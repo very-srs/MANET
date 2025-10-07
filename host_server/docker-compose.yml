@@ -1,0 +1,30 @@
+# Docker Compose file for the Alpine Router
+services:
+  # Define our router service
+  router:
+    # Build the Docker image from the Dockerfile in the current directory (.)
+    build: .
+    # Optionally name the image that gets built
+    image: alpine-router
+    # Set a custom container name. Let's make it more specific.
+    container_name: MANET-configure
+    # Use the host's network stack. This is required for the container
+    # to access and manage physical network interfaces like eth0 and wlan0.
+    network_mode: "host"
+    # Add the NET_ADMIN capability, which is necessary for modifying
+    # network configurations (ip addr, iptables).
+    cap_add:
+      - NET_ADMIN
+    # Map the local './data' directory to '/data' inside the container.
+    # This makes the configuration data persistent.
+    volumes:
+      - ./data:/data
+    # Load environment variables from the .env file in the same directory.
+    # This allows you to configure your network interfaces without editing this file.
+    env_file:
+      - .env
+    # Keep STDIN open, equivalent to the '-i' flag in `docker run`.
+    stdin_open: true
+    # Allocate a pseudo-TTY, equivalent to the '-t' flag in `docker run`.
+    tty: true
+
