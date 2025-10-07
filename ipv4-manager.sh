@@ -46,7 +46,7 @@ log "State is UNCONFIGURED."
 while true; do
 
     # Get the latest registry data from the mesh using alfred.
-    # We parse the "MAC: PAYLOAD" output to get just the "IP,MAC" payload.
+    # Parse the "MAC: PAYLOAD" output to get just the "IP,MAC" payload.
     # alfred handles data timeouts internally, so no pruning is needed.
     alfred -r $ALFRED_DATA_TYPE | awk '{print $2}' > "$REGISTRY_FILE"
 
@@ -62,9 +62,7 @@ while true; do
                 continue
             fi
 
-            # IP is free, claim it immediately. The "PROPOSING" state is no
-            # longer needed because alfred gives us a consistent snapshot
-            # of the network, which avoids the race condition.
+            # IP is free, claim it immediately.
             log "Claiming ${PROPOSED_IPV4}..."
             ip addr add "${PROPOSED_IPV4}${IPV4_MASK}" dev "$CONTROL_IFACE"
             publish_claim "$PROPOSED_IPV4"
