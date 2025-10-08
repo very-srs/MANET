@@ -12,34 +12,6 @@
         .placeholder-gray::placeholder {
             color: #9ca3af;
         }
-        /* Tooltip styles */
-        .tooltip-container {
-            position: relative;
-            display: inline-block;
-        }
-        .tooltip-text {
-            visibility: hidden;
-            width: 280px;
-            background-color: #1f2937; /* bg-gray-800 */
-            color: #d1d5db; /* text-gray-300 */
-            text-align: left;
-            border-radius: 6px;
-            padding: 8px;
-            position: absolute;
-            z-index: 10;
-            bottom: 125%; /* Position above the element */
-            left: 50%;
-            margin-left: -140px; /* Use half of the width to center */
-            opacity: 0;
-            transition: opacity 0.3s;
-            border: 1px solid #4b5563; /* border-gray-600 */
-            font-size: 0.875rem;
-            line-height: 1.25rem;
-        }
-        .tooltip-container:hover .tooltip-text {
-            visibility: visible;
-            opacity: 1;
-        }
         @import url('https://rsms.me/inter/inter.css');
     </style>
 </head>
@@ -79,21 +51,41 @@
             <h2 class="text-xl font-semibold mb-4 text-cyan-400">Device Settings</h2>
             <form id="config-form" class="space-y-4">
                 
-                <!-- SAE Key -->
-                <div>
-                    <label for="sae_key" class="block text-sm font-medium text-gray-300">SAE Key (12-32 characters)</label>
-                    <div class="mt-1 flex rounded-md shadow-sm">
-                        <input type="text" name="sae_key" id="sae_key" class="flex-1 block w-full rounded-none rounded-l-md bg-gray-900 border-gray-600 focus:ring-cyan-500 focus:border-cyan-500 placeholder-gray sm:text-sm" placeholder="Enter SAE Key">
-                        <button type="button" id="generate-key" class="inline-flex items-center px-3 rounded-r-md border border-l-0 border-gray-600 bg-gray-700 text-gray-300 text-sm hover:bg-gray-600 focus:outline-none focus:ring-1 focus:ring-cyan-500 focus:border-cyan-500">
-                            Generate
-                        </button>
-                    </div>
-                </div>
-
                 <!-- Mesh SSID -->
                 <div>
                     <label for="mesh_ssid" class="block text-sm font-medium text-gray-300">Mesh SSID</label>
                     <input type="text" name="mesh_ssid" id="mesh_ssid" class="mt-1 block w-full rounded-md bg-gray-900 border-gray-600 focus:ring-cyan-500 focus:border-cyan-500 placeholder-gray sm:text-sm" placeholder="e.g., my-mesh-network">
+                </div>
+                
+                <!-- Mesh Key -->
+                <div>
+                    <label for="mesh_key" class="block text-sm font-medium text-gray-300">Mesh Key</label>
+                    <input type="text" name="mesh_key" id="mesh_key" class="mt-1 block w-full rounded-md bg-gray-900 border-gray-600 focus:ring-cyan-500 focus:border-cyan-500 placeholder-gray sm:text-sm" placeholder="Enter mesh network key">
+                </div>
+
+                <!-- IPv4 Range -->
+                <div>
+                    <label for="ipv4_network" class="block text-sm font-medium text-gray-300">IPv4 Range</label>
+                    <div class="mt-1 flex rounded-md shadow-sm">
+                        <input type="text" name="ipv4_network" id="ipv4_network" class="block w-3/4 rounded-none rounded-l-md bg-gray-900 border-gray-600 focus:ring-cyan-500 focus:border-cyan-500 placeholder-gray sm:text-sm" placeholder="e.g., 192.168.10.0">
+                        <select name="ipv4_cidr" id="ipv4_cidr" class="block w-1/4 items-center px-3 rounded-r-md border border-l-0 border-gray-600 bg-gray-700 text-gray-300 text-sm focus:outline-none focus:ring-1 focus:ring-cyan-500 focus:border-cyan-500">
+                            <option value="16">/16</option>
+                            <option value="17">/17</option>
+                            <option value="18">/18</option>
+                            <option value="19">/19</option>
+                            <option value="20">/20</option>
+                            <option value="21">/21</option>
+                            <option value="22">/22</option>
+                            <option value="23">/23</option>
+                            <option value="24" selected>/24</option>
+                            <option value="25">/25</option>
+                            <option value="26">/26</option>
+                            <option value="27">/27</option>
+                            <option value="28">/28</option>
+                            <option value="29">/29</option>
+                            <option value="30">/30</option>
+                        </select>
+                    </div>
                 </div>
 
                 <!-- Passwords -->
@@ -108,6 +100,12 @@
                     </div>
                 </div>
 
+                <!-- SSH Public Key -->
+                <div>
+                    <label for="ssh_public_key" class="block text-sm font-medium text-gray-300">Public SSH Key (for user: radio)</label>
+                    <textarea id="ssh_public_key" name="ssh_public_key" rows="4" class="mt-1 block w-full rounded-md bg-gray-900 border-gray-600 focus:ring-cyan-500 focus:border-cyan-500 placeholder-gray sm:text-sm" placeholder="Paste the contents of your id_rsa.pub or similar public key file here."></textarea>
+                </div>
+
                 <!-- Hardware Selection -->
                 <div>
                     <label for="hardware_selection" class="block text-sm font-medium text-gray-300">Hardware Selection</label>
@@ -119,37 +117,6 @@
                         <option>r6c+MT7916-4x4</option>
                     </select>
                 </div>
-
-                <!-- OpenTAKServer Section -->
-                <div class="bg-gray-700/50 rounded-lg p-4 space-y-4">
-                    <div class="flex items-center justify-between">
-                        <span class="text-lg font-semibold text-cyan-400">OpenTAKServer</span>
-                        <label for="enable_tak_server" class="relative inline-flex items-center cursor-pointer">
-                            <input type="checkbox" value="true" name="enable_tak_server" id="enable_tak_server" class="sr-only peer">
-                            <div class="w-11 h-6 bg-gray-600 rounded-full peer peer-focus:ring-4 peer-focus:ring-cyan-800 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-cyan-600"></div>
-                        </label>
-                    </div>
-                    <div id="tak_options" class="hidden pl-4 border-l-2 border-gray-600 space-y-3">
-                        <p class="text-sm text-gray-400">TAK Server Mode:</p>
-                        <div class="flex items-center">
-                            <input id="tak_mode_consistency" name="tak_mode" type="radio" value="consistency" class="h-4 w-4 text-cyan-600 border-gray-500 focus:ring-cyan-500">
-                            <label for="tak_mode_consistency" class="ml-3 block text-sm font-medium text-gray-300">Prioritize Data Preservation</label>
-                            <div class="tooltip-container ml-2">
-                               <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-gray-400" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clip-rule="evenodd" /></svg>
-                               <span class="tooltip-text"><b>(Consistency Mode)</b><br>Guarantees that no TAK data is ever lost. If the network splits, any smaller, isolated group will temporarily lose access to the TAK server until they rejoin the main group. Choose this for missions where data integrity is the top priority.</span>
-                           </div>
-                        </div>
-                        <div class="flex items-center">
-                            <input id="tak_mode_availability" name="tak_mode" type="radio" value="availability" class="h-4 w-4 text-cyan-600 border-gray-500 focus:ring-cyan-500" checked>
-                            <label for="tak_mode_availability" class="ml-3 block text-sm font-medium text-gray-300">Prioritize ATAK Access</label>
-                            <div class="tooltip-container ml-2">
-                               <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-gray-400" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clip-rule="evenodd" /></svg>
-                               <span class="tooltip-text"><b>(Availability Mode)</b><br>Ensures a functional TAK server is always available to your local group, even during a network split.<br><b>WARNING:</b> If your group rejoins the main network, all data created during isolation will be permanently lost. Choose this for missions where constant local communication is top priority.</span>
-                           </div>
-                        </div>
-                    </div>
-                </div>
-
 
                 <!-- Notes -->
                 <div>
@@ -194,7 +161,6 @@
 <script>
     // --- DOM Elements ---
     const form = document.getElementById('config-form');
-    const generateKeyBtn = document.getElementById('generate-key');
     const saveBtn = document.getElementById('save-button');
     const publishBtn = document.getElementById('publish-button');
     const configListDiv = document.getElementById('config-list');
@@ -205,8 +171,6 @@
     const modalBody = document.getElementById('modal-body');
     const modalCancelBtn = document.getElementById('modal-cancel-btn');
     const modalConfirmBtn = document.getElementById('modal-confirm-btn');
-    const enableTakServerToggle = document.getElementById('enable_tak_server');
-    const takOptionsDiv = document.getElementById('tak_options');
 
     // --- State ---
     let confirmAction = null;
@@ -225,10 +189,6 @@
 
     const getFormData = () => {
         const formData = new FormData(form);
-        // Manually handle the checkbox, as unchecked boxes aren't submitted by default
-        if (!enableTakServerToggle.checked) {
-            formData.set('enable_tak_server', 'false');
-        }
         return new URLSearchParams(formData).toString();
     };
     
@@ -243,14 +203,6 @@
         confirmModal.classList.add('hidden');
         confirmAction = null;
     };
-
-    // --- Key Generation ---
-    generateKeyBtn.addEventListener('click', async () => {
-        const array = new Uint8Array(21); // 21 bytes = 28 base64 chars
-        window.crypto.getRandomValues(array);
-        const base64Key = btoa(String.fromCharCode.apply(null, array));
-        document.getElementById('sae_key').value = base64Key;
-    });
 
     // --- Core API Functions ---
     const loadConfig = async (filename) => {
@@ -269,19 +221,10 @@
                     const encodedValue = line.substring(eqIndex + 1);
                     const value = decodeURIComponent(encodedValue || '');
                     
-                    if (key === 'enable_tak_server') {
-                        const takToggle = document.getElementById('enable_tak_server');
-                        takToggle.checked = (value === 'true');
-                        // Manually trigger the change event to show/hide options
-                        takToggle.dispatchEvent(new Event('change'));
-                    } else if (key === 'tak_mode') {
-                        const radioBtn = document.querySelector(`input[name="tak_mode"][value="${value}"]`);
-                        if(radioBtn) radioBtn.checked = true;
-                    } else {
-                        const element = document.getElementById(key);
-                         if (element && element.type !== 'password') {
-                            element.value = value;
-                        }
+                    const element = document.getElementById(key);
+
+                    if (element && element.type !== 'password') {
+                        element.value = value;
                     }
                 }
             });
@@ -431,14 +374,6 @@
             confirmAction();
         }
         hideConfirmModal();
-    });
-
-    enableTakServerToggle.addEventListener('change', (e) => {
-        if (e.target.checked) {
-            takOptionsDiv.classList.remove('hidden');
-        } else {
-            takOptionsDiv.classList.add('hidden');
-        }
     });
 
     const fetchConfigs = async () => {
