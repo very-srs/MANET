@@ -57,7 +57,7 @@ main() {
 	#  Setup base system
 	#
 
-	# disable kernel updates, this is a custom kernel with wifi drivers added
+	# Disable kernel updates, this is a custom kernel with wifi drivers added
 	armbian-config --cmd UPD002
 
 	# get the sources up to date and install packages
@@ -67,13 +67,13 @@ main() {
 	apt upgrade -y > /dev/null 2>&1
 	echo -n "."
 
-	# remove the question about the iperf daemon during apt install
+	# Remove the question about the iperf daemon during apt install
 	echo "iperf3 iperf3/start_daemon boolean true" | debconf-set-selections
 
-	# install packages for this system
+	# Install packages for this system
 	apt install -y nmap lshw tcpdump net-tools batctl wireless-tools iperf3\
-	  \screen alfred radvd bridge-utils firmware-mediatek libnss-mdns \
-	  avahi-daemon avahi-utils libgps-dev libcap-dev> /dev/null 2>&1
+	  \screen alfred radvd bridge-utils firmware-mediatek libnss-mdns syncthing\
+	  avahi-daemon avahi-utils libgps-dev libcap-dev mumble-server > /dev/null 2>&1
 	echo "Done"
 
 	# The version of alfred in the debian packages is old.  These are the git clones
@@ -234,16 +234,6 @@ main() {
 		</service-group>
 	EOF
 
-	# Disable netplan
-	rm -f /etc/netplan/*
-	cat <<- EOF > /etc/netplan/99-disable-netplan.yaml
-		# This file tells Netplan to do nothing.
-		network:
-		  version: 2
-		  renderer: networkd
-	EOF
-	echo "Netplan disabled, will use networkd instead"
-
 	# Set br0 to be the wait online interface
 	mkdir -p /etc/systemd/system/systemd-networkd-wait-online.service.d/
 	cat <<- EOF > /etc/systemd/system/systemd-networkd-wait-online.service.d/override.conf#
@@ -254,6 +244,27 @@ main() {
 	# But let's try not using it, it was hanging at first reboot
 	systemctl disable systemd-networkd-wait-online.service
 
+	# Disable netplan
+	rm -f /etc/netplan/*
+	cat <<- EOF > /etc/netplan/99-disable-netplan.yaml
+		# This file tells Netplan to do nothing.
+		network:
+		  version: 2
+		  renderer: networkd
+	EOF
+	echo "Netplan disabled, will use networkd instead"
+
+	echo "Disabling mDNS in systemd-resolved"
+
+	# Ensure the MulticastDNS setting is set to 'no'
+	sed -i 's/#MulticastDNS=.*/MulticastDNS=no/' /etc/systemd/resolved.conf
+
+
+	#make mumble server ini changes
+	sed -i '/ice="tcp -h 127.0.0.1 -p 6502"/s/^#//g' /etc/mumble-server.ini
+	sed -i 's/icesecretwrite/;icesecretwrite/g' /etc/mumble-server.ini
+	service mumble-server restart
+	grep -m 1 SuperUser /var/log/mumble-server/mumble-server.log > /root/mumble_pw
 
 	#remove un-needed configs
 	rm -f /etc/systemd/network/00-arm*

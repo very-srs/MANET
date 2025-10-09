@@ -38,7 +38,8 @@ while IFS= read -r line; do
     fi
 done < <(curl -s --cacert "$CERT_PATH" "$CONFIG_URL")
 
-echo -n "--- Configuration $config_name loaded successfully ---\n\n"
+echo "--- Configuration $config_name loaded successfully ---"
+echo
 echo "Applying settings..."
 
 if [[ -n "$sae_key" ]]; then
@@ -66,10 +67,28 @@ if [[ -n "$hardware_selection" ]]; then
 	# do selections based on "$hardware_selection"
 fi
 
-if echo $enable_tak_server | grep true; then
-    echo " > Enabling OpenTAKServer..."
-    #do tak stuff, not yet enabled
+#if echo $enable_tak_server | grep true; then
+#    echo " > Enabling OpenTAKServer..."
+#    #do tak stuff, not yet enabled
+#fi
+
+if [[ -n "$ipv4_network" ]]; then
+	echo " > Setting IPv4 network settings..."
+	# Create the configuration file for the IPv4 manager
+	cat <<- EOF > /etc/mesh_ipv4.conf
+		IPV4_SUBNET="$(echo "$ipv4_network" | cut -d'.' -f1-3)"
+		IPV4_MASK="/${ipv4_cidr}"
+	EOF
 fi
+
+if [[ -n "$ssh_public_key" ]]; then
+	echo " > Updating authorized_keys for user 'radio'..."
+	mkdir -p /home/radio/.ssh
+	echo "$ssh_public_key" >> /home/radio/.ssh/authorized_keys
+	awk '!seen[$0]++' /home/radio/.ssh/authorized_keys > /tmp/t
+	mv /tmp/t /home/radio/.ssh/authorized_keys
+fi
+
 
 
 #
@@ -129,40 +148,85 @@ done
 #
 
 # Enslave interfaces to Batman, create second Batman interface for Alfred to use
-# This is needed to be done with a system service due to batadv not being
-# added to networkd in bookworm
+# Create the batman interface setup script
+cat <<- 'EOF' > /usr/local/bin/batman-if-setup.sh
+	#!/bin/bash
+	set -e
+
+	WLAN_INTERFACES=$(networkctl | awk '/wlan/ {print $2}' | tr '\n' ' ')
+
+	start() {
+	    echo "Starting BATMAN interfaces..."
+	    # Only create interface if it does not exist
+	    ip link show bat0 &>/dev/null || ip link add name bat0 type batadv
+	    ip link show bat1 &>/dev/null || ip link add name bat1 type batadv
+
+	    for WLAN in $WLAN_INTERFACES; do
+	        ip link set "$WLAN" up
+	        batctl bat0 if add "$WLAN"
+	    done
+
+	    ip link set bat0 up
+	    ip link set bat1 up
+	}
+
+	stop() {
+	    echo "Stopping BATMAN interfaces..."
+	    for WLAN in $WLAN_INTERFACES; do
+	        # Only try to remove interface if it is actually attached
+	        if batctl bat0 if | grep -q "$WLAN"; then
+	             batctl bat0 if del "$WLAN"
+	        fi
+	    done
+
+	    ip link show bat0 &>/dev/null && ip link del bat0
+	    ip link show bat1 &>/dev/null && ip link del bat1
+	}
+
+	case "$1" in
+	    start)
+	        start
+	        ;;
+	    stop)
+	        stop
+	        ;;
+	    *)
+	        echo "Usage: $0 {start|stop}"
+	        exit 1
+	        ;;
+	esac
+EOF
+chmod +x /usr/local/bin/batman-if-setup.sh
+
+# Build dependency strings
+WLAN_INTERFACES=$(networkctl | awk '/wlan/ {print $2}' | tr '\n' ' ')
+AFTER_DEVICES=""
+WANTS_SERVICES=""
+for WLAN in $WLAN_INTERFACES; do
+    AFTER_DEVICES+="sys-subsystem-net-devices-${WLAN}.device "
+    WANTS_SERVICES+="wpa_supplicant@${WLAN}.service "
+done
+
+# Create the service file
 cat <<- EOF > /etc/systemd/system/batman-enslave.service
 	[Unit]
-	Description=Enslave wlan interfaces to bat0 for BATMAN Advanced
-
-	# Wait for the network devices AND wpa_supplicant to be ready
-	After=sys-subsystem-net-devices-wlan0.device sys-subsystem-net-devices-wlan1.device
-	After=wpa_supplicant@wlan0.service wpa_supplicant@wlan1.service
-	Wants=wpa_supplicant@wlan0.service wpa_supplicant@wlan1.service
+	Description=BATMAN Advanced Interface Manager
+	After=${AFTER_DEVICES} ${WANTS_SERVICES}
+	Wants=${WANTS_SERVICES}
 
 	[Service]
 	Type=oneshot
 	RemainAfterExit=yes
-
-	ExecStart=/usr/bin/ip link add name bat0 type batadv
-	ExecStart=/usr/bin/ip link add name bat1 type batadv
-
-	ExecStart=/usr/bin/ip link set wlan0 up
-	ExecStart=/usr/bin/ip link set wlan1 up
-
-	# Enslave the interfaces to bat0
-	ExecStart=/usr/sbin/batctl if add wlan0
-	ExecStart=/usr/sbin/batctl if add wlan1
-	ExecStart=/usr/bin/ip link set bat1 up
-
-	# Clean up when the service is stopped
-	ExecStop=/usr/sbin/batctl if del wlan0
-	ExecStop=/usr/sbin/batctl if del wlan1
+	ExecStart=/usr/local/bin/batman-if-setup.sh start
+	ExecStop=/usr/local/bin/batman-if-setup.sh stop
 
 	[Install]
 	WantedBy=multi-user.target
 EOF
+
+systemctl daemon-reload
 systemctl enable batman-enslave.service
+systemctl restart batman-enslave.service
 
 # Start an alfred master listener at boot for mesh data messages
 cat <<- EOF > /etc/systemd/system/alfred.service
@@ -205,18 +269,24 @@ EOF
 systemctl enable ipv4-manager.service
 systemctl restart ipv4-manager.service
 
+#creates a shared directory in /home/radio
+systemctl enable syncthing@radio.service
+systemctl enable syncthing-peer-manager.service
+
 systemctl daemon-reload
 systemctl restart avahi-daemon
 
-echo "> Clearing reboot job from cron tab..."
-crontab -r
 
 # Determine if this script is being run for the first time
 # and reboot if so to pick up the changes to the interfaces
 for WLAN in `networkctl | awk '/wlan/ {print $2}'`; do
 	if ! echo $WLAN | grep wlan[0-9]; then
-		echo " > First run detected, rebooting..."
-		sleep 2
+		echo " > First run detected"
+		echo " >> Clearing reboot job from cron tab..."
+		crontab -r
+		echo " >> Doing initial Syncthing config..."
+		sudo -u radio syncthing -generate="/home/radio/.config/syncthing"
+		sleep 5
 		reboot
 	fi
 done
@@ -234,7 +304,6 @@ sleep 6 # wait for wpa_supplicant to catch up
 systemctl restart batman-enslave.service
 echo " > resetting BATMAN-ADV bond..."
 
-echo "Radio settings updated"
 sleep 2
 networkctl
 iw dev
