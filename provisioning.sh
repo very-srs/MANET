@@ -71,7 +71,7 @@ main() {
 	echo "iperf3 iperf3/start_daemon boolean true" | debconf-set-selections
 
 	# Install packages for this system
-	apt install -y nmap lshw tcpdump net-tools batctl wireless-tools iperf3\
+	apt install -y ipcalc nmap lshw tcpdump net-tools nftables batctl wireless-tools iperf3\
 	  \screen alfred radvd bridge-utils firmware-mediatek libnss-mdns syncthing\
 	  avahi-daemon avahi-utils libgps-dev libcap-dev mumble-server > /dev/null 2>&1
 	echo "Done"
@@ -195,8 +195,56 @@ main() {
 	# Configure and enable system services
 	#
 
+	echo "Configuring nftables for IPv4 NAT gateway"
+	cat <<- EOF > /etc/nftables.conf
+		#!/usr/sbin/nft -f
+
+		# Flush the old ruleset to start clean
+		flush ruleset
+		table inet filter {
+		    # The INPUT chain handles traffic destined for the node itself.
+		    chain input {
+		        type filter hook input priority 0; policy drop;
+
+		        ct state {established, related} accept
+		        ct state invalid drop
+
+		        iifname "lo" accept
+
+		        # Accept ALL traffic coming from the trusted mesh interface.
+		        iifname "br0" accept
+
+		        iifname "end0" tcp dport 22 accept
+		    }
+
+		    chain forward {
+		        type filter hook forward priority 0; policy drop;
+
+		        # Allow traffic from the trusted mesh to be forwarded
+		        # out to the internet via the Ethernet port.
+		        iifname "br0" oifname "end0" accept
+
+		        # Allow the return traffic from the internet back to the mesh.
+		        iifname "end0" oifname "br0" ct state established, related accept
+		    }
+
+		    chain output {
+		        type filter hook output priority 0; policy accept;
+		    }
+		}
+
+		table ip nat {
+		    chain postrouting {
+		        type nat hook postrouting priority 100;
+
+		        oifname "end0" masquerade
+		    }
+		}
+	EOF
+
+
 	#configure router advertisements for slaac on ipv6
-	cat <<-EOF > /etc/radvd.conf
+	cat <<-EOF > /etc/radvd-mesh.conf
 		interface br0
 		{
 		    AdvSendAdvert on;
@@ -209,6 +257,20 @@ main() {
 		    };
 		};
 	EOF
+
+	cat <<- EOF > /etc/radvd-gateway.conf
+		interface br0 {
+		    AdvSendAdvert on;
+		    AdvDefaultLifetime 600; #advertise this node as a default router
+		    AdvDefaultRoute on;
+		    prefix fd5a:1753:4340:1::/64 {
+		        AdvOnLink on;
+		        AdvAutonomous on;
+		    };
+		};
+	EOF
+	# Default to mesh config
+	cp /etc/radvd-mesh.conf /etc/radvd.conf
 	systemctl enable radvd
 
 	# Set avahi to wait for the network to be up
