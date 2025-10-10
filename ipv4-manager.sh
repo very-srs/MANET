@@ -3,12 +3,27 @@
 # ==============================================================================
 #  Decentralized IPv4 Address Manager using B.A.T.M.A.N. alfred
 # ==============================================================================
+#
+#  This script is for auto assigning IPv4 addresses to the bridge.  It picks up
+#  the address range from a config variable, set on the config server, and saved
+#  in /ec/mesh_ipv4.conf.  It listens to address gossip on the Alfred tool, and
+#  keeps a log of which IPv4 addresses it has heard about.  The script selects a
+#  random IP within the configured CIDR block then checks to see if it has
+#  already heard about it from the Alfred tool.  If not, it announces this
+#  address via Alfred and assigns the address to br0
+#
+
+# Source the configuration file if it exists
+if [ -f /etc/mesh_ipv4.conf ]; then
+    source /etc/mesh_ipv4.conf
+fi
+
+# Set defaults in case the config file doesn't exist
+IPV4_SUBNET=${IPV4_SUBNET:-"10.30.1.0"}
+IPV4_MASK=${IPV4_MASK:-"/24"}
+
 
 ### --- Configuration ---
-IPV4_OCTET2=$(shuf -i 0-255 -n 1)
-#IPV4_SUBNET="10.${IPV4_OCTET2}"
-IPV4_SUBNET="10.30.1"
-IPV4_MASK="/24"
 CONTROL_IFACE="br0"
 REGISTRY_FILE="/tmp/ipv4_registry.txt"
 ALFRED_DATA_TYPE=64
@@ -22,7 +37,53 @@ LAST_DEFENSE_TIME=$(date +%s)
 #Remove the existing IP at start
 ip -4 addr flush dev br0
 
-### --- Helper Functions ---
+# --- Helper Functions ---
+
+# This one takes in a cidr notation network and outputs a random ip in it
+get_random_ip_from_cidr() {
+    local CIDR="$1"
+
+    ip_to_int() {
+        local a b c d
+        IFS=. read -r a b c d <<<"$1"
+        echo "$(( (a << 24) + (b << 16) + (c << 8) + d ))"
+    }
+
+    int_to_ip() {
+        local ip_int=$1
+        echo "$(( (ip_int >> 24) & 255 )).$(( (ip_int >> 16) & 255 )).$(( (ip_int >> 8) & 255 )).$(( ip_int & 255 ))"
+    }
+
+    # --- Main Logic ---
+    # Use ipcalc to get the valid host range
+    local CALC_OUTPUT
+    CALC_OUTPUT=$(ipcalc "$CIDR" 2>/dev/null)
+    if [ -z "$CALC_OUTPUT" ]; then
+        echo "Error: Invalid CIDR notation provided: $CIDR" >&2
+        return 1
+    fi
+
+    local HOST_MIN=$(echo "$CALC_OUTPUT" | awk '/HostMin/ {print $2}')
+    local HOST_MAX=$(echo "$CALC_OUTPUT" | awk '/HostMax/ {print $2}')
+
+    # Convert the range to integers
+    local MIN_INT=$(ip_to_int "$HOST_MIN")
+    local MAX_INT=$(ip_to_int "$HOST_MAX")
+
+    # Handle single-host networks (/31) or smaller, though unlikely
+    if [ "$MIN_INT" -ge "$MAX_INT" ]; then
+        echo "$HOST_MIN"
+        return 0
+    fi
+
+    # Pick a random integer within the valid range
+    local RANDOM_INT=$(shuf -i "${MIN_INT}-${MAX_INT}" -n 1)
+
+    # Convert the random integer back to an IP and print it
+    int_to_ip "$RANDOM_INT"
+}
+
+
 publish_claim() {
     local ip_to_claim=$1
     local payload="${ip_to_claim},${MY_MAC}"

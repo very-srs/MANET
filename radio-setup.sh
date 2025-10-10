@@ -272,6 +272,7 @@ systemctl restart ipv4-manager.service
 #creates a shared directory in /home/radio
 systemctl enable syncthing@radio.service
 systemctl enable syncthing-peer-manager.service
+systemctl enable nftables.service
 
 systemctl daemon-reload
 systemctl restart avahi-daemon
