@@ -42,8 +42,8 @@ echo "--- Configuration $config_name loaded successfully ---"
 echo
 echo "Applying settings..."
 
-if [[ -n "$sae_key" ]]; then
-	KEY=$sae_key
+if [[ -n "$mesh_key" ]]; then
+	KEY=$mesh_key
 	echo " > Using SAE Key: $KEY"
 fi
 
