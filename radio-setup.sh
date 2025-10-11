@@ -269,9 +269,26 @@ EOF
 systemctl enable ipv4-manager.service
 systemctl restart ipv4-manager.service
 
+
+cat <<- EOF > /etc/systemd/system/syncthing-peer-manager.service 
+	[Unit]
+	Description=Syncthing Peer Manager for B.A.T.M.A.N. Mesh
+	After=syncthing@radio.service alfred.service
+	Wants=syncthing@radio.service alfred.service
+
+	[Service]
+	Type=simple
+	ExecStart=/usr/local/bin/syncthing-peer-manager.sh
+	Restart=on-failure
+	RestartSec=30
+
+	[Install]
+	WantedBy=multi-user.target
+EOF
+systemctl enable syncthing-peer-manager.service
+
 #creates a shared directory in /home/radio
 systemctl enable syncthing@radio.service
-systemctl enable syncthing-peer-manager.service
 systemctl enable nftables.service
 
 systemctl daemon-reload
