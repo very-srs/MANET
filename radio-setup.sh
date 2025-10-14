@@ -138,7 +138,6 @@ for WLAN in `networkctl | awk '/wlan/ {print $2}'`; do
     echo " > Enabling wlan$CT..."
 	#start up wpa_supplicant at boot for this interface
 	systemctl enable wpa_supplicant@wlan$CT.service
-	systemctl restart wpa_supplicant@wlan$CT.service
 	((CT++))
 done
 
@@ -228,7 +227,6 @@ EOF
 
 systemctl daemon-reload
 systemctl enable batman-enslave.service
-systemctl restart batman-enslave.service
 
 # Start an alfred master listener at boot for mesh data messages
 cat <<- EOF > /etc/systemd/system/alfred.service
@@ -301,8 +299,9 @@ systemctl restart avahi-daemon
 for WLAN in `networkctl | awk '/wlan/ {print $2}'`; do
 	if ! echo $WLAN | grep wlan[0-9]; then
 		echo " > First run detected"
-		echo " >> Clearing reboot job from cron tab..."
-		crontab -r
+		echo " >> Removing radio-setup-run-once.service"
+		systemct disable radio-setup-run-once.service
+		rm /etc/systemd/system/radio-setup-run-once.service
 		echo " >> Doing initial Syncthing config..."
 		sudo -u radio syncthing -generate="/home/radio/.config/syncthing"
 		sleep 5
