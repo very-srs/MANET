@@ -158,15 +158,15 @@ cat <<- 'EOF' > /usr/local/bin/batman-if-setup.sh
 	    echo "Starting BATMAN interfaces..."
 	    # Only create interface if it does not exist
 	    ip link show bat0 &>/dev/null || ip link add name bat0 type batadv
-	    ip link show bat1 &>/dev/null || ip link add name bat1 type batadv
 
 	    for WLAN in $WLAN_INTERFACES; do
 	        ip link set "$WLAN" up
 	        batctl bat0 if add "$WLAN"
 	    done
 
+		#give bat0 a LL ipv6 address for alfred to work
 	    ip link set bat0 up
-	    ip link set bat1 up
+	    ip -6 addr add fe80::1/64 dev bat0 scope link
 	}
 
 	stop() {
@@ -179,7 +179,6 @@ cat <<- 'EOF' > /usr/local/bin/batman-if-setup.sh
 	    done
 
 	    ip link show bat0 &>/dev/null && ip link del bat0
-	    ip link show bat1 &>/dev/null && ip link del bat1
 	}
 
 	case "$1" in
@@ -196,6 +195,13 @@ cat <<- 'EOF' > /usr/local/bin/batman-if-setup.sh
 	esac
 EOF
 chmod +x /usr/local/bin/batman-if-setup.sh
+
+#get bat0 a link local address for alfred
+cat <<- EOF > /etc/sysctl.d/99-batman.conf
+	# Enable IPv6 address generation on batman-adv interfaces
+	net.ipv6.conf.bat0.disable_ipv6 = 0
+	net.ipv6.conf.bat0.addr_gen_mode = 0
+EOF
 
 # Build dependency strings
 WLAN_INTERFACES=$(networkctl | awk '/wlan/ {print $2}' | tr '\n' ' ')
@@ -232,13 +238,15 @@ systemctl enable batman-enslave.service
 cat <<- EOF > /etc/systemd/system/alfred.service
 	[Unit]
 	Description=B.A.T.M.A.N. Advanced Layer 2 Forwarding Daemon
-	After=network-online.target
-	Wants=network-online.target
+	After=network-online.target batman-enslave.service
+	Wants=network-online.target batman-enslave.service
+	Requires=batman-enslave.service
+
 
 	[Service]
 	Type=simple
 	# Add -m to run alfred in master mode, allowing it to accept client data
-	ExecStart=/usr/sbin/alfred -m -i bat1
+	ExecStart=/usr/sbin/alfred -m -i bat0
 	UMask=0000
 	Restart=always
 	RestartSec=10
