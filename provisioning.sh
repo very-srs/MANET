@@ -51,6 +51,7 @@ main() {
 	sleep 10
         exec "$SCRIPT_PATH" "$@"   # restart the script
     fi
+
     echo "Network is available, continuing..."
 
 	#
@@ -71,19 +72,14 @@ main() {
 	echo "iperf3 iperf3/start_daemon boolean true" | debconf-set-selections
 
 	# Install packages for this system
-	apt install -y ipcalc nmap lshw tcpdump net-tools nftables batctl wireless-tools iperf3\
-	  \screen alfred radvd bridge-utils firmware-mediatek libnss-mdns syncthing\
+	apt install -y ipcalc nmap lshw tcpdump net-tools nftables wireless-tools iperf3\
+	  \screen radvd bridge-utils firmware-mediatek libnss-mdns syncthing\
 	  avahi-daemon avahi-utils libgps-dev libcap-dev mumble-server > /dev/null 2>&1
 	echo "Done"
 
-	# The version of alfred in the debian packages is old.  These are the git clones
-	# of a newer version (oct-2025).  Make has been run in these already.  The kernel
-	# in the image is static, so I'm copying these over rather than a fresh git clone
-	cd /root/bat-tools/batctl/
-	make install
-	cd /root/bat-tools/alfred/
-	make install
-	cd
+	# The version of alfred in the debian packages is old.  Install one built oct 2025
+	cp /root/alfred /usr/sbin/
+	cp /root/batctl /usr/sbin/
 
 	# setup rpi config parameters to activate the pcie bus, used by wireless card
 	sed -i 's/#dtparam=spi=on/dtparam=spi=on/g' /boot/firmware/config.txt
@@ -101,15 +97,9 @@ main() {
 	# get rid of otg, get rid of host, add peripheral at the end of the file
 	# trying to put out ethernet via usb-c
 	sed -i 's/otg_mode=1//g' /boot/firmware/config.txt
-	if ! grep -q 'dr_mode=peripheral' /boot/firmware/config.txt; then
-		echo "dtoverlay=dwc2,dr_mode=peripheral/g" >> /boot/firmware/config.txt
+	if ! grep -q 'dr_mode=host' /boot/firmware/config.txt; then
+		echo "dtoverlay=dwc2,dr_mode=host/g" >> /boot/firmware/config.txt
 	fi
-	sed -i 's/dtoverlay=dwc2,dr_mode=host//g' /boot/firmware/config.txt
-	# enable gadget mode kernel module
-	if ! grep -q g_ether /etc/modules; then
-		echo g_ether >> /etc/modules
-	fi
-	echo "USB gadget mode enabled in software"
 
 
 	# disable the default wpa_supplicant service
@@ -187,6 +177,7 @@ main() {
 			[DHCPv4]
 			UseDomains=true
 		EOF
+
 	done
 	echo "Ethernet config added"
 
@@ -241,7 +232,6 @@ main() {
 		    }
 		}
 	EOF
-
 
 	#configure router advertisements for slaac on ipv6
 	cat <<-EOF > /etc/radvd-mesh.conf
