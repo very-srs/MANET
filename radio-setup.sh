@@ -97,7 +97,7 @@ fi
 
 CT=0
 for WLAN in `networkctl | awk '/wlan/ {print $2}'`; do
-	echo " > Setting SAE key/SSID for $WLAN ..."
+	echo " > Setting SAE key/SSID for wlan$CT ..."
 	#create wpa supplicant configs
 	cat <<-EOF > /etc/wpa_supplicant/wpa_supplicant-wlan$CT.conf
 		ctrl_interface=/var/run/wpa_supplicant
@@ -202,9 +202,11 @@ chmod +x /usr/local/bin/batman-if-setup.sh
 WLAN_INTERFACES=$(networkctl | awk '/wlan/ {print $2}' | tr '\n' ' ')
 AFTER_DEVICES=""
 WANTS_SERVICES=""
+INT_CT=0
 for WLAN in $WLAN_INTERFACES; do
-    AFTER_DEVICES+="sys-subsystem-net-devices-${WLAN}.device "
-    WANTS_SERVICES+="wpa_supplicant@${WLAN}.service "
+    AFTER_DEVICES+="sys-subsystem-net-devices-wlan$INT_CT.device "
+    WANTS_SERVICES+="wpa_supplicant@wlan$INT_CT.service "
+	((INT_CT++))
 done
 
 # Create the service file
@@ -267,7 +269,6 @@ cat <<- EOF > /etc/systemd/system/ipv4-manager.service
 	WantedBy=multi-user.target
 EOF
 systemctl enable ipv4-manager.service
-systemctl restart ipv4-manager.service
 
 
 cat <<- EOF > /etc/systemd/system/syncthing-peer-manager.service 
