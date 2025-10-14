@@ -233,6 +233,7 @@ main() {
 		}
 	EOF
 
+	echo "Setting up router advertisements"
 	#configure router advertisements for slaac on ipv6
 	cat <<-EOF > /etc/radvd-mesh.conf
 		interface br0
@@ -263,6 +264,8 @@ main() {
 	cp /etc/radvd-mesh.conf /etc/radvd.conf
 	systemctl enable radvd
 
+
+	echo "Configuring Avahi"
 	# Set avahi to wait for the network to be up
 	mkdir -p /etc/systemd/system/avahi-daemon.service.d/
 	cat <<- EOF > /etc/systemd/system/avahi-daemon.service.d/override.conf
@@ -321,10 +324,25 @@ main() {
 	#remove un-needed configs
 	rm -f /etc/systemd/network/00-arm*
 
-	#continue setup after a reboot
-	chmod +x /root/radio-setup.sh
-	crontab -l 2>/dev/null
-	echo '@reboot sleep 30 && /root/radio_setup.sh' | crontab -
+	echo "setting radio-setup.sh to run at next reboot"
+	#set up the second provisioning script to run at boot
+	cat <<- EOF > /etc/systemd/system/radio-setup-run-once.service
+		[Unit]
+		Description=Run radio setup script once after reboot
+		After=network-online.target multi-user.target
+		Wants=network-online.target
+
+		[Service]
+		Type=oneshot
+		ExecStart=/root/radio-setup.sh
+		ExecStartPre=/bin/sleep 10
+		RemainAfterExit=no
+
+		[Install]
+		WantedBy=multi-user.target
+	EOF
+	systemctl enable radio-setup-run-once.service
+
 }
 
 
