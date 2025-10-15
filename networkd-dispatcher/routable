@@ -1,0 +1,80 @@
+#!/bin/bash
+# /etc/networkd-dispatcher/routable.d/50-gateway-enable
+# Triggers when end0 becomes routable
+
+
+INTERFACE="end0"
+LOGFILE="/var/log/gateway-mode.log"
+
+# Only act on the specific interface
+if [ "$IFACE" != "$INTERFACE" ]; then
+    exit 0
+fi
+
+# Logging function
+log() {
+    echo "$(date '+%Y-%m-%d %H:%M:%S') [ENABLE] - $1" >> "$LOGFILE"
+}
+
+# Check for internet connectivity
+check_internet() {
+    for host in 8.8.8.8 1.1.1.1 ; do
+        if ping -c 2 -W 3 -I "$INTERFACE" "$host" &>/dev/null; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+log "Interface $IFACE became routable"
+
+# Verify internet connectivity before enabling gateway mode
+if ! check_internet; then
+    log "Interface is routable but internet is not reachable, not enabling gateway mode"
+    exit 0
+fi
+
+log "Internet connectivity confirmed, enabling gateway mode"
+
+# Copy gateway radvd configuration
+if cp /etc/radvd.gateway.conf /etc/radvd.conf; then
+    log "Copied radvd.gateway.conf to radvd.conf"
+else
+    log "ERROR: Failed to copy radvd.gateway.conf"
+    exit 1
+fi
+
+# Restart radvd
+if systemctl restart radvd; then
+    log "Restarted radvd service"
+else
+    log "ERROR: Failed to restart radvd"
+    exit 1
+fi
+
+# Enable batman-adv gateway mode
+if batctl gw_mode server; then
+    log "Set batctl gateway mode to server"
+else
+    log "ERROR: Failed to set batctl gateway mode"
+    exit 1
+fi
+
+# Get IPv4 address of end0
+IPV4_ADDR=$(ip -4 addr show "$INTERFACE" | grep -oP '(?<=inet\s)\d+(\.\d+){3}')
+
+if [ -n "$IPV4_ADDR" ]; then
+    # Announce gateway via alfred
+    if echo "$IPV4_ADDR" | alfred -s 1; then
+        log "Announced IPv4 gateway address $IPV4_ADDR via alfred"
+    else
+        log "ERROR: Failed to announce gateway via alfred"
+        exit 1
+    fi
+else
+    log "ERROR: Could not determine IPv4 address for $INTERFACE"
+    exit 1
+fi
+
+log "Gateway mode enabled successfully"
+

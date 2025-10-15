@@ -1,0 +1,52 @@
+#!/bin/bash
+# /etc/networkd-dispatcher/off.d/50-gateway-disable
+# Triggers when end0 goes offline/unplugged
+
+INTERFACE="end0"
+LOGFILE="/var/log/gateway-mode.log"
+
+# Only act on the specific interface
+if [ "$IFACE" != "$INTERFACE" ]; then
+    exit 0
+fi
+
+# Logging function
+log() {
+    echo "$(date '+%Y-%m-%d %H:%M:%S') [DISABLE] - $1" >> "$LOGFILE"
+}
+
+log "Interface $IFACE went offline, disabling gateway mode"
+
+# Copy mesh radvd configuration
+if cp /etc/radvd.mesh.conf /etc/radvd.conf; then
+    log "Copied radvd.mesh.conf to radvd.conf"
+else
+    log "ERROR: Failed to copy radvd.mesh.conf"
+    exit 1
+fi
+
+# Restart radvd
+if systemctl restart radvd; then
+    log "Restarted radvd service"
+else
+    log "ERROR: Failed to restart radvd"
+    exit 1
+fi
+
+# Set batman-adv to client mode
+if batctl gw_mode client; then
+    log "Set batctl gateway mode to client"
+else
+    log "ERROR: Failed to set batctl gateway mode"
+    exit 1
+fi
+
+# Remove alfred announcement
+if echo "" | alfred -s 1; then
+    log "Removed gateway announcement from alfred"
+else
+    log "WARNING: Could not remove alfred announcement"
+fi
+
+log "Gateway mode disabled successfully"
+
