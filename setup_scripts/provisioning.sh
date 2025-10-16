@@ -73,8 +73,8 @@ main() {
 
 	# Install packages for this system
 	apt install -y ipcalc nmap lshw tcpdump net-tools nftables wireless-tools iperf3\
-	  \screen radvd bridge-utils firmware-mediatek libnss-mdns syncthing\
-	  avahi-daemon avahi-utils libgps-dev libcap-dev mumble-server > /dev/null 2>&1
+	  \radvd bridge-utils firmware-mediatek libnss-mdns syncthing networkd-dispatcher\
+	  avahi-daemon avahi-utils libgps-dev libcap-dev mumble-server screen> /dev/null 2>&1
 	echo "Done"
 
 	# The version of alfred in the debian packages is old.  Install one built oct 2025
@@ -127,6 +127,13 @@ main() {
 	#
 	#  Create the non wifi interfaces
 	#
+	cat <<- EOF > /etc/systemd/network/10-bat0.network 
+		[Match]
+		Name=bat0
+
+		[Network]
+		LinkLocalAddressing=ipv6
+	EOF
 
 	# The bridge br0 is the main interface for the mesh node
 	cat <<-EOF > /etc/systemd/network/10-br0-bridge.netdev
@@ -252,8 +259,7 @@ main() {
 	cat <<- EOF > /etc/radvd-gateway.conf
 		interface br0 {
 		    AdvSendAdvert on;
-		    AdvDefaultLifetime 600; #advertise this node as a default router
-		    AdvDefaultRoute on;
+		    AdvDefaultLifetime 600;
 		    prefix fd5a:1753:4340:1::/64 {
 		        AdvOnLink on;
 		        AdvAutonomous on;
