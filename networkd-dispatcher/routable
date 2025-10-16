@@ -37,10 +37,10 @@ fi
 log "Internet connectivity confirmed, enabling gateway mode"
 
 # Copy gateway radvd configuration
-if cp /etc/radvd.gateway.conf /etc/radvd.conf; then
-    log "Copied radvd.gateway.conf to radvd.conf"
+if cp /etc/radvd-gateway.conf /etc/radvd.conf; then
+    log "Copied radvd-gateway.conf to radvd.conf"
 else
-    log "ERROR: Failed to copy radvd.gateway.conf"
+    log "ERROR: Failed to copy radvd-gateway.conf"
     exit 1
 fi
 
@@ -65,7 +65,7 @@ IPV4_ADDR=$(ip -4 addr show "$INTERFACE" | grep -oP '(?<=inet\s)\d+(\.\d+){3}')
 
 if [ -n "$IPV4_ADDR" ]; then
     # Announce gateway via alfred
-    if echo "$IPV4_ADDR" | alfred -s 1; then
+    if echo -n "$IPV4_ADDR" | alfred -s 68; then
         log "Announced IPv4 gateway address $IPV4_ADDR via alfred"
     else
         log "ERROR: Failed to announce gateway via alfred"

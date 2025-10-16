@@ -18,10 +18,10 @@ log() {
 log "Interface $IFACE became degraded, disabling gateway mode"
 
 # Copy mesh radvd configuration
-if cp /etc/radvd.mesh.conf /etc/radvd.conf; then
-    log "Copied radvd.mesh.conf to radvd.conf"
+if cp /etc/radvd-mesh.conf /etc/radvd.conf; then
+    log "Copied radvd-mesh.conf to radvd.conf"
 else
-    log "ERROR: Failed to copy radvd.mesh.conf"
+    log "ERROR: Failed to copy radvd-mesh.conf"
     exit 1
 fi
 
@@ -42,7 +42,7 @@ else
 fi
 
 # Remove alfred announcement
-if echo "" | alfred -s 1; then
+if echo -n "" | alfred -s 68; then
     log "Removed gateway announcement from alfred"
 else
     log "WARNING: Could not remove alfred announcement"

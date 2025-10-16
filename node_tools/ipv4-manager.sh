@@ -86,9 +86,9 @@ get_random_ip_from_cidr() {
 
 publish_claim() {
     local ip_to_claim=$1
-    local payload="${ip_to_claim},${MY_MAC}"
+    local payload="${ip_to_claim}"
     # Use alfred to set our data for the mesh to see
-    echo "$payload" | alfred -s $ALFRED_DATA_TYPE
+    echo -n "$payload" | alfred -s $ALFRED_DATA_TYPE
     log "Published claim for ${ip_to_claim} via alfred"
 }
 
@@ -107,7 +107,6 @@ log "State is UNCONFIGURED."
 while true; do
 
     # Get the latest registry data from the mesh using alfred.
-    # Parse the "MAC: PAYLOAD" output to get just the "IP,MAC" payload.
     # alfred handles data timeouts internally, so no pruning is needed.
     alfred -r $ALFRED_DATA_TYPE | awk '{print $2}' > "$REGISTRY_FILE"
 
@@ -117,7 +116,7 @@ while true; do
             log "State: UNCONFIGURED. Proposing a new IP."
             PROPOSED_IPV4="${IPV4_SUBNET}.$(shuf -i 1-254 -n 1)"
 
-            if grep -q "^${PROPOSED_IPV4}," "$REGISTRY_FILE"; then
+            if grep -q "${PROPOSED_IPV4}" "$REGISTRY_FILE"; then
                 log "Proposed IP ${PROPOSED_IPV4} is already in use. Retrying."
                 sleep 1
                 continue
@@ -136,7 +135,7 @@ while true; do
 
         "CONFIGURED")
             # Scan for conflicts
-            CONFLICTING_MAC=$(grep "^${CURRENT_IPV4}," "$REGISTRY_FILE" | grep -v ",${MY_MAC}$" | cut -d',' -f2)
+            CONFLICTING_MAC=$(grep "^${CURRENT_IPV4}," "$REGISTRY_FILE" | grep -v ",${MY_MAC}$" | cut -d',' -f1)
 
             if [[ -n "$CONFLICTING_MAC" ]]; then
                 log "CONFLICT DETECTED for ${CURRENT_IPV4}! Owner: ${CONFLICTING_MAC}"
@@ -165,6 +164,6 @@ while true; do
             ;;
     esac
 
-    # Main loop polls the network every 15 seconds
-    sleep 15
+    # Main loop polls the network every 25 seconds
+    sleep 25
 done
