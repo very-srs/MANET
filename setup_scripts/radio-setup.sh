@@ -201,6 +201,21 @@ cat <<- EOF > /etc/sysctl.d/99-batman.conf
 	net.ipv6.conf.bat0.addr_gen_mode = 0
 EOF
 
+mkdir -p /etc/systemd/system/bat0.device.d
+cat <<- EOF > /etc/systemd/system/bat0.device.d/trigger-alfred.conf
+	[Unit]
+	# When the bat0 device appears, start the target that alfred waits on
+	BindsTo=bat0-interface-up.target
+	After=bat0-interface-up.target
+EOF
+
+cat <<- EOF > /etc/systemd/system/bat0-interface-up.target
+	[Unit]
+	Description=bat0 network interface is up
+	Requires=bat0.device
+	After=bat0.device
+EOF
+
 # Build dependency strings
 WLAN_INTERFACES=$(networkctl | awk '/wlan/ {print $2}' | tr '\n' ' ')
 AFTER_DEVICES=""
@@ -236,8 +251,9 @@ systemctl enable batman-enslave.service
 cat <<- EOF > /etc/systemd/system/alfred.service
 	[Unit]
 	Description=B.A.T.M.A.N. Advanced Layer 2 Forwarding Daemon
-	After=network-online.target batman-enslave.service
-	Wants=network-online.target batman-enslave.service
+	# Wait for bat0 device to exist and be up
+	After=bat0-interface-up.target
+	Wants=bat0-interface-up.target
 	Requires=batman-enslave.service
 
 
