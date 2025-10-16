@@ -164,9 +164,7 @@ cat <<- 'EOF' > /usr/local/bin/batman-if-setup.sh
 	        batctl bat0 if add "$WLAN"
 	    done
 
-		#give bat0 a LL ipv6 address for alfred to work
 	    ip link set bat0 up
-	    ip -6 addr add fe80::1/64 dev bat0 scope link
 	}
 
 	stop() {
@@ -245,6 +243,7 @@ cat <<- EOF > /etc/systemd/system/alfred.service
 
 	[Service]
 	Type=simple
+	ExecStartPre=/bin/bash -c 'for i in {1..10}; do ip -6 addr show dev bat0 | grep -q "fe80::" && exit 0; sleep 1; done; echo "bat0 missing link-local IPv6" >&2; exit 1'
 	# Add -m to run alfred in master mode, allowing it to accept client data
 	ExecStart=/usr/sbin/alfred -m -i bat0
 	UMask=0000
@@ -287,7 +286,7 @@ cat <<- EOF > /etc/systemd/system/syncthing-peer-manager.service
 	Type=simple
 	ExecStart=/usr/local/bin/syncthing-peer-manager.sh
 	Restart=on-failure
-	RestartSec=30
+q	RestartSec=30
 
 	[Install]
 	WantedBy=multi-user.target
@@ -301,6 +300,11 @@ systemctl enable nftables.service
 systemctl daemon-reload
 systemctl restart avahi-daemon
 
+#install scripts for auto gateway management
+cp /root/networkd-dispatcher/off /etc/networkd-dispatcher/off.d/50-gateway-disable
+cp /root/networkd-dispatcher/degraded /etc/networkd-dispatcher/degraded.d/50-gateway-disable
+cp /root/networkd-dispatcher/routable /etc/networkd-dispatcher/routable.d/50-gateway-enable
+chmod -R 755 /etc/networkd-dispatcher
 
 # Determine if this script is being run for the first time
 # and reboot if so to pick up the changes to the interfaces
