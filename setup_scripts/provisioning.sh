@@ -133,6 +133,8 @@ main() {
 
 		[Network]
 		LinkLocalAddressing=ipv6
+		IPv6Token=eui64
+		IPv6PrivacyExtensions=no
 	EOF
 
 	# The bridge br0 is the main interface for the mesh node
