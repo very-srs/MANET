@@ -201,22 +201,7 @@ cat <<- EOF > /etc/sysctl.d/99-batman.conf
 	net.ipv6.conf.bat0.addr_gen_mode = 0
 EOF
 
-mkdir -p /etc/systemd/system/bat0.device.d
-cat <<- EOF > /etc/systemd/system/bat0.device.d/trigger-alfred.conf
-	[Unit]
-	# When the bat0 device appears, start the target that alfred waits on
-	BindsTo=bat0-interface-up.target
-	After=bat0-interface-up.target
-EOF
-
-cat <<- EOF > /etc/systemd/system/bat0-interface-up.target
-	[Unit]
-	Description=bat0 network interface is up
-	Requires=bat0.device
-	After=bat0.device
-EOF
-
-# Build dependency strings
+# Build dependency strings to make batman-enslave service file
 WLAN_INTERFACES=$(networkctl | awk '/wlan/ {print $2}' | tr '\n' ' ')
 AFTER_DEVICES=""
 WANTS_SERVICES=""
@@ -252,14 +237,14 @@ cat <<- EOF > /etc/systemd/system/alfred.service
 	[Unit]
 	Description=B.A.T.M.A.N. Advanced Layer 2 Forwarding Daemon
 	# Wait for bat0 device to exist and be up
-	After=bat0-interface-up.target
-	Wants=bat0-interface-up.target
+	After=network-online.target
+	Wants=network-online.target
 	Requires=batman-enslave.service
 
 
 	[Service]
 	Type=simple
-	ExecStartPre=/bin/bash -c 'for i in {1..10}; do ip -6 addr show dev bat0 | grep -q "fe80::" && exit 0; sleep 1; done; echo "bat0 missing link-local IPv6" >&2; exit 1'
+	ExecStartPre=/bin/bash -c 'for i in {1..20}; do if ip -6 addr show dev bat0 | grep "inet6 fe80::" | grep -qv "tentative"; then exit 0; fi; sleep 1; done; echo "bat0 link-local IPv6 address not ready" >&2; exit 1'
 	# Add -m to run alfred in master mode, allowing it to accept client data
 	ExecStart=/usr/sbin/alfred -m -i bat0
 	UMask=0000
