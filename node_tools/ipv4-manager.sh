@@ -40,17 +40,21 @@ ip -4 addr flush dev br0
 # --- Helper Functions ---
 
 # This one takes in a cidr notation network and outputs a random ip in it
+# This one takes in a cidr notation network and outputs a random ip in it
 get_random_ip_from_cidr() {
     local CIDR="$1"
 
+    # Converts an IP string (e.g., 192.168.1.1) to a 32-bit integer.
     ip_to_int() {
         local a b c d
         IFS=. read -r a b c d <<<"$1"
         echo "$(( (a << 24) + (b << 16) + (c << 8) + d ))"
     }
 
+    # Correctly converts a 32-bit integer back to an IP string.
     int_to_ip() {
         local ip_int=$1
+        # This version correctly calculates all four octets from the integer.
         echo "$(( (ip_int >> 24) & 255 )).$(( (ip_int >> 16) & 255 )).$(( (ip_int >> 8) & 255 )).$(( ip_int & 255 ))"
     }
 
@@ -59,19 +63,28 @@ get_random_ip_from_cidr() {
     local CALC_OUTPUT
     CALC_OUTPUT=$(ipcalc "$CIDR" 2>/dev/null)
     if [ -z "$CALC_OUTPUT" ]; then
-        echo "Error: Invalid CIDR notation provided: $CIDR" >&2
+        echo "Error: Invalid CIDR or ipcalc not found: $CIDR" >&2
         return 1
     fi
 
     local HOST_MIN=$(echo "$CALC_OUTPUT" | awk '/HostMin/ {print $2}')
     local HOST_MAX=$(echo "$CALC_OUTPUT" | awk '/HostMax/ {print $2}')
 
+    # Add a check to ensure ipcalc output was parsed correctly
+    if [ -z "$HOST_MIN" ] || [ -z "$HOST_MAX" ]; then
+        echo "Error: Could not parse HostMin/HostMax from ipcalc." >&2
+        return 1
+    fi
+
     # Convert the range to integers
     local MIN_INT=$(ip_to_int "$HOST_MIN")
     local MAX_INT=$(ip_to_int "$HOST_MAX")
 
-    # Handle single-host networks (/31) or smaller, though unlikely
-    if [ "$MIN_INT" -ge "$MAX_INT" ]; then
+    # Handle /31 networks where min and max can be the same.
+    if [ "$MIN_INT" -gt "$MAX_INT" ]; then
+        echo "Error: Invalid IP range (Min > Max)." >&2
+        return 1
+    elif [ "$MIN_INT" -eq "$MAX_INT" ]; then
         echo "$HOST_MIN"
         return 0
     fi
@@ -82,7 +95,6 @@ get_random_ip_from_cidr() {
     # Convert the random integer back to an IP and print it
     int_to_ip "$RANDOM_INT"
 }
-
 
 publish_claim() {
     local ip_to_claim=$1
@@ -114,8 +126,7 @@ while true; do
 
         "UNCONFIGURED")
             log "State: UNCONFIGURED. Proposing a new IP."
-            PROPOSED_IPV4="${IPV4_SUBNET}.$(shuf -i 1-254 -n 1)"
-
+	    PROPOSED_IPV4=$(get_random_ip_from_cidr "${IPV4_SUBNET}${IPV4_MASK}")
             if grep -q "${PROPOSED_IPV4}" "$REGISTRY_FILE"; then
                 log "Proposed IP ${PROPOSED_IPV4} is already in use. Retrying."
                 sleep 1
