@@ -21,10 +21,10 @@ services:
       - ./data:/data
     # Load environment variables from the .env file in the same directory.
     # This allows you to configure your network interfaces without editing this file.
-    env_file:
-      - .env
+    environment:
+      - ETH_IFACE
+      - WIFI_IFACE
     # Keep STDIN open, equivalent to the '-i' flag in `docker run`.
     stdin_open: true
     # Allocate a pseudo-TTY, equivalent to the '-t' flag in `docker run`.
     tty: true
-

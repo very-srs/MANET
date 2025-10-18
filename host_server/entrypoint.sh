@@ -3,19 +3,41 @@
 # Exit immediately if a command exits with a non-zero status.
 set -e
 
+if [ -z "$ETH_IFACE" ]; then
+    ETH_IFACE=$(ip -o link show | awk -F': ' '{print $2}' | grep -E '^e|^en' | head -n1)
+    echo "Detected Ethernet interface: $ETH_IFACE"
+fi
+
+if [ -z "$WIFI_IFACE" ]; then
+    WIFI_IFACE=$(ip -o link show | awk -F': ' '{print $2}' | grep -E '^w' | head -n1)
+    echo "Detected Wi-Fi interface: $WIFI_IFACE"
+fi
+
 echo "--- Starting network configuration ---"
-echo "Ethernet (DHCP clients): $ETH_IFACE"
-echo "WiFi (Internet): $WIFI_IFACE"
 
 echo "Flushing old IP configuration from $ETH_IFACE..."
 ip addr flush dev "$ETH_IFACE"
 
-echo "Assigning IP 10.30.1.1 to $ETH_IFACE..."
-ip addr add 10.30.1.1/24 dev "$ETH_IFACE"
+echo "Bringing interfaces up..."
+ip link set "$ETH_IFACE" up || { echo "Failed to bring up $ETH_IFACE"; exit 1; }
+ip link set "$WIFI_IFACE" up || echo "Warning: Could not bring up $WIFI_IFACE (ensure WiFi is connected)"
+
+#echo "Enabling IP forwarding..."
+#echo 1 > /proc/sys/net/ipv4/ip_forward || { echo "Failed to enable IP forwarding"; exit 1; }
+
+echo "Checking/assigning IP 10.30.1.1 to $ETH_IFACE..."
+if ! ip addr show dev "$ETH_IFACE" | grep -q "10.30.1.1"; then
+    ip addr flush dev "$ETH_IFACE" || echo "Warning: Could not flush $ETH_IFACE IPs"
+    ip addr add 10.30.1.1/24 dev "$ETH_IFACE" || { echo "Failed to assign IP to $ETH_IFACE"; exit 1; }
+fi
 
 echo "Setting up iptables NAT rules..."
-iptables -t nat -D POSTROUTING -o "$WIFI_IFACE" -j MASQUERADE || true
+iptables -F FORWARD
+iptables -t nat -F POSTROUTING
+iptables -A FORWARD -i "$ETH_IFACE" -o "$WIFI_IFACE" -j ACCEPT
+iptables -A FORWARD -i "$WIFI_IFACE" -o "$ETH_IFACE" -m state --state RELATED,ESTABLISHED -j ACCEPT
 iptables -t nat -A POSTROUTING -o "$WIFI_IFACE" -j MASQUERADE
+
 
 # --- SSL Certificate Generation ---
 # Check if a certificate already exists in the persistent volume.
