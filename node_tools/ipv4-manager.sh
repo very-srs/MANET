@@ -124,10 +124,11 @@ while true; do
 
     case $IPV4_STATE in
 
-        "UNCONFIGURED")
+			"UNCONFIGURED")
             log "State: UNCONFIGURED. Proposing a new IP."
-	    PROPOSED_IPV4=$(get_random_ip_from_cidr "${IPV4_SUBNET}${IPV4_MASK}")
-            if grep -q "${PROPOSED_IPV4}" "$REGISTRY_FILE"; then
+            PROPOSED_IPV4=$(get_random_ip_from_cidr "${IPV4_SUBNET}${IPV4_MASK}")
+
+            if grep -q "^${PROPOSED_IPV4}," "$REGISTRY_FILE"; then
                 log "Proposed IP ${PROPOSED_IPV4} is already in use. Retrying."
                 sleep 1
                 continue
