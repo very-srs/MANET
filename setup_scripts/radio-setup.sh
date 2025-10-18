@@ -5,7 +5,7 @@
 #
 
 
-# The URL to the active configuration file on your Docker host.
+# The URL to the active configuration file on the Docker host.
 CONFIG_URL="https://10.30.1.1:8081/data/active.conf"
 
 ### configure mesh defaults, these should not get used
@@ -99,6 +99,7 @@ CT=0
 for WLAN in `networkctl | awk '/wlan/ {print $2}'`; do
 	echo " > Setting SAE key/SSID for wlan$CT ..."
 	#create wpa supplicant configs
+	echo "MESH_NAME=\"$MESH_NAME\"" > /etc/default/mesh
 	cat <<-EOF > /etc/wpa_supplicant/wpa_supplicant-wlan$CT.conf
 		ctrl_interface=/var/run/wpa_supplicant
 		update_config=1
@@ -148,43 +149,85 @@ done
 
 # Enslave interfaces to Batman, create second Batman interface for Alfred to use
 # Create the batman interface setup script
+# /radio-setup.sh
+
 cat <<- 'EOF' > /usr/local/bin/batman-if-setup.sh
 	#!/bin/bash
 	set -e
 
+	# Source mesh configuration to get the MESH_NAME variable
+	if [ -f /etc/default/mesh ]; then
+	    source /etc/default/mesh
+	else
+	    echo "Error: Mesh configuration /etc/default/mesh not found!" >&2
+	    exit 1
+	fi
+
 	WLAN_INTERFACES=$(networkctl | awk '/wlan/ {print $2}' | tr '\n' ' ')
 
 	start() {
-	    echo "Starting BATMAN interfaces..."
-	    # Only create interface if it does not exist
+	    echo "Starting BATMAN-ADV setup..."
+	    # Create bat0 interface if it doesn't exist
 	    ip link show bat0 &>/dev/null || ip link add name bat0 type batadv
 
 	    for WLAN in $WLAN_INTERFACES; do
+	        echo "--> Configuring interface: $WLAN"
+
+	        # Set the interface type to mesh
+	        ip link set "$WLAN" type mesh
 	        ip link set "$WLAN" up
+
+	        # Wait for interface to be operationally up in mesh mode
+	        echo "Waiting for $WLAN to be ready..."
+	        for i in {1..15}; do
+	            if ip link show "$WLAN" | grep -q "state UP" && \
+	               iw dev "$WLAN" info | grep -q "type mesh point"; then
+	                echo "$WLAN is up in mesh mode."
+	                break
+	            fi
+	            if [ $i -eq 15 ]; then
+	                echo "!! Timed out waiting for $WLAN to be ready. Skipping." >&2
+	                continue 2
+	            fi
+	            sleep 1
+	        done
+
+	        # Wait for mesh association
+	        echo "Waiting for $WLAN to associate with SSID '$MESH_NAME'..."
+	        for i in {1..30}; do
+	            if iw dev "$WLAN" link | grep -q "SSID: $MESH_NAME"; then
+	                echo "$WLAN successfully associated."
+	                break
+	            fi
+	            if [ $i -eq 30 ]; then
+	                echo "!! Timed out waiting for $WLAN to associate. Skipping." >&2
+	                continue 2
+	            fi
+	            sleep 1
+	        done
+
+	        # Now add to bat0
+	        echo "Adding $WLAN to bat0..."
 	        batctl bat0 if add "$WLAN"
 	    done
 
 	    ip link set bat0 up
+	    echo "bat0 interface is up and configured."
 	}
 
 	stop() {
-	    echo "Stopping BATMAN interfaces..."
+	    echo "Stopping BATMAN-ADV..."
 	    for WLAN in $WLAN_INTERFACES; do
-	        # Only try to remove interface if it is actually attached
 	        if batctl bat0 if | grep -q "$WLAN"; then
-	             batctl bat0 if del "$WLAN"
+	            batctl bat0 if del "$WLAN"
 	        fi
 	    done
-
 	    ip link show bat0 &>/dev/null && ip link del bat0
 	}
 
 	case "$1" in
-	    start)
-	        start
-	        ;;
-	    stop)
-	        stop
+	    start|stop)
+	        "$1"
 	        ;;
 	    *)
 	        echo "Usage: $0 {start|stop}"
@@ -216,8 +259,8 @@ done
 cat <<- EOF > /etc/systemd/system/batman-enslave.service
 	[Unit]
 	Description=BATMAN Advanced Interface Manager
-	After=${AFTER_DEVICES} ${WANTS_SERVICES}
-	Wants=${WANTS_SERVICES}
+	After=network-online.target ${AFTER_DEVICES} ${WANTS_SERVICES}
+	Wants=network-online.target ${WANTS_SERVICES}
 
 	[Service]
 	Type=oneshot
@@ -255,7 +298,6 @@ cat <<- EOF > /etc/systemd/system/alfred.service
 	WantedBy=multi-user.target
 EOF
 systemctl enable alfred.service
-systemctl restart alfred.service
 
 #start the script for getting ipv4 established
 cp /root/ipv4-manager.sh /usr/local/bin/
@@ -276,6 +318,8 @@ cat <<- EOF > /etc/systemd/system/ipv4-manager.service
 EOF
 systemctl enable ipv4-manager.service
 
+cp /root/syncthing-peer-manager.sh /usr/local/bin/
+chmod 755 /usr/local/bin/syncthing-peer-manager.sh
 
 cat <<- EOF > /etc/systemd/system/syncthing-peer-manager.service 
 	[Unit]
@@ -331,9 +375,13 @@ systemctl restart avahi-daemon
 echo " > resetting ipv4..."
 systemctl restart ipv4-manager
 
+
 sleep 6 # wait for wpa_supplicant to catch up
-systemctl restart batman-enslave.service
 echo " > resetting BATMAN-ADV bond..."
+systemctl restart batman-enslave.service
+
+echo " > restarting alfred..."
+systemctl restart alfred.service
 
 sleep 2
 networkctl

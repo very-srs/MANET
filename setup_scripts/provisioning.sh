@@ -11,6 +11,7 @@
 
 #wifi region
 REG=US
+
 # used for determining a unique hostname
 HOST_MAC=$(ip a | grep -A1 `networkctl | grep -v bat | awk '/ether/ {print $2}'`\
  | awk '/ether/ {print $2}' | cut -d':' -f 5-6 | sed 's/://g')
@@ -98,7 +99,7 @@ main() {
 	# trying to put out ethernet via usb-c
 	sed -i 's/otg_mode=1//g' /boot/firmware/config.txt
 	if ! grep -q 'dr_mode=host' /boot/firmware/config.txt; then
-		echo "dtoverlay=dwc2,dr_mode=host/g" >> /boot/firmware/config.txt
+		echo "dtoverlay=dwc2,dr_mode=host" >> /boot/firmware/config.txt
 	fi
 
 
@@ -152,14 +153,15 @@ main() {
 		[Match]
 		Name=br0
 
-	    [Network]
-	    DHCP=no
-	    LinkLocalAddressing=ipv6
-	    IPv6AcceptRA=yes
-	    MulticastDNS=yes
+		[Network]
+		DHCP=no
+		LinkLocalAddressing=ipv6
+		IPv6AcceptRA=yes
+		MulticastDNS=yes
+		BindCarrier=bat0
 
-	    [Link]
-	    RequiredForOnline=no
+		[Link]
+		RequiredForOnline=no
 	EOF
 
 	# Place other interfaces into the bridge
@@ -270,7 +272,17 @@ main() {
 	EOF
 	# Default to mesh config
 	cp /etc/radvd-mesh.conf /etc/radvd.conf
+
+	#make radvd wait for bat0 to be up
+	mkdir -p /etc/systemd/system/radvd.service.d/
+	cat <<- EOF > /etc/systemd/system/radvd.service.d/override.conf
+		[Unit]
+		After=batman-enslave.service
+		Wants=batman-enslave.service
+	EOF
+
 	systemctl enable radvd
+
 
 
 	echo "Configuring Avahi"
