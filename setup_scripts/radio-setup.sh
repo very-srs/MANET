@@ -76,7 +76,7 @@ if [[ -n "$ipv4_network" ]]; then
 	echo " > Setting IPv4 network settings..."
 	# Create the configuration file for the IPv4 manager
 	cat <<- EOF > /etc/mesh_ipv4.conf
-		IPV4_SUBNET="$(echo "$ipv4_network" | cut -d'.' -f1-3)"
+		IPV4_SUBNET="$(echo "$ipv4_network" | cut -d'.' -f1-4)"
 		IPV4_MASK="/${ipv4_cidr}"
 	EOF
 fi
@@ -192,20 +192,6 @@ cat <<- 'EOF' > /usr/local/bin/batman-if-setup.sh
 	            sleep 1
 	        done
 
-	        # Wait for mesh association
-	        echo "Waiting for $WLAN to associate with SSID '$MESH_NAME'..."
-	        for i in {1..30}; do
-	            if iw dev "$WLAN" link | grep -q "SSID: $MESH_NAME"; then
-	                echo "$WLAN successfully associated."
-	                break
-	            fi
-	            if [ $i -eq 30 ]; then
-	                echo "!! Timed out waiting for $WLAN to associate. Skipping." >&2
-	                continue 2
-	            fi
-	            sleep 1
-	        done
-
 	        # Now add to bat0
 	        echo "Adding $WLAN to bat0..."
 	        batctl bat0 if add "$WLAN"
@@ -242,6 +228,8 @@ cat <<- EOF > /etc/sysctl.d/99-batman.conf
 	# Enable IPv6 address generation on batman-adv interfaces
 	net.ipv6.conf.bat0.disable_ipv6 = 0
 	net.ipv6.conf.bat0.addr_gen_mode = 0
+	net.ipv6.conf.br0.disable_ipv6 = 0
+	net.ipv6.conf.br0.accept_ra = 1
 EOF
 
 # Build dependency strings to make batman-enslave service file
@@ -289,7 +277,7 @@ cat <<- EOF > /etc/systemd/system/alfred.service
 	Type=simple
 	ExecStartPre=/bin/bash -c 'for i in {1..20}; do if ip -6 addr show dev bat0 | grep "inet6 fe80::" | grep -qv "tentative"; then exit 0; fi; sleep 1; done; echo "bat0 link-local IPv6 address not ready" >&2; exit 1'
 	# Add -m to run alfred in master mode, allowing it to accept client data
-	ExecStart=/usr/sbin/alfred -m -i bat0
+	ExecStart=/usr/sbin/alfred -m -i bat0 -f
 	UMask=0000
 	Restart=always
 	RestartSec=10
@@ -299,24 +287,25 @@ cat <<- EOF > /etc/systemd/system/alfred.service
 EOF
 systemctl enable alfred.service
 
-#start the script for getting ipv4 established
-cp /root/ipv4-manager.sh /usr/local/bin/
-cat <<- EOF > /etc/systemd/system/ipv4-manager.service
+# This script handles IPv4 addressing and node status gossip via alfred
+cp /root/node-manager.sh /usr/local/bin/
+cat <<- EOF > /etc/systemd/system/node-manager.service
 	[Unit]
-	Description=Decentralized IPv4 Address Manager
-	After=network-online.target
-	Wants=network-online.target
+	Description=Mesh Node Status Manager and IPv4 Coordinator
+	# This must run after alfred is available
+	After=alfred.service
+	Wants=alfred.service
 
 	[Service]
 	Type=simple
-	ExecStart=/usr/local/bin/ipv4-manager.sh
+	ExecStart=/usr/local/bin/mesh-node-manager.sh
 	Restart=on-failure
-	RestartSec=10
+	RestartSec=15
 
 	[Install]
 	WantedBy=multi-user.target
 EOF
-systemctl enable ipv4-manager.service
+systemctl enable node-manager.service
 
 cp /root/syncthing-peer-manager.sh /usr/local/bin/
 chmod 755 /usr/local/bin/syncthing-peer-manager.sh
@@ -331,7 +320,7 @@ cat <<- EOF > /etc/systemd/system/syncthing-peer-manager.service
 	Type=simple
 	ExecStart=/usr/local/bin/syncthing-peer-manager.sh
 	Restart=on-failure
-q	RestartSec=30
+	RestartSec=30
 
 	[Install]
 	WantedBy=multi-user.target
@@ -343,7 +332,6 @@ systemctl enable syncthing@radio.service
 systemctl enable nftables.service
 
 systemctl daemon-reload
-systemctl restart avahi-daemon
 
 #install scripts for auto gateway management
 cp /root/networkd-dispatcher/off /etc/networkd-dispatcher/off.d/50-gateway-disable
@@ -351,17 +339,89 @@ cp /root/networkd-dispatcher/degraded /etc/networkd-dispatcher/degraded.d/50-gat
 cp /root/networkd-dispatcher/routable /etc/networkd-dispatcher/routable.d/50-gateway-enable
 chmod -R 755 /etc/networkd-dispatcher
 
+cat <<- EOF > /usr/local/bin/route-manager.sh
+	#!/bin/bash
+	#
+	# route-manager.sh: A persistent service to manage the default internet route
+	# based on B.A.T.M.A.N.-adv gateway selection for both IPv4 and IPv6.
+	#
+
+	log() {
+	    echo "[$(date +'%Y-%m-%d %H:%M:%S')] - $1"
+	}
+
+	update_default_route() {
+	    log "Checking gateway status..."
+	    # Check if ANY gateway is selected by batctl
+	    if batctl gwl -H | grep -q "=>"; then
+	        log "Gateway found. Ensuring default routes point to bat0."
+	        ip route replace default dev bat0
+	        ip -6 route replace default dev bat0
+	    else
+	        log "No gateway available. Removing default routes."
+	        ip route del default dev bat0 2>/dev/null
+	        ip -6 route del default dev bat0 2>/dev/null
+	    fi
+	}
+
+
+	# --- Main Loop ---
+	log "Starting Route Manager."
+	# Perform an initial check on startup
+	update_default_route
+
+	# Continuously monitor for events from batctl's kernel uevent interface
+	# The `read -t 60` provides a 60-second timeout, ensuring the script
+	# runs a safety check at least once a minute even if no events are received.
+	batctl monitor | while read -t 60 event; do
+
+	    # Check if the read timed out (exit code > 128) or if a GATEWAY event was received
+	    if [[ $? -gt 128 || "$event" == *"GATEWAY"* ]]; then
+	        update_default_route
+	    fi
+	done
+EOF
+chmod +x /usr/local/route-manager.sh
+
+cat <<- EOF > /etc/systemd/system/route-manager.service
+	[Unit]
+	Description=B.A.T.M.A.N. Advanced Default Route Manager
+	# This service must start after the batman interfaces are fully configured.
+	Requires=batman-enslave.service
+	After=batman-enslave.service
+
+	[Service]
+	Type=simple
+	ExecStart=/usr/local/bin/route-manager.sh
+	# Always restart the service if it fails for any reason
+	Restart=always
+	RestartSec=10
+
+	[Install]
+	WantedBy=multi-user.target
+EOF
+
+systemctl enable route-manager.service
+
+
 # Determine if this script is being run for the first time
 # and reboot if so to pick up the changes to the interfaces
 for WLAN in `networkctl | awk '/wlan/ {print $2}'`; do
 	if ! echo $WLAN | grep wlan[0-9]; then
 		echo " > First run detected"
 		echo " >> Removing radio-setup-run-once.service"
-		systemct disable radio-setup-run-once.service
+		systemctl disable radio-setup-run-once.service
 		rm /etc/systemd/system/radio-setup-run-once.service
 		echo " >> Doing initial Syncthing config..."
 		sudo -u radio syncthing -generate="/home/radio/.config/syncthing"
 		sleep 5
+		killall syncthing
+		SYNCTHING_CONFIG="/home/radio/.config/syncthing/config.xml"
+		echo " >> Hardening Syncthing for local-only operation..."
+		#disable global discovery and relaying
+		sed -i '/<options>/a <globalAnnounceEnabled>false</globalAnnounceEnabled>\n<relaysEnabled>false</relaysEnabled>' "$SYNCTHING_CONFIG"
+		# replace the gui block to set the address
+		sed -i 's|<gui enabled="true" tls="false" debugging="false">.*</gui>|<gui enabled="true" tls="false" debugging="false">\n        <address>127.0.0.1:8384</address>\n    </gui>|' "$SYNCTHING_CONFIG"
 		reboot
 	fi
 done

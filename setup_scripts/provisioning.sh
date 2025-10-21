@@ -75,12 +75,23 @@ main() {
 	# Install packages for this system
 	apt install -y ipcalc nmap lshw tcpdump net-tools nftables wireless-tools iperf3\
 	  \radvd bridge-utils firmware-mediatek libnss-mdns syncthing networkd-dispatcher\
-	  avahi-daemon avahi-utils libgps-dev libcap-dev mumble-server screen> /dev/null 2>&1
+	  avahi-daemon avahi-utils libgps-dev libcap-dev mumble-server screen \
+	  python3-protobuf > /dev/null 2>&1
 	echo "Done"
+
+	echo "Disabling APT timers for automatic updates..."
+	systemctl disable apt-daily.timer
+	systemctl disable apt-daily-upgrade.timer
 
 	# The version of alfred in the debian packages is old.  Install one built oct 2025
 	cp /root/alfred /usr/sbin/
 	cp /root/batctl /usr/sbin/
+
+	# Add the protobuf tools
+	cp /root/encoder /usr/local/bin/
+	cp /root/decoder /usr/local/bin/
+
+
 
 	# setup rpi config parameters to activate the pcie bus, used by wireless card
 	sed -i 's/#dtparam=spi=on/dtparam=spi=on/g' /boot/firmware/config.txt
@@ -114,6 +125,9 @@ main() {
 	echo i2c_dev > /etc/modules-load.d/i2c_dev.conf
 	echo "Enabled i2c"
 
+	# enable SPI
+	sed -i 's/#dtparam=spi=on/dtparam=spi=on/g' /boot/firmware/config.txt
+
 	#set regulatory region as US
 	echo options cfg80211 ieee80211_regdom=$REG > /etc/modprobe.d/wifi-regdom.conf
 	echo "Set wifi regulatory domain to $REG"
@@ -133,6 +147,7 @@ main() {
 		Name=bat0
 
 		[Network]
+		Bridge=br0
 		LinkLocalAddressing=ipv6
 		IPv6Token=eui64
 		IPv6PrivacyExtensions=no
@@ -158,19 +173,9 @@ main() {
 		LinkLocalAddressing=ipv6
 		IPv6AcceptRA=yes
 		MulticastDNS=yes
-		BindCarrier=bat0
 
 		[Link]
 		RequiredForOnline=no
-	EOF
-
-	# Place other interfaces into the bridge
-	cat <<-EOF > /etc/systemd/network/30-br0-bind.network
-		[Match]
-		Name=bat0 usb0
-
-		[Network]
-		Bridge=br0
 	EOF
 
 	#set ethernet links for DHCP, currently only used for setup
@@ -279,6 +284,9 @@ main() {
 		[Unit]
 		After=batman-enslave.service
 		Wants=batman-enslave.service
+
+		[Service]
+		ExecStartPre=/bin/sleep 5
 	EOF
 
 	systemctl enable radvd
@@ -296,7 +304,8 @@ main() {
 	# Publish host names but not local addresses via avahi, and only the bridge address
 	sed -i 's/publish-workstation=no/publish-workstation=yes/g' /etc/avahi/avahi-daemon.conf
 	sed -i 's/#allow-interfaces=eth0/allow-interfaces=br0/g' /etc/avahi/avahi-daemon.conf
-	# Advertise ssh 
+	sed -i 's/#enable-dbus=yes/enable-dbus=no/g' /etc/avahi/avahi-daemon.conf
+	# Advertise ssh
 	cat <<- EOF > /etc/avahi/services/ssh.service
 		<?xml version="1.0" standalone='no'?>
 		<!DOCTYPE service-group SYSTEM "avahi-service.dtd">
@@ -311,7 +320,7 @@ main() {
 
 	# Set br0 to be the wait online interface
 	mkdir -p /etc/systemd/system/systemd-networkd-wait-online.service.d/
-	cat <<- EOF > /etc/systemd/system/systemd-networkd-wait-online.service.d/override.conf#
+	cat <<- EOF > /etc/systemd/system/systemd-networkd-wait-online.service.d/override.conf
 	    [Service]
 	    ExecStart=
 	    ExecStart=/lib/systemd/systemd-networkd-wait-online --interface=br0
