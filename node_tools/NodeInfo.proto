@@ -1,0 +1,34 @@
+syntax = "proto3";
+// Update with protoc --python_out=. NodeInfo.proto 
+
+// This message represents a complete status update from a single mesh node.
+message NodeInfo {
+  // --- Network Identity ---
+  string hostname = 1;
+  string mac_address = 2;
+  string ipv4_address = 3;
+  string syncthing_id = 4;
+
+  // --- Network & Election Metrics ---
+  float tq_average = 10;       // TQ average, for service elections.
+  bool is_internet_gateway = 11; // Does this node have an active internet connection?
+
+  // --- Service Status ---
+  bool is_mumble_server = 20;
+  bool is_ntp_server = 21;
+  bool is_tak_server = 22;
+
+  // --- System Health ---
+  uint32 uptime_seconds = 30;
+  uint32 battery_percentage = 31; // 0-100
+  float cpu_load_average = 32;    // 1-minute load average
+
+  // --- Other ---
+  message GpsLocation {
+    double latitude = 1;
+    double longitude = 2;
+    float altitude = 3;
+  }
+  GpsLocation location = 40;
+  string atak_user = 41;
+}
