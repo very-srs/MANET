@@ -45,7 +45,7 @@ else
 fi
 
 # Restart radvd
-if systemctl restart radvd; then
+if killall radvd || systemctl start radvd; then
     log "Restarted radvd service"
 else
     log "ERROR: Failed to restart radvd"
