@@ -171,6 +171,9 @@ cat <<- 'EOF' > /usr/local/bin/batman-if-setup.sh
 	    # Create bat0 interface if it doesn't exist
 	    ip link show bat0 &>/dev/null || ip link add name bat0 type batadv
 
+	    #change to batman V algo
+		batctl -m bat0 ra BATMAN_V
+
 	    for WLAN in $WLAN_INTERFACES; do
 	        echo "--> Configuring interface: $WLAN"
 
@@ -197,6 +200,7 @@ cat <<- 'EOF' > /usr/local/bin/batman-if-setup.sh
 	        echo "Adding $WLAN to bat0..."
 	        batctl bat0 if add "$WLAN"
 	    done
+
 
 	    ip link set bat0 up
 	    echo "bat0 interface is up and configured."
