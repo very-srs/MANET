@@ -1,51 +1,44 @@
 #!/bin/bash
-# /etc/networkd-dispatcher/degraded.d/50-gateway-disable
-# Triggers when end0 becomes degraded (loss of connectivity while still up)
+#
+# This script is triggered when an interface goes down.
+# It reverts the node from a gateway back to a normal mesh client.
+#
 
-INTERFACE="end0"
-LOGFILE="/var/log/gateway-mode.log"
+IFACE="end0" # Define the Ethernet interface name here
+GATEWAY_STATE_FILE="/var/run/mesh-gateway.state"
 
-# Only act on the specific interface
-if [ "$IFACE" != "$INTERFACE" ]; then
+log() {
+    echo "[$(date +'%Y-%m-%d %H:%M:%S')] - GATEWAY-DOWN: $1" | systemd-cat -t mesh-gateway
+}
+
+# Only act if the event is for our Ethernet interface and if we were the active gateway
+if [ "$1" != "$IFACE" ] || [ ! -f "$GATEWAY_STATE_FILE" ]; then
     exit 0
 fi
 
-# Logging function
-log() {
-    echo "$(date '+%Y-%m-%d %H:%M:%S') [DEGRADED] - $1" >> "$LOGFILE"
-}
+log "Internet connection lost on $IFACE. Reverting to mesh client mode..."
+rm -f "$GATEWAY_STATE_FILE"
 
-log "Interface $IFACE became degraded, disabling gateway mode"
-
-# Copy mesh radvd configuration
-if cp /etc/radvd-mesh.conf /etc/radvd.conf; then
-    log "Copied radvd-mesh.conf to radvd.conf"
-else
-    log "ERROR: Failed to copy radvd-mesh.conf"
-    exit 1
+# --- 1. Revert NTP Role ---
+# Check if chrony is actually running in server mode before reverting.
+# This prevents unnecessary stops/starts if the external sync failed initially.
+if systemctl is-active --quiet chrony.service && grep -q "allow fd5a" /etc/chrony/chrony.conf; then
+    log "We were an NTP server. Reverting chrony."
+    systemctl stop chrony.service
+	cp /etc/chrony-default.conf /etc/chrony.conf
 fi
+# Ensure chrony is stopped regardless, as it shouldn't run as a client constantly
+systemctl stop chrony.service
 
-# Restart radvd
-if killall radvd || systemctl start radvd; then
-    log "Restarted radvd service"
-else
-    log "ERROR: Failed to restart radvd"
-    exit 1
-fi
 
-# Set batman-adv to client mode
-if batctl gw_mode client; then
-    log "Set batctl gateway mode to client"
-else
-    log "ERROR: Failed to set batctl gateway mode"
-    exit 1
-fi
+# --- 2. Revert Gateway Role ---
+batctl gw_mode off
+cp /etc/radvd-mesh.conf /etc/radvd.conf
+systemctl restart radvd
 
-# Remove alfred announcement
-if echo -n "" | alfred -s 68; then
-    log "Removed gateway announcement from alfred"
-else
-    log "WARNING: Could not remove alfred announcement"
-fi
+# --- 3. Announce Changes to Mesh ---
+log "Triggering mesh-node-manager to publish new non-gateway status..."
+systemctl restart mesh-node-manager.service
 
-log "Gateway mode disabled successfully"
+log "Reversion to client mode complete."
+

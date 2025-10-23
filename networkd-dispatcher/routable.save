@@ -5,23 +5,19 @@
 # successfully sync its own time, it also becomes an NTP server.
 #
 
-IFACE="end0" # Define the Ethernet interface name here
+IFACE="$1"
 GATEWAY_STATE_FILE="/var/run/mesh-gateway.state"
+ETH_IF="end0"
 
 log() {
     echo "[$(date +'%Y-%m-%d %H:%M:%S')] - GATEWAY-UP: $1" | systemd-cat -t mesh-gateway
 }
 
 # --- Initial Checks ---
-# Exit if the event is not for our specific Ethernet interface
-if [ "$1" != "$IFACE" ]; then
+# Make sure the ethernet port is what's triggering the state
+if [ "$IFACE" != "$ETH_IF" ] || [ -f "$GATEWAY_STATE_FILE" ]; then
     exit 0
 fi
-# Exit if we are already a gateway (prevents re-running)
-if [ -f "$GATEWAY_STATE_FILE" ]; then
-    exit 0
-fi
-# Verify true internet access before proceeding
 if ! ping -c 3 -I "$IFACE" 8.8.8.8 > /dev/null 2>&1; then
     log "Interface $IFACE is routable but has no internet access. Not promoting."
     exit 0
@@ -32,28 +28,24 @@ touch "$GATEWAY_STATE_FILE"
 
 # --- 1. Attempt to Become an NTP Server ---
 log "Attempting to sync time with external NTP source..."
-NTP_SUCCESS=false
-# Load the test configuration temporarily
+systemctl stop chrony.service
 cp /etc/chrony/chrony-test.conf /etc/chrony/chrony.conf
-# Restart chrony with the test config (needed for 'burst' to target external)
-systemctl restart chrony.service
-sleep 2 # Give chrony a moment to start
+systemctl start chrony.service
 
-# The 'chronyc burst' command will exit with a non-zero status if it fails to sync.
-# Use timeout to prevent hanging indefinitely if external NTP is blocked/unreachable
-if timeout 30 chronyc -a 'burst 4/4'; then
+# The 'chronyc' command will exit with a non-zero status if it fails to sync.
+if chronyc -a 'burst 4/4'; then
     log "Time sync successful. Promoting to mesh NTP server."
-    NTP_SUCCESS=true
-    # Stop the test service, activate the proper server config, and start it.
+    # Stop the client service, activate the server config, and start it.
     systemctl stop chrony.service
     cp /etc/chrony/chrony-server.conf /etc/chrony/chrony.conf
     systemctl start chrony.service
 else
     log "Failed to sync time with external NTP source. Will not become an NTP server."
-    # Revert to the default (effectively off, as one-shot disables it) config
     systemctl stop chrony.service
-    cp /etc/chrony/chrony-default.conf /etc/chrony/chrony.conf
-    # We do NOT start chrony here, let the one-shot handle it if needed later
+    cp /etc/chrony/chrony-client.conf /etc/chrony/chrony.conf
+    systemctl start chrony.service
+
+    # We will continue as a data gateway, but not a time source.
 fi
 
 # --- 2. Become an IPv6 Data Gateway ---
@@ -64,12 +56,8 @@ batctl gw_mode server
 
 # --- 3. Announce Changes to Mesh ---
 # Trigger the manager to immediately publish the new gateway status.
-# The manager script will correctly report whether this node IS_NTP_SERVER based
-# on whether chrony is running the server config (which only happens on success).
+# The manager script will correctly report whether this node is an NTP server or not.
 log "Triggering mesh-node-manager to publish new status..."
-# Use restart if the manager needs to pick up the chrony server status immediately,
-# otherwise, a reload or signal might suffice if the manager polls periodically.
-# For simplicity and immediate effect, restart is used here.
 systemctl restart mesh-node-manager.service
 
 log "Promotion to gateway complete."
