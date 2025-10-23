@@ -403,6 +403,12 @@ main() {
 	# Ensure the MulticastDNS setting is set to 'no'
 	sed -i 's/#MulticastDNS=.*/MulticastDNS=no/' /etc/systemd/resolved.conf
 
+	# Started getting panics with the MM kernel, adding this while debugging
+	cat <<- EOF > /etc/sysctl.d/90-kernelpanic-reboot.conf
+		kernel.panic = 10
+		kernel.panic_on_oops = 1
+	EOF
+
 
 	#make mumble server ini changes
 	sed -i '/ice="tcp -h 127.0.0.1 -p 6502"/s/^#//g' /etc/mumble-server.ini
