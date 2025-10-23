@@ -76,7 +76,7 @@ main() {
 	apt install -y ipcalc nmap lshw tcpdump net-tools nftables wireless-tools iperf3\
 	  \radvd bridge-utils firmware-mediatek libnss-mdns syncthing networkd-dispatcher\
 	  avahi-daemon avahi-utils libgps-dev libcap-dev mumble-server screen \
-	  python3-protobuf > /dev/null 2>&1
+	  python3-protobuf chrony > /dev/null 2>&1
 	echo "Done"
 
 	echo "Disabling APT timers for automatic updates..."
@@ -292,19 +292,79 @@ main() {
 	systemctl enable radvd
 
 
+	cat <<- EOF > /etc/systemd/system/one-shot-time-sync.service
+		[Unit]
+		Description=One-Shot Mesh Time Synchronization
+		# This must run after the mesh is fully up and the manager has started.
+		After=mesh-node-manager.service
+		Wants=mesh-node-manager.service
+
+		[Service]
+		Type=oneshot
+		ExecStart=/usr/local/bin/one-shot-time-sync.sh
+
+		[Install]
+		WantedBy=multi-user.target
+	EOF
+	cp /root/one-shot-time-sync.sh /usr/local/bin/
+	chmod +x /usr/local/bin/one-shot-time-sync.sh
+	systemctl enable one-shot-time-sync.service
+
+	# Config for the active gateway acting as a mesh NTP server
+	cat <<- EOF > /etc/chrony/chrony-server.conf
+		# Use public NTP servers from the internet.
+		pool pool.ntp.org iburst
+		driftfile /var/lib/chrony/chrony.drift
+		makestep 1.0 3
+		# Allow clients from our private mesh prefix.
+		allow fd5a:1<0xC2><0xB6><0xC2><0xB6>::/64
+		# Serve time even if internet connection is lost.
+		local stratum 10
+	EOF
+
+	# Config used ONLY to test external NTP connectivity
+	cat <<- EOF > /etc/chrony/chrony-test.conf
+		# Use public NTP servers from the internet.
+		pool pool.ntp.org iburst
+		driftfile /var/lib/chrony/chrony.drift
+		makestep 1.0 3
+		# Do NOT allow any clients - this is just a test config.
+		deny all
+	EOF
+
+	# Set the default configuration to be a client
+	echo "Setting default NTP mode to offline..."
+	cat <<- EOF > /etc/chrony-default.conf
+		# This configuration file makes chronyd start but remain offline
+		# until explicitly told to sync via chronyc.
+		driftfile /var/lib/chrony/chrony.drift
+		makestep 1.0 3
+		offline
+		deny all
+	EOF
+	cp /etc/chrony-default.conf /etc/chrony.conf
+	systemctl enable chrony.service
 
 	echo "Configuring Avahi"
 	# Set avahi to wait for the network to be up
 	mkdir -p /etc/systemd/system/avahi-daemon.service.d/
 	cat <<- EOF > /etc/systemd/system/avahi-daemon.service.d/override.conf
 		[Unit]
-		Wants=network-online.target
-		After=network-online.target radvd.service
+		# Only require the specific interface Avahi binds to (br0) to be up
+		Requires=sys-subsystem-net-devices-br0.device
+		After=sys-subsystem-net-devices-br0.device radvd.service
+		# Explicitly remove default DBus dependency if present in main service file
+		Requires=
+		Requires=sys-subsystem-net-devices-br0.device
+
+		[Service]
+		# Ensure systemd doesn't try to use DBus to start Avahi
+		BusName=
 	EOF
 	# Publish host names but not local addresses via avahi, and only the bridge address
 	sed -i 's/publish-workstation=no/publish-workstation=yes/g' /etc/avahi/avahi-daemon.conf
 	sed -i 's/#allow-interfaces=eth0/allow-interfaces=br0/g' /etc/avahi/avahi-daemon.conf
-	sed -i 's/#enable-dbus=yes/enable-dbus=no/g' /etc/avahi/avahi-daemon.conf
+	#sed -i 's/#enable-dbus=yes/enable-dbus=no/g' /etc/avahi/avahi-daemon.conf
 	# Advertise ssh
 	cat <<- EOF > /etc/avahi/services/ssh.service
 		<?xml version="1.0" standalone='no'?>

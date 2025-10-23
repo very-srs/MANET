@@ -1,80 +1,76 @@
 #!/bin/bash
-# /etc/networkd-dispatcher/routable.d/50-gateway-enable
-# Triggers when end0 becomes routable
+#
+# This script is triggered when an interface becomes "routable".
+# It promotes the node to a B.A.T.M.A.N. gateway and, if it can
+# successfully sync its own time, it also becomes an NTP server.
+#
 
+IFACE="end0" # Define the Ethernet interface name here
+GATEWAY_STATE_FILE="/var/run/mesh-gateway.state"
 
-INTERFACE="end0"
-LOGFILE="/var/log/gateway-mode.log"
-
-# Only act on the specific interface
-if [ "$IFACE" != "$INTERFACE" ]; then
-    exit 0
-fi
-
-# Logging function
 log() {
-    echo "$(date '+%Y-%m-%d %H:%M:%S') [ENABLE] - $1" >> "$LOGFILE"
+    echo "[$(date +'%Y-%m-%d %H:%M:%S')] - GATEWAY-UP: $1" | systemd-cat -t mesh-gateway
 }
 
-# Check for internet connectivity
-check_internet() {
-    for host in 8.8.8.8 1.1.1.1 ; do
-        if ping -c 2 -W 3 -I "$INTERFACE" "$host" &>/dev/null; then
-            return 0
-        fi
-    done
-    return 1
-}
-
-log "Interface $IFACE became routable"
-
-# Verify internet connectivity before enabling gateway mode
-if ! check_internet; then
-    log "Interface is routable but internet is not reachable, not enabling gateway mode"
+# --- Initial Checks ---
+# Exit if the event is not for our specific Ethernet interface
+if [ "$1" != "$IFACE" ]; then
+    exit 0
+fi
+# Exit if we are already a gateway (prevents re-running)
+if [ -f "$GATEWAY_STATE_FILE" ]; then
+    exit 0
+fi
+# Verify true internet access before proceeding
+if ! ping -c 3 -I "$IFACE" 8.8.8.8 > /dev/null 2>&1; then
+    log "Interface $IFACE is routable but has no internet access. Not promoting."
     exit 0
 fi
 
-log "Internet connectivity confirmed, enabling gateway mode"
+log "Internet detected on $IFACE. Promoting to mesh gateway..."
+touch "$GATEWAY_STATE_FILE"
 
-# Copy gateway radvd configuration
-if cp /etc/radvd-gateway.conf /etc/radvd.conf; then
-    log "Copied radvd-gateway.conf to radvd.conf"
+# --- 1. Attempt to Become an NTP Server ---
+log "Attempting to sync time with external NTP source..."
+NTP_SUCCESS=false
+# Load the test configuration temporarily
+cp /etc/chrony/chrony-test.conf /etc/chrony/chrony.conf
+# Restart chrony with the test config (needed for 'burst' to target external)
+systemctl restart chrony.service
+sleep 2 # Give chrony a moment to start
+
+# The 'chronyc burst' command will exit with a non-zero status if it fails to sync.
+# Use timeout to prevent hanging indefinitely if external NTP is blocked/unreachable
+if timeout 30 chronyc -a 'burst 4/4'; then
+    log "Time sync successful. Promoting to mesh NTP server."
+    NTP_SUCCESS=true
+    # Stop the test service, activate the proper server config, and start it.
+    systemctl stop chrony.service
+    cp /etc/chrony/chrony-server.conf /etc/chrony/chrony.conf
+    systemctl start chrony.service
 else
-    log "ERROR: Failed to copy radvd-gateway.conf"
-    exit 1
+    log "Failed to sync time with external NTP source. Will not become an NTP server."
+    # Revert to the default (effectively off, as one-shot disables it) config
+    systemctl stop chrony.service
+    cp /etc/chrony/chrony-default.conf /etc/chrony/chrony.conf
+    # We do NOT start chrony here, let the one-shot handle it if needed later
 fi
 
-# Restart radvd
-if killall radvd || systemctl start radvd; then
-    log "Restarted radvd service"
-else
-    log "ERROR: Failed to restart radvd"
-    exit 1
-fi
+# --- 2. Become an IPv6 Data Gateway ---
+log "Enabling IPv6 gateway mode..."
+cp /etc/radvd-gateway.conf /etc/radvd.conf
+systemctl restart radvd
+batctl gw_mode server
 
-# Enable batman-adv gateway mode
-if batctl gw_mode server; then
-    log "Set batctl gateway mode to server"
-else
-    log "ERROR: Failed to set batctl gateway mode"
-    exit 1
-fi
+# --- 3. Announce Changes to Mesh ---
+# Trigger the manager to immediately publish the new gateway status.
+# The manager script will correctly report whether this node IS_NTP_SERVER based
+# on whether chrony is running the server config (which only happens on success).
+log "Triggering mesh-node-manager to publish new status..."
+# Use restart if the manager needs to pick up the chrony server status immediately,
+# otherwise, a reload or signal might suffice if the manager polls periodically.
+# For simplicity and immediate effect, restart is used here.
+systemctl restart mesh-node-manager.service
 
-# Get IPv4 address of end0
-IPV4_ADDR=$(ip -4 addr show "$INTERFACE" | grep -oP '(?<=inet\s)\d+(\.\d+){3}')
-
-if [ -n "$IPV4_ADDR" ]; then
-    # Announce gateway via alfred
-    if echo -n "$IPV4_ADDR" | alfred -s 68; then
-        log "Announced IPv4 gateway address $IPV4_ADDR via alfred"
-    else
-        log "ERROR: Failed to announce gateway via alfred"
-        exit 1
-    fi
-else
-    log "ERROR: Could not determine IPv4 address for $INTERFACE"
-    exit 1
-fi
-
-log "Gateway mode enabled successfully"
+log "Promotion to gateway complete."
 

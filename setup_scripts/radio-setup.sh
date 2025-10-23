@@ -112,6 +112,7 @@ for WLAN in `networkctl | awk '/wlan/ {print $2}'`; do
 		    key_mgmt=SAE
 		    psk="$KEY"
 		    ieee80211w=2
+		    mesh_fwding=0
 		}
 	EOF
 
@@ -277,7 +278,7 @@ cat <<- EOF > /etc/systemd/system/alfred.service
 	Type=simple
 	ExecStartPre=/bin/bash -c 'for i in {1..20}; do if ip -6 addr show dev bat0 | grep "inet6 fe80::" | grep -qv "tentative"; then exit 0; fi; sleep 1; done; echo "bat0 link-local IPv6 address not ready" >&2; exit 1'
 	# Add -m to run alfred in master mode, allowing it to accept client data
-	ExecStart=/usr/sbin/alfred -m -i bat0 -f
+	ExecStart=/usr/sbin/alfred -m -i br0 -f
 	UMask=0000
 	Restart=always
 	RestartSec=10
@@ -289,6 +290,7 @@ systemctl enable alfred.service
 
 # This script handles IPv4 addressing and node status gossip via alfred
 cp /root/node-manager.sh /usr/local/bin/
+chmod +x /usr/local/bin/node-manager.sh
 cat <<- EOF > /etc/systemd/system/node-manager.service
 	[Unit]
 	Description=Mesh Node Status Manager and IPv4 Coordinator
@@ -298,7 +300,7 @@ cat <<- EOF > /etc/systemd/system/node-manager.service
 
 	[Service]
 	Type=simple
-	ExecStart=/usr/local/bin/mesh-node-manager.sh
+	ExecStart=/usr/local/bin/node-manager.sh
 	Restart=on-failure
 	RestartSec=15
 
@@ -339,49 +341,8 @@ cp /root/networkd-dispatcher/degraded /etc/networkd-dispatcher/degraded.d/50-gat
 cp /root/networkd-dispatcher/routable /etc/networkd-dispatcher/routable.d/50-gateway-enable
 chmod -R 755 /etc/networkd-dispatcher
 
-cat <<- EOF > /usr/local/bin/route-manager.sh
-	#!/bin/bash
-	#
-	# route-manager.sh: A persistent service to manage the default internet route
-	# based on B.A.T.M.A.N.-adv gateway selection for both IPv4 and IPv6.
-	#
-
-	log() {
-	    echo "[$(date +'%Y-%m-%d %H:%M:%S')] - $1"
-	}
-
-	update_default_route() {
-	    log "Checking gateway status..."
-	    # Check if ANY gateway is selected by batctl
-	    if batctl gwl -H | grep -q "=>"; then
-	        log "Gateway found. Ensuring default routes point to bat0."
-	        ip route replace default dev bat0
-	        ip -6 route replace default dev bat0
-	    else
-	        log "No gateway available. Removing default routes."
-	        ip route del default dev bat0 2>/dev/null
-	        ip -6 route del default dev bat0 2>/dev/null
-	    fi
-	}
-
-
-	# --- Main Loop ---
-	log "Starting Route Manager."
-	# Perform an initial check on startup
-	update_default_route
-
-	# Continuously monitor for events from batctl's kernel uevent interface
-	# The `read -t 60` provides a 60-second timeout, ensuring the script
-	# runs a safety check at least once a minute even if no events are received.
-	batctl monitor | while read -t 60 event; do
-
-	    # Check if the read timed out (exit code > 128) or if a GATEWAY event was received
-	    if [[ $? -gt 128 || "$event" == *"GATEWAY"* ]]; then
-	        update_default_route
-	    fi
-	done
-EOF
-chmod +x /usr/local/route-manager.sh
+cp /root/route-manager.sh /usr/local/bin/
+chmod +x /usr/local/bin/route-manager.sh
 
 cat <<- EOF > /etc/systemd/system/route-manager.service
 	[Unit]
@@ -422,6 +383,8 @@ for WLAN in `networkctl | awk '/wlan/ {print $2}'`; do
 		sed -i '/<options>/a <globalAnnounceEnabled>false</globalAnnounceEnabled>\n<relaysEnabled>false</relaysEnabled>' "$SYNCTHING_CONFIG"
 		# replace the gui block to set the address
 		sed -i 's|<gui enabled="true" tls="false" debugging="false">.*</gui>|<gui enabled="true" tls="false" debugging="false">\n        <address>127.0.0.1:8384</address>\n    </gui>|' "$SYNCTHING_CONFIG"
+		#make it clear we're done
+		echo " -- CONFIGURED -- " >> /etc/issue
 		reboot
 	fi
 done
