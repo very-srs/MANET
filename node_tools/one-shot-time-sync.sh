@@ -110,10 +110,12 @@ done < "$REGISTRY_STATE_FILE"
 
 # --- Sync Time and Shut Down ---
 if [ -n "$BEST_SERVER_HOSTNAME" ]; then
-    log "Best NTP server found from this node's perspective: ${BEST_SERVER_HOSTNAME} (MAC: ${BEST_SERVER_MAC}) with local TQ ${HIGHEST_LOCAL_TQ}."
+    log "Best NTP server found from this node's perspective: ${BEST_SERVER_HOSTNAME}\
+     (MAC: ${BEST_SERVER_MAC}) with local TQ ${HIGHEST_LOCAL_TQ}."
 
-    # Resolve the hostname to an IPv6 address using Avahi
-    BEST_SERVER_IP=$(avahi-resolve-host-name -6 "${BEST_SERVER_HOSTNAME}.local" | awk '{print $2}')
+    # Resolve the hostname to an IPv6 address
+	BEST_SERVER_IP=$(resolvectl query --type=AAAA "${BEST_SERVER_HOSTNAME}.local" \
+  | awk '/^.*: .*:/ {print $2; exit}')
 
     if [ -n "$BEST_SERVER_IP" ]; then
         log "Syncing time with ${BEST_SERVER_IP}..."
@@ -128,7 +130,7 @@ if [ -n "$BEST_SERVER_HOSTNAME" ]; then
             log "Time sync command failed."
         fi
     else
-        log "Could not resolve hostname ${BEST_SERVER_HOSTNAME}.local via Avahi."
+        log "Could not resolve hostname ${BEST_SERVER_HOSTNAME}.local"
     fi
 else
     log "No NTP servers found on the mesh."

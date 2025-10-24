@@ -75,7 +75,7 @@ main() {
 	# Install packages for this system
 	apt install -y ipcalc nmap lshw tcpdump net-tools nftables wireless-tools iperf3\
 	  \radvd bridge-utils firmware-mediatek libnss-mdns syncthing networkd-dispatcher\
-	  avahi-daemon avahi-utils libgps-dev libcap-dev mumble-server screen \
+	  libgps-dev libcap-dev mumble-server screen \
 	  python3-protobuf chrony > /dev/null 2>&1
 	echo "Done"
 
@@ -133,9 +133,36 @@ main() {
 	echo "Set wifi regulatory domain to $REG"
 
 	#turn on packet forwarding
-	cat <<- EOF > /etc/sysctl.d/99-forwarding.conf
+	cat <<- EOF > /etc/sysctl.d/99-mesh.conf
+		# IPv4 forwarding for mesh
 		net.ipv4.ip_forward=1
+		net.ipv4.conf.all.forwarding=1
+		net.ipv4.conf.default.forwarding=1
+
+		# IPv4 multicast forwarding
+		net.ipv4.conf.all.mc_forwarding=1
+		net.ipv4.conf.default.mc_forwarding=1
+		net.ipv4.conf.bat0.mc_forwarding=1
+		net.ipv4.conf.br0.mc_forwarding=1
+
+		# IPv6 forwarding for mesh
 		net.ipv6.conf.all.forwarding=1
+		net.ipv6.conf.default.forwarding=1
+
+		# IPv6 multicast forwarding
+		net.ipv6.conf.all.mc_forwarding=1
+		net.ipv6.conf.default.mc_forwarding=1
+		net.ipv6.conf.bat0.mc_forwarding=1
+		net.ipv6.conf.br0.mc_forwarding=1
+
+		# Increase multicast route cache for large mesh
+		net.ipv4.route.max_size=16384
+		net.ipv6.route.max_size=16384
+
+		# Optional: Increase ARP cache for many nodes
+		net.ipv4.neigh.default.gc_thresh1=1024
+		net.ipv4.neigh.default.gc_thresh2=2048
+		net.ipv4.neigh.default.gc_thresh3=4096
 	EOF
 
 
@@ -176,6 +203,16 @@ main() {
 
 		[Link]
 		RequiredForOnline=no
+	EOF
+
+	#stop other interfaces from doing multicast dns
+	cat <<- EOF > /etc/systemd/network/90-default-no-mdns.network
+		[Match]
+		Name=!br0
+
+		[Network]
+		LLMNR=no
+		MulticastDNS=no
 	EOF
 
 	#set ethernet links for DHCP, currently only used for setup
@@ -220,6 +257,7 @@ main() {
 
 		        # Accept ALL traffic coming from the trusted mesh interface.
 		        iifname "br0" accept
+		        iifname "bat0" accept
 
 		        iifname "end0" tcp dport 22 accept
 		    }
@@ -250,7 +288,15 @@ main() {
 	EOF
 
 	echo "Setting up router advertisements"
-	#configure router advertisements for slaac on ipv6
+	# Configure router advertisements for slaac on ipv6
+	# The announced ipv6 prefix with be where all the nodes
+	# auto configure their addresses to be local to each other
+	#
+	# The to files are for when the node is a client
+	# ( AdvDefaultLifetime 0 ) vs when it advertises itself as
+	# a gateway ( AdvDefaultLifetime 600 ).  A networkd-dispatcher
+	# script does the swap
+
 	cat <<-EOF > /etc/radvd-mesh.conf
 		interface br0
 		{
@@ -275,10 +321,11 @@ main() {
 		    };
 		};
 	EOF
+
 	# Default to mesh config
 	cp /etc/radvd-mesh.conf /etc/radvd.conf
 
-	#make radvd wait for bat0 to be up
+	# make radvd wait for bat0 to be up
 	mkdir -p /etc/systemd/system/radvd.service.d/
 	cat <<- EOF > /etc/systemd/system/radvd.service.d/override.conf
 		[Unit]
@@ -292,12 +339,17 @@ main() {
 	systemctl enable radvd
 
 
+	# Attempt to sync network time at boot
+	# Uses data from Alfred to look for any NTP servers (a gw that has
+	# sync'd its time from the internet) on the mesh.  It picks the
+	# one with the best transmission quality, does a time sync with it,
+	# and then disables chrony to prevent excess network traffic
 	cat <<- EOF > /etc/systemd/system/one-shot-time-sync.service
 		[Unit]
 		Description=One-Shot Mesh Time Synchronization
 		# This must run after the mesh is fully up and the manager has started.
-		After=mesh-node-manager.service
-		Wants=mesh-node-manager.service
+		After=node-manager.service
+		Wants=node-manager.service
 
 		[Service]
 		Type=oneshot
@@ -308,7 +360,8 @@ main() {
 	EOF
 	cp /root/one-shot-time-sync.sh /usr/local/bin/
 	chmod +x /usr/local/bin/one-shot-time-sync.sh
-	systemctl enable one-shot-time-sync.service
+# this is currently not working
+#	systemctl enable one-shot-time-sync.service
 
 	# Config for the active gateway acting as a mesh NTP server
 	cat <<- EOF > /etc/chrony/chrony-server.conf
@@ -332,7 +385,7 @@ main() {
 		deny all
 	EOF
 
-	# Set the default configuration to be a client
+	# Set the default configuration to be a client.  Allows chrony to start
 	echo "Setting default NTP mode to offline..."
 	cat <<- EOF > /etc/chrony-default.conf
 		# This configuration file makes chronyd start but remain offline
@@ -345,50 +398,17 @@ main() {
 	cp /etc/chrony-default.conf /etc/chrony.conf
 	systemctl enable chrony.service
 
-	echo "Configuring Avahi"
-	# Set avahi to wait for the network to be up
-	mkdir -p /etc/systemd/system/avahi-daemon.service.d/
-	cat <<- EOF > /etc/systemd/system/avahi-daemon.service.d/override.conf
-		[Unit]
-		# Only require the specific interface Avahi binds to (br0) to be up
-		Requires=sys-subsystem-net-devices-br0.device
-		After=sys-subsystem-net-devices-br0.device radvd.service
-		# Explicitly remove default DBus dependency if present in main service file
-		Requires=
-		Requires=sys-subsystem-net-devices-br0.device
-
-		[Service]
-		# Ensure systemd doesn't try to use DBus to start Avahi
-		BusName=
-	EOF
-	# Publish host names but not local addresses via avahi, and only the bridge address
-	sed -i 's/publish-workstation=no/publish-workstation=yes/g' /etc/avahi/avahi-daemon.conf
-	sed -i 's/#allow-interfaces=eth0/allow-interfaces=br0/g' /etc/avahi/avahi-daemon.conf
-	#sed -i 's/#enable-dbus=yes/enable-dbus=no/g' /etc/avahi/avahi-daemon.conf
-	# Advertise ssh
-	cat <<- EOF > /etc/avahi/services/ssh.service
-		<?xml version="1.0" standalone='no'?>
-		<!DOCTYPE service-group SYSTEM "avahi-service.dtd">
-		<service-group>
-		  <name replace-wildcards="yes">%h</name>
-		  <service>
-		    <type>_ssh._tcp</type>
-		    <port>22</port>
-		  </service>
-		</service-group>
-	EOF
-
-	# Set br0 to be the wait online interface
+	# Set br0 to be the wait online interface, avoids boot delay
 	mkdir -p /etc/systemd/system/systemd-networkd-wait-online.service.d/
 	cat <<- EOF > /etc/systemd/system/systemd-networkd-wait-online.service.d/override.conf
 	    [Service]
 	    ExecStart=
 	    ExecStart=/lib/systemd/systemd-networkd-wait-online --interface=br0
 	EOF
-	# But let's try not using it, it was hanging at first reboot
+	# But let's try not using it
 	systemctl disable systemd-networkd-wait-online.service
 
-	# Disable netplan
+	# Disable netplan, networkd will do the networking
 	rm -f /etc/netplan/*
 	cat <<- EOF > /etc/netplan/99-disable-netplan.yaml
 		# This file tells Netplan to do nothing.
@@ -398,10 +418,13 @@ main() {
 	EOF
 	echo "Netplan disabled, will use networkd instead"
 
-	echo "Disabling mDNS in systemd-resolved"
-
-	# Ensure the MulticastDNS setting is set to 'no'
-	sed -i 's/#MulticastDNS=.*/MulticastDNS=no/' /etc/systemd/resolved.conf
+	cat <<- EOF > /etc/systemd/resolved.conf
+		[Resolve]
+		LLMNR=no
+		MulticastDNS=no
+		DNSStubListener=yes
+		Cache=yes
+	EOF
 
 	# Started getting panics with the MM kernel, adding this while debugging
 	cat <<- EOF > /etc/sysctl.d/90-kernelpanic-reboot.conf
