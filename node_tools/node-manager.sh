@@ -6,25 +6,29 @@
 # This script runs as a persistent service to:
 # 1. Gather various node metrics (hostname, TQ, gateway status, etc.).
 # 2. Use encoder.py to create a Protobuf message.
-# 3. Announce this status to the mesh via alfred, but only on change or
-#    periodically to keep the data fresh.
-# 4. Manage a decentralized, conflict-free IPv4 address for this node.
+# 3. Announce this status to the mesh via alfred.
+# 4. Decode all peer statuses and write them to the global state file
+#    at /var/run/mesh_node_registry for other services to use.
+# 5. Manage a decentralized, conflict-free IPv4 address for this node,
+#    using the registry file for conflict detection.
 # ==============================================================================
 
-# Source the configuration file if it exists, from radio-setup.sh
+# Source the configuration file if it exists
 if [ -f /etc/mesh_ipv4.conf ]; then
     source /etc/mesh_ipv4.conf
 fi
 
-# Set defaults in case the config file doesn't exist
+# Set defaults
 IPV4_NETWORK=${IPV4_NETWORK:-"10.30.1.0/24"}
 
 ### --- Configuration ---
 CONTROL_IFACE="br0"
-ALFRED_DATA_TYPE=68 # Data type for the full NodeInfo protobuf message
+ALFRED_DATA_TYPE=68
 MY_MAC=$(cat "/sys/class/net/${CONTROL_IFACE}/address")
-DEFENSE_INTERVAL=300 # How often to re-publish status to prevent timeout (5 minutes)
-MONITOR_INTERVAL=20   # How often to wake up and check for local changes
+DEFENSE_INTERVAL=300 # Republish status every 5 minutes
+MONITOR_INTERVAL=20  # How often the main loop runs (seconds)
+REGISTRY_STATE_FILE="/var/run/mesh_node_registry" # Global state file
+BATCTL_PATH="/usr/sbin/batctl" # Explicit path
 
 ### --- State Variables ---
 IPV4_STATE="UNCONFIGURED"
@@ -34,27 +38,11 @@ LAST_PUBLISH_TIME=0
 
 # --- Helper Functions ---
 log() {
-    echo "[$(date +'%Y-%m-%d %H:%M:%S')] - $1"
+    echo "[$(date +'%Y-%m-%d %H:%M:%S')] - NODE-MGR: $1"
 }
 
 get_random_ip_from_cidr() {
-    local CIDR="$1"
-    ip_to_int() {
-        local a b c d; IFS=. read -r a b c d <<<"$1"; echo "$(( (a << 24) + (b << 16) + (c << 8) + d ))"
-    }
-    int_to_ip() {
-        local ip_int=$1; echo "$(( (ip_int >> 24) & 255 )).$(( (ip_int >> 16) & 255 )).$(( (ip_int >> 8) & 255 )).$(( ip_int & 255 ))"
-    }
-    local CALC_OUTPUT; CALC_OUTPUT=$(ipcalc "$CIDR" 2>/dev/null)
-    if [ -z "$CALC_OUTPUT" ]; then echo "Error: Invalid CIDR: $CIDR" >&2; return 1; fi
-    local HOST_MIN=$(echo "$CALC_OUTPUT" | awk '/HostMin/ {print $2}')
-    local HOST_MAX=$(echo "$CALC_OUTPUT" | awk '/HostMax/ {print $2}')
-    if [ -z "$HOST_MIN" ] || [ -z "$HOST_MAX" ]; then echo "Error: ipcalc parsing failed." >&2; return 1; fi
-    local MIN_INT=$(ip_to_int "$HOST_MIN")
-    local MAX_INT=$(ip_to_int "$HOST_MAX")
-    if [ "$MIN_INT" -gt "$MAX_INT" ]; then return 1; elif [ "$MIN_INT" -eq "$MAX_INT" ]; then echo "$HOST_MIN"; return 0; fi
-    local RANDOM_INT=$(shuf -i "${MIN_INT}-${MAX_INT}" -n 1)
-    int_to_ip "$RANDOM_INT"
+    local CIDR="$1"; ip_to_int() { local a b c d; IFS=. read -r a b c d <<<"$1"; echo "$(( (a << 24) + (b << 16) + (c << 8) + d ))"; }; int_to_ip() { local ip_int=$1; echo "$(( (ip_int >> 24) & 255 )).$(( (ip_int >> 16) & 255 )).$(( (ip_int >> 8) & 255 )).$(( ip_int & 255 ))"; }; local CALC_OUTPUT; CALC_OUTPUT=$(ipcalc "$CIDR" 2>/dev/null); if [ -z "$CALC_OUTPUT" ]; then echo "Error: Invalid CIDR: $CIDR" >&2; return 1; fi; local HOST_MIN=$(echo "$CALC_OUTPUT" | awk '/HostMin/ {print $2}'); local HOST_MAX=$(echo "$CALC_OUTPUT" | awk '/HostMax/ {print $2}'); if [ -z "$HOST_MIN" ] || [ -z "$HOST_MAX" ]; then echo "Error: ipcalc parsing failed." >&2; return 1; fi; local MIN_INT=$(ip_to_int "$HOST_MIN"); local MAX_INT=$(ip_to_int "$HOST_MAX"); if [ "$MIN_INT" -gt "$MAX_INT" ]; then return 1; elif [ "$MIN_INT" -eq "$MAX_INT" ]; then echo "$HOST_MIN"; return 0; fi; local RANDOM_INT=$(shuf -i "${MIN_INT}-${MAX_INT}" -n 1); int_to_ip "$RANDOM_INT";
 }
 
 # ==============================================================================
@@ -62,66 +50,116 @@ get_random_ip_from_cidr() {
 # ==============================================================================
 
 log "Starting Mesh Node Manager for ${MY_MAC}."
-
-# Clear any old IPv4 addresses on startup
 ip -4 addr flush dev "$CONTROL_IFACE"
 log "Initial IPv4 address flush on ${CONTROL_IFACE}."
 
 ### --- Main Loop ---
-# This loop runs periodically to check for changes. 
 while true; do
 
-    # --- PUBLISH STATUS ---
-    # Gather all current local metrics
+    # --- 1. GATHER LOCAL METRICS ---
     HOSTNAME=$(hostname)
     SYNCTHING_ID=$(runuser -u radio -- syncthing --device-id 2>/dev/null || echo "")
-	# get the average TQ of the seen nodes
-    TQ_AVG=$(batctl o | awk 'NR>1 {sum+=$3} END {if (NR>1) printf "%.2f", sum/(NR-1); else print 0}')
+    TQ_AVG=$("$BATCTL_PATH" o | awk 'NR>1 {sum+=$3} END {if (NR>1) printf "%.2f", sum/(NR-1); else print 0}')
     IS_GATEWAY_FLAG=""
     [ -f /var/run/mesh-gateway.state ] && IS_GATEWAY_FLAG="--is-internet-gateway"
     IS_NTP_FLAG=""
-    # check for virtual IP of the ntp server being on this node
-    ip addr show dev br0 | grep -q "fd5a:1753:4340:1::123" && IS_NTP_FLAG="--is-ntp-server"
+    # Check if chrony server config is active AND service is running
+    if systemctl is-active --quiet chrony.service && grep -q "allow fd5a" /etc/chrony/chrony.conf; then
+         IS_NTP_FLAG="--is-ntp-server"
+    fi
 
-    # Build the arguments for the encoder
+    # --- 2. ENCODE & PUBLISH OWN STATUS ---
     ENCODER_ARGS=( "--hostname" "$HOSTNAME" "--mac-address" "$MY_MAC" "--tq-average" "$TQ_AVG" "--syncthing-id" "$SYNCTHING_ID" )
     [ "$IPV4_STATE" == "CONFIGURED" ] && ENCODER_ARGS+=("--ipv4-address" "$CURRENT_IPV4")
     [ -n "$IS_GATEWAY_FLAG" ] && ENCODER_ARGS+=("$IS_GATEWAY_FLAG")
     [ -n "$IS_NTP_FLAG" ] && ENCODER_ARGS+=("$IS_NTP_FLAG")
+    # Add other metrics here
 
-    # Generate the current payload
     CURRENT_PAYLOAD=$(/usr/local/bin/encoder.py "${ENCODER_ARGS[@]}")
 
-    # Check if we need to publish
     time_since_publish=$(( $(date +%s) - LAST_PUBLISH_TIME ))
     if [[ "$CURRENT_PAYLOAD" != "$LAST_PUBLISHED_PAYLOAD" || $time_since_publish -gt $DEFENSE_INTERVAL ]]; then
-        log "Change detected or defense timer expired. Publishing status..."
+        log "Change detected or timer expired. Publishing status..."
         if [ -n "$CURRENT_PAYLOAD" ]; then
             echo -n "$CURRENT_PAYLOAD" | alfred -s $ALFRED_DATA_TYPE
             LAST_PUBLISHED_PAYLOAD="$CURRENT_PAYLOAD"
             LAST_PUBLISH_TIME=$(date +%s)
+        else
+             log "Error: Encoder produced empty payload."
         fi
     fi
 
-    # --- 2. DISCOVER PEERS & MANAGE IPV4 ---
-    mapfile -t PEER_PAYLOADS < <(alfred -r $ALFRED_DATA_TYPE | awk '{print $2}')
+    # --- 3. DISCOVER PEERS & BUILD GLOBAL REGISTRY ---
+    mapfile -t PEER_PAYLOADS < <(alfred -r $ALFRED_DATA_TYPE | cut -d' ' -f2-)
+    REGISTRY_TMP=$(mktemp)
 
-    CLAIMED_IPS=()
+    # Add header to the registry file
+    echo "# Mesh Node Registry - Generated $(date)" > "$REGISTRY_TMP"
+    echo "# Sourced by other scripts to get network state." >> "$REGISTRY_TMP"
+    echo "" >> "$REGISTRY_TMP"
+
     for B64_PAYLOAD in "${PEER_PAYLOADS[@]}"; do
-        (
-            eval "$(/usr/local/bin/decoder.py "$B64_PAYLOAD" 2>/dev/null)"
-            if [[ -n "$IPV4_ADDRESS" && -n "$MAC_ADDRESS" ]]; then
-                echo "${IPV4_ADDRESS},${MAC_ADDRESS}"
-            fi
-        )
-    done > /tmp/claimed_ips.txt
+        TRIMMED_PAYLOAD=$(echo "$B64_PAYLOAD" | xargs)
+        if [ -z "$TRIMMED_PAYLOAD" ]; then continue; fi
 
-    mapfile -t CLAIMED_IPS < /tmp/claimed_ips.txt
+        DECODED_DATA=$(/usr/local/bin/decoder.py "$TRIMMED_PAYLOAD" 2>/dev/null)
+        if [ -n "$DECODED_DATA" ]; then
+            # Write specified decoded data to the registry file
+            (
+                eval "$DECODED_DATA"
+                if [[ -n "$MAC_ADDRESS" ]]; then
+                    PREFIX="NODE_$(echo "$MAC_ADDRESS" | tr -d ':')"
+                    echo "${PREFIX}_HOSTNAME='$HOSTNAME'"
+                    echo "${PREFIX}_MAC_ADDRESS='$MAC_ADDRESS'"
+                    echo "${PREFIX}_IPV4_ADDRESS='$IPV4_ADDRESS'"
+                    echo "${PREFIX}_SYNCTHING_ID='$SYNCTHING_ID'"
+                    echo "${PREFIX}_TQ_AVERAGE='$TQ_AVERAGE'"
+                    # Map the python bool 'true'/'false' to bash usable strings
+                    echo "${PREFIX}_IS_GATEWAY='$IS_INTERNET_GATEWAY'"
+                    echo "${PREFIX}_IS_NTP_SERVER='$IS_NTP_SERVER'"
+                    # Add echo lines here for any other fields you want in the registry
+                    echo ""
+                fi
+            ) >> "$REGISTRY_TMP"
+        fi
+    done
+
+    # Replace the old registry with the new one
+    mv "$REGISTRY_TMP" "$REGISTRY_STATE_FILE"
+    chmod 644 "$REGISTRY_STATE_FILE" # Ensure readable
+
+    # --- 4. MANAGE IPV4 ADDRESS (Using the registry file) ---
+    CLAIMED_IPS=()
+    if [ -f "$REGISTRY_STATE_FILE" ]; then
+         # Source the registry in a subshell to avoid polluting the main script
+         # Extract IP,MAC pairs
+         CLAIMED_IPS=($(
+             source "$REGISTRY_STATE_FILE" > /dev/null 2>&1 # Suppress output
+             # List all IPV4_ADDRESS variables, extract IP and MAC prefix
+             compgen -A variable | grep 'NODE_.*_IPV4_ADDRESS' | while read varname; do
+                 ip_val="${!varname}"
+                 mac_prefix="${varname%%_IPV4_ADDRESS}"
+                 mac_var="${mac_prefix}_MAC_ADDRESS"
+                 mac_val="${!mac_var}"
+                 # Output only if both IP and MAC are non-empty
+                 if [[ -n "$ip_val" && -n "$mac_val" ]]; then
+                     echo "$ip_val,$mac_val"
+                 fi
+             done | sort # Sort for consistency
+         ))
+    fi
+
 
     case $IPV4_STATE in
         "UNCONFIGURED")
-            log "State: UNCONFIGURED. Proposing a new IP from ${IPV4_NETWORK}..."
+            log "State: UNCONFIGURED. Proposing IP from ${IPV4_NETWORK}..."
             PROPOSED_IPV4=$(get_random_ip_from_cidr "${IPV4_NETWORK}")
+
+            if [ -z "$PROPOSED_IPV4" ]; then
+                log "Failed to generate IP. Retrying."
+                sleep 5
+                continue
+            fi
 
             CONFLICT=false
             for entry in "${CLAIMED_IPS[@]}"; do
@@ -132,14 +170,13 @@ while true; do
             done
 
             if [ "$CONFLICT" = true ]; then
-                log "Proposed IP ${PROPOSED_IPV4} is already in use. Retrying."
-                sleep 0.5
+                log "Proposed IP ${PROPOSED_IPV4} is in use. Retrying."
             else
                 log "Claiming ${PROPOSED_IPV4}..."
                 ip addr add "${PROPOSED_IPV4}/${IPV4_NETWORK#*/}" dev "$CONTROL_IFACE"
                 CURRENT_IPV4="$PROPOSED_IPV4"
                 IPV4_STATE="CONFIGURED"
-                log "State -> CONFIGURED with ${CURRENT_IPV4}"
+                LAST_PUBLISH_TIME=0 # Trigger immediate publish
             fi
             ;;
 
@@ -159,12 +196,18 @@ while true; do
                     ip addr del "${CURRENT_IPV4}/${IPV4_NETWORK#*/}" dev "$CONTROL_IFACE"
                     CURRENT_IPV4=""
                     IPV4_STATE="UNCONFIGURED"
+                    LAST_PUBLISH_TIME=0 # Trigger immediate publish
                 else
                     log "Won tie-breaker against ${CONFLICTING_MAC}. Defending IP."
+                    LAST_PUBLISH_TIME=0 # Re-publish immediately
                 fi
             fi
             ;;
     esac
 
-    sleep $MONITOR_INTERVAL
+    # --- Wait for next cycle ---
+    sleep "$MONITOR_INTERVAL"
 done
+
+log "mesh-node-manager loop exited unexpectedly. Restarting..."
+exit 1
