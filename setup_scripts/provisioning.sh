@@ -88,9 +88,10 @@ main() {
 	cp /root/batctl /usr/sbin/
 
 	# Add the protobuf tools
-	cp /root/encoder /usr/local/bin/
-	cp /root/decoder /usr/local/bin/
-
+	cp /root/encoder.py /usr/local/bin/
+	cp /root/decoder.py /usr/local/bin/
+    chmod +x /usr/loca/bin/encoder.py
+    chmod +x /usr/loca/bin/decoder.py
 
 
 	# setup rpi config parameters to activate the pcie bus, used by wireless card
