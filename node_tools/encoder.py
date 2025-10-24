@@ -16,7 +16,7 @@ def main():
     # --- Network & Election Metrics (float, bools) ---
     parser.add_argument("--tq-average", type=float, default=0.0, help="Average TQ to other mesh nodes.")
     parser.add_argument("--is-internet-gateway", action="store_true", help="Flag if node has internet.")
-    parser.add_argument("--has-quorum", action="store_true", help="Flag if node is in a majority partition.")
+#    parser.add_argument("--has-quorum", action="store_true", help="Flag if node is in a majority partition.")
 
     # --- Service Status (bools, enum) ---
     parser.add_argument("--is-mumble-server", action="store_true", help="Flag if node is hosting the mumble server.")
@@ -29,10 +29,10 @@ def main():
     parser.add_argument("--cpu-load-average", type=float, default=0.0)
 
     # --- Other ---
-    parser.add_argument("--latitude", type=float, help="GPS Latitude.")
-    parser.add_argument("--longitude", type=float, help="GPS Longitude.")
-    parser.add_argument("--altitude", type=float, help="GPS Altitude.")
-    parser.add_argument("--atak-user", help="ATAK user callsign.")
+#    parser.add_argument("--latitude", type=float, help="GPS Latitude.")
+#    parser.add_argument("--longitude", type=float, help="GPS Longitude.")
+#    parser.add_argument("--altitude", type=float, help="GPS Altitude.")
+#    parser.add_argument("--atak-user", help="ATAK user callsign.")
 
     args = parser.parse_args()
 
@@ -46,17 +46,17 @@ def main():
     node_info.syncthing_id = args.syncthing_id
     node_info.tq_average = args.tq_average
     node_info.is_internet_gateway = args.is_internet_gateway
-    node_info.has_quorum = args.has_quorum
+#    node_info.has_quorum = args.has_quorum
     node_info.is_mumble_server = args.is_mumble_server
     node_info.is_ntp_server = args.is_ntp_server
     node_info.is_tak_server = args.is_tak_server
     node_info.uptime_seconds = args.uptime_seconds
     node_info.battery_percentage = args.battery_percentage
     node_info.cpu_load_average = args.cpu_load_average
-    node_info.location.latitude = args.latitude
-    node_info.location.longitude = args.longitude
-    node_info.location.altitude = args.altitude
-    node_info.atak_user = args.atak_user
+#    node_info.location.latitude = args.latitude
+#    node_info.location.longitude = args.longitude
+#    node_info.location.altitude = args.altitude
+#    node_info.atak_user = args.atak_user
 
     # Serialize the message to a binary string
     serialized_message = node_info.SerializeToString()

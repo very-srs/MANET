@@ -24,7 +24,7 @@ CONTROL_IFACE="br0"
 ALFRED_DATA_TYPE=68 # Data type for the full NodeInfo protobuf message
 MY_MAC=$(cat "/sys/class/net/${CONTROL_IFACE}/address")
 DEFENSE_INTERVAL=300 # How often to re-publish status to prevent timeout (5 minutes)
-MONITOR_TIMEOUT=20   # How often to wake up and check for local changes
+MONITOR_INTERVAL=20   # How often to wake up and check for local changes
 
 ### --- State Variables ---
 IPV4_STATE="UNCONFIGURED"
@@ -67,15 +67,15 @@ log "Starting Mesh Node Manager for ${MY_MAC}."
 ip -4 addr flush dev "$CONTROL_IFACE"
 log "Initial IPv4 address flush on ${CONTROL_IFACE}."
 
-### --- Main Event Loop ---
-# This loop is driven by events from `batctl monitor` and a periodic timeout.
-batctl monitor | while read -t $MONITOR_TIMEOUT event; do
+### --- Main Loop ---
+# This loop runs periodically to check for changes. 
+while true; do
 
     # --- PUBLISH STATUS ---
     # Gather all current local metrics
     HOSTNAME=$(hostname)
     SYNCTHING_ID=$(runuser -u radio -- syncthing --device-id 2>/dev/null || echo "")
-	# get the average TQ of the seen modes
+	# get the average TQ of the seen nodes
     TQ_AVG=$(batctl o | awk 'NR>1 {sum+=$3} END {if (NR>1) printf "%.2f", sum/(NR-1); else print 0}')
     IS_GATEWAY_FLAG=""
     [ -f /var/run/mesh-gateway.state ] && IS_GATEWAY_FLAG="--is-internet-gateway"
@@ -165,5 +165,6 @@ batctl monitor | while read -t $MONITOR_TIMEOUT event; do
             fi
             ;;
     esac
-done
 
+    sleep $MONITOR_INTERVAL
+done
