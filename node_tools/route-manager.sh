@@ -30,7 +30,7 @@ log "Starting Route Manager (Event-Driven Mode)."
 update_default_route
 
 # Continuously listen for events from batctl's kernel interface
-/usr/local/sbin/batctl event | while read -t $EVENT_TIMEOUT event_line; do
+/usr/sbin/batctl event | while read -t $EVENT_TIMEOUT event_line; do
 
     # Check if the read timed out (exit code > 128)
     # OR if the event line contains a gateway change notification.
