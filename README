@@ -1,130 +1,66 @@
-## Overview
+Overview
 
-This document outlines the architecture for a portable, self-configuring, and
+This release is the basis for a portable, self-configuring, and
 resilient network node designed for infrastructure-free team communications.
-The system uses a BATMAN-ADV mesh network over dual-band Wi-Fi.
+The system uses a B.A.T.M.A.N.-adv mesh network over dual-band Wi-Fi (802.11ax).
 
-On top of this, a dynamic election protocol designates one node to run a
-central Mumble (Murmur) voice server, providing Push-to-Talk (PTT)
-capabilities for clients.
+The mesh currently provides the following services:
 
-The design creates a single, unified network segment that includes all mesh
-participants and locally tethered devices, with services and mesh members
-made easily discoverable through Avahi.
+Internet gateway - any node connected to the internet will become a possible
+gateway node.  Multiple gateways may be plugged in and the mesh nodes will
+select the one they can reach with the best link quality.
 
-## Architecture Diagram
+Decentralized IPv4 addressing provides routable private IPs without DHCP in a
+user defined CIDR range or any size.
 
-The following diagram illustrates the relationship between the various
-network interfaces involed on the mesh node:
+The design creates a single, unified network segment. Node discovery uses
+systemd-resolved (mDNS), and inter-node coordination relies heavily on alfred
+with Protobuf messaging.
 
-                                 [ Phone w/ ATAK client ]
-                                                 |
-                                                 | (USB Tethering)
-     +-------------------------------------------|------------+
-     | Mesh node, Armbian Bookworm               |            |
-     |                                           | usb0       |
-     |                                           |            |
-     |                                           |            |
-     |                 +---------br0 (Bridge)----+            |
-     |                 |  (Node's Main IPv6 Address)          |
-     |                 |  (Node's Main IPv4 Address           |
-     |                 |                                      |
-     |      bat0 (BATMAN-ADV)                                 |
-     |          |                                             |
-     |  +-------+--------+                                    |
-     |  |                |                                    |
-     | wlan0 (2.4GHz)   wlan1 (5GHz)                          |
-     +--|----------------|------------------------------------+
-        |                |
-      <----     Mesh   ----> To Other Nodes
 
-## Key Components
+Key Components
 
-### I. Hardware Interfaces
+I. Hardware Interfaces
 
-*   Dual-Band Wi-Fi (`wlan0`, `wlan1`): Each node uses two 802.11ax
-    interfaces, one on 2.4 GHz and one on 5 GHz. This provides both the
-    long-range capabilities of 2.4 GHz and the high-speed, low-interference
-    benefits of 5 GHz. Both are configured for mesh (ad-hoc) mode.
+Dual-Band Wi-Fi (wlan0, wlan1): Two 802.11ax interfaces (2.4/5 GHz) configured
+for mesh mode provide redundant, high-performance links.  If a wireless
+network card with a single interface is used, it will default to one 2.4 ghz
+link without any changes being needed.
 
-*   USB Ethernet (`usb0`): This interface provides a direct, wired link
-    to a device, typically a phone running a client application like ATAK.
-    This allows the phone to join the mesh network as a first-class citizen.
-*** USB Ethernet is currently a work in progress
+Ethernet (end0): Used for initial setup and internet gateway access.  
 
-### II. Virtual Interfaces & Configuration
+II. Virtual Interfaces & Configuration
 
-*   `bat0` (The Mesh Interface): Both `wlan0` and `wlan1` are enslaved
-    to the `bat0` virtual interface. The BATMAN-ADV protocol runs on `bat0`
-    and treats both Wi-Fi links as potential paths. It uses its Transmitter
-    Quality (TQ) metric to intelligently route traffic over the best
-    available link, automatically balancing range and performance.
+bat0 (Mesh Interface): wlan0 and wlan1 are enslaved via a 
+systemd service (batman-if-setup.sh). B.A.T.M.A.N.-adv runs on bat0,
+using TQ metrics to optimize routing over the best Wi-Fi path.
 
-*   `br0` (The Unified Bridge): The `bat0` interface and the `usb0`
-    interface are added as members to the `br0` bridge. This creates a
-    single, unified Layer 2 network. Any device on the mesh can communicate
-    seamlessly with the phone on `usb0`. The node's primary IPv6 address 
-    (acquired via SLAAC from a common router advertisement prefix) is
-    assigned to `br0`.
+br0 (Unified Bridge): bat0 is bridged into br0. 
 
-*** When a HaLow device can be made to appear as a normal network interface
-	in Linux, that device is simply configured to mesh with its HaLow peers
-	and the HaLo interface is added to this bridge
+IPv6: br0 receives its primary address via SLAAC from radvd
+advertisements (fd5a:1753:4340:1::/64).
 
-### III. Functionality
+IPv4: br0 receives a routable private address assigned by the decentralized 
+node-manager.sh service.
 
-*   Seamless Networking: The bridge ensures that all devices, whether
-    on the mesh or tethered via USB, are part of the same logical network,
-    sharing the same IPv6 prefix.
+III. Core Functionality
 
-*   The IPv6 zeroconf mesh is used to communicate node IP information to
-    facilitate the selection of routable, private IPv4 addresses.  This
-    avoids both the need for a central DHCP server, static assignments,
-    or link local addresses.
+IPv6 Autoconfiguration: radvd provides SLAAC configuration for the
+ULA prefix fd5a:1753:4340:1::/64. Gateway nodes dynamically adjust
+advertisements using networkd-dispatcher.
 
-*   Service Discovery: Avahi runs on each node, advertising services
-    and hostnames associated with the `br0` address.
+Decentralized IPv4: The node-manager.sh service uses alfred and Protobuf
+messages to coordinate conflict-free assignment ofaddresses, avoiding DHCP.
 
-## Dynamic Service Election for Voice Chat
+Node Discovery: Hostname discovery (radio-xxxx.local) is handled by
+systemd-resolved using mDNS over the mesh.
 
-To provide reliable voice communications without a predefined server, the nodes
-use a dynamic leader election protocol to host the Mumble (Murmur) server.
+Node Status Gossip: The node-manager.sh service on each node
+periodically gathers status (TQ, gateway status, service roles, IPv4, etc.),
+encodes it into a Protobuf message, and distributes it mesh-wide using
+alfred. This data fuels all election protocols.
 
-1.  Score Announcement: Each node runs a background script that
-    calculates its "network centrality" by averaging the TQ to all other
-    nodes it can see. It then broadcasts its score periodically to the
-    link-local multicast address `ff02::1` over the `br0` interface, using
-    Alfred.
-
-2.  Decentralized Election: Each node listens for these announcements and
-    maintains a scorecard of all other nodes. A timer-driven script
-    periodically evaluates the scorecard and elects the node with the highest
-    score as the leader. A deterministic tie-breaker (MAC address) ensures
-    all nodes elect the same leader.
-
-3.  Automatic Service Activation: The node that wins the election
-    automatically starts the `murmur` service. If it later loses an
-    election, it stops the service.
-
-4.  Virtual IP (VIP): The elected leader also assigns a predefined,
-    static Virtual IP address to its `br0` interface.
-
-    All EUD clients are configured to point to this single VIP. This makes
-    the server transition completely transparent to end-users, as BATMAN-ADV
-    automatically routes traffic for the VIP to whichever node is currently
-    the leader.
-
-    Alternatively, a voip client may run directly on the radio if it is to
-    be used directly as a voice device.
-    
-## Use Case: ATAK Team Communication
-
-This architecture enables a team, with each member carrying a node and a
-phone, to establish a private, resilient communication network anywhere.
-Upon powering on, the nodes form a mesh, auto-configure their IP addresses,
-and elect the most central node to host the Murmur PTT server. Team members
-can immediately begin voice communication through the ATAK interface without
-any manual server configuration, and the system will automatically self-heal
-by electing a new server if the current one goes offline or becomes joined to
-the mesh with a slow connection.
+Internet Gateway: Nodes with internet access via end0 automatically
+promote themselves using networkd-dispatcher. They enable NAT (nftables),
+advertise themselves via batctl gw_mode server, and update radvd.
 
