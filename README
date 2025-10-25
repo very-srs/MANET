@@ -86,3 +86,7 @@ Internet Gateway: Nodes with internet access via end0 automatically
 promote themselves using networkd-dispatcher. They enable NAT (nftables),
 advertise themselves via batctl gw_mode server, and update radvd.
 
+
+
+Come join the discussion around this Armbian release and the standard
+openMANET project at https://discord.gg/jBwVWHF9dy
