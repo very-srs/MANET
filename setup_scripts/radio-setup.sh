@@ -343,30 +343,14 @@ systemctl daemon-reload
 cp /root/networkd-dispatcher/off /etc/networkd-dispatcher/off.d/50-gateway-disable
 cp /root/networkd-dispatcher/degraded /etc/networkd-dispatcher/degraded.d/50-gateway-disable
 cp /root/networkd-dispatcher/routable /etc/networkd-dispatcher/routable.d/50-gateway-enable
-chmod -R 755 /etc/networkd-dispatcher
-
-cp /root/route-manager.sh /usr/local/bin/
-chmod +x /usr/local/bin/route-manager.sh
-
-cat <<- EOF > /etc/systemd/system/route-manager.service
-	[Unit]
-	Description=B.A.T.M.A.N. Advanced Default Route Manager
-	# This service must start after the batman interfaces are fully configured.
-	Requires=batman-enslave.service
-	After=batman-enslave.service
-
-	[Service]
-	Type=simple
-	ExecStart=/usr/local/bin/route-manager.sh
-	# Always restart the service if it fails for any reason
-	Restart=always
-	RestartSec=10
-
-	[Install]
-	WantedBy=multi-user.target
+cat <<- EOF > /etc/networkd-dispatcher/routable.d/99-bat0-route
+	if [ "$IFACE" == "br0" ]; then
+	    # Add routes with a high metric if they don't already exist
+	    ip route show default dev br0 metric 2000 | grep -q . || ip route add default dev br0 metric 2000
+	    ip -6 route show default dev br0 metric 2000 | grep -q . || ip -6 route add default dev br0 metric 2000
+	fi
 EOF
-
-systemctl enable route-manager.service
+chmod -R 755 /etc/networkd-dispatcher
 
 
 # Determine if this script is being run for the first time
