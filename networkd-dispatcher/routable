@@ -5,25 +5,28 @@
 # successfully sync its own time, it also becomes an NTP server.
 #
 
-IFACE="end0" # Define the Ethernet interface name here
+# Define the interface we care about
+TARGET_IFACE="end0"
 GATEWAY_STATE_FILE="/var/run/mesh-gateway.state"
 
 log() {
-    echo "[$(date +'%Y-%m-%d %H:%M:%S')] - GATEWAY-UP: $1" | systemd-cat -t mesh-gateway
+    echo "[$(date +'%Y-%m-%d %H:%M:%S')] - GATEWAY-UP [$$]($IFACE): $1" | systemd-cat -t mesh-gateway
 }
 
-# --- Initial Checks ---
-# Exit if the event is not for our specific Ethernet interface
-if [ "$1" != "$IFACE" ]; then
+# Compare the actual interface ($IFACE) with our target ($TARGET_IFACE)
+if [ "$IFACE" != "$TARGET_IFACE" ]; then
     exit 0
 fi
-# Exit if we are already a gateway (prevents re-running)
+
+# Exit if node is are already a gateway (prevents re-running)
 if [ -f "$GATEWAY_STATE_FILE" ]; then
+    log "Exiting: Gateway state file already exists."
     exit 0
 fi
+
 # Verify true internet access before proceeding
 if ! ping -c 3 -I "$IFACE" 8.8.8.8 > /dev/null 2>&1; then
-    log "Interface $IFACE is routable but has no internet access. Not promoting."
+    log "Exiting: Internet ping check failed via $IFACE."
     exit 0
 fi
 
