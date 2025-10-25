@@ -73,7 +73,7 @@ log "Triggering mesh-node-manager to publish new status..."
 # Use restart if the manager needs to pick up the chrony server status immediately,
 # otherwise, a reload or signal might suffice if the manager polls periodically.
 # For simplicity and immediate effect, restart is used here.
-systemctl restart mesh-node-manager.service
+systemctl restart node-manager.service
 
 log "Promotion to gateway complete."
 
