@@ -1,6 +1,8 @@
 # MANET Node Assembly and Provisioning Guide
-
 *October 2025, First release - basic networking functional*
+
+cm4 install image is:
+https://drive.google.com/file/d/1gI7fC58g3qusvzY3Ng1WtBVyPlVRBFP5
 
 ## Overview
 
@@ -18,20 +20,20 @@ server.
 
 ## Hardware Bill of Materials
 
-* **Compute Module**: Raspberry Pi Compute Module 4
+* Compute Module: Raspberry Pi Compute Module 4
     * 4GB or 8GB of RAM (8gb recommended)
     * Any amount of eMMC storage (8GB, 16GB, or 32GB, but 32 is recommended)
 
-* **Carrier Board**: Waveshare IO Carrier Board Mini A
+* Carrier Board: Waveshare IO Carrier Board Mini A
     * https://www.amazon.com/dp/B095CSRWXS
 
-* **Wi-Fi Module**: Wi-Fi 6E AX3000 M.2 AE Key Module (AW7916-AED)
+* Wi-Fi Module: Wi-Fi 6E AX3000 M.2 AE Key Module (AW7916-AED)
     * https://asiarf.com/product/wi-fi-6e-m-2-ae-key-module-mt7916-aw7916-aed/
 
-* **M.2 Adapter**: M-Key to A-E Key Adapter
+* M.2 Adapter: M-Key to A-E Key Adapter
     * https://www.amazon.com/dp/B0BGCWQY67
 
-* **Adhesive**: Thermal Glue
+* Adhesive: Thermal Glue
     * https://www.amazon.com/dp/B07HCDRL7W
 
 
