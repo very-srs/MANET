@@ -3,7 +3,7 @@ State of the project
 The October 2025 release creates a functional network node without any hands on
 configuration needed.  This is the bare minimum for a functional mesh network.
 This release is being set so that this network can be experimented with by others
-while breaking changes can be done to implement additionall features.  The immediate
+while breaking changes can be done to implement additional features.  The immediate
 next steps are:
 
   Network Services:
