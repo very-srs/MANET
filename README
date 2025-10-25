@@ -1,8 +1,30 @@
+State of the project
+
+The October 2025 release creates a functional network node without any hands on
+configuration needed.  This is the bare minimum for a functional mesh network.
+This release is being set so that this network can be experimented with by others
+while breaking changes can be done to implement additionall features.  The immediate
+next steps are:
+
+  Network Services:
+  * NTP server - This work is mostly complete, just needs testing
+  * Mumble server - A voice chat server for the mesh that is elected to, and
+    can migrate between, the best connected nodes in the mesh
+  
+  Expanded Hardware Support:
+  * Add support for 802.11ah.  Seeed boards should arrive by early November
+
+  Non-Software work:
+  * Adapt ethernet to usb for EUD support
+  * Design an enclosure
+
+
+
 Overview
 
-This release is the basis for a portable, self-configuring, and
-resilient network node designed for infrastructure-free team communications.
-The system uses a B.A.T.M.A.N.-adv mesh network over dual-band Wi-Fi (802.11ax).
+This is the basis for a portable, self-configuring, and resilient network node 
+designed for infrastructure-free team communications. The system uses a 
+B.A.T.M.A.N.-adv mesh network over dual-band Wi-Fi (802.11ax).
 
 The mesh currently provides the following services:
 
