@@ -4,15 +4,15 @@
 # It reverts the node from a gateway back to a normal mesh client.
 #
 
-IFACE="end0" # Define the Ethernet interface name here
+TARGET_IFACE="end0" # Define the Ethernet interface name here
 GATEWAY_STATE_FILE="/var/run/mesh-gateway.state"
 
 log() {
     echo "[$(date +'%Y-%m-%d %H:%M:%S')] - GATEWAY-DOWN: $1" | systemd-cat -t mesh-gateway
 }
 
-# Only act if the event is for our Ethernet interface and if we were the active gateway
-if [ "$1" != "$IFACE" ] || [ ! -f "$GATEWAY_STATE_FILE" ]; then
+# Compare the actual interface ($IFACE) with our target ($TARGET_IFACE)
+if [ "$IFACE" != "$TARGET_IFACE" ]; then
     exit 0
 fi
 

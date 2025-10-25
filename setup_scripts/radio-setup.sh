@@ -282,7 +282,7 @@ cat <<- EOF > /etc/systemd/system/alfred.service
 	Type=simple
 	ExecStartPre=/bin/bash -c 'for i in {1..20}; do if ip -6 addr show dev bat0 | grep "inet6 fe80::" | grep -qv "tentative"; then exit 0; fi; sleep 1; done; echo "bat0 link-local IPv6 address not ready" >&2; exit 1'
 	# Add -m to run alfred in master mode, allowing it to accept client data
-	ExecStart=/usr/sbin/alfred -m -i bat0 -f
+	ExecStart=/usr/sbin/alfred -m -i br0 -f
 	UMask=0000
 	Restart=always
 	RestartSec=10

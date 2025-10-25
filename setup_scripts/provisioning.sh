@@ -88,10 +88,11 @@ main() {
 	cp /root/batctl /usr/sbin/
 
 	# Add the protobuf tools
+	cp /root/NodeInfo_pb2.py /usr/local/bin/
 	cp /root/encoder.py /usr/local/bin/
 	cp /root/decoder.py /usr/local/bin/
-    chmod +x /usr/loca/bin/encoder.py
-    chmod +x /usr/loca/bin/decoder.py
+    chmod +x /usr/local/bin/encoder.py
+    chmod +x /usr/local/bin/decoder.py
 
 
 	# setup rpi config parameters to activate the pcie bus, used by wireless card
@@ -433,6 +434,9 @@ main() {
 		kernel.panic_on_oops = 1
 	EOF
 
+
+	echo "Disabling default chrony networkd-dispatcher script"
+	chmod -x /usr/lib/NetworkManager/dispatcher.d/*
 
 	#make mumble server ini changes
 	sed -i '/ice="tcp -h 127.0.0.1 -p 6502"/s/^#//g' /etc/mumble-server.ini
