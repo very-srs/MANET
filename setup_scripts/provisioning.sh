@@ -75,7 +75,7 @@ main() {
 	# Install packages for this system
 	apt install -y ipcalc nmap lshw tcpdump net-tools nftables wireless-tools iperf3\
 	  \radvd bridge-utils firmware-mediatek libnss-mdns syncthing networkd-dispatcher\
-	  libgps-dev libcap-dev mumble-server screen arping\
+	  libgps-dev libcap-dev mumble-server screen arping bc yq\
 	  python3-protobuf chrony > /dev/null 2>&1
 	echo "Done"
 
@@ -308,7 +308,7 @@ main() {
 		{
 		    AdvSendAdvert on;
 		    AdvDefaultLifetime 0;
-		    prefix fd5a:1753:4340:1::/64
+		    prefix fd01:ed20:ecb4::/48
 		    {
 		        AdvOnLink on;
 		        AdvAutonomous on;
@@ -321,7 +321,7 @@ main() {
 		interface br0 {
 		    AdvSendAdvert on;
 		    AdvDefaultLifetime 600;
-		    prefix fd5a:1753:4340:1::/64 {
+		    prefix fd01:ed20:ecb4::/48  {
 		        AdvOnLink on;
 		        AdvAutonomous on;
 		    };
