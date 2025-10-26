@@ -75,7 +75,7 @@ main() {
 	# Install packages for this system
 	apt install -y ipcalc nmap lshw tcpdump net-tools nftables wireless-tools iperf3\
 	  \radvd bridge-utils firmware-mediatek libnss-mdns syncthing networkd-dispatcher\
-	  libgps-dev libcap-dev mumble-server screen \
+	  libgps-dev libcap-dev mumble-server screen arping\
 	  python3-protobuf chrony > /dev/null 2>&1
 	echo "Done"
 
@@ -93,6 +93,10 @@ main() {
 	cp /root/decoder.py /usr/local/bin/
     chmod +x /usr/local/bin/encoder.py
     chmod +x /usr/local/bin/decoder.py
+
+	#copy over misc tools
+	cp /root/mtx-ip.sh /usr/local/bin/
+	chmod +x /usr/local/bin/mtx-ip.sh
 
 
 	# setup rpi config parameters to activate the pcie bus, used by wireless card
