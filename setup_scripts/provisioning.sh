@@ -94,10 +94,11 @@ main() {
     chmod +x /usr/local/bin/encoder.py
     chmod +x /usr/local/bin/decoder.py
 
-	#copy over misc tools
-	cp /root/mtx-ip.sh /usr/local/bin/
+	#copy over mtx tools
+	cp /root/mtx-ip.sh /usr/local/bin/   # Selects the ipv6 for mediaMTX
 	chmod +x /usr/local/bin/mtx-ip.sh
-
+	cp /root/mediamtx-election.sh /usr/local/bin  # Determines who will be the MTX server
+	chmod +x /usr/local/bin/mediamtx-election.sh
 
 	# setup rpi config parameters to activate the pcie bus, used by wireless card
 	sed -i 's/#dtparam=spi=on/dtparam=spi=on/g' /boot/firmware/config.txt
@@ -112,8 +113,6 @@ main() {
 	fi
 	echo "PCIe subsystem enabled"
 
-	# get rid of otg, get rid of host, add peripheral at the end of the file
-	# trying to put out ethernet via usb-c
 	sed -i 's/otg_mode=1//g' /boot/firmware/config.txt
 	if ! grep -q 'dr_mode=host' /boot/firmware/config.txt; then
 		echo "dtoverlay=dwc2,dr_mode=host" >> /boot/firmware/config.txt
