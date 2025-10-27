@@ -1,75 +1,83 @@
 #!/usr/bin/env bash
 # mtx-ip.sh
-# Deterministically derive a MediaMTX IPv6 VIP from a /64 ULA prefix
+# Deterministically derive a MediaMTX IPv6 VIP within the first /64
+# subnet of a given ULA prefix (e.g., /48 or /64).
 
 set -euo pipefail
 
-# Input: IPv6 /64 prefix (e.g., fd5a:1753:4340:1::/64)
-PREFIX=`grep prefix /etc/radvd-mesh.conf | awk '{print $2}'`
+# Input: Find the first IPv6 prefix line in radvd config
+PREFIX_LINE=$(grep -m 1 '^[[:space:]]*prefix[[:space:]]\+fd[0-9a-fA-F:]\+/[0-9]\+' /etc/radvd-mesh.conf || echo "")
+PREFIX_CIDR=$(echo "$PREFIX_LINE" | awk '{print $2}') # e.g., fd01:ed20:ecb4::/48
 
-# Normalize prefix: strip /64 and trailing '::' or ':'
-PREFIX=$(echo "$PREFIX" | sed 's#/64$##; s/::$//; s/:$//')
-
-# Basic validation: must contain colons and resemble IPv6
-if ! [[ "$PREFIX" =~ : ]]; then
-  echo "Error: '$PREFIX' is not a valid IPv6 prefix." >&2
-  exit 1
+if [ -z "$PREFIX_CIDR" ]; then
+    echo "Error: No valid IPv6 ULA prefix found in /etc/radvd-mesh.conf." >&2
+    exit 1
 fi
 
-# Expand compressed prefix (handle ::) and validate it's a /64 ULA
-# Convert to array of hextets
+# Normalize prefix: strip CIDR length, ensure we have the first 4 hextets.
+PREFIX=${PREFIX_CIDR%/*} # Remove /XX suffix
+PREFIX=$(echo "$PREFIX" | sed 's/::$//; s/:$//') # Remove trailing :: or :
+
+# Basic validation: must contain colons and start with 'fd' (ULA)
+if ! [[ "$PREFIX" =~ ^fd && "$PREFIX" =~ : ]]; then
+    echo "Error: '$PREFIX_CIDR' does not contain a valid IPv6 ULA prefix starting with 'fd'." >&2
+    exit 1
+fi
+
+# --- Expand compressed prefix to get exactly 4 hextets ---
 IFS=':' read -r -a HEXTETS <<< "$PREFIX"
-HEXTET_COUNT=${#HEXTETS[@]}
+EXPANDED_PREFIX_ARRAY=()
+SEEN_EMPTY=false
 
-# Check for compression (::) and expand to 4 hextets
-if [[ "$HEXTET_COUNT" -le 4 ]]; then
-  if [[ "$PREFIX" =~ :: ]]; then
-    # Calculate missing hextets to reach 4 (since /64 needs 4 hextets)
-    MISSING=$((4 - HEXTET_COUNT + 1)) # +1 for the :: itself
-    EXPANDED_PREFIX=""
-    for ((i=0; i<HEXTET_COUNT; i++)); do
-      if [[ "${HEXTETS[i]}" == "" && "$PREFIX" =~ :: ]]; then
-        # Insert zeros for compression
+for hextet in "${HEXTETS[@]}"; do
+    if [[ -z "$hextet" && "$SEEN_EMPTY" = false ]]; then
+        # Found the '::' compression
+        SEEN_EMPTY=true
+        # Calculate how many zero hextets to insert to reach 4 total
+        MISSING=$((4 - ${#HEXTETS[@]} + 1)) # +1 because the empty string counts as one hextet
         for ((j=0; j<MISSING; j++)); do
-          EXPANDED_PREFIX="${EXPANDED_PREFIX}0:"
+            EXPANDED_PREFIX_ARRAY+=("0000")
         done
-      else
-        # Pad hextet to 4 digits
-        HEXTET=$(printf "%04x" "0x${HEXTETS[i]:-0}")
-        EXPANDED_PREFIX="${EXPANDED_PREFIX}${HEXTET}:"
-      fi
-    done
-    # Remove trailing colon
-    EXPANDED_PREFIX=${EXPANDED_PREFIX%:}
-  else
-    EXPANDED_PREFIX="$PREFIX"
-  fi
-else
-  echo "Error: '$PREFIX' does not form a valid /64 prefix (too many hextets)." >&2
-  exit 1
+    elif [[ -n "$hextet" ]]; then
+        # Add non-empty hextet, padding with leading zeros
+        EXPANDED_PREFIX_ARRAY+=("$(printf "%04x" "0x${hextet}")")
+    fi
+    # Stop processing if we already have 4 hextets (handles cases like fdXX::/48)
+    if [[ ${#EXPANDED_PREFIX_ARRAY[@]} -ge 4 ]]; then
+        break
+    fi
+done
+
+# Ensure we have exactly 4 hextets for the /64 base
+while [[ ${#EXPANDED_PREFIX_ARRAY[@]} -lt 4 ]]; do
+    EXPANDED_PREFIX_ARRAY+=("0000")
+done
+
+# Join the first 4 hextets back into a string
+EXPANDED_PREFIX=$(IFS=: ; echo "${EXPANDED_PREFIX_ARRAY[*]}")
+
+# Final Validation: Check the resulting /64 prefix structure
+if ! [[ "$EXPANDED_PREFIX" =~ ^fd[0-9a-fA-F]{2}:[0-9a-fA-F]{4}:[0-9a-fA-F]{4}:[0-9a-fA-F]{4}$ ]]; then
+    echo "Error: Failed to normalize '$PREFIX_CIDR' into a valid /64 ULA prefix. Result: '$EXPANDED_PREFIX'." >&2
+    exit 1
 fi
 
-# Validate: must be exactly 4 hextets and start with 'fd' (ULA)
-if ! [[ "$EXPANDED_PREFIX" =~ ^fd[0-9a-fA-F]{2}:[0-9a-fA-F]{1,4}:[0-9a-fA-F]{1,4}:[0-9a-fA-F]{1,4}$ ]]; then
-  echo "Error: Invalid IPv6 /64 ULA prefix '$PREFIX'. Expected format like 'fdXX:XXXX:XXXX:XXXX'." >&2
-  exit 1
-fi
-
-# Hash the expanded prefix to derive a deterministic suffix
+# --- Suffix Generation (remains the same) ---
+# Hash the normalized /64 prefix to derive a deterministic suffix
 if command -v md5sum >/dev/null; then
-  HASH_BYTE=$(echo -n "${EXPANDED_PREFIX}-mediamtx" | md5sum | cut -c1-2)
+    HASH_BYTE=$(echo -n "${EXPANDED_PREFIX}-mediamtx" | md5sum | cut -c1-2)
 elif command -v sha256sum >/dev/null; then
-  HASH_BYTE=$(echo -n "${EXPANDED_PREFIX}-mediamtx" | sha256sum | cut -c1-2)
+    HASH_BYTE=$(echo -n "${EXPANDED_PREFIX}-mediamtx" | sha256sum | cut -c1-2)
 else
-  echo "Error: Neither md5sum nor sha256sum found. Please install one." >&2
-  exit 1
+    echo "Error: Neither md5sum nor sha256sum found. Please install one." >&2
+    exit 1
 fi
 
-# Convert hash byte to decimal (100-511, hex 64-1ff, to avoid ::1 and reduce SLAAC collisions)
-OFFSET=$(( 0x$HASH_BYTE % 412 + 100 )) # Maps to 0x64-0x1ff (100-511)
+# Convert hash byte to decimal offset (100-511)
+OFFSET=$(( 0x$HASH_BYTE % 412 + 100 ))
 
-# Form the VIP: prefix + :: + offset (in hex)
+# Form the VIP: normalized prefix + :: + offset (in hex)
 VIP="${EXPANDED_PREFIX}::$(printf "%x" "$OFFSET")"
 
-
+# Output the final address with /128 mask for assignment
 echo "$VIP/128"
