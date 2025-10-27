@@ -5,7 +5,7 @@
 # sync the time, and then disable the chrony service to minimize traffic.
 #
 
-REGISTRY_STATE_FILE="/var/run/mesh_node_registry.conf"
+REGISTRY_STATE_FILE="/var/run/mesh_node_registry"
 STATE_FILE="/var/run/initial_time_synced"
 
 log() {
