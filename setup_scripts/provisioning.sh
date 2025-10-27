@@ -447,6 +447,37 @@ main() {
 	service mumble-server restart
 	grep -m 1 SuperUser /var/log/mumble-server/mumble-server.log > /root/mumble_pw
 
+	# install mediaMTX server
+	cd /tmp
+	wget -q https://github.com/bluenviron/mediamtx/releases/download/v1.15.3/mediamtx_v1.15.3_linux_arm64.tar.gz
+	gzip -d mediamtx_v1.15.3_linux_arm64.tar.gz
+	tar -xf mediamtx_v1.15.3_linux_arm64.tar
+	groupadd --system mediamtx
+	useradd --system -g mediamtx -d /opt/mediamtx -s /sbin/nologin mediamtx
+	mkdir /etc/mediamtx && chown mediamtx:mediamtx /etc/mediamtx
+	mkdir -p /opt/mediamtx
+	cp mediamtx /opt/mediamtx/
+	chmod +x /opt/mediamtx/mediamtx
+	cp mediamtx.yml /etc/mediamtx/
+
+	cat <<- EOF > /etc/systemd/system/mediamtx.service
+		[Unit]
+		Description=MediaMTX RTSP/RTMP/WebRTC Server
+		After=network.target
+
+		[Service]
+		User=mediamtx
+		Group=mediamtx
+		WorkingDirectory=/opt/mediamtx
+		ExecStart=/opt/mediamtx/mediamtx /etc/mediamtx/mediamtx.yml
+		Restart=on-failure
+		RestartSec=5
+
+		[Install]
+		WantedBy=multi-user.target
+	EOF
+	systemctl enable mediamtx
+
 	#remove un-needed configs
 	rm -f /etc/systemd/network/00-arm*
 
