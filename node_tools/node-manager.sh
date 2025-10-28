@@ -345,8 +345,7 @@ while true; do
         log "DEBUG: Decoded data: $DECODED_DATA"
 
         # Filter for valid variable assignments (with or without quotes)
-        FILTERED_DATA=$(echo "$DECODED_DATA" | grep -E "^[A-Z_]+=")
-
+		FILTERED_DATA=$(echo "$DECODED_DATA" | grep -E "^[A-Z0-9_]+=")
         if [ -z "$FILTERED_DATA" ]; then
             log "Warning: No valid variable assignments in decoded data"
             continue
