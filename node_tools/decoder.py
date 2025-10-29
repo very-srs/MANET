@@ -20,6 +20,7 @@ def main():
         # Print the fields in a shell-friendly "KEY=VALUE" format
         print(f"HOSTNAME='{node_info.hostname}'")
         print(f"MAC_ADDRESS='{node_info.mac_address}'")
+        print(f"BAT0_MAC_ADDRESS='{node_info.bat0_mac_address}'")
         print(f"IPV4_ADDRESS='{node_info.ipv4_address}'")
         print(f"SYNCTHING_ID='{node_info.syncthing_id}'")
         print(f"TQ_AVERAGE={node_info.tq_average}")

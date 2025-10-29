@@ -1,10 +1,5 @@
 #!/bin/bash
-#
-# This script is triggered when an interface goes down (e.g., unplugged).
-# It reverts the node from a gateway back to a normal mesh client.
-#
-
-TARGET_IFACE="end0" # Define the Ethernet interface name here
+TARGET_IFACE="end0"
 GATEWAY_STATE_FILE="/var/run/mesh-gateway.state"
 NTP_STATE_FILE="/var/run/mesh-ntp.state"
 
@@ -12,34 +7,44 @@ log() {
     echo "[$(date +'%Y-%m-%d %H:%M:%S')] - GATEWAY-DOWN: $1" | systemd-cat -t mesh-gateway
 }
 
-# Compare the actual interface ($IFACE) with our target ($TARGET_IFACE)
 if [ "$IFACE" != "$TARGET_IFACE" ]; then
     exit 0
 fi
 
-log "Internet connection potentially lost on $IFACE. Reverting to mesh client mode..."
+# Check if we were actually a gateway
+if [ ! -f "$GATEWAY_STATE_FILE" ]; then
+    log "Not currently a gateway. Nothing to do."
+    exit 0
+fi
 
-# --- 1. Remove State Files FIRST ---
+log "Internet connection lost on $IFACE. Reverting to mesh client mode..."
+
+# Remove state files FIRST
 rm -f "$GATEWAY_STATE_FILE"
-rm -f "$NTP_STATE_FILE" # Remove NTP state regardless of whether sync worked initially
+rm -f "$NTP_STATE_FILE"
 
-# --- 2. Revert B.A.T.M.A.N. Gateway Role ---
+# Stop NTP server if running
+if systemctl is-active --quiet chrony.service; then
+    log "Stopping chrony service."
+    systemctl stop chrony.service
+    cp /etc/chrony/chrony-default.conf /etc/chrony/chrony.conf
+fi
+
+# Revert batman-adv mode
 batctl gw_mode client
 
-# --- 3. Revert IPv6 Router Role ---
+# Wait and verify
+sleep 2
+if ! batctl gw_mode | grep -q "client"; then
+    log "ERROR: Failed to revert gateway mode to client!"
+fi
+
+# Revert radvd
 cp /etc/radvd-mesh.conf /etc/radvd.conf
 systemctl restart radvd
 
-# --- 4. Stop Chrony ---
-# Ensure chrony is stopped, reverting to the default "inert client" state
-# managed by the one-shot sync service on next boot if needed.
-log "Stopping chrony service."
-systemctl stop chrony.service
-# Copy the inert config back just in case, although service remains stopped
-cp /etc/chrony/chrony-default.conf /etc/chrony/chrony.conf
-
-# --- 5. Trigger Status Update ---
-log "Triggering mesh-node-manager to publish new non-gateway status..."
+# Announce changes
+log "Triggering node-manager to publish new non-gateway status..."
 systemctl restart node-manager.service
 
 log "Reversion to client mode complete."
