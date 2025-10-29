@@ -265,7 +265,8 @@ systemctl daemon-reload
 
 #install scripts for auto gateway management
 cp /root/networkd-dispatcher/off /etc/networkd-dispatcher/off.d/50-gateway-disable
-cp /root/networkd-dispatcher/degraded /etc/networkd-dispatcher/degraded.d/50-gateway-disable
+cp /root/networkd-dispatcher/off /etc/networkd-dispatcher/no-carrier.d/50-gateway-disable
+cp /root/networkd-dispatcher/off /etc/networkd-dispatcher/degraded.d/50-gateway-disable
 cp /root/networkd-dispatcher/routable /etc/networkd-dispatcher/routable.d/50-gateway-enable
 chmod -R 755 /etc/networkd-dispatcher
 
@@ -274,8 +275,8 @@ cat <<- EOF > /etc/systemd/system/gateway-route-manager.service
 	[Unit]
 	Description=Mesh Gateway Route Manager
 	Documentation=man:batctl(8)
-	After=network.target mesh-node-manager.service
-	Wants=mesh-node-manager.service
+	After=network.target node-manager.service
+	Wants=node-manager.service
 	ConditionPathExists=/usr/local/bin/gateway-route-manager.sh
 
 	[Service]
@@ -294,9 +295,9 @@ cat <<- EOF > /etc/systemd/system/gateway-route-manager.service
 	[Install]
 	WantedBy=multi-user.target
 EOF
-systemctl enable gateway-route-manger
 cp /root/gateway-route-manager.sh /usr/local/bin/
 chmod +x /usr/local/bin/gateway-route-manager.sh
+systemctl enable gateway-route-manager
 
 # Determine if this script is being run for the first time
 # and reboot if so to pick up the changes to the interfaces
