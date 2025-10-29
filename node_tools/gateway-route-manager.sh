@@ -27,43 +27,96 @@ log() {
 get_selected_gateway_mac() {
     # Look for the line starting with * in batctl gwl output
     local gw_line=$("$BATCTL_PATH" gwl 2>/dev/null | grep '^\*')
-
+    
     if [ -z "$gw_line" ]; then
         echo ""
         return 1
     fi
-
-    # Extract MAC address
+    
+    # Extract MAC address (second field)
     echo "$gw_line" | awk '{print $2}'
 }
 
-# Look up the IP address for a given MAC in the registry
+# Look up the IP address for a given bat0 MAC in the registry
 lookup_gateway_ip() {
-    local mac=$1
+    local bat0_mac=$1
 
     if [ ! -f "$REGISTRY_FILE" ]; then
-        log "Warning: $REGISTRY_FILE not found"
+        log "Warning: Registry file not found: $REGISTRY_FILE"
         return 1
     fi
 
-    # Convert MAC to registry variable format (remove colons)
-    local mac_clean=$(echo "$mac" | tr -d ':')
-    local var_name="NODE_${mac_clean}_IPV4_ADDRESS"
+    # Search for the bat0 MAC in the registry
+    local matching_line=$(grep "_BAT0_MAC_ADDRESS='${bat0_mac}'" "$REGISTRY_FILE" 2>/dev/null)
 
-    # Source registry and get the IP
+    if [ -z "$matching_line" ]; then
+        log "Warning: No registry entry found for bat0 MAC $bat0_mac"
+        return 1
+    fi
+
+    # Extract the node ID from the matching line
+    local node_id=$(echo "$matching_line" | sed 's/NODE_\([^_]*\)_BAT0_MAC_ADDRESS.*/\1/')
+
+    if [ -z "$node_id" ]; then
+        log "Warning: Could not extract node ID from registry line"
+        return 1
+    fi
+
+    # Get the IP for this node
+    local var_name="NODE_${node_id}_IPV4_ADDRESS"
     local ip=$(source "$REGISTRY_FILE" 2>/dev/null && eval echo "\$$var_name")
 
     if [ -z "$ip" ]; then
-        log "Warning: No IP found for gateway MAC $mac in registry"
+        log "Warning: No IP found for gateway node $node_id"
         return 1
     fi
 
     echo "$ip"
 }
 
+# Get hostname for a bat0 MAC from registry (for logging)
+get_hostname_for_mac() {
+    local bat0_mac=$1
+
+    if [ ! -f "$REGISTRY_FILE" ]; then
+        echo "unknown"
+        return 1
+    fi
+
+    # Search for the bat0 MAC in the registry
+    local matching_line=$(grep "_BAT0_MAC_ADDRESS='${bat0_mac}'" "$REGISTRY_FILE" 2>/dev/null)
+
+    if [ -z "$matching_line" ]; then
+        echo "unknown"
+        return 1
+    fi
+
+    local node_id=$(echo "$matching_line" | sed 's/NODE_\([^_]*\)_BAT0_MAC_ADDRESS.*/\1/')
+
+    if [ -z "$node_id" ]; then
+        echo "unknown"
+        return 1
+    fi
+
+    local var_name="NODE_${node_id}_HOSTNAME"
+    local hostname=$(source "$REGISTRY_FILE" 2>/dev/null && eval echo "\$$var_name")
+
+    if [ -n "$hostname" ]; then
+        echo "$hostname"
+    else
+        echo "unknown"
+    fi
+}
+
 # Update the default route to point to a specific gateway IP
 set_default_route() {
     local gw_ip=$1
+
+    # Validate IP address format
+    if ! echo "$gw_ip" | grep -qE '^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$'; then
+        log "Error: Invalid IP address format: $gw_ip"
+        return 1
+    fi
 
     # Check if route already exists and points to this gateway
     local current_route=$(ip route show default 2>/dev/null | head -n1)
@@ -101,23 +154,6 @@ remove_default_route() {
     fi
 }
 
-# Get hostname for a MAC from registry (for logging)
-get_hostname_for_mac() {
-    local mac=$1
-    local mac_clean=$(echo "$mac" | tr -d ':')
-    local var_name="NODE_${mac_clean}_HOSTNAME"
-
-    if [ -f "$REGISTRY_FILE" ]; then
-        local hostname=$(source "$REGISTRY_FILE" 2>/dev/null && eval echo "\$$var_name")
-        if [ -n "$hostname" ]; then
-            echo "$hostname"
-            return 0
-        fi
-    fi
-
-    echo "unknown"
-}
-
 ### --- Main Loop ---
 log "Starting Gateway Route Manager (polling every ${POLL_INTERVAL}s)"
 
@@ -135,40 +171,71 @@ if [ "$GW_MODE" != "client" ]; then
 fi
 
 while true; do
-    # Get the currently selected gateway
+    # Get the currently selected gateway MAC (from batctl)
     NEW_GW_MAC=$(get_selected_gateway_mac)
 
-    # Check if gateway has changed
-    if [ "$NEW_GW_MAC" != "$CURRENT_GW_MAC" ]; then
+    # Lookup gateway IP from registry by bat0 MAC
+    if [ -n "$NEW_GW_MAC" ]; then
+        NEW_GW_IP=$(lookup_gateway_ip "$NEW_GW_MAC")
+    else
+        NEW_GW_IP=""
+    fi
+
+    # Determine if state has changed
+    STATE_CHANGED=false
+
+    if [ -z "$NEW_GW_MAC" ] && [ -n "$CURRENT_GW_MAC" ]; then
+        # Gateway disappeared
+        STATE_CHANGED=true
+        ACTION="lost"
+    elif [ -n "$NEW_GW_MAC" ] && [ -z "$CURRENT_GW_MAC" ]; then
+        # Gateway appeared
+        STATE_CHANGED=true
+        ACTION="detected"
+    elif [ "$NEW_GW_MAC" != "$CURRENT_GW_MAC" ]; then
+        # Gateway changed
+        STATE_CHANGED=true
+        ACTION="changed"
+    elif [ "$NEW_GW_IP" != "$CURRENT_GW_IP" ] && [ -n "$NEW_GW_IP" ]; then
+        # Gateway MAC same but IP changed (rare)
+        STATE_CHANGED=true
+        ACTION="ip_changed"
+    fi
+
+    # Handle state changes
+    if [ "$STATE_CHANGED" = true ]; then
 
         if [ -z "$NEW_GW_MAC" ]; then
             # No gateway available
-            if [ -n "$CURRENT_GW_MAC" ]; then
-                log "Gateway lost: $CURRENT_GW_MAC ($CURRENT_GW_IP)"
-                remove_default_route
-            fi
+            log "Gateway lost: $CURRENT_GW_MAC ($CURRENT_GW_IP)"
+            remove_default_route
             CURRENT_GW_MAC=""
             CURRENT_GW_IP=""
 
+        elif [ -z "$NEW_GW_IP" ]; then
+            # Gateway exists but IP not found in registry yet
+            log "Gateway detected: $NEW_GW_MAC but IP not yet in registry. Will retry."
+            # Don't update CURRENT_GW_MAC yet, so we keep trying
+
         else
-            # New gateway selected
-            NEW_GW_IP=$(lookup_gateway_ip "$NEW_GW_MAC")
+            # Valid gateway with IP
+            GW_HOSTNAME=$(get_hostname_for_mac "$NEW_GW_MAC")
 
-            if [ -n "$NEW_GW_IP" ]; then
-                GW_HOSTNAME=$(get_hostname_for_mac "$NEW_GW_MAC")
-
-                if [ -z "$CURRENT_GW_MAC" ]; then
+            case "$ACTION" in
+                "detected")
                     log "Gateway detected: $NEW_GW_MAC ($GW_HOSTNAME) at $NEW_GW_IP"
-                else
+                    ;;
+                "changed")
                     log "Gateway changed: $CURRENT_GW_MAC -> $NEW_GW_MAC ($GW_HOSTNAME) at $NEW_GW_IP"
-                fi
+                    ;;
+                "ip_changed")
+                    log "Gateway IP changed: $CURRENT_GW_IP -> $NEW_GW_IP ($GW_HOSTNAME)"
+                    ;;
+            esac
 
-                if set_default_route "$NEW_GW_IP"; then
-                    CURRENT_GW_MAC="$NEW_GW_MAC"
-                    CURRENT_GW_IP="$NEW_GW_IP"
-                fi
-            else
-                log "Gateway MAC found ($NEW_GW_MAC) but IP lookup failed. Will retry."
+            if set_default_route "$NEW_GW_IP"; then
+                CURRENT_GW_MAC="$NEW_GW_MAC"
+                CURRENT_GW_IP="$NEW_GW_IP"
             fi
         fi
     fi

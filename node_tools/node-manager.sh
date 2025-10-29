@@ -70,8 +70,10 @@ IPV4_NETWORK=${IPV4_NETWORK:-"10.43.1.0/16"}
 
 ### --- Configuration ---
 CONTROL_IFACE="br0"
+BAT_IFACE="bat0"
 ALFRED_DATA_TYPE=68
 MY_MAC=$(cat "/sys/class/net/${CONTROL_IFACE}/address")
+MY_BAT_MAC=$(cat "/sys/class/net/${BAT_IFACE}/address" 2>/dev/null || echo "")
 DEFENSE_INTERVAL=300 # Republish status every 5 minutes
 MONITOR_INTERVAL=30  # How often the main loop runs (seconds)
 REGISTRY_STATE_FILE="/var/run/mesh_node_registry" # Global state file (tmpfs ok)
@@ -264,6 +266,9 @@ while true; do
         "--tq-average" "$TQ_AVG"
         "--syncthing-id" "$SYNCTHING_ID"
     )
+    # Add bat0 MAC address if available
+    [ -n "$MY_BAT_MAC" ] && ENCODER_ARGS+=("--bat0-mac-address" "$MY_BAT_MAC")
+    
     # Ensure CURRENT_IPV4 is valid before adding
     [[ "$IPV4_STATE" == "CONFIGURED" && -n "$CURRENT_IPV4" ]] && ENCODER_ARGS+=("--ipv4-address" "$CURRENT_IPV4")
     [ -n "$IS_GATEWAY_FLAG" ] && ENCODER_ARGS+=("$IS_GATEWAY_FLAG")
@@ -362,6 +367,7 @@ while true; do
             {
                 printf "%s_HOSTNAME='%s'\n" "$PREFIX" "$HOSTNAME"
                 printf "%s_MAC_ADDRESS='%s'\n" "$PREFIX" "$MAC_ADDRESS"
+                printf "%s_BAT0_MAC_ADDRESS='%s'\n" "$PREFIX" "$BAT0_MAC_ADDRESS"
                 printf "%s_IPV4_ADDRESS='%s'\n" "$PREFIX" "$IPV4_ADDRESS"
                 printf "%s_SYNCTHING_ID='%s'\n" "$PREFIX" "$SYNCTHING_ID"
                 printf "%s_TQ_AVERAGE='%s'\n" "$PREFIX" "$TQ_AVERAGE"
@@ -385,7 +391,7 @@ while true; do
         fi
 
         # Clear variables for next iteration
-        unset HOSTNAME MAC_ADDRESS IPV4_ADDRESS SYNCTHING_ID TQ_AVERAGE IS_INTERNET_GATEWAY \
+        unset HOSTNAME MAC_ADDRESS BAT0_MAC_ADDRESS IPV4_ADDRESS SYNCTHING_ID TQ_AVERAGE IS_INTERNET_GATEWAY \
               IS_NTP_SERVER IS_MUMBLE_SERVER IS_TAK_SERVER UPTIME_SECONDS BATTERY_PERCENTAGE \
               CPU_LOAD_AVERAGE ATAK_USER
     done

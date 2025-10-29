@@ -1,31 +1,22 @@
 #!/bin/bash
-#
-# This script is triggered when an interface becomes "routable".
-# It promotes the node to a B.A.T.M.A.N. gateway and, if it can
-# successfully sync its own time, it also becomes an NTP server.
-#
-
-# Define the interface we care about
 TARGET_IFACE="end0"
 GATEWAY_STATE_FILE="/var/run/mesh-gateway.state"
+NTP_STATE_FILE="/var/run/mesh-ntp.state"
 
 log() {
     echo "[$(date +'%Y-%m-%d %H:%M:%S')] - GATEWAY-UP [$$]($IFACE): $1" | systemd-cat -t mesh-gateway
 }
 
-# Compare the actual interface ($IFACE) with our target ($TARGET_IFACE)
 if [ "$IFACE" != "$TARGET_IFACE" ]; then
     exit 0
 fi
 
-# Exit if node is are already a gateway (prevents re-running)
 if [ -f "$GATEWAY_STATE_FILE" ]; then
     log "Exiting: Gateway state file already exists."
     exit 0
 fi
 
-# Verify true internet access before proceeding
-if ! ping -c 3 -I "$IFACE" 8.8.8.8 > /dev/null 2>&1; then
+if ! ping -c 3 -W 2 -I "$IFACE" 8.8.8.8 > /dev/null 2>&1; then
     log "Exiting: Internet ping check failed via $IFACE."
     exit 0
 fi
@@ -33,47 +24,40 @@ fi
 log "Internet detected on $IFACE. Promoting to mesh gateway..."
 touch "$GATEWAY_STATE_FILE"
 
-# --- 1. Attempt to Become an NTP Server ---
+# --- NTP Server Setup ---
 log "Attempting to sync time with external NTP source..."
-NTP_SUCCESS=false
-# Load the test configuration temporarily
 cp /etc/chrony/chrony-test.conf /etc/chrony/chrony.conf
-# Restart chrony with the test config (needed for 'burst' to target external)
 systemctl restart chrony.service
-sleep 2 # Give chrony a moment to start
+sleep 3
 
-# The 'chronyc burst' command will exit with a non-zero status if it fails to sync.
-# Use timeout to prevent hanging indefinitely if external NTP is blocked/unreachable
-if timeout 30 chronyc -a 'burst 4/4'; then
+if timeout 30 chronyc -a 'burst 4/4' && sleep 5 && chronyc sources | grep -q '^\*'; then
     log "Time sync successful. Promoting to mesh NTP server."
-    NTP_SUCCESS=true
-    # Stop the test service, activate the proper server config, and start it.
+    touch "$NTP_STATE_FILE"
     systemctl stop chrony.service
     cp /etc/chrony/chrony-server.conf /etc/chrony/chrony.conf
     systemctl start chrony.service
 else
-    log "Failed to sync time with external NTP source. Will not become an NTP server."
-    # Revert to the default (effectively off, as one-shot disables it) config
+    log "Failed to sync time. Will not become an NTP server."
+    rm -f "$NTP_STATE_FILE"
     systemctl stop chrony.service
     cp /etc/chrony/chrony-default.conf /etc/chrony/chrony.conf
-    # We do NOT start chrony here, let the one-shot handle it if needed later
 fi
 
-# --- 2. Become an IPv6 Data Gateway ---
+# --- Gateway Mode ---
 log "Enabling IPv6 gateway mode..."
-cp /etc/radvd-gateway.conf /etc/radvd.conf
-systemctl restart radvd
 batctl gw_mode server
 
-# --- 3. Announce Changes to Mesh ---
-# Trigger the manager to immediately publish the new gateway status.
-# The manager script will correctly report whether this node IS_NTP_SERVER based
-# on whether chrony is running the server config (which only happens on success).
-log "Triggering mesh-node-manager to publish new status..."
-# Use restart if the manager needs to pick up the chrony server status immediately,
-# otherwise, a reload or signal might suffice if the manager polls periodically.
-# For simplicity and immediate effect, restart is used here.
+# Wait and verify
+sleep 2
+if ! batctl gw_mode | grep -q "server"; then
+    log "ERROR: Failed to set gateway mode to server!"
+fi
+
+cp /etc/radvd-gateway.conf /etc/radvd.conf
+systemctl restart radvd
+
+# --- Announce to Mesh ---
+log "Triggering node-manager to publish new status..."
 systemctl restart node-manager.service
 
 log "Promotion to gateway complete."
-
