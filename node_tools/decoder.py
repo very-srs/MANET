@@ -19,8 +19,11 @@ def main():
 
         # Print the fields in a shell-friendly "KEY=VALUE" format
         print(f"HOSTNAME='{node_info.hostname}'")
-        print(f"MAC_ADDRESS='{node_info.mac_address}'")
-        print(f"BAT0_MAC_ADDRESS='{node_info.bat0_mac_address}'")
+        if node_info.mac_addresses:
+            print(f"MAC_ADDRESS='{node_info.mac_addresses[0]}'")
+        else:
+            print(f"MAC_ADDRESS=''")
+        print(f"MAC_ADDRESSES='{','.join(node_info.mac_addresses)}'")
         print(f"IPV4_ADDRESS='{node_info.ipv4_address}'")
         print(f"SYNCTHING_ID='{node_info.syncthing_id}'")
         print(f"TQ_AVERAGE={node_info.tq_average}")
@@ -43,4 +46,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
