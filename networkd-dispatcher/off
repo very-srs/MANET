@@ -24,7 +24,7 @@ rm -f "$GATEWAY_STATE_FILE"
 rm -f "$NTP_STATE_FILE" # Remove NTP state regardless of whether sync worked initially
 
 # --- 2. Revert B.A.T.M.A.N. Gateway Role ---
-batctl gw_mode off
+batctl gw_mode client
 
 # --- 3. Revert IPv6 Router Role ---
 cp /etc/radvd-mesh.conf /etc/radvd.conf

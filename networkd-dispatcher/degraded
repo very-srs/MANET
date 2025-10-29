@@ -32,7 +32,7 @@ systemctl stop chrony.service
 
 
 # --- 2. Revert Gateway Role ---
-batctl gw_mode off
+batctl gw_mode client
 cp /etc/radvd-mesh.conf /etc/radvd.conf
 systemctl restart radvd
 
