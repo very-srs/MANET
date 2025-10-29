@@ -8,6 +8,7 @@ message NodeInfo {
   string mac_address = 2;
   string ipv4_address = 3;
   string syncthing_id = 4;
+  string bat0_mac_address = 5;
 
   // --- Network & Election Metrics ---
   float tq_average = 10;       // TQ average, for service elections.

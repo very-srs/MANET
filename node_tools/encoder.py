@@ -9,7 +9,8 @@ def main():
 
     # --- Core Identity (strings) ---
     parser.add_argument("--hostname", required=True, help="Node's hostname.")
-    parser.add_argument("--mac-address", required=True, help="Node's bat0 MAC address.")
+    parser.add_argument("--mac-address", required=True, help="Node's br0 MAC address.")
+    parser.add_argument("--bat0-mac-address", required=True, help="Node's bat0 MAC address.")
     parser.add_argument("--ipv4-address", default="", help="Node's assigned IPv4 address.")
     parser.add_argument("--syncthing-id", default="", help="Node's Syncthing Device ID.")
 
@@ -42,6 +43,7 @@ def main():
     # === Populate the message from the arguments ===
     node_info.hostname = args.hostname
     node_info.mac_address = args.mac_address
+    node_info.bat0_mac_address = args.bat0_mac_address
     node_info.ipv4_address = args.ipv4_address
     node_info.syncthing_id = args.syncthing_id
     node_info.tq_average = args.tq_average
