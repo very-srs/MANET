@@ -148,84 +148,8 @@ done
 #	System service setup
 #
 
-# Enslave interfaces to Batman, create second Batman interface for Alfred to use
-# Create the batman interface setup script
-# /radio-setup.sh
-
-cat <<- 'EOF' > /usr/local/bin/batman-if-setup.sh
-	#!/bin/bash
-	set -e
-
-	# Source mesh configuration to get the MESH_NAME variable
-	if [ -f /etc/default/mesh ]; then
-	    source /etc/default/mesh
-	else
-	    echo "Error: Mesh configuration /etc/default/mesh not found!" >&2
-	    exit 1
-	fi
-
-	WLAN_INTERFACES=$(networkctl | awk '/wlan/ {print $2}' | tr '\n' ' ')
-
-	start() {
-	    echo "Starting BATMAN-ADV setup..."
-	    #change to batman V algo
-		#batctl ra BATMAN_V
-
-	    # Create bat0 interface if it doesn't exist
-	    ip link show bat0 &>/dev/null || ip link add name bat0 type batadv
-
-	    for WLAN in $WLAN_INTERFACES; do
-	        echo "--> Configuring interface: $WLAN"
-
-	        # Set the interface type to mesh
-	        ip link set "$WLAN" type mesh
-	        ip link set "$WLAN" up
-
-	        # Wait for interface to be operationally up in mesh mode
-	        echo "Waiting for $WLAN to be ready..."
-	        for i in {1..15}; do
-	            if ip link show "$WLAN" | grep -q "state UP" && \
-	               iw dev "$WLAN" info | grep -q "type mesh point"; then
-	                echo "$WLAN is up in mesh mode."
-	                break
-	            fi
-	            if [ $i -eq 15 ]; then
-	                echo "!! Timed out waiting for $WLAN to be ready. Skipping." >&2
-	                continue 2
-	            fi
-	            sleep 1
-	        done
-
-	        # Now add to bat0
-	        echo "Adding $WLAN to bat0..."
-	        batctl bat0 if add "$WLAN"
-	    done
-
-
-	    ip link set bat0 up
-	    echo "bat0 interface is up and configured."
-	}
-
-	stop() {
-	    echo "Stopping BATMAN-ADV..."
-	    for WLAN in $WLAN_INTERFACES; do
-	        if batctl bat0 if | grep -q "$WLAN"; then
-	            batctl bat0 if del "$WLAN"
-	        fi
-	    done
-	    ip link show bat0 &>/dev/null && ip link del bat0
-	}
-
-	case "$1" in
-	    start|stop)
-	        "$1"
-	        ;;
-	    *)
-	        echo "Usage: $0 {start|stop}"
-	        exit 1
-	        ;;
-	esac
-EOF
+# Copy the batman interface setup script
+cp /root/batman-if-setup.sh /usr/local/bin/
 chmod +x /usr/local/bin/batman-if-setup.sh
 
 #get bat0 a link local address for alfred
@@ -343,15 +267,36 @@ systemctl daemon-reload
 cp /root/networkd-dispatcher/off /etc/networkd-dispatcher/off.d/50-gateway-disable
 cp /root/networkd-dispatcher/degraded /etc/networkd-dispatcher/degraded.d/50-gateway-disable
 cp /root/networkd-dispatcher/routable /etc/networkd-dispatcher/routable.d/50-gateway-enable
-cat <<- EOF > /etc/networkd-dispatcher/routable.d/99-bat0-route
-	if [ "$IFACE" == "br0" ]; then
-	    # Add routes with a high metric if they don't already exist
-	    ip route show default dev br0 metric 2000 | grep -q . || ip route add default dev br0 metric 2000
-	    ip -6 route show default dev br0 metric 2000 | grep -q . || ip -6 route add default dev br0 metric 2000
-	fi
-EOF
 chmod -R 755 /etc/networkd-dispatcher
 
+#enable automatic gateway selection
+cat <<- EOF > /etc/systemd/system/gateway-route-manager.service
+	[Unit]
+	Description=Mesh Gateway Route Manager
+	Documentation=man:batctl(8)
+	After=network.target mesh-node-manager.service
+	Wants=mesh-node-manager.service
+	ConditionPathExists=/usr/local/bin/gateway-route-manager.sh
+
+	[Service]
+	Type=simple
+	ExecStart=/usr/local/bin/gateway-route-manager.sh
+	Restart=always
+	RestartSec=10
+
+	User=root
+
+	# Logging
+	StandardOutput=journal
+	StandardError=journal
+	SyslogIdentifier=gateway-route-manager
+
+	[Install]
+	WantedBy=multi-user.target
+EOF
+systemctl enable gateway-route-manger
+cp /root/gateway-route-manager.sh /usr/local/bin/
+chmod +x /usr/local/bin/gateway-route-manager.sh
 
 # Determine if this script is being run for the first time
 # and reboot if so to pick up the changes to the interfaces

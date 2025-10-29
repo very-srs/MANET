@@ -439,7 +439,7 @@ main() {
 
 
 	echo "Disabling default chrony networkd-dispatcher script"
-	chmod -x /usr/lib/NetworkManager/dispatcher.d/*
+	rm -f /usr/lib/NetworkManager/dispatcher.d/*
 
 	#make mumble server ini changes
 	sed -i '/ice="tcp -h 127.0.0.1 -p 6502"/s/^#//g' /etc/mumble-server.ini
