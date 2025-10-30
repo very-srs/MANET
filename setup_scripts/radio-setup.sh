@@ -146,10 +146,6 @@ done
 #	System service setup
 #
 
-# Copy the batman interface setup script
-cp /root/batman-if-setup.sh /usr/local/bin/
-chmod +x /usr/local/bin/batman-if-setup.sh
-
 #get bat0 a link local address for alfred
 cat <<- EOF > /etc/sysctl.d/99-batman.conf
 	# Enable IPv6 address generation on batman-adv interfaces
@@ -215,8 +211,6 @@ EOF
 systemctl enable alfred.service
 
 # This script handles IPv4 addressing and node status gossip via alfred
-cp /root/node-manager.sh /usr/local/bin/
-chmod +x /usr/local/bin/node-manager.sh
 cat <<- EOF > /etc/systemd/system/node-manager.service
 	[Unit]
 	Description=Mesh Node Status Manager and IPv4 Coordinator
@@ -234,9 +228,6 @@ cat <<- EOF > /etc/systemd/system/node-manager.service
 	WantedBy=multi-user.target
 EOF
 systemctl enable node-manager.service
-
-cp /root/syncthing-peer-manager.sh /usr/local/bin/
-chmod 755 /usr/local/bin/syncthing-peer-manager.sh
 
 cat <<- EOF > /etc/systemd/system/syncthing-peer-manager.service 
 	[Unit]
@@ -293,8 +284,6 @@ cat <<- EOF > /etc/systemd/system/gateway-route-manager.service
 	[Install]
 	WantedBy=multi-user.target
 EOF
-cp /root/gateway-route-manager.sh /usr/local/bin/
-chmod +x /usr/local/bin/gateway-route-manager.sh
 systemctl enable gateway-route-manager
 
 # Determine if this script is being run for the first time

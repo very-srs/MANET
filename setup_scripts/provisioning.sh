@@ -84,21 +84,11 @@ main() {
 	systemctl disable apt-daily-upgrade.timer
 
 	# The version of alfred in the debian packages is old.  Install one built oct 2025
-	cp /root/alfred /usr/sbin/
-	cp /root/batctl /usr/sbin/
+	cp /root/bin/* /usr/sbin/
 
-	# Add the protobuf tools
-	cp /root/NodeInfo_pb2.py /usr/local/bin/
-	cp /root/encoder.py /usr/local/bin/
-	cp /root/decoder.py /usr/local/bin/
-    chmod +x /usr/local/bin/encoder.py
-    chmod +x /usr/local/bin/decoder.py
-
-	#copy over mtx tools
-	cp /root/mtx-ip.sh /usr/local/bin/   # Selects the ipv6 for mediaMTX
-	chmod +x /usr/local/bin/mtx-ip.sh
-	cp /root/mediamtx-election.sh /usr/local/bin  # Determines who will be the MTX server
-	chmod +x /usr/local/bin/mediamtx-election.sh
+	# Install the scripts that do all the work
+	cp /root/node_tools/* /usr/local/bin/
+    chmod +x /usr/local/bin/*
 
 	# setup rpi config parameters to activate the pcie bus, used by wireless card
 	sed -i 's/#dtparam=spi=on/dtparam=spi=on/g' /boot/firmware/config.txt
@@ -362,8 +352,6 @@ main() {
 		[Install]
 		WantedBy=multi-user.target
 	EOF
-	cp /root/one-shot-time-sync.sh /usr/local/bin/
-	chmod +x /usr/local/bin/one-shot-time-sync.sh
 # this is currently not working
 #	systemctl enable one-shot-time-sync.service
 
