@@ -71,13 +71,11 @@ fi
 #    echo " > Enabling OpenTAKServer..."
 #    #do tak stuff, not yet enabled
 #fi
-
 if [[ -n "$ipv4_network" ]]; then
 	echo " > Setting IPv4 network settings..."
 	# Create the configuration file for the IPv4 manager
 	cat <<- EOF > /etc/mesh_ipv4.conf
-		IPV4_SUBNET="$(echo "$ipv4_network" | cut -d'.' -f1-4)"
-		IPV4_MASK="/${ipv4_cidr}"
+		IPV4_NETWORK="${ipv4_network}/${ipv4_cidr}"
 	EOF
 fi
 
@@ -327,7 +325,7 @@ echo " > restarting networkd..."
 systemctl restart systemd-networkd
 
 echo " > resetting ipv4..."
-systemctl restart ipv4-manager
+systemctl restart node-manager
 
 
 sleep 6 # wait for wpa_supplicant to catch up
