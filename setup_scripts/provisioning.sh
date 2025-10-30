@@ -307,7 +307,7 @@ main() {
 		{
 		    AdvSendAdvert on;
 		    AdvDefaultLifetime 0;
-		    prefix fd01:ed20:ecb4::/48
+		    prefix fd01:ed20:ecb4:0::/64
 		    {
 		        AdvOnLink on;
 		        AdvAutonomous on;
@@ -320,7 +320,7 @@ main() {
 		interface br0 {
 		    AdvSendAdvert on;
 		    AdvDefaultLifetime 600;
-		    prefix fd01:ed20:ecb4::/48  {
+		    fd01:ed20:ecb4:0::/64  {
 		        AdvOnLink on;
 		        AdvAutonomous on;
 		    };
