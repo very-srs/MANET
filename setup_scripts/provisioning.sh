@@ -307,8 +307,7 @@ main() {
 		{
 		    AdvSendAdvert on;
 		    AdvDefaultLifetime 0;
-		    prefix fd01:ed20:ecb4:0::/64
-		    {
+		    prefix fd01:ed20:ecb4:0::/64  {
 		        AdvOnLink on;
 		        AdvAutonomous on;
 		        AdvRouterAddr off;
@@ -320,7 +319,7 @@ main() {
 		interface br0 {
 		    AdvSendAdvert on;
 		    AdvDefaultLifetime 600;
-		    fd01:ed20:ecb4:0::/64  {
+		    prefix fd01:ed20:ecb4:0::/64  {
 		        AdvOnLink on;
 		        AdvAutonomous on;
 		    };
