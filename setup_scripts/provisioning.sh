@@ -75,9 +75,15 @@ main() {
 	# Install packages for this system
 	apt install -y ipcalc nmap lshw tcpdump net-tools nftables wireless-tools iperf3\
 	  \radvd bridge-utils firmware-mediatek libnss-mdns syncthing networkd-dispatcher\
-	  libgps-dev libcap-dev mumble-server screen arping bc yq\
+	  libgps-dev libcap-dev mumble-server screen arping bc \
 	  python3-protobuf chrony > /dev/null 2>&1
 	echo "Done"
+
+	apt remove yq > /dev/null 2>&1
+
+	# Download and install Go yq
+	wget -q https://github.com/mikefarah/yq/releases/latest/download/yq_linux_arm64 -O /usr/bin/yq
+	chmod +x /usr/bin/yq
 
 	echo "Disabling APT timers for automatic updates..."
 	systemctl disable apt-daily.timer
@@ -88,7 +94,7 @@ main() {
 
 	# Install the scripts that do all the work
 	cp /root/node_tools/* /usr/local/bin/
-    chmod +x /usr/local/bin/*
+	chmod +x /usr/local/bin/*
 
 	# setup rpi config parameters to activate the pcie bus, used by wireless card
 	sed -i 's/#dtparam=spi=on/dtparam=spi=on/g' /boot/firmware/config.txt
@@ -104,9 +110,8 @@ main() {
 	echo "PCIe subsystem enabled"
 
 	sed -i 's/otg_mode=1//g' /boot/firmware/config.txt
-	if ! grep -q 'dr_mode=host' /boot/firmware/config.txt; then
-		echo "dtoverlay=dwc2,dr_mode=host" >> /boot/firmware/config.txt
-	fi
+	sed -i 's/dtoverlay=dwc2,dr_mode=host//g' /boot/firmware/config.txt
+	echo "dtoverlay=dwc2,dr_mode=host" >> /boot/firmware/config.txt
 
 
 	# disable the default wpa_supplicant service
