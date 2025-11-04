@@ -17,7 +17,7 @@ DECODER_PATH="/usr/local/bin/decoder.py"
 
 # --- Helper Functions ---
 log() {
-    echo "[$(date +'%Y-%m-%d %H:%M:%S')] - REGISTRY: $1"
+    echo "[$(date +'%Y-%m-%d %H:%M:%S')] - REGISTRY: $1" >&2
 }
 
 # --- Main Logic ---
@@ -83,6 +83,7 @@ for B64_PAYLOAD in "${PEER_PAYLOADS[@]}"; do
             printf "%s_IS_NTP_SERVER='%s'\n" "$PREFIX" "${IS_NTP_SERVER:-}"
             printf "%s_IS_MUMBLE_SERVER='%s'\n" "$PREFIX" "${IS_MUMBLE_SERVER:-}"
             printf "%s_IS_TAK_SERVER='%s'\n" "$PREFIX" "${IS_TAK_SERVER:-}"
+            printf "%s_IS_MEDIAMTX_SERVER='%s'\n" "$PREFIX" "${IS_MEDIAMTX_SERVER:-}"
             printf "%s_UPTIME_SECONDS='%s'\n" "$PREFIX" "${UPTIME_SECONDS:-}"
             printf "%s_BATTERY_PERCENTAGE='%s'\n" "$PREFIX" "${BATTERY_PERCENTAGE:-}"
             printf "%s_CPU_LOAD_AVERAGE='%s'\n" "$PREFIX" "${CPU_LOAD_AVERAGE:-}"
@@ -101,7 +102,7 @@ for B64_PAYLOAD in "${PEER_PAYLOADS[@]}"; do
 
     # Clear variables for next iteration
     unset HOSTNAME MAC_ADDRESS MAC_ADDRESSES IPV4_ADDRESS SYNCTHING_ID TQ_AVERAGE \
-          IS_INTERNET_GATEWAY IS_NTP_SERVER IS_MUMBLE_SERVER IS_TAK_SERVER \
+          IS_INTERNET_GATEWAY IS_NTP_SERVER IS_MUMBLE_SERVER IS_TAK_SERVER IS_MEDIAMTX_SERVER \
           UPTIME_SECONDS BATTERY_PERCENTAGE CPU_LOAD_AVERAGE \
           GPS_LATITUDE GPS_LONGITUDE GPS_ALTITUDE ATAK_USER
 done
