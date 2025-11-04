@@ -19,7 +19,7 @@ DESCRIPTOR = _descriptor.FileDescriptor(
   syntax='proto3',
   serialized_options=None,
   create_key=_descriptor._internal_create_key,
-  serialized_pb=b'\n\x0eNodeInfo.proto\"\xa8\x03\n\x08NodeInfo\x12\x10\n\x08hostname\x18\x01 \x01(\t\x12\x15\n\rmac_addresses\x18\x02 \x03(\t\x12\x14\n\x0cipv4_address\x18\x03 \x01(\t\x12\x14\n\x0csyncthing_id\x18\x04 \x01(\t\x12\x12\n\ntq_average\x18\n \x01(\x02\x12\x1b\n\x13is_internet_gateway\x18\x0b \x01(\x08\x12\x18\n\x10is_mumble_server\x18\x14 \x01(\x08\x12\x15\n\ris_ntp_server\x18\x15 \x01(\x08\x12\x15\n\ris_tak_server\x18\x16 \x01(\x08\x12\x16\n\x0euptime_seconds\x18\x1e \x01(\r\x12\x1a\n\x12\x62\x61ttery_percentage\x18\x1f \x01(\r\x12\x18\n\x10\x63pu_load_average\x18  \x01(\x02\x12\'\n\x08location\x18( \x01(\x0b\x32\x15.NodeInfo.GpsLocation\x12\x11\n\tatak_user\x18) \x01(\t\x1a\x44\n\x0bGpsLocation\x12\x10\n\x08latitude\x18\x01 \x01(\x01\x12\x11\n\tlongitude\x18\x02 \x01(\x01\x12\x10\n\x08\x61ltitude\x18\x03 \x01(\x02\x62\x06proto3'
+  serialized_pb=b'\n\x0eNodeInfo.proto\"\xc4\x03\n\x08NodeInfo\x12\x10\n\x08hostname\x18\x01 \x01(\t\x12\x15\n\rmac_addresses\x18\x02 \x03(\t\x12\x14\n\x0cipv4_address\x18\x03 \x01(\t\x12\x14\n\x0csyncthing_id\x18\x04 \x01(\t\x12\x12\n\ntq_average\x18\n \x01(\x02\x12\x1b\n\x13is_internet_gateway\x18\x0b \x01(\x08\x12\x18\n\x10is_mumble_server\x18\x14 \x01(\x08\x12\x15\n\ris_ntp_server\x18\x15 \x01(\x08\x12\x15\n\ris_tak_server\x18\x16 \x01(\x08\x12\x1a\n\x12is_mediamtx_server\x18\x17 \x01(\x08\x12\x16\n\x0euptime_seconds\x18\x1e \x01(\r\x12\x1a\n\x12\x62\x61ttery_percentage\x18\x1f \x01(\r\x12\x18\n\x10\x63pu_load_average\x18  \x01(\x02\x12\'\n\x08location\x18( \x01(\x0b\x32\x15.NodeInfo.GpsLocation\x12\x11\n\tatak_user\x18) \x01(\t\x1a\x44\n\x0bGpsLocation\x12\x10\n\x08latitude\x18\x01 \x01(\x01\x12\x11\n\tlongitude\x18\x02 \x01(\x01\x12\x10\n\x08\x61ltitude\x18\x03 \x01(\x02\x62\x06proto3'
 )
 
 
@@ -66,8 +66,8 @@ _NODEINFO_GPSLOCATION = _descriptor.Descriptor(
   extension_ranges=[],
   oneofs=[
   ],
-  serialized_start=375,
-  serialized_end=443,
+  serialized_start=403,
+  serialized_end=471,
 )
 
 _NODEINFO = _descriptor.Descriptor(
@@ -142,35 +142,42 @@ _NODEINFO = _descriptor.Descriptor(
       is_extension=False, extension_scope=None,
       serialized_options=None, file=DESCRIPTOR,  create_key=_descriptor._internal_create_key),
     _descriptor.FieldDescriptor(
-      name='uptime_seconds', full_name='NodeInfo.uptime_seconds', index=9,
+      name='is_mediamtx_server', full_name='NodeInfo.is_mediamtx_server', index=9,
+      number=23, type=8, cpp_type=7, label=1,
+      has_default_value=False, default_value=False,
+      message_type=None, enum_type=None, containing_type=None,
+      is_extension=False, extension_scope=None,
+      serialized_options=None, file=DESCRIPTOR,  create_key=_descriptor._internal_create_key),
+    _descriptor.FieldDescriptor(
+      name='uptime_seconds', full_name='NodeInfo.uptime_seconds', index=10,
       number=30, type=13, cpp_type=3, label=1,
       has_default_value=False, default_value=0,
       message_type=None, enum_type=None, containing_type=None,
       is_extension=False, extension_scope=None,
       serialized_options=None, file=DESCRIPTOR,  create_key=_descriptor._internal_create_key),
     _descriptor.FieldDescriptor(
-      name='battery_percentage', full_name='NodeInfo.battery_percentage', index=10,
+      name='battery_percentage', full_name='NodeInfo.battery_percentage', index=11,
       number=31, type=13, cpp_type=3, label=1,
       has_default_value=False, default_value=0,
       message_type=None, enum_type=None, containing_type=None,
       is_extension=False, extension_scope=None,
       serialized_options=None, file=DESCRIPTOR,  create_key=_descriptor._internal_create_key),
     _descriptor.FieldDescriptor(
-      name='cpu_load_average', full_name='NodeInfo.cpu_load_average', index=11,
+      name='cpu_load_average', full_name='NodeInfo.cpu_load_average', index=12,
       number=32, type=2, cpp_type=6, label=1,
       has_default_value=False, default_value=float(0),
       message_type=None, enum_type=None, containing_type=None,
       is_extension=False, extension_scope=None,
       serialized_options=None, file=DESCRIPTOR,  create_key=_descriptor._internal_create_key),
     _descriptor.FieldDescriptor(
-      name='location', full_name='NodeInfo.location', index=12,
+      name='location', full_name='NodeInfo.location', index=13,
       number=40, type=11, cpp_type=10, label=1,
       has_default_value=False, default_value=None,
       message_type=None, enum_type=None, containing_type=None,
       is_extension=False, extension_scope=None,
       serialized_options=None, file=DESCRIPTOR,  create_key=_descriptor._internal_create_key),
     _descriptor.FieldDescriptor(
-      name='atak_user', full_name='NodeInfo.atak_user', index=13,
+      name='atak_user', full_name='NodeInfo.atak_user', index=14,
       number=41, type=9, cpp_type=9, label=1,
       has_default_value=False, default_value=b"".decode('utf-8'),
       message_type=None, enum_type=None, containing_type=None,
@@ -189,7 +196,7 @@ _NODEINFO = _descriptor.Descriptor(
   oneofs=[
   ],
   serialized_start=19,
-  serialized_end=443,
+  serialized_end=471,
 )
 
 _NODEINFO_GPSLOCATION.containing_type = _NODEINFO

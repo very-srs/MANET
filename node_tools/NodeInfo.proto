@@ -17,6 +17,7 @@ message NodeInfo {
   bool is_mumble_server = 20;
   bool is_ntp_server = 21;
   bool is_tak_server = 22;
+  bool is_mediamtx_server = 23;
 
   // --- System Health ---
   uint32 uptime_seconds = 30;

@@ -23,7 +23,7 @@ REGISTRY_BUILDER="/usr/local/bin/mesh-registry-builder.sh"
 IP_MANAGER="/usr/local/bin/mesh-ip-manager.sh"
 ELECTION_SCRIPTS_PATTERN="/usr/local/bin/*-election.sh"
 
-# --- State Variables ---
+# State Variables
 LAST_PUBLISHED_PAYLOAD=""
 LAST_PUBLISH_TIME=0
 PROTOBUF_OVERRIDE=""
@@ -147,6 +147,25 @@ while true; do
          IS_NTP_FLAG="--is-ntp-server"
     fi
 
+    # Check for MediaMTX server status (check if we have the VIP assigned)
+    IS_MTX_FLAG=""
+    if [ -f /etc/mesh_ipv4.conf ]; then
+        source /etc/mesh_ipv4.conf
+        IPV4_NETWORK=${IPV4_NETWORK:-"10.43.1.0/16"}
+        
+        # Get second IP (MediaMTX VIP)
+        CALC_OUTPUT=$(ipcalc "$IPV4_NETWORK" 2>/dev/null)
+        if [ -n "$CALC_OUTPUT" ]; then
+            FIRST_IP=$(echo "$CALC_OUTPUT" | awk '/HostMin/ {print $2}')
+            MTX_VIP="${FIRST_IP%.*}.$((${FIRST_IP##*.} + 1))"
+            
+            # Check if we have this IP assigned
+            if ip addr show dev "$CONTROL_IFACE" | grep -q "inet $MTX_VIP/"; then
+                IS_MTX_FLAG="--is-mediamtx-server"
+            fi
+        fi
+    fi
+
     # Gather all MAC addresses, with primary (br0) first
     ALL_MACS=("$MY_MAC")
     for iface_dir in /sys/class/net/*; do
@@ -212,6 +231,7 @@ while true; do
     # Add flags
     [ -n "$IS_GATEWAY_FLAG" ] && ENCODER_ARGS+=("$IS_GATEWAY_FLAG")
     [ -n "$IS_NTP_FLAG" ] && ENCODER_ARGS+=("$IS_NTP_FLAG")
+    [ -n "$IS_MTX_FLAG" ] && ENCODER_ARGS+=("$IS_MTX_FLAG")
 
     # Apply protobuf overrides if present
     if [ -n "$PROTOBUF_OVERRIDE" ]; then
