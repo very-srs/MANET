@@ -5,11 +5,6 @@
 # which node should host the MediaMTX service. It assigns static VIPs
 # (IPv4 and IPv6), updates the config, and manages the service.
 #
-# Improvements:
-# - 50% TQ threshold to prevent flapping between similar nodes
-# - Uses is_mediamtx_server flag in registry to identify current leader
-# - Only restarts service when taking over leadership
-# - Improved IPv6 VIP detection
 
 # --- Configuration ---
 REGISTRY_STATE_FILE="/var/run/mesh_node_registry"
@@ -18,9 +13,6 @@ MEDIAMTX_SERVICE_NAME="mediamtx.service"
 CONTROL_IFACE="br0"
 MY_MAC=$(cat "/sys/class/net/${CONTROL_IFACE}/address")
 MTX_IPV6_SCRIPT="/usr/local/bin/mtx-ip.sh"
-
-# Threshold: challenger must have 50% better TQ than current leader
-TQ_THRESHOLD_MULTIPLIER="1.5"
 
 log() {
     echo "[$(date +'%Y-%m-%d %H:%M:%S')] - MEDIAMTX-ELECTION: $1" | systemd-cat -t mediamtx-election
@@ -62,87 +54,40 @@ if [ -z "$MEDIAMTX_IPV4_VIP" ] || [ -z "$MEDIAMTX_IPV6_VIP" ]; then
 fi
 IPV4_VIP_WITH_MASK="${MEDIAMTX_IPV4_VIP}/${IPV4_NETWORK#*/}"
 
-# --- Check if we currently have the VIPs (are we the current leader?) ---
-HAS_IPV4_VIP=false
-HAS_IPV6_VIP=false
-
-if ip addr show dev "$CONTROL_IFACE" | grep -q "inet $MEDIAMTX_IPV4_VIP/"; then
-    HAS_IPV4_VIP=true
-fi
-
-if ip -6 addr show dev "$CONTROL_IFACE" | grep -qw "$MEDIAMTX_IPV6_VIP"; then
-    HAS_IPV6_VIP=true
-fi
-
-I_AM_CURRENT_LEADER=false
-if [ "$HAS_IPV4_VIP" = true ] && [ "$HAS_IPV6_VIP" = true ]; then
-    I_AM_CURRENT_LEADER=true
-    log "Currently holding leadership (have VIPs)"
-fi
-
-# --- Discover current leader from registry ---
-CURRENT_LEADER_MAC=""
-CURRENT_LEADER_TQ="0"
-
-# Find the node advertising is_mediamtx_server=true
-while read server_line; do
-    # server_line will be like: NODE_..._IS_MEDIAMTX_SERVER='true'
-    server_varname=$(echo "$server_line" | cut -d'=' -f1)
-    server_value=$(echo "$server_line" | cut -d'=' -f2 | tr -d "'")
-    
-    if [ "$server_value" = "true" ]; then
-        # Extract the sanitized MAC part
-        MAC_SANITIZED=$(echo "$server_varname" | sed -n 's/NODE_\([0-9a-fA-F]\+\)_IS_MEDIAMTX_SERVER/\1/p')
-        
-        if [ -n "$MAC_SANITIZED" ]; then
-            # Get the MAC address
-            MAC_VAR="NODE_${MAC_SANITIZED}_MAC_ADDRESS"
-            MAC_LINE=$(grep "^${MAC_VAR}=" "$REGISTRY_STATE_FILE")
-            
-            if [ -n "$MAC_LINE" ]; then
-                CURRENT_LEADER_MAC=$(echo "$MAC_LINE" | cut -d'=' -f2 | tr -d "'")
-                
-                # Get the TQ for this node
-                TQ_VAR="NODE_${MAC_SANITIZED}_TQ_AVERAGE"
-                TQ_LINE=$(grep "^${TQ_VAR}=" "$REGISTRY_STATE_FILE")
-                
-                if [ -n "$TQ_LINE" ]; then
-                    CURRENT_LEADER_TQ=$(echo "$TQ_LINE" | cut -d'=' -f2 | tr -d "'")
-                    log "Found current leader in registry: $CURRENT_LEADER_MAC (TQ: $CURRENT_LEADER_TQ)"
-                fi
-                break
-            fi
-        fi
-    fi
-done < <(grep 'NODE_.*_IS_MEDIAMTX_SERVER=' "$REGISTRY_STATE_FILE")
-
 # --- Run Election ---
 log "Running MediaMTX election..."
 
 BEST_CANDIDATE_MAC=""
 HIGHEST_TQ="-1"
-MY_TQ="-1"
+NOW=$(date +%s)
+STALE_THRESHOLD=600 # 10 minutes (must match node-manager)
 
 # Read TQ values directly from the registry file
 while read tq_line; do
     tq_varname=$(echo "$tq_line" | cut -d'=' -f1)
     CURRENT_TQ=$(echo "$tq_line" | cut -d'=' -f2 | tr -d "'")
-    
     MAC_SANITIZED=$(echo "$tq_varname" | sed -n 's/NODE_\([0-9a-fA-F]\+\)_TQ_AVERAGE/\1/p')
-    
+
     if [ -n "$MAC_SANITIZED" ]; then
+        # --- NEW: Check Timestamp ---
+        TIMESTAMP_VAR="NODE_${MAC_SANITIZED}_LAST_SEEN_TIMESTAMP"
+        TIMESTAMP_LINE=$(grep "^${TIMESTAMP_VAR}=" "$REGISTRY_STATE_FILE")
+        TIMESTAMP_VAL=$(echo "$TIMESTAMP_LINE" | cut -d'=' -f2 | tr -d "'")
+        
+        if [ -z "$TIMESTAMP_VAL" ] || [ $((NOW - TIMESTAMP_VAL)) -gt $STALE_THRESHOLD ]; then
+            log "Skipping stale candidate $MAC_SANITIZED"
+            continue # Skip to the next node
+        fi
+        # --- End Timestamp Check ---
+
         MAC_VAR="NODE_${MAC_SANITIZED}_MAC_ADDRESS"
         MAC_LINE=$(grep "^${MAC_VAR}=" "$REGISTRY_STATE_FILE")
-        
+
         if [ -n "$MAC_LINE" ]; then
+            # Extract the MAC address and strip the single quotes
             CURRENT_MAC=$(echo "$MAC_LINE" | cut -d'=' -f2 | tr -d "'")
-            
-            # Track our own TQ
-            if [ "$CURRENT_MAC" = "$MY_MAC" ]; then
-                MY_TQ="$CURRENT_TQ"
-            fi
-            
-            # Find highest TQ
+
+            # --- Your existing comparison logic (now working) ---
             if (( $(echo "$CURRENT_TQ > $HIGHEST_TQ" | bc -l) )); then
                 HIGHEST_TQ=$CURRENT_TQ
                 BEST_CANDIDATE_MAC=$CURRENT_MAC
@@ -150,146 +95,101 @@ while read tq_line; do
             elif (( $(echo "$CURRENT_TQ == $HIGHEST_TQ" | bc -l) )) && [[ "$CURRENT_MAC" < "$BEST_CANDIDATE_MAC" ]]; then
                 BEST_CANDIDATE_MAC=$CURRENT_MAC
             fi
+        else
+             log "Warning: Found TQ for $MAC_SANITIZED but no matching MAC_ADDRESS."
         fi
     fi
+# Use process substitution to read from grep, avoiding the subshell pipe problem
 done < <(grep 'NODE_.*_TQ_AVERAGE=' "$REGISTRY_STATE_FILE")
 
-# --- Apply threshold logic ---
-# If there's a current leader and they're not us, apply 50% threshold
-WINNER_MAC=""
-
-if [ -n "$CURRENT_LEADER_MAC" ] && [ "$CURRENT_LEADER_MAC" != "$MY_MAC" ]; then
-    # There's an existing leader (not us). Challenger needs 50% better TQ
-    REQUIRED_TQ=$(echo "$CURRENT_LEADER_TQ * $TQ_THRESHOLD_MULTIPLIER" | bc -l)
-    
-    if (( $(echo "$HIGHEST_TQ >= $REQUIRED_TQ" | bc -l) )); then
-        WINNER_MAC="$BEST_CANDIDATE_MAC"
-        log "Challenger $BEST_CANDIDATE_MAC (TQ: $HIGHEST_TQ) exceeds threshold ($REQUIRED_TQ) to take over from $CURRENT_LEADER_MAC (TQ: $CURRENT_LEADER_TQ)"
-    else
-        # Current leader retains position due to threshold
-        WINNER_MAC="$CURRENT_LEADER_MAC"
-        log "Current leader $CURRENT_LEADER_MAC (TQ: $CURRENT_LEADER_TQ) retains position. Best challenger: $BEST_CANDIDATE_MAC (TQ: $HIGHEST_TQ, needs: $REQUIRED_TQ)"
-    fi
-elif [ "$I_AM_CURRENT_LEADER" = true ]; then
-    # We're the current leader, check if someone beat us by 50%
-    REQUIRED_TQ=$(echo "$MY_TQ * $TQ_THRESHOLD_MULTIPLIER" | bc -l)
-    
-    if [ "$BEST_CANDIDATE_MAC" != "$MY_MAC" ] && (( $(echo "$HIGHEST_TQ >= $REQUIRED_TQ" | bc -l) )); then
-        WINNER_MAC="$BEST_CANDIDATE_MAC"
-        log "Challenger $BEST_CANDIDATE_MAC (TQ: $HIGHEST_TQ) exceeds threshold ($REQUIRED_TQ) to take over from us (TQ: $MY_TQ)"
-    else
-        WINNER_MAC="$MY_MAC"
-        if [ "$BEST_CANDIDATE_MAC" != "$MY_MAC" ]; then
-            log "Retaining leadership (our TQ: $MY_TQ). Best challenger: $BEST_CANDIDATE_MAC (TQ: $HIGHEST_TQ, needs: $REQUIRED_TQ)"
-        else
-            log "Retaining leadership (our TQ: $MY_TQ). No other candidates."
-        fi
-    fi
-else
-    # No current leader exists, highest TQ wins
-    WINNER_MAC="$BEST_CANDIDATE_MAC"
-    log "No current leader. Highest TQ wins: $BEST_CANDIDATE_MAC (TQ: $HIGHEST_TQ)"
-fi
-
 # --- Decide and Act ---
-if [ -z "$WINNER_MAC" ]; then
-    log "No suitable winner determined."
-    # Ensure we're not running if we shouldn't be
-    if [ "$I_AM_CURRENT_LEADER" = true ]; then
-        log "Removing VIPs and stopping service (no valid winner)."
+if [ -z "$BEST_CANDIDATE_MAC" ]; then
+    log "No suitable candidates found in registry."
+    # Ensure service is stopped and VIPs removed if we previously held them
+    if ip addr show dev "$CONTROL_IFACE" | grep -q "inet $MEDIAMTX_IPV4_VIP/"; then
+        log "Removing IPv4 VIP."
         ip addr del "$IPV4_VIP_WITH_MASK" dev "$CONTROL_IFACE" 2>/dev/null
-        ip addr del "$MEDIAMTX_IPV6_VIP_WITH_MASK" dev "$CONTROL_IFACE" 2>/dev/null
-        systemctl stop "$MEDIAMTX_SERVICE_NAME" 2>/dev/null
     fi
-    exit 0
-fi
+    if ip -6 addr show dev "$CONTROL_IFACE" | grep -q "$MEDIAMTX_IPV6_VIP/"; then
+        log "Removing IPv6 VIP."
+        ip addr del "$MEDIAMTX_IPV6_VIP_WITH_MASK" dev "$CONTROL_IFACE" 2>/dev/null
+    fi
+    if systemctl is-active --quiet "$MEDIAMTX_SERVICE_NAME"; then
+        log "Stopping local service as no winner was found."
+        systemctl stop "$MEDIAMTX_SERVICE_NAME"
+    fi
 
-if [ "$WINNER_MAC" = "$MY_MAC" ]; then
+elif [ "$MY_MAC" == "$BEST_CANDIDATE_MAC" ]; then
     # --- I AM THE LEADER ---
-    if [ "$I_AM_CURRENT_LEADER" = true ]; then
-        # Already leader with VIPs, check service status
-        if systemctl is-active --quiet "$MEDIAMTX_SERVICE_NAME"; then
-            log "Already leader and service running. No action needed."
-        else
-            log "Already leader but service not running. Starting service."
-            systemctl start "$MEDIAMTX_SERVICE_NAME"
+    log "Won election (TQ: $HIGHEST_TQ)."
+
+    # Check if we already have both VIPs assigned
+    HAS_IPV4_VIP=false
+    HAS_IPV6_VIP=false
+
+    if ip addr show dev "$CONTROL_IFACE" | grep -q "inet $MEDIAMTX_IPV4_VIP/"; then
+        HAS_IPV4_VIP=true
+    fi
+
+    if ip addr show dev "$CONTROL_IFACE" | grep -q "inet6 $MEDIAMTX_IPV6_VIP/"; then
+        HAS_IPV6_VIP=true
+    fi
+
+    # Assign IPv4 VIP if not already present
+    if [ "$HAS_IPV4_VIP" = false ]; then
+        log "Assigning IPv4 VIP: $MEDIAMTX_IPV4_VIP"
+        ip addr add "$IPV4_VIP_WITH_MASK" dev "$CONTROL_IFACE"
+        # Send Gratuitous ARP
+        if command -v arping &> /dev/null; then
+             log "Sending Gratuitous ARP for $MEDIAMTX_IPV4_VIP"
+             arping -c 1 -A -I "$CONTROL_IFACE" "$MEDIAMTX_IPV4_VIP"
         fi
+    fi
+
+    # Assign IPv6 VIP if not already present
+    if [ "$HAS_IPV6_VIP" = false ]; then
+         log "Assigning IPv6 VIP: $MEDIAMTX_IPV6_VIP"
+         ip addr add "$MEDIAMTX_IPV6_VIP_WITH_MASK" dev "$CONTROL_IFACE" 2>/dev/null || log "IPv6 VIP already exists or failed to add"
+    fi
+
+    # Determine if we were already the leader (had both VIPs)
+    if [ "$HAS_IPV4_VIP" = true ] && [ "$HAS_IPV6_VIP" = true ]; then
+        WAS_ALREADY_LEADER=true
     else
-        # Taking over leadership
-        log "Won election. Taking over leadership (TQ: $MY_TQ)."
-        
-        # Assign IPv4 VIP
-        if [ "$HAS_IPV4_VIP" = false ]; then
-            log "Assigning IPv4 VIP: $MEDIAMTX_IPV4_VIP"
-            ip addr add "$IPV4_VIP_WITH_MASK" dev "$CONTROL_IFACE"
-            
-            # Send Gratuitous ARP
-            if command -v arping &> /dev/null; then
-                log "Sending Gratuitous ARP for $MEDIAMTX_IPV4_VIP"
-                arping -c 1 -A -I "$CONTROL_IFACE" "$MEDIAMTX_IPV4_VIP" 2>/dev/null &
-            fi
-        fi
-        
-        # Assign IPv6 VIP
-        if [ "$HAS_IPV6_VIP" = false ]; then
-            log "Assigning IPv6 VIP: $MEDIAMTX_IPV6_VIP"
-            ip addr add "$MEDIAMTX_IPV6_VIP_WITH_MASK" dev "$CONTROL_IFACE" 2>/dev/null
-        fi
-        
-        # Update config
+        WAS_ALREADY_LEADER=false
+    fi
+
+    # Update config and start service ONLY if we weren't already the leader
+    # or if the service isn't currently running (covers initial startup)
+    if [ "$WAS_ALREADY_LEADER" = false ] || ! systemctl is-active --quiet "$MEDIAMTX_SERVICE_NAME"; then
         if command -v yq &> /dev/null; then
             log "Updating $MEDIAMTX_CONFIG_FILE listen addresses..."
             yq -i ".rtspAddress = \"$MEDIAMTX_IPV4_VIP:8554,$MEDIAMTX_IPV6_VIP:8554\"" "$MEDIAMTX_CONFIG_FILE"
             yq -i ".webrtcAddress = \"$MEDIAMTX_IPV4_VIP:8889,$MEDIAMTX_IPV6_VIP:8889\"" "$MEDIAMTX_CONFIG_FILE"
         else
-            log "Warning: 'yq' not found. Cannot update $MEDIAMTX_CONFIG_FILE."
+            log "Warning: 'yq' not found. Cannot update listen addresses in $MEDIAMTX_CONFIG_FILE. Service might bind incorrectly."
         fi
-        
-        # Start/restart service
-        log "Starting $MEDIAMTX_SERVICE_NAME..."
+        log "Starting/Restarting $MEDIAMTX_SERVICE_NAME..."
         systemctl restart "$MEDIAMTX_SERVICE_NAME"
-    fi
-    
-else
-    # --- I AM NOT THE LEADER ---
-    if [ "$I_AM_CURRENT_LEADER" = true ]; then
-        log "Lost leadership to $WINNER_MAC. Stepping down."
-        
-        # Remove VIPs with error checking
-        if ip addr show dev "$CONTROL_IFACE" | grep -q "inet $MEDIAMTX_IPV4_VIP/"; then
-            log "Removing IPv4 VIP $MEDIAMTX_IPV4_VIP"
-            if ip addr del "$IPV4_VIP_WITH_MASK" dev "$CONTROL_IFACE" 2>&1; then
-                log "IPv4 VIP removed successfully"
-            else
-                log "ERROR: Failed to remove IPv4 VIP"
-            fi
-        fi
-        
-        if ip -6 addr show dev "$CONTROL_IFACE" | grep -qw "$MEDIAMTX_IPV6_VIP"; then
-            log "Removing IPv6 VIP $MEDIAMTX_IPV6_VIP"
-            if ip addr del "$MEDIAMTX_IPV6_VIP_WITH_MASK" dev "$CONTROL_IFACE" 2>&1; then
-                log "IPv6 VIP removed successfully"
-            else
-                log "ERROR: Failed to remove IPv6 VIP"
-            fi
-        fi
-        
-        # Stop service
-        if systemctl is-active --quiet "$MEDIAMTX_SERVICE_NAME"; then
-            log "Stopping $MEDIAMTX_SERVICE_NAME"
-            systemctl stop "$MEDIAMTX_SERVICE_NAME"
-        fi
     else
-        log "Not leader. Current leader: $WINNER_MAC"
-        
-        # Sanity check - if we somehow have the VIPs but shouldn't, remove them
-        if [ "$HAS_IPV4_VIP" = true ] || [ "$HAS_IPV6_VIP" = true ]; then
-            log "WARNING: Not leader but have VIPs assigned. Removing them."
-            [ "$HAS_IPV4_VIP" = true ] && ip addr del "$IPV4_VIP_WITH_MASK" dev "$CONTROL_IFACE" 2>/dev/null
-            [ "$HAS_IPV6_VIP" = true ] && ip addr del "$MEDIAMTX_IPV6_VIP_WITH_MASK" dev "$CONTROL_IFACE" 2>/dev/null
-            systemctl stop "$MEDIAMTX_SERVICE_NAME" 2>/dev/null
-        fi
+        log "Already leader and service running. No action needed."
+    fi
+
+    else
+    # --- I AM NOT THE LEADER ---
+    log "Lost election to ${BEST_CANDIDATE_MAC}."
+    # Ensure service is stopped and VIPs removed if we previously held them
+    if ip addr show dev "$CONTROL_IFACE" | grep -q "inet $MEDIAMTX_IPV4_VIP/"; then
+        log "Removing IPv4 VIP."
+        ip addr del "$IPV4_VIP_WITH_MASK" dev "$CONTROL_IFACE" 2>/dev/null
+    fi
+    if ip addr show dev "$CONTROL_IFACE" | grep -q "inet6 $MEDIAMTX_IPV6_VIP/"; then
+        log "Removing IPv6 VIP."
+        ip addr del "$MEDIAMTX_IPV6_VIP_WITH_MASK" dev "$CONTROL_IFACE" 2>/dev/null
+    fi
+    if systemctl is-active --quiet "$MEDIAMTX_SERVICE_NAME"; then
+        log "Stopping local service."
+        systemctl stop "$MEDIAMTX_SERVICE_NAME"
     fi
 fi
-
 log "Election check complete."

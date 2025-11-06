@@ -2,6 +2,7 @@
 import sys
 import base64
 import argparse
+import json
 import NodeInfo_pb2
 
 def main():
@@ -35,11 +36,39 @@ def main():
         print(f"UPTIME_SECONDS={node_info.uptime_seconds}")
         print(f"BATTERY_PERCENTAGE={node_info.battery_percentage}")
         print(f"CPU_LOAD_AVERAGE={node_info.cpu_load_average}")
-        # Uncomment these when location fields are being used:
-        # print(f"LATITUDE={node_info.location.latitude}")
-        # print(f"LONGITUDE={node_info.location.longitude}")
-        # print(f"ALTITUDE={node_info.location.altitude}")
-        # print(f"ATAK_USER='{node_info.atak_user}'")
+        
+        # --- Print Channel Data ---
+        print(f"DATA_CHANNEL_2_4='{node_info.data_channel_2_4}'")
+        print(f"DATA_CHANNEL_5_0='{node_info.data_channel_5_0}'")
+        
+        # --- Print Timestamp ---
+        print(f"LAST_SEEN_TIMESTAMP={node_info.last_seen_timestamp}")
+        
+        # --- Print Limp Mode ---
+        print(f"IS_IN_LIMP_MODE={str(node_info.is_in_limp_mode).lower()}")
+        
+        # --- Print Tourguide Tracking ---
+        print(f"LAST_TOURGUIDE_TIMESTAMP={node_info.last_tourguide_timestamp}")
+        print(f"LAST_TOURGUIDE_RADIO='{node_info.last_tourguide_radio}'")
+        
+        # --- Print Node State ---
+        state_names = {
+            0: "ACTIVE",
+            1: "SHUTTING_DOWN"
+        }
+        print(f"NODE_STATE='{state_names.get(node_info.node_state, 'ACTIVE')}'")
+
+        # Re-serialize channel report to JSON for shell consumption
+        report_list = []
+        for result in node_info.channel_report.results:
+            report_list.append({
+                "channel": result.channel,
+                "noise_floor": result.noise_floor,
+                "bss_count": result.bss_count
+            })
+        report_json = json.dumps({"results": report_list})
+        # Use single quotes around the JSON for safety in shell
+        print(f"CHANNEL_REPORT_JSON='{report_json}'")
 
     except Exception as e:
         print(f"Error decoding message: {e}", file=sys.stderr)

@@ -98,7 +98,7 @@ for WLAN in `networkctl | awk '/wlan/ {print $2}'`; do
 	echo " > Setting SAE key/SSID for wlan$CT ..."
 	#create wpa supplicant configs
 	echo "MESH_NAME=\"$MESH_NAME\"" > /etc/default/mesh
-	cat <<-EOF > /etc/wpa_supplicant/wpa_supplicant-wlan$CT.conf
+	cat <<-EOF > /etc/wpa_supplicant/wpa_supplicant-wlan$CT-lobby.conf
 		ctrl_interface=/var/run/wpa_supplicant
 		update_config=1
 		sae_pwe=1
@@ -145,6 +145,23 @@ done
 #
 #	System service setup
 #
+
+# Replace wpa_supplicant with default files at boot
+
+cat <<- EOF > /etc/systemd/system/mesh-boot-lobby.service
+	[Unit]
+	Description=Set mesh interfaces to Lobby channels
+	Before=wpa_supplicant@.service
+
+	[Service]
+	Type=oneshot
+	ExecStart=/bin/sh -c 'for LOBBY_FILE in /etc/wpa_supplicant/wlan*-lobby.conf; do DEST_FILE="${LOBBY_FILE%-lobby.conf}.conf"; cp "$LOBBY_FILE" "$DEST_FILE"; done'
+	RemainAfterExit=yes
+
+	[Install]
+	WantedBy=multi-user.target
+EOF
+systemctl enable mesh-boot-lobby.service
 
 #get bat0 a link local address for alfred
 cat <<- EOF > /etc/sysctl.d/99-batman.conf
@@ -285,6 +302,24 @@ cat <<- EOF > /etc/systemd/system/gateway-route-manager.service
 	WantedBy=multi-user.target
 EOF
 systemctl enable gateway-route-manager
+
+cat <<- EOF > /etc/systemd/system/mesh-shutdown.service
+	[Unit]
+	Description=Mesh Network Graceful Shutdown
+	DefaultDependencies=no
+	Before=shutdown.target reboot.target halt.target
+	Requires=alfred.service
+
+	[Service]
+	Type=oneshot
+	ExecStart=/usr/local/bin/mesh-shutdown.sh
+	TimeoutStartSec=10
+	RemainAfterExit=yes
+
+	[Install]
+	WantedBy=halt.target reboot.target shutdown.target
+EOF
+systemctl enable mesh-shutdown.service
 
 # Determine if this script is being run for the first time
 # and reboot if so to pick up the changes to the interfaces

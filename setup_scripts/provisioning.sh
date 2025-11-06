@@ -75,7 +75,7 @@ main() {
 	# Install packages for this system
 	apt install -y ipcalc nmap lshw tcpdump net-tools nftables wireless-tools iperf3\
 	  \radvd bridge-utils firmware-mediatek libnss-mdns syncthing networkd-dispatcher\
-	  libgps-dev libcap-dev mumble-server screen arping bc \
+	  libgps-dev libcap-dev mumble-server screen arping bc jq \
 	  python3-protobuf chrony > /dev/null 2>&1
 	echo "Done"
 
