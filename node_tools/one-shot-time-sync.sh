@@ -36,32 +36,7 @@ while [ ! -s "$REGISTRY_STATE_FILE" ]; do
 done
 log "Mesh registry is available. Proceeding with sync..."
 
-# Find the Best NTP Server
-source "$REGISTRY_STATE_FILE"
-BEST_SERVER_HOSTNAME=""
-HIGHEST_TQ="-1"
-PREFIX_PATTERN="NODE_([0-9a-fA-F]+)"
-
-while IFS= read -r line; do
-    # Find nodes that are flagged as NTP servers
-    if [[ $line =~ ${PREFIX_PATTERN}_IS_NTP_SERVER=\'true\' ]]; then
-        MAC_SANITIZED="${BASH_REMATCH[1]}"
-
-        TQ_VAR="NODE_${MAC_SANITIZED}_TQ_AVERAGE"
-        HOSTNAME_VAR="NODE_${MAC_SANITIZED}_HOSTNAME"
-
-        CURRENT_TQ=${!TQ_VAR}
-        CURRENT_HOSTNAME=${!HOSTNAME_VAR}
-
-        # Compare TQ scores to find the best
-        if (( $(echo "$CURRENT_TQ > $HIGHEST_TQ" | bc -l) )); then
-            HIGHEST_TQ=$CURRENT_TQ
-            BEST_SERVER_HOSTNAME=$CURRENT_HOSTNAME
-        fi
-    fi
-done < "$REGISTRY_STATE_FILE"
-
-# Find the Best NTP Server
+# Find the Best NTP Server, from the POV of this mesh node
 source "$REGISTRY_STATE_FILE"
 BEST_SERVER_HOSTNAME=""
 BEST_SERVER_MAC=""
@@ -73,7 +48,7 @@ mapfile -t BATCTL_OUTPUT < <(batctl o)
 
 # Loop through the registry to find candidate servers
 while IFS= read -r line; do
-    # Find nodes that are flagged as NTP servers
+    # Find nodes that are flagged as NTP servers in the registry
     if [[ $line =~ ${PREFIX_PATTERN}_IS_NTP_SERVER=\'true\' ]]; then
         MAC_SANITIZED="${BASH_REMATCH[1]}"
 
@@ -89,7 +64,7 @@ while IFS= read -r line; do
         for bat_line in "${BATCTL_OUTPUT[@]}"; do
             # The Originator column in `batctl o` is the MAC address
             if [[ "$bat_line" == *"$CANDIDATE_MAC"* ]]; then
-                # Extract the TQ score (usually the 3rd field, enclosed in parentheses)
+                # Extract the TQ score
                 TQ_RAW=$(echo "$bat_line" | awk '{print $3}' | tr -d '()')
                 # Validate if it's a number
                 if [[ "$TQ_RAW" =~ ^[0-9]+$ ]]; then
@@ -114,8 +89,10 @@ if [ -n "$BEST_SERVER_HOSTNAME" ]; then
      (MAC: ${BEST_SERVER_MAC}) with local TQ ${HIGHEST_LOCAL_TQ}."
 
     # Resolve the hostname to an IPv6 address
-	BEST_SERVER_IP=$(resolvectl query --type=AAAA "${BEST_SERVER_HOSTNAME}.local" \
-  | awk '/^.*: .*:/ {print $2; exit}')
+#	BEST_SERVER_IP=$(resolvectl query --type=AAAA "${BEST_SERVER_HOSTNAME}.local" \
+#  | awk '/^.*: .*:/ {print $2; exit}')
+
+    BEST_SERVER_IP=$( /usr/loca/bin/mac-to-ip.sh $BEST_SERVER_MAC )
 
     if [ -n "$BEST_SERVER_IP" ]; then
         log "Syncing time with ${BEST_SERVER_IP}..."

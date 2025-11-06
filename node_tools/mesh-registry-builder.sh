@@ -17,7 +17,7 @@ DECODER_PATH="/usr/local/bin/decoder.py"
 
 # --- Helper Functions ---
 log() {
-    echo "[$(date +'%Y-%m-%d %H:%M:%S')] - REGISTRY: $1" >&2
+    echo "[$(date +'%Y-%m-%d %H:%M:%S')] - REGISTRY: $1"
 }
 
 # --- Main Logic ---
@@ -87,10 +87,14 @@ for B64_PAYLOAD in "${PEER_PAYLOADS[@]}"; do
             printf "%s_UPTIME_SECONDS='%s'\n" "$PREFIX" "${UPTIME_SECONDS:-}"
             printf "%s_BATTERY_PERCENTAGE='%s'\n" "$PREFIX" "${BATTERY_PERCENTAGE:-}"
             printf "%s_CPU_LOAD_AVERAGE='%s'\n" "$PREFIX" "${CPU_LOAD_AVERAGE:-}"
-            printf "%s_GPS_LATITUDE='%s'\n" "$PREFIX" "${GPS_LATITUDE:-}"
-            printf "%s_GPS_LONGITUDE='%s'\n" "$PREFIX" "${GPS_LONGITUDE:-}"
-            printf "%s_GPS_ALTITUDE='%s'\n" "$PREFIX" "${GPS_ALTITUDE:-}"
-            printf "%s_ATAK_USER='%s'\n" "$PREFIX" "${ATAK_USER:-}"
+            printf "%s_DATA_CHANNEL_2_4='%s'\n" "$PREFIX" "${DATA_CHANNEL_2_4:-}"
+            printf "%s_DATA_CHANNEL_5_0='%s'\n" "$PREFIX" "${DATA_CHANNEL_5_0:-}"
+            printf "%s_CHANNEL_REPORT_JSON='%s'\n" "$PREFIX" "${CHANNEL_REPORT_JSON:-}"
+            printf "%s_LAST_SEEN_TIMESTAMP='%s'\n" "$PREFIX" "${LAST_SEEN_TIMESTAMP:-0}"
+            printf "%s_IS_IN_LIMP_MODE='%s'\n" "$PREFIX" "${IS_IN_LIMP_MODE:-false}"
+            printf "%s_LAST_TOURGUIDE_TIMESTAMP='%s'\n" "$PREFIX" "${LAST_TOURGUIDE_TIMESTAMP:-0}"
+            printf "%s_LAST_TOURGUIDE_RADIO='%s'\n" "$PREFIX" "${LAST_TOURGUIDE_RADIO:-}"
+            printf "%s_NODE_STATE='%s'\n" "$PREFIX" "${NODE_STATE:-ACTIVE}"
             echo ""
         } >> "$REGISTRY_TMP"
 
@@ -102,9 +106,12 @@ for B64_PAYLOAD in "${PEER_PAYLOADS[@]}"; do
 
     # Clear variables for next iteration
     unset HOSTNAME MAC_ADDRESS MAC_ADDRESSES IPV4_ADDRESS SYNCTHING_ID TQ_AVERAGE \
-          IS_INTERNET_GATEWAY IS_NTP_SERVER IS_MUMBLE_SERVER IS_TAK_SERVER IS_MEDIAMTX_SERVER \
-          UPTIME_SECONDS BATTERY_PERCENTAGE CPU_LOAD_AVERAGE \
-          GPS_LATITUDE GPS_LONGITUDE GPS_ALTITUDE ATAK_USER
+        IS_INTERNET_GATEWAY IS_NTP_SERVER IS_MUMBLE_SERVER IS_TAK_SERVER IS_MEDIAMTX_SERVER \
+        UPTIME_SECONDS BATTERY_PERCENTAGE CPU_LOAD_AVERAGE \
+        DATA_CHANNEL_2_4 DATA_CHANNEL_5_0 CHANNEL_REPORT_JSON \
+        LAST_SEEN_TIMESTAMP IS_IN_LIMP_MODE \
+        LAST_TOURGUIDE_TIMESTAMP LAST_TOURGUIDE_RADIO NODE_STATE \
+        GPS_LATITUDE GPS_LONGITUDE GPS_ALTITUDE ATAK_USER
 done
 
 # Sort and save claimed IPs

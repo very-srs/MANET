@@ -2,304 +2,322 @@
 # ==============================================================================
 # Mesh Node Manager - Main Orchestrator
 # ==============================================================================
-# This script runs as a persistent service to:
-# 1. Periodically gather various node metrics.
-# 2. Use encoder.py to create a Protobuf message.
-# 3. Announce status via alfred.
-# 4. Call modular scripts for IP management, registry building, and elections.
-# 5. Accept --update arguments to update specific protobuf variables.
+# Coordinates timing and delegates complex tasks to specialized scripts
 # ==============================================================================
 
 # --- Configuration ---
 CONTROL_IFACE="br0"
 ALFRED_DATA_TYPE=68
-DEFENSE_INTERVAL=300 # Republish status every 5 minutes
-MONITOR_INTERVAL=15 # How often the main loop runs (seconds)
-PERSISTENT_STATE_FILE="/etc/mesh_node_state"
-BATCTL_PATH="/usr/sbin/batctl"
+ALFRED_HELPER_TYPE=69
+MONITOR_INTERVAL=15
+
+# Lobby channels
+LOBBY_FREQ_2_4=2412
+LOBBY_FREQ_5_0=5180
+
+# Radio Config
+WPA_CONF_2_4="/etc/wpa_supplicant/wpa_supplicant-wlan0.conf"
+WPA_CONF_5_0="/etc/wpa_supplicant/wpa_supplicant-wlan1.conf"
+
+# Scan frequencies
+SCAN_FREQS_2_4="2412 2437 2462"
+SCAN_FREQS_5_0="5180 5200 5220 5240 5745 5765 5785 5805 5825"
 
 # Helper scripts
 REGISTRY_BUILDER="/usr/local/bin/mesh-registry-builder.sh"
 IP_MANAGER="/usr/local/bin/mesh-ip-manager.sh"
-ELECTION_SCRIPTS_PATTERN="/usr/local/bin/*-election.sh"
+CHANNEL_ELECTION="/usr/local/bin/channel-election.sh"
+TOURGUIDE_MANAGER="/usr/local/bin/tourguide-manager.sh"
+QUORUM_CHECKER="/usr/local/bin/quorum-checker.sh"
+LIMP_MODE_MANAGER="/usr/local/bin/limp-mode-manager.sh"
+ELECTION_OUTPUT_FILE="/var/run/mesh_channel_election"
+REGISTRY_STATE_FILE="/var/run/mesh_node_registry"
+ENCODER_PATH="/usr/local/bin/encoder.py"
+BATCTL_PATH="/usr/sbin/batctl"
 
-# State Variables
+# --- State Variables ---
 LAST_PUBLISHED_PAYLOAD=""
 LAST_PUBLISH_TIME=0
-PROTOBUF_OVERRIDE=""
-LAST_RUN_TIMESTAMP=0
+CACHED_SCAN_REPORT_JSON="{}"
+LAST_SCAN_COMPLETE_TIME=0
 
-# --- Helper Functions ---
+# Window tracking
+declare -A LAST_ACTION_WINDOW
+
 log() {
     echo "[$(date +'%Y-%m-%d %H:%M:%S')] - NODE-MGR: $1"
 }
 
-# Save persistent state
-save_persistent_state() {
-    cat > "$PERSISTENT_STATE_FILE" <<- EOF
-		# Persistent state for mesh node manager
-		# Last updated: $(date)
-		PROTOBUF_OVERRIDE='$PROTOBUF_OVERRIDE'
-		LAST_RUN_TIMESTAMP=$(date +%s)
-		LAST_UPDATE=$(date +%s)
-	EOF
-    chmod 644 "$PERSISTENT_STATE_FILE"
+# --- Clock-synchronized action checker ---
+should_perform_action() {
+    local action_name=$1
+    local interval_seconds=$2
+    local offset_seconds=$3
+
+    local NOW=$(date +%s)
+    local SECONDS_INTO_INTERVAL=$((NOW % interval_seconds))
+
+    local DIFF=$((SECONDS_INTO_INTERVAL - offset_seconds))
+    DIFF=${DIFF#-}
+
+    if [ $DIFF -le 2 ]; then
+        local CURRENT_WINDOW=$((NOW / interval_seconds))
+
+        if [ "${LAST_ACTION_WINDOW[$action_name]}" != "$CURRENT_WINDOW" ]; then
+            LAST_ACTION_WINDOW[$action_name]=$CURRENT_WINDOW
+            return 0
+        fi
+    fi
+
+    return 1
 }
 
-# --- Parse command line arguments ---
-UPDATE_MODE=false
-if [[ "$1" == "--update-protobuf" || "$1" == "-u" ]]; then
-    UPDATE_MODE=true
-fi
+get_current_freq() {
+    local conf_file=$1
+    grep -oP 'frequency=\K[0-9]+' "$conf_file" 2>/dev/null | head -1
+}
 
-# --- Handle update mode ---
-if [ "$UPDATE_MODE" = true ]; then
-    # Read protobuf variable assignments from STDIN
-    PROTOBUF_VARS=$(cat)
-    if [ -z "$PROTOBUF_VARS" ]; then
-        echo "Error: No protobuf variables provided on STDIN" >&2
-        echo "Usage: echo 'VARIABLE=value' | $0 --update-protobuf" >&2
-        exit 1
+is_in_lobby() {
+    local freq_2_4=$(get_current_freq "$WPA_CONF_2_4")
+    local freq_5_0=$(get_current_freq "$WPA_CONF_5_0")
+
+    if [[ "$freq_2_4" == "$LOBBY_FREQ_2_4" && "$freq_5_0" == "$LOBBY_FREQ_5_0" ]]; then
+        echo "true"
+    else
+        echo "false"
+    fi
+}
+
+return_to_lobby() {
+    log "Returning to lobby channels..."
+    sed -i "s/frequency=.*/frequency=${LOBBY_FREQ_2_4}/" "$WPA_CONF_2_4"
+    sed -i "s/frequency=.*/frequency=${LOBBY_FREQ_5_0}/" "$WPA_CONF_5_0"
+    systemctl restart wpa_supplicant@wlan0.service
+    systemctl restart wpa_supplicant@wlan1.service
+    sleep 5
+}
+
+perform_scan() {
+    local json_out='{"results": ['
+    local first_entry=true
+
+    for iface in "wlan0" "wlan1"; do
+        local freqs_to_scan=""
+        [ "$iface" == "wlan0" ] && freqs_to_scan=$SCAN_FREQS_2_4
+        [ "$iface" == "wlan1" ] && freqs_to_scan=$SCAN_FREQS_5_0
+
+        (iw dev "$iface" scan freqs $freqs_to_scan > /dev/null 2>&1) &
+        SCAN_PID=$!
+
+        for i in {1..10}; do
+            kill -0 $SCAN_PID 2>/dev/null || break
+            sleep 0.5
+        done
+        kill $SCAN_PID 2>/dev/null || true
+
+        local survey_data=$(iw dev "$iface" survey dump 2>/dev/null)
+        local scan_data=$(iw dev "$iface" scan dump 2>/dev/null)
+
+        for freq in $freqs_to_scan; do
+            local noise=$(echo "$survey_data" | awk -v f=$freq '$1=="freq:" && $2==f {getline; if ($1=="noise:") print $2}' | head -1)
+            noise=${noise:--100}
+            local bss_count=$(echo "$scan_data" | grep -c "freq: $freq" || echo "0")
+
+            [ "$first_entry" = true ] && first_entry=false || json_out+=","
+            json_out+="{\"channel\": ${freq}, \"noise_floor\": ${noise}, \"bss_count\": ${bss_count}}"
+        done
+    done
+
+    json_out+=']}'
+    echo "$json_out"
+}
+
+is_hosting_service() {
+    if systemctl is-active --quiet mediamtx.service; then
+        source /etc/mesh_ipv4.conf 2>/dev/null
+        local CALC_OUTPUT=$(ipcalc "$IPV4_NETWORK" 2>/dev/null)
+        local FIRST_IP=$(echo "$CALC_OUTPUT" | awk '/HostMin/ {print $2}')
+        local MEDIAMTX_IPV4_VIP="${FIRST_IP%.*}.$((${FIRST_IP##*.} + 1))"
+        ip addr show dev "$CONTROL_IFACE" | grep -q "inet $MEDIAMTX_IPV4_VIP/" && return 0
+    fi
+    return 1
+}
+
+should_perform_tourguide() {
+    local NOW=$(date +%s)
+    local MINUTE_OF_HOUR=$(( (NOW % 3600) / 60 ))
+
+    [ $((MINUTE_OF_HOUR % 2)) -ne 0 ] && return 1
+
+    local SECOND_OF_MINUTE=$((NOW % 60))
+
+    if [ $SECOND_OF_MINUTE -ge 30 ] && [ $SECOND_OF_MINUTE -lt 50 ]; then
+        local CURRENT_WINDOW=$((NOW / 120))
+        if [ "${LAST_ACTION_WINDOW[TOURGUIDE]}" != "$CURRENT_WINDOW" ]; then
+            LAST_ACTION_WINDOW[TOURGUIDE]=$CURRENT_WINDOW
+            return 0
+        fi
     fi
 
-    # Load existing state
-    if [ -f "$PERSISTENT_STATE_FILE" ]; then
-        source "$PERSISTENT_STATE_FILE" 2>/dev/null
-    fi
+    return 1
+}
 
-    # Update the PROTOBUF_OVERRIDE variable
-    PROTOBUF_OVERRIDE="$PROTOBUF_VARS"
-    save_persistent_state
-
-    echo "Protobuf variables updated successfully."
-    echo "The node-manager service will use these overrides on next cycle."
-    exit 0
-fi
-
-# --- Normal operation mode continues below ---
-
+# === MAIN SETUP ===
 log "Starting Mesh Node Manager."
-
-# Get primary MAC address
-MY_MAC=$(cat "/sys/class/net/${CONTROL_IFACE}/address" 2>/dev/null || echo "")
-if [ -z "$MY_MAC" ]; then
-    log "ERROR: Cannot read MAC address from $CONTROL_IFACE"
-    exit 1
-fi
-
+MY_MAC=$(cat "/sys/class/net/${CONTROL_IFACE}/address")
 log "Node MAC: ${MY_MAC}"
 
-# Load persistent state if it exists
-if [ -f "$PERSISTENT_STATE_FILE" ]; then
-    source "$PERSISTENT_STATE_FILE" 2>/dev/null
-    if [ -n "$PROTOBUF_OVERRIDE" ]; then
-        log "Loaded protobuf overrides."
-    fi
-    if [ -n "$LAST_RUN_TIMESTAMP" ] && [ "$LAST_RUN_TIMESTAMP" -gt 0 ]; then
-        log "Last run: $(date -d @${LAST_RUN_TIMESTAMP})"
-    fi
-fi
-
-### --- Main Loop ---
+# === MAIN LOOP ===
 while true; do
-    CYCLE_START=$(date +%s)
+    NOW=$(date +%s)
 
-    # Reload persistent state if it was recently updated by --update-protobuf
-    if [ -f "$PERSISTENT_STATE_FILE" ]; then
-        STATE_FILE_MTIME=$(stat -c %Y "$PERSISTENT_STATE_FILE")
-        TEMP_LAST_UPDATE=0
-        eval "$(grep '^LAST_UPDATE=' "$PERSISTENT_STATE_FILE" 2>/dev/null || echo 'LAST_UPDATE=0')"
-        TEMP_LAST_UPDATE=${LAST_UPDATE:-0}
+    # === CHECK STATE: LOBBY OR DATA ===
+    IS_IN_LOBBY=$(is_in_lobby)
 
-        if [[ "$STATE_FILE_MTIME" -gt "$TEMP_LAST_UPDATE" ]]; then
-            log "Detected external update to state file. Reloading..."
-            source "$PERSISTENT_STATE_FILE" 2>/dev/null
+    if [ "$IS_IN_LOBBY" = "true" ]; then
+        # ===================================
+        # === LOBBY STATE ===
+        # ===================================
+        HELPER_PAYLOAD=$(timeout $MONITOR_INTERVAL alfred -r $ALFRED_HELPER_TYPE 2>/dev/null | grep -oP '"\K[^"]+(?="\s*\},?)' | head -1)
+
+        if [ -n "$HELPER_PAYLOAD" ]; then
+            eval $("/usr/local/bin/decoder.py" "$HELPER_PAYLOAD" 2>/dev/null | grep "DATA_CHANNEL_")
+
+            if [[ -n "$DATA_CHANNEL_2_4" && -n "$DATA_CHANNEL_5_0" ]]; then
+                log "Helper beacon received. Migrating to data channels: 2.4=${DATA_CHANNEL_2_4}, 5=${DATA_CHANNEL_5_0}"
+
+                sed -i "s/frequency=.*/frequency=${DATA_CHANNEL_2_4}/" "$WPA_CONF_2_4"
+                sed -i "s/frequency=.*/frequency=${DATA_CHANNEL_5_0}/" "$WPA_CONF_5_0"
+
+                systemctl restart wpa_supplicant@wlan0.service
+                systemctl restart wpa_supplicant@wlan1.service
+                sleep 5
+            fi
         fi
-    fi
 
-    # --- 1. BUILD REGISTRY (discover peers) ---
-    if [ -x "$REGISTRY_BUILDER" ]; then
-        log "Building mesh registry..."
-        "$REGISTRY_BUILDER"
     else
-        log "WARNING: Registry builder not found or not executable: $REGISTRY_BUILDER"
-    fi
+        # ===================================
+        # === DATA CHANNEL STATE ===
+        # ===================================
 
-    # --- 2. MANAGE IP ADDRESS ---
-    if [ -x "$IP_MANAGER" ]; then
-        "$IP_MANAGER"
-    else
-        log "WARNING: IP manager not found or not executable: $IP_MANAGER"
-    fi
-
-    # --- 3. GATHER LOCAL METRICS ---
-    HOSTNAME=$(hostname)
-    SYNCTHING_ID=$(runuser -u radio -- syncthing --device-id 2>/dev/null || echo "")
-    TQ_AVG=$("$BATCTL_PATH" o | awk 'NR>1 {sum+=$3} END {if (NR>1) printf "%.2f", sum/(NR-1); else print 0}')
-
-    # Check for gateway status
-    IS_GATEWAY_FLAG=""
-    [ -f /var/run/mesh-gateway.state ] && IS_GATEWAY_FLAG="--is-internet-gateway"
-
-    # Check for NTP server status
-    IS_NTP_FLAG=""
-    if systemctl is-active --quiet chrony.service && grep -q "allow fd5a" /etc/chrony/chrony.conf 2>/dev/null; then
-         IS_NTP_FLAG="--is-ntp-server"
-    fi
-
-    # Check for MediaMTX server status (check if we have the VIP assigned)
-    IS_MTX_FLAG=""
-    if [ -f /etc/mesh_ipv4.conf ]; then
-        source /etc/mesh_ipv4.conf
-        IPV4_NETWORK=${IPV4_NETWORK:-"10.43.1.0/16"}
-        
-        # Get second IP (MediaMTX VIP)
-        CALC_OUTPUT=$(ipcalc "$IPV4_NETWORK" 2>/dev/null)
-        if [ -n "$CALC_OUTPUT" ]; then
-            FIRST_IP=$(echo "$CALC_OUTPUT" | awk '/HostMin/ {print $2}')
-            MTX_VIP="${FIRST_IP%.*}.$((${FIRST_IP##*.} + 1))"
-            
-            # Check if we have this IP assigned
-            if ip addr show dev "$CONTROL_IFACE" | grep -q "inet $MTX_VIP/"; then
-                IS_MTX_FLAG="--is-mediamtx-server"
-            fi
-        fi
-    fi
-
-    # Gather all MAC addresses, with primary (br0) first
-    ALL_MACS=("$MY_MAC")
-    for iface_dir in /sys/class/net/*; do
-        iface=$(basename "$iface_dir")
-        if [ "$iface" != "$CONTROL_IFACE" ] && [ -f "$iface_dir/address" ]; then
-            mac=$(cat "$iface_dir/address" | tr -d '\n')
-            if [ -n "$mac" ] && [ "$mac" != "$MY_MAC" ]; then
-                ALL_MACS+=("$mac")
-            fi
-        fi
-    done
-
-    # Get current IPv4 address if configured (excluding service VIPs in reserved range)
-    CURRENT_IPV4=""
-
-    # Source network config to get reserved range
-    if [ -f /etc/mesh_ipv4.conf ]; then
-        source /etc/mesh_ipv4.conf
-    fi
-    IPV4_NETWORK=${IPV4_NETWORK:-"10.43.1.0/16"}
-    RESERVED_IP_COUNT=${RESERVED_IP_COUNT:-5}
-
-    # Calculate reserved range
-    CALC_OUTPUT=$(ipcalc "$IPV4_NETWORK" 2>/dev/null)
-    if [ -n "$CALC_OUTPUT" ]; then
-        HOST_MIN=$(echo "$CALC_OUTPUT" | awk '/HostMin:/ {print $2}')
-        if [ -n "$HOST_MIN" ]; then
-            # Convert to integer
-            IFS=. read -r a b c d <<<"$HOST_MIN"
-            MIN_INT=$(( (a << 24) + (b << 16) + (c << 8) + d ))
-            RESERVED_END_INT=$(( MIN_INT + RESERVED_IP_COUNT - 1 ))
-
-            # Get all IPs on interface, filter out reserved range
-            while IFS= read -r ip; do
-                IFS=. read -r a b c d <<<"$ip"
-                ip_int=$(( (a << 24) + (b << 16) + (c << 8) + d ))
-
-                # Check if NOT in reserved range
-                if [ "$ip_int" -lt "$MIN_INT" ] || [ "$ip_int" -gt "$RESERVED_END_INT" ]; then
-                    CURRENT_IPV4="$ip"
-                    break
-                fi
-            done < <(ip addr show dev "$CONTROL_IFACE" | grep -oP 'inet \K[\d.]+')
-        fi
-    fi
-
-    # Fallback if calculation failed - just get first IP
-    if [ -z "$CURRENT_IPV4" ]; then
-        CURRENT_IPV4=$(ip addr show dev "$CONTROL_IFACE" | grep -oP 'inet \K[\d.]+' | head -1)
-    fi
-
-    # --- 4. ENCODE & PUBLISH OWN STATUS ---
-    ENCODER_ARGS=(
-        "--hostname" "$HOSTNAME"
-        "--mac-addresses" "${ALL_MACS[@]}"
-        "--tq-average" "$TQ_AVG"
-        "--syncthing-id" "$SYNCTHING_ID"
-    )
-
-    # Add IPv4 if present
-    [ -n "$CURRENT_IPV4" ] && ENCODER_ARGS+=("--ipv4-address" "$CURRENT_IPV4")
-
-    # Add flags
-    [ -n "$IS_GATEWAY_FLAG" ] && ENCODER_ARGS+=("$IS_GATEWAY_FLAG")
-    [ -n "$IS_NTP_FLAG" ] && ENCODER_ARGS+=("$IS_NTP_FLAG")
-    [ -n "$IS_MTX_FLAG" ] && ENCODER_ARGS+=("$IS_MTX_FLAG")
-
-    # Apply protobuf overrides if present
-    if [ -n "$PROTOBUF_OVERRIDE" ]; then
-        log "Applying protobuf overrides"
-
-        # Parse overrides in subshell to extract flags
-        OVERRIDE_ARGS=()
-        (
-            # Clear variables
-            IS_MUMBLE_SERVER="" IS_TAK_SERVER="" UPTIME_SECONDS="" BATTERY_PERCENTAGE=""
-            CPU_LOAD_AVERAGE="" GPS_LATITUDE="" GPS_LONGITUDE="" GPS_ALTITUDE="" ATAK_USER=""
-
-            # Evaluate override string
-            eval "$PROTOBUF_OVERRIDE"
-
-            # Build argument list
-            [[ "$IS_MUMBLE_SERVER" == "true" ]] && OVERRIDE_ARGS+=("--is-mumble-server")
-            [[ "$IS_TAK_SERVER" == "true" ]] && OVERRIDE_ARGS+=("--is-tak-server")
-            [ -n "$UPTIME_SECONDS" ] && [[ "$UPTIME_SECONDS" =~ ^[0-9]+$ ]] && OVERRIDE_ARGS+=("--uptime-seconds=$UPTIME_SECONDS")
-            [ -n "$BATTERY_PERCENTAGE" ] && [[ "$BATTERY_PERCENTAGE" =~ ^[0-9]+$ ]] && OVERRIDE_ARGS+=("--battery-percentage=$BATTERY_PERCENTAGE")
-            [ -n "$CPU_LOAD_AVERAGE" ] && [[ "$CPU_LOAD_AVERAGE" =~ ^[0-9]+(\.[0-9]+)?$ ]] && OVERRIDE_ARGS+=("--cpu-load-average=$CPU_LOAD_AVERAGE")
-
-            if [ -n "$GPS_LATITUDE" ] && [ -n "$GPS_LONGITUDE" ]; then
-                OVERRIDE_ARGS+=("--latitude=$GPS_LATITUDE")
-                OVERRIDE_ARGS+=("--longitude=$GPS_LONGITUDE")
-                [ -n "$GPS_ALTITUDE" ] && OVERRIDE_ARGS+=("--altitude=$GPS_ALTITUDE")
-            fi
-
-            [ -n "$ATAK_USER" ] && OVERRIDE_ARGS+=("--atak-user=$ATAK_USER")
-
-            # Print args for parent shell
-            printf "%s\n" "${OVERRIDE_ARGS[@]}"
-        ) | while IFS= read -r arg; do
-            ENCODER_ARGS+=("$arg")
-        done
-    fi
-
-    # Encode the protobuf message
-    CURRENT_PAYLOAD=$(/usr/local/bin/encoder.py "${ENCODER_ARGS[@]}" 2>/dev/null)
-
-    # Publish if changed or timer expired
-    time_since_publish=$(( $(date +%s) - LAST_PUBLISH_TIME ))
-    if [[ "$CURRENT_PAYLOAD" != "$LAST_PUBLISHED_PAYLOAD" || $time_since_publish -gt $DEFENSE_INTERVAL ]]; then
-        if [ -n "$CURRENT_PAYLOAD" ]; then
-            log "Publishing status to Alfred..."
-            echo -n "$CURRENT_PAYLOAD" | alfred -s $ALFRED_DATA_TYPE
-            LAST_PUBLISHED_PAYLOAD="$CURRENT_PAYLOAD"
-            LAST_PUBLISH_TIME=$(date +%s)
+        # === STAGE 1: RF SCAN (every 3 min at :10) ===
+        if should_perform_action "SCAN" 180 10; then
+            log "=== SCAN ($(date +'%H:%M:%S')) ==="
+            SCAN_REPORT_JSON=$(perform_scan)
+            LAST_SCAN_COMPLETE_TIME=$NOW
+            SCAN_DATA_AVAILABLE=true
+            CACHED_SCAN_REPORT_JSON="$SCAN_REPORT_JSON"
         else
-            log "ERROR: Encoder produced empty payload."
+            SCAN_DATA_AVAILABLE=false
+            SCAN_REPORT_JSON="$CACHED_SCAN_REPORT_JSON"
         fi
-    fi
 
-    # --- 5. TRIGGER ELECTION SCRIPTS ---
-    for election_script in $ELECTION_SCRIPTS_PATTERN; do
-        if [ -f "$election_script" ] && [ -x "$election_script" ]; then
-            log "Triggering election script: $(basename $election_script)"
-            "$election_script" &
+        # === STAGE 2: PUBLISH (every 3 min at :15) ===
+        if should_perform_action "PUBLISH" 180 15; then
+            log "=== PUBLISH ($(date +'%H:%M:%S')) ==="
+
+            HOSTNAME=$(hostname)
+            SYNCTHING_ID=$(runuser -u radio -- syncthing --device-id 2>/dev/null || echo "")
+            TQ_AVG=$("$BATCTL_PATH" o 2>/dev/null | awk 'NR>1 {sum+=$3} END {if (NR>1) printf "%.2f", sum/(NR-1); else print 0}')
+
+            # Service flags
+            IS_GATEWAY_FLAG=$([ -f /var/run/mesh-gateway.state ] && echo "--is-internet-gateway" || echo "")
+            IS_NTP_FLAG=$([ -f /var/run/mesh-ntp.state ] && echo "--is-ntp-server" || echo "")
+            IS_MEDIAMTX_FLAG=$(is_hosting_service && echo "--is-mediamtx-server" || echo "")
+
+            # Gather MACs
+            ALL_MACS=("$MY_MAC")
+            for iface in wlan0 wlan1 end0; do
+                if [ -d "/sys/class/net/$iface" ]; then
+                    MAC=$(cat "/sys/class/net/$iface/address" 2>/dev/null)
+                    [ -n "$MAC" ] && ALL_MACS+=("$MAC")
+                fi
+            done
+
+            CURRENT_IPV4=$(ip addr show dev "$CONTROL_IFACE" 2>/dev/null | grep -oP 'inet \K[\d.]+' | head -1)
+
+            # Limp mode flag
+            LIMP_MODE_FLAG=""
+            if [ -f "$ELECTION_OUTPUT_FILE" ]; then
+                LIMP_MODE_DECISION=$(grep "LIMP_MODE" "$ELECTION_OUTPUT_FILE" 2>/dev/null | cut -d'=' -f2)
+                [ "$LIMP_MODE_DECISION" == "true" ] && LIMP_MODE_FLAG="--is-in-limp-mode"
+            fi
+
+            # Load tourguide state
+            LAST_TOURGUIDE_TIME=0
+            LAST_TOURGUIDE_RADIO=""
+            [ -f /var/run/tourguide_state ] && source /var/run/tourguide_state
+
+            # Encode
+            ENCODER_ARGS=(
+                "--hostname" "$HOSTNAME"
+                "--mac-addresses" "${ALL_MACS[@]}"
+                "--tq-average" "$TQ_AVG"
+                "--syncthing-id" "$SYNCTHING_ID"
+                "--channel-report-json" "$SCAN_REPORT_JSON"
+                "--timestamp" "$NOW"
+                "--last-tourguide-timestamp" "$LAST_TOURGUIDE_TIME"
+                "--last-tourguide-radio" "$LAST_TOURGUIDE_RADIO"
+            )
+            [ -n "$CURRENT_IPV4" ] && ENCODER_ARGS+=("--ipv4-address" "$CURRENT_IPV4")
+            [ -n "$IS_GATEWAY_FLAG" ] && ENCODER_ARGS+=("$IS_GATEWAY_FLAG")
+            [ -n "$IS_NTP_FLAG" ] && ENCODER_ARGS+=("$IS_NTP_FLAG")
+            [ -n "$IS_MEDIAMTX_FLAG" ] && ENCODER_ARGS+=("$IS_MEDIAMTX_FLAG")
+            [ -n "$LIMP_MODE_FLAG" ] && ENCODER_ARGS+=("$LIMP_MODE_FLAG")
+
+            CURRENT_PAYLOAD=$("$ENCODER_PATH" "${ENCODER_ARGS[@]}" 2>/dev/null)
+
+            if [ -n "$CURRENT_PAYLOAD" ]; then
+                echo -n "$CURRENT_PAYLOAD" | alfred -s $ALFRED_DATA_TYPE
+                LAST_PUBLISHED_PAYLOAD="$CURRENT_PAYLOAD"
+                LAST_PUBLISH_TIME=$NOW
+            fi
         fi
-    done
 
-    # --- 6. UPDATE TIMESTAMP ---
-    LAST_RUN_TIMESTAMP=$(date +%s)
-    save_persistent_state
+        # === STAGE 3: REGISTRY BUILD (every 3 min at :20) ===
+        if should_perform_action "REGISTRY" 180 20; then
+            log "=== REGISTRY BUILD ($(date +'%H:%M:%S')) ==="
+            [ -x "$REGISTRY_BUILDER" ] && "$REGISTRY_BUILDER"
+        fi
 
-    # --- Wait for next cycle ---
+        # === STAGE 4: CHANNEL ELECTION (every 3 min at :25) ===
+        if should_perform_action "ELECTION" 180 25; then
+            log "=== CHANNEL ELECTION ($(date +'%H:%M:%S')) ==="
+            [ -x "$CHANNEL_ELECTION" ] && "$CHANNEL_ELECTION"
+        fi
+
+        # === STAGE 5: IP MANAGEMENT ===
+        [ -x "$IP_MANAGER" ] && "$IP_MANAGER"
+
+        # === STAGE 6: QUORUM CHECK ===
+        if [ -x "$QUORUM_CHECKER" ]; then
+            if ! "$QUORUM_CHECKER"; then
+                log "Quorum check failed. Returning to lobby."
+                return_to_lobby
+                continue
+            fi
+        fi
+
+        # === STAGE 7: TOURGUIDE (every 2 min at :30) ===
+        if should_perform_tourguide; then
+            log "=== TOURGUIDE WINDOW ($(date +'%H:%M:%S')) ==="
+            [ -x "$TOURGUIDE_MANAGER" ] && "$TOURGUIDE_MANAGER" &
+        fi
+
+        # === STAGE 8: LIMP MODE MANAGEMENT ===
+        [ -x "$LIMP_MODE_MANAGER" ] && "$LIMP_MODE_MANAGER"
+
+        # === STAGE 9: OTHER ELECTIONS ===
+        for election_script in /usr/local/bin/*-election.sh; do
+            if [[ -f "$election_script" && -x "$election_script" && "$election_script" != "$CHANNEL_ELECTION" ]]; then
+                "$election_script" &
+            fi
+        done
+
+    fi  # End of data channel state
+
     sleep "$MONITOR_INTERVAL"
 done
 
-log "node-manager loop exited unexpectedly. Restarting..."
+log "Main loop exited unexpectedly. Restarting..."
 exit 1

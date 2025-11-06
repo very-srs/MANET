@@ -30,7 +30,7 @@ RESERVED_END_INT=0
 
 # --- Helper Functions ---
 log() {
-    echo "[$(date +'%Y-%m-%d %H:%M:%S')] - IP-MGR: $1" >&2
+    echo "[$(date +'%Y-%m-%d %H:%M:%S')] - IP-MGR: $1"
 }
 
 # Converts an IP string to a 32-bit integer
