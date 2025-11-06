@@ -19,10 +19,35 @@ DESCRIPTOR = _descriptor.FileDescriptor(
   syntax='proto3',
   serialized_options=None,
   create_key=_descriptor._internal_create_key,
-  serialized_pb=b'\n\x0eNodeInfo.proto\"\xc4\x03\n\x08NodeInfo\x12\x10\n\x08hostname\x18\x01 \x01(\t\x12\x15\n\rmac_addresses\x18\x02 \x03(\t\x12\x14\n\x0cipv4_address\x18\x03 \x01(\t\x12\x14\n\x0csyncthing_id\x18\x04 \x01(\t\x12\x12\n\ntq_average\x18\n \x01(\x02\x12\x1b\n\x13is_internet_gateway\x18\x0b \x01(\x08\x12\x18\n\x10is_mumble_server\x18\x14 \x01(\x08\x12\x15\n\ris_ntp_server\x18\x15 \x01(\x08\x12\x15\n\ris_tak_server\x18\x16 \x01(\x08\x12\x1a\n\x12is_mediamtx_server\x18\x17 \x01(\x08\x12\x16\n\x0euptime_seconds\x18\x1e \x01(\r\x12\x1a\n\x12\x62\x61ttery_percentage\x18\x1f \x01(\r\x12\x18\n\x10\x63pu_load_average\x18  \x01(\x02\x12\'\n\x08location\x18( \x01(\x0b\x32\x15.NodeInfo.GpsLocation\x12\x11\n\tatak_user\x18) \x01(\t\x1a\x44\n\x0bGpsLocation\x12\x10\n\x08latitude\x18\x01 \x01(\x01\x12\x11\n\tlongitude\x18\x02 \x01(\x01\x12\x10\n\x08\x61ltitude\x18\x03 \x01(\x02\x62\x06proto3'
+  serialized_pb=b'\n\x0eNodeInfo.proto\"\x81\x07\n\x08NodeInfo\x12\x10\n\x08hostname\x18\x01 \x01(\t\x12\x15\n\rmac_addresses\x18\x02 \x03(\t\x12\x14\n\x0cipv4_address\x18\x03 \x01(\t\x12\x14\n\x0csyncthing_id\x18\x04 \x01(\t\x12\x12\n\ntq_average\x18\n \x01(\x02\x12\x1b\n\x13is_internet_gateway\x18\x0b \x01(\x08\x12\x18\n\x10is_mumble_server\x18\x14 \x01(\x08\x12\x15\n\ris_ntp_server\x18\x15 \x01(\x08\x12\x15\n\ris_tak_server\x18\x16 \x01(\x08\x12\x1a\n\x12is_mediamtx_server\x18\x17 \x01(\x08\x12\x16\n\x0euptime_seconds\x18\x1e \x01(\r\x12\x1a\n\x12\x62\x61ttery_percentage\x18\x1f \x01(\r\x12\x18\n\x10\x63pu_load_average\x18  \x01(\x02\x12\'\n\x08location\x18( \x01(\x0b\x32\x15.NodeInfo.GpsLocation\x12\x11\n\tatak_user\x18) \x01(\t\x12/\n\x0e\x63hannel_report\x18\x32 \x01(\x0b\x32\x17.NodeInfo.ChannelReport\x12\x18\n\x10\x64\x61ta_channel_2_4\x18\x33 \x01(\t\x12\x18\n\x10\x64\x61ta_channel_5_0\x18\x34 \x01(\t\x12\x1b\n\x13last_seen_timestamp\x18\x35 \x01(\x04\x12\x17\n\x0fis_in_limp_mode\x18\x36 \x01(\x08\x12 \n\x18last_tourguide_timestamp\x18\x37 \x01(\x04\x12\x1c\n\x14last_tourguide_radio\x18\x38 \x01(\t\x12\'\n\nnode_state\x18\x39 \x01(\x0e\x32\x13.NodeInfo.NodeState\x1a\x44\n\x0bGpsLocation\x12\x10\n\x08latitude\x18\x01 \x01(\x01\x12\x11\n\tlongitude\x18\x02 \x01(\x01\x12\x10\n\x08\x61ltitude\x18\x03 \x01(\x02\x1aL\n\x11\x43hannelScanResult\x12\x0f\n\x07\x63hannel\x18\x01 \x01(\r\x12\x13\n\x0bnoise_floor\x18\x02 \x01(\x11\x12\x11\n\tbss_count\x18\x03 \x01(\r\x1a=\n\rChannelReport\x12,\n\x07results\x18\x01 \x03(\x0b\x32\x1b.NodeInfo.ChannelScanResult\"*\n\tNodeState\x12\n\n\x06\x41\x43TIVE\x10\x00\x12\x11\n\rSHUTTING_DOWN\x10\x01\x62\x06proto3'
 )
 
 
+
+_NODEINFO_NODESTATE = _descriptor.EnumDescriptor(
+  name='NodeState',
+  full_name='NodeInfo.NodeState',
+  filename=None,
+  file=DESCRIPTOR,
+  create_key=_descriptor._internal_create_key,
+  values=[
+    _descriptor.EnumValueDescriptor(
+      name='ACTIVE', index=0, number=0,
+      serialized_options=None,
+      type=None,
+      create_key=_descriptor._internal_create_key),
+    _descriptor.EnumValueDescriptor(
+      name='SHUTTING_DOWN', index=1, number=1,
+      serialized_options=None,
+      type=None,
+      create_key=_descriptor._internal_create_key),
+  ],
+  containing_type=None,
+  serialized_options=None,
+  serialized_start=874,
+  serialized_end=916,
+)
+_sym_db.RegisterEnumDescriptor(_NODEINFO_NODESTATE)
 
 
 _NODEINFO_GPSLOCATION = _descriptor.Descriptor(
@@ -66,8 +91,84 @@ _NODEINFO_GPSLOCATION = _descriptor.Descriptor(
   extension_ranges=[],
   oneofs=[
   ],
-  serialized_start=403,
-  serialized_end=471,
+  serialized_start=663,
+  serialized_end=731,
+)
+
+_NODEINFO_CHANNELSCANRESULT = _descriptor.Descriptor(
+  name='ChannelScanResult',
+  full_name='NodeInfo.ChannelScanResult',
+  filename=None,
+  file=DESCRIPTOR,
+  containing_type=None,
+  create_key=_descriptor._internal_create_key,
+  fields=[
+    _descriptor.FieldDescriptor(
+      name='channel', full_name='NodeInfo.ChannelScanResult.channel', index=0,
+      number=1, type=13, cpp_type=3, label=1,
+      has_default_value=False, default_value=0,
+      message_type=None, enum_type=None, containing_type=None,
+      is_extension=False, extension_scope=None,
+      serialized_options=None, file=DESCRIPTOR,  create_key=_descriptor._internal_create_key),
+    _descriptor.FieldDescriptor(
+      name='noise_floor', full_name='NodeInfo.ChannelScanResult.noise_floor', index=1,
+      number=2, type=17, cpp_type=1, label=1,
+      has_default_value=False, default_value=0,
+      message_type=None, enum_type=None, containing_type=None,
+      is_extension=False, extension_scope=None,
+      serialized_options=None, file=DESCRIPTOR,  create_key=_descriptor._internal_create_key),
+    _descriptor.FieldDescriptor(
+      name='bss_count', full_name='NodeInfo.ChannelScanResult.bss_count', index=2,
+      number=3, type=13, cpp_type=3, label=1,
+      has_default_value=False, default_value=0,
+      message_type=None, enum_type=None, containing_type=None,
+      is_extension=False, extension_scope=None,
+      serialized_options=None, file=DESCRIPTOR,  create_key=_descriptor._internal_create_key),
+  ],
+  extensions=[
+  ],
+  nested_types=[],
+  enum_types=[
+  ],
+  serialized_options=None,
+  is_extendable=False,
+  syntax='proto3',
+  extension_ranges=[],
+  oneofs=[
+  ],
+  serialized_start=733,
+  serialized_end=809,
+)
+
+_NODEINFO_CHANNELREPORT = _descriptor.Descriptor(
+  name='ChannelReport',
+  full_name='NodeInfo.ChannelReport',
+  filename=None,
+  file=DESCRIPTOR,
+  containing_type=None,
+  create_key=_descriptor._internal_create_key,
+  fields=[
+    _descriptor.FieldDescriptor(
+      name='results', full_name='NodeInfo.ChannelReport.results', index=0,
+      number=1, type=11, cpp_type=10, label=3,
+      has_default_value=False, default_value=[],
+      message_type=None, enum_type=None, containing_type=None,
+      is_extension=False, extension_scope=None,
+      serialized_options=None, file=DESCRIPTOR,  create_key=_descriptor._internal_create_key),
+  ],
+  extensions=[
+  ],
+  nested_types=[],
+  enum_types=[
+  ],
+  serialized_options=None,
+  is_extendable=False,
+  syntax='proto3',
+  extension_ranges=[],
+  oneofs=[
+  ],
+  serialized_start=811,
+  serialized_end=872,
 )
 
 _NODEINFO = _descriptor.Descriptor(
@@ -183,11 +284,68 @@ _NODEINFO = _descriptor.Descriptor(
       message_type=None, enum_type=None, containing_type=None,
       is_extension=False, extension_scope=None,
       serialized_options=None, file=DESCRIPTOR,  create_key=_descriptor._internal_create_key),
+    _descriptor.FieldDescriptor(
+      name='channel_report', full_name='NodeInfo.channel_report', index=15,
+      number=50, type=11, cpp_type=10, label=1,
+      has_default_value=False, default_value=None,
+      message_type=None, enum_type=None, containing_type=None,
+      is_extension=False, extension_scope=None,
+      serialized_options=None, file=DESCRIPTOR,  create_key=_descriptor._internal_create_key),
+    _descriptor.FieldDescriptor(
+      name='data_channel_2_4', full_name='NodeInfo.data_channel_2_4', index=16,
+      number=51, type=9, cpp_type=9, label=1,
+      has_default_value=False, default_value=b"".decode('utf-8'),
+      message_type=None, enum_type=None, containing_type=None,
+      is_extension=False, extension_scope=None,
+      serialized_options=None, file=DESCRIPTOR,  create_key=_descriptor._internal_create_key),
+    _descriptor.FieldDescriptor(
+      name='data_channel_5_0', full_name='NodeInfo.data_channel_5_0', index=17,
+      number=52, type=9, cpp_type=9, label=1,
+      has_default_value=False, default_value=b"".decode('utf-8'),
+      message_type=None, enum_type=None, containing_type=None,
+      is_extension=False, extension_scope=None,
+      serialized_options=None, file=DESCRIPTOR,  create_key=_descriptor._internal_create_key),
+    _descriptor.FieldDescriptor(
+      name='last_seen_timestamp', full_name='NodeInfo.last_seen_timestamp', index=18,
+      number=53, type=4, cpp_type=4, label=1,
+      has_default_value=False, default_value=0,
+      message_type=None, enum_type=None, containing_type=None,
+      is_extension=False, extension_scope=None,
+      serialized_options=None, file=DESCRIPTOR,  create_key=_descriptor._internal_create_key),
+    _descriptor.FieldDescriptor(
+      name='is_in_limp_mode', full_name='NodeInfo.is_in_limp_mode', index=19,
+      number=54, type=8, cpp_type=7, label=1,
+      has_default_value=False, default_value=False,
+      message_type=None, enum_type=None, containing_type=None,
+      is_extension=False, extension_scope=None,
+      serialized_options=None, file=DESCRIPTOR,  create_key=_descriptor._internal_create_key),
+    _descriptor.FieldDescriptor(
+      name='last_tourguide_timestamp', full_name='NodeInfo.last_tourguide_timestamp', index=20,
+      number=55, type=4, cpp_type=4, label=1,
+      has_default_value=False, default_value=0,
+      message_type=None, enum_type=None, containing_type=None,
+      is_extension=False, extension_scope=None,
+      serialized_options=None, file=DESCRIPTOR,  create_key=_descriptor._internal_create_key),
+    _descriptor.FieldDescriptor(
+      name='last_tourguide_radio', full_name='NodeInfo.last_tourguide_radio', index=21,
+      number=56, type=9, cpp_type=9, label=1,
+      has_default_value=False, default_value=b"".decode('utf-8'),
+      message_type=None, enum_type=None, containing_type=None,
+      is_extension=False, extension_scope=None,
+      serialized_options=None, file=DESCRIPTOR,  create_key=_descriptor._internal_create_key),
+    _descriptor.FieldDescriptor(
+      name='node_state', full_name='NodeInfo.node_state', index=22,
+      number=57, type=14, cpp_type=8, label=1,
+      has_default_value=False, default_value=0,
+      message_type=None, enum_type=None, containing_type=None,
+      is_extension=False, extension_scope=None,
+      serialized_options=None, file=DESCRIPTOR,  create_key=_descriptor._internal_create_key),
   ],
   extensions=[
   ],
-  nested_types=[_NODEINFO_GPSLOCATION, ],
+  nested_types=[_NODEINFO_GPSLOCATION, _NODEINFO_CHANNELSCANRESULT, _NODEINFO_CHANNELREPORT, ],
   enum_types=[
+    _NODEINFO_NODESTATE,
   ],
   serialized_options=None,
   is_extendable=False,
@@ -196,11 +354,17 @@ _NODEINFO = _descriptor.Descriptor(
   oneofs=[
   ],
   serialized_start=19,
-  serialized_end=471,
+  serialized_end=916,
 )
 
 _NODEINFO_GPSLOCATION.containing_type = _NODEINFO
+_NODEINFO_CHANNELSCANRESULT.containing_type = _NODEINFO
+_NODEINFO_CHANNELREPORT.fields_by_name['results'].message_type = _NODEINFO_CHANNELSCANRESULT
+_NODEINFO_CHANNELREPORT.containing_type = _NODEINFO
 _NODEINFO.fields_by_name['location'].message_type = _NODEINFO_GPSLOCATION
+_NODEINFO.fields_by_name['channel_report'].message_type = _NODEINFO_CHANNELREPORT
+_NODEINFO.fields_by_name['node_state'].enum_type = _NODEINFO_NODESTATE
+_NODEINFO_NODESTATE.containing_type = _NODEINFO
 DESCRIPTOR.message_types_by_name['NodeInfo'] = _NODEINFO
 _sym_db.RegisterFileDescriptor(DESCRIPTOR)
 
@@ -212,12 +376,28 @@ NodeInfo = _reflection.GeneratedProtocolMessageType('NodeInfo', (_message.Messag
     # @@protoc_insertion_point(class_scope:NodeInfo.GpsLocation)
     })
   ,
+
+  'ChannelScanResult' : _reflection.GeneratedProtocolMessageType('ChannelScanResult', (_message.Message,), {
+    'DESCRIPTOR' : _NODEINFO_CHANNELSCANRESULT,
+    '__module__' : 'NodeInfo_pb2'
+    # @@protoc_insertion_point(class_scope:NodeInfo.ChannelScanResult)
+    })
+  ,
+
+  'ChannelReport' : _reflection.GeneratedProtocolMessageType('ChannelReport', (_message.Message,), {
+    'DESCRIPTOR' : _NODEINFO_CHANNELREPORT,
+    '__module__' : 'NodeInfo_pb2'
+    # @@protoc_insertion_point(class_scope:NodeInfo.ChannelReport)
+    })
+  ,
   'DESCRIPTOR' : _NODEINFO,
   '__module__' : 'NodeInfo_pb2'
   # @@protoc_insertion_point(class_scope:NodeInfo)
   })
 _sym_db.RegisterMessage(NodeInfo)
 _sym_db.RegisterMessage(NodeInfo.GpsLocation)
+_sym_db.RegisterMessage(NodeInfo.ChannelScanResult)
+_sym_db.RegisterMessage(NodeInfo.ChannelReport)
 
 
 # @@protoc_insertion_point(module_scope)

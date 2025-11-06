@@ -10,7 +10,7 @@ message NodeInfo {
   string syncthing_id = 4;
 
   // --- Network & Election Metrics ---
-  float tq_average = 10;       // TQ average, for service elections.
+  float tq_average = 10;          // TQ average, for service elections.
   bool is_internet_gateway = 11; // Does this node have an active internet connection?
 
   // --- Service Status ---
@@ -32,4 +32,42 @@ message NodeInfo {
   }
   GpsLocation location = 40;
   string atak_user = 41;
+
+  // --- Channel Hopping & Discovery ---
+  
+  // A report for a single scanned channel
+  message ChannelScanResult {
+    uint32 channel = 1;
+    sint32 noise_floor = 2;
+    uint32 bss_count = 3;
+  }
+
+  // The full report from one node
+  message ChannelReport {
+    repeated ChannelScanResult results = 1;
+  }
+
+  // Channel scan report
+  ChannelReport channel_report = 50;
+  
+  // Current data channels (for helper broadcast)
+  string data_channel_2_4 = 51;
+  string data_channel_5_0 = 52;
+  
+  // --- Timestamp ---
+  uint64 last_seen_timestamp = 53; // Unix epoch (seconds)
+  
+  // --- Jamming Detection ---
+  bool is_in_limp_mode = 54;
+  
+  // --- Tourguide Tracking ---
+  uint64 last_tourguide_timestamp = 55;  // Last time this node sent helper beacon
+  string last_tourguide_radio = 56;      // "wlan0" or "wlan1" - which radio was used last
+  
+  // --- Node State ---
+  enum NodeState {
+    ACTIVE = 0;
+    SHUTTING_DOWN = 1;
+  }
+  NodeState node_state = 57;  // Current operational state
 }
