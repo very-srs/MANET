@@ -1,46 +1,56 @@
 #!/bin/bash
+#
+#   This script is injected into the install image via rpi-imager
+#	It does some very basic configuration and then creates a script
+#	that is then run (via systemd service) when boot finishes and
+#   the network is available.  This other script continues the basic
+#   setup of the node.  Finally, radio-setup.sh is set to run at next
+#   boot to finish the setup with the now available network interfaces
+#
+
+
+
+# log the output of this script to a file for debugging
 exec > >(tee /boot/firmware/firstrun.log) 2>&1
 set -x
 echo "=== firstrun.sh starting at $(date) ==="
 
+# disable the standard first boot interactive setup wizard
 echo "Disabling first-boot wizard and creating user..."
+systemctl disable userconfig.service 2>/dev/null || true
+systemctl stop userconfig.service 2>/dev/null || true
+rm -f /etc/xdg/autostart/piwiz.desktop 2>/dev/null || true
+rm -f /usr/lib/raspberrypi-sys-mods/firstboot 2>/dev/null || true
+
+# set up persistent logging
 chown root:systemd-journal /var/log/journal
 chmod 2755 /var/log/journal
 systemctl restart systemd-journald
 
-# Stop and disable the userconfig wizard service
-systemctl disable userconfig.service 2>/dev/null || true
-systemctl stop userconfig.service 2>/dev/null || true
-
-# Remove wizard autostart files
-rm -f /etc/xdg/autostart/piwiz.desktop 2>/dev/null || true
-rm -f /usr/lib/raspberrypi-sys-mods/firstboot 2>/dev/null || true
 
 # Create the radio user with proper groups
 if ! id -u radio > /dev/null 2>&1; then
 	echo "Creating user 'radio'..."
 	useradd -m -s /bin/bash -G sudo,adm,dialout,cdrom,audio,video,plugdev,games,users,input,netdev,gpio,i2c,spi radio
 	echo "radio:radio" | chpasswd
-	
+
 	# Set up SSH directory
 	mkdir -p /home/radio/.ssh
 	chmod 700 /home/radio/.ssh
 	chown -R radio:radio /home/radio/.ssh
-	
 	echo "User 'radio' created successfully"
 fi
 
 # Enable SSH service
-systemctl enable ssh
-systemctl start ssh
-
+systemctl enable --now ssh
 echo "User setup complete - proceeding with provisioning..."
 
-# Don't wait for network - just create a service to run after network is ready
-echo "Creating post-network provisioning service..."
 
+# Waiting for the network will hang boot, instead create a service to run after network is ready
+echo "Creating post-network provisioning service..."
 cat > /usr/local/bin/provision-mesh.sh << 'PROVISIONEOF'
 #!/bin/bash
+#log the output of the provisioning script
 exec > >(tee -a /boot/firmware/provision.log) 2>&1
 set -x
 echo "=== provision-mesh-node.sh starting at $(date) ==="
@@ -50,12 +60,6 @@ REG=US
 HOST_MAC=$(ip a | grep -A1 $(networkctl | grep -v bat | awk '/ether/ {print $2}' | head -1) \
    | awk '/ether/ {print $2}' | cut -d':' -f 5-6 | sed 's/://g')
 
-echo "Detected HOST_MAC: $HOST_MAC"
-echo "Using regulatory region: $REG"
-
-
-
-# NOW we can safely wait for network - boot is complete
 echo "Waiting for internet connectivity..."
 TIMEOUT=300
 ELAPSED=0
@@ -77,6 +81,12 @@ fi
 cd /root
 
 
+# Pull down a .tar file that consists of all the various additionaly tools and scripts that will be used
+# These are mesh tools in /usr/local/bin, the boot config.txt, batctl and alfred, and some systemd service
+# files.  Here we can also differentiate between hardware types if he need different setup options.  At
+# the moment (nov 2025) these tar files are the same and the only difference here is that for sd card
+# devices we expand the filesystem
+
 if [ "__HARDWARE_MODEL__" = "rpi5" ]; then
 		echo "Applying RPi 5 specific settings..."
 
@@ -85,7 +95,7 @@ if [ "__HARDWARE_MODEL__" = "rpi5" ]; then
 				echo "ERROR: Failed to download rpi5 package"
 				exit 1
 		}
-	tar -xf /root/rpi5-0.3.tar -C /
+		tar -xf /root/rpi5-0.3.tar -C /
 
 		# The rpi5 is using an SD card and may need to be resized
 		# Check if filesystem is nearly full (indicating small partition)
@@ -103,7 +113,6 @@ if [ "__HARDWARE_MODEL__" = "rpi5" ]; then
 			resize2fs /dev/mmcblk0p2
 
 			echo "Expansion complete"
-#		   systemctl reboot
 		else
 		echo "Filesystem has room (${USAGE_PERCENT}%), skipping expansion."
 		fi
@@ -115,6 +124,23 @@ elif [ "__HARDWARE_MODEL__" = "rpi4" ]; then
 				exit 1
 		}
 		tar -xf /root/rpi4-0.3.tar -C /
+		USAGE_PERCENT=$(df / | tail -1 | awk '{print $5}' | tr -d '%')
+		echo "Root filesystem is ${USAGE_PERCENT}% full"
+
+		# If filesystem is >80% full, partition is too small - expand
+		if [ $USAGE_PERCENT -gt 80 ]; then
+			echo "Filesystem nearly full, expanding partition..."
+
+			# Expand the partition
+			raspi-config --expand-rootfs
+
+			# Resize the filesystem to fill the new partition
+			resize2fs /dev/mmcblk0p2
+
+			echo "Expansion complete"
+		else
+		echo "Filesystem has room (${USAGE_PERCENT}%), skipping expansion."
+		fi
 fi
 
 #
@@ -124,49 +150,49 @@ fi
 
 # get the sources up to date and install packages
 echo -n "Updating system packages..."
-apt update  > /dev/null 2>&1
-echo -n "."
-apt upgrade -y > /dev/null 2>&1
-echo -n "."
+apt update
+apt upgrade -y
 
 # Remove the question about the iperf daemon during apt install
 echo "iperf3 iperf3/start_daemon boolean true" | debconf-set-selections
+
+# This isn't needed for the manet kernel and causes errors
+chmod -x /etc/kernel/postinst.d/initramfs-tools
 
 # Install packages for this system
 apt install -y ipcalc nmap lshw tcpdump net-tools nftables wireless-tools iperf3\
 		radvd bridge-utils firmware-mediatek libnss-mdns syncthing networkd-dispatcher\
 		libgps-dev libcap-dev mumble-server screen arping bc jq git \
-		python3-protobuf unzip chrony build-essential systemd-resolved
+		python3-protobuf unzip chrony build-essential systemd-resolved 
 echo "Done"
 
+# probably not installed, but the debian package is old
 apt remove yq > /dev/null 2>&1
 
-# Download and install Go yq
+# Download and install Go yq, this has better features
 wget -q https://github.com/mikefarah/yq/releases/latest/download/yq_linux_arm64 -O /usr/bin/yq
 chmod +x /usr/bin/yq
 
-
-
-
+# These add network traffic, disable them
 echo "Disabling APT timers for automatic updates"
 systemctl disable apt-daily.timer 2>&1
 systemctl disable apt-daily-upgrade.timer 2>&1
 
-# This is hanging on boot
+# This was hanging on boot, disable it
 systemctl mask dev-zram0.device
 
-# Get firmware
+# Install more micro halow firmware
 cd /root/morse-firmware
 make install
 cd /root
 
-#load modules at boot
-cat <<- EOF > /etc/modules-load.d/morse.conf
-		mac80211
-		cfg80211
-		crc7
-		morse
-		dot11ah
+# Load modules at boot
+cat << EOF > /etc/modules-load.d/morse.conf
+mac80211
+cfg80211
+crc7
+morse
+dot11ah
 EOF
 echo "Morse Micro 802.11ah system installed"
 echo "batman-adv" > /etc/modules-load.d/batman.conf
@@ -182,105 +208,107 @@ cp /boot/vmlinuz-6.6.31-manet+ /boot/firmware/
 cp /boot/System.map-6.6.31-manet+ /boot/firmware/
 cp /boot/config-6.6.31-manet+ /boot/firmware/
 
-# This isn't needed for the manet kernel and causes errors
-chmod -x /etc/kernel/postinst.d/initramfs-tools
-
-# disable the default wpa_supplicant service
+# Disable the default wpa_supplicant service
 systemctl disable wpa_supplicant.service > /dev/null 2>&1
 
-#set hostname, make unique by ethernet mac addr (last 4)
+# Set hostname, make unique by ethernet mac addr (last 4)
 hostnamectl hostname radio-$HOST_MAC
 echo "Hostname set"
 
-#set regulatory region as US
+# Set regulatory region  (default will be US)
 echo options cfg80211 ieee80211_regdom=$REG > /etc/modprobe.d/wifi-regdom.conf
 echo "Set wifi regulatory domain to $REG"
 
 #turn on packet forwarding
-cat <<- EOF > /etc/sysctl.d/99-mesh.conf
-		# IPv4 forwarding for mesh
-		net.ipv4.ip_forward=1
-		net.ipv4.conf.all.forwarding=1
-		net.ipv4.conf.default.forwarding=1
+cat << EOF > /etc/sysctl.d/99-mesh.conf
+# IPv4 forwarding for mesh
+net.ipv4.ip_forward=1
+net.ipv4.conf.all.forwarding=1
+net.ipv4.conf.default.forwarding=1
 
-		# IPv4 multicast forwarding
-		net.ipv4.conf.all.mc_forwarding=1
-		net.ipv4.conf.default.mc_forwarding=1
-		net.ipv4.conf.bat0.mc_forwarding=1
-		net.ipv4.conf.br0.mc_forwarding=1
+# IPv4 multicast forwarding
+net.ipv4.conf.all.mc_forwarding=1
+net.ipv4.conf.default.mc_forwarding=1
+net.ipv4.conf.bat0.mc_forwarding=1
+net.ipv4.conf.br0.mc_forwarding=1
 
-		# IPv6 forwarding for mesh
-		net.ipv6.conf.all.forwarding=1
-		net.ipv6.conf.default.forwarding=1
+# IPv6 forwarding for mesh
+net.ipv6.conf.all.forwarding=1
+net.ipv6.conf.default.forwarding=1
 
-		# IPv6 multicast forwarding
-		net.ipv6.conf.all.mc_forwarding=1
-		net.ipv6.conf.default.mc_forwarding=1
-		net.ipv6.conf.bat0.mc_forwarding=1
-		net.ipv6.conf.br0.mc_forwarding=1
+# IPv6 multicast forwarding
+net.ipv6.conf.all.mc_forwarding=1
+net.ipv6.conf.default.mc_forwarding=1
+net.ipv6.conf.bat0.mc_forwarding=1
+net.ipv6.conf.br0.mc_forwarding=1
 
-		# Increase multicast route cache for large mesh
-		net.ipv4.route.max_size=16384
-		net.ipv6.route.max_size=16384
+# Increase multicast route cache for large mesh
+net.ipv4.route.max_size=16384
+net.ipv6.route.max_size=16384
 
-		# Optional: Increase ARP cache for many nodes
-		net.ipv4.neigh.default.gc_thresh1=1024
-		net.ipv4.neigh.default.gc_thresh2=2048
-		net.ipv4.neigh.default.gc_thresh3=4096
+# Optional: Increase ARP cache for many nodes
+net.ipv4.neigh.default.gc_thresh1=1024
+net.ipv4.neigh.default.gc_thresh2=2048
+net.ipv4.neigh.default.gc_thresh3=4096
 EOF
 
 
 #
 #  Create the non wifi interfaces
 #
-cat <<- EOF > /etc/systemd/network/10-bat0.network
-		[Match]
-		Name=bat0
 
-		[Network]
-		Bridge=br0
-		LinkLocalAddressing=ipv6
-		IPv6Token=eui64
-		IPv6PrivacyExtensions=no
+# Create the batman-adv interface, enslave it to br0
+# Tell it to get the correct LL address for alfred to work
+cat << EOF > /etc/systemd/network/10-bat0.network
+[Match]
+Name=bat0
+
+[Network]
+Bridge=br0
+LinkLocalAddressing=ipv6
+IPv6Token=eui64
+IPv6PrivacyExtensions=no
 EOF
 
 # The bridge br0 is the main interface for the mesh node
-cat <<-EOF > /etc/systemd/network/10-br0-bridge.netdev
-		[NetDev]
-		Name=br0
-		Kind=bridge
+cat << EOF > /etc/systemd/network/10-br0-bridge.netdev
+[NetDev]
+Name=br0
+Kind=bridge
 
-		[Bridge]
-		MulticastSnooping=true
-		MulticastQuerier=true
+[Bridge]
+MulticastSnooping=true
+MulticastQuerier=true
 EOF
 
 # br0 will get a slaac ipv6 address
-cat <<-EOF > /etc/systemd/network/20-br0-bridge.network
-		[Match]
-		Name=br0
+# Scripts will give it an ipv4 address later on
+cat << EOF > /etc/systemd/network/20-br0-bridge.network
+[Match]
+Name=br0
 
-		[Network]
-		DHCP=no
-		LinkLocalAddressing=ipv6
-		IPv6AcceptRA=yes
-		MulticastDNS=yes
+[Network]
+DHCP=no
+LinkLocalAddressing=ipv6
+IPv6AcceptRA=yes
+MulticastDNS=yes
 
-		[Link]
-		RequiredForOnline=no
+[Link]
+RequiredForOnline=no
 EOF
 
 #stop other interfaces from doing multicast dns, trim down network chatter
-cat <<- EOF > /etc/systemd/network/90-default-no-mdns.network
-		[Match]
-		Name=!br0
+cat << EOF > /etc/systemd/network/90-default-no-mdns.network
+[Match]
+Name=!br0
 
-		[Network]
-		LLMNR=no
-		MulticastDNS=no
+[Network]
+LLMNR=no
+MulticastDNS=no
 EOF
 
-#set ethernet links for DHCP as a default setup
+# Set ethernet links for DHCP as a default setup.  Scripts will juggle this
+# around later for device detection
 for LAN in `networkctl | awk '/ether/ {print $2}'`; do
 	M=`ip link show $LAN | awk '/ether/ {print $2}'`
 	cat <<- EOF > /etc/systemd/network/10-$LAN.network
@@ -305,44 +333,44 @@ echo "Ethernet config added"
 #
 
 echo "Configuring nftables for IPv4 NAT gateway"
-cat <<- EOF > /etc/nftables.conf
-		#!/usr/sbin/nft -f
+cat << EOF > /etc/nftables.conf
+#!/usr/sbin/nft -f
 
-		# Flush the old ruleset to start clean
-		flush ruleset
-		table inet filter {
-		  # The INPUT chain handles traffic destined for the node itself.
-		  chain input {
-			type filter hook input priority 0; policy drop;
-			ct state {established, related} accept
-			ct state invalid drop
-			iifname "lo" accept
-			# Accept ALL traffic coming from the trusted mesh interface.
-			iifname "br0" accept
-			iifname "bat0" accept
-			iifname "end0" tcp dport 22 accept
-		  }
-		  chain forward {
-			type filter hook forward priority 0; policy drop;
+# Flush the old ruleset to start clean
+flush ruleset
+table inet filter {
+  # The INPUT chain handles traffic destined for the node itself.
+  chain input {
+	type filter hook input priority 0; policy drop;
+	ct state {established, related} accept
+	ct state invalid drop
+	iifname "lo" accept
+	# Accept ALL traffic coming from the trusted mesh interface.
+	iifname "br0" accept
+	iifname "bat0" accept
+	iifname "end0" tcp dport 22 accept
+  }
+  chain forward {
+	type filter hook forward priority 0; policy drop;
 
-			# Allow traffic from the trusted mesh to be forwarded
-			# out to the internet via the Ethernet port.
-			iifname "br0" oifname "end0" accept
+	# Allow traffic from the trusted mesh to be forwarded
+	# out to the internet via the Ethernet port.
+	iifname "br0" oifname "end0" accept
 
-			# Allow the return traffic from the internet back to the mesh.
-			iifname "end0" oifname "br0" ct state established, related accept
-		  }
-		  chain output {
-			type filter hook output priority 0; policy accept;
-		  }
-		}
+	# Allow the return traffic from the internet back to the mesh.
+	iifname "end0" oifname "br0" ct state established, related accept
+  }
+  chain output {
+	type filter hook output priority 0; policy accept;
+  }
+}
 
-		table ip nat {
-		  chain postrouting {
-			type nat hook postrouting priority 100;
-			oifname "end0" masquerade
-		  }
-		}
+table ip nat {
+  chain postrouting {
+	type nat hook postrouting priority 100;
+	oifname "end0" masquerade
+  }
+}
 EOF
 
 echo "Setting up router advertisements"
@@ -354,28 +382,28 @@ echo "Setting up router advertisements"
 # ( AdvDefaultLifetime 0 ) vs when it advertises itself as
 # a gateway ( AdvDefaultLifetime 600 ).  A networkd-dispatcher
 # script does the swap
-cat <<-EOF > /etc/radvd-mesh.conf
-		interface br0
-		{
-		  AdvSendAdvert on;
-		  AdvDefaultLifetime 0;
-		  prefix fd01:ed20:ecb4:0::/64  {
-			AdvOnLink on;
-			AdvAutonomous on;
-			AdvRouterAddr off;
-		  };
-		};
+cat << EOF > /etc/radvd-mesh.conf
+interface br0
+{
+  AdvSendAdvert on;
+  AdvDefaultLifetime 0;
+  prefix fd01:ed20:ecb4:0::/64  {
+	AdvOnLink on;
+	AdvAutonomous on;
+	AdvRouterAddr off;
+  };
+};
 EOF
 
-cat <<- EOF > /etc/radvd-gateway.conf
-		interface br0 {
-		  AdvSendAdvert on;
-		  AdvDefaultLifetime 600;
-		  prefix fd01:ed20:ecb4:0::/64  {
-			AdvOnLink on;
-			AdvAutonomous on;
-		  };
-		};
+cat << EOF > /etc/radvd-gateway.conf
+interface br0 {
+  AdvSendAdvert on;
+  AdvDefaultLifetime 600;
+  prefix fd01:ed20:ecb4:0::/64  {
+	AdvOnLink on;
+	AdvAutonomous on;
+  };
+};
 EOF
 
 # Default to mesh config
@@ -383,13 +411,14 @@ cp /etc/radvd-mesh.conf /etc/radvd.conf
 
 # make radvd wait for bat0 to be up
 mkdir -p /etc/systemd/system/radvd.service.d/
-cat <<- EOF > /etc/systemd/system/radvd.service.d/override.conf
-		[Unit]
-		After=batman-enslave.service
-		Wants=batman-enslave.service
+cat << EOF > /etc/systemd/system/radvd.service.d/override.conf
+[Unit]
+After=batman-enslave.service
+Wants=batman-enslave.service
 
-		[Service]
-		ExecStartPre=/bin/sleep 5
+[Service]
+ExecStartPre=/bin/sleep 5
+
 EOF
 
 systemctl enable radvd
@@ -400,54 +429,54 @@ systemctl enable radvd
 # sync'd its time from the internet) on the mesh.  It picks the
 # one with the best transmission quality, does a time sync with it,
 # and then disables chrony to prevent excess network traffic
-cat <<- EOF > /etc/systemd/system/one-shot-time-sync.service
-		[Unit]
-		Description=One-Shot Mesh Time Synchronization
-		# This must run after the mesh is fully up and the manager has started.
-		After=node-manager.service
-		Wants=node-manager.service
+cat << EOF > /etc/systemd/system/one-shot-time-sync.service
+[Unit]
+Description=One-Shot Mesh Time Synchronization
+# This must run after the mesh is fully up and the manager has started.
+After=node-manager.service
+Wants=node-manager.service
 
-		[Service]
-		Type=oneshot
-		ExecStart=/usr/local/bin/one-shot-time-sync.sh
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/one-shot-time-sync.sh
 
-		[Install]
-		WantedBy=multi-user.target
+[Install]
+WantedBy=multi-user.target
 EOF
 # this will be enabled by radio-setup.sh
 #systemctl enable one-shot-time-sync.service
 
 # Config for the active gateway acting as a mesh NTP server
-cat <<- EOF > /etc/chrony/chrony-server.conf
-		# Use public NTP servers from the internet.
-		pool pool.ntp.org iburst
-		driftfile /var/lib/chrony/chrony.drift
-		makestep 1.0 3
-		# Allow clients from our private mesh prefix.
-	allow fd01:ed20:ecb4::/64
-		# Serve time even if internet connection is lost.
-		local stratum 10
+cat << EOF > /etc/chrony/chrony-server.conf
+# Use public NTP servers from the internet.
+pool pool.ntp.org iburst
+driftfile /var/lib/chrony/chrony.drift
+makestep 1.0 3
+# Allow clients from our private mesh prefix.
+allow fd01:ed20:ecb4::/64
+# Serve time even if internet connection is lost.
+local stratum 10
 EOF
 
 # Config used ONLY to test external NTP connectivity
-cat <<- EOF > /etc/chrony/chrony-test.conf
-		# Use public NTP servers from the internet.
-		pool pool.ntp.org iburst
-		driftfile /var/lib/chrony/chrony.drift
-		makestep 1.0 3
-		# Do NOT allow any clients - this is just a test config.
-		deny all
+cat << EOF > /etc/chrony/chrony-test.conf
+# Use public NTP servers from the internet.
+pool pool.ntp.org iburst
+driftfile /var/lib/chrony/chrony.drift
+makestep 1.0 3
+# Do NOT allow any clients - this is just a test config.
+deny all
 EOF
 
 # Set the default configuration to be a client.  Allows chrony to start
 echo "Setting default NTP mode to offline"
-cat <<- EOF > /etc/chrony-default.conf
-		# This configuration file makes chronyd start but remain offline
-		# until explicitly told to sync via chronyc.
-		driftfile /var/lib/chrony/chrony.drift
-		makestep 1.0 3
-		offline
-		deny all
+cat << EOF > /etc/chrony-default.conf
+# This configuration file makes chronyd start but remain offline
+# until explicitly told to sync via chronyc.
+driftfile /var/lib/chrony/chrony.drift
+makestep 1.0 3
+offline
+deny all
 EOF
 cp /etc/chrony-default.conf /etc/chrony.conf
 systemctl enable chrony.service
@@ -455,36 +484,37 @@ systemctl enable chrony.service
 # Set br0 to be the wait online interface, avoids boot delay
 mkdir -p /etc/systemd/system/systemd-networkd-wait-online.service.d/
 cat <<- EOF > /etc/systemd/system/systemd-networkd-wait-online.service.d/override.conf
-		[Service]
-		ExecStart=
-		ExecStart=/lib/systemd/systemd-networkd-wait-online --interface=br0
+[Service]
+ExecStart=
+ExecStart=/lib/systemd/systemd-networkd-wait-online --interface=br0
 EOF
-# But let's try not using it unless something else enables it
+# But let's not use it unless something else enables it
 systemctl disable systemd-networkd-wait-online.service
 
 # Disable netplan, networkd will do the networking
 mkdir -p /etc/netplan
 rm -f /etc/netplan/*
-cat <<- EOF > /etc/netplan/99-disable-netplan.yaml
-		# This file tells Netplan to do nothing.
-		network:
-		version: 2
-		renderer: networkd
+cat << EOF > /etc/netplan/99-disable-netplan.yaml
+# This file tells Netplan to do nothing.
+network:
+version: 2
+renderer: networkd
 EOF
 echo "Netplan disabled, will use networkd instead"
 
-cat <<- EOF > /etc/systemd/resolved.conf
-		[Resolve]
-		LLMNR=no
-		MulticastDNS=no
-		DNSStubListener=yes
-		Cache=yes
+# Configure resolved
+cat << EOF > /etc/systemd/resolved.conf
+[Resolve]
+LLMNR=no
+MulticastDNS=no
+DNSStubListener=yes
+Cache=yes
 EOF
 
 # Old issue, but useful to avoid any hung mesh node so leaving this in
-cat <<- EOF > /etc/sysctl.d/90-kernelpanic-reboot.conf
-		kernel.panic = 10
-		kernel.panic_on_oops = 1
+cat << EOF > /etc/sysctl.d/90-kernelpanic-reboot.conf
+kernel.panic = 10
+kernel.panic_on_oops = 1
 EOF
 
 echo "Disabling default chrony networkd-dispatcher script"
@@ -514,45 +544,45 @@ if [ "__INSTALL_MEDIAMTX__" = "y" ]; then
 		chmod +x /opt/mediamtx/mediamtx
 		cp mediamtx.yml /etc/mediamtx/
 
-	cat <<- EOF > /etc/systemd/system/mediamtx.service
-		[Unit]
-		Description=MediaMTX RTSP/RTMP/WebRTC Server
-		After=network.target
+cat << EOF > /etc/systemd/system/mediamtx.service
+[Unit]
+Description=MediaMTX RTSP/RTMP/WebRTC Server
+After=network.target
 
-		[Service]
-		User=mediamtx
-		Group=mediamtx
-		WorkingDirectory=/opt/mediamtx
-		ExecStart=/opt/mediamtx/mediamtx /etc/mediamtx/mediamtx.yml
-#			   Restart=on-failure
-#			   RestartSec=5
+[Service]
+User=mediamtx
+Group=mediamtx
+WorkingDirectory=/opt/mediamtx
+ExecStart=/opt/mediamtx/mediamtx /etc/mediamtx/mediamtx.yml
+Restart=on-failure
+RestartSec=5
 
-		[Install]
-		WantedBy=multi-user.target
-	EOF
+[Install]
+WantedBy=multi-user.target
+EOF
 fi
 
 echo "Setting radio-setup.sh to run at next reboot"
 #set up the second provisioning script to run at boot
-cat <<- EOF > /etc/systemd/system/radio-setup-run-once.service
-		[Unit]
-		Description=Run radio setup script once after reboot
-		After=network-online.target multi-user.target
-		Wants=network-online.target
+cat << EOF > /etc/systemd/system/radio-setup-run-once.service
+[Unit]
+Description=Run radio setup script once after reboot
+After=network-online.target multi-user.target
+Wants=network-online.target
 
-		[Service]
-		Type=oneshot
-		ExecStart=/usr/local/bin/radio-setup.sh
-		ExecStartPre=/bin/sleep 10
-		RemainAfterExit=no
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/radio-setup.sh
+ExecStartPre=/bin/sleep 10
+RemainAfterExit=no
 
-		[Install]
-		WantedBy=multi-user.target
+[Install]
+WantedBy=multi-user.target
 EOF
 systemctl enable radio-setup-run-once.service
 
 
-echo "Disabling old network managers"
+echo "Disabling network manager"
 systemctl stop dhcpcd
 systemctl disable dhcpcd
 systemctl stop NetworkManager
@@ -574,7 +604,7 @@ echo "mumble=__INSTALL_MUMBLE__" >> /etc/mesh.conf
 echo "mtx=__INSTALL_MEDIAMTX__" >> /etc/mesh.conf
 echo "acs=__AUTO_CHANNEL__" >> /etc/mesh.conf
 
-
+# Disable the current script so it won't run again at next boot
 systemctl disable mesh-provision
 
 echo "=== Provisioning complete at $(date) ==="
@@ -583,9 +613,11 @@ reboot
 
 PROVISIONEOF
 
+# Make sure all our tools can run
 chmod +x /usr/local/bin/*
 
 # Create systemd service to run the provisioning AFTER network is ready
+# This is the above portion of the script that was just written out
 cat > /etc/systemd/system/mesh-provision.service << 'EOF'
 [Unit]
 Description=Provision Mesh Node After Network
@@ -603,10 +635,10 @@ StandardError=journal+console
 WantedBy=multi-user.target
 EOF
 
-
 systemctl daemon-reload
 systemctl enable mesh-provision.service
 
+# There is an annoying banner message in here, get rid of it
 rm /etc/ssh/sshd_config.d/*
 echo "=== firstrun.sh complete - provisioning will continue after reboot ==="
 echo "=== firstrun.sh exiting at $(date) ==="
