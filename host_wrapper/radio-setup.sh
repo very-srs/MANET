@@ -11,23 +11,23 @@ REG=US  #wifi regulatory region
 
 # read the stored values from firstrun.sh
 while IFS= read -r line; do
-    # Skip empty lines
-    if [[ -z "$line" ]]; then
-        continue
-    fi
+	# Skip empty lines
+	if [[ -z "$line" ]]; then
+		continue
+	fi
 
-    # Split the line into a key and a value at the first ": "
-    key="${line%%: *}"
-    value="${line#*: }"
+	# Split the line into a key and a value at the first ": "
+	key="${line%%: *}"
+	value="${line#*: }"
 
-    sanitized_key=$(echo "$key" | sed 's/-/_/g' | tr -cd '[:alnum:]_')
+	sanitized_key=$(echo "$key" | sed 's/-/_/g' | tr -cd '[:alnum:]_')
 
-    # Check if the key is not empty after sanitization
-    if [[ -n "$sanitized_key" ]]; then
-        # Export the sanitized key as an environment variable with its value.
-        export "$sanitized_key=$value"
-        echo "Checking config: $sanitized_key"
-    fi
+	# Check if the key is not empty after sanitization
+	if [[ -n "$sanitized_key" ]]; then
+		# Export the sanitized key as an environment variable with its value.
+		export "$sanitized_key=$value"
+		echo "Checking config: $sanitized_key"
+	fi
 done < <(cat /etc/mesh.conf)
 
 echo "Applying settings..."
@@ -117,13 +117,13 @@ for WLAN in `networkctl | awk '/wlan/ {print $2}'`; do
 		sae_pwe=1
 		ap_scan=2
 		network={
-		    ssid="$MESH_NAME"
-		    mode=5
-		    frequency=${FREQS[$CT]}
-		    key_mgmt=SAE
-		    psk="$KEY"
-		    ieee80211w=2
-		    mesh_fwding=0
+			ssid="$MESH_NAME"
+			mode=5
+			frequency=${FREQS[$CT]}
+			key_mgmt=SAE
+			psk="$KEY"
+			ieee80211w=2
+			mesh_fwding=0
 		}
 	EOF
 
@@ -148,7 +148,7 @@ for WLAN in `networkctl | awk '/wlan/ {print $2}'`; do
 		Type=mesh
 	EOF
 
-    echo " > Enabling wlan$CT..."
+	echo " > Enabling wlan$CT..."
 	#start up wpa_supplicant at boot for this interface
 	systemctl enable wpa_supplicant@wlan$CT.service
 	((CT++))
@@ -191,8 +191,8 @@ AFTER_DEVICES=""
 WANTS_SERVICES=""
 INT_CT=0
 for WLAN in $WLAN_INTERFACES; do
-    AFTER_DEVICES+="sys-subsystem-net-devices-wlan$INT_CT.device "
-    WANTS_SERVICES+="wpa_supplicant@wlan$INT_CT.service "
+	AFTER_DEVICES+="sys-subsystem-net-devices-wlan$INT_CT.device "
+	WANTS_SERVICES+="wpa_supplicant@wlan$INT_CT.service "
 	((INT_CT++))
 done
 
@@ -351,7 +351,7 @@ for WLAN in `networkctl | awk '/wlan/ {print $2}'`; do
 		#disable global discovery and relaying
 		sed -i '/<options>/a <globalAnnounceEnabled>false</globalAnnounceEnabled>\n<relaysEnabled>false</relaysEnabled>' "$SYNCTHING_CONFIG"
 		# replace the gui block to set the address
-		sed -i 's|<gui enabled="true" tls="false" debugging="false">.*</gui>|<gui enabled="true" tls="false" debugging="false">\n        <address>127.0.0.1:8384</address>\n    </gui>|' "$SYNCTHING_CONFIG"
+		sed -i 's|<gui enabled="true" tls="false" debugging="false">.*</gui>|<gui enabled="true" tls="false" debugging="false">\n		<address>127.0.0.1:8384</address>\n	</gui>|' "$SYNCTHING_CONFIG"
 		#make it clear we're done
 		echo " -- CONFIGURED -- " >> /etc/issue
 		reboot
