@@ -9,18 +9,18 @@ set "OS_IMAGE_URL=https://downloads.raspberrypi.com/raspios_lite_arm64/images/ra
 
 :: --- 1. Check Dependencies ---
 if not exist "%TEMPLATE_FILE%" (
-    echo ERROR: Template file '%TEMPLATE_FILE%' not found.
-    pause
-    exit /b
+	echo ERROR: Template file '%TEMPLATE_FILE%' not found.
+	pause
+	exit /b
 )
 if exist "%ProgramFiles(x86)%\Raspberry Pi Imager\rpi-imager.exe" (
-    set "IMAGER_PATH=%ProgramFiles(x86)%\Raspberry Pi Imager\rpi-imager.exe"
+	set "IMAGER_PATH=%ProgramFiles(x86)%\Raspberry Pi Imager\rpi-imager.exe"
 ) else if exist "%ProgramFiles%\Raspberry Pi Imager\rpi-imager.exe" (
-    set "IMAGER_PATH=%ProgramFiles%\Raspberry Pi Imager\rpi-imager.exe"
+	set "IMAGER_PATH=%ProgramFiles%\Raspberry Pi Imager\rpi-imager.exe"
 ) else (
-    echo ERROR: Cannot find rpi-imager.exe
-    pause
-    exit /b
+	echo ERROR: Cannot find rpi-imager.exe
+	pause
+	exit /b
 )
 echo Found rpi-imager at %IMAGER_PATH%
 echo.
@@ -28,11 +28,11 @@ echo.
 :: Find rpiboot.exe
 set "RPIBOOT_PATH="
 if exist "%ProgramFiles(x86)%\Raspberry Pi\rpiboot.exe" (
-    set "RPIBOOT_PATH=%ProgramFiles(x86)%\Raspberry Pi\rpiboot.exe"
+	set "RPIBOOT_PATH=%ProgramFiles(x86)%\Raspberry Pi\rpiboot.exe"
 ) else if exist "%ProgramFiles%\Raspberry Pi\rpiboot.exe" (
-    set "RPIBOOT_PATH=%ProgramFiles%\Raspberry Pi\rpiboot.exe"
+	set "RPIBOOT_PATH=%ProgramFiles%\Raspberry Pi\rpiboot.exe"
 ) else if exist "rpiboot.exe" (
-    set "RPIBOOT_PATH=.\rpiboot.exe"
+	set "RPIBOOT_PATH=.\rpiboot.exe"
 )
 
 :: Ensure config directory exists
@@ -43,15 +43,15 @@ set "CONFIG_FOUND="
 for %%f in (%CONFIG_DIR%\*.bat) do set "CONFIG_FOUND=true"
 
 if defined CONFIG_FOUND (
-    echo Found saved configuration(s).
-    echo 1. Load a saved configuration
-    echo 2. Create a new configuration
-    choice /c 12 /m "Select an option:"
-    if errorlevel 2 goto :new_config
-    if errorlevel 1 goto :load_menu
+	echo Found saved configuration(s).
+	echo 1. Load a saved configuration
+	echo 2. Create a new configuration
+	choice /c 12 /m "Select an option:"
+	if errorlevel 2 goto :new_config
+	if errorlevel 1 goto :load_menu
 ) else (
-    echo No saved configs found. Starting new setup.
-    goto :new_config
+	echo No saved configs found. Starting new setup.
+	goto :new_config
 )
 
 :load_menu
@@ -59,28 +59,28 @@ cls
 echo Please select a configuration to load:
 set /a "count=0"
 for /f "delims=" %%f in ('dir /b "%CONFIG_DIR%\*.bat"') do (
-    set /a "count+=1"
-    set "config_!count!=%%f"
-    echo !count!. %%~nf
+	set /a "count+=1"
+	set "config_!count!=%%f"
+	echo !count!. %%~nf
 )
 set "config_count=%count%"
 echo.
 set /p "choice_num=Enter number (or 'c' to cancel): "
 
 if /i "%choice_num%"=="c" (
-    echo Aborting.
-    pause
-    exit /b
+	echo Aborting.
+	pause
+	exit /b
 )
 
 :: Validate choice
 if %choice_num% GTR 0 if %choice_num% LEQ %config_count% (
-    call :load_config "%%~n!config_%choice_num%!%%"
-    goto :post_config
+	call :load_config "%%~n!config_%choice_num%!%%"
+	goto :post_config
 ) else (
-    echo Invalid selection.
-    pause
-    goto :load_menu
+	echo Invalid selection.
+	pause
+	goto :load_menu
 )
 
 :new_config
@@ -107,31 +107,31 @@ wmic diskdrive get DeviceID,Model,Size
 echo ========================================================
 echo.
 echo WARNING: Identify your BOOT DRIVE (e.g., C:\) from the list above and DO NOT select it.
-echo          Common target drives are removable media.
+echo		  Common target drives are removable media.
 set /p "TARGET_DEVICE=Enter target device (e.g., \\.\PHYSICALDRIVE2): "
 
 echo.
 echo WARNING: This will ERASE ALL DATA on %TARGET_DEVICE%.
 set /p "CONFIRM=Are you sure? (yes/no): "
 if not /i "%CONFIRM%"=="yes" (
-    echo Aborting.
-    pause
-    exit /b
+	echo Aborting.
+	pause
+	exit /b
 )
 
 :: --- 5. Create Temporary Script ---
 echo "Generating temporary firstrun script..."
 (for /f "delims=" %%i in (%TEMPLATE_FILE%) do (
-    set "line=%%i"
-    set "line=!line:__HARDWARE_MODEL__=%HARDWARE_MODEL%!"
-    set "line=!line:__EUD_CONNECTION__=%EUD_CONNECTION%!"
-    set "line=!line:__INSTALL_MEDIAMTX__=%INSTALL_MEDIAMTX%!"
-    set "line=!line:__INSTALL_MUMBLE__=%INSTALL_MUMBLE%!"
-    set "line=!line:__LAN_SSID__=%LAN_SSID%!"
-    set "line=!line:__LAN_SAE_KEY__=%LAN_SAE_KEY%!"
-    set "line=!line:__LAN_CIDR_BLOCK__=%LAN_CIDR_BLOCK%!"
-    set "line=!line:__AUTO_CHANNEL__=%AUTO_CHANNEL%!"
-    echo(!line!
+	set "line=%%i"
+	set "line=!line:__HARDWARE_MODEL__=%HARDWARE_MODEL%!"
+	set "line=!line:__EUD_CONNECTION__=%EUD_CONNECTION%!"
+	set "line=!line:__INSTALL_MEDIAMTX__=%INSTALL_MEDIAMTX%!"
+	set "line=!line:__INSTALL_MUMBLE__=%INSTALL_MUMBLE%!"
+	set "line=!line:__LAN_SSID__=%LAN_SSID%!"
+	set "line=!line:__LAN_SAE_KEY__=%LAN_SAE_KEY%!"
+	set "line=!line:__LAN_CIDR_BLOCK__=%LAN_CIDR_BLOCK%!"
+	set "line=!line:__AUTO_CHANNEL__=%AUTO_CHANNEL%!"
+	echo(!line!
 )) > "%TEMP_SCRIPT_FILE%"
 
 :: --- 6. Run rpi-imager ---
@@ -182,27 +182,27 @@ set /p "LAN_SSID=Enter LAN SSID Name: "
 set "LAN_SAE_KEY="
 set /p "LAN_SAE_KEY_INPUT=Enter LAN SAE Key (WPA3 password, 8-63 chars) [or press Enter to generate]: "
 if "%LAN_SAE_KEY_INPUT%"=="" (
-    set "LAN_SAE_KEY=P%RANDOM%a%RANDOM%s%RANDOM%s"
-    echo Generated (weak) SAE Key: %LAN_SAE_KEY%
+	set "LAN_SAE_KEY=P%RANDOM%a%RANDOM%s%RANDOM%s"
+	echo Generated (weak) SAE Key: %LAN_SAE_KEY%
 ) else (
-    set "LAN_SAE_KEY=%LAN_SAE_KEY_INPUT%"
+	set "LAN_SAE_KEY=%LAN_SAE_KEY_INPUT%"
 )
 :: Validate length
 set "test_key=%LAN_SAE_KEY%"
 set "key_len=0"
 :len_loop
 if defined test_key (
-    set "test_key=%test_key:~1%"
-    set /a "key_len+=1"
-    goto :len_loop
+	set "test_key=%test_key:~1%"
+	set /a "key_len+=1"
+	goto :len_loop
 )
 if %key_len% LSS 8 (
-    echo ERROR: Key must be at least 8 characters. You entered %key_len%.
-    goto :ask_lan_sae
+	echo ERROR: Key must be at least 8 characters. You entered %key_len%.
+	goto :ask_lan_sae
 )
 if %key_len% GTR 63 (
-    echo ERROR: Key must be 63 characters or less. You entered %key_len%.
-    goto :ask_lan_sae
+	echo ERROR: Key must be 63 characters or less. You entered %key_len%.
+	goto :ask_lan_sae
 )
 
 :: Call the new CIDR function
@@ -226,24 +226,24 @@ echo 3. Compute Module 4 (CM4)
 choice /c 123 /m "Select an option:"
 if errorlevel 3 goto :hw_cm4
 if errorlevel 2 (
-    set "HARDWARE_MODEL=rpi4"
-    echo Selected: Raspberry Pi 4B
-    goto :eof
+	set "HARDWARE_MODEL=rpi4"
+	echo Selected: Raspberry Pi 4B
+	goto :eof
 )
 if errorlevel 1 (
-    set "HARDWARE_MODEL=rpi5"
-    echo Selected: Raspberry Pi 5
-    goto :eof
+	set "HARDWARE_MODEL=rpi5"
+	echo Selected: Raspberry Pi 5
+	goto :eof
 )
 
 :hw_cm4
 set "HARDWARE_MODEL=rpi4"
 echo Selected: Compute Module 4 (CM4)
 if not defined RPIBOOT_PATH (
-    echo ERROR: 'rpiboot.exe' not found.
-    echo Please install Raspberry Pi drivers or place rpiboot.exe in this directory.
-    pause
-    exit /b
+	echo ERROR: 'rpiboot.exe' not found.
+	echo Please install Raspberry Pi drivers or place rpiboot.exe in this directory.
+	pause
+	exit /b
 )
 echo Please connect your CM4 to this computer in USB-boot mode.
 echo The script will run rpiboot.exe to mount the eMMC.
@@ -260,9 +260,9 @@ set /p "confirm_default=Use default LAN network %DEFAULT_CIDR%? (Y/n) [y]: "
 if not defined confirm_default set "confirm_default=y"
 
 if /i "%confirm_default%"=="y" (
-    set "LAN_CIDR_BLOCK=%DEFAULT_CIDR%"
-    echo Using default network: %LAN_CIDR_BLOCK%
-    goto :eof
+	set "LAN_CIDR_BLOCK=%DEFAULT_CIDR%"
+	echo Using default network: %LAN_CIDR_BLOCK%
+	goto :eof
 )
 
 :manual_cidr_loop
@@ -272,64 +272,64 @@ set /p "custom_cidr=Enter custom LAN CIDR block (e.g., 10.10.0.0/16): "
 set "ip_part="
 set "prefix_part="
 for /f "tokens=1,2 delims=/" %%a in ("%custom_cidr%") do (
-    set "ip_part=%%a"
-    set "prefix_part=%%b"
+	set "ip_part=%%a"
+	set "prefix_part=%%b"
 )
 
 if not defined ip_part (
-    echo ERROR: Invalid format. Must be x.x.x.x/yy
-    goto :manual_cidr_loop
+	echo ERROR: Invalid format. Must be x.x.x.x/yy
+	goto :manual_cidr_loop
 )
 if not defined prefix_part (
-    echo ERROR: Invalid format. Missing prefix /yy
-    goto :manual_cidr_loop
+	echo ERROR: Invalid format. Missing prefix /yy
+	goto :manual_cidr_loop
 )
 
 :: Check if prefix is a number
 set /a "check_prefix=prefix_part + 0" 2>nul
 if not "%check_prefix%"=="%prefix_part%" (
-     echo ERROR: Prefix '/%prefix_part%' is not a valid number.
-     goto :manual_cidr_loop
+	 echo ERROR: Prefix '/%prefix_part%' is not a valid number.
+	 goto :manual_cidr_loop
 )
 if %prefix_part% LSS 16 (
-    echo ERROR: Prefix /%prefix_part% is too small. Must be 16-30.
-    goto :manual_cidr_loop
+	echo ERROR: Prefix /%prefix_part% is too small. Must be 16-30.
+	goto :manual_cidr_loop
 )
 if %prefix_part% GTR 30 (
-    echo ERROR: Prefix /%prefix_part% is too large. Must be 16-30.
-    goto :manual_cidr_loop
+	echo ERROR: Prefix /%prefix_part% is too large. Must be 16-30.
+	goto :manual_cidr_loop
 )
 
 :: Validate IP as a private range
 set "o1="
 set "o2="
 for /f "tokens=1,2 delims=." %%i in ("%ip_part%") do (
-    set "o1=%%i"
-    set "o2=%%j"
+	set "o1=%%i"
+	set "o2=%%j"
 )
 
 set "is_private=false"
 if "%o1%"=="10" (
-    set "is_private=true"
+	set "is_private=true"
 )
 if "%o1%"=="172" (
-    set /a "check_o2=o2 + 0" 2>nul
-    if "%check_o2%"=="%o2%" (
-        if %o2% GEQ 16 if %o2% LEQ 31 (
-            set "is_private=true"
-        )
-    )
+	set /a "check_o2=o2 + 0" 2>nul
+	if "%check_o2%"=="%o2%" (
+		if %o2% GEQ 16 if %o2% LEQ 31 (
+			set "is_private=true"
+		)
+	)
 )
 if "%o1%"=="192" (
-    if "%o2%"=="168" (
-        set "is_private=true"
-    )
+	if "%o2%"=="168" (
+		set "is_private=true"
+	)
 )
 
 if "%is_private%"=="false" (
-    echo ERROR: IP %ip_part% is not in a private range.
-    echo Must be in 10.0.0.0/8, 172.16.0.0/12, or 192.168.0.0/16.
-    goto :manual_cidr_loop
+	echo ERROR: IP %ip_part% is not in a private range.
+	echo Must be in 10.0.0.0/8, 172.16.0.0/12, or 192.168.0.0/16.
+	goto :manual_cidr_loop
 )
 
 :: All checks passed
@@ -347,21 +347,21 @@ if /i not "%save_choice%"=="y" goto :eof
 
 set /p "config_name=Enter a name for this config (e.g., media-server): "
 if "%config_name%"=="" (
-    echo Invalid name, skipping save.
-    goto :eof
+	echo Invalid name, skipping save.
+	goto :eof
 )
 set "CONFIG_FILE=%CONFIG_DIR%\%config_name%.bat"
 (
-    echo @echo off
-    echo rem Pi Imager Config: %config_name%
-    echo rem Hardware model is selected at runtime, not saved
-    echo set "EUD_CONNECTION=%EUD_CONNECTION%"
-    echo set "INSTALL_MEDIAMTX=%INSTALL_MEDIAMTX%"
-    echo set "INSTALL_MUMBLE=%INSTALL_MUMBLE%"
-    echo set "LAN_SSID=%LAN_SSID%"
-    echo set "LAN_SAE_KEY=%LAN_SAE_KEY%"
-    echo set "LAN_CIDR_BLOCK=%LAN_CIDR_BLOCK%"
-    echo set "AUTO_CHANNEL=%AUTO_CHANNEL%"
+	echo @echo off
+	echo rem Pi Imager Config: %config_name%
+	echo rem Hardware model is selected at runtime, not saved
+	echo set "EUD_CONNECTION=%EUD_CONNECTION%"
+	echo set "INSTALL_MEDIAMTX=%INSTALL_MEDIAMTX%"
+	echo set "INSTALL_MUMBLE=%INSTALL_MUMBLE%"
+	echo set "LAN_SSID=%LAN_SSID%"
+	echo set "LAN_SAE_KEY=%LAN_SAE_KEY%"
+	echo set "LAN_CIDR_BLOCK=%LAN_CIDR_BLOCK%"
+	echo set "AUTO_CHANNEL=%AUTO_CHANNEL%"
 ) > "%CONFIG_FILE%"
 echo Configuration saved to %CONFIG_FILE%
 goto :eof

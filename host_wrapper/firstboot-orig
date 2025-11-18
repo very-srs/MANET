@@ -24,20 +24,20 @@ TIMEOUT=60
 ELAPSED=0
 
 while [ $ELAPSED -lt $TIMEOUT ]; do
-    if systemctl is-active --quiet systemd-networkd; then
-        echo "systemd-networkd is running!"
-        break
-    fi
-    echo "systemd-networkd not ready yet... (${ELAPSED}s)"
-    sleep 2
-    ELAPSED=$((ELAPSED + 2))
+	if systemctl is-active --quiet systemd-networkd; then
+		echo "systemd-networkd is running!"
+		break
+	fi
+	echo "systemd-networkd not ready yet... (${ELAPSED}s)"
+	sleep 2
+	ELAPSED=$((ELAPSED + 2))
 done
 
 if ! systemctl is-active --quiet systemd-networkd; then
-    echo "WARNING: systemd-networkd did not start after ${TIMEOUT}s"
-    echo "Attempting to start it manually..."
-    systemctl start systemd-networkd
-    sleep 5
+	echo "WARNING: systemd-networkd did not start after ${TIMEOUT}s"
+	echo "Attempting to start it manually..."
+	systemctl start systemd-networkd
+	sleep 5
 fi
 
 # Now wait for the ethernet interface to get an IP
@@ -46,15 +46,15 @@ TIMEOUT=120
 ELAPSED=0
 
 while [ $ELAPSED -lt $TIMEOUT ]; do
-    # Check if we have a non-loopback IPv4 address
-    if ip -4 addr show | grep -q "inet.*scope global"; then
-        IP=$(ip -4 addr show | awk '/inet.*scope global/ {print $2; exit}')
-        echo "Got IP address: $IP"
-        break
-    fi
-    echo "Waiting for IP address... (${ELAPSED}s)"
-    sleep 3
-    ELAPSED=$((ELAPSED + 3))
+	# Check if we have a non-loopback IPv4 address
+	if ip -4 addr show | grep -q "inet.*scope global"; then
+		IP=$(ip -4 addr show | awk '/inet.*scope global/ {print $2; exit}')
+		echo "Got IP address: $IP"
+		break
+	fi
+	echo "Waiting for IP address... (${ELAPSED}s)"
+	sleep 3
+	ELAPSED=$((ELAPSED + 3))
 done
 
 # Finally test internet
@@ -62,13 +62,13 @@ echo "Testing internet connectivity..."
 ELAPSED=0
 TIMEOUT=60
 while [ $ELAPSED -lt $TIMEOUT ]; do
-    if ping -c 1 -W 2 8.8.8.8 > /dev/null 2>&1; then
-        echo "Internet connectivity confirmed!"
-        break
-    fi
-    echo "Waiting for internet... (${ELAPSED}s)"
-    sleep 3
-    ELAPSED=$((ELAPSED + 3))
+	if ping -c 1 -W 2 8.8.8.8 > /dev/null 2>&1; then
+		echo "Internet connectivity confirmed!"
+		break
+	fi
+	echo "Waiting for internet... (${ELAPSED}s)"
+	sleep 3
+	ELAPSED=$((ELAPSED + 3))
 done
 
 # Download and unpack the various config files and packages needed
@@ -88,24 +88,24 @@ if [ "__HARDWARE_MODEL__" = "rpi5" ]; then
 
 	# If filesystem is >80% full, partition is too small - expand
 	if [ $USAGE_PERCENT -gt 80 ]; then
-	    echo "Filesystem nearly full, expanding partition..."
+		echo "Filesystem nearly full, expanding partition..."
 
-	    # Expand the partition
-	    raspi-config --expand-rootfs
+		# Expand the partition
+		raspi-config --expand-rootfs
 
-	    # Resize the filesystem to fill the new partition
-	    resize2fs /dev/mmcblk0p2
+		# Resize the filesystem to fill the new partition
+		resize2fs /dev/mmcblk0p2
 
-	    echo "Expansion complete"
-#	    systemctl reboot
+		echo "Expansion complete"
+#		systemctl reboot
 	else
-    	echo "Filesystem has room (${USAGE_PERCENT}%), skipping expansion."
+		echo "Filesystem has room (${USAGE_PERCENT}%), skipping expansion."
 	fi
 	touch /var/lib/expand-root-done
 elif [ "__HARDWARE_MODEL__" = "rpi4" ]; then
 	echo "Applying RPi 4 specific settings..."
 	wget -q http://10.30.1.1:8081/data/rpi4-0.3.tar	 -O /root/rpi4-0.3.tar || {
-        	echo "ERROR: Failed to download rpi4 package"
+			echo "ERROR: Failed to download rpi4 package"
 		exit 1
 	}
 	tar -xvf /root/rpi4-0.3.tar -C /
@@ -309,34 +309,34 @@ cat <<- EOF > /etc/nftables.conf
 	table inet filter {
 	  # The INPUT chain handles traffic destined for the node itself.
 	  chain input {
-	    type filter hook input priority 0; policy drop;
-	    ct state {established, related} accept
-	    ct state invalid drop
-	    iifname "lo" accept
-	    # Accept ALL traffic coming from the trusted mesh interface.
-	    iifname "br0" accept
-	    iifname "bat0" accept
-	    iifname "end0" tcp dport 22 accept
+		type filter hook input priority 0; policy drop;
+		ct state {established, related} accept
+		ct state invalid drop
+		iifname "lo" accept
+		# Accept ALL traffic coming from the trusted mesh interface.
+		iifname "br0" accept
+		iifname "bat0" accept
+		iifname "end0" tcp dport 22 accept
 	  }
 	  chain forward {
-	    type filter hook forward priority 0; policy drop;
+		type filter hook forward priority 0; policy drop;
 
-	    # Allow traffic from the trusted mesh to be forwarded
-	    # out to the internet via the Ethernet port.
-	    iifname "br0" oifname "end0" accept
+		# Allow traffic from the trusted mesh to be forwarded
+		# out to the internet via the Ethernet port.
+		iifname "br0" oifname "end0" accept
 
-	    # Allow the return traffic from the internet back to the mesh.
-	    iifname "end0" oifname "br0" ct state established, related accept
+		# Allow the return traffic from the internet back to the mesh.
+		iifname "end0" oifname "br0" ct state established, related accept
 	  }
 	  chain output {
-	    type filter hook output priority 0; policy accept;
+		type filter hook output priority 0; policy accept;
 	  }
 	}
 
 	table ip nat {
 	  chain postrouting {
-	    type nat hook postrouting priority 100;
-	    oifname "end0" masquerade
+		type nat hook postrouting priority 100;
+		oifname "end0" masquerade
 	  }
 	}
 EOF
@@ -356,9 +356,9 @@ cat <<-EOF > /etc/radvd-mesh.conf
 	  AdvSendAdvert on;
 	  AdvDefaultLifetime 0;
 	  prefix fd01:ed20:ecb4:0::/64  {
-	    AdvOnLink on;
-	    AdvAutonomous on;
-	    AdvRouterAddr off;
+		AdvOnLink on;
+		AdvAutonomous on;
+		AdvRouterAddr off;
 	  };
 	};
 EOF
@@ -368,8 +368,8 @@ cat <<- EOF > /etc/radvd-gateway.conf
 	  AdvSendAdvert on;
 	  AdvDefaultLifetime 600;
 	  prefix fd01:ed20:ecb4:0::/64  {
-	    AdvOnLink on;
-	    AdvAutonomous on;
+		AdvOnLink on;
+		AdvAutonomous on;
 	  };
 	};
 EOF
@@ -497,7 +497,7 @@ fi
 
 # install mediaMTX server
 if [ "__INSTALL_MEDIAMTX__" = "y" ]; then
-    echo "Installing MediaMTX"
+	echo "Installing MediaMTX"
 	cd /tmp
 	wget -q https://github.com/bluenviron/mediamtx/releases/download/v1.15.3/mediamtx_v1.15.3_linux_arm64.tar.gz
 	gzip -d mediamtx_v1.15.3_linux_arm64.tar.gz
