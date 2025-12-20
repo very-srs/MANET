@@ -1,56 +1,19 @@
 #!/bin/bash
 #  A script to finalize the setup of a radio after imaging and a first boot
 #
-#  This script can be re-run to set new wifi setings from a config server
+#  This script can be re-run to set new network setings
+#  if the mesh config file is updated
 #
 
 
+# log the output of this script to a file for debugging
+exec > >(tee /boot/firmware/radio-setup.log) 2>&1
+set -x
 
-# The default URL to the active configuration file on the Docker host.
-CONFIG_URL="https://10.30.1.1:8081/data/active.conf"
-
-# Parse command-line options for alternative URL
-while [[ $# -gt 0 ]]; do
-    case $1 in
-        -u|--url)
-            CONFIG_URL="$2"
-            shift 2
-            ;;
-        *)
-            echo "Unknown option: $1" >&2
-            echo "Usage: $0 [-u|--url <url>]" >&2
-            exit 1
-            ;;
-    esac
-done
-
-echo
-echo " # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #"
-echo " #                                                                           #"
-if systemctl is-enabled radio-setup-run-once.service >/dev/null 2>&1; then
-	echo " #   This mesh node is being provisioned for the first time.  Basic setup    #"
-	echo " #   is now continuing.  This node will reboot one more time when done       #"
-else
-	echo " #   Re-configuring mesh node with config from:                              #"
-	echo "     $CONFIG_URL "
-fi
-echo " #                                                                           #"
-echo " # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #"
-echo
-echo
-sleep 1
-
-
-### configure mesh defaults, ** these should not get used **
-KEY='qhiUvWC3sgxmvgisF+bBeiSjgBlYuN8DczaCgw=='  # a random but not unique key
-MESH_NAME="test-01"
+# default lobby frequencies for wifi
 FREQS=("2412" "5180")
-REG=US  #wifi regulatory region
-#CERT_PATH="/root/server.crt"  #allows ssl to the config server
 
-
-# This loop reads the output from curl to set config variables
-echo "--- Fetching configuration from $CONFIG_URL ---"
+# This loop reads the stored setup variables to set the current config
 while IFS= read -r line; do
     # Skip empty lines
     if [[ -z "$line" ]]; then
@@ -58,8 +21,8 @@ while IFS= read -r line; do
     fi
 
     # Split the line into a key and a value at the first ": "
-    key="${line%%: *}"
-    value="${line#*: }"
+    key="${line%%=*}"
+    value="${line#*=}"
 
     sanitized_key=$(echo "$key" | sed 's/-/_/g' | tr -cd '[:alnum:]_')
 
@@ -69,11 +32,8 @@ while IFS= read -r line; do
         export "$sanitized_key=$value"
         echo "Checking config: $sanitized_key"
     fi
-#done < <(curl -s --cacert "$CERT_PATH" "$CONFIG_URL")
-done < <(curl -k  -s "$CONFIG_URL")
+done < <(cat /etc/mesh.conf)
 
-echo "--- Configuration $config_name loaded successfully ---"
-echo
 echo "Applying settings..."
 sleep 0.5
 if [[ -n "$mesh_key" ]]; then
@@ -98,24 +58,6 @@ if [[ -n "$new_user_password" ]]; then
 	echo "radio:$new_user_password" | chpasswd
 fi
 
-#if [[ -n "$hardware_selection" ]]; then
-#	echo " > Hardware selected: $hardware_selection"
-	# do selections based on "$hardware_selection"
-#fi
-
-#if echo $enable_tak_server | grep true; then
-#    echo " > Enabling OpenTAKServer..."
-#    #do tak stuff, not yet enabled
-#fi
-if [[ -n "$ipv4_network" ]]; then
-	echo " > Setting IPv4 network settings..."
-	# Create the configuration file for the IPv4 manager
-	cat <<- EOF > /etc/mesh_ipv4.conf
-		IPV4_NETWORK="${ipv4_network}/${ipv4_cidr}"
-	EOF
-	sleep 0.5
-fi
-
 if [[ -n "$ssh_public_key" ]]; then
 	echo " > Updating authorized_keys for user 'radio'..."
 	mkdir -p /home/radio/.ssh
@@ -124,16 +66,51 @@ if [[ -n "$ssh_public_key" ]]; then
 	mv /tmp/t /home/radio/.ssh/authorized_keys
 fi
 
+sleep 0.5
+echo "testing acs variable"
+if [[ -n "$acsn" ]]; then
+	echo "acs defined as $acsn"
+	sleep 0.5
+        if [[ "$acs" == "Y" ]]; then
+	        echo " > This mesh will channel hop ..."
+		cp /usr/local/bin/node-manager-acs.sh /usr/local/bin/node-manager.sh
+	else
+		echo " > This mesh will remain on a static channel ..."
+		cp /usr/local/bin/node-manager-static.sh /usr/local/bin/node-manager.sh
+	fi
+fi
 
+sleep 2
 
 #
 # Finish setting up network devices (wireless)
 #
 
+# A system service to force mesh point mode on the wlan interfaces
+cat << EOF > /etc/systemd/system/mesh-interface-setup@.service
+[Unit]
+Description=Set %I to mesh point mode
+Before=wpa_supplicant@%i.service
+BindsTo=sys-subsystem-net-devices-%i.device
+After=sys-subsystem-net-devices-%i.device
+
+[Service]
+Type=oneshot
+ExecStartPre=/bin/sleep 1
+ExecStart=/usr/sbin/ip link set %I down
+ExecStart=/usr/sbin/iw dev %I set type mp
+ExecStart=/usr/sbin/ip link set %I up
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+echo REGDOMAIN=US > /etc/default/crda
 
 # First identify mesh and non mesh wlan interfaces
-
 mesh_ifaces=()
+halow_ifaces=()
 nonmesh_ifaces=()
 
 for phy in $(iw dev | awk '/^phy#/{print $1}'); do
@@ -141,28 +118,32 @@ for phy in $(iw dev | awk '/^phy#/{print $1}'); do
     phyname=${phy//#/}
 
     # Find interface(s) for this PHY
-    iface=$(iw dev | awk -v phy="$phy" '
-        $1=="Interface" {print $2}
+    iface=$(iw dev | awk -v target="$phy" '
+        $1 ~ /^phy#/ { current_phy = $1 }
+        current_phy == target && $1 == "Interface" { print $2 }
     ')
 
-    # Check if it supports mesh
-    if iw phy "$phyname" info | grep -q "mesh point"; then
+    # Check if it's HaLow (802.11ah) - look for Band 7 or morse driver
+	if iw phy "$phyname" info | grep -q "0.5 Mbps"; then
+        halow_ifaces+=("$iface")
+    elif iw phy "$phyname" info | grep -q "mesh point"; then
         mesh_ifaces+=("$iface")
     else
         nonmesh_ifaces+=("$iface")
     fi
 done
 
-#keep track of this across reboots
+# Keep track across reboots
 > /var/lib/mesh_if
+> /var/lib/halow_if
 > /var/lib/no_mesh_if
 
 # Bring everything down before renaming
-for iface in "${mesh_ifaces[@]}" "${nonmesh_ifaces[@]}"; do
+for iface in "${mesh_ifaces[@]}" "${halow_ifaces[@]}" "${nonmesh_ifaces[@]}"; do
     ip link set "$iface" down 2>/dev/null
 done
 
-# Rename mesh-capable ones first, we want them to be wlan0 and wlan1
+# Rename regular mesh-capable ones first (wlan0, wlan1)
 i=0
 for iface in "${mesh_ifaces[@]}"; do
     newname="wlan$i"
@@ -171,117 +152,239 @@ for iface in "${mesh_ifaces[@]}"; do
     ((i++))
 done
 
-# Rename non-mesh after mesh-capable
+# Rename HaLow interfaces (wlan2, wlan3, etc.)
+for iface in "${halow_ifaces[@]}"; do
+    newname="wlan$i"
+    echo $newname >> /var/lib/halow_if
+    ip link set "$iface" name "$newname"
+    ((i++))
+done
+
+# Rename non-mesh after all mesh-capable
 for iface in "${nonmesh_ifaces[@]}"; do
     newname="wlan$i"
     echo $newname >> /var/lib/no_mesh_if
     ip link set "$iface" name "$newname"
     ((i++))
 done
-
 # Bring them back up
 for iface in $(ip -o link show | awk -F': ' '{print $2}' | grep wlan); do
     ip link set "$iface" up 2>/dev/null
 done
 
+CT=0
 for WLAN in `cat /var/lib/mesh_if`; do
 	echo " > Setting SAE key/SSID for $WLAN ..."
 	#create wpa supplicant configs
 	echo "MESH_NAME=\"$MESH_NAME\"" > /etc/default/mesh
-	cat <<-EOF > /etc/wpa_supplicant/wpa_supplicant-$WLAN-lobby.conf
-		ctrl_interface=/var/run/wpa_supplicant
-		update_config=1
-		sae_pwe=1
-		ap_scan=2
-		network={
-		    ssid="$MESH_NAME"
-		    mode=5
-		    frequency=${FREQS[$CT]}
-		    key_mgmt=SAE
-		    psk="$KEY"
-		    ieee80211w=2
-		    mesh_fwding=0
-		}
-	EOF
+cat <<-EOF > /etc/wpa_supplicant/wpa_supplicant-$WLAN-lobby.conf
+ctrl_interface=/var/run/wpa_supplicant
+country=US
+update_config=1
+sae_pwe=1
+ap_scan=2
+network={
+    ssid="$MESH_NAME"
+    mode=5
+    frequency=${FREQS[$CT]}
+    key_mgmt=SAE
+    sae_password="$KEY"
+    ieee80211w=2
+    mesh_fwding=0
+}
+EOF
 
 	#create the network interface config
-	cat <<-EOF >  /etc/systemd/network/30-$WLAN.network
-		[Match]
-		MACAddress=`ip a | grep -A1 $WLAN | awk '/ether/ {print $2}'`
+cat <<-EOF >  /etc/systemd/network/30-$WLAN.network
+[Match]
+MACAddress=`ip a | grep -A1 $WLAN | awk '/ether/ {print $2}'`
 
-		[Network]
+[Network]
 
-		[Link]
-		RequiredForOnline=no
-		MTUBytes=1560
-	EOF
+[Link]
+RequiredForOnline=no
+MTUBytes=1560
+EOF
 
 	cat <<-EOF >  /etc/systemd/network/10-$WLAN.link
-		[Match]
-		MACAddress=`ip a | grep -A1 $WLAN | awk '/ether/ {print $2}'`
+[Match]
+MACAddress=`ip a | grep -A1 $WLAN | awk '/ether/ {print $2}'`
 
-		[Link]
-		Name=$WLAN
-	EOF
+[Link]
+Name=$WLAN
+EOF
 
     echo " > Enabling $WLAN for mesh use ..."
+	cp /etc/wpa_supplicant/wpa_supplicant-$WLAN-lobby.conf /etc/wpa_supplicant/wpa_supplicant-$WLAN.conf
 	#start up wpa_supplicant at boot for this interface
-	systemctl enable wpa_supplicant@wlan$CT.service
+	systemctl enable wpa_supplicant@$WLAN.service
 	((CT++))
 done
 for WLAN in `cat /var/lib/no_mesh_if | head -n 1`; do
 	echo " > Setting up $WLAN as a client AP ..."
 
 	echo "   > creating networkd file ..."
-	cat <<- EOF > /etc/systemd/network/30-$WLAN.network
-		[Match]
-		Name=$WLAN
+cat <<- EOF > /etc/systemd/network/30-$WLAN.network
+[Match]
+Name=$WLAN
 
-		[Link]
-		Unmanaged=yes
-		ActivationPolicy=manual
-	EOF
+[Link]
+Unmanaged=yes
+ActivationPolicy=manual
+EOF
 
-	echo "   > creating systemd tx power service ... "
-	#set this wlan interface to have a low (5db) tx power
-	cat <<- EOF > /etc/systemd/system/wlan-txpower.service
-		[Unit]
-		Description=Set low TX power on wlan interface
-		Before=hostapd.service
-		After=network.target
+systemctl enable mesh-interface-setup@$WLAN
 
-		[Service]
-		Type=oneshot
-		ExecStart=/usr/sbin/iw dev $WLAN set txpower fixed 1000
-		RemainAfterExit=yes
 
-		[Install]
-		WantedBy=multi-user.target
-	EOF
-	systemctl enable --now wlan-txpower.service
+#echo "   > creating systemd tx power service ... "
+##set this wlan interface to have a low (5db) tx power
+#cat <<- EOF > /etc/systemd/system/wlan-txpower.service
+#[Unit]
+#Description=Set low TX power on wlan interface
+#Before=hostapd.service
+#After=network.target
 
-	ip link set wlan0 down
-	echo "   > creating systemd hostapd service ... "
-	#set up hotsapd for this wlan to be an AP for the EUD
-	cat <<- EOF > /etc/hostapd/hostapd.conf
-		interface=$WLAN
-		driver=nl80211
-		ssid=$(hostname)
-		hw_mode=a
-		channel=36
-		ieee80211n=1
-		ieee80211ac=1
-		wmm_enabled=1
-		auth_algs=1
-		wpa=2
-		wpa_key_mgmt=WPA-PSK
-		rsn_pairwise=CCMP
-		wpa_passphrase=eudtest1!
-		country_code=US	
-	EOF
-	systemctl unmask hostapd
-	systemctl enable --now hostapd
+#[Service]
+#Type=oneshot
+#ExecStart=/usr/sbin/iw dev $WLAN set txpower fixed 1000
+#RemainAfterExit=yes
+
+#[Install]
+#WantedBy=multi-user.target
+#EOF
+#systemctl enable --now wlan-txpower.service
+#ip link set wlan0 down
+#echo "   > creating systemd hostapd service ... "
+#set up hotsapd for this wlan to be an AP for the EUD
+
+#cat <<- EOF > /etc/hostapd/hostapd.conf
+#interface=$WLAN
+#driver=nl80211
+#ssid=$(hostname)
+#hw_mode=a
+#channel=36
+#ieee80211n=1
+#ieee80211ac=1
+#wmm_enabled=1
+#auth_algs=1
+#wpa=2
+#wpa_key_mgmt=WPA-PSK
+#rsn_pairwise=CCMP
+#wpa_passphrase=eudtest1!
+#country_code=US	
+#EOF
+#	systemctl unmask hostapd
+#	systemctl enable --now hostapd
 done
+
+for WLAN in `cat /var/lib/halow_if | head -n 1`; do
+	echo " > Setting up $WLAN for HaLow use ..."
+#create the network interface config
+cat <<-EOF >  /etc/systemd/network/30-$WLAN.network
+[Match]
+MACAddress=`ip a | grep -A1 $WLAN | awk '/ether/ {print $2}'`
+
+[Network]
+
+[Link]
+RequiredForOnline=no
+MTUBytes=1560
+EOF
+
+cat <<-EOF >  /etc/systemd/network/10-$WLAN.link
+[Match]
+MACAddress=`ip a | grep -A1 $WLAN | awk '/ether/ {print $2}'`
+
+[Link]
+Name=$WLAN
+EOF
+
+rm /etc/wpa_supplicant/*${WLAN}* 2>/dev/null
+
+cat << EOF > /etc/wpa_supplicant/wpa_supplicant-$WLAN-s1g.conf
+country=US
+ctrl_interface=/var/run/wpa_supplicant_s1g
+sae_pwe=1
+max_peer_links=10
+mesh_fwding=0
+network={
+    ssid="$mesh_ssid"
+    key_mgmt=SAE
+    mode=5
+    channel=12
+    op_class=71
+    country="US"
+    s1g_prim_chwidth=1
+    s1g_prim_1mhz_chan_index=3
+    dtim_period=1
+    mesh_rssi_threshold=-85
+    dot11MeshHWMPRootMode=0
+    dot11MeshGateAnnouncements=0
+    mbca_config=1
+    mbca_min_beacon_gap_ms=25
+    mbca_tbtt_adj_interval_sec=60
+    dot11MeshBeaconTimingReportInterval=10
+    mbss_start_scan_duration_ms=2048
+    mesh_beaconless_mode=0
+    mesh_dynamic_peering=0
+    sae_password="$mesh_key"
+    pairwise=CCMP
+    ieee80211w=2
+    beacon_int=1000
+}
+EOF
+
+
+cat << EOF > /etc/systemd/system/wpa_supplicant-s1g-$WLAN.service 
+[Unit]
+Description=WPA supplicant (S1G/HaLow) for $WLAN
+After=morse-delayed-load.service
+Requires=morse-delayed-load.service
+
+[Service]
+Type=simple
+ExecStartPre=/bin/sleep 3
+ExecStart=/usr/sbin/wpa_supplicant_s1g -c /etc/wpa_supplicant/wpa_supplicant-$WLAN-s1g.conf -i $WLAN -D nl80211
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl disable wpa_supplicant_s1g@$WLAN.service
+systemctl enable wpa_supplicant-s1g-$WLAN.service
+
+done
+
+
+#stop this from loading at boot, happens too quickly
+echo "blacklist morse" > /etc/modprobe.d/morse-blacklist.conf
+echo "options cfg80211 ieee80211_regdom=US" > /etc/modprobe.d/cfg80211.conf
+
+cat << EOF > /etc/systemd/system/morse-delayed-load.service
+[Unit]
+Description=Load Morse HaLow driver with delay
+After=network.target systemd-modules-load.service
+Before=wpa_supplicant-s1g-wlan2.service
+
+[Service]
+Type=oneshot
+# Wait for system to stabilize
+ExecStartPre=/bin/sleep 3
+# Load dependencies first
+ExecStart=/sbin/modprobe dot11ah
+# Then load morse driver
+ExecStart=/sbin/modprobe morse
+# Wait for interface to appear
+ExecStartPost=/bin/bash -c 'for i in {1..10}; do ip link show wlan2 && break || sleep 1; done'
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl enable morse-delayed-load.service
 
 
 #
@@ -291,27 +394,27 @@ done
 # Replace wpa_supplicant with default files at boot
 
 cat <<- EOF > /etc/systemd/system/mesh-boot-lobby.service
-	[Unit]
-	Description=Set mesh interfaces to Lobby channels
-	Before=wpa_supplicant@.service
+[Unit]
+Description=Set mesh interfaces to Lobby channels
+Before=wpa_supplicant@.service
 
-	[Service]
-	Type=oneshot
-	ExecStart=/bin/sh -c 'for LOBBY_FILE in /etc/wpa_supplicant/wlan*-lobby.conf; do DEST_FILE="${LOBBY_FILE%-lobby.conf}.conf"; cp "$LOBBY_FILE" "$DEST_FILE"; done'
-	RemainAfterExit=yes
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'for LOBBY_FILE in /etc/wpa_supplicant/wpa_supplicant-wlan*-lobby.conf; do DEST_FILE="\${LOBBY_FILE%-lobby.conf}.conf"; cp "\$LOBBY_FILE" "\$DEST_FILE"; done'
+RemainAfterExit=yes
 
-	[Install]
-	WantedBy=multi-user.target
+[Install]
+WantedBy=multi-user.target
 EOF
 systemctl enable mesh-boot-lobby.service
 
 #get bat0 a link local address for alfred
 cat <<- EOF > /etc/sysctl.d/99-batman.conf
-	# Enable IPv6 address generation on batman-adv interfaces
-	net.ipv6.conf.bat0.disable_ipv6 = 0
-	net.ipv6.conf.bat0.addr_gen_mode = 0
-	net.ipv6.conf.br0.disable_ipv6 = 0
-	net.ipv6.conf.br0.accept_ra = 1
+# Enable IPv6 address generation on batman-adv interfaces
+net.ipv6.conf.bat0.disable_ipv6 = 0
+net.ipv6.conf.bat0.addr_gen_mode = 0
+net.ipv6.conf.br0.disable_ipv6 = 0
+net.ipv6.conf.br0.accept_ra = 1
 EOF
 
 # Build dependency strings to make batman-enslave service file
@@ -319,27 +422,32 @@ WLAN_INTERFACES=$(networkctl | awk '/wlan/ {print $2}' | tr '\n' ' ')
 AFTER_DEVICES=""
 WANTS_SERVICES=""
 INT_CT=0
-for WLAN in $WLAN_INTERFACES; do
+for WLAN in `cat /var/lib/mesh_if`; do
     AFTER_DEVICES+="sys-subsystem-net-devices-wlan$INT_CT.device "
     WANTS_SERVICES+="wpa_supplicant@wlan$INT_CT.service "
+	((INT_CT++))
+done
+for WLAN in `cat /var/lib/halow_if | head -n 1`; do
+    AFTER_DEVICES+="sys-subsystem-net-devices-$WLAN.device "
+    WANTS_SERVICES+="wpa_supplicant-s1g-$WLAN.service "
 	((INT_CT++))
 done
 
 # Create the service file
 cat <<- EOF > /etc/systemd/system/batman-enslave.service
-	[Unit]
-	Description=BATMAN Advanced Interface Manager
-	After=network-online.target ${AFTER_DEVICES} ${WANTS_SERVICES}
-	Wants=network-online.target ${WANTS_SERVICES}
+[Unit]
+Description=BATMAN Advanced Interface Manager
+After=network-online.target ${AFTER_DEVICES} ${WANTS_SERVICES}
+Wants=network-online.target ${WANTS_SERVICES}
 
-	[Service]
-	Type=oneshot
-	RemainAfterExit=yes
-	ExecStart=/usr/local/bin/batman-if-setup.sh start
-	ExecStop=/usr/local/bin/batman-if-setup.sh stop
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/batman-if-setup.sh start
+ExecStop=/usr/local/bin/batman-if-setup.sh stop
 
-	[Install]
-	WantedBy=multi-user.target
+[Install]
+WantedBy=multi-user.target
 EOF
 
 systemctl daemon-reload
@@ -347,67 +455,67 @@ systemctl enable batman-enslave.service
 
 # Start an alfred master listener at boot for mesh data messages
 cat <<- EOF > /etc/systemd/system/alfred.service
-	[Unit]
-	Description=B.A.T.M.A.N. Advanced Layer 2 Forwarding Daemon
-	# Wait for bat0 device to exist and be up
-	After=network-online.target
-	Wants=network-online.target
-	Requires=batman-enslave.service
+[Unit]
+Description=B.A.T.M.A.N. Advanced Layer 2 Forwarding Daemon
+# Wait for bat0 device to exist and be up
+After=network-online.target
+Wants=network-online.target
+Requires=batman-enslave.service
 
 
-	[Service]
-	Type=simple
-	ExecStartPre=/bin/bash -c 'for i in {1..20}; do if ip -6 addr show dev bat0 | grep "inet6 fe80::" | grep -qv "tentative"; then exit 0; fi; sleep 1; done; echo "bat0 link-local IPv6 address not ready" >&2; exit 1'
-	# Add -m to run alfred in master mode, allowing it to accept client data
-	ExecStart=/usr/sbin/alfred -m -i br0 -f
-	UMask=0000
-	Restart=always
-	RestartSec=10
+[Service]
+Type=simple
+ExecStartPre=/bin/bash -c 'for i in {1..20}; do if ip -6 addr show dev bat0 | grep "inet6 fe80::" | grep -qv "tentative"; then exit 0; fi; sleep 1; done; echo "bat0 link-local IPv6 address not ready" >&2; exit 1'
+# Add -m to run alfred in master mode, allowing it to accept client data
+ExecStart=/usr/sbin/alfred -m -i br0 -f
+UMask=0000
+Restart=always
+RestartSec=10
 
-	[Install]
-	WantedBy=multi-user.target
+[Install]
+WantedBy=multi-user.target
 EOF
 systemctl enable alfred.service
 
 # This script handles IPv4 addressing and node status gossip via alfred
 cat <<- EOF > /etc/systemd/system/node-manager.service
-	[Unit]
-	Description=Mesh Node Status Manager and IPv4 Coordinator
-	# This must run after alfred is available
-	After=alfred.service
-	Wants=alfred.service
+[Unit]
+Description=Mesh Node Status Manager and IPv4 Coordinator
+# This must run after alfred is available
+After=alfred.service
+Wants=alfred.service
 
-	[Service]
-	Type=simple
-	ExecStart=/usr/local/bin/node-manager.sh
-	Restart=on-failure
-	RestartSec=15
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/node-manager.sh
+Restart=on-failure
+RestartSec=15
 
-	[Install]
-	WantedBy=multi-user.target
+[Install]
+WantedBy=multi-user.target
 EOF
 systemctl enable node-manager.service
 
 cat <<- EOF > /etc/systemd/system/syncthing-peer-manager.service 
-	[Unit]
-	Description=Syncthing Peer Manager for B.A.T.M.A.N. Mesh
-	After=syncthing@radio.service alfred.service
-	Wants=syncthing@radio.service alfred.service
+[Unit]
+Description=Syncthing Peer Manager for B.A.T.M.A.N. Mesh
+After=syncthing@radio.service alfred.service
+Wants=syncthing@radio.service alfred.service
 
-	[Service]
-	Type=simple
-	ExecStart=/usr/local/bin/syncthing-peer-manager.sh
-	Restart=on-failure
-	RestartSec=30
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/syncthing-peer-manager.sh
+Restart=on-failure
+RestartSec=30
 
-	[Install]
-	WantedBy=multi-user.target
+[Install]
+WantedBy=multi-user.target
 EOF
 systemctl enable syncthing-peer-manager.service
 
 #creates a shared directory in /home/radio
 systemctl enable syncthing@radio.service
-systemctl enable nftables.service
+systemctl disable nftables.service
 
 systemctl daemon-reload
 
@@ -418,64 +526,71 @@ cp /root/networkd-dispatcher/off /etc/networkd-dispatcher/degraded.d/50-gateway-
 cp /root/networkd-dispatcher/routable /etc/networkd-dispatcher/routable.d/50-gateway-enable
 chmod -R 755 /etc/networkd-dispatcher
 
+cp /root/regulatory.db /lib/firmware/
+
 #enable automatic gateway selection
 cat <<- EOF > /etc/systemd/system/gateway-route-manager.service
-	[Unit]
-	Description=Mesh Gateway Route Manager
-	Documentation=man:batctl(8)
-	After=network.target node-manager.service
-	Wants=node-manager.service
-	ConditionPathExists=/usr/local/bin/gateway-route-manager.sh
+[Unit]
+Description=Mesh Gateway Route Manager
+Documentation=man:batctl(8)
+After=network.target node-manager.service
+Wants=node-manager.service
+ConditionPathExists=/usr/local/bin/gateway-route-manager.sh
 
-	[Service]
-	Type=simple
-	ExecStart=/usr/local/bin/gateway-route-manager.sh
-	Restart=always
-	RestartSec=10
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/gateway-route-manager.sh
+Restart=always
+RestartSec=10
 
-	User=root
+User=root
 
-	# Logging
-	StandardOutput=journal
-	StandardError=journal
-	SyslogIdentifier=gateway-route-manager
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=gateway-route-manager
 
-	[Install]
-	WantedBy=multi-user.target
+[Install]
+WantedBy=multi-user.target
 EOF
 systemctl enable gateway-route-manager
 
 cat <<- EOF > /etc/systemd/system/mesh-shutdown.service
-	[Unit]
-	Description=Mesh Network Graceful Shutdown
-	DefaultDependencies=no
-	Before=shutdown.target reboot.target halt.target
-	Requires=alfred.service
+[Unit]
+Description=Mesh Network Graceful Shutdown
+DefaultDependencies=no
+Before=shutdown.target reboot.target halt.target
+Requires=alfred.service
 
-	[Service]
-	Type=oneshot
-	ExecStart=/usr/local/bin/mesh-shutdown.sh
-	TimeoutStartSec=10
-	RemainAfterExit=yes
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/mesh-shutdown.sh
+TimeoutStartSec=10
+RemainAfterExit=yes
 
-	[Install]
-	WantedBy=halt.target reboot.target shutdown.target
+[Install]
+WantedBy=halt.target reboot.target shutdown.target
 EOF
 systemctl enable mesh-shutdown.service
+
+###  removed from kernel
+# Prevent RFkill from disabling interfaces
+#rfkill unblock all
+#cat <<- EOF > /etc/udev/rules.d/99-rfkill-unblock.conf
+# Automatically unblock all rfkill switches
+#SUBSYSTEM=="rfkill", ACTION=="add", RUN+="/usr/sbin/rfkill unblock %k"
+#EOF
 
 # Determine if this script is being run for the first time
 # and reboot if so to pick up the changes to the interfaces
 if systemctl is-enabled radio-setup-run-once.service >/dev/null 2>&1; then
-	echo " >> Swapping from network manager to networkd"
-	systemctl enable systemd-networkd
-	systemctl enable systemd-resolved
-	systemctl disable NetworkManager
-	apt purge -y network-manager
-	ln -sf /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
-	
+	apt remove -y network-manager avahi*
+	systemctl mask rpi-eeprom-update.service
+	systemctl set-default multi-user.target
+
 	echo " >> Removing radio-setup-run-once.service"
 	systemctl disable radio-setup-run-once.service
-	rm /etc/systemd/system/radio-setup-run-once.service
+
 	echo " >> Doing initial Syncthing config..."
 	sudo -u radio syncthing -generate="/home/radio/.config/syncthing"
 	sleep 5
@@ -509,4 +624,3 @@ sleep 2
 networkctl
 iw dev
 ip -br a
-

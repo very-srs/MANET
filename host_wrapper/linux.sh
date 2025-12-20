@@ -1,4 +1,9 @@
 #!/bin/bash
+#
+#  This is a wrapper around the rpi-imager tool.  It asks some questions to enable the configuration
+#  of a mesh node.  These choices may be saved to easily image multiple nodes
+#
+
 set -e
 
 # --- Configuration ---
@@ -17,7 +22,7 @@ ask_lan_cidr() {
 	local confirm_default
 	local ip_part
 	local prefix_part
-	
+
 	read -p "Use default LAN network $DEFAULT_CIDR? (Y/n): " confirm_default
 	confirm_default=${confirm_default:-y}
 
@@ -30,19 +35,19 @@ ask_lan_cidr() {
 	# --- Custom CIDR Loop ---
 	while true; do
 		read -p "Enter custom LAN CIDR block (e.g., 10.10.0.0/16): " custom_cidr
-		
+
 		# 1. Validate general format (IP/Prefix)
 		if ! [[ "$custom_cidr" =~ ^([0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3})\/([0-9]{1,2})$ ]]; then
 			echo "ERROR: Invalid format. Must be x.x.x.x/yy"
 			continue
 		fi
-		
-		ip_part="${BASH_REMATCH[1]}"
+
+ 		ip_part="${BASH_REMATCH[1]}"
 		prefix_part="${BASH_REMATCH[2]}"
 
-		# 2. Validate Prefix (16-30 is a reasonable range for a LAN)
-		if (( prefix_part < 16 || prefix_part > 30 )); then
-			echo "ERROR: Prefix /${prefix_part} is invalid. Must be between /16 and /30."
+		# 2. Validate Prefix (16-28 is a reasonable range for a LAN)
+		if (( prefix_part < 16 || prefix_part > 26 )); then
+			echo "ERROR: Prefix /${prefix_part} is invalid. Must be between /16 and /26."
 			continue
 		fi
 
@@ -50,7 +55,7 @@ ask_lan_cidr() {
 		OIFS="$IFS"; IFS='.'; ip_octets=($ip_part); IFS="$OIFS"
 		local o1=${ip_octets[0]}
 		local o2=${ip_octets[1]}
-		
+
 		local is_private=0
 		if [ "$o1" -eq 10 ]; then
 			is_private=1
@@ -67,7 +72,6 @@ ask_lan_cidr() {
 		fi
 
 		# 4. Check if it's a valid network address (e.g. not 192.168.1.1/24)
-		# This is complex, for now we just check the format.
 		# A simple check: the last octet for a /24 should be 0.
 		if [ "$prefix_part" -eq 24 ] && [ "${ip_octets[3]}" -ne 0 ]; then
 			echo "WARNING: For a /24 network, the IP should end in .0 (e.g., 192.168.1.0/24)."
@@ -87,8 +91,8 @@ ask_lan_cidr() {
 }
 
 
-# --- *** NEW FUNCTION: Robustly find the boot disk *** ---
-# This finds the top-level disk (e.g., nvme0n1) that hosts the / filesystem
+# This finds the top-level disk (e.g., nvme0n1) that hosts the / filesystem of the
+# flashing computer
 find_boot_disk() {
 	local root_dev
 	local physical_disk
@@ -117,9 +121,6 @@ find_boot_disk() {
 ask_questions() {
 	echo "--- Starting New Configuration ---"
 
-	# --- 1. Hardware & Role ---
-	# ** HARDWARE SELECTION MOVED OUT OF THIS FUNCTION **
-
 	echo "Select EUD (client) connection type:"
 	select eud_choice in "Wired" "Wireless"; do
 		case $eud_choice in
@@ -139,16 +140,16 @@ ask_questions() {
 
 	# --- 3. LAN Configuration ---
 	read -p "Enter LAN SSID Name: " LAN_SSID
-	
+
 	while true; do
-		read -s -p "Enter LAN SAE Key (WPA3 password, 8-63 chars) [or press Enter to generate]: " LAN_SAE_KEY
+		read -p "Enter LAN SAE Key (WPA3 password, 8-63 chars) [or press Enter to generate]: " LAN_SAE_KEY
 		echo
 		if [ -z "$LAN_SAE_KEY" ]; then
-			LAN_SAE_KEY=$(openssl rand -base64 24)
+			LAN_SAE_KEY=$(openssl rand -base64 28)
 			echo "Generated SAE Key: $LAN_SAE_KEY"
 			break
 		fi
-		
+
 		key_len=${#LAN_SAE_KEY}
 		if (( key_len < 8 || key_len > 63 )); then
 			echo "ERROR: Key must be between 8 and 63 characters. You entered $key_len characters."
@@ -156,14 +157,23 @@ ask_questions() {
 			break # Valid key
 		fi
 	done
-	
-	# Call the new CIDR function
+
+	echo "The device will have a user called radio, for ssh access."
+	read -p "Enter a password for the radio user [or press Enter to default to 'radio']: " RADIO_PW
+	echo
+
+	if [ -z "$RADIO_PW" ]; then
+		RADIO_PW="radio"
+		echo "Setting default password"
+	fi
+	echo "Setting radio password to be $RADIO_PW"
+
 	ask_lan_cidr
-	
-	read -p "Use Automatic Channel Selection? (Y/n): " AUTO_CHANNEL
+
+	read -p "Use Automatic WiFi Channel Selection? (Y/n): " AUTO_CHANNEL
 	AUTO_CHANNEL=${AUTO_CHANNEL:-y}
 	if [ "$AUTO_CHANNEL" = "y" ] || [ "$AUTO_CHANNEL" = "Y" ]; then AUTO_CHANNEL="y"; else AUTO_CHANNEL="n"; fi
-	
+
 	echo "----------------------------------"
 }
 
@@ -178,11 +188,10 @@ save_config() {
 			echo "Invalid name, skipping save."
 			return
 		fi
-		
+
 		local CONFIG_FILE="$CONFIG_DIR/$config_name.conf"
-		
+
 		# Use a heredoc to write all variables to the file
-		# ** HARDWARE_MODEL is no longer saved. It's selected at runtime. **
 		cat << EOF > "$CONFIG_FILE"
 # Pi Imager Config: $config_name
 EUD_CONNECTION="$EUD_CONNECTION"
@@ -192,8 +201,9 @@ LAN_SSID="$LAN_SSID"
 LAN_SAE_KEY="$LAN_SAE_KEY"
 LAN_CIDR_BLOCK="$LAN_CIDR_BLOCK"
 AUTO_CHANNEL="$AUTO_CHANNEL"
+RADIO_PW="$RADIO_PW"
 EOF
-		
+
 		echo "Configuration saved to $CONFIG_FILE"
 	fi
 }
@@ -204,10 +214,9 @@ load_config() {
 	echo "Loading config from $CONFIG_FILE..."
 	# Source the file to load the variables into this script
 	source "$CONFIG_FILE"
-	
+
 	# Display the loaded settings
 	echo "--- Loaded Configuration ---"
-	# ** HARDWARE_MODEL is no longer loaded. It's selected at runtime. **
 	echo "  EUD Connection: $EUD_CONNECTION"
 	echo "  Install MediaMTX: $INSTALL_MEDIAMTX"
 	echo "  Install Mumble: $INSTALL_MUMBLE"
@@ -215,19 +224,18 @@ load_config() {
 	echo "  LAN SAE Key: $LAN_SAE_KEY"
 	echo "  LAN CIDR Block: $LAN_CIDR_BLOCK"
 	echo "  Auto Channel: $AUTO_CHANNEL"
+	echo "  User password: $RADIO_PW"
 	echo "----------------------------"
 }
 
-# --- *** NEW FUNCTION: Select Hardware and Target Device *** ---
-# This function is now called AFTER loading or creating a config.
-# It returns the chosen TARGET_DEVICE path in a global variable.
+# Returns the chosen TARGET_DEVICE path in a global variable.
 select_hardware_and_target_device() {
 	echo ""
 	echo "--- 1. Select Hardware ---"
-	
+
 	# This variable will be set to 1 by the CM4 logic to skip the device menu
 	local SKIP_DEV_SELECT=0
-	
+
 	echo "Select Raspberry Pi Model:"
 	select hw_choice in "Raspberry Pi 5" "Raspberry Pi 4B" "Compute Module 4 (CM4)"; do
 		case $hw_choice in
@@ -246,7 +254,7 @@ select_hardware_and_target_device() {
 					echo "Please install it (e.g., 'sudo apt install rpiboot') and re-run."
 					exit 1
 				fi
-				
+
 				# --- *** Before/After device detection *** ---
 				echo "Detecting disks *before* rpiboot..."
 				local DISKS_BEFORE
@@ -255,8 +263,8 @@ select_hardware_and_target_device() {
 				echo "Please connect your CM4 to this computer in USB-boot mode."
 				read -p "Press Enter to run 'sudo rpiboot' and mount the eMMC..."
 				sudo rpiboot
-				echo "'rpiboot' finished. Waiting 5s for device to settle..."
-				sleep 5
+				echo "'rpiboot' finished. Waiting 4s for device to settle..."
+				sleep 4
 
 				echo "Detecting disks *after* rpiboot..."
 				local DISKS_AFTER
@@ -271,12 +279,12 @@ select_hardware_and_target_device() {
 					echo "Please check connections and try again."
 					exit 1
 				fi
-				
+
 				local NEW_DISK_SIZE
 				NEW_DISK_SIZE=$(lsblk -d -n -o SIZE "/dev/$NEW_DISK")
 				TARGET_DEVICE="/dev/$NEW_DISK" # Set the global variable
 				echo "Detected new device: $TARGET_DEVICE ($NEW_DISK_SIZE)"
-				
+
 				HARDWARE_MODEL="rpi4" # Set to rpi4 for the template
 				# Set flag to skip manual device selection
 				SKIP_DEV_SELECT=1
@@ -287,19 +295,18 @@ select_hardware_and_target_device() {
 
 	echo ""
 	echo "--- 2. Select Target Device ---"
-	
+
 	if [ "$SKIP_DEV_SELECT" -eq 1 ]; then
 		echo "Using auto-detected CM4 device: $TARGET_DEVICE"
 	else
 		echo "Detecting available devices..."
 		local DEVICES=()
-		
+
 		# Get the boot disk to exclude it
 		local BOOT_DISK
 		BOOT_DISK=$(find_boot_disk)
 		echo "(Excluding boot disk: $BOOT_DISK)"
 
-		# --- *** FIX: Removed -l flag from lsblk *** ---
 		# Use lsblk in "pairs" mode (-P) and eval the output
 		while IFS= read -r line; do
 			# Reset variables for each line
@@ -307,7 +314,6 @@ select_hardware_and_target_device() {
 			local MOUNTPOINT=""
 			local SIZE=""
 			local TYPE=""
-			# Safely evaluate the key-value pairs from lsblk
 			eval "$line"
 
 			# Add any top-level disk that is NOT the boot disk
@@ -332,7 +338,7 @@ select_hardware_and_target_device() {
 				rm "$TEMP_SCRIPT_FILE"
 				exit 0
 			fi
-			
+
 			if [ -n "$device_choice" ]; then
 				# Extract the path (e.g., "/dev/sda") from "/dev/sda (8G)"
 				TARGET_DEVICE=$(echo "$device_choice" | awk '{print $1}')
@@ -370,7 +376,6 @@ if ! command -v lsblk &> /dev/null; then
 	echo "ERROR: 'lsblk' command not found. Needed for device detection."
 	exit 1
 fi
-# --- *** NEW: Add findmnt dependency check *** ---
 if ! command -v findmnt &> /dev/null; then
 	echo "ERROR: 'findmnt' command not found. Needed for boot device detection."
 	echo "Please install it (e.g., 'sudo apt install util-linux')."
@@ -439,11 +444,8 @@ echo "--- Image & Device ---"
 echo "Using image: $OS_IMAGE_URL"
 echo "rpi-imager will download/cache this image if needed."
 
-# --- *** REFACTOR: Call the new hardware/device function *** ---
 # This function will set HARDWARE_MODEL and TARGET_DEVICE
 select_hardware_and_target_device
-
-# --- *** END REFACTOR *** ---
 
 echo ""
 read -p "WARNING: This will ERASE ALL DATA on $TARGET_DEVICE. Are you sure? (yes/no): " CONFIRM
@@ -453,10 +455,7 @@ if [ "$CONFIRM" != "yes" ]; then
 	exit 0
 fi
 
-# --- 4. Process Variables ---
-# (No processing needed for this simplified version)
-
-# --- 5. Create Temporary Script ---
+# --- 4. Create Temporary Script ---
 echo "Generating temporary firstrun script..."
 sed -e "s|__HARDWARE_MODEL__|${HARDWARE_MODEL}|g" \
 	-e "s|__EUD_CONNECTION__|${EUD_CONNECTION}|g" \
@@ -466,14 +465,15 @@ sed -e "s|__HARDWARE_MODEL__|${HARDWARE_MODEL}|g" \
 	-e "s|__LAN_SAE_KEY__|${LAN_SAE_KEY}|g" \
 	-e "s|__LAN_CIDR_BLOCK__|${LAN_CIDR_BLOCK}|g" \
 	-e "s|__AUTO_CHANNEL__|${AUTO_CHANNEL}|g" \
+	-e "s|__RADIO_PW__|${RADIO_PW}|g" \
 	"$TEMPLATE_FILE" > "$TEMP_SCRIPT_FILE"
 
 chmod +x "$TEMP_SCRIPT_FILE"
 
-# --- 6. Run rpi-imager ---
+# --- 5. Run rpi-imager ---
 echo "Starting rpi-imager. This may require your password to write to the device."
 sudo rpi-imager --cli "$OS_IMAGE_URL" "$TARGET_DEVICE" --first-run-script "$TEMP_SCRIPT_FILE"
 
-# --- 7. Cleanup ---
+# --- 6. Cleanup ---
 rm "$TEMP_SCRIPT_FILE"
 echo "Done! Flashing complete. The Pi will configure itself on first boot."

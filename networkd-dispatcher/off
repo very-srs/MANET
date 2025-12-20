@@ -19,11 +19,7 @@ fi
 
 log "Internet connection lost on $IFACE. Reverting to mesh client mode..."
 
-# Remove state files FIRST
-rm -f "$GATEWAY_STATE_FILE"
-rm -f "$NTP_STATE_FILE"
-
-# Stop NTP server if running
+# Stop NTP server if running (before removing state files)
 if systemctl is-active --quiet chrony.service; then
     log "Stopping chrony service."
     systemctl stop chrony.service
@@ -31,6 +27,7 @@ if systemctl is-active --quiet chrony.service; then
 fi
 
 # Revert batman-adv mode
+log "Reverting to gateway client mode..."
 batctl gw_mode client
 
 # Wait and verify
@@ -39,12 +36,13 @@ if ! batctl gw_mode | grep -q "client"; then
     log "ERROR: Failed to revert gateway mode to client!"
 fi
 
-# Revert radvd
+# Revert radvd to not announce default route
 cp /etc/radvd-mesh.conf /etc/radvd.conf
 systemctl restart radvd
 
-# Announce changes
-log "Triggering node-manager to publish new non-gateway status..."
-systemctl restart node-manager.service
+# Remove state files AFTER successful operations
+rm -f "$GATEWAY_STATE_FILE"
+rm -f "$NTP_STATE_FILE"
 
-log "Reversion to client mode complete."
+# Don't restart node-manager - let it discover the change in next cycle
+log "Reversion to client mode complete. Node-manager will announce in next cycle."

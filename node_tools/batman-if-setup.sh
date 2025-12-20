@@ -14,7 +14,7 @@ WLAN_INTERFACES=$(networkctl | awk '/wlan/ {print $2}' | tr '\n' ' ')
 start() {
     echo "Starting BATMAN-ADV setup..."
     #change to batman V algo
-	#batctl ra BATMAN_V
+	batctl ra BATMAN_V
 
     # Create bat0 interface if it doesn't exist
     ip link show bat0 &>/dev/null || ip link add name bat0 type batadv
