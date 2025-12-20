@@ -1,19 +1,25 @@
 #!/bin/bash
 #  A script to finalize the setup of a radio after imaging and a first boot
 #
-#  This script can be re-run to set new network setings
-#  if the mesh config file is updated
+#  This script can be re-run to set new wifi setings from a config server
 #
 
 
-# log the output of this script to a file for debugging
-exec > >(tee /boot/firmware/radio-setup.log) 2>&1
-set -x
+echo " # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #"
+echo " #                                                                           #"
+if systemctl is-enabled radio-setup-run-once.service >/dev/null 2>&1; then
+	echo " #   This mesh node is being provisioned for the first time.  Basic setup    #"
+	echo " #   is now continuing.  This node will reboot one more time when done       #"
+else
+	echo " #   Re-configuring mesh node with config from disk                          #"
+fi
+echo " #                                                                           #"
+echo " # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #"
+echo
+echo
+sleep 1
 
-# default lobby frequencies for wifi
-FREQS=("2412" "5180")
-
-# This loop reads the stored setup variables to set the current config
+# This loop reads the output from curl to set config variables
 while IFS= read -r line; do
     # Skip empty lines
     if [[ -z "$line" ]]; then
@@ -80,33 +86,13 @@ if [[ -n "$acsn" ]]; then
 	fi
 fi
 
-sleep 2
+sleep 3
 
 #
 # Finish setting up network devices (wireless)
 #
 
-# A system service to force mesh point mode on the wlan interfaces
-cat << EOF > /etc/systemd/system/mesh-interface-setup@.service
-[Unit]
-Description=Set %I to mesh point mode
-Before=wpa_supplicant@%i.service
-BindsTo=sys-subsystem-net-devices-%i.device
-After=sys-subsystem-net-devices-%i.device
 
-[Service]
-Type=oneshot
-ExecStartPre=/bin/sleep 1
-ExecStart=/usr/sbin/ip link set %I down
-ExecStart=/usr/sbin/iw dev %I set type mp
-ExecStart=/usr/sbin/ip link set %I up
-RemainAfterExit=yes
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-echo REGDOMAIN=US > /etc/default/crda
 
 # First identify mesh and non mesh wlan interfaces
 mesh_ifaces=()
@@ -124,7 +110,7 @@ for phy in $(iw dev | awk '/^phy#/{print $1}'); do
     ')
 
     # Check if it's HaLow (802.11ah) - look for Band 7 or morse driver
-	if iw phy "$phyname" info | grep -q "0.5 Mbps"; then
+    if iw phy "$phyname" info | grep -q "Band 7\|S1G"; then
         halow_ifaces+=("$iface")
     elif iw phy "$phyname" info | grep -q "mesh point"; then
         mesh_ifaces+=("$iface")
@@ -172,14 +158,12 @@ for iface in $(ip -o link show | awk -F': ' '{print $2}' | grep wlan); do
     ip link set "$iface" up 2>/dev/null
 done
 
-CT=0
 for WLAN in `cat /var/lib/mesh_if`; do
 	echo " > Setting SAE key/SSID for $WLAN ..."
 	#create wpa supplicant configs
 	echo "MESH_NAME=\"$MESH_NAME\"" > /etc/default/mesh
 cat <<-EOF > /etc/wpa_supplicant/wpa_supplicant-$WLAN-lobby.conf
 ctrl_interface=/var/run/wpa_supplicant
-country=US
 update_config=1
 sae_pwe=1
 ap_scan=2
@@ -188,7 +172,7 @@ network={
     mode=5
     frequency=${FREQS[$CT]}
     key_mgmt=SAE
-    sae_password="$KEY"
+    psk="$KEY"
     ieee80211w=2
     mesh_fwding=0
 }
@@ -233,52 +217,49 @@ Unmanaged=yes
 ActivationPolicy=manual
 EOF
 
-systemctl enable mesh-interface-setup@$WLAN
+	echo "   > creating systemd tx power service ... "
+	#set this wlan interface to have a low (5db) tx power
+cat <<- EOF > /etc/systemd/system/wlan-txpower.service
+[Unit]
+Description=Set low TX power on wlan interface
+Before=hostapd.service
+After=network.target
 
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/iw dev $WLAN set txpower fixed 1000
+RemainAfterExit=yes
 
-#echo "   > creating systemd tx power service ... "
-##set this wlan interface to have a low (5db) tx power
-#cat <<- EOF > /etc/systemd/system/wlan-txpower.service
-#[Unit]
-#Description=Set low TX power on wlan interface
-#Before=hostapd.service
-#After=network.target
+[Install]
+WantedBy=multi-user.target
+EOF
+	systemctl enable --now wlan-txpower.service
 
-#[Service]
-#Type=oneshot
-#ExecStart=/usr/sbin/iw dev $WLAN set txpower fixed 1000
-#RemainAfterExit=yes
-
-#[Install]
-#WantedBy=multi-user.target
-#EOF
-#systemctl enable --now wlan-txpower.service
-#ip link set wlan0 down
-#echo "   > creating systemd hostapd service ... "
-#set up hotsapd for this wlan to be an AP for the EUD
-
-#cat <<- EOF > /etc/hostapd/hostapd.conf
-#interface=$WLAN
-#driver=nl80211
-#ssid=$(hostname)
-#hw_mode=a
-#channel=36
-#ieee80211n=1
-#ieee80211ac=1
-#wmm_enabled=1
-#auth_algs=1
-#wpa=2
-#wpa_key_mgmt=WPA-PSK
-#rsn_pairwise=CCMP
-#wpa_passphrase=eudtest1!
-#country_code=US	
-#EOF
-#	systemctl unmask hostapd
-#	systemctl enable --now hostapd
+	ip link set wlan0 down
+	echo "   > creating systemd hostapd service ... "
+	#set up hotsapd for this wlan to be an AP for the EUD
+cat <<- EOF > /etc/hostapd/hostapd.conf
+interface=$WLAN
+driver=nl80211
+ssid=$(hostname)
+hw_mode=a
+channel=36
+ieee80211n=1
+ieee80211ac=1
+wmm_enabled=1
+auth_algs=1
+wpa=2
+wpa_key_mgmt=WPA-PSK
+rsn_pairwise=CCMP
+wpa_passphrase=eudtest1!
+country_code=US	
+EOF
+	systemctl unmask hostapd
+	systemctl enable --now hostapd
 done
 
 for WLAN in `cat /var/lib/halow_if | head -n 1`; do
-	echo " > Setting up $WLAN for HaLow use ..."
+
 #create the network interface config
 cat <<-EOF >  /etc/systemd/network/30-$WLAN.network
 [Match]
@@ -298,94 +279,7 @@ MACAddress=`ip a | grep -A1 $WLAN | awk '/ether/ {print $2}'`
 [Link]
 Name=$WLAN
 EOF
-
-rm /etc/wpa_supplicant/*${WLAN}* 2>/dev/null
-
-cat << EOF > /etc/wpa_supplicant/wpa_supplicant-$WLAN-s1g.conf
-country=US
-ctrl_interface=/var/run/wpa_supplicant_s1g
-sae_pwe=1
-max_peer_links=10
-mesh_fwding=0
-network={
-    ssid="$mesh_ssid"
-    key_mgmt=SAE
-    mode=5
-    channel=12
-    op_class=71
-    country="US"
-    s1g_prim_chwidth=1
-    s1g_prim_1mhz_chan_index=3
-    dtim_period=1
-    mesh_rssi_threshold=-85
-    dot11MeshHWMPRootMode=0
-    dot11MeshGateAnnouncements=0
-    mbca_config=1
-    mbca_min_beacon_gap_ms=25
-    mbca_tbtt_adj_interval_sec=60
-    dot11MeshBeaconTimingReportInterval=10
-    mbss_start_scan_duration_ms=2048
-    mesh_beaconless_mode=0
-    mesh_dynamic_peering=0
-    sae_password="$mesh_key"
-    pairwise=CCMP
-    ieee80211w=2
-    beacon_int=1000
-}
-EOF
-
-
-cat << EOF > /etc/systemd/system/wpa_supplicant-s1g-$WLAN.service 
-[Unit]
-Description=WPA supplicant (S1G/HaLow) for $WLAN
-After=morse-delayed-load.service
-Requires=morse-delayed-load.service
-
-[Service]
-Type=simple
-ExecStartPre=/bin/sleep 3
-ExecStart=/usr/sbin/wpa_supplicant_s1g -c /etc/wpa_supplicant/wpa_supplicant-$WLAN-s1g.conf -i $WLAN -D nl80211
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-systemctl disable wpa_supplicant_s1g@$WLAN.service
-systemctl enable wpa_supplicant-s1g-$WLAN.service
-
 done
-
-
-#stop this from loading at boot, happens too quickly
-echo "blacklist morse" > /etc/modprobe.d/morse-blacklist.conf
-echo "options cfg80211 ieee80211_regdom=US" > /etc/modprobe.d/cfg80211.conf
-
-cat << EOF > /etc/systemd/system/morse-delayed-load.service
-[Unit]
-Description=Load Morse HaLow driver with delay
-After=network.target systemd-modules-load.service
-Before=wpa_supplicant-s1g-wlan2.service
-
-[Service]
-Type=oneshot
-# Wait for system to stabilize
-ExecStartPre=/bin/sleep 3
-# Load dependencies first
-ExecStart=/sbin/modprobe dot11ah
-# Then load morse driver
-ExecStart=/sbin/modprobe morse
-# Wait for interface to appear
-ExecStartPost=/bin/bash -c 'for i in {1..10}; do ip link show wlan2 && break || sleep 1; done'
-RemainAfterExit=yes
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-systemctl enable morse-delayed-load.service
-
 
 #
 #	System service setup
@@ -400,7 +294,7 @@ Before=wpa_supplicant@.service
 
 [Service]
 Type=oneshot
-ExecStart=/bin/sh -c 'for LOBBY_FILE in /etc/wpa_supplicant/wpa_supplicant-wlan*-lobby.conf; do DEST_FILE="\${LOBBY_FILE%-lobby.conf}.conf"; cp "\$LOBBY_FILE" "\$DEST_FILE"; done'
+ExecStart=/bin/sh -c 'for LOBBY_FILE in /etc/wpa_supplicant/wpa_supplicant-wlan*-lobby.conf; do DEST_FILE="${LOBBY_FILE%-lobby.conf}.conf"; cp "$LOBBY_FILE" "$DEST_FILE"; done'
 RemainAfterExit=yes
 
 [Install]
@@ -422,14 +316,9 @@ WLAN_INTERFACES=$(networkctl | awk '/wlan/ {print $2}' | tr '\n' ' ')
 AFTER_DEVICES=""
 WANTS_SERVICES=""
 INT_CT=0
-for WLAN in `cat /var/lib/mesh_if`; do
+for WLAN in $WLAN_INTERFACES; do
     AFTER_DEVICES+="sys-subsystem-net-devices-wlan$INT_CT.device "
     WANTS_SERVICES+="wpa_supplicant@wlan$INT_CT.service "
-	((INT_CT++))
-done
-for WLAN in `cat /var/lib/halow_if | head -n 1`; do
-    AFTER_DEVICES+="sys-subsystem-net-devices-$WLAN.device "
-    WANTS_SERVICES+="wpa_supplicant-s1g-$WLAN.service "
 	((INT_CT++))
 done
 
@@ -526,8 +415,6 @@ cp /root/networkd-dispatcher/off /etc/networkd-dispatcher/degraded.d/50-gateway-
 cp /root/networkd-dispatcher/routable /etc/networkd-dispatcher/routable.d/50-gateway-enable
 chmod -R 755 /etc/networkd-dispatcher
 
-cp /root/regulatory.db /lib/firmware/
-
 #enable automatic gateway selection
 cat <<- EOF > /etc/systemd/system/gateway-route-manager.service
 [Unit]
@@ -584,9 +471,7 @@ systemctl enable mesh-shutdown.service
 # Determine if this script is being run for the first time
 # and reboot if so to pick up the changes to the interfaces
 if systemctl is-enabled radio-setup-run-once.service >/dev/null 2>&1; then
-	apt remove -y network-manager avahi*
-	systemctl mask rpi-eeprom-update.service
-	systemctl set-default multi-user.target
+#	apt purge -y network-manager avahi*
 
 	echo " >> Removing radio-setup-run-once.service"
 	systemctl disable radio-setup-run-once.service
@@ -624,3 +509,4 @@ sleep 2
 networkctl
 iw dev
 ip -br a
+

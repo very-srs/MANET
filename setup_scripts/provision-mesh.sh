@@ -113,19 +113,8 @@ main() {
         echo "Disabling APT timers for automatic updates..."
         systemctl disable apt-daily.timer
         systemctl disable apt-daily-upgrade.timer
-
-        # Build the Morse Micro halow driver
-#        cd /root/morse_driver
-#        make -j$(nproc) \
-#          CONFIG_WLAN_VENDOR_MORSE=m \
-#          CONFIG_MORSE_SDIO=y \
-#          -C /lib/modules/$(uname -r)/build \
-#          M=$(pwd) \
-#          modules
-
-        # Install
-#        make -C /lib/modules/$(uname -r)/build M=$(pwd) modules_install
-#        depmod -a
+	systemctl disable rpi-eeprom-update.service
+	systemctl mask rpi-eeprom-update.service
 
         # Get firmware
         cd /root/morse-firmware
@@ -227,7 +216,7 @@ dpkg -i /root/linux-image-*.deb /root/linux-headers-*.deb
 #move kernel from where it was placed by dpkg
 mv /boot/*6.6.78-manet* /boot/firmware/
 
-#edit config.txt to make new kernel live
-sed 's/^#r#//' /boot/firmware/config.txt
-
+#activate the new kernel
+sed -i 's/#r#//g' /boot/firmware/config.txt
+sed -i 's/auto_initramfs=1//g' /boot/firmware/config.txt
 reboot
