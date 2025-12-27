@@ -106,7 +106,7 @@ perform_scan() {
         [ "$iface" == "wlan0" ] && freqs_to_scan=$SCAN_FREQS_2_4
         [ "$iface" == "wlan1" ] && freqs_to_scan=$SCAN_FREQS_5_0
 
-        (iw dev "$iface" scan freqs $freqs_to_scan > /dev/null 2>&1) &
+        (iw dev "$iface" scan freq $freqs_to_scan > /dev/null 2>&1) &
         SCAN_PID=$!
 
         for i in {1..10}; do
@@ -119,9 +119,9 @@ perform_scan() {
         local scan_data=$(iw dev "$iface" scan dump 2>/dev/null)
 
         for freq in $freqs_to_scan; do
-            local noise=$(echo "$survey_data" | awk -v f=$freq '$1=="freq:" && $2==f {getline; if ($1=="noise:") print $2}' | head -1)
+            local noise=$(echo "$survey_data" | awk -v f=$freq '$1=="frequency:" && $2==f {getline; if ($1=="noise:") print $2}' | head -1)
             noise=${noise:--100}
-            local bss_count=$(echo "$scan_data" | grep -c "freq: $freq" || echo "0")
+            local bss_count=$(echo "$scan_data" | grep -c "freq: ${freq}\." || echo "0")
 
             [ "$first_entry" = true ] && first_entry=false || json_out+=","
             json_out+="{\"channel\": ${freq}, \"noise_floor\": ${noise}, \"bss_count\": ${bss_count}}"
@@ -133,8 +133,20 @@ perform_scan() {
 }
 
 is_hosting_service() {
-    if systemctl is-active --quiet mediamtx.service; then
-        source /etc/mesh_ipv4.conf 2>/dev/null
+	if systemctl is-active --quiet mediamtx.service; then
+	# Source the network configuration
+	if [ -f /etc/mesh.conf ]; then
+	    # Parse the config file
+	    while IFS='=' read -r key value; do
+	        [[ -z "$key" || "$key" =~ ^[[:space:]]*# ]] && continue
+	        case "$key" in
+	            ipv4_network)
+	                IPV4_NETWORK="$value"
+	                ;;
+	        esac
+	    done < /etc/mesh.conf
+	fi
+
         local CALC_OUTPUT=$(ipcalc "$IPV4_NETWORK" 2>/dev/null)
         local FIRST_IP=$(echo "$CALC_OUTPUT" | awk '/HostMin/ {print $2}')
         local MEDIAMTX_IPV4_VIP="${FIRST_IP%.*}.$((${FIRST_IP##*.} + 1))"
@@ -178,7 +190,76 @@ while true; do
         # ===================================
         # === LOBBY STATE ===
         # ===================================
-        HELPER_PAYLOAD=$(timeout $MONITOR_INTERVAL alfred -r $ALFRED_HELPER_TYPE 2>/dev/null | grep -oP '"\K[^"]+(?="\s*\},?)' | head -1)
+        
+        # === REGISTRY BUILD (always needed) ===
+        [ -x "$REGISTRY_BUILDER" ] && "$REGISTRY_BUILDER"
+        
+        # === IP MANAGEMENT (always needed) ===
+        [ -x "$IP_MANAGER" ] && "$IP_MANAGER"
+        
+        # === PUBLISH STATUS (so other nodes can see us) ===
+        time_since_publish=$((NOW - LAST_PUBLISH_TIME))
+        if [ $time_since_publish -ge 180 ]; then  # Every 3 minutes
+            log "=== LOBBY PUBLISH ($(date +'%H:%M:%S')) ==="
+            
+            HOSTNAME=$(hostname)
+            SYNCTHING_ID=$(runuser -u radio -- syncthing --device-id 2>/dev/null || echo "")
+            TQ_AVG=$("$BATCTL_PATH" o 2>/dev/null | awk 'NR>1 {sum+=$3} END {if (NR>1) printf "%.2f", sum/(NR-1); else print 0}')
+            
+            # Service flags
+            IS_GATEWAY_FLAG=$([ -f /var/run/mesh-gateway.state ] && echo "--is-internet-gateway" || echo "")
+            IS_NTP_FLAG=$([ -f /var/run/mesh-ntp.state ] && echo "--is-ntp-server" || echo "")
+            IS_MEDIAMTX_FLAG=$(is_hosting_service && echo "--is-mediamtx-server" || echo "")
+            
+            # Gather MACs
+            ALL_MACS=("$MY_MAC")
+            for iface in wlan0 wlan1 end0; do
+                if [ -d "/sys/class/net/$iface" ]; then
+                    MAC=$(cat "/sys/class/net/$iface/address" 2>/dev/null)
+                    [ -n "$MAC" ] && ALL_MACS+=("$MAC")
+                fi
+            done
+            
+            CURRENT_IPV4=$(ip addr show dev "$CONTROL_IFACE" 2>/dev/null | grep -oP 'inet \K[\d.]+' | head -1)
+            
+            # Encode (no scan data, in lobby mode)
+            ENCODER_ARGS=(
+                "--hostname" "$HOSTNAME"
+                "--mac-addresses" "${ALL_MACS[@]}"
+                "--tq-average" "$TQ_AVG"
+                "--syncthing-id" "$SYNCTHING_ID"
+                "--timestamp" "$NOW"
+            )
+            [ -n "$CURRENT_IPV4" ] && ENCODER_ARGS+=("--ipv4-address" "$CURRENT_IPV4")
+            [ -n "$IS_GATEWAY_FLAG" ] && ENCODER_ARGS+=("$IS_GATEWAY_FLAG")
+            [ -n "$IS_NTP_FLAG" ] && ENCODER_ARGS+=("$IS_NTP_FLAG")
+            [ -n "$IS_MEDIAMTX_FLAG" ] && ENCODER_ARGS+=("$IS_MEDIAMTX_FLAG")
+            
+            CURRENT_PAYLOAD=$("$ENCODER_PATH" "${ENCODER_ARGS[@]}" 2>/dev/null)
+            
+            if [ -n "$CURRENT_PAYLOAD" ]; then
+                echo -n "$CURRENT_PAYLOAD" | alfred -s $ALFRED_DATA_TYPE
+                LAST_PUBLISHED_PAYLOAD="$CURRENT_PAYLOAD"
+                LAST_PUBLISH_TIME=$NOW
+            fi
+        fi
+        
+        # === RUN SERVICE ELECTIONS (needed for services to start) ===
+        for election_script in /usr/local/bin/*-election.sh; do
+            if [[ -f "$election_script" && -x "$election_script" ]]; then
+                # Skip channel-election in lobby (waiting for helper)
+                [[ "$election_script" =~ channel-election ]] && continue
+                # Skip mediamtx-election.sh if MTX not enabled
+                if [[ "$election_script" =~ mediamtx-election ]]; then
+                    MTX_ENABLED=$(grep "^mtx=" /etc/mesh.conf 2>/dev/null | cut -d'=' -f2)
+                    [[ "$MTX_ENABLED" != "y" ]] && continue
+                fi
+                "$election_script" &
+            fi
+        done
+        
+        # === CHECK FOR HELPER BEACON (non-blocking) ===
+        HELPER_PAYLOAD=$(timeout 2 alfred -r $ALFRED_HELPER_TYPE 2>/dev/null | grep -oP '"\K[^"]+(?="\s*\},?)' | head -1)
 
         if [ -n "$HELPER_PAYLOAD" ]; then
             eval $("/usr/local/bin/decoder.py" "$HELPER_PAYLOAD" 2>/dev/null | grep "DATA_CHANNEL_")
@@ -310,6 +391,11 @@ while true; do
         # === STAGE 9: OTHER ELECTIONS ===
         for election_script in /usr/local/bin/*-election.sh; do
             if [[ -f "$election_script" && -x "$election_script" && "$election_script" != "$CHANNEL_ELECTION" ]]; then
+                # Skip mediamtx-election.sh if MTX not enabled
+                if [[ "$election_script" =~ mediamtx-election ]]; then
+                    MTX_ENABLED=$(grep "^mtx=" /etc/mesh.conf 2>/dev/null | cut -d'=' -f2)
+                    [[ "$MTX_ENABLED" != "y" ]] && continue
+                fi
                 "$election_script" &
             fi
         done
