@@ -607,6 +607,8 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 EOF
+else
+	mv /usr/local/bin/mediamtx-election.sh /usr/local/bin/mediamtx-election.sh.off
 fi
 
 # Install optional service selections
