@@ -228,6 +228,7 @@ while true; do
                 "--mac-addresses" "${ALL_MACS[@]}"
                 "--tq-average" "$TQ_AVG"
                 "--syncthing-id" "$SYNCTHING_ID"
+				"--ipv4-chunk" "$MY_CHUNK"
                 "--timestamp" "$NOW"
             )
             [ -n "$CURRENT_IPV4" ] && ENCODER_ARGS+=("--ipv4-address" "$CURRENT_IPV4")

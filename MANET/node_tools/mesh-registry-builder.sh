@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # ==============================================================================
 # Mesh Registry Builder
 # ==============================================================================
@@ -6,13 +6,13 @@
 # 1. Queries Alfred for peer data
 # 2. Decodes protobuf messages
 # 3. Writes plain text /var/run/mesh_node_registry
-# 4. Tracks claimed IPs for IP manager
+# 4. Tracks claimed chunks for IP manager
 # ==============================================================================
 
 # --- Configuration ---
 ALFRED_DATA_TYPE=68
 REGISTRY_STATE_FILE="/var/run/mesh_node_registry"
-CLAIMED_IPS_FILE="/tmp/claimed_ips.txt"
+CLAIMED_CHUNKS_FILE="/tmp/claimed_chunks.txt"
 DECODER_PATH="/usr/local/bin/decoder.py"
 
 # --- Helper Functions ---
@@ -29,7 +29,7 @@ log "Found ${#PEER_PAYLOADS[@]} peer payloads from Alfred"
 
 # Create temporary files
 REGISTRY_TMP=$(mktemp)
-CLAIMED_IPS_TMP=$(mktemp)
+CLAIMED_CHUNKS_TMP=$(mktemp)
 
 # Write registry header
 echo "# Mesh Node Registry - Generated $(date)" > "$REGISTRY_TMP"
@@ -77,6 +77,7 @@ for B64_PAYLOAD in "${PEER_PAYLOADS[@]}"; do
             printf "%s_MAC_ADDRESS='%s'\n" "$PREFIX" "${MAC_ADDRESS:-}"
             printf "%s_MAC_ADDRESSES='%s'\n" "$PREFIX" "${MAC_ADDRESSES:-}"
             printf "%s_IPV4_ADDRESS='%s'\n" "$PREFIX" "${IPV4_ADDRESS:-}"
+            printf "%s_IPV4_CHUNK='%s'\n" "$PREFIX" "${IPV4_CHUNK:-0}"
             printf "%s_SYNCTHING_ID='%s'\n" "$PREFIX" "${SYNCTHING_ID:-}"
             printf "%s_TQ_AVERAGE='%s'\n" "$PREFIX" "${TQ_AVERAGE:-}"
             printf "%s_IS_GATEWAY='%s'\n" "$PREFIX" "${IS_INTERNET_GATEWAY:-}"
@@ -98,14 +99,14 @@ for B64_PAYLOAD in "${PEER_PAYLOADS[@]}"; do
             echo ""
         } >> "$REGISTRY_TMP"
 
-        # Track claimed IPs
-        if [[ -n "$IPV4_ADDRESS" ]]; then
-            echo "${IPV4_ADDRESS},${MAC_ADDRESS}" >> "$CLAIMED_IPS_TMP"
+        # Track claimed chunks
+        if [[ -n "$IPV4_CHUNK" && "$IPV4_CHUNK" != "0" ]]; then
+            echo "${IPV4_CHUNK},${MAC_ADDRESS}" >> "$CLAIMED_CHUNKS_TMP"
         fi
     fi
 
     # Clear variables for next iteration
-    unset HOSTNAME MAC_ADDRESS MAC_ADDRESSES IPV4_ADDRESS SYNCTHING_ID TQ_AVERAGE \
+    unset HOSTNAME MAC_ADDRESS MAC_ADDRESSES IPV4_ADDRESS IPV4_CHUNK SYNCTHING_ID TQ_AVERAGE \
         IS_INTERNET_GATEWAY IS_NTP_SERVER IS_MUMBLE_SERVER IS_TAK_SERVER IS_MEDIAMTX_SERVER \
         UPTIME_SECONDS BATTERY_PERCENTAGE CPU_LOAD_AVERAGE \
         DATA_CHANNEL_2_4 DATA_CHANNEL_5_0 CHANNEL_REPORT_JSON \
@@ -114,9 +115,9 @@ for B64_PAYLOAD in "${PEER_PAYLOADS[@]}"; do
         GPS_LATITUDE GPS_LONGITUDE GPS_ALTITUDE ATAK_USER
 done
 
-# Sort and save claimed IPs
-sort -u "$CLAIMED_IPS_TMP" > "$CLAIMED_IPS_FILE"
-rm "$CLAIMED_IPS_TMP"
+# Sort and save claimed chunks
+sort -u "$CLAIMED_CHUNKS_TMP" > "$CLAIMED_CHUNKS_FILE"
+rm "$CLAIMED_CHUNKS_TMP"
 
 # Move registry into place
 mv "$REGISTRY_TMP" "$REGISTRY_STATE_FILE"

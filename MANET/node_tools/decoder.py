@@ -26,6 +26,7 @@ def main():
             print(f"MAC_ADDRESS=''")
         print(f"MAC_ADDRESSES='{','.join(node_info.mac_addresses)}'")
         print(f"IPV4_ADDRESS='{node_info.ipv4_address}'")
+        print(f"IPV4_CHUNK={node_info.ipv4_chunk}")
         print(f"SYNCTHING_ID='{node_info.syncthing_id}'")
         print(f"TQ_AVERAGE={node_info.tq_average}")
         print(f"IS_INTERNET_GATEWAY={str(node_info.is_internet_gateway).lower()}")

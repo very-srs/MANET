@@ -8,6 +8,7 @@ message NodeInfo {
   repeated string mac_addresses = 2;  // All interface MAC addresses; first is primary (e.g., br0)
   string ipv4_address = 3;
   string syncthing_id = 4;
+  uint32 ipv4_chunk = 5;              // Chunk number claimed (for EUD IP allocation)
 
   // --- Network & Election Metrics ---
   float tq_average = 10;          // TQ average, for service elections.
