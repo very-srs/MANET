@@ -17,6 +17,8 @@ $OS_IMAGE_URL = "https://downloads.raspberrypi.com/raspios_lite_arm64/images/ras
 $Script:HARDWARE_MODEL = ""
 $Script:TARGET_DEVICE = ""
 $Script:EUD_CONNECTION = ""
+$Script:LAN_AP_SSID = ""
+$Script:LAN_AP_KEY = ""
 $Script:INSTALL_MEDIAMTX = ""
 $Script:INSTALL_MUMBLE = ""
 $Script:LAN_SSID = ""
@@ -102,14 +104,45 @@ function Ask-Questions {
     Write-Host "`nSelect EUD (client) connection type:"
     Write-Host "1. Wired"
     Write-Host "2. Wireless"
+    Write-Host "3. Auto"
     
     do {
-        $choice = Read-Host "Enter choice (1-2)"
+        $choice = Read-Host "Enter choice (1-3)"
         switch ($choice) {
             "1" { $Script:EUD_CONNECTION = "wired"; break }
             "2" { $Script:EUD_CONNECTION = "wireless"; break }
+            "3" { $Script:EUD_CONNECTION = "auto"; break }
         }
-    } while ($choice -notmatch "^[12]$")
+    } while ($choice -notmatch "^[123]$")
+
+    # --- If Wireless or Auto, ask for LAN AP configuration ---
+    if ($Script:EUD_CONNECTION -eq "wireless" -or $Script:EUD_CONNECTION -eq "auto") {
+        $Script:LAN_AP_SSID = Read-Host "Enter LAN AP SSID Name"
+        
+        while ($true) {
+            $key = Read-Host "Enter LAN AP WPA2 Key (8-63 chars) [or press Enter to generate]"
+            Write-Host ""
+            
+            if ([string]::IsNullOrWhiteSpace($key)) {
+                # Generate random key
+                $bytes = New-Object byte[] 28
+                [Security.Cryptography.RNGCryptoServiceProvider]::Create().GetBytes($bytes)
+                $Script:LAN_AP_KEY = [Convert]::ToBase64String($bytes)
+                Write-Host "Generated LAN AP Key: $($Script:LAN_AP_KEY)"
+                break
+            }
+
+            if ($key.Length -lt 8 -or $key.Length -gt 63) {
+                Write-Host "ERROR: Key must be between 8 and 63 characters. You entered $($key.Length) characters." -ForegroundColor Red
+            } else {
+                $Script:LAN_AP_KEY = $key
+                break
+            }
+        }
+    } else {
+        $Script:LAN_AP_SSID = ""
+        $Script:LAN_AP_KEY = ""
+    }
 
     # 2. Optional Software
     $response = Read-Host "Install MediaMTX Server? (Y/n)"
@@ -156,8 +189,14 @@ function Ask-Questions {
 
     Ask-LanCidr
 
-    $response = Read-Host "Use Automatic WiFi Channel Selection? (Y/n)"
-    $Script:AUTO_CHANNEL = if ([string]::IsNullOrWhiteSpace($response) -or $response -match "^[Yy]") { "y" } else { "n" }
+    # --- Auto Channel Selection (skip if wireless or auto) ---
+    if ($Script:EUD_CONNECTION -eq "wireless" -or $Script:EUD_CONNECTION -eq "auto") {
+        $Script:AUTO_CHANNEL = "n"
+        Write-Host "Automatic WiFi Channel Selection disabled (not compatible with Wireless/Auto EUD mode)"
+    } else {
+        $response = Read-Host "Use Automatic WiFi Channel Selection? (Y/n)"
+        $Script:AUTO_CHANNEL = if ([string]::IsNullOrWhiteSpace($response) -or $response -match "^[Yy]") { "y" } else { "n" }
+    }
 
     Write-Host "----------------------------------"
 }
@@ -179,6 +218,8 @@ function Save-Config {
         $config_content = @"
 # Pi Imager Config: $config_name
 EUD_CONNECTION="$($Script:EUD_CONNECTION)"
+LAN_AP_SSID="$($Script:LAN_AP_SSID)"
+LAN_AP_KEY="$($Script:LAN_AP_KEY)"
 INSTALL_MEDIAMTX="$($Script:INSTALL_MEDIAMTX)"
 INSTALL_MUMBLE="$($Script:INSTALL_MUMBLE)"
 LAN_SSID="$($Script:LAN_SSID)"
@@ -205,6 +246,8 @@ function Load-Config {
             
             switch ($varName) {
                 "EUD_CONNECTION" { $Script:EUD_CONNECTION = $varValue }
+                "LAN_AP_SSID" { $Script:LAN_AP_SSID = $varValue }
+                "LAN_AP_KEY" { $Script:LAN_AP_KEY = $varValue }
                 "INSTALL_MEDIAMTX" { $Script:INSTALL_MEDIAMTX = $varValue }
                 "INSTALL_MUMBLE" { $Script:INSTALL_MUMBLE = $varValue }
                 "LAN_SSID" { $Script:LAN_SSID = $varValue }
@@ -218,6 +261,10 @@ function Load-Config {
 
     Write-Host "--- Loaded Configuration ---"
     Write-Host "  EUD Connection: $($Script:EUD_CONNECTION)"
+    if ($Script:EUD_CONNECTION -eq "wireless" -or $Script:EUD_CONNECTION -eq "auto") {
+        Write-Host "  LAN AP SSID: $($Script:LAN_AP_SSID)"
+        Write-Host "  LAN AP Key: $($Script:LAN_AP_KEY)"
+    }
     Write-Host "  Install MediaMTX: $($Script:INSTALL_MEDIAMTX)"
     Write-Host "  Install Mumble: $($Script:INSTALL_MUMBLE)"
     Write-Host "  LAN SSID: $($Script:LAN_SSID)"
@@ -451,6 +498,8 @@ if ($Script:HARDWARE_MODEL -ne "r3a") {
     $templateContent = Get-Content $TEMPLATE_FILE -Raw
     $templateContent = $templateContent -replace '__HARDWARE_MODEL__', $Script:HARDWARE_MODEL
     $templateContent = $templateContent -replace '__EUD_CONNECTION__', $Script:EUD_CONNECTION
+    $templateContent = $templateContent -replace '__LAN_AP_SSID__', $Script:LAN_AP_SSID
+    $templateContent = $templateContent -replace '__LAN_AP_KEY__', $Script:LAN_AP_KEY
     $templateContent = $templateContent -replace '__INSTALL_MEDIAMTX__', $Script:INSTALL_MEDIAMTX
     $templateContent = $templateContent -replace '__INSTALL_MUMBLE__', $Script:INSTALL_MUMBLE
     $templateContent = $templateContent -replace '__LAN_SSID__', $Script:LAN_SSID
@@ -518,6 +567,8 @@ if ($Script:HARDWARE_MODEL -eq "r3a") {
         $configContent = @"
 HARDWARE_MODEL=$($Script:HARDWARE_MODEL)
 EUD_CONNECTION=$($Script:EUD_CONNECTION)
+LAN_AP_SSID=$($Script:LAN_AP_SSID)
+LAN_AP_KEY=$($Script:LAN_AP_KEY)
 INSTALL_MEDIAMTX=$($Script:INSTALL_MEDIAMTX)
 INSTALL_MUMBLE=$($Script:INSTALL_MUMBLE)
 LAN_SSID=$($Script:LAN_SSID)

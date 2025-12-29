@@ -70,7 +70,6 @@ ask_lan_cidr() {
 		fi
 
 		# 4. Check if it's a valid network address (e.g. not 192.168.1.1/24)
-		# A simple check: the last octet for a /24 should be 0.
 		if [ "$prefix_part" -eq 24 ] && [ "${ip_octets[3]}" -ne 0 ]; then
 			echo "WARNING: For a /24 network, the IP should end in .0 (e.g., 192.168.1.0/24)."
 			echo "Your entry $custom_cidr may cause routing issues."
@@ -120,12 +119,38 @@ ask_questions() {
 	echo "--- Starting New Configuration ---"
 
 	echo "Select EUD (client) connection type:"
-	select eud_choice in "Wired" "Wireless"; do
+	select eud_choice in "Wired" "Wireless" "Auto"; do
 		case $eud_choice in
 			"Wired" ) EUD_CONNECTION="wired"; break;;
 			"Wireless" ) EUD_CONNECTION="wireless"; break;;
+			"Auto" ) EUD_CONNECTION="auto"; break;;
 		esac
 	done
+
+	# --- If Wireless or Auto, ask for LAN AP configuration ---
+	if [ "$EUD_CONNECTION" = "wireless" ] || [ "$EUD_CONNECTION" = "auto" ]; then
+		read -p "Enter LAN AP SSID Name: " LAN_AP_SSID
+		
+		while true; do
+			read -p "Enter LAN AP WPA2 Key (8-63 chars) [or press Enter to generate]: " LAN_AP_KEY
+			echo
+			if [ -z "$LAN_AP_KEY" ]; then
+				LAN_AP_KEY=$(openssl rand -base64 28)
+				echo "Generated LAN AP Key: $LAN_AP_KEY"
+				break
+			fi
+
+			key_len=${#LAN_AP_KEY}
+			if (( key_len < 8 || key_len > 63 )); then
+				echo "ERROR: Key must be between 8 and 63 characters. You entered $key_len characters."
+			else
+				break # Valid key
+			fi
+		done
+	else
+		LAN_AP_SSID=""
+		LAN_AP_KEY=""
+	fi
 
 	# --- 2. Optional Software ---
 	read -p "Install MediaMTX Server? (Y/n): " INSTALL_MEDIAMTX
@@ -168,9 +193,15 @@ ask_questions() {
 
 	ask_lan_cidr
 
-	read -p "Use Automatic WiFi Channel Selection? (Y/n): " AUTO_CHANNEL
-	AUTO_CHANNEL=${AUTO_CHANNEL:-y}
-	if [ "$AUTO_CHANNEL" = "y" ] || [ "$AUTO_CHANNEL" = "Y" ]; then AUTO_CHANNEL="y"; else AUTO_CHANNEL="n"; fi
+	# --- Auto Channel Selection (skip if wireless or auto) ---
+	if [ "$EUD_CONNECTION" = "wireless" ] || [ "$EUD_CONNECTION" = "auto" ]; then
+		AUTO_CHANNEL="n"
+		echo "Automatic WiFi Channel Selection disabled (not compatible with Wireless/Auto EUD mode)"
+	else
+		read -p "Use Automatic WiFi Channel Selection? (Y/n): " AUTO_CHANNEL
+		AUTO_CHANNEL=${AUTO_CHANNEL:-y}
+		if [ "$AUTO_CHANNEL" = "y" ] || [ "$AUTO_CHANNEL" = "Y" ]; then AUTO_CHANNEL="y"; else AUTO_CHANNEL="n"; fi
+	fi
 
 	echo "----------------------------------"
 }
@@ -193,6 +224,8 @@ save_config() {
 		cat << EOF > "$CONFIG_FILE"
 # Pi Imager Config: $config_name
 EUD_CONNECTION="$EUD_CONNECTION"
+LAN_AP_SSID="$LAN_AP_SSID"
+LAN_AP_KEY="$LAN_AP_KEY"
 INSTALL_MEDIAMTX="$INSTALL_MEDIAMTX"
 INSTALL_MUMBLE="$INSTALL_MUMBLE"
 LAN_SSID="$LAN_SSID"
@@ -216,6 +249,10 @@ load_config() {
 	# Display the loaded settings
 	echo "--- Loaded Configuration ---"
 	echo "  EUD Connection: $EUD_CONNECTION"
+	if [ "$EUD_CONNECTION" = "wireless" ] || [ "$EUD_CONNECTION" = "auto" ]; then
+		echo "  LAN AP SSID: $LAN_AP_SSID"
+		echo "  LAN AP Key: $LAN_AP_KEY"
+	fi
 	echo "  Install MediaMTX: $INSTALL_MEDIAMTX"
 	echo "  Install Mumble: $INSTALL_MUMBLE"
 	echo "  LAN SSID: $LAN_SSID"
@@ -473,6 +510,8 @@ if [ "$HARDWARE_MODEL" != "r3a" ]; then
 	echo "Generating temporary firstrun script..."
 	sed -e "s|__HARDWARE_MODEL__|${HARDWARE_MODEL}|g" \
 		-e "s|__EUD_CONNECTION__|${EUD_CONNECTION}|g" \
+		-e "s|__LAN_AP_SSID__|${LAN_AP_SSID}|g" \
+		-e "s|__LAN_AP_KEY__|${LAN_AP_KEY}|g" \
 		-e "s|__INSTALL_MEDIAMTX__|${INSTALL_MEDIAMTX}|g" \
 		-e "s|__INSTALL_MUMBLE__|${INSTALL_MUMBLE}|g" \
 		-e "s|__LAN_SSID__|${LAN_SSID}|g" \
@@ -503,6 +542,8 @@ if [ "$HARDWARE_MODEL" = "r3a" ]; then
 	sudo tee "$BOOT_MOUNT/mesh-config" > /dev/null << EOF
 HARDWARE_MODEL=${HARDWARE_MODEL}
 EUD_CONNECTION=${EUD_CONNECTION}
+LAN_AP_SSID=${LAN_AP_SSID}
+LAN_AP_KEY=${LAN_AP_KEY}
 INSTALL_MEDIAMTX=${INSTALL_MEDIAMTX}
 INSTALL_MUMBLE=${INSTALL_MUMBLE}
 LAN_SSID=${LAN_SSID}
