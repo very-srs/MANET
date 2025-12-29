@@ -1,10 +1,9 @@
 #!/bin/bash
 #  A script to finalize the setup of a radio after imaging and a first boot
 #
-#  This script can be re-run to set new network setings
+#  This script can be re-run to set new network settings
 #  if the mesh config file is updated
 #
-
 
 # log the output of this script to a file for debugging
 exec > >(tee /boot/firmware/radio-setup.log) 2>&1
@@ -68,11 +67,11 @@ fi
 
 sleep 0.5
 echo "testing acs variable"
-if [[ -n "$acsn" ]]; then
-	echo "acs defined as $acsn"
+if [[ -n "$acs" ]]; then
+	echo "acs defined as $acs"
 	sleep 0.5
-        if [[ "$acs" == "Y" ]]; then
-	        echo " > This mesh will channel hop ..."
+    if [[ "$acs" == "Y" ]]; then
+	    echo " > This mesh will channel hop ..."
 		cp /usr/local/bin/node-manager-acs.sh /usr/local/bin/node-manager.sh
 	else
 		echo " > This mesh will remain on a static channel ..."
@@ -167,13 +166,69 @@ for iface in "${nonmesh_ifaces[@]}"; do
     ip link set "$iface" name "$newname"
     ((i++))
 done
+
 # Bring them back up
 for iface in $(ip -o link show | awk -F': ' '{print $2}' | grep wlan); do
     ip link set "$iface" up 2>/dev/null
 done
 
+# ============================================================================
+# === AP INTERFACE SELECTION (for wireless/auto EUD modes) ===
+# ============================================================================
+
+AP_INTERFACE=""
+
+if [[ "$eud" == "wireless" ]] || [[ "$eud" == "auto" ]]; then
+    echo "EUD mode is $eud - selecting AP interface..."
+    
+    # Priority 1: Use non-mesh interface if available (RPi 5 onboard)
+    if [ -s /var/lib/no_mesh_if ]; then
+        AP_INTERFACE=$(head -1 /var/lib/no_mesh_if)
+        echo " > Using non-mesh interface for AP: $AP_INTERFACE"
+    
+    # Priority 2: Find 5GHz-capable interface from mesh interfaces
+    elif [ -s /var/lib/mesh_if ]; then
+        echo " > Searching for 5GHz-capable mesh interface..."
+        for iface in $(cat /var/lib/mesh_if); do
+            # Get PHY for this interface
+            PHY=$(iw dev "$iface" info | grep wiphy | awk '{print "phy" $2}')
+            
+            # Check if this PHY supports 5GHz (frequencies >= 5000 MHz)
+            if iw phy "$PHY" info | grep -q "5[0-9][0-9][0-9] MHz"; then
+                AP_INTERFACE="$iface"
+                echo " > Found 5GHz-capable interface: $AP_INTERFACE"
+                break
+            fi
+        done
+        
+        if [ -z "$AP_INTERFACE" ]; then
+            echo "WARNING: No 5GHz-capable interface found. Using first mesh interface."
+            AP_INTERFACE=$(head -1 /var/lib/mesh_if)
+        fi
+    else
+        echo "ERROR: No suitable interface found for AP!"
+        AP_INTERFACE=""
+    fi
+    
+    # Save AP interface selection
+    if [ -n "$AP_INTERFACE" ]; then
+        echo "$AP_INTERFACE" > /var/lib/ap_interface
+        echo "AP interface selected: $AP_INTERFACE"
+    fi
+fi
+
+# ============================================================================
+# === CONFIGURE MESH INTERFACES (excluding AP if needed) ===
+# ============================================================================
+
 CT=0
 for WLAN in `cat /var/lib/mesh_if`; do
+    # Skip this interface if it's the AP interface
+    if [[ -n "$AP_INTERFACE" ]] && [[ "$WLAN" == "$AP_INTERFACE" ]]; then
+        echo " > Skipping $WLAN (will be used as AP)"
+        continue
+    fi
+    
 	echo " > Setting SAE key/SSID for $WLAN ..."
 	#create wpa supplicant configs
 	echo "MESH_NAME=\"$MESH_NAME\"" > /etc/default/mesh
@@ -221,8 +276,190 @@ EOF
 	((CT++))
 done
 
-# this will be used for rpi5's built in wlan interface
+# ============================================================================
+# === CONFIGURE AP INTERFACE (if wireless/auto mode) ===
+# ============================================================================
+
+if [[ -n "$AP_INTERFACE" ]]; then
+    echo "Configuring $AP_INTERFACE as access point..."
+    
+    # Get configuration from mesh.conf
+    LAN_AP_SSID=${lan_ap_ssid:-"MeshAP"}
+    LAN_AP_KEY=${lan_ap_key:-"changeme123"}
+    MAX_EUDS=${max_euds_per_node:-5}
+    IPV4_NETWORK=${ipv4_network:-"10.30.2.0/24"}
+    
+    # Calculate DHCP pool based on max EUDs
+    # Pool starts at IP 6 (IPs 1-5 are reserved for services)
+    CALC_OUTPUT=$(ipcalc "$IPV4_NETWORK" 2>/dev/null)
+    FIRST_IP=$(echo "$CALC_OUTPUT" | awk '/HostMin/ {print $2}')
+    
+    # Start pool at IP 6
+    DHCP_START="${FIRST_IP%.*}.$((${FIRST_IP##*.} + 5))"
+    
+    # Calculate max nodes and pool size
+    # Solve: nodes * (1 + max_euds) <= total_available
+    PREFIX=$(echo "$IPV4_NETWORK" | cut -d'/' -f2)
+    HOST_BITS=$((32 - PREFIX))
+    TOTAL_IPS=$((2**HOST_BITS - 2))
+    MAX_NODES=$((TOTAL_IPS / (1 + MAX_EUDS)))
+    POOL_SIZE=$((MAX_NODES * MAX_EUDS))
+    
+    # End pool at start + pool_size - 1
+    POOL_END_OFFSET=$((5 + POOL_SIZE - 1))
+    DHCP_END="${FIRST_IP%.*}.$((${FIRST_IP##*.} + POOL_END_OFFSET))"
+    
+    echo " > DHCP pool: $DHCP_START - $DHCP_END (${POOL_SIZE} IPs for ${MAX_EUDS} EUDs × ${MAX_NODES} nodes)"
+
+    # Create hostapd configuration
+    cat <<-EOF > /etc/hostapd/hostapd.conf
+interface=$AP_INTERFACE
+driver=nl80211
+ssid=$LAN_AP_SSID
+
+# Bridge to mesh network
+bridge=br0
+
+# 5GHz 802.11ax configuration
+hw_mode=a
+channel=acs_survey
+ieee80211n=1
+ieee80211ac=1
+ieee80211ax=1
+wmm_enabled=1
+
+# WPA2 security
+auth_algs=1
+wpa=2
+wpa_key_mgmt=WPA-PSK
+wpa_pairwise=CCMP
+rsn_pairwise=CCMP
+wpa_passphrase=$LAN_AP_KEY
+
+# Regulatory
+country_code=US
+
+# Performance
+ht_capab=[HT40+][SHORT-GI-20][SHORT-GI-40]
+vht_capab=[RXLDPC][SHORT-GI-80][TX-STBC-2BY1][RX-STBC-1]
+EOF
+
+    # Create dnsmasq configuration for DHCP + DNS
+    cat <<-EOF > /etc/dnsmasq.d/mesh-ap.conf
+# Listen only on AP interface bridge
+interface=br0
+bind-interfaces
+
+# DHCP configuration
+dhcp-range=$DHCP_START,$DHCP_END,12h
+
+# DNS configuration  
+domain=mesh.local
+local=/mesh.local/
+
+# Disable DNS upstream (we're offline mesh)
+no-resolv
+no-poll
+
+# Log for debugging
+log-dhcp
+
+# DHCP script hook for adding host routes
+dhcp-script=/usr/local/bin/dhcp-eud-route.sh
+EOF
+
+    # Create DHCP script for adding host routes (proxy ARP alternative)
+    cat <<-EOF > /usr/local/bin/dhcp-eud-route.sh
+#!/bin/bash
+# Called by dnsmasq when DHCP events occur
+# Args: add|old <mac> <ip> <hostname>
+
+ACTION=\$1
+MAC=\$2
+IP=\$3
+HOSTNAME=\$4
+AP_IF="$AP_INTERFACE"
+
+case "\$ACTION" in
+    add|old)
+        # Add host route for this EUD client
+        ip route add \$IP dev \$AP_IF 2>/dev/null
+        logger -t dhcp-eud "Added route for \$IP via \$AP_IF"
+        ;;
+    del)
+        # Remove host route
+        ip route del \$IP dev \$AP_IF 2>/dev/null
+        logger -t dhcp-eud "Removed route for \$IP"
+        ;;
+esac
+EOF
+    chmod +x /usr/local/bin/dhcp-eud-route.sh
+    
+    # Create TX power limiting service
+    cat <<-EOF > /etc/systemd/system/ap-txpower.service
+[Unit]
+Description=Set low TX power on AP interface
+After=sys-subsystem-net-devices-${AP_INTERFACE}.device
+BindsTo=sys-subsystem-net-devices-${AP_INTERFACE}.device
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/iw dev $AP_INTERFACE set txpower fixed 500
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    # Create networkd config for AP interface (unmanaged, will be bridged)
+    cat <<-EOF > /etc/systemd/network/30-${AP_INTERFACE}.network
+[Match]
+Name=$AP_INTERFACE
+
+[Link]
+Unmanaged=yes
+ActivationPolicy=manual
+EOF
+
+    # Enable proxy ARP on br0 for EUD routing
+    cat <<-EOF >> /etc/sysctl.d/99-mesh.conf
+
+# Proxy ARP for EUD clients
+net.ipv4.conf.br0.proxy_arp=1
+EOF
+    sysctl -p /etc/sysctl.d/99-mesh.conf
+    
+    # Enable services based on mode
+    systemctl enable ap-txpower.service
+    systemctl enable dnsmasq.service
+    
+    if [[ "$eud" == "wireless" ]]; then
+        # Wireless mode: always-on AP
+        echo " > Wireless mode: Enabling and starting AP services"
+        systemctl enable hostapd.service
+        systemctl start hostapd.service
+        systemctl start dnsmasq.service
+        systemctl start ap-txpower.service
+    else
+        # Auto mode: stage services but don't enable/start
+        # ethernet-autodetect.sh will manage them
+        echo " > Auto mode: AP services staged (ethernet-autodetect will manage)"
+        systemctl disable hostapd.service
+    fi
+    
+    echo "AP configuration complete for $AP_INTERFACE"
+fi
+
+# ============================================================================
+# === CONFIGURE CLIENT AP (if exists and not used for mesh AP) ===
+# ============================================================================
+
 for WLAN in `cat /var/lib/no_mesh_if | head -n 1`; do
+    # Skip if this is already the AP interface
+    if [[ -n "$AP_INTERFACE" ]] && [[ "$WLAN" == "$AP_INTERFACE" ]]; then
+        continue
+    fi
+    
 	echo " > Setting up $WLAN as a client AP ..."
 
 	echo "   > creating networkd file ..."
@@ -235,49 +472,12 @@ Unmanaged=yes
 ActivationPolicy=manual
 EOF
 
-#systemctl enable mesh-interface-setup@$WLAN
-
-
-echo "   > creating systemd tx power service ... "
-##set this wlan interface to have a low (5db) tx power
-cat <<- EOF > /etc/systemd/system/wlan-txpower.service
-[Unit]
-Description=Set low TX power on wlan interface
-Before=hostapd.service
-After=network.target
-
-[Service]
-Type=oneshot
-ExecStart=/usr/sbin/iw dev $WLAN set txpower fixed 1000
-RemainAfterExit=yes
-
-[Install]
-WantedBy=multi-user.target
-EOF
-systemctl enable --now wlan-txpower.service
-ip link set wlan0 down
-echo "   > creating systemd hostapd service ... "
-#set up hotsapd for this wlan to be an AP for the EUD
-
-cat <<- EOF > /etc/hostapd/hostapd.conf
-interface=$WLAN
-driver=nl80211
-ssid=$(hostname)
-hw_mode=a
-hannel=36
-ieee80211n=1
-ieee80211ac=1
-wmm_enabled=1
-auth_algs=1
-wpa=2
-wpa_key_mgmt=WPA-PSK
-rsn_pairwise=CCMP
-wpa_passphrase=eudtest1!
-country_code=US	
-EOF
-#	systemctl unmask hostapd
-#	systemctl enable --now hostapd
+systemctl enable mesh-interface-setup@$WLAN
 done
+
+# ============================================================================
+# === HALOW CONFIGURATION ===
+# ============================================================================
 
 for WLAN in `cat /var/lib/halow_if | head -n 1`; do
 	echo " > Setting up $WLAN for HaLow use ..."
@@ -336,7 +536,6 @@ network={
 }
 EOF
 
-
 cat << EOF > /etc/systemd/system/wpa_supplicant-s1g-$WLAN.service 
 [Unit]
 Description=WPA supplicant (S1G/HaLow) for $WLAN
@@ -358,7 +557,6 @@ systemctl disable wpa_supplicant_s1g@$WLAN.service
 systemctl enable wpa_supplicant-s1g-$WLAN.service
 
 done
-
 
 #stop this from loading at boot, happens too quickly
 echo "blacklist morse" > /etc/modprobe.d/morse-blacklist.conf
@@ -388,13 +586,11 @@ EOF
 
 systemctl enable morse-delayed-load.service
 
-
 #
 #	System service setup
 #
 
 # Replace wpa_supplicant with default files at boot
-
 cat <<- EOF > /etc/systemd/system/mesh-boot-lobby.service
 [Unit]
 Description=Set mesh interfaces to Lobby channels
@@ -425,6 +621,10 @@ AFTER_DEVICES=""
 WANTS_SERVICES=""
 INT_CT=0
 for WLAN in `cat /var/lib/mesh_if`; do
+    # Skip AP interface
+    if [[ -n "$AP_INTERFACE" ]] && [[ "$WLAN" == "$AP_INTERFACE" ]]; then
+        continue
+    fi
     AFTER_DEVICES+="sys-subsystem-net-devices-wlan$INT_CT.device "
     WANTS_SERVICES+="wpa_supplicant@wlan$INT_CT.service "
 	((INT_CT++))
@@ -575,14 +775,6 @@ WantedBy=halt.target reboot.target shutdown.target
 EOF
 systemctl enable mesh-shutdown.service
 
-###  removed from kernel
-# Prevent RFkill from disabling interfaces
-#rfkill unblock all
-#cat <<- EOF > /etc/udev/rules.d/99-rfkill-unblock.conf
-# Automatically unblock all rfkill switches
-#SUBSYSTEM=="rfkill", ACTION=="add", RUN+="/usr/sbin/rfkill unblock %k"
-#EOF
-
 # Determine if this script is being run for the first time
 # and reboot if so to pick up the changes to the interfaces
 if systemctl is-enabled radio-setup-run-once.service >/dev/null 2>&1; then
@@ -613,7 +805,6 @@ systemctl restart systemd-networkd
 
 echo " > resetting ipv4..."
 systemctl restart node-manager
-
 
 sleep 6 # wait for wpa_supplicant to catch up
 echo " > resetting BATMAN-ADV bond..."
