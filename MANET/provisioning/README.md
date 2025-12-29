@@ -42,26 +42,33 @@ Once you have your tools installed and scripts collected into a directory, run t
    Auto - This mode will function as wireless in the absence of a plugged-in EUD. If an EUD is plugged in, the node will not broadcast an AP.
 
 2. Install MediaMTX Server?
+
    A MediaMTX server will be available on this network. It will be assigned the address ending in `.2` of whichever network range you select.
    Ex: `10.30.1.2` on a `10.30.1.0/24` network.
 
 3. Install Mumble Server?
+
    A Mumble server will be available on this network. It will be assigned the address ending in `.3` of whichever network range you select.
    Ex: `10.30.1.3` on a `10.30.1.0/24` network.
 
 4. Enter MESH SSID Name
+
    This is the SSID the nodes will use for the MANET mesh.
 
 5. Enter MESH SAE Key
+
    This is the WPA3-SAE encryption key the nodes will use. It is likely you will want to use the automatically generated one here (just hit enter) unless you have a specific reason to use a pre-existing one. The automatic one will be 58 characters and be created with your system's random number generator/SSL library.
 
 6. Enter a password for the radio user
+
    Each node has a user called `radio`, for use if you want to SSH into the node. Here you are setting your own password for this user. Leaving this blank sets the password to the default: `radio`.
 
 7. Use default LAN network
+
    Saying yes to this sets your network to `10.30.1.0/24`. Saying no here allows you to select the network addressing you would prefer. A custom address space must be provided in CIDR notation and must be between `/16` and `/26`.
 
 8. Use Automatic WiFi Channel Selection
+
    A no answer here sets all nodes to a default and static 802.11ax channel. With automatic channel selection enabled, the radios will periodically scan for and switch to a clearer WiFi channel. There is a minor network disruption for this to work (one of the two WiFi radios will disconnect briefly). This is not an option when using a wireless EUD.
 
 ---
