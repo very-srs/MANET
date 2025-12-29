@@ -670,6 +670,7 @@ echo "mumble=__INSTALL_MUMBLE__" >> /etc/mesh.conf
 echo "mtx=__INSTALL_MEDIAMTX__" >> /etc/mesh.conf
 echo "acs=__AUTO_CHANNEL__" >> /etc/mesh.conf
 echo "eud=__EUD_CONNECTION__" >> /etc/mesh.conf
+echo "max_euds_per_node=__MAX_EUDS_PER_NODE__" >> /etc/mesh.conf
 
 # Disable the current script so it won't run again at next boot
 systemctl disable mesh-provision
