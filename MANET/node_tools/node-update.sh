@@ -30,16 +30,22 @@ get_board_type() {
     fi
 }
 
-ping -c 2 1.1.1.1 || echo "No internet detected, exiting" && exit 1
+echo "Testing internet connection"
+if ! ping -W3 -q -c 2 1.1.1.1 > /dev/null 2>&1; then
+    echo "No internet detected, exiting"
+    exit 2
+fi
 
 BOARD=$(get_board_type)
 LOCAL_VERSION=0
 if [[ -f /etc/manet_version.txt ]]; then
 	LOCAL_VERSION=$(head -n 1 /etc/manet_version.txt)
+	echo -n "Local MANET tools are at version $LOCAL_VERSION, "
 fi
 REMOTE_VERSION=$(curl -s https://raw.githubusercontent.com/very-srs/MANET/refs/heads/main/MANET/node_tools/version.txt | head -n 1)
+echo "github MANET tools are at version $REMOTE_VERSION"
 
-if [[ "$LOCAL_VERSION" -eq "$REMOTE_VERSION" ]]; then
+if [[ "$LOCAL_VERSION" == "$REMOTE_VERSION" ]]; then
 	echo "Node is already running the latest software release, exiting"
 	exit 0;
 else
@@ -74,3 +80,4 @@ fi
 
 tar -zxf /root/tools.tar.gz -C /
 echo "Node tools updated to version $REMOTE_VERSION - $(tail -n 1 /etc/manet_version.txt)"
+
