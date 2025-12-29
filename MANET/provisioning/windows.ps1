@@ -19,6 +19,7 @@ $Script:TARGET_DEVICE = ""
 $Script:EUD_CONNECTION = ""
 $Script:LAN_AP_SSID = ""
 $Script:LAN_AP_KEY = ""
+$Script:MAX_EUDS_PER_NODE = 0
 $Script:INSTALL_MEDIAMTX = ""
 $Script:INSTALL_MUMBLE = ""
 $Script:LAN_SSID = ""
@@ -31,69 +32,137 @@ $Script:RPI_IMAGER_PATH = $null
 
 # --- Helper Functions ---
 
+function Calculate-Capacity {
+    param(
+        [string]$cidr,
+        [int]$maxEuds
+    )
+    
+    # Parse CIDR
+    if ($cidr -notmatch '^(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})/(\d{1,2})$') {
+        return @{Total=0; Services=0; EudPool=0; MaxNodes=0}
+    }
+    
+    $ip = $Matches[1]
+    $prefix = [int]$Matches[2]
+    
+    # Calculate total IPs
+    $hostBits = 32 - $prefix
+    $totalIps = [math]::Pow(2, $hostBits) - 2  # Subtract network and broadcast
+    
+    $reservedServices = 5
+    
+    # Calculate max nodes: nodes * (1 + maxEuds) = available
+    # nodes = available / (1 + maxEuds)
+    if ($maxEuds -gt 0) {
+        $maxNodes = [math]::Floor($totalIps / (1 + $maxEuds))
+        $eudPool = $maxNodes * $maxEuds
+    } else {
+        $maxNodes = $totalIps - $reservedServices
+        $eudPool = 0
+    }
+    
+    return @{
+        Total = $totalIps
+        Services = $reservedServices
+        EudPool = $eudPool
+        MaxNodes = $maxNodes
+    }
+}
+
 function Ask-LanCidr {
+    param([int]$maxEuds = 0)
+    
     $DEFAULT_CIDR = "10.30.2.0/24"
     
-    $confirm = Read-Host "Use default LAN network $DEFAULT_CIDR? (Y/n)"
-    if ([string]::IsNullOrWhiteSpace($confirm) -or $confirm -match "^[Yy]") {
-        $Script:LAN_CIDR_BLOCK = $DEFAULT_CIDR
-        Write-Host "Using default network: $LAN_CIDR_BLOCK"
-        return
-    }
-
-    # Custom CIDR Loop
     while ($true) {
-        $custom_cidr = Read-Host "Enter custom LAN CIDR block (e.g., 10.10.0.0/16)"
-        
-        # 1. Validate general format (IP/Prefix)
-        if ($custom_cidr -notmatch '^(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})/(\d{1,2})$') {
-            Write-Host "ERROR: Invalid format. Must be x.x.x.x/yy" -ForegroundColor Red
-            continue
-        }
+        $confirm = Read-Host "Use default LAN network $DEFAULT_CIDR? (Y/n)"
+        if ([string]::IsNullOrWhiteSpace($confirm) -or $confirm -match "^[Yy]") {
+            $Script:LAN_CIDR_BLOCK = $DEFAULT_CIDR
+        } else {
+            # Custom CIDR Loop
+            while ($true) {
+                $custom_cidr = Read-Host "Enter custom LAN CIDR block (e.g., 10.10.0.0/16)"
+                
+                # 1. Validate general format (IP/Prefix)
+                if ($custom_cidr -notmatch '^(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})/(\d{1,2})$') {
+                    Write-Host "ERROR: Invalid format. Must be x.x.x.x/yy" -ForegroundColor Red
+                    continue
+                }
 
-        $ip_part = $Matches[1]
-        $prefix_part = [int]$Matches[2]
+                $ip_part = $Matches[1]
+                $prefix_part = [int]$Matches[2]
 
-        # 2. Validate Prefix (16-26 is a reasonable range for a LAN)
-        if ($prefix_part -lt 16 -or $prefix_part -gt 26) {
-            Write-Host "ERROR: Prefix /$prefix_part is invalid. Must be between /16 and /26." -ForegroundColor Red
-            continue
-        }
+                # 2. Validate Prefix (16-26 is a reasonable range for a LAN)
+                if ($prefix_part -lt 16 -or $prefix_part -gt 26) {
+                    Write-Host "ERROR: Prefix /$prefix_part is invalid. Must be between /16 and /26." -ForegroundColor Red
+                    continue
+                }
 
-        # 3. Validate IP as a private range
-        $octets = $ip_part -split '\.'
-        $o1 = [int]$octets[0]
-        $o2 = [int]$octets[1]
+                # 3. Validate IP as a private range
+                $octets = $ip_part -split '\.'
+                $o1 = [int]$octets[0]
+                $o2 = [int]$octets[1]
 
-        $is_private = $false
-        if ($o1 -eq 10) {
-            $is_private = $true
-        } elseif ($o1 -eq 172 -and $o2 -ge 16 -and $o2 -le 31) {
-            $is_private = $true
-        } elseif ($o1 -eq 192 -and $o2 -eq 168) {
-            $is_private = $true
-        }
+                $is_private = $false
+                if ($o1 -eq 10) {
+                    $is_private = $true
+                } elseif ($o1 -eq 172 -and $o2 -ge 16 -and $o2 -le 31) {
+                    $is_private = $true
+                } elseif ($o1 -eq 192 -and $o2 -eq 168) {
+                    $is_private = $true
+                }
 
-        if (-not $is_private) {
-            Write-Host "ERROR: IP $ip_part is not in a private range." -ForegroundColor Red
-            Write-Host "Must be in 10.0.0.0/8, 172.16.0.0/12, or 192.168.0.0/16."
-            continue
-        }
+                if (-not $is_private) {
+                    Write-Host "ERROR: IP $ip_part is not in a private range." -ForegroundColor Red
+                    Write-Host "Must be in 10.0.0.0/8, 172.16.0.0/12, or 192.168.0.0/16."
+                    continue
+                }
 
-        # 4. Check if it's a valid network address
-        if ($prefix_part -eq 24 -and [int]$octets[3] -ne 0) {
-            Write-Host "WARNING: For a /24 network, the IP should end in .0 (e.g., 192.168.1.0/24)." -ForegroundColor Yellow
-            Write-Host "Your entry $custom_cidr may cause routing issues."
-            $use_anyway = Read-Host "Use it anyway? (y/N)"
-            if ($use_anyway -notmatch "^[Yy]") {
-                continue
+                # 4. Check if it's a valid network address
+                if ($prefix_part -eq 24 -and [int]$octets[3] -ne 0) {
+                    Write-Host "WARNING: For a /24 network, the IP should end in .0 (e.g., 192.168.1.0/24)." -ForegroundColor Yellow
+                    Write-Host "Your entry $custom_cidr may cause routing issues."
+                    $use_anyway = Read-Host "Use it anyway? (y/N)"
+                    if ($use_anyway -notmatch "^[Yy]") {
+                        continue
+                    }
+                }
+
+                # All checks passed
+                $Script:LAN_CIDR_BLOCK = $custom_cidr
+                break
             }
         }
-
-        # All checks passed
-        $Script:LAN_CIDR_BLOCK = $custom_cidr
-        Write-Host "Using custom network: $LAN_CIDR_BLOCK"
-        break
+        
+        # Show capacity calculation if EUDs are configured
+        if ($maxEuds -gt 0) {
+            Write-Host ""
+            Write-Host "=== Network Capacity Analysis ==="
+            $capacity = Calculate-Capacity -cidr $Script:LAN_CIDR_BLOCK -maxEuds $maxEuds
+            
+            Write-Host "Network: $($Script:LAN_CIDR_BLOCK)"
+            Write-Host "  Total usable IPs: $($capacity.Total)"
+            Write-Host "  Reserved for services: $($capacity.Services)"
+            Write-Host "  Reserved for EUD pool: $($capacity.EudPool) ($maxEuds EUDs × $($capacity.MaxNodes) nodes)"
+            Write-Host "  Available for mesh nodes: $($capacity.MaxNodes)"
+            Write-Host "=================================="
+            Write-Host ""
+            
+            if ($capacity.MaxNodes -lt 3) {
+                Write-Host "WARNING: This configuration only supports $($capacity.MaxNodes) mesh nodes." -ForegroundColor Yellow
+                Write-Host "Consider using a larger network or reducing max EUDs per node."
+            }
+            
+            $accept = Read-Host "Accept this configuration? (Y/n)"
+            if ([string]::IsNullOrWhiteSpace($accept) -or $accept -match "^[Yy]") {
+                break
+            }
+            Write-Host "Let's reconfigure..."
+        } else {
+            Write-Host "Using network: $($Script:LAN_CIDR_BLOCK)"
+            break
+        }
     }
 }
 
@@ -142,6 +211,7 @@ function Ask-Questions {
     } else {
         $Script:LAN_AP_SSID = ""
         $Script:LAN_AP_KEY = ""
+        $Script:MAX_EUDS_PER_NODE = 0
     }
 
     # 2. Optional Software
@@ -187,7 +257,21 @@ function Ask-Questions {
     }
     Write-Host "Setting radio password to be $($Script:RADIO_PW)"
 
-    Ask-LanCidr
+    # --- Ask for max EUDs before CIDR selection ---
+    if ($Script:EUD_CONNECTION -eq "wireless" -or $Script:EUD_CONNECTION -eq "auto") {
+        while ($true) {
+            $input = Read-Host "Maximum EUDs per node's AP (1-20)"
+            if ($input -match '^\d+$' -and [int]$input -ge 1 -and [int]$input -le 20) {
+                $Script:MAX_EUDS_PER_NODE = [int]$input
+                break
+            } else {
+                Write-Host "ERROR: Please enter a number between 1 and 20." -ForegroundColor Red
+            }
+        }
+    }
+
+    # --- CIDR selection with capacity planning ---
+    Ask-LanCidr -maxEuds $Script:MAX_EUDS_PER_NODE
 
     # --- Auto Channel Selection (skip if wireless or auto) ---
     if ($Script:EUD_CONNECTION -eq "wireless" -or $Script:EUD_CONNECTION -eq "auto") {
@@ -220,6 +304,7 @@ function Save-Config {
 EUD_CONNECTION="$($Script:EUD_CONNECTION)"
 LAN_AP_SSID="$($Script:LAN_AP_SSID)"
 LAN_AP_KEY="$($Script:LAN_AP_KEY)"
+MAX_EUDS_PER_NODE="$($Script:MAX_EUDS_PER_NODE)"
 INSTALL_MEDIAMTX="$($Script:INSTALL_MEDIAMTX)"
 INSTALL_MUMBLE="$($Script:INSTALL_MUMBLE)"
 LAN_SSID="$($Script:LAN_SSID)"
@@ -248,6 +333,7 @@ function Load-Config {
                 "EUD_CONNECTION" { $Script:EUD_CONNECTION = $varValue }
                 "LAN_AP_SSID" { $Script:LAN_AP_SSID = $varValue }
                 "LAN_AP_KEY" { $Script:LAN_AP_KEY = $varValue }
+                "MAX_EUDS_PER_NODE" { $Script:MAX_EUDS_PER_NODE = [int]$varValue }
                 "INSTALL_MEDIAMTX" { $Script:INSTALL_MEDIAMTX = $varValue }
                 "INSTALL_MUMBLE" { $Script:INSTALL_MUMBLE = $varValue }
                 "LAN_SSID" { $Script:LAN_SSID = $varValue }
@@ -264,6 +350,7 @@ function Load-Config {
     if ($Script:EUD_CONNECTION -eq "wireless" -or $Script:EUD_CONNECTION -eq "auto") {
         Write-Host "  LAN AP SSID: $($Script:LAN_AP_SSID)"
         Write-Host "  LAN AP Key: $($Script:LAN_AP_KEY)"
+        Write-Host "  Max EUDs per node: $($Script:MAX_EUDS_PER_NODE)"
     }
     Write-Host "  Install MediaMTX: $($Script:INSTALL_MEDIAMTX)"
     Write-Host "  Install Mumble: $($Script:INSTALL_MUMBLE)"
@@ -500,6 +587,7 @@ if ($Script:HARDWARE_MODEL -ne "r3a") {
     $templateContent = $templateContent -replace '__EUD_CONNECTION__', $Script:EUD_CONNECTION
     $templateContent = $templateContent -replace '__LAN_AP_SSID__', $Script:LAN_AP_SSID
     $templateContent = $templateContent -replace '__LAN_AP_KEY__', $Script:LAN_AP_KEY
+    $templateContent = $templateContent -replace '__MAX_EUDS_PER_NODE__', $Script:MAX_EUDS_PER_NODE
     $templateContent = $templateContent -replace '__INSTALL_MEDIAMTX__', $Script:INSTALL_MEDIAMTX
     $templateContent = $templateContent -replace '__INSTALL_MUMBLE__', $Script:INSTALL_MUMBLE
     $templateContent = $templateContent -replace '__LAN_SSID__', $Script:LAN_SSID
@@ -569,6 +657,7 @@ HARDWARE_MODEL=$($Script:HARDWARE_MODEL)
 EUD_CONNECTION=$($Script:EUD_CONNECTION)
 LAN_AP_SSID=$($Script:LAN_AP_SSID)
 LAN_AP_KEY=$($Script:LAN_AP_KEY)
+MAX_EUDS_PER_NODE=$($Script:MAX_EUDS_PER_NODE)
 INSTALL_MEDIAMTX=$($Script:INSTALL_MEDIAMTX)
 INSTALL_MUMBLE=$($Script:INSTALL_MUMBLE)
 LAN_SSID=$($Script:LAN_SSID)
