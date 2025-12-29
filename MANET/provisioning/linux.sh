@@ -13,77 +13,156 @@ PI_OS_IMAGE_URL="https://downloads.raspberrypi.com/raspios_lite_arm64/images/ras
 
 # --- Helper Functions ---
 
+# Function to calculate network capacity
+calculate_capacity() {
+	local cidr=$1
+	local max_euds=$2
+	
+	# Calculate total usable IPs
+	local CALC_OUTPUT=$(ipcalc "$cidr" 2>/dev/null)
+	if [ -z "$CALC_OUTPUT" ]; then
+		echo "0"
+		return 1
+	fi
+	
+	local HOST_MIN=$(echo "$CALC_OUTPUT" | awk '/HostMin/ {print $2}')
+	local HOST_MAX=$(echo "$CALC_OUTPUT" | awk '/HostMax/ {print $2}')
+	
+	if [ -z "$HOST_MIN" ] || [ -z "$HOST_MAX" ]; then
+		echo "0"
+		return 1
+	fi
+	
+	# Convert to integers for calculation
+	local MIN_INT=$(echo $HOST_MIN | awk -F. '{print ($1 * 256^3) + ($2 * 256^2) + ($3 * 256) + $4}')
+	local MAX_INT=$(echo $HOST_MAX | awk -F. '{print ($1 * 256^3) + ($2 * 256^2) + ($3 * 256) + $4}')
+	
+	local TOTAL_USABLE=$((MAX_INT - MIN_INT + 1))
+	
+	# Reserved IPs: 5 for services
+	local RESERVED_SERVICES=5
+	
+	# Calculate based on max EUDs
+	# We need to reserve enough for reasonable number of nodes
+	# Start with assumption and iterate
+	local AVAILABLE_FOR_NODES=$((TOTAL_USABLE - RESERVED_SERVICES))
+	
+	if [ "$max_euds" -gt 0 ]; then
+		# Solve: nodes + (nodes * max_euds) = available
+		# nodes * (1 + max_euds) = available
+		# nodes = available / (1 + max_euds)
+		local MAX_NODES=$((AVAILABLE_FOR_NODES / (1 + max_euds)))
+		local EUD_POOL=$((MAX_NODES * max_euds))
+		AVAILABLE_FOR_NODES=$((TOTAL_USABLE - RESERVED_SERVICES - EUD_POOL))
+	else
+		local MAX_NODES=$((AVAILABLE_FOR_NODES))
+		local EUD_POOL=0
+	fi
+	
+	echo "$TOTAL_USABLE $RESERVED_SERVICES $EUD_POOL $MAX_NODES"
+}
+
 # Function to ask for and validate the LAN CIDR block
 ask_lan_cidr() {
+	local max_euds=${1:-0}
 	local DEFAULT_CIDR="10.30.2.0/24"
 	local custom_cidr
 	local confirm_default
 	local ip_part
 	local prefix_part
 
-	read -p "Use default LAN network $DEFAULT_CIDR? (Y/n): " confirm_default
-	confirm_default=${confirm_default:-y}
-
-	if [ "$confirm_default" = "y" ] || [ "$confirm_default" = "Y" ]; then
-		LAN_CIDR_BLOCK="$DEFAULT_CIDR"
-		echo "Using default network: $LAN_CIDR_BLOCK"
-		return
-	fi
-
-	# --- Custom CIDR Loop ---
 	while true; do
-		read -p "Enter custom LAN CIDR block (e.g., 10.10.0.0/16): " custom_cidr
+		read -p "Use default LAN network $DEFAULT_CIDR? (Y/n): " confirm_default
+		confirm_default=${confirm_default:-y}
 
-		# 1. Validate general format (IP/Prefix)
-		if ! [[ "$custom_cidr" =~ ^([0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3})\/([0-9]{1,2})$ ]]; then
-			echo "ERROR: Invalid format. Must be x.x.x.x/yy"
-			continue
+		if [ "$confirm_default" = "y" ] || [ "$confirm_default" = "Y" ]; then
+			LAN_CIDR_BLOCK="$DEFAULT_CIDR"
+		else
+			# --- Custom CIDR Loop ---
+			while true; do
+				read -p "Enter custom LAN CIDR block (e.g., 10.10.0.0/16): " custom_cidr
+
+				# 1. Validate general format (IP/Prefix)
+				if ! [[ "$custom_cidr" =~ ^([0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3})\/([0-9]{1,2})$ ]]; then
+					echo "ERROR: Invalid format. Must be x.x.x.x/yy"
+					continue
+				fi
+
+				ip_part="${BASH_REMATCH[1]}"
+				prefix_part="${BASH_REMATCH[2]}"
+
+				# 2. Validate Prefix (16-28 is a reasonable range for a LAN)
+				if (( prefix_part < 16 || prefix_part > 26 )); then
+					echo "ERROR: Prefix /${prefix_part} is invalid. Must be between /16 and /26."
+					continue
+				fi
+
+				# 3. Validate IP as a private range
+				OIFS="$IFS"; IFS='.'; ip_octets=($ip_part); IFS="$OIFS"
+				local o1=${ip_octets[0]}
+				local o2=${ip_octets[1]}
+
+				local is_private=0
+				if [ "$o1" -eq 10 ]; then
+					is_private=1
+				elif [ "$o1" -eq 172 ] && [ "$o2" -ge 16 ] && [ "$o2" -le 31 ]; then
+					is_private=1
+				elif [ "$o1" -eq 192 ] && [ "$o2" -eq 168 ]; then
+					is_private=1
+				fi
+
+				if [ "$is_private" -eq 0 ]; then
+					echo "ERROR: IP $ip_part is not in a private range."
+					echo "Must be in 10.0.0.0/8, 172.16.0.0/12, or 192.168.0.0/16."
+					continue
+				fi
+
+				# 4. Check if it's a valid network address (e.g. not 192.168.1.1/24)
+				if [ "$prefix_part" -eq 24 ] && [ "${ip_octets[3]}" -ne 0 ]; then
+					echo "WARNING: For a /24 network, the IP should end in .0 (e.g., 192.168.1.0/24)."
+					echo "Your entry $custom_cidr may cause routing issues."
+					read -p "Use it anyway? (y/N): " use_anyway
+					use_anyway=${use_anyway:-n}
+					if [ "$use_anyway" != "y" ]; then
+						continue
+					fi
+				fi
+
+				# All checks passed
+				LAN_CIDR_BLOCK="$custom_cidr"
+				break
+			done
 		fi
 
- 		ip_part="${BASH_REMATCH[1]}"
-		prefix_part="${BASH_REMATCH[2]}"
-
-		# 2. Validate Prefix (16-28 is a reasonable range for a LAN)
-		if (( prefix_part < 16 || prefix_part > 26 )); then
-			echo "ERROR: Prefix /${prefix_part} is invalid. Must be between /16 and /26."
-			continue
-		fi
-
-		# 3. Validate IP as a private range
-		OIFS="$IFS"; IFS='.'; ip_octets=($ip_part); IFS="$OIFS"
-		local o1=${ip_octets[0]}
-		local o2=${ip_octets[1]}
-
-		local is_private=0
-		if [ "$o1" -eq 10 ]; then
-			is_private=1
-		elif [ "$o1" -eq 172 ] && [ "$o2" -ge 16 ] && [ "$o2" -le 31 ]; then
-			is_private=1
-		elif [ "$o1" -eq 192 ] && [ "$o2" -eq 168 ]; then
-			is_private=1
-		fi
-
-		if [ "$is_private" -eq 0 ]; then
-			echo "ERROR: IP $ip_part is not in a private range."
-			echo "Must be in 10.0.0.0/8, 172.16.0.0/12, or 192.168.0.0/16."
-			continue
-		fi
-
-		# 4. Check if it's a valid network address (e.g. not 192.168.1.1/24)
-		if [ "$prefix_part" -eq 24 ] && [ "${ip_octets[3]}" -ne 0 ]; then
-			echo "WARNING: For a /24 network, the IP should end in .0 (e.g., 192.168.1.0/24)."
-			echo "Your entry $custom_cidr may cause routing issues."
-			read -p "Use it anyway? (y/N): " use_anyway
-			use_anyway=${use_anyway:-n}
-			if [ "$use_anyway" != "y" ]; then
-				continue
+		# Show capacity calculation if EUDs are configured
+		if [ "$max_euds" -gt 0 ]; then
+			echo ""
+			echo "=== Network Capacity Analysis ==="
+			read TOTAL SERVICES EUD_POOL NODES <<< $(calculate_capacity "$LAN_CIDR_BLOCK" "$max_euds")
+			
+			echo "Network: $LAN_CIDR_BLOCK"
+			echo "  Total usable IPs: $TOTAL"
+			echo "  Reserved for services: $SERVICES"
+			echo "  Reserved for EUD pool: $EUD_POOL (${max_euds} EUDs × ${NODES} nodes)"
+			echo "  Available for mesh nodes: $NODES"
+			echo "=================================="
+			echo ""
+			
+			if [ "$NODES" -lt 3 ]; then
+				echo "WARNING: This configuration only supports $NODES mesh nodes."
+				echo "Consider using a larger network or reducing max EUDs per node."
 			fi
+			
+			read -p "Accept this configuration? (Y/n): " accept
+			accept=${accept:-y}
+			if [ "$accept" = "y" ] || [ "$accept" = "Y" ]; then
+				break
+			fi
+			echo "Let's reconfigure..."
+		else
+			echo "Using network: $LAN_CIDR_BLOCK"
+			break
 		fi
-
-		# All checks passed
-		LAN_CIDR_BLOCK="$custom_cidr"
-		echo "Using custom network: $LAN_CIDR_BLOCK"
-		break
 	done
 }
 
@@ -150,6 +229,7 @@ ask_questions() {
 	else
 		LAN_AP_SSID=""
 		LAN_AP_KEY=""
+		MAX_EUDS_PER_NODE=0
 	fi
 
 	# --- 2. Optional Software ---
@@ -191,7 +271,20 @@ ask_questions() {
 	fi
 	echo "Setting radio password to be $RADIO_PW"
 
-	ask_lan_cidr
+	# --- Ask for max EUDs before CIDR selection ---
+	if [ "$EUD_CONNECTION" = "wireless" ] || [ "$EUD_CONNECTION" = "auto" ]; then
+		while true; do
+			read -p "Maximum EUDs per node's AP (1-20): " MAX_EUDS_PER_NODE
+			if [[ "$MAX_EUDS_PER_NODE" =~ ^[0-9]+$ ]] && [ "$MAX_EUDS_PER_NODE" -ge 1 ] && [ "$MAX_EUDS_PER_NODE" -le 20 ]; then
+				break
+			else
+				echo "ERROR: Please enter a number between 1 and 20."
+			fi
+		done
+	fi
+
+	# --- CIDR selection with capacity planning ---
+	ask_lan_cidr "$MAX_EUDS_PER_NODE"
 
 	# --- Auto Channel Selection (skip if wireless or auto) ---
 	if [ "$EUD_CONNECTION" = "wireless" ] || [ "$EUD_CONNECTION" = "auto" ]; then
@@ -226,6 +319,7 @@ save_config() {
 EUD_CONNECTION="$EUD_CONNECTION"
 LAN_AP_SSID="$LAN_AP_SSID"
 LAN_AP_KEY="$LAN_AP_KEY"
+MAX_EUDS_PER_NODE="$MAX_EUDS_PER_NODE"
 INSTALL_MEDIAMTX="$INSTALL_MEDIAMTX"
 INSTALL_MUMBLE="$INSTALL_MUMBLE"
 LAN_SSID="$LAN_SSID"
@@ -252,6 +346,7 @@ load_config() {
 	if [ "$EUD_CONNECTION" = "wireless" ] || [ "$EUD_CONNECTION" = "auto" ]; then
 		echo "  LAN AP SSID: $LAN_AP_SSID"
 		echo "  LAN AP Key: $LAN_AP_KEY"
+		echo "  Max EUDs per node: $MAX_EUDS_PER_NODE"
 	fi
 	echo "  Install MediaMTX: $INSTALL_MEDIAMTX"
 	echo "  Install Mumble: $INSTALL_MUMBLE"
@@ -512,6 +607,7 @@ if [ "$HARDWARE_MODEL" != "r3a" ]; then
 		-e "s|__EUD_CONNECTION__|${EUD_CONNECTION}|g" \
 		-e "s|__LAN_AP_SSID__|${LAN_AP_SSID}|g" \
 		-e "s|__LAN_AP_KEY__|${LAN_AP_KEY}|g" \
+		-e "s|__MAX_EUDS_PER_NODE__|${MAX_EUDS_PER_NODE}|g" \
 		-e "s|__INSTALL_MEDIAMTX__|${INSTALL_MEDIAMTX}|g" \
 		-e "s|__INSTALL_MUMBLE__|${INSTALL_MUMBLE}|g" \
 		-e "s|__LAN_SSID__|${LAN_SSID}|g" \
@@ -544,6 +640,7 @@ HARDWARE_MODEL=${HARDWARE_MODEL}
 EUD_CONNECTION=${EUD_CONNECTION}
 LAN_AP_SSID=${LAN_AP_SSID}
 LAN_AP_KEY=${LAN_AP_KEY}
+MAX_EUDS_PER_NODE=${MAX_EUDS_PER_NODE}
 INSTALL_MEDIAMTX=${INSTALL_MEDIAMTX}
 INSTALL_MUMBLE=${INSTALL_MUMBLE}
 LAN_SSID=${LAN_SSID}
