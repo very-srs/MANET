@@ -1,10 +1,10 @@
 #### PREREQUISITES
 
-Create a new directory on your computer to work out of.
+Create a new directory on your computerto work from.
 
-For Rock 3A boards, download this OS image:
-[https://dl.armbian.com/uefi-arm64/Trixie_current_minimal](https://dl.armbian.com/uefi-arm64/Trixie_current_minimal).
-Place this image in the directory you'll be working from.
+For Rock 3A boards, download this OS image and place it in the directory you're working out of.
+
+[https://dl.armbian.com/uefi-arm64/Trixie_current_minimal](https://dl.armbian.com/uefi-arm64/Trixie_current_minimal)
 
 For RPi boards, you need `rpi-imager`.
 - Windows: [Download Installer](https://downloads.raspberrypi.com/imager/imager_latest.exe)
@@ -33,6 +33,7 @@ Once you have your tools installed and scripts collected into a directory, run t
 ### SETUP OPTIONS
 
 1. Select EUD (client) connection type
+
    You are choosing how EUDs will connect to this mesh node.
 
    Wired - You'll use an Ethernet to USB adapter for a phone, or plain Ethernet for a computer. There will be no WiFi AP broadcast from the mesh node; both 2.4 and 5 GHz radios will be included in the MANET mesh. Plugging the node into an external, internet-enabled network will turn the node into a mesh gateway.
