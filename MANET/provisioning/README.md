@@ -85,3 +85,12 @@ When finished with the questions, or after loading an existing config, you must 
 | Raspberry Pi 5 | Pre-release | No HaLow support |
 | Raspberry Pi 4B | Untested | Support expected soon |
 | Compute Module 4 (CM4) | Functional | Fully functional, 802.11ax + HaLow |
+
+
+---
+
+### FIRST BOOT
+
+Plug the SBC into an ethernet network that has Internet Access.  Use a quality power adapter to provide 5v 3A.  The full post boot provisioning takes around 8 minutes and the SBC will reboot multiple times.  At the end of this proceedure you have a new mesh node that is ready to be built into an enclosure and used.
+procedure.  You want to access this node over ssh, do so via its ethernet port (plug it into a DHCP network) or a device connected to its WiFi AP (it is your default gateway).
+
