@@ -11,6 +11,13 @@ fi
 
 WLAN_INTERFACES=$(networkctl | awk '/wlan/ {print $2}' | tr '\n' ' ')
 
+# Read AP interface if configured
+AP_INTERFACE=""
+if [ -f /var/lib/ap_interface ]; then
+    AP_INTERFACE=$(cat /var/lib/ap_interface)
+    echo "AP interface detected: $AP_INTERFACE (will be excluded from batman mesh)"
+fi
+
 start() {
     echo "Starting BATMAN-ADV setup..."
     #change to batman V algo
@@ -21,6 +28,12 @@ start() {
 	batctl gw_mode client
 
     for WLAN in $WLAN_INTERFACES; do
+        # Skip AP interface - it must not be added to batman mesh
+        if [ -n "$AP_INTERFACE" ] && [ "$WLAN" == "$AP_INTERFACE" ]; then
+            echo "--> Skipping $WLAN (configured as AP interface)"
+            continue
+        fi
+        
         echo "--> Configuring interface: $WLAN"
 
         # Set the interface type to mesh
@@ -47,7 +60,6 @@ start() {
         batctl bat0 if add "$WLAN"
     done
 
-
     ip link set bat0 up
     echo "bat0 interface is up and configured."
 }
@@ -55,6 +67,11 @@ start() {
 stop() {
     echo "Stopping BATMAN-ADV..."
     for WLAN in $WLAN_INTERFACES; do
+        # Skip AP interface
+        if [ -n "$AP_INTERFACE" ] && [ "$WLAN" == "$AP_INTERFACE" ]; then
+            continue
+        fi
+        
         if batctl bat0 if | grep -q "$WLAN"; then
             batctl bat0 if del "$WLAN"
         fi

@@ -32,11 +32,23 @@ fi
 CARRIER=$(cat /sys/class/net/$ETH_IFACE/carrier 2>/dev/null || echo 0)
 if [ "$CARRIER" != "1" ]; then
     log "No carrier on $ETH_IFACE - cable not connected"
+    
     # Clean up on cable unplug
     rm -f "$ACTIVE_CONFIG"
     rm -f /var/run/mesh-gateway.state
     rm -f /var/run/ethernet_detection_state
     systemctl restart systemd-networkd
+    
+    # In AUTO mode with no ethernet, enable AP
+    EUD_MODE=$(grep "^eud=" /etc/mesh.conf 2>/dev/null | cut -d'=' -f2)
+    if [ "$EUD_MODE" == "auto" ] && [ -f /var/lib/ap_interface ]; then
+        log "Auto mode: No ethernet detected, enabling AP for EUD connectivity"
+        systemctl enable hostapd.service
+        systemctl start hostapd.service
+        systemctl start dnsmasq.service
+        systemctl start ap-txpower.service
+    fi
+    
     exit 0
 fi
 
@@ -47,6 +59,7 @@ EUD_MODE=$(grep "^eud=" /etc/mesh.conf 2>/dev/null | cut -d'=' -f2)
 
 FORCE_WIRELESS=false
 FORCE_WIRED=false
+AUTO_MODE=false
 
 case "$EUD_MODE" in
     "wireless")
@@ -54,20 +67,32 @@ case "$EUD_MODE" in
         FORCE_WIRELESS=true
         ;;
     "wired")
-        log "Forced EUD mode from mesh.conf"
+        log "Forced wired EUD mode from mesh.conf"
         FORCE_WIRED=true
         ;;
-    "auto"|*)
+    "auto")
         log "Auto-detection mode"
+        AUTO_MODE=true
+        ;;
+    *)
+        log "Unknown or no EUD mode, defaulting to auto"
+        AUTO_MODE=true
         ;;
 esac
+
+# Read AP interface if configured
+AP_INTERFACE=""
+if [ -f /var/lib/ap_interface ]; then
+    AP_INTERFACE=$(cat /var/lib/ap_interface)
+    log "AP interface: $AP_INTERFACE"
+fi
 
 # Fast DHCP detection with nmap (unless forced)
 DHCP_DETECTED=false
 
-if [ "$FORCE_GATEWAY" = true ]; then
+if [ "$FORCE_WIRELESS" = true ]; then
     DHCP_DETECTED=true
-elif [ "$FORCE_EUD" = false ]; then
+elif [ "$FORCE_WIRED" = false ]; then
     log "Probing for DHCP server (timeout: ${DETECTION_TIMEOUT}s)..."
     
     # Ensure interface is up for probing
@@ -141,6 +166,15 @@ if [ "$DHCP_DETECTED" = true ]; then
             log "Enabled BATMAN gateway mode"
         fi
         
+        # In AUTO mode when gateway, KEEP AP ENABLED (dual role)
+        if [ "$AUTO_MODE" = true ] && [ -n "$AP_INTERFACE" ]; then
+            log "Auto mode + Gateway: Keeping AP enabled for dual gateway/AP role"
+            systemctl enable hostapd.service
+            systemctl start hostapd.service
+            systemctl start dnsmasq.service
+            systemctl start ap-txpower.service
+        fi
+        
         # Save state
         cat > /var/run/ethernet_detection_state <<EOF
 # Ethernet auto-detection result
@@ -148,7 +182,7 @@ ETH_MODE=GATEWAY
 ETH_IP=$ETH_IP
 DEFAULT_GW=${DEFAULT_GW:-none}
 DETECTED_AT=$(date +%s)
-DETECTION_METHOD=$([ "$FORCE_GATEWAY" = true ] && echo "FORCED" || echo "DHCP_PROBE")
+DETECTION_METHOD=$([ "$FORCE_WIRELESS" = true ] && echo "FORCED" || echo "DHCP_PROBE")
 EOF
         
         log "Gateway configuration complete"
@@ -181,21 +215,21 @@ if [ "$DHCP_DETECTED" = false ]; then
     # Restart networkd to apply bridge membership
     systemctl restart systemd-networkd
 
-log "Waiting for bridge attachment..."
-for i in {1..10}; do
-    if bridge link show | grep -q end0; then
-        log "Successfully added end0 to bridge br0"
-        break
-    fi
-    sleep 0.5
-done
+    log "Waiting for bridge attachment..."
+    for i in {1..10}; do
+        if bridge link show | grep -q end0; then
+            log "Successfully added end0 to bridge br0"
+            break
+        fi
+        sleep 0.5
+    done
 
-# Final verification
-if ! bridge link show | grep -q end0; then
-    log "WARNING: Failed to add end0 to bridge after 5 seconds"
-    # Try manual add as fallback
-    ip link set end0 master br0 2>/dev/null || true
-fi
+    # Final verification
+    if ! bridge link show | grep -q end0; then
+        log "WARNING: Failed to add end0 to bridge after 5 seconds"
+        # Try manual add as fallback
+        ip link set end0 master br0 2>/dev/null || true
+    fi
 
     # Remove gateway state
     rm -f /var/run/mesh-gateway.state
@@ -209,13 +243,22 @@ fi
     # Remove NAT rules
     nft flush chain ip nat postrouting 2>/dev/null || true
     
+    # In AUTO mode when EUD plugged in, DISABLE AP (wired EUD takes priority)
+    if [ "$AUTO_MODE" = true ] && [ -n "$AP_INTERFACE" ]; then
+        log "Auto mode + Wired EUD: Disabling AP (wired connection takes priority)"
+        systemctl stop hostapd.service
+        systemctl stop dnsmasq.service
+        systemctl stop ap-txpower.service
+        systemctl disable hostapd.service
+    fi
+    
     # Save state
     cat > /var/run/ethernet_detection_state <<EOF
 # Ethernet auto-detection result
 ETH_MODE=EUD
 ETH_IP=none
 DETECTED_AT=$(date +%s)
-DETECTION_METHOD=$([ "$FORCE_EUD" = true ] && echo "FORCED" || echo "NO_DHCP")
+DETECTION_METHOD=$([ "$FORCE_WIRED" = true ] && echo "FORCED" || echo "NO_DHCP")
 EOF
     
     log "EUD configuration complete"
