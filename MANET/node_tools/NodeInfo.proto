@@ -1,0 +1,73 @@
+syntax = "proto3";
+// Update with protoc --python_out=. NodeInfo.proto 
+
+// This message represents a complete status update from a single mesh node.
+message NodeInfo {
+  // --- Network Identity ---
+  string hostname = 1;
+  repeated string mac_addresses = 2;  // All interface MAC addresses; first is primary (e.g., br0)
+  string ipv4_address = 3;
+  string syncthing_id = 4;
+
+  // --- Network & Election Metrics ---
+  float tq_average = 10;          // TQ average, for service elections.
+  bool is_internet_gateway = 11; // Does this node have an active internet connection?
+
+  // --- Service Status ---
+  bool is_mumble_server = 20;
+  bool is_ntp_server = 21;
+  bool is_tak_server = 22;
+  bool is_mediamtx_server = 23;
+
+  // --- System Health ---
+  uint32 uptime_seconds = 30;
+  uint32 battery_percentage = 31; // 0-100
+  float cpu_load_average = 32;    // 1-minute load average
+
+  // --- Other ---
+  message GpsLocation {
+    double latitude = 1;
+    double longitude = 2;
+    float altitude = 3;
+  }
+  GpsLocation location = 40;
+  string atak_user = 41;
+
+  // --- Channel Hopping & Discovery ---
+  
+  // A report for a single scanned channel
+  message ChannelScanResult {
+    uint32 channel = 1;
+    sint32 noise_floor = 2;
+    uint32 bss_count = 3;
+  }
+
+  // The full report from one node
+  message ChannelReport {
+    repeated ChannelScanResult results = 1;
+  }
+
+  // Channel scan report
+  ChannelReport channel_report = 50;
+  
+  // Current data channels (for helper broadcast)
+  string data_channel_2_4 = 51;
+  string data_channel_5_0 = 52;
+  
+  // --- Timestamp ---
+  uint64 last_seen_timestamp = 53; // Unix epoch (seconds)
+  
+  // --- Jamming Detection ---
+  bool is_in_limp_mode = 54;
+  
+  // --- Tourguide Tracking ---
+  uint64 last_tourguide_timestamp = 55;  // Last time this node sent helper beacon
+  string last_tourguide_radio = 56;      // "wlan0" or "wlan1" - which radio was used last
+  
+  // --- Node State ---
+  enum NodeState {
+    ACTIVE = 0;
+    SHUTTING_DOWN = 1;
+  }
+  NodeState node_state = 57;  // Current operational state
+}
