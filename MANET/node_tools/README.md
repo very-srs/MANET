@@ -164,6 +164,9 @@ Deterministically derives MediaMTX IPv6 VIP from ULA prefix.
 - Hashes the normalized /64 prefix to generate a stable suffix.
 - Returns address with /128 mask.
 
+**node-update.sh**
+Updates the various tools used by the mesh node to the current release
+
 ---
 
 ## Setup & Provisioning
