@@ -3,7 +3,6 @@
 Create a new directory on your computerto work from.
 
 For Rock 3A boards, download this OS image and place it in the directory you're working out of.
-
 [https://dl.armbian.com/uefi-arm64/Trixie_current_minimal](https://dl.armbian.com/uefi-arm64/Trixie_current_minimal)
 
 For RPi boards, you need `rpi-imager`.
