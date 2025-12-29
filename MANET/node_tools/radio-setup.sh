@@ -220,6 +220,8 @@ EOF
 	systemctl enable wpa_supplicant@$WLAN.service
 	((CT++))
 done
+
+# this will be used for rpi5's built in wlan interface
 for WLAN in `cat /var/lib/no_mesh_if | head -n 1`; do
 	echo " > Setting up $WLAN as a client AP ..."
 
@@ -233,46 +235,46 @@ Unmanaged=yes
 ActivationPolicy=manual
 EOF
 
-systemctl enable mesh-interface-setup@$WLAN
+#systemctl enable mesh-interface-setup@$WLAN
 
 
-#echo "   > creating systemd tx power service ... "
+echo "   > creating systemd tx power service ... "
 ##set this wlan interface to have a low (5db) tx power
-#cat <<- EOF > /etc/systemd/system/wlan-txpower.service
-#[Unit]
-#Description=Set low TX power on wlan interface
-#Before=hostapd.service
-#After=network.target
+cat <<- EOF > /etc/systemd/system/wlan-txpower.service
+[Unit]
+Description=Set low TX power on wlan interface
+Before=hostapd.service
+After=network.target
 
-#[Service]
-#Type=oneshot
-#ExecStart=/usr/sbin/iw dev $WLAN set txpower fixed 1000
-#RemainAfterExit=yes
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/iw dev $WLAN set txpower fixed 1000
+RemainAfterExit=yes
 
-#[Install]
-#WantedBy=multi-user.target
-#EOF
-#systemctl enable --now wlan-txpower.service
-#ip link set wlan0 down
-#echo "   > creating systemd hostapd service ... "
+[Install]
+WantedBy=multi-user.target
+EOF
+systemctl enable --now wlan-txpower.service
+ip link set wlan0 down
+echo "   > creating systemd hostapd service ... "
 #set up hotsapd for this wlan to be an AP for the EUD
 
-#cat <<- EOF > /etc/hostapd/hostapd.conf
-#interface=$WLAN
-#driver=nl80211
-#ssid=$(hostname)
-#hw_mode=a
-#channel=36
-#ieee80211n=1
-#ieee80211ac=1
-#wmm_enabled=1
-#auth_algs=1
-#wpa=2
-#wpa_key_mgmt=WPA-PSK
-#rsn_pairwise=CCMP
-#wpa_passphrase=eudtest1!
-#country_code=US	
-#EOF
+cat <<- EOF > /etc/hostapd/hostapd.conf
+interface=$WLAN
+driver=nl80211
+ssid=$(hostname)
+hw_mode=a
+hannel=36
+ieee80211n=1
+ieee80211ac=1
+wmm_enabled=1
+auth_algs=1
+wpa=2
+wpa_key_mgmt=WPA-PSK
+rsn_pairwise=CCMP
+wpa_passphrase=eudtest1!
+country_code=US	
+EOF
 #	systemctl unmask hostapd
 #	systemctl enable --now hostapd
 done
