@@ -44,7 +44,7 @@ The project transforms hardware like the Raspberry Pi CM4 into self-forming, sel
 
 ### 1. Prerequisites
 You will need a supported SBC and a Linux or Windows machine to flash from, and ethernet Internet access for the SBC being flashed. 
-See [provisioning/README.md](provisioning/README.md) for detailed requirements and download links.
+See [MANET/provisioning/README.md](provisioning/README.md) for detailed requirements and download links.
 
 ### 2. Provisioning a Node
 1.  Navigate to the `provisioning` directory.
