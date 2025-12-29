@@ -1,0 +1,75 @@
+#!/bin/bash
+TARGET_IFACE="end0"
+GATEWAY_STATE_FILE="/var/run/mesh-gateway.state"
+NTP_STATE_FILE="/var/run/mesh-ntp.state"
+
+log() {
+    echo "[$(date +'%Y-%m-%d %H:%M:%S')] - GATEWAY-UP [$$]($IFACE): $1" | systemd-cat -t mesh-gateway
+}
+
+if [ "$IFACE" != "$TARGET_IFACE" ]; then
+    exit 0
+fi
+
+if [ -f "$GATEWAY_STATE_FILE" ]; then
+    log "Gateway state file already exists. Verifying internet connectivity..."
+    # Re-verify internet is actually working
+    if ping -c 3 -W 2 -I "$IFACE" 8.8.8.8 > /dev/null 2>&1; then
+        log "Internet confirmed working. Nothing to do."
+        exit 0
+    else
+        log "Internet check failed despite state file. Removing stale state."
+        rm -f "$GATEWAY_STATE_FILE"
+        rm -f "$NTP_STATE_FILE"
+    fi
+fi
+
+log "Testing internet connectivity on $IFACE..."
+if ! ping -c 3 -W 2 -I "$IFACE" 8.8.8.8 > /dev/null 2>&1; then
+    log "Internet ping check failed via $IFACE."
+    exit 0
+fi
+
+log "Internet detected on $IFACE. Promoting to mesh gateway..."
+
+# Create state file FIRST before any operations
+touch "$GATEWAY_STATE_FILE"
+
+# --- NTP Server Setup ---
+log "Attempting to sync time with external NTP source..."
+cp /etc/chrony/chrony-test.conf /etc/chrony/chrony.conf
+systemctl restart chrony.service
+sleep 3
+
+if timeout 30 chronyc -a 'burst 4/4' && sleep 5 && chronyc sources | grep -q '^\*'; then
+    log "Time sync successful. Promoting to mesh NTP server."
+    touch "$NTP_STATE_FILE"
+    systemctl stop chrony.service
+    cp /etc/chrony/chrony-server.conf /etc/chrony/chrony.conf
+    systemctl start chrony.service
+else
+    log "Failed to sync time. Will not become an NTP server."
+    rm -f "$NTP_STATE_FILE"
+    systemctl stop chrony.service
+    cp /etc/chrony/chrony-default.conf /etc/chrony/chrony.conf
+fi
+
+# --- Gateway Mode ---
+log "Enabling IPv4 and IPv6 gateway mode..."
+batctl gw_mode server
+
+# Wait and verify
+sleep 2
+if ! batctl gw_mode | grep -q "server"; then
+    log "ERROR: Failed to set gateway mode to server!"
+    # Don't exit - maybe it partially succeeded
+fi
+
+# Update router advertisements to announce default route
+cp /etc/radvd-gateway.conf /etc/radvd.conf
+systemctl restart radvd
+
+# --- Announce to Mesh ---
+# Don't restart node-manager, just wait for next cycle (15 seconds)
+# This prevents killing the service mid-operation
+log "Gateway promotion complete. Node-manager will announce in next cycle."

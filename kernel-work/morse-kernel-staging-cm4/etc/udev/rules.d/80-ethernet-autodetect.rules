@@ -1,0 +1,3 @@
+# Trigger on carrier changes for ethernet interface
+SUBSYSTEM=="net", KERNEL=="end0", ACTION=="change", \
+  RUN+="/bin/systemctl start ethernet-autodetect.service"

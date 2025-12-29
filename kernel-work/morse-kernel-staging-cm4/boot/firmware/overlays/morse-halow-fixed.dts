@@ -1,0 +1,75 @@
+/dts-v1/;
+/plugin/;
+
+/ {
+    compatible = "brcm,bcm2711", "brcm,bcm2835", "brcm,bcm2836";
+
+    /* Fragment 0: Configure SPI0 with the Morse HaLow device */
+    fragment@0 {
+        target = <&spi0>;
+        __overlay__ {
+            status = "okay";
+            #address-cells = <1>;
+            #size-cells = <0>;
+            
+            /* Use GPIO8 as chip select, active low */
+            cs-gpios = <&gpio 8 1>;
+
+            /* Morse HaLow module on SPI0.0 */
+            mm6108: mm6108@0 {
+                compatible = "morse,mm610x-spi";
+                reg = <0>;
+                
+                /* GPIO 17 for reset - active high (0 = active high polarity) */
+                reset-gpios = <&gpio 17 0>;
+                
+                /* Power control GPIOs - GPIO 3 and GPIO 7 */
+                power-gpios = <&gpio 3 0>, <&gpio 7 0>;
+                
+                /* SPI interrupt on GPIO 5 */
+                spi-irq-gpios = <&gpio 5 0>;
+                
+                /* Match OpenWrt: 50 MHz */
+                spi-max-frequency = <50000000>;
+                
+                status = "okay";
+            };
+
+            /* Disable default spidev on CS0 to avoid conflict */
+            spidev0: spidev@0 {
+                reg = <0>;
+                status = "disabled";
+            };
+
+            /* Disable spidev on CS1 as well */
+            spidev1: spidev@1 {
+                reg = <1>;
+                status = "disabled";
+            };
+        };
+    };
+
+    /* Fragment 1: Configure GPIO pinctrl */
+    fragment@1 {
+        target = <&gpio>;
+        __overlay__ {
+            /* SPI0 chip select pin configuration */
+            spi0_cs_pins: spi0_cs_pins {
+                brcm,pins = <8>;
+                brcm,function = <1>;  /* Output */
+                brcm,pull = <2>;      /* Pull-up */
+            };
+
+            /* SPI0 data pins - ensure pull-ups */
+            spi0_pins: spi0_pins {
+                brcm,pins = <9 10 11>;
+                brcm,function = <4 4 4>;  /* ALT0 = SPI */
+                brcm,pull = <2 2 2>;      /* Pull-up on MISO, MOSI, SCLK */
+            };
+        };
+    };
+
+    __overrides__ {
+        speed = <&mm6108>, "spi-max-frequency:0";
+    };
+};
