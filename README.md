@@ -72,6 +72,6 @@ The nodes support connecting external devices (End User Devices) in three ways:
 * **Auto**: Default behavior. Acts as "Wireless" unless an Ethernet device is detected, then switches priority to "Wired".
 
 ## Documentation
-* [Provisioning Guide](provisioning/README.md)
-* [Node Tools Documentation](node_tools/README.md)
-* [Binary Details](binaries_arm64/README.md)
+* [Provisioning Guide](MANET/provisioning/README.md)
+* [Node Tools Documentation](MANET/node_tools/README.md)
+* [Binary Details](MANET/binaries_arm64/README.md)
