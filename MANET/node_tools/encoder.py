@@ -13,6 +13,7 @@ def main():
     parser.add_argument("--mac-addresses", nargs='+', type=str, required=True, help="Node's interface MAC addresses (first is primary).")
     parser.add_argument("--ipv4-address", default="", help="Node's assigned IPv4 address.")
     parser.add_argument("--syncthing-id", default="", help="Node's Syncthing Device ID.")
+    parser.add_argument("--ipv4-chunk", type=int, default=0, help="Chunk number claimed for EUD IP allocation.")
 
     # --- Network & Election Metrics (float, bools) ---
     parser.add_argument("--tq-average", type=float, default=0.0, help="Average TQ to other mesh nodes.")
@@ -61,6 +62,7 @@ def main():
     node_info.mac_addresses.extend(args.mac_addresses)
     node_info.ipv4_address = args.ipv4_address
     node_info.syncthing_id = args.syncthing_id
+    node_info.ipv4_chunk = args.ipv4_chunk
     node_info.tq_average = args.tq_average
     node_info.is_internet_gateway = args.is_internet_gateway
     node_info.is_mumble_server = args.is_mumble_server

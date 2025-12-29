@@ -147,6 +147,7 @@ while true; do
             "--mac-addresses" "${ALL_MACS[@]}"
             "--tq-average" "$TQ_AVG"
             "--syncthing-id" "$SYNCTHING_ID"
+            "--ipv4-chunk" "$MY_CHUNK"
             "--timestamp" "$NOW"
             "--data-channel-2-4" "$STATIC_FREQ_2_4"
             "--data-channel-5-0" "$STATIC_FREQ_5_0"
