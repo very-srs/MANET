@@ -214,7 +214,7 @@ ask_questions() {
 			read -p "Enter LAN AP WPA2 Key (8-63 chars) [or press Enter to generate]: " LAN_AP_KEY
 			echo
 			if [ -z "$LAN_AP_KEY" ]; then
-				LAN_AP_KEY=$(openssl rand -base64 28)
+				LAN_AP_KEY=$(openssl rand -base64 56)
 				echo "Generated LAN AP Key: $LAN_AP_KEY"
 				break
 			fi
@@ -241,19 +241,19 @@ ask_questions() {
 	INSTALL_MUMBLE=${INSTALL_MUMBLE:-y}
 	if [ "$INSTALL_MUMBLE" = "y" ] || [ "$INSTALL_MUMBLE" = "Y" ]; then INSTALL_MUMBLE="y"; else INSTALL_MUMBLE="n"; fi
 
-	# --- 3. LAN Configuration ---
-	read -p "Enter LAN SSID Name: " LAN_SSID
+	# --- 3. Mesh Configuration ---
+	read -p "Enter MESH SSID Name: " MESH_SSID
 
 	while true; do
-		read -p "Enter LAN SAE Key (WPA3 password, 8-63 chars) [or press Enter to generate]: " LAN_SAE_KEY
+		read -p "Enter MESH SAE Key (WPA3 password, 8-63 chars) [or press Enter to generate]: " MESH_SAE_KEY
 		echo
-		if [ -z "$LAN_SAE_KEY" ]; then
-			LAN_SAE_KEY=$(openssl rand -base64 28)
-			echo "Generated SAE Key: $LAN_SAE_KEY"
+		if [ -z "$MESH_SAE_KEY" ]; then
+			MESH_SAE_KEY=$(openssl rand -base64 28)
+			echo "Generated SAE Key: $MESH_SAE_KEY"
 			break
 		fi
 
-		key_len=${#LAN_SAE_KEY}
+		key_len=${#MESH_SAE_KEY}
 		if (( key_len < 8 || key_len > 63 )); then
 			echo "ERROR: Key must be between 8 and 63 characters. You entered $key_len characters."
 		else
@@ -322,8 +322,8 @@ LAN_AP_KEY="$LAN_AP_KEY"
 MAX_EUDS_PER_NODE="$MAX_EUDS_PER_NODE"
 INSTALL_MEDIAMTX="$INSTALL_MEDIAMTX"
 INSTALL_MUMBLE="$INSTALL_MUMBLE"
-LAN_SSID="$LAN_SSID"
-LAN_SAE_KEY="$LAN_SAE_KEY"
+MESH_SSID="$MESH_SSID"
+MESH_SAE_KEY="$MESH_SAE_KEY"
 LAN_CIDR_BLOCK="$LAN_CIDR_BLOCK"
 AUTO_CHANNEL="$AUTO_CHANNEL"
 RADIO_PW="$RADIO_PW"
@@ -350,8 +350,8 @@ load_config() {
 	fi
 	echo "  Install MediaMTX: $INSTALL_MEDIAMTX"
 	echo "  Install Mumble: $INSTALL_MUMBLE"
-	echo "  LAN SSID: $LAN_SSID"
-	echo "  LAN SAE Key: $LAN_SAE_KEY"
+	echo "  Mesh SSID: $MESH_SSID"
+	echo "  Mesh SAE Key: $MESH_SAE_KEY"
 	echo "  LAN CIDR Block: $LAN_CIDR_BLOCK"
 	echo "  Auto Channel: $AUTO_CHANNEL"
 	echo "  User password: $RADIO_PW"
@@ -610,8 +610,8 @@ if [ "$HARDWARE_MODEL" != "r3a" ]; then
 		-e "s|__MAX_EUDS_PER_NODE__|${MAX_EUDS_PER_NODE}|g" \
 		-e "s|__INSTALL_MEDIAMTX__|${INSTALL_MEDIAMTX}|g" \
 		-e "s|__INSTALL_MUMBLE__|${INSTALL_MUMBLE}|g" \
-		-e "s|__LAN_SSID__|${LAN_SSID}|g" \
-		-e "s|__LAN_SAE_KEY__|${LAN_SAE_KEY}|g" \
+		-e "s|__MESH_SSID__|${MESH_SSID}|g" \
+		-e "s|__MESH_SAE_KEY__|${MESH_SAE_KEY}|g" \
 		-e "s|__LAN_CIDR_BLOCK__|${LAN_CIDR_BLOCK}|g" \
 		-e "s|__AUTO_CHANNEL__|${AUTO_CHANNEL}|g" \
 		-e "s|__RADIO_PW__|${RADIO_PW}|g" \
@@ -643,8 +643,8 @@ LAN_AP_KEY=${LAN_AP_KEY}
 MAX_EUDS_PER_NODE=${MAX_EUDS_PER_NODE}
 INSTALL_MEDIAMTX=${INSTALL_MEDIAMTX}
 INSTALL_MUMBLE=${INSTALL_MUMBLE}
-LAN_SSID=${LAN_SSID}
-LAN_SAE_KEY=${LAN_SAE_KEY}
+MESH_SSID=${MESH_SSID}
+MESH_SAE_KEY=${MESH_SAE_KEY}
 LAN_CIDR_BLOCK=${LAN_CIDR_BLOCK}
 AUTO_CHANNEL=${AUTO_CHANNEL}
 RADIO_PW=${RADIO_PW}
