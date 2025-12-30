@@ -280,23 +280,64 @@ done
 # === CONFIGURE AP INTERFACE (if wireless/auto mode) ===
 # ============================================================================
 
+HOST_MAC=$(ip a | grep -A1 $(networkctl | grep -v bat | awk '/ether/ {print $2}' | head -1) \
+   | awk '/ether/ {print $2}' | cut -d':' -f 5-6 | sed 's/://g')
+
+
 if [[ -n "$AP_INTERFACE" ]]; then
     echo "Configuring $AP_INTERFACE as access point..."
-    
+
+    # Create a service to set interface to managed mode and bring it up
+    cat <<-EOF > /etc/systemd/system/ap-interface-setup.service
+[Unit]
+Description=Set $AP_INTERFACE to managed mode for hostapd
+Before=hostapd.service
+BindsTo=sys-subsystem-net-devices-${AP_INTERFACE}.device
+After=sys-subsystem-net-devices-${AP_INTERFACE}.device
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/ip link set $AP_INTERFACE down
+ExecStart=/usr/sbin/iw dev $AP_INTERFACE set type managed
+ExecStart=/usr/sbin/ip link set $AP_INTERFACE up
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    systemctl enable ap-interface-setup.service
+
+
+    # Create networkd config for AP interface (unmanaged, hostapd will control it)
+    cat <<-EOF > /etc/systemd/network/30-${AP_INTERFACE}.network
+[Match]
+Name=$AP_INTERFACE
+
+[Link]
+Unmanaged=yes
+ActivationPolicy=manual
+EOF
+
+
     # Get configuration from mesh.conf
-    LAN_AP_SSID=${lan_ap_ssid:-"MeshAP"}
-    LAN_AP_KEY=${lan_ap_key:-"changeme123"}
-    MAX_EUDS=${max_euds_per_node:-5}
-    IPV4_NETWORK=${ipv4_network:-"10.30.2.0/24"}
-    
+    while IFS='=' read -r key value; do
+        [[ -z "$key" || "$key" =~ ^[[:space:]]*# ]] && continue
+        case "$key" in
+            lan_ap_ssid) LAN_AP_SSID="$value" ;;
+            lan_ap_key) LAN_AP_KEY="$value" ;;
+            max_euds_per_node) MAX_EUDS="$value" ;;
+            ipv4_network) IPV4_NETWORK="$value" ;;
+        esac
+    done < /etc/mesh.conf
+
     # Calculate DHCP pool based on max EUDs
     # Pool starts at IP 6 (IPs 1-5 are reserved for services)
     CALC_OUTPUT=$(ipcalc "$IPV4_NETWORK" 2>/dev/null)
     FIRST_IP=$(echo "$CALC_OUTPUT" | awk '/HostMin/ {print $2}')
-    
+
     # Start pool at IP 6
     DHCP_START="${FIRST_IP%.*}.$((${FIRST_IP##*.} + 5))"
-    
+
     # Calculate max nodes and pool size
     # Solve: nodes * (1 + max_euds) <= total_available
     PREFIX=$(echo "$IPV4_NETWORK" | cut -d'/' -f2)
@@ -304,11 +345,11 @@ if [[ -n "$AP_INTERFACE" ]]; then
     TOTAL_IPS=$((2**HOST_BITS - 2))
     MAX_NODES=$((TOTAL_IPS / (1 + MAX_EUDS)))
     POOL_SIZE=$((MAX_NODES * MAX_EUDS))
-    
+
     # End pool at start + pool_size - 1
     POOL_END_OFFSET=$((5 + POOL_SIZE - 1))
     DHCP_END="${FIRST_IP%.*}.$((${FIRST_IP##*.} + POOL_END_OFFSET))"
-    
+
     echo " > DHCP pool: $DHCP_START - $DHCP_END (${POOL_SIZE} IPs for ${MAX_EUDS} EUDs × ${MAX_NODES} nodes)"
 
     # Create hostapd configuration
@@ -409,16 +450,6 @@ RemainAfterExit=yes
 
 [Install]
 WantedBy=multi-user.target
-EOF
-
-    # Create networkd config for AP interface (unmanaged, will be bridged)
-    cat <<-EOF > /etc/systemd/network/30-${AP_INTERFACE}.network
-[Match]
-Name=$AP_INTERFACE
-
-[Link]
-Unmanaged=yes
-ActivationPolicy=manual
 EOF
 
     # Enable proxy ARP on br0 for EUD routing
@@ -725,7 +756,7 @@ systemctl daemon-reload
 cp /root/networkd-dispatcher/off /etc/networkd-dispatcher/off.d/50-gateway-disable
 cp /root/networkd-dispatcher/off /etc/networkd-dispatcher/no-carrier.d/50-gateway-disable
 cp /root/networkd-dispatcher/off /etc/networkd-dispatcher/degraded.d/50-gateway-disable
-cp /root/networkd-dispatcher/routable /etc/networkd-dispatcher/routable.d/50-gateway-enable
+cp /root/networkd-dispatcher/carrier /etc/networkd-dispatcher/carrier.d/50-ethernet-detect
 chmod -R 755 /etc/networkd-dispatcher
 
 cp /root/regulatory.db /lib/firmware/
