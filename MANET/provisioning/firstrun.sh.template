@@ -195,6 +195,8 @@ systemctl disable apt-daily-upgrade.timer > /dev/null 2>&1
 # This was hanging on boot, disable it
 systemctl mask dev-zram0.device > /dev/null 2>&1
 
+
+
 # Load modules at boot
 cat << EOF > /etc/modules-load.d/morse.conf
 mac80211
@@ -682,6 +684,9 @@ echo "max_euds_per_node=__MAX_EUDS_PER_NODE__" >> /etc/mesh.conf
 
 # Disable the current script so it won't run again at next boot
 systemctl disable mesh-provision
+
+# Update tools just in case
+/usr/local/bin/node-update.sh
 
 echo "=== Provisioning complete at $(date) ==="
 echo "=== Rebooting to apply changes ==="
