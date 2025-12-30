@@ -668,8 +668,8 @@ rm /etc/resolv.conf
 echo "nameserver 1.1.1.1" > /etc/resolv.conf
 
 #write out the config selections for future use
-echo "mesh_key=__LAN_SAE_KEY__" > /etc/mesh.conf
-echo "mesh_ssid=__LAN_SSID__" >> /etc/mesh.conf
+echo "mesh_key=__MESH_SAE_KEY__" > /etc/mesh.conf
+echo "mesh_ssid=__MESH_SSID__" >> /etc/mesh.conf
 echo "ipv4_network=__LAN_CIDR_BLOCK__"  >> /etc/mesh.conf
 echo "mumble=__INSTALL_MUMBLE__" >> /etc/mesh.conf
 echo "mtx=__INSTALL_MEDIAMTX__" >> /etc/mesh.conf
