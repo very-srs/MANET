@@ -194,7 +194,7 @@ if [[ "$eud" == "wireless" ]] || [[ "$eud" == "auto" ]]; then
             PHY=$(iw dev "$iface" info | grep wiphy | awk '{print "phy" $2}')
             
             # Check if this PHY supports 5GHz (frequencies >= 5000 MHz)
-            if iw phy "$PHY" info | grep -q "5[0-9][0-9][0-9] MHz"; then
+			if iw phy "$PHY" info 2>/dev/null | grep " 5[0-9][0-9][0-9]" >/dev/null; then
                 AP_INTERFACE="$iface"
                 echo " > Found 5GHz-capable interface: $AP_INTERFACE"
                 break
