@@ -618,8 +618,8 @@ if [ "$HARDWARE_MODEL" != "r3a" ]; then
     MAX_EUDS_PER_NODE_ESC=$(escape_sed "$MAX_EUDS_PER_NODE")
     INSTALL_MEDIAMTX_ESC=$(escape_sed "$INSTALL_MEDIAMTX")
     INSTALL_MUMBLE_ESC=$(escape_sed "$INSTALL_MUMBLE")
-    LAN_SSID_ESC=$(escape_sed "$LAN_SSID")
-    LAN_SAE_KEY_ESC=$(escape_sed "$LAN_SAE_KEY")
+    MESH_SSID_ESC=$(escape_sed "$MESH_SSID")
+    MESH_SAE_KEY_ESC=$(escape_sed "$MESH_SAE_KEY")
     LAN_CIDR_BLOCK_ESC=$(escape_sed "$LAN_CIDR_BLOCK")
     AUTO_CHANNEL_ESC=$(escape_sed "$AUTO_CHANNEL")
     RADIO_PW_ESC=$(escape_sed "$RADIO_PW")
@@ -631,8 +631,8 @@ if [ "$HARDWARE_MODEL" != "r3a" ]; then
         -e "s|__MAX_EUDS_PER_NODE__|${MAX_EUDS_PER_NODE_ESC}|g" \
         -e "s|__INSTALL_MEDIAMTX__|${INSTALL_MEDIAMTX_ESC}|g" \
         -e "s|__INSTALL_MUMBLE__|${INSTALL_MUMBLE_ESC}|g" \
-        -e "s|__LAN_SSID__|${LAN_SSID_ESC}|g" \
-        -e "s|__LAN_SAE_KEY__|${LAN_SAE_KEY_ESC}|g" \
+        -e "s|__MESH_SSID__|${MESH_SSID_ESC}|g" \
+        -e "s|__MESH_SAE_KEY__|${MESH_SAE_KEY_ESC}|g" \
         -e "s|__LAN_CIDR_BLOCK__|${LAN_CIDR_BLOCK_ESC}|g" \
         -e "s|__AUTO_CHANNEL__|${AUTO_CHANNEL_ESC}|g" \
         -e "s|__RADIO_PW__|${RADIO_PW_ESC}|g" \
