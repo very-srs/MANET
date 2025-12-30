@@ -22,8 +22,8 @@ $Script:LAN_AP_KEY = ""
 $Script:MAX_EUDS_PER_NODE = 0
 $Script:INSTALL_MEDIAMTX = ""
 $Script:INSTALL_MUMBLE = ""
-$Script:LAN_SSID = ""
-$Script:LAN_SAE_KEY = ""
+$Script:MESH_SSID = ""
+$Script:MESH_SAE_KEY = ""
 $Script:LAN_CIDR_BLOCK = ""
 $Script:AUTO_CHANNEL = ""
 $Script:RADIO_PW = ""
@@ -222,7 +222,7 @@ function Ask-Questions {
     $Script:INSTALL_MUMBLE = if ([string]::IsNullOrWhiteSpace($response) -or $response -match "^[Yy]") { "y" } else { "n" }
 
     # 3. LAN Configuration
-    $Script:LAN_SSID = Read-Host "Enter LAN SSID Name"
+    $Script:MESH_SSID = Read-Host "Enter LAN SSID Name"
 
     while ($true) {
         $key = Read-Host "Enter LAN SAE Key (WPA3 password, 8-63 chars) [or press Enter to generate]"
@@ -232,15 +232,15 @@ function Ask-Questions {
             # Generate random key
             $bytes = New-Object byte[] 28
             [Security.Cryptography.RNGCryptoServiceProvider]::Create().GetBytes($bytes)
-            $Script:LAN_SAE_KEY = [Convert]::ToBase64String($bytes)
-            Write-Host "Generated SAE Key: $($Script:LAN_SAE_KEY)"
+            $Script:MESH_SAE_KEY = [Convert]::ToBase64String($bytes)
+            Write-Host "Generated SAE Key: $($Script:MESH_SAE_KEY)"
             break
         }
 
         if ($key.Length -lt 8 -or $key.Length -gt 63) {
             Write-Host "ERROR: Key must be between 8 and 63 characters. You entered $($key.Length) characters." -ForegroundColor Red
         } else {
-            $Script:LAN_SAE_KEY = $key
+            $Script:MESH_SAE_KEY = $key
             break
         }
     }
@@ -307,8 +307,8 @@ LAN_AP_KEY="$($Script:LAN_AP_KEY)"
 MAX_EUDS_PER_NODE="$($Script:MAX_EUDS_PER_NODE)"
 INSTALL_MEDIAMTX="$($Script:INSTALL_MEDIAMTX)"
 INSTALL_MUMBLE="$($Script:INSTALL_MUMBLE)"
-LAN_SSID="$($Script:LAN_SSID)"
-LAN_SAE_KEY="$($Script:LAN_SAE_KEY)"
+MESH_SSID="$($Script:MESH_SSID)"
+MESH_SAE_KEY="$($Script:MESH_SAE_KEY)"
 LAN_CIDR_BLOCK="$($Script:LAN_CIDR_BLOCK)"
 AUTO_CHANNEL="$($Script:AUTO_CHANNEL)"
 RADIO_PW="$($Script:RADIO_PW)"
@@ -336,8 +336,8 @@ function Load-Config {
                 "MAX_EUDS_PER_NODE" { $Script:MAX_EUDS_PER_NODE = [int]$varValue }
                 "INSTALL_MEDIAMTX" { $Script:INSTALL_MEDIAMTX = $varValue }
                 "INSTALL_MUMBLE" { $Script:INSTALL_MUMBLE = $varValue }
-                "LAN_SSID" { $Script:LAN_SSID = $varValue }
-                "LAN_SAE_KEY" { $Script:LAN_SAE_KEY = $varValue }
+                "MESH_SSID" { $Script:MESH_SSID = $varValue }
+                "MESH_SAE_KEY" { $Script:MESH_SAE_KEY = $varValue }
                 "LAN_CIDR_BLOCK" { $Script:LAN_CIDR_BLOCK = $varValue }
                 "AUTO_CHANNEL" { $Script:AUTO_CHANNEL = $varValue }
                 "RADIO_PW" { $Script:RADIO_PW = $varValue }
@@ -354,8 +354,8 @@ function Load-Config {
     }
     Write-Host "  Install MediaMTX: $($Script:INSTALL_MEDIAMTX)"
     Write-Host "  Install Mumble: $($Script:INSTALL_MUMBLE)"
-    Write-Host "  LAN SSID: $($Script:LAN_SSID)"
-    Write-Host "  LAN SAE Key: $($Script:LAN_SAE_KEY)"
+    Write-Host "  LAN SSID: $($Script:MESH_SSID)"
+    Write-Host "  LAN SAE Key: $($Script:MESH_SAE_KEY)"
     Write-Host "  LAN CIDR Block: $($Script:LAN_CIDR_BLOCK)"
     Write-Host "  Auto Channel: $($Script:AUTO_CHANNEL)"
     Write-Host "  User password: $($Script:RADIO_PW)"
@@ -590,8 +590,8 @@ if ($Script:HARDWARE_MODEL -ne "r3a") {
     $templateContent = $templateContent -replace '__MAX_EUDS_PER_NODE__', $Script:MAX_EUDS_PER_NODE
     $templateContent = $templateContent -replace '__INSTALL_MEDIAMTX__', $Script:INSTALL_MEDIAMTX
     $templateContent = $templateContent -replace '__INSTALL_MUMBLE__', $Script:INSTALL_MUMBLE
-    $templateContent = $templateContent -replace '__LAN_SSID__', $Script:LAN_SSID
-    $templateContent = $templateContent -replace '__LAN_SAE_KEY__', $Script:LAN_SAE_KEY
+    $templateContent = $templateContent -replace '__MESH_SSID__', $Script:MESH_SSID
+    $templateContent = $templateContent -replace '__MESH_SAE_KEY__', $Script:MESH_SAE_KEY
     $templateContent = $templateContent -replace '__LAN_CIDR_BLOCK__', $Script:LAN_CIDR_BLOCK
     $templateContent = $templateContent -replace '__AUTO_CHANNEL__', $Script:AUTO_CHANNEL
     $templateContent = $templateContent -replace '__RADIO_PW__', $Script:RADIO_PW
@@ -660,8 +660,8 @@ LAN_AP_KEY=$($Script:LAN_AP_KEY)
 MAX_EUDS_PER_NODE=$($Script:MAX_EUDS_PER_NODE)
 INSTALL_MEDIAMTX=$($Script:INSTALL_MEDIAMTX)
 INSTALL_MUMBLE=$($Script:INSTALL_MUMBLE)
-LAN_SSID=$($Script:LAN_SSID)
-LAN_SAE_KEY=$($Script:LAN_SAE_KEY)
+MESH_SSID=$($Script:MESH_SSID)
+MESH_SAE_KEY=$($Script:MESH_SAE_KEY)
 LAN_CIDR_BLOCK=$($Script:LAN_CIDR_BLOCK)
 AUTO_CHANNEL=$($Script:AUTO_CHANNEL)
 RADIO_PW=$($Script:RADIO_PW)
