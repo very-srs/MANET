@@ -467,6 +467,7 @@ EOF
     if [[ "$eud" == "wireless" ]]; then
         # Wireless mode: always-on AP
         echo " > Wireless mode: Enabling and starting AP services"
+		systemctl unmask hostapd.service
         systemctl enable hostapd.service
         systemctl start hostapd.service
         systemctl start dnsmasq.service
@@ -474,6 +475,7 @@ EOF
     else
         # Auto mode: stage services but don't enable/start
         # ethernet-autodetect.sh will manage them
+		systemctl unmask hostapd.service
         echo " > Auto mode: AP services staged (ethernet-autodetect will manage)"
         systemctl disable hostapd.service
     fi
