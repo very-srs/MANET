@@ -602,24 +602,45 @@ fi
 # user variables with the template file.  Rpi-imager will inject this into the boot
 # partition and it will be run at first boot
 if [ "$HARDWARE_MODEL" != "r3a" ]; then
-	echo "Generating temporary firstrun script..."
-	sed -e "s|__HARDWARE_MODEL__|${HARDWARE_MODEL}|g" \
-		-e "s|__EUD_CONNECTION__|${EUD_CONNECTION}|g" \
-		-e "s|__LAN_AP_SSID__|${LAN_AP_SSID}|g" \
-		-e "s|__LAN_AP_KEY__|${LAN_AP_KEY}|g" \
-		-e "s|__MAX_EUDS_PER_NODE__|${MAX_EUDS_PER_NODE}|g" \
-		-e "s|__INSTALL_MEDIAMTX__|${INSTALL_MEDIAMTX}|g" \
-		-e "s|__INSTALL_MUMBLE__|${INSTALL_MUMBLE}|g" \
-		-e "s|__MESH_SSID__|${MESH_SSID}|g" \
-		-e "s|__MESH_SAE_KEY__|${MESH_SAE_KEY}|g" \
-		-e "s|__LAN_CIDR_BLOCK__|${LAN_CIDR_BLOCK}|g" \
-		-e "s|__AUTO_CHANNEL__|${AUTO_CHANNEL}|g" \
-		-e "s|__RADIO_PW__|${RADIO_PW}|g" \
-		"$TEMPLATE_FILE" > "$TEMP_SCRIPT_FILE"
+    echo "Generating temporary firstrun script..."
+    
+    tempScriptFile=$(mktemp)
+    
+    # Escape special characters in variables for sed
+    escape_sed() {
+        printf '%s\n' "$1" | sed -e 's/[\/&]/\\&/g' -e 's/|/\\|/g'
+    }
+    
+    HARDWARE_MODEL_ESC=$(escape_sed "$HARDWARE_MODEL")
+    EUD_CONNECTION_ESC=$(escape_sed "$EUD_CONNECTION")
+    LAN_AP_SSID_ESC=$(escape_sed "$LAN_AP_SSID")
+    LAN_AP_KEY_ESC=$(escape_sed "$LAN_AP_KEY")
+    MAX_EUDS_PER_NODE_ESC=$(escape_sed "$MAX_EUDS_PER_NODE")
+    INSTALL_MEDIAMTX_ESC=$(escape_sed "$INSTALL_MEDIAMTX")
+    INSTALL_MUMBLE_ESC=$(escape_sed "$INSTALL_MUMBLE")
+    LAN_SSID_ESC=$(escape_sed "$LAN_SSID")
+    LAN_SAE_KEY_ESC=$(escape_sed "$LAN_SAE_KEY")
+    LAN_CIDR_BLOCK_ESC=$(escape_sed "$LAN_CIDR_BLOCK")
+    AUTO_CHANNEL_ESC=$(escape_sed "$AUTO_CHANNEL")
+    RADIO_PW_ESC=$(escape_sed "$RADIO_PW")
+    
+    sed -e "s|__HARDWARE_MODEL__|${HARDWARE_MODEL_ESC}|g" \
+        -e "s|__EUD_CONNECTION__|${EUD_CONNECTION_ESC}|g" \
+        -e "s|__LAN_AP_SSID__|${LAN_AP_SSID_ESC}|g" \
+        -e "s|__LAN_AP_KEY__|${LAN_AP_KEY_ESC}|g" \
+        -e "s|__MAX_EUDS_PER_NODE__|${MAX_EUDS_PER_NODE_ESC}|g" \
+        -e "s|__INSTALL_MEDIAMTX__|${INSTALL_MEDIAMTX_ESC}|g" \
+        -e "s|__INSTALL_MUMBLE__|${INSTALL_MUMBLE_ESC}|g" \
+        -e "s|__LAN_SSID__|${LAN_SSID_ESC}|g" \
+        -e "s|__LAN_SAE_KEY__|${LAN_SAE_KEY_ESC}|g" \
+        -e "s|__LAN_CIDR_BLOCK__|${LAN_CIDR_BLOCK_ESC}|g" \
+        -e "s|__AUTO_CHANNEL__|${AUTO_CHANNEL_ESC}|g" \
+        -e "s|__RADIO_PW__|${RADIO_PW_ESC}|g" \
+        "$TEMPLATE_FILE" > "$tempScriptFile"
 
-	chmod +x "$TEMP_SCRIPT_FILE"
+    chmod +x "$tempScriptFile"
+    TEMP_SCRIPT_FILE="$tempScriptFile"
 fi
-
 
 echo "Starting hardware imaging. This may require your password to write to the device."
 # For an arbian image, we must inject the setup config into the disk imge
