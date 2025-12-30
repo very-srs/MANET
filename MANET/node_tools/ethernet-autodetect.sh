@@ -36,6 +36,7 @@ if [ "$CARRIER" != "1" ]; then
     # Clean up on cable unplug
     rm -f "$ACTIVE_CONFIG"
     rm -f /var/run/mesh-gateway.state
+    rm -f /var/run/mesh-ntp.state
     rm -f /var/run/ethernet_detection_state
     systemctl restart systemd-networkd
     
@@ -141,42 +142,73 @@ if [ "$DHCP_DETECTED" = true ]; then
     if [ -n "$ETH_IP" ]; then
         log "Acquired IP: $ETH_IP"
         
-        # Mark as gateway
-        touch /var/run/mesh-gateway.state
-        
-        # Configure NAT/masquerading
-        log "Configuring NAT..."
-        nft add table ip nat 2>/dev/null || true
-        nft add chain ip nat postrouting { type nat hook postrouting priority 100 \; } 2>/dev/null || true
-        nft flush chain ip nat postrouting 2>/dev/null || true
-        nft add rule ip nat postrouting oifname "$ETH_IFACE" masquerade
-        
-        # Enable IP forwarding
-        sysctl -q net.ipv4.ip_forward=1
-        
-        # Get default gateway
-        DEFAULT_GW=$(ip route show dev "$ETH_IFACE" | grep default | awk '{print $3}')
-        if [ -n "$DEFAULT_GW" ]; then
-            log "Default gateway: $DEFAULT_GW"
-        fi
-        
-        # Enable BATMAN gateway mode
-        if command -v batctl &>/dev/null; then
-            batctl gw_mode server
-            log "Enabled BATMAN gateway mode"
-        fi
-        
-        # In AUTO mode when gateway, KEEP AP ENABLED (dual role)
-        if [ "$AUTO_MODE" = true ] && [ -n "$AP_INTERFACE" ]; then
-            log "Auto mode + Gateway: Keeping AP enabled for dual gateway/AP role"
-            systemctl enable hostapd.service
-            systemctl start hostapd.service
-            systemctl start dnsmasq.service
-            systemctl start ap-txpower.service
-        fi
-        
-        # Save state
-        cat > /var/run/ethernet_detection_state <<EOF
+        # Verify internet connectivity before proceeding
+        log "Testing internet connectivity..."
+        if ! ping -c 3 -W 2 -I "$ETH_IFACE" 8.8.8.8 > /dev/null 2>&1; then
+            log "WARNING: Got DHCP but no internet connectivity. Treating as EUD."
+            DHCP_DETECTED=false  # Fall through to EUD mode
+        else
+            log "Internet confirmed working!"
+            
+            # Mark as gateway
+            touch /var/run/mesh-gateway.state
+            
+            # Configure NAT/masquerading
+            log "Configuring NAT..."
+            nft add table ip nat 2>/dev/null || true
+            nft add chain ip nat postrouting { type nat hook postrouting priority 100 \; } 2>/dev/null || true
+            nft flush chain ip nat postrouting 2>/dev/null || true
+            nft add rule ip nat postrouting oifname "$ETH_IFACE" masquerade
+            
+            # Enable IP forwarding
+            sysctl -q net.ipv4.ip_forward=1
+            
+            # Get default gateway
+            DEFAULT_GW=$(ip route show dev "$ETH_IFACE" | grep default | awk '{print $3}')
+            if [ -n "$DEFAULT_GW" ]; then
+                log "Default gateway: $DEFAULT_GW"
+            fi
+            
+            # Enable BATMAN gateway mode
+            if command -v batctl &>/dev/null; then
+                batctl gw_mode server
+                log "Enabled BATMAN gateway mode"
+            fi
+            
+            # Update router advertisements to announce default route
+            cp /etc/radvd-gateway.conf /etc/radvd.conf
+            systemctl restart radvd
+            
+            # === NTP SERVER SETUP ===
+            log "Attempting to sync time with external NTP source..."
+            cp /etc/chrony/chrony-test.conf /etc/chrony/chrony.conf
+            systemctl restart chrony.service
+            sleep 3
+            
+            if timeout 30 chronyc -a 'burst 4/4' && sleep 5 && chronyc sources | grep -q '^\*'; then
+                log "Time sync successful. Promoting to mesh NTP server."
+                touch /var/run/mesh-ntp.state
+                systemctl stop chrony.service
+                cp /etc/chrony/chrony-server.conf /etc/chrony/chrony.conf
+                systemctl start chrony.service
+            else
+                log "Failed to sync time. Will not become an NTP server."
+                rm -f /var/run/mesh-ntp.state
+                systemctl stop chrony.service
+                cp /etc/chrony/chrony-default.conf /etc/chrony/chrony.conf
+            fi
+            
+            # In AUTO mode when gateway, KEEP AP ENABLED (dual role)
+            if [ "$AUTO_MODE" = true ] && [ -n "$AP_INTERFACE" ]; then
+                log "Auto mode + Gateway: Keeping AP enabled for dual gateway/AP role"
+                systemctl enable hostapd.service
+                systemctl start hostapd.service
+                systemctl start dnsmasq.service
+                systemctl start ap-txpower.service
+            fi
+            
+            # Save state
+            cat > /var/run/ethernet_detection_state <<EOF
 # Ethernet auto-detection result
 ETH_MODE=GATEWAY
 ETH_IP=$ETH_IP
@@ -184,9 +216,9 @@ DEFAULT_GW=${DEFAULT_GW:-none}
 DETECTED_AT=$(date +%s)
 DETECTION_METHOD=$([ "$FORCE_WIRELESS" = true ] && echo "FORCED" || echo "DHCP_PROBE")
 EOF
-        
-        log "Gateway configuration complete"
-        
+            
+            log "Gateway configuration complete"
+        fi
     else
         log "WARNING: DHCP server detected but IP acquisition failed"
         # Fall back to EUD mode
@@ -233,12 +265,17 @@ if [ "$DHCP_DETECTED" = false ]; then
 
     # Remove gateway state
     rm -f /var/run/mesh-gateway.state
+    rm -f /var/run/mesh-ntp.state
     
     # Disable BATMAN gateway mode
     if command -v batctl &>/dev/null; then
         batctl gw_mode off
         log "Disabled BATMAN gateway mode"
     fi
+    
+    # Revert radvd to not announce default route
+    cp /etc/radvd-mesh.conf /etc/radvd.conf
+    systemctl restart radvd
     
     # Remove NAT rules
     nft flush chain ip nat postrouting 2>/dev/null || true
