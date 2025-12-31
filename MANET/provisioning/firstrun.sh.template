@@ -610,6 +610,10 @@ kernel.panic = 10
 kernel.panic_on_oops = 1
 EOF
 
+# Get DNS working again after dnsmasq install
+systemctl restart systemd-resolved
+
+
 echo "Disabling default chrony networkd-dispatcher script"
 rm -Rf /usr/lib/NetworkManager/dispatcher.d/*
 
