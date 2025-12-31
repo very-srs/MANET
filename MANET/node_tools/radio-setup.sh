@@ -150,6 +150,22 @@ for iface in "${mesh_ifaces[@]}"; do
     ((i++))
 done
 
+# Rename HaLow interfaces to temp names
+i=0
+for iface in "${halow_ifaces[@]}"; do
+    temp_name="tmp_halow_$i"
+    ip link set "$iface" name "$temp_name" || echo "Warning: Failed to rename $iface to $temp_name"
+    ((i++))
+done
+
+# Rename non-mesh interfaces to temp names
+i=0
+for iface in "${nonmesh_ifaces[@]}"; do
+    temp_name="tmp_nomesh_$i"
+    ip link set "$iface" name "$temp_name" || echo "Warning: Failed to rename $iface to $temp_name"
+    ((i++))
+done
+
 # Now rename from temp to final names
 i=0
 for temp_iface in /sys/class/net/tmp_mesh_*; do
