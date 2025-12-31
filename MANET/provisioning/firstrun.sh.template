@@ -356,32 +356,62 @@ EOF
 
 # Set ethernet links for DHCP as a default setup.  Scripts will juggle this
 # around later for device detection
+# Set ethernet links for DHCP as a default setup. Scripts will juggle this
+# around later for device detection
 CT=0
 for LAN in `networkctl | awk '/ether/ {print $2}'`; do
-	M=`ip link show $LAN | awk '/ether/ {print $2}'`
-	cat <<- EOF > /etc/systemd/network/10-$LAN.network
-		[Match]
-		MACAddress=$M
+    M=$(ip link show $LAN | awk '/ether/ {print $2}')
+#    cat <<- EOF > /etc/systemd/network/10-end${CT}.network
+#		[Match]
+#		MACAddress=$M
 
-		[Network]
-		DHCP=yes
-		LinkLocalAddressing=no
-		IPv6AcceptRA=no
+#		[Network]
+#		DHCP=yes
+#		LinkLocalAddressing=no
+#		IPv6AcceptRA=no
 
-		[DHCPv4]
-		UseDomains=true
-	EOF
-	cat <<- EOF > /etc/systemd/network/11-$LAN-rename.link
+#		[DHCPv4]
+#		UseDomains=true
+#	EOF
+    cat <<- EOF > /etc/systemd/network/11-end${CT}-rename.link
 		[Match]
 		MACAddress=$M
 
 		[Link]
 		Name=end${CT}
 	EOF
-	(( CT++ ))
+    (( CT++ ))
 done
 echo "Ethernet config added"
 
+# Create ethernet templates for ethernet-autodetect.sh (OUTSIDE the loop)
+echo "Creating ethernet detection templates..."
+cat << 'EOF' > /etc/systemd/network/20-end0-gateway.network.off
+[Match]
+Name=end0
+
+[Network]
+DHCP=yes
+LinkLocalAddressing=no
+IPv6AcceptRA=no
+
+[DHCPv4]
+UseDomains=true
+EOF
+
+cat << 'EOF' > /etc/systemd/network/20-end0-eud.network.off
+[Match]
+Name=end0
+
+[Network]
+Bridge=br0
+LinkLocalAddressing=no
+IPv6AcceptRA=no
+
+[Link]
+RequiredForOnline=no
+EOF
+echo "Ethernet templates created"
 
 #
 # Configure and enable system services
@@ -684,9 +714,6 @@ echo "max_euds_per_node=__MAX_EUDS_PER_NODE__" >> /etc/mesh.conf
 
 # Disable the current script so it won't run again at next boot
 systemctl disable mesh-provision
-
-# Update tools just in case
-/usr/local/bin/node-update.sh
 
 echo "=== Provisioning complete at $(date) ==="
 echo "=== Rebooting to apply changes ==="
