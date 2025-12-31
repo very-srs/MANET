@@ -441,7 +441,7 @@ table inet filter {
 	# Accept ALL traffic coming from the trusted mesh interface.
 	iifname "br0" accept
 	iifname "bat0" accept
-	iifname "eth0" accept #tcp dport 22 accept
+	iifname "end0" accept
   }
   chain forward {
 	type filter hook forward priority 0; policy drop;
