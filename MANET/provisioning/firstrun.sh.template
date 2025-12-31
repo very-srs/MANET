@@ -256,8 +256,8 @@ echo "batman-adv" > /etc/modules-load.d/batman.conf
 systemctl disable wpa_supplicant.service > /dev/null 2>&1
 
 # Set hostname, make unique by ethernet mac addr (last 4)
-hostnamectl hostname radio-${HOST_MAC}
-sed -i 's/raspberrypi/radio-${HOST_MAC}/g' /etc/hosts
+hostnamectl hostname radio-$HOST_MAC
+sed -i "s/raspberrypi/radio-${HOST_MAC}/g" /etc/hosts
 echo "Hostname set"
 
 # Set regulatory region  (default will be US)
