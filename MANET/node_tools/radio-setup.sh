@@ -333,8 +333,12 @@ EOF
 
 
     # Get configuration from mesh.conf
-    while IFS='=' read -r key value; do
-        [[ -z "$key" || "$key" =~ ^[[:space:]]*# ]] && continue
+	while IFS= read -r line; do
+	    [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
+
+	    # Split on first = only
+	    key="${line%%=*}"
+	    value="${line#*=}"
         case "$key" in
             lan_ap_ssid) LAN_AP_SSID="$value" ;;
             lan_ap_key) LAN_AP_KEY="$value" ;;
