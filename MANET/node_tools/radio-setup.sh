@@ -321,7 +321,6 @@ RemainAfterExit=yes
 [Install]
 WantedBy=multi-user.target
 EOF
-    systemctl enable ap-interface-setup.service
 
 
     # Create networkd config for AP interface (unmanaged, hostapd will control it)
@@ -455,7 +454,7 @@ case "\$ACTION" in
 esac
 EOF
     chmod +x /usr/local/bin/dhcp-eud-route.sh
-    
+
     # Create TX power limiting service
     cat <<-EOF > /etc/systemd/system/ap-txpower.service
 [Unit]
@@ -479,15 +478,16 @@ EOF
 net.ipv4.conf.br0.proxy_arp=1
 EOF
     sysctl -p /etc/sysctl.d/99-mesh.conf
-    
+
     # Enable services based on mode
     systemctl enable ap-txpower.service
     systemctl enable dnsmasq.service
-    
+
     if [[ "$eud" == "wireless" ]]; then
         # Wireless mode: always-on AP
         echo " > Wireless mode: Enabling and starting AP services"
 		systemctl unmask hostapd.service
+        systemctl enable ap-interface-setup.service
         systemctl enable hostapd.service
         systemctl start hostapd.service
         systemctl start dnsmasq.service
@@ -499,7 +499,7 @@ EOF
         echo " > Auto mode: AP services staged (ethernet-autodetect will manage)"
         systemctl disable hostapd.service
     fi
-    
+
     echo "AP configuration complete for $AP_INTERFACE"
 fi
 
@@ -512,7 +512,7 @@ for WLAN in `cat /var/lib/no_mesh_if | head -n 1`; do
     if [[ -n "$AP_INTERFACE" ]] && [[ "$WLAN" == "$AP_INTERFACE" ]]; then
         continue
     fi
-    
+
 	echo " > Setting up $WLAN as a client AP ..."
 
 	echo "   > creating networkd file ..."
