@@ -177,7 +177,9 @@ apt install -y ipcalc nmap lshw tcpdump net-tools nftables wireless-tools iperf3
 		python3-protobuf unzip chrony build-essential systemd-resolved dhcping \
 		libnl-3-dev libnl-genl-3-dev libnl-route-3-dev libdbus-1-dev gpsd
 
-
+systemctl stop dnsmasq
+systemctl disable dnsmasq
+systemctl mask dnsmasq
 echo "Done"
 
 # probably not installed, but the debian package is old
@@ -254,8 +256,8 @@ echo "batman-adv" > /etc/modules-load.d/batman.conf
 systemctl disable wpa_supplicant.service > /dev/null 2>&1
 
 # Set hostname, make unique by ethernet mac addr (last 4)
-hostnamectl hostname radio-$HOST_MAC
-sed -i 's/raspberrypi/radio-$HOST_MAC/g' /etc/hosts
+hostnamectl hostname radio-${HOST_MAC}
+sed -i 's/raspberrypi/radio-${HOST_MAC}/g' /etc/hosts
 echo "Hostname set"
 
 # Set regulatory region  (default will be US)
@@ -702,8 +704,6 @@ systemctl enable systemd-resolved
 # Force systemd-resolved to be the DNS provider
 #ln -sf /run/systemd/resolve/resolv.conf /etc/resolv.conf
 
-rm /etc/resolv.conf
-echo "nameserver 1.1.1.1" > /etc/resolv.conf
 
 #write out the config selections for future use
 echo "mesh_key=__MESH_SAE_KEY__" > /etc/mesh.conf
@@ -720,6 +720,10 @@ echo "max_euds_per_node=__MAX_EUDS_PER_NODE__" >> /etc/mesh.conf
 
 # Disable the current script so it won't run again at next boot
 systemctl disable mesh-provision
+
+#use a known dns for next setup
+rm /etc/resolv.conf
+echo "nameserver 1.1.1.1" > /etc/resolv.conf
 
 echo "=== Provisioning complete at $(date) ==="
 echo "=== Rebooting to apply changes ==="
