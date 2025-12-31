@@ -448,10 +448,10 @@ table inet filter {
 
 	# Allow traffic from the trusted mesh to be forwarded
 	# out to the internet via the Ethernet port.
-	iifname "br0" oifname "eth0" accept
+	iifname "br0" oifname "end0" accept
 
 	# Allow the return traffic from the internet back to the mesh.
-	iifname "eth0" oifname "br0" ct state established, related accept
+	iifname "end0" oifname "br0" ct state established, related accept
   }
   chain output {
 	type filter hook output priority 0; policy accept;
@@ -461,7 +461,7 @@ table inet filter {
 table ip nat {
   chain postrouting {
 	type nat hook postrouting priority 100;
-	oifname "eth0" masquerade
+	oifname "end0" masquerade
   }
 }
 EOF
