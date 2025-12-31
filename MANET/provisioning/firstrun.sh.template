@@ -625,9 +625,15 @@ fi
 if [ "__INSTALL_MEDIAMTX__" = "y" ]; then
 	echo "Installing MediaMTX"
 		cd /tmp
-		wget -q https://github.com/bluenviron/mediamtx/releases/download/v1.15.3/mediamtx_v1.15.3_linux_arm64.tar.gz
-		gzip -d mediamtx_v1.15.3_linux_arm64.tar.gz
-		tar -xf mediamtx_v1.15.3_linux_arm64.tar
+		wget -q https://github.com/bluenviron/mediamtx/releases/download/v1.15.3/mediamtx_v1.15.3_linux_arm64.tar.gz || {
+	        echo "ERROR: Failed to download MediaMTX"
+	        exit 1
+	    }
+	    tar -xzf mediamtx_v1.15.3_linux_arm64.tar.gz || {
+	        echo "ERROR: Failed to extract MediaMTX"
+	        exit 1
+	    }
+
 		groupadd --system mediamtx
 		useradd --system -g mediamtx -d /opt/mediamtx -s /sbin/nologin mediamtx
 		mkdir /etc/mediamtx && chown mediamtx:mediamtx /etc/mediamtx

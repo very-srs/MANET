@@ -142,28 +142,41 @@ for iface in "${mesh_ifaces[@]}" "${halow_ifaces[@]}" "${nonmesh_ifaces[@]}"; do
     ip link set "$iface" down 2>/dev/null
 done
 
-# Rename regular mesh-capable ones first (wlan0, wlan1)
+# Rename regular mesh-capable ones using TEMP names first to avoid conflicts
 i=0
 for iface in "${mesh_ifaces[@]}"; do
+    temp_name="tmp_mesh_$i"
+    ip link set "$iface" name "$temp_name" || echo "Warning: Failed to rename $iface to $temp_name"
+    ((i++))
+done
+
+# Now rename from temp to final names
+i=0
+for iface in tmp_mesh_*; do
+    [ -e "/sys/class/net/$iface" ] || continue
     newname="wlan$i"
-    echo $newname >> /var/lib/mesh_if
-    ip link set "$iface" name "$newname"
+    echo "$newname" >> /var/lib/mesh_if
+    ip link set "$iface" name "$newname" || echo "Warning: Failed to rename $iface to $newname"
     ((i++))
 done
 
 # Rename HaLow interfaces (wlan2, wlan3, etc.)
 for iface in "${halow_ifaces[@]}"; do
+    temp_name="tmp_halow_$i"
+    ip link set "$iface" name "$temp_name" || echo "Warning: Failed to rename $iface to $temp_name"
     newname="wlan$i"
-    echo $newname >> /var/lib/halow_if
-    ip link set "$iface" name "$newname"
+    echo "$newname" >> /var/lib/halow_if
+    ip link set "$temp_name" name "$newname" || echo "Warning: Failed to rename $temp_name to $newname"
     ((i++))
 done
 
 # Rename non-mesh after all mesh-capable
 for iface in "${nonmesh_ifaces[@]}"; do
+    temp_name="tmp_nomesh_$i"
+    ip link set "$iface" name "$temp_name" || echo "Warning: Failed to rename $iface to $temp_name"
     newname="wlan$i"
-    echo $newname >> /var/lib/no_mesh_if
-    ip link set "$iface" name "$newname"
+    echo "$newname" >> /var/lib/no_mesh_if
+    ip link set "$temp_name" name "$newname" || echo "Warning: Failed to rename $temp_name to $newname"
     ((i++))
 done
 
