@@ -363,18 +363,18 @@ EOF
 CT=0
 for LAN in `networkctl | awk '/ether/ {print $2}'`; do
     M=$(ip link show $LAN | awk '/ether/ {print $2}')
-#    cat <<- EOF > /etc/systemd/network/10-end${CT}.network
-#		[Match]
-#		MACAddress=$M
+    cat <<- EOF > /etc/systemd/network/10-end${CT}.network
+		[Match]
+		MACAddress=$M
 
-#		[Network]
-#		DHCP=yes
-#		LinkLocalAddressing=no
-#		IPv6AcceptRA=no
+		[Network]
+		DHCP=yes
+		LinkLocalAddressing=no
+		IPv6AcceptRA=no
 
-#		[DHCPv4]
-#		UseDomains=true
-#	EOF
+		[DHCPv4]
+		UseDomains=true
+	EOF
     cat <<- EOF > /etc/systemd/network/11-end${CT}-rename.link
 		[Match]
 		MACAddress=$M
