@@ -241,9 +241,10 @@ for WLAN in `cat /var/lib/mesh_if`; do
     # Skip this interface if it's the AP interface
     if [[ -n "$AP_INTERFACE" ]] && [[ "$WLAN" == "$AP_INTERFACE" ]]; then
         echo " > Skipping $WLAN (will be used as AP)"
+		((CT++))
         continue
     fi
-    
+
 	echo " > Setting SAE key/SSID for $WLAN ..."
 	#create wpa supplicant configs
 	echo "MESH_NAME=\"$MESH_NAME\"" > /etc/default/mesh
@@ -675,6 +676,7 @@ INT_CT=0
 for WLAN in `cat /var/lib/mesh_if`; do
     # Skip AP interface
     if [[ -n "$AP_INTERFACE" ]] && [[ "$WLAN" == "$AP_INTERFACE" ]]; then
+		((INT_CT++))
         continue
     fi
     AFTER_DEVICES+="sys-subsystem-net-devices-wlan$INT_CT.device "
