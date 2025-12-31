@@ -2,6 +2,6 @@
 >
 > The files in this repository (main branch) are under active development. They frequently contain breaking bugs, untested changes, or active debugging.
 >
-> **Please download the [Latest Release](../releases/latest)**.
+> **Please download the [Latest Release](../../releases/)**.
 > * Files in a release are **tested**.
 > * Known limitations are explicitly indicated in the release notes.
