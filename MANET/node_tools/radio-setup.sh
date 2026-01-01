@@ -137,71 +137,71 @@ done
 > /var/lib/halow_if
 > /var/lib/no_mesh_if
 
-# Bring everything down before renaming
-for iface in "${mesh_ifaces[@]}" "${halow_ifaces[@]}" "${nonmesh_ifaces[@]}"; do
-    ip link set "$iface" down 2>/dev/null
-done
+## Bring everything down before renaming
+#for iface in "${mesh_ifaces[@]}" "${halow_ifaces[@]}" "${nonmesh_ifaces[@]}"; do
+#    ip link set "$iface" down 2>/dev/null
+#done
 
-# Rename regular mesh-capable ones using TEMP names first to avoid conflicts
-i=0
-for iface in "${mesh_ifaces[@]}"; do
-    temp_name="tmp_mesh_$i"
-    ip link set "$iface" name "$temp_name" || echo "Warning: Failed to rename $iface to $temp_name"
-    ((i++))
-done
+## Rename regular mesh-capable ones using TEMP names first to avoid conflicts
+#i=0
+#for iface in "${mesh_ifaces[@]}"; do
+#    temp_name="tmp_mesh_$i"
+#    ip link set "$iface" name "$temp_name" || echo "Warning: Failed to rename $iface to $temp_name"
+#    ((i++))
+#done
 
-# Rename HaLow interfaces to temp names
-i=0
-for iface in "${halow_ifaces[@]}"; do
-    temp_name="tmp_halow_$i"
-    ip link set "$iface" name "$temp_name" || echo "Warning: Failed to rename $iface to $temp_name"
-    ((i++))
-done
+## Rename HaLow interfaces to temp names
+#i=0
+#for iface in "${halow_ifaces[@]}"; do
+#    temp_name="tmp_halow_$i"
+ #   ip link set "$iface" name "$temp_name" || echo "Warning: Failed to rename $iface to $temp_name"
+  #  ((i++))
+#done
 
 # Rename non-mesh interfaces to temp names
-i=0
-for iface in "${nonmesh_ifaces[@]}"; do
-    temp_name="tmp_nomesh_$i"
-    ip link set "$iface" name "$temp_name" || echo "Warning: Failed to rename $iface to $temp_name"
-    ((i++))
-done
+#i=0
+#for iface in "${nonmesh_ifaces[@]}"; do
+#    temp_name="tmp_nomesh_$i"
+#    ip link set "$iface" name "$temp_name" || echo "Warning: Failed to rename $iface to $temp_name"
+#    ((i++))
+#done
 
-# Now rename from temp to final names
-i=0
-for temp_iface in /sys/class/net/tmp_mesh_*; do
-    [ -e "$temp_iface" ] || continue
-    iface=$(basename "$temp_iface")
-    newname="wlan$i"
-    echo "$newname" >> /var/lib/mesh_if
-    ip link set "$iface" name "$newname" || echo "Warning: Failed to rename $iface to $newname"
-    ((i++))
-done
+## Now rename from temp to final names
+#i=0
+#for temp_iface in /sys/class/net/tmp_mesh_*; do
+#    [ -e "$temp_iface" ] || continue
+#    iface=$(basename "$temp_iface")
+#    newname="wlan$i"
+#    echo "$newname" >> /var/lib/mesh_if
+#    ip link set "$iface" name "$newname" || echo "Warning: Failed to rename $iface to $newname"
+#    ((i++))
+#done
 
 # Rename HaLow interfaces (wlan2, wlan3, etc.)
-for temp_iface in /sys/class/net/tmp_halow_*; do
-    [ -e "$temp_iface" ] || continue
-    iface=$(basename "$temp_iface")
-    newname="wlan$i"
-    echo "$newname" >> /var/lib/halow_if
-    ip link set "$iface" name "$newname" || echo "Warning: Failed to rename $iface to $newname"
-    ((i++))
-done
+#for temp_iface in /sys/class/net/tmp_halow_*; do
+#    [ -e "$temp_iface" ] || continue
+#    iface=$(basename "$temp_iface")
+#    newname="wlan$i"
+#    echo "$newname" >> /var/lib/halow_if
+#    ip link set "$iface" name "$newname" || echo "Warning: Failed to rename $iface to $newname"
+#    ((i++))
+#done
 
-# Rename non-mesh after all mesh-capable
-for temp_iface in /sys/class/net/tmp_nomesh_*; do
-    [ -e "$temp_iface" ] || continue
-    iface=$(basename "$temp_iface")
-    newname="wlan$i"
-    echo "$newname" >> /var/lib/no_mesh_if
-    ip link set "$iface" name "$newname" || echo "Warning: Failed to rename $iface to $newname"
-    ((i++))
-done
+## Rename non-mesh after all mesh-capable
+#for temp_iface in /sys/class/net/tmp_nomesh_*; do
+#    [ -e "$temp_iface" ] || continue
+#    iface=$(basename "$temp_iface")
+#    newname="wlan$i"
+#    echo "$newname" >> /var/lib/no_mesh_if
+#    ip link set "$iface" name "$newname" || echo "Warning: Failed to rename $iface to $newname"
+#    ((i++))
+#done
 
 
 # Bring them back up
-for iface in $(ip -o link show | awk -F': ' '{print $2}' | grep wlan); do
-    ip link set "$iface" up 2>/dev/null
-done
+#for iface in $(ip -o link show | awk -F': ' '{print $2}' | grep wlan); do
+#    ip link set "$iface" up 2>/dev/null
+#done
 
 # ============================================================================
 # === AP INTERFACE SELECTION (for wireless/auto EUD modes) ===
