@@ -25,7 +25,16 @@ start() {
 
     # Create bat0 interface if it doesn't exist
     ip link show bat0 &>/dev/null || ip link add name bat0 type batadv
-	batctl gw_mode client
+
+
+    # Set gateway mode based on state
+    if [ -f /var/run/mesh-gateway.state ]; then
+        batctl gw_mode server
+        echo "Set to gateway server mode"
+    else
+        batctl gw_mode client
+        echo "Set to gateway client mode"
+    fi
 
     for WLAN in $WLAN_INTERFACES; do
         # Skip AP interface - it must not be added to batman mesh
@@ -33,7 +42,7 @@ start() {
             echo "--> Skipping $WLAN (configured as AP interface)"
             continue
         fi
-        
+
         echo "--> Configuring interface: $WLAN"
 
         # Set the interface type to mesh
