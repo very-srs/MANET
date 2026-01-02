@@ -13,10 +13,27 @@ NETWORKD_DIR="/etc/systemd/network"
 GATEWAY_CONFIG="${NETWORKD_DIR}/20-end0-gateway.network.off"
 EUD_CONFIG="${NETWORKD_DIR}/20-end0-eud.network.off"
 ACTIVE_CONFIG="${NETWORKD_DIR}/20-end0.network"
-BOOT_CONFIG="${NETWORKD_DIR}/10-end0.network"  # NEVER DELETE - allows retry on next boot
+BOOT_CONFIG="${NETWORKD_DIR}/10-end0.network"
 
+# --- Helper Functions ---
 log() {
     echo "[$(date +'%Y-%m-%d %H:%M:%S')] - ETH-DETECT: $1" | systemd-cat -t ethernet-autodetect
+}
+
+# IP conversion functions
+ip_to_int() {
+    local ip=$1
+    if [[ -z "$ip" || ! "$ip" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+        return 1
+    fi
+    local a b c d
+    IFS=. read -r a b c d <<<"$ip"
+    echo "$(( (a << 24) + (b << 16) + (c << 8) + d ))"
+}
+
+int_to_ip() {
+    local ip_int=$1
+    echo "$(( (ip_int >> 24) & 255 )).$(( (ip_int >> 16) & 255 )).$(( (ip_int >> 8) & 255 )).$(( ip_int & 255 ))"
 }
 
 # Ensure only one instance runs
@@ -40,8 +57,6 @@ if [ "$CARRIER" != "1" ]; then
     rm -f /var/run/mesh-ntp.state
     rm -f /var/run/ethernet_detection_state
     
-    # Don't restart networkd here - this is called from off.d hook
-    
     # In AUTO mode with no ethernet, enable AP
     EUD_MODE=$(grep "^eud=" /etc/mesh.conf 2>/dev/null | cut -d'=' -f2)
     if [ "$EUD_MODE" == "auto" ] && [ -f /var/lib/ap_interface ]; then
@@ -57,7 +72,7 @@ fi
 
 log "Ethernet cable detected on $ETH_IFACE. Starting detection..."
 
-# Check for EUD mode in config (only affects AP behavior, NOT ethernet detection)
+# Check for EUD mode in config
 EUD_MODE=$(grep "^eud=" /etc/mesh.conf 2>/dev/null | cut -d'=' -f2)
 
 case "$EUD_MODE" in
@@ -92,11 +107,9 @@ DHCP_DETECTED=false
 EXISTING_IP=$(ip -4 addr show dev "$ETH_IFACE" | grep -oP 'inet \K[\d.]+' | head -1)
 
 if [ -n "$EXISTING_IP" ]; then
-    # Interface has IP (DHCP completed)
     log "Interface has IP: $EXISTING_IP"
     log "Testing internet connectivity..."
     
-    # Test internet to determine gateway vs EUD
     if ping -c 3 -W 2 -I "$ETH_IFACE" 8.8.8.8 > /dev/null 2>&1; then
         log "Internet reachable - configuring as GATEWAY"
         DHCP_DETECTED=true
@@ -106,10 +119,8 @@ if [ -n "$EXISTING_IP" ]; then
         DHCP_DETECTED=false
     fi
 else
-    # NO IP: Unusual if called from routable.d
     log "WARNING: No IP found on $ETH_IFACE"
     log "This script expects to be called from routable.d AFTER IP acquisition"
-    log "If called too early, DHCP may not have completed yet"
     log "Exiting without changes - routable.d will call again when IP arrives"
     exit 0
 fi
@@ -123,49 +134,43 @@ if [ "$DHCP_DETECTED" = true ]; then
     # GATEWAY MODE - Has internet
     # ===================================
     log "Configuring as gateway/uplink..."
-
+    
     if [ ! -f "$GATEWAY_CONFIG" ]; then
         log "ERROR: Gateway template not found at $GATEWAY_CONFIG"
         exit 1
     fi
-
-    # Create gateway config (priority 20, overrides boot config priority 10)
-    # Boot config stays in place for next boot attempt
+    
     cp "$GATEWAY_CONFIG" "$ACTIVE_CONFIG"
-
-    # Mark as gateway
     touch /var/run/mesh-gateway.state
-
+    
     # Configure NAT
     log "Configuring NAT..."
     nft add table ip nat 2>/dev/null || true
     nft add chain ip nat postrouting { type nat hook postrouting priority 100 \; } 2>/dev/null || true
     nft flush chain ip nat postrouting 2>/dev/null || true
     nft add rule ip nat postrouting oifname "$ETH_IFACE" masquerade
-
-    # Enable IP forwarding
+    
     sysctl -q net.ipv4.ip_forward=1
-
-    # Get default gateway
+    
     DEFAULT_GW=$(ip route show dev "$ETH_IFACE" | grep default | awk '{print $3}')
     log "Default gateway: ${DEFAULT_GW:-none}"
-
+    
     # Enable BATMAN gateway mode
     if command -v batctl &>/dev/null; then
         batctl gw_mode server 2>/dev/null || log "BATMAN not ready yet"
         log "Enabled BATMAN gateway mode"
     fi
-
+    
     # Update router advertisements
     cp /etc/radvd-gateway.conf /etc/radvd.conf
     systemctl restart radvd 2>/dev/null
-
+    
     # === NTP SERVER SETUP ===
     log "Attempting to sync time with external NTP..."
     cp /etc/chrony/chrony-test.conf /etc/chrony/chrony.conf
     systemctl restart chrony.service 2>/dev/null
     sleep 3
-
+    
     if timeout 30 chronyc -a 'burst 4/4' >/dev/null 2>&1 && sleep 5 && chronyc sources 2>/dev/null | grep -q '^\*'; then
         log "Time sync successful. Promoting to mesh NTP server."
         touch /var/run/mesh-ntp.state
@@ -178,7 +183,7 @@ if [ "$DHCP_DETECTED" = true ]; then
         systemctl stop chrony.service
         cp /etc/chrony/chrony-default.conf /etc/chrony/chrony.conf
     fi
-
+    
     # === AP CONTROL ===
     if [ "$EUD_MODE" == "auto" ] && [ -n "$AP_INTERFACE" ]; then
         log "Auto mode + Gateway: Keeping AP enabled (dual role)"
@@ -199,7 +204,7 @@ if [ "$DHCP_DETECTED" = true ]; then
         systemctl stop ap-txpower.service 2>/dev/null
         systemctl disable hostapd.service 2>/dev/null
     fi
-
+    
     # Save state
     cat > /var/run/ethernet_detection_state <<EOF
 ETH_MODE=GATEWAY
@@ -208,7 +213,7 @@ DEFAULT_GW=${DEFAULT_GW:-none}
 DETECTED_AT=$(date +%s)
 DETECTION_METHOD=IP_AND_INTERNET_TEST
 EOF
-
+    
     log "Gateway configuration complete"
 
 else
@@ -216,46 +221,61 @@ else
     # EUD MODE - Routed interface for wired clients
     # ===================================
     log "Configuring as wired EUD (routed mode)..."
-
+    
     # Load chunk assignment
     MY_CHUNK=0
     if [ -f /var/run/my_ipv4_chunk ]; then
         MY_CHUNK=$(cat /var/run/my_ipv4_chunk)
     fi
-
+    
     if [ "$MY_CHUNK" -eq 0 ]; then
         log "WARNING: No chunk assigned yet, cannot configure wired EUD"
         exit 0
     fi
-
-    # Source mesh config for network
+    
+    # Source mesh config
     IPV4_NETWORK=$(grep "^ipv4_network=" /etc/mesh.conf 2>/dev/null | cut -d'=' -f2)
     MAX_EUDS=$(grep "^max_euds_per_node=" /etc/mesh.conf 2>/dev/null | cut -d'=' -f2)
-
-    # Calculate chunk IPs (inline function from mesh-ip-manager.sh)
+    
+    if [ -z "$IPV4_NETWORK" ] || [ -z "$MAX_EUDS" ]; then
+        log "ERROR: Missing network config"
+        exit 1
+    fi
+    
+    # Calculate chunk IPs
     CALC_OUTPUT=$(ipcalc "$IPV4_NETWORK" 2>/dev/null)
     FIRST_IP=$(echo "$CALC_OUTPUT" | awk '/HostMin/ {print $2}')
     MIN_INT=$(ip_to_int "$FIRST_IP")
     CHUNK_SIZE=$((MAX_EUDS + 2))
     CHUNK_START_INT=$((MIN_INT + 5 + (MY_CHUNK * CHUNK_SIZE)))
-
+    
     BR0_IP=$(int_to_ip "$CHUNK_START_INT")
     AP_IP=$(int_to_ip $((CHUNK_START_INT + 1)))
     DHCP_START=$(int_to_ip $((CHUNK_START_INT + 2)))
     DHCP_END=$(int_to_ip $((CHUNK_START_INT + CHUNK_SIZE - 1)))
-
+    
     log "Configuring end0 as EUD gateway: IP=$AP_IP, pool=$DHCP_START-$DHCP_END"
-
-    # Configure end0 with its chunk IP
+    
+    # Remove end0 from bridge config if it exists
+    rm -f "$ACTIVE_CONFIG"
+    
+    # Configure end0 with its chunk IP (not bridged)
     ip addr flush dev "$ETH_IFACE" 2>/dev/null
     ip addr add "${AP_IP}/${IPV4_NETWORK#*/}" dev "$ETH_IFACE"
     ip link set "$ETH_IFACE" up
-
+    
+    # Enable proxy ARP for routing between end0 and mesh
+    sysctl -q net.ipv4.conf.$ETH_IFACE.proxy_arp=1
+    sysctl -q net.ipv4.conf.br0.proxy_arp=1
+    
     # Configure dnsmasq for wired EUD
     cat > /etc/dnsmasq.d/mesh-wired-eud.conf <<EOF
 # Listen only on wired EUD interface
 interface=$ETH_IFACE
 bind-interfaces
+
+# Do not serve on br0
+no-dhcp-interface=br0
 
 # DHCP configuration from this node's chunk
 dhcp-range=$DHCP_START,$DHCP_END,12h
@@ -274,41 +294,50 @@ no-poll
 # Log for debugging
 log-dhcp
 EOF
-
-    systemctl enable dnsmasq.service 2>/dev/null
-    systemctl restart dnsmasq.service 2>/dev/null
-
-    # Remove gateway state
-    rm -f /var/run/mesh-gateway.state
-    rm -f /var/run/mesh-ntp.state
-
-    # Disable BATMAN gateway mode
-    if command -v batctl &>/dev/null; then
-        batctl gw_mode off 2>/dev/null
-    fi
-
-    # Revert radvd
-    cp /etc/radvd-mesh.conf /etc/radvd.conf
-    systemctl restart radvd 2>/dev/null
-
-    # Remove NAT rules
-    nft flush chain ip nat postrouting 2>/dev/null || true
-
-    # === AP CONTROL ===
-    if [ "$EUD_MODE" == "auto" ] && [ -n "$AP_INTERFACE" ]; then
-        log "Auto mode + Wired EUD: Disabling AP (wired priority)"
+    
+    # Stop hostapd but keep dnsmasq for wired DHCP
+    if [ "$EUD_MODE" == "auto" ] || [ "$EUD_MODE" == "wired" ]; then
         systemctl stop hostapd.service 2>/dev/null
         systemctl disable hostapd.service 2>/dev/null
     fi
-
+    
+    systemctl enable dnsmasq.service 2>/dev/null
+    systemctl restart dnsmasq.service 2>/dev/null
+    
+    # Remove gateway state
+    rm -f /var/run/mesh-gateway.state
+    rm -f /var/run/mesh-ntp.state
+    
+    # Disable BATMAN gateway mode
+    if command -v batctl &>/dev/null; then
+        batctl gw_mode off 2>/dev/null || log "BATMAN not ready yet"
+        log "Disabled BATMAN gateway mode"
+    fi
+    
+    # Revert radvd
+    cp /etc/radvd-mesh.conf /etc/radvd.conf
+    systemctl restart radvd 2>/dev/null
+    
+    # Remove NAT rules
+    nft flush chain ip nat postrouting 2>/dev/null || true
+    
+    # === AP CONTROL (for wireless mode) ===
+    if [ "$EUD_MODE" == "wireless" ] && [ -n "$AP_INTERFACE" ]; then
+        log "Wireless mode: Ensuring AP is enabled"
+        systemctl enable hostapd.service 2>/dev/null
+        systemctl start hostapd.service 2>/dev/null
+        systemctl start ap-txpower.service 2>/dev/null
+    fi
+    
     # Save state
     cat > /var/run/ethernet_detection_state <<EOF
 ETH_MODE=WIRED_EUD
 ETH_IP=$AP_IP
 DETECTED_AT=$(date +%s)
 DETECTION_METHOD=IP_BUT_NO_INTERNET
+DHCP_POOL=$DHCP_START-$DHCP_END
 EOF
-
+    
     log "Wired EUD configuration complete"
 fi
 
