@@ -297,7 +297,7 @@ MACAddress=`ip a | grep -A1 $WLAN | awk '/ether/ {print $2}'`
 
 [Link]
 RequiredForOnline=no
-MTUBytes=1560
+MTUBytes=1532
 EOF
 
 	cat <<-EOF >  /etc/systemd/network/10-$WLAN.link
@@ -566,7 +566,7 @@ MACAddress=`ip a | grep -A1 $WLAN | awk '/ether/ {print $2}'`
 
 [Link]
 RequiredForOnline=no
-MTUBytes=1560
+MTUBytes=1532
 EOF
 
 cat <<-EOF >  /etc/systemd/network/10-$WLAN.link
