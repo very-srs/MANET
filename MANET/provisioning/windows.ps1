@@ -194,7 +194,7 @@ function Ask-Questions {
             
             if ([string]::IsNullOrWhiteSpace($key)) {
                 # Generate random key
-                $bytes = New-Object byte[] 28
+                $bytes = New-Object byte[] 33
                 [Security.Cryptography.RNGCryptoServiceProvider]::Create().GetBytes($bytes)
                 $Script:LAN_AP_KEY = [Convert]::ToBase64String($bytes)
                 Write-Host "Generated LAN AP Key: $($Script:LAN_AP_KEY)"
@@ -230,7 +230,7 @@ function Ask-Questions {
         
         if ([string]::IsNullOrWhiteSpace($key)) {
             # Generate random key
-            $bytes = New-Object byte[] 28
+            $bytes = New-Object byte[] 33
             [Security.Cryptography.RNGCryptoServiceProvider]::Create().GetBytes($bytes)
             $Script:MESH_SAE_KEY = [Convert]::ToBase64String($bytes)
             Write-Host "Generated SAE Key: $($Script:MESH_SAE_KEY)"
