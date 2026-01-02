@@ -61,9 +61,10 @@ if [ "$CARRIER" != "1" ]; then
     EUD_MODE=$(grep "^eud=" /etc/mesh.conf 2>/dev/null | cut -d'=' -f2)
     if [ "$EUD_MODE" == "auto" ] && [ -f /var/lib/ap_interface ]; then
         log "Auto mode: No ethernet, enabling AP for EUD connectivity"
-		systemctl unmask dnsmasq.service 2>/dev/null
+        systemctl unmask dnsmasq.service 2>/dev/null
         systemctl enable hostapd.service 2>/dev/null
         systemctl start hostapd.service 2>/dev/null
+        systemctl enable dnsmasq.service 2>/dev/null
         systemctl start dnsmasq.service 2>/dev/null
         systemctl start ap-txpower.service 2>/dev/null
     fi
@@ -188,18 +189,158 @@ if [ "$DHCP_DETECTED" = true ]; then
     # === AP CONTROL ===
     if [ "$EUD_MODE" == "auto" ] && [ -n "$AP_INTERFACE" ]; then
         log "Auto mode + Gateway: Keeping AP enabled (dual role)"
-		systemctl unmask dnsmasq.service 2>/dev/null
+        
+        # Get current chunk allocation
+        MY_CHUNK=0
+        if [ -f /var/run/my_ipv4_chunk ]; then
+            MY_CHUNK=$(cat /var/run/my_ipv4_chunk)
+        fi
+        
+        if [ "$MY_CHUNK" -gt 0 ]; then
+            # Reconfigure dnsmasq and AP with correct chunk IPs
+            IPV4_NETWORK=$(grep "^ipv4_network=" /etc/mesh.conf 2>/dev/null | cut -d'=' -f2)
+            MAX_EUDS=$(grep "^max_euds_per_node=" /etc/mesh.conf 2>/dev/null | cut -d'=' -f2)
+            
+            CALC_OUTPUT=$(ipcalc "$IPV4_NETWORK" 2>/dev/null)
+            FIRST_IP=$(echo "$CALC_OUTPUT" | awk '/HostMin/ {print $2}')
+            MIN_INT=$(ip_to_int "$FIRST_IP")
+            CHUNK_SIZE=$((MAX_EUDS + 2))
+            CHUNK_START_INT=$((MIN_INT + 5 + (MY_CHUNK * CHUNK_SIZE)))
+            
+            BR0_IP=$(int_to_ip "$CHUNK_START_INT")
+            AP_IP=$(int_to_ip $((CHUNK_START_INT + 1)))
+            DHCP_START=$(int_to_ip $((CHUNK_START_INT + 2)))
+            DHCP_END=$(int_to_ip $((CHUNK_START_INT + CHUNK_SIZE - 1)))
+            
+            log "Updating AP configuration: gateway=$AP_IP, pool=$DHCP_START-$DHCP_END"
+            
+            # Remove AP from bridge if enslaved
+            if ip link show "$AP_INTERFACE" | grep -q "master br0"; then
+                log "Removing $AP_INTERFACE from br0 (must be routed, not bridged)"
+                ip link set "$AP_INTERFACE" nomaster
+            fi
+            
+            # Assign AP IP
+            ip addr flush dev "$AP_INTERFACE" 2>/dev/null
+            ip addr add "${AP_IP}/${IPV4_NETWORK#*/}" dev "$AP_INTERFACE"
+            ip link set "$AP_INTERFACE" up
+            
+            # Enable routing between AP and mesh
+            sysctl -q net.ipv4.conf.$AP_INTERFACE.proxy_arp=1
+            sysctl -q net.ipv4.conf.br0.proxy_arp=1
+            
+            # Update dnsmasq config
+            cat > /etc/dnsmasq.d/mesh-ap.conf <<EOF
+# Listen only on AP interface
+interface=$AP_INTERFACE
+bind-interfaces
+
+# Do not serve DHCP on br0
+no-dhcp-interface=br0
+
+# DHCP configuration from this node's chunk
+dhcp-range=$DHCP_START,$DHCP_END,12h
+
+# Gateway is this node's AP interface
+dhcp-option=3,$AP_IP
+
+# DNS configuration
+domain=mesh.local
+local=/mesh.local/
+
+# Disable DNS upstream (offline mesh)
+no-resolv
+no-poll
+
+# Log for debugging
+log-dhcp
+EOF
+        fi
+        
+        systemctl unmask dnsmasq.service 2>/dev/null
         systemctl enable hostapd.service 2>/dev/null
         systemctl start hostapd.service 2>/dev/null
-        systemctl start dnsmasq.service 2>/dev/null
+        systemctl enable dnsmasq.service 2>/dev/null
+        systemctl restart dnsmasq.service 2>/dev/null
         systemctl start ap-txpower.service 2>/dev/null
+        
     elif [ "$EUD_MODE" == "wireless" ] && [ -n "$AP_INTERFACE" ]; then
         log "Wireless mode: Ensuring AP is enabled"
-		systemctl unmask dnsmasq.service 2>/dev/null
+        
+        # Get current chunk allocation
+        MY_CHUNK=0
+        if [ -f /var/run/my_ipv4_chunk ]; then
+            MY_CHUNK=$(cat /var/run/my_ipv4_chunk)
+        fi
+        
+        if [ "$MY_CHUNK" -gt 0 ]; then
+            # Reconfigure dnsmasq and AP with correct chunk IPs
+            IPV4_NETWORK=$(grep "^ipv4_network=" /etc/mesh.conf 2>/dev/null | cut -d'=' -f2)
+            MAX_EUDS=$(grep "^max_euds_per_node=" /etc/mesh.conf 2>/dev/null | cut -d'=' -f2)
+            
+            CALC_OUTPUT=$(ipcalc "$IPV4_NETWORK" 2>/dev/null)
+            FIRST_IP=$(echo "$CALC_OUTPUT" | awk '/HostMin/ {print $2}')
+            MIN_INT=$(ip_to_int "$FIRST_IP")
+            CHUNK_SIZE=$((MAX_EUDS + 2))
+            CHUNK_START_INT=$((MIN_INT + 5 + (MY_CHUNK * CHUNK_SIZE)))
+            
+            BR0_IP=$(int_to_ip "$CHUNK_START_INT")
+            AP_IP=$(int_to_ip $((CHUNK_START_INT + 1)))
+            DHCP_START=$(int_to_ip $((CHUNK_START_INT + 2)))
+            DHCP_END=$(int_to_ip $((CHUNK_START_INT + CHUNK_SIZE - 1)))
+            
+            log "Updating AP configuration: gateway=$AP_IP, pool=$DHCP_START-$DHCP_END"
+            
+            # Remove AP from bridge if enslaved
+            if ip link show "$AP_INTERFACE" | grep -q "master br0"; then
+                log "Removing $AP_INTERFACE from br0 (must be routed, not bridged)"
+                ip link set "$AP_INTERFACE" nomaster
+            fi
+            
+            # Assign AP IP
+            ip addr flush dev "$AP_INTERFACE" 2>/dev/null
+            ip addr add "${AP_IP}/${IPV4_NETWORK#*/}" dev "$AP_INTERFACE"
+            ip link set "$AP_INTERFACE" up
+            
+            # Enable routing between AP and mesh
+            sysctl -q net.ipv4.conf.$AP_INTERFACE.proxy_arp=1
+            sysctl -q net.ipv4.conf.br0.proxy_arp=1
+            
+            # Update dnsmasq config
+            cat > /etc/dnsmasq.d/mesh-ap.conf <<EOF
+# Listen only on AP interface
+interface=$AP_INTERFACE
+bind-interfaces
+
+# Do not serve DHCP on br0
+no-dhcp-interface=br0
+
+# DHCP configuration from this node's chunk
+dhcp-range=$DHCP_START,$DHCP_END,12h
+
+# Gateway is this node's AP interface
+dhcp-option=3,$AP_IP
+
+# DNS configuration
+domain=mesh.local
+local=/mesh.local/
+
+# Disable DNS upstream (offline mesh)
+no-resolv
+no-poll
+
+# Log for debugging
+log-dhcp
+EOF
+        fi
+        
+        systemctl unmask dnsmasq.service 2>/dev/null
         systemctl enable hostapd.service 2>/dev/null
         systemctl start hostapd.service 2>/dev/null
-        systemctl start dnsmasq.service 2>/dev/null
+        systemctl enable dnsmasq.service 2>/dev/null
+        systemctl restart dnsmasq.service 2>/dev/null
         systemctl start ap-txpower.service 2>/dev/null
+        
     elif [ "$EUD_MODE" == "wired" ] && [ -n "$AP_INTERFACE" ]; then
         log "Wired mode: Disabling AP"
         systemctl stop hostapd.service 2>/dev/null
@@ -328,6 +469,7 @@ EOF
     # === AP CONTROL (for wireless mode) ===
     if [ "$EUD_MODE" == "wireless" ] && [ -n "$AP_INTERFACE" ]; then
         log "Wireless mode: Ensuring AP is enabled"
+        systemctl unmask dnsmasq.service 2>/dev/null
         systemctl enable hostapd.service 2>/dev/null
         systemctl start hostapd.service 2>/dev/null
         systemctl start ap-txpower.service 2>/dev/null

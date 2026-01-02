@@ -400,9 +400,6 @@ interface=$AP_INTERFACE
 driver=nl80211
 ssid=${LAN_AP_SSID}-${HOST_MAC}
 
-# Bridge to mesh network
-bridge=br0
-
 # 5GHz 802.11ax configuration
 hw_mode=a
 channel=acs_survey
