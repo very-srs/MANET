@@ -183,6 +183,11 @@ log "Node MAC: ${MY_MAC}"
 while true; do
     NOW=$(date +%s)
 
+    # Load current chunk assignment from IP manager
+    MY_CHUNK=0
+    if [ -f /var/run/my_ipv4_chunk ]; then
+        MY_CHUNK=$(cat /var/run/my_ipv4_chunk)
+    fi
     # === CHECK STATE: LOBBY OR DATA ===
     IS_IN_LOBBY=$(is_in_lobby)
 

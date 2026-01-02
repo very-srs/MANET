@@ -104,7 +104,12 @@ ensure_static_channels
 # === MAIN LOOP ===
 while true; do
     NOW=$(date +%s)
-    
+
+    # Load current chunk assignment from IP manager
+    MY_CHUNK=0
+    if [ -f /var/run/my_ipv4_chunk ]; then
+        MY_CHUNK=$(cat /var/run/my_ipv4_chunk)
+    fi
     # === PERIODIC CHANNEL CHECK ===
     # Verify we haven't drifted from static channels (safety check)
     ensure_static_channels
