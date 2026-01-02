@@ -7,7 +7,7 @@ set -x
 
 ETH_IFACE="end0"
 BRIDGE_IFACE="br0"
-DETECTION_TIMEOUT=2
+DETECTION_TIMEOUT=5
 LOCK_FILE="/var/run/ethernet-autodetect.lock"
 
 # Networkd config paths
@@ -95,7 +95,19 @@ log "Probing for DHCP server (timeout: ${DETECTION_TIMEOUT}s)..."
 
 # Ensure interface is up for probing
 ip link set "$ETH_IFACE" up
-sleep 2
+log "Waiting for ethernet link..."
+for i in {1..20}; do
+    CARRIER=$(cat /sys/class/net/$ETH_IFACE/carrier 2>/dev/null || echo 0)
+    OPERSTATE=$(cat /sys/class/net/$ETH_IFACE/operstate 2>/dev/null || echo "down")
+    
+    if [ "$CARRIER" = "1" ] && [ "$OPERSTATE" = "up" ]; then
+        log "Link ready (carrier detected)"
+        break
+    fi
+    sleep 0.5
+done
+
+sleep 1
 
 # Use nmap to detect DHCP server
 DHCP_PROBE=$(timeout "$DETECTION_TIMEOUT" nmap --script broadcast-dhcp-discover -e "$ETH_IFACE" 2>/dev/null)
