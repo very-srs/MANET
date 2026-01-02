@@ -1,0 +1,37 @@
+#!/bin/bash
+# ==============================================================================
+# Routable Hook - Triggers when end0 gets IP and becomes routable
+# ==============================================================================
+# This fires AFTER DHCP completes, so IP is already assigned
+# ==============================================================================
+
+TARGET_IFACE="end0"
+STATE_FILE="/var/run/end0_detection_state"
+
+echo "[$(date +'%Y-%m-%d %H:%M:%S')] - ROUTABLE-HOOK: Called for IFACE=$IFACE" >> /var/log/carrier-hook.log
+
+# Only process end0 becoming routable
+if [ "$IFACE" != "$TARGET_IFACE" ]; then
+    echo "[$(date +'%Y-%m-%d %H:%M:%S')] - ROUTABLE-HOOK: Skipping $IFACE (not $TARGET_IFACE)" >> /var/log/carrier-hook.log
+    exit 0
+fi
+
+# Check if we already ran detection this boot
+# Use boot_id to reset per-boot (in case node reboots while cable connected)
+if [ -f "$STATE_FILE" ]; then
+    LAST_DETECTION=$(cat "$STATE_FILE")
+    BOOT_ID=$(cat /proc/sys/kernel/random/boot_id)
+    
+    if [ "$LAST_DETECTION" == "$BOOT_ID" ]; then
+        echo "[$(date +'%Y-%m-%d %H:%M:%S')] - ROUTABLE-HOOK: Already ran detection this boot, skipping" >> /var/log/carrier-hook.log
+        exit 0
+    fi
+fi
+
+# Mark that we've run detection this boot
+cat /proc/sys/kernel/random/boot_id > "$STATE_FILE"
+
+echo "[$(date +'%Y-%m-%d %H:%M:%S')] - ROUTABLE-HOOK: Running detection for $TARGET_IFACE (has IP now)" >> /var/log/carrier-hook.log
+/usr/local/bin/ethernet-autodetect.sh
+
+exit 0
