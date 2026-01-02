@@ -42,7 +42,9 @@ if [[ -f /etc/manet_version.txt ]]; then
 	LOCAL_VERSION=$(head -n 1 /etc/manet_version.txt)
 	echo -n "Local MANET tools are at version $LOCAL_VERSION, "
 fi
-REMOTE_VERSION=$(curl -s https://raw.githubusercontent.com/very-srs/MANET/refs/heads/main/MANET/node_tools/version.txt | head -n 1)
+REMOTE_VERSION=$(curl -H 'Cache-Control: no-cache, no-store' \
+    -H 'Pragma: no-cache' \
+    -s https://raw.githubusercontent.com/very-srs/MANET/refs/heads/main/MANET/node_tools/version.txt | head -n 1)
 echo "github MANET tools are at version $REMOTE_VERSION"
 
 if [[ "$LOCAL_VERSION" == "$REMOTE_VERSION" ]]; then
