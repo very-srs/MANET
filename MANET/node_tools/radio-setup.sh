@@ -398,7 +398,7 @@ EOF
     cat <<-EOF > /etc/hostapd/hostapd.conf
 interface=$AP_INTERFACE
 driver=nl80211
-ssid=$LAN_AP_SSID
+ssid=${LAN_AP_SSID}-${HOST_MAC}
 
 # Bridge to mesh network
 bridge=br0
