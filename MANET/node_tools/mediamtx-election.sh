@@ -52,6 +52,11 @@ MEDIAMTX_IPV4_VIP=$(get_mediamtx_ipv4_vip "$IPV4_NETWORK")
 MEDIAMTX_IPV6_VIP_WITH_MASK=$("$MTX_IPV6_SCRIPT") # e.g., fd5a:..::64/128
 MEDIAMTX_IPV6_VIP=${MEDIAMTX_IPV6_VIP_WITH_MASK%/*} # Just the address part
 
+#Normalize IPv6 to compressed form (remove :0000: before ::) ***
+MEDIAMTX_IPV6_VIP=$(echo "$MEDIAMTX_IPV6_VIP" | sed 's/:0000:/::/g')
+MEDIAMTX_IPV6_VIP_WITH_MASK="${MEDIAMTX_IPV6_VIP}/128"
+
+
 if [ -z "$MEDIAMTX_IPV4_VIP" ] || [ -z "$MEDIAMTX_IPV6_VIP" ]; then
     log "Error: Could not determine valid IPv4 or IPv6 VIPs. Exiting."
     exit 1
