@@ -248,7 +248,7 @@ ask_questions() {
 		read -p "Enter MESH SAE Key (WPA3 password, 8-63 chars) [or press Enter to generate]: " MESH_SAE_KEY
 		echo
 		if [ -z "$MESH_SAE_KEY" ]; then
-			MESH_SAE_KEY=$(openssl rand -base64 28  | tr -d '\n')
+			MESH_SAE_KEY=$(openssl rand -base64 56  | tr -d '\n')
 			echo "Generated SAE Key: $MESH_SAE_KEY"
 			break
 		fi
