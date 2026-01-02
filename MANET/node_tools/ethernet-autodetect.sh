@@ -61,6 +61,7 @@ if [ "$CARRIER" != "1" ]; then
     EUD_MODE=$(grep "^eud=" /etc/mesh.conf 2>/dev/null | cut -d'=' -f2)
     if [ "$EUD_MODE" == "auto" ] && [ -f /var/lib/ap_interface ]; then
         log "Auto mode: No ethernet, enabling AP for EUD connectivity"
+		systemctl unmask dnsmasq.service 2>/dev/null
         systemctl enable hostapd.service 2>/dev/null
         systemctl start hostapd.service 2>/dev/null
         systemctl start dnsmasq.service 2>/dev/null
@@ -187,12 +188,14 @@ if [ "$DHCP_DETECTED" = true ]; then
     # === AP CONTROL ===
     if [ "$EUD_MODE" == "auto" ] && [ -n "$AP_INTERFACE" ]; then
         log "Auto mode + Gateway: Keeping AP enabled (dual role)"
+		systemctl unmask dnsmasq.service 2>/dev/null
         systemctl enable hostapd.service 2>/dev/null
         systemctl start hostapd.service 2>/dev/null
         systemctl start dnsmasq.service 2>/dev/null
         systemctl start ap-txpower.service 2>/dev/null
     elif [ "$EUD_MODE" == "wireless" ] && [ -n "$AP_INTERFACE" ]; then
         log "Wireless mode: Ensuring AP is enabled"
+		systemctl unmask dnsmasq.service 2>/dev/null
         systemctl enable hostapd.service 2>/dev/null
         systemctl start hostapd.service 2>/dev/null
         systemctl start dnsmasq.service 2>/dev/null
@@ -301,6 +304,7 @@ EOF
         systemctl disable hostapd.service 2>/dev/null
     fi
     
+    systemctl unmask dnsmasq.service 2>/dev/null
     systemctl enable dnsmasq.service 2>/dev/null
     systemctl restart dnsmasq.service 2>/dev/null
     
