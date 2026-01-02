@@ -1,0 +1,16 @@
+#!/bin/bash
+# networkd-dispatcher hook for DIRECT end0 events
+# Used when end0 is NOT a bridge member (initial boot config)
+
+TARGET_IFACE="end0"
+
+echo "[$(date +'%Y-%m-%d %H:%M:%S')] - CARRIER-DIRECT: Called for IFACE=$IFACE" >> /var/log/carrier-hook.log
+
+if [ "$IFACE" != "$TARGET_IFACE" ]; then
+    exit 0
+fi
+
+echo "[$(date +'%Y-%m-%d %H:%M:%S')] - CARRIER-DIRECT: Running detection for $TARGET_IFACE" >> /var/log/carrier-hook.log
+/usr/local/bin/ethernet-autodetect.sh
+
+exit 0

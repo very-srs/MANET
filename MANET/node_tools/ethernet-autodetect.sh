@@ -7,7 +7,7 @@ set -x
 
 ETH_IFACE="end0"
 BRIDGE_IFACE="br0"
-DETECTION_TIMEOUT=10  # Increased for more reliable detection
+DETECTION_TIMEOUT=10
 LOCK_FILE="/var/run/ethernet-autodetect.lock"
 
 # Networkd config paths
@@ -91,53 +91,78 @@ if [ -f /var/lib/ap_interface ]; then
 fi
 
 # ===================================================================
-# DHCP DETECTION - ALWAYS RUN REGARDLESS OF EUD MODE
+# DHCP DETECTION - NON-DISRUPTIVE METHOD
 # ===================================================================
 DHCP_DETECTED=false
-log "Probing for DHCP server..."
 
-# Ensure interface is completely clean and ready
-log "Preparing interface for DHCP probe..."
-ip link set "$ETH_IFACE" down
-ip addr flush dev "$ETH_IFACE"
-ip link set "$ETH_IFACE" up
+# Check if interface already has an IP (from initial boot config)
+EXISTING_IP=$(ip -4 addr show dev "$ETH_IFACE" | grep -oP 'inet \K[\d.]+' | head -1)
 
-# Wait for link to come up properly
-log "Waiting for ethernet link..."
-for i in {1..20}; do
-    CARRIER=$(cat /sys/class/net/$ETH_IFACE/carrier 2>/dev/null || echo 0)
-    OPERSTATE=$(cat /sys/class/net/$ETH_IFACE/operstate 2>/dev/null || echo "down")
+if [ -n "$EXISTING_IP" ]; then
+    # Interface already has an IP - don't disrupt it!
+    log "Interface already has IP: $EXISTING_IP from existing configuration"
+    log "Testing connectivity without disrupting DHCP lease..."
     
-    if [ "$CARRIER" = "1" ] && [ "$OPERSTATE" = "up" ]; then
-        log "Link ready (carrier detected, operstate: $OPERSTATE)"
-        break
-    fi
-    sleep 0.5
-done
-
-# Give additional time for link negotiation to complete
-log "Waiting for link negotiation..."
-sleep 3
-
-# Try dhcping first (most reliable method)
-log "Attempting DHCP detection with dhcping..."
-if timeout 8 dhcping -i "$ETH_IFACE" -s 255.255.255.255 2>&1 | tee /tmp/dhcping.log | grep -q "Got answer from"; then
-    DHCP_DETECTED=true
-    DHCP_SERVER=$(grep "Got answer from" /tmp/dhcping.log | awk '{print $4}' | tr -d ':')
-    log "DHCP server detected via dhcping: $DHCP_SERVER"
-else
-    log "dhcping found no response, trying nmap as fallback..."
-    
-    # Fallback to nmap method
-    DHCP_PROBE=$(timeout 10 nmap --script broadcast-dhcp-discover -e "$ETH_IFACE" 2>/dev/null | tee /tmp/nmap-dhcp.log)
-    
-    if echo "$DHCP_PROBE" | grep -q "Server Identifier\|DHCP Message Type: DHCPOFFER"; then
+    # Test internet connectivity to determine gateway vs EUD
+    if ping -c 3 -W 2 -I "$ETH_IFACE" 8.8.8.8 > /dev/null 2>&1; then
+        log "Internet reachable via $EXISTING_IP - treating as gateway"
         DHCP_DETECTED=true
-        log "DHCP server detected via nmap!"
-        log "nmap output: $DHCP_PROBE"
+        ETH_IP="$EXISTING_IP"
+        
+        # Verify we have the right networkd config active
+        if [ ! -f "$ACTIVE_CONFIG" ]; then
+            log "No active config found, creating gateway config"
+            cp "$GATEWAY_CONFIG" "$ACTIVE_CONFIG"
+            rm -f "${NETWORKD_DIR}/10-end0.network"
+        fi
     else
-        log "No DHCP server found with either method"
-        log "nmap output: $DHCP_PROBE"
+        log "Has IP $EXISTING_IP but no internet connectivity - treating as EUD"
+        DHCP_DETECTED=false
+    fi
+else
+    # No existing IP - need to probe for DHCP
+    log "No existing IP detected - probing for DHCP server..."
+    
+    # Ensure interface is up but don't flush any state
+    ip link set "$ETH_IFACE" up
+    
+    # Wait for link to come up
+    log "Waiting for ethernet link..."
+    for i in {1..20}; do
+        CARRIER=$(cat /sys/class/net/$ETH_IFACE/carrier 2>/dev/null || echo 0)
+        OPERSTATE=$(cat /sys/class/net/$ETH_IFACE/operstate 2>/dev/null || echo "down")
+        
+        if [ "$CARRIER" = "1" ] && [ "$OPERSTATE" = "up" ]; then
+            log "Link ready (carrier detected, operstate: $OPERSTATE)"
+            break
+        fi
+        sleep 0.5
+    done
+    
+    # Give link negotiation time to complete
+    log "Waiting for link negotiation..."
+    sleep 3
+    
+    # Try dhcping first (doesn't disrupt anything)
+    log "Attempting DHCP detection with dhcping..."
+    if timeout 8 dhcping -i "$ETH_IFACE" -s 255.255.255.255 2>&1 | tee /var/log/dhcping.log | grep -q "Got answer from"; then
+        DHCP_DETECTED=true
+        DHCP_SERVER=$(grep "Got answer from" /var/log/dhcping.log | awk '{print $4}' | tr -d ':')
+        log "DHCP server detected via dhcping: $DHCP_SERVER"
+    else
+        log "dhcping found no response, trying nmap as fallback..."
+        
+        # Fallback to nmap method (also non-disruptive)
+        DHCP_PROBE=$(timeout 10 nmap --script broadcast-dhcp-discover -e "$ETH_IFACE" 2>/dev/null | tee /var/log/nmap-dhcp.log)
+        
+        if echo "$DHCP_PROBE" | grep -q "Server Identifier\|DHCP Message Type: DHCPOFFER"; then
+            DHCP_DETECTED=true
+            log "DHCP server detected via nmap!"
+            log "nmap output: $DHCP_PROBE"
+        else
+            log "No DHCP server found with either method"
+            log "nmap output: $DHCP_PROBE"
+        fi
     fi
 fi
 
@@ -154,118 +179,112 @@ if [ "$DHCP_DETECTED" = true ]; then
         exit 1
     fi
     
-    # Activate gateway config
-    cp "$GATEWAY_CONFIG" "$ACTIVE_CONFIG"
-    rm -f "${NETWORKD_DIR}/10-end0.network"
-    
-    # Restart networkd to apply DHCP
-    systemctl restart systemd-networkd
-    
-    # Wait for DHCP to complete (up to 15 seconds)
-    log "Waiting for DHCP lease acquisition..."
-    for i in {1..30}; do
-        ETH_IP=$(ip -4 addr show dev "$ETH_IFACE" | grep -oP 'inet \K[\d.]+' | head -1)
-        if [ -n "$ETH_IP" ]; then
-            break
-        fi
-        sleep 0.5
-    done
+    # Only reconfigure if we don't already have the right setup
+    if [ ! -f "$ACTIVE_CONFIG" ] || ! grep -q "DHCP=yes" "$ACTIVE_CONFIG" 2>/dev/null; then
+        log "Applying gateway network configuration..."
+        cp "$GATEWAY_CONFIG" "$ACTIVE_CONFIG"
+        rm -f "${NETWORKD_DIR}/10-end0.network"
+        systemctl restart systemd-networkd
+        
+        # Wait for DHCP to complete (up to 15 seconds)
+        log "Waiting for DHCP lease acquisition..."
+        for i in {1..30}; do
+            ETH_IP=$(ip -4 addr show dev "$ETH_IFACE" | grep -oP 'inet \K[\d.]+' | head -1)
+            if [ -n "$ETH_IP" ]; then
+                break
+            fi
+            sleep 0.5
+        done
+    else
+        log "Gateway config already active with IP: ${ETH_IP:-$EXISTING_IP}"
+        ETH_IP="${ETH_IP:-$EXISTING_IP}"
+    fi
     
     if [ -n "$ETH_IP" ]; then
-        log "Acquired IP: $ETH_IP"
+        log "Active IP: $ETH_IP"
         
-        # Verify internet connectivity before proceeding
-        log "Testing internet connectivity..."
-        if ! ping -c 3 -W 2 -I "$ETH_IFACE" 8.8.8.8 > /dev/null 2>&1; then
-            log "WARNING: Got DHCP but no internet connectivity. Treating as EUD."
-            DHCP_DETECTED=false  # Fall through to EUD mode
+        # Mark as gateway
+        touch /var/run/mesh-gateway.state
+        
+        # Configure NAT/masquerading
+        log "Configuring NAT..."
+        nft add table ip nat 2>/dev/null || true
+        nft add chain ip nat postrouting { type nat hook postrouting priority 100 \; } 2>/dev/null || true
+        nft flush chain ip nat postrouting 2>/dev/null || true
+        nft add rule ip nat postrouting oifname "$ETH_IFACE" masquerade
+        
+        # Enable IP forwarding
+        sysctl -q net.ipv4.ip_forward=1
+        
+        # Get default gateway
+        DEFAULT_GW=$(ip route show dev "$ETH_IFACE" | grep default | awk '{print $3}')
+        if [ -n "$DEFAULT_GW" ]; then
+            log "Default gateway: $DEFAULT_GW"
+        fi
+        
+        # Enable BATMAN gateway mode
+        if command -v batctl &>/dev/null; then
+            batctl gw_mode server 2>/dev/null || log "BATMAN not ready yet"
+            log "Enabled BATMAN gateway mode"
+        fi
+        
+        # Update router advertisements to announce default route
+        cp /etc/radvd-gateway.conf /etc/radvd.conf
+        systemctl restart radvd
+        
+        # === NTP SERVER SETUP ===
+        log "Attempting to sync time with external NTP source..."
+        cp /etc/chrony/chrony-test.conf /etc/chrony/chrony.conf
+        systemctl restart chrony.service
+        sleep 3
+        
+        if timeout 30 chronyc -a 'burst 4/4' && sleep 5 && chronyc sources | grep -q '^\*'; then
+            log "Time sync successful. Promoting to mesh NTP server."
+            touch /var/run/mesh-ntp.state
+            systemctl stop chrony.service
+            cp /etc/chrony/chrony-server.conf /etc/chrony/chrony.conf
+            systemctl start chrony.service
         else
-            log "Internet confirmed working!"
-            
-            # Mark as gateway
-            touch /var/run/mesh-gateway.state
-            
-            # Configure NAT/masquerading
-            log "Configuring NAT..."
-            nft add table ip nat 2>/dev/null || true
-            nft add chain ip nat postrouting { type nat hook postrouting priority 100 \; } 2>/dev/null || true
-            nft flush chain ip nat postrouting 2>/dev/null || true
-            nft add rule ip nat postrouting oifname "$ETH_IFACE" masquerade
-            
-            # Enable IP forwarding
-            sysctl -q net.ipv4.ip_forward=1
-            
-            # Get default gateway
-            DEFAULT_GW=$(ip route show dev "$ETH_IFACE" | grep default | awk '{print $3}')
-            if [ -n "$DEFAULT_GW" ]; then
-                log "Default gateway: $DEFAULT_GW"
-            fi
-            
-            # Enable BATMAN gateway mode
-            if command -v batctl &>/dev/null; then
-                batctl gw_mode server
-                log "Enabled BATMAN gateway mode"
-            fi
-            
-            # Update router advertisements to announce default route
-            cp /etc/radvd-gateway.conf /etc/radvd.conf
-            systemctl restart radvd
-            
-            # === NTP SERVER SETUP ===
-            log "Attempting to sync time with external NTP source..."
-            cp /etc/chrony/chrony-test.conf /etc/chrony/chrony.conf
-            systemctl restart chrony.service
-            sleep 3
-            
-            if timeout 30 chronyc -a 'burst 4/4' && sleep 5 && chronyc sources | grep -q '^\*'; then
-                log "Time sync successful. Promoting to mesh NTP server."
-                touch /var/run/mesh-ntp.state
-                systemctl stop chrony.service
-                cp /etc/chrony/chrony-server.conf /etc/chrony/chrony.conf
-                systemctl start chrony.service
-            else
-                log "Failed to sync time. Will not become an NTP server."
-                rm -f /var/run/mesh-ntp.state
-                systemctl stop chrony.service
-                cp /etc/chrony/chrony-default.conf /etc/chrony/chrony.conf
-            fi
-            
-            # === AP CONTROL BASED ON EUD MODE ===
-            if [ "$AUTO_MODE" = true ] && [ -n "$AP_INTERFACE" ]; then
-                log "Auto mode + Gateway: Keeping AP enabled for dual gateway/AP role"
-                systemctl enable hostapd.service
-                systemctl start hostapd.service
-                systemctl start dnsmasq.service
-                systemctl start ap-txpower.service
-            elif [ "$FORCE_WIRELESS" = true ] && [ -n "$AP_INTERFACE" ]; then
-                log "Wireless mode: Ensuring AP is enabled"
-                systemctl enable hostapd.service
-                systemctl start hostapd.service
-                systemctl start dnsmasq.service
-                systemctl start ap-txpower.service
-            elif [ "$FORCE_WIRED" = true ] && [ -n "$AP_INTERFACE" ]; then
-                log "Wired mode: Disabling AP"
-                systemctl stop hostapd.service
-                systemctl stop dnsmasq.service
-                systemctl stop ap-txpower.service
-                systemctl disable hostapd.service
-            fi
-            
-            # Save state
-            cat > /var/run/ethernet_detection_state <<EOF
+            log "Failed to sync time. Will not become an NTP server."
+            rm -f /var/run/mesh-ntp.state
+            systemctl stop chrony.service
+            cp /etc/chrony/chrony-default.conf /etc/chrony/chrony.conf
+        fi
+        
+        # === AP CONTROL BASED ON EUD MODE ===
+        if [ "$AUTO_MODE" = true ] && [ -n "$AP_INTERFACE" ]; then
+            log "Auto mode + Gateway: Keeping AP enabled for dual gateway/AP role"
+            systemctl enable hostapd.service
+            systemctl start hostapd.service
+            systemctl start dnsmasq.service
+            systemctl start ap-txpower.service
+        elif [ "$FORCE_WIRELESS" = true ] && [ -n "$AP_INTERFACE" ]; then
+            log "Wireless mode: Ensuring AP is enabled"
+            systemctl enable hostapd.service
+            systemctl start hostapd.service
+            systemctl start dnsmasq.service
+            systemctl start ap-txpower.service
+        elif [ "$FORCE_WIRED" = true ] && [ -n "$AP_INTERFACE" ]; then
+            log "Wired mode: Disabling AP"
+            systemctl stop hostapd.service
+            systemctl stop dnsmasq.service
+            systemctl stop ap-txpower.service
+            systemctl disable hostapd.service
+        fi
+        
+        # Save state
+        cat > /var/run/ethernet_detection_state <<EOF
 # Ethernet auto-detection result
 ETH_MODE=GATEWAY
 ETH_IP=$ETH_IP
 DEFAULT_GW=${DEFAULT_GW:-none}
 DETECTED_AT=$(date +%s)
-DETECTION_METHOD=DHCP_PROBE
+DETECTION_METHOD=$([ -n "$EXISTING_IP" ] && echo "EXISTING_LEASE" || echo "DHCP_PROBE")
 EOF
-            
-            log "Gateway configuration complete"
-        fi
+        
+        log "Gateway configuration complete"
     else
-        log "WARNING: DHCP server detected but IP acquisition failed"
-        # Fall back to EUD mode
+        log "ERROR: Failed to acquire IP address"
         DHCP_DETECTED=false
     fi
 fi
@@ -285,13 +304,13 @@ if [ "$DHCP_DETECTED" = false ]; then
     # Activate EUD config
     cp "$EUD_CONFIG" "$ACTIVE_CONFIG"
     rm -f "${NETWORKD_DIR}/10-end0.network"
-
+    
     # Flush any existing IP
     ip addr flush dev "$ETH_IFACE" 2>/dev/null
     
     # Restart networkd to apply bridge membership
     systemctl restart systemd-networkd
-
+    
     log "Waiting for bridge attachment..."
     for i in {1..10}; do
         if bridge link show | grep -q end0; then
@@ -300,21 +319,21 @@ if [ "$DHCP_DETECTED" = false ]; then
         fi
         sleep 0.5
     done
-
+    
     # Final verification
     if ! bridge link show | grep -q end0; then
         log "WARNING: Failed to add end0 to bridge after 5 seconds"
         # Try manual add as fallback
         ip link set end0 master br0 2>/dev/null || true
     fi
-
+    
     # Remove gateway state
     rm -f /var/run/mesh-gateway.state
     rm -f /var/run/mesh-ntp.state
     
     # Disable BATMAN gateway mode
     if command -v batctl &>/dev/null; then
-        batctl gw_mode off
+        batctl gw_mode off 2>/dev/null || log "BATMAN not ready yet"
         log "Disabled BATMAN gateway mode"
     fi
     
