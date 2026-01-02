@@ -56,6 +56,7 @@ done
 # Join the first 4 hextets back into a string
 EXPANDED_PREFIX=$(IFS=: ; echo "${EXPANDED_PREFIX_ARRAY[*]}")
 
+
 # Final Validation: Check the resulting /64 prefix structure
 if ! [[ "$EXPANDED_PREFIX" =~ ^fd[0-9a-fA-F]{2}:[0-9a-fA-F]{4}:[0-9a-fA-F]{4}:[0-9a-fA-F]{4}$ ]]; then
     echo "Error: Failed to normalize '$PREFIX_CIDR' into a valid /64 ULA prefix. Result: '$EXPANDED_PREFIX'." >&2
@@ -78,6 +79,7 @@ OFFSET=$(( 0x$HASH_BYTE % 412 + 100 ))
 
 # Form the VIP: normalized prefix + :: + offset (in hex)
 VIP="${EXPANDED_PREFIX}::$(printf "%x" "$OFFSET")"
+
 
 # Output the final address with /128 mask for assignment
 echo "$VIP/128"
