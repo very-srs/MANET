@@ -7,7 +7,7 @@ set -x
 
 ETH_IFACE="end0"
 BRIDGE_IFACE="br0"
-DETECTION_TIMEOUT=5
+DETECTION_TIMEOUT=10  # Increased for more reliable detection
 LOCK_FILE="/var/run/ethernet-autodetect.lock"
 
 # Networkd config paths
@@ -57,7 +57,7 @@ fi
 
 log "Ethernet cable detected on $ETH_IFACE. Starting auto-detection..."
 
-# Check for forced mode in config
+# Check for EUD mode in config (only affects AP behavior, NOT ethernet detection)
 EUD_MODE=$(grep "^eud=" /etc/mesh.conf 2>/dev/null | cut -d'=' -f2)
 
 FORCE_WIRELESS=false
@@ -66,15 +66,15 @@ AUTO_MODE=false
 
 case "$EUD_MODE" in
     "wireless")
-        log "Forced wireless mode from mesh.conf"
+        log "Wireless EUD mode from mesh.conf (AP always on)"
         FORCE_WIRELESS=true
         ;;
     "wired")
-        log "Forced wired EUD mode from mesh.conf"
+        log "Wired EUD mode from mesh.conf (AP disabled)"
         FORCE_WIRED=true
         ;;
     "auto")
-        log "Auto-detection mode"
+        log "Auto-detection mode (AP based on ethernet detection)"
         AUTO_MODE=true
         ;;
     *)
@@ -90,33 +90,55 @@ if [ -f /var/lib/ap_interface ]; then
     log "AP interface: $AP_INTERFACE"
 fi
 
+# ===================================================================
+# DHCP DETECTION - ALWAYS RUN REGARDLESS OF EUD MODE
+# ===================================================================
 DHCP_DETECTED=false
-log "Probing for DHCP server (timeout: ${DETECTION_TIMEOUT}s)..."
+log "Probing for DHCP server..."
 
-# Ensure interface is up for probing
+# Ensure interface is completely clean and ready
+log "Preparing interface for DHCP probe..."
+ip link set "$ETH_IFACE" down
+ip addr flush dev "$ETH_IFACE"
 ip link set "$ETH_IFACE" up
+
+# Wait for link to come up properly
 log "Waiting for ethernet link..."
 for i in {1..20}; do
     CARRIER=$(cat /sys/class/net/$ETH_IFACE/carrier 2>/dev/null || echo 0)
     OPERSTATE=$(cat /sys/class/net/$ETH_IFACE/operstate 2>/dev/null || echo "down")
     
     if [ "$CARRIER" = "1" ] && [ "$OPERSTATE" = "up" ]; then
-        log "Link ready (carrier detected)"
+        log "Link ready (carrier detected, operstate: $OPERSTATE)"
         break
     fi
     sleep 0.5
 done
 
-sleep 1
+# Give additional time for link negotiation to complete
+log "Waiting for link negotiation..."
+sleep 3
 
-# Use nmap to detect DHCP server
-DHCP_PROBE=$(timeout "$DETECTION_TIMEOUT" nmap --script broadcast-dhcp-discover -e "$ETH_IFACE" 2>/dev/null)
-
-if echo "$DHCP_PROBE" | grep -q "Server Identifier\|DHCP Message Type: DHCPOFFER"; then
+# Try dhcping first (most reliable method)
+log "Attempting DHCP detection with dhcping..."
+if timeout 8 dhcping -i "$ETH_IFACE" -s 255.255.255.255 2>&1 | tee /tmp/dhcping.log | grep -q "Got answer from"; then
     DHCP_DETECTED=true
-    log "DHCP server detected!"
+    DHCP_SERVER=$(grep "Got answer from" /tmp/dhcping.log | awk '{print $4}' | tr -d ':')
+    log "DHCP server detected via dhcping: $DHCP_SERVER"
 else
-    log "No DHCP server found"
+    log "dhcping found no response, trying nmap as fallback..."
+    
+    # Fallback to nmap method
+    DHCP_PROBE=$(timeout 10 nmap --script broadcast-dhcp-discover -e "$ETH_IFACE" 2>/dev/null | tee /tmp/nmap-dhcp.log)
+    
+    if echo "$DHCP_PROBE" | grep -q "Server Identifier\|DHCP Message Type: DHCPOFFER"; then
+        DHCP_DETECTED=true
+        log "DHCP server detected via nmap!"
+        log "nmap output: $DHCP_PROBE"
+    else
+        log "No DHCP server found with either method"
+        log "nmap output: $DHCP_PROBE"
+    fi
 fi
 
 # Configure based on detection result
@@ -134,14 +156,14 @@ if [ "$DHCP_DETECTED" = true ]; then
     
     # Activate gateway config
     cp "$GATEWAY_CONFIG" "$ACTIVE_CONFIG"
-	rm -f "${NETWORKD_DIR}/10-end0.network" # 2>/dev/null
-	
+    rm -f "${NETWORKD_DIR}/10-end0.network"
+    
     # Restart networkd to apply DHCP
     systemctl restart systemd-networkd
     
-    # Wait for DHCP to complete (up to 10 seconds)
+    # Wait for DHCP to complete (up to 15 seconds)
     log "Waiting for DHCP lease acquisition..."
-    for i in {1..20}; do
+    for i in {1..30}; do
         ETH_IP=$(ip -4 addr show dev "$ETH_IFACE" | grep -oP 'inet \K[\d.]+' | head -1)
         if [ -n "$ETH_IP" ]; then
             break
@@ -208,13 +230,25 @@ if [ "$DHCP_DETECTED" = true ]; then
                 cp /etc/chrony/chrony-default.conf /etc/chrony/chrony.conf
             fi
             
-            # In AUTO mode when gateway, KEEP AP ENABLED (dual role)
+            # === AP CONTROL BASED ON EUD MODE ===
             if [ "$AUTO_MODE" = true ] && [ -n "$AP_INTERFACE" ]; then
                 log "Auto mode + Gateway: Keeping AP enabled for dual gateway/AP role"
                 systemctl enable hostapd.service
                 systemctl start hostapd.service
                 systemctl start dnsmasq.service
                 systemctl start ap-txpower.service
+            elif [ "$FORCE_WIRELESS" = true ] && [ -n "$AP_INTERFACE" ]; then
+                log "Wireless mode: Ensuring AP is enabled"
+                systemctl enable hostapd.service
+                systemctl start hostapd.service
+                systemctl start dnsmasq.service
+                systemctl start ap-txpower.service
+            elif [ "$FORCE_WIRED" = true ] && [ -n "$AP_INTERFACE" ]; then
+                log "Wired mode: Disabling AP"
+                systemctl stop hostapd.service
+                systemctl stop dnsmasq.service
+                systemctl stop ap-txpower.service
+                systemctl disable hostapd.service
             fi
             
             # Save state
@@ -224,7 +258,7 @@ ETH_MODE=GATEWAY
 ETH_IP=$ETH_IP
 DEFAULT_GW=${DEFAULT_GW:-none}
 DETECTED_AT=$(date +%s)
-DETECTION_METHOD=$([ "$FORCE_WIRELESS" = true ] && echo "FORCED" || echo "DHCP_PROBE")
+DETECTION_METHOD=DHCP_PROBE
 EOF
             
             log "Gateway configuration complete"
@@ -250,7 +284,7 @@ if [ "$DHCP_DETECTED" = false ]; then
     
     # Activate EUD config
     cp "$EUD_CONFIG" "$ACTIVE_CONFIG"
-    rm -f "${NETWORKD_DIR}/10-end0.network" 2>/dev/null
+    rm -f "${NETWORKD_DIR}/10-end0.network"
 
     # Flush any existing IP
     ip addr flush dev "$ETH_IFACE" 2>/dev/null
@@ -291,9 +325,21 @@ if [ "$DHCP_DETECTED" = false ]; then
     # Remove NAT rules
     nft flush chain ip nat postrouting 2>/dev/null || true
     
-    # In AUTO mode when EUD plugged in, DISABLE AP (wired EUD takes priority)
+    # === AP CONTROL BASED ON EUD MODE ===
     if [ "$AUTO_MODE" = true ] && [ -n "$AP_INTERFACE" ]; then
         log "Auto mode + Wired EUD: Disabling AP (wired connection takes priority)"
+        systemctl stop hostapd.service
+        systemctl stop dnsmasq.service
+        systemctl stop ap-txpower.service
+        systemctl disable hostapd.service
+    elif [ "$FORCE_WIRELESS" = true ] && [ -n "$AP_INTERFACE" ]; then
+        log "Wireless mode: Ensuring AP is enabled"
+        systemctl enable hostapd.service
+        systemctl start hostapd.service
+        systemctl start dnsmasq.service
+        systemctl start ap-txpower.service
+    elif [ "$FORCE_WIRED" = true ] && [ -n "$AP_INTERFACE" ]; then
+        log "Wired mode: Ensuring AP is disabled"
         systemctl stop hostapd.service
         systemctl stop dnsmasq.service
         systemctl stop ap-txpower.service
@@ -306,7 +352,7 @@ if [ "$DHCP_DETECTED" = false ]; then
 ETH_MODE=EUD
 ETH_IP=none
 DETECTED_AT=$(date +%s)
-DETECTION_METHOD=$([ "$FORCE_WIRED" = true ] && echo "FORCED" || echo "NO_DHCP")
+DETECTION_METHOD=NO_DHCP
 EOF
     
     log "EUD configuration complete"
