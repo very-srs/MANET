@@ -133,10 +133,17 @@ for phy in $(iw dev | awk '/^phy#/{print $1}'); do
 done
 
 # Keep track across reboots
-> /var/lib/mesh_if
-> /var/lib/halow_if
-> /var/lib/no_mesh_if
+for iface in "${mesh_ifaces[@]}"; do
+    echo "$iface" >> /var/lib/mesh_if
+done
 
+for iface in "${halow_ifaces[@]}"; do
+    echo "$iface" >> /var/lib/halow_if
+done
+
+for iface in "${nonmesh_ifaces[@]}"; do
+    echo "$iface" >> /var/lib/no_mesh_if
+done
 ## Bring everything down before renaming
 #for iface in "${mesh_ifaces[@]}" "${halow_ifaces[@]}" "${nonmesh_ifaces[@]}"; do
 #    ip link set "$iface" down 2>/dev/null
