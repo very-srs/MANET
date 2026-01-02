@@ -1,0 +1,68 @@
+#!/bin/bash
+# networkd-dispatcher carrier hook for ethernet detection
+# Handles both direct end0 events AND br0 events (when end0 is bridge member)
+# Tracks state to avoid unnecessary runs on unrelated br0 events
+
+TARGET_IFACE="end0"
+BRIDGE_IFACE="br0"
+STATE_FILE="/var/run/end0_carrier_state"
+
+# Log that this hook was called
+echo "[$(date +'%Y-%m-%d %H:%M:%S')] - CARRIER-HOOK: Called for IFACE=$IFACE" >> /var/log/carrier-hook.log
+
+log() {
+    echo "[$(date +'%Y-%m-%d %H:%M:%S')] - GATEWAY-UP [$$]($IFACE): $1" | systemd-cat -t mesh-gateway
+}
+
+# Check if this is a relevant interface
+SHOULD_RUN=false
+
+if [ "$IFACE" == "$TARGET_IFACE" ]; then
+    # Direct event on end0 (not bridge member)
+    SHOULD_RUN=true
+    echo "[$(date +'%Y-%m-%d %H:%M:%S')] - CARRIER-HOOK: Direct event on $TARGET_IFACE" >> /var/log/carrier-hook.log
+elif [ "$IFACE" == "$BRIDGE_IFACE" ]; then
+    # Event on br0 - check if end0 is a member
+    if bridge link show | grep -q "$TARGET_IFACE"; then
+        # end0 is enslaved to bridge - check if STATE changed
+        CURRENT_CARRIER=$(cat /sys/class/net/$TARGET_IFACE/carrier 2>/dev/null || echo 0)
+        
+        # Get previous state
+        PREVIOUS_CARRIER="unknown"
+        if [ -f "$STATE_FILE" ]; then
+            PREVIOUS_CARRIER=$(cat "$STATE_FILE")
+        fi
+        
+        # Update state file
+        echo "$CURRENT_CARRIER" > "$STATE_FILE"
+        
+        # Only run if state CHANGED
+        if [ "$CURRENT_CARRIER" != "$PREVIOUS_CARRIER" ]; then
+            echo "[$(date +'%Y-%m-%d %H:%M:%S')] - CARRIER-HOOK: $TARGET_IFACE carrier changed: $PREVIOUS_CARRIER -> $CURRENT_CARRIER" >> /var/log/carrier-hook.log
+            if [ "$CURRENT_CARRIER" == "1" ]; then
+                SHOULD_RUN=true
+            else
+                echo "[$(date +'%Y-%m-%d %H:%M:%S')] - CARRIER-HOOK: Cable unplugged (handled by off.d)" >> /var/log/carrier-hook.log
+            fi
+        else
+            echo "[$(date +'%Y-%m-%d %H:%M:%S')] - CARRIER-HOOK: $TARGET_IFACE carrier unchanged ($CURRENT_CARRIER), skipping" >> /var/log/carrier-hook.log
+        fi
+    else
+        echo "[$(date +'%Y-%m-%d %H:%M:%S')] - CARRIER-HOOK: Bridge event, but $TARGET_IFACE not a member" >> /var/log/carrier-hook.log
+    fi
+else
+    # Some other interface
+    echo "[$(date +'%Y-%m-%d %H:%M:%S')] - CARRIER-HOOK: Skipping $IFACE (not $TARGET_IFACE or $BRIDGE_IFACE)" >> /var/log/carrier-hook.log
+    exit 0
+fi
+
+# Run detection if appropriate
+if [ "$SHOULD_RUN" == "true" ]; then
+    echo "[$(date +'%Y-%m-%d %H:%M:%S')] - CARRIER-HOOK: Executing ethernet-autodetect for $TARGET_IFACE" >> /var/log/carrier-hook.log
+    log "Ethernet state change on $TARGET_IFACE - running auto-detection..."
+    /usr/local/bin/ethernet-autodetect.sh
+else
+    echo "[$(date +'%Y-%m-%d %H:%M:%S')] - CARRIER-HOOK: Conditions not met, skipping" >> /var/log/carrier-hook.log
+fi
+
+exit 0
