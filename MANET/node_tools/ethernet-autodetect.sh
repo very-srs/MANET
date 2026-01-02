@@ -2,6 +2,8 @@
 # ==============================================================================
 # Ethernet Auto-Detection Script
 # ==============================================================================
+exec > >(tee /var/log/ethernet-detect.log) 2>&1
+set -x
 
 ETH_IFACE="end0"
 BRIDGE_IFACE="br0"
@@ -120,7 +122,7 @@ if [ "$DHCP_DETECTED" = true ]; then
     
     # Activate gateway config
     cp "$GATEWAY_CONFIG" "$ACTIVE_CONFIG"
-	rm -f "${NETWORKD_DIR}/10-end0.network" 2>/dev/null
+	rm -f "${NETWORKD_DIR}/10-end0.network" # 2>/dev/null
 	
     # Restart networkd to apply DHCP
     systemctl restart systemd-networkd
