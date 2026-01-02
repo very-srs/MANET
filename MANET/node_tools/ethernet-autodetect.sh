@@ -11,9 +11,7 @@ LOCK_FILE="/var/run/ethernet-autodetect.lock"
 # Networkd config paths
 NETWORKD_DIR="/etc/systemd/network"
 GATEWAY_CONFIG="${NETWORKD_DIR}/20-end0-gateway.network.off"
-EUD_CONFIG="${NETWORKD_DIR}/20-end0-eud.network.off"
 ACTIVE_CONFIG="${NETWORKD_DIR}/20-end0.network"
-BOOT_CONFIG="${NETWORKD_DIR}/10-end0.network"
 
 # --- Helper Functions ---
 log() {
@@ -40,6 +38,17 @@ int_to_ip() {
 exec 200>"$LOCK_FILE"
 flock -n 200 || { log "Already running. Exiting."; exit 0; }
 
+# --- Parse Mode Parameter ---
+DETECTED_MODE=""
+if [ "$1" == "--mode" ] && [ -n "$2" ]; then
+    DETECTED_MODE="$2"
+    log "Called with mode: $DETECTED_MODE"
+else
+    log "ERROR: Missing --mode parameter"
+    log "Usage: $0 --mode {gateway|wired-eud}"
+    exit 1
+fi
+
 # Check if interface exists
 if ! ip link show "$ETH_IFACE" &>/dev/null; then
     log "Interface $ETH_IFACE not found"
@@ -51,7 +60,7 @@ CARRIER=$(cat /sys/class/net/$ETH_IFACE/carrier 2>/dev/null || echo 0)
 if [ "$CARRIER" != "1" ]; then
     log "No carrier on $ETH_IFACE - cable unplugged"
     
-    # Clean up detection configs (but KEEP boot config for next attempt)
+    # Clean up detection configs
     rm -f "$ACTIVE_CONFIG"
     rm -f /var/run/mesh-gateway.state
     rm -f /var/run/mesh-ntp.state
@@ -72,20 +81,20 @@ if [ "$CARRIER" != "1" ]; then
     exit 0
 fi
 
-log "Ethernet cable detected on $ETH_IFACE. Starting detection..."
+log "Ethernet cable detected on $ETH_IFACE"
 
 # Check for EUD mode in config
 EUD_MODE=$(grep "^eud=" /etc/mesh.conf 2>/dev/null | cut -d'=' -f2)
 
 case "$EUD_MODE" in
     "wireless")
-        log "Wireless EUD mode (AP always on)"
+        log "EUD mode: wireless (AP always on)"
         ;;
     "wired")
-        log "Wired EUD mode (AP disabled)"
+        log "EUD mode: wired (AP disabled)"
         ;;
     "auto")
-        log "Auto mode (AP controlled by ethernet detection)"
+        log "EUD mode: auto (AP controlled by ethernet detection)"
         ;;
     *)
         log "Unknown EUD mode, defaulting to auto"
@@ -100,42 +109,25 @@ if [ -f /var/lib/ap_interface ]; then
     log "AP interface: $AP_INTERFACE"
 fi
 
-# ===================================================================
-# DETECTION: Check if we have IP and internet
-# ===================================================================
-DHCP_DETECTED=false
-
-# Check if interface has an IP
+# Get existing IP if any
 EXISTING_IP=$(ip -4 addr show dev "$ETH_IFACE" | grep -oP 'inet \K[\d.]+' | head -1)
 
-if [ -n "$EXISTING_IP" ]; then
-    log "Interface has IP: $EXISTING_IP"
-    log "Testing internet connectivity..."
-    
-    if ping -c 3 -W 2 -I "$ETH_IFACE" 8.8.8.8 > /dev/null 2>&1; then
-        log "Internet reachable - configuring as GATEWAY"
-        DHCP_DETECTED=true
-        ETH_IP="$EXISTING_IP"
-    else
-        log "Has IP but no internet - configuring as EUD"
-        DHCP_DETECTED=false
-    fi
-else
-    log "WARNING: No IP found on $ETH_IFACE"
-    log "This script expects to be called from routable.d AFTER IP acquisition"
-    log "Exiting without changes - routable.d will call again when IP arrives"
-    exit 0
-fi
-
 # ===================================================================
-# CONFIGURE BASED ON DETECTION
+# CONFIGURE BASED ON DETECTED MODE
 # ===================================================================
 
-if [ "$DHCP_DETECTED" = true ]; then
+if [ "$DETECTED_MODE" == "gateway" ]; then
     # ===================================
     # GATEWAY MODE - Has internet
     # ===================================
     log "Configuring as gateway/uplink..."
+    
+    if [ -z "$EXISTING_IP" ]; then
+        log "ERROR: Gateway mode but no IP found on $ETH_IFACE"
+        exit 1
+    fi
+    
+    ETH_IP="$EXISTING_IP"
     
     if [ ! -f "$GATEWAY_CONFIG" ]; then
         log "ERROR: Gateway template not found at $GATEWAY_CONFIG"
@@ -355,16 +347,16 @@ ETH_MODE=GATEWAY
 ETH_IP=$ETH_IP
 DEFAULT_GW=${DEFAULT_GW:-none}
 DETECTED_AT=$(date +%s)
-DETECTION_METHOD=IP_AND_INTERNET_TEST
+DETECTION_METHOD=CARRIER_WITH_INTERNET
 EOF
     
     log "Gateway configuration complete"
 
-else
+elif [ "$DETECTED_MODE" == "wired-eud" ]; then
     # ===================================
-    # EUD MODE - Routed interface for wired clients
+    # WIRED EUD MODE - No DHCP server, we provide DHCP
     # ===================================
-    log "Configuring as wired EUD (routed mode)..."
+    log "Configuring as wired EUD (routed mode, providing DHCP)..."
     
     # Load chunk assignment
     MY_CHUNK=0
@@ -455,8 +447,8 @@ EOF
     
     # Disable BATMAN gateway mode
     if command -v batctl &>/dev/null; then
-        batctl gw_mode off 2>/dev/null || log "BATMAN not ready yet"
-        log "Disabled BATMAN gateway mode"
+        batctl gw_mode client 2>/dev/null || log "BATMAN not ready yet"
+        log "Set BATMAN to client mode"
     fi
     
     # Revert radvd
@@ -480,11 +472,15 @@ EOF
 ETH_MODE=WIRED_EUD
 ETH_IP=$AP_IP
 DETECTED_AT=$(date +%s)
-DETECTION_METHOD=IP_BUT_NO_INTERNET
+DETECTION_METHOD=CARRIER_NO_DHCP
 DHCP_POOL=$DHCP_START-$DHCP_END
 EOF
     
     log "Wired EUD configuration complete"
+
+else
+    log "ERROR: Unknown mode: $DETECTED_MODE"
+    exit 1
 fi
 
 exit 0
