@@ -88,26 +88,21 @@ if [ -f /var/lib/ap_interface ]; then
     log "AP interface: $AP_INTERFACE"
 fi
 
-# Fast DHCP detection with nmap (unless forced)
 DHCP_DETECTED=false
+log "Probing for DHCP server (timeout: ${DETECTION_TIMEOUT}s)..."
 
-if [ "$FORCE_WIRELESS" = true ]; then
+# Ensure interface is up for probing
+ip link set "$ETH_IFACE" up
+sleep 2
+
+# Use nmap to detect DHCP server
+DHCP_PROBE=$(timeout "$DETECTION_TIMEOUT" nmap --script broadcast-dhcp-discover -e "$ETH_IFACE" 2>/dev/null)
+
+if echo "$DHCP_PROBE" | grep -q "Server Identifier\|DHCP Message Type: DHCPOFFER"; then
     DHCP_DETECTED=true
-elif [ "$FORCE_WIRED" = false ]; then
-    log "Probing for DHCP server (timeout: ${DETECTION_TIMEOUT}s)..."
-    
-    # Ensure interface is up for probing
-    ip link set "$ETH_IFACE" up
-    
-    # Use nmap to detect DHCP server
-    DHCP_PROBE=$(timeout "$DETECTION_TIMEOUT" nmap --script broadcast-dhcp-discover -e "$ETH_IFACE" 2>/dev/null)
-    
-    if echo "$DHCP_PROBE" | grep -q "Server Identifier\|DHCP Message Type: DHCPOFFER"; then
-        DHCP_DETECTED=true
-        log "DHCP server detected!"
-    else
-        log "No DHCP server found"
-    fi
+    log "DHCP server detected!"
+else
+    log "No DHCP server found"
 fi
 
 # Configure based on detection result
@@ -125,7 +120,8 @@ if [ "$DHCP_DETECTED" = true ]; then
     
     # Activate gateway config
     cp "$GATEWAY_CONFIG" "$ACTIVE_CONFIG"
-    
+	rm -f "${NETWORKD_DIR}/10-end0.network" 2>/dev/null
+	
     # Restart networkd to apply DHCP
     systemctl restart systemd-networkd
     
@@ -240,7 +236,8 @@ if [ "$DHCP_DETECTED" = false ]; then
     
     # Activate EUD config
     cp "$EUD_CONFIG" "$ACTIVE_CONFIG"
-    
+    rm -f "${NETWORKD_DIR}/10-end0.network" 2>/dev/null
+
     # Flush any existing IP
     ip addr flush dev "$ETH_IFACE" 2>/dev/null
     
