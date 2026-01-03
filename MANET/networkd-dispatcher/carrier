@@ -44,6 +44,7 @@ if [ -n "$IP" ]; then
     if ping -c 3 -W 2 -I "$IFACE" 8.8.8.8 > /dev/null 2>&1; then
         log "Internet detected - configuring as GATEWAY"
         /usr/local/bin/ethernet-autodetect.sh --mode gateway
+        /usr/local/bin/node-update.sh --routine
     else
         log "Has IP but no internet - ignoring (not configuring)"
         # Do nothing - let end0 sit with its DHCP IP unused
