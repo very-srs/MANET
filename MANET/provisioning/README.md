@@ -92,5 +92,5 @@ When finished with the questions, or after loading an existing config, you must 
 ### FIRST BOOT
 
 Plug the SBC into an ethernet network that has Internet Access.  Use a quality power adapter to provide 5v 3A.  The full post boot provisioning takes around 8 minutes and the SBC will reboot multiple times.  At the end of this proceedure you have a new mesh node that is ready to be built into an enclosure and used.
-procedure.  You want to access this node over ssh, do so via its ethernet port (plug it into a DHCP network) or a device connected to its WiFi AP (it is your default gateway).
+procedure.  If you want to access this node over ssh, do so via its ethernet port (plug it into a DHCP network) or a device connected to its WiFi AP (it is your default gateway).
 
