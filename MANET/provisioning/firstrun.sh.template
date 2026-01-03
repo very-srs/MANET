@@ -383,6 +383,7 @@ for LAN in `networkctl | awk '/ether/ {print $2}'`; do
 		Name=end${CT}
 	EOF
     (( CT++ ))
+    cp  /etc/systemd/network/10-end${CT}.network  /etc/systemd/network/10-end${CT}.network.dhcp-default
 done
 echo "Ethernet config added"
 
