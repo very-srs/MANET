@@ -3,6 +3,13 @@
 #  Update the mesh tools to the latest revision
 #
 
+# --- Parse Arguments ---
+ROUTINE_MODE=false
+if [ "$1" == "--routine" ]; then
+    ROUTINE_MODE=true
+    # Redirect all output to /dev/null in routine mode
+    exec &>/dev/null
+fi
 
 get_board_type() {
     if [ -f /proc/device-tree/model ]; then
@@ -30,56 +37,105 @@ get_board_type() {
     fi
 }
 
-echo "Testing internet connection"
-if ! ping -W3 -q -c 2 1.1.1.1 > /dev/null 2>&1; then
-    echo "No internet detected, exiting"
-    exit 2
+# --- Routine Mode: Check if version file is stale ---
+if [ "$ROUTINE_MODE" = true ]; then
+    VERSION_FILE="/etc/manet_version.txt"
+    
+    # Check if file exists and is newer than 1 day
+    if [ -f "$VERSION_FILE" ]; then
+        # Check if file was modified within last 24 hours
+        if [ -z "$(find "$VERSION_FILE" -mtime +1 2>/dev/null)" ]; then
+            # File is fresh, exit silently
+            exit 0
+        fi
+    fi
+    # File is stale or doesn't exist, continue to update check
+else
+    # --- Normal Mode: Check Internet ---
+    echo "Testing internet connection"
+    if ! ping -W3 -q -c 2 1.1.1.1 > /dev/null 2>&1; then
+        echo "No internet detected, exiting"
+        exit 2
+    fi
 fi
 
 BOARD=$(get_board_type)
 LOCAL_VERSION=0
 if [[ -f /etc/manet_version.txt ]]; then
 	LOCAL_VERSION=$(head -n 1 /etc/manet_version.txt)
-	echo -n "Local MANET tools are at version $LOCAL_VERSION, "
+	if [ "$ROUTINE_MODE" = false ]; then
+		echo -n "Local MANET tools are at version $LOCAL_VERSION, "
+	fi
 fi
+
 REMOTE_VERSION=$(curl -H 'Cache-Control: no-cache, no-store' \
     -H 'Pragma: no-cache' \
-    -s https://raw.githubusercontent.com/very-srs/MANET/refs/heads/main/MANET/node_tools/version.txt | head -n 1)
-echo "github MANET tools are at version $REMOTE_VERSION"
+    -s https://raw.githubusercontent.com/very-srs/MANET/refs/heads/main/MANET/node_tools/version.txt | head -n 1 2>/dev/null)
+
+if [ -z "$REMOTE_VERSION" ]; then
+    if [ "$ROUTINE_MODE" = false ]; then
+        echo "ERROR: Failed to fetch remote version. Check internet connection."
+    fi
+    exit 3
+fi
+
+if [ "$ROUTINE_MODE" = false ]; then
+	echo "github MANET tools are at version $REMOTE_VERSION"
+fi
 
 if [[ "$LOCAL_VERSION" == "$REMOTE_VERSION" ]]; then
-	echo "Node is already running the latest software release, exiting"
-	exit 0;
+	if [ "$ROUTINE_MODE" = false ]; then
+		echo "Node is already running the latest software release, exiting"
+	fi
+	# Touch the version file to update its timestamp (prevent repeated checks)
+	touch /etc/manet_version.txt 2>/dev/null
+	exit 0
 else
 	case "$BOARD" in
 	    rock3a)
-	        echo "Running on Rock 3A"
-	        wget -q https://github.com/very-srs/MANET/raw/refs/heads/main/MANET/install_packages/rock-tools.tar.gz -O /root/tools.tar.gz || {
-                echo "ERROR: Failed to download rock3a tools package.  Not updating"
+	        if [ "$ROUTINE_MODE" = false ]; then
+	            echo "Running on Rock 3A"
+	        fi
+	        wget -q https://github.com/very-srs/MANET/raw/refs/heads/main/MANET/install_packages/rock-tools.tar.gz -O /root/tools.tar.gz 2>/dev/null || {
+                if [ "$ROUTINE_MODE" = false ]; then
+                    echo "ERROR: Failed to download rock3a tools package.  Not updating"
+                fi
                 exit 1
         	}
 	        ;;
 	    rpi5)
-	        echo "Running on Pi 5"
-	        wget -q https://github.com/very-srs/MANET/raw/refs/heads/main/MANET/install_packages/rpi5-tools.tar.gz -O /root/tools.tar.gz || {
-                echo "ERROR: Failed to download rpi5 tools package.  Not updating"
+	        if [ "$ROUTINE_MODE" = false ]; then
+	            echo "Running on Pi 5"
+	        fi
+	        wget -q https://github.com/very-srs/MANET/raw/refs/heads/main/MANET/install_packages/rpi5-tools.tar.gz -O /root/tools.tar.gz 2>/dev/null || {
+                if [ "$ROUTINE_MODE" = false ]; then
+                    echo "ERROR: Failed to download rpi5 tools package.  Not updating"
+                fi
                 exit 1
         	}
 	        ;;
 	    rpi4)
-	        echo "Running on Pi 4B/CM4"
-	        wget -q https://github.com/very-srs/MANET/raw/refs/heads/main/MANET/install_packages/cm4-tools.tar.gz -O /root/tools.tar.gz || {
-                echo "ERROR: Failed to download rpi4 tools package.  Not updating"
+	        if [ "$ROUTINE_MODE" = false ]; then
+	            echo "Running on Pi 4B/CM4"
+	        fi
+	        wget -q https://github.com/very-srs/MANET/raw/refs/heads/main/MANET/install_packages/cm4-tools.tar.gz -O /root/tools.tar.gz 2>/dev/null || {
+                if [ "$ROUTINE_MODE" = false ]; then
+                    echo "ERROR: Failed to download rpi4 tools package.  Not updating"
+                fi
                 exit 1
         	}
 	        ;;
 	    *)
-	        echo "Unknown board type, cannot update"
+	        if [ "$ROUTINE_MODE" = false ]; then
+	            echo "Unknown board type, cannot update"
+	        fi
 	        exit 1
 	        ;;
 	esac
 fi
 
-tar -zxf /root/tools.tar.gz -C /
-echo "Node tools updated to version $REMOTE_VERSION - $(tail -n 1 /etc/manet_version.txt)"
+tar -zxf /root/tools.tar.gz -C / 2>/dev/null
 
+if [ "$ROUTINE_MODE" = false ]; then
+	echo "Node tools updated to version $REMOTE_VERSION - $(tail -n 1 /etc/manet_version.txt)"
+fi
