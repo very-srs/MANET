@@ -105,7 +105,11 @@ RemainAfterExit=yes
 WantedBy=multi-user.target
 EOF
 
-echo REGDOMAIN=US > /etc/default/crda
+REGULATORY_DOMAIN=$(grep "^regulatory_domain=" /etc/mesh.conf 2>/dev/null | cut -d'=' -f2)
+REGULATORY_DOMAIN=${REGULATORY_DOMAIN:-US}  # Default to US if not found
+
+echo REGDOMAIN=$REGULATORY_DOMAIN > /etc/default/crda
+
 
 # First identify mesh and non mesh wlan interfaces
 mesh_ifaces=()
@@ -273,7 +277,7 @@ for WLAN in `cat /var/lib/mesh_if`; do
 	echo "MESH_NAME=\"$MESH_NAME\"" > /etc/default/mesh
 cat <<-EOF > /etc/wpa_supplicant/wpa_supplicant-$WLAN-lobby.conf
 ctrl_interface=/var/run/wpa_supplicant
-country=US
+country=$REGULATORY_DOMAIN
 update_config=1
 sae_pwe=1
 ap_scan=2
@@ -417,7 +421,7 @@ rsn_pairwise=CCMP
 wpa_passphrase=$LAN_AP_KEY
 
 # Regulatory
-country_code=US
+country_code=$REGULATORY_DOMAIN
 
 # Performance
 ht_capab=[HT40+][SHORT-GI-20][SHORT-GI-40]
@@ -588,7 +592,7 @@ network={
     mode=5
     channel=12
     op_class=71
-    country="US"
+    country=US
     s1g_prim_chwidth=1
     s1g_prim_1mhz_chan_index=3
     dtim_period=1
@@ -633,8 +637,8 @@ done
 
 #stop this from loading at boot, happens too quickly
 echo "blacklist morse" > /etc/modprobe.d/morse-blacklist.conf
-echo "options cfg80211 ieee80211_regdom=US" > /etc/modprobe.d/cfg80211.conf
-
+echo "options cfg80211 ieee80211_regdom=$REGULATORY_DOMAIN" > /etc/modprobe.d/cfg80211.conf
+f
 cat << EOF > /etc/systemd/system/morse-delayed-load.service
 [Unit]
 Description=Load Morse HaLow driver with delay

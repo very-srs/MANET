@@ -59,7 +59,7 @@ set -x
 echo "=== provision-mesh-node.sh starting at $(date) ==="
 
 # This is where the wifi regulatory country is set
-REG=US
+REG="__REGULATORY_DOMAIN__"
 
 # Calculate unique hostname from MAC address
 HOST_MAC=$(ip a | grep -A1 $(networkctl | grep -v bat | awk '/ether/ {print $2}' | head -1) \
@@ -210,7 +210,7 @@ EOF
 
 # Load the morse driver with options
 cat << EOF > /etc/modprobe.d/morse.conf
-options morse country="$REG"
+options morse country="$REGULATORY_DOMAIN"
 options morse spi_clock_speed=1500000
 options morse bcf=bcf_fgh100mhaamd.bin
 options morse enable_mcast_whitelist=0 enable_mcast_rate_control=1
@@ -713,6 +713,7 @@ systemctl enable systemd-resolved
 #write out the config selections for future use
 echo "mesh_key=__MESH_SAE_KEY__" > /etc/mesh.conf
 echo "mesh_ssid=__MESH_SSID__" >> /etc/mesh.conf
+echo "regulatory_domain=__REGULATORY_DOMAIN__" >> /etc/mesh.conf
 echo "lan_ap_ssid=__LAN_AP_SSID__" >> /etc/mesh.conf
 echo "lan_ap_key=__LAN_AP_KEY__" >> /etc/mesh.conf
 echo "ipv4_network=__LAN_CIDR_BLOCK__"  >> /etc/mesh.conf
