@@ -29,8 +29,28 @@ $Script:AUTO_CHANNEL = ""
 $Script:RADIO_PW = ""
 $Script:DD_PATH = $null
 $Script:RPI_IMAGER_PATH = $null
+$Script:REGULATORY_DOMAIN = ""
 
 # --- Helper Functions ---
+
+function Test-RegulatoryDomain {
+    param([string]$domain)
+    
+    $validDomains = @(
+        "US", "CA", "GB", "DE", "FR", "IT", "ES", "NL", "BE", "AT", "CH", "SE", "NO", "DK", "FI",
+        "PL", "CZ", "HU", "GR", "PT", "IE", "RO", "BG", "HR", "SI", "SK", "LT", "LV", "EE", "CY",
+        "MT", "LU", "AU", "NZ", "JP", "KR", "TW", "SG", "MY", "TH", "PH", "ID", "VN", "IN", "CN",
+        "BR", "AR", "MX", "CL", "CO", "PE", "ZA", "IL", "AE", "SA", "RU", "UA", "TR", "EG", "MA"
+    )
+    
+    $domain = $domain.ToUpper()
+    
+    if ($validDomains -contains $domain) {
+        return $domain
+    }
+    
+    return $null
+}
 
 function Calculate-Capacity {
     param(
@@ -245,6 +265,26 @@ function Ask-Questions {
         }
     }
 
+	# WiFi Regulatory Domain
+    while ($true) {
+        $domain = Read-Host "Enter WiFi regulatory domain (2-letter country code, default: US)"
+        if ([string]::IsNullOrWhiteSpace($domain)) {
+            $domain = "US"
+        }
+        
+        $validated = Test-RegulatoryDomain -domain $domain
+        if ($validated) {
+            $Script:REGULATORY_DOMAIN = $validated
+            Write-Host "Using regulatory domain: $($Script:REGULATORY_DOMAIN)"
+            break
+        } else {
+            Write-Host "ERROR: Invalid regulatory domain code: $domain" -ForegroundColor Red
+            Write-Host "Please enter a valid 2-letter ISO country code (e.g., US, GB, DE, FR, JP)"
+            Write-Host "Common codes: US (United States), GB (UK), DE (Germany), FR (France), JP (Japan)"
+            Write-Host "              CA (Canada), AU (Australia), NZ (New Zealand), CN (China)"
+        }
+    }
+
     Write-Host "The device will have a user called radio, for ssh access."
     $pw = Read-Host "Enter a password for the radio user [or press Enter to default to 'radio']"
     Write-Host ""
@@ -307,6 +347,7 @@ LAN_AP_KEY="$($Script:LAN_AP_KEY)"
 MAX_EUDS_PER_NODE="$($Script:MAX_EUDS_PER_NODE)"
 INSTALL_MEDIAMTX="$($Script:INSTALL_MEDIAMTX)"
 INSTALL_MUMBLE="$($Script:INSTALL_MUMBLE)"
+REGULATORY_DOMAIN="$($Script:REGULATORY_DOMAIN)"
 MESH_SSID="$($Script:MESH_SSID)"
 MESH_SAE_KEY="$($Script:MESH_SAE_KEY)"
 LAN_CIDR_BLOCK="$($Script:LAN_CIDR_BLOCK)"
@@ -336,6 +377,7 @@ function Load-Config {
                 "MAX_EUDS_PER_NODE" { $Script:MAX_EUDS_PER_NODE = [int]$varValue }
                 "INSTALL_MEDIAMTX" { $Script:INSTALL_MEDIAMTX = $varValue }
                 "INSTALL_MUMBLE" { $Script:INSTALL_MUMBLE = $varValue }
+			    "REGULATORY_DOMAIN" { $Script:REGULATORY_DOMAIN = $varValue }
                 "MESH_SSID" { $Script:MESH_SSID = $varValue }
                 "MESH_SAE_KEY" { $Script:MESH_SAE_KEY = $varValue }
                 "LAN_CIDR_BLOCK" { $Script:LAN_CIDR_BLOCK = $varValue }
@@ -352,10 +394,12 @@ function Load-Config {
         Write-Host "  LAN AP Key: $($Script:LAN_AP_KEY)"
         Write-Host "  Max EUDs per node: $($Script:MAX_EUDS_PER_NODE)"
     }
-    Write-Host "  Install MediaMTX: $($Script:INSTALL_MEDIAMTX)"
+    Write
+    -Host "  Install MediaMTX: $($Script:INSTALL_MEDIAMTX)"
     Write-Host "  Install Mumble: $($Script:INSTALL_MUMBLE)"
     Write-Host "  LAN SSID: $($Script:MESH_SSID)"
     Write-Host "  LAN SAE Key: $($Script:MESH_SAE_KEY)"
+	Write-Host "  Regulatory Domain: $($Script:REGULATORY_DOMAIN)"
     Write-Host "  LAN CIDR Block: $($Script:LAN_CIDR_BLOCK)"
     Write-Host "  Auto Channel: $($Script:AUTO_CHANNEL)"
     Write-Host "  User password: $($Script:RADIO_PW)"
@@ -590,6 +634,7 @@ if ($Script:HARDWARE_MODEL -ne "r3a") {
     $templateContent = $templateContent -replace '__MAX_EUDS_PER_NODE__', $Script:MAX_EUDS_PER_NODE
     $templateContent = $templateContent -replace '__INSTALL_MEDIAMTX__', $Script:INSTALL_MEDIAMTX
     $templateContent = $templateContent -replace '__INSTALL_MUMBLE__', $Script:INSTALL_MUMBLE
+	$templateContent = $templateContent -replace '__REGULATORY_DOMAIN__', $Script:REGULATORY_DOMAIN
     $templateContent = $templateContent -replace '__MESH_SSID__', $Script:MESH_SSID
     $templateContent = $templateContent -replace '__MESH_SAE_KEY__', $Script:MESH_SAE_KEY
     $templateContent = $templateContent -replace '__LAN_CIDR_BLOCK__', $Script:LAN_CIDR_BLOCK
@@ -660,6 +705,7 @@ LAN_AP_KEY=$($Script:LAN_AP_KEY)
 MAX_EUDS_PER_NODE=$($Script:MAX_EUDS_PER_NODE)
 INSTALL_MEDIAMTX=$($Script:INSTALL_MEDIAMTX)
 INSTALL_MUMBLE=$($Script:INSTALL_MUMBLE)
+REGULATORY_DOMAIN=$($Script:REGULATORY_DOMAIN)
 MESH_SSID=$($Script:MESH_SSID)
 MESH_SAE_KEY=$($Script:MESH_SAE_KEY)
 LAN_CIDR_BLOCK=$($Script:LAN_CIDR_BLOCK)

@@ -12,6 +12,30 @@ CONFIG_DIR=".mesh-configs"
 PI_OS_IMAGE_URL="https://downloads.raspberrypi.com/raspios_lite_arm64/images/raspios_lite_arm64-2025-10-02/2025-10-01-raspios-trixie-arm64-lite.img.xz"
 
 # --- Helper Functions ---
+# Function to validate regulatory domain
+validate_regulatory_domain() {
+    local domain=$1
+    
+    # List of valid regulatory domains (common ones)
+    local valid_domains=(
+        "US" "CA" "GB" "DE" "FR" "IT" "ES" "NL" "BE" "AT" "CH" "SE" "NO" "DK" "FI"
+        "PL" "CZ" "HU" "GR" "PT" "IE" "RO" "BG" "HR" "SI" "SK" "LT" "LV" "EE" "CY"
+        "MT" "LU" "AU" "NZ" "JP" "KR" "TW" "SG" "MY" "TH" "PH" "ID" "VN" "IN" "CN"
+        "BR" "AR" "MX" "CL" "CO" "PE" "ZA" "IL" "AE" "SA" "RU" "UA" "TR" "EG" "MA"
+    )
+    
+    # Convert to uppercase for comparison
+    domain=$(echo "$domain" | tr '[:lower:]' '[:upper:]')
+    
+    for valid in "${valid_domains[@]}"; do
+        if [ "$domain" == "$valid" ]; then
+            echo "$domain"
+            return 0
+        fi
+    done
+    
+    return 1
+}
 
 # Function to calculate network capacity
 calculate_capacity() {
@@ -206,7 +230,7 @@ ask_questions() {
 		esac
 	done
 
-	# --- If Wireless or Auto, ask for LAN AP configuration ---
+	# If Wireless or Auto, ask for LAN AP configuration
 	if [ "$EUD_CONNECTION" = "wireless" ] || [ "$EUD_CONNECTION" = "auto" ]; then
 		read -p "Enter LAN AP SSID Name: " LAN_AP_SSID
 		
@@ -232,7 +256,7 @@ ask_questions() {
 		MAX_EUDS_PER_NODE=0
 	fi
 
-	# --- 2. Optional Software ---
+	# Optional Software
 	read -p "Install MediaMTX Server? (Y/n): " INSTALL_MEDIAMTX
 	INSTALL_MEDIAMTX=${INSTALL_MEDIAMTX:-y}
 	if [ "$INSTALL_MEDIAMTX" = "y" ] || [ "$INSTALL_MEDIAMTX" = "Y" ]; then INSTALL_MEDIAMTX="y"; else INSTALL_MEDIAMTX="n"; fi
@@ -241,7 +265,7 @@ ask_questions() {
 	INSTALL_MUMBLE=${INSTALL_MUMBLE:-y}
 	if [ "$INSTALL_MUMBLE" = "y" ] || [ "$INSTALL_MUMBLE" = "Y" ]; then INSTALL_MUMBLE="y"; else INSTALL_MUMBLE="n"; fi
 
-	# --- 3. Mesh Configuration ---
+	# Mesh Configuration
 	read -p "Enter MESH SSID Name: " MESH_SSID
 
 	while true; do
@@ -261,6 +285,23 @@ ask_questions() {
 		fi
 	done
 
+	# WiFi Regulatory Domain
+    while true; do
+        read -p "Enter WiFi regulatory domain (2-letter country code, default: US): " REGULATORY_DOMAIN
+        REGULATORY_DOMAIN=${REGULATORY_DOMAIN:-US}
+
+        if validated_domain=$(validate_regulatory_domain "$REGULATORY_DOMAIN"); then
+            REGULATORY_DOMAIN="$validated_domain"
+            echo "Using regulatory domain: $REGULATORY_DOMAIN"
+            break
+        else
+            echo "ERROR: Invalid regulatory domain code: $REGULATORY_DOMAIN"
+            echo "Please enter a valid 2-letter ISO country code (e.g., US, GB, DE, FR, JP)"
+            echo "Common codes: US (United States), GB (UK), DE (Germany), FR (France), JP (Japan)"
+            echo "              CA (Canada), AU (Australia), NZ (New Zealand), CN (China)"
+        fi
+    done
+
 	echo "The device will have a user called radio, for ssh access."
 	read -p "Enter a password for the radio user [or press Enter to default to 'radio']: " RADIO_PW
 	echo
@@ -271,7 +312,7 @@ ask_questions() {
 	fi
 	echo "Setting radio password to be $RADIO_PW"
 
-	# --- Ask for max EUDs before CIDR selection ---
+	# Ask for max EUDs before CIDR selection 
 	if [ "$EUD_CONNECTION" = "wireless" ] || [ "$EUD_CONNECTION" = "auto" ]; then
 		while true; do
 			read -p "Maximum EUDs per node's AP (1-20): " MAX_EUDS_PER_NODE
@@ -283,10 +324,10 @@ ask_questions() {
 		done
 	fi
 
-	# --- CIDR selection with capacity planning ---
+	# CIDR selection with capacity planning
 	ask_lan_cidr "$MAX_EUDS_PER_NODE"
 
-	# --- Auto Channel Selection (skip if wireless or auto) ---
+	# Auto Channel Selection (skip if wireless or auto)
 	if [ "$EUD_CONNECTION" = "wireless" ] || [ "$EUD_CONNECTION" = "auto" ]; then
 		AUTO_CHANNEL="n"
 		echo "Automatic WiFi Channel Selection disabled (not compatible with Wireless/Auto EUD mode)"
@@ -313,7 +354,6 @@ save_config() {
 
 		local CONFIG_FILE="$CONFIG_DIR/$config_name.conf"
 
-		# Use a heredoc to write all variables to the file
 		cat << EOF > "$CONFIG_FILE"
 # Pi Imager Config: $config_name
 EUD_CONNECTION="$EUD_CONNECTION"
@@ -322,6 +362,7 @@ LAN_AP_KEY="$LAN_AP_KEY"
 MAX_EUDS_PER_NODE="$MAX_EUDS_PER_NODE"
 INSTALL_MEDIAMTX="$INSTALL_MEDIAMTX"
 INSTALL_MUMBLE="$INSTALL_MUMBLE"
+REGULATORY_DOMAIN="$REGULATORY_DOMAIN"
 MESH_SSID="$MESH_SSID"
 MESH_SAE_KEY="$MESH_SAE_KEY"
 LAN_CIDR_BLOCK="$LAN_CIDR_BLOCK"
@@ -350,6 +391,7 @@ load_config() {
 	fi
 	echo "  Install MediaMTX: $INSTALL_MEDIAMTX"
 	echo "  Install Mumble: $INSTALL_MUMBLE"
+	echo "  Regulatory Domain: $REGULATORY_DOMAIN"
 	echo "  Mesh SSID: $MESH_SSID"
 	echo "  Mesh SAE Key: $MESH_SAE_KEY"
 	echo "  LAN CIDR Block: $LAN_CIDR_BLOCK"
@@ -618,6 +660,7 @@ if [ "$HARDWARE_MODEL" != "r3a" ]; then
     MAX_EUDS_PER_NODE_ESC=$(escape_sed "$MAX_EUDS_PER_NODE")
     INSTALL_MEDIAMTX_ESC=$(escape_sed "$INSTALL_MEDIAMTX")
     INSTALL_MUMBLE_ESC=$(escape_sed "$INSTALL_MUMBLE")
+    REGULATORY_DOMAIN_ESC=$(escape_sed "$REGULATORY_DOMAIN")
     MESH_SSID_ESC=$(escape_sed "$MESH_SSID")
     MESH_SAE_KEY_ESC=$(escape_sed "$MESH_SAE_KEY")
     LAN_CIDR_BLOCK_ESC=$(escape_sed "$LAN_CIDR_BLOCK")
@@ -631,6 +674,7 @@ if [ "$HARDWARE_MODEL" != "r3a" ]; then
         -e "s|__MAX_EUDS_PER_NODE__|${MAX_EUDS_PER_NODE_ESC}|g" \
         -e "s|__INSTALL_MEDIAMTX__|${INSTALL_MEDIAMTX_ESC}|g" \
         -e "s|__INSTALL_MUMBLE__|${INSTALL_MUMBLE_ESC}|g" \
+        -e "s|__REGULATORY_DOMAIN__|${REGULATORY_DOMAIN_ESC}|g" \
         -e "s|__MESH_SSID__|${MESH_SSID_ESC}|g" \
         -e "s|__MESH_SAE_KEY__|${MESH_SAE_KEY_ESC}|g" \
         -e "s|__LAN_CIDR_BLOCK__|${LAN_CIDR_BLOCK_ESC}|g" \
@@ -669,6 +713,7 @@ MESH_SAE_KEY=${MESH_SAE_KEY}
 LAN_CIDR_BLOCK=${LAN_CIDR_BLOCK}
 AUTO_CHANNEL=${AUTO_CHANNEL}
 RADIO_PW=${RADIO_PW}
+REGULATORY_DOMAIN=${REGULATORY_DOMAIN}
 EOF
 	# Unmount
 	sudo sync
