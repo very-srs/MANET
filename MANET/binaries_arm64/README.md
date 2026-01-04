@@ -2,6 +2,8 @@
 
 This directory contains pre-compiled binaries used for the mesh network nodes.
 
+Alfred and Batman are compiled from the open-mesh sources rather than pulled from apt to get a newer version.  The s1g wpa binaries are compiled from Morse Micro's halow enabled hostapd sources.  I add them as a binary here to avoid having to build them at first boot on the mesh nodes.
+
 These files are automatically injected into the OS image by the provisioning scripts. They are archived here for manual recovery, debugging, or custom deployments if needed.
 
 ---
