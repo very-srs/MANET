@@ -269,9 +269,9 @@ configure_dnsmasq() {
     local br0_secondary=$1
     local dhcp_start=$2
     local dhcp_end=$3
-    
+
     log "Configuring dnsmasq: pool=$dhcp_start-$dhcp_end, gateway=$br0_secondary"
-    
+
     cat > /etc/dnsmasq.d/mesh-eud.conf <<- EOF
 # Listen only on br0 bridge
 interface=br0
@@ -294,11 +294,17 @@ no-poll
 # Log for debugging
 log-dhcp
 EOF
-    
-    # Restart dnsmasq if it's running
+
+    # Ensure dnsmasq is unmasked, enabled, and running
+    systemctl unmask dnsmasq.service 2>/dev/null
+#    systemctl enable dnsmasq.service 2>/dev/null
+
     if systemctl is-active --quiet dnsmasq.service; then
         systemctl restart dnsmasq.service
         log "dnsmasq restarted"
+    else
+        systemctl start dnsmasq.service
+        log "dnsmasq started"
     fi
 }
 
