@@ -1,7 +1,19 @@
 #!/bin/bash
 # ==============================================================================
-# Ethernet Auto-Detection Script
+# Ethernet Auto-Detection Script - Bridged Architecture
 # ==============================================================================
+# Detects ethernet role and configures bridging appropriately
+#
+# Modes:
+#   gateway: end0 has internet (DHCP from ISP) - stays routed, NAT enabled
+#   wired-eud: end0 connected to EUD device - bridge to br0
+#
+# wlan1 handling:
+#   - In wireless/auto mode with no cable: wlan1 is AP (br0, not bat0)
+#   - In wired mode or auto with wired EUD: wlan1 returns to mesh (bat0)
+#   - In gateway mode: wlan1 behavior depends on eud config
+# ==============================================================================
+
 exec > >(tee /var/log/ethernet-detect.log) 2>&1
 set -x
 
@@ -16,22 +28,6 @@ ACTIVE_CONFIG="${NETWORKD_DIR}/20-end0.network"
 # --- Helper Functions ---
 log() {
     echo "[$(date +'%Y-%m-%d %H:%M:%S')] - ETH-DETECT: $1" | systemd-cat -t ethernet-autodetect
-}
-
-# IP conversion functions
-ip_to_int() {
-    local ip=$1
-    if [[ -z "$ip" || ! "$ip" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
-        return 1
-    fi
-    local a b c d
-    IFS=. read -r a b c d <<<"$ip"
-    echo "$(( (a << 24) + (b << 16) + (c << 8) + d ))"
-}
-
-int_to_ip() {
-    local ip_int=$1
-    echo "$(( (ip_int >> 24) & 255 )).$(( (ip_int >> 16) & 255 )).$(( (ip_int >> 8) & 255 )).$(( ip_int & 255 ))"
 }
 
 # Ensure only one instance runs
@@ -66,16 +62,27 @@ if [ "$CARRIER" != "1" ]; then
     rm -f /var/run/mesh-ntp.state
     rm -f /var/run/ethernet_detection_state
     
-    # In AUTO mode with no ethernet, enable AP
+    # In AUTO mode with no ethernet, ensure AP is enabled (if configured)
     EUD_MODE=$(grep "^eud=" /etc/mesh.conf 2>/dev/null | cut -d'=' -f2)
     if [ "$EUD_MODE" == "auto" ] && [ -f /var/lib/ap_interface ]; then
-        log "Auto mode: No ethernet, enabling AP for EUD connectivity"
+        AP_INTERFACE=$(cat /var/lib/ap_interface)
+        log "Auto mode: No ethernet, ensuring AP on $AP_INTERFACE"
+        
+        # Ensure wlan1 is NOT in bat0 (will be in br0 via hostapd/bridge config)
+        if batctl if | grep -q "$AP_INTERFACE"; then
+            log "Removing $AP_INTERFACE from bat0 (will be AP)"
+            batctl if del "$AP_INTERFACE" 2>/dev/null || true
+        fi
+        
         systemctl unmask dnsmasq.service 2>/dev/null
         systemctl enable hostapd.service 2>/dev/null
         systemctl start hostapd.service 2>/dev/null
         systemctl enable dnsmasq.service 2>/dev/null
         systemctl start dnsmasq.service 2>/dev/null
         systemctl start ap-txpower.service 2>/dev/null
+        
+        # Reconfigure ebtables (wlan1 should allow DHCP)
+        /usr/local/bin/mesh-ip-manager.sh
     fi
     
     exit 0
@@ -179,167 +186,56 @@ if [ "$DETECTED_MODE" == "gateway" ]; then
     fi
     
     # === AP CONTROL ===
+    # In gateway mode, AP behavior depends on EUD mode
     if [ "$EUD_MODE" == "auto" ] && [ -n "$AP_INTERFACE" ]; then
         log "Auto mode + Gateway: Keeping AP enabled (dual role)"
         
-        # Get current chunk allocation
-        MY_CHUNK=0
-        if [ -f /var/run/my_ipv4_chunk ]; then
-            MY_CHUNK=$(cat /var/run/my_ipv4_chunk)
-        fi
-        
-        if [ "$MY_CHUNK" -gt 0 ]; then
-            # Reconfigure dnsmasq and AP with correct chunk IPs
-            IPV4_NETWORK=$(grep "^ipv4_network=" /etc/mesh.conf 2>/dev/null | cut -d'=' -f2)
-            MAX_EUDS=$(grep "^max_euds_per_node=" /etc/mesh.conf 2>/dev/null | cut -d'=' -f2)
-            
-            CALC_OUTPUT=$(ipcalc "$IPV4_NETWORK" 2>/dev/null)
-            FIRST_IP=$(echo "$CALC_OUTPUT" | awk '/HostMin/ {print $2}')
-            MIN_INT=$(ip_to_int "$FIRST_IP")
-            CHUNK_SIZE=$((MAX_EUDS + 2))
-            CHUNK_START_INT=$((MIN_INT + 5 + (MY_CHUNK * CHUNK_SIZE)))
-            
-            BR0_IP=$(int_to_ip "$CHUNK_START_INT")
-            AP_IP=$(int_to_ip $((CHUNK_START_INT + 1)))
-            DHCP_START=$(int_to_ip $((CHUNK_START_INT + 2)))
-            DHCP_END=$(int_to_ip $((CHUNK_START_INT + CHUNK_SIZE - 1)))
-            
-            log "Updating AP configuration: gateway=$AP_IP, pool=$DHCP_START-$DHCP_END"
-            
-            # Remove AP from bridge if enslaved
-            if ip link show "$AP_INTERFACE" | grep -q "master br0"; then
-                log "Removing $AP_INTERFACE from br0 (must be routed, not bridged)"
-                ip link set "$AP_INTERFACE" nomaster
-            fi
-            
-            # Assign AP IP
-            ip addr flush dev "$AP_INTERFACE" 2>/dev/null
-            ip addr add "${AP_IP}/${IPV4_NETWORK#*/}" dev "$AP_INTERFACE"
-            ip link set "$AP_INTERFACE" up
-            
-            # Enable routing between AP and mesh
-            sysctl -q net.ipv4.conf.$AP_INTERFACE.proxy_arp=1
-            sysctl -q net.ipv4.conf.br0.proxy_arp=1
-            
-            # Update dnsmasq config
-            cat > /etc/dnsmasq.d/mesh-ap.conf <<EOF
-# Listen only on AP interface
-interface=$AP_INTERFACE
-bind-interfaces
-
-# Do not serve DHCP on br0
-no-dhcp-interface=br0
-
-# DHCP configuration from this node's chunk
-dhcp-range=$DHCP_START,$DHCP_END,12h
-
-# Gateway is this node's AP interface
-dhcp-option=3,$AP_IP
-
-# DNS configuration
-domain=mesh.local
-local=/mesh.local/
-
-# Disable DNS upstream (offline mesh)
-no-resolv
-no-poll
-
-# Log for debugging
-log-dhcp
-EOF
+        # Ensure wlan1 is NOT in bat0 (it's the AP)
+        if batctl if | grep -q "$AP_INTERFACE"; then
+            log "Removing $AP_INTERFACE from bat0 (dual role gateway+AP)"
+            batctl if del "$AP_INTERFACE" 2>/dev/null || true
         fi
         
         systemctl unmask dnsmasq.service 2>/dev/null
         systemctl enable hostapd.service 2>/dev/null
         systemctl start hostapd.service 2>/dev/null
         systemctl enable dnsmasq.service 2>/dev/null
-        systemctl restart dnsmasq.service 2>/dev/null
+        systemctl start dnsmasq.service 2>/dev/null
         systemctl start ap-txpower.service 2>/dev/null
         
     elif [ "$EUD_MODE" == "wireless" ] && [ -n "$AP_INTERFACE" ]; then
         log "Wireless mode: Ensuring AP is enabled"
         
-        # Get current chunk allocation
-        MY_CHUNK=0
-        if [ -f /var/run/my_ipv4_chunk ]; then
-            MY_CHUNK=$(cat /var/run/my_ipv4_chunk)
-        fi
-        
-        if [ "$MY_CHUNK" -gt 0 ]; then
-            # Reconfigure dnsmasq and AP with correct chunk IPs
-            IPV4_NETWORK=$(grep "^ipv4_network=" /etc/mesh.conf 2>/dev/null | cut -d'=' -f2)
-            MAX_EUDS=$(grep "^max_euds_per_node=" /etc/mesh.conf 2>/dev/null | cut -d'=' -f2)
-            
-            CALC_OUTPUT=$(ipcalc "$IPV4_NETWORK" 2>/dev/null)
-            FIRST_IP=$(echo "$CALC_OUTPUT" | awk '/HostMin/ {print $2}')
-            MIN_INT=$(ip_to_int "$FIRST_IP")
-            CHUNK_SIZE=$((MAX_EUDS + 2))
-            CHUNK_START_INT=$((MIN_INT + 5 + (MY_CHUNK * CHUNK_SIZE)))
-            
-            BR0_IP=$(int_to_ip "$CHUNK_START_INT")
-            AP_IP=$(int_to_ip $((CHUNK_START_INT + 1)))
-            DHCP_START=$(int_to_ip $((CHUNK_START_INT + 2)))
-            DHCP_END=$(int_to_ip $((CHUNK_START_INT + CHUNK_SIZE - 1)))
-            
-            log "Updating AP configuration: gateway=$AP_IP, pool=$DHCP_START-$DHCP_END"
-            
-            # Remove AP from bridge if enslaved
-            if ip link show "$AP_INTERFACE" | grep -q "master br0"; then
-                log "Removing $AP_INTERFACE from br0 (must be routed, not bridged)"
-                ip link set "$AP_INTERFACE" nomaster
-            fi
-            
-            # Assign AP IP
-            ip addr flush dev "$AP_INTERFACE" 2>/dev/null
-            ip addr add "${AP_IP}/${IPV4_NETWORK#*/}" dev "$AP_INTERFACE"
-            ip link set "$AP_INTERFACE" up
-            
-            # Enable routing between AP and mesh
-            sysctl -q net.ipv4.conf.$AP_INTERFACE.proxy_arp=1
-            sysctl -q net.ipv4.conf.br0.proxy_arp=1
-            
-            # Update dnsmasq config
-            cat > /etc/dnsmasq.d/mesh-ap.conf <<EOF
-# Listen only on AP interface
-interface=$AP_INTERFACE
-bind-interfaces
-
-# Do not serve DHCP on br0
-no-dhcp-interface=br0
-
-# DHCP configuration from this node's chunk
-dhcp-range=$DHCP_START,$DHCP_END,12h
-
-# Gateway is this node's AP interface
-dhcp-option=3,$AP_IP
-
-# DNS configuration
-domain=mesh.local
-local=/mesh.local/
-
-# Disable DNS upstream (offline mesh)
-no-resolv
-no-poll
-
-# Log for debugging
-log-dhcp
-EOF
+        # Ensure wlan1 is NOT in bat0
+        if batctl if | grep -q "$AP_INTERFACE"; then
+            log "Removing $AP_INTERFACE from bat0 (wireless mode AP)"
+            batctl if del "$AP_INTERFACE" 2>/dev/null || true
         fi
         
         systemctl unmask dnsmasq.service 2>/dev/null
         systemctl enable hostapd.service 2>/dev/null
         systemctl start hostapd.service 2>/dev/null
         systemctl enable dnsmasq.service 2>/dev/null
-        systemctl restart dnsmasq.service 2>/dev/null
+        systemctl start dnsmasq.service 2>/dev/null
         systemctl start ap-txpower.service 2>/dev/null
         
     elif [ "$EUD_MODE" == "wired" ] && [ -n "$AP_INTERFACE" ]; then
-        log "Wired mode: Disabling AP"
+        log "Wired mode: Disabling AP, returning $AP_INTERFACE to mesh"
+        
         systemctl stop hostapd.service 2>/dev/null
         systemctl stop dnsmasq.service 2>/dev/null
         systemctl stop ap-txpower.service 2>/dev/null
         systemctl disable hostapd.service 2>/dev/null
+        
+        # Add wlan1 back to bat0
+        if ! batctl if | grep -q "$AP_INTERFACE"; then
+            log "Adding $AP_INTERFACE back to bat0 (wired mode)"
+            systemctl restart batman-enslave.service
+        fi
     fi
+    
+    # Reconfigure ebtables and dnsmasq (handles wlan1 role changes)
+    /usr/local/bin/mesh-ip-manager.sh
     
     # Save state
     cat > /var/run/ethernet_detection_state <<EOF
@@ -354,92 +250,50 @@ EOF
 
 elif [ "$DETECTED_MODE" == "wired-eud" ]; then
     # ===================================
-    # WIRED EUD MODE - No DHCP server, we provide DHCP
+    # WIRED EUD MODE - Bridge to mesh
     # ===================================
-    log "Configuring as wired EUD (routed mode, providing DHCP)..."
+    log "Configuring as wired EUD (bridged mode)..."
     
-    # Load chunk assignment
-    MY_CHUNK=0
-    if [ -f /var/run/my_ipv4_chunk ]; then
-        MY_CHUNK=$(cat /var/run/my_ipv4_chunk)
-    fi
-    
-    if [ "$MY_CHUNK" -eq 0 ]; then
-        log "WARNING: No chunk assigned yet, cannot configure wired EUD"
-        exit 0
-    fi
-    
-    # Source mesh config
-    IPV4_NETWORK=$(grep "^ipv4_network=" /etc/mesh.conf 2>/dev/null | cut -d'=' -f2)
-    MAX_EUDS=$(grep "^max_euds_per_node=" /etc/mesh.conf 2>/dev/null | cut -d'=' -f2)
-    
-    if [ -z "$IPV4_NETWORK" ] || [ -z "$MAX_EUDS" ]; then
-        log "ERROR: Missing network config"
-        exit 1
-    fi
-    
-    # Calculate chunk IPs
-    CALC_OUTPUT=$(ipcalc "$IPV4_NETWORK" 2>/dev/null)
-    FIRST_IP=$(echo "$CALC_OUTPUT" | awk '/HostMin/ {print $2}')
-    MIN_INT=$(ip_to_int "$FIRST_IP")
-    CHUNK_SIZE=$((MAX_EUDS + 2))
-    CHUNK_START_INT=$((MIN_INT + 5 + (MY_CHUNK * CHUNK_SIZE)))
-    
-    BR0_IP=$(int_to_ip "$CHUNK_START_INT")
-    AP_IP=$(int_to_ip $((CHUNK_START_INT + 1)))
-    DHCP_START=$(int_to_ip $((CHUNK_START_INT + 2)))
-    DHCP_END=$(int_to_ip $((CHUNK_START_INT + CHUNK_SIZE - 1)))
-    
-    log "Configuring end0 as EUD gateway: IP=$AP_IP, pool=$DHCP_START-$DHCP_END"
-    
-    # Remove end0 from bridge config if it exists
+    # Remove any networkd configs for end0 (bridge will handle it)
     rm -f "$ACTIVE_CONFIG"
     
-    # Configure end0 with its chunk IP (not bridged)
+    # Flush IP from end0 (will get address via br0)
     ip addr flush dev "$ETH_IFACE" 2>/dev/null
-    ip addr add "${AP_IP}/${IPV4_NETWORK#*/}" dev "$ETH_IFACE"
-    ip link set "$ETH_IFACE" up
     
-    # Enable proxy ARP for routing between end0 and mesh
-    sysctl -q net.ipv4.conf.$ETH_IFACE.proxy_arp=1
-    sysctl -q net.ipv4.conf.br0.proxy_arp=1
-    
-    # Configure dnsmasq for wired EUD
-    cat > /etc/dnsmasq.d/mesh-wired-eud.conf <<EOF
-# Listen only on wired EUD interface
-interface=$ETH_IFACE
-bind-interfaces
-
-# Do not serve on br0
-no-dhcp-interface=br0
-
-# DHCP configuration from this node's chunk
-dhcp-range=$DHCP_START,$DHCP_END,12h
-
-# Gateway is this interface
-dhcp-option=3,$AP_IP
-
-# DNS configuration
-domain=mesh.local
-local=/mesh.local/
-
-# Disable DNS upstream (offline mesh)
-no-resolv
-no-poll
-
-# Log for debugging
-log-dhcp
-EOF
-    
-    # Stop hostapd but keep dnsmasq for wired DHCP
-    if [ "$EUD_MODE" == "auto" ] || [ "$EUD_MODE" == "wired" ]; then
-        systemctl stop hostapd.service 2>/dev/null
-        systemctl disable hostapd.service 2>/dev/null
+    # Ensure end0 is enslaved to br0
+    if ! ip link show "$ETH_IFACE" | grep -q "master br0"; then
+        log "Enslaving $ETH_IFACE to br0"
+        ip link set "$ETH_IFACE" master br0
+        ip link set "$ETH_IFACE" up
+    else
+        log "$ETH_IFACE already in br0"
     fi
     
-    systemctl unmask dnsmasq.service 2>/dev/null
-    systemctl enable dnsmasq.service 2>/dev/null
-    systemctl restart dnsmasq.service 2>/dev/null
+    # Disable AP if in auto or wired mode (wlan1 returns to mesh)
+    if [ "$EUD_MODE" == "auto" ] || [ "$EUD_MODE" == "wired" ]; then
+        if [ -n "$AP_INTERFACE" ]; then
+            log "$EUD_MODE mode with wired EUD: Disabling AP, returning $AP_INTERFACE to mesh"
+            
+            systemctl stop hostapd.service 2>/dev/null
+            systemctl stop ap-txpower.service 2>/dev/null
+            systemctl disable hostapd.service 2>/dev/null
+            
+            # Remove wlan1 from br0 if it's there
+            if ip link show "$AP_INTERFACE" 2>/dev/null | grep -q "master br0"; then
+                log "Removing $AP_INTERFACE from br0"
+                ip link set "$AP_INTERFACE" nomaster 2>/dev/null || true
+            fi
+            
+            # Add wlan1 back to bat0
+            if ! batctl if | grep -q "$AP_INTERFACE"; then
+                log "Adding $AP_INTERFACE back to bat0"
+                systemctl restart batman-enslave.service
+            fi
+        fi
+    elif [ "$EUD_MODE" == "wireless" ] && [ -n "$AP_INTERFACE" ]; then
+        log "Wireless mode: AP stays enabled even with wired EUD"
+        # AP stays running, no changes
+    fi
     
     # Remove gateway state
     rm -f /var/run/mesh-gateway.state
@@ -458,22 +312,15 @@ EOF
     # Remove NAT rules
     nft flush chain ip nat postrouting 2>/dev/null || true
     
-    # === AP CONTROL (for wireless mode) ===
-    if [ "$EUD_MODE" == "wireless" ] && [ -n "$AP_INTERFACE" ]; then
-        log "Wireless mode: Ensuring AP is enabled"
-        systemctl unmask dnsmasq.service 2>/dev/null
-        systemctl enable hostapd.service 2>/dev/null
-        systemctl start hostapd.service 2>/dev/null
-        systemctl start ap-txpower.service 2>/dev/null
-    fi
+    # Reconfigure ebtables and dnsmasq (handles wlan1 role + end0 addition)
+    /usr/local/bin/mesh-ip-manager.sh
     
     # Save state
     cat > /var/run/ethernet_detection_state <<EOF
 ETH_MODE=WIRED_EUD
-ETH_IP=$AP_IP
+ETH_BRIDGE=br0
 DETECTED_AT=$(date +%s)
 DETECTION_METHOD=CARRIER_NO_DHCP
-DHCP_POOL=$DHCP_START-$DHCP_END
 EOF
     
     log "Wired EUD configuration complete"

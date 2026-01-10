@@ -111,13 +111,41 @@ REGULATORY_DOMAIN=${REGULATORY_DOMAIN:-US}  # Default to US if not found
 echo REGDOMAIN=$REGULATORY_DOMAIN > /etc/default/crda
 
 
-# First identify mesh and non mesh wlan interfaces
+# Wait for wireless drivers to load
+echo "Waiting for wireless drivers to load..."
+DRIVER_WAIT_COUNT=0
+MAX_DRIVER_WAIT=30  # 60 seconds total
+
+while [ $DRIVER_WAIT_COUNT -lt $MAX_DRIVER_WAIT ]; do
+    PHY_COUNT=$(iw dev 2>/dev/null | grep -c "^phy#" || echo "0")
+
+    if [ "$PHY_COUNT" -gt 0 ]; then
+        echo "✓ Found $PHY_COUNT wireless PHY(s)"
+        break
+    fi
+
+    if [ $DRIVER_WAIT_COUNT -eq 0 ]; then
+        echo "No wireless interfaces detected yet, waiting for drivers..."
+    elif [ $((DRIVER_WAIT_COUNT % 5)) -eq 0 ]; then
+        echo "Still waiting... (${DRIVER_WAIT_COUNT}/${MAX_DRIVER_WAIT})"
+    fi
+
+    sleep 2
+    ((DRIVER_WAIT_COUNT++))
+done
+
+if [ "$PHY_COUNT" -eq 0 ]; then
+    echo "⚠ WARNING: No wireless interfaces found after $((MAX_DRIVER_WAIT * 2)) seconds"
+    echo "  This is normal for wired-only configurations"
+    echo "  If you expect wireless: check 'dmesg | grep -i firmware'"
+fi
+
+# Detect interfaces, save to files
 mesh_ifaces=()
 halow_ifaces=()
 nonmesh_ifaces=()
 
-for phy in $(iw dev | awk '/^phy#/{print $1}'); do
-    # Convert 'phy#0' → 'phy0'
+for phy in $(iw dev | awk '/^phy#/{print $1}'); do    # Convert 'phy#0' → 'phy0'
     phyname=${phy//#/}
 
     # Find interface(s) for this PHY
@@ -137,6 +165,13 @@ for phy in $(iw dev | awk '/^phy#/{print $1}'); do
 done
 
 # Keep track across reboots
+# Create directory and files even if arrays are empty (supports wired-only configs)
+mkdir -p /var/lib
+> /var/lib/mesh_if
+> /var/lib/halow_if
+> /var/lib/no_mesh_if
+
+# Keep track across reboots
 for iface in "${mesh_ifaces[@]}"; do
     echo "$iface" >> /var/lib/mesh_if
 done
@@ -148,6 +183,13 @@ done
 for iface in "${nonmesh_ifaces[@]}"; do
     echo "$iface" >> /var/lib/no_mesh_if
 done
+
+# Log what we found
+echo "Interface detection complete:"
+echo "  Mesh-capable: ${#mesh_ifaces[@]} ($(echo ${mesh_ifaces[@]}))"
+echo "  HaLow: ${#halow_ifaces[@]} ($(echo ${halow_ifaces[@]}))"
+echo "  Non-mesh: ${#nonmesh_ifaces[@]} ($(echo ${nonmesh_ifaces[@]}))"
+
 ## Bring everything down before renaming
 #for iface in "${mesh_ifaces[@]}" "${halow_ifaces[@]}" "${nonmesh_ifaces[@]}"; do
 #    ip link set "$iface" down 2>/dev/null
@@ -638,7 +680,6 @@ done
 #stop this from loading at boot, happens too quickly
 echo "blacklist morse" > /etc/modprobe.d/morse-blacklist.conf
 echo "options cfg80211 ieee80211_regdom=$REGULATORY_DOMAIN" > /etc/modprobe.d/cfg80211.conf
-f
 cat << EOF > /etc/systemd/system/morse-delayed-load.service
 [Unit]
 Description=Load Morse HaLow driver with delay

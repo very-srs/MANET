@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# Mesh IP Manager - Chunk-Based Allocation
+# Mesh IP Manager - Chunk-Based Allocation with Bridged EUD Architecture
 # ==============================================================================
 # This script manages IPv4 address claiming using a chunk-based approach where
 # each node claims a contiguous block of IPs for itself and its EUDs.
@@ -11,9 +11,19 @@
 #
 # Chunk Structure (example with max_euds=5):
 #   Chunk size = max_euds + 2
-#   - IP 0 in chunk: br0 (mesh interface)
-#   - IP 1 in chunk: wlan2 (AP gateway - if wireless/auto mode)
+#   - IP 0 in chunk: br0 primary (mesh interface)
+#   - IP 1 in chunk: br0 secondary (DHCP gateway for EUDs)
 #   - IPs 2+ in chunk: DHCP pool for EUDs
+#
+# Bridged Architecture:
+#   - All EUD interfaces (wlan1 when AP, end0 when wired) are bridged to br0
+#   - ebtables blocks DHCP on mesh interfaces (bat0, wlan0, wlan2, and wlan1 if mesh)
+#   - dnsmasq listens on br0 for DHCP requests from EUDs
+#   - Multicast works at L2 (bridge), no routing needed
+#
+# wlan1 Dual Purpose:
+#   - When AP: wlan1 enslaved to br0 (not in bat0), DHCP allowed
+#   - When mesh: wlan1 enslaved to bat0, DHCP blocked
 #
 # ==============================================================================
 
@@ -42,7 +52,7 @@ fi
 
 IPV4_NETWORK=${IPV4_NETWORK:-"10.43.1.0/16"}
 MAX_EUDS=${MAX_EUDS:-0}
-CHUNK_SIZE=$((MAX_EUDS + 2))  # node br0 + AP interface + EUDs
+CHUNK_SIZE=$((MAX_EUDS + 2))  # br0 primary + br0 secondary (gateway) + EUDs
 SERVICES_RESERVED=5  # IPs 1-5 for services
 
 # --- State Variables ---
@@ -90,17 +100,17 @@ get_chunk_ips() {
     # First chunk starts after services reservation
     local CHUNK_START_INT=$((MIN_INT + SERVICES_RESERVED + (chunk_num * CHUNK_SIZE)))
     
-    # First IP in chunk (for br0)
-    local BR0_IP=$(int_to_ip "$CHUNK_START_INT")
+    # First IP in chunk (for br0 primary - mesh communication)
+    local BR0_PRIMARY=$(int_to_ip "$CHUNK_START_INT")
     
-    # Second IP in chunk (for AP interface)
-    local AP_IP=$(int_to_ip $((CHUNK_START_INT + 1)))
+    # Second IP in chunk (for br0 secondary - DHCP gateway)
+    local BR0_SECONDARY=$(int_to_ip $((CHUNK_START_INT + 1)))
     
     # DHCP pool starts at third IP
     local DHCP_START=$(int_to_ip $((CHUNK_START_INT + 2)))
     local DHCP_END=$(int_to_ip $((CHUNK_START_INT + CHUNK_SIZE - 1)))
     
-    echo "${BR0_IP}:${AP_IP}:${DHCP_START}:${DHCP_END}"
+    echo "${BR0_PRIMARY}:${BR0_SECONDARY}:${DHCP_START}:${DHCP_END}"
 }
 
 # Check if an IP is in the usable range
@@ -202,53 +212,76 @@ EOF
     chmod 644 "$PERSISTENT_STATE_FILE"
 }
 
-# Configure AP interface with its chunk IP
-configure_ap_interface() {
-    local ap_ip=$1
-    local ap_iface=$(cat /var/lib/ap_interface 2>/dev/null)
+# Configure ebtables to block DHCP on mesh interfaces
+configure_ebtables_dhcp_isolation() {
+    local br0_secondary=$1
     
-    if [ -z "$ap_iface" ]; then
-        return 0  # No AP configured
+    log "Configuring ebtables DHCP isolation..."
+    
+    # Flush existing rules
+    ebtables -F FORWARD 2>/dev/null || true
+    
+    # Get AP interface if configured
+    # This tells us if wlan1 is being used as AP (and thus should allow DHCP)
+    local AP_INTERFACE=""
+    if [ -f /var/lib/ap_interface ]; then
+        AP_INTERFACE=$(cat /var/lib/ap_interface)
+        log "AP interface: $AP_INTERFACE"
     fi
     
-    # Check if IP already assigned
-    if ip addr show dev "$ap_iface" | grep -q "inet $ap_ip/"; then
-        log "AP interface $ap_iface already has $ap_ip"
-        return 0
+    # Block DHCP on bat0 (the BATMAN-adv backbone)
+    if [ -d "/sys/class/net/bat0" ]; then
+        ebtables -A FORWARD -o bat0 -p IPv4 --ip-protocol udp --ip-destination-port 67:68 -j DROP
+        ebtables -A FORWARD -i bat0 -p IPv4 --ip-protocol udp --ip-destination-port 67:68 -j DROP
+        log "Blocked DHCP on bat0"
     fi
     
-    log "Configuring AP interface $ap_iface with $ap_ip"
-    ip addr flush dev "$ap_iface" 2>/dev/null
-    ip addr add "${ap_ip}/${IPV4_NETWORK#*/}" dev "$ap_iface"
-    ip link set "$ap_iface" up
+    # Block DHCP on all wireless interfaces EXCEPT the AP
+    # wlan0 = 2.4GHz (always mesh)
+    # wlan1 = 5GHz (dual-purpose: AP or mesh)
+    # wlan2 = HaLow (always mesh)
+    for iface in wlan0 wlan1 wlan2; do
+        if [ ! -d "/sys/class/net/$iface" ]; then
+            continue
+        fi
+        
+        # Skip if this is the AP interface
+        if [ -n "$AP_INTERFACE" ] && [ "$iface" == "$AP_INTERFACE" ]; then
+            log "Allowing DHCP on $iface (AP interface)"
+            continue
+        fi
+        
+        # Check if interface exists and has a master
+        if ip link show "$iface" 2>/dev/null | grep -q "master"; then
+            ebtables -A FORWARD -o "$iface" -p IPv4 --ip-protocol udp --ip-destination-port 67:68 -j DROP
+            ebtables -A FORWARD -i "$iface" -p IPv4 --ip-protocol udp --ip-destination-port 67:68 -j DROP
+            log "Blocked DHCP on $iface"
+        fi
+    done
+    
+    # Save rules for restore on boot
+    ebtables-save > /etc/ebtables.rules
+    log "ebtables rules saved to /etc/ebtables.rules"
 }
 
-# Configure dnsmasq for chunk DHCP pool
+# Configure dnsmasq for DHCP on br0
 configure_dnsmasq() {
-    local ap_ip=$1
+    local br0_secondary=$1
     local dhcp_start=$2
     local dhcp_end=$3
-    local ap_iface=$(cat /var/lib/ap_interface 2>/dev/null)
     
-    if [ -z "$ap_iface" ]; then
-        return 0  # No AP configured
-    fi
+    log "Configuring dnsmasq: pool=$dhcp_start-$dhcp_end, gateway=$br0_secondary"
     
-    log "Configuring dnsmasq: pool=$dhcp_start-$dhcp_end, gateway=$ap_ip"
-    
-    cat > /etc/dnsmasq.d/mesh-ap.conf <<- EOF
-# Listen only on AP interface
-interface=$ap_iface
+    cat > /etc/dnsmasq.d/mesh-eud.conf <<- EOF
+# Listen only on br0 bridge
+interface=br0
 bind-interfaces
 
-# Do not serve DHCP on br0
-no-dhcp-interface=br0
-
 # DHCP configuration from this node's chunk
-dhcp-range=$dhcp_start,$dhcp_end,30m
+dhcp-range=$dhcp_start,$dhcp_end,12h
 
-# Gateway is this node's AP interface
-dhcp-option=3,$ap_ip
+# Gateway is this node's br0 secondary address
+dhcp-option=3,$br0_secondary
 
 # DNS configuration
 domain=mesh.local
@@ -265,6 +298,7 @@ EOF
     # Restart dnsmasq if it's running
     if systemctl is-active --quiet dnsmasq.service; then
         systemctl restart dnsmasq.service
+        log "dnsmasq restarted"
     fi
 }
 
@@ -345,9 +379,9 @@ case $IPV4_STATE in
 
         # Get chunk IPs
         CHUNK_IPS=$(get_chunk_ips "$PROPOSED_CHUNK")
-        IFS=: read -r BR0_IP AP_IP DHCP_START DHCP_END <<< "$CHUNK_IPS"
+        IFS=: read -r BR0_PRIMARY BR0_SECONDARY DHCP_START DHCP_END <<< "$CHUNK_IPS"
         
-        log "Proposed chunk $PROPOSED_CHUNK: br0=$BR0_IP, ap=$AP_IP, dhcp=$DHCP_START-$DHCP_END"
+        log "Proposed chunk $PROPOSED_CHUNK: primary=$BR0_PRIMARY, gateway=$BR0_SECONDARY, dhcp=$DHCP_START-$DHCP_END"
 
         # Check for conflicts
         CONFLICT=false
@@ -369,19 +403,21 @@ case $IPV4_STATE in
                 log "Proposed chunk ${PROPOSED_CHUNK} is in use. Will retry next cycle."
             fi
         else
-            log "Claiming chunk ${PROPOSED_CHUNK} with br0 IP ${BR0_IP}..."
+            log "Claiming chunk ${PROPOSED_CHUNK} with br0 IPs ${BR0_PRIMARY} and ${BR0_SECONDARY}..."
             
-            # Assign IP to br0
-            ip addr add "${BR0_IP}/${IPV4_NETWORK#*/}" dev "$CONTROL_IFACE"
+            # Assign both IPs to br0
+            ip addr add "${BR0_PRIMARY}/${IPV4_NETWORK#*/}" dev "$CONTROL_IFACE"
+            ip addr add "${BR0_SECONDARY}/${IPV4_NETWORK#*/}" dev "$CONTROL_IFACE"
+            log "Assigned br0 primary: $BR0_PRIMARY, secondary (gateway): $BR0_SECONDARY"
             
-            # Configure AP interface if present
-            configure_ap_interface "$AP_IP"
+            # Configure ebtables DHCP isolation
+            configure_ebtables_dhcp_isolation "$BR0_SECONDARY"
             
-            # Configure dnsmasq if AP present
-            configure_dnsmasq "$AP_IP" "$DHCP_START" "$DHCP_END"
+            # Configure dnsmasq
+            configure_dnsmasq "$BR0_SECONDARY" "$DHCP_START" "$DHCP_END"
             
             # Save persistent state
-            PERSISTENT_IPV4="$BR0_IP"
+            PERSISTENT_IPV4="$BR0_PRIMARY"
             PERSISTENT_CHUNK="$PROPOSED_CHUNK"
             PERSISTENT_NETWORK="$IPV4_NETWORK"
             save_persistent_state
@@ -401,12 +437,12 @@ case $IPV4_STATE in
         for entry in "${CLAIMED_CHUNKS[@]}"; do
             IFS=, read -r CLAIMED_CHUNK CLAIMED_MAC <<< "$entry"
             
-            # Get this chunk's br0 IP
+            # Get this chunk's br0 primary IP
             CHUNK_IPS=$(get_chunk_ips "$CLAIMED_CHUNK")
-            IFS=: read -r CHUNK_BR0_IP _ _ _ <<< "$CHUNK_IPS"
+            IFS=: read -r CHUNK_BR0_PRIMARY _ _ _ <<< "$CHUNK_IPS"
             
             # Check if someone else claimed our IP
-            if [[ "$CHUNK_BR0_IP" == "$CURRENT_IPV4" && "$CLAIMED_MAC" != "$MY_MAC" ]]; then
+            if [[ "$CHUNK_BR0_PRIMARY" == "$CURRENT_IPV4" && "$CLAIMED_MAC" != "$MY_MAC" ]]; then
                 CONFLICTING_MAC="$CLAIMED_MAC"
                 CONFLICTING_CHUNK="$CLAIMED_CHUNK"
                 break
@@ -420,14 +456,8 @@ case $IPV4_STATE in
             if [[ "$MY_MAC" > "$CONFLICTING_MAC" ]]; then
                 log "Won tie-breaker. Defending chunk."
             else
-                log "Lost tie-breaker. Releasing chunk and IP."
-                ip addr del "${CURRENT_IPV4}/${IPV4_NETWORK#*/}" dev "$CONTROL_IFACE" 2>/dev/null
-                
-                # Remove AP IP if configured
-                local ap_iface=$(cat /var/lib/ap_interface 2>/dev/null)
-                if [ -n "$ap_iface" ]; then
-                    ip addr flush dev "$ap_iface" 2>/dev/null
-                fi
+                log "Lost tie-breaker. Releasing chunk and IPs."
+                ip addr flush dev "$CONTROL_IFACE" 2>/dev/null
                 
                 PERSISTENT_IPV4=""
                 PERSISTENT_CHUNK=""
@@ -436,9 +466,19 @@ case $IPV4_STATE in
                 rm -f /var/run/my_ipv4_chunk
             fi
         else
-            # No conflict, write chunk info for encoder
+            # No conflict, ensure ebtables and dnsmasq are current
             if [ -n "$PERSISTENT_CHUNK" ]; then
                 echo "$PERSISTENT_CHUNK" > /var/run/my_ipv4_chunk
+                
+                # Get current chunk IPs
+                CHUNK_IPS=$(get_chunk_ips "$PERSISTENT_CHUNK")
+                IFS=: read -r BR0_PRIMARY BR0_SECONDARY DHCP_START DHCP_END <<< "$CHUNK_IPS"
+                
+                # Ensure ebtables rules are current (handles wlan1 role changes)
+                configure_ebtables_dhcp_isolation "$BR0_SECONDARY"
+                
+                # Ensure dnsmasq config is current
+                configure_dnsmasq "$BR0_SECONDARY" "$DHCP_START" "$DHCP_END"
             fi
         fi
         ;;
