@@ -129,7 +129,8 @@ if [ "__HARDWARE_MODEL__" = "rpi5" ]; then
 		touch /var/lib/expand-root-done
 elif [ "__HARDWARE_MODEL__" = "rpi4" ]; then
 		echo "Applying RPi 4 specific settings..."
-		wget -q https://github.com/very-srs/MANET/raw/refs/heads/main/MANET/install_packages/cm4-install.tar.gz -O /root/morse-pi-install.tar.gz || {
+#		wget -q https://github.com/very-srs/MANET/raw/refs/heads/main/MANET/install_packages/cm4-install.tar.gz -O /root/morse-pi-install.tar.gz || {
+		wget -q http://192.168.69.1:8081/data/cm4-install.tar.gz -O /root/morse-pi-install.tar.gz || {
 				echo "ERROR: Failed to download rpi4 package"
 				exit 1
 		}
@@ -210,7 +211,7 @@ EOF
 
 # Load the morse driver with options
 cat << EOF > /etc/modprobe.d/morse.conf
-options morse country="$REGULATORY_DOMAIN"
+options morse country=US
 options morse spi_clock_speed=1500000
 options morse bcf=bcf_fgh100mhaamd.bin
 options morse enable_mcast_whitelist=0 enable_mcast_rate_control=1
