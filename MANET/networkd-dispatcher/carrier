@@ -11,17 +11,6 @@ fi
 
 log "Carrier detected on $IFACE - starting detection"
 
-# Ensure clean slate - flush any old IPs
-log "Flushing old IP configuration"
-ip addr flush dev "$IFACE" 2>/dev/null
-
-# Remove old networkd active configs (but keep boot config)
-rm -f /etc/systemd/network/20-end0.network 2>/dev/null
-
-# Restart networkd with clean config
-systemctl restart systemd-networkd 2>/dev/null
-sleep 2
-
 # Wait up to 10 seconds for DHCP to complete
 WAIT_COUNT=0
 MAX_WAIT=10
