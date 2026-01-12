@@ -70,8 +70,7 @@ fi
 
 REMOTE_VERSION=$(curl -H 'Cache-Control: no-cache, no-store' \
     -H 'Pragma: no-cache' \
-#    -s https://raw.githubusercontent.com/very-srs/MANET/refs/heads/main/MANET/node_tools/version.txt | head -n 1 2>/dev/null)
-    -s http://192.168.1.122:8081/data/version.txt | head -n 1 2>/dev/null)
+    -s https://raw.githubusercontent.com/very-srs/MANET/refs/heads/main/MANET/node_tools/version.txt | head -n 1 2>/dev/null)
 
 if [ -z "$REMOTE_VERSION" ]; then
     if [ "$ROUTINE_MODE" = false ]; then
@@ -97,7 +96,7 @@ else
 	        if [ "$ROUTINE_MODE" = false ]; then
 	            echo "Running on Rock 3A"
 	        fi
-	        wget -q https://github.com/very-srs/MANET/raw/refs/heads/main/MANET/install_packages/rock-tools.tar.gz -O /root/tools.tar.gz 2>/dev/null || {
+	        wget -q  https://www.colorado-governor.com/manet/rock-tools.tar.gz -O /root/tools.tar.gz 2>/dev/null || {
                 if [ "$ROUTINE_MODE" = false ]; then
                     echo "ERROR: Failed to download rock3a tools package.  Not updating"
                 fi
@@ -108,7 +107,7 @@ else
 	        if [ "$ROUTINE_MODE" = false ]; then
 	            echo "Running on Pi 5"
 	        fi
-	        wget -q https://github.com/very-srs/MANET/raw/refs/heads/main/MANET/install_packages/rpi5-tools.tar.gz -O /root/tools.tar.gz 2>/dev/null || {
+	        wget -q  https://www.colorado-governor.com/manet/rpi5-tools.tar.gz -O /root/tools.tar.gz 2>/dev/null || {
                 if [ "$ROUTINE_MODE" = false ]; then
                     echo "ERROR: Failed to download rpi5 tools package.  Not updating"
                 fi
@@ -120,7 +119,7 @@ else
 	            echo "Running on Pi 4B/CM4"
 	        fi
 #	        wget -q https://github.com/very-srs/MANET/raw/refs/heads/main/MANET/install_packages/cm4-tools.tar.gz -O /root/tools.tar.gz 2>/dev/null || {
-	        wget -q http://192.168.1.122:8081/data/cm4-tools.tar.gz -O /root/tools.tar.gz 2>/dev/null || {
+	        wget -q  https://www.colorado-governor.com/manet/cm4-tools.tar.gz -O /root/tools.tar.gz 2>/dev/null || {
                 if [ "$ROUTINE_MODE" = false ]; then
                     echo "ERROR: Failed to download rpi4 tools package.  Not updating"
                 fi
