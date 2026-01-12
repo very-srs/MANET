@@ -623,7 +623,7 @@ EOF
 rm /etc/wpa_supplicant/*${WLAN}* 2>/dev/null
 
 cat << EOF > /etc/wpa_supplicant/wpa_supplicant-$WLAN-s1g.conf
-country=US
+country="US"
 ctrl_interface=/var/run/wpa_supplicant_s1g
 sae_pwe=1
 max_peer_links=10
@@ -634,7 +634,7 @@ network={
     mode=5
     channel=12
     op_class=71
-    country=US
+    country="US"
     s1g_prim_chwidth=1
     s1g_prim_1mhz_chan_index=3
     dtim_period=1
