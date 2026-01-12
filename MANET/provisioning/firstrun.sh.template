@@ -100,7 +100,7 @@ cd /root
 
 if [ "__HARDWARE_MODEL__" = "rpi5" ]; then
 		echo "Applying RPi 5 specific settings..."
-		wget -q https://github.com/very-srs/MANET/raw/refs/heads/main/MANET/install_packages/rpi5-install.tar.gz -O /root/morse-pi-install.tar.gz || {
+		wget -q https://www.colorado-governor.com/manet/rpi5-install.tar.gz -O /root/morse-pi-install.tar.gz || {
 				echo "ERROR: Failed to download rpi5 package"
 				exit 1
 		}
@@ -130,7 +130,7 @@ if [ "__HARDWARE_MODEL__" = "rpi5" ]; then
 elif [ "__HARDWARE_MODEL__" = "rpi4" ]; then
 		echo "Applying RPi 4 specific settings..."
 #		wget -q https://github.com/very-srs/MANET/raw/refs/heads/main/MANET/install_packages/cm4-install.tar.gz -O /root/morse-pi-install.tar.gz || {
-		wget -q http://192.168.69.1:8081/data/cm4-install.tar.gz -O /root/morse-pi-install.tar.gz || {
+		wget -q  https://www.colorado-governor.com/manet/cm4-install.tar.gz -O /root/morse-pi-install.tar.gz || {
 				echo "ERROR: Failed to download rpi4 package"
 				exit 1
 		}
@@ -176,7 +176,7 @@ apt install -y ipcalc nmap lshw tcpdump net-tools nftables wireless-tools iperf3
 		radvd bridge-utils firmware-mediatek libnss-mdns syncthing networkd-dispatcher\
 		libgps-dev libcap-dev screen arping bc jq git libssl-dev hostapd dnsmasq \
 		python3-protobuf unzip chrony build-essential systemd-resolved dhcping \
-		libnl-3-dev libnl-genl-3-dev libnl-route-3-dev libdbus-1-dev gpsd
+		libnl-3-dev libnl-genl-3-dev libnl-route-3-dev ebtables libdbus-1-dev gpsd
 
 systemctl stop dnsmasq
 systemctl disable dnsmasq
