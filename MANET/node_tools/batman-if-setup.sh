@@ -64,13 +64,48 @@ start() {
             sleep 1
         done
 
-        # Now add to bat0
+        # Add extra delay for wpa_supplicant to fully initialize
+        sleep 2
+
+        # Now add to bat0 with verification and retry
         echo "Adding $WLAN to bat0..."
-        batctl bat0 if add "$WLAN"
+        
+        ADDED=false
+        for attempt in {1..5}; do
+            # Attempt to add
+            if batctl bat0 if add "$WLAN" 2>&1; then
+                # Give it a moment to settle
+                sleep 0.5
+                
+                # Verify it was actually added
+                if batctl bat0 if | grep -q "$WLAN"; then
+                    echo "$WLAN successfully added to bat0"
+                    ADDED=true
+                    break
+                else
+                    echo "Attempt $attempt: $WLAN not showing in batctl, retrying..."
+                fi
+            else
+                echo "Attempt $attempt: batctl add failed, retrying..."
+            fi
+            
+            sleep 1
+        done
+        
+        if [ "$ADDED" = false ]; then
+            echo "!! ERROR: Failed to add $WLAN to bat0 after 5 attempts" >&2
+            echo "!! This interface will not participate in the mesh" >&2
+        fi
     done
 
     ip link set bat0 up
     echo "bat0 interface is up and configured."
+    
+    # Final verification
+    echo ""
+    echo "=== Final bat0 membership ==="
+    batctl bat0 if
+    echo "============================="
 }
 
 stop() {
