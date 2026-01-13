@@ -260,6 +260,10 @@ while true; do
                     MTX_ENABLED=$(grep "^mtx=" /etc/mesh.conf 2>/dev/null | cut -d'=' -f2)
                     [[ "$MTX_ENABLED" != "y" ]] && continue
                 fi
+                if [[ "$election_script" =~ mumble-election ]]; then
+                    MUMBLE_ENABLED=$(grep "^mumble=" /etc/mesh.conf 2>/dev/null | cut -d'=' -f2)
+                    [[ "$MUMBLE_ENABLED" != "y" ]] && continue
+                fi
                 "$election_script" &
             fi
         done
