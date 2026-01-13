@@ -819,7 +819,7 @@ systemctl enable node-manager.service
 
 cat <<- EOF > /etc/systemd/system/syncthing-peer-manager.service 
 [Unit]
-Description=Syncthing Peer Manager for B.A.T.M.A.N. Mesh
+Description=Syncthing Peer Manager
 After=syncthing@radio.service alfred.service
 Wants=syncthing@radio.service alfred.service
 
@@ -908,6 +908,8 @@ if systemctl is-enabled radio-setup-run-once.service >/dev/null 2>&1; then
 	sudo -u radio syncthing -generate="/home/radio/.config/syncthing"
 	sleep 5
 	killall syncthing
+	mkdir -p /home/radio/Sync/mumble/backups
+	chown -R /home/radio/Sync
 	SYNCTHING_CONFIG="/home/radio/.config/syncthing/config.xml"
 	echo " >> Hardening Syncthing for local-only operation..."
 	#disable global discovery and relaying
