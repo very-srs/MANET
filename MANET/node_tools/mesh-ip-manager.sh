@@ -11,9 +11,9 @@
 #
 # Chunk Structure (example with max_euds=5):
 #   Chunk size = max_euds + 2
-#   - IP 0 in chunk: br0 primary (mesh interface)
-#   - IP 1 in chunk: br0 secondary (DHCP gateway for EUDs)
-#   - IPs 2+ in chunk: DHCP pool for EUDs
+#   - First IP in chunk: br0 primary (mesh interface)
+#   - Second IP in chunk: br0 secondary (DHCP gateway for EUDs)
+#   - Remaining IPs in chunk: DHCP pool for EUDs
 #
 # Bridged Architecture:
 #   - All EUD interfaces (wlan1 when AP, end0 when wired) are bridged to br0
