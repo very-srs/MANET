@@ -836,9 +836,32 @@ systemctl enable syncthing-peer-manager.service
 
 #creates a shared directory in /home/radio
 systemctl enable syncthing@radio.service
-systemctl disable nftables.service
 
 systemctl daemon-reload
+
+# === MSS CLAMPING FOR BATMAN-ADV ===
+# TCP MSS must be clamped to prevent fragmentation issues over the mesh.
+
+echo " > Configuring MSS clamping for mesh..."
+
+mkdir -p /etc/nftables.d
+
+cat <<- 'EOF' > /etc/nftables.d/mesh-mss-clamp.nft
+table inet mesh_mangle {
+    chain forward {
+        type filter hook forward priority mangle; policy accept;
+        tcp flags syn tcp option maxseg size set 1400
+    }
+}
+EOF
+
+# Ensure main nftables.conf includes the directory
+if ! grep -q 'include "/etc/nftables.d/\*.nft"' /etc/nftables.conf 2>/dev/null; then
+    echo 'include "/etc/nftables.d/*.nft"' >> /etc/nftables.conf
+fi
+
+systemctl enable --now nftables.service
+
 
 #install scripts for auto gateway management
 cp /root/networkd-dispatcher/off /etc/networkd-dispatcher/off.d/50-gateway-disable
