@@ -278,7 +278,7 @@ interface=br0
 bind-interfaces
 
 # DHCP configuration from this node's chunk
-dhcp-range=$dhcp_start,$dhcp_end,12h
+dhcp-range=$dhcp_start,$dhcp_end,4m
 
 # Gateway is this node's br0 secondary address
 dhcp-option=3,$br0_secondary
