@@ -38,7 +38,7 @@ fi
 # If not found as primary MAC, search in MAC_ADDRESSES list
 # This handles cases where you query with wlan0/wlan1/end0 MAC instead of br0
 while IFS= read -r line; do
-    if [[ $line =~ NODE_([0-9A-F]+)_MAC_ADDRESSES=\'([^\']+)\' ]]; then
+    if [[ $line =~ NODE_([0-9A-Fa-f]+)_MAC_ADDRESSES=\'([^\']+)\' ]]; then
         NODE_ID="${BASH_REMATCH[1]}"
         MAC_LIST="${BASH_REMATCH[2]}"
 
