@@ -86,8 +86,20 @@ if [ "$CARRIER" != "1" ]; then
 		# If acting as an AP, lower the tx power
         systemctl start ap-txpower.service 2>/dev/null
 
+        # Bridge AP interface to br0 for EUD connectivity
+        if ! ip link show "$AP_INTERFACE" | grep -q "master br0"; then
+            log "Bridging $AP_INTERFACE to br0"
+            ip link set "$AP_INTERFACE" master br0
+            ip link set "$AP_INTERFACE" up
+        else
+            log "$AP_INTERFACE already bridged to br0"
+        fi
+
         # Reconfigure ebtables (wlan1 should allow DHCP)
         /usr/local/bin/mesh-ip-manager.sh
+
+
+
     fi
     exit 0
 fi
@@ -213,6 +225,15 @@ if [ "$DETECTED_MODE" == "gateway" ]; then
         systemctl start dnsmasq.service 2>/dev/null
         systemctl start ap-txpower.service 2>/dev/null
 
+        # Bridge AP interface to br0 for EUD connectivity
+        if ! ip link show "$AP_INTERFACE" | grep -q "master br0"; then
+            log "Bridging $AP_INTERFACE to br0"
+            ip link set "$AP_INTERFACE" master br0
+            ip link set "$AP_INTERFACE" up
+        else
+            log "$AP_INTERFACE already bridged to br0"
+        fi
+
     elif [ "$EUD_MODE" == "wireless" ] && [ -n "$AP_INTERFACE" ]; then
         log "Wireless mode: Ensuring AP is enabled"
 
@@ -237,11 +258,37 @@ if [ "$DETECTED_MODE" == "gateway" ]; then
         systemctl stop ap-txpower.service 2>/dev/null
         systemctl disable hostapd.service 2>/dev/null
 
+        # Bridge AP interface to br0 for EUD connectivity
+        if ! ip link show "$AP_INTERFACE" | grep -q "master br0"; then
+            log "Bridging $AP_INTERFACE to br0"
+            ip link set "$AP_INTERFACE" master br0
+            ip link set "$AP_INTERFACE" up
+        else
+            log "$AP_INTERFACE already bridged to br0"
+        fi
         # Add wlan1 back to bat0
         if ! batctl if | grep -q "$AP_INTERFACE"; then
             log "Adding $AP_INTERFACE back to bat0 (wired mode)"
-            systemctl restart batman-enslave.service
-        fi
+
+            # Stop hostapd first to release the interface
+            systemctl stop hostapd.service 2>/dev/null
+            ip link set "$AP_INTERFACE" down
+            sleep 1
+
+            # Set to mesh mode and bring up
+            iw dev "$AP_INTERFACE" set type mesh
+            ip link set "$AP_INTERFACE" up
+            sleep 1
+            # Restart wpa_supplicant for this interface to join mesh
+            systemctl restart wpa_supplicant@$AP_INTERFACE.service 2>/dev/null        fi
+			sleep 2
+            # Add to bat0
+            if batctl if add "$AP_INTERFACE" 2>/dev/null; then
+                log "$AP_INTERFACE added to bat0"
+            else
+                log "Failed to add $AP_INTERFACE to bat0"
+            fi
+
     fi
 
     # Reconfigure ebtables and dnsmasq (handles wlan1 role changes)
@@ -298,9 +345,29 @@ elif [ "$DETECTED_MODE" == "wired-eud" ]; then
 
             # Add wlan1 back to bat0
             if ! batctl if | grep -q "$AP_INTERFACE"; then
+
                 log "Adding $AP_INTERFACE back to bat0"
-                systemctl restart batman-enslave.service
-            fi
+
+                # Stop hostapd first to release the interface
+                systemctl stop hostapd.service 2>/dev/null
+                ip link set "$AP_INTERFACE" down
+                sleep 1
+
+                # Set to mesh mode and bring up
+                iw dev "$AP_INTERFACE" set type mesh
+                ip link set "$AP_INTERFACE" up
+                sleep 1
+                # Restart wpa_supplicant for this interface to join mesh
+                systemctl restart wpa_supplicant@$AP_INTERFACE.service 2>/dev/null            fi
+				sleep 2
+
+                # Add to bat0
+                if batctl if add "$AP_INTERFACE" 2>/dev/null; then
+                    log "$AP_INTERFACE added to bat0"
+                else
+                    log "Failed to add $AP_INTERFACE to bat0"
+                fi
+
         fi
     elif [ "$EUD_MODE" == "wireless" ] && [ -n "$AP_INTERFACE" ]; then
         log "Wireless mode: AP stays enabled even with wired EUD"
