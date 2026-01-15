@@ -72,6 +72,17 @@ if [ "$EUD_MODE" == "auto" ] && [ -f /var/lib/ap_interface ]; then
     systemctl enable dnsmasq.service 2>/dev/null
     systemctl start dnsmasq.service 2>/dev/null
     systemctl start ap-txpower.service 2>/dev/null
+
+    # Bridge AP interface to br0 for EUD connectivity
+    if [ -n "$AP_INTERFACE" ]; then
+        if ! ip link show "$AP_INTERFACE" | grep -q "master br0"; then
+            log "Bridging $AP_INTERFACE to br0"
+            ip link set "$AP_INTERFACE" master br0
+            ip link set "$AP_INTERFACE" up
+        fi
+    fi
+fi
+
 fi
 
 log "Cleanup complete"
