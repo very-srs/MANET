@@ -12,6 +12,7 @@
 - [x] Wireless EUD
 - [x] Wired EUD
 - [x] Auto EUD
+- [x] EUD multicast over mesh
 - [x] Host lookup without DNS
 - [x] MediaMTX Server
 - [x] Automatic gateway selection
