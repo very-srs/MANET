@@ -470,26 +470,6 @@ ht_capab=[HT40+][SHORT-GI-20][SHORT-GI-40]
 vht_capab=[RXLDPC][SHORT-GI-80][TX-STBC-2BY1][RX-STBC-1]
 EOF
 
-    # Create dnsmasq configuration for DHCP + DNS
-    cat <<-EOF > /etc/dnsmasq.d/mesh-ap.conf
-# Listen only on AP interface bridge
-interface=br0
-bind-interfaces
-
-# DHCP configuration
-dhcp-range=$DHCP_START,$DHCP_END,12h
-
-# DNS configuration  
-domain=mesh.local
-local=/mesh.local/
-
-# Disable DNS upstream (we're offline mesh)
-no-resolv
-no-poll
-
-# Log for debugging
-log-dhcp
-
 # DHCP script hook for adding host routes
 dhcp-script=/usr/local/bin/dhcp-eud-route.sh
 EOF
