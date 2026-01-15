@@ -776,6 +776,10 @@ touch /etc/cloud/cloud-init.disabled
 
 systemctl disable NetworkManager-wait-online.service
 
+apt remove -y iptables cpp build-essential g++-14 gcc-14 rfkill
+apt autoremove -y
+
+
 # There is an annoying banner message in here, get rid of it
 rm /etc/ssh/sshd_config.d/*
 echo "=== firstrun.sh complete - provisioning will continue after reboot ==="
