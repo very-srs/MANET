@@ -466,6 +466,13 @@ table ip nat {
 	oifname "end0" masquerade
   }
 }
+
+table inet mesh_mangle {
+    chain forward {
+        type filter hook forward priority mangle; policy accept;
+        tcp flags syn tcp option maxseg size set 1400
+    }
+}
 EOF
 
 echo "Setting up router advertisements"
