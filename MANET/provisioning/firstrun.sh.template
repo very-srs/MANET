@@ -448,6 +448,9 @@ table inet filter {
   chain forward {
 	type filter hook forward priority 0; policy drop;
 
+    # Allow forwarding within the mesh bridge (EUD → gateway)
+    iifname "br0" oifname "br0" accept
+
 	# Allow traffic from the trusted mesh to be forwarded
 	# out to the internet via the Ethernet port.
 	iifname "br0" oifname "end0" accept
