@@ -172,6 +172,9 @@ while true; do
             remove_default_route
             CURRENT_GW_MAC=""
             CURRENT_GW_IP=""
+			rm -f /etc/dnsmasq.d/upstream-dns.conf
+			systemctl reload dnsmasq
+
         elif [ -z "$NEW_GW_IP" ]; then
             # Gateway exists but IP not found in registry yet
             log "Gateway detected: $NEW_GW_MAC but IP not yet in registry. Will retry."
@@ -194,6 +197,8 @@ while true; do
                 CURRENT_GW_MAC="$NEW_GW_MAC"
                 CURRENT_GW_IP="$NEW_GW_IP"
             fi
+			echo "server=8.8.8.8" > /etc/dnsmasq.d/upstream-dns.conf
+			systemctl reload dnsmasq
         fi
     fi
     sleep "$POLL_INTERVAL"
