@@ -420,6 +420,10 @@ select_hardware_and_target_device() {
 				fi
 				break
 				;;
+			"Raspberry Pi 5" )
+				HARDWARE_MODEL="rpi5"
+				break
+				;;
 			"Raspberry Pi 4B" )
 				HARDWARE_MODEL="rpi4"
 				break
