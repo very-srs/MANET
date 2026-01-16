@@ -97,13 +97,14 @@ function Ask-LanCidr {
     
     while ($true) {
         $confirm = Read-Host "Use default LAN network $DEFAULT_CIDR? (Y/n)"
+        
         if ([string]::IsNullOrWhiteSpace($confirm) -or $confirm -match "^[Yy]") {
             $Script:LAN_CIDR_BLOCK = $DEFAULT_CIDR
         } else {
             # Custom CIDR Loop
             while ($true) {
                 $custom_cidr = Read-Host "Enter custom LAN CIDR block (e.g., 10.10.0.0/16)"
-                
+
                 # 1. Validate general format (IP/Prefix)
                 if ($custom_cidr -notmatch '^(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})/(\d{1,2})$') {
                     Write-Host "ERROR: Invalid format. Must be x.x.x.x/yy" -ForegroundColor Red
@@ -164,7 +165,7 @@ function Ask-LanCidr {
             Write-Host "Network: $($Script:LAN_CIDR_BLOCK)"
             Write-Host "  Total usable IPs: $($capacity.Total)"
             Write-Host "  Reserved for services: $($capacity.Services)"
-            Write-Host "  Reserved for EUD pool: $($capacity.EudPool) ($maxEuds EUDs × $($capacity.MaxNodes) nodes)"
+            Write-Host "  Reserved for EUD pool: $($capacity.EudPool) ($maxEuds EUDs x $($capacity.MaxNodes) nodes)"
             Write-Host "  Available for mesh nodes: $($capacity.MaxNodes)"
             Write-Host "=================================="
             Write-Host ""
@@ -241,11 +242,11 @@ function Ask-Questions {
     $response = Read-Host "Install Mumble Server (murmur)? (Y/n)"
     $Script:INSTALL_MUMBLE = if ([string]::IsNullOrWhiteSpace($response) -or $response -match "^[Yy]") { "y" } else { "n" }
 
-    # 3. LAN Configuration
-    $Script:MESH_SSID = Read-Host "Enter LAN SSID Name"
+    # 3. Mesh Configuration
+    $Script:MESH_SSID = Read-Host "Enter MESH SSID Name"
 
     while ($true) {
-        $key = Read-Host "Enter LAN SAE Key (WPA3 password, 8-63 chars) [or press Enter to generate]"
+        $key = Read-Host "Enter MESH SAE Key (WPA3 password, 8-63 chars) [or press Enter to generate]"
         Write-Host ""
         
         if ([string]::IsNullOrWhiteSpace($key)) {
@@ -265,7 +266,7 @@ function Ask-Questions {
         }
     }
 
-	# WiFi Regulatory Domain
+    # WiFi Regulatory Domain
     while ($true) {
         $domain = Read-Host "Enter WiFi regulatory domain (2-letter country code, default: US)"
         if ([string]::IsNullOrWhiteSpace($domain)) {
@@ -377,7 +378,7 @@ function Load-Config {
                 "MAX_EUDS_PER_NODE" { $Script:MAX_EUDS_PER_NODE = [int]$varValue }
                 "INSTALL_MEDIAMTX" { $Script:INSTALL_MEDIAMTX = $varValue }
                 "INSTALL_MUMBLE" { $Script:INSTALL_MUMBLE = $varValue }
-			    "REGULATORY_DOMAIN" { $Script:REGULATORY_DOMAIN = $varValue }
+                "REGULATORY_DOMAIN" { $Script:REGULATORY_DOMAIN = $varValue }
                 "MESH_SSID" { $Script:MESH_SSID = $varValue }
                 "MESH_SAE_KEY" { $Script:MESH_SAE_KEY = $varValue }
                 "LAN_CIDR_BLOCK" { $Script:LAN_CIDR_BLOCK = $varValue }
@@ -394,12 +395,11 @@ function Load-Config {
         Write-Host "  LAN AP Key: $($Script:LAN_AP_KEY)"
         Write-Host "  Max EUDs per node: $($Script:MAX_EUDS_PER_NODE)"
     }
-    Write
-    -Host "  Install MediaMTX: $($Script:INSTALL_MEDIAMTX)"
+    Write-Host "  Install MediaMTX: $($Script:INSTALL_MEDIAMTX)"
     Write-Host "  Install Mumble: $($Script:INSTALL_MUMBLE)"
-    Write-Host "  LAN SSID: $($Script:MESH_SSID)"
-    Write-Host "  LAN SAE Key: $($Script:MESH_SAE_KEY)"
-	Write-Host "  Regulatory Domain: $($Script:REGULATORY_DOMAIN)"
+    Write-Host "  Mesh SSID: $($Script:MESH_SSID)"
+    Write-Host "  Mesh SAE Key: $($Script:MESH_SAE_KEY)"
+    Write-Host "  Regulatory Domain: $($Script:REGULATORY_DOMAIN)"
     Write-Host "  LAN CIDR Block: $($Script:LAN_CIDR_BLOCK)"
     Write-Host "  Auto Channel: $($Script:AUTO_CHANNEL)"
     Write-Host "  User password: $($Script:RADIO_PW)"
@@ -634,7 +634,7 @@ if ($Script:HARDWARE_MODEL -ne "r3a") {
     $templateContent = $templateContent -replace '__MAX_EUDS_PER_NODE__', $Script:MAX_EUDS_PER_NODE
     $templateContent = $templateContent -replace '__INSTALL_MEDIAMTX__', $Script:INSTALL_MEDIAMTX
     $templateContent = $templateContent -replace '__INSTALL_MUMBLE__', $Script:INSTALL_MUMBLE
-	$templateContent = $templateContent -replace '__REGULATORY_DOMAIN__', $Script:REGULATORY_DOMAIN
+    $templateContent = $templateContent -replace '__REGULATORY_DOMAIN__', $Script:REGULATORY_DOMAIN
     $templateContent = $templateContent -replace '__MESH_SSID__', $Script:MESH_SSID
     $templateContent = $templateContent -replace '__MESH_SAE_KEY__', $Script:MESH_SAE_KEY
     $templateContent = $templateContent -replace '__LAN_CIDR_BLOCK__', $Script:LAN_CIDR_BLOCK
