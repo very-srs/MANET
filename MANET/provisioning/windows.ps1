@@ -9,7 +9,11 @@
 
 # --- Configuration ---
 $TEMPLATE_FILE = "firstrun.sh.template"
-$ARMBIAN_IMAGE = "Armbian-r3a-trixia-manet.img"
+
+$ARMBIAN_IMAGE_URL = "https://fi.mirror.armbian.de/dl/rock-3a/archive/Armbian_25.11.1_Rock-3a_trixie_current_6.12.58_minimal.img.xz"
+$ARMBIAN_IMAGE_FILENAME = "Armbian_25.11.1_Rock-3a_trixie_current_6.12.58_minimal.img"
+$Script:ARMBIAN_IMAGE = ""  # Will be set by Get-ArmbianImage function
+
 $CONFIG_DIR = ".mesh-configs"
 $OS_IMAGE_URL = "https://downloads.raspberrypi.com/raspios_lite_arm64/images/raspios_lite_arm64-2025-10-02/2025-10-01-raspios-trixie-arm64-lite.img.xz"
 
@@ -406,6 +410,260 @@ function Load-Config {
     Write-Host "----------------------------"
 }
 
+
+# Function to acquire Armbian image for Rock 3A
+# Sets $Script:ARMBIAN_IMAGE to the path of a usable .img file
+function Get-ArmbianImage {
+    Write-Host ""
+    Write-Host "--- Armbian Image Setup for Rock 3A ---"
+    
+    $scriptDir = $PSScriptRoot
+    if (-not $scriptDir) {
+        $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
+    }
+    if (-not $scriptDir) {
+        $scriptDir = Get-Location
+    }
+    
+    $localImage = Join-Path $scriptDir $ARMBIAN_IMAGE_FILENAME
+    $localCompressed = Join-Path $scriptDir "${ARMBIAN_IMAGE_FILENAME}.xz"
+    
+    # Check if default image exists locally (uncompressed)
+    if (Test-Path $localImage) {
+        Write-Host "Found local Armbian image: $localImage"
+        $Script:ARMBIAN_IMAGE = $localImage
+        return $true
+    }
+    
+    # Check for compressed version
+    if (Test-Path $localCompressed) {
+        Write-Host "Found compressed Armbian image: $localCompressed"
+        $result = Expand-XzFile -CompressedPath $localCompressed -OutputPath $localImage
+        if ($result) {
+            $Script:ARMBIAN_IMAGE = $localImage
+            return $true
+        } else {
+            return $false
+        }
+    }
+    
+    Write-Host "Armbian image not found locally."
+    Write-Host ""
+    Write-Host "Options:"
+    Write-Host "  1. Download from Armbian mirror (recommended)"
+    Write-Host "     URL: $ARMBIAN_IMAGE_URL"
+    Write-Host "  2. Provide path to an existing Armbian Trixie image"
+    Write-Host ""
+    
+    while ($true) {
+        $imgChoice = Read-Host "Select option (1 or 2)"
+        
+        switch ($imgChoice) {
+            "1" {
+                return Get-ArmbianImageDownload -OutputDir $scriptDir
+            }
+            "2" {
+                return Get-ArmbianImageCustomPath
+            }
+            default {
+                Write-Host "Invalid selection. Please enter 1 or 2." -ForegroundColor Red
+            }
+        }
+    }
+}
+
+# Function to download Armbian image from mirror
+function Get-ArmbianImageDownload {
+    param([string]$OutputDir)
+    
+    $compressedFile = Join-Path $OutputDir "${ARMBIAN_IMAGE_FILENAME}.xz"
+    $outputFile = Join-Path $OutputDir $ARMBIAN_IMAGE_FILENAME
+    
+    Write-Host ""
+    Write-Host "Downloading Armbian image..."
+    Write-Host "Source: $ARMBIAN_IMAGE_URL"
+    Write-Host "This may take several minutes depending on your connection speed."
+    Write-Host ""
+    
+    try {
+        # Use BitsTransfer for better progress display, fallback to Invoke-WebRequest
+        if (Get-Command Start-BitsTransfer -ErrorAction SilentlyContinue) {
+            Start-BitsTransfer -Source $ARMBIAN_IMAGE_URL -Destination $compressedFile -DisplayName "Downloading Armbian Image"
+        } else {
+            # Show progress with Invoke-WebRequest
+            $ProgressPreference = 'Continue'
+            Invoke-WebRequest -Uri $ARMBIAN_IMAGE_URL -OutFile $compressedFile -UseBasicParsing
+        }
+    } catch {
+        Write-Host "ERROR: Download failed: $_" -ForegroundColor Red
+        if (Test-Path $compressedFile) {
+            Remove-Item $compressedFile -Force
+        }
+        return $false
+    }
+    
+    if (-not (Test-Path $compressedFile)) {
+        Write-Host "ERROR: Download failed - file not created." -ForegroundColor Red
+        return $false
+    }
+    
+    Write-Host ""
+    Write-Host "Download complete. Decompressing..."
+    
+    $result = Expand-XzFile -CompressedPath $compressedFile -OutputPath $outputFile
+    if ($result) {
+        $Script:ARMBIAN_IMAGE = $outputFile
+        Write-Host "Image ready: $($Script:ARMBIAN_IMAGE)"
+        return $true
+    }
+    return $false
+}
+
+# Function to decompress .xz files
+function Expand-XzFile {
+    param(
+        [string]$CompressedPath,
+        [string]$OutputPath
+    )
+    
+    Write-Host "Decompressing $CompressedPath..."
+    Write-Host "(This may take a few minutes)"
+    
+    # Try using 7-Zip if available
+    $7zPaths = @(
+        "C:\Program Files\7-Zip\7z.exe",
+        "C:\Program Files (x86)\7-Zip\7z.exe",
+        (Join-Path $env:ProgramFiles "7-Zip\7z.exe")
+    )
+    
+    $7zPath = $null
+    foreach ($path in $7zPaths) {
+        if (Test-Path $path) {
+            $7zPath = $path
+            break
+        }
+    }
+    
+    if ($7zPath) {
+        try {
+            $outputDir = Split-Path -Parent $OutputPath
+            & $7zPath x $CompressedPath -o"$outputDir" -y | Out-Null
+            if (Test-Path $OutputPath) {
+                Write-Host "Decompression complete."
+                return $true
+            }
+        } catch {
+            Write-Host "7-Zip decompression failed: $_" -ForegroundColor Yellow
+        }
+    }
+    
+    # Try using tar (available in Windows 10+)
+    if (Get-Command tar -ErrorAction SilentlyContinue) {
+        try {
+            $outputDir = Split-Path -Parent $OutputPath
+            Push-Location $outputDir
+            tar -xf $CompressedPath
+            Pop-Location
+            if (Test-Path $OutputPath) {
+                Write-Host "Decompression complete."
+                return $true
+            }
+        } catch {
+            Write-Host "tar decompression failed: $_" -ForegroundColor Yellow
+        }
+    }
+    
+    Write-Host "ERROR: Could not decompress .xz file." -ForegroundColor Red
+    Write-Host "Please install 7-Zip (https://www.7-zip.org/) or manually decompress the file."
+    Write-Host "Compressed file location: $CompressedPath"
+    return $false
+}
+
+# Function to select a custom Armbian image path
+function Get-ArmbianImageCustomPath {
+        echo ""
+        echo "=============================================="
+        echo "  IMPORTANT: Armbian Image Selection"
+        echo "=============================================="
+        echo "Please ensure you are selecting an Armbian image"
+        echo "that is compatible with the Radxa Rock 3A board."
+        echo ""
+        echo "       The expected environment is:"
+        echo "    minimal/IoT Armbian Trixie ( Debian 13)"
+        echo ""
+        echo "The image should be an uncompressed .img file."
+        echo "If you have a .img.xz file, it will be decompressed."
+        echo "=============================================="
+        echo ""
+
+
+    Write-Host ""
+    Write-Host "==============================================" -ForegroundColor Cyan
+    Write-Host "  IMPORTANT: Armbian Image Selection" -ForegroundColor Cyan
+    Write-Host "==============================================" -ForegroundColor Cyan
+    Write-Host "Please ensure you are selecting an Armbian image"
+    Write-Host "that is compatible with the Radxa Rock 3A board."
+    Write-Host ""
+    Write-Host "       The expected environment is:"
+    Write-Host "    minimal/IoT Armbian Trixie ( Debian 13)"
+    Write-Host ""
+    Write-Host "The image should be an uncompressed .img file."
+    Write-Host "If you have a .img.xz file, it will be decompressed."
+    Write-Host "==============================================" -ForegroundColor Cyan
+    Write-Host ""
+    
+    while ($true) {
+        $customPath = Read-Host "Enter path to Armbian image (or 'cancel' to abort)"
+        
+        if ($customPath -eq 'cancel') {
+            return $false
+        }
+        
+        if ([string]::IsNullOrWhiteSpace($customPath)) {
+            Write-Host "No path entered. Please try again." -ForegroundColor Yellow
+            continue
+        }
+        
+        # Expand environment variables and resolve path
+        $customPath = [Environment]::ExpandEnvironmentVariables($customPath)
+        
+        # Handle relative paths
+        if (-not [System.IO.Path]::IsPathRooted($customPath)) {
+            $customPath = Join-Path (Get-Location) $customPath
+        }
+        
+        # Check if it's a compressed file
+        if ((Test-Path $customPath) -and ($customPath -match '\.xz$')) {
+            Write-Host "Compressed image detected."
+            $decompressedPath = $customPath -replace '\.xz$', ''
+            $result = Expand-XzFile -CompressedPath $customPath -OutputPath $decompressedPath
+            if ($result) {
+                $Script:ARMBIAN_IMAGE = $decompressedPath
+                Write-Host "Image ready: $($Script:ARMBIAN_IMAGE)"
+                return $true
+            } else {
+                return $false
+            }
+        } elseif ((Test-Path $customPath) -and ($customPath -match '\.img$')) {
+            $Script:ARMBIAN_IMAGE = $customPath
+            Write-Host "Using image: $($Script:ARMBIAN_IMAGE)"
+            return $true
+        } elseif (Test-Path $customPath) {
+            Write-Host "WARNING: File exists but doesn't have .img or .img.xz extension." -ForegroundColor Yellow
+            $useAnyway = Read-Host "Use this file anyway? (y/N)"
+            if ($useAnyway -match "^[Yy]") {
+                $Script:ARMBIAN_IMAGE = $customPath
+                Write-Host "Using image: $($Script:ARMBIAN_IMAGE)"
+                return $true
+            }
+        } else {
+            Write-Host "ERROR: File not found: $customPath" -ForegroundColor Red
+            Write-Host "Please check the path and try again."
+        }
+    }
+}
+
+
 function Select-HardwareAndTargetDevice {
     Write-Host ""
     Write-Host "--- 1. Select Hardware ---"
@@ -571,13 +829,14 @@ Select-HardwareAndTargetDevice
 
 # --- Now check for hardware-specific dependencies ---
 if ($Script:HARDWARE_MODEL -eq "r3a") {
-    # Check for Armbian image
-    if (-not (Test-Path $ARMBIAN_IMAGE)) {
-        Write-Host "ERROR: Armbian image file '$ARMBIAN_IMAGE' not found." -ForegroundColor Red
+    # Acquire Armbian image (download or use existing)
+    $imageResult = Get-ArmbianImage
+    if (-not $imageResult) {
+        Write-Host "ERROR: Could not acquire Armbian image." -ForegroundColor Red
         exit 1
     }
-    Write-Host "Using image: $ARMBIAN_IMAGE"
-    
+    Write-Host "Using Armbian image: $($Script:ARMBIAN_IMAGE)"
+        
     # Check for dd in script directory
     $scriptDir = $PSScriptRoot
     if (-not $scriptDir) {
@@ -654,7 +913,7 @@ if ($Script:HARDWARE_MODEL -eq "r3a") {
     
     try {
         # Copy image to temp location
-        Copy-Item -Path $ARMBIAN_IMAGE -Destination $tempImage -Force
+		Copy-Item -Path $Script:ARMBIAN_IMAGE -Destination $tempImage -Force
         Write-Host "Temporary image created at: $tempImage"
         
         # Mount the image
