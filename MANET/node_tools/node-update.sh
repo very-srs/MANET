@@ -17,7 +17,7 @@ get_board_type() {
 
         case "$model" in
             *"ROCK 3A"*|*"Rock 3A"*)
-                echo "rock3a"
+                echo "r3a"
                 ;;
             *"Raspberry Pi 5"*)
                 echo "rpi5"
@@ -92,11 +92,11 @@ if [[ "$LOCAL_VERSION" == "$REMOTE_VERSION" ]]; then
 	exit 0
 else
 	case "$BOARD" in
-	    rock3a)
+	    r3a)
 	        if [ "$ROUTINE_MODE" = false ]; then
 	            echo "Running on Rock 3A"
 	        fi
-	        wget -q  https://www.colorado-governor.com/manet/rock-tools.tar.gz -O /root/tools.tar.gz 2>/dev/null || {
+	        wget -q  https://www.colorado-governor.com/manet/r3a-tools.tar.gz -O /root/tools.tar.gz 2>/dev/null || {
                 if [ "$ROUTINE_MODE" = false ]; then
                     echo "ERROR: Failed to download rock3a tools package.  Not updating"
                 fi
