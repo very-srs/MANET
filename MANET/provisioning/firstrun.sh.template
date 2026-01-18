@@ -154,6 +154,7 @@ elif [ "__HARDWARE_MODEL__" = "r3a" ]; then
 		wget -q  https://www.colorado-governor.com/manet/r3a-install.tar.gz -O /root/morse-pi-install.tar.gz || {
 				echo "ERROR: Failed to download Rock 3a install package"
 				exit 1
+		}
 fi
 
 #
