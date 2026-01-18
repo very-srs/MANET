@@ -15,7 +15,7 @@ PI_OS_IMAGE_URL="https://downloads.raspberrypi.com/raspios_lite_arm64/images/ras
 # Function to validate regulatory domain
 validate_regulatory_domain() {
     local domain=$1
-    
+
     # List of valid regulatory domains (common ones)
     local valid_domains=(
         "US" "CA" "GB" "DE" "FR" "IT" "ES" "NL" "BE" "AT" "CH" "SE" "NO" "DK" "FI"
@@ -233,7 +233,7 @@ ask_questions() {
 	# If Wireless or Auto, ask for LAN AP configuration
 	if [ "$EUD_CONNECTION" = "wireless" ] || [ "$EUD_CONNECTION" = "auto" ]; then
 		read -p "Enter LAN AP SSID Name: " LAN_AP_SSID
-		
+
 		while true; do
 			read -p "Enter LAN AP WPA2 Key (8-63 chars) [or press Enter to generate]: " LAN_AP_KEY
 			echo
@@ -324,7 +324,7 @@ ask_questions() {
 		done
 	fi
 
-	# CIDR selection with capacity planning
+	# CIDR selection
 	ask_lan_cidr "$MAX_EUDS_PER_NODE"
 
 	# Auto Channel Selection (skip if wireless or auto)
@@ -355,7 +355,7 @@ save_config() {
 		local CONFIG_FILE="$CONFIG_DIR/$config_name.conf"
 
 		cat << EOF > "$CONFIG_FILE"
-# Pi Imager Config: $config_name
+# Mesh Config: $config_name
 EUD_CONNECTION="$EUD_CONNECTION"
 LAN_AP_SSID="$LAN_AP_SSID"
 LAN_AP_KEY="$LAN_AP_KEY"
@@ -383,6 +383,7 @@ load_config() {
 
 	# Display the loaded settings
 	echo "--- Loaded Configuration ---"
+	head -n 1 "$CONFIG_FILE" | sed 's/\#//'
 	echo "  EUD Connection: $EUD_CONNECTION"
 	if [ "$EUD_CONNECTION" = "wireless" ] || [ "$EUD_CONNECTION" = "auto" ]; then
 		echo "  LAN AP SSID: $LAN_AP_SSID"
@@ -649,14 +650,13 @@ fi
 # partition and it will be run at first boot
 if [ "$HARDWARE_MODEL" != "r3a" ]; then
     echo "Generating temporary firstrun script..."
-    
     tempScriptFile=$(mktemp)
-    
+
     # Escape special characters in variables for sed
     escape_sed() {
         printf '%s\n' "$1" | sed -e 's/[\/&]/\\&/g' -e 's/|/\\|/g'
     }
-    
+
     HARDWARE_MODEL_ESC=$(escape_sed "$HARDWARE_MODEL")
     EUD_CONNECTION_ESC=$(escape_sed "$EUD_CONNECTION")
     LAN_AP_SSID_ESC=$(escape_sed "$LAN_AP_SSID")
@@ -670,7 +670,7 @@ if [ "$HARDWARE_MODEL" != "r3a" ]; then
     LAN_CIDR_BLOCK_ESC=$(escape_sed "$LAN_CIDR_BLOCK")
     AUTO_CHANNEL_ESC=$(escape_sed "$AUTO_CHANNEL")
     RADIO_PW_ESC=$(escape_sed "$RADIO_PW")
-    
+
     sed -e "s|__HARDWARE_MODEL__|${HARDWARE_MODEL_ESC}|g" \
         -e "s|__EUD_CONNECTION__|${EUD_CONNECTION_ESC}|g" \
         -e "s|__LAN_AP_SSID__|${LAN_AP_SSID_ESC}|g" \
