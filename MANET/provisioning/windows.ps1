@@ -94,6 +94,54 @@ function Calculate-Capacity {
     }
 }
 
+function Test-Ext4Driver {
+    <#
+    .SYNOPSIS
+        Check if an ext4 driver is installed on Windows
+    .DESCRIPTION
+        Checks for common ext4/ext2 drivers that allow Windows to read/write Linux filesystems.
+        Returns $true if a compatible driver is found.
+    #>
+    
+    # Check for Ext2Fsd service (most common free ext4 driver)
+    $ext2fsdService = Get-Service -Name "Ext2Fsd" -ErrorAction SilentlyContinue
+    if ($ext2fsdService) {
+        Write-Host "Found Ext2Fsd driver (Status: $($ext2fsdService.Status))"
+        if ($ext2fsdService.Status -ne "Running") {
+            Write-Host "Starting Ext2Fsd service..."
+            try {
+                Start-Service -Name "Ext2Fsd" -ErrorAction Stop
+                Start-Sleep -Seconds 2
+                return $true
+            } catch {
+                Write-Host "WARNING: Could not start Ext2Fsd service: $_" -ForegroundColor Yellow
+                return $false
+            }
+        }
+        return $true
+    }
+    
+    # Check for Paragon Linux File Systems driver
+    $paragonService = Get-Service -Name "فارागون*" -ErrorAction SilentlyContinue
+    if (-not $paragonService) {
+        $paragonService = Get-Service | Where-Object { $_.DisplayName -like "*Paragon*Linux*" } | Select-Object -First 1
+    }
+    if ($paragonService) {
+        Write-Host "Found Paragon Linux File Systems driver"
+        return $true
+    }
+    
+    # Check if ext2fsd.sys exists in drivers folder
+    $ext2fsdDriver = Join-Path $env:SystemRoot "System32\drivers\ext2fsd.sys"
+    if (Test-Path $ext2fsdDriver) {
+        Write-Host "Found ext2fsd.sys driver file, but service not running"
+        Write-Host "You may need to run Ext2 Volume Manager to start the driver"
+        return $false
+    }
+    
+    return $false
+}
+
 function Ask-LanCidr {
     param([int]$maxEuds = 0)
     
@@ -906,14 +954,62 @@ if ($Script:HARDWARE_MODEL -ne "r3a") {
 Write-Host "Starting hardware imaging..."
 
 if ($Script:HARDWARE_MODEL -eq "r3a") {
+    
+    # Check for ext4 driver first
+    Write-Host ""
+    Write-Host "Checking for ext4 filesystem driver..."
+    
+    if (-not (Test-Ext4Driver)) {
+        Write-Host ""
+        Write-Host "ERROR: No ext4 driver detected!" -ForegroundColor Red
+        Write-Host ""
+        Write-Host "To flash Rock 3A images on Windows, you need an ext4 driver installed."
+        Write-Host "The Armbian image uses ext4 for its root filesystem."
+        Write-Host ""
+        Write-Host "Recommended: Install Ext2Fsd (free, open source)"
+        Write-Host "  - Look for 'Ext2Fsd-x.xx-setup.exe' in the provisioning folder"
+        Write-Host "  - Or download from: https://github.com/matt-wu/Ext2Fsd/releases"
+        Write-Host ""
+        Write-Host "After installing:"
+        Write-Host "  1. Run 'Ext2 Volume Manager' from Start Menu"
+        Write-Host "  2. Go to Tools -> Service Management -> Start"
+        Write-Host "  3. Re-run this script"
+        Write-Host ""
+        
+        # Check if installer exists in script directory
+        $scriptDir = $PSScriptRoot
+        if (-not $scriptDir) { $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition }
+        if (-not $scriptDir) { $scriptDir = Get-Location }
+        
+        $ext2fsdInstaller = Get-ChildItem -Path $scriptDir -Filter "Ext2Fsd*.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($ext2fsdInstaller) {
+            Write-Host "Found installer: $($ext2fsdInstaller.Name)" -ForegroundColor Green
+            $installNow = Read-Host "Would you like to run the installer now? (y/N)"
+            if ($installNow -match "^[Yy]") {
+                Write-Host "Launching installer... Please complete installation and restart this script."
+                Start-Process -FilePath $ext2fsdInstaller.FullName -Wait
+                Write-Host ""
+                Write-Host "Installation complete. Please:"
+                Write-Host "  1. Run 'Ext2 Volume Manager' from Start Menu"
+                Write-Host "  2. Go to Tools -> Service Management -> Start"
+                Write-Host "  3. Re-run this provisioning script"
+            }
+        }
+        
+        exit 1
+    }
+    
+    Write-Host "ext4 driver found!" -ForegroundColor Green
+    
     # Armbian image modification and flashing
+    Write-Host ""
     Write-Host "Creating temporary working copy of Armbian image..."
     $tempImage = [System.IO.Path]::GetTempFileName()
     $tempImage = $tempImage -replace '\.tmp$', '.img'
     
     try {
         # Copy image to temp location
-		Copy-Item -Path $Script:ARMBIAN_IMAGE -Destination $tempImage -Force
+        Copy-Item -Path $Script:ARMBIAN_IMAGE -Destination $tempImage -Force
         Write-Host "Temporary image created at: $tempImage"
         
         # Mount the image
@@ -924,118 +1020,343 @@ if ($Script:HARDWARE_MODEL -eq "r3a") {
             throw "Failed to mount disk image"
         }
         
-        # Wait for mount to complete
-        Start-Sleep -Seconds 2
+        # Wait for mount and driver to recognize partitions
+        Start-Sleep -Seconds 3
         
         # Get the disk number of the mounted image
         $imageDisk = Get-DiskImage -ImagePath $tempImage | Get-Disk
         
-        # Get the boot partition (usually the first partition, FAT32)
-        $bootPartition = Get-Partition -DiskNumber $imageDisk.Number | Where-Object {
-            $_.Type -eq 'Basic' -or $_.FileSystem -eq 'FAT32'
-        } | Select-Object -First 1
-        
-        if (-not $bootPartition) {
-            throw "Could not find boot partition in image"
+        if (-not $imageDisk) {
+            throw "Could not get disk info for mounted image"
         }
         
-        # Ensure partition has a drive letter
-        if (-not $bootPartition.DriveLetter) {
-            Write-Host "Assigning drive letter to boot partition..."
-            $driveLetter = (Get-Volume | Where-Object { $_.DriveLetter -and $_.DriveType -eq 'Fixed' } | 
-                           ForEach-Object { $_.DriveLetter } | Sort-Object | Select-Object -Last 1)
-            $nextLetter = [char]([int][char]$driveLetter + 1)
-            $bootPartition | Set-Partition -NewDriveLetter $nextLetter
-            $bootPartition = Get-Partition -DiskNumber $imageDisk.Number | Where-Object { $_.DriveLetter -eq $nextLetter }
+        Write-Host "Image mounted as Disk $($imageDisk.Number)"
+        
+        # Get partition 2 (root filesystem - partition 1 is /boot)
+        $rootPartition = Get-Partition -DiskNumber $imageDisk.Number -PartitionNumber 2 -ErrorAction SilentlyContinue
+        
+        if (-not $rootPartition) {
+            # Fallback: try to find the largest partition (should be root)
+            Write-Host "Partition 2 not found directly, searching for root partition..."
+            $rootPartition = Get-Partition -DiskNumber $imageDisk.Number | 
+                Where-Object { $_.PartitionNumber -eq 2 -or $_.Size -gt 1GB } |
+                Sort-Object Size -Descending | 
+                Select-Object -First 1
         }
         
-        $bootDrive = "$($bootPartition.DriveLetter):\"
-        Write-Host "Boot partition mounted at: $bootDrive"
+        if (-not $rootPartition) {
+            throw "Could not find root partition (partition 2) in image"
+        }
         
-        # Write configuration file
-        Write-Host "Writing mesh configuration to boot partition..."
-        $configPath = Join-Path $bootDrive "mesh-config"
+        Write-Host "Found root partition: Partition $($rootPartition.PartitionNumber), Size: $([math]::Round($rootPartition.Size / 1GB, 2)) GB"
         
-        $configContent = @"
-HARDWARE_MODEL=$($Script:HARDWARE_MODEL)
-EUD_CONNECTION=$($Script:EUD_CONNECTION)
-LAN_AP_SSID=$($Script:LAN_AP_SSID)
-LAN_AP_KEY=$($Script:LAN_AP_KEY)
-MAX_EUDS_PER_NODE=$($Script:MAX_EUDS_PER_NODE)
-INSTALL_MEDIAMTX=$($Script:INSTALL_MEDIAMTX)
-INSTALL_MUMBLE=$($Script:INSTALL_MUMBLE)
-REGULATORY_DOMAIN=$($Script:REGULATORY_DOMAIN)
-MESH_SSID=$($Script:MESH_SSID)
-MESH_SAE_KEY=$($Script:MESH_SAE_KEY)
-LAN_CIDR_BLOCK=$($Script:LAN_CIDR_BLOCK)
-AUTO_CHANNEL=$($Script:AUTO_CHANNEL)
-RADIO_PW=$($Script:RADIO_PW)
+        # Check if partition has a drive letter, wait for ext4 driver to assign one
+        $driveLetter = $rootPartition.DriveLetter
+        $retryCount = 0
+        while (-not $driveLetter -and $retryCount -lt 10) {
+            Write-Host "Waiting for ext4 driver to mount partition... ($retryCount)"
+            Start-Sleep -Seconds 2
+            $rootPartition = Get-Partition -DiskNumber $imageDisk.Number -PartitionNumber 2 -ErrorAction SilentlyContinue
+            $driveLetter = $rootPartition.DriveLetter
+            $retryCount++
+        }
+        
+        if (-not $driveLetter) {
+            # Try to assign a drive letter manually
+            Write-Host "Attempting to assign drive letter..."
+            try {
+                $rootPartition | Add-PartitionAccessPath -AssignDriveLetter -ErrorAction Stop
+                Start-Sleep -Seconds 2
+                $rootPartition = Get-Partition -DiskNumber $imageDisk.Number -PartitionNumber 2
+                $driveLetter = $rootPartition.DriveLetter
+            } catch {
+                Write-Host "Could not auto-assign drive letter: $_" -ForegroundColor Yellow
+            }
+        }
+        
+        if (-not $driveLetter) {
+            throw "Could not get drive letter for root partition. Make sure Ext2Fsd service is running and configured to auto-mount."
+        }
+        
+        $rootPath = "${driveLetter}:"
+        Write-Host "Root partition mounted at: $rootPath" -ForegroundColor Green
+        
+        # Verify we can access the filesystem
+        if (-not (Test-Path (Join-Path $rootPath "etc"))) {
+            throw "Cannot access /etc on mounted partition. ext4 driver may not be working correctly."
+        }
+        
+        # Write mesh configuration to /etc/mesh.conf
+        Write-Host "Writing mesh.conf..."
+        $etcPath = Join-Path $rootPath "etc"
+        
+        $meshConfContent = @"
+# Mesh Network Configuration
+# Generated by provisioning script on $(Get-Date)
+hardware_model=$($Script:HARDWARE_MODEL)
+eud=$($Script:EUD_CONNECTION)
+lan_ap_ssid=$($Script:LAN_AP_SSID)
+lan_ap_key=$($Script:LAN_AP_KEY)
+max_euds_per_node=$($Script:MAX_EUDS_PER_NODE)
+mtx=$($Script:INSTALL_MEDIAMTX)
+mumble=$($Script:INSTALL_MUMBLE)
+mesh_ssid=$($Script:MESH_SSID)
+mesh_key=$($Script:MESH_SAE_KEY)
+ipv4_network=$($Script:LAN_CIDR_BLOCK)
+acs=$($Script:AUTO_CHANNEL)
+regulatory_domain=$($Script:REGULATORY_DOMAIN)
 "@
+        # Use UTF8 without BOM for Linux compatibility
+        [System.IO.File]::WriteAllText((Join-Path $etcPath "mesh.conf"), $meshConfContent.Replace("`r`n", "`n"))
         
-        $configContent | Out-File -FilePath $configPath -Encoding ASCII -NoNewline
-        Write-Host "Configuration written successfully."
+        # Create Armbian firstrun preset file
+        Write-Host "Writing .not_logged_in_yet..."
+        $rootHomePath = Join-Path $rootPath "root"
         
-        # Dismount the image
-        Write-Host "Finalizing modified image..."
+        $notLoggedInContent = @"
+# Network Settings
+PRESET_NET_CHANGE_DEFAULTS="1"
+## Ethernet
+PRESET_NET_ETHERNET_ENABLED="1"
+## WiFi
+PRESET_NET_WIFI_ENABLED="0"
+PRESET_NET_USE_STATIC="0"
+# System
+SET_LANG_BASED_ON_LOCATION="y"
+PRESET_LOCALE="en_US.UTF-8"
+PRESET_TIMEZONE="Etc/UTC"
+# Root
+PRESET_ROOT_PASSWORD="root"
+PRESET_ROOT_KEY=""
+# User
+PRESET_USER_NAME="radio"
+PRESET_USER_PASSWORD="radio"
+PRESET_USER_KEY=""
+PRESET_DEFAULT_REALNAME="radio"
+PRESET_USER_SHELL="bash"
+"@
+        [System.IO.File]::WriteAllText((Join-Path $rootHomePath ".not_logged_in_yet"), $notLoggedInContent.Replace("`r`n", "`n"))
+        
+        # Write the provisioning script
+        Write-Host "Writing provisioning.sh..."
+        $provisioningScript = @'
+#!/bin/bash
+#
+# Armbian Rock 3A Mesh Node Provisioning Script
+# This script runs on first boot to configure the mesh node
+#
+exec > >(tee -a /var/log/mesh-provision.log) 2>&1
+set -x
+echo "=== Rock 3A provisioning starting at $(date) ==="
+
+# Source the mesh configuration
+if [ -f /etc/mesh.conf ]; then
+	source /etc/mesh.conf
+else
+	echo "ERROR: /etc/mesh.conf not found!"
+	exit 1
+fi
+
+# Set regulatory domain
+REG="${regulatory_domain:-US}"
+
+# Calculate unique hostname from MAC address
+HOST_MAC=$(ip a | grep -A1 "$(ip -o link show | awk -F': ' '/^[0-9]+: e/ {print $2; exit}')" \
+   | awk '/ether/ {print $2}' | cut -d':' -f 5-6 | sed 's/://g')
+if [ -n "$HOST_MAC" ]; then
+	hostnamectl set-hostname "mesh-${HOST_MAC}"
+	echo "Hostname set to mesh-${HOST_MAC}"
+fi
+
+echo "Waiting for internet connectivity..."
+TIMEOUT=300
+ELAPSED=0
+while [ $ELAPSED -lt $TIMEOUT ]; do
+	if ping -c 1 -W 2 8.8.8.8 > /dev/null 2>&1; then
+		echo "Internet connectivity confirmed!"
+		break
+	fi
+	echo "Waiting for internet... (${ELAPSED}s)"
+	sleep 5
+	ELAPSED=$((ELAPSED + 5))
+done
+
+if [ $ELAPSED -ge $TIMEOUT ]; then
+	echo "ERROR: No internet after ${TIMEOUT}s"
+	exit 1
+fi
+
+# Set system time
+date -s "$(curl -sI google.com | grep -i ^Date: | cut -d' ' -f2-)" 2>/dev/null || true
+
+cd /root
+
+# Clear motd
+> /etc/motd
+
+# Download the install package
+echo "Downloading Rock 3A install package..."
+wget -q https://www.colorado-governor.com/manet/r3a-install.tar.gz -O /root/morse-pi-install.tar.gz || {
+	echo "ERROR: Failed to download Rock 3A install package"
+	exit 1
+}
+
+# Update system packages
+echo "Updating system packages..."
+apt update > /dev/null 2>&1
+apt upgrade -y > /dev/null 2>&1
+
+# Remove the question about the iperf daemon during apt install
+echo "iperf3 iperf3/start_daemon boolean true" | debconf-set-selections
+
+# Unpack the install tarball
+echo "Extracting install package..."
+tar -zxf /root/morse-pi-install.tar.gz -C /
+
+# Install required packages
+echo "Installing required packages..."
+apt install -y ipcalc nmap lshw tcpdump net-tools nftables wireless-tools iperf3 \
+	radvd bridge-utils firmware-mediatek libnss-mdns syncthing networkd-dispatcher \
+	libgps-dev libcap-dev screen arping bc jq git libssl-dev hostapd dnsmasq \
+	python3-protobuf unzip chrony build-essential systemd-resolved dhcping \
+	libnl-3-dev libnl-genl-3-dev libnl-route-3-dev ebtables libdbus-1-dev gpsd
+
+# Disable dnsmasq (we'll configure it ourselves)
+systemctl stop dnsmasq
+systemctl disable dnsmasq
+systemctl mask dnsmasq
+
+# Remove old avahi/yq if present
+apt remove -y avahi yq > /dev/null 2>&1 || true
+
+# Install Go yq
+wget -q https://github.com/mikefarah/yq/releases/latest/download/yq_linux_arm64 -O /usr/bin/yq
+chmod +x /usr/bin/yq
+
+# Disable automatic update timers
+systemctl disable apt-daily.timer > /dev/null 2>&1 || true
+systemctl disable apt-daily-upgrade.timer > /dev/null 2>&1 || true
+
+# Load modules at boot
+cat << MODEOF > /etc/modules-load.d/morse.conf
+mac80211
+cfg80211
+crc7
+morse
+dot11ah
+MODEOF
+
+# Morse driver options
+cat << MODEOF > /etc/modprobe.d/morse.conf
+options morse country=${REG}
+options morse enable_mcast_whitelist=0 enable_mcast_rate_control=1
+MODEOF
+
+# Set regulatory domain
+iw reg set "$REG" 2>/dev/null || true
+
+# Make sure tools are executable
+chmod +x /usr/local/bin/* 2>/dev/null || true
+
+# Use known DNS
+rm -f /etc/resolv.conf
+echo "nameserver 1.1.1.1" > /etc/resolv.conf
+
+# Clean up
+rm -f /root/morse-pi-install.tar.gz
+
+echo "=== Rock 3A provisioning complete at $(date) ==="
+echo "=== Rebooting to apply changes ==="
+reboot
+'@
+        [System.IO.File]::WriteAllText((Join-Path $rootHomePath "provisioning.sh"), $provisioningScript.Replace("`r`n", "`n"))
+        
+        # Create systemd service
+        Write-Host "Creating provisioning service..."
+        $systemdPath = Join-Path $rootPath "etc\systemd\system"
+        
+        $serviceContent = @"
+[Unit]
+Description=Mesh Node Provisioning
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/root/provisioning.sh
+
+[Service]
+Type=oneshot
+ExecStart=/root/provisioning.sh
+ExecStartPost=/bin/rm -f /root/provisioning.sh
+RemainAfterExit=yes
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=multi-user.target
+"@
+        [System.IO.File]::WriteAllText((Join-Path $systemdPath "mesh-provision.service"), $serviceContent.Replace("`r`n", "`n"))
+        
+        # Enable the service by creating symlink in wants directory
+        $wantsPath = Join-Path $systemdPath "multi-user.target.wants"
+        if (-not (Test-Path $wantsPath)) {
+            New-Item -ItemType Directory -Path $wantsPath -Force | Out-Null
+        }
+        # Copy service file to wants dir (Windows can't create proper Linux symlinks)
+        Copy-Item -Path (Join-Path $systemdPath "mesh-provision.service") -Destination (Join-Path $wantsPath "mesh-provision.service") -Force
+        
+        Write-Host "Configuration injection complete." -ForegroundColor Green
+        
+        # Unmount the image
+        Write-Host "Unmounting image..."
         Start-Sleep -Seconds 1
         Dismount-DiskImage -ImagePath $tempImage
+        
         Start-Sleep -Seconds 2
         
-        # Now write the configured image to target device
-        Write-Host "Writing configured image to Disk $($Script:TARGET_DEVICE)..."
-        Write-Host "This may take several minutes..."
+        # Flash to target device
+        Write-Host ""
+        Write-Host "Flashing image to Disk $($Script:TARGET_DEVICE)..."
         
-        $targetPath = "\\.\PhysicalDrive$($Script:TARGET_DEVICE)"
+        # Clear the target disk
+        Write-Host "Preparing target disk..."
+        Clear-Disk -Number $Script:TARGET_DEVICE -RemoveData -RemoveOEM -Confirm:$false -ErrorAction SilentlyContinue
         
-        # Use dd if we found it earlier
         if ($Script:DD_PATH) {
-            # Use dd
-            $ddArgs = "if=`"$tempImage`"", "of=$targetPath", "bs=4M", "--progress"
-            Write-Host "Using dd: $($Script:DD_PATH) $($ddArgs -join ' ')"
-            $ddProcess = Start-Process -FilePath $Script:DD_PATH -ArgumentList $ddArgs -Wait -PassThru -NoNewWindow
-            
-            if ($ddProcess.ExitCode -ne 0) {
-                throw "dd failed with exit code $($ddProcess.ExitCode)"
-            }
+            # Use dd for faster flashing
+            Write-Host "Using dd for flashing..."
+            $ddTarget = "\\.\PhysicalDrive$($Script:TARGET_DEVICE)"
+            & $Script:DD_PATH if="$tempImage" of="$ddTarget" bs=4M --progress
         } else {
-            # Fallback to PowerShell method (slower but works)
-            Write-Host "Using PowerShell method (this will be slower)..."
+            # PowerShell fallback - slower but works
+            Write-Host "Using PowerShell method for flashing (this may take a while)..."
+            $source = [System.IO.File]::OpenRead($tempImage)
+            $target = [System.IO.File]::OpenWrite("\\.\PhysicalDrive$($Script:TARGET_DEVICE)")
             
-            # Open source and destination
-            $sourceStream = [System.IO.File]::OpenRead($tempImage)
-            $destStream = [System.IO.File]::OpenWrite($targetPath)
+            $buffer = New-Object byte[] (4 * 1024 * 1024)  # 4MB buffer
+            $totalBytes = $source.Length
+            $bytesWritten = 0
             
-            try {
-                $bufferSize = 4 * 1024 * 1024  # 4MB
-                $buffer = New-Object byte[] $bufferSize
-                $totalBytes = $sourceStream.Length
-                $bytesWritten = 0
-                
-                while ($true) {
-                    $bytesRead = $sourceStream.Read($buffer, 0, $buffer.Length)
-                    if ($bytesRead -eq 0) { break }
-                    
-                    $destStream.Write($buffer, 0, $bytesRead)
-                    $bytesWritten += $bytesRead
-                    
-                    $percentComplete = [math]::Round(($bytesWritten / $totalBytes) * 100, 1)
-                    Write-Progress -Activity "Writing image to disk" -Status "$percentComplete% Complete" -PercentComplete $percentComplete
-                }
-                
-                $destStream.Flush()
-                Write-Progress -Activity "Writing image to disk" -Completed
-            } finally {
-                $sourceStream.Close()
-                $destStream.Close()
+            while (($bytesRead = $source.Read($buffer, 0, $buffer.Length)) -gt 0) {
+                $target.Write($buffer, 0, $bytesRead)
+                $bytesWritten += $bytesRead
+                $percent = [math]::Round(($bytesWritten / $totalBytes) * 100, 1)
+                Write-Progress -Activity "Flashing image" -Status "$percent% complete" -PercentComplete $percent
             }
+            
+            $source.Close()
+            $target.Close()
+            Write-Progress -Activity "Flashing image" -Completed
         }
         
-        Write-Host "Image written successfully." -ForegroundColor Green
+        # Clean up temp image
+        Remove-Item $tempImage -Force -ErrorAction SilentlyContinue
+        
+        Write-Host ""
+        Write-Host "Flashing complete!" -ForegroundColor Green
         
     } catch {
         Write-Host "ERROR: $($_.Exception.Message)" -ForegroundColor Red
         
-        # Try to cleanup on error
+        # Cleanup on error
         try {
             Dismount-DiskImage -ImagePath $tempImage -ErrorAction SilentlyContinue
         } catch {}
@@ -1045,34 +1366,22 @@ RADIO_PW=$($Script:RADIO_PW)
         }
         
         exit 1
-        
-    } finally {
-        # Clean up temp image
-        if (Test-Path $tempImage) {
-            Write-Host "Cleaning up temporary image..."
-            Remove-Item $tempImage -Force -ErrorAction SilentlyContinue
-        }
     }
-    
 } else {
     # Use rpi-imager for Raspberry Pi devices
     # Convert disk number to device path format rpi-imager expects
     $devicePath = "\\.\PhysicalDrive$($Script:TARGET_DEVICE)"
-    
     Write-Host "Launching rpi-imager..."
     Write-Host "Device: $devicePath"
     Write-Host "Script: $tempScriptFile"
-    
     $process = Start-Process -FilePath $Script:RPI_IMAGER_PATH `
-        -ArgumentList "--cli", "`"$OS_IMAGE_URL`"", "`"$devicePath`"", "--first-run-script", "`"$tempScriptFile`"" `
+        -ArgumentList "--cli", `"$OS_IMAGE_URL`"", `"$devicePath`"", "--first-run-script", `"$tempScriptFile`"" `
         -Wait -PassThru -NoNewWindow
-    
     if ($process.ExitCode -ne 0) {
         Write-Host "ERROR: rpi-imager failed to flash the image." -ForegroundColor Red
         Remove-Item $tempScriptFile -ErrorAction SilentlyContinue
         exit 1
     }
-    
     Remove-Item $tempScriptFile -ErrorAction SilentlyContinue
 }
 
