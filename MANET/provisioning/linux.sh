@@ -6,7 +6,10 @@ set -e
 # --- Configuration ---
 TEMPLATE_FILE="firstrun.sh.template"
 TEMP_SCRIPT_FILE=$(mktemp)
-ARMBIAN_IMAGE="Armbian-r3a-trixia-manet.img"
+# Full mirror, fast connection
+ARMBIAN_IMAGE_URL="https://fi.mirror.armbian.de/dl/rock-3a/archive/Armbian_25.11.1_Rock-3a_trixie_current_6.12.58_minimal.img.xz"
+ARMBIAN_IMAGE_FILENAME="Armbian_25.11.1_Rock-3a_trixie_current_6.12.58_minimal.img"
+ARMBIAN_IMAGE=""  # Will be set by acquire_armbian_image function
 CONFIG_DIR=".mesh-configs"
 # Hardcode the OS image URL. rpi-imager will download and cache this.
 PI_OS_IMAGE_URL="https://downloads.raspberrypi.com/raspios_lite_arm64/images/raspios_lite_arm64-2025-10-02/2025-10-01-raspios-trixie-arm64-lite.img.xz"
@@ -163,7 +166,7 @@ ask_lan_cidr() {
 			echo ""
 			echo "=== Network Capacity Analysis ==="
 			read TOTAL SERVICES EUD_POOL NODES <<< $(calculate_capacity "$LAN_CIDR_BLOCK" "$max_euds")
-			
+
 			echo "Network: $LAN_CIDR_BLOCK"
 			echo "  Total usable IPs: $TOTAL"
 			echo "  Reserved for services: $SERVICES"
@@ -171,12 +174,12 @@ ask_lan_cidr() {
 			echo "  Available for mesh nodes: $NODES"
 			echo "=================================="
 			echo ""
-			
+
 			if [ "$NODES" -lt 3 ]; then
 				echo "WARNING: This configuration only supports $NODES mesh nodes."
 				echo "Consider using a larger network or reducing max EUDs per node."
 			fi
-			
+
 			read -p "Accept this configuration? (Y/n): " accept
 			accept=${accept:-y}
 			if [ "$accept" = "y" ] || [ "$accept" = "Y" ]; then
@@ -401,6 +404,159 @@ load_config() {
 	echo "----------------------------"
 }
 
+# Function to acquire Armbian image for Rock 3A
+# Sets ARMBIAN_IMAGE to the path of a usable .img file
+acquire_armbian_image() {
+	echo ""
+	echo "--- Armbian Image Setup for Rock 3A ---"
+
+	# Check if default image exists locally (uncompressed)
+	if [ -f "$ARMBIAN_IMAGE_FILENAME" ]; then
+		echo "Found local Armbian image: $ARMBIAN_IMAGE_FILENAME"
+		ARMBIAN_IMAGE="$ARMBIAN_IMAGE_FILENAME"
+		return 0
+	fi
+
+	# Check for compressed version
+	if [ -f "${ARMBIAN_IMAGE_FILENAME}.xz" ]; then
+		echo "Found compressed Armbian image: ${ARMBIAN_IMAGE_FILENAME}.xz"
+		echo "Decompressing (this may take a moment)..."
+		xz -dk "${ARMBIAN_IMAGE_FILENAME}.xz"
+		if [ $? -eq 0 ]; then
+			ARMBIAN_IMAGE="$ARMBIAN_IMAGE_FILENAME"
+			echo "Decompression complete."
+			return 0
+		else
+			echo "ERROR: Decompression failed."
+			return 1
+		fi
+	fi
+
+	echo "Armbian image not found locally."
+	echo ""
+	echo "Options:"
+	echo "  1. Download from Armbian mirror (recommended)"
+	echo "     URL: $ARMBIAN_IMAGE_URL"
+	echo "  2. Provide path to an existing Armbian Trixie image"
+	echo ""
+
+	while true; do
+		read -p "Select option (1 or 2): " img_choice
+		case $img_choice in
+			1)
+				download_armbian_image
+				return $?
+				;;
+			2)
+				select_custom_armbian_image
+				return $?
+				;;
+			*)
+				echo "Invalid selection. Please enter 1 or 2."
+				;;
+		esac
+	done
+}
+
+# Function to download Armbian image from mirror
+download_armbian_image() {
+	local compressed_file="${ARMBIAN_IMAGE_FILENAME}.xz"
+
+	echo ""
+	echo "Downloading Armbian image..."
+	echo "Source: $ARMBIAN_IMAGE_URL"
+	echo ""
+
+	# Check for wget or curl
+	if command -v wget &> /dev/null; then
+		wget --progress=bar:force -O "$compressed_file" "$ARMBIAN_IMAGE_URL"
+	elif command -v curl &> /dev/null; then
+		curl -L --progress-bar -o "$compressed_file" "$ARMBIAN_IMAGE_URL"
+	else
+		echo "ERROR: Neither wget nor curl found. Please install one to download."
+		return 1
+	fi
+
+	if [ $? -ne 0 ]; then
+		echo "ERROR: Download failed."
+		rm -f "$compressed_file" 2>/dev/null
+		return 1
+	fi
+
+	echo ""
+	echo "Download complete. Decompressing..."
+	xz -dk "$compressed_file"
+
+	if [ $? -ne 0 ]; then
+		echo "ERROR: Decompression failed."
+		return 1
+	fi
+
+	ARMBIAN_IMAGE="$ARMBIAN_IMAGE_FILENAME"
+	echo "Image ready: $ARMBIAN_IMAGE"
+	return 0
+}
+
+# Function to select a custom Armbian image path
+select_custom_armbian_image() {
+	echo ""
+	echo "=============================================="
+	echo "  IMPORTANT: Armbian Image Selection"
+	echo "=============================================="
+	echo "Please ensure you are selecting an Armbian image"
+	echo "that is compatible with the Radxa Rock 3A board."
+	echo ""
+	echo "       The expected environment is:"
+	echo "    minimal/IoT Armbian Trixie ( Debian 13)"
+	echo ""
+	echo "The image should be an uncompressed .img file."
+	echo "If you have a .img.xz file, it will be decompressed."
+	echo "=============================================="
+	echo ""
+
+	while true; do
+		read -p "Enter path to Armbian image: " custom_path
+
+		# Expand ~ if present
+		custom_path="${custom_path/#\~/$HOME}"
+
+		if [ -z "$custom_path" ]; then
+			echo "No path entered. Please try again or press Ctrl+C to cancel."
+			continue
+		fi
+
+		# Check if it's a compressed file
+		if [ -f "$custom_path" ] && [[ "$custom_path" == *.xz ]]; then
+			echo "Compressed image detected. Decompressing..."
+			local decompressed_path="${custom_path%.xz}"
+			xz -dk "$custom_path"
+			if [ $? -eq 0 ]; then
+				ARMBIAN_IMAGE="$decompressed_path"
+				echo "Image ready: $ARMBIAN_IMAGE"
+				return 0
+			else
+				echo "ERROR: Decompression failed."
+				return 1
+			fi
+		elif [ -f "$custom_path" ] && [[ "$custom_path" == *.img ]]; then
+			ARMBIAN_IMAGE="$custom_path"
+			echo "Using image: $ARMBIAN_IMAGE"
+			return 0
+		elif [ -f "$custom_path" ]; then
+			echo "WARNING: File exists but doesn't have .img or .img.xz extension."
+			read -p "Use this file anyway? (y/N): " use_anyway
+			if [ "$use_anyway" = "y" ] || [ "$use_anyway" = "Y" ]; then
+				ARMBIAN_IMAGE="$custom_path"
+				echo "Using image: $ARMBIAN_IMAGE"
+				return 0
+			fi
+		else
+			echo "ERROR: File not found: $custom_path"
+			echo "Please check the path and try again."
+		fi
+	done
+}
+
 # Returns the chosen TARGET_DEVICE path in a global variable.
 select_hardware_and_target_device() {
 	echo ""
@@ -417,6 +573,11 @@ select_hardware_and_target_device() {
 				if ! command -v losetup &> /dev/null; then
 					echo "ERROR: 'losetup' command not found."
 					echo "Cannot customize disk image without losetup"
+					exit 1
+				fi
+				if ! command -v xz &> /dev/null; then
+					echo "ERROR: 'xz' command not found. Needed for decompressing Armbian images."
+					echo "Please install it (e.g., 'sudo apt install xz-utils')."
 					exit 1
 				fi
 				break
@@ -626,15 +787,24 @@ fi
 # --- 3. Get Image & Device ---
 echo ""
 echo "--- Image & Device ---"
+
+# This function will set HARDWARE_MODEL and TARGET_DEVICE
+select_hardware_and_target_device
+
+# Now that we know the hardware, acquire the appropriate image
 if [ "$HARDWARE_MODEL" = "r3a" ]; then
-	echo "Using image: $ARMBIAN_IMAGE"
+	acquire_armbian_image
+	if [ $? -ne 0 ]; then
+		echo "ERROR: Could not acquire Armbian image."
+		rm -f "$TEMP_SCRIPT_FILE" 2>/dev/null
+		exit 1
+	fi
+	echo "Using Armbian image: $ARMBIAN_IMAGE"
 else
 	echo "Using image: $PI_OS_IMAGE_URL"
 	echo "rpi-imager will download/cache this image if needed."
 fi
 
-# This function will set HARDWARE_MODEL and TARGET_DEVICE
-select_hardware_and_target_device
 
 echo ""
 read -p "WARNING: This will ERASE ALL DATA on $TARGET_DEVICE. Are you sure? (yes/no): " CONFIRM
