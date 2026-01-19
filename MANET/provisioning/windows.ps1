@@ -876,82 +876,17 @@ Write-Host "--- Image & Device ---"
 Select-HardwareAndTargetDevice
 
 # --- Now check for hardware-specific dependencies ---
-if ($Script:HARDWARE_MODEL -eq "r3a") {
-    # Acquire Armbian image (download or use existing)
-    $imageResult = Get-ArmbianImage
-    if (-not $imageResult) {
-        Write-Host "ERROR: Could not acquire Armbian image." -ForegroundColor Red
-        exit 1
-    }
-    Write-Host "Using Armbian image: $($Script:ARMBIAN_IMAGE)"
-        
-    # Check for dd in script directory
-    $scriptDir = $PSScriptRoot
-    if (-not $scriptDir) {
-        $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
-    }
-    $ddPath = Join-Path $scriptDir "ddrelease64.exe"
-    
-    if (-not (Test-Path $ddPath)) {
-        Write-Host "WARNING: ddrelease64.exe not found in script directory." -ForegroundColor Yellow
-        Write-Host "Will use slower PowerShell fallback method for flashing."
-        Write-Host "For faster flashing, download dd for Windows from: http://www.chrysocome.net/dd"
-        Write-Host "and place ddrelease64.exe in: $scriptDir"
-        Write-Host ""
-        $Script:DD_PATH = $null
-    } else {
-        Write-Host "Found dd at: $ddPath"
-        $Script:DD_PATH = $ddPath
-    }
-} else {
-    # Check for rpi-imager
-    $rpiImagerPath = "C:\Program Files\Raspberry Pi Ltd\Imager\rpi-imager.exe"
-    
-    if (-not (Test-Path $rpiImagerPath)) {
-        Write-Host "ERROR: rpi-imager.exe not found at expected location:" -ForegroundColor Red
-        Write-Host "  $rpiImagerPath"
-        Write-Host "Please install Raspberry Pi Imager from: https://www.raspberrypi.com/software/"
-        exit 1
-    }
-    
-    Write-Host "Found rpi-imager at: $rpiImagerPath"
-    $Script:RPI_IMAGER_PATH = $rpiImagerPath
-    Write-Host "Using image: $OS_IMAGE_URL"
-    Write-Host "rpi-imager will download/cache this image if needed."
-}
-
-Write-Host ""
-$confirm = Read-Host "WARNING: This will ERASE ALL DATA on Disk $($Script:TARGET_DEVICE). Are you sure? (yes/no)"
-if ($confirm -ne "yes") {
-    Write-Host "Aborting."
-    exit 0
-}
-
-# Create firstrun script for Raspberry Pi devices
-if ($Script:HARDWARE_MODEL -ne "r3a") {
-    Write-Host "Generating temporary firstrun script..."
-    
-    $tempScriptFile = [System.IO.Path]::GetTempFileName()
-    
-    $templateContent = Get-Content $TEMPLATE_FILE -Raw
-    $templateContent = $templateContent -replace '__HARDWARE_MODEL__', $Script:HARDWARE_MODEL
-    $templateContent = $templateContent -replace '__EUD_CONNECTION__', $Script:EUD_CONNECTION
-    $templateContent = $templateContent -replace '__LAN_AP_SSID__', $Script:LAN_AP_SSID
-    $templateContent = $templateContent -replace '__LAN_AP_KEY__', $Script:LAN_AP_KEY
-    $templateContent = $templateContent -replace '__MAX_EUDS_PER_NODE__', $Script:MAX_EUDS_PER_NODE
-    $templateContent = $templateContent -replace '__INSTALL_MEDIAMTX__', $Script:INSTALL_MEDIAMTX
-    $templateContent = $templateContent -replace '__INSTALL_MUMBLE__', $Script:INSTALL_MUMBLE
-    $templateContent = $templateContent -replace '__REGULATORY_DOMAIN__', $Script:REGULATORY_DOMAIN
-    $templateContent = $templateContent -replace '__MESH_SSID__', $Script:MESH_SSID
-    $templateContent = $templateContent -replace '__MESH_SAE_KEY__', $Script:MESH_SAE_KEY
-    $templateContent = $templateContent -replace '__LAN_CIDR_BLOCK__', $Script:LAN_CIDR_BLOCK
-    $templateContent = $templateContent -replace '__AUTO_CHANNEL__', $Script:AUTO_CHANNEL
-    $templateContent = $templateContent -replace '__RADIO_PW__', $Script:RADIO_PW
-    
-    $templateContent | Out-File -FilePath $tempScriptFile -Encoding ASCII
-}
-
-Write-Host "Starting hardware imaging..."
+# =============================================================================
+# Updated Rock 3A Section for windows.ps1
+# =============================================================================
+# This replaces the entire r3a block starting from:
+#   if ($Script:HARDWARE_MODEL -eq "r3a") {
+# down to the matching closing brace before the "else" for rpi-imager
+#
+# IMPORTANT: This matches linux.sh exactly - uses Armbian's built-in 
+# provisioning mechanism where armbian-firstlogin sources /root/provisioning.sh
+# We do NOT need a separate systemd service.
+# =============================================================================
 
 if ($Script:HARDWARE_MODEL -eq "r3a") {
     
@@ -1001,14 +936,13 @@ if ($Script:HARDWARE_MODEL -eq "r3a") {
     
     Write-Host "ext4 driver found!" -ForegroundColor Green
     
-    # Armbian image modification and flashing
+    # Create temporary working copy of Armbian image
     Write-Host ""
-    Write-Host "Creating temporary working copy of Armbian image..."
+    Write-Host "Creating temporary copy of Armbian image..."
     $tempImage = [System.IO.Path]::GetTempFileName()
     $tempImage = $tempImage -replace '\.tmp$', '.img'
     
     try {
-        # Copy image to temp location
         Copy-Item -Path $Script:ARMBIAN_IMAGE -Destination $tempImage -Force
         Write-Host "Temporary image created at: $tempImage"
         
@@ -1036,7 +970,6 @@ if ($Script:HARDWARE_MODEL -eq "r3a") {
         $rootPartition = Get-Partition -DiskNumber $imageDisk.Number -PartitionNumber 2 -ErrorAction SilentlyContinue
         
         if (-not $rootPartition) {
-            # Fallback: try to find the largest partition (should be root)
             Write-Host "Partition 2 not found directly, searching for root partition..."
             $rootPartition = Get-Partition -DiskNumber $imageDisk.Number | 
                 Where-Object { $_.PartitionNumber -eq 2 -or $_.Size -gt 1GB } |
@@ -1050,7 +983,7 @@ if ($Script:HARDWARE_MODEL -eq "r3a") {
         
         Write-Host "Found root partition: Partition $($rootPartition.PartitionNumber), Size: $([math]::Round($rootPartition.Size / 1GB, 2)) GB"
         
-        # Check if partition has a drive letter, wait for ext4 driver to assign one
+        # Wait for ext4 driver to mount partition
         $driveLetter = $rootPartition.DriveLetter
         $retryCount = 0
         while (-not $driveLetter -and $retryCount -lt 10) {
@@ -1062,7 +995,6 @@ if ($Script:HARDWARE_MODEL -eq "r3a") {
         }
         
         if (-not $driveLetter) {
-            # Try to assign a drive letter manually
             Write-Host "Attempting to assign drive letter..."
             try {
                 $rootPartition | Add-PartitionAccessPath -AssignDriveLetter -ErrorAction Stop
@@ -1087,7 +1019,7 @@ if ($Script:HARDWARE_MODEL -eq "r3a") {
         }
         
         # Write mesh configuration to /etc/mesh.conf
-        Write-Host "Writing mesh.conf..."
+        Write-Host "Writing /etc/mesh.conf..."
         $etcPath = Join-Path $rootPath "etc"
         
         $meshConfContent = @"
@@ -1106,11 +1038,11 @@ ipv4_network=$($Script:LAN_CIDR_BLOCK)
 acs=$($Script:AUTO_CHANNEL)
 regulatory_domain=$($Script:REGULATORY_DOMAIN)
 "@
-        # Use UTF8 without BOM for Linux compatibility
+        # Write with Unix line endings (LF only)
         [System.IO.File]::WriteAllText((Join-Path $etcPath "mesh.conf"), $meshConfContent.Replace("`r`n", "`n"))
         
         # Create Armbian firstrun preset file
-        Write-Host "Writing .not_logged_in_yet..."
+        Write-Host "Writing /root/.not_logged_in_yet..."
         $rootHomePath = Join-Path $rootPath "root"
         
         $notLoggedInContent = @"
@@ -1137,108 +1069,115 @@ PRESET_USER_SHELL="bash"
 "@
         [System.IO.File]::WriteAllText((Join-Path $rootHomePath ".not_logged_in_yet"), $notLoggedInContent.Replace("`r`n", "`n"))
         
-        # Write the provisioning script
-        Write-Host "Writing provisioning.sh..."
+        # Write the provisioning script (sourced by armbian-firstlogin)
+        # This matches linux.sh EXACTLY - no systemd service needed
+        Write-Host "Writing /root/provisioning.sh..."
+        
         $provisioningScript = @'
 #!/bin/bash
 #
 # Armbian Rock 3A Mesh Node Provisioning Script
-# This script runs on first boot to configure the mesh node
+# This script is sourced by armbian-firstlogin after user creation
 #
-exec > >(tee -a /var/log/mesh-provision.log) 2>&1
-set -x
-echo "=== Rock 3A provisioning starting at $(date) ==="
 
-# Source the mesh configuration
-if [ -f /etc/mesh.conf ]; then
-	source /etc/mesh.conf
-else
-	echo "ERROR: /etc/mesh.conf not found!"
-	exit 1
-fi
+# Don't use set -x when sourced - it will spam the console
+# Log to file instead
+PROVISION_LOG="/var/log/mesh-provision.log"
 
-# Set regulatory domain
-REG="${regulatory_domain:-US}"
+{
+    echo "=== Rock 3A provisioning starting at $(date) ==="
 
-# Calculate unique hostname from MAC address
-HOST_MAC=$(ip a | grep -A1 "$(ip -o link show | awk -F': ' '/^[0-9]+: e/ {print $2; exit}')" \
-   | awk '/ether/ {print $2}' | cut -d':' -f 5-6 | sed 's/://g')
-if [ -n "$HOST_MAC" ]; then
-	hostnamectl set-hostname "mesh-${HOST_MAC}"
-	echo "Hostname set to mesh-${HOST_MAC}"
-fi
+    # Source the mesh configuration
+    if [ -f /etc/mesh.conf ]; then
+        source /etc/mesh.conf
+    else
+        echo "ERROR: /etc/mesh.conf not found!"
+        # Don't exit - we're sourced, just return
+        return 1 2>/dev/null || true
+    fi
 
-echo "Waiting for internet connectivity..."
-TIMEOUT=300
-ELAPSED=0
-while [ $ELAPSED -lt $TIMEOUT ]; do
-	if ping -c 1 -W 2 8.8.8.8 > /dev/null 2>&1; then
-		echo "Internet connectivity confirmed!"
-		break
-	fi
-	echo "Waiting for internet... (${ELAPSED}s)"
-	sleep 5
-	ELAPSED=$((ELAPSED + 5))
-done
+    # Set regulatory domain
+    REG="${regulatory_domain:-US}"
 
-if [ $ELAPSED -ge $TIMEOUT ]; then
-	echo "ERROR: No internet after ${TIMEOUT}s"
-	exit 1
-fi
+    # Calculate unique hostname from MAC address
+    HOST_MAC=$(ip a | grep -A1 "$(ip -o link show | awk -F': ' '/^[0-9]+: e/ {print $2; exit}')" \
+       | awk '/ether/ {print $2}' | cut -d':' -f 5-6 | sed 's/://g')
+    if [ -n "$HOST_MAC" ]; then
+        hostnamectl set-hostname "mesh-${HOST_MAC}"
+        echo "Hostname set to mesh-${HOST_MAC}"
+    fi
 
-# Set system time
-date -s "$(curl -sI google.com | grep -i ^Date: | cut -d' ' -f2-)" 2>/dev/null || true
+    echo "Waiting for internet connectivity..."
+    TIMEOUT=300
+    ELAPSED=0
+    while [ $ELAPSED -lt $TIMEOUT ]; do
+        if ping -c 1 -W 2 8.8.8.8 > /dev/null 2>&1; then
+            echo "Internet connectivity confirmed!"
+            break
+        fi
+        echo "Waiting for internet... (${ELAPSED}s)"
+        sleep 5
+        ELAPSED=$((ELAPSED + 5))
+    done
 
-cd /root
+    if [ $ELAPSED -ge $TIMEOUT ]; then
+        echo "ERROR: No internet after ${TIMEOUT}s"
+        return 1 2>/dev/null || true
+    fi
 
-# Clear motd
-> /etc/motd
+    # Set system time
+    date -s "$(curl -sI google.com | grep -i ^Date: | cut -d' ' -f2-)" 2>/dev/null || true
 
-# Download the install package
-echo "Downloading Rock 3A install package..."
-wget -q https://www.colorado-governor.com/manet/r3a-install.tar.gz -O /root/morse-pi-install.tar.gz || {
-	echo "ERROR: Failed to download Rock 3A install package"
-	exit 1
-}
+    cd /root
 
-# Update system packages
-echo "Updating system packages..."
-apt update > /dev/null 2>&1
-apt upgrade -y > /dev/null 2>&1
+    # Clear motd
+    > /etc/motd
 
-# Remove the question about the iperf daemon during apt install
-echo "iperf3 iperf3/start_daemon boolean true" | debconf-set-selections
+    # Update system packages FIRST (before extracting tarball to avoid kernel overwrites)
+    echo "Updating system packages..."
+    apt-get update > /dev/null 2>&1
+    DEBIAN_FRONTEND=noninteractive apt-get upgrade -y > /dev/null 2>&1
 
-# Unpack the install tarball
-echo "Extracting install package..."
-tar -zxf /root/morse-pi-install.tar.gz -C /
+    # Remove the question about the iperf daemon during apt install
+    echo "iperf3 iperf3/start_daemon boolean true" | debconf-set-selections
 
-# Install required packages
-echo "Installing required packages..."
-apt install -y ipcalc nmap lshw tcpdump net-tools nftables wireless-tools iperf3 \
-	radvd bridge-utils firmware-mediatek libnss-mdns syncthing networkd-dispatcher \
-	libgps-dev libcap-dev screen arping bc jq git libssl-dev hostapd dnsmasq \
-	python3-protobuf unzip chrony build-essential systemd-resolved dhcping \
-	libnl-3-dev libnl-genl-3-dev libnl-route-3-dev ebtables libdbus-1-dev gpsd
+    # Install required packages
+    echo "Installing required packages..."
+    DEBIAN_FRONTEND=noninteractive apt-get install -y ipcalc nmap lshw tcpdump net-tools nftables wireless-tools iperf3 \
+        radvd bridge-utils firmware-mediatek libnss-mdns syncthing networkd-dispatcher \
+        libgps-dev libcap-dev screen arping bc jq git libssl-dev hostapd dnsmasq \
+        python3-protobuf unzip chrony build-essential systemd-resolved dhcping \
+        libnl-3-dev libnl-genl-3-dev libnl-route-3-dev ebtables libdbus-1-dev gpsd
 
-# Disable dnsmasq (we'll configure it ourselves)
-systemctl stop dnsmasq
-systemctl disable dnsmasq
-systemctl mask dnsmasq
+    # Download the install package
+    echo "Downloading Rock 3A install package..."
+    wget -q https://www.colorado-governor.com/manet/r3a-install.tar.gz -O /root/morse-pi-install.tar.gz || {
+        echo "ERROR: Failed to download Rock 3A install package"
+        return 1 2>/dev/null || true
+    }
 
-# Remove old avahi/yq if present
-apt remove -y avahi yq > /dev/null 2>&1 || true
+    # Unpack the install tarball AFTER apt updates to avoid kernel overwrites
+    echo "Extracting install package..."
+    tar -zxf /root/morse-pi-install.tar.gz -C /
 
-# Install Go yq
-wget -q https://github.com/mikefarah/yq/releases/latest/download/yq_linux_arm64 -O /usr/bin/yq
-chmod +x /usr/bin/yq
+    # Disable dnsmasq (we'll configure it ourselves)
+    systemctl stop dnsmasq
+    systemctl disable dnsmasq
+    systemctl mask dnsmasq
 
-# Disable automatic update timers
-systemctl disable apt-daily.timer > /dev/null 2>&1 || true
-systemctl disable apt-daily-upgrade.timer > /dev/null 2>&1 || true
+    # Remove old avahi/yq if present
+    apt-get remove -y avahi yq > /dev/null 2>&1 || true
 
-# Load modules at boot
-cat << MODEOF > /etc/modules-load.d/morse.conf
+    # Install Go yq
+    wget -q https://github.com/mikefarah/yq/releases/latest/download/yq_linux_arm64 -O /usr/bin/yq
+    chmod +x /usr/bin/yq
+
+    # Disable automatic update timers
+    systemctl disable apt-daily.timer > /dev/null 2>&1 || true
+    systemctl disable apt-daily-upgrade.timer > /dev/null 2>&1 || true
+
+    # Load modules at boot
+    cat << MODEOF > /etc/modules-load.d/morse.conf
 mac80211
 cfg80211
 crc7
@@ -1246,62 +1185,42 @@ morse
 dot11ah
 MODEOF
 
-# Morse driver options
-cat << MODEOF > /etc/modprobe.d/morse.conf
+    # Morse driver options
+    cat << MODEOF > /etc/modprobe.d/morse.conf
 options morse country=${REG}
 options morse enable_mcast_whitelist=0 enable_mcast_rate_control=1
 MODEOF
 
-# Set regulatory domain
-iw reg set "$REG" 2>/dev/null || true
+    # Set regulatory domain
+    iw reg set "$REG" 2>/dev/null || true
 
-# Make sure tools are executable
-chmod +x /usr/local/bin/* 2>/dev/null || true
+    # Make sure tools are executable
+    chmod +x /usr/local/bin/* 2>/dev/null || true
 
-# Use known DNS
-rm -f /etc/resolv.conf
-echo "nameserver 1.1.1.1" > /etc/resolv.conf
+    # Use known DNS
+    rm -f /etc/resolv.conf
+    echo "nameserver 1.1.1.1" > /etc/resolv.conf
 
-# Clean up
-rm -f /root/morse-pi-install.tar.gz
+    # Clean up
+    rm -f /root/morse-pi-install.tar.gz
 
-echo "=== Rock 3A provisioning complete at $(date) ==="
-echo "=== Rebooting to apply changes ==="
-reboot
+    # Remove this script so it doesn't run again
+    rm -f /root/provisioning.sh
+
+    echo "=== Rock 3A provisioning complete at $(date) ==="
+
+} >> "$PROVISION_LOG" 2>&1
+
+# Show user that provisioning completed
+echo ""
+echo "Mesh node provisioning complete. See $PROVISION_LOG for details."
+echo "System will reboot in 10 seconds to apply changes..."
+echo ""
+
+# Schedule reboot after this script returns (don't reboot while sourced)
+( sleep 10 && reboot ) &
 '@
         [System.IO.File]::WriteAllText((Join-Path $rootHomePath "provisioning.sh"), $provisioningScript.Replace("`r`n", "`n"))
-        
-        # Create systemd service
-        Write-Host "Creating provisioning service..."
-        $systemdPath = Join-Path $rootPath "etc\systemd\system"
-        
-        $serviceContent = @"
-[Unit]
-Description=Mesh Node Provisioning
-After=network-online.target
-Wants=network-online.target
-ConditionPathExists=/root/provisioning.sh
-
-[Service]
-Type=oneshot
-ExecStart=/root/provisioning.sh
-ExecStartPost=/bin/rm -f /root/provisioning.sh
-RemainAfterExit=yes
-StandardOutput=journal+console
-StandardError=journal+console
-
-[Install]
-WantedBy=multi-user.target
-"@
-        [System.IO.File]::WriteAllText((Join-Path $systemdPath "mesh-provision.service"), $serviceContent.Replace("`r`n", "`n"))
-        
-        # Enable the service by creating symlink in wants directory
-        $wantsPath = Join-Path $systemdPath "multi-user.target.wants"
-        if (-not (Test-Path $wantsPath)) {
-            New-Item -ItemType Directory -Path $wantsPath -Force | Out-Null
-        }
-        # Copy service file to wants dir (Windows can't create proper Linux symlinks)
-        Copy-Item -Path (Join-Path $systemdPath "mesh-provision.service") -Destination (Join-Path $wantsPath "mesh-provision.service") -Force
         
         Write-Host "Configuration injection complete." -ForegroundColor Green
         
@@ -1309,49 +1228,60 @@ WantedBy=multi-user.target
         Write-Host "Unmounting image..."
         Start-Sleep -Seconds 1
         Dismount-DiskImage -ImagePath $tempImage
-        
         Start-Sleep -Seconds 2
         
-        # Flash to target device
-        Write-Host ""
-        Write-Host "Flashing image to Disk $($Script:TARGET_DEVICE)..."
-        
-        # Clear the target disk
-        Write-Host "Preparing target disk..."
+        # Wipe target device to avoid stale partition data
+        Write-Host "Wiping target device..."
         Clear-Disk -Number $Script:TARGET_DEVICE -RemoveData -RemoveOEM -Confirm:$false -ErrorAction SilentlyContinue
+        
+        # Flash to target device
+        Write-Host "Flashing image to Disk $($Script:TARGET_DEVICE)..."
+        Write-Host "This may take several minutes..."
         
         if ($Script:DD_PATH) {
             # Use dd for faster flashing
-            Write-Host "Using dd for flashing..."
             $ddTarget = "\\.\PhysicalDrive$($Script:TARGET_DEVICE)"
+            Write-Host "Using dd: $($Script:DD_PATH)"
             & $Script:DD_PATH if="$tempImage" of="$ddTarget" bs=4M --progress
+            
+            if ($LASTEXITCODE -ne 0) {
+                throw "dd failed with exit code $LASTEXITCODE"
+            }
         } else {
             # PowerShell fallback - slower but works
-            Write-Host "Using PowerShell method for flashing (this may take a while)..."
+            Write-Host "Using PowerShell method (this will be slower)..."
             $source = [System.IO.File]::OpenRead($tempImage)
             $target = [System.IO.File]::OpenWrite("\\.\PhysicalDrive$($Script:TARGET_DEVICE)")
             
-            $buffer = New-Object byte[] (4 * 1024 * 1024)  # 4MB buffer
-            $totalBytes = $source.Length
-            $bytesWritten = 0
-            
-            while (($bytesRead = $source.Read($buffer, 0, $buffer.Length)) -gt 0) {
-                $target.Write($buffer, 0, $bytesRead)
-                $bytesWritten += $bytesRead
-                $percent = [math]::Round(($bytesWritten / $totalBytes) * 100, 1)
-                Write-Progress -Activity "Flashing image" -Status "$percent% complete" -PercentComplete $percent
+            try {
+                $buffer = New-Object byte[] (4 * 1024 * 1024)  # 4MB buffer
+                $totalBytes = $source.Length
+                $bytesWritten = 0
+                
+                while (($bytesRead = $source.Read($buffer, 0, $buffer.Length)) -gt 0) {
+                    $target.Write($buffer, 0, $bytesRead)
+                    $bytesWritten += $bytesRead
+                    $percent = [math]::Round(($bytesWritten / $totalBytes) * 100, 1)
+                    Write-Progress -Activity "Flashing image" -Status "$percent% complete" -PercentComplete $percent
+                }
+                
+                $target.Flush()
+                Write-Progress -Activity "Flashing image" -Completed
+            } finally {
+                $source.Close()
+                $target.Close()
             }
-            
-            $source.Close()
-            $target.Close()
-            Write-Progress -Activity "Flashing image" -Completed
         }
+        
+        # Sync and clean up
+        Write-Host "Syncing..."
+        Start-Sleep -Seconds 2
         
         # Clean up temp image
         Remove-Item $tempImage -Force -ErrorAction SilentlyContinue
         
         Write-Host ""
-        Write-Host "Flashing complete!" -ForegroundColor Green
+        Write-Host "Flash complete!" -ForegroundColor Green
         
     } catch {
         Write-Host "ERROR: $($_.Exception.Message)" -ForegroundColor Red
@@ -1367,22 +1297,27 @@ WantedBy=multi-user.target
         
         exit 1
     }
+    
 } else {
-    # Use rpi-imager for Raspberry Pi devices
-    # Convert disk number to device path format rpi-imager expects
+    # Raspberry Pi path - use rpi-imager
     $devicePath = "\\.\PhysicalDrive$($Script:TARGET_DEVICE)"
+    
     Write-Host "Launching rpi-imager..."
     Write-Host "Device: $devicePath"
     Write-Host "Script: $tempScriptFile"
+    
     $process = Start-Process -FilePath $Script:RPI_IMAGER_PATH `
-        -ArgumentList "--cli", `"$OS_IMAGE_URL`"", `"$devicePath`"", "--first-run-script", `"$tempScriptFile`"" `
+        -ArgumentList "--cli", "`"$OS_IMAGE_URL`"", "`"$devicePath`"", "--first-run-script", "`"$tempScriptFile`"" `
         -Wait -PassThru -NoNewWindow
+    
     if ($process.ExitCode -ne 0) {
         Write-Host "ERROR: rpi-imager failed to flash the image." -ForegroundColor Red
         Remove-Item $tempScriptFile -ErrorAction SilentlyContinue
         exit 1
     }
+    
     Remove-Item $tempScriptFile -ErrorAction SilentlyContinue
 }
 
-Write-Host "`nDone! Flashing complete. The device will configure itself on first boot." -ForegroundColor Green
+Write-Host ""
+Write-Host "Done! Flashing complete. The device will configure itself on first boot." -ForegroundColor Green
