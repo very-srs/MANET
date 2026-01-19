@@ -7,8 +7,8 @@ set -e
 TEMPLATE_FILE="firstrun.sh.template"
 TEMP_SCRIPT_FILE=$(mktemp)
 # Full mirror, fast connection
-ARMBIAN_IMAGE_URL="https://fi.mirror.armbian.de/dl/rock-3a/archive/Armbian_25.11.1_Rock-3a_trixie_current_6.12.58_minimal.img.xz"
-ARMBIAN_IMAGE_FILENAME="Armbian_25.11.1_Rock-3a_trixie_current_6.12.58_minimal.img"
+ARMBIAN_IMAGE_URL="https://fi.mirror.armbian.de/dl/rock-3a/archive/Armbian_25.11.1_Rock-3a_trixie_vendor_6.1.115_minimal.img.xz"
+ARMBIAN_IMAGE_FILENAME="Armbian_25.11.1_Rock-3a_trixie_vendor_6.1.115_minimal.img"
 ARMBIAN_IMAGE=""  # Will be set by acquire_armbian_image function
 CONFIG_DIR=".mesh-configs"
 # Hardcode the OS image URL. rpi-imager will download and cache this.
@@ -792,17 +792,12 @@ echo "--- Image & Device ---"
 select_hardware_and_target_device
 
 # Now that we know the hardware, acquire the appropriate image
-# Updated r3a section for linux.sh
-# Replace the existing r3a block in the "Starting hardware imaging" section
-# 
-# IMPORTANT: This uses Armbian's built-in provisioning mechanism.
-# Armbian's armbian-firstlogin script sources /root/provisioning.sh at the end.
-# We do NOT need a separate systemd service.
+acquire_armbian_image
 
 if [ "$HARDWARE_MODEL" = "r3a" ]; then
 	# Create temp copy of image to avoid modifying original
 	TEMP_IMAGE=$(mktemp --suffix=.img)
-	echo "Creating temporary copy of Armbian image..."
+	echo "Creating temporary copy of $ARMBIAN_IMAGE..."
 	cp "$ARMBIAN_IMAGE" "$TEMP_IMAGE"
 
 	# Loop mount the temp image
