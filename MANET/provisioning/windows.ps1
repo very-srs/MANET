@@ -5,13 +5,15 @@
 .DESCRIPTION
     This PowerShell script provides the same functionality as the Linux bash version
     for flashing Raspberry Pi and Radxa Rock 3A devices with mesh network configurations.
+.NOTES
+    Must be run as Administrator
 #>
 
 # --- Configuration ---
 $TEMPLATE_FILE = "firstrun.sh.template"
 
-$ARMBIAN_IMAGE_URL = "https://fi.mirror.armbian.de/dl/rock-3a/archive/Armbian_25.11.1_Rock-3a_trixie_current_6.12.58_minimal.img.xz"
-$ARMBIAN_IMAGE_FILENAME = "Armbian_25.11.1_Rock-3a_trixie_current_6.12.58_minimal.img"
+$ARMBIAN_IMAGE_URL = "https://fi.mirror.armbian.de/dl/rock-3a/archive/Armbian_25.11.1_Rock-3a_trixie_vendor_6.1.115_minimal.img.xz"
+$ARMBIAN_IMAGE_FILENAME = "Armbian_25.11.1_Rock-3a_trixie_vendor_6.1.115_minimal.img"
 $Script:ARMBIAN_IMAGE = ""  # Will be set by Get-ArmbianImage function
 
 $CONFIG_DIR = ".mesh-configs"
@@ -31,11 +33,26 @@ $Script:MESH_SAE_KEY = ""
 $Script:LAN_CIDR_BLOCK = ""
 $Script:AUTO_CHANNEL = ""
 $Script:RADIO_PW = ""
+$Script:ADMIN_PW = ""
+$Script:AUTO_UPDATE = ""
 $Script:DD_PATH = $null
 $Script:RPI_IMAGER_PATH = $null
 $Script:REGULATORY_DOMAIN = ""
 
 # --- Helper Functions ---
+
+function Generate-Password {
+    param([int]$length = 10)
+    
+    $chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+    $bytes = New-Object byte[] $length
+    [Security.Cryptography.RNGCryptoServiceProvider]::Create().GetBytes($bytes)
+    $password = ""
+    foreach ($byte in $bytes) {
+        $password += $chars[$byte % $chars.Length]
+    }
+    return $password
+}
 
 function Test-RegulatoryDomain {
     param([string]$domain)
@@ -103,42 +120,85 @@ function Test-Ext4Driver {
         Returns $true if a compatible driver is found.
     #>
     
-    # Check for Ext2Fsd service (most common free ext4 driver)
-    $ext2fsdService = Get-Service -Name "Ext2Fsd" -ErrorAction SilentlyContinue
-    if ($ext2fsdService) {
-        Write-Host "Found Ext2Fsd driver (Status: $($ext2fsdService.Status))"
-        if ($ext2fsdService.Status -ne "Running") {
-            Write-Host "Starting Ext2Fsd service..."
-            try {
-                Start-Service -Name "Ext2Fsd" -ErrorAction Stop
-                Start-Sleep -Seconds 2
+    # Check for Ext2Fsd service
+    $ext2fsd = Get-Service -Name "Ext2Fsd" -ErrorAction SilentlyContinue
+    if ($ext2fsd -and $ext2fsd.Status -eq "Running") {
+        return $true
+    }
+    
+    # Check for Paragon ExtFS service
+    $paragon = Get-Service -Name "ufsd_extfs*" -ErrorAction SilentlyContinue
+    if ($paragon -and $paragon.Status -eq "Running") {
+        return $true
+    }
+    
+    # Check if Ext2Fsd is installed but not running
+    if ($ext2fsd) {
+        Write-Host "Ext2Fsd service found but not running. Attempting to start..." -ForegroundColor Yellow
+        try {
+            Start-Service -Name "Ext2Fsd"
+            Start-Sleep -Seconds 2
+            $ext2fsd = Get-Service -Name "Ext2Fsd"
+            if ($ext2fsd.Status -eq "Running") {
+                Write-Host "Ext2Fsd service started successfully." -ForegroundColor Green
                 return $true
-            } catch {
-                Write-Host "WARNING: Could not start Ext2Fsd service: $_" -ForegroundColor Yellow
-                return $false
             }
+        } catch {
+            Write-Host "Failed to start Ext2Fsd service: $_" -ForegroundColor Red
         }
-        return $true
     }
     
-    # Check for Paragon Linux File Systems driver
-    $paragonService = Get-Service -Name "فارागون*" -ErrorAction SilentlyContinue
-    if (-not $paragonService) {
-        $paragonService = Get-Service | Where-Object { $_.DisplayName -like "*Paragon*Linux*" } | Select-Object -First 1
-    }
-    if ($paragonService) {
-        Write-Host "Found Paragon Linux File Systems driver"
-        return $true
+    return $false
+}
+
+function Expand-XzFile {
+    param(
+        [string]$CompressedPath,
+        [string]$OutputPath
+    )
+    
+    Write-Host "Decompressing (this may take a moment)..."
+    
+    # Check for 7-Zip
+    $sevenZipPaths = @(
+        "C:\Program Files\7-Zip\7z.exe",
+        "C:\Program Files (x86)\7-Zip\7z.exe",
+        (Get-Command 7z -ErrorAction SilentlyContinue).Source
+    )
+    
+    $sevenZip = $null
+    foreach ($path in $sevenZipPaths) {
+        if ($path -and (Test-Path $path)) {
+            $sevenZip = $path
+            break
+        }
     }
     
-    # Check if ext2fsd.sys exists in drivers folder
-    $ext2fsdDriver = Join-Path $env:SystemRoot "System32\drivers\ext2fsd.sys"
-    if (Test-Path $ext2fsdDriver) {
-        Write-Host "Found ext2fsd.sys driver file, but service not running"
-        Write-Host "You may need to run Ext2 Volume Manager to start the driver"
-        return $false
+    if ($sevenZip) {
+        Write-Host "Using 7-Zip for decompression..."
+        & $sevenZip x -y "-o$(Split-Path $OutputPath)" $CompressedPath
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "Decompression complete."
+            return $true
+        } else {
+            Write-Host "ERROR: 7-Zip decompression failed." -ForegroundColor Red
+            return $false
+        }
     }
     
+    # Try built-in tar (Windows 10 1803+)
+    $tar = Get-Command tar -ErrorAction SilentlyContinue
+    if ($tar) {
+        Write-Host "Using built-in tar for decompression..."
+        & tar -xf $CompressedPath -C (Split-Path $OutputPath)
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "Decompression complete."
+            return $true
+        }
+    }
+    
+    Write-Host "ERROR: No decompression tool found. Please install 7-Zip." -ForegroundColor Red
+    Write-Host "Download from: https://www.7-zip.org/"
     return $false
 }
 
@@ -153,62 +213,47 @@ function Ask-LanCidr {
         if ([string]::IsNullOrWhiteSpace($confirm) -or $confirm -match "^[Yy]") {
             $Script:LAN_CIDR_BLOCK = $DEFAULT_CIDR
         } else {
-            # Custom CIDR Loop
+            # Custom CIDR input
             while ($true) {
-                $custom_cidr = Read-Host "Enter custom LAN CIDR block (e.g., 10.10.0.0/16)"
-
-                # 1. Validate general format (IP/Prefix)
-                if ($custom_cidr -notmatch '^(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})/(\d{1,2})$') {
+                $customCidr = Read-Host "Enter custom LAN CIDR block (e.g., 10.10.0.0/16)"
+                
+                # Validate format
+                if ($customCidr -notmatch '^(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})/(\d{1,2})$') {
                     Write-Host "ERROR: Invalid format. Must be x.x.x.x/yy" -ForegroundColor Red
                     continue
                 }
-
-                $ip_part = $Matches[1]
-                $prefix_part = [int]$Matches[2]
-
-                # 2. Validate Prefix (16-26 is a reasonable range for a LAN)
-                if ($prefix_part -lt 16 -or $prefix_part -gt 26) {
-                    Write-Host "ERROR: Prefix /$prefix_part is invalid. Must be between /16 and /26." -ForegroundColor Red
+                
+                $ipPart = $Matches[1]
+                $prefixPart = [int]$Matches[2]
+                
+                # Validate prefix
+                if ($prefixPart -lt 16 -or $prefixPart -gt 26) {
+                    Write-Host "ERROR: Prefix /$prefixPart is invalid. Must be between /16 and /26." -ForegroundColor Red
                     continue
                 }
-
-                # 3. Validate IP as a private range
-                $octets = $ip_part -split '\.'
+                
+                # Validate private range
+                $octets = $ipPart.Split('.')
                 $o1 = [int]$octets[0]
                 $o2 = [int]$octets[1]
-
-                $is_private = $false
-                if ($o1 -eq 10) {
-                    $is_private = $true
-                } elseif ($o1 -eq 172 -and $o2 -ge 16 -and $o2 -le 31) {
-                    $is_private = $true
-                } elseif ($o1 -eq 192 -and $o2 -eq 168) {
-                    $is_private = $true
-                }
-
-                if (-not $is_private) {
-                    Write-Host "ERROR: IP $ip_part is not in a private range." -ForegroundColor Red
+                
+                $isPrivate = $false
+                if ($o1 -eq 10) { $isPrivate = $true }
+                elseif ($o1 -eq 172 -and $o2 -ge 16 -and $o2 -le 31) { $isPrivate = $true }
+                elseif ($o1 -eq 192 -and $o2 -eq 168) { $isPrivate = $true }
+                
+                if (-not $isPrivate) {
+                    Write-Host "ERROR: IP $ipPart is not in a private range." -ForegroundColor Red
                     Write-Host "Must be in 10.0.0.0/8, 172.16.0.0/12, or 192.168.0.0/16."
                     continue
                 }
-
-                # 4. Check if it's a valid network address
-                if ($prefix_part -eq 24 -and [int]$octets[3] -ne 0) {
-                    Write-Host "WARNING: For a /24 network, the IP should end in .0 (e.g., 192.168.1.0/24)." -ForegroundColor Yellow
-                    Write-Host "Your entry $custom_cidr may cause routing issues."
-                    $use_anyway = Read-Host "Use it anyway? (y/N)"
-                    if ($use_anyway -notmatch "^[Yy]") {
-                        continue
-                    }
-                }
-
-                # All checks passed
-                $Script:LAN_CIDR_BLOCK = $custom_cidr
+                
+                $Script:LAN_CIDR_BLOCK = $customCidr
                 break
             }
         }
         
-        # Show capacity calculation if EUDs are configured
+        # Show capacity if EUDs configured
         if ($maxEuds -gt 0) {
             Write-Host ""
             Write-Host "=== Network Capacity Analysis ==="
@@ -296,13 +341,12 @@ function Ask-Questions {
 
     # 3. Mesh Configuration
     $Script:MESH_SSID = Read-Host "Enter MESH SSID Name"
-
+    
     while ($true) {
         $key = Read-Host "Enter MESH SAE Key (WPA3 password, 8-63 chars) [or press Enter to generate]"
         Write-Host ""
         
         if ([string]::IsNullOrWhiteSpace($key)) {
-            # Generate random key
             $bytes = New-Object byte[] 33
             [Security.Cryptography.RNGCryptoServiceProvider]::Create().GetBytes($bytes)
             $Script:MESH_SAE_KEY = [Convert]::ToBase64String($bytes)
@@ -318,7 +362,7 @@ function Ask-Questions {
         }
     }
 
-    # WiFi Regulatory Domain
+    # 4. Regulatory Domain
     while ($true) {
         $domain = Read-Host "Enter WiFi regulatory domain (2-letter country code, default: US)"
         if ([string]::IsNullOrWhiteSpace($domain)) {
@@ -338,6 +382,7 @@ function Ask-Questions {
         }
     }
 
+    # 5. Radio user password
     Write-Host "The device will have a user called radio, for ssh access."
     $pw = Read-Host "Enter a password for the radio user [or press Enter to default to 'radio']"
     Write-Host ""
@@ -349,6 +394,31 @@ function Ask-Questions {
         $Script:RADIO_PW = $pw
     }
     Write-Host "Setting radio password to be $($Script:RADIO_PW)"
+
+    # 6. Network administrator password
+    Write-Host ""
+    Write-Host "The network administrator password is used to access the mesh admin interface."
+    $adminPw = Read-Host "Enter admin password [or press Enter to generate 10-char random]"
+    Write-Host ""
+    
+    if ([string]::IsNullOrWhiteSpace($adminPw)) {
+        $Script:ADMIN_PW = Generate-Password -length 10
+        Write-Host "Generated admin password: $($Script:ADMIN_PW)"
+    } else {
+        $Script:ADMIN_PW = $adminPw
+        Write-Host "Admin password set."
+    }
+
+    # 7. Automatic updates for MANET tools
+    Write-Host ""
+    $response = Read-Host "Enable automatic updates for MANET tools? (Y/n)"
+    if ([string]::IsNullOrWhiteSpace($response) -or $response -match "^[Yy]") {
+        $Script:AUTO_UPDATE = "y"
+        Write-Host "Automatic updates enabled."
+    } else {
+        $Script:AUTO_UPDATE = "n"
+        Write-Host "Automatic updates disabled."
+    }
 
     # --- Ask for max EUDs before CIDR selection ---
     if ($Script:EUD_CONNECTION -eq "wireless" -or $Script:EUD_CONNECTION -eq "auto") {
@@ -393,7 +463,7 @@ function Save-Config {
         $CONFIG_FILE = Join-Path $CONFIG_DIR "$config_name.conf"
         
         $config_content = @"
-# Pi Imager Config: $config_name
+# Mesh Config: $config_name
 EUD_CONNECTION="$($Script:EUD_CONNECTION)"
 LAN_AP_SSID="$($Script:LAN_AP_SSID)"
 LAN_AP_KEY="$($Script:LAN_AP_KEY)"
@@ -406,6 +476,8 @@ MESH_SAE_KEY="$($Script:MESH_SAE_KEY)"
 LAN_CIDR_BLOCK="$($Script:LAN_CIDR_BLOCK)"
 AUTO_CHANNEL="$($Script:AUTO_CHANNEL)"
 RADIO_PW="$($Script:RADIO_PW)"
+ADMIN_PW="$($Script:ADMIN_PW)"
+AUTO_UPDATE="$($Script:AUTO_UPDATE)"
 "@
         
         $config_content | Out-File -FilePath $CONFIG_FILE -Encoding ASCII
@@ -436,6 +508,8 @@ function Load-Config {
                 "LAN_CIDR_BLOCK" { $Script:LAN_CIDR_BLOCK = $varValue }
                 "AUTO_CHANNEL" { $Script:AUTO_CHANNEL = $varValue }
                 "RADIO_PW" { $Script:RADIO_PW = $varValue }
+                "ADMIN_PW" { $Script:ADMIN_PW = $varValue }
+                "AUTO_UPDATE" { $Script:AUTO_UPDATE = $varValue }
             }
         }
     }
@@ -449,18 +523,17 @@ function Load-Config {
     }
     Write-Host "  Install MediaMTX: $($Script:INSTALL_MEDIAMTX)"
     Write-Host "  Install Mumble: $($Script:INSTALL_MUMBLE)"
+    Write-Host "  Regulatory Domain: $($Script:REGULATORY_DOMAIN)"
     Write-Host "  Mesh SSID: $($Script:MESH_SSID)"
     Write-Host "  Mesh SAE Key: $($Script:MESH_SAE_KEY)"
-    Write-Host "  Regulatory Domain: $($Script:REGULATORY_DOMAIN)"
     Write-Host "  LAN CIDR Block: $($Script:LAN_CIDR_BLOCK)"
     Write-Host "  Auto Channel: $($Script:AUTO_CHANNEL)"
     Write-Host "  User password: $($Script:RADIO_PW)"
+    Write-Host "  Admin password: $(if ($Script:ADMIN_PW) { $Script:ADMIN_PW } else { '(not set)' })"
+    Write-Host "  Auto Update: $(if ($Script:AUTO_UPDATE) { $Script:AUTO_UPDATE } else { 'n' })"
     Write-Host "----------------------------"
 }
 
-
-# Function to acquire Armbian image for Rock 3A
-# Sets $Script:ARMBIAN_IMAGE to the path of a usable .img file
 function Get-ArmbianImage {
     Write-Host ""
     Write-Host "--- Armbian Image Setup for Rock 3A ---"
@@ -504,185 +577,83 @@ function Get-ArmbianImage {
     Write-Host ""
     
     while ($true) {
-        $imgChoice = Read-Host "Select option (1 or 2)"
-        
-        switch ($imgChoice) {
+        $choice = Read-Host "Select option (1 or 2)"
+        switch ($choice) {
             "1" {
-                return Get-ArmbianImageDownload -OutputDir $scriptDir
+                return Download-ArmbianImage
             }
             "2" {
-                return Get-ArmbianImageCustomPath
+                return Select-CustomArmbianImage
             }
             default {
-                Write-Host "Invalid selection. Please enter 1 or 2." -ForegroundColor Red
+                Write-Host "Invalid selection. Please enter 1 or 2."
             }
         }
     }
 }
 
-# Function to download Armbian image from mirror
-function Get-ArmbianImageDownload {
-    param([string]$OutputDir)
+function Download-ArmbianImage {
+    $scriptDir = $PSScriptRoot
+    if (-not $scriptDir) { $scriptDir = Get-Location }
     
-    $compressedFile = Join-Path $OutputDir "${ARMBIAN_IMAGE_FILENAME}.xz"
-    $outputFile = Join-Path $OutputDir $ARMBIAN_IMAGE_FILENAME
+    $compressedFile = Join-Path $scriptDir "${ARMBIAN_IMAGE_FILENAME}.xz"
+    $outputFile = Join-Path $scriptDir $ARMBIAN_IMAGE_FILENAME
     
     Write-Host ""
     Write-Host "Downloading Armbian image..."
     Write-Host "Source: $ARMBIAN_IMAGE_URL"
-    Write-Host "This may take several minutes depending on your connection speed."
     Write-Host ""
     
     try {
-        # Use BitsTransfer for better progress display, fallback to Invoke-WebRequest
-        if (Get-Command Start-BitsTransfer -ErrorAction SilentlyContinue) {
-            Start-BitsTransfer -Source $ARMBIAN_IMAGE_URL -Destination $compressedFile -DisplayName "Downloading Armbian Image"
-        } else {
-            # Show progress with Invoke-WebRequest
-            $ProgressPreference = 'Continue'
-            Invoke-WebRequest -Uri $ARMBIAN_IMAGE_URL -OutFile $compressedFile -UseBasicParsing
-        }
+        $ProgressPreference = 'SilentlyContinue'  # Speeds up download
+        Invoke-WebRequest -Uri $ARMBIAN_IMAGE_URL -OutFile $compressedFile -UseBasicParsing
+        $ProgressPreference = 'Continue'
     } catch {
         Write-Host "ERROR: Download failed: $_" -ForegroundColor Red
-        if (Test-Path $compressedFile) {
-            Remove-Item $compressedFile -Force
-        }
         return $false
     }
     
-    if (-not (Test-Path $compressedFile)) {
-        Write-Host "ERROR: Download failed - file not created." -ForegroundColor Red
-        return $false
-    }
-    
-    Write-Host ""
     Write-Host "Download complete. Decompressing..."
-    
     $result = Expand-XzFile -CompressedPath $compressedFile -OutputPath $outputFile
+    
     if ($result) {
         $Script:ARMBIAN_IMAGE = $outputFile
         Write-Host "Image ready: $($Script:ARMBIAN_IMAGE)"
         return $true
     }
+    
     return $false
 }
 
-# Function to decompress .xz files
-function Expand-XzFile {
-    param(
-        [string]$CompressedPath,
-        [string]$OutputPath
-    )
-    
-    Write-Host "Decompressing $CompressedPath..."
-    Write-Host "(This may take a few minutes)"
-    
-    # Try using 7-Zip if available
-    $7zPaths = @(
-        "C:\Program Files\7-Zip\7z.exe",
-        "C:\Program Files (x86)\7-Zip\7z.exe",
-        (Join-Path $env:ProgramFiles "7-Zip\7z.exe")
-    )
-    
-    $7zPath = $null
-    foreach ($path in $7zPaths) {
-        if (Test-Path $path) {
-            $7zPath = $path
-            break
-        }
-    }
-    
-    if ($7zPath) {
-        try {
-            $outputDir = Split-Path -Parent $OutputPath
-            & $7zPath x $CompressedPath -o"$outputDir" -y | Out-Null
-            if (Test-Path $OutputPath) {
-                Write-Host "Decompression complete."
-                return $true
-            }
-        } catch {
-            Write-Host "7-Zip decompression failed: $_" -ForegroundColor Yellow
-        }
-    }
-    
-    # Try using tar (available in Windows 10+)
-    if (Get-Command tar -ErrorAction SilentlyContinue) {
-        try {
-            $outputDir = Split-Path -Parent $OutputPath
-            Push-Location $outputDir
-            tar -xf $CompressedPath
-            Pop-Location
-            if (Test-Path $OutputPath) {
-                Write-Host "Decompression complete."
-                return $true
-            }
-        } catch {
-            Write-Host "tar decompression failed: $_" -ForegroundColor Yellow
-        }
-    }
-    
-    Write-Host "ERROR: Could not decompress .xz file." -ForegroundColor Red
-    Write-Host "Please install 7-Zip (https://www.7-zip.org/) or manually decompress the file."
-    Write-Host "Compressed file location: $CompressedPath"
-    return $false
-}
-
-# Function to select a custom Armbian image path
-function Get-ArmbianImageCustomPath {
-        echo ""
-        echo "=============================================="
-        echo "  IMPORTANT: Armbian Image Selection"
-        echo "=============================================="
-        echo "Please ensure you are selecting an Armbian image"
-        echo "that is compatible with the Radxa Rock 3A board."
-        echo ""
-        echo "       The expected environment is:"
-        echo "    minimal/IoT Armbian Trixie ( Debian 13)"
-        echo ""
-        echo "The image should be an uncompressed .img file."
-        echo "If you have a .img.xz file, it will be decompressed."
-        echo "=============================================="
-        echo ""
-
-
+function Select-CustomArmbianImage {
     Write-Host ""
-    Write-Host "==============================================" -ForegroundColor Cyan
-    Write-Host "  IMPORTANT: Armbian Image Selection" -ForegroundColor Cyan
-    Write-Host "==============================================" -ForegroundColor Cyan
+    Write-Host "=============================================="
+    Write-Host "  IMPORTANT: Armbian Image Selection"
+    Write-Host "=============================================="
     Write-Host "Please ensure you are selecting an Armbian image"
     Write-Host "that is compatible with the Radxa Rock 3A board."
     Write-Host ""
     Write-Host "       The expected environment is:"
-    Write-Host "    minimal/IoT Armbian Trixie ( Debian 13)"
+    Write-Host "    minimal/IoT Armbian Trixie (Debian 13)"
     Write-Host ""
     Write-Host "The image should be an uncompressed .img file."
     Write-Host "If you have a .img.xz file, it will be decompressed."
-    Write-Host "==============================================" -ForegroundColor Cyan
+    Write-Host "=============================================="
     Write-Host ""
     
     while ($true) {
-        $customPath = Read-Host "Enter path to Armbian image (or 'cancel' to abort)"
-        
-        if ($customPath -eq 'cancel') {
-            return $false
-        }
+        $customPath = Read-Host "Enter path to Armbian image"
         
         if ([string]::IsNullOrWhiteSpace($customPath)) {
-            Write-Host "No path entered. Please try again." -ForegroundColor Yellow
+            Write-Host "No path entered. Please try again or press Ctrl+C to cancel."
             continue
         }
         
-        # Expand environment variables and resolve path
+        # Expand environment variables
         $customPath = [Environment]::ExpandEnvironmentVariables($customPath)
         
-        # Handle relative paths
-        if (-not [System.IO.Path]::IsPathRooted($customPath)) {
-            $customPath = Join-Path (Get-Location) $customPath
-        }
-        
-        # Check if it's a compressed file
-        if ((Test-Path $customPath) -and ($customPath -match '\.xz$')) {
-            Write-Host "Compressed image detected."
+        if ($customPath.EndsWith(".xz") -and (Test-Path $customPath)) {
+            Write-Host "Compressed image detected. Decompressing..."
             $decompressedPath = $customPath -replace '\.xz$', ''
             $result = Expand-XzFile -CompressedPath $customPath -OutputPath $decompressedPath
             if ($result) {
@@ -692,7 +663,7 @@ function Get-ArmbianImageCustomPath {
             } else {
                 return $false
             }
-        } elseif ((Test-Path $customPath) -and ($customPath -match '\.img$')) {
+        } elseif ($customPath.EndsWith(".img") -and (Test-Path $customPath)) {
             $Script:ARMBIAN_IMAGE = $customPath
             Write-Host "Using image: $($Script:ARMBIAN_IMAGE)"
             return $true
@@ -711,59 +682,58 @@ function Get-ArmbianImageCustomPath {
     }
 }
 
-
 function Select-HardwareAndTargetDevice {
     Write-Host ""
     Write-Host "--- 1. Select Hardware ---"
     
-    $SKIP_DEV_SELECT = $false
-
-    Write-Host "Select Raspberry Pi Model:"
+    Write-Host "Select hardware platform:"
     Write-Host "1. Radxa Rock 3A"
     Write-Host "2. Raspberry Pi 5"
     Write-Host "3. Raspberry Pi 4B"
     Write-Host "4. Compute Module 4 (CM4)"
     
     do {
-        $hw_choice = Read-Host "Enter choice (1-4)"
+        $choice = Read-Host "Enter choice (1-4)"
+        switch ($choice) {
+            "1" { $Script:HARDWARE_MODEL = "r3a"; break }
+            "2" { $Script:HARDWARE_MODEL = "rpi5"; break }
+            "3" { $Script:HARDWARE_MODEL = "rpi4"; break }
+            "4" { $Script:HARDWARE_MODEL = "rpi4"; break }  # CM4 uses rpi4 config
+        }
+    } while ($choice -notmatch "^[1234]$")
+    
+    # Check for rpi-imager if using Raspberry Pi
+    if ($Script:HARDWARE_MODEL -ne "r3a") {
+        # Look for rpi-imager
+        $rpiImagerPaths = @(
+            "C:\Program Files (x86)\Raspberry Pi Imager\rpi-imager.exe",
+            "C:\Program Files\Raspberry Pi Imager\rpi-imager.exe",
+            (Get-Command rpi-imager -ErrorAction SilentlyContinue).Source
+        )
         
-        switch ($hw_choice) {
-            "1" {
-                $Script:HARDWARE_MODEL = "r3a"
-                break
-            }
-            "2" {
-                $Script:HARDWARE_MODEL = "rpi5"
-                break
-            }
-            "3" {
-                $Script:HARDWARE_MODEL = "rpi4"
-                break
-            }
-            "4" {
-                Write-Host "Compute Module 4 selected."
-                Write-Host "IMPORTANT: CM4 flashing on Windows requires:" -ForegroundColor Yellow
-                Write-Host "  1. Boot switch set to USB-boot mode"
-                Write-Host "  2. rpiboot.exe installed and run (CM4 should appear as USB mass storage)"
-                Write-Host "  3. Device should show up as a removable disk in Windows"
-                Write-Host ""
-                Read-Host "Press Enter once CM4 is connected and appears as a disk in Windows"
-                
-                $Script:HARDWARE_MODEL = "rpi4"
-                $SKIP_DEV_SELECT = $false  # Still need to select which disk is the CM4
+        foreach ($path in $rpiImagerPaths) {
+            if ($path -and (Test-Path $path)) {
+                $Script:RPI_IMAGER_PATH = $path
                 break
             }
         }
-    } while ($hw_choice -notmatch "^[1-4]$")
-
+        
+        if (-not $Script:RPI_IMAGER_PATH) {
+            Write-Host "ERROR: Raspberry Pi Imager not found!" -ForegroundColor Red
+            Write-Host "Please install from: https://www.raspberrypi.com/software/"
+            exit 1
+        }
+    }
+    
     Write-Host ""
     Write-Host "--- 2. Select Target Device ---"
     
-    # Get all removable disks
+    # Get available disks (excluding boot disk)
+    $bootDisk = (Get-Disk | Where-Object { $_.IsBoot -eq $true }).Number
     $disks = Get-Disk | Where-Object { 
-        $_.BusType -in @('USB', 'SD') -or 
-        ($_.Model -like '*Compute Module*') -or
-        ($_.FriendlyName -like '*RPi*')
+        $_.Number -ne $bootDisk -and 
+        $_.OperationalStatus -eq "Online" -and
+        $_.Size -gt 0
     }
     
     if ($disks.Count -eq 0) {
@@ -771,7 +741,7 @@ function Select-HardwareAndTargetDevice {
         Write-Host "Please ensure your SD card reader, USB drive, or CM4 is connected."
         exit 1
     }
-
+    
     Write-Host "Available devices:"
     $i = 1
     $diskMap = @{}
@@ -781,19 +751,63 @@ function Select-HardwareAndTargetDevice {
         $diskMap[$i] = $disk
         $i++
     }
+    Write-Host "$i. Quit"
     
     do {
-        $choice = Read-Host "Enter device number (1-$($disks.Count))"
+        $choice = Read-Host "Enter device number (1-$i)"
         $choiceNum = 0
-        if ([int]::TryParse($choice, [ref]$choiceNum) -and $diskMap.ContainsKey($choiceNum)) {
-            $selectedDisk = $diskMap[$choiceNum]
-            $Script:TARGET_DEVICE = $selectedDisk.Number
-            Write-Host "Selected: Disk $($Script:TARGET_DEVICE) - $($selectedDisk.FriendlyName)"
-            break
-        } else {
-            Write-Host "Invalid selection." -ForegroundColor Red
+        if ([int]::TryParse($choice, [ref]$choiceNum)) {
+            if ($choiceNum -eq $i) {
+                Write-Host "Aborting."
+                exit 0
+            }
+            if ($diskMap.ContainsKey($choiceNum)) {
+                $selectedDisk = $diskMap[$choiceNum]
+                $Script:TARGET_DEVICE = $selectedDisk.Number
+                Write-Host "Selected: Disk $($Script:TARGET_DEVICE) - $($selectedDisk.FriendlyName)"
+                break
+            }
         }
+        Write-Host "Invalid selection." -ForegroundColor Red
     } while ($true)
+}
+
+function Confirm-Flash {
+    param(
+        [int]$DiskNumber
+    )
+    
+    $disk = Get-Disk -Number $DiskNumber
+    $sizeGB = [math]::Round($disk.Size / 1GB, 2)
+    
+    Write-Host ""
+    Write-Host "==============================================" -ForegroundColor Yellow
+    Write-Host "         ⚠️  FINAL CONFIRMATION  ⚠️" -ForegroundColor Yellow
+    Write-Host "==============================================" -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "You are about to ERASE and FLASH:"
+    Write-Host ""
+    Write-Host "  Device: Disk $DiskNumber - $($disk.FriendlyName)"
+    Write-Host "  Size:   ${sizeGB}GB"
+    Write-Host ""
+    Write-Host "  Hardware: $($Script:HARDWARE_MODEL)"
+    Write-Host "  Mesh SSID: $($Script:MESH_SSID)"
+    Write-Host "  Network: $($Script:LAN_CIDR_BLOCK)"
+    Write-Host ""
+    Write-Host "⚠️  ALL DATA ON DISK $DiskNumber WILL BE DESTROYED! ⚠️" -ForegroundColor Red
+    Write-Host ""
+    Write-Host "==============================================" -ForegroundColor Yellow
+    Write-Host ""
+    
+    $confirm = Read-Host "Type 'yes' to proceed, anything else to abort"
+    if ($confirm -ne "yes") {
+        Write-Host ""
+        Write-Host "Aborted by user."
+        exit 0
+    }
+    
+    Write-Host ""
+    Write-Host "Proceeding with flash..."
 }
 
 # --- Main Script ---
@@ -815,6 +829,26 @@ if (-not (Test-Path $TEMPLATE_FILE)) {
 # Ensure config directory exists
 if (-not (Test-Path $CONFIG_DIR)) {
     New-Item -ItemType Directory -Path $CONFIG_DIR | Out-Null
+}
+
+# Check for dd.exe (optional, for faster flashing)
+$ddPaths = @(
+    (Join-Path $PSScriptRoot "ddrelease64.exe"),
+    (Join-Path (Get-Location) "ddrelease64.exe"),
+    (Get-Command dd -ErrorAction SilentlyContinue).Source
+)
+
+foreach ($path in $ddPaths) {
+    if ($path -and (Test-Path $path)) {
+        $Script:DD_PATH = $path
+        Write-Host "Found dd: $($Script:DD_PATH)" -ForegroundColor Green
+        break
+    }
+}
+
+if (-not $Script:DD_PATH) {
+    Write-Host "Note: dd.exe not found. Will use slower PowerShell method for flashing." -ForegroundColor Yellow
+    Write-Host "For faster flashing, place ddrelease64.exe in the script directory."
 }
 
 # --- 2. Load or Create Config ---
@@ -875,19 +909,7 @@ Write-Host "--- Image & Device ---"
 # Select hardware and device
 Select-HardwareAndTargetDevice
 
-# --- Now check for hardware-specific dependencies ---
-# =============================================================================
-# Updated Rock 3A Section for windows.ps1
-# =============================================================================
-# This replaces the entire r3a block starting from:
-#   if ($Script:HARDWARE_MODEL -eq "r3a") {
-# down to the matching closing brace before the "else" for rpi-imager
-#
-# IMPORTANT: This matches linux.sh exactly - uses Armbian's built-in 
-# provisioning mechanism where armbian-firstlogin sources /root/provisioning.sh
-# We do NOT need a separate systemd service.
-# =============================================================================
-
+# --- Rock 3A Flashing ---
 if ($Script:HARDWARE_MODEL -eq "r3a") {
     
     # Check for ext4 driver first
@@ -913,7 +935,6 @@ if ($Script:HARDWARE_MODEL -eq "r3a") {
         
         # Check if installer exists in script directory
         $scriptDir = $PSScriptRoot
-        if (-not $scriptDir) { $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition }
         if (-not $scriptDir) { $scriptDir = Get-Location }
         
         $ext2fsdInstaller = Get-ChildItem -Path $scriptDir -Filter "Ext2Fsd*.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
@@ -935,6 +956,12 @@ if ($Script:HARDWARE_MODEL -eq "r3a") {
     }
     
     Write-Host "ext4 driver found!" -ForegroundColor Green
+    
+    # Get Armbian image
+    if (-not (Get-ArmbianImage)) {
+        Write-Host "ERROR: Failed to acquire Armbian image." -ForegroundColor Red
+        exit 1
+    }
     
     # Create temporary working copy of Armbian image
     Write-Host ""
@@ -964,46 +991,24 @@ if ($Script:HARDWARE_MODEL -eq "r3a") {
             throw "Could not get disk info for mounted image"
         }
         
-        Write-Host "Image mounted as Disk $($imageDisk.Number)"
-        
-        # Get partition 2 (root filesystem - partition 1 is /boot)
-        $rootPartition = Get-Partition -DiskNumber $imageDisk.Number -PartitionNumber 2 -ErrorAction SilentlyContinue
-        
-        if (-not $rootPartition) {
-            Write-Host "Partition 2 not found directly, searching for root partition..."
-            $rootPartition = Get-Partition -DiskNumber $imageDisk.Number | 
-                Where-Object { $_.PartitionNumber -eq 2 -or $_.Size -gt 1GB } |
-                Sort-Object Size -Descending | 
-                Select-Object -First 1
-        }
+        # Find the root partition (partition 2 on Armbian)
+        $partitions = Get-Partition -DiskNumber $imageDisk.Number -ErrorAction SilentlyContinue
+        $rootPartition = $partitions | Where-Object { $_.PartitionNumber -eq 2 }
         
         if (-not $rootPartition) {
-            throw "Could not find root partition (partition 2) in image"
+            throw "Could not find root partition (partition 2) on mounted image"
         }
         
-        Write-Host "Found root partition: Partition $($rootPartition.PartitionNumber), Size: $([math]::Round($rootPartition.Size / 1GB, 2)) GB"
-        
-        # Wait for ext4 driver to mount partition
+        # Get drive letter assigned by ext4 driver
         $driveLetter = $rootPartition.DriveLetter
-        $retryCount = 0
-        while (-not $driveLetter -and $retryCount -lt 10) {
-            Write-Host "Waiting for ext4 driver to mount partition... ($retryCount)"
-            Start-Sleep -Seconds 2
-            $rootPartition = Get-Partition -DiskNumber $imageDisk.Number -PartitionNumber 2 -ErrorAction SilentlyContinue
-            $driveLetter = $rootPartition.DriveLetter
-            $retryCount++
-        }
         
         if (-not $driveLetter) {
-            Write-Host "Attempting to assign drive letter..."
-            try {
-                $rootPartition | Add-PartitionAccessPath -AssignDriveLetter -ErrorAction Stop
-                Start-Sleep -Seconds 2
-                $rootPartition = Get-Partition -DiskNumber $imageDisk.Number -PartitionNumber 2
-                $driveLetter = $rootPartition.DriveLetter
-            } catch {
-                Write-Host "Could not auto-assign drive letter: $_" -ForegroundColor Yellow
-            }
+            # Try to assign a drive letter
+            Write-Host "Attempting to assign drive letter to root partition..."
+            $rootPartition | Add-PartitionAccessPath -AssignDriveLetter -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 2
+            $rootPartition = Get-Partition -DiskNumber $imageDisk.Number -PartitionNumber 2
+            $driveLetter = $rootPartition.DriveLetter
         }
         
         if (-not $driveLetter) {
@@ -1037,6 +1042,8 @@ mesh_key=$($Script:MESH_SAE_KEY)
 ipv4_network=$($Script:LAN_CIDR_BLOCK)
 acs=$($Script:AUTO_CHANNEL)
 regulatory_domain=$($Script:REGULATORY_DOMAIN)
+admin_password=$($Script:ADMIN_PW)
+auto_update=$($Script:AUTO_UPDATE)
 "@
         # Write with Unix line endings (LF only)
         [System.IO.File]::WriteAllText((Join-Path $etcPath "mesh.conf"), $meshConfContent.Replace("`r`n", "`n"))
@@ -1070,7 +1077,6 @@ PRESET_USER_SHELL="bash"
         [System.IO.File]::WriteAllText((Join-Path $rootHomePath ".not_logged_in_yet"), $notLoggedInContent.Replace("`r`n", "`n"))
         
         # Write the provisioning script (sourced by armbian-firstlogin)
-        # This matches linux.sh EXACTLY - no systemd service needed
         Write-Host "Writing /root/provisioning.sh..."
         
         $provisioningScript = @'
@@ -1103,8 +1109,8 @@ PROVISION_LOG="/var/log/mesh-provision.log"
     HOST_MAC=$(ip a | grep -A1 "$(ip -o link show | awk -F': ' '/^[0-9]+: e/ {print $2; exit}')" \
        | awk '/ether/ {print $2}' | cut -d':' -f 5-6 | sed 's/://g')
     if [ -n "$HOST_MAC" ]; then
-        hostnamectl set-hostname "mesh-${HOST_MAC}"
-        echo "Hostname set to mesh-${HOST_MAC}"
+        hostnamectl set-hostname "radio-${HOST_MAC}"
+        echo "Hostname set to radio-${HOST_MAC}"
     fi
 
     echo "Waiting for internet connectivity..."
@@ -1230,6 +1236,9 @@ echo ""
         Dismount-DiskImage -ImagePath $tempImage
         Start-Sleep -Seconds 2
         
+        # Final confirmation before flashing
+        Confirm-Flash -DiskNumber $Script:TARGET_DEVICE
+        
         # Wipe target device to avoid stale partition data
         Write-Host "Wiping target device..."
         Clear-Disk -Number $Script:TARGET_DEVICE -RemoveData -RemoveOEM -Confirm:$false -ErrorAction SilentlyContinue
@@ -1281,17 +1290,21 @@ echo ""
         Remove-Item $tempImage -Force -ErrorAction SilentlyContinue
         
         Write-Host ""
-        Write-Host "Flash complete!" -ForegroundColor Green
+        Write-Host "==============================================" -ForegroundColor Green
+        Write-Host "           ✅ Flash complete!" -ForegroundColor Green
+        Write-Host "==============================================" -ForegroundColor Green
+        Write-Host ""
+        Write-Host "You can now remove the SD card and boot your"
+        Write-Host "Rock 3A. First boot provisioning will run"
+        Write-Host "automatically when connected to the internet."
+        Write-Host ""
         
     } catch {
         Write-Host "ERROR: $($_.Exception.Message)" -ForegroundColor Red
         
-        # Cleanup on error
-        try {
+        # Clean up on error
+        if ($tempImage -and (Test-Path $tempImage)) {
             Dismount-DiskImage -ImagePath $tempImage -ErrorAction SilentlyContinue
-        } catch {}
-        
-        if (Test-Path $tempImage) {
             Remove-Item $tempImage -Force -ErrorAction SilentlyContinue
         }
         
@@ -1300,24 +1313,55 @@ echo ""
     
 } else {
     # Raspberry Pi path - use rpi-imager
-    $devicePath = "\\.\PhysicalDrive$($Script:TARGET_DEVICE)"
     
-    Write-Host "Launching rpi-imager..."
-    Write-Host "Device: $devicePath"
-    Write-Host "Script: $tempScriptFile"
+    # Final confirmation before flashing
+    Confirm-Flash -DiskNumber $Script:TARGET_DEVICE
     
-    $process = Start-Process -FilePath $Script:RPI_IMAGER_PATH `
-        -ArgumentList "--cli", "`"$OS_IMAGE_URL`"", "`"$devicePath`"", "--first-run-script", "`"$tempScriptFile`"" `
-        -Wait -PassThru -NoNewWindow
+    # Generate the firstrun script from template
+    Write-Host "Generating firstrun script from template..."
+    $templateContent = Get-Content $TEMPLATE_FILE -Raw
     
-    if ($process.ExitCode -ne 0) {
-        Write-Host "ERROR: rpi-imager failed to flash the image." -ForegroundColor Red
-        Remove-Item $tempScriptFile -ErrorAction SilentlyContinue
-        exit 1
+    # Replace placeholders
+    $templateContent = $templateContent -replace '__HARDWARE_MODEL__', $Script:HARDWARE_MODEL
+    $templateContent = $templateContent -replace '__EUD_CONNECTION__', $Script:EUD_CONNECTION
+    $templateContent = $templateContent -replace '__LAN_AP_SSID__', $Script:LAN_AP_SSID
+    $templateContent = $templateContent -replace '__LAN_AP_KEY__', $Script:LAN_AP_KEY
+    $templateContent = $templateContent -replace '__MAX_EUDS_PER_NODE__', $Script:MAX_EUDS_PER_NODE
+    $templateContent = $templateContent -replace '__INSTALL_MEDIAMTX__', $Script:INSTALL_MEDIAMTX
+    $templateContent = $templateContent -replace '__INSTALL_MUMBLE__', $Script:INSTALL_MUMBLE
+    $templateContent = $templateContent -replace '__MESH_SSID__', $Script:MESH_SSID
+    $templateContent = $templateContent -replace '__MESH_SAE_KEY__', $Script:MESH_SAE_KEY
+    $templateContent = $templateContent -replace '__LAN_CIDR_BLOCK__', $Script:LAN_CIDR_BLOCK
+    $templateContent = $templateContent -replace '__AUTO_CHANNEL__', $Script:AUTO_CHANNEL
+    $templateContent = $templateContent -replace '__RADIO_PW__', $Script:RADIO_PW
+    $templateContent = $templateContent -replace '__REGULATORY_DOMAIN__', $Script:REGULATORY_DOMAIN
+    $templateContent = $templateContent -replace '__ADMIN_PW__', $Script:ADMIN_PW
+    $templateContent = $templateContent -replace '__AUTO_UPDATE__', $Script:AUTO_UPDATE
+    
+    # Write to temp file with Unix line endings
+    $tempScript = [System.IO.Path]::GetTempFileName()
+    [System.IO.File]::WriteAllText($tempScript, $templateContent.Replace("`r`n", "`n"))
+    
+    # Run rpi-imager
+    Write-Host "Running Raspberry Pi Imager..."
+    $targetDrive = "\\.\PhysicalDrive$($Script:TARGET_DEVICE)"
+    
+    & $Script:RPI_IMAGER_PATH --cli $OS_IMAGE_URL $targetDrive --first-run-script $tempScript
+    
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host ""
+        Write-Host "==============================================" -ForegroundColor Green
+        Write-Host "           ✅ Flash complete!" -ForegroundColor Green
+        Write-Host "==============================================" -ForegroundColor Green
+        Write-Host ""
+        Write-Host "You can now remove the SD card and boot your"
+        Write-Host "Raspberry Pi. First boot provisioning will run"
+        Write-Host "automatically when connected to the internet."
+        Write-Host ""
+    } else {
+        Write-Host "ERROR: rpi-imager failed with exit code $LASTEXITCODE" -ForegroundColor Red
     }
     
-    Remove-Item $tempScriptFile -ErrorAction SilentlyContinue
+    # Clean up
+    Remove-Item $tempScript -Force -ErrorAction SilentlyContinue
 }
-
-Write-Host ""
-Write-Host "Done! Flashing complete. The device will configure itself on first boot." -ForegroundColor Green
