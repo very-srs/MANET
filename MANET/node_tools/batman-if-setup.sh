@@ -1,4 +1,8 @@
 #!/bin/bash
+#
+#  This script enslaves various interfaces to the bat0 batman bridge
+#
+
 set -e
 
 # Source mesh configuration to get the MESH_NAME variable
@@ -9,9 +13,10 @@ else
     exit 1
 fi
 
+# Find all the wireless network interfaces
 WLAN_INTERFACES=$(networkctl | awk '/wlan/ {print $2}' | tr '\n' ' ')
 
-# Read AP interface if configured
+# Read AP interface if configured, it will not be in the bat0 bridge
 AP_INTERFACE=""
 if [ -f /var/lib/ap_interface ]; then
     AP_INTERFACE=$(cat /var/lib/ap_interface)
@@ -20,7 +25,7 @@ fi
 
 start() {
     echo "Starting BATMAN-ADV setup..."
-    #change to batman V algo
+    # Change to batman V routing algorithm
 	batctl ra BATMAN_V
 
     # Create bat0 interface if it doesn't exist
@@ -69,14 +74,14 @@ start() {
 
         # Now add to bat0 with verification and retry
         echo "Adding $WLAN to bat0..."
-        
+
         ADDED=false
         for attempt in {1..5}; do
             # Attempt to add
             if batctl bat0 if add "$WLAN" 2>&1; then
                 # Give it a moment to settle
                 sleep 0.5
-                
+
                 # Verify it was actually added
                 if batctl bat0 if | grep -q "$WLAN"; then
                     echo "$WLAN successfully added to bat0"
@@ -88,10 +93,10 @@ start() {
             else
                 echo "Attempt $attempt: batctl add failed, retrying..."
             fi
-            
+
             sleep 1
         done
-        
+
         if [ "$ADDED" = false ]; then
             echo "!! ERROR: Failed to add $WLAN to bat0 after 5 attempts" >&2
             echo "!! This interface will not participate in the mesh" >&2
@@ -100,7 +105,7 @@ start() {
 
     ip link set bat0 up
     echo "bat0 interface is up and configured."
-    
+
     # Final verification
     echo ""
     echo "=== Final bat0 membership ==="
@@ -108,6 +113,7 @@ start() {
     echo "============================="
 }
 
+# Clear out bat0
 stop() {
     echo "Stopping BATMAN-ADV..."
     for WLAN in $WLAN_INTERFACES; do
@@ -115,7 +121,7 @@ stop() {
         if [ -n "$AP_INTERFACE" ] && [ "$WLAN" == "$AP_INTERFACE" ]; then
             continue
         fi
-        
+
         if batctl bat0 if | grep -q "$WLAN"; then
             batctl bat0 if del "$WLAN"
         fi
