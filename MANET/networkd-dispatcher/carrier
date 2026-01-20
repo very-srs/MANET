@@ -43,9 +43,10 @@ if [ -n "$IP" ]; then
         /usr/local/bin/ethernet-autodetect.sh --mode gateway
 
 		# Automatic tool updates if enabled
-		if $(grep -i auto_update /etc/mesh.conf | cut -d'=' -f2 | grep -q 1); then
-	        /usr/local/bin/node-update.sh --routine 
+		if grep -i auto_update /etc/mesh.conf | cut -d'=' -f2 | grep -q 1; then
+		    /usr/local/bin/node-update.sh --routine
 		fi
+
     else
         log "Has IP but no internet - ignoring (not configuring)"
         # Do nothing - let end0 sit with its DHCP IP unused
