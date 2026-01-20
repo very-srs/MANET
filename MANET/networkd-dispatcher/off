@@ -39,20 +39,20 @@ rm -f /etc/dnsmasq.d/mesh-wired-eud.conf 2>/dev/null
 # If we were a gateway, revert that too
 if [ -f "$GATEWAY_STATE_FILE" ]; then
     log "Was gateway - reverting gateway-specific settings..."
-    
+
     # Stop NTP server
     if systemctl is-active --quiet chrony.service; then
         systemctl stop chrony.service
         cp /etc/chrony/chrony-default.conf /etc/chrony/chrony.conf
     fi
-    
+
     # Revert batman-adv mode
     batctl gw_mode client 2>/dev/null
-    
+
     # Revert radvd
     cp /etc/radvd-mesh.conf /etc/radvd.conf
     systemctl restart radvd 2>/dev/null
-    
+
     # Remove NAT
     nft flush chain ip nat postrouting 2>/dev/null || true
 fi
