@@ -886,8 +886,8 @@ PROVISION_LOG="/var/log/mesh-provision.log"
     HOST_MAC=$(ip a | grep -A1 "$(ip -o link show | awk -F': ' '/^[0-9]+: e/ {print $2; exit}')" \
        | awk '/ether/ {print $2}' | cut -d':' -f 5-6 | sed 's/://g')
     if [ -n "$HOST_MAC" ]; then
-        hostnamectl set-hostname "mesh-${HOST_MAC}"
-        echo "Hostname set to mesh-${HOST_MAC}"
+        hostnamectl set-hostname "radio-${HOST_MAC}"
+        echo "Hostname set to radio-${HOST_MAC}"
     fi
 
     echo "Waiting for internet connectivity..."
