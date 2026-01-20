@@ -43,7 +43,7 @@ if [ -n "$IP" ]; then
         /usr/local/bin/ethernet-autodetect.sh --mode gateway
 
 		# Automatic tool updates if enabled
-		if grep -i auto_update /etc/mesh.conf | cut -d'=' -f2 | grep -q 1; then
+		if grep -qi '^auto_update=1' /etc/mesh.conf 2>/dev/null; then
 		    /usr/local/bin/node-update.sh --routine
 		fi
 
