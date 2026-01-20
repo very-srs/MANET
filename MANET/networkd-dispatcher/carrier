@@ -1,28 +1,36 @@
 #!/bin/bash
+#
+# This script is triggered on network interface state changes and then does nothing unless
+# the interface is end0 (the ethernet interface).  It first checks for internet access and
+# if found triggers the ethernet-autodetect script to continue with ethernet based gateway
+# swap or EUD access logic
+#
+
 TARGET_IFACE="end0"
 
 log() {
     echo "[$(date +'%Y-%m-%d %H:%M:%S')] - CARRIER-DETECT: $1" | systemd-cat -t ethernet-carrier
 }
 
+# Exit when the interface that changed is not end0
 if [ "$IFACE" != "$TARGET_IFACE" ]; then
     exit 0
 fi
 
 log "Carrier detected on $IFACE - starting detection"
 
-# Wait up to 10 seconds for DHCP to complete
+# Wait up to 8 seconds for DHCP to complete
 WAIT_COUNT=0
-MAX_WAIT=10
+MAX_WAIT=8
 
 while [ $WAIT_COUNT -lt $MAX_WAIT ]; do
     IP=$(ip -4 addr show dev "$IFACE" | grep -oP 'inet \K[\d.]+' | head -1)
-    
+
     if [ -n "$IP" ]; then
         log "IP acquired: $IP"
         break
     fi
-    
+
     sleep 1
     ((WAIT_COUNT++))
 done
@@ -33,7 +41,11 @@ if [ -n "$IP" ]; then
     if ping -c 3 -W 2 -I "$IFACE" 8.8.8.8 > /dev/null 2>&1; then
         log "Internet detected - configuring as GATEWAY"
         /usr/local/bin/ethernet-autodetect.sh --mode gateway
-        /usr/local/bin/node-update.sh --routine
+
+		# Automatic tool updates if enabled
+		if $(grep -i auto_update /etc/mesh.conf | cut -d'=' -f2 | grep -q 1); then
+	        /usr/local/bin/node-update.sh --routine 
+		fi
     else
         log "Has IP but no internet - ignoring (not configuring)"
         # Do nothing - let end0 sit with its DHCP IP unused
