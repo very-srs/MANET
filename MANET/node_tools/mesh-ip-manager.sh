@@ -5,7 +5,7 @@
 # This script manages IPv4 address claiming using a chunk-based approach where
 # each node claims a contiguous block of IPs for itself and its EUDs.
 #
-# IP Allocation Scheme:
+# Subnet IP Allocation Scheme:
 #   IPs 1-5:    Reserved for mesh services (MediaMTX, Mumble, NTP, etc.)
 #   IPs 6+:     Allocated in chunks
 #
@@ -50,6 +50,7 @@ if [ -f /etc/mesh.conf ]; then
     done < /etc/mesh.conf
 fi
 
+# Sourced above
 IPV4_NETWORK=${IPV4_NETWORK:-"10.43.1.0/16"}
 MAX_EUDS=${MAX_EUDS:-0}
 CHUNK_SIZE=$((MAX_EUDS + 2))  # br0 primary + br0 secondary (gateway) + EUDs
@@ -89,27 +90,27 @@ int_to_ip() {
 get_chunk_ips() {
     local chunk_num=$1
     local CALC_OUTPUT=$(ipcalc "$IPV4_NETWORK" 2>/dev/null)
-    
+
     if [ -z "$CALC_OUTPUT" ]; then
         return 1
     fi
-    
+
     local HOST_MIN=$(echo "$CALC_OUTPUT" | awk '/HostMin/ {print $2}')
     local MIN_INT=$(ip_to_int "$HOST_MIN")
-    
+
     # First chunk starts after services reservation
     local CHUNK_START_INT=$((MIN_INT + SERVICES_RESERVED + (chunk_num * CHUNK_SIZE)))
-    
+
     # First IP in chunk (for br0 primary - mesh communication)
     local BR0_PRIMARY=$(int_to_ip "$CHUNK_START_INT")
-    
+
     # Second IP in chunk (for br0 secondary - DHCP gateway)
     local BR0_SECONDARY=$(int_to_ip $((CHUNK_START_INT + 1)))
-    
+
     # DHCP pool starts at third IP
     local DHCP_START=$(int_to_ip $((CHUNK_START_INT + 2)))
     local DHCP_END=$(int_to_ip $((CHUNK_START_INT + CHUNK_SIZE - 1)))
-    
+
     echo "${BR0_PRIMARY}:${BR0_SECONDARY}:${DHCP_START}:${DHCP_END}"
 }
 
@@ -475,14 +476,14 @@ case $IPV4_STATE in
             # No conflict, ensure ebtables and dnsmasq are current
             if [ -n "$PERSISTENT_CHUNK" ]; then
                 echo "$PERSISTENT_CHUNK" > /var/run/my_ipv4_chunk
-                
+
                 # Get current chunk IPs
                 CHUNK_IPS=$(get_chunk_ips "$PERSISTENT_CHUNK")
                 IFS=: read -r BR0_PRIMARY BR0_SECONDARY DHCP_START DHCP_END <<< "$CHUNK_IPS"
-                
+
                 # Ensure ebtables rules are current (handles wlan1 role changes)
                 configure_ebtables_dhcp_isolation "$BR0_SECONDARY"
-                
+
                 # Ensure dnsmasq config is current
                 configure_dnsmasq "$BR0_SECONDARY" "$DHCP_START" "$DHCP_END"
             fi
