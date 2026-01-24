@@ -181,9 +181,9 @@ tar -zxf /root/morse-pi-install.tar.gz -C /
 # Install packages for this system
 apt install -y ipcalc nmap lshw tcpdump net-tools nftables wireless-tools iperf3\
 		radvd bridge-utils firmware-mediatek libnss-mdns syncthing networkd-dispatcher\
-		libgps-dev libcap-dev screen arping bc jq git libssl-dev hostapd dnsmasq \
-		python3-protobuf unzip chrony build-essential systemd-resolved dhcping \
-		libnl-3-dev libnl-genl-3-dev libnl-route-3-dev ebtables libdbus-1-dev gpsd
+		libgps-dev libcap-dev screen arping bc jq git libssl-dev hostapd dnsmasq pulseaudio\
+		python3-protobuf unzip chrony build-essential systemd-resolved dhcping mpg123\
+		libnl-3-dev libnl-genl-3-dev libnl-route-3-dev ebtables libdbus-1-dev gpsd pulseaudio-utils
 
 systemctl stop dnsmasq
 systemctl disable dnsmasq
