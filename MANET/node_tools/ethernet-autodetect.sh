@@ -28,7 +28,6 @@ NETWORKD_DIR="/etc/systemd/network"
 GATEWAY_CONFIG="${NETWORKD_DIR}/20-end0-gateway.network.off"
 ACTIVE_CONFIG="${NETWORKD_DIR}/20-end0.network"
 
-# --- Helper Functions ---
 log() {
     echo "[$(date +'%Y-%m-%d %H:%M:%S')] - ETH-DETECT: $1" | systemd-cat -t ethernet-autodetect
 }
@@ -37,7 +36,7 @@ log() {
 exec 200>"$LOCK_FILE"
 flock -n 200 || { log "Already running. Exiting."; exit 0; }
 
-# --- Parse Mode Parameter ---
+# Parse CLI argument
 DETECTED_MODE=""
 if [ "$1" == "--mode" ] && [ -n "$2" ]; then
     DETECTED_MODE="$2"
@@ -55,6 +54,8 @@ if ! ip link show "$ETH_IFACE" &>/dev/null; then
 fi
 
 # Check carrier (cable connected)
+# Should not be needed, this script is called by networkd-dispatcher
+# But this is a double check
 CARRIER=$(cat /sys/class/net/$ETH_IFACE/carrier 2>/dev/null || echo 0)
 if [ "$CARRIER" != "1" ]; then
     log "No carrier on $ETH_IFACE - cable unplugged"
@@ -401,7 +402,7 @@ ETH_BRIDGE=br0
 DETECTED_AT=$(date +%s)
 DETECTION_METHOD=CARRIER_NO_DHCP
 EOF
-    
+
     log "Wired EUD configuration complete"
 
 else
