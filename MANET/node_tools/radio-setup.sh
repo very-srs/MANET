@@ -33,6 +33,25 @@ while IFS= read -r line; do
     fi
 done < <(cat /etc/mesh.conf)
 
+
+echo "Installing morse driver"
+mkdir -p /lib/modules/$(uname -r)/extra/morse
+
+# Copy modules
+cp /root/morse_driver/morse.ko /lib/modules/$(uname -r)/extra/morse/
+cp /root/morse_driver/dot11ah/dot11ah.ko /lib/modules/$(uname -r)/extra/morse/
+
+# Update module dependencies
+depmod -a
+
+cp /root/morse_cli/morse_cli /usr/local/bin/
+chmod +x /usr/local/bin/*
+
+# Activating drivers
+modprobe dot11ah
+modprobe morse
+
+
 echo "Applying settings..."
 sleep 0.5
 if [[ -n "$mesh_key" ]]; then
