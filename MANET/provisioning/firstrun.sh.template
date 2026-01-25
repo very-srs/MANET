@@ -177,6 +177,14 @@ chmod -x /etc/kernel/postinst.d/initramfs-tools
 # mesh tools
 tar -zxf /root/morse-pi-install.tar.gz -C /
 
+cd /root
+dpkg -i *deb
+cd /root/morse-firmware
+sudo cp firmware/mm8108*.bin /lib/firmware/morse/
+sudo cp bcf/morsemicro/*.bin /lib/firmware/morse/
+sudo cp bcf/azurewave/*.bin /lib/firmware/morse/
+sudo cp bcf/netprisma/*.bin /lib/firmware/morse/
+sudo cp bcf/quectel/*.bin /lib/firmware/morse/
 
 # Install packages for this system
 apt install -y ipcalc nmap lshw tcpdump net-tools nftables wireless-tools iperf3\
