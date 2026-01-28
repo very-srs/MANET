@@ -166,10 +166,6 @@ echo "iperf3 iperf3/start_daemon boolean true" | debconf-set-selections
 # This isn't needed for the manet kernel and causes errors
 chmod -x /etc/kernel/postinst.d/initramfs-tools
 
-# Unpack the tar file that was pulled down earlier.  This contains the kernel and 
-# mesh tools
-tar -zxf /root/morse-pi-install.tar.gz -C /
-
 cd /root
 dpkg -i *deb
 cd /root/morse-firmware
@@ -186,10 +182,17 @@ apt install -y ipcalc nmap lshw tcpdump net-tools nftables wireless-tools iperf3
 		python3-protobuf unzip chrony build-essential systemd-resolved dhcping mpg123\
 		libnl-3-dev libnl-genl-3-dev libnl-route-3-dev ebtables libdbus-1-dev gpsd pulseaudio-utils
 
+
+# Unpack the tar file that was pulled down earlier.  This contains the kernel and 
+# mesh tools
+tar -zxf /root/morse-pi-install.tar.gz -C /
+
+# Installed but not being used now
 systemctl stop dnsmasq
 systemctl disable dnsmasq
 systemctl mask dnsmasq
 echo "Done"
+
 
 # probably not installed, but the debian package is old
 apt remove -y avahi yq > /dev/null 2>&1
