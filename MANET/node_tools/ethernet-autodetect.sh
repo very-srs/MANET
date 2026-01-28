@@ -361,15 +361,16 @@ elif [ "$DETECTED_MODE" == "wired-eud" ]; then
                 ip link set "$AP_INTERFACE" up
                 sleep 1
                 # Restart wpa_supplicant for this interface to join mesh
-                systemctl restart wpa_supplicant@$AP_INTERFACE.service 2>/dev/null            fi
+                systemctl restart wpa_supplicant@$AP_INTERFACE.service 2>/dev/null
+            fi
 				sleep 2
 
                 # Add to bat0
-                if batctl if add "$AP_INTERFACE" 2>/dev/null; then
-                    log "$AP_INTERFACE added to bat0"
-                else
-                    log "Failed to add $AP_INTERFACE to bat0"
-                fi
+            if batctl if add "$AP_INTERFACE" 2>/dev/null; then
+               log "$AP_INTERFACE added to bat0"
+            else
+               log "Failed to add $AP_INTERFACE to bat0"
+            fi
 
         fi
     elif [ "$EUD_MODE" == "wireless" ] && [ -n "$AP_INTERFACE" ]; then
