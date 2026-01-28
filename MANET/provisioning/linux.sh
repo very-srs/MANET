@@ -767,6 +767,10 @@ confirm_flash() {
 
 # --- Main Script ---
 
+# This function will set HARDWARE_MODEL and TARGET_DEVICE
+select_hardware_and_target_device
+
+
 # --- 1. Check Dependencies ---
 if [ "$HARDWARE_MODEL" != "r3a" ]; then
         if ! command -v rpi-imager &> /dev/null; then
@@ -858,8 +862,6 @@ fi
 echo ""
 echo "--- Image & Device ---"
 
-# This function will set HARDWARE_MODEL and TARGET_DEVICE
-select_hardware_and_target_device
 
 # Now that we know the hardware, acquire the appropriate image
 acquire_armbian_image
