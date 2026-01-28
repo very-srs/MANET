@@ -283,7 +283,7 @@ if [ "$DETECTED_MODE" == "gateway" ]; then
             # Restart wpa_supplicant for this interface to join mesh
             systemctl restart wpa_supplicant@$AP_INTERFACE.service 2>/dev/null
         fi
-		sleep 2
+		sleep 3
 
         # Add to bat0
         if batctl if add "$AP_INTERFACE" 2>/dev/null; then
