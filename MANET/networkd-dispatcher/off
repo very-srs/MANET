@@ -62,6 +62,11 @@ rm -f "$GATEWAY_STATE_FILE"
 rm -f "$NTP_STATE_FILE"
 rm -f "$ETHERNET_STATE_FILE"
 
+AP_INTERFACE=""
+if [ -f /var/lib/ap_interface ]; then
+    AP_INTERFACE=$(cat /var/lib/ap_interface)
+fi
+
 # In AUTO mode with no ethernet, enable AP
 EUD_MODE=$(grep "^eud=" /etc/mesh.conf 2>/dev/null | cut -d'=' -f2)
 if [ "$EUD_MODE" == "auto" ] && [ -f /var/lib/ap_interface ]; then
