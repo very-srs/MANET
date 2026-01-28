@@ -905,7 +905,7 @@ EOF
 
         # Create Armbian firstrun preset file
         echo "Writing /root/.not_logged_in_yet..."
-        sudo tee "$ROOT_MOUNT/root/.not_logged_in_yet" > /dev/null << 'EOF'
+        sudo tee "$ROOT_MOUNT/root/.not_logged_in_yet" > /dev/null << EOF
 # Network Settings
 PRESET_NET_CHANGE_DEFAULTS="1"
 ## Ethernet
