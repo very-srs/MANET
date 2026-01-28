@@ -166,15 +166,6 @@ echo "iperf3 iperf3/start_daemon boolean true" | debconf-set-selections
 # This isn't needed for the manet kernel and causes errors
 chmod -x /etc/kernel/postinst.d/initramfs-tools
 
-cd /root
-dpkg -i *deb
-cd /root/morse-firmware
-sudo cp firmware/mm8108*.bin /lib/firmware/morse/
-sudo cp bcf/morsemicro/*.bin /lib/firmware/morse/
-sudo cp bcf/azurewave/*.bin /lib/firmware/morse/
-sudo cp bcf/netprisma/*.bin /lib/firmware/morse/
-sudo cp bcf/quectel/*.bin /lib/firmware/morse/
-
 # Install packages for this system
 apt install -y ipcalc nmap lshw tcpdump net-tools nftables wireless-tools iperf3\
 		radvd bridge-utils firmware-mediatek libnss-mdns syncthing networkd-dispatcher\
@@ -186,6 +177,14 @@ apt install -y ipcalc nmap lshw tcpdump net-tools nftables wireless-tools iperf3
 # Unpack the tar file that was pulled down earlier.  This contains the kernel and 
 # mesh tools
 tar -zxf /root/morse-pi-install.tar.gz -C /
+
+cd /root/morse-firmware
+sudo cp firmware/mm8108*.bin /lib/firmware/morse/
+sudo cp bcf/morsemicro/*.bin /lib/firmware/morse/
+sudo cp bcf/azurewave/*.bin /lib/firmware/morse/
+sudo cp bcf/netprisma/*.bin /lib/firmware/morse/
+sudo cp bcf/quectel/*.bin /lib/firmware/morse/
+
 
 # Installed but not being used now
 systemctl stop dnsmasq
