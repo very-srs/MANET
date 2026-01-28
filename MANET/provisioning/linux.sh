@@ -920,7 +920,7 @@ PRESET_ROOT_PASSWORD="root"
 PRESET_ROOT_KEY=""
 # User
 PRESET_USER_NAME="radio"
-PRESET_USER_PASSWORD="radio"
+PRESET_USER_PASSWORD="$RADIO_PW"
 PRESET_USER_KEY=""
 PRESET_DEFAULT_REALNAME="radio"
 PRESET_USER_SHELL="bash"
@@ -1005,12 +1005,12 @@ PROVISION_LOG="/var/log/mesh-provision.log"
         libnl-3-dev libnl-genl-3-dev libnl-route-3-dev ebtables libdbus-1-dev gpsd
 
     # Download the install package
-    echo "Downloading Rock 3A install package..."
+    echo -n "Downloading Rock 3A install package..."
     wget -q https://www.colorado-governor.com/manet/r3a-install.tar.gz -O /root/morse-pi-install.tar.gz || {
         echo "ERROR: Failed to download Rock 3A install package"
         return 1 2>/dev/null || true
     }
-
+	echo "done"
     # Unpack the install tarball AFTER apt updates to avoid kernel overwrites
     echo "Extracting install package..."
     tar -zxf /root/morse-pi-install.tar.gz -C /
@@ -1062,7 +1062,7 @@ MODEOF
     # Remove this script so it doesn't run again
     rm -f /root/provisioning.sh
 
-    echo "=== Rock 3A provisioning complete at $(date) ==="
+	echo "=== Rock 3A provisioning complete at $(date) ==="
 
 } >> "$PROVISION_LOG" 2>&1
 
