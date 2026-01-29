@@ -6,7 +6,7 @@
 #
 
 # log the output of this script to a file for debugging
-exec > >(tee /boot/firmware/radio-setup.log) 2>&1
+exec > >(tee /var/log/radio-setup.log) 2>&1
 set -x
 
 # default lobby frequencies for wifi
