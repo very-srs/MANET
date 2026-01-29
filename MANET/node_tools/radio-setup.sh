@@ -487,7 +487,6 @@ country_code=$REGULATORY_DOMAIN
 # Performance
 ht_capab=[HT40+][SHORT-GI-20][SHORT-GI-40]
 vht_capab=[RXLDPC][SHORT-GI-80][TX-STBC-2BY1][RX-STBC-1]
-EOF
 
 # DHCP script hook for adding host routes
 dhcp-script=/usr/local/bin/dhcp-eud-route.sh
@@ -546,6 +545,7 @@ EOF
 
     # Enable services based on mode
     systemctl enable ap-txpower.service
+	systemctl unmask dnsmasq.service
     systemctl enable dnsmasq.service
 
     if [[ "$eud" == "wireless" ]]; then
@@ -910,7 +910,7 @@ if systemctl is-enabled radio-setup-run-once.service >/dev/null 2>&1; then
 	sleep 5
 	killall syncthing
 	mkdir -p /home/radio/Sync/mumble/backups
-	chown -R /home/radio/Sync
+	chown -R radio:radio /home/radio/Sync
 	SYNCTHING_CONFIG="/home/radio/.config/syncthing/config.xml"
 	echo " >> Hardening Syncthing for local-only operation..."
 	#disable global discovery and relaying
