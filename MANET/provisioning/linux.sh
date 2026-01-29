@@ -1077,6 +1077,8 @@ MODEOF
     # Remove this script so it doesn't run again
     rm -f /root/provisioning.sh
 
+	# Disable predict names
+	sed -i '/^extraargs=/ s/$/ net.ifnames=0/' /boot/armbianEnv.txt
 
 
 	# Create the one-shot radio-setup service to run at next boot
