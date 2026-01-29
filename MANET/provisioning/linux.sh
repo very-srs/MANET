@@ -1017,6 +1017,19 @@ PROVISION_LOG="/var/log/mesh-provision.log"
     echo "Extracting install package..."
     tar -zxf /root/morse-pi-install.tar.gz -C /
 
+	# Unpack the r3a kernel
+	cd /root
+	dpkg -i *.deb
+
+	# Add the morse firmware
+	cd /root/morse-firmware
+	cp firmware/mm8108*.bin /lib/firmware/morse/
+	cp bcf/morsemicro/*.bin /lib/firmware/morse/
+	cp bcf/azurewave/*.bin /lib/firmware/morse/
+	cp bcf/netprisma/*.bin /lib/firmware/morse/
+	cp bcf/quectel/*.bin /lib/firmware/morse/
+
+
     # Disable dnsmasq (we'll configure it ourselves)
     systemctl stop dnsmasq
     systemctl disable dnsmasq
@@ -1064,8 +1077,30 @@ MODEOF
     # Remove this script so it doesn't run again
     rm -f /root/provisioning.sh
 
-	echo "=== Rock 3A provisioning complete at $(date) ==="
 
+
+	# Create the one-shot radio-setup service to run at next boot
+	cat << EOF > /etc/systemd/system/radio-setup-run-once.service
+[Unit]
+Description=Run radio setup script once after reboot
+After=network-online.target multi-user.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/radio-setup.sh
+ExecStartPre=/bin/sleep 10
+RemainAfterExit=no
+
+[Install]
+WantedBy=multi-user.target
+EOF
+	systemctl enable radio-setup-run-once.service
+
+
+	echo "=== Rock 3A provisioning complete at $(date) ==="
+	reboot
+	
 } >> "$PROVISION_LOG" 2>&1
 
 # Show user that provisioning completed
