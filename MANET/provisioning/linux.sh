@@ -1046,6 +1046,9 @@ PROVISION_LOG="/var/log/mesh-provision.log"
     systemctl disable apt-daily.timer > /dev/null 2>&1 || true
     systemctl disable apt-daily-upgrade.timer > /dev/null 2>&1 || true
 
+	# Load batman-adv module
+    echo "batman-adv" > /etc/modules-load.d/batman.conf
+
     # Load modules at boot
     cat << MODEOF > /etc/modules-load.d/morse.conf
 mac80211
