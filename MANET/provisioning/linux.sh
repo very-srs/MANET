@@ -1049,20 +1049,65 @@ PROVISION_LOG="/var/log/mesh-provision.log"
 	# Load batman-adv module
     echo "batman-adv" > /etc/modules-load.d/batman.conf
 
+	echo "Creating bridge interfaces..."
+	# Create the batman-adv interface, enslave it to br0
+	cat << EOF > /etc/systemd/network/10-bat0.network
+[Match]
+Name=bat0
+
+[Network]
+Bridge=br0
+LinkLocalAddressing=ipv6
+IPv6Token=eui64
+IPv6PrivacyExtensions=no
+
+[Link]
+MTUBytes=1500
+EOF
+
+	# The bridge br0 is the main interface for the mesh node
+	cat << EOF > /etc/systemd/network/10-br0-bridge.netdev
+[NetDev]
+Name=br0
+Kind=bridge
+
+[Bridge]
+MulticastSnooping=true
+MulticastQuerier=true
+EOF
+
+	# br0 will get a slaac ipv6 address
+	cat << EOF > /etc/systemd/network/20-br0-bridge.network
+[Match]
+Name=br0
+
+[Network]
+DHCP=no
+LinkLocalAddressing=ipv6
+IPv6AcceptRA=yes
+MulticastDNS=yes
+
+[Link]
+RequiredForOnline=no
+MTUBytes=1500
+EOF
+
+	echo "Bridge configuration complete"
+
     # Load modules at boot
-    cat << MODEOF > /etc/modules-load.d/morse.conf
+    cat << EOF > /etc/modules-load.d/morse.conf
 mac80211
 cfg80211
 crc7
 morse
 dot11ah
-MODEOF
+EOF
 
     # Morse driver options
-    cat << MODEOF > /etc/modprobe.d/morse.conf
+    cat << EOF > /etc/modprobe.d/morse.conf
 options morse country=${REG}
 options morse enable_mcast_whitelist=0 enable_mcast_rate_control=1
-MODEOF
+EOF
 
     # Set regulatory domain
     iw reg set "$REG" 2>/dev/null || true
@@ -1105,7 +1150,7 @@ EOF
 
 	echo "=== Rock 3A provisioning complete at $(date) ==="
 	reboot
-	
+
 } >> "$PROVISION_LOG" 2>&1
 
 # Show user that provisioning completed
