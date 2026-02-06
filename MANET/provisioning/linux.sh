@@ -928,240 +928,61 @@ PRESET_DEFAULT_REALNAME="radio"
 PRESET_USER_SHELL="bash"
 EOF
 
-        # Write the provisioning script (sourced by armbian-firstlogin)
-        echo "Writing /root/provisioning.sh..."
-        sudo tee "$ROOT_MOUNT/root/provisioning.sh" > /dev/null << 'PROVISIONEOF'
-#!/bin/bash
-#
-# Armbian Rock 3A Mesh Node Provisioning Script
-# This script is sourced by armbian-firstlogin after user creation
-#
+		# Generate provisioning script from template (same as RPi)
+		echo "Generating provisioning script from template..."
+		TEMP_SCRIPT_FILE=$(mktemp)
 
-# Don't use set -x when sourced - it will spam the console
-# Log to file instead
-PROVISION_LOG="/var/log/mesh-provision.log"
+		# Do all the same substitutions as RPi
+		sed -e "s|__HARDWARE_MODEL__|${HARDWARE_MODEL}|g" \
+		    -e "s|__EUD_CONNECTION__|${EUD_CONNECTION}|g" \
+		    -e "s|__LAN_AP_SSID__|${LAN_AP_SSID}|g" \
+		    -e "s|__LAN_AP_KEY__|${LAN_AP_KEY}|g" \
+		    -e "s|__MAX_EUDS_PER_NODE__|${MAX_EUDS_PER_NODE}|g" \
+		    -e "s|__INSTALL_MEDIAMTX__|${INSTALL_MEDIAMTX}|g" \
+		    -e "s|__INSTALL_MUMBLE__|${INSTALL_MUMBLE}|g" \
+		    -e "s|__MESH_SSID__|${MESH_SSID}|g" \
+		    -e "s|__MESH_SAE_KEY__|${MESH_SAE_KEY}|g" \
+		    -e "s|__LAN_CIDR_BLOCK__|${LAN_CIDR_BLOCK}|g" \
+		    -e "s|__AUTO_CHANNEL__|${AUTO_CHANNEL}|g" \
+		    -e "s|__RADIO_PW__|${RADIO_PW}|g" \
+		    -e "s|__REGULATORY_DOMAIN__|${REGULATORY_DOMAIN}|g" \
+		    -e "s|__ADMIN_PW__|${ADMIN_PW}|g" \
+		    -e "s|__AUTO_UPDATE__|${AUTO_UPDATE}|g" \
+		    "$TEMPLATE_FILE" > "$TEMP_SCRIPT_FILE"
 
-{
-    echo "=== Rock 3A provisioning starting at $(date) ==="
+		# Rock3A-specific adaptations for being sourced by armbian-firstlogin
+		echo "Adapting script for Armbian sourcing behavior..."
 
-    # Source the mesh configuration
-    if [ -f /etc/mesh.conf ]; then
-        source /etc/mesh.conf
-    else
-        echo "ERROR: /etc/mesh.conf not found!"
-        # Don't exit - we're sourced, just return
-        return 1 2>/dev/null || true
-    fi
+		# 1. Change exit to return (script is sourced, not executed)
+		sed -i 's/exit 1/return 1 2>\/dev\/null || true/g' "$TEMP_SCRIPT_FILE"
+		sed -i 's/exit 0/return 0 2>\/dev\/null || true/g' "$TEMP_SCRIPT_FILE"
 
-    # Set regulatory domain
-    REG="${regulatory_domain:-US}"
+		# 2. Remove set -x from firstrun section (causes spam when sourced)
+		sed -i '/^set -x$/d' "$TEMP_SCRIPT_FILE"
 
-    # Calculate unique hostname from MAC address
-    HOST_MAC=$(ip a | grep -A1 "$(ip -o link show | awk -F': ' '/^[0-9]+: e/ {print $2; exit}')" \
-       | awk '/ether/ {print $2}' | cut -d':' -f 5-6 | sed 's/://g')
-    if [ -n "$HOST_MAC" ]; then
-        hostnamectl set-hostname "radio-${HOST_MAC}"
-        echo "Hostname set to radio-${HOST_MAC}"
-    fi
+		# 3. Change log paths from /boot/firmware to /var/log (Armbian paths)
+		sed -i 's|/boot/firmware/firstrun.log|/var/log/mesh-firstrun.log|g' "$TEMP_SCRIPT_FILE"
+		sed -i 's|/boot/firmware/provision.log|/var/log/mesh-provision.log|g' "$TEMP_SCRIPT_FILE"
 
-    echo "Waiting for internet connectivity..."
-    TIMEOUT=300
-    ELAPSED=0
-    while [ $ELAPSED -lt $TIMEOUT ]; do
-        if ping -c 1 -W 2 8.8.8.8 > /dev/null 2>&1; then
-            echo "Internet connectivity confirmed!"
-            break
-        fi
-        echo "Waiting for internet... (${ELAPSED}s)"
-        sleep 5
-        ELAPSED=$((ELAPSED + 5))
-    done
+		# 4. Change final reboot to background (so armbian-firstlogin can finish)
+		sed -i 's/^reboot$/( sleep 10 \&\& reboot ) \&/g' "$TEMP_SCRIPT_FILE"
 
-    if [ $ELAPSED -ge $TIMEOUT ]; then
-        echo "ERROR: No internet after ${TIMEOUT}s"
-        return 1 2>/dev/null || true
-    fi
+		# 5. Add self-deletion before the background reboot
+		sed -i '/( sleep 10 && reboot ) &/i rm -f /root/provisioning.sh' "$TEMP_SCRIPT_FILE"
 
-    # Set system time
-    date -s "$(curl -sI google.com | grep -i ^Date: | cut -d' ' -f2-)" 2>/dev/null || true
+		# 6. Remove the systemd service creation section (Armbian uses its own firstrun)
+		# The template creates mesh-provision.service - we don't need this for Armbian
+		sed -i '/cat > \/etc\/systemd\/system\/mesh-provision.service/,/^EOF$/d' "$TEMP_SCRIPT_FILE"
+		sed -i '/systemctl daemon-reload/d' "$TEMP_SCRIPT_FILE"
+		sed -i '/systemctl enable mesh-provision.service/d' "$TEMP_SCRIPT_FILE"
 
-    cd /root
+		# Write the adapted script to mounted image
+		echo "Writing adapted provisioning script to image..."
+		sudo cp "$TEMP_SCRIPT_FILE" "$ROOT_MOUNT/root/provisioning.sh"
+		sudo chmod +x "$ROOT_MOUNT/root/provisioning.sh"
 
-    # Clear motd
-    > /etc/motd
-
-    # Update system packages FIRST (before extracting tarball to avoid kernel overwrites)
-    echo "Updating system packages..."
-    apt-get update > /dev/null 2>&1
-    DEBIAN_FRONTEND=noninteractive apt-get upgrade -y > /dev/null 2>&1
-
-    # Remove the question about the iperf daemon during apt install
-    echo "iperf3 iperf3/start_daemon boolean true" | debconf-set-selections
-
-    # Install required packages
-    echo "Installing required packages..."
-    DEBIAN_FRONTEND=noninteractive apt-get install -y ipcalc nmap lshw tcpdump net-tools nftables wireless-tools iperf3 \
-        radvd bridge-utils firmware-mediatek libnss-mdns syncthing networkd-dispatcher \
-        libgps-dev libcap-dev screen arping bc jq git libssl-dev hostapd dnsmasq \
-        python3-protobuf unzip chrony build-essential systemd-resolved dhcping \
-        libnl-3-dev libnl-genl-3-dev libnl-route-3-dev ebtables libdbus-1-dev gpsd
-
-    # Download the install package
-    echo -n "Downloading Rock 3A install package..."
-    wget -q https://www.colorado-governor.com/manet/r3a-install.tar.gz -O /root/morse-pi-install.tar.gz || {
-        echo "ERROR: Failed to download Rock 3A install package"
-        return 1 2>/dev/null || true
-    }
-	echo "done"
-    # Unpack the install tarball AFTER apt updates to avoid kernel overwrites
-    echo "Extracting install package..."
-    tar -zxf /root/morse-pi-install.tar.gz -C /
-
-	# Unpack the r3a kernel
-	cd /root
-	dpkg -i *.deb
-
-	# Add the morse firmware
-	cd /root/morse-firmware
-	cp firmware/mm8108*.bin /lib/firmware/morse/
-	cp bcf/morsemicro/*.bin /lib/firmware/morse/
-	cp bcf/azurewave/*.bin /lib/firmware/morse/
-	cp bcf/netprisma/*.bin /lib/firmware/morse/
-	cp bcf/quectel/*.bin /lib/firmware/morse/
-
-
-    # Disable dnsmasq (we'll configure it ourselves)
-    systemctl stop dnsmasq
-    systemctl disable dnsmasq
-    systemctl mask dnsmasq
-
-    # Remove old avahi/yq if present
-    apt-get remove -y avahi yq > /dev/null 2>&1 || true
-
-    # Install Go yq
-    wget -q https://github.com/mikefarah/yq/releases/latest/download/yq_linux_arm64 -O /usr/bin/yq
-    chmod +x /usr/bin/yq
-
-    # Disable automatic update timers
-    systemctl disable apt-daily.timer > /dev/null 2>&1 || true
-    systemctl disable apt-daily-upgrade.timer > /dev/null 2>&1 || true
-
-	# Load batman-adv module
-    echo "batman-adv" > /etc/modules-load.d/batman.conf
-
-	echo "Creating bridge interfaces..."
-	# Create the batman-adv interface, enslave it to br0
-	cat << EOF > /etc/systemd/network/10-bat0.network
-[Match]
-Name=bat0
-
-[Network]
-Bridge=br0
-LinkLocalAddressing=ipv6
-IPv6Token=eui64
-IPv6PrivacyExtensions=no
-
-[Link]
-MTUBytes=1500
-EOF
-
-	# The bridge br0 is the main interface for the mesh node
-	cat << EOF > /etc/systemd/network/10-br0-bridge.netdev
-[NetDev]
-Name=br0
-Kind=bridge
-
-[Bridge]
-MulticastSnooping=true
-MulticastQuerier=true
-EOF
-
-	# br0 will get a slaac ipv6 address
-	cat << EOF > /etc/systemd/network/20-br0-bridge.network
-[Match]
-Name=br0
-
-[Network]
-DHCP=no
-LinkLocalAddressing=ipv6
-IPv6AcceptRA=yes
-MulticastDNS=yes
-
-[Link]
-RequiredForOnline=no
-MTUBytes=1500
-EOF
-
-	echo "Bridge configuration complete"
-
-    # Load modules at boot
-    cat << EOF > /etc/modules-load.d/morse.conf
-mac80211
-cfg80211
-crc7
-morse
-dot11ah
-EOF
-
-    # Morse driver options
-    cat << EOF > /etc/modprobe.d/morse.conf
-options morse country=${REG}
-options morse enable_mcast_whitelist=0 enable_mcast_rate_control=1
-EOF
-
-    # Set regulatory domain
-    iw reg set "$REG" 2>/dev/null || true
-
-    # Make sure tools are executable
-    chmod +x /usr/local/bin/* 2>/dev/null || true
-
-    # Use known DNS
-    rm -f /etc/resolv.conf
-    echo "nameserver 1.1.1.1" > /etc/resolv.conf
-
-    # Clean up
-    rm -f /root/morse-pi-install.tar.gz
-
-    # Remove this script so it doesn't run again
-    rm -f /root/provisioning.sh
-
-	# Disable predict names
-	sed -i '/^extraargs=/ s/$/ net.ifnames=0/' /boot/armbianEnv.txt
-
-
-	# Create the one-shot radio-setup service to run at next boot
-	cat << EOF > /etc/systemd/system/radio-setup-run-once.service
-[Unit]
-Description=Run radio setup script once after reboot
-After=network-online.target multi-user.target
-Wants=network-online.target
-
-[Service]
-Type=oneshot
-ExecStart=/usr/local/bin/radio-setup.sh
-ExecStartPre=/bin/sleep 10
-RemainAfterExit=no
-
-[Install]
-WantedBy=multi-user.target
-EOF
-	systemctl enable radio-setup-run-once.service
-
-
-	echo "=== Rock 3A provisioning complete at $(date) ==="
-	reboot
-
-} >> "$PROVISION_LOG" 2>&1
-
-# Show user that provisioning completed
-echo ""
-echo "Mesh node provisioning complete. See $PROVISION_LOG for details."
-echo "System will reboot in 10 seconds to apply changes..."
-echo ""
-
-# Schedule reboot after this script returns (don't reboot while sourced)
-( sleep 10 && reboot ) &
-PROVISIONEOF
+		# Cleanup
+		rm -f "$TEMP_SCRIPT_FILE"
 
         sudo chmod +x "$ROOT_MOUNT/root/provisioning.sh"
 
