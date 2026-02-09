@@ -866,6 +866,9 @@ echo "--- Image & Device ---"
 # Now that we know the hardware, acquire the appropriate image
 acquire_armbian_image
 
+
+# Rock3A provisioning section for linux.sh
+
 if [ "$HARDWARE_MODEL" = "r3a" ]; then
         # Create temp copy of image to avoid modifying original
         TEMP_IMAGE=$(mktemp --suffix=.img)
@@ -928,63 +931,84 @@ PRESET_DEFAULT_REALNAME="radio"
 PRESET_USER_SHELL="bash"
 EOF
 
-		# Generate provisioning script from template (same as RPi)
-		echo "Generating provisioning script from template..."
-		TEMP_SCRIPT_FILE=$(mktemp)
+        # Generate provisioning script from template
+        echo "Extracting and adapting provisioning script from template..."
+        TEMP_SCRIPT_FILE=$(mktemp)
 
-		# Do all the same substitutions as RPi
-		sed -e "s|__HARDWARE_MODEL__|${HARDWARE_MODEL}|g" \
-		    -e "s|__EUD_CONNECTION__|${EUD_CONNECTION}|g" \
-		    -e "s|__LAN_AP_SSID__|${LAN_AP_SSID}|g" \
-		    -e "s|__LAN_AP_KEY__|${LAN_AP_KEY}|g" \
-		    -e "s|__MAX_EUDS_PER_NODE__|${MAX_EUDS_PER_NODE}|g" \
-		    -e "s|__INSTALL_MEDIAMTX__|${INSTALL_MEDIAMTX}|g" \
-		    -e "s|__INSTALL_MUMBLE__|${INSTALL_MUMBLE}|g" \
-		    -e "s|__MESH_SSID__|${MESH_SSID}|g" \
-		    -e "s|__MESH_SAE_KEY__|${MESH_SAE_KEY}|g" \
-		    -e "s|__LAN_CIDR_BLOCK__|${LAN_CIDR_BLOCK}|g" \
-		    -e "s|__AUTO_CHANNEL__|${AUTO_CHANNEL}|g" \
-		    -e "s|__RADIO_PW__|${RADIO_PW}|g" \
-		    -e "s|__REGULATORY_DOMAIN__|${REGULATORY_DOMAIN}|g" \
-		    -e "s|__ADMIN_PW__|${ADMIN_PW}|g" \
-		    -e "s|__AUTO_UPDATE__|${AUTO_UPDATE}|g" \
-		    "$TEMPLATE_FILE" > "$TEMP_SCRIPT_FILE"
+        # Extract ONLY the provision-mesh.sh section from template (between PROVISIONEOF markers)
+        # This avoids including the outer firstrun.sh wrapper
+        sed -n '/cat > \/usr\/local\/bin\/provision-mesh.sh << .PROVISIONEOF./,/^PROVISIONEOF$/p' "$TEMPLATE_FILE" | \
+            sed '1d;$d' > "$TEMP_SCRIPT_FILE"
 
-		# Rock3A-specific adaptations for being sourced by armbian-firstlogin
-		echo "Adapting script for Armbian sourcing behavior..."
+        # Apply all the placeholder substitutions
+        sed -i "s|__HARDWARE_MODEL__|${HARDWARE_MODEL}|g" "$TEMP_SCRIPT_FILE"
+        sed -i "s|__EUD_CONNECTION__|${EUD_CONNECTION}|g" "$TEMP_SCRIPT_FILE"
+        sed -i "s|__LAN_AP_SSID__|${LAN_AP_SSID}|g" "$TEMP_SCRIPT_FILE"
+        sed -i "s|__LAN_AP_KEY__|${LAN_AP_KEY}|g" "$TEMP_SCRIPT_FILE"
+        sed -i "s|__MAX_EUDS_PER_NODE__|${MAX_EUDS_PER_NODE}|g" "$TEMP_SCRIPT_FILE"
+        sed -i "s|__INSTALL_MEDIAMTX__|${INSTALL_MEDIAMTX}|g" "$TEMP_SCRIPT_FILE"
+        sed -i "s|__INSTALL_MUMBLE__|${INSTALL_MUMBLE}|g" "$TEMP_SCRIPT_FILE"
+        sed -i "s|__MESH_SSID__|${MESH_SSID}|g" "$TEMP_SCRIPT_FILE"
+        sed -i "s|__MESH_SAE_KEY__|${MESH_SAE_KEY}|g" "$TEMP_SCRIPT_FILE"
+        sed -i "s|__LAN_CIDR_BLOCK__|${LAN_CIDR_BLOCK}|g" "$TEMP_SCRIPT_FILE"
+        sed -i "s|__AUTO_CHANNEL__|${AUTO_CHANNEL}|g" "$TEMP_SCRIPT_FILE"
+        sed -i "s|__RADIO_PW__|${RADIO_PW}|g" "$TEMP_SCRIPT_FILE"
+        sed -i "s|__REGULATORY_DOMAIN__|${REGULATORY_DOMAIN}|g" "$TEMP_SCRIPT_FILE"
+        sed -i "s|__ADMIN_PW__|${ADMIN_PW}|g" "$TEMP_SCRIPT_FILE"
+        sed -i "s|__AUTO_UPDATE__|${AUTO_UPDATE}|g" "$TEMP_SCRIPT_FILE"
+        
+        echo "Applying Armbian-specific adaptations..."
+        
+        # 1. Change exit to return (script is sourced, not executed)
+        sed -i 's/^\([[:space:]]*\)exit 1$/\1return 1 2>\/dev\/null || true/g' "$TEMP_SCRIPT_FILE"
+        sed -i 's/^\([[:space:]]*\)exit 0$/\1return 0 2>\/dev\/null || true/g' "$TEMP_SCRIPT_FILE"
+        
+        # 2. Remove set -x (causes spam when sourced)
+        sed -i '/^set -x$/d' "$TEMP_SCRIPT_FILE"
+        
+        # 3. Change log paths from /boot/firmware to /var/log (Armbian paths)
+        sed -i 's|/boot/firmware/firstrun.log|/var/log/mesh-firstrun.log|g' "$TEMP_SCRIPT_FILE"
+        sed -i 's|/boot/firmware/provision.log|/var/log/mesh-provision.log|g' "$TEMP_SCRIPT_FILE"
+        
+        # 4. Replace the exec line to log to /var/log instead
+        sed -i 's|^exec > >(tee -a /boot/firmware/provision.log) 2>&1$|# Log to file for Armbian\nPROVISION_LOG="/var/log/mesh-provision.log"\nexec > >(tee -a "$PROVISION_LOG") 2>&1|' "$TEMP_SCRIPT_FILE"
+        
+        # 5. Change final reboot to background (so armbian-firstlogin can finish)
+        sed -i 's/^reboot$/# Self-delete this script\nrm -f \/root\/provisioning.sh\n\n# Schedule reboot in background so armbian-firstlogin can complete\n( sleep 10 \&\& reboot ) \&/' "$TEMP_SCRIPT_FILE"
+        
+        # 6. Remove the mesh-provision.service creation (Armbian doesn't need this)
+        # Find and remove the entire service creation block
+        sed -i '/^cat > \/etc\/systemd\/system\/mesh-provision.service << .EOF.$/,/^EOF$/d' "$TEMP_SCRIPT_FILE"
+        sed -i '/^systemctl daemon-reload$/d' "$TEMP_SCRIPT_FILE"
+        sed -i '/^systemctl enable mesh-provision.service$/d' "$TEMP_SCRIPT_FILE"
 
-		# 1. Change exit to return (script is sourced, not executed)
-		sed -i 's/exit 1/return 1 2>\/dev\/null || true/g' "$TEMP_SCRIPT_FILE"
-		sed -i 's/exit 0/return 0 2>\/dev\/null || true/g' "$TEMP_SCRIPT_FILE"
+        # 7. Add wrapper for error handling when sourced
+        sed -i '1i\
+#!/bin/bash\
+#\
+# Armbian Rock 3A Mesh Node Provisioning Script\
+# This script is sourced by armbian-firstlogin after user creation\
+#\
+\
+# Wrap in subshell to capture all output\
+{' "$TEMP_SCRIPT_FILE"
 
-		# 2. Remove set -x from firstrun section (causes spam when sourced)
-		sed -i '/^set -x$/d' "$TEMP_SCRIPT_FILE"
+        # Pause before the background reboot
+        sed -i '/( sleep 10 && reboot ) &/i\
+} >> "$PROVISION_LOG" 2>&1\
+\
+echo ""\
+echo "Mesh node provisioning complete. See $PROVISION_LOG for details."\
+echo "System will reboot in 10 seconds to apply changes..."\
+echo ""' "$TEMP_SCRIPT_FILE"
 
-		# 3. Change log paths from /boot/firmware to /var/log (Armbian paths)
-		sed -i 's|/boot/firmware/firstrun.log|/var/log/mesh-firstrun.log|g' "$TEMP_SCRIPT_FILE"
-		sed -i 's|/boot/firmware/provision.log|/var/log/mesh-provision.log|g' "$TEMP_SCRIPT_FILE"
-
-		# 4. Change final reboot to background (so armbian-firstlogin can finish)
-		sed -i 's/^reboot$/( sleep 10 \&\& reboot ) \&/g' "$TEMP_SCRIPT_FILE"
-
-		# 5. Add self-deletion before the background reboot
-		sed -i '/( sleep 10 && reboot ) &/i rm -f /root/provisioning.sh' "$TEMP_SCRIPT_FILE"
-
-		# 6. Remove the systemd service creation section (Armbian uses its own firstrun)
-		# The template creates mesh-provision.service - we don't need this for Armbian
-		sed -i '/cat > \/etc\/systemd\/system\/mesh-provision.service/,/^EOF$/d' "$TEMP_SCRIPT_FILE"
-		sed -i '/systemctl daemon-reload/d' "$TEMP_SCRIPT_FILE"
-		sed -i '/systemctl enable mesh-provision.service/d' "$TEMP_SCRIPT_FILE"
-
-		# Write the adapted script to mounted image
-		echo "Writing adapted provisioning script to image..."
-		sudo cp "$TEMP_SCRIPT_FILE" "$ROOT_MOUNT/root/provisioning.sh"
-		sudo chmod +x "$ROOT_MOUNT/root/provisioning.sh"
-
-		# Cleanup
-		rm -f "$TEMP_SCRIPT_FILE"
-
+        # Write the adapted script to mounted image
+        echo "Writing adapted provisioning script to /root/provisioning.sh..."
+        sudo cp "$TEMP_SCRIPT_FILE" "$ROOT_MOUNT/root/provisioning.sh"
         sudo chmod +x "$ROOT_MOUNT/root/provisioning.sh"
+
+        # Cleanup temp file
+        rm -f "$TEMP_SCRIPT_FILE"
 
         # Unmount
         echo "Unmounting image..."
