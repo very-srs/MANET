@@ -867,8 +867,7 @@ echo "--- Image & Device ---"
 acquire_armbian_image
 
 
-# Rock3A provisioning section for linux.sh
-
+# Rock3A provisioning section
 if [ "$HARDWARE_MODEL" = "r3a" ]; then
         # Create temp copy of image to avoid modifying original
         TEMP_IMAGE=$(mktemp --suffix=.img)
@@ -931,86 +930,95 @@ PRESET_DEFAULT_REALNAME="radio"
 PRESET_USER_SHELL="bash"
 EOF
 
-        # Generate provisioning script from template
-        echo "Extracting and adapting provisioning script from template..."
-        TEMP_SCRIPT_FILE=$(mktemp)
-
+        # Generate the full provisioning script from template
+        echo "Generating provisioning script from template..."
+        TEMP_PROVISION_SCRIPT=$(mktemp)
+        
         # Extract ONLY the provision-mesh.sh section from template (between PROVISIONEOF markers)
-        # This avoids including the outer firstrun.sh wrapper
         sed -n '/cat > \/usr\/local\/bin\/provision-mesh.sh << .PROVISIONEOF./,/^PROVISIONEOF$/p' "$TEMPLATE_FILE" | \
-		    sed '1d;$d' | sed '1,/^echo "=== provision-mesh-node.sh starting/{ /^#!\/bin\/bash$/d; /^set -x$/d; }' > "$TEMP_SCRIPT_FILE"
-
+            sed '1d;$d' > "$TEMP_PROVISION_SCRIPT"
+        
         # Apply all the placeholder substitutions
-        sed -i "s|__HARDWARE_MODEL__|${HARDWARE_MODEL}|g" "$TEMP_SCRIPT_FILE"
-        sed -i "s|__EUD_CONNECTION__|${EUD_CONNECTION}|g" "$TEMP_SCRIPT_FILE"
-        sed -i "s|__LAN_AP_SSID__|${LAN_AP_SSID}|g" "$TEMP_SCRIPT_FILE"
-        sed -i "s|__LAN_AP_KEY__|${LAN_AP_KEY}|g" "$TEMP_SCRIPT_FILE"
-        sed -i "s|__MAX_EUDS_PER_NODE__|${MAX_EUDS_PER_NODE}|g" "$TEMP_SCRIPT_FILE"
-        sed -i "s|__INSTALL_MEDIAMTX__|${INSTALL_MEDIAMTX}|g" "$TEMP_SCRIPT_FILE"
-        sed -i "s|__INSTALL_MUMBLE__|${INSTALL_MUMBLE}|g" "$TEMP_SCRIPT_FILE"
-        sed -i "s|__MESH_SSID__|${MESH_SSID}|g" "$TEMP_SCRIPT_FILE"
-        sed -i "s|__MESH_SAE_KEY__|${MESH_SAE_KEY}|g" "$TEMP_SCRIPT_FILE"
-        sed -i "s|__LAN_CIDR_BLOCK__|${LAN_CIDR_BLOCK}|g" "$TEMP_SCRIPT_FILE"
-        sed -i "s|__AUTO_CHANNEL__|${AUTO_CHANNEL}|g" "$TEMP_SCRIPT_FILE"
-        sed -i "s|__RADIO_PW__|${RADIO_PW}|g" "$TEMP_SCRIPT_FILE"
-        sed -i "s|__REGULATORY_DOMAIN__|${REGULATORY_DOMAIN}|g" "$TEMP_SCRIPT_FILE"
-        sed -i "s|__ADMIN_PW__|${ADMIN_PW}|g" "$TEMP_SCRIPT_FILE"
-        sed -i "s|__AUTO_UPDATE__|${AUTO_UPDATE}|g" "$TEMP_SCRIPT_FILE"
+        sed -i "s|__HARDWARE_MODEL__|${HARDWARE_MODEL}|g" "$TEMP_PROVISION_SCRIPT"
+        sed -i "s|__EUD_CONNECTION__|${EUD_CONNECTION}|g" "$TEMP_PROVISION_SCRIPT"
+        sed -i "s|__LAN_AP_SSID__|${LAN_AP_SSID}|g" "$TEMP_PROVISION_SCRIPT"
+        sed -i "s|__LAN_AP_KEY__|${LAN_AP_KEY}|g" "$TEMP_PROVISION_SCRIPT"
+        sed -i "s|__MAX_EUDS_PER_NODE__|${MAX_EUDS_PER_NODE}|g" "$TEMP_PROVISION_SCRIPT"
+        sed -i "s|__INSTALL_MEDIAMTX__|${INSTALL_MEDIAMTX}|g" "$TEMP_PROVISION_SCRIPT"
+        sed -i "s|__INSTALL_MUMBLE__|${INSTALL_MUMBLE}|g" "$TEMP_PROVISION_SCRIPT"
+        sed -i "s|__MESH_SSID__|${MESH_SSID}|g" "$TEMP_PROVISION_SCRIPT"
+        sed -i "s|__MESH_SAE_KEY__|${MESH_SAE_KEY}|g" "$TEMP_PROVISION_SCRIPT"
+        sed -i "s|__LAN_CIDR_BLOCK__|${LAN_CIDR_BLOCK}|g" "$TEMP_PROVISION_SCRIPT"
+        sed -i "s|__AUTO_CHANNEL__|${AUTO_CHANNEL}|g" "$TEMP_PROVISION_SCRIPT"
+        sed -i "s|__RADIO_PW__|${RADIO_PW}|g" "$TEMP_PROVISION_SCRIPT"
+        sed -i "s|__REGULATORY_DOMAIN__|${REGULATORY_DOMAIN}|g" "$TEMP_PROVISION_SCRIPT"
+        sed -i "s|__ADMIN_PW__|${ADMIN_PW}|g" "$TEMP_PROVISION_SCRIPT"
+        sed -i "s|__AUTO_UPDATE__|${AUTO_UPDATE}|g" "$TEMP_PROVISION_SCRIPT"
         
-        echo "Applying Armbian-specific adaptations..."
-        
-        # 1. Change exit to return (script is sourced, not executed)
-        sed -i 's/^\([[:space:]]*\)exit 1$/\1return 1 2>\/dev\/null || true/g' "$TEMP_SCRIPT_FILE"
-        sed -i 's/^\([[:space:]]*\)exit 0$/\1return 0 2>\/dev\/null || true/g' "$TEMP_SCRIPT_FILE"
-        
-        # 2. Remove set -x (causes spam when sourced)
-        sed -i '/^set -x$/d' "$TEMP_SCRIPT_FILE"
-        
-        # 3. Change log paths from /boot/firmware to /var/log (Armbian paths)
-        sed -i 's|/boot/firmware/firstrun.log|/var/log/mesh-firstrun.log|g' "$TEMP_SCRIPT_FILE"
-        sed -i 's|/boot/firmware/provision.log|/var/log/mesh-provision.log|g' "$TEMP_SCRIPT_FILE"
-        
-       # 4. Remove the exec line entirely (we'll handle logging differently)
-        sed -i '/^exec > >(tee -a .*provision.log) 2>&1$/d' "$TEMP_SCRIPT_FILE"
-        
-        # 5. Change final reboot to background (so armbian-firstlogin can finish)
-        sed -i 's/^reboot$/# Self-delete this script\nrm -f \/root\/provisioning.sh\n\n# Schedule reboot in background so armbian-firstlogin can complete\n( sleep 10 \&\& reboot ) \&/' "$TEMP_SCRIPT_FILE"
-        
-        # 6. Remove the mesh-provision.service creation (Armbian doesn't need this)
-        sed -i '/^cat > \/etc\/systemd\/system\/mesh-provision.service << .EOF.$/,/^EOF$/d' "$TEMP_SCRIPT_FILE"
-        sed -i '/^systemctl daemon-reload$/d' "$TEMP_SCRIPT_FILE"
-        sed -i '/^systemctl enable mesh-provision.service$/d' "$TEMP_SCRIPT_FILE"
-        
-        # 7. Add wrapper with PROVISION_LOG set BEFORE the subshell
-        sed -i '1i\
-#!/bin/bash\
-#\
-# Armbian Rock 3A Mesh Node Provisioning Script\
-# This script is sourced by armbian-firstlogin after user creation\
-#\
-\
-# Set log file location\
-PROVISION_LOG="/var/log/mesh-provision.log"\
-\
-# Wrap in subshell to capture all output\
-{' "$TEMP_SCRIPT_FILE"
-        
-        # 8. Add closing brace and status messages before the background reboot
-        sed -i '/( sleep 10 && reboot ) &/i\
-} >> "$PROVISION_LOG" 2>&1\
-\
-echo ""\
-echo "Mesh node provisioning complete. See $PROVISION_LOG for details."\
-echo "System will reboot in 10 seconds to apply changes..."\
-echo ""' "$TEMP_SCRIPT_FILE"
-        # Write the adapted script to mounted image
-        echo "Writing adapted provisioning script to /root/provisioning.sh..."
-        sudo cp "$TEMP_SCRIPT_FILE" "$ROOT_MOUNT/root/provisioning.sh"
+        # Create the simple setup script that armbian-firstlogin will source
+        # This just creates the real provisioning script and service, then reboots
+        echo "Writing /root/provisioning.sh (stage 1 setup script)..."
+        sudo tee "$ROOT_MOUNT/root/provisioning.sh" > /dev/null << 'ARMBIAN_SETUP_EOF'
+#!/bin/bash
+#
+# Armbian Rock 3A Setup Script (Stage 1)
+# This script is sourced by armbian-firstlogin after user creation
+# It creates the real provisioning script and systemd service
+#
+
+echo "=== Armbian setup (stage 1) starting at $(date) ===" >> /var/log/armbian-setup.log
+
+# Create the actual provisioning script
+cat > /usr/local/bin/provision-mesh.sh << 'PROVISION_CONTENT_EOF'
+ARMBIAN_SETUP_EOF
+
+        # Append the actual provisioning content
+        sudo bash -c "cat '$TEMP_PROVISION_SCRIPT' >> '$ROOT_MOUNT/root/provisioning.sh'"
+
+        # Continue the setup script - close the heredoc and create the service
+        sudo tee -a "$ROOT_MOUNT/root/provisioning.sh" > /dev/null << 'ARMBIAN_SETUP_EOF'
+PROVISION_CONTENT_EOF
+
+# Make it executable
+chmod +x /usr/local/bin/provision-mesh.sh
+
+# Create systemd service to run the provisioning AFTER network is ready
+cat > /etc/systemd/system/mesh-provision.service << 'SERVICE_EOF'
+[Unit]
+Description=Provision Mesh Node After Network
+After=network-online.target multi-user.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/provision-mesh.sh
+RemainAfterExit=yes
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=multi-user.target
+SERVICE_EOF
+
+# Enable the service
+systemctl daemon-reload
+systemctl enable mesh-provision.service
+
+# Remove this setup script so it doesn't run again
+rm -f /root/provisioning.sh
+
+echo "=== Armbian setup (stage 1) complete at $(date) ===" >> /var/log/armbian-setup.log
+echo "=== System will reboot and continue provisioning ===" >> /var/log/armbian-setup.log
+
+# Reboot to start stage 2
+reboot
+ARMBIAN_SETUP_EOF
+
         sudo chmod +x "$ROOT_MOUNT/root/provisioning.sh"
-
+        
         # Cleanup temp file
-        rm -f "$TEMP_SCRIPT_FILE"
-
+        rm -f "$TEMP_PROVISION_SCRIPT"
+        
         # Unmount
         echo "Unmounting image..."
         sudo sync
@@ -1045,8 +1053,31 @@ echo ""' "$TEMP_SCRIPT_FILE"
 
 else
         # Raspberry Pi path - use rpi-imager
+        
+        # Generate the firstrun script from template
+        echo "Generating firstrun script from template..."
+        
+        # Do all the same substitutions as before
+        sed -e "s|__HARDWARE_MODEL__|${HARDWARE_MODEL}|g" \
+            -e "s|__EUD_CONNECTION__|${EUD_CONNECTION}|g" \
+            -e "s|__LAN_AP_SSID__|${LAN_AP_SSID}|g" \
+            -e "s|__LAN_AP_KEY__|${LAN_AP_KEY}|g" \
+            -e "s|__MAX_EUDS_PER_NODE__|${MAX_EUDS_PER_NODE}|g" \
+            -e "s|__INSTALL_MEDIAMTX__|${INSTALL_MEDIAMTX}|g" \
+            -e "s|__INSTALL_MUMBLE__|${INSTALL_MUMBLE}|g" \
+            -e "s|__MESH_SSID__|${MESH_SSID}|g" \
+            -e "s|__MESH_SAE_KEY__|${MESH_SAE_KEY}|g" \
+            -e "s|__LAN_CIDR_BLOCK__|${LAN_CIDR_BLOCK}|g" \
+            -e "s|__AUTO_CHANNEL__|${AUTO_CHANNEL}|g" \
+            -e "s|__RADIO_PW__|${RADIO_PW}|g" \
+            -e "s|__REGULATORY_DOMAIN__|${REGULATORY_DOMAIN}|g" \
+            -e "s|__ADMIN_PW__|${ADMIN_PW}|g" \
+            -e "s|__AUTO_UPDATE__|${AUTO_UPDATE}|g" \
+            "$TEMPLATE_FILE" > "$TEMP_SCRIPT_FILE"
+        
         # Final confirmation before flashing
         confirm_flash "$TARGET_DEVICE"
 
         sudo rpi-imager --cli "$PI_OS_IMAGE_URL" "$TARGET_DEVICE" --first-run-script "$TEMP_SCRIPT_FILE"
 fi
+
