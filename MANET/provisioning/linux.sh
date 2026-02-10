@@ -938,7 +938,7 @@ EOF
         # Extract ONLY the provision-mesh.sh section from template (between PROVISIONEOF markers)
         # This avoids including the outer firstrun.sh wrapper
         sed -n '/cat > \/usr\/local\/bin\/provision-mesh.sh << .PROVISIONEOF./,/^PROVISIONEOF$/p' "$TEMPLATE_FILE" | \
-            sed '1d;$d' > "$TEMP_SCRIPT_FILE"
+		    sed '1d;$d' | sed '1,/^echo "=== provision-mesh-node.sh starting/{ /^#!\/bin\/bash$/d; /^set -x$/d; }' > "$TEMP_SCRIPT_FILE"
 
         # Apply all the placeholder substitutions
         sed -i "s|__HARDWARE_MODEL__|${HARDWARE_MODEL}|g" "$TEMP_SCRIPT_FILE"
@@ -970,19 +970,18 @@ EOF
         sed -i 's|/boot/firmware/firstrun.log|/var/log/mesh-firstrun.log|g' "$TEMP_SCRIPT_FILE"
         sed -i 's|/boot/firmware/provision.log|/var/log/mesh-provision.log|g' "$TEMP_SCRIPT_FILE"
         
-        # 4. Replace the exec line to log to /var/log instead
-        sed -i 's|^exec > >(tee -a /boot/firmware/provision.log) 2>&1$|# Log to file for Armbian\nPROVISION_LOG="/var/log/mesh-provision.log"\nexec > >(tee -a "$PROVISION_LOG") 2>&1|' "$TEMP_SCRIPT_FILE"
+       # 4. Remove the exec line entirely (we'll handle logging differently)
+        sed -i '/^exec > >(tee -a .*provision.log) 2>&1$/d' "$TEMP_SCRIPT_FILE"
         
         # 5. Change final reboot to background (so armbian-firstlogin can finish)
         sed -i 's/^reboot$/# Self-delete this script\nrm -f \/root\/provisioning.sh\n\n# Schedule reboot in background so armbian-firstlogin can complete\n( sleep 10 \&\& reboot ) \&/' "$TEMP_SCRIPT_FILE"
         
         # 6. Remove the mesh-provision.service creation (Armbian doesn't need this)
-        # Find and remove the entire service creation block
         sed -i '/^cat > \/etc\/systemd\/system\/mesh-provision.service << .EOF.$/,/^EOF$/d' "$TEMP_SCRIPT_FILE"
         sed -i '/^systemctl daemon-reload$/d' "$TEMP_SCRIPT_FILE"
         sed -i '/^systemctl enable mesh-provision.service$/d' "$TEMP_SCRIPT_FILE"
-
-        # 7. Add wrapper for error handling when sourced
+        
+        # 7. Add wrapper with PROVISION_LOG set BEFORE the subshell
         sed -i '1i\
 #!/bin/bash\
 #\
@@ -990,10 +989,13 @@ EOF
 # This script is sourced by armbian-firstlogin after user creation\
 #\
 \
+# Set log file location\
+PROVISION_LOG="/var/log/mesh-provision.log"\
+\
 # Wrap in subshell to capture all output\
 {' "$TEMP_SCRIPT_FILE"
-
-        # Pause before the background reboot
+        
+        # 8. Add closing brace and status messages before the background reboot
         sed -i '/( sleep 10 && reboot ) &/i\
 } >> "$PROVISION_LOG" 2>&1\
 \
@@ -1001,7 +1003,6 @@ echo ""\
 echo "Mesh node provisioning complete. See $PROVISION_LOG for details."\
 echo "System will reboot in 10 seconds to apply changes..."\
 echo ""' "$TEMP_SCRIPT_FILE"
-
         # Write the adapted script to mounted image
         echo "Writing adapted provisioning script to /root/provisioning.sh..."
         sudo cp "$TEMP_SCRIPT_FILE" "$ROOT_MOUNT/root/provisioning.sh"
