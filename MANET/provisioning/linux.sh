@@ -906,32 +906,43 @@ admin_password=${ADMIN_PW}
 auto_update=${AUTO_UPDATE}
 EOF
 
-        # Create Armbian firstrun preset file
-        echo "Writing /root/.not_logged_in_yet..."
-        sudo tee "$ROOT_MOUNT/root/.not_logged_in_yet" > /dev/null << EOF
-# Network Settings
-PRESET_NET_CHANGE_DEFAULTS="1"
-## Ethernet
-PRESET_NET_ETHERNET_ENABLED="1"
-## WiFi
-PRESET_NET_WIFI_ENABLED="0"
-PRESET_NET_USE_STATIC="0"
-# System
-SET_LANG_BASED_ON_LOCATION="y"
-PRESET_LOCALE="en_US.UTF-8"
-PRESET_TIMEZONE="Etc/UTC"
-# Root
-PRESET_ROOT_PASSWORD="root"
-PRESET_ROOT_KEY=""
-# User
-PRESET_USER_NAME="radio"
-PRESET_USER_PASSWORD="$RADIO_PW"
-PRESET_USER_KEY=""
-PRESET_DEFAULT_REALNAME="radio"
-PRESET_USER_SHELL="bash"
-EOF
+        # ============================================================
+        # BYPASS ARMBIAN-FIRSTLOGIN - Headless auto-provisioning
+        # ============================================================
+        
+        # Remove .not_logged_in_yet to prevent armbian-firstlogin from running
+        echo "Removing .not_logged_in_yet to bypass interactive setup..."
+        sudo rm -f "$ROOT_MOUNT/root/.not_logged_in_yet"
+        
+        # Pre-create the radio user with hashed password
+        echo "Creating radio user..."
+        RADIO_PW_HASH=$(openssl passwd -6 "$RADIO_PW")
+        
+        # Add radio user to passwd (UID 1000, GID 1000, home /home/radio, shell /bin/bash)
+        echo "radio:x:1000:1000:radio:/home/radio:/bin/bash" | sudo tee -a "$ROOT_MOUNT/etc/passwd" > /dev/null
+        
+        # Add radio group
+        echo "radio:x:1000:" | sudo tee -a "$ROOT_MOUNT/etc/group" > /dev/null
+        
+        # Add radio to shadow with hashed password
+        echo "radio:${RADIO_PW_HASH}:19700:0:99999:7:::" | sudo tee -a "$ROOT_MOUNT/etc/shadow" > /dev/null
+        
+        # Add radio to sudo group
+        sudo sed -i 's/^sudo:x:\([0-9]*\):.*$/sudo:x:\1:radio/' "$ROOT_MOUNT/etc/group"
+        
+        # Create home directory
+        sudo mkdir -p "$ROOT_MOUNT/home/radio"
+        sudo chown 1000:1000 "$ROOT_MOUNT/home/radio"
+        sudo chmod 755 "$ROOT_MOUNT/home/radio"
+        
+        # Add radio to sudoers (passwordless sudo)
+        echo "radio ALL=(ALL) NOPASSWD: ALL" | sudo tee "$ROOT_MOUNT/etc/sudoers.d/radio" > /dev/null
+        sudo chmod 440 "$ROOT_MOUNT/etc/sudoers.d/radio"
 
-        # Generate the full provisioning script from Rock3A template
+        # ============================================================
+        # Generate and install the provisioning script
+        # ============================================================
+        
         echo "Generating provisioning script from Rock3A template..."
         TEMP_PROVISION_SCRIPT=$(mktemp)
         
@@ -961,43 +972,30 @@ EOF
         sed -i "s|__ADMIN_PW__|${ADMIN_PW}|g" "$TEMP_PROVISION_SCRIPT"
         sed -i "s|__AUTO_UPDATE__|${AUTO_UPDATE}|g" "$TEMP_PROVISION_SCRIPT"
         
-        # Create the simple setup script that armbian-firstlogin will source
-        # This just creates the real provisioning script and service, then reboots
-        echo "Writing /root/provisioning.sh (stage 1 setup script)..."
-        sudo tee "$ROOT_MOUNT/root/provisioning.sh" > /dev/null << 'ARMBIAN_SETUP_EOF'
-#!/bin/bash
-#
-# Armbian Rock 3A Setup Script (Stage 1)
-# This script is sourced by armbian-firstlogin after user creation
-# It creates the real provisioning script and systemd service
-#
+        # Install provisioning script directly to /usr/local/bin
+        echo "Installing provisioning script to /usr/local/bin/provision-mesh.sh..."
+        sudo cp "$TEMP_PROVISION_SCRIPT" "$ROOT_MOUNT/usr/local/bin/provision-mesh.sh"
+        sudo chmod +x "$ROOT_MOUNT/usr/local/bin/provision-mesh.sh"
+        
+        # Cleanup temp file
+        rm -f "$TEMP_PROVISION_SCRIPT"
 
-echo "=== Armbian setup (stage 1) starting at $(date) ===" >> /var/log/armbian-setup.log
-
-# Create the actual provisioning script
-cat > /usr/local/bin/provision-mesh.sh << 'PROVISION_CONTENT_EOF'
-ARMBIAN_SETUP_EOF
-
-        # Append the actual provisioning content
-        sudo bash -c "cat '$TEMP_PROVISION_SCRIPT' >> '$ROOT_MOUNT/root/provisioning.sh'"
-
-        # Continue the setup script - close the heredoc and create the service
-        sudo tee -a "$ROOT_MOUNT/root/provisioning.sh" > /dev/null << 'ARMBIAN_SETUP_EOF'
-PROVISION_CONTENT_EOF
-
-# Make it executable
-chmod +x /usr/local/bin/provision-mesh.sh
-
-# Create systemd service to run the provisioning AFTER network is ready
-cat > /etc/systemd/system/mesh-provision.service << 'SERVICE_EOF'
+        # ============================================================
+        # Create systemd service for auto-provisioning on first boot
+        # ============================================================
+        
+        echo "Creating mesh-provision systemd service..."
+        sudo tee "$ROOT_MOUNT/etc/systemd/system/mesh-provision.service" > /dev/null << 'SERVICE_EOF'
 [Unit]
-Description=Provision Mesh Node After Network
-After=network-online.target multi-user.target
+Description=Mesh Network First Boot Provisioning
+ConditionPathExists=/root/.mesh-not-provisioned
+After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=oneshot
 ExecStart=/usr/local/bin/provision-mesh.sh
+ExecStartPost=/bin/rm -f /root/.mesh-not-provisioned
 RemainAfterExit=yes
 StandardOutput=journal+console
 StandardError=journal+console
@@ -1006,26 +1004,20 @@ StandardError=journal+console
 WantedBy=multi-user.target
 SERVICE_EOF
 
-# Enable the service
-systemctl daemon-reload
-systemctl enable mesh-provision.service
-
-# Remove this setup script so it doesn't run again
-rm -f /root/provisioning.sh
-
-echo "=== Armbian setup (stage 1) complete at $(date) ===" >> /var/log/armbian-setup.log
-echo "=== System will reboot and continue provisioning ===" >> /var/log/armbian-setup.log
-
-# Reboot to start stage 2
-reboot
-ARMBIAN_SETUP_EOF
-
-        sudo chmod +x "$ROOT_MOUNT/root/provisioning.sh"
+        # Create the flag file that triggers provisioning
+        echo "Creating provisioning trigger flag..."
+        sudo touch "$ROOT_MOUNT/root/.mesh-not-provisioned"
         
-        # Cleanup temp file
-        rm -f "$TEMP_PROVISION_SCRIPT"
+        # Enable the service (create symlink manually since systemctl won't work on mounted image)
+        echo "Enabling mesh-provision service..."
+        sudo mkdir -p "$ROOT_MOUNT/etc/systemd/system/multi-user.target.wants"
+        sudo ln -sf /etc/systemd/system/mesh-provision.service \
+                "$ROOT_MOUNT/etc/systemd/system/multi-user.target.wants/mesh-provision.service"
+
+        # ============================================================
+        # Unmount and flash
+        # ============================================================
         
-        # Unmount
         echo "Unmounting image..."
         sudo sync
         sudo umount "$ROOT_MOUNT"
@@ -1056,13 +1048,16 @@ ARMBIAN_SETUP_EOF
         echo "Rock 3A. First boot provisioning will run"
         echo "automatically when connected to the internet."
         echo ""
+        echo "  - Root password: 1234 (Armbian default)"
+        echo "  - Radio user: radio / <your configured password>"
+        echo ""
 
 else
         # Raspberry Pi path - use rpi-imager
-        
+
         # Generate the firstrun script from template
         echo "Generating firstrun script from template..."
-        
+
         # Do all the same substitutions as before
         sed -e "s|__HARDWARE_MODEL__|${HARDWARE_MODEL}|g" \
             -e "s|__EUD_CONNECTION__|${EUD_CONNECTION}|g" \
