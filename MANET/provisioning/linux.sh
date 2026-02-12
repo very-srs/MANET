@@ -5,6 +5,7 @@ set -e
 
 # --- Configuration ---
 TEMPLATE_FILE="firstrun.sh.template"
+ROCK3A_TEMPLATE="rock3a-provision.sh.template"
 TEMP_SCRIPT_FILE=$(mktemp)
 # Full mirror, fast connection
 ARMBIAN_IMAGE_URL="https://fi.mirror.armbian.de/dl/rock-3a/archive/Armbian_25.11.1_Rock-3a_trixie_vendor_6.1.115_minimal.img.xz"
@@ -930,13 +931,18 @@ PRESET_DEFAULT_REALNAME="radio"
 PRESET_USER_SHELL="bash"
 EOF
 
-        # Generate the full provisioning script from template
-        echo "Generating provisioning script from template..."
+        # Generate the full provisioning script from Rock3A template
+        echo "Generating provisioning script from Rock3A template..."
         TEMP_PROVISION_SCRIPT=$(mktemp)
         
-        # Extract ONLY the provision-mesh.sh section from template (between PROVISIONEOF markers)
-        sed -n '/cat > \/usr\/local\/bin\/provision-mesh.sh << .PROVISIONEOF./,/^PROVISIONEOF$/p' "$TEMPLATE_FILE" | \
-            sed '1d;$d' > "$TEMP_PROVISION_SCRIPT"
+        # Check if Rock3A template exists
+        if [ ! -f "$ROCK3A_TEMPLATE" ]; then
+                echo "ERROR: Rock3A template '$ROCK3A_TEMPLATE' not found."
+                exit 1
+        fi
+        
+        # Copy the template
+        cp "$ROCK3A_TEMPLATE" "$TEMP_PROVISION_SCRIPT"
         
         # Apply all the placeholder substitutions
         sed -i "s|__HARDWARE_MODEL__|${HARDWARE_MODEL}|g" "$TEMP_PROVISION_SCRIPT"
@@ -1080,4 +1086,3 @@ else
 
         sudo rpi-imager --cli "$PI_OS_IMAGE_URL" "$TARGET_DEVICE" --first-run-script "$TEMP_SCRIPT_FILE"
 fi
-
