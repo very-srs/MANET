@@ -228,7 +228,7 @@ EOF
 # Set ethernet links for DHCP as a default setup.  Scripts will juggle this
 # around later for device detection
 CT=0
-for LAN in `networkctl | awk '/ether/ {print $2}'`; do
+for LAN in `networkctl | grep -v bat | awk '/ether/ {print $2}'`; do
     M=$(ip link show $LAN | awk '/ether/ {print $2}')
     cat <<- EOF > /etc/systemd/network/10-end${CT}.network
 		[Match]
@@ -496,7 +496,7 @@ rm -Rf /usr/lib/NetworkManager/dispatcher.d/*
 
 # Install optional service selections
 if [ "__INSTALL_MUMBLE__" = "y" ]; then
-		apt install -y mumble-server
+		apt install -y sqlite3 mumble-server
 		#make mumble server ini changes
 		sed -i '/ice="tcp -h 127.0.0.1 -p 6502"/s/^#//g' /etc/mumble/mumble-server.ini
 		sed -i 's/icesecretwrite/;icesecretwrite/g' /etc/mumble/mumble-server.ini
