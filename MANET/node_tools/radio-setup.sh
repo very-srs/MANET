@@ -677,31 +677,44 @@ systemctl enable wpa_supplicant-s1g-$WLAN.service
 done
 
 #stop this from loading at boot, happens too quickly
-echo "blacklist morse" > /etc/modprobe.d/morse-blacklist.conf
+#echo "blacklist morse" > /etc/modprobe.d/morse-blacklist.conf
+
 echo "options cfg80211 ieee80211_regdom=$REGULATORY_DOMAIN" > /etc/modprobe.d/cfg80211.conf
-cat << EOF > /etc/systemd/system/morse-delayed-load.service
-[Unit]
-Description=Load Morse HaLow driver with delay
-After=network.target systemd-modules-load.service
-Before=wpa_supplicant-s1g-wlan2.service
+echo "options morse enable_mcast_whitelist=0 enable_mcast_rate_control=1" > /etc/modprobe.d/morse.conf
+echo "options morse spi_clock_speed=1500000" >> /etc/modprobe.d/morse.conf
 
-[Service]
-Type=oneshot
-# Wait for system to stabilize
-ExecStartPre=/bin/sleep 3
-# Load dependencies first
-ExecStart=/sbin/modprobe dot11ah
-# Then load morse driver
-ExecStart=/sbin/modprobe morse
-# Wait for interface to appear
-ExecStartPost=/bin/bash -c 'for i in {1..10}; do ip link show wlan2 && break || sleep 1; done'
-RemainAfterExit=yes
+if [[ "$REG" == "EU" ]]; then
+	echo "options morse country=EU enable_auto_duty_cycle=0 enable_auto_mpsw=0" >> /etc/modprobe.d/morse.conf
+else
+	echo "options morse country=$REG" >> /etc/modprobe.d/morse.conf
+fi
+#options morse bcf=bcf_mf15457.bin
 
-[Install]
-WantedBy=multi-user.target
-EOF
 
-systemctl enable morse-delayed-load.service
+
+#cat << EOF > /etc/systemd/system/morse-delayed-load.service
+#[Unit]
+#Description=Load Morse HaLow driver with delay
+#After=network.target systemd-modules-load.service
+#Before=wpa_supplicant-s1g-wlan2.service
+
+#[Service]
+#Type=oneshot
+## Wait for system to stabilize
+#ExecStartPre=/bin/sleep 3
+## Load dependencies first
+#ExecStart=/sbin/modprobe dot11ah
+## Then load morse driver
+#ExecStart=/sbin/modprobe morse
+## Wait for interface to appear
+#ExecStartPost=/bin/bash -c 'for i in {1..10}; do ip link show wlan2 && break || sleep 1; done'
+#RemainAfterExit=yes
+
+#[Install]
+#WantedBy=multi-user.target
+#EOF
+
+#systemctl enable morse-delayed-load.service
 
 #
 #	System service setup
