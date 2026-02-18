@@ -943,6 +943,15 @@ WantedBy=halt.target reboot.target shutdown.target
 EOF
 systemctl enable mesh-shutdown.service
 
+# Calculate unique hostname from MAC address
+HOST_MAC=$(ip a | grep -A1 $(networkctl | grep -v bat | awk '/ether/ {print $2}' | head -1) \
+   | awk '/ether/ {print $2}' | cut -d':' -f 5-6 | sed 's/://g')
+
+
+# Set hostname based on MAC
+hostnamectl set-hostname "mesh-${HOST_MAC}"
+
+
 # Determine if this script is being run for the first time
 # and reboot if so to pick up the changes to the interfaces
 if systemctl is-enabled radio-setup-run-once.service >/dev/null 2>&1; then
