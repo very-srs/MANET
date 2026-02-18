@@ -128,17 +128,11 @@ morse
 dot11ah
 EOF
 
-# Load the morse driver with options
+# Load the morse driver with options to allow the interface to be picked up
+# This will be re-written by radio-setup to select the correct region
 cat << EOF > /etc/modprobe.d/morse.conf
 options morse country=US
-options morse spi_clock_speed=1500000
-options morse bcf=bcf_fgh100mhaamd.bin
 options morse enable_mcast_whitelist=0 enable_mcast_rate_control=1
-EOF
-
-# this is probably redundant, and should be done in radio-setup.sh with a variable for the wlan interface
-cat << EOF > /etc/wpa_supplicant-wlan2-s1g.conf
-country=US
 EOF
 
 # More kernel tweaks
@@ -244,13 +238,15 @@ for LAN in `networkctl | grep -v bat | awk '/ether/ {print $2}'`; do
 	EOF
     cat <<- EOF > /etc/systemd/network/11-end${CT}-rename.link
 		[Match]
-		MACAddress=$M
+		OriginalName=eth0
 
 		[Link]
+		MACAddress=$M
 		Name=end${CT}
 	EOF
     (( CT++ ))
     cp  /etc/systemd/network/10-end${CT}.network  /etc/systemd/network/10-end${CT}.network.dhcp-default
+    break
 done
 echo "Ethernet config added"
 

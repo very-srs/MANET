@@ -621,6 +621,7 @@ EOF
 
 rm /etc/wpa_supplicant/*${WLAN}* 2>/dev/null
 
+if [[ "$REG" == "US"]]; then
 cat << EOF > /etc/wpa_supplicant/wpa_supplicant-$WLAN-s1g.conf
 country="US"
 ctrl_interface=/var/run/wpa_supplicant_s1g
@@ -653,6 +654,40 @@ network={
     beacon_int=1000
 }
 EOF
+else
+cat << EOF > /etc/wpa_supplicant/wpa_supplicant-$WLAN-s1g.conf
+country="$REG"
+ctrl_interface=/var/run/wpa_supplicant_s1g
+sae_pwe=1
+max_peer_links=10
+mesh_fwding=0
+network={
+    ssid="$MESH_SSID"
+    key_mgmt=SAE
+    mode=5
+    channel=6
+    op_class=67
+    country="$REG"
+    s1g_prim_chwidth=0
+    s1g_prim_1mhz_chan_index=0
+    dtim_period=1
+    mesh_rssi_threshold=-85
+    dot11MeshHWMPRootMode=0
+    dot11MeshGateAnnouncements=0
+    mbca_config=0
+    mbca_min_beacon_gap_ms=25
+    mbca_tbtt_adj_interval_sec=60
+    dot11MeshBeaconTimingReportInterval=10
+    mbss_start_scan_duration_ms=2048
+    mesh_beaconless_mode=0
+    mesh_dynamic_peering=0
+    sae_password="$mesh_key"
+    pairwise=CCMP
+    ieee80211w=2
+    beacon_int=100
+}
+EOF
+
 
 cat << EOF > /etc/systemd/system/wpa_supplicant-s1g-$WLAN.service 
 [Unit]
@@ -681,12 +716,12 @@ done
 
 echo "options cfg80211 ieee80211_regdom=$REGULATORY_DOMAIN" > /etc/modprobe.d/cfg80211.conf
 echo "options morse enable_mcast_whitelist=0 enable_mcast_rate_control=1" > /etc/modprobe.d/morse.conf
-echo "options morse spi_clock_speed=1500000" >> /etc/modprobe.d/morse.conf
+#echo "options morse spi_clock_speed=1500000" >> /etc/modprobe.d/morse.conf
+echo "options morse country=$REG" >> /etc/modprobe.d/morse.conf
 
 if [[ "$REG" == "EU" ]]; then
-	echo "options morse country=EU enable_auto_duty_cycle=0 enable_auto_mpsw=0" >> /etc/modprobe.d/morse.conf
+	echo "options morse enable_auto_duty_cycle=0 enable_auto_mpsw=0" >> /etc/modprobe.d/morse.conf
 else
-	echo "options morse country=$REG" >> /etc/modprobe.d/morse.conf
 fi
 #options morse bcf=bcf_mf15457.bin
 
