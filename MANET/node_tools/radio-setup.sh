@@ -170,7 +170,7 @@ mesh_24=()
 mesh_5=()
 for iface in "${mesh_ifaces[@]}"; do
     phyname=$(iw dev "$iface" info 2>/dev/null | awk '/wiphy/ {print "phy" $2}')
-    if iw phy "$phyname" info 2>/dev/null | grep -qE "^\s+24[0-9][0-9]\b"; then
+	if iw phy "$phyname" info 2>/dev/null | grep -qE "\*\s+24[0-9][0-9]"; then
         mesh_24+=("$iface")
     else
         mesh_5+=("$iface")
