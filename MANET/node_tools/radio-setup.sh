@@ -33,6 +33,12 @@ while IFS= read -r line; do
     fi
 done < <(cat /etc/mesh.conf)
 
+phys_iface() {
+    local logical="$1"
+    local phys
+    phys=$(grep "^${logical}:" /var/lib/iface_map 2>/dev/null | cut -d: -f2)
+    echo "${phys:-$logical}"   # fall back to logical name if no mapping (post-reboot)
+}
 
 echo "Installing morse driver"
 mkdir -p /lib/modules/$(uname -r)/extra/morse
@@ -159,52 +165,54 @@ if [ "$PHY_COUNT" -eq 0 ]; then
     echo "  If you expect wireless: check 'dmesg | grep -i firmware'"
 fi
 
-# Detect interfaces, save to files
-mesh_ifaces=()
-halow_ifaces=()
-nonmesh_ifaces=()
-
-for phy in $(iw dev | awk '/^phy#/{print $1}'); do    # Convert 'phy#0' → 'phy0'
-    phyname=${phy//#/}
-
-    # Find interface(s) for this PHY
-    iface=$(iw dev | awk -v target="$phy" '
-        $1 ~ /^phy#/ { current_phy = $1 }
-        current_phy == target && $1 == "Interface" { print $2 }
-    ')
-
-    # Check if it's HaLow (802.11ah) - look for Band 7 or morse driver
-	if iw phy "$phyname" info | grep -q "0.5 Mbps"; then
-        halow_ifaces+=("$iface")
-    elif iw phy "$phyname" info | grep -q "mesh point"; then
-        mesh_ifaces+=("$iface")
+# Sort mesh_ifaces: 2.4GHz first, then 5GHz
+mesh_24=()
+mesh_5=()
+for iface in "${mesh_ifaces[@]}"; do
+    phyname=$(iw dev "$iface" info 2>/dev/null | awk '/wiphy/ {print "phy" $2}')
+    if iw phy "$phyname" info 2>/dev/null | grep -qE "^\s+24[0-9][0-9]\b"; then
+        mesh_24+=("$iface")
     else
-        nonmesh_ifaces+=("$iface")
+        mesh_5+=("$iface")
     fi
 done
+mesh_ifaces=("${mesh_24[@]}" "${mesh_5[@]}")
 
-# Keep track across reboots
 # Create directory and files even if arrays are empty (supports wired-only configs)
 mkdir -p /var/lib
 > /var/lib/mesh_if
 > /var/lib/halow_if
 > /var/lib/no_mesh_if
+> /var/lib/iface_map   # logical_name:physical_name (for MAC lookups during provisioning)
 
-# Keep track across reboots
+# Assign logical wlan numbers in order: 2.4GHz mesh, 5GHz mesh, HaLow, non-mesh
+WLAN_IDX=0
 for iface in "${mesh_ifaces[@]}"; do
-    echo "$iface" >> /var/lib/mesh_if
+    newname="wlan$WLAN_IDX"
+    echo "$newname" >> /var/lib/mesh_if
+    echo "$newname:$iface" >> /var/lib/iface_map
+    echo " > Mapped $iface (mesh) → $newname"
+    ((WLAN_IDX++))
 done
-
 for iface in "${halow_ifaces[@]}"; do
-    echo "$iface" >> /var/lib/halow_if
+    newname="wlan$WLAN_IDX"
+    echo "$newname" >> /var/lib/halow_if
+    echo "$newname:$iface" >> /var/lib/iface_map
+    echo " > Mapped $iface (HaLow) → $newname"
+    ((WLAN_IDX++))
+done
+for iface in "${nonmesh_ifaces[@]}"; do
+    newname="wlan$WLAN_IDX"
+    echo "$newname" >> /var/lib/no_mesh_if
+    echo "$newname:$iface" >> /var/lib/iface_map
+    echo " > Mapped $iface (non-mesh) → $newname"
+    ((WLAN_IDX++))
 done
 
-for iface in "${nonmesh_ifaces[@]}"; do
-    echo "$iface" >> /var/lib/no_mesh_if
-done
 
 # Log what we found
 echo "Interface detection complete:"
+
 echo "  Mesh-capable: ${#mesh_ifaces[@]} ($(echo ${mesh_ifaces[@]}))"
 echo "  HaLow: ${#halow_ifaces[@]} ($(echo ${halow_ifaces[@]}))"
 echo "  Non-mesh: ${#nonmesh_ifaces[@]} ($(echo ${nonmesh_ifaces[@]}))"
@@ -356,8 +364,7 @@ EOF
 	#create the network interface config
 cat <<-EOF >  /etc/systemd/network/30-$WLAN.network
 [Match]
-MACAddress=`ip a | grep -A1 $WLAN | awk '/ether/ {print $2}'`
-
+MACAddress=$(ip a | grep -A1 "$(phys_iface $WLAN)" | awk '/ether/ {print $2}')
 [Network]
 
 [Link]
@@ -367,7 +374,7 @@ EOF
 
 	cat <<-EOF >  /etc/systemd/network/10-$WLAN.link
 [Match]
-MACAddress=`ip a | grep -A1 $WLAN | awk '/ether/ {print $2}'`
+MACAddress=$(ip a | grep -A1 "$(phys_iface $WLAN)" | awk '/ether/ {print $2}')
 
 [Link]
 Name=$WLAN
@@ -602,8 +609,7 @@ for WLAN in `cat /var/lib/halow_if | head -n 1`; do
 #create the network interface config
 cat <<-EOF >  /etc/systemd/network/30-$WLAN.network
 [Match]
-MACAddress=`ip a | grep -A1 $WLAN | awk '/ether/ {print $2}'`
-
+MACAddress=$(ip a | grep -A1 "$(phys_iface $WLAN)" | awk '/ether/ {print $2}')
 [Network]
 
 [Link]
