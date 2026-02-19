@@ -882,6 +882,8 @@ if systemctl is-enabled radio-setup-run-once.service >/dev/null 2>&1; then
     killall syncthing
     mkdir -p /home/radio/Sync/mumble/backups
     chown -R radio:radio /home/radio/Sync
+    chown -R radio:radio /home/radio/.config/syncthing
+
     SYNCTHING_CONFIG="/home/radio/.config/syncthing/config.xml"
     echo " >> Hardening Syncthing for local-only operation..."
     sed -i '/<options>/a <globalAnnounceEnabled>false</globalAnnounceEnabled>\n<relaysEnabled>false</relaysEnabled>' "$SYNCTHING_CONFIG"
