@@ -16,7 +16,7 @@ get_board_type() {
         model=$(tr -d '\0' < /proc/device-tree/model)
 
         case "$model" in
-            *"ROCK 3A"*|*"Rock 3A"*)
+            *"ROCK3"*)
                 echo "r3a"
                 ;;
             *"Raspberry Pi 5"*)
