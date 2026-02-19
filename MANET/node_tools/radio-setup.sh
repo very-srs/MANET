@@ -643,8 +643,8 @@ EOF
 cat << EOF > /etc/systemd/system/wpa_supplicant-s1g-$WLAN.service
 [Unit]
 Description=WPA supplicant (S1G/HaLow) for $WLAN
-After=morse-delayed-load.service
-Requires=morse-delayed-load.service
+After=network-online.target $WLAN
+Requires=network-online.target
 
 [Service]
 Type=simple
