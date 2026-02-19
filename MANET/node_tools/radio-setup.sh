@@ -1,6 +1,6 @@
 #!/bin/bash
 #  A script to finalize the setup of a radio after imaging and a first boot
-#
+# 
 #  This script can be re-run to set new network settings
 #  if the mesh config file is updated
 #
