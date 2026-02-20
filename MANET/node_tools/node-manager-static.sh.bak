@@ -37,65 +37,6 @@ log() {
     echo "[$(date +'%Y-%m-%d %H:%M:%S')] - NODE-MGR-STATIC: $1" >&2
 }
 
-
-# ==============================================================================
-# === GATEWAY DETECTION ===
-# ==============================================================================
-# Actively detects whether this node has internet connectivity via ethernet.
-# Maintains /var/run/mesh-gateway.state and batctl gw mode.
-# Called on every publish cycle so the registry stays accurate regardless of
-# whether networkd-dispatcher fired a carrier event at boot.
-GATEWAY_STATE_FILE="/var/run/mesh-gateway.state"
-LAST_GW_CHECK=0
-GW_CHECK_INTERVAL=60  # Re-check internet every 60s (rate-limit the ping test)
-
-detect_and_update_gateway_state() {
-    local NOW
-    NOW=$(date +%s)
-
-    # Rate-limit the internet ping test but always act if state file is absent
-    local time_since_check=$(( NOW - LAST_GW_CHECK ))
-    if [ $time_since_check -lt $GW_CHECK_INTERVAL ] && [ -f "$GATEWAY_STATE_FILE" ]; then
-        return
-    fi
-
-    local ETH_IFACE="end0"
-    local is_gateway=false
-
-    if [ -d "/sys/class/net/$ETH_IFACE" ]; then
-        local CARRIER
-        CARRIER=$(cat "/sys/class/net/$ETH_IFACE/carrier" 2>/dev/null || echo 0)
-        if [ "$CARRIER" = "1" ]; then
-            local ETH_IP
-            ETH_IP=$(ip -4 addr show dev "$ETH_IFACE" 2>/dev/null | grep -oP "inet \K[\d.]+" | head -1)
-            if [ -n "$ETH_IP" ]; then
-                if ip route show dev "$ETH_IFACE" 2>/dev/null | grep -q "default\|metric"; then
-                    if ping -c 2 -W 2 -I "$ETH_IFACE" 8.8.8.8 >/dev/null 2>&1 || \
-                       ping -c 2 -W 2 -I "$ETH_IFACE" 1.1.1.1 >/dev/null 2>&1; then
-                        is_gateway=true
-                    fi
-                fi
-            fi
-        fi
-    fi
-
-    LAST_GW_CHECK=$NOW
-
-    if [ "$is_gateway" = "true" ]; then
-        if [ ! -f "$GATEWAY_STATE_FILE" ]; then
-            log "Internet detected on $ETH_IFACE — setting gateway mode"
-            touch "$GATEWAY_STATE_FILE"
-            batctl gw server 100Mbit/100Mbit 2>/dev/null || true
-        fi
-    else
-        if [ -f "$GATEWAY_STATE_FILE" ]; then
-            log "Internet lost on $ETH_IFACE — clearing gateway mode"
-            rm -f "$GATEWAY_STATE_FILE"
-            batctl gw client 2>/dev/null || true
-        fi
-    fi
-}
-
 get_current_freq() {
     local conf_file=$1
     grep -oP 'frequency=\K[0-9]+' "$conf_file" 2>/dev/null | head -1
@@ -190,7 +131,6 @@ while true; do
         TQ_AVG=$("$BATCTL_PATH" o 2>/dev/null | awk 'NR>1 {sum+=$3} END {if (NR>1) printf "%.2f", sum/(NR-1); else print 0}')
         
         # Service flags
-        detect_and_update_gateway_state
         IS_GATEWAY_FLAG=$([ -f /var/run/mesh-gateway.state ] && echo "--is-internet-gateway" || echo "")
         IS_NTP_FLAG=$([ -f /var/run/mesh-ntp.state ] && echo "--is-ntp-server" || echo "")
         IS_MEDIAMTX_FLAG=$(is_hosting_service && echo "--is-mediamtx-server" || echo "")

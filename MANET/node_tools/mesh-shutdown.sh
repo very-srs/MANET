@@ -23,7 +23,7 @@ if [ -z "$MY_MAC" ]; then
 fi
 
 ALL_MACS=("$MY_MAC")
-for iface in wlan0 wlan1 end0; do
+for iface in wlan0 wlan1 wlan2 br0 bat0 end0; do
     if [ -d "/sys/class/net/$iface" ]; then
         MAC=$(cat "/sys/class/net/$iface/address" 2>/dev/null)
         [ -n "$MAC" ] && ALL_MACS+=("$MAC")
