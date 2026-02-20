@@ -149,20 +149,34 @@ def run_batctl_neighbors():
     return neighbors
 
 def run_batctl_gateways():
-    """Return list of {mac, tq, selected} from `batctl gwl`."""
+    """Return list of {mac, tq, selected} from `batctl gwl`.
+
+    BATMAN_V format:
+      => <gw_mac>  <age>s (  <Mbit/s>)  <nexthop_mac> [<if>]
+    BATMAN_IV format:
+      => <gw_mac>  <age>ms (<lq>)  <nexthop_mac> [<if>]
+    Header lines and the self-node are skipped.
+    """
     gateways = []
     try:
         r = subprocess.run(['batctl', 'gwl', '-n'],
                            capture_output=True, text=True, timeout=5)
         for line in r.stdout.splitlines():
-            selected = line.startswith('=>')
-            mac_m = re.search(r'([0-9a-f:]{17})', line)
-            tq_m  = re.search(r'\((\d+)\)', line)
+            # Skip header / blank lines
+            if not line.strip() or line.startswith('[') or line.strip().startswith('Router'):
+                continue
+            selected = line.lstrip().startswith('=>')
+            # Extract first MAC on the line (the gateway's originator MAC)
+            mac_m = re.search(r'([0-9a-f]{2}(?::[0-9a-f]{2}){5})', line)
+            # Extract throughput/LQ: handles both "( 100.0)" and "(255)"
+            tq_m  = re.search(r'\(\s*([\d.]+)\s*\)', line)
             if mac_m:
+                raw_tq = float(tq_m.group(1)) if tq_m else 0.0
+                tq_norm = int(min(raw_tq / 1000 * 255, 255)) if raw_tq > 255 else int(raw_tq)
                 gateways.append({
                     'mac':      norm_mac(mac_m.group(1)),
-                    'tq':       int(tq_m.group(1)) if tq_m else 0,
-                    'selected': selected
+                    'tq':       tq_norm,
+                    'selected': selected,
                 })
     except Exception:
         pass
@@ -562,6 +576,26 @@ def assemble_status_data():
     gw_mac_map    = {g['mac']: g for g in gateways}
     selected_gw   = next((g['mac'] for g in gateways if g['selected']), None)
 
+    # If batctl gwl has no gateways, fall back to registry IS_GATEWAY flags.
+    # This covers nodes that have internet but haven't configured batctl gw server.
+    registry_gw_nodes = [
+        nid for nid, nd in nodes_raw.items()
+        if nd.get('IS_GATEWAY', 'false').lower() == 'true'
+    ]
+    if not gateways and registry_gw_nodes:
+        # Use the registry gateway with best TQ as the "selected" gateway
+        def _node_tq(nid):
+            nd = nodes_raw[nid]
+            for m in nd.get('MAC_ADDRESSES', '').split(','):
+                t = orig_tq.get(norm_mac(m.strip()))
+                if t is not None:
+                    return t
+            return 0
+        best_gw_nid = max(registry_gw_nodes, key=_node_tq)
+        best_gw_nd  = nodes_raw[best_gw_nid]
+        selected_gw = norm_mac(best_gw_nd.get('MAC_ADDRESS', ''))
+        gateways    = [{'mac': selected_gw, 'tq': 0, 'selected': True}]
+
     node_list = []
     self_found = False
 
@@ -710,7 +744,7 @@ def assemble_status_data():
         'my_ip':          next((n['ip'] for n in node_list if n.get('is_me')), '') or (state.get('CURRENT_IPV4') or ''),
         'mesh_ssid':      conf.get('mesh_ssid', ''),
         'network':        conf.get('ipv4_network', ''),
-        'gateway_count':  len(gateways),
+        'gateway_count':  len(gateways),  # includes registry fallback
         'selected_gw':    selected_gw or '',
         'neighbors':      neighbors,
         'edges':          edges,
@@ -1016,13 +1050,13 @@ function updateHeader(d) {
   } else {
     // Find selected gateway node by MAC
     const selMac = (d.selected_gw || '').toLowerCase();
+    // Match by any MAC, then fall back to any node flagged is_gateway
     const gwNode = selMac
       ? d.nodes.find(n => {
           if (n.mac && n.mac.toLowerCase() === selMac) return true;
           return (n.all_macs || []).some(m => m.toLowerCase() === selMac);
-        })
-      : null;
-    // Fallback: if no selected GW node found but count > 0, show count
+        }) || d.nodes.find(n => n.is_gateway)
+      : d.nodes.find(n => n.is_gateway);
     const gwName = gwNode ? gwNode.hostname : `${d.gateway_count} GW`;
     gwEl.textContent = `via ${gwName}`;
     gwEl.className   = 'meta gw-ok';
@@ -1109,18 +1143,26 @@ function simStep() {
   const W = canvas.offsetWidth, H = canvas.offsetHeight;
   const cx = W / 2, cy = H / 2;
   const nodes = SIM.nodes;
-  const k = Math.sqrt((W * H) / (nodes.length || 1));
+  const n_count = nodes.length || 1;
+
+  // Max link length: scale with canvas but cap so nodes never reach edge.
+  // Use a fraction of the smaller dimension so the graph stays readable.
+  const maxLink = Math.min(W, H) * 0.30;
+
+  // Repulsion: scale down with more nodes to avoid explosion on large meshes,
+  // but also don't let 2-node setups push each other to opposite corners.
+  const repulseK = Math.min(W, H) * 0.18 / Math.sqrt(n_count);
 
   // Clear forces
   nodes.forEach(n => { n.fx = 0; n.fy = 0; });
 
-  // Repulsion (Fruchterman-Reingold style)
+  // Repulsion
   for (let i = 0; i < nodes.length; i++) {
     for (let j = i + 1; j < nodes.length; j++) {
       const a = nodes[i], b = nodes[j];
       const dx = b.x - a.x, dy = b.y - a.y;
       const dist = Math.max(Math.sqrt(dx*dx + dy*dy), 0.1);
-      const repel = (k * k) / dist;
+      const repel = (repulseK * repulseK) / dist;
       const fx = (dx / dist) * repel;
       const fy = (dy / dist) * repel;
       a.fx -= fx; a.fy -= fy;
@@ -1133,37 +1175,39 @@ function simStep() {
     const a = link.source, b = link.target;
     const dx = b.x - a.x, dy = b.y - a.y;
     const dist = Math.max(Math.sqrt(dx*dx + dy*dy), 0.1);
-    const tq = link.tq != null ? link.tq : 50;
-    // Rest length: excellent link = short, poor link = long
-    const restLen = 40 + ((255 - tq) / 255) * Math.min(W, H) * 0.45;
-    const spring  = (dist - restLen) * 0.03;
+    const tq = link.tq != null ? link.tq : 128;
+    // Rest length: great link = shorter, poor link = longer, capped at maxLink
+    const restLen = Math.min(60 + ((255 - tq) / 255) * maxLink * 0.85, maxLink);
+    const spring  = (dist - restLen) * 0.05;
     const fx = (dx / dist) * spring;
     const fy = (dy / dist) * spring;
     a.fx += fx; a.fy += fy;
     b.fx -= fx; b.fy -= fy;
   });
 
-  // Center gravity
+  // Center gravity — stronger pull keeps everything near center
   nodes.forEach(n => {
-    n.fx += (cx - n.x) * 0.01;
-    n.fy += (cy - n.y) * 0.01;
+    n.fx += (cx - n.x) * 0.03;
+    n.fy += (cy - n.y) * 0.03;
   });
 
-  // Self node pinned to center (soft)
+  // Self node pinned firmly to center
   nodes.forEach(n => {
     if (n.is_me) {
-      n.fx += (cx - n.x) * 0.5;
-      n.fy += (cy - n.y) * 0.5;
+      n.fx += (cx - n.x) * 0.6;
+      n.fy += (cy - n.y) * 0.6;
     }
   });
 
   // Integrate with damping
-  const damp = 0.82;
+  const damp = 0.78;
+  // Keep nodes inside an inset margin so labels are always visible
+  const margin = 28;
   nodes.forEach(n => {
     n.vx = (n.vx + n.fx) * damp;
     n.vy = (n.vy + n.fy) * damp;
-    n.x  = Math.max(n.r + 4, Math.min(W - n.r - 4, n.x + n.vx));
-    n.y  = Math.max(n.r + 4, Math.min(H - n.r - 4, n.y + n.vy));
+    n.x  = Math.max(margin, Math.min(W - margin, n.x + n.vx));
+    n.y  = Math.max(margin, Math.min(H - margin, n.y + n.vy));
   });
 }
 
