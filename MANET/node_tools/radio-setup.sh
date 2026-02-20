@@ -643,8 +643,8 @@ EOF
 cat << EOF > /etc/systemd/system/wpa_supplicant-s1g-$WLAN.service
 [Unit]
 Description=WPA supplicant (S1G/HaLow) for $WLAN
-After=network-online.target $WLAN
-Requires=network-online.target
+After=morse-delayed-load.service
+Requires=morse-delayed-load.service
 
 [Service]
 Type=simple
@@ -861,6 +861,28 @@ HOST_MAC=$(ip a | grep -A1 $(networkctl | grep -v bat | awk '/ether/ {print $2}'
    | awk '/ether/ {print $2}' | cut -d':' -f 5-6 | sed 's/://g')
 
 hostnamectl set-hostname "mesh-${HOST_MAC}"
+
+# ============================================================================
+# === Web Status / config ===
+# ============================================================================
+cat << EOF > /etc/systemd/system/mesh-status.service
+[Unit]
+Description=MANET Node Status Web Server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /usr/local/bin/mesh-status.py 80
+Restart=on-failure
+RestartSec=5
+User=root
+# Allows reading /etc/mesh.conf (contains credentials) and calling batctl
+AmbientCapabilities=CAP_NET_RAW CAP_NET_ADMIN
+
+[Install]
+WantedBy=multi-user.target
+EOF
 
 # ============================================================================
 # === FIRST RUN vs RE-RUN ===
