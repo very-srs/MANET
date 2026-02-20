@@ -421,8 +421,12 @@ case $IPV4_STATE in
             configure_ebtables_dhcp_isolation "$BR0_SECONDARY"
             
             # Configure dnsmasq
-            configure_dnsmasq "$BR0_SECONDARY" "$DHCP_START" "$DHCP_END"
-            
+	    if [ "$MAX_EUDS" -gt 0 ]; then
+                configure_dnsmasq "$BR0_SECONDARY" "$DHCP_START" "$DHCP_END"
+            else
+                # No EUDs, no DHCP needed
+                systemctl stop dnsmasq.service 2>/dev/null || true
+            fi
             # Save persistent state
             PERSISTENT_IPV4="$BR0_PRIMARY"
             PERSISTENT_CHUNK="$PROPOSED_CHUNK"
