@@ -884,6 +884,8 @@ AmbientCapabilities=CAP_NET_RAW CAP_NET_ADMIN
 WantedBy=multi-user.target
 EOF
 
+systemctl enable mesh-status
+
 # ============================================================================
 # === FIRST RUN vs RE-RUN ===
 # ============================================================================
