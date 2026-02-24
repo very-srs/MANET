@@ -2,7 +2,7 @@
 
 This directory contains the scripts and templates needed to flash a new mesh radio node.
 
----
+--- 
 
 ## How It Works
 
