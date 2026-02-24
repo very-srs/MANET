@@ -27,13 +27,45 @@ Simplified orchestrator for Static Channel operation. Handles:
 
 ---
 
+## Web Status Interface
+
+**mesh-status.py**
+
+Python web server providing real-time mesh network visibility on port 8080. Designed for mobile-optimized field access without SSH.
+
+Routes:
+- `/` — Force-directed topology visualization with node health indicators, TQ-coloured link quality, and per-node detail panels. Auto-refreshes every 15 seconds.
+- `/api/data` — JSON endpoint returning full mesh topology, node list, gateway status, and TQ values. Used by the status page and available for external tooling.
+- `/api/local` — JSON endpoint for local node state only (interfaces, services, IP state, channel info).
+- `/admin` — Read-only node configuration page. Requires HTTP Basic Auth using `admin_password` from `/etc/mesh.conf`.
+
+Access control: all routes except `/admin` are restricted to localhost and the mesh subnet. `/admin` is accessible from any IP but requires authentication.
+
+Data sources:
+- `/var/run/mesh_node_registry` — peer registry built by `mesh-registry-builder.sh`
+- `/etc/mesh.conf` — node configuration
+- `/etc/mesh_ipv4_state` — current IP allocation state
+- `batctl o`, `batctl n`, `batctl gwl` — live BATMAN-ADV state
+
+---
+
 ## Service Elections
+
+All service elections share the same TQ-based algorithm: the node with the highest average TQ wins. Stale nodes (not seen within 10 minutes) are excluded. Ties are broken deterministically by MAC address.
 
 **mediamtx-election.sh**
 
-Elects which node hosts the MediaMTX streaming server based on mesh centrality (TQ).
-- Winner gets assigned static IPv4/IPv6 VIPs and manages service lifecycle.
-- Excludes stale nodes from consideration.
+Elects which node hosts the MediaMTX streaming server.
+- Winner is assigned static IPv4 and IPv6 VIPs and manages the service lifecycle.
+- VIPs are removed and the service is stopped when the node loses the election.
+
+**mumble-election.sh**
+
+Elects which node hosts the Mumble (Murmur) voice server.
+- Same TQ-based election algorithm as MediaMTX.
+- Winner is assigned static IPv4 and IPv6 VIPs.
+- Includes database synchronization via Syncthing: the winner syncs the Mumble SQLite database from the shared Syncthing folder before starting the service, and syncs it back when losing. This preserves user accounts and channel configuration across leader changes.
+- Maintains integrity-checked backups before each sync operation.
 
 ---
 
@@ -42,7 +74,7 @@ Elects which node hosts the MediaMTX streaming server based on mesh centrality (
 **channel-election.sh**
 
 Decentralized election for optimal 2.4GHz and 5GHz channels.
-- Aggregates scan reports from all nodes.
+- Aggregates scan reports from all nodes via the registry.
 - Scores channels based on noise floor and BSS count.
 - Falls back to lobby channels if all options are jammed.
 - Includes channel bias to prevent unnecessary migrations.
@@ -146,6 +178,20 @@ Protocol buffer schema defining mesh node status message structure.
 
 ---
 
+## File Synchronization
+
+**syncthing-peer-manager.sh**
+
+Daemon that automatically discovers and configures Syncthing peers across the mesh.
+- Runs continuously, checking the mesh registry every 60 seconds.
+- Reads peer Syncthing device IDs from `/var/run/mesh_node_registry`.
+- Adds newly discovered peers to the local Syncthing `config.xml` automatically.
+- Shares the default Syncthing folder with each new peer.
+- Restarts Syncthing when the configuration changes.
+- Used by `mumble-election.sh` to replicate the Mumble database across the mesh.
+
+---
+
 ## Time Synchronization
 
 **one-shot-time-sync.sh**
@@ -185,7 +231,9 @@ Deterministically derives MediaMTX IPv6 VIP from ULA prefix.
 
 **node-update.sh**
 
-Updates the various tools used by the mesh node to the current release
+Updates mesh node tools to the latest release from GitHub.
+- In normal mode: checks internet connectivity, compares local vs remote version, downloads and installs the appropriate board-specific tools tarball if out of date.
+- In `--routine` mode: runs silently, rate-limited to once per 24 hours via version file timestamp. Used by the automatic update cron job.
 
 ---
 
