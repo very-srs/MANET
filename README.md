@@ -35,10 +35,10 @@ The project transforms hardware like the Raspberry Pi CM4 into self-forming, sel
 
 | Hardware | Support Level | Notes |
 | :--- | :--- | :--- |
-| **Compute Module 4 (CM4)** | Functional | Primary dev target. Supports 802.11ax + HaLow. |
-| **Raspberry Pi 4B** | Untested | Support expected soon. |
+| **Compute Module 4 (CM4)** | Functional | Supports 802.11ax + HaLow. |
+| **Raspberry Pi 4B** | Untested |  |
 | **Raspberry Pi 5** | Pre-release | No HaLow support yet. |
-| **Radxa Rock 3A** | Pre-release | Full support expected Feb 2026. |
+| **Radxa Rock 3A** | In-Testing | Primary dev target. Supports 802.11ax + HaLow. |
 
 ## Getting Started
 
