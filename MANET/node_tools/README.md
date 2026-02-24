@@ -31,7 +31,7 @@ Simplified orchestrator for Static Channel operation. Handles:
 
 **mesh-status.py**
 
-Python web server providing real-time mesh network visibility on port 8080. Designed for mobile-optimized field access without SSH.
+Python web server providing real-time mesh network visibility on port 80. Designed for mobile-optimized field access without SSH.
 
 Routes:
 - `/` — Force-directed topology visualization with node health indicators, TQ-coloured link quality, and per-node detail panels. Auto-refreshes every 15 seconds.

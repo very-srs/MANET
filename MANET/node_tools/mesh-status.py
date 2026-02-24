@@ -2,12 +2,12 @@
 """
 MANET Node Status Web Server
 -----------------------------
-Serves mesh network status and topology information on port 8080.
+Serves mesh network status and topology information on port 80.
 
 Access:
   /          - Public status page (localhost + mesh subnet)
   /api/data  - JSON data endpoint (same access control)
-  /admin     - Admin config page (HTTP Basic Auth with admin_password)
+  /admin     - Admin config page (HTTP Basic Auth with admin password)
 
 Reads:
   /etc/mesh.conf                - Node configuration
@@ -39,7 +39,7 @@ from urllib.parse import urlparse, parse_qs
 REGISTRY_FILE   = "/var/run/mesh_node_registry"
 MESH_CONF_FILE  = "/etc/mesh.conf"
 MESH_STATE_FILE = "/etc/mesh_ipv4_state"
-PORT            = 8080
+PORT            = 80
 REFRESH_MS      = 15000   # Status page polling interval (ms)
 
 # ─────────────────────────────────────────────────────────────────────────────
