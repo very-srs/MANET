@@ -853,6 +853,36 @@ WantedBy=halt.target reboot.target shutdown.target
 EOF
 systemctl enable mesh-shutdown.service
 
+
+# Power saving
+cat << EOF > /etc/systemd/system/cpu-powersave.service
+[Unit]
+Description=Set CPU to powersave mode
+After=multi-user.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+
+# Set governor
+ExecStart=/bin/bash -c 'echo powersave > /sys/devices/system/cpu/cpufreq/policy0/scaling_governor'
+# Cap max frequency to 1.0 GHz
+ExecStart=/bin/bash -c 'echo 1008000 > /sys/devices/system/cpu/cpufreq/policy0/scaling_max_freq'
+# Disable cores 2 and 3
+ExecStart=/bin/bash -c 'echo 0 > /sys/devices/system/cpu/cpu2/online'
+ExecStart=/bin/bash -c 'echo 0 > /sys/devices/system/cpu/cpu3/online'
+
+# Restore on stop (or when election scripts call systemctl stop cpu-powersave)
+ExecStop=/bin/bash -c 'echo 1 > /sys/devices/system/cpu/cpu2/online'
+ExecStop=/bin/bash -c 'echo 1 > /sys/devices/system/cpu/cpu3/online'
+ExecStop=/bin/bash -c 'echo ondemand > /sys/devices/system/cpu/cpufreq/policy0/scaling_governor'
+ExecStop=/bin/bash -c 'echo 1416000 > /sys/devices/system/cpu/cpufreq/policy0/scaling_max_freq'
+
+[Install]
+WantedBy=multi-user.target
+EOF
+systemctl enable cpu-powersave
+
 # ============================================================================
 # === HOSTNAME ===
 # ============================================================================
