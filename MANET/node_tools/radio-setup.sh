@@ -883,6 +883,33 @@ WantedBy=multi-user.target
 EOF
 systemctl enable cpu-powersave
 
+
+
+cat << EOF > /etc/systemd/system/mesh-hosts-update.service
+[Unit]
+Description=Update /etc/hosts from mesh registry
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/mesh-hosts-update.sh
+EOF
+
+cat << EOF > /etc/systemd/system/mesh-hosts-update.timer
+[Unit]
+Description=Refresh mesh hosts periodically
+
+[Timer]
+OnBootSec=60
+OnUnitActiveSec=120
+
+[Install]
+WantedBy=timers.target
+EOF
+
+systemctl enable mesh-hosts-update.timer
+
+
 # ============================================================================
 # === HOSTNAME ===
 # ============================================================================
