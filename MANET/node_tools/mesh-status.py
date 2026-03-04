@@ -2,12 +2,12 @@
 """
 MANET Node Status Web Server
 -----------------------------
-Serves mesh network status and topology information on port 80.
+Serves mesh network status and topology information on port 8080.
 
 Access:
   /          - Public status page (localhost + mesh subnet)
   /api/data  - JSON data endpoint (same access control)
-  /admin     - Admin config page (HTTP Basic Auth with admin password)
+  /admin     - Admin config page (HTTP Basic Auth with admin_password)
 
 Reads:
   /etc/mesh.conf                - Node configuration
@@ -39,7 +39,7 @@ from urllib.parse import urlparse, parse_qs
 REGISTRY_FILE   = "/var/run/mesh_node_registry"
 MESH_CONF_FILE  = "/etc/mesh.conf"
 MESH_STATE_FILE = "/etc/mesh_ipv4_state"
-PORT            = 80
+PORT            = 8080
 REFRESH_MS      = 15000   # Status page polling interval (ms)
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1594,6 +1594,96 @@ setInterval(fetchLocal, POLL_INTERVAL_MS);
 </body>
 </html>"""
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Admin API helpers
+# ─────────────────────────────────────────────────────────────────────────────
+import hashlib
+
+ALFRED_CONFIG_TYPE = 70
+PENDING_CONFIG_FILE = '/var/run/mesh_pending_config.json'
+
+def broadcast_config_package(pkg):
+    """Write config package to Alfred type 70."""
+    import subprocess, json
+    payload = json.dumps(pkg, separators=(',', ':'))
+    try:
+        r = subprocess.run(
+            ['alfred', '-s', str(ALFRED_CONFIG_TYPE)],
+            input=payload, capture_output=True, text=True, timeout=5)
+        return r.returncode == 0
+    except Exception:
+        return False
+
+def get_pending_config():
+    """Read pending config package from disk, or None."""
+    try:
+        with open(PENDING_CONFIG_FILE) as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+def save_pending_config(pkg):
+    try:
+        with open(PENDING_CONFIG_FILE, 'w') as f:
+            json.dump(pkg, f)
+        return True
+    except Exception:
+        return False
+
+def clear_pending_config():
+    try:
+        import os
+        os.remove(PENDING_CONFIG_FILE)
+    except Exception:
+        pass
+
+def make_config_version(config_dict):
+    """8-char SHA-256 prefix of the JSON config (deterministic)."""
+    s = json.dumps(config_dict, sort_keys=True, separators=(',', ':'))
+    return hashlib.sha256(s.encode()).hexdigest()[:8]
+
+def assemble_admin_status():
+    """Return current config, pending config, and per-node ACK status."""
+    conf       = load_kv_file(MESH_CONF_FILE)
+    nodes_raw  = parse_registry()
+    pending    = get_pending_config()
+
+    node_status = []
+    for nid, nd in nodes_raw.items():
+        node_status.append({
+            'hostname':   nd.get('HOSTNAME', 'unknown'),
+            'ip':         nd.get('IPV4_ADDRESS', ''),
+            'ack':        nd.get('CONFIG_ACK_VERSION', ''),
+            'last_seen':  nd.get('LAST_SEEN_TIMESTAMP', '0'),
+            'node_state': nd.get('NODE_STATE', 'ACTIVE'),
+        })
+    node_status.sort(key=lambda n: n['hostname'])
+
+    return {
+        'current_config': {
+            'eud':              conf.get('eud', 'wired'),
+            'lan_ap_ssid':      conf.get('lan_ap_ssid', ''),
+            'lan_ap_key':       conf.get('lan_ap_key', ''),
+            'max_euds_per_node':conf.get('max_euds_per_node', '0'),
+            'mesh_ssid':        conf.get('mesh_ssid', ''),
+            'mesh_key':         conf.get('mesh_key', ''),
+            'ipv4_network':     conf.get('ipv4_network', ''),
+            'regulatory_domain':conf.get('regulatory_domain', 'US'),
+            'acs':              conf.get('acs', 'n'),
+            'mtx':              conf.get('mtx', 'n'),
+            'mumble':           conf.get('mumble', 'n'),
+            'auto_update':      conf.get('auto_update', 'n'),
+            'admin_password':   conf.get('admin_password', ''),
+        },
+        'pending':      pending,
+        'nodes':        node_status,
+        'total_nodes':  len(node_status),
+        'active_nodes': sum(1 for n in node_status if n['node_state'] == 'ACTIVE'),
+    }
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Admin HTML
+# ─────────────────────────────────────────────────────────────────────────────
 ADMIN_HTML = """<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1602,128 +1692,492 @@ ADMIN_HTML = """<!DOCTYPE html>
 <title>MANET Admin</title>
 <style>__CSS__
 body { overflow-y: auto; }
+/* ── Admin layout ── */
+.admin-body { display: flex; gap: 0; height: calc(100vh - 34px); overflow: hidden; }
+.admin-form-col { flex: 1; overflow-y: auto; padding: 20px 24px; border-right: 1px solid var(--border); }
+.admin-status-col { width: 320px; flex-shrink: 0; overflow-y: auto; padding: 16px; background: #080c12; }
+.admin-col-hdr { font-size: 9px; color: var(--muted); letter-spacing: 1.5px; text-transform: uppercase;
+                 padding-bottom: 10px; border-bottom: 1px solid var(--border); margin-bottom: 14px; }
+/* Section styling */
+.cfg-section { margin-bottom: 22px; }
+.cfg-section-title { font-size: 10px; color: var(--accent); letter-spacing: 1.5px; text-transform: uppercase;
+                      padding: 0 0 8px 0; border-bottom: 1px solid var(--border); margin-bottom: 12px; }
+.cfg-row { display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px; }
+.cfg-row label { flex: 0 0 180px; font-size: 11px; color: var(--muted); padding-top: 6px; }
+.cfg-row .hint { display: block; font-size: 9px; color: #4a5568; margin-top: 2px; }
+.cfg-row input[type=text], .cfg-row input[type=password], .cfg-row select {
+  flex: 1; background: #111827; border: 1px solid var(--border); border-radius: 3px;
+  color: var(--text); font-family: "Courier New", monospace; font-size: 12px;
+  padding: 5px 8px; outline: none; }
+.cfg-row input:focus, .cfg-row select:focus { border-color: var(--accent); }
+.cfg-row input[type=checkbox] { width: 16px; height: 16px; margin-top: 6px; accent-color: var(--accent); }
+/* Danger badge on dangerous fields */
+.danger-badge { font-size: 9px; font-weight: bold; color: var(--bad); background: #ef444415;
+                border: 1px solid #ef444430; border-radius: 2px; padding: 1px 5px;
+                margin-left: 6px; vertical-align: middle; letter-spacing: .5px; }
+/* Action buttons */
+.admin-actions { display: flex; gap: 10px; margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--border); }
+.btn { padding: 8px 18px; border-radius: 3px; font-size: 11px; font-weight: bold; letter-spacing: 1px;
+       font-family: "Courier New", monospace; cursor: pointer; border: none; text-transform: uppercase; }
+.btn-stage  { background: #00b4d820; color: var(--accent); border: 1px solid #00b4d840; }
+.btn-stage:hover:not(:disabled)  { background: #00b4d830; }
+.btn-apply  { background: #22c55e20; color: var(--good);   border: 1px solid #22c55e40; }
+.btn-apply:hover:not(:disabled)  { background: #22c55e30; }
+.btn-force  { background: #f9731620; color: var(--warn);   border: 1px solid #f9731640; }
+.btn-force:hover:not(:disabled)  { background: #f9731630; }
+.btn-cancel { background: #ef444420; color: var(--bad);    border: 1px solid #ef444440; }
+.btn-cancel:hover:not(:disabled) { background: #ef444430; }
+.btn:disabled { opacity: 0.35; cursor: not-allowed; }
+/* Status column — node ACK table */
+.ack-table { width: 100%; border-collapse: collapse; }
+.ack-table th { font-size: 9px; color: var(--muted); text-align: left; padding: 4px 6px;
+                letter-spacing: .8px; text-transform: uppercase; border-bottom: 1px solid var(--border); }
+.ack-table td { font-size: 11px; padding: 5px 6px; border-bottom: 1px solid #1e304820; }
+.ack-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 5px; }
+.ack-dot-yes  { background: var(--good); box-shadow: 0 0 4px var(--good); }
+.ack-dot-no   { background: var(--muted); }
+.ack-dot-self { background: var(--accent); }
+/* Pending config info box */
+.pending-box { background: #111827; border: 1px solid var(--border); border-radius: 4px;
+               padding: 10px 12px; margin-bottom: 14px; }
+.pending-box.pending-active { border-color: #f59e0b40; background: #f59e0b08; }
+.pending-label { font-size: 9px; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; margin-bottom: 6px; }
+.pending-version { font-size: 12px; font-family: "Courier New",monospace; color: var(--accent); }
+.pending-stat { font-size: 10px; color: var(--muted); margin-top: 4px; }
+.pending-stat span { color: var(--text); }
+/* Progress bar */
+.ack-progress { height: 4px; background: var(--border); border-radius: 2px; margin-top: 8px; }
+.ack-progress-bar { height: 100%; border-radius: 2px; background: var(--good); transition: width .5s; }
+/* Warning modal */
+#force-modal { display:none; position:fixed; top:0;left:0;right:0;bottom:0;
+               background:#000a; z-index:100; align-items:center; justify-content:center; }
+#force-modal.show { display:flex; }
+.modal-box { background: var(--surface); border: 1px solid #ef444440; border-radius: 4px;
+             padding: 24px; max-width: 380px; }
+.modal-title { color: var(--bad); font-size: 14px; font-weight: bold; margin-bottom: 10px; }
+.modal-body { color: var(--muted); font-size: 12px; line-height: 1.6; margin-bottom: 16px; }
+.modal-actions { display:flex; gap:10px; justify-content:flex-end; }
+/* Toast */
+#toast { position:fixed; bottom:20px; right:20px; background: var(--surface); border:1px solid var(--border);
+         border-radius:4px; padding:10px 16px; font-size:12px; opacity:0; transition:opacity .3s;
+         pointer-events:none; z-index:200; }
+#toast.show { opacity:1; }
+#toast.toast-ok   { border-color:#22c55e60; color:var(--good); }
+#toast.toast-err  { border-color:#ef444460; color:var(--bad); }
+#toast.toast-warn { border-color:#f9731660; color:var(--warn); }
 </style>
 </head>
 <body>
 <div id="app" style="display:block;">
-  <div id="header" style="display:flex;align-items:center;gap:12px;">
-    <h1>&#9741; MANET ADMIN</h1>
-    <span class="pill pill-accent">__HOSTNAME__</span>
+  <div id="header">
+    <div id="hdr-health" class="health-loading">
+      <div id="hdr-health-dot"></div>
+      <span id="hdr-health-label">ADMIN</span>
+    </div>
+    <div class="meta" id="hdr-hostname" style="color:var(--text);font-size:12px;font-weight:bold;padding-right:10px;border-right:1px solid var(--border);margin-right:10px;">—</div>
     <div class="spacer"></div>
-    <a href="/" style="color:var(--muted);text-decoration:none;font-size:11px">&#8592; Status</a>
+    <a href="/" style="color:var(--muted);text-decoration:none;font-size:11px;padding-right:4px">&#8592; Status</a>
   </div>
-  <div class="admin-wrap">
-    <h2>NODE CONFIGURATION</h2>
-    <p class="notice">&#9888; This page is read-only. Configuration changes will be applied in a future update.</p>
 
-    <div class="form-section">
-      <div class="form-section-title">Client (EUD) Connection</div>
-      <div class="form-row">
-        <label>Connection Mode<span class="hint">How clients connect to this node</span></label>
-        <select __DISABLED__>
-          <option value="wired"    __EUD_WIRED__>Wired (USB/Ethernet)</option>
-          <option value="wireless" __EUD_WIRELESS__>Wireless (5GHz AP)</option>
-          <option value="auto"     __EUD_AUTO__>Auto (Wireless unless wired)</option>
-        </select>
+  <div class="admin-body">
+    <!-- ── Left: Config Form ── -->
+    <div class="admin-form-col">
+
+      <div class="cfg-section">
+        <div class="cfg-section-title">EUD / Client Connection</div>
+
+        <div class="cfg-row">
+          <label>Connection Mode<span class="hint">How clients connect to this node</span></label>
+          <select id="f-eud">
+            <option value="wired">Wired (USB/Ethernet)</option>
+            <option value="wireless">Wireless (5GHz AP)</option>
+            <option value="auto">Auto (Wireless unless wired)</option>
+          </select>
+        </div>
+        <div class="cfg-row">
+          <label>AP SSID<span class="hint">WiFi network name for clients</span></label>
+          <input type="text" id="f-lan-ap-ssid">
+        </div>
+        <div class="cfg-row">
+          <label>AP Password<span class="hint">Client WiFi password</span></label>
+          <input type="password" id="f-lan-ap-key" autocomplete="new-password">
+        </div>
+        <div class="cfg-row">
+          <label>Max EUDs per Node<span class="hint">Max concurrent client devices</span></label>
+          <input type="text" id="f-max-euds">
+        </div>
       </div>
-      <div class="form-row">
-        <label>AP SSID<span class="hint">WiFi network name for clients</span></label>
-        <input type="text" value="__LAN_AP_SSID__" __DISABLED__>
+
+      <div class="cfg-section">
+        <div class="cfg-section-title">Mesh Network</div>
+
+        <div class="cfg-row">
+          <label>Mesh SSID<span class="hint">BATMAN mesh network name
+            <span class="danger-badge">⚠ DANGEROUS</span></span></label>
+          <input type="text" id="f-mesh-ssid">
+        </div>
+        <div class="cfg-row">
+          <label>Mesh SAE Key<span class="hint">WPA3-SAE passphrase
+            <span class="danger-badge">⚠ DANGEROUS</span></span></label>
+          <input type="password" id="f-mesh-key" autocomplete="new-password">
+        </div>
+        <div class="cfg-row">
+          <label>IP Range (CIDR)<span class="hint">Mesh network address space
+            <span class="danger-badge">⚠ DANGEROUS</span></span></label>
+          <input type="text" id="f-ipv4-network">
+        </div>
+        <div class="cfg-row">
+          <label>Regulatory Domain<span class="hint">2-letter country code for RF</span></label>
+          <input type="text" id="f-regulatory-domain" maxlength="2" style="width:48px;flex:none;">
+        </div>
+        <div class="cfg-row">
+          <label>Auto Channel<span class="hint">Scan and select best channel</span></label>
+          <input type="checkbox" id="f-acs">
+        </div>
       </div>
-      <div class="form-row">
-        <label>AP Password<span class="hint">Client WiFi password</span></label>
-        <input type="password" value="__LAN_AP_KEY__" __DISABLED__>
+
+      <div class="cfg-section">
+        <div class="cfg-section-title">Services</div>
+
+        <div class="cfg-row">
+          <label>MediaMTX<span class="hint">RTSP/WebRTC streaming</span></label>
+          <input type="checkbox" id="f-mtx">
+        </div>
+        <div class="cfg-row">
+          <label>Mumble<span class="hint">Voice communications</span></label>
+          <input type="checkbox" id="f-mumble">
+        </div>
+        <div class="cfg-row">
+          <label>Auto Update<span class="hint">Automatic MANET tool updates</span></label>
+          <input type="checkbox" id="f-auto-update">
+        </div>
       </div>
-      <div class="form-row">
-        <label>Max EUDs per Node<span class="hint">Max concurrent client devices</span></label>
-        <input type="text" value="__MAX_EUDS__" __DISABLED__>
+
+      <div class="cfg-section">
+        <div class="cfg-section-title">Security</div>
+
+        <div class="cfg-row">
+          <label>Admin Password<span class="hint">This admin interface</span></label>
+          <input type="password" id="f-admin-password" autocomplete="new-password">
+        </div>
       </div>
+
+      <div class="admin-actions">
+        <button class="btn btn-stage"  id="btn-stage"  onclick="stageChanges()">Stage Changes</button>
+        <button class="btn btn-apply"  id="btn-apply"  onclick="applyChanges(false)" disabled>Apply Now</button>
+        <button class="btn btn-force"  id="btn-force"  onclick="showForceModal()" style="display:none">Force Apply</button>
+        <button class="btn btn-cancel" id="btn-cancel" onclick="cancelPending()" style="display:none">Cancel</button>
+      </div>
+      <div id="action-msg" style="font-size:10px;color:var(--muted);margin-top:8px;min-height:14px;"></div>
     </div>
 
-    <div class="form-section">
-      <div class="form-section-title">Mesh Network</div>
-      <div class="form-row">
-        <label>Mesh SSID<span class="hint">BATMAN mesh network name</span></label>
-        <input type="text" value="__MESH_SSID__" __DISABLED__>
+    <!-- ── Right: Deployment Status ── -->
+    <div class="admin-status-col">
+      <div class="admin-col-hdr">Deployment Status</div>
+
+      <!-- Pending config box -->
+      <div class="pending-box" id="pending-box">
+        <div class="pending-label">Pending Config</div>
+        <div id="pending-version" class="pending-version">None</div>
+        <div id="pending-stat"   class="pending-stat" style="display:none"></div>
+        <div id="ack-progress-wrap" style="display:none">
+          <div class="ack-progress"><div class="ack-progress-bar" id="ack-bar" style="width:0%"></div></div>
+        </div>
       </div>
-      <div class="form-row">
-        <label>Mesh SAE Key<span class="hint">WPA3-SAE passphrase</span></label>
-        <input type="password" value="__MESH_KEY__" __DISABLED__>
-      </div>
-      <div class="form-row">
-        <label>LAN CIDR Block<span class="hint">Mesh network IP range</span></label>
-        <input type="text" value="__LAN_CIDR__" __DISABLED__>
-      </div>
-      <div class="form-row">
-        <label>Regulatory Domain<span class="hint">2-letter country code for RF</span></label>
-        <input type="text" value="__REG_DOMAIN__" __DISABLED__>
-      </div>
-      <div class="form-row">
-        <label>Auto Channel<span class="hint">Scan and select best WiFi channel</span></label>
-        <input type="checkbox" __ACS_CHECKED__ __DISABLED__>
+
+      <!-- Node ACK table -->
+      <div class="admin-col-hdr" style="margin-top:14px">Nodes (<span id="node-count">—</span>)</div>
+      <table class="ack-table" id="ack-table">
+        <thead><tr><th>Node</th><th>IP</th><th>ACK</th></tr></thead>
+        <tbody id="ack-tbody"></tbody>
+      </table>
+
+      <!-- Dangerous change warning -->
+      <div id="danger-warn" style="display:none;margin-top:14px;padding:10px;
+           background:#ef444408;border:1px solid #ef444430;border-radius:3px;
+           font-size:10px;color:var(--bad);line-height:1.6;">
+        ⚠ Staged changes include <strong>DANGEROUS</strong> settings (mesh SSID, key, or IP range).
+        All nodes will briefly disconnect while applying. Ensure 100% ACK before applying.
       </div>
     </div>
-
-    <div class="form-section">
-      <div class="form-section-title">Services</div>
-      <div class="form-row">
-        <label>MediaMTX Server<span class="hint">RTSP/WebRTC streaming server</span></label>
-        <input type="checkbox" __MTX_CHECKED__ __DISABLED__>
-      </div>
-      <div class="form-row">
-        <label>Mumble Server<span class="hint">Voice communications (murmur)</span></label>
-        <input type="checkbox" __MUMBLE_CHECKED__ __DISABLED__>
-      </div>
-      <div class="form-row">
-        <label>Auto Update<span class="hint">Automatic MANET tool updates</span></label>
-        <input type="checkbox" __AUTOUPDATE_CHECKED__ __DISABLED__>
-      </div>
-    </div>
-
-    <div class="form-section">
-      <div class="form-section-title">Security</div>
-      <div class="form-row">
-        <label>Radio User Password<span class="hint">SSH / system login</span></label>
-        <input type="password" value="__RADIO_PW__" __DISABLED__>
-      </div>
-      <div class="form-row">
-        <label>Admin Password<span class="hint">This admin interface</span></label>
-        <input type="password" value="__ADMIN_PW__" __DISABLED__>
-      </div>
-    </div>
-
-    <button class="form-btn" disabled>APPLY CHANGES — NOT YET IMPLEMENTED</button>
   </div>
+
+  <!-- Force apply modal -->
+  <div id="force-modal">
+    <div class="modal-box">
+      <div class="modal-title">⚠ Force Apply</div>
+      <div class="modal-body" id="force-modal-body">
+        Not all nodes have acknowledged the pending config.
+        Forcing apply will push changes to this node only — unreachable nodes
+        will remain on the old config and may need manual intervention.
+      </div>
+      <div class="modal-actions">
+        <button class="btn btn-cancel" onclick="closeForceModal()">Cancel</button>
+        <button class="btn btn-force"  onclick="applyChanges(true)">Force Apply</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast"></div>
 </div>
+
+<script>
+const POLL_MS = 5000;
+let STATUS = null;
+let pollTimer = null;
+
+// ── Init ────────────────────────────────────────────────────────────────────
+window.addEventListener('DOMContentLoaded', async () => {
+  document.getElementById('hdr-hostname').textContent = location.hostname;
+  await refreshStatus();
+  pollTimer = setInterval(refreshStatus, POLL_MS);
+});
+
+// ── Fetch status ─────────────────────────────────────────────────────────────
+async function refreshStatus() {
+  try {
+    const r = await fetch('/api/admin/status');
+    if (!r.ok) return;
+    STATUS = await r.json();
+    renderStatus(STATUS);
+  } catch(e) {}
+}
+
+// ── Populate form from current config ────────────────────────────────────────
+function populateForm(cfg) {
+  setVal('f-eud',              cfg.eud              || 'wired');
+  setVal('f-lan-ap-ssid',      cfg.lan_ap_ssid      || '');
+  setVal('f-lan-ap-key',       cfg.lan_ap_key        || '');
+  setVal('f-max-euds',         cfg.max_euds_per_node || '');
+  setVal('f-mesh-ssid',        cfg.mesh_ssid         || '');
+  setVal('f-mesh-key',         cfg.mesh_key          || '');
+  setVal('f-ipv4-network',     cfg.ipv4_network      || '');
+  setVal('f-regulatory-domain',cfg.regulatory_domain || 'US');
+  setChk('f-acs',              cfg.acs        === 'y');
+  setChk('f-mtx',              cfg.mtx        === 'y');
+  setChk('f-mumble',           cfg.mumble     === 'y');
+  setChk('f-auto-update',      cfg.auto_update=== 'y');
+  setVal('f-admin-password',   cfg.admin_password    || '');
+}
+
+function setVal(id, v) { const el = document.getElementById(id); if (el) el.value = v; }
+function setChk(id, v) { const el = document.getElementById(id); if (el) el.checked = v; }
+function getVal(id)    { const el = document.getElementById(id); return el ? el.value.trim() : ''; }
+function getChk(id)    { const el = document.getElementById(id); return el ? el.checked : false; }
+
+// ── Render status panel ───────────────────────────────────────────────────────
+let formPopulated = false;
+function renderStatus(s) {
+  // Populate form once from live config
+  if (!formPopulated && s.current_config) {
+    populateForm(s.current_config);
+    formPopulated = true;
+  }
+
+  document.getElementById('node-count').textContent = s.total_nodes || '0';
+
+  const pending  = s.pending;
+  const pBox     = document.getElementById('pending-box');
+  const pVersion = document.getElementById('pending-version');
+  const pStat    = document.getElementById('pending-stat');
+  const pWrap    = document.getElementById('ack-progress-wrap');
+  const ackBar   = document.getElementById('ack-bar');
+  const dangerWarn = document.getElementById('danger-warn');
+  const btnApply = document.getElementById('btn-apply');
+  const btnForce = document.getElementById('btn-force');
+  const btnCancel= document.getElementById('btn-cancel');
+
+  if (pending && pending.version) {
+    pBox.className = 'pending-box pending-active';
+    pVersion.textContent = 'v' + pending.version;
+
+    const nodes = s.nodes || [];
+    const acked = nodes.filter(n => n.ack === pending.version).length;
+    const total = nodes.length;
+    const pct   = total > 0 ? Math.round(acked / total * 100) : 0;
+
+    pStat.style.display = '';
+    pStat.innerHTML = `<span>${acked}/${total}</span> nodes ACKed &nbsp; <span>${pct}%</span>`;
+    pWrap.style.display = '';
+    ackBar.style.width = pct + '%';
+    ackBar.style.background = acked === total ? 'var(--good)' : 'var(--warn)';
+
+    const isDangerous = pending.dangerous === true;
+    dangerWarn.style.display = isDangerous ? '' : 'none';
+
+    const allAcked = acked === total && total > 0;
+    btnApply.disabled = !allAcked;
+    btnApply.style.display = '';
+    btnForce.style.display = !allAcked ? '' : 'none';
+    btnCancel.style.display = '';
+
+    const activateAt = pending.activate_at || 0;
+    if (activateAt > 0) {
+      const secs = Math.max(0, activateAt - Math.floor(Date.now() / 1000));
+      document.getElementById('action-msg').textContent =
+        secs > 0 ? `Applying in ${secs}s...` : 'Applying now...';
+    }
+  } else {
+    pBox.className = 'pending-box';
+    pVersion.textContent = 'None';
+    pStat.style.display = 'none';
+    pWrap.style.display = 'none';
+    dangerWarn.style.display = 'none';
+    btnApply.disabled = true;
+    btnApply.style.display = 'none';
+    btnForce.style.display = 'none';
+    btnCancel.style.display = 'none';
+    document.getElementById('action-msg').textContent = '';
+  }
+
+  // Node ACK table
+  const tbody = document.getElementById('ack-tbody');
+  tbody.innerHTML = (s.nodes || []).map(n => {
+    const pendingVer = pending && pending.version;
+    const isAcked    = pendingVer && n.ack === pendingVer;
+    const isSelf     = n.hostname === (STATUS && STATUS.my_hostname);
+    let dotCls, ackLabel;
+    if (!pendingVer) {
+      dotCls   = 'ack-dot-self';
+      ackLabel = '—';
+    } else if (isSelf && isAcked) {
+      dotCls   = 'ack-dot-self';
+      ackLabel = 'Self ✓';
+    } else if (isAcked) {
+      dotCls   = 'ack-dot-yes';
+      ackLabel = '✓';
+    } else {
+      dotCls   = 'ack-dot-no';
+      ackLabel = 'Waiting';
+    }
+    const staleMs = (Date.now() / 1000) - parseInt(n.last_seen || 0);
+    const stale   = staleMs > 300;
+    const nameStyle = stale ? 'color:var(--muted)' : '';
+    return `<tr>
+      <td style="${nameStyle}">${n.hostname}</td>
+      <td style="color:var(--muted);font-size:10px">${n.ip}</td>
+      <td><span class="ack-dot ${dotCls}"></span>${ackLabel}</td>
+    </tr>`;
+  }).join('');
+}
+
+// ── Read form into config object ──────────────────────────────────────────────
+function readForm() {
+  return {
+    eud:               getVal('f-eud'),
+    lan_ap_ssid:       getVal('f-lan-ap-ssid'),
+    lan_ap_key:        getVal('f-lan-ap-key'),
+    max_euds_per_node: getVal('f-max-euds'),
+    mesh_ssid:         getVal('f-mesh-ssid'),
+    mesh_key:          getVal('f-mesh-key'),
+    ipv4_network:      getVal('f-ipv4-network'),
+    regulatory_domain: getVal('f-regulatory-domain'),
+    acs:               getChk('f-acs')          ? 'y' : 'n',
+    mtx:               getChk('f-mtx')          ? 'y' : 'n',
+    mumble:            getChk('f-mumble')        ? 'y' : 'n',
+    auto_update:       getChk('f-auto-update')   ? 'y' : 'n',
+    admin_password:    getVal('f-admin-password'),
+  };
+}
+
+// ── Stage changes ─────────────────────────────────────────────────────────────
+async function stageChanges() {
+  const cfg = readForm();
+  showMsg('Staging...', 'muted');
+  try {
+    const r   = await fetch('/api/admin/stage', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({config: cfg})
+    });
+    const res = await r.json();
+    if (r.ok && res.ok) {
+      toast('Changes staged — waiting for nodes to ACK', 'ok');
+      showMsg('Staged. Waiting for ' + (STATUS && STATUS.total_nodes || '?') + ' nodes to ACK.', 'ok');
+      await refreshStatus();
+    } else {
+      toast('Stage failed: ' + (res.error || r.status), 'err');
+      showMsg('Stage failed.', 'err');
+    }
+  } catch(e) {
+    toast('Stage error: ' + e, 'err');
+  }
+}
+
+// ── Apply changes ─────────────────────────────────────────────────────────────
+async function applyChanges(force) {
+  closeForceModal();
+  showMsg('Sending activate signal...', 'ok');
+  try {
+    const r   = await fetch('/api/admin/activate', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({force: force})
+    });
+    const res = await r.json();
+    if (r.ok && res.ok) {
+      toast('Activate signal sent — applying in 60s', 'ok');
+      showMsg('All nodes will apply in ~60s.', 'ok');
+      await refreshStatus();
+    } else {
+      toast('Activate failed: ' + (res.error || r.status), 'err');
+    }
+  } catch(e) {
+    toast('Activate error: ' + e, 'err');
+  }
+}
+
+// ── Cancel pending ────────────────────────────────────────────────────────────
+async function cancelPending() {
+  try {
+    const r   = await fetch('/api/admin/cancel', {method: 'POST'});
+    const res = await r.json();
+    if (r.ok && res.ok) {
+      toast('Pending config cancelled', 'warn');
+      showMsg('', '');
+      await refreshStatus();
+    }
+  } catch(e) {}
+}
+
+// ── Force modal ───────────────────────────────────────────────────────────────
+function showForceModal() {
+  const s     = STATUS;
+  const nodes = s && s.nodes || [];
+  const pv    = s && s.pending && s.pending.version;
+  const acked = pv ? nodes.filter(n => n.ack === pv).length : 0;
+  const total = nodes.length;
+  document.getElementById('force-modal-body').textContent =
+    `${acked} of ${total} nodes have ACKed. Forcing will apply on all reachable nodes. ` +
+    `Unreachable nodes (${total - acked}) will remain on the old config until they reconnect.`;
+  document.getElementById('force-modal').classList.add('show');
+}
+function closeForceModal() {
+  document.getElementById('force-modal').classList.remove('show');
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+function showMsg(msg, cls) {
+  const el = document.getElementById('action-msg');
+  el.textContent = msg;
+  el.style.color = cls === 'ok' ? 'var(--good)' : cls === 'err' ? 'var(--bad)' : 'var(--muted)';
+}
+
+let toastTimer = null;
+function toast(msg, cls) {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.className = 'show toast-' + cls;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.className = '', 3000);
+}
+</script>
 </body>
 </html>"""
 
-def render_admin_page(conf):
-    def checked(key, trueval='y'):
-        return 'checked' if conf.get(key, '').lower() in (trueval, 'true', '1', 'yes') else ''
-    def sel(key, val):
-        return 'selected' if conf.get(key, '') == val else ''
-
+def render_admin_page():
     html = ADMIN_HTML
-    html = html.replace('__CSS__',              CSS)
-    html = html.replace('__DISABLED__',         'disabled')
-    html = html.replace('__HOSTNAME__',         get_my_hostname())
-    html = html.replace('__EUD_WIRED__',        sel('eud', 'wired'))
-    html = html.replace('__EUD_WIRELESS__',     sel('eud', 'wireless'))
-    html = html.replace('__EUD_AUTO__',         sel('eud', 'auto'))
-    html = html.replace('__LAN_AP_SSID__',      conf.get('lan_ap_ssid', ''))
-    html = html.replace('__LAN_AP_KEY__',       conf.get('lan_ap_key', ''))
-    html = html.replace('__MAX_EUDS__',         conf.get('max_euds_per_node', '0'))
-    html = html.replace('__MESH_SSID__',        conf.get('mesh_ssid', ''))
-    html = html.replace('__MESH_KEY__',         conf.get('mesh_key', ''))
-    html = html.replace('__LAN_CIDR__',         conf.get('ipv4_network', ''))
-    html = html.replace('__REG_DOMAIN__',       conf.get('regulatory_domain', ''))
-    html = html.replace('__ACS_CHECKED__',      checked('acs'))
-    html = html.replace('__MTX_CHECKED__',      checked('mtx'))
-    html = html.replace('__MUMBLE_CHECKED__',   checked('mumble'))
-    html = html.replace('__AUTOUPDATE_CHECKED__', checked('auto_update'))
-    html = html.replace('__RADIO_PW__',         conf.get('radio_password', ''))
-    html = html.replace('__ADMIN_PW__',         conf.get('admin_password', ''))
+    html = html.replace('__CSS__', CSS)
     return html
 
 def render_status_page():
@@ -1783,7 +2237,7 @@ class MeshHandler(http.server.BaseHTTPRequestHandler):
             if not check_admin_auth(self, conf):
                 self.send_401()
                 return
-            self.send_html(render_admin_page(conf))
+            self.send_html(render_admin_page())
             return
 
         # All other routes — IP restricted
@@ -1837,6 +2291,125 @@ class MeshHandler(http.server.BaseHTTPRequestHandler):
                 self.send_response(500)
                 self.end_headers()
                 self.wfile.write(str(e).encode())
+        elif path == '/api/admin/status':
+            if not check_admin_auth(self, conf):
+                self.send_401()
+                return
+            try:
+                data = assemble_admin_status()
+                data['my_hostname'] = get_my_hostname()
+                self.send_json(data)
+            except Exception as e:
+                self.send_response(500)
+                self.end_headers()
+                self.wfile.write(str(e).encode())
+
+        else:
+            self.send_response(404)
+            self.end_headers()
+            self.wfile.write(b'Not found')
+
+    def do_POST(self):
+        conf      = load_kv_file(MESH_CONF_FILE)
+        parsed    = urlparse(self.path)
+        path      = parsed.path.rstrip('/') or '/'
+        length    = int(self.headers.get('Content-Length', 0))
+        body      = self.rfile.read(length) if length else b'{}'
+
+        # All POST endpoints require admin auth
+        if not check_admin_auth(self, conf):
+            self.send_401()
+            return
+
+        if path == '/api/admin/stage':
+            try:
+                req    = json.loads(body)
+                config = req.get('config', {})
+                if not config:
+                    self.send_json({'ok': False, 'error': 'No config provided'})
+                    return
+
+                # Detect dangerous fields
+                cur_ssid = conf.get('mesh_ssid', '')
+                cur_key  = conf.get('mesh_key', '')
+                cur_cidr = conf.get('ipv4_network', '')
+                dangerous = (
+                    (config.get('mesh_ssid',    cur_ssid) != cur_ssid) or
+                    (config.get('mesh_key',     cur_key)  != cur_key)  or
+                    (config.get('ipv4_network', cur_cidr) != cur_cidr)
+                )
+
+                version = make_config_version(config)
+                pkg = {
+                    'version':    version,
+                    'issued_by':  get_my_hostname(),
+                    'issued_at':  int(__import__('time').time()),
+                    'activate_at': 0,   # 0 = stage only
+                    'dangerous':  dangerous,
+                    'config':     config,
+                }
+                save_pending_config(pkg)
+                broadcast_config_package(pkg)
+
+                # This node ACKs immediately (it's the one staging)
+                try:
+                    with open('/var/run/mesh_config_ack_version', 'w') as f:
+                        f.write(version)
+                except Exception:
+                    pass
+
+                self.send_json({'ok': True, 'version': version, 'dangerous': dangerous})
+            except Exception as e:
+                self.send_json({'ok': False, 'error': str(e)})
+
+        elif path == '/api/admin/activate':
+            try:
+                req   = json.loads(body)
+                force = req.get('force', False)
+                pkg   = get_pending_config()
+                if not pkg:
+                    self.send_json({'ok': False, 'error': 'No pending config'})
+                    return
+
+                # Check all nodes have ACKed (unless force)
+                if not force:
+                    nodes_raw = parse_registry()
+                    version   = pkg['version']
+                    not_acked = [
+                        nd.get('HOSTNAME', nid)
+                        for nid, nd in nodes_raw.items()
+                        if nd.get('CONFIG_ACK_VERSION', '') != version
+                    ]
+                    if not_acked:
+                        self.send_json({
+                            'ok': False,
+                            'error': f'{len(not_acked)} nodes have not ACKed: {", ".join(not_acked)}'
+                        })
+                        return
+
+                # Set activate_at to now + 60 seconds
+                import time
+                activate_at = int(time.time()) + 60
+                pkg['activate_at'] = activate_at
+                save_pending_config(pkg)
+                broadcast_config_package(pkg)
+                self.send_json({'ok': True, 'activate_at': activate_at})
+            except Exception as e:
+                self.send_json({'ok': False, 'error': str(e)})
+
+        elif path == '/api/admin/cancel':
+            try:
+                clear_pending_config()
+                # Clear local ACK state
+                try:
+                    import os
+                    os.remove('/var/run/mesh_config_ack_version')
+                except Exception:
+                    pass
+                self.send_json({'ok': True})
+            except Exception as e:
+                self.send_json({'ok': False, 'error': str(e)})
+
         else:
             self.send_response(404)
             self.end_headers()
