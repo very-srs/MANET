@@ -19,7 +19,7 @@ DESCRIPTOR = _descriptor.FileDescriptor(
   syntax='proto3',
   serialized_options=None,
   create_key=_descriptor._internal_create_key,
-  serialized_pb=b'\n\x0eNodeInfo.proto\"\x95\x07\n\x08NodeInfo\x12\x10\n\x08hostname\x18\x01 \x01(\t\x12\x15\n\rmac_addresses\x18\x02 \x03(\t\x12\x14\n\x0cipv4_address\x18\x03 \x01(\t\x12\x14\n\x0csyncthing_id\x18\x04 \x01(\t\x12\x12\n\nipv4_chunk\x18\x05 \x01(\r\x12\x12\n\ntq_average\x18\n \x01(\x02\x12\x1b\n\x13is_internet_gateway\x18\x0b \x01(\x08\x12\x18\n\x10is_mumble_server\x18\x14 \x01(\x08\x12\x15\n\ris_ntp_server\x18\x15 \x01(\x08\x12\x15\n\ris_tak_server\x18\x16 \x01(\x08\x12\x1a\n\x12is_mediamtx_server\x18\x17 \x01(\x08\x12\x16\n\x0euptime_seconds\x18\x1e \x01(\r\x12\x1a\n\x12\x62\x61ttery_percentage\x18\x1f \x01(\r\x12\x18\n\x10\x63pu_load_average\x18  \x01(\x02\x12\'\n\x08location\x18( \x01(\x0b\x32\x15.NodeInfo.GpsLocation\x12\x11\n\tatak_user\x18) \x01(\t\x12/\n\x0e\x63hannel_report\x18\x32 \x01(\x0b\x32\x17.NodeInfo.ChannelReport\x12\x18\n\x10\x64\x61ta_channel_2_4\x18\x33 \x01(\t\x12\x18\n\x10\x64\x61ta_channel_5_0\x18\x34 \x01(\t\x12\x1b\n\x13last_seen_timestamp\x18\x35 \x01(\x04\x12\x17\n\x0fis_in_limp_mode\x18\x36 \x01(\x08\x12 \n\x18last_tourguide_timestamp\x18\x37 \x01(\x04\x12\x1c\n\x14last_tourguide_radio\x18\x38 \x01(\t\x12\'\n\nnode_state\x18\x39 \x01(\x0e\x32\x13.NodeInfo.NodeState\x1a\x44\n\x0bGpsLocation\x12\x10\n\x08latitude\x18\x01 \x01(\x01\x12\x11\n\tlongitude\x18\x02 \x01(\x01\x12\x10\n\x08\x61ltitude\x18\x03 \x01(\x02\x1aL\n\x11\x43hannelScanResult\x12\x0f\n\x07\x63hannel\x18\x01 \x01(\r\x12\x13\n\x0bnoise_floor\x18\x02 \x01(\x11\x12\x11\n\tbss_count\x18\x03 \x01(\r\x1a=\n\rChannelReport\x12,\n\x07results\x18\x01 \x03(\x0b\x32\x1b.NodeInfo.ChannelScanResult\"*\n\tNodeState\x12\n\n\x06\x41\x43TIVE\x10\x00\x12\x11\n\rSHUTTING_DOWN\x10\x01\x62\x06proto3'
+  serialized_pb=b'\n\x0eNodeInfo.proto\"\xb1\x07\n\x08NodeInfo\x12\x10\n\x08hostname\x18\x01 \x01(\t\x12\x15\n\rmac_addresses\x18\x02 \x03(\t\x12\x14\n\x0cipv4_address\x18\x03 \x01(\t\x12\x14\n\x0csyncthing_id\x18\x04 \x01(\t\x12\x12\n\nipv4_chunk\x18\x05 \x01(\r\x12\x12\n\ntq_average\x18\n \x01(\x02\x12\x1b\n\x13is_internet_gateway\x18\x0b \x01(\x08\x12\x18\n\x10is_mumble_server\x18\x14 \x01(\x08\x12\x15\n\ris_ntp_server\x18\x15 \x01(\x08\x12\x15\n\ris_tak_server\x18\x16 \x01(\x08\x12\x1a\n\x12is_mediamtx_server\x18\x17 \x01(\x08\x12\x16\n\x0euptime_seconds\x18\x1e \x01(\r\x12\x1a\n\x12\x62\x61ttery_percentage\x18\x1f \x01(\r\x12\x18\n\x10\x63pu_load_average\x18  \x01(\x02\x12\'\n\x08location\x18( \x01(\x0b\x32\x15.NodeInfo.GpsLocation\x12\x11\n\tatak_user\x18) \x01(\t\x12/\n\x0e\x63hannel_report\x18\x32 \x01(\x0b\x32\x17.NodeInfo.ChannelReport\x12\x18\n\x10\x64\x61ta_channel_2_4\x18\x33 \x01(\t\x12\x18\n\x10\x64\x61ta_channel_5_0\x18\x34 \x01(\t\x12\x1b\n\x13last_seen_timestamp\x18\x35 \x01(\x04\x12\x17\n\x0fis_in_limp_mode\x18\x36 \x01(\x08\x12 \n\x18last_tourguide_timestamp\x18\x37 \x01(\x04\x12\x1c\n\x14last_tourguide_radio\x18\x38 \x01(\t\x12\'\n\nnode_state\x18\x39 \x01(\x0e\x32\x13.NodeInfo.NodeState\x12\x1a\n\x12\x63onfig_ack_version\x18: \x01(\t\x1a\x44\n\x0bGpsLocation\x12\x10\n\x08latitude\x18\x01 \x01(\x01\x12\x11\n\tlongitude\x18\x02 \x01(\x01\x12\x10\n\x08\x61ltitude\x18\x03 \x01(\x02\x1aL\n\x11\x43hannelScanResult\x12\x0f\n\x07\x63hannel\x18\x01 \x01(\r\x12\x13\n\x0bnoise_floor\x18\x02 \x01(\x11\x12\x11\n\tbss_count\x18\x03 \x01(\r\x1a=\n\rChannelReport\x12,\n\x07results\x18\x01 \x03(\x0b\x32\x1b.NodeInfo.ChannelScanResult\"*\n\tNodeState\x12\n\n\x06\x41\x43TIVE\x10\x00\x12\x11\n\rSHUTTING_DOWN\x10\x01\x62\x06proto3'
 )
 
 
@@ -44,8 +44,8 @@ _NODEINFO_NODESTATE = _descriptor.EnumDescriptor(
   ],
   containing_type=None,
   serialized_options=None,
-  serialized_start=894,
-  serialized_end=936,
+  serialized_start=922,
+  serialized_end=964,
 )
 _sym_db.RegisterEnumDescriptor(_NODEINFO_NODESTATE)
 
@@ -91,8 +91,8 @@ _NODEINFO_GPSLOCATION = _descriptor.Descriptor(
   extension_ranges=[],
   oneofs=[
   ],
-  serialized_start=683,
-  serialized_end=751,
+  serialized_start=711,
+  serialized_end=779,
 )
 
 _NODEINFO_CHANNELSCANRESULT = _descriptor.Descriptor(
@@ -136,8 +136,8 @@ _NODEINFO_CHANNELSCANRESULT = _descriptor.Descriptor(
   extension_ranges=[],
   oneofs=[
   ],
-  serialized_start=753,
-  serialized_end=829,
+  serialized_start=781,
+  serialized_end=857,
 )
 
 _NODEINFO_CHANNELREPORT = _descriptor.Descriptor(
@@ -167,8 +167,8 @@ _NODEINFO_CHANNELREPORT = _descriptor.Descriptor(
   extension_ranges=[],
   oneofs=[
   ],
-  serialized_start=831,
-  serialized_end=892,
+  serialized_start=859,
+  serialized_end=920,
 )
 
 _NODEINFO = _descriptor.Descriptor(
@@ -347,6 +347,13 @@ _NODEINFO = _descriptor.Descriptor(
       message_type=None, enum_type=None, containing_type=None,
       is_extension=False, extension_scope=None,
       serialized_options=None, file=DESCRIPTOR,  create_key=_descriptor._internal_create_key),
+    _descriptor.FieldDescriptor(
+      name='config_ack_version', full_name='NodeInfo.config_ack_version', index=24,
+      number=58, type=9, cpp_type=9, label=1,
+      has_default_value=False, default_value=b"".decode('utf-8'),
+      message_type=None, enum_type=None, containing_type=None,
+      is_extension=False, extension_scope=None,
+      serialized_options=None, file=DESCRIPTOR,  create_key=_descriptor._internal_create_key),
   ],
   extensions=[
   ],
@@ -361,7 +368,7 @@ _NODEINFO = _descriptor.Descriptor(
   oneofs=[
   ],
   serialized_start=19,
-  serialized_end=936,
+  serialized_end=964,
 )
 
 _NODEINFO_GPSLOCATION.containing_type = _NODEINFO
