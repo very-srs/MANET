@@ -50,7 +50,7 @@ EUD_MODE=${EUD_MODE:-"none"}
 
 # If any EUD mode is active, we need at least 1 EUD IP
 if [[ "$EUD_MODE" != "none" && "$MAX_EUDS" -lt 1 ]]; then
-    log "EUD mode is '$EUD_MODE' but max_euds=$MAX_EUDS. Forcing max_euds=1."
+#    log "EUD mode is '$EUD_MODE' but max_euds=$MAX_EUDS. Forcing max_euds=1."
     MAX_EUDS=1
 fi
 
