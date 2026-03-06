@@ -14,6 +14,10 @@ CONTROL_IFACE="br0"
 MY_MAC=$(cat "/sys/class/net/${CONTROL_IFACE}/address")
 MTX_IPV6_SCRIPT="/usr/local/bin/mtx-ip.sh"
 
+# Incumbent bias: current leader gets this many TQ points added to their score.
+# Prevents service migration due to normal TQ fluctuation.
+INCUMBENT_BIAS=10
+
 log() {
     echo "[$(date +'%Y-%m-%d %H:%M:%S')] - MEDIAMTX-ELECTION: $1" | systemd-cat -t mediamtx-election
 }
@@ -63,6 +67,20 @@ if [ -z "$MEDIAMTX_IPV4_VIP" ] || [ -z "$MEDIAMTX_IPV6_VIP" ]; then
 fi
 IPV4_VIP_WITH_MASK="${MEDIAMTX_IPV4_VIP}/${IPV4_NETWORK#*/}"
 
+# --- Detect Current Incumbent ---
+# Determine who currently holds the VIP so we can apply incumbent bias
+CURRENT_LEADER_MAC=""
+if ip addr show dev "$CONTROL_IFACE" | grep -q "inet $MEDIAMTX_IPV4_VIP/"; then
+    # We hold the VIP ourselves
+    CURRENT_LEADER_MAC="$MY_MAC"
+else
+    # Check ARP/neighbor table for who owns the VIP
+    CURRENT_LEADER_MAC=$(ip neigh show "$MEDIAMTX_IPV4_VIP" 2>/dev/null | awk '{print $5}')
+fi
+if [ -n "$CURRENT_LEADER_MAC" ]; then
+    log "Current incumbent: $CURRENT_LEADER_MAC (bias: +${INCUMBENT_BIAS} TQ)"
+fi
+
 # --- Run Election ---
 log "Running MediaMTX election..."
 
@@ -78,7 +96,7 @@ while read tq_line; do
     MAC_SANITIZED=$(echo "$tq_varname" | sed -n 's/NODE_\([0-9a-fA-F]\+\)_TQ_AVERAGE/\1/p')
 
     if [ -n "$MAC_SANITIZED" ]; then
-        # --- NEW: Check Timestamp ---
+        # --- Check Timestamp ---
         TIMESTAMP_VAR="NODE_${MAC_SANITIZED}_LAST_SEEN_TIMESTAMP"
         TIMESTAMP_LINE=$(grep "^${TIMESTAMP_VAR}=" "$REGISTRY_STATE_FILE")
         TIMESTAMP_VAL=$(echo "$TIMESTAMP_LINE" | cut -d'=' -f2 | tr -d "'")
@@ -96,12 +114,18 @@ while read tq_line; do
             # Extract the MAC address and strip the single quotes
             CURRENT_MAC=$(echo "$MAC_LINE" | cut -d'=' -f2 | tr -d "'")
 
-            # --- Your existing comparison logic (now working) ---
-            if (( $(echo "$CURRENT_TQ > $HIGHEST_TQ" | bc -l) )); then
-                HIGHEST_TQ=$CURRENT_TQ
+            # Apply incumbent bias: current leader gets a TQ bonus to prevent
+            # unnecessary service migration from normal TQ fluctuation
+            EFFECTIVE_TQ="$CURRENT_TQ"
+            if [ -n "$CURRENT_LEADER_MAC" ] && [ "$CURRENT_MAC" == "$CURRENT_LEADER_MAC" ]; then
+                EFFECTIVE_TQ=$(echo "$CURRENT_TQ + $INCUMBENT_BIAS" | bc -l)
+            fi
+
+            if (( $(echo "$EFFECTIVE_TQ > $HIGHEST_TQ" | bc -l) )); then
+                HIGHEST_TQ=$EFFECTIVE_TQ
                 BEST_CANDIDATE_MAC=$CURRENT_MAC
             # Tie-breaker (lower MAC wins)
-            elif (( $(echo "$CURRENT_TQ == $HIGHEST_TQ" | bc -l) )) && [[ "$CURRENT_MAC" < "$BEST_CANDIDATE_MAC" ]]; then
+            elif (( $(echo "$EFFECTIVE_TQ == $HIGHEST_TQ" | bc -l) )) && [[ "$CURRENT_MAC" < "$BEST_CANDIDATE_MAC" ]]; then
                 BEST_CANDIDATE_MAC=$CURRENT_MAC
             fi
         else
@@ -127,6 +151,7 @@ if [ -z "$BEST_CANDIDATE_MAC" ]; then
         log "Stopping local service as no winner was found."
         systemctl stop "$MEDIAMTX_SERVICE_NAME"
     fi
+    systemctl reset-failed "$MEDIAMTX_SERVICE_NAME" 2>/dev/null
 
 elif [ "$MY_MAC" == "$BEST_CANDIDATE_MAC" ]; then
     # --- I AM THE LEADER ---
@@ -184,7 +209,7 @@ elif [ "$MY_MAC" == "$BEST_CANDIDATE_MAC" ]; then
         log "Already leader and service running. No action needed."
     fi
 
-    else
+else
     # --- I AM NOT THE LEADER ---
     log "Lost election to ${BEST_CANDIDATE_MAC}."
     # Ensure service is stopped and VIPs removed if we previously held them
@@ -201,7 +226,6 @@ elif [ "$MY_MAC" == "$BEST_CANDIDATE_MAC" ]; then
         systemctl stop "$MEDIAMTX_SERVICE_NAME"
     fi
     systemctl reset-failed "$MEDIAMTX_SERVICE_NAME" 2>/dev/null
-
 
 fi
 log "Election check complete."
