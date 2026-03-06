@@ -478,6 +478,8 @@ case $IPV4_STATE in
             fi
         else
             # No conflict, ensure ebtables and dnsmasq are current
+        else
+            # No conflict, only reconfigure if something actually changed
             if [ -n "$PERSISTENT_CHUNK" ]; then
                 echo "$PERSISTENT_CHUNK" > /var/run/my_ipv4_chunk
 
@@ -485,11 +487,23 @@ case $IPV4_STATE in
                 CHUNK_IPS=$(get_chunk_ips "$PERSISTENT_CHUNK")
                 IFS=: read -r BR0_PRIMARY BR0_SECONDARY DHCP_START DHCP_END <<< "$CHUNK_IPS"
 
-                # Ensure ebtables rules are current (handles wlan1 role changes)
-                configure_ebtables_dhcp_isolation "$BR0_SECONDARY"
+                # Only reconfigure dnsmasq if the config has changed
+                DNSMASQ_CONF="/etc/dnsmasq.d/mesh-eud.conf"
+                NEEDS_DNSMASQ_UPDATE=false
 
-                # Ensure dnsmasq config is current
-                configure_dnsmasq "$BR0_SECONDARY" "$DHCP_START" "$DHCP_END"
+                if [ ! -f "$DNSMASQ_CONF" ]; then
+                    NEEDS_DNSMASQ_UPDATE=true
+                elif ! grep -q "dhcp-range=$DHCP_START,$DHCP_END" "$DNSMASQ_CONF" 2>/dev/null; then
+                    NEEDS_DNSMASQ_UPDATE=true
+                elif ! grep -q "dhcp-option=3,$BR0_SECONDARY" "$DNSMASQ_CONF" 2>/dev/null; then
+                    NEEDS_DNSMASQ_UPDATE=true
+                fi
+
+                if [ "$NEEDS_DNSMASQ_UPDATE" = true ]; then
+                    log "DHCP config changed, reconfiguring..."
+                    configure_ebtables_dhcp_isolation "$BR0_SECONDARY"
+                    configure_dnsmasq "$BR0_SECONDARY" "$DHCP_START" "$DHCP_END"
+                fi
             fi
         fi
         ;;
