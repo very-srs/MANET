@@ -173,8 +173,8 @@ elif [ "$MY_MAC" == "$BEST_CANDIDATE_MAC" ]; then
     if [ "$WAS_ALREADY_LEADER" = false ] || ! systemctl is-active --quiet "$MEDIAMTX_SERVICE_NAME"; then
         if command -v yq &> /dev/null; then
             log "Updating $MEDIAMTX_CONFIG_FILE listen addresses..."
-            yq -i ".rtspAddress = \"$MEDIAMTX_IPV4_VIP:8554,$MEDIAMTX_IPV6_VIP:8554\"" "$MEDIAMTX_CONFIG_FILE"
-            yq -i ".webrtcAddress = \"$MEDIAMTX_IPV4_VIP:8889,$MEDIAMTX_IPV6_VIP:8889\"" "$MEDIAMTX_CONFIG_FILE"
+            yq -i ".rtspAddress = \"$MEDIAMTX_IPV4_VIP:8554\"" "$MEDIAMTX_CONFIG_FILE"
+            yq -i ".webrtcAddress = \"$MEDIAMTX_IPV4_VIP:8889\"" "$MEDIAMTX_CONFIG_FILE"
         else
             log "Warning: 'yq' not found. Cannot update listen addresses in $MEDIAMTX_CONFIG_FILE. Service might bind incorrectly."
         fi
@@ -200,5 +200,8 @@ elif [ "$MY_MAC" == "$BEST_CANDIDATE_MAC" ]; then
         log "Stopping local service."
         systemctl stop "$MEDIAMTX_SERVICE_NAME"
     fi
+    systemctl reset-failed "$MEDIAMTX_SERVICE_NAME" 2>/dev/null
+
+
 fi
 log "Election check complete."
