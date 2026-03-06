@@ -61,4 +61,6 @@ else
     echo "$MESH_BLOCK" >> "$HOSTS_FILE"
 fi
 
+chmod 644 /etc/hosts
+
 log "Updated ${ENTRY_COUNT} mesh host entries"
