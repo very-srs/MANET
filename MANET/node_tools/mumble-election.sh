@@ -23,6 +23,10 @@ BACKUP_DIR="${SHARED_DB_DIR}/backups"
 MUMBLE_IPV4_VIP=""
 MUMBLE_IPV6_VIP=""
 
+# Incumbent bias: current leader gets this many TQ points added to their score.
+# Prevents service migration due to normal TQ fluctuation.
+INCUMBENT_BIAS=10
+
 # State
 MY_MAC=$(cat "/sys/class/net/${CONTROL_IFACE}/address")
 LOCK_FILE="/var/run/mumble-election.lock"
@@ -383,6 +387,20 @@ fi
 IPV4_VIP_WITH_MASK="${MUMBLE_IPV4_VIP}/${IPV4_NETWORK#*/}"
 log "Mumble VIPs: IPv4=$MUMBLE_IPV4_VIP, IPv6=$MUMBLE_IPV6_VIP"
 
+# --- Detect Current Incumbent ---
+# Determine who currently holds the VIP so we can apply incumbent bias
+CURRENT_LEADER_MAC=""
+if ip addr show dev "$CONTROL_IFACE" | grep -q "inet $MUMBLE_IPV4_VIP/"; then
+    # We hold the VIP ourselves
+    CURRENT_LEADER_MAC="$MY_MAC"
+else
+    # Check ARP/neighbor table for who owns the VIP
+    CURRENT_LEADER_MAC=$(ip neigh show "$MUMBLE_IPV4_VIP" 2>/dev/null | awk '{print $5}')
+fi
+if [ -n "$CURRENT_LEADER_MAC" ]; then
+    log "Current incumbent: $CURRENT_LEADER_MAC (bias: +${INCUMBENT_BIAS} TQ)"
+fi
+
 # --- Run Election ---
 log "Running Mumble election..."
 
@@ -412,10 +430,17 @@ while read tq_line; do
         if [ -n "$MAC_LINE" ]; then
             CURRENT_MAC=$(echo "$MAC_LINE" | cut -d'=' -f2 | tr -d "'")
 
-            if (( $(echo "$CURRENT_TQ > $HIGHEST_TQ" | bc -l) )); then
-                HIGHEST_TQ=$CURRENT_TQ
+            # Apply incumbent bias: current leader gets a TQ bonus to prevent
+            # unnecessary service migration from normal TQ fluctuation
+            EFFECTIVE_TQ="$CURRENT_TQ"
+            if [ -n "$CURRENT_LEADER_MAC" ] && [ "$CURRENT_MAC" == "$CURRENT_LEADER_MAC" ]; then
+                EFFECTIVE_TQ=$(echo "$CURRENT_TQ + $INCUMBENT_BIAS" | bc -l)
+            fi
+
+            if (( $(echo "$EFFECTIVE_TQ > $HIGHEST_TQ" | bc -l) )); then
+                HIGHEST_TQ=$EFFECTIVE_TQ
                 BEST_CANDIDATE_MAC=$CURRENT_MAC
-            elif (( $(echo "$CURRENT_TQ == $HIGHEST_TQ" | bc -l) )) && [[ "$CURRENT_MAC" < "$BEST_CANDIDATE_MAC" ]]; then
+            elif (( $(echo "$EFFECTIVE_TQ == $HIGHEST_TQ" | bc -l) )) && [[ "$CURRENT_MAC" < "$BEST_CANDIDATE_MAC" ]]; then
                 BEST_CANDIDATE_MAC=$CURRENT_MAC
             fi
         fi
@@ -442,6 +467,7 @@ if [ -z "$BEST_CANDIDATE_MAC" ]; then
         sleep 2
         sync_database_to_shared
     fi
+    systemctl reset-failed "$MUMBLE_SERVICE_NAME" 2>/dev/null
     
     rm -f /var/run/mesh-mumble.state
 
@@ -538,6 +564,7 @@ else
         sleep 2
         sync_database_to_shared
     fi
+    systemctl reset-failed "$MUMBLE_SERVICE_NAME" 2>/dev/null
     
     rm -f /var/run/mesh-mumble.state
 fi
