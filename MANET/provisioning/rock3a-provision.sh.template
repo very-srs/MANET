@@ -69,7 +69,7 @@ echo "iperf3 iperf3/start_daemon boolean true" | debconf-set-selections
 chmod -x /etc/kernel/postinst.d/initramfs-tools
 
 # Install packages for this system
-apt install -y ipcalc nmap lshw tcpdump net-tools nftables wireless-tools iperf3\
+apt install -y ipcalc-ng nmap lshw tcpdump net-tools nftables wireless-tools iperf3\
 		radvd bridge-utils firmware-mediatek libnss-mdns syncthing networkd-dispatcher\
 		libgps-dev libcap-dev screen arping bc jq git libssl-dev hostapd dnsmasq pulseaudio\
 		python3-protobuf unzip chrony build-essential systemd-resolved dhcping mpg123\
@@ -77,6 +77,9 @@ apt install -y ipcalc nmap lshw tcpdump net-tools nftables wireless-tools iperf3
 
 # Unpack the tar file that was pulled down earlier.  This contains the kernel and mesh tools
 tar -zxf /root/morse-pi-install.tar.gz -C /
+
+# Link this to where scripts expet it, updated from the old perl version
+ln -s /usr/bin/ipcalc-ng /usr/bin/ipcalc
 
 # Unpack the r3a kernel
 cd /root
