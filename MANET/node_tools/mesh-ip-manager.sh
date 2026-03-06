@@ -40,14 +40,18 @@ if [ -f /etc/mesh.conf ]; then
     while IFS='=' read -r key value; do
         [[ -z "$key" || "$key" =~ ^[[:space:]]*# ]] && continue
         case "$key" in
-            max_euds_per_node)
-                MAX_EUDS="$value"
-                ;;
-            ipv4_network)
-                IPV4_NETWORK="$value"
-                ;;
+            max_euds_per_node) MAX_EUDS="$value" ;;
+            ipv4_network)      IPV4_NETWORK="$value" ;;
+            eud)               EUD_MODE="$value" ;;
         esac
     done < /etc/mesh.conf
+fi
+EUD_MODE=${EUD_MODE:-"none"}
+
+# If any EUD mode is active, we need at least 1 EUD IP
+if [[ "$EUD_MODE" != "none" && "$MAX_EUDS" -lt 1 ]]; then
+    log "EUD mode is '$EUD_MODE' but max_euds=$MAX_EUDS. Forcing max_euds=1."
+    MAX_EUDS=1
 fi
 
 # Sourced above
