@@ -477,8 +477,6 @@ case $IPV4_STATE in
                 rm -f /var/run/my_ipv4_chunk
             fi
         else
-            # No conflict, ensure ebtables and dnsmasq are current
-        else
             # No conflict, only reconfigure if something actually changed
             if [ -n "$PERSISTENT_CHUNK" ]; then
                 echo "$PERSISTENT_CHUNK" > /var/run/my_ipv4_chunk
