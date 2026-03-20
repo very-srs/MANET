@@ -33,7 +33,7 @@ CLAIMED_CHUNKS_FILE="/tmp/claimed_chunks.txt"
 PERSISTENT_STATE_FILE="/etc/mesh_ipv4_state"
 
 # Source the network configuration
-MAX_EUDS=0
+MAX_EUDS=1
 IPV4_NETWORK=""
 
 if [ -f /etc/mesh.conf ]; then
@@ -56,7 +56,7 @@ fi
 
 # Sourced above
 IPV4_NETWORK=${IPV4_NETWORK:-"10.43.1.0/16"}
-MAX_EUDS=${MAX_EUDS:-0}
+MAX_EUDS=${MAX_EUDS:-1}
 CHUNK_SIZE=$((MAX_EUDS + 2))  # br0 primary + br0 secondary (gateway) + EUDs
 SERVICES_RESERVED=5  # IPs 1-5 for services
 
