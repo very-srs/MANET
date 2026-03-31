@@ -12,7 +12,7 @@
 | 4pcs MMCX Male Right Angle to SMA Female Bulkhead (8 inch) | Antenna cables for HaLow card; right-angle connectors recommended | $14.00 | [amazon](https://www.amazon.com/dp/B0CQXBHGQ2) |
 | Copper Heatsink 15x15x3mm (4 pcs) | Small copper heatsinks for thermal management | $9.19 | [amazon](https://www.amazon.com/dp/B0F8V5729T) |
 | Gateworks GW16167 HaLow Card | E-key M.2 HaLow card with USB signaling and 8108 HaLow chip | $42.90 | [digikey](https://www.digikey.com/en/products/detail/gateworks-corporation/GW16167/28244003) |
-| **Subtotal (Radio)** |  | **$239.95** |  |
+| **Subtotal (Radio)** |  | **$216.17** |  |
 
 ---
 
@@ -48,12 +48,14 @@
 | M2.5 Screws | Fasteners for assembly | $6.00 | [amazon](https://www.amazon.com/dp/B0DDYDSGBY) |
 | PiSugar 3 Plus | UPS / power management module for SBC | $50.00 | [pisugar](https://www.pisugar.com/products/pisugar-3-plus-raspberry-pi-ups) |
 | Pogo Pins for PiSugar | Electrical contacts for PiSugar connection | $12.00 | [digikey](https://www.digikey.com/en/products/detail/adam-tech/PH-MVP-4355/9831576) |
-| PiSugar Battery (1000mAh) | Battery for portable operation | $10.00 | [mouser](https://www.mouser.com/ProductDetail/TinyCircuits/ASR00012?qs=0lSvoLzn4L%2FDH7Pi1IBo3A%3D%3D) |
+| PiSugar Battery (1000mAh) | Smaller backup battery | $10.00 | [mouser](https://www.mouser.com/ProductDetail/TinyCircuits/ASR00012?qs=0lSvoLzn4L%2FDH7Pi1IBo3A%3D%3D) |
 | Ethernet Plug (1K FGG/EGG, 8 Pin) | Ruggedized Ethernet connector | $24.10 | [aliexpress](https://www.aliexpress.us/item/3256801810967302.html?gatewayAdapt=glo2usa) |
 | Ethernet Plug Cap (BHG, 1K Series) | Protective cap for Ethernet connector | $7.67 | [aliexpress](https://www.aliexpress.us/item/3256802111495954.html?gatewayAdapt=glo2usa) |
-| Momentary LED Switch (Tri-color, 12mm) | Panel-mount power/control switch with LED ring | $2.26 | [aliexpress](https://www.aliexpress.us/item/3256806568472829.html?gatewayAdapt=glo2usa) |
+| Momentary LED Switch (Tri-color, 12mm) | Panel-mount switch with LED ring | $2.26 | [aliexpress](https://www.aliexpress.us/item/3256806568472829.html?gatewayAdapt=glo2usa) |
+| Volume / Power knob | Vishay P16SNP103MAB15 10Kohms 20% Linear IP67 | 21.63 | [mouser](https://www.mouser.com/ProductDetail/Vishay-Sfernice/P16SNP103MAB15?qs=Ur9nHeL6P%252B0%252B0IlLYaP6lw%3D%3D) |
+| MOSFET for switching power | DMP3130L-7 | $0.57 | [mouser](https://www.mouser.com/ProductDetail/Diodes-Incorporated/DMP3130L-7?qs=oUsD4qhOtFzo1DjIYBcgCA%3D%3D)
 | Case heatsink | SK 665 75 SA | $9 | [digikey](https://www.digikey.com/en/products/detail/fischer-elektronik/SK-665-75-SA/25827150?s=N4IgTCBcDaIMoGkAEA2FBWJB2TcCCIAugL5A) |
-| **Subtotal (Enclosure)** |  | **$121.03** |  |
+| **Subtotal (Enclosure)** |  | **$144.23** |  |
 
 ---
 
@@ -61,8 +63,8 @@
 
 | Section | Cost |
 |--------|------|
-| Radio | $239.95 |
+| Radio | $216.17 |
 | Antennas | $30.97 |
 | PTT | $63.82 |
-| Enclosure | $113.03 |
-| **Grand Total** | **$456.77** |
+| Enclosure | $144.23 |
+| **Grand Total** | **$455.19** |
