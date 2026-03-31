@@ -52,7 +52,7 @@
 | Ethernet Plug (1K FGG/EGG, 8 Pin) | Ruggedized Ethernet connector | $24.10 | [aliexpress](https://www.aliexpress.us/item/3256801810967302.html?gatewayAdapt=glo2usa) |
 | Ethernet Plug Cap (BHG, 1K Series) | Protective cap for Ethernet connector | $7.67 | [aliexpress](https://www.aliexpress.us/item/3256802111495954.html?gatewayAdapt=glo2usa) |
 | Momentary LED Switch (Tri-color, 12mm) | Panel-mount switch with LED ring | $2.26 | [aliexpress](https://www.aliexpress.us/item/3256806568472829.html?gatewayAdapt=glo2usa) |
-| Volume / Power knob | Vishay P16SNP103MAB15 10Kohms 20% Linear IP67 | 21.63 | [mouser](https://www.mouser.com/ProductDetail/Vishay-Sfernice/P16SNP103MAB15?qs=Ur9nHeL6P%252B0%252B0IlLYaP6lw%3D%3D) |
+| Volume / Power knob | Vishay P16SNP103MAB15 10Kohms 20% Linear IP67 | $21.63 | [mouser](https://www.mouser.com/ProductDetail/Vishay-Sfernice/P16SNP103MAB15?qs=Ur9nHeL6P%252B0%252B0IlLYaP6lw%3D%3D) |
 | MOSFET for switching power | DMP3130L-7 | $0.57 | [mouser](https://www.mouser.com/ProductDetail/Diodes-Incorporated/DMP3130L-7?qs=oUsD4qhOtFzo1DjIYBcgCA%3D%3D)
 | Case heatsink | SK 665 75 SA | $9 | [digikey](https://www.digikey.com/en/products/detail/fischer-elektronik/SK-665-75-SA/25827150?s=N4IgTCBcDaIMoGkAEA2FBWJB2TcCCIAugL5A) |
 | **Subtotal (Enclosure)** |  | **$144.23** |  |
