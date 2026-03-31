@@ -864,12 +864,13 @@ echo ""
 echo "--- Image & Device ---"
 
 
-# Now that we know the hardware, acquire the appropriate image
-acquire_armbian_image
 
 
 # Rock3A provisioning section
 if [ "$HARDWARE_MODEL" = "r3a" ]; then
+		# Now that we know the hardware, acquire the appropriate image
+		acquire_armbian_image
+
         # Create temp copy of image to avoid modifying original
         TEMP_IMAGE=$(mktemp --suffix=.img)
         echo "Creating temporary copy of $ARMBIAN_IMAGE..."
