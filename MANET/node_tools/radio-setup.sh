@@ -294,6 +294,8 @@ fi
 # === CONFIGURE MESH INTERFACES (excluding AP if needed) ===
 # ============================================================================
 
+echo "MESH_NAME=\"$MESH_NAME\"" > /etc/default/mesh
+
 CT=0
 for WLAN in $(cat /var/lib/mesh_if); do
     # Skip this interface if it's the AP interface
@@ -304,7 +306,6 @@ for WLAN in $(cat /var/lib/mesh_if); do
     fi
 
     echo " > Setting SAE key/SSID for $WLAN ..."
-    echo "MESH_NAME=\"$MESH_NAME\"" > /etc/default/mesh
 
 cat <<-EOF > /etc/wpa_supplicant/wpa_supplicant-$WLAN-lobby.conf
 ctrl_interface=/var/run/wpa_supplicant
