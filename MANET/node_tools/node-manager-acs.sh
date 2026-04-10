@@ -180,7 +180,7 @@ perform_scan() {
         for freq in $freqs_to_scan; do
             local noise=$(echo "$survey_data" | awk -v f=$freq '$1=="frequency:" && $2==f {getline; if ($1=="noise:") print $2}' | head -1)
             noise=${noise:--100}
-            local bss_count=$(echo "$scan_data" | grep -c "freq: ${freq}\." || echo "0")
+            local bss_count=$(echo "$scan_data" | grep -c "freq: ${freq}\." )
 
             [ "$first_entry" = true ] && first_entry=false || json_out+=","
             json_out+="{\"channel\": ${freq}, \"noise_floor\": ${noise}, \"bss_count\": ${bss_count}}"

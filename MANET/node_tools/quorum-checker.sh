@@ -25,7 +25,7 @@ ACTIVE_ALFRED_COUNT=$(awk -F"['=]" -v now="$NOW" -v stale="$STALE_NODE_THRESHOLD
     "$REGISTRY_STATE_FILE")
 
 # Count shutting down nodes
-SHUTTING_DOWN_COUNT=$(grep -c "NODE_STATE='SHUTTING_DOWN'" "$REGISTRY_STATE_FILE" 2>/dev/null || echo "0")
+SHUTTING_DOWN_COUNT=$(grep -c "NODE_STATE='SHUTTING_DOWN'" "$REGISTRY_STATE_FILE" 2>/dev/null)
 
 # Count reachable mesh nodes (originators)
 UNIQUE_BATMAN_ORIGINATORS=$("$BATCTL_PATH" o 2>/dev/null | awk 'NR>1 {print $1}' | sort -u | wc -l)
