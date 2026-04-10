@@ -27,7 +27,7 @@ ACTIVE_ALFRED_COUNT=$(awk -F"['=]" -v now="$NOW" -v stale="$STALE_NODE_THRESHOLD
 [ "$ACTIVE_ALFRED_COUNT" -eq 0 ] && exit 0
 
 # Count nodes reporting limp mode
-LIMP_NODE_COUNT=$(grep -c "IS_IN_LIMP_MODE='true'" "$REGISTRY_STATE_FILE" 2>/dev/null || echo "0")
+LIMP_NODE_COUNT=$(grep -c "IS_IN_LIMP_MODE='true'" "$REGISTRY_STATE_FILE" 2>/dev/null)
 
 LIMP_RATIO=$(echo "scale=2; $LIMP_NODE_COUNT / $ACTIVE_ALFRED_COUNT" | bc)
 
