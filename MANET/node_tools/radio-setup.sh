@@ -678,6 +678,42 @@ fi
 # === SYSTEM SERVICE SETUP ===
 # ============================================================================
 
+# Watch for button presses
+cat << EOF > /etc/systemd/system/led-boot.service
+[Unit]
+Description=LED boot
+After=sysinit.target
+DefaultDependencies=no
+
+[Service]
+Type=oneshot
+RemainAfterExit=no
+ExecStart=/usr/local/bin/led-boot.sh
+TimeoutStartSec=infinity
+
+[Install]
+WantedBy=sysinit.target
+EOF
+systemctl enable led-boot.service
+
+cat << EOF > /etc/systemd/system/button-monitor.service
+[Unit]
+Description=Button monitor - launches LED info on press
+After=multi-user.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/button-monitor.sh
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=multi-user.target
+EOF
+systemctl enable button-monitor.service
+
+
+
 # Replace wpa_supplicant with lobby channel files at boot
 cat <<- EOF > /etc/systemd/system/mesh-boot-lobby.service
 [Unit]
