@@ -100,7 +100,7 @@ ask_lan_cidr() {
         local prefix_part
 
         while true; do
-                read -p "Use default LAN network $DEFAULT_CIDR? (Y/n): " confirm_default
+                read -p "Use default mesh network range ( $DEFAULT_CIDR )? (Y/n): " confirm_default
                 confirm_default=${confirm_default:-y}
 
                 if [ "$confirm_default" = "y" ] || [ "$confirm_default" = "Y" ]; then
@@ -108,7 +108,7 @@ ask_lan_cidr() {
                 else
                         # --- Custom CIDR Loop ---
                         while true; do
-                               read -p "Enter custom LAN CIDR block (e.g., 10.10.0.0/16): " custom_cidr
+                               read -p "Enter custom CIDR block for the mesh (e.g., 10.10.0.0/16): " custom_cidr
 
                                # 1. Validate general format (IP/Prefix)
                                if ! [[ "$custom_cidr" =~ ^([0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3})\/([0-9]{1,2})$ ]]; then
@@ -638,9 +638,10 @@ select_hardware_and_target_device() {
                                echo "Detecting disks *before* rpiboot..."
                                local DISKS_BEFORE
                                DISKS_BEFORE=$(lsblk -d -n -o NAME)
-
+                               echo
                                echo "Please connect your CM4 to this computer in USB-boot mode."
                                read -p "Press Enter to run 'sudo rpiboot' and mount the eMMC..."
+                               echo
                                sudo rpiboot
                                echo "'rpiboot' finished. Waiting 4s for device to settle..."
                                sleep 4
@@ -662,6 +663,7 @@ select_hardware_and_target_device() {
                                local NEW_DISK_SIZE
                                NEW_DISK_SIZE=$(lsblk -d -n -o SIZE "/dev/$NEW_DISK")
                                TARGET_DEVICE="/dev/$NEW_DISK" # Set the global variable
+                               echo
                                echo "Detected new device: $TARGET_DEVICE ($NEW_DISK_SIZE)"
 
                                HARDWARE_MODEL="rpi4" # Set to rpi4 for the template
@@ -1052,7 +1054,10 @@ SERVICE_EOF
         echo "  - Root password: 1234 (Armbian default)"
         echo "  - Radio user: radio / <your configured password>"
         echo ""
-
+		echo " ONCE BOOTED, THE MESH NODE WILL AUTOMATICALLY START"
+		echo " SETTING ITSELF UP AND WILL REBOOT MULTIPLE TIMES"
+		echo " Just leave it alone, this provess takes about ten"
+		echo " minutes"
 else
         # Raspberry Pi path - use rpi-imager
 
@@ -1081,4 +1086,10 @@ else
         confirm_flash "$TARGET_DEVICE"
 
         sudo rpi-imager --cli "$PI_OS_IMAGE_URL" "$TARGET_DEVICE" --first-run-script "$TEMP_SCRIPT_FILE"
+        echo ""
+        echo " ONCE BOOTED, THE MESH NODE WILL AUTOMATICALLY START"
+        echo " SETTING ITSELF UP AND WILL REBOOT MULTIPLE TIMES"
+        echo " Just leave it alone, this provess takes about ten"
+        echo " minutes"
+
 fi
