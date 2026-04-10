@@ -145,7 +145,7 @@ DRIVER_WAIT_COUNT=0
 MAX_DRIVER_WAIT=30  # 60 seconds total
 
 while [ $DRIVER_WAIT_COUNT -lt $MAX_DRIVER_WAIT ]; do
-    PHY_COUNT=$(iw dev 2>/dev/null | grep -c "^phy#" || echo "0")
+    PHY_COUNT=$(iw dev 2>/dev/null | grep -c "^phy#")
 
     if [ "$PHY_COUNT" -gt 0 ]; then
         echo "✓ Found $PHY_COUNT wireless PHY(s)"
@@ -665,10 +665,23 @@ done
 # ============================================================================
 # === MORSE / HALOW MODULE OPTIONS ===
 # ============================================================================
-
 echo "options cfg80211 ieee80211_regdom=$REGULATORY_DOMAIN" > /etc/modprobe.d/cfg80211.conf
+
+# Preserve hardware-specific modprobe options that were written by firstrun
+# (bcf= and spi_clock_speed= are board-specific; losing them causes the Morse
+# driver to fall back to bcf_default.bin which doesn't exist, failing probe)
+MORSE_BCF=""
+MORSE_SPI_CLOCK=""
+if [ -f /etc/modprobe.d/morse.conf ]; then
+    MORSE_BCF=$(grep -oP '(?<=bcf=)\S+' /etc/modprobe.d/morse.conf | head -1)
+    MORSE_SPI_CLOCK=$(grep -oP '(?<=spi_clock_speed=)\S+' /etc/modprobe.d/morse.conf | head -1)
+fi
+
 echo "options morse enable_mcast_whitelist=0 enable_mcast_rate_control=1" > /etc/modprobe.d/morse.conf
 echo "options morse country=$REG" >> /etc/modprobe.d/morse.conf
+[[ -n "$MORSE_BCF" ]]       && echo "options morse bcf=$MORSE_BCF" >> /etc/modprobe.d/morse.conf
+[[ -n "$MORSE_SPI_CLOCK" ]] && echo "options morse spi_clock_speed=$MORSE_SPI_CLOCK" >> /etc/modprobe.d/morse.conf
+
 
 if [[ "$REG" == "EU" ]]; then
     echo "options morse enable_auto_duty_cycle=0 enable_auto_mpsw=0" >> /etc/modprobe.d/morse.conf
