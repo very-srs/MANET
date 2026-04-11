@@ -292,9 +292,9 @@ dhcp-option=3,$br0_secondary
 domain=mesh.local
 local=/mesh.local/
 
-# Disable DNS upstream (offline mesh)
-no-resolv
-no-poll
+# Upstream DNS for EUD internet access through Ethernet
+server=1.1.1.1
+server=8.8.8.8
 
 # Log for debugging
 log-dhcp
