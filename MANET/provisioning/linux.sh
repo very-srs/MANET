@@ -41,6 +41,36 @@ validate_regulatory_domain() {
     return 1
 }
 
+uses_eu_halow_region() {
+    local domain
+    domain=$(echo "$1" | tr '[:lower:]' '[:upper:]')
+
+    local eu_halow_domains=(
+        "AT" "BE" "BG" "HR" "CY" "CZ" "DK" "EE" "FI" "FR" "DE" "GR" "HU" "IE"
+        "IT" "LV" "LT" "LU" "MT" "NL" "PL" "PT" "RO" "SK" "SI" "ES" "SE"
+        "GB" "CH" "NO"
+    )
+
+    for eu_halow_domain in "${eu_halow_domains[@]}"; do
+        if [ "$domain" == "$eu_halow_domain" ]; then
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+halow_regulatory_domain_for_wifi_domain() {
+    local domain
+    domain=$(echo "$1" | tr '[:lower:]' '[:upper:]')
+
+    if uses_eu_halow_region "$domain"; then
+        echo "EU"
+    else
+        echo "$domain"
+    fi
+}
+
 # Function to calculate network capacity
 calculate_capacity() {
         local cidr=$1
@@ -304,6 +334,10 @@ ask_questions() {
         if validated_domain=$(validate_regulatory_domain "$REGULATORY_DOMAIN"); then
             REGULATORY_DOMAIN="$validated_domain"
             echo "Using regulatory domain: $REGULATORY_DOMAIN"
+            HALOW_REGULATORY_DOMAIN=$(halow_regulatory_domain_for_wifi_domain "$REGULATORY_DOMAIN")
+            if [ "$HALOW_REGULATORY_DOMAIN" != "$REGULATORY_DOMAIN" ]; then
+                echo "Using HaLow regulatory region: $HALOW_REGULATORY_DOMAIN"
+            fi
             break
         else
             echo "ERROR: Invalid regulatory domain code: $REGULATORY_DOMAIN"
@@ -399,6 +433,7 @@ MAX_EUDS_PER_NODE="$MAX_EUDS_PER_NODE"
 INSTALL_MEDIAMTX="$INSTALL_MEDIAMTX"
 INSTALL_MUMBLE="$INSTALL_MUMBLE"
 REGULATORY_DOMAIN="$REGULATORY_DOMAIN"
+HALOW_REGULATORY_DOMAIN="$HALOW_REGULATORY_DOMAIN"
 MESH_SSID="$MESH_SSID"
 MESH_SAE_KEY="$MESH_SAE_KEY"
 LAN_CIDR_BLOCK="$LAN_CIDR_BLOCK"
@@ -418,6 +453,7 @@ load_config() {
         echo "Loading config from $CONFIG_FILE..."
         # Source the file to load the variables into this script
         source "$CONFIG_FILE"
+        HALOW_REGULATORY_DOMAIN=${HALOW_REGULATORY_DOMAIN:-$(halow_regulatory_domain_for_wifi_domain "$REGULATORY_DOMAIN")}
 
         # Display the loaded settings
         echo "--- Loaded Configuration ---"
@@ -431,6 +467,7 @@ load_config() {
         echo "  Install MediaMTX: $INSTALL_MEDIAMTX"
         echo "  Install Mumble: $INSTALL_MUMBLE"
         echo "  Regulatory Domain: $REGULATORY_DOMAIN"
+        echo "  HaLow Regulatory Region: $HALOW_REGULATORY_DOMAIN"
         echo "  Mesh SSID: $MESH_SSID"
         echo "  Mesh SAE Key: $MESH_SAE_KEY"
         echo "  LAN CIDR Block: $LAN_CIDR_BLOCK"
@@ -906,6 +943,7 @@ mesh_key=${MESH_SAE_KEY}
 ipv4_network=${LAN_CIDR_BLOCK}
 acs=${AUTO_CHANNEL}
 regulatory_domain=${REGULATORY_DOMAIN}
+halow_regulatory_domain=${HALOW_REGULATORY_DOMAIN}
 admin_password=${ADMIN_PW}
 auto_update=${AUTO_UPDATE}
 EOF
@@ -973,6 +1011,7 @@ EOF
         sed -i "s|__AUTO_CHANNEL__|${AUTO_CHANNEL}|g" "$TEMP_PROVISION_SCRIPT"
         sed -i "s|__RADIO_PW__|${RADIO_PW}|g" "$TEMP_PROVISION_SCRIPT"
         sed -i "s|__REGULATORY_DOMAIN__|${REGULATORY_DOMAIN}|g" "$TEMP_PROVISION_SCRIPT"
+        sed -i "s|__HALOW_REGULATORY_DOMAIN__|${HALOW_REGULATORY_DOMAIN}|g" "$TEMP_PROVISION_SCRIPT"
         sed -i "s|__ADMIN_PW__|${ADMIN_PW}|g" "$TEMP_PROVISION_SCRIPT"
         sed -i "s|__AUTO_UPDATE__|${AUTO_UPDATE}|g" "$TEMP_PROVISION_SCRIPT"
         
@@ -1079,6 +1118,7 @@ else
             -e "s|__AUTO_CHANNEL__|${AUTO_CHANNEL}|g" \
             -e "s|__RADIO_PW__|${RADIO_PW}|g" \
             -e "s|__REGULATORY_DOMAIN__|${REGULATORY_DOMAIN}|g" \
+            -e "s|__HALOW_REGULATORY_DOMAIN__|${HALOW_REGULATORY_DOMAIN}|g" \
             -e "s|__ADMIN_PW__|${ADMIN_PW}|g" \
             -e "s|__AUTO_UPDATE__|${AUTO_UPDATE}|g" \
             "$TEMPLATE_FILE" > "$TEMP_SCRIPT_FILE"
