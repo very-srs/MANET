@@ -40,6 +40,7 @@ $Script:RADIO_PW          = ""
 $Script:ADMIN_PW          = ""
 $Script:AUTO_UPDATE       = ""
 $Script:REGULATORY_DOMAIN = ""
+$Script:HALOW_REGULATORY_DOMAIN = ""
 $Script:RPI_IMAGER_PATH   = $null
 
 
@@ -68,6 +69,23 @@ function Test-RegulatoryDomain {
     $domain = $domain.ToUpper()
     if ($validDomains -contains $domain) { return $domain }
     return $null
+}
+
+function Test-EuHalowRegion {
+    param([string]$domain)
+    $euHalowDomains = @(
+        "AT","BE","BG","HR","CY","CZ","DK","EE","FI","FR","DE","GR","HU","IE",
+        "IT","LV","LT","LU","MT","NL","PL","PT","RO","SK","SI","ES","SE",
+        "GB","CH","NO"
+    )
+    return $euHalowDomains -contains $domain.ToUpper()
+}
+
+function Get-HalowRegulatoryDomain {
+    param([string]$wifiDomain)
+    $wifiDomain = $wifiDomain.ToUpper()
+    if (Test-EuHalowRegion -domain $wifiDomain) { return "EU" }
+    return $wifiDomain
 }
 
 function Calculate-Capacity {
@@ -291,7 +309,11 @@ function Ask-Questions {
         $validated = Test-RegulatoryDomain -domain $domain
         if ($validated) {
             $Script:REGULATORY_DOMAIN = $validated
+            $Script:HALOW_REGULATORY_DOMAIN = Get-HalowRegulatoryDomain -wifiDomain $validated
             Write-Host "Using regulatory domain: $($Script:REGULATORY_DOMAIN)"
+            if ($Script:HALOW_REGULATORY_DOMAIN -ne $Script:REGULATORY_DOMAIN) {
+                Write-Host "Using HaLow regulatory region: $($Script:HALOW_REGULATORY_DOMAIN)"
+            }
             break
         } else {
             Write-Host "ERROR: Invalid regulatory domain: $domain" -ForegroundColor Red
@@ -373,6 +395,7 @@ MAX_EUDS_PER_NODE="$($Script:MAX_EUDS_PER_NODE)"
 INSTALL_MEDIAMTX="$($Script:INSTALL_MEDIAMTX)"
 INSTALL_MUMBLE="$($Script:INSTALL_MUMBLE)"
 REGULATORY_DOMAIN="$($Script:REGULATORY_DOMAIN)"
+HALOW_REGULATORY_DOMAIN="$($Script:HALOW_REGULATORY_DOMAIN)"
 MESH_SSID="$($Script:MESH_SSID)"
 MESH_SAE_KEY="$($Script:MESH_SAE_KEY)"
 LAN_CIDR_BLOCK="$($Script:LAN_CIDR_BLOCK)"
@@ -399,6 +422,7 @@ function Load-Config {
                 "INSTALL_MEDIAMTX"  { $Script:INSTALL_MEDIAMTX  = $Matches[2] }
                 "INSTALL_MUMBLE"    { $Script:INSTALL_MUMBLE    = $Matches[2] }
                 "REGULATORY_DOMAIN" { $Script:REGULATORY_DOMAIN = $Matches[2] }
+                "HALOW_REGULATORY_DOMAIN" { $Script:HALOW_REGULATORY_DOMAIN = $Matches[2] }
                 "MESH_SSID"         { $Script:MESH_SSID         = $Matches[2] }
                 "MESH_SAE_KEY"      { $Script:MESH_SAE_KEY      = $Matches[2] }
                 "LAN_CIDR_BLOCK"    { $Script:LAN_CIDR_BLOCK    = $Matches[2] }
@@ -408,6 +432,9 @@ function Load-Config {
                 "AUTO_UPDATE"       { $Script:AUTO_UPDATE       = $Matches[2] }
             }
         }
+    }
+    if (-not $Script:HALOW_REGULATORY_DOMAIN) {
+        $Script:HALOW_REGULATORY_DOMAIN = Get-HalowRegulatoryDomain -wifiDomain $Script:REGULATORY_DOMAIN
     }
 
     Write-Host "--- Loaded Configuration ---"
@@ -420,6 +447,7 @@ function Load-Config {
     Write-Host "  Install MediaMTX: $($Script:INSTALL_MEDIAMTX)"
     Write-Host "  Install Mumble: $($Script:INSTALL_MUMBLE)"
     Write-Host "  Regulatory Domain: $($Script:REGULATORY_DOMAIN)"
+    Write-Host "  HaLow Regulatory Region: $($Script:HALOW_REGULATORY_DOMAIN)"
     Write-Host "  Mesh SSID: $($Script:MESH_SSID)"
     Write-Host "  Mesh SAE Key: $($Script:MESH_SAE_KEY)"
     Write-Host "  LAN CIDR Block: $($Script:LAN_CIDR_BLOCK)"
@@ -844,6 +872,7 @@ mesh_key=$($Script:MESH_SAE_KEY)
 ipv4_network=$($Script:LAN_CIDR_BLOCK)
 acs=$($Script:AUTO_CHANNEL)
 regulatory_domain=$($Script:REGULATORY_DOMAIN)
+halow_regulatory_domain=$($Script:HALOW_REGULATORY_DOMAIN)
 admin_password=$($Script:ADMIN_PW)
 auto_update=$($Script:AUTO_UPDATE)
 "@
@@ -928,6 +957,7 @@ auto_update=$($Script:AUTO_UPDATE)
             -replace '__AUTO_CHANNEL__',      $Script:AUTO_CHANNEL `
             -replace '__RADIO_PW__',          $Script:RADIO_PW `
             -replace '__REGULATORY_DOMAIN__', $Script:REGULATORY_DOMAIN `
+            -replace '__HALOW_REGULATORY_DOMAIN__', $Script:HALOW_REGULATORY_DOMAIN `
             -replace '__ADMIN_PW__',          $Script:ADMIN_PW `
             -replace '__AUTO_UPDATE__',       $Script:AUTO_UPDATE
 
@@ -1070,6 +1100,7 @@ WantedBy=multi-user.target
         -replace '__AUTO_CHANNEL__',      $Script:AUTO_CHANNEL `
         -replace '__RADIO_PW__',          $Script:RADIO_PW `
         -replace '__REGULATORY_DOMAIN__', $Script:REGULATORY_DOMAIN `
+        -replace '__HALOW_REGULATORY_DOMAIN__', $Script:HALOW_REGULATORY_DOMAIN `
         -replace '__ADMIN_PW__',          $Script:ADMIN_PW `
         -replace '__AUTO_UPDATE__',       $Script:AUTO_UPDATE
 

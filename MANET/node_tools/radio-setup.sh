@@ -145,9 +145,28 @@ EOF
 
 REGULATORY_DOMAIN=$(grep "^regulatory_domain=" /etc/mesh.conf 2>/dev/null | cut -d'=' -f2)
 REGULATORY_DOMAIN=${REGULATORY_DOMAIN:-US}  # Default to US if not found
+HALOW_REGULATORY_DOMAIN=$(grep "^halow_regulatory_domain=" /etc/mesh.conf 2>/dev/null | cut -d'=' -f2)
+HALOW_REGULATORY_DOMAIN=${HALOW_REGULATORY_DOMAIN:-$REGULATORY_DOMAIN}
 REG=$REGULATORY_DOMAIN
 
 echo REGDOMAIN=$REGULATORY_DOMAIN > /etc/default/crda
+
+uses_eu_halow_region() {
+    local domain="$1"
+
+    case "$domain" in
+        AT|BE|BG|HR|CY|CZ|DK|EE|FI|FR|DE|GR|HU|IE|IT|LV|LT|LU|MT|NL|PL|PT|RO|SK|SI|ES|SE|GB|CH|NO)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+if [ -z "$HALOW_REGULATORY_DOMAIN" ] || uses_eu_halow_region "$REGULATORY_DOMAIN"; then
+    HALOW_REGULATORY_DOMAIN="EU"
+fi
 
 
 # Wait for wireless drivers to load
@@ -590,7 +609,7 @@ EOF
 
     rm -f /etc/wpa_supplicant/*${WLAN}* 2>/dev/null
 
-    if [[ "$REG" == "US" ]]; then
+    if [[ "$HALOW_REGULATORY_DOMAIN" == "US" ]]; then
 cat << EOF > /etc/wpa_supplicant/wpa_supplicant-$WLAN-s1g.conf
 country="US"
 ctrl_interface=/var/run/wpa_supplicant_s1g
@@ -625,7 +644,7 @@ network={
 EOF
     else
 cat << EOF > /etc/wpa_supplicant/wpa_supplicant-$WLAN-s1g.conf
-country="$REG"
+country="$HALOW_REGULATORY_DOMAIN"
 ctrl_interface=/var/run/wpa_supplicant_s1g
 sae_pwe=1
 max_peer_links=10
@@ -636,7 +655,7 @@ network={
     mode=5
     channel=6
     op_class=67
-    country="$REG"
+    country="$HALOW_REGULATORY_DOMAIN"
     s1g_prim_chwidth=0
     s1g_prim_1mhz_chan_index=0
     dtim_period=1
@@ -696,13 +715,13 @@ if [ -f /etc/modprobe.d/morse.conf ]; then
 fi
 
 echo "options morse enable_mcast_whitelist=0 enable_mcast_rate_control=1" > /etc/modprobe.d/morse.conf
-echo "options morse country=$REGULATORY_DOMAIN" >> /etc/modprobe.d/morse.conf
+echo "options morse country=$HALOW_REGULATORY_DOMAIN" >> /etc/modprobe.d/morse.conf
 
 [[ -n "$MORSE_BCF" ]]       && echo "options morse bcf=$MORSE_BCF" >> /etc/modprobe.d/morse.conf
 [[ -n "$MORSE_SPI_CLOCK" ]] && echo "options morse spi_clock_speed=$MORSE_SPI_CLOCK" >> /etc/modprobe.d/morse.conf
 
 
-if [[ "$REG" == "EU" ]]; then
+if [[ "$HALOW_REGULATORY_DOMAIN" == "EU" ]]; then
     echo "options morse enable_auto_duty_cycle=0 enable_auto_mpsw=0" >> /etc/modprobe.d/morse.conf
 fi
 
