@@ -16,8 +16,8 @@ LOBBY_FREQ_2_4=2412
 LOBBY_FREQ_5_0=5180
 
 # Radio Config
-WPA_CONF_2_4="/etc/wpa_supplicant/wpa_supplicant-wlan0.conf"
-WPA_CONF_5_0="/etc/wpa_supplicant/wpa_supplicant-wlan1.conf"
+WPA_CONF_2_4="/etc/wpa_supplicant/wpa_supplicant-wlan1.conf"
+WPA_CONF_5_0="/etc/wpa_supplicant/wpa_supplicant-wlan2.conf"
 
 # Scan frequencies
 SCAN_FREQS_2_4="2412 2437 2462"
@@ -151,8 +151,8 @@ return_to_lobby() {
     log "Returning to lobby channels..."
     sed -i "s/frequency=.*/frequency=${LOBBY_FREQ_2_4}/" "$WPA_CONF_2_4"
     sed -i "s/frequency=.*/frequency=${LOBBY_FREQ_5_0}/" "$WPA_CONF_5_0"
-    systemctl restart wpa_supplicant@wlan0.service
     systemctl restart wpa_supplicant@wlan1.service
+    systemctl restart wpa_supplicant@wlan2.service
     sleep 5
 }
 
@@ -340,8 +340,8 @@ while true; do
                 sed -i "s/frequency=.*/frequency=${DATA_CHANNEL_2_4}/" "$WPA_CONF_2_4"
                 sed -i "s/frequency=.*/frequency=${DATA_CHANNEL_5_0}/" "$WPA_CONF_5_0"
 
-                systemctl restart wpa_supplicant@wlan0.service
                 systemctl restart wpa_supplicant@wlan1.service
+                systemctl restart wpa_supplicant@wlan2.service
                 sleep 5
             fi
         fi

@@ -21,29 +21,67 @@ else
     exit 1
 fi
 
-# Find all the wireless network interfaces
-WLAN_INTERFACES=$(networkctl | awk '/wlan/ {print $2}' | tr '\n' ' ')
+iface_driver() {
+    local iface="$1"
+    local driver
 
-# Read HaLow interfaces - these require a different enslave path
-HALOW_INTERFACES=""
-if [ -f /var/lib/halow_if ]; then
-    HALOW_INTERFACES=$(cat /var/lib/halow_if | tr '\n' ' ')
-fi
+    driver="$(basename "$(readlink -f /sys/class/net/$iface/device/driver 2>/dev/null)")"
+    if [[ -z "$driver" || "$driver" == "." ]]; then
+        driver="$(ethtool -i "$iface" 2>/dev/null | awk -F': ' '$1 == "driver" {print $2; exit}')"
+    fi
 
-# Read AP interface if configured, it will not be in the bat0 bridge
-AP_INTERFACE=""
-if [ -f /var/lib/ap_interface ]; then
-    AP_INTERFACE=$(cat /var/lib/ap_interface)
-    echo "AP interface detected: $AP_INTERFACE (will be excluded from batman mesh)"
-fi
+    echo "$driver"
+}
 
-# Helper: returns 0 (true) if the given interface is a HaLow interface
+iface_phy() {
+    local iface="$1"
+    iw dev "$iface" info 2>/dev/null | awk '/wiphy/ {print "phy"$2; exit}'
+}
+
+iface_supports_mesh() {
+    local iface="$1"
+    local phyname
+
+    phyname="$(iface_phy "$iface")"
+    [[ -n "$phyname" ]] && iw phy "$phyname" info 2>/dev/null | grep -q "mesh point"
+}
+
 is_halow() {
-    echo "$HALOW_INTERFACES" | grep -qw "$1"
+    [[ "$(iface_driver "$1")" == morse* ]]
+}
+
+is_nonmesh_wifi() {
+    [[ "$(iface_driver "$1")" == brcmfmac ]]
+}
+
+refresh_interfaces() {
+    WLAN_INTERFACES="$(iw dev 2>/dev/null | awk '$1 == "Interface" {print $2}' | tr '\n' ' ')"
+    STANDARD_MESH_INTERFACES=""
+    HALOW_INTERFACES=""
+    NONMESH_INTERFACES=""
+
+    for WLAN in $WLAN_INTERFACES; do
+        if is_halow "$WLAN"; then
+            HALOW_INTERFACES+="$WLAN "
+        elif is_nonmesh_wifi "$WLAN"; then
+            NONMESH_INTERFACES+="$WLAN "
+        elif iface_supports_mesh "$WLAN"; then
+            STANDARD_MESH_INTERFACES+="$WLAN "
+        else
+            NONMESH_INTERFACES+="$WLAN "
+        fi
+    done
+
+    echo "Runtime wireless classification:"
+    echo "  Standard mesh: $STANDARD_MESH_INTERFACES"
+    echo "  HaLow: $HALOW_INTERFACES"
+    echo "  Non-mesh/AP: $NONMESH_INTERFACES"
 }
 
 start() {
     echo "Starting BATMAN-ADV setup..."
+    refresh_interfaces
+
     # Change to batman V routing algorithm
     batctl ra BATMAN_V
 
@@ -62,29 +100,13 @@ start() {
     # -------------------------------------------------------------------------
     # Standard 802.11 mesh interfaces
     # -------------------------------------------------------------------------
-    for WLAN in $WLAN_INTERFACES; do
-        # Skip AP interface - it must not be added to batman mesh
-        if [ -n "$AP_INTERFACE" ] && [ "$WLAN" == "$AP_INTERFACE" ]; then
-            echo "--> Skipping $WLAN (configured as AP interface)"
-            continue
-        fi
-
-        # HaLow interfaces are handled in the dedicated section below;
-        # attempting 'ip link set type mesh' on an S1G interface will fail and
-        # (with set -e) kill this entire script.
-        if is_halow "$WLAN"; then
-            echo "--> Skipping $WLAN in standard mesh loop (HaLow - handled below)"
-            continue
-        fi
-
+    for WLAN in $STANDARD_MESH_INTERFACES; do
         echo "--> Configuring standard mesh interface: $WLAN"
 
-        # Set the interface type to mesh
-        ip link set "$WLAN" type mesh
-        ip link set "$WLAN" up
-
-        # Wait for interface to be operationally up in mesh mode
-        echo "Waiting for $WLAN to be ready..."
+        # wpa_supplicant owns standard mesh interfaces. Do not force the type
+        # here or we can race the supplicant and knock the interface back to
+        # managed mode. Just wait for the configured supplicant to join mesh.
+        echo "Waiting for $WLAN to be ready (managed by wpa_supplicant)..."
         for i in {1..15}; do
             if ip link show "$WLAN" | grep -q "state UP" && \
                iw dev "$WLAN" info | grep -q "type mesh point"; then
@@ -191,11 +213,8 @@ start() {
 # Clear out bat0
 stop() {
     echo "Stopping BATMAN-ADV..."
-    for WLAN in $WLAN_INTERFACES; do
-        # Skip AP interface
-        if [ -n "$AP_INTERFACE" ] && [ "$WLAN" == "$AP_INTERFACE" ]; then
-            continue
-        fi
+    refresh_interfaces
+    for WLAN in $STANDARD_MESH_INTERFACES $HALOW_INTERFACES; do
         if batctl bat0 if | grep -q "$WLAN"; then
             batctl bat0 if del "$WLAN"
         fi
