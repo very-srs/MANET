@@ -25,7 +25,7 @@ validate_regulatory_domain() {
         "US" "CA" "GB" "DE" "FR" "IT" "ES" "NL" "BE" "AT" "CH" "SE" "NO" "DK" "FI"
         "PL" "CZ" "HU" "GR" "PT" "IE" "RO" "BG" "HR" "SI" "SK" "LT" "LV" "EE" "CY"
         "MT" "LU" "AU" "NZ" "JP" "KR" "TW" "SG" "MY" "TH" "PH" "ID" "VN" "IN" "CN"
-        "BR" "AR" "MX" "CL" "CO" "PE" "ZA" "IL" "AE" "SA" "RU" "UA" "TR" "EG" "MA"
+        "BR" "AR" "MX" "CL" "CO" "PE" "ZA" "IL" "AE" "SA" "RU" "UA" "TR" "EG"
     )
 
     # Convert to uppercase for comparison
@@ -310,6 +310,7 @@ ask_questions() {
             echo "Please enter a valid 2-letter ISO country code (e.g., US, GB, DE, FR, JP)"
             echo "Common codes: US (United States), GB (UK), DE (Germany), FR (France), JP (Japan)"
             echo "              CA (Canada), AU (Australia), NZ (New Zealand), CN (China)"
+			echo "NOTE: EU is not a country code, use your actual country"
         fi
     done
 
