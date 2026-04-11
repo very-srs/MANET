@@ -674,14 +674,14 @@ echo "options cfg80211 ieee80211_regdom=$REGULATORY_DOMAIN" > /etc/modprobe.d/cf
 MORSE_BCF=""
 MORSE_SPI_CLOCK=""
 if [ -f /etc/modprobe.d/morse.conf ]; then
-    MORSE_BCF=$(grep -oP '(?<=bcf=)\S+' /etc/modprobe.d/morse.conf | head -1)
-    MORSE_SPI_CLOCK=$(grep -oP '(?<=spi_clock_speed=)\S+' /etc/modprobe.d/morse.conf | head -1)
+#    MORSE_BCF=$(grep -oP '(?<=bcf=)\S+' /etc/modprobe.d/morse.conf | head -1)
+#    MORSE_SPI_CLOCK=$(grep -oP '(?<=spi_clock_speed=)\S+' /etc/modprobe.d/morse.conf | head -1)
 fi
 
 echo "options morse enable_mcast_whitelist=0 enable_mcast_rate_control=1" > /etc/modprobe.d/morse.conf
 echo "options morse country=$REG" >> /etc/modprobe.d/morse.conf
-[[ -n "$MORSE_BCF" ]]       && echo "options morse bcf=$MORSE_BCF" >> /etc/modprobe.d/morse.conf
-[[ -n "$MORSE_SPI_CLOCK" ]] && echo "options morse spi_clock_speed=$MORSE_SPI_CLOCK" >> /etc/modprobe.d/morse.conf
+#[[ -n "$MORSE_BCF" ]]       && echo "options morse bcf=$MORSE_BCF" >> /etc/modprobe.d/morse.conf
+#[[ -n "$MORSE_SPI_CLOCK" ]] && echo "options morse spi_clock_speed=$MORSE_SPI_CLOCK" >> /etc/modprobe.d/morse.conf
 
 
 if [[ "$REG" == "EU" ]]; then
