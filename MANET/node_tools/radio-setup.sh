@@ -104,6 +104,17 @@ if [[ -n "$acs" ]]; then
         echo " > This mesh will remain on a static channel ..."
         cp /usr/local/bin/node-manager-static.sh /usr/local/bin/node-manager.sh
     fi
+
+    # This Pi 5 hardware map reserves wlan0 for the onboard EUD AP. The
+    # MT7915 mesh radios are expected at wlan1/wlan2 after stable naming.
+    sed -i \
+        -e 's|^WPA_CONF_2_4=.*|WPA_CONF_2_4="/etc/wpa_supplicant/wpa_supplicant-wlan1.conf"|' \
+        -e 's|^WPA_CONF_5_0=.*|WPA_CONF_5_0="/etc/wpa_supplicant/wpa_supplicant-wlan2.conf"|' \
+        -e 's/systemctl restart wpa_supplicant@wlan0.service/__RESTART_WPA_24__/g' \
+        -e 's/systemctl restart wpa_supplicant@wlan1.service/__RESTART_WPA_50__/g' \
+        -e 's/__RESTART_WPA_24__/systemctl restart wpa_supplicant@wlan1.service/g' \
+        -e 's/__RESTART_WPA_50__/systemctl restart wpa_supplicant@wlan2.service/g' \
+        /usr/local/bin/node-manager.sh
 fi
 
 sleep 2
@@ -177,67 +188,96 @@ mesh_ifaces=()
 halow_ifaces=()
 nonmesh_ifaces=()
 
-for phy in $(iw dev | awk '/^phy#/{print $1}'); do
-    phyname=${phy//#/}
+iface_driver() {
+    local iface="$1"
+    local driver
 
-    # Find interface(s) for this PHY
-    iface=$(iw dev | awk -v target="$phy" '
-        $1 ~ /^phy#/ { current_phy = $1 }
-        current_phy == target && $1 == "Interface" { print $2 }
-    ')
+    driver="$(basename "$(readlink -f /sys/class/net/$iface/device/driver 2>/dev/null)")"
+    if [[ -z "$driver" || "$driver" == "." ]]; then
+        driver="$(ethtool -i "$iface" 2>/dev/null | awk -F': ' '$1 == "driver" {print $2; exit}')"
+    fi
 
-    # Check if it's HaLow (802.11ah) - look for 0.5 Mbps rates unique to S1G
-    if iw phy "$phyname" info | grep -q "0.5 Mbps"; then
+    echo "$driver"
+}
+
+is_halow_iface() {
+    local iface="$1"
+    local driver
+
+    driver="$(iface_driver "$iface")"
+    [[ "$driver" == morse* ]]
+}
+
+is_nonmesh_wifi() {
+    local iface="$1"
+    local driver
+
+    driver="$(iface_driver "$iface")"
+
+    # Raspberry Pi onboard Wi-Fi advertises mesh point support in some kernels,
+    # but on this platform it is reserved for the EUD AP/hotspot. Keep it out
+    # of mesh_if so rerunning setup cannot enslave the AP radio to bat0.
+    [[ "$driver" == brcmfmac ]]
+}
+
+iface_phy() {
+    local iface="$1"
+    iw dev "$iface" info 2>/dev/null | awk '/wiphy/ {print "phy"$2; exit}'
+}
+
+iface_supports_mesh() {
+    local iface="$1"
+    local phyname
+
+    phyname="$(iface_phy "$iface")"
+    [[ -n "$phyname" ]] && iw phy "$phyname" info 2>/dev/null | grep -q "mesh point"
+}
+
+for iface in $(iw dev | awk '$1 == "Interface" {print $2}'); do
+    if is_halow_iface "$iface"; then
         halow_ifaces+=("$iface")
-    elif iw phy "$phyname" info | grep -q "mesh point"; then
+    elif is_nonmesh_wifi "$iface"; then
+        nonmesh_ifaces+=("$iface")
+    elif iface_supports_mesh "$iface"; then
         mesh_ifaces+=("$iface")
     else
         nonmesh_ifaces+=("$iface")
     fi
 done
 
-# Sort mesh_ifaces: 2.4GHz first, then 5GHz
-mesh_24=()
-mesh_5=()
-for iface in "${mesh_ifaces[@]}"; do
-    phyname=$(iw dev "$iface" info 2>/dev/null | awk '/wiphy/ {print "phy" $2}')
-    if iw phy "$phyname" info 2>/dev/null | grep -qE "\*\s+24[0-9][0-9]"; then
-        mesh_24+=("$iface")
-    else
-        mesh_5+=("$iface")
-    fi
-done
-mesh_ifaces=("${mesh_24[@]}" "${mesh_5[@]}")
+# Keep stable wlan naming order. On this Pi 5 node wlan1 is the 2.4 GHz MT7915
+# mesh radio and wlan2 is the 5 GHz MT7915 mesh radio. Sorting by "supports
+# 2.4 GHz" is unsafe because multi-band capable radios can be placed in the
+# wrong lobby config.
+if [ "${#mesh_ifaces[@]}" -gt 0 ]; then
+    mapfile -t mesh_ifaces < <(printf '%s\n' "${mesh_ifaces[@]}" | sort -V)
+fi
 
 # Create directory and files (supports wired-only configs if arrays are empty)
 mkdir -p /var/lib
 > /var/lib/mesh_if
 > /var/lib/halow_if
 > /var/lib/no_mesh_if
-> /var/lib/iface_map   # logical_name:physical_name (for MAC lookups during provisioning)
+> /var/lib/iface_map   # runtime_name:physical_name (for MAC lookups during provisioning)
 
-# Assign logical wlan numbers in order: 2.4GHz mesh, 5GHz mesh, HaLow, non-mesh
-WLAN_IDX=0
+# Persist the runtime interface names. The rest of the setup and boot scripts
+# consume these files as live netdev names, so writing desired logical names
+# before udev has renamed anything can make HaLow and non-mesh devices appear
+# swapped. Keep iface_map as an identity map for phys_iface() callers.
 for iface in "${mesh_ifaces[@]}"; do
-    newname="wlan$WLAN_IDX"
-    echo "$newname" >> /var/lib/mesh_if
-    echo "$newname:$iface" >> /var/lib/iface_map
-    echo " > Mapped $iface (mesh) → $newname"
-    ((WLAN_IDX++))
+    echo "$iface" >> /var/lib/mesh_if
+    echo "$iface:$iface" >> /var/lib/iface_map
+    echo " > Mapped $iface (mesh)"
 done
 for iface in "${halow_ifaces[@]}"; do
-    newname="wlan$WLAN_IDX"
-    echo "$newname" >> /var/lib/halow_if
-    echo "$newname:$iface" >> /var/lib/iface_map
-    echo " > Mapped $iface (HaLow) → $newname"
-    ((WLAN_IDX++))
+    echo "$iface" >> /var/lib/halow_if
+    echo "$iface:$iface" >> /var/lib/iface_map
+    echo " > Mapped $iface (HaLow)"
 done
 for iface in "${nonmesh_ifaces[@]}"; do
-    newname="wlan$WLAN_IDX"
-    echo "$newname" >> /var/lib/no_mesh_if
-    echo "$newname:$iface" >> /var/lib/iface_map
-    echo " > Mapped $iface (non-mesh) → $newname"
-    ((WLAN_IDX++))
+    echo "$iface" >> /var/lib/no_mesh_if
+    echo "$iface:$iface" >> /var/lib/iface_map
+    echo " > Mapped $iface (non-mesh)"
 done
 
 # Log what we found
@@ -388,6 +428,14 @@ Unmanaged=yes
 ActivationPolicy=manual
 EOF
 
+    cat <<-EOF > /etc/systemd/network/10-${AP_INTERFACE}.link
+[Match]
+MACAddress=$(ip a | grep -A1 "$(phys_iface $AP_INTERFACE)" | awk '/ether/ {print $2}')
+
+[Link]
+Name=$AP_INTERFACE
+EOF
+
     # Get configuration from mesh.conf
     while IFS= read -r line; do
         [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
@@ -419,17 +467,20 @@ EOF
 
     echo " > DHCP pool: $DHCP_START - $DHCP_END (${POOL_SIZE} IPs for ${MAX_EUDS} EUDs × ${MAX_NODES} nodes)"
 
+    AP_CHANNEL="${lan_ap_channel:-11}"
+
     cat <<-EOF > /etc/hostapd/hostapd.conf
 interface=$AP_INTERFACE
+bridge=br0
 driver=nl80211
 ssid=${LAN_AP_SSID}-${HOST_MAC}
+country_code=$REGULATORY_DOMAIN
+ieee80211d=1
 
-# 5GHz 802.11ax configuration
-hw_mode=a
-channel=acs_survey
+# Raspberry Pi onboard 2.4 GHz AP for EUD clients
+hw_mode=g
+channel=$AP_CHANNEL
 ieee80211n=1
-ieee80211ac=1
-ieee80211ax=1
 wmm_enabled=1
 
 # WPA2 security
@@ -439,41 +490,7 @@ wpa_key_mgmt=WPA-PSK
 wpa_pairwise=CCMP
 rsn_pairwise=CCMP
 wpa_passphrase=$LAN_AP_KEY
-
-# Regulatory
-country_code=$REGULATORY_DOMAIN
-
-# Performance
-ht_capab=[HT40+][SHORT-GI-20][SHORT-GI-40]
-vht_capab=[RXLDPC][SHORT-GI-80][TX-STBC-2BY1][RX-STBC-1]
-
-# DHCP script hook for adding host routes
-dhcp-script=/usr/local/bin/dhcp-eud-route.sh
 EOF
-
-    cat <<-EOF > /usr/local/bin/dhcp-eud-route.sh
-#!/bin/bash
-# Called by dnsmasq when DHCP events occur
-# Args: add|old <mac> <ip> <hostname>
-
-ACTION=\$1
-MAC=\$2
-IP=\$3
-HOSTNAME=\$4
-AP_IF="$AP_INTERFACE"
-
-case "\$ACTION" in
-    add|old)
-        ip route add \$IP dev \$AP_IF 2>/dev/null
-        logger -t dhcp-eud "Added route for \$IP via \$AP_IF"
-        ;;
-    del)
-        ip route del \$IP dev \$AP_IF 2>/dev/null
-        logger -t dhcp-eud "Removed route for \$IP"
-        ;;
-esac
-EOF
-    chmod +x /usr/local/bin/dhcp-eud-route.sh
 
     cat <<-EOF > /etc/systemd/system/ap-txpower.service
 [Unit]
@@ -674,14 +691,15 @@ echo "options cfg80211 ieee80211_regdom=$REGULATORY_DOMAIN" > /etc/modprobe.d/cf
 MORSE_BCF=""
 MORSE_SPI_CLOCK=""
 if [ -f /etc/modprobe.d/morse.conf ]; then
-#    MORSE_BCF=$(grep -oP '(?<=bcf=)\S+' /etc/modprobe.d/morse.conf | head -1)
-#    MORSE_SPI_CLOCK=$(grep -oP '(?<=spi_clock_speed=)\S+' /etc/modprobe.d/morse.conf | head -1)
+    MORSE_BCF=$(grep -oP '(?<=bcf=)\S+' /etc/modprobe.d/morse.conf | head -1)
+    MORSE_SPI_CLOCK=$(grep -oP '(?<=spi_clock_speed=)\S+' /etc/modprobe.d/morse.conf | head -1)
 fi
 
 echo "options morse enable_mcast_whitelist=0 enable_mcast_rate_control=1" > /etc/modprobe.d/morse.conf
-echo "options morse country=$REG" >> /etc/modprobe.d/morse.conf
-#[[ -n "$MORSE_BCF" ]]       && echo "options morse bcf=$MORSE_BCF" >> /etc/modprobe.d/morse.conf
-#[[ -n "$MORSE_SPI_CLOCK" ]] && echo "options morse spi_clock_speed=$MORSE_SPI_CLOCK" >> /etc/modprobe.d/morse.conf
+echo "options morse country=$REGULATORY_DOMAIN" >> /etc/modprobe.d/morse.conf
+
+[[ -n "$MORSE_BCF" ]]       && echo "options morse bcf=$MORSE_BCF" >> /etc/modprobe.d/morse.conf
+[[ -n "$MORSE_SPI_CLOCK" ]] && echo "options morse spi_clock_speed=$MORSE_SPI_CLOCK" >> /etc/modprobe.d/morse.conf
 
 
 if [[ "$REG" == "EU" ]]; then
@@ -763,8 +781,8 @@ for WLAN in $(cat /var/lib/mesh_if); do
         ((INT_CT++))
         continue
     fi
-    AFTER_DEVICES+="sys-subsystem-net-devices-wlan$INT_CT.device "
-    WANTS_SERVICES+="wpa_supplicant@wlan$INT_CT.service "
+    AFTER_DEVICES+="sys-subsystem-net-devices-$WLAN.device "
+    WANTS_SERVICES+="wpa_supplicant@$WLAN.service "
     ((INT_CT++))
 done
 for WLAN in $(cat /var/lib/halow_if | head -n 1); do
