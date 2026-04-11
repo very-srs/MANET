@@ -714,6 +714,7 @@ systemctl enable systemd-resolved
 echo "mesh_key=__MESH_SAE_KEY__" > /etc/mesh.conf
 echo "mesh_ssid=__MESH_SSID__" >> /etc/mesh.conf
 echo "regulatory_domain=__REGULATORY_DOMAIN__" >> /etc/mesh.conf
+echo "halow_regulatory_domain=__HALOW_REGULATORY_DOMAIN__" >> /etc/mesh.conf
 echo "lan_ap_ssid=__LAN_AP_SSID__" >> /etc/mesh.conf
 echo "lan_ap_key=__LAN_AP_KEY__" >> /etc/mesh.conf
 echo "ipv4_network=__LAN_CIDR_BLOCK__"  >> /etc/mesh.conf
