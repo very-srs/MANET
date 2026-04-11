@@ -18,8 +18,8 @@ STATIC_FREQ_2_4=2412
 STATIC_FREQ_5_0=5180
 
 # Radio Config
-WPA_CONF_2_4="/etc/wpa_supplicant/wpa_supplicant-wlan0.conf"
-WPA_CONF_5_0="/etc/wpa_supplicant/wpa_supplicant-wlan1.conf"
+WPA_CONF_2_4="/etc/wpa_supplicant/wpa_supplicant-wlan1.conf"
+WPA_CONF_5_0="/etc/wpa_supplicant/wpa_supplicant-wlan2.conf"
 
 # Helper scripts
 REGISTRY_BUILDER="/usr/local/bin/mesh-registry-builder.sh"
@@ -121,8 +121,8 @@ ensure_static_channels() {
     
     if [ "$needs_restart" = true ]; then
         log "Restarting wpa_supplicant services..."
-        systemctl restart wpa_supplicant@wlan0.service
         systemctl restart wpa_supplicant@wlan1.service
+        systemctl restart wpa_supplicant@wlan2.service
         sleep 5
     fi
 }
