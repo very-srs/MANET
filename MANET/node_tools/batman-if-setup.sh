@@ -152,19 +152,19 @@ start() {
     # -------------------------------------------------------------------------
     # HaLow / 802.11ah interfaces
     #
-    # wpa_supplicant_s1g already owns these in S1G mesh mode (mode=5 in the
-    # conf). Do NOT call 'ip link set type mesh' - that will fail and/or break
-    # the S1G driver session. Just wait for the interface to come UP (which
-    # happens once wpa_supplicant_s1g has finished initialising), then add to
-    # bat0 exactly like any other mesh interface.
+    # wpa_supplicant_s1g owns these devices. Do NOT call 'ip link set type mesh'
+    # on an S1G interface. Some Morse driver builds do not report operstate UP
+    # even when batman-adv can enslave the interface, so wait for the netdev to
+    # exist and let batctl's retry loop decide whether the interface is usable.
     # -------------------------------------------------------------------------
     for WLAN in $HALOW_INTERFACES; do
         echo "--> Configuring HaLow interface: $WLAN"
 
-        echo "Waiting for $WLAN to be ready (managed by wpa_supplicant_s1g)..."
+        echo "Waiting for $WLAN netdev (managed by wpa_supplicant_s1g)..."
         for i in {1..30}; do
-            if ip link show "$WLAN" 2>/dev/null | grep -q "state UP"; then
-                echo "$WLAN is up."
+            if ip link show "$WLAN" >/dev/null 2>&1; then
+                ip link set "$WLAN" up 2>/dev/null || true
+                echo "$WLAN exists."
                 break
             fi
             if [ $i -eq 30 ]; then

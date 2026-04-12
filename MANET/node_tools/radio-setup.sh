@@ -105,16 +105,6 @@ if [[ -n "$acs" ]]; then
         cp /usr/local/bin/node-manager-static.sh /usr/local/bin/node-manager.sh
     fi
 
-    # This Pi 5 hardware map reserves wlan0 for the onboard EUD AP. The
-    # MT7915 mesh radios are expected at wlan1/wlan2 after stable naming.
-    sed -i \
-        -e 's|^WPA_CONF_2_4=.*|WPA_CONF_2_4="/etc/wpa_supplicant/wpa_supplicant-wlan1.conf"|' \
-        -e 's|^WPA_CONF_5_0=.*|WPA_CONF_5_0="/etc/wpa_supplicant/wpa_supplicant-wlan2.conf"|' \
-        -e 's/systemctl restart wpa_supplicant@wlan0.service/__RESTART_WPA_24__/g' \
-        -e 's/systemctl restart wpa_supplicant@wlan1.service/__RESTART_WPA_50__/g' \
-        -e 's/__RESTART_WPA_24__/systemctl restart wpa_supplicant@wlan1.service/g' \
-        -e 's/__RESTART_WPA_50__/systemctl restart wpa_supplicant@wlan2.service/g' \
-        /usr/local/bin/node-manager.sh
 fi
 
 sleep 2
@@ -122,6 +112,32 @@ sleep 2
 #
 # Finish setting up network devices (wireless)
 #
+
+cat << 'EOF' > /usr/local/bin/unblock-wifi-rfkill.sh
+#!/bin/sh
+for rfkill in /sys/class/rfkill/rfkill*; do
+    [ -e "$rfkill/type" ] || continue
+    [ "$(cat "$rfkill/type" 2>/dev/null)" = "wlan" ] || continue
+    [ "$(cat "$rfkill/hard" 2>/dev/null)" = "1" ] && continue
+    echo 0 > "$rfkill/soft" 2>/dev/null || true
+done
+EOF
+chmod +x /usr/local/bin/unblock-wifi-rfkill.sh
+/usr/local/bin/unblock-wifi-rfkill.sh
+
+cat << EOF > /etc/systemd/system/wifi-rfkill-unblock.service
+[Unit]
+Description=Unblock Wi-Fi rfkill switches
+Before=hostapd.service batman-enslave.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/unblock-wifi-rfkill.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
 
 # A system service to force mesh point mode on the wlan interfaces
 cat << EOF > /etc/systemd/system/mesh-interface-setup@.service
@@ -133,6 +149,7 @@ After=sys-subsystem-net-devices-%i.device
 
 [Service]
 Type=oneshot
+ExecStartPre=/usr/local/bin/unblock-wifi-rfkill.sh
 ExecStartPre=/bin/sleep 1
 ExecStart=/usr/sbin/ip link set %I down
 ExecStart=/usr/sbin/iw dev %I set type mp
@@ -428,6 +445,7 @@ After=sys-subsystem-net-devices-${AP_INTERFACE}.device
 
 [Service]
 Type=oneshot
+ExecStartPre=/usr/local/bin/unblock-wifi-rfkill.sh
 ExecStart=/usr/sbin/ip link set $AP_INTERFACE down
 ExecStart=/usr/sbin/iw dev $AP_INTERFACE set type managed
 ExecStart=/usr/sbin/ip link set $AP_INTERFACE up
@@ -519,7 +537,7 @@ BindsTo=sys-subsystem-net-devices-${AP_INTERFACE}.device
 
 [Service]
 Type=oneshot
-ExecStart=/usr/sbin/iw dev $AP_INTERFACE set txpower fixed 500
+ExecStart=/bin/sh -c '/usr/sbin/iw dev $AP_INTERFACE set txpower fixed 500 || true'
 RemainAfterExit=yes
 
 [Install]
@@ -685,6 +703,7 @@ Requires=sys-subsystem-net-devices-${WLAN}.device
 
 [Service]
 Type=simple
+ExecStartPre=/usr/local/bin/unblock-wifi-rfkill.sh
 ExecStartPre=/bin/sleep 3
 ExecStart=/usr/sbin/wpa_supplicant_s1g -c /etc/wpa_supplicant/wpa_supplicant-$WLAN-s1g.conf -i $WLAN -D nl80211
 Restart=on-failure
@@ -746,6 +765,7 @@ TimeoutStartSec=infinity
 WantedBy=sysinit.target
 EOF
 systemctl enable led-boot.service
+systemctl enable wifi-rfkill-unblock.service
 
 cat << EOF > /etc/systemd/system/button-monitor.service
 [Unit]
