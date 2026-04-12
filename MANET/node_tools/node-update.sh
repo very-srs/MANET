@@ -107,7 +107,7 @@ else
 	        if [ "$ROUTINE_MODE" = false ]; then
 	            echo "Running on Pi 5"
 	        fi
-	        wget -q  https://www.colorado-governor.com/manet/rpi5-tools.tar.gz -O /root/tools.tar.gz 2>/dev/null || {
+	        wget -q https://www.colorado-governor.com/manet/rpi5/rpi5-tools.tar.gz -O /root/tools.tar.gz 2>/dev/null || {
                 if [ "$ROUTINE_MODE" = false ]; then
                     echo "ERROR: Failed to download rpi5 tools package.  Not updating"
                 fi
