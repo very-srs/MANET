@@ -45,9 +45,19 @@ phys_iface() {
 echo "Installing morse driver"
 mkdir -p /lib/modules/$(uname -r)/extra/morse
 
-# Copy modules
-cp /root/morse_driver/morse.ko /lib/modules/$(uname -r)/extra/morse/
-cp /root/morse_driver/dot11ah/dot11ah.ko /lib/modules/$(uname -r)/extra/morse/
+# Copy Morse modules when provisioning assets are present. On already-provisioned
+# nodes the modules may already be installed and /root/morse_driver may be gone.
+if [ -f /root/morse_driver/morse.ko ]; then
+    cp /root/morse_driver/morse.ko /lib/modules/$(uname -r)/extra/morse/
+else
+    echo " > /root/morse_driver/morse.ko not found; keeping existing installed module"
+fi
+
+if [ -f /root/morse_driver/dot11ah/dot11ah.ko ]; then
+    cp /root/morse_driver/dot11ah/dot11ah.ko /lib/modules/$(uname -r)/extra/morse/
+else
+    echo " > /root/morse_driver/dot11ah/dot11ah.ko not found; keeping existing installed module"
+fi
 
 # Update module dependencies
 depmod -a
