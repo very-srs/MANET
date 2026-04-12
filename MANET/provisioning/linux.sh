@@ -752,6 +752,12 @@ select_hardware_and_target_device() {
                 echo "Please select the target device:"
                 PS3="Enter number (or 'q' to quit): "
                 select device_choice in "${DEVICES[@]}" "Quit"; do
+                        if [[ "$REPLY" =~ ^[Qq]$ ]]; then
+                               echo "Aborting."
+                               rm "$TEMP_SCRIPT_FILE"
+                               exit 0
+                        fi
+
                         if [ "$device_choice" == "Quit" ]; then
                                echo "Aborting."
                                rm "$TEMP_SCRIPT_FILE"
@@ -1096,7 +1102,7 @@ SERVICE_EOF
         echo ""
 		echo " ONCE BOOTED, THE MESH NODE WILL AUTOMATICALLY START"
 		echo " SETTING ITSELF UP AND WILL REBOOT MULTIPLE TIMES"
-		echo " Just leave it alone, this provess takes about ten"
+		echo " Just leave it alone, this process takes about ten"
 		echo " minutes"
 else
         # Raspberry Pi path - use rpi-imager
@@ -1130,7 +1136,7 @@ else
         echo ""
         echo " ONCE BOOTED, THE MESH NODE WILL AUTOMATICALLY START"
         echo " SETTING ITSELF UP AND WILL REBOOT MULTIPLE TIMES"
-        echo " Just leave it alone, this provess takes about ten"
+        echo " Just leave it alone, this process takes about ten"
         echo " minutes"
 
 fi
