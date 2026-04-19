@@ -33,6 +33,10 @@ echo "Bridged Architecture Verification"
 echo "========================================"
 echo ""
 
+AP_INTERFACE=$(cat /var/lib/ap_interface 2>/dev/null)
+mapfile -t MESH_INTERFACES < /var/lib/mesh_if 2>/dev/null || MESH_INTERFACES=()
+mapfile -t HALOW_INTERFACES < /var/lib/halow_if 2>/dev/null || HALOW_INTERFACES=()
+
 # --- 1. Check Bridge Membership ---
 echo "=== Bridge Membership ==="
 
@@ -57,30 +61,18 @@ else
         log_warn "end0 is not bridged (normal if no wired EUD)"
     fi
     
-    # Check wlan1 - should be in br0 OR bat0, not both
-    AP_INTERFACE=$(cat /var/lib/ap_interface 2>/dev/null)
-    
-    if [ -n "$AP_INTERFACE" ] && [ "$AP_INTERFACE" == "wlan1" ]; then
-        if echo "$BR0_MEMBERS" | grep -q "wlan1"; then
-            log_pass "wlan1 is in br0 (AP mode, as configured)"
+    # Check AP interface - should be in br0 and not bat0.
+    if [ -n "$AP_INTERFACE" ]; then
+        if echo "$BR0_MEMBERS" | grep -q "^${AP_INTERFACE}$"; then
+            log_pass "$AP_INTERFACE is in br0 (AP mode, as configured)"
         else
-            log_warn "wlan1 should be in br0 when configured as AP"
+            log_warn "$AP_INTERFACE should be in br0 when configured as AP"
         fi
         
-        if batctl if | grep -q "wlan1"; then
-            log_fail "wlan1 is in BOTH br0 and bat0 (invalid configuration!)"
+        if batctl if | awk '{print $1}' | cut -d: -f1 | grep -qx "$AP_INTERFACE"; then
+            log_fail "$AP_INTERFACE is in BOTH br0 and bat0 (invalid configuration!)"
         else
-            log_pass "wlan1 is NOT in bat0 (correct for AP mode)"
-        fi
-    else
-        if echo "$BR0_MEMBERS" | grep -q "wlan1"; then
-            log_warn "wlan1 is in br0 but not configured as AP"
-        fi
-        
-        if batctl if | grep -q "wlan1"; then
-            log_pass "wlan1 is in bat0 (mesh mode)"
-        else
-            log_warn "wlan1 is not in bat0 or br0"
+            log_pass "$AP_INTERFACE is NOT in bat0 (correct for AP mode)"
         fi
     fi
 fi
@@ -95,32 +87,23 @@ if ! batctl if &>/dev/null; then
 else
     BAT0_MEMBERS=$(batctl if | awk '{print $1}' | cut -d: -f1)
     
-    if echo "$BAT0_MEMBERS" | grep -q "wlan0"; then
-        log_pass "wlan0 (2.4GHz) is in bat0"
-    else
-        log_fail "wlan0 (2.4GHz) is NOT in bat0"
-    fi
-    
-    if echo "$BAT0_MEMBERS" | grep -q "wlan2"; then
-        log_pass "wlan2 (HaLow) is in bat0"
-    else
-        log_warn "wlan2 (HaLow) is NOT in bat0 (may not be present)"
-    fi
-    
-    # wlan1 status depends on AP configuration
-    if [ -n "$AP_INTERFACE" ] && [ "$AP_INTERFACE" == "wlan1" ]; then
-        if echo "$BAT0_MEMBERS" | grep -q "wlan1"; then
-            log_fail "wlan1 is in bat0 but should be AP (conflict!)"
+    for iface in "${MESH_INTERFACES[@]}"; do
+        [ -z "$iface" ] && continue
+        if echo "$BAT0_MEMBERS" | grep -qx "$iface"; then
+            log_pass "$iface is in bat0 (mesh)"
         else
-            log_pass "wlan1 is NOT in bat0 (correct for AP mode)"
+            log_fail "$iface is NOT in bat0 (mesh)"
         fi
-    else
-        if echo "$BAT0_MEMBERS" | grep -q "wlan1"; then
-            log_pass "wlan1 (5GHz) is in bat0 (mesh mode)"
+    done
+
+    for iface in "${HALOW_INTERFACES[@]}"; do
+        [ -z "$iface" ] && continue
+        if echo "$BAT0_MEMBERS" | grep -qx "$iface"; then
+            log_pass "$iface is in bat0 (HaLow)"
         else
-            log_warn "wlan1 (5GHz) is NOT in bat0 (should be in mesh mode)"
+            log_warn "$iface is NOT in bat0 (HaLow may still be initializing)"
         fi
-    fi
+    done
 fi
 
 echo ""
@@ -160,24 +143,20 @@ else
         log_fail "DHCP is NOT blocked on bat0"
     fi
     
-    if echo "$EBTABLES_OUTPUT" | grep -q "DROP.*udp.*67:68.*wlan0"; then
-        log_pass "DHCP blocked on wlan0"
-    else
-        log_fail "DHCP is NOT blocked on wlan0"
-    fi
-    
-    # wlan1 should only be blocked if NOT the AP
-    if [ -n "$AP_INTERFACE" ] && [ "$AP_INTERFACE" == "wlan1" ]; then
-        if echo "$EBTABLES_OUTPUT" | grep -q "DROP.*udp.*67:68.*wlan1"; then
-            log_fail "DHCP is blocked on wlan1 (AP interface - should allow!)"
+    for iface in "${MESH_INTERFACES[@]}" "${HALOW_INTERFACES[@]}"; do
+        [ -z "$iface" ] && continue
+        if echo "$EBTABLES_OUTPUT" | grep -q "DROP.*udp.*67:68.*${iface}"; then
+            log_pass "DHCP blocked on $iface"
         else
-            log_pass "DHCP is allowed on wlan1 (AP interface)"
+            log_warn "DHCP is NOT blocked on $iface"
         fi
-    else
-        if echo "$EBTABLES_OUTPUT" | grep -q "DROP.*udp.*67:68.*wlan1"; then
-            log_pass "DHCP blocked on wlan1 (mesh mode)"
+    done
+
+    if [ -n "$AP_INTERFACE" ]; then
+        if echo "$EBTABLES_OUTPUT" | grep -q "DROP.*udp.*67:68.*${AP_INTERFACE}"; then
+            log_fail "DHCP is blocked on $AP_INTERFACE (AP interface - should allow!)"
         else
-            log_warn "DHCP is NOT blocked on wlan1 (should be blocked in mesh mode)"
+            log_pass "DHCP is allowed on $AP_INTERFACE (AP interface)"
         fi
     fi
     
@@ -263,11 +242,11 @@ check_service() {
 check_service "batman-enslave.service"
 check_service "alfred.service"
 
-if [ -n "$AP_INTERFACE" ] && [ "$AP_INTERFACE" == "wlan1" ]; then
+if [ -n "$AP_INTERFACE" ]; then
     check_service "hostapd.service"
 else
     if systemctl is-active --quiet hostapd.service; then
-        log_warn "hostapd running but wlan1 not configured as AP"
+        log_warn "hostapd running but no AP interface configured"
     fi
 fi
 
@@ -281,12 +260,9 @@ echo "EUD Mode: ${EUD_MODE:-unknown}"
 
 if [ -n "$AP_INTERFACE" ]; then
     echo "AP Interface: $AP_INTERFACE"
-    if [ "$AP_INTERFACE" == "wlan1" ]; then
-        echo "  → wlan1 should be: in br0, NOT in bat0, DHCP allowed"
-    fi
+    echo "  -> $AP_INTERFACE should be: in br0, NOT in bat0, DHCP allowed"
 else
     echo "AP Interface: none configured"
-    echo "  → wlan1 should be: in bat0, DHCP blocked"
 fi
 
 if [ -f /var/run/mesh-gateway.state ]; then

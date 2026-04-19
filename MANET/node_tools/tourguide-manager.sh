@@ -9,8 +9,10 @@
 CONTROL_IFACE="br0"
 ALFRED_HELPER_TYPE=69
 REGISTRY_STATE_FILE="/var/run/mesh_node_registry"
-WPA_CONF_2_4="/etc/wpa_supplicant/wpa_supplicant-wlan0.conf"
-WPA_CONF_5_0="/etc/wpa_supplicant/wpa_supplicant-wlan1.conf"
+WPA_IFACE_2_4=""
+WPA_IFACE_5_0=""
+WPA_CONF_2_4=""
+WPA_CONF_5_0=""
 LOBBY_FREQ_2_4=2412
 LOBBY_FREQ_5_0=5180
 ENCODER_PATH="/usr/local/bin/encoder.py"
@@ -28,6 +30,21 @@ get_current_freq() {
     else
         echo ""
     fi
+}
+
+load_mesh_roles() {
+    local mesh_ifaces=()
+
+    [ -f /var/lib/mesh_if ] && mapfile -t mesh_ifaces < /var/lib/mesh_if
+
+    WPA_IFACE_2_4="$(cat /var/lib/mesh_24_if 2>/dev/null || true)"
+    WPA_IFACE_5_0="$(cat /var/lib/mesh_5_if 2>/dev/null || true)"
+
+    [ -z "$WPA_IFACE_2_4" ] && WPA_IFACE_2_4="${mesh_ifaces[0]:-}"
+    [ -z "$WPA_IFACE_5_0" ] && WPA_IFACE_5_0="${mesh_ifaces[1]:-}"
+
+    WPA_CONF_2_4="/etc/wpa_supplicant/wpa_supplicant-${WPA_IFACE_2_4}.conf"
+    WPA_CONF_5_0="/etc/wpa_supplicant/wpa_supplicant-${WPA_IFACE_5_0}.conf"
 }
 
 is_hosting_service() {
@@ -121,11 +138,13 @@ select_tourguide_radio() {
 
     local LAST_RADIO=$(grep "^${RADIO_VAR}=" "$REGISTRY_STATE_FILE" 2>/dev/null | cut -d'=' -f2 | tr -d "'")
 
-    case "$LAST_RADIO" in
-        "wlan0") echo "wlan1" ;;
-        "wlan1") echo "wlan0" ;;
-        *) echo "wlan0" ;;
-    esac
+    if [ "$LAST_RADIO" = "$WPA_IFACE_2_4" ]; then
+        echo "$WPA_IFACE_5_0"
+    elif [ "$LAST_RADIO" = "$WPA_IFACE_5_0" ]; then
+        echo "$WPA_IFACE_2_4"
+    else
+        echo "$WPA_IFACE_2_4"
+    fi
 }
 
 hop_to_lobby_frequency() {
@@ -219,6 +238,11 @@ analyze_partition_data() {
 }
 
 # === MAIN EXECUTION ===
+load_mesh_roles
+if [ -z "$WPA_IFACE_2_4" ] || [ -z "$WPA_IFACE_5_0" ]; then
+    log "Mesh role files not ready; cannot run tourguide manager."
+    exit 1
+fi
 MY_MAC=$(cat "/sys/class/net/${CONTROL_IFACE}/address")
 NOW=$(date +%s)
 
@@ -251,7 +275,7 @@ HELPER_PAYLOAD=$("$ENCODER_PATH" \
     2>/dev/null)
 
 # Select lobby frequency based on radio
-if [ "$TOURGUIDE_RADIO" == "wlan0" ]; then
+if [ "$TOURGUIDE_RADIO" == "$WPA_IFACE_2_4" ]; then
     LOBBY_FREQ=$LOBBY_FREQ_2_4
     TOURGUIDE_CONF=$WPA_CONF_2_4
 else
