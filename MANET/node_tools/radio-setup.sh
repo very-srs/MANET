@@ -9,8 +9,10 @@
 exec > >(tee /var/log/radio-setup.log) 2>&1
 set -x
 
-# default lobby frequencies for wifi
-FREQS=("2412" "5180")
+led_error() {
+    echo heartbeat > /sys/class/leds/PWR/trigger
+}
+trap led_error ERR
 
 # This loop reads the stored setup variables to set the current config
 while IFS= read -r line; do
@@ -42,6 +44,47 @@ phys_iface() {
     echo "${phys:-$logical}"   # fall back to logical name if no mapping (post-reboot)
 }
 
+set_mesh_hostname() {
+    local new_hostname="$1"
+    [ -n "$new_hostname" ] || return 0
+
+    if hostnamectl set-hostname "$new_hostname" 2>/dev/null; then
+        return 0
+    fi
+
+    echo "$new_hostname" > /etc/hostname 2>/dev/null || true
+    if grep -q '^127\.0\.1\.1' /etc/hosts 2>/dev/null; then
+        sed -i "s/^127\\.0\\.1\\.1.*/127.0.1.1\t${new_hostname}/" /etc/hosts
+    else
+        echo "127.0.1.1	${new_hostname}" >> /etc/hosts
+    fi
+    hostname "$new_hostname" 2>/dev/null || hostnamectl --transient set-hostname "$new_hostname" 2>/dev/null || true
+}
+
+has_usb_morse_device() {
+    local dev text
+
+    for dev in /sys/bus/usb/devices/*; do
+        [ -d "$dev" ] || continue
+        text="$(cat "$dev/product" "$dev/manufacturer" 2>/dev/null | tr '[:upper:]' '[:lower:]')"
+        echo "$text" | grep -Eq 'morse|mm81|halow|802\.11ah' && return 0
+    done
+
+    return 1
+}
+
+has_morse_netdev() {
+    local iface driver
+
+    for iface in /sys/class/net/*; do
+        [ -e "$iface" ] || continue
+        driver="$(basename "$(readlink -f "$iface/device/driver" 2>/dev/null)")"
+        [[ "$driver" == morse* ]] && return 0
+    done
+
+    return 1
+}
+
 echo "Installing morse driver"
 mkdir -p /lib/modules/$(uname -r)/extra/morse
 
@@ -64,6 +107,38 @@ depmod -a
 
 cp /root/morse_cli/morse_cli /usr/local/bin/ 2>/dev/null || true
 chmod +x /usr/local/bin/*
+
+# Write safe Morse options before the first modprobe. Cloned images may carry
+# board-specific SPI BCF options that break USB MM81xx probe.
+EARLY_REGULATORY_DOMAIN=$(grep "^regulatory_domain=" /etc/mesh.conf 2>/dev/null | cut -d'=' -f2)
+EARLY_REGULATORY_DOMAIN=${EARLY_REGULATORY_DOMAIN:-US}
+EARLY_HALOW_REGULATORY_DOMAIN=$(grep "^halow_regulatory_domain=" /etc/mesh.conf 2>/dev/null | cut -d'=' -f2)
+EARLY_HALOW_REGULATORY_DOMAIN=${EARLY_HALOW_REGULATORY_DOMAIN:-$EARLY_REGULATORY_DOMAIN}
+case "$EARLY_REGULATORY_DOMAIN" in
+    AT|BE|BG|HR|CY|CZ|DK|EE|FI|FR|DE|GR|HU|IE|IT|LV|LT|LU|MT|NL|PL|PT|RO|SK|SI|ES|SE|GB|CH|NO)
+        EARLY_HALOW_REGULATORY_DOMAIN="EU"
+        ;;
+esac
+
+echo "options cfg80211 ieee80211_regdom=$EARLY_REGULATORY_DOMAIN" > /etc/modprobe.d/cfg80211.conf
+EARLY_MORSE_BCF=""
+EARLY_MORSE_SPI_CLOCK=""
+if [ -f /etc/modprobe.d/morse.conf ] && ! has_usb_morse_device; then
+    EARLY_MORSE_BCF=$(grep -oP '(?<=bcf=)\S+' /etc/modprobe.d/morse.conf | head -1)
+    EARLY_MORSE_SPI_CLOCK=$(grep -oP '(?<=spi_clock_speed=)\S+' /etc/modprobe.d/morse.conf | head -1)
+fi
+echo "options morse enable_mcast_whitelist=0 enable_mcast_rate_control=1" > /etc/modprobe.d/morse.conf
+echo "options morse country=$EARLY_HALOW_REGULATORY_DOMAIN" >> /etc/modprobe.d/morse.conf
+[[ -n "$EARLY_MORSE_BCF" ]] && echo "options morse bcf=$EARLY_MORSE_BCF" >> /etc/modprobe.d/morse.conf
+[[ -n "$EARLY_MORSE_SPI_CLOCK" ]] && echo "options morse spi_clock_speed=$EARLY_MORSE_SPI_CLOCK" >> /etc/modprobe.d/morse.conf
+if [[ "$EARLY_HALOW_REGULATORY_DOMAIN" == "EU" ]]; then
+    echo "options morse enable_auto_duty_cycle=0 enable_auto_mpsw=0" >> /etc/modprobe.d/morse.conf
+fi
+
+if has_usb_morse_device && ! has_morse_netdev; then
+    modprobe -r morse 2>/dev/null || true
+    modprobe -r dot11ah 2>/dev/null || true
+fi
 
 # Activating drivers
 modprobe dot11ah
@@ -101,6 +176,28 @@ if [[ -n "$ssh_public_key" ]]; then
     awk '!seen[$0]++' /home/radio/.ssh/authorized_keys > /tmp/t
     mv /tmp/t /home/radio/.ssh/authorized_keys
 fi
+
+echo " > Ensuring SSH password access for user 'radio'..."
+id -u radio >/dev/null 2>&1 || useradd -m -s /bin/bash -G sudo,adm,dialout,cdrom,audio,video,plugdev,games,users,input,netdev,gpio,i2c,spi radio
+usermod -aG sudo,adm,dialout,cdrom,audio,video,plugdev,games,users,input,netdev,gpio,i2c,spi radio 2>/dev/null || true
+if [[ -n "$new_user_password" ]]; then
+    echo "radio:$new_user_password" | chpasswd
+elif [[ -n "$radio_password" ]]; then
+    echo "radio:$radio_password" | chpasswd
+fi
+passwd -u radio 2>/dev/null || true
+mkdir -p /home/radio/.ssh /etc/ssh/sshd_config.d
+chmod 700 /home/radio/.ssh
+chown -R radio:radio /home/radio/.ssh
+cat << EOF > /etc/ssh/sshd_config.d/10-manet.conf
+PasswordAuthentication yes
+KbdInteractiveAuthentication no
+PubkeyAuthentication yes
+UsePAM yes
+PermitRootLogin prohibit-password
+EOF
+systemctl enable ssh 2>/dev/null || true
+systemctl restart ssh 2>/dev/null || true
 
 sleep 0.5
 echo "testing acs variable"
@@ -238,6 +335,15 @@ if [ -z "$HALOW_REGULATORY_DOMAIN" ] || uses_eu_halow_region "$REGULATORY_DOMAIN
     HALOW_REGULATORY_DOMAIN="EU"
 fi
 
+# cfg80211 regdomain to use — EU when HaLow is EU so S1G channels are
+# resolvable by wpa_supplicant_s1g. Also used in wpa_supplicant configs
+# for 2.4/5 GHz radios to keep cfg80211 from reverting to WORLD.
+if [[ "$HALOW_REGULATORY_DOMAIN" == "EU" ]]; then
+    CFG80211_REGDOM="EU"
+else
+    CFG80211_REGDOM="$REGULATORY_DOMAIN"
+fi
+
 
 # Wait for wireless drivers to load
 echo "Waiting for wireless drivers to load..."
@@ -291,10 +397,23 @@ iface_driver() {
 
 is_halow_iface() {
     local iface="$1"
-    local driver
+    local driver phyname
 
     driver="$(iface_driver "$iface")"
-    [[ "$driver" == morse* ]]
+    [[ "$driver" == morse* ]] && return 0
+
+    # Fallback: USB HaLow adapters may report a USB driver name instead of
+    # morse via sysfs.  A wireless phy with no standard 2.4/5 GHz frequencies
+    # is a sub-GHz (HaLow) device.
+    phyname="$(iface_phy "$iface")"
+    [[ -z "$phyname" ]] && return 1
+
+    if ! iw phy "$phyname" info 2>/dev/null | grep -q "2412\.0 MHz" && \
+       ! iw phy "$phyname" info 2>/dev/null | grep -q "5180\.0 MHz"; then
+        return 0
+    fi
+
+    return 1
 }
 
 is_nonmesh_wifi() {
@@ -322,6 +441,29 @@ iface_supports_mesh() {
     [[ -n "$phyname" ]] && iw phy "$phyname" info 2>/dev/null | grep -q "mesh point"
 }
 
+iface_supports_freq() {
+    local iface="$1"
+    local freq="$2"
+    local phyname
+    phyname="$(iface_phy "$iface")"
+    [[ -n "$phyname" ]] && iw phy "$phyname" info 2>/dev/null | grep -q "${freq}\\.0 MHz"
+}
+
+iface_mesh_freq() {
+    local iface="$1"
+    local phyname
+    phyname="$(iface_phy "$iface")"
+    [[ -z "$phyname" ]] && echo "" && return
+
+    if iw phy "$phyname" info 2>/dev/null | grep -q "2412\\.0 MHz"; then
+        echo "2412"
+    elif iw phy "$phyname" info 2>/dev/null | grep -q "5180\\.0 MHz"; then
+        echo "5180"
+    else
+        echo ""
+    fi
+}
+
 for iface in $(iw dev | awk '$1 == "Interface" {print $2}'); do
     if is_halow_iface "$iface"; then
         halow_ifaces+=("$iface")
@@ -334,17 +476,52 @@ for iface in $(iw dev | awk '$1 == "Interface" {print $2}'); do
     fi
 done
 
-# Keep stable wlan naming order. On this Pi 5 node wlan1 is the 2.4 GHz MT7915
-# mesh radio and wlan2 is the 5 GHz MT7915 mesh radio. Sorting by "supports
-# 2.4 GHz" is unsafe because multi-band capable radios can be placed in the
-# wrong lobby config.
-if [ "${#mesh_ifaces[@]}" -gt 0 ]; then
+# Order standard mesh interfaces by role, not by volatile wlanX name. The first
+# interface receives the 2.4 GHz lobby config and the second receives the 5 GHz
+# lobby config. Prefer single-band matches when possible, then fall back to any
+# device supporting the required lobby frequency.
+if [ "${#mesh_ifaces[@]}" -gt 1 ]; then
+    mesh_24=""
+    mesh_5=""
+
+    for iface in "${mesh_ifaces[@]}"; do
+        if iface_supports_freq "$iface" 2412 && ! iface_supports_freq "$iface" 5180; then
+            mesh_24="$iface"
+            break
+        fi
+    done
+    for iface in "${mesh_ifaces[@]}"; do
+        if iface_supports_freq "$iface" 5180 && ! iface_supports_freq "$iface" 2412; then
+            mesh_5="$iface"
+            break
+        fi
+    done
+    [ -z "$mesh_24" ] && for iface in "${mesh_ifaces[@]}"; do
+        iface_supports_freq "$iface" 2412 && mesh_24="$iface" && break
+    done
+    [ -z "$mesh_5" ] && for iface in "${mesh_ifaces[@]}"; do
+        [ "$iface" = "$mesh_24" ] && continue
+        iface_supports_freq "$iface" 5180 && mesh_5="$iface" && break
+    done
+
+    reordered=()
+    [ -n "$mesh_24" ] && reordered+=("$mesh_24")
+    [ -n "$mesh_5" ] && reordered+=("$mesh_5")
+    for iface in "${mesh_ifaces[@]}"; do
+        [ "$iface" = "$mesh_24" ] && continue
+        [ "$iface" = "$mesh_5" ] && continue
+        reordered+=("$iface")
+    done
+    mesh_ifaces=("${reordered[@]}")
+elif [ "${#mesh_ifaces[@]}" -eq 1 ]; then
     mapfile -t mesh_ifaces < <(printf '%s\n' "${mesh_ifaces[@]}" | sort -V)
 fi
 
 # Create directory and files (supports wired-only configs if arrays are empty)
 mkdir -p /var/lib
 > /var/lib/mesh_if
+> /var/lib/mesh_24_if
+> /var/lib/mesh_5_if
 > /var/lib/halow_if
 > /var/lib/no_mesh_if
 > /var/lib/iface_map   # runtime_name:physical_name (for MAC lookups during provisioning)
@@ -358,6 +535,8 @@ for iface in "${mesh_ifaces[@]}"; do
     echo "$iface:$iface" >> /var/lib/iface_map
     echo " > Mapped $iface (mesh)"
 done
+[ "${#mesh_ifaces[@]}" -gt 0 ] && echo "${mesh_ifaces[0]}" > /var/lib/mesh_24_if
+[ "${#mesh_ifaces[@]}" -gt 1 ] && echo "${mesh_ifaces[1]}" > /var/lib/mesh_5_if
 for iface in "${halow_ifaces[@]}"; do
     echo "$iface" >> /var/lib/halow_if
     echo "$iface:$iface" >> /var/lib/iface_map
@@ -372,6 +551,8 @@ done
 # Log what we found
 echo "Interface detection complete:"
 echo "  Mesh-capable: ${#mesh_ifaces[@]} (${mesh_ifaces[*]})"
+echo "  Mesh 2.4 role: $(cat /var/lib/mesh_24_if 2>/dev/null || true)"
+echo "  Mesh 5.0 role: $(cat /var/lib/mesh_5_if 2>/dev/null || true)"
 echo "  HaLow: ${#halow_ifaces[@]} (${halow_ifaces[*]})"
 echo "  Non-mesh: ${#nonmesh_ifaces[@]} (${nonmesh_ifaces[*]})"
 echo "  Logical mapping:"
@@ -420,32 +601,179 @@ if [[ "$eud" == "wireless" ]] || [[ "$eud" == "auto" ]]; then
 fi
 
 # ============================================================================
+# === CLEANUP STALE PER-INTERFACE SERVICES AND CONFIGS ===
+# ============================================================================
+# Previous runs may have enabled wpa_supplicant or s1g services for interfaces
+# that no longer hold those roles (e.g. after a .link rename swapped which
+# physical card is wlanX). Disable any per-interface service whose target
+# interface isn't currently classified for that role.
+
+current_mesh="$(cat /var/lib/mesh_if 2>/dev/null | tr '\n' ' ')"
+current_halow="$(cat /var/lib/halow_if 2>/dev/null | tr '\n' ' ')"
+
+cleanup_iface_service() {
+    local svc_pattern="$1"   # e.g. "wpa_supplicant@wlan*.service"
+    local valid_list="$2"    # space-separated interface names that should keep this service
+    local svc iface link
+
+    # Find enabled units by looking at symlinks in target wants directories.
+    # This catches both concrete units and instantiated template units.
+    for link in /etc/systemd/system/*.wants/$svc_pattern \
+                /etc/systemd/system/*.requires/$svc_pattern; do
+        [ -L "$link" ] || continue
+        svc="$(basename "$link")"
+
+        iface="$(echo "$svc" | sed -E 's/.*[@-](wlan[0-9]+)\.service$/\1/')"
+        [[ "$iface" == "$svc" ]] && continue
+
+        if ! echo " $valid_list " | grep -q " $iface "; then
+            echo " > Disabling stale service: $svc (iface $iface no longer in role)"
+            systemctl disable --now "$svc" 2>/dev/null || true
+            systemctl reset-failed "$svc" 2>/dev/null || true
+        fi
+    done
+
+    # Also catch units that are loaded/failed but never had an enable symlink
+    # (e.g. started manually, or left over after their wants symlink was removed
+    # but the runtime instance kept lingering).
+    for svc in $(systemctl list-units --all --no-legend --state=failed,loaded "$svc_pattern" 2>/dev/null | awk '{print $1}'); do
+        iface="$(echo "$svc" | sed -E 's/.*[@-](wlan[0-9]+)\.service$/\1/')"
+        [[ "$iface" == "$svc" ]] && continue
+
+        if ! echo " $valid_list " | grep -q " $iface "; then
+            echo " > Cleaning up stale runtime instance: $svc"
+            systemctl stop "$svc" 2>/dev/null || true
+            systemctl reset-failed "$svc" 2>/dev/null || true
+        fi
+    done
+}
+
+cleanup_iface_service 'wpa_supplicant@wlan*.service' "$current_mesh"
+cleanup_iface_service 'wpa_supplicant-s1g-wlan*.service' "$current_halow"
+
+# Remove stale per-interface wpa_supplicant config files for interfaces that
+# don't currently hold a wireless role. mesh-boot-lobby.service blindly copies
+# every *-lobby.conf at boot, so leftovers will resurrect dead configs.
+all_wireless_roles="$current_mesh $current_halow"
+for conf in /etc/wpa_supplicant/wpa_supplicant-wlan*.conf; do
+    [ -e "$conf" ] || continue
+    iface="$(basename "$conf" | sed -E 's/^wpa_supplicant-(wlan[0-9]+).*/\1/')"
+    if ! echo " $all_wireless_roles " | grep -q " $iface "; then
+        echo " > Removing stale wpa_supplicant config: $conf"
+        rm -f "$conf"
+    fi
+done
+
+# ============================================================================
 # === CONFIGURE MESH INTERFACES (excluding AP if needed) ===
 # ============================================================================
 
+# Pin wlanX names by MAC so role assignments survive reboot in a predictable
+# order: wlan0=2.4GHz mesh, wlan1=5GHz mesh, wlan2=HaLow, wlan3=non-mesh AP.
+# The classification above already determined which physical phy plays which
+# role; we now bind that role to a stable MAC-keyed name via systemd .link.
+# These take effect at next boot — current run uses kernel-assigned names from
+# the role files.
+rm -f /etc/systemd/network/10-wlan*.link
+
+iface_mac() {
+    cat "/sys/class/net/$1/address" 2>/dev/null
+}
+
+write_link_file() {
+    local target_name="$1"
+    local mac="$2"
+    [[ -z "$mac" ]] && return
+
+cat <<-EOF > /etc/systemd/network/10-${target_name}.link
+[Match]
+MACAddress=$mac
+Type=wlan
+
+[Link]
+Name=$target_name
+EOF
+    echo " > Pinning $target_name to MAC $mac"
+}
+
+# Mesh interfaces are already ordered: [0]=2.4GHz, [1]=5GHz
+[ "${#mesh_ifaces[@]}" -gt 0 ] && write_link_file wlan0 "$(iface_mac "${mesh_ifaces[0]}")"
+[ "${#mesh_ifaces[@]}" -gt 1 ] && write_link_file wlan1 "$(iface_mac "${mesh_ifaces[1]}")"
+[ "${#halow_ifaces[@]}" -gt 0 ] && write_link_file wlan2 "$(iface_mac "${halow_ifaces[0]}")"
+[ "${#nonmesh_ifaces[@]}" -gt 0 ] && write_link_file wlan3 "$(iface_mac "${nonmesh_ifaces[0]}")"
 echo "MESH_NAME=\"$MESH_NAME\"" > /etc/default/mesh
 
-CT=0
+
+# Detect if the .link files we just wrote disagree with current runtime names.
+# If they do, the next boot will rename interfaces and the role files we wrote
+# this run will be stale. Schedule a post-reboot re-run to refresh them.
+needs_rerun=0
+check_rename() {
+    local target="$1"
+    local current="$2"
+    [[ -z "$current" ]] && return
+    [[ "$target" == "$current" ]] && return
+    echo " > Rename pending: $current -> $target (next boot)"
+    needs_rerun=1
+}
+
+[ "${#mesh_ifaces[@]}" -gt 0 ] && check_rename wlan0 "${mesh_ifaces[0]}"
+[ "${#mesh_ifaces[@]}" -gt 1 ] && check_rename wlan1 "${mesh_ifaces[1]}"
+[ "${#halow_ifaces[@]}" -gt 0 ] && check_rename wlan2 "${halow_ifaces[0]}"
+[ "${#nonmesh_ifaces[@]}" -gt 0 ] && check_rename wlan3 "${nonmesh_ifaces[0]}"
+
+if [ "$needs_rerun" -eq 1 ]; then
+    echo " > Interface renames staged. Scheduling post-reboot re-run."
+
+cat << 'EOF' > /etc/systemd/system/radio-setup-rerun.service
+[Unit]
+Description=Re-run radio-setup after interface rename
+After=multi-user.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/radio-setup.sh
+ExecStartPost=/bin/systemctl disable radio-setup-rerun.service
+ExecStartPost=/bin/rm -f /etc/systemd/system/radio-setup-rerun.service
+RemainAfterExit=no
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    systemctl daemon-reload
+    systemctl enable radio-setup-rerun.service
+    touch /var/lib/radio-setup-reboot-pending
+else
+    echo " > Interface names already match desired layout, no rename needed"
+fi
+
 for WLAN in $(cat /var/lib/mesh_if); do
     # Skip this interface if it's the AP interface
     if [[ -n "$AP_INTERFACE" ]] && [[ "$WLAN" == "$AP_INTERFACE" ]]; then
         echo " > Skipping $WLAN (will be used as AP)"
-        ((CT++))
         continue
     fi
 
-    echo " > Setting SAE key/SSID for $WLAN ..."
+    FREQ=$(iface_mesh_freq "$WLAN")
+    if [[ -z "$FREQ" ]]; then
+        echo " > WARNING: Cannot determine band for $WLAN, skipping"
+        continue
+    fi
+
+    echo " > Setting SAE key/SSID for $WLAN (${FREQ} MHz) ..."
 
 cat <<-EOF > /etc/wpa_supplicant/wpa_supplicant-$WLAN-lobby.conf
 ctrl_interface=/var/run/wpa_supplicant
-country=$REGULATORY_DOMAIN
+country=$CFG80211_REGDOM
 update_config=1
 sae_pwe=1
 ap_scan=2
 network={
     ssid="$MESH_NAME"
     mode=5
-    frequency=${FREQS[$CT]}
+    frequency=${FREQ}
     key_mgmt=SAE
     sae_password="$KEY"
     ieee80211w=2
@@ -465,18 +793,9 @@ RequiredForOnline=no
 MTUBytes=1532
 EOF
 
-cat <<-EOF > /etc/systemd/network/10-$WLAN.link
-[Match]
-MACAddress=$(ip a | grep -A1 "$(phys_iface $WLAN)" | awk '/ether/ {print $2}')
-
-[Link]
-Name=$WLAN
-EOF
-
     echo " > Enabling $WLAN for mesh use ..."
     cp /etc/wpa_supplicant/wpa_supplicant-$WLAN-lobby.conf /etc/wpa_supplicant/wpa_supplicant-$WLAN.conf
     systemctl enable wpa_supplicant@$WLAN.service
-    ((CT++))
 done
 
 # ============================================================================
@@ -489,19 +808,20 @@ HOST_MAC=$(ip a | grep -A1 $(networkctl | grep -v bat | awk '/ether/ {print $2}'
 if [[ -n "$AP_INTERFACE" ]]; then
     echo "Configuring $AP_INTERFACE as access point..."
 
-    cat <<-EOF > /etc/systemd/system/ap-interface-setup.service
+cat <<-EOF > /etc/systemd/system/ap-interface-setup.service
 [Unit]
 Description=Set $AP_INTERFACE to managed mode for hostapd
 Before=hostapd.service
-BindsTo=sys-subsystem-net-devices-${AP_INTERFACE}.device
-After=sys-subsystem-net-devices-${AP_INTERFACE}.device
+After=wifi-rfkill-unblock.service
+Wants=wifi-rfkill-unblock.service
 
 [Service]
 Type=oneshot
 ExecStartPre=/usr/local/bin/unblock-wifi-rfkill.sh
-ExecStart=/usr/sbin/ip link set $AP_INTERFACE down
-ExecStart=/usr/sbin/iw dev $AP_INTERFACE set type managed
-ExecStart=/usr/sbin/ip link set $AP_INTERFACE up
+ExecStartPre=/bin/sleep 2
+ExecStart=-/usr/sbin/ip link set $AP_INTERFACE down
+ExecStart=-/usr/sbin/iw dev $AP_INTERFACE set type managed
+ExecStart=-/usr/sbin/ip link set $AP_INTERFACE up
 RemainAfterExit=yes
 
 [Install]
@@ -516,14 +836,6 @@ Name=$AP_INTERFACE
 [Link]
 Unmanaged=yes
 ActivationPolicy=manual
-EOF
-
-    cat <<-EOF > /etc/systemd/network/10-${AP_INTERFACE}.link
-[Match]
-MACAddress=$(ip a | grep -A1 "$(phys_iface $AP_INTERFACE)" | awk '/ether/ {print $2}')
-
-[Link]
-Name=$AP_INTERFACE
 EOF
 
     # Get configuration from mesh.conf
@@ -582,15 +894,16 @@ rsn_pairwise=CCMP
 wpa_passphrase=$LAN_AP_KEY
 EOF
 
-    cat <<-EOF > /etc/systemd/system/ap-txpower.service
+cat <<-EOF > /etc/systemd/system/ap-txpower.service
 [Unit]
 Description=Set low TX power on AP interface
-After=sys-subsystem-net-devices-${AP_INTERFACE}.device
-BindsTo=sys-subsystem-net-devices-${AP_INTERFACE}.device
+After=ap-interface-setup.service
+Wants=ap-interface-setup.service
 
 [Service]
 Type=oneshot
-ExecStart=/bin/sh -c '/usr/sbin/iw dev $AP_INTERFACE set txpower fixed 500 || true'
+ExecStartPre=/bin/sleep 2
+ExecStart=-/usr/sbin/iw dev $AP_INTERFACE set txpower fixed 500
 RemainAfterExit=yes
 
 [Install]
@@ -614,9 +927,10 @@ EOF
         systemctl unmask hostapd.service
         systemctl enable ap-interface-setup.service
         systemctl enable hostapd.service
-        systemctl start hostapd.service
-        systemctl start dnsmasq.service
-        systemctl start ap-txpower.service
+        systemctl restart ap-interface-setup.service 2>/dev/null || true
+        systemctl restart hostapd.service 2>/dev/null || true
+        systemctl restart dnsmasq.service 2>/dev/null || true
+        systemctl restart ap-txpower.service 2>/dev/null || true
     else
         systemctl unmask hostapd.service
         echo " > Auto mode: AP services staged (ethernet-autodetect will manage)"
@@ -670,14 +984,6 @@ RequiredForOnline=no
 MTUBytes=1532
 EOF
 
-cat <<-EOF > /etc/systemd/network/10-$WLAN.link
-[Match]
-MACAddress=$(ip a | grep -A1 "$(phys_iface $WLAN)" | awk '/ether/ {print $2}')
-
-[Link]
-Name=$WLAN
-EOF
-
     rm -f /etc/wpa_supplicant/*${WLAN}* 2>/dev/null
 
     if [[ "$HALOW_REGULATORY_DOMAIN" == "US" ]]; then
@@ -724,8 +1030,8 @@ network={
     ssid="$mesh_ssid"
     key_mgmt=SAE
     mode=5
-    channel=6
-    op_class=67
+    channel=5
+    op_class=66
     country="$HALOW_REGULATORY_DOMAIN"
     s1g_prim_chwidth=0
     s1g_prim_1mhz_chan_index=0
@@ -774,14 +1080,13 @@ done
 # ============================================================================
 # === MORSE / HALOW MODULE OPTIONS ===
 # ============================================================================
-echo "options cfg80211 ieee80211_regdom=$REGULATORY_DOMAIN" > /etc/modprobe.d/cfg80211.conf
+echo "options cfg80211 ieee80211_regdom=$CFG80211_REGDOM" > /etc/modprobe.d/cfg80211.conf
 
-# Preserve hardware-specific modprobe options that were written by firstrun
-# (bcf= and spi_clock_speed= are board-specific; losing them causes the Morse
-# driver to fall back to bcf_default.bin which doesn't exist, failing probe)
+# Preserve hardware-specific SPI modprobe options that were written by firstrun.
+# USB MM81xx adapters auto-select BCF by board type; forcing SPI BCF breaks probe.
 MORSE_BCF=""
 MORSE_SPI_CLOCK=""
-if [ -f /etc/modprobe.d/morse.conf ]; then
+if [ -f /etc/modprobe.d/morse.conf ] && ! has_usb_morse_device; then
     MORSE_BCF=$(grep -oP '(?<=bcf=)\S+' /etc/modprobe.d/morse.conf | head -1)
     MORSE_SPI_CLOCK=$(grep -oP '(?<=spi_clock_speed=)\S+' /etc/modprobe.d/morse.conf | head -1)
 fi
@@ -836,6 +1141,36 @@ WantedBy=multi-user.target
 EOF
 systemctl enable button-monitor.service
 
+cat << EOF > /etc/systemd/system/mesh-clone-identity.service
+[Unit]
+Description=Reset cloned mesh node identity when hardware MAC changes
+After=local-fs.target
+Before=batman-enslave.service alfred.service node-manager.service gateway-route-manager.service syncthing@radio.service hostapd.service dnsmasq.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/mesh-clone-identity.sh
+
+[Install]
+WantedBy=multi-user.target
+EOF
+systemctl enable mesh-clone-identity.service
+
+cat << EOF > /etc/systemd/system/ssh-recovery.service
+[Unit]
+Description=Ensure MANET SSH access is available
+After=local-fs.target
+Before=network-online.target batman-enslave.service alfred.service node-manager.service hostapd.service dnsmasq.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/ssh-recovery.sh
+
+[Install]
+WantedBy=multi-user.target
+EOF
+systemctl enable ssh-recovery.service
+
 
 
 # Replace wpa_supplicant with lobby channel files at boot
@@ -846,7 +1181,7 @@ Before=wpa_supplicant@.service
 
 [Service]
 Type=oneshot
-ExecStart=/bin/sh -c 'for LOBBY_FILE in /etc/wpa_supplicant/wpa_supplicant-wlan*-lobby.conf; do DEST_FILE="\${LOBBY_FILE%-lobby.conf}.conf"; cp "\$LOBBY_FILE" "\$DEST_FILE"; done'
+ExecStart=/bin/sh -c 'for LOBBY_FILE in /etc/wpa_supplicant/wpa_supplicant-wlan*-lobby.conf; do [ -e "\$\$LOBBY_FILE" ] || continue; DEST_FILE="\$\${LOBBY_FILE%-lobby.conf}.conf"; cp "\$\$LOBBY_FILE" "\$\$DEST_FILE"; done'
 RemainAfterExit=yes
 
 [Install]
@@ -970,6 +1305,23 @@ cp /root/networkd-dispatcher/off /etc/networkd-dispatcher/degraded.d/50-gateway-
 cp /root/networkd-dispatcher/carrier /etc/networkd-dispatcher/carrier.d/50-ethernet-detect
 chmod -R 755 /etc/networkd-dispatcher
 
+cat <<- EOF > /etc/systemd/system/ethernet-autodetect.service
+[Unit]
+Description=MANET Ethernet Hotplug Auto Detection
+After=systemd-networkd.service batman-enslave.service
+Wants=systemd-networkd.service
+ConditionPathExists=/usr/local/bin/ethernet-autodetect.sh
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/ethernet-autodetect.sh --hotplug
+TimeoutStartSec=45
+
+[Install]
+WantedBy=multi-user.target
+EOF
+systemctl enable ethernet-autodetect.service
+
 cp /root/regulatory.db /lib/firmware/
 
 cat <<- EOF > /etc/systemd/system/gateway-route-manager.service
@@ -1077,7 +1429,7 @@ systemctl enable mesh-hosts-update.timer
 HOST_MAC=$(ip a | grep -A1 $(networkctl | grep -v bat | awk '/ether/ {print $2}' | head -1) \
    | awk '/ether/ {print $2}' | cut -d':' -f 5-6 | sed 's/://g')
 
-hostnamectl set-hostname "mesh-${HOST_MAC}"
+set_mesh_hostname "mesh-${HOST_MAC}"
 
 # ============================================================================
 # === Web Status / config ===
@@ -1104,13 +1456,60 @@ EOF
 systemctl enable mesh-status
 
 # ============================================================================
+# === mDNS — manet.local ===
+# ============================================================================
+# Advertise this node as manet.local on the AP/EUD interface only.
+# avahi-daemon is kept but restricted to deny mesh interfaces (bat0, wlan0-2).
+# Clients connected to the EUD AP can reach the admin panel at http://manet.local
+
+apt install -y avahi-daemon iperf3 traceroute 2>/dev/null || true
+install -m 644 /etc/avahi/avahi-daemon.conf /etc/avahi/avahi-daemon.conf.bak 2>/dev/null || true
+cp /usr/local/share/manet/avahi-daemon.conf /etc/avahi/avahi-daemon.conf
+# Restrict avahi to the AP-only interface so nodes on the mesh don't conflict on 'manet'
+AVAHI_AP_IF=$(head -1 /var/lib/no_mesh_if 2>/dev/null)
+if [ -n "$AVAHI_AP_IF" ]; then
+    sed -i "s/allow-interfaces=.*/allow-interfaces=$AVAHI_AP_IF/" /etc/avahi/avahi-daemon.conf
+fi
+cp /usr/local/share/manet/manet-http.service /etc/avahi/services/manet-http.service
+cp /usr/local/share/manet/perf-http.service /etc/avahi/services/perf-http.service 2>/dev/null || true
+systemctl enable avahi-daemon
+systemctl restart avahi-daemon || true
+
+# ============================================================================
+# === UPS HAT (E) BATTERY MONITOR ===
+# ============================================================================
+
+# Enable I2C for battery fuel gauge (Waveshare UPS HAT E — IP2368 MCU at 0x2D)
+# Bookworm+: /boot/firmware/config.txt; older images: /boot/config.txt
+for _cfg in /boot/firmware/config.txt /boot/config.txt; do
+    [ -f "$_cfg" ] || continue
+    if ! grep -q '^dtparam=i2c_arm=on$' "$_cfg"; then
+        # Remove any existing i2c_arm line then append the correct one
+        sed -i '/^dtparam=i2c_arm/d' "$_cfg"
+        echo "dtparam=i2c_arm=on" >> "$_cfg"
+        echo " > I2C enabled in $_cfg"
+    fi
+done
+
+# RPi5 uses i2c_designware — i2c-dev module must load at boot for /dev/i2c-1
+if ! grep -q '^i2c-dev$' /etc/modules 2>/dev/null; then
+    echo 'i2c-dev' >> /etc/modules
+    echo " > i2c-dev added to /etc/modules"
+fi
+
+# Install smbus and i2c-tools for battery-reader.py and diagnostics
+apt update -qq && apt install -y python3-smbus i2c-tools || true
+
+systemctl enable battery-reader.service
+
+# ============================================================================
 # === FIRST RUN vs RE-RUN ===
 # ============================================================================
 
 # Determine if this script is being run for the first time
 # and reboot if so to pick up the changes to the interfaces
 if systemctl is-enabled radio-setup-run-once.service >/dev/null 2>&1; then
-    apt remove -y network-manager avahi*
+    apt remove -y network-manager
     systemctl mask rpi-eeprom-update.service
     systemctl set-default multi-user.target
 
@@ -1136,6 +1535,15 @@ fi
 echo " > restarting networkd..."
 systemctl restart systemd-networkd
 
+echo " > restarting mesh supplicants..."
+for WLAN in $(cat /var/lib/mesh_if 2>/dev/null); do
+    if [[ -n "$AP_INTERFACE" ]] && [[ "$WLAN" == "$AP_INTERFACE" ]]; then
+        continue
+    fi
+    systemctl reset-failed wpa_supplicant@$WLAN.service 2>/dev/null || true
+    systemctl restart wpa_supplicant@$WLAN.service 2>/dev/null || true
+done
+
 echo " > resetting ipv4..."
 systemctl restart node-manager
 
@@ -1150,3 +1558,16 @@ sleep 2
 networkctl
 iw dev
 ip -br a
+
+echo heartbeat > /sys/class/leds/ACT/trigger
+
+if [ -f /var/lib/radio-setup-reboot-pending ]; then
+    rm -f /var/lib/radio-setup-reboot-pending
+    echo ""
+    echo "=================================================="
+    echo " Interface renames pending - rebooting in 5s"
+    echo " radio-setup will re-run automatically after boot"
+    echo "=================================================="
+    sleep 5
+    reboot
+fi
