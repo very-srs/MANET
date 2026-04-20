@@ -8,7 +8,7 @@ TEMPLATE_FILE="firstrun.sh.template"
 ROCK3A_TEMPLATE="rock3a-provision.sh.template"
 TEMP_SCRIPT_FILE=$(mktemp)
 # Full mirror, fast connection
-ARMBIAN_IMAGE_URL="https://fi.mirror.armbian.de/dl/rock-3a/archive/Armbian_25.11.1_Rock-3a_trixie_vendor_6.1.115_minimal.img.xz"
+ARMBIAN_IMAGE_URL="https://fi.mirror.armbian.de/dl/rock-3a/archive/Armbian_26.2.1_Rock-3a_trixie_vendor_6.1.115_minimal.img.xz"
 ARMBIAN_IMAGE_FILENAME="Armbian_25.11.1_Rock-3a_trixie_vendor_6.1.115_minimal.img"
 ARMBIAN_IMAGE=""  # Will be set by acquire_armbian_image function
 CONFIG_DIR=".mesh-configs"
