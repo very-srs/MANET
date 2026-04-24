@@ -258,8 +258,9 @@ generate_password() {
         openssl rand -base64 48 | tr -dc 'a-zA-Z0-9' | head -c "$length"
 }
 
-# Detect only SD card devices (mmcblk), excluding boot disk and eMMC internal storage.
-# Returns array of "/dev/mmcblkN (size)" strings in SD_DEVICES global.
+# Detect SD card devices: mmcblk (native readers) + USB-attached disks (external card readers).
+# Excludes boot disk and eMMC internal storage.
+# Returns array of "/dev/NAME (size)" strings in SD_DEVICES global.
 detect_sd_cards() {
         local boot_disk="$1"
         SD_DEVICES=()
@@ -268,19 +269,19 @@ detect_sd_cards() {
                 local NAME="" SIZE="" TYPE="" TRAN=""
                 eval "$line"
 
-                # Only mmcblk devices
-                [[ "$NAME" =~ ^mmcblk[0-9]+$ ]] || continue
-                # Skip boot disk
+                [ "$TYPE" = "disk" ] || continue
                 [ "$NAME" = "$boot_disk" ] && continue
-                # Skip boot partitions (mmcblkNboot0/boot1) — already filtered by ^mmcblk[0-9]+$
-                # Skip eMMC internal (subsystem symlink contains mmc_host but tran is absent for eMMC)
-                # lsblk TRAN is empty for eMMC, "sd" or absent for SD readers via USB
-                # Most reliable: check /sys/block/mmcblkN/device/type = "SD"
-                local devtype
-                devtype=$(cat "/sys/block/$NAME/device/type" 2>/dev/null || echo "")
-                if [ "$devtype" != "SD" ] && [ "$devtype" != "MMC" ]; then
-                        # If sysfs type not available, include anyway (external reader)
-                        [ -z "$devtype" ] || continue
+
+                if [[ "$NAME" =~ ^mmcblk[0-9]+$ ]]; then
+                        # Native MMC slot: accept SD and MMC types, skip eMMC (empty sysfs type = internal eMMC on most SBCs)
+                        local devtype
+                        devtype=$(cat "/sys/block/$NAME/device/type" 2>/dev/null || echo "")
+                        [ "$devtype" = "SD" ] || [ "$devtype" = "MMC" ] || continue
+                elif [ "$TRAN" = "usb" ]; then
+                        # USB-attached card reader — accept any non-zero-size disk
+                        [ "$SIZE" = "0B" ] && continue
+                else
+                        continue
                 fi
 
                 SD_DEVICES+=("/dev/$NAME ($SIZE)")
