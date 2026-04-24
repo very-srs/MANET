@@ -680,6 +680,7 @@ if [ "__AUTO_CHANNEL__" = "y" ]; then
 else
 	cp /usr/local/bin/node-manager-static.sh /usr/local/bin/node-manager.sh
 fi
+chmod +x /usr/local/bin/node-manager.sh
 chmod +x /usr/local/bin/*
 
 echo "Setting radio-setup.sh to run at next reboot"
