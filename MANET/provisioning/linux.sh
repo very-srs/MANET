@@ -258,6 +258,35 @@ generate_password() {
         openssl rand -base64 48 | tr -dc 'a-zA-Z0-9' | head -c "$length"
 }
 
+# Detect only SD card devices (mmcblk), excluding boot disk and eMMC internal storage.
+# Returns array of "/dev/mmcblkN (size)" strings in SD_DEVICES global.
+detect_sd_cards() {
+        local boot_disk="$1"
+        SD_DEVICES=()
+
+        while IFS= read -r line; do
+                local NAME="" SIZE="" TYPE="" TRAN=""
+                eval "$line"
+
+                # Only mmcblk devices
+                [[ "$NAME" =~ ^mmcblk[0-9]+$ ]] || continue
+                # Skip boot disk
+                [ "$NAME" = "$boot_disk" ] && continue
+                # Skip boot partitions (mmcblkNboot0/boot1) — already filtered by ^mmcblk[0-9]+$
+                # Skip eMMC internal (subsystem symlink contains mmc_host but tran is absent for eMMC)
+                # lsblk TRAN is empty for eMMC, "sd" or absent for SD readers via USB
+                # Most reliable: check /sys/block/mmcblkN/device/type = "SD"
+                local devtype
+                devtype=$(cat "/sys/block/$NAME/device/type" 2>/dev/null || echo "")
+                if [ "$devtype" != "SD" ] && [ "$devtype" != "MMC" ]; then
+                        # If sysfs type not available, include anyway (external reader)
+                        [ -z "$devtype" ] || continue
+                fi
+
+                SD_DEVICES+=("/dev/$NAME ($SIZE)")
+        done < <(lsblk -d -n -P -o NAME,SIZE,TYPE,TRAN)
+}
+
 # Function to ask all setup questions
 ask_questions() {
         echo "--- Starting New Configuration ---"
@@ -344,7 +373,7 @@ ask_questions() {
             echo "Please enter a valid 2-letter ISO country code (e.g., US, GB, DE, FR, JP)"
             echo "Common codes: US (United States), GB (UK), DE (Germany), FR (France), JP (Japan)"
             echo "              CA (Canada), AU (Australia), NZ (New Zealand), CN (China)"
-			echo "NOTE: EU is not a country code, use your actual country"
+		echo "NOTE: EU is not a country code, use your actual country"
         fi
     done
 
@@ -480,15 +509,50 @@ load_config() {
 
 # Function to acquire Armbian image for Rock 3A
 # Sets ARMBIAN_IMAGE to the path of a usable .img file
+# Verifies SHA256 checksum if a .sha256 sidecar exists; saves checksum after first download.
 acquire_armbian_image() {
         echo ""
         echo "--- Armbian Image Setup for Rock 3A ---"
 
+        local checksum_file="${ARMBIAN_IMAGE_FILENAME}.sha256"
+
+        verify_armbian_checksum() {
+                local img="$1"
+                if [ ! -f "$checksum_file" ]; then
+                        return 0  # No checksum on file, skip verification
+                fi
+                echo "Verifying image checksum..."
+                local expected
+                expected=$(awk '{print $1}' "$checksum_file")
+                local actual
+                actual=$(sha256sum "$img" | awk '{print $1}')
+                if [ "$expected" = "$actual" ]; then
+                        echo "Checksum OK."
+                        return 0
+                else
+                        echo "ERROR: Checksum mismatch!"
+                        echo "  Expected: $expected"
+                        echo "  Actual:   $actual"
+                        return 1
+                fi
+        }
+
+        save_armbian_checksum() {
+                local img="$1"
+                echo "Saving checksum to $checksum_file..."
+                sha256sum "$img" | awk '{print $1}' > "$checksum_file"
+        }
+
         # Check if default image exists locally (uncompressed)
         if [ -f "$ARMBIAN_IMAGE_FILENAME" ]; then
                 echo "Found local Armbian image: $ARMBIAN_IMAGE_FILENAME"
-                ARMBIAN_IMAGE="$ARMBIAN_IMAGE_FILENAME"
-                return 0
+                if verify_armbian_checksum "$ARMBIAN_IMAGE_FILENAME"; then
+                        ARMBIAN_IMAGE="$ARMBIAN_IMAGE_FILENAME"
+                        return 0
+                else
+                        echo "Local image failed checksum — re-downloading."
+                        rm -f "$ARMBIAN_IMAGE_FILENAME"
+                fi
         fi
 
         # Check for compressed version
@@ -497,9 +561,14 @@ acquire_armbian_image() {
                 echo "Decompressing (this may take a moment)..."
                 xz -dk "${ARMBIAN_IMAGE_FILENAME}.xz"
                 if [ $? -eq 0 ]; then
-                        ARMBIAN_IMAGE="$ARMBIAN_IMAGE_FILENAME"
-                        echo "Decompression complete."
-                        return 0
+                        if verify_armbian_checksum "$ARMBIAN_IMAGE_FILENAME"; then
+                                ARMBIAN_IMAGE="$ARMBIAN_IMAGE_FILENAME"
+                                echo "Decompression complete."
+                                return 0
+                        else
+                                echo "Decompressed image failed checksum — re-downloading."
+                                rm -f "$ARMBIAN_IMAGE_FILENAME" "${ARMBIAN_IMAGE_FILENAME}.xz"
+                        fi
                 else
                         echo "ERROR: Decompression failed."
                         return 1
@@ -519,10 +588,16 @@ acquire_armbian_image() {
                 case $img_choice in
                         1)
                                download_armbian_image
+                               if [ $? -eq 0 ]; then
+                                       save_armbian_checksum "$ARMBIAN_IMAGE"
+                               fi
                                return $?
                                ;;
                         2)
                                select_custom_armbian_image
+                               if [ $? -eq 0 ]; then
+                                       save_armbian_checksum "$ARMBIAN_IMAGE"
+                               fi
                                return $?
                                ;;
                         *)
@@ -631,15 +706,12 @@ select_custom_armbian_image() {
         done
 }
 
-# Returns the chosen TARGET_DEVICE path in a global variable.
-select_hardware_and_target_device() {
+# Selects hardware model. Sets HARDWARE_MODEL global.
+select_hardware() {
         echo ""
         echo "--- 1. Select Hardware ---"
 
-        # This variable will be set to 1 by the CM4 logic to skip the device menu
-        local SKIP_DEV_SELECT=0
-
-        echo "Select Raspberry Pi Model:"
+        echo "Select hardware model:"
         select hw_choice in "Raxda Rock 3A" "Raspberry Pi 5" "Raspberry Pi 4B" "Compute Module 4 (CM4)"; do
                 case $hw_choice in
                         "Raxda Rock 3A" )
@@ -671,109 +743,78 @@ select_hardware_and_target_device() {
                                 echo "Please install it (e.g., 'sudo apt install rpiboot') and re-run."
                                 exit 1
                                fi
-
-                               # --- *** Before/After device detection *** ---
-                               echo "Detecting disks *before* rpiboot..."
-                               local DISKS_BEFORE
-                               DISKS_BEFORE=$(lsblk -d -n -o NAME)
-                               echo
-                               echo "Please connect your CM4 to this computer in USB-boot mode."
-                               read -p "Press Enter to run 'sudo rpiboot' and mount the eMMC..."
-                               echo
-                               sudo rpiboot
-                               echo "'rpiboot' finished. Waiting 4s for device to settle..."
-                               sleep 4
-
-                               echo "Detecting disks *after* rpiboot..."
-                               local DISKS_AFTER
-                               DISKS_AFTER=$(lsblk -d -n -o NAME)
-
-                               # Compare the lists to find the new disk
-                               local NEW_DISK
-                               NEW_DISK=$(comm -13 <(echo "$DISKS_BEFORE" | sort) <(echo "$DISKS_AFTER" | sort))
-
-                               if [ -z "$NEW_DISK" ]; then
-                                echo "ERROR: No new disk detected after rpiboot."
-                                echo "Please check connections and try again."
-                                exit 1
-                               fi
-
-                               local NEW_DISK_SIZE
-                               NEW_DISK_SIZE=$(lsblk -d -n -o SIZE "/dev/$NEW_DISK")
-                               TARGET_DEVICE="/dev/$NEW_DISK" # Set the global variable
-                               echo
-                               echo "Detected new device: $TARGET_DEVICE ($NEW_DISK_SIZE)"
-
-                               HARDWARE_MODEL="rpi4" # Set to rpi4 for the template
-                               # Set flag to skip manual device selection
-                               SKIP_DEV_SELECT=1
+                               HARDWARE_MODEL="cm4"
                                break
                                ;;
                 esac
         done
+}
 
+# Selects a single SD card target. Sets TARGET_DEVICE global.
+# For CM4 uses rpiboot before/after detection.
+select_target_device() {
         echo ""
-        echo "--- 2. Select Target Device ---"
+        echo "--- Select Target SD Card ---"
 
-        if [ "$SKIP_DEV_SELECT" -eq 1 ]; then
-                echo "Using auto-detected CM4 device: $TARGET_DEVICE"
-        else
-                echo "Detecting available devices..."
-                local DEVICES=()
+        # CM4: use rpiboot before/after detection
+        if [ "$HARDWARE_MODEL" = "cm4" ]; then
+                local DISKS_BEFORE
+                DISKS_BEFORE=$(lsblk -d -n -o NAME)
+                echo "Please connect your CM4 to this computer in USB-boot mode."
+                read -p "Press Enter to run 'sudo rpiboot' and mount the eMMC..."
+                echo
+                sudo rpiboot
+                echo "'rpiboot' finished. Waiting 4s for device to settle..."
+                sleep 4
 
-                # Get the boot disk to exclude it
-                local BOOT_DISK
-                BOOT_DISK=$(find_boot_disk)
-                echo "(Excluding boot disk: $BOOT_DISK)"
+                local DISKS_AFTER
+                DISKS_AFTER=$(lsblk -d -n -o NAME)
+                local NEW_DISK
+                NEW_DISK=$(comm -13 <(echo "$DISKS_BEFORE" | sort) <(echo "$DISKS_AFTER" | sort))
 
-                # Use lsblk in "pairs" mode (-P) and eval the output
-                while IFS= read -r line; do
-                        # Reset variables for each line
-                        local NAME=""
-                        local MOUNTPOINT=""
-                        local SIZE=""
-                        local TYPE=""
-                        eval "$line"
-
-                        # Add any top-level disk that is NOT the boot disk
-                        if [ "$TYPE" == "disk" ] && [ "$NAME" != "$BOOT_DISK" ]; then
-                               DEVICES+=("/dev/$NAME ($SIZE)")
-                        fi
-                done < <(lsblk -n -P -o NAME,MOUNTPOINT,SIZE,TYPE)
-                # --- *** END FIX *** ---
-
-                if [ ${#DEVICES[@]} -eq 0 ]; then
-                        echo "ERROR: No suitable target devices found (e.g., no USB/SD drives detected)."
-                        echo "Please make sure your SD card reader or USB drive is plugged in."
-                        rm "$TEMP_SCRIPT_FILE"
+                if [ -z "$NEW_DISK" ]; then
+                        echo "ERROR: No new disk detected after rpiboot."
+                        echo "Please check connections and try again."
                         exit 1
                 fi
 
-                echo "Please select the target device:"
-                PS3="Enter number (or 'q' to quit): "
-                select device_choice in "${DEVICES[@]}" "Quit"; do
-                        if [[ "$REPLY" =~ ^[Qq]$ ]]; then
-                               echo "Aborting."
-                               rm "$TEMP_SCRIPT_FILE"
-                               exit 0
-                        fi
-
-                        if [ "$device_choice" == "Quit" ]; then
-                               echo "Aborting."
-                               rm "$TEMP_SCRIPT_FILE"
-                               exit 0
-                        fi
-
-                        if [ -n "$device_choice" ]; then
-                               # Extract the path (e.g., "/dev/sda") from "/dev/sda (8G)"
-                               TARGET_DEVICE=$(echo "$device_choice" | awk '{print $1}')
-                               echo "Selected device: $TARGET_DEVICE"
-                               break
-                        else
-                               echo "Invalid selection."
-                        fi
-                done
+                local NEW_DISK_SIZE
+                NEW_DISK_SIZE=$(lsblk -d -n -o SIZE "/dev/$NEW_DISK")
+                TARGET_DEVICE="/dev/$NEW_DISK"
+                echo "Detected CM4 device: $TARGET_DEVICE ($NEW_DISK_SIZE)"
+                HARDWARE_MODEL="rpi4"  # Use rpi4 template for CM4
+                return
         fi
+
+        echo "Detecting SD cards..."
+        local BOOT_DISK
+        BOOT_DISK=$(find_boot_disk)
+        echo "(Excluding boot disk: $BOOT_DISK)"
+
+        detect_sd_cards "$BOOT_DISK"
+
+        if [ ${#SD_DEVICES[@]} -eq 0 ]; then
+                echo "ERROR: No SD cards detected."
+                echo "Please insert an SD card and try again."
+                exit 1
+        fi
+
+        echo "Please select the target SD card:"
+        PS3="Enter number (or 'q' to quit): "
+        select device_choice in "${SD_DEVICES[@]}" "Quit"; do
+                if [[ "$REPLY" =~ ^[Qq]$ ]] || [ "$device_choice" = "Quit" ]; then
+                        echo "Aborting."
+                        rm -f "$TEMP_SCRIPT_FILE"
+                        exit 0
+                fi
+                if [ -n "$device_choice" ]; then
+                        TARGET_DEVICE=$(echo "$device_choice" | awk '{print $1}')
+                        echo "Selected: $TARGET_DEVICE"
+                        break
+                else
+                        echo "Invalid selection."
+                fi
+        done
 }
 
 # Function to display final confirmation before flashing
@@ -811,12 +852,235 @@ confirm_flash() {
         echo "Proceeding with flash..."
 }
 
+# Flash one SD card — Rock3A path (dd)
+flash_r3a() {
+        local target="$1"
+
+        # Create temp copy of image to avoid modifying original
+        local TEMP_IMAGE
+        TEMP_IMAGE=$(mktemp --suffix=.img)
+        echo "Creating temporary copy of $ARMBIAN_IMAGE..."
+        cp "$ARMBIAN_IMAGE" "$TEMP_IMAGE"
+
+        # Loop mount the temp image
+        local LOOP_DEV
+        LOOP_DEV=$(sudo losetup -fP --show "$TEMP_IMAGE")
+        echo "Mounted image as: $LOOP_DEV"
+
+        # Mount root partition (partition 2 on Armbian - partition 1 is /boot)
+        local ROOT_MOUNT="/tmp/armbian-root"
+        sudo mkdir -p "$ROOT_MOUNT"
+        echo "Mounting ${LOOP_DEV}p2 to $ROOT_MOUNT"
+        sudo mount "${LOOP_DEV}p2" "$ROOT_MOUNT"
+
+        # Write mesh configuration to /etc/mesh.conf
+        echo "Writing /etc/mesh.conf..."
+        sudo tee "$ROOT_MOUNT/etc/mesh.conf" > /dev/null << EOF
+# Mesh Network Configuration
+# Generated by provisioning script on $(date)
+hardware_model=${HARDWARE_MODEL}
+eud=${EUD_CONNECTION}
+lan_ap_ssid=${LAN_AP_SSID}
+lan_ap_key=${LAN_AP_KEY}
+max_euds_per_node=${MAX_EUDS_PER_NODE}
+mtx=${INSTALL_MEDIAMTX}
+mumble=${INSTALL_MUMBLE}
+mesh_ssid=${MESH_SSID}
+mesh_key=${MESH_SAE_KEY}
+ipv4_network=${LAN_CIDR_BLOCK}
+acs=${AUTO_CHANNEL}
+regulatory_domain=${REGULATORY_DOMAIN}
+halow_regulatory_domain=${HALOW_REGULATORY_DOMAIN}
+admin_password=${ADMIN_PW}
+auto_update=${AUTO_UPDATE}
+EOF
+
+        # ============================================================
+        # BYPASS ARMBIAN-FIRSTLOGIN - Headless auto-provisioning
+        # ============================================================
+
+        # Remove .not_logged_in_yet to prevent armbian-firstlogin from running
+        echo "Removing .not_logged_in_yet to bypass interactive setup..."
+        sudo rm -f "$ROOT_MOUNT/root/.not_logged_in_yet"
+
+        # Pre-create the radio user with hashed password
+        echo "Creating radio user..."
+        local RADIO_PW_HASH
+        RADIO_PW_HASH=$(openssl passwd -6 "$RADIO_PW")
+
+        # Add radio user to passwd (UID 1000, GID 1000, home /home/radio, shell /bin/bash)
+        echo "radio:x:1000:1000:radio:/home/radio:/bin/bash" | sudo tee -a "$ROOT_MOUNT/etc/passwd" > /dev/null
+
+        # Add radio group
+        echo "radio:x:1000:" | sudo tee -a "$ROOT_MOUNT/etc/group" > /dev/null
+
+        # Add radio to shadow with hashed password
+        echo "radio:${RADIO_PW_HASH}:19700:0:99999:7:::" | sudo tee -a "$ROOT_MOUNT/etc/shadow" > /dev/null
+
+        # Add radio to sudo group
+        sudo sed -i 's/^sudo:x:\([0-9]*\):.*$/sudo:x:\1:radio/' "$ROOT_MOUNT/etc/group"
+
+        # Create home directory
+        sudo mkdir -p "$ROOT_MOUNT/home/radio"
+        sudo chown 1000:1000 "$ROOT_MOUNT/home/radio"
+        sudo chmod 755 "$ROOT_MOUNT/home/radio"
+
+        # Add radio to sudoers (passwordless sudo)
+        echo "radio ALL=(ALL) NOPASSWD: ALL" | sudo tee "$ROOT_MOUNT/etc/sudoers.d/radio" > /dev/null
+        sudo chmod 440 "$ROOT_MOUNT/etc/sudoers.d/radio"
+
+        # ============================================================
+        # Generate and install the provisioning script
+        # ============================================================
+
+        echo "Generating provisioning script from Rock3A template..."
+        local TEMP_PROVISION_SCRIPT
+        TEMP_PROVISION_SCRIPT=$(mktemp)
+
+        if [ ! -f "$ROCK3A_TEMPLATE" ]; then
+                echo "ERROR: Rock3A template '$ROCK3A_TEMPLATE' not found."
+                sudo umount "$ROOT_MOUNT" 2>/dev/null; sudo losetup -d "$LOOP_DEV" 2>/dev/null
+                rm -f "$TEMP_IMAGE"
+                exit 1
+        fi
+
+        cp "$ROCK3A_TEMPLATE" "$TEMP_PROVISION_SCRIPT"
+
+        sed -i "s|__HARDWARE_MODEL__|${HARDWARE_MODEL}|g" "$TEMP_PROVISION_SCRIPT"
+        sed -i "s|__EUD_CONNECTION__|${EUD_CONNECTION}|g" "$TEMP_PROVISION_SCRIPT"
+        sed -i "s|__LAN_AP_SSID__|${LAN_AP_SSID}|g" "$TEMP_PROVISION_SCRIPT"
+        sed -i "s|__LAN_AP_KEY__|${LAN_AP_KEY}|g" "$TEMP_PROVISION_SCRIPT"
+        sed -i "s|__MAX_EUDS_PER_NODE__|${MAX_EUDS_PER_NODE}|g" "$TEMP_PROVISION_SCRIPT"
+        sed -i "s|__INSTALL_MEDIAMTX__|${INSTALL_MEDIAMTX}|g" "$TEMP_PROVISION_SCRIPT"
+        sed -i "s|__INSTALL_MUMBLE__|${INSTALL_MUMBLE}|g" "$TEMP_PROVISION_SCRIPT"
+        sed -i "s|__MESH_SSID__|${MESH_SSID}|g" "$TEMP_PROVISION_SCRIPT"
+        sed -i "s|__MESH_SAE_KEY__|${MESH_SAE_KEY}|g" "$TEMP_PROVISION_SCRIPT"
+        sed -i "s|__LAN_CIDR_BLOCK__|${LAN_CIDR_BLOCK}|g" "$TEMP_PROVISION_SCRIPT"
+        sed -i "s|__AUTO_CHANNEL__|${AUTO_CHANNEL}|g" "$TEMP_PROVISION_SCRIPT"
+        sed -i "s|__RADIO_PW__|${RADIO_PW}|g" "$TEMP_PROVISION_SCRIPT"
+        sed -i "s|__REGULATORY_DOMAIN__|${REGULATORY_DOMAIN}|g" "$TEMP_PROVISION_SCRIPT"
+        sed -i "s|__HALOW_REGULATORY_DOMAIN__|${HALOW_REGULATORY_DOMAIN}|g" "$TEMP_PROVISION_SCRIPT"
+        sed -i "s|__ADMIN_PW__|${ADMIN_PW}|g" "$TEMP_PROVISION_SCRIPT"
+        sed -i "s|__AUTO_UPDATE__|${AUTO_UPDATE}|g" "$TEMP_PROVISION_SCRIPT"
+
+        echo "Installing provisioning script to /usr/local/bin/provision-mesh.sh..."
+        sudo cp "$TEMP_PROVISION_SCRIPT" "$ROOT_MOUNT/usr/local/bin/provision-mesh.sh"
+        sudo chmod +x "$ROOT_MOUNT/usr/local/bin/provision-mesh.sh"
+        rm -f "$TEMP_PROVISION_SCRIPT"
+
+        # ============================================================
+        # Create systemd service for auto-provisioning on first boot
+        # ============================================================
+
+        echo "Creating mesh-provision systemd service..."
+        sudo tee "$ROOT_MOUNT/etc/systemd/system/mesh-provision.service" > /dev/null << 'SERVICE_EOF'
+[Unit]
+Description=Mesh Network First Boot Provisioning
+ConditionPathExists=/root/.mesh-not-provisioned
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/provision-mesh.sh
+ExecStartPost=/bin/rm -f /root/.mesh-not-provisioned
+RemainAfterExit=yes
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=multi-user.target
+SERVICE_EOF
+
+        echo "Creating provisioning trigger flag..."
+        sudo touch "$ROOT_MOUNT/root/.mesh-not-provisioned"
+
+        echo "Enabling mesh-provision service..."
+        sudo mkdir -p "$ROOT_MOUNT/etc/systemd/system/multi-user.target.wants"
+        sudo ln -sf /etc/systemd/system/mesh-provision.service \
+                "$ROOT_MOUNT/etc/systemd/system/multi-user.target.wants/mesh-provision.service"
+
+        # ============================================================
+        # Unmount and flash
+        # ============================================================
+
+        echo "Unmounting image..."
+        sudo sync
+        sudo umount "$ROOT_MOUNT"
+        sudo rmdir "$ROOT_MOUNT"
+        sudo losetup -d "$LOOP_DEV"
+
+        confirm_flash "$target"
+
+        echo "Wiping target device..."
+        sudo wipefs -a "$target"
+
+        echo "Flashing image to $target..."
+        sudo dd if="$TEMP_IMAGE" of="$target" bs=4M status=progress conv=fsync
+        sudo sync
+
+        rm -f "$TEMP_IMAGE"
+
+        echo ""
+        echo "=============================================="
+        echo "           ✅ Flash complete: $target"
+        echo "=============================================="
+        echo ""
+        echo "You can now remove the SD card and boot your"
+        echo "Rock 3A. First boot provisioning will run"
+        echo "automatically when connected to the internet."
+        echo ""
+        echo "  - Root password: 1234 (Armbian default)"
+        echo "  - Radio user: radio / <your configured password>"
+        echo ""
+        echo " ONCE BOOTED, THE MESH NODE WILL AUTOMATICALLY START"
+        echo " SETTING ITSELF UP AND WILL REBOOT MULTIPLE TIMES"
+        echo " Just leave it alone, this process takes about ten"
+        echo " minutes"
+}
+
+# Flash one SD card — Raspberry Pi path (rpi-imager)
+flash_rpi() {
+        local target="$1"
+
+        echo "Generating firstrun script from template..."
+        sed -e "s|__HARDWARE_MODEL__|${HARDWARE_MODEL}|g" \
+            -e "s|__EUD_CONNECTION__|${EUD_CONNECTION}|g" \
+            -e "s|__LAN_AP_SSID__|${LAN_AP_SSID}|g" \
+            -e "s|__LAN_AP_KEY__|${LAN_AP_KEY}|g" \
+            -e "s|__MAX_EUDS_PER_NODE__|${MAX_EUDS_PER_NODE}|g" \
+            -e "s|__INSTALL_MEDIAMTX__|${INSTALL_MEDIAMTX}|g" \
+            -e "s|__INSTALL_MUMBLE__|${INSTALL_MUMBLE}|g" \
+            -e "s|__MESH_SSID__|${MESH_SSID}|g" \
+            -e "s|__MESH_SAE_KEY__|${MESH_SAE_KEY}|g" \
+            -e "s|__LAN_CIDR_BLOCK__|${LAN_CIDR_BLOCK}|g" \
+            -e "s|__AUTO_CHANNEL__|${AUTO_CHANNEL}|g" \
+            -e "s|__RADIO_PW__|${RADIO_PW}|g" \
+            -e "s|__REGULATORY_DOMAIN__|${REGULATORY_DOMAIN}|g" \
+            -e "s|__HALOW_REGULATORY_DOMAIN__|${HALOW_REGULATORY_DOMAIN}|g" \
+            -e "s|__ADMIN_PW__|${ADMIN_PW}|g" \
+            -e "s|__AUTO_UPDATE__|${AUTO_UPDATE}|g" \
+            "$TEMPLATE_FILE" > "$TEMP_SCRIPT_FILE"
+
+        confirm_flash "$target"
+
+        sudo rpi-imager --cli "$PI_OS_IMAGE_URL" "$target" --first-run-script "$TEMP_SCRIPT_FILE"
+
+        echo ""
+        echo "=============================================="
+        echo "           ✅ Flash complete: $target"
+        echo "=============================================="
+        echo ""
+        echo " ONCE BOOTED, THE MESH NODE WILL AUTOMATICALLY START"
+        echo " SETTING ITSELF UP AND WILL REBOOT MULTIPLE TIMES"
+        echo " Just leave it alone, this process takes about ten"
+        echo " minutes"
+}
+
 
 # --- Main Script ---
 
-# This function will set HARDWARE_MODEL and TARGET_DEVICE
-select_hardware_and_target_device
-
+select_hardware
 
 # --- 1. Check Dependencies ---
 if [ "$HARDWARE_MODEL" != "r3a" ]; then
@@ -848,16 +1112,18 @@ if ! command -v findmnt &> /dev/null; then
         echo "Please install it (e.g., 'sudo apt install util-linux')."
         exit 1
 fi
+if ! command -v sha256sum &> /dev/null; then
+        echo "ERROR: 'sha256sum' command not found. Needed for image verification."
+        exit 1
+fi
 
 # Ensure config directory exists
 mkdir -p "$CONFIG_DIR"
 
 # --- 2. Load or Create Config ---
-# Find config files
 config_files=("$CONFIG_DIR"/*.conf)
 num_configs=${#config_files[@]}
 
-# Check if the first match is an actual file
 if [ ! -f "${config_files[0]}" ]; then
         num_configs=0
 fi
@@ -869,7 +1135,6 @@ if [ "$num_configs" -gt 0 ]; then
                 case $choice in
                         "Load a saved configuration" )
                                echo "Please select a configuration to load:"
-                               # Build a list of just the names for the select menu
                                config_names=()
                                for f in "${config_files[@]}"; do
                                 config_names+=("$(basename "$f" .conf)")
@@ -905,238 +1170,106 @@ else
 fi
 
 
-# --- 3. Get Image & Device ---
-echo ""
-echo "--- Image & Device ---"
-
-
-
-
-# Rock3A provisioning section
+# --- 3. Acquire image (Rock3A only — checksum verified here) ---
 if [ "$HARDWARE_MODEL" = "r3a" ]; then
-		# Now that we know the hardware, acquire the appropriate image
-		acquire_armbian_image
-
-        # Create temp copy of image to avoid modifying original
-        TEMP_IMAGE=$(mktemp --suffix=.img)
-        echo "Creating temporary copy of $ARMBIAN_IMAGE..."
-        cp "$ARMBIAN_IMAGE" "$TEMP_IMAGE"
-
-        # Loop mount the temp image
-        LOOP_DEV=$(sudo losetup -fP --show "$TEMP_IMAGE")
-        echo "Mounted image as: $LOOP_DEV"
-
-        # Mount root partition (partition 2 on Armbian - partition 1 is /boot)
-        ROOT_MOUNT="/tmp/armbian-root"
-        sudo mkdir -p "$ROOT_MOUNT"
-        echo "Mounting ${LOOP_DEV}p2 to $ROOT_MOUNT"
-        sudo mount "${LOOP_DEV}p2" "$ROOT_MOUNT"
-
-        # Write mesh configuration to /etc/mesh.conf
-        echo "Writing /etc/mesh.conf..."
-        sudo tee "$ROOT_MOUNT/etc/mesh.conf" > /dev/null << EOF
-# Mesh Network Configuration
-# Generated by provisioning script on $(date)
-hardware_model=${HARDWARE_MODEL}
-eud=${EUD_CONNECTION}
-lan_ap_ssid=${LAN_AP_SSID}
-lan_ap_key=${LAN_AP_KEY}
-max_euds_per_node=${MAX_EUDS_PER_NODE}
-mtx=${INSTALL_MEDIAMTX}
-mumble=${INSTALL_MUMBLE}
-mesh_ssid=${MESH_SSID}
-mesh_key=${MESH_SAE_KEY}
-ipv4_network=${LAN_CIDR_BLOCK}
-acs=${AUTO_CHANNEL}
-regulatory_domain=${REGULATORY_DOMAIN}
-halow_regulatory_domain=${HALOW_REGULATORY_DOMAIN}
-admin_password=${ADMIN_PW}
-auto_update=${AUTO_UPDATE}
-EOF
-
-        # ============================================================
-        # BYPASS ARMBIAN-FIRSTLOGIN - Headless auto-provisioning
-        # ============================================================
-        
-        # Remove .not_logged_in_yet to prevent armbian-firstlogin from running
-        echo "Removing .not_logged_in_yet to bypass interactive setup..."
-        sudo rm -f "$ROOT_MOUNT/root/.not_logged_in_yet"
-        
-        # Pre-create the radio user with hashed password
-        echo "Creating radio user..."
-        RADIO_PW_HASH=$(openssl passwd -6 "$RADIO_PW")
-        
-        # Add radio user to passwd (UID 1000, GID 1000, home /home/radio, shell /bin/bash)
-        echo "radio:x:1000:1000:radio:/home/radio:/bin/bash" | sudo tee -a "$ROOT_MOUNT/etc/passwd" > /dev/null
-        
-        # Add radio group
-        echo "radio:x:1000:" | sudo tee -a "$ROOT_MOUNT/etc/group" > /dev/null
-        
-        # Add radio to shadow with hashed password
-        echo "radio:${RADIO_PW_HASH}:19700:0:99999:7:::" | sudo tee -a "$ROOT_MOUNT/etc/shadow" > /dev/null
-        
-        # Add radio to sudo group
-        sudo sed -i 's/^sudo:x:\([0-9]*\):.*$/sudo:x:\1:radio/' "$ROOT_MOUNT/etc/group"
-        
-        # Create home directory
-        sudo mkdir -p "$ROOT_MOUNT/home/radio"
-        sudo chown 1000:1000 "$ROOT_MOUNT/home/radio"
-        sudo chmod 755 "$ROOT_MOUNT/home/radio"
-        
-        # Add radio to sudoers (passwordless sudo)
-        echo "radio ALL=(ALL) NOPASSWD: ALL" | sudo tee "$ROOT_MOUNT/etc/sudoers.d/radio" > /dev/null
-        sudo chmod 440 "$ROOT_MOUNT/etc/sudoers.d/radio"
-
-        # ============================================================
-        # Generate and install the provisioning script
-        # ============================================================
-        
-        echo "Generating provisioning script from Rock3A template..."
-        TEMP_PROVISION_SCRIPT=$(mktemp)
-        
-        # Check if Rock3A template exists
-        if [ ! -f "$ROCK3A_TEMPLATE" ]; then
-                echo "ERROR: Rock3A template '$ROCK3A_TEMPLATE' not found."
-                exit 1
-        fi
-        
-        # Copy the template
-        cp "$ROCK3A_TEMPLATE" "$TEMP_PROVISION_SCRIPT"
-        
-        # Apply all the placeholder substitutions
-        sed -i "s|__HARDWARE_MODEL__|${HARDWARE_MODEL}|g" "$TEMP_PROVISION_SCRIPT"
-        sed -i "s|__EUD_CONNECTION__|${EUD_CONNECTION}|g" "$TEMP_PROVISION_SCRIPT"
-        sed -i "s|__LAN_AP_SSID__|${LAN_AP_SSID}|g" "$TEMP_PROVISION_SCRIPT"
-        sed -i "s|__LAN_AP_KEY__|${LAN_AP_KEY}|g" "$TEMP_PROVISION_SCRIPT"
-        sed -i "s|__MAX_EUDS_PER_NODE__|${MAX_EUDS_PER_NODE}|g" "$TEMP_PROVISION_SCRIPT"
-        sed -i "s|__INSTALL_MEDIAMTX__|${INSTALL_MEDIAMTX}|g" "$TEMP_PROVISION_SCRIPT"
-        sed -i "s|__INSTALL_MUMBLE__|${INSTALL_MUMBLE}|g" "$TEMP_PROVISION_SCRIPT"
-        sed -i "s|__MESH_SSID__|${MESH_SSID}|g" "$TEMP_PROVISION_SCRIPT"
-        sed -i "s|__MESH_SAE_KEY__|${MESH_SAE_KEY}|g" "$TEMP_PROVISION_SCRIPT"
-        sed -i "s|__LAN_CIDR_BLOCK__|${LAN_CIDR_BLOCK}|g" "$TEMP_PROVISION_SCRIPT"
-        sed -i "s|__AUTO_CHANNEL__|${AUTO_CHANNEL}|g" "$TEMP_PROVISION_SCRIPT"
-        sed -i "s|__RADIO_PW__|${RADIO_PW}|g" "$TEMP_PROVISION_SCRIPT"
-        sed -i "s|__REGULATORY_DOMAIN__|${REGULATORY_DOMAIN}|g" "$TEMP_PROVISION_SCRIPT"
-        sed -i "s|__HALOW_REGULATORY_DOMAIN__|${HALOW_REGULATORY_DOMAIN}|g" "$TEMP_PROVISION_SCRIPT"
-        sed -i "s|__ADMIN_PW__|${ADMIN_PW}|g" "$TEMP_PROVISION_SCRIPT"
-        sed -i "s|__AUTO_UPDATE__|${AUTO_UPDATE}|g" "$TEMP_PROVISION_SCRIPT"
-        
-        # Install provisioning script directly to /usr/local/bin
-        echo "Installing provisioning script to /usr/local/bin/provision-mesh.sh..."
-        sudo cp "$TEMP_PROVISION_SCRIPT" "$ROOT_MOUNT/usr/local/bin/provision-mesh.sh"
-        sudo chmod +x "$ROOT_MOUNT/usr/local/bin/provision-mesh.sh"
-        
-        # Cleanup temp file
-        rm -f "$TEMP_PROVISION_SCRIPT"
-
-        # ============================================================
-        # Create systemd service for auto-provisioning on first boot
-        # ============================================================
-        
-        echo "Creating mesh-provision systemd service..."
-        sudo tee "$ROOT_MOUNT/etc/systemd/system/mesh-provision.service" > /dev/null << 'SERVICE_EOF'
-[Unit]
-Description=Mesh Network First Boot Provisioning
-ConditionPathExists=/root/.mesh-not-provisioned
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=oneshot
-ExecStart=/usr/local/bin/provision-mesh.sh
-ExecStartPost=/bin/rm -f /root/.mesh-not-provisioned
-RemainAfterExit=yes
-StandardOutput=journal+console
-StandardError=journal+console
-
-[Install]
-WantedBy=multi-user.target
-SERVICE_EOF
-
-        # Create the flag file that triggers provisioning
-        echo "Creating provisioning trigger flag..."
-        sudo touch "$ROOT_MOUNT/root/.mesh-not-provisioned"
-        
-        # Enable the service (create symlink manually since systemctl won't work on mounted image)
-        echo "Enabling mesh-provision service..."
-        sudo mkdir -p "$ROOT_MOUNT/etc/systemd/system/multi-user.target.wants"
-        sudo ln -sf /etc/systemd/system/mesh-provision.service \
-                "$ROOT_MOUNT/etc/systemd/system/multi-user.target.wants/mesh-provision.service"
-
-        # ============================================================
-        # Unmount and flash
-        # ============================================================
-        
-        echo "Unmounting image..."
-        sudo sync
-        sudo umount "$ROOT_MOUNT"
-        sudo rmdir "$ROOT_MOUNT"
-        sudo losetup -d "$LOOP_DEV"
-
-        # Final confirmation before flashing
-        confirm_flash "$TARGET_DEVICE"
-
-        # Wipe target device to avoid stale partition data
-        echo "Wiping target device..."
-        sudo wipefs -a "$TARGET_DEVICE"
-
-        # Flash to device
-        echo "Flashing image to $TARGET_DEVICE..."
-        sudo dd if="$TEMP_IMAGE" of="$TARGET_DEVICE" bs=4M status=progress conv=fsync
-        sudo sync
-
-        # Clean up temp image
-        rm -f "$TEMP_IMAGE"
-
-        echo ""
-        echo "=============================================="
-        echo "           ✅ Flash complete!"
-        echo "=============================================="
-        echo ""
-        echo "You can now remove the SD card and boot your"
-        echo "Rock 3A. First boot provisioning will run"
-        echo "automatically when connected to the internet."
-        echo ""
-        echo "  - Root password: 1234 (Armbian default)"
-        echo "  - Radio user: radio / <your configured password>"
-        echo ""
-		echo " ONCE BOOTED, THE MESH NODE WILL AUTOMATICALLY START"
-		echo " SETTING ITSELF UP AND WILL REBOOT MULTIPLE TIMES"
-		echo " Just leave it alone, this process takes about ten"
-		echo " minutes"
-else
-        # Raspberry Pi path - use rpi-imager
-
-        # Generate the firstrun script from template
-        echo "Generating firstrun script from template..."
-
-        # Do all the same substitutions as before
-        sed -e "s|__HARDWARE_MODEL__|${HARDWARE_MODEL}|g" \
-            -e "s|__EUD_CONNECTION__|${EUD_CONNECTION}|g" \
-            -e "s|__LAN_AP_SSID__|${LAN_AP_SSID}|g" \
-            -e "s|__LAN_AP_KEY__|${LAN_AP_KEY}|g" \
-            -e "s|__MAX_EUDS_PER_NODE__|${MAX_EUDS_PER_NODE}|g" \
-            -e "s|__INSTALL_MEDIAMTX__|${INSTALL_MEDIAMTX}|g" \
-            -e "s|__INSTALL_MUMBLE__|${INSTALL_MUMBLE}|g" \
-            -e "s|__MESH_SSID__|${MESH_SSID}|g" \
-            -e "s|__MESH_SAE_KEY__|${MESH_SAE_KEY}|g" \
-            -e "s|__LAN_CIDR_BLOCK__|${LAN_CIDR_BLOCK}|g" \
-            -e "s|__AUTO_CHANNEL__|${AUTO_CHANNEL}|g" \
-            -e "s|__RADIO_PW__|${RADIO_PW}|g" \
-            -e "s|__REGULATORY_DOMAIN__|${REGULATORY_DOMAIN}|g" \
-            -e "s|__HALOW_REGULATORY_DOMAIN__|${HALOW_REGULATORY_DOMAIN}|g" \
-            -e "s|__ADMIN_PW__|${ADMIN_PW}|g" \
-            -e "s|__AUTO_UPDATE__|${AUTO_UPDATE}|g" \
-            "$TEMPLATE_FILE" > "$TEMP_SCRIPT_FILE"
-        
-        # Final confirmation before flashing
-        confirm_flash "$TARGET_DEVICE"
-
-        sudo rpi-imager --cli "$PI_OS_IMAGE_URL" "$TARGET_DEVICE" --first-run-script "$TEMP_SCRIPT_FILE"
-        echo ""
-        echo " ONCE BOOTED, THE MESH NODE WILL AUTOMATICALLY START"
-        echo " SETTING ITSELF UP AND WILL REBOOT MULTIPLE TIMES"
-        echo " Just leave it alone, this process takes about ten"
-        echo " minutes"
-
+        acquire_armbian_image
 fi
+
+# --- 4. Multi-SD flash ---
+
+# CM4 goes through its own single-device flow (rpiboot required)
+if [ "$HARDWARE_MODEL" = "cm4" ]; then
+        select_target_device
+        flash_rpi "$TARGET_DEVICE"
+        rm -f "$TEMP_SCRIPT_FILE"
+        exit 0
+fi
+
+# For all other hardware: detect all SD cards upfront, let user pick multiple
+
+flash_multiple_cards() {
+        local BOOT_DISK
+        BOOT_DISK=$(find_boot_disk)
+
+        while true; do
+                echo ""
+                echo "=============================================="
+                echo "  Insert all SD cards you want to flash now,"
+                echo "  then press Enter to detect them."
+                echo "=============================================="
+                read -p ""
+
+                detect_sd_cards "$BOOT_DISK"
+
+                if [ ${#SD_DEVICES[@]} -eq 0 ]; then
+                        echo "No SD cards detected. Please insert cards and try again."
+                        continue
+                fi
+
+                echo ""
+                echo "Detected SD cards:"
+                local i=1
+                for dev in "${SD_DEVICES[@]}"; do
+                        printf "  %d) %s\n" "$i" "$dev"
+                        i=$((i + 1))
+                done
+                echo ""
+
+                local selected_nums
+                read -p "Enter card numbers to flash (e.g. 1 2 3), or 'r' to re-scan: " selected_nums
+
+                [[ "$selected_nums" =~ ^[Rr]$ ]] && continue
+
+                # Validate input
+                local valid=true
+                local nums=()
+                for n in $selected_nums; do
+                        if ! [[ "$n" =~ ^[0-9]+$ ]] || [ "$n" -lt 1 ] || [ "$n" -gt "${#SD_DEVICES[@]}" ]; then
+                                echo "Invalid number: $n (valid range: 1-${#SD_DEVICES[@]})"
+                                valid=false
+                                break
+                        fi
+                        nums+=("$n")
+                done
+                $valid || continue
+
+                [ ${#nums[@]} -eq 0 ] && echo "No cards selected." && continue
+
+                echo ""
+                echo "Will flash ${#nums[@]} card(s):"
+                for n in "${nums[@]}"; do
+                        echo "  - ${SD_DEVICES[$((n-1))]}"
+                done
+                echo ""
+                read -p "Proceed? (Y/n): " proceed
+                proceed=${proceed:-y}
+                [[ "$proceed" =~ ^[Yy]$ ]] || continue
+
+                local FLASH_COUNT=0
+                for n in "${nums[@]}"; do
+                        local dev_entry="${SD_DEVICES[$((n-1))]}"
+                        TARGET_DEVICE=$(echo "$dev_entry" | awk '{print $1}')
+                        echo ""
+                        echo "=== Flashing card $((FLASH_COUNT+1)) of ${#nums[@]}: $TARGET_DEVICE ==="
+                        if [ "$HARDWARE_MODEL" = "r3a" ]; then
+                                flash_r3a "$TARGET_DEVICE"
+                        else
+                                flash_rpi "$TARGET_DEVICE"
+                        fi
+                        FLASH_COUNT=$((FLASH_COUNT + 1))
+                done
+
+                echo ""
+                echo "=============================================="
+                echo "  Done. $FLASH_COUNT SD card(s) flashed."
+                echo "=============================================="
+                echo ""
+                read -p "Flash another batch with the same settings? (y/N): " again
+                again=${again:-n}
+                [[ "$again" =~ ^[Yy]$ ]] || break
+        done
+}
+
+flash_multiple_cards
+
+rm -f "$TEMP_SCRIPT_FILE"
