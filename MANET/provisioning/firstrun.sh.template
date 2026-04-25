@@ -779,7 +779,7 @@ touch /etc/cloud/cloud-init.disabled
 
 systemctl disable NetworkManager-wait-online.service
 
-apt remove -y iptables rfkill
+apt remove -y iptables
 apt autoremove -y
 
 
