@@ -199,6 +199,22 @@ tar -zxf /root/morse-pi-install.tar.gz -C /
 udevadm control --reload-rules 2>/dev/null || true
 udevadm trigger 2>/dev/null || true
 
+# Fix networkd-dispatcher directory ownership (tar extracts as current user)
+chown root:root /etc/networkd-dispatcher \
+  /etc/networkd-dispatcher/carrier.d \
+  /etc/networkd-dispatcher/off.d \
+  /etc/networkd-dispatcher/no-carrier.d \
+  /etc/networkd-dispatcher/degraded.d 2>/dev/null || true
+chmod 755 /etc/networkd-dispatcher \
+  /etc/networkd-dispatcher/carrier.d \
+  /etc/networkd-dispatcher/off.d \
+  /etc/networkd-dispatcher/no-carrier.d \
+  /etc/networkd-dispatcher/degraded.d 2>/dev/null || true
+
+# Fix sudoers.d directory ownership
+chown root:root /etc/sudoers.d 2>/dev/null || true
+chmod 750 /etc/sudoers.d 2>/dev/null || true
+
 # Platform-specific post-extraction steps
 if [ "__HARDWARE_MODEL__" = "r3a" ]; then
 	# Unpack the r3a kernel
