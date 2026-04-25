@@ -66,21 +66,26 @@ HOST_MAC=$(ip a | grep -A1 $(networkctl | grep -v bat | awk '/ether/ {print $2}'
    | awk '/ether/ {print $2}' | cut -d':' -f 5-6 | sed 's/://g')
 
 echo "Waiting for internet connectivity..."
-TIMEOUT=300
-ELAPSED=0
-while [ $ELAPSED -lt $TIMEOUT ]; do
-	if ping -c 1 -W 2 8.8.8.8 > /dev/null 2>&1; then
-		echo "Internet connectivity confirmed!"
-		break
-	fi
-	echo "Waiting for internet... (${ELAPSED}s)"
-	sleep 5
-	ELAPSED=$((ELAPSED + 5))
+# Blink POWER LED rapidly while waiting (RPi5: /sys/class/leds/PWR)
+PWR_LED=/sys/class/leds/PWR
+if [ -d "$PWR_LED" ]; then
+    echo timer        > "$PWR_LED/trigger"   2>/dev/null || true
+    echo 100          > "$PWR_LED/delay_on"  2>/dev/null || true
+    echo 100          > "$PWR_LED/delay_off" 2>/dev/null || true
+fi
+
+while true; do
+    if ping -c 1 -W 2 8.8.8.8 > /dev/null 2>&1; then
+        echo "Internet connectivity confirmed!"
+        break
+    fi
+    echo "Waiting for internet..."
+    sleep 5
 done
 
-if [ $ELAPSED -ge $TIMEOUT ]; then
-	echo "ERROR: No internet after ${TIMEOUT}s"
-	exit 1
+# Restore LED to solid-on
+if [ -d "$PWR_LED" ]; then
+    echo default-on > "$PWR_LED/trigger" 2>/dev/null || true
 fi
 
 # A basic method to set the system time
