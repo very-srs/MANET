@@ -1011,8 +1011,6 @@ SERVICE_EOF
         sudo rmdir "$ROOT_MOUNT"
         sudo losetup -d "$LOOP_DEV"
 
-        confirm_flash "$target"
-
         echo "Wiping target device..."
         sudo wipefs -a "$target"
 
@@ -1062,8 +1060,6 @@ flash_rpi() {
             -e "s|__ADMIN_PW__|${ADMIN_PW}|g" \
             -e "s|__AUTO_UPDATE__|${AUTO_UPDATE}|g" \
             "$TEMPLATE_FILE" > "$TEMP_SCRIPT_FILE"
-
-        confirm_flash "$target"
 
         sudo rpi-imager --cli "$PI_OS_IMAGE_URL" "$target" --first-run-script "$TEMP_SCRIPT_FILE"
 
@@ -1181,6 +1177,7 @@ fi
 # CM4 goes through its own single-device flow (rpiboot required)
 if [ "$HARDWARE_MODEL" = "cm4" ]; then
         select_target_device
+        confirm_flash "$TARGET_DEVICE"
         flash_rpi "$TARGET_DEVICE"
         rm -f "$TEMP_SCRIPT_FILE"
         exit 0
