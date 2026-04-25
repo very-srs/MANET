@@ -176,7 +176,6 @@ fi
 # get the sources up to date and install packages
 echo -n "Updating system packages..."
 apt update > /dev/null 2>&1
-apt upgrade -y > /dev/null 2>&1
 
 # Remove the question about the iperf daemon during apt install
 echo "iperf3 iperf3/start_daemon boolean true" | debconf-set-selections
