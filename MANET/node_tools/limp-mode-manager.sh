@@ -15,6 +15,9 @@ log() {
     echo "[$(date +'%Y-%m-%d %H:%M:%S')] - LIMP-MODE: $1" | systemd-cat -t limp-mode-manager
 }
 
+mesh_iface_24="$(cat /var/lib/mesh_24_if 2>/dev/null || true)"
+mesh_iface_5="$(cat /var/lib/mesh_5_if 2>/dev/null || true)"
+
 [ ! -f "$REGISTRY_STATE_FILE" ] && exit 0
 
 NOW=$(date +%s)
@@ -47,8 +50,8 @@ if (( $(echo "$LIMP_RATIO > $LIMP_MODE_CONSENSUS" | bc -l) )); then
     # Should be in limp mode
     if [ "$CURRENT_LIMP_STATE" == "false" ]; then
         log "ENTERING LIMP MODE (consensus: $LIMP_RATIO)"
-        iw dev wlan0 set bitrates legacy-2.4 1 2 5.5 11
-        iw dev wlan1 set bitrates legacy-5 6 9 12 18
+        [ -n "$mesh_iface_24" ] && iw dev "$mesh_iface_24" set bitrates legacy-2.4 1 2 5.5 11
+        [ -n "$mesh_iface_5" ] && iw dev "$mesh_iface_5" set bitrates legacy-5 6 9 12 18
         echo "$NOW" > "$LIMP_STATE_FILE"
     fi
 else
@@ -58,8 +61,8 @@ else
 
         if [ $TIME_IN_LIMP -ge $LIMP_MODE_MIN_DURATION ]; then
             log "EXITING LIMP MODE (consensus: $LIMP_RATIO, duration: ${TIME_IN_LIMP}s)"
-            iw dev wlan0 set bitrates
-            iw dev wlan1 set bitrates
+            [ -n "$mesh_iface_24" ] && iw dev "$mesh_iface_24" set bitrates
+            [ -n "$mesh_iface_5" ] && iw dev "$mesh_iface_5" set bitrates
             rm -f "$LIMP_STATE_FILE"
         else
             log "Consensus lost but maintaining limp mode for minimum duration (${TIME_IN_LIMP}/${LIMP_MODE_MIN_DURATION}s)"

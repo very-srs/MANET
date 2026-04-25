@@ -1,0 +1,13 @@
+[Unit]
+Description=BATMAN bat0 HaLow re-enslave watchdog
+After=batman-enslave.service
+Requires=batman-enslave.service
+
+[Service]
+Type=simple
+Restart=always
+RestartSec=10
+ExecStart=/usr/local/bin/batman-enslave-watch.sh
+
+[Install]
+WantedBy=multi-user.target
