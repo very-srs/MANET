@@ -182,13 +182,12 @@ apply_dangerous_settings() {
         rm -f /var/run/my_ipv4_chunk /var/run/mesh_ipv4_state 2>/dev/null
     }
 
-    # Restart wpa_supplicant on all mesh interfaces
+    # Restart wpa_supplicant on configured mesh interfaces
     log "  Restarting wpa_supplicant on mesh interfaces..."
-    for iface in wlan0 wlan1 wlan2; do
-        if [ -f "/etc/wpa_supplicant/wpa_supplicant-${iface}.conf" ]; then
-            systemctl restart "wpa_supplicant@${iface}.service" 2>/dev/null || \
-            systemctl restart "wpa_supplicant-s1g-${iface}.service" 2>/dev/null || true
-        fi
+    for iface in $(cat /var/lib/mesh_if /var/lib/halow_if 2>/dev/null); do
+        [ -z "$iface" ] && continue
+        systemctl restart "wpa_supplicant@${iface}.service" 2>/dev/null || \
+        systemctl restart "wpa_supplicant-s1g-${iface}.service" 2>/dev/null || true
     done
 
     log "  Dangerous settings applied. Mesh reconnecting..."

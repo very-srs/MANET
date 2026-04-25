@@ -1,0 +1,15 @@
+[Unit]
+Description=BATMAN Advanced Interface Manager
+After=network-online.target sys-subsystem-net-devices-wlan0.device sys-subsystem-net-devices-wlan1.device sys-subsystem-net-devices-wlan2.device wpa_supplicant@wlan0.service wpa_supplicant@wlan1.service wpa_supplicant-s1g-wlan2.service
+Wants=network-online.target wpa_supplicant@wlan0.service wpa_supplicant@wlan1.service wpa_supplicant-s1g-wlan2.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# Wait for wpa_supplicant_s1g regulatory domain events to settle before enslaving
+ExecStartPre=/bin/sleep 6
+ExecStart=/usr/local/bin/batman-if-setup.sh start
+ExecStop=/usr/local/bin/batman-if-setup.sh stop
+
+[Install]
+WantedBy=multi-user.target

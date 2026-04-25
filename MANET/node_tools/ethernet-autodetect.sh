@@ -32,18 +32,107 @@ log() {
     echo "[$(date +'%Y-%m-%d %H:%M:%S')] - ETH-DETECT: $1" | systemd-cat -t ethernet-autodetect
 }
 
+run_no_carrier_cleanup() {
+    log "No carrier on $ETH_IFACE - running unplug cleanup"
+
+    if [ -x /etc/networkd-dispatcher/off.d/50-gateway-disable ]; then
+        IFACE="$ETH_IFACE" /etc/networkd-dispatcher/off.d/50-gateway-disable
+    elif [ -x /root/networkd-dispatcher/off ]; then
+        IFACE="$ETH_IFACE" /root/networkd-dispatcher/off
+    else
+        rm -f "$ACTIVE_CONFIG" /var/run/mesh-gateway.state /var/run/mesh-ntp.state /var/run/ethernet_detection_state
+        ip addr flush dev "$ETH_IFACE" 2>/dev/null || true
+        ip link set "$ETH_IFACE" nomaster 2>/dev/null || true
+        batctl gw_mode client 2>/dev/null || true
+        nft flush chain ip nat postrouting 2>/dev/null || true
+        systemctl restart gateway-route-manager.service 2>/dev/null || true
+        systemctl restart dnsmasq.service 2>/dev/null || true
+    fi
+}
+
+wait_for_end0_ip() {
+    local wait_count=0
+    local max_wait="${1:-20}"
+    local ip=""
+
+    while [ "$wait_count" -lt "$max_wait" ]; do
+        ip=$(ip -4 addr show dev "$ETH_IFACE" | grep -oP 'inet \K[\d.]+' | head -1)
+        if [ -n "$ip" ]; then
+            echo "$ip"
+            return 0
+        fi
+
+        sleep 1
+        ((wait_count++))
+    done
+
+    return 1
+}
+
+detect_hotplug_mode() {
+    local carrier ip
+
+    carrier=$(cat /sys/class/net/$ETH_IFACE/carrier 2>/dev/null || echo 0)
+    if [ "$carrier" != "1" ]; then
+        run_no_carrier_cleanup
+        exit 0
+    fi
+
+    # Hotplug events can be emitted repeatedly after networkd restarts. If this
+    # node is already a working gateway, do not flush end0 or restart networkd;
+    # that creates a loop which interrupts dnsmasq and EUD DHCP.
+    ip=$(ip -4 addr show dev "$ETH_IFACE" | grep -oP 'inet \K[\d.]+' | head -1)
+    if [ -f /var/run/mesh-gateway.state ] && [ -n "$ip" ] && \
+       ip route show dev "$ETH_IFACE" | grep -q '^default '; then
+        log "Existing gateway state is healthy on $ETH_IFACE ($ip); skipping re-detection"
+        DETECTED_MODE="gateway"
+        return 0
+    fi
+
+    log "Carrier present on $ETH_IFACE - detecting role"
+
+    # If a previous wired-EUD state left end0 bridged, detach it before DHCP.
+    ip link set "$ETH_IFACE" nomaster 2>/dev/null || true
+
+    if [ -f "$GATEWAY_CONFIG" ]; then
+        cp "$GATEWAY_CONFIG" "$ACTIVE_CONFIG"
+    fi
+
+    ip addr flush dev "$ETH_IFACE" 2>/dev/null || true
+    networkctl reload 2>/dev/null || true
+    networkctl reconfigure end0 2>/dev/null || true
+
+    ip=$(wait_for_end0_ip 20 || true)
+    if [ -n "$ip" ]; then
+        log "IP acquired on $ETH_IFACE: $ip"
+        if ping -c 3 -W 2 -I "$ETH_IFACE" 8.8.8.8 >/dev/null 2>&1; then
+            DETECTED_MODE="gateway"
+            return 0
+        fi
+
+        log "DHCP succeeded but internet test failed; leaving as mesh client"
+        run_no_carrier_cleanup
+        exit 0
+    fi
+
+    DETECTED_MODE="wired-eud"
+}
+
 # Ensure only one instance runs
 exec 200>"$LOCK_FILE"
 flock -n 200 || { log "Already running. Exiting."; exit 0; }
 
 # Parse CLI argument
 DETECTED_MODE=""
-if [ "$1" == "--mode" ] && [ -n "$2" ]; then
+if [ "${1:-}" == "--mode" ] && [ -n "${2:-}" ]; then
     DETECTED_MODE="$2"
     log "Called with mode: $DETECTED_MODE"
+elif [ "${1:-}" == "--hotplug" ] || [ -z "${1:-}" ]; then
+    detect_hotplug_mode
+    log "Hotplug detected mode: $DETECTED_MODE"
 else
     log "ERROR: Missing --mode parameter"
-    log "Usage: $0 --mode {gateway|wired-eud}"
+    log "Usage: $0 [--hotplug] | --mode {gateway|wired-eud}"
     exit 1
 fi
 

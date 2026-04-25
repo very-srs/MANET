@@ -30,6 +30,7 @@ IP_MANAGER="/usr/local/bin/mesh-ip-manager.sh"
 REGISTRY_STATE_FILE="/var/run/mesh_node_registry"
 ENCODER_PATH="/usr/local/bin/encoder.py"
 BATCTL_PATH="/usr/sbin/batctl"
+RADIO_STATE_SYNC="/usr/local/bin/mesh-radio-state.py"
 
 # --- State Variables ---
 LAST_PUBLISHED_PAYLOAD=""
@@ -104,6 +105,19 @@ get_current_freq() {
     grep -oP 'frequency=\K[0-9]+' "$conf_file" 2>/dev/null | head -1
 }
 
+radio_iface_enabled() {
+    python3 - "$1" <<'PY'
+import json, sys
+iface = sys.argv[1]
+try:
+    with open('/var/lib/mesh_radio_state.json') as f:
+        state = json.load(f).get('desired', {}).get(iface, 'up')
+except Exception:
+    state = 'up'
+sys.exit(1 if state == 'down' else 0)
+PY
+}
+
 load_mesh_wpa_confs() {
     local mesh_ifaces=()
 
@@ -144,8 +158,8 @@ ensure_static_channels() {
     
     if [ "$needs_restart" = true ]; then
         log "Restarting wpa_supplicant services..."
-        systemctl restart "wpa_supplicant@${WPA_IFACE_2_4}.service"
-        systemctl restart "wpa_supplicant@${WPA_IFACE_5_0}.service"
+        radio_iface_enabled "$WPA_IFACE_2_4" && systemctl restart "wpa_supplicant@${WPA_IFACE_2_4}.service"
+        radio_iface_enabled "$WPA_IFACE_5_0" && systemctl restart "wpa_supplicant@${WPA_IFACE_5_0}.service"
         sleep 5
     fi
 }
@@ -186,6 +200,11 @@ ensure_static_channels
 # === MAIN LOOP ===
 while true; do
     NOW=$(date +%s)
+
+    # === ALFRED RADIO STATE SYNC ===
+    # Global radio up/down changes are staged through Alfred and only applied
+    # after all nodes have ACKed the same version.
+    [ -x "$RADIO_STATE_SYNC" ] && "$RADIO_STATE_SYNC" sync || true
 
     # Load current chunk assignment from IP manager
     MY_CHUNK=0
@@ -245,6 +264,8 @@ while true; do
         [ -n "$IS_GATEWAY_FLAG" ] && ENCODER_ARGS+=("$IS_GATEWAY_FLAG")
         [ -n "$IS_NTP_FLAG" ] && ENCODER_ARGS+=("$IS_NTP_FLAG")
         [ -n "$IS_MEDIAMTX_FLAG" ] && ENCODER_ARGS+=("$IS_MEDIAMTX_FLAG")
+        BATT_PCT=$(python3 -c "import json;d=json.load(open('/run/battery_status.json'));print(d['percentage'])" 2>/dev/null)
+        [ -n "$BATT_PCT" ] && ENCODER_ARGS+=("--battery-percentage" "$BATT_PCT")
         
         CURRENT_PAYLOAD=$("$ENCODER_PATH" "${ENCODER_ARGS[@]}" 2>/dev/null)
         
