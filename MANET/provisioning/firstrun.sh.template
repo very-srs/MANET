@@ -188,7 +188,7 @@ chmod -x /etc/kernel/postinst.d/initramfs-tools
 apt install -y ipcalc nmap lshw tcpdump net-tools nftables wireless-tools iperf3\
 		radvd bridge-utils firmware-mediatek libnss-mdns syncthing networkd-dispatcher\
 		libgps-dev libcap-dev screen arping bc jq git libssl-dev hostapd dnsmasq pulseaudio\
-		python3-protobuf unzip chrony build-essential systemd-resolved dhcping mpg123\
+		python3-protobuf unzip chrony systemd-resolved dhcping mpg123\
 		libnl-3-dev libnl-genl-3-dev libnl-route-3-dev ebtables libdbus-1-dev gpsd pulseaudio-utils
 
 
@@ -779,7 +779,7 @@ touch /etc/cloud/cloud-init.disabled
 
 systemctl disable NetworkManager-wait-online.service
 
-apt remove -y iptables cpp build-essential g++-14 gcc-14 rfkill
+apt remove -y iptables rfkill
 apt autoremove -y
 
 
