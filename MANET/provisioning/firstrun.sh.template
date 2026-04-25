@@ -195,6 +195,10 @@ apt install -y ipcalc nmap lshw tcpdump net-tools nftables wireless-tools iperf3
 # mesh tools
 tar -zxf /root/morse-pi-install.tar.gz -C /
 
+# Reload udev rules after extracting (picks up 80-usb-ethernet.rules etc.)
+udevadm control --reload-rules 2>/dev/null || true
+udevadm trigger 2>/dev/null || true
+
 # Platform-specific post-extraction steps
 if [ "__HARDWARE_MODEL__" = "r3a" ]; then
 	# Unpack the r3a kernel
