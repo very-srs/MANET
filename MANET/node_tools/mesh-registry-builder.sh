@@ -14,6 +14,7 @@ ALFRED_DATA_TYPE=68
 REGISTRY_STATE_FILE="/var/run/mesh_node_registry"
 CLAIMED_CHUNKS_FILE="/tmp/claimed_chunks.txt"
 DECODER_PATH="/usr/local/bin/decoder.py"
+STALE_AFTER_SECONDS="${MESH_REGISTRY_STALE_AFTER:-300}"
 
 # --- Helper Functions ---
 log() {
@@ -21,6 +22,7 @@ log() {
 }
 
 # --- Main Logic ---
+NOW=$(date +%s)
 
 # Query Alfred for all peer payloads
 mapfile -t PEER_PAYLOADS < <(alfred -r $ALFRED_DATA_TYPE 2>/dev/null | grep -oP '"\K[^"]+(?="\s*\},?)' )
@@ -70,6 +72,14 @@ for B64_PAYLOAD in "${PEER_PAYLOADS[@]}"; do
     # Write to registry if we have a MAC address
     if [[ -n "$MAC_ADDRESS" ]]; then
         PREFIX="NODE_$(echo "$MAC_ADDRESS" | tr -d ':')"
+        EFFECTIVE_NODE_STATE="${NODE_STATE:-ACTIVE}"
+
+        if [[ "${LAST_SEEN_TIMESTAMP:-0}" =~ ^[0-9]+$ ]] && [ "${LAST_SEEN_TIMESTAMP:-0}" -gt 0 ]; then
+            NODE_AGE=$((NOW - LAST_SEEN_TIMESTAMP))
+            if [ "$NODE_AGE" -gt "$STALE_AFTER_SECONDS" ]; then
+                EFFECTIVE_NODE_STATE="STALE"
+            fi
+        fi
 
         # Write all node data to registry
         {
@@ -81,6 +91,7 @@ for B64_PAYLOAD in "${PEER_PAYLOADS[@]}"; do
             printf "%s_SYNCTHING_ID='%s'\n" "$PREFIX" "${SYNCTHING_ID:-}"
             printf "%s_TQ_AVERAGE='%s'\n" "$PREFIX" "${TQ_AVERAGE:-}"
             printf "%s_IS_GATEWAY='%s'\n" "$PREFIX" "${IS_INTERNET_GATEWAY:-}"
+            printf "%s_GATEWAY_IFACE='%s'\n" "$PREFIX" "${GATEWAY_IFACE:-}"
             printf "%s_IS_NTP_SERVER='%s'\n" "$PREFIX" "${IS_NTP_SERVER:-}"
             printf "%s_IS_MUMBLE_SERVER='%s'\n" "$PREFIX" "${IS_MUMBLE_SERVER:-}"
             printf "%s_IS_TAK_SERVER='%s'\n" "$PREFIX" "${IS_TAK_SERVER:-}"
@@ -92,16 +103,24 @@ for B64_PAYLOAD in "${PEER_PAYLOADS[@]}"; do
             printf "%s_DATA_CHANNEL_5_0='%s'\n" "$PREFIX" "${DATA_CHANNEL_5_0:-}"
             printf "%s_CHANNEL_REPORT_JSON='%s'\n" "$PREFIX" "${CHANNEL_REPORT_JSON:-}"
             printf "%s_LAST_SEEN_TIMESTAMP='%s'\n" "$PREFIX" "${LAST_SEEN_TIMESTAMP:-0}"
+            printf "%s_LAST_REGISTRY_UPDATE='%s'\n" "$PREFIX" "$(date +%s)"
             printf "%s_IS_IN_LIMP_MODE='%s'\n" "$PREFIX" "${IS_IN_LIMP_MODE:-false}"
             printf "%s_LAST_TOURGUIDE_TIMESTAMP='%s'\n" "$PREFIX" "${LAST_TOURGUIDE_TIMESTAMP:-0}"
             printf "%s_LAST_TOURGUIDE_RADIO='%s'\n" "$PREFIX" "${LAST_TOURGUIDE_RADIO:-}"
-            printf "%s_NODE_STATE='%s'\n" "$PREFIX" "${NODE_STATE:-ACTIVE}"
+            printf "%s_NODE_STATE='%s'\n" "$PREFIX" "$EFFECTIVE_NODE_STATE"
             printf "%s_CONFIG_ACK_VERSION='%s'\n" "$PREFIX" "${CONFIG_ACK_VERSION:-}"
+            printf "%s_HALOW_TX_MCS='%s'\n" "$PREFIX" "${HALOW_TX_MCS:-}"
+            printf "%s_HALOW_RX_MCS='%s'\n" "$PREFIX" "${HALOW_RX_MCS:-}"
+            printf "%s_HALOW_MCS_PEER='%s'\n" "$PREFIX" "${HALOW_MCS_PEER:-}"
+            printf "%s_WIFI_24_TX_MCS='%s'\n" "$PREFIX" "${WIFI_24_TX_MCS:-}"
+            printf "%s_WIFI_24_RX_MCS='%s'\n" "$PREFIX" "${WIFI_24_RX_MCS:-}"
+            printf "%s_WIFI_5_TX_MCS='%s'\n" "$PREFIX" "${WIFI_5_TX_MCS:-}"
+            printf "%s_WIFI_5_RX_MCS='%s'\n" "$PREFIX" "${WIFI_5_RX_MCS:-}"
             echo ""
         } >> "$REGISTRY_TMP"
 
         # Track claimed chunks
-        if [[ -n "$IPV4_CHUNK" && "$IPV4_CHUNK" != "0" ]]; then
+        if [[ "$EFFECTIVE_NODE_STATE" == "ACTIVE" && -n "$IPV4_CHUNK" && "$IPV4_CHUNK" != "0" ]]; then
             echo "${IPV4_CHUNK},${MAC_ADDRESS}" >> "$CLAIMED_CHUNKS_TMP"
         fi
     fi
@@ -113,7 +132,8 @@ for B64_PAYLOAD in "${PEER_PAYLOADS[@]}"; do
         DATA_CHANNEL_2_4 DATA_CHANNEL_5_0 CHANNEL_REPORT_JSON \
         LAST_SEEN_TIMESTAMP IS_IN_LIMP_MODE \
         LAST_TOURGUIDE_TIMESTAMP LAST_TOURGUIDE_RADIO NODE_STATE \
-        CONFIG_ACK_VERSION \
+        CONFIG_ACK_VERSION HALOW_TX_MCS HALOW_RX_MCS HALOW_MCS_PEER \
+        WIFI_24_TX_MCS WIFI_24_RX_MCS WIFI_5_TX_MCS WIFI_5_RX_MCS \
         GPS_LATITUDE GPS_LONGITUDE GPS_ALTITUDE ATAK_USER
 done
 

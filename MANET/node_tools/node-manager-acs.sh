@@ -38,6 +38,7 @@ REGISTRY_STATE_FILE="/var/run/mesh_node_registry"
 ENCODER_PATH="/usr/local/bin/encoder.py"
 BATCTL_PATH="/usr/sbin/batctl"
 RADIO_STATE_SYNC="/usr/local/bin/mesh-radio-state.py"
+HALOW_MCS_SUMMARY="/usr/local/bin/halow-mcs-summary.py"
 
 # --- State Variables ---
 LAST_PUBLISHED_PAYLOAD=""
@@ -56,59 +57,23 @@ log() {
 # ==============================================================================
 # === GATEWAY DETECTION ===
 # ==============================================================================
-# Actively detects whether this node has internet connectivity via ethernet.
-# Maintains /var/run/mesh-gateway.state and batctl gw mode.
-# Called on every publish cycle so the registry stays accurate regardless of
-# whether networkd-dispatcher fired a carrier event at boot.
+# Gateway state is owned by manet-uplink-dispatch.sh. Node manager only
+# asks it to reconcile periodically before publishing status to Alfred.
 GATEWAY_STATE_FILE="/var/run/mesh-gateway.state"
 LAST_GW_CHECK=0
-GW_CHECK_INTERVAL=60  # Re-check internet every 60s (rate-limit the ping test)
+GW_CHECK_INTERVAL=60
 
 detect_and_update_gateway_state() {
     local NOW
     NOW=$(date +%s)
 
-    # Rate-limit the internet ping test but always act if state file is absent
     local time_since_check=$(( NOW - LAST_GW_CHECK ))
-    if [ $time_since_check -lt $GW_CHECK_INTERVAL ] && [ -f "$GATEWAY_STATE_FILE" ]; then
+    if [ "$time_since_check" -lt "$GW_CHECK_INTERVAL" ] && [ -f "$GATEWAY_STATE_FILE" ]; then
         return
     fi
 
-    local ETH_IFACE="end0"
-    local is_gateway=false
-
-    if [ -d "/sys/class/net/$ETH_IFACE" ]; then
-        local CARRIER
-        CARRIER=$(cat "/sys/class/net/$ETH_IFACE/carrier" 2>/dev/null || echo 0)
-        if [ "$CARRIER" = "1" ]; then
-            local ETH_IP
-            ETH_IP=$(ip -4 addr show dev "$ETH_IFACE" 2>/dev/null | grep -oP "inet \K[\d.]+" | head -1)
-            if [ -n "$ETH_IP" ]; then
-                if ip route show dev "$ETH_IFACE" 2>/dev/null | grep -q "default\|metric"; then
-                    if ping -c 2 -W 2 -I "$ETH_IFACE" 8.8.8.8 >/dev/null 2>&1 || \
-                       ping -c 2 -W 2 -I "$ETH_IFACE" 1.1.1.1 >/dev/null 2>&1; then
-                        is_gateway=true
-                    fi
-                fi
-            fi
-        fi
-    fi
-
     LAST_GW_CHECK=$NOW
-
-    if [ "$is_gateway" = "true" ]; then
-        if [ ! -f "$GATEWAY_STATE_FILE" ]; then
-            log "Internet detected on $ETH_IFACE — setting gateway mode"
-            touch "$GATEWAY_STATE_FILE"
-            batctl gw server 100Mbit/100Mbit 2>/dev/null || true
-        fi
-    else
-        if [ -f "$GATEWAY_STATE_FILE" ]; then
-            log "Internet lost on $ETH_IFACE — clearing gateway mode"
-            rm -f "$GATEWAY_STATE_FILE"
-            batctl gw client 2>/dev/null || true
-        fi
-    fi
+    [ -x /usr/local/bin/manet-uplink-dispatch.sh ] && /usr/local/bin/manet-uplink-dispatch.sh reconcile >/dev/null 2>&1 || true
 }
 
 # --- Clock-synchronized action checker ---
@@ -138,6 +103,17 @@ should_perform_action() {
 get_current_freq() {
     local conf_file=$1
     grep -oP 'frequency=\K[0-9]+' "$conf_file" 2>/dev/null | head -1
+}
+
+collect_radio_mcs() {
+    WLAN0_TX_MCS=""; WLAN0_RX_MCS=""
+    WLAN1_TX_MCS=""; WLAN1_RX_MCS=""
+    WLAN2_TX_MCS=""; WLAN2_RX_MCS=""
+    [ -x "$HALOW_MCS_SUMMARY" ] || return 0
+    for iface in wlan0 wlan1 wlan2; do
+        [ -d "/sys/class/net/$iface" ] || continue
+        eval "$("$HALOW_MCS_SUMMARY" --iface "$iface" --shell 2>/dev/null || true)"
+    done
 }
 
 radio_iface_enabled() {
@@ -261,6 +237,29 @@ is_hosting_service() {
     return 1
 }
 
+is_hosting_mumble_service() {
+    if systemctl is-active --quiet mumble-server.service; then
+        if [ -f /etc/mesh.conf ]; then
+            while IFS='=' read -r key value; do
+                [[ -z "$key" || "$key" =~ ^[[:space:]]*# ]] && continue
+                case "$key" in
+                    ipv4_network)
+                        IPV4_NETWORK="$value"
+                        ;;
+                esac
+            done < /etc/mesh.conf
+        fi
+
+        local CALC_OUTPUT
+        CALC_OUTPUT=$(ipcalc "$IPV4_NETWORK" 2>/dev/null)
+        local FIRST_IP
+        FIRST_IP=$(echo "$CALC_OUTPUT" | awk '/HostMin/ {print $2}')
+        local MUMBLE_IPV4_VIP="${FIRST_IP%.*}.$((${FIRST_IP##*.} + 2))"
+        ip addr show dev "$CONTROL_IFACE" | grep -q "inet $MUMBLE_IPV4_VIP/" && return 0
+    fi
+    return 1
+}
+
 should_perform_tourguide() {
     local NOW=$(date +%s)
     local MINUTE_OF_HOUR=$(( (NOW % 3600) / 60 ))
@@ -326,10 +325,12 @@ while true; do
             
             # Service flags
             detect_and_update_gateway_state
-        IS_GATEWAY_FLAG=$([ -f /var/run/mesh-gateway.state ] && echo "--is-internet-gateway" || echo "")
+            IS_GATEWAY_FLAG=$([ -f /var/run/mesh-gateway.state ] && echo "--is-internet-gateway" || echo "")
+            GATEWAY_IFACE=$(cat /var/run/upstream_iface 2>/dev/null || echo "")
             IS_NTP_FLAG=$([ -f /var/run/mesh-ntp.state ] && echo "--is-ntp-server" || echo "")
             IS_MEDIAMTX_FLAG=$(is_hosting_service && echo "--is-mediamtx-server" || echo "")
-            
+            IS_MUMBLE_FLAG=$(is_hosting_mumble_service && echo "--is-mumble-server" || echo "")
+
             # Gather MACs
             ALL_MACS=("$MY_MAC")
             for iface_path in /sys/class/net/wlan* /sys/class/net/bat0 /sys/class/net/end0; do
@@ -342,6 +343,7 @@ while true; do
             done
             
             CURRENT_IPV4=$(ip addr show dev "$CONTROL_IFACE" 2>/dev/null | grep -oP 'inet \K[\d.]+' | head -1)
+            collect_radio_mcs
             
             # Encode (no scan data, in lobby mode)
             ENCODER_ARGS=(
@@ -351,13 +353,26 @@ while true; do
                 "--syncthing-id" "$SYNCTHING_ID"
 				"--ipv4-chunk" "$MY_CHUNK"
                 "--timestamp" "$NOW"
+                "--wifi-24-tx-mcs" "${WLAN0_TX_MCS:-}"
+                "--wifi-24-rx-mcs" "${WLAN0_RX_MCS:-}"
+                "--wifi-5-tx-mcs" "${WLAN1_TX_MCS:-}"
+                "--wifi-5-rx-mcs" "${WLAN1_RX_MCS:-}"
+                "--halow-tx-mcs" "${WLAN2_TX_MCS:-}"
+                "--halow-rx-mcs" "${WLAN2_RX_MCS:-}"
+                "--halow-mcs-peer" "${WLAN2_MCS_PEER:-}"
             )
             [ -n "$CURRENT_IPV4" ] && ENCODER_ARGS+=("--ipv4-address" "$CURRENT_IPV4")
             [ -n "$IS_GATEWAY_FLAG" ] && ENCODER_ARGS+=("$IS_GATEWAY_FLAG")
+            [ -n "$GATEWAY_IFACE" ] && ENCODER_ARGS+=("--gateway-iface" "$GATEWAY_IFACE")
             [ -n "$IS_NTP_FLAG" ] && ENCODER_ARGS+=("$IS_NTP_FLAG")
             [ -n "$IS_MEDIAMTX_FLAG" ] && ENCODER_ARGS+=("$IS_MEDIAMTX_FLAG")
+            [ -n "$IS_MUMBLE_FLAG" ] && ENCODER_ARGS+=("$IS_MUMBLE_FLAG")
             BATT_PCT=$(python3 -c "import json;d=json.load(open('/run/battery_status.json'));print(d['percentage'])" 2>/dev/null)
             [ -n "$BATT_PCT" ] && ENCODER_ARGS+=("--battery-percentage" "$BATT_PCT")
+            UPTIME_SECS=$(awk '{print int($1)}' /proc/uptime 2>/dev/null)
+            [ -n "$UPTIME_SECS" ] && ENCODER_ARGS+=("--uptime-seconds" "$UPTIME_SECS")
+            CPU_LOAD=$(awk '{print $1}' /proc/loadavg 2>/dev/null)
+            [ -n "$CPU_LOAD" ] && ENCODER_ARGS+=("--cpu-load-average" "$CPU_LOAD")
 
             CURRENT_PAYLOAD=$("$ENCODER_PATH" "${ENCODER_ARGS[@]}" 2>/dev/null)
             
@@ -430,9 +445,11 @@ while true; do
 
             # Service flags
             detect_and_update_gateway_state
-        IS_GATEWAY_FLAG=$([ -f /var/run/mesh-gateway.state ] && echo "--is-internet-gateway" || echo "")
+            IS_GATEWAY_FLAG=$([ -f /var/run/mesh-gateway.state ] && echo "--is-internet-gateway" || echo "")
+            GATEWAY_IFACE=$(cat /var/run/upstream_iface 2>/dev/null || echo "")
             IS_NTP_FLAG=$([ -f /var/run/mesh-ntp.state ] && echo "--is-ntp-server" || echo "")
             IS_MEDIAMTX_FLAG=$(is_hosting_service && echo "--is-mediamtx-server" || echo "")
+            IS_MUMBLE_FLAG=$(is_hosting_mumble_service && echo "--is-mumble-server" || echo "")
 
             # Gather MACs
             ALL_MACS=("$MY_MAC")
@@ -460,6 +477,7 @@ while true; do
             [ -f /var/run/tourguide_state ] && source /var/run/tourguide_state
 
             # Encode
+            collect_radio_mcs
             ENCODER_ARGS=(
                 "--hostname" "$HOSTNAME"
                 "--mac-addresses" "${ALL_MACS[@]}"
@@ -469,11 +487,20 @@ while true; do
                 "--timestamp" "$NOW"
                 "--last-tourguide-timestamp" "$LAST_TOURGUIDE_TIME"
                 "--last-tourguide-radio" "$LAST_TOURGUIDE_RADIO"
+                "--wifi-24-tx-mcs" "${WLAN0_TX_MCS:-}"
+                "--wifi-24-rx-mcs" "${WLAN0_RX_MCS:-}"
+                "--wifi-5-tx-mcs" "${WLAN1_TX_MCS:-}"
+                "--wifi-5-rx-mcs" "${WLAN1_RX_MCS:-}"
+                "--halow-tx-mcs" "${WLAN2_TX_MCS:-}"
+                "--halow-rx-mcs" "${WLAN2_RX_MCS:-}"
+                "--halow-mcs-peer" "${WLAN2_MCS_PEER:-}"
             )
             [ -n "$CURRENT_IPV4" ] && ENCODER_ARGS+=("--ipv4-address" "$CURRENT_IPV4")
             [ -n "$IS_GATEWAY_FLAG" ] && ENCODER_ARGS+=("$IS_GATEWAY_FLAG")
+            [ -n "$GATEWAY_IFACE" ] && ENCODER_ARGS+=("--gateway-iface" "$GATEWAY_IFACE")
             [ -n "$IS_NTP_FLAG" ] && ENCODER_ARGS+=("$IS_NTP_FLAG")
             [ -n "$IS_MEDIAMTX_FLAG" ] && ENCODER_ARGS+=("$IS_MEDIAMTX_FLAG")
+            [ -n "$IS_MUMBLE_FLAG" ] && ENCODER_ARGS+=("$IS_MUMBLE_FLAG")
             [ -n "$LIMP_MODE_FLAG" ] && ENCODER_ARGS+=("$LIMP_MODE_FLAG")
 
             CURRENT_PAYLOAD=$("$ENCODER_PATH" "${ENCODER_ARGS[@]}" 2>/dev/null)

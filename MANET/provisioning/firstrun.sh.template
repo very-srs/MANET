@@ -205,16 +205,19 @@ chown root:root /etc/networkd-dispatcher \
   /etc/networkd-dispatcher/carrier.d \
   /etc/networkd-dispatcher/off.d \
   /etc/networkd-dispatcher/no-carrier.d \
-  /etc/networkd-dispatcher/degraded.d 2>/dev/null || true
+  /etc/networkd-dispatcher/degraded.d \
+  /etc/networkd-dispatcher/routable.d 2>/dev/null || true
 chmod 755 /etc/networkd-dispatcher \
   /etc/networkd-dispatcher/carrier.d \
   /etc/networkd-dispatcher/off.d \
   /etc/networkd-dispatcher/no-carrier.d \
-  /etc/networkd-dispatcher/degraded.d 2>/dev/null || true
+  /etc/networkd-dispatcher/degraded.d \
+  /etc/networkd-dispatcher/routable.d 2>/dev/null || true
 chown root:root /etc/networkd-dispatcher/carrier.d/* \
   /etc/networkd-dispatcher/off.d/* \
   /etc/networkd-dispatcher/no-carrier.d/* \
-  /etc/networkd-dispatcher/degraded.d/* 2>/dev/null || true
+  /etc/networkd-dispatcher/degraded.d/* \
+  /etc/networkd-dispatcher/routable.d/* 2>/dev/null || true
 
 # Fix sudoers.d ownership
 chown root:root /etc/sudoers.d /etc/sudoers.d/* 2>/dev/null || true
@@ -412,7 +415,7 @@ for LAN in `networkctl | awk '/ether/ {print $2}'`; do
 done
 echo "Ethernet config added"
 
-# Create ethernet templates for ethernet-autodetect.sh (OUTSIDE the loop)
+# Create ethernet templates for manet-uplink-dispatch.sh (OUTSIDE the loop)
 echo "Creating ethernet detection templates..."
 cat << 'EOF' > /etc/systemd/network/20-end0-gateway.network.off
 [Match]

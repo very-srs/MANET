@@ -70,4 +70,16 @@ message NodeInfo {
   // SHA-256 prefix of the pending config this node has staged and acknowledged.
   // Empty string means no pending config. Matches MeshConfigPackage.version.
   string config_ack_version = 58;
+
+  // --- HaLow link summary ---
+  string halow_tx_mcs = 59;
+  string halow_rx_mcs = 60;
+  string halow_mcs_peer = 61;
+  string wifi_24_tx_mcs = 62;
+  string wifi_24_rx_mcs = 63;
+  string wifi_5_tx_mcs = 64;
+  string wifi_5_rx_mcs = 65;
+
+  // --- Gateway Interface ---
+  string gateway_iface = 66; // Which interface is the upstream gateway (end0, usb0, enxXXX, etc.)
 }
