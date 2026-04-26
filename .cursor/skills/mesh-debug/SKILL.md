@@ -10,18 +10,20 @@ description: >-
 
 # Mesh Node Debugging
 
+## Node Inventory
+
+Read `.cursor/mesh-nodes.env` for the current list of node IPs, SSH user, and password. Use these values for all SSH commands below.
+
 ## SSH Access
 
-Nodes use the `radio` user. Password is set during provisioning (commonly stored in mesh.conf or known by the operator).
-
 ```bash
-sshpass -p '$PASSWORD' ssh -o StrictHostKeyChecking=no radio@$NODE_IP
+sshpass -p '$MESH_PASSWORD' ssh -o StrictHostKeyChecking=no $MESH_USER@$NODE_IP
 ```
 
 For sudo commands in non-interactive SSH, pipe the password:
 
 ```bash
-echo $PASSWORD | sudo -S <command>
+echo $MESH_PASSWORD | sudo -S <command>
 ```
 
 Always export the full PATH on the node — many tools live outside the default PATH:
