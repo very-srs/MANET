@@ -2,10 +2,10 @@
 name: mesh-debug
 description: >-
   Operate MANET mesh nodes over SSH. Covers diagnostics (batman-adv, WiFi,
-  bridge, routing, Alfred, services), performance testing (iperf3, signal
-  quality), provisioning verification, and deploying script updates. Use when
-  the user asks to check, debug, diagnose, troubleshoot, test, update, deploy
-  to, or provision mesh nodes.
+  bridge, routing, DNS/dnsmasq, Alfred, services), performance testing (iperf3,
+  signal quality), provisioning verification, and deploying script updates.
+  Use when the user asks to check, debug, diagnose, troubleshoot, test, update,
+  deploy to, or provision mesh nodes.
 ---
 
 # Mesh Node Debugging
@@ -142,10 +142,14 @@ readlink -f /usr/local/bin/node-manager.sh
 
 ```bash
 # Check key services
-systemctl is-active batman-enslave node-manager wpa_supplicant hostapd radvd alfred mesh-status
+systemctl is-active batman-enslave node-manager wpa_supplicant hostapd radvd alfred mesh-status dnsmasq
 
 # List all running mesh-related services
 systemctl list-units --type=service --state=running | grep -E 'bat|mesh|wpa|node|hostap|alfred|radvd|mediamtx|mumble|dnsmasq'
+
+# dnsmasq upstream DNS and DHCP config
+cat /etc/dnsmasq.d/mesh-eud.conf /etc/dnsmasq.d/upstream-dns.conf
+journalctl -u dnsmasq --no-pager -n 15
 
 # WPA supplicant logs per interface
 journalctl -u wpa_supplicant@wlan0 --no-pager -n 20
@@ -225,6 +229,36 @@ dmesg | grep -iE 'morse|wifi|wlan|bat0|mesh|mt7915|brcmfmac' | tail -30
 
 **Symptom**: EUD SSID not visible.
 **Check**: `systemctl status hostapd`, `cat /etc/hostapd/hostapd.conf`, `iw dev` — verify AP interface is in `type AP` mode on the expected channel.
+
+### EUD can ping IPs but no DNS / no browsing
+
+**Symptom**: Client connected to AP can `ping 8.8.8.8` but can't browse or resolve names.
+**Cause**: dnsmasq's upstream DNS is unreachable (e.g. network blocks port 53 to public resolvers).
+**Check**:
+
+```bash
+# What upstream DNS is dnsmasq using?
+cat /etc/dnsmasq.d/mesh-eud.conf /etc/dnsmasq.d/upstream-dns.conf
+
+# Test if dnsmasq can actually resolve
+python3 -c "
+import socket, struct
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.settimeout(3)
+query = b'\xab\xcd\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x06google\x03com\x00\x00\x01\x00\x01'
+br0_ip = '$(ip -4 -o addr show br0 | awk \"{print \\$4}\" | cut -d/ -f1 | head -1)'
+s.sendto(query, (br0_ip, 53))
+resp, _ = s.recvfrom(512)
+print(f'OK: {struct.unpack(\"!H\", resp[6:8])[0]} answers')
+"
+
+# What DNS did the node get via DHCP on end0?
+resolvectl dns end0
+
+# What's in the systemd-resolved uplink file (dnsmasq should read this)?
+cat /run/systemd/resolve/resolv.conf
+```
+
+**Fix**: `mesh-eud.conf` should have `resolv-file=/run/systemd/resolve/resolv.conf` (not `no-resolv`) so dnsmasq uses DHCP-provided DNS. `upstream-dns.conf` should have `server=1.1.1.1` and `server=8.8.8.8` as fallbacks only.
 
 ## Performance Testing
 

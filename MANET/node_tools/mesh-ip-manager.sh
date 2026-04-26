@@ -396,22 +396,27 @@ dhcp-range=$dhcp_start,$dhcp_end,4m
 # Gateway is this node's br0 secondary address
 dhcp-option=3,$br0_secondary
 
-# DNS configuration
+# DNS configuration — upstream servers come from the systemd-resolved
+# uplink file (auto-updates on DHCP lease changes) plus upstream-dns.conf
 dhcp-option=6,$br0_secondary
 domain=mesh.local
 local=/mesh.local/
+resolv-file=/run/systemd/resolve/resolv.conf
 
 # manet.local and perf.local resolve to this node's IP so EUD clients can reach the admin panels
 address=/manet.local/$br0_secondary
 address=/perf.local/$br0_secondary
 
-# Upstream DNS for EUD internet access through Ethernet
-server=1.1.1.1
-server=8.8.8.8
-
 # Log for debugging
 log-dhcp
 EOF
+
+    # Public resolvers as fallback in case the DHCP-provided servers
+    # (from resolv-file) are unreachable or the uplink file is missing.
+    cat > /etc/dnsmasq.d/upstream-dns.conf <<- DNSEOF
+server=1.1.1.1
+server=8.8.8.8
+DNSEOF
 
     # Publish perf.local/manet.local plus dynamic service aliases via mDNS.
     # Avahi is restricted to the AP-facing interface and reflector remains off.
