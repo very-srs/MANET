@@ -696,11 +696,22 @@ EOF
     echo " > Pinning $target_name to MAC $mac"
 }
 
-# Mesh interfaces are already ordered: [0]=2.4GHz, [1]=5GHz
-[ "${#mesh_ifaces[@]}" -gt 0 ] && write_link_file wlan0 "$(iface_mac "${mesh_ifaces[0]}")"
-[ "${#mesh_ifaces[@]}" -gt 1 ] && write_link_file wlan1 "$(iface_mac "${mesh_ifaces[1]}")"
-[ "${#halow_ifaces[@]}" -gt 0 ] && write_link_file wlan2 "$(iface_mac "${halow_ifaces[0]}")"
-[ "${#nonmesh_ifaces[@]}" -gt 0 ] && write_link_file wlan3 "$(iface_mac "${nonmesh_ifaces[0]}")"
+# Assign contiguous wlanX names: mesh first (2.4 GHz, 5 GHz), then HaLow,
+# then non-mesh. Every detected interface gets a .link file so no radio can
+# race into the wrong slot at boot.
+WLAN_IDX=0
+for iface in "${mesh_ifaces[@]}"; do
+    write_link_file "wlan${WLAN_IDX}" "$(iface_mac "$iface")"
+    ((WLAN_IDX++))
+done
+for iface in "${halow_ifaces[@]}"; do
+    write_link_file "wlan${WLAN_IDX}" "$(iface_mac "$iface")"
+    ((WLAN_IDX++))
+done
+for iface in "${nonmesh_ifaces[@]}"; do
+    write_link_file "wlan${WLAN_IDX}" "$(iface_mac "$iface")"
+    ((WLAN_IDX++))
+done
 echo "MESH_NAME=\"$MESH_NAME\"" > /etc/default/mesh
 
 
@@ -717,10 +728,19 @@ check_rename() {
     needs_rerun=1
 }
 
-[ "${#mesh_ifaces[@]}" -gt 0 ] && check_rename wlan0 "${mesh_ifaces[0]}"
-[ "${#mesh_ifaces[@]}" -gt 1 ] && check_rename wlan1 "${mesh_ifaces[1]}"
-[ "${#halow_ifaces[@]}" -gt 0 ] && check_rename wlan2 "${halow_ifaces[0]}"
-[ "${#nonmesh_ifaces[@]}" -gt 0 ] && check_rename wlan3 "${nonmesh_ifaces[0]}"
+WLAN_IDX=0
+for iface in "${mesh_ifaces[@]}"; do
+    check_rename "wlan${WLAN_IDX}" "$iface"
+    ((WLAN_IDX++))
+done
+for iface in "${halow_ifaces[@]}"; do
+    check_rename "wlan${WLAN_IDX}" "$iface"
+    ((WLAN_IDX++))
+done
+for iface in "${nonmesh_ifaces[@]}"; do
+    check_rename "wlan${WLAN_IDX}" "$iface"
+    ((WLAN_IDX++))
+done
 
 if [ "$needs_rerun" -eq 1 ]; then
     echo " > Interface renames staged. Scheduling post-reboot re-run."
