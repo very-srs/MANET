@@ -14,7 +14,7 @@ A complete software suite that turns ARM64 SBCs (Rock 3A, Raspberry Pi 5, CM4) i
 Nodes can have any combination of these radios:
 
 | Radio Type | Driver | Role | Notes |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | External AX card (mt7915e) | `mt7915e` | Mesh backhaul | Dual-band: one 2.4 GHz + one 5 GHz radio. Primary mesh transport. |
 | Onboard WiFi (Broadcom) | `brcmfmac` | EUD Access Point | Cannot do mesh. Present on RPi 5 / some boards. Always used as AP when available. |
 | HaLow (Morse Micro) | `morse` | Mesh backhaul | Sub-GHz 802.11ah. Long range, low throughput. Uses `wpa_supplicant_s1g`. |
@@ -31,7 +31,7 @@ Interfaces are pinned via systemd `.link` files (by MAC) in `/etc/systemd/networ
 
 ## Key Network Stack
 
-```
+```text
 EUD clients ──► wlan2 (hostapd AP) ──► br0 (bridge) ◄── bat0 (batman-adv)
                                                               │
                                             ┌─────────────────┼─────────────────┐
@@ -47,7 +47,7 @@ EUD clients ──► wlan2 (hostapd AP) ──► br0 (bridge) ◄── bat0 (
 ## Key Paths on Nodes
 
 | Path | Purpose |
-|---|---|
+| --- | --- |
 | `/etc/mesh.conf` | Node configuration (SSID, key, network CIDR, EUD mode, services) |
 | `/var/lib/mesh_if` | List of mesh-role interfaces (one per line) |
 | `/var/lib/halow_if` | HaLow interfaces |
@@ -71,7 +71,7 @@ EUD clients ──► wlan2 (hostapd AP) ──► br0 (bridge) ◄── bat0 (
 ## Default Credentials
 
 | Account | Username | Password |
-|---|---|---|
+| --- | --- | --- |
 | SSH / node user | `radio` | Set during provisioning |
 | Armbian root (Rock 3A) | `root` | `1234` |
 
@@ -79,3 +79,9 @@ EUD clients ──► wlan2 (hostapd AP) ──► br0 (bridge) ◄── bat0 (
 
 - User `radio` has sudo but requires password via `-S` flag in non-interactive sessions: `echo $PASSWORD | sudo -S <command>`
 - `iw` and `batctl` are in `/usr/sbin/` which may not be in PATH; use full path or `export PATH=$PATH:/usr/sbin:/usr/local/sbin`
+
+## Workflow Rules
+
+- **Never commit on behalf of the user.** Make changes to files but leave `git add` and `git commit` to the user.
+- **Always create a branch** before making code fixes. Use `git checkout -b <branch-name>` before editing files. Branch names should be descriptive (e.g. `fix/contiguous-wlan-link-naming`).
+- **Keep live nodes and repo in sync.** When fixing something on a node via SSH, always make the corresponding fix in the repo on a branch in the same session. The repo is the source of truth — a live-only fix will be lost on the next provision or update.
