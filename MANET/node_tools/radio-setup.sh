@@ -1506,7 +1506,36 @@ for _cfg in /boot/firmware/config.txt /boot/config.txt; do
         echo "dtparam=i2c_arm=on" >> "$_cfg"
         echo " > I2C enabled in $_cfg"
     fi
+
 done
+
+# Remove HaLow-specific SDIO overlay when no morse/HaLow hardware is present.
+# The base image includes dtoverlay=sdio,poll_once=on and dtparam=sdio_overclock=42
+# for SPI-attached HaLow radios, but these break the CM4 onboard WiFi (brcmfmac)
+# which shares the SDIO bus.
+if ! has_usb_morse_device && ! has_morse_netdev; then
+    for _cfg in /boot/firmware/config.txt /boot/config.txt; do
+        [ -f "$_cfg" ] || continue
+        if grep -q 'dtoverlay=sdio,poll_once' "$_cfg" || grep -q 'dtparam=sdio_overclock' "$_cfg"; then
+            sed -i '/^#.*enable sdio$/d' "$_cfg"
+            sed -i '/^dtoverlay=sdio,poll_once/d' "$_cfg"
+            sed -i '/^#.*sub 50MHz SDIO clock$/d' "$_cfg"
+            sed -i '/^dtparam=sdio_overclock/d' "$_cfg"
+            echo " > Removed HaLow SDIO overlay from $_cfg (no morse hardware)"
+        fi
+    done
+fi
+
+# Use external antenna for onboard WiFi (brcmfmac) if present
+if ls /sys/bus/sdio/drivers/brcmfmac/*/net 2>/dev/null | grep -q .; then
+    for _cfg in /boot/firmware/config.txt /boot/config.txt; do
+        [ -f "$_cfg" ] || continue
+        if ! grep -q '^dtparam=ant1$' "$_cfg"; then
+            echo "dtparam=ant1" >> "$_cfg"
+            echo " > External antenna (ant1) enabled in $_cfg"
+        fi
+    done
+fi
 
 # RPi5 uses i2c_designware — i2c-dev module must load at boot for /dev/i2c-1
 if ! grep -q '^i2c-dev$' /etc/modules 2>/dev/null; then
