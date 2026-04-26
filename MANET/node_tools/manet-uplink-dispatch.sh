@@ -227,6 +227,7 @@ ensure_eud_services() {
     [ -f /var/lib/ap_interface ] && ap_iface=$(cat /var/lib/ap_interface)
 
     if { [ "$mode" = "wireless" ] || [ "$mode" = "auto" ]; } && [ -n "$ap_iface" ]; then
+        systemctl start ap-interface-setup.service 2>/dev/null || true
         systemctl unmask dnsmasq.service 2>/dev/null || true
         systemctl enable hostapd.service 2>/dev/null || true
         systemctl start hostapd.service 2>/dev/null || true
