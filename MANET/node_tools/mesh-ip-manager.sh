@@ -285,6 +285,32 @@ release_control_ips() {
     fi
 }
 
+cleanup_control_aliases() {
+    local prefix="${IPV4_NETWORK#*/}"
+    local primary=""
+    local secondary=""
+    local ip=""
+    local keep=""
+    local _dhcp_start=""
+    local _dhcp_end=""
+
+    [ -n "$PERSISTENT_CHUNK" ] || return 0
+
+    IFS=: read -r primary secondary _dhcp_start _dhcp_end <<< "$(get_chunk_ips "$PERSISTENT_CHUNK")"
+    keep=" $primary $secondary "
+
+    while read -r ip; do
+        [ -n "$ip" ] || continue
+        ip_in_cidr "$ip" "$IPV4_NETWORK" || continue
+        is_service_reserved_ip "$ip" && continue
+
+        if [[ "$keep" != *" $ip "* ]]; then
+            ip addr del "${ip}/${prefix}" dev "$CONTROL_IFACE" 2>/dev/null || true
+            log "Removed stale $CONTROL_IFACE IPv4 alias: $ip"
+        fi
+    done < <(ip -4 -o addr show dev "$CONTROL_IFACE" 2>/dev/null | awk '{print $4}' | cut -d/ -f1)
+}
+
 # Configure ebtables to block DHCP on mesh interfaces
 configure_ebtables_dhcp_isolation() {
     local br0_secondary=$1
@@ -353,10 +379,8 @@ configure_dnsmasq() {
     fi
 
     if [ -n "$old_gateway" ] && [ "$old_gateway" != "$br0_secondary" ] && ip_in_cidr "$old_gateway" "$IPV4_NETWORK"; then
-        ensure_control_addr "$old_gateway"
         old_primary=$(int_to_ip $(( $(ip_to_int "$old_gateway") - 1 )))
-        ip_in_cidr "$old_primary" "$IPV4_NETWORK" && ensure_control_addr "$old_primary"
-        log "Preserved previous EUD gateway/DNS aliases for active leases: ${old_primary:-unknown}, $old_gateway"
+        log "EUD gateway changed from ${old_primary:-unknown}/$old_gateway to $br0_primary/$br0_secondary"
     fi
 
     log "Configuring dnsmasq: pool=$dhcp_start-$dhcp_end, gateway=$br0_secondary"
@@ -389,13 +413,9 @@ server=8.8.8.8
 log-dhcp
 EOF
 
-    # Publish perf.local and manet.local via mDNS (avahi static hosts)
-    # avahi is restricted to wlan3 only, so no inter-node conflicts
-    cat > /etc/avahi/hosts <<EOF2
-$br0_primary perf.local
-$br0_primary manet.local
-EOF2
-    systemctl is-active --quiet avahi-daemon && systemctl reload-or-restart avahi-daemon || true
+    # Publish perf.local/manet.local plus dynamic service aliases via mDNS.
+    # Avahi is restricted to the AP-facing interface and reflector remains off.
+    /usr/local/bin/mesh-mdns-update.sh || true
 
     # Ensure dnsmasq is unmasked, enabled, and running
     systemctl unmask dnsmasq.service 2>/dev/null
@@ -446,6 +466,8 @@ if [ -f "$PERSISTENT_STATE_FILE" ]; then
         log "Forcing persistent state: chunk=$PERSISTENT_CHUNK, ip=$PERSISTENT_IPV4"
     fi
 fi
+
+cleanup_control_aliases
 
 # Check if we already have an IP configured on br0
 CURRENT_IPV4=$(ip addr show dev "$CONTROL_IFACE" | grep -oP 'inet \K[\d.]+' | head -1)

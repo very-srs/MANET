@@ -55,6 +55,14 @@ def main():
     # --- Config Sync ---
     parser.add_argument("--config-ack-version", type=str, default="",
                         help="SHA-256 prefix of the pending config this node has staged (ACK signal).")
+    parser.add_argument("--gateway-iface", type=str, default="", help="Upstream gateway interface name (end0, usb0, enxXXX, etc.)")
+    parser.add_argument("--halow-tx-mcs", type=str, default="")
+    parser.add_argument("--halow-rx-mcs", type=str, default="")
+    parser.add_argument("--halow-mcs-peer", type=str, default="")
+    parser.add_argument("--wifi-24-tx-mcs", type=str, default="")
+    parser.add_argument("--wifi-24-rx-mcs", type=str, default="")
+    parser.add_argument("--wifi-5-tx-mcs", type=str, default="")
+    parser.add_argument("--wifi-5-rx-mcs", type=str, default="")
 
     args = parser.parse_args()
 
@@ -100,6 +108,16 @@ def main():
 
     # --- Populate Config ACK ---
     node_info.config_ack_version = args.config_ack_version
+
+    # --- Populate link MCS summary ---
+    node_info.gateway_iface = args.gateway_iface
+    node_info.halow_tx_mcs = args.halow_tx_mcs
+    node_info.halow_rx_mcs = args.halow_rx_mcs
+    node_info.halow_mcs_peer = args.halow_mcs_peer
+    node_info.wifi_24_tx_mcs = args.wifi_24_tx_mcs
+    node_info.wifi_24_rx_mcs = args.wifi_24_rx_mcs
+    node_info.wifi_5_tx_mcs = args.wifi_5_tx_mcs
+    node_info.wifi_5_rx_mcs = args.wifi_5_rx_mcs
 
     # --- Populate Channel Scan Report ---
     try:

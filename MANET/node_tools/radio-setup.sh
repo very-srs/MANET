@@ -933,7 +933,7 @@ EOF
         systemctl restart ap-txpower.service 2>/dev/null || true
     else
         systemctl unmask hostapd.service
-        echo " > Auto mode: AP services staged (ethernet-autodetect will manage)"
+        echo " > Auto mode: AP services staged (manet-uplink-dispatch will manage)"
         systemctl disable hostapd.service
     fi
 
@@ -1299,22 +1299,24 @@ systemctl daemon-reload
 systemctl enable --now nftables.service
 
 # Install scripts for auto gateway management
+mkdir -p /etc/networkd-dispatcher/{carrier,off,no-carrier,degraded,routable}.d
 cp /root/networkd-dispatcher/off /etc/networkd-dispatcher/off.d/50-gateway-disable
-cp /root/networkd-dispatcher/off /etc/networkd-dispatcher/no-carrier.d/50-gateway-disable
-cp /root/networkd-dispatcher/off /etc/networkd-dispatcher/degraded.d/50-gateway-disable
+cp /root/networkd-dispatcher/no-carrier /etc/networkd-dispatcher/no-carrier.d/50-gateway-disable
+cp /root/networkd-dispatcher/degraded /etc/networkd-dispatcher/degraded.d/50-gateway-disable
 cp /root/networkd-dispatcher/carrier /etc/networkd-dispatcher/carrier.d/50-ethernet-detect
+cp /root/networkd-dispatcher/routable /etc/networkd-dispatcher/routable.d/50-manet-uplink
 chmod -R 755 /etc/networkd-dispatcher
 
 cat <<- EOF > /etc/systemd/system/ethernet-autodetect.service
 [Unit]
-Description=MANET Ethernet Hotplug Auto Detection
+Description=MANET Uplink Reconciliation
 After=systemd-networkd.service batman-enslave.service
 Wants=systemd-networkd.service
-ConditionPathExists=/usr/local/bin/ethernet-autodetect.sh
+ConditionPathExists=/usr/local/bin/manet-uplink-dispatch.sh
 
 [Service]
 Type=oneshot
-ExecStart=/usr/local/bin/ethernet-autodetect.sh --hotplug
+ExecStart=/usr/local/bin/manet-uplink-dispatch.sh reconcile
 TimeoutStartSec=45
 
 [Install]
