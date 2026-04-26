@@ -109,7 +109,17 @@ ip route
 ip -6 addr show dev br0
 ```
 
-### 6. Alfred & Node Manager
+### 6. Web Status API (fastest overview)
+
+```bash
+# Full mesh topology as JSON (all nodes, links, TQ values)
+curl -s http://localhost/api/data | python3 -m json.tool
+
+# Local node state only (interfaces, services, IP, channel)
+curl -s http://localhost/api/local | python3 -m json.tool
+```
+
+### 7. Alfred & Node Manager
 
 ```bash
 # Read Alfred data store (type 65 = mesh node status)
@@ -120,9 +130,12 @@ journalctl -u node-manager --no-pager -n 40
 
 # Mesh registry (decoded peer data)
 cat /var/run/mesh_node_registry
+
+# Which node-manager mode is running (ACS vs static)
+readlink -f /usr/local/bin/node-manager.sh
 ```
 
-### 7. Service Status
+### 8. Service Status
 
 ```bash
 # Check key services
@@ -134,9 +147,12 @@ systemctl list-units --type=service --state=running | grep -E 'bat|mesh|wpa|node
 # WPA supplicant logs per interface
 journalctl -u wpa_supplicant@wlan0 --no-pager -n 20
 journalctl -u wpa_supplicant@wlan1 --no-pager -n 20
+
+# HaLow uses a different service name pattern
+journalctl -u 'wpa_supplicant-s1g-*' --no-pager -n 20
 ```
 
-### 8. Interface Naming & Pinning
+### 9. Interface Naming & Pinning
 
 ```bash
 # What radio-setup decided
@@ -153,7 +169,17 @@ cat /etc/systemd/network/10-wlan*.link
 ls /etc/wpa_supplicant/wpa_supplicant-wlan*.conf
 ```
 
-### 9. Logs & Kernel Messages
+### 10. Provisioning State
+
+```bash
+# Check if initial provisioning completed
+systemctl is-enabled radio-setup-run-once 2>/dev/null && echo "STILL PROVISIONING" || echo "provisioning done"
+
+# Check if a post-rename re-run is pending
+systemctl is-enabled radio-setup-rerun 2>/dev/null && echo "RERUN PENDING" || echo "no rerun pending"
+```
+
+### 11. Logs & Kernel Messages
 
 ```bash
 # Radio setup log

@@ -44,6 +44,26 @@ EUD clients ──► wlan2 (hostapd AP) ──► br0 (bridge) ◄── bat0 (
 - **br0**: bridge containing bat0 + AP interface; carries the mesh IPv4/IPv6
 - **end0**: Ethernet (renamed from eth0); DHCP client or gateway depending on uplink
 
+## Gossip & Coordination
+
+All mesh coordination flows through Alfred (Layer 2 multicast):
+
+`encoder.py` (protobuf → base64) → `alfred -s 65` → mesh → `alfred -r 65` → `decoder.py` → `/var/run/mesh_node_registry`
+
+The registry drives IP allocation, gateway selection, service elections, channel elections, and partition healing. Scripts never talk to each other directly — they read/write the shared registry.
+
+## Node Manager Modes
+
+Controlled by `acs=` in `/etc/mesh.conf`:
+
+- **Static** (`node-manager-static.sh`): Simple loop — publish status, build registry, run IP manager and service elections. No RF scanning or channel changes.
+- **ACS** (`node-manager-acs.sh`): Full orchestrator — adds RF scanning, channel elections, tourguide partition healing, limp mode (jamming response), and quorum checking.
+
+## Web Interfaces on Nodes
+
+- **Port 80** (`mesh-status.py`): Topology visualization, JSON API at `/api/data` (full mesh) and `/api/local` (this node only). Mobile-friendly.
+- **Port 8081** (`perf-dashboard.py`): Performance testing UI — iperf, ping, WiFi/HaLow controls, data export.
+
 ## Key Paths on Nodes
 
 | Path | Purpose |
@@ -67,6 +87,7 @@ EUD clients ──► wlan2 (hostapd AP) ──► br0 (bridge) ◄── bat0 (
 - `MANET/binaries_arm64/` — Pre-compiled `alfred`, `batctl`, `wpa_supplicant_s1g` for ARM64
 - `MANET/networkd-dispatcher/` — Carrier/routable event handlers for gateway management
 - `MANET/install_packages/` — Tarball contents (kernel, firmware, systemd units)
+- `MANET/systemd/` — Unit files for batman-enslave and its watchdog
 
 ## Default Credentials
 
