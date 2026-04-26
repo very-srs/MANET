@@ -335,14 +335,9 @@ if [ -z "$HALOW_REGULATORY_DOMAIN" ] || uses_eu_halow_region "$REGULATORY_DOMAIN
     HALOW_REGULATORY_DOMAIN="EU"
 fi
 
-# cfg80211 regdomain to use — EU when HaLow is EU so S1G channels are
-# resolvable by wpa_supplicant_s1g. Also used in wpa_supplicant configs
-# for 2.4/5 GHz radios to keep cfg80211 from reverting to WORLD.
-if [[ "$HALOW_REGULATORY_DOMAIN" == "EU" ]]; then
-    CFG80211_REGDOM="EU"
-else
-    CFG80211_REGDOM="$REGULATORY_DOMAIN"
-fi
+# cfg80211 regdomain for WiFi radios — always use the configured
+# regulatory_domain. HaLow uses halow_regulatory_domain independently.
+CFG80211_REGDOM="$REGULATORY_DOMAIN"
 
 
 # Wait for wireless drivers to load
