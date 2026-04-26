@@ -1,10 +1,11 @@
 ---
 name: mesh-debug
 description: >-
-  Debug MANET mesh nodes over SSH. Provides commands for diagnosing batman-adv
-  mesh, WiFi interfaces, bridge, routing, Alfred gossip, and service health.
-  Use when the user asks to check, debug, diagnose, or troubleshoot mesh nodes,
-  WiFi, networking, batman, or connectivity issues.
+  Operate MANET mesh nodes over SSH. Covers diagnostics (batman-adv, WiFi,
+  bridge, routing, Alfred, services), performance testing (iperf3, signal
+  quality), provisioning verification, and deploying script updates. Use when
+  the user asks to check, debug, diagnose, troubleshoot, test, update, deploy
+  to, or provision mesh nodes.
 ---
 
 # Mesh Node Debugging
@@ -222,6 +223,87 @@ dmesg | grep -iE 'morse|wifi|wlan|bat0|mesh|mt7915|brcmfmac' | tail -30
 
 **Symptom**: EUD SSID not visible.
 **Check**: `systemctl status hostapd`, `cat /etc/hostapd/hostapd.conf`, `iw dev` — verify AP interface is in `type AP` mode on the expected channel.
+
+## Performance Testing
+
+### iperf3 between nodes
+
+Run the server on one node, client on the other. Use br0 IPs (the 10.x.x.x mesh addresses).
+
+```bash
+# On node A (server)
+iperf3 -s -1
+
+# On node B (client) — replace with node A's br0 IP
+iperf3 -c 10.30.2.111 -t 10
+```
+
+### Per-radio link quality
+
+```bash
+# Check which radio batman prefers (higher throughput = preferred path)
+batctl meshif bat0 o
+
+# Signal quality thresholds
+#   > -50 dBm  = excellent (close range)
+#   -50 to -65 = good
+#   -65 to -75 = usable
+#   < -75      = marginal, expect retransmissions
+```
+
+## Provisioning Verification
+
+After a node's first boot, verify all three phases completed:
+
+```bash
+# Phase 1: firstrun (RPi only) — should exist and show completion
+tail -5 /boot/firmware/firstrun.log
+
+# Phase 2: provision-mesh — should show "Provisioning complete"
+tail -5 /boot/firmware/provision.log       # RPi
+tail -5 /var/log/mesh-provision.log        # Rock 3A
+
+# Phase 3: radio-setup — should show interface detection and service setup
+tail -20 /var/log/radio-setup.log
+
+# Confirm all phases finished (both should say "inactive")
+systemctl is-enabled radio-setup-run-once 2>/dev/null || echo "done"
+systemctl is-enabled mesh-provision 2>/dev/null || echo "done"
+```
+
+## Deploying Script Changes
+
+### Via node-update (official path)
+
+```bash
+# Manual trigger (checks internet, compares versions, downloads tarball)
+sudo node-update.sh
+
+# Check current version
+cat /etc/manet_version.txt
+```
+
+### Manual file deployment
+
+The tools tarball extracts to `/`, so scripts live at their final paths. Key destinations:
+
+```bash
+# Mesh scripts
+/usr/local/bin/*.sh
+/usr/local/bin/*.py
+
+# Systemd units
+/etc/systemd/system/*.service
+
+# After copying updated scripts:
+chmod +x /usr/local/bin/*
+systemctl daemon-reload
+
+# Restart order for most changes:
+systemctl restart node-manager        # picks up script changes
+systemctl restart batman-enslave      # re-enslaves interfaces
+systemctl restart alfred              # reconnects gossip
+```
 
 ## Parallel Multi-Node Check
 
