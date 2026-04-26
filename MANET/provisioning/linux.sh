@@ -765,10 +765,10 @@ select_target_device() {
                 read -p "Press Enter to run 'sudo rpiboot' and mount the eMMC..."
                 echo
                 sudo rpiboot
-                echo "'rpiboot' finished. Waiting up to 30s for device to appear..."
+                echo "'rpiboot' finished. Waiting up to 60s for device to appear..."
                 local NEW_DISK=""
                 local DISKS_AFTER
-                for i in $(seq 1 30); do
+                for i in $(seq 1 60); do
                         sleep 1
                         DISKS_AFTER=$(lsblk -d -n -o NAME)
                         NEW_DISK=$(comm -13 <(echo "$DISKS_BEFORE" | sort) <(echo "$DISKS_AFTER" | sort))
@@ -782,7 +782,7 @@ select_target_device() {
                 echo
 
                 if [ -z "$NEW_DISK" ]; then
-                        echo "ERROR: No new disk detected after 30s."
+                        echo "ERROR: No new disk detected after 60s."
                         echo "Please check connections and try again."
                         exit 1
                 fi
