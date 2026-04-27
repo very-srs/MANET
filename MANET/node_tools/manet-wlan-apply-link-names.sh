@@ -55,9 +55,11 @@ load_targets() {
 }
 
 alloc_tmp() {
+    # IFNAMSIZ 15 — keep temp names short (avoid wlmtmp$RANDOM$RANDOM).
     local t
     while true; do
-        t="wlmtmp${RANDOM}${RANDOM}"
+        t="wt${RANDOM}"
+        [[ ${#t} -le 15 ]] || continue
         [[ ! -e /sys/class/net/$t ]] && echo "$t" && return
     done
 }
