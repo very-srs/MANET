@@ -4,8 +4,9 @@ description: >-
   Operate MANET mesh nodes over SSH. Covers diagnostics (batman-adv, WiFi,
   bridge, routing, DNS/dnsmasq, Alfred, services), performance testing (iperf3,
   signal quality), provisioning verification, and deploying script updates.
-  Use when the user asks to check, debug, diagnose, troubleshoot, test, update,
-  deploy to, or provision mesh nodes.
+  For flash-time and first-boot context, read MANET/provisioning/README.md
+  (linked in the skill body). Use when the user asks to check, debug, diagnose,
+  troubleshoot, test, update, deploy to, or provision mesh nodes.
 ---
 
 # Mesh Node Debugging
@@ -13,6 +14,12 @@ description: >-
 ## Node Inventory
 
 Read `.cursor/mesh-nodes.env` for the current list of node IPs, SSH user, and password. Use these values for all SSH commands below.
+
+## Related documentation
+
+For **host-side flashing**, **first-boot flow** (Raspberry Pi vs Rock 3A), **provisioning-time options** (EUD wired/wireless/auto, mesh SSID and SAE key, CIDR, DHCP sizing, regulatory domain), **reserved service addresses** (e.g. MediaMTX / Mumble), **default credentials**, and **provisioning troubleshooting** (Ethernet, timeouts, log locations in prose), read `MANET/provisioning/README.md` in this repository.
+
+For **repository layout** and where provisioning sources of truth live, see `MANET/README.md`.
 
 ## SSH Access
 
@@ -289,7 +296,7 @@ batctl meshif bat0 o
 
 ## Provisioning Verification
 
-After a node's first boot, verify all three phases completed:
+Pi vs Rock 3A first-boot stages and host flashing are documented in `MANET/provisioning/README.md`. After a node's first boot, verify all three phases completed:
 
 ```bash
 # Phase 1: firstrun (RPi only) — should exist and show completion
