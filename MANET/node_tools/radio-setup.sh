@@ -1693,9 +1693,9 @@ fi
 if ls /sys/bus/sdio/drivers/brcmfmac/*/net 2>/dev/null | grep -q .; then
     for _cfg in /boot/firmware/config.txt /boot/config.txt; do
         [ -f "$_cfg" ] || continue
-        if ! grep -q '^dtparam=ant1$' "$_cfg"; then
-            echo "dtparam=ant1" >> "$_cfg"
-            echo " > External antenna (ant1) enabled in $_cfg"
+        if ! grep -q '^dtparam=ant2$' "$_cfg"; then
+            echo "dtparam=ant2" >> "$_cfg"
+            echo " > External U.FL antenna (dtparam=ant2) enabled in $_cfg"
         fi
     done
 fi
