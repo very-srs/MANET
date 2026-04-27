@@ -280,6 +280,23 @@ RemainAfterExit=yes
 WantedBy=multi-user.target
 EOF
 
+cat << 'EOF' > /etc/systemd/system/manet-wlan-apply-link-names.service
+[Unit]
+Description=Apply wlan names from 10-wlan*.link (swap-safe); remap MANET role files by MAC
+DefaultDependencies=no
+After=systemd-udevd.service
+Before=systemd-networkd.service wifi-rfkill-unblock.service
+Before=network-pre.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/manet-wlan-apply-link-names.sh
+
+[Install]
+WantedBy=sysinit.target
+EOF
+
 # A system service to force mesh point mode on the wlan interfaces
 cat << EOF > /etc/systemd/system/mesh-interface-setup@.service
 [Unit]
@@ -835,6 +852,24 @@ for iface in "${nonmesh_ifaces[@]}"; do
 done
 echo "MESH_NAME=\"$MESH_NAME\"" > /etc/default/mesh
 
+# systemd .link Name= cannot always swap two wlan slots; apply MAC→name now and
+# rewrite /var/lib role files so names match physical radios before check_rename.
+_MANET_RS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+if [[ -f "$_MANET_RS_DIR/manet-wlan-apply-link-names.sh" ]]; then
+    cp -a "$_MANET_RS_DIR/manet-wlan-apply-link-names.sh" /usr/local/bin/manet-wlan-apply-link-names.sh
+    chmod +x /usr/local/bin/manet-wlan-apply-link-names.sh
+fi
+if [[ -x /usr/local/bin/manet-wlan-apply-link-names.sh ]]; then
+    echo " > Applying wlan .link names (swap-safe) and remapping role files by MAC..."
+    /usr/local/bin/manet-wlan-apply-link-names.sh || echo " > WARNING: manet-wlan-apply-link-names.sh failed ($?)"
+    mesh_ifaces=()
+    [[ -f /var/lib/mesh_if ]] && mapfile -t mesh_ifaces < /var/lib/mesh_if
+    nonmesh_ifaces=()
+    [[ -f /var/lib/no_mesh_if ]] && mapfile -t nonmesh_ifaces < /var/lib/no_mesh_if
+    halow_ifaces=()
+    [[ -f /var/lib/halow_if ]] && mapfile -t halow_ifaces < /var/lib/halow_if
+    [[ -f /var/lib/ap_interface ]] && AP_INTERFACE="$(head -1 /var/lib/ap_interface)"
+fi
 
 # Detect if the .link files we just wrote disagree with current runtime names.
 # If they do, the next boot will rename interfaces and the role files we wrote
@@ -1265,6 +1300,7 @@ WantedBy=sysinit.target
 EOF
 systemctl enable led-boot.service
 systemctl enable wifi-rfkill-unblock.service
+systemctl enable manet-wlan-apply-link-names.service 2>/dev/null || true
 
 cat << EOF > /etc/systemd/system/button-monitor.service
 [Unit]
@@ -1706,6 +1742,12 @@ fi
 
 echo " > restarting networkd..."
 systemctl restart systemd-networkd
+
+echo " > re-applying wlan .link names after networkd restart..."
+if [[ -x /usr/local/bin/manet-wlan-apply-link-names.sh ]]; then
+    /usr/local/bin/manet-wlan-apply-link-names.sh || echo " > WARNING: manet-wlan-apply-link-names.sh failed ($?)"
+    [[ -f /var/lib/ap_interface ]] && AP_INTERFACE="$(head -1 /var/lib/ap_interface)"
+fi
 
 echo " > restarting mesh supplicants..."
 for WLAN in $(cat /var/lib/mesh_if 2>/dev/null); do
