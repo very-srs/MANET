@@ -339,11 +339,28 @@ fi
 # regulatory_domain. HaLow uses halow_regulatory_domain independently.
 CFG80211_REGDOM="$REGULATORY_DOMAIN"
 
+iface_driver() {
+    local iface="$1"
+    local driver
+
+    driver="$(basename "$(readlink -f /sys/class/net/$iface/device/driver 2>/dev/null)")"
+    if [[ -z "$driver" || "$driver" == "." ]]; then
+        driver="$(ethtool -i "$iface" 2>/dev/null | awk -F': ' '$1 == "driver" {print $2; exit}')"
+    fi
+
+    echo "$driver"
+}
+
+iface_phy() {
+    local iface="$1"
+    iw dev "$iface" info 2>/dev/null | awk '/wiphy/ {print "phy"$2; exit}'
+}
 
 # Wait for wireless drivers to load
 echo "Waiting for wireless drivers to load..."
 DRIVER_WAIT_COUNT=0
 MAX_DRIVER_WAIT=30  # 60 seconds total
+PHY_COUNT=0
 
 while [ $DRIVER_WAIT_COUNT -lt $MAX_DRIVER_WAIT ]; do
     PHY_COUNT=$(iw dev 2>/dev/null | grep -c "^phy#")
@@ -367,6 +384,45 @@ if [ "$PHY_COUNT" -eq 0 ]; then
     echo "⚠ WARNING: No wireless interfaces found after $((MAX_DRIVER_WAIT * 2)) seconds"
     echo "  This is normal for wired-only configurations"
     echo "  If you expect wireless: check 'dmesg | grep -i firmware'"
+else
+    # Wait until netdev list and drivers stabilize (multi-AX + onboard often probe late).
+    STABLE_ROUNDS=0
+    LAST_IFACE_COUNT=-1
+    STABLE_MAX=30
+    for ((stable_i = 0; stable_i < STABLE_MAX; stable_i++)); do
+        mapfile -t _wifi_ifaces < <(iw dev 2>/dev/null | awk '$1 == "Interface" {print $2}')
+        _n=${#_wifi_ifaces[@]}
+        _all_drivers=1
+        for _iface in "${_wifi_ifaces[@]}"; do
+            _d="$(iface_driver "$_iface")"
+            if [[ -z "$_d" || "$_d" == "." ]]; then
+                _all_drivers=0
+                break
+            fi
+        done
+        if [[ "$_all_drivers" -eq 1 && "$_n" -gt 0 ]]; then
+            if [[ "$_n" -eq "$LAST_IFACE_COUNT" ]]; then
+                STABLE_ROUNDS=$((STABLE_ROUNDS + 1))
+                if [[ "$STABLE_ROUNDS" -ge 2 ]]; then
+                    echo "Wireless interfaces stable (count=$_n, drivers bound)."
+                    break
+                fi
+            else
+                STABLE_ROUNDS=1
+            fi
+            LAST_IFACE_COUNT="$_n"
+        else
+            STABLE_ROUNDS=0
+            LAST_IFACE_COUNT="$_n"
+        fi
+        if [[ $((stable_i % 5)) -eq 4 ]]; then
+            echo "Waiting for wireless enumerate to stabilize... ($((stable_i + 1))/${STABLE_MAX})"
+        fi
+        sleep 2
+    done
+    if [[ "$STABLE_ROUNDS" -lt 2 ]]; then
+        echo "WARNING: Wireless interfaces did not reach stability before timeout; continuing."
+    fi
 fi
 
 # ============================================================================
@@ -377,18 +433,6 @@ fi
 mesh_ifaces=()
 halow_ifaces=()
 nonmesh_ifaces=()
-
-iface_driver() {
-    local iface="$1"
-    local driver
-
-    driver="$(basename "$(readlink -f /sys/class/net/$iface/device/driver 2>/dev/null)")"
-    if [[ -z "$driver" || "$driver" == "." ]]; then
-        driver="$(ethtool -i "$iface" 2>/dev/null | awk -F': ' '$1 == "driver" {print $2; exit}')"
-    fi
-
-    echo "$driver"
-}
 
 is_halow_iface() {
     local iface="$1"
@@ -423,11 +467,6 @@ is_nonmesh_wifi() {
     [[ "$driver" == brcmfmac ]]
 }
 
-iface_phy() {
-    local iface="$1"
-    iw dev "$iface" info 2>/dev/null | awk '/wiphy/ {print "phy"$2; exit}'
-}
-
 iface_supports_mesh() {
     local iface="$1"
     local phyname
@@ -459,6 +498,113 @@ iface_mesh_freq() {
     fi
 }
 
+# Reorder mesh-capable interfaces by 2.4 / 5 GHz role (nameref: array name).
+reorder_mesh_candidate_list() {
+    local -n __mesh_arr="$1"
+    local mesh_24 mesh_5 iface reordered
+
+    if [ "${#__mesh_arr[@]}" -gt 1 ]; then
+        mesh_24=""
+        mesh_5=""
+
+        for iface in "${__mesh_arr[@]}"; do
+            if iface_supports_freq "$iface" 2412 && ! iface_supports_freq "$iface" 5180; then
+                mesh_24="$iface"
+                break
+            fi
+        done
+        for iface in "${__mesh_arr[@]}"; do
+            if iface_supports_freq "$iface" 5180 && ! iface_supports_freq "$iface" 2412; then
+                mesh_5="$iface"
+                break
+            fi
+        done
+        [ -z "$mesh_24" ] && for iface in "${__mesh_arr[@]}"; do
+            iface_supports_freq "$iface" 2412 && mesh_24="$iface" && break
+        done
+        [ -z "$mesh_5" ] && for iface in "${__mesh_arr[@]}"; do
+            [ "$iface" = "$mesh_24" ] && continue
+            iface_supports_freq "$iface" 5180 && mesh_5="$iface" && break
+        done
+
+        reordered=()
+        [ -n "$mesh_24" ] && reordered+=("$mesh_24")
+        [ -n "$mesh_5" ] && reordered+=("$mesh_5")
+        for iface in "${__mesh_arr[@]}"; do
+            [ "$iface" = "$mesh_24" ] && continue
+            [ "$iface" = "$mesh_5" ] && continue
+            reordered+=("$iface")
+        done
+        __mesh_arr=("${reordered[@]}")
+    elif [ "${#__mesh_arr[@]}" -eq 1 ]; then
+        mapfile -t __mesh_arr < <(printf '%s\n' "${__mesh_arr[@]}" | sort -V)
+    fi
+}
+
+# brcmfmac must never stay in mesh candidates (even if probed late).
+sweep_brcmfmac_from_mesh() {
+    local iface d newm found nm
+    newm=()
+    for iface in "${mesh_ifaces[@]}"; do
+        d="$(iface_driver "$iface")"
+        if [[ "$d" == "brcmfmac" ]]; then
+            found=0
+            for nm in "${nonmesh_ifaces[@]}"; do
+                [[ "$nm" == "$iface" ]] && found=1 && break
+            done
+            [[ "$found" -eq 0 ]] && nonmesh_ifaces+=("$iface")
+            echo " > Moved $iface (brcmfmac) from mesh to non-mesh"
+        else
+            newm+=("$iface")
+        fi
+    done
+    mesh_ifaces=("${newm[@]}")
+}
+
+append_iface_map_unique() {
+    local iface="$1"
+    grep -q "^${iface}:" /var/lib/iface_map 2>/dev/null || echo "${iface}:${iface}" >> /var/lib/iface_map
+}
+
+rewrite_no_mesh_if_from_array() {
+    : > /var/lib/no_mesh_if
+    for iface in "${nonmesh_ifaces[@]}"; do
+        echo "$iface" >> /var/lib/no_mesh_if
+    done
+}
+
+# If onboard brcmfmac exists but was missed, pull it out of mesh candidates and refresh role files.
+rescue_brcmfmac_to_nonmesh() {
+    local iface d changed found nm newm
+    changed=0
+    for iface in $(iw dev 2>/dev/null | awk '$1 == "Interface" {print $2}'); do
+        d="$(iface_driver "$iface")"
+        [[ "$d" == "brcmfmac" ]] || continue
+        found=0
+        for nm in "${nonmesh_ifaces[@]}"; do
+            [[ "$nm" == "$iface" ]] && found=1 && break
+        done
+        if [[ "$found" -eq 0 ]]; then
+            nonmesh_ifaces+=("$iface")
+            append_iface_map_unique "$iface"
+            changed=1
+        fi
+        newm=()
+        for nm in "${mesh_ifaces[@]}"; do
+            [[ "$nm" == "$iface" ]] || newm+=("$nm")
+        done
+        if [[ "${#newm[@]}" -ne "${#mesh_ifaces[@]}" ]]; then
+            mesh_ifaces=("${newm[@]}")
+            changed=1
+            echo " > Rescue: moved $iface (brcmfmac) to non-mesh for AP"
+        fi
+    done
+    if [[ "$changed" -eq 1 ]]; then
+        reorder_mesh_candidate_list mesh_ifaces
+        rewrite_no_mesh_if_from_array
+    fi
+}
+
 for iface in $(iw dev | awk '$1 == "Interface" {print $2}'); do
     if is_halow_iface "$iface"; then
         halow_ifaces+=("$iface")
@@ -471,48 +617,11 @@ for iface in $(iw dev | awk '$1 == "Interface" {print $2}'); do
     fi
 done
 
-# Order standard mesh interfaces by role, not by volatile wlanX name. The first
-# interface receives the 2.4 GHz lobby config and the second receives the 5 GHz
-# lobby config. Prefer single-band matches when possible, then fall back to any
-# device supporting the required lobby frequency.
-if [ "${#mesh_ifaces[@]}" -gt 1 ]; then
-    mesh_24=""
-    mesh_5=""
+sweep_brcmfmac_from_mesh
+reorder_mesh_candidate_list mesh_ifaces
 
-    for iface in "${mesh_ifaces[@]}"; do
-        if iface_supports_freq "$iface" 2412 && ! iface_supports_freq "$iface" 5180; then
-            mesh_24="$iface"
-            break
-        fi
-    done
-    for iface in "${mesh_ifaces[@]}"; do
-        if iface_supports_freq "$iface" 5180 && ! iface_supports_freq "$iface" 2412; then
-            mesh_5="$iface"
-            break
-        fi
-    done
-    [ -z "$mesh_24" ] && for iface in "${mesh_ifaces[@]}"; do
-        iface_supports_freq "$iface" 2412 && mesh_24="$iface" && break
-    done
-    [ -z "$mesh_5" ] && for iface in "${mesh_ifaces[@]}"; do
-        [ "$iface" = "$mesh_24" ] && continue
-        iface_supports_freq "$iface" 5180 && mesh_5="$iface" && break
-    done
-
-    reordered=()
-    [ -n "$mesh_24" ] && reordered+=("$mesh_24")
-    [ -n "$mesh_5" ] && reordered+=("$mesh_5")
-    for iface in "${mesh_ifaces[@]}"; do
-        [ "$iface" = "$mesh_24" ] && continue
-        [ "$iface" = "$mesh_5" ] && continue
-        reordered+=("$iface")
-    done
-    mesh_ifaces=("${reordered[@]}")
-elif [ "${#mesh_ifaces[@]}" -eq 1 ]; then
-    mapfile -t mesh_ifaces < <(printf '%s\n' "${mesh_ifaces[@]}" | sort -V)
-fi
-
-# Create directory and files (supports wired-only configs if arrays are empty)
+# Create directory and files (supports wired-only configs if arrays are empty).
+# Mesh role files are written after AP selection so /var/lib/mesh_if never lists the AP iface.
 mkdir -p /var/lib
 > /var/lib/mesh_if
 > /var/lib/mesh_24_if
@@ -521,17 +630,6 @@ mkdir -p /var/lib
 > /var/lib/no_mesh_if
 > /var/lib/iface_map   # runtime_name:physical_name (for MAC lookups during provisioning)
 
-# Persist the runtime interface names. The rest of the setup and boot scripts
-# consume these files as live netdev names, so writing desired logical names
-# before udev has renamed anything can make HaLow and non-mesh devices appear
-# swapped. Keep iface_map as an identity map for phys_iface() callers.
-for iface in "${mesh_ifaces[@]}"; do
-    echo "$iface" >> /var/lib/mesh_if
-    echo "$iface:$iface" >> /var/lib/iface_map
-    echo " > Mapped $iface (mesh)"
-done
-[ "${#mesh_ifaces[@]}" -gt 0 ] && echo "${mesh_ifaces[0]}" > /var/lib/mesh_24_if
-[ "${#mesh_ifaces[@]}" -gt 1 ] && echo "${mesh_ifaces[1]}" > /var/lib/mesh_5_if
 for iface in "${halow_ifaces[@]}"; do
     echo "$iface" >> /var/lib/halow_if
     echo "$iface:$iface" >> /var/lib/iface_map
@@ -543,16 +641,6 @@ for iface in "${nonmesh_ifaces[@]}"; do
     echo " > Mapped $iface (non-mesh)"
 done
 
-# Log what we found
-echo "Interface detection complete:"
-echo "  Mesh-capable: ${#mesh_ifaces[@]} (${mesh_ifaces[*]})"
-echo "  Mesh 2.4 role: $(cat /var/lib/mesh_24_if 2>/dev/null || true)"
-echo "  Mesh 5.0 role: $(cat /var/lib/mesh_5_if 2>/dev/null || true)"
-echo "  HaLow: ${#halow_ifaces[@]} (${halow_ifaces[*]})"
-echo "  Non-mesh: ${#nonmesh_ifaces[@]} (${nonmesh_ifaces[*]})"
-echo "  Logical mapping:"
-cat /var/lib/iface_map
-
 # ============================================================================
 # === AP INTERFACE SELECTION (for wireless/auto EUD modes) ===
 # ============================================================================
@@ -562,26 +650,34 @@ AP_INTERFACE=""
 if [[ "$eud" == "wireless" ]] || [[ "$eud" == "auto" ]]; then
     echo "EUD mode is $eud - selecting AP interface..."
 
-    # Priority 1: Use non-mesh interface if available (RPi 5 onboard)
+    # Priority 1: Use non-mesh interface if available (RPi onboard / CM4 wireless)
     if [ -s /var/lib/no_mesh_if ]; then
         AP_INTERFACE=$(head -1 /var/lib/no_mesh_if)
         echo " > Using non-mesh interface for AP: $AP_INTERFACE"
 
-    # Priority 2: Find 5GHz-capable interface from mesh interfaces
-    elif [ -s /var/lib/mesh_if ]; then
-        echo " > Searching for 5GHz-capable mesh interface..."
-        for iface in $(cat /var/lib/mesh_if); do
-            PHY=$(iw dev "$iface" info | grep wiphy | awk '{print "phy" $2}')
-            if iw phy "$PHY" info 2>/dev/null | grep " 5[0-9][0-9][0-9]" >/dev/null; then
-                AP_INTERFACE="$iface"
-                echo " > Found 5GHz-capable interface: $AP_INTERFACE"
-                break
-            fi
-        done
+    # Priority 2: Find 5GHz-capable interface from mesh candidates (in-memory only)
+    elif [ "${#mesh_ifaces[@]}" -gt 0 ]; then
+        if ! [ -s /var/lib/no_mesh_if ]; then
+            rescue_brcmfmac_to_nonmesh
+        fi
+        if [ -s /var/lib/no_mesh_if ]; then
+            AP_INTERFACE=$(head -1 /var/lib/no_mesh_if)
+            echo " > Using non-mesh interface for AP (after rescue): $AP_INTERFACE"
+        else
+            echo " > Searching for 5GHz-capable mesh interface..."
+            for iface in "${mesh_ifaces[@]}"; do
+                PHY=$(iw dev "$iface" info | grep wiphy | awk '{print "phy" $2}')
+                if iw phy "$PHY" info 2>/dev/null | grep " 5[0-9][0-9][0-9]" >/dev/null; then
+                    AP_INTERFACE="$iface"
+                    echo " > Found 5GHz-capable interface: $AP_INTERFACE"
+                    break
+                fi
+            done
 
-        if [ -z "$AP_INTERFACE" ]; then
-            echo "WARNING: No 5GHz-capable interface found. Using first mesh interface."
-            AP_INTERFACE=$(head -1 /var/lib/mesh_if)
+            if [ -z "$AP_INTERFACE" ]; then
+                echo "WARNING: No 5GHz-capable interface found. Using first mesh interface."
+                AP_INTERFACE="${mesh_ifaces[0]}"
+            fi
         fi
     else
         echo "ERROR: No suitable interface found for AP!"
@@ -594,6 +690,36 @@ if [[ "$eud" == "wireless" ]] || [[ "$eud" == "auto" ]]; then
         echo "AP interface selected: $AP_INTERFACE"
     fi
 fi
+
+# Final mesh set for batman / wpa: never include the AP interface.
+mesh_deploy=("${mesh_ifaces[@]}")
+if [[ -n "${AP_INTERFACE:-}" ]]; then
+    tmp_mesh_deploy=()
+    for iface in "${mesh_deploy[@]}"; do
+        [[ "$iface" == "$AP_INTERFACE" ]] && continue
+        tmp_mesh_deploy+=("$iface")
+    done
+    mesh_deploy=("${tmp_mesh_deploy[@]}")
+fi
+reorder_mesh_candidate_list mesh_deploy
+mesh_ifaces=("${mesh_deploy[@]}")
+
+for iface in "${mesh_ifaces[@]}"; do
+    echo "$iface" >> /var/lib/mesh_if
+    append_iface_map_unique "$iface"
+    echo " > Mapped $iface (mesh)"
+done
+[ "${#mesh_ifaces[@]}" -gt 0 ] && echo "${mesh_ifaces[0]}" > /var/lib/mesh_24_if
+[ "${#mesh_ifaces[@]}" -gt 1 ] && echo "${mesh_ifaces[1]}" > /var/lib/mesh_5_if
+
+echo "Interface detection complete:"
+echo "  Mesh-capable: ${#mesh_ifaces[@]} (${mesh_ifaces[*]})"
+echo "  Mesh 2.4 role: $(cat /var/lib/mesh_24_if 2>/dev/null || true)"
+echo "  Mesh 5.0 role: $(cat /var/lib/mesh_5_if 2>/dev/null || true)"
+echo "  HaLow: ${#halow_ifaces[@]} (${halow_ifaces[*]})"
+echo "  Non-mesh: ${#nonmesh_ifaces[@]} (${nonmesh_ifaces[*]})"
+echo "  Logical mapping:"
+cat /var/lib/iface_map
 
 # ============================================================================
 # === CLEANUP STALE PER-INTERFACE SERVICES AND CONFIGS ===
