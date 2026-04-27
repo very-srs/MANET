@@ -23,6 +23,23 @@ iface_for_mac() {
     return 1
 }
 
+wait_for_macs() {
+    # SDIO/USB radios may register after sysinit; do not rename until every
+    # MAC from 10-wlan*.link exists on some wlan* (any name).
+    local deadline=$(( $(date +%s) + ${MANET_WLAN_APPLY_WAIT_MAX:-60} ))
+    local mac all
+    while (( $(date +%s) < deadline )); do
+        all=1
+        for mac in "${!mac_to_target[@]}"; do
+            iface_for_mac "$mac" >/dev/null || { all=0; break; }
+        done
+        (( all == 1 )) && return 0
+        sleep 0.25
+    done
+    echo "manet-wlan-apply-link-names: WARN some .link MACs still missing after ${MANET_WLAN_APPLY_WAIT_MAX:-60}s" >&2
+    return 0
+}
+
 load_targets() {
     mac_to_target=()
     local f mac name
@@ -171,6 +188,7 @@ if [[ ${#mac_to_target[@]} -eq 0 ]]; then
     exit 0
 fi
 
+wait_for_macs
 apply_renames || exit 1
 
 remap_lines_by_mac /var/lib/mesh_if || exit 1

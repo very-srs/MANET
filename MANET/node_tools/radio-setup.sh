@@ -284,17 +284,18 @@ cat << 'EOF' > /etc/systemd/system/manet-wlan-apply-link-names.service
 [Unit]
 Description=Apply wlan names from 10-wlan*.link (swap-safe); remap MANET role files by MAC
 DefaultDependencies=no
-After=systemd-udevd.service
-Before=systemd-networkd.service wifi-rfkill-unblock.service
-Before=network-pre.target
+After=systemd-networkd.service
+Before=wifi-rfkill-unblock.service
+Wants=systemd-networkd.service
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
+TimeoutStartSec=120
 ExecStart=/usr/local/bin/manet-wlan-apply-link-names.sh
 
 [Install]
-WantedBy=sysinit.target
+WantedBy=multi-user.target
 EOF
 
 # A system service to force mesh point mode on the wlan interfaces
