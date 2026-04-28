@@ -1,0 +1,18 @@
+# EUD Mode Configuration for end0
+# Managed by ethernet-autodetect.sh
+# This file is copied to 20-end0.network when EUD mode is detected
+
+[Match]
+Name=end0
+
+[Link]
+RequiredForOnline=no
+
+[Network]
+# Add to bridge for mesh client connectivity
+Bridge=br0
+# No DHCP on bridged interface
+DHCP=no
+IPv6AcceptRA=no
+# Bridge members shouldn't have their own IPs
+LinkLocalAddressing=no

@@ -107,12 +107,15 @@ Partition detection and healing system. Runs every 2 minutes at :30 seconds:
 5. If a larger partition is detected, triggers migration.
 6. Returns to data channel.
 
-**manet-uplink-dispatch.sh**
+**ethernet-autodetect.sh**
 
-Reconciles Ethernet and USB tether uplinks from networkd-dispatcher:
-- **Routable upstream:** Gateway mode (NAT, advertise default route, keep EUD AP available).
-- **No upstream route:** Wired EUD mode (bridge/link handling without advertising internet).
-- **Conflict handling:** Publishes the gateway interface through Alfred/protobuf so peers do not inherit stale aliases.
+Auto-detects Ethernet configuration when a cable is connected:
+- **DHCP detected:** Gateway mode (NAT, advertise default route, optionally keep AP).
+- **No DHCP:** EUD mode (bridge to mesh).
+- **Auto Mode Behavior:**
+  - *Ethernet Gateway:* Dual role (gateway + AP).
+  - *Ethernet EUD:* Disable AP (wired priority).
+  - *Wireless EUD:* Enable AP for wireless EUDs.
 
 ---
 

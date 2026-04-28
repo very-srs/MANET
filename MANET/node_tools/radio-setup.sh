@@ -933,7 +933,7 @@ EOF
         systemctl restart ap-txpower.service 2>/dev/null || true
     else
         systemctl unmask hostapd.service
-        echo " > Auto mode: AP services staged (manet-uplink-dispatch will manage)"
+        echo " > Auto mode: AP services staged (ethernet-autodetect will manage)"
         systemctl disable hostapd.service
     fi
 
@@ -1030,7 +1030,7 @@ network={
     ssid="$mesh_ssid"
     key_mgmt=SAE
     mode=5
-    channel=5
+    channel=1
     op_class=66
     country="$HALOW_REGULATORY_DOMAIN"
     s1g_prim_chwidth=0
@@ -1053,6 +1053,24 @@ network={
 }
 EOF
     fi
+
+    # Set HaLow TX power to 24 dBm (2400 mBm) after interface comes up
+cat << EOF > /etc/systemd/system/halow-txpower-$WLAN.service
+[Unit]
+Description=Set HaLow TX power for $WLAN
+After=wpa_supplicant-s1g-$WLAN.service
+Wants=wpa_supplicant-s1g-$WLAN.service
+
+[Service]
+Type=oneshot
+ExecStartPre=/bin/sleep 5
+ExecStart=/usr/sbin/iw dev $WLAN set txpower fixed 2400
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    systemctl enable halow-txpower-$WLAN.service
 
 cat << EOF > /etc/systemd/system/wpa_supplicant-s1g-$WLAN.service
 [Unit]
@@ -1299,24 +1317,22 @@ systemctl daemon-reload
 systemctl enable --now nftables.service
 
 # Install scripts for auto gateway management
-mkdir -p /etc/networkd-dispatcher/{carrier,off,no-carrier,degraded,routable}.d
 cp /root/networkd-dispatcher/off /etc/networkd-dispatcher/off.d/50-gateway-disable
-cp /root/networkd-dispatcher/no-carrier /etc/networkd-dispatcher/no-carrier.d/50-gateway-disable
-cp /root/networkd-dispatcher/degraded /etc/networkd-dispatcher/degraded.d/50-gateway-disable
+cp /root/networkd-dispatcher/off /etc/networkd-dispatcher/no-carrier.d/50-gateway-disable
+cp /root/networkd-dispatcher/off /etc/networkd-dispatcher/degraded.d/50-gateway-disable
 cp /root/networkd-dispatcher/carrier /etc/networkd-dispatcher/carrier.d/50-ethernet-detect
-cp /root/networkd-dispatcher/routable /etc/networkd-dispatcher/routable.d/50-manet-uplink
 chmod -R 755 /etc/networkd-dispatcher
 
 cat <<- EOF > /etc/systemd/system/ethernet-autodetect.service
 [Unit]
-Description=MANET Uplink Reconciliation
+Description=MANET Ethernet Hotplug Auto Detection
 After=systemd-networkd.service batman-enslave.service
 Wants=systemd-networkd.service
-ConditionPathExists=/usr/local/bin/manet-uplink-dispatch.sh
+ConditionPathExists=/usr/local/bin/ethernet-autodetect.sh
 
 [Service]
 Type=oneshot
-ExecStart=/usr/local/bin/manet-uplink-dispatch.sh reconcile
+ExecStart=/usr/local/bin/ethernet-autodetect.sh --hotplug
 TimeoutStartSec=45
 
 [Install]
@@ -1464,7 +1480,7 @@ systemctl enable mesh-status
 # avahi-daemon is kept but restricted to deny mesh interfaces (bat0, wlan0-2).
 # Clients connected to the EUD AP can reach the admin panel at http://manet.local
 
-apt install -y avahi-daemon iperf3 traceroute 2>/dev/null || true
+apt install -y avahi-daemon iperf3 traceroute sqlite3 python3-zeroconf 2>/dev/null || true
 install -m 644 /etc/avahi/avahi-daemon.conf /etc/avahi/avahi-daemon.conf.bak 2>/dev/null || true
 cp /usr/local/share/manet/avahi-daemon.conf /etc/avahi/avahi-daemon.conf
 # Restrict avahi to the AP-only interface so nodes on the mesh don't conflict on 'manet'

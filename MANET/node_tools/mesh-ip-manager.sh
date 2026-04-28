@@ -48,6 +48,20 @@ if [ -f /etc/mesh.conf ]; then
 fi
 EUD_MODE=${EUD_MODE:-"none"}
 
+# Calculate service VIPs from ipv4_network — same formula as election scripts
+# MTX VIP = HostMin+1, Mumble VIP = HostMin+2
+MTX_VIP=""
+MUMBLE_VIP=""
+_calc_service_vips() {
+    local calc host_min
+    calc=$(ipcalc "$IPV4_NETWORK" 2>/dev/null) || return 0
+    host_min=$(echo "$calc" | awk '/HostMin/ {print $2}')
+    [ -n "$host_min" ] || return 0
+    MTX_VIP="${host_min%.*}.$((${host_min##*.} + 1))"
+    MUMBLE_VIP="${host_min%.*}.$((${host_min##*.} + 2))"
+}
+_calc_service_vips
+
 # If any EUD mode is active, we need at least 1 EUD IP
 if [[ "$EUD_MODE" != "none" && "$MAX_EUDS" -lt 1 ]]; then
 #    log "EUD mode is '$EUD_MODE' but max_euds=$MAX_EUDS. Forcing max_euds=1."
@@ -373,6 +387,10 @@ configure_dnsmasq() {
     local dhcp_end=$4
     local old_gateway=""
     local old_primary=""
+    local _MUMBLE_VIP_LINE=""
+    local _MTX_VIP_LINE=""
+    [ -n "$MUMBLE_VIP" ] && _MUMBLE_VIP_LINE="address=/mumble.local/$MUMBLE_VIP"
+    [ -n "$MTX_VIP" ]    && _MTX_VIP_LINE="address=/mtx.local/$MTX_VIP"
 
     if [ -f /etc/dnsmasq.d/mesh-eud.conf ]; then
         old_gateway=$(awk -F, '$1 == "dhcp-option=3" {print $2; exit}' /etc/dnsmasq.d/mesh-eud.conf)
@@ -405,6 +423,10 @@ local=/mesh.local/
 address=/manet.local/$br0_secondary
 address=/perf.local/$br0_secondary
 
+# Service VIPs — stable across the mesh regardless of which node is leader
+${_MUMBLE_VIP_LINE}
+${_MTX_VIP_LINE}
+
 # Upstream DNS for EUD internet access through Ethernet
 server=1.1.1.1
 server=8.8.8.8
@@ -412,10 +434,6 @@ server=8.8.8.8
 # Log for debugging
 log-dhcp
 EOF
-
-    # Publish perf.local/manet.local plus dynamic service aliases via mDNS.
-    # Avahi is restricted to the AP-facing interface and reflector remains off.
-    /usr/local/bin/mesh-mdns-update.sh || true
 
     # Ensure dnsmasq is unmasked, enabled, and running
     systemctl unmask dnsmasq.service 2>/dev/null
@@ -644,6 +662,8 @@ case $IPV4_STATE in
                 elif grep -q "^no-resolv" "$DNSMASQ_CONF" 2>/dev/null; then
                     NEEDS_DNSMASQ_UPDATE=true
                 elif ! grep -q "^server=" "$DNSMASQ_CONF" 2>/dev/null; then
+                    NEEDS_DNSMASQ_UPDATE=true
+                elif ! grep -q "^address=/mumble.local/" "$DNSMASQ_CONF" 2>/dev/null; then
                     NEEDS_DNSMASQ_UPDATE=true
                 fi
 

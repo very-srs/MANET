@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!-- Created with Inkscape (http://www.inkscape.org/) -->
+
+<svg
+   version="1.1"
+   id="svg1"
+   width="896.64001"
+   height="558.22668"
+   viewBox="0 0 896.64001 558.22668"
+   sodipodi:docname="FER_logo_1.eps"
+   xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
+   xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
+   xmlns="http://www.w3.org/2000/svg"
+   xmlns:svg="http://www.w3.org/2000/svg">
+  <defs
+     id="defs1" />
+  <sodipodi:namedview
+     id="namedview1"
+     pagecolor="#ffffff"
+     bordercolor="#000000"
+     borderopacity="0.25"
+     inkscape:showpageshadow="2"
+     inkscape:pageopacity="0.0"
+     inkscape:pagecheckerboard="0"
+     inkscape:deskcolor="#d1d1d1">
+    <inkscape:page
+       x="0"
+       y="0"
+       inkscape:label="1"
+       id="page1"
+       width="896.64001"
+       height="558.22668"
+       margin="0"
+       bleed="0" />
+  </sodipodi:namedview>
+  <g
+     id="g1"
+     inkscape:groupmode="layer"
+     inkscape:label="1">
+    <g
+       id="group-R5">
+      <path
+         id="path2"
+         d="M 4942.83,3009.52 H 3141.44 v -393.48 h 1798.58 c 90.75,0 164.59,-70.07 164.59,-160.73 0,-90.66 -73.84,-165.05 -164.59,-165.05 h -421.34 l -0.28,-393.29 h 223.81 l 362.2,-719.76 h 443.17 l -385.63,762.51 c 197.86,85.92 336.59,283.02 336.59,511.91 0,306.69 -249.03,556.34 -555.71,557.86 v 0.03"
+         style="fill:#2c2728;fill-opacity:1;fill-rule:evenodd;stroke:none"
+         transform="matrix(0.13333333,0,0,-0.13333333,0,558.22667)" />
+      <path
+         id="path3"
+         d="M 4125.17,1897.08 H 1797.12 v 393.08 h 2328.05 v -393.08"
+         style="fill:#2c2728;fill-opacity:1;fill-rule:evenodd;stroke:none"
+         transform="matrix(0.13333333,0,0,-0.13333333,0,558.22667)" />
+      <path
+         id="path4"
+         d="M 4522.9,1177.21 H 2161.21 v 393.08 H 4522.9 v -393.08"
+         style="fill:#2c2728;fill-opacity:1;fill-rule:evenodd;stroke:none"
+         transform="matrix(0.13333333,0,0,-0.13333333,0,558.22667)" />
+      <path
+         id="path5"
+         d="M 2747.44,3009.52 H 1177.29 v -262.16 h -0.08 V 1177.21 h 393.08 v 1439.23 h 1177.15 v 393.08"
+         style="fill:#2c2728;fill-opacity:1;fill-rule:evenodd;stroke:none"
+         transform="matrix(0.13333333,0,0,-0.13333333,0,558.22667)" />
+    </g>
+  </g>
+</svg>

@@ -3,7 +3,7 @@
 # USB Ethernet Watch
 # ==============================================================================
 # Called by udev when a USB ethernet interface (tethering, LTE dongle) appears
-# or disappears. Triggers manet-uplink-dispatch.sh with the correct interface.
+# or disappears. Triggers ethernet-autodetect.sh with the correct interface.
 # ==============================================================================
 
 exec >> /var/log/usb-ethernet-watch.log 2>&1

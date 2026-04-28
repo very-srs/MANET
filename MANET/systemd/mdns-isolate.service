@@ -1,0 +1,20 @@
+[Unit]
+Description=Block mDNS crossing bat0 bridge boundary
+Before=avahi-daemon.service
+After=network.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c '\
+  ebtables -C INPUT -i bat0 -p ip --ip-protocol udp --ip-destination-port 5353 -j DROP 2>/dev/null || \
+  ebtables -A INPUT -i bat0 -p ip --ip-protocol udp --ip-destination-port 5353 -j DROP; \
+  ebtables -C INPUT -i bat0 -p ip --ip-protocol udp --ip-source-port 5353 -j DROP 2>/dev/null || \
+  ebtables -A INPUT -i bat0 -p ip --ip-protocol udp --ip-source-port 5353 -j DROP; \
+  ebtables -C FORWARD -i bat0 -p ip --ip-protocol udp --ip-destination-port 5353 -j DROP 2>/dev/null || \
+  ebtables -A FORWARD -i bat0 -p ip --ip-protocol udp --ip-destination-port 5353 -j DROP; \
+  ebtables -C FORWARD -i bat0 -p ip --ip-protocol udp --ip-source-port 5353 -j DROP 2>/dev/null || \
+  ebtables -A FORWARD -i bat0 -p ip --ip-protocol udp --ip-source-port 5353 -j DROP'
+
+[Install]
+WantedBy=multi-user.target

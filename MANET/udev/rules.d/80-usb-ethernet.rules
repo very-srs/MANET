@@ -1,0 +1,3 @@
+# Trigger USB ethernet watch when a USB-backed network interface appears or disappears
+ACTION=="add",    SUBSYSTEM=="net", ENV{ID_BUS}=="usb", RUN+="/usr/local/bin/usb-ethernet-watch.sh add $name"
+ACTION=="remove", SUBSYSTEM=="net", ENV{ID_BUS}=="usb", RUN+="/usr/local/bin/usb-ethernet-watch.sh remove $name"
