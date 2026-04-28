@@ -4,15 +4,18 @@
 set -e
 
 # --- Configuration ---
-TEMPLATE_FILE="firstrun.sh.template"
+DEVICE_WAIT=4   # seconds to wait for USB to populate, for cm4 flashing
+TEMPLATE_FILE="firstrun.sh.template"  # these template files are the device setup scripts to be written/modified
 ROCK3A_TEMPLATE="rock3a-provision.sh.template"
 TEMP_SCRIPT_FILE=$(mktemp)
-# Full mirror, fast connection
+
+# Armbian imgage source, does need to be updated from time to time as it ages out
 ARMBIAN_IMAGE_URL="https://fi.mirror.armbian.de/dl/rock-3a/archive/Armbian_26.2.1_Rock-3a_trixie_vendor_6.1.115_minimal.img.xz"
 ARMBIAN_IMAGE_FILENAME="Armbian_25.11.1_Rock-3a_trixie_vendor_6.1.115_minimal.img"
 ARMBIAN_IMAGE=""  # Will be set by acquire_armbian_image function
-CONFIG_DIR=".mesh-configs"
-# Hardcode the OS image URL. rpi-imager will download and cache this.
+CONFIG_DIR=".mesh-configs"  # configs are stored locally in this subdirectory
+
+# RPI OS image URL. rpi-imager will download and cache this.
 PI_OS_IMAGE_URL="https://downloads.raspberrypi.com/raspios_lite_arm64/images/raspios_lite_arm64-2025-10-02/2025-10-01-raspios-trixie-arm64-lite.img.xz"
 
 # --- Helper Functions ---
@@ -41,6 +44,7 @@ validate_regulatory_domain() {
     return 1
 }
 
+# This pair of functions are for setting "eu" as the reg domain for only halow config files
 uses_eu_halow_region() {
     local domain
     domain=$(echo "$1" | tr '[:lower:]' '[:upper:]')
@@ -71,7 +75,7 @@ halow_regulatory_domain_for_wifi_domain() {
     fi
 }
 
-# Function to calculate network capacity
+# Function to calculate network capacity (number of nodes per CIDR range)
 calculate_capacity() {
         local cidr=$1
         local max_euds=$2
@@ -101,8 +105,6 @@ calculate_capacity() {
         local RESERVED_SERVICES=5
 
         # Calculate based on max EUDs
-        # We need to reserve enough for reasonable number of nodes
-        # Start with assumption and iterate
         local AVAILABLE_FOR_NODES=$((TOTAL_USABLE - RESERVED_SERVICES))
 
         if [ "$max_euds" -gt 0 ]; then
@@ -192,7 +194,7 @@ ask_lan_cidr() {
                         done
                 fi
 
-                # Show capacity calculation if EUDs are configured
+                # Show capacity calculation if EUDs are configured (which is typical)
                 if [ "$max_euds" -gt 0 ]; then
                         echo ""
                         echo "=== Network Capacity Analysis ==="
@@ -206,7 +208,7 @@ ask_lan_cidr() {
                         echo "=================================="
                         echo ""
 
-                        if [ "$NODES" -lt 3 ]; then
+                        if [ "$NODES" -lt 5 ]; then
                                echo "WARNING: This configuration only supports $NODES mesh nodes."
                                echo "Consider using a larger network or reducing max EUDs per node."
                         fi
@@ -303,10 +305,11 @@ ask_questions() {
 
         # If Wireless or Auto, ask for LAN AP configuration
         if [ "$EUD_CONNECTION" = "wireless" ] || [ "$EUD_CONNECTION" = "auto" ]; then
-                read -p "Enter LAN AP SSID Name: " LAN_AP_SSID
+        		echo "EUD wifi network name.  This name will have the last 4 of the ethernet MAC address appended to it for node identification"
+                read -p "Enter EUD access point SSID name: " LAN_AP_SSID
 
                 while true; do
-                        read -p "Enter LAN AP WPA2 Key (8-63 chars) [or press Enter to generate]: " LAN_AP_KEY
+                        read -p "Enter EUD AP WPA2 Key (8-63 chars) [or press Enter to generate]: " LAN_AP_KEY
                         echo
                         if [ -z "$LAN_AP_KEY" ]; then
                                LAN_AP_KEY=$(openssl rand -base64 45  | tr -d '\n')
@@ -337,10 +340,10 @@ ask_questions() {
         if [ "$INSTALL_MUMBLE" = "y" ] || [ "$INSTALL_MUMBLE" = "Y" ]; then INSTALL_MUMBLE="y"; else INSTALL_MUMBLE="n"; fi
 
         # Mesh Configuration
-        read -p "Enter MESH SSID Name: " MESH_SSID
+        read -p "Enter global MESH SSID Name: " MESH_SSID
 
         while true; do
-                read -p "Enter MESH SAE Key (WPA3 password, 8-63 chars) [or press Enter to generate]: " MESH_SAE_KEY
+                read -p "Enter MESH SAE Key (WPA3 password, 8-63 chars) [or press Enter to generate, which is recommended]: " MESH_SAE_KEY
                 echo
                 if [ -z "$MESH_SAE_KEY" ]; then
                         MESH_SAE_KEY=$(openssl rand -base64 45  | tr -d '\n')
@@ -374,7 +377,7 @@ ask_questions() {
             echo "Please enter a valid 2-letter ISO country code (e.g., US, GB, DE, FR, JP)"
             echo "Common codes: US (United States), GB (UK), DE (Germany), FR (France), JP (Japan)"
             echo "              CA (Canada), AU (Australia), NZ (New Zealand), CN (China)"
-		echo "NOTE: EU is not a country code, use your actual country"
+			echo "NOTE: EU is not a country code, use your actual country"
         fi
     done
 
@@ -390,7 +393,7 @@ ask_questions() {
 
         # Network administrator password
         echo ""
-        echo "The network administrator password is used to access the mesh admin interface."
+        echo "The network administrator password is used to access the mesh admin interface to modify a working mesh."
         read -p "Enter admin password [or press Enter to generate 10-char random]: " ADMIN_PW
         echo
         if [ -z "$ADMIN_PW" ]; then
@@ -415,7 +418,7 @@ ask_questions() {
         # Ask for max EUDs before CIDR selection
         if [ "$EUD_CONNECTION" = "wireless" ] || [ "$EUD_CONNECTION" = "auto" ]; then
                 while true; do
-                        read -p "Maximum EUDs per node's AP (1-20): " MAX_EUDS_PER_NODE
+                        read -p "Maximum EUDs per radio (via wifi) (1-20): " MAX_EUDS_PER_NODE
                         if [[ "$MAX_EUDS_PER_NODE" =~ ^[0-9]+$ ]] && [ "$MAX_EUDS_PER_NODE" -ge 1 ] && [ "$MAX_EUDS_PER_NODE" -le 20 ]; then
                                break
                         else
@@ -765,8 +768,8 @@ select_target_device() {
                 read -p "Press Enter to run 'sudo rpiboot' and mount the eMMC..."
                 echo
                 sudo rpiboot
-                echo "'rpiboot' finished. Waiting 4s for device to settle..."
-                sleep 4
+                echo "'rpiboot' finished. Waiting $DEVICE_WAIT seconds for device to settle..."
+                sleep $DEVICE_WAIT
 
                 local DISKS_AFTER
                 DISKS_AFTER=$(lsblk -d -n -o NAME)
