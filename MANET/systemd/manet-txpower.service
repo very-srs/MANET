@@ -1,0 +1,15 @@
+[Unit]
+Description=Set MANET lab TX power limits
+After=wpa_supplicant@wlan0.service wpa_supplicant@wlan1.service wpa_supplicant-s1g-wlan2.service
+Wants=wpa_supplicant@wlan0.service wpa_supplicant@wlan1.service wpa_supplicant-s1g-wlan2.service
+
+[Service]
+Type=oneshot
+ExecStartPre=/bin/sleep 5
+ExecStart=-/usr/sbin/iw dev wlan0 set txpower fixed 2300
+ExecStart=-/usr/sbin/iw dev wlan1 set txpower fixed 2400
+ExecStart=-/usr/sbin/iw dev wlan2 set txpower fixed 2400
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

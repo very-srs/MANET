@@ -1,0 +1,17 @@
+[Unit]
+Description=Waveshare UPS HAT (E) battery monitor
+Documentation=https://www.waveshare.com/wiki/UPS_HAT_(E)
+After=multi-user.target
+Wants=multi-user.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /usr/local/bin/battery-reader.py
+Restart=on-failure
+RestartSec=30
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=battery-reader
+
+[Install]
+WantedBy=multi-user.target
