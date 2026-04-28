@@ -20,13 +20,48 @@
 exec > >(tee /var/log/ethernet-detect.log) 2>&1
 set -x
 
-ETH_IFACE="end0"
+# Determine which upstream interface to use.
+# Priority: end0 (native ethernet) > USB ethernet (usb*, enx*)
+# Can be overridden by passing --iface <name> or via /var/run/upstream_iface
+resolve_eth_iface() {
+    # Explicit override from caller
+    if [ -n "${FORCE_IFACE:-}" ]; then
+        echo "$FORCE_IFACE"
+        return
+    fi
+    # Saved upstream from previous detection
+    if [ -f /var/run/upstream_iface ]; then
+        local saved
+        saved=$(cat /var/run/upstream_iface)
+        if ip link show "$saved" &>/dev/null; then
+            echo "$saved"
+            return
+        fi
+    fi
+    # Native ethernet first
+    if ip link show end0 &>/dev/null; then
+        echo "end0"
+        return
+    fi
+    # USB ethernet: usb0, usb1, enxXXX (CDC ECM/RNDIS/NCM dongles/tethering)
+    for iface in $(ls /sys/class/net/); do
+        local bus
+        bus=$(readlink /sys/class/net/$iface/device/subsystem 2>/dev/null | grep -o 'usb' || true)
+        if [ "$bus" = "usb" ] && [[ "$iface" != wlan* ]] && [[ "$iface" != bat* ]] && [[ "$iface" != br* ]]; then
+            echo "$iface"
+            return
+        fi
+    done
+    echo "end0"
+}
+
+ETH_IFACE=$(resolve_eth_iface)
 LOCK_FILE="/var/run/ethernet-autodetect.lock"
 
 # Networkd config paths
 NETWORKD_DIR="/etc/systemd/network"
 GATEWAY_CONFIG="${NETWORKD_DIR}/20-end0-gateway.network.off"
-ACTIVE_CONFIG="${NETWORKD_DIR}/20-end0.network"
+ACTIVE_CONFIG="${NETWORKD_DIR}/20-${ETH_IFACE}.network"
 
 log() {
     echo "[$(date +'%Y-%m-%d %H:%M:%S')] - ETH-DETECT: $1" | systemd-cat -t ethernet-autodetect
@@ -94,13 +129,33 @@ detect_hotplug_mode() {
     # If a previous wired-EUD state left end0 bridged, detach it before DHCP.
     ip link set "$ETH_IFACE" nomaster 2>/dev/null || true
 
-    if [ -f "$GATEWAY_CONFIG" ]; then
-        cp "$GATEWAY_CONFIG" "$ACTIVE_CONFIG"
-    fi
+    cat > "$ACTIVE_CONFIG" << EOF
+[Match]
+Name=${ETH_IFACE}
+
+[Link]
+RequiredForOnline=yes
+
+[Network]
+DHCP=ipv4
+IPv6AcceptRA=yes
+Bridge=
+
+[DHCP]
+ClientIdentifier=mac
+UseDNS=yes
+UseNTP=yes
+UseRoutes=yes
+Timeout=10
+
+[DHCPv4]
+UseRoutes=yes
+UseGateway=yes
+EOF
 
     ip addr flush dev "$ETH_IFACE" 2>/dev/null || true
     networkctl reload 2>/dev/null || true
-    networkctl reconfigure end0 2>/dev/null || true
+    networkctl reconfigure "$ETH_IFACE" 2>/dev/null || true
 
     ip=$(wait_for_end0_ip 20 || true)
     if [ -n "$ip" ]; then
@@ -124,17 +179,34 @@ flock -n 200 || { log "Already running. Exiting."; exit 0; }
 
 # Parse CLI argument
 DETECTED_MODE=""
-if [ "${1:-}" == "--mode" ] && [ -n "${2:-}" ]; then
-    DETECTED_MODE="$2"
-    log "Called with mode: $DETECTED_MODE"
-elif [ "${1:-}" == "--hotplug" ] || [ -z "${1:-}" ]; then
+ARGS=("$@")
+i=0
+while [ $i -lt ${#ARGS[@]} ]; do
+    case "${ARGS[$i]}" in
+        --iface)
+            i=$((i+1))
+            FORCE_IFACE="${ARGS[$i]}"
+            ETH_IFACE=$(resolve_eth_iface)
+            ACTIVE_CONFIG="${NETWORKD_DIR}/20-${ETH_IFACE}.network"
+            ;;
+        --mode)
+            i=$((i+1))
+            DETECTED_MODE="${ARGS[$i]}"
+            log "Called with mode: $DETECTED_MODE"
+            ;;
+        --hotplug|"")
+            ;;
+    esac
+    i=$((i+1))
+done
+
+if [ -z "$DETECTED_MODE" ]; then
     detect_hotplug_mode
     log "Hotplug detected mode: $DETECTED_MODE"
-else
-    log "ERROR: Missing --mode parameter"
-    log "Usage: $0 [--hotplug] | --mode {gateway|wired-eud}"
-    exit 1
 fi
+
+# Save which interface we're managing so other scripts know
+echo "$ETH_IFACE" > /var/run/upstream_iface
 
 # Check if interface exists
 if ! ip link show "$ETH_IFACE" &>/dev/null; then
@@ -242,12 +314,29 @@ if [ "$DETECTED_MODE" == "gateway" ]; then
 
     ETH_IP="$EXISTING_IP"
 
-    if [ ! -f "$GATEWAY_CONFIG" ]; then
-        log "ERROR: Gateway template not found at $GATEWAY_CONFIG"
-        exit 1
-    fi
+    cat > "$ACTIVE_CONFIG" << EOF
+[Match]
+Name=${ETH_IFACE}
 
-    cp "$GATEWAY_CONFIG" "$ACTIVE_CONFIG"
+[Link]
+RequiredForOnline=yes
+
+[Network]
+DHCP=ipv4
+IPv6AcceptRA=yes
+Bridge=
+
+[DHCP]
+ClientIdentifier=mac
+UseDNS=yes
+UseNTP=yes
+UseRoutes=yes
+Timeout=10
+
+[DHCPv4]
+UseRoutes=yes
+UseGateway=yes
+EOF
     touch /var/run/mesh-gateway.state
 
     # Configure NAT

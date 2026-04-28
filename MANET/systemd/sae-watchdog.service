@@ -1,0 +1,13 @@
+[Unit]
+Description=SAE Mesh Authentication Watchdog
+After=batman-enslave.service wpa_supplicant@wlan0.service wpa_supplicant@wlan1.service
+Wants=batman-enslave.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/sae-watchdog.sh
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
