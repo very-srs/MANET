@@ -2162,7 +2162,8 @@ async function applyHalow() {
     }
     let msg = `HaLow ch${ch} / ${bw} / ${dbm} dBm applied to: ${d.applied?.join(', ')}`;
     if (d.unreachable?.length) msg += ` · WARNING: not in mesh: ${d.unreachable.join(', ')}`;
-    showMsg(msg, d.unreachable?.length ? 'info' : 'ok');
+    if (d.warning) msg += ` - WARNING: ${d.warning}`;
+    showMsg(msg, (d.warning || d.unreachable?.length) ? 'info' : 'ok');
     await fetchTopo();
   } catch (e) {
     showMsg('HaLow apply failed: ' + e.message, 'err');
@@ -2964,6 +2965,7 @@ class PerfHandler(http.server.BaseHTTPRequestHandler):
 
                 result = {'ok': True, 'applied': applied}
                 if failed:
+                    result['failed'] = failed
                     result['warning'] = 'Some nodes failed: ' + '; '.join(failed)
                 self.send_json(result)
             except Exception as e:
