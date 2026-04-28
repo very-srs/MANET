@@ -1519,6 +1519,7 @@ if systemctl is-enabled radio-setup-run-once.service >/dev/null 2>&1; then
     systemctl disable radio-setup-run-once.service
 
     echo " >> Doing initial Syncthing config..."
+    install -d -o radio -g radio -m 700 /home/radio/.local/state/syncthing
     sudo -u radio syncthing -generate="/home/radio/.config/syncthing"
     sleep 5
     killall syncthing
