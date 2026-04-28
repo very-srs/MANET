@@ -1,7 +1,24 @@
 #!/bin/bash
-set -euo pipefail
+#
+# This script is triggered on network interface state changes and then does nothing unless
+# the interface is end0 (the ethernet interface).  It first checks for internet access and
+# if found triggers the ethernet-autodetect script to continue with ethernet based gateway
+# swap or EUD access logic
+#
 
-/usr/local/bin/manet-uplink-dispatch.sh carrier "${IFACE:-}"
+TARGET_IFACE="end0"
+
+log() {
+    echo "[$(date +'%Y-%m-%d %H:%M:%S')] - CARRIER-DETECT: $1" | systemd-cat -t ethernet-carrier
+}
+
+# Exit when the interface that changed is not end0
+if [ "$IFACE" != "$TARGET_IFACE" ]; then
+    exit 0
+fi
+
+log "Carrier state changed on $IFACE - running hotplug detection"
+/usr/local/bin/ethernet-autodetect.sh --hotplug
 
 # Automatic tool updates if enabled and internet is now available.
 if grep -qi '^auto_update=1' /etc/mesh.conf 2>/dev/null && ping -c 1 -W 2 -I "$IFACE" 8.8.8.8 >/dev/null 2>&1; then

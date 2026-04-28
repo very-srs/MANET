@@ -13,6 +13,7 @@ Endpoints:
   POST /api/txpower             - Set TX power on node/interface
   POST /api/measure/start       - Start iperf3/ping session
   GET  /api/measure/status      - Current measurement status
+  GET  /api/upload/status       - Current upload status
   GET  /api/sessions            - List saved sessions
   GET  /api/sessions/<id>       - Get session JSON
   GET  /api/sessions/<id>/csv   - Get session CSV
@@ -46,10 +47,16 @@ SESSIONS_DIR    = '/var/log/manet-measurements'
 CONTROL_PORT    = 80  # mesh-status.py port on each node
 ALFRED_RADIO_TYPE = 71
 ALFRED_RADIO_ACK_TYPE = 72
+FER_LOGO_FULL_FILE = '/usr/local/share/manet/fer-logo.svg'
+FER_LOGO_BLACK_FILE = '/usr/local/share/manet/fer-logo-black.svg'
+FER_LOGO_WHITE_FILE = '/usr/local/share/manet/fer-logo-white.svg'
 
 # EU S1G channels (centre frequencies in MHz)
 HALOW_EU_CHANNELS = [863500, 864500, 865500, 866500, 867500, 868500]
 HALOW_BW_OPTIONS  = ['1MHz', '2MHz', '4MHz']
+# Empirical HaLow TX-power ceilings verified on mesh-f86f (2026-04-22)
+# by applying channel/BW changes on the live node and reading back /api/local.
+HALOW_BW_TXPOWER_CAP_DBM = {'1MHz': '24', '2MHz': '24', '4MHz': '22'}
 
 # Active measurement state
 _measure_lock   = threading.Lock()
@@ -57,6 +64,23 @@ _measure_status = {
     'running': False, 'label': '', 'progress': '', 'error': '',
     'done': 0, 'total': 0, 'started_at': None, 'current_started_at': None,
     'current': None, 'last_result': None,
+}
+
+_upload_lock = threading.Lock()
+_upload_status = {
+    'running': False,
+    'target': '',
+    'phase': '',
+    'progress': '',
+    'bytes_sent': 0,
+    'bytes_total': 0,
+    'percent': 0,
+    'started_at': None,
+    'finished_at': None,
+    'done': False,
+    'error': '',
+    'file': '',
+    'url': '',
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -97,6 +121,94 @@ def has_internet():
         return True
     except Exception:
         return False
+
+def get_local_battery_percentage():
+    try:
+        with open('/run/battery_status.json') as f:
+            data = json.load(f)
+        pct = data.get('percentage')
+        if pct is not None:
+            return str(pct)
+    except Exception:
+        pass
+    return ''
+
+
+def get_local_uptime():
+    try:
+        with open('/proc/uptime') as f:
+            secs = float(f.read().split()[0])
+        return fmt_uptime(secs)
+    except Exception:
+        return ''
+
+
+def reset_upload_status():
+    with _upload_lock:
+        _upload_status.update({
+            'running': False,
+            'target': '',
+            'phase': '',
+            'progress': '',
+            'bytes_sent': 0,
+            'bytes_total': 0,
+            'percent': 0,
+            'started_at': None,
+            'finished_at': None,
+            'done': False,
+            'error': '',
+            'file': '',
+            'url': '',
+        })
+
+
+def update_upload_status(**kwargs):
+    with _upload_lock:
+        _upload_status.update(kwargs)
+
+
+def start_upload_status(target):
+    now = int(time.time())
+    with _upload_lock:
+        if _upload_status.get('running'):
+            raise RuntimeError('Upload already running')
+        _upload_status.update({
+            'running': True,
+            'target': target,
+            'phase': 'starting',
+            'progress': f'Starting {target} upload...',
+            'bytes_sent': 0,
+            'bytes_total': 0,
+            'percent': 1,
+            'started_at': now,
+            'finished_at': None,
+            'done': False,
+            'error': '',
+            'file': '',
+            'url': '',
+        })
+
+
+def finish_upload_status(ok=True, error='', **extra):
+    now = int(time.time())
+    with _upload_lock:
+        _upload_status.update(extra)
+        _upload_status['running'] = False
+        _upload_status['done'] = bool(ok)
+        _upload_status['error'] = error or ''
+        _upload_status['finished_at'] = now
+        _upload_status['percent'] = 100 if ok else _upload_status.get('percent', 0)
+        if ok:
+            _upload_status['phase'] = 'done'
+            _upload_status['progress'] = _upload_status.get('progress') or 'Upload complete'
+        else:
+            _upload_status['phase'] = 'error'
+            _upload_status['progress'] = error or _upload_status.get('progress') or 'Upload failed'
+
+
+def get_upload_status():
+    with _upload_lock:
+        return dict(_upload_status)
 
 def parse_registry():
     nodes = {}
@@ -315,6 +427,190 @@ def call_node_api(node_ip, path, method='GET', data=None, timeout=8):
     except Exception as e:
         return {'ok': False, 'error': str(e)}
 
+def fmt_uptime(seconds):
+    try:
+        s = int(seconds)
+    except (TypeError, ValueError):
+        return ''
+    if s < 60:
+        return f'{s}s'
+    m = s // 60
+    if m < 60:
+        return f'{m}m'
+    h = m // 60
+    rm = m % 60
+    if h < 24:
+        return f'{h}h{rm:02d}m'
+    d = h // 24
+    rh = h % 24
+    return f'{d}d{rh:02d}h'
+
+
+def get_session_hop_count(src_ip, dst_ip):
+    if not src_ip or not dst_ip:
+        return None, 'missing'
+    try:
+        data = call_node_api(src_ip, '/api/data', timeout=5)
+    except Exception:
+        return None, 'error'
+    if not isinstance(data, dict):
+        return None, 'error'
+    if data.get('error'):
+        return None, 'error'
+    for node in data.get('nodes', []):
+        if node.get('ip') == dst_ip:
+            hop_count = node.get('hop_count')
+            if isinstance(hop_count, int) and hop_count >= 1:
+                return hop_count, 'batctl'
+            return None, 'unknown'
+    return None, 'unknown'
+
+
+def extract_iperf3_metrics(iperf):
+    metrics = {
+        'tcp_mbps': None,
+        'udp_mbps': None,
+        'jitter_ms': None,
+        'loss_pct': None,
+    }
+    if not isinstance(iperf, dict):
+        return metrics
+
+    end = iperf.get('end', {}) or {}
+
+    def _mbps(section):
+        try:
+            bps = section.get('bits_per_second')
+            if bps is None:
+                return None
+            return round(float(bps) / 1e6, 2)
+        except Exception:
+            return None
+
+    for key in ('sum_received', 'sum_sent', 'sum'):
+        section = end.get(key)
+        if isinstance(section, dict):
+            value = _mbps(section)
+            if value is not None:
+                if key == 'sum':
+                    metrics['udp_mbps'] = value
+                elif metrics['tcp_mbps'] is None:
+                    metrics['tcp_mbps'] = value
+
+    sum_section = end.get('sum')
+    if isinstance(sum_section, dict):
+        try:
+            if sum_section.get('jitter_ms') is not None:
+                metrics['jitter_ms'] = round(float(sum_section.get('jitter_ms')), 3)
+        except Exception:
+            pass
+        try:
+            if sum_section.get('lost_percent') is not None:
+                metrics['loss_pct'] = round(float(sum_section.get('lost_percent')), 2)
+        except Exception:
+            pass
+
+    streams = end.get('streams')
+    if metrics['tcp_mbps'] is None and isinstance(streams, list):
+        received_vals = []
+        sent_vals = []
+        for stream in streams:
+            receiver = stream.get('receiver') if isinstance(stream, dict) else None
+            sender = stream.get('sender') if isinstance(stream, dict) else None
+            if isinstance(receiver, dict) and receiver.get('bits_per_second') is not None:
+                try:
+                    received_vals.append(float(receiver.get('bits_per_second')))
+                except Exception:
+                    pass
+            if isinstance(sender, dict) and sender.get('bits_per_second') is not None:
+                try:
+                    sent_vals.append(float(sender.get('bits_per_second')))
+                except Exception:
+                    pass
+        if received_vals:
+            metrics['tcp_mbps'] = round(sum(received_vals) / 1e6, 2)
+        elif sent_vals:
+            metrics['tcp_mbps'] = round(sum(sent_vals) / 1e6, 2)
+
+    return metrics
+
+def _fmt_dbm(value):
+    try:
+        num = float(value)
+    except Exception:
+        return ''
+    if abs(num - round(num)) < 0.05:
+        return str(int(round(num)))
+    return f'{num:.1f}'.rstrip('0').rstrip('.')
+
+def parse_phy_txpower_options(iw_phy_text):
+    options = {}
+    cur_phy = None
+    for line in (iw_phy_text or '').splitlines():
+        pm = re.match(r'Wiphy phy(\d+)', line)
+        if pm:
+            cur_phy = pm.group(1)
+            options.setdefault(cur_phy, set())
+            continue
+        if cur_phy is None:
+            continue
+        dm = re.search(r'\(([\d.]+)\s+dBm\)', line)
+        if dm:
+            fmt = _fmt_dbm(dm.group(1))
+            if fmt:
+                options[cur_phy].add(fmt)
+    return {
+        phy: sorted(vals, key=lambda v: float(v))
+        for phy, vals in options.items() if vals
+    }
+
+def txpower_choices_from_cap(cap_dbm):
+    try:
+        cap = int(float(cap_dbm))
+    except Exception:
+        return []
+    if cap < 1:
+        return []
+    return [str(v) for v in range(cap, 0, -1)]
+
+
+def get_halow_bw_txpower_cap(bw):
+    return HALOW_BW_TXPOWER_CAP_DBM.get(_format_halow_bw(bw), '')
+
+def get_iface_txpower_cap(iface):
+    try:
+        r = subprocess.run(['iw', 'dev', iface, 'info'], capture_output=True, text=True, timeout=5)
+        if r.returncode != 0:
+            return ''
+        if iface == 'wlan2':
+            bw_cap = get_halow_bw_txpower_cap(get_halow_driver_info(iface).get('halow_bw', ''))
+            if bw_cap:
+                return bw_cap
+        phy = ''
+        current = ''
+        m = re.search(r'txpower ([\d.]+) dBm', r.stdout)
+        if m:
+            current = _fmt_dbm(m.group(1))
+        m = re.search(r'wiphy (\d+)', r.stdout)
+        if m:
+            phy = m.group(1)
+        else:
+            m = re.search(r'wdev (0x[0-9a-fA-F]+)', r.stdout)
+            if m:
+                phy = str(int(m.group(1), 16) >> 32)
+        if not phy:
+            return current
+        r = subprocess.run(['iw', 'phy'], capture_output=True, text=True, timeout=5)
+        options = parse_phy_txpower_options(r.stdout).get(phy, [])
+        if not options:
+            return current
+        cap = max(options, key=lambda v: float(v))
+        if iface == 'wlan2' and current:
+            return _fmt_dbm(min(float(cap), float(current)))
+        return _fmt_dbm(cap)
+    except Exception:
+        return ''
+
 def _add_alfred_candidate(items, value, kind):
     if isinstance(value, bytes):
         value = value.decode(errors='ignore')
@@ -453,11 +749,17 @@ def coordinate_radio_toggle(node_ip, iface, state):
     if iface not in ('wlan0', 'wlan1', 'wlan2') or state not in ('up', 'down'):
         return {'ok': False, 'error': 'Invalid iface or state'}
 
-    targets = radio_target_for_node(node_ip)
+    # Per-node toggle: call the target node directly, no Alfred broadcast
+    if node_ip != 'all':
+        r = call_node_api(node_ip, '/api/control/interface', 'POST',
+                          {'iface': iface, 'state': state})
+        return r
+
+    # Global toggle: use Alfred broadcast/consensus
     expected = radio_expected_hosts()
     if not expected:
         return {'ok': False, 'error': 'No reachable nodes in registry'}
-    if node_ip == 'all' and len(expected) < 2:
+    if len(expected) < 2:
         return {
             'ok': False,
             'error': 'Refusing global radio change: registry sees fewer than 2 reachable nodes. Wait for Alfred registry refresh and retry.',
@@ -469,7 +771,7 @@ def coordinate_radio_toggle(node_ip, iface, state):
         'issued_by': get_my_hostname(),
         'issued_at': int(time.time()),
         'activate_at': 0,
-        'targets': targets,
+        'targets': 'all',
         'desired': {iface: state},
     }
     pkg['version'] = make_radio_version(pkg)
@@ -512,7 +814,7 @@ def coordinate_radio_toggle(node_ip, iface, state):
         'activate_at': activate_at,
         'acked': sorted(ack_state['acks'].keys()),
         'expected': expected,
-        'targets': targets,
+        'targets': 'all',
     }
 
 def get_iw_info(iface):
@@ -530,6 +832,12 @@ def get_iw_info(iface):
             info['txpower_dbm'] = m.group(1)
     except Exception:
         pass
+    cap = get_iface_txpower_cap(iface)
+    if cap:
+        info['txpower_cap_dbm'] = cap
+        info['txpower_options_dbm'] = txpower_choices_from_cap(cap)
+    else:
+        info['txpower_options_dbm'] = []
 
     # HaLow (morse_usb): iw can report a regular Wi-Fi channel; Morse driver is the runtime source.
     if iface == 'wlan2':
@@ -557,6 +865,11 @@ def build_topology():
         hostname = nd.get('HOSTNAME', 'unknown')
         ip       = nd.get('IPV4_ADDRESS', '')
         is_me    = (hostname == my_host)
+        mcs_map = {
+            'wlan0': {'tx_mcs': nd.get('WIFI_24_TX_MCS', ''), 'rx_mcs': nd.get('WIFI_24_RX_MCS', '')},
+            'wlan1': {'tx_mcs': nd.get('WIFI_5_TX_MCS', ''), 'rx_mcs': nd.get('WIFI_5_RX_MCS', '')},
+            'wlan2': {'tx_mcs': nd.get('HALOW_TX_MCS', ''), 'rx_mcs': nd.get('HALOW_RX_MCS', '')},
+        }
 
         node_info = {
             'id':       nid,
@@ -564,26 +877,41 @@ def build_topology():
             'ip':       ip,
             'is_me':    is_me,
             'is_gateway': nd.get('IS_GATEWAY', 'false').lower() == 'true',
+            'gateway_iface': nd.get('GATEWAY_IFACE', ''),
             'battery':  nd.get('BATTERY_PERCENTAGE', ''),
-            'uptime':   nd.get('UPTIME_SECONDS', ''),
+            'uptime':   fmt_uptime(nd.get('UPTIME_SECONDS', '')),
         }
 
         if is_me:
+            live_battery = get_local_battery_percentage()
+            if live_battery:
+                node_info['battery'] = live_battery
+            live_uptime = get_local_uptime()
+            if live_uptime:
+                node_info['uptime'] = live_uptime
             node_info['interfaces'] = {
-                'wlan0': {'active': 'wlan0' in active_ifaces, **iw_wlan0},
-                'wlan1': {'active': 'wlan1' in active_ifaces, **iw_wlan1},
-                'wlan2': {'active': 'wlan2' in active_ifaces, **iw_wlan2},
+                'wlan0': {'active': 'wlan0' in active_ifaces, **iw_wlan0, **mcs_map['wlan0']},
+                'wlan1': {'active': 'wlan1' in active_ifaces, **iw_wlan1, **mcs_map['wlan1']},
+                'wlan2': {'active': 'wlan2' in active_ifaces, **iw_wlan2, **mcs_map['wlan2']},
             }
         else:
             # Fetch from remote node's /api/local via peer proxy
             try:
                 local = call_node_api(ip, '/api/local')
+                live_battery = local.get('battery')
+                if isinstance(live_battery, dict) and live_battery.get('percentage') is not None:
+                    node_info['battery'] = str(live_battery.get('percentage'))
                 ifaces_raw = local.get('interfaces', [])
                 node_info['interfaces'] = {
                     i['name']: {
                         'active': i.get('health') == 'ok' and i.get('role') == 'mesh',
                         'channel': i.get('channel', ''),
                         'freq_mhz': i.get('freq_mhz', ''),
+                        'txpower_dbm': i.get('txpower_dbm', ''),
+                        'txpower_cap_dbm': i.get('txpower_cap_dbm', ''),
+                        'txpower_options_dbm': i.get('txpower_options_dbm', []),
+                        'tx_mcs': mcs_map.get(i['name'], {}).get('tx_mcs', ''),
+                        'rx_mcs': mcs_map.get(i['name'], {}).get('rx_mcs', ''),
                         'halow_bw': i.get('halow_bw', ''),
                         'halow_source': i.get('halow_source', ''),
                     }
@@ -658,25 +986,16 @@ def session_to_csv(label):
         'timestamp', 'session_label', 'test_type',
         'src_node', 'dst_node',
         'active_interfaces', 'halow_channel', 'halow_bw',
+        'hop_count', 'hop_count_source',
         'tcp_mbps', 'udp_mbps', 'jitter_ms', 'loss_pct',
         'rtt_avg_ms', 'rtt_min_ms', 'rtt_max_ms',
     ])
     for r in results:
         iperf = r.get('iperf3_result', {})
         ping  = r.get('ping_result', {})
-        # Extract iperf3 metrics
-        tcp_mbps = udp_mbps = jitter = loss = None
-        try:
-            end = iperf.get('end', {})
-            if 'sum_received' in end:
-                tcp_mbps = round(end['sum_received']['bits_per_second'] / 1e6, 2)
-            if 'sum' in end:
-                s = end['sum']
-                udp_mbps = round(s.get('bits_per_second', 0) / 1e6, 2)
-                jitter   = round(s.get('jitter_ms', 0), 3)
-                loss     = round(s.get('lost_percent', 0), 2)
-        except Exception:
-            pass
+        metrics = extract_iperf3_metrics(iperf)
+        ping_loss = ping.get('loss_pct', '') if ping else ''
+        loss_value = metrics['loss_pct'] if metrics['loss_pct'] is not None else ping_loss
         writer.writerow([
             r.get('timestamp', ''),
             r.get('session_label', ''),
@@ -686,10 +1005,12 @@ def session_to_csv(label):
             ','.join(r.get('active_interfaces', [])),
             r.get('halow_channel', ''),
             r.get('halow_bw', ''),
-            tcp_mbps or '',
-            udp_mbps or '',
-            jitter or '',
-            loss or (ping.get('loss_pct', '') if ping else ''),
+            r.get('hop_count', ''),
+            r.get('hop_count_source', ''),
+            '' if metrics['tcp_mbps'] is None else metrics['tcp_mbps'],
+            '' if metrics['udp_mbps'] is None else metrics['udp_mbps'],
+            '' if metrics['jitter_ms'] is None else metrics['jitter_ms'],
+            loss_value,
             ping.get('rtt_avg', '') if ping else '',
             ping.get('rtt_min', '') if ping else '',
             ping.get('rtt_max', '') if ping else '',
@@ -756,26 +1077,16 @@ def summarize_measurement_result(record):
 
     iperf = record.get('iperf3_result') or {}
     ping = record.get('ping_result') or {}
-    try:
-        end = iperf.get('end', {})
-        if 'sum_received' in end:
-            summary['tcp_mbps'] = round(end['sum_received'].get('bits_per_second', 0) / 1e6, 2)
-        if 'sum_sent' in end and 'tcp_mbps' not in summary:
-            summary['tcp_mbps'] = round(end['sum_sent'].get('bits_per_second', 0) / 1e6, 2)
-        if 'sum' in end:
-            s = end['sum']
-            if s.get('bits_per_second') is not None:
-                summary['udp_mbps'] = round(s.get('bits_per_second', 0) / 1e6, 2)
-            if s.get('jitter_ms') is not None:
-                summary['jitter_ms'] = round(s.get('jitter_ms', 0), 3)
-            if s.get('lost_percent') is not None:
-                summary['loss_pct'] = round(s.get('lost_percent', 0), 2)
-    except Exception:
-        pass
+    metrics = extract_iperf3_metrics(iperf)
+    for key, value in metrics.items():
+        if value is not None:
+            summary[key] = value
 
     for key in ('rtt_avg', 'rtt_min', 'rtt_max', 'loss_pct'):
         if ping.get(key) is not None:
             summary[key] = ping.get(key)
+    if record.get('hop_count') is not None:
+        summary['hop_count'] = record.get('hop_count')
     return summary
 
 def run_measurement_session(label, pairs, tests, duration, udp_bitrate):
@@ -827,7 +1138,12 @@ def run_measurement_session(label, pairs, tests, duration, udp_bitrate):
                     'ch_2g':            topo['ch_2g'],
                     'gps_source':       None,
                     'gps_destination':  None,
+                    'hop_count':        None,
+                    'hop_count_source': '',
                 }
+                hop_count, hop_source = get_session_hop_count(src_ip, dst_ip)
+                result_record['hop_count'] = hop_count
+                result_record['hop_count_source'] = hop_source
 
                 if test_type == 'icmp_ping':
                     # Run ping locally toward dst
@@ -891,6 +1207,93 @@ def run_measurement_session(label, pairs, tests, duration, udp_bitrate):
             _measure_status['error']    = str(e)
             _measure_status['done']     = done
 
+
+def run_upload_github_job():
+    repo_dir = '/home/radio/manet-dev'
+    meas_src = SESSIONS_DIR
+    meas_dst = os.path.join(repo_dir, 'measurements')
+    try:
+        update_upload_status(phase='sync', progress='Syncing measurements into repo...', percent=10)
+        subprocess.run(['rsync', '-a', meas_src + '/', meas_dst + '/'],
+                       check=True, timeout=60)
+
+        update_upload_status(phase='git-add', progress='Staging measurement files...', percent=35)
+        subprocess.run(['git', '-C', repo_dir, 'add', 'measurements/'],
+                       check=True, timeout=15)
+
+        update_upload_status(phase='git-commit', progress='Creating git commit...', percent=55)
+        ts = datetime.now().strftime('%Y-%m-%d %H:%M')
+        commit = subprocess.run(['git', '-C', repo_dir, 'commit', '-m',
+                                 f'measurements: add results {ts}'],
+                                capture_output=True, text=True, timeout=15)
+        if commit.returncode != 0:
+            commit_out = (commit.stderr or commit.stdout or '').lower()
+            if 'nothing to commit' not in commit_out:
+                raise subprocess.CalledProcessError(
+                    commit.returncode, commit.args, output=commit.stdout, stderr=commit.stderr
+                )
+
+        update_upload_status(phase='git-push', progress='Pushing measurements to GitHub...', percent=80)
+        subprocess.run(['git', '-C', repo_dir, 'push'],
+                       check=True, timeout=120)
+        finish_upload_status(True, progress='Uploaded measurements to GitHub')
+    except subprocess.CalledProcessError as e:
+        finish_upload_status(False, error=str(e))
+    except Exception as e:
+        finish_upload_status(False, error=str(e))
+
+
+def run_upload_ventum_job():
+    archive = ''
+    try:
+        conf = load_kv_file('/etc/mesh.conf')
+        ventum_url = conf.get('ventum_upload_url', 'https://manet.ventum.hr/upload/rpi5/measurements')
+        ventum_auth = conf.get('ventum_auth', '')
+        if not ventum_auth:
+            user = conf.get('ventum_user', 'clanker')
+            password = conf.get('ventum_password', 'really-strong-password-321')
+            ventum_auth = f'{user}:{password}'
+
+        ts = datetime.now().strftime('%Y%m%dT%H%M%S')
+        host = get_my_hostname()
+        archive = f'/tmp/manet-measurements-{host}-{ts}.tar.gz'
+        remote_name = os.path.basename(archive)
+        upload_url = ventum_url.rstrip('/') + '/' + remote_name
+
+        update_upload_status(phase='pack', progress='Packing measurements archive...', percent=15)
+        subprocess.run(
+            ['tar', '-C', os.path.dirname(SESSIONS_DIR),
+             '-czf', archive, os.path.basename(SESSIONS_DIR)],
+            check=True, timeout=120
+        )
+        total = os.path.getsize(archive) if os.path.exists(archive) else 0
+        update_upload_status(
+            phase='upload',
+            progress='Uploading archive to Ventum...',
+            bytes_total=total,
+            bytes_sent=0,
+            percent=55,
+            file=remote_name,
+            url=upload_url,
+        )
+
+        subprocess.run(
+            ['curl', '-fS', '-u', ventum_auth, '-T', archive, upload_url],
+            check=True, timeout=300
+        )
+        update_upload_status(bytes_sent=total, percent=95)
+        finish_upload_status(True, progress='Uploaded measurements to Ventum', file=remote_name, url=upload_url)
+    except subprocess.CalledProcessError as e:
+        finish_upload_status(False, error=str(e))
+    except Exception as e:
+        finish_upload_status(False, error=str(e))
+    finally:
+        if archive:
+            try:
+                os.remove(archive)
+            except Exception:
+                pass
+
 # ─────────────────────────────────────────────────────────────────────────────
 # HTML
 # ─────────────────────────────────────────────────────────────────────────────
@@ -904,16 +1307,17 @@ CSS = """
   --border2: #e7e2da;
   --accent:  #00003f;
   --accent2: #ecb000;
+  --info:    #00003f;
+  --warn:    #ecb000;
   --fer-yellow:#ecb000;
   --fer-black:#02000d;
   --green:   #16a34a;
-  --orange:  #d97706;
+  --orange:  #8a6a00;
   --red:     #dc2626;
-  --purple:  #00003f;
   --text:    #02000d;
   --muted:   #615f68;
   --shadow:  0 18px 50px rgba(2,0,13,.10);
-  --font:    Roobert, Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font:    Roobert, Arial, sans-serif;
 }
 :root[data-theme="dark"] {
   --bg:      #02000d;
@@ -922,8 +1326,10 @@ CSS = """
   --panel:   #0b0a12;
   --border:  #34313b;
   --border2: #24212b;
-  --accent:  #ecb000;
+  --accent:  #00003f;
   --accent2: #ecb000;
+  --info:    #9fa8ff;
+  --warn:    #ecb000;
   --text:    #f8f6ef;
   --muted:   #aaa5b2;
   --shadow:  0 18px 50px rgba(0,0,0,.36);
@@ -935,20 +1341,20 @@ body{font-feature-settings:"cv02","cv03","cv04","cv11"}
 body::before{display:none}
 body{
   background:
-    linear-gradient(135deg, rgba(236,176,0,.22) 0 9px, transparent 9px 72px),
-    linear-gradient(160deg, transparent 0 60%, rgba(0,0,63,.08) 60% 74%, transparent 74%),
+    radial-gradient(circle at top left, rgba(236,176,0,.16), transparent 34%),
+    linear-gradient(160deg, transparent 0 56%, rgba(0,0,63,.05) 56% 70%, transparent 70%),
     var(--bg);
 }
 
 /* header */
-#hdr{background:rgba(255,255,255,.92);backdrop-filter:blur(18px);border-bottom:1px solid var(--border2);padding:0 22px;min-height:58px;display:flex;align-items:center;gap:18px;position:sticky;top:0;z-index:100;box-shadow:0 1px 0 rgba(2,0,13,.05);transition:min-height .18s ease,padding .18s ease,gap .18s ease}
-#hdr::after{content:'';position:absolute;left:0;right:0;bottom:0;height:3px;background:linear-gradient(90deg,var(--fer-yellow) 0 33%,transparent 33%);pointer-events:none}
+#hdr{background:rgba(255,255,255,.94);backdrop-filter:blur(18px);border-bottom:1px solid var(--border2);padding:0 22px;min-height:58px;display:flex;align-items:center;gap:10px;position:sticky;top:0;z-index:100;box-shadow:0 1px 0 rgba(2,0,13,.05);transition:min-height .18s ease,padding .18s ease,gap .18s ease}
+#hdr::after{content:'';position:absolute;left:0;right:0;bottom:0;height:2px;background:linear-gradient(90deg,rgba(236,176,0,.92) 0 36%,rgba(236,176,0,.28) 36% 68%,transparent 68%);pointer-events:none}
 :root[data-theme="dark"] #hdr{background:rgba(18,17,24,.92)}
-.fer-lockup{display:flex;align-items:center;height:34px;min-width:82px;padding-right:14px;border-right:1px solid var(--border)}
-.fer-logo-img{display:block;width:82px;max-height:22px;object-fit:contain;transition:width .18s ease,max-height .18s ease}
-:root[data-theme="dark"] .fer-logo-img{filter:invert(1) brightness(1.18)}
-.fer-logo-fallback{display:none;align-items:center;height:28px;padding:0 10px;background:var(--fer-yellow);color:var(--fer-black);border-radius:4px;font-size:15px;font-weight:900}
-#hdr-logo{color:var(--text);font-size:17px;letter-spacing:0;font-weight:900}
+.fer-lockup{display:flex;align-items:center;justify-content:flex-start;height:58px;min-width:clamp(104px,18vw,172px);width:clamp(104px,18vw,172px);padding-right:8px;border-right:1px solid var(--border);color:var(--fer-black);overflow:hidden;flex:0 0 auto}
+.fer-logo-img{display:block;width:clamp(104px,18vw,172px);height:48px;max-width:none;object-fit:contain;object-position:left center;filter:none;transition:width .18s ease,height .18s ease,filter .18s ease}
+:root[data-theme="dark"] .fer-lockup{color:#ffffff}
+:root[data-theme="dark"] .fer-logo-img{filter:brightness(0) invert(1)}
+#hdr-logo{color:var(--text);font-size:17px;letter-spacing:0;font-weight:900;display:flex;align-items:center;min-height:46px;line-height:1}
 #hdr-logo span{color:var(--accent2)}
 #hdr-node{font-size:12px;color:var(--muted);border-left:1px solid var(--border);padding-left:16px;transition:opacity .18s ease,max-width .18s ease,padding .18s ease,border .18s ease}
 #hdr-node strong{color:var(--text)}
@@ -959,24 +1365,29 @@ body{
 #hdr-clock{color:var(--muted);font-size:11px}
 .theme-toggle{border:1px solid var(--accent2);background:rgba(236,176,0,.10);color:var(--text);border-radius:999px;padding:6px 10px;font-family:var(--font);font-size:11px;font-weight:850;cursor:pointer;min-width:74px}
 .theme-toggle:hover{background:var(--accent2);color:var(--fer-black);box-shadow:0 8px 22px rgba(236,176,0,.20)}
+.overview-link-btn{border:1px solid var(--accent2);background:var(--accent2);color:var(--fer-black);border-radius:999px;padding:6px 12px;font-family:var(--font);font-size:11px;font-weight:850;cursor:pointer;min-width:92px;transition:background .18s ease,color .18s ease,box-shadow .18s ease,transform .18s ease;box-shadow:0 8px 20px rgba(236,176,0,.16)}
+.overview-link-btn:hover{background:#f6c62f;color:var(--fer-black);box-shadow:0 10px 24px rgba(236,176,0,.26);transform:translateY(-1px)}
+:root[data-theme="dark"] .overview-link-btn{background:var(--accent2);color:var(--fer-black);border-color:var(--accent2)}
+:root[data-theme="dark"] .overview-link-btn:hover{background:#f6c62f;color:var(--fer-black);box-shadow:0 10px 24px rgba(236,176,0,.28)}
 
 /* sidebar nav */
 #page{display:flex;min-height:calc(100vh - 58px)}
 #nav{background:var(--surface);border-right:1px solid var(--border2);width:160px;flex:0 0 160px;display:flex;flex-direction:column;padding:12px 0;position:sticky;top:58px;height:calc(100vh - 58px);overflow-y:auto;z-index:90;transition:top .18s ease}
-.tab{padding:11px 20px;cursor:pointer;font-size:12px;font-weight:700;letter-spacing:0;color:var(--muted);border-left:3px solid transparent;text-transform:none;transition:all .15s;white-space:nowrap}
-.tab:hover{color:var(--text);background:var(--panel)}
-.tab.active{color:var(--accent);border-left-color:var(--accent);background:var(--panel)}
+.tab{padding:11px 20px;cursor:pointer;font-size:12px;font-weight:700;letter-spacing:0;color:var(--muted);border-left:none;border-bottom:2px solid transparent;text-transform:none;transition:color .15s ease,border-color .15s ease,background .15s ease;white-space:nowrap}
+.tab:hover{color:var(--text);background:color-mix(in srgb, var(--panel) 92%, transparent)}
+.tab.active{color:var(--text);border-bottom-color:var(--fer-yellow);background:transparent}
 .tab.active::after{display:none}
 
 /* layout */
 #content{padding:22px;max-width:1120px;width:100%;flex:1;min-width:0;position:relative}
-#content::before{content:'';display:block;height:44px;margin:-22px -22px 18px;background:
-  linear-gradient(104deg,transparent 0 36%,rgba(236,176,0,.42) 36% 41%,transparent 41%);
+#content::before{content:'';display:block;height:36px;margin:-22px -22px 18px;background:
+  linear-gradient(90deg, rgba(236,176,0,.24) 0 12%, transparent 12% 100%);
   border-bottom:1px solid var(--border2);transition:height .18s ease,margin .18s ease,opacity .18s ease}
 :root[data-theme="dark"] #content::before{background:
-  linear-gradient(104deg,transparent 0 36%,rgba(236,176,0,.46) 36% 41%,transparent 41%)}
-body.chrome-compact #hdr{min-height:46px;gap:14px}
-body.chrome-compact .fer-logo-img{width:70px;max-height:18px}
+  linear-gradient(90deg, rgba(236,176,0,.28) 0 12%, transparent 12% 100%)}
+body.chrome-compact #hdr{min-height:50px;gap:14px}
+  body.chrome-compact .fer-lockup{min-width:clamp(96px,18vw,140px);width:clamp(96px,18vw,140px);height:44px}
+  body.chrome-compact .fer-logo-img{width:clamp(96px,18vw,140px);height:36px}
 body.chrome-compact #hdr-node{opacity:0;max-width:0;padding-left:0;border-left:0;overflow:hidden;white-space:nowrap}
 body.chrome-compact #nav{top:46px;height:calc(100vh - 46px)}
 body.chrome-compact #content::before{height:8px;margin:-22px -22px 12px;opacity:.72}
@@ -1024,8 +1435,8 @@ input[type=checkbox]{width:15px;height:15px;accent-color:var(--accent)}
 .badge{padding:3px 8px;font-size:10px;font-weight:750;letter-spacing:0;border:1px solid;border-radius:999px}
 .b-on {color:var(--text); border-color:rgba(22,163,74,.34);background:rgba(22,163,74,.07)}
 .b-off{color:var(--muted); border-color:var(--border);background:#f7f8fa}
-.b-gw {color:#8a4b07;border-color:#f3d29a;background:#fff7ed}
-.b-me {color:#3b2e7e;border-color:#d7cdfa;background:#f5f3ff}
+.b-gw {color:var(--fer-black);border-color:rgba(236,176,0,.48);background:rgba(236,176,0,.14)}
+.b-me {color:var(--info);border-color:rgba(0,0,63,.22);background:rgba(0,0,63,.08)}
 
 /* table */
 table{width:100%;border-collapse:collapse}
@@ -1039,8 +1450,8 @@ tr:hover td{background:rgba(236,176,0,.08)}
 .node-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(220px,100%),1fr));gap:12px;padding:16px}
 .node-card{background:var(--card);border:1px solid var(--border2);border-radius:8px;padding:14px;position:relative;transition:border .15s,box-shadow .15s}
 .node-card:hover{border-color:var(--border);box-shadow:0 10px 26px rgba(18,24,38,.07)}
-.node-card.is-me{border-color:#d7cdfa}
-.node-card.is-gw{border-color:#f3d29a}
+.node-card.is-me{border-color:rgba(0,0,63,.28);box-shadow:0 10px 26px rgba(0,0,63,.08)}
+.node-card.is-gw{border-color:rgba(236,176,0,.5);box-shadow:0 10px 26px rgba(236,176,0,.12)}
 .node-name{font-size:14px;font-weight:700;margin-bottom:4px;color:var(--text)}
 .node-ip{font-size:10px;color:var(--muted);margin-bottom:8px}
 .node-ifaces{display:flex;gap:4px;flex-wrap:wrap;margin-bottom:8px}
@@ -1097,20 +1508,20 @@ tr:hover td{background:rgba(236,176,0,.08)}
 #msg{padding:10px 16px;font-size:12px;display:none;margin-bottom:16px;border-left:3px solid;letter-spacing:.3px}
 #msg.ok  {border-color:var(--green);color:#136c36;background:#ecfdf3;display:block}
 #msg.err {border-color:var(--red);  color:#b42318;background:#fff5f5;display:block}
-#msg.info{border-color:var(--accent);color:var(--accent);background:#eff6ff;display:block}
+#msg.info{border-color:var(--info);color:var(--info);background:rgba(0,0,63,.06);display:block}
 
 /* foreground overlay */
-#overlay{position:fixed;left:50%;top:18px;transform:translate(-50%,-130%);z-index:10000;width:min(520px,calc(100vw - 24px));background:var(--surface);border:1px solid var(--accent);border-radius:8px;box-shadow:0 18px 60px rgba(2,0,13,.22);opacity:0;transition:transform .18s ease,opacity .18s ease;pointer-events:none}
+#overlay{position:fixed;left:50%;top:18px;transform:translate(-50%,-130%);z-index:10000;width:min(520px,calc(100vw - 24px));background:var(--surface);border:1px solid var(--info);border-radius:8px;box-shadow:0 18px 60px rgba(2,0,13,.22);opacity:0;transition:transform .18s ease,opacity .18s ease;pointer-events:none}
 #overlay.show{transform:translate(-50%,0);opacity:1;pointer-events:auto}
 #overlay.ok{border-color:#b8e6c8}
 #overlay.err{border-color:#f3b6b1}
-#overlay.info{border-color:var(--accent)}
+#overlay.info{border-color:var(--info)}
 .overlay-body{display:flex;align-items:flex-start;gap:10px;padding:12px 14px}
 #overlay-text{flex:1;font-size:12px;line-height:1.35;overflow-wrap:anywhere}
 #overlay-close{background:transparent;border:0;color:var(--muted);font-family:var(--font);font-size:18px;line-height:1;cursor:pointer;padding:0 2px}
 #overlay.ok #overlay-text{color:var(--green)}
 #overlay.err #overlay-text{color:var(--red)}
-#overlay.info #overlay-text{color:var(--accent)}
+#overlay.info #overlay-text{color:var(--info)}
 
 /* session list */
 .session-row{display:flex;align-items:center;gap:12px;padding:10px 16px;border-bottom:1px solid var(--border2);flex-wrap:wrap}
@@ -1128,12 +1539,23 @@ tr:hover td{background:rgba(236,176,0,.08)}
 .upload-info{flex:1}
 .upload-title{font-size:13px;margin-bottom:2px}
 .upload-sub{font-size:10px;color:var(--muted);letter-spacing:.3px}
+.upload-status{display:none;margin:12px 16px 0;padding:12px;border:1px solid var(--border2);border-radius:8px;background:var(--card)}
+.upload-status-title{font-size:10px;font-weight:800;color:var(--muted);letter-spacing:.4px}
+.upload-status-text{margin-top:6px;font-size:11px;font-weight:700}
+.upload-status-meta{margin-top:4px;font-size:10px;color:var(--muted);line-height:1.4}
+.upload-status-bar{margin-top:8px;height:8px;border-radius:999px;background:var(--border2);overflow:hidden}
+.upload-status-fill{height:100%;width:0;background:var(--accent2);transition:width .18s ease}
+.footer-actions{display:flex;justify-content:flex-end;padding:8px 0 6px}
+.logout-link-btn{border:1px solid rgba(180,35,24,.26);background:rgba(180,35,24,.05);color:#b42318;border-radius:999px;padding:8px 14px;font-family:var(--font);font-size:11px;font-weight:850;cursor:pointer;transition:background .18s ease,color .18s ease,box-shadow .18s ease,transform .18s ease}
+.logout-link-btn:hover{background:#b42318;color:#ffffff;box-shadow:0 8px 20px rgba(180,35,24,.16);transform:translateY(-1px)}
+:root[data-theme="dark"] .logout-link-btn{border-color:rgba(239,68,68,.34);background:rgba(239,68,68,.08);color:#ffb4b4}
+:root[data-theme="dark"] .logout-link-btn:hover{background:#ef4444;color:#ffffff;box-shadow:0 8px 20px rgba(239,68,68,.22)}
 
 @media (max-width: 620px) {
   html,body{font-size:12px}
-  #hdr{position:relative;padding:10px 12px;gap:8px;align-items:flex-start;flex-wrap:wrap}
-  .fer-lockup{order:1;min-width:66px;height:28px;padding-right:8px}
-  .fer-logo-img{width:66px;max-height:18px}
+  #hdr{position:relative;padding:10px 12px;gap:6px;align-items:flex-start;flex-wrap:wrap}
+  .fer-lockup{order:1;min-width:clamp(92px,24vw,132px);width:clamp(92px,24vw,132px);height:46px;padding-right:4px}
+  .fer-logo-img{width:clamp(92px,24vw,132px);height:38px}
   #hdr-logo{order:2;font-size:16px;letter-spacing:0;flex:1;min-width:140px}
   #hdr-node{order:3;flex:0 0 100%;border-left:0;padding-left:0;font-size:10px;max-width:100%;overflow-wrap:anywhere}
   #hdr-right{order:4;flex:0 0 100%;margin-left:0;width:100%;justify-content:flex-start;gap:8px;flex-wrap:wrap}
@@ -1143,7 +1565,7 @@ tr:hover td{background:rgba(236,176,0,.08)}
   #page{flex-direction:column}
   #nav{width:100%;flex:0 0 auto;display:grid;grid-template-columns:repeat(3,1fr);position:static;height:auto;border-right:none;border-bottom:1px solid var(--border2);padding:0;overflow:visible;top:auto}
   .tab{padding:9px 4px;font-size:10px;white-space:nowrap;text-align:center;border-left:none;border-bottom:3px solid transparent;box-sizing:border-box;overflow:hidden;text-overflow:ellipsis}
-  .tab.active{border-left-color:transparent;border-bottom-color:var(--accent)}
+  .tab.active{border-left-color:transparent;border-bottom-color:var(--fer-yellow);background:transparent}
   #content{padding:10px}
   .card{margin-bottom:10px}
   .card-title{padding:9px 10px;letter-spacing:1px}
@@ -1193,11 +1615,17 @@ let _pollTimer = null;
 let _overlayTimer = null;
 let _autoRefreshTimer = null;
 let _autoRefreshBusy = false;
-const VALID_TABS = ['topology','interfaces','radio','measure','sessions','upload'];
+const VALID_TABS = ['topology','radio','measure','sessions','upload'];
 const AUTO_REFRESH_MS = 15000;
 const THEME_KEY = 'manetUiTheme';
 
 function preferredTheme() {
+  const params = new URLSearchParams(window.location.search);
+  const forced = params.get('theme');
+  if (forced === 'dark' || forced === 'light') {
+    try { localStorage.setItem(THEME_KEY, forced); } catch(e) {}
+    return forced;
+  }
   try {
     const saved = localStorage.getItem(THEME_KEY);
     if (saved === 'dark' || saved === 'light') return saved;
@@ -1209,6 +1637,9 @@ function setTheme(theme) {
   document.documentElement.dataset.theme = theme;
   const btn = document.getElementById('theme-toggle');
   if (btn) btn.textContent = theme === 'dark' ? 'Light' : 'Dark';
+  document.querySelectorAll('.fer-logo-img[data-light][data-dark]').forEach(img => {
+    img.src = theme === 'dark' ? img.dataset.dark : img.dataset.light;
+  });
 }
 
 function toggleTheme() {
@@ -1224,6 +1655,7 @@ async function fetchTopo() {
     const r = await fetch('/api/topology');
     _topo = await r.json();
     renderTopology();
+    buildHalowConfig();
     updatePairs();
   } catch(e) { showMsg('Topology fetch failed: ' + e, 'err'); }
 }
@@ -1239,7 +1671,7 @@ async function autoRefreshUi() {
   _autoRefreshBusy = true;
   try {
     await fetchTopo();
-    if (_tab === 'interfaces') buildIfaceControl();
+    if (_tab === 'radio') buildIfaceControl();
     if (_tab === 'sessions') await loadSessions();
   } finally {
     _autoRefreshBusy = false;
@@ -1298,6 +1730,85 @@ function setButtonBusy(id, busy, label, idleLabel) {
   btn.textContent = busy ? label : idleLabel;
 }
 
+function normalizeDbm(value) {
+  const num = parseFloat(value);
+  if (!Number.isFinite(num)) return '';
+  return Number.isInteger(num) ? String(num) : String(num.toFixed(1)).replace(/[.]0$/, '');
+}
+
+const HALOW_BW_TXPOWER_CAPS = { '1MHz': '24', '2MHz': '24', '4MHz': '22' };
+
+function txPowerOptionsForCap(cap) {
+  const num = parseFloat(cap);
+  if (!Number.isFinite(num) || num < 1) return [];
+  const out = [];
+  for (let v = Math.floor(num); v >= 1; v--) out.push(String(v));
+  return out;
+}
+
+function txPowerOptions(info) {
+  const opts = Array.isArray(info?.txpower_options_dbm) ? info.txpower_options_dbm.map(normalizeDbm).filter(Boolean) : [];
+  const cur = normalizeDbm(info?.txpower_dbm);
+  if (cur && !opts.includes(cur)) opts.push(cur);
+  opts.sort((a, b) => parseFloat(a) - parseFloat(b));
+  return opts;
+}
+
+function renderTxPowerSelect(id, info) {
+  const opts = txPowerOptions(info);
+  if (!opts.length) {
+    const cur = normalizeDbm(info?.txpower_dbm) || '';
+    return `<input id="${id}" type="number" min="1" max="30" step="1" value="${cur}" style="width:60px" placeholder="dBm">`;
+  }
+  const current = normalizeDbm(info?.txpower_dbm) || opts[opts.length - 1];
+  return `<select id="${id}">` +
+    opts.map(v => `<option value="${v}"${v === current ? ' selected' : ''}>${v} dBm</option>`).join('') +
+    `</select>`;
+}
+
+function updateHalowTxpowerOptions(preferredValue = '') {
+  const bwEl = document.getElementById('halow-bw');
+  let select = document.getElementById('txpwr-all-wlan2');
+  if (!bwEl || !select) return;
+
+  const bw = bwEl.value || '1MHz';
+  const cap = normalizeDbm(HALOW_BW_TXPOWER_CAPS[bw]);
+  const opts = txPowerOptionsForCap(cap);
+  if (!opts.length) {
+    select.outerHTML = `<select id="txpwr-all-wlan2" disabled><option value="">n/a</option></select>`;
+    return;
+  }
+
+  const prevVal = normalizeDbm(preferredValue || select.value);
+  const prevCap = normalizeDbm(select.dataset.cap);
+  let nextVal = opts[0];
+
+  if (prevVal && opts.includes(prevVal)) {
+    nextVal = prevVal;
+  } else if (prevVal && prevCap && prevVal === prevCap) {
+    nextVal = cap;
+  }
+
+  select.outerHTML = `<select id="txpwr-all-wlan2" data-cap="${cap}">` +
+    opts.map(v => `<option value="${v}"${v === nextVal ? ' selected' : ''}>${v} dBm</option>`).join('') +
+    `</select>`;
+}
+
+function getNodeInfo(nodeIp, iface) {
+  if (!_topo || !_topo.nodes) return {};
+  const node = _topo.nodes.find(n => n.ip === nodeIp || (nodeIp === 'all' && n.is_me));
+  if (!node || !node.interfaces) return {};
+  return node.interfaces[iface] || {};
+}
+
+function syncSelectValue(id, value) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  const normalized = value == null ? '' : String(value);
+  const hasOption = Array.from(el.options || []).some(opt => opt.value === normalized);
+  if (hasOption) el.value = normalized;
+}
+
 function radioTargetNodes(nodeIp) {
   if (!_topo || !_topo.nodes) return [];
   if (nodeIp === 'all') return _topo.nodes;
@@ -1346,7 +1857,7 @@ async function verifyRadioExecution(nodeIp, iface, state, activateAt) {
     const nodes = radioTargetNodes(nodeIp);
     const result = radioStateOk(nodes, iface, state);
     if (nodes.length && result.ok) {
-      buildIfaceControl();
+      if (_tab === 'radio') buildIfaceControl();
       const scope = nodeIp === 'all' ? 'all nodes' : (nodes[0].hostname || nodeIp);
       showOverlay(`${iface} ${state} executed on ${scope}`, 'ok');
       showMsg(`${iface} ${state} executed on ${scope}`, 'ok');
@@ -1440,14 +1951,16 @@ function showTab(name, updateUrl = true) {
   document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
   document.querySelectorAll('.tab-pane').forEach(p => p.style.display = p.id === 'tab-' + name ? '' : 'none');
   if (name === 'sessions') loadSessions();
+  if (name === 'radio') buildIfaceControl();
 }
 
 // ── Clock ──
-function tickClock() {
+function tickLocalTime() {
   const el = document.getElementById('hdr-clock');
-  if (el) el.textContent = new Date().toLocaleString('hr-HR', {hour12:false}).replace(',','');
+  if (el) el.textContent = new Date().toLocaleTimeString('en-US', {hour:'2-digit', minute:'2-digit', second:'2-digit', hour12:false});
 }
-setInterval(tickClock, 1000); tickClock();
+setInterval(tickLocalTime, 1000);
+tickLocalTime();
 
 // ── Topology tab ──
 function renderTopology() {
@@ -1461,12 +1974,13 @@ function renderTopology() {
       const on = info.active === true;
       const band = i === 'wlan0' ? '2.4G' : i === 'wlan1' ? '5G' : 'HaLow';
       const ch = info.channel ? ` ch${info.channel}` : (info.freq_mhz ? ` ${Math.round(info.freq_mhz)}MHz` : '');
-      return `<span class="iface-chip ${on ? 'iface-on' : 'iface-off'}">${band}${on ? ch : ' OFF'}</span>`;
+      const mcs = on && (info.tx_mcs || info.rx_mcs) ? ` · ${info.tx_mcs || '-'} / ${info.rx_mcs || '-'}` : '';
+      return `<span class="iface-chip ${on ? 'iface-on' : 'iface-off'}">${band}${on ? ch : ' OFF'}${mcs}</span>`;
     }).join('');
     const bat = node.battery ? `<div class="node-battery">BAT ${node.battery}%</div>` : '';
     const tags = [
       node.is_me ? '<span class="badge b-me" style="font-size:9px">ME</span>' : '',
-      node.is_gateway ? '<span class="badge b-gw" style="font-size:9px">GW</span>' : '',
+      node.is_gateway ? `<span class="badge b-gw" style="font-size:9px">GW${node.gateway_iface ? '·' + node.gateway_iface : ''}</span>` : '',
     ].filter(Boolean).join('');
     const cls = [node.is_me ? 'is-me' : '', node.is_gateway ? 'is-gw' : ''].join(' ');
     grid.innerHTML += `<div class="node-card ${cls}">
@@ -1481,8 +1995,7 @@ function renderTopology() {
   const inet = document.getElementById('hdr-inet');
   if (_topo.internet) { inet.textContent = '● INET OK'; inet.className = 'ok'; }
   else { inet.textContent = '○ NO INET'; inet.className = 'no'; }
-  document.getElementById('upload-github').disabled = !_topo.internet;
-  document.getElementById('upload-ventum').disabled = !_topo.internet;
+  setUploadButtons(false);
 }
 
 // ── Interface control tab ──
@@ -1494,7 +2007,7 @@ function buildIfaceControl() {
     const ifaces = node.interfaces || {};
     const card = document.createElement('div');
     card.className = 'card';
-    const BANDS = {wlan0: '2.4 GHz', wlan1: '5 GHz', wlan2: 'HaLow 900 MHz'};
+    const BANDS = {wlan0: '2.4 GHz', wlan1: '5 GHz', wlan2: 'HaLow'};
     let html = `<div class="card-title">${node.hostname} &nbsp;<span style="color:var(--muted);font-size:10px">${node.ip}${node.is_me ? ' &bull; THIS NODE' : ''}</span></div>`;
     for (const iface of ['wlan0','wlan1','wlan2']) {
       const info = ifaces[iface] || {};
@@ -1512,9 +2025,15 @@ function buildIfaceControl() {
           </div>
         </div>
         <div class="txpwr-row">
+          LINK RATE
+          <strong>${info.tx_mcs || '-'}</strong>
+          /
+          <strong>${info.rx_mcs || '-'}</strong>
+          <span style="color:var(--muted)">TX / RX</span>
+        </div>
+        <div class="txpwr-row">
           TX POWER
-          <input type="number" id="txpwr-${node.id}-${iface}" value="${info.txpower_dbm || 20}" min="0" max="30" style="width:65px">
-          dBm
+          ${renderTxPowerSelect(`txpwr-${node.id}-${iface}`, info)}
           <button class="btn" style="padding:4px 10px;font-size:10px" onclick="setTxPower('${node.ip}','${node.id}','${iface}')">SET</button>
         </div>
       </div>`;
@@ -1526,8 +2045,13 @@ function buildIfaceControl() {
 
 async function toggleIface(nodeIp, nodeId, iface, state) {
   if (state === 'down' && !confirmRadioDown(nodeIp, iface)) return;
-  showOverlay(`Coordinating ${iface} ${state} on ${nodeIp} through Alfred...`, 'info');
-  showMsg(`Staging ${iface} ${state}; waiting for mesh ACKs...`, 'info');
+  const isAll = nodeIp === 'all';
+  showOverlay(isAll
+    ? `Coordinating ${iface} ${state} on all nodes through Alfred...`
+    : `Setting ${iface} ${state} on ${nodeIp}...`, 'info');
+  showMsg(isAll
+    ? `Staging ${iface} ${state}; waiting for mesh ACKs...`
+    : `Setting ${iface} ${state} on ${nodeIp}...`, 'info');
   try {
     const r = await fetch('/api/interface/toggle', {
       method: 'POST',
@@ -1536,10 +2060,16 @@ async function toggleIface(nodeIp, nodeId, iface, state) {
     });
     const d = await r.json();
     if (d.ok) {
-      const wait = d.activate_at ? Math.max(0, d.activate_at - Math.floor(Date.now() / 1000)) : 0;
-      showOverlay(`${iface} ${state} ACKed by ${d.acked?.length || 0}/${d.expected?.length || 0} nodes. Applying in ${wait}s...`, 'ok');
-      showMsg(`${iface} ${state} scheduled through Alfred`, 'ok');
-      verifyRadioExecution(nodeIp, iface, state, d.activate_at);
+      if (d.activate_at) {
+        const wait = Math.max(0, d.activate_at - Math.floor(Date.now() / 1000));
+        showOverlay(`${iface} ${state} ACKed by ${d.acked?.length || 0}/${d.expected?.length || 0} nodes. Applying in ${wait}s...`, 'ok');
+        showMsg(`${iface} ${state} scheduled through Alfred`, 'ok');
+        verifyRadioExecution(nodeIp, iface, state, d.activate_at);
+      } else {
+        showOverlay(`${iface} ${state} applied on ${nodeIp}`, 'ok');
+        showMsg(`${iface} ${state} applied`, 'ok');
+        setTimeout(() => { hideOverlay(); loadTopology(); }, 3000);
+      }
     } else {
       showOverlay(`Radio change failed: ${d.error}`, 'err');
       showMsg('Error: ' + d.error, 'err');
@@ -1552,6 +2082,10 @@ async function toggleIface(nodeIp, nodeId, iface, state) {
 
 async function setTxPower(nodeIp, nodeId, iface) {
   const dbm = document.getElementById(`txpwr-${nodeId}-${iface}`).value;
+  if (!dbm) {
+    showMsg(`No TX power options available for ${iface}@${nodeIp}`, 'err');
+    return;
+  }
   const r = await fetch('/api/txpower', {
     method: 'POST',
     headers: {'Content-Type':'application/json'},
@@ -1589,18 +2123,33 @@ async function toggleAll(iface, state) {
 }
 
 // ── HaLow config tab (HTML is static in template) ──
-function buildHalowConfig() {}
+function buildHalowConfig() {
+  const halowInfo = getNodeInfo('all', 'wlan2');
+  syncSelectValue('halow-ch', halowInfo.channel);
+  syncSelectValue('halow-bw', halowInfo.halow_bw);
+  syncSelectValue('ch-2g', getNodeInfo('all', 'wlan0').channel);
+  syncSelectValue('ch-5g', getNodeInfo('all', 'wlan1').channel);
+  for (const iface of ['wlan0', 'wlan1', 'wlan2']) {
+    const info = getNodeInfo('all', iface);
+    const select = document.getElementById(`txpwr-all-${iface}`);
+    if (select) {
+      select.outerHTML = renderTxPowerSelect(`txpwr-all-${iface}`, info);
+    }
+  }
+  updateHalowTxpowerOptions(halowInfo.txpower_dbm);
+}
 
 async function applyHalow() {
   const ch = document.getElementById('halow-ch').value;
   const bw = document.getElementById('halow-bw').value;
+  const dbm = document.getElementById('txpwr-all-wlan2').value;
   setButtonBusy('btn-apply-halow', true, 'APPLYING...', 'APPLY TO ALL NODES');
-  showOverlay(`Applying HaLow ch${ch} / ${bw} — verifying all nodes...`, 'info');
+  showOverlay(`Applying HaLow ch${ch} / ${bw} / ${dbm} dBm — verifying all nodes...`, 'info');
   try {
     const r = await fetch('/api/halow/channel', {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({channel: parseInt(ch), bw})
+      body: JSON.stringify({channel: parseInt(ch), bw, dbm: parseFloat(dbm)})
     });
     const d = await r.json();
     if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
@@ -1611,7 +2160,7 @@ async function applyHalow() {
       showMsg(msg, 'err');
       return;
     }
-    let msg = `HaLow ch${ch} / ${bw} applied to: ${d.applied?.join(', ')}`;
+    let msg = `HaLow ch${ch} / ${bw} / ${dbm} dBm applied to: ${d.applied?.join(', ')}`;
     if (d.unreachable?.length) msg += ` · WARNING: not in mesh: ${d.unreachable.join(', ')}`;
     showMsg(msg, d.unreachable?.length ? 'info' : 'ok');
     await fetchTopo();
@@ -1624,18 +2173,19 @@ async function applyHalow() {
 
 async function apply2G() {
   const ch = document.getElementById('ch-2g').value;
+  const dbm = document.getElementById('txpwr-all-wlan0').value;
   setButtonBusy('btn-apply-2g', true, 'APPLYING...', 'APPLY TO ALL NODES');
-  showOverlay(`Applying 2.4G channel ${ch} to all nodes...`, 'info');
-  showMsg(`Applying 2.4G channel ${ch} to all nodes...`, 'info');
+  showOverlay(`Applying 2.4G ch${ch} / ${dbm} dBm to all nodes...`, 'info');
+  showMsg(`Applying 2.4G ch${ch} / ${dbm} dBm to all nodes...`, 'info');
   try {
     const r = await fetch('/api/wifi/channel', {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({interface: 'wlan0', channel: parseInt(ch)})
+      body: JSON.stringify({interface: 'wlan0', channel: parseInt(ch), dbm: parseFloat(dbm)})
     });
     const d = await r.json();
     if (!r.ok || !d.ok) throw new Error(d.error || `HTTP ${r.status}`);
-    showMsg('2.4G channel applied to all nodes', 'ok');
+    showMsg(`2.4G ch${ch} / ${dbm} dBm applied to all nodes`, 'ok');
     await fetchTopo();
   } catch (e) {
     showMsg('2.4G channel failed: ' + e.message, 'err');
@@ -1646,17 +2196,18 @@ async function apply2G() {
 
 async function apply5G() {
   const ch = document.getElementById('ch-5g').value;
+  const dbm = document.getElementById('txpwr-all-wlan1').value;
   setButtonBusy('btn-apply-5g', true, 'APPLYING...', 'APPLY TO ALL NODES');
-  showOverlay(`Applying 5G channel ${ch} to all nodes...`, 'info');
+  showOverlay(`Applying 5G ch${ch} / ${dbm} dBm to all nodes...`, 'info');
   try {
     const r = await fetch('/api/wifi/channel', {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({interface: 'wlan1', channel: parseInt(ch)})
+      body: JSON.stringify({interface: 'wlan1', channel: parseInt(ch), dbm: parseFloat(dbm)})
     });
     const d = await r.json();
     if (!r.ok || !d.ok) throw new Error(d.error || `HTTP ${r.status}`);
-    showMsg('5G channel applied to all nodes', 'ok');
+    showMsg(`5G ch${ch} / ${dbm} dBm applied to all nodes`, 'ok');
     await fetchTopo();
   } catch (e) {
     showMsg('5G channel failed: ' + e.message, 'err');
@@ -1824,21 +2375,95 @@ async function deleteSession(encodedLabel) {
 }
 
 async function uploadGithub() {
-  document.getElementById('upload-github').disabled = true;
-  const r = await fetch('/api/upload/github', {method:'POST'});
-  const d = await r.json();
-  document.getElementById('upload-github').disabled = !_topo?.internet;
-  if (d.ok) showMsg('Uploaded to GitHub', 'ok');
-  else showMsg('GitHub upload failed: ' + d.error, 'err');
+  try {
+    const r = await fetch('/api/upload/github', {method:'POST'});
+    const d = await r.json();
+    if (!r.ok || !d.ok) throw new Error(d.error || `HTTP ${r.status}`);
+    setUploadButtons(true);
+    setUploadStatus({running:true,target:'github',phase:'starting',progress:'Starting GitHub upload...',percent:1});
+    pollUploadStatus();
+  } catch (e) {
+    setUploadButtons(false);
+    showMsg('GitHub upload failed: ' + e.message, 'err');
+  }
 }
 
 async function uploadVentum() {
-  document.getElementById('upload-ventum').disabled = true;
-  const r = await fetch('/api/upload/ventum', {method:'POST'});
-  const d = await r.json();
-  document.getElementById('upload-ventum').disabled = !_topo?.internet;
-  if (d.ok) showMsg('Uploaded to Ventum', 'ok');
-  else showMsg('Ventum upload failed: ' + d.error, 'err');
+  try {
+    const r = await fetch('/api/upload/ventum', {method:'POST'});
+    const d = await r.json();
+    if (!r.ok || !d.ok) throw new Error(d.error || `HTTP ${r.status}`);
+    setUploadButtons(true);
+    setUploadStatus({running:true,target:'ventum',phase:'starting',progress:'Starting Ventum upload...',percent:1});
+    pollUploadStatus();
+  } catch (e) {
+    setUploadButtons(false);
+    showMsg('Ventum upload failed: ' + e.message, 'err');
+  }
+}
+
+let _uploadPollTimer = null;
+
+function setUploadButtons(running) {
+  const githubBtn = document.getElementById('upload-github');
+  const ventumBtn = document.getElementById('upload-ventum');
+  const disabled = running || !_topo?.internet;
+  if (githubBtn) githubBtn.disabled = disabled;
+  if (ventumBtn) ventumBtn.disabled = disabled;
+}
+
+function setUploadStatus(d) {
+  const card = document.getElementById('upload-status');
+  const title = document.getElementById('upload-status-title');
+  const text = document.getElementById('upload-status-text');
+  const meta = document.getElementById('upload-status-meta');
+  const fill = document.getElementById('upload-status-fill');
+  if (!card || !title || !text || !meta || !fill) return;
+
+  if (!d || (!d.running && !d.progress && !d.error && !d.done)) {
+    card.style.display = 'none';
+    return;
+  }
+
+  card.style.display = '';
+  const target = (d.target || 'upload').toUpperCase();
+  const percent = Number.isFinite(Number(d.percent)) ? Math.max(0, Math.min(100, Number(d.percent))) : 0;
+  title.textContent = `${target} STATUS`;
+  text.textContent = d.error ? `Error: ${d.error}` : (d.progress || 'Working...');
+  meta.textContent = [
+    d.phase ? `phase ${d.phase}` : '',
+    percent ? `${percent}%` : '',
+    d.bytes_total ? `${d.bytes_sent || 0}/${d.bytes_total} bytes` : '',
+    d.file ? d.file : ''
+  ].filter(Boolean).join(' · ');
+  fill.style.width = `${percent}%`;
+  fill.style.background = d.error ? 'var(--red)' : (d.done ? 'var(--green)' : 'var(--accent2)');
+}
+
+async function pollUploadStatus() {
+  if (_uploadPollTimer) {
+    clearTimeout(_uploadPollTimer);
+    _uploadPollTimer = null;
+  }
+  try {
+    const r = await fetch('/api/upload/status');
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+    setUploadStatus(d);
+    setUploadButtons(!!d.running);
+    if (d.running) {
+      _uploadPollTimer = setTimeout(pollUploadStatus, 1000);
+      return;
+    }
+    if (d.done) {
+      showMsg(`${(d.target || 'upload').toUpperCase()} upload complete`, 'ok');
+    } else if (d.error) {
+      showMsg(`${(d.target || 'upload').toUpperCase()} upload failed: ${d.error}`, 'err');
+    }
+  } catch (e) {
+    setUploadButtons(false);
+    showMsg('Upload status failed: ' + e.message, 'err');
+  }
 }
 
 window.onload = async () => {
@@ -1847,7 +2472,10 @@ window.onload = async () => {
   await fetchTopo();
   buildIfaceControl();
   buildHalowConfig();
+  const halowBw = document.getElementById('halow-bw');
+  if (halowBw) halowBw.addEventListener('change', () => updateHalowTxpowerOptions());
   startAutoRefresh();
+  pollUploadStatus();
 };
 
 window.addEventListener('hashchange', () => showTab(getInitialTab(), false));
@@ -1876,24 +2504,23 @@ def render_dashboard():
 </div>
 
 <div id="hdr">
-  <div class="fer-lockup" title="FER">
-    <img class="fer-logo-img" src="https://www.fer.unizg.hr/_pub/themes_static/fer_2025/default/img/FERlogo.svg" alt="FER" onerror="this.style.display='none';this.nextElementSibling.style.display='inline-flex'">
-    <span class="fer-logo-fallback">FER</span>
+  <div class="fer-lockup" title="FER" aria-label="FER">
+    <img class="fer-logo-img" src="/assets/fer-logo-black.svg" data-light="/assets/fer-logo-black.svg" data-dark="/assets/fer-logo-white.svg" alt="FER">
   </div>
   <div id="hdr-logo">MANET//<span>PERF</span></div>
   <div id="hdr-node"><strong>{hostname}</strong> &nbsp;{ip}</div>
   <div id="hdr-right">
     <span id="hdr-inet" class="no">○ NO INET</span>
     <span id="hdr-clock"></span>
+    <button id="overview-link" class="overview-link-btn" type="button" onclick="window.location.href='http://manet.local/?theme=' + encodeURIComponent(document.documentElement.dataset.theme || 'light')">OVERVIEW</button>
     <button id="theme-toggle" class="theme-toggle" type="button" onclick="toggleTheme()">Dark</button>
   </div>
 </div>
 
 <div id="page">
 <div id="nav">
-  <div class="tab active" data-tab="topology"   onclick="showTab('topology')">TOPOLOGY</div>
-  <div class="tab"        data-tab="interfaces" onclick="showTab('interfaces')">INTERFACES</div>
-  <div class="tab"        data-tab="radio"      onclick="showTab('radio')">RADIO CONFIG</div>
+  <div class="tab active" data-tab="topology" onclick="showTab('topology')">TOPOLOGY</div>
+  <div class="tab"        data-tab="radio"    onclick="showTab('radio')">RADIO CONFIG</div>
   <div class="tab"        data-tab="measure"    onclick="showTab('measure')">MEASURE</div>
   <div class="tab"        data-tab="sessions"   onclick="showTab('sessions')">SESSIONS</div>
   <div class="tab"        data-tab="upload"     onclick="showTab('upload')">UPLOAD</div>
@@ -1912,8 +2539,8 @@ def render_dashboard():
     </div>
   </div>
 
-  <!-- ── INTERFACES ── -->
-  <div id="tab-interfaces" class="tab-pane" style="display:none">
+  <!-- ── RADIO CONFIG ── -->
+  <div id="tab-radio" class="tab-pane" style="display:none">
     <div class="card">
       <div class="card-title">Global Actions</div>
       <div class="global-bar" id="global-bar">
@@ -1926,12 +2553,8 @@ def render_dashboard():
       </div>
     </div>
     <div id="iface-cards"></div>
-  </div>
-
-  <!-- ── RADIO CONFIG ── -->
-  <div id="tab-radio" class="tab-pane" style="display:none">
     <div class="card">
-      <div class="card-title">HaLow 900 MHz</div>
+      <div class="card-title">HaLow</div>
       <div class="row">
         <span class="row-label">Channel</span>
         <select id="halow-ch">
@@ -1952,6 +2575,10 @@ def render_dashboard():
         </select>
       </div>
       <div class="row">
+        <span class="row-label">TX Power</span>
+        <select id="txpwr-all-wlan2"><option value="">Loading...</option></select>
+      </div>
+      <div class="row">
         <span class="row-label"></span>
         <button class="btn btn-green" id="btn-apply-halow" onclick="applyHalow()">APPLY TO ALL NODES</button>
       </div>
@@ -1963,6 +2590,10 @@ def render_dashboard():
         <select id="ch-2g">
           ${''.join(f'<option value="{c}"{" selected" if c==6 else ""}>ch {c} ({2407+c*5} MHz)</option>' for c in range(1,14))}
         </select>
+      </div>
+      <div class="row">
+        <span class="row-label">TX Power</span>
+        <select id="txpwr-all-wlan0"><option value="">Loading...</option></select>
       </div>
       <div class="row">
         <span class="row-label"></span>
@@ -1999,6 +2630,10 @@ def render_dashboard():
           <option value="161">ch 161 (5805 MHz)</option>
           <option value="165">ch 165 (5825 MHz)</option>
         </select>
+      </div>
+      <div class="row">
+        <span class="row-label">TX Power</span>
+        <select id="txpwr-all-wlan1"><option value="">Loading...</option></select>
       </div>
       <div class="row">
         <span class="row-label"></span>
@@ -2094,10 +2729,19 @@ def render_dashboard():
         </div>
         <button class="btn btn-green" id="upload-ventum" onclick="uploadVentum()" disabled>UPLOAD</button>
       </div>
+      <div id="upload-status" class="upload-status">
+        <div id="upload-status-title" class="upload-status-title">UPLOAD STATUS</div>
+        <div id="upload-status-text" class="upload-status-text">—</div>
+        <div id="upload-status-meta" class="upload-status-meta"></div>
+        <div class="upload-status-bar"><div id="upload-status-fill" class="upload-status-fill"></div></div>
+      </div>
       <div style="padding:12px 16px;font-size:10px;color:var(--muted);letter-spacing:.5px">
         UPLOAD BUTTONS ENABLED ONLY WHEN INTERNET IS AVAILABLE
       </div>
     </div>
+  </div>
+  <div class="footer-actions">
+    <button class="logout-link-btn" type="button" onclick="window.location.href='/auth/perf-logout'">LOGOUT</button>
   </div>
 </div><!-- #content -->
 </div><!-- #page -->
@@ -2133,7 +2777,52 @@ class PerfHandler(http.server.BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         path   = parsed.path.rstrip('/') or '/'
 
-        if path in ('/', '/index.html'):
+        if parsed.path == '/assets/fer-logo.svg':
+            try:
+                with open(FER_LOGO_FULL_FILE, 'rb') as f:
+                    body = f.read()
+                self.send_response(200)
+                self.send_header('Content-Type', 'image/svg+xml')
+                self.send_header('Content-Length', str(len(body)))
+                self.send_header('Cache-Control', 'public, max-age=3600')
+                self.end_headers()
+                self.wfile.write(body)
+            except FileNotFoundError:
+                self.send_response(404)
+                self.end_headers()
+                self.wfile.write(b'Not found')
+
+        elif parsed.path == '/assets/fer-logo-black.svg':
+            try:
+                with open(FER_LOGO_BLACK_FILE, 'rb') as f:
+                    body = f.read()
+                self.send_response(200)
+                self.send_header('Content-Type', 'image/svg+xml')
+                self.send_header('Content-Length', str(len(body)))
+                self.send_header('Cache-Control', 'public, max-age=3600')
+                self.end_headers()
+                self.wfile.write(body)
+            except FileNotFoundError:
+                self.send_response(404)
+                self.end_headers()
+                self.wfile.write(b'Not found')
+
+        elif parsed.path == '/assets/fer-logo-white.svg':
+            try:
+                with open(FER_LOGO_WHITE_FILE, 'rb') as f:
+                    body = f.read()
+                self.send_response(200)
+                self.send_header('Content-Type', 'image/svg+xml')
+                self.send_header('Content-Length', str(len(body)))
+                self.send_header('Cache-Control', 'public, max-age=3600')
+                self.end_headers()
+                self.wfile.write(body)
+            except FileNotFoundError:
+                self.send_response(404)
+                self.end_headers()
+                self.wfile.write(b'Not found')
+
+        elif path in ('/', '/index.html'):
             self.send_html(render_dashboard())
 
         elif path == '/api/topology':
@@ -2145,6 +2834,9 @@ class PerfHandler(http.server.BaseHTTPRequestHandler):
         elif path == '/api/measure/status':
             with _measure_lock:
                 self.send_json(dict(_measure_status))
+
+        elif path == '/api/upload/status':
+            self.send_json(get_upload_status())
 
         elif path == '/api/sessions':
             self.send_json(list_sessions())
@@ -2204,9 +2896,29 @@ class PerfHandler(http.server.BaseHTTPRequestHandler):
                 node_ip = req.get('node_ip', '')
                 iface   = req.get('iface', '')
                 dbm     = req.get('dbm')
-                r = call_node_api(node_ip, '/api/control/txpower', 'POST',
-                                  {'iface': iface, 'dbm': dbm})
-                self.send_json(r)
+                if node_ip == 'all':
+                    nodes_raw = parse_registry()
+                    applied = []
+                    errors = []
+                    for nd in nodes_raw.values():
+                        ip = nd.get('IPV4_ADDRESS', '')
+                        hostname = nd.get('HOSTNAME', ip)
+                        if not ip:
+                            continue
+                        r = call_node_api(ip, '/api/control/txpower', 'POST',
+                                          {'iface': iface, 'dbm': dbm})
+                        if r.get('ok'):
+                            applied.append(hostname)
+                        else:
+                            errors.append(f"{hostname}: {r.get('error')}")
+                    if errors:
+                        self.send_json({'ok': False, 'applied': applied, 'error': '; '.join(errors)})
+                    else:
+                        self.send_json({'ok': True, 'applied': applied, 'iface': iface, 'dbm': _fmt_dbm(dbm)})
+                else:
+                    r = call_node_api(node_ip, '/api/control/txpower', 'POST',
+                                      {'iface': iface, 'dbm': dbm})
+                    self.send_json(r)
             except Exception as e:
                 self.send_json({'ok': False, 'error': str(e)})
 
@@ -2220,78 +2932,39 @@ class PerfHandler(http.server.BaseHTTPRequestHandler):
                     return
 
                 nodes_raw = parse_registry()
-                # Step 1: probe reachable nodes via mesh IP and snapshot current channel
-                # Nodes not reachable through mesh will timeout — no ethernet fallback
-                reachable = []   # {hostname, ip, old_ch, old_bw}
-                unreachable = [] # hostnames
+                # Step 1: collect all known nodes from registry (no pre-ping — mesh may be only HaLow)
+                targets = []
                 for nd in nodes_raw.values():
                     ip       = nd.get('IPV4_ADDRESS', '')
                     hostname = nd.get('HOSTNAME', ip)
-                    if not ip:
-                        continue
-                    local = call_node_api(ip, '/api/local', timeout=4)
-                    if 'error' in local and local.get('ok') is False:
-                        unreachable.append(hostname)
-                        continue
-                    ifaces = {i['name']: i for i in local.get('interfaces', []) if 'name' in i}
-                    w2 = ifaces.get('wlan2', {})
-                    reachable.append({
-                        'hostname': hostname,
-                        'ip':       ip,
-                        'old_ch':   w2.get('channel', ''),
-                        'old_bw':   w2.get('halow_bw', ''),
-                    })
+                    if ip:
+                        targets.append({'hostname': hostname, 'ip': ip})
 
-                if not reachable:
-                    self.send_json({'ok': False, 'error': 'No reachable nodes'})
+                if not targets:
+                    self.send_json({'ok': False, 'error': 'No nodes in registry'})
                     return
 
-                # Step 2: apply new channel to all reachable nodes
+                # Step 2: apply new channel to all nodes simultaneously.
+                # NOTE: when HaLow is the only active mesh interface, all nodes will
+                # temporarily lose connectivity during this step — this is expected.
+                # We do NOT verify via mesh IP afterwards (mesh is down during switch).
+                # We do NOT roll back (rollback calls would also fail via unreachable mesh).
                 failed = []
                 applied = []
-                for node in reachable:
+                for node in targets:
                     r = call_node_api(node['ip'], '/api/control/halow_channel', 'POST', req)
                     if r.get('ok'):
-                        applied.append(node)
+                        applied.append(node['hostname'])
                     else:
-                        failed.append({'hostname': node['hostname'], 'error': r.get('error', 'failed')})
+                        failed.append(f"{node['hostname']}: {r.get('error', 'failed')}")
 
-                # Step 3: verify via morse_cli (re-read; retry up to 3x with 2s spacing)
-                verify_failed = []
-                for node in applied:
-                    confirmed = False
-                    for _ in range(3):
-                        time.sleep(2)
-                        local = call_node_api(node['ip'], '/api/local', timeout=5)
-                        ifaces = {i['name']: i for i in local.get('interfaces', []) if 'name' in i}
-                        actual_ch = ifaces.get('wlan2', {}).get('channel', '')
-                        if str(actual_ch) == str(new_ch):
-                            confirmed = True
-                            break
-                    if not confirmed:
-                        verify_failed.append(node['hostname'])
-
-                # Step 4: rollback if any verification failed
-                if verify_failed or failed:
-                    for node in applied:
-                        if node['old_ch']:
-                            call_node_api(node['ip'], '/api/control/halow_channel', 'POST', {
-                                'channel': node['old_ch'], 'bw': node['old_bw'] or '1MHz'
-                            })
-                    err_parts = []
-                    if failed:
-                        err_parts.append('apply failed: ' + ', '.join(f['hostname'] for f in failed))
-                    if verify_failed:
-                        err_parts.append('verify failed: ' + ', '.join(verify_failed))
-                    self.send_json({'ok': False, 'error': '; '.join(err_parts),
-                                    'rolled_back': True,
-                                    'unreachable': unreachable})
+                if failed and not applied:
+                    self.send_json({'ok': False, 'error': '; '.join(failed)})
                     return
 
-                result = {'ok': True, 'applied': [n['hostname'] for n in applied]}
-                if unreachable:
-                    result['warning'] = 'Unreachable (not in mesh): ' + ', '.join(unreachable)
-                    result['unreachable'] = unreachable
+                result = {'ok': True, 'applied': applied}
+                if failed:
+                    result['warning'] = 'Some nodes failed: ' + '; '.join(failed)
                 self.send_json(result)
             except Exception as e:
                 self.send_json({'ok': False, 'error': str(e)})
@@ -2301,6 +2974,7 @@ class PerfHandler(http.server.BaseHTTPRequestHandler):
                 req = json.loads(body)
                 iface = req.get('interface', req.get('iface', ''))
                 channel = req.get('channel')
+                dbm = req.get('dbm')
                 if iface not in ('wlan0', 'wlan1'):
                     self.send_json({'ok': False, 'error': 'Invalid Wi-Fi interface'})
                     return
@@ -2311,7 +2985,7 @@ class PerfHandler(http.server.BaseHTTPRequestHandler):
                     if not ip:
                         continue
                     r = call_node_api(ip, '/api/control/wifi_channel', 'POST',
-                                      {'interface': iface, 'channel': channel})
+                                      {'interface': iface, 'channel': channel, 'dbm': dbm})
                     if not r.get('ok'):
                         errors.append(f"{ip}: {r.get('error')}")
                 if errors:
@@ -2359,59 +3033,19 @@ class PerfHandler(http.server.BaseHTTPRequestHandler):
 
         elif path == '/api/upload/github':
             try:
-                repo_dir = '/home/radio/manet-dev'
-                meas_src = SESSIONS_DIR
-                meas_dst = os.path.join(repo_dir, 'measurements')
-                subprocess.run(['rsync', '-a', meas_src + '/', meas_dst + '/'],
-                               check=True, timeout=30)
-                subprocess.run(['git', '-C', repo_dir, 'add', 'measurements/'],
-                               check=True, timeout=10)
-                ts = datetime.now().strftime('%Y-%m-%d %H:%M')
-                subprocess.run(['git', '-C', repo_dir, 'commit', '-m',
-                                f'measurements: add results {ts}'],
-                               check=True, timeout=10)
-                subprocess.run(['git', '-C', repo_dir, 'push'],
-                               check=True, timeout=30)
-                self.send_json({'ok': True})
-            except subprocess.CalledProcessError as e:
-                self.send_json({'ok': False, 'error': str(e)})
+                start_upload_status('github')
+                t = threading.Thread(target=run_upload_github_job, daemon=True)
+                t.start()
+                self.send_json({'ok': True, 'started': True})
             except Exception as e:
                 self.send_json({'ok': False, 'error': str(e)})
 
         elif path == '/api/upload/ventum':
             try:
-                conf = load_kv_file('/etc/mesh.conf')
-                ventum_url = conf.get('ventum_upload_url', 'https://manet.ventum.hr/upload/rpi5/measurements')
-                ventum_auth = conf.get('ventum_auth', '')
-                if not ventum_auth:
-                    user = conf.get('ventum_user', 'clanker')
-                    password = conf.get('ventum_password', 'really-strong-password-321')
-                    ventum_auth = f'{user}:{password}'
-
-                ts = datetime.now().strftime('%Y%m%dT%H%M%S')
-                host = get_my_hostname()
-                archive = f'/tmp/manet-measurements-{host}-{ts}.tar.gz'
-                remote_name = os.path.basename(archive)
-                upload_url = ventum_url.rstrip('/') + '/' + remote_name
-
-                subprocess.run(
-                    ['tar', '-C', os.path.dirname(SESSIONS_DIR),
-                     '-czf', archive, os.path.basename(SESSIONS_DIR)],
-                    check=True, timeout=60
-                )
-                try:
-                    subprocess.run(
-                        ['curl', '-fS', '-u', ventum_auth, '-T', archive, upload_url],
-                        check=True, timeout=120
-                    )
-                finally:
-                    try:
-                        os.remove(archive)
-                    except Exception:
-                        pass
-                self.send_json({'ok': True, 'file': remote_name, 'url': upload_url})
-            except subprocess.CalledProcessError as e:
-                self.send_json({'ok': False, 'error': str(e)})
+                start_upload_status('ventum')
+                t = threading.Thread(target=run_upload_ventum_job, daemon=True)
+                t.start()
+                self.send_json({'ok': True, 'started': True})
             except Exception as e:
                 self.send_json({'ok': False, 'error': str(e)})
 

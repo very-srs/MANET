@@ -1,0 +1,30 @@
+# Gateway/Uplink Mode Configuration for end0
+# Managed by ethernet-autodetect-hybrid.sh
+# This file is copied to 20-end0.network when gateway mode is detected
+
+[Match]
+Name=end0
+
+[Link]
+RequiredForOnline=yes
+
+[Network]
+DHCP=ipv4
+IPv6AcceptRA=yes
+# Don't add to bridge in gateway mode
+Bridge=
+
+[DHCP]
+# Use MAC address as client identifier
+ClientIdentifier=mac
+# Request specific options
+UseDNS=yes
+UseNTP=yes
+UseRoutes=yes
+# Shorter timeout for faster detection
+Timeout=10
+
+[DHCPv4]
+# Use the DHCP server's routes
+UseRoutes=yes
+UseGateway=yes

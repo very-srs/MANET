@@ -30,7 +30,11 @@ import ipaddress
 import socket
 import threading
 import time
-from urllib.parse import urlparse, parse_qs
+import urllib.request
+import hashlib
+import hmac
+import html
+from urllib.parse import urlparse, parse_qs, quote
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Constants
@@ -41,6 +45,12 @@ MESH_STATE_FILE = "/etc/mesh_ipv4_state"
 PORT            = 8080
 REFRESH_MS      = 15000   # Status page polling interval (ms)
 HALOW_EU_CHANNELS = [863500, 864500, 865500, 866500, 867500, 868500]
+HALOW_BW_TXPOWER_CAP_DBM = {'1MHz': '24', '2MHz': '24', '4MHz': '22'}
+PERF_AUTH_COOKIE = 'manet_perf_auth'
+PERF_AUTH_COOKIE_MAX_AGE = 15552000
+FER_LOGO_FULL_FILE = '/usr/local/share/manet/fer-logo.svg'
+FER_LOGO_BLACK_FILE = '/usr/local/share/manet/fer-logo-black.svg'
+FER_LOGO_WHITE_FILE = '/usr/local/share/manet/fer-logo-white.svg'
 CONTROL_POST_PATHS = {
     '/api/control/interface',
     '/api/control/txpower',
@@ -70,6 +80,56 @@ def load_kv_file(path):
     except Exception:
         pass
     return conf
+
+def _machine_token_salt():
+    for path in ('/etc/machine-id', '/var/lib/dbus/machine-id'):
+        try:
+            with open(path) as f:
+                value = f.read().strip()
+            if value:
+                return value
+        except Exception:
+            pass
+    return socket.gethostname()
+
+def get_provisioned_manage_password(conf=None):
+    conf = conf or load_kv_file(MESH_CONF_FILE)
+    for key in ('admin_password', 'radio_password', 'lan_ap_key'):
+        value = conf.get(key, '').strip()
+        if value:
+            return value
+    return ''
+
+def get_perf_auth_token():
+    conf = load_kv_file(MESH_CONF_FILE)
+    manage_password = get_provisioned_manage_password(conf)
+    if not manage_password:
+        return ''
+    raw = f'{manage_password}|perf-local|v1|{_machine_token_salt()}'
+    return hashlib.sha256(raw.encode('utf-8')).hexdigest()
+
+def is_valid_perf_auth_token(token):
+    expected = get_perf_auth_token()
+    return bool(expected and token) and hmac.compare_digest(str(token), expected)
+
+def parse_cookie_header(header):
+    cookies = {}
+    if not header:
+        return cookies
+    for part in header.split(';'):
+        if '=' not in part:
+            continue
+        key, value = part.split('=', 1)
+        cookies[key.strip()] = value.strip()
+    return cookies
+
+def normalize_local_redirect(target):
+    target = str(target or '/').strip()
+    if not target.startswith('/'):
+        return '/'
+    if target.startswith('//'):
+        return '/'
+    return target
 
 def _first_flat_value(data, keys):
     """Find the first matching key in a nested dict/list structure."""
@@ -257,6 +317,83 @@ def wifi_channel_to_freq(iface, channel):
             return 5000 + ch * 5
     return None
 
+def _fmt_dbm(value):
+    try:
+        num = float(value)
+    except Exception:
+        return ''
+    if abs(num - round(num)) < 0.05:
+        return str(int(round(num)))
+    return f'{num:.1f}'.rstrip('0').rstrip('.')
+
+def parse_phy_txpower_options(iw_phy_text):
+    options = {}
+    cur_phy = None
+    for line in (iw_phy_text or '').splitlines():
+        pm = re.match(r'Wiphy phy(\d+)', line)
+        if pm:
+            cur_phy = pm.group(1)
+            options.setdefault(cur_phy, set())
+            continue
+        if cur_phy is None:
+            continue
+        dm = re.search(r'\(([\d.]+)\s+dBm\)', line)
+        if dm:
+            fmt = _fmt_dbm(dm.group(1))
+            if fmt:
+                options[cur_phy].add(fmt)
+    return {
+        phy: sorted(vals, key=lambda v: float(v))
+        for phy, vals in options.items() if vals
+    }
+
+def txpower_choices_from_cap(cap_dbm):
+    try:
+        cap = int(float(cap_dbm))
+    except Exception:
+        return []
+    if cap < 1:
+        return []
+    return [str(v) for v in range(cap, 0, -1)]
+
+
+def get_halow_bw_txpower_cap(bw):
+    return HALOW_BW_TXPOWER_CAP_DBM.get(_format_halow_bw(bw), '')
+
+def get_iface_txpower_cap(iface):
+    try:
+        r = subprocess.run(['iw', 'dev', iface, 'info'], capture_output=True, text=True, timeout=5)
+        if r.returncode != 0:
+            return ''
+        if iface == 'wlan2':
+            bw_cap = get_halow_bw_txpower_cap(get_halow_driver_info(iface).get('halow_bw', ''))
+            if bw_cap:
+                return bw_cap
+        phy = ''
+        current = ''
+        m = re.search(r'txpower ([\d.]+) dBm', r.stdout)
+        if m:
+            current = _fmt_dbm(m.group(1))
+        m = re.search(r'wiphy (\d+)', r.stdout)
+        if m:
+            phy = m.group(1)
+        else:
+            m = re.search(r'wdev (0x[0-9a-fA-F]+)', r.stdout)
+            if m:
+                phy = str(int(m.group(1), 16) >> 32)
+        if not phy:
+            return current
+        r = subprocess.run(['iw', 'phy'], capture_output=True, text=True, timeout=5)
+        options = parse_phy_txpower_options(r.stdout).get(phy, [])
+        if not options:
+            return current
+        cap = max(options, key=lambda v: float(v))
+        if iface == 'wlan2' and current:
+            return _fmt_dbm(min(float(cap), float(current)))
+        return _fmt_dbm(cap)
+    except Exception:
+        return ''
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Registry Parser
 # ─────────────────────────────────────────────────────────────────────────────
@@ -425,6 +562,74 @@ def get_battery():
                 continue
     return None
 
+def get_peer_local_data(peer_ip, timeout=1.0):
+    """Fetch live /api/local from a peer over the mesh; return {} on failure."""
+    if not peer_ip:
+        return {}
+    try:
+        ipaddress.ip_address(peer_ip)
+        req = urllib.request.Request(
+            f'http://{peer_ip}:80/api/local',
+            headers={'User-Agent': 'manet-status/1'}
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode())
+    except Exception:
+        return {}
+
+
+def best_orig_entry_for_node(node, orig_map):
+    if not isinstance(node, dict):
+        return None
+    node_all_macs = set(node.get('all_macs', []))
+    raw_mac = norm_mac(node.get('mac', ''))
+    if raw_mac:
+        node_all_macs.add(raw_mac)
+    best_entry = None
+    for omac, odata in orig_map.items():
+        if omac in node_all_macs:
+            if best_entry is None or odata.get('tq', 0) > best_entry.get('tq', 0):
+                best_entry = odata
+    return best_entry
+
+
+def resolve_hop_count(node_id, node_by_id, orig_map, mac_to_node_id, visited=None):
+    if visited is None:
+        visited = set()
+    if node_id in visited:
+        return None
+    visited.add(node_id)
+
+    node = node_by_id.get(node_id)
+    if not node or node.get('is_me'):
+        return None
+    if node.get('is_direct'):
+        return 1
+
+    best_entry = best_orig_entry_for_node(node, orig_map)
+    if not best_entry:
+        return None
+
+    node_all_macs = set(node.get('all_macs', []))
+    raw_mac = norm_mac(node.get('mac', ''))
+    if raw_mac:
+        node_all_macs.add(raw_mac)
+
+    nexthop = norm_mac(best_entry.get('nexthop', ''))
+    if not nexthop:
+        return None
+    if nexthop in node_all_macs:
+        return 1
+
+    via_id = mac_to_node_id.get(nexthop)
+    if not via_id or via_id == node_id:
+        return None
+
+    via_hops = resolve_hop_count(via_id, node_by_id, orig_map, mac_to_node_id, visited)
+    if via_hops is None:
+        return None
+    return via_hops + 1
+
 def get_interfaces():
     """
     Return list of interface dicts with role, health, and fault details.
@@ -459,6 +664,8 @@ def get_interfaces():
                 if sm: iw_info[cur_iface]['ssid'] = sm.group(1).strip()
                 fm = re.search(r'channel (\d+).*MHz', line)
                 if fm: iw_info[cur_iface]['channel'] = fm.group(1)
+                pm = re.search(r'txpower ([\d.]+) dBm', line)
+                if pm: iw_info[cur_iface]['txpower_dbm'] = pm.group(1)
                 freqm = re.search(r'([\d.]+) GHz', line)
                 if freqm: iw_info[cur_iface]['freq'] = freqm.group(1)
                 wm = re.search(r'wiphy (\d+)', line)
@@ -471,8 +678,10 @@ def get_interfaces():
     # Build phy→band map: Band 1 = 2.4 GHz, Band 2 = 5 GHz (IEEE 802.11 convention)
     # A phy with both bands → 2.4 GHz takes precedence (dual-band chip)
     phy_band = {}  # wiphy_num_str -> '2.4 GHz' | '5 GHz'
+    phy_txpower_options = {}
     try:
         r3 = subprocess.run(['iw', 'phy'], capture_output=True, text=True, timeout=5)
+        phy_txpower_options = parse_phy_txpower_options(r3.stdout)
         cur_phy = None
         for line in r3.stdout.splitlines():
             pm = re.match(r'Wiphy phy(\d+)', line)
@@ -504,14 +713,14 @@ def get_interfaces():
             pass
         iw_info[iname]['driver'] = driver
         if 'morse' in driver:
-            iw_info[iname]['band_label'] = 'HaLow 900MHz'
+            iw_info[iname]['band_label'] = 'HaLow'
         else:
             # Try runtime freq first, fall back to phy capability
             freq_str = iw_info[iname].get('freq', '')
             try:
                 freq_f = float(freq_str)
                 if freq_f < 2.0:
-                    iw_info[iname]['band_label'] = 'HaLow 900MHz'
+                    iw_info[iname]['band_label'] = 'HaLow'
                 elif freq_f < 3.0:
                     iw_info[iname]['band_label'] = '2.4 GHz'
                 else:
@@ -519,6 +728,10 @@ def get_interfaces():
             except ValueError:
                 wiphy_num = iw_info[iname].get('wiphy', '')
                 iw_info[iname]['band_label'] = phy_band.get(wiphy_num, '')
+        cap = get_iface_txpower_cap(iname)
+        if cap:
+            iw_info[iname]['txpower_cap_dbm'] = cap
+            iw_info[iname]['txpower_options_dbm'] = txpower_choices_from_cap(cap)
 
     # HaLow (morse_usb): iw can report a regular Wi-Fi channel; Morse driver is the runtime source.
     for iname in list(iw_info.keys()):
@@ -688,6 +901,11 @@ def get_interfaces():
                 health = 'warn'
                 faults.append(f'Not in bat0 and not an AP — check wpa_supplicant')
 
+        # bat0/br0 report operstate=UNKNOWN (virtual iface); derive from UP flag instead
+        display_state = state
+        if state == 'UNKNOWN' and name in ('bat0', 'br0'):
+            display_state = 'UP' if 'UP' in flags else 'DOWN'
+
         ifaces.append({
             'name':     name,
             'role':     role,
@@ -695,9 +913,12 @@ def get_interfaces():
             'detail':   detail,
             'faults':   faults,
             'addrs':    addrs,
-            'state':    state,
+            'state':    display_state,
             'channel':  iw.get('channel', ''),
             'freq_mhz': iw.get('freq_mhz', ''),
+            'txpower_dbm': iw.get('txpower_dbm', ''),
+            'txpower_cap_dbm': iw.get('txpower_cap_dbm', ''),
+            'txpower_options_dbm': iw.get('txpower_options_dbm', []),
             'halow_bw': iw.get('halow_bw', ''),
             'halow_source': iw.get('halow_source', ''),
         })
@@ -772,6 +993,34 @@ def get_local_uptime():
     except Exception:
         return ''
 
+
+def enrich_interfaces_with_registry_mcs(ifaces, node_data):
+    if not ifaces or not isinstance(node_data, dict):
+        return ifaces
+
+    mcs_by_iface = {
+        'wlan0': {
+            'tx_mcs': node_data.get('WIFI_24_TX_MCS', ''),
+            'rx_mcs': node_data.get('WIFI_24_RX_MCS', ''),
+        },
+        'wlan1': {
+            'tx_mcs': node_data.get('WIFI_5_TX_MCS', ''),
+            'rx_mcs': node_data.get('WIFI_5_RX_MCS', ''),
+        },
+        'wlan2': {
+            'tx_mcs': node_data.get('HALOW_TX_MCS', ''),
+            'rx_mcs': node_data.get('HALOW_RX_MCS', ''),
+        },
+    }
+
+    for iface in ifaces:
+        if not isinstance(iface, dict):
+            continue
+        extra = mcs_by_iface.get(iface.get('name', ''), {})
+        iface['tx_mcs'] = extra.get('tx_mcs', '')
+        iface['rx_mcs'] = extra.get('rx_mcs', '')
+    return ifaces
+
 def assemble_local_data():
     conf     = load_kv_file(MESH_CONF_FILE)
     state    = load_kv_file(MESH_STATE_FILE)
@@ -790,6 +1039,8 @@ def assemble_local_data():
         if norm_mac(ndata.get('MAC_ADDRESS', '')) == my_mac or ndata.get('HOSTNAME', '') == hostname:
             my_node = ndata
             break
+
+    ifaces = enrich_interfaces_with_registry_mcs(ifaces, my_node)
 
     # GPS — placeholder, will be populated when registry has GPS fields
     gps = {
@@ -846,6 +1097,7 @@ def assemble_status_data():
     conf       = load_kv_file(MESH_CONF_FILE)
     state      = load_kv_file(MESH_STATE_FILE)
     nodes_raw  = parse_registry()
+    local_battery = get_battery()
     orig_tq, orig_map = run_batctl_originators()
     neighbors  = run_batctl_neighbors()
     gateways   = run_batctl_gateways()
@@ -895,8 +1147,16 @@ def assemble_status_data():
 
         is_me = (my_mac and node_mac == my_mac) or (hostname == my_host)
         if is_me:
-            tq = 255
+            tq = None
             self_found = True
+
+        battery = {'percentage': int(ndata['BATTERY_PERCENTAGE'])} if ndata.get('BATTERY_PERCENTAGE') else None
+        if is_me and local_battery and local_battery.get('percentage') is not None:
+            battery = local_battery
+        elif not is_me and ndata.get('IPV4_ADDRESS'):
+            peer_battery = get_peer_local_data(ndata.get('IPV4_ADDRESS'), timeout=0.8).get('battery')
+            if isinstance(peer_battery, dict) and peer_battery.get('percentage') is not None:
+                battery = peer_battery
 
         all_node_macs = [norm_mac(m) for m in ndata.get('MAC_ADDRESSES', '').split(',') if m.strip()]
         is_direct = any(m in neighbor_macs for m in all_node_macs) or node_mac in neighbor_macs
@@ -916,8 +1176,8 @@ def assemble_status_data():
                 selected_gw in [norm_mac(m) for m in ndata.get('MAC_ADDRESSES','').split(',') if m.strip()]
             )),
             'uptime':       fmt_uptime(ndata.get('UPTIME_SECONDS', '')),
-            'cpu':          ndata.get('CPU_LOAD_AVERAGE', ''),
-            'battery':      {'percentage': int(ndata['BATTERY_PERCENTAGE'])} if ndata.get('BATTERY_PERCENTAGE') else None,
+            'cpu':          (f"{float(ndata['CPU_LOAD_AVERAGE']):.2f}" if ndata.get('CPU_LOAD_AVERAGE') else ''),
+            'battery':      battery,
             'mumble':       ndata.get('IS_MUMBLE_SERVER', 'false').lower() == 'true',
             'mediamtx':     ndata.get('IS_MEDIAMTX_SERVER', 'false').lower() == 'true',
             'ntp':          ndata.get('IS_NTP_SERVER', 'false').lower() == 'true',
@@ -926,6 +1186,8 @@ def assemble_status_data():
             'ch_5g':        ndata.get('DATA_CHANNEL_5_0', ''),
             'limp':         ndata.get('IS_IN_LIMP_MODE', 'false').lower() == 'true',
             'all_macs':     [norm_mac(m) for m in ndata.get('MAC_ADDRESSES', '').split(',') if m.strip()],
+            'hop_count':    None,
+            'last_seen':    ndata.get('LAST_REGISTRY_UPDATE', ndata.get('LAST_SEEN_TIMESTAMP', '0')),
         })
 
     # If self not in registry, inject a placeholder
@@ -935,11 +1197,12 @@ def assemble_status_data():
             'hostname': my_host,
             'mac': my_mac or '',
             'ip': (state.get('CURRENT_IPV4') or ''),
-            'tq': 255, 'is_me': True, 'is_direct': True,
+            'tq': None, 'is_me': True, 'is_direct': True,
             'is_gateway': False, 'is_selected_gw': False,
             'uptime': '', 'cpu': '', 'battery': None,
             'mumble': False, 'mediamtx': False, 'ntp': False,
             'state': 'ACTIVE', 'ch_2g': '', 'ch_5g': '', 'limp': False,
+            'hop_count': None, 'last_seen': str(int(time.time())),
         })
 
     node_list.sort(key=lambda n: (not n['is_me'], -(n['tq'] if n['tq'] is not None else -1)))
@@ -951,6 +1214,12 @@ def assemble_status_data():
         for m in node.get('all_macs', []):
             mac_to_node_id[m] = node['id']
         mac_to_node_id[norm_mac(node['mac'])] = node['id']
+    node_by_id = {node['id']: node for node in node_list}
+
+    for node in node_list:
+        if node.get('is_me'):
+            continue
+        node['hop_count'] = resolve_hop_count(node['id'], node_by_id, orig_map, mac_to_node_id)
 
     edges = []
     self_node = next((n for n in node_list if n['is_me']), None)
@@ -1041,20 +1310,21 @@ CSS = """
   --panel:    #f7f6f3;
   --border:   #d6d2cb;
   --border2:  #e7e2da;
-  --accent:   #00003f;
+  --accent:   #02000d;
   --accent2:  #ecb000;
+  --info:     #02000d;
   --fer-yellow:#ecb000;
   --fer-black:#02000d;
   --text:     #02000d;
   --muted:    #615f68;
   --good:     #22c55e;
-  --ok:       #eab308;
-  --warn:     #f97316;
+  --ok:       #ecb000;
+  --warn:     #ecb000;
   --bad:      #ef4444;
   --gw:       #ecb000;
-  --self:     #00003f;
+  --self:     #ecb000;
   --shadow:   0 18px 50px rgba(2,0,13,.10);
-  --font:     Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font:     Roobert, Arial, sans-serif;
 }
 :root[data-theme="dark"] {
   --bg:       #02000d;
@@ -1062,8 +1332,9 @@ CSS = """
   --panel:    #0b0a12;
   --border:   #34313b;
   --border2:  #24212b;
-  --accent:   #ecb000;
+  --accent:   #f8f6ef;
   --accent2:  #ecb000;
+  --info:     #9fa8ff;
   --text:     #f8f6ef;
   --muted:    #aaa5b2;
   --gw:       #ecb000;
@@ -1071,18 +1342,19 @@ CSS = """
   --shadow:   0 18px 50px rgba(0,0,0,.36);
 }
 * { box-sizing: border-box; margin: 0; padding: 0; }
-html, body { height: 100%; background: var(--bg); color: var(--text); font-family: var(--font); font-size: 13px; overflow-x: hidden; }
+html { min-height: 100%; scroll-behavior: smooth; }
+body { min-height: 100%; background: var(--bg); color: var(--text); font-family: var(--font); font-size: 13px; overflow-x: hidden; overflow-y: auto; -webkit-overflow-scrolling: touch; overscroll-behavior-y: auto; text-rendering: optimizeLegibility; }
 body {
   background:
-    linear-gradient(135deg, rgba(236,176,0,.24) 0 9px, transparent 9px 72px),
-    linear-gradient(160deg, transparent 0 62%, rgba(0,0,63,.08) 62% 76%, transparent 76%),
+    radial-gradient(circle at top left, rgba(236,176,0,.18), transparent 28%),
+    radial-gradient(circle at top right, rgba(2,0,13,.08), transparent 24%),
     var(--bg);
 }
 
 /* ── Layout ── */
-#app { display: flex; flex-direction: column; height: 100vh; }
-#header { background: rgba(255,255,255,.92); backdrop-filter: blur(18px); border-bottom: 1px solid var(--border2); padding: 0 14px 0 0; display: flex; align-items: stretch; gap: 0; flex-shrink: 0; min-height: 58px; box-shadow: 0 1px 0 rgba(2,0,13,.05); position: relative; }
-#header::after { content:''; position:absolute; left:0; right:0; bottom:0; height:3px; background: linear-gradient(90deg, var(--fer-yellow) 0 24%, var(--accent) 24% 72%, transparent 72%); pointer-events:none; }
+#app { display: flex; flex-direction: column; min-height: 100vh; }
+#header { background: rgba(255,255,255,.94); backdrop-filter: blur(18px); border-bottom: 1px solid var(--border2); padding: 10px 14px 10px 0; display: grid; grid-template-columns: auto 1fr; grid-template-areas: "brand brand" "meta meta" "actions actions"; row-gap: 8px; column-gap: 12px; flex-shrink: 0; min-height: 58px; box-shadow: 0 1px 0 rgba(2,0,13,.05); position: relative; }
+#header::after { content:''; position:absolute; left:0; right:0; bottom:0; height:2px; background: linear-gradient(90deg, rgba(236,176,0,.92) 0 36%, rgba(236,176,0,.28) 36% 68%, transparent 68%); pointer-events:none; }
 :root[data-theme="dark"] #header { background: rgba(18,17,24,.92); }
 /* Health pill — left edge strip */
 #hdr-health { display: flex; align-items: center; gap: 7px; padding: 0 14px 0 12px;
@@ -1093,74 +1365,114 @@ body {
 #hdr-health-label { font-size: 11px; font-weight: 800; letter-spacing: 0;
                     transition: color 0.4s; white-space: nowrap; }
 .health-ok   { color: #136c36; background: rgba(22,163,74,.07); }
-.health-warn { color: #8a4b07; background: rgba(217,119,6,.08); }
+.health-warn { color: #8a6a00; background: rgba(236,176,0,.12); }
 .health-fault{ color: #b42318; background: rgba(180,35,24,.08); }
 .health-loading { color: var(--muted); background: transparent; }
-.fer-lockup { display:flex; align-items:center; align-self:center; height:34px; min-width:76px; padding:0 12px 0 0; margin-right:10px; border-right:1px solid var(--border); }
-.fer-logo-img { display:block; width:82px; max-height:22px; object-fit:contain; }
-:root[data-theme="dark"] .fer-logo-img { filter: invert(1) brightness(1.18); }
-.fer-logo-fallback { display:none; align-items:center; height:28px; padding:0 10px; background:var(--fer-yellow); color:var(--fer-black); border-radius:4px; font-size:15px; font-weight:900; letter-spacing:0; }
+.hdr-brand { grid-area: brand; display:flex; align-items:center; gap:8px; min-width:0; padding-left:12px; }
+.fer-lockup { display:flex; align-items:center; justify-content:flex-start; align-self:center; height:58px; min-width:clamp(104px,18vw,172px); width:clamp(104px,18vw,172px); padding:0 8px 0 0; border-right:1px solid var(--border); color:var(--fer-black); overflow:hidden; flex:0 0 auto; }
+.fer-logo-img { display:block; width:clamp(104px,18vw,172px); height:48px; max-width:none; object-fit:contain; object-position:left center; filter:none; transition:width .18s ease,height .18s ease,filter .18s ease; }
+:root[data-theme="dark"] .fer-lockup { color:#ffffff; }
+:root[data-theme="dark"] .fer-logo-img { filter: brightness(0) invert(1); }
+.hdr-logo { color: var(--text); font-size: 17px; letter-spacing: 0; font-weight: 900; display:flex; align-items:center; min-height:46px; line-height:1; }
+.hdr-logo span { color: var(--accent2); }
 .theme-toggle { border:1px solid var(--accent2); background:rgba(236,176,0,.10); color:var(--text); border-radius:999px; padding:6px 10px; font-family:var(--font); font-size:11px; font-weight:850; cursor:pointer; min-width:74px; }
 .theme-toggle:hover { background:var(--accent2); color:var(--fer-black); box-shadow:0 8px 22px rgba(236,176,0,.20); }
+.perf-link-btn { border:1px solid var(--accent2); background:var(--accent2); color:var(--fer-black); border-radius:999px; padding:6px 12px; font-family:var(--font); font-size:11px; font-weight:850; cursor:pointer; min-width:92px; transition:background .18s ease,color .18s ease,box-shadow .18s ease,transform .18s ease; box-shadow:0 8px 20px rgba(236,176,0,.16); }
+.perf-link-btn:hover { background:#f6c62f; color:var(--fer-black); box-shadow:0 10px 24px rgba(236,176,0,.26); transform:translateY(-1px); }
+:root[data-theme="dark"] .perf-link-btn { background:var(--accent2); color:var(--fer-black); border-color:var(--accent2); }
+:root[data-theme="dark"] .perf-link-btn:hover { background:#f6c62f; color:var(--fer-black); box-shadow:0 10px 24px rgba(236,176,0,.28); }
 /* Centre identity items */
 #header .meta { color: var(--muted); font-size: 12px; display: flex; align-items: center; }
+#hdr-meta { grid-area: meta; display:flex; align-items:center; gap:0; flex-wrap:wrap; min-width:0; padding-left:12px; }
 #hdr-hostname { color: var(--text); font-size: 13px; font-weight: 800; padding-right: 10px;
                 border-right: 1px solid var(--border); margin-right: 10px; }
-#hdr-ssid { color: var(--accent); }
-#header .spacer { flex: 1; }
+#hdr-ssid { color: var(--text); }
+#header .spacer { display:none; }
 /* Right-side items */
-#hdr-right { display: flex; align-items: center; gap: 12px; }
+#hdr-right { grid-area: actions; display: flex; align-items: center; gap: 12px; flex-wrap:wrap; padding-left:12px; }
 #hdr-gw-label { font-size: 11px; }
 .gw-ok   { color: var(--good); }
 .gw-none { color: var(--muted); }
 .pill { display: inline-block; padding: 4px 9px; border-radius: 999px; font-size: 10px; font-weight: 800; letter-spacing: 0; }
-.pill-accent { background: #eff6ff; color: var(--accent); border: 1px solid #bfdbfe; }
-.pill-gw     { background: #fff7ed; color: #8a4b07; border: 1px solid #f3d29a; }
-.pill-self   { background: #f5f3ff; color: #4c1d95; border: 1px solid #d7cdfa; }
+.pill-accent { background: rgba(236,176,0,.10); color: var(--text); border: 1px solid rgba(236,176,0,.30); }
+.pill-gw     { background: rgba(236,176,0,.14); color: var(--fer-black); border: 1px solid rgba(236,176,0,.38); }
+.pill-self   { background: rgba(236,176,0,.16); color: var(--fer-black); border: 1px solid rgba(236,176,0,.34); }
 
 /* ── Main Panels ── */
-#main { display: flex; flex: 1; overflow: hidden; }
+#main { display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 16px; flex: 1; padding: 16px; align-items: start; }
 #topo-panel {
-  flex: 1; position: relative; min-width: 0;
+  position: relative; min-width: 0; min-height: 520px;
   background:
-    linear-gradient(90deg, rgba(2,0,13,.045) 1px, transparent 1px),
-    linear-gradient(0deg, rgba(2,0,13,.045) 1px, transparent 1px),
-    linear-gradient(135deg, rgba(236,176,0,.12), transparent 36%),
+    radial-gradient(circle at 14% 18%, rgba(236,176,0,.24), transparent 18%),
+    radial-gradient(circle at 84% 12%, rgba(2,0,13,.10), transparent 20%),
+    radial-gradient(circle at 50% 120%, rgba(236,176,0,.12), transparent 28%),
     var(--panel);
-  background-size: 42px 42px, 42px 42px, auto, auto;
+  border: 1px solid var(--border2);
+  border-radius: 18px;
+  overflow: hidden;
+  box-shadow:
+    inset 0 0 0 1px rgba(2,0,13,.04),
+    inset 0 0 80px rgba(236,176,0,.08),
+    inset 0 0 120px rgba(2,0,13,.04),
+    0 22px 52px rgba(2,0,13,.08);
 }
-#topo-panel canvas { width: 100%; height: 100%; display: block; }
-#side-panel { width: 300px; flex-shrink: 0; overflow-y: auto; border-left: 1px solid var(--border2); background: var(--surface); }
+#topo-panel::after { content:''; position:absolute; right:18px; bottom:18px; width:120px; height:120px; background:radial-gradient(circle, rgba(236,176,0,.16), transparent 72%); pointer-events:none; }
+#topo-panel canvas { width: 100%; height: 100%; display: block; touch-action: pan-y pinch-zoom; }
+#side-panel { width: 100%; overflow: visible; border: 1px solid var(--border2); border-radius: 18px; background: var(--surface); box-shadow: 0 18px 44px rgba(2,0,13,.06); }
 
 /* ── Node Table ── */
-.section-hdr { padding: 10px 12px; font-size: 11px; font-weight: 800; letter-spacing: 0; color: var(--muted); text-transform: none; border-bottom: 1px solid var(--border2); position: sticky; top: 0; background: var(--surface); z-index: 1; }
-.node-row { padding: 10px 12px; border-bottom: 1px solid var(--border2); cursor: default; transition: background .15s; }
-.node-row:hover { background: rgba(236,176,0,.08); }
+.section-hdr { padding: 12px 14px; font-size: 11px; font-weight: 800; letter-spacing: .3px; color: var(--muted); text-transform: none; border-bottom: 1px solid var(--border2); position: sticky; top: 0; background: color-mix(in srgb, var(--surface) 92%, transparent); backdrop-filter: blur(12px); z-index: 1; }
+.node-row { padding: 10px 12px; border-bottom: 1px solid var(--border2); cursor: pointer; transition: background .18s ease, transform .18s ease; }
+.node-row:hover { background: rgba(236,176,0,.08); transform: translateY(-1px); }
 .node-row.is-me { border-left: 2px solid var(--self); }
 .node-row.is-gw { border-left: 2px solid var(--gw); }
 .node-row.is-me.is-gw { border-left: 2px solid var(--gw); }
-.node-name { font-size: 13px; font-weight: bold; display: flex; align-items: center; gap: 5px; margin-bottom: 3px; }
-.node-ip { color: var(--muted); font-size: 11px; margin-bottom: 3px; }
-.node-meta { display: flex; gap: 6px; flex-wrap: wrap; }
+.node-row.peer-selected { background: rgba(236,176,0,.12); outline: 1px solid rgba(236,176,0,.36); outline-offset: -1px; }
+.node-summary { min-width: 0; }
+.node-name { font-size: 12px; font-weight: bold; display: flex; align-items: center; gap: 5px; margin-bottom: 2px; }
+.node-ip { color: var(--muted); font-size: 10px; margin-bottom: 2px; }
+.node-meta { display: flex; gap: 5px; flex-wrap: wrap; }
+.node-inline-detail { margin-top: 12px; border: 1px solid var(--border2); border-radius: 14px; overflow: hidden; background: color-mix(in srgb, var(--surface) 96%, rgba(236,176,0,.06)); box-shadow: 0 16px 34px rgba(2,0,13,.05); }
+.inline-detail-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 10px 12px; border-bottom: 1px solid var(--border2); background: transparent; }
+.inline-detail-title { font-size: 12px; font-weight: 800; color: var(--text); }
+.node-inline-detail .section-hdr { position: static; top: auto; }
 .badge { padding: 3px 7px; border-radius: 999px; font-size: 10px; font-weight: 750; }
 .badge-tq-great  { background: rgba(22,163,74,.07); color: var(--text); border:1px solid rgba(22,163,74,.28); }
 .badge-tq-ok     { background: rgba(236,176,0,.10); color: var(--text); border:1px solid rgba(236,176,0,.28); }
 .badge-tq-warn   { background: rgba(217,119,6,.08); color: var(--text); border:1px solid rgba(217,119,6,.28); }
 .badge-tq-bad    { background: rgba(180,35,24,.08); color: var(--text); border:1px solid rgba(180,35,24,.28); }
 .badge-tq-none   { background: #f7f8fa; color: var(--muted); }
-.badge-svc       { background: #eff6ff; color: var(--accent); }
-.badge-gw        { background: #fff7ed; color: #8a4b07; }
+.badge-svc       { background: rgba(236,176,0,.10); color: var(--text); border:1px solid rgba(236,176,0,.26); }
+.badge-gw        { background: rgba(236,176,0,.14); color: var(--fer-black); }
 .badge-direct    { background: #ecfdf3; color: #136c36; }
+.self-node-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 850;
+  letter-spacing: .2px;
+  background: linear-gradient(135deg, rgba(236,176,0,.96), rgba(236,176,0,.82));
+  color: var(--fer-black);
+  border: 1px solid rgba(236,176,0,.40);
+  box-shadow: 0 0 0 1px rgba(236,176,0,.12), 0 0 18px rgba(236,176,0,.18), 0 0 30px rgba(236,176,0,.16);
+}
+:root[data-theme="dark"] .self-node-badge {
+  background: linear-gradient(135deg, rgba(236,176,0,.96), rgba(236,176,0,.82));
+  color: var(--fer-black);
+  border-color: rgba(236,176,0,.48);
+  box-shadow: 0 0 0 1px rgba(236,176,0,.14), 0 0 18px rgba(236,176,0,.20), 0 0 34px rgba(236,176,0,.18);
+}
 .tq-bar-wrap     { margin-top: 6px; height: 5px; background: var(--border2); border-radius: 999px; overflow: hidden; }
 .tq-bar          { height: 100%; border-radius: 2px; transition: width .5s; }
 
 /* ── Tooltip ── */
-#tooltip { position: fixed; background: color-mix(in srgb, var(--surface) 92%, transparent); backdrop-filter: blur(12px); border: 1px solid var(--border); padding: 9px 11px; border-radius: 8px; pointer-events: none; font-size: 11px; line-height: 1.6; display: none; z-index: 100; max-width: 220px; box-shadow: var(--shadow); }
-
 /* ── Admin Page ── */
 .admin-wrap { max-width: 600px; margin: 0 auto; padding: 16px 12px 40px; }
 .admin-wrap h2 { color: var(--text); font-size: 18px; letter-spacing: 0; margin-bottom: 4px; }
-.admin-wrap .notice { color: var(--warn); font-size: 11px; margin-bottom: 20px; padding: 8px; background: #f9731610; border: 1px solid #f9731630; border-radius: 4px; }
+.admin-wrap .notice { color: #8a6a00; font-size: 11px; margin-bottom: 20px; padding: 8px; background: rgba(236,176,0,.12); border: 1px solid rgba(236,176,0,.28); border-radius: 4px; }
 .form-section { background: var(--surface); border: 1px solid var(--border2); border-radius: 8px; margin-bottom: 16px; box-shadow: var(--shadow); }
 .form-section-title { padding: 12px 14px; font-size: 12px; font-weight: 800; letter-spacing: 0; color: var(--text); text-transform: none; border-bottom: 1px solid var(--border2); }
 .form-row { display: flex; align-items: center; gap: 10px; padding: 10px 14px; border-bottom: 1px solid var(--border2); }
@@ -1199,11 +1511,11 @@ body {
 .iface-state-down    { color: var(--bad); background: #ef444420; }
 .iface-state-unknown { color: var(--muted); }
 .iface-role { font-size: 10px; padding: 2px 6px; border-radius: 999px; font-weight: 750; }
-.role-mesh     { background:#eff6ff; color:var(--accent); }
+.role-mesh     { background:rgba(236,176,0,.10); color:var(--text); }
 .role-ap       { background:#ecfdf3; color:#136c36; }
-.role-gateway  { background:#fff7ed; color:#8a4b07; }
-.role-bat      { background:#f5f3ff; color:#4c1d95; }
-.role-bridge   { background:#f5f3ff; color:#4c1d95; }
+.role-gateway  { background:rgba(236,176,0,.14); color:var(--fer-black); }
+.role-bat      { background:rgba(236,176,0,.10); color:var(--text); }
+.role-bridge   { background:rgba(236,176,0,.10); color:var(--text); }
 .role-eud-bridge{ background:#ecfdf3; color:#136c36; }
 .role-other    { background:#f7f8fa; color:var(--muted); }
 .iface-detail  { font-size: 10px; color: var(--muted); }
@@ -1216,16 +1528,7 @@ body {
                background:#ef444420; color:var(--bad); margin-left:6px; vertical-align:middle; }
 .warn-count  { display:inline-block; padding:1px 5px; border-radius:3px; font-size:10px;
                background:#f9731620; color:var(--warn); margin-left:6px; vertical-align:middle; }
-/* ── Peer Detail Drawer ── */
-#peer-drawer { display: flex; flex-direction: column; border-bottom: 1px solid var(--border2);
-               background: var(--surface); flex-shrink: 0; max-height: 55vh; overflow-y: auto; }
-#peer-drawer-hdr { display: flex; align-items: center; gap: 8px; padding: 8px 12px;
-                   border-bottom: 1px solid var(--border2); background: var(--surface);
-                   position: sticky; top: 0; z-index: 1; flex-shrink: 0; }
-#peer-drawer-title { flex: 1; font-size: 13px; font-weight: 800; color: var(--text); }
-#peer-drawer-body { overflow-y: auto; flex: 1; }
 .peer-loading { padding: 16px; color: var(--muted); font-size: 12px; text-align: center; letter-spacing: 1px; }
-.node-row.peer-selected { background: rgba(236,176,0,.14); outline: 1px solid rgba(236,176,0,.5); outline-offset: -1px; }
 .eud-row { padding: 5px 12px; border-bottom: 1px solid var(--border2); font-size: 11px; }
 .eud-row:last-child { border-bottom: none; }
 .eud-name { color: var(--text); }
@@ -1240,19 +1543,22 @@ body {
 .gps-dot { display:inline-block; width:7px; height:7px; border-radius:50%; margin-right:4px; vertical-align:middle; }
 
 /* ── Loading / Error ── */
-#loading { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--muted); font-size: 13px; font-weight: 700; letter-spacing: 0; }
+#loading { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--muted); font-size: 13px; font-weight: 700; letter-spacing: 0; backdrop-filter: blur(2px); }
 
 /* ── Responsive: narrow → stack ── */
 @media (max-width: 768px) {
-  #main { flex-direction: column; }
-  #topo-panel { height: var(--topo-h, 50vh); min-height: 80px; flex: none; }
-  #side-panel { width: 100%; flex: 1; overflow-y: auto; border-left: none; border-top: none; }
-  #header { flex-wrap: wrap; height: auto; min-height: 58px; padding: 6px 10px 8px 0; }
-  .fer-lockup { order: 1; min-width: 64px; padding-right: 8px; margin-right: 6px; }
-  .fer-logo-img { width: 64px; }
-  #hdr-hostname { order: 2; max-width: 42vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  #hdr-ip, #hdr-ssid { order: 3; }
-  #hdr-right { order: 4; flex: 0 0 100%; margin-left: 0; gap: 8px; flex-wrap: wrap; justify-content: flex-start; }
+  #main { grid-template-columns: 1fr; gap: 10px; padding: 10px; }
+  #topo-panel { order: 1; height: var(--topo-h, 46vh); min-height: 260px; }
+  #drag-handle { order: 2; }
+  #side-panel { order: 3; width: 100%; overflow: visible; }
+  #header { grid-template-columns:1fr; grid-template-areas:"brand" "meta" "actions"; height: auto; min-height: 58px; padding: 8px 10px 10px; row-gap:6px; }
+  .hdr-brand { padding-left:0; gap:6px; }
+  .fer-lockup { min-width:clamp(92px,24vw,132px); width:clamp(92px,24vw,132px); height:46px; padding-right:4px; }
+  .fer-logo-img { width: clamp(92px,24vw,132px); height: 38px; }
+  .hdr-logo { font-size:15px; min-height:38px; }
+  #hdr-meta { padding-left:0; }
+  #hdr-hostname { max-width: 42vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #hdr-right { margin-left: 0; gap: 8px; justify-content: flex-start; padding-left:0; }
   #header .meta { font-size: 11px; }
   .theme-toggle { padding: 5px 8px; min-width: 66px; }
 }
@@ -1265,13 +1571,15 @@ body {
   justify-content: center;
   height: 22px;
   background: var(--surface);
-  border-top: 1px solid var(--border2);
-  border-bottom: 1px solid var(--border2);
+  border: 1px solid var(--border2);
+  border-radius: 999px;
   cursor: row-resize;
   flex-shrink: 0;
   touch-action: none;
   user-select: none;
   -webkit-user-select: none;
+  margin: -2px auto 0;
+  width: calc(100% - 24px);
 }
 #drag-handle::before {
   content: '';
@@ -1294,22 +1602,24 @@ STATUS_HTML = r"""<!DOCTYPE html>
 <body>
 <div id="app">
   <div id="header">
-    <!-- Health pill -->
-    <div id="hdr-health" class="health-loading">
-      <div id="hdr-health-dot"></div>
-      <span id="hdr-health-label">—</span>
+    <div class="hdr-brand">
+      <div class="fer-lockup" title="FER" aria-label="FER">
+        <img class="fer-logo-img" src="/assets/fer-logo-black.svg" data-light="/assets/fer-logo-black.svg" data-dark="/assets/fer-logo-white.svg" alt="FER">
+      </div>
+      <div class="hdr-logo">MANET//<span>STAT</span></div>
     </div>
-    <div class="fer-lockup" title="FER">
-      <img class="fer-logo-img" src="https://www.fer.unizg.hr/_pub/themes_static/fer_2025/default/img/FERlogo.svg" alt="FER" onerror="this.style.display='none';this.nextElementSibling.style.display='inline-flex'">
-      <span class="fer-logo-fallback">FER</span>
+    <div id="hdr-meta">
+      <div id="hdr-health" class="health-loading">
+        <div id="hdr-health-dot"></div>
+        <span id="hdr-health-label">—</span>
+      </div>
+      <div class="meta" id="hdr-hostname">—</div>
+      <div class="meta" id="hdr-ip" style="padding-right:10px">—</div>
+      <div class="meta" id="hdr-ssid">—</div>
+      <div class="spacer"></div>
     </div>
-    <!-- Identity -->
-    <div class="meta" id="hdr-hostname">—</div>
-    <div class="meta" id="hdr-ip" style="padding-right:10px">—</div>
-    <div class="meta" id="hdr-ssid">—</div>
-    <div class="spacer"></div>
-    <!-- Right: mesh stats -->
     <div id="hdr-right">
+      <button id="perf-link" class="perf-link-btn" type="button" onclick="goPerfDashboard()">MANAGE</button>
       <div class="meta" id="hdr-nodes">—</div>
       <div class="meta" id="hdr-gw-label">—</div>
       <div class="meta" id="hdr-time" style="color:var(--muted);min-width:54px;text-align:right">—</div>
@@ -1323,28 +1633,31 @@ STATUS_HTML = r"""<!DOCTYPE html>
     </div>
     <div id="drag-handle"></div>
     <div id="side-panel">
-      <div id="peer-drawer">
-        <div id="peer-drawer-hdr">
-          <span id="peer-drawer-title">—</span>
-        </div>
-        <div id="peer-drawer-body"><div class="peer-loading">Loading…</div></div>
-      </div>
       <div class="section-hdr">MESH NODES <span id="node-count"></span></div>
       <div id="node-list"></div>
     </div>
   </div>
 </div>
-<div id="tooltip"></div>
-
 <script>
 // ── Data & State ────────────────────────────────────────────────────────────
 let DATA = null;
 let SIM  = { nodes: [], links: [], running: false, raf: null };
 let HOVER_NODE = null;
+let drawQueued = false;
+let SELECTED_PEER_ID = '';
+let LOCAL_DETAIL_HTML = '<div class="peer-loading">Loading…</div>';
+let PEER_DETAIL_CACHE = {};
+let PEER_LOADING_ID = null;
 const POLL_INTERVAL_MS = __REFRESH__;
 const THEME_KEY = 'manetUiTheme';
 
 function preferredTheme() {
+  const params = new URLSearchParams(window.location.search);
+  const forced = params.get('theme');
+  if (forced === 'dark' || forced === 'light') {
+    try { localStorage.setItem(THEME_KEY, forced); } catch(e) {}
+    return forced;
+  }
   try {
     const saved = localStorage.getItem(THEME_KEY);
     if (saved === 'dark' || saved === 'light') return saved;
@@ -1356,7 +1669,10 @@ function setTheme(theme) {
   document.documentElement.dataset.theme = theme;
   const btn = document.getElementById('theme-toggle');
   if (btn) btn.textContent = theme === 'dark' ? 'Light' : 'Dark';
-  if (window.MANET_CANVAS_READY && typeof drawTopo === 'function' && !SIM.running) drawTopo();
+  document.querySelectorAll('.fer-logo-img[data-light][data-dark], .logo[data-light][data-dark]').forEach(img => {
+    img.src = theme === 'dark' ? img.dataset.dark : img.dataset.light;
+  });
+  if (window.MANET_CANVAS_READY && typeof scheduleDraw === 'function' && !SIM.running) scheduleDraw();
 }
 
 function toggleTheme() {
@@ -1367,6 +1683,10 @@ function toggleTheme() {
 
 function isDarkTheme() {
   return document.documentElement.dataset.theme === 'dark';
+}
+
+function goPerfDashboard() {
+  window.location.href = 'http://perf.local/?theme=' + encodeURIComponent(document.documentElement.dataset.theme || 'light');
 }
 
 setTheme(preferredTheme());
@@ -1394,12 +1714,26 @@ function tqPct(tq) {
   if (tq == null) return 0;
   return Math.round((tq / 255) * 100);
 }
+function fmtAge(ts) {
+  const secs = Math.floor(Date.now() / 1000) - parseInt(ts || 0);
+  if (secs < 60)   return `${secs}s ago`;
+  if (secs < 3600) return `${Math.floor(secs/60)}m ago`;
+  if (secs < 86400) return `${Math.floor(secs/3600)}h ago`;
+  return `${Math.floor(secs/86400)}d ago`;
+}
 function themeColor(light, dark) {
   return isDarkTheme() ? dark : light;
+}
+function topoFont(weight, size) {
+  return `${weight} ${size}px Roobert, Arial, sans-serif`;
 }
 function ts(epoch) {
   const d = new Date(epoch * 1000);
   return d.toLocaleTimeString('en-US', {hour:'2-digit', minute:'2-digit', second:'2-digit', hour12:false});
+}
+
+function getLocalNodeId() {
+  return DATA && DATA.nodes ? ((DATA.nodes.find(n => n.is_me) || {}).id || '') : '';
 }
 
 // ── Node List ────────────────────────────────────────────────────────────────
@@ -1409,6 +1743,7 @@ function renderNodeList(nodes) {
   el.innerHTML = nodes.map(n => {
     const cls = [
       'node-row',
+      SELECTED_PEER_ID === n.id ? 'peer-selected' : '',
       n.is_me  ? 'is-me' : '',
       n.is_gateway ? 'is-gw' : ''
     ].filter(Boolean).join(' ');
@@ -1422,35 +1757,61 @@ function renderNodeList(nodes) {
     if (n.limp)        badges.push(`<span class="badge badge-tq-bad">LIMP</span>`);
 
     const thisNodeLabel = n.is_me
-      ? `<span style="background:var(--self);color:#fff;font-size:10px;font-weight:bold;padding:1px 7px;border-radius:3px;letter-spacing:.8px;margin-left:6px">THIS NODE</span>`
+      ? `<span class="self-node-badge">THIS NODE</span>`
       : '';
-    const tqBadge = `<span class="badge ${tqClass(n.tq)}">${tqLabel(n.tq)}</span>`;
-    const bar = `<div class="tq-bar-wrap"><div class="tq-bar" style="width:${tqPct(n.tq)}%;background:${tqColor(n.tq)}"></div></div>`;
-    const meta = n.uptime  ? `<span style="color:var(--muted)">up ${n.uptime}</span>` : '';
-    const cpu  = n.cpu     ? `<span style="color:var(--muted)">CPU ${n.cpu}</span>` : '';
+    const nodeStale = !n.is_me && (Date.now() / 1000) - parseInt(n.last_seen || 0) > 300;
+    const tqBadge = (n.is_me || nodeStale) ? '' : `<span class="badge ${tqClass(n.tq)}">${tqLabel(n.tq)}</span>`;
+    const bar = nodeStale ? '' : `<div class="tq-bar-wrap"><div class="tq-bar" style="width:${tqPct(n.tq)}%;background:${tqColor(n.tq)}"></div></div>`;
+    const meta = (!nodeStale && n.uptime) ? `<span style="color:var(--muted)">up ${n.uptime}</span>` : '';
+    const cpu  = (!nodeStale && n.cpu)    ? `<span style="color:var(--muted)">CPU ${n.cpu}</span>` : '';
     let battMeta = '';
-    if (n.battery != null) {
+    if (!nodeStale && n.battery != null) {
       const pct = n.battery.percentage;
       const col = battColor(pct);
       const icon = (n.battery.charging === true) ? '⚡' : (pct <= 15 ? '⚠' : '');
       battMeta = `<span style="color:${col};font-size:10px">${icon}${pct}%</span>`;
     }
+    const offlineBadge = nodeStale ? `<span class="badge badge-tq-bad" style="opacity:.7">OFFLINE</span><span style="color:var(--muted);font-size:10px">last seen ${fmtAge(n.last_seen)}</span>` : '';
+
+    const expanded = SELECTED_PEER_ID === n.id;
+      const detailBody = n.is_me
+        ? LOCAL_DETAIL_HTML
+        : (PEER_LOADING_ID === n.id
+            ? '<div class="peer-loading">FETCHING…</div>'
+          : (PEER_DETAIL_CACHE[n.id] || '<div class="peer-loading" style="color:var(--muted)">No details loaded</div>'));
+    const detail = expanded ? `<div class="node-inline-detail">
+      <div class="inline-detail-head">
+        <span class="inline-detail-title">${n.hostname}${n.ip ? '  ' + n.ip : ''}</span>
+        ${n.is_me ? '<span class="self-node-badge">THIS NODE</span>' : ''}
+      </div>
+      <div class="inline-detail-body">${detailBody}</div>
+    </div>` : '';
 
     return `<div class="${cls}" data-id="${n.id}">
-      <div class="node-name">${n.hostname}${thisNodeLabel}${n.state==='SHUTTING_DOWN'?'<span style="color:var(--bad);font-size:10px;margin-left:4px">OFFLINE</span>':''}</div>
-      <div class="node-ip">${n.ip||'—'} &nbsp; <span style="color:var(--muted)">${n.mac}</span></div>
-      <div class="node-meta">${tqBadge}${badges.join('')}${meta}${cpu}${battMeta}</div>
-      ${bar}
+      <div class="node-summary">
+        <div class="node-name" style="${nodeStale ? 'color:var(--muted)' : ''}">${n.hostname}${thisNodeLabel}${n.state==='SHUTTING_DOWN'?'<span style="color:var(--bad);font-size:10px;margin-left:4px">OFFLINE</span>':''}</div>
+        <div class="node-ip">${n.ip||'—'} &nbsp; <span style="color:var(--muted)">${n.mac}</span></div>
+        <div class="node-meta">${nodeStale ? offlineBadge : tqBadge+badges.join('')+meta+cpu+battMeta}</div>
+        ${bar}
+      </div>
+      ${detail}
     </div>`;
   }).join('');
 }
+
+function tickLocalTime() {
+  const el = document.getElementById('hdr-time');
+  if (el) el.textContent = new Date().toLocaleTimeString('en-US', {hour:'2-digit', minute:'2-digit', second:'2-digit', hour12:false});
+}
+setInterval(tickLocalTime, 1000);
+tickLocalTime();
 
 function updateHeader(d) {
   document.getElementById('hdr-hostname').textContent = d.my_hostname || '—';
   document.getElementById('hdr-ip').textContent       = d.my_ip      || '—';
   document.getElementById('hdr-ssid').textContent     = d.mesh_ssid  ? `▶ ${d.mesh_ssid}` : '';
   document.getElementById('hdr-nodes').textContent    = `${d.nodes.length} node${d.nodes.length!==1?'s':''}`;
-  document.getElementById('hdr-time').textContent     = ts(d.timestamp);
+  // hdr-time is kept live by tickLocalTime(), no need to override here
 
   // Gateway label: show selected gateway hostname if known, else count, else "No GW"
   const gwEl = document.getElementById('hdr-gw-label');
@@ -1498,7 +1859,7 @@ function updateHealthPill(localData) {
   } else {
     cls = 'health-ok';
     dotColor = 'var(--good)';
-    text = '● ALL OK';
+    text = 'ALL OK';
   }
 
   // Apply to pill container
@@ -1625,6 +1986,7 @@ function simStep() {
 const view = { x: 0, y: 0, scale: 1 };
 
 function drawTopo() {
+  drawQueued = false;
   const dpr = window.devicePixelRatio || 1;
   const W = canvas.offsetWidth, H = canvas.offsetHeight;
   canvas.width  = W * dpr;
@@ -1637,10 +1999,10 @@ function drawTopo() {
 
   if (SIM.nodes.length === 0) return;
 
-  // Grid dots
-  ctx.fillStyle = themeColor('#d6d2cb77', '#34313b88');
-  for (let gx = 20; gx < W; gx += 30)
-    for (let gy = 20; gy < H; gy += 30)
+  // Subtle guide dots
+  ctx.fillStyle = themeColor('#d6d2cb55', '#34313b66');
+  for (let gx = 28; gx < W; gx += 38)
+    for (let gy = 28; gy < H; gy += 38)
       ctx.fillRect(gx, gy, 1, 1);
 
   // Links
@@ -1688,7 +2050,7 @@ function drawTopo() {
     const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
     if (tq != null && (isDirect || link.type === 'multihop')) {
       ctx.fillStyle = col + 'cc';
-      ctx.font = '9px Inter, system-ui, sans-serif';
+      ctx.font = topoFont('700', 9);
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       // Small white backing for readability
@@ -1727,7 +2089,8 @@ function drawTopo() {
   SIM.nodes.forEach(n => {
     const isHover = HOVER_NODE && HOVER_NODE.id === n.id;
     const isSelected = (SELECTED_PEER_ID === null && n.is_me) || (SELECTED_PEER_ID && SELECTED_PEER_ID === n.id);
-    const col = n.is_me ? themeColor('#00003f', '#ecb000') : (n.is_gateway ? '#ecb000' : tqColor(n.tq));
+    const nodeStaleCanvas = !n.is_me && (Date.now() / 1000) - parseInt(n.last_seen || 0) > 300;
+    const col = n.is_me ? '#ecb000' : (nodeStaleCanvas ? '#6b7280' : (n.is_gateway ? '#ecb000' : tqColor(n.tq)));
     const r = n.r + (isHover ? 3 : (isSelected ? 2 : 0));
 
     // Soft focus halo for selected node
@@ -1755,18 +2118,18 @@ function drawTopo() {
     ctx.textBaseline = 'middle';
     if (n.is_gateway) {
       ctx.fillStyle = n.is_selected_gw ? '#ecb000' : '#ecb00080';
-      ctx.font = `${Math.round(r * 0.9)}px serif`;
+      ctx.font = topoFont('700', Math.round(r * 0.9));
       ctx.fillText('★', n.x, n.y);
     } else if (n.is_me) {
-      ctx.fillStyle = themeColor('#00003f', '#ecb000');
-      ctx.font = `${Math.round(r)}px Inter, system-ui, sans-serif`;
+      ctx.fillStyle = '#ecb000';
+      ctx.font = topoFont('700', Math.round(r));
       ctx.fillText('◉', n.x, n.y);
     }
     // THIS NODE: small filled dot in top-right corner of circle
     if (n.is_me) {
       ctx.beginPath();
       ctx.arc(n.x + r * 0.65, n.y - r * 0.65, 3.5, 0, Math.PI * 2);
-      ctx.fillStyle = themeColor('#00003f', '#ecb000');
+      ctx.fillStyle = '#ecb000';
       ctx.fill();
       ctx.strokeStyle = themeColor('#ffffff', '#02000d');
       ctx.lineWidth = 1;
@@ -1776,9 +2139,21 @@ function drawTopo() {
 
     // Label
     ctx.fillStyle = isHover || isSelected ? themeColor('#02000d', '#f8f6ef') : themeColor('#4a4752', '#cfc9d8');
-    ctx.font = `${isHover || isSelected ? '700 ' : '600 '}11px Inter, system-ui, sans-serif`;
+    ctx.font = topoFont(isHover || isSelected ? '700' : '600', 11);
     ctx.textAlign = 'center';
     ctx.fillText(n.hostname, n.x, n.y + r + 12);
+  });
+}
+
+function scheduleDraw() {
+  if (drawQueued) return;
+  drawQueued = true;
+  requestAnimationFrame(() => {
+    if (!window.MANET_CANVAS_READY) {
+      drawQueued = false;
+      return;
+    }
+    drawTopo();
   });
 }
 
@@ -1803,21 +2178,6 @@ function screenToSim(sx, sy) {
   return { x: (sx - view.x) / view.scale, y: (sy - view.y) / view.scale };
 }
 
-// ── Canvas click → open peer drawer ──────────────────────────────────────────
-canvas.addEventListener('click', e => {
-  const rect = canvas.getBoundingClientRect();
-  const { x: mx, y: my } = screenToSim(e.clientX - rect.left, e.clientY - rect.top);
-  const clicked = SIM.nodes.find(n => {
-    const dx = n.x - mx, dy = n.y - my;
-    return Math.sqrt(dx*dx + dy*dy) < n.r + 12;
-  });
-  if (!clicked) return;
-  if (clicked.is_me) { showLocalInDrawer(); return; }
-  const node = DATA && DATA.nodes.find(n => n.id === clicked.id);
-  if (node) openPeerDrawer(node);
-});
-
-// ── Tooltip ───────────────────────────────────────────────────────────────────
 canvas.addEventListener('mousemove', e => {
   const rect = canvas.getBoundingClientRect();
   const { x: mx, y: my } = screenToSim(e.clientX - rect.left, e.clientY - rect.top);
@@ -1825,32 +2185,13 @@ canvas.addEventListener('mousemove', e => {
     const dx = n.x - mx, dy = n.y - my;
     return Math.sqrt(dx*dx + dy*dy) < n.r + 8;
   }) || null;
-
-  const tip = document.getElementById('tooltip');
   canvas.style.cursor = HOVER_NODE ? 'pointer' : 'default';
-  if (HOVER_NODE) {
-    const n = HOVER_NODE;
-    const svcs = [n.is_gateway?'Gateway':'', n.mumble?'Mumble':'', n.mediamtx?'MediaMTX':'', n.ntp?'NTP':''].filter(Boolean);
-    tip.innerHTML = `<b style="color:var(--accent)">${n.hostname}</b><br>
-      IP: ${n.ip||'—'}<br>
-      MAC: ${n.mac}<br>
-      TQ: <b style="color:${tqColor(n.tq)}">${tqLabel(n.tq)}</b> / 255<br>
-      ${n.uptime ? `Up: ${n.uptime}<br>` : ''}
-      ${n.cpu    ? `CPU: ${n.cpu}<br>`    : ''}
-      ${svcs.length ? `Svcs: ${svcs.join(', ')}` : ''}`;
-    tip.style.display = 'block';
-    tip.style.left    = `${e.clientX + 12}px`;
-    tip.style.top     = `${e.clientY - 10}px`;
-  } else {
-    tip.style.display = 'none';
-  }
-  if (!SIM.running) drawTopo();
+  if (!SIM.running) scheduleDraw();
 });
 
 canvas.addEventListener('mouseleave', () => {
   HOVER_NODE = null;
-  document.getElementById('tooltip').style.display = 'none';
-  if (!SIM.running) drawTopo();
+  if (!SIM.running) scheduleDraw();
 });
 
 canvas.addEventListener('click', e => {
@@ -1862,14 +2203,11 @@ canvas.addEventListener('click', e => {
   });
   if (!hit) return;
   if (hit.is_me) { showLocalInDrawer(); return; }
-  const listRow = document.querySelector(`#node-list .node-row[data-id="${hit.id}"]`);
-  if (listRow) listRow.scrollIntoView({ block: 'nearest' });
-  openPeerDrawer(hit);
+  const node = DATA && DATA.nodes.find(n => n.id === hit.id);
+  if (node) openPeerDrawer(node);
 });
 
-// ── Touch: pinch-to-zoom + pan + node drag ────────────────────────────────────
-let dragNode = null, dragOX = 0, dragOY = 0;
-let lastPanX = 0, lastPanY = 0, isPanning = false;
+// ── Touch: two-finger pinch only (single finger always scrolls page) ────────
 let pinchDist0 = 0, pinchScale0 = 1, pinchCX = 0, pinchCY = 0;
 
 function getTouchDist(touches) {
@@ -1886,24 +2224,7 @@ function getTouchCenter(touches, rect) {
 
 canvas.addEventListener('touchstart', e => {
   const rect = canvas.getBoundingClientRect();
-  if (e.touches.length === 1) {
-    const t = e.touches[0];
-    touchStartX = t.clientX; touchStartY = t.clientY; touchStartT = Date.now();
-    const sx = t.clientX - rect.left, sy = t.clientY - rect.top;
-    const { x: mx, y: my } = screenToSim(sx, sy);
-    dragNode = SIM.nodes.find(n => {
-      const dx = n.x - mx, dy = n.y - my;
-      return Math.sqrt(dx*dx + dy*dy) < n.r + 12;
-    }) || null;
-    if (dragNode) {
-      dragOX = mx - dragNode.x; dragOY = my - dragNode.y;
-      e.preventDefault(); // only prevent default when dragging a node
-    } else {
-      isPanning = true; lastPanX = sx; lastPanY = sy;
-      e.preventDefault(); // prevent scroll while panning canvas
-    }
-  } else if (e.touches.length === 2) {
-    dragNode = null; isPanning = false;
+  if (e.touches.length === 2) {
     pinchDist0  = getTouchDist(e.touches);
     pinchScale0 = view.scale;
     const c = getTouchCenter(e.touches, rect);
@@ -1922,57 +2243,13 @@ canvas.addEventListener('touchmove', e => {
     view.x = pinchCX - (pinchCX - view.x) * (newScale / view.scale);
     view.y = pinchCY - (pinchCY - view.y) * (newScale / view.scale);
     view.scale = newScale;
-    if (!SIM.running) drawTopo();
-    e.preventDefault();
-  } else if (e.touches.length === 1) {
-    const t = e.touches[0];
-    const sx = t.clientX - rect.left, sy = t.clientY - rect.top;
-    if (dragNode) {
-      const { x: mx, y: my } = screenToSim(sx, sy);
-      dragNode.x = mx - dragOX; dragNode.y = my - dragOY;
-      dragNode.vx = 0; dragNode.vy = 0;
-    } else if (isPanning) {
-      view.x += sx - lastPanX; view.y += sy - lastPanY;
-      lastPanX = sx; lastPanY = sy;
-    }
-    if (!SIM.running) drawTopo();
+    if (!SIM.running) scheduleDraw();
     e.preventDefault();
   }
 }, { passive: false });
 
-let touchStartX = 0, touchStartY = 0, touchStartT = 0;
-
 canvas.addEventListener('touchend', e => {
-  if (e.touches.length < 2) { pinchDist0 = 0; }
-  if (e.touches.length === 0) {
-    const wasDraggingNode = dragNode;
-    const wasPanning = isPanning;
-    dragNode = null; isPanning = false;
-
-    // Tap detection: short time, small movement
-    const dt = Date.now() - touchStartT;
-    const ct = e.changedTouches[0];
-    const dx = ct.clientX - touchStartX, dy = ct.clientY - touchStartY;
-    const dist = Math.sqrt(dx*dx + dy*dy);
-    if (dt < 300 && dist < 12) {
-      const rect = canvas.getBoundingClientRect();
-      const sx = ct.clientX - rect.left, sy = ct.clientY - rect.top;
-      const { x: mx, y: my } = screenToSim(sx, sy);
-      const hit = SIM.nodes.find(n => {
-        const ndx = n.x - mx, ndy = n.y - my;
-        return Math.sqrt(ndx*ndx + ndy*ndy) < n.r + 14;
-      });
-      if (hit) {
-        if (hit.is_me) {
-          showLocalInDrawer();
-        } else {
-          const listRow = document.querySelector(`#node-list .node-row[data-id="${hit.id}"]`);
-          if (listRow) listRow.scrollIntoView({ block: 'nearest' });
-          openPeerDrawer(hit);
-        }
-      }
-    }
-  }
+  if (e.touches.length < 2) pinchDist0 = 0;
 });
 
 // ── Panel drag-to-resize (mobile) ────────────────────────────────────────────
@@ -1992,7 +2269,7 @@ canvas.addEventListener('touchend', e => {
     const mainH  = main.getBoundingClientRect().height;
     const newH   = Math.min(Math.max(startH + (y - startY), 80), mainH - 60);
     document.documentElement.style.setProperty('--topo-h', newH + 'px');
-    if (!SIM.running) drawTopo();
+    if (!SIM.running) scheduleDraw();
   }
   function onEnd() {
     dragging = false;
@@ -2009,7 +2286,7 @@ canvas.addEventListener('touchend', e => {
 
 // ── Resize ────────────────────────────────────────────────────────────────────
 window.addEventListener('resize', () => {
-  if (!SIM.running) drawTopo();
+  if (!SIM.running) scheduleDraw();
 });
 
 function battColor(pct) {
@@ -2019,8 +2296,6 @@ function battColor(pct) {
 }
 
 function renderLocalPanel(d) {
-  const el = document.getElementById('peer-drawer-body');
-
   // ── Identity rows ──
   let html = '';
 
@@ -2089,6 +2364,8 @@ function renderLocalPanel(d) {
       const stateLabel = iface.state || '?';
       const addrs = iface.addrs && iface.addrs.length
         ? `<div class="iface-addrs">${iface.addrs.join(' &nbsp; ')}</div>` : '';
+      const mcs = (iface.tx_mcs || iface.rx_mcs)
+        ? `<div class="iface-addrs">TX ${iface.tx_mcs || '—'} &nbsp; RX ${iface.rx_mcs || '—'}</div>` : '';
       const faultLines = (iface.faults || []).map(f =>
         `<div class="${iface.health === 'fault' ? 'iface-fault' : 'iface-warn'}">${f}</div>`
       ).join('');
@@ -2100,6 +2377,7 @@ function renderLocalPanel(d) {
         </div>
         ${iface.detail ? `<div class="iface-detail">${iface.detail}</div>` : ''}
         ${addrs}
+        ${mcs}
         ${faultLines}
       </div>`;
     }).join('');
@@ -2131,7 +2409,7 @@ function renderLocalPanel(d) {
   }
   html += `</div>`;
 
-  el.innerHTML = html;
+  return html;
 }
 
 async function fetchLocal() {
@@ -2140,14 +2418,11 @@ async function fetchLocal() {
     if (!r.ok) throw new Error(r.status);
     const d = await r.json();
     updateHealthPill(d);
-    if (SELECTED_PEER_ID === null) {
-      document.getElementById('peer-drawer-title').textContent =
-        (d.hostname || '—') + (d.ip ? '  ' + d.ip : '') + '  ★ THIS NODE';
-      renderLocalPanel(d);
-    }
+    LOCAL_DETAIL_HTML = renderLocalPanel(d);
+    if (DATA) renderNodeList(DATA.nodes);
   } catch (err) {
-    if (SELECTED_PEER_ID === null)
-      document.getElementById('peer-drawer-body').textContent = `Error: ${err.message}`;
+    LOCAL_DETAIL_HTML = `<div class="peer-loading" style="color:var(--bad)">Error: ${err.message}</div>`;
+    if (DATA) renderNodeList(DATA.nodes);
   }
 }
 
@@ -2177,9 +2452,6 @@ document.addEventListener('visibilitychange', () => {
   }
 });
 
-// ── Peer Detail Drawer ────────────────────────────────────────────────────────
-let SELECTED_PEER_ID = null;
-
 document.getElementById('node-list').addEventListener('click', e => {
   const row = e.target.closest('.node-row');
   if (!row) return;
@@ -2187,41 +2459,65 @@ document.getElementById('node-list').addEventListener('click', e => {
   if (!id || !DATA) return;
   const node = DATA.nodes.find(n => n.id === id);
   if (!node) return;
+  if (SELECTED_PEER_ID === id) {
+    collapseNodeDetail();
+    return;
+  }
   if (node.is_me) { showLocalInDrawer(); return; }
   openPeerDrawer(node);
 });
 
+function collapseNodeDetail() {
+  SELECTED_PEER_ID = '';
+  PEER_LOADING_ID = null;
+  if (DATA) renderNodeList(DATA.nodes);
+  if (!SIM.running) drawTopo();
+}
+
 function openPeerDrawer(node) {
   SELECTED_PEER_ID = node.id;
-  document.querySelectorAll('.node-row').forEach(r => r.classList.toggle('peer-selected', r.dataset.id === node.id));
-  document.getElementById('peer-drawer-title').textContent = node.hostname + (node.ip ? '  ' + node.ip : '');
-  document.getElementById('peer-drawer-body').innerHTML = '<div class="peer-loading">FETCHING…</div>';
-  document.getElementById('side-panel').scrollTop = 0;
+  PEER_LOADING_ID = node.id;
+  if (DATA) renderNodeList(DATA.nodes);
+  const listRow = document.querySelector(`#node-list .node-row[data-id="${node.id}"]`);
+  if (listRow) listRow.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
   if (!SIM.running) drawTopo();
   if (!node.ip) {
-    document.getElementById('peer-drawer-body').innerHTML = '<div class="peer-loading" style="color:var(--muted)">No IP known for this node</div>';
+    PEER_DETAIL_CACHE[node.id] = '<div class="peer-loading" style="color:var(--muted)">No IP known for this node</div>';
+    PEER_LOADING_ID = null;
+    if (DATA) renderNodeList(DATA.nodes);
     return;
   }
   fetchPeer(node.ip, node.hostname);
 }
 
 function showLocalInDrawer() {
-  SELECTED_PEER_ID = null;
-  document.querySelectorAll('.node-row').forEach(r => r.classList.remove('peer-selected'));
-  document.getElementById('side-panel').scrollTop = 0;
+  const localId = getLocalNodeId();
+  if (!localId) return;
+  SELECTED_PEER_ID = localId;
+  PEER_LOADING_ID = null;
+  if (DATA) renderNodeList(DATA.nodes);
+  const listRow = document.querySelector(`#node-list .node-row[data-id="${localId}"]`);
+  if (listRow) listRow.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
   if (!SIM.running) drawTopo();
   fetchLocal();
 }
 
 async function fetchPeer(ip, hostname) {
+  const node = DATA && DATA.nodes
+    ? (DATA.nodes.find(n => n.ip === ip && n.hostname === hostname) || DATA.nodes.find(n => n.ip === ip))
+    : null;
+  const nodeId = node ? node.id : null;
   try {
     const r = await fetch('/api/peer/' + ip);
     const d = await r.json();
     if (!r.ok || d.error) throw new Error(d.error || r.status);
-    renderPeerDrawer(d, hostname);
+    if (nodeId) PEER_DETAIL_CACHE[nodeId] = renderPeerDrawer(d, hostname);
   } catch (err) {
-    document.getElementById('peer-drawer-body').innerHTML =
+    if (nodeId) PEER_DETAIL_CACHE[nodeId] =
       '<div class="peer-loading" style="color:var(--bad)">Error: ' + err.message + '</div>';
+  } finally {
+    if (nodeId === PEER_LOADING_ID) PEER_LOADING_ID = null;
+    if (DATA) renderNodeList(DATA.nodes);
   }
 }
 
@@ -2270,6 +2566,8 @@ function renderPeerDrawer(d, hostname) {
       const label = roleLabel[iface.role] || iface.role.toUpperCase();
       const sc = iface.state === 'UP' ? 'up' : iface.state === 'DOWN' ? 'down' : 'unknown';
       const addrs = iface.addrs && iface.addrs.length ? `<div class="iface-addrs">${iface.addrs.join(' &nbsp; ')}</div>` : '';
+      const mcs = (iface.tx_mcs || iface.rx_mcs)
+        ? `<div class="iface-addrs">TX ${iface.tx_mcs || '—'} &nbsp; RX ${iface.rx_mcs || '—'}</div>` : '';
       const faultLines = (iface.faults || []).map(f => `<div class="${iface.health==='fault'?'iface-fault':'iface-warn'}">${f}</div>`).join('');
       return `<div class="iface-row health-${iface.health}">
         <div class="iface-header">
@@ -2278,7 +2576,7 @@ function renderPeerDrawer(d, hostname) {
           ${label ? `<span class="iface-role role-${iface.role}">${label}</span>` : ''}
         </div>
         ${iface.detail ? `<div class="iface-detail">${iface.detail}</div>` : ''}
-        ${addrs}${faultLines}
+        ${addrs}${mcs}${faultLines}
       </div>`;
     }).join('');
   }
@@ -2304,7 +2602,7 @@ function renderPeerDrawer(d, hostname) {
   }
   html += `</div>`;
 
-  document.getElementById('peer-drawer-body').innerHTML = html;
+  return html;
 }
 </script>
 </body>
@@ -2907,6 +3205,212 @@ def render_status_page():
     html = html.replace('__REFRESH__', str(REFRESH_MS))
     return html
 
+def send_file_response(handler, path, content_type):
+    try:
+        with open(path, 'rb') as f:
+            body = f.read()
+    except FileNotFoundError:
+        handler.send_response(404)
+        handler.end_headers()
+        handler.wfile.write(b'Not found')
+        return
+    handler.send_response(200)
+    handler.send_header('Content-Type', content_type)
+    handler.send_header('Content-Length', str(len(body)))
+    handler.send_header('Cache-Control', 'public, max-age=3600')
+    handler.end_headers()
+    handler.wfile.write(body)
+
+def render_perf_auth_page(next_path='/', error=''):
+    safe_next = html.escape(next_path, quote=True)
+    safe_error = html.escape(error)
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>perf.local login</title>
+<script>
+(() => {{
+  const key = 'manetUiTheme';
+  const params = new URLSearchParams(window.location.search);
+  const forced = params.get('theme');
+  let theme = (forced === 'dark' || forced === 'light') ? forced : null;
+  if (!theme) {{
+    try {{
+      const saved = localStorage.getItem(key);
+      if (saved === 'dark' || saved === 'light') theme = saved;
+    }} catch (e) {{}}
+  }}
+  if (!theme && window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) theme = 'dark';
+  if (!theme) theme = 'light';
+  document.documentElement.dataset.theme = theme;
+  try {{ localStorage.setItem(key, theme); }} catch (e) {{}}
+}})();
+</script>
+<style>
+@keyframes autofill-detect {{ from {{ opacity: 1; }} to {{ opacity: 1; }} }}
+body {{
+  margin: 0;
+  min-height: 100vh;
+  min-height: 100svh;
+  display: grid;
+  place-items: center;
+  padding: 18px;
+  box-sizing: border-box;
+  background:
+    radial-gradient(circle at top left, rgba(236,176,0,.18), transparent 28%),
+    radial-gradient(circle at top right, rgba(2,0,13,.08), transparent 26%),
+    #ebeae8;
+  color: #02000d;
+  font-family: Roobert, Arial, sans-serif;
+}}
+.wrap {{
+  width: min(460px, calc(100vw - 28px));
+  position: fixed;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  max-height: calc(100svh - 36px);
+  background: rgba(255,255,255,.94);
+  border: 1px solid #e7e2da;
+  border-radius: 18px;
+  box-shadow: 0 24px 60px rgba(2,0,13,.12);
+  overflow: auto;
+}}
+.top {{
+  padding: 18px 20px 14px;
+  border-bottom: 1px solid #e7e2da;
+  background: transparent;
+  text-align: center;
+}}
+.logo {{
+  width: min(260px, 72vw);
+  max-width: 100%;
+  height: auto;
+  display: block;
+  margin: 0 auto;
+  filter: none;
+}}
+h1 {{ margin: 14px 0 4px; font-size: 18px; }}
+p  {{ margin: 0; font-size: 13px; color: #615f68; }}
+form {{ padding: 18px 20px 20px; display: grid; gap: 12px; }}
+label {{ font-size: 12px; font-weight: 700; color: #02000d; }}
+.sr-only {{
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}}
+input {{
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid #d6d2cb;
+  border-radius: 10px;
+  padding: 10px 12px;
+  font: inherit;
+  color: #02000d;
+  background: #ffffff;
+  animation: autofill-detect 0s both;
+}}
+input:focus {{
+  outline: none;
+  border-color: #ecb000;
+  box-shadow: 0 0 0 3px rgba(236,176,0,.18);
+}}
+button {{
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid #ecb000;
+  background: #ecb000;
+  color: #02000d;
+  border-radius: 999px;
+  padding: 10px 14px;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 800;
+  cursor: pointer;
+}}
+.err {{
+  min-height: 18px;
+  color: #b42318;
+  font-size: 12px;
+}}
+:root[data-theme="dark"] body {{
+  background:
+    radial-gradient(circle at top left, rgba(236,176,0,.18), transparent 28%),
+    radial-gradient(circle at top right, rgba(255,255,255,.08), transparent 26%),
+    #02000d;
+  color: #f8f6ef;
+}}
+:root[data-theme="dark"] .wrap {{
+  background: rgba(18,17,24,.94);
+  border-color: #24212b;
+  box-shadow: 0 24px 60px rgba(0,0,0,.34);
+}}
+:root[data-theme="dark"] .top {{
+  border-bottom-color: #24212b;
+  background: transparent;
+}}
+:root[data-theme="dark"] .logo {{
+  filter: brightness(0) invert(1);
+}}
+:root[data-theme="dark"] p {{
+  color: #aaa5b2;
+}}
+:root[data-theme="dark"] label {{
+  color: #f8f6ef;
+}}
+:root[data-theme="dark"] input {{
+  border-color: #34313b;
+  color: #f8f6ef;
+  background: #121118;
+}}
+:root[data-theme="dark"] button {{
+  border-color: #ecb000;
+  background: #ecb000;
+  color: #02000d;
+}}
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="top">
+      <img class="logo" src="/assets/fer-logo.svg" data-light="/assets/fer-logo.svg" data-dark="/assets/fer-logo.svg" alt="FER">
+      <h1>perf.local</h1>
+      <p>Enter the provisioned management password to continue.</p>
+    </div>
+    <form id="perf-login-form" method="post" action="/auth/perf-login" autocomplete="on">
+      <input type="hidden" name="next" value="{safe_next}">
+      <label class="sr-only" for="username">Username</label>
+      <input class="sr-only" id="username" name="username" type="text" value="admin" autocomplete="username" tabindex="-1" aria-hidden="true">
+      <label for="password">Management password</label>
+      <input id="password" name="password" type="password" autocomplete="current-password" autofocus>
+      <div class="err">{safe_error}</div>
+      <button type="submit">Login</button>
+    </form>
+  </div>
+  <script>
+    (() => {{
+      const form = document.getElementById('perf-login-form');
+      const password = document.getElementById('password');
+      if (!form || !password) return;
+      let submitted = false;
+      password.addEventListener('animationstart', () => {{
+        if (submitted || !password.value) return;
+        submitted = true;
+        requestAnimationFrame(() => form.requestSubmit());
+      }});
+    }})();
+  </script>
+</body>
+</html>"""
+
 # ─────────────────────────────────────────────────────────────────────────────
 # HTTP Handler
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2940,12 +3444,69 @@ class MeshHandler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def read_json_body(self):
+        length = int(self.headers.get('Content-Length', '0') or '0')
+        raw = self.rfile.read(length) if length else b'{}'
+        return json.loads(raw.decode('utf-8') or '{}')
+
+    def read_form_body(self):
+        length = int(self.headers.get('Content-Length', '0') or '0')
+        raw = self.rfile.read(length) if length else b''
+        return parse_qs(raw.decode('utf-8'), keep_blank_values=True)
+
+    def _perf_cookie_valid(self):
+        cookies = parse_cookie_header(self.headers.get('Cookie', ''))
+        return is_valid_perf_auth_token(cookies.get(PERF_AUTH_COOKIE, ''))
+
+    def _send_perf_cookie_redirect(self, target_path, token):
+        target_path = normalize_local_redirect(target_path)
+        self.send_response(303)
+        self.send_header('Location', target_path or '/')
+        self.send_header('Set-Cookie', f'{PERF_AUTH_COOKIE}={token}; Path=/; Max-Age={PERF_AUTH_COOKIE_MAX_AGE}; SameSite=Lax')
+        self.end_headers()
+
+    def _send_perf_auth_required(self, next_path='/', error=''):
+        next_path = normalize_local_redirect(next_path)
+        body = render_perf_auth_page(next_path=next_path, error=error).encode('utf-8')
+        self.send_response(401)
+        self.send_header('Content-Type', 'text/html; charset=utf-8')
+        self.send_header('Content-Length', str(len(body)))
+        self.send_header('Cache-Control', 'no-store')
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _send_perf_logout_redirect(self):
+        self.send_response(303)
+        self.send_header('Location', '/auth/perf-login')
+        self.send_header('Set-Cookie', f'{PERF_AUTH_COOKIE}=; Path=/; Max-Age=0; SameSite=Lax')
+        self.end_headers()
+
     def _proxy_to_perf(self):
         import urllib.request as _ur
+        parsed = urlparse(self.path)
+        query = parse_qs(parsed.query)
+        supplied = query.get('perf_token', [''])[0]
+        if supplied and is_valid_perf_auth_token(supplied):
+            clean_q = [(k, v) for k, values in query.items() if k != 'perf_token' for v in values]
+            clean_query = '&'.join(
+                f'{k}={quote(v, safe="")}' if v != '' else k
+                for k, v in clean_q
+            )
+            clean_path = parsed.path or '/'
+            if clean_query:
+                clean_path += '?' + clean_query
+            self._send_perf_cookie_redirect(clean_path, supplied)
+            return
+        if not self._perf_cookie_valid():
+            next_path = parsed.path or '/'
+            if parsed.query:
+                next_path += '?' + parsed.query
+            self._send_perf_auth_required(next_path=next_path)
+            return
         target = 'http://127.0.0.1:8081' + self.path
         req = _ur.Request(target, method=self.command)
         for k, v in self.headers.items():
-            if k.lower() not in ('host', 'content-length'):
+            if k.lower() not in ('host', 'content-length', 'cookie'):
                 req.add_header(k, v)
         length = int(self.headers.get('Content-Length', 0))
         data = self.rfile.read(length) if length else None
@@ -2970,13 +3531,29 @@ class MeshHandler(http.server.BaseHTTPRequestHandler):
         return host == 'perf.local' or host == 'perf'
 
     def do_GET(self):
+        parsed = urlparse(self.path)
+        if parsed.path == '/assets/fer-logo.svg':
+            send_file_response(self, FER_LOGO_FULL_FILE, 'image/svg+xml')
+            return
+        if parsed.path == '/assets/fer-logo-black.svg':
+            send_file_response(self, FER_LOGO_BLACK_FILE, 'image/svg+xml')
+            return
+        if parsed.path == '/assets/fer-logo-white.svg':
+            send_file_response(self, FER_LOGO_WHITE_FILE, 'image/svg+xml')
+            return
         if self._is_perf_host():
+            if parsed.path == '/auth/perf-logout':
+                self._send_perf_logout_redirect()
+                return
+            if parsed.path == '/auth/perf-login':
+                next_path = parse_qs(parsed.query).get('next', ['/'])[0]
+                self._send_perf_auth_required(next_path=next_path)
+                return
             self._proxy_to_perf()
             return
 
         conf       = load_kv_file(MESH_CONF_FILE)
         client_ip  = self.client_address[0]
-        parsed     = urlparse(self.path)
         path       = parsed.path.rstrip('/') or '/'
 
         # Admin page — no Basic auth
@@ -3084,6 +3661,17 @@ class MeshHandler(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self):
         if self._is_perf_host():
+            parsed = urlparse(self.path)
+            if parsed.path == '/auth/perf-login':
+                form = self.read_form_body()
+                password = (form.get('password', [''])[0] or '').strip()
+                next_path = normalize_local_redirect((form.get('next', ['/'])[0] or '/').strip())
+                conf = load_kv_file(MESH_CONF_FILE)
+                if password and password == get_provisioned_manage_password(conf):
+                    self._send_perf_cookie_redirect(next_path, get_perf_auth_token())
+                else:
+                    self._send_perf_auth_required(next_path=next_path, error='Wrong management password')
+                return
             self._proxy_to_perf()
             return
 
@@ -3101,6 +3689,24 @@ class MeshHandler(http.server.BaseHTTPRequestHandler):
             if not is_allowed_ip(client_ip, conf):
                 self.send_403()
                 return
+
+        if path == '/api/perf-auth':
+            if not is_allowed_ip(client_ip, conf):
+                self.send_403()
+                return
+            try:
+                req = json.loads(body)
+            except Exception:
+                req = {}
+            password = str(req.get('password', '')).strip()
+            if password and password == get_provisioned_manage_password(conf):
+                self.send_json({'ok': True, 'token': get_perf_auth_token()})
+            else:
+                self.send_response(401)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({'ok': False, 'error': 'Wrong management password'}).encode('utf-8'))
+            return
 
         if path == '/api/admin/stage':
             try:
@@ -3245,9 +3851,30 @@ class MeshHandler(http.server.BaseHTTPRequestHandler):
                 if not iface or dbm is None:
                     self.send_json({'ok': False, 'error': 'Missing iface or dbm'})
                     return
+                requested = _fmt_dbm(dbm)
+                cap = get_iface_txpower_cap(iface)
+                if cap and float(requested) > float(cap):
+                    self.send_json({
+                        'ok': False,
+                        'error': f'Unsupported txpower {requested} dBm for {iface} (max {cap} dBm)',
+                        'options': txpower_choices_from_cap(cap),
+                    })
+                    return
                 mbm = int(float(dbm) * 100)
-                subprocess.run(['iw', 'dev', iface, 'set', 'txpower', 'fixed', str(mbm)], timeout=5)
-                self.send_json({'ok': True, 'iface': iface, 'dbm': dbm})
+                subprocess.run(
+                    ['iw', 'dev', iface, 'set', 'txpower', 'fixed', str(mbm)],
+                    capture_output=True, text=True, check=True, timeout=5
+                )
+                self.send_json({
+                    'ok': True,
+                    'iface': iface,
+                    'dbm': requested,
+                    'cap': cap,
+                    'options': txpower_choices_from_cap(cap) if cap else [],
+                })
+            except subprocess.CalledProcessError as e:
+                err = (e.stderr or e.stdout or str(e)).strip()
+                self.send_json({'ok': False, 'error': err or str(e)})
             except Exception as e:
                 self.send_json({'ok': False, 'error': str(e)})
 
@@ -3256,6 +3883,7 @@ class MeshHandler(http.server.BaseHTTPRequestHandler):
                 req     = json.loads(body)
                 channel = req.get('channel')
                 bw      = req.get('bw', '1MHz')
+                dbm     = req.get('dbm')
                 if not channel:
                     self.send_json({'ok': False, 'error': 'Missing channel'})
                     return
@@ -3292,7 +3920,21 @@ class MeshHandler(http.server.BaseHTTPRequestHandler):
                     # Fall back to wpa_supplicant restart if morse_cli fails
                     subprocess.run(['systemctl', 'restart', 'wpa_supplicant-s1g-wlan2.service'],
                                    timeout=15)
-                self.send_json({'ok': True, 'channel': channel, 'freq_khz': freq_khz, 'bw': bw})
+                if dbm is not None:
+                    cap = get_halow_bw_txpower_cap(bw) or get_iface_txpower_cap('wlan2')
+                    requested = _fmt_dbm(dbm)
+                    if cap and float(requested) > float(cap):
+                        self.send_json({
+                            'ok': False,
+                            'error': f'Unsupported txpower {requested} dBm for wlan2 (max {cap} dBm)',
+                            'options': txpower_choices_from_cap(cap),
+                        })
+                        return
+                    subprocess.run(
+                        ['iw', 'dev', 'wlan2', 'set', 'txpower', 'fixed', str(int(float(dbm) * 100))],
+                        capture_output=True, text=True, check=True, timeout=5
+                    )
+                self.send_json({'ok': True, 'channel': channel, 'freq_khz': freq_khz, 'bw': bw, 'dbm': _fmt_dbm(dbm) if dbm is not None else ''})
             except Exception as e:
                 self.send_json({'ok': False, 'error': str(e)})
 
@@ -3301,6 +3943,7 @@ class MeshHandler(http.server.BaseHTTPRequestHandler):
                 req     = json.loads(body)
                 iface   = req.get('interface', req.get('iface', ''))
                 channel = req.get('channel')
+                dbm     = req.get('dbm')
                 if iface not in ('wlan0', 'wlan1'):
                     self.send_json({'ok': False, 'error': 'Invalid Wi-Fi interface'})
                     return
@@ -3324,7 +3967,21 @@ class MeshHandler(http.server.BaseHTTPRequestHandler):
 
                 subprocess.run(['systemctl', 'restart', f'wpa_supplicant@{iface}.service'],
                                check=True, timeout=15)
-                self.send_json({'ok': True, 'iface': iface, 'channel': channel, 'frequency': freq})
+                if dbm is not None:
+                    cap = get_iface_txpower_cap(iface)
+                    requested = _fmt_dbm(dbm)
+                    if cap and float(requested) > float(cap):
+                        self.send_json({
+                            'ok': False,
+                            'error': f'Unsupported txpower {requested} dBm for {iface} (max {cap} dBm)',
+                            'options': txpower_choices_from_cap(cap),
+                        })
+                        return
+                    subprocess.run(
+                        ['iw', 'dev', iface, 'set', 'txpower', 'fixed', str(int(float(dbm) * 100))],
+                        capture_output=True, text=True, check=True, timeout=5
+                    )
+                self.send_json({'ok': True, 'iface': iface, 'channel': channel, 'frequency': freq, 'dbm': _fmt_dbm(dbm) if dbm is not None else ''})
             except subprocess.CalledProcessError as e:
                 self.send_json({'ok': False, 'error': str(e)})
             except Exception as e:

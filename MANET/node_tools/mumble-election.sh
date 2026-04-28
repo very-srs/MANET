@@ -388,14 +388,20 @@ IPV4_VIP_WITH_MASK="${MUMBLE_IPV4_VIP}/${IPV4_NETWORK#*/}"
 log "Mumble VIPs: IPv4=$MUMBLE_IPV4_VIP, IPv6=$MUMBLE_IPV6_VIP"
 
 # --- Detect Current Incumbent ---
-# Determine who currently holds the VIP so we can apply incumbent bias
+# Use the Alfred node registry as the authoritative source for incumbency.
+# node-manager publishes IS_MUMBLE_SERVER=true only when the local node holds
+# both mumble-server.service AND the Mumble VIP — so the registry reflects the
+# actual winner, not just who has the IP configured.  All nodes read the same
+# Alfred-propagated registry, so there is no per-node ARP/local-IP ambiguity.
 CURRENT_LEADER_MAC=""
-if ip addr show dev "$CONTROL_IFACE" | grep -q "inet $MUMBLE_IPV4_VIP/"; then
-    # We hold the VIP ourselves
-    CURRENT_LEADER_MAC="$MY_MAC"
-else
-    # Check ARP/neighbor table for who owns the VIP
-    CURRENT_LEADER_MAC=$(ip neigh show "$MUMBLE_IPV4_VIP" 2>/dev/null | awk '{print $5}')
+if [ -f "$REGISTRY_STATE_FILE" ]; then
+    INCUMBENT_NODE_ID=$(grep "IS_MUMBLE_SERVER='true'" "$REGISTRY_STATE_FILE" \
+        | head -1 | sed "s/NODE_\([^_]*\)_.*/\1/")
+    if [ -n "$INCUMBENT_NODE_ID" ]; then
+        INCUMBENT_MAC=$(grep "^NODE_${INCUMBENT_NODE_ID}_MAC_ADDRESS=" "$REGISTRY_STATE_FILE" \
+            | cut -d"'" -f2)
+        [ -n "$INCUMBENT_MAC" ] && CURRENT_LEADER_MAC="$INCUMBENT_MAC"
+    fi
 fi
 if [ -n "$CURRENT_LEADER_MAC" ]; then
     log "Current incumbent: $CURRENT_LEADER_MAC (bias: +${INCUMBENT_BIAS} TQ)"
