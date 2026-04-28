@@ -1047,6 +1047,30 @@ EOF
     echo " > DHCP pool: $DHCP_START - $DHCP_END (${POOL_SIZE} IPs for ${MAX_EUDS} EUDs × ${MAX_NODES} nodes)"
 
     AP_CHANNEL="${lan_ap_channel:-11}"
+    AP_BW="${lan_ap_bw:-80}" # used for 5 GHz only (20/40/80). defaults to 80.
+
+    # Decide AP band from channel. (1-14 => 2.4 GHz, >=36 => 5 GHz)
+    # brcmfmac on CM4 supports 802.11ac (VHT) on 5 GHz.
+    if [[ "$AP_CHANNEL" =~ ^[0-9]+$ ]] && (( AP_CHANNEL >= 36 )); then
+        AP_HW_MODE="a"
+    else
+        AP_HW_MODE="g"
+    fi
+
+    # For 80 MHz VHT, hostapd needs a center channel index. Provide a safe mapping
+    # for common non-DFS and DFS ranges; fall back to primary channel.
+    vht_seg0_idx() {
+        local ch="$1"
+        case "$ch" in
+            36|40|44|48) echo 42 ;;
+            52|56|60|64) echo 58 ;;
+            100|104|108|112) echo 106 ;;
+            116|120|124|128) echo 122 ;;
+            132|136|140|144) echo 138 ;;
+            149|153|157|161) echo 155 ;;
+            *) echo "$ch" ;;
+        esac
+    }
 
     cat <<-EOF > /etc/hostapd/hostapd.conf
 interface=$AP_INTERFACE
@@ -1056,11 +1080,28 @@ ssid=${LAN_AP_SSID}-${HOST_MAC}
 country_code=$REGULATORY_DOMAIN
 ieee80211d=1
 
-# Raspberry Pi onboard 2.4 GHz AP for EUD clients
-hw_mode=g
+# Onboard AP for EUD clients (2.4 GHz or 5 GHz depending on channel)
+hw_mode=$AP_HW_MODE
 channel=$AP_CHANNEL
 ieee80211n=1
 wmm_enabled=1
+
+# 5 GHz (802.11ac/VHT) options
+$(if [[ "$AP_HW_MODE" == "a" ]]; then
+    if [[ "$AP_BW" == "80" ]]; then
+        echo "ieee80211ac=1"
+        echo "vht_oper_chwidth=1"
+        echo "vht_oper_centr_freq_seg0_idx=$(vht_seg0_idx "$AP_CHANNEL")"
+        echo "vht_oper_centr_freq_seg1_idx=0"
+    elif [[ "$AP_BW" == "40" ]]; then
+        echo "ieee80211ac=1"
+        echo "vht_oper_chwidth=0"
+    else
+        # 20 MHz on 5 GHz
+        echo "ieee80211ac=1"
+        echo "vht_oper_chwidth=0"
+    fi
+fi)
 
 # WPA2 security
 auth_algs=1
