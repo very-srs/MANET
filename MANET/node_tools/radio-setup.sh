@@ -1072,6 +1072,17 @@ EOF
         esac
     }
 
+    # HT40 +/- selection for 5 GHz. hostapd needs a "second channel offset"
+    # when using HT40/VHT. Use the standard 20 MHz step mapping within 80 MHz blocks.
+    ht40_capab() {
+        local ch="$1"
+        case "$ch" in
+            36|44|52|60|100|108|116|124|132|140|149|157) echo "[HT40+]" ;;
+            40|48|56|64|104|112|120|128|136|144|153|161) echo "[HT40-]" ;;
+            *) echo "" ;;
+        esac
+    }
+
     cat <<-EOF > /etc/hostapd/hostapd.conf
 interface=$AP_INTERFACE
 bridge=br0
@@ -1088,6 +1099,11 @@ wmm_enabled=1
 
 # 5 GHz (802.11ac/VHT) options
 $(if [[ "$AP_HW_MODE" == "a" ]]; then
+    # Request an HT40 offset whenever using 40/80 MHz
+    if [[ "$AP_BW" == "40" || "$AP_BW" == "80" ]]; then
+        cap="$(ht40_capab "$AP_CHANNEL")"
+        [[ -n "$cap" ]] && echo "ht_capab=$cap"
+    fi
     if [[ "$AP_BW" == "80" ]]; then
         echo "ieee80211ac=1"
         echo "vht_oper_chwidth=1"
