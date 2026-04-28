@@ -245,3 +245,17 @@ First-boot configuration script. Sets up:
 - Optional services (MediaMTX, Mumble).
 - Systemd services for node manager.
 - Called once via `radio-setup-run-once.service`, then disabled.
+
+**CM4 / Pi + dual MT7915 and onboard wireless (brcmfmac AP, both AX mesh)**
+
+After `sudo /usr/local/bin/radio-setup.sh`, on the node:
+
+```bash
+cat /var/lib/no_mesh_if /var/lib/mesh_if /var/lib/ap_interface
+for i in $(cat /var/lib/mesh_if); do basename $(readlink -f /sys/class/net/$i/device/driver); done
+iw dev | sed -n '/Interface /,/type /p'
+systemctl is-active wpa_supplicant@wlan0 wpa_supplicant@wlan1 hostapd 2>/dev/null
+batctl meshif bat0 if
+```
+
+Expect: `no_mesh_if` lists onboard `brcmfmac`; `mesh_if` lists **only** the two `mt7915e` (or `mt7916`) interfaces; `ap_interface` matches onboard; `wpa_supplicant@<AP>` should not be required (no mesh config on AP iface); `batctl meshif bat0 if` shows both mesh radios.

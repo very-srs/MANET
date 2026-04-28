@@ -1,2 +1,3 @@
 *.img
 *.deb
+.cursor/mesh-nodes.env

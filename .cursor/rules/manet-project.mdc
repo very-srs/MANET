@@ -1,0 +1,108 @@
+---
+description: Core project knowledge for the MANET mesh networking system
+alwaysApply: true
+---
+
+# MANET Project Context
+
+## What This Is
+
+A complete software suite that turns ARM64 SBCs (Rock 3A, Raspberry Pi 5, CM4) into self-forming mesh network nodes using **batman-adv** (Layer 2) over **802.11ax/s/ah** radios. Nodes coordinate via **Alfred** gossip to handle IP allocation, channel selection, service elections, and partition healing — all without central infrastructure.
+
+## Hardware & Radio Architecture
+
+Nodes can have any combination of these radios:
+
+| Radio Type | Driver | Role | Notes |
+| --- | --- | --- | --- |
+| External AX card (mt7915e) | `mt7915e` | Mesh backhaul | Dual-band: one 2.4 GHz + one 5 GHz radio. Primary mesh transport. |
+| Onboard WiFi (Broadcom) | `brcmfmac` | EUD Access Point | Cannot do mesh. Present on RPi 5 / some boards. Always used as AP when available. |
+| HaLow (Morse Micro) | `morse` | Mesh backhaul | Sub-GHz 802.11ah. Long range, low throughput. Uses `wpa_supplicant_s1g`. |
+
+### AP Selection Priority
+
+1. **Non-mesh onboard radio** (brcmfmac) — first choice, frees both AX radios for mesh
+2. **5 GHz AX radio** — last resort when no onboard WiFi exists; sacrificed from mesh duty
+3. **Never**: HaLow or 2.4 GHz AX
+
+### Interface Naming Convention
+
+Interfaces are pinned via systemd `.link` files (by MAC) in `/etc/systemd/network/10-wlanX.link`. Contiguous naming: mesh radios first (wlan0=2.4 GHz, wlan1=5 GHz), then HaLow, then non-mesh. Driver load order varies between boards, so every radio must have a `.link` file to prevent naming races.
+
+## Key Network Stack
+
+```text
+EUD clients ──► wlan2 (hostapd AP) ──► br0 (bridge) ◄── bat0 (batman-adv)
+                                                              │
+                                            ┌─────────────────┼─────────────────┐
+                                          wlan0             wlan1            wlan_halow
+                                       (2.4 GHz mesh)    (5 GHz mesh)     (sub-GHz mesh)
+                                      wpa_supplicant     wpa_supplicant   wpa_supplicant_s1g
+```
+
+- **bat0**: batman-adv virtual interface (BATMAN_V algorithm)
+- **br0**: bridge containing bat0 + AP interface; carries the mesh IPv4/IPv6
+- **end0**: Ethernet (renamed from eth0); DHCP client or gateway depending on uplink
+
+## Gossip & Coordination
+
+All mesh coordination flows through Alfred (Layer 2 multicast):
+
+`encoder.py` (protobuf → base64) → `alfred -s 65` → mesh → `alfred -r 65` → `decoder.py` → `/var/run/mesh_node_registry`
+
+The registry drives IP allocation, gateway selection, service elections, channel elections, and partition healing. Scripts never talk to each other directly — they read/write the shared registry.
+
+## Node Manager Modes
+
+Controlled by `acs=` in `/etc/mesh.conf`:
+
+- **Static** (`node-manager-static.sh`): Simple loop — publish status, build registry, run IP manager and service elections. No RF scanning or channel changes.
+- **ACS** (`node-manager-acs.sh`): Full orchestrator — adds RF scanning, channel elections, tourguide partition healing, limp mode (jamming response), and quorum checking.
+
+## Web Interfaces on Nodes
+
+- **Port 80** (`mesh-status.py`): Topology visualization, JSON API at `/api/data` (full mesh) and `/api/local` (this node only). Mobile-friendly.
+- **Port 8081** (`perf-dashboard.py`): Performance testing UI — iperf, ping, WiFi/HaLow controls, data export.
+
+## Key Paths on Nodes
+
+| Path | Purpose |
+| --- | --- |
+| `/etc/mesh.conf` | Node configuration (SSID, key, network CIDR, EUD mode, services) |
+| `/var/lib/mesh_if` | List of mesh-role interfaces (one per line) |
+| `/var/lib/halow_if` | HaLow interfaces |
+| `/var/lib/no_mesh_if` | Non-mesh interfaces (AP candidates) |
+| `/var/lib/ap_interface` | Selected AP interface name |
+| `/var/lib/iface_map` | Runtime name mapping |
+| `/var/run/mesh_node_registry` | Decoded peer registry from Alfred |
+| `/etc/mesh_ipv4_state` | Persistent IP chunk allocation |
+| `/var/log/radio-setup.log` | radio-setup.sh output |
+| `/boot/firmware/provision.log` | RPi provisioning log |
+| `/var/log/mesh-provision.log` | Rock 3A provisioning log |
+
+## Repo Structure
+
+- `MANET/provisioning/` — Flashing scripts (`linux.sh`, `windows.ps1`) and first-boot templates
+- `MANET/node_tools/` — Runtime scripts deployed to nodes (node-manager, elections, mesh tools)
+- `MANET/binaries_arm64/` — Pre-compiled `alfred`, `batctl`, `wpa_supplicant_s1g` for ARM64
+- `MANET/networkd-dispatcher/` — Carrier/routable event handlers for gateway management
+- `MANET/install_packages/` — Tarball contents (kernel, firmware, systemd units)
+- `MANET/systemd/` — Unit files for batman-enslave and its watchdog
+
+## Default Credentials
+
+| Account | Username | Password |
+| --- | --- | --- |
+| SSH / node user | `radio` | Set during provisioning |
+| Armbian root (Rock 3A) | `root` | `1234` |
+
+## SSH Notes
+
+- User `radio` has sudo but requires password via `-S` flag in non-interactive sessions: `echo $PASSWORD | sudo -S <command>`
+- `iw` and `batctl` are in `/usr/sbin/` which may not be in PATH; use full path or `export PATH=$PATH:/usr/sbin:/usr/local/sbin`
+
+## Workflow Rules
+
+- **Never commit on behalf of the user.** Make changes to files but leave `git add` and `git commit` to the user.
+- **Always create a branch** before making code fixes. Use `git checkout -b <branch-name>` before editing files. Branch names should be descriptive (e.g. `fix/contiguous-wlan-link-naming`).
+- **Keep live nodes and repo in sync.** When fixing something on a node via SSH, always make the corresponding fix in the repo on a branch in the same session. The repo is the source of truth — a live-only fix will be lost on the next provision or update.

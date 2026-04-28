@@ -765,16 +765,24 @@ select_target_device() {
                 read -p "Press Enter to run 'sudo rpiboot' and mount the eMMC..."
                 echo
                 sudo rpiboot
-                echo "'rpiboot' finished. Waiting 4s for device to settle..."
-                sleep 4
-
+                echo "'rpiboot' finished. Waiting up to 60s for device to appear..."
+                local NEW_DISK=""
                 local DISKS_AFTER
-                DISKS_AFTER=$(lsblk -d -n -o NAME)
-                local NEW_DISK
-                NEW_DISK=$(comm -13 <(echo "$DISKS_BEFORE" | sort) <(echo "$DISKS_AFTER" | sort))
+                for i in $(seq 1 60); do
+                        sleep 1
+                        DISKS_AFTER=$(lsblk -d -n -o NAME)
+                        NEW_DISK=$(comm -13 <(echo "$DISKS_BEFORE" | sort) <(echo "$DISKS_AFTER" | sort))
+                        if [ -n "$NEW_DISK" ]; then
+                                echo "Device appeared after ${i}s."
+                                sleep 2
+                                break
+                        fi
+                        printf "."
+                done
+                echo
 
                 if [ -z "$NEW_DISK" ]; then
-                        echo "ERROR: No new disk detected after rpiboot."
+                        echo "ERROR: No new disk detected after 60s."
                         echo "Please check connections and try again."
                         exit 1
                 fi
@@ -883,6 +891,8 @@ hardware_model=${HARDWARE_MODEL}
 eud=${EUD_CONNECTION}
 lan_ap_ssid=${LAN_AP_SSID}
 lan_ap_key=${LAN_AP_KEY}
+lan_ap_channel=36
+lan_ap_bw=80
 max_euds_per_node=${MAX_EUDS_PER_NODE}
 mtx=${INSTALL_MEDIAMTX}
 mumble=${INSTALL_MUMBLE}
