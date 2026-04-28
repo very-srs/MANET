@@ -721,8 +721,9 @@ echo "Setting radio-setup.sh to run at next reboot"
 cat << EOF > /etc/systemd/system/radio-setup-run-once.service
 [Unit]
 Description=Run radio setup script once after reboot
-After=network-online.target multi-user.target
+After=network-online.target
 Wants=network-online.target
+Before=batman-enslave.service node-manager.service mesh-status.service perf-dashboard.service
 
 [Service]
 Type=oneshot
