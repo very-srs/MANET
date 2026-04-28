@@ -397,6 +397,34 @@ def get_iface_txpower_cap(iface):
 # ─────────────────────────────────────────────────────────────────────────────
 # Registry Parser
 # ─────────────────────────────────────────────────────────────────────────────
+def read_iface_txpower_dbm(iface):
+    try:
+        r = subprocess.run(['iw', 'dev', iface, 'info'],
+                           capture_output=True, text=True, timeout=5)
+        m = re.search(r'txpower ([\d.]+) dBm', r.stdout)
+        if m:
+            return _fmt_dbm(m.group(1))
+    except Exception:
+        pass
+    return ''
+
+def set_iface_txpower_verified(iface, dbm, retries=6, delay=0.25):
+    requested = _fmt_dbm(dbm)
+    subprocess.run(
+        ['iw', 'dev', iface, 'set', 'txpower', 'fixed', str(int(float(requested) * 100))],
+        capture_output=True, text=True, check=True, timeout=5
+    )
+    actual = ''
+    for _ in range(retries):
+        time.sleep(delay)
+        actual = read_iface_txpower_dbm(iface)
+        if actual and abs(float(actual) - float(requested)) < 0.05:
+            return requested, actual
+    raise RuntimeError(
+        f'TX power command accepted but {iface} is still '
+        f'{actual or "unknown"} dBm, expected {requested} dBm'
+    )
+
 def parse_registry():
     """Parse /var/run/mesh_node_registry into a dict of node dicts."""
     nodes = {}
@@ -3860,15 +3888,12 @@ class MeshHandler(http.server.BaseHTTPRequestHandler):
                         'options': txpower_choices_from_cap(cap),
                     })
                     return
-                mbm = int(float(dbm) * 100)
-                subprocess.run(
-                    ['iw', 'dev', iface, 'set', 'txpower', 'fixed', str(mbm)],
-                    capture_output=True, text=True, check=True, timeout=5
-                )
+                requested, actual = set_iface_txpower_verified(iface, dbm)
                 self.send_json({
                     'ok': True,
                     'iface': iface,
                     'dbm': requested,
+                    'actual_dbm': actual,
                     'cap': cap,
                     'options': txpower_choices_from_cap(cap) if cap else [],
                 })
@@ -3930,11 +3955,8 @@ class MeshHandler(http.server.BaseHTTPRequestHandler):
                             'options': txpower_choices_from_cap(cap),
                         })
                         return
-                    subprocess.run(
-                        ['iw', 'dev', 'wlan2', 'set', 'txpower', 'fixed', str(int(float(dbm) * 100))],
-                        capture_output=True, text=True, check=True, timeout=5
-                    )
-                self.send_json({'ok': True, 'channel': channel, 'freq_khz': freq_khz, 'bw': bw, 'dbm': _fmt_dbm(dbm) if dbm is not None else ''})
+                    requested, actual = set_iface_txpower_verified('wlan2', dbm)
+                self.send_json({'ok': True, 'channel': channel, 'freq_khz': freq_khz, 'bw': bw, 'dbm': requested if dbm is not None else '', 'actual_dbm': actual if dbm is not None else ''})
             except Exception as e:
                 self.send_json({'ok': False, 'error': str(e)})
 
@@ -3977,11 +3999,8 @@ class MeshHandler(http.server.BaseHTTPRequestHandler):
                             'options': txpower_choices_from_cap(cap),
                         })
                         return
-                    subprocess.run(
-                        ['iw', 'dev', iface, 'set', 'txpower', 'fixed', str(int(float(dbm) * 100))],
-                        capture_output=True, text=True, check=True, timeout=5
-                    )
-                self.send_json({'ok': True, 'iface': iface, 'channel': channel, 'frequency': freq, 'dbm': _fmt_dbm(dbm) if dbm is not None else ''})
+                    requested, actual = set_iface_txpower_verified(iface, dbm)
+                self.send_json({'ok': True, 'iface': iface, 'channel': channel, 'frequency': freq, 'dbm': requested if dbm is not None else '', 'actual_dbm': actual if dbm is not None else ''})
             except subprocess.CalledProcessError as e:
                 self.send_json({'ok': False, 'error': str(e)})
             except Exception as e:
