@@ -1,0 +1,17 @@
+[Unit]
+Description=GPS reader — gpsd to /run/gps_status.json
+# Start after gpsd if available; still starts cleanly when gpsd is absent
+# (gps-reader.py writes has_fix=false on connection failure).
+After=gpsd.service gpsd.socket
+Wants=gpsd.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /usr/local/bin/gps-reader.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

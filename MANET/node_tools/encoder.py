@@ -56,6 +56,12 @@ def main():
     parser.add_argument("--config-ack-version", type=str, default="",
                         help="SHA-256 prefix of the pending config this node has staged (ACK signal).")
     parser.add_argument("--gateway-iface", type=str, default="", help="Upstream gateway interface name (end0, usb0, enxXXX, etc.)")
+
+    # --- GPS Location ---
+    parser.add_argument("--latitude", type=float, default=0.0, help="GPS latitude in degrees (WGS84). Omit or 0 if no fix.")
+    parser.add_argument("--longitude", type=float, default=0.0, help="GPS longitude in degrees (WGS84). Omit or 0 if no fix.")
+    parser.add_argument("--altitude", type=float, default=0.0, help="GPS altitude in metres (WGS84). Omit or 0 if no fix.")
+
     parser.add_argument("--halow-tx-mcs", type=str, default="")
     parser.add_argument("--halow-rx-mcs", type=str, default="")
     parser.add_argument("--halow-mcs-peer", type=str, default="")
@@ -108,6 +114,13 @@ def main():
 
     # --- Populate Config ACK ---
     node_info.config_ack_version = args.config_ack_version
+
+    # --- Populate GPS Location ---
+    # Only set if we have a non-zero position (has_fix=true from gps-reader.py)
+    if args.latitude != 0.0 or args.longitude != 0.0:
+        node_info.location.latitude = args.latitude
+        node_info.location.longitude = args.longitude
+        node_info.location.altitude = args.altitude
 
     # --- Populate link MCS summary ---
     node_info.gateway_iface = args.gateway_iface

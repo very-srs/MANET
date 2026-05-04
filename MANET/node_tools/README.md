@@ -2,6 +2,18 @@
 
 This directory contains the core operational scripts for mesh network nodes. These scripts handle service elections, network management, discovery, and coordination.
 
+## Current Release State
+
+As of 2026-05-03, the current install release asset is:
+
+- Release: `v0.27-provisioning-lf`
+- Asset name: `rpi5-install.tar.gz`
+- SHA256: `cc4eb246ab5fc9df32f6131e4abdfd47e6075721c6e79d20dc1ce6936bc01b2b`
+
+The tarball is root-relative (`boot/`, `etc/`, `usr/`, `root/`) and packed with numeric owner/group `0/0`. Do not rename the asset; first-boot provisioning expects exactly `rpi5-install.tar.gz`.
+
+The 2026-05-03 rebuild fixed binary corruption caused by over-broad line-ending normalization. Keep these shipped tools marked as binary in `.gitattributes`: `morse_cli`, `chronyc`, `alfred`, `batctl`, `wpa_cli_s1g`, and `wpa_supplicant_s1g`.
+
 ---
 
 ## Core Orchestration
@@ -165,11 +177,12 @@ Encodes mesh node status to protobuf and Base64 for Alfred broadcast. Inputs inc
 - Service flags (gateway, NTP, MediaMTX, Mumble)
 - Channel data (scan reports, current frequencies)
 - Tourguide tracking
+- GPS location when `/run/gps_status.json` reports `has_fix=true`
 - Node state (active/shutting down)
 
 **decoder.py**
 
-Decodes Base64 protobuf messages to shell variables.
+Decodes Base64 protobuf messages to shell variables, including `GPS_LATITUDE`, `GPS_LONGITUDE`, and `GPS_ALTITUDE` when the payload carries `NodeInfo.location`.
 
 **NodeInfo.proto**
 
@@ -193,6 +206,10 @@ Daemon that automatically discovers and configures Syncthing peers across the me
 ---
 
 ## Time Synchronization
+
+**gps-reader.py**
+
+Daemon for optional u-blox USB GPS receivers. It queries local `gpsd` on `127.0.0.1:2947`, writes `/run/gps_status.json` every 5 seconds, and reports `has_fix=false` safely when gpsd is missing, the dongle is absent, or there is no fix.
 
 **one-shot-time-sync.sh**
 
@@ -234,6 +251,7 @@ Deterministically derives MediaMTX IPv6 VIP from ULA prefix.
 Updates mesh node tools to the latest release from GitHub.
 - In normal mode: checks internet connectivity, compares local vs remote version, downloads and installs the appropriate board-specific tools tarball if out of date.
 - In `--routine` mode: runs silently, rate-limited to once per 24 hours via version file timestamp. Used by the automatic update cron job.
+- Version metadata still points at `very-srs/MANET`; that upstream now has matching `.gitattributes` binary protection on all branches as of 2026-05-03.
 
 ---
 
@@ -246,5 +264,6 @@ First-boot configuration script. Sets up:
 - WPA supplicant configs per interface.
 - Network services (alfred, batman, radvd, chrony).
 - Optional services (MediaMTX, Mumble).
+- Optional GPS/NTP support through `gpsd`, `gps-reader.service`, and chrony `SHM 0`.
 - Systemd services for node manager.
 - Called once via `radio-setup-run-once.service`, then disabled.

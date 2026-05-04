@@ -282,6 +282,23 @@ while true; do
         CPU_LOAD=$(awk '{print $1}' /proc/loadavg 2>/dev/null)
         [ -n "$CPU_LOAD" ] && ENCODER_ARGS+=("--cpu-load-average" "$CPU_LOAD")
 
+        # --- GPS Location ---
+        GPS_LAT=""; GPS_LON=""; GPS_ALT=""
+        if [ -f /run/gps_status.json ]; then
+            eval "$(python3 -c "
+import json, sys
+try:
+    d = json.load(open('/run/gps_status.json'))
+    if d.get('has_fix'):
+        print('GPS_LAT=' + str(d['latitude']))
+        print('GPS_LON=' + str(d['longitude']))
+        print('GPS_ALT=' + str(d['altitude']))
+except Exception:
+    pass
+" 2>/dev/null)"
+        fi
+        [ -n "$GPS_LAT" ] && ENCODER_ARGS+=("--latitude" "$GPS_LAT" "--longitude" "$GPS_LON" "--altitude" "$GPS_ALT")
+
         CURRENT_PAYLOAD=$("$ENCODER_PATH" "${ENCODER_ARGS[@]}" 2>/dev/null)
         
         if [ -n "$CURRENT_PAYLOAD" ]; then

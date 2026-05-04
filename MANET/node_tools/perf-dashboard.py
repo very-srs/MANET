@@ -446,24 +446,43 @@ def fmt_uptime(seconds):
     return f'{d}d{rh:02d}h'
 
 
-def get_session_hop_count(src_ip, dst_ip):
+def _gps_dict(node):
+    g = node.get('gps') or {}
+    return {
+        'available': bool(g.get('available')),
+        'lat': g.get('lat', ''),
+        'lon': g.get('lon', ''),
+        'alt': g.get('alt', ''),
+    }
+
+def get_session_info(src_ip, dst_ip):
+    """Return (hop_count, hop_source, gps_src, gps_dst) from one /api/data call on src."""
+    _null_gps = {'available': False, 'lat': '', 'lon': '', 'alt': ''}
     if not src_ip or not dst_ip:
-        return None, 'missing'
+        return None, 'missing', _null_gps, _null_gps
     try:
         data = call_node_api(src_ip, '/api/data', timeout=5)
     except Exception:
-        return None, 'error'
-    if not isinstance(data, dict):
-        return None, 'error'
-    if data.get('error'):
-        return None, 'error'
+        return None, 'error', _null_gps, _null_gps
+    if not isinstance(data, dict) or data.get('error'):
+        return None, 'error', _null_gps, _null_gps
+
+    gps_src = _null_gps
+    gps_dst = _null_gps
+    hop_count = None
+    hop_source = 'unknown'
+
     for node in data.get('nodes', []):
+        if node.get('is_me'):
+            gps_src = _gps_dict(node)
         if node.get('ip') == dst_ip:
-            hop_count = node.get('hop_count')
-            if isinstance(hop_count, int) and hop_count >= 1:
-                return hop_count, 'batctl'
-            return None, 'unknown'
-    return None, 'unknown'
+            gps_dst = _gps_dict(node)
+            hc = node.get('hop_count')
+            if isinstance(hc, int) and hc >= 1:
+                hop_count = hc
+                hop_source = 'batctl'
+
+    return hop_count, hop_source, gps_src, gps_dst
 
 
 def extract_iperf3_metrics(iperf):
@@ -989,6 +1008,8 @@ def session_to_csv(label):
         'hop_count', 'hop_count_source',
         'tcp_mbps', 'udp_mbps', 'jitter_ms', 'loss_pct',
         'rtt_avg_ms', 'rtt_min_ms', 'rtt_max_ms',
+        'src_lat', 'src_lon', 'src_alt',
+        'dst_lat', 'dst_lon', 'dst_alt',
     ])
     for r in results:
         iperf = r.get('iperf3_result', {})
@@ -996,6 +1017,8 @@ def session_to_csv(label):
         metrics = extract_iperf3_metrics(iperf)
         ping_loss = ping.get('loss_pct', '') if ping else ''
         loss_value = metrics['loss_pct'] if metrics['loss_pct'] is not None else ping_loss
+        gps_src = r.get('gps_source') or {}
+        gps_dst = r.get('gps_destination') or {}
         writer.writerow([
             r.get('timestamp', ''),
             r.get('session_label', ''),
@@ -1014,6 +1037,12 @@ def session_to_csv(label):
             ping.get('rtt_avg', '') if ping else '',
             ping.get('rtt_min', '') if ping else '',
             ping.get('rtt_max', '') if ping else '',
+            gps_src.get('lat', ''),
+            gps_src.get('lon', ''),
+            gps_src.get('alt', ''),
+            gps_dst.get('lat', ''),
+            gps_dst.get('lon', ''),
+            gps_dst.get('alt', ''),
         ])
     return output.getvalue()
 
@@ -1141,9 +1170,11 @@ def run_measurement_session(label, pairs, tests, duration, udp_bitrate):
                     'hop_count':        None,
                     'hop_count_source': '',
                 }
-                hop_count, hop_source = get_session_hop_count(src_ip, dst_ip)
+                hop_count, hop_source, gps_src, gps_dst = get_session_info(src_ip, dst_ip)
                 result_record['hop_count'] = hop_count
                 result_record['hop_count_source'] = hop_source
+                result_record['gps_source'] = gps_src
+                result_record['gps_destination'] = gps_dst
 
                 if test_type == 'icmp_ping':
                     # Run ping locally toward dst
@@ -3063,49 +3094,10 @@ class ThreadedServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
-AVAHI_PERF_SERVICE = '/etc/avahi/services/perf-http.service'
-AVAHI_PERF_CONTENT = """<?xml version="1.0" standalone='no'?>
-<!DOCTYPE service-group SYSTEM "avahi-service.dtd">
-<service-group>
-  <name>MANET Perf Dashboard</name>
-  <host-name>perf.local</host-name>
-  <service>
-    <type>_http._tcp</type>
-    <port>8081</port>
-  </service>
-</service-group>
-"""
-
-def _is_gateway():
-    return os.path.exists('/var/run/mesh-gateway.state')
-
-def _manage_avahi_perf():
-    """Run in background thread: install/remove avahi perf.local based on gateway status."""
-    last = None
-    while True:
-        gw = _is_gateway()
-        if gw != last:
-            try:
-                if gw:
-                    with open(AVAHI_PERF_SERVICE, 'w') as f:
-                        f.write(AVAHI_PERF_CONTENT)
-                    subprocess.run(['systemctl', 'reload', 'avahi-daemon'], timeout=5, capture_output=True)
-                else:
-                    if os.path.exists(AVAHI_PERF_SERVICE):
-                        os.remove(AVAHI_PERF_SERVICE)
-                        subprocess.run(['systemctl', 'reload', 'avahi-daemon'], timeout=5, capture_output=True)
-            except Exception:
-                pass
-            last = gw
-        time.sleep(30)
-
 if __name__ == '__main__':
     import sys
     port = int(sys.argv[1]) if len(sys.argv) > 1 else PORT
     os.makedirs(SESSIONS_DIR, exist_ok=True)
-
-    t = threading.Thread(target=_manage_avahi_perf, daemon=True)
-    t.start()
 
     server = ThreadedServer(('0.0.0.0', port), PerfHandler)
     print(f'MANET Perf Dashboard listening on port {port}')
