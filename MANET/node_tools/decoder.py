@@ -40,6 +40,14 @@ def main():
         print(f"UPTIME_SECONDS={node_info.uptime_seconds}")
         print(f"BATTERY_PERCENTAGE={node_info.battery_percentage}")
         print(f"CPU_LOAD_AVERAGE={format_shell_float(node_info.cpu_load_average)}")
+        if node_info.HasField("location"):
+            print(f"GPS_LATITUDE='{node_info.location.latitude}'")
+            print(f"GPS_LONGITUDE='{node_info.location.longitude}'")
+            print(f"GPS_ALTITUDE='{format_shell_float(node_info.location.altitude)}'")
+        else:
+            print("GPS_LATITUDE=''")
+            print("GPS_LONGITUDE=''")
+            print("GPS_ALTITUDE=''")
         print(f"DATA_CHANNEL_2_4='{node_info.data_channel_2_4}'")
         print(f"DATA_CHANNEL_5_0='{node_info.data_channel_5_0}'")
         print(f"LAST_SEEN_TIMESTAMP={node_info.last_seen_timestamp}")

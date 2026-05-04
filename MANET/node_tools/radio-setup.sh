@@ -1473,25 +1473,7 @@ EOF
 
 systemctl enable mesh-status
 
-# ============================================================================
-# === mDNS — manet.local ===
-# ============================================================================
-# Advertise this node as manet.local on the AP/EUD interface only.
-# avahi-daemon is kept but restricted to deny mesh interfaces (bat0, wlan0-2).
-# Clients connected to the EUD AP can reach the admin panel at http://manet.local
-
-apt install -y avahi-daemon iperf3 traceroute sqlite3 python3-zeroconf 2>/dev/null || true
-install -m 644 /etc/avahi/avahi-daemon.conf /etc/avahi/avahi-daemon.conf.bak 2>/dev/null || true
-cp /usr/local/share/manet/avahi-daemon.conf /etc/avahi/avahi-daemon.conf
-# Restrict avahi to the AP-only interface so nodes on the mesh don't conflict on 'manet'
-AVAHI_AP_IF=$(head -1 /var/lib/no_mesh_if 2>/dev/null)
-if [ -n "$AVAHI_AP_IF" ]; then
-    sed -i "s/allow-interfaces=.*/allow-interfaces=$AVAHI_AP_IF/" /etc/avahi/avahi-daemon.conf
-fi
-cp /usr/local/share/manet/manet-http.service /etc/avahi/services/manet-http.service
-cp /usr/local/share/manet/perf-http.service /etc/avahi/services/perf-http.service 2>/dev/null || true
-systemctl enable avahi-daemon
-systemctl restart avahi-daemon || true
+apt install -y iperf3 traceroute sqlite3 python3-zeroconf 2>/dev/null || true
 
 # ============================================================================
 # === UPS HAT (E) BATTERY MONITOR ===
@@ -1521,18 +1503,86 @@ apt update -qq && apt install -y python3-smbus i2c-tools || true
 systemctl enable battery-reader.service
 
 # ============================================================================
+# === GPS — u-blox USB dongle + chrony SHM NTP ===
+# ============================================================================
+# Supports optional u-blox 7 (USB VID 1546:01a7) GPS receivers.
+# Nodes without a dongle still run gps-reader.service safely — it writes
+# has_fix=false when gpsd is unreachable or has no fix.
+#
+# NTP strategy:
+#   - chrony is already installed and serves the mesh (allow fd01::/64).
+#   - With GPS: SHM 0 refclock (NMEA, ~100 ms accuracy) → stratum ~2.
+#   - Without GPS or fix: chrony falls back to pool.ntp.org or local stratum 10.
+#   - Nodes with GPS automatically become the preferred NTP source because
+#     their chrony stratum beats the stratum-10 fallback of GPS-less nodes.
+#   - No election logic change needed — existing is_ntp_server flag stays
+#     tied to the ethernet gateway; GPS just silently improves time quality.
+
+apt-get install -y gpsd gpsd-clients 2>/dev/null || true
+
+# /etc/default/gpsd — hotplug via gpsd's own udev rules (USBAUTO=true).
+# DEVICES="" means gpsd starts without a fixed device path and picks up
+# any GPS device added after boot through its udev integration.
+cat > /etc/default/gpsd <<'GPSD_CONF'
+DEVICES=""
+GPSD_OPTIONS="-n"
+START_DAEMON="true"
+USBAUTO="true"
+GPSD_CONF
+
+# Patch chrony configs — add SHM 0 refclock and IPv4 mesh allow if absent.
+# ethernet-autodetect.sh can replace chrony.conf from these templates, so all
+# available templates must carry the GPS/mesh-NTP additions too.
+ensure_chrony_gps_config() {
+    local conf="$1"
+    [ -f "$conf" ] || return 0
+
+    if ! grep -q 'refclock SHM 0' "$conf"; then
+        cat >> "$conf" <<'CHRONY_GPS'
+
+# GPS SHM refclock — populated by gpsd when a GPS dongle is present.
+# SHM 0 = NMEA sentences (~100 ms accuracy, stratum 0 source).
+# Nodes without a dongle: gpsd is not running so this refclock stays
+# unreachable and chrony ignores it transparently.
+refclock SHM 0 refid GPS precision 1e-1 delay 0.2 poll 4 offset 0.0
+CHRONY_GPS
+        echo " > chrony: SHM 0 refclock added to $conf"
+    fi
+    if ! grep -q 'allow 10\.30\.2\.' "$conf"; then
+        echo "allow 10.30.2.0/24" >> "$conf"
+        echo " > chrony: allow 10.30.2.0/24 added to $conf"
+    fi
+}
+
+for chrony_conf in \
+    /etc/chrony/chrony.conf \
+    /etc/chrony/chrony-default.conf \
+    /etc/chrony/chrony-server.conf \
+    /etc/chrony/chrony-test.conf; do
+    ensure_chrony_gps_config "$chrony_conf"
+done
+
+systemctl enable gps-reader.service
+systemctl restart gps-reader.service 2>/dev/null || true
+systemctl restart chrony 2>/dev/null || true
+
+# ============================================================================
 # === FIRST RUN vs RE-RUN ===
 # ============================================================================
 
-# Determine if this script is being run for the first time
-# and reboot if so to pick up the changes to the interfaces
+# Determine if this script is being run by the first-boot systemd unit. When
+# interface renames are staged, keep the unit enabled until the post-reboot run
+# finishes; disabling before that leaves provisioning half-complete.
+FIRST_BOOT_UNIT_ENABLED=0
 if systemctl is-enabled radio-setup-run-once.service >/dev/null 2>&1; then
+    FIRST_BOOT_UNIT_ENABLED=1
+fi
+FIRST_BOOT_STAGE_MARKER="/var/lib/radio-setup-first-stage.done"
+
+if [[ "$FIRST_BOOT_UNIT_ENABLED" -eq 1 && ! -f "$FIRST_BOOT_STAGE_MARKER" ]]; then
     apt remove -y network-manager
     systemctl mask rpi-eeprom-update.service
     systemctl set-default multi-user.target
-
-    echo " >> Removing radio-setup-run-once.service"
-    systemctl disable radio-setup-run-once.service
 
     echo " >> Doing initial Syncthing config..."
     install -d -o radio -g radio -m 700 /home/radio/.local/state/syncthing
@@ -1548,7 +1598,7 @@ if systemctl is-enabled radio-setup-run-once.service >/dev/null 2>&1; then
     sed -i '/<options>/a <globalAnnounceEnabled>false</globalAnnounceEnabled>\n<relaysEnabled>false</relaysEnabled>' "$SYNCTHING_CONFIG"
     sed -i 's|<gui enabled="true" tls="false" debugging="false">.*</gui>|<gui enabled="true" tls="false" debugging="false">\n        <address>127.0.0.1:8384</address>\n    </gui>|' "$SYNCTHING_CONFIG"
     echo " -- CONFIGURED -- " >> /etc/issue
-    reboot
+    touch "$FIRST_BOOT_STAGE_MARKER"
 fi
 
 echo " > restarting networkd..."
@@ -1589,4 +1639,11 @@ if [ -f /var/lib/radio-setup-reboot-pending ]; then
     echo "=================================================="
     sleep 5
     reboot
+fi
+
+if [[ "$FIRST_BOOT_UNIT_ENABLED" -eq 1 ]]; then
+    echo " >> Removing radio-setup-run-once.service"
+    systemctl disable radio-setup-run-once.service
+    rm -f "$FIRST_BOOT_STAGE_MARKER"
+    touch /var/lib/radio-setup.done
 fi
