@@ -18,6 +18,12 @@ CONFIG_DIR=".mesh-configs"  # configs are stored locally in this subdirectory
 # RPI OS image URL. rpi-imager will download and cache this.
 PI_OS_IMAGE_URL="https://downloads.raspberrypi.com/raspios_lite_arm64/images/raspios_lite_arm64-2025-10-02/2025-10-01-raspios-trixie-arm64-lite.img.xz"
 
+if ! command -v ipcalc &> /dev/null; then
+	echo "ERROR: 'ipcalc' command not found. Needed for subnet math."
+    echo "Please install it (e.g., 'sudo apt install ipcalc')."
+    exit 1
+fi
+
 # --- Helper Functions ---
 # Function to validate regulatory domain
 validate_regulatory_domain() {
