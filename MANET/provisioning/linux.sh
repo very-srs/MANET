@@ -880,8 +880,8 @@ flash_r3a() {
         # Mount root partition (partition 2 on Armbian - partition 1 is /boot)
         local ROOT_MOUNT="/tmp/armbian-root"
         sudo mkdir -p "$ROOT_MOUNT"
-        echo "Mounting ${LOOP_DEV}p2 to $ROOT_MOUNT"
-        sudo mount "${LOOP_DEV}p2" "$ROOT_MOUNT"
+        echo "Mounting ${LOOP_DEV}p1 to $ROOT_MOUNT"
+        sudo mount "${LOOP_DEV}p1" "$ROOT_MOUNT"
 
         # Write mesh configuration to /etc/mesh.conf
         echo "Writing /etc/mesh.conf..."
