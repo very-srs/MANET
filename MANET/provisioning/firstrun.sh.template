@@ -91,6 +91,8 @@ fi
 # A basic method to set the system time
 date -s "$(curl -sI google.com | grep -i ^Date: | cut -d' ' -f2-)"
 
+hostnamectl set-hostname "mesh-${HOST_MAC}"
+
 cd /root
 
 # Get rid of the exra nonsense printed on an SSH connection
