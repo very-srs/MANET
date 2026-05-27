@@ -16,7 +16,10 @@
 $TEMPLATE_FILE      = "firstrun.sh.template"
 $ROCK3A_TEMPLATE    = "rock3a-provision.sh.template"
 
-$ARMBIAN_IMAGE_URL      = "https://fi.mirror.armbian.de/dl/rock-3a/archive/Armbian_25.11.1_Rock-3a_trixie_vendor_6.1.115_minimal.img.xz"
+# NOTE: The URL references 26.2.1 but the local filename is 25.11.1 — kept in sync
+# with linux.sh which has the same mismatch. Update both together when refreshing
+# to a new Armbian release.
+$ARMBIAN_IMAGE_URL      = "https://fi.mirror.armbian.de/dl/rock-3a/archive/Armbian_26.2.1_Rock-3a_trixie_vendor_6.1.115_minimal.img.xz"
 $ARMBIAN_IMAGE_FILENAME = "Armbian_25.11.1_Rock-3a_trixie_vendor_6.1.115_minimal.img"
 $Script:ARMBIAN_IMAGE   = ""   # Set by Get-ArmbianImage
 
@@ -167,321 +170,107 @@ function Expand-XzFile {
         if ($p -and (Test-Path $p)) {
             Write-Host "Using 7-Zip for decompression..."
             & $p e $CompressedPath "-o$(Split-Path $OutputPath)" -y | Out-Null
-            if ($LASTEXITCODE -eq 0) { Write-Host "Decompression complete."; return $true }
-            Write-Host "ERROR: 7-Zip decompression failed." -ForegroundColor Red
-            return $false
+            if ($LASTEXITCODE -eq 0) {
+                Write-Host "Decompression complete."
+                return $true
+            }
         }
     }
 
-    # Try built-in tar (Windows 10 1803+)
-    $tar = Get-Command tar -ErrorAction SilentlyContinue
-    if ($tar) {
-        Write-Host "Using built-in tar for decompression..."
-        & tar -xf $CompressedPath -C (Split-Path $OutputPath)
-        if ($LASTEXITCODE -eq 0) { Write-Host "Decompression complete."; return $true }
+    # Try WSL xz
+    $wsl = Get-Command wsl -ErrorAction SilentlyContinue
+    if ($wsl) {
+        Write-Host "Using WSL xz for decompression..."
+        $wslInput  = ($CompressedPath  -replace '\\', '/') -replace '^([A-Za-z]):', { "/mnt/$($_.Value[0].ToString().ToLower())" }
+        $wslOutput = ($OutputPath -replace '\\', '/') -replace '^([A-Za-z]):', { "/mnt/$($_.Value[0].ToString().ToLower())" }
+        & wsl xz -dk $wslInput 2>$null
+        if ($LASTEXITCODE -eq 0 -and (Test-Path $OutputPath)) {
+            Write-Host "Decompression complete."
+            return $true
+        }
     }
 
-    Write-Host "ERROR: No decompression tool found. Please install 7-Zip." -ForegroundColor Red
-    Write-Host "Download from: https://www.7-zip.org/"
+    Write-Host "ERROR: Could not decompress .xz file." -ForegroundColor Red
+    Write-Host "Please install 7-Zip (https://www.7-zip.org/) or enable WSL."
     return $false
 }
 
-function Ask-LanCidr {
-    param([int]$maxEuds = 0)
-    $DEFAULT_CIDR = "10.30.2.0/24"
-
-    while ($true) {
-        $confirm = Read-Host "Use default LAN network $DEFAULT_CIDR? (Y/n)"
-        if ([string]::IsNullOrWhiteSpace($confirm) -or $confirm -match "^[Yy]") {
-            $Script:LAN_CIDR_BLOCK = $DEFAULT_CIDR
-        } else {
-            while ($true) {
-                $customCidr = Read-Host "Enter custom LAN CIDR block (e.g., 10.10.0.0/16)"
-                if ($customCidr -notmatch '^(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})/(\d{1,2})$') {
-                    Write-Host "ERROR: Invalid format. Must be x.x.x.x/yy" -ForegroundColor Red; continue
-                }
-                $prefixPart = [int]$Matches[2]
-                if ($prefixPart -lt 16 -or $prefixPart -gt 26) {
-                    Write-Host "ERROR: Prefix /$prefixPart is invalid. Must be between /16 and /26." -ForegroundColor Red; continue
-                }
-                $octets = $Matches[1].Split('.')
-                $o1 = [int]$octets[0]; $o2 = [int]$octets[1]
-                $isPrivate = ($o1 -eq 10) -or ($o1 -eq 172 -and $o2 -ge 16 -and $o2 -le 31) -or ($o1 -eq 192 -and $o2 -eq 168)
-                if (-not $isPrivate) {
-                    Write-Host "ERROR: IP is not in a private range (10.x, 172.16-31.x, 192.168.x)." -ForegroundColor Red; continue
-                }
-                $Script:LAN_CIDR_BLOCK = $customCidr
-                break
-            }
-        }
-
-        if ($maxEuds -gt 0) {
-            $capacity = Calculate-Capacity -cidr $Script:LAN_CIDR_BLOCK -maxEuds $maxEuds
-            Write-Host ""
-            Write-Host "=== Network Capacity Analysis ==="
-            Write-Host "Network: $($Script:LAN_CIDR_BLOCK)"
-            Write-Host "  Total usable IPs:        $($capacity.Total)"
-            Write-Host "  Reserved for services:   $($capacity.Services)"
-            Write-Host "  Reserved for EUD pool:   $($capacity.EudPool) ($maxEuds EUDs x $($capacity.MaxNodes) nodes)"
-            Write-Host "  Available for mesh nodes: $($capacity.MaxNodes)"
-            Write-Host "=================================="
-            if ($capacity.MaxNodes -lt 3) {
-                Write-Host "WARNING: Only $($capacity.MaxNodes) mesh nodes fit. Consider a larger network or fewer max EUDs." -ForegroundColor Yellow
-            }
-            $accept = Read-Host "Accept this configuration? (Y/n)"
-            if ([string]::IsNullOrWhiteSpace($accept) -or $accept -match "^[Yy]") { break }
-            Write-Host "Let's reconfigure..."
-        } else {
-            Write-Host "Using network: $($Script:LAN_CIDR_BLOCK)"
-            break
-        }
-    }
-}
-
-function Ask-Questions {
-    Write-Host "--- Starting New Configuration ---"
-
-    # EUD Connection Type
-    Write-Host "`nSelect EUD (client) connection type:"
-    Write-Host "1. Wired"
-    Write-Host "2. Wireless"
-    Write-Host "3. Auto"
-    do {
-        $choice = Read-Host "Enter choice (1-3)"
-        switch ($choice) {
-            "1" { $Script:EUD_CONNECTION = "wired";    break }
-            "2" { $Script:EUD_CONNECTION = "wireless"; break }
-            "3" { $Script:EUD_CONNECTION = "auto";     break }
-        }
-    } while ($choice -notmatch "^[123]$")
-
-    if ($Script:EUD_CONNECTION -eq "wireless" -or $Script:EUD_CONNECTION -eq "auto") {
-        $Script:LAN_AP_SSID = Read-Host "Enter LAN AP SSID Name"
-        while ($true) {
-            $key = Read-Host "Enter LAN AP WPA2 Key (8-63 chars) [or press Enter to generate]"
-            Write-Host ""
-            if ([string]::IsNullOrWhiteSpace($key)) {
-                $bytes = New-Object byte[] 33
-                [Security.Cryptography.RNGCryptoServiceProvider]::Create().GetBytes($bytes)
-                $Script:LAN_AP_KEY = [Convert]::ToBase64String($bytes)
-                Write-Host "Generated LAN AP Key: $($Script:LAN_AP_KEY)"
-                break
-            }
-            if ($key.Length -lt 8 -or $key.Length -gt 63) {
-                Write-Host "ERROR: Key must be between 8 and 63 characters." -ForegroundColor Red
-            } else { $Script:LAN_AP_KEY = $key; break }
-        }
-    } else {
-        $Script:LAN_AP_SSID       = ""
-        $Script:LAN_AP_KEY        = ""
-        $Script:MAX_EUDS_PER_NODE = 0
-    }
-
-    # Optional Software
-    $r = Read-Host "Install MediaMTX Server? (Y/n)"
-    $Script:INSTALL_MEDIAMTX = if ([string]::IsNullOrWhiteSpace($r) -or $r -match "^[Yy]") { "y" } else { "n" }
-
-    $r = Read-Host "Install Mumble Server (murmur)? (Y/n)"
-    $Script:INSTALL_MUMBLE = if ([string]::IsNullOrWhiteSpace($r) -or $r -match "^[Yy]") { "y" } else { "n" }
-
-    # Mesh Configuration
-    $Script:MESH_SSID = Read-Host "Enter MESH SSID Name"
-
-    while ($true) {
-        $key = Read-Host "Enter MESH SAE Key (WPA3 password, 8-63 chars) [or press Enter to generate]"
-        Write-Host ""
-        if ([string]::IsNullOrWhiteSpace($key)) {
-            $bytes = New-Object byte[] 33
-            [Security.Cryptography.RNGCryptoServiceProvider]::Create().GetBytes($bytes)
-            $Script:MESH_SAE_KEY = [Convert]::ToBase64String($bytes)
-            Write-Host "Generated SAE Key: $($Script:MESH_SAE_KEY)"
-            break
-        }
-        if ($key.Length -lt 8 -or $key.Length -gt 63) {
-            Write-Host "ERROR: Key must be between 8 and 63 characters." -ForegroundColor Red
-        } else { $Script:MESH_SAE_KEY = $key; break }
-    }
-
-    # Regulatory Domain
-    while ($true) {
-        $domain = Read-Host "Enter WiFi regulatory domain (2-letter country code, default: US)"
-        if ([string]::IsNullOrWhiteSpace($domain)) { $domain = "US" }
-        $validated = Test-RegulatoryDomain -domain $domain
-        if ($validated) {
-            $Script:REGULATORY_DOMAIN = $validated
-            $Script:HALOW_REGULATORY_DOMAIN = Get-HalowRegulatoryDomain -wifiDomain $validated
-            Write-Host "Using regulatory domain: $($Script:REGULATORY_DOMAIN)"
-            if ($Script:HALOW_REGULATORY_DOMAIN -ne $Script:REGULATORY_DOMAIN) {
-                Write-Host "Using HaLow regulatory region: $($Script:HALOW_REGULATORY_DOMAIN)"
-            }
-            break
-        } else {
-            Write-Host "ERROR: Invalid regulatory domain: $domain" -ForegroundColor Red
-            Write-Host "Enter a valid 2-letter ISO country code (e.g., US, GB, DE, JP, AU)"
-        }
-    }
-
-    # Radio user password
-    Write-Host "The device will have a user called 'radio' for SSH access."
-    $pw = Read-Host "Enter a password for the radio user [or press Enter to default to 'radio']"
-    Write-Host ""
-    $Script:RADIO_PW = if ([string]::IsNullOrWhiteSpace($pw)) { Write-Host "Setting default password"; "radio" } else { $pw }
-    Write-Host "Radio password set to: $($Script:RADIO_PW)"
-
-    # Admin password
-    Write-Host ""
-    Write-Host "The network administrator password is used to access the mesh admin interface."
-    $adminPw = Read-Host "Enter admin password [or press Enter to generate 10-char random]"
-    Write-Host ""
-    if ([string]::IsNullOrWhiteSpace($adminPw)) {
-        $Script:ADMIN_PW = Generate-Password -length 10
-        Write-Host "Generated admin password: $($Script:ADMIN_PW)"
-    } else {
-        $Script:ADMIN_PW = $adminPw
-        Write-Host "Admin password set."
-    }
-
-    # Automatic updates
-    Write-Host ""
-    $r = Read-Host "Enable automatic updates for MANET tools? (Y/n)"
-    if ([string]::IsNullOrWhiteSpace($r) -or $r -match "^[Yy]") {
-        $Script:AUTO_UPDATE = "y"; Write-Host "Automatic updates enabled."
-    } else {
-        $Script:AUTO_UPDATE = "n"; Write-Host "Automatic updates disabled."
-    }
-
-    # Max EUDs per node (only for wireless/auto modes)
-    if ($Script:EUD_CONNECTION -eq "wireless" -or $Script:EUD_CONNECTION -eq "auto") {
-        while ($true) {
-            $input = Read-Host "Maximum EUDs per node's AP (1-20)"
-            if ($input -match '^\d+$' -and [int]$input -ge 1 -and [int]$input -le 20) {
-                $Script:MAX_EUDS_PER_NODE = [int]$input; break
-            } else {
-                Write-Host "ERROR: Please enter a number between 1 and 20." -ForegroundColor Red
-            }
-        }
-    }
-
-    # CIDR block
-    Ask-LanCidr -maxEuds $Script:MAX_EUDS_PER_NODE
-
-    # Auto Channel Selection (incompatible with wireless/auto EUD modes)
-    if ($Script:EUD_CONNECTION -eq "wireless" -or $Script:EUD_CONNECTION -eq "auto") {
-        $Script:AUTO_CHANNEL = "n"
-        Write-Host "Automatic WiFi Channel Selection disabled (not compatible with Wireless/Auto EUD mode)"
-    } else {
-        $r = Read-Host "Use Automatic WiFi Channel Selection? (Y/n)"
-        $Script:AUTO_CHANNEL = if ([string]::IsNullOrWhiteSpace($r) -or $r -match "^[Yy]") { "y" } else { "n" }
-    }
-
-    Write-Host "----------------------------------"
-}
-
-function Save-Config {
-    Write-Host ""
-    $save_choice = Read-Host "Save this configuration? (Y/n)"
-    if (-not ([string]::IsNullOrWhiteSpace($save_choice) -or $save_choice -match "^[Yy]")) { return }
-
-    $config_name = Read-Host "Enter a name for this config"
-    if ([string]::IsNullOrWhiteSpace($config_name)) { Write-Host "Invalid name, skipping save."; return }
-
-    $CONFIG_FILE = Join-Path $CONFIG_DIR "$config_name.conf"
-    $content = @"
-# Mesh Config: $config_name
-EUD_CONNECTION="$($Script:EUD_CONNECTION)"
-LAN_AP_SSID="$($Script:LAN_AP_SSID)"
-LAN_AP_KEY="$($Script:LAN_AP_KEY)"
-MAX_EUDS_PER_NODE="$($Script:MAX_EUDS_PER_NODE)"
-INSTALL_MEDIAMTX="$($Script:INSTALL_MEDIAMTX)"
-INSTALL_MUMBLE="$($Script:INSTALL_MUMBLE)"
-REGULATORY_DOMAIN="$($Script:REGULATORY_DOMAIN)"
-HALOW_REGULATORY_DOMAIN="$($Script:HALOW_REGULATORY_DOMAIN)"
-MESH_SSID="$($Script:MESH_SSID)"
-MESH_SAE_KEY="$($Script:MESH_SAE_KEY)"
-LAN_CIDR_BLOCK="$($Script:LAN_CIDR_BLOCK)"
-AUTO_CHANNEL="$($Script:AUTO_CHANNEL)"
-RADIO_PW="$($Script:RADIO_PW)"
-ADMIN_PW="$($Script:ADMIN_PW)"
-AUTO_UPDATE="$($Script:AUTO_UPDATE)"
-"@
-    [System.IO.File]::WriteAllText($CONFIG_FILE, $content.Replace("`r`n", "`n"))
-    Write-Host "Configuration saved to $CONFIG_FILE"
-}
-
-function Load-Config {
-    param([string]$ConfigFile)
-    Write-Host "Loading config from $ConfigFile..."
-
-    Get-Content $ConfigFile | ForEach-Object {
-        if ($_ -match '^([^=]+)="([^"]*)"') {
-            switch ($Matches[1]) {
-                "EUD_CONNECTION"    { $Script:EUD_CONNECTION    = $Matches[2] }
-                "LAN_AP_SSID"       { $Script:LAN_AP_SSID       = $Matches[2] }
-                "LAN_AP_KEY"        { $Script:LAN_AP_KEY        = $Matches[2] }
-                "MAX_EUDS_PER_NODE" { $Script:MAX_EUDS_PER_NODE = [int]$Matches[2] }
-                "INSTALL_MEDIAMTX"  { $Script:INSTALL_MEDIAMTX  = $Matches[2] }
-                "INSTALL_MUMBLE"    { $Script:INSTALL_MUMBLE    = $Matches[2] }
-                "REGULATORY_DOMAIN" { $Script:REGULATORY_DOMAIN = $Matches[2] }
-                "HALOW_REGULATORY_DOMAIN" { $Script:HALOW_REGULATORY_DOMAIN = $Matches[2] }
-                "MESH_SSID"         { $Script:MESH_SSID         = $Matches[2] }
-                "MESH_SAE_KEY"      { $Script:MESH_SAE_KEY      = $Matches[2] }
-                "LAN_CIDR_BLOCK"    { $Script:LAN_CIDR_BLOCK    = $Matches[2] }
-                "AUTO_CHANNEL"      { $Script:AUTO_CHANNEL      = $Matches[2] }
-                "RADIO_PW"          { $Script:RADIO_PW          = $Matches[2] }
-                "ADMIN_PW"          { $Script:ADMIN_PW          = $Matches[2] }
-                "AUTO_UPDATE"       { $Script:AUTO_UPDATE       = $Matches[2] }
-            }
-        }
-    }
-    if (-not $Script:HALOW_REGULATORY_DOMAIN) {
-        $Script:HALOW_REGULATORY_DOMAIN = Get-HalowRegulatoryDomain -wifiDomain $Script:REGULATORY_DOMAIN
-    }
-
-    Write-Host "--- Loaded Configuration ---"
-    Write-Host "  EUD Connection: $($Script:EUD_CONNECTION)"
-    if ($Script:EUD_CONNECTION -eq "wireless" -or $Script:EUD_CONNECTION -eq "auto") {
-        Write-Host "  LAN AP SSID: $($Script:LAN_AP_SSID)"
-        Write-Host "  LAN AP Key: $($Script:LAN_AP_KEY)"
-        Write-Host "  Max EUDs per node: $($Script:MAX_EUDS_PER_NODE)"
-    }
-    Write-Host "  Install MediaMTX: $($Script:INSTALL_MEDIAMTX)"
-    Write-Host "  Install Mumble: $($Script:INSTALL_MUMBLE)"
-    Write-Host "  Regulatory Domain: $($Script:REGULATORY_DOMAIN)"
-    Write-Host "  HaLow Regulatory Region: $($Script:HALOW_REGULATORY_DOMAIN)"
-    Write-Host "  Mesh SSID: $($Script:MESH_SSID)"
-    Write-Host "  Mesh SAE Key: $($Script:MESH_SAE_KEY)"
-    Write-Host "  LAN CIDR Block: $($Script:LAN_CIDR_BLOCK)"
-    Write-Host "  Auto Channel: $($Script:AUTO_CHANNEL)"
-    Write-Host "  User password: $($Script:RADIO_PW)"
-    Write-Host "  Admin password: $(if ($Script:ADMIN_PW) { $Script:ADMIN_PW } else { '(not set)' })"
-    Write-Host "  Auto Update: $(if ($Script:AUTO_UPDATE) { $Script:AUTO_UPDATE } else { 'n' })"
-    Write-Host "----------------------------"
-}
-
 # ============================================================
-# Rock 3A Image Acquisition
+# Armbian Image Acquisition (Rock 3A)
 # ============================================================
+
+# Verify SHA256 checksum of a file against a .sha256 sidecar.
+# Returns $true if no sidecar exists (skip check) or if hash matches.
+# Returns $false on mismatch.
+function Test-ArmbianChecksum {
+    param([string]$ImagePath, [string]$ChecksumFile)
+
+    if (-not (Test-Path $ChecksumFile)) {
+        return $true   # No sidecar — skip verification
+    }
+
+    Write-Host "Verifying image checksum..."
+    $expected = (Get-Content $ChecksumFile -Raw).Trim() -replace '\s.*', ''
+    $actual   = (Get-FileHash -Algorithm SHA256 -Path $ImagePath).Hash.ToLower()
+
+    if ($expected.ToLower() -eq $actual) {
+        Write-Host "Checksum OK."
+        return $true
+    } else {
+        Write-Host "ERROR: Checksum mismatch!" -ForegroundColor Red
+        Write-Host "  Expected: $expected"
+        Write-Host "  Actual:   $actual"
+        return $false
+    }
+}
+
+# Save SHA256 checksum of a file to a .sha256 sidecar.
+function Save-ArmbianChecksum {
+    param([string]$ImagePath, [string]$ChecksumFile)
+
+    Write-Host "Saving checksum to $ChecksumFile..."
+    $hash = (Get-FileHash -Algorithm SHA256 -Path $ImagePath).Hash.ToLower()
+    [System.IO.File]::WriteAllText($ChecksumFile, "$hash`n")
+}
 
 function Get-ArmbianImage {
     Write-Host ""
     Write-Host "--- Armbian Image Setup for Rock 3A ---"
 
-    $scriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { Get-Location }
+    $scriptDir       = if ($PSScriptRoot) { $PSScriptRoot } else { Get-Location }
     $localImage      = Join-Path $scriptDir $ARMBIAN_IMAGE_FILENAME
     $localCompressed = Join-Path $scriptDir "${ARMBIAN_IMAGE_FILENAME}.xz"
+    $checksumFile    = Join-Path $scriptDir "${ARMBIAN_IMAGE_FILENAME}.sha256"
 
+    # Check for uncompressed image
     if (Test-Path $localImage) {
         Write-Host "Found local Armbian image: $localImage"
-        $Script:ARMBIAN_IMAGE = $localImage
-        return $true
+        if (Test-ArmbianChecksum -ImagePath $localImage -ChecksumFile $checksumFile) {
+            $Script:ARMBIAN_IMAGE = $localImage
+            return $true
+        } else {
+            Write-Host "Local image failed checksum — re-downloading."
+            Remove-Item $localImage -Force
+        }
     }
 
+    # Check for compressed image
     if (Test-Path $localCompressed) {
         Write-Host "Found compressed Armbian image: $localCompressed"
         Write-Host "Decompressing (this may take a moment)..."
         $result = Expand-XzFile -CompressedPath $localCompressed -OutputPath $localImage
-        if ($result) { $Script:ARMBIAN_IMAGE = $localImage; return $true }
-        return $false
+        if ($result) {
+            if (Test-ArmbianChecksum -ImagePath $localImage -ChecksumFile $checksumFile) {
+                $Script:ARMBIAN_IMAGE = $localImage
+                return $true
+            } else {
+                Write-Host "Decompressed image failed checksum — re-downloading."
+                Remove-Item $localImage -Force -ErrorAction SilentlyContinue
+                Remove-Item $localCompressed -Force -ErrorAction SilentlyContinue
+            }
+        } else {
+            return $false
+        }
     }
 
     Write-Host "Armbian image not found locally."
@@ -495,8 +284,20 @@ function Get-ArmbianImage {
     while ($true) {
         $choice = Read-Host "Select option (1 or 2)"
         switch ($choice) {
-            "1" { return Download-ArmbianImage }
-            "2" { return Select-CustomArmbianImage }
+            "1" {
+                $ok = Download-ArmbianImage
+                if ($ok) {
+                    Save-ArmbianChecksum -ImagePath $Script:ARMBIAN_IMAGE -ChecksumFile $checksumFile
+                }
+                return $ok
+            }
+            "2" {
+                $ok = Select-CustomArmbianImage
+                if ($ok) {
+                    Save-ArmbianChecksum -ImagePath $Script:ARMBIAN_IMAGE -ChecksumFile $checksumFile
+                }
+                return $ok
+            }
             default { Write-Host "Invalid selection. Please enter 1 or 2." }
         }
     }
@@ -695,6 +496,291 @@ function Confirm-Flash {
     Write-Host ""; Write-Host "Proceeding with flash..."
 }
 
+# ============================================================
+# Configuration Questions / Save / Load
+# ============================================================
+
+function Ask-LanCidr {
+    param([int]$maxEuds)
+
+    $suggestedPrefixes = @(24, 23, 22, 21, 20)
+
+    Write-Host ""
+    Write-Host "Select the IP network for this mesh (used for node and EUD addressing)."
+
+    while ($true) {
+        Write-Host ""
+        Write-Host "Suggested networks:"
+        $idx = 1
+        foreach ($prefix in $suggestedPrefixes) {
+            $cidr = "10.0.0.0/$prefix"
+            $cap  = Calculate-Capacity -cidr $cidr -maxEuds $maxEuds
+            if ($cap) {
+                Write-Host ("  {0}. {1,-18} ({2} nodes, {3} EUD addresses)" -f $idx, $cidr, $cap.MaxNodes, $cap.EudPool)
+            }
+            $idx++
+        }
+        Write-Host "  $idx. Enter a custom CIDR block"
+        Write-Host ""
+
+        $choice = Read-Host "Enter choice (1-$idx)"
+        $n = 0
+        if ([int]::TryParse($choice, [ref]$n) -and $n -ge 1 -and $n -lt $idx) {
+            $Script:LAN_CIDR_BLOCK = "10.0.0.0/$($suggestedPrefixes[$n - 1])"
+        } elseif ($n -eq $idx) {
+            $custom = Read-Host "Enter CIDR block (e.g. 192.168.1.0/24)"
+            if ($custom -notmatch '^\d+\.\d+\.\d+\.\d+/\d+$') {
+                Write-Host "ERROR: Invalid CIDR format." -ForegroundColor Red
+                continue
+            }
+            $Script:LAN_CIDR_BLOCK = $custom
+        } else {
+            Write-Host "Invalid selection." -ForegroundColor Red
+            continue
+        }
+
+        $cap = Calculate-Capacity -cidr $Script:LAN_CIDR_BLOCK -maxEuds $maxEuds
+        if ($cap) {
+            Write-Host ""
+            Write-Host "Network: $($Script:LAN_CIDR_BLOCK)"
+            Write-Host "  Total host addresses : $($cap.Total)"
+            Write-Host "  Max mesh nodes       : $($cap.MaxNodes)"
+            Write-Host "  EUD address pool     : $($cap.EudPool)"
+            if ($cap.MaxNodes -lt 5) {
+                Write-Host "  ⚠️  Warning: very few node addresses. Consider a larger network or fewer max EUDs." -ForegroundColor Yellow
+            }
+            $accept = Read-Host "Accept this configuration? (Y/n)"
+            if ([string]::IsNullOrWhiteSpace($accept) -or $accept -match "^[Yy]") { break }
+            Write-Host "Let's reconfigure..."
+        } else {
+            Write-Host "Using network: $($Script:LAN_CIDR_BLOCK)"
+            break
+        }
+    }
+}
+
+function Ask-Questions {
+    Write-Host "--- Starting New Configuration ---"
+
+    # EUD Connection Type
+    Write-Host "`nSelect EUD (client) connection type:"
+    Write-Host "1. Wired"
+    Write-Host "2. Wireless"
+    Write-Host "3. Auto"
+    do {
+        $choice = Read-Host "Enter choice (1-3)"
+        switch ($choice) {
+            "1" { $Script:EUD_CONNECTION = "wired";    break }
+            "2" { $Script:EUD_CONNECTION = "wireless"; break }
+            "3" { $Script:EUD_CONNECTION = "auto";     break }
+        }
+    } while ($choice -notmatch "^[123]$")
+
+    if ($Script:EUD_CONNECTION -eq "wireless" -or $Script:EUD_CONNECTION -eq "auto") {
+        $Script:LAN_AP_SSID = Read-Host "Enter LAN AP SSID Name"
+        while ($true) {
+            $key = Read-Host "Enter LAN AP WPA2 Key (8-63 chars) [or press Enter to generate]"
+            Write-Host ""
+            if ([string]::IsNullOrWhiteSpace($key)) {
+                $bytes = New-Object byte[] 33
+                [Security.Cryptography.RNGCryptoServiceProvider]::Create().GetBytes($bytes)
+                $Script:LAN_AP_KEY = [Convert]::ToBase64String($bytes)
+                Write-Host "Generated LAN AP Key: $($Script:LAN_AP_KEY)"
+                break
+            }
+            if ($key.Length -lt 8 -or $key.Length -gt 63) {
+                Write-Host "ERROR: Key must be between 8 and 63 characters." -ForegroundColor Red
+            } else { $Script:LAN_AP_KEY = $key; break }
+        }
+    } else {
+        $Script:LAN_AP_SSID       = ""
+        $Script:LAN_AP_KEY        = ""
+        $Script:MAX_EUDS_PER_NODE = 0
+    }
+
+    # Optional Software
+    $r = Read-Host "Install MediaMTX Server? (Y/n)"
+    $Script:INSTALL_MEDIAMTX = if ([string]::IsNullOrWhiteSpace($r) -or $r -match "^[Yy]") { "y" } else { "n" }
+
+    $r = Read-Host "Install Mumble Server (murmur)? (Y/n)"
+    $Script:INSTALL_MUMBLE = if ([string]::IsNullOrWhiteSpace($r) -or $r -match "^[Yy]") { "y" } else { "n" }
+
+    # Mesh Configuration
+    $Script:MESH_SSID = Read-Host "Enter MESH SSID Name"
+
+    while ($true) {
+        $key = Read-Host "Enter MESH SAE Key (WPA3 password, 8-63 chars) [or press Enter to generate]"
+        Write-Host ""
+        if ([string]::IsNullOrWhiteSpace($key)) {
+            $bytes = New-Object byte[] 33
+            [Security.Cryptography.RNGCryptoServiceProvider]::Create().GetBytes($bytes)
+            $Script:MESH_SAE_KEY = [Convert]::ToBase64String($bytes)
+            Write-Host "Generated SAE Key: $($Script:MESH_SAE_KEY)"
+            break
+        }
+        if ($key.Length -lt 8 -or $key.Length -gt 63) {
+            Write-Host "ERROR: Key must be between 8 and 63 characters." -ForegroundColor Red
+        } else { $Script:MESH_SAE_KEY = $key; break }
+    }
+
+    # Regulatory Domain
+    while ($true) {
+        $domain = Read-Host "Enter WiFi regulatory domain (2-letter country code, default: US)"
+        if ([string]::IsNullOrWhiteSpace($domain)) { $domain = "US" }
+        $validated = Test-RegulatoryDomain -domain $domain
+        if ($validated) {
+            $Script:REGULATORY_DOMAIN       = $validated
+            $Script:HALOW_REGULATORY_DOMAIN = Get-HalowRegulatoryDomain -wifiDomain $validated
+            Write-Host "Using regulatory domain: $($Script:REGULATORY_DOMAIN)"
+            if ($Script:HALOW_REGULATORY_DOMAIN -ne $Script:REGULATORY_DOMAIN) {
+                Write-Host "Using HaLow regulatory region: $($Script:HALOW_REGULATORY_DOMAIN)"
+            }
+            break
+        } else {
+            Write-Host "ERROR: Invalid regulatory domain: $domain" -ForegroundColor Red
+            Write-Host "Enter a valid 2-letter ISO country code (e.g., US, GB, DE, JP, AU)"
+            Write-Host "NOTE: EU is not a country code, use your actual country"
+        }
+    }
+
+    # Radio user password
+    Write-Host "The device will have a user called 'radio' for SSH access."
+    $pw = Read-Host "Enter a password for the radio user [or press Enter to default to 'radio']"
+    Write-Host ""
+    $Script:RADIO_PW = if ([string]::IsNullOrWhiteSpace($pw)) { Write-Host "Setting default password"; "radio" } else { $pw }
+    Write-Host "Radio password set to: $($Script:RADIO_PW)"
+
+    # Admin password
+    Write-Host ""
+    Write-Host "The network administrator password is used to access the mesh admin interface."
+    $adminPw = Read-Host "Enter admin password [or press Enter to generate 10-char random]"
+    Write-Host ""
+    if ([string]::IsNullOrWhiteSpace($adminPw)) {
+        $Script:ADMIN_PW = Generate-Password -length 10
+        Write-Host "Generated admin password: $($Script:ADMIN_PW)"
+    } else {
+        $Script:ADMIN_PW = $adminPw
+        Write-Host "Admin password set."
+    }
+
+    # Automatic updates
+    Write-Host ""
+    $r = Read-Host "Enable automatic updates for MANET tools? (Y/n)"
+    if ([string]::IsNullOrWhiteSpace($r) -or $r -match "^[Yy]") {
+        $Script:AUTO_UPDATE = "y"; Write-Host "Automatic updates enabled."
+    } else {
+        $Script:AUTO_UPDATE = "n"; Write-Host "Automatic updates disabled."
+    }
+
+    # Max EUDs per node (only for wireless/auto modes)
+    if ($Script:EUD_CONNECTION -eq "wireless" -or $Script:EUD_CONNECTION -eq "auto") {
+        while ($true) {
+            $input = Read-Host "Maximum EUDs per node's AP (1-20)"
+            if ($input -match '^\d+$' -and [int]$input -ge 1 -and [int]$input -le 20) {
+                $Script:MAX_EUDS_PER_NODE = [int]$input; break
+            } else {
+                Write-Host "ERROR: Please enter a number between 1 and 20." -ForegroundColor Red
+            }
+        }
+    }
+
+    # CIDR block
+    Ask-LanCidr -maxEuds $Script:MAX_EUDS_PER_NODE
+
+    # Auto Channel Selection (incompatible with wireless/auto EUD modes)
+    if ($Script:EUD_CONNECTION -eq "wireless" -or $Script:EUD_CONNECTION -eq "auto") {
+        $Script:AUTO_CHANNEL = "n"
+        Write-Host "Automatic WiFi Channel Selection disabled (not compatible with Wireless/Auto EUD mode)"
+    } else {
+        $r = Read-Host "Use Automatic WiFi Channel Selection? (Y/n)"
+        $Script:AUTO_CHANNEL = if ([string]::IsNullOrWhiteSpace($r) -or $r -match "^[Yy]") { "y" } else { "n" }
+    }
+
+    Write-Host "----------------------------------"
+}
+
+function Save-Config {
+    Write-Host ""
+    $save_choice = Read-Host "Save this configuration? (Y/n)"
+    if (-not ([string]::IsNullOrWhiteSpace($save_choice) -or $save_choice -match "^[Yy]")) { return }
+
+    $config_name = Read-Host "Enter a name for this config"
+    if ([string]::IsNullOrWhiteSpace($config_name)) { Write-Host "Invalid name, skipping save."; return }
+
+    $CONFIG_FILE = Join-Path $CONFIG_DIR "$config_name.conf"
+    $content = @"
+# Mesh Config: $config_name
+EUD_CONNECTION="$($Script:EUD_CONNECTION)"
+LAN_AP_SSID="$($Script:LAN_AP_SSID)"
+LAN_AP_KEY="$($Script:LAN_AP_KEY)"
+MAX_EUDS_PER_NODE="$($Script:MAX_EUDS_PER_NODE)"
+INSTALL_MEDIAMTX="$($Script:INSTALL_MEDIAMTX)"
+INSTALL_MUMBLE="$($Script:INSTALL_MUMBLE)"
+REGULATORY_DOMAIN="$($Script:REGULATORY_DOMAIN)"
+HALOW_REGULATORY_DOMAIN="$($Script:HALOW_REGULATORY_DOMAIN)"
+MESH_SSID="$($Script:MESH_SSID)"
+MESH_SAE_KEY="$($Script:MESH_SAE_KEY)"
+LAN_CIDR_BLOCK="$($Script:LAN_CIDR_BLOCK)"
+AUTO_CHANNEL="$($Script:AUTO_CHANNEL)"
+RADIO_PW="$($Script:RADIO_PW)"
+ADMIN_PW="$($Script:ADMIN_PW)"
+AUTO_UPDATE="$($Script:AUTO_UPDATE)"
+"@
+    [System.IO.File]::WriteAllText($CONFIG_FILE, $content.Replace("`r`n", "`n"))
+    Write-Host "Configuration saved to $CONFIG_FILE"
+}
+
+function Load-Config {
+    param([string]$ConfigFile)
+    Write-Host "Loading config from $ConfigFile..."
+
+    Get-Content $ConfigFile | ForEach-Object {
+        if ($_ -match '^([^=]+)="([^"]*)"') {
+            switch ($Matches[1]) {
+                "EUD_CONNECTION"          { $Script:EUD_CONNECTION          = $Matches[2] }
+                "LAN_AP_SSID"             { $Script:LAN_AP_SSID             = $Matches[2] }
+                "LAN_AP_KEY"              { $Script:LAN_AP_KEY               = $Matches[2] }
+                "MAX_EUDS_PER_NODE"       { $Script:MAX_EUDS_PER_NODE        = [int]$Matches[2] }
+                "INSTALL_MEDIAMTX"        { $Script:INSTALL_MEDIAMTX         = $Matches[2] }
+                "INSTALL_MUMBLE"          { $Script:INSTALL_MUMBLE            = $Matches[2] }
+                "REGULATORY_DOMAIN"       { $Script:REGULATORY_DOMAIN        = $Matches[2] }
+                "HALOW_REGULATORY_DOMAIN" { $Script:HALOW_REGULATORY_DOMAIN  = $Matches[2] }
+                "MESH_SSID"               { $Script:MESH_SSID                = $Matches[2] }
+                "MESH_SAE_KEY"            { $Script:MESH_SAE_KEY              = $Matches[2] }
+                "LAN_CIDR_BLOCK"          { $Script:LAN_CIDR_BLOCK            = $Matches[2] }
+                "AUTO_CHANNEL"            { $Script:AUTO_CHANNEL              = $Matches[2] }
+                "RADIO_PW"                { $Script:RADIO_PW                  = $Matches[2] }
+                "ADMIN_PW"                { $Script:ADMIN_PW                  = $Matches[2] }
+                "AUTO_UPDATE"             { $Script:AUTO_UPDATE               = $Matches[2] }
+            }
+        }
+    }
+
+    if (-not $Script:HALOW_REGULATORY_DOMAIN) {
+        $Script:HALOW_REGULATORY_DOMAIN = Get-HalowRegulatoryDomain -wifiDomain $Script:REGULATORY_DOMAIN
+    }
+
+    Write-Host "--- Loaded Configuration ---"
+    Write-Host "  EUD Connection: $($Script:EUD_CONNECTION)"
+    if ($Script:EUD_CONNECTION -eq "wireless" -or $Script:EUD_CONNECTION -eq "auto") {
+        Write-Host "  LAN AP SSID: $($Script:LAN_AP_SSID)"
+        Write-Host "  LAN AP Key: $($Script:LAN_AP_KEY)"
+        Write-Host "  Max EUDs per node: $($Script:MAX_EUDS_PER_NODE)"
+    }
+    Write-Host "  Install MediaMTX: $($Script:INSTALL_MEDIAMTX)"
+    Write-Host "  Install Mumble: $($Script:INSTALL_MUMBLE)"
+    Write-Host "  Regulatory Domain: $($Script:REGULATORY_DOMAIN)"
+    Write-Host "  HaLow Regulatory Region: $($Script:HALOW_REGULATORY_DOMAIN)"
+    Write-Host "  Mesh SSID: $($Script:MESH_SSID)"
+    Write-Host "  Mesh SAE Key: $($Script:MESH_SAE_KEY)"
+    Write-Host "  LAN CIDR Block: $($Script:LAN_CIDR_BLOCK)"
+    Write-Host "  Auto Channel: $($Script:AUTO_CHANNEL)"
+    Write-Host "  User password: $($Script:RADIO_PW)"
+    Write-Host "  Admin password: $(if ($Script:ADMIN_PW) { $Script:ADMIN_PW } else { '(not set)' })"
+    Write-Host "  Auto Update: $(if ($Script:AUTO_UPDATE) { $Script:AUTO_UPDATE } else { 'n' })"
+    Write-Host "----------------------------"
+}
+
 
 # ============================================================
 # Main Script
@@ -708,7 +794,11 @@ if (-not $currentPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Adm
     exit 1
 }
 
-# --- 1. Basic Checks ---
+# --- 1. Select Hardware (matches linux.sh — hardware selected first) ---
+
+Select-HardwareAndTargetDevice
+
+# --- 2. Basic Checks ---
 
 if (-not (Test-Path $TEMPLATE_FILE)) {
     Write-Host "ERROR: Template file '$TEMPLATE_FILE' not found." -ForegroundColor Red
@@ -723,7 +813,7 @@ if (-not (Test-Path $CONFIG_DIR)) {
     New-Item -ItemType Directory -Path $CONFIG_DIR | Out-Null
 }
 
-# --- 2. Load or Create Config ---
+# --- 3. Load or Create Config ---
 
 $configFiles = Get-ChildItem -Path $CONFIG_DIR -Filter "*.conf" -ErrorAction SilentlyContinue
 
@@ -765,12 +855,7 @@ if ($configFiles.Count -gt 0) {
     Save-Config
 }
 
-# --- 3. Select Hardware and Acquire Image ---
-
-Write-Host ""
-Write-Host "--- Image & Device ---"
-
-Select-HardwareAndTargetDevice
+# --- 4. Acquire Armbian image (Rock 3A only) ---
 
 if ($Script:HARDWARE_MODEL -eq "r3a") {
     $imageOk = Get-ArmbianImage
@@ -830,15 +915,15 @@ if ($Script:HARDWARE_MODEL -eq "r3a") {
         $disk = Get-Disk | Where-Object { $_.Location -eq $tempImage }
         if (-not $disk) { throw "Could not find mounted virtual disk." }
 
-        # Find the root partition (partition 2 on Armbian)
-        $partition = Get-Partition -DiskNumber $disk.Number | Where-Object { $_.PartitionNumber -eq 2 }
-        if (-not $partition) { throw "Could not find root partition (partition 2) on mounted image." }
+        # Find the root partition (partition 1 on Armbian — single-partition layout)
+        $partition = Get-Partition -DiskNumber $disk.Number | Where-Object { $_.PartitionNumber -eq 1 }
+        if (-not $partition) { throw "Could not find root partition (partition 1) on mounted image." }
 
         # Assign a drive letter so Ext2Fsd can mount it
         if (-not $partition.DriveLetter -or $partition.DriveLetter -eq "`0") {
-            Add-PartitionAccessPath -DiskNumber $disk.Number -PartitionNumber 2 -AssignDriveLetter
+            Add-PartitionAccessPath -DiskNumber $disk.Number -PartitionNumber 1 -AssignDriveLetter
             Start-Sleep -Seconds 3
-            $partition = Get-Partition -DiskNumber $disk.Number -PartitionNumber 2
+            $partition = Get-Partition -DiskNumber $disk.Number -PartitionNumber 1
         }
 
         $driveLetter = $partition.DriveLetter
@@ -859,7 +944,7 @@ if ($Script:HARDWARE_MODEL -eq "r3a") {
         Write-Host "Writing /etc/mesh.conf..."
         $meshConf = @"
 # Mesh Network Configuration
-# Generated by provisioning script on $(Get-Date)
+# Generated by provisioning script
 hardware_model=$($Script:HARDWARE_MODEL)
 eud=$($Script:EUD_CONNECTION)
 lan_ap_ssid=$($Script:LAN_AP_SSID)
@@ -879,17 +964,20 @@ auto_update=$($Script:AUTO_UPDATE)
         [System.IO.File]::WriteAllText((Join-Path $rootPath "etc\mesh.conf"), $meshConf.Replace("`r`n", "`n"))
 
         # --------------------------------------------------------
-        # Bypass Armbian firstlogin — pre-create the radio user
+        # Bypass Armbian firstlogin
         # --------------------------------------------------------
-        Write-Host "Bypassing Armbian firstlogin wizard..."
+        Write-Host "Removing .not_logged_in_yet to bypass interactive setup..."
         $notLoggedIn = Join-Path $rootPath "root\.not_logged_in_yet"
         if (Test-Path $notLoggedIn) { Remove-Item $notLoggedIn -Force }
 
-        # Generate SHA-512 shadow hash
-        Write-Host "Generating password hash for radio user..."
+        # --------------------------------------------------------
+        # Generate password hash and create radio user
+        # --------------------------------------------------------
+        Write-Host "Generating password hash..."
         $radioHash = Get-LinuxPasswordHash -password $Script:RADIO_PW
         if (-not $radioHash) {
-            Write-Host "WARNING: Could not generate SHA-512 password hash." -ForegroundColor Yellow
+            Write-Host ""
+            Write-Host "  ⚠️  WARNING: Could not generate password hash." -ForegroundColor Yellow
             Write-Host "         openssl, WSL, and Python were all unavailable."
             Write-Host "         The radio user will be created without a password."
             Write-Host "         You will need to set it manually after first boot:"
@@ -900,15 +988,14 @@ auto_update=$($Script:AUTO_UPDATE)
         Write-Host "Creating radio user..."
 
         # /etc/passwd
-        $passwdPath = Join-Path $rootPath "etc\passwd"
+        $passwdPath    = Join-Path $rootPath "etc\passwd"
         $passwdContent = [System.IO.File]::ReadAllText($passwdPath)
         if ($passwdContent -notmatch "^radio:") {
-            Add-Content -Path $passwdPath -Value "`nradio:x:1000:1000:radio:/home/radio:/bin/bash" -NoNewline
             [System.IO.File]::WriteAllText($passwdPath, ($passwdContent.TrimEnd() + "`nradio:x:1000:1000:radio:/home/radio:/bin/bash`n").Replace("`r`n", "`n"))
         }
 
         # /etc/group — add radio group and add radio to sudo group
-        $groupPath = Join-Path $rootPath "etc\group"
+        $groupPath    = Join-Path $rootPath "etc\group"
         $groupContent = [System.IO.File]::ReadAllText($groupPath)
         if ($groupContent -notmatch "^radio:") {
             $groupContent += "radio:x:1000:`n"
@@ -918,7 +1005,7 @@ auto_update=$($Script:AUTO_UPDATE)
         [System.IO.File]::WriteAllText($groupPath, $groupContent.Replace("`r`n", "`n"))
 
         # /etc/shadow
-        $shadowPath = Join-Path $rootPath "etc\shadow"
+        $shadowPath    = Join-Path $rootPath "etc\shadow"
         $shadowContent = [System.IO.File]::ReadAllText($shadowPath)
         if ($shadowContent -notmatch "^radio:") {
             $shadowContent += "radio:${radioHash}:19700:0:99999:7:::`n"
@@ -944,22 +1031,22 @@ auto_update=$($Script:AUTO_UPDATE)
 
         $provisionScript = [System.IO.File]::ReadAllText($ROCK3A_TEMPLATE)
         $provisionScript = $provisionScript `
-            -replace '__HARDWARE_MODEL__',    $Script:HARDWARE_MODEL `
-            -replace '__EUD_CONNECTION__',    $Script:EUD_CONNECTION `
-            -replace '__LAN_AP_SSID__',       $Script:LAN_AP_SSID `
-            -replace '__LAN_AP_KEY__',        $Script:LAN_AP_KEY `
-            -replace '__MAX_EUDS_PER_NODE__', $Script:MAX_EUDS_PER_NODE `
-            -replace '__INSTALL_MEDIAMTX__',  $Script:INSTALL_MEDIAMTX `
-            -replace '__INSTALL_MUMBLE__',    $Script:INSTALL_MUMBLE `
-            -replace '__MESH_SSID__',         $Script:MESH_SSID `
-            -replace '__MESH_SAE_KEY__',      $Script:MESH_SAE_KEY `
-            -replace '__LAN_CIDR_BLOCK__',    $Script:LAN_CIDR_BLOCK `
-            -replace '__AUTO_CHANNEL__',      $Script:AUTO_CHANNEL `
-            -replace '__RADIO_PW__',          $Script:RADIO_PW `
-            -replace '__REGULATORY_DOMAIN__', $Script:REGULATORY_DOMAIN `
+            -replace '__HARDWARE_MODEL__',          $Script:HARDWARE_MODEL `
+            -replace '__EUD_CONNECTION__',          $Script:EUD_CONNECTION `
+            -replace '__LAN_AP_SSID__',             $Script:LAN_AP_SSID `
+            -replace '__LAN_AP_KEY__',              $Script:LAN_AP_KEY `
+            -replace '__MAX_EUDS_PER_NODE__',       $Script:MAX_EUDS_PER_NODE `
+            -replace '__INSTALL_MEDIAMTX__',        $Script:INSTALL_MEDIAMTX `
+            -replace '__INSTALL_MUMBLE__',          $Script:INSTALL_MUMBLE `
+            -replace '__MESH_SSID__',               $Script:MESH_SSID `
+            -replace '__MESH_SAE_KEY__',            $Script:MESH_SAE_KEY `
+            -replace '__LAN_CIDR_BLOCK__',          $Script:LAN_CIDR_BLOCK `
+            -replace '__AUTO_CHANNEL__',            $Script:AUTO_CHANNEL `
+            -replace '__RADIO_PW__',                $Script:RADIO_PW `
+            -replace '__REGULATORY_DOMAIN__',       $Script:REGULATORY_DOMAIN `
             -replace '__HALOW_REGULATORY_DOMAIN__', $Script:HALOW_REGULATORY_DOMAIN `
-            -replace '__ADMIN_PW__',          $Script:ADMIN_PW `
-            -replace '__AUTO_UPDATE__',       $Script:AUTO_UPDATE
+            -replace '__ADMIN_PW__',                $Script:ADMIN_PW `
+            -replace '__AUTO_UPDATE__',             $Script:AUTO_UPDATE
 
         $provisionScript = $provisionScript.Replace("`r`n", "`n")
 
@@ -997,16 +1084,10 @@ WantedBy=multi-user.target
         Write-Host "Creating provisioning trigger flag..."
         [System.IO.File]::WriteAllText((Join-Path $rootPath "root\.mesh-not-provisioned"), "")
 
-        # Enable the service by creating the symlink (as a file, since Windows can't make
-        # Linux-style symlinks on a mounted ext4 volume; the systemd unit file is enough
-        # because the service already has WantedBy=multi-user.target — Armbian will enable
-        # it on first boot via the preset mechanism, or we create the wants symlink directly)
+        # Enable service via wants symlink (copy, since Windows can't make Linux symlinks
+        # on ext4; Armbian/systemd will accept a regular file copy in the wants directory)
         $wantsDir = Join-Path $systemdDir "multi-user.target.wants"
         if (-not (Test-Path $wantsDir)) { New-Item -ItemType Directory -Path $wantsDir | Out-Null }
-        # Write a small text file that acts as a placeholder; the real symlink will be
-        # resolved on the target's first boot when systemd reads the unit.
-        # Actually: copy the service file to the wants directory (not a symlink, but systemd
-        # will accept a regular file as a unit override on Armbian/Debian).
         Copy-Item (Join-Path $systemdDir "mesh-provision.service") (Join-Path $wantsDir "mesh-provision.service")
 
         # --------------------------------------------------------
@@ -1021,12 +1102,12 @@ WantedBy=multi-user.target
 
         # Wipe and flash
         Write-Host "Wiping target disk..."
-        $physDrive = "\\.\PhysicalDrive$($Script:TARGET_DEVICE)"
         Clear-Disk -Number $Script:TARGET_DEVICE -RemoveData -Confirm:$false -ErrorAction SilentlyContinue
 
         Write-Host "Flashing image to Disk $($Script:TARGET_DEVICE)..."
         $bufferSize = 4MB
         $buffer     = New-Object byte[] $bufferSize
+        $physDrive  = "\\.\PhysicalDrive$($Script:TARGET_DEVICE)"
 
         $src  = [System.IO.File]::OpenRead($tempImage)
         $dest = [System.IO.File]::Open($physDrive, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
@@ -1065,6 +1146,10 @@ WantedBy=multi-user.target
             Write-Host "     Log in as root and run: passwd radio" -ForegroundColor Yellow
         }
         Write-Host ""
+        Write-Host " ONCE BOOTED, THE MESH NODE WILL AUTOMATICALLY START"
+        Write-Host " SETTING ITSELF UP AND WILL REBOOT MULTIPLE TIMES"
+        Write-Host " Just leave it alone, this process takes about ten minutes"
+        Write-Host ""
 
     } catch {
         Write-Host "ERROR: $($_.Exception.Message)" -ForegroundColor Red
@@ -1087,49 +1172,109 @@ WantedBy=multi-user.target
     $templateContent = [System.IO.File]::ReadAllText($TEMPLATE_FILE)
 
     $templateContent = $templateContent `
-        -replace '__HARDWARE_MODEL__',    $Script:HARDWARE_MODEL `
-        -replace '__EUD_CONNECTION__',    $Script:EUD_CONNECTION `
-        -replace '__LAN_AP_SSID__',       $Script:LAN_AP_SSID `
-        -replace '__LAN_AP_KEY__',        $Script:LAN_AP_KEY `
-        -replace '__MAX_EUDS_PER_NODE__', $Script:MAX_EUDS_PER_NODE `
-        -replace '__INSTALL_MEDIAMTX__',  $Script:INSTALL_MEDIAMTX `
-        -replace '__INSTALL_MUMBLE__',    $Script:INSTALL_MUMBLE `
-        -replace '__MESH_SSID__',         $Script:MESH_SSID `
-        -replace '__MESH_SAE_KEY__',      $Script:MESH_SAE_KEY `
-        -replace '__LAN_CIDR_BLOCK__',    $Script:LAN_CIDR_BLOCK `
-        -replace '__AUTO_CHANNEL__',      $Script:AUTO_CHANNEL `
-        -replace '__RADIO_PW__',          $Script:RADIO_PW `
-        -replace '__REGULATORY_DOMAIN__', $Script:REGULATORY_DOMAIN `
+        -replace '__HARDWARE_MODEL__',          $Script:HARDWARE_MODEL `
+        -replace '__EUD_CONNECTION__',          $Script:EUD_CONNECTION `
+        -replace '__LAN_AP_SSID__',             $Script:LAN_AP_SSID `
+        -replace '__LAN_AP_KEY__',              $Script:LAN_AP_KEY `
+        -replace '__MAX_EUDS_PER_NODE__',       $Script:MAX_EUDS_PER_NODE `
+        -replace '__INSTALL_MEDIAMTX__',        $Script:INSTALL_MEDIAMTX `
+        -replace '__INSTALL_MUMBLE__',          $Script:INSTALL_MUMBLE `
+        -replace '__MESH_SSID__',               $Script:MESH_SSID `
+        -replace '__MESH_SAE_KEY__',            $Script:MESH_SAE_KEY `
+        -replace '__LAN_CIDR_BLOCK__',          $Script:LAN_CIDR_BLOCK `
+        -replace '__AUTO_CHANNEL__',            $Script:AUTO_CHANNEL `
+        -replace '__RADIO_PW__',                $Script:RADIO_PW `
+        -replace '__REGULATORY_DOMAIN__',       $Script:REGULATORY_DOMAIN `
         -replace '__HALOW_REGULATORY_DOMAIN__', $Script:HALOW_REGULATORY_DOMAIN `
-        -replace '__ADMIN_PW__',          $Script:ADMIN_PW `
-        -replace '__AUTO_UPDATE__',       $Script:AUTO_UPDATE
+        -replace '__ADMIN_PW__',                $Script:ADMIN_PW `
+        -replace '__AUTO_UPDATE__',             $Script:AUTO_UPDATE
 
-    $tempScript = [System.IO.Path]::GetTempFileName()
-    [System.IO.File]::WriteAllText($tempScript, $templateContent.Replace("`r`n", "`n"))
+    # Multi-card flash loop — mirrors linux.sh flash_multiple_cards()
+    $flashCount = 0
+    $keepFlashing = $true
 
-    # Final confirmation
-    Confirm-Flash -DiskNumber $Script:TARGET_DEVICE
+    while ($keepFlashing) {
 
-    # Flash via rpi-imager
-    Write-Host "Running Raspberry Pi Imager..."
-    $targetDrive = "\\.\PhysicalDrive$($Script:TARGET_DEVICE)"
-    & $Script:RPI_IMAGER_PATH --cli $OS_IMAGE_URL $targetDrive --first-run-script $tempScript
+        $tempScript = [System.IO.Path]::GetTempFileName()
+        [System.IO.File]::WriteAllText($tempScript, $templateContent.Replace("`r`n", "`n"))
 
-    Remove-Item $tempScript -Force -ErrorAction SilentlyContinue
+        # Final confirmation
+        Confirm-Flash -DiskNumber $Script:TARGET_DEVICE
 
-    if ($LASTEXITCODE -eq 0) {
-        Write-Host ""
-        Write-Host "==============================================" -ForegroundColor Green
-        Write-Host "           ✅ Flash complete!" -ForegroundColor Green
-        Write-Host "==============================================" -ForegroundColor Green
-        Write-Host ""
-        Write-Host "You can now boot your Raspberry Pi."
-        Write-Host "Connect Ethernet for internet access during first boot provisioning."
-        Write-Host ""
-        Write-Host "  - Radio user: radio / $($Script:RADIO_PW)"
-        Write-Host ""
-    } else {
-        Write-Host "ERROR: rpi-imager exited with code $LASTEXITCODE" -ForegroundColor Red
-        exit 1
+        # Flash via rpi-imager
+        Write-Host "Running Raspberry Pi Imager..."
+        $targetDrive = "\\.\PhysicalDrive$($Script:TARGET_DEVICE)"
+        & $Script:RPI_IMAGER_PATH --cli $OS_IMAGE_URL $targetDrive --first-run-script $tempScript
+
+        Remove-Item $tempScript -Force -ErrorAction SilentlyContinue
+
+        if ($LASTEXITCODE -eq 0) {
+            $flashCount++
+            Write-Host ""
+            Write-Host "==============================================" -ForegroundColor Green
+            Write-Host "           ✅ Flash complete!" -ForegroundColor Green
+            Write-Host "==============================================" -ForegroundColor Green
+            Write-Host ""
+            Write-Host " ONCE BOOTED, THE MESH NODE WILL AUTOMATICALLY START"
+            Write-Host " SETTING ITSELF UP AND WILL REBOOT MULTIPLE TIMES"
+            Write-Host " Just leave it alone, this process takes about ten minutes"
+            Write-Host ""
+        } else {
+            Write-Host ""
+            Write-Host "ERROR: rpi-imager exited with code $LASTEXITCODE" -ForegroundColor Red
+            Write-Host ""
+        }
+
+        # Offer to flash another card with the same settings
+        Write-Host "==============================================" -ForegroundColor Cyan
+        $again = Read-Host "Flash another card with the same settings? (y/N)"
+        if ($again -notmatch "^[Yy]") {
+            $keepFlashing = $false
+        } else {
+            Write-Host ""
+            Write-Host "Insert the next SD card, then select the target device."
+
+            # Re-detect available disks for next card
+            $bootDisk = (Get-Disk | Where-Object { $_.IsBoot -eq $true }).Number
+            $disks = Get-Disk | Where-Object {
+                $_.Number -ne $bootDisk -and
+                $_.OperationalStatus -eq "Online" -and
+                $_.Size -gt 0
+            }
+
+            if ($disks.Count -eq 0) {
+                Write-Host "ERROR: No suitable target devices found." -ForegroundColor Red
+                $keepFlashing = $false
+            } else {
+                Write-Host "Available devices:"
+                $i = 1; $diskMap = @{}
+                foreach ($disk in $disks) {
+                    $sizeGB = [math]::Round($disk.Size / 1GB, 2)
+                    Write-Host "$i. Disk $($disk.Number): $($disk.FriendlyName) - ${sizeGB}GB"
+                    $diskMap[$i] = $disk; $i++
+                }
+                Write-Host "$i. Done (stop flashing)"
+
+                do {
+                    $c = Read-Host "Enter device number (1-$i)"
+                    $n = 0
+                    if ([int]::TryParse($c, [ref]$n)) {
+                        if ($n -eq $i) { $keepFlashing = $false; break }
+                        if ($diskMap.ContainsKey($n)) {
+                            $Script:TARGET_DEVICE = $diskMap[$n].Number
+                            Write-Host "Selected: Disk $($Script:TARGET_DEVICE) - $($diskMap[$n].FriendlyName)"
+                            break
+                        }
+                    }
+                    Write-Host "Invalid selection." -ForegroundColor Red
+                } while ($true)
+            }
+        }
     }
+
+    Write-Host ""
+    Write-Host "=============================================="
+    Write-Host "  Done. $flashCount card(s) flashed."
+    Write-Host "=============================================="
+    Write-Host ""
 }
