@@ -1,0 +1,12 @@
+[Unit]
+Description=Restore ebtables rules
+Before=batman-enslave.service dnsmasq.service
+After=network-pre.target
+
+[Service]
+Type=oneshot
+ExecStart=/sbin/ebtables-restore < /etc/ebtables.rules
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

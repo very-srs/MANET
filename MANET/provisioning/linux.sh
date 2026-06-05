@@ -11,7 +11,7 @@ TEMP_SCRIPT_FILE=$(mktemp)
 
 # Armbian imgage source, does need to be updated from time to time as it ages out
 ARMBIAN_IMAGE_URL="https://fi.mirror.armbian.de/dl/rock-3a/archive/Armbian_26.2.1_Rock-3a_trixie_vendor_6.1.115_minimal.img.xz"
-ARMBIAN_IMAGE_FILENAME="Armbian_25.11.1_Rock-3a_trixie_vendor_6.1.115_minimal.img"
+ARMBIAN_IMAGE_FILENAME="Armbian_26.2.1_Rock-3a_trixie_vendor_6.1.115_minimal.img"
 ARMBIAN_IMAGE=""  # Will be set by acquire_armbian_image function
 CONFIG_DIR=".mesh-configs"  # configs are stored locally in this subdirectory
 
@@ -877,11 +877,27 @@ flash_r3a() {
         LOOP_DEV=$(sudo losetup -fP --show "$TEMP_IMAGE")
         echo "Mounted image as: $LOOP_DEV"
 
-        # Mount root partition (partition 2 on Armbian - partition 1 is /boot)
+        # Find the ext4 rootfs partition — auto-detects single or split layout
+        local ROOT_PART=""
+        for part in "${LOOP_DEV}p"*; do
+                local fstype
+                fstype=$(sudo blkid -s TYPE -o value "$part" 2>/dev/null)
+                if [ "$fstype" = "ext4" ]; then
+                        ROOT_PART="$part"
+                        break
+                fi
+        done
+        if [ -z "$ROOT_PART" ]; then
+                echo "ERROR: No ext4 partition found in $TEMP_IMAGE"
+                sudo losetup -d "$LOOP_DEV"
+                rm -f "$TEMP_IMAGE"
+                exit 1
+        fi
+        echo "Found rootfs partition: $ROOT_PART"
+
         local ROOT_MOUNT="/tmp/armbian-root"
         sudo mkdir -p "$ROOT_MOUNT"
-        echo "Mounting ${LOOP_DEV}p1 to $ROOT_MOUNT"
-        sudo mount "${LOOP_DEV}p1" "$ROOT_MOUNT"
+        sudo mount "$ROOT_PART" "$ROOT_MOUNT"
 
         # Write mesh configuration to /etc/mesh.conf
         echo "Writing /etc/mesh.conf..."

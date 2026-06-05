@@ -168,7 +168,15 @@ elif [ "__HARDWARE_MODEL__" = "rpi4" ]; then
 		touch /var/lib/expand-root-done
 elif [ "__HARDWARE_MODEL__" = "r3a" ]; then
 		echo "Applying Rock 3A specific settings..."
-		wget -q https://www.colorado-governor.com/manet/r3a-install.tar.gz -O /root/morse-pi-install.tar.gz || {
+		R3A_URL=$(curl -s https://api.github.com/repos/mrleongalaxyum/manet-dev/releases/latest \
+				| grep -oE '"browser_download_url": *"[^"]*r3a-install[^"/]*\.tar\.gz"' \
+				| grep -oE 'https://[^"]*' \
+				| head -1)
+		if [ -z "$R3A_URL" ]; then
+				echo "ERROR: Could not resolve r3a-install.tar.gz from latest release"
+				exit 1
+		fi
+		wget -q "$R3A_URL" -O /root/morse-pi-install.tar.gz || {
 				echo "ERROR: Failed to download Rock 3A package"
 				exit 1
 		}
@@ -232,30 +240,8 @@ chmod 440 /etc/sudoers.d/* 2>/dev/null || true
 
 # Platform-specific post-extraction steps
 if [ "__HARDWARE_MODEL__" = "r3a" ]; then
-	# Unpack the r3a kernel
-	cd /root
-	dpkg -i *.deb
-
-	# Add the morse firmware
-	cd /root/morse-firmware
-	cp firmware/mm8108*.bin /lib/firmware/morse/
-	cp bcf/morsemicro/*.bin /lib/firmware/morse/
-	cp bcf/azurewave/*.bin /lib/firmware/morse/
-	cp bcf/netprisma/*.bin /lib/firmware/morse/
-	cp bcf/quectel/*.bin /lib/firmware/morse/
-
-	# Disable predictable interface names for Armbian
+	# Kernel and firmware are in the tarball; just fix up Armbian boot config.
 	sed -i '/^extraargs=/ s/$/ net.ifnames=0/' /boot/armbianEnv.txt
-	
-	cd /root
-else
-	# RPi-specific firmware
-	cd /root/morse-firmware
-	sudo cp firmware/mm8108*.bin /lib/firmware/morse/
-	sudo cp bcf/morsemicro/*.bin /lib/firmware/morse/
-	sudo cp bcf/azurewave/*.bin /lib/firmware/morse/
-	sudo cp bcf/netprisma/*.bin /lib/firmware/morse/
-	sudo cp bcf/quectel/*.bin /lib/firmware/morse/
 fi
 
 
@@ -297,12 +283,19 @@ EOF
 
 # Load the morse driver with options to allow the interface to be picked up
 # This will be re-written by radio-setup and become specific to the chosen region
+if [ "__HARDWARE_MODEL__" = "r3a" ]; then
+cat << EOF > /etc/modprobe.d/morse.conf
+options morse country=US
+options morse enable_mcast_whitelist=0 enable_mcast_rate_control=1
+EOF
+else
 cat << EOF > /etc/modprobe.d/morse.conf
 options morse country=US
 options morse spi_clock_speed=1500000
 options morse bcf=bcf_fgh100mhaamd.bin
 options morse enable_mcast_whitelist=0 enable_mcast_rate_control=1
 EOF
+fi
 
 
 # More kernel tweaks
