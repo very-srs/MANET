@@ -1491,6 +1491,40 @@ for _cfg in /boot/firmware/config.txt /boot/config.txt; do
     fi
 done
 
+# ============================================================================
+# === RPi config.txt — SPI, Morse HaLow overlay, CM4 PCIe 32-bit DMA ===
+# ============================================================================
+# The Morse mm610x HaLow chip uses SPI on CM4 and RPi5. config.txt must load
+# the DT overlay, enable SPI, and drive GPIO 3/7/17 HIGH at boot (Morse
+# power/reset pins). CM4 nodes with a PCIe mt7916 WiFi card also need
+# pcie-32bit-dma: the BCM2711 PCIe outbound window sits above 4GB and the
+# card fails probe with -ENOMEM without forcing 32-bit DMA mapping.
+for _cfg in /boot/firmware/config.txt /boot/config.txt; do
+    [ -f "$_cfg" ] || continue
+
+    if ! grep -q 'dtparam=spi=on' "$_cfg"; then
+        echo "dtparam=spi=on" >> "$_cfg"
+        echo " > SPI enabled in $_cfg"
+    fi
+    if ! grep -q 'mm610x-spi' "$_cfg"; then
+        echo "dtoverlay=mm610x-spi.dtbo" >> "$_cfg"
+        echo " > mm610x-spi HaLow overlay added to $_cfg"
+    fi
+    for _gpio_line in "gpio=3=op,dh" "gpio=7=op,dh" "gpio=17=op,dh"; do
+        grep -qF "$_gpio_line" "$_cfg" || echo "$_gpio_line" >> "$_cfg"
+    done
+    echo " > Morse GPIO power/reset pins set in $_cfg"
+
+    # CM4 only: PCIe WiFi cards (mt7916) need 32-bit DMA — the BCM2711 PCIe
+    # outbound window is above 4GB which the card cannot address otherwise.
+    if grep -q 'Compute Module 4' /proc/device-tree/model 2>/dev/null; then
+        if ! grep -q 'pcie-32bit-dma' "$_cfg"; then
+            printf '\n[cm4]\ndtoverlay=pcie-32bit-dma\n' >> "$_cfg"
+            echo " > pcie-32bit-dma added to $_cfg for CM4 PCIe WiFi"
+        fi
+    fi
+done
+
 # RPi5 uses i2c_designware — i2c-dev module must load at boot for /dev/i2c-1
 if ! grep -q '^i2c-dev$' /etc/modules 2>/dev/null; then
     echo 'i2c-dev' >> /etc/modules
@@ -1586,6 +1620,9 @@ if [[ "$FIRST_BOOT_UNIT_ENABLED" -eq 1 && ! -f "$FIRST_BOOT_STAGE_MARKER" ]]; th
 
     echo " >> Doing initial Syncthing config..."
     install -d -o radio -g radio -m 700 /home/radio/.local/state/syncthing
+    # syncthing's apt post-install may have already created .local as radio:root;
+    # install -d skips chown on pre-existing directories, so fix it explicitly.
+    chown radio:radio /home/radio/.local
     sudo -u radio syncthing -generate="/home/radio/.config/syncthing"
     sleep 5
     killall syncthing
