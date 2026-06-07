@@ -213,6 +213,9 @@ tar -zxf /root/morse-pi-install.tar.gz -C /
 udevadm control --reload-rules 2>/dev/null || true
 udevadm trigger 2>/dev/null || true
 
+# disable onboard wifi
+echo "dtoverlay=disable-wifi" >> /boot/firmware/config.txt"
+
 # Fix networkd-dispatcher ownership (tar extracts as current user; dispatcher
 # refuses to run scripts not owned by root)
 chown root:root /etc/networkd-dispatcher \
@@ -720,14 +723,7 @@ echo "Setting radio-setup.sh to run at next reboot"
 cat << EOF > /etc/systemd/system/radio-setup-run-once.service
 [Unit]
 Description=Run radio setup script once after reboot
-After=network-online.target
-Wants=network-online.target
-# Note: do not add 'Before=batman-enslave.service node-manager.service ...'
-# here. radio-setup.sh itself writes those .service files (heredoc emit), so
-# at the time radio-setup-run-once first runs they either don't exist yet
-# (the directive is a no-op) or they were just written by this very script
-# (the directive is redundant). multi-user.target ordering with Type=oneshot
-# is sufficient to keep radio-setup ahead of mesh runtime services.
+After=multi-user.target
 
 [Service]
 Type=oneshot
