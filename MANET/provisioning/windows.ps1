@@ -1229,7 +1229,7 @@ WantedBy=multi-user.target
 
     while ($keepFlashing) {
 
-        $tempScript = Join-Path $ScriptDir "firstrun.sh"
+		$tempScript = Join-Path $ScriptDir "firstrun.sh"
         [System.IO.File]::WriteAllText($tempScript, $templateContent.Replace("`r`n", "`n"))
 
         # Final confirmation
@@ -1237,11 +1237,11 @@ WantedBy=multi-user.target
 
         # Flash via rpi-imager
         Write-Host "Running Raspberry Pi Imager..."
+        Write-Host "Firstrun script path: $tempScript"
         $targetDrive = "\\.\PhysicalDrive$($Script:TARGET_DEVICE)"
-        & $Script:RPI_IMAGER_PATH --cli $OS_IMAGE_URL $targetDrive --first-run-script $tempScript
+        & $Script:RPI_IMAGER_PATH --cli $OS_IMAGE_URL $targetDrive --first-run-script "$tempScript"
 
         Remove-Item $tempScript -Force -ErrorAction SilentlyContinue
-
         if ($LASTEXITCODE -eq 0) {
             $flashCount++
             Write-Host ""
