@@ -1229,8 +1229,8 @@ WantedBy=multi-user.target
 
     while ($keepFlashing) {
 
-		$tempScript = Join-Path $ScriptDir "firstrun.sh"
-		[System.IO.File]::WriteAllText($tempScript, $templateContent.Replace("`r`n", "`n"))
+        $tempScript = Join-Path $ScriptDir "firstrun.sh"
+        [System.IO.File]::WriteAllText($tempScript, $templateContent.Replace("`r`n", "`n"))
 
         # Final confirmation
         Confirm-Flash -DiskNumber $Script:TARGET_DEVICE
