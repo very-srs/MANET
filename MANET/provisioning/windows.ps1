@@ -3,7 +3,7 @@
 .SYNOPSIS
     A script to image new mesh radio nodes on Windows
 .DESCRIPTION
-    Equivalent to linux.sh — flashes Raspberry Pi and Radxa Rock 3A devices
+    Equivalent to linux.sh - flashes Raspberry Pi and Radxa Rock 3A devices
     with mesh network configurations. Rock 3A images are customised by mounting
     the Armbian ext4 root partition via Ext2Fsd. Raspberry Pi images are written
     with rpi-imager.
@@ -16,11 +16,8 @@
 $TEMPLATE_FILE      = "firstrun.sh.template"
 $ROCK3A_TEMPLATE    = "rock3a-provision.sh.template"
 
-# NOTE: The URL references 26.2.1 but the local filename is 25.11.1 — kept in sync
-# with linux.sh which has the same mismatch. Update both together when refreshing
-# to a new Armbian release.
 $ARMBIAN_IMAGE_URL      = "https://fi.mirror.armbian.de/dl/rock-3a/archive/Armbian_26.2.1_Rock-3a_trixie_vendor_6.1.115_minimal.img.xz"
-$ARMBIAN_IMAGE_FILENAME = "Armbian_25.11.1_Rock-3a_trixie_vendor_6.1.115_minimal.img"
+$ARMBIAN_IMAGE_FILENAME = "Armbian_26.2.1_Rock-3a_trixie_vendor_6.1.115_minimal.img"
 $Script:ARMBIAN_IMAGE   = ""   # Set by Get-ArmbianImage
 
 $CONFIG_DIR    = ".mesh-configs"
@@ -102,11 +99,12 @@ function Calculate-Capacity {
     $totalHosts = [math]::Pow(2, $hostBits) - 2   # subtract network and broadcast
     $reserved   = 5
 
+    $available = $totalHosts - $reserved
     if ($maxEuds -gt 0) {
-        $maxNodes = [math]::Floor($totalHosts / (1 + $maxEuds))
+        $maxNodes = [math]::Floor($available / (1 + $maxEuds))
         $eudPool  = $maxNodes * $maxEuds
     } else {
-        $maxNodes = $totalHosts - $reserved
+        $maxNodes = $available
         $eudPool  = 0
     }
 
@@ -181,8 +179,10 @@ function Expand-XzFile {
     $wsl = Get-Command wsl -ErrorAction SilentlyContinue
     if ($wsl) {
         Write-Host "Using WSL xz for decompression..."
-        $wslInput  = ($CompressedPath  -replace '\\', '/') -replace '^([A-Za-z]):', { "/mnt/$($_.Value[0].ToString().ToLower())" }
-        $wslOutput = ($OutputPath -replace '\\', '/') -replace '^([A-Za-z]):', { "/mnt/$($_.Value[0].ToString().ToLower())" }
+        $wslInput = $CompressedPath -replace '\\', '/'
+        if ($wslInput -match '^([A-Za-z]):(.*)') { $wslInput = "/mnt/$($Matches[1].ToLower())$($Matches[2])" }
+        $wslOutput = $OutputPath -replace '\\', '/'
+        if ($wslOutput -match '^([A-Za-z]):(.*)') { $wslOutput = "/mnt/$($Matches[1].ToLower())$($Matches[2])" }
         & wsl xz -dk $wslInput 2>$null
         if ($LASTEXITCODE -eq 0 -and (Test-Path $OutputPath)) {
             Write-Host "Decompression complete."
@@ -206,7 +206,7 @@ function Test-ArmbianChecksum {
     param([string]$ImagePath, [string]$ChecksumFile)
 
     if (-not (Test-Path $ChecksumFile)) {
-        return $true   # No sidecar — skip verification
+        return $true   # No sidecar - skip verification
     }
 
     Write-Host "Verifying image checksum..."
@@ -249,7 +249,7 @@ function Get-ArmbianImage {
             $Script:ARMBIAN_IMAGE = $localImage
             return $true
         } else {
-            Write-Host "Local image failed checksum — re-downloading."
+            Write-Host "Local image failed checksum - re-downloading."
             Remove-Item $localImage -Force
         }
     }
@@ -264,7 +264,7 @@ function Get-ArmbianImage {
                 $Script:ARMBIAN_IMAGE = $localImage
                 return $true
             } else {
-                Write-Host "Decompressed image failed checksum — re-downloading."
+                Write-Host "Decompressed image failed checksum - re-downloading."
                 Remove-Item $localImage -Force -ErrorAction SilentlyContinue
                 Remove-Item $localCompressed -Force -ErrorAction SilentlyContinue
             }
@@ -474,7 +474,7 @@ function Confirm-Flash {
 
     Write-Host ""
     Write-Host "==============================================" -ForegroundColor Yellow
-    Write-Host "         ⚠️  FINAL CONFIRMATION  ⚠️"          -ForegroundColor Yellow
+    Write-Host "         *** FINAL CONFIRMATION ***"                       -ForegroundColor Yellow
     Write-Host "==============================================" -ForegroundColor Yellow
     Write-Host ""
     Write-Host "You are about to ERASE and FLASH:"
@@ -486,7 +486,7 @@ function Confirm-Flash {
     Write-Host "  Mesh SSID: $($Script:MESH_SSID)"
     Write-Host "  Network:   $($Script:LAN_CIDR_BLOCK)"
     Write-Host ""
-    Write-Host "⚠️  ALL DATA ON DISK $DiskNumber WILL BE DESTROYED! ⚠️" -ForegroundColor Red
+    Write-Host "WARNING: ALL DATA ON DISK $DiskNumber WILL BE DESTROYED!"           -ForegroundColor Red
     Write-Host ""
     Write-Host "==============================================" -ForegroundColor Yellow
     Write-Host ""
@@ -503,55 +503,60 @@ function Confirm-Flash {
 function Ask-LanCidr {
     param([int]$maxEuds)
 
-    $suggestedPrefixes = @(24, 23, 22, 21, 20)
-
-    Write-Host ""
-    Write-Host "Select the IP network for this mesh (used for node and EUD addressing)."
+    $defaultCidr = "10.30.2.0/24"
 
     while ($true) {
-        Write-Host ""
-        Write-Host "Suggested networks:"
-        $idx = 1
-        foreach ($prefix in $suggestedPrefixes) {
-            $cidr = "10.0.0.0/$prefix"
-            $cap  = Calculate-Capacity -cidr $cidr -maxEuds $maxEuds
-            if ($cap) {
-                Write-Host ("  {0}. {1,-18} ({2} nodes, {3} EUD addresses)" -f $idx, $cidr, $cap.MaxNodes, $cap.EudPool)
-            }
-            $idx++
-        }
-        Write-Host "  $idx. Enter a custom CIDR block"
-        Write-Host ""
-
-        $choice = Read-Host "Enter choice (1-$idx)"
-        $n = 0
-        if ([int]::TryParse($choice, [ref]$n) -and $n -ge 1 -and $n -lt $idx) {
-            $Script:LAN_CIDR_BLOCK = "10.0.0.0/$($suggestedPrefixes[$n - 1])"
-        } elseif ($n -eq $idx) {
-            $custom = Read-Host "Enter CIDR block (e.g. 192.168.1.0/24)"
-            if ($custom -notmatch '^\d+\.\d+\.\d+\.\d+/\d+$') {
-                Write-Host "ERROR: Invalid CIDR format." -ForegroundColor Red
-                continue
-            }
-            $Script:LAN_CIDR_BLOCK = $custom
+        $confirm = Read-Host "Use default mesh network range ( $defaultCidr )? (Y/n)"
+        if ([string]::IsNullOrWhiteSpace($confirm) -or $confirm -match "^[Yy]") {
+            $Script:LAN_CIDR_BLOCK = $defaultCidr
         } else {
-            Write-Host "Invalid selection." -ForegroundColor Red
-            continue
+            while ($true) {
+                $custom = Read-Host "Enter custom CIDR block for the mesh (e.g., 10.10.0.0/16)"
+                if ($custom -notmatch '^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}/(\d{1,2})$') {
+                    Write-Host "ERROR: Invalid format. Must be x.x.x.x/yy" -ForegroundColor Red
+                    continue
+                }
+                $prefix = [int]$Matches[1]
+                if ($prefix -lt 16 -or $prefix -gt 26) {
+                    Write-Host "ERROR: Prefix /$prefix is invalid. Must be between /16 and /26." -ForegroundColor Red
+                    continue
+                }
+                $ipPart = ($custom -split '/')[0]
+                $octets = $ipPart -split '\.'
+                $o1 = [int]$octets[0]; $o2 = [int]$octets[1]
+                $isPrivate = ($o1 -eq 10) -or
+                             ($o1 -eq 172 -and $o2 -ge 16 -and $o2 -le 31) -or
+                             ($o1 -eq 192 -and $o2 -eq 168)
+                if (-not $isPrivate) {
+                    Write-Host "ERROR: $ipPart is not in a private range (10.x, 172.16-31.x, 192.168.x)." -ForegroundColor Red
+                    continue
+                }
+                $Script:LAN_CIDR_BLOCK = $custom
+                break
+            }
         }
 
-        $cap = Calculate-Capacity -cidr $Script:LAN_CIDR_BLOCK -maxEuds $maxEuds
-        if ($cap) {
-            Write-Host ""
-            Write-Host "Network: $($Script:LAN_CIDR_BLOCK)"
-            Write-Host "  Total host addresses : $($cap.Total)"
-            Write-Host "  Max mesh nodes       : $($cap.MaxNodes)"
-            Write-Host "  EUD address pool     : $($cap.EudPool)"
-            if ($cap.MaxNodes -lt 5) {
-                Write-Host "  ⚠️  Warning: very few node addresses. Consider a larger network or fewer max EUDs." -ForegroundColor Yellow
+        if ($maxEuds -gt 0) {
+            $cap = Calculate-Capacity -cidr $Script:LAN_CIDR_BLOCK -maxEuds $maxEuds
+            if ($cap) {
+                Write-Host ""
+                Write-Host "=== Network Capacity Analysis ==="
+                Write-Host "Network: $($Script:LAN_CIDR_BLOCK)"
+                Write-Host "  Total usable IPs        : $($cap.Total)"
+                Write-Host "  Reserved for services   : $($cap.Services)"
+                Write-Host "  Reserved for EUD pool   : $($cap.EudPool) (${maxEuds} EUDs x $($cap.MaxNodes) nodes)"
+                Write-Host "  Available for mesh nodes: $($cap.MaxNodes)"
+                Write-Host "=================================="
+                if ($cap.MaxNodes -lt 5) {
+                    Write-Host "WARNING: Only $($cap.MaxNodes) mesh node addresses. Consider a larger network or fewer EUDs." -ForegroundColor Yellow
+                }
+                $accept = Read-Host "Accept this configuration? (Y/n)"
+                if ([string]::IsNullOrWhiteSpace($accept) -or $accept -match "^[Yy]") { break }
+                Write-Host "Let's reconfigure..."
+            } else {
+                Write-Host "Using network: $($Script:LAN_CIDR_BLOCK)"
+                break
             }
-            $accept = Read-Host "Accept this configuration? (Y/n)"
-            if ([string]::IsNullOrWhiteSpace($accept) -or $accept -match "^[Yy]") { break }
-            Write-Host "Let's reconfigure..."
         } else {
             Write-Host "Using network: $($Script:LAN_CIDR_BLOCK)"
             break
@@ -577,7 +582,8 @@ function Ask-Questions {
     } while ($choice -notmatch "^[123]$")
 
     if ($Script:EUD_CONNECTION -eq "wireless" -or $Script:EUD_CONNECTION -eq "auto") {
-        $Script:LAN_AP_SSID = Read-Host "Enter LAN AP SSID Name"
+        Write-Host "EUD wifi network name. This name will have the last 4 of the ethernet MAC address appended to it for node identification."
+        $Script:LAN_AP_SSID = Read-Host "Enter EUD access point SSID name"
         while ($true) {
             $key = Read-Host "Enter LAN AP WPA2 Key (8-63 chars) [or press Enter to generate]"
             Write-Host ""
@@ -794,7 +800,7 @@ if (-not $currentPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Adm
     exit 1
 }
 
-# --- 1. Select Hardware (matches linux.sh — hardware selected first) ---
+# --- 1. Select Hardware (matches linux.sh - hardware selected first) ---
 
 Select-HardwareAndTargetDevice
 
@@ -804,7 +810,7 @@ if (-not (Test-Path $TEMPLATE_FILE)) {
     Write-Host "ERROR: Template file '$TEMPLATE_FILE' not found." -ForegroundColor Red
     exit 1
 }
-if (-not (Test-Path $ROCK3A_TEMPLATE)) {
+if ($Script:HARDWARE_MODEL -eq "r3a" -and -not (Test-Path $ROCK3A_TEMPLATE)) {
     Write-Host "ERROR: Rock 3A template '$ROCK3A_TEMPLATE' not found." -ForegroundColor Red
     exit 1
 }
@@ -915,7 +921,7 @@ if ($Script:HARDWARE_MODEL -eq "r3a") {
         $disk = Get-Disk | Where-Object { $_.Location -eq $tempImage }
         if (-not $disk) { throw "Could not find mounted virtual disk." }
 
-        # Find the root partition (partition 1 on Armbian — single-partition layout)
+        # Find the root partition (partition 1 on Armbian - single-partition layout)
         $partition = Get-Partition -DiskNumber $disk.Number | Where-Object { $_.PartitionNumber -eq 1 }
         if (-not $partition) { throw "Could not find root partition (partition 1) on mounted image." }
 
@@ -977,7 +983,7 @@ auto_update=$($Script:AUTO_UPDATE)
         $radioHash = Get-LinuxPasswordHash -password $Script:RADIO_PW
         if (-not $radioHash) {
             Write-Host ""
-            Write-Host "  ⚠️  WARNING: Could not generate password hash." -ForegroundColor Yellow
+            Write-Host "  WARNING: Could not generate password hash." -ForegroundColor Yellow
             Write-Host "         openssl, WSL, and Python were all unavailable."
             Write-Host "         The radio user will be created without a password."
             Write-Host "         You will need to set it manually after first boot:"
@@ -994,7 +1000,7 @@ auto_update=$($Script:AUTO_UPDATE)
             [System.IO.File]::WriteAllText($passwdPath, ($passwdContent.TrimEnd() + "`nradio:x:1000:1000:radio:/home/radio:/bin/bash`n").Replace("`r`n", "`n"))
         }
 
-        # /etc/group — add radio group and add radio to sudo group
+        # /etc/group - add radio group and add radio to sudo group
         $groupPath    = Join-Path $rootPath "etc\group"
         $groupContent = [System.IO.File]::ReadAllText($groupPath)
         if ($groupContent -notmatch "^radio:") {
@@ -1091,16 +1097,56 @@ WantedBy=multi-user.target
         Copy-Item (Join-Path $systemdDir "mesh-provision.service") (Join-Path $wantsDir "mesh-provision.service")
 
         # --------------------------------------------------------
-        # Unmount and flash
+        # Unmount
         # --------------------------------------------------------
         Write-Host "Unmounting image..."
         Dismount-DiskImage -ImagePath $tempImage | Out-Null
         Start-Sleep -Seconds 2
 
-        # Final confirmation before writing to device
+    } catch {
+        Write-Host "ERROR during image customisation: $($_.Exception.Message)" -ForegroundColor Red
+        try { Dismount-DiskImage -ImagePath $tempImage -ErrorAction SilentlyContinue | Out-Null } catch { }
+        if (Test-Path $tempImage) { Remove-Item $tempImage -Force -ErrorAction SilentlyContinue }
+        exit 1
+    }
+
+    # Multi-card flash loop - mirrors linux.sh flash_multiple_cards() for Rock 3A
+    $r3aFlashCount = 0
+    $r3aKeepFlashing = $true
+    while ($r3aKeepFlashing) {
+        if ($r3aFlashCount -gt 0) {
+            Write-Host ""
+            Write-Host "Insert the next SD card, then select the target device."
+            $bootDisk2 = (Get-Disk | Where-Object { $_.IsBoot -eq $true }).Number
+            $disks2 = Get-Disk | Where-Object {
+                $_.Number -ne $bootDisk2 -and $_.OperationalStatus -eq "Online" -and $_.Size -gt 0
+            }
+            if ($disks2.Count -eq 0) { Write-Host "ERROR: No devices found." -ForegroundColor Red; break }
+            $i2 = 1; $diskMap2 = @{}
+            foreach ($d2 in $disks2) {
+                $sz2 = [math]::Round($d2.Size / 1GB, 2)
+                Write-Host "$i2. Disk $($d2.Number): $($d2.FriendlyName) - ${sz2}GB"
+                $diskMap2[$i2] = $d2; $i2++
+            }
+            Write-Host "$i2. Done (stop flashing)"
+            do {
+                $c2 = Read-Host "Enter device number (1-$i2)"
+                $n2 = 0
+                if ([int]::TryParse($c2, [ref]$n2)) {
+                    if ($n2 -eq $i2) { $r3aKeepFlashing = $false; break }
+                    if ($diskMap2.ContainsKey($n2)) {
+                        $Script:TARGET_DEVICE = $diskMap2[$n2].Number
+                        Write-Host "Selected: Disk $($Script:TARGET_DEVICE) - $($diskMap2[$n2].FriendlyName)"
+                        break
+                    }
+                }
+                Write-Host "Invalid selection." -ForegroundColor Red
+            } while ($true)
+            if (-not $r3aKeepFlashing) { break }
+        }
+
         Confirm-Flash -DiskNumber $Script:TARGET_DEVICE
 
-        # Wipe and flash
         Write-Host "Wiping target disk..."
         Clear-Disk -Number $Script:TARGET_DEVICE -RemoveData -Confirm:$false -ErrorAction SilentlyContinue
 
@@ -1108,10 +1154,8 @@ WantedBy=multi-user.target
         $bufferSize = 4MB
         $buffer     = New-Object byte[] $bufferSize
         $physDrive  = "\\.\PhysicalDrive$($Script:TARGET_DEVICE)"
-
         $src  = [System.IO.File]::OpenRead($tempImage)
         $dest = [System.IO.File]::Open($physDrive, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
-
         try {
             $totalBytes = $src.Length
             $written    = 0
@@ -1128,21 +1172,20 @@ WantedBy=multi-user.target
             Write-Progress -Activity "Flashing" -Completed
         }
 
-        Remove-Item $tempImage -Force -ErrorAction SilentlyContinue
-
+        $r3aFlashCount++
         Write-Host ""
         Write-Host "==============================================" -ForegroundColor Green
-        Write-Host "           ✅ Flash complete!" -ForegroundColor Green
+        Write-Host "           DONE: Flash complete!" -ForegroundColor Green
         Write-Host "==============================================" -ForegroundColor Green
         Write-Host ""
         Write-Host "You can now remove the SD card and boot your Rock 3A."
         Write-Host "First boot provisioning will run automatically when connected to the internet."
         Write-Host ""
-        Write-Host "  - Root password: 1234 (Armbian default — change this)"
+        Write-Host "  - Root password: 1234 (Armbian default - change this)"
         Write-Host "  - Radio user: radio / $($Script:RADIO_PW)"
         if ($radioHash -eq "!") {
             Write-Host ""
-            Write-Host "  ⚠️  Password hash could not be generated." -ForegroundColor Yellow
+            Write-Host "  WARNING: Password hash could not be generated." -ForegroundColor Yellow
             Write-Host "     Log in as root and run: passwd radio" -ForegroundColor Yellow
         }
         Write-Host ""
@@ -1151,15 +1194,17 @@ WantedBy=multi-user.target
         Write-Host " Just leave it alone, this process takes about ten minutes"
         Write-Host ""
 
-    } catch {
-        Write-Host "ERROR: $($_.Exception.Message)" -ForegroundColor Red
-
-        # Clean up on error
-        try { Dismount-DiskImage -ImagePath $tempImage -ErrorAction SilentlyContinue | Out-Null } catch { }
-        if (Test-Path $tempImage) { Remove-Item $tempImage -Force -ErrorAction SilentlyContinue }
-
-        exit 1
+        Write-Host "==============================================" -ForegroundColor Cyan
+        $again = Read-Host "Flash another card with the same settings? (y/N)"
+        if ($again -notmatch "^[Yy]") { $r3aKeepFlashing = $false }
     }
+
+    Remove-Item $tempImage -Force -ErrorAction SilentlyContinue
+    Write-Host ""
+    Write-Host "=============================================="
+    Write-Host "  Done. $r3aFlashCount Rock 3A card(s) flashed."
+    Write-Host "=============================================="
+    Write-Host ""
 
 # ============================================================
 # Raspberry Pi Flashing Path (all Pi models including CM4)
@@ -1189,7 +1234,7 @@ WantedBy=multi-user.target
         -replace '__ADMIN_PW__',                $Script:ADMIN_PW `
         -replace '__AUTO_UPDATE__',             $Script:AUTO_UPDATE
 
-    # Multi-card flash loop — mirrors linux.sh flash_multiple_cards()
+    # Multi-card flash loop - mirrors linux.sh flash_multiple_cards()
     $flashCount = 0
     $keepFlashing = $true
 
@@ -1212,7 +1257,7 @@ WantedBy=multi-user.target
             $flashCount++
             Write-Host ""
             Write-Host "==============================================" -ForegroundColor Green
-            Write-Host "           ✅ Flash complete!" -ForegroundColor Green
+            Write-Host "           DONE: Flash complete!" -ForegroundColor Green
             Write-Host "==============================================" -ForegroundColor Green
             Write-Host ""
             Write-Host " ONCE BOOTED, THE MESH NODE WILL AUTOMATICALLY START"
