@@ -729,7 +729,6 @@ cat << 'EOF' > /etc/systemd/system/radio-setup-rerun.service
 [Unit]
 Description=Re-run radio-setup after interface rename
 After=multi-user.target
-Wants=network-online.target
 
 [Service]
 Type=oneshot
