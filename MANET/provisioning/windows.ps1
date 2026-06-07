@@ -15,8 +15,11 @@ Set-Location -Path $PSScriptRoot
 #>
 
 # --- Configuration ---
-$TEMPLATE_FILE      = "firstrun.sh.template"
-$ROCK3A_TEMPLATE    = "rock3a-provision.sh.template"
+$ScriptDir          = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
+$TEMPLATE_FILE      = Join-Path $ScriptDir "firstrun.sh.template"
+$ROCK3A_TEMPLATE    = Join-Path $ScriptDir "rock3a-provision.sh.template"
+$CONFIG_DIR         = Join-Path $ScriptDir ".mesh-configs"
+
 
 $ARMBIAN_IMAGE_URL      = "https://fi.mirror.armbian.de/dl/rock-3a/archive/Armbian_26.2.1_Rock-3a_trixie_vendor_6.1.115_minimal.img.xz"
 $ARMBIAN_IMAGE_FILENAME = "Armbian_26.2.1_Rock-3a_trixie_vendor_6.1.115_minimal.img"
