@@ -120,41 +120,22 @@ detect_hotplug_mode() {
     if [ -f /var/run/mesh-gateway.state ] && [ -n "$ip" ] && \
        ip route show dev "$ETH_IFACE" | grep -q '^default '; then
         log "Existing gateway state is healthy on $ETH_IFACE ($ip); skipping re-detection"
-        DETECTED_MODE="gateway"
-        return 0
+        # Exit the whole script — returning here would still run the gateway
+        # mode section, which rewrites 20-end0.network, triggers a networkd
+        # inotify reconfigure, and restarts this loop.
+        exit 0
     fi
 
     log "Carrier present on $ETH_IFACE - detecting role"
 
-    # If a previous wired-EUD state left end0 bridged, detach it before DHCP.
+    # Detach from any bridge before DHCP (wired-EUD may have enslaved it).
     ip link set "$ETH_IFACE" nomaster 2>/dev/null || true
-
-    cat > "$ACTIVE_CONFIG" << EOF
-[Match]
-Name=${ETH_IFACE}
-
-[Link]
-RequiredForOnline=yes
-
-[Network]
-DHCP=ipv4
-IPv6AcceptRA=yes
-Bridge=
-
-[DHCP]
-ClientIdentifier=mac
-UseDNS=yes
-UseNTP=yes
-UseRoutes=yes
-Timeout=10
-
-[DHCPv4]
-UseRoutes=yes
-UseGateway=yes
-EOF
-
     ip addr flush dev "$ETH_IFACE" 2>/dev/null || true
-    networkctl reload 2>/dev/null || true
+
+    # Trigger DHCP without writing a networkd config file. Writing
+    # 20-end0.network fires an inotify event that causes networkd to
+    # reconfigure, briefly drops any existing lease, and restarts this loop.
+    # networkd uses 10-end0.network (or equivalent) for DHCP automatically.
     networkctl reconfigure "$ETH_IFACE" 2>/dev/null || true
 
     ip=$(wait_for_end0_ip 20 || true)
@@ -314,29 +295,10 @@ if [ "$DETECTED_MODE" == "gateway" ]; then
 
     ETH_IP="$EXISTING_IP"
 
-    cat > "$ACTIVE_CONFIG" << EOF
-[Match]
-Name=${ETH_IFACE}
-
-[Link]
-RequiredForOnline=yes
-
-[Network]
-DHCP=ipv4
-IPv6AcceptRA=yes
-Bridge=
-
-[DHCP]
-ClientIdentifier=mac
-UseDNS=yes
-UseNTP=yes
-UseRoutes=yes
-Timeout=10
-
-[DHCPv4]
-UseRoutes=yes
-UseGateway=yes
-EOF
+    # Do not rewrite $ACTIVE_CONFIG here — it was already written (if needed)
+    # during detect_hotplug_mode, and rewriting it triggers an inotify event
+    # that causes networkd to reconfigure end0, briefly drops the DHCP lease,
+    # and restarts this loop. networkd uses 10-end0.network regardless.
     touch /var/run/mesh-gateway.state
 
     # Configure NAT

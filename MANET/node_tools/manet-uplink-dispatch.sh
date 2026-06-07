@@ -60,7 +60,12 @@ write_networkd_dhcp_config() {
     local iface="$1"
     local conf="${NETWORKD_DIR}/20-${iface}.network"
 
-    cat > "$conf" <<EOF
+    # Only write the file if it does not already exist. Overwriting it with
+    # identical content still fires an inotify event that causes networkd to
+    # reconfigure the interface, briefly drops the DHCP lease, and re-triggers
+    # this dispatch loop.
+    if [ ! -f "$conf" ]; then
+        cat > "$conf" <<EOF
 [Match]
 Name=${iface}
 
@@ -83,9 +88,15 @@ Timeout=10
 UseRoutes=yes
 UseGateway=yes
 EOF
+        networkctl reload 2>/dev/null || true
+    fi
 
-    networkctl reload 2>/dev/null || true
-    networkctl reconfigure "$iface" 2>/dev/null || true
+    # Only reconfigure (restart DHCP) when the interface has no IP yet.
+    # networkctl reconfigure always causes a brief DHCP lease loss even without
+    # a file change — avoid it when DHCP is already working.
+    if [ -z "$(iface_ip "$iface")" ]; then
+        networkctl reconfigure "$iface" 2>/dev/null || true
+    fi
 }
 
 wait_for_ipv4() {
@@ -153,15 +164,25 @@ candidate_ifaces() {
 }
 
 find_working_uplink() {
-    local iface ip
+    local iface ip gw
 
     for iface in $(candidate_ifaces); do
         is_upstream_iface "$iface" || continue
         has_carrier "$iface" || continue
 
         ip link set "$iface" nomaster 2>/dev/null || true
-        write_networkd_dhcp_config "$iface"
-        ip=$(wait_for_ipv4 "$iface" 12 || true)
+
+        # Skip reconfiguring if the interface already has an IP and a default
+        # route — rewriting the networkd config triggers inotify, briefly drops
+        # the DHCP lease, and causes the internet probe to fail on the route
+        # re-installation race, which creates a demote→carrier→loop cycle.
+        ip=$(iface_ip "$iface")
+        gw=$(iface_default_gw "$iface" || true)
+        if [ -z "$ip" ] || [ -z "$gw" ]; then
+            write_networkd_dhcp_config "$iface"
+            ip=$(wait_for_ipv4 "$iface" 12 || true)
+        fi
+
         [ -n "$ip" ] || continue
         iface_default_gw "$iface" >/dev/null || true
 
@@ -295,8 +316,10 @@ demote_gateway() {
     if [ -n "$old_iface" ] && is_upstream_iface "$old_iface"; then
         ip addr flush dev "$old_iface" 2>/dev/null || true
         ip link set "$old_iface" nomaster 2>/dev/null || true
-        rm -f "${NETWORKD_DIR}/20-${old_iface}.network" "${NETWORKD_DIR}/20-${old_iface}-"*.network 2>/dev/null || true
-        networkctl reload 2>/dev/null || true
+        # Do not delete 20-*.network or call networkctl reload: removing the
+        # file fires an inotify event that triggers a networkd reconfigure,
+        # briefly drops the DHCP lease, and re-triggers this loop.
+        # 10-end0.network takes precedence and handles DHCP regardless.
         networkctl reconfigure "$old_iface" 2>/dev/null || true
     fi
 
