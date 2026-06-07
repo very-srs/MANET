@@ -188,14 +188,11 @@ function Expand-XzFile {
 # Armbian Image Acquisition (Rock 3A)
 # ============================================================
 
-# Verify SHA256 checksum of a file against a .sha256 sidecar.
-# Returns $true if no sidecar exists (skip check) or if hash matches.
-# Returns $false on mismatch.
 function Test-ArmbianChecksum {
     param([string]$ImagePath, [string]$ChecksumFile)
 
     if (-not (Test-Path $ChecksumFile)) {
-        return $true   # No sidecar - skip verification
+        return $true
     }
 
     Write-Host "Verifying image checksum..."
@@ -213,7 +210,6 @@ function Test-ArmbianChecksum {
     }
 }
 
-# Save SHA256 checksum of a file to a .sha256 sidecar.
 function Save-ArmbianChecksum {
     param([string]$ImagePath, [string]$ChecksumFile)
 
@@ -226,12 +222,10 @@ function Get-ArmbianImage {
     Write-Host ""
     Write-Host "--- Armbian Image Setup for Rock 3A ---"
 
-    $scriptDir       = if ($PSScriptRoot) { $PSScriptRoot } else { Get-Location }
-    $localImage      = Join-Path $scriptDir $ARMBIAN_IMAGE_FILENAME
-    $localCompressed = Join-Path $scriptDir "${ARMBIAN_IMAGE_FILENAME}.xz"
-    $checksumFile    = Join-Path $scriptDir "${ARMBIAN_IMAGE_FILENAME}.sha256"
+    $localImage      = Join-Path $ScriptDir $ARMBIAN_IMAGE_FILENAME
+    $localCompressed = Join-Path $ScriptDir "${ARMBIAN_IMAGE_FILENAME}.xz"
+    $checksumFile    = Join-Path $ScriptDir "${ARMBIAN_IMAGE_FILENAME}.sha256"
 
-    # Check for uncompressed image
     if (Test-Path $localImage) {
         Write-Host "Found local Armbian image: $localImage"
         if (Test-ArmbianChecksum -ImagePath $localImage -ChecksumFile $checksumFile) {
@@ -243,7 +237,6 @@ function Get-ArmbianImage {
         }
     }
 
-    # Check for compressed image
     if (Test-Path $localCompressed) {
         Write-Host "Found compressed Armbian image: $localCompressed"
         Write-Host "Decompressing (this may take a moment)..."
@@ -275,16 +268,12 @@ function Get-ArmbianImage {
         switch ($choice) {
             "1" {
                 $ok = Download-ArmbianImage
-                if ($ok) {
-                    Save-ArmbianChecksum -ImagePath $Script:ARMBIAN_IMAGE -ChecksumFile $checksumFile
-                }
+                if ($ok) { Save-ArmbianChecksum -ImagePath $Script:ARMBIAN_IMAGE -ChecksumFile $checksumFile }
                 return $ok
             }
             "2" {
                 $ok = Select-CustomArmbianImage
-                if ($ok) {
-                    Save-ArmbianChecksum -ImagePath $Script:ARMBIAN_IMAGE -ChecksumFile $checksumFile
-                }
+                if ($ok) { Save-ArmbianChecksum -ImagePath $Script:ARMBIAN_IMAGE -ChecksumFile $checksumFile }
                 return $ok
             }
             default { Write-Host "Invalid selection. Please enter 1 or 2." }
@@ -293,9 +282,8 @@ function Get-ArmbianImage {
 }
 
 function Download-ArmbianImage {
-    $scriptDir       = if ($PSScriptRoot) { $PSScriptRoot } else { Get-Location }
-    $compressedFile  = Join-Path $scriptDir "${ARMBIAN_IMAGE_FILENAME}.xz"
-    $outputFile      = Join-Path $scriptDir $ARMBIAN_IMAGE_FILENAME
+    $compressedFile  = Join-Path $ScriptDir "${ARMBIAN_IMAGE_FILENAME}.xz"
+    $outputFile      = Join-Path $ScriptDir $ARMBIAN_IMAGE_FILENAME
 
     Write-Host ""
     Write-Host "Downloading Armbian image..."
@@ -323,8 +311,6 @@ function Select-CustomArmbianImage {
     Write-Host "The expected environment is: minimal/IoT Armbian Trixie (Debian 13)"
     Write-Host "The image should be an uncompressed .img file (.img.xz will be decompressed)."
     Write-Host ""
-
-    $scriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { Get-Location }
 
     while ($true) {
         $customPath = Read-Host "Enter path to Armbian image"
@@ -356,11 +342,9 @@ function Select-CustomArmbianImage {
 # ============================================================
 
 function Test-Ext4Driver {
-    # Check if the Ext2Fsd service is running
     $svc = Get-Service -Name "Ext2Srv" -ErrorAction SilentlyContinue
     if ($svc -and $svc.Status -eq "Running") { return $true }
 
-    # Try to start it if it exists but isn't running
     if ($svc) {
         try {
             Start-Service "Ext2Srv" -ErrorAction Stop
@@ -387,13 +371,15 @@ function Select-HardwareAndTargetDevice {
             "1" { $Script:HARDWARE_MODEL = "r3a";  break }
             "2" { $Script:HARDWARE_MODEL = "rpi5"; break }
             "3" { $Script:HARDWARE_MODEL = "rpi4"; break }
-            "4" { $Script:HARDWARE_MODEL = "rpi4"; break }   # CM4 uses rpi4 config
+            "4" { $Script:HARDWARE_MODEL = "rpi4"; break }
         }
     } while ($choice -notmatch "^[1234]$")
 
-    # For Raspberry Pi targets, locate rpi-imager
     if ($Script:HARDWARE_MODEL -ne "r3a") {
-        $rpiImagerPaths = @(
+		$rpiImagerPaths = @(
+            (Get-Command rpi-imager-cli.cmd -ErrorAction SilentlyContinue).Source,
+            "C:\Program Files\Raspberry Pi Ltd\Imager\rpi-imager-cli.cmd",
+            "C:\Program Files\Raspberry Pi Ltd\Imager\rpi-imager.exe",
             "C:\Program Files (x86)\Raspberry Pi Imager\rpi-imager.exe",
             "C:\Program Files\Raspberry Pi Imager\rpi-imager.exe",
             (Get-Command rpi-imager -ErrorAction SilentlyContinue).Source
@@ -406,9 +392,9 @@ function Select-HardwareAndTargetDevice {
             Write-Host "Please install from: https://www.raspberrypi.com/software/"
             exit 1
         }
+        Write-Host "Found Raspberry Pi Imager: $($Script:RPI_IMAGER_PATH)"
     }
 
-    # CM4 note
     if ($choice -eq "4") {
         Write-Host ""
         Write-Host "NOTE: For CM4 on Windows, you must run rpiboot manually before continuing." -ForegroundColor Yellow
@@ -463,7 +449,7 @@ function Confirm-Flash {
 
     Write-Host ""
     Write-Host "==============================================" -ForegroundColor Yellow
-    Write-Host "         *** FINAL CONFIRMATION ***"                       -ForegroundColor Yellow
+    Write-Host "         *** FINAL CONFIRMATION ***"           -ForegroundColor Yellow
     Write-Host "==============================================" -ForegroundColor Yellow
     Write-Host ""
     Write-Host "You are about to ERASE and FLASH:"
@@ -475,7 +461,7 @@ function Confirm-Flash {
     Write-Host "  Mesh SSID: $($Script:MESH_SSID)"
     Write-Host "  Network:   $($Script:LAN_CIDR_BLOCK)"
     Write-Host ""
-    Write-Host "WARNING: ALL DATA ON DISK $DiskNumber WILL BE DESTROYED!"           -ForegroundColor Red
+    Write-Host "WARNING: ALL DATA ON DISK $DiskNumber WILL BE DESTROYED!" -ForegroundColor Red
     Write-Host ""
     Write-Host "==============================================" -ForegroundColor Yellow
     Write-Host ""
@@ -556,7 +542,6 @@ function Ask-LanCidr {
 function Ask-Questions {
     Write-Host "--- Starting New Configuration ---"
 
-    # EUD Connection Type
     Write-Host "`nSelect EUD (client) connection type:"
     Write-Host "1. Wired"
     Write-Host "2. Wireless"
@@ -593,14 +578,12 @@ function Ask-Questions {
         $Script:MAX_EUDS_PER_NODE = 0
     }
 
-    # Optional Software
     $r = Read-Host "Install MediaMTX Server? (Y/n)"
     $Script:INSTALL_MEDIAMTX = if ([string]::IsNullOrWhiteSpace($r) -or $r -match "^[Yy]") { "y" } else { "n" }
 
     $r = Read-Host "Install Mumble Server (murmur)? (Y/n)"
     $Script:INSTALL_MUMBLE = if ([string]::IsNullOrWhiteSpace($r) -or $r -match "^[Yy]") { "y" } else { "n" }
 
-    # Mesh Configuration
     $Script:MESH_SSID = Read-Host "Enter MESH SSID Name"
 
     while ($true) {
@@ -618,7 +601,6 @@ function Ask-Questions {
         } else { $Script:MESH_SAE_KEY = $key; break }
     }
 
-    # Regulatory Domain
     while ($true) {
         $domain = Read-Host "Enter WiFi regulatory domain (2-letter country code, default: US)"
         if ([string]::IsNullOrWhiteSpace($domain)) { $domain = "US" }
@@ -638,14 +620,12 @@ function Ask-Questions {
         }
     }
 
-    # Radio user password
     Write-Host "The device will have a user called 'radio' for SSH access."
     $pw = Read-Host "Enter a password for the radio user [or press Enter to default to 'radio']"
     Write-Host ""
     $Script:RADIO_PW = if ([string]::IsNullOrWhiteSpace($pw)) { Write-Host "Setting default password"; "radio" } else { $pw }
     Write-Host "Radio password set to: $($Script:RADIO_PW)"
 
-    # Admin password
     Write-Host ""
     Write-Host "The network administrator password is used to access the mesh admin interface."
     $adminPw = Read-Host "Enter admin password [or press Enter to generate 10-char random]"
@@ -658,7 +638,6 @@ function Ask-Questions {
         Write-Host "Admin password set."
     }
 
-    # Automatic updates
     Write-Host ""
     $r = Read-Host "Enable automatic updates for MANET tools? (Y/n)"
     if ([string]::IsNullOrWhiteSpace($r) -or $r -match "^[Yy]") {
@@ -667,7 +646,6 @@ function Ask-Questions {
         $Script:AUTO_UPDATE = "n"; Write-Host "Automatic updates disabled."
     }
 
-    # Max EUDs per node (only for wireless/auto modes)
     if ($Script:EUD_CONNECTION -eq "wireless" -or $Script:EUD_CONNECTION -eq "auto") {
         while ($true) {
             $input = Read-Host "Maximum EUDs per node's AP (1-20)"
@@ -679,10 +657,8 @@ function Ask-Questions {
         }
     }
 
-    # CIDR block
     Ask-LanCidr -maxEuds $Script:MAX_EUDS_PER_NODE
 
-    # Auto Channel Selection (incompatible with wireless/auto EUD modes)
     if ($Script:EUD_CONNECTION -eq "wireless" -or $Script:EUD_CONNECTION -eq "auto") {
         $Script:AUTO_CHANNEL = "n"
         Write-Host "Automatic WiFi Channel Selection disabled (not compatible with Wireless/Auto EUD mode)"
@@ -781,7 +757,6 @@ function Load-Config {
 # Main Script
 # ============================================================
 
-# Check for Administrator privileges
 $currentPrincipal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
 if (-not $currentPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     Write-Host "ERROR: This script must be run as Administrator!" -ForegroundColor Red
@@ -789,11 +764,9 @@ if (-not $currentPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Adm
     exit 1
 }
 
-# --- 1. Select Hardware (matches linux.sh - hardware selected first) ---
+Write-Host "Script directory: $ScriptDir"
 
 Select-HardwareAndTargetDevice
-
-# --- 2. Basic Checks ---
 
 if (-not (Test-Path $TEMPLATE_FILE)) {
     Write-Host "ERROR: Template file '$TEMPLATE_FILE' not found." -ForegroundColor Red
@@ -807,8 +780,6 @@ if ($Script:HARDWARE_MODEL -eq "r3a" -and -not (Test-Path $ROCK3A_TEMPLATE)) {
 if (-not (Test-Path $CONFIG_DIR)) {
     New-Item -ItemType Directory -Path $CONFIG_DIR | Out-Null
 }
-
-# --- 3. Load or Create Config ---
 
 $configFiles = Get-ChildItem -Path $CONFIG_DIR -Filter "*.conf" -ErrorAction SilentlyContinue
 
@@ -850,8 +821,6 @@ if ($configFiles.Count -gt 0) {
     Save-Config
 }
 
-# --- 4. Acquire Armbian image (Rock 3A only) ---
-
 if ($Script:HARDWARE_MODEL -eq "r3a") {
     $imageOk = Get-ArmbianImage
     if (-not $imageOk) {
@@ -866,7 +835,6 @@ if ($Script:HARDWARE_MODEL -eq "r3a") {
 
 if ($Script:HARDWARE_MODEL -eq "r3a") {
 
-    # Verify Ext2Fsd is available
     Write-Host ""
     Write-Host "Checking for ext4 filesystem driver (Ext2Fsd)..."
     if (-not (Test-Ext4Driver)) {
@@ -882,9 +850,7 @@ if ($Script:HARDWARE_MODEL -eq "r3a") {
         Write-Host "  3. Re-run this script"
         Write-Host ""
 
-        # Offer to launch installer if present alongside the script
-        $scriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { Get-Location }
-        $installer = Get-ChildItem -Path $scriptDir -Filter "Ext2Fsd*.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+        $installer = Get-ChildItem -Path $ScriptDir -Filter "Ext2Fsd*.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
         if ($installer) {
             Write-Host "Found installer: $($installer.Name)" -ForegroundColor Green
             $run = Read-Host "Run the installer now? (y/N)"
@@ -897,24 +863,20 @@ if ($Script:HARDWARE_MODEL -eq "r3a") {
     }
     Write-Host "Ext2Fsd service is running." -ForegroundColor Green
 
-    # Create temp copy of image to avoid modifying the original
     $tempImage = [System.IO.Path]::GetTempFileName() -replace '\.tmp$', '.img'
     Write-Host "Creating temporary copy of $($Script:ARMBIAN_IMAGE)..."
     Copy-Item $Script:ARMBIAN_IMAGE $tempImage
 
     try {
-        # Mount the image as a virtual disk
         Write-Host "Mounting image as virtual disk..."
         $vdisk = Mount-DiskImage -ImagePath $tempImage -PassThru
         Start-Sleep -Seconds 3
         $disk = Get-Disk | Where-Object { $_.Location -eq $tempImage }
         if (-not $disk) { throw "Could not find mounted virtual disk." }
 
-        # Find the root partition (partition 1 on Armbian - single-partition layout)
         $partition = Get-Partition -DiskNumber $disk.Number | Where-Object { $_.PartitionNumber -eq 1 }
         if (-not $partition) { throw "Could not find root partition (partition 1) on mounted image." }
 
-        # Assign a drive letter so Ext2Fsd can mount it
         if (-not $partition.DriveLetter -or $partition.DriveLetter -eq "`0") {
             Add-PartitionAccessPath -DiskNumber $disk.Number -PartitionNumber 1 -AssignDriveLetter
             Start-Sleep -Seconds 3
@@ -933,9 +895,6 @@ if ($Script:HARDWARE_MODEL -eq "r3a") {
             throw "Cannot access /etc on mounted partition. Ext2Fsd may not be working correctly."
         }
 
-        # --------------------------------------------------------
-        # Write /etc/mesh.conf
-        # --------------------------------------------------------
         Write-Host "Writing /etc/mesh.conf..."
         $meshConf = @"
 # Mesh Network Configuration
@@ -958,16 +917,10 @@ auto_update=$($Script:AUTO_UPDATE)
 "@
         [System.IO.File]::WriteAllText((Join-Path $rootPath "etc\mesh.conf"), $meshConf.Replace("`r`n", "`n"))
 
-        # --------------------------------------------------------
-        # Bypass Armbian firstlogin
-        # --------------------------------------------------------
         Write-Host "Removing .not_logged_in_yet to bypass interactive setup..."
         $notLoggedIn = Join-Path $rootPath "root\.not_logged_in_yet"
         if (Test-Path $notLoggedIn) { Remove-Item $notLoggedIn -Force }
 
-        # --------------------------------------------------------
-        # Generate password hash and create radio user
-        # --------------------------------------------------------
         Write-Host "Generating password hash..."
         $radioHash = Get-LinuxPasswordHash -password $Script:RADIO_PW
         if (-not $radioHash) {
@@ -977,29 +930,25 @@ auto_update=$($Script:AUTO_UPDATE)
             Write-Host "         The radio user will be created without a password."
             Write-Host "         You will need to set it manually after first boot:"
             Write-Host "         (log in as root with password '1234', then: passwd radio)"
-            $radioHash = "!"   # locked account placeholder
+            $radioHash = "!"
         }
 
         Write-Host "Creating radio user..."
 
-        # /etc/passwd
         $passwdPath    = Join-Path $rootPath "etc\passwd"
         $passwdContent = [System.IO.File]::ReadAllText($passwdPath)
         if ($passwdContent -notmatch "^radio:") {
             [System.IO.File]::WriteAllText($passwdPath, ($passwdContent.TrimEnd() + "`nradio:x:1000:1000:radio:/home/radio:/bin/bash`n").Replace("`r`n", "`n"))
         }
 
-        # /etc/group - add radio group and add radio to sudo group
         $groupPath    = Join-Path $rootPath "etc\group"
         $groupContent = [System.IO.File]::ReadAllText($groupPath)
         if ($groupContent -notmatch "^radio:") {
             $groupContent += "radio:x:1000:`n"
         }
-        # Add radio to the sudo group
         $groupContent = $groupContent -replace '(?m)^(sudo:x:\d+:)(.*)', '$1$2,radio' -replace ',radio$', 'radio' -replace ',,', ','
         [System.IO.File]::WriteAllText($groupPath, $groupContent.Replace("`r`n", "`n"))
 
-        # /etc/shadow
         $shadowPath    = Join-Path $rootPath "etc\shadow"
         $shadowContent = [System.IO.File]::ReadAllText($shadowPath)
         if ($shadowContent -notmatch "^radio:") {
@@ -1007,18 +956,13 @@ auto_update=$($Script:AUTO_UPDATE)
             [System.IO.File]::WriteAllText($shadowPath, $shadowContent.Replace("`r`n", "`n"))
         }
 
-        # /etc/sudoers.d/radio
         $sudoersDir = Join-Path $rootPath "etc\sudoers.d"
         if (-not (Test-Path $sudoersDir)) { New-Item -ItemType Directory -Path $sudoersDir | Out-Null }
         [System.IO.File]::WriteAllText((Join-Path $sudoersDir "radio"), "radio ALL=(ALL) NOPASSWD: ALL`n")
 
-        # /home/radio directory
         $radioHome = Join-Path $rootPath "home\radio"
         if (-not (Test-Path $radioHome)) { New-Item -ItemType Directory -Path $radioHome | Out-Null }
 
-        # --------------------------------------------------------
-        # Install provisioning script from rock3a-provision.sh.template
-        # --------------------------------------------------------
         Write-Host "Installing provisioning script from template..."
         if (-not (Test-Path $ROCK3A_TEMPLATE)) {
             throw "Rock 3A template file '$ROCK3A_TEMPLATE' not found in script directory."
@@ -1049,9 +993,6 @@ auto_update=$($Script:AUTO_UPDATE)
         if (-not (Test-Path $usrLocalBin)) { New-Item -ItemType Directory -Path $usrLocalBin | Out-Null }
         [System.IO.File]::WriteAllText((Join-Path $usrLocalBin "provision-mesh.sh"), $provisionScript)
 
-        # --------------------------------------------------------
-        # Create systemd service (matches linux.sh exactly)
-        # --------------------------------------------------------
         Write-Host "Creating mesh-provision systemd service..."
         $serviceContent = @"
 [Unit]
@@ -1075,19 +1016,13 @@ WantedBy=multi-user.target
         if (-not (Test-Path $systemdDir)) { New-Item -ItemType Directory -Path $systemdDir | Out-Null }
         [System.IO.File]::WriteAllText((Join-Path $systemdDir "mesh-provision.service"), $serviceContent.Replace("`r`n", "`n"))
 
-        # Create the flag file that triggers provisioning on first boot
         Write-Host "Creating provisioning trigger flag..."
         [System.IO.File]::WriteAllText((Join-Path $rootPath "root\.mesh-not-provisioned"), "")
 
-        # Enable service via wants symlink (copy, since Windows can't make Linux symlinks
-        # on ext4; Armbian/systemd will accept a regular file copy in the wants directory)
         $wantsDir = Join-Path $systemdDir "multi-user.target.wants"
         if (-not (Test-Path $wantsDir)) { New-Item -ItemType Directory -Path $wantsDir | Out-Null }
         Copy-Item (Join-Path $systemdDir "mesh-provision.service") (Join-Path $wantsDir "mesh-provision.service")
 
-        # --------------------------------------------------------
-        # Unmount
-        # --------------------------------------------------------
         Write-Host "Unmounting image..."
         Dismount-DiskImage -ImagePath $tempImage | Out-Null
         Start-Sleep -Seconds 2
@@ -1099,7 +1034,6 @@ WantedBy=multi-user.target
         exit 1
     }
 
-    # Multi-card flash loop - mirrors linux.sh flash_multiple_cards() for Rock 3A
     $r3aFlashCount = 0
     $r3aKeepFlashing = $true
     while ($r3aKeepFlashing) {
@@ -1201,7 +1135,6 @@ WantedBy=multi-user.target
 
 } else {
 
-    # Generate firstrun script from template
     Write-Host "Generating firstrun script from template..."
     $templateContent = [System.IO.File]::ReadAllText($TEMPLATE_FILE)
 
@@ -1223,25 +1156,28 @@ WantedBy=multi-user.target
         -replace '__ADMIN_PW__',                $Script:ADMIN_PW `
         -replace '__AUTO_UPDATE__',             $Script:AUTO_UPDATE
 
-    # Multi-card flash loop - mirrors linux.sh flash_multiple_cards()
     $flashCount = 0
     $keepFlashing = $true
 
     while ($keepFlashing) {
 
-		$tempScript = Join-Path $ScriptDir "firstrun.sh"
+        $tempScript = Join-Path $ScriptDir "firstrun.sh"
+        Write-Host "Writing firstrun script to: $tempScript"
         [System.IO.File]::WriteAllText($tempScript, $templateContent.Replace("`r`n", "`n"))
 
-        # Final confirmation
+        if (-not (Test-Path $tempScript)) {
+            Write-Host "ERROR: Failed to write firstrun script!" -ForegroundColor Red
+            exit 1
+        }
+
         Confirm-Flash -DiskNumber $Script:TARGET_DEVICE
 
-        # Flash via rpi-imager
         Write-Host "Running Raspberry Pi Imager..."
-        Write-Host "Firstrun script path: $tempScript"
         $targetDrive = "\\.\PhysicalDrive$($Script:TARGET_DEVICE)"
         & $Script:RPI_IMAGER_PATH --cli $OS_IMAGE_URL $targetDrive --first-run-script "$tempScript"
 
         Remove-Item $tempScript -Force -ErrorAction SilentlyContinue
+
         if ($LASTEXITCODE -eq 0) {
             $flashCount++
             Write-Host ""
@@ -1259,7 +1195,6 @@ WantedBy=multi-user.target
             Write-Host ""
         }
 
-        # Offer to flash another card with the same settings
         Write-Host "==============================================" -ForegroundColor Cyan
         $again = Read-Host "Flash another card with the same settings? (y/N)"
         if ($again -notmatch "^[Yy]") {
@@ -1268,7 +1203,6 @@ WantedBy=multi-user.target
             Write-Host ""
             Write-Host "Insert the next SD card, then select the target device."
 
-            # Re-detect available disks for next card
             $bootDisk = (Get-Disk | Where-Object { $_.IsBoot -eq $true }).Number
             $disks = Get-Disk | Where-Object {
                 $_.Number -ne $bootDisk -and
