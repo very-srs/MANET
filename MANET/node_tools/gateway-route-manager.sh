@@ -64,8 +64,8 @@ while true; do
         if echo "$cur" | grep -q " dev br0 "; then
             ip route del default dev br0 2>/dev/null || true
             log "Removed mesh-managed default route"
-        else
-            log "Leaving default route unchanged; it is not managed by gateway-route-manager: ${cur:-none}"
+        #else
+           # log "Leaving default route unchanged; it is not managed by gateway-route-manager: ${cur:-none}"
         fi
         sleep "$POLL_INTERVAL"
         continue
