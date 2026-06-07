@@ -399,21 +399,13 @@ if [ "$DETECTED_MODE" == "gateway" ]; then
         systemctl stop ap-txpower.service 2>/dev/null
         systemctl disable hostapd.service 2>/dev/null
 
-        # Bridge AP interface to br0 for EUD connectivity
-        if ! ip link show "$AP_INTERFACE" | grep -q "master br0"; then
-            log "Bridging $AP_INTERFACE to br0"
-            ip link set "$AP_INTERFACE" master br0
-            ip link set "$AP_INTERFACE" up
-        else
-            log "$AP_INTERFACE already bridged to br0"
-        fi
         # Add wlan1 back to bat0
         if ! batctl if | grep -q "$AP_INTERFACE"; then
             log "Adding $AP_INTERFACE back to bat0 (wired mode)"
 
-            # Stop hostapd first to release the interface
             systemctl stop hostapd.service 2>/dev/null
             ip link set "$AP_INTERFACE" down
+            ip link set "$AP_INTERFACE" nomaster 2>/dev/null || true
             sleep 1
 
             # Set to mesh mode and bring up

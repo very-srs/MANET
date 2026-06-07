@@ -92,7 +92,7 @@ if [ -n "$BEST_SERVER_HOSTNAME" ]; then
 #	BEST_SERVER_IP=$(resolvectl query --type=AAAA "${BEST_SERVER_HOSTNAME}.local" \
 #  | awk '/^.*: .*:/ {print $2; exit}')
 
-    BEST_SERVER_IP=$( /usr/loca/bin/mac-to-ip.sh $BEST_SERVER_MAC )
+    BEST_SERVER_IP=$( /usr/local/bin/mac-to-ip.sh "$BEST_SERVER_MAC" )
 
     if [ -n "$BEST_SERVER_IP" ]; then
         log "Syncing time with ${BEST_SERVER_IP}..."

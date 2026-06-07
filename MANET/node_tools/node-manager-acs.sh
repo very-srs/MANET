@@ -216,6 +216,7 @@ perform_scan() {
 
 is_hosting_service() {
 	if systemctl is-active --quiet mediamtx.service; then
+        local IPV4_NETWORK=""
 	# Source the network configuration
 	if [ -f /etc/mesh.conf ]; then
 	    # Parse the config file
@@ -228,6 +229,7 @@ is_hosting_service() {
 	        esac
 	    done < /etc/mesh.conf
 	fi
+        [ -z "$IPV4_NETWORK" ] && return 1
 
         local CALC_OUTPUT=$(ipcalc "$IPV4_NETWORK" 2>/dev/null)
         local FIRST_IP=$(echo "$CALC_OUTPUT" | awk '/HostMin/ {print $2}')

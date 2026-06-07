@@ -196,7 +196,13 @@ analyze_partition_data() {
         DECODED=$("/usr/local/bin/decoder.py" "$payload" 2>/dev/null || true)
         [ -z "$DECODED" ] && continue
 
-        eval $(echo "$DECODED" | grep -E "^(MAC_ADDRESS|DATA_CHANNEL_)")
+        while IFS= read -r _line; do
+            _varname="${_line%%=*}"
+            _val="${_line#*=}"
+            _val="${_val#\'}"
+            _val="${_val%\'}"
+            printf -v "$_varname" '%s' "$_val"
+        done < <(echo "$DECODED" | grep -E "^(MAC_ADDRESS|DATA_CHANNEL_)")
 
         [ "$MAC_ADDRESS" == "$MY_MAC" ] && { unset MAC_ADDRESS DATA_CHANNEL_2_4 DATA_CHANNEL_5_0; continue; }
 

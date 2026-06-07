@@ -131,6 +131,7 @@ load_mesh_roles() {
         local band_channels="$1"
         local current_channel="$2"
         local band_name="$3"
+        local -n _winner=$4
         local winner_channel=""
         local winner_score=1000 # Lower is better
 
@@ -187,9 +188,9 @@ load_mesh_roles() {
             LIMP_MODE_NEEDED="true"
 
             if [ "$band_name" == "2.4GHz" ]; then
-                echo "$LOBBY_FREQ_2_4"
+                _winner="$LOBBY_FREQ_2_4"
             else
-                echo "$LOBBY_FREQ_5_0"
+                _winner="$LOBBY_FREQ_5_0"
             fi
         else
             local winner_line=$(printf '%s\n' "${candidates[@]}" | sort -n -k1,1 -k2,2 | head -1)
@@ -202,13 +203,13 @@ load_mesh_roles() {
                 LIMP_MODE_NEEDED="true"
 
                 if [ "$band_name" == "2.4GHz" ]; then
-                    echo "$LOBBY_FREQ_2_4"
+                    _winner="$LOBBY_FREQ_2_4"
                 else
-                    echo "$LOBBY_FREQ_5_0"
+                    _winner="$LOBBY_FREQ_5_0"
                 fi
             else
                 log "[$band_name] Winner is $winner_channel (Score: $winner_score)"
-                echo "$winner_channel"
+                _winner="$winner_channel"
             fi
         fi
     }
@@ -219,8 +220,8 @@ load_mesh_roles() {
     log "Current channels: 2.4G=${CURRENT_2_4:-none}, 5.0G=${CURRENT_5_0:-none}"
 
     # --- Run Elections ---
-    WINNER_2_4=$(find_best_channel "$CHANNELS_2_4" "$CURRENT_2_4" "2.4GHz")
-    WINNER_5_0=$(find_best_channel "$CHANNELS_5_0" "$CURRENT_5_0" "5.0GHz")
+    find_best_channel "$CHANNELS_2_4" "$CURRENT_2_4" "2.4GHz" WINNER_2_4
+    find_best_channel "$CHANNELS_5_0" "$CURRENT_5_0" "5.0GHz" WINNER_5_0
 
     # --- Write Output File (for node-manager) ---
     cat > "$OUTPUT_FILE" <<- EOF
