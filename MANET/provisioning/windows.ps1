@@ -117,7 +117,7 @@ function Calculate-Capacity {
 }
 
 # Generates a Linux SHA-512 crypt hash for use in /etc/shadow.
-# Tries openssl (Git for Windows), WSL, and Python in turn.
+# Tries openssl (Git for Windows) then WSL.
 # Returns $null if no suitable tool is found.
 function Get-LinuxPasswordHash {
     param([string]$password)
@@ -140,17 +140,6 @@ function Get-LinuxPasswordHash {
         }
     }
 
-    # Try Python (python3 or python)
-	foreach ($pyCmd in @("python3", "python")) {
-        $py = Get-Command $pyCmd -ErrorAction SilentlyContinue
-        if ($py) {
-            $pyScript = "import crypt; print(crypt.crypt('$($password -replace ""'"", ""'\\\"'\\\"'"")', crypt.mksalt(crypt.METHOD_SHA512)))"
-            $hash = & $py -c $pyScript 2>$null
-            if ($hash -and $hash.StartsWith('$6$')) {
-                return $hash
-            }
-        }
-    }
     return $null
 }
 
@@ -983,7 +972,7 @@ auto_update=$($Script:AUTO_UPDATE)
         if (-not $radioHash) {
             Write-Host ""
             Write-Host "  WARNING: Could not generate password hash." -ForegroundColor Yellow
-            Write-Host "         openssl, WSL, and Python were all unavailable."
+            Write-Host "         openssl and WSL were both unavailable."
             Write-Host "         The radio user will be created without a password."
             Write-Host "         You will need to set it manually after first boot:"
             Write-Host "         (log in as root with password '1234', then: passwd radio)"
