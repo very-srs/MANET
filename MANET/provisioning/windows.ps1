@@ -1,6 +1,4 @@
 #Requires -RunAsAdministrator
-# Set working directory to script location
-Set-Location -Path $PSScriptRoot
 <#
 .SYNOPSIS
     A script to image new mesh radio nodes on Windows
@@ -20,12 +18,10 @@ $TEMPLATE_FILE      = Join-Path $ScriptDir "firstrun.sh.template"
 $ROCK3A_TEMPLATE    = Join-Path $ScriptDir "rock3a-provision.sh.template"
 $CONFIG_DIR         = Join-Path $ScriptDir ".mesh-configs"
 
-
 $ARMBIAN_IMAGE_URL      = "https://fi.mirror.armbian.de/dl/rock-3a/archive/Armbian_26.2.1_Rock-3a_trixie_vendor_6.1.115_minimal.img.xz"
 $ARMBIAN_IMAGE_FILENAME = "Armbian_26.2.1_Rock-3a_trixie_vendor_6.1.115_minimal.img"
 $Script:ARMBIAN_IMAGE   = ""   # Set by Get-ArmbianImage
 
-$CONFIG_DIR    = ".mesh-configs"
 $OS_IMAGE_URL  = "https://downloads.raspberrypi.com/raspios_lite_arm64/images/raspios_lite_arm64-2025-10-02/2025-10-01-raspios-trixie-arm64-lite.img.xz"
 
 # --- Global State ---
