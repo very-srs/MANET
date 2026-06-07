@@ -141,17 +141,16 @@ function Get-LinuxPasswordHash {
     }
 
     # Try Python (python3 or python)
-    foreach ($pyCmd in @("python3", "python")) {
+	foreach ($pyCmd in @("python3", "python")) {
         $py = Get-Command $pyCmd -ErrorAction SilentlyContinue
         if ($py) {
-            $escaped = $password -replace "'", "'\"'\"'"
-            $hash = & $py -c "import crypt; print(crypt.crypt('$escaped', crypt.mksalt(crypt.METHOD_SHA512)))" 2>$null
+            $pyScript = "import crypt; print(crypt.crypt('$($password -replace ""'"", ""'\\\"'\\\"'"")', crypt.mksalt(crypt.METHOD_SHA512)))"
+            $hash = & $py -c $pyScript 2>$null
             if ($hash -and $hash.StartsWith('$6$')) {
                 return $hash
             }
         }
     }
-
     return $null
 }
 
