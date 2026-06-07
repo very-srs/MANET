@@ -1,4 +1,6 @@
 #Requires -RunAsAdministrator
+# Set working directory to script location
+Set-Location -Path $PSScriptRoot
 <#
 .SYNOPSIS
     A script to image new mesh radio nodes on Windows
