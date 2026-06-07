@@ -28,7 +28,7 @@ MUMBLE_IPV6_VIP=""
 INCUMBENT_BIAS=10
 
 # State
-MY_MAC=$(cat "/sys/class/net/${CONTROL_IFACE}/address")
+MY_MAC=$(cat "/sys/class/net/${CONTROL_IFACE}/address" 2>/dev/null || true)
 LOCK_FILE="/var/run/mumble-election.lock"
 
 log() {
@@ -36,6 +36,10 @@ log() {
 }
 
 # --- Dependency Checks ---
+if [ -z "$MY_MAC" ]; then
+    log "Cannot determine local MAC address (${CONTROL_IFACE} not up). Exiting."
+    exit 1
+fi
 if ! command -v sqlite3 &>/dev/null; then
     log "ERROR: 'sqlite3' command not found. Please install it."
     exit 1

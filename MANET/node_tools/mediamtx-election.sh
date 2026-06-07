@@ -11,7 +11,7 @@ REGISTRY_STATE_FILE="/var/run/mesh_node_registry"
 MEDIAMTX_CONFIG_FILE="/etc/mediamtx/mediamtx.yml"
 MEDIAMTX_SERVICE_NAME="mediamtx.service"
 CONTROL_IFACE="br0"
-MY_MAC=$(cat "/sys/class/net/${CONTROL_IFACE}/address")
+MY_MAC=$(cat "/sys/class/net/${CONTROL_IFACE}/address" 2>/dev/null || true)
 MTX_IPV6_SCRIPT="/usr/local/bin/mtx-ip.sh"
 
 # Incumbent bias: current leader gets this many TQ points added to their score.
@@ -40,6 +40,10 @@ get_mediamtx_ipv4_vip() {
 }
 
 # --- Check Dependencies ---
+if [ -z "$MY_MAC" ]; then
+    log "Cannot determine local MAC address (${CONTROL_IFACE} not up). Exiting."
+    exit 1
+fi
 if [ ! -f "$REGISTRY_STATE_FILE" ]; then
     log "Registry file not found ($REGISTRY_STATE_FILE). Exiting."
     exit 1

@@ -66,8 +66,14 @@ for B64_PAYLOAD in "${PEER_PAYLOADS[@]}"; do
         continue
     fi
 
-    # Evaluate the decoded data to extract variables
-    eval "$FILTERED_DATA"
+    # Safely parse variable assignments — no eval on network data
+    while IFS= read -r _line; do
+        _varname="${_line%%=*}"
+        _val="${_line#*=}"
+        _val="${_val#\'}"
+        _val="${_val%\'}"
+        printf -v "$_varname" '%s' "$_val"
+    done <<< "$FILTERED_DATA"
 
     # Write to registry if we have a MAC address
     if [[ -n "$MAC_ADDRESS" ]]; then

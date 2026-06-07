@@ -85,6 +85,11 @@ while true; do
     fi
 
     local_ip="$(ip -4 -o addr show dev br0 | awk '{print $4}' | cut -d/ -f1 | head -n1)"
+    if [ -z "$local_ip" ]; then
+        log "br0 has no IPv4 address yet; skipping route install"
+        sleep "$POLL_INTERVAL"
+        continue
+    fi
     cur="$(ip route show default | head -n1 || true)"
 
     if ping -c 1 -W 1 "$gw_ip" >/dev/null 2>&1; then
