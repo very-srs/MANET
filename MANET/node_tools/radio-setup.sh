@@ -749,6 +749,14 @@ else
 fi
 
 for WLAN in $(cat /var/lib/mesh_if); do
+    # If interface renames are pending the names we have now are the pre-rename
+    # names. Skip config writes; the post-reboot re-run will write them with
+    # the correct names.
+    if [ "$needs_rerun" -eq 1 ]; then
+        echo " > Rename pending — deferring wpa config for $WLAN to post-reboot re-run"
+        continue
+    fi
+
     # Skip this interface if it's the AP interface
     if [[ -n "$AP_INTERFACE" ]] && [[ "$WLAN" == "$AP_INTERFACE" ]]; then
         echo " > Skipping $WLAN (will be used as AP)"
@@ -969,6 +977,11 @@ done
 # ============================================================================
 
 for WLAN in $(cat /var/lib/halow_if | head -n 1); do
+    if [ "$needs_rerun" -eq 1 ]; then
+        echo " > Rename pending — deferring HaLow wpa config for $WLAN to post-reboot re-run"
+        continue
+    fi
+
     echo " > Setting up $WLAN for HaLow use ..."
 
     # Create the network interface config
@@ -1498,19 +1511,25 @@ done
 # power/reset pins). CM4 nodes with a PCIe mt7916 WiFi card also need
 # pcie-32bit-dma: the BCM2711 PCIe outbound window sits above 4GB and the
 # card fails probe with -ENOMEM without forcing 32-bit DMA mapping.
+_config_txt_changed=0
 for _cfg in /boot/firmware/config.txt /boot/config.txt; do
     [ -f "$_cfg" ] || continue
 
     if ! grep -q 'dtparam=spi=on' "$_cfg"; then
         echo "dtparam=spi=on" >> "$_cfg"
         echo " > SPI enabled in $_cfg"
+        _config_txt_changed=1
     fi
     if ! grep -q 'mm610x-spi' "$_cfg"; then
         echo "dtoverlay=mm610x-spi.dtbo" >> "$_cfg"
         echo " > mm610x-spi HaLow overlay added to $_cfg"
+        _config_txt_changed=1
     fi
     for _gpio_line in "gpio=3=op,dh" "gpio=7=op,dh" "gpio=17=op,dh"; do
-        grep -qF "$_gpio_line" "$_cfg" || echo "$_gpio_line" >> "$_cfg"
+        if ! grep -qF "$_gpio_line" "$_cfg"; then
+            echo "$_gpio_line" >> "$_cfg"
+            _config_txt_changed=1
+        fi
     done
     echo " > Morse GPIO power/reset pins set in $_cfg"
 
@@ -1520,9 +1539,15 @@ for _cfg in /boot/firmware/config.txt /boot/config.txt; do
         if ! grep -q 'pcie-32bit-dma' "$_cfg"; then
             printf '\n[cm4]\ndtoverlay=pcie-32bit-dma\n' >> "$_cfg"
             echo " > pcie-32bit-dma added to $_cfg for CM4 PCIe WiFi"
+            _config_txt_changed=1
         fi
     fi
 done
+
+if [ "$_config_txt_changed" -eq 1 ]; then
+    echo " > config.txt modified — a reboot is needed to apply overlay changes"
+    echo " > On a standard provision flow this should have been written by provision-mesh.sh"
+fi
 
 # RPi5 uses i2c_designware — i2c-dev module must load at boot for /dev/i2c-1
 if ! grep -q '^i2c-dev$' /etc/modules 2>/dev/null; then

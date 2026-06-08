@@ -1084,7 +1084,7 @@ flash_rpi() {
             -e "s|__HALOW_REGULATORY_DOMAIN__|${HALOW_REGULATORY_DOMAIN}|g" \
             -e "s|__ADMIN_PW__|${ADMIN_PW}|g" \
             -e "s|__AUTO_UPDATE__|${AUTO_UPDATE}|g" \
-            "$TEMPLATE_FILE" > "$TEMP_SCRIPT_FILE"
+            "$TEMPLATE_FILE" | tr -d '\r' > "$TEMP_SCRIPT_FILE"
 
         sudo rpi-imager --cli "$PI_OS_IMAGE_URL" "$target" --first-run-script "$TEMP_SCRIPT_FILE"
 
