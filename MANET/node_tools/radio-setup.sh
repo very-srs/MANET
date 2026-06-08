@@ -593,10 +593,16 @@ if [[ "$eud" == "wireless" ]] || [[ "$eud" == "auto" ]]; then
         AP_INTERFACE=""
     fi
 
-    # Save AP interface selection
+    # Save AP interface selection and remove it from mesh_if so batman-enslave
+    # doesn't try to enslave it (which would make it unavailable for hostapd).
     if [ -n "$AP_INTERFACE" ]; then
         echo "$AP_INTERFACE" > /var/lib/ap_interface
         echo "AP interface selected: $AP_INTERFACE"
+        sed -i "/^${AP_INTERFACE}$/d" /var/lib/mesh_if
+        if [ "$(cat /var/lib/mesh_5_if 2>/dev/null)" = "$AP_INTERFACE" ]; then
+            > /var/lib/mesh_5_if
+        fi
+        echo " > Removed $AP_INTERFACE from mesh_if (reserved for AP)"
     fi
 fi
 
@@ -876,7 +882,16 @@ EOF
 
     echo " > DHCP pool: $DHCP_START - $DHCP_END (${POOL_SIZE} IPs for ${MAX_EUDS} EUDs × ${MAX_NODES} nodes)"
 
-    AP_CHANNEL="${lan_ap_channel:-11}"
+    # Detect 5 GHz capability to pick the right hw_mode and default channel
+    if iface_supports_freq "$AP_INTERFACE" 5180; then
+        AP_HW_MODE="a"
+        AP_CHANNEL="${lan_ap_channel:-36}"
+        AP_80211AC="ieee80211ac=1"
+    else
+        AP_HW_MODE="g"
+        AP_CHANNEL="${lan_ap_channel:-11}"
+        AP_80211AC=""
+    fi
 
     cat <<-EOF > /etc/hostapd/hostapd.conf
 interface=$AP_INTERFACE
@@ -886,10 +901,11 @@ ssid=${LAN_AP_SSID}-${HOST_MAC}
 country_code=$REGULATORY_DOMAIN
 ieee80211d=1
 
-# Raspberry Pi onboard 2.4 GHz AP for EUD clients
-hw_mode=g
+# hw_mode=a for 5 GHz interfaces, hw_mode=g for 2.4 GHz
+hw_mode=$AP_HW_MODE
 channel=$AP_CHANNEL
 ieee80211n=1
+$AP_80211AC
 wmm_enabled=1
 
 # WPA2 security
