@@ -214,7 +214,7 @@ udevadm control --reload-rules 2>/dev/null || true
 udevadm trigger 2>/dev/null || true
 
 # disable onboard wifi
-echo "dtoverlay=disable-wifi" >> /boot/firmware/config.txt"
+echo "dtoverlay=disable-wifi" >> /boot/firmware/config.txt
 
 # Fix networkd-dispatcher ownership (tar extracts as current user; dispatcher
 # refuses to run scripts not owned by root)
