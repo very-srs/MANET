@@ -774,6 +774,22 @@ systemctl disable mesh-provision
 rm /etc/resolv.conf
 echo "nameserver 1.1.1.1" > /etc/resolv.conf
 
+# Write HaLow/SPI config.txt entries now so they take effect on the next
+# (provisioning) reboot.  radio-setup runs on that boot and will find the
+# interfaces already present.  All writes are idempotent; disable-wifi added
+# above is not affected.
+for _cfg in /boot/firmware/config.txt /boot/config.txt; do
+    [ -f "$_cfg" ] || continue
+    grep -q 'dtparam=spi=on' "$_cfg"   || echo "dtparam=spi=on"            >> "$_cfg"
+    grep -q 'mm610x-spi'     "$_cfg"   || echo "dtoverlay=mm610x-spi.dtbo" >> "$_cfg"
+    grep -qF 'gpio=3=op,dh'  "$_cfg"   || echo "gpio=3=op,dh"              >> "$_cfg"
+    grep -qF 'gpio=7=op,dh'  "$_cfg"   || echo "gpio=7=op,dh"              >> "$_cfg"
+    grep -qF 'gpio=17=op,dh' "$_cfg"   || echo "gpio=17=op,dh"             >> "$_cfg"
+    if [ "__HARDWARE_MODEL__" = "rpi4" ]; then
+        grep -q 'pcie-32bit-dma' "$_cfg" || printf '\n[cm4]\ndtoverlay=pcie-32bit-dma\n' >> "$_cfg"
+    fi
+done
+
 echo "=== Provisioning complete at $(date) ==="
 echo "=== Rebooting to apply changes ==="
 reboot
