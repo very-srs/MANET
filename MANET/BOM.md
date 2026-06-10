@@ -16,7 +16,7 @@
 |------|------------|------|------|
 | Raspberry Pi Compute Module 4 | BCM2711 quad-core, **4 GB RAM / 32 GB eMMC / no onboard Wi-Fi** (mesh Wi-Fi is supplied by the MT7916). | >$115 _(current street price; supply-dependent)_ | [raspberrypi](https://www.raspberrypi.com/products/compute-module-4/) |
 | Waveshare CM4-IO-BASE-A | Mini Base Board (A), Lite. 40-pin GPIO header (SPI for the HaLow HAT), M.2 M-key slot (PCIe — MT7916 via adapter), 2× USB 2.0, Gigabit Ethernet, microSD, USB-C power/programming. 85×56 mm. | $28.99 | [waveshare](https://www.waveshare.com/cm4-io-base-a.htm) |
-| **Subtotal (Compute & Carrier)** |  | **~$144+** _(CM4 at >$100)_ |  
+| **Subtotal (Compute & Carrier)** |  | **~$144+** _(CM4 at >$115)_ |  
 
 ---
 
@@ -62,7 +62,7 @@
 ---
 
 ## Enclosure
-> - The enclosre BOM has not finalized.  Changes will happen, listed here only for a reference not for actually ordering
+> - The enclosure BOM has not finalized.  Changes will happen, listed here only for a reference not for actually ordering
 
 | Name | Description | Cost | Link |
 |------|------------|------|------|
