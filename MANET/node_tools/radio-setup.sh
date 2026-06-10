@@ -825,13 +825,14 @@ cat <<-EOF > /etc/systemd/system/ap-interface-setup.service
 [Unit]
 Description=Set $AP_INTERFACE to managed mode for hostapd
 Before=hostapd.service
-After=wifi-rfkill-unblock.service
+After=wifi-rfkill-unblock.service wpa_supplicant@${AP_INTERFACE}.service
 Wants=wifi-rfkill-unblock.service
 
 [Service]
 Type=oneshot
 ExecStartPre=/usr/local/bin/unblock-wifi-rfkill.sh
 ExecStartPre=/bin/sleep 2
+ExecStartPre=-/bin/systemctl stop wpa_supplicant@${AP_INTERFACE}.service
 ExecStart=-/usr/sbin/ip link set $AP_INTERFACE down
 ExecStart=-/usr/sbin/iw dev $AP_INTERFACE set type managed
 ExecStart=-/usr/sbin/ip link set $AP_INTERFACE up
