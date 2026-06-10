@@ -2,7 +2,7 @@
 
 This repository contains a complete software suite for provisioning, configuring, and orchestrating Mobile Ad-hoc Network (MANET) nodes on Single Board Computers (SBCs).
 
-The project transforms hardware like a Rock3a (recommended) or a Raspberry Pi CM4 into self-forming, self-healing mesh nodes using **B.A.T.M.A.N. Advanced** (Layer 2 routing) and **802.11s / 802.11ah HaLow** (Layer 1/2). It features orchestration for automatic addressing and channel selection, partition healing, jamming detection, and decentralized service elections.
+The project transforms hardware like a Rock3a or a Raspberry Pi CM4 (recommended) into self-forming, self-healing mesh nodes using **B.A.T.M.A.N. Advanced** (Layer 2 routing) and **802.11s / 802.11ah HaLow** (Layer 1/2). It features orchestration for automatic addressing and channel selection, partition healing, jamming detection, and decentralized service elections.
 
 ## Key Features
 
@@ -35,10 +35,10 @@ The project transforms hardware like a Rock3a (recommended) or a Raspberry Pi CM
 
 | Hardware | Support Level | Notes |
 | :--- | :--- | :--- |
-| **Compute Module 4 (CM4)** | Functional | Supports 802.11ax + HaLow. |
+| **Compute Module 4 (CM4)** | Functional, primary dev target | Supports 802.11ax + HaLow. |
 | **Raspberry Pi 4B** | Untested |  |
-| **Raspberry Pi 5** | Pre-release | No HaLow support yet. |
-| **Radxa Rock 3A** | In-Testing | Primary dev target. Supports 802.11ax + HaLow. |
+| **Raspberry Pi 5** | Functional | Supports 802.11ax + HaLow |
+| **Radxa Rock 3A** | Functional | Supports 802.11ax + HaLow. |
 
 ## Getting Started
 
