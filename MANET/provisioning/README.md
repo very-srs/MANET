@@ -2,7 +2,7 @@
 
 This directory contains the scripts and templates needed to flash a new mesh radio node.
 
---- 
+---
 
 ## How It Works
 
@@ -17,9 +17,9 @@ The provisioning process has two phases:
 ## PREREQUISITES
 
 You will need:
-- A supported SBC (see main README for hardware support table)
+- A supported SBC. The **Compute Module 4 (CM4) is the current reference platform**; Raspberry Pi 5 and Radxa Rock 3A are also supported, though both are currently deprioritized because of thermal limits in enclosed builds. See the main README for the hardware support table.
 - A Linux or Windows computer to flash from
-- An SD card or eMMC adapter, appropriate for your hardware
+- An SD card or cm4 eMMC, appropriate for your hardware
 - Ethernet internet access on the node during its first boot
 
 ### Required tools (Linux host)
@@ -33,11 +33,11 @@ You will need:
 | `bc` | Network CIDR calculations | `sudo apt install bc` |
 | `openssl` | Generating SAE keys | usually pre-installed |
 
-> **Rock 3A on Linux:** `rpi-imager` is not needed. `rpiboot` is not needed. You do need `losetup`, `xz`, `bc`, and `openssl`.
-
-> **Raspberry Pi on Linux:** `rpi-imager` is required. `losetup` and `xz` are not required.
-
 > **CM4 on Linux:** `rpi-imager` and `rpiboot` are both required.
+
+> **Raspberry Pi (5 / 4B) on Linux:** `rpi-imager` is required. `losetup` and `xz` are not required.
+
+> **Rock 3A on Linux:** `rpi-imager` is not needed. `rpiboot` is not needed. You do need `losetup`, `xz`, `bc`, and `openssl`.
 
 ### Required tools (Windows host)
 
@@ -63,9 +63,26 @@ Clone or download the entire `provisioning/` directory to your working folder. T
 
 **You do not need to download OS images manually.** The scripts handle this automatically:
 
-- **Raspberry Pi (all models):** `rpi-imager` downloads the correct Raspberry Pi OS Lite image directly from the Raspberry Pi Foundation's servers and caches it locally.
+- **Raspberry Pi (all models, including CM4):** `rpi-imager` downloads the correct Raspberry Pi OS Lite image directly from the Raspberry Pi Foundation's servers and caches it locally.
 
 - **Rock 3A:** The script will offer to download the correct Armbian image automatically. If you already have an Armbian `.img` or `.img.xz` file locally, you can point the script to it instead. The expected image is Armbian Trixie (Debian 13) minimal for the Rock 3A — do not use a generic ARM64 image, it must be the board-specific build.
+
+---
+
+## RADIO HARDWARE
+
+Each node carries two radios: an **MT7916** dual-band card for the 2.4/5 GHz 802.11ax mesh links, and an **802.11ah (HaLow)** radio for the long-range backhaul.
+
+On the CM4 reference platform the HaLow radio can be attached two ways, and the software stack supports both:
+
+- **MM6108 over SPI** (Seeed Wio-WM6108 module on a WM1302 Pi HAT) — covers the **NA 902–928 MHz** band only.
+- **MM8108 over USB** (e.g. Lunpid USB MM8108 dongle) — covers **both NA 902–928 MHz and EU 863–870 MHz**.
+
+> **European deployments must use the USB MM8108.** The MM6108 / FGH100M-H module does not operate in the EU 863–870 MHz ISM band.
+
+For the SPI path, provisioning handles the hardware setup automatically: it enables SPI, loads the `mm610x-spi` device-tree overlay, drives the Morse power/reset GPIOs (3, 7, 17) high at boot, and — for the PCIe-attached MT7916 — adds the `pcie-32bit-dma` overlay. No manual `config.txt` editing is required.
+
+The Raspberry Pi 5 and Rock 3A platforms use an MM8108 USB HaLow adapter (e.g. Gateworks GW16167 or Lunpid) rather than the SPI module.
 
 ---
 
@@ -82,7 +99,7 @@ bash linux.sh
 ```
 
 The script will:
-1. Ask you to select your hardware platform (Rock 3A, Pi 5, Pi 4B, or CM4)
+1. Ask you to select your hardware platform (Rock 3A, Pi 5, Pi 4B, or CM4 — **select CM4 for the current reference build**)
 2. Offer to load a saved configuration or create a new one
 3. Acquire the OS image (download automatically or use a local file)
 4. Ask you to select the target device
@@ -91,7 +108,7 @@ The script will:
 
 > **Saved configs:** The script saves configurations to a `.mesh-configs/` directory so you can re-flash nodes with the same settings quickly.
 
-> **CM4 on Linux:** When you select CM4, the script will prompt you to connect the module in USB-boot mode, then run `rpiboot` automatically and detect the newly mounted eMMC device.
+> **CM4 on Linux:** When you select CM4, the script will prompt you to connect the module in USB-boot mode, then run `rpiboot` automatically and detect the newly mounted eMMC device. CM4 is flashed through the Raspberry Pi (Pi 4) image path.
 
 ---
 
@@ -117,11 +134,11 @@ If yes, a Mumble voice server will be available on the mesh at the address endin
 
 ### 4. Mesh SSID
 
-The SSID all nodes use to form the MANET backhaul mesh.
+The SSID all nodes use to form the MANET mesh.
 
 ### 5. Mesh SAE Key
 
-The WPA3-SAE encryption key for the mesh. A key will be generated automatically if you leave this blank.
+The WPA3-SAE encryption key for the mesh. A key will be generated automatically if you leave this blank (recommended).
 
 ### 6. Network CIDR Block
 
@@ -133,7 +150,7 @@ The maximum number of end-user devices each node will serve. This controls DHCP 
 
 ### 8. Regulatory Domain
 
-Your country code for Wi-Fi regulatory compliance (e.g. `US`, `GB`, `AU`).
+Your country code for Wi-Fi regulatory compliance (e.g. `US`, `GB`, `AU`). A matching HaLow regulatory region is derived from this automatically — see **Radio Hardware** above for the EU band caveat (EU nodes need the USB MM8108).
 
 ### 9. Auto Channel Selection
 
@@ -187,6 +204,23 @@ After the reboot the node is fully operational.
 
 ---
 
+## FINAL SETUP — `radio-setup.sh`
+
+`radio-setup.sh` is the last provisioning stage and does most of the node-specific radio and service configuration. The earlier stages enable it to run once on the following boot (via `radio-setup-run-once.service`, after a short delay) — by then the wireless drivers have loaded and the radio interfaces actually exist, which is what this stage depends on. It is the "final mesh configuration" the boot flow above reboots into, and runs on both the Raspberry Pi / CM4 and Rock 3A platforms.
+
+It performs:
+
+- **Interface detection and naming.** Waits for the wireless PHYs to appear, classifies each interface as 2.4 GHz mesh, 5 GHz mesh, HaLow, or non-mesh (EUD AP), and writes MAC-keyed `.link` files so the names stay stable across reboots. If an interface still needs renaming, it stages a one-shot re-run and reboots once, so the rest of the configuration is written against the final names.
+- **Per-interface supplicant configs.** Writes `wpa_supplicant` mesh-point / SAE configs for the 2.4 and 5 GHz radios and `wpa_supplicant_s1g` (S1G) configs for the HaLow interface, along with the matching `systemd-networkd` link/network files.
+- **HaLow / Morse setup.** Sets the HaLow TX power, writes `/etc/modprobe.d/morse.conf` and the `cfg80211` regulatory domain (including EU handling), and ensures the SPI overlay, Morse power/reset GPIOs, and CM4 `pcie-32bit-dma` settings are present in `config.txt`.
+- **Core services.** Enables and starts the mesh stack — `alfred`, BATMAN-adv (`batman-enslave`), `node-manager`, `radvd`, and `chrony` — plus support services for LED/button handling, SSH recovery, cloned-identity reset, the boot lobby channels, and one-shot time sync.
+- **Optional services.** Brings up MediaMTX, Mumble, and GPS/NTP (`gpsd`, `gps-reader.service`, chrony `SHM 0`) when selected or present.
+- **Identity and web UI.** Derives the hostname from the node's MAC (`mesh-XXXX`) and starts the status / admin web server (`mesh-status.py`) on port 80.
+
+When it finishes — and after any pending interface rename has settled — it disables its own run-once service, marks the node provisioned, and brings the mesh up by restarting `systemd-networkd`, the supplicants, `node-manager`, BATMAN-adv, and `alfred`. Output is logged to `/var/log/radio-setup.log`.
+
+---
+
 ## DEFAULT CREDENTIALS
 
 | Account | Username | Default Password |
@@ -201,8 +235,10 @@ After the reboot the node is fully operational.
 **Provisioning logs (Raspberry Pi):**
 - Phase 1 (firstrun): `/boot/firmware/firstrun.log`
 - Phase 2 (mesh provisioning): `/boot/firmware/provision.log`
+- Radio setup: `/var/log/radio-setup.log`
 
 **Provisioning logs (Rock 3A):**
 - `/var/log/mesh-provision.log`
+- `/var/log/radio-setup.log`
 
 **Node hasn't provisioned after 10 minutes:** Check that Ethernet is connected and has a working internet connection. The provisioning script waits up to 5 minutes for connectivity before timing out.
