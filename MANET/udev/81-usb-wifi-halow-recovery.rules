@@ -1,0 +1,4 @@
+# When a non-Morse USB WiFi adapter is added or removed, restart HaLow (wlan2)
+# to recover from USB bus contention that drops the Morse S1G link.
+ACTION=="add",    SUBSYSTEM=="net", ENV{ID_BUS}=="usb", ENV{ID_NET_DRIVER}!="morse*", ENV{ID_NET_DRIVER}!="", RUN+="/usr/local/bin/usb-wifi-halow-recovery.sh add $name"
+ACTION=="remove", SUBSYSTEM=="net", ENV{ID_BUS}=="usb", ENV{ID_NET_DRIVER}!="morse*", RUN+="/usr/local/bin/usb-wifi-halow-recovery.sh remove $name"
