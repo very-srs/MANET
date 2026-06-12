@@ -789,6 +789,7 @@ ctrl_interface=/var/run/wpa_supplicant
 country=$CFG80211_REGDOM
 update_config=1
 sae_pwe=1
+sae_anti_clogging_threshold=0
 ap_scan=2
 network={
     ssid="$MESH_NAME"
@@ -798,6 +799,7 @@ network={
     sae_password="$KEY"
     ieee80211w=2
     mesh_fwding=0
+    group_rekey=0
 }
 EOF
 
@@ -1053,6 +1055,7 @@ network={
     pairwise=CCMP
     ieee80211w=2
     beacon_int=1000
+    group_rekey=0
 }
 EOF
     else
@@ -1086,6 +1089,7 @@ network={
     pairwise=CCMP
     ieee80211w=2
     beacon_int=100
+    group_rekey=0
 }
 EOF
     fi

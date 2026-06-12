@@ -31,8 +31,11 @@ rm -f /etc/systemd/network/20-end0-*.network
 log "Restoring default DHCP config"
 cp /etc/systemd/network/10-end0.network.dhcp-default /etc/systemd/network/10-end0.network 2>/dev/null || true
 
-# Restart networkd to apply changes
-systemctl restart systemd-networkd 2>/dev/null
+# Reload networkd config files and reconfigure only end0.
+# Do NOT restart systemd-networkd — a full restart kicks batman-adv interfaces
+# out of bat0 when networkd reconfigures wlan0/wlan2.
+networkctl reload 2>/dev/null || true
+networkctl reconfigure "$IFACE" 2>/dev/null || true
 
 # Remove dnsmasq wired-eud config
 rm -f /etc/dnsmasq.d/mesh-wired-eud.conf 2>/dev/null

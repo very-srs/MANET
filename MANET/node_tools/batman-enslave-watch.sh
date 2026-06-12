@@ -54,6 +54,22 @@ while true; do
     HALOW_IFS="$(cat /var/lib/halow_if 2>/dev/null)"
     MESH_IFS="$(cat /var/lib/mesh_if 2>/dev/null)"
 
+    # Enforce mesh_plink_timeout=0 on HaLow interfaces. The inactivity-based
+    # plink close triggers a Morse firmware stuck state during key teardown
+    # (morse_cmd_disable_key ENODEV) that only a hard reboot recovers from.
+    # The param resets to default whenever wpa_supplicant_s1g re-forms the
+    # mesh, so enforce it here rather than once at boot. The get/set only
+    # succeeds after the mesh is joined; failures are silently retried.
+    for IFACE in $HALOW_IFS; do
+        radio_iface_enabled "$IFACE" || continue
+        CUR="$(iw dev "$IFACE" get mesh_param mesh_plink_timeout 2>/dev/null)"
+        if [ -n "$CUR" ] && [ "${CUR%% *}" != "0" ]; then
+            if iw dev "$IFACE" set mesh_param mesh_plink_timeout 0 2>/dev/null; then
+                log "Set mesh_plink_timeout=0 on $IFACE (was: $CUR)"
+            fi
+        fi
+    done
+
     for IFACE in $HALOW_IFS $MESH_IFS; do
         # Skip if radio-state says down
         radio_iface_enabled "$IFACE" || continue
