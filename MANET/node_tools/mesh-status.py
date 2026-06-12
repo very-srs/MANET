@@ -23,7 +23,6 @@ Calls:
 import http.server
 import socketserver
 import json
-import math
 import subprocess
 import re
 import os
@@ -45,7 +44,8 @@ MESH_CONF_FILE  = "/etc/mesh.conf"
 MESH_STATE_FILE = "/etc/mesh_ipv4_state"
 PORT            = 8080
 REFRESH_MS      = 15000   # Status page polling interval (ms)
-HALOW_EU_CHANNELS = [863500, 864500, 865500, 866500, 867500, 868500]
+HALOW_EU_CHANNELS = [863500, 864500, 865500, 866500, 867500]
+HALOW_EU_UI_TO_S1G_CHANNEL = {idx: 1 + ((idx - 1) * 2) for idx in range(1, 6)}
 HALOW_BW_TXPOWER_CAP_DBM = {'1MHz': '24', '2MHz': '24', '4MHz': '22'}
 PERF_AUTH_COOKIE = 'manet_perf_auth'
 PERF_AUTH_COOKIE_MAX_AGE = 15552000
@@ -358,6 +358,45 @@ def txpower_choices_from_cap(cap_dbm):
     return [str(v) for v in range(cap, 0, -1)]
 
 
+def txpower_options_for_iface(iface, cap_dbm, current_dbm=''):
+    if iface == 'wlan2':
+        fixed = _fmt_dbm(cap_dbm or current_dbm)
+        return [fixed] if fixed else []
+    return txpower_choices_from_cap(cap_dbm)
+
+
+def txpower_request_allowed(iface, requested, cap_dbm, options=None):
+    if iface == 'wlan2':
+        opts = options if options is not None else txpower_options_for_iface(iface, cap_dbm)
+        try:
+            req = float(requested)
+            return any(abs(req - float(opt)) < 0.05 for opt in opts)
+        except Exception:
+            return False
+    try:
+        return not cap_dbm or float(requested) <= float(cap_dbm)
+    except Exception:
+        return False
+
+
+def unsupported_txpower_response(iface, requested, cap_dbm, options=None):
+    opts = options if options is not None else txpower_options_for_iface(iface, cap_dbm)
+    if iface == 'wlan2':
+        return {
+            'ok': False,
+            'error': (
+                f'Unsupported txpower {requested} dBm for {iface}; '
+                f'HaLow txpower is fixed by the Morse driver/BCF for the selected bandwidth'
+            ),
+            'options': opts,
+        }
+    return {
+        'ok': False,
+        'error': f'Unsupported txpower {requested} dBm for {iface} (max {cap_dbm} dBm)',
+        'options': opts,
+    }
+
+
 def get_halow_bw_txpower_cap(bw):
     return HALOW_BW_TXPOWER_CAP_DBM.get(_format_halow_bw(bw), '')
 
@@ -426,28 +465,6 @@ def set_iface_txpower_verified(iface, dbm, retries=6, delay=0.25):
         f'{actual or "unknown"} dBm, expected {requested} dBm'
     )
 
-def haversine_m(lat1, lon1, lat2, lon2):
-    R = 6_371_000
-    phi1, phi2 = math.radians(lat1), math.radians(lat2)
-    dphi = math.radians(lat2 - lat1)
-    dlam = math.radians(lon2 - lon1)
-    a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlam / 2) ** 2
-    return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
-
-def fmt_distance(m):
-    if m is None:
-        return None
-    if m < 1000:
-        return f'{round(m)} m'
-    return f'{m / 1000:.2f} km'
-
-def gps_from_registry_node(ndata):
-    lat = ndata.get('GPS_LATITUDE', '')
-    lon = ndata.get('GPS_LONGITUDE', '')
-    alt = ndata.get('GPS_ALTITUDE', '')
-    available = bool(lat and lon)
-    return {'available': available, 'lat': lat, 'lon': lon, 'alt': alt}
-
 def parse_registry():
     """Parse /var/run/mesh_node_registry into a dict of node dicts."""
     nodes = {}
@@ -473,13 +490,13 @@ def norm_mac(mac):
 def run_batctl_originators():
     """Parse `batctl o` into two structures:
       tq_map:   {mac -> best_tq_norm}  (indexes both orig + nexthop MACs)
-      orig_map: {orig_mac -> {tq, nexthop}}  (best path per originator)
+      orig_map: {orig_mac -> {tq, nexthop, iface}}  (best path per originator)
 
     BATMAN_V reports throughput in Mbit/s (>255); BATMAN_IV uses 0-255 LQ.
     Both are normalised to 0-255.
     """
     tq_map   = {}
-    orig_map = {}  # orig_mac -> {'tq': int, 'nexthop': str}
+    orig_map = {}  # orig_mac -> {'tq': int, 'nexthop': str, 'iface': str}
 
     def _set_tq(mac, tq):
         if mac and (mac not in tq_map or tq > tq_map[mac]):
@@ -488,25 +505,26 @@ def run_batctl_originators():
     try:
         r = subprocess.run(['batctl', 'o', '-n'],
                            capture_output=True, text=True, timeout=5)
-        orig_best = {}  # orig_mac -> (best_tq_float, nexthop_mac)
+        orig_best = {}  # orig_mac -> (best_tq_float, nexthop_mac, outgoing_iface)
         for line in r.stdout.splitlines():
             m = re.match(
-                r'[\s*]+([0-9a-f:]{17})\s+[\d.]+(?:ms|s)\s+\(\s*([\d.]+)\)\s+([0-9a-f:]{17})',
+                r'[\s*]+([0-9a-f:]{17})\s+[\d.]+(?:ms|s)\s+\(\s*([\d.]+)\)\s+([0-9a-f:]{17})(?:\s+\[\s*(\S+)\s*\])?',
                 line)
             if m:
                 orig    = norm_mac(m.group(1))
                 tq      = float(m.group(2))
                 nexthop = norm_mac(m.group(3))
+                iface   = (m.group(4) or '').strip()
                 prev = orig_best.get(orig)
                 if prev is None or tq > prev[0]:
-                    orig_best[orig] = (tq, nexthop)
+                    orig_best[orig] = (tq, nexthop, iface)
 
-        for orig, (tq, nexthop) in orig_best.items():
+        for orig, (tq, nexthop, iface) in orig_best.items():
             tq_norm = int(min(tq / 1000 * 255, 255)) if tq > 255 else int(tq)
             _set_tq(orig, tq_norm)
             if nexthop != orig:
                 _set_tq(nexthop, tq_norm)
-            orig_map[orig] = {'tq': tq_norm, 'nexthop': nexthop}
+            orig_map[orig] = {'tq': tq_norm, 'nexthop': nexthop, 'iface': iface}
     except Exception:
         pass
     return tq_map, orig_map
@@ -782,7 +800,9 @@ def get_interfaces():
         cap = get_iface_txpower_cap(iname)
         if cap:
             iw_info[iname]['txpower_cap_dbm'] = cap
-            iw_info[iname]['txpower_options_dbm'] = txpower_choices_from_cap(cap)
+            iw_info[iname]['txpower_options_dbm'] = txpower_options_for_iface(
+                iname, cap, iw_info[iname].get('txpower_dbm', '')
+            )
 
     # HaLow (morse_usb): iw can report a regular Wi-Fi channel; Morse driver is the runtime source.
     for iname in list(iw_info.keys()):
@@ -983,9 +1003,10 @@ def get_interfaces():
 
 def get_connected_euds():
     """
-    Return list of {mac, ip, hostname} from dnsmasq leases.
+    Return list of active {mac, ip, hostname} from dnsmasq leases.
     """
     euds = []
+    now = int(time.time())
     lease_paths = [
         '/var/lib/misc/dnsmasq.leases',
         '/tmp/dnsmasq.leases',
@@ -998,10 +1019,17 @@ def get_connected_euds():
                     parts = line.strip().split()
                     if len(parts) >= 4:
                         # format: expiry mac ip hostname [clientid]
+                        try:
+                            expiry = int(parts[0])
+                        except Exception:
+                            expiry = 0
+                        if expiry and expiry < now:
+                            continue
                         euds.append({
                             'mac':      parts[1],
                             'ip':       parts[2],
                             'hostname': parts[3] if parts[3] != '*' else '',
+                            'expires_in': max(0, expiry - now) if expiry else None,
                         })
             break
         except Exception:
@@ -1193,36 +1221,6 @@ def assemble_status_data():
         selected_gw = norm_mac(best_gw_nd.get('MAC_ADDRESS', ''))
         gateways    = [{'mac': selected_gw, 'tq': 0, 'selected': True}]
 
-    # GPS for THIS NODE — fresh from gps_status.json, fall back to registry
-    self_gps = {'available': False, 'lat': '', 'lon': '', 'alt': ''}
-    try:
-        with open('/run/gps_status.json') as _gf:
-            _gd = json.load(_gf)
-        if _gd.get('has_fix'):
-            self_gps = {
-                'available': True,
-                'lat': str(_gd['latitude']),
-                'lon': str(_gd['longitude']),
-                'alt': str(_gd.get('altitude', '')),
-            }
-    except Exception:
-        pass
-    if not self_gps['available']:
-        for nid_s, nd_s in nodes_raw.items():
-            if (my_mac and norm_mac(nd_s.get('MAC_ADDRESS', '')) == my_mac) or nd_s.get('HOSTNAME', '') == my_host:
-                self_gps = gps_from_registry_node(nd_s)
-                break
-
-    def _distance_from_self(peer_gps):
-        if not self_gps['available'] or not peer_gps['available']:
-            return None, None
-        try:
-            m = haversine_m(float(self_gps['lat']), float(self_gps['lon']),
-                            float(peer_gps['lat']), float(peer_gps['lon']))
-            return round(m, 1), fmt_distance(m)
-        except Exception:
-            return None, None
-
     node_list = []
     self_found = False
 
@@ -1256,12 +1254,16 @@ def assemble_status_data():
         all_node_macs = [norm_mac(m) for m in ndata.get('MAC_ADDRESSES', '').split(',') if m.strip()]
         is_direct = any(m in neighbor_macs for m in all_node_macs) or node_mac in neighbor_macs
         gw_info   = gw_mac_map.get(node_mac)
-
-        node_gps = self_gps if is_me else gps_from_registry_node(ndata)
-        if is_me:
-            dist_m, dist_label = 0, '0 m'
-        else:
-            dist_m, dist_label = _distance_from_self(node_gps)
+        best_link = {}
+        if not is_me:
+            for omac, odata in orig_map.items():
+                if omac == node_mac or omac in all_node_macs:
+                    if not best_link or odata.get('tq', 0) > best_link.get('tq', 0):
+                        best_link = {
+                            'iface':   odata.get('iface', ''),
+                            'nexthop': odata.get('nexthop', ''),
+                            'tq':      odata.get('tq'),
+                        }
 
         node_list.append({
             'id':           nid,
@@ -1287,11 +1289,9 @@ def assemble_status_data():
             'ch_5g':        ndata.get('DATA_CHANNEL_5_0', ''),
             'limp':         ndata.get('IS_IN_LIMP_MODE', 'false').lower() == 'true',
             'all_macs':     [norm_mac(m) for m in ndata.get('MAC_ADDRESSES', '').split(',') if m.strip()],
+            'best_link':    best_link,
             'hop_count':    None,
             'last_seen':    ndata.get('LAST_REGISTRY_UPDATE', ndata.get('LAST_SEEN_TIMESTAMP', '0')),
-            'gps':                  node_gps,
-            'distance_from_self_m': dist_m,
-            'distance_from_self_label': dist_label,
         })
 
     # If self not in registry, inject a placeholder
@@ -1307,9 +1307,6 @@ def assemble_status_data():
             'mumble': False, 'mediamtx': False, 'ntp': False,
             'state': 'ACTIVE', 'ch_2g': '', 'ch_5g': '', 'limp': False,
             'hop_count': None, 'last_seen': str(int(time.time())),
-            'gps': self_gps,
-            'distance_from_self_m': 0,
-            'distance_from_self_label': '0 m',
         })
 
     node_list.sort(key=lambda n: (not n['is_me'], -(n['tq'] if n['tq'] is not None else -1)))
@@ -1552,6 +1549,8 @@ body {
 .badge-svc       { background: rgba(236,176,0,.10); color: var(--text); border:1px solid rgba(236,176,0,.26); }
 .badge-gw        { background: rgba(236,176,0,.14); color: var(--fer-black); }
 .badge-direct    { background: #ecfdf3; color: #136c36; }
+.badge-bestlink  { background: rgba(2,0,13,.08); color: var(--text); border: 1px solid rgba(2,0,13,.18); }
+:root[data-theme="dark"] .badge-bestlink { background: rgba(248,246,239,.08); border-color: rgba(248,246,239,.18); }
 .self-node-badge {
   display: inline-flex;
   align-items: center;
@@ -1858,6 +1857,10 @@ function renderNodeList(nodes) {
     const badges = [];
     if (n.is_gateway)  badges.push(`<span class="badge badge-gw">${n.is_selected_gw ? '★ GW' : 'GW'}</span>`);
     if (n.is_direct && !n.is_me) badges.push(`<span class="badge badge-direct">DIRECT</span>`);
+    if (n.best_link && n.best_link.iface && !n.is_me) {
+      const linkTq = n.best_link.tq == null ? '?' : n.best_link.tq;
+      badges.push(`<span class="badge badge-bestlink" title="BATMAN selected route via ${n.best_link.nexthop || 'unknown'}">BEST ${n.best_link.iface} TQ ${linkTq}</span>`);
+    }
     if (n.mumble)      badges.push(`<span class="badge badge-svc">MUMBLE</span>`);
     if (n.mediamtx)    badges.push(`<span class="badge badge-svc">MTX</span>`);
     if (n.ntp)         badges.push(`<span class="badge badge-svc">NTP</span>`);
@@ -1878,8 +1881,6 @@ function renderNodeList(nodes) {
       const icon = (n.battery.charging === true) ? '⚡' : (pct <= 15 ? '⚠' : '');
       battMeta = `<span style="color:${col};font-size:10px">${icon}${pct}%</span>`;
     }
-    const distMeta = (!n.is_me && !nodeStale && n.distance_from_self_label)
-      ? `<span style="color:var(--muted);font-size:10px">&#x25CE; ${n.distance_from_self_label}</span>` : '';
     const offlineBadge = nodeStale ? `<span class="badge badge-tq-bad" style="opacity:.7">OFFLINE</span><span style="color:var(--muted);font-size:10px">last seen ${fmtAge(n.last_seen)}</span>` : '';
 
     const expanded = SELECTED_PEER_ID === n.id;
@@ -1888,14 +1889,10 @@ function renderNodeList(nodes) {
         : (PEER_LOADING_ID === n.id
             ? '<div class="peer-loading">FETCHING…</div>'
           : (PEER_DETAIL_CACHE[n.id] || '<div class="peer-loading" style="color:var(--muted)">No details loaded</div>'));
-    const distDetail = (!n.is_me && n.distance_from_self_label)
-      ? `<span style="color:var(--muted);font-size:10px;margin-left:8px">&#x25CE; ${n.distance_from_self_label}</span>` : '';
-    const gpsDetail = (!n.is_me && n.gps && n.gps.available)
-      ? `<span style="color:var(--muted);font-size:10px;margin-left:8px">${n.gps.lat}, ${n.gps.lon}${n.gps.alt ? ' ' + n.gps.alt + 'm' : ''}</span>` : '';
     const detail = expanded ? `<div class="node-inline-detail">
       <div class="inline-detail-head">
         <span class="inline-detail-title">${n.hostname}${n.ip ? '  ' + n.ip : ''}</span>
-        ${n.is_me ? '<span class="self-node-badge">THIS NODE</span>' : ''}${distDetail}${gpsDetail}
+        ${n.is_me ? '<span class="self-node-badge">THIS NODE</span>' : ''}
       </div>
       <div class="inline-detail-body">${detailBody}</div>
     </div>` : '';
@@ -1904,7 +1901,7 @@ function renderNodeList(nodes) {
       <div class="node-summary">
         <div class="node-name" style="${nodeStale ? 'color:var(--muted)' : ''}">${n.hostname}${thisNodeLabel}${n.state==='SHUTTING_DOWN'?'<span style="color:var(--bad);font-size:10px;margin-left:4px">OFFLINE</span>':''}</div>
         <div class="node-ip">${n.ip||'—'} &nbsp; <span style="color:var(--muted)">${n.mac}</span></div>
-        <div class="node-meta">${nodeStale ? offlineBadge : tqBadge+badges.join('')+meta+cpu+battMeta+distMeta}</div>
+        <div class="node-meta">${nodeStale ? offlineBadge : tqBadge+badges.join('')+meta+cpu+battMeta}</div>
         ${bar}
       </div>
       ${detail}
@@ -3975,12 +3972,9 @@ class MeshHandler(http.server.BaseHTTPRequestHandler):
                     return
                 requested = _fmt_dbm(dbm)
                 cap = get_iface_txpower_cap(iface)
-                if cap and float(requested) > float(cap):
-                    self.send_json({
-                        'ok': False,
-                        'error': f'Unsupported txpower {requested} dBm for {iface} (max {cap} dBm)',
-                        'options': txpower_choices_from_cap(cap),
-                    })
+                options = txpower_options_for_iface(iface, cap, read_iface_txpower_dbm(iface))
+                if cap and not txpower_request_allowed(iface, requested, cap, options):
+                    self.send_json(unsupported_txpower_response(iface, requested, cap, options))
                     return
                 requested, actual = set_iface_txpower_verified(iface, dbm)
                 self.send_json({
@@ -3989,7 +3983,7 @@ class MeshHandler(http.server.BaseHTTPRequestHandler):
                     'dbm': requested,
                     'actual_dbm': actual,
                     'cap': cap,
-                    'options': txpower_choices_from_cap(cap) if cap else [],
+                    'options': txpower_options_for_iface(iface, cap, actual) if cap else [],
                 })
             except subprocess.CalledProcessError as e:
                 err = (e.stderr or e.stdout or str(e)).strip()
@@ -4008,13 +4002,22 @@ class MeshHandler(http.server.BaseHTTPRequestHandler):
                     return
                 channel = int(channel)
                 # EU S1G channel index → centre frequency in kHz
-                eu_s1g_freq_khz = {1: 863500, 2: 864500, 3: 865500,
-                                   4: 866500, 5: 867500, 6: 868500}
+                eu_s1g_freq_khz = {idx: freq for idx, freq in enumerate(HALOW_EU_CHANNELS, start=1)}
+                s1g_channel = HALOW_EU_UI_TO_S1G_CHANNEL.get(channel)
                 freq_khz = eu_s1g_freq_khz.get(channel)
-                if not freq_khz:
+                if not freq_khz or not s1g_channel:
                     self.send_json({'ok': False, 'error': f'Invalid EU S1G channel {channel}'})
                     return
                 bw_mhz = int(str(bw).replace('MHz', ''))
+                requested = ''
+                actual = ''
+                if dbm is not None:
+                    cap = get_halow_bw_txpower_cap(bw) or get_iface_txpower_cap('wlan2')
+                    requested = _fmt_dbm(dbm)
+                    options = txpower_options_for_iface('wlan2', cap, read_iface_txpower_dbm('wlan2'))
+                    if cap and not txpower_request_allowed('wlan2', requested, cap, options):
+                        self.send_json(unsupported_txpower_response('wlan2', requested, cap, options))
+                        return
                 # s1g_prim_chwidth: 0=1MHz primary, 1=2MHz primary
                 # For 4MHz operation, primary channel is 2MHz → chwidth=1
                 chwidth = {1: 0, 2: 1, 4: 1}.get(bw_mhz, 0)
@@ -4025,7 +4028,8 @@ class MeshHandler(http.server.BaseHTTPRequestHandler):
                 wpa_conf = '/etc/wpa_supplicant/wpa_supplicant-wlan2-s1g.conf'
                 with open(wpa_conf) as f:
                     content = f.read()
-                content = re.sub(r'(channel\s*=\s*)\d+', rf'\g<1>{channel}', content)
+                content = re.sub(r'(channel\s*=\s*)\d+', rf'\g<1>{s1g_channel}', content)
+                content = re.sub(r'(op_class\s*=\s*)\d+', r'\g<1>66', content)
                 content = re.sub(r'(s1g_prim_chwidth\s*=\s*)\d+', rf'\g<1>{chwidth}', content)
                 with open(wpa_conf, 'w') as f:
                     f.write(content)
@@ -4040,15 +4044,6 @@ class MeshHandler(http.server.BaseHTTPRequestHandler):
                     subprocess.run(['systemctl', 'restart', 'wpa_supplicant-s1g-wlan2.service'],
                                    timeout=15)
                 if dbm is not None:
-                    cap = get_halow_bw_txpower_cap(bw) or get_iface_txpower_cap('wlan2')
-                    requested = _fmt_dbm(dbm)
-                    if cap and float(requested) > float(cap):
-                        self.send_json({
-                            'ok': False,
-                            'error': f'Unsupported txpower {requested} dBm for wlan2 (max {cap} dBm)',
-                            'options': txpower_choices_from_cap(cap),
-                        })
-                        return
                     requested, actual = set_iface_txpower_verified('wlan2', dbm)
                 self.send_json({'ok': True, 'channel': channel, 'freq_khz': freq_khz, 'bw': bw, 'dbm': requested if dbm is not None else '', 'actual_dbm': actual if dbm is not None else ''})
             except Exception as e:
@@ -4086,12 +4081,9 @@ class MeshHandler(http.server.BaseHTTPRequestHandler):
                 if dbm is not None:
                     cap = get_iface_txpower_cap(iface)
                     requested = _fmt_dbm(dbm)
-                    if cap and float(requested) > float(cap):
-                        self.send_json({
-                            'ok': False,
-                            'error': f'Unsupported txpower {requested} dBm for {iface} (max {cap} dBm)',
-                            'options': txpower_choices_from_cap(cap),
-                        })
+                    options = txpower_options_for_iface(iface, cap)
+                    if cap and not txpower_request_allowed(iface, requested, cap, options):
+                        self.send_json(unsupported_txpower_response(iface, requested, cap, options))
                         return
                     requested, actual = set_iface_txpower_verified(iface, dbm)
                 self.send_json({'ok': True, 'iface': iface, 'channel': channel, 'frequency': freq, 'dbm': requested if dbm is not None else '', 'actual_dbm': actual if dbm is not None else ''})

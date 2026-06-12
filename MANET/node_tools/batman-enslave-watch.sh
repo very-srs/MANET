@@ -17,6 +17,37 @@ sys.exit(1 if state == 'down' else 0)
 PY
 }
 
+batman_mainif() {
+    batctl bat0 o 2>/dev/null | sed -n '1s/.*MainIF\/MAC: \([^/]*\)\/.*/\1/p'
+}
+
+restore_halow_primary_if_needed() {
+    local halow mainif now last cooldown_file
+
+    halow="$(echo "$HALOW_IFS" | awk 'NF {print $1; exit}')"
+    [ -n "$halow" ] || return 0
+    radio_iface_enabled "$halow" || return 0
+    ip link show "$halow" >/dev/null 2>&1 || return 0
+    batctl bat0 if 2>/dev/null | grep -q "^${halow}:" || return 0
+
+    mainif="$(batman_mainif)"
+    [ -n "$mainif" ] || return 0
+    [ "$mainif" = "$halow" ] && return 0
+
+    cooldown_file="/run/batman-enslave-watch-halow-primary-reset"
+    now="$(date +%s)"
+    last="$(cat "$cooldown_file" 2>/dev/null || echo 0)"
+    if [ $((now - last)) -lt 60 ]; then
+        return 0
+    fi
+    echo "$now" > "$cooldown_file"
+
+    log "WARNING: bat0 MainIF is $mainif, expected HaLow $halow; rebuilding bat0 membership"
+    /usr/local/bin/batman-if-setup.sh stop 2>/dev/null || true
+    sleep 2
+    /usr/local/bin/batman-if-setup.sh start 2>/dev/null || true
+}
+
 while true; do
     sleep 8
 
@@ -51,4 +82,6 @@ while true; do
             sleep 2
         done
     done
+
+    restore_halow_primary_if_needed
 done

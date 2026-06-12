@@ -50,9 +50,10 @@ ALFRED_RADIO_ACK_TYPE = 72
 FER_LOGO_FULL_FILE = '/usr/local/share/manet/fer-logo.svg'
 FER_LOGO_BLACK_FILE = '/usr/local/share/manet/fer-logo-black.svg'
 FER_LOGO_WHITE_FILE = '/usr/local/share/manet/fer-logo-white.svg'
+USB_WIFI_UPLINK_SCRIPT = '/usr/local/bin/usb-wifi-uplink.sh'
 
 # EU S1G channels (centre frequencies in MHz)
-HALOW_EU_CHANNELS = [863500, 864500, 865500, 866500, 867500, 868500]
+HALOW_EU_CHANNELS = [863500, 864500, 865500, 866500, 867500]
 HALOW_BW_OPTIONS  = ['1MHz', '2MHz', '4MHz']
 # Empirical HaLow TX-power ceilings verified on mesh-f86f (2026-04-22)
 # by applying channel/BW changes on the live node and reading back /api/local.
@@ -209,6 +210,100 @@ def finish_upload_status(ok=True, error='', **extra):
 def get_upload_status():
     with _upload_lock:
         return dict(_upload_status)
+
+
+def get_usb_wifi_uplink_status():
+    if not os.path.exists(USB_WIFI_UPLINK_SCRIPT):
+        return {
+            'enabled': True,
+            'iface': '',
+            'ssid': 'hotspot',
+            'state': 'script-missing',
+            'connected': False,
+            'ip': '',
+            'service': '',
+        }
+    try:
+        r = subprocess.run(
+            [USB_WIFI_UPLINK_SCRIPT, 'status-json'],
+            capture_output=True, text=True, timeout=8
+        )
+        data = json.loads((r.stdout or '{}').strip() or '{}')
+        data.setdefault('ssid', 'hotspot')
+        data.setdefault('iface', '')
+        data.setdefault('state', 'unknown')
+        data.setdefault('connected', False)
+        data.setdefault('ip', '')
+        data.setdefault('service', '')
+        data.setdefault('enabled', True)
+        return data
+    except Exception as e:
+        return {
+            'enabled': True,
+            'iface': '',
+            'ssid': 'hotspot',
+            'state': 'error',
+            'connected': False,
+            'ip': '',
+            'service': '',
+            'error': str(e),
+        }
+
+
+def apply_usb_wifi_uplink(ssid, password, enabled=True):
+    ssid = (ssid or 'hotspot').strip()
+    password = password if password is not None else 'raspberry'
+    if not ssid:
+        raise ValueError('SSID is required')
+    if not password:
+        raise ValueError('Password is required')
+    if not os.path.exists(USB_WIFI_UPLINK_SCRIPT):
+        raise RuntimeError(f'Missing {USB_WIFI_UPLINK_SCRIPT}')
+    r = subprocess.run(
+        [USB_WIFI_UPLINK_SCRIPT, 'set', ssid, password, '1' if enabled else '0'],
+        capture_output=True, text=True, timeout=45
+    )
+    if r.returncode != 0:
+        err = (r.stderr or r.stdout or '').strip()
+        raise RuntimeError(err or f'usb-wifi-uplink exited {r.returncode}')
+    return get_usb_wifi_uplink_status()
+
+
+def apply_usb_wifi_uplink_all(ssid, password, enabled=True):
+    local_status = apply_usb_wifi_uplink(ssid, password, enabled)
+    nodes_raw = parse_registry()
+    applied = []
+    errors = []
+    statuses = {}
+    for nd in nodes_raw.values():
+        ip = nd.get('IPV4_ADDRESS', '')
+        hostname = nd.get('HOSTNAME', ip)
+        if not ip:
+            continue
+        try:
+            r = call_perf_node_api(
+                ip,
+                '/api/control/uplink_wifi',
+                'POST',
+                {'ssid': ssid, 'password': password, 'enabled': enabled},
+                timeout=55,
+            )
+            statuses[hostname] = r
+            if r.get('ok'):
+                applied.append(hostname)
+            else:
+                errors.append(f"{hostname}: {r.get('error', 'failed')}")
+        except Exception as e:
+            errors.append(f"{hostname}: {e}")
+    result = dict(local_status)
+    result.update({
+        'ok': not errors,
+        'local': local_status,
+        'applied': applied,
+        'statuses': statuses,
+        'error': '; '.join(errors),
+    })
+    return result
 
 def parse_registry():
     nodes = {}
@@ -427,6 +522,22 @@ def call_node_api(node_ip, path, method='GET', data=None, timeout=8):
     except Exception as e:
         return {'ok': False, 'error': str(e)}
 
+
+def call_perf_node_api(node_ip, path, method='GET', data=None, timeout=8):
+    try:
+        url = f'http://{node_ip}:8081{path}'
+        body = json.dumps(data).encode() if data else None
+        req = urllib.request.Request(
+            url,
+            data=body,
+            method=method,
+            headers={'Content-Type': 'application/json', 'User-Agent': 'perf-dashboard/1'}
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode())
+    except Exception as e:
+        return {'ok': False, 'error': str(e)}
+
 def fmt_uptime(seconds):
     try:
         s = int(seconds)
@@ -446,43 +557,24 @@ def fmt_uptime(seconds):
     return f'{d}d{rh:02d}h'
 
 
-def _gps_dict(node):
-    g = node.get('gps') or {}
-    return {
-        'available': bool(g.get('available')),
-        'lat': g.get('lat', ''),
-        'lon': g.get('lon', ''),
-        'alt': g.get('alt', ''),
-    }
-
-def get_session_info(src_ip, dst_ip):
-    """Return (hop_count, hop_source, gps_src, gps_dst) from one /api/data call on src."""
-    _null_gps = {'available': False, 'lat': '', 'lon': '', 'alt': ''}
+def get_session_hop_count(src_ip, dst_ip):
     if not src_ip or not dst_ip:
-        return None, 'missing', _null_gps, _null_gps
+        return None, 'missing'
     try:
         data = call_node_api(src_ip, '/api/data', timeout=5)
     except Exception:
-        return None, 'error', _null_gps, _null_gps
-    if not isinstance(data, dict) or data.get('error'):
-        return None, 'error', _null_gps, _null_gps
-
-    gps_src = _null_gps
-    gps_dst = _null_gps
-    hop_count = None
-    hop_source = 'unknown'
-
+        return None, 'error'
+    if not isinstance(data, dict):
+        return None, 'error'
+    if data.get('error'):
+        return None, 'error'
     for node in data.get('nodes', []):
-        if node.get('is_me'):
-            gps_src = _gps_dict(node)
         if node.get('ip') == dst_ip:
-            gps_dst = _gps_dict(node)
-            hc = node.get('hop_count')
-            if isinstance(hc, int) and hc >= 1:
-                hop_count = hc
-                hop_source = 'batctl'
-
-    return hop_count, hop_source, gps_src, gps_dst
+            hop_count = node.get('hop_count')
+            if isinstance(hop_count, int) and hop_count >= 1:
+                return hop_count, 'batctl'
+            return None, 'unknown'
+    return None, 'unknown'
 
 
 def extract_iperf3_metrics(iperf):
@@ -591,6 +683,13 @@ def txpower_choices_from_cap(cap_dbm):
     if cap < 1:
         return []
     return [str(v) for v in range(cap, 0, -1)]
+
+
+def txpower_options_for_iface(iface, cap_dbm, current_dbm=''):
+    if iface == 'wlan2':
+        fixed = _fmt_dbm(cap_dbm or current_dbm)
+        return [fixed] if fixed else []
+    return txpower_choices_from_cap(cap_dbm)
 
 
 def get_halow_bw_txpower_cap(bw):
@@ -854,7 +953,7 @@ def get_iw_info(iface):
     cap = get_iface_txpower_cap(iface)
     if cap:
         info['txpower_cap_dbm'] = cap
-        info['txpower_options_dbm'] = txpower_choices_from_cap(cap)
+        info['txpower_options_dbm'] = txpower_options_for_iface(iface, cap, info.get('txpower_dbm', ''))
     else:
         info['txpower_options_dbm'] = []
 
@@ -1008,8 +1107,6 @@ def session_to_csv(label):
         'hop_count', 'hop_count_source',
         'tcp_mbps', 'udp_mbps', 'jitter_ms', 'loss_pct',
         'rtt_avg_ms', 'rtt_min_ms', 'rtt_max_ms',
-        'src_lat', 'src_lon', 'src_alt',
-        'dst_lat', 'dst_lon', 'dst_alt',
     ])
     for r in results:
         iperf = r.get('iperf3_result', {})
@@ -1017,8 +1114,6 @@ def session_to_csv(label):
         metrics = extract_iperf3_metrics(iperf)
         ping_loss = ping.get('loss_pct', '') if ping else ''
         loss_value = metrics['loss_pct'] if metrics['loss_pct'] is not None else ping_loss
-        gps_src = r.get('gps_source') or {}
-        gps_dst = r.get('gps_destination') or {}
         writer.writerow([
             r.get('timestamp', ''),
             r.get('session_label', ''),
@@ -1037,12 +1132,6 @@ def session_to_csv(label):
             ping.get('rtt_avg', '') if ping else '',
             ping.get('rtt_min', '') if ping else '',
             ping.get('rtt_max', '') if ping else '',
-            gps_src.get('lat', ''),
-            gps_src.get('lon', ''),
-            gps_src.get('alt', ''),
-            gps_dst.get('lat', ''),
-            gps_dst.get('lon', ''),
-            gps_dst.get('alt', ''),
         ])
     return output.getvalue()
 
@@ -1170,11 +1259,9 @@ def run_measurement_session(label, pairs, tests, duration, udp_bitrate):
                     'hop_count':        None,
                     'hop_count_source': '',
                 }
-                hop_count, hop_source, gps_src, gps_dst = get_session_info(src_ip, dst_ip)
+                hop_count, hop_source = get_session_hop_count(src_ip, dst_ip)
                 result_record['hop_count'] = hop_count
                 result_record['hop_count_source'] = hop_source
-                result_record['gps_source'] = gps_src
-                result_record['gps_destination'] = gps_dst
 
                 if test_type == 'icmp_ping':
                     # Run ping locally toward dst
@@ -1435,7 +1522,7 @@ body.chrome-compact #content::before{height:8px;margin:-22px -22px 12px;opacity:
 .row-label{flex:0 0 150px;font-size:11px;color:var(--muted);letter-spacing:.5px;text-transform:uppercase}
 
 /* inputs */
-input[type=text],input[type=number],select{
+input[type=text],input[type=password],input[type=number],select{
   background:var(--surface);border:1px solid var(--border);color:var(--text);
   padding:6px 10px;font-family:var(--font);font-size:12px;
   outline:none;transition:border .15s,box-shadow .15s;min-width:150px;max-width:100%;border-radius:8px;
@@ -1602,7 +1689,7 @@ tr:hover td{background:rgba(236,176,0,.08)}
   .card-title{padding:9px 10px;letter-spacing:1px}
   .row{padding:10px;gap:8px;align-items:stretch}
   .row-label{flex:0 0 100%;font-size:10px}
-  input[type=text],input[type=number],select{width:100%!important;min-width:0}
+  input[type=text],input[type=password],input[type=number],select{width:100%!important;min-width:0}
   .btn{width:100%;justify-content:center;text-align:center;padding:9px 10px}
   .btn-run{padding:12px 10px;font-size:12px;letter-spacing:1px}
   .global-bar{padding:10px;display:grid;grid-template-columns:1fr 1fr;gap:8px}
@@ -1772,9 +1859,7 @@ const HALOW_BW_TXPOWER_CAPS = { '1MHz': '24', '2MHz': '24', '4MHz': '22' };
 function txPowerOptionsForCap(cap) {
   const num = parseFloat(cap);
   if (!Number.isFinite(num) || num < 1) return [];
-  const out = [];
-  for (let v = Math.floor(num); v >= 1; v--) out.push(String(v));
-  return out;
+  return [normalizeDbm(num)];
 }
 
 function txPowerOptions(info) {
@@ -1983,6 +2068,7 @@ function showTab(name, updateUrl = true) {
   document.querySelectorAll('.tab-pane').forEach(p => p.style.display = p.id === 'tab-' + name ? '' : 'none');
   if (name === 'sessions') loadSessions();
   if (name === 'radio') buildIfaceControl();
+  if (name === 'upload') loadUsbWifiUplink();
 }
 
 // ── Clock ──
@@ -2249,6 +2335,59 @@ async function apply5G() {
 }
 
 // ── Measurements tab ──
+async function loadUsbWifiUplink() {
+  try {
+    const r = await fetch('/api/uplink/wifi');
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+    const ssid = document.getElementById('uplink-wifi-ssid');
+    const pass = document.getElementById('uplink-wifi-password');
+    const status = document.getElementById('uplink-wifi-status');
+    if (ssid && !ssid.value) ssid.value = d.ssid || 'hotspot';
+    if (pass && !pass.value) pass.value = 'raspberry';
+    if (status) {
+      const parts = [];
+      parts.push(d.iface ? `iface ${d.iface}` : 'no USB Wi-Fi adapter detected');
+      parts.push(d.state || 'unknown');
+      if (d.ip) parts.push(d.ip);
+      if (d.service) parts.push(`service ${d.service}`);
+      if (d.error) parts.push(d.error);
+      status.textContent = parts.join(' / ');
+      status.style.color = d.connected ? 'var(--green)' : 'var(--muted)';
+    }
+  } catch (e) {
+    const status = document.getElementById('uplink-wifi-status');
+    if (status) {
+      status.textContent = 'Error: ' + e.message;
+      status.style.color = 'var(--red)';
+    }
+  }
+}
+
+async function applyUsbWifiUplink() {
+  const ssid = document.getElementById('uplink-wifi-ssid').value.trim() || 'hotspot';
+  const password = document.getElementById('uplink-wifi-password').value || 'raspberry';
+  const btn = document.getElementById('btn-uplink-wifi-apply');
+  if (btn) { btn.disabled = true; btn.textContent = 'APPLYING...'; }
+  showMsg(`Configuring USB Wi-Fi uplink for SSID ${ssid}...`, 'info');
+  try {
+    const r = await fetch('/api/uplink/wifi', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ssid, password, enabled: true})
+    });
+    const d = await r.json();
+    if (!r.ok || !d.ok) throw new Error(d.error || `HTTP ${r.status}`);
+    showMsg(`USB Wi-Fi uplink saved for ${ssid}`, 'ok');
+    await loadUsbWifiUplink();
+    await fetchTopo();
+  } catch (e) {
+    showMsg('USB Wi-Fi uplink failed: ' + e.message, 'err');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = 'APPLY'; }
+  }
+}
+
 function updatePairs() {
   if (!_topo) return;
   const wrap = document.getElementById('pairs-grid');
@@ -2592,10 +2731,9 @@ def render_dashboard():
         <select id="halow-ch">
           <option value="1">ch 1 (863.5 MHz)</option>
           <option value="2">ch 2 (864.5 MHz)</option>
-          <option value="3">ch 3 (865.5 MHz)</option>
+          <option value="3" selected>ch 3 (865.5 MHz)</option>
           <option value="4">ch 4 (866.5 MHz)</option>
-          <option value="5" selected>ch 5 (867.5 MHz)</option>
-          <option value="6">ch 6 (868.5 MHz)</option>
+          <option value="5">ch 5 (867.5 MHz)</option>
         </select>
       </div>
       <div class="row">
@@ -2746,6 +2884,25 @@ def render_dashboard():
   <!-- ── UPLOAD ── -->
   <div id="tab-upload" class="tab-pane" style="display:none">
     <div class="card">
+      <div class="card-title">USB Wi-Fi Internet Uplink</div>
+      <div class="row">
+        <span class="row-label">SSID</span>
+        <input type="text" id="uplink-wifi-ssid" value="hotspot" style="width:260px">
+      </div>
+      <div class="row">
+        <span class="row-label">Password</span>
+        <input type="password" id="uplink-wifi-password" value="raspberry" autocomplete="new-password" style="width:260px">
+      </div>
+      <div class="row">
+        <span class="row-label">Status</span>
+        <span id="uplink-wifi-status" style="font-size:11px;color:var(--muted)">Loading...</span>
+      </div>
+      <div class="row">
+        <span class="row-label"></span>
+        <button class="btn btn-green" id="btn-uplink-wifi-apply" onclick="applyUsbWifiUplink()">APPLY</button>
+      </div>
+    </div>
+    <div class="card">
       <div class="card-title">Upload Results</div>
       <div class="upload-card">
         <div class="upload-info">
@@ -2869,6 +3026,9 @@ class PerfHandler(http.server.BaseHTTPRequestHandler):
 
         elif path == '/api/upload/status':
             self.send_json(get_upload_status())
+
+        elif path == '/api/uplink/wifi':
+            self.send_json(get_usb_wifi_uplink_status())
 
         elif path == '/api/sessions':
             self.send_json(list_sessions())
@@ -3073,6 +3233,31 @@ class PerfHandler(http.server.BaseHTTPRequestHandler):
             except Exception as e:
                 self.send_json({'ok': False, 'error': str(e)})
 
+        elif path == '/api/control/uplink_wifi':
+            try:
+                req = json.loads(body)
+                status = apply_usb_wifi_uplink(
+                    req.get('ssid', 'hotspot'),
+                    req.get('password', 'raspberry'),
+                    bool(req.get('enabled', True)),
+                )
+                status['ok'] = True
+                self.send_json(status)
+            except Exception as e:
+                self.send_json({'ok': False, 'error': str(e)})
+
+        elif path == '/api/uplink/wifi':
+            try:
+                req = json.loads(body)
+                result = apply_usb_wifi_uplink_all(
+                    req.get('ssid', 'hotspot'),
+                    req.get('password', 'raspberry'),
+                    bool(req.get('enabled', True)),
+                )
+                self.send_json(result)
+            except Exception as e:
+                self.send_json({'ok': False, 'error': str(e)})
+
         elif path == '/api/upload/ventum':
             try:
                 start_upload_status('ventum')
@@ -3094,10 +3279,49 @@ class ThreadedServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
+AVAHI_PERF_SERVICE = '/etc/avahi/services/perf-http.service'
+AVAHI_PERF_CONTENT = """<?xml version="1.0" standalone='no'?>
+<!DOCTYPE service-group SYSTEM "avahi-service.dtd">
+<service-group>
+  <name>MANET Perf Dashboard</name>
+  <host-name>perf.local</host-name>
+  <service>
+    <type>_http._tcp</type>
+    <port>8081</port>
+  </service>
+</service-group>
+"""
+
+def _is_gateway():
+    return os.path.exists('/var/run/mesh-gateway.state')
+
+def _manage_avahi_perf():
+    """Run in background thread: install/remove avahi perf.local based on gateway status."""
+    last = None
+    while True:
+        gw = _is_gateway()
+        if gw != last:
+            try:
+                if gw:
+                    with open(AVAHI_PERF_SERVICE, 'w') as f:
+                        f.write(AVAHI_PERF_CONTENT)
+                    subprocess.run(['systemctl', 'reload', 'avahi-daemon'], timeout=5, capture_output=True)
+                else:
+                    if os.path.exists(AVAHI_PERF_SERVICE):
+                        os.remove(AVAHI_PERF_SERVICE)
+                        subprocess.run(['systemctl', 'reload', 'avahi-daemon'], timeout=5, capture_output=True)
+            except Exception:
+                pass
+            last = gw
+        time.sleep(30)
+
 if __name__ == '__main__':
     import sys
     port = int(sys.argv[1]) if len(sys.argv) > 1 else PORT
     os.makedirs(SESSIONS_DIR, exist_ok=True)
+
+    t = threading.Thread(target=_manage_avahi_perf, daemon=True)
+    t.start()
 
     server = ThreadedServer(('0.0.0.0', port), PerfHandler)
     print(f'MANET Perf Dashboard listening on port {port}')

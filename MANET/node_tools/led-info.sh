@@ -4,10 +4,11 @@
 # Displays neighbor count via LED blink sequence, then exits.
 
 # ── Hardware config (update after wiring test) ───────────────────────
-GPIO_CHIP="gpiochip3"
+GPIO_CHIP="gpiochip0"
 LED_R=20
 LED_G=21
 LED_B=22
+GPIO_CONSUMER="manet-led"
 # ─────────────────────────────────────────────────────────────────────
 
 BLINK_ON=0.3        # seconds LED on per blink
@@ -16,16 +17,27 @@ NO_PEER_SOLID=3     # seconds of solid red if no neighbors
 
 # ── LED control ───────────────────────────────────────────────────────
 
-led_set() { gpioset "${GPIO_CHIP}" "${LED_R}=$1" "${LED_G}=$2" "${LED_B}=$3"; }
+release_led_lines() {
+    pkill -f "gpioset.*${GPIO_CONSUMER}" 2>/dev/null || true
+}
+
+led_set() {
+    release_led_lines
+    gpioset -z -C "${GPIO_CONSUMER}" -c "${GPIO_CHIP}" "${LED_R}=$1" "${LED_G}=$2" "${LED_B}=$3"
+    sleep 0.02
+}
 led_off()  { led_set 0 0 0; }
 
-cleanup() { led_off; }
+cleanup() {
+    led_off
+    release_led_lines
+}
 trap cleanup EXIT
 
 # ── Neighbor count ────────────────────────────────────────────────────
 
 get_neighbor_count() {
-    batctl neighbors 2>/dev/null \
+    /usr/sbin/batctl neighbors 2>/dev/null \
         | grep -v -e '^$' -e 'B.A.T.M.A.N' -e 'No batman' \
         | wc -l
 }

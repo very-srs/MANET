@@ -4,10 +4,11 @@
 # Managed by led-boot.service
 
 # ── Hardware config (update after wiring test) ───────────────────────
-GPIO_CHIP="gpiochip3"
+GPIO_CHIP="gpiochip0"
 LED_R=20
 LED_G=21
 LED_B=22
+GPIO_CONSUMER="manet-led"
 # ─────────────────────────────────────────────────────────────────────
 
 MESH_READY_FLAG="/run/mesh-ready"
@@ -17,9 +18,15 @@ MESH_SOLID_SECS=10      # solid green duration before going dark
 
 # ── LED control ───────────────────────────────────────────────────────
 
+release_led_lines() {
+    pkill -f "gpioset.*${GPIO_CONSUMER}" 2>/dev/null || true
+}
+
 led_set() {
     # Usage: led_set <r> <g> <b>   (1=on, 0=off)
-    gpioset "${GPIO_CHIP}" "${LED_R}=$1" "${LED_G}=$2" "${LED_B}=$3"
+    release_led_lines
+    gpioset -z -C "${GPIO_CONSUMER}" -c "${GPIO_CHIP}" "${LED_R}=$1" "${LED_G}=$2" "${LED_B}=$3"
+    sleep 0.02
 }
 
 led_off() { led_set 0 0 0; }
@@ -28,9 +35,15 @@ led_off() { led_set 0 0 0; }
 
 get_neighbor_count() {
     # Skip header lines and blank lines; count what remains
-    batctl neighbors 2>/dev/null \
+    /usr/sbin/batctl neighbors 2>/dev/null \
         | grep -v -e '^$' -e 'B.A.T.M.A.N' -e 'No batman' \
         | wc -l
+}
+
+mesh_ready() {
+    [[ -f "$MESH_READY_FLAG" ]] && return 0
+    systemctl is-active --quiet node-manager.service || return 1
+    ip link show bat0 >/dev/null 2>&1
 }
 
 # ── State: BOOTING ────────────────────────────────────────────────────
@@ -39,7 +52,7 @@ get_neighbor_count() {
 state_booting() {
     local toggle=0
     echo "led-boot: BOOTING"
-    while [[ ! -f "$MESH_READY_FLAG" ]]; do
+    while ! mesh_ready; do
         led_set $toggle 0 0
         toggle=$(( 1 - toggle ))
         sleep "$BLINK_HALF"
@@ -82,7 +95,10 @@ state_mesh_forming() {
 
 # ── Cleanup on unexpected exit ────────────────────────────────────────
 
-cleanup() { led_off; }
+cleanup() {
+    led_off
+    release_led_lines
+}
 trap cleanup EXIT
 
 # ── Main ──────────────────────────────────────────────────────────────
