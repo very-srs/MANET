@@ -8,6 +8,21 @@ log() {
     echo "[$(date +'%Y-%m-%d %H:%M:%S')] - ETH-OFF: $1" | systemd-cat -t ethernet-off
 }
 
+# systemctl unmask always triggers a full daemon-reload, and enable on units
+# with sysv shims (dnsmasq, hostapd) spawns update-rc.d which reloads again.
+# Guard them so repeated carrier events don't churn PID 1.
+unmask_if_masked() {
+    [ "$(systemctl is-enabled "$1" 2>/dev/null)" = "masked" ] && \
+        systemctl unmask "$1" 2>/dev/null
+    return 0
+}
+
+enable_if_disabled() {
+    systemctl is-enabled --quiet "$1" 2>/dev/null || \
+        systemctl enable "$1" 2>/dev/null
+    return 0
+}
+
 if [ "$IFACE" != "$TARGET_IFACE" ]; then
     exit 0
 fi
@@ -75,10 +90,10 @@ fi
 EUD_MODE=$(grep "^eud=" /etc/mesh.conf 2>/dev/null | cut -d'=' -f2)
 if { [ "$EUD_MODE" == "auto" ] || [ "$EUD_MODE" == "wireless" ]; } && [ -f /var/lib/ap_interface ]; then
     log "$EUD_MODE mode: No ethernet, ensuring AP/DHCP stays enabled"
-    systemctl unmask dnsmasq.service 2>/dev/null
-    systemctl enable hostapd.service 2>/dev/null
+    unmask_if_masked dnsmasq.service
+    enable_if_disabled hostapd.service
     systemctl start hostapd.service 2>/dev/null
-    systemctl enable dnsmasq.service 2>/dev/null
+    enable_if_disabled dnsmasq.service
     systemctl start dnsmasq.service 2>/dev/null
     systemctl start ap-txpower.service 2>/dev/null
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-POLL_INTERVAL=2
+POLL_INTERVAL=10
 LOCK_FILE=/var/run/gateway-route-manager.lock
 
 exec 200>"$LOCK_FILE"
@@ -60,12 +60,11 @@ lookup_gateway_ip_by_mac() {
 while true; do
     if [ -f /var/run/mesh-gateway.state ]; then
         cur="$(ip route show default | head -n1 || true)"
-        log "Local gateway mode active; clearing only mesh-managed default route state"
+        # Only log when actually removing a route — this branch runs every
+        # poll cycle while in gateway mode, and log() forks date+systemd-cat.
         if echo "$cur" | grep -q " dev br0 "; then
             ip route del default dev br0 2>/dev/null || true
-            log "Removed mesh-managed default route"
-        #else
-           # log "Leaving default route unchanged; it is not managed by gateway-route-manager: ${cur:-none}"
+            log "Local gateway mode active; removed mesh-managed default route"
         fi
         sleep "$POLL_INTERVAL"
         continue

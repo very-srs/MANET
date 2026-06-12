@@ -60,7 +60,7 @@ is_hosting_service() {
 
 get_mediamtx_ipv4_vip() {
     local CIDR="$1"
-    local CALC_OUTPUT=$(ipcalc "$CIDR" 2>/dev/null)
+    local CALC_OUTPUT=$(manet-ipcalc.sh "$CIDR" 2>/dev/null)
     local FIRST_IP=$(echo "$CALC_OUTPUT" | awk '/HostMin/ {print $2}')
     echo "${FIRST_IP%.*}.$((${FIRST_IP##*.} + 1))"
 }

@@ -2,6 +2,7 @@
 # led-info.sh
 # One-shot. Called by button-monitor.sh on button press.
 # Displays neighbor count via LED blink sequence, then exits.
+# Requires libgpiod v2 tools (gpioset --chip <chip> <line>=<value>).
 
 # ── Hardware config (update after wiring test) ───────────────────────
 GPIO_CHIP="gpiochip0"
@@ -15,22 +16,31 @@ BLINK_ON=0.3        # seconds LED on per blink
 BLINK_OFF=0.4       # seconds LED off between blinks
 NO_PEER_SOLID=3     # seconds of solid red if no neighbors
 
-# ── LED control ───────────────────────────────────────────────────────
+if ! gpioinfo --chip "$GPIO_CHIP" >/dev/null 2>&1; then
+    echo "led-info: GPIO chip ${GPIO_CHIP} not present/usable; exiting"
+    exit 0
+fi
 
-release_led_lines() {
-    pkill -f "gpioset.*${GPIO_CONSUMER}" 2>/dev/null || true
-}
+# ── LED control ───────────────────────────────────────────────────────
+# libgpiod v2 gpioset only holds line values while it runs, so keep one
+# holder process alive and replace it on each state change.
+
+LED_HOLD_PID=""
 
 led_set() {
-    release_led_lines
-    gpioset -z -C "${GPIO_CONSUMER}" -c "${GPIO_CHIP}" "${LED_R}=$1" "${LED_G}=$2" "${LED_B}=$3"
-    sleep 0.02
+    if [ -n "$LED_HOLD_PID" ]; then
+        kill "$LED_HOLD_PID" 2>/dev/null
+        wait "$LED_HOLD_PID" 2>/dev/null
+    fi
+    gpioset --chip "$GPIO_CHIP" \
+        "${LED_R}=$1" "${LED_G}=$2" "${LED_B}=$3" 2>/dev/null &
+    LED_HOLD_PID=$!
 }
-led_off()  { led_set 0 0 0; }
+
+led_off() { led_set 0 0 0; }
 
 cleanup() {
-    led_off
-    release_led_lines
+    [ -n "$LED_HOLD_PID" ] && kill "$LED_HOLD_PID" 2>/dev/null
 }
 trap cleanup EXIT
 

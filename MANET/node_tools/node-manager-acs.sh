@@ -231,7 +231,7 @@ is_hosting_service() {
 	fi
         [ -z "$IPV4_NETWORK" ] && return 1
 
-        local CALC_OUTPUT=$(ipcalc "$IPV4_NETWORK" 2>/dev/null)
+        local CALC_OUTPUT=$(manet-ipcalc.sh "$IPV4_NETWORK" 2>/dev/null)
         local FIRST_IP=$(echo "$CALC_OUTPUT" | awk '/HostMin/ {print $2}')
         local MEDIAMTX_IPV4_VIP="${FIRST_IP%.*}.$((${FIRST_IP##*.} + 1))"
         ip addr show dev "$CONTROL_IFACE" | grep -q "inet $MEDIAMTX_IPV4_VIP/" && return 0
@@ -253,7 +253,7 @@ is_hosting_mumble_service() {
         fi
 
         local CALC_OUTPUT
-        CALC_OUTPUT=$(ipcalc "$IPV4_NETWORK" 2>/dev/null)
+        CALC_OUTPUT=$(manet-ipcalc.sh "$IPV4_NETWORK" 2>/dev/null)
         local FIRST_IP
         FIRST_IP=$(echo "$CALC_OUTPUT" | awk '/HostMin/ {print $2}')
         local MUMBLE_IPV4_VIP="${FIRST_IP%.*}.$((${FIRST_IP##*.} + 2))"

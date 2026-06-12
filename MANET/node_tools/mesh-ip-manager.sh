@@ -54,7 +54,7 @@ MTX_VIP=""
 MUMBLE_VIP=""
 _calc_service_vips() {
     local calc host_min
-    calc=$(ipcalc "$IPV4_NETWORK" 2>/dev/null) || return 0
+    calc=$(manet-ipcalc.sh "$IPV4_NETWORK" 2>/dev/null) || return 0
     host_min=$(echo "$calc" | awk '/HostMin/ {print $2}')
     [ -n "$host_min" ] || return 0
     MTX_VIP="${host_min%.*}.$((${host_min##*.} + 1))"
@@ -121,7 +121,7 @@ int_to_ip() {
 # Calculate chunk IPs given a chunk number
 get_chunk_ips() {
     local chunk_num=$1
-    local CALC_OUTPUT=$(ipcalc "$IPV4_NETWORK" 2>/dev/null)
+    local CALC_OUTPUT=$(manet-ipcalc.sh "$IPV4_NETWORK" 2>/dev/null)
 
     if [ -z "$CALC_OUTPUT" ]; then
         return 1
@@ -155,7 +155,7 @@ ip_in_cidr() {
         return 1
     fi
 
-    local CALC_OUTPUT=$(ipcalc "$cidr" 2>/dev/null)
+    local CALC_OUTPUT=$(manet-ipcalc.sh "$cidr" 2>/dev/null)
     if [ -z "$CALC_OUTPUT" ]; then
         return 1
     fi
@@ -186,7 +186,7 @@ is_service_reserved_ip() {
     local ip="$1"
     local CALC_OUTPUT HOST_MIN MIN_INT IP_INT offset
 
-    CALC_OUTPUT=$(ipcalc "$IPV4_NETWORK" 2>/dev/null)
+    CALC_OUTPUT=$(manet-ipcalc.sh "$IPV4_NETWORK" 2>/dev/null)
     [ -n "$CALC_OUTPUT" ] || return 1
 
     HOST_MIN=$(echo "$CALC_OUTPUT" | awk '/HostMin/ {print $2}')
@@ -200,7 +200,7 @@ is_service_reserved_ip() {
 
 # Get a random available chunk
 get_random_chunk() {
-    local CALC_OUTPUT=$(ipcalc "$IPV4_NETWORK" 2>/dev/null)
+    local CALC_OUTPUT=$(manet-ipcalc.sh "$IPV4_NETWORK" 2>/dev/null)
     
     if [ -z "$CALC_OUTPUT" ]; then
         log "Error: ipcalc failed for CIDR: $IPV4_NETWORK"
@@ -438,8 +438,12 @@ server=8.8.8.8
 log-dhcp
 EOF
 
-    # Ensure dnsmasq is unmasked, enabled, and running
-    systemctl unmask dnsmasq.service 2>/dev/null
+    # Ensure dnsmasq is unmasked, enabled, and running.
+    # unmask triggers a full systemd daemon-reload even when nothing is
+    # masked — only call it when the unit is actually masked.
+    if [ "$(systemctl is-enabled dnsmasq.service 2>/dev/null)" = "masked" ]; then
+        systemctl unmask dnsmasq.service 2>/dev/null
+    fi
 #    systemctl enable dnsmasq.service 2>/dev/null
 
     if systemctl is-active --quiet dnsmasq.service; then

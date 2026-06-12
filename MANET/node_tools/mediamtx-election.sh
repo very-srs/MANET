@@ -26,7 +26,7 @@ log() {
 get_mediamtx_ipv4_vip() {
     local CIDR="$1"
     local CALC_OUTPUT
-    CALC_OUTPUT=$(ipcalc "$CIDR" 2>/dev/null)
+    CALC_OUTPUT=$(manet-ipcalc.sh "$CIDR" 2>/dev/null)
     if [ -z "$CALC_OUTPUT" ]; then
         echo "no CIDR supplied"
         return 1
