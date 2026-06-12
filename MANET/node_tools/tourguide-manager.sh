@@ -15,6 +15,7 @@ WPA_CONF_2_4=""
 WPA_CONF_5_0=""
 LOBBY_FREQ_2_4=2412
 LOBBY_FREQ_5_0=5180
+HELPER_STALE_SECONDS=300  # Ignore foreign helper beacons older than this
 ENCODER_PATH="/usr/local/bin/encoder.py"
 BATCTL_PATH="/usr/sbin/batctl"
 ELECTION_OUTPUT_FILE="/var/run/mesh_channel_election"
@@ -181,14 +182,22 @@ hop_to_data_frequency() {
     wpa_cli -i "$iface" reconfigure >/dev/null 2>&1
 }
 
+get_partition_size() {
+    # Own partition size = unique batman originators + self
+    echo $(( $("$BATCTL_PATH" o 2>/dev/null | awk 'NR>1 {print $1}' | sort -u | wc -l) + 1 ))
+}
+
 analyze_partition_data() {
     local payloads="$1"
     local MY_MAC=$(cat "/sys/class/net/${CONTROL_IFACE}/address")
     local MY_CHAN_2_4=$(get_current_freq "$WPA_CONF_2_4")
     local MY_CHAN_5_0=$(get_current_freq "$WPA_CONF_5_0")
+    local MY_CONFIG="${MY_CHAN_2_4}-${MY_CHAN_5_0}"
+    local MY_PARTITION_SIZE=$(get_partition_size)
+    local NOW=$(date +%s)
 
-    declare -A CHANNEL_CONFIGS
-    local FOREIGN_NODES_FOUND=false
+    # Newest credible foreign beacon wins consideration
+    local BEST_CONFIG="" BEST_SIZE=0 BEST_TS=0
 
     while IFS= read -r payload; do
         [ -z "$payload" ] && continue
@@ -196,51 +205,59 @@ analyze_partition_data() {
         DECODED=$("/usr/local/bin/decoder.py" "$payload" 2>/dev/null || true)
         [ -z "$DECODED" ] && continue
 
+        MAC_ADDRESS=""; DATA_CHANNEL_2_4=""; DATA_CHANNEL_5_0=""
+        PARTITION_SIZE=0; LAST_SEEN_TIMESTAMP=0
         while IFS= read -r _line; do
             _varname="${_line%%=*}"
             _val="${_line#*=}"
             _val="${_val#\'}"
             _val="${_val%\'}"
             printf -v "$_varname" '%s' "$_val"
-        done < <(echo "$DECODED" | grep -E "^(MAC_ADDRESS|DATA_CHANNEL_)")
+        done < <(echo "$DECODED" | grep -E "^(MAC_ADDRESS|DATA_CHANNEL_|PARTITION_SIZE|LAST_SEEN_TIMESTAMP)")
 
-        [ "$MAC_ADDRESS" == "$MY_MAC" ] && { unset MAC_ADDRESS DATA_CHANNEL_2_4 DATA_CHANNEL_5_0; continue; }
+        [ "$MAC_ADDRESS" == "$MY_MAC" ] && continue
+        [[ "$DATA_CHANNEL_2_4" =~ ^[0-9]{4}$ && "$DATA_CHANNEL_5_0" =~ ^[0-9]{4}$ ]] || continue
+        [[ "$PARTITION_SIZE" =~ ^[0-9]+$ ]] || PARTITION_SIZE=0
+        [[ "$LAST_SEEN_TIMESTAMP" =~ ^[0-9]+$ ]] || LAST_SEEN_TIMESTAMP=0
 
-        FOREIGN_NODES_FOUND=true
+        local CONFIG_KEY="${DATA_CHANNEL_2_4}-${DATA_CHANNEL_5_0}"
+        [ "$CONFIG_KEY" == "$MY_CONFIG" ] && continue
 
-        if [[ -n "$DATA_CHANNEL_2_4" && -n "$DATA_CHANNEL_5_0" ]]; then
-            CONFIG_KEY="${DATA_CHANNEL_2_4}-${DATA_CHANNEL_5_0}"
-            CHANNEL_CONFIGS[$CONFIG_KEY]=$((${CHANNEL_CONFIGS[$CONFIG_KEY]:-0} + 1))
+        # Alfred keeps old beacons around: ignore stale ones, and ignore
+        # beacons from nodes that are ACTIVE in my own registry (they are in
+        # my partition; their beacon just predates a channel change).
+        [ $((NOW - LAST_SEEN_TIMESTAMP)) -gt "$HELPER_STALE_SECONDS" ] && continue
+        local MAC_SANITIZED=$(echo "$MAC_ADDRESS" | tr -d ':')
+        grep -q "^NODE_${MAC_SANITIZED}_NODE_STATE='ACTIVE'" "$REGISTRY_STATE_FILE" 2>/dev/null && continue
+
+        if [ "$LAST_SEEN_TIMESTAMP" -gt "$BEST_TS" ]; then
+            BEST_CONFIG=$CONFIG_KEY
+            BEST_SIZE=$PARTITION_SIZE
+            BEST_TS=$LAST_SEEN_TIMESTAMP
         fi
-
-        unset MAC_ADDRESS DATA_CHANNEL_2_4 DATA_CHANNEL_5_0
     done <<< "$payloads"
 
-    [ "$FOREIGN_NODES_FOUND" = false ] && return
+    [ -z "$BEST_CONFIG" ] && return
 
-    MY_CONFIG="${MY_CHAN_2_4}-${MY_CHAN_5_0}"
+    log "!!! PARTITION: foreign partition (size $BEST_SIZE) on $BEST_CONFIG; mine (size $MY_PARTITION_SIZE) on $MY_CONFIG !!!"
 
-    for config in "${!CHANNEL_CONFIGS[@]}"; do
-        if [ "$config" != "$MY_CONFIG" ]; then
-            count=${CHANNEL_CONFIGS[$config]}
-            log "!!! PARTITION: $count nodes on $config !!!"
+    # Smaller partition migrates. Equal sizes: both tourguides see the same
+    # pair of configs, so break the tie on the config string — the partition
+    # whose config sorts lower stays put.
+    if [ "$BEST_SIZE" -gt "$MY_PARTITION_SIZE" ] || \
+       { [ "$BEST_SIZE" -eq "$MY_PARTITION_SIZE" ] && [[ "$BEST_CONFIG" < "$MY_CONFIG" ]]; }; then
+        log "Other partition wins. Triggering migration..."
+        IFS='-' read -r new_2_4 new_5_0 <<< "$BEST_CONFIG"
 
-            local my_count=$(batctl o | awk 'NR>1' | wc -l)
-
-            if [ $count -gt $((my_count + 2)) ]; then
-                log "Other partition larger. Triggering migration..."
-                IFS='-' read -r new_2_4 new_5_0 <<< "$config"
-
-                cat > "$ELECTION_OUTPUT_FILE" <<-EOF
-					WINNER_2_4=$new_2_4
-					WINNER_5_0=$new_5_0
-					LIMP_MODE=false
-					PARTITION_MERGE=true
-				EOF
-            fi
-            return
-        fi
-    done
+        cat > "$ELECTION_OUTPUT_FILE" <<-EOF
+			WINNER_2_4=$new_2_4
+			WINNER_5_0=$new_5_0
+			LIMP_MODE=false
+			PARTITION_MERGE=true
+		EOF
+    else
+        log "My partition wins. Staying on $MY_CONFIG."
+    fi
 }
 
 # === MAIN EXECUTION ===
@@ -271,12 +288,14 @@ log "=== I AM TOURGUIDE ==="
 TOURGUIDE_RADIO=$(select_tourguide_radio "$MY_MAC")
 HOSTNAME=$(hostname)
 
-# Build helper payload
+# Build helper payload (partition size lets two tourguides meeting in the
+# lobby agree on which partition migrates)
 HELPER_PAYLOAD=$("$ENCODER_PATH" \
     "--hostname" "$HOSTNAME" \
     "--mac-addresses" "$MY_MAC" \
     "--data-channel-2-4" "$(get_current_freq $WPA_CONF_2_4)" \
     "--data-channel-5-0" "$(get_current_freq $WPA_CONF_5_0)" \
+    "--partition-size" "$(get_partition_size)" \
     "--timestamp" "$NOW" \
     2>/dev/null)
 

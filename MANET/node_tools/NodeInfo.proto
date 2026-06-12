@@ -82,4 +82,10 @@ message NodeInfo {
 
   // --- Gateway Interface ---
   string gateway_iface = 66; // Which interface is the upstream gateway (end0, usb0, enxXXX, etc.)
+
+  // --- Channel Hopping & Discovery (cont.) ---
+  // Number of nodes in the sender's partition (batman originators + self).
+  // Set in tourguide helper beacons so two tourguides meeting in the lobby
+  // can decide which partition migrates (the smaller one).
+  uint32 partition_size = 67;
 }
