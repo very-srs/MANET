@@ -53,7 +53,7 @@ fi
 # --- VIP Calculation Functions ---
 get_mumble_ipv4_vip() {
     local CIDR="$1"
-    local CALC_OUTPUT=$(ipcalc "$CIDR" 2>/dev/null)
+    local CALC_OUTPUT=$(manet-ipcalc.sh "$CIDR" 2>/dev/null)
     if [ -z "$CALC_OUTPUT" ]; then
         return 1
     fi

@@ -17,8 +17,29 @@
 #   -  - Auto:  wlan1 into mesh
 # ==============================================================================
 
-exec > >(tee /var/log/ethernet-detect.log) 2>&1
-set -x
+# Full xtrace + tee-to-journal only when debugging: set -x sends every traced
+# line to journald via the dispatcher, which is real load when events loop.
+if [ -f /etc/eth-detect-debug ]; then
+    exec > >(tee /var/log/ethernet-detect.log) 2>&1
+    set -x
+else
+    exec > /var/log/ethernet-detect.log 2>&1
+fi
+
+# systemctl unmask always triggers a full daemon-reload, and enable on units
+# with sysv shims (dnsmasq, hostapd) spawns update-rc.d which reloads again.
+# Guard them so repeated runs of this script don't churn PID 1.
+unmask_if_masked() {
+    [ "$(systemctl is-enabled "$1" 2>/dev/null)" = "masked" ] && \
+        systemctl unmask "$1" 2>/dev/null
+    return 0
+}
+
+enable_if_disabled() {
+    systemctl is-enabled --quiet "$1" 2>/dev/null || \
+        systemctl enable "$1" 2>/dev/null
+    return 0
+}
 
 # Determine which upstream interface to use.
 # Priority: end0 (native ethernet) > USB ethernet (usb*, enx*)
@@ -57,6 +78,11 @@ resolve_eth_iface() {
 
 ETH_IFACE=$(resolve_eth_iface)
 LOCK_FILE="/var/run/ethernet-autodetect.lock"
+
+# Written when DHCP works but the internet test fails, so repeated dispatcher
+# events on the same iface+IP don't rerun the cleanup/reconfigure cycle.
+NO_INET_STATE="/var/run/eth-no-internet.state"
+NO_INET_RECHECK_SECS=600
 
 # Networkd config paths
 NETWORKD_DIR="/etc/systemd/network"
@@ -109,6 +135,8 @@ detect_hotplug_mode() {
 
     carrier=$(cat /sys/class/net/$ETH_IFACE/carrier 2>/dev/null || echo 0)
     if [ "$carrier" != "1" ]; then
+        # Cable gone: forget the no-internet verdict so a re-plug re-detects.
+        rm -f "$NO_INET_STATE"
         run_no_carrier_cleanup
         exit 0
     fi
@@ -124,6 +152,21 @@ detect_hotplug_mode() {
         # mode section, which rewrites 20-end0.network, triggers a networkd
         # inotify reconfigure, and restarts this loop.
         exit 0
+    fi
+
+    # Same idea for the DHCP-but-no-internet outcome: the cleanup below ends
+    # with a networkctl reconfigure, which fires another dispatcher event and
+    # would otherwise repeat the flush/DHCP/ping/cleanup cycle every 1-2 min
+    # forever on LANs without internet. If we already concluded "no internet"
+    # for this iface+IP recently, leave everything alone. The timestamp lets
+    # a periodic re-check notice if internet comes back on the same lease.
+    if [ -f "$NO_INET_STATE" ] && [ -n "$ip" ]; then
+        read -r prev_iface prev_ip prev_ts < "$NO_INET_STATE" || true
+        if [ "$prev_iface" = "$ETH_IFACE" ] && [ "$prev_ip" = "$ip" ] && \
+           [ $(( $(date +%s) - ${prev_ts:-0} )) -lt "$NO_INET_RECHECK_SECS" ]; then
+            log "No-internet state is current on $ETH_IFACE ($ip); skipping re-detection"
+            exit 0
+        fi
     fi
 
     log "Carrier present on $ETH_IFACE - detecting role"
@@ -147,6 +190,7 @@ detect_hotplug_mode() {
         fi
 
         log "DHCP succeeded but internet test failed; leaving as mesh client"
+        echo "$ETH_IFACE $ip $(date +%s)" > "$NO_INET_STATE"
         run_no_carrier_cleanup
         exit 0
     fi
@@ -186,6 +230,10 @@ if [ -z "$DETECTED_MODE" ]; then
     log "Hotplug detected mode: $DETECTED_MODE"
 fi
 
+# Reaching here means a definite mode (gateway/wired-eud) was chosen;
+# the no-internet paths above all exit before this point.
+rm -f "$NO_INET_STATE"
+
 # Save which interface we're managing so other scripts know
 echo "$ETH_IFACE" > /var/run/upstream_iface
 
@@ -207,6 +255,7 @@ if [ "$CARRIER" != "1" ]; then
     rm -f /var/run/mesh-gateway.state
     rm -f /var/run/mesh-ntp.state
     rm -f /var/run/ethernet_detection_state
+    rm -f "$NO_INET_STATE"
 
     # In AUTO mode with no ethernet, ensure AP is enabled (if configured)
     EUD_MODE=$(grep "^eud=" /etc/mesh.conf 2>/dev/null | cut -d'=' -f2)
@@ -220,10 +269,10 @@ if [ "$CARRIER" != "1" ]; then
             batctl if del "$AP_INTERFACE" 2>/dev/null || true
         fi
 
-        systemctl unmask dnsmasq.service 2>/dev/null
-        systemctl enable hostapd.service 2>/dev/null
+        unmask_if_masked dnsmasq.service
+        enable_if_disabled hostapd.service
         systemctl start hostapd.service 2>/dev/null
-        systemctl enable dnsmasq.service 2>/dev/null
+        enable_if_disabled dnsmasq.service
         systemctl start dnsmasq.service 2>/dev/null
 
 		# If acting as an AP, lower the tx power
@@ -359,10 +408,10 @@ if [ "$DETECTED_MODE" == "gateway" ]; then
             batctl if del "$AP_INTERFACE" 2>/dev/null || true
         fi
 
-        systemctl unmask dnsmasq.service 2>/dev/null
-        systemctl enable hostapd.service 2>/dev/null
+        unmask_if_masked dnsmasq.service
+        enable_if_disabled hostapd.service
         systemctl start hostapd.service 2>/dev/null
-        systemctl enable dnsmasq.service 2>/dev/null
+        enable_if_disabled dnsmasq.service
         systemctl start dnsmasq.service 2>/dev/null
         systemctl start ap-txpower.service 2>/dev/null
 
@@ -384,10 +433,10 @@ if [ "$DETECTED_MODE" == "gateway" ]; then
             batctl if del "$AP_INTERFACE" 2>/dev/null || true
         fi
 
-        systemctl unmask dnsmasq.service 2>/dev/null
-        systemctl enable hostapd.service 2>/dev/null
+        unmask_if_masked dnsmasq.service
+        enable_if_disabled hostapd.service
         systemctl start hostapd.service 2>/dev/null
-        systemctl enable dnsmasq.service 2>/dev/null
+        enable_if_disabled dnsmasq.service
         systemctl start dnsmasq.service 2>/dev/null
         systemctl start ap-txpower.service 2>/dev/null
 

@@ -2,6 +2,7 @@
 # led-boot.sh
 # One-shot LED state machine. Runs at boot, exits when LED goes dark.
 # Managed by led-boot.service
+# Requires libgpiod v2 tools (gpioset --chip <chip> <line>=<value>).
 
 # ── Hardware config (update after wiring test) ───────────────────────
 GPIO_CHIP="gpiochip0"
@@ -16,17 +17,28 @@ BLINK_HALF=0.5          # seconds per half-cycle → 1Hz blink
 POLL_TICKS=10           # poll batctl every N half-cycles (10 × 0.5s = 5s)
 MESH_SOLID_SECS=10      # solid green duration before going dark
 
-# ── LED control ───────────────────────────────────────────────────────
+# Exit cleanly when the hardware isn't there — without this the state
+# machine blinks failing gpioset calls forever on nodes without LED wiring.
+if ! gpioinfo --chip "$GPIO_CHIP" >/dev/null 2>&1; then
+    echo "led-boot: GPIO chip ${GPIO_CHIP} not present/usable; exiting"
+    exit 0
+fi
 
-release_led_lines() {
-    pkill -f "gpioset.*${GPIO_CONSUMER}" 2>/dev/null || true
-}
+# ── LED control ───────────────────────────────────────────────────────
+# libgpiod v2 gpioset only holds line values while it runs, so keep one
+# holder process alive and replace it on each state change.
+
+LED_HOLD_PID=""
 
 led_set() {
     # Usage: led_set <r> <g> <b>   (1=on, 0=off)
-    release_led_lines
-    gpioset -z -C "${GPIO_CONSUMER}" -c "${GPIO_CHIP}" "${LED_R}=$1" "${LED_G}=$2" "${LED_B}=$3"
-    sleep 0.02
+    if [ -n "$LED_HOLD_PID" ]; then
+        kill "$LED_HOLD_PID" 2>/dev/null
+        wait "$LED_HOLD_PID" 2>/dev/null
+    fi
+    gpioset --chip "$GPIO_CHIP" \
+        "${LED_R}=$1" "${LED_G}=$2" "${LED_B}=$3" 2>/dev/null &
+    LED_HOLD_PID=$!
 }
 
 led_off() { led_set 0 0 0; }
@@ -94,10 +106,15 @@ state_mesh_forming() {
 }
 
 # ── Cleanup on unexpected exit ────────────────────────────────────────
+# Killing the holder releases the lines (hi-Z) → LED dark.
 
 cleanup() {
+<<<<<<< HEAD
     led_off
     release_led_lines
+=======
+    [ -n "$LED_HOLD_PID" ] && kill "$LED_HOLD_PID" 2>/dev/null
+>>>>>>> 3cc130a (System load fixes: bash ipcalc replacement, GPIO script spin, ethernet no-internet loop, uplink-dispatch reload churn)
 }
 trap cleanup EXIT
 

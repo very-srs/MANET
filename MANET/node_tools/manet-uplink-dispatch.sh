@@ -51,6 +51,38 @@ is_usb_wifi_uplink_iface() {
     return 0
 }
 
+# systemctl unmask/enable are NOT cheap no-ops: unmask always triggers a full
+# daemon-reload, and enable on units with sysv shims (dnsmasq, hostapd) spawns
+# update-rc.d which triggers more reloads. This script runs every node-manager
+# cycle, so guard them behind state checks.
+unmask_if_masked() {
+    [ "$(systemctl is-enabled "$1" 2>/dev/null)" = "masked" ] && \
+        systemctl unmask "$1" 2>/dev/null || true
+}
+
+enable_if_disabled() {
+    systemctl is-enabled --quiet "$1" 2>/dev/null || \
+        systemctl enable "$1" 2>/dev/null || true
+}
+
+start_if_inactive() {
+    systemctl is-active --quiet "$1" 2>/dev/null || \
+        systemctl start "$1" 2>/dev/null || true
+}
+
+# Restart radvd only when its config actually changes; otherwise just make
+# sure it is running.
+apply_radvd_conf() {
+    local src="$1"
+    [ -f "$src" ] || return 0
+    if ! cmp -s "$src" /etc/radvd.conf 2>/dev/null; then
+        cp "$src" /etc/radvd.conf 2>/dev/null || true
+        systemctl restart radvd 2>/dev/null || true
+    else
+        start_if_inactive radvd.service
+    fi
+}
+
 is_upstream_iface() {
     local iface="$1"
 
@@ -279,12 +311,12 @@ ensure_eud_services() {
     [ -f /var/lib/ap_interface ] && ap_iface=$(cat /var/lib/ap_interface)
 
     if { [ "$mode" = "wireless" ] || [ "$mode" = "auto" ]; } && [ -n "$ap_iface" ]; then
-        systemctl unmask dnsmasq.service 2>/dev/null || true
-        systemctl enable hostapd.service 2>/dev/null || true
-        systemctl start hostapd.service 2>/dev/null || true
-        systemctl enable dnsmasq.service 2>/dev/null || true
-        systemctl start dnsmasq.service 2>/dev/null || true
-        systemctl start ap-txpower.service 2>/dev/null || true
+        unmask_if_masked dnsmasq.service
+        enable_if_disabled hostapd.service
+        start_if_inactive hostapd.service
+        enable_if_disabled dnsmasq.service
+        start_if_inactive dnsmasq.service
+        start_if_inactive ap-txpower.service
 
         if ! ip link show "$ap_iface" 2>/dev/null | grep -q "master br0"; then
             ip link set "$ap_iface" master br0 2>/dev/null || true
@@ -308,8 +340,26 @@ promote_gateway() {
         ip route replace default via "$gw" dev "$iface" src "$ip" metric 100 2>/dev/null || true
     fi
 
-    configure_firewall "$iface"
     batctl gw_mode server 2>/dev/null || true
+
+    # Steady state: reconcile runs every node-manager cycle; if this exact
+    # uplink is already promoted, skip the reconfiguration below (firewall
+    # rewrite, radvd/gateway-route-manager restarts, mesh-ip-manager rerun).
+    local prev_mode="" prev_iface="" prev_ip="" prev_gw=""
+    if [ -f "$STATE_FILE" ]; then
+        prev_mode=$(awk -F= '$1 == "UPLINK_MODE" {print $2}' "$STATE_FILE" 2>/dev/null)
+        prev_iface=$(awk -F= '$1 == "UPLINK_IFACE" {print $2}' "$STATE_FILE" 2>/dev/null)
+        prev_ip=$(awk -F= '$1 == "UPLINK_IP" {print $2}' "$STATE_FILE" 2>/dev/null)
+        prev_gw=$(awk -F= '$1 == "UPLINK_GW" {print $2}' "$STATE_FILE" 2>/dev/null)
+    fi
+    if [ "$prev_mode" = "gateway" ] && [ "$prev_iface" = "$iface" ] && \
+       [ "$prev_ip" = "$ip" ] && [ "$prev_gw" = "${gw:-}" ] && \
+       [ -f "$LEGACY_GATEWAY_STATE" ]; then
+        ensure_eud_services
+        return 0
+    fi
+
+    configure_firewall "$iface"
 
     touch "$LEGACY_GATEWAY_STATE"
     echo "$iface" > "$UPSTREAM_IFACE_FILE"
@@ -328,8 +378,7 @@ DETECTED_AT=$(date +%s)
 DETECTION_METHOD=MANET_UPLINK_DISPATCH
 EOF
 
-    cp /etc/radvd-gateway.conf /etc/radvd.conf 2>/dev/null || true
-    systemctl restart radvd 2>/dev/null || true
+    apply_radvd_conf /etc/radvd-gateway.conf
     ensure_eud_services
     /usr/local/bin/mesh-ip-manager.sh 2>/dev/null || true
     systemctl restart gateway-route-manager.service 2>/dev/null || true
@@ -339,6 +388,11 @@ EOF
 
 demote_gateway() {
     local old_iface="${1:-}"
+    local was_gateway=false
+
+    if [ -f "$STATE_FILE" ] || [ -f "$LEGACY_GATEWAY_STATE" ] || [ -f "$LEGACY_ETH_STATE" ]; then
+        was_gateway=true
+    fi
 
     clear_firewall
     batctl gw_mode client 2>/dev/null || true
@@ -354,13 +408,17 @@ demote_gateway() {
         networkctl reconfigure "$old_iface" 2>/dev/null || true
     fi
 
-    cp /etc/radvd-mesh.conf /etc/radvd.conf 2>/dev/null || true
-    systemctl restart radvd 2>/dev/null || true
+    apply_radvd_conf /etc/radvd-mesh.conf
     ensure_eud_services
-    /usr/local/bin/mesh-ip-manager.sh 2>/dev/null || true
-    systemctl restart gateway-route-manager.service 2>/dev/null || true
 
-    log "Demoted MANET gateway${old_iface:+ on $old_iface}"
+    # Steady state: with no uplink, reconcile lands here every node-manager
+    # cycle. Only rerun mesh-ip-manager / restart gateway-route-manager when
+    # an actual demotion happened.
+    if [ "$was_gateway" = true ]; then
+        /usr/local/bin/mesh-ip-manager.sh 2>/dev/null || true
+        systemctl restart gateway-route-manager.service 2>/dev/null || true
+        log "Demoted MANET gateway${old_iface:+ on $old_iface}"
+    fi
 }
 
 current_uplink_iface() {

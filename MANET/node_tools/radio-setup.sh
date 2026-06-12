@@ -875,7 +875,7 @@ EOF
     done < /etc/mesh.conf
 
     # Calculate DHCP pool based on max EUDs
-    CALC_OUTPUT=$(ipcalc "$IPV4_NETWORK" 2>/dev/null)
+    CALC_OUTPUT=$(manet-ipcalc.sh "$IPV4_NETWORK" 2>/dev/null)
     FIRST_IP=$(echo "$CALC_OUTPUT" | awk '/HostMin/ {print $2}')
 
     # Start pool at IP 6
@@ -1191,8 +1191,10 @@ After=multi-user.target
 [Service]
 Type=simple
 ExecStart=/usr/local/bin/button-monitor.sh
-Restart=always
-RestartSec=1
+# on-failure (not always): the script exits 0 when the GPIO chip is absent,
+# and that must stay exited instead of relaunching every second.
+Restart=on-failure
+RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
