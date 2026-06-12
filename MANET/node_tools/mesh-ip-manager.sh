@@ -402,6 +402,9 @@ configure_dnsmasq() {
     fi
 
     log "Configuring dnsmasq: pool=$dhcp_start-$dhcp_end, gateway=$br0_secondary"
+    # Pool/gateway changes invalidate old EUD leases. Keeping them can make the
+    # dashboard or downstream clients try stale EUD IPs such as old ATAK peers.
+    rm -f /var/lib/misc/dnsmasq.leases /run/dnsmasq.leases /tmp/dnsmasq.leases 2>/dev/null || true
 
     cat > /etc/dnsmasq.d/mesh-eud.conf <<- EOF
 # Listen only on br0 bridge

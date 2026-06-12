@@ -21,6 +21,36 @@ log() {
     echo "$msg" | systemd-cat -t manet-uplink
 }
 
+iface_driver() {
+    local iface="$1" driver
+    driver="$(basename "$(readlink -f "/sys/class/net/$iface/device/driver" 2>/dev/null)" 2>/dev/null || true)"
+    if [ -z "$driver" ] || [ "$driver" = "." ]; then
+        driver="$(ethtool -i "$iface" 2>/dev/null | awk -F': ' '$1 == "driver" {print $2; exit}')"
+    fi
+    echo "$driver"
+}
+
+is_usb_wifi_uplink_iface() {
+    local iface="$1" bus driver
+
+    case "$iface" in
+        wlan0|wlan1|wlan2|wlan3) return 1 ;;
+        wlan*) ;;
+        *) return 1 ;;
+    esac
+
+    bus=$(readlink "/sys/class/net/$iface/device/subsystem" 2>/dev/null | grep -o 'usb' || true)
+    [ "$bus" = "usb" ] || return 1
+
+    driver="$(iface_driver "$iface")"
+    case "$driver" in
+        morse*|brcmfmac) return 1 ;;
+    esac
+
+    grep -qx "$iface" /var/lib/mesh_if /var/lib/halow_if /var/lib/no_mesh_if 2>/dev/null && return 1
+    return 0
+}
+
 is_upstream_iface() {
     local iface="$1"
 
@@ -28,7 +58,8 @@ is_upstream_iface() {
     [ -d "/sys/class/net/$iface" ] || return 1
 
     case "$iface" in
-        lo|br*|bat*|wlan*) return 1 ;;
+        lo|br*|bat*) return 1 ;;
+        wlan*) is_usb_wifi_uplink_iface "$iface" && return 0 || return 1 ;;
     esac
 
     if [ "$iface" = "end0" ]; then
