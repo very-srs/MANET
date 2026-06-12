@@ -24,15 +24,21 @@ WPA_CONF_5_0=""
 STALE_THRESHOLD=240 # (4 minutes) Ignore scan reports older than this (scans are every 3 min)
 NOISE_DISQUALIFY_THRESHOLD_DBM=-70 # Disqualify channel if ANY node reports noise worse than this
 CHANNEL_BIAS_DB=10 # A new channel must be at least this much quieter (in dB) to trigger a move
-LIMP_MODE_SCORE_THRESHOLD=110 # If the *best* channel's score is worse than this, trigger limp mode
+# Score = avg_noise + bss_count*0.1, lower is better. A channel at the -70 dBm
+# disqualification edge needs ~100 BSSes to reach -60; anything above that is
+# unusable enough to trigger limp mode.
+LIMP_MODE_SCORE_THRESHOLD=-60 # If the *best* channel's score is worse (higher) than this, trigger limp mode
 
 # Lobby channels
 LOBBY_FREQ_2_4=2412
 LOBBY_FREQ_5_0=5180
 
-# List of channels this mesh is allowed to use
-CHANNELS_2_4="2412 2437 2462"
-CHANNELS_5_0="5180 5200 5220 5240 5745 5765 5785 5805 5825"
+# List of channels this mesh is allowed to use. The lobby frequencies are
+# deliberately excluded: if the election landed on the lobby pair, every node
+# would flip into lobby state (is_in_lobby checks frequencies) and scanning,
+# elections and tourguide duty would silently stop.
+CHANNELS_2_4="2437 2462"
+CHANNELS_5_0="5200 5220 5240 5745 5765 5785 5805 5825"
 
 # --- Helper Functions ---
 log() {
@@ -103,20 +109,26 @@ load_mesh_roles() {
 
     NOW=$(date +%s)
 
-    # 1. Aggregate all *active* scan reports from the registry
+    # 1. Aggregate all *active* scan reports from the registry.
+    # Key by the NODE_<mac> prefix in $1 and pair report/timestamp in END:
+    # the registry writes CHANNEL_REPORT_JSON before LAST_SEEN_TIMESTAMP, so
+    # a single pass keyed on $2 (always empty with this FS) dropped the first
+    # node's report and matched each report against the previous node's age.
     ALL_REPORTS_JSON=$(awk -F"['=]" \
         -v now="$NOW" -v stale="$STALE_THRESHOLD" \
-        'BEGIN{print "["}
-         /LAST_SEEN_TIMESTAMP/ { mac=$2; timestamps[mac]=$3 }
-         /CHANNEL_REPORT_JSON/ {
-             mac=$2;
-             if ( (mac in timestamps) && (now - timestamps[mac]) < stale) {
-                 if (count > 0) print ",";
-                 print $3;
-                 count++
+        '/_LAST_SEEN_TIMESTAMP=/ { k=$1; sub(/_LAST_SEEN_TIMESTAMP$/, "", k); ts[k]=$3 }
+         /_CHANNEL_REPORT_JSON=/ { k=$1; sub(/_CHANNEL_REPORT_JSON$/, "", k); rpt[k]=$3 }
+         END{
+             print "[";
+             for (k in rpt) {
+                 if (rpt[k] != "" && (k in ts) && (now - ts[k]) < stale) {
+                     if (count > 0) print ",";
+                     print rpt[k];
+                     count++
+                 }
              }
-         }
-         END{print "]"}' "$REGISTRY_FILE")
+             print "]"
+         }' "$REGISTRY_FILE")
 
     if [ "$(echo "$ALL_REPORTS_JSON" | jq 'length')" -eq 0 ]; then
         log "No active scan reports in registry. Exiting."
@@ -170,8 +182,8 @@ load_mesh_roles() {
                 continue
             fi
 
-            # --- Calculate Final Score ---
-            local score=$(echo "($avg_noise * -1) + ($total_bss * 0.1)" | bc -l)
+            # --- Calculate Final Score (lower is better: quieter + fewer BSSes wins) ---
+            local score=$(echo "$avg_noise + ($total_bss * 0.1)" | bc -l)
 
             # --- Apply Bias ---
             if [ "$chan" == "$current_channel" ]; then

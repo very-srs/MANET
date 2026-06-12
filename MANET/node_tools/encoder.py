@@ -34,6 +34,7 @@ def main():
     parser.add_argument("--channel-report-json", type=str, default="{}", help="JSON string of the channel scan report.")
     parser.add_argument("--data-channel-2-4", type=str, default="", help="Current 2.4GHz data channel (for helper broadcast).")
     parser.add_argument("--data-channel-5-0", type=str, default="", help="Current 5.0GHz data channel (for helper broadcast).")
+    parser.add_argument("--partition-size", type=int, default=0, help="Node count of the sender's partition (for helper broadcast).")
 
     # --- Timestamp ---
     parser.add_argument("--timestamp", type=int, required=True, help="Unix epoch timestamp of this report.")
@@ -94,6 +95,7 @@ def main():
     # --- Populate Channel Data ---
     node_info.data_channel_2_4 = args.data_channel_2_4
     node_info.data_channel_5_0 = args.data_channel_5_0
+    node_info.partition_size = args.partition_size
 
     # --- Populate Timestamp ---
     node_info.last_seen_timestamp = args.timestamp

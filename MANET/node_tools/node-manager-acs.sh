@@ -15,6 +15,13 @@ MONITOR_INTERVAL=15
 LOBBY_FREQ_2_4=2412
 LOBBY_FREQ_5_0=5180
 
+# Cold-start bootstrap: a fresh mesh is all-lobby, so no data-state node exists
+# to send helper beacons and nothing would ever pick initial data channels.
+# After this many seconds in the lobby without being rescued (several missed
+# tourguide windows — an established mesh gets to rescue us first), run the
+# scan/publish/election pipeline from the lobby to elect data channels.
+LOBBY_BOOTSTRAP_DWELL=300
+
 # Radio Config. radio-setup writes runtime interface role files because wlanX
 # ordering varies between otherwise identical Raspberry Pi 5 nodes.
 WPA_IFACE_2_4=""
@@ -22,9 +29,10 @@ WPA_IFACE_5_0=""
 WPA_CONF_2_4=""
 WPA_CONF_5_0=""
 
-# Scan frequencies
-SCAN_FREQS_2_4="2412 2437 2462"
-SCAN_FREQS_5_0="5180 5200 5220 5240 5745 5765 5785 5805 5825"
+# Scan frequencies (must match the candidate lists in channel-election.sh;
+# lobby frequencies are excluded — they are reserved as the rendezvous point)
+SCAN_FREQS_2_4="2437 2462"
+SCAN_FREQS_5_0="5200 5220 5240 5745 5765 5785 5805 5825"
 
 # Helper scripts
 REGISTRY_BUILDER="/usr/local/bin/mesh-registry-builder.sh"
@@ -45,6 +53,9 @@ LAST_PUBLISHED_PAYLOAD=""
 LAST_PUBLISH_TIME=0
 CACHED_SCAN_REPORT_JSON="{}"
 LAST_SCAN_COMPLETE_TIME=0
+LOBBY_ENTERED_TIME=0
+BOOTSTRAP_START_WINDOW=-1
+LIMP_STATE_FILE="/var/run/mesh_limp_mode.state"
 
 # Window tracking
 declare -A LAST_ACTION_WINDOW
@@ -77,6 +88,10 @@ detect_and_update_gateway_state() {
 }
 
 # --- Clock-synchronized action checker ---
+# Fires once per interval, at the first loop wakeup at-or-after the offset.
+# (The old ±2 s match missed windows routinely: with a 15 s sleep a wakeup
+# only landed inside a given 5 s window about a third of the time, so stages
+# silently skipped intervals and peers aged out of each other's elections.)
 should_perform_action() {
     local action_name=$1
     local interval_seconds=$2
@@ -85,10 +100,7 @@ should_perform_action() {
     local NOW=$(date +%s)
     local SECONDS_INTO_INTERVAL=$((NOW % interval_seconds))
 
-    local DIFF=$((SECONDS_INTO_INTERVAL - offset_seconds))
-    DIFF=${DIFF#-}
-
-    if [ $DIFF -le 2 ]; then
+    if [ "$SECONDS_INTO_INTERVAL" -ge "$offset_seconds" ]; then
         local CURRENT_WINDOW=$((NOW / interval_seconds))
 
         if [ "${LAST_ACTION_WINDOW[$action_name]}" != "$CURRENT_WINDOW" ]; then
@@ -147,6 +159,16 @@ load_mesh_roles() {
 restart_mesh_supplicants() {
     [ -n "$WPA_IFACE_2_4" ] && radio_iface_enabled "$WPA_IFACE_2_4" && systemctl restart "wpa_supplicant@${WPA_IFACE_2_4}.service"
     [ -n "$WPA_IFACE_5_0" ] && radio_iface_enabled "$WPA_IFACE_5_0" && systemctl restart "wpa_supplicant@${WPA_IFACE_5_0}.service"
+}
+
+# Leaving the lobby for data channels: clear any legacy bitrate masks (set by
+# tourguide lobby hops or limp-mode entry — they persist on the netdev across
+# supplicant restarts) and drop the limp-mode state file. limp-mode-manager
+# only runs in data state, so without this a lobby fallback never resets them.
+leave_lobby_cleanup() {
+    [ -n "$WPA_IFACE_2_4" ] && iw dev "$WPA_IFACE_2_4" set bitrates 2>/dev/null
+    [ -n "$WPA_IFACE_5_0" ] && iw dev "$WPA_IFACE_5_0" set bitrates 2>/dev/null
+    rm -f "$LIMP_STATE_FILE"
 }
 
 is_in_lobby() {
@@ -309,16 +331,45 @@ while true; do
         # ===================================
         # === LOBBY STATE ===
         # ===================================
-        
+
+        # === COLD-START BOOTSTRAP DWELL TRACKING ===
+        # Dwell only counts once the WPA configs exist (is_in_lobby also
+        # returns true while radio-setup hasn't produced them yet).
+        BOOTSTRAPPING=false
+        if [ -f "$WPA_CONF_2_4" ] && [ -f "$WPA_CONF_5_0" ]; then
+            [ "$LOBBY_ENTERED_TIME" -eq 0 ] && LOBBY_ENTERED_TIME=$NOW
+            if [ $((NOW - LOBBY_ENTERED_TIME)) -ge "$LOBBY_BOOTSTRAP_DWELL" ]; then
+                BOOTSTRAPPING=true
+                [ "$BOOTSTRAP_START_WINDOW" -lt 0 ] && BOOTSTRAP_START_WINDOW=$((NOW / 180))
+            fi
+        fi
+
         # === REGISTRY BUILD (always needed) ===
         [ -x "$REGISTRY_BUILDER" ] && "$REGISTRY_BUILDER"
-        
+
         # === IP MANAGEMENT (always needed) ===
         [ -x "$IP_MANAGER" ] && "$IP_MANAGER"
-        
+
+        # === BOOTSTRAP STAGE 1: RF SCAN (every 3 min at :10) ===
+        if [ "$BOOTSTRAPPING" = true ] && should_perform_action "SCAN" 180 10; then
+            log "=== LOBBY BOOTSTRAP SCAN ($(date +'%H:%M:%S')) ==="
+            CACHED_SCAN_REPORT_JSON=$(perform_scan)
+            LAST_SCAN_COMPLETE_TIME=$NOW
+        fi
+
         # === PUBLISH STATUS (so other nodes can see us) ===
-        time_since_publish=$((NOW - LAST_PUBLISH_TIME))
-        if [ $time_since_publish -ge 180 ]; then  # Every 3 minutes
+        # Bootstrapping nodes publish on the same clock-synchronized :15
+        # window as data state so every lobby node's scan report lands in
+        # peers' registries before the shared :25 election; otherwise the
+        # free-running 3-minute timer is fine.
+        DO_LOBBY_PUBLISH=false
+        if [ "$BOOTSTRAPPING" = true ]; then
+            should_perform_action "PUBLISH" 180 15 && DO_LOBBY_PUBLISH=true
+        else
+            time_since_publish=$((NOW - LAST_PUBLISH_TIME))
+            [ $time_since_publish -ge 180 ] && DO_LOBBY_PUBLISH=true
+        fi
+        if [ "$DO_LOBBY_PUBLISH" = true ]; then
             log "=== LOBBY PUBLISH ($(date +'%H:%M:%S')) ==="
             
             HOSTNAME=$(hostname)
@@ -347,7 +398,7 @@ while true; do
             CURRENT_IPV4=$(ip addr show dev "$CONTROL_IFACE" 2>/dev/null | grep -oP 'inet \K[\d.]+' | head -1)
             collect_radio_mcs
             
-            # Encode (no scan data, in lobby mode)
+            # Encode (scan data only while bootstrapping)
             ENCODER_ARGS=(
                 "--hostname" "$HOSTNAME"
                 "--mac-addresses" "${ALL_MACS[@]}"
@@ -369,6 +420,9 @@ while true; do
             [ -n "$IS_NTP_FLAG" ] && ENCODER_ARGS+=("$IS_NTP_FLAG")
             [ -n "$IS_MEDIAMTX_FLAG" ] && ENCODER_ARGS+=("$IS_MEDIAMTX_FLAG")
             [ -n "$IS_MUMBLE_FLAG" ] && ENCODER_ARGS+=("$IS_MUMBLE_FLAG")
+            # Bootstrap election needs every lobby node's scan report replicated
+            [ "$BOOTSTRAPPING" = true ] && [ "$CACHED_SCAN_REPORT_JSON" != "{}" ] && \
+                ENCODER_ARGS+=("--channel-report-json" "$CACHED_SCAN_REPORT_JSON")
             BATT_PCT=$(python3 -c "import json;d=json.load(open('/run/battery_status.json'));print(d['percentage'])" 2>/dev/null)
             [ -n "$BATT_PCT" ] && ENCODER_ARGS+=("--battery-percentage" "$BATT_PCT")
             UPTIME_SECS=$(awk '{print int($1)}' /proc/uptime 2>/dev/null)
@@ -405,7 +459,8 @@ except Exception:
         # === RUN SERVICE ELECTIONS (needed for services to start) ===
         for election_script in /usr/local/bin/*-election.sh; do
             if [[ -f "$election_script" && -x "$election_script" ]]; then
-                # Skip channel-election in lobby (waiting for helper)
+                # Skip channel-election here; the bootstrap stage below runs it
+                # on the clock-synchronized :25 window once dwell expires
                 [[ "$election_script" =~ channel-election ]] && continue
                 # Skip mediamtx-election.sh if MTX not enabled
                 if [[ "$election_script" =~ mediamtx-election ]]; then
@@ -421,19 +476,54 @@ except Exception:
         done
         
         # === CHECK FOR HELPER BEACON (non-blocking) ===
+        HELPER_MIGRATED=false
         HELPER_PAYLOAD=$(timeout 2 alfred -r $ALFRED_HELPER_TYPE 2>/dev/null | grep -oP '"\K[^"]+(?="\s*\},?)' | head -1)
 
         if [ -n "$HELPER_PAYLOAD" ]; then
-            eval $("/usr/local/bin/decoder.py" "$HELPER_PAYLOAD" 2>/dev/null | grep "DATA_CHANNEL_")
+            # No eval on network data — parse assignments with printf -v
+            DATA_CHANNEL_2_4=""; DATA_CHANNEL_5_0=""
+            while IFS= read -r _line; do
+                _varname="${_line%%=*}"
+                _val="${_line#*=}"
+                _val="${_val#\'}"
+                _val="${_val%\'}"
+                printf -v "$_varname" '%s' "$_val"
+            done < <("/usr/local/bin/decoder.py" "$HELPER_PAYLOAD" 2>/dev/null | grep -E "^DATA_CHANNEL_(2_4|5_0)=")
 
-            if [[ -n "$DATA_CHANNEL_2_4" && -n "$DATA_CHANNEL_5_0" ]]; then
+            if [[ "$DATA_CHANNEL_2_4" =~ ^[0-9]{4}$ && "$DATA_CHANNEL_5_0" =~ ^[0-9]{4}$ ]]; then
                 log "Helper beacon received. Migrating to data channels: 2.4=${DATA_CHANNEL_2_4}, 5=${DATA_CHANNEL_5_0}"
 
                 sed -i "s/frequency=.*/frequency=${DATA_CHANNEL_2_4}/" "$WPA_CONF_2_4"
                 sed -i "s/frequency=.*/frequency=${DATA_CHANNEL_5_0}/" "$WPA_CONF_5_0"
 
                 restart_mesh_supplicants
+                leave_lobby_cleanup
+                HELPER_MIGRATED=true
                 sleep 5
+            fi
+        fi
+
+        # === BOOTSTRAP STAGE 2: CHANNEL ELECTION (every 3 min at :25) ===
+        # Same deterministic election as data state, over the replicated lobby
+        # scan reports — every bootstrapping node computes the same winners and
+        # migrates independently. channel-election.sh itself rewrites the WPA
+        # configs and restarts the supplicants; if all channels are disqualified
+        # it elects the lobby pair (no-op here) and we stay put and re-scan,
+        # which is also the limp-mode lobby fallback's exit path.
+        # A helper rescue this cycle wins over self-election: joining the
+        # established mesh's channels beats electing our own. The election
+        # also sits out the (partial) window in which bootstrap began so one
+        # full scan->publish->replicate round completes first — otherwise a
+        # dwell expiring mid-window fires all three stages back-to-back and
+        # elects before any peer report can be in the registry.
+        if [ "$BOOTSTRAPPING" = true ] && [ "$HELPER_MIGRATED" = false ] && \
+           [ $((NOW / 180)) -gt "$BOOTSTRAP_START_WINDOW" ] && \
+           should_perform_action "ELECTION" 180 25; then
+            log "=== LOBBY BOOTSTRAP ELECTION ($(date +'%H:%M:%S')) ==="
+            [ -x "$CHANNEL_ELECTION" ] && "$CHANNEL_ELECTION"
+            if [ "$(is_in_lobby)" = "false" ]; then
+                log "Bootstrap election picked data channels; leaving lobby."
+                leave_lobby_cleanup
             fi
         fi
 
@@ -441,6 +531,9 @@ except Exception:
         # ===================================
         # === DATA CHANNEL STATE ===
         # ===================================
+
+        LOBBY_ENTERED_TIME=0
+        BOOTSTRAP_START_WINDOW=-1
 
         # === STAGE 1: RF SCAN (every 3 min at :10) ===
         if should_perform_action "SCAN" 180 10; then
@@ -578,6 +671,29 @@ except Exception:
             [ -x "$TOURGUIDE_MANAGER" ] && "$TOURGUIDE_MANAGER" &
         fi
 
+        # === STAGE 7.5: PARTITION MERGE ===
+        # tourguide-manager writes PARTITION_MERGE=true when it met a larger
+        # partition in the lobby. Apply its channels here, then drop the file
+        # so the next channel election starts clean. This migrates one node
+        # per tourguide turn; the shrinking remainder either follows the same
+        # way or fails quorum and gets rescued via the lobby.
+        if [ -f "$ELECTION_OUTPUT_FILE" ] && grep -q "^PARTITION_MERGE=true" "$ELECTION_OUTPUT_FILE"; then
+            MERGE_2_4=$(grep "^WINNER_2_4=" "$ELECTION_OUTPUT_FILE" | cut -d'=' -f2)
+            MERGE_5_0=$(grep "^WINNER_5_0=" "$ELECTION_OUTPUT_FILE" | cut -d'=' -f2)
+            rm -f "$ELECTION_OUTPUT_FILE"
+
+            if [[ "$MERGE_2_4" =~ ^[0-9]{4}$ && "$MERGE_5_0" =~ ^[0-9]{4}$ ]]; then
+                log ">>> PARTITION MERGE: migrating to 2.4=${MERGE_2_4}, 5=${MERGE_5_0}"
+                sed -i "s/frequency=.*/frequency=${MERGE_2_4}/" "$WPA_CONF_2_4"
+                sed -i "s/frequency=.*/frequency=${MERGE_5_0}/" "$WPA_CONF_5_0"
+                restart_mesh_supplicants
+                sleep 5
+                continue
+            else
+                log "PARTITION MERGE: invalid winner channels ('$MERGE_2_4'/'$MERGE_5_0'), discarded"
+            fi
+        fi
+
         # === STAGE 8: LIMP MODE MANAGEMENT ===
         [ -x "$LIMP_MODE_MANAGER" ] && "$LIMP_MODE_MANAGER"
 
@@ -588,6 +704,10 @@ except Exception:
                 if [[ "$election_script" =~ mediamtx-election ]]; then
                     MTX_ENABLED=$(grep "^mtx=" /etc/mesh.conf 2>/dev/null | cut -d'=' -f2)
                     [[ "$MTX_ENABLED" != "y" ]] && continue
+                fi
+                if [[ "$election_script" =~ mumble-election ]]; then
+                    MUMBLE_ENABLED=$(grep "^mumble=" /etc/mesh.conf 2>/dev/null | cut -d'=' -f2)
+                    [[ "$MUMBLE_ENABLED" != "y" ]] && continue
                 fi
                 "$election_script" &
             fi

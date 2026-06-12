@@ -50,6 +50,7 @@ def main():
             print("GPS_ALTITUDE=''")
         print(f"DATA_CHANNEL_2_4='{node_info.data_channel_2_4}'")
         print(f"DATA_CHANNEL_5_0='{node_info.data_channel_5_0}'")
+        print(f"PARTITION_SIZE={node_info.partition_size}")
         print(f"LAST_SEEN_TIMESTAMP={node_info.last_seen_timestamp}")
         print(f"IS_IN_LIMP_MODE={str(node_info.is_in_limp_mode).lower()}")
         print(f"LAST_TOURGUIDE_TIMESTAMP={node_info.last_tourguide_timestamp}")
