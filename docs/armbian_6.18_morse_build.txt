@@ -1,0 +1,451 @@
+# Building MorseMicro MM8108 Driver (v1.16.4) on Linux Kernel 6.18
+
+This guide documents the process of cross-compiling the MorseMicro morse_driver v1.16.4 for Linux kernel 6.18.x. The official driver targets kernel 6.12 and earlier, so several compatibility patches are required.
+
+**Tested Configuration:**
+- Hardware: Gateworks GW16167 (MM8108B2 chip) on Radxa Rock 3A
+- Kernel: 6.18.7-current-rockchip64 (Armbian Trixie)
+- Driver: MorseMicro morse_driver 1.16.4
+- Interface: USB (M.2 E-key slot)
+- Build Host: Ubuntu 22.04 x86_64 with Ubuntu 24.04 container
+
+## Overview
+
+Cross-compiling requires:
+1. Kernel headers from the target kernel (.deb package)
+2. Matching cross-compiler (GCC 13 for kernels built with GCC 13)
+3. The `modpost` tool built for the host architecture
+4. Compatibility patches for API changes between kernel 6.12 and 6.18
+
+## Prerequisites
+
+### On the Build Host
+
+```bash
+# Install container runtime
+sudo apt install podman
+# (or docker)
+
+# Install cross-compiler for stripping modules later
+sudo apt install gcc-aarch64-linux-gnu
+```
+
+### Required Files
+
+- `linux-headers-current-rockchip64_*.deb` - Kernel headers package
+- MorseMicro morse_driver source (from GitHub)
+- MorseMicro morse-firmware (from GitHub)
+
+## Step 1: Set Up Build Environment
+
+### Extract Kernel Headers
+
+```bash
+mkdir -p /tmp/morse-stage
+dpkg-deb -x /path/to/linux-headers-current-rockchip64_26.02.0-trunk_arm64__6.18.7.deb /tmp/morse-stage
+```
+
+### Build modpost Tool
+
+The headers package doesn't include the `modpost` tool, which is needed for the final linking step. Build it from kernel source:
+
+```bash
+cd /tmp
+git clone --depth=1 --branch v6.18 https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git linux-6.18-src
+cd linux-6.18-src
+make defconfig
+make scripts/mod/
+
+# Copy to headers directory
+mkdir -p /tmp/morse-stage/usr/src/linux-headers-6.18.7-current-rockchip64/scripts/mod
+cp scripts/mod/modpost /tmp/morse-stage/usr/src/linux-headers-6.18.7-current-rockchip64/scripts/mod/
+```
+
+### Rebuild Host Scripts in Headers
+
+Inside the container (after starting it), rebuild the build-time tools for x86_64:
+
+```bash
+cd /tmp/morse-stage/usr/src/linux-headers-6.18.7-current-rockchip64
+make scripts
+```
+
+Note: This may show errors about missing arch files - that's okay as long as `scripts/basic/fixdep` gets built.
+
+## Step 2: Clone Driver Repository
+
+```bash
+cd ~/manet-new/kernel-work/rock3a
+
+# Clone driver with submodules
+git clone --recurse-submodules https://github.com/MorseMicro/morse_driver.git
+cd morse_driver
+git checkout 1.16.4
+git submodule update --init --recursive
+```
+
+## Step 3: Create Kernel 6.18 Compatibility Header
+
+Create `morse_compat.h` in the driver directory:
+
+```bash
+cat > morse_compat.h << 'EOFCOMPAT'
+/* SPDX-License-Identifier: GPL-2.0 */
+#ifndef _MORSE_COMPAT_H_
+#define _MORSE_COMPAT_H_
+
+#include <linux/version.h>
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 17, 0)
+#ifndef from_timer
+#define from_timer(var, callback_timer, timer_fieldname) \
+	timer_container_of(var, callback_timer, timer_fieldname)
+#endif
+#ifndef del_timer_sync
+#define del_timer_sync(timer) timer_delete_sync(timer)
+#endif
+#endif
+
+#ifndef IEEE80211_CHAN_1MHZ
+#define IEEE80211_CHAN_1MHZ		BIT(14)
+#endif
+#ifndef IEEE80211_CHAN_2MHZ
+#define IEEE80211_CHAN_2MHZ		BIT(15)
+#endif
+#ifndef IEEE80211_CHAN_4MHZ
+#define IEEE80211_CHAN_4MHZ		BIT(16)
+#endif
+#ifndef IEEE80211_CHAN_8MHZ
+#define IEEE80211_CHAN_8MHZ		BIT(17)
+#endif
+#ifndef IEEE80211_CHAN_IGNORE
+#define IEEE80211_CHAN_IGNORE		BIT(18)
+#endif
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 13, 0)
+#include <linux/crc7.h>
+static inline u8 crc7_be_byte(u8 crc, u8 data)
+{
+	return crc7_be(crc, &data, 1);
+}
+#endif
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 16, 0)
+#define compat_hrtimer_init_and_set(timer, clock, mode, func) \
+	hrtimer_setup(timer, func, clock, mode)
+#else
+#define compat_hrtimer_init_and_set(timer, clock, mode, func) \
+	do { \
+		hrtimer_init(timer, clock, mode); \
+		(timer)->function = func; \
+	} while (0)
+#endif
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 15, 0)
+#include <linux/ieee80211.h>
+static inline u8 *compat_get_s1g_beacon_variable(struct ieee80211_ext *bcn)
+{
+	return bcn->u.s1g_beacon.variable + ieee80211_s1g_optional_len(bcn->frame_control);
+}
+static inline bool compat_ieee80211_is_s1g_short_beacon(__le16 fc)
+{
+	return ieee80211_is_s1g_beacon(fc) &&
+	       (fc & cpu_to_le16(IEEE80211_S1G_BCN_NEXT_TBTT));
+}
+#define morse_is_s1g_short_beacon(fc) compat_ieee80211_is_s1g_short_beacon(fc)
+#define COMPAT_S1G_BEACON_API_NEW 1
+#else
+#define morse_is_s1g_short_beacon(fc) ieee80211_is_s1g_short_beacon(fc)
+#endif
+
+#endif /* _MORSE_COMPAT_H_ */
+EOFCOMPAT
+```
+
+## Step 4: Add Compat Header to Source Files
+
+Add the compat header to all files that need timer/channel flag compatibility:
+
+```bash
+cd ~/manet-new/kernel-work/rock3a/morse_driver
+
+# Main driver files
+sed -i '/#include "monitor.h"/a #include "morse_compat.h"' mac.c
+sed -i '0,/#include ".*"/{s/#include "\(.*\)"/#include "\1"\n#include "morse_compat.h"/}' cac.c
+sed -i '0,/#include ".*"/{s/#include "\(.*\)"/#include "\1"\n#include "morse_compat.h"/}' mesh.c
+sed -i '0,/#include ".*"/{s/#include "\(.*\)"/#include "\1"\n#include "morse_compat.h"/}' bss_stats.c
+sed -i '0,/#include ".*"/{s/#include "\(.*\)"/#include "\1"\n#include "morse_compat.h"/}' yaps.c
+sed -i '0,/#include ".*"/{s/#include "\(.*\)"/#include "\1"\n#include "morse_compat.h"/}' yaps-hw.c
+sed -i '0,/#include ".*"/{s/#include "\(.*\)"/#include "\1"\n#include "morse_compat.h"/}' watchdog.c
+sed -i '0,/#include ".*"/{s/#include "\(.*\)"/#include "\1"\n#include "morse_compat.h"/}' vendor_ie.c
+
+# dot11ah subdirectory files (note the ../ path)
+sed -i '0,/#include ".*"/{s/#include "\(.*\)"/#include "\1"\n#include "..\/morse_compat.h"/}' dot11ah/ie.c
+sed -i '0,/#include ".*"/{s/#include "\(.*\)"/#include "\1"\n#include "..\/morse_compat.h"/}' dot11ah/s1g_channels.c
+```
+
+## Step 5: Fix mac80211 Ops Function Signatures
+
+The mac80211 ops gained additional parameters in kernel 6.18:
+
+```bash
+cd ~/manet-new/kernel-work/rock3a/morse_driver
+
+# Fix morse_mac_ops_config - add radio_idx parameter
+sed -i 's/^static int morse_mac_ops_config(struct ieee80211_hw \*hw, u32 changed)$/static int morse_mac_ops_config(struct ieee80211_hw *hw, int radio_idx, u32 changed)/' mac.c
+
+# Fix internal call to morse_mac_ops_config
+sed -i 's/morse_mac_ops_config(hw, changed);/morse_mac_ops_config(hw, 0, changed);/' mac.c
+
+# Fix morse_mac_ops_get_txpower - add link_id parameter
+sed -i 's/^static int morse_mac_ops_get_txpower(struct ieee80211_hw \*hw, struct ieee80211_vif \*vif, int \*dbm)$/static int morse_mac_ops_get_txpower(struct ieee80211_hw *hw, struct ieee80211_vif *vif, unsigned int link_id, int *dbm)/' mac.c
+
+# Fix morse_mac_set_frag_threshold - add radio_idx parameter
+sed -i 's/^static int morse_mac_set_frag_threshold(struct ieee80211_hw \*hw, u32 value)$/static int morse_mac_set_frag_threshold(struct ieee80211_hw *hw, int radio_idx, u32 value)/' mac.c
+
+# Fix morse_mac_set_rts_threshold - add radio_idx parameter
+sed -i 's/^static int morse_mac_set_rts_threshold(struct ieee80211_hw \*hw, u32 value)$/static int morse_mac_set_rts_threshold(struct ieee80211_hw *hw, int radio_idx, u32 value)/' mac.c
+```
+
+## Step 6: Fix cfg80211 Ops Function Signature
+
+```bash
+cd ~/manet-new/kernel-work/rock3a/morse_driver
+
+# Fix morse_wiphy_set_wiphy_params - add radio_idx parameter
+sed -i 's/^static int morse_wiphy_set_wiphy_params(struct wiphy \*wiphy, u32 changed)$/static int morse_wiphy_set_wiphy_params(struct wiphy *wiphy, int radio_idx, u32 changed)/' wiphy.c
+```
+
+## Step 7: Fix Type Mismatches in Header Files
+
+```bash
+cd ~/manet-new/kernel-work/rock3a/morse_driver
+
+# Fix enum vs u32 type mismatch in debug.h
+sed -i 's/bool morse_log_is_enabled(u32 id, u8 level);/bool morse_log_is_enabled(enum morse_feature_id id, u8 level);/' debug.h
+```
+
+## Step 8: Fix hrtimer API in watchdog.c
+
+The hrtimer API changed in kernel 6.16+. Replace the two-line init pattern:
+
+```bash
+cd ~/manet-new/kernel-work/rock3a/morse_driver
+
+# Check current line numbers
+grep -n "hrtimer_init" watchdog.c
+
+# Replace lines (adjust line numbers if different)
+# The pattern is:
+#   hrtimer_init(&mors->watchdog.timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+#   mors->watchdog.timer.function = &morse_watchdog_fire;
+# Replace with:
+#   compat_hrtimer_init_and_set(&mors->watchdog.timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL, &morse_watchdog_fire);
+
+sed -i '185,186s/.*/\tcompat_hrtimer_init_and_set(\&mors->watchdog.timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL, \&morse_watchdog_fire);/' watchdog.c
+sed -i '186d' watchdog.c
+```
+
+## Step 9: Fix S1G Beacon API in vendor_ie.c
+
+Replace the `get_elements_from_s1g_beacon` function to handle both old and new kernel APIs:
+
+```bash
+cd ~/manet-new/kernel-work/rock3a/morse_driver
+
+# Find the function (around line 140-145)
+grep -n "get_elements_from_s1g_beacon" vendor_ie.c
+
+# Replace the function body (adjust line numbers as needed)
+sed -i '140,144c\
+static inline u8 *get_elements_from_s1g_beacon(struct ieee80211_ext *bcn)\
+{\
+#ifdef COMPAT_S1G_BEACON_API_NEW\
+        return compat_get_s1g_beacon_variable(bcn);\
+#else\
+        return (morse_is_s1g_short_beacon(bcn->frame_control) ?\
+                bcn->u.s1g_short_beacon.variable : bcn->u.s1g_beacon.variable);\
+#endif\
+}' vendor_ie.c
+```
+
+## Step 10: Fix ieee80211_is_s1g_short_beacon Calls
+
+```bash
+cd ~/manet-new/kernel-work/rock3a/morse_driver
+
+# Replace calls to use compat wrapper
+sed -i 's/ieee80211_is_s1g_short_beacon(frame_control)/morse_is_s1g_short_beacon(frame_control)/g' dot11ah/ie.c
+```
+
+## Step 11: Build the Driver
+
+Start the Ubuntu 24.04 container for GCC 13:
+
+```bash
+podman run -it --rm \
+  -v ~/manet-new:/manet-new \
+  -v /tmp/morse-stage:/tmp/morse-stage \
+  ubuntu:24.04 bash
+```
+
+Inside the container:
+
+```bash
+# Install build tools
+apt update && apt install -y build-essential gcc-aarch64-linux-gnu make bc
+
+# Set cross-compile environment
+export ARCH=arm64
+export CROSS_COMPILE=aarch64-linux-gnu-
+
+# Build the driver
+cd /manet-new/kernel-work/rock3a/morse_driver
+
+make CONFIG_WLAN_VENDOR_MORSE=m \
+     CONFIG_MORSE_USB=y \
+     CONFIG_MORSE_COUNTRY="US" \
+     CONFIG_MORSE_VENDOR_COMMAND=y \
+     KBUILD_MODPOST_WARN=1
+```
+
+Note: `KBUILD_MODPOST_WARN=1` is required because the headers package doesn't have full symbol information. The warnings about undefined symbols (`__kfifo_out_peek`, `wdev_to_ieee80211_vif`, `gpio_request`) are harmless - these symbols exist in the running kernel.
+
+## Step 12: Verify and Strip Modules
+
+Exit the container and verify on the host:
+
+```bash
+exit
+
+# Check the modules
+file ~/manet-new/kernel-work/rock3a/morse_driver/morse.ko
+# Should show: ELF 64-bit LSB relocatable, ARM aarch64
+
+# Strip debug symbols to reduce size
+aarch64-linux-gnu-strip --strip-debug ~/manet-new/kernel-work/rock3a/morse_driver/morse.ko
+aarch64-linux-gnu-strip --strip-debug ~/manet-new/kernel-work/rock3a/morse_driver/dot11ah/dot11ah.ko
+
+# Check sizes (should be ~700KB and ~120KB after stripping)
+ls -lh ~/manet-new/kernel-work/rock3a/morse_driver/morse.ko
+ls -lh ~/manet-new/kernel-work/rock3a/morse_driver/dot11ah/dot11ah.ko
+```
+
+## Step 13: Install to Staging Directory
+
+```bash
+# Create module directory in staging
+mkdir -p ~/manet-new/kernel-work/rock3a/staging/usr/lib/modules/6.18.7-current-rockchip64/extra/morse
+
+# Copy modules
+cp ~/manet-new/kernel-work/rock3a/morse_driver/morse.ko \
+   ~/manet-new/kernel-work/rock3a/staging/usr/lib/modules/6.18.7-current-rockchip64/extra/morse/
+cp ~/manet-new/kernel-work/rock3a/morse_driver/dot11ah/dot11ah.ko \
+   ~/manet-new/kernel-work/rock3a/staging/usr/lib/modules/6.18.7-current-rockchip64/extra/morse/
+```
+
+## Step 14: Install Firmware
+
+Ensure firmware is in place:
+
+```bash
+mkdir -p ~/manet-new/kernel-work/rock3a/staging/usr/lib/firmware/morse
+
+# Copy from morse-firmware repo (adjust path as needed)
+cp ~/morse-firmware/firmware/mm8108*.bin \
+   ~/manet-new/kernel-work/rock3a/staging/usr/lib/firmware/morse/
+
+# Copy BCF file for your hardware
+cp ~/morse-firmware/bcf/gateworks/bcf_mf15457.bin \
+   ~/manet-new/kernel-work/rock3a/staging/usr/lib/firmware/morse/
+```
+
+## Step 15: Deploy and Test
+
+After deploying to the Rock 3A:
+
+```bash
+# Update module dependencies
+sudo depmod -a
+
+# Load modules
+sudo modprobe dot11ah
+sudo modprobe morse
+
+# Check for successful initialization
+dmesg | grep -i morse
+
+# Check for wireless interface
+ip link show
+iw dev
+
+# Test with morse_cli (if installed)
+morse_cli -i <interface_name> hw_version
+```
+
+## Troubleshooting
+
+### "compiler differs from the one used to build the kernel"
+
+The kernel was built with GCC 13.x but you're using an older GCC. Use the Ubuntu 24.04 container which has GCC 13.
+
+### "scripts/basic/fixdep: not found"
+
+The fixdep tool in the headers is ARM64 binary. Run `make scripts` in the headers directory to rebuild for x86_64.
+
+### "modpost not found"
+
+Build modpost from kernel source (see Step 1).
+
+### Undefined symbol warnings during modpost
+
+Use `KBUILD_MODPOST_WARN=1`. These symbols are provided by the running kernel.
+
+### USB Device Not Detected
+
+- Ensure the M.2 E-key slot provides USB signals (pins 36/38)
+- M-key slots typically only have PCIe, not USB
+- Check `lsusb` for MorseMicro vendor ID `325b`
+
+### BCF File Not Found
+
+The driver reports which BCF file it needs in dmesg. Copy the required BCF from the morse-firmware repo.
+
+## Summary of API Changes (Kernel 6.12 → 6.18)
+
+| Component | Old API | New API |
+|-----------|---------|---------|
+| Timer | `from_timer()` | `timer_container_of()` |
+| Timer | `del_timer_sync()` | `timer_delete_sync()` |
+| HRTimer | `hrtimer_init()` + `.function =` | `hrtimer_setup()` |
+| CRC7 | `crc7_be_byte()` | Removed (use `crc7_be()`) |
+| mac80211 | `.config(hw, changed)` | `.config(hw, radio_idx, changed)` |
+| mac80211 | `.get_txpower(hw, vif, dbm)` | `.get_txpower(hw, vif, link_id, dbm)` |
+| mac80211 | `.set_frag_threshold(hw, val)` | `.set_frag_threshold(hw, radio_idx, val)` |
+| mac80211 | `.set_rts_threshold(hw, val)` | `.set_rts_threshold(hw, radio_idx, val)` |
+| cfg80211 | `.set_wiphy_params(wiphy, changed)` | `.set_wiphy_params(wiphy, radio_idx, changed)` |
+| S1G Beacon | `ieee80211_is_s1g_short_beacon(fc)` | `ieee80211_is_s1g_short_beacon(fc, var, len)` |
+| S1G Beacon | `bcn->u.s1g_short_beacon.variable` | `bcn->u.s1g_beacon.variable` (unified) |
+
+## Files Modified
+
+Summary of all source files that need patches:
+
+- `morse_compat.h` - New file (compatibility shims)
+- `mac.c` - Compat header + function signature fixes
+- `cac.c` - Compat header
+- `mesh.c` - Compat header
+- `bss_stats.c` - Compat header
+- `yaps.c` - Compat header
+- `yaps-hw.c` - Compat header
+- `watchdog.c` - Compat header + hrtimer fix
+- `vendor_ie.c` - Compat header + S1G beacon function fix
+- `wiphy.c` - Function signature fix
+- `debug.h` - Type mismatch fix
+- `dot11ah/ie.c` - Compat header + S1G beacon call fix
+- `dot11ah/s1g_channels.c` - Compat header
+
+---
+
+*Guide updated: February 2026*
+*Tested with MorseMicro driver 1.16.4 on kernel 6.18.7*

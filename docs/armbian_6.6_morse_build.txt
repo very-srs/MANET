@@ -1,0 +1,152 @@
+## Rock 3A Kernel 6.6 + MorseMicro 1.16 Driver Build Guide
+
+### Prerequisites
+# in addition to standard linux compiling tools.  Need this to cross compile for arm64
+sudo apt install gcc-aarch64-linux-gnu
+
+### 1. Clone MorseMicro driver and firmware
+cd ~/MANET/kernel-work/rock3a
+git clone https://github.com/MorseMicro/morse_driver.git
+cd morse_driver
+git checkout 1.16.4
+git submodule update --init --recursive
+
+cd ~/MANET/kernel-work/rock3a
+git clone https://github.com/MorseMicro/morse-firmware.git
+
+### 2. Prepare kernel source (Armbian worktree)
+KSRC=/home/user/manet-new/kernel-work/rock3a/build/cache/sources/linux-kernel-worktree/6.6__rockchip64__arm64
+cd $KSRC
+
+# Fix host tools (if built on different glibc version)
+rm scripts/mod/modpost
+make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- scripts/mod/
+
+# Configure kernel
+./scripts/config --set-str CONFIG_LOCALVERSION "-manet"
+./scripts/config --disable CONFIG_LOCALVERSION_AUTO
+./scripts/config --enable CONFIG_CFG80211_CERTIFICATION_ONUS
+./scripts/config --enable CONFIG_CFG80211_REG_RELAX_NO_IR
+./scripts/config --disable CONFIG_CFG80211_REQUIRE_SIGNED_REGDB
+./scripts/config --module CONFIG_MT76_CORE
+./scripts/config --module CONFIG_MT76_PCI
+./scripts/config --module CONFIG_MT7915E
+./scripts/config --module CONFIG_MT7921_COMMON
+./scripts/config --module CONFIG_MT7921E
+./scripts/config --module CONFIG_BATMAN_ADV
+./scripts/config --enable CONFIG_BATMAN_ADV_BATMAN_V
+./scripts/config --enable CONFIG_BATMAN_ADV_BLA
+./scripts/config --enable CONFIG_BATMAN_ADV_DAT
+./scripts/config --enable CONFIG_BATMAN_ADV_NC
+./scripts/config --enable CONFIG_BATMAN_ADV_MCAST
+# Core ebtables support
+./scripts/config --module CONFIG_BRIDGE_NF_EBTABLES
+# ebtables tables
+./scripts/config --module CONFIG_BRIDGE_EBT_T_FILTER
+./scripts/config --module CONFIG_BRIDGE_EBT_T_NAT
+./scripts/config --module CONFIG_BRIDGE_EBT_BROUTE
+# Common ebtables matches
+./scripts/config --module CONFIG_BRIDGE_EBT_802_3
+./scripts/config --module CONFIG_BRIDGE_EBT_AMONG
+./scripts/config --module CONFIG_BRIDGE_EBT_ARP
+./scripts/config --module CONFIG_BRIDGE_EBT_IP
+./scripts/config --module CONFIG_BRIDGE_EBT_IP6
+./scripts/config --module CONFIG_BRIDGE_EBT_LIMIT
+./scripts/config --module CONFIG_BRIDGE_EBT_MARK
+./scripts/config --module CONFIG_BRIDGE_EBT_PKTTYPE
+./scripts/config --module CONFIG_BRIDGE_EBT_STP
+./scripts/config --module CONFIG_BRIDGE_EBT_VLAN
+# Common ebtables targets
+./scripts/config --module CONFIG_BRIDGE_EBT_ARPREPLY
+./scripts/config --module CONFIG_BRIDGE_EBT_DNAT
+./scripts/config --module CONFIG_BRIDGE_EBT_MARK_T
+./scripts/config --module CONFIG_BRIDGE_EBT_REDIRECT
+./scripts/config --module CONFIG_BRIDGE_EBT_SNAT
+./scripts/config --module CONFIG_BRIDGE_EBT_LOG
+./scripts/config --module CONFIG_BRIDGE_EBT_NFLOG
+# Build kernel
+make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- -j$(nproc) Image modules dtbs
+
+# Suppress -dirty suffix and commit
+echo "" > .scmversion
+git add -A
+git commit -m "MANET kernel config"
+
+
+### 3. Patch and build MorseMicro driver
+
+cd ~/MANET/kernel-work/rock3a/morse_driver
+
+# Fix compatibility for vanilla kernel (not MorseMicro's patched kernel)
+sed -i 's/#if defined(__x86_64__)/#ifndef IEEE80211_CHAN_IGNORE/' morse.h
+
+# Build
+export ARCH=arm64
+export CROSS_COMPILE=aarch64-linux-gnu-
+export KERNEL_SRC=/home/user/MANET/kernel-work/rock3a/build/cache/sources/linux-kernel-worktree/6.6__rockchip64__arm64
+
+make clean
+make CONFIG_WLAN_VENDOR_MORSE=m CONFIG_MORSE_USB=y CONFIG_MORSE_COUNTRY="US" CONFIG_MORSE_VENDOR_COMMAND=y
+
+
+### 4. Create staging directory
+
+mkdir -p ~/MANET/kernel-work/rock3a/staging
+cd ~/MANET/kernel-work/rock3a/staging
+
+mkdir -p boot/dtb/rockchip
+mkdir -p lib/modules
+mkdir -p lib/firmware/morse
+mkdir -p usr/local/bin
+mkdir -p etc/modprobe.d
+mkdir -p etc/modules-load.d
+
+KSRC=/home/user/MANET/kernel-work/rock3a/build/cache/sources/linux-kernel-worktree/6.6__rockchip64__arm64
+
+# Kernel image and DTBs
+cp $KSRC/arch/arm64/boot/Image boot/
+cp $KSRC/arch/arm64/boot/dts/rockchip/rk3568*.dtb boot/dtb/rockchip/
+
+# Kernel modules
+make -C $KSRC ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- INSTALL_MOD_PATH=$(pwd) modules_install
+#mv lib/modules/6.6.119-manet+ lib/modules/6.6.119-manet
+rm -f lib/modules/6.6.119-manet+/build lib/modules/6.6.119-manet+/source
+
+# MorseMicro modules
+mkdir -p lib/modules/6.6.119-manet+/extra
+cp ~/MANET/kernel-work/rock3a/morse_driver/morse.ko lib/modules/6.6.119-manet/extra/
+cp ~/MANET/kernel-work/rock3a/morse_driver/dot11ah/dot11ah.ko lib/modules/6.6.119-manet/extra/
+
+# MorseMicro firmware (MM8108 + GW16167 BCF)
+cp ~/MANET/kernel-work/rock3a/morse-firmware/firmware/mm8108*.bin lib/firmware/morse/
+cp ~/MANET/kernel-work/rock3a/morse-firmware/bcf/morsemicro/bcf_mf15457.bin lib/firmware/morse/
+
+# Node tools
+cp ~/MANET/MANET/node_tools/* usr/local/bin/
+
+# Module configs
+cat << 'EOF' > etc/modprobe.d/morse.conf
+options morse country=US
+options morse bcf=bcf_mf15457.bin
+EOF
+
+cat << 'EOF' > etc/modules-load.d/morse.conf
+mac80211
+cfg80211
+morse
+dot11ah
+EOF
+
+# Strip debug symbols from modules
+find lib/modules -name "*.ko" -exec aarch64-linux-gnu-strip --strip-unneeded {} \;
+
+# Regenerate module dependencies
+depmod -b $(pwd) -a 6.6.119-manet
+
+
+### 5. Create tarball
+
+cd ~/MANET/kernel-work/rock3a/staging
+tar --owner=root --group=root -czvf ../rock3a-install.tar.gz .
+
+#  Result: `rock3a-install.tar.gz` (~53MB) ready to deploy on top of stock Armbian.
