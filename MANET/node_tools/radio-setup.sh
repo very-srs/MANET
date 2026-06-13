@@ -1710,6 +1710,43 @@ if [[ "$FIRST_BOOT_UNIT_ENABLED" -eq 1 && ! -f "$FIRST_BOOT_STAGE_MARKER" ]]; th
     touch "$FIRST_BOOT_STAGE_MARKER"
 fi
 
+# networkd-dispatcher hardening (two stock-default issues, both bite Rock 3A).
+#
+# 1) The stock unit has no ordering dependency, so at boot it can start before
+#    systemd-networkd and dbus. Its constructor runs `networkctl list`; with no
+#    networkd to answer that can wedge. Pin the ordering via a drop-in.
+# 2) The Debian default /etc/default/networkd-dispatcher passes
+#    `--run-startup-triggers`, which makes the daemon run every interface's state
+#    hooks BEFORE signalling readiness. Hook evaluation shells out to
+#    `iw <iface> link` / `networkctl status <iface>` with no timeout; on the USB
+#    Morse HaLow card (wlan2) that call blocks while the firmware is still coming
+#    up at boot, so the service never reaches READY and systemd kills it on the
+#    start timeout. The hooks still fire on real carrier/routable state changes
+#    (and MANET drives uplink/gateway detection independently via
+#    ethernet-autodetect), so the boot-time pre-trigger is not needed. CM4 (SPI
+#    Morse) tolerates it but we disable it everywhere for uniform behaviour.
+DISPATCHER_DROPIN_DIR=/etc/systemd/system/networkd-dispatcher.service.d
+if [ ! -f "$DISPATCHER_DROPIN_DIR/10-manet-ordering.conf" ]; then
+    mkdir -p "$DISPATCHER_DROPIN_DIR"
+    cat <<-EOF > "$DISPATCHER_DROPIN_DIR/10-manet-ordering.conf"
+	[Unit]
+	After=systemd-networkd.service dbus.service
+	Wants=systemd-networkd.service
+	EOF
+    systemctl daemon-reload
+    echo " > Installed networkd-dispatcher ordering drop-in"
+fi
+if grep -q 'run-startup-triggers' /etc/default/networkd-dispatcher 2>/dev/null; then
+    cat <<-'EOF' > /etc/default/networkd-dispatcher
+	# Specify command line options here. This config file is used
+	# by the included systemd service file.
+	# MANET: --run-startup-triggers removed — it blocks startup on the USB Morse
+	# HaLow card (iw/networkctl with no timeout while the firmware inits at boot).
+	networkd_dispatcher_args=""
+	EOF
+    echo " > Disabled networkd-dispatcher --run-startup-triggers"
+fi
+
 echo " > restarting networkd..."
 systemctl restart systemd-networkd
 

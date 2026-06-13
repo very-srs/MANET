@@ -174,6 +174,14 @@ start() {
             local mac
             mac=$(cat "/sys/class/net/${WLAN}/address" 2>/dev/null || true)
             if [ -n "$mac" ]; then
+                # radio-setup may have already pinned this MAC to a different
+                # target name (staged rename, applied next boot). Writing a
+                # link file for the current name would shadow that pin —
+                # lexically-first .link wins — and wedge the rename forever.
+                if grep -qi "MACAddress=$mac" /etc/systemd/network/10-wlan*.link 2>/dev/null; then
+                    echo "Skipping $link_file: MAC $mac already pinned by radio-setup"
+                    continue
+                fi
                 printf '[Match]\nMACAddress=%s\n\n[Link]\nName=%s\n' "$mac" "$WLAN" > "$link_file"
                 echo "Wrote $link_file (MAC=$mac)"
                 wrote_links=true
