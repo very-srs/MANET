@@ -101,43 +101,42 @@ load_mesh_wpa_confs() {
         mapfile -t mesh_ifaces < /var/lib/mesh_if
     fi
 
+    # The 5 GHz radio is absent from mesh_if when it is reserved for AP duty
+    # (ethernet-autodetect moves it between hostapd and the mesh), so a second
+    # entry is optional — no wlan1 fallback.
     WPA_IFACE_2_4="${mesh_ifaces[0]:-wlan0}"
-    WPA_IFACE_5_0="${mesh_ifaces[1]:-wlan1}"
+    WPA_IFACE_5_0="${mesh_ifaces[1]:-}"
     WPA_CONF_2_4="/etc/wpa_supplicant/wpa_supplicant-${WPA_IFACE_2_4}.conf"
-    WPA_CONF_5_0="/etc/wpa_supplicant/wpa_supplicant-${WPA_IFACE_5_0}.conf"
+    WPA_CONF_5_0=""
+    [ -n "$WPA_IFACE_5_0" ] && WPA_CONF_5_0="/etc/wpa_supplicant/wpa_supplicant-${WPA_IFACE_5_0}.conf"
+}
+
+ensure_static_iface_channel() {
+    local iface=$1 conf=$2 static_freq=$3 band=$4
+
+    [ -n "$iface" ] || return 0
+    if [ ! -f "$conf" ]; then
+        log "Static mesh WPA config not ready for $band: $conf"
+        return 0
+    fi
+
+    local freq
+    freq=$(get_current_freq "$conf")
+    [ "$freq" = "$static_freq" ] && return 0
+
+    log "Correcting $band to static channel $static_freq"
+    sed -i "s/frequency=.*/frequency=${static_freq}/" "$conf"
+    if radio_iface_enabled "$iface"; then
+        log "Restarting wpa_supplicant@${iface}..."
+        systemctl restart "wpa_supplicant@${iface}.service"
+        sleep 5
+    fi
 }
 
 ensure_static_channels() {
     load_mesh_wpa_confs
-
-    if [ ! -f "$WPA_CONF_2_4" ] || [ ! -f "$WPA_CONF_5_0" ]; then
-        log "Static mesh WPA configs not ready: $WPA_CONF_2_4 / $WPA_CONF_5_0"
-        return
-    fi
-
-    local freq_2_4=$(get_current_freq "$WPA_CONF_2_4")
-    local freq_5_0=$(get_current_freq "$WPA_CONF_5_0")
-    
-    local needs_restart=false
-    
-    if [ "$freq_2_4" != "$STATIC_FREQ_2_4" ]; then
-        log "Correcting 2.4 GHz to static channel $STATIC_FREQ_2_4"
-        sed -i "s/frequency=.*/frequency=${STATIC_FREQ_2_4}/" "$WPA_CONF_2_4"
-        needs_restart=true
-    fi
-    
-    if [ "$freq_5_0" != "$STATIC_FREQ_5_0" ]; then
-        log "Correcting 5 GHz to static channel $STATIC_FREQ_5_0"
-        sed -i "s/frequency=.*/frequency=${STATIC_FREQ_5_0}/" "$WPA_CONF_5_0"
-        needs_restart=true
-    fi
-    
-    if [ "$needs_restart" = true ]; then
-        log "Restarting wpa_supplicant services..."
-        radio_iface_enabled "$WPA_IFACE_2_4" && systemctl restart "wpa_supplicant@${WPA_IFACE_2_4}.service"
-        radio_iface_enabled "$WPA_IFACE_5_0" && systemctl restart "wpa_supplicant@${WPA_IFACE_5_0}.service"
-        sleep 5
-    fi
+    ensure_static_iface_channel "$WPA_IFACE_2_4" "$WPA_CONF_2_4" "$STATIC_FREQ_2_4" "2.4 GHz"
+    ensure_static_iface_channel "$WPA_IFACE_5_0" "$WPA_CONF_5_0" "$STATIC_FREQ_5_0" "5 GHz"
 }
 
 is_hosting_service() {
@@ -301,7 +300,7 @@ except Exception:
         [ -n "$GPS_LAT" ] && ENCODER_ARGS+=("--latitude" "$GPS_LAT" "--longitude" "$GPS_LON" "--altitude" "$GPS_ALT")
 
         CURRENT_PAYLOAD=$("$ENCODER_PATH" "${ENCODER_ARGS[@]}" 2>/dev/null)
-
+        
         if [ -n "$CURRENT_PAYLOAD" ]; then
             echo -n "$CURRENT_PAYLOAD" | alfred -s $ALFRED_DATA_TYPE
             LAST_PUBLISHED_PAYLOAD="$CURRENT_PAYLOAD"
