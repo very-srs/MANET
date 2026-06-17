@@ -1293,6 +1293,7 @@ EOF
 
 systemctl daemon-reload
 systemctl enable batman-enslave.service
+systemctl enable batman-enslave-watch.service
 
 # Alfred master listener for mesh data messages
 cat <<- EOF > /etc/systemd/system/alfred.service
