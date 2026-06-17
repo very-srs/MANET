@@ -341,14 +341,12 @@ if [ -z "$HALOW_REGULATORY_DOMAIN" ] || uses_eu_halow_region "$REGULATORY_DOMAIN
     HALOW_REGULATORY_DOMAIN="EU"
 fi
 
-# cfg80211 regdomain to use — EU when HaLow is EU so S1G channels are
-# resolvable by wpa_supplicant_s1g. Also used in wpa_supplicant configs
-# for 2.4/5 GHz radios to keep cfg80211 from reverting to WORLD.
-if [[ "$HALOW_REGULATORY_DOMAIN" == "EU" ]]; then
-    CFG80211_REGDOM="EU"
-else
-    CFG80211_REGDOM="$REGULATORY_DOMAIN"
-fi
+# cfg80211 regdomain for the 2.4/5 GHz (mt7915) radios — use the real ISO
+# country code (e.g. HR). The Morse HaLow phy is self-managed and applies
+# HALOW_REGULATORY_DOMAIN (EU) on its own via the morse module param, so
+# cfg80211 must NOT be forced to "EU": that is a synthetic DFS-invalid regdb
+# entry that cfg80211 rejects, leaving the global regdom stuck at WORLD/00.
+CFG80211_REGDOM="$REGULATORY_DOMAIN"
 
 
 # Wait for wireless drivers to load
@@ -789,7 +787,6 @@ ctrl_interface=/var/run/wpa_supplicant
 country=$CFG80211_REGDOM
 update_config=1
 sae_pwe=1
-sae_anti_clogging_threshold=0
 ap_scan=2
 network={
     ssid="$MESH_NAME"
