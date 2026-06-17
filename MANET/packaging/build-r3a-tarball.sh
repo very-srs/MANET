@@ -127,7 +127,8 @@ for unit in \
     mesh-default-route-fix.service \
     perf-dashboard.service \
     sae-watchdog.service \
-    ebtables-restore.service
+    ebtables-restore.service \
+    batman-enslave-watch.service
 do
     if [ -f "$STAGE/etc/systemd/system/$unit" ]; then
         ln -sf "../$unit" "$STAGE/etc/systemd/system/multi-user.target.wants/$unit"
