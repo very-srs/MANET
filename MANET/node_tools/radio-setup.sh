@@ -933,7 +933,8 @@ Wants=ap-interface-setup.service
 [Service]
 Type=oneshot
 ExecStartPre=/bin/sleep 2
-ExecStart=-/usr/sbin/iw dev $AP_INTERFACE set txpower fixed 500
+# mt7915e ignores per-netdev txpower in AP mode; must set on the wiphy.
+ExecStart=-/bin/sh -c '/usr/sbin/iw phy "\$(cat /sys/class/net/$AP_INTERFACE/phy80211/name)" set txpower fixed 500'
 RemainAfterExit=yes
 
 [Install]
