@@ -157,18 +157,10 @@ elif [ "__HARDWARE_MODEL__" = "rpi4" ]; then
 		touch /var/lib/expand-root-done
 elif [ "__HARDWARE_MODEL__" = "r3a" ]; then
 		echo "Applying Rock 3A specific settings..."
-		R3A_URL=$(curl -s https://api.github.com/repos/mrleongalaxyum/manet-dev/releases/latest \
-				| grep -oE '"browser_download_url": *"[^"]*r3a-install[^"/]*\.tar\.gz"' \
-				| grep -oE 'https://[^"]*' \
-				| head -1)
-		if [ -z "$R3A_URL" ]; then
-				echo "ERROR: Could not resolve r3a-install.tar.gz from latest release"
-				exit 1
-		fi
-		wget -q "$R3A_URL" -O /root/morse-pi-install.tar.gz || {
-				echo "ERROR: Failed to download Rock 3A package"
-				exit 1
-		}
+        wget -q  https://www.colorado-governor.com/manet/r3a-install.tar.gz -O /root/morse-pi-install.tar.gz || {
+                echo "ERROR: Failed to download rock3a package"
+                exit 1
+        }
 fi
 
 #
