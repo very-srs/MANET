@@ -1553,32 +1553,43 @@ done
 # ============================================================================
 # === RPi config.txt — SPI, Morse HaLow overlay, CM4 PCIe 32-bit DMA ===
 # ============================================================================
-# The Morse mm610x HaLow chip uses SPI on CM4 and RPi5. config.txt must load
-# the DT overlay, enable SPI, and drive GPIO 3/7/17 HIGH at boot (Morse
-# power/reset pins). CM4 nodes with a PCIe mt7916 WiFi card also need
-# pcie-32bit-dma: the BCM2711 PCIe outbound window sits above 4GB and the
-# card fails probe with -ENOMEM without forcing 32-bit DMA mapping.
+# The Morse mm610x HaLow chip uses SPI on CM4 and RPi5 (Seeed-style SPI hat):
+# config.txt must load the DT overlay, enable SPI, and drive GPIO 3/7/17 HIGH at
+# boot (Morse power/reset pins). Boards carrying a USB MM81xx card instead need
+# none of that — the card enumerates on USB and the SPI overlay only creates a
+# phantom spi0.0 that fails probe every boot ("morse_spi_probe failed"), while
+# gpio=3=op,dh fights dtparam=i2c_arm=on for the same pin. CM4 nodes with a PCIe
+# mt7916 WiFi card also need pcie-32bit-dma: the BCM2711 PCIe outbound window
+# sits above 4GB and the card fails probe with -ENOMEM without 32-bit DMA.
 _config_txt_changed=0
+if has_usb_morse_device; then
+    _halow_on_spi=0
+    echo " > USB Morse HaLow card present — skipping SPI overlay/GPIO config.txt entries"
+else
+    _halow_on_spi=1
+fi
 for _cfg in /boot/firmware/config.txt /boot/config.txt; do
     [ -f "$_cfg" ] || continue
 
-    if ! grep -q 'dtparam=spi=on' "$_cfg"; then
-        echo "dtparam=spi=on" >> "$_cfg"
-        echo " > SPI enabled in $_cfg"
-        _config_txt_changed=1
-    fi
-    if ! grep -q 'mm610x-spi' "$_cfg"; then
-        echo "dtoverlay=mm610x-spi.dtbo" >> "$_cfg"
-        echo " > mm610x-spi HaLow overlay added to $_cfg"
-        _config_txt_changed=1
-    fi
-    for _gpio_line in "gpio=3=op,dh" "gpio=7=op,dh" "gpio=17=op,dh"; do
-        if ! grep -qF "$_gpio_line" "$_cfg"; then
-            echo "$_gpio_line" >> "$_cfg"
+    if [ "$_halow_on_spi" -eq 1 ]; then
+        if ! grep -q 'dtparam=spi=on' "$_cfg"; then
+            echo "dtparam=spi=on" >> "$_cfg"
+            echo " > SPI enabled in $_cfg"
             _config_txt_changed=1
         fi
-    done
-    echo " > Morse GPIO power/reset pins set in $_cfg"
+        if ! grep -q 'mm610x-spi' "$_cfg"; then
+            echo "dtoverlay=mm610x-spi.dtbo" >> "$_cfg"
+            echo " > mm610x-spi HaLow overlay added to $_cfg"
+            _config_txt_changed=1
+        fi
+        for _gpio_line in "gpio=3=op,dh" "gpio=7=op,dh" "gpio=17=op,dh"; do
+            if ! grep -qF "$_gpio_line" "$_cfg"; then
+                echo "$_gpio_line" >> "$_cfg"
+                _config_txt_changed=1
+            fi
+        done
+        echo " > Morse GPIO power/reset pins set in $_cfg"
+    fi
 
     # CM4 only: PCIe WiFi cards (mt7916) need 32-bit DMA — the BCM2711 PCIe
     # outbound window is above 4GB which the card cannot address otherwise.

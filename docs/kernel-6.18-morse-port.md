@@ -286,7 +286,12 @@ the Morse driver out-of-tree against the build dir, stage `morse.ko` +
 xz-compress all modules. Per-target notes:
 
 - **CM4** (`bcm2711_defconfig`): also compiles the DTS overlay (§5).
-  Driver flags: `CONFIG_MORSE_SPI=y CONFIG_MORSE_VENDOR_COMMAND=y CONFIG_MORSE_USER_ACCESS=y`.
+  Driver flags: `CONFIG_MORSE_SPI=y CONFIG_MORSE_USB=y CONFIG_MORSE_VENDOR_COMMAND=y
+  CONFIG_MORSE_USER_ACCESS=y`. **Both buses are built in** — CM4 boards ship
+  either with the SPI HaLow hat (mm6108) or with a USB MM8108 card, and one
+  module serves both. `CONFIG_MORSE_SPI` and `CONFIG_MORSE_USB` are independent
+  `#ifdef` blocks in `init.c`/`morse.h` and coexist fine; the unused bus driver
+  just registers and never probes. See §6.1.
 - **RPi5** (`bcm2712_defconfig`): same tree and flags as CM4 (currently without
   `CONFIG_MORSE_VENDOR_COMMAND` — add it if vendor commands are needed there).
   Known latent bug (rpi5 work is deferred, unfixed as of 2026-06): `build-rpi5.sh`
@@ -301,6 +306,42 @@ xz-compress all modules. Per-target notes:
 
 All targets cross-compile with `aarch64-linux-gnu-`. All Morse builds pass
 `KERNEL_SRC="$BUILD"` and `MORSE_TRACE_PATH="$(pwd)"`.
+
+### 6.1 USB HaLow cards on CM4 (added 2026-08-11)
+
+CM4 boards without the SPI hat use a USB **MM8108** card (`lsusb`:
+`325b:8100 Morse Micro MM81xx Wi-Fi HaLow 802.11ah Transceiver`). The kernel
+side needs nothing special — `bcm2711_defconfig` already has `CONFIG_USB=y` +
+xHCI, and the card enumerates on the CM4's `fe9c0000.xhci` bus. What was missing
+was purely a **driver build flag**: `build-cm4.sh` passed only
+`CONFIG_MORSE_SPI=y`, so `usb.o` was never compiled, `morse.ko` carried no
+`usb:v325Bp8100*` alias, and the USB device sat with `Driver=[none]` while the
+only visible dmesg line was the (unrelated, harmless) SPI probe failure:
+
+```
+morse_spi spi0.0: morse_spi_probe: failed to init SPI with CMD63 (ret:-61)
+morse_spi_probe failed. The driver has not been loaded!
+```
+
+That message appears on **any** CM4 whose config.txt loads `mm610x-spi.dtbo`
+with no hat attached — it is not evidence of a USB problem. Quick check for
+whether the module has USB support at all:
+
+```bash
+modinfo morse | grep alias    # want: usb:v325Bp8100d*dc*dsc*dp*ic*isc*ip*in*
+```
+
+With `CONFIG_MORSE_USB=y` the driver binds as `morse_usb`, auto-selects
+`morse/mm8108b2-rl.bin` + a BCF from the chip's board type (bench card:
+`bcf_boardtype_0807.bin`), and creates the HaLow netdev. `FW manifest pointer
+not set (ret:-5)` right after firmware load is benign on this card — the mesh
+comes up normally afterwards.
+
+Provisioning: `radio-setup.sh` skips the SPI overlay / GPIO 3+7+17 config.txt
+entries when `has_usb_morse_device` sees a USB card (it was already USB-aware
+for the BCF/spi_clock modparams). An already-provisioned board keeps whatever
+config.txt it has; drop `dtoverlay=mm610x-spi.dtbo`, `dtparam=spi=on` and the
+three `gpio=` lines by hand to silence the phantom SPI probe.
 
 **Module.symvers gotcha:** the Morse make consumes the kernel build dir's
 `Module.symvers`. After a `make clean` in the kernel tree, rebuild kernel modules

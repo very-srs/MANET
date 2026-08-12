@@ -105,8 +105,11 @@ Templates use `__PLACEHOLDER__` substitution (mesh key, SSID, regulatory domain,
 ## Morse driver notes
 
 Out-of-tree driver (`morse-driver-1.16/`), built per-platform against the kernel build dir:
-- CM4/RPi5: `CONFIG_MORSE_SPI=y` — SPI DTS overlay (`dts-overlays/cm4-morse-spi.dts`) compiled to `mm610x-spi.dtbo`
+- CM4: `CONFIG_MORSE_SPI=y CONFIG_MORSE_USB=y` — both buses, since CM4 boards ship either with the SPI HaLow hat (mm6108) or a USB MM8108 card (`325b:8100`). SPI DTS overlay (`dts-overlays/cm4-morse-spi.dts`) compiled to `mm610x-spi.dtbo`
+- RPi5: `CONFIG_MORSE_SPI=y` (deferred target)
 - Rock 3A: `CONFIG_MORSE_USB=y`
+
+A USB HaLow card that enumerates (`lsusb` shows `325b:8100`) but shows `Driver=[none]` in `lsusb -t` means the module was built without `CONFIG_MORSE_USB` — check `modinfo morse | grep alias` for `usb:v325Bp8100*`. The `morse_spi spi0.0: ... CMD63 (ret:-61)` dmesg error is unrelated: it is the SPI overlay probing a hat that isn't there.
 - All: `CONFIG_WLAN_VENDOR_MORSE=m CONFIG_MORSE_VENDOR_COMMAND=y CONFIG_MORSE_USER_ACCESS=y`
 
 Produces `morse.ko` + `dot11ah/dot11ah.ko`. The `modules.dep` generated at build time does NOT include the Morse extras (they live in `extra/morse/` added after `make modules_install`). Run `depmod -a` on target after install, or from dev machine: `sudo depmod -b /mnt/rootfs <kver>`.
