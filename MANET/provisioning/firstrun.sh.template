@@ -265,9 +265,26 @@ morse
 dot11ah
 EOF
 
+# Detect a USB MM81xx HaLow card (325b:8100) from sysfs.  Boards with one need
+# none of the SPI-hat plumbing below — not the mm6108 BCF / SPI clock modparams
+# (wrong board file: probe dies with "morse_firmware_init failed: -5"), and not
+# the config.txt SPI overlay/GPIO entries further down.  The card is enumerated
+# by the time provision-mesh runs.  Detection failure falls back to the SPI
+# settings, which is the safe default for hat boards.
+_halow_on_spi=1
+for _usbdev in /sys/bus/usb/devices/*; do
+    [ -d "$_usbdev" ] || continue
+    if cat "$_usbdev/product" "$_usbdev/manufacturer" 2>/dev/null \
+        | tr '[:upper:]' '[:lower:]' | grep -Eq 'morse|mm81|halow|802\.11ah'; then
+        _halow_on_spi=0
+        echo " > USB Morse HaLow card detected — using USB modparams, skipping SPI entries"
+        break
+    fi
+done
+
 # Load the morse driver with options to allow the interface to be picked up
 # This will be re-written by radio-setup and become specific to the chosen region
-if [ "__HARDWARE_MODEL__" = "r3a" ]; then
+if [ "__HARDWARE_MODEL__" = "r3a" ] || [ "$_halow_on_spi" -eq 0 ]; then
 cat << EOF > /etc/modprobe.d/morse.conf
 options morse country=US
 options morse enable_mcast_whitelist=0 enable_mcast_rate_control=1
@@ -760,23 +777,9 @@ echo "nameserver 1.1.1.1" > /etc/resolv.conf
 # interfaces already present.  All writes are idempotent; disable-wifi added
 # above is not affected.
 #
-# Boards carrying a USB MM81xx HaLow card (325b:8100) instead of the SPI hat
-# need none of the SPI plumbing: the overlay only creates a phantom spi0.0 that
-# fails probe on every boot ("morse_spi_probe failed"), and gpio=3=op,dh fights
-# dtparam=i2c_arm=on for the same pin.  The card is enumerated by the time
-# provision-mesh runs, so detect it from sysfs.  If detection fails we fall back
-# to writing the SPI entries, which is the safe default for hat boards.
-_halow_on_spi=1
-for _usbdev in /sys/bus/usb/devices/*; do
-    [ -d "$_usbdev" ] || continue
-    if cat "$_usbdev/product" "$_usbdev/manufacturer" 2>/dev/null \
-        | tr '[:upper:]' '[:lower:]' | grep -Eq 'morse|mm81|halow|802\.11ah'; then
-        _halow_on_spi=0
-        echo " > USB Morse HaLow card detected — skipping SPI overlay/GPIO entries"
-        break
-    fi
-done
-
+# On a USB MM81xx board ($_halow_on_spi=0, detected above) the SPI overlay only
+# creates a phantom spi0.0 that fails probe on every boot ("morse_spi_probe
+# failed"), and gpio=3=op,dh fights dtparam=i2c_arm=on for the same pin.
 for _cfg in /boot/firmware/config.txt /boot/config.txt; do
     [ -f "$_cfg" ] || continue
     if [ "$_halow_on_spi" -eq 1 ]; then
