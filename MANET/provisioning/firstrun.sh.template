@@ -759,13 +759,33 @@ echo "nameserver 1.1.1.1" > /etc/resolv.conf
 # (provisioning) reboot.  radio-setup runs on that boot and will find the
 # interfaces already present.  All writes are idempotent; disable-wifi added
 # above is not affected.
+#
+# Boards carrying a USB MM81xx HaLow card (325b:8100) instead of the SPI hat
+# need none of the SPI plumbing: the overlay only creates a phantom spi0.0 that
+# fails probe on every boot ("morse_spi_probe failed"), and gpio=3=op,dh fights
+# dtparam=i2c_arm=on for the same pin.  The card is enumerated by the time
+# provision-mesh runs, so detect it from sysfs.  If detection fails we fall back
+# to writing the SPI entries, which is the safe default for hat boards.
+_halow_on_spi=1
+for _usbdev in /sys/bus/usb/devices/*; do
+    [ -d "$_usbdev" ] || continue
+    if cat "$_usbdev/product" "$_usbdev/manufacturer" 2>/dev/null \
+        | tr '[:upper:]' '[:lower:]' | grep -Eq 'morse|mm81|halow|802\.11ah'; then
+        _halow_on_spi=0
+        echo " > USB Morse HaLow card detected — skipping SPI overlay/GPIO entries"
+        break
+    fi
+done
+
 for _cfg in /boot/firmware/config.txt /boot/config.txt; do
     [ -f "$_cfg" ] || continue
-    grep -q 'dtparam=spi=on' "$_cfg"   || echo "dtparam=spi=on"            >> "$_cfg"
-    grep -q 'mm610x-spi'     "$_cfg"   || echo "dtoverlay=mm610x-spi.dtbo" >> "$_cfg"
-    grep -qF 'gpio=3=op,dh'  "$_cfg"   || echo "gpio=3=op,dh"              >> "$_cfg"
-    grep -qF 'gpio=7=op,dh'  "$_cfg"   || echo "gpio=7=op,dh"              >> "$_cfg"
-    grep -qF 'gpio=17=op,dh' "$_cfg"   || echo "gpio=17=op,dh"             >> "$_cfg"
+    if [ "$_halow_on_spi" -eq 1 ]; then
+        grep -q 'dtparam=spi=on' "$_cfg"   || echo "dtparam=spi=on"            >> "$_cfg"
+        grep -q 'mm610x-spi'     "$_cfg"   || echo "dtoverlay=mm610x-spi.dtbo" >> "$_cfg"
+        grep -qF 'gpio=3=op,dh'  "$_cfg"   || echo "gpio=3=op,dh"              >> "$_cfg"
+        grep -qF 'gpio=7=op,dh'  "$_cfg"   || echo "gpio=7=op,dh"              >> "$_cfg"
+        grep -qF 'gpio=17=op,dh' "$_cfg"   || echo "gpio=17=op,dh"             >> "$_cfg"
+    fi
     if [ "__HARDWARE_MODEL__" = "rpi4" ]; then
         grep -q 'pcie-32bit-dma' "$_cfg" || printf '\n[cm4]\ndtoverlay=pcie-32bit-dma\n' >> "$_cfg"
     fi
