@@ -1,3 +1,15 @@
 *.img
 *.deb
 *.tar.gz
+
+# Compressed OS images and their checksums (provisioning/)
+*.img.xz
+*.img.sha256
+
+# Build output and backups kept beside the real artifacts
+__pycache__/
+*.prev-*
+install_packages-orig/
+
+# Kernel build infrastructure — deliberately not in this repo
+kernel-work/

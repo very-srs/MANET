@@ -179,11 +179,36 @@ wait_for_ipv4() {
     return 1
 }
 
+# Is there real internet behind $1? ICMP echo alone is not a usable test: many
+# LANs drop or rate-limit echo to public addresses while passing TCP and UDP
+# normally, which makes a ping-only probe flap the uplink. Fall back to the
+# standard 204 captive-portal endpoints (a portal answers 200/302, not 204, so
+# it correctly counts as "no internet"), then to a bare TCP connect for images
+# without curl. Keep this in sync with ethernet-autodetect.sh.
 internet_probe() {
     local iface="$1"
+    local url code ip
 
     ping -c 1 -W 2 -I "$iface" 1.1.1.1 >/dev/null 2>&1 && return 0
     ping -c 1 -W 2 -I "$iface" 8.8.8.8 >/dev/null 2>&1 && return 0
+
+    if command -v curl >/dev/null 2>&1; then
+        for url in http://connectivitycheck.gstatic.com/generate_204 \
+                   http://cp.cloudflare.com/; do
+            code=$(curl --interface "$iface" -s -m 3 -o /dev/null \
+                        -w '%{http_code}' "$url" 2>/dev/null || true)
+            [ "$code" = "204" ] && return 0
+        done
+        return 1
+    fi
+
+    # No curl in this image: bare TCP connect instead.
+    ip=$(iface_ip "$iface")
+    if [ -n "$ip" ] && command -v nc >/dev/null 2>&1; then
+        nc -z -w 3 -s "$ip" 1.1.1.1 53 >/dev/null 2>&1 && return 0
+        nc -z -w 3 -s "$ip" 8.8.8.8 53 >/dev/null 2>&1 && return 0
+    fi
+
     return 1
 }
 
