@@ -93,8 +93,66 @@ log() {
     echo "[$(date +'%Y-%m-%d %H:%M:%S')] - ETH-DETECT: $1" | systemd-cat -t ethernet-autodetect
 }
 
+# Is there real internet behind $1?
+#
+# ICMP echo alone is not a usable test. Plenty of LANs (the bench LAN included)
+# drop or heavily rate-limit echo to public addresses while passing TCP and UDP
+# normally — measured 95-100% echo loss to 8.8.8.8/1.1.1.1 there while DNS,
+# HTTP and traceroute all worked. A ping-only probe made this node flap in and
+# out of gateway mode, so try progressively less-filtered methods:
+#   1. ICMP  — cheapest, answers in milliseconds on a normal LAN
+#   2. HTTP  — the standard 204 captive-portal endpoints; a portal answers
+#              200/302 rather than 204, which correctly counts as "no internet"
+#   3. TCP   — bare connect to public DNS, for images without curl
+internet_probe() {
+    local iface="$1"
+    local url code ip
+
+    ping -c 1 -W 2 -I "$iface" 1.1.1.1 >/dev/null 2>&1 && return 0
+    ping -c 1 -W 2 -I "$iface" 8.8.8.8 >/dev/null 2>&1 && return 0
+
+    if command -v curl >/dev/null 2>&1; then
+        for url in http://connectivitycheck.gstatic.com/generate_204 \
+                   http://cp.cloudflare.com/; do
+            code=$(curl --interface "$iface" -s -m 3 -o /dev/null \
+                        -w '%{http_code}' "$url" 2>/dev/null || true)
+            [ "$code" = "204" ] && return 0
+        done
+        return 1
+    fi
+
+    # No curl in this image: bare TCP connect instead. Every leg has a timeout
+    # because this runs inside the dispatcher's flock.
+    ip=$(ip -4 addr show dev "$iface" | grep -oP 'inet \K[\d.]+' | head -1)
+    if [ -n "$ip" ] && command -v nc >/dev/null 2>&1; then
+        nc -z -w 3 -s "$ip" 1.1.1.1 53 >/dev/null 2>&1 && return 0
+        nc -z -w 3 -s "$ip" 8.8.8.8 53 >/dev/null 2>&1 && return 0
+    fi
+
+    return 1
+}
+
+# Tearing down a working gateway is expensive: it drops NAT and batman gw_mode
+# here, and every mesh client is left holding a default route to this node that
+# now black-holes (gateway-route-manager withdraws it, but only on its next
+# poll). So confirm a failure before acting on it, and try harder when we are
+# currently the gateway.
+internet_probe_confirmed() {
+    local iface="$1"
+    local attempts=2 i
+
+    [ -f /var/run/mesh-gateway.state ] && attempts=3
+
+    for i in $(seq 1 "$attempts"); do
+        internet_probe "$iface" && return 0
+        [ "$i" -lt "$attempts" ] && sleep 3
+    done
+
+    return 1
+}
+
 run_no_carrier_cleanup() {
-    log "No carrier on $ETH_IFACE - running unplug cleanup"
+    log "${1:-No carrier on $ETH_IFACE} - running unplug cleanup"
 
     if [ -x /etc/networkd-dispatcher/off.d/50-gateway-disable ]; then
         IFACE="$ETH_IFACE" /etc/networkd-dispatcher/off.d/50-gateway-disable
@@ -184,14 +242,14 @@ detect_hotplug_mode() {
     ip=$(wait_for_end0_ip 20 || true)
     if [ -n "$ip" ]; then
         log "IP acquired on $ETH_IFACE: $ip"
-        if ping -c 3 -W 2 -I "$ETH_IFACE" 8.8.8.8 >/dev/null 2>&1; then
+        if internet_probe_confirmed "$ETH_IFACE"; then
             DETECTED_MODE="gateway"
             return 0
         fi
 
         log "DHCP succeeded but internet test failed; leaving as mesh client"
         echo "$ETH_IFACE $ip $(date +%s)" > "$NO_INET_STATE"
-        run_no_carrier_cleanup
+        run_no_carrier_cleanup "Internet test failed on $ETH_IFACE"
         exit 0
     fi
 

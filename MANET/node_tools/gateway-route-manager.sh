@@ -7,10 +7,13 @@ LOCK_FILE=/var/run/gateway-route-manager.lock
 exec 200>"$LOCK_FILE"
 flock -n 200 || exit 0
 
+# The unit runs this with StandardError=journal and
+# SyslogIdentifier=gateway-route-manager, so stderr already lands in the
+# journal under the right tag. Piping to systemd-cat as well logged every line
+# twice and forked an extra process per line. Run by hand, stderr goes to the
+# terminal, which is what you want there.
 log() {
-    local msg="[$(date '+%Y-%m-%d %H:%M:%S')] - GW-ROUTE-MGR: $*"
-    echo "$msg" >&2
-    echo "$msg" | systemd-cat -t gateway-route-manager
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] - GW-ROUTE-MGR: $*" >&2
 }
 
 get_gateway_mac() {
@@ -61,7 +64,7 @@ while true; do
     if [ -f /var/run/mesh-gateway.state ]; then
         cur="$(ip route show default | head -n1 || true)"
         # Only log when actually removing a route — this branch runs every
-        # poll cycle while in gateway mode, and log() forks date+systemd-cat.
+        # poll cycle while in gateway mode, and log() forks date.
         if echo "$cur" | grep -q " dev br0 "; then
             ip route del default dev br0 2>/dev/null || true
             log "Local gateway mode active; removed mesh-managed default route"
@@ -72,6 +75,16 @@ while true; do
 
     gw_mac="$(get_gateway_mac || true)"
     if [ -z "${gw_mac:-}" ]; then
+        # Nobody is announcing a gateway any more. A default route installed on
+        # an earlier pass now points at a node that has stopped NATing, so
+        # traffic black-holes instead of visibly failing — withdraw it. Only
+        # br0 routes are ours; a local uplink route lives on the ethernet iface
+        # and must be left alone.
+        cur="$(ip route show default | head -n1 || true)"
+        if echo "$cur" | grep -q " dev br0 "; then
+            ip route del default dev br0 2>/dev/null || true
+            log "No mesh gateway announced; removed stale default route ($cur)"
+        fi
         sleep "$POLL_INTERVAL"
         continue
     fi
