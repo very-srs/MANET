@@ -3,9 +3,11 @@ set -euo pipefail
 
 # build-tools-tarball.sh — assemble a tools-only update tarball.
 #
-# Contains node_tools scripts, systemd units, networkd configs, udev rules,
-# and etc files. Does NOT include the SBC overlay (kernel/modules/firmware)
-# or pre-built binaries (alfred, batctl, wpa_supplicant_s1g).
+# Contains node_tools scripts, the version file, and the shared assets under
+# share/manet that those scripts load at runtime (the dashboard logos). Does
+# NOT include the SBC overlay (kernel/modules/firmware), systemd units,
+# networkd configs, udev rules, or pre-built binaries (alfred, batctl,
+# wpa_supplicant_s1g).
 #
 # Usage:
 #   build-tools-tarball.sh [output.tar.gz]
@@ -40,6 +42,12 @@ find "$STAGE/usr/local/bin" -type f \
     -exec chmod 0755 {} +
 
 install_file 0644 "$REPO_ROOT/MANET/etc/manet_version.txt" "$STAGE/etc/manet_version.txt"
+
+# mesh-status.py and perf-dashboard.py serve these from /usr/local/share/manet
+# at runtime, so an OTA update that ships the scripts without them leaves the
+# dashboards with broken assets.
+install_tree "$REPO_ROOT/MANET/share/manet" "$STAGE/usr/local/share/manet"
+chmod -R a+rX "$STAGE/usr/local/share/manet" 2>/dev/null || true
 
 mkdir -p "$(dirname "$OUT")"
 tar --owner=0 --group=0 --numeric-owner -czf "$OUT" -C "$STAGE" .
