@@ -188,7 +188,9 @@ apt install -y ipcalc nmap lshw tcpdump net-tools nftables wireless-tools iperf3
 
 # Unpack the tar file that was pulled down earlier.  This contains the kernel and 
 # mesh tools
-tar -zxf /root/morse-pi-install.tar.gz -C /
+# --no-overwrite-dir: an archive must never change the mode of an existing
+# directory, least of all /.
+tar -zxf /root/morse-pi-install.tar.gz --no-overwrite-dir -C /
 
 # Reload udev rules after extracting (picks up 80-usb-ethernet.rules etc.)
 udevadm control --reload-rules 2>/dev/null || true
