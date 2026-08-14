@@ -155,5 +155,22 @@ fi
 # ── Assemble tarball ──────────────────────────────────────────────────────────
 
 mkdir -p "$(dirname "$OUT")"
-tar --owner=0 --group=0 --numeric-owner -czf "$OUT" -C "$STAGE" .
+OUT_ABS="$(cd "$(dirname "$OUT")" && pwd)/$(basename "$OUT")"
+
+# Directory modes are recorded in the archive and applied to the target by an
+# extractor running as root, so they have to be right here. Two rules:
+#
+#  1. Never emit an entry for the stage root. Tar stores its mode against "./"
+#     and restores it onto the extraction directory — which is "/" on a node.
+#     mktemp -d gives 0700, so shipping "./" once set / to 0700 and locked
+#     every non-root process out of the filesystem (no traversal, no shared
+#     libraries, no ssh logins). Archive the contents instead.
+#  2. Strip group/other write. These dirs inherit the build machine's umask,
+#     and a umask of 002 ships /usr, /etc and /usr/local as 0775 root:root.
+# Bytecode compiled on the build machine has no business on a node.
+find "$STAGE" -type d -name __pycache__ -prune -exec rm -rf {} +
+
+find "$STAGE" -type d -exec chmod go-w {} +
+( cd "$STAGE" && find . -mindepth 1 -maxdepth 1 -printf './%P\0' \
+    | tar --owner=0 --group=0 --numeric-owner --null -T - -czf "$OUT_ABS" )
 echo "Built: $OUT  ($(du -sh "$OUT" | cut -f1))"

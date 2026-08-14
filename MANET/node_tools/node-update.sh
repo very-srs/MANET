@@ -148,7 +148,11 @@ else
 	esac
 fi
 
-tar -zxf /root/tools.tar.gz -C / 2>/dev/null
+# --no-overwrite-dir: never let an archive restyle a directory that already
+# exists on the node. A tarball carrying an entry for its own root would
+# otherwise apply that mode to /, and a stray 0700 there locks every
+# non-root process out of the filesystem.
+tar -zxf /root/tools.tar.gz --no-overwrite-dir -C / 2>/dev/null
 
 if [ "$ROUTINE_MODE" = false ]; then
 	echo "Node tools updated to version $REMOTE_VERSION - $(tail -n 1 /etc/manet_version.txt)"
