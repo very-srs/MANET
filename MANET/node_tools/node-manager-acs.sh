@@ -423,7 +423,7 @@ while true; do
             # Bootstrap election needs every lobby node's scan report replicated
             [ "$BOOTSTRAPPING" = true ] && [ "$CACHED_SCAN_REPORT_JSON" != "{}" ] && \
                 ENCODER_ARGS+=("--channel-report-json" "$CACHED_SCAN_REPORT_JSON")
-            BATT_PCT=$(python3 -c "import json;d=json.load(open('/run/battery_status.json'));print(d['percentage'])" 2>/dev/null)
+            BATT_PCT=$(python3 -c "import json;d=json.load(open('/run/battery_status.json'));p=d.get('percentage');print('' if p is None else p)" 2>/dev/null)
             [ -n "$BATT_PCT" ] && ENCODER_ARGS+=("--battery-percentage" "$BATT_PCT")
             UPTIME_SECS=$(awk '{print int($1)}' /proc/uptime 2>/dev/null)
             [ -n "$UPTIME_SECS" ] && ENCODER_ARGS+=("--uptime-seconds" "$UPTIME_SECS")
@@ -448,6 +448,10 @@ except Exception:
             [ -n "$GPS_LAT" ] && ENCODER_ARGS+=("--latitude" "$GPS_LAT" "--longitude" "$GPS_LON" "--altitude" "$GPS_ALT")
 
             CURRENT_PAYLOAD=$("$ENCODER_PATH" "${ENCODER_ARGS[@]}" 2>/dev/null)
+            if [ -z "$CURRENT_PAYLOAD" ]; then
+                # re-run only on failure, to surface why nothing was published
+                log "WARN: encoder produced no payload, not publishing: $("$ENCODER_PATH" "${ENCODER_ARGS[@]}" 2>&1 >/dev/null | tr '\n' ' ')"
+            fi
 
             if [ -n "$CURRENT_PAYLOAD" ]; then
                 echo -n "$CURRENT_PAYLOAD" | alfred -s $ALFRED_DATA_TYPE
@@ -633,6 +637,10 @@ except Exception:
             [ -n "$GPS_LAT" ] && ENCODER_ARGS+=("--latitude" "$GPS_LAT" "--longitude" "$GPS_LON" "--altitude" "$GPS_ALT")
 
             CURRENT_PAYLOAD=$("$ENCODER_PATH" "${ENCODER_ARGS[@]}" 2>/dev/null)
+            if [ -z "$CURRENT_PAYLOAD" ]; then
+                # re-run only on failure, to surface why nothing was published
+                log "WARN: encoder produced no payload, not publishing: $("$ENCODER_PATH" "${ENCODER_ARGS[@]}" 2>&1 >/dev/null | tr '\n' ' ')"
+            fi
 
             if [ -n "$CURRENT_PAYLOAD" ]; then
                 echo -n "$CURRENT_PAYLOAD" | alfred -s $ALFRED_DATA_TYPE

@@ -13,13 +13,12 @@ Endpoints:
   POST /api/txpower             - Set TX power on node/interface
   POST /api/measure/start       - Start iperf3/ping session
   GET  /api/measure/status      - Current measurement status
-  GET  /api/upload/status       - Current upload status
   GET  /api/sessions            - List saved sessions
   GET  /api/sessions/<id>       - Get session JSON
   GET  /api/sessions/<id>/csv   - Get session CSV
   DELETE /api/sessions/<id>     - Delete saved session
-  POST /api/upload/github       - Git push measurements/
-  POST /api/upload/ventum       - curl -u upload to Ventum
+  GET  /api/uplink/wifi         - USB Wi-Fi uplink status
+  POST /api/uplink/wifi         - Set USB Wi-Fi uplink credentials (all nodes)
 """
 
 import http.server
@@ -47,9 +46,34 @@ SESSIONS_DIR    = '/var/log/manet-measurements'
 CONTROL_PORT    = 80  # mesh-status.py port on each node
 ALFRED_RADIO_TYPE = 71
 ALFRED_RADIO_ACK_TYPE = 72
-FER_LOGO_FULL_FILE = '/usr/local/share/manet/fer-logo.svg'
-FER_LOGO_BLACK_FILE = '/usr/local/share/manet/fer-logo-black.svg'
-FER_LOGO_WHITE_FILE = '/usr/local/share/manet/fer-logo-white.svg'
+# The hexagon badge is line art with no fill, so it needs two inks: near-black
+# strokes on light themes, white strokes on dark. Same artwork, same geometry.
+FER_LOGO_DARK_INK_FILE  = '/usr/local/share/manet/fer-logo-black.png'
+FER_LOGO_LIGHT_INK_FILE = '/usr/local/share/manet/fer-logo-white.png'
+# Served under /assets/<name>, extension optional, so swapping a logo between
+# svg and png only means changing the paths above.
+FER_LOGO_ASSETS = {
+    'fer-logo':       FER_LOGO_DARK_INK_FILE,
+    'fer-logo-black': FER_LOGO_DARK_INK_FILE,
+    'fer-logo-white': FER_LOGO_LIGHT_INK_FILE,
+}
+
+
+def logo_asset_token():
+    """Cache-busting token for logo URLs.
+
+    Logo assets are served with a one-hour cache. Without a token in the URL,
+    replacing a logo leaves browsers showing the previous artwork from cache
+    until it expires, because the URL never changes.
+    """
+    parts = []
+    for path in (FER_LOGO_DARK_INK_FILE, FER_LOGO_LIGHT_INK_FILE):
+        try:
+            st = os.stat(path)
+            parts.append(f'{st.st_mtime_ns}:{st.st_size}')
+        except OSError:
+            parts.append('missing')
+    return hashlib.sha1('|'.join(parts).encode()).hexdigest()[:8]
 USB_WIFI_UPLINK_SCRIPT = '/usr/local/bin/usb-wifi-uplink.sh'
 
 # EU S1G channels (centre frequencies in MHz)
@@ -65,23 +89,6 @@ _measure_status = {
     'running': False, 'label': '', 'progress': '', 'error': '',
     'done': 0, 'total': 0, 'started_at': None, 'current_started_at': None,
     'current': None, 'last_result': None,
-}
-
-_upload_lock = threading.Lock()
-_upload_status = {
-    'running': False,
-    'target': '',
-    'phase': '',
-    'progress': '',
-    'bytes_sent': 0,
-    'bytes_total': 0,
-    'percent': 0,
-    'started_at': None,
-    'finished_at': None,
-    'done': False,
-    'error': '',
-    'file': '',
-    'url': '',
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -114,7 +121,8 @@ def get_my_hostname():
 
 def get_my_ip():
     state = load_kv_file(MESH_STATE_FILE)
-    return state.get('CURRENT_IPV4', '')
+    # mesh-ip-manager.sh only ever writes PERSISTENT_IPV4 to this file
+    return state.get('CURRENT_IPV4') or state.get('PERSISTENT_IPV4', '')
 
 def has_internet():
     try:
@@ -142,74 +150,6 @@ def get_local_uptime():
         return fmt_uptime(secs)
     except Exception:
         return ''
-
-
-def reset_upload_status():
-    with _upload_lock:
-        _upload_status.update({
-            'running': False,
-            'target': '',
-            'phase': '',
-            'progress': '',
-            'bytes_sent': 0,
-            'bytes_total': 0,
-            'percent': 0,
-            'started_at': None,
-            'finished_at': None,
-            'done': False,
-            'error': '',
-            'file': '',
-            'url': '',
-        })
-
-
-def update_upload_status(**kwargs):
-    with _upload_lock:
-        _upload_status.update(kwargs)
-
-
-def start_upload_status(target):
-    now = int(time.time())
-    with _upload_lock:
-        if _upload_status.get('running'):
-            raise RuntimeError('Upload already running')
-        _upload_status.update({
-            'running': True,
-            'target': target,
-            'phase': 'starting',
-            'progress': f'Starting {target} upload...',
-            'bytes_sent': 0,
-            'bytes_total': 0,
-            'percent': 1,
-            'started_at': now,
-            'finished_at': None,
-            'done': False,
-            'error': '',
-            'file': '',
-            'url': '',
-        })
-
-
-def finish_upload_status(ok=True, error='', **extra):
-    now = int(time.time())
-    with _upload_lock:
-        _upload_status.update(extra)
-        _upload_status['running'] = False
-        _upload_status['done'] = bool(ok)
-        _upload_status['error'] = error or ''
-        _upload_status['finished_at'] = now
-        _upload_status['percent'] = 100 if ok else _upload_status.get('percent', 0)
-        if ok:
-            _upload_status['phase'] = 'done'
-            _upload_status['progress'] = _upload_status.get('progress') or 'Upload complete'
-        else:
-            _upload_status['phase'] = 'error'
-            _upload_status['progress'] = error or _upload_status.get('progress') or 'Upload failed'
-
-
-def get_upload_status():
-    with _upload_lock:
-        return dict(_upload_status)
 
 
 def get_usb_wifi_uplink_status():
@@ -1326,92 +1266,6 @@ def run_measurement_session(label, pairs, tests, duration, udp_bitrate):
             _measure_status['done']     = done
 
 
-def run_upload_github_job():
-    repo_dir = '/home/radio/manet-dev'
-    meas_src = SESSIONS_DIR
-    meas_dst = os.path.join(repo_dir, 'measurements')
-    try:
-        update_upload_status(phase='sync', progress='Syncing measurements into repo...', percent=10)
-        subprocess.run(['rsync', '-a', meas_src + '/', meas_dst + '/'],
-                       check=True, timeout=60)
-
-        update_upload_status(phase='git-add', progress='Staging measurement files...', percent=35)
-        subprocess.run(['git', '-C', repo_dir, 'add', 'measurements/'],
-                       check=True, timeout=15)
-
-        update_upload_status(phase='git-commit', progress='Creating git commit...', percent=55)
-        ts = datetime.now().strftime('%Y-%m-%d %H:%M')
-        commit = subprocess.run(['git', '-C', repo_dir, 'commit', '-m',
-                                 f'measurements: add results {ts}'],
-                                capture_output=True, text=True, timeout=15)
-        if commit.returncode != 0:
-            commit_out = (commit.stderr or commit.stdout or '').lower()
-            if 'nothing to commit' not in commit_out:
-                raise subprocess.CalledProcessError(
-                    commit.returncode, commit.args, output=commit.stdout, stderr=commit.stderr
-                )
-
-        update_upload_status(phase='git-push', progress='Pushing measurements to GitHub...', percent=80)
-        subprocess.run(['git', '-C', repo_dir, 'push'],
-                       check=True, timeout=120)
-        finish_upload_status(True, progress='Uploaded measurements to GitHub')
-    except subprocess.CalledProcessError as e:
-        finish_upload_status(False, error=str(e))
-    except Exception as e:
-        finish_upload_status(False, error=str(e))
-
-
-def run_upload_ventum_job():
-    archive = ''
-    try:
-        conf = load_kv_file('/etc/mesh.conf')
-        ventum_url = conf.get('ventum_upload_url', 'https://manet.ventum.hr/upload/rpi5/measurements')
-        ventum_auth = conf.get('ventum_auth', '')
-        if not ventum_auth:
-            user = conf.get('ventum_user', 'clanker')
-            password = conf.get('ventum_password', 'really-strong-password-321')
-            ventum_auth = f'{user}:{password}'
-
-        ts = datetime.now().strftime('%Y%m%dT%H%M%S')
-        host = get_my_hostname()
-        archive = f'/tmp/manet-measurements-{host}-{ts}.tar.gz'
-        remote_name = os.path.basename(archive)
-        upload_url = ventum_url.rstrip('/') + '/' + remote_name
-
-        update_upload_status(phase='pack', progress='Packing measurements archive...', percent=15)
-        subprocess.run(
-            ['tar', '-C', os.path.dirname(SESSIONS_DIR),
-             '-czf', archive, os.path.basename(SESSIONS_DIR)],
-            check=True, timeout=120
-        )
-        total = os.path.getsize(archive) if os.path.exists(archive) else 0
-        update_upload_status(
-            phase='upload',
-            progress='Uploading archive to Ventum...',
-            bytes_total=total,
-            bytes_sent=0,
-            percent=55,
-            file=remote_name,
-            url=upload_url,
-        )
-
-        subprocess.run(
-            ['curl', '-fS', '-u', ventum_auth, '-T', archive, upload_url],
-            check=True, timeout=300
-        )
-        update_upload_status(bytes_sent=total, percent=95)
-        finish_upload_status(True, progress='Uploaded measurements to Ventum', file=remote_name, url=upload_url)
-    except subprocess.CalledProcessError as e:
-        finish_upload_status(False, error=str(e))
-    except Exception as e:
-        finish_upload_status(False, error=str(e))
-    finally:
-        if archive:
-            try:
-                os.remove(archive)
-            except Exception:
-                pass
-
 # ─────────────────────────────────────────────────────────────────────────────
 # HTML
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1468,10 +1322,12 @@ body{
 #hdr{background:rgba(255,255,255,.94);backdrop-filter:blur(18px);border-bottom:1px solid var(--border2);padding:0 22px;min-height:58px;display:flex;align-items:center;gap:10px;position:sticky;top:0;z-index:100;box-shadow:0 1px 0 rgba(2,0,13,.05);transition:min-height .18s ease,padding .18s ease,gap .18s ease}
 #hdr::after{content:'';position:absolute;left:0;right:0;bottom:0;height:2px;background:linear-gradient(90deg,rgba(236,176,0,.92) 0 36%,rgba(236,176,0,.28) 36% 68%,transparent 68%);pointer-events:none}
 :root[data-theme="dark"] #hdr{background:rgba(18,17,24,.92)}
-.fer-lockup{display:flex;align-items:center;justify-content:flex-start;height:58px;min-width:clamp(104px,18vw,172px);width:clamp(104px,18vw,172px);padding-right:8px;border-right:1px solid var(--border);color:var(--fer-black);overflow:hidden;flex:0 0 auto}
-.fer-logo-img{display:block;width:clamp(104px,18vw,172px);height:48px;max-width:none;object-fit:contain;object-position:left center;filter:none;transition:width .18s ease,height .18s ease,filter .18s ease}
+.fer-lockup{display:flex;align-items:center;justify-content:flex-start;height:58px;padding-right:12px;border-right:1px solid var(--border);color:var(--fer-black);overflow:hidden;flex:0 0 auto}
+/* the badge is near-square, so height drives the size and width follows the
+   aspect ratio — a fixed width would letterbox it and leave dead space */
+.fer-logo-img{display:block;width:auto;height:44px;max-width:100%;object-fit:contain;object-position:left center;filter:none;transition:height .18s ease}
 :root[data-theme="dark"] .fer-lockup{color:#ffffff}
-:root[data-theme="dark"] .fer-logo-img{filter:brightness(0) invert(1)}
+/* no brightness(0) invert(1) here — that flattens the badge to a solid silhouette */
 #hdr-logo{color:var(--text);font-size:17px;letter-spacing:0;font-weight:900;display:flex;align-items:center;min-height:46px;line-height:1}
 #hdr-logo span{color:var(--accent2)}
 #hdr-node{font-size:12px;color:var(--muted);border-left:1px solid var(--border);padding-left:16px;transition:opacity .18s ease,max-width .18s ease,padding .18s ease,border .18s ease}
@@ -1505,7 +1361,7 @@ body{
   linear-gradient(90deg, rgba(236,176,0,.28) 0 12%, transparent 12% 100%)}
 body.chrome-compact #hdr{min-height:50px;gap:14px}
   body.chrome-compact .fer-lockup{min-width:clamp(96px,18vw,140px);width:clamp(96px,18vw,140px);height:44px}
-  body.chrome-compact .fer-logo-img{width:clamp(96px,18vw,140px);height:36px}
+  body.chrome-compact .fer-logo-img{height:34px}
 body.chrome-compact #hdr-node{opacity:0;max-width:0;padding-left:0;border-left:0;overflow:hidden;white-space:nowrap}
 body.chrome-compact #nav{top:46px;height:calc(100vh - 46px)}
 body.chrome-compact #content::before{height:8px;margin:-22px -22px 12px;opacity:.72}
@@ -1651,18 +1507,6 @@ tr:hover td{background:rgba(236,176,0,.08)}
 .metric-mini{background:var(--card);border:1px solid var(--border2);border-radius:8px;padding:6px 8px;font-size:10px;color:var(--muted)}
 .metric-mini strong{display:block;color:var(--text);font-size:11px;margin-top:2px}
 
-/* upload */
-.upload-card{padding:16px;display:flex;align-items:center;gap:16px;border-bottom:1px solid var(--border2);flex-wrap:wrap}
-.upload-card:last-child{border-bottom:none}
-.upload-info{flex:1}
-.upload-title{font-size:13px;margin-bottom:2px}
-.upload-sub{font-size:10px;color:var(--muted);letter-spacing:.3px}
-.upload-status{display:none;margin:12px 16px 0;padding:12px;border:1px solid var(--border2);border-radius:8px;background:var(--card)}
-.upload-status-title{font-size:10px;font-weight:800;color:var(--muted);letter-spacing:.4px}
-.upload-status-text{margin-top:6px;font-size:11px;font-weight:700}
-.upload-status-meta{margin-top:4px;font-size:10px;color:var(--muted);line-height:1.4}
-.upload-status-bar{margin-top:8px;height:8px;border-radius:999px;background:var(--border2);overflow:hidden}
-.upload-status-fill{height:100%;width:0;background:var(--accent2);transition:width .18s ease}
 .footer-actions{display:flex;justify-content:flex-end;padding:8px 0 6px}
 .logout-link-btn{border:1px solid rgba(180,35,24,.26);background:rgba(180,35,24,.05);color:#b42318;border-radius:999px;padding:8px 14px;font-family:var(--font);font-size:11px;font-weight:850;cursor:pointer;transition:background .18s ease,color .18s ease,box-shadow .18s ease,transform .18s ease}
 .logout-link-btn:hover{background:#b42318;color:#ffffff;box-shadow:0 8px 20px rgba(180,35,24,.16);transform:translateY(-1px)}
@@ -1673,7 +1517,7 @@ tr:hover td{background:rgba(236,176,0,.08)}
   html,body{font-size:12px}
   #hdr{position:relative;padding:10px 12px;gap:6px;align-items:flex-start;flex-wrap:wrap}
   .fer-lockup{order:1;min-width:clamp(92px,24vw,132px);width:clamp(92px,24vw,132px);height:46px;padding-right:4px}
-  .fer-logo-img{width:clamp(92px,24vw,132px);height:38px}
+  .fer-logo-img{height:36px}
   #hdr-logo{order:2;font-size:16px;letter-spacing:0;flex:1;min-width:140px}
   #hdr-node{order:3;flex:0 0 100%;border-left:0;padding-left:0;font-size:10px;max-width:100%;overflow-wrap:anywhere}
   #hdr-right{order:4;flex:0 0 100%;margin-left:0;width:100%;justify-content:flex-start;gap:8px;flex-wrap:wrap}
@@ -1713,9 +1557,6 @@ tr:hover td{background:rgba(236,176,0,.08)}
   .session-label,.session-count,.session-actions{width:100%}
   .progress-stats,.session-summary{grid-template-columns:1fr}
   .session-actions{display:grid;grid-template-columns:1fr 1fr}
-  .upload-card{padding:12px;align-items:flex-start}
-  .upload-info,.upload-card .btn{width:100%}
-  .upload-sub{overflow-wrap:anywhere}
   table{display:block;overflow-x:auto;-webkit-overflow-scrolling:touch}
   body.chrome-compact #hdr{gap:6px;padding:6px 12px}
   body.chrome-compact #hdr-node{display:none}
@@ -1733,7 +1574,7 @@ let _pollTimer = null;
 let _overlayTimer = null;
 let _autoRefreshTimer = null;
 let _autoRefreshBusy = false;
-const VALID_TABS = ['topology','radio','measure','sessions','upload'];
+const VALID_TABS = ['topology','radio','measure','sessions','uplink'];
 const AUTO_REFRESH_MS = 15000;
 const THEME_KEY = 'manetUiTheme';
 
@@ -2068,7 +1909,7 @@ function showTab(name, updateUrl = true) {
   document.querySelectorAll('.tab-pane').forEach(p => p.style.display = p.id === 'tab-' + name ? '' : 'none');
   if (name === 'sessions') loadSessions();
   if (name === 'radio') buildIfaceControl();
-  if (name === 'upload') loadUsbWifiUplink();
+  if (name === 'uplink') loadUsbWifiUplink();
 }
 
 // ── Clock ──
@@ -2112,7 +1953,6 @@ function renderTopology() {
   const inet = document.getElementById('hdr-inet');
   if (_topo.internet) { inet.textContent = '● INET OK'; inet.className = 'ok'; }
   else { inet.textContent = '○ NO INET'; inet.className = 'no'; }
-  setUploadButtons(false);
 }
 
 // ── Interface control tab ──
@@ -2185,7 +2025,7 @@ async function toggleIface(nodeIp, nodeId, iface, state) {
       } else {
         showOverlay(`${iface} ${state} applied on ${nodeIp}`, 'ok');
         showMsg(`${iface} ${state} applied`, 'ok');
-        setTimeout(() => { hideOverlay(); loadTopology(); }, 3000);
+        setTimeout(() => { hideOverlay(); fetchTopo(); }, 3000);
       }
     } else {
       showOverlay(`Radio change failed: ${d.error}`, 'err');
@@ -2545,98 +2385,6 @@ async function deleteSession(encodedLabel) {
   }
 }
 
-async function uploadGithub() {
-  try {
-    const r = await fetch('/api/upload/github', {method:'POST'});
-    const d = await r.json();
-    if (!r.ok || !d.ok) throw new Error(d.error || `HTTP ${r.status}`);
-    setUploadButtons(true);
-    setUploadStatus({running:true,target:'github',phase:'starting',progress:'Starting GitHub upload...',percent:1});
-    pollUploadStatus();
-  } catch (e) {
-    setUploadButtons(false);
-    showMsg('GitHub upload failed: ' + e.message, 'err');
-  }
-}
-
-async function uploadVentum() {
-  try {
-    const r = await fetch('/api/upload/ventum', {method:'POST'});
-    const d = await r.json();
-    if (!r.ok || !d.ok) throw new Error(d.error || `HTTP ${r.status}`);
-    setUploadButtons(true);
-    setUploadStatus({running:true,target:'ventum',phase:'starting',progress:'Starting Ventum upload...',percent:1});
-    pollUploadStatus();
-  } catch (e) {
-    setUploadButtons(false);
-    showMsg('Ventum upload failed: ' + e.message, 'err');
-  }
-}
-
-let _uploadPollTimer = null;
-
-function setUploadButtons(running) {
-  const githubBtn = document.getElementById('upload-github');
-  const ventumBtn = document.getElementById('upload-ventum');
-  const disabled = running || !_topo?.internet;
-  if (githubBtn) githubBtn.disabled = disabled;
-  if (ventumBtn) ventumBtn.disabled = disabled;
-}
-
-function setUploadStatus(d) {
-  const card = document.getElementById('upload-status');
-  const title = document.getElementById('upload-status-title');
-  const text = document.getElementById('upload-status-text');
-  const meta = document.getElementById('upload-status-meta');
-  const fill = document.getElementById('upload-status-fill');
-  if (!card || !title || !text || !meta || !fill) return;
-
-  if (!d || (!d.running && !d.progress && !d.error && !d.done)) {
-    card.style.display = 'none';
-    return;
-  }
-
-  card.style.display = '';
-  const target = (d.target || 'upload').toUpperCase();
-  const percent = Number.isFinite(Number(d.percent)) ? Math.max(0, Math.min(100, Number(d.percent))) : 0;
-  title.textContent = `${target} STATUS`;
-  text.textContent = d.error ? `Error: ${d.error}` : (d.progress || 'Working...');
-  meta.textContent = [
-    d.phase ? `phase ${d.phase}` : '',
-    percent ? `${percent}%` : '',
-    d.bytes_total ? `${d.bytes_sent || 0}/${d.bytes_total} bytes` : '',
-    d.file ? d.file : ''
-  ].filter(Boolean).join(' · ');
-  fill.style.width = `${percent}%`;
-  fill.style.background = d.error ? 'var(--red)' : (d.done ? 'var(--green)' : 'var(--accent2)');
-}
-
-async function pollUploadStatus() {
-  if (_uploadPollTimer) {
-    clearTimeout(_uploadPollTimer);
-    _uploadPollTimer = null;
-  }
-  try {
-    const r = await fetch('/api/upload/status');
-    const d = await r.json();
-    if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
-    setUploadStatus(d);
-    setUploadButtons(!!d.running);
-    if (d.running) {
-      _uploadPollTimer = setTimeout(pollUploadStatus, 1000);
-      return;
-    }
-    if (d.done) {
-      showMsg(`${(d.target || 'upload').toUpperCase()} upload complete`, 'ok');
-    } else if (d.error) {
-      showMsg(`${(d.target || 'upload').toUpperCase()} upload failed: ${d.error}`, 'err');
-    }
-  } catch (e) {
-    setUploadButtons(false);
-    showMsg('Upload status failed: ' + e.message, 'err');
-  }
-}
-
 window.onload = async () => {
   updateChromeCompact();
   showTab(getInitialTab());
@@ -2646,7 +2394,6 @@ window.onload = async () => {
   const halowBw = document.getElementById('halow-bw');
   if (halowBw) halowBw.addEventListener('change', () => updateHalowTxpowerOptions());
   startAutoRefresh();
-  pollUploadStatus();
 };
 
 window.addEventListener('hashchange', () => showTab(getInitialTab(), false));
@@ -2659,6 +2406,7 @@ document.addEventListener('visibilitychange', () => {
 def render_dashboard():
     hostname = get_my_hostname()
     ip       = get_my_ip()
+    logo_v   = logo_asset_token()
     return f"""<!DOCTYPE html>
 <html lang="en"><head>
 <meta charset="UTF-8">
@@ -2676,7 +2424,7 @@ def render_dashboard():
 
 <div id="hdr">
   <div class="fer-lockup" title="FER" aria-label="FER">
-    <img class="fer-logo-img" src="/assets/fer-logo-black.svg" data-light="/assets/fer-logo-black.svg" data-dark="/assets/fer-logo-white.svg" alt="FER">
+    <img class="fer-logo-img" src="/assets/fer-logo-black?v={logo_v}" data-light="/assets/fer-logo-black?v={logo_v}" data-dark="/assets/fer-logo-white?v={logo_v}" alt="FER">
   </div>
   <div id="hdr-logo">MANET//<span>PERF</span></div>
   <div id="hdr-node"><strong>{hostname}</strong> &nbsp;{ip}</div>
@@ -2694,7 +2442,7 @@ def render_dashboard():
   <div class="tab"        data-tab="radio"    onclick="showTab('radio')">RADIO CONFIG</div>
   <div class="tab"        data-tab="measure"    onclick="showTab('measure')">MEASURE</div>
   <div class="tab"        data-tab="sessions"   onclick="showTab('sessions')">SESSIONS</div>
-  <div class="tab"        data-tab="upload"     onclick="showTab('upload')">UPLOAD</div>
+  <div class="tab"        data-tab="uplink"     onclick="showTab('uplink')">UPLINK</div>
 </div>
 
 <div id="content">
@@ -2882,7 +2630,7 @@ def render_dashboard():
   </div>
 
   <!-- ── UPLOAD ── -->
-  <div id="tab-upload" class="tab-pane" style="display:none">
+  <div id="tab-uplink" class="tab-pane" style="display:none">
     <div class="card">
       <div class="card-title">USB Wi-Fi Internet Uplink</div>
       <div class="row">
@@ -2902,32 +2650,6 @@ def render_dashboard():
         <button class="btn btn-green" id="btn-uplink-wifi-apply" onclick="applyUsbWifiUplink()">APPLY</button>
       </div>
     </div>
-    <div class="card">
-      <div class="card-title">Upload Results</div>
-      <div class="upload-card">
-        <div class="upload-info">
-          <div class="upload-title">GitHub</div>
-          <div class="upload-sub">mrleongalaxyum/manet-dev &rarr; measurements/ &nbsp;&bull;&nbsp; git commit + push</div>
-        </div>
-        <button class="btn btn-green" id="upload-github" onclick="uploadGithub()" disabled>PUSH</button>
-      </div>
-      <div class="upload-card">
-        <div class="upload-info">
-          <div class="upload-title">Ventum</div>
-          <div class="upload-sub">curl -u upload to manet.ventum.hr/upload/rpi5/measurements</div>
-        </div>
-        <button class="btn btn-green" id="upload-ventum" onclick="uploadVentum()" disabled>UPLOAD</button>
-      </div>
-      <div id="upload-status" class="upload-status">
-        <div id="upload-status-title" class="upload-status-title">UPLOAD STATUS</div>
-        <div id="upload-status-text" class="upload-status-text">—</div>
-        <div id="upload-status-meta" class="upload-status-meta"></div>
-        <div class="upload-status-bar"><div id="upload-status-fill" class="upload-status-fill"></div></div>
-      </div>
-      <div style="padding:12px 16px;font-size:10px;color:var(--muted);letter-spacing:.5px">
-        UPLOAD BUTTONS ENABLED ONLY WHEN INTERNET IS AVAILABLE
-      </div>
-    </div>
   </div>
   <div class="footer-actions">
     <button class="logout-link-btn" type="button" onclick="window.location.href='/auth/perf-logout'">LOGOUT</button>
@@ -2941,6 +2663,25 @@ def render_dashboard():
 # ─────────────────────────────────────────────────────────────────────────────
 # Request Handler
 # ─────────────────────────────────────────────────────────────────────────────
+ASSET_CONTENT_TYPES = {
+    '.svg':  'image/svg+xml',
+    '.png':  'image/png',
+    '.jpg':  'image/jpeg',
+    '.jpeg': 'image/jpeg',
+    '.webp': 'image/webp',
+}
+
+def asset_content_type(path):
+    ext = os.path.splitext(path)[1].lower()
+    return ASSET_CONTENT_TYPES.get(ext, 'application/octet-stream')
+
+def logo_asset_file(url_path):
+    """Map /assets/fer-logo-white[.png|.svg] to the file we actually ship."""
+    if not url_path.startswith('/assets/'):
+        return None
+    name = os.path.splitext(url_path[len('/assets/'):])[0]
+    return FER_LOGO_ASSETS.get(name)
+
 class PerfHandler(http.server.BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         pass  # suppress access logs
@@ -2966,42 +2707,13 @@ class PerfHandler(http.server.BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         path   = parsed.path.rstrip('/') or '/'
 
-        if parsed.path == '/assets/fer-logo.svg':
+        logo_file = logo_asset_file(parsed.path)
+        if logo_file:
             try:
-                with open(FER_LOGO_FULL_FILE, 'rb') as f:
+                with open(logo_file, 'rb') as f:
                     body = f.read()
                 self.send_response(200)
-                self.send_header('Content-Type', 'image/svg+xml')
-                self.send_header('Content-Length', str(len(body)))
-                self.send_header('Cache-Control', 'public, max-age=3600')
-                self.end_headers()
-                self.wfile.write(body)
-            except FileNotFoundError:
-                self.send_response(404)
-                self.end_headers()
-                self.wfile.write(b'Not found')
-
-        elif parsed.path == '/assets/fer-logo-black.svg':
-            try:
-                with open(FER_LOGO_BLACK_FILE, 'rb') as f:
-                    body = f.read()
-                self.send_response(200)
-                self.send_header('Content-Type', 'image/svg+xml')
-                self.send_header('Content-Length', str(len(body)))
-                self.send_header('Cache-Control', 'public, max-age=3600')
-                self.end_headers()
-                self.wfile.write(body)
-            except FileNotFoundError:
-                self.send_response(404)
-                self.end_headers()
-                self.wfile.write(b'Not found')
-
-        elif parsed.path == '/assets/fer-logo-white.svg':
-            try:
-                with open(FER_LOGO_WHITE_FILE, 'rb') as f:
-                    body = f.read()
-                self.send_response(200)
-                self.send_header('Content-Type', 'image/svg+xml')
+                self.send_header('Content-Type', asset_content_type(logo_file))
                 self.send_header('Content-Length', str(len(body)))
                 self.send_header('Cache-Control', 'public, max-age=3600')
                 self.end_headers()
@@ -3023,9 +2735,6 @@ class PerfHandler(http.server.BaseHTTPRequestHandler):
         elif path == '/api/measure/status':
             with _measure_lock:
                 self.send_json(dict(_measure_status))
-
-        elif path == '/api/upload/status':
-            self.send_json(get_upload_status())
 
         elif path == '/api/uplink/wifi':
             self.send_json(get_usb_wifi_uplink_status())
@@ -3224,15 +2933,6 @@ class PerfHandler(http.server.BaseHTTPRequestHandler):
                     _measure_status['running'] = False
                     self.send_json({'ok': False, 'error': str(e)})
 
-        elif path == '/api/upload/github':
-            try:
-                start_upload_status('github')
-                t = threading.Thread(target=run_upload_github_job, daemon=True)
-                t.start()
-                self.send_json({'ok': True, 'started': True})
-            except Exception as e:
-                self.send_json({'ok': False, 'error': str(e)})
-
         elif path == '/api/control/uplink_wifi':
             try:
                 req = json.loads(body)
@@ -3255,15 +2955,6 @@ class PerfHandler(http.server.BaseHTTPRequestHandler):
                     bool(req.get('enabled', True)),
                 )
                 self.send_json(result)
-            except Exception as e:
-                self.send_json({'ok': False, 'error': str(e)})
-
-        elif path == '/api/upload/ventum':
-            try:
-                start_upload_status('ventum')
-                t = threading.Thread(target=run_upload_ventum_job, daemon=True)
-                t.start()
-                self.send_json({'ok': True, 'started': True})
             except Exception as e:
                 self.send_json({'ok': False, 'error': str(e)})
 

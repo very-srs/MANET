@@ -49,9 +49,34 @@ HALOW_EU_UI_TO_S1G_CHANNEL = {idx: 1 + ((idx - 1) * 2) for idx in range(1, 6)}
 HALOW_BW_TXPOWER_CAP_DBM = {'1MHz': '24', '2MHz': '24', '4MHz': '22'}
 PERF_AUTH_COOKIE = 'manet_perf_auth'
 PERF_AUTH_COOKIE_MAX_AGE = 15552000
-FER_LOGO_FULL_FILE = '/usr/local/share/manet/fer-logo.svg'
-FER_LOGO_BLACK_FILE = '/usr/local/share/manet/fer-logo-black.svg'
-FER_LOGO_WHITE_FILE = '/usr/local/share/manet/fer-logo-white.svg'
+# The hexagon badge is line art with no fill, so it needs two inks: near-black
+# strokes on light themes, white strokes on dark. Same artwork, same geometry.
+FER_LOGO_DARK_INK_FILE  = '/usr/local/share/manet/fer-logo-black.png'
+FER_LOGO_LIGHT_INK_FILE = '/usr/local/share/manet/fer-logo-white.png'
+# Served under /assets/<name>, extension optional, so swapping a logo between
+# svg and png only means changing the paths above.
+FER_LOGO_ASSETS = {
+    'fer-logo':       FER_LOGO_DARK_INK_FILE,
+    'fer-logo-black': FER_LOGO_DARK_INK_FILE,
+    'fer-logo-white': FER_LOGO_LIGHT_INK_FILE,
+}
+
+
+def logo_asset_token():
+    """Cache-busting token for logo URLs.
+
+    Logo assets are served with a one-hour cache. Without a token in the URL,
+    replacing a logo leaves browsers showing the previous artwork from cache
+    until it expires, because the URL never changes.
+    """
+    parts = []
+    for path in (FER_LOGO_DARK_INK_FILE, FER_LOGO_LIGHT_INK_FILE):
+        try:
+            st = os.stat(path)
+            parts.append(f'{st.st_mtime_ns}:{st.st_size}')
+        except OSError:
+            parts.append('missing')
+    return hashlib.sha1('|'.join(parts).encode()).hexdigest()[:8]
 CONTROL_POST_PATHS = {
     '/api/control/interface',
     '/api/control/txpower',
@@ -1473,10 +1498,12 @@ body {
 .health-fault{ color: #b42318; background: rgba(180,35,24,.08); }
 .health-loading { color: var(--muted); background: transparent; }
 .hdr-brand { grid-area: brand; display:flex; align-items:center; gap:8px; min-width:0; padding-left:12px; }
-.fer-lockup { display:flex; align-items:center; justify-content:flex-start; align-self:center; height:58px; min-width:clamp(104px,18vw,172px); width:clamp(104px,18vw,172px); padding:0 8px 0 0; border-right:1px solid var(--border); color:var(--fer-black); overflow:hidden; flex:0 0 auto; }
-.fer-logo-img { display:block; width:clamp(104px,18vw,172px); height:48px; max-width:none; object-fit:contain; object-position:left center; filter:none; transition:width .18s ease,height .18s ease,filter .18s ease; }
+.fer-lockup { display:flex; align-items:center; justify-content:flex-start; align-self:center; height:58px; padding:0 12px 0 0; border-right:1px solid var(--border); color:var(--fer-black); overflow:hidden; flex:0 0 auto; }
+/* the badge is near-square, so height drives the size and width follows the
+   aspect ratio — a fixed width would letterbox it and leave dead space */
+.fer-logo-img { display:block; width:auto; height:44px; max-width:100%; object-fit:contain; object-position:left center; filter:none; transition:height .18s ease; }
 :root[data-theme="dark"] .fer-lockup { color:#ffffff; }
-:root[data-theme="dark"] .fer-logo-img { filter: brightness(0) invert(1); }
+/* no brightness(0) invert(1) here — that flattens the badge to a solid silhouette */
 .hdr-logo { color: var(--text); font-size: 17px; letter-spacing: 0; font-weight: 900; display:flex; align-items:center; min-height:46px; line-height:1; }
 .hdr-logo span { color: var(--accent2); }
 .theme-toggle { border:1px solid var(--accent2); background:rgba(236,176,0,.10); color:var(--text); border-radius:999px; padding:6px 10px; font-family:var(--font); font-size:11px; font-weight:850; cursor:pointer; min-width:74px; }
@@ -1660,7 +1687,7 @@ body {
   #header { grid-template-columns:1fr; grid-template-areas:"brand" "meta" "actions"; height: auto; min-height: 58px; padding: 8px 10px 10px; row-gap:6px; }
   .hdr-brand { padding-left:0; gap:6px; }
   .fer-lockup { min-width:clamp(92px,24vw,132px); width:clamp(92px,24vw,132px); height:46px; padding-right:4px; }
-  .fer-logo-img { width: clamp(92px,24vw,132px); height: 38px; }
+  .fer-logo-img { height: 36px; }
   .hdr-logo { font-size:15px; min-height:38px; }
   #hdr-meta { padding-left:0; }
   #hdr-hostname { max-width: 42vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -1710,7 +1737,7 @@ STATUS_HTML = r"""<!DOCTYPE html>
   <div id="header">
     <div class="hdr-brand">
       <div class="fer-lockup" title="FER" aria-label="FER">
-        <img class="fer-logo-img" src="/assets/fer-logo-black.svg" data-light="/assets/fer-logo-black.svg" data-dark="/assets/fer-logo-white.svg" alt="FER">
+        <img class="fer-logo-img" src="/assets/fer-logo-black?v=__LOGO_V__" data-light="/assets/fer-logo-black?v=__LOGO_V__" data-dark="/assets/fer-logo-white?v=__LOGO_V__" alt="FER">
       </div>
       <div class="hdr-logo">MANET//<span>STAT</span></div>
     </div>
@@ -3322,7 +3349,27 @@ def render_status_page():
     html = STATUS_HTML
     html = html.replace('__CSS__',     CSS)
     html = html.replace('__REFRESH__', str(REFRESH_MS))
+    html = html.replace('__LOGO_V__',  logo_asset_token())
     return html
+
+ASSET_CONTENT_TYPES = {
+    '.svg':  'image/svg+xml',
+    '.png':  'image/png',
+    '.jpg':  'image/jpeg',
+    '.jpeg': 'image/jpeg',
+    '.webp': 'image/webp',
+}
+
+def asset_content_type(path):
+    ext = os.path.splitext(path)[1].lower()
+    return ASSET_CONTENT_TYPES.get(ext, 'application/octet-stream')
+
+def logo_asset_file(url_path):
+    """Map /assets/fer-logo-white[.png|.svg] to the file we actually ship."""
+    if not url_path.startswith('/assets/'):
+        return None
+    name = os.path.splitext(url_path[len('/assets/'):])[0]
+    return FER_LOGO_ASSETS.get(name)
 
 def send_file_response(handler, path, content_type):
     try:
@@ -3343,6 +3390,7 @@ def send_file_response(handler, path, content_type):
 def render_perf_auth_page(next_path='/', error=''):
     safe_next = html.escape(next_path, quote=True)
     safe_error = html.escape(error)
+    logo_v = logo_asset_token()
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -3403,10 +3451,13 @@ body {{
   background: transparent;
   text-align: center;
 }}
+/* near-square badge: drive off height so it doesn't tower over the form the
+   way a width-driven size would (the old wordmark was ~1.6:1, this is ~0.86:1) */
 .logo {{
-  width: min(260px, 72vw);
+  width: auto;
+  height: min(150px, 38vw);
   max-width: 100%;
-  height: auto;
+  object-fit: contain;
   display: block;
   margin: 0 auto;
   filter: none;
@@ -3476,9 +3527,8 @@ button {{
   border-bottom-color: #24212b;
   background: transparent;
 }}
-:root[data-theme="dark"] .logo {{
-  filter: brightness(0) invert(1);
-}}
+/* dark mode swaps in the dedicated white asset (see data-dark) rather than
+   filtering — brightness(0) invert(1) flattens artwork to a solid silhouette */
 :root[data-theme="dark"] p {{
   color: #aaa5b2;
 }}
@@ -3500,7 +3550,7 @@ button {{
 <body>
   <div class="wrap">
     <div class="top">
-      <img class="logo" src="/assets/fer-logo.svg" data-light="/assets/fer-logo.svg" data-dark="/assets/fer-logo.svg" alt="FER">
+      <img class="logo" src="/assets/fer-logo-black?v={logo_v}" data-light="/assets/fer-logo-black?v={logo_v}" data-dark="/assets/fer-logo-white?v={logo_v}" alt="FER">
       <h1>perf.local</h1>
       <p>Enter the provisioned management password to continue.</p>
     </div>
@@ -3651,14 +3701,9 @@ class MeshHandler(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self):
         parsed = urlparse(self.path)
-        if parsed.path == '/assets/fer-logo.svg':
-            send_file_response(self, FER_LOGO_FULL_FILE, 'image/svg+xml')
-            return
-        if parsed.path == '/assets/fer-logo-black.svg':
-            send_file_response(self, FER_LOGO_BLACK_FILE, 'image/svg+xml')
-            return
-        if parsed.path == '/assets/fer-logo-white.svg':
-            send_file_response(self, FER_LOGO_WHITE_FILE, 'image/svg+xml')
+        logo_file = logo_asset_file(parsed.path)
+        if logo_file:
+            send_file_response(self, logo_file, asset_content_type(logo_file))
             return
         if self._is_perf_host():
             if parsed.path == '/auth/perf-logout':
