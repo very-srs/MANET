@@ -47,6 +47,8 @@ REGISTRY_STATE_FILE="/var/run/mesh_node_registry"
 ENCODER_PATH="/usr/local/bin/encoder.py"
 BATCTL_PATH="/usr/sbin/batctl"
 RADIO_STATE_SYNC="/usr/local/bin/mesh-radio-state.py"
+CONFIG_SYNC="/usr/local/bin/mesh-config-sync.py"
+CONFIG_ROLLBACK="/usr/local/bin/mesh-config-rollback.sh"
 HALOW_MCS_SUMMARY="/usr/local/bin/halow-mcs-summary.py"
 
 # --- State Variables ---
@@ -60,6 +62,7 @@ LAST_PUBLISH_TIME=0
 # its own timer rather than inside a pipeline stage, so it keeps ticking in
 # both lobby and data state.
 LAST_IDENTITY_PUBLISH=0
+LAST_ACK_PUBLISHED=""
 IDENTITY_PUBLISH_INTERVAL=270
 CACHED_SCAN_REPORT_JSON="{}"
 LAST_SCAN_COMPLETE_TIME=0
@@ -329,6 +332,23 @@ while true; do
     # after all nodes have ACKed the same version.
     [ -x "$RADIO_STATE_SYNC" ] && "$RADIO_STATE_SYNC" sync || true
 
+    # === ALFRED CONFIG SYNC ===
+    # Same shape for mesh configuration: stage what the operator broadcast,
+    # publish an ACK, and apply once activate_at passes.
+    [ -x "$CONFIG_SYNC" ] && "$CONFIG_SYNC" sync || true
+
+    # A dangerous config change can take the mesh down. This is the node
+    # deciding, on its own, whether the change worked or has to be undone.
+    [ -x "$CONFIG_ROLLBACK" ] && "$CONFIG_ROLLBACK" check || true
+
+    # An ACK is only useful if peers see it promptly, so a change here brings
+    # the next telemetry publish forward instead of waiting out the interval.
+    CURRENT_ACK=$(cat /var/run/mesh_config_ack_version 2>/dev/null || echo "")
+    if [ "$CURRENT_ACK" != "$LAST_ACK_PUBLISHED" ]; then
+        LAST_PUBLISH_TIME=0
+        LAST_ACK_PUBLISHED="$CURRENT_ACK"
+    fi
+
     # Load current chunk assignment from IP manager
     MY_CHUNK=0
     if [ -f /var/run/my_ipv4_chunk ]; then
@@ -431,6 +451,7 @@ while true; do
             ENCODER_ARGS=(
                 "--mean-throughput-mbps" "$MEAN_THROUGHPUT"
                 "--timestamp" "$NOW"
+                "--config-ack-version" "$(cat /var/run/mesh_config_ack_version 2>/dev/null || echo "")"
                 "--wifi-24-tx-mcs" "${WLAN0_TX_MCS:-}"
                 "--wifi-24-rx-mcs" "${WLAN0_RX_MCS:-}"
                 "--wifi-5-tx-mcs" "${WLAN1_TX_MCS:-}"
@@ -611,6 +632,7 @@ except Exception:
                 "--mean-throughput-mbps" "$MEAN_THROUGHPUT"
                 "--channel-report-json" "$SCAN_REPORT_JSON"
                 "--timestamp" "$NOW"
+                "--config-ack-version" "$(cat /var/run/mesh_config_ack_version 2>/dev/null || echo "")"
                 "--last-tourguide-timestamp" "$LAST_TOURGUIDE_TIME"
                 "--last-tourguide-radio" "$LAST_TOURGUIDE_RADIO"
                 "--wifi-24-tx-mcs" "${WLAN0_TX_MCS:-}"
