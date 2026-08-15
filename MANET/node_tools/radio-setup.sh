@@ -1517,7 +1517,9 @@ systemctl enable mesh-status
 # ============================================================================
 # === mDNS — manet.local ===
 # ============================================================================
-# Advertise this node as manet.local on the AP/EUD interface only.
+# Advertise this node as manet.local on the AP/EUD interface only. One record,
+# port 80 — the management UI lives at /manage on the same server now, so
+# there is no second port to advertise.
 # avahi-daemon is kept but restricted to deny mesh interfaces (bat0, wlan0-2).
 # Clients connected to the EUD AP can reach the admin panel at http://manet.local
 
@@ -1530,7 +1532,14 @@ if [ -n "$AVAHI_AP_IF" ]; then
     sed -i "s/allow-interfaces=.*/allow-interfaces=$AVAHI_AP_IF/" /etc/avahi/avahi-daemon.conf
 fi
 cp /usr/local/share/manet/manet-http.service /etc/avahi/services/manet-http.service
-cp /usr/local/share/manet/perf-http.service /etc/avahi/services/perf-http.service 2>/dev/null || true
+# Left over from when the dashboard was its own service on port 8081.
+rm -f /etc/avahi/services/perf-http.service
+if systemctl list-unit-files perf-dashboard.service >/dev/null 2>&1; then
+    systemctl disable --now perf-dashboard.service 2>/dev/null || true
+    rm -f /etc/systemd/system/perf-dashboard.service
+    systemctl daemon-reload
+fi
+
 systemctl enable avahi-daemon
 systemctl restart avahi-daemon || true
 

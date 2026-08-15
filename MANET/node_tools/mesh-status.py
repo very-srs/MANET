@@ -4,10 +4,15 @@ MANET Node Status Web Server
 -----------------------------
 Serves mesh network status and topology information on port 8080.
 
-Access:
-  /          - Public status page (localhost + mesh subnet)
-  /api/data  - JSON data endpoint (same access control)
-  /admin     - Admin config page (no Basic auth)
+Access (everything here is restricted to localhost + the EUD/mesh subnet;
+nothing is reachable from the uplink/LAN side):
+  /          - Status page, no password
+  /api/data  - JSON data endpoint, no password
+  /manage/*  - Management UI, requires the provisioned admin password.
+               Routes come from manet_manage.py, mixed into this handler.
+               There is no second listening port.
+  /api/admin/* - Mesh config staging/apply, requires the same password.
+  /admin     - Legacy path, redirects into /manage/
 
 Reads:
   /etc/mesh.conf                - Node configuration
@@ -15,7 +20,7 @@ Reads:
   /var/run/mesh_node_registry   - Peer registry (built by mesh-registry-builder.sh)
 
 Calls:
-  batctl o   - Originator/TQ table
+  batctl o   - Originator throughput table
   batctl n   - Direct neighbors
   batctl gwl - Gateway list
 """
@@ -36,6 +41,18 @@ import hmac
 import html
 from urllib.parse import urlparse, parse_qs, quote
 
+# Radio control lives in one place, shared with mesh-radio-state.py so an
+# Alfred-staged change and a local one do exactly the same thing.
+from manet_manage import ManageRoutes
+from manet_radio import (
+    HALOW_EU_CHANNELS, HALOW_EU_UI_TO_S1G_CHANNEL, HALOW_BW_TXPOWER_CAP_DBM,
+    _format_halow_bw, get_halow_driver_info, wifi_channel_to_freq, _fmt_dbm,
+    parse_phy_txpower_options, txpower_choices_from_cap, txpower_options_for_iface,
+    txpower_request_allowed, unsupported_txpower_response, get_halow_bw_txpower_cap,
+    get_iface_txpower_cap, read_iface_txpower_dbm, set_iface_txpower_verified,
+    apply_txpower, apply_halow_channel, apply_wifi_channel, apply_uplink_wifi,
+)
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Constants
 # ─────────────────────────────────────────────────────────────────────────────
@@ -44,11 +61,11 @@ MESH_CONF_FILE  = "/etc/mesh.conf"
 MESH_STATE_FILE = "/etc/mesh_ipv4_state"
 PORT            = 8080
 REFRESH_MS      = 15000   # Status page polling interval (ms)
-HALOW_EU_CHANNELS = [863500, 864500, 865500, 866500, 867500]
-HALOW_EU_UI_TO_S1G_CHANNEL = {idx: 1 + ((idx - 1) * 2) for idx in range(1, 6)}
-HALOW_BW_TXPOWER_CAP_DBM = {'1MHz': '24', '2MHz': '24', '4MHz': '22'}
 PERF_AUTH_COOKIE = 'manet_perf_auth'
 PERF_AUTH_COOKIE_MAX_AGE = 15552000
+# The management UI lives behind this prefix on port 80, served in-process by
+# the ManageRoutes mixin. Nothing reaches it without the password cookie.
+MANAGE_PREFIX = '/manage'
 # The hexagon badge is line art with no fill, so it needs two inks: near-black
 # strokes on light themes, white strokes on dark. Same artwork, same geometry.
 FER_LOGO_DARK_INK_FILE  = '/usr/local/share/manet/fer-logo-black.png'
@@ -82,10 +99,6 @@ CONTROL_POST_PATHS = {
     '/api/control/txpower',
     '/api/control/halow_channel',
     '/api/control/wifi_channel',
-    '/api/iperf/server/start',
-    '/api/iperf/server/stop',
-    '/api/iperf/client/run',
-    '/api/ping/run',
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -186,24 +199,6 @@ def _json_from_text(text):
             pass
     return None
 
-def _format_halow_bw(value):
-    if value in (None, ''):
-        return ''
-    text = str(value).strip()
-    low = text.lower()
-    if low.endswith('mhz'):
-        return text.replace('mhz', 'MHz').replace('MHZ', 'MHz')
-    try:
-        num = float(text)
-        if num >= 1000000:
-            num /= 1000000
-        elif num >= 1000:
-            num /= 1000
-        if num in (1, 2, 4):
-            return f'{int(num)}MHz'
-    except Exception:
-        pass
-    return text
 
 def _channel_from_frequency(freq_value):
     try:
@@ -276,219 +271,24 @@ def _parse_morse_channel_output(text):
         info['halow_source'] = 'morse'
     return info
 
-def get_halow_driver_info(iface='wlan2'):
-    """Read HaLow runtime channel data from Morse tooling; config is only fallback."""
-    binaries = ['/usr/local/bin/morse_cli', 'morse_cli']
-    variants = [
-        lambda b: [b, '-i', iface, 'channel', '-j'],
-        lambda b: [b, '-i', iface, 'channel', '--json'],
-        lambda b: [b, 'channel', '-i', iface, '-j'],
-        lambda b: [b, '-i', iface, 'channel'],
-        lambda b: [b, 'channel', '-i', iface],
-    ]
-    seen = set()
-    for binary in binaries:
-        if binary.startswith('/') and not os.path.exists(binary):
-            continue
-        for build in variants:
-            cmd = build(binary)
-            key = tuple(cmd)
-            if key in seen:
-                continue
-            seen.add(key)
-            try:
-                r = subprocess.run(cmd, capture_output=True, text=True, timeout=3)
-            except Exception:
-                continue
-            text = (r.stdout or '') + '\n' + (r.stderr or '')
-            if r.returncode != 0 and not text.strip():
-                continue
-            parsed = _parse_morse_channel_output(text)
-            if parsed:
-                return parsed
-
-    info = {}
-    for conf_path in (
-        '/etc/wpa_supplicant/wpa_supplicant-wlan2-s1g.conf',
-        '/etc/wpa_supplicant/wpa_supplicant_s1g-wlan2.conf',
-    ):
-        try:
-            with open(conf_path) as f:
-                txt = f.read()
-        except Exception:
-            continue
-        m = re.search(r'channel\s*=\s*(\d+)', txt)
-        if m:
-            info['channel'] = m.group(1)
-        m = re.search(r's1g_prim_chwidth\s*=\s*(\d+)', txt)
-        if m:
-            info['halow_bw'] = {'0': '1MHz', '1': '2MHz', '2': '4MHz'}.get(m.group(1), m.group(1))
-        if info:
-            info['halow_source'] = 'config'
-            return info
-    return info
-
-def wifi_channel_to_freq(iface, channel):
-    try:
-        ch = int(channel)
-    except Exception:
-        return None
-    if iface == 'wlan0' and 1 <= ch <= 13:
-        return 2407 + ch * 5
-    if iface == 'wlan1':
-        # Common 5 GHz channels; enough for manual dashboard control.
-        if ch == 14:
-            return 2484
-        if 32 <= ch <= 177:
-            return 5000 + ch * 5
-    return None
-
-def _fmt_dbm(value):
-    try:
-        num = float(value)
-    except Exception:
-        return ''
-    if abs(num - round(num)) < 0.05:
-        return str(int(round(num)))
-    return f'{num:.1f}'.rstrip('0').rstrip('.')
-
-def parse_phy_txpower_options(iw_phy_text):
-    options = {}
-    cur_phy = None
-    for line in (iw_phy_text or '').splitlines():
-        pm = re.match(r'Wiphy phy(\d+)', line)
-        if pm:
-            cur_phy = pm.group(1)
-            options.setdefault(cur_phy, set())
-            continue
-        if cur_phy is None:
-            continue
-        dm = re.search(r'\(([\d.]+)\s+dBm\)', line)
-        if dm:
-            fmt = _fmt_dbm(dm.group(1))
-            if fmt:
-                options[cur_phy].add(fmt)
-    return {
-        phy: sorted(vals, key=lambda v: float(v))
-        for phy, vals in options.items() if vals
-    }
-
-def txpower_choices_from_cap(cap_dbm):
-    try:
-        cap = int(float(cap_dbm))
-    except Exception:
-        return []
-    if cap < 1:
-        return []
-    return [str(v) for v in range(cap, 0, -1)]
 
 
-def txpower_options_for_iface(iface, cap_dbm, current_dbm=''):
-    if iface == 'wlan2':
-        fixed = _fmt_dbm(cap_dbm or current_dbm)
-        return [fixed] if fixed else []
-    return txpower_choices_from_cap(cap_dbm)
 
 
-def txpower_request_allowed(iface, requested, cap_dbm, options=None):
-    if iface == 'wlan2':
-        opts = options if options is not None else txpower_options_for_iface(iface, cap_dbm)
-        try:
-            req = float(requested)
-            return any(abs(req - float(opt)) < 0.05 for opt in opts)
-        except Exception:
-            return False
-    try:
-        return not cap_dbm or float(requested) <= float(cap_dbm)
-    except Exception:
-        return False
 
 
-def unsupported_txpower_response(iface, requested, cap_dbm, options=None):
-    opts = options if options is not None else txpower_options_for_iface(iface, cap_dbm)
-    if iface == 'wlan2':
-        return {
-            'ok': False,
-            'error': (
-                f'Unsupported txpower {requested} dBm for {iface}; '
-                f'HaLow txpower is fixed by the Morse driver/BCF for the selected bandwidth'
-            ),
-            'options': opts,
-        }
-    return {
-        'ok': False,
-        'error': f'Unsupported txpower {requested} dBm for {iface} (max {cap_dbm} dBm)',
-        'options': opts,
-    }
 
 
-def get_halow_bw_txpower_cap(bw):
-    return HALOW_BW_TXPOWER_CAP_DBM.get(_format_halow_bw(bw), '')
 
-def get_iface_txpower_cap(iface):
-    try:
-        r = subprocess.run(['iw', 'dev', iface, 'info'], capture_output=True, text=True, timeout=5)
-        if r.returncode != 0:
-            return ''
-        if iface == 'wlan2':
-            bw_cap = get_halow_bw_txpower_cap(get_halow_driver_info(iface).get('halow_bw', ''))
-            if bw_cap:
-                return bw_cap
-        phy = ''
-        current = ''
-        m = re.search(r'txpower ([\d.]+) dBm', r.stdout)
-        if m:
-            current = _fmt_dbm(m.group(1))
-        m = re.search(r'wiphy (\d+)', r.stdout)
-        if m:
-            phy = m.group(1)
-        else:
-            m = re.search(r'wdev (0x[0-9a-fA-F]+)', r.stdout)
-            if m:
-                phy = str(int(m.group(1), 16) >> 32)
-        if not phy:
-            return current
-        r = subprocess.run(['iw', 'phy'], capture_output=True, text=True, timeout=5)
-        options = parse_phy_txpower_options(r.stdout).get(phy, [])
-        if not options:
-            return current
-        cap = max(options, key=lambda v: float(v))
-        if iface == 'wlan2' and current:
-            return _fmt_dbm(min(float(cap), float(current)))
-        return _fmt_dbm(cap)
-    except Exception:
-        return ''
+
+
+
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Registry Parser
 # ─────────────────────────────────────────────────────────────────────────────
-def read_iface_txpower_dbm(iface):
-    try:
-        r = subprocess.run(['iw', 'dev', iface, 'info'],
-                           capture_output=True, text=True, timeout=5)
-        m = re.search(r'txpower ([\d.]+) dBm', r.stdout)
-        if m:
-            return _fmt_dbm(m.group(1))
-    except Exception:
-        pass
-    return ''
 
-def set_iface_txpower_verified(iface, dbm, retries=6, delay=0.25):
-    requested = _fmt_dbm(dbm)
-    subprocess.run(
-        ['iw', 'dev', iface, 'set', 'txpower', 'fixed', str(int(float(requested) * 100))],
-        capture_output=True, text=True, check=True, timeout=5
-    )
-    actual = ''
-    for _ in range(retries):
-        time.sleep(delay)
-        actual = read_iface_txpower_dbm(iface)
-        if actual and abs(float(actual) - float(requested)) < 0.05:
-            return requested, actual
-    raise RuntimeError(
-        f'TX power command accepted but {iface} is still '
-        f'{actual or "unknown"} dBm, expected {requested} dBm'
-    )
 
 def parse_registry():
     """Parse /var/run/mesh_node_registry into a dict of node dicts."""
@@ -514,48 +314,48 @@ def norm_mac(mac):
 
 def run_batctl_originators():
     """Parse `batctl o` into two structures:
-      tq_map:   {mac -> best_tq_norm}  (indexes both orig + nexthop MACs)
-      orig_map: {orig_mac -> {tq, nexthop, iface}}  (best path per originator)
+      mbps_map: {mac -> best throughput}  (indexes both orig + nexthop MACs)
+      orig_map: {orig_mac -> {mbps, nexthop, iface}}  (best path per originator)
 
-    BATMAN_V reports throughput in Mbit/s (>255); BATMAN_IV uses 0-255 LQ.
-    Both are normalised to 0-255.
+    The mesh runs BATMAN_V, whose metric is throughput in Mbit/s — batctl
+    prints it as `%u.%u` (originators.c), so 43.2 means 43.2 Mbit/s. It is
+    carried through as-is; there is no 0-255 link quality here to scale to.
     """
-    tq_map   = {}
-    orig_map = {}  # orig_mac -> {'tq': int, 'nexthop': str, 'iface': str}
+    mbps_map = {}
+    orig_map = {}  # orig_mac -> {'mbps': float, 'nexthop': str, 'iface': str}
 
-    def _set_tq(mac, tq):
-        if mac and (mac not in tq_map or tq > tq_map[mac]):
-            tq_map[mac] = tq
+    def _set_mbps(mac, mbps):
+        if mac and (mac not in mbps_map or mbps > mbps_map[mac]):
+            mbps_map[mac] = mbps
 
     try:
         r = subprocess.run(['batctl', 'o', '-n'],
                            capture_output=True, text=True, timeout=5)
-        orig_best = {}  # orig_mac -> (best_tq_float, nexthop_mac, outgoing_iface)
+        orig_best = {}  # orig_mac -> (best_mbps, nexthop_mac, outgoing_iface)
         for line in r.stdout.splitlines():
             m = re.match(
                 r'[\s*]+([0-9a-f:]{17})\s+[\d.]+(?:ms|s)\s+\(\s*([\d.]+)\)\s+([0-9a-f:]{17})(?:\s+\[\s*(\S+)\s*\])?',
                 line)
             if m:
                 orig    = norm_mac(m.group(1))
-                tq      = float(m.group(2))
+                mbps    = float(m.group(2))
                 nexthop = norm_mac(m.group(3))
                 iface   = (m.group(4) or '').strip()
                 prev = orig_best.get(orig)
-                if prev is None or tq > prev[0]:
-                    orig_best[orig] = (tq, nexthop, iface)
+                if prev is None or mbps > prev[0]:
+                    orig_best[orig] = (mbps, nexthop, iface)
 
-        for orig, (tq, nexthop, iface) in orig_best.items():
-            tq_norm = int(min(tq / 1000 * 255, 255)) if tq > 255 else int(tq)
-            _set_tq(orig, tq_norm)
+        for orig, (mbps, nexthop, iface) in orig_best.items():
+            _set_mbps(orig, mbps)
             if nexthop != orig:
-                _set_tq(nexthop, tq_norm)
-            orig_map[orig] = {'tq': tq_norm, 'nexthop': nexthop, 'iface': iface}
+                _set_mbps(nexthop, mbps)
+            orig_map[orig] = {'mbps': mbps, 'nexthop': nexthop, 'iface': iface}
     except Exception:
         pass
-    return tq_map, orig_map
+    return mbps_map, orig_map
 
 def run_batctl_neighbors():
-    """Return list of {iface, mac, tq} from `batctl n`."""
+    """Return list of {iface, mac, mbps} from `batctl n`."""
     neighbors = []
     try:
         r = subprocess.run(['batctl', 'n', '-n'],
@@ -564,24 +364,19 @@ def run_batctl_neighbors():
             # wlan0   aa:bb:cc:dd:ee:ff   0.500ms   (240)
             m = re.match(r'\s*(\S+)\s+([0-9a-f:]{17})\s+[\d.]+(?:ms|s)\s+\(\s*([\d.]+)\)', line)
             if m:
-                raw_tq = float(m.group(3))
-                tq_norm = int(min(raw_tq / 1000 * 255, 255)) if raw_tq > 255 else int(raw_tq)
                 neighbors.append({
                     'iface': m.group(1),
                     'mac':   norm_mac(m.group(2)),
-                    'tq':    tq_norm
+                    'mbps':  float(m.group(3)),
                 })
     except Exception:
         pass
     return neighbors
 
 def run_batctl_gateways():
-    """Return list of {mac, tq, selected} from `batctl gwl`.
+    """Return list of {mac, mbps, selected} from `batctl gwl`.
 
-    BATMAN_V format:
-      => <gw_mac>  <age>s (  <Mbit/s>)  <nexthop_mac> [<if>]
-    BATMAN_IV format:
-      => <gw_mac>  <age>ms (<lq>)  <nexthop_mac> [<if>]
+    Format: => <gw_mac>  <age>s (  <Mbit/s>)  <nexthop_mac> [<if>]
     Header lines and the self-node are skipped.
     """
     gateways = []
@@ -595,14 +390,11 @@ def run_batctl_gateways():
             selected = line.lstrip().startswith('=>')
             # Extract first MAC on the line (the gateway's originator MAC)
             mac_m = re.search(r'([0-9a-f]{2}(?::[0-9a-f]{2}){5})', line)
-            # Extract throughput/LQ: handles both "( 100.0)" and "(255)"
-            tq_m  = re.search(r'\(\s*([\d.]+)\s*\)', line)
+            mbps_m = re.search(r'\(\s*([\d.]+)\s*\)', line)
             if mac_m:
-                raw_tq = float(tq_m.group(1)) if tq_m else 0.0
-                tq_norm = int(min(raw_tq / 1000 * 255, 255)) if raw_tq > 255 else int(raw_tq)
                 gateways.append({
                     'mac':      norm_mac(mac_m.group(1)),
-                    'tq':       tq_norm,
+                    'mbps':     float(mbps_m.group(1)) if mbps_m else 0.0,
                     'selected': selected,
                 })
     except Exception:
@@ -656,22 +448,6 @@ def get_battery():
                 continue
     return None
 
-def get_peer_local_data(peer_ip, timeout=1.0):
-    """Fetch live /api/local from a peer over the mesh; return {} on failure."""
-    if not peer_ip:
-        return {}
-    try:
-        ipaddress.ip_address(peer_ip)
-        req = urllib.request.Request(
-            f'http://{peer_ip}:80/api/local',
-            headers={'User-Agent': 'manet-status/1'}
-        )
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read().decode())
-    except Exception:
-        return {}
-
-
 def best_orig_entry_for_node(node, orig_map):
     if not isinstance(node, dict):
         return None
@@ -682,7 +458,7 @@ def best_orig_entry_for_node(node, orig_map):
     best_entry = None
     for omac, odata in orig_map.items():
         if omac in node_all_macs:
-            if best_entry is None or odata.get('tq', 0) > best_entry.get('tq', 0):
+            if best_entry is None or odata.get('mbps', 0) > best_entry.get('mbps', 0):
                 best_entry = odata
     return best_entry
 
@@ -1183,6 +959,81 @@ def assemble_local_data():
         'mesh_ssid': conf.get('mesh_ssid', ''),
     }
 
+def assemble_peer_data(peer_ip):
+    """Peer detail for the status drawer, entirely from the registry.
+
+    This used to proxy the peer's own /api/local over HTTP. Everything it
+    showed is replicated over Alfred now, so a peer that is briefly
+    unreachable still renders — and one unreachable peer no longer stalls the
+    page waiting on a timeout.
+    """
+    for ndata in parse_registry().values():
+        if ndata.get('IPV4_ADDRESS') != peer_ip:
+            continue
+
+        battery = None
+        if ndata.get('BATTERY_PERCENTAGE'):
+            try:
+                battery = {'percentage': int(ndata['BATTERY_PERCENTAGE']),
+                           'status': 'unknown', 'voltage_v': None, 'current_ma': None,
+                           'power_w': None, 'charging': None, 'timestamp': None}
+            except ValueError:
+                battery = None
+
+        interfaces = []
+        try:
+            published = json.loads(ndata.get('INTERFACES_JSON', '') or '[]')
+        except json.JSONDecodeError:
+            published = []
+        for iface in published if isinstance(published, list) else []:
+            if not isinstance(iface, dict) or not iface.get('name'):
+                continue
+            role = iface.get('role', 'other')
+            state = iface.get('state', 'UNKNOWN')
+            # Derived here rather than published: every node would otherwise
+            # ship the same prose about itself on every cycle.
+            faults = []
+            if state == 'DOWN' and role in ('mesh', 'bat', 'bridge'):
+                health = 'fault'
+                faults.append(f'{iface["name"]} is down')
+            elif state == 'UNKNOWN':
+                health = 'warn'
+            else:
+                health = 'ok'
+            interfaces.append({
+                'name':   iface['name'],
+                'role':   role,
+                'state':  state,
+                'addrs':  iface.get('ipv4', []) or [],
+                'health': health,
+                'faults': faults,
+                'tx_mcs': iface.get('tx_mcs', ''),
+                'rx_mcs': iface.get('rx_mcs', ''),
+            })
+
+        return {
+            'hostname':   ndata.get('HOSTNAME', ''),
+            'ip':         peer_ip,
+            'mac':        ndata.get('MAC_ADDRESS', ''),
+            'uptime':     fmt_uptime(ndata.get('UPTIME_SECONDS', '')),
+            'battery':    battery,
+            'gps': {
+                'available': bool(ndata.get('GPS_LATITUDE')),
+                'lat':       ndata.get('GPS_LATITUDE', ''),
+                'lon':       ndata.get('GPS_LONGITUDE', ''),
+                'alt':       ndata.get('GPS_ALTITUDE', ''),
+            },
+            'interfaces': interfaces,
+            'euds':       [],
+            'services':   [],
+            'eud_mode':   ndata.get('EUD_MODE', ''),
+            'ap_ssid':    ndata.get('AP_SSID', ''),
+            'mesh_ssid':  '',
+            'stale':      ndata.get('NODE_STATE', 'ACTIVE') != 'ACTIVE',
+        }
+    return None
+
+
 def fmt_uptime(seconds):
     try:
         s = int(float(seconds))
@@ -1216,7 +1067,7 @@ def assemble_status_data():
     state      = load_kv_file(MESH_STATE_FILE)
     nodes_raw  = parse_registry()
     local_battery = get_battery()
-    orig_tq, orig_map = run_batctl_originators()
+    orig_mbps, orig_map = run_batctl_originators()
     neighbors  = run_batctl_neighbors()
     gateways   = run_batctl_gateways()
     my_mac     = get_my_mac()
@@ -1233,18 +1084,18 @@ def assemble_status_data():
         if nd.get('IS_GATEWAY', 'false').lower() == 'true'
     ]
     if not gateways and registry_gw_nodes:
-        # Use the registry gateway with best TQ as the "selected" gateway
-        def _node_tq(nid):
+        # Use the registry gateway with the best throughput as "selected"
+        def _node_mbps(nid):
             nd = nodes_raw[nid]
             for m in nd.get('MAC_ADDRESSES', '').split(','):
-                t = orig_tq.get(norm_mac(m.strip()))
+                t = orig_mbps.get(norm_mac(m.strip()))
                 if t is not None:
                     return t
             return 0
-        best_gw_nid = max(registry_gw_nodes, key=_node_tq)
+        best_gw_nid = max(registry_gw_nodes, key=_node_mbps)
         best_gw_nd  = nodes_raw[best_gw_nid]
         selected_gw = norm_mac(best_gw_nd.get('MAC_ADDRESS', ''))
-        gateways    = [{'mac': selected_gw, 'tq': 0, 'selected': True}]
+        gateways    = [{'mac': selected_gw, 'mbps': 0, 'selected': True}]
 
     node_list = []
     self_found = False
@@ -1254,27 +1105,23 @@ def assemble_status_data():
         node_mac = norm_mac(raw_mac)
         hostname = ndata.get('HOSTNAME', 'unknown')
 
-        # TQ: check primary mac then all macs
-        tq = orig_tq.get(node_mac)
-        if tq is None:
+        # Throughput: check primary mac then all macs
+        mbps = orig_mbps.get(node_mac)
+        if mbps is None:
             for alt_mac in ndata.get('MAC_ADDRESSES', '').split(','):
                 alt = norm_mac(alt_mac)
-                if alt in orig_tq:
-                    tq = orig_tq[alt]
+                if alt in orig_mbps:
+                    mbps = orig_mbps[alt]
                     break
 
         is_me = (my_mac and node_mac == my_mac) or (hostname == my_host)
         if is_me:
-            tq = None
+            mbps = None
             self_found = True
 
         battery = {'percentage': int(ndata['BATTERY_PERCENTAGE'])} if ndata.get('BATTERY_PERCENTAGE') else None
         if is_me and local_battery and local_battery.get('percentage') is not None:
             battery = local_battery
-        elif not is_me and ndata.get('IPV4_ADDRESS'):
-            peer_battery = get_peer_local_data(ndata.get('IPV4_ADDRESS'), timeout=0.8).get('battery')
-            if isinstance(peer_battery, dict) and peer_battery.get('percentage') is not None:
-                battery = peer_battery
 
         all_node_macs = [norm_mac(m) for m in ndata.get('MAC_ADDRESSES', '').split(',') if m.strip()]
         is_direct = any(m in neighbor_macs for m in all_node_macs) or node_mac in neighbor_macs
@@ -1283,11 +1130,11 @@ def assemble_status_data():
         if not is_me:
             for omac, odata in orig_map.items():
                 if omac == node_mac or omac in all_node_macs:
-                    if not best_link or odata.get('tq', 0) > best_link.get('tq', 0):
+                    if not best_link or odata.get('mbps', 0) > best_link.get('mbps', 0):
                         best_link = {
                             'iface':   odata.get('iface', ''),
                             'nexthop': odata.get('nexthop', ''),
-                            'tq':      odata.get('tq'),
+                            'mbps':    odata.get('mbps'),
                         }
 
         node_list.append({
@@ -1295,7 +1142,7 @@ def assemble_status_data():
             'hostname':     hostname,
             'mac':          raw_mac,
             'ip':           ndata.get('IPV4_ADDRESS', ''),
-            'tq':           tq,
+            'mbps':         mbps,
             'is_me':        is_me,
             'is_direct':    is_direct or is_me,
             'is_gateway':   ndata.get('IS_GATEWAY', 'false').lower() == 'true',
@@ -1326,7 +1173,7 @@ def assemble_status_data():
             'hostname': my_host,
             'mac': my_mac or '',
             'ip': (state.get('CURRENT_IPV4') or ''),
-            'tq': None, 'is_me': True, 'is_direct': True,
+            'mbps': None, 'is_me': True, 'is_direct': True,
             'is_gateway': False, 'is_selected_gw': False,
             'uptime': '', 'cpu': '', 'battery': None,
             'mumble': False, 'mediamtx': False, 'ntp': False,
@@ -1334,7 +1181,7 @@ def assemble_status_data():
             'hop_count': None, 'last_seen': str(int(time.time())),
         })
 
-    node_list.sort(key=lambda n: (not n['is_me'], -(n['tq'] if n['tq'] is not None else -1)))
+    node_list.sort(key=lambda n: (not n['is_me'], -(n['mbps'] if n['mbps'] is not None else -1)))
 
     # ── Build topology edges from batctl o nexthop data ──
     # mac_to_node_id: every MAC (all interfaces) -> node_id
@@ -1362,7 +1209,7 @@ def assemble_status_data():
             best_entry = None
             for omac, odata in orig_map.items():
                 if omac in node_all_macs:
-                    if best_entry is None or odata['tq'] > best_entry['tq']:
+                    if best_entry is None or odata['mbps'] > best_entry['mbps']:
                         best_entry = odata
 
             if best_entry is None:
@@ -1372,7 +1219,7 @@ def assemble_status_data():
                     'target':  node['id'],
                     'type':    'unknown',
                     'via':     None,
-                    'tq':      node['tq'],
+                    'mbps':    node['mbps'],
                 })
                 continue
 
@@ -1384,7 +1231,7 @@ def assemble_status_data():
                     'target': node['id'],
                     'type':   'direct',
                     'via':    None,
-                    'tq':     node['tq'],
+                    'mbps':   node['mbps'],
                 })
             else:
                 # nexthop is a different node -> multi-hop via that node
@@ -1394,7 +1241,7 @@ def assemble_status_data():
                     'target': node['id'],
                     'type':   'multihop',
                     'via':    via_id,
-                    'tq':     node['tq'],
+                    'mbps':   node['mbps'],
                 })
 
         # Also add edges between non-self nodes where we can infer adjacency:
@@ -1405,14 +1252,14 @@ def assemble_status_data():
                 pair = tuple(sorted([edge['via'], edge['target']]))
                 if pair not in inferred:
                     inferred.add(pair)
-                    # TQ for inferred edge: use target node's tq (conservative)
+                    # Inferred edge: use the target node's throughput (conservative)
                     target_node = next((n for n in node_list if n['id'] == edge['target']), None)
                     edges.append({
                         'source': edge['via'],
                         'target': edge['target'],
                         'type':   'inferred',
                         'via':    None,
-                        'tq':     target_node['tq'] if target_node else None,
+                        'mbps':   target_node['mbps'] if target_node else None,
                     })
 
     return {
@@ -1568,11 +1415,11 @@ body {
 .inline-detail-title { font-size: 12px; font-weight: 800; color: var(--text); }
 .node-inline-detail .section-hdr { position: static; top: auto; }
 .badge { padding: 3px 7px; border-radius: 999px; font-size: 10px; font-weight: 750; }
-.badge-tq-great  { background: rgba(22,163,74,.07); color: var(--text); border:1px solid rgba(22,163,74,.28); }
-.badge-tq-ok     { background: rgba(236,176,0,.10); color: var(--text); border:1px solid rgba(236,176,0,.28); }
-.badge-tq-warn   { background: rgba(217,119,6,.08); color: var(--text); border:1px solid rgba(217,119,6,.28); }
-.badge-tq-bad    { background: rgba(180,35,24,.08); color: var(--text); border:1px solid rgba(180,35,24,.28); }
-.badge-tq-none   { background: #f7f8fa; color: var(--muted); }
+.badge-link-great  { background: rgba(22,163,74,.07); color: var(--text); border:1px solid rgba(22,163,74,.28); }
+.badge-link-ok     { background: rgba(236,176,0,.10); color: var(--text); border:1px solid rgba(236,176,0,.28); }
+.badge-link-warn   { background: rgba(217,119,6,.08); color: var(--text); border:1px solid rgba(217,119,6,.28); }
+.badge-link-bad    { background: rgba(180,35,24,.08); color: var(--text); border:1px solid rgba(180,35,24,.28); }
+.badge-link-none   { background: #f7f8fa; color: var(--muted); }
 .badge-svc       { background: rgba(236,176,0,.10); color: var(--text); border:1px solid rgba(236,176,0,.26); }
 .badge-gw        { background: rgba(236,176,0,.14); color: var(--fer-black); }
 .badge-direct    { background: #ecfdf3; color: #136c36; }
@@ -1598,8 +1445,8 @@ body {
   border-color: rgba(236,176,0,.48);
   box-shadow: 0 0 0 1px rgba(236,176,0,.14), 0 0 18px rgba(236,176,0,.20), 0 0 34px rgba(236,176,0,.18);
 }
-.tq-bar-wrap     { margin-top: 6px; height: 5px; background: var(--border2); border-radius: 999px; overflow: hidden; }
-.tq-bar          { height: 100%; border-radius: 2px; transition: width .5s; }
+.link-bar-wrap     { margin-top: 6px; height: 5px; background: var(--border2); border-radius: 999px; overflow: hidden; }
+.link-bar          { height: 100%; border-radius: 2px; transition: width .5s; }
 
 /* ── Tooltip ── */
 /* ── Admin Page ── */
@@ -1819,33 +1666,46 @@ function isDarkTheme() {
 }
 
 function goPerfDashboard() {
-  window.location.href = 'http://perf.local/?theme=' + encodeURIComponent(document.documentElement.dataset.theme || 'light');
+  // Same origin, so this works from any EUD without depending on perf.local
+  // resolving. The password prompt lives on the other side.
+  window.location.href = '/manage/?theme=' + encodeURIComponent(document.documentElement.dataset.theme || 'light');
 }
 
 setTheme(preferredTheme());
 
 // ── Utilities ────────────────────────────────────────────────────────────────
-function tqClass(tq) {
-  if (tq == null) return 'badge-tq-none';
-  if (tq >= 200)  return 'badge-tq-great';
-  if (tq >= 130)  return 'badge-tq-ok';
-  if (tq >= 60)   return 'badge-tq-warn';
-  return 'badge-tq-bad';
+// BATMAN_V's metric is throughput in Mbit/s, not a 0-255 link quality.
+// HaLow tops out near 43 Mbit/s at 8 MHz, so "great" is set where a healthy
+// HaLow link lands rather than where a 5 GHz link does.
+const LINK_GREAT_MBPS = 30, LINK_OK_MBPS = 15, LINK_WARN_MBPS = 5;
+// Full scale for the bar and the graph's spring lengths.
+const LINK_FULL_SCALE_MBPS = 50;
+
+function linkClass(mbps) {
+  if (mbps == null) return 'badge-link-none';
+  if (mbps >= LINK_GREAT_MBPS) return 'badge-link-great';
+  if (mbps >= LINK_OK_MBPS)    return 'badge-link-ok';
+  if (mbps >= LINK_WARN_MBPS)  return 'badge-link-warn';
+  return 'badge-link-bad';
 }
-function tqColor(tq) {
-  if (tq == null) return '#9aa4b2';
-  if (tq >= 200)  return '#22c55e';
-  if (tq >= 130)  return '#eab308';
-  if (tq >= 60)   return '#f97316';
+function linkColor(mbps) {
+  if (mbps == null) return '#9aa4b2';
+  if (mbps >= LINK_GREAT_MBPS) return '#22c55e';
+  if (mbps >= LINK_OK_MBPS)    return '#eab308';
+  if (mbps >= LINK_WARN_MBPS)  return '#f97316';
   return '#ef4444';
 }
-function tqLabel(tq) {
-  if (tq == null) return '?';
-  return `TQ ${tq}`;
+function fmtMbps(mbps) {
+  if (mbps == null) return '?';
+  return mbps >= 10 ? Math.round(mbps).toString() : mbps.toFixed(1);
 }
-function tqPct(tq) {
-  if (tq == null) return 0;
-  return Math.round((tq / 255) * 100);
+function linkLabel(mbps) {
+  if (mbps == null) return '?';
+  return `${fmtMbps(mbps)} Mbps`;
+}
+function linkPct(mbps) {
+  if (mbps == null) return 0;
+  return Math.round(Math.min(mbps / LINK_FULL_SCALE_MBPS, 1) * 100);
 }
 function fmtAge(ts) {
   const secs = (DATA ? DATA.timestamp : Math.floor(Date.now() / 1000)) - parseInt(ts || 0);
@@ -1885,20 +1745,20 @@ function renderNodeList(nodes) {
     if (n.is_gateway)  badges.push(`<span class="badge badge-gw">${n.is_selected_gw ? '★ GW' : 'GW'}</span>`);
     if (n.is_direct && !n.is_me) badges.push(`<span class="badge badge-direct">DIRECT</span>`);
     if (n.best_link && n.best_link.iface && !n.is_me) {
-      const linkTq = n.best_link.tq == null ? '?' : n.best_link.tq;
-      badges.push(`<span class="badge badge-bestlink" title="BATMAN selected route via ${n.best_link.nexthop || 'unknown'}">BEST ${n.best_link.iface} TQ ${linkTq}</span>`);
+      const linkRate = linkLabel(n.best_link.mbps);
+      badges.push(`<span class="badge badge-bestlink" title="BATMAN selected route via ${n.best_link.nexthop || 'unknown'}">BEST ${n.best_link.iface} ${linkRate}</span>`);
     }
     if (n.mumble)      badges.push(`<span class="badge badge-svc">MUMBLE</span>`);
     if (n.mediamtx)    badges.push(`<span class="badge badge-svc">MTX</span>`);
     if (n.ntp)         badges.push(`<span class="badge badge-svc">NTP</span>`);
-    if (n.limp)        badges.push(`<span class="badge badge-tq-bad">LIMP</span>`);
+    if (n.limp)        badges.push(`<span class="badge badge-link-bad">LIMP</span>`);
 
     const thisNodeLabel = n.is_me
       ? `<span class="self-node-badge">THIS NODE</span>`
       : '';
     const nodeStale = !n.is_me && (DATA.timestamp - parseInt(n.last_seen || 0)) > 300;
-    const tqBadge = (n.is_me || nodeStale) ? '' : `<span class="badge ${tqClass(n.tq)}">${tqLabel(n.tq)}</span>`;
-    const bar = nodeStale ? '' : `<div class="tq-bar-wrap"><div class="tq-bar" style="width:${tqPct(n.tq)}%;background:${tqColor(n.tq)}"></div></div>`;
+    const rateBadge = (n.is_me || nodeStale) ? '' : `<span class="badge ${linkClass(n.mbps)}">${linkLabel(n.mbps)}</span>`;
+    const bar = nodeStale ? '' : `<div class="link-bar-wrap"><div class="link-bar" style="width:${linkPct(n.mbps)}%;background:${linkColor(n.mbps)}"></div></div>`;
     const meta = (!nodeStale && n.uptime) ? `<span style="color:var(--muted)">up ${n.uptime}</span>` : '';
     const cpu  = (!nodeStale && n.cpu)    ? `<span style="color:var(--muted)">CPU ${n.cpu}</span>` : '';
     let battMeta = '';
@@ -1908,7 +1768,7 @@ function renderNodeList(nodes) {
       const icon = (n.battery.charging === true) ? '⚡' : (pct <= 15 ? '⚠' : '');
       battMeta = `<span style="color:${col};font-size:10px">${icon}${pct}%</span>`;
     }
-    const offlineBadge = nodeStale ? `<span class="badge badge-tq-bad" style="opacity:.7">OFFLINE</span><span style="color:var(--muted);font-size:10px">last seen ${fmtAge(n.last_seen)}</span>` : '';
+    const offlineBadge = nodeStale ? `<span class="badge badge-link-bad" style="opacity:.7">OFFLINE</span><span style="color:var(--muted);font-size:10px">last seen ${fmtAge(n.last_seen)}</span>` : '';
 
     const expanded = SELECTED_PEER_ID === n.id;
       const detailBody = n.is_me
@@ -1928,7 +1788,7 @@ function renderNodeList(nodes) {
       <div class="node-summary">
         <div class="node-name" style="${nodeStale ? 'color:var(--muted)' : ''}">${n.hostname}${thisNodeLabel}${n.state==='SHUTTING_DOWN'?'<span style="color:var(--bad);font-size:10px;margin-left:4px">OFFLINE</span>':''}</div>
         <div class="node-ip">${n.ip||'—'} &nbsp; <span style="color:var(--muted)">${n.mac}</span></div>
-        <div class="node-meta">${nodeStale ? offlineBadge : tqBadge+badges.join('')+meta+cpu+battMeta}</div>
+        <div class="node-meta">${nodeStale ? offlineBadge : rateBadge+badges.join('')+meta+cpu+battMeta}</div>
         ${bar}
       </div>
       ${detail}
@@ -2043,7 +1903,7 @@ function initSim(nodes, edges) {
       target:   dstNode,
       type:     edge.type,    // 'direct' | 'multihop' | 'inferred' | 'unknown'
       via:      edge.via,     // node id of hop, or null
-      tq:       edge.tq,
+      mbps:     edge.mbps,
     });
   });
 }
@@ -2084,9 +1944,10 @@ function simStep() {
     const a = link.source, b = link.target;
     const dx = b.x - a.x, dy = b.y - a.y;
     const dist = Math.max(Math.sqrt(dx*dx + dy*dy), 0.1);
-    const tq = link.tq != null ? link.tq : 128;
+    const mbps = link.mbps != null ? link.mbps : LINK_OK_MBPS;
     // Rest length: great link = shorter, poor link = longer, capped at maxLink
-    const restLen = Math.min(60 + ((255 - tq) / 255) * maxLink * 0.85, maxLink);
+    const slack = 1 - Math.min(mbps / LINK_FULL_SCALE_MBPS, 1);
+    const restLen = Math.min(60 + slack * maxLink * 0.85, maxLink);
     const spring  = (dist - restLen) * 0.05;
     const fx = (dx / dist) * spring;
     const fy = (dy / dist) * spring;
@@ -2151,8 +2012,8 @@ function drawTopo() {
 
   sorted_links.forEach(link => {
     const a = link.source, b = link.target;
-    const tq  = link.tq;
-    const col = tqColor(tq);
+    const mbps = link.mbps;
+    const col = linkColor(mbps);
     const isDirect   = link.type === 'direct';
     const isInferred = link.type === 'inferred';
     const isUnknown  = link.type === 'unknown';
@@ -2183,9 +2044,9 @@ function drawTopo() {
     ctx.stroke();
     ctx.setLineDash([]);
 
-    // TQ label at midpoint for direct and multihop lines involving self
+    // Throughput label at midpoint for direct and multihop lines involving self
     const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
-    if (tq != null && (isDirect || link.type === 'multihop')) {
+    if (mbps != null && (isDirect || link.type === 'multihop')) {
       ctx.fillStyle = col + 'cc';
       ctx.font = topoFont('700', 9);
       ctx.textAlign = 'center';
@@ -2194,7 +2055,7 @@ function drawTopo() {
       ctx.fillStyle = themeColor('#ffffffe8', '#121118e8');
       ctx.fillRect(mx - 12, my - 7, 24, 13);
       ctx.fillStyle = col + 'dd';
-      ctx.fillText(`${tq}`, mx, my);
+      ctx.fillText(fmtMbps(mbps), mx, my);
       ctx.textBaseline = 'alphabetic';
     }
 
@@ -2227,7 +2088,7 @@ function drawTopo() {
     const isHover = HOVER_NODE && HOVER_NODE.id === n.id;
     const isSelected = (SELECTED_PEER_ID === null && n.is_me) || (SELECTED_PEER_ID && SELECTED_PEER_ID === n.id);
     const nodeStaleCanvas = !n.is_me && (DATA.timestamp - parseInt(n.last_seen || 0)) > 300;
-    const col = n.is_me ? '#ecb000' : (nodeStaleCanvas ? '#6b7280' : (n.is_gateway ? '#ecb000' : tqColor(n.tq)));
+    const col = n.is_me ? '#ecb000' : (nodeStaleCanvas ? '#6b7280' : (n.is_gateway ? '#ecb000' : linkColor(n.mbps)));
     const r = n.r + (isHover ? 3 : (isSelected ? 2 : 0));
 
     // Soft focus halo for selected node
@@ -2840,511 +2701,6 @@ def assemble_admin_status():
         'active_nodes': sum(1 for n in node_status if n['node_state'] == 'ACTIVE'),
     }
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Admin HTML
-# ─────────────────────────────────────────────────────────────────────────────
-ADMIN_HTML = """<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>MANET Admin</title>
-<style>__CSS__
-body { overflow-y: auto; }
-/* ── Admin layout ── */
-.admin-body { display: flex; gap: 0; height: calc(100vh - 34px); overflow: hidden; }
-.admin-form-col { flex: 1; overflow-y: auto; padding: 20px 24px; border-right: 1px solid var(--border); }
-.admin-status-col { width: 320px; flex-shrink: 0; overflow-y: auto; padding: 16px; background: #ffffff; }
-.admin-col-hdr { font-size: 11px; color: var(--muted); font-weight: 800; letter-spacing: 0; text-transform: none;
-                 padding-bottom: 10px; border-bottom: 1px solid var(--border); margin-bottom: 14px; }
-/* Section styling */
-.cfg-section { margin-bottom: 22px; }
-.cfg-section-title { font-size: 12px; color: var(--text); font-weight: 800; letter-spacing: 0; text-transform: none;
-                      padding: 0 0 8px 0; border-bottom: 1px solid var(--border); margin-bottom: 12px; }
-.cfg-row { display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px; }
-.cfg-row label { flex: 0 0 180px; font-size: 11px; color: var(--muted); padding-top: 6px; }
-.cfg-row .hint { display: block; font-size: 9px; color: var(--muted); margin-top: 2px; }
-.cfg-row input[type=text], .cfg-row input[type=password], .cfg-row select {
-  flex: 1; background: #ffffff; border: 1px solid var(--border); border-radius: 8px;
-  color: var(--text); font-family: var(--font); font-size: 12px;
-  padding: 5px 8px; outline: none; }
-.cfg-row input:focus, .cfg-row select:focus { border-color: var(--accent); }
-.cfg-row input[type=checkbox] { width: 16px; height: 16px; margin-top: 6px; accent-color: var(--accent); }
-/* Danger badge on dangerous fields */
-.danger-badge { font-size: 9px; font-weight: bold; color: var(--bad); background: #ef444415;
-                border: 1px solid #ef444430; border-radius: 2px; padding: 1px 5px;
-                margin-left: 6px; vertical-align: middle; letter-spacing: .5px; }
-/* Action buttons */
-.admin-actions { display: flex; gap: 10px; margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--border); }
-.btn { padding: 9px 16px; border-radius: 8px; font-size: 12px; font-weight: 850; letter-spacing: 0;
-       font-family: var(--font); cursor: pointer; border: 1px solid var(--accent); text-transform: none; background:var(--surface); color:var(--accent); transition:all .15s; }
-.btn-stage  { background: var(--surface); color: var(--accent); border-color: var(--accent); }
-.btn-stage:hover:not(:disabled)  { background: var(--accent); color: #ffffff; }
-.btn-apply  { background: var(--accent2); color: var(--fer-black); border-color: var(--accent2); }
-.btn-apply:hover:not(:disabled)  { background: var(--fer-black); color: #ffffff; border-color: var(--fer-black); }
-.btn-force  { background: rgba(236,176,0,.10); color: var(--text); border-color: rgba(236,176,0,.48); }
-.btn-force:hover:not(:disabled)  { background: var(--accent2); color: var(--fer-black); border-color: var(--accent2); }
-.btn-cancel { background: transparent; color: #b42318; border-color: #e9b2ad; }
-.btn-cancel:hover:not(:disabled) { background: #b42318; color: #ffffff; border-color: #b42318; }
-:root[data-theme="dark"] .btn-stage { background: transparent; color: var(--accent2); border-color: var(--accent2); }
-:root[data-theme="dark"] .btn-stage:hover:not(:disabled), :root[data-theme="dark"] .btn-apply:hover:not(:disabled), :root[data-theme="dark"] .btn-force:hover:not(:disabled) { background:#f8f6ef; color:var(--fer-black); border-color:#f8f6ef; }
-:root[data-theme="dark"] .btn-apply { background: var(--accent2); color: var(--fer-black); border-color: var(--accent2); }
-:root[data-theme="dark"] .btn-force { background: rgba(236,176,0,.10); color: var(--accent2); border-color: rgba(236,176,0,.48); }
-:root[data-theme="dark"] .btn-cancel { color:#fca5a5; border-color:#7f1d1d; }
-:root[data-theme="dark"] .btn-cancel:hover:not(:disabled) { background:#b42318; color:#ffffff; border-color:#b42318; }
-.btn:disabled { opacity: 0.35; cursor: not-allowed; }
-/* Status column — node ACK table */
-.ack-table { width: 100%; border-collapse: collapse; }
-.ack-table th { font-size: 9px; color: var(--muted); text-align: left; padding: 4px 6px;
-                letter-spacing: .8px; text-transform: uppercase; border-bottom: 1px solid var(--border); }
-.ack-table td { font-size: 11px; padding: 6px; border-bottom: 1px solid #edf0f4; }
-.ack-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 5px; }
-.ack-dot-yes  { background: var(--good); }
-.ack-dot-no   { background: var(--muted); }
-.ack-dot-self { background: var(--accent); }
-/* Pending config info box */
-.pending-box { background: #f8fafc; border: 1px solid var(--border); border-radius: 8px;
-               padding: 10px 12px; margin-bottom: 14px; }
-.pending-box.pending-active { border-color: #f59e0b40; background: #f59e0b08; }
-.pending-label { font-size: 9px; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; margin-bottom: 6px; }
-.pending-version { font-size: 12px; font-family: var(--font); font-weight: 800; color: var(--accent); }
-.pending-stat { font-size: 10px; color: var(--muted); margin-top: 4px; }
-.pending-stat span { color: var(--text); }
-/* Progress bar */
-.ack-progress { height: 4px; background: var(--border); border-radius: 2px; margin-top: 8px; }
-.ack-progress-bar { height: 100%; border-radius: 2px; background: var(--good); transition: width .5s; }
-/* Warning modal */
-#force-modal { display:none; position:fixed; top:0;left:0;right:0;bottom:0;
-               background:#000a; z-index:100; align-items:center; justify-content:center; }
-#force-modal.show { display:flex; }
-.modal-box { background: var(--surface); border: 1px solid #ef444440; border-radius: 4px;
-             padding: 24px; max-width: 380px; }
-.modal-title { color: var(--bad); font-size: 14px; font-weight: bold; margin-bottom: 10px; }
-.modal-body { color: var(--muted); font-size: 12px; line-height: 1.6; margin-bottom: 16px; }
-.modal-actions { display:flex; gap:10px; justify-content:flex-end; }
-/* Toast */
-#toast { position:fixed; bottom:20px; right:20px; background: var(--surface); border:1px solid var(--border);
-         border-radius:4px; padding:10px 16px; font-size:12px; opacity:0; transition:opacity .3s;
-         pointer-events:none; z-index:200; }
-#toast.show { opacity:1; }
-#toast.toast-ok   { border-color:#22c55e60; color:var(--good); }
-#toast.toast-err  { border-color:#ef444460; color:var(--bad); }
-#toast.toast-warn { border-color:#f9731660; color:var(--warn); }
-</style>
-</head>
-<body>
-<div id="app" style="display:block;">
-  <div id="header">
-    <div id="hdr-health" class="health-loading">
-      <div id="hdr-health-dot"></div>
-      <span id="hdr-health-label">ADMIN</span>
-    </div>
-    <div class="meta" id="hdr-hostname" style="color:var(--text);font-size:12px;font-weight:bold;padding-right:10px;border-right:1px solid var(--border);margin-right:10px;">—</div>
-    <div class="spacer"></div>
-    <a href="/" style="color:var(--muted);text-decoration:none;font-size:11px;padding-right:4px">&#8592; Status</a>
-  </div>
-
-  <div class="admin-body">
-    <!-- ── Left: Config Form ── -->
-    <div class="admin-form-col">
-
-      <div class="cfg-section">
-        <div class="cfg-section-title">EUD / Client Connection</div>
-
-        <div class="cfg-row">
-          <label>Connection Mode<span class="hint">How clients connect to this node</span></label>
-          <select id="f-eud">
-            <option value="wired">Wired (USB/Ethernet)</option>
-            <option value="wireless">Wireless (5GHz AP)</option>
-            <option value="auto">Auto (Wireless unless wired)</option>
-          </select>
-        </div>
-        <div class="cfg-row">
-          <label>AP SSID<span class="hint">WiFi network name for clients</span></label>
-          <input type="text" id="f-lan-ap-ssid">
-        </div>
-        <div class="cfg-row">
-          <label>AP Password<span class="hint">Client WiFi password</span></label>
-          <input type="password" id="f-lan-ap-key" autocomplete="new-password">
-        </div>
-        <div class="cfg-row">
-          <label>Max EUDs per Node<span class="hint">Max concurrent client devices</span></label>
-          <input type="text" id="f-max-euds">
-        </div>
-      </div>
-
-      <div class="cfg-section">
-        <div class="cfg-section-title">Mesh Network</div>
-
-        <div class="cfg-row">
-          <label>Mesh SSID<span class="hint">BATMAN mesh network name
-            <span class="danger-badge">⚠ DANGEROUS</span></span></label>
-          <input type="text" id="f-mesh-ssid">
-        </div>
-        <div class="cfg-row">
-          <label>Mesh SAE Key<span class="hint">WPA3-SAE passphrase
-            <span class="danger-badge">⚠ DANGEROUS</span></span></label>
-          <input type="password" id="f-mesh-key" autocomplete="new-password">
-        </div>
-        <div class="cfg-row">
-          <label>IP Range (CIDR)<span class="hint">Mesh network address space
-            <span class="danger-badge">⚠ DANGEROUS</span></span></label>
-          <input type="text" id="f-ipv4-network">
-        </div>
-        <div class="cfg-row">
-          <label>Regulatory Domain<span class="hint">2-letter country code for RF</span></label>
-          <input type="text" id="f-regulatory-domain" maxlength="2" style="width:48px;flex:none;">
-        </div>
-        <div class="cfg-row">
-          <label>Auto Channel<span class="hint">Scan and select best channel</span></label>
-          <input type="checkbox" id="f-acs">
-        </div>
-      </div>
-
-      <div class="cfg-section">
-        <div class="cfg-section-title">Services</div>
-
-        <div class="cfg-row">
-          <label>MediaMTX<span class="hint">RTSP/WebRTC streaming</span></label>
-          <input type="checkbox" id="f-mtx">
-        </div>
-        <div class="cfg-row">
-          <label>Mumble<span class="hint">Voice communications</span></label>
-          <input type="checkbox" id="f-mumble">
-        </div>
-        <div class="cfg-row">
-          <label>Auto Update<span class="hint">Automatic MANET tool updates</span></label>
-          <input type="checkbox" id="f-auto-update">
-        </div>
-      </div>
-
-      <div class="cfg-section">
-        <div class="cfg-section-title">Security</div>
-
-        <div class="cfg-row">
-          <label>Admin Password<span class="hint">This admin interface</span></label>
-          <input type="password" id="f-admin-password" autocomplete="new-password">
-        </div>
-      </div>
-
-      <div class="admin-actions">
-        <button class="btn btn-stage"  id="btn-stage"  onclick="stageChanges()">Stage Changes</button>
-        <button class="btn btn-apply"  id="btn-apply"  onclick="applyChanges(false)" disabled>Apply Now</button>
-        <button class="btn btn-force"  id="btn-force"  onclick="showForceModal()" style="display:none">Force Apply</button>
-        <button class="btn btn-cancel" id="btn-cancel" onclick="cancelPending()" style="display:none">Cancel</button>
-      </div>
-      <div id="action-msg" style="font-size:10px;color:var(--muted);margin-top:8px;min-height:14px;"></div>
-    </div>
-
-    <!-- ── Right: Deployment Status ── -->
-    <div class="admin-status-col">
-      <div class="admin-col-hdr">Deployment Status</div>
-
-      <!-- Pending config box -->
-      <div class="pending-box" id="pending-box">
-        <div class="pending-label">Pending Config</div>
-        <div id="pending-version" class="pending-version">None</div>
-        <div id="pending-stat"   class="pending-stat" style="display:none"></div>
-        <div id="ack-progress-wrap" style="display:none">
-          <div class="ack-progress"><div class="ack-progress-bar" id="ack-bar" style="width:0%"></div></div>
-        </div>
-      </div>
-
-      <!-- Node ACK table -->
-      <div class="admin-col-hdr" style="margin-top:14px">Nodes (<span id="node-count">—</span>)</div>
-      <table class="ack-table" id="ack-table">
-        <thead><tr><th>Node</th><th>IP</th><th>ACK</th></tr></thead>
-        <tbody id="ack-tbody"></tbody>
-      </table>
-
-      <!-- Dangerous change warning -->
-      <div id="danger-warn" style="display:none;margin-top:14px;padding:10px;
-           background:#ef444408;border:1px solid #ef444430;border-radius:3px;
-           font-size:10px;color:var(--bad);line-height:1.6;">
-        ⚠ Staged changes include <strong>DANGEROUS</strong> settings (mesh SSID, key, or IP range).
-        All nodes will briefly disconnect while applying. Ensure 100% ACK before applying.
-      </div>
-    </div>
-  </div>
-
-  <!-- Force apply modal -->
-  <div id="force-modal">
-    <div class="modal-box">
-      <div class="modal-title">⚠ Force Apply</div>
-      <div class="modal-body" id="force-modal-body">
-        Not all nodes have acknowledged the pending config.
-        Forcing apply will push changes to this node only — unreachable nodes
-        will remain on the old config and may need manual intervention.
-      </div>
-      <div class="modal-actions">
-        <button class="btn btn-cancel" onclick="closeForceModal()">Cancel</button>
-        <button class="btn btn-force"  onclick="applyChanges(true)">Force Apply</button>
-      </div>
-    </div>
-  </div>
-
-  <div id="toast"></div>
-</div>
-
-<script>
-const POLL_MS = 5000;
-let STATUS = null;
-let pollTimer = null;
-
-// ── Init ────────────────────────────────────────────────────────────────────
-window.addEventListener('DOMContentLoaded', async () => {
-  document.getElementById('hdr-hostname').textContent = location.hostname;
-  await refreshStatus();
-  pollTimer = setInterval(refreshStatus, POLL_MS);
-});
-
-// ── Fetch status ─────────────────────────────────────────────────────────────
-async function refreshStatus() {
-  try {
-    const r = await fetch('/api/admin/status');
-    if (!r.ok) return;
-    STATUS = await r.json();
-    renderStatus(STATUS);
-  } catch(e) {}
-}
-
-// ── Populate form from current config ────────────────────────────────────────
-function populateForm(cfg) {
-  setVal('f-eud',              cfg.eud              || 'wired');
-  setVal('f-lan-ap-ssid',      cfg.lan_ap_ssid      || '');
-  setVal('f-lan-ap-key',       cfg.lan_ap_key        || '');
-  setVal('f-max-euds',         cfg.max_euds_per_node || '');
-  setVal('f-mesh-ssid',        cfg.mesh_ssid         || '');
-  setVal('f-mesh-key',         cfg.mesh_key          || '');
-  setVal('f-ipv4-network',     cfg.ipv4_network      || '');
-  setVal('f-regulatory-domain',cfg.regulatory_domain || 'US');
-  setChk('f-acs',              cfg.acs        === 'y');
-  setChk('f-mtx',              cfg.mtx        === 'y');
-  setChk('f-mumble',           cfg.mumble     === 'y');
-  setChk('f-auto-update',      cfg.auto_update=== 'y');
-  setVal('f-admin-password',   cfg.admin_password    || '');
-}
-
-function setVal(id, v) { const el = document.getElementById(id); if (el) el.value = v; }
-function setChk(id, v) { const el = document.getElementById(id); if (el) el.checked = v; }
-function getVal(id)    { const el = document.getElementById(id); return el ? el.value.trim() : ''; }
-function getChk(id)    { const el = document.getElementById(id); return el ? el.checked : false; }
-
-// ── Render status panel ───────────────────────────────────────────────────────
-let formPopulated = false;
-function renderStatus(s) {
-  // Populate form once from live config
-  if (!formPopulated && s.current_config) {
-    populateForm(s.current_config);
-    formPopulated = true;
-  }
-
-  document.getElementById('node-count').textContent = s.total_nodes || '0';
-
-  const pending  = s.pending;
-  const pBox     = document.getElementById('pending-box');
-  const pVersion = document.getElementById('pending-version');
-  const pStat    = document.getElementById('pending-stat');
-  const pWrap    = document.getElementById('ack-progress-wrap');
-  const ackBar   = document.getElementById('ack-bar');
-  const dangerWarn = document.getElementById('danger-warn');
-  const btnApply = document.getElementById('btn-apply');
-  const btnForce = document.getElementById('btn-force');
-  const btnCancel= document.getElementById('btn-cancel');
-
-  if (pending && pending.version) {
-    pBox.className = 'pending-box pending-active';
-    pVersion.textContent = 'v' + pending.version;
-
-    const nodes = s.nodes || [];
-    const acked = nodes.filter(n => n.ack === pending.version).length;
-    const total = nodes.length;
-    const pct   = total > 0 ? Math.round(acked / total * 100) : 0;
-
-    pStat.style.display = '';
-    pStat.innerHTML = `<span>${acked}/${total}</span> nodes ACKed &nbsp; <span>${pct}%</span>`;
-    pWrap.style.display = '';
-    ackBar.style.width = pct + '%';
-    ackBar.style.background = acked === total ? 'var(--good)' : 'var(--warn)';
-
-    const isDangerous = pending.dangerous === true;
-    dangerWarn.style.display = isDangerous ? '' : 'none';
-
-    const allAcked = acked === total && total > 0;
-    btnApply.disabled = !allAcked;
-    btnApply.style.display = '';
-    btnForce.style.display = !allAcked ? '' : 'none';
-    btnCancel.style.display = '';
-
-    const activateAt = pending.activate_at || 0;
-    if (activateAt > 0) {
-      const secs = Math.max(0, activateAt - Math.floor(Date.now() / 1000));
-      document.getElementById('action-msg').textContent =
-        secs > 0 ? `Applying in ${secs}s...` : 'Applying now...';
-    }
-  } else {
-    pBox.className = 'pending-box';
-    pVersion.textContent = 'None';
-    pStat.style.display = 'none';
-    pWrap.style.display = 'none';
-    dangerWarn.style.display = 'none';
-    btnApply.disabled = true;
-    btnApply.style.display = 'none';
-    btnForce.style.display = 'none';
-    btnCancel.style.display = 'none';
-    document.getElementById('action-msg').textContent = '';
-  }
-
-  // Node ACK table
-  const tbody = document.getElementById('ack-tbody');
-  tbody.innerHTML = (s.nodes || []).map(n => {
-    const pendingVer = pending && pending.version;
-    const isAcked    = pendingVer && n.ack === pendingVer;
-    const isSelf     = n.hostname === (STATUS && STATUS.my_hostname);
-    let dotCls, ackLabel;
-    if (!pendingVer) {
-      dotCls   = 'ack-dot-self';
-      ackLabel = '—';
-    } else if (isSelf && isAcked) {
-      dotCls   = 'ack-dot-self';
-      ackLabel = 'Self ✓';
-    } else if (isAcked) {
-      dotCls   = 'ack-dot-yes';
-      ackLabel = '✓';
-    } else {
-      dotCls   = 'ack-dot-no';
-      ackLabel = 'Waiting';
-    }
-    const staleMs = (DATA.timestamp - parseInt(n.last_seen || 0));
-    const stale   = staleMs > 300;
-    const nameStyle = stale ? 'color:var(--muted)' : '';
-    return `<tr>
-      <td style="${nameStyle}">${n.hostname}</td>
-      <td style="color:var(--muted);font-size:10px">${n.ip}</td>
-      <td><span class="ack-dot ${dotCls}"></span>${ackLabel}</td>
-    </tr>`;
-  }).join('');
-}
-
-// ── Read form into config object ──────────────────────────────────────────────
-function readForm() {
-  return {
-    eud:               getVal('f-eud'),
-    lan_ap_ssid:       getVal('f-lan-ap-ssid'),
-    lan_ap_key:        getVal('f-lan-ap-key'),
-    max_euds_per_node: getVal('f-max-euds'),
-    mesh_ssid:         getVal('f-mesh-ssid'),
-    mesh_key:          getVal('f-mesh-key'),
-    ipv4_network:      getVal('f-ipv4-network'),
-    regulatory_domain: getVal('f-regulatory-domain'),
-    acs:               getChk('f-acs')          ? 'y' : 'n',
-    mtx:               getChk('f-mtx')          ? 'y' : 'n',
-    mumble:            getChk('f-mumble')        ? 'y' : 'n',
-    auto_update:       getChk('f-auto-update')   ? 'y' : 'n',
-    admin_password:    getVal('f-admin-password'),
-  };
-}
-
-// ── Stage changes ─────────────────────────────────────────────────────────────
-async function stageChanges() {
-  const cfg = readForm();
-  showMsg('Staging...', 'muted');
-  try {
-    const r   = await fetch('/api/admin/stage', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({config: cfg})
-    });
-    const res = await r.json();
-    if (r.ok && res.ok) {
-      toast('Changes staged — waiting for nodes to ACK', 'ok');
-      showMsg('Staged. Waiting for ' + (STATUS && STATUS.total_nodes || '?') + ' nodes to ACK.', 'ok');
-      await refreshStatus();
-    } else {
-      toast('Stage failed: ' + (res.error || r.status), 'err');
-      showMsg('Stage failed.', 'err');
-    }
-  } catch(e) {
-    toast('Stage error: ' + e, 'err');
-  }
-}
-
-// ── Apply changes ─────────────────────────────────────────────────────────────
-async function applyChanges(force) {
-  closeForceModal();
-  showMsg('Sending activate signal...', 'ok');
-  try {
-    const r   = await fetch('/api/admin/activate', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({force: force})
-    });
-    const res = await r.json();
-    if (r.ok && res.ok) {
-      toast('Activate signal sent — applying in 60s', 'ok');
-      showMsg('All nodes will apply in ~60s.', 'ok');
-      await refreshStatus();
-    } else {
-      toast('Activate failed: ' + (res.error || r.status), 'err');
-    }
-  } catch(e) {
-    toast('Activate error: ' + e, 'err');
-  }
-}
-
-// ── Cancel pending ────────────────────────────────────────────────────────────
-async function cancelPending() {
-  try {
-    const r   = await fetch('/api/admin/cancel', {method: 'POST'});
-    const res = await r.json();
-    if (r.ok && res.ok) {
-      toast('Pending config cancelled', 'warn');
-      showMsg('', '');
-      await refreshStatus();
-    }
-  } catch(e) {}
-}
-
-// ── Force modal ───────────────────────────────────────────────────────────────
-function showForceModal() {
-  const s     = STATUS;
-  const nodes = s && s.nodes || [];
-  const pv    = s && s.pending && s.pending.version;
-  const acked = pv ? nodes.filter(n => n.ack === pv).length : 0;
-  const total = nodes.length;
-  document.getElementById('force-modal-body').textContent =
-    `${acked} of ${total} nodes have ACKed. Forcing will apply on all reachable nodes. ` +
-    `Unreachable nodes (${total - acked}) will remain on the old config until they reconnect.`;
-  document.getElementById('force-modal').classList.add('show');
-}
-function closeForceModal() {
-  document.getElementById('force-modal').classList.remove('show');
-}
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
-function showMsg(msg, cls) {
-  const el = document.getElementById('action-msg');
-  el.textContent = msg;
-  el.style.color = cls === 'ok' ? 'var(--good)' : cls === 'err' ? 'var(--bad)' : 'var(--muted)';
-}
-
-let toastTimer = null;
-function toast(msg, cls) {
-  const el = document.getElementById('toast');
-  el.textContent = msg;
-  el.className = 'show toast-' + cls;
-  clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => el.className = '', 3000);
-}
-</script>
-</body>
-</html>"""
-
-def render_admin_page():
-    html = ADMIN_HTML
-    html = html.replace('__CSS__', CSS)
-    return html
-
 def render_status_page():
     html = STATUS_HTML
     html = html.replace('__CSS__',     CSS)
@@ -3389,14 +2745,23 @@ def send_file_response(handler, path, content_type):
 
 def render_perf_auth_page(next_path='/', error=''):
     safe_next = html.escape(next_path, quote=True)
-    safe_error = html.escape(error)
     logo_v = logo_asset_token()
+    # A node that came through provisioning always has admin_password. If one
+    # somehow doesn't, say so instead of rejecting every password silently.
+    if not get_provisioned_manage_password():
+        intro = ('No management password is set on this node. Add '
+                 '<code>admin_password=&lt;password&gt;</code> to /etc/mesh.conf '
+                 'and run <code>systemctl restart mesh-status</code>.')
+        error = error or 'No admin_password in /etc/mesh.conf'
+    else:
+        intro = 'Enter the provisioned management password to continue.'
+    safe_error = html.escape(error)
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>perf.local login</title>
+<title>MANET management login</title>
 <script>
 (() => {{
   const key = 'manetUiTheme';
@@ -3551,10 +2916,10 @@ button {{
   <div class="wrap">
     <div class="top">
       <img class="logo" src="/assets/fer-logo-black?v={logo_v}" data-light="/assets/fer-logo-black?v={logo_v}" data-dark="/assets/fer-logo-white?v={logo_v}" alt="FER">
-      <h1>perf.local</h1>
-      <p>Enter the provisioned management password to continue.</p>
+      <h1>MANET&#8203;//MANAGE</h1>
+      <p>{intro}</p>
     </div>
-    <form id="perf-login-form" method="post" action="/auth/perf-login" autocomplete="on">
+    <form id="perf-login-form" method="post" action="{MANAGE_PREFIX}/login" autocomplete="on">
       <input type="hidden" name="next" value="{safe_next}">
       <label class="sr-only" for="username">Username</label>
       <input class="sr-only" id="username" name="username" type="text" value="admin" autocomplete="username" tabindex="-1" aria-hidden="true">
@@ -3583,7 +2948,7 @@ button {{
 # ─────────────────────────────────────────────────────────────────────────────
 # HTTP Handler
 # ─────────────────────────────────────────────────────────────────────────────
-class MeshHandler(http.server.BaseHTTPRequestHandler):
+class MeshHandler(ManageRoutes, http.server.BaseHTTPRequestHandler):
 
     def log_message(self, fmt, *args):
         # Suppress default access logs (use stderr only for errors)
@@ -3594,6 +2959,17 @@ class MeshHandler(http.server.BaseHTTPRequestHandler):
         self.send_header('Content-Type', 'text/plain')
         self.end_headers()
         self.wfile.write(b'Forbidden')
+
+    def send_401_json(self, error='Management password required'):
+        """Unauthenticated XHR from the management UI — the page turns this
+        into a bounce back to the login form rather than a silent failure."""
+        body = json.dumps({'ok': False, 'auth_required': True, 'error': error}).encode('utf-8')
+        self.send_response(401)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Content-Length', str(len(body)))
+        self.send_header('Cache-Control', 'no-store')
+        self.end_headers()
+        self.wfile.write(body)
 
     def send_html(self, body):
         encoded = body.encode('utf-8')
@@ -3630,8 +3006,12 @@ class MeshHandler(http.server.BaseHTTPRequestHandler):
     def _send_perf_cookie_redirect(self, target_path, token):
         target_path = normalize_local_redirect(target_path)
         self.send_response(303)
-        self.send_header('Location', target_path or '/')
-        self.send_header('Set-Cookie', f'{PERF_AUTH_COOKIE}={token}; Path=/; Max-Age={PERF_AUTH_COOKIE_MAX_AGE}; SameSite=Lax')
+        self.send_header('Location', target_path or MANAGE_PREFIX + '/')
+        self.send_header(
+            'Set-Cookie',
+            f'{PERF_AUTH_COOKIE}={token}; Path=/; Max-Age={PERF_AUTH_COOKIE_MAX_AGE}; '
+            'HttpOnly; SameSite=Lax'
+        )
         self.end_headers()
 
     def _send_perf_auth_required(self, next_path='/', error=''):
@@ -3646,58 +3026,91 @@ class MeshHandler(http.server.BaseHTTPRequestHandler):
 
     def _send_perf_logout_redirect(self):
         self.send_response(303)
-        self.send_header('Location', '/auth/perf-login')
-        self.send_header('Set-Cookie', f'{PERF_AUTH_COOKIE}=; Path=/; Max-Age=0; SameSite=Lax')
+        self.send_header('Location', MANAGE_PREFIX + '/login')
+        self.send_header('Set-Cookie', f'{PERF_AUTH_COOKIE}=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax')
         self.end_headers()
 
-    def _proxy_to_perf(self):
-        import urllib.request as _ur
-        parsed = urlparse(self.path)
-        query = parse_qs(parsed.query)
-        supplied = query.get('perf_token', [''])[0]
-        if supplied and is_valid_perf_auth_token(supplied):
-            clean_q = [(k, v) for k, values in query.items() if k != 'perf_token' for v in values]
-            clean_query = '&'.join(
-                f'{k}={quote(v, safe="")}' if v != '' else k
-                for k, v in clean_q
-            )
-            clean_path = parsed.path or '/'
-            if clean_query:
-                clean_path += '?' + clean_query
-            self._send_perf_cookie_redirect(clean_path, supplied)
-            return
-        if not self._perf_cookie_valid():
-            next_path = parsed.path or '/'
-            if parsed.query:
-                next_path += '?' + parsed.query
-            self._send_perf_auth_required(next_path=next_path)
-            return
-        target = 'http://127.0.0.1:8081' + self.path
-        req = _ur.Request(target, method=self.command)
-        for k, v in self.headers.items():
-            if k.lower() not in ('host', 'content-length', 'cookie'):
-                req.add_header(k, v)
-        length = int(self.headers.get('Content-Length', 0))
-        data = self.rfile.read(length) if length else None
-        if data:
-            req.data = data
-            req.add_header('Content-Length', str(len(data)))
-        try:
-            with _ur.urlopen(req, timeout=120) as resp:
-                self.send_response(resp.status)
-                for k, v in resp.headers.items():
-                    if k.lower() not in ('transfer-encoding',):
-                        self.send_header(k, v)
-                self.end_headers()
-                self.wfile.write(resp.read())
-        except Exception as e:
-            self.send_response(502)
-            self.end_headers()
-            self.wfile.write(str(e).encode())
+    def _send_redirect(self, location):
+        self.send_response(302)
+        self.send_header('Location', location)
+        self.send_header('Content-Length', '0')
+        self.end_headers()
 
     def _is_perf_host(self):
         host = self.headers.get('Host', '').split(':')[0].lower()
         return host == 'perf.local' or host == 'perf'
+
+    def _perf_host_target(self, parsed):
+        """Fold a perf.local URL into the /manage space on this host."""
+        target = MANAGE_PREFIX + (parsed.path or '/')
+        if parsed.query:
+            target += '?' + parsed.query
+        return target
+
+    def _is_manage_path(self, path):
+        return path == MANAGE_PREFIX or path.startswith(MANAGE_PREFIX + '/')
+
+    def _handle_manage(self, parsed):
+        """Login, logout, or a management route once the password has been given."""
+        path = parsed.path
+        if path == MANAGE_PREFIX:
+            self._send_redirect(MANAGE_PREFIX + '/')
+            return
+        if path in (MANAGE_PREFIX + '/logout', '/auth/perf-logout'):
+            self._send_perf_logout_redirect()
+            return
+        if path in (MANAGE_PREFIX + '/login', '/auth/perf-login'):
+            if self.command == 'POST':
+                form = self.read_form_body()
+                password = (form.get('password', [''])[0] or '').strip()
+                next_path = normalize_local_redirect((form.get('next', [''])[0] or '').strip())
+                if not self._is_manage_path(next_path):
+                    next_path = MANAGE_PREFIX + '/'
+                if password and password == get_provisioned_manage_password():
+                    self._send_perf_cookie_redirect(next_path, get_perf_auth_token())
+                else:
+                    self._send_perf_auth_required(next_path=next_path,
+                                                  error='Wrong management password')
+                return
+            next_path = parse_qs(parsed.query).get('next', [MANAGE_PREFIX + '/'])[0]
+            if not self._is_manage_path(normalize_local_redirect(next_path)):
+                next_path = MANAGE_PREFIX + '/'
+            self._send_perf_auth_required(next_path=next_path)
+            return
+
+        # Everything else under /manage is the UI itself. This is the gate:
+        # without a valid cookie the request never reaches a management route.
+        if not self._perf_cookie_valid():
+            next_path = path
+            if parsed.query:
+                next_path += '?' + parsed.query
+            self._send_perf_auth_required(next_path=next_path)
+            return
+
+        self._dispatch_manage()
+
+    def _dispatch_manage(self):
+        """Hand a /manage request to the mixin with the prefix stripped.
+
+        The routes were written as if they owned the site root, so the prefix
+        is removed here rather than threaded through every one of them.
+        """
+        original = self.path
+        stripped = original[len(MANAGE_PREFIX):] or '/'
+        self.path = stripped if stripped.startswith('/') else '/' + stripped
+        try:
+            handler = {
+                'GET': self.manage_do_GET,
+                'POST': self.manage_do_POST,
+                'DELETE': self.manage_do_DELETE,
+            }.get(self.command)
+            if handler is None:
+                self.send_response(405)
+                self.end_headers()
+                return
+            handler()
+        finally:
+            self.path = original
 
     def do_GET(self):
         parsed = urlparse(self.path)
@@ -3705,29 +3118,30 @@ class MeshHandler(http.server.BaseHTTPRequestHandler):
         if logo_file:
             send_file_response(self, logo_file, asset_content_type(logo_file))
             return
-        if self._is_perf_host():
-            if parsed.path == '/auth/perf-logout':
-                self._send_perf_logout_redirect()
-                return
-            if parsed.path == '/auth/perf-login':
-                next_path = parse_qs(parsed.query).get('next', ['/'])[0]
-                self._send_perf_auth_required(next_path=next_path)
-                return
-            self._proxy_to_perf()
-            return
 
         conf       = load_kv_file(MESH_CONF_FILE)
         client_ip  = self.client_address[0]
-        path       = parsed.path.rstrip('/') or '/'
 
-        # Admin page — no Basic auth
-        if path == '/admin':
-            self.send_html(render_admin_page())
-            return
-
-        # All other routes — IP restricted
+        # Nothing this server offers is meant for the uplink/LAN side — only
+        # localhost and clients holding a DHCP lease from the mesh.
         if not is_allowed_ip(client_ip, conf):
             self.send_403()
+            return
+
+        # dnsmasq still points EUDs at perf.local; that name now lands in /manage.
+        if self._is_perf_host():
+            self._send_redirect(self._perf_host_target(parsed))
+            return
+
+        if self._is_manage_path(parsed.path) or parsed.path.startswith('/auth/perf-'):
+            self._handle_manage(parsed)
+            return
+
+        path = parsed.path.rstrip('/') or '/'
+
+        # The config form moved into the management UI as its NODE CONFIG tab.
+        if path == '/admin':
+            self._send_redirect(MANAGE_PREFIX + '/#config')
             return
 
         if path in ('/', '/index.html'):
@@ -3754,7 +3168,6 @@ class MeshHandler(http.server.BaseHTTPRequestHandler):
 
         elif path.startswith('/api/peer/'):
             peer_ip = path[len('/api/peer/'):]
-            # Validate: must look like an IP address
             try:
                 ipaddress.ip_address(peer_ip)
             except ValueError:
@@ -3762,18 +3175,14 @@ class MeshHandler(http.server.BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(b'Bad IP')
                 return
-            try:
-                import urllib.request
-                url = f'http://{peer_ip}:80/api/local'
-                req = urllib.request.Request(url, headers={'User-Agent': 'manet-proxy/1'})
-                with urllib.request.urlopen(req, timeout=4) as resp:
-                    data = json.loads(resp.read().decode())
-                self.send_json(data)
-            except Exception as e:
-                self.send_response(502)
+            data = assemble_peer_data(peer_ip)
+            if data is None:
+                self.send_response(404)
                 self.send_header('Content-Type', 'application/json')
                 self.end_headers()
-                self.wfile.write(json.dumps({'error': str(e)}).encode())
+                self.wfile.write(json.dumps({'error': f'No registry entry for {peer_ip}'}).encode())
+                return
+            self.send_json(data)
 
         elif path == '/api/debug':
             try:
@@ -3800,6 +3209,10 @@ class MeshHandler(http.server.BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(str(e).encode())
         elif path == '/api/admin/status':
+            # Hands out the mesh SAE key and admin password — same gate as /manage.
+            if not self._perf_cookie_valid():
+                self.send_401_json()
+                return
             try:
                 data = assemble_admin_status()
                 data['my_hostname'] = get_my_hostname()
@@ -3815,8 +3228,16 @@ class MeshHandler(http.server.BaseHTTPRequestHandler):
             self.wfile.write(b'Not found')
 
     def do_DELETE(self):
+        parsed = urlparse(self.path)
+        conf   = load_kv_file(MESH_CONF_FILE)
+        if not is_allowed_ip(self.client_address[0], conf):
+            self.send_403()
+            return
         if self._is_perf_host():
-            self._proxy_to_perf()
+            self._send_redirect(self._perf_host_target(parsed))
+            return
+        if self._is_manage_path(parsed.path):
+            self._handle_manage(parsed)
             return
 
         self.send_response(404)
@@ -3824,40 +3245,31 @@ class MeshHandler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(b'Not found')
 
     def do_POST(self):
-        if self._is_perf_host():
-            parsed = urlparse(self.path)
-            if parsed.path == '/auth/perf-login':
-                form = self.read_form_body()
-                password = (form.get('password', [''])[0] or '').strip()
-                next_path = normalize_local_redirect((form.get('next', ['/'])[0] or '/').strip())
-                conf = load_kv_file(MESH_CONF_FILE)
-                if password and password == get_provisioned_manage_password(conf):
-                    self._send_perf_cookie_redirect(next_path, get_perf_auth_token())
-                else:
-                    self._send_perf_auth_required(next_path=next_path, error='Wrong management password')
-                return
-            self._proxy_to_perf()
-            return
-
         conf      = load_kv_file(MESH_CONF_FILE)
         client_ip = self.client_address[0]
         parsed    = urlparse(self.path)
+
+        if not is_allowed_ip(client_ip, conf):
+            self.send_403()
+            return
+
+        if self._is_perf_host():
+            self._send_redirect(self._perf_host_target(parsed))
+            return
+
+        if self._is_manage_path(parsed.path) or parsed.path.startswith('/auth/perf-'):
+            self._handle_manage(parsed)
+            return
+
         path      = parsed.path.rstrip('/') or '/'
         length    = int(self.headers.get('Content-Length', 0))
         body      = self.rfile.read(length) if length else b'{}'
 
-        # Runtime control endpoints are called server-to-server by perf-dashboard,
-        # so restrict them to localhost/mesh IPs. Admin POSTs are intentionally
-        # not protected by Basic auth for the local field UI.
-        if path in CONTROL_POST_PATHS:
-            if not is_allowed_ip(client_ip, conf):
-                self.send_403()
-                return
-
+        # Runtime control endpoints are called server-to-server by the
+        # management UI on peer nodes, so they authenticate by source IP rather
+        # than by cookie. Admin POSTs below are operator actions and need the
+        # password.
         if path == '/api/perf-auth':
-            if not is_allowed_ip(client_ip, conf):
-                self.send_403()
-                return
             try:
                 req = json.loads(body)
             except Exception:
@@ -3870,6 +3282,12 @@ class MeshHandler(http.server.BaseHTTPRequestHandler):
                 self.send_header('Content-Type', 'application/json')
                 self.end_headers()
                 self.wfile.write(json.dumps({'ok': False, 'error': 'Wrong management password'}).encode('utf-8'))
+            return
+
+        # Reprovisioning the mesh (SAE key, SSID, IP range) is the most
+        # destructive thing this UI can do — never without the password.
+        if path.startswith('/api/admin/') and not self._perf_cookie_valid():
+            self.send_401_json()
             return
 
         if path == '/api/admin/stage':
@@ -4009,27 +3427,8 @@ class MeshHandler(http.server.BaseHTTPRequestHandler):
 
         elif path == '/api/control/txpower':
             try:
-                req   = json.loads(body)
-                iface = req.get('iface', '')
-                dbm   = req.get('dbm')   # integer dBm
-                if not iface or dbm is None:
-                    self.send_json({'ok': False, 'error': 'Missing iface or dbm'})
-                    return
-                requested = _fmt_dbm(dbm)
-                cap = get_iface_txpower_cap(iface)
-                options = txpower_options_for_iface(iface, cap, read_iface_txpower_dbm(iface))
-                if cap and not txpower_request_allowed(iface, requested, cap, options):
-                    self.send_json(unsupported_txpower_response(iface, requested, cap, options))
-                    return
-                requested, actual = set_iface_txpower_verified(iface, dbm)
-                self.send_json({
-                    'ok': True,
-                    'iface': iface,
-                    'dbm': requested,
-                    'actual_dbm': actual,
-                    'cap': cap,
-                    'options': txpower_options_for_iface(iface, cap, actual) if cap else [],
-                })
+                req = json.loads(body)
+                self.send_json(apply_txpower(req.get('iface', ''), req.get('dbm')))
             except subprocess.CalledProcessError as e:
                 err = (e.stderr or e.stdout or str(e)).strip()
                 self.send_json({'ok': False, 'error': err or str(e)})
@@ -4038,176 +3437,17 @@ class MeshHandler(http.server.BaseHTTPRequestHandler):
 
         elif path == '/api/control/halow_channel':
             try:
-                req     = json.loads(body)
-                channel = req.get('channel')
-                bw      = req.get('bw', '1MHz')
-                dbm     = req.get('dbm')
-                if not channel:
-                    self.send_json({'ok': False, 'error': 'Missing channel'})
-                    return
-                channel = int(channel)
-                # EU S1G channel index → centre frequency in kHz
-                eu_s1g_freq_khz = {idx: freq for idx, freq in enumerate(HALOW_EU_CHANNELS, start=1)}
-                s1g_channel = HALOW_EU_UI_TO_S1G_CHANNEL.get(channel)
-                freq_khz = eu_s1g_freq_khz.get(channel)
-                if not freq_khz or not s1g_channel:
-                    self.send_json({'ok': False, 'error': f'Invalid EU S1G channel {channel}'})
-                    return
-                bw_mhz = int(str(bw).replace('MHz', ''))
-                requested = ''
-                actual = ''
-                if dbm is not None:
-                    cap = get_halow_bw_txpower_cap(bw) or get_iface_txpower_cap('wlan2')
-                    requested = _fmt_dbm(dbm)
-                    options = txpower_options_for_iface('wlan2', cap, read_iface_txpower_dbm('wlan2'))
-                    if cap and not txpower_request_allowed('wlan2', requested, cap, options):
-                        self.send_json(unsupported_txpower_response('wlan2', requested, cap, options))
-                        return
-                # s1g_prim_chwidth: 0=1MHz primary, 1=2MHz primary
-                # For 4MHz operation, primary channel is 2MHz → chwidth=1
-                chwidth = {1: 0, 2: 1, 4: 1}.get(bw_mhz, 0)
-                # Write override flag so channel-election.sh doesn't overwrite
-                with open('/var/run/halow-channel-override', 'w') as f:
-                    f.write(f'{channel},{bw}')
-                # Update wpa_supplicant conf for persistence across reboots
-                wpa_conf = '/etc/wpa_supplicant/wpa_supplicant-wlan2-s1g.conf'
-                with open(wpa_conf) as f:
-                    content = f.read()
-                content = re.sub(r'(channel\s*=\s*)\d+', rf'\g<1>{s1g_channel}', content)
-                content = re.sub(r'(op_class\s*=\s*)\d+', r'\g<1>66', content)
-                content = re.sub(r'(s1g_prim_chwidth\s*=\s*)\d+', rf'\g<1>{chwidth}', content)
-                with open(wpa_conf, 'w') as f:
-                    f.write(content)
-                # Apply immediately via morse_cli (needs root; mesh-status runs as root)
-                morse_result = subprocess.run(
-                    ['morse_cli', '-i', 'wlan2', 'channel',
-                     '-c', str(freq_khz), '-o', str(bw_mhz), '-p', str(bw_mhz)],
-                    capture_output=True, text=True, timeout=10
-                )
-                if morse_result.returncode != 0:
-                    # Fall back to wpa_supplicant restart if morse_cli fails
-                    subprocess.run(['systemctl', 'restart', 'wpa_supplicant-s1g-wlan2.service'],
-                                   timeout=15)
-                if dbm is not None:
-                    requested, actual = set_iface_txpower_verified('wlan2', dbm)
-                self.send_json({'ok': True, 'channel': channel, 'freq_khz': freq_khz, 'bw': bw, 'dbm': requested if dbm is not None else '', 'actual_dbm': actual if dbm is not None else ''})
+                req = json.loads(body)
+                self.send_json(apply_halow_channel(
+                    req.get('channel'), req.get('bw', '1MHz'), req.get('dbm')))
             except Exception as e:
                 self.send_json({'ok': False, 'error': str(e)})
 
         elif path == '/api/control/wifi_channel':
             try:
-                req     = json.loads(body)
-                iface   = req.get('interface', req.get('iface', ''))
-                channel = req.get('channel')
-                dbm     = req.get('dbm')
-                if iface not in ('wlan0', 'wlan1'):
-                    self.send_json({'ok': False, 'error': 'Invalid Wi-Fi interface'})
-                    return
-                freq = wifi_channel_to_freq(iface, channel)
-                if not freq:
-                    self.send_json({'ok': False, 'error': f'Invalid channel {channel} for {iface}'})
-                    return
-
-                conf_path = f'/etc/wpa_supplicant/wpa_supplicant-{iface}.conf'
-                if not os.path.exists(conf_path):
-                    self.send_json({'ok': False, 'error': f'Missing {conf_path}'})
-                    return
-                with open(conf_path) as f:
-                    content = f.read()
-                if re.search(r'frequency=\d+', content):
-                    content = re.sub(r'frequency=\d+', f'frequency={freq}', content)
-                else:
-                    content = re.sub(r'(network=\{\n)', rf'\1    frequency={freq}\n', content, count=1)
-                with open(conf_path, 'w') as f:
-                    f.write(content)
-
-                subprocess.run(['systemctl', 'restart', f'wpa_supplicant@{iface}.service'],
-                               check=True, timeout=15)
-                if dbm is not None:
-                    cap = get_iface_txpower_cap(iface)
-                    requested = _fmt_dbm(dbm)
-                    options = txpower_options_for_iface(iface, cap)
-                    if cap and not txpower_request_allowed(iface, requested, cap, options):
-                        self.send_json(unsupported_txpower_response(iface, requested, cap, options))
-                        return
-                    requested, actual = set_iface_txpower_verified(iface, dbm)
-                self.send_json({'ok': True, 'iface': iface, 'channel': channel, 'frequency': freq, 'dbm': requested if dbm is not None else '', 'actual_dbm': actual if dbm is not None else ''})
-            except subprocess.CalledProcessError as e:
-                self.send_json({'ok': False, 'error': str(e)})
-            except Exception as e:
-                self.send_json({'ok': False, 'error': str(e)})
-
-        elif path == '/api/iperf/server/start':
-            try:
-                subprocess.run(['pkill', '-f', 'iperf3 -s'], capture_output=True)
-                subprocess.Popen(['iperf3', '-s', '--one-off', '-J',
-                                  '--logfile', '/tmp/iperf3-server.log'])
-                self.send_json({'ok': True})
-            except Exception as e:
-                self.send_json({'ok': False, 'error': str(e)})
-
-        elif path == '/api/iperf/server/stop':
-            try:
-                subprocess.run(['pkill', '-f', 'iperf3 -s'], capture_output=True)
-                self.send_json({'ok': True})
-            except Exception as e:
-                self.send_json({'ok': False, 'error': str(e)})
-
-        elif path == '/api/iperf/client/run':
-            try:
-                req        = json.loads(body)
-                server_ip  = req.get('server_ip', '')
-                test_type  = req.get('test_type', 'tcp_1stream')
-                duration   = int(req.get('duration', 30))
-                bitrate    = req.get('bitrate', '4M')
-                parallel   = int(req.get('parallel', 1))
-                reverse    = bool(req.get('reverse', False))
-
-                cmd = ['iperf3', '-c', server_ip, '-t', str(duration), '-J']
-                if test_type in ('udp_throughput', 'udp_jitter', 'packet_loss'):
-                    cmd += ['-u', '-b', bitrate]
-                if parallel > 1:
-                    cmd += ['-P', str(parallel)]
-                if reverse:
-                    cmd += ['-R']
-
-                r = subprocess.run(cmd, capture_output=True, text=True, timeout=duration + 15)
-                try:
-                    result = json.loads(r.stdout)
-                except Exception:
-                    result = {'raw': r.stdout, 'stderr': r.stderr}
-                if result.get('error'):
-                    self.send_json({'ok': False, 'error': result.get('error'), 'result': result})
-                else:
-                    self.send_json({'ok': r.returncode == 0, 'error': r.stderr.strip(), 'result': result})
-            except Exception as e:
-                self.send_json({'ok': False, 'error': str(e)})
-
-        elif path == '/api/ping/run':
-            try:
-                req    = json.loads(body)
-                target = req.get('target', '')
-                count  = int(req.get('count', 100))
-                interval = float(req.get('interval', 0.2))
-                if not target:
-                    self.send_json({'ok': False, 'error': 'Missing target'})
-                    return
-                r = subprocess.run(
-                    ['ping', '-c', str(count), '-i', str(interval), target],
-                    capture_output=True, text=True, timeout=count * interval + 10
-                )
-                # Parse ping summary line
-                rtt_match  = re.search(r'rtt min/avg/max/mdev = ([\d.]+)/([\d.]+)/([\d.]+)/([\d.]+)', r.stdout)
-                loss_match = re.search(r'(\d+)% packet loss', r.stdout)
-                result = {
-                    'output':   r.stdout,
-                    'rtt_min':  float(rtt_match.group(1)) if rtt_match else None,
-                    'rtt_avg':  float(rtt_match.group(2)) if rtt_match else None,
-                    'rtt_max':  float(rtt_match.group(3)) if rtt_match else None,
-                    'rtt_mdev': float(rtt_match.group(4)) if rtt_match else None,
-                    'loss_pct': int(loss_match.group(1))  if loss_match else None,
-                }
-                self.send_json({'ok': True, 'result': result})
+                req = json.loads(body)
+                self.send_json(apply_wifi_channel(
+                    req.get('iface', ''), req.get('channel'), req.get('dbm')))
             except Exception as e:
                 self.send_json({'ok': False, 'error': str(e)})
 
@@ -4228,8 +3468,8 @@ if __name__ == '__main__':
     port = int(sys.argv[1]) if len(sys.argv) > 1 else PORT
     server = ThreadedServer(('0.0.0.0', port), MeshHandler)
     print(f'MANET Status Server listening on port {port}')
-    print(f'  Status:  http://localhost:{port}/')
-    print(f'  Admin:   http://localhost:{port}/admin  (no auth)')
+    print(f'  Status:  http://localhost:{port}/          (no password)')
+    print(f'  Manage:  http://localhost:{port}{MANAGE_PREFIX}/    (admin_password from /etc/mesh.conf)')
     try:
         server.serve_forever()
     except KeyboardInterrupt:
