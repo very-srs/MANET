@@ -159,7 +159,9 @@ If enabled, nodes negotiate channel selection automatically. If disabled, a fixe
 ### 10. Passwords
 
 - **Radio user password** — SSH/login password for the `radio` account on the node.
-- **Admin password** — Used for web interface access where applicable.
+- **Admin password** — Gates the management UI at `http://<node>/manage`. Stored
+  as `admin_password` in `/etc/mesh.conf`. The status page at `http://<node>/`
+  needs no password; everything that can change this node or the mesh does.
 
 ---
 
@@ -215,7 +217,7 @@ It performs:
 - **HaLow / Morse setup.** Sets the HaLow TX power, writes `/etc/modprobe.d/morse.conf` and the `cfg80211` regulatory domain (including EU handling), and ensures the SPI overlay, Morse power/reset GPIOs, and CM4 `pcie-32bit-dma` settings are present in `config.txt`.
 - **Core services.** Enables and starts the mesh stack — `alfred`, BATMAN-adv (`batman-enslave`), `node-manager`, `radvd`, and `chrony` — plus support services for LED/button handling, SSH recovery, cloned-identity reset, the boot lobby channels, and one-shot time sync.
 - **Optional services.** Brings up MediaMTX, Mumble, and GPS/NTP (`gpsd`, `gps-reader.service`, chrony `SHM 0`) when selected or present.
-- **Identity and web UI.** Derives the hostname from the node's MAC (`mesh-XXXX`) and starts the status / admin web server (`mesh-status.py`) on port 80.
+- **Identity and web UI.** Derives the hostname from the node's MAC (`mesh-XXXX`) and starts the web server (`mesh-status.py`) on port 80 — open status page at `/`, password-gated management UI at `/manage`. Also advertises the node as `manet.local` over mDNS on the EUD-facing interface only.
 
 When it finishes — and after any pending interface rename has settled — it disables its own run-once service, marks the node provisioned, and brings the mesh up by restarting `systemd-networkd`, the supplicants, `node-manager`, BATMAN-adv, and `alfred`. Output is logged to `/var/log/radio-setup.log`.
 
