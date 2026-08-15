@@ -43,7 +43,7 @@ find "$STAGE/usr/local/bin" -type f \
 
 install_file 0644 "$REPO_ROOT/MANET/etc/manet_version.txt" "$STAGE/etc/manet_version.txt"
 
-# mesh-status.py and perf-dashboard.py serve these from /usr/local/share/manet
+# mesh-status.py serves these from /usr/local/share/manet
 # at runtime, so an OTA update that ships the scripts without them leaves the
 # dashboards with broken assets.
 install_tree "$REPO_ROOT/MANET/share/manet" "$STAGE/usr/local/share/manet"

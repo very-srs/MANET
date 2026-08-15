@@ -1,11 +1,18 @@
 #!/usr/bin/env python3
 """
-MANET Performance Dashboard
------------------------------
-Port 8081. Runs on all nodes. Accessible via wlan3 AP or LAN.
+MANET Management UI
+-------------------
+Not a server. This is the route set behind /manage on mesh-status.py's port
+80, mixed into its request handler — there is no second listening port, and
+nothing here is reachable without the admin password.
 
-Endpoints:
-  GET  /                        - Dashboard HTML
+Peers are never queried directly: node state comes from the Alfred-built
+registry, and changes that affect other nodes are staged over Alfred.
+Measurement runs from this node outward toward a peer's always-listening
+iperf3 daemon.
+
+Routes (relative to /manage):
+  GET  /                        - Management UI HTML
   GET  /api/topology            - Mesh topology (nodes, interfaces)
   POST /api/interface/toggle    - Toggle wlan interface on node(s)
   POST /api/halow/channel       - Set HaLow channel/BW on all nodes
@@ -38,7 +45,6 @@ import ipaddress
 from datetime import datetime, timezone
 from urllib.parse import urlparse, unquote
 
-PORT            = 8081
 MESH_CONF_FILE  = '/etc/mesh.conf'
 MESH_STATE_FILE = '/etc/mesh_ipv4_state'
 REGISTRY_FILE   = '/var/run/mesh_node_registry'
@@ -210,40 +216,24 @@ def apply_usb_wifi_uplink(ssid, password, enabled=True):
 
 
 def apply_usb_wifi_uplink_all(ssid, password, enabled=True):
-    local_status = apply_usb_wifi_uplink(ssid, password, enabled)
-    nodes_raw = parse_registry()
-    applied = []
-    errors = []
-    statuses = {}
-    for nd in nodes_raw.values():
-        ip = nd.get('IPV4_ADDRESS', '')
-        hostname = nd.get('HOSTNAME', ip)
-        if not ip:
-            continue
-        try:
-            r = call_perf_node_api(
-                ip,
-                '/api/control/uplink_wifi',
-                'POST',
-                {'ssid': ssid, 'password': password, 'enabled': enabled},
-                timeout=55,
-            )
-            statuses[hostname] = r
-            if r.get('ok'):
-                applied.append(hostname)
-            else:
-                errors.append(f"{hostname}: {r.get('error', 'failed')}")
-        except Exception as e:
-            errors.append(f"{hostname}: {e}")
-    result = dict(local_status)
-    result.update({
-        'ok': not errors,
-        'local': local_status,
-        'applied': applied,
-        'statuses': statuses,
-        'error': '; '.join(errors),
+    """Push uplink credentials to every node via Alfred.
+
+    This used to POST to each peer's port 8081 — the one place in the system
+    that talked to another node over HTTP. It is staged like any other
+    mesh-wide radio change now, so every node applies the same credentials at
+    the same activate_at.
+    """
+    result = coordinate_radio_change({'uplink_wifi': {
+        'ssid': ssid, 'password': password, 'enabled': bool(enabled),
+    }})
+    status = dict(get_usb_wifi_uplink_status())
+    status.update({
+        'ok': result.get('ok', False),
+        'applied': result.get('acked', []),
+        'error': result.get('error', ''),
     })
-    return result
+    return status
+
 
 def parse_registry():
     nodes = {}
@@ -446,38 +436,6 @@ def get_halow_driver_info(iface='wlan2'):
             return info
     return info
 
-def call_node_api(node_ip, path, method='GET', data=None, timeout=8):
-    """Call mesh-status.py control API on a remote node."""
-    try:
-        url = f'http://{node_ip}:{CONTROL_PORT}{path}'
-        body = json.dumps(data).encode() if data else None
-        req = urllib.request.Request(
-            url,
-            data=body,
-            method=method,
-            headers={'Content-Type': 'application/json', 'User-Agent': 'perf-dashboard/1'}
-        )
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read().decode())
-    except Exception as e:
-        return {'ok': False, 'error': str(e)}
-
-
-def call_perf_node_api(node_ip, path, method='GET', data=None, timeout=8):
-    try:
-        url = f'http://{node_ip}:8081{path}'
-        body = json.dumps(data).encode() if data else None
-        req = urllib.request.Request(
-            url,
-            data=body,
-            method=method,
-            headers={'Content-Type': 'application/json', 'User-Agent': 'perf-dashboard/1'}
-        )
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read().decode())
-    except Exception as e:
-        return {'ok': False, 'error': str(e)}
-
 def fmt_uptime(seconds):
     try:
         s = int(seconds)
@@ -498,22 +456,35 @@ def fmt_uptime(seconds):
 
 
 def get_session_hop_count(src_ip, dst_ip):
-    if not src_ip or not dst_ip:
+    """Hops from this node to dst, straight out of batman's own table.
+
+    Measurements always originate here, so the local hop count is the right
+    one — and asking a peer for it over HTTP is exactly what we are removing.
+    """
+    if not dst_ip:
         return None, 'missing'
     try:
-        data = call_node_api(src_ip, '/api/data', timeout=5)
+        r = subprocess.run(['batctl', 'o'], capture_output=True, text=True, timeout=5)
     except Exception:
         return None, 'error'
-    if not isinstance(data, dict):
-        return None, 'error'
-    if data.get('error'):
-        return None, 'error'
-    for node in data.get('nodes', []):
-        if node.get('ip') == dst_ip:
-            hop_count = node.get('hop_count')
-            if isinstance(hop_count, int) and hop_count >= 1:
-                return hop_count, 'batctl'
-            return None, 'unknown'
+    nodes = parse_registry()
+    dst_macs = set()
+    for nd in nodes.values():
+        if nd.get('IPV4_ADDRESS') == dst_ip:
+            dst_macs = {m.strip().lower()
+                        for m in (nd.get('MAC_ADDRESSES', '') or '').split(',') if m.strip()}
+            break
+    if not dst_macs:
+        return None, 'unknown'
+    for line in r.stdout.splitlines():
+        parts = line.split()
+        if len(parts) < 4:
+            continue
+        if parts[0].lower().rstrip('*') in dst_macs:
+            # A direct originator entry is one hop; anything reached via a
+            # different nexthop is at least two.
+            nexthop = parts[3].strip('[]').lower()
+            return (1 if nexthop in dst_macs else 2), 'batctl'
     return None, 'unknown'
 
 
@@ -806,18 +777,27 @@ def cancel_radio_version(version):
 def coordinate_radio_toggle(node_ip, iface, state):
     if iface not in ('wlan0', 'wlan1', 'wlan2') or state not in ('up', 'down'):
         return {'ok': False, 'error': 'Invalid iface or state'}
+    return coordinate_radio_change({'desired': {iface: state}}, node_ip)
 
-    # Per-node toggle: call the target node directly, no Alfred broadcast
+
+def coordinate_radio_change(actions, node_ip='all'):
+    """Stage a radio change over Alfred and apply it once everyone has ACKed.
+
+    This is the only way a change reaches another node. Targeting one node
+    still goes through Alfred — the difference is the `targets` list, not the
+    transport, so there is no second code path that talks to peers directly.
+    """
+    targets = 'all'
     if node_ip != 'all':
-        r = call_node_api(node_ip, '/api/control/interface', 'POST',
-                          {'iface': iface, 'state': state})
-        return r
+        try:
+            targets = radio_target_for_node(node_ip)
+        except ValueError as e:
+            return {'ok': False, 'error': str(e)}
 
-    # Global toggle: use Alfred broadcast/consensus
-    expected = radio_expected_hosts()
+    expected = radio_expected_hosts() if targets == 'all' else list(targets)
     if not expected:
         return {'ok': False, 'error': 'No reachable nodes in registry'}
-    if len(expected) < 2:
+    if targets == 'all' and len(expected) < 2:
         return {
             'ok': False,
             'error': 'Refusing global radio change: registry sees fewer than 2 reachable nodes. Wait for Alfred registry refresh and retry.',
@@ -829,9 +809,9 @@ def coordinate_radio_toggle(node_ip, iface, state):
         'issued_by': get_my_hostname(),
         'issued_at': int(time.time()),
         'activate_at': 0,
-        'targets': 'all',
-        'desired': {iface: state},
+        'targets': targets,
     }
+    pkg.update(actions)
     pkg['version'] = make_radio_version(pkg)
 
     ok, error = send_alfred_object(ALFRED_RADIO_TYPE, pkg)
@@ -872,7 +852,7 @@ def coordinate_radio_toggle(node_ip, iface, state):
         'activate_at': activate_at,
         'acked': sorted(ack_state['acks'].keys()),
         'expected': expected,
-        'targets': 'all',
+        'targets': targets,
     }
 
 def get_iw_info(iface):
@@ -906,6 +886,15 @@ def get_iw_info(iface):
 # ─────────────────────────────────────────────────────────────────────────────
 # Topology
 # ─────────────────────────────────────────────────────────────────────────────
+def parse_json_field(text):
+    """Decode a JSON list carried through the registry; [] on anything odd."""
+    try:
+        value = json.loads(text or '[]')
+    except (json.JSONDecodeError, TypeError):
+        return []
+    return value if isinstance(value, list) else []
+
+
 def build_topology():
     nodes_raw = parse_registry()
     my_host   = get_my_hostname()
@@ -953,30 +942,25 @@ def build_topology():
                 'wlan2': {'active': 'wlan2' in active_ifaces, **iw_wlan2, **mcs_map['wlan2']},
             }
         else:
-            # Fetch from remote node's /api/local via peer proxy
-            try:
-                local = call_node_api(ip, '/api/local')
-                live_battery = local.get('battery')
-                if isinstance(live_battery, dict) and live_battery.get('percentage') is not None:
-                    node_info['battery'] = str(live_battery.get('percentage'))
-                ifaces_raw = local.get('interfaces', [])
-                node_info['interfaces'] = {
-                    i['name']: {
-                        'active': i.get('health') == 'ok' and i.get('role') == 'mesh',
-                        'channel': i.get('channel', ''),
-                        'freq_mhz': i.get('freq_mhz', ''),
-                        'txpower_dbm': i.get('txpower_dbm', ''),
-                        'txpower_cap_dbm': i.get('txpower_cap_dbm', ''),
-                        'txpower_options_dbm': i.get('txpower_options_dbm', []),
-                        'tx_mcs': mcs_map.get(i['name'], {}).get('tx_mcs', ''),
-                        'rx_mcs': mcs_map.get(i['name'], {}).get('rx_mcs', ''),
-                        'halow_bw': i.get('halow_bw', ''),
-                        'halow_source': i.get('halow_source', ''),
-                    }
-                    for i in ifaces_raw if i.get('name') in ('wlan0', 'wlan1', 'wlan2')
+            # Straight from the registry. Peers publish their interface list
+            # over Alfred, so this needs no round trip and works for a node
+            # that is momentarily unreachable but still replicating.
+            node_info['interfaces'] = {
+                i['name']: {
+                    'active': i.get('state') == 'UP' and i.get('role') == 'mesh',
+                    'channel': '',
+                    'freq_mhz': '',
+                    'txpower_dbm': '',
+                    'txpower_cap_dbm': '',
+                    'txpower_options_dbm': [],
+                    'tx_mcs': mcs_map.get(i['name'], {}).get('tx_mcs', ''),
+                    'rx_mcs': mcs_map.get(i['name'], {}).get('rx_mcs', ''),
+                    'halow_bw': '',
+                    'halow_source': '',
                 }
-            except Exception:
-                node_info['interfaces'] = {}
+                for i in parse_json_field(nd.get('INTERFACES_JSON', ''))
+                if i.get('name') in ('wlan0', 'wlan1', 'wlan2')
+            }
 
         nodes.append(node_info)
 
@@ -1147,6 +1131,51 @@ def summarize_measurement_result(record):
         summary['hop_count'] = record.get('hop_count')
     return summary
 
+def run_local_ping(target, count=100, interval=0.2):
+    """Ping a peer from this node. Returns the parsed summary, or None."""
+    if not target:
+        return None
+    try:
+        r = subprocess.run(['ping', '-c', str(count), '-i', str(interval), target],
+                           capture_output=True, text=True,
+                           timeout=count * interval + 10)
+    except Exception:
+        return None
+    rtt = re.search(r'rtt min/avg/max/mdev = ([\d.]+)/([\d.]+)/([\d.]+)/([\d.]+)', r.stdout)
+    loss = re.search(r'(\d+)% packet loss', r.stdout)
+    return {
+        'output':   r.stdout,
+        'rtt_min':  float(rtt.group(1)) if rtt else None,
+        'rtt_avg':  float(rtt.group(2)) if rtt else None,
+        'rtt_max':  float(rtt.group(3)) if rtt else None,
+        'rtt_mdev': float(rtt.group(4)) if rtt else None,
+        'loss_pct': int(loss.group(1)) if loss else None,
+    }
+
+
+def run_local_iperf3(server_ip, test_type, duration, bitrate,
+                     parallel=1, reverse=False):
+    """Run iperf3 from this node against a peer's always-on daemon.
+
+    Returns (ok, parsed_json, error).
+    """
+    cmd = ['iperf3', '-c', server_ip, '-t', str(duration), '-J']
+    if test_type in ('udp_throughput', 'udp_jitter', 'packet_loss'):
+        cmd += ['-u', '-b', bitrate]
+    if parallel > 1:
+        cmd += ['-P', str(parallel)]
+    if reverse:
+        cmd += ['-R']
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=duration + 25)
+    try:
+        payload = json.loads(r.stdout)
+    except Exception:
+        payload = {'raw': r.stdout, 'stderr': r.stderr}
+    if payload.get('error'):
+        return False, payload, payload['error']
+    return r.returncode == 0, payload, r.stderr.strip()
+
+
 def run_measurement_session(label, pairs, tests, duration, udp_bitrate):
     """Run all test combinations. Blocking — call in thread."""
     global _measure_status
@@ -1204,38 +1233,26 @@ def run_measurement_session(label, pairs, tests, duration, udp_bitrate):
                 result_record['hop_count_source'] = hop_source
 
                 if test_type == 'icmp_ping':
-                    # Run ping locally toward dst
-                    resp = call_node_api(src_ip, '/api/ping/run', 'POST', {
-                        'target': dst_ip, 'count': 100, 'interval': 0.2
-                    }, timeout=40)
-                    result_record['ping_result'] = resp.get('result')
-                    result_record['ok'] = resp.get('ok', False)
+                    result_record['ping_result'] = run_local_ping(dst_ip)
+                    result_record['ok'] = result_record['ping_result'] is not None
                     if not result_record['ok']:
-                        result_record['error'] = resp.get('error', 'ping failed')
+                        result_record['error'] = 'ping failed'
                 else:
-                    # Start iperf3 server on dst, run client on src
-                    server_resp = call_node_api(dst_ip, '/api/iperf/server/start', 'POST', {})
-                    if not server_resp.get('ok'):
-                        raise RuntimeError(f'{dst_name} iperf server failed: {server_resp.get("error")}')
-                    time.sleep(1)
-
-                    reverse = test_type == 'reverse'
-                    parallel = 4 if test_type == 'tcp_4stream' else 1
+                    # iperf3 runs as a daemon on every node, so there is no
+                    # server to start or stop remotely — just point a local
+                    # client at the peer that is already listening.
                     try:
-                        resp = call_node_api(src_ip, '/api/iperf/client/run', 'POST', {
-                            'server_ip':  dst_ip,
-                            'test_type':  test_type,
-                            'duration':   duration,
-                            'bitrate':    udp_bitrate,
-                            'parallel':   parallel,
-                            'reverse':    reverse,
-                        }, timeout=duration + 25)
-                        result_record['iperf3_result'] = resp.get('result')
-                        result_record['ok'] = resp.get('ok', False)
-                        if not result_record['ok']:
-                            result_record['error'] = resp.get('error', 'iperf client failed')
-                    finally:
-                        call_node_api(dst_ip, '/api/iperf/server/stop', 'POST', {}, timeout=8)
+                        ok, payload, err = run_local_iperf3(
+                            dst_ip, test_type, duration, udp_bitrate,
+                            parallel=4 if test_type == 'tcp_4stream' else 1,
+                            reverse=test_type == 'reverse')
+                        result_record['iperf3_result'] = payload
+                        result_record['ok'] = ok
+                        if not ok:
+                            result_record['error'] = err or 'iperf client failed'
+                    except Exception as e:
+                        result_record['ok'] = False
+                        result_record['error'] = str(e)
 
                 # Save result
                 with open(os.path.join(session_dir, fname), 'w') as f:
@@ -1574,7 +1591,7 @@ let _pollTimer = null;
 let _overlayTimer = null;
 let _autoRefreshTimer = null;
 let _autoRefreshBusy = false;
-const VALID_TABS = ['topology','radio','measure','sessions','uplink'];
+const VALID_TABS = ['topology','radio','measure','sessions','uplink', 'config'];
 const AUTO_REFRESH_MS = 15000;
 const THEME_KEY = 'manetUiTheme';
 
@@ -1910,6 +1927,7 @@ function showTab(name, updateUrl = true) {
   if (name === 'sessions') loadSessions();
   if (name === 'radio') buildIfaceControl();
   if (name === 'uplink') loadUsbWifiUplink();
+  if (name === 'config') startConfigPolling(); else stopConfigPolling();
 }
 
 // ── Clock ──
@@ -2403,6 +2421,504 @@ document.addEventListener('visibilitychange', () => {
 });
 """
 
+# ─────────────────────────────────────────────────────────────────────────────
+# NODE CONFIG tab
+# ─────────────────────────────────────────────────────────────────────────────
+# Was the standalone /admin page on port 80 with no authentication at all,
+# handing out the mesh SAE key in a text field. Same staging/ACK/apply flow,
+# now a tab in here behind the admin password.
+#
+# Held as plain strings and substituted into the dashboard template, rather
+# than written inline: the template is an f-string, and CSS/JS braces would
+# have to be doubled throughout if this lived inside it.
+
+CONFIG_TAB_CSS = r"""
+
+body { overflow-y: auto; }
+/* ── Admin layout ── */
+.admin-body { display: flex; gap: 0; height: calc(100vh - 34px); overflow: hidden; }
+.admin-form-col { flex: 1; overflow-y: auto; padding: 20px 24px; border-right: 1px solid var(--border); }
+.admin-status-col { width: 320px; flex-shrink: 0; overflow-y: auto; padding: 16px; background: #ffffff; }
+.admin-col-hdr { font-size: 11px; color: var(--muted); font-weight: 800; letter-spacing: 0; text-transform: none;
+                 padding-bottom: 10px; border-bottom: 1px solid var(--border); margin-bottom: 14px; }
+/* Section styling */
+.cfg-section { margin-bottom: 22px; }
+.cfg-section-title { font-size: 12px; color: var(--text); font-weight: 800; letter-spacing: 0; text-transform: none;
+                      padding: 0 0 8px 0; border-bottom: 1px solid var(--border); margin-bottom: 12px; }
+.cfg-row { display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px; }
+.cfg-row label { flex: 0 0 180px; font-size: 11px; color: var(--muted); padding-top: 6px; }
+.cfg-row .hint { display: block; font-size: 9px; color: var(--muted); margin-top: 2px; }
+.cfg-row input[type=text], .cfg-row input[type=password], .cfg-row select {
+  flex: 1; background: #ffffff; border: 1px solid var(--border); border-radius: 8px;
+  color: var(--text); font-family: var(--font); font-size: 12px;
+  padding: 5px 8px; outline: none; }
+.cfg-row input:focus, .cfg-row select:focus { border-color: var(--accent); }
+.cfg-row input[type=checkbox] { width: 16px; height: 16px; margin-top: 6px; accent-color: var(--accent); }
+/* Danger badge on dangerous fields */
+.danger-badge { font-size: 9px; font-weight: bold; color: var(--bad); background: #ef444415;
+                border: 1px solid #ef444430; border-radius: 2px; padding: 1px 5px;
+                margin-left: 6px; vertical-align: middle; letter-spacing: .5px; }
+/* Action buttons */
+.admin-actions { display: flex; gap: 10px; margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--border); }
+.cfg-btn { padding: 9px 16px; border-radius: 8px; font-size: 12px; font-weight: 850; letter-spacing: 0;
+       font-family: var(--font); cursor: pointer; border: 1px solid var(--accent); text-transform: none; background:var(--surface); color:var(--accent); transition:all .15s; }
+.cfg-btn-stage  { background: var(--surface); color: var(--accent); border-color: var(--accent); }
+.cfg-btn-stage:hover:not(:disabled)  { background: var(--accent); color: #ffffff; }
+.cfg-btn-apply  { background: var(--accent2); color: var(--fer-black); border-color: var(--accent2); }
+.cfg-btn-apply:hover:not(:disabled)  { background: var(--fer-black); color: #ffffff; border-color: var(--fer-black); }
+.cfg-btn-force  { background: rgba(236,176,0,.10); color: var(--text); border-color: rgba(236,176,0,.48); }
+.cfg-btn-force:hover:not(:disabled)  { background: var(--accent2); color: var(--fer-black); border-color: var(--accent2); }
+.cfg-btn-cancel { background: transparent; color: #b42318; border-color: #e9b2ad; }
+.cfg-btn-cancel:hover:not(:disabled) { background: #b42318; color: #ffffff; border-color: #b42318; }
+:root[data-theme="dark"] .cfg-btn-stage { background: transparent; color: var(--accent2); border-color: var(--accent2); }
+:root[data-theme="dark"] .cfg-btn-stage:hover:not(:disabled), :root[data-theme="dark"] .cfg-btn-apply:hover:not(:disabled), :root[data-theme="dark"] .cfg-btn-force:hover:not(:disabled) { background:#f8f6ef; color:var(--fer-black); border-color:#f8f6ef; }
+:root[data-theme="dark"] .cfg-btn-apply { background: var(--accent2); color: var(--fer-black); border-color: var(--accent2); }
+:root[data-theme="dark"] .cfg-btn-force { background: rgba(236,176,0,.10); color: var(--accent2); border-color: rgba(236,176,0,.48); }
+:root[data-theme="dark"] .cfg-btn-cancel { color:#fca5a5; border-color:#7f1d1d; }
+:root[data-theme="dark"] .cfg-btn-cancel:hover:not(:disabled) { background:#b42318; color:#ffffff; border-color:#b42318; }
+.cfg-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+/* Status column — node ACK table */
+.ack-table { width: 100%; border-collapse: collapse; }
+.ack-table th { font-size: 9px; color: var(--muted); text-align: left; padding: 4px 6px;
+                letter-spacing: .8px; text-transform: uppercase; border-bottom: 1px solid var(--border); }
+.ack-table td { font-size: 11px; padding: 6px; border-bottom: 1px solid #edf0f4; }
+.ack-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 5px; }
+.ack-dot-yes  { background: var(--good); }
+.ack-dot-no   { background: var(--muted); }
+.ack-dot-self { background: var(--accent); }
+/* Pending config info box */
+.pending-box { background: #f8fafc; border: 1px solid var(--border); border-radius: 8px;
+               padding: 10px 12px; margin-bottom: 14px; }
+.pending-box.pending-active { border-color: #f59e0b40; background: #f59e0b08; }
+.pending-label { font-size: 9px; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; margin-bottom: 6px; }
+.pending-version { font-size: 12px; font-family: var(--font); font-weight: 800; color: var(--accent); }
+.pending-stat { font-size: 10px; color: var(--muted); margin-top: 4px; }
+.pending-stat span { color: var(--text); }
+/* Progress bar */
+.ack-progress { height: 4px; background: var(--border); border-radius: 2px; margin-top: 8px; }
+.ack-progress-bar { height: 100%; border-radius: 2px; background: var(--good); transition: width .5s; }
+/* Warning modal */
+#cfg-force-modal { display:none; position:fixed; top:0;left:0;right:0;bottom:0;
+               background:#000a; z-index:100; align-items:center; justify-content:center; }
+#cfg-force-modal.show { display:flex; }
+.modal-box { background: var(--surface); border: 1px solid #ef444440; border-radius: 4px;
+             padding: 24px; max-width: 380px; }
+.modal-title { color: var(--bad); font-size: 14px; font-weight: bold; margin-bottom: 10px; }
+.modal-body { color: var(--muted); font-size: 12px; line-height: 1.6; margin-bottom: 16px; }
+.modal-actions { display:flex; gap:10px; justify-content:flex-end; }
+/* Toast */
+#cfg-toast { position:fixed; bottom:20px; right:20px; background: var(--surface); border:1px solid var(--border);
+         border-radius:4px; padding:10px 16px; font-size:12px; opacity:0; transition:opacity .3s;
+         pointer-events:none; z-index:200; }
+#cfg-toast.show { opacity:1; }
+#cfg-toast.toast-ok   { border-color:#22c55e60; color:var(--good); }
+#cfg-toast.toast-err  { border-color:#ef444460; color:var(--bad); }
+#cfg-toast.toast-warn { border-color:#f9731660; color:var(--warn); }
+"""
+
+CONFIG_TAB_HTML = r"""
+<div class="admin-body">
+    <!-- ── Left: Config Form ── -->
+    <div class="admin-form-col">
+
+      <div class="cfg-section">
+        <div class="cfg-section-title">EUD / Client Connection</div>
+
+        <div class="cfg-row">
+          <label>Connection Mode<span class="hint">How clients connect to this node</span></label>
+          <select id="f-eud">
+            <option value="wired">Wired (USB/Ethernet)</option>
+            <option value="wireless">Wireless (5GHz AP)</option>
+            <option value="auto">Auto (Wireless unless wired)</option>
+          </select>
+        </div>
+        <div class="cfg-row">
+          <label>AP SSID<span class="hint">WiFi network name for clients</span></label>
+          <input type="text" id="f-lan-ap-ssid">
+        </div>
+        <div class="cfg-row">
+          <label>AP Password<span class="hint">Client WiFi password</span></label>
+          <input type="password" id="f-lan-ap-key" autocomplete="new-password">
+        </div>
+        <div class="cfg-row">
+          <label>Max EUDs per Node<span class="hint">Max concurrent client devices</span></label>
+          <input type="text" id="f-max-euds">
+        </div>
+      </div>
+
+      <div class="cfg-section">
+        <div class="cfg-section-title">Mesh Network</div>
+
+        <div class="cfg-row">
+          <label>Mesh SSID<span class="hint">BATMAN mesh network name
+            <span class="danger-badge">⚠ DANGEROUS</span></span></label>
+          <input type="text" id="f-mesh-ssid">
+        </div>
+        <div class="cfg-row">
+          <label>Mesh SAE Key<span class="hint">WPA3-SAE passphrase
+            <span class="danger-badge">⚠ DANGEROUS</span></span></label>
+          <input type="password" id="f-mesh-key" autocomplete="new-password">
+        </div>
+        <div class="cfg-row">
+          <label>IP Range (CIDR)<span class="hint">Mesh network address space
+            <span class="danger-badge">⚠ DANGEROUS</span></span></label>
+          <input type="text" id="f-ipv4-network">
+        </div>
+        <div class="cfg-row">
+          <label>Regulatory Domain<span class="hint">2-letter country code for RF</span></label>
+          <input type="text" id="f-regulatory-domain" maxlength="2" style="width:48px;flex:none;">
+        </div>
+        <div class="cfg-row">
+          <label>Auto Channel<span class="hint">Scan and select best channel</span></label>
+          <input type="checkbox" id="f-acs">
+        </div>
+      </div>
+
+      <div class="cfg-section">
+        <div class="cfg-section-title">Services</div>
+
+        <div class="cfg-row">
+          <label>MediaMTX<span class="hint">RTSP/WebRTC streaming</span></label>
+          <input type="checkbox" id="f-mtx">
+        </div>
+        <div class="cfg-row">
+          <label>Mumble<span class="hint">Voice communications</span></label>
+          <input type="checkbox" id="f-mumble">
+        </div>
+        <div class="cfg-row">
+          <label>Auto Update<span class="hint">Automatic MANET tool updates</span></label>
+          <input type="checkbox" id="f-auto-update">
+        </div>
+      </div>
+
+      <div class="cfg-section">
+        <div class="cfg-section-title">Security</div>
+
+        <div class="cfg-row">
+          <label>Admin Password<span class="hint">This admin interface</span></label>
+          <input type="password" id="f-admin-password" autocomplete="new-password">
+        </div>
+      </div>
+
+      <div class="admin-actions">
+        <button class="cfg-btn cfg-btn-stage"  id="btn-stage"  onclick="stageChanges()">Stage Changes</button>
+        <button class="cfg-btn cfg-btn-apply"  id="btn-apply"  onclick="applyChanges(false)" disabled>Apply Now</button>
+        <button class="cfg-btn cfg-btn-force"  id="btn-force"  onclick="showForceModal()" style="display:none">Force Apply</button>
+        <button class="cfg-btn cfg-btn-cancel" id="btn-cancel" onclick="cancelPending()" style="display:none">Cancel</button>
+      </div>
+      <div id="action-msg" style="font-size:10px;color:var(--muted);margin-top:8px;min-height:14px;"></div>
+    </div>
+
+    <!-- ── Right: Deployment Status ── -->
+    <div class="admin-status-col">
+      <div class="admin-col-hdr">Deployment Status</div>
+
+      <!-- Pending config box -->
+      <div class="pending-box" id="pending-box">
+        <div class="pending-label">Pending Config</div>
+        <div id="pending-version" class="pending-version">None</div>
+        <div id="pending-stat"   class="pending-stat" style="display:none"></div>
+        <div id="ack-progress-wrap" style="display:none">
+          <div class="ack-progress"><div class="ack-progress-bar" id="ack-bar" style="width:0%"></div></div>
+        </div>
+      </div>
+
+      <!-- Node ACK table -->
+      <div class="admin-col-hdr" style="margin-top:14px">Nodes (<span id="node-count">—</span>)</div>
+      <table class="ack-table" id="ack-table">
+        <thead><tr><th>Node</th><th>IP</th><th>ACK</th></tr></thead>
+        <tbody id="ack-tbody"></tbody>
+      </table>
+
+      <!-- Dangerous change warning -->
+      <div id="danger-warn" style="display:none;margin-top:14px;padding:10px;
+           background:#ef444408;border:1px solid #ef444430;border-radius:3px;
+           font-size:10px;color:var(--bad);line-height:1.6;">
+        ⚠ Staged changes include <strong>DANGEROUS</strong> settings (mesh SSID, key, or IP range).
+        All nodes will briefly disconnect while applying. Ensure 100% ACK before applying.
+      </div>
+    </div>
+  </div>
+
+  <!-- Force apply modal -->
+  <div id="cfg-force-modal">
+    <div class="modal-box">
+      <div class="modal-title">⚠ Force Apply</div>
+      <div class="modal-body" id="force-modal-body">
+        Not all nodes have acknowledged the pending config.
+        Forcing apply will push changes to this node only — unreachable nodes
+        will remain on the old config and may need manual intervention.
+      </div>
+      <div class="modal-actions">
+        <button class="cfg-btn cfg-btn-cancel" onclick="closeForceModal()">Cancel</button>
+        <button class="cfg-btn cfg-btn-force"  onclick="applyChanges(true)">Force Apply</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="cfg-toast"></div>
+"""
+
+CONFIG_TAB_JS = r"""
+
+const POLL_MS = 5000;
+let STATUS = null;
+let pollTimer = null;
+
+// ── Init ────────────────────────────────────────────────────────────────────
+// Polls only while the NODE CONFIG tab is on screen — this is a 5 s poll and
+// there is no reason to run it while the operator is looking at the topology.
+function startConfigPolling() {
+  if (pollTimer) return;
+  refreshStatus();
+  pollTimer = setInterval(refreshStatus, POLL_MS);
+}
+function stopConfigPolling() {
+  clearInterval(pollTimer);
+  pollTimer = null;
+}
+
+// ── Fetch status ─────────────────────────────────────────────────────────────
+async function refreshStatus() {
+  try {
+    const r = await fetch('/api/admin/status');
+    if (!r.ok) return;
+    STATUS = await r.json();
+    renderStatus(STATUS);
+  } catch(e) {}
+}
+
+// ── Populate form from current config ────────────────────────────────────────
+function populateForm(cfg) {
+  setVal('f-eud',              cfg.eud              || 'wired');
+  setVal('f-lan-ap-ssid',      cfg.lan_ap_ssid      || '');
+  setVal('f-lan-ap-key',       cfg.lan_ap_key        || '');
+  setVal('f-max-euds',         cfg.max_euds_per_node || '');
+  setVal('f-mesh-ssid',        cfg.mesh_ssid         || '');
+  setVal('f-mesh-key',         cfg.mesh_key          || '');
+  setVal('f-ipv4-network',     cfg.ipv4_network      || '');
+  setVal('f-regulatory-domain',cfg.regulatory_domain || 'US');
+  setChk('f-acs',              cfg.acs        === 'y');
+  setChk('f-mtx',              cfg.mtx        === 'y');
+  setChk('f-mumble',           cfg.mumble     === 'y');
+  setChk('f-auto-update',      cfg.auto_update=== 'y');
+  setVal('f-admin-password',   cfg.admin_password    || '');
+}
+
+function setVal(id, v) { const el = document.getElementById(id); if (el) el.value = v; }
+function setChk(id, v) { const el = document.getElementById(id); if (el) el.checked = v; }
+function getVal(id)    { const el = document.getElementById(id); return el ? el.value.trim() : ''; }
+function getChk(id)    { const el = document.getElementById(id); return el ? el.checked : false; }
+
+// ── Render status panel ───────────────────────────────────────────────────────
+let formPopulated = false;
+function renderStatus(s) {
+  // Populate form once from live config
+  if (!formPopulated && s.current_config) {
+    populateForm(s.current_config);
+    formPopulated = true;
+  }
+
+  document.getElementById('node-count').textContent = s.total_nodes || '0';
+
+  const pending  = s.pending;
+  const pBox     = document.getElementById('pending-box');
+  const pVersion = document.getElementById('pending-version');
+  const pStat    = document.getElementById('pending-stat');
+  const pWrap    = document.getElementById('ack-progress-wrap');
+  const ackBar   = document.getElementById('ack-bar');
+  const dangerWarn = document.getElementById('danger-warn');
+  const btnApply = document.getElementById('btn-apply');
+  const btnForce = document.getElementById('btn-force');
+  const btnCancel= document.getElementById('btn-cancel');
+
+  if (pending && pending.version) {
+    pBox.className = 'pending-box pending-active';
+    pVersion.textContent = 'v' + pending.version;
+
+    const nodes = s.nodes || [];
+    const acked = nodes.filter(n => n.ack === pending.version).length;
+    const total = nodes.length;
+    const pct   = total > 0 ? Math.round(acked / total * 100) : 0;
+
+    pStat.style.display = '';
+    pStat.innerHTML = `<span>${acked}/${total}</span> nodes ACKed &nbsp; <span>${pct}%</span>`;
+    pWrap.style.display = '';
+    ackBar.style.width = pct + '%';
+    ackBar.style.background = acked === total ? 'var(--good)' : 'var(--warn)';
+
+    const isDangerous = pending.dangerous === true;
+    dangerWarn.style.display = isDangerous ? '' : 'none';
+
+    const allAcked = acked === total && total > 0;
+    btnApply.disabled = !allAcked;
+    btnApply.style.display = '';
+    btnForce.style.display = !allAcked ? '' : 'none';
+    btnCancel.style.display = '';
+
+    const activateAt = pending.activate_at || 0;
+    if (activateAt > 0) {
+      const secs = Math.max(0, activateAt - Math.floor(Date.now() / 1000));
+      document.getElementById('action-msg').textContent =
+        secs > 0 ? `Applying in ${secs}s...` : 'Applying now...';
+    }
+  } else {
+    pBox.className = 'pending-box';
+    pVersion.textContent = 'None';
+    pStat.style.display = 'none';
+    pWrap.style.display = 'none';
+    dangerWarn.style.display = 'none';
+    btnApply.disabled = true;
+    btnApply.style.display = 'none';
+    btnForce.style.display = 'none';
+    btnCancel.style.display = 'none';
+    document.getElementById('action-msg').textContent = '';
+  }
+
+  // Node ACK table
+  const tbody = document.getElementById('ack-tbody');
+  tbody.innerHTML = (s.nodes || []).map(n => {
+    const pendingVer = pending && pending.version;
+    const isAcked    = pendingVer && n.ack === pendingVer;
+    const isSelf     = n.hostname === (STATUS && STATUS.my_hostname);
+    let dotCls, ackLabel;
+    if (!pendingVer) {
+      dotCls   = 'ack-dot-self';
+      ackLabel = '—';
+    } else if (isSelf && isAcked) {
+      dotCls   = 'ack-dot-self';
+      ackLabel = 'Self ✓';
+    } else if (isAcked) {
+      dotCls   = 'ack-dot-yes';
+      ackLabel = '✓';
+    } else {
+      dotCls   = 'ack-dot-no';
+      ackLabel = 'Waiting';
+    }
+    const staleMs = (DATA.timestamp - parseInt(n.last_seen || 0));
+    const stale   = staleMs > 300;
+    const nameStyle = stale ? 'color:var(--muted)' : '';
+    return `<tr>
+      <td style="${nameStyle}">${n.hostname}</td>
+      <td style="color:var(--muted);font-size:10px">${n.ip}</td>
+      <td><span class="ack-dot ${dotCls}"></span>${ackLabel}</td>
+    </tr>`;
+  }).join('');
+}
+
+// ── Read form into config object ──────────────────────────────────────────────
+function readForm() {
+  return {
+    eud:               getVal('f-eud'),
+    lan_ap_ssid:       getVal('f-lan-ap-ssid'),
+    lan_ap_key:        getVal('f-lan-ap-key'),
+    max_euds_per_node: getVal('f-max-euds'),
+    mesh_ssid:         getVal('f-mesh-ssid'),
+    mesh_key:          getVal('f-mesh-key'),
+    ipv4_network:      getVal('f-ipv4-network'),
+    regulatory_domain: getVal('f-regulatory-domain'),
+    acs:               getChk('f-acs')          ? 'y' : 'n',
+    mtx:               getChk('f-mtx')          ? 'y' : 'n',
+    mumble:            getChk('f-mumble')        ? 'y' : 'n',
+    auto_update:       getChk('f-auto-update')   ? 'y' : 'n',
+    admin_password:    getVal('f-admin-password'),
+  };
+}
+
+// ── Stage changes ─────────────────────────────────────────────────────────────
+async function stageChanges() {
+  const cfg = readForm();
+  cfgShowMsg('Staging...', 'muted');
+  try {
+    const r   = await fetch('/api/admin/stage', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({config: cfg})
+    });
+    const res = await r.json();
+    if (r.ok && res.ok) {
+      toast('Changes staged — waiting for nodes to ACK', 'ok');
+      cfgShowMsg('Staged. Waiting for ' + (STATUS && STATUS.total_nodes || '?') + ' nodes to ACK.', 'ok');
+      await refreshStatus();
+    } else {
+      toast('Stage failed: ' + (res.error || r.status), 'err');
+      cfgShowMsg('Stage failed.', 'err');
+    }
+  } catch(e) {
+    toast('Stage error: ' + e, 'err');
+  }
+}
+
+// ── Apply changes ─────────────────────────────────────────────────────────────
+async function applyChanges(force) {
+  closeForceModal();
+  cfgShowMsg('Sending activate signal...', 'ok');
+  try {
+    const r   = await fetch('/api/admin/activate', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({force: force})
+    });
+    const res = await r.json();
+    if (r.ok && res.ok) {
+      toast('Activate signal sent — applying in 60s', 'ok');
+      cfgShowMsg('All nodes will apply in ~60s.', 'ok');
+      await refreshStatus();
+    } else {
+      toast('Activate failed: ' + (res.error || r.status), 'err');
+    }
+  } catch(e) {
+    toast('Activate error: ' + e, 'err');
+  }
+}
+
+// ── Cancel pending ────────────────────────────────────────────────────────────
+async function cancelPending() {
+  try {
+    const r   = await fetch('/api/admin/cancel', {method: 'POST'});
+    const res = await r.json();
+    if (r.ok && res.ok) {
+      toast('Pending config cancelled', 'warn');
+      cfgShowMsg('', '');
+      await refreshStatus();
+    }
+  } catch(e) {}
+}
+
+// ── Force modal ───────────────────────────────────────────────────────────────
+function showForceModal() {
+  const s     = STATUS;
+  const nodes = s && s.nodes || [];
+  const pv    = s && s.pending && s.pending.version;
+  const acked = pv ? nodes.filter(n => n.ack === pv).length : 0;
+  const total = nodes.length;
+  document.getElementById('force-modal-body').textContent =
+    `${acked} of ${total} nodes have ACKed. Forcing will apply on all reachable nodes. ` +
+    `Unreachable nodes (${total - acked}) will remain on the old config until they reconnect.`;
+  document.getElementById('cfg-force-modal').classList.add('show');
+}
+function closeForceModal() {
+  document.getElementById('cfg-force-modal').classList.remove('show');
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+function cfgShowMsg(msg, cls) {
+  const el = document.getElementById('action-msg');
+  el.textContent = msg;
+  el.style.color = cls === 'ok' ? 'var(--good)' : cls === 'err' ? 'var(--bad)' : 'var(--muted)';
+}
+
+let toastTimer = null;
+function toast(msg, cls) {
+  const el = document.getElementById('cfg-toast');
+  el.textContent = msg;
+  el.className = 'show toast-' + cls;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.className = '', 3000);
+}
+"""
+
+
 def render_dashboard():
     hostname = get_my_hostname()
     ip       = get_my_ip()
@@ -2411,8 +2927,9 @@ def render_dashboard():
 <html lang="en"><head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>MANET // PERF</title>
-<style>{CSS}</style>
+<title>MANET // MANAGE</title>
+<style>{CSS}{CONFIG_TAB_CSS}
+</style>
 </head><body>
 
 <div id="overlay" class="info">
@@ -2426,7 +2943,7 @@ def render_dashboard():
   <div class="fer-lockup" title="FER" aria-label="FER">
     <img class="fer-logo-img" src="/assets/fer-logo-black?v={logo_v}" data-light="/assets/fer-logo-black?v={logo_v}" data-dark="/assets/fer-logo-white?v={logo_v}" alt="FER">
   </div>
-  <div id="hdr-logo">MANET//<span>PERF</span></div>
+  <div id="hdr-logo">MANET//<span>MANAGE</span></div>
   <div id="hdr-node"><strong>{hostname}</strong> &nbsp;{ip}</div>
   <div id="hdr-right">
     <span id="hdr-inet" class="no">○ NO INET</span>
@@ -2443,6 +2960,7 @@ def render_dashboard():
   <div class="tab"        data-tab="measure"    onclick="showTab('measure')">MEASURE</div>
   <div class="tab"        data-tab="sessions"   onclick="showTab('sessions')">SESSIONS</div>
   <div class="tab"        data-tab="uplink"     onclick="showTab('uplink')">UPLINK</div>
+  <div class="tab"        data-tab="config"     onclick="showTab('config')">NODE CONFIG</div>
 </div>
 
 <div id="content">
@@ -2651,13 +3169,21 @@ def render_dashboard():
       </div>
     </div>
   </div>
+  <!-- ── NODE CONFIG ── -->
+  <!-- The old /admin page. Same staging/ACK/apply flow, now behind the same
+       password as everything else here rather than open on port 80. -->
+  <div id="tab-config" class="tab-pane" style="display:none">
+{CONFIG_TAB_HTML}
+  </div>
+
   <div class="footer-actions">
     <button class="logout-link-btn" type="button" onclick="window.location.href='/auth/perf-logout'">LOGOUT</button>
   </div>
 </div><!-- #content -->
 </div><!-- #page -->
 
-<script>{JS}</script>
+<script>{JS}
+{CONFIG_TAB_JS}</script>
 </body></html>"""
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2682,28 +3208,16 @@ def logo_asset_file(url_path):
     name = os.path.splitext(url_path[len('/assets/'):])[0]
     return FER_LOGO_ASSETS.get(name)
 
-class PerfHandler(http.server.BaseHTTPRequestHandler):
+class ManageRoutes:
+    """Mixed into mesh-status.py's handler; relies on its send_json/send_html.
+
+    Route methods are prefixed so they never shadow the real do_* dispatch —
+    mesh-status calls them only after the password cookie checks out.
+    """
     def log_message(self, fmt, *args):
         pass  # suppress access logs
 
-    def send_json(self, data, code=200):
-        body = json.dumps(data).encode()
-        self.send_response(code)
-        self.send_header('Content-Type', 'application/json')
-        self.send_header('Content-Length', str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-    def send_html(self, html):
-        body = html.encode()
-        self.send_response(200)
-        self.send_header('Content-Type', 'text/html; charset=utf-8')
-        self.send_header('Content-Length', str(len(body)))
-        self.send_header('Cache-Control', 'no-store')
-        self.end_headers()
-        self.wfile.write(body)
-
-    def do_GET(self):
+    def manage_do_GET(self):
         parsed = urlparse(self.path)
         path   = parsed.path.rstrip('/') or '/'
 
@@ -2761,7 +3275,7 @@ class PerfHandler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(b'Not found')
 
-    def do_DELETE(self):
+    def manage_do_DELETE(self):
         parsed = urlparse(self.path)
         path   = parsed.path.rstrip('/') or '/'
 
@@ -2774,7 +3288,7 @@ class PerfHandler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(b'Not found')
 
-    def do_POST(self):
+    def manage_do_POST(self):
         global _measure_status
         parsed = urlparse(self.path)
         path   = parsed.path.rstrip('/') or '/'
@@ -2793,81 +3307,28 @@ class PerfHandler(http.server.BaseHTTPRequestHandler):
 
         elif path == '/api/txpower':
             try:
-                req     = json.loads(body)
-                node_ip = req.get('node_ip', '')
-                iface   = req.get('iface', '')
-                dbm     = req.get('dbm')
-                if node_ip == 'all':
-                    nodes_raw = parse_registry()
-                    applied = []
-                    errors = []
-                    for nd in nodes_raw.values():
-                        ip = nd.get('IPV4_ADDRESS', '')
-                        hostname = nd.get('HOSTNAME', ip)
-                        if not ip:
-                            continue
-                        r = call_node_api(ip, '/api/control/txpower', 'POST',
-                                          {'iface': iface, 'dbm': dbm})
-                        if r.get('ok'):
-                            applied.append(hostname)
-                        else:
-                            errors.append(f"{hostname}: {r.get('error')}")
-                    if errors:
-                        self.send_json({'ok': False, 'applied': applied, 'error': '; '.join(errors)})
-                    else:
-                        self.send_json({'ok': True, 'applied': applied, 'iface': iface, 'dbm': _fmt_dbm(dbm)})
-                else:
-                    r = call_node_api(node_ip, '/api/control/txpower', 'POST',
-                                      {'iface': iface, 'dbm': dbm})
-                    self.send_json(r)
+                req = json.loads(body)
+                self.send_json(coordinate_radio_change(
+                    {'txpower': {req.get('iface', ''): req.get('dbm')}},
+                    req.get('node_ip', 'all')))
             except Exception as e:
                 self.send_json({'ok': False, 'error': str(e)})
 
         elif path == '/api/halow/channel':
+            # Every node has to land on the new channel together: when HaLow is
+            # the only active mesh interface, the mesh is down between the first
+            # node moving and the last. Alfred stages the change and applies it
+            # at a common activate_at, which is why this can be done at all.
             try:
-                req       = json.loads(body)
-                new_ch    = int(req.get('channel', 0))
-                new_bw    = req.get('bw', '1MHz')
-                if not new_ch:
+                req = json.loads(body)
+                if not int(req.get('channel', 0)):
                     self.send_json({'ok': False, 'error': 'Missing channel'})
                     return
-
-                nodes_raw = parse_registry()
-                # Step 1: collect all known nodes from registry (no pre-ping — mesh may be only HaLow)
-                targets = []
-                for nd in nodes_raw.values():
-                    ip       = nd.get('IPV4_ADDRESS', '')
-                    hostname = nd.get('HOSTNAME', ip)
-                    if ip:
-                        targets.append({'hostname': hostname, 'ip': ip})
-
-                if not targets:
-                    self.send_json({'ok': False, 'error': 'No nodes in registry'})
-                    return
-
-                # Step 2: apply new channel to all nodes simultaneously.
-                # NOTE: when HaLow is the only active mesh interface, all nodes will
-                # temporarily lose connectivity during this step — this is expected.
-                # We do NOT verify via mesh IP afterwards (mesh is down during switch).
-                # We do NOT roll back (rollback calls would also fail via unreachable mesh).
-                failed = []
-                applied = []
-                for node in targets:
-                    r = call_node_api(node['ip'], '/api/control/halow_channel', 'POST', req)
-                    if r.get('ok'):
-                        applied.append(node['hostname'])
-                    else:
-                        failed.append(f"{node['hostname']}: {r.get('error', 'failed')}")
-
-                if failed and not applied:
-                    self.send_json({'ok': False, 'error': '; '.join(failed)})
-                    return
-
-                result = {'ok': True, 'applied': applied}
-                if failed:
-                    result['failed'] = failed
-                    result['warning'] = 'Some nodes failed: ' + '; '.join(failed)
-                self.send_json(result)
+                self.send_json(coordinate_radio_change({'halow_channel': {
+                    'channel': int(req['channel']),
+                    'bw': req.get('bw', '1MHz'),
+                    'dbm': req.get('dbm'),
+                }}))
             except Exception as e:
                 self.send_json({'ok': False, 'error': str(e)})
 
@@ -2875,25 +3336,14 @@ class PerfHandler(http.server.BaseHTTPRequestHandler):
             try:
                 req = json.loads(body)
                 iface = req.get('interface', req.get('iface', ''))
-                channel = req.get('channel')
-                dbm = req.get('dbm')
                 if iface not in ('wlan0', 'wlan1'):
                     self.send_json({'ok': False, 'error': 'Invalid Wi-Fi interface'})
                     return
-                nodes_raw = parse_registry()
-                errors = []
-                for nd in nodes_raw.values():
-                    ip = nd.get('IPV4_ADDRESS', '')
-                    if not ip:
-                        continue
-                    r = call_node_api(ip, '/api/control/wifi_channel', 'POST',
-                                      {'interface': iface, 'channel': channel, 'dbm': dbm})
-                    if not r.get('ok'):
-                        errors.append(f"{ip}: {r.get('error')}")
-                if errors:
-                    self.send_json({'ok': False, 'error': '; '.join(errors)})
-                else:
-                    self.send_json({'ok': True})
+                self.send_json(coordinate_radio_change({'wifi_channel': {
+                    'iface': iface,
+                    'channel': req.get('channel'),
+                    'dbm': req.get('dbm'),
+                }}))
             except Exception as e:
                 self.send_json({'ok': False, 'error': str(e)})
 
@@ -2962,61 +3412,3 @@ class PerfHandler(http.server.BaseHTTPRequestHandler):
             self.send_response(404)
             self.end_headers()
             self.wfile.write(b'Not found')
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Entry Point
-# ─────────────────────────────────────────────────────────────────────────────
-class ThreadedServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
-    daemon_threads = True
-    allow_reuse_address = True
-
-AVAHI_PERF_SERVICE = '/etc/avahi/services/perf-http.service'
-AVAHI_PERF_CONTENT = """<?xml version="1.0" standalone='no'?>
-<!DOCTYPE service-group SYSTEM "avahi-service.dtd">
-<service-group>
-  <name>MANET Perf Dashboard</name>
-  <host-name>perf.local</host-name>
-  <service>
-    <type>_http._tcp</type>
-    <port>8081</port>
-  </service>
-</service-group>
-"""
-
-def _is_gateway():
-    return os.path.exists('/var/run/mesh-gateway.state')
-
-def _manage_avahi_perf():
-    """Run in background thread: install/remove avahi perf.local based on gateway status."""
-    last = None
-    while True:
-        gw = _is_gateway()
-        if gw != last:
-            try:
-                if gw:
-                    with open(AVAHI_PERF_SERVICE, 'w') as f:
-                        f.write(AVAHI_PERF_CONTENT)
-                    subprocess.run(['systemctl', 'reload', 'avahi-daemon'], timeout=5, capture_output=True)
-                else:
-                    if os.path.exists(AVAHI_PERF_SERVICE):
-                        os.remove(AVAHI_PERF_SERVICE)
-                        subprocess.run(['systemctl', 'reload', 'avahi-daemon'], timeout=5, capture_output=True)
-            except Exception:
-                pass
-            last = gw
-        time.sleep(30)
-
-if __name__ == '__main__':
-    import sys
-    port = int(sys.argv[1]) if len(sys.argv) > 1 else PORT
-    os.makedirs(SESSIONS_DIR, exist_ok=True)
-
-    t = threading.Thread(target=_manage_avahi_perf, daemon=True)
-    t.start()
-
-    server = ThreadedServer(('0.0.0.0', port), PerfHandler)
-    print(f'MANET Perf Dashboard listening on port {port}')
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        server.shutdown()
