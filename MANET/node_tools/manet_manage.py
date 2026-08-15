@@ -2636,6 +2636,18 @@ CONFIG_TAB_HTML = r"""
            font-size:10px;color:var(--bad);line-height:1.6;">
         ⚠ Staged changes include <strong>DANGEROUS</strong> settings (mesh SSID, key, or IP range).
         All nodes will briefly disconnect while applying. Ensure 100% ACK before applying.
+        <label style="display:flex;align-items:center;gap:6px;margin-top:8px;color:var(--muted);cursor:pointer">
+          <input type="checkbox" id="f-no-rollback" style="width:14px;height:14px;margin:0">
+          Skip the safety net — keep the change even if the mesh does not come back
+        </label>
+      </div>
+
+      <!-- Rollback armed on this node -->
+      <div id="rollback-box" style="display:none;margin-top:14px;padding:10px;
+           background:#f59e0b0d;border:1px solid #f59e0b40;border-radius:3px;
+           font-size:10px;color:var(--text);line-height:1.6;">
+        <strong>Rollback armed</strong>
+        <div id="rollback-detail" style="color:var(--muted);margin-top:4px"></div>
       </div>
     </div>
   </div>
@@ -2727,6 +2739,21 @@ function renderStatus(s) {
   const pStat    = document.getElementById('pending-stat');
   const pWrap    = document.getElementById('ack-progress-wrap');
   const ackBar   = document.getElementById('ack-bar');
+  const rb = s.rollback || {};
+  const rbBox = document.getElementById('rollback-box');
+  if (rbBox) {
+    rbBox.style.display = rb.armed ? '' : 'none';
+    if (rb.armed) {
+      const left = rb.seconds_left > 0
+        ? `${Math.ceil(rb.seconds_left / 60)} min remaining`
+        : 'deadline passed, deciding on the next cycle';
+      document.getElementById('rollback-detail').textContent =
+        `Version ${(rb.version || '').slice(0, 8)} is on trial. This node had ` +
+        `${rb.peers_before} peer(s) before the change; if none are back by the ` +
+        `deadline it restores the previous config by itself. ${left}.`;
+    }
+  }
+
   const dangerWarn = document.getElementById('danger-warn');
   const btnApply = document.getElementById('btn-apply');
   const btnForce = document.getElementById('btn-force');
@@ -2857,12 +2884,15 @@ async function applyChanges(force) {
     const r   = await fetch('/api/admin/activate', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({force: force})
+      body: JSON.stringify({force: force, no_rollback: skipRollback()})
     });
     const res = await r.json();
     if (r.ok && res.ok) {
       toast('Activate signal sent — applying in 60s', 'ok');
-      cfgShowMsg('All nodes will apply in ~60s.', 'ok');
+      cfgShowMsg(res.no_rollback
+        ? 'All nodes will apply in ~60s. Safety net skipped — this change is permanent.'
+        : 'All nodes will apply in ~60s. Dangerous changes roll back automatically if the mesh does not re-form.',
+        'ok');
       await refreshStatus();
     } else {
       toast('Activate failed: ' + (res.error || r.status), 'err');
@@ -2885,6 +2915,11 @@ async function cancelPending() {
   } catch(e) {}
 }
 
+function skipRollback() {
+  const el = document.getElementById('f-no-rollback');
+  return !!(el && el.checked);
+}
+
 // ── Force modal ───────────────────────────────────────────────────────────────
 function showForceModal() {
   const s     = STATUS;
@@ -2894,7 +2929,10 @@ function showForceModal() {
   const total = nodes.length;
   document.getElementById('force-modal-body').textContent =
     `${acked} of ${total} nodes have ACKed. Forcing will apply on all reachable nodes. ` +
-    `Unreachable nodes (${total - acked}) will remain on the old config until they reconnect.`;
+    `Unreachable nodes (${total - acked}) will remain on the old config until they reconnect. ` +
+    (skipRollback()
+      ? 'The safety net is switched off: nodes will keep the change even if the mesh does not come back.'
+      : 'The safety net still applies: a node that loses the mesh restores its previous config.');
   document.getElementById('cfg-force-modal').classList.add('show');
 }
 function closeForceModal() {
