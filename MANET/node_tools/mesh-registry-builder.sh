@@ -2,18 +2,28 @@
 # ==============================================================================
 # Mesh Registry Builder
 # ==============================================================================
-# This script:
-# 1. Queries Alfred for peer data
-# 2. Decodes protobuf messages
-# 3. Writes plain text /var/run/mesh_node_registry
-# 4. Tracks claimed chunks for IP manager
+# Builds /var/run/mesh_node_registry from Alfred. This is the only place peer
+# state comes from — nothing in this system queries another node directly.
+#
+# Peer data arrives as two Alfred types, joined on the record key:
+#
+#   type 67  identity   hostname, MACs, syncthing ID, chunk. Republished
+#                       slowly, so it is cached across cycles: a node whose
+#                       identity record has not been refreshed yet keeps the
+#                       values from the previous registry rather than blanking.
+#   type 68  telemetry  everything volatile, refreshed every cycle.
+#
+# Alfred stamps each record with the publishing node's MAC (it runs `-i br0`).
+# That key is the join column AND the node's primary MAC, which is why the
+# identity payload does not carry it.
 # ==============================================================================
 
 # --- Configuration ---
+ALFRED_IDENTITY_TYPE=67
 ALFRED_DATA_TYPE=68
-REGISTRY_STATE_FILE="/var/run/mesh_node_registry"
-CLAIMED_CHUNKS_FILE="/tmp/claimed_chunks.txt"
-DECODER_PATH="/usr/local/bin/decoder.py"
+REGISTRY_STATE_FILE="${MESH_REGISTRY_FILE:-/var/run/mesh_node_registry}"
+CLAIMED_CHUNKS_FILE="${MESH_CLAIMED_CHUNKS_FILE:-/tmp/claimed_chunks.txt}"
+DECODER_PATH="${MESH_DECODER_PATH:-/usr/local/bin/decoder.py}"
 STALE_AFTER_SECONDS="${MESH_REGISTRY_STALE_AFTER:-300}"
 
 # --- Helper Functions ---
@@ -21,139 +31,139 @@ log() {
     echo "[$(date +'%Y-%m-%d %H:%M:%S')] - REGISTRY: $1"
 }
 
+# Alfred prints one record per line as:  { "aa:bb:cc:dd:ee:ff", "<base64>" },
+# Emit "<mac> <base64>" so the key travels with the payload.
+alfred_records() {
+    alfred -r "$1" 2>/dev/null |
+        sed -n 's/^[[:space:]]*{[[:space:]]*"\([0-9a-fA-F:]\{17\}\)"[[:space:]]*,[[:space:]]*"\([^"]*\)".*/\1 \2/p'
+}
+
+# Single-quote a value for the registry file. Network-sourced strings land in
+# here, so an embedded quote must not be able to end the assignment.
+shell_escape() {
+    printf '%s' "${1//\'/\'\\\'\'}"
+}
+
+# Pull one already-known field out of the registry we wrote last time.
+prev_value() {
+    [ -f "$REGISTRY_STATE_FILE" ] || return 0
+    sed -n "s/^$1_$2='\(.*\)'$/\1/p" "$REGISTRY_STATE_FILE" | head -1
+}
+
 # --- Main Logic ---
 NOW=$(date +%s)
 
-# Query Alfred for all peer payloads
-mapfile -t PEER_PAYLOADS < <(alfred -r $ALFRED_DATA_TYPE 2>/dev/null | grep -oP '"\K[^"]+(?="\s*\},?)' )
+declare -A IDENTITY_B64=()
+declare -A TELEMETRY_B64=()
 
-log "Found ${#PEER_PAYLOADS[@]} peer payloads from Alfred"
+while read -r _mac _payload; do
+    [ -n "$_mac" ] && [ -n "$_payload" ] && IDENTITY_B64[${_mac,,}]="$_payload"
+done < <(alfred_records "$ALFRED_IDENTITY_TYPE")
 
-# Create temporary files
+while read -r _mac _payload; do
+    [ -n "$_mac" ] && [ -n "$_payload" ] && TELEMETRY_B64[${_mac,,}]="$_payload"
+done < <(alfred_records "$ALFRED_DATA_TYPE")
+
+log "Found ${#TELEMETRY_B64[@]} telemetry and ${#IDENTITY_B64[@]} identity payloads from Alfred"
+
 REGISTRY_TMP=$(mktemp)
 CLAIMED_CHUNKS_TMP=$(mktemp)
 
-# Write registry header
 echo "# Mesh Node Registry - Generated $(date)" > "$REGISTRY_TMP"
 echo "# Sourced by other scripts to get network state." >> "$REGISTRY_TMP"
 echo "" >> "$REGISTRY_TMP"
 
-# Process each payload
-for B64_PAYLOAD in "${PEER_PAYLOADS[@]}"; do
-    if [ -z "$B64_PAYLOAD" ]; then
+NODE_COUNT=0
+
+for NODE_MAC in "${!TELEMETRY_B64[@]}"; do
+    declare -A F=()
+
+    # --- Telemetry (required) ---
+    DECODED=$("$DECODER_PATH" telemetry "${TELEMETRY_B64[$NODE_MAC]}" 2>&1)
+    if [ $? -ne 0 ] || [ -z "$DECODED" ]; then
+        log "Warning: telemetry decode failed for $NODE_MAC"
         continue
     fi
 
-    # Decode the protobuf message
-    DECODED_DATA=$("$DECODER_PATH" "${B64_PAYLOAD}" 2>&1)
-    DECODER_EXIT=$?
-
-    if [ $DECODER_EXIT -ne 0 ]; then
-        log "Warning: decoder.py failed with exit code $DECODER_EXIT"
-        continue
-    fi
-
-    if [ -z "$DECODED_DATA" ]; then
-        log "Warning: decoder.py returned empty data"
-        continue
-    fi
-
-    # Filter for valid variable assignments
-    FILTERED_DATA=$(echo "$DECODED_DATA" | grep -E "^[A-Z0-9_]+=")
-
-    if [ -z "$FILTERED_DATA" ]; then
-        log "Warning: No valid variable assignments in decoded data"
-        continue
-    fi
-
-    # Safely parse variable assignments — no eval on network data
+    # Parse assignments without eval — this is network data.
     while IFS= read -r _line; do
         _varname="${_line%%=*}"
         _val="${_line#*=}"
         _val="${_val#\'}"
         _val="${_val%\'}"
-        printf -v "$_varname" '%s' "$_val"
-    done <<< "$FILTERED_DATA"
+        F["$_varname"]="$_val"
+    done < <(grep -E "^[A-Z0-9_]+=" <<< "$DECODED")
 
-    # Write to registry if we have a MAC address
-    if [[ -n "$MAC_ADDRESS" ]]; then
-        PREFIX="NODE_$(echo "$MAC_ADDRESS" | tr -d ':')"
-        EFFECTIVE_NODE_STATE="${NODE_STATE:-ACTIVE}"
+    PREFIX="NODE_$(tr -d ':' <<< "$NODE_MAC")"
 
-        if [[ "${LAST_SEEN_TIMESTAMP:-0}" =~ ^[0-9]+$ ]] && [ "${LAST_SEEN_TIMESTAMP:-0}" -gt 0 ]; then
-            NODE_AGE=$((NOW - LAST_SEEN_TIMESTAMP))
-            if [ "$NODE_AGE" -gt "$STALE_AFTER_SECONDS" ]; then
-                EFFECTIVE_NODE_STATE="STALE"
-            fi
+    # --- Identity (cached when this cycle's copy is missing) ---
+    if [ -n "${IDENTITY_B64[$NODE_MAC]}" ]; then
+        DECODED_ID=$("$DECODER_PATH" identity "${IDENTITY_B64[$NODE_MAC]}" \
+                     --node-mac "$NODE_MAC" 2>&1)
+        if [ $? -eq 0 ] && [ -n "$DECODED_ID" ]; then
+            while IFS= read -r _line; do
+                _varname="${_line%%=*}"
+                _val="${_line#*=}"
+                _val="${_val#\'}"
+                _val="${_val%\'}"
+                F["$_varname"]="$_val"
+            done < <(grep -E "^[A-Z0-9_]+=" <<< "$DECODED_ID")
+        else
+            log "Warning: identity decode failed for $NODE_MAC"
         fi
+    fi
+    if [ -z "${F[HOSTNAME]}" ]; then
+        for _k in HOSTNAME MAC_ADDRESSES IPV4_ADDRESS IPV4_CHUNK SYNCTHING_ID; do
+            F["$_k"]=$(prev_value "$PREFIX" "$_k")
+        done
+        [ -n "${F[HOSTNAME]}" ] && log "Using cached identity for $NODE_MAC"
+    fi
+    F[MAC_ADDRESS]="$NODE_MAC"
+    [ -z "${F[MAC_ADDRESSES]}" ] && F[MAC_ADDRESSES]="$NODE_MAC"
 
-        # Write all node data to registry
-        {
-            printf "%s_HOSTNAME='%s'\n" "$PREFIX" "${HOSTNAME:-}"
-            printf "%s_MAC_ADDRESS='%s'\n" "$PREFIX" "${MAC_ADDRESS:-}"
-            printf "%s_MAC_ADDRESSES='%s'\n" "$PREFIX" "${MAC_ADDRESSES:-}"
-            printf "%s_IPV4_ADDRESS='%s'\n" "$PREFIX" "${IPV4_ADDRESS:-}"
-            printf "%s_IPV4_CHUNK='%s'\n" "$PREFIX" "${IPV4_CHUNK:-0}"
-            printf "%s_SYNCTHING_ID='%s'\n" "$PREFIX" "${SYNCTHING_ID:-}"
-            printf "%s_TQ_AVERAGE='%s'\n" "$PREFIX" "${TQ_AVERAGE:-}"
-            printf "%s_IS_GATEWAY='%s'\n" "$PREFIX" "${IS_INTERNET_GATEWAY:-}"
-            printf "%s_GATEWAY_IFACE='%s'\n" "$PREFIX" "${GATEWAY_IFACE:-}"
-            printf "%s_IS_NTP_SERVER='%s'\n" "$PREFIX" "${IS_NTP_SERVER:-}"
-            printf "%s_IS_MUMBLE_SERVER='%s'\n" "$PREFIX" "${IS_MUMBLE_SERVER:-}"
-            printf "%s_IS_TAK_SERVER='%s'\n" "$PREFIX" "${IS_TAK_SERVER:-}"
-            printf "%s_IS_MEDIAMTX_SERVER='%s'\n" "$PREFIX" "${IS_MEDIAMTX_SERVER:-}"
-            printf "%s_UPTIME_SECONDS='%s'\n" "$PREFIX" "${UPTIME_SECONDS:-}"
-            printf "%s_BATTERY_PERCENTAGE='%s'\n" "$PREFIX" "${BATTERY_PERCENTAGE:-}"
-            printf "%s_CPU_LOAD_AVERAGE='%s'\n" "$PREFIX" "${CPU_LOAD_AVERAGE:-}"
-            printf "%s_GPS_LATITUDE='%s'\n" "$PREFIX" "${GPS_LATITUDE:-}"
-            printf "%s_GPS_LONGITUDE='%s'\n" "$PREFIX" "${GPS_LONGITUDE:-}"
-            printf "%s_GPS_ALTITUDE='%s'\n" "$PREFIX" "${GPS_ALTITUDE:-}"
-            printf "%s_DATA_CHANNEL_2_4='%s'\n" "$PREFIX" "${DATA_CHANNEL_2_4:-}"
-            printf "%s_DATA_CHANNEL_5_0='%s'\n" "$PREFIX" "${DATA_CHANNEL_5_0:-}"
-            printf "%s_CHANNEL_REPORT_JSON='%s'\n" "$PREFIX" "${CHANNEL_REPORT_JSON:-}"
-            printf "%s_LAST_SEEN_TIMESTAMP='%s'\n" "$PREFIX" "${LAST_SEEN_TIMESTAMP:-0}"
-            printf "%s_LAST_REGISTRY_UPDATE='%s'\n" "$PREFIX" "$(date +%s)"
-            printf "%s_IS_IN_LIMP_MODE='%s'\n" "$PREFIX" "${IS_IN_LIMP_MODE:-false}"
-            printf "%s_LAST_TOURGUIDE_TIMESTAMP='%s'\n" "$PREFIX" "${LAST_TOURGUIDE_TIMESTAMP:-0}"
-            printf "%s_LAST_TOURGUIDE_RADIO='%s'\n" "$PREFIX" "${LAST_TOURGUIDE_RADIO:-}"
-            printf "%s_NODE_STATE='%s'\n" "$PREFIX" "$EFFECTIVE_NODE_STATE"
-            printf "%s_CONFIG_ACK_VERSION='%s'\n" "$PREFIX" "${CONFIG_ACK_VERSION:-}"
-            printf "%s_HALOW_TX_MCS='%s'\n" "$PREFIX" "${HALOW_TX_MCS:-}"
-            printf "%s_HALOW_RX_MCS='%s'\n" "$PREFIX" "${HALOW_RX_MCS:-}"
-            printf "%s_HALOW_MCS_PEER='%s'\n" "$PREFIX" "${HALOW_MCS_PEER:-}"
-            printf "%s_WIFI_24_TX_MCS='%s'\n" "$PREFIX" "${WIFI_24_TX_MCS:-}"
-            printf "%s_WIFI_24_RX_MCS='%s'\n" "$PREFIX" "${WIFI_24_RX_MCS:-}"
-            printf "%s_WIFI_5_TX_MCS='%s'\n" "$PREFIX" "${WIFI_5_TX_MCS:-}"
-            printf "%s_WIFI_5_RX_MCS='%s'\n" "$PREFIX" "${WIFI_5_RX_MCS:-}"
-            echo ""
-        } >> "$REGISTRY_TMP"
-
-        # Track claimed chunks
-        if [[ "$EFFECTIVE_NODE_STATE" == "ACTIVE" && -n "$IPV4_CHUNK" && "$IPV4_CHUNK" != "0" ]]; then
-            echo "${IPV4_CHUNK},${MAC_ADDRESS}" >> "$CLAIMED_CHUNKS_TMP"
+    # --- Freshness ---
+    EFFECTIVE_NODE_STATE="${F[NODE_STATE]:-ACTIVE}"
+    if [[ "${F[LAST_SEEN_TIMESTAMP]:-0}" =~ ^[0-9]+$ ]] && [ "${F[LAST_SEEN_TIMESTAMP]:-0}" -gt 0 ]; then
+        if [ $((NOW - ${F[LAST_SEEN_TIMESTAMP]})) -gt "$STALE_AFTER_SECONDS" ]; then
+            EFFECTIVE_NODE_STATE="STALE"
         fi
     fi
 
-    # Clear variables for next iteration
-    unset HOSTNAME MAC_ADDRESS MAC_ADDRESSES IPV4_ADDRESS IPV4_CHUNK SYNCTHING_ID TQ_AVERAGE \
-        IS_INTERNET_GATEWAY IS_NTP_SERVER IS_MUMBLE_SERVER IS_TAK_SERVER IS_MEDIAMTX_SERVER \
-        UPTIME_SECONDS BATTERY_PERCENTAGE CPU_LOAD_AVERAGE \
-        DATA_CHANNEL_2_4 DATA_CHANNEL_5_0 CHANNEL_REPORT_JSON \
-        LAST_SEEN_TIMESTAMP IS_IN_LIMP_MODE \
-        LAST_TOURGUIDE_TIMESTAMP LAST_TOURGUIDE_RADIO NODE_STATE \
-        CONFIG_ACK_VERSION HALOW_TX_MCS HALOW_RX_MCS HALOW_MCS_PEER \
-        WIFI_24_TX_MCS WIFI_24_RX_MCS WIFI_5_TX_MCS WIFI_5_RX_MCS \
-        GPS_LATITUDE GPS_LONGITUDE GPS_ALTITUDE ATAK_USER
+    {
+        for KEY in HOSTNAME MAC_ADDRESS MAC_ADDRESSES IPV4_ADDRESS IPV4_CHUNK \
+                   SYNCTHING_ID TQ_AVERAGE GATEWAY_IFACE IS_NTP_SERVER \
+                   IS_MUMBLE_SERVER IS_TAK_SERVER IS_MEDIAMTX_SERVER \
+                   UPTIME_SECONDS BATTERY_PERCENTAGE CPU_LOAD_AVERAGE \
+                   GPS_LATITUDE GPS_LONGITUDE GPS_ALTITUDE ATAK_USER \
+                   DATA_CHANNEL_2_4 DATA_CHANNEL_5_0 CHANNEL_REPORT_JSON \
+                   LAST_SEEN_TIMESTAMP IS_IN_LIMP_MODE \
+                   LAST_TOURGUIDE_TIMESTAMP LAST_TOURGUIDE_RADIO \
+                   CONFIG_ACK_VERSION HALOW_TX_MCS HALOW_RX_MCS HALOW_MCS_PEER \
+                   WIFI_24_TX_MCS WIFI_24_RX_MCS WIFI_5_TX_MCS WIFI_5_RX_MCS \
+                   INTERFACES_JSON EUD_MODE AP_SSID EUD_COUNT; do
+            printf "%s_%s='%s'\n" "$PREFIX" "$KEY" "$(shell_escape "${F[$KEY]}")"
+        done
+        # IS_GATEWAY keeps its historic name; consumers grep for it.
+        printf "%s_IS_GATEWAY='%s'\n" "$PREFIX" "$(shell_escape "${F[IS_INTERNET_GATEWAY]}")"
+        printf "%s_NODE_STATE='%s'\n" "$PREFIX" "$EFFECTIVE_NODE_STATE"
+        printf "%s_LAST_REGISTRY_UPDATE='%s'\n" "$PREFIX" "$NOW"
+        echo ""
+    } >> "$REGISTRY_TMP"
+
+    if [[ "$EFFECTIVE_NODE_STATE" == "ACTIVE" && -n "${F[IPV4_CHUNK]}" && "${F[IPV4_CHUNK]}" != "0" ]]; then
+        echo "${F[IPV4_CHUNK]},${NODE_MAC}" >> "$CLAIMED_CHUNKS_TMP"
+    fi
+
+    NODE_COUNT=$((NODE_COUNT + 1))
+    unset F
 done
 
-# Sort and save claimed chunks
 sort -u "$CLAIMED_CHUNKS_TMP" > "$CLAIMED_CHUNKS_FILE"
 rm "$CLAIMED_CHUNKS_TMP"
 
-# Move registry into place
 mv "$REGISTRY_TMP" "$REGISTRY_STATE_FILE"
 chmod 644 "$REGISTRY_STATE_FILE"
 
-log "Registry updated with ${#PEER_PAYLOADS[@]} nodes"
+log "Registry updated with $NODE_COUNT nodes"
 
 exit 0
