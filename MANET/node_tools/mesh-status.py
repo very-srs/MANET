@@ -2622,6 +2622,7 @@ import hashlib
 
 ALFRED_CONFIG_TYPE = 70
 PENDING_CONFIG_FILE = '/var/run/mesh_pending_config.json'
+ROLLBACK_STATE_FILE = '/var/lib/manet-config-rollback/state'
 
 def broadcast_config_package(pkg):
     """Write config package to Alfred type 70."""
@@ -2662,6 +2663,28 @@ def make_config_version(config_dict):
     s = json.dumps(config_dict, sort_keys=True, separators=(',', ':'))
     return hashlib.sha256(s.encode()).hexdigest()[:8]
 
+def read_rollback_state():
+    """Whether this node has a config rollback armed, and until when.
+
+    Written by mesh-config-rollback.sh as shell assignments; read rather than
+    sourced, because it is only ever consumed here for display.
+    """
+    state = load_kv_file(ROLLBACK_STATE_FILE)
+    if not state:
+        return {'armed': False}
+    try:
+        deadline = int(state.get('DEADLINE', '0') or 0)
+    except ValueError:
+        deadline = 0
+    return {
+        'armed':        True,
+        'version':      state.get('VERSION', ''),
+        'deadline':     deadline,
+        'seconds_left': max(0, deadline - int(time.time())),
+        'peers_before': state.get('PEERS_BEFORE', '0'),
+    }
+
+
 def assemble_admin_status():
     """Return current config, pending config, and per-node ACK status."""
     conf       = load_kv_file(MESH_CONF_FILE)
@@ -2696,6 +2719,7 @@ def assemble_admin_status():
             'admin_password':   conf.get('admin_password', ''),
         },
         'pending':      pending,
+        'rollback':     read_rollback_state(),
         'nodes':        node_status,
         'total_nodes':  len(node_status),
         'active_nodes': sum(1 for n in node_status if n['node_state'] == 'ACTIVE'),
@@ -3310,6 +3334,7 @@ class MeshHandler(ManageRoutes, http.server.BaseHTTPRequestHandler):
 
                 version = make_config_version(config)
                 pkg = {
+                    'kind':       'mesh_config',
                     'version':    version,
                     'issued_by':  get_my_hostname(),
                     'issued_at':  int(__import__('time').time()),
@@ -3335,6 +3360,9 @@ class MeshHandler(ManageRoutes, http.server.BaseHTTPRequestHandler):
             try:
                 req   = json.loads(body)
                 force = req.get('force', False)
+                # Carried in the package rather than decided per node, so the
+                # whole mesh applies under the same terms.
+                no_rollback = bool(req.get('no_rollback', False))
                 pkg   = get_pending_config()
                 if not pkg:
                     self.send_json({'ok': False, 'error': 'No pending config'})
@@ -3360,9 +3388,11 @@ class MeshHandler(ManageRoutes, http.server.BaseHTTPRequestHandler):
                 import time
                 activate_at = int(time.time()) + 60
                 pkg['activate_at'] = activate_at
+                pkg['no_rollback'] = no_rollback
                 save_pending_config(pkg)
                 broadcast_config_package(pkg)
-                self.send_json({'ok': True, 'activate_at': activate_at})
+                self.send_json({'ok': True, 'activate_at': activate_at,
+                                'no_rollback': no_rollback})
             except Exception as e:
                 self.send_json({'ok': False, 'error': str(e)})
 
