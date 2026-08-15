@@ -765,6 +765,11 @@ echo "mtx=__INSTALL_MEDIAMTX__" >> /etc/mesh.conf
 echo "acs=__AUTO_CHANNEL__" >> /etc/mesh.conf
 echo "eud=__EUD_CONNECTION__" >> /etc/mesh.conf
 echo "max_euds_per_node=__MAX_EUDS_PER_NODE__" >> /etc/mesh.conf
+# admin_password gates the web management UI (mesh-status.py /manage). Without
+# this line the password the operator typed at flash time is silently dropped
+# and management is unreachable.
+echo "admin_password=__ADMIN_PW__" >> /etc/mesh.conf
+echo "auto_update=__AUTO_UPDATE__" >> /etc/mesh.conf
 
 
 # Disable the current script so it won't run again at next boot
