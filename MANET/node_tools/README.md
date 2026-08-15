@@ -434,25 +434,66 @@ Runs once on boot to establish time synchronization. Tries to reach internet oth
 
 ## Mesh Configuration Push
 
+**mesh-config-sync.py**
+
+The receiving half. Each node-manager cycle it reads the newest package from
+Alfred type 70, validates it, stages it to `/var/run/mesh_pending_config.json`,
+publishes an ACK by writing `/var/run/mesh_config_ack_version`, and runs
+`mesh-config-apply.sh` once `activate_at` has passed.
+
+Everything in a package is remote input that ends up in `/etc/mesh.conf` and in
+wpa_supplicant configs, so it is validated rather than trusted: keys are
+whitelisted, and values are rejected if they contain a quote, newline or NUL, or
+fail a per-key check (CIDR shape, SSID and SAE key lengths, enum values). A peer
+cannot use a config broadcast to write arbitrary supplicant configuration.
+
 **mesh-config-apply.sh**
 
-Applies a staged config package from `/var/run/mesh_pending_config.json` to
-`/etc/mesh.conf`, splitting settings into two classes:
+Applies a staged package to `/etc/mesh.conf`, splitting settings into two
+classes:
 
 - **Safe** (applied immediately): `admin_password`, `eud`, `lan_ap_ssid`,
   `lan_ap_key`, `max_euds_per_node`, `mtx`, `mumble`, `auto_update`.
-- **Dangerous** (brief mesh outage): `mesh_ssid`, `mesh_key`, `ipv4_network`.
+- **Dangerous** (brief mesh outage): `mesh_ssid`, `mesh_key`, `ipv4_network` —
+  these rewrite the supplicant configs and restart the supplicants.
 
-> **Not currently wired up.** The script is complete and works when run by hand
-> (`mesh-config-apply.sh --force`), but nothing invokes it and nothing consumes
-> Alfred type 70. The NODE CONFIG tab stages a package and broadcasts it, and no
-> node — including the one that staged it — ever applies it. Two links are
-> missing: something to read type 70 into `/var/run/mesh_pending_config.json`
-> and call this at `activate_at`, and something to publish
-> `/var/run/mesh_config_ack_version` as `--config-ack-version` so peers'
-> `CONFIG_ACK_VERSION` is non-empty. Until then the ACK gate in
-> `/api/admin/activate` can never pass, and Force Apply reports success without
-> changing anything.
+Also callable by hand for testing: `mesh-config-apply.sh --force`.
+
+**mesh-config-rollback.sh**
+
+The safety net for dangerous changes. A wrong mesh key takes the mesh down, and
+with it the only way to push a correction — so each node has to be able to undo
+the change on its own, with no help from the network.
+
+`arm` snapshots `/etc/mesh.conf` and the supplicant configs, records how many
+batman peers the node had, and sets a deadline (default 300 s, `MANET_ROLLBACK_GRACE`).
+`check` runs every node-manager cycle and is a no-op until the deadline passes,
+then either commits or restores and restarts the supplicants. State lives in
+`/var/lib` because a dangerous apply can end in a reboot.
+
+A node that had no peers before the change commits rather than rolling back —
+on a solo bench node "the mesh did not come back" cannot be told apart from
+"there was never anyone there".
+
+### The whole flow
+
+1. **Stage** — the UI writes a package and broadcasts it on type 70 with
+   `activate_at=0`.
+2. **ACK** — every node stages it and writes its ACK version; the node managers
+   carry that into telemetry, which fills the ACK table. A change to the ACK
+   brings the next publish forward so the table fills in seconds.
+3. **Apply** — the operator presses Apply once the table shows 100%.
+   `/api/admin/activate` refuses until then; **Force Apply** skips that gate for
+   unreachable nodes.
+4. **Activate** — `activate_at` is set 60 s out and rebroadcast, so every node
+   applies at the same moment.
+5. **Trial** — a node whose dangerous settings actually change arms the rollback
+   first. If its peers come back it commits; if they do not it restores itself.
+   **Skip the safety net** in the UI sets `no_rollback` in the package for a
+   change the operator wants kept regardless.
+
+Danger is judged per node against local values, so re-broadcasting the SSID a
+node already has does not put it into a five-minute trial window.
 
 ---
 
