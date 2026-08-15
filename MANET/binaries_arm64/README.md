@@ -13,7 +13,7 @@ These files are automatically injected into the OS image by the provisioning scr
 - `alfred`
   The Almighty Lightweight Fact Remote Exchange Daemon. Used to distribute information (like hostnames or sensor data) across the batman-adv mesh network without requiring a central server.
 
-- `batman`
+- `batctl`
   The B.A.T.M.A.N. (Better Approach To Mobile Adhoc Networking) routing protocol utility.
 
 - `wpa_supplicant_s1g`
