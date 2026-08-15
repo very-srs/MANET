@@ -22,23 +22,11 @@ if [ -z "$MY_MAC" ]; then
     exit 1
 fi
 
-ALL_MACS=("$MY_MAC")
-for iface in wlan0 wlan1 wlan2 br0 bat0 end0; do
-    if [ -d "/sys/class/net/$iface" ]; then
-        MAC=$(cat "/sys/class/net/$iface/address" 2>/dev/null)
-        [ -n "$MAC" ] && ALL_MACS+=("$MAC")
-    fi
-done
-
-CURRENT_IPV4=$(ip addr show dev "$CONTROL_IFACE" | grep -oP 'inet \K[\d.]+' | head -1)
-SYNCTHING_ID=$(runuser -u radio -- syncthing --device-id 2>/dev/null || echo "")
-
-# Build tombstone payload
-TOMBSTONE_PAYLOAD=$("$ENCODER_PATH" \
-    "--hostname" "$HOSTNAME" \
-    "--mac-addresses" "${ALL_MACS[@]}" \
-    "--ipv4-address" "${CURRENT_IPV4:-}" \
-    "--syncthing-id" "${SYNCTHING_ID:-}" \
+# A tombstone is pure telemetry — it says this node is going away, and peers
+# already hold its identity record. Nothing here needs to repeat the hostname
+# or MACs, and Alfred stamps the record with our MAC so the registry still
+# knows which node it refers to.
+TOMBSTONE_PAYLOAD=$("$ENCODER_PATH" telemetry \
     "--timestamp" "$(date +%s)" \
     "--node-state" "SHUTTING_DOWN" \
     2>/dev/null)

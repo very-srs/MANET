@@ -7,6 +7,7 @@
 
 # --- Configuration ---
 CONTROL_IFACE="br0"
+ALFRED_IDENTITY_TYPE=67
 ALFRED_DATA_TYPE=68
 ALFRED_HELPER_TYPE=69
 MONITOR_INTERVAL=15
@@ -51,6 +52,15 @@ HALOW_MCS_SUMMARY="/usr/local/bin/halow-mcs-summary.py"
 # --- State Variables ---
 LAST_PUBLISHED_PAYLOAD=""
 LAST_PUBLISH_TIME=0
+
+# Identity (hostname, MACs, syncthing ID) does not change while we are up, so
+# it goes out on its own Alfred type and only often enough to stay resident.
+# Alfred purges any record it has not seen for ALFRED_DATA_TIMEOUT = 600 s, so
+# at 270 s a publish can fail once and the record still survives. This runs on
+# its own timer rather than inside a pipeline stage, so it keeps ticking in
+# both lobby and data state.
+LAST_IDENTITY_PUBLISH=0
+IDENTITY_PUBLISH_INTERVAL=270
 CACHED_SCAN_REPORT_JSON="{}"
 LAST_SCAN_COMPLETE_TIME=0
 LOBBY_ENTERED_TIME=0
@@ -324,6 +334,37 @@ while true; do
     if [ -f /var/run/my_ipv4_chunk ]; then
         MY_CHUNK=$(cat /var/run/my_ipv4_chunk)
     fi
+    # === PUBLISH IDENTITY (Alfred type 67) ===
+    if [ $((NOW - LAST_IDENTITY_PUBLISH)) -ge $IDENTITY_PUBLISH_INTERVAL ]; then
+        # br0's MAC must come first: encoder.py drops it, because Alfred
+        # already stamps every record we publish with it.
+        IDENT_MACS=("$MY_MAC")
+        for iface in /sys/class/net/wlan* /sys/class/net/bat0 /sys/class/net/end0; do
+            iface=$(basename "$iface")
+            if [ -d "/sys/class/net/$iface" ]; then
+                MAC=$(cat "/sys/class/net/$iface/address" 2>/dev/null)
+                [ -n "$MAC" ] && IDENT_MACS+=("$MAC")
+            fi
+        done
+
+        IDENT_IPV4=$(ip addr show dev "$CONTROL_IFACE" 2>/dev/null | grep -oP 'inet \K[\d.]+' | head -1)
+        IDENTITY_ARGS=(
+            "--hostname" "$(hostname)"
+            "--mac-addresses" "${IDENT_MACS[@]}"
+            "--syncthing-id" "$(runuser -u radio -- syncthing --device-id 2>/dev/null || echo "")"
+            "--ipv4-chunk" "$MY_CHUNK"
+        )
+        [ -n "$IDENT_IPV4" ] && IDENTITY_ARGS+=("--ipv4-address" "$IDENT_IPV4")
+
+        IDENTITY_PAYLOAD=$("$ENCODER_PATH" identity "${IDENTITY_ARGS[@]}" 2>/dev/null)
+        if [ -n "$IDENTITY_PAYLOAD" ]; then
+            echo -n "$IDENTITY_PAYLOAD" | alfred -s $ALFRED_IDENTITY_TYPE
+            LAST_IDENTITY_PUBLISH=$NOW
+        else
+            log "WARN: identity encoder produced no payload"
+        fi
+    fi
+
     # === CHECK STATE: LOBBY OR DATA ===
     IS_IN_LOBBY=$(is_in_lobby)
 
@@ -372,8 +413,6 @@ while true; do
         if [ "$DO_LOBBY_PUBLISH" = true ]; then
             log "=== LOBBY PUBLISH ($(date +'%H:%M:%S')) ==="
             
-            HOSTNAME=$(hostname)
-            SYNCTHING_ID=$(runuser -u radio -- syncthing --device-id 2>/dev/null || echo "")
             TQ_AVG=$("$BATCTL_PATH" o 2>/dev/null | awk 'NR>1 {sum+=$3} END {if (NR>1) printf "%.2f", sum/(NR-1); else print 0}')
             
             # Service flags
@@ -384,27 +423,12 @@ while true; do
             IS_MEDIAMTX_FLAG=$(is_hosting_service && echo "--is-mediamtx-server" || echo "")
             IS_MUMBLE_FLAG=$(is_hosting_mumble_service && echo "--is-mumble-server" || echo "")
 
-            # Gather MACs
-            ALL_MACS=("$MY_MAC")
-            for iface_path in /sys/class/net/wlan* /sys/class/net/bat0 /sys/class/net/end0; do
-                [ -e "$iface_path" ] || continue
-                iface=$(basename "$iface_path")
-                if [ -d "/sys/class/net/$iface" ]; then
-                    MAC=$(cat "/sys/class/net/$iface/address" 2>/dev/null)
-                    [ -n "$MAC" ] && ALL_MACS+=("$MAC")
-                fi
-            done
             
-            CURRENT_IPV4=$(ip addr show dev "$CONTROL_IFACE" 2>/dev/null | grep -oP 'inet \K[\d.]+' | head -1)
             collect_radio_mcs
             
             # Encode (scan data only while bootstrapping)
             ENCODER_ARGS=(
-                "--hostname" "$HOSTNAME"
-                "--mac-addresses" "${ALL_MACS[@]}"
                 "--tq-average" "$TQ_AVG"
-                "--syncthing-id" "$SYNCTHING_ID"
-				"--ipv4-chunk" "$MY_CHUNK"
                 "--timestamp" "$NOW"
                 "--wifi-24-tx-mcs" "${WLAN0_TX_MCS:-}"
                 "--wifi-24-rx-mcs" "${WLAN0_RX_MCS:-}"
@@ -414,7 +438,6 @@ while true; do
                 "--halow-rx-mcs" "${WLAN2_RX_MCS:-}"
                 "--halow-mcs-peer" "${WLAN2_MCS_PEER:-}"
             )
-            [ -n "$CURRENT_IPV4" ] && ENCODER_ARGS+=("--ipv4-address" "$CURRENT_IPV4")
             [ -n "$IS_GATEWAY_FLAG" ] && ENCODER_ARGS+=("$IS_GATEWAY_FLAG")
             [ -n "$GATEWAY_IFACE" ] && ENCODER_ARGS+=("--gateway-iface" "$GATEWAY_IFACE")
             [ -n "$IS_NTP_FLAG" ] && ENCODER_ARGS+=("$IS_NTP_FLAG")
@@ -447,10 +470,10 @@ except Exception:
             fi
             [ -n "$GPS_LAT" ] && ENCODER_ARGS+=("--latitude" "$GPS_LAT" "--longitude" "$GPS_LON" "--altitude" "$GPS_ALT")
 
-            CURRENT_PAYLOAD=$("$ENCODER_PATH" "${ENCODER_ARGS[@]}" 2>/dev/null)
+            CURRENT_PAYLOAD=$("$ENCODER_PATH" telemetry "${ENCODER_ARGS[@]}" 2>/dev/null)
             if [ -z "$CURRENT_PAYLOAD" ]; then
                 # re-run only on failure, to surface why nothing was published
-                log "WARN: encoder produced no payload, not publishing: $("$ENCODER_PATH" "${ENCODER_ARGS[@]}" 2>&1 >/dev/null | tr '\n' ' ')"
+                log "WARN: encoder produced no payload, not publishing: $("$ENCODER_PATH" telemetry "${ENCODER_ARGS[@]}" 2>&1 >/dev/null | tr '\n' ' ')"
             fi
 
             if [ -n "$CURRENT_PAYLOAD" ]; then
@@ -481,7 +504,8 @@ except Exception:
         
         # === CHECK FOR HELPER BEACON (non-blocking) ===
         HELPER_MIGRATED=false
-        HELPER_PAYLOAD=$(timeout 2 alfred -r $ALFRED_HELPER_TYPE 2>/dev/null | grep -oP '"\K[^"]+(?="\s*\},?)' | head -1)
+        HELPER_PAYLOAD=$(timeout 2 alfred -r $ALFRED_HELPER_TYPE 2>/dev/null |
+            sed -n 's/^[[:space:]]*{[[:space:]]*"[0-9a-fA-F:]\{17\}"[[:space:]]*,[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
 
         if [ -n "$HELPER_PAYLOAD" ]; then
             # No eval on network data — parse assignments with printf -v
@@ -492,7 +516,7 @@ except Exception:
                 _val="${_val#\'}"
                 _val="${_val%\'}"
                 printf -v "$_varname" '%s' "$_val"
-            done < <("/usr/local/bin/decoder.py" "$HELPER_PAYLOAD" 2>/dev/null | grep -E "^DATA_CHANNEL_(2_4|5_0)=")
+            done < <("/usr/local/bin/decoder.py" telemetry "$HELPER_PAYLOAD" 2>/dev/null | grep -E "^DATA_CHANNEL_(2_4|5_0)=")
 
             if [[ "$DATA_CHANNEL_2_4" =~ ^[0-9]{4}$ && "$DATA_CHANNEL_5_0" =~ ^[0-9]{4}$ ]]; then
                 log "Helper beacon received. Migrating to data channels: 2.4=${DATA_CHANNEL_2_4}, 5=${DATA_CHANNEL_5_0}"
@@ -555,8 +579,6 @@ except Exception:
         if should_perform_action "PUBLISH" 180 15; then
             log "=== PUBLISH ($(date +'%H:%M:%S')) ==="
 
-            HOSTNAME=$(hostname)
-            SYNCTHING_ID=$(runuser -u radio -- syncthing --device-id 2>/dev/null || echo "")
             TQ_AVG=$("$BATCTL_PATH" o 2>/dev/null | awk 'NR>1 {sum+=$3} END {if (NR>1) printf "%.2f", sum/(NR-1); else print 0}')
 
             # Service flags
@@ -567,18 +589,7 @@ except Exception:
             IS_MEDIAMTX_FLAG=$(is_hosting_service && echo "--is-mediamtx-server" || echo "")
             IS_MUMBLE_FLAG=$(is_hosting_mumble_service && echo "--is-mumble-server" || echo "")
 
-            # Gather MACs
-            ALL_MACS=("$MY_MAC")
-            for iface_path in /sys/class/net/wlan* /sys/class/net/end0; do
-                [ -e "$iface_path" ] || continue
-                iface=$(basename "$iface_path")
-                if [ -d "/sys/class/net/$iface" ]; then
-                    MAC=$(cat "/sys/class/net/$iface/address" 2>/dev/null)
-                    [ -n "$MAC" ] && ALL_MACS+=("$MAC")
-                fi
-            done
 
-            CURRENT_IPV4=$(ip addr show dev "$CONTROL_IFACE" 2>/dev/null | grep -oP 'inet \K[\d.]+' | head -1)
 
             # Limp mode flag
             LIMP_MODE_FLAG=""
@@ -595,10 +606,7 @@ except Exception:
             # Encode
             collect_radio_mcs
             ENCODER_ARGS=(
-                "--hostname" "$HOSTNAME"
-                "--mac-addresses" "${ALL_MACS[@]}"
                 "--tq-average" "$TQ_AVG"
-                "--syncthing-id" "$SYNCTHING_ID"
                 "--channel-report-json" "$SCAN_REPORT_JSON"
                 "--timestamp" "$NOW"
                 "--last-tourguide-timestamp" "$LAST_TOURGUIDE_TIME"
@@ -611,7 +619,6 @@ except Exception:
                 "--halow-rx-mcs" "${WLAN2_RX_MCS:-}"
                 "--halow-mcs-peer" "${WLAN2_MCS_PEER:-}"
             )
-            [ -n "$CURRENT_IPV4" ] && ENCODER_ARGS+=("--ipv4-address" "$CURRENT_IPV4")
             [ -n "$IS_GATEWAY_FLAG" ] && ENCODER_ARGS+=("$IS_GATEWAY_FLAG")
             [ -n "$GATEWAY_IFACE" ] && ENCODER_ARGS+=("--gateway-iface" "$GATEWAY_IFACE")
             [ -n "$IS_NTP_FLAG" ] && ENCODER_ARGS+=("$IS_NTP_FLAG")
@@ -636,10 +643,10 @@ except Exception:
             fi
             [ -n "$GPS_LAT" ] && ENCODER_ARGS+=("--latitude" "$GPS_LAT" "--longitude" "$GPS_LON" "--altitude" "$GPS_ALT")
 
-            CURRENT_PAYLOAD=$("$ENCODER_PATH" "${ENCODER_ARGS[@]}" 2>/dev/null)
+            CURRENT_PAYLOAD=$("$ENCODER_PATH" telemetry "${ENCODER_ARGS[@]}" 2>/dev/null)
             if [ -z "$CURRENT_PAYLOAD" ]; then
                 # re-run only on failure, to surface why nothing was published
-                log "WARN: encoder produced no payload, not publishing: $("$ENCODER_PATH" "${ENCODER_ARGS[@]}" 2>&1 >/dev/null | tr '\n' ' ')"
+                log "WARN: encoder produced no payload, not publishing: $("$ENCODER_PATH" telemetry "${ENCODER_ARGS[@]}" 2>&1 >/dev/null | tr '\n' ' ')"
             fi
 
             if [ -n "$CURRENT_PAYLOAD" ]; then

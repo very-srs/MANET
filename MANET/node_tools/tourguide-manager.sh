@@ -199,13 +199,16 @@ analyze_partition_data() {
     # Newest credible foreign beacon wins consideration
     local BEST_CONFIG="" BEST_SIZE=0 BEST_TS=0
 
-    while IFS= read -r payload; do
+    # Each line is "<sender mac> <base64>": the MAC is Alfred's record key,
+    # which is where a beacon's identity comes from now that telemetry no
+    # longer repeats it.
+    while IFS=' ' read -r beacon_mac payload; do
         [ -z "$payload" ] && continue
 
-        DECODED=$("/usr/local/bin/decoder.py" "$payload" 2>/dev/null || true)
+        DECODED=$("/usr/local/bin/decoder.py" telemetry "$payload" 2>/dev/null || true)
         [ -z "$DECODED" ] && continue
 
-        MAC_ADDRESS=""; DATA_CHANNEL_2_4=""; DATA_CHANNEL_5_0=""
+        MAC_ADDRESS="${beacon_mac,,}"; DATA_CHANNEL_2_4=""; DATA_CHANNEL_5_0=""
         PARTITION_SIZE=0; LAST_SEEN_TIMESTAMP=0
         while IFS= read -r _line; do
             _varname="${_line%%=*}"
@@ -213,7 +216,7 @@ analyze_partition_data() {
             _val="${_val#\'}"
             _val="${_val%\'}"
             printf -v "$_varname" '%s' "$_val"
-        done < <(echo "$DECODED" | grep -E "^(MAC_ADDRESS|DATA_CHANNEL_|PARTITION_SIZE|LAST_SEEN_TIMESTAMP)")
+        done < <(echo "$DECODED" | grep -E "^(DATA_CHANNEL_|PARTITION_SIZE|LAST_SEEN_TIMESTAMP)")
 
         [ "$MAC_ADDRESS" == "$MY_MAC" ] && continue
         [[ "$DATA_CHANNEL_2_4" =~ ^[0-9]{4}$ && "$DATA_CHANNEL_5_0" =~ ^[0-9]{4}$ ]] || continue
@@ -290,9 +293,7 @@ HOSTNAME=$(hostname)
 
 # Build helper payload (partition size lets two tourguides meeting in the
 # lobby agree on which partition migrates)
-HELPER_PAYLOAD=$("$ENCODER_PATH" \
-    "--hostname" "$HOSTNAME" \
-    "--mac-addresses" "$MY_MAC" \
+HELPER_PAYLOAD=$("$ENCODER_PATH" telemetry \
     "--data-channel-2-4" "$(get_current_freq $WPA_CONF_2_4)" \
     "--data-channel-5-0" "$(get_current_freq $WPA_CONF_5_0)" \
     "--partition-size" "$(get_partition_size)" \
@@ -322,7 +323,8 @@ log "Listening for partitions (12s)..."
 sleep 12
 
 # Check for partition
-OTHER_PARTITION_DATA=$(alfred -r $ALFRED_HELPER_TYPE 2>/dev/null | grep -oP '"\K[^"]+(?="\s*\},?)' || true)
+OTHER_PARTITION_DATA=$(alfred -r $ALFRED_HELPER_TYPE 2>/dev/null |
+    sed -n 's/^[[:space:]]*{[[:space:]]*"\([0-9a-fA-F:]\{17\}\)"[[:space:]]*,[[:space:]]*"\([^"]*\)".*/\1 \2/p' || true)
 
 if [ -n "$OTHER_PARTITION_DATA" ]; then
     analyze_partition_data "$OTHER_PARTITION_DATA"

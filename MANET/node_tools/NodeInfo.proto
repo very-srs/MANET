@@ -1,91 +1,163 @@
 syntax = "proto3";
-// Update with protoc --python_out=. NodeInfo.proto 
 
-// This message represents a complete status update from a single mesh node.
-message NodeInfo {
-  // --- Network Identity ---
+// Regenerate with protoc 3.21.x:  protoc --python_out=. NodeInfo.proto
+//
+// Version matters. Nodes run the protobuf 4.21.12 python runtime, which
+// rejects generated code from protoc older than 3.19, and 5.x emits a
+// runtime_version gate that runtime doesn't have. 3.21.12 is the one that
+// works. Nothing in this file needs anything newer.
+//
+// Alfred stamps every record with the publishing node's MAC (it runs
+// `-i br0`, so that is the node's primary MAC). mesh-registry-builder reads
+// that key alongside the payload, so no message here repeats it.
+//
+// The data is split across two alfred types by how often it changes:
+//
+//   type 67  NodeIdentity   — fixed while the node is up. Republished only
+//                             often enough that alfred never expires it.
+//   type 68  NodeTelemetry  — everything volatile, on the regular cycle.
+//   type 69  NodeTelemetry  — same message, used for tourguide helper beacons.
+//
+// Fields are sized for the wire, not for readability: MACs and syncthing IDs
+// travel as raw bytes rather than their display spellings, and coordinates as
+// scaled integers rather than doubles. Formatting back into human shapes is
+// decoder.py's job.
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Alfred type 67 — identity
+// ─────────────────────────────────────────────────────────────────────────────
+message NodeIdentity {
   string hostname = 1;
-  repeated string mac_addresses = 2;  // All interface MAC addresses; first is primary (e.g., br0)
-  string ipv4_address = 3;
-  string syncthing_id = 4;
-  uint32 ipv4_chunk = 5;              // Chunk number claimed (for EUD IP allocation)
 
-  // --- Network & Election Metrics ---
-  float tq_average = 10;          // TQ average, for service elections.
-  bool is_internet_gateway = 11; // Does this node have an active internet connection?
+  // Secondary interface MACs, 6 raw bytes each. The primary MAC is alfred's
+  // record key and is deliberately not repeated here.
+  repeated bytes mac_addresses = 2;
 
-  // --- Service Status ---
-  bool is_mumble_server = 20;
-  bool is_ntp_server = 21;
-  bool is_tak_server = 22;
-  bool is_mediamtx_server = 23;
+  // Raw 32-byte device key. The dashed base32 spelling syncthing shows the
+  // user is a display encoding and costs twice as much on the wire.
+  bytes syncthing_id = 3;
 
-  // --- System Health ---
-  uint32 uptime_seconds = 30;
-  uint32 battery_percentage = 31; // 0-100
-  float cpu_load_average = 32;    // 1-minute load average
+  uint32  ipv4_chunk   = 4;  // chunk claimed for EUD IP allocation
+  fixed32 ipv4_address = 5;  // network byte order, big-endian
+}
 
-  // --- Other ---
+// ─────────────────────────────────────────────────────────────────────────────
+// Alfred types 68 and 69 — telemetry
+// ─────────────────────────────────────────────────────────────────────────────
+message NodeTelemetry {
+  // --- Network & election metrics ---
+  float tq_average          = 1;   // TQ average, drives service elections
+  bool  is_internet_gateway = 2;
+  string gateway_iface      = 3;   // end0, usb0, enxXXX, ...
+
+  // --- Service status ---
+  bool is_mumble_server   = 10;
+  bool is_ntp_server      = 11;
+  bool is_tak_server      = 12;
+  bool is_mediamtx_server = 13;
+
+  // --- System health ---
+  uint32 uptime_seconds      = 20;
+  uint32 battery_percentage  = 21;  // 0-100
+  float  cpu_load_average    = 22;  // 1-minute load average
+
+  // --- Location ---
+  // Scaled integers, not doubles: 1e-7 degrees is ~1 cm, and a double pair
+  // costs 20 bytes on the wire where this pair costs 10.
   message GpsLocation {
-    double latitude = 1;
-    double longitude = 2;
-    float altitude = 3;
+    sfixed32 latitude_e7  = 1;
+    sfixed32 longitude_e7 = 2;
+    sint32   altitude_m   = 3;
   }
-  GpsLocation location = 40;
-  string atak_user = 41;
+  GpsLocation location = 23;
+  string atak_user     = 24;
 
-  // --- Channel Hopping & Discovery ---
+  // --- Radio state ---
+  uint32 data_channel_2_4 = 30;  // MHz
+  uint32 data_channel_5_0 = 31;  // MHz
+
   message ChannelScanResult {
-    uint32 channel = 1;
-    sint32 noise_floor = 2;
-    uint32 bss_count = 3;
+    uint32 channel     = 1;  // MHz
+    sint32 noise_floor = 2;  // dBm
+    uint32 bss_count   = 3;
   }
-
   message ChannelReport {
     repeated ChannelScanResult results = 1;
   }
+  // Structured, not a JSON string. A five-channel report is ~25 bytes here
+  // and ~200 as JSON text nested inside the protobuf.
+  ChannelReport channel_report = 32;
 
-  ChannelReport channel_report = 50;
-  string data_channel_2_4 = 51;
-  string data_channel_5_0 = 52;
-  
+  string halow_tx_mcs   = 33;
+  string halow_rx_mcs   = 34;
+  bytes  halow_mcs_peer = 35;  // 6 raw bytes
+  string wifi_24_tx_mcs = 36;
+  string wifi_24_rx_mcs = 37;
+  string wifi_5_tx_mcs  = 38;
+  string wifi_5_rx_mcs  = 39;
+
+  // --- Interfaces ---
+  // Published so peers render from the registry instead of asking this node
+  // over HTTP. Health and fault text are derived by the viewer from state and
+  // role, rather than shipped as strings by every node on every cycle.
+  enum IfaceRole {
+    ROLE_OTHER      = 0;
+    ROLE_BAT        = 1;  // bat0
+    ROLE_MESH       = 2;  // mesh-joined wireless
+    ROLE_AP         = 3;  // EUD access point
+    ROLE_GATEWAY    = 4;  // upstream uplink
+    ROLE_EUD_BRIDGE = 5;  // wired EUD port
+    ROLE_BRIDGE     = 6;  // br0
+  }
+  enum IfaceState {
+    STATE_UNKNOWN = 0;
+    STATE_UP      = 1;
+    STATE_DOWN    = 2;
+  }
+  message InterfaceInfo {
+    string    name   = 1;
+    IfaceRole role   = 2;
+    IfaceState state = 3;
+    repeated fixed32 ipv4 = 4;  // packed
+    string tx_mcs = 5;
+    string rx_mcs = 6;
+  }
+  repeated InterfaceInfo interfaces = 40;
+
+  // --- EUD serving ---
+  enum EudMode {
+    EUD_WIRED    = 0;
+    EUD_WIRELESS = 1;
+    EUD_AUTO     = 2;
+  }
+  EudMode eud_mode  = 45;
+  string  ap_ssid   = 46;
+  uint32  eud_count = 47;  // clients currently holding a lease from this node
+
   // --- Timestamp ---
-  uint64 last_seen_timestamp = 53;
-  
-  // --- Jamming Detection ---
-  bool is_in_limp_mode = 54;
-  
-  // --- Tourguide Tracking ---
-  uint64 last_tourguide_timestamp = 55;
-  string last_tourguide_radio = 56;
-  
-  // --- Node State ---
+  uint32 last_seen_timestamp = 50;  // unix seconds
+
+  // --- Jamming detection ---
+  bool is_in_limp_mode = 51;
+
+  // --- Tourguide tracking ---
+  uint32 last_tourguide_timestamp = 52;
+  string last_tourguide_radio     = 53;
+
+  // --- Node state ---
   enum NodeState {
-    ACTIVE = 0;
+    ACTIVE        = 0;
     SHUTTING_DOWN = 1;
   }
-  NodeState node_state = 57;
+  NodeState node_state = 54;
 
-  // --- Config Sync ---
+  // --- Config sync ---
   // SHA-256 prefix of the pending config this node has staged and acknowledged.
-  // Empty string means no pending config. Matches MeshConfigPackage.version.
-  string config_ack_version = 58;
+  // Empty means nothing pending. Matches MeshConfigPackage.version.
+  string config_ack_version = 55;
 
-  // --- HaLow link summary ---
-  string halow_tx_mcs = 59;
-  string halow_rx_mcs = 60;
-  string halow_mcs_peer = 61;
-  string wifi_24_tx_mcs = 62;
-  string wifi_24_rx_mcs = 63;
-  string wifi_5_tx_mcs = 64;
-  string wifi_5_rx_mcs = 65;
-
-  // --- Gateway Interface ---
-  string gateway_iface = 66; // Which interface is the upstream gateway (end0, usb0, enxXXX, etc.)
-
-  // --- Channel Hopping & Discovery (cont.) ---
-  // Number of nodes in the sender's partition (batman originators + self).
-  // Set in tourguide helper beacons so two tourguides meeting in the lobby
-  // can decide which partition migrates (the smaller one).
-  uint32 partition_size = 67;
+  // --- Partition size ---
+  // batman originators + self, set in tourguide helper beacons so two
+  // tourguides meeting in the lobby can decide which partition migrates.
+  uint32 partition_size = 56;
 }
