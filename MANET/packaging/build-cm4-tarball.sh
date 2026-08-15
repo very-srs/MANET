@@ -126,7 +126,6 @@ for unit in \
     ethernet-autodetect.service \
     manet-txpower.service \
     mesh-default-route-fix.service \
-    perf-dashboard.service \
     sae-watchdog.service \
     ebtables-restore.service \
     batman-enslave-watch.service

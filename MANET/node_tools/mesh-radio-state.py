@@ -19,6 +19,13 @@ import subprocess
 import sys
 import time
 
+# Same implementations the management UI uses for a local change, so an
+# Alfred-staged channel or power change means exactly the same thing.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from manet_radio import (
+    apply_txpower, apply_halow_channel, apply_wifi_channel, apply_uplink_wifi,
+)
+
 
 ALFRED_RADIO_TYPE = 71
 ALFRED_RADIO_ACK_TYPE = 72
@@ -29,6 +36,10 @@ CURRENT_STATE_FILE = "/var/lib/mesh_radio_state.json"
 LOG_FILE = "/var/log/mesh-radio-state.log"
 VALID_IFACES = ("wlan0", "wlan1", "wlan2")
 VALID_STATES = ("up", "down")
+# Keys a radio_state package may carry besides "desired". Every one of these
+# is a change that has to land on every node at the same time, which is why
+# they are staged through Alfred rather than pushed node to node.
+ACTION_KEYS = ("desired", "txpower", "halow_channel", "wifi_channel", "uplink_wifi")
 
 
 def log(msg):
@@ -177,14 +188,24 @@ def validate_pkg(pkg):
         return False, "not a radio_state package"
     if not pkg.get("version"):
         return False, "missing version"
-    desired = pkg.get("desired")
-    if not isinstance(desired, dict) or not desired:
-        return False, "missing desired state"
+    if not any(pkg.get(key) for key in ACTION_KEYS):
+        return False, "package carries no action"
+
+    desired = pkg.get("desired") or {}
+    if not isinstance(desired, dict):
+        return False, "desired state is not an object"
     for iface, state in desired.items():
         if iface not in VALID_IFACES or state not in VALID_STATES:
             return False, f"invalid desired state {iface}={state}"
 
-    if target_matches(pkg):
+    txpower = pkg.get("txpower") or {}
+    if not isinstance(txpower, dict):
+        return False, "txpower is not an object"
+    for iface in txpower:
+        if iface not in VALID_IFACES:
+            return False, f"invalid txpower interface {iface}"
+
+    if desired and target_matches(pkg):
         post = active_bat_ifaces()
         for iface, state in desired.items():
             if state == "down":
@@ -289,20 +310,48 @@ def clear_pending(version=None):
 
 
 def apply_package(pkg):
-    desired = pkg.get("desired", {})
     if not target_matches(pkg):
         log(f"Version {pkg.get('version')} is not targeted at this node; no-op apply")
         return
     ok, error = validate_pkg(pkg)
     if not ok:
         raise RuntimeError(error)
-    for iface, state in desired.items():
+
+    for iface, state in (pkg.get("desired") or {}).items():
         apply_iface(iface, state)
+
+    for iface, dbm in (pkg.get("txpower") or {}).items():
+        log(f"Applying txpower {iface}={dbm}")
+        result = apply_txpower(iface, dbm)
+        if not result.get("ok"):
+            raise RuntimeError(result.get("error", f"txpower {iface} failed"))
+
+    halow = pkg.get("halow_channel")
+    if halow:
+        log(f"Applying HaLow channel {halow.get('channel')} @ {halow.get('bw', '1MHz')}")
+        result = apply_halow_channel(halow.get("channel"), halow.get("bw", "1MHz"),
+                                     halow.get("dbm"))
+        if not result.get("ok"):
+            raise RuntimeError(result.get("error", "halow channel failed"))
+
+    wifi = pkg.get("wifi_channel")
+    if wifi:
+        log(f"Applying Wi-Fi channel {wifi.get('iface')}={wifi.get('channel')}")
+        result = apply_wifi_channel(wifi.get("iface"), wifi.get("channel"), wifi.get("dbm"))
+        if not result.get("ok"):
+            raise RuntimeError(result.get("error", "wifi channel failed"))
+
+    uplink = pkg.get("uplink_wifi")
+    if uplink:
+        log(f"Applying USB Wi-Fi uplink ssid={uplink.get('ssid')}")
+        apply_uplink_wifi(uplink.get("ssid"), uplink.get("password"),
+                          uplink.get("enabled", True))
+
     record_current_state(pkg)
 
 
 def record_current_state(pkg):
-    desired = pkg.get("desired", {})
+    desired = pkg.get("desired") or {}
     data = read_json(CURRENT_STATE_FILE) or {"desired": {}}
     if not isinstance(data.get("desired"), dict):
         data["desired"] = {}
