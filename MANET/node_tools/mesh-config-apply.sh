@@ -35,24 +35,26 @@ die() {
 # ==============================================================================
 [ -f "$PENDING_CONFIG" ] || die "No pending config at $PENDING_CONFIG"
 
-VERSION=$(python3 -c "import json,sys; d=json.load(open('$PENDING_CONFIG')); print(d.get('version',''))" 2>/dev/null)
+VERSION=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('version',''))" "$PENDING_CONFIG" 2>/dev/null)
 [ -n "$VERSION" ] || die "Cannot read version from pending config"
-
-CONFIG_JSON=$(python3 -c "import json,sys; d=json.load(open('$PENDING_CONFIG')); print(json.dumps(d.get('config',{})))" 2>/dev/null)
-[ -n "$CONFIG_JSON" ] || die "Cannot read config block from pending config"
 
 log "Applying config version $VERSION"
 
 # ==============================================================================
-# Helper: read a value from the JSON config
+# Helper: read a value from the staged config
 # ==============================================================================
+# The file is written from an Alfred broadcast, so the value is remote input.
+# It is read straight out of the JSON by key and passed as an argv element —
+# never interpolated into the Python source, where a quote in a value would
+# otherwise end up as code. mesh-config-sync.py has already whitelisted the
+# keys and rejected quotes and newlines; this is the second layer.
 cfg_get() {
     python3 -c "
 import json, sys
-d = json.loads('''$CONFIG_JSON''')
-val = d.get('$1', '')
+d = json.load(open(sys.argv[1])).get('config', {})
+val = d.get(sys.argv[2], '')
 print(val if val is not None else '')
-" 2>/dev/null
+" "$PENDING_CONFIG" "$1" 2>/dev/null
 }
 
 # ==============================================================================
