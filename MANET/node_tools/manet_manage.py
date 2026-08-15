@@ -1591,6 +1591,21 @@ let _pollTimer = null;
 let _overlayTimer = null;
 let _autoRefreshTimer = null;
 let _autoRefreshBusy = false;
+// This page is served under /manage, and its own routes live under that
+// prefix. Worked out from the URL rather than baked in, so the page still
+// functions if the prefix ever moves.
+const MANAGE_BASE = (() => {
+  const m = window.location.pathname.match(/^(\/[^/]*manage)(\/|$)/);
+  return m ? m[1] : '';
+})();
+// U() is for routes this page owns. /api/admin/* is served at the site root by
+// mesh-status.py and must NOT be prefixed.
+//
+// Any new fetch to a route in this file has to go through U(). Without it the
+// request lands on mesh-status.py's root router, which answers 404 with the
+// text "Not found" — and the caller dies in JSON.parse rather than saying so.
+function U(path) { return MANAGE_BASE + path; }
+
 const VALID_TABS = ['topology','radio','measure','sessions','uplink', 'config'];
 const AUTO_REFRESH_MS = 15000;
 const THEME_KEY = 'manetUiTheme';
@@ -1628,7 +1643,7 @@ setTheme(preferredTheme());
 
 async function fetchTopo() {
   try {
-    const r = await fetch('/api/topology');
+    const r = await fetch(U('/api/topology'));
     _topo = await r.json();
     renderTopology();
     buildHalowConfig();
@@ -2028,7 +2043,7 @@ async function toggleIface(nodeIp, nodeId, iface, state) {
     ? `Staging ${iface} ${state}; waiting for mesh ACKs...`
     : `Setting ${iface} ${state} on ${nodeIp}...`, 'info');
   try {
-    const r = await fetch('/api/interface/toggle', {
+    const r = await fetch(U('/api/interface/toggle'), {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
       body: JSON.stringify({node_ip: nodeIp, iface, state})
@@ -2061,7 +2076,7 @@ async function setTxPower(nodeIp, nodeId, iface) {
     showMsg(`No TX power options available for ${iface}@${nodeIp}`, 'err');
     return;
   }
-  const r = await fetch('/api/txpower', {
+  const r = await fetch(U('/api/txpower'), {
     method: 'POST',
     headers: {'Content-Type':'application/json'},
     body: JSON.stringify({node_ip: nodeIp, iface, dbm: parseFloat(dbm)})
@@ -2076,7 +2091,7 @@ async function toggleAll(iface, state) {
   showOverlay(`Coordinating ${iface} ${state} on all nodes through Alfred...`, 'info');
   showMsg(`Staging ${iface} ${state}; waiting for all mesh ACKs...`, 'info');
   try {
-    const r = await fetch('/api/interface/toggle', {
+    const r = await fetch(U('/api/interface/toggle'), {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
       body: JSON.stringify({node_ip: 'all', iface, state})
@@ -2121,7 +2136,7 @@ async function applyHalow() {
   setButtonBusy('btn-apply-halow', true, 'APPLYING...', 'APPLY TO ALL NODES');
   showOverlay(`Applying HaLow ch${ch} / ${bw} / ${dbm} dBm — verifying all nodes...`, 'info');
   try {
-    const r = await fetch('/api/halow/channel', {
+    const r = await fetch(U('/api/halow/channel'), {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
       body: JSON.stringify({channel: parseInt(ch), bw, dbm: parseFloat(dbm)})
@@ -2154,7 +2169,7 @@ async function apply2G() {
   showOverlay(`Applying 2.4G ch${ch} / ${dbm} dBm to all nodes...`, 'info');
   showMsg(`Applying 2.4G ch${ch} / ${dbm} dBm to all nodes...`, 'info');
   try {
-    const r = await fetch('/api/wifi/channel', {
+    const r = await fetch(U('/api/wifi/channel'), {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
       body: JSON.stringify({interface: 'wlan0', channel: parseInt(ch), dbm: parseFloat(dbm)})
@@ -2176,7 +2191,7 @@ async function apply5G() {
   setButtonBusy('btn-apply-5g', true, 'APPLYING...', 'APPLY TO ALL NODES');
   showOverlay(`Applying 5G ch${ch} / ${dbm} dBm to all nodes...`, 'info');
   try {
-    const r = await fetch('/api/wifi/channel', {
+    const r = await fetch(U('/api/wifi/channel'), {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
       body: JSON.stringify({interface: 'wlan1', channel: parseInt(ch), dbm: parseFloat(dbm)})
@@ -2195,7 +2210,7 @@ async function apply5G() {
 // ── Measurements tab ──
 async function loadUsbWifiUplink() {
   try {
-    const r = await fetch('/api/uplink/wifi');
+    const r = await fetch(U('/api/uplink/wifi'));
     const d = await r.json();
     if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
     const ssid = document.getElementById('uplink-wifi-ssid');
@@ -2229,7 +2244,7 @@ async function applyUsbWifiUplink() {
   if (btn) { btn.disabled = true; btn.textContent = 'APPLYING...'; }
   showMsg(`Configuring USB Wi-Fi uplink for SSID ${ssid}...`, 'info');
   try {
-    const r = await fetch('/api/uplink/wifi', {
+    const r = await fetch(U('/api/uplink/wifi'), {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
       body: JSON.stringify({ssid, password, enabled: true})
@@ -2304,7 +2319,7 @@ async function startMeasurement() {
   showMsg('Starting measurement session...', 'info');
 
   try {
-    const r = await fetch('/api/measure/start', {
+    const r = await fetch(U('/api/measure/start'), {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
       body: JSON.stringify({label, pairs, tests, duration, udp_bitrate: udpBitrate})
@@ -2326,7 +2341,7 @@ async function startMeasurement() {
 
 async function pollStatus() {
   try {
-    const r = await fetch('/api/measure/status');
+    const r = await fetch(U('/api/measure/status'));
     const d = await r.json();
     if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
 
@@ -2356,7 +2371,7 @@ async function pollStatus() {
 
 // ── Sessions tab ──
 async function loadSessions() {
-  const r = await fetch('/api/sessions');
+  const r = await fetch(U('/api/sessions'));
   const d = await r.json();
   const list = document.getElementById('sessions-list');
   if (!d.length) {
@@ -2368,9 +2383,9 @@ async function loadSessions() {
       <div class="session-label">${s.label}</div>
       <div class="session-count">${s.tests} test${s.tests !== 1 ? 's' : ''} · ${s.summary?.ok || 0} ok / ${s.summary?.fail || 0} fail</div>
       <div class="session-actions">
-        <a href="/api/sessions/${encodeURIComponent(s.label)}/csv" download="${s.label}.csv"
+        <a href="${U(`/api/sessions/${encodeURIComponent(s.label)}/csv`)}" download="${s.label}.csv"
            class="btn" style="text-decoration:none;font-size:10px">CSV</a>
-        <a href="/api/sessions/${encodeURIComponent(s.label)}" target="_blank"
+        <a href="${U(`/api/sessions/${encodeURIComponent(s.label)}`)}" target="_blank"
            class="btn" style="text-decoration:none;font-size:10px">JSON</a>
         <button class="btn btn-red" style="font-size:10px" onclick="deleteSession('${encodeURIComponent(s.label)}')">DELETE</button>
       </div>
@@ -2393,7 +2408,7 @@ async function deleteSession(encodedLabel) {
   const label = decodeURIComponent(encodedLabel);
   if (!confirm(`Delete measurement session "${label}"? This cannot be undone.`)) return;
   try {
-    const r = await fetch(`/api/sessions/${encodedLabel}`, {method: 'DELETE'});
+    const r = await fetch(U(`/api/sessions/${encodedLabel}`), {method: 'DELETE'});
     const d = await r.json();
     if (!r.ok || !d.ok) throw new Error(d.error || `HTTP ${r.status}`);
     showMsg(`Deleted session ${label}`, 'ok');
@@ -2986,7 +3001,7 @@ def render_dashboard():
   <div id="hdr-right">
     <span id="hdr-inet" class="no">○ NO INET</span>
     <span id="hdr-clock"></span>
-    <button id="overview-link" class="overview-link-btn" type="button" onclick="window.location.href='http://manet.local/?theme=' + encodeURIComponent(document.documentElement.dataset.theme || 'light')">OVERVIEW</button>
+    <button id="overview-link" class="overview-link-btn" type="button" onclick="window.location.href='/?theme=' + encodeURIComponent(document.documentElement.dataset.theme || 'light')">OVERVIEW</button>
     <button id="theme-toggle" class="theme-toggle" type="button" onclick="toggleTheme()">Dark</button>
   </div>
 </div>
@@ -3215,7 +3230,7 @@ def render_dashboard():
   </div>
 
   <div class="footer-actions">
-    <button class="logout-link-btn" type="button" onclick="window.location.href='/auth/perf-logout'">LOGOUT</button>
+    <button class="logout-link-btn" type="button" onclick="window.location.href='/manage/logout'">LOGOUT</button>
   </div>
 </div><!-- #content -->
 </div><!-- #page -->
