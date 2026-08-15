@@ -10,6 +10,7 @@
 
 # --- Configuration ---
 CONTROL_IFACE="br0"
+ALFRED_IDENTITY_TYPE=67
 ALFRED_DATA_TYPE=68
 MONITOR_INTERVAL=15
 
@@ -37,6 +38,13 @@ HALOW_MCS_SUMMARY="/usr/local/bin/halow-mcs-summary.py"
 LAST_PUBLISHED_PAYLOAD=""
 LAST_PUBLISH_TIME=0
 PUBLISH_INTERVAL=180  # Publish every 3 minutes
+
+# Identity (hostname, MACs, syncthing ID) does not change while we are up, so
+# it goes out on its own Alfred type and only often enough to stay resident.
+# Alfred purges any record it has not seen for ALFRED_DATA_TIMEOUT = 600 s, so
+# at 270 s a publish can fail once and the record still survives.
+LAST_IDENTITY_PUBLISH=0
+IDENTITY_PUBLISH_INTERVAL=270
 
 log() {
     echo "[$(date +'%Y-%m-%d %H:%M:%S')] - NODE-MGR-STATIC: $1" >&2
@@ -220,25 +228,12 @@ while true; do
     # === IP MANAGEMENT ===
     [ -x "$IP_MANAGER" ] && "$IP_MANAGER"
     
-    # === PUBLISH STATUS ===
-    time_since_publish=$((NOW - LAST_PUBLISH_TIME))
-    
-    if [ $time_since_publish -ge $PUBLISH_INTERVAL ]; then
-        log "Publishing status to Alfred..."
-        
-        HOSTNAME=$(hostname)
-        SYNCTHING_ID=$(runuser -u radio -- syncthing --device-id 2>/dev/null || echo "")
-        TQ_AVG=$("$BATCTL_PATH" o 2>/dev/null | awk 'NR>1 {sum+=$3} END {if (NR>1) printf "%.2f", sum/(NR-1); else print 0}')
-        
-        # Service flags
-        detect_and_update_gateway_state
-        IS_GATEWAY_FLAG=$([ -f /var/run/mesh-gateway.state ] && echo "--is-internet-gateway" || echo "")
-        GATEWAY_IFACE=$(cat /var/run/upstream_iface 2>/dev/null || echo "")
-        IS_NTP_FLAG=$([ -f /var/run/mesh-ntp.state ] && echo "--is-ntp-server" || echo "")
-        IS_MEDIAMTX_FLAG=$(is_hosting_service && echo "--is-mediamtx-server" || echo "")
-        IS_MUMBLE_FLAG=$(is_hosting_mumble_service && echo "--is-mumble-server" || echo "")
-        
-        # Gather MACs
+    # === PUBLISH IDENTITY (Alfred type 67) ===
+    # Hostname, MACs and syncthing ID do not change while we are up, so they
+    # ride their own type and only refresh often enough to stay resident.
+    if [ $((NOW - LAST_IDENTITY_PUBLISH)) -ge $IDENTITY_PUBLISH_INTERVAL ]; then
+        # br0's MAC must come first: encoder.py drops it, because Alfred
+        # already stamps every record we publish with it.
         ALL_MACS=("$MY_MAC")
         for iface in /sys/class/net/wlan* /sys/class/net/bat0 /sys/class/net/end0; do
             iface=$(basename "$iface")
@@ -247,17 +242,48 @@ while true; do
                 [ -n "$MAC" ] && ALL_MACS+=("$MAC")
             fi
         done
-        
+
         CURRENT_IPV4=$(ip addr show dev "$CONTROL_IFACE" 2>/dev/null | grep -oP 'inet \K[\d.]+' | head -1)
-        collect_radio_mcs
-        
-        # Encode (no scan data, no limp mode, no tourguide in static mode)
-        ENCODER_ARGS=(
-            "--hostname" "$HOSTNAME"
+        SYNCTHING_ID=$(runuser -u radio -- syncthing --device-id 2>/dev/null || echo "")
+
+        IDENTITY_ARGS=(
+            "--hostname" "$(hostname)"
             "--mac-addresses" "${ALL_MACS[@]}"
-            "--tq-average" "$TQ_AVG"
             "--syncthing-id" "$SYNCTHING_ID"
             "--ipv4-chunk" "$MY_CHUNK"
+        )
+        [ -n "$CURRENT_IPV4" ] && IDENTITY_ARGS+=("--ipv4-address" "$CURRENT_IPV4")
+
+        IDENTITY_PAYLOAD=$("$ENCODER_PATH" identity "${IDENTITY_ARGS[@]}" 2>/dev/null)
+        if [ -n "$IDENTITY_PAYLOAD" ]; then
+            echo -n "$IDENTITY_PAYLOAD" | alfred -s $ALFRED_IDENTITY_TYPE
+            LAST_IDENTITY_PUBLISH=$NOW
+        else
+            log "WARN: identity encoder produced no payload: $("$ENCODER_PATH" identity "${IDENTITY_ARGS[@]}" 2>&1 >/dev/null | tr '\n' ' ')"
+        fi
+    fi
+
+    # === PUBLISH TELEMETRY (Alfred type 68) ===
+    time_since_publish=$((NOW - LAST_PUBLISH_TIME))
+
+    if [ $time_since_publish -ge $PUBLISH_INTERVAL ]; then
+        log "Publishing status to Alfred..."
+
+        TQ_AVG=$("$BATCTL_PATH" o 2>/dev/null | awk 'NR>1 {sum+=$3} END {if (NR>1) printf "%.2f", sum/(NR-1); else print 0}')
+
+        # Service flags
+        detect_and_update_gateway_state
+        IS_GATEWAY_FLAG=$([ -f /var/run/mesh-gateway.state ] && echo "--is-internet-gateway" || echo "")
+        GATEWAY_IFACE=$(cat /var/run/upstream_iface 2>/dev/null || echo "")
+        IS_NTP_FLAG=$([ -f /var/run/mesh-ntp.state ] && echo "--is-ntp-server" || echo "")
+        IS_MEDIAMTX_FLAG=$(is_hosting_service && echo "--is-mediamtx-server" || echo "")
+        IS_MUMBLE_FLAG=$(is_hosting_mumble_service && echo "--is-mumble-server" || echo "")
+
+        collect_radio_mcs
+
+        # Encode (no scan data, no limp mode, no tourguide in static mode)
+        ENCODER_ARGS=(
+            "--tq-average" "$TQ_AVG"
             "--timestamp" "$NOW"
             "--data-channel-2-4" "$STATIC_FREQ_2_4"
             "--data-channel-5-0" "$STATIC_FREQ_5_0"
@@ -269,7 +295,6 @@ while true; do
             "--halow-rx-mcs" "${WLAN2_RX_MCS:-}"
             "--halow-mcs-peer" "${WLAN2_MCS_PEER:-}"
         )
-        [ -n "$CURRENT_IPV4" ] && ENCODER_ARGS+=("--ipv4-address" "$CURRENT_IPV4")
         [ -n "$IS_GATEWAY_FLAG" ] && ENCODER_ARGS+=("$IS_GATEWAY_FLAG")
         [ -n "$GATEWAY_IFACE" ] && ENCODER_ARGS+=("--gateway-iface" "$GATEWAY_IFACE")
         [ -n "$IS_NTP_FLAG" ] && ENCODER_ARGS+=("$IS_NTP_FLAG")
@@ -299,10 +324,10 @@ except Exception:
         fi
         [ -n "$GPS_LAT" ] && ENCODER_ARGS+=("--latitude" "$GPS_LAT" "--longitude" "$GPS_LON" "--altitude" "$GPS_ALT")
 
-        CURRENT_PAYLOAD=$("$ENCODER_PATH" "${ENCODER_ARGS[@]}" 2>/dev/null)
+        CURRENT_PAYLOAD=$("$ENCODER_PATH" telemetry "${ENCODER_ARGS[@]}" 2>/dev/null)
         if [ -z "$CURRENT_PAYLOAD" ]; then
             # re-run only on failure, to surface why nothing was published
-            log "WARN: encoder produced no payload, not publishing: $("$ENCODER_PATH" "${ENCODER_ARGS[@]}" 2>&1 >/dev/null | tr '\n' ' ')"
+            log "WARN: encoder produced no payload, not publishing: $("$ENCODER_PATH" telemetry "${ENCODER_ARGS[@]}" 2>&1 >/dev/null | tr '\n' ' ')"
         fi
         
         if [ -n "$CURRENT_PAYLOAD" ]; then
