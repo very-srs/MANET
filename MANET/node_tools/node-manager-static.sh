@@ -269,7 +269,8 @@ while true; do
     if [ $time_since_publish -ge $PUBLISH_INTERVAL ]; then
         log "Publishing status to Alfred..."
 
-        TQ_AVG=$("$BATCTL_PATH" o 2>/dev/null | awk 'NR>1 {sum+=$3} END {if (NR>1) printf "%.2f", sum/(NR-1); else print 0}')
+        # Column 3 of `batctl o` is the BATMAN_V metric: throughput in Mbit/s.
+        MEAN_THROUGHPUT=$("$BATCTL_PATH" o 2>/dev/null | awk 'NR>1 {sum+=$3} END {if (NR>1) printf "%.2f", sum/(NR-1); else print 0}')
 
         # Service flags
         detect_and_update_gateway_state
@@ -283,7 +284,7 @@ while true; do
 
         # Encode (no scan data, no limp mode, no tourguide in static mode)
         ENCODER_ARGS=(
-            "--tq-average" "$TQ_AVG"
+            "--mean-throughput-mbps" "$MEAN_THROUGHPUT"
             "--timestamp" "$NOW"
             "--data-channel-2-4" "$STATIC_FREQ_2_4"
             "--data-channel-5-0" "$STATIC_FREQ_5_0"

@@ -100,9 +100,9 @@ STALE_THRESHOLD=600 # 10 minutes (must match node-manager)
 
 # Read TQ values directly from the registry file
 while read tq_line; do
-    tq_varname=$(echo "$tq_line" | cut -d'=' -f1)
+    metric_varname=$(echo "$tq_line" | cut -d'=' -f1)
     CURRENT_TQ=$(echo "$tq_line" | cut -d'=' -f2 | tr -d "'")
-    MAC_SANITIZED=$(echo "$tq_varname" | sed -n 's/NODE_\([0-9a-fA-F]\+\)_TQ_AVERAGE/\1/p')
+    MAC_SANITIZED=$(echo "$metric_varname" | sed -n 's/NODE_\([0-9a-fA-F]\+\)_MEAN_THROUGHPUT_MBPS/\1/p')
 
     if [ -n "$MAC_SANITIZED" ]; then
         # --- Check Timestamp ---
@@ -142,7 +142,7 @@ while read tq_line; do
         fi
     fi
 # Use process substitution to read from grep, avoiding the subshell pipe problem
-done < <(grep 'NODE_.*_TQ_AVERAGE=' "$REGISTRY_STATE_FILE")
+done < <(grep 'NODE_.*_MEAN_THROUGHPUT_MBPS=' "$REGISTRY_STATE_FILE")
 
 # --- Decide and Act ---
 if [ -z "$BEST_CANDIDATE_MAC" ]; then

@@ -46,7 +46,10 @@ message NodeIdentity {
 // ─────────────────────────────────────────────────────────────────────────────
 message NodeTelemetry {
   // --- Network & election metrics ---
-  float tq_average          = 1;   // TQ average, drives service elections
+  // Mean of the BATMAN_V metric across this node's originators, i.e. mean
+  // throughput in Mbit/s — not a 0-255 TQ. Drives service elections: the
+  // best-connected node wins.
+  float mean_throughput_mbps = 1;
   bool  is_internet_gateway = 2;
   string gateway_iface      = 3;   // end0, usb0, enxXXX, ...
 

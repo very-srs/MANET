@@ -52,7 +52,7 @@ def build_identity(args):
 def build_telemetry(args):
     t = NodeInfo_pb2.NodeTelemetry()
 
-    t.tq_average = args.tq_average
+    t.mean_throughput_mbps = args.mean_throughput_mbps
     t.is_internet_gateway = args.is_internet_gateway
     t.gateway_iface = args.gateway_iface
 
@@ -181,7 +181,8 @@ def main():
     p = sub.add_parser('telemetry', help='volatile node state')
     p.add_argument('--timestamp', type=int, required=True)
 
-    p.add_argument('--tq-average', type=float, default=0.0)
+    p.add_argument('--mean-throughput-mbps', type=float, default=0.0,
+                   help='Mean BATMAN_V throughput across originators, Mbit/s.')
     p.add_argument('--is-internet-gateway', action='store_true')
     p.add_argument('--gateway-iface', type=str, default='')
 
