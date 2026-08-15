@@ -413,7 +413,8 @@ while true; do
         if [ "$DO_LOBBY_PUBLISH" = true ]; then
             log "=== LOBBY PUBLISH ($(date +'%H:%M:%S')) ==="
             
-            TQ_AVG=$("$BATCTL_PATH" o 2>/dev/null | awk 'NR>1 {sum+=$3} END {if (NR>1) printf "%.2f", sum/(NR-1); else print 0}')
+            # Column 3 of `batctl o` is the BATMAN_V metric: throughput in Mbit/s.
+        MEAN_THROUGHPUT=$("$BATCTL_PATH" o 2>/dev/null | awk 'NR>1 {sum+=$3} END {if (NR>1) printf "%.2f", sum/(NR-1); else print 0}')
             
             # Service flags
             detect_and_update_gateway_state
@@ -428,7 +429,7 @@ while true; do
             
             # Encode (scan data only while bootstrapping)
             ENCODER_ARGS=(
-                "--tq-average" "$TQ_AVG"
+                "--mean-throughput-mbps" "$MEAN_THROUGHPUT"
                 "--timestamp" "$NOW"
                 "--wifi-24-tx-mcs" "${WLAN0_TX_MCS:-}"
                 "--wifi-24-rx-mcs" "${WLAN0_RX_MCS:-}"
@@ -579,7 +580,8 @@ except Exception:
         if should_perform_action "PUBLISH" 180 15; then
             log "=== PUBLISH ($(date +'%H:%M:%S')) ==="
 
-            TQ_AVG=$("$BATCTL_PATH" o 2>/dev/null | awk 'NR>1 {sum+=$3} END {if (NR>1) printf "%.2f", sum/(NR-1); else print 0}')
+            # Column 3 of `batctl o` is the BATMAN_V metric: throughput in Mbit/s.
+        MEAN_THROUGHPUT=$("$BATCTL_PATH" o 2>/dev/null | awk 'NR>1 {sum+=$3} END {if (NR>1) printf "%.2f", sum/(NR-1); else print 0}')
 
             # Service flags
             detect_and_update_gateway_state
@@ -606,7 +608,7 @@ except Exception:
             # Encode
             collect_radio_mcs
             ENCODER_ARGS=(
-                "--tq-average" "$TQ_AVG"
+                "--mean-throughput-mbps" "$MEAN_THROUGHPUT"
                 "--channel-report-json" "$SCAN_REPORT_JSON"
                 "--timestamp" "$NOW"
                 "--last-tourguide-timestamp" "$LAST_TOURGUIDE_TIME"

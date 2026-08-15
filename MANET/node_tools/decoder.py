@@ -53,7 +53,8 @@ def decode_telemetry(raw):
     t = NodeInfo_pb2.NodeTelemetry()
     t.ParseFromString(raw)
 
-    emit_raw('TQ_AVERAGE', t.tq_average)
+    # float32 round-trips as 43.20000076..., which is noise in a registry file.
+    emit_raw('MEAN_THROUGHPUT_MBPS', f'{t.mean_throughput_mbps:.2f}')
     emit_raw('IS_INTERNET_GATEWAY', str(t.is_internet_gateway).lower())
     emit('GATEWAY_IFACE', t.gateway_iface)
 
