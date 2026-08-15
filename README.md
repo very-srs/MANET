@@ -19,7 +19,7 @@ The project transforms hardware like a Rock3a or a Raspberry Pi CM4 (recommended
     * **Tourguide System**: Detects network partitions and "guides" isolated clusters back to the main mesh.
     * **Quorum Checking**: Monitors network health and resets isolated nodes to a "Lobby" state to re-establish connections.
 * **Decentralized Services**:
-    * **Service Elections**: Nodes elect hosts for services like **MediaMTX** (video streaming) based on mesh centrality (TQ).
+    * **Service Elections**: Nodes elect hosts for services like **MediaMTX** (video streaming); the best-connected node wins, measured by mean BATMAN_V throughput.
     * **Distributed NTP**: Time synchronization across the mesh without internet access.
 
 ## Repository Structure
@@ -30,6 +30,8 @@ The project transforms hardware like a Rock3a or a Raspberry Pi CM4 (recommended
     * `radio-setup.sh`: Initial provisioning tool.
     * `mesh-registry-builder.sh`: Decodes gossip data (via Alfred) to build a map of the network.
 * **`binaries_arm64/`**: Pre-compiled custom binaries for ARM64, including `alfred`, `batctl`, and a modified `wpa_supplicant` for HaLow support.
+* **`packaging/`**: Builders for the install and tools tarballs, per board.
+* **`systemd/`, `systemd-network/`, `udev/`, `networkd-dispatcher/`, `etc/`**: Units, network and hook files installed onto the node.
 
 ## Supported Hardware
 
@@ -37,8 +39,13 @@ The project transforms hardware like a Rock3a or a Raspberry Pi CM4 (recommended
 | :--- | :--- | :--- |
 | **Compute Module 4 (CM4)** | Functional, primary dev target | Supports 802.11ax + HaLow. |
 | **Raspberry Pi 4B** | Untested |  |
-| **Raspberry Pi 5** | Functional | Supports 802.11ax + HaLow |
-| **Radxa Rock 3A** | Functional | Supports 802.11ax + HaLow. |
+| **Raspberry Pi 5** | Functional, not a focus | Supports 802.11ax + HaLow. |
+| **Radxa Rock 3A** | Functional, not a focus | Supports 802.11ax + HaLow. |
+
+The Pi 5 and Rock 3A both work, but they run too hot for a sealed radio
+enclosure, which is the form factor this project targets. They are no longer the
+focus of testing — the CM4 is. Expect fixes to land and be verified on CM4
+first.
 
 ## Getting Started
 
@@ -64,6 +71,24 @@ Insert the storage media into the node and power it on. The `firstrun.sh` script
 4.  Configure the radio interfaces.
 5.  Result in a fully functional mesh node
 
+## Web Interface
+
+Each node serves two things on port 80, reachable from a device connected to
+that node (Ethernet or its AP), or over an SSH port-forward:
+
+* **`http://<node>/`** — status page. Mesh topology, link throughput, per-node
+  health and detail. No password.
+* **`http://<node>/manage`** — management UI. Radio control, throughput and ping
+  measurement, saved sessions, uplink credentials, and the mesh configuration
+  form. Requires the **admin password** chosen at flash time.
+
+Both are restricted to that node's own clients and localhost — not other radios,
+not other radios' clients, and not the upstream LAN when the node is acting as a
+gateway. Nodes that resolve mDNS can also use `http://manet.local/`.
+
+See [Node Tools Documentation](MANET/node_tools/README.md) for the routes,
+access-control layers, and what each management tab does.
+
 ## Connectivity Modes
 
 The nodes support connecting external devices (End User Devices) in three ways:
@@ -76,3 +101,5 @@ The nodes support connecting external devices (End User Devices) in three ways:
 * [Provisioning Guide](MANET/provisioning/README.md)
 * [Node Tools Documentation](MANET/node_tools/README.md)
 * [Binary Details](MANET/binaries_arm64/README.md)
+* [Packaging](MANET/packaging/README.md)
+* [Dispatcher Hooks](MANET/networkd-dispatcher/README.md)

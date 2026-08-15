@@ -18,6 +18,8 @@
 - [x] Automatic gateway selection
 - [x] Zero-conf IP addressing
 - [x] Tri-band Mesh (802.11ah, 802.11ax 2.4/5)
+- [x] Status page, open to connected clients
+- [x] Management UI behind the install-time admin password
 
 #### 🧪 In Testing
 - [ ] Mumble Server
