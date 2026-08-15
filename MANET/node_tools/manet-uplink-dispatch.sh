@@ -299,6 +299,10 @@ configure_firewall() {
 
     nft add rule inet filter input ct state established,related accept
     nft add rule inet filter input ct state invalid drop
+    # These accepts are deliberately broad. Access to the web UI (80) and the
+    # iperf3 daemon (5201) is decided in the manet_ui table, which runs at an
+    # earlier hook priority — see manet-ui-firewall.sh. Do not try to encode
+    # that policy here as well.
     nft add rule inet filter input iifname "lo" accept
     nft add rule inet filter input iifname "br0" accept
     nft add rule inet filter input iifname "bat0" accept

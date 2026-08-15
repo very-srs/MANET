@@ -679,6 +679,11 @@ case $IPV4_STATE in
                     configure_ebtables_dhcp_isolation "$BR0_SECONDARY"
                     configure_dnsmasq "$BR0_PRIMARY" "$BR0_SECONDARY" "$DHCP_START" "$DHCP_END"
                 fi
+
+                # The web UI is restricted to whoever holds a lease from this
+                # node, so the rule has to follow the pool whenever it moves.
+                [ -x /usr/local/bin/manet-ui-firewall.sh ] && \
+                    /usr/local/bin/manet-ui-firewall.sh >/dev/null 2>&1 || true
             fi
         fi
         ;;
