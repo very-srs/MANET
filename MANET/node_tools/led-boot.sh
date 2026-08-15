@@ -109,12 +109,7 @@ state_mesh_forming() {
 # Killing the holder releases the lines (hi-Z) → LED dark.
 
 cleanup() {
-<<<<<<< HEAD
-    led_off
-    release_led_lines
-=======
     [ -n "$LED_HOLD_PID" ] && kill "$LED_HOLD_PID" 2>/dev/null
->>>>>>> 3cc130a (System load fixes: bash ipcalc replacement, GPIO script spin, ethernet no-internet loop, uplink-dispatch reload churn)
 }
 trap cleanup EXIT
 
