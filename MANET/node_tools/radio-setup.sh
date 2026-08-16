@@ -5,14 +5,78 @@
 #  if the mesh config file is updated
 #
 
-# log the output of this script to a file for debugging
-exec > >(tee /var/log/radio-setup.log) 2>&1
+# log the output of this script to a file for debugging. Append, never
+# truncate: this script runs more than once (first boot, post-rename re-run,
+# manual retry) and overwriting destroyed the history of the run that actually
+# went wrong. Two runs writing a truncating tee also interleave into an
+# unreadable file.
+exec >> >(tee -a /var/log/radio-setup.log) 2>&1
 set -x
+
+echo "=============================================================="
+echo " radio-setup starting: $(date -Is)"
+echo "=============================================================="
 
 led_error() {
     echo heartbeat > /sys/class/leds/PWR/trigger
 }
 trap led_error ERR
+
+# ── Provisioning state ──────────────────────────────────────────────────────
+# A node takes several reboots and about ten minutes to provision. Nothing used
+# to record whether that finished, so a node whose Ethernet was unplugged
+# part-way through looked exactly like a finished one — and got marked done.
+# These files are what `manet-provision-status.sh` reports on login.
+PROVISION_STATE_FILE="/var/lib/manet-provision.state"
+PROVISION_FAIL_FILE="/var/lib/manet-provision.failures"
+PROVISION_STARTED=$(date +%s)
+
+provision_state() {
+    mkdir -p /var/lib
+    {
+        echo "STATE=$1"
+        echo "PHASE=radio-setup"
+        echo "STARTED=$PROVISION_STARTED"
+        echo "UPDATED=$(date +%s)"
+        [ -n "$2" ] && echo "FINISHED=$2"
+    } > "$PROVISION_STATE_FILE"
+}
+
+# Record a step that did not work. The run continues — a node with no GPS
+# tooling is still a useful node — but it will not be marked provisioned.
+provision_fail() {
+    echo "$1" >> "$PROVISION_FAIL_FILE"
+    echo " !! PROVISION FAILURE: $1"
+}
+
+# Run a command, recording a failure if it does not succeed.
+provision_try() {
+    local what="$1"; shift
+    if ! "$@"; then
+        provision_fail "$what"
+        return 1
+    fi
+    return 0
+}
+
+# Is there a working path to the package repositories? Checked before the apt
+# phases so "no network" is reported once, plainly, instead of as a wall of
+# apt resolver errors.
+have_package_network() {
+    getent hosts deb.debian.org >/dev/null 2>&1 || return 1
+    return 0
+}
+
+: > "$PROVISION_FAIL_FILE"
+provision_state running
+
+# Show provisioning state on every SSH login. Installed before any of the work
+# below, so a node that is still setting itself up says so to anyone who logs
+# in to check on it.
+if [ -x /usr/local/bin/manet-provision-status.sh ]; then
+    mkdir -p /etc/update-motd.d
+    ln -sf /usr/local/bin/manet-provision-status.sh /etc/update-motd.d/50-manet-provision
+fi
 
 # This loop reads the stored setup variables to set the current config
 while IFS= read -r line; do
@@ -1523,7 +1587,12 @@ systemctl enable mesh-status
 # avahi-daemon is kept but restricted to deny mesh interfaces (bat0, wlan0-2).
 # Clients connected to the EUD AP can reach the admin panel at http://manet.local
 
-apt install -y avahi-daemon iperf3 traceroute sqlite3 python3-zeroconf 2>/dev/null || true
+if have_package_network; then
+    provision_try "apt install failed: avahi-daemon iperf3 traceroute sqlite3 python3-zeroconf" \
+        apt install -y avahi-daemon iperf3 traceroute sqlite3 python3-zeroconf
+else
+    provision_fail "no network: cannot install avahi-daemon iperf3 traceroute sqlite3 python3-zeroconf"
+fi
 install -m 644 /etc/avahi/avahi-daemon.conf /etc/avahi/avahi-daemon.conf.bak 2>/dev/null || true
 cp /usr/local/share/manet/avahi-daemon.conf /etc/avahi/avahi-daemon.conf
 # Restrict avahi to the AP-only interface so nodes on the mesh don't conflict on 'manet'
@@ -1623,7 +1692,12 @@ if ! grep -q '^i2c-dev$' /etc/modules 2>/dev/null; then
 fi
 
 # Install smbus and i2c-tools for battery-reader.py and diagnostics
-apt update -qq && apt install -y python3-smbus i2c-tools || true
+if have_package_network; then
+    provision_try "apt install failed: python3-smbus i2c-tools" \
+        sh -c 'apt update -qq && apt install -y python3-smbus i2c-tools'
+else
+    provision_fail "no network: cannot install python3-smbus i2c-tools"
+fi
 
 systemctl enable battery-reader.service
 
@@ -1643,7 +1717,12 @@ systemctl enable battery-reader.service
 #   - No election logic change needed — existing is_ntp_server flag stays
 #     tied to the ethernet gateway; GPS just silently improves time quality.
 
-apt-get install -y gpsd gpsd-clients 2>/dev/null || true
+if have_package_network; then
+    provision_try "apt install failed: gpsd gpsd-clients" \
+        apt-get install -y gpsd gpsd-clients
+else
+    provision_fail "no network: cannot install gpsd gpsd-clients"
+fi
 
 # /etc/default/gpsd — hotplug via gpsd's own udev rules (USBAUTO=true).
 # DEVICES="" means gpsd starts without a fixed device path and picks up
@@ -1806,9 +1885,40 @@ if [ -f /var/lib/radio-setup-reboot-pending ]; then
     reboot
 fi
 
+# ============================================================================
+# === DID THIS ACTUALLY WORK? ===
+# ============================================================================
+# Everything above continues past failures on purpose — a node with no GPS
+# tooling still meshes. What is not acceptable is calling such a node finished.
+# If anything was recorded as failed, leave the first-boot unit enabled so the
+# next boot retries, and leave the node visibly unprovisioned.
+PROVISION_FAILURES=0
+[ -s "$PROVISION_FAIL_FILE" ] && PROVISION_FAILURES=$(wc -l < "$PROVISION_FAIL_FILE")
+
+if [ "$PROVISION_FAILURES" -gt 0 ]; then
+    provision_state incomplete "$(date +%s)"
+    echo ""
+    echo "=================================================="
+    echo " PROVISIONING INCOMPLETE — $PROVISION_FAILURES step(s) failed"
+    sed 's/^/   - /' "$PROVISION_FAIL_FILE"
+    echo ""
+    echo " This node has NOT been marked provisioned."
+    echo " Reconnect Ethernet and reboot, or re-run this script."
+    echo " Failures: $PROVISION_FAIL_FILE"
+    echo "=================================================="
+    echo ""
+    # Leave radio-setup-run-once.service enabled: the next boot retries.
+    echo heartbeat > /sys/class/leds/PWR/trigger 2>/dev/null || true
+    exit 1
+fi
+
+provision_state complete "$(date +%s)"
+
 if [[ "$FIRST_BOOT_UNIT_ENABLED" -eq 1 ]]; then
     echo " >> Removing radio-setup-run-once.service"
     systemctl disable radio-setup-run-once.service
     rm -f "$FIRST_BOOT_STAGE_MARKER"
     touch /var/lib/radio-setup.done
 fi
+
+echo " >> Provisioning complete: $(date -Is)"
