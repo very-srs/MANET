@@ -266,6 +266,17 @@ Populates `/etc/hosts` from the registry so peer hostnames resolve without DNS.
 Resolves a MAC to its IPv4 via the registry. Handles both primary and
 per-interface MACs. Usage: `mac-to-ip.sh aa:bb:cc:dd:ee:ff`
 
+**mesh-throughput-mean.sh**
+
+Mean of BATMAN_V's metric across this node's originators, in Mbit/s — published
+as `MEAN_THROUGHPUT_MBPS` and used by the service elections.
+
+Reads the parenthesised value, never a positional field: `batctl o` shifts
+columns on the selected route (prefixed `*`), so `$3` is the last-seen timestamp
+there and `(` on the others. Averaging `$3`, as this did until 2026-08-16,
+produced 0.14 on a mesh running at 43 Mbit/s. Keeps the best path per
+originator, so one peer reachable over two radios is still one peer.
+
 **manet-ipcalc.sh**
 
 Pure-bash replacement for Debian's `ipcalc`, printing the same `HostMin:` /
@@ -580,6 +591,20 @@ The copy that actually runs on a node is generated from
 `MANET/provisioning/firstrun.sh.template` at flash time, with the operator's
 answers substituted in — the copy here is the reference.
 
+**manet-provision-status.sh**
+
+Answers one question on every SSH login: is this node finished setting itself
+up? Installed as `/etc/update-motd.d/50-manet-provision`, and runnable directly.
+
+- **running** — a banner saying not to disconnect, with how long it has been going.
+- **incomplete** — a loud banner listing what failed and how to retry.
+- **complete** — a single line with the version and when it finished.
+
+Reads `/var/lib/manet-provision.state` and `/var/lib/manet-provision.failures`.
+Prints nothing when there is no state file, so nodes provisioned before this
+existed look normal. It never exits non-zero — a motd hook that errors breaks
+the login banner.
+
 **radio-setup.sh**
 
 First-boot configuration script. Sets up:
@@ -589,4 +614,26 @@ First-boot configuration script. Sets up:
 - Optional services (MediaMTX, Mumble).
 - Optional GPS/NTP support through `gpsd`, `gps-reader.service`, and chrony `SHM 0`.
 - Systemd services for node manager.
-- Called once via `radio-setup-run-once.service`, then disabled.
+- Called once via `radio-setup-run-once.service`, then disabled — **but only if
+  everything worked**.
+
+Provisioning takes several reboots and about ten minutes, and every `apt` call
+here deliberately continues on failure, because a node with no GPS tooling is
+still a useful node. What is not acceptable is calling such a node finished.
+
+`provision_fail` records any step that did not work, and the end of the script
+refuses to mark the node provisioned if the list is non-empty: it writes
+`STATE=incomplete`, leaves `radio-setup-run-once.service` **enabled** so the next
+boot retries, and exits 1. `manet-provision-status.sh` then reports it on login.
+
+`have_package_network` is checked before each apt phase, so "no network" is
+recorded once, plainly, instead of as a wall of resolver errors.
+
+This exists because a node reached the field with none of its packages
+installed: its Ethernet was unplugged part-way through provisioning, every apt
+call failed silently behind `|| true`, and the script still touched
+`/var/lib/radio-setup.done`. Nothing on the node said anything was wrong.
+
+The log is opened with `tee -a`, not `tee`. It used to truncate per run, which
+destroyed the history of the run that went wrong — and two overlapping runs
+interleaved into an unreadable file.
