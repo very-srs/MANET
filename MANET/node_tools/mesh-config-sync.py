@@ -194,7 +194,8 @@ def latest_config_package():
             candidate = json.loads(text.encode().decode("unicode_escape"))
         except Exception:
             continue
-        if isinstance(candidate, dict) and candidate.get("config"):
+        if isinstance(candidate, dict) and (
+                candidate.get("config") or candidate.get("kind") == "mesh_config_cancel"):
             packages.append(candidate)
 
     if not packages:
@@ -206,9 +207,28 @@ def latest_config_package():
 # ─────────────────────────────────────────────────────────────────────────────
 # Sync
 # ─────────────────────────────────────────────────────────────────────────────
+def clear_staging(reason):
+    removed = False
+    for path in (PENDING_FILE, ACK_VERSION_FILE):
+        try:
+            os.remove(path)
+            removed = True
+        except FileNotFoundError:
+            pass
+    if removed:
+        log(f"Cleared staged config: {reason}")
+
+
 def sync_once():
     pkg = latest_config_package()
     if not pkg:
+        return 0
+
+    # A cancel has no config block, so it is handled before validation. Without
+    # this the operator's cancel would be undone on the next cycle: the
+    # original package is still resident in Alfred, and we would re-stage it.
+    if pkg.get("kind") == "mesh_config_cancel":
+        clear_staging(f"cancelled by {pkg.get('issued_by', 'operator')}")
         return 0
 
     ok, why = validate_package(pkg)
@@ -220,11 +240,7 @@ def sync_once():
     if read_file(APPLIED_VERSION_FILE) == version:
         # Already applied. Drop any leftover staging state so a re-broadcast of
         # the same version does not make us apply it twice.
-        for path in (PENDING_FILE, ACK_VERSION_FILE):
-            try:
-                os.remove(path)
-            except FileNotFoundError:
-                pass
+        clear_staging(f"version {version} already applied")
         return 0
 
     staged = ""
