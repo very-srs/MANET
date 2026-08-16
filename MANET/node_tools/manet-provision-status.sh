@@ -18,6 +18,7 @@
 
 STATE_FILE="${MANET_PROVISION_STATE:-/var/lib/manet-provision.state}"
 FAIL_FILE="${MANET_PROVISION_FAILURES:-/var/lib/manet-provision.failures}"
+DONE_FILE="${MANET_PROVISION_DONE:-/var/lib/radio-setup.done}"
 LOG_FILE="/var/log/radio-setup.log"
 VERSION_FILE="/etc/manet_version.txt"
 
@@ -33,9 +34,25 @@ if [ -r "$STATE_FILE" ]; then
     done < "$STATE_FILE"
 fi
 
-# No state file at all: either a node from before this existed, or provisioning
-# has not started. Say nothing rather than guess.
+# A node provisioned before this reporting existed has no state file, but it
+# does have the marker radio-setup touches on success. Treat that as the record
+# of completion rather than saying nothing.
+if [ -z "$STATE" ] && [ -f "$DONE_FILE" ]; then
+    STATE=complete
+    PHASE=radio-setup
+fi
+
+# Still nothing: provisioning has not started, or this is not a MANET node.
+# Say nothing rather than guess.
 [ -z "$STATE" ] && exit 0
+
+# The completion time comes from the marker's mtime, not from whatever the
+# state file claims. The filesystem records when radio-setup actually finished;
+# the state file is just a copy of that, and a copy can be wrong.
+if [ "$STATE" = complete ] && [ -f "$DONE_FILE" ]; then
+    marker_time=$(stat -c %Y "$DONE_FILE" 2>/dev/null)
+    [ -n "$marker_time" ] && FINISHED="$marker_time"
+fi
 
 human_delta() {
     local from="$1" now secs
