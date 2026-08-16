@@ -10,6 +10,8 @@ Nothing here talks to another node. Anything mesh-wide is staged over Alfred
 by the caller.
 """
 
+import json
+import os
 import re
 import subprocess
 import time
@@ -44,6 +46,108 @@ def _format_halow_bw(value):
     except Exception:
         pass
     return text
+
+def _first_flat_value(data, keys):
+    """Find the first matching key in a nested dict/list structure."""
+    if isinstance(data, dict):
+        for key in keys:
+            if key in data and data[key] not in (None, ''):
+                return data[key]
+        for value in data.values():
+            found = _first_flat_value(value, keys)
+            if found not in (None, ''):
+                return found
+    elif isinstance(data, list):
+        for item in data:
+            found = _first_flat_value(item, keys)
+            if found not in (None, ''):
+                return found
+    return None
+
+def _json_from_text(text):
+    decoder = json.JSONDecoder()
+    for idx, char in enumerate(text):
+        if char not in '[{':
+            continue
+        try:
+            data, _ = decoder.raw_decode(text[idx:])
+            return data
+        except Exception:
+            pass
+    return None
+
+def _channel_from_frequency(freq_value):
+    try:
+        m = re.search(r'[0-9.]+', str(freq_value))
+        freq = float(m.group(0)) if m else None
+    except Exception:
+        return '', ''
+    if freq is None:
+        return '', ''
+    if freq > 1000000:
+        freq_khz = freq / 1000.0
+        freq_mhz = freq / 1000000.0
+    elif freq > 1000:
+        freq_khz = freq
+        freq_mhz = freq / 1000.0
+    else:
+        freq_khz = freq * 1000.0
+        freq_mhz = freq
+    channel = ''
+    for idx, center_khz in enumerate(HALOW_EU_CHANNELS, start=1):
+        if abs(freq_khz - center_khz) <= 500:
+            channel = str(idx)
+            break
+    return channel, f'{freq_mhz:.3f}'.rstrip('0').rstrip('.')
+
+
+def _parse_morse_channel_output(text):
+    info = {}
+    data = _json_from_text(text)
+    if data is not None:
+        freq = _first_flat_value(data, [
+            'channel_frequency', 'frequency', 'freq', 'freq_khz', 'freq_hz',
+            'operating_frequency', 'op_chan_freq'
+        ])
+        bw = _first_flat_value(data, [
+            'channel_op_bw', 'op_bw', 'operating_bw', 'channel_bw',
+            'bandwidth', 'bw', 'op_chan_bw'
+        ])
+        idx = _first_flat_value(data, [
+            'channel_index', 'channel', 'primary_channel', 's1g_channel'
+        ])
+    else:
+        freq = None
+        bw = None
+        idx = None
+        for key in ('channel_frequency', 'frequency', 'freq_khz', 'freq_hz', 'op_chan_freq'):
+            m = re.search(rf'{key}\s*[:=]\s*"?([0-9.]+)"?', text, re.I)
+            if m:
+                freq = m.group(1)
+                break
+        for key in ('channel_op_bw', 'op_bw', 'operating_bw', 'channel_bw', 'bandwidth', 'op_chan_bw'):
+            m = re.search(rf'{key}\s*[:=]\s*"?([0-9.]+\s*(?:[kKmM][hH][zZ])?)"?', text, re.I)
+            if m:
+                bw = m.group(1)
+                break
+        m = re.search(r'channel(?:_index)?\s*[:=]\s*"?(\d+)"?', text, re.I)
+        if m:
+            idx = m.group(1)
+
+    if freq not in (None, ''):
+        channel, freq_mhz = _channel_from_frequency(freq)
+        if channel:
+            info['channel'] = channel
+        if freq_mhz:
+            info['freq_mhz'] = freq_mhz
+    if bw not in (None, ''):
+        info['halow_bw'] = _format_halow_bw(bw)
+    if idx not in (None, '') and 'channel' not in info:
+        info['channel'] = str(idx)
+    if info:
+        info['halow_source'] = 'morse'
+    return info
+
 
 def get_halow_driver_info(iface='wlan2'):
     """Read HaLow runtime channel data from Morse tooling; config is only fallback."""
