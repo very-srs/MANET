@@ -46,6 +46,7 @@ ELECTION_OUTPUT_FILE="/var/run/mesh_channel_election"
 REGISTRY_STATE_FILE="/var/run/mesh_node_registry"
 ENCODER_PATH="/usr/local/bin/encoder.py"
 BATCTL_PATH="/usr/sbin/batctl"
+THROUGHPUT_MEAN="/usr/local/bin/mesh-throughput-mean.sh"
 RADIO_STATE_SYNC="/usr/local/bin/mesh-radio-state.py"
 CONFIG_SYNC="/usr/local/bin/mesh-config-sync.py"
 CONFIG_ROLLBACK="/usr/local/bin/mesh-config-rollback.sh"
@@ -433,8 +434,10 @@ while true; do
         if [ "$DO_LOBBY_PUBLISH" = true ]; then
             log "=== LOBBY PUBLISH ($(date +'%H:%M:%S')) ==="
             
-            # Column 3 of `batctl o` is the BATMAN_V metric: throughput in Mbit/s.
-        MEAN_THROUGHPUT=$("$BATCTL_PATH" o 2>/dev/null | awk 'NR>1 {sum+=$3} END {if (NR>1) printf "%.2f", sum/(NR-1); else print 0}')
+        # Not a positional field: `batctl o` shifts columns on the starred
+        # (selected) route, so $3 is the last-seen timestamp there. See
+        # mesh-throughput-mean.sh.
+        MEAN_THROUGHPUT=$("$THROUGHPUT_MEAN" 2>/dev/null || echo 0)
             
             # Service flags
             detect_and_update_gateway_state
@@ -601,8 +604,10 @@ except Exception:
         if should_perform_action "PUBLISH" 180 15; then
             log "=== PUBLISH ($(date +'%H:%M:%S')) ==="
 
-            # Column 3 of `batctl o` is the BATMAN_V metric: throughput in Mbit/s.
-        MEAN_THROUGHPUT=$("$BATCTL_PATH" o 2>/dev/null | awk 'NR>1 {sum+=$3} END {if (NR>1) printf "%.2f", sum/(NR-1); else print 0}')
+        # Not a positional field: `batctl o` shifts columns on the starred
+        # (selected) route, so $3 is the last-seen timestamp there. See
+        # mesh-throughput-mean.sh.
+        MEAN_THROUGHPUT=$("$THROUGHPUT_MEAN" 2>/dev/null || echo 0)
 
             # Service flags
             detect_and_update_gateway_state
