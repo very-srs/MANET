@@ -2530,7 +2530,6 @@ ROLLBACK_STATE_FILE = '/var/lib/manet-config-rollback/state'
 
 def broadcast_config_package(pkg):
     """Write config package to Alfred type 70."""
-    import subprocess, json
     payload = json.dumps(pkg, separators=(',', ':'))
     try:
         r = subprocess.run(
@@ -3289,7 +3288,6 @@ class MeshHandler(ManageRoutes, http.server.BaseHTTPRequestHandler):
                         return
 
                 # Set activate_at to now + 60 seconds
-                import time
                 activate_at = int(time.time()) + 60
                 pkg['activate_at'] = activate_at
                 pkg['no_rollback'] = no_rollback
@@ -3302,8 +3300,18 @@ class MeshHandler(ManageRoutes, http.server.BaseHTTPRequestHandler):
 
         elif path == '/api/admin/cancel':
             try:
+                # Clearing our own files is not enough: the package is still
+                # resident in Alfred, so every node (including this one) would
+                # re-stage it on the next sync. Broadcast a cancel the way the
+                # radio path does.
+                pending = get_pending_config() or {}
+                broadcast_config_package({
+                    'kind':      'mesh_config_cancel',
+                    'version':   pending.get('version', ''),
+                    'issued_by': get_my_hostname(),
+                    'issued_at': int(time.time()),
+                })
                 clear_pending_config()
-                # Clear local ACK state
                 try:
                     os.remove('/var/run/mesh_config_ack_version')
                 except Exception:
@@ -3336,7 +3344,7 @@ class MeshHandler(ManageRoutes, http.server.BaseHTTPRequestHandler):
                                                capture_output=True, text=True, timeout=3)
                             if r.stdout.strip() == 'active':
                                 subprocess.run(['systemctl', 'restart', std_svc], timeout=15)
-                                import time; time.sleep(3)
+                                time.sleep(3)
                                 break
                         subprocess.run(['ip', 'link', 'set', iface, 'up'], timeout=5)
                         subprocess.run(['systemctl', 'start', svc], timeout=15)
