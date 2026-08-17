@@ -8,8 +8,22 @@ adapts packing to measured loss, and publishes state for the web UI. Nothing
 Python touches the audio thread, which is the whole reason this is not a
 compiled daemon.
 
-    TX  alsasrc -> level -> valve -> <enc> -> <pay>   -> multiudpsink
-    RX  udpsrc  -> rtpjitterbuffer -> <depay> -> <dec> -> alsasink
+    TX  alsasrc -> level -> valve -> <enc> -> <pay> -> multiudpsink
+    RX  udpsrc  -> rtpbin -+-> <depay> -> <dec> -\
+                           +-> <depay> -> <dec> --+-> audiomixer -> alsasink
+                                    (one branch per talker)
+
+Receive is conference style: rtpbin demultiplexes by SSRC, gives every talker
+their own jitter buffer, and audiomixer sums them, so simultaneous speakers are
+mixed rather than corrupting one another. Transmit is still push-to-talk — the
+valve is shut until the button is pressed, so nobody is hot-miked — and there
+is no software lockout on talking over someone. That is etiquette, like any
+conference bridge. voice_half_duplex=y restores the old refuse-to-key
+behaviour for anyone who wants it.
+
+A single rtpjitterbuffer cannot do this: two senders' sequence numbers
+interleave in one buffer and the output is garbage. That limitation, not
+policy, is what the old half-duplex lockout was really working around.
 
 voice_codec picks the pair: opus (stock elements, the default) or lyra
 (libgstlyra.so plus model weights, and a fallback to opus if either is
@@ -242,7 +256,10 @@ class Config:
         # Off by default: batman-adv already fans multicast out as unicast.
         self.unicast = conf_bool(conf, "voice_unicast", False)
         self.max_peers = conf_int(conf, "voice_unicast_max_peers", 16, 0, 128)
-        self.half_duplex = conf_bool(conf, "voice_half_duplex", True)
+        # Off by default: the receiver mixes talkers now, so talking over
+        # someone degrades gracefully instead of corrupting the stream.
+        # Etiquette is left to the operators, like any conference bridge.
+        self.half_duplex = conf_bool(conf, "voice_half_duplex", False)
         self.ptt_mode = conf.get("voice_ptt", "openvlm").strip().lower()
         # Empty means autodetect the OpenVLM card.
         self.alsa_in = conf.get("voice_alsa_in", "").strip()
@@ -514,8 +531,13 @@ class MeshVoice:
         self.rx = None
         self.valve = None
         self.sink = None
-        self.jitter = None
         self.payloader = None
+        self.mixer = None
+        self.rtpbin = None
+        # One decode branch and one jitter buffer per talker, keyed by
+        # rtpbin pad name and SSRC respectively.
+        self.rx_branches = {}
+        self.jitterbuffers = {}
 
         # Adaptive packing state. `packing` mirrors the payloader property so
         # the state file and the web UI can report it without querying GStreamer
@@ -629,18 +651,32 @@ class MeshVoice:
                  ttl=self.cfg.ttl,
                  bind=("bind-address=%s" % bind_ip) if bind_ip else "")
 
+        # Conference receive: rtpbin demultiplexes by SSRC and gives each talker
+        # its own jitter buffer, and audiomixer sums them. A single
+        # rtpjitterbuffer cannot do this — two senders' sequence numbers
+        # interleave in one buffer and the output is garbage, which is why the
+        # old pipeline needed a half-duplex lockout to be usable at all.
+        #
+        # The silent source is not decoration. audiomixer only produces output
+        # while it has an input, so with nobody talking the sink would be
+        # starved, and every transmission would start with the DAC spinning up.
+        # A permanent silent input keeps the mixer and alsasink running so
+        # speech starts cleanly.
+        self.rx_branches = {}
+        self.jitterbuffers = {}
         rx_desc = (
+            "rtpbin name=rtpbin latency={jitter} do-lost=true autoremove=true "
             "udpsrc name=src address={group} port={port} "
             "  multicast-iface={iface} auto-multicast=true buffer-size=1048576 "
             "  caps=\"application/x-rtp,media=(string)audio,"
             "clock-rate=(int){rate},encoding-name=(string){encoding},"
-            "payload=(int){pt}\" ! "
-            "rtpjitterbuffer name=jb latency={jitter} do-lost=true ! "
-            "{depay} ! {dec} ! "
-            "audioconvert ! audioresample ! {play}"
+            "payload=(int){pt}\" ! rtpbin.recv_rtp_sink_0 "
+            "audiomixer name=mix ! audioconvert ! audioresample ! {play} "
+            "audiotestsrc name=silence wave=silence is-live=true ! "
+            "  audio/x-raw,rate={arate},channels=1,format=S16LE ! mix. "
         ).format(group=TALK_GROUP_ADDR, port=self.cfg.port,
                  iface=self.cfg.iface, rate=clock_rate, encoding=encoding,
-                 pt=RTP_PAYLOAD_TYPE, depay=depay_desc, dec=dec_desc,
+                 pt=RTP_PAYLOAD_TYPE, arate=raw_rate,
                  jitter=max(self.cfg.jitter_ms, packet_ms * 2),
                  play=playback_desc)
 
@@ -648,8 +684,20 @@ class MeshVoice:
         self.rx = Gst.parse_launch(rx_desc)
         self.valve = self.tx.get_by_name("ptt")
         self.sink = self.tx.get_by_name("sink")
-        self.jitter = self.rx.get_by_name("jb")
         self.payloader = self.tx.get_by_name("pay")
+        self.mixer = self.rx.get_by_name("mix")
+        self.rtpbin = self.rx.get_by_name("rtpbin")
+
+        # Branches appear and disappear as people key up and drop. Remember the
+        # codec stages so the handler can build one per talker.
+        self._rx_depay_desc = depay_desc
+        self._rx_dec_desc = dec_desc
+        self._rx_raw_rate = raw_rate
+        self.rtpbin.connect("pad-added", self._on_rtp_pad_added)
+        self.rtpbin.connect("pad-removed", self._on_rtp_pad_removed)
+        # Loss is measured per talker now, so collect the jitter buffers as
+        # rtpbin creates them; _tick_packing sums across them.
+        self.rtpbin.connect("new-jitterbuffer", self._on_new_jitterbuffer)
 
         for pipeline, name in ((self.tx, "tx"), (self.rx, "rx")):
             bus = pipeline.get_bus()
@@ -863,6 +911,94 @@ class MeshVoice:
     def _remote_active(self):
         return self.rx_active and now_ms() - self.last_rx_ms < HALF_DUPLEX_HOLD_MS
 
+    # -- conference receive --
+
+    def _on_new_jitterbuffer(self, _rtpbin, jitterbuffer, session, ssrc):
+        """rtpbin made a jitter buffer for a new talker; keep it for stats.
+
+        Loss is per talker now. The packing controller sums across these, which
+        is the right aggregate: it is asking "how lossy is this radio link",
+        not "how lossy is any one speaker".
+        """
+        self.jitterbuffers[ssrc] = jitterbuffer
+        GST_LOG_SSRC = "%s/%s" % (session, ssrc)
+        log("rx: new talker ssrc %s" % GST_LOG_SSRC)
+
+    def _on_rtp_pad_added(self, _rtpbin, pad):
+        """Build a decode branch for one talker and feed it into the mixer."""
+        name = pad.get_name()
+        if not name.startswith("recv_rtp_src_"):
+            return
+        if name in self.rx_branches:
+            return
+
+        try:
+            # An explicit capsfilter, not bare caps: as the last item in a bin
+            # description the parser reads "audio/x-raw,..." as an element name
+            # and fails with 'no element "audio"'. Every talker must arrive at
+            # the mixer in the same format, so this cannot simply be dropped.
+            depay = Gst.parse_bin_from_description(
+                "%s ! %s ! audioconvert ! audioresample ! capsfilter "
+                "caps=\"audio/x-raw, rate=(int)%d, channels=(int)1, "
+                "format=(string)S16LE\""
+                % (self._rx_depay_desc, self._rx_dec_desc, self._rx_raw_rate),
+                True)
+        except GLib.Error as exc:
+            log("rx: cannot build branch for %s: %s" % (name, exc))
+            return
+
+        self.rx.add(depay)
+        mixpad = self.mixer.request_pad_simple("sink_%u")
+        if mixpad is None:
+            log("rx: audiomixer refused a pad for %s" % name)
+            self.rx.remove(depay)
+            return
+
+        if (pad.link(depay.get_static_pad("sink")) != Gst.PadLinkReturn.OK
+                or depay.get_static_pad("src").link(mixpad)
+                != Gst.PadLinkReturn.OK):
+            log("rx: link failed for %s" % name)
+            self.mixer.release_request_pad(mixpad)
+            self.rx.remove(depay)
+            return
+
+        depay.sync_state_with_parent()
+        self.rx_branches[name] = (depay, mixpad)
+        log("rx: talker branch up (%d active)" % len(self.rx_branches))
+
+    def _on_rtp_pad_removed(self, _rtpbin, pad):
+        """Tear the branch down when rtpbin times the talker out.
+
+        Without this the pipeline accumulates a decoder per talker per session
+        for the life of the daemon — on a busy net that is a slow leak of both
+        memory and CPU, and with lyra each one holds a TFLite interpreter.
+        """
+        entry = self.rx_branches.pop(pad.get_name(), None)
+        if entry is None:
+            return
+        branch, mixpad = entry
+        branch.set_state(Gst.State.NULL)
+        self.rx.remove(branch)
+        self.mixer.release_request_pad(mixpad)
+        # Drop jitter buffers whose element has left the pipeline, so the stats
+        # dict does not grow without bound either.
+        for ssrc in [s for s, jb in self.jitterbuffers.items()
+                     if jb.get_parent() is None]:
+            del self.jitterbuffers[ssrc]
+        log("rx: talker branch down (%d active)" % len(self.rx_branches))
+
+    def _rx_loss_stats(self):
+        """(pushed, lost) summed over every current talker's jitter buffer."""
+        pushed = lost = 0
+        for jb in list(self.jitterbuffers.values()):
+            try:
+                stats = jb.get_property("stats")
+                pushed += stats.get_value("num-pushed") or 0
+                lost += stats.get_value("num-lost") or 0
+            except Exception:
+                continue
+        return pushed, lost
+
     # -- adaptive packing --
 
     def _link_mbps(self):
@@ -924,21 +1060,21 @@ class MeshVoice:
         from batman-adv's throughput estimate.
 
         The signal is our own receive loss, not the far end's -- plain
-        multicast RTP has no back channel. Half duplex makes that a fair proxy:
-        we measure the same radio link in the other direction, moments before
-        we key up. It is a proxy, though, and an asymmetric link will fool it.
+        multicast RTP has no back channel. It is a decent proxy because it
+        measures the same radio link in the other direction, but it is only a
+        proxy, and an asymmetric link will fool it. Summed across talkers,
+        since the question is how lossy the link is, not who is speaking.
         """
-        if self.cfg.codec != "lyra" or self.jitter is None:
+        if self.cfg.codec != "lyra":
             return False        # nothing to adapt; stop the timer
         if self.transmitting:
-            return True         # half duplex: not receiving, so no signal
-
-        try:
-            stats = self.jitter.get_property("stats")
-            pushed = stats.get_value("num-pushed") or 0
-            lost = stats.get_value("num-lost") or 0
-        except Exception:
+            # Our own transmission crowds the air and we are not listening to
+            # it, so a window that overlaps TX says nothing useful about the
+            # link. Skipping is not about duplex policy -- it is about not
+            # measuring during the one period we cannot measure.
             return True
+
+        pushed, lost = self._rx_loss_stats()
 
         d_pushed = pushed - self._pk_last_pushed
         d_lost = lost - self._pk_last_lost
@@ -1023,13 +1159,20 @@ class MeshVoice:
         return True
 
     def write_state(self):
+        # Totals across every talker's jitter buffer. Late and duplicate are
+        # summed the same way; per-talker detail is not worth the UI space.
         stats = {}
-        if self.jitter:
+        late = dups = 0
+        for jb in list(self.jitterbuffers.values()):
             try:
-                stats = self.jitter.get_property("stats") or {}
-                stats = {k: stats[k] for k in stats.keys()}
+                s = jb.get_property("stats")
+                late += s.get_value("num-late") or 0
+                dups += s.get_value("num-duplicates") or 0
             except Exception:
-                stats = {}
+                continue
+        pushed, lost = self._rx_loss_stats()
+        stats = {"num-lost": lost, "num-late": late, "num-duplicates": dups,
+                 "num-pushed": pushed}
 
         state = {
             "service": "running",
@@ -1054,6 +1197,7 @@ class MeshVoice:
                                   else None),
             "rx_loss_pct": round(self.rx_loss_pct, 1),
             "unicast": self.cfg.unicast,
+            "talkers": len(self.rx_branches),
             "peers": [{"ip": ip, "hostname": host} for ip, host in self.peers],
             "tx_packets": self.tx_packets,
             "rx_packets": self.rx_packets,
