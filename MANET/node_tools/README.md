@@ -136,17 +136,25 @@ remote node arrives on `br0` exactly like one from a local EUD. Re-run by
 
 **mesh-voice.py**
 
-Half-duplex PTT voice across the mesh. Opus over RTP to a multicast group, with
-a headset PTT plugged into the node itself — there is no browser microphone and
-the web UI is a status readout only.
+Conference-style PTT voice across the mesh, with a headset PTT plugged into the
+node itself — there is no browser microphone and the web UI is a status and
+talk-group readout only. Talking is gated by the button, but listening mixes
+everyone, so two people speaking at once are summed rather than corrupting each
+other.
 
 The audio path is entirely GStreamer, so no Python code runs on the audio
 thread:
 
 ```
-TX  alsasrc -> level -> valve -> opusenc -> rtpopuspay -> multiudpsink
-RX  udpsrc  -> rtpjitterbuffer -> rtpopusdepay -> opusdec -> alsasink
+TX  alsasrc -> level -> valve -> <enc> -> <pay> -> multiudpsink
+RX  udpsrc  -> rtpbin -+-> <depay> -> <dec> -\
+                       +-> <depay> -> <dec> --+-> audiomixer -> alsasink
+                                (one branch per talker)
 ```
+
+`voice_codec` selects the codec pair: `opus` (stock elements, the default) or
+`lyra` (needs `libgstlyra.so` and the model weights; falls back to opus with a
+log if either is missing).
 
 The daemon only supervises: it reads the PTT button, keeps the unicast peer
 list current, and publishes `/run/mesh-voice.json` for the UI.
@@ -203,15 +211,37 @@ talking and every transmission starts with the DAC spinning up. Branches are
 built on `pad-added` and torn down on `pad-removed`, so a decoder is not leaked
 per talker; measured, two idle talkers were reaped and the count returned to 0.
 
-**Known issue for the lyra path:** `rtpbin autoremove=true` reaps a talker after
-roughly a minute of silence, so the next transmission from that node builds a
-fresh decode branch. With opus that is free. With lyra it means constructing a
-`LyraDecoder` — three TFLite models — while speech is already arriving, which
-will clip the start of the transmission. PTT gaps longer than the timeout are
-completely normal, so this needs solving before lyra ships: either keep the
-branches (`autoremove=false`, bounded by node count on the group, at the cost
-of stale branches when a node's SSRC changes on retune) or pool decoders and
-reattach them. Not urgent while the default codec is opus.
+**Decode branches are kept, not reaped — this is what stops transmissions
+being clipped.** `rtpbin autoremove=false` (its own default) means a talker's
+branch survives their silence, so the next thing they say plays from the first
+frame. Measured on a CM4 with lyra, 3.00 s bursts:
+
+| receiver state when the talker keys up | audio arrived | lost |
+|---|---|---|
+| branch rebuilt on demand | 2.82 s | 180 ms |
+| branch pre-built and attached | 2.92 s | 80 ms |
+| talker already established | 3.04 s | none |
+
+Only a source `rtpbin` has already seen costs nothing. Blocking the pad during
+construction, lowering RTP source probation, and raising the mixer's
+`min-upstream-latency` were each tried and none of them helped — the residual
+is `rtpbin` establishing a new source, not our linking, so the fix is to make
+sure the source is not new.
+
+The consequence is that a talker's *first* transmission after this node starts
+still loses about 80–180 ms, and every one after that is clean. In practice
+that head lands in the gap between pressing PTT and starting to speak. If that
+ever proves not good enough, the fix is a periodic silent RTP beacon so every
+receiver has seen each SSRC before real speech — deliberately not built yet,
+because it costs airtime for a case that may never be audible.
+
+Because branches are never reaped on idle, `voice_max_talkers` (default 8)
+bounds them with an LRU eviction. Each costs about 5.3 MB with lyra, measured,
+so the default is roughly 40 MB against 3.4 GB free — the cap exists to stop
+unbounded growth when nodes churn SSRCs across restarts and retunes, not
+because memory is scarce. `ignore-inactive-pads` on the mixer is required
+rather than optional once branches are kept: they are silent between
+transmissions and the mixer would otherwise wait on them.
 
 **Talk group is per-radio and changed at runtime.** Every node is flashed on
 group 1; the operator moves it from the VOICE tab of the web UI, which writes
@@ -354,6 +384,7 @@ Config keys in `/etc/mesh.conf`:
 | `voice_unicast` | `n` | Userspace unicast copies — normally unnecessary, see above |
 | `voice_unicast_max_peers` | `16` | Cap on unicast copies |
 | `voice_half_duplex` | `n` | Refuse PTT while a remote node is transmitting — off, see below |
+| `voice_max_talkers` | `8` | Decode branches kept warm; LRU-evicted above this (~5.3 MB each with lyra) |
 | `voice_dscp` | `48` | DSCP marking — CS6, see the QoS note above |
 | `voice_codec` | `opus` | `opus` or `lyra`; lyra falls back to opus if the plugin or model weights are missing |
 | `voice_bitrate` | `32000` | Opus bitrate |
