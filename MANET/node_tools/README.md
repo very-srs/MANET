@@ -182,6 +182,37 @@ in normal operation, but expect a brief window after start-up before joins
 propagate, and note that a sender with no listeners is silently idle rather
 than wasting air.
 
+**Receive is conference style; transmit is still push-to-talk.** `rtpbin`
+demultiplexes by SSRC and gives every talker their own jitter buffer, and
+`audiomixer` sums them — so two people speaking at once are *mixed*, the way a
+conference bridge behaves. Nobody is hot-miked: the valve stays shut until the
+button is pressed. What is gone is the software lockout on talking over
+someone; that is etiquette now, like any conference bridge.
+`voice_half_duplex=y` restores the refuse-to-key behaviour if you want it.
+
+This is not just a policy change. A single `rtpjitterbuffer` cannot do it — two
+senders' sequence numbers interleave in one buffer and the output is garbage.
+That limitation, not policy, is what the old lockout was really working around.
+Verified by feeding two senders (440 Hz and 880 Hz, distinct SSRCs) into the
+receive pipeline: with one talker only 440 Hz is present; with both, 440 Hz and
+880 Hz appear together at comparable amplitude.
+
+A permanent silent input feeds the mixer, because `audiomixer` only produces
+output while it has one — without it the sink is starved whenever nobody is
+talking and every transmission starts with the DAC spinning up. Branches are
+built on `pad-added` and torn down on `pad-removed`, so a decoder is not leaked
+per talker; measured, two idle talkers were reaped and the count returned to 0.
+
+**Known issue for the lyra path:** `rtpbin autoremove=true` reaps a talker after
+roughly a minute of silence, so the next transmission from that node builds a
+fresh decode branch. With opus that is free. With lyra it means constructing a
+`LyraDecoder` — three TFLite models — while speech is already arriving, which
+will clip the start of the transmission. PTT gaps longer than the timeout are
+completely normal, so this needs solving before lyra ships: either keep the
+branches (`autoremove=false`, bounded by node count on the group, at the cost
+of stale branches when a node's SSRC changes on retune) or pool decoders and
+reattach them. Not urgent while the default codec is opus.
+
 **Talk group is per-radio and changed at runtime.** Every node is flashed on
 group 1; the operator moves it from the VOICE tab of the web UI, which writes
 `voice_channel` to `/etc/mesh.conf` and runs `systemctl reload mesh-voice`.
@@ -322,7 +353,7 @@ Config keys in `/etc/mesh.conf`:
 | `voice_ptt` | `openvlm` | `openvlm`, `always` (open mic), or anything else for receive-only |
 | `voice_unicast` | `n` | Userspace unicast copies — normally unnecessary, see above |
 | `voice_unicast_max_peers` | `16` | Cap on unicast copies |
-| `voice_half_duplex` | `y` | Refuse PTT while a remote node is transmitting |
+| `voice_half_duplex` | `n` | Refuse PTT while a remote node is transmitting — off, see below |
 | `voice_dscp` | `48` | DSCP marking — CS6, see the QoS note above |
 | `voice_codec` | `opus` | `opus` or `lyra`; lyra falls back to opus if the plugin or model weights are missing |
 | `voice_bitrate` | `32000` | Opus bitrate |
