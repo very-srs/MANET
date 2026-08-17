@@ -345,6 +345,19 @@ ask_questions() {
         INSTALL_MUMBLE=${INSTALL_MUMBLE:-y}
         if [ "$INSTALL_MUMBLE" = "y" ] || [ "$INSTALL_MUMBLE" = "Y" ]; then INSTALL_MUMBLE="y"; else INSTALL_MUMBLE="n"; fi
 
+        # Mesh PTT voice. Defaults to n: it needs an OpenVLM (CM108B) board
+        # fitted for the headset and PTT switch, and a node without one would
+        # run the daemon to no purpose. Enabling later is a mesh.conf edit and
+        # a service restart, so "n" here costs nothing.
+        read -p "Enable mesh PTT voice (needs an OpenVLM board)? (y/N): " VOICE_ENABLED
+        VOICE_ENABLED=${VOICE_ENABLED:-n}
+        if [ "$VOICE_ENABLED" = "y" ] || [ "$VOICE_ENABLED" = "Y" ]; then VOICE_ENABLED="y"; else VOICE_ENABLED="n"; fi
+        # Talk group is deliberately not asked here. Every node ships on group 1
+        # and the operator changes it from the web UI (and, later, the enclosure
+        # rotary switch) — it is a per-radio setting like a channel knob, not a
+        # fleet-build decision, and baking it into the image would mean
+        # reflashing to change channel.
+
         # Mesh Configuration
         read -p "Enter global MESH SSID Name: " MESH_SSID
 
@@ -471,6 +484,7 @@ LAN_AP_KEY="$LAN_AP_KEY"
 MAX_EUDS_PER_NODE="$MAX_EUDS_PER_NODE"
 INSTALL_MEDIAMTX="$INSTALL_MEDIAMTX"
 INSTALL_MUMBLE="$INSTALL_MUMBLE"
+VOICE_ENABLED="$VOICE_ENABLED"
 REGULATORY_DOMAIN="$REGULATORY_DOMAIN"
 HALOW_REGULATORY_DOMAIN="$HALOW_REGULATORY_DOMAIN"
 MESH_SSID="$MESH_SSID"
@@ -493,6 +507,9 @@ load_config() {
         # Source the file to load the variables into this script
         source "$CONFIG_FILE"
         HALOW_REGULATORY_DOMAIN=${HALOW_REGULATORY_DOMAIN:-$(halow_regulatory_domain_for_wifi_domain "$REGULATORY_DOMAIN")}
+        # Config files saved before voice existed have neither key. Default them
+        # rather than substituting an empty string into mesh.conf.
+        VOICE_ENABLED=${VOICE_ENABLED:-n}
 
         # Display the loaded settings
         echo "--- Loaded Configuration ---"
@@ -505,6 +522,7 @@ load_config() {
         fi
         echo "  Install MediaMTX: $INSTALL_MEDIAMTX"
         echo "  Install Mumble: $INSTALL_MUMBLE"
+        echo "  Mesh PTT voice: $VOICE_ENABLED"
         echo "  Regulatory Domain: $REGULATORY_DOMAIN"
         echo "  HaLow Regulatory Region: $HALOW_REGULATORY_DOMAIN"
         echo "  Mesh SSID: $MESH_SSID"
@@ -911,6 +929,9 @@ lan_ap_key=${LAN_AP_KEY}
 max_euds_per_node=${MAX_EUDS_PER_NODE}
 mtx=${INSTALL_MEDIAMTX}
 mumble=${INSTALL_MUMBLE}
+voice=${VOICE_ENABLED}
+# Every node ships on talk group 1; changed from the web UI, not at flash time.
+voice_channel=1
 mesh_ssid=${MESH_SSID}
 mesh_key=${MESH_SAE_KEY}
 ipv4_network=${LAN_CIDR_BLOCK}
@@ -979,6 +1000,7 @@ EOF
         sed -i "s|__MAX_EUDS_PER_NODE__|${MAX_EUDS_PER_NODE}|g" "$TEMP_PROVISION_SCRIPT"
         sed -i "s|__INSTALL_MEDIAMTX__|${INSTALL_MEDIAMTX}|g" "$TEMP_PROVISION_SCRIPT"
         sed -i "s|__INSTALL_MUMBLE__|${INSTALL_MUMBLE}|g" "$TEMP_PROVISION_SCRIPT"
+        sed -i "s|__VOICE_ENABLED__|${VOICE_ENABLED}|g" "$TEMP_PROVISION_SCRIPT"
         sed -i "s|__MESH_SSID__|${MESH_SSID}|g" "$TEMP_PROVISION_SCRIPT"
         sed -i "s|__MESH_SAE_KEY__|${MESH_SAE_KEY}|g" "$TEMP_PROVISION_SCRIPT"
         sed -i "s|__LAN_CIDR_BLOCK__|${LAN_CIDR_BLOCK}|g" "$TEMP_PROVISION_SCRIPT"
@@ -1075,6 +1097,7 @@ flash_rpi() {
             -e "s|__MAX_EUDS_PER_NODE__|${MAX_EUDS_PER_NODE}|g" \
             -e "s|__INSTALL_MEDIAMTX__|${INSTALL_MEDIAMTX}|g" \
             -e "s|__INSTALL_MUMBLE__|${INSTALL_MUMBLE}|g" \
+            -e "s|__VOICE_ENABLED__|${VOICE_ENABLED}|g" \
             -e "s|__MESH_SSID__|${MESH_SSID}|g" \
             -e "s|__MESH_SAE_KEY__|${MESH_SAE_KEY}|g" \
             -e "s|__LAN_CIDR_BLOCK__|${LAN_CIDR_BLOCK}|g" \
