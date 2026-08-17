@@ -33,6 +33,7 @@ $Script:LAN_AP_KEY        = ""
 $Script:MAX_EUDS_PER_NODE = 0
 $Script:INSTALL_MEDIAMTX  = ""
 $Script:INSTALL_MUMBLE    = ""
+$Script:VOICE_ENABLED     = "n"
 $Script:MESH_SSID         = ""
 $Script:MESH_SAE_KEY      = ""
 $Script:LAN_CIDR_BLOCK    = ""
@@ -584,6 +585,12 @@ function Ask-Questions {
     $r = Read-Host "Install Mumble Server (murmur)? (Y/n)"
     $Script:INSTALL_MUMBLE = if ([string]::IsNullOrWhiteSpace($r) -or $r -match "^[Yy]") { "y" } else { "n" }
 
+    # Mesh PTT voice. Defaults to n: it needs an OpenVLM (CM108B) board fitted
+    # for the headset and PTT switch, and a node without one would run the
+    # daemon to no purpose. Enabling later is a mesh.conf edit and a restart.
+    $r = Read-Host "Enable mesh PTT voice (needs an OpenVLM board)? (y/N)"
+    $Script:VOICE_ENABLED = if ($r -match "^[Yy]") { "y" } else { "n" }
+
     $Script:MESH_SSID = Read-Host "Enter MESH SSID Name"
 
     while ($true) {
@@ -687,6 +694,7 @@ LAN_AP_KEY="$($Script:LAN_AP_KEY)"
 MAX_EUDS_PER_NODE="$($Script:MAX_EUDS_PER_NODE)"
 INSTALL_MEDIAMTX="$($Script:INSTALL_MEDIAMTX)"
 INSTALL_MUMBLE="$($Script:INSTALL_MUMBLE)"
+VOICE_ENABLED="$($Script:VOICE_ENABLED)"
 REGULATORY_DOMAIN="$($Script:REGULATORY_DOMAIN)"
 HALOW_REGULATORY_DOMAIN="$($Script:HALOW_REGULATORY_DOMAIN)"
 MESH_SSID="$($Script:MESH_SSID)"
@@ -714,6 +722,9 @@ function Load-Config {
                 "MAX_EUDS_PER_NODE"       { $Script:MAX_EUDS_PER_NODE        = [int]$Matches[2] }
                 "INSTALL_MEDIAMTX"        { $Script:INSTALL_MEDIAMTX         = $Matches[2] }
                 "INSTALL_MUMBLE"          { $Script:INSTALL_MUMBLE            = $Matches[2] }
+                # Absent from configs saved before voice existed; the defaults
+                # at the top of the script stand in that case.
+                "VOICE_ENABLED"           { $Script:VOICE_ENABLED             = $Matches[2] }
                 "REGULATORY_DOMAIN"       { $Script:REGULATORY_DOMAIN        = $Matches[2] }
                 "HALOW_REGULATORY_DOMAIN" { $Script:HALOW_REGULATORY_DOMAIN  = $Matches[2] }
                 "MESH_SSID"               { $Script:MESH_SSID                = $Matches[2] }
@@ -740,6 +751,7 @@ function Load-Config {
     }
     Write-Host "  Install MediaMTX: $($Script:INSTALL_MEDIAMTX)"
     Write-Host "  Install Mumble: $($Script:INSTALL_MUMBLE)"
+    Write-Host "  Mesh PTT voice: $($Script:VOICE_ENABLED)"
     Write-Host "  Regulatory Domain: $($Script:REGULATORY_DOMAIN)"
     Write-Host "  HaLow Regulatory Region: $($Script:HALOW_REGULATORY_DOMAIN)"
     Write-Host "  Mesh SSID: $($Script:MESH_SSID)"
@@ -906,6 +918,9 @@ lan_ap_key=$($Script:LAN_AP_KEY)
 max_euds_per_node=$($Script:MAX_EUDS_PER_NODE)
 mtx=$($Script:INSTALL_MEDIAMTX)
 mumble=$($Script:INSTALL_MUMBLE)
+voice=$($Script:VOICE_ENABLED)
+# Every node ships on talk group 1; changed from the web UI, not at flash time.
+voice_channel=1
 mesh_ssid=$($Script:MESH_SSID)
 mesh_key=$($Script:MESH_SAE_KEY)
 ipv4_network=$($Script:LAN_CIDR_BLOCK)
@@ -977,6 +992,7 @@ auto_update=$($Script:AUTO_UPDATE)
             -replace '__MAX_EUDS_PER_NODE__',       $Script:MAX_EUDS_PER_NODE `
             -replace '__INSTALL_MEDIAMTX__',        $Script:INSTALL_MEDIAMTX `
             -replace '__INSTALL_MUMBLE__',          $Script:INSTALL_MUMBLE `
+            -replace '__VOICE_ENABLED__',           $Script:VOICE_ENABLED `
             -replace '__MESH_SSID__',               $Script:MESH_SSID `
             -replace '__MESH_SAE_KEY__',            $Script:MESH_SAE_KEY `
             -replace '__LAN_CIDR_BLOCK__',          $Script:LAN_CIDR_BLOCK `
@@ -1146,6 +1162,7 @@ WantedBy=multi-user.target
         -replace '__MAX_EUDS_PER_NODE__',       $Script:MAX_EUDS_PER_NODE `
         -replace '__INSTALL_MEDIAMTX__',        $Script:INSTALL_MEDIAMTX `
         -replace '__INSTALL_MUMBLE__',          $Script:INSTALL_MUMBLE `
+        -replace '__VOICE_ENABLED__',           $Script:VOICE_ENABLED `
         -replace '__MESH_SSID__',               $Script:MESH_SSID `
         -replace '__MESH_SAE_KEY__',            $Script:MESH_SAE_KEY `
         -replace '__LAN_CIDR_BLOCK__',          $Script:LAN_CIDR_BLOCK `

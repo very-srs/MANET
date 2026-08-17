@@ -97,7 +97,8 @@ for unit in \
     manet-txpower.service \
     mesh-default-route-fix.service \
     sae-watchdog.service \
-    ebtables-restore.service
+    ebtables-restore.service \
+    mesh-voice.service
 do
     if [ -f "$STAGE/etc/systemd/system/$unit" ]; then
         ln -s "../$unit" "$STAGE/etc/systemd/system/multi-user.target.wants/$unit"
