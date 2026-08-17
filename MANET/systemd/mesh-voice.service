@@ -1,0 +1,33 @@
+[Unit]
+Description=Mesh push-to-talk voice — Opus/RTP over multicast
+# br0 must exist and hold an address before the send socket can be bound to
+# it, and the multicast group is joined on it. batman-enslave brings the mesh
+# side of that bridge up.
+#
+# Ordering only — deliberately no Wants=/Requires= on batman-enslave. This unit
+# is enabled on every node by the install tarball, so a Wants= would pull
+# batman-enslave in at boot everywhere, including on a node where someone had
+# disabled it on purpose. Voice must not be able to start the mesh.
+After=network-online.target batman-enslave.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /usr/local/bin/mesh-voice.py
+# voice=n in /etc/mesh.conf makes the daemon exit 0 immediately, so an
+# always-restart would spin. on-failure leaves a disabled node quiet.
+Restart=on-failure
+RestartSec=10
+# `systemctl reload mesh-voice` re-reads mesh.conf and changes talk group in
+# place. The web UI uses this rather than restart so that changing channel does
+# not tear down the audio path (and, with lyra, reload the TFLite models).
+ExecReload=/bin/kill -HUP $MAINPID
+TimeoutStopSec=5
+StandardOutput=journal
+StandardError=journal
+
+# The PTT button is read from /dev/hidraw*, and audio from the OpenVLM's ALSA
+# card. Both need the device nodes; the udev rule grants group access.
+SupplementaryGroups=audio plugdev
+
+[Install]
+WantedBy=multi-user.target
