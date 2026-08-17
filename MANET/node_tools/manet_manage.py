@@ -33,6 +33,7 @@ import socketserver
 import json
 import subprocess
 import re
+import stat
 import os
 import time
 import threading
@@ -1606,7 +1607,7 @@ const MANAGE_BASE = (() => {
 // text "Not found" — and the caller dies in JSON.parse rather than saying so.
 function U(path) { return MANAGE_BASE + path; }
 
-const VALID_TABS = ['topology','radio','measure','sessions','uplink', 'config'];
+const VALID_TABS = ['topology','radio','measure','sessions','uplink','voice','config'];
 const AUTO_REFRESH_MS = 15000;
 const THEME_KEY = 'manetUiTheme';
 
@@ -1943,6 +1944,7 @@ function showTab(name, updateUrl = true) {
   if (name === 'radio') buildIfaceControl();
   if (name === 'uplink') loadUsbWifiUplink();
   if (name === 'config') startConfigPolling(); else stopConfigPolling();
+  if (name === 'voice') startVoicePolling(); else stopVoicePolling();
 }
 
 // ── Clock ──
@@ -2446,6 +2448,479 @@ document.addEventListener('visibilitychange', () => {
 # Held as plain strings and substituted into the dashboard template, rather
 # than written inline: the template is an f-string, and CSS/JS braces would
 # have to be doubled throughout if this lived inside it.
+
+VOICE_TAB_CSS = r"""
+.voice-wrap { padding: 20px 24px; display: grid; gap: 18px;
+              grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }
+.voice-card { border: 1px solid var(--border); background: var(--card, #fff); }
+.voice-card-hdr { font-size: 11px; color: var(--muted); font-weight: 800;
+                  padding: 10px 14px; border-bottom: 1px solid var(--border); }
+.voice-card-body { padding: 14px; }
+.voice-row { display: flex; justify-content: space-between; align-items: center;
+             padding: 7px 0; border-bottom: 1px solid var(--border); font-size: 12px; }
+.voice-row:last-child { border-bottom: 0; }
+.voice-row .k { color: var(--muted); }
+.voice-row .v { font-variant-numeric: tabular-nums; }
+.voice-dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%;
+             background: #bbb; margin-right: 7px; vertical-align: middle; }
+.voice-dot.on { background: #2e9e4f; }
+.voice-dot.tx { background: #d9534f; }
+.voice-dot.rx { background: #2f6fd0; }
+.voice-dot.warn { background: #d1a000; }
+/* The PTT indicator is the one thing an operator glances at, so it is big. */
+.voice-ptt { text-align: center; padding: 18px 0; }
+.voice-ptt-ring { width: 84px; height: 84px; border-radius: 50%; margin: 0 auto 10px;
+                  border: 3px solid var(--border); background: #f2f2f2; }
+.voice-ptt.tx .voice-ptt-ring { border-color: #d9534f; background: #ffe9e8; }
+.voice-ptt.rx .voice-ptt-ring { border-color: #2f6fd0; background: #e8f0ff; }
+.voice-ptt-label { font-size: 12px; font-weight: 800; letter-spacing: .04em; }
+.voice-peers { width: 100%; border-collapse: collapse; font-size: 12px; }
+.voice-peers th { text-align: left; color: var(--muted); font-weight: 700;
+                  padding: 5px 6px; border-bottom: 1px solid var(--border); }
+.voice-peers td { padding: 5px 6px; border-bottom: 1px solid var(--border);
+                  font-variant-numeric: tabular-nums; }
+.voice-empty { color: var(--muted); font-size: 12px; padding: 10px 0; }
+.voice-note { color: var(--muted); font-size: 11px; padding: 10px 14px 0; }
+
+/* Talk group picker. Sized for a thumb on an EUD screen rather than a mouse:
+   44px is the smallest touch target that is reliably hittable, and the stepper
+   mirrors the rotary switch on the enclosure so both feel like the same
+   control. */
+.voice-tg-stepper { display: flex; align-items: center; justify-content: center;
+                    gap: 18px; padding: 4px 0 14px; }
+.voice-tg-step { width: 56px; height: 56px; font-size: 28px; line-height: 1;
+                 border: 1px solid var(--border); background: var(--card, #fff);
+                 color: inherit; border-radius: 8px; cursor: pointer;
+                 -webkit-tap-highlight-color: transparent; }
+.voice-tg-step:active { background: var(--border); }
+.voice-tg-step:disabled { opacity: .35; cursor: default; }
+.voice-tg-now { min-width: 84px; text-align: center; font-size: 40px;
+                font-weight: 800; font-variant-numeric: tabular-nums; }
+.voice-tg-grid { display: grid; gap: 6px;
+                 grid-template-columns: repeat(8, minmax(0, 1fr)); }
+.voice-tg-cell { height: 44px; font-size: 13px; border: 1px solid var(--border);
+                 background: var(--card, #fff); color: inherit; border-radius: 6px;
+                 cursor: pointer; -webkit-tap-highlight-color: transparent;
+                 font-variant-numeric: tabular-nums; }
+.voice-tg-cell.sel { background: #2f6f3e; border-color: #2f6f3e; color: #fff;
+                     font-weight: 800; }
+.voice-tg-msg { min-height: 16px; font-size: 11px; padding-top: 10px;
+                color: var(--muted); }
+.voice-tg-msg.err { color: #b3261e; }
+@media (max-width: 420px) {
+  .voice-tg-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+}
+"""
+
+VOICE_TAB_HTML = r"""
+<div class="voice-wrap">
+
+  <div class="voice-card">
+    <div class="voice-card-hdr">PUSH TO TALK</div>
+    <div class="voice-card-body">
+      <div class="voice-ptt" id="voice-ptt">
+        <div class="voice-ptt-ring"></div>
+        <div class="voice-ptt-label" id="voice-ptt-label">--</div>
+      </div>
+      <div class="voice-row"><span class="k">PTT hardware</span>
+        <span class="v"><span class="voice-dot" id="voice-hw-dot"></span><span id="voice-hw">--</span></span></div>
+      <div class="voice-row"><span class="k">PTT mode</span><span class="v" id="voice-mode">--</span></div>
+      <div class="voice-row"><span class="k">Device</span><span class="v" id="voice-dev">--</span></div>
+    </div>
+  </div>
+
+  <div class="voice-card">
+    <div class="voice-card-hdr">SERVICE</div>
+    <div class="voice-card-body">
+      <div class="voice-row"><span class="k">State</span>
+        <span class="v"><span class="voice-dot" id="voice-svc-dot"></span><span id="voice-svc">--</span></span></div>
+      <div class="voice-row"><span class="k">Uptime</span><span class="v" id="voice-uptime">--</span></div>
+      <div class="voice-row"><span class="k">Talk group</span><span class="v" id="voice-group">--</span></div>
+      <div class="voice-row"><span class="k">Interface</span><span class="v" id="voice-iface">--</span></div>
+      <div class="voice-row"><span class="k">Codec</span><span class="v" id="voice-codec">--</span></div>
+      <div class="voice-row"><span class="k">QoS</span><span class="v" id="voice-qos">--</span></div>
+    </div>
+  </div>
+
+  <div class="voice-card">
+    <div class="voice-card-hdr">TALK GROUP</div>
+    <div class="voice-card-body">
+      <div class="voice-tg-stepper">
+        <button class="voice-tg-step" id="voice-tg-down" onclick="voiceStepChannel(-1)"
+                aria-label="Previous talk group">&minus;</button>
+        <div class="voice-tg-now"><span id="voice-tg-cur">--</span></div>
+        <button class="voice-tg-step" id="voice-tg-up" onclick="voiceStepChannel(1)"
+                aria-label="Next talk group">+</button>
+      </div>
+      <div class="voice-tg-grid" id="voice-tg-grid"></div>
+      <div class="voice-tg-msg" id="voice-tg-msg"></div>
+    </div>
+    <div class="voice-note">Talk group is this radio only — it is not pushed to
+      the mesh. Every group shares one multicast address and differs by port, so
+      changing it never causes an IGMP leave/join.</div>
+  </div>
+
+  <div class="voice-card">
+    <div class="voice-card-hdr">TRAFFIC</div>
+    <div class="voice-card-body">
+      <div class="voice-row"><span class="k">Sent</span><span class="v" id="voice-tx">--</span></div>
+      <div class="voice-row"><span class="k">Received</span><span class="v" id="voice-rx">--</span></div>
+      <div class="voice-row"><span class="k">Lost</span><span class="v" id="voice-lost">--</span></div>
+      <div class="voice-row"><span class="k">Late</span><span class="v" id="voice-late">--</span></div>
+      <div class="voice-row"><span class="k">Duplicates</span><span class="v" id="voice-dup">--</span></div>
+    </div>
+    <div class="voice-note">Lost counts frames the jitter buffer never saw.
+      Duplicates are expected when unicast redundancy is on — each is a
+      multicast copy that also arrived by unicast.</div>
+  </div>
+
+  <div class="voice-card">
+    <div class="voice-card-hdr">UNICAST REDUNDANCY</div>
+    <div class="voice-card-body">
+      <div class="voice-row"><span class="k">Enabled</span>
+        <span class="v"><span class="voice-dot" id="voice-uni-dot"></span><span id="voice-uni">--</span></span></div>
+      <div id="voice-peer-wrap"></div>
+    </div>
+    <div class="voice-note">Peers come from the Alfred node registry, so a node
+      that has never transmitted still receives a unicast copy.</div>
+  </div>
+
+</div>
+"""
+
+VOICE_TAB_JS = r"""
+// ── VOICE tab ───────────────────────────────────────────────────────────────
+// Read-only. Voice is carried by mesh-voice.py over multicast RTP with a
+// headset PTT on the node itself; nothing here touches audio. Polls only while
+// the tab is visible.
+const VOICE_POLL_MS = 2000;
+let voicePollTimer = null;
+
+function startVoicePolling() {
+  if (voicePollTimer) return;
+  refreshVoice();
+  voicePollTimer = setInterval(refreshVoice, VOICE_POLL_MS);
+}
+function stopVoicePolling() {
+  clearInterval(voicePollTimer);
+  voicePollTimer = null;
+}
+
+function vTxt(id, val) {
+  const el = document.getElementById(id);
+  if (el) el.textContent = (val === undefined || val === null || val === '') ? '--' : val;
+}
+function vDot(id, cls) {
+  const el = document.getElementById(id);
+  if (el) el.className = 'voice-dot' + (cls ? ' ' + cls : '');
+}
+function vDuration(sec) {
+  if (!sec && sec !== 0) return '--';
+  const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
+  return h ? (h + 'h ' + m + 'm') : (m ? (m + 'm ' + s + 's') : (s + 's'));
+}
+
+const VOICE_TG_MAX = 32;
+let voiceChannel  = null;   // last channel the daemon reported
+let voiceTgBusy   = false;  // suppress polling clobber while a change is in flight
+
+function voiceTgBuildGrid() {
+  const g = document.getElementById('voice-tg-grid');
+  if (!g || g.childElementCount) return;          // build once
+  for (let n = 1; n <= VOICE_TG_MAX; n++) {
+    const b = document.createElement('button');
+    b.className = 'voice-tg-cell';
+    b.textContent = n;
+    b.dataset.ch = n;
+    b.onclick = () => voiceSetChannel(n);
+    g.appendChild(b);
+  }
+}
+
+function voiceTgPaint(ch) {
+  const cur = document.getElementById('voice-tg-cur');
+  if (cur) cur.textContent = (ch === null || ch === undefined) ? '--' : ch;
+  document.querySelectorAll('.voice-tg-cell').forEach(b => {
+    b.classList.toggle('sel', Number(b.dataset.ch) === ch);
+  });
+  const dn = document.getElementById('voice-tg-down');
+  const up = document.getElementById('voice-tg-up');
+  if (dn) dn.disabled = voiceTgBusy || !ch || ch <= 1;
+  if (up) up.disabled = voiceTgBusy || !ch || ch >= VOICE_TG_MAX;
+}
+
+function voiceTgMsg(text, isErr) {
+  const m = document.getElementById('voice-tg-msg');
+  if (!m) return;
+  m.textContent = text || '';
+  m.className = 'voice-tg-msg' + (isErr ? ' err' : '');
+}
+
+function voiceStepChannel(delta) {
+  if (voiceChannel === null) return;
+  const n = voiceChannel + delta;
+  if (n >= 1 && n <= VOICE_TG_MAX) voiceSetChannel(n);
+}
+
+async function voiceSetChannel(ch) {
+  if (voiceTgBusy || ch === voiceChannel) return;
+  voiceTgBusy = true;
+  // Paint the target immediately. The daemon takes a moment to retune and the
+  // 2 s poll would otherwise snap the number back to the old group and make
+  // the button feel broken.
+  voiceChannel = ch;
+  voiceTgPaint(ch);
+  voiceTgMsg('Switching to talk group ' + ch + '…');
+  try {
+    const r = await fetch(U('/api/voice/channel'), {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({channel: ch})
+    });
+    const j = await r.json();
+    if (j.ok) {
+      voiceTgMsg(j.reloaded ? ('Talk group ' + j.channel)
+                            : ('Talk group ' + j.channel + ' — saved; applies when voice starts'));
+    } else {
+      voiceTgMsg(j.error || 'Change failed', true);
+      voiceChannel = null;            // force the next poll to resync
+    }
+  } catch (e) {
+    voiceTgMsg('Change failed: ' + e, true);
+    voiceChannel = null;
+  } finally {
+    voiceTgBusy = false;
+    voiceTgPaint(voiceChannel);
+  }
+}
+
+async function refreshVoice() {
+  let d;
+  try {
+    const r = await fetch(U('/api/voice'));
+    if (!r.ok) return;
+    d = await r.json();
+  } catch (e) { return; }
+
+  const running = d.service === 'running';
+
+  vDot('voice-svc-dot', running ? 'on' : '');
+  vTxt('voice-svc', running ? 'Running' : (d.stale ? 'Stopped (stale state)' : 'Stopped'));
+  vTxt('voice-uptime', running ? vDuration(d.uptime) : '--');
+  vTxt('voice-group', d.group ? (d.group + ':' + d.port + '  (ch ' + d.channel + ')') : '--');
+
+  voiceTgBuildGrid();
+  // Do not let a poll land on top of a change the operator just made.
+  if (!voiceTgBusy) {
+    if (d.channel) voiceChannel = d.channel;
+    voiceTgPaint(voiceChannel);
+  }
+  vTxt('voice-iface', d.interface);
+  // Lyra adapts packing at runtime, so show frames/packet alongside the rate —
+  // it is the number that actually moves, and the one that explains the
+  // on-air cost. Opus keeps a fixed frame size and has none to show.
+  vTxt('voice-codec', d.bitrate
+        ? ((d.codec === 'lyra' ? 'Lyra ' : 'Opus ')
+           + (d.bitrate / 1000).toFixed(d.codec === 'lyra' ? 1 : 0) + ' kbps / '
+           + (d.frame_ms || 20) + ' ms'
+           + (d.frames_per_packet ? ' (' + d.frames_per_packet + ' fr/pkt)' : ''))
+        : '--');
+  vTxt('voice-qos', (d.dscp !== undefined && d.dscp !== null)
+        ? ('DSCP ' + d.dscp + (d.dscp === 46 ? ' (EF)' : '')) : '--');
+
+  // PTT
+  const ptt = document.getElementById('voice-ptt');
+  let label = 'SERVICE OFF';
+  let cls = '';
+  if (running) {
+    if (d.tx)       { label = 'TRANSMITTING'; cls = 'tx'; }
+    else if (d.rx)  { label = 'RECEIVING';    cls = 'rx'; }
+    else if (d.ptt_connected) label = 'IDLE';
+    else            label = 'NO PTT HARDWARE';
+  }
+  if (ptt) ptt.className = 'voice-ptt' + (cls ? ' ' + cls : '');
+  vTxt('voice-ptt-label', label);
+
+  const hwOk = !!d.ptt_connected;
+  vDot('voice-hw-dot', running ? (hwOk ? 'on' : 'warn') : '');
+  vTxt('voice-hw', !running ? '--' : (hwOk ? 'Connected' : 'Not detected'));
+  vTxt('voice-mode', d.ptt_mode);
+  vTxt('voice-dev', d.ptt_device);
+
+  vTxt('voice-tx', d.tx_packets);
+  vTxt('voice-rx', d.rx_packets);
+  vTxt('voice-lost', (d.rx_loss_pct !== undefined && d.rx_loss_pct !== null)
+        ? (d.rx_lost + '  (' + d.rx_loss_pct + '%)') : d.rx_lost);
+  vTxt('voice-late', d.rx_late);
+  vTxt('voice-dup', d.rx_duplicates);
+
+  vDot('voice-uni-dot', d.unicast ? 'on' : '');
+  vTxt('voice-uni', d.unicast === undefined ? '--' : (d.unicast ? 'Yes' : 'No'));
+
+  const wrap = document.getElementById('voice-peer-wrap');
+  if (!wrap) return;
+  const peers = d.peers || [];
+  wrap.textContent = '';
+
+  if (!d.unicast || !peers.length) {
+    const msg = document.createElement('div');
+    msg.className = 'voice-empty';
+    msg.textContent = !d.unicast ? 'Multicast only.'
+                                 : 'No active peers in the registry.';
+    wrap.appendChild(msg);
+    return;
+  }
+
+  // Hostnames arrive from other nodes over Alfred, so they are built as text
+  // nodes rather than concatenated into innerHTML.
+  const table = document.createElement('table');
+  table.className = 'voice-peers';
+  const head = table.insertRow();
+  ['Node', 'Address'].forEach(t => {
+    const th = document.createElement('th');
+    th.textContent = t;
+    head.appendChild(th);
+  });
+  peers.forEach(p => {
+    const row = table.insertRow();
+    row.insertCell().textContent = p.hostname || '(unknown)';
+    row.insertCell().textContent = p.ip || '';
+  });
+  wrap.appendChild(table);
+}
+"""
+
+VOICE_STATE_FILE = '/run/mesh-voice.json'
+
+
+VOICE_CHANNEL_MAX = 32
+
+
+def set_voice_channel(channel):
+    """Move this node to a talk group.
+
+    Local only, and deliberately so: a talk group is a per-radio setting like
+    the channel knob on a handheld, not a fleet-wide one. This is why it does
+    not go through coordinate_radio_change() the way the HaLow and Wi-Fi
+    channel changes do — every operator picks their own group.
+
+    mesh.conf holds mesh_key and admin_password, so the rewrite is careful:
+    only the one key is touched, every other line is passed through byte for
+    byte, the mode and ownership of the original are carried over, and the
+    replacement is put in place with an atomic rename so a crash mid-write
+    cannot leave a node with a truncated config and no way back in.
+    """
+    try:
+        channel = int(channel)
+    except (TypeError, ValueError):
+        return {'ok': False, 'error': 'Talk group must be a number'}
+    if not 1 <= channel <= VOICE_CHANNEL_MAX:
+        return {'ok': False, 'error': 'Talk group must be 1-%d' % VOICE_CHANNEL_MAX}
+
+    try:
+        with open(MESH_CONF_FILE) as f:
+            lines = f.readlines()
+    except OSError as e:
+        return {'ok': False, 'error': 'Cannot read %s: %s' % (MESH_CONF_FILE, e)}
+
+    out, replaced = [], False
+    for line in lines:
+        if line.split('=', 1)[0].strip() == 'voice_channel':
+            if not replaced:
+                out.append('voice_channel=%d\n' % channel)
+                replaced = True
+            continue          # drop any duplicate keys rather than stack them
+        out.append(line)
+    if not replaced:
+        if out and not out[-1].endswith('\n'):
+            out[-1] += '\n'
+        out.append('voice_channel=%d\n' % channel)
+
+    tmp = MESH_CONF_FILE + '.tmp'
+    try:
+        st = os.stat(MESH_CONF_FILE)
+        with open(tmp, 'w') as f:
+            f.writelines(out)
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp, stat.S_IMODE(st.st_mode))
+        try:
+            os.chown(tmp, st.st_uid, st.st_gid)
+        except PermissionError:
+            pass              # not root: mode still carried, ownership stays ours
+        os.replace(tmp, MESH_CONF_FILE)
+    except OSError as e:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        return {'ok': False, 'error': 'Cannot write %s: %s' % (MESH_CONF_FILE, e)}
+
+    # reload, not restart: mesh-voice retunes in place on SIGHUP, which keeps
+    # the audio path up. Not fatal if it fails — the config is already correct,
+    # so the change takes effect at the next start either way.
+    reloaded = False
+    try:
+        rc = subprocess.run(['systemctl', 'reload', 'mesh-voice'],
+                            timeout=10, stderr=subprocess.DEVNULL)
+        reloaded = rc.returncode == 0
+    except Exception:
+        pass
+
+    return {'ok': True, 'channel': channel, 'reloaded': reloaded}
+
+
+def voice_status():
+    """Voice state for the VOICE tab.
+
+    Everything comes from the state file mesh-voice.py publishes plus the unit
+    state — this node never asks a peer anything, and the daemon is the only
+    thing that touches the audio path.
+    """
+    out = {'service': 'stopped', 'enabled': False, 'state_age': None}
+
+    # Talk group comes from mesh.conf first so the picker still shows the
+    # configured group when the daemon is not running — with voice=n there is
+    # no state file at all, and a picker stuck on "--" would look broken.
+    # A running daemon overwrites this below with what it actually tuned.
+    conf = load_kv_file(MESH_CONF_FILE)
+    out['voice_configured'] = conf.get('voice', 'n').strip().lower() in (
+        'y', 'yes', 'true', '1', 'on')
+    try:
+        ch = int(conf.get('voice_channel', 1))
+        out['channel'] = ch if 1 <= ch <= VOICE_CHANNEL_MAX else 1
+    except (TypeError, ValueError):
+        out['channel'] = 1
+
+    try:
+        rc = subprocess.run(['systemctl', 'is-active', '--quiet', 'mesh-voice'],
+                            timeout=3, stderr=subprocess.DEVNULL)
+        out['service'] = 'running' if rc.returncode == 0 else 'stopped'
+    except Exception:
+        pass
+    try:
+        rc = subprocess.run(['systemctl', 'is-enabled', '--quiet', 'mesh-voice'],
+                            timeout=3, stderr=subprocess.DEVNULL)
+        out['enabled'] = rc.returncode == 0
+    except Exception:
+        pass
+
+    try:
+        with open(VOICE_STATE_FILE) as f:
+            state = json.load(f)
+        # A stale file means the daemon died without cleaning up; do not let it
+        # masquerade as live state.
+        age = time.time() - state.get('updated', 0)
+        if age < 30:
+            out.update(state)
+            out['state_age'] = int(age)
+        else:
+            out['service'] = 'stopped'
+            out['stale'] = True
+    except (OSError, ValueError):
+        pass
+    return out
+
 
 CONFIG_TAB_CSS = r"""
 
@@ -2981,7 +3456,7 @@ def render_dashboard():
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>MANET // MANAGE</title>
-<style>{CSS}{CONFIG_TAB_CSS}
+<style>{CSS}{CONFIG_TAB_CSS}{VOICE_TAB_CSS}
 </style>
 </head><body>
 
@@ -3013,6 +3488,7 @@ def render_dashboard():
   <div class="tab"        data-tab="measure"    onclick="showTab('measure')">MEASURE</div>
   <div class="tab"        data-tab="sessions"   onclick="showTab('sessions')">SESSIONS</div>
   <div class="tab"        data-tab="uplink"     onclick="showTab('uplink')">UPLINK</div>
+  <div class="tab"        data-tab="voice"      onclick="showTab('voice')">VOICE</div>
   <div class="tab"        data-tab="config"     onclick="showTab('config')">NODE CONFIG</div>
 </div>
 
@@ -3226,6 +3702,9 @@ def render_dashboard():
   <!-- The old /admin page. Same staging/ACK/apply flow, now behind the same
        password as everything else here rather than open on port 80. -->
   <div id="tab-config" class="tab-pane" style="display:none">
+<!-- ── VOICE ── -->
+  <div id="tab-voice" class="tab-pane" style="display:none">{VOICE_TAB_HTML}</div>
+
 {CONFIG_TAB_HTML}
   </div>
 
@@ -3236,7 +3715,8 @@ def render_dashboard():
 </div><!-- #page -->
 
 <script>{JS}
-{CONFIG_TAB_JS}</script>
+{CONFIG_TAB_JS}
+{VOICE_TAB_JS}</script>
 </body></html>"""
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -3306,6 +3786,12 @@ class ManageRoutes:
         elif path == '/api/uplink/wifi':
             self.send_json(get_usb_wifi_uplink_status())
 
+        elif path == '/api/voice':
+            try:
+                self.send_json(voice_status())
+            except Exception as e:
+                self.send_json({'error': str(e)}, 500)
+
         elif path == '/api/sessions':
             self.send_json(list_sessions())
 
@@ -3355,6 +3841,14 @@ class ManageRoutes:
                 iface    = req.get('iface', '')
                 state    = req.get('state', '')
                 self.send_json(coordinate_radio_toggle(node_ip, iface, state))
+            except Exception as e:
+                self.send_json({'ok': False, 'error': str(e)})
+
+        elif path == '/api/voice/channel':
+            # Local only — a talk group is this radio's setting, not the mesh's.
+            try:
+                req = json.loads(body)
+                self.send_json(set_voice_channel(req.get('channel')))
             except Exception as e:
                 self.send_json({'ok': False, 'error': str(e)})
 
