@@ -2539,6 +2539,7 @@ VOICE_TAB_HTML = r"""
       <div class="voice-row"><span class="k">Interface</span><span class="v" id="voice-iface">--</span></div>
       <div class="voice-row"><span class="k">Codec</span><span class="v" id="voice-codec">--</span></div>
       <div class="voice-row"><span class="k">QoS</span><span class="v" id="voice-qos">--</span></div>
+      <div class="voice-row"><span class="k">Talkers heard</span><span class="v" id="voice-talkers">--</span></div>
     </div>
   </div>
 
@@ -2727,6 +2728,10 @@ async function refreshVoice() {
         : '--');
   vTxt('voice-qos', (d.dscp !== undefined && d.dscp !== null)
         ? ('DSCP ' + d.dscp + (d.dscp === 46 ? ' (EF)' : '')) : '--');
+  // Receive is conference style: one decode branch per talker, all mixed. This
+  // is the count of streams currently being decoded, not a peer count.
+  vTxt('voice-talkers', (d.talkers === undefined || d.talkers === null)
+        ? '--' : (d.talkers + (d.talkers === 1 ? ' stream' : ' streams')));
 
   // PTT
   const ptt = document.getElementById('voice-ptt');
