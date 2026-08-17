@@ -132,31 +132,48 @@ If yes, a MediaMTX streaming server will be elected to run somewhere on the mesh
 
 If yes, a Mumble voice server will be available on the mesh at the address ending in `.3` (e.g. `10.30.1.3`). Note: Mumble integration is currently untested.
 
-### 4. Mesh SSID
+### 4. Enable mesh PTT voice?
+
+Push-to-talk voice over the mesh, using a headset and PTT switch plugged into
+the node itself — not a browser. Defaults to **no**, because it needs an
+OpenVLM (C-Media CM108B) board fitted for the mic amp and PTT switch; a node
+without one would run the daemon to no purpose.
+
+**Talk group is not asked here.** Every node is flashed on group 1, and the
+operator changes it from the VOICE tab of the web UI — it is a per-radio
+setting like the channel knob on a handheld, not a fleet-build decision, and
+baking it into the image would mean reflashing to change channel.
+
+This writes `voice=` and `voice_channel=1` to `/etc/mesh.conf`.
+`mesh-voice.service` is enabled on every node regardless, but exits immediately
+unless `voice=y` — so answering no here costs nothing, and turning voice on
+later is a `mesh.conf` edit plus `systemctl start mesh-voice`.
+
+### 5. Mesh SSID
 
 The SSID all nodes use to form the MANET mesh.
 
-### 5. Mesh SAE Key
+### 6. Mesh SAE Key
 
 The WPA3-SAE encryption key for the mesh. A key will be generated automatically if you leave this blank (recommended).
 
-### 6. Network CIDR Block
+### 7. Network CIDR Block
 
 The IPv4 network range for the mesh (e.g. `10.30.1.0/24`). Node addresses, EUD DHCP ranges, and service addresses are all allocated from this block.
 
-### 7. Max EUDs per Node
+### 8. Max EUDs per Node
 
 The maximum number of end-user devices each node will serve. This controls DHCP pool sizing.
 
-### 8. Regulatory Domain
+### 9. Regulatory Domain
 
 Your country code for Wi-Fi regulatory compliance (e.g. `US`, `GB`, `AU`). A matching HaLow regulatory region is derived from this automatically — see **Radio Hardware** above for the EU band caveat (EU nodes need the USB MM8108).
 
-### 9. Auto Channel Selection
+### 10. Auto Channel Selection
 
 If enabled, nodes negotiate channel selection automatically. If disabled, a fixed channel is used.
 
-### 10. Passwords
+### 11. Passwords
 
 - **Radio user password** — SSH/login password for the `radio` account on the node.
 - **Admin password** — Gates the management UI at `http://<node>/manage`. Stored
