@@ -132,6 +132,212 @@ remote node arrives on `br0` exactly like one from a local EUD. Re-run by
 
 ---
 
+## Push-to-Talk Voice
+
+**mesh-voice.py**
+
+Half-duplex PTT voice across the mesh. Opus over RTP to a multicast group, with
+a headset PTT plugged into the node itself — there is no browser microphone and
+the web UI is a status readout only.
+
+The audio path is entirely GStreamer, so no Python code runs on the audio
+thread:
+
+```
+TX  alsasrc -> level -> valve -> opusenc -> rtpopuspay -> multiudpsink
+RX  udpsrc  -> rtpjitterbuffer -> rtpopusdepay -> opusdec -> alsasink
+```
+
+The daemon only supervises: it reads the PTT button, keeps the unicast peer
+list current, and publishes `/run/mesh-voice.json` for the UI.
+
+**Addressing.** Every talk group shares one multicast group (`239.192.41.1`)
+and differs only by port — channel *n* uses `38801 + (n-1)*2`, the stride being
+2 because `port+1` is that channel's RTCP. Sharing the group address means
+changing channel never causes an IGMP leave/join.
+
+**Unicast redundancy: off by default — batman-adv already does it.** With
+`multicast_forceflood` disabled (our configuration) and listeners at or below
+`multicast_fanout` (default 16), `batadv_mcast_forw_mode_by_count()` returns
+`BATADV_FORW_UCASTS` and emits **one unicast frame per listener**. Measured on
+the bench: 200 multicast packets produced exactly 200 unicast frames addressed
+to the peer's MAC on `wlan2`, with no broadcast frames above baseline, and the
+peer received all 200. Those frames already get 802.11 ACKs and retries, so a
+userspace unicast copy per peer would double airtime for no extra reliability.
+
+`voice_unicast=y` remains available for the two cases where it stops being
+redundant: more than `multicast_fanout` listeners, where batman-adv falls back
+to `BATADV_FORW_BCAST`; and any future configuration that enables
+`multicast_forceflood`. When enabled, `multiudpsink`'s `clients` property is
+rewritten live from the registry rather than from learned senders, because in a
+PTT system a node that has never transmitted is exactly the one that needs to
+hear you.
+
+**Receivers must join the group or nothing transmits.** The same optimisation
+means `batadv_mcast_forw_mode()` returns `BATADV_FORW_NONE` — dropping the
+packet at the *sender* — when no node has announced interest in the group. This
+was observed directly: multicast sent with no listener never reached the radio
+at all. `udpsrc` performs the IGMP join (`auto-multicast=true`), so this works
+in normal operation, but expect a brief window after start-up before joins
+propagate, and note that a sender with no listeners is silently idle rather
+than wasting air.
+
+**Talk group is per-radio and changed at runtime.** Every node is flashed on
+group 1; the operator moves it from the VOICE tab of the web UI, which writes
+`voice_channel` to `/etc/mesh.conf` and runs `systemctl reload mesh-voice`.
+This is deliberately *not* pushed across the mesh the way HaLow and Wi-Fi
+channel changes are — each operator picks their own group.
+
+Reload is a `SIGHUP`, and the daemon retunes in place rather than restarting:
+it drops both pipelines to `NULL`, rebuilds them on the new port and returns to
+`PLAYING`, holding the PTT valve open if the operator was mid-transmission.
+Only the talk group is re-read; codec, bitrate and audio devices are start-up
+settings, because rebuilding the audio path under someone's thumb on the PTT is
+a good way to lose a transmission mid-word. If the rebuild fails the daemon
+reverts to the previous group rather than leaving the node deaf.
+
+Retuning in place rather than restarting the unit is what makes a hardware
+channel selector practical — clicking through groups on a rotary switch would
+otherwise mean a systemd restart per detent, several seconds each, plus a
+TFLite model reload under lyra. Anything that can write `mesh.conf` and send
+`SIGHUP` drives this, so the web UI and a future panel switch share one path.
+
+**Adaptive packing: the lever is packet size, not codec bitrate.** With
+`voice_codec=lyra` the daemon adapts `frames-per-packet` to measured receive
+loss, and deliberately does *not* adapt bitrate. The reason is measured. On the
+HaLow link a batman-adv frame carrying one 20 ms Lyra frame is 101 bytes, of
+which 86 is header, so at 6 kbps the packet overhead dominates completely:
+
+| frames/packet | interval | on-air | a lost packet costs | listening test at 10 % loss |
+|---|---|---|---|---|
+| 1 | 20 ms | 40.4 kbps | 20 ms | clean |
+| 2 | 40 ms | 23.2 kbps | 40 ms | barely audible |
+| 3 | 60 ms | 17.5 kbps | 60 ms | audible glitches |
+| 4 | 80 ms | 14.6 kbps | 80 ms | unpleasant |
+
+Going 1 → 2 frames/packet takes **43 %** off the wire. Dropping the codec from
+6000 to 3200 bps takes **12 %** off (23.2 → 20.4 kbps at 40 ms) and is plainly
+audible. So bitrate stays fixed and packing moves.
+
+The direction is the counter-intuitive part: **under loss we packetise
+smaller.** A lost packet takes `frames-per-packet` frames with it, and the
+audibility knee sits exactly in this range, so the loss response spends airtime
+to keep each loss short enough for Lyra's concealment to hide. That is only
+safe while loss means fades rather than congestion — on a saturated link,
+offering more packets makes it worse — so the controller will not go below 2
+frames/packet when batman-adv's throughput estimate for the worst neighbour is
+under 2 Mbit/s.
+
+Loss above 5 % steps down immediately; recovery needs 30 s below 1 % per step,
+and anything in between holds position. Windows with fewer than 25 packets are
+ignored rather than treated as clean. The signal is our *own* receive loss —
+plain multicast RTP has no back channel — which half duplex makes a fair proxy,
+since it measures the same link in the other direction moments before keying
+up. An asymmetric link will fool it.
+
+No signalling is needed for any of this: Lyra frames are a fixed size per
+bitrate (8/15/23 bytes), so `rtplyradepay` recovers the packet geometry from
+the payload length alone and follows a mid-stream change with no renegotiation.
+Verified on hardware — switching 2 → 1 → 3 → 2 while playing produced 27/42/57
+byte payloads and 1001 frames decoded against 1000 sent.
+
+**PTT is USB, not GPIO.** The OpenVLM board is a C-Media CM108B; the switch
+lands on the *codec's* GPIO3 and is read from USB HID input reports on
+`/dev/hidraw*` — bit 2 of IR1, valid only when `IR0[7:6] == 0`. Bit 0 of IR1 is
+the strap that distinguishes a real OpenVLM from a generic CM108 dongle, and
+strapped devices are preferred when both are present. Hot-plug is handled by
+reopening; the daemon runs fine with no board fitted and picks one up when it
+appears.
+
+**QoS — use CS6 (48), not EF (46).** This is counter-intuitive and worth
+understanding before changing `voice_dscp`.
+
+Linux 6.12+ added an RFC 8325 mapping to `cfg80211_classify8021d()`
+(`net/wireless/util.c`) that sends DSCP 46/EF to 802.1d UP 6, i.e. WMM AC_VO.
+On 6.6 and older the naive `dscp >> 5` rule sent it to UP 5 / AC_VI. We ship
+6.18 everywhere, so on a plain wireless interface EF would be correct.
+
+**batman-adv never lets that code run.** `batadv_skb_set_priority()`
+(`net/batman-adv/main.c`) is called from `batadv_interface_tx()` for every
+packet entering `bat0` — locally originated included — and from both forwarding
+paths in `routing.c`. It stamps:
+
+```c
+if (skb->priority >= 256 && skb->priority <= 263) return;  /* already set */
+prio = (ipv4_get_dsfield(ip_hdr) & 0xfc) >> 5;             /* the OLD rule */
+skb->priority = prio + 256;
+```
+
+Values 256–263 are the 802.1d passthrough range, which `cfg80211_classify8021d()`
+checks **first** and returns directly as the UP — so the RFC 8325 DSCP code is
+never reached. The result is kernel-version independent:
+
+| DSCP | TOS | batman-adv priority | 802.11 UP | Access category |
+|---|---|---|---|---|
+| 46 (EF) | 0xB8 | 261 | 5 | AC_VI (video) |
+| **48 (CS6)** | **0xC0** | **262** | **6** | **AC_VO (voice)** |
+
+Hence the default of 48. The `return` guard also means an explicitly-set
+`SO_PRIORITY` in 256–263 survives batman-adv, which is how OpenMANET pins the
+access category — they set `IP_TOS` and `SO_PRIORITY` together, in that order,
+because the kernel rewrites `sk_priority` as a side effect of `IP_TOS`.
+GStreamer's `multiudpsink` exposes only `qos-dscp`, so we rely on batman-adv's
+derivation instead — which is why the DSCP value has to be chosen for what
+batman-adv will make of it. **Worth confirming on-air** with per-AC counters
+before trusting it.
+
+Multicast TTL is set explicitly to 32: the default of 1 silently black-holes
+voice one hop out.
+
+Multicast tuning is deliberately untouched — the mesh's arrangement is the way
+it is on purpose, and `multicast_forceflood` stays off, which is what leaves
+batman-adv's own multicast→unicast fanout available.
+
+**Bandwidth: headers dominate, not the codec.** Every packet carries 12 B RTP +
+8 UDP + 20 IP + 14 Ethernet = 54 B of overhead. At 20 ms framing that is 50
+packets/sec, so ~21.6 kbps is spent on headers no matter which codec is used.
+Measured on-wire cost:
+
+| Opus bitrate | 20 ms frames | 60 ms frames |
+|---|---|---|
+| 24 kbps | 45.6 kbps | 31.8 kbps |
+| 16 kbps | 37.6 kbps | **23.7 kbps** |
+| 12 kbps | 33.6 kbps | 19.6 kbps |
+| 8 kbps | 29.6 kbps | 15.5 kbps |
+
+Frame size is therefore the larger lever: 16 kbps at 60 ms costs less on air
+than 6 kbps at 20 ms (27.7 kbps) and sounds far better. The cost is latency —
+a 60 ms frame adds 60 ms — and coarser loss, since one dropped packet now takes
+60 ms of audio with it. The jitter buffer floor is raised to two frames
+automatically. For a PTT system where the multiplier is unicast redundancy
+rather than continuous full-duplex, 40–60 ms is usually the right trade.
+
+Config keys in `/etc/mesh.conf`:
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `voice` | `n` | Master enable; `n` makes the daemon exit 0 immediately |
+| `voice_iface` | `br0` | Interface for the multicast group and send socket |
+| `voice_channel` | `1` | Talk group, 1–32 |
+| `voice_ptt` | `openvlm` | `openvlm`, `always` (open mic), or anything else for receive-only |
+| `voice_unicast` | `n` | Userspace unicast copies — normally unnecessary, see above |
+| `voice_unicast_max_peers` | `16` | Cap on unicast copies |
+| `voice_half_duplex` | `y` | Refuse PTT while a remote node is transmitting |
+| `voice_dscp` | `48` | DSCP marking — CS6, see the QoS note above |
+| `voice_codec` | `opus` | `opus` or `lyra`; lyra falls back to opus if the plugin or model weights are missing |
+| `voice_bitrate` | `32000` | Opus bitrate |
+| `voice_frame_ms` | `20` | Opus frame duration: 10, 20, 40 or 60 |
+| `voice_lyra_bitrate` | `6000` | Lyra rate: 3200, 6000 or 9200 only |
+| `voice_lyra_frames_per_packet` | `2` | Starting packing; adapts at runtime, see below |
+| `voice_lyra_model` | `/usr/local/share/lyra/model_coeffs` | Lyra model weights |
+| `voice_jitter_ms` | `100` | Jitter buffer depth |
+| `voice_loss_pct` | `20` | Opus in-band FEC expected-loss level |
+| `voice_ttl` | `32` | Multicast TTL |
+| `voice_alsa_in` / `voice_alsa_out` | auto | Override ALSA devices; empty autodetects the OpenVLM card |
+| `voice_test_tone` | `n` | Bench mode: 440 Hz tone in, null sink out, so the transport can be proven with no audio hardware fitted |
+
+---
+
 ## Service Elections
 
 All service elections share the same algorithm: the best-connected node wins,
