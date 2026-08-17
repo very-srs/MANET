@@ -260,6 +260,10 @@ class Config:
         # someone degrades gracefully instead of corrupting the stream.
         # Etiquette is left to the operators, like any conference bridge.
         self.half_duplex = conf_bool(conf, "voice_half_duplex", False)
+        # Decode branches kept warm. ~5.3 MB each with lyra (measured on a
+        # CM4), so 8 is ~40 MB. Raise it if a talk group routinely has more
+        # than 8 active speakers and you want them all warm.
+        self.max_talkers = conf_int(conf, "voice_max_talkers", 8, 1, 32)
         self.ptt_mode = conf.get("voice_ptt", "openvlm").strip().lower()
         # Empty means autodetect the OpenVLM card.
         self.alsa_in = conf.get("voice_alsa_in", "").strip()
@@ -662,16 +666,37 @@ class MeshVoice:
         # starved, and every transmission would start with the DAC spinning up.
         # A permanent silent input keeps the mixer and alsasink running so
         # speech starts cleanly.
+        #
+        # autoremove=false is deliberate and load-bearing (it is also rtpbin's
+        # own default; an earlier revision set it true and that was the bug).
+        # Reaping an idle talker means the next thing they say rebuilds the
+        # branch, and a rebuilt branch loses the head of the transmission.
+        # Measured on a CM4 with lyra, 3.00 s bursts:
+        #
+        #     branch rebuilt on demand   2.82 s arrived  (180 ms lost)
+        #     branch pre-built, attached 2.92 s arrived  ( 80 ms lost)
+        #     talker already established 3.04 s arrived  (nothing lost)
+        #
+        # Only a source rtpbin has seen before costs nothing, so the branches
+        # stay. Blocking the pad, lowering probation and raising the mixer's
+        # min-upstream-latency were all tried and none of them helped; the
+        # residual is rtpbin establishing a new source, not our linking.
+        #
+        # ignore-inactive-pads is then required rather than optional: branches
+        # that are kept are silent between transmissions, and without it the
+        # mixer would sit waiting on them.
         self.rx_branches = {}
         self.jitterbuffers = {}
+        self.branch_seen = {}
         rx_desc = (
-            "rtpbin name=rtpbin latency={jitter} do-lost=true autoremove=true "
+            "rtpbin name=rtpbin latency={jitter} do-lost=true autoremove=false "
             "udpsrc name=src address={group} port={port} "
             "  multicast-iface={iface} auto-multicast=true buffer-size=1048576 "
             "  caps=\"application/x-rtp,media=(string)audio,"
             "clock-rate=(int){rate},encoding-name=(string){encoding},"
             "payload=(int){pt}\" ! rtpbin.recv_rtp_sink_0 "
-            "audiomixer name=mix ! audioconvert ! audioresample ! {play} "
+            "audiomixer name=mix ignore-inactive-pads=true ! "
+            "  audioconvert ! audioresample ! {play} "
             "audiotestsrc name=silence wave=silence is-live=true ! "
             "  audio/x-raw,rate={arate},channels=1,format=S16LE ! mix. "
         ).format(group=TALK_GROUP_ADDR, port=self.cfg.port,
@@ -964,7 +989,40 @@ class MeshVoice:
 
         depay.sync_state_with_parent()
         self.rx_branches[name] = (depay, mixpad)
+        self.branch_seen[name] = time.time()
+        # Touch on every decoded buffer so the LRU below evicts the talker who
+        # has been quiet longest, not whoever happened to arrive first.
+        depay.get_static_pad("src").add_probe(
+            Gst.PadProbeType.BUFFER,
+            lambda _p, _i, n=name: (self.branch_seen.__setitem__(n, time.time()),
+                                    Gst.PadProbeReturn.OK)[1])
         log("rx: talker branch up (%d active)" % len(self.rx_branches))
+        self._prune_branches()
+
+    def _prune_branches(self):
+        """Keep at most VOICE_MAX_TALKERS branches, dropping the quietest.
+
+        Branches are never reaped on idle (see the pipeline comment), so the
+        only bound is this one. Each costs about 5.3 MB with lyra, measured, so
+        the default cap is roughly 40 MB against 3.4 GB free — the cap exists to
+        stop unbounded growth when nodes churn SSRCs across restarts and
+        retunes, not because the memory is scarce.
+
+        Evicting a talker only costs them the head of their next transmission,
+        and only if they were the least recently heard.
+        """
+        while len(self.rx_branches) > self.cfg.max_talkers:
+            oldest = min(self.branch_seen, key=self.branch_seen.get)
+            entry = self.rx_branches.pop(oldest, None)
+            self.branch_seen.pop(oldest, None)
+            if entry is None:
+                continue
+            branch, mixpad = entry
+            branch.set_state(Gst.State.NULL)
+            self.rx.remove(branch)
+            self.mixer.release_request_pad(mixpad)
+            log("rx: evicted least-recent talker branch (cap %d)"
+                % self.cfg.max_talkers)
 
     def _on_rtp_pad_removed(self, _rtpbin, pad):
         """Tear the branch down when rtpbin times the talker out.
@@ -974,6 +1032,7 @@ class MeshVoice:
         memory and CPU, and with lyra each one holds a TFLite interpreter.
         """
         entry = self.rx_branches.pop(pad.get_name(), None)
+        self.branch_seen.pop(pad.get_name(), None)
         if entry is None:
             return
         branch, mixpad = entry
