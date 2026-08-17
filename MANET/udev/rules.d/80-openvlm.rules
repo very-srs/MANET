@@ -1,0 +1,4 @@
+# OpenVLM voice board — a C-Media CM108B presenting as USB audio + USB HID.
+# The PTT button is GPIO3 on the codec, read from the hidraw node, so
+# mesh-voice needs read access to it without running as root.
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0d8c", ATTRS{idProduct}=="0012", MODE="0660", GROUP="plugdev", TAG+="uaccess"
