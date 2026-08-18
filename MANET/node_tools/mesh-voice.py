@@ -153,6 +153,18 @@ HID_GPIO1_MASK = 0x01  # IR1 bit 0 — OpenVLM identity strap
 # CM108B datasheet 7.4: IR1[3:0] only reflects live GPIO when IR0[7:6] == 0.
 HID_IR0_VALID_MASK = 0xC0
 
+# Decode branches are kept warm (see the rx pipeline), so the table is sized
+# from the node registry rather than guessed. HARD is the ceiling: at roughly
+# 5.3 MB per lyra branch, 64 is ~340 MB, which is the point where this stops
+# being free on a 3.7 GB node. HEADROOM keeps a margin above the known node
+# count so a node joining mid-operation is never the one that gets evicted.
+VOICE_MAX_TALKERS_HARD = 64
+VOICE_TALKER_HEADROOM = 2
+
+# Presence beacon. A very short muted transmission whose only job is to make
+# every receiver establish our RTP source before we say anything real.
+BEACON_MS = 140
+
 PTT_DEBOUNCE_MS = 150
 HALF_DUPLEX_HOLD_MS = 500
 RX_IDLE_MS = 500
@@ -263,7 +275,10 @@ class Config:
         # Decode branches kept warm. ~5.3 MB each with lyra (measured on a
         # CM4), so 8 is ~40 MB. Raise it if a talk group routinely has more
         # than 8 active speakers and you want them all warm.
-        self.max_talkers = conf_int(conf, "voice_max_talkers", 8, 1, 32)
+        self.max_talkers = conf_int(conf, "voice_max_talkers", 8, 1,
+                                   VOICE_MAX_TALKERS_HARD)
+        # Seconds between presence beacons; 0 disables them. See _tick_beacon.
+        self.beacon_sec = conf_int(conf, "voice_beacon_sec", 30, 0, 3600)
         self.ptt_mode = conf.get("voice_ptt", "openvlm").strip().lower()
         # Empty means autodetect the OpenVLM card.
         self.alsa_in = conf.get("voice_alsa_in", "").strip()
@@ -476,6 +491,29 @@ def iface_ipv4(name):
     return None
 
 
+def ipv4_to_ssrc(addr):
+    """A dotted-quad as a 32-bit RTP SSRC, or None.
+
+    Mesh addresses are unique, so this cannot collide within a talk group, and
+    it makes the mapping invertible: a receiver seeing SSRC 0x0A1E0224 knows it
+    is 10.30.2.36 and can name it from the registry.
+    """
+    if not addr:
+        return None
+    try:
+        parts = [int(p) for p in addr.split(".")]
+    except ValueError:
+        return None
+    if len(parts) != 4 or any(p < 0 or p > 255 for p in parts):
+        return None
+    return (parts[0] << 24) | (parts[1] << 16) | (parts[2] << 8) | parts[3]
+
+
+def ssrc_to_ipv4(ssrc):
+    return "%d.%d.%d.%d" % ((ssrc >> 24) & 0xFF, (ssrc >> 16) & 0xFF,
+                            (ssrc >> 8) & 0xFF, ssrc & 0xFF)
+
+
 def local_ipv4_addresses():
     """Our own addresses, so we never unicast a copy back to ourselves."""
     addrs = set()
@@ -645,6 +683,7 @@ class MeshVoice:
             "audioconvert ! audioresample ! "
             "audio/x-raw,rate={rate},channels=1,format=S16LE ! "
             "level name=lvl interval=200000000 ! "
+            "volume name=vol ! "
             "valve name=ptt drop=true ! "
             "{enc} ! {pay} ! "
             "multiudpsink name=sink clients={group}:{port} "
@@ -688,6 +727,9 @@ class MeshVoice:
         self.rx_branches = {}
         self.jitterbuffers = {}
         self.branch_seen = {}
+        self.my_ssrc = None
+        # ssrc -> peer name, for the UI. Filled from the registry.
+        self.talker_names = {}
         rx_desc = (
             "rtpbin name=rtpbin latency={jitter} do-lost=true autoremove=false "
             "udpsrc name=src address={group} port={port} "
@@ -710,6 +752,17 @@ class MeshVoice:
         self.valve = self.tx.get_by_name("ptt")
         self.sink = self.tx.get_by_name("sink")
         self.payloader = self.tx.get_by_name("pay")
+        self.volume = self.tx.get_by_name("vol")
+
+        # SSRC is our mesh IPv4 as a 32-bit integer rather than the random
+        # value RFC 3550 asks for. Addresses are unique on the mesh so it
+        # cannot collide, and it buys two things nothing else does: every
+        # receiver can name a talker by looking the address up in the registry,
+        # and each node knows in advance which SSRCs its peers will use.
+        ssrc = ipv4_to_ssrc(iface_ipv4(self.cfg.iface))
+        if ssrc is not None and self.payloader is not None:
+            self.payloader.set_property("ssrc", ssrc)
+            self.my_ssrc = ssrc
         self.mixer = self.rx.get_by_name("mix")
         self.rtpbin = self.rx.get_by_name("rtpbin")
 
@@ -760,6 +813,10 @@ class MeshVoice:
         GLib.timeout_add_seconds(REGISTRY_POLL_SEC, self._tick_peers)
         if self.cfg.codec == "lyra":
             GLib.timeout_add_seconds(PACKING_TICK_SEC, self._tick_packing)
+        if self.cfg.beacon_sec:
+            GLib.timeout_add_seconds(self.cfg.beacon_sec, self._tick_beacon)
+            log("beacon: announcing every %ds as ssrc 0x%08x"
+                % (self.cfg.beacon_sec, self.my_ssrc or 0))
         GLib.timeout_add_seconds(STATE_WRITE_SEC, self._tick_state)
         GLib.timeout_add(100, self._tick_rx_decay)
 
@@ -946,8 +1003,10 @@ class MeshVoice:
         not "how lossy is any one speaker".
         """
         self.jitterbuffers[ssrc] = jitterbuffer
-        GST_LOG_SSRC = "%s/%s" % (session, ssrc)
-        log("rx: new talker ssrc %s" % GST_LOG_SSRC)
+        # SSRC is the sender's mesh address, so this names the talker outright
+        # rather than printing an opaque 32-bit number.
+        who = self.talker_names.get(ssrc) or ssrc_to_ipv4(ssrc)
+        log("rx: new talker %s (ssrc 0x%08x)" % (who, ssrc))
 
     def _on_rtp_pad_added(self, _rtpbin, pad):
         """Build a decode branch for one talker and feed it into the mixer."""
@@ -998,6 +1057,65 @@ class MeshVoice:
                                     Gst.PadProbeReturn.OK)[1])
         log("rx: talker branch up (%d active)" % len(self.rx_branches))
         self._prune_branches()
+
+    def _tick_beacon(self):
+        """Announce ourselves so receivers establish our source before we talk.
+
+        This is the only thing that actually pre-establishes a talker, and the
+        alternative was measured and rejected. Synthesising a source locally
+        from a peer's registry address does create the slot -- but our invented
+        sequence numbers and timestamps become the source's base, the real
+        sender's do not match, and the jitter buffer resyncs and discards the
+        transmission. Measured end to end: the peer talked for three seconds
+        and the output was digital silence, peak amplitude zero. A receive
+        source can only be established by the node that owns the SSRC.
+
+        So we do it from the sending side: mute, open the valve for one packet
+        or two, close, unmute. That is real RTP from the real payloader with
+        the real sequence numbers, which is exactly what makes the next
+        transmission arrive whole.
+
+        It costs about 4 packets a minute at the default interval. batman-adv
+        drops multicast that nobody has joined, so beacons only occupy air when
+        somebody is actually listening.
+        """
+        if self.transmitting or self.ptt_pressed:
+            return True                      # never interrupt a transmission
+        if not self.valve or not self.volume:
+            return True
+        self.volume.set_property("volume", 0.0)
+        self.valve.set_property("drop", False)
+        GLib.timeout_add(BEACON_MS, self._end_beacon)
+        return True
+
+    def _end_beacon(self):
+        # _set_tx already restores volume if PTT beat us to it, so only close
+        # the valve when we are not actually transmitting.
+        if not self.transmitting and self.valve:
+            self.valve.set_property("drop", True)
+        if self.volume:
+            self.volume.set_property("volume", 1.0)
+        return False                          # one-shot
+
+    def _size_talker_table(self, peer_count):
+        """Keep the branch table comfortably above the number of known nodes.
+
+        Every node on the talk group is a potential talker, and an evicted
+        talker pays the first-contact penalty again next time they speak. So
+        the table tracks the registry rather than a guess: known nodes plus
+        headroom, never below the configured value, never above the hard cap.
+        """
+        want = min(peer_count + VOICE_TALKER_HEADROOM, VOICE_MAX_TALKERS_HARD)
+        if want > self.cfg.max_talkers:
+            log("rx: %d nodes known — raising warm talker table %d -> %d "
+                "(~%d MB with lyra)"
+                % (peer_count, self.cfg.max_talkers, want, want * 5))
+            self.cfg.max_talkers = want
+        elif peer_count + VOICE_TALKER_HEADROOM > VOICE_MAX_TALKERS_HARD:
+            log("rx: %d nodes known but the warm talker table is capped at %d "
+                "— the least recently heard will be evicted and pay a "
+                "first-contact delay when they next speak"
+                % (peer_count, VOICE_MAX_TALKERS_HARD))
 
     def _prune_branches(self):
         """Keep at most VOICE_MAX_TALKERS branches, dropping the quietest.
@@ -1179,6 +1297,9 @@ class MeshVoice:
         if on == self.transmitting:
             return
         self.transmitting = on
+        if on and self.volume:
+            # A beacon may have muted us moments ago; never key up silent.
+            self.volume.set_property("volume", 1.0)
         if self.valve:
             self.valve.set_property("drop", not on)
         log("TX: %s" % ("start" if on else "stop"))
@@ -1202,6 +1323,15 @@ class MeshVoice:
             if self.cfg.max_peers and len(peers) > self.cfg.max_peers:
                 peers = peers[:self.cfg.max_peers]
             clients += ["%s:%d" % (ip, self.cfg.port) for ip, _ in peers]
+
+        # Every known node is a potential talker, so the warm-branch table and
+        # the ssrc->name map are both driven from the registry.
+        self._size_talker_table(len(peers))
+        self.talker_names = {}
+        for ip, host in peers:
+            ssrc = ipv4_to_ssrc(ip)
+            if ssrc is not None:
+                self.talker_names[ssrc] = host or ip
 
         if peers != self.peers:
             log("peers: %d unicast target(s)%s" % (
@@ -1257,6 +1387,10 @@ class MeshVoice:
             "rx_loss_pct": round(self.rx_loss_pct, 1),
             "unicast": self.cfg.unicast,
             "talkers": len(self.rx_branches),
+            "talker_names": sorted(
+                self.talker_names.get(sr) or ssrc_to_ipv4(sr)
+                for sr in self.jitterbuffers),
+            "max_talkers": self.cfg.max_talkers,
             "peers": [{"ip": ip, "hostname": host} for ip, host in self.peers],
             "tx_packets": self.tx_packets,
             "rx_packets": self.rx_packets,
