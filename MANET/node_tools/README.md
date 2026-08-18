@@ -235,13 +235,58 @@ ever proves not good enough, the fix is a periodic silent RTP beacon so every
 receiver has seen each SSRC before real speech — deliberately not built yet,
 because it costs airtime for a case that may never be audible.
 
-Because branches are never reaped on idle, `voice_max_talkers` (default 8)
-bounds them with an LRU eviction. Each costs about 5.3 MB with lyra, measured,
-so the default is roughly 40 MB against 3.4 GB free — the cap exists to stop
-unbounded growth when nodes churn SSRCs across restarts and retunes, not
-because memory is scarce. `ignore-inactive-pads` on the mixer is required
-rather than optional once branches are kept: they are silent between
-transmissions and the mixer would otherwise wait on them.
+**Pre-establishing a talker: only the sender can do it.** A receive slot in
+`rtpbin` is keyed by **SSRC, not by IP**, and it comes into existence only when
+a packet carrying that SSRC arrives. Two pieces close that gap.
+
+First, SSRC is the node's mesh IPv4 as a 32-bit integer rather than the random
+value RFC 3550 suggests. Addresses are unique on the mesh so it cannot collide,
+and it makes the mapping invertible — a receiver seeing `0x0a1e0224` knows it is
+10.30.2.36 and names the talker straight out of the node registry.
+
+Second, each node sends a **presence beacon**: a ~140 ms muted transmission
+(`volume` to 0, valve open, valve shut, volume back) every `voice_beacon_sec`.
+That is real RTP from the real payloader with the real sequence numbers, so
+every receiver establishes the source before anything is said. Measured, first
+transmission after start-up:
+
+| | speech arrived of 3.00 s sent |
+|---|---|
+| no beacon | 2.88 s |
+| beacon first | **3.08 s — nothing lost** |
+
+Roughly 4 packets a minute at the default interval, and batman-adv drops
+multicast nobody has joined, so beacons only occupy air when someone is
+listening.
+
+**Synthesising a source locally from the registry does not work — it is worse
+than doing nothing.** It is the obvious idea: we already know every peer's
+address, so inject a packet with their SSRC and pre-fill the slot. Measured, it
+does create the slot, and then it destroys the stream. Our invented sequence
+numbers and timestamps become the source's base; the real sender's do not
+match; the jitter buffer resyncs and discards. The peer talked for three
+seconds and the output was **digital silence, peak amplitude zero**, with
+`rtpjitterbuffer` logging a single `resync`. Do not reintroduce this.
+
+**Table size follows the node registry.** Every known node is a potential
+talker, and an evicted one pays the first-contact penalty again, so
+`voice_max_talkers` (default 8) is a floor rather than a fixed size: on each
+registry poll the table is raised to known nodes + 2 headroom. It never
+shrinks below the configured value and never exceeds the hard cap of 64.
+
+**The ceiling is RAM.** A warm branch costs about **5.3 MB with lyra** and
+**0.6 MB with opus**, measured on a CM4. So the hard cap of 64 is roughly
+340 MB of lyra decoders against the 3.4 GB a node has free — comfortable, but
+it is the reason a cap exists at all rather than tracking the registry without
+limit. A mesh larger than 62 nodes on one talk group will log that it is
+capped, and the least recently heard talkers will be evicted and pay the
+first-contact delay when they next speak. If that ever matters, raising
+`VOICE_MAX_TALKERS_HARD` is safe until roughly 600 lyra branches on a 3.7 GB
+node, at which point the decoders, not the audio, are the constraint.
+
+`ignore-inactive-pads` on the mixer is required rather than optional once
+branches are kept: they are silent between transmissions and the mixer would
+otherwise wait on them.
 
 **Talk group is per-radio and changed at runtime.** Every node is flashed on
 group 1; the operator moves it from the VOICE tab of the web UI, which writes
@@ -384,7 +429,8 @@ Config keys in `/etc/mesh.conf`:
 | `voice_unicast` | `n` | Userspace unicast copies — normally unnecessary, see above |
 | `voice_unicast_max_peers` | `16` | Cap on unicast copies |
 | `voice_half_duplex` | `n` | Refuse PTT while a remote node is transmitting — off, see below |
-| `voice_max_talkers` | `8` | Decode branches kept warm; LRU-evicted above this (~5.3 MB each with lyra) |
+| `voice_max_talkers` | `8` | Floor for warm decode branches; raised to registry nodes + 2, hard cap 64 (~5.3 MB each with lyra) |
+| `voice_beacon_sec` | `30` | Muted presence beacon interval so peers establish our source before we talk; 0 disables |
 | `voice_dscp` | `48` | DSCP marking — CS6, see the QoS note above |
 | `voice_codec` | `opus` | `opus` or `lyra`; lyra falls back to opus if the plugin or model weights are missing |
 | `voice_bitrate` | `32000` | Opus bitrate |

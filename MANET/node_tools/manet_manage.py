@@ -2730,8 +2730,13 @@ async function refreshVoice() {
         ? ('DSCP ' + d.dscp + (d.dscp === 46 ? ' (EF)' : '')) : '--');
   // Receive is conference style: one decode branch per talker, all mixed. This
   // is the count of streams currently being decoded, not a peer count.
-  vTxt('voice-talkers', (d.talkers === undefined || d.talkers === null)
-        ? '--' : (d.talkers + (d.talkers === 1 ? ' stream' : ' streams')));
+  // SSRC is the sender's mesh address, so talkers can be named rather than
+  // counted. The cap tracks the node registry, hence showing both.
+  var tkNames = Array.isArray(d.talker_names) ? d.talker_names : [];
+  vTxt('voice-talkers', (d.talkers === undefined || d.talkers === null) ? '--'
+        : (tkNames.length ? tkNames.join(', ')
+                          : (d.talkers + (d.talkers === 1 ? ' stream' : ' streams')))
+          + (d.max_talkers ? '  (warm ' + d.talkers + '/' + d.max_talkers + ')' : ''));
 
   // PTT
   const ptt = document.getElementById('voice-ptt');
