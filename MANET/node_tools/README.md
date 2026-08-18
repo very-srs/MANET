@@ -236,28 +236,39 @@ receiver has seen each SSRC before real speech — deliberately not built yet,
 because it costs airtime for a case that may never be audible.
 
 **Pre-establishing a talker: only the sender can do it.** A receive slot in
-`rtpbin` is keyed by **SSRC, not by IP**, and it comes into existence only when
-a packet carrying that SSRC arrives. Two pieces close that gap.
+`rtpbin` is keyed by **SSRC, not by IP**, and it exists only once a packet
+carrying that SSRC arrives. Two pieces close that gap.
 
-First, SSRC is the node's mesh IPv4 as a 32-bit integer rather than the random
-value RFC 3550 suggests. Addresses are unique on the mesh so it cannot collide,
-and it makes the mapping invertible — a receiver seeing `0x0a1e0224` knows it is
-10.30.2.36 and names the talker straight out of the node registry.
+First, the SSRC is split: **24 bits identifying the node** (a hash of its mesh
+address) and **8 bits identifying the run** of the daemon. The prefix lets any
+receiver build address → prefix for every node in the registry and name a
+talker with no back channel — verified collision-free across a full /24.
+
+The generation is not cosmetic, and this is the subtle part. Because a receiver
+never forgets a source, a node that restarted and reused its SSRC would find
+its fresh sequence-number base did not match the source the receiver was still
+holding. Measured: a three-second transmission arrived as **nothing at all**,
+and neither a beacon nor `max-misorder-time`/`max-dropout-time` tuning rescued
+it. A new generation makes the restarted node a new source, which is clean:
+
+| after a sender restart | speech arrived of 3.00 s |
+|---|---|
+| same SSRC reused | **never arrived** |
+| new generation | 2.96 s |
+| new generation + beacon | **3.00 s** |
 
 Second, each node sends a **presence beacon**: a ~140 ms muted transmission
-(`volume` to 0, valve open, valve shut, volume back) every `voice_beacon_sec`.
-That is real RTP from the real payloader with the real sequence numbers, so
-every receiver establishes the source before anything is said. Measured, first
-transmission after start-up:
+(`volume` to 0, valve open, valve shut, volume back) carrying real RTP from the
+real payloader with real sequence numbers, so receivers establish the source
+before anything is said.
 
-| | speech arrived of 3.00 s sent |
-|---|---|
-| no beacon | 2.88 s |
-| beacon first | **3.08 s — nothing lost** |
-
-Roughly 4 packets a minute at the default interval, and batman-adv drops
-multicast nobody has joined, so beacons only occupy air when someone is
-listening.
+Beacons are **event driven, not a heartbeat**. There is nothing to refresh —
+`autoremove=false` means a source is never forgotten — so one is sent at
+start-up (announcing this run's generation) and whenever a node appears in the
+registry that cannot have heard us yet. `voice_beacon_sec` (default 600) is
+only a safety net for a peer whose arrival was somehow missed, and 0 disables
+it. That is about **21 packets an hour, ~5 bps averaged**, against 420/hour at
+the 30 s heartbeat this replaced.
 
 **Synthesising a source locally from the registry does not work — it is worse
 than doing nothing.** It is the obvious idea: we already know every peer's
@@ -430,7 +441,7 @@ Config keys in `/etc/mesh.conf`:
 | `voice_unicast_max_peers` | `16` | Cap on unicast copies |
 | `voice_half_duplex` | `n` | Refuse PTT while a remote node is transmitting — off, see below |
 | `voice_max_talkers` | `8` | Floor for warm decode branches; raised to registry nodes + 2, hard cap 64 (~5.3 MB each with lyra) |
-| `voice_beacon_sec` | `30` | Muted presence beacon interval so peers establish our source before we talk; 0 disables |
+| `voice_beacon_sec` | `600` | Safety-net beacon interval; beacons are normally sent on start-up and on new peers. 0 disables |
 | `voice_dscp` | `48` | DSCP marking — CS6, see the QoS note above |
 | `voice_codec` | `opus` | `opus` or `lyra`; lyra falls back to opus if the plugin or model weights are missing |
 | `voice_bitrate` | `32000` | Opus bitrate |

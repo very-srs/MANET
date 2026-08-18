@@ -84,12 +84,14 @@ import errno
 import glob
 import json
 import os
+import random
 import re
 import signal
 import subprocess
 import sys
 import threading
 import time
+import zlib
 
 # GStreamer is a hard requirement for voice but must not be one for the unit to
 # exist. The install tarball enables mesh-voice.service on every node, including
@@ -277,8 +279,12 @@ class Config:
         # than 8 active speakers and you want them all warm.
         self.max_talkers = conf_int(conf, "voice_max_talkers", 8, 1,
                                    VOICE_MAX_TALKERS_HARD)
-        # Seconds between presence beacons; 0 disables them. See _tick_beacon.
-        self.beacon_sec = conf_int(conf, "voice_beacon_sec", 30, 0, 3600)
+        # Safety net only. Beacons are normally event driven -- at start-up and
+        # whenever a node appears in the registry -- because a receiver never
+        # forgets a source (autoremove=false), so there is nothing to refresh.
+        # This interval only covers a peer whose arrival we somehow missed.
+        # 0 disables the periodic one entirely. See _tick_beacon.
+        self.beacon_sec = conf_int(conf, "voice_beacon_sec", 600, 0, 3600)
         self.ptt_mode = conf.get("voice_ptt", "openvlm").strip().lower()
         # Empty means autodetect the OpenVLM card.
         self.alsa_in = conf.get("voice_alsa_in", "").strip()
@@ -491,12 +497,13 @@ def iface_ipv4(name):
     return None
 
 
-def ipv4_to_ssrc(addr):
-    """A dotted-quad as a 32-bit RTP SSRC, or None.
+def ssrc_prefix_for_ip(addr):
+    """Top 24 bits of the SSRC a node with this address will use, or None.
 
-    Mesh addresses are unique, so this cannot collide within a talk group, and
-    it makes the mapping invertible: a receiver seeing SSRC 0x0A1E0224 knows it
-    is 10.30.2.36 and can name it from the registry.
+    The SSRC is split: 24 bits identifying the node, 8 bits identifying this
+    particular run of the daemon. The high half is a hash of the mesh address,
+    so any receiver can build address -> prefix for every node in the registry
+    and name a talker without a back channel.
     """
     if not addr:
         return None
@@ -506,12 +513,29 @@ def ipv4_to_ssrc(addr):
         return None
     if len(parts) != 4 or any(p < 0 or p > 255 for p in parts):
         return None
-    return (parts[0] << 24) | (parts[1] << 16) | (parts[2] << 8) | parts[3]
+    packed = (parts[0] << 24) | (parts[1] << 16) | (parts[2] << 8) | parts[3]
+    return (zlib.crc32(b"manet-voice:%d" % packed) & 0xFFFFFF)
 
 
-def ssrc_to_ipv4(ssrc):
-    return "%d.%d.%d.%d" % ((ssrc >> 24) & 0xFF, (ssrc >> 16) & 0xFF,
-                            (ssrc >> 8) & 0xFF, ssrc & 0xFF)
+def node_ssrc(addr):
+    """Our SSRC: node prefix in the high 24 bits, run generation in the low 8.
+
+    The generation is what stops a restart from being silent, and it is not
+    cosmetic. With autoremove=false a receiver keeps our source for the life of
+    its daemon. If we restarted and reused the same SSRC, our payloader's fresh
+    sequence-number base would not match the source the receiver is still
+    holding, the jitter buffer would resync, and every word would be discarded
+    -- measured, a three second transmission arrived as nothing at all, and no
+    beacon or jitter-buffer tuning rescued it.
+
+    A new generation makes the restarted node a new source, which is clean.
+    The abandoned source is silent from then on, so the LRU in
+    _prune_branches() evicts it ahead of anything live.
+    """
+    prefix = ssrc_prefix_for_ip(addr)
+    if prefix is None:
+        return None
+    return (prefix << 8) | random.randint(0, 255)
 
 
 def local_ipv4_addresses():
@@ -580,6 +604,12 @@ class MeshVoice:
         # rtpbin pad name and SSRC respectively.
         self.rx_branches = {}
         self.jitterbuffers = {}
+        self.branch_seen = {}
+        self.volume = None
+        self.my_ssrc = None
+        # ssrc prefix -> peer name, rebuilt from the registry each poll.
+        self.talker_names = {}
+        self._known_peer_ips = set()
 
         # Adaptive packing state. `packing` mirrors the payloader property so
         # the state file and the web UI can report it without querying GStreamer
@@ -730,6 +760,7 @@ class MeshVoice:
         self.my_ssrc = None
         # ssrc -> peer name, for the UI. Filled from the registry.
         self.talker_names = {}
+        self._known_peer_ips = set()
         rx_desc = (
             "rtpbin name=rtpbin latency={jitter} do-lost=true autoremove=false "
             "udpsrc name=src address={group} port={port} "
@@ -754,12 +785,11 @@ class MeshVoice:
         self.payloader = self.tx.get_by_name("pay")
         self.volume = self.tx.get_by_name("vol")
 
-        # SSRC is our mesh IPv4 as a 32-bit integer rather than the random
-        # value RFC 3550 asks for. Addresses are unique on the mesh so it
-        # cannot collide, and it buys two things nothing else does: every
-        # receiver can name a talker by looking the address up in the registry,
-        # and each node knows in advance which SSRCs its peers will use.
-        ssrc = ipv4_to_ssrc(iface_ipv4(self.cfg.iface))
+        # SSRC = 24-bit hash of our mesh address, plus an 8-bit generation for
+        # this run. The prefix lets any receiver name us from the registry; the
+        # generation stops a restart from colliding with the source a receiver
+        # is still holding. See node_ssrc().
+        ssrc = node_ssrc(iface_ipv4(self.cfg.iface))
         if ssrc is not None and self.payloader is not None:
             self.payloader.set_property("ssrc", ssrc)
             self.my_ssrc = ssrc
@@ -814,9 +844,14 @@ class MeshVoice:
         if self.cfg.codec == "lyra":
             GLib.timeout_add_seconds(PACKING_TICK_SEC, self._tick_packing)
         if self.cfg.beacon_sec:
+            # Announce this run immediately: any receiver still holding our
+            # previous generation needs to see the new SSRC, and anyone already
+            # listening should have us warm before the first press of the PTT.
+            GLib.timeout_add(1500, self._tick_beacon)
             GLib.timeout_add_seconds(self.cfg.beacon_sec, self._tick_beacon)
-            log("beacon: announcing every %ds as ssrc 0x%08x"
-                % (self.cfg.beacon_sec, self.my_ssrc or 0))
+            log("beacon: ssrc 0x%08x, on start-up and on new peers "
+                "(safety net every %ds)"
+                % (self.my_ssrc or 0, self.cfg.beacon_sec))
         GLib.timeout_add_seconds(STATE_WRITE_SEC, self._tick_state)
         GLib.timeout_add(100, self._tick_rx_decay)
 
@@ -1005,7 +1040,7 @@ class MeshVoice:
         self.jitterbuffers[ssrc] = jitterbuffer
         # SSRC is the sender's mesh address, so this names the talker outright
         # rather than printing an opaque 32-bit number.
-        who = self.talker_names.get(ssrc) or ssrc_to_ipv4(ssrc)
+        who = self.talker_names.get(ssrc >> 8) or ("ssrc 0x%08x" % ssrc)
         log("rx: new talker %s (ssrc 0x%08x)" % (who, ssrc))
 
     def _on_rtp_pad_added(self, _rtpbin, pad):
@@ -1329,9 +1364,17 @@ class MeshVoice:
         self._size_talker_table(len(peers))
         self.talker_names = {}
         for ip, host in peers:
-            ssrc = ipv4_to_ssrc(ip)
-            if ssrc is not None:
-                self.talker_names[ssrc] = host or ip
+            prefix = ssrc_prefix_for_ip(ip)
+            if prefix is not None:
+                self.talker_names[prefix] = host or ip
+
+        # A node we have not seen before cannot have heard us either, so
+        # announce ourselves rather than waiting for the periodic beacon.
+        new_ips = {ip for ip, _ in peers} - self._known_peer_ips
+        if new_ips and self.cfg.beacon_sec:
+            log("beacon: %d new node(s) in registry — announcing" % len(new_ips))
+            GLib.timeout_add(500, self._tick_beacon)
+        self._known_peer_ips = {ip for ip, _ in peers}
 
         if peers != self.peers:
             log("peers: %d unicast target(s)%s" % (
@@ -1388,7 +1431,7 @@ class MeshVoice:
             "unicast": self.cfg.unicast,
             "talkers": len(self.rx_branches),
             "talker_names": sorted(
-                self.talker_names.get(sr) or ssrc_to_ipv4(sr)
+                self.talker_names.get(sr >> 8) or ("0x%08x" % sr)
                 for sr in self.jitterbuffers),
             "max_talkers": self.cfg.max_talkers,
             "peers": [{"ip": ip, "hostname": host} for ip, host in self.peers],
