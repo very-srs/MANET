@@ -589,7 +589,7 @@ Wants=node-manager.service
 
 [Service]
 Type=oneshot
-ExecstartPre=/bin/sleep 5
+ExecStartPre=/bin/sleep 5
 ExecStart=/usr/local/bin/one-shot-time-sync.sh
 
 [Install]
@@ -622,15 +622,16 @@ EOF
 
 # Set the default configuration to be a client.  Allows chrony to start
 echo "Setting default NTP mode to offline"
-cat << EOF > /etc/chrony-default.conf
-# This configuration file makes chronyd start but remain offline
-# until explicitly told to sync via chronyc.
+cat << EOF > /etc/chrony/chrony-default.conf
+# Default client config: chronyd starts with no network time sources, so it
+# generates no traffic until one is added. This carried a bare "offline"
+# directive until that was found to be invalid — chronyd refused to start at
+# all. With no sources configured the intended effect is the same.
 driftfile /var/lib/chrony/chrony.drift
 makestep 1.0 3
-offline
 deny all
 EOF
-cp /etc/chrony-default.conf /etc/chrony.conf
+cp /etc/chrony/chrony-default.conf /etc/chrony/chrony.conf
 systemctl enable chrony.service
 
 # Set br0 to be the wait online interface, avoids boot delay

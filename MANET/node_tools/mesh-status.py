@@ -58,6 +58,9 @@ from manet_radio import (
 # ─────────────────────────────────────────────────────────────────────────────
 REGISTRY_FILE   = "/var/run/mesh_node_registry"
 MESH_CONF_FILE  = "/etc/mesh.conf"
+# Seconds before /run/gps_status.json counts as stale. gps-reader polls every 5 s;
+# node-manager uses the same budget so the UI and the mesh agree on the position.
+GPS_FIX_MAX_AGE = 60
 MESH_STATE_FILE = "/etc/mesh_ipv4_state"
 PORT            = 8080
 REFRESH_MS      = 15000   # Status page polling interval (ms)
@@ -826,12 +829,15 @@ def assemble_local_data():
 
     ifaces = enrich_interfaces_with_registry_mcs(ifaces, my_node)
 
-    # GPS — read directly from gps-reader output for freshness; fall back to registry
+    # GPS — read directly from gps-reader output for freshness; fall back to registry.
+    # gps-reader stamps every write, so a frozen timestamp means it died or hung
+    # while still holding a fix. Presenting that position as current is worse than
+    # showing none, so a stale file is treated the same as no fix.
     gps = {'available': False, 'lat': '', 'lon': '', 'alt': ''}
     try:
         with open('/run/gps_status.json') as _gf:
             _gd = json.load(_gf)
-        if _gd.get('has_fix'):
+        if _gd.get('has_fix') and time.time() - _gd.get('timestamp', 0) <= GPS_FIX_MAX_AGE:
             gps = {
                 'available': True,
                 'lat': str(_gd['latitude']),
