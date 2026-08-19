@@ -1,0 +1,15 @@
+[Unit]
+Description=One-shot voice runtime setup for over-the-air updated nodes
+# Needs a route for apt, and must not delay anything else at boot.
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/usr/local/bin/manet-voice-setup.sh
+
+[Service]
+Type=oneshot
+RemainAfterExit=no
+ExecStart=/usr/local/bin/manet-voice-setup.sh
+TimeoutStartSec=600
+
+[Install]
+WantedBy=multi-user.target
