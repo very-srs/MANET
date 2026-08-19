@@ -1708,14 +1708,24 @@ systemctl enable battery-reader.service
 # Nodes without a dongle still run gps-reader.service safely — it writes
 # has_fix=false when gpsd is unreachable or has no fix.
 #
-# NTP strategy:
-#   - chrony is already installed and serves the mesh (allow fd01::/64).
-#   - With GPS: SHM 0 refclock (NMEA, ~100 ms accuracy) → stratum ~2.
-#   - Without GPS or fix: chrony falls back to pool.ntp.org or local stratum 10.
-#   - Nodes with GPS automatically become the preferred NTP source because
-#     their chrony stratum beats the stratum-10 fallback of GPS-less nodes.
-#   - No election logic change needed — existing is_ntp_server flag stays
-#     tied to the ethernet gateway; GPS just silently improves time quality.
+# NTP strategy — sync once, then stop. Continuous polling is not worth the
+# HaLow airtime for a deployment measured in days, and a second of skew does
+# not matter. Only nodes that cost nothing to keep synced stay synced:
+#   - GPS fix: disciplines from the SHM 0 refclock, which is shared memory
+#     rather than a peer, so it costs no traffic at all. Such a node keeps
+#     chrony running and serves the mesh. node-manager marks it with
+#     /var/run/mesh-ntp-gps.state.
+#   - Ethernet gateway: syncs from pool.ntp.org over the wire, not over the
+#     mesh, and also serves. ethernet-autodetect.sh marks it with
+#     /var/run/mesh-ntp.state.
+#   - Everyone else: one-shot-time-sync.sh syncs once against whichever of
+#     those peers has the best TQ, then stops chrony for the rest of the boot.
+#
+# is_ntp_server in telemetry is the OR of the two markers, which is what makes
+# a GPS node discoverable as a time source. An earlier note here claimed this
+# happened by itself through stratum comparison — it did not. GPS-less nodes
+# do not run chrony at all, so there was no stratum to compare, and GPS was
+# never wired into the election.
 
 if have_package_network; then
     provision_try "apt install failed: gpsd gpsd-clients" \
@@ -1758,6 +1768,25 @@ CHRONY_GPS
     fi
 }
 
+# Seed chrony-default.conf when it is missing. Nodes provisioned before the
+# path fix got this written to /etc/chrony-default.conf, one directory too
+# high, where chronyd never reads it. Both ethernet-autodetect.sh and the
+# networkd-dispatcher off hook cp this file over chrony.conf after stopping
+# chrony; when it does not exist the cp fails silently and the node is left
+# stopped with the throwaway test config still in place.
+if [ ! -f /etc/chrony/chrony-default.conf ]; then
+    cat > /etc/chrony/chrony-default.conf <<'CHRONY_DEFAULT'
+# Default client config: chronyd starts with no network time sources, so it
+# generates no traffic until one is added. This carried a bare "offline"
+# directive until that was found to be invalid — chronyd refused to start at
+# all. With no sources configured the intended effect is the same.
+driftfile /var/lib/chrony/chrony.drift
+makestep 1.0 3
+deny all
+CHRONY_DEFAULT
+    echo " > chrony: seeded missing /etc/chrony/chrony-default.conf"
+fi
+
 for chrony_conf in \
     /etc/chrony/chrony.conf \
     /etc/chrony/chrony-default.conf \
@@ -1769,6 +1798,12 @@ done
 systemctl enable gps-reader.service
 systemctl restart gps-reader.service 2>/dev/null || true
 systemctl restart chrony 2>/dev/null || true
+
+# provision-mesh.sh writes this unit but leaves it disabled, with a note saying
+# radio-setup would enable it. That never happened, so the one-shot mesh time
+# sync has never run on any node. Nodes that are their own time source — GPS
+# fix, or Ethernet gateway — exit from it immediately and keep chrony running.
+systemctl enable one-shot-time-sync.service 2>/dev/null || true
 
 # ============================================================================
 # === FIRST RUN vs RE-RUN ===
