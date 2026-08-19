@@ -440,9 +440,14 @@ if [ "$DETECTED_MODE" == "gateway" ]; then
     log "Attempting to sync time with external NTP..."
     cp /etc/chrony/chrony-test.conf /etc/chrony/chrony.conf
     systemctl restart chrony.service 2>/dev/null
-    sleep 3
 
-    if timeout 30 chronyc -a 'burst 4/4' >/dev/null 2>&1 && sleep 5 && chronyc sources 2>/dev/null | grep -q '\^\*'; then
+    # waitsync blocks until chronyd has actually disciplined the clock, which is
+    # the condition we care about. The old check burst and then grepped for a
+    # selected source after a fixed 8 s, which is not enough time to resolve the
+    # pool, take four samples and settle on one — so a node with working
+    # internet was routinely recorded as having failed and left unsynced.
+    chronyc -a 'burst 4/4' >/dev/null 2>&1
+    if timeout 90 chronyc waitsync 60 0 0 1 >/dev/null 2>&1; then
         log "Time sync successful. Promoting to mesh NTP server."
         touch /var/run/mesh-ntp.state
         systemctl stop chrony.service

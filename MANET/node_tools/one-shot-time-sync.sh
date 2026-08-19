@@ -18,6 +18,17 @@ if [ -f "$STATE_FILE" ]; then
     exit 0
 fi
 
+# Nodes that hold their own time source stay synced rather than doing a
+# one-shot, and must keep chrony running so everyone else can sync against
+# them: a GPS node disciplines from the local SHM refclock at no network cost,
+# and a gateway polls over Ethernet rather than mesh airtime. A gateway whose
+# internet sync failed has neither marker, so it correctly falls through and
+# takes its time from a mesh peer like any other node.
+if [ -f /var/run/mesh-ntp.state ] || [ -f /var/run/mesh-ntp-gps.state ]; then
+    log "This node is a mesh time source (GPS or gateway); it stays synced. Exiting."
+    exit 0
+fi
+
 log "Starting one-shot time sync..."
 
 # Wait for the mesh registry file to be created via alfred
@@ -96,15 +107,30 @@ if [ -n "$BEST_SERVER_HOSTNAME" ]; then
 
     if [ -n "$BEST_SERVER_IP" ]; then
         log "Syncing time with ${BEST_SERVER_IP}..."
-        # Force a one-time sync.
-        if chronyc -a "burst 1/1 ${BEST_SERVER_IP}"; then
-            log "Time sync successful."
+
+        # chronyc needs a live daemon, and ethernet-autodetect may already have
+        # stopped it earlier in this boot.
+        systemctl is-active --quiet chrony.service || systemctl start chrony.service
+
+        # "burst" only acts on sources chronyd already knows about. This peer is
+        # discovered from the registry at runtime and appears in no config file,
+        # so it has to be added first — without this the command returned
+        # "503 No such source" and the sync silently never happened.
+        chronyc -a "add server ${BEST_SERVER_IP} iburst" >/dev/null 2>&1
+        chronyc -a "burst 1/1 ${BEST_SERVER_IP}" >/dev/null 2>&1
+
+        # burst returns 200 as soon as the command is accepted, which says
+        # nothing about whether the clock was ever set. waitsync is what
+        # actually blocks until chronyd has disciplined it.
+        if timeout 90 chronyc waitsync 60 0 0 1 >/dev/null 2>&1; then
+            log "Time sync successful. Clock disciplined from ${BEST_SERVER_IP}."
             touch "$STATE_FILE"
-            log "Stopping and disabling chrony service to conserve network traffic."
+            # Stop, but leave the unit enabled: a GPS dongle appearing later, or
+            # this node becoming a gateway, both need to start chrony again.
+            log "Stopping chrony; this node has its time and need not keep polling."
             systemctl stop chrony.service
-            systemctl disable chrony.service
         else
-            log "Time sync command failed."
+            log "Time sync did not complete against ${BEST_SERVER_IP}."
         fi
     else
         log "Could not resolve hostname ${BEST_SERVER_HOSTNAME}.local"
