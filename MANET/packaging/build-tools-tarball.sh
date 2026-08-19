@@ -3,11 +3,24 @@ set -euo pipefail
 
 # build-tools-tarball.sh — assemble a tools-only update tarball.
 #
-# Contains node_tools scripts, the version file, and the shared assets under
-# share/manet that those scripts load at runtime (the dashboard logos). Does
-# NOT include the SBC overlay (kernel/modules/firmware), systemd units,
-# networkd configs, udev rules, or pre-built binaries (alfred, batctl,
-# wpa_supplicant_s1g).
+# Contains node_tools scripts, the version file, the shared assets under
+# share/manet that those scripts load at runtime (the dashboard logos), the
+# systemd units and their enable symlinks, and udev rules.
+#
+# The archive extracts to / on the node, so it can carry any file the node
+# needs — units, rules, modules, or a one-shot service that runs a script and
+# deletes itself. That is how a fielded board picks up something new (voice, a
+# migration, a fix) without being reflashed. An earlier version of this comment
+# claimed units and udev rules were out of scope; that described what it
+# happened to pack, not a limit on what it can.
+#
+# Still excluded, deliberately:
+#   * the SBC overlay (kernel, modules, firmware) — that is what -install is for
+#   * pre-built binaries (alfred, batctl, wpa_supplicant_s1g) — size, and they
+#     change far less often than the scripts
+#   * systemd-network configs — rewriting a live node's interface definitions
+#     from under it is a different risk class to dropping in a new unit, and
+#     belongs in a considered migration rather than every routine update
 #
 # Usage:
 #   build-tools-tarball.sh [output.tar.gz]
@@ -42,6 +55,28 @@ find "$STAGE/usr/local/bin" -type f \
     -exec chmod 0755 {} +
 
 install_file 0644 "$REPO_ROOT/MANET/etc/manet_version.txt" "$STAGE/etc/manet_version.txt"
+
+# Units and udev rules. node-update.sh only extracts -- it does not run
+# daemon-reload or udevadm -- so a new unit becomes active at the next boot via
+# the enable symlink below, and anything needing to happen sooner does it from
+# a one-shot (see manet-voice-setup.service).
+install_tree "$REPO_ROOT/MANET/systemd" "$STAGE/etc/systemd/system"
+install_tree "$REPO_ROOT/MANET/udev/rules.d" "$STAGE/etc/udev/rules.d"
+
+mkdir -p "$STAGE/etc/systemd/system/multi-user.target.wants"
+for unit in \
+    ethernet-autodetect.service \
+    manet-txpower.service \
+    mesh-default-route-fix.service \
+    sae-watchdog.service \
+    ebtables-restore.service \
+    mesh-voice.service \
+    manet-voice-setup.service
+do
+    if [ -f "$STAGE/etc/systemd/system/$unit" ]; then
+        ln -sf "../$unit" "$STAGE/etc/systemd/system/multi-user.target.wants/$unit"
+    fi
+done
 
 # mesh-status.py serves these from /usr/local/share/manet
 # at runtime, so an OTA update that ships the scripts without them leaves the
