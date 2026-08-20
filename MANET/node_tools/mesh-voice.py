@@ -25,10 +25,18 @@ A single rtpjitterbuffer cannot do this: two senders' sequence numbers
 interleave in one buffer and the output is garbage. That limitation, not
 policy, is what the old half-duplex lockout was really working around.
 
-voice_codec picks the pair: opus (stock elements, the default) or lyra
-(libgstlyra.so plus model weights, and a fallback to opus if either is
-missing). Only the codec stages differ; the transport around them was measured
-with Opus and is unchanged.
+voice_codec picks the pair: lyra (the default -- libgstlyra.so plus model
+weights) or opus (stock elements). Only the codec stages differ; the transport
+around them was measured with Opus and is unchanged.
+
+The two do not interoperate, and the failure is silence rather than bad audio.
+Both derive the RTP payload type and clock rate from this one setting, and a
+receiver builds every decode branch from its own configured codec rather than
+from what arrived, so a node on the other codec hears nothing. That is why the
+setting is staged mesh-wide over Alfred (radio_state, like a channel or key
+change) instead of being a per-node choice, and why the fallback below matters:
+a node whose lyra plugin or model weights are missing silently drops to opus,
+which on a lyra mesh means it is deaf and mute. Check the log line.
 
 With lyra, frames-per-packet adapts to receive loss — see _tick_packing. The
 short version: at these bitrates the headers dominate, so packing is a much
@@ -240,7 +248,7 @@ class Config:
         # gst-plugins-base every node already has, whereas lyra needs
         # libgstlyra.so and the model weights installed. Asking for lyra on a
         # node without them falls back rather than failing to come up.
-        self.codec = conf.get("voice_codec", "opus").strip().lower()
+        self.codec = conf.get("voice_codec", "lyra").strip().lower()
         if self.codec not in ("opus", "lyra"):
             self.codec = "opus"
         self.bitrate = conf_int(conf, "voice_bitrate", 32000, 6000, 128000)
@@ -705,6 +713,14 @@ class MeshVoice:
 
         (enc_desc, pay_desc, depay_desc, dec_desc, encoding, packet_ms,
          raw_rate, clock_rate) = self._codec_stages()
+
+        # What we actually built with, which is not always what was asked for:
+        # a missing lyra plugin or model dir falls back to opus. The UI paints
+        # its codec picker from this, so reporting the *configured* value here
+        # would show a node as Lyra while it was really transmitting Opus --
+        # and since the two do not interoperate, that is precisely the node
+        # that is silently deaf to the rest of the mesh.
+        self.effective_codec = encoding.lower()
 
         # sync=false on the sink: alsasrc is the clock for a live capture, and
         # making the sink wait on running time would only add latency.
@@ -1352,29 +1368,38 @@ class MeshVoice:
         set follows the mesh without restarting anything.
         """
         clients = ["%s:%d" % (TALK_GROUP_ADDR, self.cfg.port)]
+
+        # The registry is read unconditionally. It drives naming, warm-branch
+        # sizing and the new-node beacon, none of which have anything to do
+        # with unicast -- an earlier revision read it only when
+        # voice_unicast=y, which meant that on the default configuration
+        # talkers showed as raw SSRC hex, the talker table never grew past its
+        # floor, and a node joining mid-operation was never announced to.
+        registry = read_registry(self.local_ips)
+
         peers = []
         if self.cfg.unicast:
-            peers = read_registry(self.local_ips)
+            peers = registry
             if self.cfg.max_peers and len(peers) > self.cfg.max_peers:
                 peers = peers[:self.cfg.max_peers]
             clients += ["%s:%d" % (ip, self.cfg.port) for ip, _ in peers]
 
         # Every known node is a potential talker, so the warm-branch table and
         # the ssrc->name map are both driven from the registry.
-        self._size_talker_table(len(peers))
+        self._size_talker_table(len(registry))
         self.talker_names = {}
-        for ip, host in peers:
+        for ip, host in registry:
             prefix = ssrc_prefix_for_ip(ip)
             if prefix is not None:
                 self.talker_names[prefix] = host or ip
 
         # A node we have not seen before cannot have heard us either, so
         # announce ourselves rather than waiting for the periodic beacon.
-        new_ips = {ip for ip, _ in peers} - self._known_peer_ips
+        new_ips = {ip for ip, _ in registry} - self._known_peer_ips
         if new_ips and self.cfg.beacon_sec:
             log("beacon: %d new node(s) in registry — announcing" % len(new_ips))
             GLib.timeout_add(500, self._tick_beacon)
-        self._known_peer_ips = {ip for ip, _ in peers}
+        self._known_peer_ips = {ip for ip, _ in registry}
 
         if peers != self.peers:
             log("peers: %d unicast target(s)%s" % (
@@ -1420,7 +1445,10 @@ class MeshVoice:
             "port": self.cfg.port,
             "interface": self.cfg.iface,
             "dscp": self.cfg.dscp,
-            "codec": self.cfg.codec,
+            "codec": getattr(self, "effective_codec", self.cfg.codec),
+            "codec_configured": self.cfg.codec,
+            "codec_fallback": (getattr(self, "effective_codec", self.cfg.codec)
+                               != self.cfg.codec),
             "bitrate": (self.cfg.lyra_bitrate if self.cfg.codec == "lyra"
                         else self.cfg.bitrate),
             "frame_ms": (self.packing * 20 if self.cfg.codec == "lyra"

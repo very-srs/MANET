@@ -16,8 +16,8 @@
 #   * protobuf is eliminated entirely: Lyra used it to read one optional int32
 #     from a two-byte file. See lyra_config.pb.h (hand-written shim).
 #
-# Configure with -DDEPS_ROOT pointing at the scratch tree holding tflite-build,
-# deps/ and lyra/.
+# Configure with -DDEPS_ROOT pointing at the work directory that
+# build-lyra-aarch64.sh populated (it holds src/ and build/).
 
 cmake_minimum_required(VERSION 3.16)
 project(lyra_aarch64 CXX C)
@@ -30,12 +30,32 @@ if(NOT DEFINED DEPS_ROOT)
   message(FATAL_ERROR "-DDEPS_ROOT=<scratch dir> is required")
 endif()
 
-set(LYRA_SRC   "${DEPS_ROOT}/lyra")
-set(TFLITE_B   "${DEPS_ROOT}/tflite-build")
-set(TFLITE_SRC "${DEPS_ROOT}/tfsrc")
-set(AUDIO_DSP  "${DEPS_ROOT}/deps/audio_dsp")
-set(GHC        "${DEPS_ROOT}/deps/ghc")
-set(GLOG       "${DEPS_ROOT}/deps/glog-install")
+# Defaults follow the tree build-lyra-aarch64.sh actually creates, which is
+# also the tree gst-lyra/Makefile reads. An earlier revision of this file used a
+# flatter layout (deps/, tflite-build/, tfsrc/) that the script never produced,
+# so configuring Lyra failed with "Cannot find source file" on every path here.
+# Each is overridable so an out-of-tree layout can still be pointed at.
+if(NOT DEFINED LYRA_SRC)
+  set(LYRA_SRC   "${DEPS_ROOT}/src/lyra")
+endif()
+if(NOT DEFINED TFLITE_B)
+  set(TFLITE_B   "${DEPS_ROOT}/build/tflite")
+endif()
+if(NOT DEFINED TFLITE_SRC)
+  set(TFLITE_SRC "${DEPS_ROOT}/src/tensorflow")
+endif()
+if(NOT DEFINED AUDIO_DSP)
+  set(AUDIO_DSP  "${DEPS_ROOT}/src/audio_dsp")
+endif()
+if(NOT DEFINED GHC)
+  set(GHC        "${DEPS_ROOT}/src/ghc")
+endif()
+if(NOT DEFINED GLOG)
+  set(GLOG       "${DEPS_ROOT}/build/glog-install")
+endif()
+if(NOT DEFINED ABSL)
+  set(ABSL       "${DEPS_ROOT}/build/absl-install")
+endif()
 
 # --- the subset of multichannel-audio-tools Lyra includes --------------------
 set(AUDIO_DSP_SRCS
@@ -72,7 +92,7 @@ target_include_directories(lyra PUBLIC
   ${GHC}                       # Lyra includes "include/ghc/filesystem.hpp"
   ${GLOG}/include
   ${TFLITE_SRC}
-  ${DEPS_ROOT}/deps/absl-install/include
+  ${ABSL}/include
   ${TFLITE_B}/eigen
   ${TFLITE_B}/flatbuffers/include
   ${AUDIO_DSP}/third_party/pffft/src   # audio_dsp includes "pffft/pffft.h"
@@ -87,7 +107,7 @@ target_include_directories(lyra PUBLIC
 # statusor, flags_parse and the random_* family are absent, and Lyra uses all
 # three. So abseil is built standalone (same source, same 20220623 LTS) with
 # every target, and used instead of TFLite's partial set.
-file(GLOB ABSL_LIBS "${DEPS_ROOT}/deps/absl-install/lib/libabsl_*.a")
+file(GLOB ABSL_LIBS "${ABSL}/lib/libabsl_*.a")
 file(GLOB RUY_LIBS  "${TFLITE_B}/_deps/ruy-build/ruy/libruy_*.a")
 
 set(TFLITE_LIBS

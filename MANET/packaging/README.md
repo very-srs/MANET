@@ -32,6 +32,8 @@ Universal files come from this repository:
 
 - `MANET/node_tools` -> `/usr/local/bin`
 - `MANET/binaries_arm64` -> `/usr/sbin`
+- `MANET/lyra_arm64/libgstlyra.so` -> `/usr/lib/aarch64-linux-gnu/gstreamer-1.0`
+- `MANET/lyra_arm64/model_coeffs` -> `/usr/local/share/lyra/model_coeffs`
 - `MANET/systemd` -> `/etc/systemd/system`
 - `MANET/systemd-network` -> `/etc/systemd/network`
 - `MANET/udev/rules.d` -> `/etc/udev/rules.d`
@@ -58,6 +60,45 @@ An overlay archive must be root-relative and contain only SBC-specific files:
 
 It must not contain universal scripts from `MANET/node_tools`, systemd units,
 dispatcher hooks, dashboard files, or generated config from a live node.
+
+## Lyra codec plugin
+
+`voice_codec` defaults to `lyra` and provisioning writes it explicitly, so the
+plugin is a hard requirement rather than an optional extra: a node without it
+falls back to opus, and because the two codecs cannot hear each other, that node
+is deaf and mute on the rest of the mesh. Every builder warns loudly if the
+artifacts are absent.
+
+Two artifacts, both committed under `MANET/lyra_arm64/`:
+
+- `libgstlyra.so` — the GStreamer plugin (`lyraenc`, `lyradec`, `rtplyrapay`,
+  `rtplyradepay`), statically linked against Lyra, TFLite and abseil, so its only
+  runtime needs are glibc, libstdc++ and GStreamer itself.
+- `model_coeffs/` — the Lyra v2 model weights, loaded at pipeline build.
+
+They are built in two stages, and the split is not arbitrary:
+
+```bash
+# 1. Cross-build Lyra and its dependencies on the dev machine. Needs cmake, git,
+#    make and the aarch64-linux-gnu toolchain. Long, and several GB of disk.
+bash MANET/packaging/build-lyra-aarch64.sh ~/lyra-aarch64-build
+
+# 2. Build the plugin *natively on an aarch64 node*. Cross-linking this stage
+#    would need a full aarch64 sysroot with GStreamer and glib headers, which is
+#    more setup than compiling ~500 lines on the target.
+sudo apt install -y build-essential pkg-config \
+     libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
+make -C MANET/packaging/gst-lyra LYRA_BUILD=~/lyra-aarch64-build
+
+# 3. Commit the results so every tarball carries them.
+cp MANET/packaging/gst-lyra/libgstlyra.so   MANET/lyra_arm64/
+cp -r ~/lyra-aarch64-build/out/model_coeffs MANET/lyra_arm64/
+```
+
+Stage 1 output is only needed to produce stage 2; it does not ship. Verify on a
+node with `gst-inspect-1.0 lyraenc`, and check `journalctl -u mesh-voice` for the
+fallback line — the daemon reports the codec it actually built with, and the
+VOICE tab flags a mismatch in red.
 
 ## RPi5 overlay contract
 
