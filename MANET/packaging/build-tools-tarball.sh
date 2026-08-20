@@ -17,7 +17,10 @@ set -euo pipefail
 # Still excluded, deliberately:
 #   * the SBC overlay (kernel, modules, firmware) — that is what -install is for
 #   * pre-built binaries (alfred, batctl, wpa_supplicant_s1g) — size, and they
-#     change far less often than the scripts
+#     change far less often than the scripts. The Lyra plugin is the exception
+#     and is carried: voice_codec now defaults to lyra, so a fielded node
+#     without it is deaf and mute on a lyra mesh, which is a functional
+#     regression rather than a missing nicety.
 #   * systemd-network configs — rewriting a live node's interface definitions
 #     from under it is a different risk class to dropping in a new unit, and
 #     belongs in a considered migration rather than every routine update
@@ -77,6 +80,21 @@ do
         ln -sf "../$unit" "$STAGE/etc/systemd/system/multi-user.target.wants/$unit"
     fi
 done
+
+# Lyra codec plugin and model weights. Carried here as well as in the install
+# tarball so a fielded board picks up the codec on a routine update instead of
+# needing a reflash — which is the whole point of this archive.
+LYRA_SRC="$REPO_ROOT/MANET/lyra_arm64"
+if [ -f "$LYRA_SRC/libgstlyra.so" ] && [ -d "$LYRA_SRC/model_coeffs" ]; then
+    install_file 0644 "$LYRA_SRC/libgstlyra.so" \
+        "$STAGE/usr/lib/aarch64-linux-gnu/gstreamer-1.0/libgstlyra.so"
+    install_tree "$LYRA_SRC/model_coeffs" "$STAGE/usr/local/share/lyra/model_coeffs"
+    chmod -R a+rX "$STAGE/usr/local/share/lyra" 2>/dev/null || true
+    echo "Lyra codec: plugin + model weights staged"
+else
+    echo "WARNING: MANET/lyra_arm64/{libgstlyra.so,model_coeffs/} missing — this" >&2
+    echo "         update will not carry the Lyra codec; nodes fall back to opus." >&2
+fi
 
 # mesh-status.py serves these from /usr/local/share/manet
 # at runtime, so an OTA update that ships the scripts without them leaves the

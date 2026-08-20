@@ -13,6 +13,7 @@ by the caller.
 import json
 import os
 import re
+import stat
 import subprocess
 import time
 
@@ -469,3 +470,84 @@ def apply_uplink_wifi(ssid, password, enabled=True):
         raise RuntimeError((r.stderr or r.stdout or '').strip()
                            or f'usb-wifi-uplink exited {r.returncode}')
     return {'ok': True, 'ssid': ssid, 'enabled': bool(enabled)}
+
+
+# --- voice codec -------------------------------------------------------------
+
+VOICE_CODECS = ('lyra', 'opus')
+MESH_CONF_FILE = '/etc/mesh.conf'
+
+
+def set_mesh_conf_key(key, value, conf_file=MESH_CONF_FILE):
+    """Replace one key in mesh.conf, leaving every other line byte for byte.
+
+    mesh.conf holds mesh_key and admin_password, so this is deliberately
+    conservative: only the named key is touched, duplicates are collapsed
+    rather than stacked, the original mode and ownership are carried over, and
+    the replacement lands by atomic rename. A crash mid-write cannot leave a
+    node with a truncated config and no way back in.
+    """
+    with open(conf_file) as f:
+        lines = f.readlines()
+
+    out, replaced = [], False
+    for line in lines:
+        if line.split('=', 1)[0].strip() == key:
+            if not replaced:
+                out.append('%s=%s\n' % (key, value))
+                replaced = True
+            continue
+        out.append(line)
+    if not replaced:
+        if out and not out[-1].endswith('\n'):
+            out[-1] += '\n'
+        out.append('%s=%s\n' % (key, value))
+
+    tmp = conf_file + '.tmp'
+    try:
+        st = os.stat(conf_file)
+        with open(tmp, 'w') as f:
+            f.writelines(out)
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp, stat.S_IMODE(st.st_mode))
+        try:
+            os.chown(tmp, st.st_uid, st.st_gid)
+        except PermissionError:
+            pass          # not root: mode still carried, ownership stays ours
+        os.replace(tmp, conf_file)
+    except OSError:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def apply_voice_codec(codec):
+    """Switch this node's voice codec.
+
+    Restart, not reload: mesh-voice's SIGHUP path retunes the talk group only.
+    A codec change swaps the encoder, payloader, RTP clock rate and the raw
+    caps either side of it, which means rebuilding both pipelines.
+
+    This is staged mesh-wide through Alfred rather than applied node by node
+    because the two codecs cannot hear each other. Sender and receiver both
+    derive their RTP payload type and clock rate from this one setting, so a
+    node left on the other codec is mutually inaudible -- it is not degraded
+    audio, it is silence. See the codec note in node_tools/README.md.
+    """
+    codec = (codec or '').strip().lower()
+    if codec not in VOICE_CODECS:
+        raise ValueError('codec must be one of: %s' % ', '.join(VOICE_CODECS))
+
+    set_mesh_conf_key('voice_codec', codec)
+
+    restarted = False
+    try:
+        r = subprocess.run(['systemctl', 'restart', 'mesh-voice'],
+                           timeout=30, stderr=subprocess.DEVNULL)
+        restarted = r.returncode == 0
+    except Exception:
+        pass
+    return {'ok': True, 'codec': codec, 'restarted': restarted}
