@@ -127,7 +127,12 @@ TALK_GROUP_BASE_PORT = 38801
 TALK_GROUP_PORT_STRIDE = 2
 TALK_GROUP_MAX = 32
 
-# Opus/RTP. 111 is the conventional dynamic payload type for Opus.
+# One payload type for both codecs. 111 is the conventional dynamic PT for
+# Opus, and Lyra reuses it rather than claiming a second number, which is
+# exactly why the two cannot interoperate: a node running opus accepts a
+# PT=111 lyra packet as if it were opus. Nothing on the wire distinguishes
+# them, so the codec is a fleet-wide setting staged through alfred rather
+# than a per-radio one. See apply_voice_codec() in manet_radio.py.
 RTP_PAYLOAD_TYPE = 111
 SAMPLE_RATE = 48000
 # Opus pins its RTP clock at 48 kHz whatever the input rate; Lyra is a 16 kHz
