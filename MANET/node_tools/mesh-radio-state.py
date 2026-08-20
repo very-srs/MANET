@@ -24,6 +24,7 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from manet_radio import (
     apply_txpower, apply_halow_channel, apply_wifi_channel, apply_uplink_wifi,
+    apply_voice_codec,
 )
 
 
@@ -39,7 +40,8 @@ VALID_STATES = ("up", "down")
 # Keys a radio_state package may carry besides "desired". Every one of these
 # is a change that has to land on every node at the same time, which is why
 # they are staged through Alfred rather than pushed node to node.
-ACTION_KEYS = ("desired", "txpower", "halow_channel", "wifi_channel", "uplink_wifi")
+ACTION_KEYS = ("desired", "txpower", "halow_channel", "wifi_channel",
+               "uplink_wifi", "voice_codec")
 
 
 def log(msg):
@@ -346,6 +348,14 @@ def apply_package(pkg):
         log(f"Applying USB Wi-Fi uplink ssid={uplink.get('ssid')}")
         apply_uplink_wifi(uplink.get("ssid"), uplink.get("password"),
                           uplink.get("enabled", True))
+
+    voice = pkg.get("voice_codec")
+    if voice:
+        codec = voice.get("codec") if isinstance(voice, dict) else voice
+        log(f"Applying voice codec {codec}")
+        result = apply_voice_codec(codec)
+        if not result.get("ok"):
+            raise RuntimeError(result.get("error", "voice codec failed"))
 
     record_current_state(pkg)
 

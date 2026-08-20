@@ -588,6 +588,12 @@ echo "voice=__VOICE_ENABLED__" >> /etc/mesh.conf
 # web UI (and later the enclosure rotary switch), not a build-time one —
 # baking it into the image would mean reflashing to change channel.
 echo "voice_channel=1" >> /etc/mesh.conf
+# Codec, written explicitly rather than left to the daemon's default. This is
+# a mesh-wide setting -- the two codecs cannot hear each other -- so every node
+# has to leave the factory agreeing on it, and "whatever mesh-voice.py happens
+# to default to this release" is not agreement. Change it fleet-wide from the
+# VOICE tab, which stages it over Alfred like a channel or key change.
+echo "voice_codec=lyra" >> /etc/mesh.conf
 echo "acs=__AUTO_CHANNEL__" >> /etc/mesh.conf
 echo "eud=__EUD_CONNECTION__" >> /etc/mesh.conf
 echo "max_euds_per_node=__MAX_EUDS_PER_NODE__" >> /etc/mesh.conf

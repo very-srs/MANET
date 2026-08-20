@@ -49,6 +49,26 @@ install_file 0755 "$REPO_ROOT/MANET/binaries_arm64/batctl" "$STAGE/usr/sbin/batc
 install_file 0755 "$REPO_ROOT/MANET/binaries_arm64/wpa_cli_s1g" "$STAGE/usr/sbin/wpa_cli_s1g"
 install_file 0755 "$REPO_ROOT/MANET/binaries_arm64/wpa_supplicant_s1g" "$STAGE/usr/sbin/wpa_supplicant_s1g"
 
+# ── Lyra codec plugin ─────────────────────────────────────────────────────────
+# voice_codec defaults to lyra, and a node without these two artifacts falls
+# back to opus — which on a lyra mesh means it is deaf and mute, not merely
+# lower quality. So this warns loudly rather than skipping quietly the way
+# install_file does. Build them with:
+#   MANET/packaging/build-lyra-aarch64.sh          (cross-builds liblyra + deps)
+#   make -C MANET/packaging/gst-lyra               (natively, on an aarch64 node)
+# then drop the results in MANET/lyra_arm64/.
+LYRA_SRC="$REPO_ROOT/MANET/lyra_arm64"
+if [ -f "$LYRA_SRC/libgstlyra.so" ] && [ -d "$LYRA_SRC/model_coeffs" ]; then
+    install_file 0644 "$LYRA_SRC/libgstlyra.so" \
+        "$STAGE/usr/lib/aarch64-linux-gnu/gstreamer-1.0/libgstlyra.so"
+    install_tree "$LYRA_SRC/model_coeffs" "$STAGE/usr/local/share/lyra/model_coeffs"
+    echo "Lyra codec: plugin + model weights staged"
+else
+    echo "WARNING: MANET/lyra_arm64/{libgstlyra.so,model_coeffs/} missing — the" >&2
+    echo "         tarball will ship without the Lyra codec, and every node will" >&2
+    echo "         fall back to opus. See MANET/packaging/README.md." >&2
+fi
+
 install_tree "$REPO_ROOT/MANET/systemd" "$STAGE/etc/systemd/system"
 install_tree "$REPO_ROOT/MANET/systemd-network" "$STAGE/etc/systemd/network"
 install_tree "$REPO_ROOT/MANET/udev/rules.d" "$STAGE/etc/udev/rules.d"

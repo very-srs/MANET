@@ -152,9 +152,19 @@ RX  udpsrc  -> rtpbin -+-> <depay> -> <dec> -\
                                 (one branch per talker)
 ```
 
-`voice_codec` selects the codec pair: `opus` (stock elements, the default) or
-`lyra` (needs `libgstlyra.so` and the model weights; falls back to opus with a
-log if either is missing).
+`voice_codec` selects the codec pair: `lyra` (the default; needs
+`libgstlyra.so` and the model weights) or `opus` (stock elements). A node
+missing the lyra plugin or the model directory falls back to opus and logs why.
+
+**The two codecs do not interoperate, and the failure mode is silence.** Both
+the RTP payload type and the clock rate come from this one setting, and a
+receiver builds every decode branch from its *own* configured codec rather
+than from what actually arrived — so a node left on the other codec does not
+get degraded audio, it gets nothing. That is why the codec is a mesh-wide
+setting staged over Alfred (see below) and not a per-radio one like the talk
+group, and it is why the silent fallback above matters: on a Lyra mesh, a node
+whose plugin is missing is both deaf and mute. Check for the fallback log line
+after any install.
 
 The daemon only supervises: it reads the PTT button, keeps the unicast peer
 list current, and publishes `/run/mesh-voice.json` for the UI.
@@ -298,6 +308,23 @@ node, at which point the decoders, not the audio, are the constraint.
 `ignore-inactive-pads` on the mixer is required rather than optional once
 branches are kept: they are silent between transmissions and the mixer would
 otherwise wait on them.
+
+**Codec is mesh-wide and staged like a channel change.** The CODEC card in
+the VOICE tab posts to `/api/voice/codec`, which calls
+`coordinate_radio_change({'voice_codec': ...})` — the same two-phase path as a
+HaLow channel or WPA key change. The package is staged over Alfred, every node
+ACKs it, and only then is `activate_at` set ~20 s out so the whole fleet
+switches on a common clock. If any node fails to ACK, the change is cancelled
+and nothing moves: staying wholly on the old codec is always better than
+splitting the mesh in half. On activation each node runs
+`apply_voice_codec()` (in `manet_radio.py`), which rewrites `voice_codec` in
+`/etc/mesh.conf` and *restarts* mesh-voice — a restart rather than a reload,
+because swapping the codec changes the encoder, payloader, RTP clock rate and
+the raw caps either side of them, so both pipelines have to be rebuilt.
+
+A node that was powered off during the change comes back on the old codec and
+is mutually inaudible until it is changed too. There is no automatic
+reconciliation; re-issue the change from the UI with the node up.
 
 **Talk group is per-radio and changed at runtime.** Every node is flashed on
 group 1; the operator moves it from the VOICE tab of the web UI, which writes
@@ -443,7 +470,7 @@ Config keys in `/etc/mesh.conf`:
 | `voice_max_talkers` | `8` | Floor for warm decode branches; raised to registry nodes + 2, hard cap 64 (~5.3 MB each with lyra) |
 | `voice_beacon_sec` | `600` | Safety-net beacon interval; beacons are normally sent on start-up and on new peers. 0 disables |
 | `voice_dscp` | `48` | DSCP marking — CS6, see the QoS note above |
-| `voice_codec` | `opus` | `opus` or `lyra`; lyra falls back to opus if the plugin or model weights are missing |
+| `voice_codec` | `lyra` | `lyra` or `opus`; lyra falls back to opus if the plugin or model weights are missing. Mesh-wide — change it from the UI, not by hand, or the node goes silent |
 | `voice_bitrate` | `32000` | Opus bitrate |
 | `voice_frame_ms` | `20` | Opus frame duration: 10, 20, 40 or 60 |
 | `voice_lyra_bitrate` | `6000` | Lyra rate: 3200, 6000 or 9200 only |

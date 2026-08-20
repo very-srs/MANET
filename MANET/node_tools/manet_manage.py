@@ -2507,6 +2507,19 @@ VOICE_TAB_CSS = r"""
 .voice-tg-msg { min-height: 16px; font-size: 11px; padding-top: 10px;
                 color: var(--muted); }
 .voice-tg-msg.err { color: #b3261e; }
+/* Codec picker. Two mutually exclusive options rather than a dropdown: this
+   is a mesh-wide change with a real failure mode, so it should not be
+   possible to change it by scrolling past it. */
+.voice-codec-pick { display: grid; gap: 8px; grid-template-columns: 1fr 1fr; }
+.voice-codec-opt { display: flex; flex-direction: column; gap: 3px; padding: 12px 10px;
+                   border: 1px solid var(--border); border-radius: 8px;
+                   background: var(--card); color: inherit; cursor: pointer;
+                   text-align: left; font: inherit; }
+.voice-codec-opt b { font-size: 15px; }
+.voice-codec-opt span { font-size: 11px; color: var(--muted); }
+.voice-codec-opt.sel { background: #2f6f3e; border-color: #2f6f3e; color: #fff; }
+.voice-codec-opt.sel span { color: rgba(255,255,255,.85); }
+.voice-codec-opt:disabled { opacity: .45; cursor: default; }
 @media (max-width: 420px) {
   .voice-tg-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 }
@@ -2559,6 +2572,24 @@ VOICE_TAB_HTML = r"""
     <div class="voice-note">Talk group is this radio only — it is not pushed to
       the mesh. Every group shares one multicast address and differs by port, so
       changing it never causes an IGMP leave/join.</div>
+  </div>
+
+  <div class="voice-card">
+    <div class="voice-card-hdr">CODEC</div>
+    <div class="voice-card-body">
+      <div class="voice-codec-pick">
+        <button class="voice-codec-opt" id="voice-codec-lyra" onclick="voiceSetCodec('lyra')">
+          <b>Lyra</b><span>6 kbps neural — default</span></button>
+        <button class="voice-codec-opt" id="voice-codec-opus" onclick="voiceSetCodec('opus')">
+          <b>Opus</b><span>32 kbps, stock elements</span></button>
+      </div>
+      <div class="voice-tg-msg" id="voice-codec-msg"></div>
+    </div>
+    <div class="voice-note">Codec is mesh-wide, not per radio. The two do not
+      interoperate — a node left on the other codec hears silence, not degraded
+      audio — so this is staged over Alfred like a channel or key change: every
+      node ACKs, then all switch together. If any node fails to ACK, nothing
+      moves. Expect a short break in audio as each node restarts its pipeline.</div>
   </div>
 
   <div class="voice-card">
@@ -2657,6 +2688,63 @@ function voiceTgMsg(text, isErr) {
   m.className = 'voice-tg-msg' + (isErr ? ' err' : '');
 }
 
+var voiceCodec = null, voiceCodecBusy = false;
+
+function voiceCodecPaint(codec) {
+  ['lyra', 'opus'].forEach(c => {
+    const b = document.getElementById('voice-codec-' + c);
+    if (!b) return;
+    b.classList.toggle('sel', c === codec);
+    b.disabled = voiceCodecBusy;
+  });
+}
+
+function voiceCodecMsg(text, isErr) {
+  const m = document.getElementById('voice-codec-msg');
+  if (!m) return;
+  m.textContent = text || '';
+  m.className = 'voice-tg-msg' + (isErr ? ' err' : '');
+}
+
+// Mesh-wide and disruptive, so unlike the talk group this asks first. The
+// round trip is long — every node has to ACK before anything activates — so
+// the button stays disabled for the duration rather than looking idle.
+async function voiceSetCodec(codec) {
+  if (voiceCodecBusy || codec === voiceCodec) return;
+  const other = codec === 'lyra' ? 'Opus' : 'Lyra';
+  if (!confirm('Switch the whole mesh from ' + other + ' to ' +
+               (codec === 'lyra' ? 'Lyra' : 'Opus') + '?\n\n' +
+               'Every node restarts its voice pipeline. Audio drops for a few ' +
+               'seconds. If any node does not ACK, the change is cancelled.')) return;
+  voiceCodecBusy = true;
+  voiceCodecPaint(voiceCodec);
+  voiceCodecMsg('Staging across the mesh — waiting for every node to ACK…');
+  try {
+    const r = await fetch(U('/api/voice/codec'), {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({codec})
+    });
+    const j = await r.json();
+    if (j.ok) {
+      voiceCodec = j.codec;
+      // coordinate_radio_change() returns once every node has ACKed, but the
+      // package activates on a common clock ~20 s later, so this is staged,
+      // not done. The poll above repaints from the daemon when it lands.
+      voiceCodecMsg('Staged on ' + ((j.acked || []).length || 'all') +
+                    ' node(s) — all switching to ' +
+                    (j.codec === 'lyra' ? 'Lyra' : 'Opus') + ' together in ~20 s');
+    } else {
+      voiceCodecMsg(j.error || 'Change failed', true);
+    }
+  } catch (e) {
+    voiceCodecMsg('Change failed: ' + e, true);
+  } finally {
+    voiceCodecBusy = false;
+    voiceCodecPaint(voiceCodec);
+  }
+}
+
 function voiceStepChannel(delta) {
   if (voiceChannel === null) return;
   const n = voiceChannel + delta;
@@ -2726,6 +2814,27 @@ async function refreshVoice() {
            + (d.frame_ms || 20) + ' ms'
            + (d.frames_per_packet ? ' (' + d.frames_per_packet + ' fr/pkt)' : ''))
         : '--');
+  // The picker shows the configured codec — that is the mesh-wide setting the
+  // buttons actually change. d.codec is what the daemon *built* with, and the
+  // two differ when a missing lyra plugin or model dir forced a fallback. That
+  // gap is worth shouting about rather than hiding: on a Lyra mesh a node that
+  // fell back to Opus is deaf and mute, not merely lower quality.
+  const cfgCodec = d.codec_configured || d.codec;
+  if (!voiceCodecBusy && cfgCodec && cfgCodec !== voiceCodec) {
+    voiceCodec = cfgCodec;
+    voiceCodecPaint(voiceCodec);
+  }
+  if (!voiceCodecBusy) {
+    if (d.codec_fallback) {
+      voiceCodecMsg('Configured for ' + (cfgCodec === 'lyra' ? 'Lyra' : 'Opus') +
+                    ' but running ' + (d.codec === 'lyra' ? 'Lyra' : 'Opus') +
+                    ' — plugin or model weights missing. This node cannot hear ' +
+                    'the rest of the mesh.', true);
+    } else if (document.getElementById('voice-codec-msg') &&
+               document.getElementById('voice-codec-msg').classList.contains('err')) {
+      voiceCodecMsg('');
+    }
+  }
   vTxt('voice-qos', (d.dscp !== undefined && d.dscp !== null)
         ? ('DSCP ' + d.dscp + (d.dscp === 46 ? ' (EF)' : '')) : '--');
   // Receive is conference style: one decode branch per talker, all mixed. This
@@ -2804,6 +2913,9 @@ VOICE_STATE_FILE = '/run/mesh-voice.json'
 
 
 VOICE_CHANNEL_MAX = 32
+# Lyra is the default; opus stays selectable for anyone who wants stock
+# elements. They do not interoperate -- see set_voice_codec_all().
+VOICE_CODECS = ('lyra', 'opus')
 
 
 def set_voice_channel(channel):
@@ -2878,6 +2990,33 @@ def set_voice_channel(channel):
         pass
 
     return {'ok': True, 'channel': channel, 'reloaded': reloaded}
+
+
+def set_voice_codec_all(codec):
+    """Change the voice codec on every node at once.
+
+    The opposite of set_voice_channel() above, and for a concrete reason: talk
+    groups are per-radio because two operators on different groups simply do
+    not hear each other, which is the intent. Two operators on different
+    *codecs* also do not hear each other, which is never the intent -- the
+    payload type and RTP clock rate both come from this setting, and a receiver
+    decodes with its own configured codec rather than with whatever arrived.
+    A split fleet is a silently broken fleet.
+
+    So this goes through coordinate_radio_change() exactly like a HaLow channel
+    or a WPA key: staged over Alfred, ACKed by every node, then activated on a
+    common wall clock. If any node fails to ACK the change is cancelled and
+    nothing moves, which is the behaviour we want -- better to stay wholly on
+    the old codec than to split the mesh in half.
+    """
+    codec = (codec or '').strip().lower()
+    if codec not in VOICE_CODECS:
+        return {'ok': False,
+                'error': 'Codec must be one of: %s' % ', '.join(VOICE_CODECS)}
+    result = coordinate_radio_change({'voice_codec': {'codec': codec}})
+    if result.get('ok'):
+        result['codec'] = codec
+    return result
 
 
 def voice_status():
@@ -3859,6 +3998,15 @@ class ManageRoutes:
             try:
                 req = json.loads(body)
                 self.send_json(set_voice_channel(req.get('channel')))
+            except Exception as e:
+                self.send_json({'ok': False, 'error': str(e)})
+
+        elif path == '/api/voice/codec':
+            # Mesh-wide, unlike the talk group: the codecs cannot hear each
+            # other, so this is staged over Alfred like a channel or key change.
+            try:
+                req = json.loads(body)
+                self.send_json(set_voice_codec_all(req.get('codec')))
             except Exception as e:
                 self.send_json({'ok': False, 'error': str(e)})
 
