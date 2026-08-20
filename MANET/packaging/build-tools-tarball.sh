@@ -59,6 +59,15 @@ find "$STAGE/usr/local/bin" -type f \
 
 install_file 0644 "$REPO_ROOT/MANET/etc/manet_version.txt" "$STAGE/etc/manet_version.txt"
 
+# Persistent journal. Carried by the tools tarball as well as the install one so
+# that a fielded board picks it up without being reflashed — a node that resets
+# is exactly the node whose logs you want, and until this lands its journal is
+# in /run and every reset erases the evidence. Takes effect at the next boot,
+# like the units below.
+install_file 0644 \
+    "$REPO_ROOT/MANET/etc/systemd/journald.conf.d/99-manet-persistent.conf" \
+    "$STAGE/etc/systemd/journald.conf.d/99-manet-persistent.conf"
+
 # Units and udev rules. node-update.sh only extracts -- it does not run
 # daemon-reload or udevadm -- so a new unit becomes active at the next boot via
 # the enable symlink below, and anything needing to happen sooner does it from
