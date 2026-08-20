@@ -1,5 +1,5 @@
 [Unit]
-Description=Mesh push-to-talk voice — Opus/RTP over multicast
+Description=Mesh push-to-talk voice — Lyra/RTP over multicast
 # br0 must exist and hold an address before the send socket can be bound to
 # it, and the multicast group is joined on it. batman-enslave brings the mesh
 # side of that bridge up.
