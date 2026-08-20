@@ -24,10 +24,20 @@ rm -f /usr/lib/raspberrypi-sys-mods/firstboot 2>/dev/null || true
 # Allow apt to function without a correct system date
 echo "APT::Check-Date "false";" >  /etc/apt/apt.conf.d/99no-time-checks.conf
 
-# set up persistent logging, this is not working
+# Persistent logging. The install tarball drops
+# /etc/systemd/journald.conf.d/99-manet-persistent.conf, which is what actually
+# turns this on — it has to sort after RPi OS's own 40-rpi-volatile-storage.conf
+# (Storage=volatile) to win. Creating the directory and fixing its ownership is
+# still worth doing here so journald has somewhere to flush to on this first
+# boot, before the tarball has been extracted. An earlier version of this block
+# did only the chown/chmod and was marked "this is not working": it could not
+# work, because storage was explicitly volatile no matter what the directory
+# looked like.
+mkdir -p /var/log/journal
 chown root:systemd-journal /var/log/journal
 chmod 2755 /var/log/journal
 systemctl restart systemd-journald
+journalctl --flush 2>/dev/null || true
 
 
 # Create the radio user with proper groups
