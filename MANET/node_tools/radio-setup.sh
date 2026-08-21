@@ -823,6 +823,34 @@ else
     echo " > Interface names already match desired layout, no rename needed"
 fi
 
+# Mesh (SAE) supplicant config for one interface. Used for the mesh interfaces
+# below, and for the AP interface, which needs a config on disk even though its
+# service stays disabled - ethernet-autodetect restarts wpa_supplicant@<ap
+# iface> when a wired EUD returns that radio to the mesh, and without this file
+# that service just fails.
+write_mesh_wpa_conf() {
+    local iface="$1" freq="$2"
+cat <<-EOF > /etc/wpa_supplicant/wpa_supplicant-$iface-lobby.conf
+ctrl_interface=/var/run/wpa_supplicant
+country=$CFG80211_REGDOM
+update_config=1
+sae_pwe=1
+ap_scan=2
+network={
+    ssid="$MESH_NAME"
+    mode=5
+    frequency=${freq}
+    key_mgmt=SAE
+    sae_password="$KEY"
+    ieee80211w=2
+    mesh_fwding=0
+    group_rekey=0
+}
+EOF
+    cp /etc/wpa_supplicant/wpa_supplicant-$iface-lobby.conf \
+       /etc/wpa_supplicant/wpa_supplicant-$iface.conf
+}
+
 for WLAN in $(cat /var/lib/mesh_if); do
     # If interface renames are pending the names we have now are the pre-rename
     # names. Skip config writes; the post-reboot re-run will write them with
@@ -845,24 +873,7 @@ for WLAN in $(cat /var/lib/mesh_if); do
     fi
 
     echo " > Setting SAE key/SSID for $WLAN (${FREQ} MHz) ..."
-
-cat <<-EOF > /etc/wpa_supplicant/wpa_supplicant-$WLAN-lobby.conf
-ctrl_interface=/var/run/wpa_supplicant
-country=$CFG80211_REGDOM
-update_config=1
-sae_pwe=1
-ap_scan=2
-network={
-    ssid="$MESH_NAME"
-    mode=5
-    frequency=${FREQ}
-    key_mgmt=SAE
-    sae_password="$KEY"
-    ieee80211w=2
-    mesh_fwding=0
-    group_rekey=0
-}
-EOF
+    write_mesh_wpa_conf "$WLAN" "$FREQ"
 
     # Create the network interface config
 cat <<-EOF > /etc/systemd/network/30-$WLAN.network
@@ -877,7 +888,6 @@ MTUBytes=1532
 EOF
 
     echo " > Enabling $WLAN for mesh use ..."
-    cp /etc/wpa_supplicant/wpa_supplicant-$WLAN-lobby.conf /etc/wpa_supplicant/wpa_supplicant-$WLAN.conf
     systemctl enable wpa_supplicant@$WLAN.service
 done
 
@@ -888,8 +898,22 @@ done
 HOST_MAC=$(ip a | grep -A1 $(networkctl | grep -v bat | awk '/ether/ {print $2}' | head -1) \
    | awk '/ether/ {print $2}' | cut -d':' -f 5-6 | sed 's/://g')
 
-if [[ -n "$AP_INTERFACE" ]]; then
+if [[ -n "$AP_INTERFACE" ]] && [ "$needs_rerun" -eq 1 ]; then
+    echo " > Rename pending - deferring AP config to post-reboot re-run"
+elif [[ -n "$AP_INTERFACE" ]]; then
     echo "Configuring $AP_INTERFACE as access point..."
+
+    # The AP radio also needs a mesh config on disk: in wired-EUD mode
+    # ethernet-autodetect hands it back to the mesh and restarts
+    # wpa_supplicant@$AP_INTERFACE. The service stays disabled - only that
+    # path starts it.
+    AP_MESH_FREQ=$(iface_mesh_freq "$AP_INTERFACE")
+    if [[ -n "$AP_MESH_FREQ" ]]; then
+        echo " > Writing mesh config for $AP_INTERFACE (${AP_MESH_FREQ} MHz, service left disabled)"
+        write_mesh_wpa_conf "$AP_INTERFACE" "$AP_MESH_FREQ"
+    else
+        echo " > WARNING: cannot determine mesh band for $AP_INTERFACE, no mesh config written"
+    fi
 
 cat <<-EOF > /etc/systemd/system/ap-interface-setup.service
 [Unit]
@@ -1030,6 +1054,16 @@ EOF
         systemctl unmask hostapd.service
         echo " > Auto mode: AP services staged (ethernet-autodetect will manage)"
         systemctl disable hostapd.service
+        # A hostapd started before this run holds the interface its old config
+        # named. After the first-boot rename that name can belong to a
+        # different radio - on the bench CM4s it was the HaLow one - and
+        # nothing here would ever move it. Only restart a daemon that is
+        # already up; whether the AP runs at all in auto mode stays
+        # ethernet-autodetect's decision.
+        if systemctl is-active --quiet hostapd.service; then
+            echo " > Restarting running hostapd onto $AP_INTERFACE"
+            systemctl restart hostapd.service 2>/dev/null || true
+        fi
     fi
 
     echo "AP configuration complete for $AP_INTERFACE"

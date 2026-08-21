@@ -41,6 +41,37 @@ enable_if_disabled() {
     return 0
 }
 
+# hostapd binds the interface named in its config at start time, and
+# "systemctl start" is a no-op against a unit that is already active. If the
+# radio names moved under it - radio-setup renames interfaces on first boot and
+# reboots - the running daemon keeps whatever it grabbed then. On both bench
+# CM4s that was the HaLow radio, which left the S1G mesh dead and the real AP
+# radio idle. An interface hostapd has released keeps "type AP" but loses its
+# SSID and its carrier, so test the interface the config names rather than
+# looking for whichever interface is type AP.
+hostapd_serving() {
+    iw dev "$1" info 2>/dev/null | grep -q '^[[:space:]]*type AP$' && \
+        [ "$(cat /sys/class/net/"$1"/carrier 2>/dev/null)" = "1" ]
+}
+
+start_hostapd_checked() {
+    local want
+    want=$(grep -E '^[[:space:]]*interface=' /etc/hostapd/hostapd.conf 2>/dev/null \
+           | head -1 | cut -d'=' -f2)
+    if [ -n "$want" ] && systemctl is-active --quiet hostapd.service; then
+        if ! hostapd_serving "$want"; then
+            sleep 2     # it may simply still be coming up
+            if ! hostapd_serving "$want"; then
+                log "hostapd is up but $want is not serving - restarting onto it"
+                systemctl restart hostapd.service 2>/dev/null
+                return 0
+            fi
+        fi
+    fi
+    systemctl start hostapd.service 2>/dev/null
+    return 0
+}
+
 # Determine which upstream interface to use.
 # Priority: end0 (native ethernet) > USB ethernet (usb*, enx*)
 # Can be overridden by passing --iface <name> or via /var/run/upstream_iface
@@ -329,7 +360,7 @@ if [ "$CARRIER" != "1" ]; then
 
         unmask_if_masked dnsmasq.service
         enable_if_disabled hostapd.service
-        systemctl start hostapd.service 2>/dev/null
+        start_hostapd_checked
         enable_if_disabled dnsmasq.service
         systemctl start dnsmasq.service 2>/dev/null
 
@@ -473,7 +504,7 @@ if [ "$DETECTED_MODE" == "gateway" ]; then
 
         unmask_if_masked dnsmasq.service
         enable_if_disabled hostapd.service
-        systemctl start hostapd.service 2>/dev/null
+        start_hostapd_checked
         enable_if_disabled dnsmasq.service
         systemctl start dnsmasq.service 2>/dev/null
         systemctl start ap-txpower.service 2>/dev/null
@@ -498,7 +529,7 @@ if [ "$DETECTED_MODE" == "gateway" ]; then
 
         unmask_if_masked dnsmasq.service
         enable_if_disabled hostapd.service
-        systemctl start hostapd.service 2>/dev/null
+        start_hostapd_checked
         enable_if_disabled dnsmasq.service
         systemctl start dnsmasq.service 2>/dev/null
         systemctl start ap-txpower.service 2>/dev/null
@@ -520,8 +551,11 @@ if [ "$DETECTED_MODE" == "gateway" ]; then
             ip link set "$AP_INTERFACE" nomaster 2>/dev/null || true
             sleep 1
 
-            # Set to mesh mode and bring up
+            # Set to mesh mode and bring up. The AP interface carries no
+            # MTUBytes from networkd (its .network is Unmanaged for hostapd),
+            # so set the batman header allowance here or bat0 drops to 1468.
             iw dev "$AP_INTERFACE" set type mesh
+            ip link set "$AP_INTERFACE" mtu 1532 2>/dev/null || true
             ip link set "$AP_INTERFACE" up
             sleep 1
             # Restart wpa_supplicant for this interface to join mesh
@@ -600,8 +634,11 @@ elif [ "$DETECTED_MODE" == "wired-eud" ]; then
                 ip link set "$AP_INTERFACE" down
                 sleep 1
 
-                # Set to mesh mode and bring up
+                # Set to mesh mode and bring up. The AP interface carries no
+                # MTUBytes from networkd (its .network is Unmanaged for hostapd),
+                # so set the batman header allowance here or bat0 drops to 1468.
                 iw dev "$AP_INTERFACE" set type mesh
+                ip link set "$AP_INTERFACE" mtu 1532 2>/dev/null || true
                 ip link set "$AP_INTERFACE" up
                 sleep 1
                 # Restart wpa_supplicant for this interface to join mesh
