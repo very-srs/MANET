@@ -141,6 +141,11 @@ chmod 0755 \
 
 # ── systemd unit enables ──────────────────────────────────────────────────────
 
+# The list below has drifted between the four builders before now: the cm4 and
+# r3a install tarballs shipped mesh-voice.service without its enable symlink,
+# so a freshly flashed node had voice=y in mesh.conf, the right codec, the Lyra
+# plugin -- and a service that never started. Keep this list in step with
+# build-tools-tarball.sh and the other install builders when adding a unit.
 mkdir -p "$STAGE/etc/systemd/system/multi-user.target.wants"
 for unit in \
     ethernet-autodetect.service \
@@ -148,7 +153,9 @@ for unit in \
     mesh-default-route-fix.service \
     sae-watchdog.service \
     ebtables-restore.service \
-    batman-enslave-watch.service
+    batman-enslave-watch.service \
+    mesh-voice.service \
+    manet-voice-setup.service
 do
     if [ -f "$STAGE/etc/systemd/system/$unit" ]; then
         ln -sf "../$unit" "$STAGE/etc/systemd/system/multi-user.target.wants/$unit"
