@@ -183,6 +183,20 @@ BEACON_MS = 140
 PTT_DEBOUNCE_MS = 150
 HALF_DUPLEX_HOLD_MS = 500
 RX_IDLE_MS = 500
+
+# Pipeline restart backoff. A pipeline whose audio device is simply not there —
+# a node provisioned with voice=y before its OpenVLM board is fitted — used to
+# retry on a flat 5s timer for ever, logging the same two ALSA errors each
+# time: ~73 journal lines a minute, ~105k a day. That was survivable while the
+# journal lived in RAM, but it now persists to the card, so the noise wears the
+# card and evicts the history that persistence exists to keep. Back off instead,
+# and say it once.
+PIPELINE_RETRY_BASE_SEC = 5
+PIPELINE_RETRY_MAX_SEC = 300
+# An error arriving this long after the previous one is a fresh fault, not a
+# continuation, so it starts from the base delay again rather than inheriting a
+# five-minute backoff from something that healed hours ago.
+PIPELINE_RETRY_RESET_SEC = 900
 REGISTRY_POLL_SEC = 30
 STATE_WRITE_SEC = 2
 
@@ -640,6 +654,8 @@ class MeshVoice:
         self.rx_active = False
         self.rx_packets = 0
         self.tx_packets = 0
+        # Per-pipeline restart state, keyed "tx"/"rx". See _note_pipeline_error.
+        self._pipeline_fault = {}
         self.peers = []
         self.local_ips = local_ipv4_addresses()
         self.ptt = None
@@ -921,10 +937,9 @@ class MeshVoice:
     def _on_bus_message(self, _bus, message, which):
         if message.type == Gst.MessageType.ERROR:
             err, debug = message.parse_error()
-            log("%s pipeline error: %s (%s)" % (which, err.message, debug))
             # An audio device can vanish on USB reset; keep the process alive so
             # systemd's restart backoff is not the recovery path for a replug.
-            GLib.timeout_add_seconds(5, self._restart, which)
+            self._note_pipeline_error(which, err.message, debug)
         elif message.type == Gst.MessageType.ELEMENT:
             struct = message.get_structure()
             if struct and struct.get_name() == "level":
@@ -1006,20 +1021,84 @@ class MeshVoice:
         self.write_state()
         return False
 
+    def _note_pipeline_error(self, which, text, debug):
+        """Log a pipeline error and schedule a restart, backing off if it repeats.
+
+        The first occurrence of a given error is logged in full, along with when
+        the retry will happen. Identical errors after that are counted, not
+        logged — a missing sound card produces the same two lines for ever, and
+        printing them every few seconds buries everything else in the journal.
+        The tally is emitted once, on recovery or when the error changes.
+        """
+        state = self._pipeline_fault.get(which)
+        now = time.time()
+
+        if state is None or now - state["last_ts"] > PIPELINE_RETRY_RESET_SEC:
+            state = {"delay": PIPELINE_RETRY_BASE_SEC, "text": None, "repeats": 0,
+                     "last_ts": now, "capped": False}
+            self._pipeline_fault[which] = state
+        state["last_ts"] = now
+
+        if text == state["text"]:
+            state["repeats"] += 1
+            # Say something once when the backoff tops out, so a permanently
+            # broken pipeline is still visible in the log rather than going
+            # completely silent, then stay quiet.
+            if state["delay"] >= PIPELINE_RETRY_MAX_SEC and not state["capped"]:
+                state["capped"] = True
+                log("%s pipeline: still failing after %d attempt(s) — retrying "
+                    "every %ds, further identical errors suppressed"
+                    % (which, state["repeats"], PIPELINE_RETRY_MAX_SEC))
+        else:
+            self._flush_pipeline_repeats(which, state)
+            state["text"] = text
+            state["repeats"] = 0
+            state["capped"] = False
+            log("%s pipeline error: %s (%s) — retrying in %ds"
+                % (which, text, debug, state["delay"]))
+
+        GLib.timeout_add_seconds(state["delay"], self._restart, which)
+        state["delay"] = min(state["delay"] * 2, PIPELINE_RETRY_MAX_SEC)
+
+    def _flush_pipeline_repeats(self, which, state):
+        """Emit the suppressed-repeat tally, if there is one."""
+        if state and state["repeats"]:
+            log("%s pipeline: previous error repeated %d more time(s)"
+                % (which, state["repeats"]))
+            state["repeats"] = 0
+
+    def _note_pipeline_ok(self, which):
+        """A buffer flowed, so whatever was wrong with this pipeline is over."""
+        state = self._pipeline_fault.pop(which, None)
+        if state and state["text"] is not None:
+            self._flush_pipeline_repeats(which, state)
+            log("%s pipeline recovered" % which)
+
     def _restart(self, which):
         pipeline = self.tx if which == "tx" else self.rx
-        log("%s pipeline restarting" % which)
+        # Only announce the restart while the error is still being logged;
+        # during a suppressed streak this would just be more of the same noise.
+        state = self._pipeline_fault.get(which)
+        if not state or not state["repeats"]:
+            log("%s pipeline restarting" % which)
         pipeline.set_state(Gst.State.NULL)
         pipeline.set_state(Gst.State.PLAYING)
         return False  # one-shot
 
     def _on_tx_buffer(self, _pad, _info):
         self.tx_packets += 1
+        # Data flowing is the only honest evidence a pipeline came back. The
+        # dict is empty in the normal case, so this costs a truth test per
+        # buffer and nothing else.
+        if self._pipeline_fault:
+            self._note_pipeline_ok("tx")
         return Gst.PadProbeReturn.OK
 
     def _on_rx_buffer(self, _pad, _info):
         self.rx_packets += 1
         self.last_rx_ms = now_ms()
+        if self._pipeline_fault:
+            self._note_pipeline_ok("rx")
         if not self.rx_active:
             self.rx_active = True
         return Gst.PadProbeReturn.OK
