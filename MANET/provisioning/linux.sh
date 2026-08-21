@@ -318,7 +318,7 @@ ask_questions() {
                         read -p "Enter EUD AP WPA2 Key (8-63 chars) [or press Enter to generate]: " LAN_AP_KEY
                         echo
                         if [ -z "$LAN_AP_KEY" ]; then
-                               LAN_AP_KEY=$(openssl rand -base64 45  | tr -d '\n')
+                               LAN_AP_KEY=$(openssl rand -base64 10  | tr -d '\n')
                                echo "Generated LAN AP Key: $LAN_AP_KEY"
                                break
                         fi
