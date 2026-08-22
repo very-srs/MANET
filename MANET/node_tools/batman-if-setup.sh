@@ -72,6 +72,16 @@ refresh_interfaces() {
     HALOW_INTERFACES=""
     NONMESH_INTERFACES=""
 
+    # The AP radio is mesh-capable, so the runtime classification below would
+    # call it a mesh interface and start a supplicant on it. That supplicant
+    # fights hostapd for the radio: the mesh join fails with -95, and the
+    # teardown deinits the netdev out from under hostapd, which stays "active"
+    # while the AP is dead. Before the role files exist - on a first boot, or
+    # any boot where this runs before radio-setup - /var/lib/ap_interface is
+    # the only record of which radio the AP owns.
+    local AP_IFACE
+    AP_IFACE="$(cat /var/lib/ap_interface 2>/dev/null || true)"
+
     # Prefer role files written by radio-setup. This is important when a Morse
     # USB device exists but is intentionally disabled because the driver can
     # create a netdev that times out on link-up.
@@ -88,6 +98,7 @@ refresh_interfaces() {
         done
 
         for WLAN in $(cat /var/lib/mesh_if 2>/dev/null); do
+            [ "$WLAN" = "$AP_IFACE" ] && continue
             [ -d "/sys/class/net/$WLAN" ] && STANDARD_MESH_INTERFACES+="$WLAN "
         done
         for WLAN in $(cat /var/lib/halow_if 2>/dev/null); do
@@ -107,7 +118,9 @@ refresh_interfaces() {
     WLAN_INTERFACES="$(iw dev 2>/dev/null | awk '$1 == "Interface" {print $2}' | tr '\n' ' ')"
 
     for WLAN in $WLAN_INTERFACES; do
-        if is_halow "$WLAN"; then
+        if [ -n "$AP_IFACE" ] && [ "$WLAN" = "$AP_IFACE" ]; then
+            NONMESH_INTERFACES+="$WLAN "
+        elif is_halow "$WLAN"; then
             HALOW_INTERFACES+="$WLAN "
         elif is_nonmesh_wifi "$WLAN"; then
             NONMESH_INTERFACES+="$WLAN "

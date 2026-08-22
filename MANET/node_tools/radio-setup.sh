@@ -924,6 +924,12 @@ Wants=wifi-rfkill-unblock.service
 
 [Service]
 Type=oneshot
+# Do nothing if hostapd already has the radio. Before= only orders units
+# queued in one transaction, and ethernet-autodetect starts hostapd from a
+# carrier event outside it - so this unit can land after the AP is live, and
+# downing the interface here leaves hostapd active with a dead BSS that
+# nothing brings back.
+ExecCondition=/bin/sh -c '! ( systemctl is-active --quiet hostapd.service && /usr/sbin/iw dev $AP_INTERFACE info 2>/dev/null | grep -q "type AP" )'
 ExecStartPre=/usr/local/bin/unblock-wifi-rfkill.sh
 ExecStartPre=/bin/sleep 2
 ExecStartPre=-/bin/systemctl stop wpa_supplicant@${AP_INTERFACE}.service

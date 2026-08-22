@@ -46,12 +46,15 @@ enable_if_disabled() {
 # radio names moved under it - radio-setup renames interfaces on first boot and
 # reboots - the running daemon keeps whatever it grabbed then. On both bench
 # CM4s that was the HaLow radio, which left the S1G mesh dead and the real AP
-# radio idle. An interface hostapd has released keeps "type AP" but loses its
-# SSID and its carrier, so test the interface the config names rather than
-# looking for whichever interface is type AP.
+# radio idle. An interface hostapd has released, or had deinited under it,
+# keeps "type AP" but loses its SSID, so test the interface the config names
+# rather than looking for whichever interface is type AP. The SSID is the
+# discriminator rather than the carrier: during a DFS channel-availability
+# check the SSID is set while the carrier is still down, and restarting there
+# would mean CAC never completes.
 hostapd_serving() {
-    iw dev "$1" info 2>/dev/null | grep -q '^[[:space:]]*type AP$' && \
-        [ "$(cat /sys/class/net/"$1"/carrier 2>/dev/null)" = "1" ]
+    iw dev "$1" info 2>/dev/null | awk '$1 == "type" { t = $2 } $1 == "ssid" { s = 1 }
+        END { exit !(t == "AP" && s) }'
 }
 
 start_hostapd_checked() {
