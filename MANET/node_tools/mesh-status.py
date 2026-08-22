@@ -808,6 +808,32 @@ def enrich_interfaces_with_registry_mcs(ifaces, node_data):
         iface['rx_mcs'] = extra.get('rx_mcs', '')
     return ifaces
 
+_POWER_CACHE = {'at': 0.0, 'data': {'available': False}}
+
+def get_power_status():
+    """Throttling / under-voltage state, from manet-power-status.sh --json.
+
+    The decoding lives in the shell script because the motd banner needs it
+    too, and one reading of the bitmask is enough for the whole node. Cached
+    briefly: every open dashboard polls this, and the answer changes slowly.
+    """
+    now = time.time()
+    if now - _POWER_CACHE['at'] < 10:
+        return _POWER_CACHE['data']
+    data = {'available': False}
+    try:
+        out = subprocess.run(
+            ['/usr/local/bin/manet-power-status.sh', '--json'],
+            capture_output=True, text=True, timeout=5,
+        ).stdout.strip()
+        if out:
+            data = json.loads(out)
+    except Exception:
+        pass
+    _POWER_CACHE['at'] = now
+    _POWER_CACHE['data'] = data
+    return data
+
 def assemble_local_data():
     conf     = load_kv_file(MESH_CONF_FILE)
     state    = load_kv_file(MESH_STATE_FILE)
@@ -817,6 +843,7 @@ def assemble_local_data():
     euds     = get_connected_euds()
     services = get_running_services()
     uptime   = get_local_uptime()
+    power    = get_power_status()
 
     # Pull self entry from registry for extra fields
     nodes_raw = parse_registry()
@@ -864,6 +891,7 @@ def assemble_local_data():
         'interfaces': ifaces,
         'euds':      euds,
         'services':  services,
+        'power':     power,
         'eud_mode':  conf.get('eud', 'wired'),
         'ap_ssid':   conf.get('lan_ap_ssid', ''),
         'mesh_ssid': conf.get('mesh_ssid', ''),
@@ -1487,7 +1515,12 @@ STATUS_HTML = r"""<!DOCTYPE html>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>MANET Node</title>
-<style>__CSS__</style>
+<style>__CSS__
+#power-banner { padding:7px 14px; font-size:12px; font-weight:600; letter-spacing:.4px;
+  text-align:center; border-bottom:1px solid rgba(0,0,0,.25); }
+#power-banner.crit { background:var(--bad);  color:#fff; }
+#power-banner.warn { background:var(--warn); color:#000; }
+</style>
 </head>
 <body>
 <div id="app">
@@ -1516,6 +1549,7 @@ STATUS_HTML = r"""<!DOCTYPE html>
       <button id="theme-toggle" class="theme-toggle" type="button" onclick="toggleTheme()">Dark</button>
     </div>
   </div>
+  <div id="power-banner" style="display:none"></div>
   <div id="main">
     <div id="topo-panel">
       <canvas id="topo"></canvas>
@@ -1739,6 +1773,26 @@ function updateHeader(d) {
     gwEl.textContent = `via ${gwName}`;
     gwEl.className   = 'meta gw-ok';
   }
+}
+
+// A sagging supply is the most misleading fault on these boards: it surfaces
+// as radios that will not associate or a card that stops answering, and people
+// go driver hunting. The SoC knows, so say it across the top of the page
+// rather than in a row nobody scrolls to.
+function updatePowerBanner(localData) {
+  const el = document.getElementById('power-banner');
+  if (!el) return;
+  const p = localData && localData.power;
+  if (!p || !p.available || p.state === 'ok' || p.state === 'notice') {
+    el.style.display = 'none';
+    return;
+  }
+  const crit = p.state === 'critical';
+  el.className = crit ? 'crit' : 'warn';
+  el.textContent = crit
+    ? `\u26a0 UNDER-VOLTAGE NOW \u2014 this board is not getting enough power (${p.raw}). Radio faults are expected; check the PSU and cable.`
+    : `\u26a0 Power problem recorded since boot (${p.raw}) \u2014 ${p.undervoltage_ever ? 'under-voltage' : 'throttling'} has occurred. Suspect the PSU before the radios.`;
+  el.style.display = 'block';
 }
 
 function updateHealthPill(localData) {
@@ -2244,6 +2298,16 @@ function renderLocalPanel(d) {
     ['GPS',      gpsHtml],
     ['EUD Mode', d.eud_mode || '—'],
   ];
+  if (d.power && d.power.available) {
+    const ps = d.power.state;
+    const col = ps === 'critical' ? 'var(--bad)' : ps === 'ok' ? 'var(--good)' : 'var(--warn)';
+    const txt = ps === 'critical' ? 'UNDER-VOLTAGE NOW'
+              : ps === 'warning'  ? (d.power.undervoltage_ever ? 'under-voltage since boot' : 'throttled since boot')
+              : ps === 'notice'   ? 'throttling since boot'
+              : 'OK';
+    rows.push(['Power', `<span class="gps-dot" style="background:${col}"></span>${txt}` +
+      (ps === 'ok' ? '' : ` <span style="font-size:9px;color:var(--muted)">${d.power.raw}</span>`)]);
+  }
   if (d.eud_mode !== 'wired' && d.ap_ssid) {
     rows.push(['AP SSID', d.ap_ssid]);
   }
@@ -2326,6 +2390,7 @@ async function fetchLocal() {
     if (!r.ok) throw new Error(r.status);
     const d = await r.json();
     updateHealthPill(d);
+    updatePowerBanner(d);
     LOCAL_DETAIL_HTML = renderLocalPanel(d);
     if (DATA) renderNodeList(DATA.nodes);
   } catch (err) {
