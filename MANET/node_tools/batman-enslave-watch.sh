@@ -48,6 +48,50 @@ restore_halow_primary_if_needed() {
     /usr/local/bin/batman-if-setup.sh start 2>/dev/null || true
 }
 
+# hostapd can be left "active" over a dead BSS: something downed or re-moded
+# the netdev under it - a unit racing the AP at boot, a PCIe reset when the
+# supply sags - and hostapd neither exits nor rebuilds. It logs nothing, so
+# the AP is simply gone until someone restarts it by hand. A live AP has an
+# SSID on the netdev; one that has been deinited keeps "type AP" and loses it.
+# The SSID rather than the carrier, because a DFS channel-availability check
+# has the SSID set with the carrier still down, and restarting through CAC
+# would mean it never finishes.
+ap_is_serving() {
+    iw dev "$1" info 2>/dev/null | awk '$1 == "type" { t = $2 } $1 == "ssid" { s = 1 }
+        END { exit !(t == "AP" && s) }'
+}
+
+restart_dead_ap_if_needed() {
+    local ap now last cooldown_file strikes_file strikes
+
+    ap="$(cat /var/lib/ap_interface 2>/dev/null)"
+    [ -n "$ap" ] || return 0
+    systemctl is-active --quiet hostapd.service || return 0
+    ip link show "$ap" >/dev/null 2>&1 || return 0
+
+    strikes_file="/run/batman-enslave-watch-ap-strikes"
+    if ap_is_serving "$ap"; then
+        rm -f "$strikes_file"
+        return 0
+    fi
+
+    # Two consecutive cycles, so a restart in progress is not counted as dead.
+    strikes=$(( $(cat "$strikes_file" 2>/dev/null || echo 0) + 1 ))
+    echo "$strikes" > "$strikes_file"
+    [ "$strikes" -ge 2 ] || return 0
+
+    cooldown_file="/run/batman-enslave-watch-ap-restart"
+    now="$(date +%s)"
+    last="$(cat "$cooldown_file" 2>/dev/null || echo 0)"
+    if [ $((now - last)) -lt 60 ]; then
+        return 0
+    fi
+    echo "$now" > "$cooldown_file"
+
+    log "WARNING: hostapd is active but $ap is not serving; restarting hostapd"
+    systemctl restart hostapd.service 2>/dev/null || true
+}
+
 while true; do
     sleep 8
 
@@ -100,4 +144,5 @@ while true; do
     done
 
     restore_halow_primary_if_needed
+    restart_dead_ap_if_needed
 done
