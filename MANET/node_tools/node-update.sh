@@ -154,6 +154,19 @@ fi
 # non-root process out of the filesystem.
 tar -zxf /root/tools.tar.gz --no-overwrite-dir -C / 2>/dev/null
 
+# Files land, but nothing that reads them is told. A new unit or a drop-in
+# stays inert until systemd is reloaded, and a motd hook only prints once it
+# is linked into /etc/update-motd.d - neither of which happens on a node that
+# is updated over the air rather than reflashed, since radio-setup does not
+# run again. Only reached on an actual update, so this costs nothing in
+# steady state.
+systemctl daemon-reload 2>/dev/null || true
+mkdir -p /etc/update-motd.d
+[ -x /usr/local/bin/manet-provision-status.sh ] && \
+    ln -sf /usr/local/bin/manet-provision-status.sh /etc/update-motd.d/50-manet-provision
+[ -x /usr/local/bin/manet-power-status.sh ] && \
+    ln -sf /usr/local/bin/manet-power-status.sh /etc/update-motd.d/55-manet-power
+
 if [ "$ROUTINE_MODE" = false ]; then
 	echo "Node tools updated to version $REMOTE_VERSION - $(tail -n 1 /etc/manet_version.txt)"
 fi

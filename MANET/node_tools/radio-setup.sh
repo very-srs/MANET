@@ -77,6 +77,10 @@ if [ -x /usr/local/bin/manet-provision-status.sh ]; then
     mkdir -p /etc/update-motd.d
     ln -sf /usr/local/bin/manet-provision-status.sh /etc/update-motd.d/50-manet-provision
 fi
+if [ -x /usr/local/bin/manet-power-status.sh ]; then
+    mkdir -p /etc/update-motd.d
+    ln -sf /usr/local/bin/manet-power-status.sh /etc/update-motd.d/55-manet-power
+fi
 
 # This loop reads the stored setup variables to set the current config
 while IFS= read -r line; do

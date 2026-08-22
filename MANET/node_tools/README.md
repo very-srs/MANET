@@ -943,6 +943,47 @@ The copy that actually runs on a node is generated from
 `MANET/provisioning/firstrun.sh.template` at flash time, with the operator's
 answers substituted in — the copy here is the reference.
 
+**manet-ap-guard.sh**
+
+Decides, for one interface, whether a mesh supplicant may start on it right
+now. Installed as an `ExecCondition` on `wpa_supplicant@.service` through
+`/etc/systemd/system/wpa_supplicant@.service.d/10-manet-ap-guard.conf`, so it
+applies to every caller rather than to whichever call site was remembered —
+twelve places in this directory restart `wpa_supplicant@<iface>` from
+interface lists assembled in different ways.
+
+The AP radio legitimately needs a mesh config on disk: in wired EUD mode it is
+always a mesh interface, and in auto mode it joins the mesh whenever an EUD
+appears on Ethernet. Only `ethernet-autodetect.sh` makes that call, and it
+stops hostapd first. Any other start while hostapd holds the radio fails the
+mesh join with -95 and, worse, deinits the netdev on the way out — leaving
+hostapd `active` over a dead BSS, logging nothing.
+
+Exits 0 to allow (not the AP radio, or hostapd is not holding it), 1 to skip.
+
+**manet-power-status.sh**
+
+Answers one question on every SSH login, and on the web status page: is this
+board getting enough power? Installed as `/etc/update-motd.d/55-manet-power`,
+read by `mesh-status.py` for `/api/local`, and runnable directly. Pass
+`--json` for the machine-readable form.
+
+The carrier boards sit at the edge of their envelope with a HaLow card and a
+PCIe Wi-Fi card drawing at once, and a sagging supply does not announce
+itself — it presents as a radio that will not associate, a USB card that stops
+answering, or a board that resets with no shutdown in the journal. Hours have
+gone into chasing those as driver bugs.
+
+- **ok** — one line.
+- **notice** — throttling has occurred, but no under-voltage.
+- **warning** — under-voltage or throttling has occurred since boot.
+- **critical** — under-voltage right now.
+
+Decodes the `vcgencmd get_throttled` bitmask; the sticky bits 16+ matter most,
+because the event that killed a radio is over by the time anyone logs in.
+Prints nothing and reports `available: false` on hardware without the Broadcom
+mailbox, such as the Rock 3A. It never exits non-zero.
+
 **manet-provision-status.sh**
 
 Answers one question on every SSH login: is this node finished setting itself
