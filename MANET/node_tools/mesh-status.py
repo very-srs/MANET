@@ -44,6 +44,7 @@ from urllib.parse import urlparse, parse_qs, quote
 # Radio control lives in one place, shared with mesh-radio-state.py so an
 # Alfred-staged change and a local one do exactly the same thing.
 from manet_manage import ManageRoutes
+from manet_peer_radios import interfaces_for_telemetry, peer_status_panel
 from manet_radio import (
     HALOW_EU_CHANNELS, HALOW_EU_UI_TO_S1G_CHANNEL, HALOW_BW_TXPOWER_CAP_DBM,
     _format_halow_bw, get_halow_driver_info, wifi_channel_to_freq, _fmt_dbm,
@@ -918,36 +919,11 @@ def assemble_peer_data(peer_ip):
             except ValueError:
                 battery = None
 
-        interfaces = []
         try:
-            published = json.loads(ndata.get('INTERFACES_JSON', '') or '[]')
-        except json.JSONDecodeError:
-            published = []
-        for iface in published if isinstance(published, list) else []:
-            if not isinstance(iface, dict) or not iface.get('name'):
-                continue
-            role = iface.get('role', 'other')
-            state = iface.get('state', 'UNKNOWN')
-            # Derived here rather than published: every node would otherwise
-            # ship the same prose about itself on every cycle.
-            faults = []
-            if state == 'DOWN' and role in ('mesh', 'bat', 'bridge'):
-                health = 'fault'
-                faults.append(f'{iface["name"]} is down')
-            elif state == 'UNKNOWN':
-                health = 'warn'
-            else:
-                health = 'ok'
-            interfaces.append({
-                'name':   iface['name'],
-                'role':   role,
-                'state':  state,
-                'addrs':  iface.get('ipv4', []) or [],
-                'health': health,
-                'faults': faults,
-                'tx_mcs': iface.get('tx_mcs', ''),
-                'rx_mcs': iface.get('rx_mcs', ''),
-            })
+            eud_count = int(ndata.get('EUD_COUNT') or 0)
+        except (TypeError, ValueError):
+            eud_count = 0
+        panel = peer_status_panel(ndata)
 
         return {
             'hostname':   ndata.get('HOSTNAME', ''),
@@ -961,9 +937,10 @@ def assemble_peer_data(peer_ip):
                 'lon':       ndata.get('GPS_LONGITUDE', ''),
                 'alt':       ndata.get('GPS_ALTITUDE', ''),
             },
-            'interfaces': interfaces,
-            'euds':       [],
-            'services':   [],
+            'interfaces': panel['interfaces'],
+            'euds':       panel['euds'],
+            'eud_count':  panel['eud_count'] if panel['eud_count'] else eud_count,
+            'services':   panel['services'],
             'eud_mode':   ndata.get('EUD_MODE', ''),
             'ap_ssid':    ndata.get('AP_SSID', ''),
             'mesh_ssid':  '',
@@ -1568,10 +1545,10 @@ let DATA = null;
 let SIM  = { nodes: [], links: [], running: false, raf: null };
 let HOVER_NODE = null;
 let drawQueued = false;
-let SELECTED_PEER_ID = '';
+let EXPANDED_NODE_IDS = new Set();
 let LOCAL_DETAIL_HTML = '<div class="peer-loading">Loading…</div>';
 let PEER_DETAIL_CACHE = {};
-let PEER_LOADING_ID = null;
+let PEER_LOADING_IDS = new Set();
 const POLL_INTERVAL_MS = __REFRESH__;
 const THEME_KEY = 'manetUiTheme';
 
@@ -1680,7 +1657,7 @@ function renderNodeList(nodes) {
   el.innerHTML = nodes.map(n => {
     const cls = [
       'node-row',
-      SELECTED_PEER_ID === n.id ? 'peer-selected' : '',
+      EXPANDED_NODE_IDS.has(n.id) ? 'peer-selected' : '',
       n.is_me  ? 'is-me' : '',
       n.is_gateway ? 'is-gw' : ''
     ].filter(Boolean).join(' ');
@@ -1714,10 +1691,10 @@ function renderNodeList(nodes) {
     }
     const offlineBadge = nodeStale ? `<span class="badge badge-link-bad" style="opacity:.7">OFFLINE</span><span style="color:var(--muted);font-size:10px">last seen ${fmtAge(n.last_seen)}</span>` : '';
 
-    const expanded = SELECTED_PEER_ID === n.id;
+    const expanded = EXPANDED_NODE_IDS.has(n.id);
       const detailBody = n.is_me
         ? LOCAL_DETAIL_HTML
-        : (PEER_LOADING_ID === n.id
+        : (PEER_LOADING_IDS.has(n.id)
             ? '<div class="peer-loading">FETCHING…</div>'
           : (PEER_DETAIL_CACHE[n.id] || '<div class="peer-loading" style="color:var(--muted)">No details loaded</div>'));
     const detail = expanded ? `<div class="node-inline-detail">
@@ -2050,7 +2027,7 @@ function drawTopo() {
   // Nodes
   SIM.nodes.forEach(n => {
     const isHover = HOVER_NODE && HOVER_NODE.id === n.id;
-    const isSelected = (SELECTED_PEER_ID === null && n.is_me) || (SELECTED_PEER_ID && SELECTED_PEER_ID === n.id);
+    const isSelected = EXPANDED_NODE_IDS.has(n.id);
     const nodeStaleCanvas = !n.is_me && (DATA.timestamp - parseInt(n.last_seen || 0)) > 300;
     const col = n.is_me ? '#ecb000' : (nodeStaleCanvas ? '#6b7280' : (n.is_gateway ? '#ecb000' : linkColor(n.mbps)));
     const r = n.r + (isHover ? 3 : (isSelected ? 2 : 0));
@@ -2164,9 +2141,11 @@ canvas.addEventListener('click', e => {
     return Math.sqrt(dx*dx + dy*dy) < n.r + 10;
   });
   if (!hit) return;
-  if (hit.is_me) { showLocalInDrawer(); return; }
   const node = DATA && DATA.nodes.find(n => n.id === hit.id);
-  if (node) openPeerDrawer(node);
+  if (!node) return;
+  if (EXPANDED_NODE_IDS.has(node.id)) { collapseNodeDetail(node.id); return; }
+  if (node.is_me) { showLocalInDrawer(); return; }
+  openPeerDrawer(node);
 });
 
 // ── Touch: two-finger pinch only (single finger always scrolls page) ────────
@@ -2432,31 +2411,31 @@ document.getElementById('node-list').addEventListener('click', e => {
   if (!id || !DATA) return;
   const node = DATA.nodes.find(n => n.id === id);
   if (!node) return;
-  if (SELECTED_PEER_ID === id) {
-    collapseNodeDetail();
+  if (EXPANDED_NODE_IDS.has(id)) {
+    collapseNodeDetail(id);
     return;
   }
   if (node.is_me) { showLocalInDrawer(); return; }
   openPeerDrawer(node);
 });
 
-function collapseNodeDetail() {
-  SELECTED_PEER_ID = '';
-  PEER_LOADING_ID = null;
+function collapseNodeDetail(id) {
+  EXPANDED_NODE_IDS.delete(id);
+  PEER_LOADING_IDS.delete(id);
   if (DATA) renderNodeList(DATA.nodes);
   if (!SIM.running) drawTopo();
 }
 
 function openPeerDrawer(node) {
-  SELECTED_PEER_ID = node.id;
-  PEER_LOADING_ID = node.id;
+  EXPANDED_NODE_IDS.add(node.id);
+  PEER_LOADING_IDS.add(node.id);
   if (DATA) renderNodeList(DATA.nodes);
   const listRow = document.querySelector(`#node-list .node-row[data-id="${node.id}"]`);
   if (listRow) listRow.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
   if (!SIM.running) drawTopo();
   if (!node.ip) {
     PEER_DETAIL_CACHE[node.id] = '<div class="peer-loading" style="color:var(--muted)">No IP known for this node</div>';
-    PEER_LOADING_ID = null;
+    PEER_LOADING_IDS.delete(node.id);
     if (DATA) renderNodeList(DATA.nodes);
     return;
   }
@@ -2466,8 +2445,8 @@ function openPeerDrawer(node) {
 function showLocalInDrawer() {
   const localId = getLocalNodeId();
   if (!localId) return;
-  SELECTED_PEER_ID = localId;
-  PEER_LOADING_ID = null;
+  EXPANDED_NODE_IDS.add(localId);
+  PEER_LOADING_IDS.delete(localId);
   if (DATA) renderNodeList(DATA.nodes);
   const listRow = document.querySelector(`#node-list .node-row[data-id="${localId}"]`);
   if (listRow) listRow.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
@@ -2489,7 +2468,7 @@ async function fetchPeer(ip, hostname) {
     if (nodeId) PEER_DETAIL_CACHE[nodeId] =
       '<div class="peer-loading" style="color:var(--bad)">Error: ' + err.message + '</div>';
   } finally {
-    if (nodeId === PEER_LOADING_ID) PEER_LOADING_ID = null;
+    PEER_LOADING_IDS.delete(nodeId);
     if (DATA) renderNodeList(DATA.nodes);
   }
 }
@@ -2564,12 +2543,15 @@ function renderPeerDrawer(d, hostname) {
   }
 
   // Connected EUDs
-  html += `<div class="section-hdr" style="font-size:9px;position:static">CONNECTED EUDS (${d.euds ? d.euds.length : 0})</div>`;
+  const eudCount = (d.euds && d.euds.length) ? d.euds.length : (d.eud_count || 0);
+  html += `<div class="section-hdr" style="font-size:9px;position:static">CONNECTED EUDS (${eudCount})</div>`;
   if (d.euds && d.euds.length) {
     html += d.euds.map(e => `<div class="eud-row">
       <span class="eud-name">${e.hostname || '<i style="color:var(--muted)">unknown</i>'}</span>
       &nbsp;<span class="eud-ip">${e.ip}</span>
       <div class="eud-mac">${e.mac}</div></div>`).join('');
+  } else if (eudCount) {
+    html += `<div style="padding:5px 10px;font-size:11px;color:var(--muted)">${eudCount} connected (names not published)</div>`;
   } else {
     html += `<div style="padding:5px 10px;font-size:11px;color:var(--muted)">None</div>`;
   }
@@ -3478,6 +3460,10 @@ class ThreadedServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
 
 if __name__ == '__main__':
     import sys
+    if len(sys.argv) > 1 and sys.argv[1] == '--dump-interfaces':
+        print(json.dumps(interfaces_for_telemetry(get_interfaces()),
+                         separators=(',', ':')))
+        raise SystemExit(0)
     port = int(sys.argv[1]) if len(sys.argv) > 1 else PORT
     server = ThreadedServer(('0.0.0.0', port), MeshHandler)
     print(f'MANET Status Server listening on port {port}')

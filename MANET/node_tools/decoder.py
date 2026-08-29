@@ -121,6 +121,10 @@ def decode_telemetry(raw):
             'ipv4': [int_to_ipv4(a) for a in i.ipv4],
             'tx_mcs': i.tx_mcs,
             'rx_mcs': i.rx_mcs,
+            'channel': i.channel,
+            'freq_mhz': i.freq_mhz,
+            'txpower_dbm': i.txpower_dbm,
+            'halow_bw': i.halow_bw,
         }
         for i in t.interfaces
     ]))
