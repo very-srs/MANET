@@ -815,8 +815,10 @@ cannot use a config broadcast to write arbitrary supplicant configuration.
 Applies a staged package to `/etc/mesh.conf`, splitting settings into two
 classes:
 
-- **Safe** (applied immediately): `admin_password`, `eud`, `lan_ap_ssid`,
-  `lan_ap_key`, `max_euds_per_node`, `mtx`, `mumble`, `auto_update`.
+- **Per-node** (this radio only, never Alfred): `eud`, `lan_ap_ssid`,
+  `lan_ap_key`, `max_euds_per_node`.
+- **Safe** (applied mesh-wide immediately): `admin_password`, `mtx`,
+  `mumble`, `auto_update`.
 - **Dangerous** (brief mesh outage): `mesh_ssid`, `mesh_key`, `ipv4_network` —
   these rewrite the supplicant configs and restart the supplicants.
 
