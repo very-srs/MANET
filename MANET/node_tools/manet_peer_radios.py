@@ -135,3 +135,124 @@ def interfaces_for_telemetry(ifaces):
             'halow_bw': str(iface.get('halow_bw', '') or ''),
         })
     return out
+
+
+def _truthy(nd, key):
+    return str(nd.get(key, '')).lower() == 'true'
+
+
+def _peer_iface_health(role, state):
+    if state == 'DOWN' and role in ('mesh', 'bat', 'bridge', 'gateway', 'ap'):
+        return 'fault', [f'{role} is down']
+    if state == 'UNKNOWN':
+        return 'warn', []
+    if role in ('bat', 'bridge'):
+        return 'info', []
+    return 'ok', []
+
+
+def _peer_iface_detail(iface, nd):
+    role = iface.get('role', '')
+    name = iface.get('name', '')
+    channel = str(iface.get('channel') or '')
+    if role == 'bat':
+        return 'BATMAN-ADV mesh bridge'
+    if role == 'bridge':
+        return 'L2 bridge (mesh + EUD)'
+    if role == 'gateway':
+        return 'Internet gateway'
+    if role == 'ap':
+        ssid = nd.get('AP_SSID', '') or ''
+        return f'EUD AP — {ssid}' if ssid else 'EUD AP'
+    if role == 'mesh':
+        if name == 'wlan2' or iface.get('halow_bw'):
+            return f'HaLow — ch{channel}' if channel else 'HaLow'
+        if name == 'wlan0':
+            return f'2.4 GHz — ch{channel}' if channel else '2.4 GHz'
+        if name == 'wlan1':
+            return f'5 GHz — ch{channel}' if channel else '5 GHz'
+        return f'Mesh — ch{channel}' if channel else 'Mesh radio'
+    return ''
+
+
+def _mcs_for_name(nd, name):
+    return {
+        'wlan0': (nd.get('WIFI_24_TX_MCS', '') or '', nd.get('WIFI_24_RX_MCS', '') or ''),
+        'wlan1': (nd.get('WIFI_5_TX_MCS', '') or '', nd.get('WIFI_5_RX_MCS', '') or ''),
+        'wlan2': (nd.get('HALOW_TX_MCS', '') or '', nd.get('HALOW_RX_MCS', '') or ''),
+    }.get(name, ('', ''))
+
+
+def _decorate_published_iface(iface, nd):
+    name = iface['name']
+    role = iface.get('role', '') or 'other'
+    state = iface.get('state', '') or 'UNKNOWN'
+    health, faults = _peer_iface_health(role, state)
+    tx_mcs, rx_mcs = _mcs_for_name(nd, name)
+    return {
+        'name': name,
+        'role': role,
+        'state': state,
+        'addrs': list(iface.get('ipv4') or iface.get('addrs') or []),
+        'health': health,
+        'faults': faults,
+        'tx_mcs': str(iface.get('tx_mcs') or '') or tx_mcs,
+        'rx_mcs': str(iface.get('rx_mcs') or '') or rx_mcs,
+        'channel': str(iface.get('channel') or ''),
+        'freq_mhz': str(iface.get('freq_mhz') or ''),
+        'txpower_dbm': str(iface.get('txpower_dbm') or ''),
+        'halow_bw': str(iface.get('halow_bw') or ''),
+        'detail': _peer_iface_detail(iface, nd),
+    }
+
+
+def _synthetic_iface(name, role, state, nd, addrs=None):
+    fake = {'name': name, 'role': role, 'state': state, 'channel': ''}
+    row = _decorate_published_iface(fake, nd)
+    if addrs is not None:
+        row['addrs'] = addrs
+    return row
+
+
+def peer_status_panel(nd):
+    """Status-page peer drawer from a registry row (no live probe)."""
+    names = set()
+    interfaces = []
+    for iface in parse_json_field(nd.get('INTERFACES_JSON', '')):
+        if not isinstance(iface, dict) or not iface.get('name'):
+            continue
+        row = _decorate_published_iface(iface, nd)
+        names.add(row['name'])
+        interfaces.append(row)
+
+    mesh_up = any(i['role'] == 'mesh' and i['state'] == 'UP' for i in interfaces)
+    if 'bat0' not in names and mesh_up:
+        interfaces.append(_synthetic_iface('bat0', 'bat', 'UP', nd))
+    gw_name = (nd.get('GATEWAY_IFACE') or '').strip()
+    if _truthy(nd, 'IS_GATEWAY') and gw_name and gw_name not in names:
+        interfaces.append(_synthetic_iface(gw_name, 'gateway', 'UP', nd))
+    mesh_ip = (nd.get('IPV4_ADDRESS') or '').strip()
+    if 'br0' not in names and mesh_ip:
+        interfaces.append(_synthetic_iface(
+            'br0', 'bridge', 'UP', nd, addrs=[mesh_ip]))
+
+    order = {'bat': 0, 'mesh': 1, 'ap': 2, 'gateway': 3, 'eud-bridge': 4, 'bridge': 5}
+    interfaces.sort(key=lambda i: (order.get(i['role'], 9), i['name']))
+
+    try:
+        eud_count = int(nd.get('EUD_COUNT') or 0)
+    except (TypeError, ValueError):
+        eud_count = 0
+
+    return {
+        'interfaces': interfaces,
+        'services': {
+            'mumble': _truthy(nd, 'IS_MUMBLE_SERVER'),
+            'mediamtx': _truthy(nd, 'IS_MEDIAMTX_SERVER'),
+            'ntp': _truthy(nd, 'IS_NTP_SERVER'),
+            'syncthing': False,
+            'tak': _truthy(nd, 'IS_TAK_SERVER'),
+        },
+        'euds': [],
+        'eud_count': eud_count,
+    }
