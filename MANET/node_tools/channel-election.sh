@@ -37,6 +37,14 @@ LOBBY_FREQ_5_0=5180
 # deliberately excluded: if the election landed on the lobby pair, every node
 # would flip into lobby state (is_in_lobby checks frequencies) and scanning,
 # elections and tourguide duty would silently stop.
+#
+# These are deliberately NOT filtered against the local phy's capabilities here.
+# The election is an implicit-consensus algorithm: every node must run the same
+# computation over the same replicated inputs, so injecting a per-node hardware
+# filter at this stage would let two nodes reach different answers from
+# identical data. Unusable frequencies are excluded at scan time instead
+# (phy_usable_freqs in node-manager-acs.sh), which keeps the exclusion visible
+# in the replicated reports and therefore symmetric across the mesh.
 CHANNELS_2_4="2437 2462"
 CHANNELS_5_0="5200 5220 5240 5745 5765 5785 5805 5825"
 
@@ -148,6 +156,10 @@ load_mesh_roles() {
         local winner_score=1000 # Lower is better
 
         local candidates=()
+        # Distinguishes "every candidate was measured and rejected" (a real RF
+        # verdict) from "nothing reported any measurement at all" (an outage).
+        # Both leave candidates[] empty; they must not be handled the same way.
+        local had_any_data=false
 
         for chan in $band_channels; do
             local stats=$(echo "$ALL_REPORTS_JSON" | jq -r --argjson c "$chan" '
@@ -171,6 +183,7 @@ load_mesh_roles() {
                 log "[$band_name] No scan data for channel $chan"
                 continue
             fi
+            had_any_data=true
 
             local max_noise=$(echo "$stats" | jq '.max_noise')
             local avg_noise=$(echo "$stats" | jq '.avg_noise')
@@ -195,6 +208,20 @@ load_mesh_roles() {
         done
 
         # --- Sort and Pick Winner ---
+        if [ ${#candidates[@]} -eq 0 ] && [ "$had_any_data" = false ]; then
+            # Not an RF verdict -- no node reported a usable measurement for any
+            # candidate on this band. Causes seen in practice: the radio for this
+            # band is absent (so its scan report carries no entries for it), the
+            # scan request was rejected wholesale, or alfred was silently down so
+            # no reports replicated. Dropping to lobby and asserting limp mode
+            # here throttles the whole mesh to legacy bitrates on the strength of
+            # missing data. Hold the current channel and change nothing; the next
+            # cycle re-elects once measurements come back.
+            log "[$band_name] No scan data for any candidate channel. Holding ${current_channel:-current channel}, not asserting limp mode."
+            _winner="$current_channel"
+            return 0
+        fi
+
         if [ ${#candidates[@]} -eq 0 ]; then
             log "[$band_name] ALL CHANNELS DISQUALIFIED. Falling back to lobby."
             LIMP_MODE_NEEDED="true"
