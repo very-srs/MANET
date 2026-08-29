@@ -274,6 +274,56 @@ return_to_lobby() {
     sleep 5
 }
 
+# Return the phy backing an interface (same derivation as radio-setup.sh's
+# iface_phy).
+iface_phy() {
+    iw dev "$1" info 2>/dev/null | awk '/wiphy/ {print "phy"$2; exit}'
+}
+
+# Filter a candidate frequency list down to what this interface's phy actually
+# offers. This is NOT a regulatory compliance mechanism -- MANET ships a
+# flattened regulatory.db (see MANET/root/db.txt) that clears DFS / NO-IR /
+# NO-OUTDOOR and raises every rule to 30 dBm, so on a correctly provisioned node
+# this filter is a no-op. It exists for two failure cases:
+#   1. "iw scan freq" rejects the WHOLE request if any single frequency is not
+#      permitted on the phy, so one bad entry silently kills the scan for every
+#      channel on that radio -- and perform_scan discards the exit status, so the
+#      only symptom is an empty survey.
+#   2. A node that boots before the MANET regdb has landed runs the stock
+#      database, where the UNII-3 candidates (5745-5825) can be absent, gated
+#      behind (no IR), or DFS.
+# Fails OPEN: if the phy cannot be read, or nothing parses, hand back the input
+# list untouched. Filtering to an empty set is far worse than not filtering --
+# it would take a whole band off the air on every node at once.
+phy_usable_freqs() {
+    local iface="$1"
+    local wanted="$2"
+    local phyname info usable="" freq
+
+    phyname="$(iface_phy "$iface")"
+    [ -z "$phyname" ] && { echo "$wanted"; return; }
+
+    info="$(iw phy "$phyname" info 2>/dev/null)"
+    [ -z "$info" ] && { echo "$wanted"; return; }
+
+    for freq in $wanted; do
+        # iw prints "* 5220.0 MHz [44] (30.0 dBm)"; an unusable channel carries a
+        # trailing (disabled) / (no IR) / (radar detection) tag. All three mean
+        # we cannot bring a mesh point up there, so contribute no data for it.
+        if echo "$info" | grep -qE "[[:space:]]${freq}\.0 MHz.*\((disabled|no IR|radar detection|passive scan)"; then
+            continue
+        fi
+        echo "$info" | grep -q "[[:space:]]${freq}\.0 MHz" && usable+="$freq "
+    done
+
+    if [ -z "$usable" ]; then
+        log "WARNING: no candidate frequency usable on $iface ($phyname). Scanning unfiltered."
+        echo "$wanted"
+    else
+        echo "${usable% }"
+    fi
+}
+
 perform_scan() {
     local json_out='{"results": ['
     local first_entry=true
@@ -285,6 +335,7 @@ perform_scan() {
         local freqs_to_scan=""
         [ "$iface" == "$WPA_IFACE_2_4" ] && freqs_to_scan=$SCAN_FREQS_2_4
         [ "$iface" == "$WPA_IFACE_5_0" ] && freqs_to_scan=$SCAN_FREQS_5_0
+        freqs_to_scan="$(phy_usable_freqs "$iface" "$freqs_to_scan")"
 
         (iw dev "$iface" scan freq $freqs_to_scan > /dev/null 2>&1) &
         SCAN_PID=$!
@@ -300,7 +351,15 @@ perform_scan() {
 
         for freq in $freqs_to_scan; do
             local noise=$(echo "$survey_data" | awk -v f=$freq '$1=="frequency:" && $2==f {getline; if ($1=="noise:") print $2}' | head -1)
-            noise=${noise:--100}
+            # No survey entry means the radio never actually visited this
+            # frequency (scan request rejected, channel unavailable, driver
+            # hiccup). Report nothing for it rather than a synthetic floor:
+            # -100 dBm beats every real measurement, so a defaulted value wins
+            # channel-election.sh outright and parks the mesh on a channel
+            # nobody can hear. Missing data is handled correctly downstream --
+            # find_best_channel holds the current channel when a band has no
+            # measurements at all.
+            [ -z "$noise" ] && continue
             local bss_count=$(echo "$scan_data" | grep -c "freq: ${freq}\." )
 
             [ "$first_entry" = true ] && first_entry=false || json_out+=","
