@@ -209,6 +209,10 @@ collect_interfaces_json() {
     python3 /usr/local/bin/mesh-status.py --dump-interfaces 2>/dev/null || echo '[]'
 }
 
+collect_ap_ssid() {
+    grep "^lan_ap_ssid=" /etc/mesh.conf 2>/dev/null | head -1 | cut -d'=' -f2-
+}
+
 radio_iface_enabled() {
     python3 - "$1" <<'PY'
 import json, sys
@@ -628,6 +632,8 @@ while true; do
                 "--halow-mcs-peer" "${WLAN2_MCS_PEER:-}"
                 "--interfaces-json" "$INTERFACES_JSON"
             )
+            AP_SSID=$(collect_ap_ssid)
+            [ -n "$AP_SSID" ] && ENCODER_ARGS+=("--ap-ssid" "$AP_SSID")
             [ -n "$IS_GATEWAY_FLAG" ] && ENCODER_ARGS+=("$IS_GATEWAY_FLAG")
             [ -n "$GATEWAY_IFACE" ] && ENCODER_ARGS+=("--gateway-iface" "$GATEWAY_IFACE")
             [ -n "$IS_NTP_FLAG" ] && ENCODER_ARGS+=("$IS_NTP_FLAG")
@@ -822,6 +828,8 @@ except Exception:
                 "--halow-mcs-peer" "${WLAN2_MCS_PEER:-}"
                 "--interfaces-json" "$INTERFACES_JSON"
             )
+            AP_SSID=$(collect_ap_ssid)
+            [ -n "$AP_SSID" ] && ENCODER_ARGS+=("--ap-ssid" "$AP_SSID")
             [ -n "$IS_GATEWAY_FLAG" ] && ENCODER_ARGS+=("$IS_GATEWAY_FLAG")
             [ -n "$GATEWAY_IFACE" ] && ENCODER_ARGS+=("--gateway-iface" "$GATEWAY_IFACE")
             [ -n "$IS_NTP_FLAG" ] && ENCODER_ARGS+=("$IS_NTP_FLAG")
