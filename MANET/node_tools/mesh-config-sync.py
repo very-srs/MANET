@@ -14,6 +14,8 @@ sets activate_at and every node applies at the same moment.
 
 Everything in a package arrives from the network and ends up in /etc/mesh.conf
 and in wpa_supplicant configs, so it is validated here rather than trusted.
+EUD/AP settings (eud, lan_ap_ssid, lan_ap_key, max_euds_per_node) are stripped
+and never applied from Alfred — those stay on the node that staged them.
 """
 
 import json
@@ -23,6 +25,8 @@ import subprocess
 import sys
 import time
 
+from mesh_config import strip_local_keys
+
 ALFRED_CONFIG_TYPE = 70
 PENDING_FILE = "/var/run/mesh_pending_config.json"
 ACK_VERSION_FILE = "/var/run/mesh_config_ack_version"
@@ -31,10 +35,9 @@ APPLY_SCRIPT = "/usr/local/bin/mesh-config-apply.sh"
 ROLLBACK_SCRIPT = "/usr/local/bin/mesh-config-rollback.sh"
 LOG_FILE = "/var/log/mesh-config-sync.log"
 
-# Only these may be carried in a package. Anything else is ignored rather than
-# written through to mesh.conf.
-SAFE_KEYS = ("admin_password", "eud", "lan_ap_ssid", "lan_ap_key",
-             "max_euds_per_node", "mtx", "mumble", "auto_update")
+# Only these may be carried in a package. EUD/AP settings are per-node and are
+# stripped even if an older publisher still includes them.
+SAFE_KEYS = ("admin_password", "mtx", "mumble", "auto_update")
 DANGEROUS_KEYS = ("mesh_ssid", "mesh_key", "ipv4_network")
 ALLOWED_KEYS = SAFE_KEYS + DANGEROUS_KEYS + ("regulatory_domain", "acs")
 
@@ -125,7 +128,7 @@ def validate_package(pkg):
     version = pkg.get("version")
     if not isinstance(version, str) or not re.fullmatch(r"[0-9a-f]{6,64}", version):
         return False, "missing or malformed version"
-    config = pkg.get("config")
+    config = strip_local_keys(pkg.get("config"))
     if not isinstance(config, dict) or not config:
         return False, "missing config block"
 
@@ -234,6 +237,12 @@ def sync_once():
     ok, why = validate_package(pkg)
     if not ok:
         log(f"Ignoring config package: {why}")
+        return 0
+
+    pkg = dict(pkg)
+    pkg["config"] = strip_local_keys(pkg.get("config") or {})
+    if not pkg["config"]:
+        log("Ignoring config package: only per-node settings")
         return 0
 
     version = pkg["version"]

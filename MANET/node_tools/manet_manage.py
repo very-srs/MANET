@@ -3139,6 +3139,7 @@ CONFIG_TAB_HTML = r"""
 
       <div class="cfg-section">
         <div class="cfg-section-title">EUD / Client Connection</div>
+        <p class="cfg-section-note" style="font-size:10px;color:var(--muted);margin:0 0 10px;line-height:1.5">Applies on this node only. Mesh Network settings below still go to every radio.</p>
 
         <div class="cfg-row">
           <label>Connection Mode<span class="hint">How clients connect to this node</span></label>
@@ -3480,6 +3481,14 @@ async function stageChanges() {
     });
     const res = await r.json();
     if (r.ok && res.ok) {
+      if (res.local_only) {
+        toast('Applied on this node', 'ok');
+        cfgShowMsg(res.applied && res.applied.length
+          ? 'Saved on this node: ' + res.applied.join(', ')
+          : 'No EUD/AP changes to apply.', 'ok');
+        await refreshStatus();
+        return;
+      }
       toast('Changes staged — waiting for nodes to ACK', 'ok');
       cfgShowMsg('Staged. Waiting for ' + (STATUS && STATUS.total_nodes || '?') + ' nodes to ACK.', 'ok');
       await refreshStatus();
