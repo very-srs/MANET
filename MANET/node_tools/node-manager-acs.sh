@@ -69,6 +69,7 @@ CACHED_SCAN_REPORT_JSON="{}"
 LAST_SCAN_COMPLETE_TIME=0
 LOBBY_ENTERED_TIME=0
 BOOTSTRAP_START_WINDOW=-1
+LOBBY_SOLO_LOGGED=false
 LIMP_STATE_FILE="/var/run/mesh_limp_mode.state"
 
 # Window tracking
@@ -264,6 +265,15 @@ is_in_lobby() {
     else
         echo "false"
     fi
+}
+
+# How many other nodes are meshed with us right now, by batman-adv's data-plane
+# view (same idiom as quorum-checker.sh and tourguide-manager.sh's
+# get_partition_size). Counts a peer found over ANY batman interface, HaLow
+# included -- what the lobby bootstrap needs is somebody to run a joint
+# deterministic election with, and it does not matter which radio found them.
+mesh_peer_count() {
+    "$BATCTL_PATH" o 2>/dev/null | awk 'NR>1 {print $1}' | sort -u | wc -l
 }
 
 return_to_lobby() {
@@ -522,8 +532,35 @@ while true; do
         if [ -f "$WPA_CONF_2_4" ] && [ -f "$WPA_CONF_5_0" ]; then
             [ "$LOBBY_ENTERED_TIME" -eq 0 ] && LOBBY_ENTERED_TIME=$NOW
             if [ $((NOW - LOBBY_ENTERED_TIME)) -ge "$LOBBY_BOOTSTRAP_DWELL" ]; then
-                BOOTSTRAPPING=true
-                [ "$BOOTSTRAP_START_WINDOW" -lt 0 ] && BOOTSTRAP_START_WINDOW=$((NOW / 180))
+                # A SOLO node never elects and never hops. It waits at the
+                # lobby until either a tourguide rescues it onto the mesh's
+                # data channels, or another radio turns up and meshes with it
+                # here -- and only then do the two of them run a joint
+                # deterministic election and migrate together.
+                #
+                # Bootstrapping alone was the old behaviour and bought nothing:
+                # one node's view of the RF is not a consensus, and having
+                # elected, it then had to tourguide back into the lobby every
+                # two minutes to stay findable. Parking on the lobby pair costs
+                # a solo radio nothing, since there is no mesh link to optimise.
+                # The whole-site cold start still works: every node powers on
+                # into the lobby, they mesh with each other there, so each sees
+                # peers and they bootstrap together -- which is the case this
+                # dwell was built for in the first place.
+                if [ "$(mesh_peer_count)" -gt 0 ]; then
+                    BOOTSTRAPPING=true
+                    [ "$BOOTSTRAP_START_WINDOW" -lt 0 ] && BOOTSTRAP_START_WINDOW=$((NOW / 180))
+                    LOBBY_SOLO_LOGGED=false
+                else
+                    # Lost every peer mid-bootstrap: drop the start window so a
+                    # later rejoin sits out a fresh scan->publish->replicate
+                    # round before electing, exactly like a first entry.
+                    BOOTSTRAP_START_WINDOW=-1
+                    if [ "$LOBBY_SOLO_LOGGED" = false ]; then
+                        log "Solo at the lobby (no batman peers). Holding for a tourguide or another radio; not electing."
+                        LOBBY_SOLO_LOGGED=true
+                    fi
+                fi
             fi
         fi
 
@@ -714,6 +751,7 @@ except Exception:
 
         LOBBY_ENTERED_TIME=0
         BOOTSTRAP_START_WINDOW=-1
+        LOBBY_SOLO_LOGGED=false
 
         # === STAGE 1: RF SCAN (every 3 min at :10) ===
         if should_perform_action "SCAN" 180 10; then

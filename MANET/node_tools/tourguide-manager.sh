@@ -133,18 +133,25 @@ elect_tourguide() {
 }
 
 select_tourguide_radio() {
-    local MY_MAC=$1
-    local MAC_SANITIZED=$(echo "$MY_MAC" | tr -d ':')
-    local RADIO_VAR="NODE_${MAC_SANITIZED}_LAST_TOURGUIDE_RADIO"
-
-    local LAST_RADIO=$(grep "^${RADIO_VAR}=" "$REGISTRY_STATE_FILE" 2>/dev/null | cut -d'=' -f2 | tr -d "'")
-
-    if [ "$LAST_RADIO" = "$WPA_IFACE_2_4" ]; then
-        echo "$WPA_IFACE_5_0"
-    elif [ "$LAST_RADIO" = "$WPA_IFACE_5_0" ]; then
+    # Alternate on the GLOBAL tourguide window index, never on this node's own
+    # history. Two split partitions can only discover each other if their
+    # tourguides hop to the same band in the same window. The previous
+    # implementation read this node's LAST_TOURGUIDE_RADIO from the registry,
+    # which goes permanently out of phase the moment one side misses a window
+    # (elected tourguide was excluded for hosting a service, a restart, a failed
+    # hop) -- after that the two partitions hop to opposite bands every window
+    # and never meet, silently disabling partition healing. That is the only
+    # recovery path a 2-node mesh has: quorum-checker.sh cannot rescue an
+    # isolated node below 3 remembered peers.
+    #
+    # 120 matches should_perform_tourguide's window in node-manager-acs.sh
+    # (every even minute). This inherits the wall-clock alignment the rest of
+    # the ACS pipeline already depends on; it adds no new time-sync requirement.
+    local NOW=$(date +%s)
+    if [ $(( (NOW / 120) % 2 )) -eq 0 ]; then
         echo "$WPA_IFACE_2_4"
     else
-        echo "$WPA_IFACE_2_4"
+        echo "$WPA_IFACE_5_0"
     fi
 }
 
@@ -197,7 +204,7 @@ analyze_partition_data() {
     local NOW=$(date +%s)
 
     # Newest credible foreign beacon wins consideration
-    local BEST_CONFIG="" BEST_SIZE=0 BEST_TS=0
+    local BEST_CONFIG="" BEST_SIZE=0 BEST_TS=0 BEST_MAC=""
 
     # Each line is "<sender mac> <base64>": the MAC is Alfred's record key,
     # which is where a beacon's identity comes from now that telemetry no
@@ -237,6 +244,7 @@ analyze_partition_data() {
             BEST_CONFIG=$CONFIG_KEY
             BEST_SIZE=$PARTITION_SIZE
             BEST_TS=$LAST_SEEN_TIMESTAMP
+            BEST_MAC=$MAC_ADDRESS
         fi
     done <<< "$payloads"
 
@@ -244,11 +252,26 @@ analyze_partition_data() {
 
     log "!!! PARTITION: foreign partition (size $BEST_SIZE) on $BEST_CONFIG; mine (size $MY_PARTITION_SIZE) on $MY_CONFIG !!!"
 
-    # Smaller partition migrates. Equal sizes: both tourguides see the same
-    # pair of configs, so break the tie on the config string — the partition
-    # whose config sorts lower stays put.
+    # Smaller partition migrates. Equal sizes: break the tie on MAC, lowest
+    # stays put. Both tourguides run this in the same window and each sees the
+    # other's MAC as BEST_MAC and its own as MY_MAC, so exactly one migrates.
+    #
+    # Deliberately NOT the config string (what this used to compare). A config
+    # tiebreak decides a split by channel number, which biases every equal-size
+    # merge toward the numerically-lower pair and can pull a node straight back
+    # onto the channel it fled. Identity is neutral: the merge only has to pick
+    # a winner, and the normal election re-optimises the channel on the next
+    # cycle once both sides are talking again.
+    #
+    # BEST_MAC is the beaconing tourguide's MAC, not a stable partition
+    # identity -- in partitions larger than one node the tourguide rotates, so
+    # the comparison MAC can differ between windows. That is fine here: the
+    # comparison is consistent within a single window, which is all that is
+    # needed, and one merge resolves the split. Carrying a real partition
+    # identity would mean a new NodeInfo.proto field and a pb2 regeneration
+    # (protoc 3.21.x only — see the ACS section of the handoff).
     if [ "$BEST_SIZE" -gt "$MY_PARTITION_SIZE" ] || \
-       { [ "$BEST_SIZE" -eq "$MY_PARTITION_SIZE" ] && [[ "$BEST_CONFIG" < "$MY_CONFIG" ]]; }; then
+       { [ "$BEST_SIZE" -eq "$MY_PARTITION_SIZE" ] && [[ -n "$BEST_MAC" ]] && [[ "$BEST_MAC" < "$MY_MAC" ]]; }; then
         log "Other partition wins. Triggering migration..."
         IFS='-' read -r new_2_4 new_5_0 <<< "$BEST_CONFIG"
 
@@ -288,7 +311,7 @@ fi
 
 log "=== I AM TOURGUIDE ==="
 
-TOURGUIDE_RADIO=$(select_tourguide_radio "$MY_MAC")
+TOURGUIDE_RADIO=$(select_tourguide_radio)
 HOSTNAME=$(hostname)
 
 # Build helper payload (partition size lets two tourguides meeting in the
