@@ -161,6 +161,10 @@ def _add_interfaces(t, interfaces_json):
                 iface.ipv4.append(packed)
         iface.tx_mcs = str(entry.get('tx_mcs', '') or '')
         iface.rx_mcs = str(entry.get('rx_mcs', '') or '')
+        iface.channel = str(entry.get('channel', '') or '')
+        iface.freq_mhz = str(entry.get('freq_mhz', '') or '')
+        iface.txpower_dbm = str(entry.get('txpower_dbm', '') or '')
+        iface.halow_bw = str(entry.get('halow_bw', '') or '')
 
 
 def main():
@@ -213,7 +217,8 @@ def main():
     p.add_argument('--wifi-5-rx-mcs', type=str, default='')
 
     p.add_argument('--interfaces-json', type=str, default='[]',
-                   help='[{"name","role","state","ipv4":[],"tx_mcs","rx_mcs"}]')
+                   help='[{"name","role","state","ipv4":[],"tx_mcs","rx_mcs",'
+                        '"channel","freq_mhz","txpower_dbm","halow_bw"}]')
     p.add_argument('--eud-mode', type=str, default='wired',
                    choices=['wired', 'wireless', 'auto'])
     p.add_argument('--ap-ssid', type=str, default='')
