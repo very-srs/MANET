@@ -116,6 +116,50 @@ class EncoderInterfacesRoundtripTests(unittest.TestCase):
         self.assertEqual(wlan2['halow_bw'], '1')
 
 
+class PeerStatusPanelTests(unittest.TestCase):
+    def test_fills_services_mcs_detail_and_inferred_bat_bridge_gateway(self):
+        from manet_peer_radios import peer_status_panel
+        nd = {
+            'HOSTNAME': 'mesh-6b28',
+            'IPV4_ADDRESS': '10.30.2.6',
+            'IS_MUMBLE_SERVER': 'true',
+            'IS_MEDIAMTX_SERVER': 'true',
+            'IS_NTP_SERVER': 'true',
+            'IS_TAK_SERVER': 'false',
+            'IS_GATEWAY': 'true',
+            'GATEWAY_IFACE': 'end0',
+            'AP_SSID': 'mesh-ap-6b28',
+            'EUD_COUNT': '1',
+            'WIFI_24_TX_MCS': 'MCS15',
+            'WIFI_24_RX_MCS': 'MCS15 SGI',
+            'HALOW_TX_MCS': 'MCS9 N1 SGI',
+            'HALOW_RX_MCS': 'MCS9 N1 SGI',
+            'INTERFACES_JSON': (
+                '[{"name":"wlan0","role":"mesh","state":"UP","channel":"1",'
+                '"ipv4":[]},'
+                '{"name":"wlan2","role":"mesh","state":"UP","channel":"1",'
+                '"halow_bw":"1MHz"},'
+                '{"name":"wlan1","role":"ap","state":"UP","channel":"36"}]'
+            ),
+        }
+        panel = peer_status_panel(nd)
+        self.assertEqual(panel['services'], {
+            'mumble': True, 'mediamtx': True, 'ntp': True,
+            'syncthing': False, 'tak': False,
+        })
+        by_name = {i['name']: i for i in panel['interfaces']}
+        self.assertEqual(by_name['wlan0']['tx_mcs'], 'MCS15')
+        self.assertEqual(by_name['wlan0']['detail'], '2.4 GHz — ch1')
+        self.assertEqual(by_name['wlan2']['detail'], 'HaLow — ch1')
+        self.assertIn('mesh-ap-6b28', by_name['wlan1']['detail'])
+        self.assertEqual(by_name['bat0']['role'], 'bat')
+        self.assertEqual(by_name['bat0']['detail'], 'BATMAN-ADV mesh bridge')
+        self.assertEqual(by_name['end0']['role'], 'gateway')
+        self.assertEqual(by_name['br0']['addrs'], ['10.30.2.6'])
+        self.assertEqual(panel['eud_count'], 1)
+        self.assertEqual(panel['euds'], [])
+
+
 class TelemetryInterfacesTests(unittest.TestCase):
     def test_keeps_radio_ifaces_and_drops_the_rest(self):
         from manet_peer_radios import interfaces_for_telemetry
