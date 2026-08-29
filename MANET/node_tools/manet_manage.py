@@ -46,6 +46,8 @@ import ipaddress
 from datetime import datetime, timezone
 from urllib.parse import urlparse, unquote
 
+from manet_peer_radios import peer_radio_interfaces
+
 MESH_CONF_FILE  = '/etc/mesh.conf'
 MESH_STATE_FILE = '/etc/mesh_ipv4_state'
 REGISTRY_FILE   = '/var/run/mesh_node_registry'
@@ -887,15 +889,6 @@ def get_iw_info(iface):
 # ─────────────────────────────────────────────────────────────────────────────
 # Topology
 # ─────────────────────────────────────────────────────────────────────────────
-def parse_json_field(text):
-    """Decode a JSON list carried through the registry; [] on anything odd."""
-    try:
-        value = json.loads(text or '[]')
-    except (json.JSONDecodeError, TypeError):
-        return []
-    return value if isinstance(value, list) else []
-
-
 def build_topology():
     nodes_raw = parse_registry()
     my_host   = get_my_hostname()
@@ -943,25 +936,9 @@ def build_topology():
                 'wlan2': {'active': 'wlan2' in active_ifaces, **iw_wlan2, **mcs_map['wlan2']},
             }
         else:
-            # Straight from the registry. Peers publish their interface list
-            # over Alfred, so this needs no round trip and works for a node
-            # that is momentarily unreachable but still replicating.
-            node_info['interfaces'] = {
-                i['name']: {
-                    'active': i.get('state') == 'UP' and i.get('role') == 'mesh',
-                    'channel': '',
-                    'freq_mhz': '',
-                    'txpower_dbm': '',
-                    'txpower_cap_dbm': '',
-                    'txpower_options_dbm': [],
-                    'tx_mcs': mcs_map.get(i['name'], {}).get('tx_mcs', ''),
-                    'rx_mcs': mcs_map.get(i['name'], {}).get('rx_mcs', ''),
-                    'halow_bw': '',
-                    'halow_source': '',
-                }
-                for i in parse_json_field(nd.get('INTERFACES_JSON', ''))
-                if i.get('name') in ('wlan0', 'wlan1', 'wlan2')
-            }
+            # Registry first: INTERFACES_JSON when a peer actually published
+            # it, otherwise MCS + DATA_CHANNEL_* so chips are not all OFF.
+            node_info['interfaces'] = peer_radio_interfaces(nd)
 
         nodes.append(node_info)
 

@@ -168,6 +168,14 @@ collect_radio_mcs() {
     done
 }
 
+collect_interfaces_json() {
+    python3 /usr/local/bin/mesh-status.py --dump-interfaces 2>/dev/null || echo '[]'
+}
+
+collect_ap_ssid() {
+    grep "^lan_ap_ssid=" /etc/mesh.conf 2>/dev/null | head -1 | cut -d'=' -f2-
+}
+
 load_mesh_wpa_confs() {
     local mesh_ifaces=()
 
@@ -367,6 +375,7 @@ while true; do
         IS_MUMBLE_FLAG=$(is_hosting_mumble_service && echo "--is-mumble-server" || echo "")
 
         collect_radio_mcs
+        INTERFACES_JSON=$(collect_interfaces_json)
 
         # Encode (no scan data, no limp mode, no tourguide in static mode)
         ENCODER_ARGS=(
@@ -382,7 +391,10 @@ while true; do
             "--halow-tx-mcs" "${WLAN2_TX_MCS:-}"
             "--halow-rx-mcs" "${WLAN2_RX_MCS:-}"
             "--halow-mcs-peer" "${WLAN2_MCS_PEER:-}"
+            "--interfaces-json" "$INTERFACES_JSON"
         )
+        AP_SSID=$(collect_ap_ssid)
+        [ -n "$AP_SSID" ] && ENCODER_ARGS+=("--ap-ssid" "$AP_SSID")
         [ -n "$IS_GATEWAY_FLAG" ] && ENCODER_ARGS+=("$IS_GATEWAY_FLAG")
         [ -n "$GATEWAY_IFACE" ] && ENCODER_ARGS+=("--gateway-iface" "$GATEWAY_IFACE")
         [ -n "$IS_NTP_FLAG" ] && ENCODER_ARGS+=("$IS_NTP_FLAG")
