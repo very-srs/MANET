@@ -45,6 +45,7 @@ from urllib.parse import urlparse, parse_qs, quote
 # Alfred-staged change and a local one do exactly the same thing.
 from manet_manage import ManageRoutes
 from manet_peer_radios import interfaces_for_telemetry, peer_status_panel
+from mesh_config import apply_local_to_conf, local_changes, mesh_changes, strip_local_keys
 from manet_radio import (
     HALOW_EU_CHANNELS, HALOW_EU_UI_TO_S1G_CHANNEL, HALOW_BW_TXPOWER_CAP_DBM,
     _format_halow_bw, get_halow_driver_info, wifi_channel_to_freq, _fmt_dbm,
@@ -2619,6 +2620,34 @@ def make_config_version(config_dict):
     s = json.dumps(config_dict, sort_keys=True, separators=(',', ':'))
     return hashlib.sha256(s.encode()).hexdigest()[:8]
 
+
+def restart_eud_ap(changes):
+    """Restart hostapd on this node when AP SSID or key changed."""
+    if not ({'lan_ap_ssid', 'lan_ap_key'} & set(changes)):
+        return
+    ap_iface = ''
+    try:
+        with open('/var/lib/ap_interface') as f:
+            ap_iface = f.read().strip()
+    except Exception:
+        return
+    if not ap_iface or not os.path.isfile('/etc/hostapd/hostapd.conf'):
+        return
+    ssid = changes.get('lan_ap_ssid', '')
+    key = changes.get('lan_ap_key', '')
+    try:
+        with open('/etc/hostapd/hostapd.conf') as f:
+            text = f.read()
+        if ssid:
+            text = re.sub(r'^ssid=.*', f'ssid={ssid}', text, flags=re.M)
+        if key:
+            text = re.sub(r'^wpa_passphrase=.*', f'wpa_passphrase={key}', text, flags=re.M)
+        with open('/etc/hostapd/hostapd.conf', 'w') as f:
+            f.write(text)
+        subprocess.run(['systemctl', 'restart', 'hostapd'], capture_output=True, timeout=30)
+    except Exception:
+        pass
+
 def read_rollback_state():
     """Whether this node has a config rollback armed, and until when.
 
@@ -3278,17 +3307,31 @@ class MeshHandler(ManageRoutes, http.server.BaseHTTPRequestHandler):
                     self.send_json({'ok': False, 'error': 'No config provided'})
                     return
 
+                applied_local = local_changes(config, conf)
+                if applied_local:
+                    apply_local_to_conf(applied_local, MESH_CONF_FILE)
+                    restart_eud_ap(applied_local)
+
+                mesh_cfg = strip_local_keys(config)
+                if not mesh_changes(config, conf):
+                    self.send_json({
+                        'ok': True,
+                        'local_only': True,
+                        'applied': sorted(applied_local.keys()),
+                    })
+                    return
+
                 # Detect dangerous fields
                 cur_ssid = conf.get('mesh_ssid', '')
                 cur_key  = conf.get('mesh_key', '')
                 cur_cidr = conf.get('ipv4_network', '')
                 dangerous = (
-                    (config.get('mesh_ssid',    cur_ssid) != cur_ssid) or
-                    (config.get('mesh_key',     cur_key)  != cur_key)  or
-                    (config.get('ipv4_network', cur_cidr) != cur_cidr)
+                    (mesh_cfg.get('mesh_ssid',    cur_ssid) != cur_ssid) or
+                    (mesh_cfg.get('mesh_key',     cur_key)  != cur_key)  or
+                    (mesh_cfg.get('ipv4_network', cur_cidr) != cur_cidr)
                 )
 
-                version = make_config_version(config)
+                version = make_config_version(mesh_cfg)
                 pkg = {
                     'kind':       'mesh_config',
                     'version':    version,
@@ -3296,7 +3339,7 @@ class MeshHandler(ManageRoutes, http.server.BaseHTTPRequestHandler):
                     'issued_at':  int(__import__('time').time()),
                     'activate_at': 0,   # 0 = stage only
                     'dangerous':  dangerous,
-                    'config':     config,
+                    'config':     mesh_cfg,
                 }
                 save_pending_config(pkg)
                 broadcast_config_package(pkg)
@@ -3308,7 +3351,12 @@ class MeshHandler(ManageRoutes, http.server.BaseHTTPRequestHandler):
                 except Exception:
                     pass
 
-                self.send_json({'ok': True, 'version': version, 'dangerous': dangerous})
+                self.send_json({
+                    'ok': True,
+                    'version': version,
+                    'dangerous': dangerous,
+                    'applied': sorted(applied_local.keys()),
+                })
             except Exception as e:
                 self.send_json({'ok': False, 'error': str(e)})
 
