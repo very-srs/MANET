@@ -44,6 +44,7 @@ from urllib.parse import urlparse, parse_qs, quote
 # Radio control lives in one place, shared with mesh-radio-state.py so an
 # Alfred-staged change and a local one do exactly the same thing.
 from manet_manage import ManageRoutes
+from manet_peer_radios import interfaces_for_telemetry
 from manet_radio import (
     HALOW_EU_CHANNELS, HALOW_EU_UI_TO_S1G_CHANNEL, HALOW_BW_TXPOWER_CAP_DBM,
     _format_halow_bw, get_halow_driver_info, wifi_channel_to_freq, _fmt_dbm,
@@ -3478,6 +3479,10 @@ class ThreadedServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
 
 if __name__ == '__main__':
     import sys
+    if len(sys.argv) > 1 and sys.argv[1] == '--dump-interfaces':
+        print(json.dumps(interfaces_for_telemetry(get_interfaces()),
+                         separators=(',', ':')))
+        raise SystemExit(0)
     port = int(sys.argv[1]) if len(sys.argv) > 1 else PORT
     server = ThreadedServer(('0.0.0.0', port), MeshHandler)
     print(f'MANET Status Server listening on port {port}')

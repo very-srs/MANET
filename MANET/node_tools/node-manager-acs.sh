@@ -205,6 +205,10 @@ collect_radio_mcs() {
     done
 }
 
+collect_interfaces_json() {
+    python3 /usr/local/bin/mesh-status.py --dump-interfaces 2>/dev/null || echo '[]'
+}
+
 radio_iface_enabled() {
     python3 - "$1" <<'PY'
 import json, sys
@@ -608,6 +612,7 @@ while true; do
 
             
             collect_radio_mcs
+            INTERFACES_JSON=$(collect_interfaces_json)
             
             # Encode (scan data only while bootstrapping)
             ENCODER_ARGS=(
@@ -621,6 +626,7 @@ while true; do
                 "--halow-tx-mcs" "${WLAN2_TX_MCS:-}"
                 "--halow-rx-mcs" "${WLAN2_RX_MCS:-}"
                 "--halow-mcs-peer" "${WLAN2_MCS_PEER:-}"
+                "--interfaces-json" "$INTERFACES_JSON"
             )
             [ -n "$IS_GATEWAY_FLAG" ] && ENCODER_ARGS+=("$IS_GATEWAY_FLAG")
             [ -n "$GATEWAY_IFACE" ] && ENCODER_ARGS+=("--gateway-iface" "$GATEWAY_IFACE")
@@ -799,6 +805,7 @@ except Exception:
 
             # Encode
             collect_radio_mcs
+            INTERFACES_JSON=$(collect_interfaces_json)
             ENCODER_ARGS=(
                 "--mean-throughput-mbps" "$MEAN_THROUGHPUT"
                 "--channel-report-json" "$SCAN_REPORT_JSON"
@@ -813,6 +820,7 @@ except Exception:
                 "--halow-tx-mcs" "${WLAN2_TX_MCS:-}"
                 "--halow-rx-mcs" "${WLAN2_RX_MCS:-}"
                 "--halow-mcs-peer" "${WLAN2_MCS_PEER:-}"
+                "--interfaces-json" "$INTERFACES_JSON"
             )
             [ -n "$IS_GATEWAY_FLAG" ] && ENCODER_ARGS+=("$IS_GATEWAY_FLAG")
             [ -n "$GATEWAY_IFACE" ] && ENCODER_ARGS+=("--gateway-iface" "$GATEWAY_IFACE")

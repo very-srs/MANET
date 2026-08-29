@@ -124,6 +124,10 @@ message NodeTelemetry {
     repeated fixed32 ipv4 = 4;  // packed
     string tx_mcs = 5;
     string rx_mcs = 6;
+    string channel = 7;
+    string freq_mhz = 8;
+    string txpower_dbm = 9;
+    string halow_bw = 10;
   }
   repeated InterfaceInfo interfaces = 40;
 
