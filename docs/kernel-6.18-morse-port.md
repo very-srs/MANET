@@ -382,7 +382,21 @@ FGH100M-AA-MD, US frequency plan); Rock 3A uses `mm8108*.bin` + `bcf_mf15457.bin
 right one is missing.
 
 Never extract a kernel tarball onto a live CM4's mounted FAT32 boot partition —
-power down and extract on the dev machine (sequence in the top-level CLAUDE.md).
+power down and mount the eMMC on the dev machine. Usual first-boot path is an
+install tarball from `MANET/packaging/` (overlay already includes Morse
+firmware). For a kernel-only tarball onto mounted partitions:
+
+```bash
+# $BOOTFS = FAT boot partition, $ROOTFS = ext4 root, $KVER e.g. 6.18.33-manet
+sudo tar xzf cm4-kernel.tar.gz -C "$BOOTFS" --strip-components=2 ./boot/firmware/
+sudo tar xzf cm4-kernel.tar.gz -C "$ROOTFS" ./usr/lib/modules/ ./etc/ ./usr/local/ ./root/
+sudo depmod -b "$ROOTFS" "$KVER"
+```
+
+`--strip-components=2` on boot is required: the archive stores firmware under
+`./boot/firmware/`, and the mounted FAT volume *is* that firmware directory.
+If the tarball has no `usr/lib/firmware/morse/`, copy those blobs from the
+build staging dir or the SBC overlay onto `$ROOTFS/usr/lib/firmware/morse/`.
 
 Success check after boot:
 
@@ -405,4 +419,4 @@ The mm6108 firmware can wedge if a mesh plink teardown sends
 without a hardware power cycle). Runtime mitigations (`mesh_plink_timeout=0`
 enforced by batman-enslave-watch, `group_rekey=0`) prevent the trigger; a driver
 hardening fix (tolerate disable_key ENODEV without wedging) remains on the
-wishlist. Details in `handoff` and the top-level CLAUDE.md.
+wishlist. Details in `handoff`.
