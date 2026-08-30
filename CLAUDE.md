@@ -95,9 +95,12 @@ probing a missing hat — unrelated. Details in the kernel port doc §6.1.
 
 ## Verify
 
+From the git root, so `node_tools` is on `sys.path`:
+
 ```bash
-python3 -m unittest MANET/node_tools/test_mesh_config.py MANET/node_tools/test_peer_radios.py
+python3 -m unittest discover -s MANET/node_tools -p 'test_*.py'
 ```
 
-Check behavior on CM4. Packaging changes also need a tarball rebuild; see
+The encoder roundtrip test needs the `protobuf` package. Check behavior on CM4.
+Packaging changes also need a tarball rebuild; see
 [MANET/packaging/README.md](MANET/packaging/README.md).
