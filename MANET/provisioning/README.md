@@ -74,6 +74,25 @@ Clone or download the entire `provisioning/` directory to your working folder. T
 - `firstrun.sh.template` — Raspberry Pi first-boot script template
 - `rock3a-provision.sh.template` — Rock 3A first-boot provisioning script template
 
+### Template tokens
+
+`linux.sh` and `windows.ps1` bake mesh settings into the image by substituting
+`__TOKEN__` placeholders in those templates at flash time. Edit the templates
+using the tokens, not concrete values — a leftover `__MESH_SSID__` in a flashed
+image means the substitution list in the flasher was not updated.
+
+Tokens (same set on Linux and Windows):
+
+`__HARDWARE_MODEL__` `__EUD_CONNECTION__` `__LAN_AP_SSID__` `__LAN_AP_KEY__`
+`__MAX_EUDS_PER_NODE__` `__INSTALL_MEDIAMTX__` `__INSTALL_MUMBLE__`
+`__VOICE_ENABLED__` `__MESH_SSID__` `__MESH_SAE_KEY__` `__LAN_CIDR_BLOCK__`
+`__AUTO_CHANNEL__` `__RADIO_PW__` `__REGULATORY_DOMAIN__`
+`__HALOW_REGULATORY_DOMAIN__` `__ADMIN_PW__` `__AUTO_UPDATE__`
+
+Adding a new flash-time setting means the token in both templates **and** the
+`sed` / `-replace` list in both flashers. The lists live in `linux.sh`
+(`flash_rpi` and the Rock 3A path) and `windows.ps1`.
+
 ### OS Images
 
 **You do not need to download OS images manually.** The scripts handle this automatically:
