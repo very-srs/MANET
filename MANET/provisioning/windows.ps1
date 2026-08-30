@@ -1554,7 +1554,8 @@ WantedBy=multi-user.target
     while ($r3aKeepFlashing) {
         if ($r3aFlashCount -gt 0) {
             Write-Host ""
-            Write-Host "Insert the next SD card, then select the target device."
+            Read-Host "Insert the next SD card and then press Enter"
+            Write-Host "Select the target device."
             $bootDisk2 = (Get-Disk | Where-Object { $_.IsBoot -eq $true }).Number
             $disks2 = Get-Disk | Where-Object {
                 $_.Number -ne $bootDisk2 -and $_.OperationalStatus -eq "Online" -and $_.Size -gt 0
@@ -1738,7 +1739,8 @@ WantedBy=multi-user.target
             $keepFlashing = $false
         } else {
             Write-Host ""
-            Write-Host "Insert the next SD card, then select the target device."
+            Read-Host "Insert the next SD card and then press Enter"
+            Write-Host "Select the target device."
 
             $bootDisk = (Get-Disk | Where-Object { $_.IsBoot -eq $true }).Number
             $disks = Get-Disk | Where-Object {
