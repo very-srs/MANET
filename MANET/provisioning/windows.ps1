@@ -10,6 +10,11 @@
 .NOTES
     Must be run as Administrator.
     Rock 3A support requires Ext2Fsd (https://github.com/matt-wu/Ext2Fsd/releases).
+
+    rpi-imager and rpiboot are located at run time rather than assumed to be on
+    C:. If they are not found on any fixed drive, the user is asked with a
+    file-picker window and the answer is remembered in
+    .mesh-configs\tool-paths.json. See Find-ProgramPath.
 #>
 
 # --- Configuration ---
@@ -23,6 +28,12 @@ $ARMBIAN_IMAGE_FILENAME = "Armbian_26.2.1_Rock-3a_trixie_vendor_6.1.115_minimal.
 $Script:ARMBIAN_IMAGE   = ""   # Set by Get-ArmbianImage
 
 $OS_IMAGE_URL  = "https://downloads.raspberrypi.com/raspios_lite_arm64/images/raspios_lite_arm64-2025-10-02/2025-10-01-raspios-trixie-arm64-lite.img.xz"
+
+$DEVICE_WAIT   = 4   # seconds to wait for the CM4 eMMC to enumerate after rpiboot
+
+# Where a program location the user pointed us at gets remembered, so nobody is
+# asked twice. Not a *.conf, so the saved-config picker does not list it.
+$TOOL_PATH_CACHE = Join-Path $CONFIG_DIR "tool-paths.json"
 
 # --- Global State ---
 $Script:HARDWARE_MODEL    = ""
@@ -44,6 +55,7 @@ $Script:AUTO_UPDATE       = ""
 $Script:REGULATORY_DOMAIN = ""
 $Script:HALOW_REGULATORY_DOMAIN = ""
 $Script:RPI_IMAGER_PATH   = $null
+$Script:RPIBOOT_PATH      = $null
 
 
 # ============================================================
@@ -183,6 +195,470 @@ function Expand-XzFile {
     Write-Host "ERROR: Could not decompress .xz file." -ForegroundColor Red
     Write-Host "Please install 7-Zip (https://www.7-zip.org/) or enable WSL."
     return $false
+}
+
+# ============================================================
+# Finding installed programs (rpi-imager, rpiboot)
+# ============================================================
+#
+# These used to be a hardcoded list of C:\Program Files paths, which finds
+# nothing on a machine set up any other way - a second hard drive, a
+# non-default install folder, a portable copy. The search below walks every
+# fixed drive instead, and when that still comes up empty it ASKS, with a
+# file-picker window rather than a console prompt: the people running this are
+# not comfortable typing paths into a terminal. What they pick is remembered in
+# .mesh-configs\tool-paths.json so they are never asked twice.
+
+# Runs a scriptblock on an STA thread and returns its last output value.
+# WinForms dialogs require STA. Windows PowerShell 5.1 already is; pwsh 7 is
+# MTA, where ShowDialog() can return immediately or hang, so there the work goes
+# to a dedicated STA runspace. Arguments are passed explicitly because the
+# scriptblock crosses a runspace boundary and takes no closure with it.
+function Invoke-OnStaThread {
+    param([scriptblock]$Action, [object[]]$Arguments = @())
+
+    if ([System.Threading.Thread]::CurrentThread.GetApartmentState() -eq 'STA') {
+        return (& $Action @Arguments)
+    }
+
+    $runspace = [runspacefactory]::CreateRunspace()
+    $runspace.ApartmentState = 'STA'
+    $runspace.ThreadOptions  = 'ReuseThread'
+    $runspace.Open()
+
+    $shell = [powershell]::Create()
+    $shell.Runspace = $runspace
+    $null = $shell.AddScript($Action.ToString())
+    foreach ($arg in $Arguments) { $null = $shell.AddArgument($arg) }
+
+    try {
+        $out = $shell.Invoke()
+
+        # Invoke() does NOT rethrow. A failure inside the runspace - WinForms
+        # missing, no desktop session - lands in the error stream and returns an
+        # empty collection. Without this it would look like a silent "user
+        # cancelled" and the caller's console fallback, which exists for exactly
+        # that machine, would never run.
+        if ($out.Count -eq 0 -and $shell.HadErrors -and $shell.Streams.Error.Count -gt 0) {
+            throw $shell.Streams.Error[0].Exception
+        }
+
+        if ($out.Count -gt 0) { return $out[$out.Count - 1] }
+        return $null
+    } finally {
+        $shell.Dispose()
+        $runspace.Close()
+        $runspace.Dispose()
+    }
+}
+
+# Every place a program might reasonably be installed. Deliberately shallow -
+# a handful of Test-Path calls, no recursive disk crawl.
+function Get-ProgramSearchRoots {
+    $roots = New-Object System.Collections.Generic.List[string]
+
+    foreach ($known in @($env:ProgramFiles, ${env:ProgramFiles(x86)}, $env:ProgramW6432)) {
+        if ($known) { $roots.Add($known) }
+    }
+    if ($env:LOCALAPPDATA) { $roots.Add((Join-Path $env:LOCALAPPDATA 'Programs')) }
+    if ($ScriptDir)        { $roots.Add($ScriptDir) }
+
+    # Every fixed drive, not just the system one. A machine with a second hard
+    # drive very often has the program under D:\Program Files, or plain D:\.
+    $drives = @()
+    try {
+        $drives = @(Get-CimInstance -ClassName Win32_LogicalDisk -Filter "DriveType=3" -ErrorAction Stop |
+                    Select-Object -ExpandProperty DeviceID)
+    } catch {
+        $drives = @(Get-PSDrive -PSProvider FileSystem -ErrorAction SilentlyContinue |
+                    Where-Object { $_.Root -match '^[A-Za-z]:\\$' } |
+                    ForEach-Object { $_.Root.Substring(0, 2) })
+    }
+    foreach ($drive in $drives) {
+        $roots.Add("$drive\Program Files")
+        $roots.Add("$drive\Program Files (x86)")
+        $roots.Add("$drive\")
+    }
+
+    return @($roots | Where-Object { $_ } | Select-Object -Unique)
+}
+
+function Get-CachedToolPath {
+    param([string]$Key)
+
+    if (-not (Test-Path $TOOL_PATH_CACHE)) { return $null }
+    try {
+        $cache = Get-Content $TOOL_PATH_CACHE -Raw | ConvertFrom-Json
+        $value = $cache.$Key
+        # Revalidate: a remembered path is stale if the program was moved or
+        # uninstalled, and we would rather search again than fail at flash time.
+        if ($value -and (Test-Path -LiteralPath $value -PathType Leaf)) { return $value }
+    } catch { }
+    return $null
+}
+
+function Set-CachedToolPath {
+    param([string]$Key, [string]$Path)
+
+    try {
+        $cache = @{}
+        if (Test-Path $TOOL_PATH_CACHE) {
+            $existing = Get-Content $TOOL_PATH_CACHE -Raw | ConvertFrom-Json
+            foreach ($property in $existing.PSObject.Properties) { $cache[$property.Name] = $property.Value }
+        }
+        $cache[$Key] = $Path
+
+        $cacheDir = Split-Path -Parent $TOOL_PATH_CACHE
+        if (-not (Test-Path $cacheDir)) { New-Item -ItemType Directory -Path $cacheDir -Force | Out-Null }
+        ($cache | ConvertTo-Json) | Set-Content -Path $TOOL_PATH_CACHE -Encoding UTF8
+    } catch {
+        # Never let a cache write stop a flash - it only costs one extra prompt.
+        Write-Host "(Could not save the $Key location for next time: $($_.Exception.Message))" -ForegroundColor DarkGray
+    }
+}
+
+# Forget a remembered location. Called when the program turns out not to run,
+# so a bad answer costs one failed attempt rather than wedging every future run
+# behind a JSON file the user will never find.
+function Remove-CachedToolPath {
+    param([string]$Key, [string]$Reason = '')
+
+    if (-not (Test-Path $TOOL_PATH_CACHE)) { return }
+    try {
+        $cache    = @{}
+        $existing = Get-Content $TOOL_PATH_CACHE -Raw | ConvertFrom-Json
+        foreach ($property in $existing.PSObject.Properties) {
+            if ($property.Name -ne $Key) { $cache[$property.Name] = $property.Value }
+        }
+        ($cache | ConvertTo-Json) | Set-Content -Path $TOOL_PATH_CACHE -Encoding UTF8
+
+        Write-Host ""
+        Write-Host "Forgetting the remembered location for '$Key'$(if ($Reason) { " - $Reason" })." -ForegroundColor Yellow
+        Write-Host "You will be asked for it again next time you run this script."
+    } catch { }
+}
+
+# The "we couldn't find it" window. Three plainly-worded buttons instead of a
+# stock Yes/No/Cancel box. Returns 'browse', 'download' or 'quit'.
+function Show-ProgramNotFoundWindow {
+    param([string]$DisplayName, [string]$UsualLocation, [string]$DownloadUrl)
+
+    $dialog = {
+        param($DisplayName, $UsualLocation, $DownloadUrl)
+
+        Add-Type -AssemblyName System.Windows.Forms
+        Add-Type -AssemblyName System.Drawing
+
+        $form                 = New-Object System.Windows.Forms.Form
+        $form.Text            = "$DisplayName was not found"
+        $form.ClientSize      = New-Object System.Drawing.Size(480, 235)
+        $form.FormBorderStyle = 'FixedDialog'
+        $form.StartPosition   = 'CenterScreen'
+        $form.MaximizeBox     = $false
+        $form.MinimizeBox     = $false
+        $form.TopMost         = $true
+
+        $lines = @(
+            "This script needs $DisplayName to flash the card, but it is not",
+            "installed in any of the usual places.",
+            "",
+            "It is normally found in:",
+            "     $UsualLocation",
+            "",
+            "If you know it is installed somewhere else on this computer - on a",
+            "second hard drive, say - choose 'Find it for me' and point to it.",
+            "",
+            "If it is not installed at all, choose 'Download it' to open:",
+            "     $DownloadUrl"
+        )
+
+        $label          = New-Object System.Windows.Forms.Label
+        $label.Location = New-Object System.Drawing.Point(16, 16)
+        $label.Size     = New-Object System.Drawing.Size(450, 165)
+        $label.Text     = ($lines -join "`r`n")
+        $form.Controls.Add($label)
+
+        $browse              = New-Object System.Windows.Forms.Button
+        $browse.Text         = 'Find it for me...'
+        $browse.Location     = New-Object System.Drawing.Point(16, 190)
+        $browse.Size         = New-Object System.Drawing.Size(140, 30)
+        $browse.DialogResult = [System.Windows.Forms.DialogResult]::OK
+
+        $download              = New-Object System.Windows.Forms.Button
+        $download.Text         = 'Download it'
+        $download.Location     = New-Object System.Drawing.Point(170, 190)
+        $download.Size         = New-Object System.Drawing.Size(140, 30)
+        $download.DialogResult = [System.Windows.Forms.DialogResult]::Retry
+
+        $quit              = New-Object System.Windows.Forms.Button
+        $quit.Text         = 'Quit'
+        $quit.Location     = New-Object System.Drawing.Point(345, 190)
+        $quit.Size         = New-Object System.Drawing.Size(120, 30)
+        $quit.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+
+        $form.Controls.AddRange(@($browse, $download, $quit))
+        $form.AcceptButton = $browse
+        $form.CancelButton = $quit
+
+        switch ($form.ShowDialog()) {
+            ([System.Windows.Forms.DialogResult]::OK)    { 'browse' }
+            ([System.Windows.Forms.DialogResult]::Retry) { 'download' }
+            default                                     { 'quit' }
+        }
+    }
+
+    try {
+        return (Invoke-OnStaThread -Action $dialog -Arguments @($DisplayName, $UsualLocation, $DownloadUrl))
+    } catch {
+        # No GUI available (Server Core, a stripped PowerShell). Fall back to
+        # the console rather than dying.
+        Write-Host ""
+        Write-Host "$DisplayName was not found. It normally lives in $UsualLocation" -ForegroundColor Yellow
+        Write-Host "  1. Let me type where it is"
+        Write-Host "  2. Open the download page"
+        Write-Host "  3. Quit"
+        switch (Read-Host "Choose 1-3") {
+            "1"     { return 'browse' }
+            "2"     { return 'download' }
+            default { return 'quit' }
+        }
+    }
+}
+
+function Show-ProgramFilePicker {
+    param([string]$DisplayName, [string]$Filter, [string]$InitialDirectory)
+
+    $dialog = {
+        param($DisplayName, $Filter, $InitialDirectory)
+
+        Add-Type -AssemblyName System.Windows.Forms
+
+        $picker                 = New-Object System.Windows.Forms.OpenFileDialog
+        $picker.Title           = "Show me where $DisplayName is installed"
+        $picker.Filter          = $Filter
+        $picker.CheckFileExists = $true
+        $picker.Multiselect     = $false
+        if ($InitialDirectory -and (Test-Path $InitialDirectory)) {
+            $picker.InitialDirectory = $InitialDirectory
+        }
+
+        # An elevated console can leave the dialog behind other windows, which
+        # looks to the user like nothing happened. Owning it to a topmost form
+        # keeps it in front.
+        $owner         = New-Object System.Windows.Forms.Form
+        $owner.TopMost = $true
+
+        if ($picker.ShowDialog($owner) -eq [System.Windows.Forms.DialogResult]::OK) {
+            $picker.FileName
+        } else {
+            ''
+        }
+    }
+
+    try {
+        $picked = Invoke-OnStaThread -Action $dialog -Arguments @($DisplayName, $Filter, $InitialDirectory)
+        if ($picked) { return [string]$picked }
+        return $null
+    } catch {
+        Write-Host "Could not open a file browser window: $($_.Exception.Message)" -ForegroundColor Yellow
+        $typed = Read-Host "Enter the full path to $DisplayName (or press Enter to give up)"
+        if ($typed) { return $typed.Trim().Trim('"') }
+        return $null
+    }
+}
+
+# Picked a file that is not named anything like the program we asked for -
+# check rather than failing confusingly later.
+function Confirm-UnexpectedProgram {
+    param([string]$DisplayName, [string]$FileName)
+
+    $dialog = {
+        param($DisplayName, $FileName)
+
+        Add-Type -AssemblyName System.Windows.Forms
+        $owner         = New-Object System.Windows.Forms.Form
+        $owner.TopMost = $true
+
+        [System.Windows.Forms.MessageBox]::Show($owner,
+            "You picked '$FileName', which does not look like $DisplayName.`r`n`r`nUse it anyway?",
+            "Is this the right program?",
+            [System.Windows.Forms.MessageBoxButtons]::YesNo,
+            [System.Windows.Forms.MessageBoxIcon]::Warning) -eq [System.Windows.Forms.DialogResult]::Yes
+    }
+
+    try {
+        return [bool](Invoke-OnStaThread -Action $dialog -Arguments @($DisplayName, $FileName))
+    } catch {
+        $reply = Read-Host "'$FileName' does not look like $DisplayName. Use it anyway? (y/N)"
+        return ($reply -match '^[Yy]')
+    }
+}
+
+# Try the expected locations, then ask. Returns the full path, or $null if the
+# user gave up or chose to go and install it.
+function Find-ProgramPath {
+    param(
+        [string]  $Key,
+        [string]  $DisplayName,
+        [string[]]$CommandNames  = @(),
+        [string[]]$RelativePaths = @(),
+        [string]  $NamePattern   = '*',
+        [string]  $Filter        = 'Programs (*.exe;*.cmd;*.bat)|*.exe;*.cmd;*.bat|All files (*.*)|*.*',
+        [string]  $DownloadUrl   = '',
+        [string]  $UsualLocation = ''
+    )
+
+    # 1. Where the user pointed us last time.
+    $cached = Get-CachedToolPath -Key $Key
+    if ($cached) {
+        Write-Host "Found $DisplayName (remembered): $cached"
+        return $cached
+    }
+
+    # 2. On PATH.
+    foreach ($name in $CommandNames) {
+        $onPath = (Get-Command $name -ErrorAction SilentlyContinue | Select-Object -First 1).Source
+        if ($onPath -and (Test-Path -LiteralPath $onPath -PathType Leaf)) {
+            Write-Host "Found $DisplayName on PATH: $onPath"
+            return $onPath
+        }
+    }
+
+    # 3. Under every plausible install root, on every fixed drive.
+    Write-Host "Looking for $DisplayName..."
+    foreach ($root in (Get-ProgramSearchRoots)) {
+        foreach ($relative in $RelativePaths) {
+            $candidate = Join-Path $root $relative
+            if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+                Write-Host "Found ${DisplayName}: $candidate"
+                return $candidate
+            }
+        }
+    }
+
+    # 4. Ask.
+    while ($true) {
+        $answer = Show-ProgramNotFoundWindow -DisplayName $DisplayName `
+                                             -UsualLocation $UsualLocation `
+                                             -DownloadUrl   $DownloadUrl
+
+        if ($answer -eq 'download') {
+            if ($DownloadUrl) {
+                Write-Host "Opening $DownloadUrl in your browser..."
+                try { Start-Process $DownloadUrl } catch {
+                    Write-Host "Could not open a browser. Go to: $DownloadUrl" -ForegroundColor Yellow
+                }
+            }
+            Write-Host "Install $DisplayName, then run this script again." -ForegroundColor Yellow
+            return $null
+        }
+        if ($answer -ne 'browse') { return $null }
+
+        $picked = Show-ProgramFilePicker -DisplayName $DisplayName -Filter $Filter -InitialDirectory $env:ProgramFiles
+        if (-not $picked) { return $null }
+
+        if (-not (Test-Path -LiteralPath $picked -PathType Leaf)) {
+            Write-Host "That file does not exist: $picked" -ForegroundColor Red
+            continue
+        }
+
+        $leaf     = Split-Path -Leaf $picked
+        $nameOkay = ($NamePattern -eq '*' -or $leaf -like $NamePattern)
+
+        if (-not $nameOkay) {
+            if (-not (Confirm-UnexpectedProgram -DisplayName $DisplayName -FileName $leaf)) { continue }
+        }
+
+        # Only remember a pick that looks like the right program. An override is
+        # honoured for this run but deliberately NOT persisted: if someone picks
+        # notepad.exe and clicks through the warning, that must not become the
+        # remembered answer on every future run.
+        if ($nameOkay) {
+            Set-CachedToolPath -Key $Key -Path $picked
+        } else {
+            Write-Host "Using '$leaf' for this run only - it will not be remembered." -ForegroundColor Yellow
+        }
+
+        Write-Host "Using $DisplayName at: $picked" -ForegroundColor Green
+        return $picked
+    }
+}
+
+# CM4 only: put the module into USB-boot mode so its eMMC appears as a disk.
+# linux.sh runs rpiboot itself; this does the same rather than sending the user
+# off to run a second program by hand.
+function Invoke-RpiBoot {
+    Write-Host ""
+    Write-Host "--- Compute Module 4: USB boot ---"
+
+    $Script:RPIBOOT_PATH = Find-ProgramPath `
+        -Key           'rpiboot' `
+        -DisplayName   'rpiboot' `
+        -CommandNames  @('rpiboot.exe', 'rpiboot') `
+        -RelativePaths @(
+            'Raspberry Pi\rpiboot.exe',
+            'Raspberry Pi\usbboot\rpiboot.exe',
+            'Raspberry Pi Ltd\rpiboot\rpiboot.exe',
+            'usbboot\rpiboot.exe',
+            'rpiboot\rpiboot.exe',
+            'rpiboot.exe'
+        ) `
+        -NamePattern   'rpiboot*' `
+        -Filter        'rpiboot (rpiboot.exe)|rpiboot.exe|Programs (*.exe)|*.exe|All files (*.*)|*.*' `
+        -DownloadUrl   'https://github.com/raspberrypi/usbboot/releases' `
+        -UsualLocation 'C:\Program Files (x86)\Raspberry Pi\rpiboot.exe'
+
+    if (-not $Script:RPIBOOT_PATH) {
+        # Not found and not supplied - fall back to the old manual flow rather
+        # than dead-ending, since the eMMC may already be mounted.
+        Write-Host ""
+        Write-Host "Carrying on without rpiboot." -ForegroundColor Yellow
+        Write-Host "Run rpiboot yourself now, if the CM4 eMMC is not already showing as a drive."
+        Read-Host "Press Enter when the CM4 eMMC is mounted and ready"
+        return
+    }
+
+    Write-Host ""
+    Write-Host "Connect the CM4 to this computer in USB-boot mode:"
+    Write-Host "  1. Fit the boot jumper (nRPIBOOT to GND) on the carrier board"
+    Write-Host "  2. Plug the USB cable into the carrier's USB slave port"
+    Write-Host "  3. Power the board on"
+    Read-Host "Press Enter to run rpiboot"
+
+    $disksBefore = @(Get-Disk | Select-Object -ExpandProperty Number)
+
+    Write-Host "Running rpiboot..."
+    try {
+        & $Script:RPIBOOT_PATH
+        if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) {
+            # Ambiguous on its own - rpiboot also exits non-zero when no module
+            # is connected - so this warns but keeps the remembered path.
+            Write-Host "WARNING: rpiboot exited with code $LASTEXITCODE." -ForegroundColor Yellow
+        }
+    } catch {
+        Write-Host "ERROR: could not run $($Script:RPIBOOT_PATH)" -ForegroundColor Red
+        Write-Host "       $($_.Exception.Message)" -ForegroundColor Red
+        Remove-CachedToolPath -Key 'rpiboot' -Reason "it could not be run"
+    }
+
+    Write-Host "Waiting $DEVICE_WAIT seconds for the eMMC to appear..."
+    Start-Sleep -Seconds $DEVICE_WAIT
+
+    $disksAfter = @(Get-Disk | Select-Object -ExpandProperty Number)
+    $newDisks   = @($disksAfter | Where-Object { $disksBefore -notcontains $_ })
+
+    if ($newDisks.Count -gt 0) {
+        foreach ($number in $newDisks) {
+            $disk = Get-Disk -Number $number
+            Write-Host ("Detected CM4 eMMC: Disk {0} - {1} ({2}GB)" -f `
+                $disk.Number, $disk.FriendlyName, [math]::Round($disk.Size / 1GB, 2)) -ForegroundColor Green
+        }
+    } else {
+        Write-Host "No new disk appeared." -ForegroundColor Yellow
+        Write-Host "If the eMMC was already mounted from an earlier run, carry on and pick it below."
+        Write-Host "Otherwise check the boot jumper and the USB cable, and start again."
+        Read-Host "Press Enter to continue"
+    }
 }
 
 # ============================================================
@@ -377,30 +853,31 @@ function Select-HardwareAndTargetDevice {
     } while ($choice -notmatch "^[1234]$")
 
     if ($Script:HARDWARE_MODEL -ne "r3a") {
-		$rpiImagerPaths = @(
-            (Get-Command rpi-imager-cli.cmd -ErrorAction SilentlyContinue).Source,
-            "C:\Program Files\Raspberry Pi Ltd\Imager\rpi-imager-cli.cmd",
-            "C:\Program Files\Raspberry Pi Ltd\Imager\rpi-imager.exe",
-            "C:\Program Files (x86)\Raspberry Pi Imager\rpi-imager.exe",
-            "C:\Program Files\Raspberry Pi Imager\rpi-imager.exe",
-            (Get-Command rpi-imager -ErrorAction SilentlyContinue).Source
-        )
-        foreach ($p in $rpiImagerPaths) {
-            if ($p -and (Test-Path $p)) { $Script:RPI_IMAGER_PATH = $p; break }
-        }
+        $Script:RPI_IMAGER_PATH = Find-ProgramPath `
+            -Key           'rpi-imager' `
+            -DisplayName   'Raspberry Pi Imager' `
+            -CommandNames  @('rpi-imager-cli.cmd', 'rpi-imager.exe', 'rpi-imager') `
+            -RelativePaths @(
+                'Raspberry Pi Ltd\Imager\rpi-imager-cli.cmd',
+                'Raspberry Pi Ltd\Imager\rpi-imager.exe',
+                'Raspberry Pi Imager\rpi-imager.exe',
+                'Raspberry Pi\Imager\rpi-imager.exe'
+            ) `
+            -NamePattern   'rpi-imager*' `
+            -Filter        'Raspberry Pi Imager|rpi-imager*.exe;rpi-imager*.cmd|Programs (*.exe;*.cmd)|*.exe;*.cmd|All files (*.*)|*.*' `
+            -DownloadUrl   'https://www.raspberrypi.com/software/' `
+            -UsualLocation 'C:\Program Files\Raspberry Pi Ltd\Imager\'
+
         if (-not $Script:RPI_IMAGER_PATH) {
-            Write-Host "ERROR: Raspberry Pi Imager not found!" -ForegroundColor Red
-            Write-Host "Please install from: https://www.raspberrypi.com/software/"
+            Write-Host ""
+            Write-Host "ERROR: Raspberry Pi Imager is needed to flash the card, and was not found." -ForegroundColor Red
+            Write-Host "Install it from https://www.raspberrypi.com/software/ and run this script again."
             exit 1
         }
-        Write-Host "Found Raspberry Pi Imager: $($Script:RPI_IMAGER_PATH)"
     }
 
     if ($choice -eq "4") {
-        Write-Host ""
-        Write-Host "NOTE: For CM4 on Windows, you must run rpiboot manually before continuing." -ForegroundColor Yellow
-        Write-Host "Once rpiboot has mounted the eMMC, press Enter to continue."
-        Read-Host "Press Enter when the CM4 eMMC is mounted and ready"
+        Invoke-RpiBoot
     }
 
     Write-Host ""
@@ -563,7 +1040,10 @@ function Ask-Questions {
             $key = Read-Host "Enter LAN AP WPA2 Key (8-63 chars) [or press Enter to generate]"
             Write-Host ""
             if ([string]::IsNullOrWhiteSpace($key)) {
-                $bytes = New-Object byte[] 33
+                # 10 bytes -> a 16-char base64 key, matching linux.sh's
+                # 'openssl rand -base64 10'. This one gets typed by hand into
+                # an EUD, so it is deliberately shorter than the mesh SAE key.
+                $bytes = New-Object byte[] 10
                 [Security.Cryptography.RNGCryptoServiceProvider]::Create().GetBytes($bytes)
                 $Script:LAN_AP_KEY = [Convert]::ToBase64String($bytes)
                 Write-Host "Generated LAN AP Key: $($Script:LAN_AP_KEY)"
@@ -950,23 +1430,42 @@ auto_update=$($Script:AUTO_UPDATE)
 
         Write-Host "Creating radio user..."
 
+        # The "^radio:" tests all need (?m). Without it "^" anchors to the start
+        # of the whole file, so an existing radio entry anywhere below line 1 is
+        # not seen and a duplicate gets appended.
         $passwdPath    = Join-Path $rootPath "etc\passwd"
         $passwdContent = [System.IO.File]::ReadAllText($passwdPath)
-        if ($passwdContent -notmatch "^radio:") {
+        if ($passwdContent -notmatch "(?m)^radio:") {
             [System.IO.File]::WriteAllText($passwdPath, ($passwdContent.TrimEnd() + "`nradio:x:1000:1000:radio:/home/radio:/bin/bash`n").Replace("`r`n", "`n"))
         }
 
-        $groupPath    = Join-Path $rootPath "etc\group"
-        $groupContent = [System.IO.File]::ReadAllText($groupPath)
-        if ($groupContent -notmatch "^radio:") {
-            $groupContent += "radio:x:1000:`n"
+        # Done line by line. The old one-liner anchored its ",radio" tidy-up to
+        # the end of the *string*, so a memberless sudo line anywhere but the
+        # last line of the file was left as "sudo:x:27:,radio" - an empty member
+        # name - and the ",," collapse was a blind replace over the whole file.
+        $groupPath  = Join-Path $rootPath "etc\group"
+        $groupLines = @(([System.IO.File]::ReadAllText($groupPath).Replace("`r`n", "`n")).TrimEnd("`n") -split "`n")
+
+        if (-not ($groupLines -match '^radio:')) {
+            $groupLines += "radio:x:1000:"
         }
-        $groupContent = $groupContent -replace '(?m)^(sudo:x:\d+:)(.*)', '$1$2,radio' -replace ',radio$', 'radio' -replace ',,', ','
-        [System.IO.File]::WriteAllText($groupPath, $groupContent.Replace("`r`n", "`n"))
+
+        $groupLines = @($groupLines | ForEach-Object {
+            if ($_ -match '^(sudo:[^:]*:[0-9]+:)(.*)$') {
+                $prefix  = $Matches[1]
+                $members = @($Matches[2] -split ',' | Where-Object { $_ -ne '' })
+                if ($members -notcontains 'radio') { $members += 'radio' }
+                "$prefix$($members -join ',')"
+            } else {
+                $_
+            }
+        })
+
+        [System.IO.File]::WriteAllText($groupPath, (($groupLines -join "`n") + "`n"))
 
         $shadowPath    = Join-Path $rootPath "etc\shadow"
         $shadowContent = [System.IO.File]::ReadAllText($shadowPath)
-        if ($shadowContent -notmatch "^radio:") {
+        if ($shadowContent -notmatch "(?m)^radio:") {
             $shadowContent += "radio:${radioHash}:19700:0:99999:7:::`n"
             [System.IO.File]::WriteAllText($shadowPath, $shadowContent.Replace("`r`n", "`n"))
         }
@@ -1190,12 +1689,25 @@ WantedBy=multi-user.target
         Confirm-Flash -DiskNumber $Script:TARGET_DEVICE
 
         Write-Host "Running Raspberry Pi Imager..."
-        $targetDrive = "\\.\PhysicalDrive$($Script:TARGET_DEVICE)"
-        & $Script:RPI_IMAGER_PATH --cli $OS_IMAGE_URL $targetDrive --first-run-script "$tempScript"
+        $targetDrive  = "\\.\PhysicalDrive$($Script:TARGET_DEVICE)"
+        $imagerFailed = $false
+        $imagerError  = ""
+
+        try {
+            & $Script:RPI_IMAGER_PATH --cli $OS_IMAGE_URL $targetDrive --first-run-script "$tempScript"
+            if ($LASTEXITCODE -ne 0) {
+                $imagerFailed = $true
+                $imagerError  = "exited with code $LASTEXITCODE"
+            }
+        } catch {
+            # Could not be executed at all - the surest sign the path is wrong.
+            $imagerFailed = $true
+            $imagerError  = "could not be run: $($_.Exception.Message)"
+        }
 
         Remove-Item $tempScript -Force -ErrorAction SilentlyContinue
 
-        if ($LASTEXITCODE -eq 0) {
+        if (-not $imagerFailed) {
             $flashCount++
             Write-Host ""
             Write-Host "==============================================" -ForegroundColor Green
@@ -1208,8 +1720,16 @@ WantedBy=multi-user.target
             Write-Host ""
         } else {
             Write-Host ""
-            Write-Host "ERROR: rpi-imager exited with code $LASTEXITCODE" -ForegroundColor Red
+            Write-Host "ERROR: $($Script:RPI_IMAGER_PATH)" -ForegroundColor Red
+            Write-Host "       $imagerError" -ForegroundColor Red
             Write-Host ""
+
+            # If that path came from tool-paths.json it must not stay there: a
+            # wrong answer would otherwise be replayed on every future run, and
+            # the user cannot reasonably be asked to edit a JSON file. Dropping
+            # it costs nothing when the path was right - the next run finds it
+            # again by searching, and only asks if the search comes up empty.
+            Remove-CachedToolPath -Key 'rpi-imager' -Reason "it did not flash the card"
         }
 
         Write-Host "==============================================" -ForegroundColor Cyan

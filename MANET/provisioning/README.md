@@ -44,9 +44,24 @@ You will need:
 | Tool | Purpose | Install |
 |------|---------|---------|
 | `rpi-imager` | Flashing Raspberry Pi boards | [Download Installer](https://downloads.raspberrypi.com/imager/imager_latest.exe) |
+| `rpiboot` | Mounting CM4 eMMC | [usbboot releases](https://github.com/raspberrypi/usbboot/releases) — CM4 only |
 | Ext2Fsd | Mounting ext4 partitions for Rock 3A | Required for Rock 3A provisioning |
 
-> **CM4 on Windows:** You must manually run `rpiboot` before running `windows.ps1` to mount the eMMC. The script will not do this for you. On Linux, the script handles this interactively.
+> **Finding these tools:** `windows.ps1` does not assume they are on the C: drive. It
+> checks the usual install folders on *every* fixed drive, then `PATH`, then its own
+> directory. If it still cannot find one it opens a window asking you to point at the
+> program, with a **Download it** button if you do not have it yet. Your answer is saved
+> in `.mesh-configs\tool-paths.json`, so you are only asked once per machine.
+>
+> A wrong answer cannot get stuck. Pointing at something that is clearly not the right
+> program (`notepad.exe`, say) is used for that run only and never saved, and a saved
+> location that then fails to flash is dropped automatically — the next run searches
+> again, and only asks you if the search still comes up empty. Deleting
+> `.mesh-configs\tool-paths.json` clears every saved location.
+
+> **CM4 on Windows:** the script runs `rpiboot` for you, the same way the Linux script
+> does. Connect the module in USB-boot mode when prompted; the script then reports which
+> disk appeared so you can pick the right one.
 
 > **Rock 3A on Windows — password hashing:** The script pre-creates the `radio` user by writing directly to `/etc/shadow`, which requires generating a Linux SHA-512 password hash on your Windows machine. The script tries `openssl` (available if Git for Windows is installed), then WSL, then Python. If none of these are available the `radio` account will be created with a locked password — you can still log in as `root` (password `1234`) and run `passwd radio` to set it manually. Having Git for Windows installed is the easiest way to satisfy this.
 
