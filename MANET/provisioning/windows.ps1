@@ -29,7 +29,7 @@ $Script:ARMBIAN_IMAGE   = ""   # Set by Get-ArmbianImage
 
 $OS_IMAGE_URL  = "https://downloads.raspberrypi.com/raspios_lite_arm64/images/raspios_lite_arm64-2025-10-02/2025-10-01-raspios-trixie-arm64-lite.img.xz"
 
-$DEVICE_WAIT   = 4   # seconds to wait for the CM4 eMMC to enumerate after rpiboot
+$DEVICE_WAIT   = 8   # seconds to wait for the CM4 eMMC to enumerate after rpiboot
 
 # Where a program location the user pointed us at gets remembered, so nobody is
 # asked twice. Not a *.conf, so the saved-config picker does not list it.
