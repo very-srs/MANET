@@ -3070,6 +3070,7 @@ body { overflow-y: auto; }
   padding: 5px 8px; outline: none; }
 .cfg-row input:focus, .cfg-row select:focus { border-color: var(--accent); }
 .cfg-row input[type=checkbox] { width: 16px; height: 16px; margin-top: 6px; accent-color: var(--accent); }
+.cfg-readonly { flex: 1; font-size: 12px; color: var(--text); padding: 6px 0; }
 /* Danger badge on dangerous fields */
 .danger-badge { font-size: 9px; font-weight: bold; color: var(--bad); background: #ef444415;
                 border: 1px solid #ef444430; border-radius: 2px; padding: 1px 5px;
@@ -3139,6 +3140,7 @@ CONFIG_TAB_HTML = r"""
 
       <div class="cfg-section">
         <div class="cfg-section-title">EUD / Client Connection</div>
+        <p class="cfg-section-note" style="font-size:10px;color:var(--muted);margin:0 0 10px;line-height:1.5">Applies on this node only. Mesh Network settings below still go to every radio.</p>
 
         <div class="cfg-row">
           <label>Connection Mode<span class="hint">How clients connect to this node</span></label>
@@ -3157,8 +3159,8 @@ CONFIG_TAB_HTML = r"""
           <input type="password" id="f-lan-ap-key" autocomplete="new-password">
         </div>
         <div class="cfg-row">
-          <label>Max EUDs per Node<span class="hint">Max concurrent client devices</span></label>
-          <input type="text" id="f-max-euds">
+          <label>Max EUDs per Node<span class="hint">Set at flash; not changed from here</span></label>
+          <span id="f-max-euds" class="cfg-readonly">—</span>
         </div>
       </div>
 
@@ -3321,7 +3323,7 @@ function populateForm(cfg) {
   setVal('f-eud',              cfg.eud              || 'wired');
   setVal('f-lan-ap-ssid',      cfg.lan_ap_ssid      || '');
   setVal('f-lan-ap-key',       cfg.lan_ap_key        || '');
-  setVal('f-max-euds',         cfg.max_euds_per_node || '');
+  setText('f-max-euds',        cfg.max_euds_per_node || '—');
   setVal('f-mesh-ssid',        cfg.mesh_ssid         || '');
   setVal('f-mesh-key',         cfg.mesh_key          || '');
   setVal('f-ipv4-network',     cfg.ipv4_network      || '');
@@ -3334,6 +3336,7 @@ function populateForm(cfg) {
 }
 
 function setVal(id, v) { const el = document.getElementById(id); if (el) el.value = v; }
+function setText(id, v) { const el = document.getElementById(id); if (el) el.textContent = v; }
 function setChk(id, v) { const el = document.getElementById(id); if (el) el.checked = v; }
 function getVal(id)    { const el = document.getElementById(id); return el ? el.value.trim() : ''; }
 function getChk(id)    { const el = document.getElementById(id); return el ? el.checked : false; }
@@ -3455,7 +3458,6 @@ function readForm() {
     eud:               getVal('f-eud'),
     lan_ap_ssid:       getVal('f-lan-ap-ssid'),
     lan_ap_key:        getVal('f-lan-ap-key'),
-    max_euds_per_node: getVal('f-max-euds'),
     mesh_ssid:         getVal('f-mesh-ssid'),
     mesh_key:          getVal('f-mesh-key'),
     ipv4_network:      getVal('f-ipv4-network'),
@@ -3480,6 +3482,14 @@ async function stageChanges() {
     });
     const res = await r.json();
     if (r.ok && res.ok) {
+      if (res.local_only) {
+        toast('Applied on this node', 'ok');
+        cfgShowMsg(res.applied && res.applied.length
+          ? 'Saved on this node: ' + res.applied.join(', ')
+          : 'No EUD/AP changes to apply.', 'ok');
+        await refreshStatus();
+        return;
+      }
       toast('Changes staged — waiting for nodes to ACK', 'ok');
       cfgShowMsg('Staged. Waiting for ' + (STATUS && STATUS.total_nodes || '?') + ' nodes to ACK.', 'ok');
       await refreshStatus();
