@@ -11,6 +11,8 @@ still show radio values.
 
 import json
 
+from manet_radio import txpower_options_for_iface
+
 WLAN_IFACES = ('wlan0', 'wlan1', 'wlan2')
 
 
@@ -99,6 +101,9 @@ def peer_radio_interfaces(nd):
             info['channel'] = str(pub.get('channel') or '') or freq_mhz_to_channel(band_freq[name])
             info['freq_mhz'] = str(pub.get('freq_mhz') or pub.get('freq') or '') or band_freq[name]
             info['txpower_dbm'] = str(pub.get('txpower_dbm') or '')
+            info['txpower_cap_dbm'] = str(pub.get('txpower_cap_dbm') or '')
+            info['txpower_options_dbm'] = txpower_options_for_iface(
+                name, info['txpower_cap_dbm'], info['txpower_dbm'])
             info['halow_bw'] = str(pub.get('halow_bw') or '')
             info['tx_mcs'] = str(pub.get('tx_mcs') or '') or mcs['tx_mcs']
             info['rx_mcs'] = str(pub.get('rx_mcs') or '') or mcs['rx_mcs']
@@ -132,6 +137,7 @@ def interfaces_for_telemetry(ifaces):
             'channel': str(iface.get('channel', '') or ''),
             'freq_mhz': str(iface.get('freq_mhz', '') or ''),
             'txpower_dbm': str(iface.get('txpower_dbm', '') or ''),
+            'txpower_cap_dbm': str(iface.get('txpower_cap_dbm', '') or ''),
             'halow_bw': str(iface.get('halow_bw', '') or ''),
         })
     return out

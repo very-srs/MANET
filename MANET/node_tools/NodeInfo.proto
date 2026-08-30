@@ -128,6 +128,9 @@ message NodeTelemetry {
     string freq_mhz = 8;
     string txpower_dbm = 9;
     string halow_bw = 10;
+    // Highest dBm this radio will accept. Viewers pad the dropdown from this
+    // rather than shipping the 1..cap list on every Alfred cycle.
+    string txpower_cap_dbm = 11;
   }
   repeated InterfaceInfo interfaces = 40;
 

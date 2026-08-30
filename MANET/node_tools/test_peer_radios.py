@@ -78,6 +78,34 @@ class PeerRadioInterfacesTests(unittest.TestCase):
         self.assertEqual(ifaces['wlan2']['freq_mhz'], '863.5')
         self.assertEqual(ifaces['wlan2']['halow_bw'], '1')
 
+    def test_published_cap_pads_wifi_and_keeps_halow_as_cap_only(self):
+        nd = {
+            'INTERFACES_JSON': (
+                '[{"name":"wlan0","role":"mesh","state":"UP","txpower_dbm":"20",'
+                '"txpower_cap_dbm":"23"},'
+                '{"name":"wlan2","role":"mesh","state":"UP","txpower_dbm":"15",'
+                '"txpower_cap_dbm":"24","halow_bw":"1"}]'
+            ),
+        }
+        ifaces = peer_radio_interfaces(nd)
+        self.assertEqual(ifaces['wlan0']['txpower_cap_dbm'], '23')
+        self.assertEqual(ifaces['wlan0']['txpower_options_dbm'][0], '23')
+        self.assertEqual(ifaces['wlan0']['txpower_options_dbm'][-1], '1')
+        self.assertEqual(len(ifaces['wlan0']['txpower_options_dbm']), 23)
+        self.assertIn('20', ifaces['wlan0']['txpower_options_dbm'])
+        self.assertEqual(ifaces['wlan2']['txpower_cap_dbm'], '24')
+        self.assertEqual(ifaces['wlan2']['txpower_options_dbm'], ['24'])
+
+    def test_missing_cap_leaves_options_empty(self):
+        nd = {
+            'INTERFACES_JSON': (
+                '[{"name":"wlan0","role":"mesh","state":"UP","txpower_dbm":"20"}]'
+            ),
+        }
+        ifaces = peer_radio_interfaces(nd)
+        self.assertEqual(ifaces['wlan0']['txpower_cap_dbm'], '')
+        self.assertEqual(ifaces['wlan0']['txpower_options_dbm'], [])
+
 
 class EncoderInterfacesRoundtripTests(unittest.TestCase):
     def test_channel_fields_survive_encode_decode(self):
@@ -92,8 +120,8 @@ class EncoderInterfacesRoundtripTests(unittest.TestCase):
              '--timestamp', '1',
              '--interfaces-json',
              '[{"name":"wlan2","role":"mesh","state":"UP","channel":"1",'
-             '"freq_mhz":"863.5","txpower_dbm":"15","halow_bw":"1",'
-             '"tx_mcs":"MCS9 N1 SGI","rx_mcs":"MCS9 N1 SGI"}]'],
+             '"freq_mhz":"863.5","txpower_dbm":"15","txpower_cap_dbm":"24",'
+             '"halow_bw":"1","tx_mcs":"MCS9 N1 SGI","rx_mcs":"MCS9 N1 SGI"}]'],
             cwd=here,
         ).decode()
         decoded = subprocess.check_output(
@@ -113,6 +141,7 @@ class EncoderInterfacesRoundtripTests(unittest.TestCase):
         self.assertEqual(wlan2['channel'], '1')
         self.assertEqual(wlan2['freq_mhz'], '863.5')
         self.assertEqual(wlan2['txpower_dbm'], '15')
+        self.assertEqual(wlan2['txpower_cap_dbm'], '24')
         self.assertEqual(wlan2['halow_bw'], '1')
 
 
@@ -168,7 +197,8 @@ class TelemetryInterfacesTests(unittest.TestCase):
             {
                 'name': 'wlan0', 'role': 'mesh', 'state': 'UP',
                 'addrs': ['fe80::1'], 'channel': '1', 'freq_mhz': '2412',
-                'txpower_dbm': '20', 'tx_mcs': 'MCS7', 'rx_mcs': 'MCS5',
+                'txpower_dbm': '20', 'txpower_cap_dbm': '23',
+                'tx_mcs': 'MCS7', 'rx_mcs': 'MCS5',
             },
             {
                 'name': 'wlan1', 'role': 'ap', 'state': 'UP',
@@ -183,7 +213,9 @@ class TelemetryInterfacesTests(unittest.TestCase):
         self.assertEqual(dumped[0]['channel'], '1')
         self.assertEqual(dumped[0]['freq_mhz'], '2412')
         self.assertEqual(dumped[0]['txpower_dbm'], '20')
+        self.assertEqual(dumped[0]['txpower_cap_dbm'], '23')
         self.assertEqual(dumped[1]['role'], 'ap')
+        self.assertEqual(dumped[1]['txpower_cap_dbm'], '')
 
 
 if __name__ == '__main__':

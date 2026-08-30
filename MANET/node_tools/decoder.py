@@ -125,6 +125,7 @@ def decode_telemetry(raw):
             'freq_mhz': i.freq_mhz,
             'txpower_dbm': i.txpower_dbm,
             'halow_bw': i.halow_bw,
+            'txpower_cap_dbm': i.txpower_cap_dbm,
         }
         for i in t.interfaces
     ]))
