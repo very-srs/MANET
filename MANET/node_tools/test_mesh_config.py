@@ -70,6 +70,13 @@ class LocalChangesTests(unittest.TestCase):
         current = {'lan_ap_key': 'keep'}
         self.assertEqual(local_changes({'lan_ap_key': ''}, current), {})
 
+    def test_max_euds_is_never_a_local_change(self):
+        current = {'max_euds_per_node': '5'}
+        self.assertEqual(
+            local_changes({'max_euds_per_node': '12'}, current),
+            {},
+        )
+
 
 class ValidatePackageTests(unittest.TestCase):
     def test_mixed_package_is_accepted(self):
@@ -118,6 +125,18 @@ class ApplyLocalToConfTests(unittest.TestCase):
             self.assertIn('eud=wireless\n', text)
             self.assertIn('lan_ap_ssid=mesh-ap-6b28\n', text)
             self.assertIn('mesh_ssid=MANET\n', text)
+        finally:
+            os.unlink(path)
+
+    def test_does_not_write_max_euds(self):
+        with tempfile.NamedTemporaryFile('w+', delete=False) as fh:
+            fh.write('max_euds_per_node=5\nmesh_ssid=MANET\n')
+            path = fh.name
+        try:
+            applied = apply_local_to_conf({'max_euds_per_node': '12'}, path)
+            self.assertEqual(applied, [])
+            with open(path) as fh:
+                self.assertEqual(fh.read(), 'max_euds_per_node=5\nmesh_ssid=MANET\n')
         finally:
             os.unlink(path)
 

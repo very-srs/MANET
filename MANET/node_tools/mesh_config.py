@@ -12,6 +12,10 @@ LOCAL_KEYS = frozenset({
     'max_euds_per_node',
 })
 
+# max_euds_per_node is stripped from Alfred with the other per-node keys, but
+# it is set at flash and must not be rewritten from the management UI.
+LOCAL_APPLY_KEYS = LOCAL_KEYS - {'max_euds_per_node'}
+
 
 def strip_local_keys(config):
     """Return a copy with per-node keys removed, for Alfred / apply."""
@@ -35,7 +39,7 @@ def local_changes(config, current):
         return {}
     current = current or {}
     changed = {}
-    for key in LOCAL_KEYS:
+    for key in LOCAL_APPLY_KEYS:
         val = config.get(key)
         if val is None or val == '':
             continue
@@ -70,7 +74,7 @@ def apply_local_to_conf(changes, mesh_conf):
 
     applied = []
     for key, val in changes.items():
-        if key not in LOCAL_KEYS:
+        if key not in LOCAL_APPLY_KEYS:
             continue
         prefix = f'{key}='
         replaced = False

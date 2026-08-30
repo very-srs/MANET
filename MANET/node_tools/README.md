@@ -816,7 +816,8 @@ Applies a staged package to `/etc/mesh.conf`, splitting settings into two
 classes:
 
 - **Per-node** (this radio only, never Alfred): `eud`, `lan_ap_ssid`,
-  `lan_ap_key`, `max_euds_per_node`.
+  `lan_ap_key`. `max_euds_per_node` is also stripped from Alfred but is not
+  written from the management UI (set at flash).
 - **Safe** (applied mesh-wide immediately): `admin_password`, `mtx`,
   `mumble`, `auto_update`.
 - **Dangerous** (brief mesh outage): `mesh_ssid`, `mesh_key`, `ipv4_network` —
