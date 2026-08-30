@@ -11,6 +11,23 @@ with numeric owner/group `0/0`. Keep the shipped binaries marked as binary in
 `.gitattributes` — `morse_cli`, `chronyc`, `alfred`, `batctl`, `wpa_cli_s1g`,
 `wpa_supplicant_s1g` — or line-ending normalization corrupts them.
 
+- [Core Orchestration](#core-orchestration)
+- [Web Interface](#web-interface)
+- [Push-to-Talk Voice](#push-to-talk-voice)
+- [Service Elections](#service-elections)
+- [Channel Selection & Jamming Detection](#channel-selection--jamming-detection)
+- [Discovery & Partition Healing](#discovery--partition-healing)
+- [Network Management](#network-management)
+- [Data Management](#data-management)
+- [File Synchronization](#file-synchronization)
+- [Time Synchronization](#time-synchronization)
+- [Mesh Configuration Push](#mesh-configuration-push)
+- [Hardware Support](#hardware-support)
+- [Recovery & Identity](#recovery--identity)
+- [Shutdown](#shutdown)
+- [Utilities](#utilities)
+- [Setup & Provisioning](#setup--provisioning)
+
 ---
 
 ## Core Orchestration
