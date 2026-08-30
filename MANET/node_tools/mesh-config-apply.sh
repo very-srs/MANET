@@ -9,8 +9,9 @@
 # Also callable directly for testing: mesh-config-apply.sh --force
 #
 # Safe settings (applied immediately, no mesh disruption):
-#   admin_password, eud, lan_ap_ssid, lan_ap_key, max_euds_per_node,
-#   mtx, mumble, auto_update
+#   admin_password, mtx, mumble, auto_update
+# EUD mode, AP SSID/key, and max_euds_per_node are per-node and are not
+# applied from an Alfred package.
 #
 # Dangerous settings (require coordinated cutover, will briefly drop mesh):
 #   mesh_ssid, mesh_key, ipv4_network
@@ -76,7 +77,7 @@ conf_set() {
 apply_safe_settings() {
     local changed=false
 
-    for key in admin_password eud lan_ap_ssid lan_ap_key max_euds_per_node mtx mumble auto_update; do
+    for key in admin_password mtx mumble auto_update; do
         local val
         val=$(cfg_get "$key")
         [ -z "$val" ] && continue
@@ -91,34 +92,6 @@ apply_safe_settings() {
     done
 
     if [ "$changed" = "true" ]; then
-        # Restart AP if SSID/key changed
-        local ap_changed=false
-        for k in lan_ap_ssid lan_ap_key; do
-            val=$(cfg_get "$k")
-            [ -n "$val" ] && ap_changed=true
-        done
-
-        if [ "$ap_changed" = "true" ]; then
-            log "  AP credentials changed — restarting hostapd"
-            AP_IFACE=$(cat /var/lib/ap_interface 2>/dev/null || echo "")
-            if [ -n "$AP_IFACE" ]; then
-                NEW_SSID=$(cfg_get "lan_ap_ssid")
-                NEW_KEY=$(cfg_get "lan_ap_key")
-                if [ -f "/etc/hostapd/hostapd.conf" ]; then
-                    sed -i "s|^ssid=.*|ssid=${NEW_SSID}|" /etc/hostapd/hostapd.conf
-                    sed -i "s|^wpa_passphrase=.*|wpa_passphrase=${NEW_KEY}|" /etc/hostapd/hostapd.conf
-                    systemctl restart hostapd 2>/dev/null || true
-                fi
-            fi
-        fi
-
-        # Reload EUD mode if changed
-        local eud_val
-        eud_val=$(cfg_get "eud")
-        if [ -n "$eud_val" ]; then
-            log "  EUD mode changed — will take effect on next node-manager cycle"
-        fi
-
         # Handle service toggles
         local mtx_val mumble_val
         mtx_val=$(cfg_get "mtx")
