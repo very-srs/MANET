@@ -59,7 +59,7 @@ See [/provisioning/README.md](MANET/provisioning/README.md) for detailed require
 2.  Run the flashing script appropriate for your host OS (`linux.sh` or `windows.ps1`).
     * **On Windows**, scripts are blocked by default and `windows.ps1` will refuse to
       start until you allow it. Run PowerShell as Administrator and see
-      [Windows: allow the script to run first](MANET/provisioning/README.md#windows-allow-the-script-to-run-first).
+      [Windows: step by step](MANET/provisioning/README.md#windows-step-by-step).
 3.  Load a saved config or follow the interactive prompts to configure:
     * **EUD Connection**: Wired, Wireless (local AP), or Auto.
     * **Optional Services**: MediaMTX, (Mumble is untested).
@@ -88,6 +88,30 @@ that node (Ethernet or its AP), or over an SSH port-forward:
 Both are restricted to that node's own clients and localhost — not other radios,
 not other radios' clients, and not the upstream LAN when the node is acting as a
 gateway. Nodes that resolve mDNS can also use `http://manet.local/`.
+
+### Status page
+
+Live mesh topology with per-link throughput, and a node list showing which radio carries
+the best route to each peer.
+
+![Mesh topology on the status page](docs/images/webui/status-topology.png)
+
+Expanding a node gives its addresses, uptime, GPS and battery state, supply health, every
+interface with the role it is playing, connected EUDs, and which services it is hosting.
+
+![Per-node detail card](docs/images/webui/node-detail.png)
+
+### Management UI
+
+**Radio config** — bring each interface up or down and set TX power, per node or across
+the whole mesh at once, plus the HaLow channel.
+
+![Radio configuration tab](docs/images/webui/manage-radio-config.png)
+
+**Measure** — run iperf3 and ping between any pair of nodes, in either direction, and
+save the results against a labelled session so field tests can be compared later.
+
+![Measurement tab](docs/images/webui/manage-measure.png)
 
 See [Node Tools Documentation](MANET/node_tools/README.md) for the routes,
 access-control layers, and what each management tab does.

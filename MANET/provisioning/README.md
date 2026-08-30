@@ -110,37 +110,81 @@ From the `provisioning/` directory, run the script matching your host OS:
 bash linux.sh
 ```
 
-### Windows: allow the script to run first
+### Windows: step by step
 
-**Windows refuses to run PowerShell scripts by default.** `windows.ps1` will not start
-until you allow it — this is normal and expected, not a problem with the script.
+Windows blocks PowerShell scripts by default, so there are two things to do before
+`windows.ps1` will start. This is normal Windows behaviour, not a fault in the script.
 
-Open PowerShell **as Administrator** (right-click the Start button, then *Terminal
-(Admin)* or *Windows PowerShell (Admin)*), change to the `provisioning` folder, and run
-these three commands:
+#### 1. Open PowerShell as Administrator
+
+Click Start, type `powershell`, then choose **Run as Administrator** from the panel on
+the right. The window title must begin with **Administrator:** — if it does not, the
+script refuses to run and tells you so.
+
+![Choosing Run as Administrator from the Start menu](../../docs/images/provisioning/01-run-as-admin.png)
+
+#### 2. Change to the folder you downloaded
+
+Type `cd` followed by the folder containing `windows.ps1`. If you unzipped it into your
+Downloads folder that is:
 
 ```powershell
-# 1. Allow scripts in THIS window only. Nothing is changed permanently and it
-#    reverts the moment you close the window.
+cd C:\Users\<your-username>\Downloads
+```
+
+![Changing to the download folder](../../docs/images/provisioning/02-open-folder.png)
+
+#### 3. Allow the script to run
+
+```powershell
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
-
-# 2. If you downloaded this repository as a .zip, Windows marks every file inside
-#    it as untrusted and will block them even after step 1. This clears that mark.
 Get-ChildItem -Recurse | Unblock-File
+```
 
-# 3. Run the flasher.
+**The first command asks you to confirm, and the default answer is No.** Pressing Enter
+refuses the change and the script still will not start. Type **`A`** (Yes to All) and
+press Enter.
+
+The second command clears the "came from the internet" mark that Windows puts on every
+file inside a `.zip`. Skip it and the script is still blocked, this time with a
+different error about not being digitally signed.
+
+Both apply to this window only. Nothing is changed permanently, and closing the window
+undoes them.
+
+![Allowing scripts to run in this window](../../docs/images/provisioning/03-allow-scripts.png)
+
+#### 4. Start the flasher
+
+```powershell
 .\windows.ps1
 ```
 
-If you would rather not touch the execution policy at all, this one command does the
-same job without changing any setting:
+![Starting windows.ps1 and choosing the hardware platform](../../docs/images/provisioning/04-start-script.png)
+
+If you would rather not change the execution policy at all, this single command does the
+same job without altering any setting:
 
 ```powershell
 powershell.exe -ExecutionPolicy Bypass -File .\windows.ps1
 ```
 
-The exact errors you get if you skip this are listed under
+The exact errors you get if you skip any of this are listed under
 [TROUBLESHOOTING](#troubleshooting).
+
+#### 5. Answer the questions
+
+For CM4 the script finds `rpiboot`, asks you to connect the module in USB-boot mode,
+runs it for you, and reports which disk appeared so you can pick the right one:
+
+![rpiboot running and the CM4 eMMC being detected](../../docs/images/provisioning/05-usb-boot-cm4.png)
+
+#### 6. Confirm before anything is written
+
+Nothing is written to the card until you type `yes` here. Check the device and size —
+everything on that disk is erased.
+
+![The final confirmation prompt](../../docs/images/provisioning/06-final-confirmation.png)
 
 The script will:
 1. Ask you to select your hardware platform (Rock 3A, Pi 5, Pi 4B, or CM4 — **select CM4 for the current reference build**)
@@ -308,7 +352,9 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 .\windows.ps1
 ```
 
-That applies to the current window only and is forgotten when you close it.
+`Set-ExecutionPolicy` asks you to confirm and **the default answer is No**, so pressing
+Enter leaves the script just as blocked. Answer **`A`** (Yes to All). It applies to the
+current window only and is forgotten when you close it.
 
 **`... is not digitally signed. You cannot run this script on the current system.`**
 
@@ -336,5 +382,17 @@ button, then *Terminal (Admin)* or *Windows PowerShell (Admin)*.
 **Provisioning logs (Rock 3A):**
 - `/var/log/mesh-provision.log`
 - `/var/log/radio-setup.log`
+
+**Radios misbehaving — check power first.** A HaLow card that stops answering, a Wi-Fi
+interface that will not associate, or a board that resets with nothing in the log are all
+symptoms of an inadequate supply rather than a software fault. The node reports this
+itself, on the SSH login banner and on the web status page:
+
+![Under-voltage warning on the SSH login banner](../../docs/images/webui/login-banner-undervoltage.png)
+
+`manet-power-status.sh` on the node prints the same thing on demand, and
+`vcgencmd get_throttled` gives the raw value (`0x0` is clean; bit 0 set means it is
+under-volting right now; bits 16 and up mean it has happened since boot). Check the PSU
+and the cable before suspecting the software.
 
 **Node hasn't provisioned after 10 minutes:** Check that Ethernet is connected and has a working internet connection. The provisioning script waits up to 5 minutes for connectivity before timing out.
