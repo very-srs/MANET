@@ -108,10 +108,39 @@ From the `provisioning/` directory, run the script matching your host OS:
 ```bash
 # Linux
 bash linux.sh
+```
 
-# Windows (PowerShell, run as Administrator)
+### Windows: allow the script to run first
+
+**Windows refuses to run PowerShell scripts by default.** `windows.ps1` will not start
+until you allow it — this is normal and expected, not a problem with the script.
+
+Open PowerShell **as Administrator** (right-click the Start button, then *Terminal
+(Admin)* or *Windows PowerShell (Admin)*), change to the `provisioning` folder, and run
+these three commands:
+
+```powershell
+# 1. Allow scripts in THIS window only. Nothing is changed permanently and it
+#    reverts the moment you close the window.
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+
+# 2. If you downloaded this repository as a .zip, Windows marks every file inside
+#    it as untrusted and will block them even after step 1. This clears that mark.
+Get-ChildItem -Recurse | Unblock-File
+
+# 3. Run the flasher.
 .\windows.ps1
 ```
+
+If you would rather not touch the execution policy at all, this one command does the
+same job without changing any setting:
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass -File .\windows.ps1
+```
+
+The exact errors you get if you skip this are listed under
+[TROUBLESHOOTING](#troubleshooting).
 
 The script will:
 1. Ask you to select your hardware platform (Rock 3A, Pi 5, Pi 4B, or CM4 — **select CM4 for the current reference build**)
@@ -265,6 +294,39 @@ When it finishes — and after any pending interface rename has settled — it d
 ---
 
 ## TROUBLESHOOTING
+
+### Windows: the script will not start
+
+**`... cannot be loaded because running scripts is disabled on this system`**
+
+Windows' execution policy is blocking the script. This is the default on Windows and
+affects every PowerShell script, not just this one. In an **Administrator** PowerShell
+window, in the `provisioning` folder:
+
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+.\windows.ps1
+```
+
+That applies to the current window only and is forgotten when you close it.
+
+**`... is not digitally signed. You cannot run this script on the current system.`**
+
+Different cause, different fix. Windows tags files that came from the internet — most
+often because the repository was downloaded as a `.zip` — and keeps blocking them even
+once scripts are allowed. Clear the tag, in the `provisioning` folder:
+
+```powershell
+Get-ChildItem -Recurse | Unblock-File
+.\windows.ps1
+```
+
+**`The script ... cannot be run because it contains a "#requires" statement for running as Administrator`**
+
+The PowerShell window is not elevated. Close it and reopen with right-click on the Start
+button, then *Terminal (Admin)* or *Windows PowerShell (Admin)*.
+
+### Provisioning
 
 **Provisioning logs (Raspberry Pi):**
 - Phase 1 (firstrun): `/boot/firmware/firstrun.log`

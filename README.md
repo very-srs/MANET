@@ -57,6 +57,9 @@ See [/provisioning/README.md](MANET/provisioning/README.md) for detailed require
 ### 2. Provisioning a Node
 1.  Navigate to the `provisioning` directory.
 2.  Run the flashing script appropriate for your host OS (`linux.sh` or `windows.ps1`).
+    * **On Windows**, scripts are blocked by default and `windows.ps1` will refuse to
+      start until you allow it. Run PowerShell as Administrator and see
+      [Windows: allow the script to run first](MANET/provisioning/README.md#windows-allow-the-script-to-run-first).
 3.  Load a saved config or follow the interactive prompts to configure:
     * **EUD Connection**: Wired, Wireless (local AP), or Auto.
     * **Optional Services**: MediaMTX, (Mumble is untested).
