@@ -78,11 +78,6 @@ SERVICES_RESERVED=5  # IPs 1-5 for services
 IPV4_STATE="UNCONFIGURED"
 CURRENT_IPV4=""
 CURRENT_CHUNK=""
-FORCE_CONF="/etc/manet/mesh-ip-force.conf"
-FORCED_IPV4=""
-FORCED_CHUNK=""
-FORCED_GW=""
-FORCED_DNS=""
 
 PERSISTENT_IPV4=""
 PERSISTENT_CHUNK=""
@@ -92,14 +87,6 @@ PERSISTENT_NETWORK=""
 log() {
     echo "[$(date +'%Y-%m-%d %H:%M:%S')] - IP-MGR: $1" >&2
 }
-
-
-if [ -f "$FORCE_CONF" ]; then
-    # shellcheck disable=SC1090
-    . "$FORCE_CONF"
-    log "Loaded forced mesh IP config from $FORCE_CONF"
-fi
-
 
 # Converts an IP string to a 32-bit integer
 ip_to_int() {
@@ -483,12 +470,6 @@ if [ -f "$PERSISTENT_STATE_FILE" ]; then
     source "$PERSISTENT_STATE_FILE" 2>/dev/null
     if [ -n "$PERSISTENT_IPV4" ] && [ -n "$PERSISTENT_CHUNK" ]; then
         log "Loaded persistent state: chunk=$PERSISTENT_CHUNK, ip=$PERSISTENT_IPV4"
-    fi
-
-    if [ -n "${FORCED_IPV4:-}" ] && [ -n "${FORCED_CHUNK:-}" ]; then
-        PERSISTENT_IPV4="$FORCED_IPV4"
-        PERSISTENT_CHUNK="$FORCED_CHUNK"
-        log "Forcing persistent state: chunk=$PERSISTENT_CHUNK, ip=$PERSISTENT_IPV4"
     fi
 fi
 
