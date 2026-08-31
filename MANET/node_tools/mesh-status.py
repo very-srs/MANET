@@ -41,8 +41,9 @@ import hmac
 import html
 from urllib.parse import urlparse, parse_qs, quote
 
-# Radio control lives in one place, shared with mesh-radio-state.py so an
-# Alfred-staged change and a local one do exactly the same thing.
+# Radio state is read here for display only. Every change goes through the
+# management UI and is staged over Alfred, which mesh-radio-state.py applies --
+# this server has no local apply path of its own.
 from manet_manage import ManageRoutes
 from manet_peer_radios import interfaces_for_telemetry, peer_status_panel
 from mesh_config import apply_local_to_conf, local_changes, mesh_changes, strip_local_keys
@@ -52,7 +53,6 @@ from manet_radio import (
     parse_phy_txpower_options, txpower_choices_from_cap, txpower_options_for_iface,
     txpower_request_allowed, unsupported_txpower_response, get_halow_bw_txpower_cap,
     get_iface_txpower_cap, read_iface_txpower_dbm, set_iface_txpower_verified,
-    apply_txpower, apply_halow_channel, apply_wifi_channel, apply_uplink_wifi,
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -99,13 +99,6 @@ def logo_asset_token():
         except OSError:
             parts.append('missing')
     return hashlib.sha1('|'.join(parts).encode()).hexdigest()[:8]
-CONTROL_POST_PATHS = {
-    '/api/control/interface',
-    '/api/control/txpower',
-    '/api/control/halow_channel',
-    '/api/control/wifi_channel',
-}
-
 # ─────────────────────────────────────────────────────────────────────────────
 # Config / State Loaders
 # ─────────────────────────────────────────────────────────────────────────────
@@ -3413,79 +3406,6 @@ class MeshHandler(ManageRoutes, http.server.BaseHTTPRequestHandler):
                 except Exception:
                     pass
                 self.send_json({'ok': True})
-            except Exception as e:
-                self.send_json({'ok': False, 'error': str(e)})
-
-        elif path == '/api/control/interface':
-            try:
-                req   = json.loads(body)
-                iface = req.get('iface', '')
-                state = req.get('state', '')  # 'up' or 'down'
-                if iface not in ('wlan0', 'wlan1', 'wlan2') or state not in ('up', 'down'):
-                    self.send_json({'ok': False, 'error': 'Invalid iface or state'})
-                    return
-                # Detect HaLow (morse_usb) — requires wpa_supplicant-s1g lifecycle
-                et = subprocess.run(['ethtool', '-i', iface], capture_output=True, text=True, timeout=3)
-                is_halow = any('morse' in l for l in et.stdout.splitlines() if l.startswith('driver:'))
-                if is_halow:
-                    svc = f'wpa_supplicant-s1g-{iface}.service'
-                    if state == 'down':
-                        subprocess.run(['systemctl', 'stop', svc], timeout=15)
-                        subprocess.run(['ip', 'link', 'set', iface, 'down'], timeout=5)
-                    else:
-                        # cfg80211 regulatory must be set before wpa_supplicant_s1g starts.
-                        # Restarting wpa_supplicant for a standard iface re-asserts country=EU.
-                        for std_svc in ('wpa_supplicant@wlan0.service', 'wpa_supplicant@wlan1.service'):
-                            r = subprocess.run(['systemctl', 'is-active', std_svc],
-                                               capture_output=True, text=True, timeout=3)
-                            if r.stdout.strip() == 'active':
-                                subprocess.run(['systemctl', 'restart', std_svc], timeout=15)
-                                time.sleep(3)
-                                break
-                        subprocess.run(['ip', 'link', 'set', iface, 'up'], timeout=5)
-                        subprocess.run(['systemctl', 'start', svc], timeout=15)
-                        bat_r = subprocess.run(['batctl', 'if'], capture_output=True, text=True, timeout=5)
-                        if not any(l.startswith(iface + ':') for l in bat_r.stdout.splitlines()):
-                            subprocess.run(['batctl', 'if', 'add', iface], timeout=10)
-                else:
-                    svc = f'wpa_supplicant@{iface}.service'
-                    if state == 'down':
-                        subprocess.run(['batctl', 'if', 'del', iface], timeout=10)
-                        subprocess.run(['systemctl', 'stop', svc], timeout=15)
-                        subprocess.run(['ip', 'link', 'set', iface, 'down'], timeout=5)
-                    else:
-                        subprocess.run(['ip', 'link', 'set', iface, 'up'], timeout=5)
-                        subprocess.run(['systemctl', 'start', svc], timeout=15)
-                        bat_r = subprocess.run(['batctl', 'if'], capture_output=True, text=True, timeout=5)
-                        if not any(l.startswith(iface + ':') for l in bat_r.stdout.splitlines()):
-                            subprocess.run(['batctl', 'if', 'add', iface], timeout=10)
-                self.send_json({'ok': True, 'iface': iface, 'state': state})
-            except Exception as e:
-                self.send_json({'ok': False, 'error': str(e)})
-
-        elif path == '/api/control/txpower':
-            try:
-                req = json.loads(body)
-                self.send_json(apply_txpower(req.get('iface', ''), req.get('dbm')))
-            except subprocess.CalledProcessError as e:
-                err = (e.stderr or e.stdout or str(e)).strip()
-                self.send_json({'ok': False, 'error': err or str(e)})
-            except Exception as e:
-                self.send_json({'ok': False, 'error': str(e)})
-
-        elif path == '/api/control/halow_channel':
-            try:
-                req = json.loads(body)
-                self.send_json(apply_halow_channel(
-                    req.get('channel'), req.get('bw', '1MHz'), req.get('dbm')))
-            except Exception as e:
-                self.send_json({'ok': False, 'error': str(e)})
-
-        elif path == '/api/control/wifi_channel':
-            try:
-                req = json.loads(body)
-                self.send_json(apply_wifi_channel(
-                    req.get('iface', ''), req.get('channel'), req.get('dbm')))
             except Exception as e:
                 self.send_json({'ok': False, 'error': str(e)})
 
