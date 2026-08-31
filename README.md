@@ -25,7 +25,7 @@ The project transforms hardware like a Rock3a or a Raspberry Pi CM4 (recommended
 ## Repository Structure
 
 * **`provisioning/`**: Scripts and templates for flashing the OS image.
-    * `additional-scripts/`: optional — your own setup scripts, baked into the image and run once on the node after setup finishes.
+    * `additional-scripts/`: optional site-specific setup scripts, embedded in the image and run once on the node after setup finishes.
 * **`node_tools/`**: The runtime logic for the node. Contains the scripts that run the mesh, including:
     * `node-manager`: The core orchestrator for cooperative mesh functions.
     * `radio-setup.sh`: Initial provisioning tool.
@@ -66,10 +66,10 @@ See [/provisioning/README.md](MANET/provisioning/README.md) for detailed require
     * **Optional Services**: MediaMTX, (Mumble is untested).
     * **Mesh Security**: SSID and SAE Password.
     * **Network Settings**: CIDR blocks and addressing.
-4.  *(Optional)* Drop your own setup scripts into `provisioning/additional-scripts/`.
-    They are validated before anything is written to the card, baked into the image,
-    and run **once as root on the node** after the mesh is up — for site routes, org
-    SSH keys, an extra package. See
+4.  *(Optional)* Place site-specific setup scripts in
+    `provisioning/additional-scripts/`. They are validated before anything is written
+    to the card, embedded in the image, and run **once as root on the node** after the
+    mesh is up — for static routes, organisation SSH keys, or additional packages. See
     [Additional setup scripts](MANET/provisioning/additional-scripts/README.md).
 
 ### 3. First Boot
@@ -79,9 +79,8 @@ Insert the storage media into the node and power it on. The `firstrun.sh` script
 3.  Install necessary packages (`batctl`, `alfred`, `wpa_supplicant`, etc.).
 4.  Configure the radio interfaces.
 5.  Result in a fully functional mesh node
-6.  Run your own scripts from `additional-scripts/`, if you supplied any. Their outcome
-    is reported on the SSH login banner; a failure there never marks the node
-    unprovisioned.
+6.  Run any scripts supplied in `additional-scripts/`. Their outcome is reported on
+    the SSH login banner; a failure there does not mark the node unprovisioned.
 
 ## Web Interface
 

@@ -32,15 +32,16 @@ bash MANET/packaging/build-tools-tarball.sh MANET/install_packages/r3a-tools.tar
 (`MANET/node_tools/version.txt`) but fetches the **tarball** from
 colorado-governor.com. Two sources, and they are compared against each other.
 
-**Upload the tarballs first, then push the version bump.** In the other order,
-every node with `auto_update=y` sees a remote version it can never reach: it
-downloads the stale tools tarball, extracts the old `manet_version.txt`, and is
-still behind — so it downloads again on the next Ethernet carrier event.
+**Upload the tarballs first, then push the version bump.** In the reverse
+order, a node with `auto_update=y` sees a remote version the server cannot
+supply: it downloads the stale tools tarball, extracts the older
+`manet_version.txt`, remains behind, and repeats the download on the next
+Ethernet carrier event.
 
-`node-update.sh --routine` is throttled by the version file's mtime (a check is
-skipped if the file is under a day old), but `tar` restores the **build
-machine's** mtime, and a published tarball is normally older than that, so the
-throttle does not save you.
+`node-update.sh --routine` is throttled by the version file's mtime, skipping a
+check while the file is less than a day old. This does not prevent the repeated
+downloads, because `tar` restores the build machine's mtime and a published
+tarball is normally already older than a day.
 
 ## Dev toolchain
 
@@ -59,18 +60,19 @@ It pins two versions, both to **what the fleet runs**, not to what is newest:
 | `protoc` | 3.21.12 | regenerating `NodeInfo_pb2.py` |
 | `protobuf` (Python) | 4.21.12 | the runtime nodes have; what the tests must run against |
 
-protoc goes *inside* the venv, so activating it puts the right compiler on
-`PATH` along with the right runtime — there is no way to get one without the
-other. The script finishes by regenerating `NodeInfo_pb2.py` into a temp dir and
-diffing it against the committed copy; a mismatch fails the setup, because it
-means a later regeneration would produce a diff unrelated to the `.proto` change
-being made.
+protoc is installed inside the venv, so activating it places the correct
+compiler on `PATH` together with the correct runtime and the two cannot diverge.
+The script finishes by regenerating `NodeInfo_pb2.py` into a temporary directory
+and comparing it with the committed copy. A mismatch fails the setup, since it
+indicates that a later regeneration would produce differences unrelated to the
+`.proto` change being made.
 
-The build scripts here do **not** invoke protoc — they copy the committed
-`NodeInfo_pb2.py`. The venv matters when editing `NodeInfo.proto` and when
-running the test suite.
+The build scripts in this directory do **not** invoke protoc; they copy the
+committed `NodeInfo_pb2.py`. The venv is required when editing
+`NodeInfo.proto` and when running the test suite.
 
-Override the location with `MANET_VENV_DIR=`. `python3-venv` is not required.
+The location can be overridden with `MANET_VENV_DIR=`. `python3-venv` is not
+required.
 
 ## Inputs
 
