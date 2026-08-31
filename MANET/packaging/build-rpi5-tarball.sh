@@ -77,39 +77,10 @@ install_tree "$REPO_ROOT/MANET/etc" "$STAGE/etc"
 
 install_file 0644 "$REPO_ROOT/MANET/root/regulatory.db" "$STAGE/root/regulatory.db"
 
-mkdir -p "$STAGE/root/networkd-dispatcher"
-install_file 0755 "$REPO_ROOT/MANET/networkd-dispatcher/carrier" "$STAGE/root/networkd-dispatcher/carrier"
-install_file 0755 "$REPO_ROOT/MANET/networkd-dispatcher/off" "$STAGE/root/networkd-dispatcher/off"
-
-mkdir -p \
-    "$STAGE/etc/networkd-dispatcher/carrier.d" \
-    "$STAGE/etc/networkd-dispatcher/routable.d" \
-    "$STAGE/etc/networkd-dispatcher/off.d" \
-    "$STAGE/etc/networkd-dispatcher/no-carrier.d" \
-    "$STAGE/etc/networkd-dispatcher/degraded.d"
-
-cat > "$STAGE/etc/networkd-dispatcher/carrier.d/50-ethernet-detect" <<'EOF'
-#!/bin/bash
-set -euo pipefail
-
-/usr/local/bin/manet-uplink-dispatch.sh carrier "${IFACE:-}"
-
-if grep -qi '^auto_update=1' /etc/mesh.conf 2>/dev/null && ping -c 1 -W 2 -I "$IFACE" 8.8.8.8 >/dev/null 2>&1; then
-    /usr/local/bin/node-update.sh --routine
-fi
-EOF
-
-cat > "$STAGE/etc/networkd-dispatcher/routable.d/50-manet-uplink" <<'EOF'
-#!/bin/bash
-set -euo pipefail
-
-/usr/local/bin/manet-uplink-dispatch.sh routable "${IFACE:-}"
-EOF
-
-install -m 0755 "$REPO_ROOT/MANET/networkd-dispatcher/off" "$STAGE/etc/networkd-dispatcher/off.d/50-gateway-disable"
-install -m 0755 "$REPO_ROOT/MANET/networkd-dispatcher/off" "$STAGE/etc/networkd-dispatcher/no-carrier.d/50-gateway-disable"
-install -m 0755 "$REPO_ROOT/MANET/networkd-dispatcher/off" "$STAGE/etc/networkd-dispatcher/degraded.d/50-gateway-disable"
-chmod 0755 "$STAGE/etc/networkd-dispatcher/carrier.d/50-ethernet-detect" "$STAGE/etc/networkd-dispatcher/routable.d/50-manet-uplink"
+# networkd-dispatcher hooks (shared with every other builder -- see
+# lib-dispatcher.sh for why these are not heredocs any more)
+. "$SCRIPT_DIR/lib-dispatcher.sh"
+stage_dispatcher_hooks "$STAGE" "$REPO_ROOT"
 
 mkdir -p "$STAGE/etc/systemd/system/multi-user.target.wants"
 for unit in \
