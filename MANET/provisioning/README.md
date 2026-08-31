@@ -325,7 +325,10 @@ a site daemon.
    README.md                            SKIP  no #! on line 1
 ```
 
-Scripts run in filename order, each with a 300 s limit. Failures are reported
+Scripts may be written in any language a node provides — bash, dash, python3,
+perl, lua or awk — selected by the shebang. Other interpreters must be
+installed by an earlier script. Scripts run in filename order, each with a
+300 s limit. Failures are reported
 on the login banner and never mark the node unprovisioned. The full rules,
 including the handling of data files and the reason secrets must not be placed
 here, are in

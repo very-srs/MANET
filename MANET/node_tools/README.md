@@ -1084,6 +1084,10 @@ Behaviour:
 - Candidates are every regular file in the directory except dotfiles, the
   `.disabled`, `.bak`, `.orig` and `~` suffixes, and any file without `#!` on
   line one.
+- Scripts are executed directly, so the shebang selects the interpreter. A
+  stock node provides bash, dash, python3, perl, lua and mawk; anything else
+  must be installed by an earlier script. Exit 126 and 127 are reported with
+  the name of the missing interpreter rather than as a bare status.
 - Exit codes are appended to `/var/lib/manet-user-scripts.state` as
   `name<TAB>exit<TAB>epoch`, one line per completed script. Output goes to
   `/var/log/manet-user-scripts.log`, appended rather than truncated.

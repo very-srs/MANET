@@ -38,6 +38,12 @@ $ADDITIONAL_SCRIPTS_DIR = Join-Path $ScriptDir "additional-scripts"
 # has trailing completion echoes and rock3a-provision.sh ends with `reboot`, so
 # anything tacked on after the last line would never execute.
 $ADDITIONAL_SCRIPTS_ANCHOR     = '# >>> MANET_ADDITIONAL_SCRIPTS <<<'
+# Interpreters present on a stock provisioned node (Debian 13). A script whose
+# shebang names anything else is still embedded - an earlier script may well
+# install it - but the operator is told, because the alternative is a script
+# that fails at first boot with a bare exit 127.
+$ADDITIONAL_SCRIPTS_NODE_INTERPRETERS = @(
+    'sh','bash','dash','python','python3','perl','lua','awk','mawk')
 $ADDITIONAL_SCRIPTS_WARN_BYTES = 262144      # 256 KB
 $ADDITIONAL_SCRIPTS_MAX_BYTES  = 2097152     # 2 MB
 $Script:ADDITIONAL_SCRIPTS     = @()         # filled by Test-AdditionalScripts
@@ -1024,21 +1030,60 @@ function Test-AdditionalScript {
         return @{ Verdict = 'SKIP'; Reason = 'no #! on line 1' }
     }
 
-    # Syntax-check what we can. Only shell gets a real parse; a Python or perl
-    # shebang is taken at its word, since checking it would mean running that
-    # interpreter on the flashing host.
-    if ($firstLine -match '^#!/bin/(ba)?sh|/env\s+(ba)?sh$|/bash$|/sh$') {
-        $syntaxError = Test-ShellSyntax -Path $File.FullName
-        if ($null -eq $syntaxError) {
-            return @{ Verdict = 'OK'; Reason = 'shell (not syntax-checked, no bash here)' }
-        }
-        if ($syntaxError -ne "") {
-            return @{ Verdict = 'FAIL'; Reason = "shell syntax error: $syntaxError" }
-        }
-        return @{ Verdict = 'OK'; Reason = 'bash -n clean' }
+    # The interpreter, as a bare name: "#!/usr/bin/env python3" -> python3,
+    # "#!/usr/bin/perl -w" -> perl.
+    $words  = ($firstLine.Substring(2).Trim() -split '\s+')
+    $interp = if ($words[0] -match '/env$' -and $words.Count -gt 1) { $words[1] } else { $words[0] }
+    $interp = ($interp -split '[/\\]')[-1]
+
+    $note = ''
+    if ($ADDITIONAL_SCRIPTS_NODE_INTERPRETERS -notcontains $interp) {
+        $note = " - $interp is not installed on a stock node"
     }
 
-    return @{ Verdict = 'OK'; Reason = $firstLine.Substring(2) }
+    # Any interpreter is accepted. Only those that can be checked *without
+    # executing the script* are checked: shell via `bash -n`, python via
+    # ast.parse. perl is deliberately excluded - `perl -c` executes BEGIN
+    # blocks and resolves `use` against the host's module path, so it would run
+    # operator code on the wrong machine and fail wrongly on modules that exist
+    # only on the node. A wrong FAIL blocks a flash.
+    switch -Regex ($interp) {
+        '^(sh|bash|dash)$' {
+            $syntaxError = Test-ShellSyntax -Path $File.FullName
+            if ($null -eq $syntaxError) {
+                return @{ Verdict = 'OK'; Reason = "shell (not syntax-checked, no bash here)$note" }
+            }
+            if ($syntaxError -ne "") {
+                return @{ Verdict = 'FAIL'; Reason = "shell syntax error: $syntaxError" }
+            }
+            return @{ Verdict = 'OK'; Reason = "bash -n clean$note" }
+        }
+        '^python[23]?$' {
+            $py = Get-Command python3 -ErrorAction SilentlyContinue
+            if (-not $py) { $py = Get-Command python -ErrorAction SilentlyContinue }
+            if ($py) {
+                $code = @'
+import ast,sys
+try:
+    ast.parse(open(sys.argv[1], encoding="utf-8", errors="replace").read())
+except SyntaxError as e:
+    sys.stderr.write("line %s: %s" % (e.lineno, e.msg)); sys.exit(1)
+'@
+                $tmp = [System.IO.Path]::GetTempFileName() + '.py'
+                [System.IO.File]::WriteAllText($tmp, $code)
+                $err = & $py.Source $tmp $File.FullName 2>&1
+                Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+                if ($LASTEXITCODE -ne 0) {
+                    return @{ Verdict = 'FAIL'
+                              Reason  = "python syntax error: $(($err | Out-String).Trim())" }
+                }
+                return @{ Verdict = 'OK'; Reason = "python syntax clean$note" }
+            }
+            return @{ Verdict = 'OK'; Reason = "$interp (not syntax-checked, no python here)$note" }
+        }
+    }
+
+    return @{ Verdict = 'OK'; Reason = "$interp (not syntax-checked)$note" }
 }
 
 function Test-AdditionalScripts {
