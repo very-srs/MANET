@@ -47,6 +47,8 @@ from datetime import datetime, timezone
 from urllib.parse import urlparse, unquote
 
 from manet_peer_radios import peer_radio_interfaces
+from manet_radio import (halow_bandwidth_for_channel, halow_channel_for_frequency,
+                        halow_channel_options)
 
 MESH_CONF_FILE  = '/etc/mesh.conf'
 MESH_STATE_FILE = '/etc/mesh_ipv4_state'
@@ -85,9 +87,8 @@ def logo_asset_token():
     return hashlib.sha1('|'.join(parts).encode()).hexdigest()[:8]
 USB_WIFI_UPLINK_SCRIPT = '/usr/local/bin/usb-wifi-uplink.sh'
 
-# EU S1G channels (centre frequencies in MHz)
-HALOW_EU_CHANNELS = [863500, 864500, 865500, 866500, 867500]
-HALOW_BW_OPTIONS  = ['1MHz', '2MHz', '4MHz']
+# The S1G channel plan is region-dependent and lives in manet_radio, so the
+# UI, the Alfred applier and mesh-status all offer the same channels.
 # Empirical HaLow TX-power ceilings verified on mesh-f86f (2026-04-22)
 # by applying channel/BW changes on the live node and reading back /api/local.
 HALOW_BW_TXPOWER_CAP_DBM = {'1MHz': '24', '2MHz': '24', '4MHz': '22'}
@@ -330,11 +331,7 @@ def _channel_from_frequency(freq_value):
     else:
         freq_khz = freq * 1000.0
         freq_mhz = freq
-    channel = ''
-    for idx, center_khz in enumerate(HALOW_EU_CHANNELS, start=1):
-        if abs(freq_khz - center_khz) <= 500:
-            channel = str(idx)
-            break
+    channel, _bw = halow_channel_for_frequency(freq_khz)
     return channel, f'{freq_mhz:.3f}'.rstrip('0').rstrip('.')
 
 def _parse_morse_channel_output(text):
@@ -431,9 +428,12 @@ def get_halow_driver_info(iface='wlan2'):
         m = re.search(r'op_class\s*=\s*(\d+)', txt)
         if m:
             info['op_class'] = m.group(1)
-        m = re.search(r's1g_prim_chwidth\s*=\s*(\d+)', txt)
-        if m:
-            info['halow_bw'] = {'0': '1MHz', '1': '2MHz', '2': '4MHz'}.get(m.group(1), m.group(1))
+        # s1g_prim_chwidth is the *primary* width (2 MHz for every operating
+        # width above 1 MHz), so the channel number is what says how wide the
+        # operating channel actually is.
+        bw = halow_bandwidth_for_channel(info.get('channel'))
+        if bw:
+            info['halow_bw'] = bw
         if info:
             info['halow_source'] = 'config'
             return info
@@ -950,6 +950,7 @@ def build_topology():
         'my_hostname': my_host,
         'my_ip':      my_ip,
         'internet':   has_internet(),
+        'halow_plan': halow_channel_options(),
         'timestamp':  int(time.time()),
     }
 
@@ -1742,7 +1743,9 @@ function updateHalowTxpowerOptions(preferredValue = '') {
   const cap = normalizeDbm(HALOW_BW_TXPOWER_CAPS[bw]);
   const opts = txPowerOptionsForCap(cap);
   if (!opts.length) {
-    select.outerHTML = `<select id="txpwr-all-wlan2" disabled><option value="">n/a</option></select>`;
+    // No measured cap for this width (8 MHz has never been measured here).
+    // Offer what the radio itself reports rather than greying the control out.
+    select.outerHTML = renderTxPowerSelect('txpwr-all-wlan2', getNodeInfo('all', 'wlan2'));
     return;
   }
 
@@ -2091,11 +2094,56 @@ async function toggleAll(iface, state) {
   }
 }
 
-// ── HaLow config tab (HTML is static in template) ──
+// ── HaLow config tab ──
+// The channel and bandwidth menus are not static: the S1G plan is per region,
+// and which channels exist depends on the width (a US 8 MHz channel is not a
+// 1 MHz channel number). Both are rendered from _topo.halow_plan, which the
+// node builds from the same table the apply path validates against.
+function halowPlan() {
+  return (_topo && _topo.halow_plan) || {region: '', bandwidths: [], channels: {}};
+}
+
+function renderHalowBandwidths(preferred) {
+  const plan = halowPlan();
+  const select = document.getElementById('halow-bw');
+  if (!select || !plan.bandwidths.length) return '';
+  const want = plan.bandwidths.includes(preferred) ? preferred
+             : (plan.bandwidths.includes(select.value) ? select.value : plan.bandwidths[0]);
+  select.innerHTML = plan.bandwidths
+    .map(bw => `<option value="${bw}"${bw === want ? ' selected' : ''}>${parseInt(bw)} MHz</option>`)
+    .join('');
+  select.value = want;
+  return want;
+}
+
+function renderHalowChannels(bw, preferred) {
+  const select = document.getElementById('halow-ch');
+  if (!select) return;
+  const list = halowPlan().channels[bw] || [];
+  if (!list.length) {
+    select.innerHTML = '<option value="">n/a</option>';
+    return;
+  }
+  const want = String(preferred || select.value || '');
+  const match = list.some(c => String(c.channel) === want) ? want : String(list[0].channel);
+  select.innerHTML = list
+    .map(c => `<option value="${c.channel}"${String(c.channel) === match ? ' selected' : ''}>` +
+              `ch ${c.channel} (${c.mhz} MHz)</option>`)
+    .join('');
+  select.value = match;
+}
+
+function onHalowBandwidthChange() {
+  const bw = document.getElementById('halow-bw').value;
+  renderHalowChannels(bw, '');
+  updateHalowTxpowerOptions();
+}
+
 function buildHalowConfig() {
   const halowInfo = getNodeInfo('all', 'wlan2');
+  const bw = renderHalowBandwidths(halowInfo.halow_bw);
+  renderHalowChannels(bw, halowInfo.channel);
   syncSelectValue('halow-ch', halowInfo.channel);
-  syncSelectValue('halow-bw', halowInfo.halow_bw);
   syncSelectValue('ch-2g', getNodeInfo('all', 'wlan0').channel);
   syncSelectValue('ch-5g', getNodeInfo('all', 'wlan1').channel);
   for (const iface of ['wlan0', 'wlan1', 'wlan2']) {
@@ -2404,7 +2452,7 @@ window.onload = async () => {
   buildIfaceControl();
   buildHalowConfig();
   const halowBw = document.getElementById('halow-bw');
-  if (halowBw) halowBw.addEventListener('change', () => updateHalowTxpowerOptions());
+  if (halowBw) halowBw.addEventListener('change', onHalowBandwidthChange);
   startAutoRefresh();
 };
 
@@ -3659,21 +3707,11 @@ def render_dashboard():
       <div class="card-title">HaLow</div>
       <div class="row">
         <span class="row-label">Channel</span>
-        <select id="halow-ch">
-          <option value="1">ch 1 (863.5 MHz)</option>
-          <option value="2">ch 2 (864.5 MHz)</option>
-          <option value="3" selected>ch 3 (865.5 MHz)</option>
-          <option value="4">ch 4 (866.5 MHz)</option>
-          <option value="5">ch 5 (867.5 MHz)</option>
-        </select>
+        <select id="halow-ch"><option value="">Loading...</option></select>
       </div>
       <div class="row">
         <span class="row-label">Bandwidth</span>
-        <select id="halow-bw">
-          <option value="1MHz" selected>1 MHz</option>
-          <option value="2MHz">2 MHz</option>
-          <option value="4MHz">4 MHz</option>
-        </select>
+        <select id="halow-bw"><option value="">Loading...</option></select>
       </div>
       <div class="row">
         <span class="row-label">TX Power</span>

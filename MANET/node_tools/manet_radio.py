@@ -17,16 +17,132 @@ import stat
 import subprocess
 import time
 
-# EU S1G channel plan: UI index 1-5 -> centre frequency (kHz), and the
-# corresponding S1G channel number the supplicant config wants.
-HALOW_EU_CHANNELS = [863500, 864500, 865500, 866500, 867500]
-HALOW_EU_UI_TO_S1G_CHANNEL = {idx: 1 + ((idx - 1) * 2) for idx in range(1, 6)}
+# S1G channel plans, transcribed from the Morse driver's own tables in
+# dot11ah/s1g_channels_rules.c ({eu,us}_s1g_channels).  Keys are the S1G
+# channel number the supplicant config wants; values the centre frequency in
+# kHz.  A bandwidth appears for a region only where the driver defines a
+# channel of that width — which is why EU stops at 2 MHz: the whole 863-868
+# allocation is 5 MHz wide, so there is nowhere to put a 4 or 8 MHz channel.
+#
+# Only EU and US are listed because radio-setup.sh generates exactly two
+# supplicant templates: US, and everything else on the EU plan
+# (radio-setup.sh:1132).  Offering a third region's channels here would write
+# a config no template backs.
+HALOW_CHANNEL_PLANS = {
+    'EU': {
+        '1MHz': {1: 863500, 3: 864500, 5: 865500, 7: 866500, 9: 867500},
+        '2MHz': {2: 864000, 6: 866000},
+    },
+    'US': {
+        '1MHz': {1: 902500, 3: 903500, 5: 904500, 7: 905500, 9: 906500,
+                 11: 907500, 13: 908500, 15: 909500, 17: 910500, 19: 911500,
+                 21: 912500, 23: 913500, 25: 914500, 27: 915500, 29: 916500,
+                 31: 917500, 33: 918500, 35: 919500, 37: 920500, 39: 921500,
+                 41: 922500, 43: 923500, 45: 924500, 47: 925500, 49: 926500,
+                 51: 927500},
+        '2MHz': {2: 903000, 6: 905000, 10: 907000, 14: 909000, 18: 911000,
+                 22: 913000, 26: 915000, 30: 917000, 34: 919000, 38: 921000,
+                 42: 923000, 46: 925000, 50: 927000},
+        '4MHz': {8: 906000, 16: 910000, 24: 914000, 32: 918000, 40: 922000,
+                 48: 926000},
+        '8MHz': {12: 908000, 28: 916000, 44: 924000},
+    },
+}
+
+# S1G global operating class per region and bandwidth.  The supplicant
+# rejects a class that disagrees with the country or the channel, and a
+# rejected config is a silent crashloop, so treat these as load-bearing.
+#
+# VERIFIED - these two are the values radio-setup.sh's own working templates
+# ship: EU 1 MHz = 66 (non-US template), US 8 MHz = 71 (US template).
+# INFERRED - the rest follow the standard's contiguous S1G block (EU 2 MHz =
+# 67 is documented; US 1/2/4 MHz then fill 68/69/70 below the verified 71).
+# They have not been confirmed against the standard text or on hardware, so
+# apply_halow_channel() restarts the supplicant and rolls the config back if
+# it will not come up on a class it has not used before.
+HALOW_OP_CLASS = {
+    ('EU', '1MHz'): 66, ('EU', '2MHz'): 67,
+    ('US', '1MHz'): 68, ('US', '2MHz'): 69,
+    ('US', '4MHz'): 70, ('US', '8MHz'): 71,
+}
+
 # The Morse driver/BCF fixes TX power per bandwidth; these are the caps.
+# Measured on mesh-f86f (2026-04-22).  8 MHz has never been measured, so it is
+# deliberately absent: callers fall back to reading the interface's own cap
+# rather than acting on a number nobody checked.
 HALOW_BW_TXPOWER_CAP_DBM = {'1MHz': '24', '2MHz': '24', '4MHz': '22'}
 
 HALOW_WPA_CONF = '/etc/wpa_supplicant/wpa_supplicant-wlan2-s1g.conf'
 HALOW_OVERRIDE_FILE = '/var/run/halow-channel-override'
 USB_WIFI_UPLINK_SCRIPT = '/usr/local/bin/usb-wifi-uplink.sh'
+
+
+def halow_region():
+    """'US' or 'EU' — mirrors radio-setup.sh:1132, which is the only place a
+    HaLow supplicant config is generated: US gets its own template, every
+    other region gets the EU one."""
+    domain = ''
+    try:
+        with open('/etc/mesh.conf') as f:
+            for line in f:
+                if line.startswith('halow_regulatory_domain='):
+                    domain = line.split('=', 1)[1].strip().strip('"').upper()
+                    break
+    except OSError:
+        pass
+    return 'US' if domain == 'US' else 'EU'
+
+
+def halow_plan(region=None):
+    """{bandwidth: {s1g_channel: centre_khz}} for this node's region."""
+    return HALOW_CHANNEL_PLANS.get(region or halow_region(),
+                                   HALOW_CHANNEL_PLANS['EU'])
+
+
+def halow_channel_options(region=None):
+    """The channel/bandwidth menu the UI renders, for this node's region."""
+    region = region or halow_region()
+    plan = halow_plan(region)
+    order = sorted(plan, key=lambda bw: int(bw[:-3]))
+    return {
+        'region': region,
+        'bandwidths': order,
+        'channels': {
+            bw: [{'channel': ch, 'mhz': round(khz / 1000.0, 1)}
+                 for ch, khz in sorted(plan[bw].items())]
+            for bw in order
+        },
+    }
+
+
+def halow_bandwidth_for_channel(channel, region=None):
+    """The bandwidth an S1G channel number belongs to, or ''.
+
+    Channel numbers do not repeat across bandwidths within a region, so the
+    number alone says how wide the channel is.
+    """
+    try:
+        channel = int(channel)
+    except (TypeError, ValueError):
+        return ''
+    for bw, channels in halow_plan(region).items():
+        if channel in channels:
+            return bw
+    return ''
+
+
+def halow_channel_for_frequency(freq_khz, region=None):
+    """(s1g_channel, bandwidth) for a centre frequency, or ('', '').
+
+    Centre frequencies are unique across bandwidths within a region, so the
+    frequency alone identifies the channel.
+    """
+    plan = halow_plan(region)
+    for bw, channels in plan.items():
+        for ch, khz in channels.items():
+            if abs(freq_khz - khz) < 100:
+                return str(ch), bw
+    return '', ''
 
 
 def _format_halow_bw(value):
@@ -42,7 +158,7 @@ def _format_halow_bw(value):
             num /= 1000000
         elif num >= 1000:
             num /= 1000
-        if num in (1, 2, 4):
+        if num in (1, 2, 4, 8):
             return f'{int(num)}MHz'
     except Exception:
         pass
@@ -94,11 +210,7 @@ def _channel_from_frequency(freq_value):
     else:
         freq_khz = freq * 1000.0
         freq_mhz = freq
-    channel = ''
-    for idx, center_khz in enumerate(HALOW_EU_CHANNELS, start=1):
-        if abs(freq_khz - center_khz) <= 500:
-            channel = str(idx)
-            break
+    channel, _bw = halow_channel_for_frequency(freq_khz)
     return channel, f'{freq_mhz:.3f}'.rstrip('0').rstrip('.')
 
 
@@ -194,9 +306,13 @@ def get_halow_driver_info(iface='wlan2'):
         m = re.search(r'channel\s*=\s*(\d+)', txt)
         if m:
             info['channel'] = m.group(1)
-        m = re.search(r's1g_prim_chwidth\s*=\s*(\d+)', txt)
-        if m:
-            info['halow_bw'] = {'0': '1MHz', '1': '2MHz', '2': '4MHz'}.get(m.group(1), m.group(1))
+        # Not from s1g_prim_chwidth: that is the *primary* channel width, which
+        # is 2 MHz for every operating width above 1 MHz, so reading it as the
+        # operating width reports a 4 or 8 MHz channel as 2 MHz. The channel
+        # number identifies the width on its own.
+        bw = halow_bandwidth_for_channel(info.get('channel'))
+        if bw:
+            info['halow_bw'] = bw
         if info:
             info['halow_source'] = 'config'
             return info
@@ -383,16 +499,51 @@ def apply_txpower(iface, dbm):
     }
 
 
+S1G_SERVICE = 'wpa_supplicant-s1g-wlan2.service'
+
+
+def _s1g_supplicant_healthy(settle=6):
+    """True if the s1g supplicant is up and not crashlooping on its config.
+
+    A rejected field is fatal to this build and shows up as a restart loop,
+    not as a running daemon with a complaint, so watch the restart counter
+    rather than a single is-active.
+    """
+    def counter():
+        r = subprocess.run(['systemctl', 'show', '-p', 'NRestarts', '--value',
+                            S1G_SERVICE], capture_output=True, text=True, timeout=10)
+        try:
+            return int(r.stdout.strip())
+        except ValueError:
+            return 0
+
+    before = counter()
+    time.sleep(settle)
+    active = subprocess.run(['systemctl', 'is-active', '--quiet', S1G_SERVICE],
+                            timeout=10).returncode == 0
+    return active and counter() == before
+
+
 def apply_halow_channel(channel, bw='1MHz', dbm=None):
     if not channel:
         raise ValueError('Missing channel')
-    channel = int(channel)
-    freq_khz = dict(enumerate(HALOW_EU_CHANNELS, start=1)).get(channel)
-    s1g_channel = HALOW_EU_UI_TO_S1G_CHANNEL.get(channel)
-    if not freq_khz or not s1g_channel:
-        raise ValueError(f'Invalid EU S1G channel {channel}')
+    region = halow_region()
+    bw = _format_halow_bw(bw) or '1MHz'
+    plan = halow_plan(region)
+    if bw not in plan:
+        raise ValueError(
+            f'{bw} is not available on the {region} S1G plan '
+            f'(offered: {", ".join(sorted(plan, key=lambda b: int(b[:-3])))})')
+    s1g_channel = int(channel)
+    freq_khz = plan[bw].get(s1g_channel)
+    if not freq_khz:
+        raise ValueError(f'Channel {s1g_channel} is not a {bw} channel on the '
+                         f'{region} S1G plan')
+    op_class = HALOW_OP_CLASS.get((region, bw))
+    if not op_class:
+        raise ValueError(f'No S1G operating class known for {region} {bw}')
 
-    bw_mhz = int(str(bw).replace('MHz', ''))
+    bw_mhz = int(bw[:-3])
     requested = actual = ''
     if dbm is not None:
         cap = get_halow_bw_txpower_cap(bw) or get_iface_txpower_cap('wlan2')
@@ -401,20 +552,37 @@ def apply_halow_channel(channel, bw='1MHz', dbm=None):
         if cap and not txpower_request_allowed('wlan2', requested, cap, options):
             return unsupported_txpower_response('wlan2', requested, cap, options)
 
-    # s1g_prim_chwidth: 0 = 1 MHz primary, 1 = 2 MHz primary. 4 MHz operation
-    # still has a 2 MHz primary, hence chwidth 1.
-    chwidth = {1: 0, 2: 1, 4: 1}.get(bw_mhz, 0)
+    # s1g_prim_chwidth: 0 = 1 MHz primary, 1 = 2 MHz primary. Everything wider
+    # than 1 MHz keeps a 2 MHz primary, which is what both radio-setup
+    # templates do.
+    chwidth = 0 if bw_mhz == 1 else 1
 
     # Tell channel-election.sh to leave this alone.
     with open(HALOW_OVERRIDE_FILE, 'w') as f:
-        f.write(f'{channel},{bw}')
+        f.write(f'{s1g_channel},{bw}')
 
     # Persist across reboots, then apply live.
     with open(HALOW_WPA_CONF) as f:
-        content = f.read()
-    content = re.sub(r'(channel\s*=\s*)\d+', rf'\g<1>{s1g_channel}', content)
-    content = re.sub(r'(op_class\s*=\s*)\d+', r'\g<1>66', content)
+        previous = f.read()
+    m = re.search(r'op_class\s*=\s*(\d+)', previous)
+    op_class_changed = not m or int(m.group(1)) != op_class
+
+    # s1g_prim_1mhz_chan_index addresses a 1 MHz slice of the operating
+    # channel, so it must be 0..bw-1. Narrowing the channel without clamping
+    # it leaves an out-of-range index behind and the supplicant refuses the
+    # whole config.
+    def _clamp_prim_index(text):
+        idx = re.search(r's1g_prim_1mhz_chan_index\s*=\s*(\d+)', text)
+        if not idx:
+            return text
+        wanted = min(int(idx.group(1)), bw_mhz - 1)
+        return re.sub(r'(s1g_prim_1mhz_chan_index\s*=\s*)\d+',
+                      rf'\g<1>{wanted}', text)
+
+    content = re.sub(r'(channel\s*=\s*)\d+', rf'\g<1>{s1g_channel}', previous)
+    content = re.sub(r'(op_class\s*=\s*)\d+', rf'\g<1>{op_class}', content)
     content = re.sub(r'(s1g_prim_chwidth\s*=\s*)\d+', rf'\g<1>{chwidth}', content)
+    content = _clamp_prim_index(content)
     with open(HALOW_WPA_CONF, 'w') as f:
         f.write(content)
 
@@ -422,15 +590,25 @@ def apply_halow_channel(channel, bw='1MHz', dbm=None):
         ['morse_cli', '-i', 'wlan2', 'channel',
          '-c', str(freq_khz), '-o', str(bw_mhz), '-p', str(bw_mhz)],
         capture_output=True, text=True, timeout=10)
-    if result.returncode != 0:
-        # The config above is already written, so a restart lands on the same
-        # channel even when morse_cli will not take it live.
-        subprocess.run(['systemctl', 'restart', 'wpa_supplicant-s1g-wlan2.service'],
-                       timeout=15)
+
+    # Restart when the live change failed (the config above then carries it),
+    # and also whenever the operating class changed: only a restart proves the
+    # supplicant accepts the new class, and a class it rejects is a silent
+    # crashloop that would otherwise surface at the next reboot.
+    if result.returncode != 0 or op_class_changed:
+        subprocess.run(['systemctl', 'restart', S1G_SERVICE], timeout=15)
+        if not _s1g_supplicant_healthy():
+            with open(HALOW_WPA_CONF, 'w') as f:
+                f.write(previous)
+            subprocess.run(['systemctl', 'restart', S1G_SERVICE], timeout=15)
+            return {'ok': False, 'error': (
+                f'{region} {bw} (channel {s1g_channel}, op_class {op_class}) '
+                f'was refused by wpa_supplicant_s1g - config restored')}
 
     if dbm is not None:
         requested, actual = set_iface_txpower_verified('wlan2', dbm)
-    return {'ok': True, 'channel': channel, 'freq_khz': freq_khz, 'bw': bw,
+    return {'ok': True, 'channel': s1g_channel, 'freq_khz': freq_khz, 'bw': bw,
+            'region': region, 'op_class': op_class,
             'dbm': requested, 'actual_dbm': actual}
 
 
