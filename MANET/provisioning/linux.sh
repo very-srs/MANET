@@ -15,6 +15,26 @@ ARMBIAN_IMAGE_FILENAME="Armbian_26.2.1_Rock-3a_trixie_vendor_6.1.115_minimal.img
 ARMBIAN_IMAGE=""  # Will be set by acquire_armbian_image function
 CONFIG_DIR=".mesh-configs"  # configs are stored locally in this subdirectory
 
+# Operator-supplied setup scripts. Anything dropped in here is baked into the
+# generated firstrun.sh and runs once on the node after radio-setup finishes.
+# See additional-scripts/README.md.
+ADDITIONAL_SCRIPTS_DIR="additional-scripts"
+ADDITIONAL_SCRIPTS=()          # filled by validate_additional_scripts
+ADDITIONAL_SCRIPTS_BYTES=0
+# Warn above the first, refuse above the second. Neither is a limit imposed by
+# rpi-imager or by FAT32 -- the boot partition has ~512 MB and bash parses a
+# multi-MB script without complaint. They exist because the whole generated
+# file is held in memory as one string by both flashers, and because a payload
+# this large almost always wants to be fetched by the script at run time
+# instead: the node has proven internet before these ever run.
+# The line both templates carry, which the block replaces. An anchor rather
+# than a plain append because neither template runs off the end: firstrun.sh
+# has trailing completion echoes and rock3a-provision.sh ends with `reboot`, so
+# anything tacked on after the last line would never execute.
+ADDITIONAL_SCRIPTS_ANCHOR="# >>> MANET_ADDITIONAL_SCRIPTS <<<"
+ADDITIONAL_SCRIPTS_WARN_BYTES=262144      # 256 KB
+ADDITIONAL_SCRIPTS_MAX_BYTES=2097152      # 2 MB
+
 # RPI OS image URL. rpi-imager will download and cache this.
 PI_OS_IMAGE_URL="https://downloads.raspberrypi.com/raspios_lite_arm64/images/raspios_lite_arm64-2025-10-02/2025-10-01-raspios-trixie-arm64-lite.img.xz"
 
@@ -1011,6 +1031,10 @@ EOF
         sed -i "s|__ADMIN_PW__|${ADMIN_PW}|g" "$TEMP_PROVISION_SCRIPT"
         sed -i "s|__AUTO_UPDATE__|${AUTO_UPDATE}|g" "$TEMP_PROVISION_SCRIPT"
 
+        # Same embedding as the Pi path, and for the same reason it goes after
+        # the substitutions above rather than before.
+        append_additional_scripts "$TEMP_PROVISION_SCRIPT"
+
         echo "Installing provisioning script to /usr/local/bin/provision-mesh.sh..."
         sudo cp "$TEMP_PROVISION_SCRIPT" "$ROOT_MOUNT/usr/local/bin/provision-mesh.sh"
         sudo chmod +x "$ROOT_MOUNT/usr/local/bin/provision-mesh.sh"
@@ -1086,6 +1110,265 @@ SERVICE_EOF
 }
 
 # Flash one SD card — Raspberry Pi path (rpi-imager)
+# ---------------------------------------------------------------------------
+# Operator setup scripts
+# ---------------------------------------------------------------------------
+# These are embedded in the generated firstrun.sh as one quoted heredoc per
+# file, and written out to /var/lib/manet-user-scripts on the node's first
+# boot. manet-user-scripts.service runs them once, after radio-setup has
+# finished (radio-setup.sh starts it as its last act).
+#
+# Validation happens BEFORE any card is touched. Baking a syntactically broken
+# script into an image is a wasted flash and a node that silently does not do
+# what the operator asked; failing here costs nothing.
+
+# Is this file safe to embed in a quoted heredoc, and does it look like a
+# script? Echoes a verdict word plus a reason. Never modifies the file.
+classify_additional_script() {
+    local f="$1" name shebang
+    name=$(basename "$f")
+
+    # Filename becomes a path on the node and appears in a shell heredoc
+    # header, so keep it boring.
+    if ! [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+        echo "FAIL filename must match [A-Za-z0-9][A-Za-z0-9._-]*"; return
+    fi
+    if [ ! -s "$f" ]; then
+        echo "FAIL empty file"; return
+    fi
+
+    # A heredoc is a byte stream through bash, and bash cannot carry NUL.
+    # This is the one hard technical limit on what can be embedded.
+    #
+    # Detected by size comparison rather than `grep -P '\x00'`, which needs a
+    # PCRE-capable grep that is not guaranteed on every host that can run this
+    # script. `tr -d` is in POSIX. Note this cannot be left to the UTF-8 check
+    # below: U+0000 is perfectly valid UTF-8, so iconv accepts it happily.
+    local raw_bytes text_bytes
+    raw_bytes=$(wc -c < "$f")
+    text_bytes=$(tr -d '\000' < "$f" | wc -c)
+    if [ "$raw_bytes" -ne "$text_bytes" ]; then
+        # Offset is a nicety; only report one if this grep can find it.
+        local nul_at
+        nul_at=$(LC_ALL=C grep -aobUP '\x00' "$f" 2>/dev/null | head -1 | cut -d: -f1)
+        echo "FAIL binary content${nul_at:+ (NUL byte at offset $nul_at)} — fetch binaries at run time"
+        return
+    fi
+
+    # Invalid UTF-8 would reach the node as mangled bytes. Skipped rather than
+    # failed when iconv is absent: the NUL check above is the one that protects
+    # the heredoc itself, and refusing a flash over a missing tool is worse
+    # than shipping a script the operator already tested.
+    if command -v iconv >/dev/null 2>&1; then
+        if ! iconv -f UTF-8 -t UTF-8 "$f" >/dev/null 2>&1; then
+            echo "FAIL not valid UTF-8 text"; return
+        fi
+    fi
+
+    # Shebang decides whether this is a script at all. No shebang is a skip,
+    # not an error: a README or a notes file living in the directory is
+    # perfectly reasonable and must not be executed as root on a mesh node.
+    shebang=$(head -1 "$f" | tr -d '\r')
+    if [[ "$shebang" != '#!'* ]]; then
+        echo "SKIP no #! on line 1"; return
+    fi
+
+    # Syntax-check what we can. Only shell gets a real parse; a Python or perl
+    # shebang is taken at its word, since checking it would mean running that
+    # interpreter on the flashing host.
+    if [[ "$shebang" =~ (^\#\!/bin/(ba)?sh|/env[[:space:]]+(ba)?sh$|/bash$|/sh$) ]]; then
+        local errs
+        if ! errs=$(bash -n "$f" 2>&1); then
+            echo "FAIL shell syntax error: $(echo "$errs" | head -1 | sed 's|^[^:]*: ||')"
+            return
+        fi
+        echo "OK bash -n clean"; return
+    fi
+    echo "OK ${shebang#\#!}"
+}
+
+validate_additional_scripts() {
+    ADDITIONAL_SCRIPTS=()
+    ADDITIONAL_SCRIPTS_BYTES=0
+
+    [ -d "$ADDITIONAL_SCRIPTS_DIR" ] || return 0
+
+    local candidates=()
+    while IFS= read -r f; do
+        [ -n "$f" ] && candidates+=("$f")
+    done < <(find "$ADDITIONAL_SCRIPTS_DIR" -maxdepth 1 -type f -printf '%f\n' 2>/dev/null \
+        | grep -v -e '^\.' -e '\.disabled$' -e '\.bak$' -e '\.orig$' -e '~$' \
+        | LC_ALL=C sort)
+
+    [ ${#candidates[@]} -eq 0 ] && return 0
+
+    echo ""
+    echo "=============================================="
+    echo " Additional setup scripts"
+    echo "=============================================="
+    echo " From: $ADDITIONAL_SCRIPTS_DIR/"
+    echo ""
+
+    local failed=0 name path verdict reason
+    for name in "${candidates[@]}"; do
+        path="$ADDITIONAL_SCRIPTS_DIR/$name"
+        local result; result=$(classify_additional_script "$path")
+        verdict="${result%% *}"
+        reason="${result#* }"
+
+        case "$verdict" in
+            OK)
+                ADDITIONAL_SCRIPTS+=("$name")
+                ADDITIONAL_SCRIPTS_BYTES=$((ADDITIONAL_SCRIPTS_BYTES + $(stat -c %s "$path")))
+                printf '   %-36s ok    %s\n' "$name" "$reason"
+                ;;
+            SKIP) printf '   %-36s SKIP  %s\n' "$name" "$reason" ;;
+            FAIL) printf '   %-36s FAIL  %s\n' "$name" "$reason"; failed=1 ;;
+        esac
+    done
+
+    if [ "$failed" -eq 1 ]; then
+        echo ""
+        echo " ERROR: one or more scripts did not pass validation."
+        echo "        Nothing has been written to any card. Fix the files"
+        echo "        above (or rename them to .disabled) and run again."
+        exit 1
+    fi
+
+    if [ ${#ADDITIONAL_SCRIPTS[@]} -eq 0 ]; then
+        echo ""
+        echo " Nothing to embed."
+        return 0
+    fi
+
+    if [ "$ADDITIONAL_SCRIPTS_BYTES" -gt "$ADDITIONAL_SCRIPTS_MAX_BYTES" ]; then
+        echo ""
+        echo " ERROR: embedded scripts total $ADDITIONAL_SCRIPTS_BYTES bytes," \
+             "over the ${ADDITIONAL_SCRIPTS_MAX_BYTES}-byte limit."
+        echo "        Have a script fetch the bulk at run time instead — the"
+        echo "        node has confirmed internet before these are run."
+        exit 1
+    fi
+    if [ "$ADDITIONAL_SCRIPTS_BYTES" -gt "$ADDITIONAL_SCRIPTS_WARN_BYTES" ]; then
+        echo ""
+        echo " NOTE: $ADDITIONAL_SCRIPTS_BYTES bytes of scripts is a lot to bake"
+        echo "       into an image. Consider fetching large payloads at run time."
+    fi
+
+    echo ""
+    echo " ${#ADDITIONAL_SCRIPTS[@]} script(s) will be embedded and run ONCE as"
+    echo " root on each node, after setup completes."
+    echo ""
+    echo " Note: firstrun.sh is stored unencrypted on the boot partition and is"
+    echo " not deleted. Anyone who reads the card reads these scripts. Do not"
+    echo " put private keys or long-lived secrets in them."
+    echo "=============================================="
+    echo ""
+}
+
+# Pick a heredoc terminator that cannot appear in the file. A quoted heredoc
+# ends at the first line consisting solely of the delimiter, so an operator
+# script that legitimately contains our default -- one that embeds its own
+# heredoc, say -- would truncate itself and leave the rest as loose shell.
+heredoc_delimiter_for() {
+    local f="$1" i=0 delim="MANET_USER_SCRIPT_EOF"
+    while LC_ALL=C grep -qxF "$delim" "$f" 2>/dev/null; do
+        i=$((i + 1))
+        delim="MANET_USER_SCRIPT_EOF_$i"
+        [ "$i" -gt 64 ] && { echo "" ; return 1; }
+    done
+    echo "$delim"
+}
+
+# Append the embedding block to an already-generated setup script.
+#
+# Called AFTER token substitution, deliberately. The flasher rewrites every
+# __TOKEN__ in the template with sed; running that over operator content would
+# silently rewrite a script that happens to mention __ADMIN_PW__ or any other
+# token, which is both wrong and invisible.
+append_additional_scripts() {
+    local target="$1"
+    local block; block=$(mktemp)
+    : > "$block"
+
+    # The block is built into a temp file first, then substituted for the
+    # anchor line. Doing it in that order means a run with no scripts still
+    # strips the marker out of the generated image.
+    if [ ${#ADDITIONAL_SCRIPTS[@]} -gt 0 ]; then
+        {
+            echo ""
+            echo "# ===================================================================="
+            echo "# Operator setup scripts, embedded at flash time from"
+            # Literal, not "$ADDITIONAL_SCRIPTS_DIR": that variable can hold an
+            # absolute path, and this comment is baked into every flashed image
+            # on a boot partition anyone can read. It should not carry the
+            # operator's directory layout. Matches windows.ps1 verbatim.
+            echo "# additional-scripts/. Written out here; run once by"
+            echo "# manet-user-scripts.service, which radio-setup.sh starts after"
+            echo "# provisioning completes."
+            echo "# ===================================================================="
+            echo 'echo "Writing operator setup scripts..."'
+            echo 'mkdir -p /var/lib/manet-user-scripts'
+        } > "$block"
+
+        local name path delim
+        for name in "${ADDITIONAL_SCRIPTS[@]}"; do
+            path="$ADDITIONAL_SCRIPTS_DIR/$name"
+            delim=$(heredoc_delimiter_for "$path")
+            if [ -z "$delim" ]; then
+                echo "ERROR: could not find a safe heredoc delimiter for $name" >&2
+                rm -f "$block"
+                exit 1
+            fi
+            {
+                echo ""
+                echo "cat > '/var/lib/manet-user-scripts/$name' << '$delim'"
+                # CRLF is stripped for the same reason the flasher does it to
+                # the template: a shebang with a trailing CR makes the kernel
+                # look for an interpreter whose name ends in CR, and the script
+                # dies with a bare "not found" naming the right path.
+                tr -d '\r' < "$path"
+                # A file with no trailing newline would otherwise glue the
+                # delimiter onto its last line and the heredoc would never close.
+                [ -n "$(tail -c 1 "$path")" ] && echo ""
+                echo "$delim"
+                echo "chmod 0755 '/var/lib/manet-user-scripts/$name'"
+            } >> "$block"
+        done
+
+        {
+            echo ""
+            echo "echo \"Operator setup scripts staged: \$(ls -1 /var/lib/manet-user-scripts | wc -l)\""
+        } >> "$block"
+    fi
+
+    if grep -qxF "$ADDITIONAL_SCRIPTS_ANCHOR" "$target"; then
+        awk -v anchor="$ADDITIONAL_SCRIPTS_ANCHOR" -v blockfile="$block" '
+            $0 == anchor {
+                while ((getline l < blockfile) > 0) print l
+                close(blockfile)
+                next
+            }
+            { print }
+        ' "$target" > "$target.manet-tmp" && mv "$target.manet-tmp" "$target"
+    elif [ ${#ADDITIONAL_SCRIPTS[@]} -gt 0 ]; then
+        # No anchor in an older or hand-edited template. Appending would be
+        # worse than nothing on a script that ends in `reboot`, so refuse
+        # rather than silently produce an image whose scripts never run.
+        echo "ERROR: '$(basename "$target")' has no anchor line:" >&2
+        echo "       $ADDITIONAL_SCRIPTS_ANCHOR" >&2
+        echo "       Cannot place the operator setup scripts. Aborting." >&2
+        rm -f "$block"
+        exit 1
+    fi
+
+    rm -f "$block"
+    if [ ${#ADDITIONAL_SCRIPTS[@]} -gt 0 ]; then
+        echo "Embedded ${#ADDITIONAL_SCRIPTS[@]} operator setup script(s)."
+    fi
+    return 0
+}
+
 flash_rpi() {
         local target="$1"
 
@@ -1108,6 +1391,10 @@ flash_rpi() {
             -e "s|__ADMIN_PW__|${ADMIN_PW}|g" \
             -e "s|__AUTO_UPDATE__|${AUTO_UPDATE}|g" \
             "$TEMPLATE_FILE" | tr -d '\r' > "$TEMP_SCRIPT_FILE"
+
+        # After substitution, never before: operator scripts must not have
+        # their own __TOKEN__-looking text rewritten by the sed above.
+        append_additional_scripts "$TEMP_SCRIPT_FILE"
 
         sudo rpi-imager --cli "$PI_OS_IMAGE_URL" "$target" --first-run-script "$TEMP_SCRIPT_FILE"
 
@@ -1213,6 +1500,13 @@ else
         ask_questions
         save_config
 fi
+
+
+# --- 2b. Validate operator setup scripts ---
+# Before any device selection, and long before anything is written: a bad
+# script here is a wasted flash, and the operator should find out while the
+# card is still safely in their hand.
+validate_additional_scripts
 
 
 # --- 3. Acquire image (Rock3A only — checksum verified here) ---
