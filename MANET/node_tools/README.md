@@ -27,6 +27,7 @@ with numeric owner/group `0/0`. Keep the shipped binaries marked as binary in
 - [Shutdown](#shutdown)
 - [Utilities](#utilities)
 - [Setup & Provisioning](#setup--provisioning)
+- [Tests](#tests)
 
 ---
 
@@ -43,6 +44,24 @@ Main orchestrator for Automatic Channel Selection mode. Coordinates all mesh ope
 - Service elections
 - Limp mode management
 
+Scan frequencies are filtered against the interface's phy before the request
+goes out (`phy_usable_freqs`). `iw scan freq` refuses the **whole** request if
+any single frequency is not permitted on that phy, so one bad entry takes out
+the scan for every channel on the radio and the only symptom is an empty
+survey. The filter fails open: if the phy cannot be read, or nothing parses, the
+requested list is used unchanged, because filtering to an empty set would take a
+band off the air on every node at once.
+
+**A solo node at the lobby neither elects nor hops.** It waits until a
+tourguide brings it onto the mesh's data channels, or another radio turns up and
+meshes with it there — and only then do the two run a joint election and migrate
+together. One node's view of the RF is not a consensus, and a node that elected
+alone then had to tourguide back to the lobby every two minutes to stay
+findable. Parking costs a solo radio nothing, since there is no mesh link to
+optimise. A whole-site cold start is unaffected: every node powers on into the
+lobby and meshes with the others there, so each one sees peers and they
+bootstrap together, which is the case the lobby dwell was built for.
+
 **node-manager-static.sh**
 
 Simplified orchestrator for Static Channel operation. Handles:
@@ -55,10 +74,27 @@ Simplified orchestrator for Static Channel operation. Handles:
 
 The file the `node-manager.service` unit actually runs. It is **generated**:
 `radio-setup.sh` copies either `node-manager-acs.sh` or `node-manager-static.sh`
-over it depending on `acs=` in `/etc/mesh.conf`. The committed copy is the
-static variant, so it also serves as what an OTA tools update installs — keep
-all three in sync when editing the publish path, or a node will run stale code
-after an update.
+over it depending on `acs=` in `/etc/mesh.conf`. Keep all three in sync when
+editing the publish path.
+
+**The tools tarball does not carry this file.** Only the two variants ship over
+the air, and `node-update.sh` re-publishes whichever one `acs=` selects after
+extracting, restarting `node-manager` if the file changed. The committed copy is
+the static variant, so an update that shipped it would return every ACS node to
+the static orchestrator on each routine update — silently, with nothing in the
+log to say why. Leaving it out entirely would be the opposite failure: both
+variants arrive, but the node keeps running the previous release's orchestrator
+until `radio-setup.sh` happens to run again. A mesh config change to `acs` also
+re-publishes it (see [Mesh Configuration Push](#mesh-configuration-push)).
+
+The install tarball still carries it, since a node being provisioned needs
+something at that path before `radio-setup.sh` has chosen a variant.
+
+The `acs=` test accepts `y`/`yes`/`1`/`true` case-insensitively. It compared
+against `"Y"` alone until 2026-08-31, and every writer produces lowercase — both
+flashers normalise the answer, the web UI writes `'y':'n'`, and
+`mesh-config-sync.py` validates the key as exactly `y` or `n` — so `acs=y`
+selected the static variant on every node and the ACS orchestrator never ran.
 
 ---
 
@@ -77,13 +113,26 @@ Open routes (no password):
   throughput. Used by the status page and available for external tooling.
 - `/api/local` — JSON: this node's own state (interfaces, services, IP state,
   channel info).
+- `/api/peer/<ip>` — JSON: one peer's detail panel, assembled by
+  `manet_peer_radios.py`. Fetched by the status page when a node is expanded.
+- `/api/debug` — JSON: raw `batctl` originator, neighbour and gateway output
+  alongside the registry's MAC/hostname mapping. A diagnostic dump; nothing in
+  the UI calls it.
 
 Password-gated routes — the password is `admin_password` from `/etc/mesh.conf`,
 set at flash time. Login sets an HttpOnly cookie:
-- `/manage/` — the management UI (see `manet_manage.py`).
+- `/manage/` — the management UI (see `manet_manage.py`), and every `/manage`
+  route beneath it, including the radio, measurement, voice and uplink APIs.
 - `/manage/login`, `/manage/logout`
+- `/api/perf-auth` — POST the password, receive the cookie token.
 - `/api/admin/*` — mesh config staging, ACK status, and apply.
 - `/admin` — legacy path, redirects to `/manage/#config`.
+
+There is no unauthenticated route that changes anything. A set of
+`/api/control/*` handlers at the site root used to apply interface, TX power and
+channel changes locally, behind nothing but the subnet check, and were removed
+once every caller had moved to the Alfred-staged path — a local change and a
+mesh-wide one now take the same route through `manet_manage.py`.
 
 Access control has two layers:
 - **Application:** every route is restricted to localhost and the mesh/EUD
@@ -116,6 +165,8 @@ handler and reachable only under `/manage` after the password check. Tabs:
 - **Measure** — iperf3 and ping runs from this node toward a peer.
 - **Sessions** — saved measurement results, JSON and CSV.
 - **Uplink** — USB Wi-Fi uplink credentials.
+- **Voice** — talk group, codec, and per-peer voice state (see
+  [Push-to-Talk Voice](#push-to-talk-voice)).
 - **Node config** — the mesh configuration form (EUD mode, AP credentials, mesh
   SSID/SAE key, IP range, regulatory domain, services, admin password) with the
   per-node ACK table. This was the old unauthenticated `/admin` page.
@@ -127,10 +178,34 @@ against the peer's always-listening daemon.
 
 **manet_radio.py**
 
-Radio control primitives shared by the two things that drive the radios:
-`mesh-status.py` for a local change from the UI, and `mesh-radio-state.py` when
-an Alfred-staged package activates. One implementation, so a channel change
-means the same thing whichever path asked for it.
+Radio primitives shared by the UI that offers a change and the code that
+applies one: `mesh-status.py` and `manet_manage.py` read state and build the
+menus, `mesh-radio-state.py` applies an Alfred-staged package. One
+implementation, so what the UI offers and what the node does cannot diverge.
+
+**The HaLow channel plan is derived from the node's region.** The channel,
+bandwidth and S1G operating-class tables are transcribed from the Morse driver's
+`dot11ah` tables, and a bandwidth appears for a region only where the driver
+defines a channel of that width — which is why **EU stops at 2 MHz** (the whole
+863–868 MHz allocation is too narrow for more) while **US reaches 8 MHz**.
+`halow_channel_options()` builds the menu the Radio config tab renders, so an
+EU node is never offered a width it cannot use. Channel numbers and centre
+frequencies are both unique within a region, so either resolves the other:
+`halow_bandwidth_for_channel()` recovers the width from the channel number,
+which is how the status readout avoids `s1g_prim_chwidth` — that reports the
+*primary* channel width, 2 MHz for every operating width above 1 MHz, and
+reading it as the operating width reports a 4 or 8 MHz channel as 2 MHz.
+
+**HaLow TX power is fixed per bandwidth by the driver and BCF**, not freely
+settable: `HALOW_BW_TXPOWER_CAP_DBM` holds the caps, and a request outside them
+is refused with an explanation rather than silently clamped
+(`txpower_request_allowed`, `unsupported_txpower_response`). Wi-Fi TX power
+options come from the phy's own advertised range (`parse_phy_txpower_options`),
+and a set is read back and verified rather than assumed
+(`set_iface_txpower_verified`).
+
+An unknown region falls back to the EU plan — the narrower of the two, so a
+misconfigured node cannot be offered channels its region may not permit.
 
 **mesh-radio-state.py**
 
@@ -138,6 +213,19 @@ Applies Alfred-coordinated radio changes. Reads a staged package from type 71,
 publishes an ACK on type 72, and applies at the package's `activate_at` once the
 coordinator has collected ACKs. Carries interface up/down, TX power, HaLow and
 Wi-Fi channel, and uplink credentials.
+
+**manet_peer_radios.py**
+
+Builds the per-peer radio chips and the expandable status panel the topology
+views show for another node — role, up/down state, channel, MCS, service pills,
+and the inferred `bat0` / `br0` / gateway rows.
+
+Everything comes from what Alfred already replicates, so no node is queried.
+Where a peer publishes `INTERFACES_JSON`, that wins. Where it publishes an empty
+list — which `node-manager` did historically, leaving the UI with no
+`wlan0`/`wlan1`/`wlan2` keys and every peer rendered as 2.4G/5G/HaLow OFF — the
+values are reconstructed from the registry's MCS and `DATA_CHANNEL_*` fields, so
+an older node still shows its radios.
 
 **manet-ui-firewall.sh**
 
@@ -534,8 +622,25 @@ Elects which node hosts the Mumble (Murmur) voice server.
 Decentralized election for optimal 2.4GHz and 5GHz channels.
 - Aggregates scan reports from all nodes via the registry.
 - Scores channels based on noise floor and BSS count.
-- Falls back to lobby channels if all options are jammed.
 - Includes channel bias to prevent unnecessary migrations.
+
+Candidate frequencies are deliberately **not** filtered against the local phy
+here. The election reaches its answer by implicit consensus — every node runs
+the same computation over the same replicated reports — so a per-node hardware
+filter at this stage would let two nodes derive different winners from identical
+data. Unusable frequencies are dropped at scan time instead (`phy_usable_freqs`
+in `node-manager-acs.sh`), which keeps the exclusion inside the replicated
+report and therefore symmetric across the mesh.
+
+**"Every candidate was measured and rejected" and "nothing reported a
+measurement at all" are different verdicts.** Both leave the candidate list
+empty. The first is a real RF result and drops to the lobby channels. The
+second is an outage — the band's radio is absent so its scan report carries no
+entries, or the scan request was refused wholesale, or Alfred was down and no
+reports replicated — and it now **holds the current channel and does not assert
+limp mode**, logging `No scan data for any candidate channel`. Treating it as
+jamming throttled the whole mesh to legacy bitrates on the strength of missing
+data.
 
 **limp-mode-manager.sh**
 
@@ -559,11 +664,31 @@ Detects network partitioning and isolation.
 
 Partition detection and healing system. Runs every 2 minutes at :30 seconds:
 1. Elects tourguide (node with oldest helper broadcast timestamp, excluding service hosts).
-2. Hops one radio to lobby frequency.
+2. Hops one radio to lobby frequency — 2.4 or 5 GHz, alternating.
 3. Broadcasts helper beacon with current data channels.
 4. Listens for other partitions.
-5. If a larger partition is detected, triggers migration.
+5. If the other partition should win, triggers migration.
 6. Returns to data channel.
+
+**Which radio hops is derived from the clock, never from this node's own
+history** — `(epoch / 120) % 2`, the same window index `should_perform_tourguide`
+uses, so it inherits the wall-clock alignment the rest of the ACS pipeline
+already needs and adds no new time-sync requirement. Two split partitions can
+only find each other if their tourguides hop to the same band in the same
+window. Reading this node's last-used radio out of the registry went permanently
+out of phase the moment either side missed a window — an elected tourguide
+excluded for hosting a service, a restart, a failed hop — after which the two
+partitions alternated to opposite bands forever and partition healing was
+silently dead. For a 2-node mesh that is the only recovery path there is:
+`quorum-checker.sh` cannot rescue an isolated node below 3 remembered peers.
+
+**The smaller partition migrates; equal sizes break the tie on MAC**, lowest
+stays put. Both tourguides run the comparison in the same window and each sees
+the other's MAC, so exactly one moves. The tie-break is deliberately not the
+config string: deciding a split by channel number biases every equal-size merge
+toward the numerically lower pair, and can pull a node straight back onto the
+channel it fled. Identity is neutral, and the next election re-optimises the
+channel once both sides are talking again.
 
 **ethernet-autodetect.sh**
 
@@ -592,6 +717,13 @@ isolation; `manet-ui-firewall.sh` is what actually separates them.
 - First 5 IPs network-wide are reserved for services.
 - Handles conflicts via MAC tie-breaker.
 - Configures `dnsmasq` DHCP when needed.
+
+Chunk size is uniform across the mesh — `max_euds_per_node + 2`, set at flash
+time, which is why `mesh_config.py` keeps that key display-only in the
+management UI. There is no per-node override: pinning a node's chunk by hand
+skips the registry check and the MAC tie-break, so two pinned nodes, or a pinned
+chunk that a peer later claims, collide with nothing left to resolve them. An
+`/etc/manet/mesh-ip-force.conf` mechanism that did this was removed.
 
 **gateway-route-manager.sh**
 
@@ -838,9 +970,24 @@ whitelisted, and values are rejected if they contain a quote, newline or NUL, or
 fail a per-key check (CIDR shape, SSID and SAE key lengths, enum values). A peer
 cannot use a config broadcast to write arbitrary supplicant configuration.
 
+**mesh_config.py**
+
+The one place that decides which settings are this node's own and which belong
+to the whole mesh. `LOCAL_KEYS` is `eud`, `lan_ap_ssid`, `lan_ap_key` and
+`max_euds_per_node`; `split_config()` partitions a submitted form into a local
+half and a mesh half, and `strip_local_keys()` is what keeps the local half off
+Alfred. The EUD AP is a node's own Wi-Fi for its own clients, and broadcasting
+it renamed every AP on the mesh.
+
+`max_euds_per_node` is stripped with the others but excluded from
+`LOCAL_APPLY_KEYS`: it sizes the IPv4 chunk allocated at flash time, so the
+management UI shows it and never writes it. Shared by `mesh-config-sync.py`,
+`mesh-status.py` and `manet_manage.py`, so the receiving end and the submitting
+end cannot disagree about which half a key is in.
+
 **mesh-config-apply.sh**
 
-Applies a staged package to `/etc/mesh.conf`, splitting settings into two
+Applies a staged package to `/etc/mesh.conf`, splitting settings into three
 classes:
 
 - **Per-node** (this radio only, never Alfred): `eud`, `lan_ap_ssid`,
@@ -848,8 +995,20 @@ classes:
   written from the management UI (set at flash).
 - **Safe** (applied mesh-wide immediately): `admin_password`, `mtx`,
   `mumble`, `auto_update`.
+- **Deferred** (written now, radio effect later): `regulatory_domain`, `acs`.
+  The regulatory domain reaches the radios through
+  `/etc/modprobe.d/{cfg80211,morse}.conf` and the supplicant `country_code`,
+  all of which `radio-setup.sh` writes from `mesh.conf`, so the value is
+  persisted here and takes hold at the next boot. `acs` selects which
+  orchestrator variant is copied over `node-manager.sh` and is applied at once,
+  with a `node-manager` restart.
 - **Dangerous** (brief mesh outage): `mesh_ssid`, `mesh_key`, `ipv4_network` —
   these rewrite the supplicant configs and restart the supplicants.
+
+Every key `mesh-config-sync.py` admits must fall into one of those three
+classes. `regulatory_domain` and `acs` were validated and staged but matched no
+apply block, so a change to either ACKed, reported itself applied, and wrote
+nothing.
 
 Also callable by hand for testing: `mesh-config-apply.sh --force`.
 
@@ -958,21 +1117,34 @@ in the radvd config.
 
 Updates mesh node tools to the latest release from GitHub.
 - In normal mode: checks internet connectivity, compares local vs remote version, downloads and installs the appropriate board-specific tools tarball if out of date.
-- In `--routine` mode: runs silently, rate-limited to once per 24 hours via version file timestamp. Used by the automatic update cron job.
+- In `--routine` mode: runs silently, rate-limited to once per 24 hours by the
+  mtime of `/etc/manet_version.txt`.
+
+The only thing that ever calls it is the networkd-dispatcher carrier hook,
+`carrier.d/50-ethernet-detect` — there is no cron job. That hook runs it once
+Ethernet gets carrier and a ping succeeds, and only when `/etc/mesh.conf` has
+`auto_update=` set to a true value. See
+[networkd-dispatcher/README.md](../networkd-dispatcher/README.md).
+
+**Publish in the right order.** The remote *version* is read from GitHub `main`
+while the *tarball* comes from colorado-governor.com, so the tarballs have to be
+uploaded before the version bump is pushed. The 24 h mtime throttle does not
+protect against getting this wrong: `tar` restores the build machine's mtime,
+and a published tarball is normally already older than a day.
 - Version metadata still points at `very-srs/MANET`; that upstream now has matching `.gitattributes` binary protection on all branches as of 2026-05-03.
 
 ---
 
 ## Setup & Provisioning
 
-**provision-mesh.sh**
-
-Runs on the first boot from `mesh-provision.service`, before `radio-setup.sh`.
-Installs the apt dependencies, downloads and extracts the install tarball,
-places the Morse firmware, and writes the base networkd/nftables/radvd config.
-The copy that actually runs on a node is generated from
-`MANET/provisioning/firstrun.sh.template` at flash time, with the operator's
-answers substituted in — the copy here is the reference.
+The first-boot stage that runs before `radio-setup.sh` — apt dependencies, the
+install tarball, the Morse firmware, and the base networkd/nftables/radvd
+config — is not in this directory. It is generated as
+`/usr/local/bin/provision-mesh.sh` from
+[`MANET/provisioning/firstrun.sh.template`](../provisioning/firstrun.sh.template)
+at flash time, with the operator's answers substituted in, and runs from
+`mesh-provision.service`. See
+[provisioning/README.md](../provisioning/README.md).
 
 **manet-ap-guard.sh**
 
@@ -1121,3 +1293,32 @@ Flash-time validation is performed by the flashers rather than here; see
 [additional-scripts/README.md](../provisioning/additional-scripts/README.md).
 The checks in this script cover the files that reach the directory without
 passing through a flasher.
+
+---
+
+## Tests
+
+Three unit-test files sit alongside the code they cover — 38 tests, pure Python,
+no hardware and no node:
+
+| File | Covers |
+|------|--------|
+| `test_halow_plan.py` | The region HaLow plan in `manet_radio.py`: EU capping at 2 MHz and US reaching 8, channel numbers and centre frequencies unique within a region and resolving each other, every region/bandwidth pair carrying an operating class, an unknown region falling back to EU, and a channel or bandwidth the region does not have being refused |
+| `test_mesh_config.py` | The local/mesh key split in `mesh_config.py`: EUD and AP keys never reaching Alfred, mesh keys still going, only values that differ from `mesh.conf` counting as changes, and `max_euds_per_node` never being written |
+| `test_peer_radios.py` | The peer radio chips in `manet_peer_radios.py`: frequency-to-channel conversion, published `INTERFACES_JSON` winning over the registry fallback, the fallback filling in when it is empty, and the channel fields surviving an encode/decode round trip |
+
+Run them from the git root, so this directory is on `sys.path`, and from the dev
+venv, so the protobuf runtime matches the fleet:
+
+```bash
+source ~/.venvs/manet/bin/activate    # bash ../packaging/setup-dev-env.sh
+python -m unittest discover -s MANET/node_tools -p 'test_*.py'
+```
+
+The venv is not optional for the full run. One case —
+`test_peer_radios.test_channel_fields_survive_encode_decode` — shells out to
+`encoder.py`, which imports `NodeInfo_pb2.py`, which needs
+`google.protobuf.internal.builder` from runtime 3.20 or later. A system Python
+with an older protobuf fails that test; a system Python with a *newer* one is
+worse, because 5.x and later accept generated code every node refuses to import,
+so the test passes while proving nothing.
