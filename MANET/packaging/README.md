@@ -26,6 +26,52 @@ bash MANET/packaging/build-tools-tarball.sh MANET/install_packages/cm4-tools.tar
 bash MANET/packaging/build-tools-tarball.sh MANET/install_packages/r3a-tools.tar.gz
 ```
 
+## Publishing order matters
+
+`node-update.sh` reads the remote **version** from GitHub `main`
+(`MANET/node_tools/version.txt`) but fetches the **tarball** from
+colorado-governor.com. Two sources, and they are compared against each other.
+
+**Upload the tarballs first, then push the version bump.** In the other order,
+every node with `auto_update=y` sees a remote version it can never reach: it
+downloads the stale tools tarball, extracts the old `manet_version.txt`, and is
+still behind — so it downloads again on the next Ethernet carrier event.
+
+`node-update.sh --routine` is throttled by the version file's mtime (a check is
+skipped if the file is under a day old), but `tar` restores the **build
+machine's** mtime, and a published tarball is normally older than that, so the
+throttle does not save you.
+
+## Dev toolchain
+
+`setup-dev-env.sh` builds the venv the repo's Python tooling needs. No root, and
+nothing outside the venv is touched:
+
+```bash
+bash MANET/packaging/setup-dev-env.sh     # idempotent; re-run any time
+source ~/.venvs/manet/bin/activate
+```
+
+It pins two versions, both to **what the fleet runs**, not to what is newest:
+
+| | Version | For |
+|---|---|---|
+| `protoc` | 3.21.12 | regenerating `NodeInfo_pb2.py` |
+| `protobuf` (Python) | 4.21.12 | the runtime nodes have; what the tests must run against |
+
+protoc goes *inside* the venv, so activating it puts the right compiler on
+`PATH` along with the right runtime — there is no way to get one without the
+other. The script finishes by regenerating `NodeInfo_pb2.py` into a temp dir and
+diffing it against the committed copy; a mismatch fails the setup, because it
+means a later regeneration would produce a diff unrelated to the `.proto` change
+being made.
+
+The build scripts here do **not** invoke protoc — they copy the committed
+`NodeInfo_pb2.py`. The venv matters when editing `NodeInfo.proto` and when
+running the test suite.
+
+Override the location with `MANET_VENV_DIR=`. `python3-venv` is not required.
+
 ## Inputs
 
 Universal files come from this repository:
