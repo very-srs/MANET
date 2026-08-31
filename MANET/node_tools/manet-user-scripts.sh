@@ -203,6 +203,18 @@ while IFS= read -r name; do
     elif [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
         echo " << $name: TIMED OUT after ${TIMEOUT}s (exit $rc)"
         FAILED=$((FAILED + 1))
+    elif [ "$rc" -eq 126 ] || [ "$rc" -eq 127 ]; then
+        # The usual cause is a shebang naming an interpreter this node does not
+        # have. Any interpreter is allowed, but only what is installed can run,
+        # and a bare "exit 127" does not say that.
+        interp=$(head -1 "$path" | sed 's|^#!||' | awk '{ if ($1 ~ /\/env$/) print $2; else print $1 }')
+        if [ -n "$interp" ] && ! command -v "$interp" >/dev/null 2>&1 \
+           && [ ! -x "$interp" ]; then
+            echo " << $name: FAILED (exit $rc) — interpreter '$interp' is not installed"
+        else
+            echo " << $name: FAILED (exit $rc, could not be executed)"
+        fi
+        FAILED=$((FAILED + 1))
     else
         echo " << $name: FAILED (exit $rc, ${elapsed}s)"
         FAILED=$((FAILED + 1))

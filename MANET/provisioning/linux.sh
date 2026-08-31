@@ -32,6 +32,11 @@ ADDITIONAL_SCRIPTS_BYTES=0
 # has trailing completion echoes and rock3a-provision.sh ends with `reboot`, so
 # anything tacked on after the last line would never execute.
 ADDITIONAL_SCRIPTS_ANCHOR="# >>> MANET_ADDITIONAL_SCRIPTS <<<"
+# Interpreters present on a stock provisioned node (Debian 13). A script whose
+# shebang names anything else is still embedded -- an earlier script may well
+# install it -- but the operator is told, because the alternative is a script
+# that fails at first boot with a bare exit 127.
+ADDITIONAL_SCRIPTS_NODE_INTERPRETERS="sh bash dash python python3 perl lua awk mawk"
 ADDITIONAL_SCRIPTS_WARN_BYTES=262144      # 256 KB
 ADDITIONAL_SCRIPTS_MAX_BYTES=2097152      # 2 MB
 
@@ -1173,18 +1178,57 @@ classify_additional_script() {
         echo "SKIP no #! on line 1"; return
     fi
 
-    # Syntax-check what we can. Only shell gets a real parse; a Python or perl
-    # shebang is taken at its word, since checking it would mean running that
-    # interpreter on the flashing host.
-    if [[ "$shebang" =~ (^\#\!/bin/(ba)?sh|/env[[:space:]]+(ba)?sh$|/bash$|/sh$) ]]; then
-        local errs
-        if ! errs=$(bash -n "$f" 2>&1); then
-            echo "FAIL shell syntax error: $(echo "$errs" | head -1 | sed 's|^[^:]*: ||')"
-            return
-        fi
-        echo "OK bash -n clean"; return
-    fi
-    echo "OK ${shebang#\#!}"
+    # The interpreter, as a bare name: "#!/usr/bin/env python3" -> python3,
+    # "#!/usr/bin/perl -w" -> perl. Used for the syntax check below and for the
+    # availability note.
+    local interp
+    interp=$(echo "${shebang#\#!}" | awk '{ if ($1 ~ /\/env$/) print $2; else print $1 }')
+    interp=$(basename "${interp:-sh}")
+
+    # Any interpreter is accepted. Only some can be syntax-checked, and only
+    # those that can be checked without executing the script:
+    #
+    #   shell  - bash -n parses without running.
+    #   python - ast.parse is a pure parse; imports are not executed.
+    #
+    # perl is deliberately not checked. `perl -c` executes BEGIN blocks, which
+    # would run operator code on the flashing host, and it resolves `use`
+    # statements against the host's module path -- so a script using a module
+    # present on the node but not here would be failed wrongly. A wrong FAIL
+    # blocks a flash, which is worse than an unchecked script.
+    local note=""
+    case " $ADDITIONAL_SCRIPTS_NODE_INTERPRETERS " in
+        *" $interp "*) ;;
+        *) note=" — $interp is not installed on a stock node" ;;
+    esac
+
+    case "$interp" in
+        sh|bash|dash)
+            local errs
+            if ! errs=$(bash -n "$f" 2>&1); then
+                echo "FAIL shell syntax error: $(echo "$errs" | head -1 | sed 's|^[^:]*: ||')"
+                return
+            fi
+            echo "OK bash -n clean$note"; return
+            ;;
+        python|python3|python2)
+            if command -v python3 >/dev/null 2>&1; then
+                local pycheck='import ast,sys
+try:
+    ast.parse(open(sys.argv[1], encoding="utf-8", errors="replace").read())
+except SyntaxError as e:
+    sys.stderr.write("line %s: %s" % (e.lineno, e.msg)); sys.exit(1)'
+                local perrs
+                if ! perrs=$(python3 -c "$pycheck" "$f" 2>&1); then
+                    echo "FAIL python syntax error: $perrs"
+                    return
+                fi
+                echo "OK python syntax clean$note"; return
+            fi
+            echo "OK $interp (not syntax-checked, no python3 here)$note"; return
+            ;;
+    esac
+    echo "OK $interp (not syntax-checked)$note"
 }
 
 validate_additional_scripts() {

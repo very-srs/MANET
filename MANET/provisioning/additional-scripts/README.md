@@ -70,6 +70,37 @@ Anything ending in `.disabled`, `.bak`, `.orig` or `~`, and anything starting
 with `.`, is ignored. That is how to park a script without deleting it, and it
 is what keeps the bundled example inert.
 
+## Languages
+
+Scripts are executed by the interpreter named in their shebang, so any language
+installed on the node can be used. A freshly flashed node provides:
+
+| Shebang | Version on a stock node |
+|---|---|
+| `#!/bin/bash` | bash 5.2 |
+| `#!/bin/sh`, `#!/bin/dash` | dash |
+| `#!/usr/bin/env python3` | Python 3.13 |
+| `#!/usr/bin/perl` | Perl 5.40 |
+| `#!/usr/bin/lua` | Lua 5.1 |
+| `#!/usr/bin/awk -f` | mawk |
+
+Nothing else is installed. Ruby, Node, PHP, Tcl and similar are absent, and a
+script written for one of them fails with exit 127 and a log line naming the
+missing interpreter.
+
+Those languages remain usable, but the interpreter has to be installed first.
+Because scripts run in filename order, an earlier script can prepare the
+environment for a later one:
+
+```
+10-install-ruby.sh     #!/bin/bash — apt-get install -y ruby
+20-configure-site.rb   #!/usr/bin/ruby — now runs
+```
+
+A script whose shebang names an interpreter absent from the list above is still
+embedded; the flasher only reports it, since an earlier script may be
+installing it.
+
 ## What is accepted
 
 Every file needs a **shebang on line 1**. A file without one is skipped with a
@@ -85,16 +116,26 @@ The flasher checks each file **before anything is written to a card**:
 | No NUL bytes | FAIL — binaries cannot go in a heredoc |
 | Valid UTF-8 | FAIL |
 | `#!` on line 1 | SKIP, with a notice |
-| `bash -n` clean (shell shebangs only) | FAIL |
+| Interpreter present on a stock node | reported, not rejected |
+| `bash -n` clean (shell shebangs) | FAIL |
+| `ast.parse` clean (python shebangs) | FAIL |
 
 Any FAIL aborts the run with the filename and the reason, before the card is
-touched. Non-shell scripts (`#!/usr/bin/env python3` and friends) get every
-check except the syntax parse — checking those would mean running that
-interpreter on the flashing machine.
+touched.
 
-> On Windows the syntax check needs a `bash` — Git for Windows or WSL. Without
-> one the script is still embedded, and the report says
-> `shell (not syntax-checked, no bash here)`.
+Only shell and Python are syntax-checked, because only those can be checked
+without executing the script: `bash -n` parses without running, and Python's
+`ast.parse` does not execute imports. Perl is deliberately excluded — `perl -c`
+runs `BEGIN` blocks, which would execute operator code on the flashing machine,
+and it resolves `use` statements against that machine's module path, so a
+script using a module present only on the node would be rejected incorrectly. A
+wrong rejection blocks a flash, which is worse than an unchecked script. Other
+languages are accepted at their shebang and reported as
+`not syntax-checked`.
+
+> The shell check needs `bash` and the Python check needs `python3`. On Windows
+> these come from Git for Windows, WSL, or a Python installation. When one is
+> absent the script is still embedded and the report says so.
 
 CRLF line endings are stripped automatically, so a script written in a Windows
 editor works.
