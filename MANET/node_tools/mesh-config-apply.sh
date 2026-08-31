@@ -10,11 +10,18 @@
 #
 # Safe settings (applied immediately, no mesh disruption):
 #   admin_password, mtx, mumble, auto_update
+#
+# Node-local settings (written here, radio effect deferred):
+#   acs, regulatory_domain
 # EUD mode, AP SSID/key, and max_euds_per_node are per-node and are not
 # applied from an Alfred package.
 #
 # Dangerous settings (require coordinated cutover, will briefly drop mesh):
 #   mesh_ssid, mesh_key, ipv4_network
+#
+# Every key mesh-config-sync.py accepts must be handled by one of the three
+# blocks below. acs and regulatory_domain were validated and staged but never
+# written, so a change to either ACKed, reported applied, and did nothing.
 # ==============================================================================
 
 PENDING_CONFIG="/var/run/mesh_pending_config.json"
@@ -109,6 +116,54 @@ apply_safe_settings() {
 }
 
 # ==============================================================================
+# Apply deferred settings (acs, regulatory_domain)
+# ==============================================================================
+# Both are mesh-wide agreements whose radio-level effect is written by
+# radio-setup.sh out of mesh.conf: the regulatory domain lands in
+# /etc/modprobe.d/{cfg80211,morse}.conf and in the supplicant country_code,
+# which only take hold when the modules next load. Persist the value and say
+# so rather than restarting radios from here -- that is the dangerous class,
+# and the rollback snapshot does not cover a regdomain change.
+#
+# acs is the exception: which orchestrator runs is decided by copying a variant
+# over node-manager.sh, exactly as radio-setup.sh does, so it can take effect
+# now for no more than a node-manager restart.
+apply_deferred_settings() {
+    local val current
+
+    for key in regulatory_domain acs; do
+        val=$(cfg_get "$key")
+        [ -z "$val" ] && continue
+
+        current=$(grep "^${key}=" "$MESH_CONF" 2>/dev/null | cut -d'=' -f2-)
+        [ "$val" = "$current" ] && continue
+
+        log "  $key: '$current' -> '$val'"
+        conf_set "$key" "$val"
+
+        case "$key" in
+            regulatory_domain)
+                log "  regulatory domain takes effect at the next boot"
+                ;;
+            acs)
+                # Same liberal match as the auto_update carrier gate: every
+                # writer produces y/n, but mesh.conf is operator-editable.
+                if echo "$val" | grep -qiE '^(y|yes|1|true)$'; then
+                    cp /usr/local/bin/node-manager-acs.sh \
+                       /usr/local/bin/node-manager.sh
+                    log "  node-manager.sh -> ACS variant"
+                else
+                    cp /usr/local/bin/node-manager-static.sh \
+                       /usr/local/bin/node-manager.sh
+                    log "  node-manager.sh -> static variant"
+                fi
+                systemctl restart node-manager.service 2>/dev/null || true
+                ;;
+        esac
+    done
+}
+
+# ==============================================================================
 # Apply dangerous settings (mesh SSID, key, IP range)
 # These require wpa_supplicant restart — the mesh will briefly disconnect
 # ==============================================================================
@@ -174,6 +229,7 @@ apply_dangerous_settings() {
 log "=== Config apply starting (version: $VERSION) ==="
 
 apply_safe_settings
+apply_deferred_settings
 apply_dangerous_settings
 
 # Record which version was applied
