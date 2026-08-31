@@ -1296,21 +1296,16 @@ body {
 #main { display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 16px; flex: 1; padding: 16px; align-items: start; }
 #topo-panel {
   position: relative; min-width: 0; min-height: 520px;
-  background:
-    radial-gradient(circle at 14% 18%, rgba(236,176,0,.24), transparent 18%),
-    radial-gradient(circle at 84% 12%, rgba(2,0,13,.10), transparent 20%),
-    radial-gradient(circle at 50% 120%, rgba(236,176,0,.12), transparent 28%),
-    var(--panel);
+  /* Flat panel on purpose: decorative blobs behind the canvas read as
+     mesh activity at a glance and pulled the eye off the real nodes. */
+  background: var(--panel);
   border: 1px solid var(--border2);
   border-radius: 18px;
   overflow: hidden;
   box-shadow:
     inset 0 0 0 1px rgba(2,0,13,.04),
-    inset 0 0 80px rgba(236,176,0,.08),
-    inset 0 0 120px rgba(2,0,13,.04),
     0 22px 52px rgba(2,0,13,.08);
 }
-#topo-panel::after { content:''; position:absolute; right:18px; bottom:18px; width:120px; height:120px; background:radial-gradient(circle, rgba(236,176,0,.16), transparent 72%); pointer-events:none; }
 #topo-panel canvas { width: 100%; height: 100%; display: block; touch-action: pan-y pinch-zoom; }
 #side-panel { width: 100%; overflow: visible; border: 1px solid var(--border2); border-radius: 18px; background: var(--surface); box-shadow: 0 18px 44px rgba(2,0,13,.06); }
 
