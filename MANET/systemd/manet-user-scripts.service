@@ -1,0 +1,31 @@
+[Unit]
+# Operator setup scripts, baked into the image at flash time from
+# provisioning/additional-scripts/ and written out by firstrun.sh.
+#
+# Deliberately NOT enabled by firstrun: it must not fire during the two
+# provisioning boots, when the radios have no configuration and the mesh does
+# not exist yet. radio-setup.sh enables and starts it as its last act, once the
+# node is genuinely finished. The conditions below are what make it one-time
+# after that — the marker exists from the first completed run onward, so every
+# later boot skips the unit without running anything.
+Description=MANET operator setup scripts (one-time)
+Documentation=file:/var/log/manet-user-scripts.log
+After=multi-user.target network-online.target
+Wants=network-online.target
+ConditionPathIsDirectory=/var/lib/manet-user-scripts
+ConditionPathExists=!/var/lib/manet-user-scripts.done
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/manet-user-scripts.sh
+RemainAfterExit=no
+# Generous, and larger than any per-script timeout: this is the budget for the
+# whole set, and the runner already bounds each script individually. Hitting
+# this means systemd kills the run, the marker is never written, and the next
+# boot resumes from the script that was cut off.
+TimeoutStartSec=1800
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,46 @@
+#!/bin/bash
+#
+# EXAMPLE — rename to 10-example-site-setup.sh to make it run.
+#
+# Anything in this directory with a #! on line 1 is baked into the image at
+# flash time and run ONCE as root on the node, after radio-setup has finished
+# and the mesh is up. Files ending in .disabled are ignored, which is what
+# keeps this example inert.
+#
+# Order is lexical, so the 10-/20-/30- prefix convention means what it looks
+# like it means. Exit status is recorded and shown on the SSH login banner,
+# but a failure here never marks the node unprovisioned.
+
+set -euo pipefail
+
+echo "site setup starting on $(hostname)"
+
+# ---------------------------------------------------------------------------
+# Small data files go in your own heredoc, right next to the code that uses
+# them. There is no separate data/ directory and none is needed — a quoted
+# heredoc carries any text verbatim, including one nested inside this script.
+# ---------------------------------------------------------------------------
+install -d -m 700 -o radio -g radio /home/radio/.ssh
+cat > /home/radio/.ssh/authorized_keys <<'KEYS'
+# ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA... ops@example.org
+KEYS
+chown radio:radio /home/radio/.ssh/authorized_keys
+chmod 600 /home/radio/.ssh/authorized_keys
+
+# ---------------------------------------------------------------------------
+# Anything large or binary belongs behind a fetch, not in the image. The node
+# has already proven internet during provisioning, and this keeps the payload
+# off the boot partition — where firstrun.sh sits unencrypted and is readable
+# by anyone who puts the card in a laptop.
+# ---------------------------------------------------------------------------
+# curl -fsSL --retry 3 https://files.example.org/site-bundle.tar.gz \
+#     -o /tmp/site-bundle.tar.gz
+# tar xzf /tmp/site-bundle.tar.gz -C /opt
+
+# ---------------------------------------------------------------------------
+# Mesh settings are readable from /etc/mesh.conf if a script needs them.
+# ---------------------------------------------------------------------------
+mesh_ssid=$(sed -n 's/^mesh_ssid=//p' /etc/mesh.conf)
+echo "node is on mesh ${mesh_ssid:-unknown}"
+
+echo "site setup complete"

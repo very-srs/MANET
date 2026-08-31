@@ -900,5 +900,7 @@ apt autoremove -y
 
 # There is an annoying banner message in here, get rid of it
 rm /etc/ssh/sshd_config.d/*
+# >>> MANET_ADDITIONAL_SCRIPTS <<<
+
 echo "=== firstrun.sh complete - provisioning will continue after reboot ==="
 echo "=== firstrun.sh exiting at $(date) ==="
