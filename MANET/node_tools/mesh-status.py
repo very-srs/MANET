@@ -47,7 +47,7 @@ from manet_manage import ManageRoutes
 from manet_peer_radios import interfaces_for_telemetry, peer_status_panel
 from mesh_config import apply_local_to_conf, local_changes, mesh_changes, strip_local_keys
 from manet_radio import (
-    HALOW_EU_CHANNELS, HALOW_EU_UI_TO_S1G_CHANNEL, HALOW_BW_TXPOWER_CAP_DBM,
+    HALOW_BW_TXPOWER_CAP_DBM, halow_channel_options,
     _format_halow_bw, get_halow_driver_info, wifi_channel_to_freq, _fmt_dbm,
     parse_phy_txpower_options, txpower_choices_from_cap, txpower_options_for_iface,
     txpower_request_allowed, unsupported_txpower_response, get_halow_bw_txpower_cap,
