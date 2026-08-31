@@ -96,24 +96,23 @@ Adding a new flash-time setting means the token in both templates **and** the
 `sed` / `-replace` list in both flashers. The lists live in `linux.sh`
 (`flash_rpi` and the Rock 3A path) and `windows.ps1`.
 
-Scripts from `additional-scripts/` are placed **after** substitution and are
-never token-substituted, so a script that legitimately mentions `__ADMIN_PW__`
-keeps it verbatim.
+Scripts from `additional-scripts/` are inserted **after** substitution and are
+never token-substituted, so a script containing a literal `__ADMIN_PW__`
+retains it.
 
-They are not appended to the end of the template either. Both templates carry
-an anchor line:
+They are inserted at an anchor rather than appended. Both templates carry the
+line:
 
 ```
 # >>> MANET_ADDITIONAL_SCRIPTS <<<
 ```
 
-and the flashers replace that line with the generated heredocs — removing it
-when there is nothing to embed. It has to be an anchor: neither template runs
-off the end, `firstrun.sh.template` has trailing completion echoes and
-`rock3a-provision.sh.template` ends with `reboot`, so a block appended after
-the last line would never execute. Deleting the anchor from a template makes
-the flasher refuse to run rather than silently produce an image whose scripts
-do nothing.
+The flashers replace that line with the generated heredocs, and remove it when
+there is nothing to embed. An anchor is required because neither template
+executes to its final line: `firstrun.sh.template` ends with completion
+messages and `rock3a-provision.sh.template` ends with `reboot`, so an appended
+block would never run. A template with the anchor removed causes the flasher to
+abort rather than produce an image whose scripts have no effect.
 
 ### OS Images
 
@@ -309,15 +308,16 @@ If enabled, nodes negotiate channel selection automatically. If disabled, a fixe
   as `admin_password` in `/etc/mesh.conf`. The status page at `http://<node>/`
   needs no password; everything that can change this node or the mesh does.
 
-### 12. Additional setup scripts (not a question)
+### 12. Additional setup scripts (not prompted)
 
-Anything you put in `additional-scripts/` is baked into the image and run
-**once as root on the node, after setup completes**. There is no prompt — the
-flasher validates whatever is in the directory and reports what it will embed
-before it writes anything.
+Files placed in `additional-scripts/` are embedded in the image and run **once
+as root on the node, after setup completes**. The flasher does not prompt for
+this: it validates the contents of the directory and reports what will be
+embedded before writing to the card.
 
-Use it for site-specific work the mesh build itself has no opinion about:
-static routes, org SSH keys, an extra package, a site daemon.
+The directory is intended for site-specific configuration outside the scope of
+the mesh build — static routes, organisation SSH keys, additional packages, or
+a site daemon.
 
 ```
    10-site-routes.sh                    ok    bash -n clean
@@ -325,9 +325,10 @@ static routes, org SSH keys, an extra package, a site daemon.
    README.md                            SKIP  no #! on line 1
 ```
 
-Scripts run in filename order and each gets 300 s. Failures are reported on the
-login banner but never mark the node unprovisioned. Full rules, including why
-there is no `data/` directory and why secrets do not belong here, are in
+Scripts run in filename order, each with a 300 s limit. Failures are reported
+on the login banner and never mark the node unprovisioned. The full rules,
+including the handling of data files and the reason secrets must not be placed
+here, are in
 [additional-scripts/README.md](additional-scripts/README.md).
 
 ---
@@ -388,11 +389,11 @@ It performs:
 
 When it finishes — and after any pending interface rename has settled — it disables its own run-once service, marks the node provisioned, and brings the mesh up by restarting `systemd-networkd`, the supplicants, `node-manager`, BATMAN-adv, and `alfred`. Output is logged to `/var/log/radio-setup.log`.
 
-Its last act, and only on a run that reached this point with no recorded
-failures, is to start `manet-user-scripts.service` — the operator scripts from
-`additional-scripts/`. They are started with `--no-block`, so nothing an
-operator wrote can hold provisioning open, and the unit's own conditions make
-it one-time. Output goes to `/var/log/manet-user-scripts.log`.
+Finally, on a run that reaches this point with no recorded failures, it starts
+`manet-user-scripts.service`, which runs the operator scripts embedded from
+`additional-scripts/`. The unit is started with `--no-block` so that operator
+code cannot delay the completion of provisioning, and its conditions restrict
+it to a single run. Output is written to `/var/log/manet-user-scripts.log`.
 
 ---
 
