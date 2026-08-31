@@ -272,7 +272,12 @@ echo "testing acs variable"
 if [[ -n "$acs" ]]; then
     echo "acs defined as $acs"
     sleep 0.5
-    if [[ "$acs" == "Y" ]]; then
+    # y/n is what every writer produces: both flashers normalise the answer to
+    # lowercase, the web UI writes 'y':'n', and mesh-config-sync.py validates
+    # the key as exactly y or n. This tested for "Y" alone, so acs=y selected
+    # the static orchestrator on every node and ACS never ran. Liberal about a
+    # hand-edited conf; cannot match n/no/0/false.
+    if [[ "$acs" =~ ^([Yy]|[Yy][Ee][Ss]|1|[Tt][Rr][Uu][Ee])$ ]]; then
         echo " > This mesh will channel hop ..."
         cp /usr/local/bin/node-manager-acs.sh /usr/local/bin/node-manager.sh
     else
