@@ -843,6 +843,21 @@ for _cfg in /boot/firmware/config.txt /boot/config.txt; do
     if [ "__HARDWARE_MODEL__" = "rpi4" ]; then
         grep -q 'pcie-32bit-dma' "$_cfg" || printf '\n[cm4]\ndtoverlay=pcie-32bit-dma\n' >> "$_cfg"
     fi
+
+    # CM4 USB: the stock image runs USB off the 2711 built-in XHCI controller
+    # via otg_mode=1 in the [cm4] section.  Comment that out and drive USB
+    # through the legacy DWC2 controller in host mode instead.  The overlay
+    # line is inserted directly beneath it so it stays inside [cm4] and has no
+    # effect on a Pi 4B flashed from the same branch.
+    sed -i 's/^otg_mode=1/#otg_mode=1/' "$_cfg"
+    if grep -q '^#otg_mode=1' "$_cfg" && ! grep -q '^dtoverlay=dwc2,dr_mode=host' "$_cfg"; then
+        awk '
+            /^#otg_mode=1/ && !ins {
+                print; print ""; print "dtoverlay=dwc2,dr_mode=host"; ins = 1; next
+            }
+            { print }
+        ' "$_cfg" > "$_cfg.manet-otg" && mv "$_cfg.manet-otg" "$_cfg"
+    fi
 done
 
 echo "=== Provisioning complete at $(date) ==="
