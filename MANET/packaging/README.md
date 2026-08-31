@@ -7,7 +7,7 @@ Two kinds of tarball are built from this repository, for three boards.
 | `build-cm4-tarball.sh` | `cm4-install.tar.gz` | node tools + CM4 SBC overlay |
 | `build-r3a-tarball.sh` | `r3a-install.tar.gz` | node tools + Rock 3A SBC overlay |
 | `build-rpi5-tarball.sh` | `rpi5-install.tar.gz` | node tools + RPi5 SBC overlay |
-| `build-tools-tarball.sh` | `<board>-tools.tar.gz` | node tools only, no kernel |
+| `build-tools-tarball.sh` | `<board>-tools.tar.gz` | everything an update needs, no kernel |
 
 **Install tarballs** bootstrap a new node: everything universal from this repo,
 plus the board's kernel, DTBs, modules and Morse firmware from an SBC overlay.
@@ -16,6 +16,34 @@ plus the board's kernel, DTBs, modules and Morse firmware from an SBC overlay.
 and extracts it over `/`. Platform-agnostic — the cm4, r3a and rpi5 tools
 tarballs are byte-identical content, and are only named per board because
 `node-update.sh` asks for its own board's name.
+
+Because it extracts to `/`, this archive can carry **anything that needs to go
+out** — it is not restricted to `node_tools`. Today it carries the node scripts
+and version file, systemd units together with their `multi-user.target.wants`
+enable symlinks, udev rules, the networkd-dispatcher hooks, the Lyra plugin and
+model weights, the dashboard assets under `share/manet`, and the journald
+persistence drop-in. A one-shot unit that runs a migration and deletes itself is
+a legitimate payload, and is how a fielded board picks up a conditional fix.
+
+Two deliberate exclusions:
+
+- **Board-specific files** — the SBC overlay (kernel, DTBs, modules, Morse
+  firmware) and `config.txt`. That is what an install tarball is for.
+- **`MANET/systemd-network/`** — rewriting a live node's interface definitions
+  from under it on a routine update is a different risk class to dropping in a
+  new unit, and belongs in a considered migration.
+
+`node-manager.sh` is excluded too, for a different reason: it is generated on
+the node from `acs=`, and the committed copy is the static variant, so shipping
+it would put every ACS node back on the static orchestrator at each update. Both
+variants are carried and `node-update.sh` re-publishes the selected one after
+extracting.
+
+The prebuilt binaries under `MANET/binaries_arm64/` are absent for size, not on
+principle; they change far less often than the scripts. `node-update.sh` only
+extracts — it runs no `daemon-reload` and no `udevadm` — so a new unit becomes
+active at the next boot through its enable symlink, and anything that has to
+happen sooner does it from a one-shot.
 
 Usage:
 
@@ -69,7 +97,9 @@ indicates that a later regeneration would produce differences unrelated to the
 
 The build scripts in this directory do **not** invoke protoc; they copy the
 committed `NodeInfo_pb2.py`. The venv is required when editing
-`NodeInfo.proto` and when running the test suite.
+`NodeInfo.proto`, and when running the unit tests — those live with the code
+they cover, in
+[`MANET/node_tools`](../node_tools/README.md#tests), not here.
 
 The location can be overridden with `MANET_VENV_DIR=`. `python3-venv` is not
 required.
@@ -148,16 +178,24 @@ node with `gst-inspect-1.0 lyraenc`, and check `journalctl -u mesh-voice` for th
 fallback line — the daemon reports the codec it actually built with, and the
 VOICE tab flags a mismatch in red.
 
-## RPi5 overlay contract
+## Overlays are built locally
 
-RPi5 is the CI-driven path; its overlay is published as a release asset.
+All three overlays come from `kernel-work/`, which is not in git, and none of
+them is published:
 
-- Release/tag: `rpi5-sbc-overlay-current`
-- Asset: `rpi5-sbc-overlay.tar.gz`
-- Release URL: `https://github.com/very-srs/MANET/releases/tag/rpi5-sbc-overlay-current`
+```
+kernel-work/packages/{cm4,r3a,rpi5}-sbc-overlay/
+```
 
-CM4 and Rock 3A overlays are built locally by
-`kernel-work/real_work/build-{cm4,r3a}.sh` and are not published.
+CM4 and Rock 3A are built by `kernel-work/real_work/build-{cm4,r3a}.sh`.
+
+RPi5 used to be a CI-driven path: a GitHub Actions workflow pulled an
+`rpi5-sbc-overlay.tar.gz` release asset, built the install tarball and published
+it as a release on every push. That workflow was removed. It had been failing on
+every push since 2026-08-12 — the overlay release it downloaded no longer exists,
+its verification step listed `perf-dashboard.py`, which the web UI merge deleted,
+and it pinned kernel `6.6.78-manet+` against an overlay now at `6.18.33-manet`.
+Build the RPi5 tarball locally like the other two, or set `SBC_OVERLAY_DIR`.
 
 ## Output
 

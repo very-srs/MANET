@@ -299,17 +299,15 @@ iface_phy() {
 }
 
 # Filter a candidate frequency list down to what this interface's phy actually
-# offers. This is NOT a regulatory compliance mechanism -- MANET ships a
-# flattened regulatory.db (see MANET/root/db.txt) that clears DFS / NO-IR /
-# NO-OUTDOOR and raises every rule to 30 dBm, so on a correctly provisioned node
-# this filter is a no-op. It exists for two failure cases:
+# offers. This is not a regulatory mechanism and on a fully provisioned node it
+# is a no-op. It exists for two failure cases:
 #   1. "iw scan freq" rejects the WHOLE request if any single frequency is not
 #      permitted on the phy, so one bad entry silently kills the scan for every
 #      channel on that radio -- and perform_scan discards the exit status, so the
 #      only symptom is an empty survey.
-#   2. A node that boots before the MANET regdb has landed runs the stock
-#      database, where the UNII-3 candidates (5745-5825) can be absent, gated
-#      behind (no IR), or DFS.
+#   2. A node that boots before /root/regulatory.db has been copied into place
+#      runs the stock database, where the UNII-3 candidates (5745-5825) can be
+#      absent, gated behind (no IR), or DFS.
 # Fails OPEN: if the phy cannot be read, or nothing parses, hand back the input
 # list untouched. Filtering to an empty set is far worse than not filtering --
 # it would take a whole band off the air on every node at once.
