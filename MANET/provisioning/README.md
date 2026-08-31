@@ -73,6 +73,9 @@ Clone or download the entire `provisioning/` directory to your working folder. T
 - `windows.ps1` — flashing script for Windows hosts
 - `firstrun.sh.template` — Raspberry Pi first-boot script template
 - `rock3a-provision.sh.template` — Rock 3A first-boot provisioning script template
+- `additional-scripts/` — optional; your own setup scripts, baked into the
+  image and run once on the node after setup completes. Empty is fine. See
+  [additional-scripts/README.md](additional-scripts/README.md).
 
 ### Template tokens
 
@@ -92,6 +95,25 @@ Tokens (same set on Linux and Windows):
 Adding a new flash-time setting means the token in both templates **and** the
 `sed` / `-replace` list in both flashers. The lists live in `linux.sh`
 (`flash_rpi` and the Rock 3A path) and `windows.ps1`.
+
+Scripts from `additional-scripts/` are placed **after** substitution and are
+never token-substituted, so a script that legitimately mentions `__ADMIN_PW__`
+keeps it verbatim.
+
+They are not appended to the end of the template either. Both templates carry
+an anchor line:
+
+```
+# >>> MANET_ADDITIONAL_SCRIPTS <<<
+```
+
+and the flashers replace that line with the generated heredocs — removing it
+when there is nothing to embed. It has to be an anchor: neither template runs
+off the end, `firstrun.sh.template` has trailing completion echoes and
+`rock3a-provision.sh.template` ends with `reboot`, so a block appended after
+the last line would never execute. Deleting the anchor from a template makes
+the flasher refuse to run rather than silently produce an image whose scripts
+do nothing.
 
 ### OS Images
 
@@ -287,6 +309,27 @@ If enabled, nodes negotiate channel selection automatically. If disabled, a fixe
   as `admin_password` in `/etc/mesh.conf`. The status page at `http://<node>/`
   needs no password; everything that can change this node or the mesh does.
 
+### 12. Additional setup scripts (not a question)
+
+Anything you put in `additional-scripts/` is baked into the image and run
+**once as root on the node, after setup completes**. There is no prompt — the
+flasher validates whatever is in the directory and reports what it will embed
+before it writes anything.
+
+Use it for site-specific work the mesh build itself has no opinion about:
+static routes, org SSH keys, an extra package, a site daemon.
+
+```
+   10-site-routes.sh                    ok    bash -n clean
+   20-org-ssh-keys.sh                   ok    bash -n clean
+   README.md                            SKIP  no #! on line 1
+```
+
+Scripts run in filename order and each gets 300 s. Failures are reported on the
+login banner but never mark the node unprovisioned. Full rules, including why
+there is no `data/` directory and why secrets do not belong here, are in
+[additional-scripts/README.md](additional-scripts/README.md).
+
 ---
 
 ## FIRST BOOT
@@ -345,6 +388,12 @@ It performs:
 
 When it finishes — and after any pending interface rename has settled — it disables its own run-once service, marks the node provisioned, and brings the mesh up by restarting `systemd-networkd`, the supplicants, `node-manager`, BATMAN-adv, and `alfred`. Output is logged to `/var/log/radio-setup.log`.
 
+Its last act, and only on a run that reached this point with no recorded
+failures, is to start `manet-user-scripts.service` — the operator scripts from
+`additional-scripts/`. They are started with `--no-block`, so nothing an
+operator wrote can hold provisioning open, and the unit's own conditions make
+it one-time. Output goes to `/var/log/manet-user-scripts.log`.
+
 ---
 
 ## DEFAULT CREDENTIALS
@@ -397,6 +446,7 @@ button, then *Terminal (Admin)* or *Windows PowerShell (Admin)*.
 - Phase 1 (firstrun): `/boot/firmware/firstrun.log`
 - Phase 2 (mesh provisioning): `/boot/firmware/provision.log`
 - Radio setup: `/var/log/radio-setup.log`
+- Operator setup scripts: `/var/log/manet-user-scripts.log`
 
 **Provisioning logs (Rock 3A):**
 - `/var/log/mesh-provision.log`

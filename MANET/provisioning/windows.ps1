@@ -23,6 +23,25 @@ $TEMPLATE_FILE      = Join-Path $ScriptDir "firstrun.sh.template"
 $ROCK3A_TEMPLATE    = Join-Path $ScriptDir "rock3a-provision.sh.template"
 $CONFIG_DIR         = Join-Path $ScriptDir ".mesh-configs"
 
+# Operator-supplied setup scripts. Anything dropped in here is baked into the
+# generated firstrun.sh and runs once on the node after radio-setup finishes.
+# See additional-scripts\README.md.
+$ADDITIONAL_SCRIPTS_DIR = Join-Path $ScriptDir "additional-scripts"
+# Warn above the first, refuse above the second. Neither is a limit imposed by
+# rpi-imager or by FAT32 - the boot partition has ~512 MB and bash parses a
+# multi-MB script without complaint. They exist because the whole generated
+# file is held in memory as one .NET string here, and because a payload that
+# large almost always wants to be fetched by the script at run time instead:
+# the node has proven internet before these ever run.
+# The line both templates carry, which the block replaces. An anchor rather
+# than a plain append because neither template runs off the end: firstrun.sh
+# has trailing completion echoes and rock3a-provision.sh ends with `reboot`, so
+# anything tacked on after the last line would never execute.
+$ADDITIONAL_SCRIPTS_ANCHOR     = '# >>> MANET_ADDITIONAL_SCRIPTS <<<'
+$ADDITIONAL_SCRIPTS_WARN_BYTES = 262144      # 256 KB
+$ADDITIONAL_SCRIPTS_MAX_BYTES  = 2097152     # 2 MB
+$Script:ADDITIONAL_SCRIPTS     = @()         # filled by Test-AdditionalScripts
+
 $ARMBIAN_IMAGE_URL      = "https://fi.mirror.armbian.de/dl/rock-3a/archive/Armbian_26.2.1_Rock-3a_trixie_vendor_6.1.115_minimal.img.xz"
 $ARMBIAN_IMAGE_FILENAME = "Armbian_26.2.1_Rock-3a_trixie_vendor_6.1.115_minimal.img"
 $Script:ARMBIAN_IMAGE   = ""   # Set by Get-ArmbianImage
@@ -920,6 +939,310 @@ function Select-HardwareAndTargetDevice {
     } while ($true)
 }
 
+# ============================================================
+# Operator setup scripts
+# ============================================================
+# These are embedded in the generated firstrun.sh as one quoted heredoc per
+# file, and written out to /var/lib/manet-user-scripts on the node's first
+# boot. manet-user-scripts.service runs them once, after radio-setup has
+# finished (radio-setup.sh starts it as its last act).
+#
+# Validation happens BEFORE any card is touched. Baking a syntactically broken
+# script into an image is a wasted flash and a node that silently does not do
+# what the operator asked; failing here costs nothing.
+
+# Syntax-check a shell script if any Linux shell is reachable from Windows.
+# Returns $null when there is no way to check - the same graceful degradation
+# Get-LinuxPasswordHash uses. An unchecked script still gets every other test;
+# only the parse is skipped, and the operator is told so once.
+function Test-ShellSyntax {
+    param([string]$Path)
+
+    # Git for Windows ships bash, and it is the common case on a machine that
+    # already has rpi-imager and Git installed.
+    $bash = Get-Command bash -ErrorAction SilentlyContinue
+    if ($bash) {
+        $err = & $bash.Source -n $Path 2>&1
+        if ($LASTEXITCODE -eq 0) { return "" }
+        # bash prefixes the message with the full path; the filename is already
+        # in the column to the left of this, so strip it. Matches linux.sh.
+        return (($err | Select-Object -First 1 | Out-String).Trim() -replace '^[^:]*: ', '')
+    }
+
+    $wsl = Get-Command wsl -ErrorAction SilentlyContinue
+    if ($wsl) {
+        $wslPath = $Path -replace '\\', '/'
+        if ($wslPath -match '^([A-Za-z]):(.*)') {
+            $wslPath = "/mnt/$($Matches[1].ToLower())$($Matches[2])"
+        }
+        $err = & wsl bash -n $wslPath 2>&1
+        if ($LASTEXITCODE -eq 0) { return "" }
+        return (($err | Select-Object -First 1 | Out-String).Trim() -replace '^[^:]*: ', '')
+    }
+
+    return $null
+}
+
+# Is this file safe to embed in a quoted heredoc, and does it look like a
+# script? Returns a hashtable with Verdict (OK/SKIP/FAIL) and Reason.
+function Test-AdditionalScript {
+    param([System.IO.FileInfo]$File)
+
+    # Filename becomes a path on the node and appears in a shell heredoc
+    # header, so keep it boring.
+    if ($File.Name -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') {
+        return @{ Verdict = 'FAIL'; Reason = 'filename must match [A-Za-z0-9][A-Za-z0-9._-]*' }
+    }
+    if ($File.Length -eq 0) {
+        return @{ Verdict = 'FAIL'; Reason = 'empty file' }
+    }
+
+    $bytes = [System.IO.File]::ReadAllBytes($File.FullName)
+
+    # A heredoc is a byte stream through bash, and bash cannot carry NUL.
+    # This is the one hard technical limit on what can be embedded.
+    $nulAt = [Array]::IndexOf($bytes, [byte]0)
+    if ($nulAt -ge 0) {
+        return @{ Verdict = 'FAIL'
+                  Reason  = "binary content (NUL byte at offset $nulAt) - fetch binaries at run time" }
+    }
+
+    # Strict UTF-8: throw on anything that is not valid, rather than silently
+    # substituting U+FFFD and shipping mangled bytes to the node.
+    try {
+        $enc  = New-Object System.Text.UTF8Encoding($false, $true)
+        $text = $enc.GetString($bytes)
+    } catch {
+        return @{ Verdict = 'FAIL'; Reason = 'not valid UTF-8 text' }
+    }
+
+    # Shebang decides whether this is a script at all. No shebang is a skip,
+    # not an error: a README or a notes file living in the directory is
+    # perfectly reasonable and must not be executed as root on a mesh node.
+    $firstLine = ($text -split "`n", 2)[0].TrimEnd("`r")
+    if (-not $firstLine.StartsWith('#!')) {
+        return @{ Verdict = 'SKIP'; Reason = 'no #! on line 1' }
+    }
+
+    # Syntax-check what we can. Only shell gets a real parse; a Python or perl
+    # shebang is taken at its word, since checking it would mean running that
+    # interpreter on the flashing host.
+    if ($firstLine -match '^#!/bin/(ba)?sh|/env\s+(ba)?sh$|/bash$|/sh$') {
+        $syntaxError = Test-ShellSyntax -Path $File.FullName
+        if ($null -eq $syntaxError) {
+            return @{ Verdict = 'OK'; Reason = 'shell (not syntax-checked, no bash here)' }
+        }
+        if ($syntaxError -ne "") {
+            return @{ Verdict = 'FAIL'; Reason = "shell syntax error: $syntaxError" }
+        }
+        return @{ Verdict = 'OK'; Reason = 'bash -n clean' }
+    }
+
+    return @{ Verdict = 'OK'; Reason = $firstLine.Substring(2) }
+}
+
+function Test-AdditionalScripts {
+    $Script:ADDITIONAL_SCRIPTS = @()
+
+    if (-not (Test-Path $ADDITIONAL_SCRIPTS_DIR)) { return }
+
+    $found = @(Get-ChildItem -Path $ADDITIONAL_SCRIPTS_DIR -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -notmatch '^\.' -and
+                       $_.Name -notmatch '\.(disabled|bak|orig)$' -and
+                       $_.Name -notmatch '~$' })
+
+    if ($found.Count -eq 0) { return }
+
+    # Ordinal sort, to match `LC_ALL=C sort` in linux.sh exactly. A culture
+    # sort would order 10-/20-/90- differently from the Linux flasher on some
+    # locales, and the whole point of the numeric prefix convention is that
+    # the operator can predict the order.
+    $names = @($found | ForEach-Object { $_.Name })
+    [Array]::Sort($names, [System.StringComparer]::Ordinal)
+    $byName = @{}
+    foreach ($f in $found) { $byName[$f.Name] = $f }
+    $candidates = @($names | ForEach-Object { $byName[$_] })
+
+    Write-Host ""
+    Write-Host "==============================================" -ForegroundColor Cyan
+    Write-Host " Additional setup scripts" -ForegroundColor Cyan
+    Write-Host "==============================================" -ForegroundColor Cyan
+    Write-Host " From: $ADDITIONAL_SCRIPTS_DIR"
+    Write-Host ""
+
+    $failed     = $false
+    $totalBytes = 0
+    $accepted   = New-Object System.Collections.ArrayList
+
+    foreach ($file in $candidates) {
+        $result = Test-AdditionalScript -File $file
+        $label  = $file.Name.PadRight(36)
+        switch ($result.Verdict) {
+            'OK' {
+                [void]$accepted.Add($file)
+                $totalBytes += $file.Length
+                Write-Host "   $label ok    $($result.Reason)"
+            }
+            'SKIP' { Write-Host "   $label SKIP  $($result.Reason)" -ForegroundColor DarkGray }
+            'FAIL' { Write-Host "   $label FAIL  $($result.Reason)" -ForegroundColor Red; $failed = $true }
+        }
+    }
+
+    if ($failed) {
+        Write-Host ""
+        Write-Host " ERROR: one or more scripts did not pass validation." -ForegroundColor Red
+        Write-Host "        Nothing has been written to any card. Fix the files"
+        Write-Host "        above (or rename them to .disabled) and run again."
+        exit 1
+    }
+
+    if ($accepted.Count -eq 0) {
+        Write-Host ""
+        Write-Host " Nothing to embed."
+        return
+    }
+
+    if ($totalBytes -gt $ADDITIONAL_SCRIPTS_MAX_BYTES) {
+        Write-Host ""
+        Write-Host " ERROR: embedded scripts total $totalBytes bytes, over the" -ForegroundColor Red
+        Write-Host "        $ADDITIONAL_SCRIPTS_MAX_BYTES-byte limit."
+        Write-Host "        Have a script fetch the bulk at run time instead - the"
+        Write-Host "        node has confirmed internet before these are run."
+        exit 1
+    }
+    if ($totalBytes -gt $ADDITIONAL_SCRIPTS_WARN_BYTES) {
+        Write-Host ""
+        Write-Host " NOTE: $totalBytes bytes of scripts is a lot to bake into an" -ForegroundColor Yellow
+        Write-Host "       image. Consider fetching large payloads at run time."
+    }
+
+    $Script:ADDITIONAL_SCRIPTS = $accepted.ToArray()
+
+    Write-Host ""
+    Write-Host " $($accepted.Count) script(s) will be embedded and run ONCE as"
+    Write-Host " root on each node, after setup completes."
+    Write-Host ""
+    Write-Host " Note: firstrun.sh is stored unencrypted on the boot partition and" -ForegroundColor Yellow
+    Write-Host " is not deleted. Anyone who reads the card reads these scripts. Do" -ForegroundColor Yellow
+    Write-Host " not put private keys or long-lived secrets in them." -ForegroundColor Yellow
+    Write-Host "==============================================" -ForegroundColor Cyan
+    Write-Host ""
+}
+
+# Pick a heredoc terminator that cannot appear in the file. A quoted heredoc
+# ends at the first line consisting solely of the delimiter, so an operator
+# script that legitimately contains our default - one that embeds its own
+# heredoc, say - would truncate itself and leave the rest as loose shell.
+function Get-HeredocDelimiter {
+    param([string[]]$Lines)
+
+    $delim = 'MANET_USER_SCRIPT_EOF'
+    $i = 0
+    while ($Lines -ccontains $delim) {
+        $i++
+        if ($i -gt 64) { return $null }
+        $delim = "MANET_USER_SCRIPT_EOF_$i"
+    }
+    return $delim
+}
+
+# Build the embedding block to append to an already-generated setup script.
+#
+# Called AFTER token substitution, deliberately. The flasher rewrites every
+# __TOKEN__ in the template with -replace; running that over operator content
+# would silently rewrite a script that happens to mention __ADMIN_PW__ or any
+# other token, which is both wrong and invisible.
+function Get-AdditionalScriptsBlock {
+    if ($Script:ADDITIONAL_SCRIPTS.Count -eq 0) { return "" }
+
+    $sb = New-Object System.Text.StringBuilder
+    [void]$sb.Append("`n")
+    [void]$sb.Append("# ====================================================================`n")
+    [void]$sb.Append("# Operator setup scripts, embedded at flash time from`n")
+    [void]$sb.Append("# additional-scripts/. Written out here; run once by`n")
+    [void]$sb.Append("# manet-user-scripts.service, which radio-setup.sh starts after`n")
+    [void]$sb.Append("# provisioning completes.`n")
+    [void]$sb.Append("# ====================================================================`n")
+    [void]$sb.Append("echo `"Writing operator setup scripts...`"`n")
+    [void]$sb.Append("mkdir -p /var/lib/manet-user-scripts`n")
+
+    foreach ($file in $Script:ADDITIONAL_SCRIPTS) {
+        # CRLF is stripped for the same reason the flasher does it to the
+        # template: a shebang with a trailing CR makes the kernel look for an
+        # interpreter whose name ends in CR, and the script dies with a bare
+        # "not found" that names the right path.
+        $enc     = New-Object System.Text.UTF8Encoding($false, $true)
+        $content = $enc.GetString([System.IO.File]::ReadAllBytes($file.FullName))
+        $content = $content -replace "`r`n", "`n" -replace "`r", "`n"
+
+        $delim = Get-HeredocDelimiter -Lines ($content -split "`n")
+        if ($null -eq $delim) {
+            Write-Host "ERROR: could not find a safe heredoc delimiter for $($file.Name)" -ForegroundColor Red
+            exit 1
+        }
+
+        # A file with no trailing newline would otherwise glue the delimiter
+        # onto its last line and the heredoc would never close.
+        if (-not $content.EndsWith("`n")) { $content += "`n" }
+
+        [void]$sb.Append("`n")
+        [void]$sb.Append("cat > '/var/lib/manet-user-scripts/$($file.Name)' << '$delim'`n")
+        [void]$sb.Append($content)
+        [void]$sb.Append("$delim`n")
+        [void]$sb.Append("chmod 0755 '/var/lib/manet-user-scripts/$($file.Name)'`n")
+    }
+
+    [void]$sb.Append("`n")
+    [void]$sb.Append("echo `"Operator setup scripts staged: `$(ls -1 /var/lib/manet-user-scripts | wc -l)`"`n")
+
+    Write-Host "Embedded $($Script:ADDITIONAL_SCRIPTS.Count) operator setup script(s)."
+    return $sb.ToString()
+}
+
+# Substitute the block for the anchor line in an already-generated setup
+# script. Called with content whose newlines are already normalised to LF.
+#
+# The block replaces the anchor rather than being appended, because neither
+# template runs off the end - firstrun.sh has trailing completion echoes and
+# rock3a-provision.sh ends with `reboot`. A run with no scripts still comes
+# through here, so the marker is stripped out of every generated image.
+function Add-AdditionalScriptsBlock {
+    param([string]$Content)
+
+    $block = Get-AdditionalScriptsBlock
+
+    $lines  = $Content -split "`n"
+    $anchor = -1
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        if ($lines[$i] -ceq $ADDITIONAL_SCRIPTS_ANCHOR) { $anchor = $i; break }
+    }
+
+    if ($anchor -lt 0) {
+        if ($Script:ADDITIONAL_SCRIPTS.Count -gt 0) {
+            Write-Host "ERROR: template has no anchor line:" -ForegroundColor Red
+            Write-Host "       $ADDITIONAL_SCRIPTS_ANCHOR" -ForegroundColor Red
+            Write-Host "       Cannot place the operator setup scripts. Aborting." -ForegroundColor Red
+            exit 1
+        }
+        return $Content
+    }
+
+    # Drop the trailing newline the block always ends with: the anchor line it
+    # replaces did not carry one of its own once the array was split.
+    $blockLines = @()
+    if ($block -ne "") { $blockLines = @($block.TrimEnd("`n") -split "`n") }
+
+    $out = New-Object System.Collections.ArrayList
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        if ($i -eq $anchor) {
+            foreach ($bl in $blockLines) { [void]$out.Add($bl) }
+        } else {
+            [void]$out.Add($lines[$i])
+        }
+    }
+    return ($out -join "`n")
+}
+
 function Confirm-Flash {
     param([int]$DiskNumber)
     $disk   = Get-Disk -Number $DiskNumber
@@ -1313,6 +1636,11 @@ if ($configFiles.Count -gt 0) {
     Save-Config
 }
 
+# Validate operator setup scripts before anything is written to any card: a
+# bad script here is a wasted flash, and the operator should find out while
+# the card is still safely in their hand.
+Test-AdditionalScripts
+
 if ($Script:HARDWARE_MODEL -eq "r3a") {
     $imageOk = Get-ArmbianImage
     if (-not $imageOk) {
@@ -1504,6 +1832,10 @@ auto_update=$($Script:AUTO_UPDATE)
 
         $provisionScript = $provisionScript.Replace("`r`n", "`n")
 
+        # After substitution, never before: operator scripts must not have
+        # their own __TOKEN__-looking text rewritten by the -replace chain.
+        $provisionScript = Add-AdditionalScriptsBlock -Content $provisionScript
+
         $usrLocalBin = Join-Path $rootPath "usr\local\bin"
         if (-not (Test-Path $usrLocalBin)) { New-Item -ItemType Directory -Path $usrLocalBin | Out-Null }
         [System.IO.File]::WriteAllText((Join-Path $usrLocalBin "provision-mesh.sh"), $provisionScript)
@@ -1672,6 +2004,13 @@ WantedBy=multi-user.target
         -replace '__HALOW_REGULATORY_DOMAIN__', $Script:HALOW_REGULATORY_DOMAIN `
         -replace '__ADMIN_PW__',                $Script:ADMIN_PW `
         -replace '__AUTO_UPDATE__',             $Script:AUTO_UPDATE
+
+    # After substitution, never before: operator scripts must not have their
+    # own __TOKEN__-looking text rewritten by the -replace chain above.
+    # Newlines are normalised first: the anchor is matched line by line, and
+    # ReadAllText preserves whatever the template was checked out with.
+    $templateContent = $templateContent.Replace("`r`n", "`n")
+    $templateContent = Add-AdditionalScriptsBlock -Content $templateContent
 
     $flashCount = 0
     $keepFlashing = $true

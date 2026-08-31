@@ -1,0 +1,8 @@
+# Operator setup scripts are site-specific and routinely carry detail that has
+# no business in this repository — internal addresses, org SSH keys, server
+# names. Ignore everything here by default; the documentation and the disabled
+# examples are the deliberate exceptions.
+*
+!.gitignore
+!README.md
+!*.disabled

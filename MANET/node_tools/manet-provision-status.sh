@@ -21,6 +21,10 @@ FAIL_FILE="${MANET_PROVISION_FAILURES:-/var/lib/manet-provision.failures}"
 DONE_FILE="${MANET_PROVISION_DONE:-/var/lib/radio-setup.done}"
 LOG_FILE="/var/log/radio-setup.log"
 VERSION_FILE="/etc/manet_version.txt"
+USER_SCRIPT_DIR="${MANET_USER_SCRIPT_DIR:-/var/lib/manet-user-scripts}"
+USER_SCRIPT_STATE="${MANET_USER_SCRIPT_STATE:-/var/lib/manet-user-scripts.state}"
+USER_SCRIPT_DONE="${MANET_USER_SCRIPT_DONE:-/var/lib/manet-user-scripts.done}"
+USER_SCRIPT_LOG="${MANET_USER_SCRIPT_LOG:-/var/log/manet-user-scripts.log}"
 
 STATE=""; PHASE=""; STARTED=""; FINISHED=""; UPDATED=""
 if [ -r "$STATE_FILE" ]; then
@@ -68,6 +72,42 @@ human_delta() {
 
 rule() { printf '  %s\n' '────────────────────────────────────────────────────────────'; }
 
+# Operator setup scripts (provisioning/additional-scripts/, run once by
+# manet-user-scripts.service). Advisory: these never change the provisioning
+# verdict, so this prints alongside it rather than inside it. Silent on a node
+# where the operator staged nothing, which is the common case.
+user_scripts_line() {
+    [ -d "$USER_SCRIPT_DIR" ] || return 0
+
+    local staged ok failed
+    staged=$(find "$USER_SCRIPT_DIR" -maxdepth 1 -type f 2>/dev/null \
+        | grep -c -v -e '/\.' -e '\.disabled$' -e '\.bak$' -e '\.orig$' -e '~$')
+    [ "${staged:-0}" -gt 0 ] || return 0
+
+    if [ ! -f "$USER_SCRIPT_DONE" ]; then
+        printf '  Setup scripts  : %s staged, not run yet\n' "$staged"
+        return 0
+    fi
+
+    ok=0; failed=0
+    if [ -r "$USER_SCRIPT_STATE" ]; then
+        ok=$(awk -F'\t' '$2 == 0' "$USER_SCRIPT_STATE" 2>/dev/null | wc -l)
+        failed=$(awk -F'\t' '$2 != 0 && NF >= 2' "$USER_SCRIPT_STATE" 2>/dev/null | wc -l)
+    fi
+
+    if [ "$failed" -gt 0 ]; then
+        printf '  Setup scripts  : %s of %s ran, %s FAILED\n' \
+            "$ok" "$((ok + failed))" "$failed"
+        # Name them. "Something failed" with no name sends people to the log
+        # for information the banner could have given them.
+        awk -F'\t' '$2 != 0 && NF >= 2 { printf "     ! %-30s exit %s\n", $1, $2 }' \
+            "$USER_SCRIPT_STATE" 2>/dev/null | head -5
+        printf '     log: %s\n' "$USER_SCRIPT_LOG"
+    else
+        printf '  Setup scripts  : %s ran, all OK\n' "$ok"
+    fi
+}
+
 case "$STATE" in
 running)
     echo
@@ -105,6 +145,7 @@ incomplete)
     printf '  or simply reboot — it retries automatically.\n'
     printf '  Details : %s\n' "$FAIL_FILE"
     printf '  Full log: %s\n' "$LOG_FILE"
+    user_scripts_line
     rule
     echo
     ;;
@@ -114,6 +155,7 @@ complete)
     printf '  MANET node provisioned%s%s\n' \
         "${ver:+ (v$ver)}" \
         "${FINISHED:+, $(human_delta "$FINISHED") ago}"
+    user_scripts_line
     ;;
 esac
 

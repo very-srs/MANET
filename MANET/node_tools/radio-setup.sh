@@ -2000,4 +2000,29 @@ if [[ "$FIRST_BOOT_UNIT_ENABLED" -eq 1 ]]; then
     touch /var/lib/radio-setup.done
 fi
 
+# ============================================================================
+# === OPERATOR SETUP SCRIPTS ===
+# ============================================================================
+# Last thing, and only on a run that got this far — past the failure gate above
+# and past the rename-reboot branch, so the node is a working mesh node before
+# anybody else's code touches it.
+#
+# --now starts it immediately instead of waiting for a reboot that a clean run
+# never performs. --no-block means operator code cannot hold radio-setup open:
+# systemd owns the run from here, and the unit's own conditions make it
+# one-time (see manet-user-scripts.service). Safe to reach on a re-run — the
+# completion marker makes systemd skip the unit.
+#
+# Failures in there are advisory by design and are reported on the login
+# banner; they must not affect the provisioning verdict already reached above.
+if [ -x /usr/local/bin/manet-user-scripts.sh ] && [ -d /var/lib/manet-user-scripts ]; then
+    if [ -f /var/lib/manet-user-scripts.done ]; then
+        echo " >> Operator setup scripts already ran (see /var/log/manet-user-scripts.log)"
+    else
+        echo " >> Starting operator setup scripts"
+        systemctl enable manet-user-scripts.service 2>/dev/null || true
+        systemctl start --no-block manet-user-scripts.service 2>/dev/null || true
+    fi
+fi
+
 echo " >> Provisioning complete: $(date -Is)"

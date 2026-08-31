@@ -444,8 +444,7 @@ access category — they set `IP_TOS` and `SO_PRIORITY` together, in that order,
 because the kernel rewrites `sk_priority` as a side effect of `IP_TOS`.
 GStreamer's `multiudpsink` exposes only `qos-dscp`, so we rely on batman-adv's
 derivation instead — which is why the DSCP value has to be chosen for what
-batman-adv will make of it. **Worth confirming on-air** with per-AC counters
-before trusting it.
+batman-adv will make of it.
 
 Multicast TTL is set explicitly to 32: the default of 1 silently black-holes
 voice one hop out.
@@ -772,10 +771,22 @@ not hand-edit; regenerate.
 **NodeInfo.proto**
 
 Protocol buffer schema for both messages.
-- Compile with: `protoc --python_out=. NodeInfo.proto`
+- Compile with: `protoc --python_out=. NodeInfo.proto`, from **the dev venv**:
+
+  ```bash
+  source ~/.venvs/manet/bin/activate    # bash MANET/packaging/setup-dev-env.sh
+  cd MANET/node_tools && protoc --python_out=. NodeInfo.proto
+  ```
+
 - **Use protoc 3.21.x.** Nodes run the protobuf 4.21.12 Python runtime, which
   rejects generated code from protoc older than 3.19, and 5.x emits a
   `runtime_version` gate that runtime does not have.
+- **Not `/usr/bin/protoc`.** Ubuntu 22.04 ships 3.12.4, which emits the old
+  `_reflection`-based form — 786 lines different, and unimportable on every
+  node. This is easy to do by accident and nothing downstream catches it: a dev
+  box with the matching-vintage protobuf runtime imports the bad file happily.
+  `setup-dev-env.sh` puts the right protoc inside the venv precisely so
+  activating it cannot give you one without the other.
 - Changing a field type is a flag day: there is no compatibility path, so all
   nodes must be reflashed together.
 
@@ -1008,6 +1019,8 @@ mailbox, such as the Rock 3A. It never exits non-zero.
 
 Answers one question on every SSH login: is this node finished setting itself
 up? Installed as `/etc/update-motd.d/50-manet-provision`, and runnable directly.
+It also reports the outcome of the operator setup scripts, when any were staged
+— see `manet-user-scripts.sh` below.
 
 - **running** — a banner saying not to disconnect, with how long it has been going.
 - **incomplete** — a loud banner listing what failed and how to retry.
@@ -1050,3 +1063,58 @@ call failed silently behind `|| true`, and the script still touched
 The log is opened with `tee -a`, not `tee`. It used to truncate per run, which
 destroyed the history of the run that went wrong — and two overlapping runs
 interleaved into an unreadable file.
+
+**manet-user-scripts.sh**
+
+Runs the operator's own setup scripts — whatever they put in
+`MANET/provisioning/additional-scripts/` at flash time. Those files are baked
+into `firstrun.sh` as one quoted heredoc each and written to
+`/var/lib/manet-user-scripts/` on the first boot; this runs them **once**, from
+`manet-user-scripts.service`, which `radio-setup.sh` enables and starts as its
+last act.
+
+Three reasons it is not just a few lines at the end of `radio-setup.sh`:
+
+- **radio-setup must not be at the mercy of operator code.** It is the script
+  that decides whether a node is provisioned at all. A user script that hangs,
+  reboots, or exits non-zero inside it would take provisioning with it. The
+  unit is started `--no-block`, so systemd owns the run from there.
+- **These run once per node, not per radio-setup.** `radio-setup.sh` is
+  explicitly re-runnable to apply new mesh settings; a site hook that adds a
+  route or installs a package is not.
+- **A one-shot unit survives a power pull.** If the board loses power part-way
+  through the set, the completion marker was never written and the next boot
+  resumes from the script that was cut off — the ones that already finished are
+  recorded individually and not repeated.
+
+Failures are **advisory** and deliberately touch nothing in
+`/var/lib/manet-provision.*`. A broken site hook must not make a working mesh
+node report itself unprovisioned. Exit codes are recorded in
+`/var/lib/manet-user-scripts.state` (`name<TAB>exit<TAB>epoch`) and
+`manet-provision-status.sh` prints the tally, and names any failures, on the
+login banner. The runner always exits 0 for the same reason.
+
+Each script gets 300 s, overridable with `user_script_timeout=` in
+`/etc/mesh.conf` — read with `sed`, not sourced, because `mesh.conf` is
+operator-editable and a stray line must not execute as shell. Scripts run in
+`LC_ALL=C` order from `/`, with stdin on `/dev/null` so one that blocks on
+`read` fails immediately instead of burning its whole timeout.
+
+`--list` shows what is staged and what has run; `--force` re-runs everything.
+Log: `/var/log/manet-user-scripts.log`, appended, never truncated.
+
+A script that ran and *failed* has had its turn and is not retried
+automatically. Only an interrupted one is.
+
+Candidates are every regular file in the directory except dotfiles and
+`.disabled`/`.bak`/`.orig`/`~` suffixes, **and except anything without a `#!` on line
+one**. That last test matters only for the hand-copy path, since the flasher never
+embeds a file without a shebang — but it matters there, because exec'ing a file with no
+shebang does not fail: the kernel refuses it and bash falls back to interpreting it as a
+shell script, so a dropped-in config file whose lines happen to parse as shell would run
+and report success.
+
+Flash-time validation lives in the flashers, not here — see
+[additional-scripts/README.md](../provisioning/additional-scripts/README.md).
+The checks in this script are a second line of defence, and cover files an
+operator dropped onto a live node by hand.

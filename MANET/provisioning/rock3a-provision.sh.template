@@ -610,6 +610,8 @@ systemctl disable mesh-provision
 rm /etc/resolv.conf
 echo "nameserver 1.1.1.1" > /etc/resolv.conf
 
+# >>> MANET_ADDITIONAL_SCRIPTS <<<
+
 echo "=== Provisioning complete at $(date) ==="
 echo "=== Rebooting to apply changes ==="
 reboot
