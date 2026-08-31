@@ -34,6 +34,7 @@ MANET/
   binaries_arm64/      # alfred, batctl, wpa_supplicant_s1g, wpa_cli_s1g
   lyra_arm64/          # GStreamer Lyra plugin + model_coeffs
   provisioning/        # linux.sh, windows.ps1, firstrun templates
+    additional-scripts/  # operator's own setup scripts, baked in at flash time
   packaging/           # install/tools tarball builders
   install_packages/    # built tarballs (not source)
 docs/                  # kernel/Morse port record
@@ -47,6 +48,11 @@ OS is Debian 13 (Trixie), merged-usr: modules go to `/usr/lib/modules/`.
 
 - Bump **both** `MANET/node_tools/version.txt` and `MANET/etc/manet_version.txt`
   together. `node-update.sh` treats inequality as “not current” and will loop.
+- **Upload the tarballs to colorado-governor.com before pushing a version bump
+  to GitHub `main`.** `node-update.sh` reads the remote *version* from GitHub
+  `main` but fetches the *tarball* from colorado-governor. Push first and every
+  `auto_update=y` node re-downloads a tarball that can never satisfy the check,
+  on every Ethernet carrier event.
 - `node-manager.sh` is **generated**. `radio-setup.sh` copies
   `node-manager-acs.sh` or `node-manager-static.sh` over it. Keep all three in
   sync when changing the publish path.
@@ -59,8 +65,15 @@ OS is Debian 13 (Trixie), merged-usr: modules go to `/usr/lib/modules/`.
   corrupts them.
 - Voice defaults to Lyra. A tarball without `MANET/lyra_arm64/` artifacts falls
   back to opus and cannot talk to the rest of the mesh.
+- Both provisioning templates carry a `# >>> MANET_ADDITIONAL_SCRIPTS <<<` line.
+  The flashers substitute the operator's setup scripts for it. Do not delete it,
+  and do not switch them back to appending: `rock3a-provision.sh.template` ends
+  with `reboot`, so an appended block never runs.
 - `NodeInfo.proto` is the source; commit regenerated `NodeInfo_pb2.py` (protoc
-  3.21.x only — see node_tools README).
+  3.21.x only — see node_tools README). Use the venv's protoc, never
+  `/usr/bin/protoc`: the distro ships 3.12.4, whose output every node rejects.
+  `bash MANET/packaging/setup-dev-env.sh` builds the toolchain and proves it by
+  reproducing the committed pb2 byte for byte.
 - Never extract a kernel tarball onto a live CM4 FAT32 boot partition. Power
   down and extract on a dev machine; run `depmod` after. Sequence:
   [docs/kernel-6.18-morse-port.md](docs/kernel-6.18-morse-port.md) §8.
@@ -72,6 +85,7 @@ OS is Debian 13 (Trixie), merged-usr: modules go to `/usr/lib/modules/`.
 | Product overview, hardware support | [README.md](README.md) |
 | Runtime, web UI, voice, Alfred, elections | [MANET/node_tools/README.md](MANET/node_tools/README.md) — jump by section, do not ingest the whole file |
 | Flash / first boot / placeholders | [MANET/provisioning/README.md](MANET/provisioning/README.md) |
+| Operator's own setup scripts (flash-time hook) | [MANET/provisioning/additional-scripts/README.md](MANET/provisioning/additional-scripts/README.md) |
 | Install or tools tarball / version bump | [MANET/packaging/README.md](MANET/packaging/README.md) |
 | Lyra codec artifacts | [MANET/lyra_arm64/README.md](MANET/lyra_arm64/README.md) |
 | Prebuilt alfred / batctl / s1g wpa | [MANET/binaries_arm64/README.md](MANET/binaries_arm64/README.md) |
@@ -95,12 +109,17 @@ probing a missing hat — unrelated. Details in the kernel port doc §6.1.
 
 ## Verify
 
-From the git root, so `node_tools` is on `sys.path`:
+From the git root, so `node_tools` is on `sys.path`, and **from the dev venv**,
+so the protobuf runtime matches the fleet:
 
 ```bash
-python3 -m unittest discover -s MANET/node_tools -p 'test_*.py'
+source ~/.venvs/manet/bin/activate     # bash MANET/packaging/setup-dev-env.sh
+python -m unittest discover -s MANET/node_tools -p 'test_*.py'
 ```
 
-The encoder roundtrip test needs the `protobuf` package. Check behavior on CM4.
+The encoder roundtrip test needs `protobuf`, and specifically **4.21.12** — the
+version nodes run. A system python without it errors; a system python with a
+*newer* one is worse, because it accepts pb2 files nodes refuse to import.
+Check behavior on CM4.
 Packaging changes also need a tarball rebuild; see
 [MANET/packaging/README.md](MANET/packaging/README.md).
