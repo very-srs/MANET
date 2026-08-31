@@ -167,6 +167,29 @@ mkdir -p /etc/update-motd.d
 [ -x /usr/local/bin/manet-power-status.sh ] && \
     ln -sf /usr/local/bin/manet-power-status.sh /etc/update-motd.d/55-manet-power
 
+# node-manager.sh is generated, so the archive does not carry it -- shipping the
+# committed copy would put every ACS node back on the static orchestrator. Both
+# variants did just arrive, though, so re-publish whichever one this node has
+# selected, or it keeps running the previous release's orchestrator until
+# radio-setup happens to run again.
+#
+# acs= is matched the same way radio-setup.sh and the auto_update gate match it:
+# every writer produces y/n, but mesh.conf is operator-editable.
+if grep -qiE '^acs=(y|yes|1|true)[[:space:]]*$' /etc/mesh.conf 2>/dev/null; then
+    NODE_MANAGER_VARIANT=/usr/local/bin/node-manager-acs.sh
+else
+    NODE_MANAGER_VARIANT=/usr/local/bin/node-manager-static.sh
+fi
+if [ -f "$NODE_MANAGER_VARIANT" ] && \
+   ! cmp -s "$NODE_MANAGER_VARIANT" /usr/local/bin/node-manager.sh; then
+    cp "$NODE_MANAGER_VARIANT" /usr/local/bin/node-manager.sh
+    chmod 0755 /usr/local/bin/node-manager.sh
+    systemctl restart node-manager.service 2>/dev/null || true
+    if [ "$ROUTINE_MODE" = false ]; then
+        echo "node-manager.sh re-published from $(basename "$NODE_MANAGER_VARIANT")"
+    fi
+fi
+
 if [ "$ROUTINE_MODE" = false ]; then
 	echo "Node tools updated to version $REMOTE_VERSION - $(tail -n 1 /etc/manet_version.txt)"
 fi
