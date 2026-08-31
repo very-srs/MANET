@@ -59,6 +59,16 @@ install_file() {
 mkdir -p "$STAGE/usr/local/bin" "$STAGE/etc"
 
 install_tree "$REPO_ROOT/MANET/node_tools" "$STAGE/usr/local/bin"
+
+# node-manager.sh is generated on the node, not shipped. radio-setup.sh copies
+# node-manager-acs.sh or node-manager-static.sh over it according to acs= in
+# mesh.conf, and the committed copy is the static variant -- so including it
+# here would return every ACS node to the static orchestrator on each routine
+# update, silently and with nothing in the log to say why. Both variants are
+# still carried, and node-update.sh re-publishes the one this node has selected
+# after extracting.
+rm -f "$STAGE/usr/local/bin/node-manager.sh"
+
 chmod -R a+rX "$STAGE/usr/local/bin"
 find "$STAGE/usr/local/bin" -type f \
     \( -name '*.sh' -o -name '*.py' -o -name 'morse_cli' -o -name 'chronyc' \) \
