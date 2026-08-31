@@ -21,6 +21,11 @@ log "Carrier state changed on $IFACE - running hotplug detection"
 /usr/local/bin/ethernet-autodetect.sh --hotplug
 
 # Automatic tool updates if enabled and internet is now available.
-if grep -qi '^auto_update=1' /etc/mesh.conf 2>/dev/null && ping -c 1 -W 2 -I "$IFACE" 8.8.8.8 >/dev/null 2>&1; then
+#
+# auto_update is written as y/n -- by the flasher, by the web UI
+# (manet_manage.py writes 'y':'n'), and mesh-config-sync.py validates it as
+# exactly y or n. This tested for '=1' until 2026-08-31, which no code path
+# has ever written, so auto-update never ran on any node.
+if grep -qiE '^auto_update=(y|yes|1|true)[[:space:]]*$' /etc/mesh.conf 2>/dev/null && ping -c 1 -W 2 -I "$IFACE" 8.8.8.8 >/dev/null 2>&1; then
     /usr/local/bin/node-update.sh --routine
 fi

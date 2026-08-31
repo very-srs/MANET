@@ -1,0 +1,3 @@
+#!/bin/bash
+set -euo pipefail
+/usr/local/bin/manet-uplink-dispatch.sh routable "${IFACE:-}"
