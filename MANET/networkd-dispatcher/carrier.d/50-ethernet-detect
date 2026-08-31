@@ -1,0 +1,12 @@
+#!/bin/bash
+set -euo pipefail
+/usr/local/bin/manet-uplink-dispatch.sh carrier "${IFACE:-}"
+# auto_update is written as y/n -- the flasher writes it, the web UI writes
+# 'y':'n' (manet_manage.py), and mesh-config-sync.py validates it as exactly
+# y or n. This used to test for '=1', which no code path has ever written, so
+# auto-update never ran on any node. Liberal about what a hand-edited conf may
+# say; cannot match n/no/0/false.
+if grep -qiE '^auto_update=(y|yes|1|true)[[:space:]]*$' /etc/mesh.conf 2>/dev/null && \
+   ping -c 1 -W 2 -I "$IFACE" 8.8.8.8 >/dev/null 2>&1; then
+    /usr/local/bin/node-update.sh --routine
+fi

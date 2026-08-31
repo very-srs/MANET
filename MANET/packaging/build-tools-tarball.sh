@@ -5,7 +5,8 @@ set -euo pipefail
 #
 # Contains node_tools scripts, the version file, the shared assets under
 # share/manet that those scripts load at runtime (the dashboard logos), the
-# systemd units and their enable symlinks, and udev rules.
+# systemd units and their enable symlinks, udev rules, and the
+# networkd-dispatcher hooks.
 #
 # The archive extracts to / on the node, so it can carry any file the node
 # needs — units, rules, modules, or a one-shot service that runs a script and
@@ -24,6 +25,12 @@ set -euo pipefail
 #   * systemd-network configs — rewriting a live node's interface definitions
 #     from under it is a different risk class to dropping in a new unit, and
 #     belongs in a considered migration rather than every routine update
+#
+# networkd-dispatcher hooks ARE carried (they were not, until 2026-08-31). They
+# are scripts under /etc, not board-specific artifacts, and the rule for this
+# archive is that anything which should go out can go in it — the exceptions
+# are board-specific files such as config.txt, and the interface definitions
+# noted above.
 #
 # Usage:
 #   build-tools-tarball.sh [output.tar.gz]
@@ -74,6 +81,15 @@ install_file 0644 \
 # a one-shot (see manet-voice-setup.service).
 install_tree "$REPO_ROOT/MANET/systemd" "$STAGE/etc/systemd/system"
 install_tree "$REPO_ROOT/MANET/udev/rules.d" "$STAGE/etc/udev/rules.d"
+
+# networkd-dispatcher hooks, the same set the install builders stage. A hook is
+# an ordinary script -- there is no reason a routine update should not carry a
+# fix to one, and until it did, a bad hook could only be corrected by a
+# reflash. That mattered: the auto_update gate spent its whole life testing for
+# a value nothing ever wrote, and the only mechanism that could have shipped
+# the fix was the OTA update that same bug disabled.
+. "$SCRIPT_DIR/lib-dispatcher.sh"
+stage_dispatcher_hooks "$STAGE" "$REPO_ROOT"
 
 mkdir -p "$STAGE/etc/systemd/system/multi-user.target.wants"
 for unit in \
