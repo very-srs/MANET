@@ -1,11 +1,11 @@
 # Additional setup scripts
 
-Drop your own setup scripts in this directory and they are baked into the image
-at flash time. Each one runs **once**, as **root**, on the node — after
-`radio-setup.sh` has finished and the node is a working mesh node.
+Setup scripts placed in this directory are embedded in the image at flash time.
+Each runs **once**, as **root**, on the node, after `radio-setup.sh` has
+finished and the node is fully configured.
 
-Nothing here is required. An empty directory is the normal case and the
-flashers say nothing about it.
+The directory is optional. When it is empty the flashers report nothing and
+provisioning is unchanged.
 
 ## How it works
 
@@ -23,35 +23,36 @@ additional-scripts/            (this directory, on your machine)
         v
   /var/lib/manet-user-scripts/ (on the node)
         |
-        |  radio-setup.sh enables + starts manet-user-scripts.service
-        |  as its last act, once provisioning has actually completed
+        |  radio-setup.sh enables and starts manet-user-scripts.service
+        |  after provisioning completes
         v
   run once, in order, logged to /var/log/manet-user-scripts.log
 ```
 
-They run *after* provisioning, not during it, so the mesh, the AP, the radios
-and the network are already up when your script starts.
+They run after provisioning rather than during it, so the mesh, the AP, the
+radios and the network are already available to them.
 
 ## Where things land on the node
 
-The scripts go into one flat directory. The bookkeeping files are **siblings of it,
-not inside it** — anything inside that directory is treated as a script.
+The scripts occupy a single flat directory. The state and marker files are
+**siblings of that directory, not members of it**, because every file inside it
+is treated as a script.
 
 | Path | What |
 |---|---|
-| `/var/lib/manet-user-scripts/` | your scripts, mode `0755`, flat — no subdirectories |
+| `/var/lib/manet-user-scripts/` | the scripts, mode `0755`; flat, no subdirectories |
 | `/var/lib/manet-user-scripts.state` | one line per completed script: `name<TAB>exit<TAB>epoch` |
 | `/var/lib/manet-user-scripts.done` | marker; its presence is what stops a re-run |
 | `/var/log/manet-user-scripts.log` | full output of every run, appended |
 
-Nothing is nested and nothing is renamed — `10-site-routes.sh` in this directory
-arrives as `/var/lib/manet-user-scripts/10-site-routes.sh`, byte for byte, with CRLF
-stripped and the executable bit set.
+Files are neither nested nor renamed: `10-site-routes.sh` in this directory
+arrives as `/var/lib/manet-user-scripts/10-site-routes.sh` byte for byte, with
+CRLF stripped and the executable bit set.
 
-Two more files belong to the machinery rather than to your scripts:
-`/usr/local/bin/manet-user-scripts.sh` (the runner) and
-`/etc/systemd/system/manet-user-scripts.service` (the one-shot unit). Both arrive in
-the install tarball, not from this directory.
+Two further files implement the mechanism rather than belonging to it:
+`/usr/local/bin/manet-user-scripts.sh` and
+`/etc/systemd/system/manet-user-scripts.service`. Both are delivered by the
+install tarball, not from this directory.
 
 ## Naming and order
 
@@ -100,9 +101,9 @@ editor works.
 
 ## Data files
 
-There is no `data/` directory, and none is needed. A quoted heredoc carries any
-text verbatim, **including a heredoc nested inside your script**, so small data
-lives next to the code that uses it:
+There is no separate `data/` directory. A quoted heredoc carries any text
+verbatim, **including a heredoc nested inside the script**, so small data files
+can be written by the script that uses them:
 
 ```bash
 #!/bin/bash
@@ -120,13 +121,14 @@ curl -fsSL --retry 3 https://files.example.org/bundle.tar.gz -o /tmp/b.tar.gz
 tar xzf /tmp/b.tar.gz -C /opt
 ```
 
-The node confirms internet connectivity during provisioning, so it has a
-working path by the time your scripts run. Fetching also keeps the payload off
-the boot partition — see the warning below.
+The node confirms internet connectivity during provisioning, so a working path
+exists by the time these scripts run. Fetching also keeps the payload off the
+boot partition; see the warning below.
 
-Embedded scripts warn above **256 KB** total and are refused above **2 MB**.
-Neither is a limit of `rpi-imager` or FAT32; they are there because a payload
-that big wants to be fetched, not baked.
+Embedded scripts produce a warning above **256 KB** in total and are refused
+above **2 MB**. Neither figure is a limit imposed by `rpi-imager` or FAT32. They
+are set because a payload of that size is better retrieved at run time than
+embedded in the image.
 
 ## Do not put secrets in here
 
@@ -134,16 +136,17 @@ that big wants to be fetched, not baked.
 deleted**, and it tees its own log to `/boot/firmware/firstrun.log`. Anyone who
 pulls the eMMC or SD card and puts it in a laptop reads everything in it.
 
-The card is already a credential — the `radio` and admin passwords are baked in
-the clear — but a node password can be rotated. A site CA private key or a
-long-lived client certificate cannot be un-leaked. Fetch those at run time over
-an authenticated channel, or provision them out of band.
+The card already carries credentials: the `radio` and admin passwords are
+written to it in the clear. A node password can be rotated after exposure,
+whereas a site CA private key or a long-lived client certificate cannot.
+Retrieve those at run time over an authenticated channel, or provision them out
+of band.
 
 ## Failures
 
 Failures are **advisory**. A script that exits non-zero is recorded and
-reported; it never marks the node unprovisioned, because a broken site hook
-must not make a working mesh node claim it failed to set itself up.
+reported, but never marks the node unprovisioned: a failing site hook must not
+cause a functioning mesh node to report a failed setup.
 
 On the node:
 
@@ -153,17 +156,18 @@ cat /var/log/manet-user-scripts.log
 sudo manet-user-scripts.sh --force  # re-run everything
 ```
 
-You can also add a script to a node directly, by dropping it in
-`/var/lib/manet-user-scripts/` and running the runner. The same rules apply there — the
-runner re-checks the shebang and the `.disabled`/`.bak`/`.orig`/`~` suffixes itself, so
-a config file copied in beside your scripts is skipped rather than executed. (Without
-that check it *would* run: `exec` of a file with no shebang does not fail, the kernel
-refuses it and the shell falls back to interpreting it.)
+Scripts can also be added to a node directly by placing them in
+`/var/lib/manet-user-scripts/` and invoking `manet-user-scripts.sh`. The same
+rules apply: the shebang requirement and the `.disabled`, `.bak`, `.orig` and
+`~` suffixes are re-checked on the node, so a configuration file placed
+alongside the scripts is skipped rather than executed. Without that check it
+would be executed, because a file with no shebang does not fail to run — the
+kernel refuses it and the shell falls back to interpreting it.
 
 The SSH login banner reports the outcome next to the provisioning line:
 
 ```
-  MANET node provisioned (v0.542), 4m 12s ago
+  MANET node provisioned (v0.543), 4m 12s ago
   Setup scripts  : 2 of 3 ran, 1 FAILED
      ! 20-org-ssh-keys.sh            exit 1
      log: /var/log/manet-user-scripts.log
@@ -172,7 +176,6 @@ The SSH login banner reports the outcome next to the provisioning line:
 Each script gets **300 seconds** by default, then it is killed. Change it per
 node with `user_script_timeout=` in `/etc/mesh.conf`.
 
-A script that is cut off by a power loss part-way through the set is re-run on
-the next boot; the ones that already completed are not. A script that ran and
-*failed* has had its turn — it is not retried automatically. `--force` is the
-way back.
+A script interrupted by power loss part-way through the set is re-run on the
+next boot; those that already completed are not. A script that ran and failed
+is not retried automatically — use `--force` to run the set again.

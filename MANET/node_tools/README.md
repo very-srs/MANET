@@ -192,7 +192,7 @@ and differs only by port — channel *n* uses `38801 + (n-1)*2`, the stride bein
 changing channel never causes an IGMP leave/join.
 
 **Unicast redundancy: off by default — batman-adv already does it.** With
-`multicast_forceflood` disabled (our configuration) and listeners at or below
+`multicast_forceflood` disabled, as this node configures it, and listeners at or below
 `multicast_fanout` (default 16), `batadv_mcast_forw_mode_by_count()` returns
 `BATADV_FORW_UCASTS` and emits **one unicast frame per listener**. Measured on
 the bench: 200 multicast packets produced exactly 200 unicast frames addressed
@@ -252,8 +252,8 @@ frame. Measured on a CM4 with lyra, 3.00 s bursts:
 Only a source `rtpbin` has already seen costs nothing. Blocking the pad during
 construction, lowering RTP source probation, and raising the mixer's
 `min-upstream-latency` were each tried and none of them helped — the residual
-is `rtpbin` establishing a new source, not our linking, so the fix is to make
-sure the source is not new.
+is `rtpbin` establishing a new source rather than the pipeline linking, so the
+fix is to ensure the source is not new.
 
 The consequence is that a talker's *first* transmission after this node starts
 still loses about 80–180 ms, and every one after that is clean. In practice
@@ -292,15 +292,15 @@ before anything is said.
 Beacons are **event driven, not a heartbeat**. There is nothing to refresh —
 `autoremove=false` means a source is never forgotten — so one is sent at
 start-up (announcing this run's generation) and whenever a node appears in the
-registry that cannot have heard us yet. `voice_beacon_sec` (default 600) is
+registry that cannot yet have heard this node. `voice_beacon_sec` (default 600) is
 only a safety net for a peer whose arrival was somehow missed, and 0 disables
 it. That is about **21 packets an hour, ~5 bps averaged**, against 420/hour at
 the 30 s heartbeat this replaced.
 
 **Synthesising a source locally from the registry does not work — it is worse
-than doing nothing.** It is the obvious idea: we already know every peer's
-address, so inject a packet with their SSRC and pre-fill the slot. Measured, it
-does create the slot, and then it destroys the stream. Our invented sequence
+than doing nothing.** Every peer's address is already known, so the apparent
+solution is to inject a packet with their SSRC and pre-fill the slot. Measured,
+it does create the slot, and then it destroys the stream. The injected sequence
 numbers and timestamps become the source's base; the real sender's do not
 match; the jitter buffer resyncs and discards. The peer talked for three
 seconds and the output was **digital silence, peak amplitude zero**, with
@@ -380,8 +380,8 @@ Going 1 → 2 frames/packet takes **43 %** off the wire. Dropping the codec from
 6000 to 3200 bps takes **12 %** off (23.2 → 20.4 kbps at 40 ms) and is plainly
 audible. So bitrate stays fixed and packing moves.
 
-The direction is the counter-intuitive part: **under loss we packetise
-smaller.** A lost packet takes `frames-per-packet` frames with it, and the
+The direction is the opposite of the intuitive one: **under loss, packetisation
+gets smaller.** A lost packet takes `frames-per-packet` frames with it, and the
 audibility knee sits exactly in this range, so the loss response spends airtime
 to keep each loss short enough for Lyra's concealment to hide. That is only
 safe while loss means fades rather than congestion — on a saturated link,
@@ -391,7 +391,7 @@ under 2 Mbit/s.
 
 Loss above 5 % steps down immediately; recovery needs 30 s below 1 % per step,
 and anything in between holds position. Windows with fewer than 25 packets are
-ignored rather than treated as clean. The signal is our *own* receive loss —
+ignored rather than treated as clean. The signal is this node's *own* receive loss —
 plain multicast RTP has no back channel — which half duplex makes a fair proxy,
 since it measures the same link in the other direction moments before keying
 up. An asymmetric link will fool it.
@@ -442,8 +442,8 @@ Hence the default of 48. The `return` guard also means an explicitly-set
 `SO_PRIORITY` in 256–263 survives batman-adv, which is how OpenMANET pins the
 access category — they set `IP_TOS` and `SO_PRIORITY` together, in that order,
 because the kernel rewrites `sk_priority` as a side effect of `IP_TOS`.
-GStreamer's `multiudpsink` exposes only `qos-dscp`, so we rely on batman-adv's
-derivation instead — which is why the DSCP value has to be chosen for what
+GStreamer's `multiudpsink` exposes only `qos-dscp`, so batman-adv's derivation
+is relied on instead — which is why the DSCP value has to be chosen for what
 batman-adv will make of it.
 
 Multicast TTL is set explicitly to 32: the default of 1 silently black-holes
@@ -1066,55 +1066,54 @@ interleaved into an unreadable file.
 
 **manet-user-scripts.sh**
 
-Runs the operator's own setup scripts — whatever they put in
-`MANET/provisioning/additional-scripts/` at flash time. Those files are baked
-into `firstrun.sh` as one quoted heredoc each and written to
-`/var/lib/manet-user-scripts/` on the first boot; this runs them **once**, from
-`manet-user-scripts.service`, which `radio-setup.sh` enables and starts as its
-last act.
+Runs the operator's setup scripts — the files placed in
+`MANET/provisioning/additional-scripts/` before flashing. They are embedded in
+`firstrun.sh` as one quoted heredoc each and written to
+`/var/lib/manet-user-scripts/` on the first boot. This script runs them **once**,
+under `manet-user-scripts.service`, which `radio-setup.sh` enables and starts
+after provisioning completes.
 
-Three reasons it is not just a few lines at the end of `radio-setup.sh`:
+Behaviour:
 
-- **radio-setup must not be at the mercy of operator code.** It is the script
-  that decides whether a node is provisioned at all. A user script that hangs,
-  reboots, or exits non-zero inside it would take provisioning with it. The
-  unit is started `--no-block`, so systemd owns the run from there.
-- **These run once per node, not per radio-setup.** `radio-setup.sh` is
-  explicitly re-runnable to apply new mesh settings; a site hook that adds a
-  route or installs a package is not.
-- **A one-shot unit survives a power pull.** If the board loses power part-way
-  through the set, the completion marker was never written and the next boot
-  resumes from the script that was cut off — the ones that already finished are
-  recorded individually and not repeated.
+- Scripts run as root, in `LC_ALL=C` filename order, with the working directory
+  `/` and stdin on `/dev/null`.
+- Each is allowed 300 s, overridable with `user_script_timeout=` in
+  `/etc/mesh.conf`. That key is read with `sed` rather than sourced, because
+  `mesh.conf` is operator-editable and its contents must not be executed as
+  shell.
+- Candidates are every regular file in the directory except dotfiles, the
+  `.disabled`, `.bak`, `.orig` and `~` suffixes, and any file without `#!` on
+  line one.
+- Exit codes are appended to `/var/lib/manet-user-scripts.state` as
+  `name<TAB>exit<TAB>epoch`, one line per completed script. Output goes to
+  `/var/log/manet-user-scripts.log`, appended rather than truncated.
+- `--list` reports what is staged and what has run. `--force` re-runs
+  everything, discarding previous state.
 
-Failures are **advisory** and deliberately touch nothing in
-`/var/lib/manet-provision.*`. A broken site hook must not make a working mesh
-node report itself unprovisioned. Exit codes are recorded in
-`/var/lib/manet-user-scripts.state` (`name<TAB>exit<TAB>epoch`) and
-`manet-provision-status.sh` prints the tally, and names any failures, on the
-login banner. The runner always exits 0 for the same reason.
+The service is separate from `radio-setup.sh` for three reasons. Operator code
+cannot be allowed to affect the script that determines whether a node is
+provisioned, so the unit is started with `--no-block` and systemd owns the run.
+`radio-setup.sh` is re-runnable to apply new mesh settings, whereas a site hook
+that adds a route or installs a package is not. And a one-shot unit tolerates
+an interrupted run: completion is recorded per script, so a board that loses
+power part-way through resumes at the script that was cut off rather than
+repeating the ones that finished.
 
-Each script gets 300 s, overridable with `user_script_timeout=` in
-`/etc/mesh.conf` — read with `sed`, not sourced, because `mesh.conf` is
-operator-editable and a stray line must not execute as shell. Scripts run in
-`LC_ALL=C` order from `/`, with stdin on `/dev/null` so one that blocks on
-`read` fails immediately instead of burning its whole timeout.
+Failures are advisory. Nothing here writes to `/var/lib/manet-provision.*`, so
+a failing operator script cannot cause a working node to report itself
+unprovisioned, and the runner always exits 0 for the same reason.
+`manet-provision-status.sh` reports the tally and names any failures on the
+login banner. A script that ran and failed is not retried; only an interrupted
+one is.
 
-`--list` shows what is staged and what has run; `--force` re-runs everything.
-Log: `/var/log/manet-user-scripts.log`, appended, never truncated.
+The shebang requirement applies on the node as well as at flash time. The
+flasher never embeds a file without one, so the test only affects scripts
+copied onto a live node by hand — but it is required there, because executing a
+file with no shebang does not fail. The kernel refuses it and the shell falls
+back to interpreting it, so a configuration file whose lines happen to parse as
+shell would run and report success.
 
-A script that ran and *failed* has had its turn and is not retried
-automatically. Only an interrupted one is.
-
-Candidates are every regular file in the directory except dotfiles and
-`.disabled`/`.bak`/`.orig`/`~` suffixes, **and except anything without a `#!` on line
-one**. That last test matters only for the hand-copy path, since the flasher never
-embeds a file without a shebang — but it matters there, because exec'ing a file with no
-shebang does not fail: the kernel refuses it and bash falls back to interpreting it as a
-shell script, so a dropped-in config file whose lines happen to parse as shell would run
-and report success.
-
-Flash-time validation lives in the flashers, not here — see
+Flash-time validation is performed by the flashers rather than here; see
 [additional-scripts/README.md](../provisioning/additional-scripts/README.md).
-The checks in this script are a second line of defence, and cover files an
-operator dropped onto a live node by hand.
+The checks in this script cover the files that reach the directory without
+passing through a flasher.
