@@ -29,14 +29,14 @@ proven on a bench pair.
 - [x] Region-aware HaLow channel and bandwidth selection
 
 #### 🧪 In Testing
-- [ ] Mumble Server
+- [ ] Mumble Server - server launches, migration not tested
 - [ ] Automatic channel selection
 - [ ] Partition healing (tourguide) and limp mode
 - [ ] In mesh NTP
 - [ ] Push-to-talk voice over the mesh (Lyra codec) — needs a mic preamp for a dynamic-mic headset
 - [ ] Operator setup scripts run once at first boot — the node-side runner is verified, the flash-time half needs a reflash
-- [ ] Over-the-air tools update on Ethernet carrier — the gate that enables it ships only in an install tarball, so a node needs one reflash before it can self-update
-- [ ] Self-rollback after a mesh key or SSID change — a healthy pair has no reason to trigger it
+- [ ] Over-the-air tools update on Ethernet carrier — works manually, testing on carrier
+- [ ] Self-rollback after a mesh key or SSID change
 
 #### 📅 Future Work
 - [ ] Further reduction in network traffic
