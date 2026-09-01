@@ -352,13 +352,14 @@ The `firstrun.sh` script runs on the very first boot (injected by `rpi-imager`).
 After a reboot, `provision-mesh.sh` runs once network is available. It:
 
 1. Waits for internet connectivity (up to 5 minutes)
-2. Sets the Wi-Fi regulatory domain
-3. Calculates a unique hostname from the node's MAC address
-4. Installs required packages (`batctl`, `wpa_supplicant`, etc.)
-5. Configures network interfaces, mesh settings, and DHCP
-6. Disables itself and reboots into the final mesh configuration
+2. Downloads the kernel and mesh orchestration tools
+3. Sets the Wi-Fi regulatory domain
+4. Calculates a unique hostname from the node's MAC address
+5. Installs required packages (`batctl`, `wpa_supplicant`, etc.)
+6. Configures network interfaces, mesh settings, and DHCP
+7. Disables itself and reboots into the final mesh configuration
 
-The full process takes a few minutes and involves two reboots.
+The full process takes a few minutes (up to ten with slow internet) and involves two reboots.
 
 ### Rock 3A
 
