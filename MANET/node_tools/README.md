@@ -490,6 +490,16 @@ the payload length alone and follows a mid-stream change with no renegotiation.
 Verified on hardware — switching 2 → 1 → 3 → 2 while playing produced 27/42/57
 byte payloads and 1001 frames decoded against 1000 sent.
 
+**The mic input expects an electret.** The CM108B biases `MIC+` through its own
+network, which suits the electret capsule in a commercial headset. A **dynamic**
+element — as fitted to NATO-wired military headsets — is roughly 25 dB quieter and
+has no internal amplifier, so it sits at or below the input's own noise floor and
+no mixer or EEPROM setting recovers it. Such a headset needs an external preamp
+between the element and `MIC+`. Two further points apply once one is fitted: turn
+capture AGC **off**, since it winds gain up chasing a quiet source and costs about
+24 dB of noise floor, and keep the analog sidetone at its minimum, or the added
+gain closes an acoustic loop between the earpiece and a boom microphone.
+
 **PTT is USB, not GPIO.** The OpenVLM board is a C-Media CM108B; the switch
 lands on the *codec's* GPIO3 and is read from USB HID input reports on
 `/dev/hidraw*` — bit 2 of IR1, valid only when `IR0[7:6] == 0`. Bit 0 of IR1 is

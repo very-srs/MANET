@@ -264,8 +264,11 @@ If yes, a Mumble voice server will be available on the mesh at the address endin
 
 Push-to-talk voice over the mesh, using a headset and PTT switch plugged into
 the node itself — not a browser. Defaults to **no**, because it needs an
-OpenVLM (C-Media CM108B) board fitted for the mic amp and PTT switch; a node
-without one would run the daemon to no purpose.
+OpenVLM (C-Media CM108B) board fitted for the headset audio and PTT switch; a
+node without one would run the daemon to no purpose. A headset with a **dynamic**
+microphone needs an external mic preamp between the element and the OpenVLM's
+`MIC+` — the CM108B mic input is built for an electret and a dynamic element
+sits at or below its own noise floor.
 
 **Talk group is not asked here.** Every node is flashed on group 1, and the
 operator changes it from the VOICE tab of the web UI — it is a per-radio
