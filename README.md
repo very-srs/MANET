@@ -69,7 +69,7 @@ See [/provisioning/README.md](MANET/provisioning/README.md) for detailed require
 4.  *(Optional)* Place site-specific setup scripts in
     `provisioning/additional-scripts/`. They are validated before anything is written
     to the card, embedded in the image, and run **once as root on the node** after the
-    mesh is up — for static routes, organisation SSH keys, or additional packages. See
+    mesh is up — for static routes, organization SSH keys, or additional packages. See
     [Additional setup scripts](MANET/provisioning/additional-scripts/README.md).
 
 ### 3. First Boot
@@ -117,7 +117,7 @@ the whole mesh at once, plus the HaLow channel.
 ![Radio configuration tab](docs/images/webui/manage-radio-config.png)
 
 **Measure** — run iperf3 and ping between any pair of nodes, in either direction, and
-save the results against a labelled session so field tests can be compared later.
+save the results against a labeled session so field tests can be compared later.
 
 ![Measurement tab](docs/images/webui/manage-measure.png)
 
