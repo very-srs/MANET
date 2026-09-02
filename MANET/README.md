@@ -44,7 +44,7 @@ proven on a bench pair.
 - [ ] Further reduction in network traffic
 - [ ] Enclosure selection
 - [ ] Physical interaction (buttons, knobs) — the button and LED scripts are in
-      the tree but exit immediately, since the pin wiring is not finalised. Planned as
+      the tree but exit immediately, since the pin wiring is not finalized. Planned as
       a dual rotary encoder for power, talk group and headset volume. Talk-group
       switching already works from a script: write `voice_channel` to `/etc/mesh.conf`
       and send `mesh-voice` a SIGHUP, which retunes in place rather than restarting
