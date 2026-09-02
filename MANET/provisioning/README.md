@@ -153,7 +153,7 @@ bash linux.sh
 ### Windows: step by step
 
 Windows blocks PowerShell scripts by default, so there are two things to do before
-`windows.ps1` will start. This is normal Windows behaviour, not a fault in the script.
+`windows.ps1` will start. This is normal Windows behavior, not a fault in the script.
 
 #### 1. Open PowerShell as Administrator
 
@@ -319,7 +319,7 @@ this: it validates the contents of the directory and reports what will be
 embedded before writing to the card.
 
 The directory is intended for site-specific configuration outside the scope of
-the mesh build — static routes, organisation SSH keys, additional packages, or
+the mesh build — static routes, organization SSH keys, additional packages, or
 a site daemon.
 
 ```

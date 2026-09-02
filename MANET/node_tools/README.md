@@ -58,7 +58,7 @@ meshes with it there — and only then do the two run a joint election and migra
 together. One node's view of the RF is not a consensus, and a node that elected
 alone then had to tourguide back to the lobby every two minutes to stay
 findable. Parking costs a solo radio nothing, since there is no mesh link to
-optimise. A whole-site cold start is unaffected: every node powers on into the
+optimize. A whole-site cold start is unaffected: every node powers on into the
 lobby and meshes with the others there, so each one sees peers and they
 bootstrap together, which is the case the lobby dwell was built for.
 
@@ -92,7 +92,7 @@ something at that path before `radio-setup.sh` has chosen a variant.
 
 The `acs=` test accepts `y`/`yes`/`1`/`true` case-insensitively. It compared
 against `"Y"` alone until 2026-08-31, and every writer produces lowercase — both
-flashers normalise the answer, the web UI writes `'y':'n'`, and
+flashers normalize the answer, the web UI writes `'y':'n'`, and
 `mesh-config-sync.py` validates the key as exactly `y` or `n` — so `acs=y`
 selected the static variant on every node and the ACS orchestrator never ran.
 
@@ -115,7 +115,7 @@ Open routes (no password):
   channel info).
 - `/api/peer/<ip>` — JSON: one peer's detail panel, assembled by
   `manet_peer_radios.py`. Fetched by the status page when a node is expanded.
-- `/api/debug` — JSON: raw `batctl` originator, neighbour and gateway output
+- `/api/debug` — JSON: raw `batctl` originator, neighbor and gateway output
   alongside the registry's MAC/hostname mapping. A diagnostic dump; nothing in
   the UI calls it.
 
@@ -143,7 +143,7 @@ Access control has two layers:
 
 Link quality shown here is BATMAN_V's metric, which is **throughput in Mbit/s**,
 not a 0-255 link quality — `batctl` prints e.g. `43.2` for a 43.2 Mbit/s link.
-Colour thresholds are 30 / 15 / 5 Mbit/s, chosen so a healthy HaLow link (which
+Color thresholds are 30 / 15 / 5 Mbit/s, chosen so a healthy HaLow link (which
 tops out near 43 Mbit/s at 8 MHz) reads as good.
 
 Data sources:
@@ -189,7 +189,7 @@ bandwidth and S1G operating-class tables are transcribed from the Morse driver's
 defines a channel of that width — which is why **EU stops at 2 MHz** (the whole
 863–868 MHz allocation is too narrow for more) while **US reaches 8 MHz**.
 `halow_channel_options()` builds the menu the Radio config tab renders, so an
-EU node is never offered a width it cannot use. Channel numbers and centre
+EU node is never offered a width it cannot use. Channel numbers and center
 frequencies are both unique within a region, so either resolves the other:
 `halow_bandwidth_for_channel()` recovers the width from the channel number,
 which is how the status readout avoids `s1g_prim_chwidth` — that reports the
@@ -296,7 +296,7 @@ rewritten live from the registry rather than from learned senders, because in a
 PTT system a node that has never transmitted is exactly the one that needs to
 hear you.
 
-**Receivers must join the group or nothing transmits.** The same optimisation
+**Receivers must join the group or nothing transmits.** The same optimization
 means `batadv_mcast_forw_mode()` returns `BATADV_FORW_NONE` — dropping the
 packet at the *sender* — when no node has announced interest in the group. This
 was observed directly: multicast sent with no listener never reached the radio
@@ -311,7 +311,7 @@ demultiplexes by SSRC and gives every talker their own jitter buffer, and
 conference bridge behaves. Nobody is hot-miked: the valve stays shut until the
 button is pressed. What is gone is the software lockout on talking over
 someone; that is etiquette now, like any conference bridge.
-`voice_half_duplex=y` restores the refuse-to-key behaviour if you want it.
+`voice_half_duplex=y` restores the refuse-to-key behavior if you want it.
 
 This is not just a policy change. A single `rtpjitterbuffer` cannot do it — two
 senders' sequence numbers interleave in one buffer and the output is garbage.
@@ -385,7 +385,7 @@ only a safety net for a peer whose arrival was somehow missed, and 0 disables
 it. That is about **21 packets an hour, ~5 bps averaged**, against 420/hour at
 the 30 s heartbeat this replaced.
 
-**Synthesising a source locally from the registry does not work — it is worse
+**Synthesizing a source locally from the registry does not work — it is worse
 than doing nothing.** Every peer's address is already known, so the apparent
 solution is to inject a packet with their SSRC and pre-fill the slot. Measured,
 it does create the slot, and then it destroys the stream. The injected sequence
@@ -419,7 +419,7 @@ the VOICE tab posts to `/api/voice/codec`, which calls
 `coordinate_radio_change({'voice_codec': ...})` — the same two-phase path as a
 HaLow channel or WPA key change. The package is staged over Alfred, every node
 ACKs it, and only then is `activate_at` set ~20 s out so the whole fleet
-switches on a common clock. If any node fails to ACK, the change is cancelled
+switches on a common clock. If any node fails to ACK, the change is canceled
 and nothing moves: staying wholly on the old codec is always better than
 splitting the mesh in half. On activation each node runs
 `apply_voice_codec()` (in `manet_radio.py`), which rewrites `voice_codec` in
@@ -468,13 +468,13 @@ Going 1 → 2 frames/packet takes **43 %** off the wire. Dropping the codec from
 6000 to 3200 bps takes **12 %** off (23.2 → 20.4 kbps at 40 ms) and is plainly
 audible. So bitrate stays fixed and packing moves.
 
-The direction is the opposite of the intuitive one: **under loss, packetisation
+The direction is the opposite of the intuitive one: **under loss, packetization
 gets smaller.** A lost packet takes `frames-per-packet` frames with it, and the
 audibility knee sits exactly in this range, so the loss response spends airtime
 to keep each loss short enough for Lyra's concealment to hide. That is only
 safe while loss means fades rather than congestion — on a saturated link,
 offering more packets makes it worse — so the controller will not go below 2
-frames/packet when batman-adv's throughput estimate for the worst neighbour is
+frames/packet when batman-adv's throughput estimate for the worst neighbor is
 under 2 Mbit/s.
 
 Loss above 5 % steps down immediately; recovery needs 30 s below 1 % per step,
@@ -484,7 +484,7 @@ plain multicast RTP has no back channel — which half duplex makes a fair proxy
 since it measures the same link in the other direction moments before keying
 up. An asymmetric link will fool it.
 
-No signalling is needed for any of this: Lyra frames are a fixed size per
+No signaling is needed for any of this: Lyra frames are a fixed size per
 bitrate (8/15/23 bytes), so `rtplyradepay` recovers the packet geometry from
 the payload length alone and follows a mid-stream change with no renegotiation.
 Verified on hardware — switching 2 → 1 → 3 → 2 while playing produced 27/42/57
@@ -606,7 +606,7 @@ metric across that node's originators, in Mbit/s. Stale nodes (not seen within
 10 minutes) are excluded. Ties are broken deterministically by MAC address.
 
 This field used to be called `TQ_AVERAGE`, which was wrong: BATMAN_V's metric is
-throughput, not a 0-255 link quality. The behaviour never changed — highest
+throughput, not a 0-255 link quality. The behavior never changed — highest
 wins either way — but the name misled, so it now says what it holds.
 
 **mediamtx-election.sh**
@@ -697,7 +697,7 @@ stays put. Both tourguides run the comparison in the same window and each sees
 the other's MAC, so exactly one moves. The tie-break is deliberately not the
 config string: deciding a split by channel number biases every equal-size merge
 toward the numerically lower pair, and can pull a node straight back onto the
-channel it fled. Identity is neutral, and the next election re-optimises the
+channel it fled. Identity is neutral, and the next election re-optimizes the
 channel once both sides are talking again.
 
 **ethernet-autodetect.sh**
@@ -781,7 +781,7 @@ per-interface MACs. Usage: `mac-to-ip.sh aa:bb:cc:dd:ee:ff`
 Mean of BATMAN_V's metric across this node's originators, in Mbit/s — published
 as `MEAN_THROUGHPUT_MBPS` and used by the service elections.
 
-Reads the parenthesised value, never a positional field: `batctl o` shifts
+Reads the parenthesized value, never a positional field: `batctl o` shifts
 columns on the selected route (prefixed `*`), so `$3` is the last-seen timestamp
 there and `(` on the others. Averaging `$3`, as this did until 2026-08-16,
 produced 0.14 on a mesh running at 43 Mbit/s. Keeps the best path per
@@ -1076,9 +1076,9 @@ spinning.
 
 **led-boot.sh** / **led-info.sh**
 
-Boot-progress LED states, and an on-demand neighbour-count blink sequence.
+Boot-progress LED states, and an on-demand neighbor-count blink sequence.
 Both need libgpiod **v2** syntax and both exit 0 immediately if the configured
-GPIO chip does not exist — the pin wiring is not finalised, so on current
+GPIO chip does not exist — the pin wiring is not finalized, so on current
 hardware they are expected to be inactive.
 
 ---
@@ -1255,7 +1255,7 @@ Runs the operator's setup scripts — the files placed in
 under `manet-user-scripts.service`, which `radio-setup.sh` enables and starts
 after provisioning completes.
 
-Behaviour:
+Behavior:
 
 - Scripts run as root, in `LC_ALL=C` filename order, with the working directory
   `/` and stdin on `/dev/null`.
@@ -1313,7 +1313,7 @@ no hardware and no node:
 
 | File | Covers |
 |------|--------|
-| `test_halow_plan.py` | The region HaLow plan in `manet_radio.py`: EU capping at 2 MHz and US reaching 8, channel numbers and centre frequencies unique within a region and resolving each other, every region/bandwidth pair carrying an operating class, an unknown region falling back to EU, and a channel or bandwidth the region does not have being refused |
+| `test_halow_plan.py` | The region HaLow plan in `manet_radio.py`: EU capping at 2 MHz and US reaching 8, channel numbers and center frequencies unique within a region and resolving each other, every region/bandwidth pair carrying an operating class, an unknown region falling back to EU, and a channel or bandwidth the region does not have being refused |
 | `test_mesh_config.py` | The local/mesh key split in `mesh_config.py`: EUD and AP keys never reaching Alfred, mesh keys still going, only values that differ from `mesh.conf` counting as changes, and `max_euds_per_node` never being written |
 | `test_peer_radios.py` | The peer radio chips in `manet_peer_radios.py`: frequency-to-channel conversion, published `INTERFACES_JSON` winning over the registry fallback, the fallback filling in when it is empty, and the channel fields surviving an encode/decode round trip |
 
