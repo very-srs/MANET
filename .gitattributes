@@ -34,6 +34,7 @@ MANET/node_tools/morse_cli binary
 MANET/node_tools/chronyc binary
 MANET/binaries_arm64/alfred binary
 MANET/binaries_arm64/batctl binary
+MANET/binaries_arm64/openvlm binary
 MANET/binaries_arm64/chronyc binary
 MANET/binaries_arm64/wpa_cli_s1g binary
 MANET/binaries_arm64/wpa_supplicant_s1g binary

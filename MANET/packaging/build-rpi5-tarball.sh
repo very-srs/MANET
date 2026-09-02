@@ -46,6 +46,7 @@ find "$STAGE/usr/local/bin" -type f \( -name '*.sh' -o -name '*.py' -o -name 'mo
 
 install_file 0755 "$REPO_ROOT/MANET/binaries_arm64/alfred" "$STAGE/usr/sbin/alfred"
 install_file 0755 "$REPO_ROOT/MANET/binaries_arm64/batctl" "$STAGE/usr/sbin/batctl"
+install_file 0755 "$REPO_ROOT/MANET/binaries_arm64/openvlm" "$STAGE/usr/sbin/openvlm"
 install_file 0755 "$REPO_ROOT/MANET/binaries_arm64/wpa_cli_s1g" "$STAGE/usr/sbin/wpa_cli_s1g"
 install_file 0755 "$REPO_ROOT/MANET/binaries_arm64/wpa_supplicant_s1g" "$STAGE/usr/sbin/wpa_supplicant_s1g"
 
