@@ -44,7 +44,7 @@ You will need:
 | Tool | Purpose | Install |
 |------|---------|---------|
 | `rpi-imager` | Flashing Raspberry Pi boards | [Download Installer](https://downloads.raspberrypi.com/imager/imager_latest.exe) |
-| `rpiboot` | Mounting CM4 eMMC | [usbboot releases](https://github.com/raspberrypi/usbboot/releases) — CM4 only |
+| `rpiboot` | Mounting CM4 eMMC | [usbboot releases](https://github.com/raspberrypi/usbboot/releases) (CM4 only) |
 | Ext2Fsd | Mounting ext4 partitions for Rock 3A | Required for Rock 3A provisioning |
 
 > **Finding these tools:** `windows.ps1` does not assume they are on the C: drive. It
@@ -55,7 +55,7 @@ You will need:
 >
 > A wrong answer cannot get stuck. Pointing at something that is clearly not the right
 > program (`notepad.exe`, say) is used for that run only and never saved, and a saved
-> location that then fails to flash is dropped automatically — the next run searches
+> location that then fails to flash is dropped automatically; the next run searches
 > again, and only asks you if the search still comes up empty. Deleting
 > `.mesh-configs\tool-paths.json` clears every saved location.
 
@@ -63,17 +63,17 @@ You will need:
 > does. Connect the module in USB-boot mode when prompted; the script then reports which
 > disk appeared so you can pick the right one.
 
-> **Rock 3A on Windows — password hashing:** The script pre-creates the `radio` user by writing directly to `/etc/shadow`, which requires generating a Linux SHA-512 password hash on your Windows machine. The script tries `openssl` (available if Git for Windows is installed), then WSL, then Python. If none of these are available the `radio` account will be created with a locked password — you can still log in as `root` (password `1234`) and run `passwd radio` to set it manually. Having Git for Windows installed is the easiest way to satisfy this.
+> **Rock 3A on Windows (password hashing):** The script pre-creates the `radio` user by writing directly to `/etc/shadow`, which requires generating a Linux SHA-512 password hash on your Windows machine. The script tries `openssl` (available if Git for Windows is installed), then WSL, then Python. If none of these are available the `radio` account will be created with a locked password; you can still log in as `root` (password `1234`) and run `passwd radio` to set it manually. Having Git for Windows installed is the easiest way to satisfy this.
 
 ### Files needed from this directory
 
 Clone or download the entire `provisioning/` directory to your working folder. The scripts require these files to be present alongside them:
 
-- `linux.sh` — flashing script for Linux hosts
-- `windows.ps1` — flashing script for Windows hosts
-- `firstrun.sh.template` — Raspberry Pi first-boot script template
-- `rock3a-provision.sh.template` — Rock 3A first-boot provisioning script template
-- `additional-scripts/` — optional; your own setup scripts, baked into the
+- `linux.sh`: flashing script for Linux hosts
+- `windows.ps1`: flashing script for Windows hosts
+- `firstrun.sh.template`: Raspberry Pi first-boot script template
+- `rock3a-provision.sh.template`: Rock 3A first-boot provisioning script template
+- `additional-scripts/`: optional; your own setup scripts, baked into the
   image and run once on the node after setup completes. Empty is fine. See
   [additional-scripts/README.md](additional-scripts/README.md).
 
@@ -81,7 +81,7 @@ Clone or download the entire `provisioning/` directory to your working folder. T
 
 `linux.sh` and `windows.ps1` bake mesh settings into the image by substituting
 `__TOKEN__` placeholders in those templates at flash time. Edit the templates
-using the tokens, not concrete values — a leftover `__MESH_SSID__` in a flashed
+using the tokens, not concrete values; a leftover `__MESH_SSID__` in a flashed
 image means the substitution list in the flasher was not updated.
 
 Tokens (same set on Linux and Windows):
@@ -120,7 +120,7 @@ abort rather than produce an image whose scripts have no effect.
 
 - **Raspberry Pi (all models, including CM4):** `rpi-imager` downloads the correct Raspberry Pi OS Lite image directly from the Raspberry Pi Foundation's servers and caches it locally.
 
-- **Rock 3A:** The script will offer to download the correct Armbian image automatically. If you already have an Armbian `.img` or `.img.xz` file locally, you can point the script to it instead. The expected image is Armbian Trixie (Debian 13) minimal for the Rock 3A — do not use a generic ARM64 image, it must be the board-specific build.
+- **Rock 3A:** The script will offer to download the correct Armbian image automatically. If you already have an Armbian `.img` or `.img.xz` file locally, you can point the script to it instead. The expected image is Armbian Trixie (Debian 13) minimal for the Rock 3A. Do not use a generic ARM64 image; it must be the board-specific build.
 
 ---
 
@@ -130,12 +130,12 @@ Each node carries two radios: an **MT7916** dual-band card for the 2.4/5 GHz 802
 
 On the CM4 reference platform the HaLow radio can be attached two ways, and the software stack supports both:
 
-- **MM6108 over SPI** (Seeed Wio-WM6108 module on a WM1302 Pi HAT) — covers the **NA 902–928 MHz** band only.
-- **MM8108 over USB** (e.g. Lunpid USB MM8108 dongle) — covers **both NA 902–928 MHz and EU 863–870 MHz**.
+- **MM6108 over SPI** (Seeed Wio-WM6108 module on a WM1302 Pi HAT): covers the **NA 902–928 MHz** band only.
+- **MM8108 over USB** (e.g. Lunpid USB MM8108 dongle): covers **both NA 902–928 MHz and EU 863–870 MHz**.
 
 > **European deployments must use the USB MM8108.** The MM6108 / FGH100M-H module does not operate in the EU 863–870 MHz ISM band.
 
-For the SPI path, provisioning handles the hardware setup automatically: it enables SPI, loads the `mm610x-spi` device-tree overlay, drives the Morse power/reset GPIOs (3, 7, 17) high at boot, and — for the PCIe-attached MT7916 — adds the `pcie-32bit-dma` overlay. No manual `config.txt` editing is required.
+For the SPI path, provisioning handles the hardware setup automatically: it enables SPI, loads the `mm610x-spi` device-tree overlay, drives the Morse power/reset GPIOs (3, 7, 17) high at boot, and, for the PCIe-attached MT7916, adds the `pcie-32bit-dma` overlay. No manual `config.txt` editing is required.
 
 The Raspberry Pi 5 and Rock 3A platforms use an MM8108 USB HaLow adapter (e.g. Gateworks GW16167 or Lunpid) rather than the SPI module.
 
@@ -158,7 +158,7 @@ Windows blocks PowerShell scripts by default, so there are two things to do befo
 #### 1. Open PowerShell as Administrator
 
 Click Start, type `powershell`, then choose **Run as Administrator** from the panel on
-the right. The window title must begin with **Administrator:** — if it does not, the
+the right. The window title must begin with **Administrator:**. If it does not, the
 script refuses to run and tells you so.
 
 ![Choosing Run as Administrator from the Start menu](../../docs/images/provisioning/01-run-as-admin.png)
@@ -221,17 +221,17 @@ runs it for you, and reports which disk appeared so you can pick the right one:
 
 #### 6. Confirm before anything is written
 
-Nothing is written to the card until you type `yes` here. Check the device and size —
-everything on that disk is erased.
+Nothing is written to the card until you type `yes` here. Check the device and size; everything
+on that disk is erased.
 
 ![The final confirmation prompt](../../docs/images/provisioning/06-final-confirmation.png)
 
 The script will:
-1. Ask you to select your hardware platform (Rock 3A, Pi 5, Pi 4B, or CM4 — **select CM4 for the current reference build**)
+1. Ask you to select your hardware platform (Rock 3A, Pi 5, Pi 4B, or CM4; **select CM4 for the current reference build**)
 2. Offer to load a saved configuration or create a new one
 3. Acquire the OS image (download automatically or use a local file)
 4. Ask you to select the target device
-5. Show a final confirmation before writing — **all data on the target will be erased**
+5. Show a final confirmation before writing: **all data on the target will be erased**
 6. Flash and configure the image
 
 > **Saved configs:** The script saves configurations to a `.mesh-configs/` directory so you can re-flash nodes with the same settings quickly.
@@ -248,9 +248,9 @@ The script will ask the following questions. These can also be loaded from a sav
 
 How EUDs connect to this mesh node:
 
-- **Wired** — EUDs connect via Ethernet (or Ethernet-to-USB adapter). No Wi-Fi AP is broadcast. Both 2.4 and 5 GHz radios join the MANET mesh. Connecting the node to an internet-enabled network makes it a mesh gateway.
-- **Wireless** — The node broadcasts a 5 GHz 802.11ax access point at low power (5 dBm) for EUDs to join. Connecting to an upstream network enables gateway mode. Wired EUDs also work.
-- **Auto** — Behaves as Wireless until a wired EUD is detected, then stops broadcasting the AP.
+- **Wired.** EUDs connect via Ethernet (or Ethernet-to-USB adapter). No Wi-Fi AP is broadcast. Both 2.4 and 5 GHz radios join the MANET mesh. Connecting the node to an internet-enabled network makes it a mesh gateway.
+- **Wireless.** The node broadcasts a 5 GHz 802.11ax access point at low power (5 dBm) for EUDs to join. Connecting to an upstream network enables gateway mode. Wired EUDs also work.
+- **Auto.** Behaves as Wireless until a wired EUD is detected, then stops broadcasting the AP.
 
 ### 2. Install MediaMTX Server?
 
@@ -263,21 +263,21 @@ If yes, a Mumble voice server will be available on the mesh at the address endin
 ### 4. Enable mesh PTT voice?
 
 Push-to-talk voice over the mesh, using a headset and PTT switch plugged into
-the node itself — not a browser. Defaults to **no**, because it needs an
+the node itself, not a browser. Defaults to **no**, because it needs an
 OpenVLM (C-Media CM108B) board fitted for the headset audio and PTT switch; a
 node without one would run the daemon to no purpose. A headset with a **dynamic**
 microphone needs an external mic preamp between the element and the OpenVLM's
-`MIC+` — the CM108B mic input is built for an electret and a dynamic element
+`MIC+`; the CM108B mic input is built for an electret and a dynamic element
 sits at or below its own noise floor.
 
 **Talk group is not asked here.** Every node is flashed on group 1, and the
-operator changes it from the VOICE tab of the web UI — it is a per-radio
+operator changes it from the VOICE tab of the web UI. It is a per-radio
 setting like the channel knob on a handheld, not a fleet-build decision, and
 baking it into the image would mean reflashing to change channel.
 
 This writes `voice=` and `voice_channel=1` to `/etc/mesh.conf`.
 `mesh-voice.service` is enabled on every node regardless, but exits immediately
-unless `voice=y` — so answering no here costs nothing, and turning voice on
+unless `voice=y`, so answering no here costs nothing, and turning voice on
 later is a `mesh.conf` edit plus `systemctl start mesh-voice`.
 
 ### 5. Mesh SSID
@@ -298,7 +298,7 @@ The maximum number of end-user devices each node will serve. This controls DHCP 
 
 ### 9. Regulatory Domain
 
-Your country code for Wi-Fi regulatory compliance (e.g. `US`, `GB`, `AU`). A matching HaLow regulatory region is derived from this automatically — see **Radio Hardware** above for the EU band caveat (EU nodes need the USB MM8108).
+Your country code for Wi-Fi regulatory compliance (e.g. `US`, `GB`, `AU`). A matching HaLow regulatory region is derived from this automatically; see **Radio Hardware** above for the EU band caveat (EU nodes need the USB MM8108).
 
 ### 10. Auto Channel Selection
 
@@ -306,8 +306,8 @@ If enabled, nodes negotiate channel selection automatically. If disabled, a fixe
 
 ### 11. Passwords
 
-- **Radio user password** — SSH/login password for the `radio` account on the node.
-- **Admin password** — Gates the management UI at `http://<node>/manage`. Stored
+- **Radio user password.** SSH/login password for the `radio` account on the node.
+- **Admin password.** Gates the management UI at `http://<node>/manage`. Stored
   as `admin_password` in `/etc/mesh.conf`. The status page at `http://<node>/`
   needs no password; everything that can change this node or the mesh does.
 
@@ -319,7 +319,7 @@ this: it validates the contents of the directory and reports what will be
 embedded before writing to the card.
 
 The directory is intended for site-specific configuration outside the scope of
-the mesh build — static routes, organization SSH keys, additional packages, or
+the mesh build: static routes, organization SSH keys, additional packages, or
 a site daemon.
 
 ```
@@ -328,8 +328,8 @@ a site daemon.
    README.md                            SKIP  no #! on line 1
 ```
 
-Scripts may be written in any language a node provides — bash, dash, python3,
-perl, lua or awk — selected by the shebang. Other interpreters must be
+Scripts may be written in any language a node provides (bash, dash, python3,
+perl, lua or awk), selected by the shebang. Other interpreters must be
 installed by an earlier script. Scripts run in filename order, each with a
 300 s limit. Failures are reported
 on the login banner and never mark the node unprovisioned. The full rules,
@@ -381,20 +381,20 @@ After the reboot the node is fully operational.
 
 ---
 
-## FINAL SETUP — `radio-setup.sh`
+## FINAL SETUP: `radio-setup.sh`
 
-`radio-setup.sh` is the last provisioning stage and does most of the node-specific radio and service configuration. The earlier stages enable it to run once on the following boot (via `radio-setup-run-once.service`, after a short delay) — by then the wireless drivers have loaded and the radio interfaces actually exist, which is what this stage depends on. It is the "final mesh configuration" the boot flow above reboots into, and runs on both the Raspberry Pi / CM4 and Rock 3A platforms.
+`radio-setup.sh` is the last provisioning stage and does most of the node-specific radio and service configuration. The earlier stages enable it to run once on the following boot (via `radio-setup-run-once.service`, after a short delay). By then the wireless drivers have loaded and the radio interfaces actually exist, which is what this stage depends on. It is the "final mesh configuration" the boot flow above reboots into, and runs on both the Raspberry Pi / CM4 and Rock 3A platforms.
 
 It performs:
 
 - **Interface detection and naming.** Waits for the wireless PHYs to appear, classifies each interface as 2.4 GHz mesh, 5 GHz mesh, HaLow, or non-mesh (EUD AP), and writes MAC-keyed `.link` files so the names stay stable across reboots. If an interface still needs renaming, it stages a one-shot re-run and reboots once, so the rest of the configuration is written against the final names.
 - **Per-interface supplicant configs.** Writes `wpa_supplicant` mesh-point / SAE configs for the 2.4 and 5 GHz radios and `wpa_supplicant_s1g` (S1G) configs for the HaLow interface, along with the matching `systemd-networkd` link/network files.
 - **HaLow / Morse setup.** Sets the HaLow TX power, writes `/etc/modprobe.d/morse.conf` and the `cfg80211` regulatory domain (including EU handling), and ensures the SPI overlay, Morse power/reset GPIOs, and CM4 `pcie-32bit-dma` settings are present in `config.txt`.
-- **Core services.** Enables and starts the mesh stack — `alfred`, BATMAN-adv (`batman-enslave`), `node-manager`, `radvd`, and `chrony` — plus support services for LED/button handling, SSH recovery, cloned-identity reset, the boot lobby channels, and one-shot time sync.
+- **Core services.** Enables and starts the mesh stack (`alfred`, BATMAN-adv (`batman-enslave`), `node-manager`, `radvd`, and `chrony`) plus support services for LED/button handling, SSH recovery, cloned-identity reset, the boot lobby channels, and one-shot time sync.
 - **Optional services.** Brings up MediaMTX, Mumble, and GPS/NTP (`gpsd`, `gps-reader.service`, chrony `SHM 0`) when selected or present.
-- **Identity and web UI.** Derives the hostname from the node's MAC (`mesh-XXXX`) and starts the web server (`mesh-status.py`) on port 80 — open status page at `/`, password-gated management UI at `/manage`. Also advertises the node as `manet.local` over mDNS on the EUD-facing interface only.
+- **Identity and web UI.** Derives the hostname from the node's MAC (`mesh-XXXX`) and starts the web server (`mesh-status.py`) on port 80: open status page at `/`, password-gated management UI at `/manage`. Also advertises the node as `manet.local` over mDNS on the EUD-facing interface only.
 
-When it finishes — and after any pending interface rename has settled — it disables its own run-once service, marks the node provisioned, and brings the mesh up by restarting `systemd-networkd`, the supplicants, `node-manager`, BATMAN-adv, and `alfred`. Output is logged to `/var/log/radio-setup.log`.
+When it finishes, and after any pending interface rename has settled, it disables its own run-once service, marks the node provisioned, and brings the mesh up by restarting `systemd-networkd`, the supplicants, `node-manager`, BATMAN-adv, and `alfred`. Output is logged to `/var/log/radio-setup.log`.
 
 Finally, on a run that reaches this point with no recorded failures, it starts
 `manet-user-scripts.service`, which runs the operator scripts embedded from
@@ -409,7 +409,7 @@ it to a single run. Output is written to `/var/log/manet-user-scripts.log`.
 | Account | Username | Default Password |
 |---------|----------|-----------------|
 | SSH / radio user | `radio` | Set during provisioning |
-| Armbian root (Rock 3A) | `root` | `1234` (Armbian default — change this) |
+| Armbian root (Rock 3A) | `root` | `1234` (Armbian default; change this) |
 
 ---
 
@@ -434,8 +434,8 @@ current window only and is forgotten when you close it.
 
 **`... is not digitally signed. You cannot run this script on the current system.`**
 
-Different cause, different fix. Windows tags files that came from the internet — most
-often because the repository was downloaded as a `.zip` — and keeps blocking them even
+Different cause, different fix. Windows tags files that came from the internet (most
+often because the repository was downloaded as a `.zip`) and keeps blocking them even
 once scripts are allowed. Clear the tag, in the `provisioning` folder:
 
 ```powershell
@@ -460,7 +460,7 @@ button, then *Terminal (Admin)* or *Windows PowerShell (Admin)*.
 - `/var/log/mesh-provision.log`
 - `/var/log/radio-setup.log`
 
-**Radios misbehaving — check power first.** A HaLow card that stops answering, a Wi-Fi
+**Radios misbehaving: check power first.** A HaLow card that stops answering, a Wi-Fi
 interface that will not associate, or a board that resets with nothing in the log are all
 symptoms of an inadequate supply rather than a software fault. The node reports this
 itself, on the SSH login banner and on the web status page:

@@ -64,7 +64,7 @@ Scripts run in lexical order, so use a numeric prefix:
 | `20-org-ssh-keys.sh` | second |
 | `90-report-home.sh` | last |
 
-Filenames must match `[A-Za-z0-9][A-Za-z0-9._-]*` — no spaces.
+Filenames must match `[A-Za-z0-9][A-Za-z0-9._-]*`, so no spaces.
 
 Anything ending in `.disabled`, `.bak`, `.orig` or `~`, and anything starting
 with `.`, is ignored. That is how to park a script without deleting it, and it
@@ -93,8 +93,8 @@ Because scripts run in filename order, an earlier script can prepare the
 environment for a later one:
 
 ```
-10-install-ruby.sh     #!/bin/bash — apt-get install -y ruby
-20-configure-site.rb   #!/usr/bin/ruby — now runs
+10-install-ruby.sh     #!/bin/bash       -> apt-get install -y ruby
+20-configure-site.rb   #!/usr/bin/ruby   -> now runs
 ```
 
 A script whose shebang names an interpreter absent from the list above is still
@@ -104,7 +104,7 @@ installing it.
 ## What is accepted
 
 Every file needs a **shebang on line 1**. A file without one is skipped with a
-notice, not treated as an error — a `README.md` or a notes file living here is
+notice, not treated as an error; a `README.md` or a notes file living here is
 fine and must never be executed on a node.
 
 The flasher checks each file **before anything is written to a card**:
@@ -113,7 +113,7 @@ The flasher checks each file **before anything is written to a card**:
 |-------|---------|
 | Filename `[A-Za-z0-9][A-Za-z0-9._-]*` | FAIL |
 | Non-empty | FAIL |
-| No NUL bytes | FAIL — binaries cannot go in a heredoc |
+| No NUL bytes | FAIL: binaries cannot go in a heredoc |
 | Valid UTF-8 | FAIL |
 | `#!` on line 1 | SKIP, with a notice |
 | Interpreter present on a stock node | reported, not rejected |
@@ -125,7 +125,7 @@ touched.
 
 Only shell and Python are syntax-checked, because only those can be checked
 without executing the script: `bash -n` parses without running, and Python's
-`ast.parse` does not execute imports. Perl is deliberately excluded — `perl -c`
+`ast.parse` does not execute imports. Perl is deliberately excluded: `perl -c`
 runs `BEGIN` blocks, which would execute operator code on the flashing machine,
 and it resolves `use` statements against that machine's module path, so a
 script using a module present only on the node would be rejected incorrectly. A
@@ -202,7 +202,7 @@ Scripts can also be added to a node directly by placing them in
 rules apply: the shebang requirement and the `.disabled`, `.bak`, `.orig` and
 `~` suffixes are re-checked on the node, so a configuration file placed
 alongside the scripts is skipped rather than executed. Without that check it
-would be executed, because a file with no shebang does not fail to run — the
+would be executed, because a file with no shebang does not fail to run; the
 kernel refuses it and the shell falls back to interpreting it.
 
 The SSH login banner reports the outcome next to the provisioning line:
@@ -219,4 +219,4 @@ node with `user_script_timeout=` in `/etc/mesh.conf`.
 
 A script interrupted by power loss part-way through the set is re-run on the
 next boot; those that already completed are not. A script that ran and failed
-is not retried automatically — use `--force` to run the set again.
+is not retried automatically; use `--force` to run the set again.
