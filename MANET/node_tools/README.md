@@ -343,13 +343,6 @@ construction, lowering RTP source probation, and raising the mixer's
 is `rtpbin` establishing a new source rather than the pipeline linking, so the
 fix is to ensure the source is not new.
 
-The consequence is that a talker's *first* transmission after this node starts
-still loses about 80–180 ms, and every one after that is clean. In practice
-that head lands in the gap between pressing PTT and starting to speak. If that
-ever proves not good enough, the fix is a periodic silent RTP beacon so every
-receiver has seen each SSRC before real speech — deliberately not built yet,
-because it costs airtime for a case that may never be audible.
-
 **Pre-establishing a talker: only the sender can do it.** A receive slot in
 `rtpbin` is keyed by **SSRC, not by IP**, and it exists only once a packet
 carrying that SSRC arrives. Two pieces close that gap.
@@ -413,6 +406,69 @@ node, at which point the decoders, not the audio, are the constraint.
 `ignore-inactive-pads` on the mixer is required rather than optional once
 branches are kept: they are silent between transmissions and the mixer would
 otherwise wait on them.
+
+**Buffering: there are no queues.** Neither pipeline contains a `queue`
+element. Each is a single push thread from source to sink, and every buffer in
+the audio path is one of four things:
+
+| Where | Size | Set by |
+|---|---|---|
+| ALSA capture and playback rings | driver defaults, not configured | `alsasrc` / `alsasink` |
+| Kernel UDP receive socket | 1 MB (`buffer-size=1048576`) | `udpsrc` |
+| Per-talker RTP jitter buffer | `voice_jitter_ms`, default 100 ms | `rtpbin latency=` |
+| Mixer blend window | internal | `audiomixer` |
+
+The socket buffer is burst tolerance, not a working set: steady-state traffic
+is around 20 kbps, and 1 MB is there so a scheduling stall cannot cost
+packets before `udpsrc` runs again.
+
+Both sinks run `sync=false`, for different reasons. On transmit `alsasrc` is
+the clock for a live capture, so there is nothing for the sink to synchronize
+to. On receive the jitter buffer already does the timing, so making `alsasink`
+wait on running time as well would only add latency.
+
+**The jitter buffer is per talker and sized once.** `rtpbin` creates one
+`rtpjitterbuffer` per SSRC, and its depth is
+`max(voice_jitter_ms, two packets)` — the two-packet floor being the least
+that can absorb a single late packet. At the default 40 ms packing that
+resolves to 100 ms.
+
+That figure is computed when the pipelines are built, from the packing in
+force at the time, and nothing resizes it while the pipeline runs. So if
+adaptive packing climbs to the top of its range — 3 frames, 60 ms packets —
+a 100 ms buffer is 1.67 packets deep rather than the 2 the formula intends,
+until the next rebuild. (A SIGHUP retune rebuilds both pipelines, so it also
+re-sizes the buffer for the packing then in force.) This is a margin
+question rather than a fault, and the coupling runs in the safe direction: the
+controller shrinks packets under loss, which *deepens* the buffer in packet
+terms, and only grows them after 30 s below 1 % loss. Note also that a
+receiver's buffer has to suit what the *senders* are transmitting, which this
+node cannot know and which the formula has never tracked. If the floor is ever
+wanted at its stated value, raise `voice_jitter_ms` to 120 rather than
+resizing at runtime — a jitter buffer that resyncs mid-stream discards the
+transmission outright, which is the same failure the SSRC generation byte
+exists to prevent.
+
+`do-lost=true` makes `rtpbin` emit a gap event for every lost packet so the
+decoder conceals rather than glitches; `opusdec` additionally runs `plc=true`
+and in-band FEC, and Lyra conceals internally.
+
+**Transmit does not buffer at all.** The PTT valve *drops* upstream buffers
+while the button is released rather than holding them, so keying the
+microphone plays live audio rather than flushing a backlog of whatever the
+capture device collected beforehand. The only delay on the transmit side is
+packetization: 20 ms per Lyra frame times `frames-per-packet` must accumulate
+before a packet leaves.
+
+**End-to-end latency has never been measured.** From the settings it is
+roughly 40 ms of packetization plus 100 ms of jitter buffer plus the ALSA
+periods and codec at each end, so on the order of 150–200 ms mouth to ear at
+the defaults. Treat that as arithmetic, not as a measurement.
+
+Loss accounting comes from the same buffers. `num-pushed`, `num-lost`,
+`num-late` and `num-duplicates` are summed across every talker's jitter buffer
+and written to `/run/mesh-voice.json` every 2 s; the same window drives
+adaptive packing, ignoring any window carrying fewer than 25 packets.
 
 **Codec is mesh-wide and staged like a channel change.** The CODEC card in
 the VOICE tab posts to `/api/voice/codec`, which calls
@@ -566,9 +622,10 @@ Measured on-wire cost:
 Frame size is therefore the larger lever: 16 kbps at 60 ms costs less on air
 than 6 kbps at 20 ms (27.7 kbps) and sounds far better. The cost is latency —
 a 60 ms frame adds 60 ms — and coarser loss, since one dropped packet now takes
-60 ms of audio with it. The jitter buffer floor is raised to two frames
-automatically. For a PTT system where the multiplier is unicast redundancy
-rather than continuous full-duplex, 40–60 ms is usually the right trade.
+60 ms of audio with it. The jitter buffer floor is raised to two frames at
+start-up — see Buffering above for what that does and does not cover. For a
+PTT system where the multiplier is unicast redundancy rather than continuous
+full-duplex, 40–60 ms is usually the right trade.
 
 Config keys in `/etc/mesh.conf`:
 
@@ -590,7 +647,7 @@ Config keys in `/etc/mesh.conf`:
 | `voice_lyra_bitrate` | `6000` | Lyra rate: 3200, 6000 or 9200 only |
 | `voice_lyra_frames_per_packet` | `2` | Starting packing; adapts at runtime, see below |
 | `voice_lyra_model` | `/usr/local/share/lyra/model_coeffs` | Lyra model weights |
-| `voice_jitter_ms` | `100` | Jitter buffer depth |
+| `voice_jitter_ms` | `100` | Jitter buffer depth per talker; raised to two packets at start-up |
 | `voice_loss_pct` | `20` | Opus in-band FEC expected-loss level |
 | `voice_ttl` | `32` | Multicast TTL |
 | `voice_alsa_in` / `voice_alsa_out` | auto | Override ALSA devices; empty autodetects the OpenVLM card |
