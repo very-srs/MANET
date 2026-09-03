@@ -688,14 +688,25 @@ class MeshVoice:
                 log("voice_codec=lyra but model dir %s is missing — falling "
                     "back to opus" % self.cfg.lyra_model)
             else:
-                packet_ms = self.cfg.lyra_fpp * 20
+                # Packing is link state, not configuration. build() runs again
+                # on every SIGHUP retune, so taking this from cfg would put an
+                # adapted node silently back to the configured default while
+                # self.packing -- and the web UI reading it -- still reported
+                # the adapted value, and _set_packing's equality short-circuit
+                # would stop the controller correcting the disagreement until
+                # loss happened to move it somewhere else again. On a lossy
+                # link that resets 1 frame/packet to 2 and doubles the length
+                # of every loss, at exactly the moment it was measured
+                # audible. The talk group moved; the radio link did not.
+                fpp = self.packing
+                packet_ms = fpp * 20
                 log("codec: lyra %d bps, %d frame(s)/packet (%d ms)"
-                    % (self.cfg.lyra_bitrate, self.cfg.lyra_fpp, packet_ms))
+                    % (self.cfg.lyra_bitrate, fpp, packet_ms))
                 return (
                     "lyraenc name=enc bitrate=%d model-path=%s"
                     % (self.cfg.lyra_bitrate, self.cfg.lyra_model),
                     "rtplyrapay name=pay pt=%d frames-per-packet=%d"
-                    % (RTP_PAYLOAD_TYPE, self.cfg.lyra_fpp),
+                    % (RTP_PAYLOAD_TYPE, fpp),
                     "rtplyradepay",
                     "lyradec model-path=%s" % self.cfg.lyra_model,
                     "LYRA", packet_ms, LYRA_RATE, LYRA_RATE)
@@ -794,6 +805,14 @@ class MeshVoice:
         self.rx_branches = {}
         self.jitterbuffers = {}
         self.branch_seen = {}
+        # Loss is read as a delta against the previous window, and a rebuild
+        # destroys every jitter buffer, so the cumulative counters restart at
+        # zero. Without this the first window after a retune is a large
+        # negative delta and gets discarded. _pk_clean_since is deliberately
+        # left alone: it tracks how long the link has been clean, and the link
+        # is not what changed.
+        self._pk_last_pushed = 0
+        self._pk_last_lost = 0
         self.my_ssrc = None
         # ssrc -> peer name, for the UI. Filled from the registry.
         self.talker_names = {}
