@@ -2,9 +2,9 @@
 
 Two artifacts belong in this directory, and every tarball builder installs them:
 
-- `libgstlyra.so` — GStreamer plugin providing `lyraenc`, `lyradec`,
+- `libgstlyra.so`: GStreamer plugin providing `lyraenc`, `lyradec`,
   `rtplyrapay`, `rtplyradepay`
-- `model_coeffs/` — Lyra v2 model weights
+- `model_coeffs/`: Lyra v2 model weights
 
 They are **not** produced automatically by any build in this repository; see
 "Lyra codec plugin" in `MANET/packaging/README.md` for the two-stage build.
