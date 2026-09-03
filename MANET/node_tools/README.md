@@ -785,6 +785,26 @@ isolation; `manet-ui-firewall.sh` is what actually separates them.
 - Handles conflicts via MAC tie-breaker.
 - Configures `dnsmasq` DHCP when needed.
 
+**Which chunks are taken comes from Alfred, one step removed.** Every node
+publishes its own chunk in its identity record (`ipv4_chunk`, Alfred type 67),
+and `mesh-registry-builder.sh` decodes those into `/tmp/claimed_chunks.txt` as
+`<chunk>,<mac>` lines. This script reads that file and never queries Alfred
+itself. On a successful claim it writes the chunk to `/var/run/my_ipv4_chunk`,
+which the node manager hands back to the encoder.
+
+Four properties of that file matter:
+
+- Only nodes the registry marks **ACTIVE** appear. One unheard from for 300 s
+  goes STALE and its chunk returns to the pool.
+- A free chunk is chosen at **random**, not lowest-first, so two nodes booting
+  together with the same view do not pick the same one.
+- The file lives in `/tmp` and is empty at boot. Absent means "nothing claimed",
+  so a node starting before Alfred has converged sees the whole space as free.
+- **A node with saved state ignores the file** and reasserts its remembered
+  chunk. A false conflict from stale `/tmp` data would clear that state and
+  cause exactly the churn persistence exists to prevent. Real collisions are
+  caught after configuration by the MAC tie-break, which works on live data.
+
 Chunk size is uniform across the mesh: `max_euds_per_node + 2`, set at flash
 time, which is why `mesh_config.py` keeps that key display-only in the
 management UI. There is no per-node override: pinning a node's chunk by hand
@@ -934,7 +954,8 @@ Central registry builder.
 - Reads both Alfred types and joins them on the record key.
 - Decodes each message.
 - Writes `/var/run/mesh_node_registry` with all node state.
-- Tracks claimed IP chunks for conflict detection.
+- Writes `/tmp/claimed_chunks.txt`, the claimed-chunk index
+  [`mesh-ip-manager.sh`](#network-management) allocates from.
 - Caches identity across cycles: a node whose identity record has not been
   refreshed yet keeps the values from the previous registry rather than
   appearing nameless.
