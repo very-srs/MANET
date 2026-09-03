@@ -33,17 +33,17 @@ proven on a bench pair.
 - [ ] Automatic channel selection
 - [ ] Partition healing (tourguide) and limp mode
 - [ ] In mesh NTP
-- [ ] Push-to-talk voice over the mesh (Lyra codec) — verified one way between two
+- [ ] Push-to-talk voice over the mesh (Lyra codec). Verified one way between two
       nodes at 0% loss; a two-way test needs a second OpenVLM board. A headset with a
       dynamic microphone needs an external mic preamp ahead of the OpenVLM
-- [ ] Operator setup scripts run once at first boot — the node-side runner is verified, the flash-time half needs a reflash
-- [ ] Over-the-air tools update on Ethernet carrier — works manually, testing on carrier
+- [ ] Operator setup scripts run once at first boot. The node-side runner is verified; the flash-time half needs a reflash
+- [ ] Over-the-air tools update on Ethernet carrier. Works manually; the carrier-triggered path is still being tested
 - [ ] Self-rollback after a mesh key or SSID change
 
 #### 📅 Future Work
 - [ ] Further reduction in network traffic
 - [ ] Enclosure selection
-- [ ] Physical interaction (buttons, knobs) — the button and LED scripts are in
+- [ ] Physical interaction (buttons, knobs). The button and LED scripts are in
       the tree but exit immediately, since the pin wiring is not finalized. Planned as
       a dual rotary encoder for power, talk group and headset volume. Talk-group
       switching already works from a script: write `voice_channel` to `/etc/mesh.conf`

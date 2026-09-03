@@ -8,8 +8,8 @@ because `node-update.sh` compares the two to decide whether a node is current.
 
 Install tarballs are root-relative (`boot/`, `etc/`, `usr/`, `root/`) and packed
 with numeric owner/group `0/0`. Keep the shipped binaries marked as binary in
-`.gitattributes` — `morse_cli`, `chronyc`, `alfred`, `batctl`, `wpa_cli_s1g`,
-`wpa_supplicant_s1g` — or line-ending normalization corrupts them.
+`.gitattributes` (`morse_cli`, `chronyc`, `alfred`, `batctl`, `wpa_cli_s1g`,
+`wpa_supplicant_s1g`), or line-ending normalization corrupts them.
 
 - [Core Orchestration](#core-orchestration)
 - [Web Interface](#web-interface)
@@ -54,7 +54,7 @@ band off the air on every node at once.
 
 **A solo node at the lobby neither elects nor hops.** It waits until a
 tourguide brings it onto the mesh's data channels, or another radio turns up and
-meshes with it there — and only then do the two run a joint election and migrate
+meshes with it there, and only then do the two run a joint election and migrate
 together. One node's view of the RF is not a consensus, and a node that elected
 alone then had to tourguide back to the lobby every two minutes to stay
 findable. Parking costs a solo radio nothing, since there is no mesh link to
@@ -81,7 +81,7 @@ editing the publish path.
 the air, and `node-update.sh` re-publishes whichever one `acs=` selects after
 extracting, restarting `node-manager` if the file changed. The committed copy is
 the static variant, so an update that shipped it would return every ACS node to
-the static orchestrator on each routine update — silently, with nothing in the
+the static orchestrator on each routine update, silently, with nothing in the
 log to say why. Leaving it out entirely would be the opposite failure: both
 variants arrive, but the node keeps running the previous release's orchestrator
 until `radio-setup.sh` happens to run again. A mesh config change to `acs` also
@@ -91,9 +91,9 @@ The install tarball still carries it, since a node being provisioned needs
 something at that path before `radio-setup.sh` has chosen a variant.
 
 The `acs=` test accepts `y`/`yes`/`1`/`true` case-insensitively. It compared
-against `"Y"` alone until 2026-08-31, and every writer produces lowercase — both
+against `"Y"` alone until 2026-08-31, and every writer produces lowercase: both
 flashers normalize the answer, the web UI writes `'y':'n'`, and
-`mesh-config-sync.py` validates the key as exactly `y` or `n` — so `acs=y`
+`mesh-config-sync.py` validates the key as exactly `y` or `n`. So `acs=y`
 selected the static variant on every node and the ACS orchestrator never ran.
 
 ---
@@ -107,31 +107,31 @@ the admin password, the management UI. Designed for mobile-sized field access
 without SSH.
 
 Open routes (no password):
-- `/` — Force-directed topology with node health, link throughput, and per-node
+- `/`: Force-directed topology with node health, link throughput, and per-node
   detail panels. Auto-refreshes every 15 seconds.
-- `/api/data` — JSON: full mesh topology, node list, gateway status, per-node
+- `/api/data` returns JSON: full mesh topology, node list, gateway status, per-node
   throughput. Used by the status page and available for external tooling.
-- `/api/local` — JSON: this node's own state (interfaces, services, IP state,
+- `/api/local` returns JSON: this node's own state (interfaces, services, IP state,
   channel info).
-- `/api/peer/<ip>` — JSON: one peer's detail panel, assembled by
+- `/api/peer/<ip>` returns JSON: one peer's detail panel, assembled by
   `manet_peer_radios.py`. Fetched by the status page when a node is expanded.
-- `/api/debug` — JSON: raw `batctl` originator, neighbor and gateway output
+- `/api/debug` returns JSON: raw `batctl` originator, neighbor and gateway output
   alongside the registry's MAC/hostname mapping. A diagnostic dump; nothing in
   the UI calls it.
 
-Password-gated routes — the password is `admin_password` from `/etc/mesh.conf`,
+Password-gated routes. The password is `admin_password` from `/etc/mesh.conf`,
 set at flash time. Login sets an HttpOnly cookie:
-- `/manage/` — the management UI (see `manet_manage.py`), and every `/manage`
+- `/manage/`: the management UI (see `manet_manage.py`), and every `/manage`
   route beneath it, including the radio, measurement, voice and uplink APIs.
 - `/manage/login`, `/manage/logout`
-- `/api/perf-auth` — POST the password, receive the cookie token.
-- `/api/admin/*` — mesh config staging, ACK status, and apply.
-- `/admin` — legacy path, redirects to `/manage/#config`.
+- `/api/perf-auth`: POST the password, receive the cookie token.
+- `/api/admin/*`: mesh config staging, ACK status, and apply.
+- `/admin`: legacy path, redirects to `/manage/#config`.
 
 There is no unauthenticated route that changes anything. A set of
 `/api/control/*` handlers at the site root used to apply interface, TX power and
 channel changes locally, behind nothing but the subnet check, and were removed
-once every caller had moved to the Alfred-staged path — a local change and a
+once every caller had moved to the Alfred-staged path; a local change and a
 mesh-wide one now take the same route through `manet_manage.py`.
 
 Access control has two layers:
@@ -142,32 +142,32 @@ Access control has two layers:
   radios' EUDs, and from the uplink LAN.
 
 Link quality shown here is BATMAN_V's metric, which is **throughput in Mbit/s**,
-not a 0-255 link quality — `batctl` prints e.g. `43.2` for a 43.2 Mbit/s link.
+not a 0-255 link quality; `batctl` prints e.g. `43.2` for a 43.2 Mbit/s link.
 Color thresholds are 30 / 15 / 5 Mbit/s, chosen so a healthy HaLow link (which
 tops out near 43 Mbit/s at 8 MHz) reads as good.
 
 Data sources:
-- `/var/run/mesh_node_registry` — peer registry built by `mesh-registry-builder.sh`
-- `/etc/mesh.conf` — node configuration
-- `/etc/mesh_ipv4_state` — current IP allocation state
-- `batctl o`, `batctl n`, `batctl gwl` — live BATMAN-ADV state
+- `/var/run/mesh_node_registry`: peer registry built by `mesh-registry-builder.sh`
+- `/etc/mesh.conf`: node configuration
+- `/etc/mesh_ipv4_state`: current IP allocation state
+- `batctl o`, `batctl n`, `batctl gwl`: live BATMAN-ADV state
 
 Peers are never queried directly over HTTP. Everything shown about another node
 comes from the registry, which is built from Alfred.
 
 **manet_manage.py**
 
-The management UI. Not a server — a route set mixed into `mesh-status.py`'s
+The management UI. Not a server, but a route set mixed into `mesh-status.py`'s
 handler and reachable only under `/manage` after the password check. Tabs:
 
-- **Topology** — mesh nodes and their interfaces, from the registry.
-- **Radio config** — interface up/down, TX power, HaLow and Wi-Fi channels.
-- **Measure** — iperf3 and ping runs from this node toward a peer.
-- **Sessions** — saved measurement results, JSON and CSV.
-- **Uplink** — USB Wi-Fi uplink credentials.
-- **Voice** — talk group, codec, and per-peer voice state (see
+- **Topology.** Mesh nodes and their interfaces, from the registry.
+- **Radio config.** Interface up/down, TX power, HaLow and Wi-Fi channels.
+- **Measure.** iperf3 and ping runs from this node toward a peer.
+- **Sessions.** Saved measurement results, JSON and CSV.
+- **Uplink.** USB Wi-Fi uplink credentials.
+- **Voice.** Talk group, codec, and per-peer voice state (see
   [Push-to-Talk Voice](#push-to-talk-voice)).
-- **Node config** — the mesh configuration form (EUD mode, AP credentials, mesh
+- **Node config.** The mesh configuration form (EUD mode, AP credentials, mesh
   SSID/SAE key, IP range, regulatory domain, services, admin password) with the
   per-node ACK table. This was the old unauthenticated `/admin` page.
 
@@ -186,13 +186,13 @@ implementation, so what the UI offers and what the node does cannot diverge.
 **The HaLow channel plan is derived from the node's region.** The channel,
 bandwidth and S1G operating-class tables are transcribed from the Morse driver's
 `dot11ah` tables, and a bandwidth appears for a region only where the driver
-defines a channel of that width — which is why **EU stops at 2 MHz** (the whole
+defines a channel of that width, which is why **EU stops at 2 MHz** (the whole
 863–868 MHz allocation is too narrow for more) while **US reaches 8 MHz**.
 `halow_channel_options()` builds the menu the Radio config tab renders, so an
 EU node is never offered a width it cannot use. Channel numbers and center
 frequencies are both unique within a region, so either resolves the other:
 `halow_bandwidth_for_channel()` recovers the width from the channel number,
-which is how the status readout avoids `s1g_prim_chwidth` — that reports the
+which is how the status readout avoids `s1g_prim_chwidth`; that reports the
 *primary* channel width, 2 MHz for every operating width above 1 MHz, and
 reading it as the operating width reports a 4 or 8 MHz channel as 2 MHz.
 
@@ -204,7 +204,7 @@ options come from the phy's own advertised range (`parse_phy_txpower_options`),
 and a set is read back and verified rather than assumed
 (`set_iface_txpower_verified`).
 
-An unknown region falls back to the EU plan — the narrower of the two, so a
+An unknown region falls back to the EU plan, the narrower of the two, so a
 misconfigured node cannot be offered channels its region may not permit.
 
 **mesh-radio-state.py**
@@ -217,13 +217,13 @@ Wi-Fi channel, and uplink credentials.
 **manet_peer_radios.py**
 
 Builds the per-peer radio chips and the expandable status panel the topology
-views show for another node — role, up/down state, channel, MCS, service pills,
+views show for another node: role, up/down state, channel, MCS, service pills,
 and the inferred `bat0` / `br0` / gateway rows.
 
 Everything comes from what Alfred already replicates, so no node is queried.
 Where a peer publishes `INTERFACES_JSON`, that wins. Where it publishes an empty
-list — which `node-manager` did historically, leaving the UI with no
-`wlan0`/`wlan1`/`wlan2` keys and every peer rendered as 2.4G/5G/HaLow OFF — the
+list, as `node-manager` did historically (leaving the UI with no
+`wlan0`/`wlan1`/`wlan2` keys and every peer rendered as 2.4G/5G/HaLow OFF), the
 values are reconstructed from the registry's MCS and `DATA_CHANNEL_*` fields, so
 an older node still shows its radios.
 
@@ -231,7 +231,7 @@ an older node still shows its radios.
 
 Installs the nftables rules described above: port 80 restricted to localhost and
 this node's DHCP pool, port 5201 (iperf3) to the mesh subnet. Uses source
-addresses rather than interfaces, because `br0` bridges `bat0` — a packet from a
+addresses rather than interfaces, because `br0` bridges `bat0`; a packet from a
 remote node arrives on `br0` exactly like one from a local EUD. Re-run by
 `mesh-ip-manager.sh` whenever the DHCP pool moves.
 
@@ -242,7 +242,7 @@ remote node arrives on `br0` exactly like one from a local EUD. Re-run by
 **mesh-voice.py**
 
 Conference-style PTT voice across the mesh, with a headset PTT plugged into the
-node itself — there is no browser microphone and the web UI is a status and
+node itself; there is no browser microphone and the web UI is a status and
 talk-group readout only. Talking is gated by the button, but listening mixes
 everyone, so two people speaking at once are summed rather than corrupting each
 other.
@@ -264,7 +264,7 @@ missing the lyra plugin or the model directory falls back to opus and logs why.
 **The two codecs do not interoperate, and the failure mode is silence.** Both
 the RTP payload type and the clock rate come from this one setting, and a
 receiver builds every decode branch from its *own* configured codec rather
-than from what actually arrived — so a node left on the other codec does not
+than from what actually arrived, so a node left on the other codec does not
 get degraded audio, it gets nothing. That is why the codec is a mesh-wide
 setting staged over Alfred (see below) and not a per-radio one like the talk
 group, and it is why the silent fallback above matters: on a Lyra mesh, a node
@@ -275,11 +275,11 @@ The daemon only supervises: it reads the PTT button, keeps the unicast peer
 list current, and publishes `/run/mesh-voice.json` for the UI.
 
 **Addressing.** Every talk group shares one multicast group (`239.192.41.1`)
-and differs only by port — channel *n* uses `38801 + (n-1)*2`, the stride being
+and differs only by port: channel *n* uses `38801 + (n-1)*2`, the stride being
 2 because `port+1` is that channel's RTCP. Sharing the group address means
 changing channel never causes an IGMP leave/join.
 
-**Unicast redundancy: off by default — batman-adv already does it.** With
+**Unicast redundancy: off by default, because batman-adv already does it.** With
 `multicast_forceflood` disabled, as this node configures it, and listeners at or below
 `multicast_fanout` (default 16), `batadv_mcast_forw_mode_by_count()` returns
 `BATADV_FORW_UCASTS` and emits **one unicast frame per listener**. Measured on
@@ -297,8 +297,8 @@ PTT system a node that has never transmitted is exactly the one that needs to
 hear you.
 
 **Receivers must join the group or nothing transmits.** The same optimization
-means `batadv_mcast_forw_mode()` returns `BATADV_FORW_NONE` — dropping the
-packet at the *sender* — when no node has announced interest in the group. This
+means `batadv_mcast_forw_mode()` returns `BATADV_FORW_NONE`, dropping the
+packet at the *sender*, when no node has announced interest in the group. This
 was observed directly: multicast sent with no listener never reached the radio
 at all. `udpsrc` performs the IGMP join (`auto-multicast=true`), so this works
 in normal operation, but expect a brief window after start-up before joins
@@ -307,13 +307,13 @@ than wasting air.
 
 **Receive is conference style; transmit is still push-to-talk.** `rtpbin`
 demultiplexes by SSRC and gives every talker their own jitter buffer, and
-`audiomixer` sums them — so two people speaking at once are *mixed*, the way a
+`audiomixer` sums them, so two people speaking at once are *mixed*, the way a
 conference bridge behaves. Nobody is hot-miked: the valve stays shut until the
 button is pressed. What is gone is the software lockout on talking over
 someone; that is etiquette now, like any conference bridge.
 `voice_half_duplex=y` restores the refuse-to-key behavior if you want it.
 
-This is not just a policy change. A single `rtpjitterbuffer` cannot do it — two
+This is not just a policy change. A single `rtpjitterbuffer` cannot do it: two
 senders' sequence numbers interleave in one buffer and the output is garbage.
 That limitation, not policy, is what the old lockout was really working around.
 Verified by feeding two senders (440 Hz and 880 Hz, distinct SSRCs) into the
@@ -321,12 +321,12 @@ receive pipeline: with one talker only 440 Hz is present; with both, 440 Hz and
 880 Hz appear together at comparable amplitude.
 
 A permanent silent input feeds the mixer, because `audiomixer` only produces
-output while it has one — without it the sink is starved whenever nobody is
+output while it has one; without it the sink is starved whenever nobody is
 talking and every transmission starts with the DAC spinning up. Branches are
 built on `pad-added` and torn down on `pad-removed`, so a decoder is not leaked
 per talker; measured, two idle talkers were reaped and the count returned to 0.
 
-**Decode branches are kept, not reaped — this is what stops transmissions
+**Decode branches are kept, not reaped; this is what stops transmissions
 being clipped.** `rtpbin autoremove=false` (its own default) means a talker's
 branch survives their silence, so the next thing they say plays from the first
 frame. Measured on a CM4 with lyra, 3.00 s bursts:
@@ -339,7 +339,7 @@ frame. Measured on a CM4 with lyra, 3.00 s bursts:
 
 Only a source `rtpbin` has already seen costs nothing. Blocking the pad during
 construction, lowering RTP source probation, and raising the mixer's
-`min-upstream-latency` were each tried and none of them helped — the residual
+`min-upstream-latency` were each tried and none of them helped; the residual
 is `rtpbin` establishing a new source rather than the pipeline linking, so the
 fix is to ensure the source is not new.
 
@@ -350,7 +350,7 @@ carrying that SSRC arrives. Two pieces close that gap.
 First, the SSRC is split: **24 bits identifying the node** (a hash of its mesh
 address) and **8 bits identifying the run** of the daemon. The prefix lets any
 receiver build address → prefix for every node in the registry and name a
-talker with no back channel — verified collision-free across a full /24.
+talker with no back channel; verified collision-free across a full /24.
 
 The generation is not cosmetic, and this is the subtle part. Because a receiver
 never forgets a source, a node that restarted and reused its SSRC would find
@@ -370,15 +370,15 @@ Second, each node sends a **presence beacon**: a ~140 ms muted transmission
 real payloader with real sequence numbers, so receivers establish the source
 before anything is said.
 
-Beacons are **event driven, not a heartbeat**. There is nothing to refresh —
-`autoremove=false` means a source is never forgotten — so one is sent at
+Beacons are **event driven, not a heartbeat**. There is nothing to refresh
+(`autoremove=false` means a source is never forgotten), so one is sent at
 start-up (announcing this run's generation) and whenever a node appears in the
 registry that cannot yet have heard this node. `voice_beacon_sec` (default 600) is
 only a safety net for a peer whose arrival was somehow missed, and 0 disables
 it. That is about **21 packets an hour, ~5 bps averaged**, against 420/hour at
 the 30 s heartbeat this replaced.
 
-**Synthesizing a source locally from the registry does not work — it is worse
+**Synthesizing a source locally from the registry does not work; it is worse
 than doing nothing.** Every peer's address is already known, so the apparent
 solution is to inject a packet with their SSRC and pre-fill the slot. Measured,
 it does create the slot, and then it destroys the stream. The injected sequence
@@ -395,7 +395,7 @@ shrinks below the configured value and never exceeds the hard cap of 64.
 
 **The ceiling is RAM.** A warm branch costs about **5.3 MB with lyra** and
 **0.6 MB with opus**, measured on a CM4. So the hard cap of 64 is roughly
-340 MB of lyra decoders against the 3.4 GB a node has free — comfortable, but
+340 MB of lyra decoders against the 3.4 GB a node has free. That is comfortable, but
 it is the reason a cap exists at all rather than tracking the registry without
 limit. A mesh larger than 62 nodes on one talk group will log that it is
 capped, and the least recently heard talkers will be evicted and pay the
@@ -429,13 +429,13 @@ wait on running time as well would only add latency.
 
 **The jitter buffer is per talker and sized once.** `rtpbin` creates one
 `rtpjitterbuffer` per SSRC, and its depth is
-`max(voice_jitter_ms, two packets)` — the two-packet floor being the least
+`max(voice_jitter_ms, two packets)`, the two-packet floor being the least
 that can absorb a single late packet. At the default 40 ms packing that
 resolves to 100 ms.
 
 That figure is computed when the pipelines are built, from the packing in
 force at the time, and nothing resizes it while the pipeline runs. So if
-adaptive packing climbs to the top of its range — 3 frames, 60 ms packets —
+adaptive packing climbs to the top of its range (3 frames, 60 ms packets),
 a 100 ms buffer is 1.67 packets deep rather than the 2 the formula intends,
 until the next rebuild. (A SIGHUP retune rebuilds both pipelines, so it also
 re-sizes the buffer for the packing then in force.) This is a margin
@@ -445,7 +445,7 @@ terms, and only grows them after 30 s below 1 % loss. Note also that a
 receiver's buffer has to suit what the *senders* are transmitting, which this
 node cannot know and which the formula has never tracked. If the floor is ever
 wanted at its stated value, raise `voice_jitter_ms` to 120 rather than
-resizing at runtime — a jitter buffer that resyncs mid-stream discards the
+resizing at runtime; a jitter buffer that resyncs mid-stream discards the
 transmission outright, which is the same failure the SSRC generation byte
 exists to prevent.
 
@@ -472,14 +472,14 @@ adaptive packing, ignoring any window carrying fewer than 25 packets.
 
 **Codec is mesh-wide and staged like a channel change.** The CODEC card in
 the VOICE tab posts to `/api/voice/codec`, which calls
-`coordinate_radio_change({'voice_codec': ...})` — the same two-phase path as a
+`coordinate_radio_change({'voice_codec': ...})`, the same two-phase path as a
 HaLow channel or WPA key change. The package is staged over Alfred, every node
 ACKs it, and only then is `activate_at` set ~20 s out so the whole fleet
 switches on a common clock. If any node fails to ACK, the change is canceled
 and nothing moves: staying wholly on the old codec is always better than
 splitting the mesh in half. On activation each node runs
 `apply_voice_codec()` (in `manet_radio.py`), which rewrites `voice_codec` in
-`/etc/mesh.conf` and *restarts* mesh-voice — a restart rather than a reload,
+`/etc/mesh.conf` and *restarts* mesh-voice, a restart rather than a reload,
 because swapping the codec changes the encoder, payloader, RTP clock rate and
 the raw caps either side of them, so both pipelines have to be rebuilt.
 
@@ -491,7 +491,7 @@ reconciliation; re-issue the change from the UI with the node up.
 group 1; the operator moves it from the VOICE tab of the web UI, which writes
 `voice_channel` to `/etc/mesh.conf` and runs `systemctl reload mesh-voice`.
 This is deliberately *not* pushed across the mesh the way HaLow and Wi-Fi
-channel changes are — each operator picks their own group.
+channel changes are; each operator picks their own group.
 
 Reload is a `SIGHUP`, and the daemon retunes in place rather than restarting:
 it drops both pipelines to `NULL`, rebuilds them on the new port and returns to
@@ -502,7 +502,7 @@ a good way to lose a transmission mid-word. If the rebuild fails the daemon
 reverts to the previous group rather than leaving the node deaf.
 
 Retuning in place rather than restarting the unit is what makes a hardware
-channel selector practical — clicking through groups on a rotary switch would
+channel selector practical; clicking through groups on a rotary switch would
 otherwise mean a systemd restart per detent, several seconds each, plus a
 TFLite model reload under lyra. Anything that can write `mesh.conf` and send
 `SIGHUP` drives this, so the web UI and a future panel switch share one path.
@@ -528,27 +528,27 @@ The direction is the opposite of the intuitive one: **under loss, packetization
 gets smaller.** A lost packet takes `frames-per-packet` frames with it, and the
 audibility knee sits exactly in this range, so the loss response spends airtime
 to keep each loss short enough for Lyra's concealment to hide. That is only
-safe while loss means fades rather than congestion — on a saturated link,
-offering more packets makes it worse — so the controller will not go below 2
+safe while loss means fades rather than congestion; on a saturated link,
+offering more packets makes it worse, so the controller will not go below 2
 frames/packet when batman-adv's throughput estimate for the worst neighbor is
 under 2 Mbit/s.
 
 Loss above 5 % steps down immediately; recovery needs 30 s below 1 % per step,
 and anything in between holds position. Windows with fewer than 25 packets are
-ignored rather than treated as clean. The signal is this node's *own* receive loss —
-plain multicast RTP has no back channel — which half duplex makes a fair proxy,
+ignored rather than treated as clean. The signal is this node's *own* receive loss
+(plain multicast RTP has no back channel), which half duplex makes a fair proxy,
 since it measures the same link in the other direction moments before keying
 up. An asymmetric link will fool it.
 
 No signaling is needed for any of this: Lyra frames are a fixed size per
 bitrate (8/15/23 bytes), so `rtplyradepay` recovers the packet geometry from
 the payload length alone and follows a mid-stream change with no renegotiation.
-Verified on hardware — switching 2 → 1 → 3 → 2 while playing produced 27/42/57
+Verified on hardware: switching 2 → 1 → 3 → 2 while playing produced 27/42/57
 byte payloads and 1001 frames decoded against 1000 sent.
 
 **The mic input expects an electret.** The CM108B biases `MIC+` through its own
 network, which suits the electret capsule in a commercial headset. A **dynamic**
-element — as fitted to NATO-wired military headsets — is roughly 25 dB quieter and
+element (as fitted to NATO-wired military headsets) is roughly 25 dB quieter and
 has no internal amplifier, so it sits at or below the input's own noise floor and
 no mixer or EEPROM setting recovers it. Such a headset needs an external preamp
 between the element and `MIC+`. Two further points apply once one is fitted: turn
@@ -558,13 +558,13 @@ gain closes an acoustic loop between the earpiece and a boom microphone.
 
 **PTT is USB, not GPIO.** The OpenVLM board is a C-Media CM108B; the switch
 lands on the *codec's* GPIO3 and is read from USB HID input reports on
-`/dev/hidraw*` — bit 2 of IR1, valid only when `IR0[7:6] == 0`. Bit 0 of IR1 is
+`/dev/hidraw*`: bit 2 of IR1, valid only when `IR0[7:6] == 0`. Bit 0 of IR1 is
 the strap that distinguishes a real OpenVLM from a generic CM108 dongle, and
 strapped devices are preferred when both are present. Hot-plug is handled by
 reopening; the daemon runs fine with no board fitted and picks one up when it
 appears.
 
-**QoS — use CS6 (48), not EF (46).** This is counter-intuitive and worth
+**QoS: use CS6 (48), not EF (46).** This is counter-intuitive and worth
 understanding before changing `voice_dscp`.
 
 Linux 6.12+ added an RFC 8325 mapping to `cfg80211_classify8021d()`
@@ -574,7 +574,7 @@ On 6.6 and older the naive `dscp >> 5` rule sent it to UP 5 / AC_VI. We ship
 
 **batman-adv never lets that code run.** `batadv_skb_set_priority()`
 (`net/batman-adv/main.c`) is called from `batadv_interface_tx()` for every
-packet entering `bat0` — locally originated included — and from both forwarding
+packet entering `bat0`, locally originated included, and from both forwarding
 paths in `routing.c`. It stamps:
 
 ```c
@@ -584,7 +584,7 @@ skb->priority = prio + 256;
 ```
 
 Values 256–263 are the 802.1d passthrough range, which `cfg80211_classify8021d()`
-checks **first** and returns directly as the UP — so the RFC 8325 DSCP code is
+checks **first** and returns directly as the UP, so the RFC 8325 DSCP code is
 never reached. The result is kernel-version independent:
 
 | DSCP | TOS | batman-adv priority | 802.11 UP | Access category |
@@ -594,16 +594,16 @@ never reached. The result is kernel-version independent:
 
 Hence the default of 48. The `return` guard also means an explicitly-set
 `SO_PRIORITY` in 256–263 survives batman-adv, which is how OpenMANET pins the
-access category — they set `IP_TOS` and `SO_PRIORITY` together, in that order,
+access category: they set `IP_TOS` and `SO_PRIORITY` together, in that order,
 because the kernel rewrites `sk_priority` as a side effect of `IP_TOS`.
 GStreamer's `multiudpsink` exposes only `qos-dscp`, so batman-adv's derivation
-is relied on instead — which is why the DSCP value has to be chosen for what
+is relied on instead, which is why the DSCP value has to be chosen for what
 batman-adv will make of it.
 
 Multicast TTL is set explicitly to 32: the default of 1 silently black-holes
 voice one hop out.
 
-Multicast tuning is deliberately untouched — the mesh's arrangement is the way
+Multicast tuning is deliberately untouched; the mesh's arrangement is the way
 it is on purpose, and `multicast_forceflood` stays off, which is what leaves
 batman-adv's own multicast→unicast fanout available.
 
@@ -620,10 +620,10 @@ Measured on-wire cost:
 | 8 kbps | 29.6 kbps | 15.5 kbps |
 
 Frame size is therefore the larger lever: 16 kbps at 60 ms costs less on air
-than 6 kbps at 20 ms (27.7 kbps) and sounds far better. The cost is latency —
-a 60 ms frame adds 60 ms — and coarser loss, since one dropped packet now takes
+than 6 kbps at 20 ms (27.7 kbps) and sounds far better. The cost is latency
+(a 60 ms frame adds 60 ms) and coarser loss, since one dropped packet now takes
 60 ms of audio with it. The jitter buffer floor is raised to two frames at
-start-up — see Buffering above for what that does and does not cover. For a
+start-up; see Buffering above for what that does and does not cover. For a
 PTT system where the multiplier is unicast redundancy rather than continuous
 full-duplex, 40–60 ms is usually the right trade.
 
@@ -635,13 +635,13 @@ Config keys in `/etc/mesh.conf`:
 | `voice_iface` | `br0` | Interface for the multicast group and send socket |
 | `voice_channel` | `1` | Talk group, 1–32 |
 | `voice_ptt` | `openvlm` | `openvlm`, `always` (open mic), or anything else for receive-only |
-| `voice_unicast` | `n` | Userspace unicast copies — normally unnecessary, see above |
+| `voice_unicast` | `n` | Userspace unicast copies; normally unnecessary, see above |
 | `voice_unicast_max_peers` | `16` | Cap on unicast copies |
-| `voice_half_duplex` | `n` | Refuse PTT while a remote node is transmitting — off, see below |
+| `voice_half_duplex` | `n` | Refuse PTT while a remote node is transmitting; off, see below |
 | `voice_max_talkers` | `8` | Floor for warm decode branches; raised to registry nodes + 2, hard cap 64 (~5.3 MB each with lyra) |
 | `voice_beacon_sec` | `600` | Safety-net beacon interval; beacons are normally sent on start-up and on new peers. 0 disables |
-| `voice_dscp` | `48` | DSCP marking — CS6, see the QoS note above |
-| `voice_codec` | `lyra` | `lyra` or `opus`; lyra falls back to opus if the plugin or model weights are missing. Mesh-wide — change it from the UI, not by hand, or the node goes silent |
+| `voice_dscp` | `48` | DSCP marking: CS6, see the QoS note above |
+| `voice_codec` | `lyra` | `lyra` or `opus`; lyra falls back to opus if the plugin or model weights are missing. Mesh-wide: change it from the UI, not by hand, or the node goes silent |
 | `voice_bitrate` | `32000` | Opus bitrate |
 | `voice_frame_ms` | `20` | Opus frame duration: 10, 20, 40 or 60 |
 | `voice_lyra_bitrate` | `6000` | Lyra rate: 3200, 6000 or 9200 only |
@@ -658,13 +658,13 @@ Config keys in `/etc/mesh.conf`:
 ## Service Elections
 
 All service elections share the same algorithm: the best-connected node wins,
-measured by `MEAN_THROUGHPUT_MBPS` in the registry — the mean of BATMAN_V's
+measured by `MEAN_THROUGHPUT_MBPS` in the registry, the mean of BATMAN_V's
 metric across that node's originators, in Mbit/s. Stale nodes (not seen within
 10 minutes) are excluded. Ties are broken deterministically by MAC address.
 
 This field used to be called `TQ_AVERAGE`, which was wrong: BATMAN_V's metric is
-throughput, not a 0-255 link quality. The behavior never changed — highest
-wins either way — but the name misled, so it now says what it holds.
+throughput, not a 0-255 link quality. The behavior never changed (highest
+wins either way), but the name misled, so it now says what it holds.
 
 **mediamtx-election.sh**
 
@@ -692,8 +692,8 @@ Decentralized election for optimal 2.4GHz and 5GHz channels.
 - Includes channel bias to prevent unnecessary migrations.
 
 Candidate frequencies are deliberately **not** filtered against the local phy
-here. The election reaches its answer by implicit consensus — every node runs
-the same computation over the same replicated reports — so a per-node hardware
+here. The election reaches its answer by implicit consensus (every node runs
+the same computation over the same replicated reports), so a per-node hardware
 filter at this stage would let two nodes derive different winners from identical
 data. Unusable frequencies are dropped at scan time instead (`phy_usable_freqs`
 in `node-manager-acs.sh`), which keeps the exclusion inside the replicated
@@ -702,9 +702,9 @@ report and therefore symmetric across the mesh.
 **"Every candidate was measured and rejected" and "nothing reported a
 measurement at all" are different verdicts.** Both leave the candidate list
 empty. The first is a real RF result and drops to the lobby channels. The
-second is an outage — the band's radio is absent so its scan report carries no
+second is an outage: the band's radio is absent so its scan report carries no
 entries, or the scan request was refused wholesale, or Alfred was down and no
-reports replicated — and it now **holds the current channel and does not assert
+reports replicated, and it now **holds the current channel and does not assert
 limp mode**, logging `No scan data for any candidate channel`. Treating it as
 jamming throttled the whole mesh to legacy bitrates on the strength of missing
 data.
@@ -731,20 +731,20 @@ Detects network partitioning and isolation.
 
 Partition detection and healing system. Runs every 2 minutes at :30 seconds:
 1. Elects tourguide (node with oldest helper broadcast timestamp, excluding service hosts).
-2. Hops one radio to lobby frequency — 2.4 or 5 GHz, alternating.
+2. Hops one radio to lobby frequency: 2.4 or 5 GHz, alternating.
 3. Broadcasts helper beacon with current data channels.
 4. Listens for other partitions.
 5. If the other partition should win, triggers migration.
 6. Returns to data channel.
 
 **Which radio hops is derived from the clock, never from this node's own
-history** — `(epoch / 120) % 2`, the same window index `should_perform_tourguide`
+history**: `(epoch / 120) % 2`, the same window index `should_perform_tourguide`
 uses, so it inherits the wall-clock alignment the rest of the ACS pipeline
 already needs and adds no new time-sync requirement. Two split partitions can
 only find each other if their tourguides hop to the same band in the same
 window. Reading this node's last-used radio out of the registry went permanently
-out of phase the moment either side missed a window — an elected tourguide
-excluded for hosting a service, a restart, a failed hop — after which the two
+out of phase the moment either side missed a window (an elected tourguide
+excluded for hosting a service, a restart, a failed hop), after which the two
 partitions alternated to opposite bands forever and partition healing was
 silently dead. For a 2-node mesh that is the only recovery path there is:
 `quorum-checker.sh` cannot rescue an isolated node below 3 remembered peers.
@@ -774,18 +774,18 @@ Auto-detects Ethernet configuration when a cable is connected:
 **mesh-ip-manager.sh**
 
 Chunk-based IPv4 allocation. Each node claims a chunk where `size = max_euds + 2`.
-- **IP 0 in chunk:** `br0` primary — the node's mesh address, what peers use.
-- **IP 1 in chunk:** `br0` secondary — the DHCP gateway handed to EUDs, wired or wireless.
+- **IP 0 in chunk:** `br0` primary, the node's mesh address, what peers use.
+- **IP 1 in chunk:** `br0` secondary, the DHCP gateway handed to EUDs, wired or wireless.
 - **IPs 2+:** DHCP pool for EUDs.
 
-Both addresses sit on `br0` in the same `/24`, and `br0` bridges `bat0` — so the
+Both addresses sit on `br0` in the same `/24`, and `br0` bridges `bat0`, so the
 mesh and the EUDs are one flat broadcast domain. The split is bookkeeping, not
 isolation; `manet-ui-firewall.sh` is what actually separates them.
 - First 5 IPs network-wide are reserved for services.
 - Handles conflicts via MAC tie-breaker.
 - Configures `dnsmasq` DHCP when needed.
 
-Chunk size is uniform across the mesh — `max_euds_per_node + 2`, set at flash
+Chunk size is uniform across the mesh: `max_euds_per_node + 2`, set at flash
 time, which is why `mesh_config.py` keeps that key display-only in the
 management UI. There is no per-node override: pinning a node's chunk by hand
 skips the registry check and the MAC tie-break, so two pinned nodes, or a pinned
@@ -805,7 +805,7 @@ Owns gateway state. Decides whether an interface with carrier is an upstream
 uplink or a wired EUD port, and on promotion configures NAT, the firewall,
 `radvd`, and the EUD services; on demotion tears them back down. Called by the
 networkd-dispatcher hooks and reconciled once a cycle by the node manager. Both
-paths early-return when nothing has changed — an unconditional promote used to
+paths early-return when nothing has changed; an unconditional promote used to
 cause hundreds of systemd daemon-reloads an hour.
 
 **mesh-default-route-fix.sh**
@@ -835,7 +835,7 @@ per-interface MACs. Usage: `mac-to-ip.sh aa:bb:cc:dd:ee:ff`
 
 **mesh-throughput-mean.sh**
 
-Mean of BATMAN_V's metric across this node's originators, in Mbit/s — published
+Mean of BATMAN_V's metric across this node's originators, in Mbit/s, published
 as `MEAN_THROUGHPUT_MBPS` and used by the service elections.
 
 Reads the parenthesized value, never a positional field: `batctl o` shifts
@@ -848,7 +848,7 @@ originator, so one peer reachable over two radios is still one peer.
 
 Pure-bash replacement for Debian's `ipcalc`, printing the same `HostMin:` /
 `HostMax:` lines the mesh scripts parse. The Perl original cost ~1.5 s of CPU
-per call on a CM4 and was invoked ~9 times per 15-second cycle — nearly a full
+per call on a CM4 and was invoked ~9 times per 15-second cycle, nearly a full
 core. This runs in ~10 ms.
 
 **verify-bridge.sh**
@@ -868,12 +868,12 @@ Manages BATMAN-ADV interface lifecycle:
 - Handles start/stop operations.
 - HaLow is added first so it becomes batman's primary (longest-range link).
 - Skips writing a `.link` file when the MAC is already pinned by an existing
-  one — two link files for one MAC caused a rename ping-pong reboot loop.
+  one; two link files for one MAC caused a rename ping-pong reboot loop.
 
 **batman-enslave-watch.sh**
 
 8-second watchdog after `batman-enslave.service`. Re-enslaves interfaces that
-fall out of `bat0`, and enforces `mesh_plink_timeout=0` on HaLow interfaces —
+fall out of `bat0`, and enforces `mesh_plink_timeout=0` on HaLow interfaces;
 the parameter resets every time the supplicant rejoins the mesh, so a one-shot
 at boot would not hold. This is the right place for any idempotent "keep this
 runtime parameter set" logic.
@@ -881,7 +881,7 @@ runtime parameter set" logic.
 **sae-watchdog.sh**
 
 Tails journald for `MESH-SAE-AUTH-BLOCKED` and restarts `wpa_supplicant` plus
-`batman-enslave` to recover — but only when `bat0` is actually missing
+`batman-enslave` to recover, but only when `bat0` is actually missing
 interfaces, so a transient block does not cause a restart storm.
 
 **prepare-standard-mesh-iface.sh**
@@ -919,7 +919,7 @@ so anything that repeats is paid for continuously.
 | 68 | `NodeTelemetry` | every 180 s | everything volatile |
 | 69 | `NodeTelemetry` | tourguide window | helper beacons (channels, partition size) |
 
-Alfred stamps every record with the publishing node's MAC — it runs `-i br0`, so
+Alfred stamps every record with the publishing node's MAC; it runs `-i br0`, so
 that key *is* the node's primary MAC. It is the join column between the two
 types, and the reason neither message repeats it.
 
@@ -943,8 +943,8 @@ Central registry builder.
 
 Encodes this node's Alfred payloads to protobuf and Base64. Two subcommands:
 
-- `encoder.py identity` — hostname, secondary MACs, Syncthing ID, chunk, IP.
-- `encoder.py telemetry` — mean throughput, service flags, uptime, battery, CPU load,
+- `encoder.py identity`: hostname, secondary MACs, Syncthing ID, chunk, IP.
+- `encoder.py telemetry`: mean throughput, service flags, uptime, battery, CPU load,
   GPS (when `/run/gps_status.json` reports `has_fix=true`), channels and scan
   reports, MCS rates, interface list, EUD mode/SSID/count, tourguide tracking,
   node state.
@@ -964,7 +964,7 @@ and IPv4 as `fixed32`. Formatting back into human shapes happens on decode.
 
 **NodeInfo_pb2.py**
 
-Generated from `NodeInfo.proto`. Checked in because nodes have no protoc — do
+Generated from `NodeInfo.proto`. Checked in because nodes have no protoc. Do
 not hand-edit; regenerate.
 
 **NodeInfo.proto**
@@ -981,7 +981,7 @@ Protocol buffer schema for both messages.
   rejects generated code from protoc older than 3.19, and 5.x emits a
   `runtime_version` gate that runtime does not have.
 - **Not `/usr/bin/protoc`.** Ubuntu 22.04 ships 3.12.4, which emits the old
-  `_reflection`-based form — 786 lines different, and unimportable on every
+  `_reflection`-based form: 786 lines different, and unimportable on every
   node. This is easy to do by accident and nothing downstream catches it: a dev
   box with the matching-vintage protobuf runtime imports the bad file happily.
   `setup-dev-env.sh` puts the right protoc inside the venv precisely so
@@ -1069,8 +1069,8 @@ classes:
   persisted here and takes hold at the next boot. `acs` selects which
   orchestrator variant is copied over `node-manager.sh` and is applied at once,
   with a `node-manager` restart.
-- **Dangerous** (brief mesh outage): `mesh_ssid`, `mesh_key`, `ipv4_network` —
-  these rewrite the supplicant configs and restart the supplicants.
+- **Dangerous** (brief mesh outage): `mesh_ssid`, `mesh_key`, `ipv4_network`.
+  These rewrite the supplicant configs and restart the supplicants.
 
 Every key `mesh-config-sync.py` admits must fall into one of those three
 classes. `regulatory_domain` and `acs` were validated and staged but matched no
@@ -1082,7 +1082,7 @@ Also callable by hand for testing: `mesh-config-apply.sh --force`.
 **mesh-config-rollback.sh**
 
 The safety net for dangerous changes. A wrong mesh key takes the mesh down, and
-with it the only way to push a correction — so each node has to be able to undo
+with it the only way to push a correction, so each node has to be able to undo
 the change on its own, with no help from the network.
 
 `arm` snapshots `/etc/mesh.conf` and the supplicant configs, records how many
@@ -1091,23 +1091,23 @@ batman peers the node had, and sets a deadline (default 300 s, `MANET_ROLLBACK_G
 then either commits or restores and restarts the supplicants. State lives in
 `/var/lib` because a dangerous apply can end in a reboot.
 
-A node that had no peers before the change commits rather than rolling back —
+A node that had no peers before the change commits rather than rolling back:
 on a solo bench node "the mesh did not come back" cannot be told apart from
 "there was never anyone there".
 
 ### The whole flow
 
-1. **Stage** — the UI writes a package and broadcasts it on type 70 with
+1. **Stage.** The UI writes a package and broadcasts it on type 70 with
    `activate_at=0`.
-2. **ACK** — every node stages it and writes its ACK version; the node managers
+2. **ACK.** Every node stages it and writes its ACK version; the node managers
    carry that into telemetry, which fills the ACK table. A change to the ACK
    brings the next publish forward so the table fills in seconds.
-3. **Apply** — the operator presses Apply once the table shows 100%.
+3. **Apply.** The operator presses Apply once the table shows 100%.
    `/api/admin/activate` refuses until then; **Force Apply** skips that gate for
    unreachable nodes.
-4. **Activate** — `activate_at` is set 60 s out and rebroadcast, so every node
+4. **Activate.** `activate_at` is set 60 s out and rebroadcast, so every node
    applies at the same moment.
-5. **Trial** — a node whose dangerous settings actually change arms the rollback
+5. **Trial.** A node whose dangerous settings actually change arms the rollback
    first. If its peers come back it commits; if they do not it restores itself.
    **Skip the safety net** in the UI sets `no_rollback` in the package for a
    change the operator wants kept regardless.
@@ -1135,7 +1135,7 @@ spinning.
 
 Boot-progress LED states, and an on-demand neighbor-count blink sequence.
 Both need libgpiod **v2** syntax and both exit 0 immediately if the configured
-GPIO chip does not exist — the pin wiring is not finalized, so on current
+GPIO chip does not exist; the pin wiring is not finalized, so on current
 hardware they are expected to be inactive.
 
 ---
@@ -1149,7 +1149,7 @@ Keeps headless SSH reachable on a provisioned node.
 **mesh-clone-identity.sh**
 
 Detects a provisioned SD card cloned onto different hardware and resets the
-local-only identity and state that must not be shared between nodes — otherwise
+local-only identity and state that must not be shared between nodes; otherwise
 two nodes claim the same IP chunk and the same hostname.
 
 ---
@@ -1188,7 +1188,7 @@ Updates mesh node tools to the latest release from GitHub.
   mtime of `/etc/manet_version.txt`.
 
 The only thing that ever calls it is the networkd-dispatcher carrier hook,
-`carrier.d/50-ethernet-detect` — there is no cron job. That hook runs it once
+`carrier.d/50-ethernet-detect`; there is no cron job. That hook runs it once
 Ethernet gets carrier and a ping succeeds, and only when `/etc/mesh.conf` has
 `auto_update=` set to a true value. See
 [networkd-dispatcher/README.md](../networkd-dispatcher/README.md).
@@ -1204,9 +1204,9 @@ and a published tarball is normally already older than a day.
 
 ## Setup & Provisioning
 
-The first-boot stage that runs before `radio-setup.sh` — apt dependencies, the
+The first-boot stage that runs before `radio-setup.sh` (apt dependencies, the
 install tarball, the Morse firmware, and the base networkd/nftables/radvd
-config — is not in this directory. It is generated as
+config) is not in this directory. It is generated as
 `/usr/local/bin/provision-mesh.sh` from
 [`MANET/provisioning/firstrun.sh.template`](../provisioning/firstrun.sh.template)
 at flash time, with the operator's answers substituted in, and runs from
@@ -1218,7 +1218,7 @@ at flash time, with the operator's answers substituted in, and runs from
 Decides, for one interface, whether a mesh supplicant may start on it right
 now. Installed as an `ExecCondition` on `wpa_supplicant@.service` through
 `/etc/systemd/system/wpa_supplicant@.service.d/10-manet-ap-guard.conf`, so it
-applies to every caller rather than to whichever call site was remembered —
+applies to every caller rather than to whichever call site was remembered;
 twelve places in this directory restart `wpa_supplicant@<iface>` from
 interface lists assembled in different ways.
 
@@ -1226,7 +1226,7 @@ The AP radio legitimately needs a mesh config on disk: in wired EUD mode it is
 always a mesh interface, and in auto mode it joins the mesh whenever an EUD
 appears on Ethernet. Only `ethernet-autodetect.sh` makes that call, and it
 stops hostapd first. Any other start while hostapd holds the radio fails the
-mesh join with -95 and, worse, deinits the netdev on the way out — leaving
+mesh join with -95 and, worse, deinits the netdev on the way out, leaving
 hostapd `active` over a dead BSS, logging nothing.
 
 Exits 0 to allow (not the AP radio, or hostapd is not holding it), 1 to skip.
@@ -1240,14 +1240,14 @@ read by `mesh-status.py` for `/api/local`, and runnable directly. Pass
 
 The carrier boards sit at the edge of their envelope with a HaLow card and a
 PCIe Wi-Fi card drawing at once, and a sagging supply does not announce
-itself — it presents as a radio that will not associate, a USB card that stops
+itself; it presents as a radio that will not associate, a USB card that stops
 answering, or a board that resets with no shutdown in the journal. Hours have
 gone into chasing those as driver bugs.
 
-- **ok** — one line.
-- **notice** — throttling has occurred, but no under-voltage.
-- **warning** — under-voltage or throttling has occurred since boot.
-- **critical** — under-voltage right now.
+- **ok.** One line.
+- **notice.** Throttling has occurred, but no under-voltage.
+- **warning.** Under-voltage or throttling has occurred since boot.
+- **critical.** Under-voltage right now.
 
 Decodes the `vcgencmd get_throttled` bitmask; the sticky bits 16+ matter most,
 because the event that killed a radio is over by the time anyone logs in.
@@ -1258,16 +1258,16 @@ mailbox, such as the Rock 3A. It never exits non-zero.
 
 Answers one question on every SSH login: is this node finished setting itself
 up? Installed as `/etc/update-motd.d/50-manet-provision`, and runnable directly.
-It also reports the outcome of the operator setup scripts, when any were staged
-— see `manet-user-scripts.sh` below.
+It also reports the outcome of the operator setup scripts, when any were staged;
+see `manet-user-scripts.sh` below.
 
-- **running** — a banner saying not to disconnect, with how long it has been going.
-- **incomplete** — a loud banner listing what failed and how to retry.
-- **complete** — a single line with the version and when it finished.
+- **running.** A banner saying not to disconnect, with how long it has been going.
+- **incomplete.** A loud banner listing what failed and how to retry.
+- **complete.** A single line with the version and when it finished.
 
 Reads `/var/lib/manet-provision.state` and `/var/lib/manet-provision.failures`.
 Prints nothing when there is no state file, so nodes provisioned before this
-existed look normal. It never exits non-zero — a motd hook that errors breaks
+existed look normal. It never exits non-zero; a motd hook that errors breaks
 the login banner.
 
 **radio-setup.sh**
@@ -1279,7 +1279,7 @@ First-boot configuration script. Sets up:
 - Optional services (MediaMTX, Mumble).
 - Optional GPS/NTP support through `gpsd`, `gps-reader.service`, and chrony `SHM 0`.
 - Systemd services for node manager.
-- Called once via `radio-setup-run-once.service`, then disabled — **but only if
+- Called once via `radio-setup-run-once.service`, then disabled, **but only if
   everything worked**.
 
 Provisioning takes several reboots and about ten minutes, and every `apt` call
@@ -1300,12 +1300,12 @@ call failed silently behind `|| true`, and the script still touched
 `/var/lib/radio-setup.done`. Nothing on the node said anything was wrong.
 
 The log is opened with `tee -a`, not `tee`. It used to truncate per run, which
-destroyed the history of the run that went wrong — and two overlapping runs
+destroyed the history of the run that went wrong, and two overlapping runs
 interleaved into an unreadable file.
 
 **manet-user-scripts.sh**
 
-Runs the operator's setup scripts — the files placed in
+Runs the operator's setup scripts: the files placed in
 `MANET/provisioning/additional-scripts/` before flashing. They are embedded in
 `firstrun.sh` as one quoted heredoc each and written to
 `/var/lib/manet-user-scripts/` on the first boot. This script runs them **once**,
@@ -1351,7 +1351,7 @@ one is.
 
 The shebang requirement applies on the node as well as at flash time. The
 flasher never embeds a file without one, so the test only affects scripts
-copied onto a live node by hand — but it is required there, because executing a
+copied onto a live node by hand, but it is required there, because executing a
 file with no shebang does not fail. The kernel refuses it and the shell falls
 back to interpreting it, so a configuration file whose lines happen to parse as
 shell would run and report success.
@@ -1365,7 +1365,7 @@ passing through a flasher.
 
 ## Tests
 
-Three unit-test files sit alongside the code they cover — 38 tests, pure Python,
+Three unit-test files sit alongside the code they cover: 38 tests, pure Python,
 no hardware and no node:
 
 | File | Covers |
@@ -1382,8 +1382,8 @@ source ~/.venvs/manet/bin/activate    # bash ../packaging/setup-dev-env.sh
 python -m unittest discover -s MANET/node_tools -p 'test_*.py'
 ```
 
-The venv is not optional for the full run. One case —
-`test_peer_radios.test_channel_fields_survive_encode_decode` — shells out to
+The venv is not optional for the full run. One case,
+`test_peer_radios.test_channel_fields_survive_encode_decode`, shells out to
 `encoder.py`, which imports `NodeInfo_pb2.py`, which needs
 `google.protobuf.internal.builder` from runtime 3.20 or later. A system Python
 with an older protobuf fails that test; a system Python with a *newer* one is

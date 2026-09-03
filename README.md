@@ -45,7 +45,7 @@ The project transforms hardware like a Rock3a or a Raspberry Pi CM4 (recommended
 
 The Pi 5 and Rock 3A both work, but they run too hot for a sealed radio
 enclosure, which is the form factor this project targets. They are no longer the
-focus of testing — the CM4 is. Expect fixes to land and be verified on CM4
+focus of testing; the CM4 is. Expect fixes to land and be verified on CM4
 first.
 
 ## Getting Started
@@ -69,7 +69,7 @@ See [/provisioning/README.md](MANET/provisioning/README.md) for detailed require
 4.  *(Optional)* Place site-specific setup scripts in
     `provisioning/additional-scripts/`. They are validated before anything is written
     to the card, embedded in the image, and run **once as root on the node** after the
-    mesh is up — for static routes, organization SSH keys, or additional packages. See
+    mesh is up: for static routes, organization SSH keys, or additional packages. See
     [Additional setup scripts](MANET/provisioning/additional-scripts/README.md).
 
 ### 3. First Boot
@@ -87,13 +87,13 @@ Insert the storage media into the node and power it on. The `firstrun.sh` script
 Each node serves two things on port 80, reachable from a device connected to
 that node (Ethernet or its AP), or over an SSH port-forward:
 
-* **`http://<node>/`** — status page. Mesh topology, link throughput, per-node
+* **`http://<node>/`**: status page. Mesh topology, link throughput, per-node
   health and detail. No password.
-* **`http://<node>/manage`** — management UI. Radio control, throughput and ping
+* **`http://<node>/manage`**: management UI. Radio control, throughput and ping
   measurement, saved sessions, uplink credentials, and the mesh configuration
   form. Requires the **admin password** chosen at flash time.
 
-Both are restricted to that node's own clients and localhost — not other radios,
+Both are restricted to that node's own clients and localhost, not other radios,
 not other radios' clients, and not the upstream LAN when the node is acting as a
 gateway. Nodes that resolve mDNS can also use `http://manet.local/`.
 
@@ -111,12 +111,12 @@ interface with the role it is playing, connected EUDs, and which services it is 
 
 ### Management UI
 
-**Radio config** — bring each interface up or down and set TX power, per node or across
+**Radio config**: bring each interface up or down and set TX power, per node or across
 the whole mesh at once, plus the HaLow channel.
 
 ![Radio configuration tab](docs/images/webui/manage-radio-config.png)
 
-**Measure** — run iperf3 and ping between any pair of nodes, in either direction, and
+**Measure**: run iperf3 and ping between any pair of nodes, in either direction, and
 save the results against a labeled session so field tests can be compared later.
 
 ![Measurement tab](docs/images/webui/manage-measure.png)

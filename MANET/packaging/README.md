@@ -13,12 +13,12 @@ Two kinds of tarball are built from this repository, for three boards.
 plus the board's kernel, DTBs, modules and Morse firmware from an SBC overlay.
 
 **Tools tarballs** update a node that already runs: `node-update.sh` fetches one
-and extracts it over `/`. Platform-agnostic — the cm4, r3a and rpi5 tools
+and extracts it over `/`. Platform-agnostic: the cm4, r3a and rpi5 tools
 tarballs are byte-identical content, and are only named per board because
 `node-update.sh` asks for its own board's name.
 
 Because it extracts to `/`, this archive can carry **anything that needs to go
-out** — it is not restricted to `node_tools`. Today it carries the node scripts
+out**: it is not restricted to `node_tools`. Today it carries the node scripts
 and version file, systemd units together with their `multi-user.target.wants`
 enable symlinks, udev rules, the networkd-dispatcher hooks, the Lyra plugin and
 model weights, the dashboard assets under `share/manet`, and the journald
@@ -27,9 +27,9 @@ a legitimate payload, and is how a fielded board picks up a conditional fix.
 
 Two deliberate exclusions:
 
-- **Board-specific files** — the SBC overlay (kernel, DTBs, modules, Morse
+- **Board-specific files**: the SBC overlay (kernel, DTBs, modules, Morse
   firmware) and `config.txt`. That is what an install tarball is for.
-- **`MANET/systemd-network/`** — rewriting a live node's interface definitions
+- **`MANET/systemd-network/`**: rewriting a live node's interface definitions
   from under it on a routine update is a different risk class to dropping in a
   new unit, and belongs in a considered migration.
 
@@ -41,7 +41,7 @@ extracting.
 
 The prebuilt binaries under `MANET/binaries_arm64/` are absent for size, not on
 principle; they change far less often than the scripts. `node-update.sh` only
-extracts — it runs no `daemon-reload` and no `udevadm` — so a new unit becomes
+extracts (it runs no `daemon-reload` and no `udevadm`), so a new unit becomes
 active at the next boot through its enable symlink, and anything that has to
 happen sooner does it from a one-shot.
 
@@ -97,7 +97,7 @@ indicates that a later regeneration would produce differences unrelated to the
 
 The build scripts in this directory do **not** invoke protoc; they copy the
 committed `NodeInfo_pb2.py`. The venv is required when editing
-`NodeInfo.proto`, and when running the unit tests — those live with the code
+`NodeInfo.proto`, and when running the unit tests; those live with the code
 they cover, in
 [`MANET/node_tools`](../node_tools/README.md#tests), not here.
 
@@ -149,10 +149,10 @@ artifacts are absent.
 
 Two artifacts, both committed under `MANET/lyra_arm64/`:
 
-- `libgstlyra.so` — the GStreamer plugin (`lyraenc`, `lyradec`, `rtplyrapay`,
+- `libgstlyra.so`: the GStreamer plugin (`lyraenc`, `lyradec`, `rtplyrapay`,
   `rtplyradepay`), statically linked against Lyra, TFLite and abseil, so its only
   runtime needs are glibc, libstdc++ and GStreamer itself.
-- `model_coeffs/` — the Lyra v2 model weights, loaded at pipeline build.
+- `model_coeffs/`: the Lyra v2 model weights, loaded at pipeline build.
 
 They are built in two stages, and the split is not arbitrary:
 
@@ -175,7 +175,7 @@ cp -r ~/lyra-aarch64-build/out/model_coeffs MANET/lyra_arm64/
 
 Stage 1 output is only needed to produce stage 2; it does not ship. Verify on a
 node with `gst-inspect-1.0 lyraenc`, and check `journalctl -u mesh-voice` for the
-fallback line — the daemon reports the codec it actually built with, and the
+fallback line: the daemon reports the codec it actually built with, and the
 VOICE tab flags a mismatch in red.
 
 ## Overlays are built locally
@@ -192,7 +192,7 @@ CM4 and Rock 3A are built by `kernel-work/real_work/build-{cm4,r3a}.sh`.
 RPi5 used to be a CI-driven path: a GitHub Actions workflow pulled an
 `rpi5-sbc-overlay.tar.gz` release asset, built the install tarball and published
 it as a release on every push. That workflow was removed. It had been failing on
-every push since 2026-08-12 — the overlay release it downloaded no longer exists,
+every push since 2026-08-12: the overlay release it downloaded no longer exists,
 its verification step listed `perf-dashboard.py`, which the web UI merge deleted,
 and it pinned kernel `6.6.78-manet+` against an overlay now at `6.18.33-manet`.
 Build the RPi5 tarball locally like the other two, or set `SBC_OVERLAY_DIR`.
@@ -205,7 +205,7 @@ provisioning fetches it by exact filename.
 
 ## Before releasing
 
-- Bump **both** version files together — `MANET/etc/manet_version.txt` and
+- Bump **both** version files together: `MANET/etc/manet_version.txt` and
   `MANET/node_tools/version.txt`. `node-update.sh` treats only equality as
   "up to date", so a mismatch makes every node update itself in a loop.
 - Changes under `MANET/provisioning/` never need a repackage; they are baked
