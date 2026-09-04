@@ -1037,10 +1037,88 @@ function Select-HardwareAndTargetDevice {
 # script into an image is a wasted flash and a node that silently does not do
 # what the operator asked; failing here costs nothing.
 
+# Read an operator script and put right the things a Windows editor does to a
+# file without telling anyone. Returns the corrected text, a list of what was
+# corrected so it can be reported, and a hard error for the things that cannot
+# be guessed at.
+#
+# The corrections happen in memory. The operator's file is never rewritten:
+# they wrote it, and a flasher that silently edits the input is worse than one
+# that explains itself.
+function Read-AdditionalScriptContent {
+    param([string]$Path)
+
+    $result = @{ Ok = $true; Reason = ''; Text = ''; Fixes = @() }
+    $fixes  = New-Object System.Collections.ArrayList
+
+    # Not FileInfo.Length: Get-ChildItem fills that from the directory entry,
+    # which Windows updates lazily, so a file an editor has only just written
+    # can still read as zero bytes.
+    $bytes = [System.IO.File]::ReadAllBytes($Path)
+
+    if ($bytes.Length -eq 0) {
+        return @{ Ok = $false; Reason = 'empty file'; Text = ''; Fixes = @() }
+    }
+
+    # Encoding, decided by the byte order mark the editor left behind. Notepad
+    # writes one for "UTF-8 with BOM" and for "Unicode", which is UTF-16 LE.
+    $strict = New-Object System.Text.UTF8Encoding($false, $true)
+    $text   = $null
+
+    if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) {
+        # A BOM sits in front of the shebang, where the kernel does not look,
+        # so the node would run nothing at all.
+        try { $text = $strict.GetString($bytes, 3, $bytes.Length - 3) }
+        catch { return @{ Ok = $false; Reason = 'not valid UTF-8 text'; Text = ''; Fixes = @() } }
+        [void]$fixes.Add('byte order mark removed')
+
+    } elseif ($bytes.Length -ge 2 -and $bytes[0] -eq 0xFF -and $bytes[1] -eq 0xFE) {
+        $text = (New-Object System.Text.UnicodeEncoding($false, $false)).GetString($bytes, 2, $bytes.Length - 2)
+        [void]$fixes.Add('converted from UTF-16')
+
+    } elseif ($bytes.Length -ge 2 -and $bytes[0] -eq 0xFE -and $bytes[1] -eq 0xFF) {
+        $text = (New-Object System.Text.UnicodeEncoding($true, $false)).GetString($bytes, 2, $bytes.Length - 2)
+        [void]$fixes.Add('converted from UTF-16')
+
+    } else {
+        # Strict: throw on anything that is not valid UTF-8 rather than
+        # silently substituting U+FFFD and shipping mangled bytes to the node.
+        # Nothing is guessed here. An encoding with no mark could be any of a
+        # dozen code pages and picking wrong corrupts the script quietly.
+        try { $text = $strict.GetString($bytes) }
+        catch { return @{ Ok = $false; Reason = 'not valid UTF-8 text'; Text = ''; Fixes = @() } }
+    }
+
+    # After decoding, not before: a UTF-16 file is full of zero bytes that are
+    # not NULs in the text at all. A heredoc is a byte stream through bash, and
+    # bash cannot carry a real NUL. This is the one hard technical limit.
+    $nulAt = $text.IndexOf([char]0)
+    if ($nulAt -ge 0) {
+        return @{ Ok = $false
+                  Reason = "binary content (NUL byte at offset $nulAt) - fetch binaries at run time"
+                  Text = ''; Fixes = @() }
+    }
+
+    # A shebang with a trailing CR makes the kernel look for an interpreter
+    # whose name ends in CR, and the script dies with a bare "not found" that
+    # names the right path.
+    $lf = $text -replace "`r`n", "`n" -replace "`r", "`n"
+    if ($lf -ne $text) { [void]$fixes.Add('Windows line endings converted') }
+    $text = $lf
+
+    # A file with no trailing newline would glue the heredoc delimiter onto its
+    # last line, and the delimiter would not be recognised.
+    if (-not $text.EndsWith("`n")) {
+        $text += "`n"
+        [void]$fixes.Add('missing final newline added')
+    }
+
+    $result.Text  = $text
+    $result.Fixes = $fixes.ToArray()
+    return $result
+}
+
 # Syntax-check a shell script if any Linux shell is reachable from Windows.
-# Returns $null when there is no way to check - the same graceful degradation
-# Get-LinuxPasswordHash uses. An unchecked script still gets every other test;
-# only the parse is skipped, and the operator is told so once.
 function Test-ShellSyntax {
     param([string]$Path)
 
@@ -1069,8 +1147,6 @@ function Test-ShellSyntax {
     return $null
 }
 
-# Is this file safe to embed in a quoted heredoc, and does it look like a
-# script? Returns a hashtable with Verdict (OK/SKIP/FAIL) and Reason.
 function Test-AdditionalScript {
     param([System.IO.FileInfo]$File)
 
@@ -1079,48 +1155,17 @@ function Test-AdditionalScript {
     if ($File.Name -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') {
         return @{ Verdict = 'FAIL'; Reason = 'filename must match [A-Za-z0-9][A-Za-z0-9._-]*' }
     }
-    # Read the bytes before deciding anything about size. Get-ChildItem fills
-    # FileInfo.Length from the directory entry, and Windows updates that
-    # lazily: a file an editor has only just written can still be reported as
-    # zero bytes, and a perfectly good script gets called empty. ReadAllBytes
-    # opens the file and gets the truth.
-    $bytes = [System.IO.File]::ReadAllBytes($File.FullName)
 
-    if ($bytes.Length -eq 0) {
-        return @{ Verdict = 'FAIL'; Reason = 'empty file' }
-    }
+    $read = Read-AdditionalScriptContent -Path $File.FullName
+    if (-not $read.Ok) { return @{ Verdict = 'FAIL'; Reason = $read.Reason } }
 
-    # A UTF-8 byte order mark sits in front of the shebang, where the kernel
-    # will not look past it, so the node would run nothing at all. Windows
-    # editors write one whenever "UTF-8 with BOM" is chosen and it is invisible
-    # once written, so say so plainly rather than reporting a missing shebang
-    # to somebody who can plainly see one.
-    if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) {
-        return @{ Verdict = 'FAIL'
-                  Reason  = 'starts with a UTF-8 byte order mark - save it as UTF-8 without BOM' }
-    }
-
-    # A heredoc is a byte stream through bash, and bash cannot carry NUL.
-    # This is the one hard technical limit on what can be embedded.
-    $nulAt = [Array]::IndexOf($bytes, [byte]0)
-    if ($nulAt -ge 0) {
-        return @{ Verdict = 'FAIL'
-                  Reason  = "binary content (NUL byte at offset $nulAt) - fetch binaries at run time" }
-    }
-
-    # Strict UTF-8: throw on anything that is not valid, rather than silently
-    # substituting U+FFFD and shipping mangled bytes to the node.
-    try {
-        $enc  = New-Object System.Text.UTF8Encoding($false, $true)
-        $text = $enc.GetString($bytes)
-    } catch {
-        return @{ Verdict = 'FAIL'; Reason = 'not valid UTF-8 text' }
-    }
+    $text  = $read.Text
+    $fixed = if ($read.Fixes.Count -gt 0) { " [" + ($read.Fixes -join ', ') + "]" } else { "" }
 
     # Shebang decides whether this is a script at all. No shebang is a skip,
     # not an error: a README or a notes file living in the directory is
     # perfectly reasonable and must not be executed as root on a mesh node.
-    $firstLine = ($text -split "`n", 2)[0].TrimEnd("`r")
+    $firstLine = ($text -split "`n", 2)[0]
     if (-not $firstLine.StartsWith('#!')) {
         return @{ Verdict = 'SKIP'; Reason = 'no #! on line 1' }
     }
@@ -1136,55 +1181,60 @@ function Test-AdditionalScript {
         $note = " - $interp is not installed on a stock node"
     }
 
-    # Any interpreter is accepted. Only those that can be checked *without
-    # executing the script* are checked: shell via `bash -n`, python via
-    # ast.parse. perl is deliberately excluded - `perl -c` executes BEGIN
-    # blocks and resolves `use` against the host's module path, so it would run
-    # operator code on the wrong machine and fail wrongly on modules that exist
-    # only on the node. A wrong FAIL blocks a flash.
-    switch -Regex ($interp) {
-        '^(sh|bash|dash)$' {
-            $syntaxError = Test-ShellSyntax -Path $File.FullName
-            if ($null -eq $syntaxError) {
-                return @{ Verdict = 'OK'; Reason = "shell (not syntax-checked, no bash here)$note" }
+    # Checked against the corrected text, not the file on disk. A UTF-16 file
+    # would choke bash before it got as far as the syntax.
+    $tmp = [System.IO.Path]::GetTempFileName()
+    [System.IO.File]::WriteAllText($tmp, $text, (New-Object System.Text.UTF8Encoding($false)))
+
+    try {
+        # Any interpreter is accepted. Only those that can be checked *without
+        # executing the script* are checked: shell via `bash -n`, python via
+        # ast.parse. perl is deliberately excluded - `perl -c` executes BEGIN
+        # blocks and resolves `use` against the host's module path, so it would
+        # run operator code on the wrong machine and fail wrongly on modules
+        # that exist only on the node. A wrong FAIL blocks a flash.
+        switch -Regex ($interp) {
+            '^(sh|bash|dash)$' {
+                $syntaxError = Test-ShellSyntax -Path $tmp
+                if ($null -eq $syntaxError) {
+                    return @{ Verdict = 'OK'; Reason = "shell (not syntax-checked, no bash here)$note$fixed" }
+                }
+                if ($syntaxError -ne "") {
+                    return @{ Verdict = 'FAIL'; Reason = "shell syntax error: $syntaxError" }
+                }
+                return @{ Verdict = 'OK'; Reason = "bash -n clean$note$fixed" }
             }
-            if ($syntaxError -ne "") {
-                return @{ Verdict = 'FAIL'; Reason = "shell syntax error: $syntaxError" }
-            }
-            return @{ Verdict = 'OK'; Reason = "bash -n clean$note" }
-        }
-        '^python[23]?$' {
-            $py = Get-Command python3 -ErrorAction SilentlyContinue
-            if (-not $py) { $py = Get-Command python -ErrorAction SilentlyContinue }
-            if ($py) {
-                $code = @'
+            '^python[23]?$' {
+                $py = Get-Command python3 -ErrorAction SilentlyContinue
+                if (-not $py) { $py = Get-Command python -ErrorAction SilentlyContinue }
+                if ($py) {
+                    $code = @'
 import ast,sys
 try:
     ast.parse(open(sys.argv[1], encoding="utf-8", errors="replace").read())
 except SyntaxError as e:
     sys.stderr.write("line %s: %s" % (e.lineno, e.msg)); sys.exit(1)
 '@
-                $tmp = [System.IO.Path]::GetTempFileName() + '.py'
-                [System.IO.File]::WriteAllText($tmp, $code)
-                $err = & $py.Source $tmp $File.FullName 2>&1
-                Remove-Item $tmp -Force -ErrorAction SilentlyContinue
-                if ($LASTEXITCODE -ne 0) {
-                    return @{ Verdict = 'FAIL'
-                              Reason  = "python syntax error: $(($err | Out-String).Trim())" }
+                    $checker = [System.IO.Path]::GetTempFileName() + '.py'
+                    [System.IO.File]::WriteAllText($checker, $code)
+                    $err = & $py.Source $checker $tmp 2>&1
+                    Remove-Item $checker -Force -ErrorAction SilentlyContinue
+                    if ($LASTEXITCODE -ne 0) {
+                        return @{ Verdict = 'FAIL'
+                                  Reason  = "python syntax error: $(($err | Out-String).Trim())" }
+                    }
+                    return @{ Verdict = 'OK'; Reason = "python syntax clean$note$fixed" }
                 }
-                return @{ Verdict = 'OK'; Reason = "python syntax clean$note" }
+                return @{ Verdict = 'OK'; Reason = "$interp (not syntax-checked, no python here)$note$fixed" }
             }
-            return @{ Verdict = 'OK'; Reason = "$interp (not syntax-checked, no python here)$note" }
         }
-    }
 
-    return @{ Verdict = 'OK'; Reason = "$interp (not syntax-checked)$note" }
+        return @{ Verdict = 'OK'; Reason = "$interp (not syntax-checked)$note$fixed" }
+    } finally {
+        Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+    }
 }
 
-# The validation pass, with no printing and no exiting, so the console flow and
-# the window front end can present the same verdicts their own way. Returns
-# every candidate with its verdict plus the totals the caller needs to decide
-# whether to go on.
 function Get-AdditionalScriptReport {
     $report = [pscustomobject]@{
         Directory   = $ADDITIONAL_SCRIPTS_DIR
@@ -1351,17 +1401,10 @@ function Get-AdditionalScriptsBlock {
     [void]$sb.Append("mkdir -p /var/lib/manet-user-scripts`n")
 
     foreach ($file in $Script:ADDITIONAL_SCRIPTS) {
-        # CRLF is stripped for the same reason the flasher does it to the
-        # template: a shebang with a trailing CR makes the kernel look for an
-        # interpreter whose name ends in CR, and the script dies with a bare
-        # "not found" that names the right path.
-        $enc     = New-Object System.Text.UTF8Encoding($false, $true)
-        $content = $enc.GetString([System.IO.File]::ReadAllBytes($file.FullName))
-        # Validation rejects a byte order mark, so this only ever fires if that
-        # were bypassed. It costs one line and the alternative is a script the
-        # node cannot execute at all.
-        $content = $content.TrimStart([char]0xFEFF)
-        $content = $content -replace "`r`n", "`n" -replace "`r", "`n"
+        # The same reader the validator used, so what lands on the card is
+        # exactly what was checked: byte order mark gone, UTF-16 decoded, LF
+        # line endings, and a trailing newline the heredoc delimiter needs.
+        $content = (Read-AdditionalScriptContent -Path $file.FullName).Text
 
         $delim = Get-HeredocDelimiter -Lines ($content -split "`n")
         if ($null -eq $delim) {
@@ -1369,9 +1412,6 @@ function Get-AdditionalScriptsBlock {
             exit 1
         }
 
-        # A file with no trailing newline would otherwise glue the delimiter
-        # onto its last line and the heredoc would never close.
-        if (-not $content.EndsWith("`n")) { $content += "`n" }
 
         [void]$sb.Append("`n")
         [void]$sb.Append("cat > '/var/lib/manet-user-scripts/$($file.Name)' << '$delim'`n")
