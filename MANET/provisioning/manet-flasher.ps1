@@ -2000,8 +2000,22 @@ function Build-Window {
     $Script:BtnNext.Font = $UI.FontBold
     $footer.Controls.Add($Script:BtnNext)
 
-    $Script:LblFooterNote = New-Text 'Saved settings live in .mesh-configs, next to this script, and the Linux flasher reads them.' 20 72 798 18 $UI.FontSmall $UI.Muted
-    $footer.Controls.Add($Script:LblFooterNote)
+    # The launcher may well have moved itself into a folder the user has not
+    # seen, and that folder is where their saved settings and their own setup
+    # scripts live. Naming it, and opening it on a click, is the answer to
+    # "where did my file go".
+    $Script:LnkFolder             = New-Object System.Windows.Forms.LinkLabel
+    $Script:LnkFolder.Location    = New-Object System.Drawing.Point(20, 72)
+    $Script:LnkFolder.Size        = New-Object System.Drawing.Size(798, 18)
+    $Script:LnkFolder.Font        = $UI.FontSmall
+    $Script:LnkFolder.LinkColor   = $UI.Header
+    $Script:LnkFolder.AutoEllipsis = $true
+    $Script:LnkFolder.Text        = "Settings and setup scripts live in  $ScriptDir"
+    $Script:LnkFolder.LinkArea    = New-Object System.Windows.Forms.LinkArea(36, $ScriptDir.Length)
+    $Script:LnkFolder.Add_LinkClicked({
+        try { Start-Process explorer.exe $ScriptDir } catch { }
+    })
+    $footer.Controls.Add($Script:LnkFolder)
 
     # The heartbeat for every long job. 90 ms is short enough that a progress
     # bar looks continuous and long enough that the stepping itself is not the
