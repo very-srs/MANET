@@ -1133,8 +1133,98 @@ SERVICE_EOF
 
 # Is this file safe to embed in a quoted heredoc, and does it look like a
 # script? Echoes a verdict word plus a reason. Never modifies the file.
+# Read an operator script and put right the things a Windows editor does to a
+# file without telling anyone. Writes the corrected text to $2 and echoes the
+# list of corrections, comma separated, so they can be reported. Returns 1 with
+# the reason on stdout for the things that cannot be guessed at.
+#
+# The corrections happen on a copy. The operator's file is never rewritten:
+# they wrote it, and a flasher that silently edits the input is worse than one
+# that explains itself.
+#
+# Must stay in step with Read-AdditionalScriptContent in windows.ps1, which
+# does exactly this. The two flashers are meant to produce the same image.
+normalize_additional_script() {
+    local src="$1" dst="$2"
+    local fixes=() head3
+
+    if [ ! -s "$src" ]; then
+        echo "empty file"; return 1
+    fi
+
+    # Encoding, decided by the byte order mark the editor left behind. Notepad
+    # writes one for "UTF-8 with BOM" and for "Unicode", which is UTF-16 LE.
+    head3=$(head -c 3 "$src" | od -An -tx1 | tr -d ' \n')
+
+    case "$head3" in
+        efbbbf*)
+            # A BOM sits in front of the shebang, where the kernel does not
+            # look, so the node would run nothing at all.
+            tail -c +4 "$src" > "$dst"
+            fixes+=("byte order mark removed")
+            ;;
+        fffe*|feff*)
+            if ! command -v iconv >/dev/null 2>&1; then
+                echo "UTF-16 text and no iconv here to convert it - save it as UTF-8"; return 1
+            fi
+            if ! iconv -f UTF-16 -t UTF-8 "$src" > "$dst" 2>/dev/null; then
+                echo "not valid UTF-16 text"; return 1
+            fi
+            fixes+=("converted from UTF-16")
+            ;;
+        *)
+            cat "$src" > "$dst"
+            ;;
+    esac
+
+    # After decoding, not before: a UTF-16 file is full of zero bytes that are
+    # not NULs in the text at all. A heredoc is a byte stream through bash, and
+    # bash cannot carry a real NUL. This is the one hard technical limit.
+    #
+    # Detected by size comparison rather than `grep -P '\x00'`, which needs a
+    # PCRE-capable grep that is not guaranteed on every host. `tr -d` is POSIX.
+    # This cannot be left to the UTF-8 check below: U+0000 is perfectly valid
+    # UTF-8, so iconv accepts it happily.
+    local raw_bytes text_bytes nul_at
+    raw_bytes=$(wc -c < "$dst")
+    text_bytes=$(tr -d '\000' < "$dst" | wc -c)
+    if [ "$raw_bytes" -ne "$text_bytes" ]; then
+        nul_at=$(LC_ALL=C grep -aobUP '\x00' "$dst" 2>/dev/null | head -1 | cut -d: -f1)
+        echo "binary content${nul_at:+ (NUL byte at offset $nul_at)} - fetch binaries at run time"
+        return 1
+    fi
+
+    # Nothing is guessed here. An encoding with no mark could be any of a dozen
+    # code pages and picking wrong corrupts the script quietly.
+    if command -v iconv >/dev/null 2>&1; then
+        if ! iconv -f UTF-8 -t UTF-8 "$dst" >/dev/null 2>&1; then
+            echo "not valid UTF-8 text"; return 1
+        fi
+    fi
+
+    # A shebang with a trailing CR makes the kernel look for an interpreter
+    # whose name ends in CR, and the script dies with a bare "not found" that
+    # names the right path. The second expression catches a lone CR, which is
+    # what windows.ps1's second -replace does.
+    if LC_ALL=C grep -q $'\r' "$dst" 2>/dev/null; then
+        sed -e 's/\r$//' -e 's/\r/\n/g' "$dst" > "$dst.lf" && mv "$dst.lf" "$dst"
+        fixes+=("Windows line endings converted")
+    fi
+
+    # A file with no trailing newline would glue the heredoc delimiter onto its
+    # last line, and the delimiter would not be recognised.
+    if [ -n "$(tail -c 1 "$dst")" ]; then
+        printf '\n' >> "$dst"
+        fixes+=("missing final newline added")
+    fi
+
+    local IFS=,
+    echo "${fixes[*]}"
+    return 0
+}
+
 classify_additional_script() {
-    local f="$1" name shebang
+    local f="$1" name shebang tmp fixes fixed interp note
     name=$(basename "$f")
 
     # Filename becomes a path on the node and appears in a shell heredoc
@@ -1142,61 +1232,37 @@ classify_additional_script() {
     if ! [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
         echo "FAIL filename must match [A-Za-z0-9][A-Za-z0-9._-]*"; return
     fi
-    if [ ! -s "$f" ]; then
-        echo "FAIL empty file"; return
-    fi
 
-    # A UTF-8 byte order mark sits in front of the shebang, where the kernel
-    # will not look past it, so the node would run nothing at all. Windows
-    # editors write one whenever "UTF-8 with BOM" is chosen and it is invisible
-    # once written, so say so plainly rather than reporting a missing shebang
-    # to somebody who can plainly see one. od is POSIX; xxd is not.
-    if [ "$(head -c 3 "$f" | od -An -tx1 | tr -d ' \n')" = "efbbbf" ]; then
-        echo "FAIL starts with a UTF-8 byte order mark - save it as UTF-8 without BOM"; return
-    fi
+    tmp=$(mktemp) || { echo "FAIL could not create a temporary file"; return; }
 
-    # A heredoc is a byte stream through bash, and bash cannot carry NUL.
-    # This is the one hard technical limit on what can be embedded.
-    #
-    # Detected by size comparison rather than `grep -P '\x00'`, which needs a
-    # PCRE-capable grep that is not guaranteed on every host that can run this
-    # script. `tr -d` is in POSIX. Note this cannot be left to the UTF-8 check
-    # below: U+0000 is perfectly valid UTF-8, so iconv accepts it happily.
-    local raw_bytes text_bytes
-    raw_bytes=$(wc -c < "$f")
-    text_bytes=$(tr -d '\000' < "$f" | wc -c)
-    if [ "$raw_bytes" -ne "$text_bytes" ]; then
-        # Offset is a nicety; only report one if this grep can find it.
-        local nul_at
-        nul_at=$(LC_ALL=C grep -aobUP '\x00' "$f" 2>/dev/null | head -1 | cut -d: -f1)
-        echo "FAIL binary content${nul_at:+ (NUL byte at offset $nul_at)} - fetch binaries at run time"
-        return
+    # Everything below is judged on the corrected copy, never the original.
+    # A UTF-16 file would choke bash -n before it got as far as the syntax.
+    if ! fixes=$(normalize_additional_script "$f" "$tmp"); then
+        rm -f "$tmp"
+        echo "FAIL $fixes"; return
     fi
-
-    # Invalid UTF-8 would reach the node as mangled bytes. Skipped rather than
-    # failed when iconv is absent: the NUL check above is the one that protects
-    # the heredoc itself, and refusing a flash over a missing tool is worse
-    # than shipping a script the operator already tested.
-    if command -v iconv >/dev/null 2>&1; then
-        if ! iconv -f UTF-8 -t UTF-8 "$f" >/dev/null 2>&1; then
-            echo "FAIL not valid UTF-8 text"; return
-        fi
-    fi
+    fixed=""
+    [ -n "$fixes" ] && fixed=" [${fixes//,/, }]"
 
     # Shebang decides whether this is a script at all. No shebang is a skip,
     # not an error: a README or a notes file living in the directory is
     # perfectly reasonable and must not be executed as root on a mesh node.
-    shebang=$(head -1 "$f" | tr -d '\r')
+    shebang=$(head -1 "$tmp")
     if [[ "$shebang" != '#!'* ]]; then
-        echo "SKIP no #! on line 1"; return
+        rm -f "$tmp"; echo "SKIP no #! on line 1"; return
     fi
 
     # The interpreter, as a bare name: "#!/usr/bin/env python3" -> python3,
     # "#!/usr/bin/perl -w" -> perl. Used for the syntax check below and for the
     # availability note.
-    local interp
     interp=$(echo "${shebang#\#!}" | awk '{ if ($1 ~ /\/env$/) print $2; else print $1 }')
     interp=$(basename "${interp:-sh}")
+
+    note=""
+    case " $ADDITIONAL_SCRIPTS_NODE_INTERPRETERS " in
+        *" $interp "*) ;;
+        *) note=" - $interp is not installed on a stock node" ;;
+    esac
 
     # Any interpreter is accepted. Only some can be syntax-checked, and only
     # those that can be checked without executing the script:
@@ -1206,23 +1272,18 @@ classify_additional_script() {
     #
     # perl is deliberately not checked. `perl -c` executes BEGIN blocks, which
     # would run operator code on the flashing host, and it resolves `use`
-    # statements against the host's module path -- so a script using a module
+    # statements against the host's module path, so a script using a module
     # present on the node but not here would be failed wrongly. A wrong FAIL
     # blocks a flash, which is worse than an unchecked script.
-    local note=""
-    case " $ADDITIONAL_SCRIPTS_NODE_INTERPRETERS " in
-        *" $interp "*) ;;
-        *) note=" — $interp is not installed on a stock node" ;;
-    esac
-
     case "$interp" in
         sh|bash|dash)
             local errs
-            if ! errs=$(bash -n "$f" 2>&1); then
+            if ! errs=$(bash -n "$tmp" 2>&1); then
+                rm -f "$tmp"
                 echo "FAIL shell syntax error: $(echo "$errs" | head -1 | sed 's|^[^:]*: ||')"
                 return
             fi
-            echo "OK bash -n clean$note"; return
+            rm -f "$tmp"; echo "OK bash -n clean$note$fixed"; return
             ;;
         python|python3|python2)
             if command -v python3 >/dev/null 2>&1; then
@@ -1232,16 +1293,18 @@ try:
 except SyntaxError as e:
     sys.stderr.write("line %s: %s" % (e.lineno, e.msg)); sys.exit(1)'
                 local perrs
-                if ! perrs=$(python3 -c "$pycheck" "$f" 2>&1); then
+                if ! perrs=$(python3 -c "$pycheck" "$tmp" 2>&1); then
+                    rm -f "$tmp"
                     echo "FAIL python syntax error: $perrs"
                     return
                 fi
-                echo "OK python syntax clean$note"; return
+                rm -f "$tmp"; echo "OK python syntax clean$note$fixed"; return
             fi
-            echo "OK $interp (not syntax-checked, no python3 here)$note"; return
+            rm -f "$tmp"; echo "OK $interp (not syntax-checked, no python3 here)$note$fixed"; return
             ;;
     esac
-    echo "OK $interp (not syntax-checked)$note"
+    rm -f "$tmp"
+    echo "OK $interp (not syntax-checked)$note$fixed"
 }
 
 validate_additional_scripts() {
@@ -1368,29 +1431,38 @@ append_additional_scripts() {
             echo 'mkdir -p /var/lib/manet-user-scripts'
         } > "$block"
 
-        local name path delim
+        local name path delim tmp
         for name in "${ADDITIONAL_SCRIPTS[@]}"; do
             path="$ADDITIONAL_SCRIPTS_DIR/$name"
-            delim=$(heredoc_delimiter_for "$path")
+            tmp=$(mktemp)
+
+            # The same corrections the validator applied, so what lands on the
+            # card is exactly what was checked: byte order mark gone, UTF-16
+            # decoded, LF line endings, and the trailing newline the heredoc
+            # delimiter needs to be recognised.
+            if ! normalize_additional_script "$path" "$tmp" >/dev/null; then
+                echo "ERROR: $name could not be read" >&2
+                rm -f "$tmp" "$block"
+                exit 1
+            fi
+
+            # Chosen from the corrected text, not the original: a delimiter
+            # that only collides once the CRs are gone would truncate the
+            # heredoc on the node.
+            delim=$(heredoc_delimiter_for "$tmp")
             if [ -z "$delim" ]; then
                 echo "ERROR: could not find a safe heredoc delimiter for $name" >&2
-                rm -f "$block"
+                rm -f "$tmp" "$block"
                 exit 1
             fi
             {
                 echo ""
                 echo "cat > '/var/lib/manet-user-scripts/$name' << '$delim'"
-                # CRLF is stripped for the same reason the flasher does it to
-                # the template: a shebang with a trailing CR makes the kernel
-                # look for an interpreter whose name ends in CR, and the script
-                # dies with a bare "not found" naming the right path.
-                tr -d '\r' < "$path"
-                # A file with no trailing newline would otherwise glue the
-                # delimiter onto its last line and the heredoc would never close.
-                [ -n "$(tail -c 1 "$path")" ] && echo ""
+                cat "$tmp"
                 echo "$delim"
                 echo "chmod 0755 '/var/lib/manet-user-scripts/$name'"
             } >> "$block"
+            rm -f "$tmp"
         done
 
         {

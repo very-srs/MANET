@@ -114,7 +114,7 @@ The flasher checks each file **before anything is written to a card**:
 | Filename `[A-Za-z0-9][A-Za-z0-9._-]*` | FAIL |
 | Non-empty | FAIL |
 | No NUL bytes | FAIL: binaries cannot go in a heredoc |
-| Valid UTF-8 | FAIL |
+| Valid UTF-8, or UTF-16 with a byte order mark | FAIL if neither |
 | `#!` on line 1 | SKIP, with a notice |
 | Interpreter present on a stock node | reported, not rejected |
 | `bash -n` clean (shell shebangs) | FAIL |
@@ -137,8 +137,33 @@ languages are accepted at their shebang and reported as
 > these come from Git for Windows, WSL, or a Python installation. When one is
 > absent the script is still embedded and the report says so.
 
-CRLF line endings are stripped automatically, so a script written in a Windows
-editor works.
+## Written on Windows
+
+A script written in Notepad or any other Windows editor works as it is. The
+flasher corrects these before it checks anything, and names each correction in
+the report so nothing happens silently:
+
+| What the editor did | What the flasher does |
+|---------------------|-----------------------|
+| CRLF line endings | converted to LF |
+| Saved as "UTF-8 with BOM" | byte order mark removed |
+| Saved as "Unicode", which is UTF-16 | converted to UTF-8 |
+| No newline on the last line | one added |
+
+So a file saved every wrong way still reports, for example,
+`ok  bash -n clean [byte order mark removed, Windows line endings converted]`.
+
+**Your file is never rewritten.** The corrections are made to a copy on the way
+into the image; what is on your disk is left exactly as you saved it.
+
+Two of these are not cosmetic. A byte order mark sits in front of the `#!`,
+where the kernel does not look, so the node would run nothing at all; and a
+shebang ending in CR makes the kernel hunt for an interpreter whose name ends
+in a carriage return, which fails with a "not found" naming the right path.
+
+What is **not** guessed at is a file with no byte order mark that is not valid
+UTF-8. That could be any of a dozen code pages, and picking the wrong one
+corrupts the script quietly, so it is rejected instead.
 
 ## Data files
 
