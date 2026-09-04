@@ -130,8 +130,7 @@ runs `BEGIN` blocks, which would execute operator code on the flashing machine,
 and it resolves `use` statements against that machine's module path, so a
 script using a module present only on the node would be rejected incorrectly. A
 wrong rejection blocks a flash, which is worse than an unchecked script. Other
-languages are accepted at their shebang and reported as
-`not syntax-checked`.
+languages are accepted at their shebang and reported as `not checked`.
 
 > The shell check needs `bash` and the Python check needs `python3`. On Windows
 > these come from Git for Windows, WSL, or a Python installation. When one is

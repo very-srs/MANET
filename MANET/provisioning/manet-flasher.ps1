@@ -1520,6 +1520,24 @@ function Copy-EngineToPage {
 # Page 4: operator setup scripts
 # ============================================================
 
+# Widen each column to whatever it is actually showing, but never below the
+# width it was laid out with. A Details list view silently truncates with an
+# ellipsis, so a reason that does not fit simply is not readable, and the
+# operator has no way to see the rest. Overflowing into a horizontal scrollbar
+# is the lesser evil.
+function Expand-ListViewColumns {
+    param($List, [int[]]$Minimums)
+
+    if (-not $List -or $List.Items.Count -eq 0) { return }
+    for ($i = 0; $i -lt $List.Columns.Count; $i++) {
+        $floor = if ($i -lt $Minimums.Count) { S $Minimums[$i] } else { 0 }
+        try {
+            $List.AutoResizeColumn($i, [System.Windows.Forms.ColumnHeaderAutoResizeStyle]::ColumnContent)
+        } catch { }
+        if ($List.Columns[$i].Width -lt $floor) { $List.Columns[$i].Width = $floor }
+    }
+}
+
 function Build-ScriptsPage {
     $p = New-ContentPanel
 
@@ -1530,9 +1548,9 @@ function Build-ScriptsPage {
     $Script:LvScripts.FullRowSelect = $true
     $Script:LvScripts.GridLines     = $false
     $Script:LvScripts.Font          = $Script:UI.Font
-    [void]$Script:LvScripts.Columns.Add('File', (S 250))
-    [void]$Script:LvScripts.Columns.Add('', (S 90))
-    [void]$Script:LvScripts.Columns.Add('Why', (S 434))
+    [void]$Script:LvScripts.Columns.Add('File', (S 210))
+    [void]$Script:LvScripts.Columns.Add('', (S 85))
+    [void]$Script:LvScripts.Columns.Add('Why', (S 495))
     $p.Controls.Add($Script:LvScripts)
 
     $Script:LblScriptsSummary = New-Text '' 20 264 798 56 $Script:UI.Font $Script:UI.Text
@@ -1583,6 +1601,8 @@ function Update-ScriptsPage {
         $item.ForeColor = switch ($r.Verdict) { 'OK' { $Script:UI.Good } 'SKIP' { $Script:UI.Muted } 'FAIL' { $Script:UI.Bad } }
         [void]$Script:LvScripts.Items.Add($item)
     }
+
+    Expand-ListViewColumns -List $Script:LvScripts -Minimums @(210, 85, 495)
 
     $rep = $Script:ScriptReport
     if ($rep.Results.Count -eq 0) {
@@ -1668,6 +1688,8 @@ function Update-TargetPage {
         [void]$Script:LvDisks.Items.Add($item)
         if ($sel -and $item.Text -eq $sel) { $item.Selected = $true }
     }
+
+    Expand-ListViewColumns -List $Script:LvDisks -Minimums @(50, 300, 90, 110, 224)
 
     if ($Script:LvDisks.Items.Count -eq 0) {
         $Script:LblDiskWarn.Text = 'No card found. Plug in the card reader, or for a CM4 use the button above, then choose Look again.'

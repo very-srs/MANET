@@ -1208,14 +1208,14 @@ normalize_additional_script() {
     # what windows.ps1's second -replace does.
     if LC_ALL=C grep -q $'\r' "$dst" 2>/dev/null; then
         sed -e 's/\r$//' -e 's/\r/\n/g' "$dst" > "$dst.lf" && mv "$dst.lf" "$dst"
-        fixes+=("Windows line endings converted")
+        fixes+=("line endings fixed")
     fi
 
     # A file with no trailing newline would glue the heredoc delimiter onto its
     # last line, and the delimiter would not be recognised.
     if [ -n "$(tail -c 1 "$dst")" ]; then
         printf '\n' >> "$dst"
-        fixes+=("missing final newline added")
+        fixes+=("final newline added")
     fi
 
     local IFS=,
@@ -1300,11 +1300,11 @@ except SyntaxError as e:
                 fi
                 rm -f "$tmp"; echo "OK python syntax clean$note$fixed"; return
             fi
-            rm -f "$tmp"; echo "OK $interp (not syntax-checked, no python3 here)$note$fixed"; return
+            rm -f "$tmp"; echo "OK $interp, not checked (no python3 here)$note$fixed"; return
             ;;
     esac
     rm -f "$tmp"
-    echo "OK $interp (not syntax-checked)$note$fixed"
+    echo "OK $interp, not checked$note$fixed"
 }
 
 validate_additional_scripts() {
