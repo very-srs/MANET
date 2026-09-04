@@ -1543,7 +1543,7 @@ function Build-ScriptsPage {
 
     $Script:LvScripts               = New-Object System.Windows.Forms.ListView
     $Script:LvScripts.Location      = New-Object System.Drawing.Point((S 20), (S 14))
-    $Script:LvScripts.Size          = New-Object System.Drawing.Size((S 798), (S 240))
+    $Script:LvScripts.Size          = New-Object System.Drawing.Size((S 798), (S 228))
     $Script:LvScripts.View          = 'Details'
     $Script:LvScripts.FullRowSelect = $true
     $Script:LvScripts.GridLines     = $false
@@ -1553,18 +1553,33 @@ function Build-ScriptsPage {
     [void]$Script:LvScripts.Columns.Add('Why', (S 495))
     $p.Controls.Add($Script:LvScripts)
 
-    $Script:LblScriptsSummary = New-Text '' 20 264 798 56 $Script:UI.Font $Script:UI.Text
+    # Shown only while a check is running. Marquee rather than a percentage:
+    # what takes the time is a parser starting, not a measurable amount of
+    # work, so a bar that crawled to 40% and sat there would be a worse lie
+    # than one that simply says something is happening.
+    $Script:ScriptsProgress          = New-Object System.Windows.Forms.ProgressBar
+    $Script:ScriptsProgress.Location = New-Object System.Drawing.Point((S 20), (S 250))
+    $Script:ScriptsProgress.Size     = New-Object System.Drawing.Size((S 798), (S 12))
+    $Script:ScriptsProgress.Style    = 'Marquee'
+    $Script:ScriptsProgress.MarqueeAnimationSpeed = 30
+    $Script:ScriptsProgress.Visible  = $false
+    $p.Controls.Add($Script:ScriptsProgress)
+
+    $Script:LblScriptsSummary = New-Text '' 20 270 798 50 $Script:UI.Font $Script:UI.Text
     $p.Controls.Add($Script:LblScriptsSummary)
 
     $warn = New-Text ('These are written into the card unencrypted and are not deleted afterwards. ' +
                       'Anyone who reads the card reads them, so keep private keys and long-lived secrets out.') 20 326 798 36 $Script:UI.FontSmall $Script:UI.Warn
     $p.Controls.Add($warn)
 
-    $p.Controls.Add((New-Btn 'Open the folder' 20 372 140 28 {
+    $Script:BtnOpenScripts = New-Btn 'Open the folder' 20 372 140 28 {
         if (-not (Test-Path $ADDITIONAL_SCRIPTS_DIR)) { New-Item -ItemType Directory -Path $ADDITIONAL_SCRIPTS_DIR | Out-Null }
         Start-Process explorer.exe $ADDITIONAL_SCRIPTS_DIR
-    }))
-    $p.Controls.Add((New-Btn 'Check again' 170 372 140 28 { Update-ScriptsPage }))
+    }
+    $p.Controls.Add($Script:BtnOpenScripts)
+
+    $Script:BtnCheckScripts = New-Btn 'Check again' 170 372 140 28 { Update-ScriptsPage }
+    $p.Controls.Add($Script:BtnCheckScripts)
 
     return $p
 }
@@ -1572,24 +1587,42 @@ function Build-ScriptsPage {
 function Update-ScriptsPage {
     $Script:LvScripts.Items.Clear()
 
-    # Checking runs child processes on this thread, so the window stops
-    # painting while it happens. Say so before it starts, or an empty list
-    # under a stale summary is all anybody sees and it reads as a hang.
-    $Script:LblScriptsSummary.Text      = 'Checking the folder...'
+    # Re-entrant otherwise: the pump below lets Check again be clicked while a
+    # check is already running.
+    if ($Script:ScriptsChecking) { return }
+    $Script:ScriptsChecking = $true
+
+    # Checking runs a parser per file on this thread, so the window would
+    # otherwise stop painting for as long as that takes. The bar moves and the
+    # line underneath names the file, and the pump in the callback is what
+    # keeps both alive.
+    $Script:LblScriptsSummary.Text      = 'Looking in the folder...'
     $Script:LblScriptsSummary.ForeColor = $Script:UI.Muted
+    $Script:ScriptsProgress.Visible     = $true
+    $Script:BtnCheckScripts.Enabled     = $false
+    $Script:BtnOpenScripts.Enabled      = $false
+    $Script:BtnNext.Enabled             = $false
+    $Script:BtnBack.Enabled             = $false
     [System.Windows.Forms.Application]::DoEvents()
+
+    $onProgress = {
+        param($index, $total, $name)
+        $Script:LblScriptsSummary.Text = "Checking $name  ($index of $total)"
+        [System.Windows.Forms.Application]::DoEvents()
+    }
 
     # Reading a directory of other people's files is the likeliest thing here
     # to go wrong in a way nobody predicted, and it must not take the window
     # with it: the operator can fix a file and press the button again.
     try {
-        $Script:ScriptReport = Get-AdditionalScriptReport
+        $Script:ScriptReport = Get-AdditionalScriptReport -OnProgress $onProgress
     } catch {
         $path = Write-CrashLog -Problem $_ -Context 'reading the additional-scripts folder'
         $Script:LblScriptsSummary.Text = "Could not read that folder: $($_.Exception.Message)  Details in $path"
         $Script:LblScriptsSummary.ForeColor = $Script:UI.Bad
         $Script:ScriptReport = $null
         $Script:ADDITIONAL_SCRIPTS = @()
+        Reset-ScriptsPageBusy
         Update-Nav
         return
     }
@@ -1623,7 +1656,15 @@ function Update-ScriptsPage {
 
     # Same variable the console flow sets, and what Add-AdditionalScriptsBlock reads.
     $Script:ADDITIONAL_SCRIPTS = if ($rep.Failed -or $rep.OverMax) { @() } else { $rep.Accepted }
+    Reset-ScriptsPageBusy
     Update-Nav
+}
+
+function Reset-ScriptsPageBusy {
+    $Script:ScriptsChecking          = $false
+    $Script:ScriptsProgress.Visible  = $false
+    $Script:BtnCheckScripts.Enabled  = $true
+    $Script:BtnOpenScripts.Enabled   = $true
 }
 
 # ============================================================

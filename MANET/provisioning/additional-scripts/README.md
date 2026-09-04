@@ -132,9 +132,13 @@ script using a module present only on the node would be rejected incorrectly. A
 wrong rejection blocks a flash, which is worse than an unchecked script. Other
 languages are accepted at their shebang and reported as `not checked`.
 
-> The shell check needs `bash` and the Python check needs `python3`. On Windows
-> these come from Git for Windows, WSL, or a Python installation. When one is
-> absent the script is still embedded and the report says so.
+> **Nothing has to be installed for any of this.** The full shell check needs
+> `bash` and the Python check needs `python3`; on Windows those turn up if you
+> happen to have Git for Windows, WSL or Python already, and the report says so
+> when they do not. With neither present the flasher still checks what it can
+> without a parser: an unclosed quote and an unclosed heredoc, which are the
+> two ways a hand-written script usually breaks. That check only ever warns,
+> never rejects, because it has no grammar behind it to be certain with.
 
 ## Written on Windows
 
