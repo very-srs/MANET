@@ -1339,7 +1339,7 @@ AUTO_UPDATE="$($Script:AUTO_UPDATE)"
     [System.IO.File]::WriteAllText($file, $content.Replace("`r`n", "`n"))
     Update-SavedConfigList
     $Script:CmbSaved.SelectedItem = $name
-    $Script:LblSaveNote.Text = "Saved. The Linux flasher reads this too."
+    $Script:LblSaveNote.Text = "Saved as '$name'."
     $Script:LblSaveNote.ForeColor = $Script:UI.Good
 }
 
