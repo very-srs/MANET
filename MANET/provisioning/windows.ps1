@@ -1079,11 +1079,26 @@ function Test-AdditionalScript {
     if ($File.Name -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') {
         return @{ Verdict = 'FAIL'; Reason = 'filename must match [A-Za-z0-9][A-Za-z0-9._-]*' }
     }
-    if ($File.Length -eq 0) {
+    # Read the bytes before deciding anything about size. Get-ChildItem fills
+    # FileInfo.Length from the directory entry, and Windows updates that
+    # lazily: a file an editor has only just written can still be reported as
+    # zero bytes, and a perfectly good script gets called empty. ReadAllBytes
+    # opens the file and gets the truth.
+    $bytes = [System.IO.File]::ReadAllBytes($File.FullName)
+
+    if ($bytes.Length -eq 0) {
         return @{ Verdict = 'FAIL'; Reason = 'empty file' }
     }
 
-    $bytes = [System.IO.File]::ReadAllBytes($File.FullName)
+    # A UTF-8 byte order mark sits in front of the shebang, where the kernel
+    # will not look past it, so the node would run nothing at all. Windows
+    # editors write one whenever "UTF-8 with BOM" is chosen and it is invisible
+    # once written, so say so plainly rather than reporting a missing shebang
+    # to somebody who can plainly see one.
+    if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) {
+        return @{ Verdict = 'FAIL'
+                  Reason  = 'starts with a UTF-8 byte order mark - save it as UTF-8 without BOM' }
+    }
 
     # A heredoc is a byte stream through bash, and bash cannot carry NUL.
     # This is the one hard technical limit on what can be embedded.
@@ -1208,15 +1223,21 @@ function Get-AdditionalScriptReport {
 
     foreach ($file in $candidates) {
         $result = Test-AdditionalScript -File $file
+
+        # Same reason the validator does not trust FileInfo.Length: the
+        # directory entry can lag what is actually on disk.
+        $size = 0
+        try { $size = [System.IO.File]::ReadAllBytes($file.FullName).Length } catch { }
+
         [void]$results.Add([pscustomobject]@{
             Name    = $file.Name
             Verdict = $result.Verdict
             Reason  = $result.Reason
-            Bytes   = $file.Length
+            Bytes   = $size
             File    = $file
         })
         switch ($result.Verdict) {
-            'OK'   { [void]$accepted.Add($file); $totalBytes += $file.Length }
+            'OK'   { [void]$accepted.Add($file); $totalBytes += $size }
             'FAIL' { $report.Failed = $true }
         }
     }
@@ -1336,6 +1357,10 @@ function Get-AdditionalScriptsBlock {
         # "not found" that names the right path.
         $enc     = New-Object System.Text.UTF8Encoding($false, $true)
         $content = $enc.GetString([System.IO.File]::ReadAllBytes($file.FullName))
+        # Validation rejects a byte order mark, so this only ever fires if that
+        # were bypassed. It costs one line and the alternative is a script the
+        # node cannot execute at all.
+        $content = $content.TrimStart([char]0xFEFF)
         $content = $content -replace "`r`n", "`n" -replace "`r", "`n"
 
         $delim = Get-HeredocDelimiter -Lines ($content -split "`n")

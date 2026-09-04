@@ -1146,6 +1146,15 @@ classify_additional_script() {
         echo "FAIL empty file"; return
     fi
 
+    # A UTF-8 byte order mark sits in front of the shebang, where the kernel
+    # will not look past it, so the node would run nothing at all. Windows
+    # editors write one whenever "UTF-8 with BOM" is chosen and it is invisible
+    # once written, so say so plainly rather than reporting a missing shebang
+    # to somebody who can plainly see one. od is POSIX; xxd is not.
+    if [ "$(head -c 3 "$f" | od -An -tx1 | tr -d ' \n')" = "efbbbf" ]; then
+        echo "FAIL starts with a UTF-8 byte order mark - save it as UTF-8 without BOM"; return
+    fi
+
     # A heredoc is a byte stream through bash, and bash cannot carry NUL.
     # This is the one hard technical limit on what can be embedded.
     #
@@ -1160,7 +1169,7 @@ classify_additional_script() {
         # Offset is a nicety; only report one if this grep can find it.
         local nul_at
         nul_at=$(LC_ALL=C grep -aobUP '\x00' "$f" 2>/dev/null | head -1 | cut -d: -f1)
-        echo "FAIL binary content${nul_at:+ (NUL byte at offset $nul_at)} — fetch binaries at run time"
+        echo "FAIL binary content${nul_at:+ (NUL byte at offset $nul_at)} - fetch binaries at run time"
         return
     fi
 
