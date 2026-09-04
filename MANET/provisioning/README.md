@@ -32,9 +32,17 @@ You will need:
 4. Follow the window.
 
 That is the whole list. **You do not need the rest of this folder and you do not need to
-install anything.** The launcher fetches what it needs into a `MANET-flasher` folder
-beside itself the first time, and refreshes it on every run so it cannot quietly go
-stale. If it cannot reach GitHub it uses the copy it fetched last time and says so.
+install anything.** Download it wherever you like, including straight into Downloads.
+
+The first time it runs it makes itself a folder called **`MANET Flasher`** next to where
+you put it, moves itself in, and fetches what it needs from GitHub. Everything to do with
+flashing then lives in that one folder: the launcher, your saved settings
+(`.mesh-configs`) and your own setup scripts (`additional-scripts`). The window names
+that folder along its bottom edge, and clicking it opens it, so it is never lost.
+
+Run it again from that folder from then on. It refreshes its downloaded files on every
+run so they cannot quietly go stale, and if it cannot reach GitHub it uses the copies it
+fetched last time and says so.
 
 The window then checks for `rpi-imager` and, for a CM4, `rpiboot`, and downloads and runs
 their installers for you if they are missing. Only Rock 3A needs tools it cannot fetch.
@@ -42,13 +50,9 @@ their installers for you if they are missing. Only Rock 3A needs tools it cannot
 Windows may show *"Open File - Security Warning"* the first time, because the file came
 from the internet. Choose **Run**.
 
-Put the launcher in its own folder rather than straight on the Desktop. That is where
-your saved settings (`.mesh-configs`) and your own setup scripts (`additional-scripts`)
-end up, so you want to be able to find them again.
-
 **If you already have a checkout**, `Flash a Radio.cmd` notices `windows.ps1` sitting
-next to it and uses the folder as it stands. It downloads nothing and overwrites nothing,
-so work in progress is safe.
+next to it and uses the folder as it stands. It does not relocate, download, or overwrite
+anything, so work in progress is safe.
 
 Why the `.cmd` exists at all: Windows will not run a `.ps1` on a double-click, and
 writing to a card needs Administrator. It deals with both, then starts
@@ -118,10 +122,11 @@ to be present alongside them:
 - `manet-flasher.ps1`: the window. Dot-sources `windows.ps1` and calls its functions,
   so it is a front end rather than a second flasher
 - `Flash a Radio.cmd`: what a Windows user double-clicks, and the only file they need.
-  Asks for Administrator, gets past the execution policy, downloads the files below if
-  they are not already beside it, and opens the window. The list of what it fetches is
-  the `FILES` line at the top of it: **add to that line if the flasher ever needs another
-  file at run time**, or a standalone launcher will come up short
+  Asks for Administrator, gets past the execution policy, moves itself into a
+  `MANET Flasher` folder if it is on its own, downloads the files below into it, and
+  opens the window. The list of what it fetches is the `FILES` line at the top of it:
+  **add to that line if the flasher ever needs another file at run time**, or a
+  standalone launcher will come up short while a checkout carries on working
 - `firstrun.sh.template`: Raspberry Pi first-boot script template
 - `rock3a-provision.sh.template`: Rock 3A first-boot provisioning script template
 - `additional-scripts/`: optional; your own setup scripts, baked into the
