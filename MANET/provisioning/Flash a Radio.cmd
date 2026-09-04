@@ -15,7 +15,9 @@ rem Two things stop a .ps1 from just running when someone double-clicks it:
 rem Windows will not run one without asking, and writing to a card needs
 rem Administrator. This deals with both, then opens the window.
 
-set "SRC=https://raw.githubusercontent.com/very-srs/MANET/main/MANET/provisioning"
+set "REPO=very-srs/MANET"
+set "BRANCH=main"
+set "SUBDIR=MANET/provisioning"
 set "FILES=windows.ps1|manet-flasher.ps1|firstrun.sh.template|rock3a-provision.sh.template|additional-scripts/README.md"
 set "HERE=%~dp0"
 set "SELF=%~f0"
@@ -140,15 +142,24 @@ rem inside the quoted command, so nothing here depends on batch quoting rules.
 rem Files are refreshed on every run, because a launcher-managed copy that
 rem silently went stale would be worse than a download nobody notices. If the
 rem network is not there, whatever was fetched last time is used instead.
+rem
+rem The branch is resolved to a commit first, and the files are then pulled
+rem from URLs pinned to that commit. raw.githubusercontent caches a branch URL
+rem for several minutes, so fetching .../main/... shortly after a change hands
+rem back the previous file and the flasher appears not to have changed at all.
+rem A query string does not help; that cache ignores it. A commit URL is a
+rem different URL whenever the content differs, so it cannot be stale.
 
 :fetch
 echo.
 echo   Getting what the flasher needs...
 echo.
-set "MANET_SRC=%SRC%"
+set "MANET_REPO=%REPO%"
+set "MANET_BRANCH=%BRANCH%"
+set "MANET_SUBDIR=%SUBDIR%"
 set "MANET_FILES=%FILES%"
 set "MANET_WORK=%WORK%"
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$ProgressPreference='SilentlyContinue'; [Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; $bad=0; foreach($f in $env:MANET_FILES.Split('|')){ $dest=Join-Path $env:MANET_WORK ($f -replace '/','\'); $dir=Split-Path $dest; if(-not (Test-Path $dir)){ New-Item -ItemType Directory -Path $dir -Force | Out-Null }; $tmp=$dest+'.part'; try { Invoke-WebRequest -UseBasicParsing -TimeoutSec 60 -Uri ($env:MANET_SRC+'/'+$f+'?nocache='+[guid]::NewGuid().ToString('N')) -OutFile $tmp; $head=(Get-Content -LiteralPath $tmp -TotalCount 1 -ErrorAction SilentlyContinue); if((Get-Item $tmp).Length -lt 400 -or ($head -and $head.TrimStart().StartsWith('<'))){ throw 'that is not the file, it looks like a sign-in or error page' }; $sz=(Get-Item $tmp).Length; Move-Item -LiteralPath $tmp -Destination $dest -Force; '   ok      '+$f.PadRight(30)+$sz+' bytes' } catch { Remove-Item $tmp -Force -ErrorAction SilentlyContinue; if(Test-Path $dest){ '   cached  '+$f+'   ('+$_.Exception.Message+')' } else { '   FAILED  '+$f; '           '+$_.Exception.Message; $bad++ } } }; if($bad -gt 0){ exit 1 }"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$ProgressPreference='SilentlyContinue'; [Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; $hdr=@{'User-Agent'='manet-flasher'}; $ref=$env:MANET_BRANCH; try { $sha=Invoke-RestMethod -TimeoutSec 30 -Headers ($hdr+@{'Accept'='application/vnd.github.sha'}) -Uri ('https://api.github.com/repos/'+$env:MANET_REPO+'/commits/'+$env:MANET_BRANCH); if($sha -match '^[0-9a-f]{40}$'){ $ref=$sha } } catch { }; $base='https://raw.githubusercontent.com/'+$env:MANET_REPO+'/'+$ref+'/'+$env:MANET_SUBDIR; if($ref -eq $env:MANET_BRANCH){ '   could not resolve the commit; this copy may be a few minutes behind' } else { '   from commit '+$ref.Substring(0,12) }; $bad=0; foreach($f in $env:MANET_FILES.Split('|')){ $dest=Join-Path $env:MANET_WORK ($f -replace '/','\'); $dir=Split-Path $dest; if(-not (Test-Path $dir)){ New-Item -ItemType Directory -Path $dir -Force | Out-Null }; $tmp=$dest+'.part'; try { Invoke-WebRequest -UseBasicParsing -TimeoutSec 60 -Headers $hdr -Uri ($base+'/'+$f) -OutFile $tmp; $head=(Get-Content -LiteralPath $tmp -TotalCount 1 -ErrorAction SilentlyContinue); if((Get-Item $tmp).Length -lt 400 -or ($head -and $head.TrimStart().StartsWith('<'))){ throw 'that is not the file, it looks like a sign-in or error page' }; $sz=(Get-Item $tmp).Length; Move-Item -LiteralPath $tmp -Destination $dest -Force; '   ok      '+$f.PadRight(30)+$sz+' bytes' } catch { Remove-Item $tmp -Force -ErrorAction SilentlyContinue; if(Test-Path $dest){ '   cached  '+$f+'   ('+$_.Exception.Message+')' } else { '   FAILED  '+$f; '           '+$_.Exception.Message; $bad++ } } }; if($bad -gt 0){ exit 1 }"
 if errorlevel 1 exit /b 1
 echo.
 exit /b 0
