@@ -1554,6 +1554,13 @@ function Build-ScriptsPage {
 function Update-ScriptsPage {
     $Script:LvScripts.Items.Clear()
 
+    # Checking runs child processes on this thread, so the window stops
+    # painting while it happens. Say so before it starts, or an empty list
+    # under a stale summary is all anybody sees and it reads as a hang.
+    $Script:LblScriptsSummary.Text      = 'Checking the folder...'
+    $Script:LblScriptsSummary.ForeColor = $Script:UI.Muted
+    [System.Windows.Forms.Application]::DoEvents()
+
     # Reading a directory of other people's files is the likeliest thing here
     # to go wrong in a way nobody predicted, and it must not take the window
     # with it: the operator can fix a file and press the button again.
