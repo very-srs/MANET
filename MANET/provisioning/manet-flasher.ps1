@@ -35,7 +35,7 @@ $EnginePath = Join-Path $FlasherDir 'windows.ps1'
 if (-not (Test-Path $EnginePath)) {
     [void][System.Reflection.Assembly]::LoadWithPartialName('System.Windows.Forms')
     [System.Windows.Forms.MessageBox]::Show(
-        "windows.ps1 is missing from:`r`n$FlasherDir`r`n`r`nThis window is only the front end. Copy the whole provisioning folder, not just this one file.",
+        "windows.ps1 is missing from:`r`n$FlasherDir`r`n`r`nThis window is only the front end; the flashing itself lives in windows.ps1.`r`n`r`nStart 'Flash a Radio.cmd' instead. It fetches whatever is missing.",
         "Files are missing", 'OK', 'Error') | Out-Null
     exit 1
 }

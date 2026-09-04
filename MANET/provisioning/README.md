@@ -24,22 +24,35 @@ You will need:
 
 ### Windows: the short version
 
-1. Download this `provisioning` folder and **extract it**. Running from inside the zip
-   will not work: the flasher needs the templates that sit next to it.
-2. Double-click **`Flash a Radio.cmd`**.
+1. Download the single file
+   **[`Flash a Radio.cmd`](https://raw.githubusercontent.com/very-srs/MANET/main/MANET/provisioning/Flash%20a%20Radio.cmd)**
+   and put it in a folder of its own.
+2. Double-click it.
 3. Say yes when Windows asks for permission.
 4. Follow the window.
 
-You do not need to install anything first. The window checks for `rpi-imager` and, for a
-CM4, `rpiboot`, and downloads and runs their installers for you if they are missing. Only
-Rock 3A needs tools it cannot fetch for you.
+That is the whole list. **You do not need the rest of this folder and you do not need to
+install anything.** The launcher fetches what it needs into a `MANET-flasher` folder
+beside itself the first time, and refreshes it on every run so it cannot quietly go
+stale. If it cannot reach GitHub it uses the copy it fetched last time and says so.
+
+The window then checks for `rpi-imager` and, for a CM4, `rpiboot`, and downloads and runs
+their installers for you if they are missing. Only Rock 3A needs tools it cannot fetch.
 
 Windows may show *"Open File - Security Warning"* the first time, because the file came
 from the internet. Choose **Run**.
 
-`Flash a Radio.cmd` asks for Administrator and gets past the block Windows puts on
-scripts downloaded from the internet, which is the only reason it exists. It then starts
-`manet-flasher.ps1`, which is a front end over `windows.ps1`: the same code decides what
+Put the launcher in its own folder rather than straight on the Desktop. That is where
+your saved settings (`.mesh-configs`) and your own setup scripts (`additional-scripts`)
+end up, so you want to be able to find them again.
+
+**If you already have a checkout**, `Flash a Radio.cmd` notices `windows.ps1` sitting
+next to it and uses the folder as it stands. It downloads nothing and overwrites nothing,
+so work in progress is safe.
+
+Why the `.cmd` exists at all: Windows will not run a `.ps1` on a double-click, and
+writing to a card needs Administrator. It deals with both, then starts
+`manet-flasher.ps1`, which is a front end over `windows.ps1`. The same code decides what
 goes on the card either way, and settings saved in one are read by the other and by
 `linux.sh`.
 
@@ -96,14 +109,19 @@ installed on it at all.
 
 ### Files needed from this directory
 
-Clone or download the entire `provisioning/` directory to your working folder. The scripts require these files to be present alongside them:
+On Windows, none: `Flash a Radio.cmd` fetches them. On Linux, clone or download the
+entire `provisioning/` directory to your working folder. The scripts require these files
+to be present alongside them:
 
 - `linux.sh`: flashing script for Linux hosts
 - `windows.ps1`: flashing script for Windows hosts, and the engine the window drives
 - `manet-flasher.ps1`: the window. Dot-sources `windows.ps1` and calls its functions,
   so it is a front end rather than a second flasher
-- `Flash a Radio.cmd`: what a Windows user double-clicks. Asks for Administrator,
-  gets past the execution policy, and opens the window
+- `Flash a Radio.cmd`: what a Windows user double-clicks, and the only file they need.
+  Asks for Administrator, gets past the execution policy, downloads the files below if
+  they are not already beside it, and opens the window. The list of what it fetches is
+  the `FILES` line at the top of it: **add to that line if the flasher ever needs another
+  file at run time**, or a standalone launcher will come up short
 - `firstrun.sh.template`: Raspberry Pi first-boot script template
 - `rock3a-provision.sh.template`: Rock 3A first-boot provisioning script template
 - `additional-scripts/`: optional; your own setup scripts, baked into the
