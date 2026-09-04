@@ -213,14 +213,13 @@ $Script:PageBlurbs  = @{
 # timer calls a few times a second; it returns $true while it has more to do.
 # That keeps the window painting and the Cancel button alive without a second
 # runspace, and every job in here uses the same shape.
-$Script:Worker = @{
-    Active   = $false
-    Step     = $null
-    Finish   = $null
-    Percent  = 0
-    Status   = ''
-    Cancel   = $false
-}
+#
+# A list, not one slot. With one slot, starting a second download replaced the
+# first: its progress bar jumped back to the new file, and worse, the stream
+# and file handle of the abandoned one were never closed and its .part file
+# was left behind. Each job now carries its own state, its own progress bar
+# and its own status label, and the tick below drives all of them.
+$Script:Jobs = New-Object System.Collections.ArrayList
 
 $Script:FlashCount    = 0
 $Script:ScriptReport  = $null
@@ -262,12 +261,14 @@ function Write-Host {
     Add-Log $text
 }
 
+# Only the engine calls this, and only from the one thing the window runs on
+# its own account, so it reports to the flashing page.
 function Write-Progress {
     param($Activity, $Status, $PercentComplete, $Id, $CurrentOperation, [switch]$Completed)
-    if ($PSBoundParameters.ContainsKey('PercentComplete')) {
-        $Script:Worker.Percent = [int]$PercentComplete
+    if ($Script:LblFlashStatus -and $Status) { $Script:LblFlashStatus.Text = [string]$Status }
+    if ($Script:FlashProgress -and $PSBoundParameters.ContainsKey('PercentComplete')) {
+        try { $Script:FlashProgress.Value = [math]::Max(0, [math]::Min(100, [int]$PercentComplete)) } catch { }
     }
-    if ($Status) { $Script:Worker.Status = [string]$Status }
 }
 
 function Read-Host {
@@ -321,6 +322,8 @@ function Get-PrereqList {
             Found    = $false
             Detail   = ''
             Path     = $null
+            Busy     = $false
+            Ui       = $null
         })
     }
 
@@ -338,6 +341,8 @@ function Get-PrereqList {
             Found    = $false
             Detail   = ''
             Path     = $null
+            Busy     = $false
+            Ui       = $null
         })
     }
 
@@ -356,6 +361,8 @@ function Get-PrereqList {
             Found    = $false
             Detail   = ''
             Path     = $null
+            Busy     = $false
+            Ui       = $null
         })
         [void]$list.Add([pscustomobject]@{
             Key      = 'xz'
@@ -367,6 +374,8 @@ function Get-PrereqList {
             Found    = $false
             Detail   = ''
             Path     = $null
+            Busy     = $false
+            Ui       = $null
         })
         [void]$list.Add([pscustomobject]@{
             Key      = 'openssl'
@@ -378,6 +387,8 @@ function Get-PrereqList {
             Found    = $false
             Detail   = ''
             Path     = $null
+            Busy     = $false
+            Ui       = $null
         })
     }
 
@@ -495,51 +506,65 @@ function Get-GithubAssetUrl {
 # The step machine for long jobs
 # ============================================================
 
-$Script:ProgressBar   = $null
-$Script:ProgressLabel = $null
+function New-Job {
+    param([string]$Kind, [string]$Status = '', $Bar = $null, $StatusLabel = $null,
+          [hashtable]$State = $null)
 
-function Start-Job2 {
-    param([scriptblock]$Step, [scriptblock]$Finish, [string]$Status = '')
-    $Script:Worker.Step    = $Step
-    $Script:Worker.Finish  = $Finish
-    $Script:Worker.Status  = $Status
-    $Script:Worker.Percent = 0
-    $Script:Worker.Cancel  = $false
-    $Script:Worker.Active  = $true
+    $job = @{
+        Kind        = $Kind
+        Status      = $Status
+        Percent     = 0
+        Cancel      = $false
+        Done        = $false
+        Error       = ''
+        ExitCode    = 0
+        Bar         = $Bar
+        StatusLabel = $StatusLabel
+        Step        = $null
+        Finish      = $null
+    }
+    if ($State) { foreach ($k in $State.Keys) { $job[$k] = $State[$k] } }
+    return $job
+}
+
+function Add-Job {
+    param([hashtable]$Job)
+    [void]$Script:Jobs.Add($Job)
     Update-Nav
 }
 
-function Stop-Job2 {
-    $Script:Worker.Active = $false
-    $Script:Worker.Step   = $null
-    $Script:Worker.Finish = $null
-    Update-Nav
+function Stop-AllJobs {
+    foreach ($job in @($Script:Jobs)) { $job.Cancel = $true }
 }
 
 function Invoke-WorkerTick {
-    if (-not $Script:Worker.Active) { return }
+    if ($Script:Jobs.Count -eq 0) { return }
 
-    $more = $false
-    try {
-        $more = & $Script:Worker.Step
-    } catch {
-        Add-Log "ERROR: $($_.Exception.Message)"
-        $finish = $Script:Worker.Finish
-        Stop-Job2
-        if ($finish) { & $finish $false "$($_.Exception.Message)" }
-        return
+    # A snapshot each way round: a step can finish, and a Finish handler can
+    # start the next job, so neither loop may hold the live collection.
+    foreach ($job in @($Script:Jobs)) {
+        if ($job.Done) { continue }
+
+        $more = $false
+        try {
+            $more = [bool](@(& $job.Step $job) | Select-Object -Last 1)
+        } catch {
+            $job.Error = $_.Exception.Message
+            Add-Log "ERROR: $($job.Error)"
+            $more = $false
+        }
+
+        if ($job.Bar)         { try { $job.Bar.Value = [math]::Max(0, [math]::Min(100, [int]$job.Percent)) } catch { } }
+        if ($job.StatusLabel) { $job.StatusLabel.Text = $job.Status }
+
+        if (-not $more) { $job.Done = $true }
     }
 
-    if ($Script:ProgressBar) {
-        $p = [math]::Max(0, [math]::Min(100, [int]$Script:Worker.Percent))
-        $Script:ProgressBar.Value = $p
-    }
-    if ($Script:ProgressLabel) { $Script:ProgressLabel.Text = $Script:Worker.Status }
-
-    if (-not $more) {
-        $finish = $Script:Worker.Finish
-        Stop-Job2
-        if ($finish) { & $finish $true '' }
+    foreach ($job in @($Script:Jobs)) {
+        if (-not $job.Done) { continue }
+        $Script:Jobs.Remove($job)
+        Update-Nav
+        if ($job.Finish) { & $job.Finish $job (-not $job.Error) $job.Error }
     }
 }
 
@@ -547,12 +572,13 @@ function Invoke-WorkerTick {
 # progress bar means something. Invoke-WebRequest would be one line and would
 # freeze everything for the length of a 500 MB transfer.
 #
-# Every job below keeps its state in $Script:Worker rather than in a closure.
+# Every job keeps its state on its own job object rather than in a closure.
 # GetNewClosure binds a scriptblock to a new module, where $Script: is that
 # module's scope and not this script's, so a step that captured its state that
 # way would be writing progress somewhere nothing reads.
 function Start-DownloadJob {
-    param([string]$Url, [string]$OutFile, [string]$Label, [scriptblock]$OnDone)
+    param([string]$Url, [string]$OutFile, [string]$Label, [scriptblock]$OnDone,
+          $Bar = $null, $StatusLabel = $null, [hashtable]$State = $null)
 
     [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12
     $req  = [System.Net.HttpWebRequest]::Create($Url)
@@ -560,35 +586,40 @@ function Start-DownloadJob {
     $req.Timeout   = 30000
     $resp = $req.GetResponse()
 
-    $Script:Worker.DlResp   = $resp
-    $Script:Worker.DlStream = $resp.GetResponseStream()
-    $Script:Worker.DlOut    = [System.IO.File]::Open($OutFile, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write)
-    $Script:Worker.DlBuf    = New-Object byte[] (256KB)
-    $Script:Worker.DlGot    = 0
-    $Script:Worker.DlTotal  = $resp.ContentLength
-    $Script:Worker.DlFile   = $OutFile
-    $Script:Worker.DlLabel  = $Label
+    $job = New-Job -Kind 'download' -Status $Label -Bar $Bar -StatusLabel $StatusLabel -State $State
+    $job.DlResp   = $resp
+    $job.DlStream = $resp.GetResponseStream()
+    $job.DlOut    = [System.IO.File]::Open($OutFile, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write)
+    $job.DlBuf    = New-Object byte[] (256KB)
+    $job.DlGot    = 0
+    $job.DlTotal  = $resp.ContentLength
+    $job.DlFile   = $OutFile
+    $job.DlLabel  = $Label
+    $job.Step     = $Script:DownloadStep
+    $job.Finish   = $OnDone
 
     Add-Log "Downloading $Label"
     Add-Log "  from $Url"
-
-    Start-Job2 -Step $Script:DownloadStep -Finish $OnDone -Status $Label
+    Add-Job $job
+    return $job
 }
 
 $Script:DownloadStep = {
-    $w = $Script:Worker
+    param($w)
     if ($w.Cancel) {
         $w.DlOut.Close(); $w.DlStream.Close(); $w.DlResp.Close()
         Remove-Item $w.DlFile -Force -ErrorAction SilentlyContinue
         throw "Cancelled."
     }
     # A handful of chunks per tick: enough throughput to not be the
-    # bottleneck, short enough that the window still feels alive.
+    # bottleneck, short enough that the window still feels alive with two or
+    # three of these going at once.
     for ($i = 0; $i -lt 8; $i++) {
         $read = $w.DlStream.Read($w.DlBuf, 0, $w.DlBuf.Length)
         if ($read -le 0) {
             $w.DlOut.Flush(); $w.DlOut.Close(); $w.DlStream.Close(); $w.DlResp.Close()
             $w.Percent = 100
+            $w.Status  = "downloaded $([math]::Round($w.DlGot/1MB,1)) MB"
             Add-Log "  done, $([math]::Round($w.DlGot/1MB,1)) MB"
             return $false
         }
@@ -597,16 +628,13 @@ $Script:DownloadStep = {
     }
     if ($w.DlTotal -gt 0) {
         $w.Percent = [int](($w.DlGot / $w.DlTotal) * 100)
-        $w.Status  = "$($w.DlLabel) - $([math]::Round($w.DlGot/1MB,1)) MB of $([math]::Round($w.DlTotal/1MB,1)) MB"
+        $w.Status  = "downloading, $([math]::Round($w.DlGot/1MB,1)) MB of $([math]::Round($w.DlTotal/1MB,1)) MB"
     } else {
-        $w.Status  = "$($w.DlLabel) - $([math]::Round($w.DlGot/1MB,1)) MB"
+        $w.Status  = "downloading, $([math]::Round($w.DlGot/1MB,1)) MB"
     }
     return $true
 }
 
-# Runs a program and waits without blocking the window. Output is redirected to
-# a file and tailed into the log, so rpi-imager's progress is visible here
-# rather than in a console that has been hidden.
 # Start-Process joins an argument array with plain spaces and quotes nothing,
 # so a path with a space in it - C:\Users\Anne Smith\Downloads\provisioning -
 # arrives at the child as two arguments. The console flow never hit this
@@ -617,13 +645,20 @@ function Format-ProcessArgument {
     return $Value
 }
 
+# Runs a program and waits without blocking the window. Output is redirected to
+# a file and tailed into the log, so rpi-imager's progress is visible here
+# rather than in a console that has been hidden.
 function Start-ProcessJob {
-    param([string]$Path, [string[]]$Arguments = @(), [string]$Label, [scriptblock]$OnDone)
+    param([string]$Path, [string[]]$Arguments = @(), [string]$Label, [scriptblock]$OnDone,
+          $Bar = $null, $StatusLabel = $null, [hashtable]$State = $null)
 
-    $Script:Worker.PrOut   = [System.IO.Path]::GetTempFileName()
-    $Script:Worker.PrErr   = [System.IO.Path]::GetTempFileName()
-    $Script:Worker.PrShown = 0
-    $Script:Worker.PrLabel = $Label
+    $job = New-Job -Kind 'process' -Status $Label -Bar $Bar -StatusLabel $StatusLabel -State $State
+    $job.PrOut   = [System.IO.Path]::GetTempFileName()
+    $job.PrErr   = [System.IO.Path]::GetTempFileName()
+    $job.PrShown = 0
+    $job.PrLabel = $Label
+    $job.Step    = $Script:ProcessStep
+    $job.Finish  = $OnDone
 
     $argLine = (@($Arguments | ForEach-Object { Format-ProcessArgument $_ }) -join ' ')
 
@@ -641,20 +676,20 @@ function Start-ProcessJob {
         FilePath               = $exe
         NoNewWindow            = $true
         PassThru               = $true
-        RedirectStandardOutput = $Script:Worker.PrOut
-        RedirectStandardError  = $Script:Worker.PrErr
+        RedirectStandardOutput = $job.PrOut
+        RedirectStandardError  = $job.PrErr
     }
     if ($argLine) { $splat['ArgumentList'] = $argLine }
-    $Script:Worker.PrProc = Start-Process @splat
+    $job.PrProc = Start-Process @splat
 
-    Start-Job2 -Step $Script:ProcessStep -Finish $OnDone -Status $Label
+    Add-Job $job
+    return $job
 }
 
 $Script:ProcessStep = {
-    $w = $Script:Worker
+    param($w)
 
-    # Tail whatever the child has written since the last tick. Read shared so
-    # the running process is not locked out of its own output file.
+    # Tail whatever the child has written since the last tick.
     $lines = @()
     try { $lines = @(Get-Content -LiteralPath $w.PrOut -ErrorAction SilentlyContinue) } catch { }
     if ($lines.Count -gt $w.PrShown) {
@@ -673,26 +708,30 @@ $Script:ProcessStep = {
         $w.ExitCode = $w.PrProc.ExitCode
         return $false
     }
-    $w.Status = "$($w.PrLabel) is running..."
     return $true
 }
 
 # The Rock 3A raw write, one buffer per tick for the same reason.
 function Start-RawWriteJob {
-    param([string]$ImagePath, [int]$DiskNumber, [scriptblock]$OnDone)
+    param([string]$ImagePath, [int]$DiskNumber, [scriptblock]$OnDone,
+          $Bar = $null, $StatusLabel = $null)
 
-    $Script:Worker.WrSrc = [System.IO.File]::OpenRead($ImagePath)
-    $Script:Worker.WrDst = [System.IO.File]::Open("\\.\PhysicalDrive$DiskNumber",
-                              [System.IO.FileMode]::Open, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
-    $Script:Worker.WrBuf     = New-Object byte[] (4MB)
-    $Script:Worker.WrWritten = 0
-    $Script:Worker.WrTotal   = $Script:Worker.WrSrc.Length
+    $job = New-Job -Kind 'rawwrite' -Status 'Writing the image' -Bar $Bar -StatusLabel $StatusLabel
+    $job.WrSrc = [System.IO.File]::OpenRead($ImagePath)
+    $job.WrDst = [System.IO.File]::Open("\\.\PhysicalDrive$DiskNumber",
+                     [System.IO.FileMode]::Open, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+    $job.WrBuf     = New-Object byte[] (4MB)
+    $job.WrWritten = 0
+    $job.WrTotal   = $job.WrSrc.Length
+    $job.Step      = $Script:RawWriteStep
+    $job.Finish    = $OnDone
 
-    Start-Job2 -Step $Script:RawWriteStep -Finish $OnDone -Status "Writing the image"
+    Add-Job $job
+    return $job
 }
 
 $Script:RawWriteStep = {
-    $w = $Script:Worker
+    param($w)
     if ($w.Cancel) {
         $w.WrSrc.Close(); $w.WrDst.Close()
         throw "Cancelled part way through writing. The card is not usable; flash it again."
@@ -782,79 +821,98 @@ function Build-PrereqPage {
     $p = New-ContentPanel
 
     $Script:PrereqHost            = New-Object System.Windows.Forms.Panel
-    $Script:PrereqHost.Location   = New-Object System.Drawing.Point((S 20), (S 14))
-    $Script:PrereqHost.Size       = New-Object System.Drawing.Size((S 798), (S 300))
+    $Script:PrereqHost.Location   = New-Object System.Drawing.Point((S 20), (S 10))
+    $Script:PrereqHost.Size       = New-Object System.Drawing.Size((S 798), (S 352))
     $Script:PrereqHost.AutoScroll = $true
     $p.Controls.Add($Script:PrereqHost)
 
-    $Script:PrereqProgress          = New-Object System.Windows.Forms.ProgressBar
-    $Script:PrereqProgress.Location = New-Object System.Drawing.Point((S 20), (S 328))
-    $Script:PrereqProgress.Size     = New-Object System.Drawing.Size((S 798), (S 16))
-    $Script:PrereqProgress.Visible  = $false
-    $p.Controls.Add($Script:PrereqProgress)
-
-    $Script:PrereqStatus = New-Text '' 20 350 640 20 $UI.FontSmall $UI.Muted
+    $Script:PrereqStatus = New-Text '' 20 370 640 20 $UI.FontSmall $UI.Muted
     $p.Controls.Add($Script:PrereqStatus)
 
-    $p.Controls.Add((New-Btn 'Check again' 706 346 112 28 { Update-PrereqPage }))
+    $p.Controls.Add((New-Btn 'Check again' 706 366 112 28 { Update-PrereqPage }))
 
     return $p
 }
 
-function Update-PrereqPage {
+# Built once per set of prerequisites, then only ever updated in place. The
+# rows used to be torn down and recreated on every check, which is fine until
+# one of them owns a progress bar for a download that is still running.
+function Build-PrereqRows {
     $host_ = $Script:PrereqHost
     $host_.Controls.Clear()
 
-    $hw = Get-SelectedHardware
-    if (-not $Script:PrereqItems) { $Script:PrereqItems = Get-PrereqList -Hardware $hw.Model -IsCm4 $hw.IsCm4 }
-
     $y = 6
     foreach ($item in $Script:PrereqItems) {
-        [void](Test-Prereq $item)
+        $ui = @{}
 
-        $mark = if ($item.Found) { 'OK' } elseif ($item.Required) { 'MISSING' } else { 'optional' }
-        $col  = if ($item.Found) { $UI.Good } elseif ($item.Required) { $UI.Bad } else { $UI.Warn }
+        $ui.Mark   = New-Text ''         4  ($y + 2)  84  20 $UI.FontBold
+        $ui.Name   = New-Text $item.Name 92 ($y + 2)  340 20 $UI.FontBold $UI.Text
+        $ui.Why    = New-Text $item.Why  92 ($y + 22) 560 34 $UI.FontSmall $UI.Muted
+        $ui.Detail = New-Text ''         92 ($y + 56) 560 18 $UI.FontSmall $UI.Muted
 
-        $lblMark = New-Text $mark 4 ($y + 2) 80 20 $UI.FontBold $col
-        $host_.Controls.Add($lblMark)
+        $ui.Bar          = New-Object System.Windows.Forms.ProgressBar
+        $ui.Bar.Location = New-Object System.Drawing.Point((S 92), (S ($y + 76)))
+        $ui.Bar.Size     = New-Object System.Drawing.Size((S 560), (S 12))
+        $ui.Bar.Visible  = $false
 
-        $host_.Controls.Add((New-Text $item.Name 92 ($y + 2) 340 20 $UI.FontBold $UI.Text))
-        $host_.Controls.Add((New-Text $item.Why 92 ($y + 22) 560 34 $UI.FontSmall $UI.Muted))
-        $host_.Controls.Add((New-Text $item.Detail 92 ($y + 56) 560 18 $UI.FontSmall $col))
+        # The prerequisite each button acts on rides on the button's Tag. A
+        # closure would capture it into a module scope where $Script: no
+        # longer means this script.
+        $ui.Install     = New-Btn 'Install it' 664 ($y + 4) 118 28
+        $ui.Install.Tag = $item
+        $ui.Install.Add_Click({ Install-Prereq $this.Tag })
 
-        if (-not $item.Found) {
-            $it = $item
-            # The prerequisite each button acts on rides on the button's Tag.
-            # A closure would capture $it into a module scope where $Script:
-            # no longer means this script.
-            if ($it.Source -eq 'page') {
-                $b = New-Btn 'Get it...' 664 ($y + 4) 118 28
-                $b.Tag = $it
-                $b.Add_Click({ Start-Process $this.Tag.Page })
-            } else {
-                $b = New-Btn 'Install it' 664 ($y + 4) 118 28
-                $b.Tag = $it
-                $b.Add_Click({ Install-Prereq $this.Tag })
-            }
-            $host_.Controls.Add($b)
+        $ui.Locate      = New-Btn 'I have it...' 664 ($y + 36) 118 26
+        $ui.Locate.Tag  = $item
+        $ui.Locate.Font = $UI.FontSmall
+        $ui.Locate.Add_Click({ Locate-Prereq $this.Tag })
 
-            $bl = New-Btn 'I have it...' 664 ($y + 36) 118 26
-            $bl.Tag  = $it
-            $bl.Font = $UI.FontSmall
-            $bl.Add_Click({ Locate-Prereq $this.Tag })
-            $host_.Controls.Add($bl)
+        $ui.Sep             = New-Object System.Windows.Forms.Label
+        $ui.Sep.Location    = New-Object System.Drawing.Point((S 4), (S ($y + 96)))
+        $ui.Sep.Size        = New-Object System.Drawing.Size((S 778), (S 1))
+        $ui.Sep.BorderStyle = 'Fixed3D'
+
+        foreach ($c in @($ui.Mark, $ui.Name, $ui.Why, $ui.Detail, $ui.Bar,
+                         $ui.Install, $ui.Locate, $ui.Sep)) {
+            $host_.Controls.Add($c)
         }
 
-        $sep           = New-Object System.Windows.Forms.Label
-        $sep.Location  = New-Object System.Drawing.Point((S 4), (S ($y + 82)))
-        $sep.Size      = New-Object System.Drawing.Size((S 778), (S 1))
-        $sep.BorderStyle = 'Fixed3D'
-        $host_.Controls.Add($sep)
-
-        $y += 96
+        $item.Ui = $ui
+        $y += 110
     }
+}
 
+# Re-checks what is installed and repaints the rows. A row with a download or
+# an installer running is left alone: its detail line is that job's status.
+function Update-PrereqRows {
+    foreach ($item in $Script:PrereqItems) {
+        if (-not $item.Ui) { continue }
+        if ($item.Busy)    { continue }
+
+        [void](Test-Prereq $item)
+
+        $ui = $item.Ui
+        $ui.Mark.Text      = if ($item.Found) { 'OK' } elseif ($item.Required) { 'MISSING' } else { 'optional' }
+        $ui.Mark.ForeColor = if ($item.Found) { $UI.Good } elseif ($item.Required) { $UI.Bad } else { $UI.Warn }
+        $ui.Detail.Text      = $item.Detail
+        $ui.Detail.ForeColor = $ui.Mark.ForeColor
+        $ui.Bar.Visible      = $false
+
+        $ui.Install.Visible = -not $item.Found
+        $ui.Locate.Visible  = -not $item.Found
+        $ui.Install.Enabled = $true
+        $ui.Install.Text    = if ($item.Source -eq 'page') { 'Get it...' } else { 'Install it' }
+    }
     Update-Nav
+}
+
+function Update-PrereqPage {
+    $hw = Get-SelectedHardware
+    if (-not $Script:PrereqItems) {
+        $Script:PrereqItems = Get-PrereqList -Hardware $hw.Model -IsCm4 $hw.IsCm4
+    }
+    if (-not $Script:PrereqItems[0].Ui) { Build-PrereqRows }
+    Update-PrereqRows
 }
 
 function Test-PrereqsSatisfied {
@@ -877,72 +935,132 @@ function Locate-Prereq {
         Set-CachedToolPath -Key $P.Key -Path $picked
     }
     $P.Path = $picked; $P.Found = $true; $P.Detail = $picked
-    Update-PrereqPage
+    Update-PrereqRows
 }
 
 function Install-Prereq {
     param($P)
 
-    $Script:ProgressBar   = $Script:PrereqProgress
-    $Script:ProgressLabel = $Script:PrereqStatus
-    $Script:PrereqProgress.Visible = $true
-    $Script:PendingPrereq = $P
+    if ($P.Busy) { return }
 
+    # Nothing to download for these: there is no release API to pick an asset
+    # from, so the browser is the answer.
+    if ($P.Source -eq 'page') { Start-Process $P.Page; return }
+
+    $ui = $P.Ui
     $url = $P.Url
     if ($P.Source -eq 'github') {
-        $Script:PrereqStatus.Text = "Looking up the latest $($P.Name) release..."
+        $ui.Detail.Text      = "looking up the latest release..."
+        $ui.Detail.ForeColor = $UI.Muted
         [System.Windows.Forms.Application]::DoEvents()
         $url = Get-GithubAssetUrl -Repo $P.Repo -Match $P.Match
         if (-not $url) {
-            $Script:PrereqProgress.Visible = $false
-            [System.Windows.Forms.MessageBox]::Show($Script:Form,
-                "Could not reach GitHub to find the $($P.Name) installer.`r`n`r`nThe releases page will open instead. Download the installer, run it, then choose 'Check again'.",
-                'Could not fetch it', 'OK', 'Warning') | Out-Null
+            $ui.Detail.Text      = "could not reach GitHub; the download page is opening instead"
+            $ui.Detail.ForeColor = $UI.Warn
             Start-Process $P.Page
             return
         }
     }
 
-    $Script:PendingInstaller = Join-Path ([System.IO.Path]::GetTempPath()) $P.File
+    $dest = Join-Path ([System.IO.Path]::GetTempPath()) $P.File
+
+    $P.Busy             = $true
+    $ui.Install.Enabled = $false
+    $ui.Bar.Style       = 'Blocks'
+    $ui.Bar.Value       = 0
+    $ui.Bar.Visible     = $true
+    $ui.Detail.ForeColor = $UI.Muted
 
     try {
-        Start-DownloadJob -Url $url -OutFile $Script:PendingInstaller `
-                          -Label "$($P.Name) installer" -OnDone $Script:AfterPrereqDownload
+        [void](Start-DownloadJob -Url $url -OutFile $dest -Label "$($P.Name) installer" `
+                   -Bar $ui.Bar -StatusLabel $ui.Detail `
+                   -State @{ Prereq = $P; Installer = $dest } `
+                   -OnDone $Script:AfterPrereqDownload)
     } catch {
-        $Script:PrereqProgress.Visible = $false
-        $Script:PrereqStatus.Text = "Could not start the download: $($_.Exception.Message)"
+        $P.Busy = $false
+        $ui.Install.Enabled  = $true
+        $ui.Bar.Visible      = $false
+        $ui.Detail.Text      = "could not start the download: $($_.Exception.Message)"
+        $ui.Detail.ForeColor = $UI.Bad
+        Update-Nav
     }
 }
 
 $Script:AfterPrereqDownload = {
-    param($ok, $err)
+    param($job, $ok, $err)
+
+    $P  = $job.Prereq
+    $ui = $P.Ui
     if (-not $ok) {
-        $Script:PrereqProgress.Visible = $false
-        $Script:PrereqStatus.Text = "Download failed: $err"
+        $P.Busy = $false
+        $ui.Install.Enabled  = $true
+        $ui.Bar.Visible      = $false
+        $ui.Detail.Text      = "download failed: $err"
+        $ui.Detail.ForeColor = $UI.Bad
+        Update-Nav
         return
     }
-    $Script:PrereqStatus.Text = "Running the $($Script:PendingPrereq.Name) installer. Click through it, then come back here."
+    Add-InstallerToQueue $job
+}
+
+# Downloads happily run side by side. Installers do not: two third-party
+# setup programs asking for attention at once is confusing at best, and
+# Windows Installer serialises them anyway. So the second one waits.
+$Script:InstallerQueue   = New-Object System.Collections.ArrayList
+$Script:InstallerRunning = $false
+
+function Add-InstallerToQueue {
+    param($Job)
+    [void]$Script:InstallerQueue.Add($Job)
+    if ($Script:InstallerRunning) {
+        $Job.Prereq.Ui.Detail.Text = "downloaded, waiting for the other installer to finish"
+        $Job.Prereq.Ui.Bar.Style   = 'Marquee'
+    }
+    Start-NextInstaller
+}
+
+function Start-NextInstaller {
+    if ($Script:InstallerRunning)            { return }
+    if ($Script:InstallerQueue.Count -eq 0)  { return }
+
+    $queued = $Script:InstallerQueue[0]
+    $Script:InstallerQueue.RemoveAt(0)
+    $Script:InstallerRunning = $true
+
+    $P  = $queued.Prereq
+    $ui = $P.Ui
+    $ui.Bar.Style        = 'Marquee'
+    $ui.Bar.Visible      = $true
+    $ui.Detail.Text      = "the installer is open; click through it, then come back here"
+    $ui.Detail.ForeColor = $UI.Muted
+
     # No silent switches. These are third-party installers whose flags are not
     # ours to assume, and one that silently does the wrong thing is worse than
     # three clicks the user can see.
-    Start-ProcessJob -Path $Script:PendingInstaller `
-                     -Label "$($Script:PendingPrereq.Name) installer" `
-                     -OnDone $Script:AfterPrereqInstall
+    [void](Start-ProcessJob -Path $queued.Installer -Label "$($P.Name) installer" `
+               -State @{ Prereq = $P; Installer = $queued.Installer } `
+               -OnDone $Script:AfterPrereqInstall)
 }
 
 $Script:AfterPrereqInstall = {
-    param($ok, $err)
-    $Script:PrereqProgress.Visible = $false
-    Remove-Item $Script:PendingInstaller -Force -ErrorAction SilentlyContinue
-    $name = $Script:PendingPrereq.Name
-    Update-PrereqPage
-    if ($Script:PendingPrereq.Found) {
-        $Script:PrereqStatus.Text = "$name is installed."
-        $Script:PrereqStatus.ForeColor = $UI.Good
-    } else {
-        $Script:PrereqStatus.Text = "$name still is not showing up. Try 'I have it...' and point at it."
-        $Script:PrereqStatus.ForeColor = $UI.Warn
+    param($job, $ok, $err)
+
+    $Script:InstallerRunning = $false
+    $P  = $job.Prereq
+    $ui = $P.Ui
+
+    Remove-Item $job.Installer -Force -ErrorAction SilentlyContinue
+    $P.Busy         = $false
+    $ui.Bar.Style   = 'Blocks'
+    $ui.Bar.Visible = $false
+
+    Update-PrereqRows
+    if (-not $P.Found) {
+        $ui.Detail.Text      = "still not showing up. Try 'I have it...' and point at it."
+        $ui.Detail.ForeColor = $UI.Warn
     }
+
+    Start-NextInstaller
 }
 
 # ============================================================
@@ -1456,14 +1574,14 @@ function Invoke-RpiBootFromGui {
     }
 
     $Script:RPIBOOT_PATH = $item.Path
-    $Script:DisksBefore  = @(Get-Disk | Select-Object -ExpandProperty Number)
     $Script:LblBootState.Text = 'Running rpiboot...'
     $Script:LblBootState.ForeColor = $UI.Muted
-    $Script:ProgressBar   = $null
-    $Script:ProgressLabel = $Script:LblBootState
 
-    Start-ProcessJob -Path $item.Path -Label 'rpiboot' -OnDone {
-        param($ok, $err)
+    [void](Start-ProcessJob -Path $item.Path -Label 'rpiboot' `
+        -StatusLabel $Script:LblBootState `
+        -State @{ DisksBefore = @(Get-Disk | Select-Object -ExpandProperty Number) } `
+        -OnDone {
+        param($job, $ok, $err)
         # rpiboot exits non-zero when no module answers, so its code is not
         # evidence on its own. A new disk appearing is. The wait is broken up
         # rather than one Start-Sleep, which would freeze the window for eight
@@ -1474,7 +1592,7 @@ function Invoke-RpiBootFromGui {
             Start-Sleep -Seconds 1
         }
         $after = @(Get-Disk | Select-Object -ExpandProperty Number)
-        $new   = @($after | Where-Object { $Script:DisksBefore -notcontains $_ })
+        $new   = @($after | Where-Object { $job.DisksBefore -notcontains $_ })
         if ($new.Count -gt 0) {
             $Script:LblBootState.Text = "The eMMC appeared as disk $($new -join ', '). Pick it below."
             $Script:LblBootState.ForeColor = $UI.Good
@@ -1483,7 +1601,7 @@ function Invoke-RpiBootFromGui {
             $Script:LblBootState.ForeColor = $UI.Warn
         }
         Update-TargetPage
-    }
+    })
 }
 
 # ============================================================
@@ -1599,9 +1717,6 @@ function Build-FlashPage {
 }
 
 function Start-Flash {
-    $Script:ProgressBar   = $Script:FlashProgress
-    $Script:ProgressLabel = $Script:LblFlashStatus
-
     $d  = Get-SelectedDisk
     $hw = Get-SelectedHardware
     $Script:HARDWARE_MODEL = $hw.Model
@@ -1632,23 +1747,24 @@ function Start-RpiFlash {
     $Script:LblFlashStatus.Text = 'Raspberry Pi Imager is downloading and writing the image. This takes a few minutes.'
     $Script:FlashProgress.Style = 'Marquee'
 
-    Start-ProcessJob -Path $imager `
+    [void](Start-ProcessJob -Path $imager `
         -Arguments @('--cli', $OS_IMAGE_URL, $target, '--first-run-script', $tempScript) `
         -Label 'Raspberry Pi Imager' `
+        -StatusLabel $Script:LblFlashStatus `
         -OnDone {
-            param($ok, $err)
+            param($job, $ok, $err)
             $Script:FlashProgress.Style = 'Blocks'
             Remove-Item (Join-Path $ScriptDir 'firstrun.sh') -Force -ErrorAction SilentlyContinue
             if (-not $ok) { Complete-Flash $false $err; return }
-            if ($Script:Worker.ExitCode -ne 0) {
+            if ($job.ExitCode -ne 0) {
                 # A remembered path that does not flash must not be replayed on
                 # every future run, here or on the console.
                 Remove-CachedToolPath -Key 'rpi-imager' -Reason "it did not flash the card"
-                Complete-Flash $false "Raspberry Pi Imager exited with code $($Script:Worker.ExitCode)."
+                Complete-Flash $false "Raspberry Pi Imager exited with code $($job.ExitCode)."
                 return
             }
             Complete-Flash $true ''
-        }
+        })
 }
 
 function Start-Rock3aFlash {
@@ -1678,10 +1794,12 @@ function Start-Rock3aFlash {
     Add-Log "Wiping disk $($Script:TARGET_DEVICE)..."
     Clear-Disk -Number $Script:TARGET_DEVICE -RemoveData -Confirm:$false -ErrorAction SilentlyContinue
 
-    Start-RawWriteJob -ImagePath $Script:R3aTempImage -DiskNumber $Script:TARGET_DEVICE -OnDone {
-        param($ok, $err)
-        if ($ok) { Complete-Flash $true '' } else { Complete-Flash $false $err }
-    }
+    [void](Start-RawWriteJob -ImagePath $Script:R3aTempImage -DiskNumber $Script:TARGET_DEVICE `
+        -Bar $Script:FlashProgress -StatusLabel $Script:LblFlashStatus `
+        -OnDone {
+            param($job, $ok, $err)
+            if ($ok) { Complete-Flash $true '' } else { Complete-Flash $false $err }
+        })
 }
 
 # The console flow asks which of two ways to get the image. Here the download
@@ -1866,7 +1984,7 @@ function Go-Page {
 function Update-Nav {
     if (-not $Script:BtnNext) { return }
     $name = $Script:PageOrder[$Script:PageIndex]
-    $busy = $Script:Worker.Active
+    $busy = ($Script:Jobs.Count -gt 0)
 
     $Script:BtnBack.Visible = $name -notin @('Hardware', 'Flash', 'Done')
     $Script:BtnBack.Enabled = -not $busy
@@ -2014,12 +2132,12 @@ function Build-Window {
     $footer.Controls.Add($rule)
 
     $Script:BtnCancel = New-Btn 'Quit' 20 30 110 34 {
-        if ($Script:Worker.Active) {
+        if ($Script:Jobs.Count -gt 0) {
             $r = [System.Windows.Forms.MessageBox]::Show($Script:Form,
                 "Something is still running. Stopping now can leave the card half written.`r`n`r`nQuit anyway?",
                 'Still working', 'YesNo', 'Warning')
             if ($r -ne [System.Windows.Forms.DialogResult]::Yes) { return }
-            $Script:Worker.Cancel = $true
+            Stop-AllJobs
         }
         $Script:Form.Close()
     }
@@ -2058,12 +2176,12 @@ function Build-Window {
     $Script:Timer.Start()
 
     $form.Add_FormClosing({
-        if ($Script:Worker.Active -and -not $Script:Worker.Cancel) {
+        if ($Script:Jobs.Count -gt 0) {
             $r = [System.Windows.Forms.MessageBox]::Show($Script:Form,
                 "Something is still running. Closing now can leave the card half written.`r`n`r`nClose anyway?",
                 'Still working', 'YesNo', 'Warning')
             if ($r -ne [System.Windows.Forms.DialogResult]::Yes) { $_.Cancel = $true; return }
-            $Script:Worker.Cancel = $true
+            Stop-AllJobs
         }
         $Script:Timer.Stop()
         if ($Script:R3aTempImage -and (Test-Path $Script:R3aTempImage)) {
@@ -2100,7 +2218,6 @@ if (-not $Preview) {
 
 Set-ConsoleWindowVisible $false
 
-$Script:Worker.ExitCode = 0
 $Script:FlashFailed     = $false
 
 # Past this point the console is hidden, so an unhandled error would look like
