@@ -411,7 +411,9 @@ function Get-PrereqList {
         })
     }
 
-    return $list.ToArray()
+    # Comma for the same reason as Copy-PageToEngine: a board that needs one
+    # tool would otherwise return the bare object and defeat indexing.
+    return ,$list.ToArray()
 }
 
 function Test-Prereq {
@@ -1112,10 +1114,13 @@ function Build-ConfigPage {
     $g2.Controls.Add((New-Text 'Wi-Fi password' 12 99 124 20))
     $Script:TxtApKey = New-Input 140 96 144
     $g2.Controls.Add($Script:TxtApKey)
+    # Letters and digits, not base64. Ten random bytes encode to sixteen
+    # base64 characters of which the last two are always '==' padding, which
+    # looks like a mistake and is two characters of nothing. This key is the
+    # one that gets typed by hand into a phone or a tablet, so it also does
+    # without base64's '+' and '/'.
     $g2.Controls.Add((New-Btn 'Generate' 290 95 88 24 {
-        $bytes = New-Object byte[] 10
-        [Security.Cryptography.RNGCryptoServiceProvider]::Create().GetBytes($bytes)
-        $Script:TxtApKey.Text = [Convert]::ToBase64String($bytes)
+        $Script:TxtApKey.Text = Generate-Password -length 16
     }))
 
     $g2.Controls.Add((New-Text 'Clients per node' 12 127 124 20))
@@ -1132,9 +1137,9 @@ function Build-ConfigPage {
 
     # --- services --------------------------------------------------------
     $g3 = New-GroupBox 'Services on the node' 16 252 398 126
-    $Script:ChkMtx    = New-Check 'MediaMTX video server'                12 24 360 $true
-    $Script:ChkMumble = New-Check 'Mumble voice server (murmur)'         12 48 360 $true
-    $Script:ChkVoice  = New-Check 'Mesh push-to-talk (needs an OpenVLM board)' 12 72 360 $false
+    $Script:ChkMtx    = New-Check 'MediaMTX video server'                12 24 360 $false
+    $Script:ChkMumble = New-Check 'Mumble voice server (murmur)'         12 48 360 $false
+    $Script:ChkVoice  = New-Check 'Mesh push-to-talk (needs an OpenVLM board)' 12 72 360 $true
     $Script:ChkUpdate = New-Check 'Update MANET tools automatically'     12 96 360 $true
     $g3.Controls.AddRange(@($Script:ChkMtx, $Script:ChkMumble, $Script:ChkVoice, $Script:ChkUpdate))
     $p.Controls.Add($g3)
@@ -1184,7 +1189,7 @@ function Build-ConfigPage {
     $Script:TxtRadioPw.Text = 'radio'
     $g6.Controls.Add($Script:TxtRadioPw)
 
-    $g6.Controls.Add((New-Text 'Admin page' 12 55 124 20))
+    $g6.Controls.Add((New-Text 'Network admin' 12 55 124 20))
     $Script:TxtAdminPw = New-Input 140 52 144
     $g6.Controls.Add($Script:TxtAdminPw)
     $g6.Controls.Add((New-Btn 'Generate' 290 51 88 24 {
@@ -1219,12 +1224,12 @@ function Update-ConfigEnablement {
     # which is why the console flow forces it off and says so rather than
     # letting the answer be given and quietly ignored.
     if ($wireless) {
+        # Hidden rather than greyed out. A control that can never be used in
+        # this mode is only something else to read.
         $Script:ChkAcs.Checked = $false
-        $Script:ChkAcs.Enabled = $false
-        $Script:ChkAcs.Text    = 'Choose the Wi-Fi channel automatically (not available with a client AP)'
+        $Script:ChkAcs.Visible = $false
     } else {
-        $Script:ChkAcs.Enabled = $true
-        $Script:ChkAcs.Text    = 'Choose the Wi-Fi channel automatically'
+        $Script:ChkAcs.Visible = $true
     }
     Update-CapacityLabel
 }
@@ -1270,6 +1275,16 @@ function Load-SelectedConfig {
     $Script:LblSaveNote.ForeColor = $Script:UI.Good
 }
 
+# Save and Next validate identically, so they say the same thing. The typed
+# parameter also turns a lone problem back into a one-element array, which is
+# the shape the caller is entitled to expect.
+function Show-ConfigProblems {
+    param([string[]]$Problems)
+    [System.Windows.Forms.MessageBox]::Show($Script:Form,
+        ("These need fixing first:`r`n`r`n  - " + ($Problems -join "`r`n  - ")),
+        'Not quite ready', 'OK', 'Warning') | Out-Null
+}
+
 function Save-ConfigFromPage {
     $name = $Script:TxtSaveName.Text.Trim()
     if (-not $name) {
@@ -1282,10 +1297,15 @@ function Save-ConfigFromPage {
         $Script:LblSaveNote.ForeColor = $Script:UI.Bad
         return
     }
-    $problems = Copy-PageToEngine
+    $problems = @(Copy-PageToEngine)
     if ($problems.Count -gt 0) {
-        $Script:LblSaveNote.Text = 'Fix the settings first: ' + $problems[0]
+        $Script:LblSaveNote.Text = if ($problems.Count -eq 1) {
+            "Not saved: $($problems[0])"
+        } else {
+            "Not saved: $($problems.Count) settings need fixing"
+        }
         $Script:LblSaveNote.ForeColor = $Script:UI.Bad
+        Show-ConfigProblems $problems
         return
     }
 
@@ -1388,7 +1408,10 @@ function Copy-PageToEngine {
     if (-not $Script:TxtAdminPw.Text) { $Script:TxtAdminPw.Text = Generate-Password -length 10 }
     $Script:ADMIN_PW = $Script:TxtAdminPw.Text
 
-    return $problems.ToArray()
+    # The leading comma matters. Without it PowerShell unwraps a one-element
+    # array to the bare string, and the caller's $problems[0] then indexes into
+    # that string and reports its first letter: "Fix the settings first: t".
+    return ,$problems.ToArray()
 }
 
 # Engine variables -> page, after Load-Config has read a saved file.
@@ -1690,7 +1713,7 @@ function Update-ConfirmPage {
         "  Auto update      $($Script:AUTO_UPDATE)"
         ""
         "  radio password   $($Script:RADIO_PW)"
-        "  admin password   $($Script:ADMIN_PW)"
+        "  network admin    $($Script:ADMIN_PW)"
         ""
         "  Setup scripts    $scriptCount to run once on the node"
     )
@@ -1923,7 +1946,7 @@ function Get-ReceiptText {
     }
     $lines += @(
         "SSH login             radio / $($Script:RADIO_PW)"
-        "Admin page password   $($Script:ADMIN_PW)"
+        "Network admin password $($Script:ADMIN_PW)"
         ""
         "Every node on this mesh must be flashed with the same mesh name and"
         "mesh password, or they will not see each other. Load the saved"
@@ -2051,13 +2074,8 @@ function Invoke-Next {
         }
         'Prereqs' { Go-Page 'Config' }
         'Config'  {
-            $problems = Copy-PageToEngine
-            if ($problems.Count -gt 0) {
-                [System.Windows.Forms.MessageBox]::Show($Script:Form,
-                    ("These need fixing first:`r`n`r`n  - " + ($problems -join "`r`n  - ")),
-                    'Not quite ready', 'OK', 'Warning') | Out-Null
-                return
-            }
+            $problems = @(Copy-PageToEngine)
+            if ($problems.Count -gt 0) { Show-ConfigProblems $problems; return }
             if (-not $Script:LoadedConfig -and -not $Script:TxtSaveName.Text.Trim()) {
                 $r = [System.Windows.Forms.MessageBox]::Show($Script:Form,
                     ("These settings have not been saved.`r`n`r`nEvery other node on this mesh has to be flashed with the same ones, " +
