@@ -113,7 +113,7 @@ try {
 # Look and feel
 # ============================================================
 
-$UI = @{
+$Script:UI = @{
     Bg        = [System.Drawing.Color]::FromArgb(250, 250, 250)
     Panel     = [System.Drawing.Color]::White
     Header    = [System.Drawing.Color]::FromArgb(31, 56, 84)
@@ -132,13 +132,16 @@ $UI = @{
 
 function New-Text {
     param([string]$Text, [int]$X, [int]$Y, [int]$W = 560, [int]$H = 20,
-          [System.Drawing.Font]$Font = $null, [System.Drawing.Color]$Color = $UI.Text)
+          $Font = $null, $Color = $null)
     $l          = New-Object System.Windows.Forms.Label
     $l.Text     = $Text
     $l.Location = New-Object System.Drawing.Point((S $X), (S $Y))
     $l.Size     = New-Object System.Drawing.Size((S $W), (S $H))
-    $l.Font     = if ($Font) { $Font } else { $UI.Font }
-    $l.ForeColor= $Color
+    # Untyped, and resolved here rather than in the parameter defaults. Color
+    # is a struct, so binding a null to a [System.Drawing.Color] parameter is
+    # a hard cast failure, not an empty value.
+    $l.Font      = if ($Font)  { $Font }  else { $Script:UI.Font }
+    $l.ForeColor = if ($Color) { $Color } else { $Script:UI.Text }
     return $l
 }
 
@@ -147,7 +150,7 @@ function New-Input {
     $t          = New-Object System.Windows.Forms.TextBox
     $t.Location = New-Object System.Drawing.Point((S $X), (S $Y))
     $t.Size     = New-Object System.Drawing.Size((S $W), (S 24))
-    $t.Font     = $UI.Font
+    $t.Font     = $Script:UI.Font
     if ($Password) { $t.UseSystemPasswordChar = $false }
     return $t
 }
@@ -158,7 +161,7 @@ function New-Btn {
     $b.Text      = $Text
     $b.Location  = New-Object System.Drawing.Point((S $X), (S $Y))
     $b.Size      = New-Object System.Drawing.Size((S $W), (S $H))
-    $b.Font      = $UI.Font
+    $b.Font      = $Script:UI.Font
     $b.FlatStyle = 'System'
     if ($OnClick) { $b.Add_Click($OnClick) }
     return $b
@@ -170,7 +173,7 @@ function New-Check {
     $c.Text      = $Text
     $c.Location  = New-Object System.Drawing.Point((S $X), (S $Y))
     $c.Size      = New-Object System.Drawing.Size((S $W), (S 22))
-    $c.Font      = $UI.Font
+    $c.Font      = $Script:UI.Font
     $c.Checked   = $Checked
     return $c
 }
@@ -180,7 +183,7 @@ function New-Combo {
     $c               = New-Object System.Windows.Forms.ComboBox
     $c.Location      = New-Object System.Drawing.Point((S $X), (S $Y))
     $c.Size          = New-Object System.Drawing.Size((S $W), (S 24))
-    $c.Font          = $UI.Font
+    $c.Font          = $Script:UI.Font
     $c.DropDownStyle = 'DropDownList'
     foreach ($i in $Items) { [void]$c.Items.Add($i) }
     return $c
@@ -192,8 +195,8 @@ function New-GroupBox {
     $g.Text     = $Text
     $g.Location = New-Object System.Drawing.Point((S $X), (S $Y))
     $g.Size     = New-Object System.Drawing.Size((S $W), (S $H))
-    $g.Font     = $UI.FontBold
-    $g.ForeColor= $UI.Header
+    $g.Font     = $Script:UI.FontBold
+    $g.ForeColor= $Script:UI.Header
     return $g
 }
 
@@ -778,7 +781,7 @@ function New-ContentPanel {
     $p           = New-Object System.Windows.Forms.Panel
     $p.Size      = New-Object System.Drawing.Size((S $Script:CONTENT_W), (S $Script:CONTENT_H))
     $p.Location  = New-Object System.Drawing.Point((S 0), (S 0))
-    $p.BackColor = $UI.Panel
+    $p.BackColor = $Script:UI.Panel
     $p.Visible   = $false
     return $p
 }
@@ -786,7 +789,7 @@ function New-ContentPanel {
 function Build-HardwarePage {
     $p = New-ContentPanel
 
-    $p.Controls.Add((New-Text 'Pick the board you are flashing. This decides which tools are needed and how the card is written.' 24 18 780 20 $UI.Font $UI.Muted))
+    $p.Controls.Add((New-Text 'Pick the board you are flashing. This decides which tools are needed and how the card is written.' 24 18 780 20 $Script:UI.Font $Script:UI.Muted))
 
     $Script:RbCm4  = New-Object System.Windows.Forms.RadioButton
     $Script:RbRpi5 = New-Object System.Windows.Forms.RadioButton
@@ -804,19 +807,19 @@ function Build-HardwarePage {
     foreach ($r in $rows) {
         $rb           = $r.Rb
         $rb.Text      = $r.T
-        $rb.Font      = $UI.FontBold
-        $rb.ForeColor = $UI.Text
+        $rb.Font      = $Script:UI.FontBold
+        $rb.ForeColor = $Script:UI.Text
         $rb.Location  = New-Object System.Drawing.Point((S 28), (S $y))
         $rb.Size      = New-Object System.Drawing.Size((S 500), (S 24))
         $p.Controls.Add($rb)
-        $p.Controls.Add((New-Text $r.D 50 ($y + 24) 720 18 $UI.FontSmall $UI.Muted))
+        $p.Controls.Add((New-Text $r.D 50 ($y + 24) 720 18 $Script:UI.FontSmall $Script:UI.Muted))
         $y += 62
     }
 
     $Script:RbCm4.Checked = $true
 
     $note = New-Text ("The mesh settings on the next pages must match on every node, or they will not see each other. " +
-                      "Save them once and load the same saved configuration for each card.") 28 ($y + 8) 760 40 $UI.FontSmall $UI.Muted
+                      "Save them once and load the same saved configuration for each card.") 28 ($y + 8) 760 40 $Script:UI.FontSmall $Script:UI.Muted
     $p.Controls.Add($note)
 
     return $p
@@ -842,7 +845,7 @@ function Build-PrereqPage {
     $Script:PrereqHost.AutoScroll = $true
     $p.Controls.Add($Script:PrereqHost)
 
-    $Script:PrereqStatus = New-Text '' 20 370 640 20 $UI.FontSmall $UI.Muted
+    $Script:PrereqStatus = New-Text '' 20 370 640 20 $Script:UI.FontSmall $Script:UI.Muted
     $p.Controls.Add($Script:PrereqStatus)
 
     $p.Controls.Add((New-Btn 'Check again' 706 366 112 28 { Update-PrereqPage }))
@@ -859,41 +862,41 @@ function Build-PrereqRows {
 
     $y = 6
     foreach ($item in $Script:PrereqItems) {
-        $ui = @{}
+        $row = @{}
 
-        $ui.Mark   = New-Text ''         4  ($y + 2)  84  20 $UI.FontBold
-        $ui.Name   = New-Text $item.Name 92 ($y + 2)  340 20 $UI.FontBold $UI.Text
-        $ui.Why    = New-Text $item.Why  92 ($y + 22) 560 34 $UI.FontSmall $UI.Muted
-        $ui.Detail = New-Text ''         92 ($y + 56) 560 18 $UI.FontSmall $UI.Muted
+        $row.Mark   = New-Text ''         4  ($y + 2)  84  20 $Script:UI.FontBold
+        $row.Name   = New-Text $item.Name 92 ($y + 2)  340 20 $Script:UI.FontBold $Script:UI.Text
+        $row.Why    = New-Text $item.Why  92 ($y + 22) 560 34 $Script:UI.FontSmall $Script:UI.Muted
+        $row.Detail = New-Text ''         92 ($y + 56) 560 18 $Script:UI.FontSmall $Script:UI.Muted
 
-        $ui.Bar          = New-Object System.Windows.Forms.ProgressBar
-        $ui.Bar.Location = New-Object System.Drawing.Point((S 92), (S ($y + 76)))
-        $ui.Bar.Size     = New-Object System.Drawing.Size((S 560), (S 12))
-        $ui.Bar.Visible  = $false
+        $row.Bar          = New-Object System.Windows.Forms.ProgressBar
+        $row.Bar.Location = New-Object System.Drawing.Point((S 92), (S ($y + 76)))
+        $row.Bar.Size     = New-Object System.Drawing.Size((S 560), (S 12))
+        $row.Bar.Visible  = $false
 
         # The prerequisite each button acts on rides on the button's Tag. A
         # closure would capture it into a module scope where $Script: no
         # longer means this script.
-        $ui.Install     = New-Btn 'Install it' 664 ($y + 4) 118 28
-        $ui.Install.Tag = $item
-        $ui.Install.Add_Click({ Install-Prereq $this.Tag })
+        $row.Install     = New-Btn 'Install it' 664 ($y + 4) 118 28
+        $row.Install.Tag = $item
+        $row.Install.Add_Click({ Install-Prereq $this.Tag })
 
-        $ui.Locate      = New-Btn 'I have it...' 664 ($y + 36) 118 26
-        $ui.Locate.Tag  = $item
-        $ui.Locate.Font = $UI.FontSmall
-        $ui.Locate.Add_Click({ Locate-Prereq $this.Tag })
+        $row.Locate      = New-Btn 'I have it...' 664 ($y + 36) 118 26
+        $row.Locate.Tag  = $item
+        $row.Locate.Font = $Script:UI.FontSmall
+        $row.Locate.Add_Click({ Locate-Prereq $this.Tag })
 
-        $ui.Sep             = New-Object System.Windows.Forms.Label
-        $ui.Sep.Location    = New-Object System.Drawing.Point((S 4), (S ($y + 96)))
-        $ui.Sep.Size        = New-Object System.Drawing.Size((S 778), (S 1))
-        $ui.Sep.BorderStyle = 'Fixed3D'
+        $row.Sep             = New-Object System.Windows.Forms.Label
+        $row.Sep.Location    = New-Object System.Drawing.Point((S 4), (S ($y + 96)))
+        $row.Sep.Size        = New-Object System.Drawing.Size((S 778), (S 1))
+        $row.Sep.BorderStyle = 'Fixed3D'
 
-        foreach ($c in @($ui.Mark, $ui.Name, $ui.Why, $ui.Detail, $ui.Bar,
-                         $ui.Install, $ui.Locate, $ui.Sep)) {
+        foreach ($c in @($row.Mark, $row.Name, $row.Why, $row.Detail, $row.Bar,
+                         $row.Install, $row.Locate, $row.Sep)) {
             $host_.Controls.Add($c)
         }
 
-        $item.Ui = $ui
+        $item.Ui = $row
         $y += 110
     }
 }
@@ -907,17 +910,17 @@ function Update-PrereqRows {
 
         [void](Test-Prereq $item)
 
-        $ui = $item.Ui
-        $ui.Mark.Text      = if ($item.Found) { 'OK' } elseif ($item.Required) { 'MISSING' } else { 'optional' }
-        $ui.Mark.ForeColor = if ($item.Found) { $UI.Good } elseif ($item.Required) { $UI.Bad } else { $UI.Warn }
-        $ui.Detail.Text      = $item.Detail
-        $ui.Detail.ForeColor = $ui.Mark.ForeColor
-        $ui.Bar.Visible      = $false
+        $row = $item.Ui
+        $row.Mark.Text      = if ($item.Found) { 'OK' } elseif ($item.Required) { 'MISSING' } else { 'optional' }
+        $row.Mark.ForeColor = if ($item.Found) { $Script:UI.Good } elseif ($item.Required) { $Script:UI.Bad } else { $Script:UI.Warn }
+        $row.Detail.Text      = $item.Detail
+        $row.Detail.ForeColor = $row.Mark.ForeColor
+        $row.Bar.Visible      = $false
 
-        $ui.Install.Visible = -not $item.Found
-        $ui.Locate.Visible  = -not $item.Found
-        $ui.Install.Enabled = $true
-        $ui.Install.Text    = if ($item.Source -eq 'page') { 'Get it...' } else { 'Install it' }
+        $row.Install.Visible = -not $item.Found
+        $row.Locate.Visible  = -not $item.Found
+        $row.Install.Enabled = $true
+        $row.Install.Text    = if ($item.Source -eq 'page') { 'Get it...' } else { 'Install it' }
     }
     Update-Nav
 }
@@ -963,16 +966,16 @@ function Install-Prereq {
     # from, so the browser is the answer.
     if ($P.Source -eq 'page') { Start-Process $P.Page; return }
 
-    $ui = $P.Ui
+    $row = $P.Ui
     $url = $P.Url
     if ($P.Source -eq 'github') {
-        $ui.Detail.Text      = "looking up the latest release..."
-        $ui.Detail.ForeColor = $UI.Muted
+        $row.Detail.Text      = "looking up the latest release..."
+        $row.Detail.ForeColor = $Script:UI.Muted
         [System.Windows.Forms.Application]::DoEvents()
         $url = Get-GithubAssetUrl -Repo $P.Repo -Match $P.Match
         if (-not $url) {
-            $ui.Detail.Text      = "could not reach GitHub; the download page is opening instead"
-            $ui.Detail.ForeColor = $UI.Warn
+            $row.Detail.Text      = "could not reach GitHub; the download page is opening instead"
+            $row.Detail.ForeColor = $Script:UI.Warn
             Start-Process $P.Page
             return
         }
@@ -981,23 +984,23 @@ function Install-Prereq {
     $dest = Join-Path ([System.IO.Path]::GetTempPath()) $P.File
 
     $P.Busy             = $true
-    $ui.Install.Enabled = $false
-    $ui.Bar.Style       = 'Blocks'
-    $ui.Bar.Value       = 0
-    $ui.Bar.Visible     = $true
-    $ui.Detail.ForeColor = $UI.Muted
+    $row.Install.Enabled = $false
+    $row.Bar.Style       = 'Blocks'
+    $row.Bar.Value       = 0
+    $row.Bar.Visible     = $true
+    $row.Detail.ForeColor = $Script:UI.Muted
 
     try {
         [void](Start-DownloadJob -Url $url -OutFile $dest -Label "$($P.Name) installer" `
-                   -Bar $ui.Bar -StatusLabel $ui.Detail `
+                   -Bar $row.Bar -StatusLabel $row.Detail `
                    -State @{ Prereq = $P; Installer = $dest } `
                    -OnDone $Script:AfterPrereqDownload)
     } catch {
         $P.Busy = $false
-        $ui.Install.Enabled  = $true
-        $ui.Bar.Visible      = $false
-        $ui.Detail.Text      = "could not start the download: $($_.Exception.Message)"
-        $ui.Detail.ForeColor = $UI.Bad
+        $row.Install.Enabled  = $true
+        $row.Bar.Visible      = $false
+        $row.Detail.Text      = "could not start the download: $($_.Exception.Message)"
+        $row.Detail.ForeColor = $Script:UI.Bad
         Update-Nav
     }
 }
@@ -1006,13 +1009,13 @@ $Script:AfterPrereqDownload = {
     param($job, $ok, $err)
 
     $P  = $job.Prereq
-    $ui = $P.Ui
+    $row = $P.Ui
     if (-not $ok) {
         $P.Busy = $false
-        $ui.Install.Enabled  = $true
-        $ui.Bar.Visible      = $false
-        $ui.Detail.Text      = "download failed: $err"
-        $ui.Detail.ForeColor = $UI.Bad
+        $row.Install.Enabled  = $true
+        $row.Bar.Visible      = $false
+        $row.Detail.Text      = "download failed: $err"
+        $row.Detail.ForeColor = $Script:UI.Bad
         Update-Nav
         return
     }
@@ -1044,11 +1047,11 @@ function Start-NextInstaller {
     $Script:InstallerRunning = $true
 
     $P  = $queued.Prereq
-    $ui = $P.Ui
-    $ui.Bar.Style        = 'Marquee'
-    $ui.Bar.Visible      = $true
-    $ui.Detail.Text      = "the installer is open; click through it, then come back here"
-    $ui.Detail.ForeColor = $UI.Muted
+    $row = $P.Ui
+    $row.Bar.Style        = 'Marquee'
+    $row.Bar.Visible      = $true
+    $row.Detail.Text      = "the installer is open; click through it, then come back here"
+    $row.Detail.ForeColor = $Script:UI.Muted
 
     # No silent switches. These are third-party installers whose flags are not
     # ours to assume, and one that silently does the wrong thing is worse than
@@ -1063,17 +1066,17 @@ $Script:AfterPrereqInstall = {
 
     $Script:InstallerRunning = $false
     $P  = $job.Prereq
-    $ui = $P.Ui
+    $row = $P.Ui
 
     Remove-Item $job.Installer -Force -ErrorAction SilentlyContinue
     $P.Busy         = $false
-    $ui.Bar.Style   = 'Blocks'
-    $ui.Bar.Visible = $false
+    $row.Bar.Style   = 'Blocks'
+    $row.Bar.Visible = $false
 
     Update-PrereqRows
     if (-not $P.Found) {
-        $ui.Detail.Text      = "still not showing up. Try 'I have it...' and point at it."
-        $ui.Detail.ForeColor = $UI.Warn
+        $row.Detail.Text      = "still not showing up. Try 'I have it...' and point at it."
+        $row.Detail.ForeColor = $Script:UI.Warn
     }
 
     Start-NextInstaller
@@ -1104,7 +1107,7 @@ function Build-ConfigPage {
     $g2.Controls.Add((New-Text 'Wi-Fi name' 12 55 124 20))
     $Script:TxtApSsid = New-Input 140 52 230
     $g2.Controls.Add($Script:TxtApSsid)
-    $g2.Controls.Add((New-Text 'Each node adds the last 4 of its wired MAC to this.' 12 78 370 18 $UI.FontSmall $UI.Muted))
+    $g2.Controls.Add((New-Text 'Each node adds the last 4 of its wired MAC to this.' 12 78 370 18 $Script:UI.FontSmall $Script:UI.Muted))
 
     $g2.Controls.Add((New-Text 'Wi-Fi password' 12 99 124 20))
     $Script:TxtApKey = New-Input 140 96 144
@@ -1119,7 +1122,7 @@ function Build-ConfigPage {
     $Script:NumEuds          = New-Object System.Windows.Forms.NumericUpDown
     $Script:NumEuds.Location = New-Object System.Drawing.Point((S 140), (S 124))
     $Script:NumEuds.Size     = New-Object System.Drawing.Size((S 60), (S 24))
-    $Script:NumEuds.Font     = $UI.Font
+    $Script:NumEuds.Font     = $Script:UI.Font
     $Script:NumEuds.Minimum  = 1
     $Script:NumEuds.Maximum  = 20
     $Script:NumEuds.Value    = 4
@@ -1156,7 +1159,7 @@ function Build-ConfigPage {
     $Script:CmbDomain.SelectedItem = 'US'
     $Script:CmbDomain.Add_SelectedIndexChanged({ Update-DomainNote })
     $g4.Controls.Add($Script:CmbDomain)
-    $Script:LblDomainNote = New-Text '' 248 83 138 20 $UI.FontSmall $UI.Muted
+    $Script:LblDomainNote = New-Text '' 248 83 138 20 $Script:UI.FontSmall $Script:UI.Muted
     $g4.Controls.Add($Script:LblDomainNote)
 
     $Script:ChkAcs = New-Check 'Choose the Wi-Fi channel automatically' 12 110 370 $false
@@ -1170,7 +1173,7 @@ function Build-ConfigPage {
     $Script:TxtCidr.Text = '10.30.2.0/24'
     $Script:TxtCidr.Add_TextChanged({ Update-CapacityLabel })
     $g5.Controls.Add($Script:TxtCidr)
-    $Script:LblCapacity = New-Text '' 12 52 372 44 $UI.FontSmall $UI.Muted
+    $Script:LblCapacity = New-Text '' 12 52 372 44 $Script:UI.FontSmall $Script:UI.Muted
     $g5.Controls.Add($Script:LblCapacity)
     $p.Controls.Add($g5)
 
@@ -1187,7 +1190,7 @@ function Build-ConfigPage {
     $g6.Controls.Add((New-Btn 'Generate' 290 51 88 24 {
         $Script:TxtAdminPw.Text = Generate-Password -length 10
     }))
-    $g6.Controls.Add((New-Text 'Both are shown again at the end. Write them down there.' 12 78 372 18 $UI.FontSmall $UI.Muted))
+    $g6.Controls.Add((New-Text 'Both are shown again at the end. Write them down there.' 12 78 372 18 $Script:UI.FontSmall $Script:UI.Muted))
     $p.Controls.Add($g6)
 
     # --- save row --------------------------------------------------------
@@ -1195,7 +1198,7 @@ function Build-ConfigPage {
     $Script:TxtSaveName = New-Input 160 387 200
     $p.Controls.Add($Script:TxtSaveName)
     $p.Controls.Add((New-Btn 'Save' 368 386 90 26 { Save-ConfigFromPage }))
-    $Script:LblSaveNote = New-Text '' 468 390 354 20 $UI.FontSmall $UI.Muted
+    $Script:LblSaveNote = New-Text '' 468 390 354 20 $Script:UI.FontSmall $Script:UI.Muted
     $p.Controls.Add($Script:LblSaveNote)
 
     return $p
@@ -1233,12 +1236,12 @@ function Update-CapacityLabel {
 
     if (-not $cap) {
         $Script:LblCapacity.Text      = 'Not a valid range yet. Use something like 10.30.2.0/24.'
-        $Script:LblCapacity.ForeColor = $UI.Muted
+        $Script:LblCapacity.ForeColor = $Script:UI.Muted
         return
     }
     $Script:LblCapacity.Text = ("Room for {0} nodes, {1} client addresses, {2} reserved for services." -f `
                                 $cap.MaxNodes, $cap.EudPool, $cap.Services)
-    $Script:LblCapacity.ForeColor = if ($cap.MaxNodes -lt 5) { $UI.Warn } else { $UI.Muted }
+    $Script:LblCapacity.ForeColor = if ($cap.MaxNodes -lt 5) { $Script:UI.Warn } else { $Script:UI.Muted }
     if ($cap.MaxNodes -lt 5) {
         $Script:LblCapacity.Text += "`r`nThat is very few nodes. Use a bigger range or fewer clients per node."
     }
@@ -1264,25 +1267,25 @@ function Load-SelectedConfig {
     $Script:LoadedConfig = $name
     $Script:TxtSaveName.Text = $name
     $Script:LblSaveNote.Text = "Loaded '$name'."
-    $Script:LblSaveNote.ForeColor = $UI.Good
+    $Script:LblSaveNote.ForeColor = $Script:UI.Good
 }
 
 function Save-ConfigFromPage {
     $name = $Script:TxtSaveName.Text.Trim()
     if (-not $name) {
         $Script:LblSaveNote.Text = 'Give it a name first.'
-        $Script:LblSaveNote.ForeColor = $UI.Bad
+        $Script:LblSaveNote.ForeColor = $Script:UI.Bad
         return
     }
     if ($name -match '[\\/:*?"<>|]') {
         $Script:LblSaveNote.Text = 'That name has characters Windows will not allow in a file.'
-        $Script:LblSaveNote.ForeColor = $UI.Bad
+        $Script:LblSaveNote.ForeColor = $Script:UI.Bad
         return
     }
     $problems = Copy-PageToEngine
     if ($problems.Count -gt 0) {
         $Script:LblSaveNote.Text = 'Fix the settings first: ' + $problems[0]
-        $Script:LblSaveNote.ForeColor = $UI.Bad
+        $Script:LblSaveNote.ForeColor = $Script:UI.Bad
         return
     }
 
@@ -1314,7 +1317,7 @@ AUTO_UPDATE="$($Script:AUTO_UPDATE)"
     Update-SavedConfigList
     $Script:CmbSaved.SelectedItem = $name
     $Script:LblSaveNote.Text = "Saved. The Linux flasher reads this too."
-    $Script:LblSaveNote.ForeColor = $UI.Good
+    $Script:LblSaveNote.ForeColor = $Script:UI.Good
 }
 
 # Page -> engine variables. Returns the list of things that are wrong, so the
@@ -1429,17 +1432,17 @@ function Build-ScriptsPage {
     $Script:LvScripts.View          = 'Details'
     $Script:LvScripts.FullRowSelect = $true
     $Script:LvScripts.GridLines     = $false
-    $Script:LvScripts.Font          = $UI.Font
+    $Script:LvScripts.Font          = $Script:UI.Font
     [void]$Script:LvScripts.Columns.Add('File', (S 250))
     [void]$Script:LvScripts.Columns.Add('', (S 90))
     [void]$Script:LvScripts.Columns.Add('Why', (S 434))
     $p.Controls.Add($Script:LvScripts)
 
-    $Script:LblScriptsSummary = New-Text '' 20 264 798 56 $UI.Font $UI.Text
+    $Script:LblScriptsSummary = New-Text '' 20 264 798 56 $Script:UI.Font $Script:UI.Text
     $p.Controls.Add($Script:LblScriptsSummary)
 
     $warn = New-Text ('These are written into the card unencrypted and are not deleted afterwards. ' +
-                      'Anyone who reads the card reads them, so keep private keys and long-lived secrets out.') 20 326 798 36 $UI.FontSmall $UI.Warn
+                      'Anyone who reads the card reads them, so keep private keys and long-lived secrets out.') 20 326 798 36 $Script:UI.FontSmall $Script:UI.Warn
     $p.Controls.Add($warn)
 
     $p.Controls.Add((New-Btn 'Open the folder' 20 372 140 28 {
@@ -1459,25 +1462,25 @@ function Update-ScriptsPage {
         $item = New-Object System.Windows.Forms.ListViewItem($r.Name)
         [void]$item.SubItems.Add($(switch ($r.Verdict) { 'OK' { 'will run' } 'SKIP' { 'ignored' } 'FAIL' { 'BROKEN' } }))
         [void]$item.SubItems.Add($r.Reason)
-        $item.ForeColor = switch ($r.Verdict) { 'OK' { $UI.Good } 'SKIP' { $UI.Muted } 'FAIL' { $UI.Bad } }
+        $item.ForeColor = switch ($r.Verdict) { 'OK' { $Script:UI.Good } 'SKIP' { $Script:UI.Muted } 'FAIL' { $Script:UI.Bad } }
         [void]$Script:LvScripts.Items.Add($item)
     }
 
     $rep = $Script:ScriptReport
     if ($rep.Results.Count -eq 0) {
         $Script:LblScriptsSummary.Text = "Nothing in additional-scripts, so nothing extra runs on the node. That is the normal case."
-        $Script:LblScriptsSummary.ForeColor = $UI.Muted
+        $Script:LblScriptsSummary.ForeColor = $Script:UI.Muted
     } elseif ($rep.Failed) {
         $Script:LblScriptsSummary.Text = "One or more scripts will not run as written. Nothing is flashed until they are fixed or renamed to .disabled."
-        $Script:LblScriptsSummary.ForeColor = $UI.Bad
+        $Script:LblScriptsSummary.ForeColor = $Script:UI.Bad
     } elseif ($rep.OverMax) {
         $Script:LblScriptsSummary.Text = "$($rep.TotalBytes) bytes is over the $($rep.MaxBytes)-byte limit. Have a script download the bulk on the node instead; it has internet before these run."
-        $Script:LblScriptsSummary.ForeColor = $UI.Bad
+        $Script:LblScriptsSummary.ForeColor = $Script:UI.Bad
     } else {
         $n = $rep.Accepted.Count
         $Script:LblScriptsSummary.Text = "$n script(s) will be embedded and run once as root on each node, after setup finishes."
         if ($rep.OverWarn) { $Script:LblScriptsSummary.Text += "  That is $($rep.TotalBytes) bytes, which is a lot to bake into an image." }
-        $Script:LblScriptsSummary.ForeColor = if ($rep.OverWarn) { $UI.Warn } else { $UI.Good }
+        $Script:LblScriptsSummary.ForeColor = if ($rep.OverWarn) { $Script:UI.Warn } else { $Script:UI.Good }
     }
 
     # Same variable the console flow sets, and what Add-AdditionalScriptsBlock reads.
@@ -1497,7 +1500,7 @@ function Build-TargetPage {
     $Script:GrpBoot.Controls.Add((New-Text '2.  Plug a USB cable from this computer into the carrier board slave port.' 14 44 700 18))
     $Script:GrpBoot.Controls.Add((New-Text '3.  Power the board on, then press the button.' 14 64 700 18))
     $Script:GrpBoot.Controls.Add((New-Btn 'Expose the eMMC' 14 86 150 26 { Invoke-RpiBootFromGui }))
-    $Script:LblBootState = New-Text '' 176 90 600 20 $UI.FontSmall $UI.Muted
+    $Script:LblBootState = New-Text '' 176 90 600 20 $Script:UI.FontSmall $Script:UI.Muted
     $Script:GrpBoot.Controls.Add($Script:LblBootState)
     $p.Controls.Add($Script:GrpBoot)
 
@@ -1508,7 +1511,7 @@ function Build-TargetPage {
     $Script:LvDisks.FullRowSelect = $true
     $Script:LvDisks.MultiSelect   = $false
     $Script:LvDisks.HideSelection = $false
-    $Script:LvDisks.Font          = $UI.Font
+    $Script:LvDisks.Font          = $Script:UI.Font
     [void]$Script:LvDisks.Columns.Add('Disk', (S 50))
     [void]$Script:LvDisks.Columns.Add('Name', (S 300))
     [void]$Script:LvDisks.Columns.Add('Size', (S 90))
@@ -1517,11 +1520,11 @@ function Build-TargetPage {
     $Script:LvDisks.Add_SelectedIndexChanged({ Update-DiskWarning; Update-Nav })
     $p.Controls.Add($Script:LvDisks)
 
-    $Script:LblDiskWarn = New-Text '' 20 336 798 40 $UI.Font $UI.Text
+    $Script:LblDiskWarn = New-Text '' 20 336 798 40 $Script:UI.Font $Script:UI.Text
     $p.Controls.Add($Script:LblDiskWarn)
 
     $p.Controls.Add((New-Btn 'Look again' 20 384 140 28 { Update-TargetPage }))
-    $p.Controls.Add((New-Text 'The disk you are booted from is never listed.' 172 390 500 18 $UI.FontSmall $UI.Muted))
+    $p.Controls.Add((New-Text 'The disk you are booted from is never listed.' 172 390 500 18 $Script:UI.FontSmall $Script:UI.Muted))
 
     return $p
 }
@@ -1543,14 +1546,14 @@ function Update-TargetPage {
         [void]$item.SubItems.Add($d.BusType)
         [void]$item.SubItems.Add($(if ($d.Volumes.Count) { $d.Volumes -join ', ' } else { '' }))
         $item.Tag = $d
-        if (-not $d.IsRemovable) { $item.ForeColor = $UI.Bad }
+        if (-not $d.IsRemovable) { $item.ForeColor = $Script:UI.Bad }
         [void]$Script:LvDisks.Items.Add($item)
         if ($sel -and $item.Text -eq $sel) { $item.Selected = $true }
     }
 
     if ($Script:LvDisks.Items.Count -eq 0) {
         $Script:LblDiskWarn.Text = 'No card found. Plug in the card reader, or for a CM4 use the button above, then choose Look again.'
-        $Script:LblDiskWarn.ForeColor = $UI.Warn
+        $Script:LblDiskWarn.ForeColor = $Script:UI.Warn
     } else {
         Update-DiskWarning
     }
@@ -1566,16 +1569,16 @@ function Update-DiskWarning {
     $d = Get-SelectedDisk
     if (-not $d) {
         $Script:LblDiskWarn.Text = 'Pick the card from the list.'
-        $Script:LblDiskWarn.ForeColor = $UI.Muted
+        $Script:LblDiskWarn.ForeColor = $Script:UI.Muted
         return
     }
     if ($d.IsRemovable) {
         $Script:LblDiskWarn.Text = "Disk $($d.Number), $($d.SizeGB) GB. Everything on it will be destroyed."
-        $Script:LblDiskWarn.ForeColor = $UI.Text
+        $Script:LblDiskWarn.ForeColor = $Script:UI.Text
     } else {
         $Script:LblDiskWarn.Text = ("Disk $($d.Number) is connected by $($d.BusType), which is how a hard drive is connected, not a card reader.`r`n" +
                                     "If this is not the card you meant, pick another one. Everything on it will be destroyed.")
-        $Script:LblDiskWarn.ForeColor = $UI.Bad
+        $Script:LblDiskWarn.ForeColor = $Script:UI.Bad
     }
 }
 
@@ -1585,13 +1588,13 @@ function Invoke-RpiBootFromGui {
     $item = $Script:PrereqItems | Where-Object { $_.Key -eq 'rpiboot' } | Select-Object -First 1
     if (-not $item -or -not $item.Path) {
         $Script:LblBootState.Text = 'rpiboot is not installed. Go back to the prerequisites page.'
-        $Script:LblBootState.ForeColor = $UI.Bad
+        $Script:LblBootState.ForeColor = $Script:UI.Bad
         return
     }
 
     $Script:RPIBOOT_PATH = $item.Path
     $Script:LblBootState.Text = 'Running rpiboot...'
-    $Script:LblBootState.ForeColor = $UI.Muted
+    $Script:LblBootState.ForeColor = $Script:UI.Muted
 
     [void](Start-ProcessJob -Path $item.Path -Label 'rpiboot' `
         -StatusLabel $Script:LblBootState `
@@ -1611,10 +1614,10 @@ function Invoke-RpiBootFromGui {
         $new   = @($after | Where-Object { $job.DisksBefore -notcontains $_ })
         if ($new.Count -gt 0) {
             $Script:LblBootState.Text = "The eMMC appeared as disk $($new -join ', '). Pick it below."
-            $Script:LblBootState.ForeColor = $UI.Good
+            $Script:LblBootState.ForeColor = $Script:UI.Good
         } else {
             $Script:LblBootState.Text = 'No new disk appeared. Check the boot jumper and the USB cable, then try again.'
-            $Script:LblBootState.ForeColor = $UI.Warn
+            $Script:LblBootState.ForeColor = $Script:UI.Warn
         }
         Update-TargetPage
     })
@@ -1633,15 +1636,15 @@ function Build-ConfirmPage {
     $Script:TxtSummary.Multiline  = $true
     $Script:TxtSummary.ReadOnly   = $true
     $Script:TxtSummary.ScrollBars = 'Vertical'
-    $Script:TxtSummary.Font       = $UI.FontMono
+    $Script:TxtSummary.Font       = $Script:UI.FontMono
     $Script:TxtSummary.BackColor  = [System.Drawing.Color]::FromArgb(248, 248, 248)
     $p.Controls.Add($Script:TxtSummary)
 
-    $Script:LblEraseWarn = New-Text '' 20 334 798 26 $UI.FontBold $UI.Bad
+    $Script:LblEraseWarn = New-Text '' 20 334 798 26 $Script:UI.FontBold $Script:UI.Bad
     $p.Controls.Add($Script:LblEraseWarn)
 
     $Script:ChkErase = New-Check '' 20 366 798 $false
-    $Script:ChkErase.Font = $UI.FontBold
+    $Script:ChkErase.Font = $Script:UI.FontBold
     $Script:ChkErase.Add_CheckedChanged({ Update-Nav })
     $p.Controls.Add($Script:ChkErase)
 
@@ -1711,7 +1714,7 @@ function Build-FlashPage {
     $Script:FlashProgress.Size     = New-Object System.Drawing.Size((S 798), (S 22))
     $p.Controls.Add($Script:FlashProgress)
 
-    $Script:LblFlashStatus = New-Text 'Getting ready...' 20 44 798 20 $UI.Font $UI.Text
+    $Script:LblFlashStatus = New-Text 'Getting ready...' 20 44 798 20 $Script:UI.Font $Script:UI.Text
     $p.Controls.Add($Script:LblFlashStatus)
 
     $Script:LogBox            = New-Object System.Windows.Forms.TextBox
@@ -1720,7 +1723,7 @@ function Build-FlashPage {
     $Script:LogBox.Multiline  = $true
     $Script:LogBox.ReadOnly   = $true
     $Script:LogBox.ScrollBars = 'Vertical'
-    $Script:LogBox.Font       = $UI.FontMono
+    $Script:LogBox.Font       = $Script:UI.FontMono
     $Script:LogBox.BackColor  = [System.Drawing.Color]::FromArgb(24, 24, 24)
     $Script:LogBox.ForeColor  = [System.Drawing.Color]::FromArgb(220, 220, 220)
     $Script:LogBox.WordWrap   = $false
@@ -1851,13 +1854,13 @@ function Complete-Flash {
         $Script:FlashCount++
         $Script:FlashProgress.Value = 100
         $Script:LblFlashStatus.Text = 'Done. The card is written.'
-        $Script:LblFlashStatus.ForeColor = $UI.Good
+        $Script:LblFlashStatus.ForeColor = $Script:UI.Good
         Add-Log ""
         Add-Log "Flash complete."
         Go-Page 'Done'
     } else {
         $Script:LblFlashStatus.Text = "It did not work: $Reason"
-        $Script:LblFlashStatus.ForeColor = $UI.Bad
+        $Script:LblFlashStatus.ForeColor = $Script:UI.Bad
         Add-Log ""
         Add-Log "FAILED: $Reason"
         $Script:FlashFailed = $true
@@ -1872,9 +1875,9 @@ function Complete-Flash {
 function Build-DonePage {
     $p = New-ContentPanel
 
-    $p.Controls.Add((New-Text 'The card is ready. Put it in the board and connect Ethernet with internet access.' 20 12 798 20 $UI.FontBold $UI.Good))
+    $p.Controls.Add((New-Text 'The card is ready. Put it in the board and connect Ethernet with internet access.' 20 12 798 20 $Script:UI.FontBold $Script:UI.Good))
     $p.Controls.Add((New-Text ('The node sets itself up on first boot and reboots several times. It takes about ten minutes. ' +
-                               'Leave it alone until it settles.') 20 34 798 34 $UI.Font $UI.Text))
+                               'Leave it alone until it settles.') 20 34 798 34 $Script:UI.Font $Script:UI.Text))
 
     $Script:TxtReceipt            = New-Object System.Windows.Forms.TextBox
     $Script:TxtReceipt.Location   = New-Object System.Drawing.Point((S 20), (S 76))
@@ -1882,7 +1885,7 @@ function Build-DonePage {
     $Script:TxtReceipt.Multiline  = $true
     $Script:TxtReceipt.ReadOnly   = $true
     $Script:TxtReceipt.ScrollBars = 'Vertical'
-    $Script:TxtReceipt.Font       = $UI.FontMono
+    $Script:TxtReceipt.Font       = $Script:UI.FontMono
     $Script:TxtReceipt.BackColor  = [System.Drawing.Color]::FromArgb(248, 248, 248)
     $p.Controls.Add($Script:TxtReceipt)
 
@@ -1890,10 +1893,10 @@ function Build-DonePage {
     $p.Controls.Add((New-Btn 'Copy' 178 350 100 30 {
         try { [System.Windows.Forms.Clipboard]::SetText($Script:TxtReceipt.Text) } catch { }
     }))
-    $Script:LblReceiptNote = New-Text '' 288 356 530 20 $UI.FontSmall $UI.Muted
+    $Script:LblReceiptNote = New-Text '' 288 356 530 20 $Script:UI.FontSmall $Script:UI.Muted
     $p.Controls.Add($Script:LblReceiptNote)
 
-    $p.Controls.Add((New-Text 'Keep this somewhere safe. The passwords are not recoverable from the card by anyone who does not already have it.' 20 388 798 20 $UI.FontSmall $UI.Muted))
+    $p.Controls.Add((New-Text 'Keep this somewhere safe. The passwords are not recoverable from the card by anyone who does not already have it.' 20 388 798 20 $Script:UI.FontSmall $Script:UI.Muted))
 
     return $p
 }
@@ -1964,11 +1967,11 @@ function Save-Receipt {
         if ($path) {
             [System.IO.File]::WriteAllText($path, $Script:TxtReceipt.Text)
             $Script:LblReceiptNote.Text = "Saved to $path"
-            $Script:LblReceiptNote.ForeColor = $UI.Good
+            $Script:LblReceiptNote.ForeColor = $Script:UI.Good
         }
     } catch {
         $Script:LblReceiptNote.Text = "Could not save: $($_.Exception.Message)"
-        $Script:LblReceiptNote.ForeColor = $UI.Bad
+        $Script:LblReceiptNote.ForeColor = $Script:UI.Bad
     }
 }
 
@@ -2100,27 +2103,27 @@ function Build-Window {
     $form.FormBorderStyle = 'FixedDialog'
     $form.MaximizeBox     = $false
     $form.AutoScaleMode   = 'None'
-    $form.BackColor       = $UI.Bg
-    $form.Font            = $UI.Font
+    $form.BackColor       = $Script:UI.Bg
+    $form.Font            = $Script:UI.Font
     $Script:Form          = $form
 
     # --- header ---
     $header           = New-Object System.Windows.Forms.Panel
     $header.Location  = New-Object System.Drawing.Point((S 0), (S 0))
     $header.Size      = New-Object System.Drawing.Size((S 838), (S 84))
-    $header.BackColor = $UI.Header
+    $header.BackColor = $Script:UI.Header
     $form.Controls.Add($header)
 
-    $Script:LblTitle = New-Text '' 20 12 798 32 $UI.FontTitle $UI.HeaderTxt
+    $Script:LblTitle = New-Text '' 20 12 798 32 $Script:UI.FontTitle $Script:UI.HeaderTxt
     $header.Controls.Add($Script:LblTitle)
-    $Script:LblBlurb = New-Text '' 22 50 798 22 $UI.FontSmall ([System.Drawing.Color]::FromArgb(190, 205, 220))
+    $Script:LblBlurb = New-Text '' 22 50 798 22 $Script:UI.FontSmall ([System.Drawing.Color]::FromArgb(190, 205, 220))
     $header.Controls.Add($Script:LblBlurb)
 
     # --- content host ---
     $contentHost           = New-Object System.Windows.Forms.Panel
     $contentHost.Location  = New-Object System.Drawing.Point((S 0), (S 84))
     $contentHost.Size      = New-Object System.Drawing.Size((S $Script:CONTENT_W), (S $Script:CONTENT_H))
-    $contentHost.BackColor = $UI.Panel
+    $contentHost.BackColor = $Script:UI.Panel
     $form.Controls.Add($contentHost)
 
     $Script:Pages = @{
@@ -2139,7 +2142,7 @@ function Build-Window {
     $footer           = New-Object System.Windows.Forms.Panel
     $footer.Location  = New-Object System.Drawing.Point((S 0), (S 512))
     $footer.Size      = New-Object System.Drawing.Size((S 838), (S 108))
-    $footer.BackColor = $UI.Bg
+    $footer.BackColor = $Script:UI.Bg
     $form.Controls.Add($footer)
 
     $rule             = New-Object System.Windows.Forms.Label
@@ -2164,7 +2167,7 @@ function Build-Window {
     $footer.Controls.Add($Script:BtnBack)
 
     $Script:BtnNext = New-Btn 'Next' 668 30 150 34 { Invoke-Next }
-    $Script:BtnNext.Font = $UI.FontBold
+    $Script:BtnNext.Font = $Script:UI.FontBold
     $footer.Controls.Add($Script:BtnNext)
 
     # The launcher may well have moved itself into a folder the user has not
@@ -2174,8 +2177,8 @@ function Build-Window {
     $Script:LnkFolder             = New-Object System.Windows.Forms.LinkLabel
     $Script:LnkFolder.Location    = New-Object System.Drawing.Point((S 20), (S 72))
     $Script:LnkFolder.Size        = New-Object System.Drawing.Size((S 798), (S 18))
-    $Script:LnkFolder.Font        = $UI.FontSmall
-    $Script:LnkFolder.LinkColor   = $UI.Header
+    $Script:LnkFolder.Font        = $Script:UI.FontSmall
+    $Script:LnkFolder.LinkColor   = $Script:UI.Header
     $Script:LnkFolder.AutoEllipsis = $true
     $Script:LnkFolder.Text        = "Settings and setup scripts live in  $ScriptDir"
     $Script:LnkFolder.LinkArea    = New-Object System.Windows.Forms.LinkArea(36, $ScriptDir.Length)
