@@ -1200,16 +1200,128 @@ function Get-RealBashPath {
     return $null
 }
 
+# What can be checked with nothing installed at all.
+#
+# The flasher is meant to need no tools, so on a machine without a shell the
+# alternative to this is no check whatsoever. It is not a parser and does not
+# pretend to be one: it looks for the two mistakes that actually happen when a
+# script is written by hand, an unclosed quote and an unclosed heredoc, both of
+# which are unambiguous. Anything it is unsure about it says nothing about.
+#
+# Advisory only. It never turns into a FAIL, because a wrong FAIL blocks a
+# flash and this has no grammar behind it to be right with.
+function Test-ShellSanity {
+    param([string]$Text)
+
+    $lines    = $Text -split "`n"
+    $pending  = $null      # heredoc delimiter still waiting for its terminator
+    $pendLine = 0
+    $inSingle = $false
+    $inDouble = $false
+    $quoteLine = 0
+
+    for ($n = 0; $n -lt $lines.Count; $n++) {
+        $line = $lines[$n]
+
+        # Inside a heredoc nothing counts until the terminator, which must be
+        # the whole line. That is also how bash reads it.
+        if ($pending) {
+            if ($line.Trim() -ceq $pending) { $pending = $null }
+            continue
+        }
+
+        # Walk the line character by character so a quote inside a comment, or
+        # a hash inside a quote, is not mistaken for the other thing.
+        for ($i = 0; $i -lt $line.Length; $i++) {
+            $c = $line[$i]
+
+            if ($c -eq '\' -and -not $inSingle -and $i -lt ($line.Length - 1)) { $i++; continue }
+
+            if ($c -eq "'" -and -not $inDouble) {
+                if ($inSingle) { $inSingle = $false } else { $inSingle = $true; $quoteLine = $n + 1 }
+                continue
+            }
+            if ($c -eq '"' -and -not $inSingle) {
+                if ($inDouble) { $inDouble = $false } else { $inDouble = $true; $quoteLine = $n + 1 }
+                continue
+            }
+            if ($c -eq '#' -and -not $inSingle -and -not $inDouble) {
+                # A comment, but only where a word can start.
+                if ($i -eq 0 -or $line[$i - 1] -match '\s') { break }
+            }
+        }
+
+        # A quote that spans lines is legal shell, so it is only a problem if
+        # it is still open at the end of the file. Checked after the loop.
+
+        if (-not $inSingle -and -not $inDouble) {
+            $code = ($line -replace '(^|\s)#.*$', '')
+            if ($code -match '<<-?\s*(?:"([^"]+)"|''([^'']+)''|([A-Za-z_][A-Za-z0-9_]*))') {
+                $delim = @($Matches[1], $Matches[2], $Matches[3] | Where-Object { $_ }) | Select-Object -First 1
+                # "<<<" is a here-string and closes on its own line.
+                if ($delim -and $code -notmatch '<<<') {
+                    $pending  = $delim
+                    $pendLine = $n + 1
+                }
+            }
+        }
+    }
+
+    if ($pending)  { return "the heredoc '<< $pending' opened on line $pendLine is never closed" }
+    if ($inSingle) { return "a single quote opened on line $quoteLine is never closed" }
+    if ($inDouble) { return "a double quote opened on line $quoteLine is never closed" }
+    return ''
+}
+
+# Whether WSL has anything to run, without running WSL to find out. Every
+# distribution registers itself under this key, so an absent or empty key means
+# wsl.exe would only sit there and eventually complain. Asking wsl directly
+# takes about ten seconds to get that answer, and it was being asked once per
+# file.
+function Test-WslHasDistro {
+    try {
+        $key = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Lxss'
+        if (-not (Test-Path $key)) { return $false }
+        return (@(Get-ChildItem $key -ErrorAction SilentlyContinue).Count -gt 0)
+    } catch { return $false }
+}
+
+# Worked out once and remembered. The answer cannot change while the window is
+# open, and finding it out is the slow part.
+$Script:ShellCheckerProbed = $false
+$Script:ShellCheckerKind   = ''      # 'bash', 'wsl', or '' for none
+$Script:ShellCheckerPath   = $null
+
+function Get-ShellChecker {
+    if ($Script:ShellCheckerProbed) { return }
+    $Script:ShellCheckerProbed = $true
+
+    $bash = Get-RealBashPath
+    if ($bash) {
+        $Script:ShellCheckerKind = 'bash'
+        $Script:ShellCheckerPath = $bash
+        return
+    }
+
+    $wsl = Get-Command wsl -ErrorAction SilentlyContinue
+    if ($wsl -and $wsl.Source -and (Test-WslHasDistro)) {
+        $Script:ShellCheckerKind = 'wsl'
+        $Script:ShellCheckerPath = $wsl.Source
+    }
+}
+
 # Syntax-check a shell script if any Linux shell is reachable from Windows.
 # Returns "" for clean, the message for a syntax error, and $null when there is
 # nothing here that can check it.
 function Test-ShellSyntax {
     param([string]$Path)
 
+    Get-ShellChecker
+
     # Git for Windows ships bash, and it is the common case on a machine that
     # already has rpi-imager and Git installed.
-    $bash = Get-RealBashPath
-    if ($bash) {
+    if ($Script:ShellCheckerKind -eq 'bash') {
+        $bash = $Script:ShellCheckerPath
         $r = Invoke-CheckerProcess -Path $bash -Arguments @('-n', $Path)
         if ($r.TimedOut -or $r.Failed) { return $null }
         if ($r.ExitCode -eq 0) { return "" }
@@ -1219,8 +1331,8 @@ function Test-ShellSyntax {
         return ((($r.Output -split "`n")[0]).Trim() -replace '^[^:]*: ', '')
     }
 
-    $wsl = Get-Command wsl -ErrorAction SilentlyContinue
-    if ($wsl -and $wsl.Source) {
+    if ($Script:ShellCheckerKind -eq 'wsl') {
+        $wsl = @{ Source = $Script:ShellCheckerPath }
         $wslPath = $Path -replace '\\', '/'
         if ($wslPath -match '^([A-Za-z]):(.*)') {
             $wslPath = "/mnt/$($Matches[1].ToLower())$($Matches[2])"
@@ -1291,7 +1403,13 @@ function Test-AdditionalScript {
             '^(sh|bash|dash)$' {
                 $syntaxError = Test-ShellSyntax -Path $tmp
                 if ($null -eq $syntaxError) {
-                    return @{ Verdict = 'OK'; Reason = "shell, not checked (no bash on this PC)$note$fixed" }
+                    # Nothing here can parse shell, so fall back to what can be
+                    # checked without any tool at all.
+                    $hint = Test-ShellSanity -Text $text
+                    if ($hint) {
+                        return @{ Verdict = 'OK'; Reason = "shell, not checked - but $hint$note$fixed" }
+                    }
+                    return @{ Verdict = 'OK'; Reason = "shell, not checked (nothing here parses shell)$note$fixed" }
                 }
                 if ($syntaxError -ne "") {
                     return @{ Verdict = 'FAIL'; Reason = "shell syntax error: $syntaxError" }
@@ -1335,6 +1453,8 @@ except SyntaxError as e:
 }
 
 function Get-AdditionalScriptReport {
+    param([scriptblock]$OnProgress)
+
     $report = [pscustomobject]@{
         Directory   = $ADDITIONAL_SCRIPTS_DIR
         Results     = @()
@@ -1370,7 +1490,16 @@ function Get-AdditionalScriptReport {
     $accepted   = New-Object System.Collections.ArrayList
     $totalBytes = 0
 
+    $index = 0
     foreach ($file in $candidates) {
+        $index++
+        # Checking a file runs a parser, and on some machines that is not
+        # instant. The caller is told where it has got to so a window can show
+        # it rather than appearing to have died.
+        # Voided: whatever the callback happens to emit would otherwise join
+        # this function's output and end up in front of the report.
+        if ($OnProgress) { $null = & $OnProgress $index $candidates.Count $file.Name }
+
         $result = Test-AdditionalScript -File $file
 
         # Same reason the validator does not trust FileInfo.Length: the
