@@ -1118,6 +1118,58 @@ function Read-AdditionalScriptContent {
     return $result
 }
 
+# Run a checker and come back whatever it does. Every one of these is a child
+# process started from the window thread, so an unbounded wait is a locked up
+# window with no way out but Task Manager: wsl.exe with no distribution
+# installed can sit waiting on the Microsoft Store rather than returning.
+#
+# Output is redirected to files rather than captured with 2>&1. Windows
+# PowerShell 5.1 turns each stderr line of a native command into an ErrorRecord
+# when redirected that way, and the window's ErrorActionPreference of 'Stop'
+# makes the first one terminating, so a script with a syntax error would take
+# the flasher down instead of being reported in a column.
+function Invoke-CheckerProcess {
+    param([string]$Path, [string[]]$Arguments = @(), [int]$TimeoutSeconds = 15)
+
+    $outFile = [System.IO.Path]::GetTempFileName()
+    $errFile = [System.IO.Path]::GetTempFileName()
+
+    try {
+        $argLine = (@($Arguments | ForEach-Object {
+            if ($_ -match '[\s"]') { '"' + ($_ -replace '"', '\"') + '"' } else { $_ }
+        }) -join ' ')
+
+        $splat = @{
+            FilePath               = $Path
+            NoNewWindow            = $true
+            PassThru               = $true
+            RedirectStandardOutput = $outFile
+            RedirectStandardError  = $errFile
+        }
+        if ($argLine) { $splat['ArgumentList'] = $argLine }
+
+        $proc = Start-Process @splat
+        if (-not $proc.WaitForExit($TimeoutSeconds * 1000)) {
+            try { $proc.Kill() } catch { }
+            return @{ TimedOut = $true; ExitCode = -1; Output = '' }
+        }
+
+        $text = ''
+        foreach ($f in @($outFile, $errFile)) {
+            $part = Get-Content -LiteralPath $f -Raw -ErrorAction SilentlyContinue
+            if ($part) { $text += $part }
+        }
+        return @{ TimedOut = $false; ExitCode = $proc.ExitCode; Output = $text.Trim() }
+
+    } catch {
+        # Could not be started at all. Treated as "no checker here" rather than
+        # as a fault in the operator's script.
+        return @{ TimedOut = $false; ExitCode = -1; Output = ''; Failed = $true }
+    } finally {
+        Remove-Item $outFile, $errFile -Force -ErrorAction SilentlyContinue
+    }
+}
+
 # Windows 11 ships wsl.exe whether or not a distribution was ever installed,
 # and System32\bash.exe is that same launcher rather than a shell. Both answer
 # Get-Command and both then complain instead of parsing anything. Their
@@ -1128,44 +1180,56 @@ function Test-WslUnavailable {
     return ($Text -match 'no installed distributions|WslRegisterDistribution|Windows Subsystem for Linux|wsl\.exe --install|has not been installed')
 }
 
+# The first bash on PATH that is a real shell. Anything under System32 is the
+# WSL launcher wearing the name, and starting it on a machine with no
+# distribution is exactly the call that hangs.
+function Get-RealBashPath {
+    # Guarded: an unset SystemRoot would otherwise take Join-Path, and this
+    # whole function, down with it.
+    $system32 = if ($env:SystemRoot) { Join-Path $env:SystemRoot 'System32' } else { $null }
+    foreach ($c in @(Get-Command bash -All -ErrorAction SilentlyContinue)) {
+        if (-not $c.Source) { continue }
+        if ($system32 -and $c.Source -like "$system32*") { continue }
+        return $c.Source
+    }
+    foreach ($p in @("$env:ProgramFiles\Git\bin\bash.exe",
+                     "$env:ProgramFiles\Git\usr\bin\bash.exe",
+                     "${env:ProgramFiles(x86)}\Git\bin\bash.exe")) {
+        if (Test-Path -LiteralPath $p -PathType Leaf) { return $p }
+    }
+    return $null
+}
+
 # Syntax-check a shell script if any Linux shell is reachable from Windows.
+# Returns "" for clean, the message for a syntax error, and $null when there is
+# nothing here that can check it.
 function Test-ShellSyntax {
     param([string]$Path)
 
-    # Windows PowerShell 5.1 turns each stderr line of a native command into an
-    # ErrorRecord when it is redirected with 2>&1, and ErrorActionPreference
-    # 'Stop', which the window sets, makes the first one terminating. bash
-    # reporting a syntax error would then take the whole flasher down instead
-    # of being reported in a column. Local to this function, so nothing else
-    # loses its Stop.
-    $ErrorActionPreference = 'Continue'
-
     # Git for Windows ships bash, and it is the common case on a machine that
     # already has rpi-imager and Git installed.
-    $bash = Get-Command bash -ErrorAction SilentlyContinue
+    $bash = Get-RealBashPath
     if ($bash) {
-        $err  = & $bash.Source -n $Path 2>&1
-        $code = $LASTEXITCODE
-        $text = ($err | Out-String).Trim()
-        if ($code -eq 0) { return "" }
-        if (Test-WslUnavailable -Text $text) { return $null }
+        $r = Invoke-CheckerProcess -Path $bash -Arguments @('-n', $Path)
+        if ($r.TimedOut -or $r.Failed) { return $null }
+        if ($r.ExitCode -eq 0) { return "" }
+        if (Test-WslUnavailable -Text $r.Output) { return $null }
         # bash prefixes the message with the full path; the filename is already
         # in the column to the left of this, so strip it. Matches linux.sh.
-        return (($err | Select-Object -First 1 | Out-String).Trim() -replace '^[^:]*: ', '')
+        return ((($r.Output -split "`n")[0]).Trim() -replace '^[^:]*: ', '')
     }
 
     $wsl = Get-Command wsl -ErrorAction SilentlyContinue
-    if ($wsl) {
+    if ($wsl -and $wsl.Source) {
         $wslPath = $Path -replace '\\', '/'
         if ($wslPath -match '^([A-Za-z]):(.*)') {
             $wslPath = "/mnt/$($Matches[1].ToLower())$($Matches[2])"
         }
-        $err  = & wsl bash -n $wslPath 2>&1
-        $code = $LASTEXITCODE
-        $text = ($err | Out-String).Trim()
-        if ($code -eq 0) { return "" }
-        if (Test-WslUnavailable -Text $text) { return $null }
-        return (($err | Select-Object -First 1 | Out-String).Trim() -replace '^[^:]*: ', '')
+        $r = Invoke-CheckerProcess -Path $wsl.Source -Arguments @('bash', '-n', $wslPath)
+        if ($r.TimedOut -or $r.Failed) { return $null }
+        if ($r.ExitCode -eq 0) { return "" }
+        if (Test-WslUnavailable -Text $r.Output) { return $null }
+        return ((($r.Output -split "`n")[0]).Trim() -replace '^[^:]*: ', '')
     }
 
     return $null
@@ -1247,11 +1311,16 @@ except SyntaxError as e:
 '@
                     $checker = [System.IO.Path]::GetTempFileName() + '.py'
                     [System.IO.File]::WriteAllText($checker, $code)
-                    $err = & $py.Source $checker $tmp 2>&1
+                    # Bounded, like the shell check. The Microsoft Store stub
+                    # that answers to "python" on a machine with no Python
+                    # installed opens the Store and never returns.
+                    $r = Invoke-CheckerProcess -Path $py.Source -Arguments @($checker, $tmp)
                     Remove-Item $checker -Force -ErrorAction SilentlyContinue
-                    if ($LASTEXITCODE -ne 0) {
-                        return @{ Verdict = 'FAIL'
-                                  Reason  = "python syntax error: $(($err | Out-String).Trim())" }
+                    if ($r.TimedOut -or $r.Failed) {
+                        return @{ Verdict = 'OK'; Reason = "$interp (not syntax-checked, python did not answer)$note$fixed" }
+                    }
+                    if ($r.ExitCode -ne 0) {
+                        return @{ Verdict = 'FAIL'; Reason = "python syntax error: $($r.Output)" }
                     }
                     return @{ Verdict = 'OK'; Reason = "python syntax clean$note$fixed" }
                 }
