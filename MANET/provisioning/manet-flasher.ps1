@@ -57,6 +57,15 @@ public static extern bool SetProcessDPIAware();
 [System.Windows.Forms.Application]::EnableVisualStyles()
 [System.Windows.Forms.Application]::SetCompatibleTextRenderingDefault($false)
 
+# Anything that escapes a button handler reaches the Windows Forms message
+# loop, which puts up its own dialog. That dialog shows Exception.Message and
+# hides the rest behind a Details box whose contents are awkward to copy in
+# full, so a report of a failure can arrive without the one line that would
+# identify it. Catching it here means the whole thing, stack included, goes to
+# a file that can simply be sent on.
+[System.Windows.Forms.Application]::SetUnhandledExceptionMode(
+    [System.Windows.Forms.UnhandledExceptionMode]::CatchException)
+
 # Every position and size in this file is written for a 96 DPI screen and put
 # through S() to reach the real one. Telling Windows we are DPI aware, above,
 # stops it scaling the window for us, and a font measured in points then grows
@@ -298,6 +307,68 @@ function Read-Host {
 # The console behind the window is only noise for the people this is for.
 # It is hidden rather than not created, because a .ps1 needs a host process
 # and PowerShell always brings one.
+$Script:CrashLog = $null
+
+function Write-CrashLog {
+    param($Problem, [string]$Context = '')
+
+    if (-not $Script:CrashLog) {
+        $dir = if ($ScriptDir) { $ScriptDir } else { $FlasherDir }
+        $Script:CrashLog = Join-Path $dir 'flasher-error.log'
+    }
+
+    $lines = New-Object System.Collections.ArrayList
+    [void]$lines.Add('')
+    [void]$lines.Add('=' * 72)
+    [void]$lines.Add("$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')   build $($Script:BuildId)")
+    if ($Context) { [void]$lines.Add("while: $Context") }
+    [void]$lines.Add("host: PowerShell $($PSVersionTable.PSVersion) on $([System.Environment]::OSVersion.VersionString)")
+    [void]$lines.Add('=' * 72)
+
+    try {
+        if ($Problem -is [System.Management.Automation.ErrorRecord]) {
+            [void]$lines.Add("message : $($Problem.Exception.Message)")
+            [void]$lines.Add("type    : $($Problem.Exception.GetType().FullName)")
+            [void]$lines.Add("category: $($Problem.CategoryInfo)")
+            [void]$lines.Add("target  : $($Problem.TargetObject)")
+            [void]$lines.Add("at line $($Problem.InvocationInfo.ScriptLineNumber) of $($Problem.InvocationInfo.ScriptName)")
+            [void]$lines.Add("  $($Problem.InvocationInfo.Line.Trim())")
+            [void]$lines.Add('script stack:')
+            [void]$lines.Add($Problem.ScriptStackTrace)
+            if ($Problem.Exception.InnerException) {
+                [void]$lines.Add("inner   : $($Problem.Exception.InnerException.Message)")
+            }
+            [void]$lines.Add('.NET stack:')
+            [void]$lines.Add($Problem.Exception.StackTrace)
+        } else {
+            [void]$lines.Add("message : $($Problem.Message)")
+            [void]$lines.Add("type    : $($Problem.GetType().FullName)")
+            if ($Problem.InnerException) { [void]$lines.Add("inner   : $($Problem.InnerException.Message)") }
+            [void]$lines.Add('.NET stack:')
+            [void]$lines.Add($Problem.StackTrace)
+        }
+    } catch {
+        [void]$lines.Add("(could not describe the error: $($_.Exception.Message))")
+    }
+
+    try { [System.IO.File]::AppendAllText($Script:CrashLog, (($lines -join "`r`n") + "`r`n")) } catch { }
+    foreach ($l in $lines) { Add-Log $l }
+    return $Script:CrashLog
+}
+
+function Show-CrashDialog {
+    param($Problem, [string]$Context = '')
+    $path = Write-CrashLog -Problem $Problem -Context $Context
+    $msg  = if ($Problem -is [System.Management.Automation.ErrorRecord]) { $Problem.Exception.Message } else { $Problem.Message }
+    try {
+        [System.Windows.Forms.MessageBox]::Show(
+            "Something went wrong$(if ($Context) { " while $Context" } else { '' }).`r`n`r`n$msg`r`n`r`n" +
+            "The whole thing, stack and all, has been written to:`r`n$path`r`n`r`n" +
+            "Send that file on. Nothing has been written to any card.",
+            "MANET radio flasher", 'OK', 'Error') | Out-Null
+    } catch { }
+}
+
 function Set-ConsoleWindowVisible {
     param([bool]$Visible)
     try {
@@ -1482,7 +1553,21 @@ function Build-ScriptsPage {
 
 function Update-ScriptsPage {
     $Script:LvScripts.Items.Clear()
-    $Script:ScriptReport = Get-AdditionalScriptReport
+
+    # Reading a directory of other people's files is the likeliest thing here
+    # to go wrong in a way nobody predicted, and it must not take the window
+    # with it: the operator can fix a file and press the button again.
+    try {
+        $Script:ScriptReport = Get-AdditionalScriptReport
+    } catch {
+        $path = Write-CrashLog -Problem $_ -Context 'reading the additional-scripts folder'
+        $Script:LblScriptsSummary.Text = "Could not read that folder: $($_.Exception.Message)  Details in $path"
+        $Script:LblScriptsSummary.ForeColor = $Script:UI.Bad
+        $Script:ScriptReport = $null
+        $Script:ADDITIONAL_SCRIPTS = @()
+        Update-Nav
+        return
+    }
 
     foreach ($r in $Script:ScriptReport.Results) {
         $item = New-Object System.Windows.Forms.ListViewItem($r.Name)
@@ -2211,6 +2296,11 @@ function Build-Window {
     # The heartbeat for every long job. 90 ms is short enough that a progress
     # bar looks continuous and long enough that the stepping itself is not the
     # bottleneck.
+    [System.Windows.Forms.Application]::add_ThreadException({
+        param($sender, $e)
+        Show-CrashDialog -Problem $e.Exception -Context "on the $($Script:PageOrder[$Script:PageIndex]) page"
+    })
+
     $Script:Timer          = New-Object System.Windows.Forms.Timer
     $Script:Timer.Interval = 90
     $Script:Timer.Add_Tick({ Invoke-WorkerTick })
