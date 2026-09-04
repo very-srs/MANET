@@ -8,7 +8,7 @@ This directory contains the scripts and templates needed to flash a new mesh rad
 
 The provisioning process has two phases:
 
-**Phase 1 – Flashing (on your computer):** You run `linux.sh` or `windows.ps1` on your host machine. The script walks you through selecting hardware, loading or creating a configuration, then prepares and flashes the OS image to your target storage device. All your mesh settings are baked into the image during this step.
+**Phase 1 – Flashing (on your computer):** You run `linux.sh` on Linux, or on Windows you double-click **`Flash a Radio.cmd`** to get a window (`windows.ps1` is still there if you prefer the console). The script walks you through selecting hardware, loading or creating a configuration, then prepares and flashes the OS image to your target storage device. All your mesh settings are baked into the image during this step.
 
 **Phase 2 – First Boot (on the node):** You insert the storage, connect Ethernet, and power on the node. A systemd service embedded in the image runs automatically once the network is available, downloads packages, configures the radio interfaces, and reboots into a fully functional mesh node.
 
@@ -21,6 +21,30 @@ You will need:
 - A Linux or Windows computer to flash from
 - An SD card or cm4 eMMC, appropriate for your hardware
 - Ethernet internet access on the node during its first boot
+
+### Windows: the short version
+
+1. Download this `provisioning` folder and **extract it**. Running from inside the zip
+   will not work: the flasher needs the templates that sit next to it.
+2. Double-click **`Flash a Radio.cmd`**.
+3. Say yes when Windows asks for permission.
+4. Follow the window.
+
+You do not need to install anything first. The window checks for `rpi-imager` and, for a
+CM4, `rpiboot`, and downloads and runs their installers for you if they are missing. Only
+Rock 3A needs tools it cannot fetch for you.
+
+Windows may show *"Open File - Security Warning"* the first time, because the file came
+from the internet. Choose **Run**.
+
+`Flash a Radio.cmd` asks for Administrator and gets past the block Windows puts on
+scripts downloaded from the internet, which is the only reason it exists. It then starts
+`manet-flasher.ps1`, which is a front end over `windows.ps1`: the same code decides what
+goes on the card either way, and settings saved in one are read by the other and by
+`linux.sh`.
+
+If you would rather use the console, run `windows.ps1` from an elevated PowerShell. It
+behaves exactly as it always has.
 
 ### Required tools (Linux host)
 
@@ -43,9 +67,14 @@ You will need:
 
 | Tool | Purpose | Install |
 |------|---------|---------|
-| `rpi-imager` | Flashing Raspberry Pi boards | [Download Installer](https://downloads.raspberrypi.com/imager/imager_latest.exe) |
-| `rpiboot` | Mounting CM4 eMMC | [usbboot releases](https://github.com/raspberrypi/usbboot/releases) (CM4 only) |
-| Ext2Fsd | Mounting ext4 partitions for Rock 3A | Required for Rock 3A provisioning |
+| `rpi-imager` | Flashing Raspberry Pi boards | The window installs it for you, or [download it](https://downloads.raspberrypi.com/imager/imager_latest.exe) |
+| `rpiboot` | Mounting CM4 eMMC | The window installs it for you, or [usbboot releases](https://github.com/raspberrypi/usbboot/releases) (CM4 only) |
+| Ext2Fsd | Mounting ext4 partitions for Rock 3A | [Ext2Fsd on SourceForge](https://sourceforge.net/projects/ext2fsd/), then start its service. Rock 3A only |
+| 7-Zip | Unpacking the Armbian `.img.xz` | [7-zip.org](https://www.7-zip.org/download.html). Rock 3A only, and WSL will do instead |
+
+Nothing here is needed to *start* the flasher. Windows PowerShell and the window toolkit
+it draws with are part of Windows, so `Flash a Radio.cmd` runs on a machine with nothing
+installed on it at all.
 
 > **Finding these tools:** `windows.ps1` does not assume they are on the C: drive. It
 > checks the usual install folders on *every* fixed drive, then `PATH`, then its own
@@ -70,7 +99,11 @@ You will need:
 Clone or download the entire `provisioning/` directory to your working folder. The scripts require these files to be present alongside them:
 
 - `linux.sh`: flashing script for Linux hosts
-- `windows.ps1`: flashing script for Windows hosts
+- `windows.ps1`: flashing script for Windows hosts, and the engine the window drives
+- `manet-flasher.ps1`: the window. Dot-sources `windows.ps1` and calls its functions,
+  so it is a front end rather than a second flasher
+- `Flash a Radio.cmd`: what a Windows user double-clicks. Asks for Administrator,
+  gets past the execution policy, and opens the window
 - `firstrun.sh.template`: Raspberry Pi first-boot script template
 - `rock3a-provision.sh.template`: Rock 3A first-boot provisioning script template
 - `additional-scripts/`: optional; your own setup scripts, baked into the
@@ -94,7 +127,14 @@ Tokens (same set on Linux and Windows):
 
 Adding a new flash-time setting means the token in both templates **and** the
 `sed` / `-replace` list in both flashers. The lists live in `linux.sh`
-(`flash_rpi` and the Rock 3A path) and `windows.ps1`.
+(`flash_rpi` and the Rock 3A path) and in `windows.ps1`, in
+`Expand-ProvisioningTokens`, which is one list covering the Raspberry Pi path,
+the Rock 3A path, and the window.
+
+The window adds no third list. It writes the same `.mesh-configs/*.conf` file
+that `windows.ps1` and `linux.sh` already share, then calls
+`Build-ProvisioningScript`, so a setting added in the two places above reaches
+it with no further work.
 
 Scripts from `additional-scripts/` are inserted **after** substitution and are
 never token-substituted, so a script containing a literal `__ADMIN_PW__`
