@@ -18,8 +18,16 @@ rem Administrator. This deals with both, then opens the window.
 set "SRC=https://raw.githubusercontent.com/very-srs/MANET/main/MANET/provisioning"
 set "FILES=windows.ps1|manet-flasher.ps1|firstrun.sh.template|rock3a-provision.sh.template|additional-scripts/README.md"
 set "HERE=%~dp0"
+set "SELF=%~f0"
+set "MYNAME=%~nx0"
 set "FOLDER=MANET Flasher"
 set "HOMEMARK=.manet-flasher-home"
+set "MOVEDFROM="
+
+rem No path built here ever ends in a backslash before a closing quote. A
+rem folder name with a space in it, which "MANET Flasher" has, comes apart at
+rem the space when a trailing \" confuses whichever command receives it.
+set "WORK="
 
 rem Running straight out of a zip gives a temporary folder that Windows throws
 rem away, so anything downloaded into it is lost and anything extracted beside
@@ -27,27 +35,34 @@ rem it is not there. Say so rather than failing halfway through.
 echo "%HERE%" | find /i ".zip" >nul
 if not errorlevel 1 goto :in_a_zip
 
-rem Already Administrator? net session only succeeds when elevated.
-net session >nul 2>&1
+rem fltmc needs Administrator and, unlike "net session", does not depend on a
+rem Windows service that plenty of machines have turned off. If it is missing
+rem altogether the sentinel below still keeps this to one relaunch.
+fltmc >nul 2>&1
 if not errorlevel 1 goto :elevated
+
+rem Already been round once? Then the check above is wrong about this machine.
+rem Carry on and let the flasher itself say so, because a detection that is
+rem wrong must not turn into an endless spawn of new windows.
+if /i "%~1"=="--elevated" goto :elevated
 
 rem Ask Windows for permission and start again. The prompt that appears is
 rem Windows asking, not this script. Paths go through the environment because
 rem a quoted argument would come apart on a folder like C:\Users\O'Brien.
-set "MANET_SELF=%~f0"
+set "MANET_SELF=%SELF%"
 set "MANET_HERE=%HERE%"
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-    "Start-Process -FilePath $env:MANET_SELF -WorkingDirectory $env:MANET_HERE -Verb RunAs" >nul 2>&1
+    "Start-Process -FilePath $env:MANET_SELF -ArgumentList '--elevated' -WorkingDirectory $env:MANET_HERE -Verb RunAs" >nul 2>&1
 if errorlevel 1 goto :no_permission
 exit /b
 
 
 :elevated
-rem Started by the copy of ourselves we just made? Then tidy the original away.
-rem This runs here rather than before the elevation check because elevating
-rem starts a fresh process with no arguments, so only the relocated copy ever
-rem sees these.
-if /i "%~1"=="--moved-from" if exist "%~2" del /f /q "%~2" >nul 2>&1
+rem Elevating goes through the Windows elevation service, which starts us in
+rem C:\Windows\System32 whatever -WorkingDirectory said. Nothing below depends
+rem on the current folder, but leaving a user sitting in System32 after a
+rem failure is its own small horror.
+cd /d "%HERE%" 2>nul
 
 rem A checkout: windows.ps1 is right there. Use it as it stands, download
 rem nothing, overwrite nothing. Somebody's work in progress may be in it.
@@ -55,57 +70,66 @@ if exist "%HERE%windows.ps1" goto :run_here
 
 rem Our own folder, from a previous run. The name is checked as well as the
 rem marker so that deleting the marker does not nest a folder inside a folder.
-if exist "%HERE%%HOMEMARK%" goto :fetch_and_run
+if exist "%HERE%%HOMEMARK%" goto :work_here
 for %%I in ("%HERE:~0,-1%") do set "MYDIR=%%~nxI"
-if /i "%MYDIR%"=="%FOLDER%" goto :fetch_and_run
+if /i "%MYDIR%"=="%FOLDER%" goto :work_here
 
-rem Nothing here but us: make a home and move into it.
-goto :relocate
-
-
-:relocate
-set "TARGET=%HERE%%FOLDER%\"
+rem Nothing here but us: make a home and move into it. There is no relaunch.
+rem This process simply carries on with the new folder as its working folder,
+rem and the copy left behind is deleted at the very end.
+set "TARGET=%HERE%%FOLDER%"
 mkdir "%TARGET%" 2>nul
-copy /y "%~f0" "%TARGET%%~nx0" >nul 2>&1
+copy /y "%SELF%" "%TARGET%\%MYNAME%" >nul 2>&1
 if not errorlevel 1 goto :relocated
 
 rem Could not write beside ourselves: a read-only share, Program Files, a
 rem locked-down Downloads folder. The user's own app data always works.
-set "TARGET=%LOCALAPPDATA%\%FOLDER%\"
+set "TARGET=%LOCALAPPDATA%\%FOLDER%"
 mkdir "%TARGET%" 2>nul
-copy /y "%~f0" "%TARGET%%~nx0" >nul 2>&1
+copy /y "%SELF%" "%TARGET%\%MYNAME%" >nul 2>&1
 if errorlevel 1 goto :relocate_failed
 
 :relocated
-break > "%TARGET%%HOMEMARK%"
+type nul > "%TARGET%\%HOMEMARK%"
+set "WORK=%TARGET%"
+set "MOVEDFROM=%SELF%"
 echo.
-echo   Moved into: %TARGET%
-echo.
-start "" "%TARGET%%~nx0" --moved-from "%~f0"
-exit /b 0
+echo   Everything for the flasher now lives in
+echo     %TARGET%
+echo   including your saved settings. Run it from there next time.
+goto :fetch_and_run
 
+:work_here
+set "WORK=%HERE:~0,-1%"
+goto :fetch_and_run
+
+:run_here
+set "WORK=%HERE:~0,-1%"
+goto :launch
 
 :fetch_and_run
-set "WORK=%HERE%"
 call :fetch
 if errorlevel 1 goto :fetch_failed
 goto :launch
 
-:run_here
-set "WORK=%HERE%"
-goto :launch
-
 :launch
-if not exist "%WORK%manet-flasher.ps1" goto :missing_gui
+if not exist "%WORK%\manet-flasher.ps1" goto :missing_gui
+cd /d "%WORK%" 2>nul
 
 rem Windows PowerShell 5.1 ships with Windows, so nothing has to be installed.
 rem -STA is what the window needs, -ExecutionPolicy Bypass gets past the block
 rem on scripts that came from the internet, and -NoProfile keeps someone else's
 rem profile out of it.
-powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File "%WORK%manet-flasher.ps1"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File "%WORK%\manet-flasher.ps1"
 set "RC=%ERRORLEVEL%"
 if not "%RC%"=="0" goto :bad_exit
-exit /b 0
+
+if not defined MOVEDFROM exit /b 0
+if not exist "%MOVEDFROM%" exit /b 0
+rem Tidy away the copy that was downloaded, now that everything is in the new
+rem folder. (goto) makes cmd let go of this file so it can delete itself.
+rem Nothing after this line is ever read, which is what makes it safe.
+(goto) 2>nul & del /f /q "%MOVEDFROM%" 2>nul
 
 
 rem ============================================================
@@ -180,7 +204,7 @@ exit /b 1
 
 :missing_gui
 echo.
-echo   manet-flasher.ps1 is not in:
+echo   manet-flasher.ps1 is not in
 echo     %WORK%
 echo.
 echo   Delete that folder and run this again, and it will fetch a fresh copy.
