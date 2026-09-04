@@ -16,6 +16,13 @@
 *.template text eol=lf
 *.sh.bak text eol=lf
 
+# cmd.exe mishandles LF-only batch files, and these are checked out on Windows
+# machines that never see a Linux normalization. PowerShell is happy with LF,
+# so .ps1 is deliberately not listed here: forcing CRLF on it would rewrite
+# windows.ps1 in the working tree on every Linux checkout for no gain.
+*.cmd text eol=crlf
+*.bat text eol=crlf
+
 # Binary payloads and archives must never be normalized as text.
 *.bin binary
 *.ko binary

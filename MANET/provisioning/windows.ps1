@@ -9,13 +9,25 @@
     with rpi-imager.
 .NOTES
     Must be run as Administrator.
-    Rock 3A support requires Ext2Fsd (https://github.com/matt-wu/Ext2Fsd/releases).
+    Rock 3A support requires Ext2Fsd (https://sourceforge.net/projects/ext2fsd/).
 
     rpi-imager and rpiboot are located at run time rather than assumed to be on
     C:. If they are not found on any fixed drive, the user is asked with a
     file-picker window and the answer is remembered in
     .mesh-configs\tool-paths.json. See Find-ProgramPath.
+
+    -NoRun loads the functions without running anything, so another script can
+    dot-source this file and drive the flash itself. manet-flasher.ps1, the
+    window front end, does exactly that: it is a front end over these
+    functions, not a second flasher, so there is only ever one copy of the
+    token substitution and the flashing logic to keep in step with linux.sh.
 #>
+
+param(
+    # Load the functions and stop. For `. .\windows.ps1 -NoRun` from a host
+    # script; without it the console flow runs as it always has.
+    [switch]$NoRun
+)
 
 # --- Configuration ---
 $ScriptDir          = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
@@ -81,6 +93,9 @@ $Script:REGULATORY_DOMAIN = ""
 $Script:HALOW_REGULATORY_DOMAIN = ""
 $Script:RPI_IMAGER_PATH   = $null
 $Script:RPIBOOT_PATH      = $null
+# Set by New-Rock3aCustomImage. "!" means no hash tool was reachable and the
+# radio account was left locked, which the completion message has to say.
+$Script:R3A_RADIO_HASH    = ""
 
 
 # ============================================================
@@ -97,16 +112,21 @@ function Generate-Password {
     return $password
 }
 
-function Test-RegulatoryDomain {
-    param([string]$domain)
-    $validDomains = @(
+# A function rather than an inline list so the window front end can fill a
+# drop-down from the same set the validator accepts.
+function Get-ValidRegulatoryDomains {
+    return @(
         "US","CA","GB","DE","FR","IT","ES","NL","BE","AT","CH","SE","NO","DK","FI",
         "PL","CZ","HU","GR","PT","IE","RO","BG","HR","SI","SK","LT","LV","EE","CY",
         "MT","LU","AU","NZ","JP","KR","TW","SG","MY","TH","PH","ID","VN","IN","CN",
         "BR","AR","MX","CL","CO","PE","ZA","IL","AE","SA","RU","UA","TR","EG","MA"
     )
+}
+
+function Test-RegulatoryDomain {
+    param([string]$domain)
     $domain = $domain.ToUpper()
-    if ($validDomains -contains $domain) { return $domain }
+    if ((Get-ValidRegulatoryDomains) -contains $domain) { return $domain }
     return $null
 }
 
@@ -858,6 +878,98 @@ function Test-Ext4Driver {
     return $false
 }
 
+# Every disk that could plausibly be the card, as objects rather than printed
+# lines, so the console selector and the window front end describe a disk the
+# same way. Bus type and volume labels are gathered because "Disk 2 -
+# 29.7GB" is not enough for someone who does not already know what their
+# disks are called, and this list is about to be erased.
+function Get-CandidateDisks {
+    $bootDisk = (Get-Disk | Where-Object { $_.IsBoot -eq $true } | Select-Object -First 1).Number
+
+    $disks = @(Get-Disk | Where-Object {
+        $_.Number -ne $bootDisk -and
+        $_.OperationalStatus -eq "Online" -and
+        $_.Size -gt 0
+    })
+
+    foreach ($disk in $disks) {
+        # Drive letters and labels, when Windows has mounted anything. A card
+        # that has been flashed before shows up as "bootfs", which is the
+        # clearest possible confirmation that the right disk is selected.
+        $labels = @()
+        try {
+            $labels = @(Get-Partition -DiskNumber $disk.Number -ErrorAction Stop |
+                        Where-Object { $_.DriveLetter -and $_.DriveLetter -ne "`0" } |
+                        ForEach-Object {
+                            $vol = Get-Volume -DriveLetter $_.DriveLetter -ErrorAction SilentlyContinue
+                            if ($vol -and $vol.FileSystemLabel) {
+                                "$($_.DriveLetter): $($vol.FileSystemLabel)"
+                            } else {
+                                "$($_.DriveLetter):"
+                            }
+                        })
+        } catch { }
+
+        $bus = if ($disk.BusType) { [string]$disk.BusType } else { "Unknown" }
+
+        # Removable media is what we expect: an SD card, a USB reader, or a
+        # CM4 eMMC exposed by rpiboot (which enumerates as USB). Anything else
+        # is very likely a real hard drive that the operator wants to keep.
+        $removable = ($bus -in @('USB', 'SD', 'MMC'))
+
+        [pscustomobject]@{
+            Number       = $disk.Number
+            FriendlyName = $disk.FriendlyName
+            SizeGB       = [math]::Round($disk.Size / 1GB, 2)
+            BusType      = $bus
+            IsRemovable  = $removable
+            IsSystem     = [bool]$disk.IsSystem
+            Volumes      = $labels
+            Description  = ("Disk {0}: {1} - {2}GB [{3}]{4}" -f `
+                                $disk.Number, $disk.FriendlyName,
+                                [math]::Round($disk.Size / 1GB, 2), $bus,
+                                $(if ($labels.Count) { "  (" + ($labels -join ', ') + ")" } else { "" }))
+        }
+    }
+}
+
+# The console target picker, used for the first card and for every "flash
+# another" afterwards. Returns a disk number, or $null if the user chose to
+# stop. This was written out three times with slightly different wording;
+# one copy is enough.
+function Select-TargetDiskConsole {
+    param([string]$LastChoiceLabel = "Quit")
+
+    $disks = @(Get-CandidateDisks)
+    if ($disks.Count -eq 0) {
+        Write-Host "ERROR: No suitable target devices found." -ForegroundColor Red
+        Write-Host "Please ensure your SD card reader, USB drive, or CM4 eMMC is connected."
+        return $null
+    }
+
+    Write-Host "Available devices:"
+    $i = 1; $diskMap = @{}
+    foreach ($disk in $disks) {
+        $warn = if ($disk.IsRemovable) { "" } else { "   <-- NOT removable media, check this is right" }
+        Write-Host "$i. $($disk.Description)$warn"
+        $diskMap[$i] = $disk; $i++
+    }
+    Write-Host "$i. $LastChoiceLabel"
+
+    while ($true) {
+        $c = Read-Host "Enter device number (1-$i)"
+        $n = 0
+        if ([int]::TryParse($c, [ref]$n)) {
+            if ($n -eq $i) { return $null }
+            if ($diskMap.ContainsKey($n)) {
+                Write-Host "Selected: $($diskMap[$n].Description)"
+                return $diskMap[$n].Number
+            }
+        }
+        Write-Host "Invalid selection." -ForegroundColor Red
+    }
+}
+
 function Select-HardwareAndTargetDevice {
     Write-Host ""
     Write-Host "--- 1. Select Hardware ---"
@@ -908,41 +1020,9 @@ function Select-HardwareAndTargetDevice {
     Write-Host ""
     Write-Host "--- 2. Select Target Device ---"
 
-    $bootDisk = (Get-Disk | Where-Object { $_.IsBoot -eq $true }).Number
-    $disks = Get-Disk | Where-Object {
-        $_.Number -ne $bootDisk -and
-        $_.OperationalStatus -eq "Online" -and
-        $_.Size -gt 0
-    }
-
-    if ($disks.Count -eq 0) {
-        Write-Host "ERROR: No suitable target devices found." -ForegroundColor Red
-        Write-Host "Please ensure your SD card reader, USB drive, or CM4 eMMC is connected."
-        exit 1
-    }
-
-    Write-Host "Available devices:"
-    $i = 1; $diskMap = @{}
-    foreach ($disk in $disks) {
-        $sizeGB = [math]::Round($disk.Size / 1GB, 2)
-        Write-Host "$i. Disk $($disk.Number): $($disk.FriendlyName) - ${sizeGB}GB"
-        $diskMap[$i] = $disk; $i++
-    }
-    Write-Host "$i. Quit"
-
-    do {
-        $c = Read-Host "Enter device number (1-$i)"
-        $n = 0
-        if ([int]::TryParse($c, [ref]$n)) {
-            if ($n -eq $i) { Write-Host "Aborting."; exit 0 }
-            if ($diskMap.ContainsKey($n)) {
-                $Script:TARGET_DEVICE = $diskMap[$n].Number
-                Write-Host "Selected: Disk $($Script:TARGET_DEVICE) - $($diskMap[$n].FriendlyName)"
-                break
-            }
-        }
-        Write-Host "Invalid selection." -ForegroundColor Red
-    } while ($true)
+    $picked = Select-TargetDiskConsole -LastChoiceLabel "Quit"
+    if ($null -eq $picked) { Write-Host "Aborting."; exit 1 }
+    $Script:TARGET_DEVICE = $picked
 }
 
 # ============================================================
@@ -1086,17 +1166,31 @@ except SyntaxError as e:
     return @{ Verdict = 'OK'; Reason = "$interp (not syntax-checked)$note" }
 }
 
-function Test-AdditionalScripts {
-    $Script:ADDITIONAL_SCRIPTS = @()
+# The validation pass, with no printing and no exiting, so the console flow and
+# the window front end can present the same verdicts their own way. Returns
+# every candidate with its verdict plus the totals the caller needs to decide
+# whether to go on.
+function Get-AdditionalScriptReport {
+    $report = [pscustomobject]@{
+        Directory   = $ADDITIONAL_SCRIPTS_DIR
+        Results     = @()
+        Accepted    = @()
+        TotalBytes  = 0
+        Failed      = $false
+        OverMax     = $false
+        OverWarn    = $false
+        MaxBytes    = $ADDITIONAL_SCRIPTS_MAX_BYTES
+        WarnBytes   = $ADDITIONAL_SCRIPTS_WARN_BYTES
+    }
 
-    if (-not (Test-Path $ADDITIONAL_SCRIPTS_DIR)) { return }
+    if (-not (Test-Path $ADDITIONAL_SCRIPTS_DIR)) { return $report }
 
     $found = @(Get-ChildItem -Path $ADDITIONAL_SCRIPTS_DIR -File -ErrorAction SilentlyContinue |
         Where-Object { $_.Name -notmatch '^\.' -and
                        $_.Name -notmatch '\.(disabled|bak|orig)$' -and
                        $_.Name -notmatch '~$' })
 
-    if ($found.Count -eq 0) { return }
+    if ($found.Count -eq 0) { return $report }
 
     # Ordinal sort, to match `LC_ALL=C sort` in linux.sh exactly. A culture
     # sort would order 10-/20-/90- differently from the Linux flasher on some
@@ -1108,6 +1202,39 @@ function Test-AdditionalScripts {
     foreach ($f in $found) { $byName[$f.Name] = $f }
     $candidates = @($names | ForEach-Object { $byName[$_] })
 
+    $results    = New-Object System.Collections.ArrayList
+    $accepted   = New-Object System.Collections.ArrayList
+    $totalBytes = 0
+
+    foreach ($file in $candidates) {
+        $result = Test-AdditionalScript -File $file
+        [void]$results.Add([pscustomobject]@{
+            Name    = $file.Name
+            Verdict = $result.Verdict
+            Reason  = $result.Reason
+            Bytes   = $file.Length
+            File    = $file
+        })
+        switch ($result.Verdict) {
+            'OK'   { [void]$accepted.Add($file); $totalBytes += $file.Length }
+            'FAIL' { $report.Failed = $true }
+        }
+    }
+
+    $report.Results    = $results.ToArray()
+    $report.Accepted   = $accepted.ToArray()
+    $report.TotalBytes = $totalBytes
+    $report.OverMax    = ($totalBytes -gt $ADDITIONAL_SCRIPTS_MAX_BYTES)
+    $report.OverWarn   = ($totalBytes -gt $ADDITIONAL_SCRIPTS_WARN_BYTES)
+    return $report
+}
+
+function Test-AdditionalScripts {
+    $Script:ADDITIONAL_SCRIPTS = @()
+
+    $report = Get-AdditionalScriptReport
+    if ($report.Results.Count -eq 0) { return }
+
     Write-Host ""
     Write-Host "==============================================" -ForegroundColor Cyan
     Write-Host " Additional setup scripts" -ForegroundColor Cyan
@@ -1115,25 +1242,16 @@ function Test-AdditionalScripts {
     Write-Host " From: $ADDITIONAL_SCRIPTS_DIR"
     Write-Host ""
 
-    $failed     = $false
-    $totalBytes = 0
-    $accepted   = New-Object System.Collections.ArrayList
-
-    foreach ($file in $candidates) {
-        $result = Test-AdditionalScript -File $file
-        $label  = $file.Name.PadRight(36)
-        switch ($result.Verdict) {
-            'OK' {
-                [void]$accepted.Add($file)
-                $totalBytes += $file.Length
-                Write-Host "   $label ok    $($result.Reason)"
-            }
-            'SKIP' { Write-Host "   $label SKIP  $($result.Reason)" -ForegroundColor DarkGray }
-            'FAIL' { Write-Host "   $label FAIL  $($result.Reason)" -ForegroundColor Red; $failed = $true }
+    foreach ($r in $report.Results) {
+        $label = $r.Name.PadRight(36)
+        switch ($r.Verdict) {
+            'OK'   { Write-Host "   $label ok    $($r.Reason)" }
+            'SKIP' { Write-Host "   $label SKIP  $($r.Reason)" -ForegroundColor DarkGray }
+            'FAIL' { Write-Host "   $label FAIL  $($r.Reason)" -ForegroundColor Red }
         }
     }
 
-    if ($failed) {
+    if ($report.Failed) {
         Write-Host ""
         Write-Host " ERROR: one or more scripts did not pass validation." -ForegroundColor Red
         Write-Host "        Nothing has been written to any card. Fix the files"
@@ -1141,30 +1259,30 @@ function Test-AdditionalScripts {
         exit 1
     }
 
-    if ($accepted.Count -eq 0) {
+    if ($report.Accepted.Count -eq 0) {
         Write-Host ""
         Write-Host " Nothing to embed."
         return
     }
 
-    if ($totalBytes -gt $ADDITIONAL_SCRIPTS_MAX_BYTES) {
+    if ($report.OverMax) {
         Write-Host ""
-        Write-Host " ERROR: embedded scripts total $totalBytes bytes, over the" -ForegroundColor Red
+        Write-Host " ERROR: embedded scripts total $($report.TotalBytes) bytes, over the" -ForegroundColor Red
         Write-Host "        $ADDITIONAL_SCRIPTS_MAX_BYTES-byte limit."
         Write-Host "        Have a script fetch the bulk at run time instead - the"
         Write-Host "        node has confirmed internet before these are run."
         exit 1
     }
-    if ($totalBytes -gt $ADDITIONAL_SCRIPTS_WARN_BYTES) {
+    if ($report.OverWarn) {
         Write-Host ""
-        Write-Host " NOTE: $totalBytes bytes of scripts is a lot to bake into an" -ForegroundColor Yellow
+        Write-Host " NOTE: $($report.TotalBytes) bytes of scripts is a lot to bake into an" -ForegroundColor Yellow
         Write-Host "       image. Consider fetching large payloads at run time."
     }
 
-    $Script:ADDITIONAL_SCRIPTS = $accepted.ToArray()
+    $Script:ADDITIONAL_SCRIPTS = $report.Accepted
 
     Write-Host ""
-    Write-Host " $($accepted.Count) script(s) will be embedded and run ONCE as"
+    Write-Host " $($report.Accepted.Count) script(s) will be embedded and run ONCE as"
     Write-Host " root on each node, after setup completes."
     Write-Host ""
     Write-Host " Note: firstrun.sh is stored unencrypted on the boot partition and" -ForegroundColor Yellow
@@ -1614,120 +1732,150 @@ function Load-Config {
 
 
 # ============================================================
-# Main Script
+# Image content builders and flash primitives
 # ============================================================
+#
+# Pure enough to be called twice, and callable from a host script. Everything
+# that decides what lands on a card lives here so the console flow and the
+# window front end cannot produce different images from the same answers.
 
-$currentPrincipal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
-if (-not $currentPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-    Write-Host "ERROR: This script must be run as Administrator!" -ForegroundColor Red
-    Write-Host "Right-click PowerShell and select 'Run as Administrator'"
-    exit 1
+# The one token list in this file. Both templates take the same set, so the
+# two copies that used to sit inline in the Rock 3A and Raspberry Pi paths
+# were an invitation to update one and not the other. Adding a flash-time
+# setting still means the token in both templates and the substitution list in
+# both flashers, as the provisioning README says - it is just one list here
+# now instead of two.
+function Expand-ProvisioningTokens {
+    param([string]$Content)
+
+    return ($Content `
+        -replace '__HARDWARE_MODEL__',          $Script:HARDWARE_MODEL `
+        -replace '__EUD_CONNECTION__',          $Script:EUD_CONNECTION `
+        -replace '__LAN_AP_SSID__',             $Script:LAN_AP_SSID `
+        -replace '__LAN_AP_KEY__',              $Script:LAN_AP_KEY `
+        -replace '__MAX_EUDS_PER_NODE__',       $Script:MAX_EUDS_PER_NODE `
+        -replace '__INSTALL_MEDIAMTX__',        $Script:INSTALL_MEDIAMTX `
+        -replace '__INSTALL_MUMBLE__',          $Script:INSTALL_MUMBLE `
+        -replace '__VOICE_ENABLED__',           $Script:VOICE_ENABLED `
+        -replace '__MESH_SSID__',               $Script:MESH_SSID `
+        -replace '__MESH_SAE_KEY__',            $Script:MESH_SAE_KEY `
+        -replace '__LAN_CIDR_BLOCK__',          $Script:LAN_CIDR_BLOCK `
+        -replace '__AUTO_CHANNEL__',            $Script:AUTO_CHANNEL `
+        -replace '__RADIO_PW__',                $Script:RADIO_PW `
+        -replace '__REGULATORY_DOMAIN__',       $Script:REGULATORY_DOMAIN `
+        -replace '__HALOW_REGULATORY_DOMAIN__', $Script:HALOW_REGULATORY_DOMAIN `
+        -replace '__ADMIN_PW__',                $Script:ADMIN_PW `
+        -replace '__AUTO_UPDATE__',             $Script:AUTO_UPDATE)
 }
 
-Write-Host "Script directory: $ScriptDir"
+# Substitute, normalise, then embed the operator scripts. The order matters:
+# operator scripts must not have their own __TOKEN__-looking text rewritten,
+# and the anchor is matched line by line so CRLF has to go first.
+function Build-ProvisioningScript {
+    param([string]$TemplatePath)
 
-Select-HardwareAndTargetDevice
-
-if (-not (Test-Path $TEMPLATE_FILE)) {
-    Write-Host "ERROR: Template file '$TEMPLATE_FILE' not found." -ForegroundColor Red
-    exit 1
-}
-if ($Script:HARDWARE_MODEL -eq "r3a" -and -not (Test-Path $ROCK3A_TEMPLATE)) {
-    Write-Host "ERROR: Rock 3A template '$ROCK3A_TEMPLATE' not found." -ForegroundColor Red
-    exit 1
-}
-
-if (-not (Test-Path $CONFIG_DIR)) {
-    New-Item -ItemType Directory -Path $CONFIG_DIR | Out-Null
+    if (-not (Test-Path $TemplatePath)) {
+        throw "Template file '$TemplatePath' not found."
+    }
+    $content = [System.IO.File]::ReadAllText($TemplatePath)
+    $content = Expand-ProvisioningTokens -Content $content
+    $content = $content.Replace("`r`n", "`n")
+    return (Add-AdditionalScriptsBlock -Content $content)
 }
 
-$configFiles = Get-ChildItem -Path $CONFIG_DIR -Filter "*.conf" -ErrorAction SilentlyContinue
+function Build-MeshConf {
+    $meshConf = @"
+# Mesh Network Configuration
+# Generated by provisioning script
+hardware_model=$($Script:HARDWARE_MODEL)
+eud=$($Script:EUD_CONNECTION)
+lan_ap_ssid=$($Script:LAN_AP_SSID)
+lan_ap_key=$($Script:LAN_AP_KEY)
+max_euds_per_node=$($Script:MAX_EUDS_PER_NODE)
+mtx=$($Script:INSTALL_MEDIAMTX)
+mumble=$($Script:INSTALL_MUMBLE)
+voice=$($Script:VOICE_ENABLED)
+# Every node ships on talk group 1; changed from the web UI, not at flash time.
+voice_channel=1
+mesh_ssid=$($Script:MESH_SSID)
+mesh_key=$($Script:MESH_SAE_KEY)
+ipv4_network=$($Script:LAN_CIDR_BLOCK)
+acs=$($Script:AUTO_CHANNEL)
+regulatory_domain=$($Script:REGULATORY_DOMAIN)
+halow_regulatory_domain=$($Script:HALOW_REGULATORY_DOMAIN)
+admin_password=$($Script:ADMIN_PW)
+auto_update=$($Script:AUTO_UPDATE)
+"@
+    return $meshConf.Replace("`r`n", "`n")
+}
 
-if ($configFiles.Count -gt 0) {
-    Write-Host "Found $($configFiles.Count) saved configuration(s)."
-    Write-Host "What would you like to do?"
-    Write-Host "1. Load a saved configuration"
-    Write-Host "2. Create a new configuration"
+# One card, one rpi-imager run. Returns a result rather than printing a verdict
+# so a caller with a window can show it its own way. Dropping a bad remembered
+# path stays here: it must happen however the flash was started.
+function Invoke-RpiImagerFlash {
+    param([int]$DiskNumber, [string]$ScriptPath)
 
-    do {
-        $choice = Read-Host "Enter choice (1-2)"
-        if ($choice -eq "1") {
-            Write-Host "`nPlease select a configuration to load:"
-            $i = 1; $configMap = @{}
-            foreach ($file in $configFiles) {
-                Write-Host "$i. $($file.BaseName)"
-                $configMap[$i] = $file.FullName; $i++
-            }
-            Write-Host "$i. Cancel"
-            do {
-                $cc = Read-Host "Enter number (1-$i)"
-                $cn = 0
-                if ([int]::TryParse($cc, [ref]$cn)) {
-                    if ($cn -eq $i) { Write-Host "Aborting."; exit 0 }
-                    if ($configMap.ContainsKey($cn)) { Load-Config -ConfigFile $configMap[$cn]; break }
-                }
-                Write-Host "Invalid selection." -ForegroundColor Red
-            } while ($true)
-            break
-        } elseif ($choice -eq "2") {
-            Ask-Questions
-            Save-Config
-            break
+    $targetDrive = "\\.\PhysicalDrive$DiskNumber"
+
+    try {
+        & $Script:RPI_IMAGER_PATH --cli $OS_IMAGE_URL $targetDrive --first-run-script "$ScriptPath"
+        if ($LASTEXITCODE -ne 0) {
+            Remove-CachedToolPath -Key 'rpi-imager' -Reason "it did not flash the card"
+            return [pscustomobject]@{ Ok = $false; Error = "exited with code $LASTEXITCODE" }
         }
-    } while ($choice -notmatch "^[12]$")
-} else {
-    Write-Host "No saved configs found. Starting new setup."
-    Ask-Questions
-    Save-Config
+    } catch {
+        # Could not be executed at all - the surest sign the path is wrong.
+        Remove-CachedToolPath -Key 'rpi-imager' -Reason "it could not be run"
+        return [pscustomobject]@{ Ok = $false; Error = "could not be run: $($_.Exception.Message)" }
+    }
+
+    return [pscustomobject]@{ Ok = $true; Error = "" }
 }
 
-# Validate operator setup scripts before anything is written to any card: a
-# bad script here is a wasted flash, and the operator should find out while
-# the card is still safely in their hand.
-Test-AdditionalScripts
+# Raw sector write, used by the Rock 3A path. OnProgress is handed a percentage
+# so a window can drive a progress bar; without one it falls back to
+# Write-Progress, which is what the console flow has always shown.
+function Write-RawImageToDisk {
+    param(
+        [string]      $ImagePath,
+        [int]         $DiskNumber,
+        [scriptblock] $OnProgress
+    )
 
-if ($Script:HARDWARE_MODEL -eq "r3a") {
-    $imageOk = Get-ArmbianImage
-    if (-not $imageOk) {
-        Write-Host "ERROR: Could not obtain Armbian image." -ForegroundColor Red
-        exit 1
+    $bufferSize = 4MB
+    $buffer     = New-Object byte[] $bufferSize
+    $physDrive  = "\\.\PhysicalDrive$DiskNumber"
+
+    $src  = [System.IO.File]::OpenRead($ImagePath)
+    $dest = [System.IO.File]::Open($physDrive, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+    try {
+        $totalBytes = $src.Length
+        $written    = 0
+        $lastPct    = -1
+        while (($read = $src.Read($buffer, 0, $buffer.Length)) -gt 0) {
+            $dest.Write($buffer, 0, $read)
+            $written += $read
+            $pct = [math]::Round(($written / $totalBytes) * 100, 1)
+            if ($pct -ne $lastPct) {
+                $lastPct = $pct
+                if ($OnProgress) { & $OnProgress $pct }
+                else { Write-Progress -Activity "Flashing" -Status "$pct% complete" -PercentComplete $pct }
+            }
+        }
+        $dest.Flush()
+    } finally {
+        $src.Close()
+        $dest.Close()
+        if (-not $OnProgress) { Write-Progress -Activity "Flashing" -Completed }
     }
 }
 
-# ============================================================
-# Rock 3A Flashing Path
-# ============================================================
-
-if ($Script:HARDWARE_MODEL -eq "r3a") {
-
-    Write-Host ""
-    Write-Host "Checking for ext4 filesystem driver (Ext2Fsd)..."
-    if (-not (Test-Ext4Driver)) {
-        Write-Host ""
-        Write-Host "ERROR: Ext2Fsd service not found or not running." -ForegroundColor Red
-        Write-Host ""
-        Write-Host "To flash Rock 3A images on Windows you need Ext2Fsd installed."
-        Write-Host "Download from: https://github.com/matt-wu/Ext2Fsd/releases"
-        Write-Host ""
-        Write-Host "After installing:"
-        Write-Host "  1. Run 'Ext2 Volume Manager' from the Start Menu"
-        Write-Host "  2. Go to Tools -> Service Management -> Start"
-        Write-Host "  3. Re-run this script"
-        Write-Host ""
-
-        $installer = Get-ChildItem -Path $ScriptDir -Filter "Ext2Fsd*.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
-        if ($installer) {
-            Write-Host "Found installer: $($installer.Name)" -ForegroundColor Green
-            $run = Read-Host "Run the installer now? (y/N)"
-            if ($run -match "^[Yy]") {
-                Write-Host "Launching installer. Please complete it and then re-run this script."
-                Start-Process $installer.FullName -Wait
-            }
-        }
-        exit 1
-    }
-    Write-Host "Ext2Fsd service is running." -ForegroundColor Green
-
+# Copy the Armbian image, mount its ext4 root through Ext2Fsd, write the mesh
+# config and the provisioning unit into it, and hand back the path to the
+# customised copy. The caller writes that copy to as many cards as it likes and
+# is responsible for deleting it. Throws rather than exiting so a window can
+# report the failure and stay open.
+function New-Rock3aCustomImage {
     $tempImage = [System.IO.Path]::GetTempFileName() -replace '\.tmp$', '.img'
     Write-Host "Creating temporary copy of $($Script:ARMBIAN_IMAGE)..."
     Copy-Item $Script:ARMBIAN_IMAGE $tempImage
@@ -1761,29 +1909,7 @@ if ($Script:HARDWARE_MODEL -eq "r3a") {
         }
 
         Write-Host "Writing /etc/mesh.conf..."
-        $meshConf = @"
-# Mesh Network Configuration
-# Generated by provisioning script
-hardware_model=$($Script:HARDWARE_MODEL)
-eud=$($Script:EUD_CONNECTION)
-lan_ap_ssid=$($Script:LAN_AP_SSID)
-lan_ap_key=$($Script:LAN_AP_KEY)
-max_euds_per_node=$($Script:MAX_EUDS_PER_NODE)
-mtx=$($Script:INSTALL_MEDIAMTX)
-mumble=$($Script:INSTALL_MUMBLE)
-voice=$($Script:VOICE_ENABLED)
-# Every node ships on talk group 1; changed from the web UI, not at flash time.
-voice_channel=1
-mesh_ssid=$($Script:MESH_SSID)
-mesh_key=$($Script:MESH_SAE_KEY)
-ipv4_network=$($Script:LAN_CIDR_BLOCK)
-acs=$($Script:AUTO_CHANNEL)
-regulatory_domain=$($Script:REGULATORY_DOMAIN)
-halow_regulatory_domain=$($Script:HALOW_REGULATORY_DOMAIN)
-admin_password=$($Script:ADMIN_PW)
-auto_update=$($Script:AUTO_UPDATE)
-"@
-        [System.IO.File]::WriteAllText((Join-Path $rootPath "etc\mesh.conf"), $meshConf.Replace("`r`n", "`n"))
+        [System.IO.File]::WriteAllText((Join-Path $rootPath "etc\mesh.conf"), (Build-MeshConf))
 
         Write-Host "Removing .not_logged_in_yet to bypass interactive setup..."
         $notLoggedIn = Join-Path $rootPath "root\.not_logged_in_yet"
@@ -1800,6 +1926,7 @@ auto_update=$($Script:AUTO_UPDATE)
             Write-Host "         (log in as root with password '1234', then: passwd radio)"
             $radioHash = "!"
         }
+        $Script:R3A_RADIO_HASH = $radioHash
 
         Write-Host "Creating radio user..."
 
@@ -1851,35 +1978,7 @@ auto_update=$($Script:AUTO_UPDATE)
         if (-not (Test-Path $radioHome)) { New-Item -ItemType Directory -Path $radioHome | Out-Null }
 
         Write-Host "Installing provisioning script from template..."
-        if (-not (Test-Path $ROCK3A_TEMPLATE)) {
-            throw "Rock 3A template file '$ROCK3A_TEMPLATE' not found in script directory."
-        }
-
-        $provisionScript = [System.IO.File]::ReadAllText($ROCK3A_TEMPLATE)
-        $provisionScript = $provisionScript `
-            -replace '__HARDWARE_MODEL__',          $Script:HARDWARE_MODEL `
-            -replace '__EUD_CONNECTION__',          $Script:EUD_CONNECTION `
-            -replace '__LAN_AP_SSID__',             $Script:LAN_AP_SSID `
-            -replace '__LAN_AP_KEY__',              $Script:LAN_AP_KEY `
-            -replace '__MAX_EUDS_PER_NODE__',       $Script:MAX_EUDS_PER_NODE `
-            -replace '__INSTALL_MEDIAMTX__',        $Script:INSTALL_MEDIAMTX `
-            -replace '__INSTALL_MUMBLE__',          $Script:INSTALL_MUMBLE `
-            -replace '__VOICE_ENABLED__',           $Script:VOICE_ENABLED `
-            -replace '__MESH_SSID__',               $Script:MESH_SSID `
-            -replace '__MESH_SAE_KEY__',            $Script:MESH_SAE_KEY `
-            -replace '__LAN_CIDR_BLOCK__',          $Script:LAN_CIDR_BLOCK `
-            -replace '__AUTO_CHANNEL__',            $Script:AUTO_CHANNEL `
-            -replace '__RADIO_PW__',                $Script:RADIO_PW `
-            -replace '__REGULATORY_DOMAIN__',       $Script:REGULATORY_DOMAIN `
-            -replace '__HALOW_REGULATORY_DOMAIN__', $Script:HALOW_REGULATORY_DOMAIN `
-            -replace '__ADMIN_PW__',                $Script:ADMIN_PW `
-            -replace '__AUTO_UPDATE__',             $Script:AUTO_UPDATE
-
-        $provisionScript = $provisionScript.Replace("`r`n", "`n")
-
-        # After substitution, never before: operator scripts must not have
-        # their own __TOKEN__-looking text rewritten by the -replace chain.
-        $provisionScript = Add-AdditionalScriptsBlock -Content $provisionScript
+        $provisionScript = Build-ProvisioningScript -TemplatePath $ROCK3A_TEMPLATE
 
         $usrLocalBin = Join-Path $rootPath "usr\local\bin"
         if (-not (Test-Path $usrLocalBin)) { New-Item -ItemType Directory -Path $usrLocalBin | Out-Null }
@@ -1919,253 +2018,270 @@ WantedBy=multi-user.target
         Dismount-DiskImage -ImagePath $tempImage | Out-Null
         Start-Sleep -Seconds 2
 
+        return $tempImage
+
     } catch {
-        Write-Host "ERROR during image customisation: $($_.Exception.Message)" -ForegroundColor Red
         try { Dismount-DiskImage -ImagePath $tempImage -ErrorAction SilentlyContinue | Out-Null } catch { }
         if (Test-Path $tempImage) { Remove-Item $tempImage -Force -ErrorAction SilentlyContinue }
+        throw
+    }
+}
+
+
+# ============================================================
+# Main Script
+# ============================================================
+#
+# Everything below is the console flow. It is a function so that a host script
+# can dot-source this file with -NoRun and drive the pieces itself; nothing
+# here is called when it does.
+
+function Invoke-Main {
+
+    $currentPrincipal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
+    if (-not $currentPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+        Write-Host "ERROR: This script must be run as Administrator!" -ForegroundColor Red
+        Write-Host "Right-click PowerShell and select 'Run as Administrator'"
         exit 1
     }
 
-    $r3aFlashCount = 0
-    $r3aKeepFlashing = $true
-    while ($r3aKeepFlashing) {
-        if ($r3aFlashCount -gt 0) {
-            Write-Host ""
-            Read-Host "Insert the next SD card and then press Enter"
-            Write-Host "Select the target device."
-            $bootDisk2 = (Get-Disk | Where-Object { $_.IsBoot -eq $true }).Number
-            $disks2 = Get-Disk | Where-Object {
-                $_.Number -ne $bootDisk2 -and $_.OperationalStatus -eq "Online" -and $_.Size -gt 0
-            }
-            if ($disks2.Count -eq 0) { Write-Host "ERROR: No devices found." -ForegroundColor Red; break }
-            $i2 = 1; $diskMap2 = @{}
-            foreach ($d2 in $disks2) {
-                $sz2 = [math]::Round($d2.Size / 1GB, 2)
-                Write-Host "$i2. Disk $($d2.Number): $($d2.FriendlyName) - ${sz2}GB"
-                $diskMap2[$i2] = $d2; $i2++
-            }
-            Write-Host "$i2. Done (stop flashing)"
-            do {
-                $c2 = Read-Host "Enter device number (1-$i2)"
-                $n2 = 0
-                if ([int]::TryParse($c2, [ref]$n2)) {
-                    if ($n2 -eq $i2) { $r3aKeepFlashing = $false; break }
-                    if ($diskMap2.ContainsKey($n2)) {
-                        $Script:TARGET_DEVICE = $diskMap2[$n2].Number
-                        Write-Host "Selected: Disk $($Script:TARGET_DEVICE) - $($diskMap2[$n2].FriendlyName)"
-                        break
-                    }
-                }
-                Write-Host "Invalid selection." -ForegroundColor Red
-            } while ($true)
-            if (-not $r3aKeepFlashing) { break }
-        }
+    Write-Host "Script directory: $ScriptDir"
 
-        Confirm-Flash -DiskNumber $Script:TARGET_DEVICE
+    Select-HardwareAndTargetDevice
 
-        Write-Host "Wiping target disk..."
-        Clear-Disk -Number $Script:TARGET_DEVICE -RemoveData -Confirm:$false -ErrorAction SilentlyContinue
-
-        Write-Host "Flashing image to Disk $($Script:TARGET_DEVICE)..."
-        $bufferSize = 4MB
-        $buffer     = New-Object byte[] $bufferSize
-        $physDrive  = "\\.\PhysicalDrive$($Script:TARGET_DEVICE)"
-        $src  = [System.IO.File]::OpenRead($tempImage)
-        $dest = [System.IO.File]::Open($physDrive, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
-        try {
-            $totalBytes = $src.Length
-            $written    = 0
-            while (($read = $src.Read($buffer, 0, $buffer.Length)) -gt 0) {
-                $dest.Write($buffer, 0, $read)
-                $written += $read
-                $pct = [math]::Round(($written / $totalBytes) * 100, 1)
-                Write-Progress -Activity "Flashing" -Status "$pct% complete" -PercentComplete $pct
-            }
-            $dest.Flush()
-        } finally {
-            $src.Close()
-            $dest.Close()
-            Write-Progress -Activity "Flashing" -Completed
-        }
-
-        $r3aFlashCount++
-        Write-Host ""
-        Write-Host "==============================================" -ForegroundColor Green
-        Write-Host "           DONE: Flash complete!" -ForegroundColor Green
-        Write-Host "==============================================" -ForegroundColor Green
-        Write-Host ""
-        Write-Host "You can now remove the SD card and boot your Rock 3A."
-        Write-Host "First boot provisioning will run automatically when connected to the internet."
-        Write-Host ""
-        Write-Host "  - Root password: 1234 (Armbian default - change this)"
-        Write-Host "  - Radio user: radio / $($Script:RADIO_PW)"
-        if ($radioHash -eq "!") {
-            Write-Host ""
-            Write-Host "  WARNING: Password hash could not be generated." -ForegroundColor Yellow
-            Write-Host "     Log in as root and run: passwd radio" -ForegroundColor Yellow
-        }
-        Write-Host ""
-        Write-Host " ONCE BOOTED, THE MESH NODE WILL AUTOMATICALLY START"
-        Write-Host " SETTING ITSELF UP AND WILL REBOOT MULTIPLE TIMES"
-        Write-Host " Just leave it alone, this process takes about ten minutes"
-        Write-Host ""
-
-        Write-Host "==============================================" -ForegroundColor Cyan
-        $again = Read-Host "Flash another card with the same settings? (y/N)"
-        if ($again -notmatch "^[Yy]") { $r3aKeepFlashing = $false }
+    if (-not (Test-Path $TEMPLATE_FILE)) {
+        Write-Host "ERROR: Template file '$TEMPLATE_FILE' not found." -ForegroundColor Red
+        exit 1
+    }
+    if ($Script:HARDWARE_MODEL -eq "r3a" -and -not (Test-Path $ROCK3A_TEMPLATE)) {
+        Write-Host "ERROR: Rock 3A template '$ROCK3A_TEMPLATE' not found." -ForegroundColor Red
+        exit 1
     }
 
-    Remove-Item $tempImage -Force -ErrorAction SilentlyContinue
-    Write-Host ""
-    Write-Host "=============================================="
-    Write-Host "  Done. $r3aFlashCount Rock 3A card(s) flashed."
-    Write-Host "=============================================="
-    Write-Host ""
+    if (-not (Test-Path $CONFIG_DIR)) {
+        New-Item -ItemType Directory -Path $CONFIG_DIR | Out-Null
+    }
 
-# ============================================================
-# Raspberry Pi Flashing Path (all Pi models including CM4)
-# ============================================================
+    $configFiles = Get-ChildItem -Path $CONFIG_DIR -Filter "*.conf" -ErrorAction SilentlyContinue
 
-} else {
+    if ($configFiles.Count -gt 0) {
+        Write-Host "Found $($configFiles.Count) saved configuration(s)."
+        Write-Host "What would you like to do?"
+        Write-Host "1. Load a saved configuration"
+        Write-Host "2. Create a new configuration"
 
-    Write-Host "Generating firstrun script from template..."
-    $templateContent = [System.IO.File]::ReadAllText($TEMPLATE_FILE)
+        do {
+            $choice = Read-Host "Enter choice (1-2)"
+            if ($choice -eq "1") {
+                Write-Host "`nPlease select a configuration to load:"
+                $i = 1; $configMap = @{}
+                foreach ($file in $configFiles) {
+                    Write-Host "$i. $($file.BaseName)"
+                    $configMap[$i] = $file.FullName; $i++
+                }
+                Write-Host "$i. Cancel"
+                do {
+                    $cc = Read-Host "Enter number (1-$i)"
+                    $cn = 0
+                    if ([int]::TryParse($cc, [ref]$cn)) {
+                        if ($cn -eq $i) { Write-Host "Aborting."; exit 0 }
+                        if ($configMap.ContainsKey($cn)) { Load-Config -ConfigFile $configMap[$cn]; break }
+                    }
+                    Write-Host "Invalid selection." -ForegroundColor Red
+                } while ($true)
+                break
+            } elseif ($choice -eq "2") {
+                Ask-Questions
+                Save-Config
+                break
+            }
+        } while ($choice -notmatch "^[12]$")
+    } else {
+        Write-Host "No saved configs found. Starting new setup."
+        Ask-Questions
+        Save-Config
+    }
 
-    $templateContent = $templateContent `
-        -replace '__HARDWARE_MODEL__',          $Script:HARDWARE_MODEL `
-        -replace '__EUD_CONNECTION__',          $Script:EUD_CONNECTION `
-        -replace '__LAN_AP_SSID__',             $Script:LAN_AP_SSID `
-        -replace '__LAN_AP_KEY__',              $Script:LAN_AP_KEY `
-        -replace '__MAX_EUDS_PER_NODE__',       $Script:MAX_EUDS_PER_NODE `
-        -replace '__INSTALL_MEDIAMTX__',        $Script:INSTALL_MEDIAMTX `
-        -replace '__INSTALL_MUMBLE__',          $Script:INSTALL_MUMBLE `
-        -replace '__VOICE_ENABLED__',           $Script:VOICE_ENABLED `
-        -replace '__MESH_SSID__',               $Script:MESH_SSID `
-        -replace '__MESH_SAE_KEY__',            $Script:MESH_SAE_KEY `
-        -replace '__LAN_CIDR_BLOCK__',          $Script:LAN_CIDR_BLOCK `
-        -replace '__AUTO_CHANNEL__',            $Script:AUTO_CHANNEL `
-        -replace '__RADIO_PW__',                $Script:RADIO_PW `
-        -replace '__REGULATORY_DOMAIN__',       $Script:REGULATORY_DOMAIN `
-        -replace '__HALOW_REGULATORY_DOMAIN__', $Script:HALOW_REGULATORY_DOMAIN `
-        -replace '__ADMIN_PW__',                $Script:ADMIN_PW `
-        -replace '__AUTO_UPDATE__',             $Script:AUTO_UPDATE
+    # Validate operator setup scripts before anything is written to any card: a
+    # bad script here is a wasted flash, and the operator should find out while
+    # the card is still safely in their hand.
+    Test-AdditionalScripts
 
-    # After substitution, never before: operator scripts must not have their
-    # own __TOKEN__-looking text rewritten by the -replace chain above.
-    # Newlines are normalised first: the anchor is matched line by line, and
-    # ReadAllText preserves whatever the template was checked out with.
-    $templateContent = $templateContent.Replace("`r`n", "`n")
-    $templateContent = Add-AdditionalScriptsBlock -Content $templateContent
+    if ($Script:HARDWARE_MODEL -eq "r3a") {
+        $imageOk = Get-ArmbianImage
+        if (-not $imageOk) {
+            Write-Host "ERROR: Could not obtain Armbian image." -ForegroundColor Red
+            exit 1
+        }
+    }
 
-    $flashCount = 0
-    $keepFlashing = $true
+    # ============================================================
+    # Rock 3A Flashing Path
+    # ============================================================
 
-    while ($keepFlashing) {
+    if ($Script:HARDWARE_MODEL -eq "r3a") {
 
-        $tempScript = Join-Path $ScriptDir "firstrun.sh"
-        Write-Host "Writing firstrun script to: $tempScript"
-        [System.IO.File]::WriteAllText($tempScript, $templateContent.Replace("`r`n", "`n"))
+        Write-Host ""
+        Write-Host "Checking for ext4 filesystem driver (Ext2Fsd)..."
+        if (-not (Test-Ext4Driver)) {
+            Write-Host ""
+            Write-Host "ERROR: Ext2Fsd service not found or not running." -ForegroundColor Red
+            Write-Host ""
+            Write-Host "To flash Rock 3A images on Windows you need Ext2Fsd installed."
+            Write-Host "Download from: https://sourceforge.net/projects/ext2fsd/"
+            Write-Host ""
+            Write-Host "After installing:"
+            Write-Host "  1. Run 'Ext2 Volume Manager' from the Start Menu"
+            Write-Host "  2. Go to Tools -> Service Management -> Start"
+            Write-Host "  3. Re-run this script"
+            Write-Host ""
 
-        if (-not (Test-Path $tempScript)) {
-            Write-Host "ERROR: Failed to write firstrun script!" -ForegroundColor Red
+            $installer = Get-ChildItem -Path $ScriptDir -Filter "Ext2Fsd*.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($installer) {
+                Write-Host "Found installer: $($installer.Name)" -ForegroundColor Green
+                $run = Read-Host "Run the installer now? (y/N)"
+                if ($run -match "^[Yy]") {
+                    Write-Host "Launching installer. Please complete it and then re-run this script."
+                    Start-Process $installer.FullName -Wait
+                }
+            }
+            exit 1
+        }
+        Write-Host "Ext2Fsd service is running." -ForegroundColor Green
+
+        try {
+            $tempImage = New-Rock3aCustomImage
+        } catch {
+            Write-Host "ERROR during image customisation: $($_.Exception.Message)" -ForegroundColor Red
             exit 1
         }
 
-        Confirm-Flash -DiskNumber $Script:TARGET_DEVICE
-
-        Write-Host "Running Raspberry Pi Imager..."
-        $targetDrive  = "\\.\PhysicalDrive$($Script:TARGET_DEVICE)"
-        $imagerFailed = $false
-        $imagerError  = ""
-
-        try {
-            & $Script:RPI_IMAGER_PATH --cli $OS_IMAGE_URL $targetDrive --first-run-script "$tempScript"
-            if ($LASTEXITCODE -ne 0) {
-                $imagerFailed = $true
-                $imagerError  = "exited with code $LASTEXITCODE"
+        $r3aFlashCount = 0
+        $r3aKeepFlashing = $true
+        while ($r3aKeepFlashing) {
+            if ($r3aFlashCount -gt 0) {
+                Write-Host ""
+                Read-Host "Insert the next SD card and then press Enter"
+                Write-Host "Select the target device."
+                $picked2 = Select-TargetDiskConsole -LastChoiceLabel "Done (stop flashing)"
+                if ($null -eq $picked2) { break }
+                $Script:TARGET_DEVICE = $picked2
             }
-        } catch {
-            # Could not be executed at all - the surest sign the path is wrong.
-            $imagerFailed = $true
-            $imagerError  = "could not be run: $($_.Exception.Message)"
-        }
 
-        Remove-Item $tempScript -Force -ErrorAction SilentlyContinue
+            Confirm-Flash -DiskNumber $Script:TARGET_DEVICE
 
-        if (-not $imagerFailed) {
-            $flashCount++
+            Write-Host "Wiping target disk..."
+            Clear-Disk -Number $Script:TARGET_DEVICE -RemoveData -Confirm:$false -ErrorAction SilentlyContinue
+
+            Write-Host "Flashing image to Disk $($Script:TARGET_DEVICE)..."
+            Write-RawImageToDisk -ImagePath $tempImage -DiskNumber $Script:TARGET_DEVICE
+
+            $r3aFlashCount++
             Write-Host ""
             Write-Host "==============================================" -ForegroundColor Green
             Write-Host "           DONE: Flash complete!" -ForegroundColor Green
             Write-Host "==============================================" -ForegroundColor Green
             Write-Host ""
+            Write-Host "You can now remove the SD card and boot your Rock 3A."
+            Write-Host "First boot provisioning will run automatically when connected to the internet."
+            Write-Host ""
+            Write-Host "  - Root password: 1234 (Armbian default - change this)"
+            Write-Host "  - Radio user: radio / $($Script:RADIO_PW)"
+            if ($Script:R3A_RADIO_HASH -eq "!") {
+                Write-Host ""
+                Write-Host "  WARNING: Password hash could not be generated." -ForegroundColor Yellow
+                Write-Host "     Log in as root and run: passwd radio" -ForegroundColor Yellow
+            }
+            Write-Host ""
             Write-Host " ONCE BOOTED, THE MESH NODE WILL AUTOMATICALLY START"
             Write-Host " SETTING ITSELF UP AND WILL REBOOT MULTIPLE TIMES"
             Write-Host " Just leave it alone, this process takes about ten minutes"
             Write-Host ""
-        } else {
-            Write-Host ""
-            Write-Host "ERROR: $($Script:RPI_IMAGER_PATH)" -ForegroundColor Red
-            Write-Host "       $imagerError" -ForegroundColor Red
-            Write-Host ""
 
-            # If that path came from tool-paths.json it must not stay there: a
-            # wrong answer would otherwise be replayed on every future run, and
-            # the user cannot reasonably be asked to edit a JSON file. Dropping
-            # it costs nothing when the path was right - the next run finds it
-            # again by searching, and only asks if the search comes up empty.
-            Remove-CachedToolPath -Key 'rpi-imager' -Reason "it did not flash the card"
+            Write-Host "==============================================" -ForegroundColor Cyan
+            $again = Read-Host "Flash another card with the same settings? (y/N)"
+            if ($again -notmatch "^[Yy]") { $r3aKeepFlashing = $false }
         }
 
-        Write-Host "==============================================" -ForegroundColor Cyan
-        $again = Read-Host "Flash another card with the same settings? (y/N)"
-        if ($again -notmatch "^[Yy]") {
-            $keepFlashing = $false
-        } else {
-            Write-Host ""
-            Read-Host "Insert the next SD card and then press Enter"
-            Write-Host "Select the target device."
+        Remove-Item $tempImage -Force -ErrorAction SilentlyContinue
+        Write-Host ""
+        Write-Host "=============================================="
+        Write-Host "  Done. $r3aFlashCount Rock 3A card(s) flashed."
+        Write-Host "=============================================="
+        Write-Host ""
 
-            $bootDisk = (Get-Disk | Where-Object { $_.IsBoot -eq $true }).Number
-            $disks = Get-Disk | Where-Object {
-                $_.Number -ne $bootDisk -and
-                $_.OperationalStatus -eq "Online" -and
-                $_.Size -gt 0
+    # ============================================================
+    # Raspberry Pi Flashing Path (all Pi models including CM4)
+    # ============================================================
+
+    } else {
+
+        Write-Host "Generating firstrun script from template..."
+        $templateContent = Build-ProvisioningScript -TemplatePath $TEMPLATE_FILE
+
+        $flashCount = 0
+        $keepFlashing = $true
+
+        while ($keepFlashing) {
+
+            $tempScript = Join-Path $ScriptDir "firstrun.sh"
+            Write-Host "Writing firstrun script to: $tempScript"
+            [System.IO.File]::WriteAllText($tempScript, $templateContent.Replace("`r`n", "`n"))
+
+            if (-not (Test-Path $tempScript)) {
+                Write-Host "ERROR: Failed to write firstrun script!" -ForegroundColor Red
+                exit 1
             }
 
-            if ($disks.Count -eq 0) {
-                Write-Host "ERROR: No suitable target devices found." -ForegroundColor Red
+            Confirm-Flash -DiskNumber $Script:TARGET_DEVICE
+
+            Write-Host "Running Raspberry Pi Imager..."
+            $result = Invoke-RpiImagerFlash -DiskNumber $Script:TARGET_DEVICE -ScriptPath $tempScript
+
+            Remove-Item $tempScript -Force -ErrorAction SilentlyContinue
+
+            if ($result.Ok) {
+                $flashCount++
+                Write-Host ""
+                Write-Host "==============================================" -ForegroundColor Green
+                Write-Host "           DONE: Flash complete!" -ForegroundColor Green
+                Write-Host "==============================================" -ForegroundColor Green
+                Write-Host ""
+                Write-Host " ONCE BOOTED, THE MESH NODE WILL AUTOMATICALLY START"
+                Write-Host " SETTING ITSELF UP AND WILL REBOOT MULTIPLE TIMES"
+                Write-Host " Just leave it alone, this process takes about ten minutes"
+                Write-Host ""
+            } else {
+                Write-Host ""
+                Write-Host "ERROR: $($Script:RPI_IMAGER_PATH)" -ForegroundColor Red
+                Write-Host "       $($result.Error)" -ForegroundColor Red
+                Write-Host ""
+            }
+
+            Write-Host "==============================================" -ForegroundColor Cyan
+            $again = Read-Host "Flash another card with the same settings? (y/N)"
+            if ($again -notmatch "^[Yy]") {
                 $keepFlashing = $false
             } else {
-                Write-Host "Available devices:"
-                $i = 1; $diskMap = @{}
-                foreach ($disk in $disks) {
-                    $sizeGB = [math]::Round($disk.Size / 1GB, 2)
-                    Write-Host "$i. Disk $($disk.Number): $($disk.FriendlyName) - ${sizeGB}GB"
-                    $diskMap[$i] = $disk; $i++
-                }
-                Write-Host "$i. Done (stop flashing)"
+                Write-Host ""
+                Read-Host "Insert the next SD card and then press Enter"
+                Write-Host "Select the target device."
 
-                do {
-                    $c = Read-Host "Enter device number (1-$i)"
-                    $n = 0
-                    if ([int]::TryParse($c, [ref]$n)) {
-                        if ($n -eq $i) { $keepFlashing = $false; break }
-                        if ($diskMap.ContainsKey($n)) {
-                            $Script:TARGET_DEVICE = $diskMap[$n].Number
-                            Write-Host "Selected: Disk $($Script:TARGET_DEVICE) - $($diskMap[$n].FriendlyName)"
-                            break
-                        }
-                    }
-                    Write-Host "Invalid selection." -ForegroundColor Red
-                } while ($true)
+                $pickedNext = Select-TargetDiskConsole -LastChoiceLabel "Done (stop flashing)"
+                if ($null -eq $pickedNext) {
+                    $keepFlashing = $false
+                } else {
+                    $Script:TARGET_DEVICE = $pickedNext
+                }
             }
         }
-    }
 
-    Write-Host ""
-    Write-Host "=============================================="
-    Write-Host "  Done. $flashCount card(s) flashed."
-    Write-Host "=============================================="
-    Write-Host ""
+        Write-Host ""
+        Write-Host "=============================================="
+        Write-Host "  Done. $flashCount card(s) flashed."
+        Write-Host "=============================================="
+        Write-Host ""
+    }
 }
+
+if (-not $NoRun) { Invoke-Main }
