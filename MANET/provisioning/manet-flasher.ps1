@@ -411,9 +411,10 @@ function Get-PrereqList {
         })
     }
 
-    # Comma for the same reason as Copy-PageToEngine: a board that needs one
-    # tool would otherwise return the bare object and defeat indexing.
-    return ,$list.ToArray()
+    # No leading comma here. Every caller wraps this in @(), which turns a
+    # one-tool board's bare object back into an array; a comma as well would
+    # nest the whole list inside a one-element array instead.
+    return $list.ToArray()
 }
 
 function Test-Prereq {
@@ -932,7 +933,9 @@ function Update-PrereqPage {
     if (-not $Script:PrereqItems) {
         $Script:PrereqItems = @(Get-PrereqList -Hardware $hw.Model -IsCm4 $hw.IsCm4)
     }
-    if (-not $Script:PrereqItems[0].Ui) { Build-PrereqRows }
+    $needRows = $false
+    foreach ($i in $Script:PrereqItems) { if (-not $i.Ui) { $needRows = $true } }
+    if ($needRows) { Build-PrereqRows }
     Update-PrereqRows
 }
 
@@ -1408,10 +1411,10 @@ function Copy-PageToEngine {
     if (-not $Script:TxtAdminPw.Text) { $Script:TxtAdminPw.Text = Generate-Password -length 10 }
     $Script:ADMIN_PW = $Script:TxtAdminPw.Text
 
-    # The leading comma matters. Without it PowerShell unwraps a one-element
-    # array to the bare string, and the caller's $problems[0] then indexes into
-    # that string and reports its first letter: "Fix the settings first: t".
-    return ,$problems.ToArray()
+    # Both callers wrap this in @(). That is what stops a lone problem coming
+    # back as a bare string, whose [0] would be its first letter: the
+    # "Fix the settings first: t" report. A comma here as well would nest it.
+    return $problems.ToArray()
 }
 
 # Engine variables -> page, after Load-Config has read a saved file.
