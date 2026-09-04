@@ -93,6 +93,22 @@ function S {
 # reads there.
 . $EnginePath -NoRun
 
+# Which build is actually running, from the bytes of the two files themselves
+# rather than a number somebody has to remember to bump. It goes in the title
+# bar because that is what ends up in a screenshot, and because the launcher
+# fetches these files from a CDN that can serve a stale copy for a few minutes
+# after a change: without this, "it looks the same" is unanswerable.
+$Script:BuildId = 'unknown'
+try {
+    $h1 = (Get-FileHash -Algorithm SHA256 -LiteralPath $PSCommandPath).Hash
+    $h2 = (Get-FileHash -Algorithm SHA256 -LiteralPath $EnginePath).Hash
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    $Script:BuildId = ([System.BitConverter]::ToString(
+        $sha.ComputeHash([System.Text.Encoding]::ASCII.GetBytes($h1 + $h2))
+    ) -replace '-','').Substring(0, 8).ToLower()
+    $sha.Dispose()
+} catch { }
+
 # ============================================================
 # Look and feel
 # ============================================================
@@ -909,7 +925,7 @@ function Update-PrereqRows {
 function Update-PrereqPage {
     $hw = Get-SelectedHardware
     if (-not $Script:PrereqItems) {
-        $Script:PrereqItems = Get-PrereqList -Hardware $hw.Model -IsCm4 $hw.IsCm4
+        $Script:PrereqItems = @(Get-PrereqList -Hardware $hw.Model -IsCm4 $hw.IsCm4)
     }
     if (-not $Script:PrereqItems[0].Ui) { Build-PrereqRows }
     Update-PrereqRows
@@ -1723,6 +1739,7 @@ function Start-Flash {
     $Script:TARGET_DEVICE  = $d.Number
 
     Add-Log "=============================================="
+    Add-Log " Flasher build $($Script:BuildId)"
     Add-Log " Writing disk $($d.Number): $($d.FriendlyName)"
     Add-Log "=============================================="
 
@@ -2077,7 +2094,7 @@ function Invoke-Back {
 
 function Build-Window {
     $form                 = New-Object System.Windows.Forms.Form
-    $form.Text            = 'MANET radio flasher'
+    $form.Text            = "MANET radio flasher      build $($Script:BuildId)"
     $form.ClientSize      = New-Object System.Drawing.Size((S 838), (S 620))
     $form.StartPosition   = 'CenterScreen'
     $form.FormBorderStyle = 'FixedDialog'
