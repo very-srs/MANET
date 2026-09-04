@@ -1118,16 +1118,37 @@ function Read-AdditionalScriptContent {
     return $result
 }
 
+# Windows 11 ships wsl.exe whether or not a distribution was ever installed,
+# and System32\bash.exe is that same launcher rather than a shell. Both answer
+# Get-Command and both then complain instead of parsing anything. Their
+# complaint is not a syntax error in the operator's script, and reporting it as
+# one would be a wrong FAIL that blocks a flash.
+function Test-WslUnavailable {
+    param([string]$Text)
+    return ($Text -match 'no installed distributions|WslRegisterDistribution|Windows Subsystem for Linux|wsl\.exe --install|has not been installed')
+}
+
 # Syntax-check a shell script if any Linux shell is reachable from Windows.
 function Test-ShellSyntax {
     param([string]$Path)
+
+    # Windows PowerShell 5.1 turns each stderr line of a native command into an
+    # ErrorRecord when it is redirected with 2>&1, and ErrorActionPreference
+    # 'Stop', which the window sets, makes the first one terminating. bash
+    # reporting a syntax error would then take the whole flasher down instead
+    # of being reported in a column. Local to this function, so nothing else
+    # loses its Stop.
+    $ErrorActionPreference = 'Continue'
 
     # Git for Windows ships bash, and it is the common case on a machine that
     # already has rpi-imager and Git installed.
     $bash = Get-Command bash -ErrorAction SilentlyContinue
     if ($bash) {
-        $err = & $bash.Source -n $Path 2>&1
-        if ($LASTEXITCODE -eq 0) { return "" }
+        $err  = & $bash.Source -n $Path 2>&1
+        $code = $LASTEXITCODE
+        $text = ($err | Out-String).Trim()
+        if ($code -eq 0) { return "" }
+        if (Test-WslUnavailable -Text $text) { return $null }
         # bash prefixes the message with the full path; the filename is already
         # in the column to the left of this, so strip it. Matches linux.sh.
         return (($err | Select-Object -First 1 | Out-String).Trim() -replace '^[^:]*: ', '')
@@ -1139,8 +1160,11 @@ function Test-ShellSyntax {
         if ($wslPath -match '^([A-Za-z]):(.*)') {
             $wslPath = "/mnt/$($Matches[1].ToLower())$($Matches[2])"
         }
-        $err = & wsl bash -n $wslPath 2>&1
-        if ($LASTEXITCODE -eq 0) { return "" }
+        $err  = & wsl bash -n $wslPath 2>&1
+        $code = $LASTEXITCODE
+        $text = ($err | Out-String).Trim()
+        if ($code -eq 0) { return "" }
+        if (Test-WslUnavailable -Text $text) { return $null }
         return (($err | Select-Object -First 1 | Out-String).Trim() -replace '^[^:]*: ', '')
     }
 
@@ -1149,6 +1173,12 @@ function Test-ShellSyntax {
 
 function Test-AdditionalScript {
     param([System.IO.FileInfo]$File)
+
+    # Same reason as Test-ShellSyntax: the python checker below is a native
+    # command whose stderr is redirected, and under the window's Stop
+    # preference a script with a syntax error would abort the flasher rather
+    # than be reported as one.
+    $ErrorActionPreference = 'Continue'
 
     # Filename becomes a path on the node and appears in a shell heredoc
     # header, so keep it boring.
