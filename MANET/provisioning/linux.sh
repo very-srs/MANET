@@ -343,7 +343,11 @@ ask_questions() {
                         read -p "Enter EUD AP WPA2 Key (8-63 chars) [or press Enter to generate]: " LAN_AP_KEY
                         echo
                         if [ -z "$LAN_AP_KEY" ]; then
-                               LAN_AP_KEY=$(openssl rand -base64 10  | tr -d '\n')
+                               # Letters and digits, not base64: ten random bytes
+                               # encode to sixteen base64 characters of which the
+                               # last two are always '==' padding, and this is the
+                               # key somebody types into a phone by hand.
+                               LAN_AP_KEY=$(generate_password 16)
                                echo "Generated LAN AP Key: $LAN_AP_KEY"
                                break
                         fi
@@ -362,20 +366,20 @@ ask_questions() {
         fi
 
         # Optional Software
-        read -p "Install MediaMTX Server? (Y/n): " INSTALL_MEDIAMTX
-        INSTALL_MEDIAMTX=${INSTALL_MEDIAMTX:-y}
+        read -p "Install MediaMTX Server? (y/N): " INSTALL_MEDIAMTX
+        INSTALL_MEDIAMTX=${INSTALL_MEDIAMTX:-n}
         if [ "$INSTALL_MEDIAMTX" = "y" ] || [ "$INSTALL_MEDIAMTX" = "Y" ]; then INSTALL_MEDIAMTX="y"; else INSTALL_MEDIAMTX="n"; fi
 
-        read -p "Install Mumble Server (murmur)? (Y/n): " INSTALL_MUMBLE
-        INSTALL_MUMBLE=${INSTALL_MUMBLE:-y}
+        read -p "Install Mumble Server (murmur)? (y/N): " INSTALL_MUMBLE
+        INSTALL_MUMBLE=${INSTALL_MUMBLE:-n}
         if [ "$INSTALL_MUMBLE" = "y" ] || [ "$INSTALL_MUMBLE" = "Y" ]; then INSTALL_MUMBLE="y"; else INSTALL_MUMBLE="n"; fi
 
-        # Mesh PTT voice. Defaults to n: it needs an OpenVLM (CM108B) board
-        # fitted for the headset and PTT switch, and a node without one would
-        # run the daemon to no purpose. Enabling later is a mesh.conf edit and
-        # a service restart, so "n" here costs nothing.
-        read -p "Enable mesh PTT voice (needs an OpenVLM board)? (y/N): " VOICE_ENABLED
-        VOICE_ENABLED=${VOICE_ENABLED:-n}
+        # Mesh PTT voice is on by default: a node that ships with the OpenVLM
+        # board fitted is the normal build now. Without the board the daemon
+        # simply has nothing to drive; turning it off later is a mesh.conf edit
+        # and a service restart.
+        read -p "Enable mesh PTT voice (needs an OpenVLM board)? (Y/n): " VOICE_ENABLED
+        VOICE_ENABLED=${VOICE_ENABLED:-y}
         if [ "$VOICE_ENABLED" = "y" ] || [ "$VOICE_ENABLED" = "Y" ]; then VOICE_ENABLED="y"; else VOICE_ENABLED="n"; fi
         # Talk group is deliberately not asked here. Every node ships on group 1
         # and the operator changes it from the web UI (and, later, the enclosure
@@ -438,13 +442,13 @@ ask_questions() {
         # Network administrator password
         echo ""
         echo "The network administrator password is used to access the mesh admin interface to modify a working mesh."
-        read -p "Enter admin password [or press Enter to generate 10-char random]: " ADMIN_PW
+        read -p "Enter network admin password [or press Enter to generate 10-char random]: " ADMIN_PW
         echo
         if [ -z "$ADMIN_PW" ]; then
                 ADMIN_PW=$(generate_password 10)
-                echo "Generated admin password: $ADMIN_PW"
+                echo "Generated network admin password: $ADMIN_PW"
         else
-                echo "Admin password set."
+                echo "Network admin password set."
         fi
 
         # Automatic updates for MANET tools
@@ -555,7 +559,7 @@ load_config() {
         echo "  LAN CIDR Block: $LAN_CIDR_BLOCK"
         echo "  Auto Channel: $AUTO_CHANNEL"
         echo "  User password: $RADIO_PW"
-        echo "  Admin password: ${ADMIN_PW:-(not set)}"
+        echo "  Network admin password: ${ADMIN_PW:-(not set)}"
         echo "  Auto Update: ${AUTO_UPDATE:-n}"
         echo "----------------------------"
 }

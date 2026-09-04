@@ -1526,12 +1526,11 @@ function Ask-Questions {
             $key = Read-Host "Enter LAN AP WPA2 Key (8-63 chars) [or press Enter to generate]"
             Write-Host ""
             if ([string]::IsNullOrWhiteSpace($key)) {
-                # 10 bytes -> a 16-char base64 key, matching linux.sh's
-                # 'openssl rand -base64 10'. This one gets typed by hand into
-                # an EUD, so it is deliberately shorter than the mesh SAE key.
-                $bytes = New-Object byte[] 10
-                [Security.Cryptography.RNGCryptoServiceProvider]::Create().GetBytes($bytes)
-                $Script:LAN_AP_KEY = [Convert]::ToBase64String($bytes)
+                # Sixteen letters and digits, matching linux.sh's
+                # 'generate_password 16'. Base64 of ten bytes ends in '=='
+                # padding every time, and this is the key somebody types into
+                # a phone by hand, so it does without '+' and '/' as well.
+                $Script:LAN_AP_KEY = Generate-Password -length 16
                 Write-Host "Generated LAN AP Key: $($Script:LAN_AP_KEY)"
                 break
             }
@@ -1545,17 +1544,17 @@ function Ask-Questions {
         $Script:MAX_EUDS_PER_NODE = 0
     }
 
-    $r = Read-Host "Install MediaMTX Server? (Y/n)"
-    $Script:INSTALL_MEDIAMTX = if ([string]::IsNullOrWhiteSpace($r) -or $r -match "^[Yy]") { "y" } else { "n" }
+    $r = Read-Host "Install MediaMTX Server? (y/N)"
+    $Script:INSTALL_MEDIAMTX = if ($r -match "^[Yy]") { "y" } else { "n" }
 
-    $r = Read-Host "Install Mumble Server (murmur)? (Y/n)"
-    $Script:INSTALL_MUMBLE = if ([string]::IsNullOrWhiteSpace($r) -or $r -match "^[Yy]") { "y" } else { "n" }
+    $r = Read-Host "Install Mumble Server (murmur)? (y/N)"
+    $Script:INSTALL_MUMBLE = if ($r -match "^[Yy]") { "y" } else { "n" }
 
-    # Mesh PTT voice. Defaults to n: it needs an OpenVLM (CM108B) board fitted
-    # for the headset and PTT switch, and a node without one would run the
-    # daemon to no purpose. Enabling later is a mesh.conf edit and a restart.
-    $r = Read-Host "Enable mesh PTT voice (needs an OpenVLM board)? (y/N)"
-    $Script:VOICE_ENABLED = if ($r -match "^[Yy]") { "y" } else { "n" }
+    # Mesh PTT voice is on by default: a node that ships with the OpenVLM board
+    # fitted is the normal build now. Without the board the daemon simply has
+    # nothing to drive; turning it off later is a mesh.conf edit and a restart.
+    $r = Read-Host "Enable mesh PTT voice (needs an OpenVLM board)? (Y/n)"
+    $Script:VOICE_ENABLED = if ([string]::IsNullOrWhiteSpace($r) -or $r -match "^[Yy]") { "y" } else { "n" }
 
     $Script:MESH_SSID = Read-Host "Enter MESH SSID Name"
 
@@ -1601,14 +1600,14 @@ function Ask-Questions {
 
     Write-Host ""
     Write-Host "The network administrator password is used to access the mesh admin interface."
-    $adminPw = Read-Host "Enter admin password [or press Enter to generate 10-char random]"
+    $adminPw = Read-Host "Enter network admin password [or press Enter to generate 10-char random]"
     Write-Host ""
     if ([string]::IsNullOrWhiteSpace($adminPw)) {
         $Script:ADMIN_PW = Generate-Password -length 10
-        Write-Host "Generated admin password: $($Script:ADMIN_PW)"
+        Write-Host "Generated network admin password: $($Script:ADMIN_PW)"
     } else {
         $Script:ADMIN_PW = $adminPw
-        Write-Host "Admin password set."
+        Write-Host "Network admin password set."
     }
 
     Write-Host ""
@@ -1725,7 +1724,7 @@ function Load-Config {
     Write-Host "  LAN CIDR Block: $($Script:LAN_CIDR_BLOCK)"
     Write-Host "  Auto Channel: $($Script:AUTO_CHANNEL)"
     Write-Host "  User password: $($Script:RADIO_PW)"
-    Write-Host "  Admin password: $(if ($Script:ADMIN_PW) { $Script:ADMIN_PW } else { '(not set)' })"
+    Write-Host "  Network admin password: $(if ($Script:ADMIN_PW) { $Script:ADMIN_PW } else { '(not set)' })"
     Write-Host "  Auto Update: $(if ($Script:AUTO_UPDATE) { $Script:AUTO_UPDATE } else { 'n' })"
     Write-Host "----------------------------"
 }
