@@ -89,9 +89,17 @@ behaves exactly as it always has.
 | Ext2Fsd | Mounting ext4 partitions for Rock 3A | [Ext2Fsd on SourceForge](https://sourceforge.net/projects/ext2fsd/), then start its service. Rock 3A only |
 | 7-Zip | Unpacking the Armbian `.img.xz` | [7-zip.org](https://www.7-zip.org/download.html). Rock 3A only, and WSL will do instead |
 
-Nothing here is needed to *start* the flasher. Windows PowerShell and the window toolkit
-it draws with are part of Windows, so `Flash a Radio.cmd` runs on a machine with nothing
-installed on it at all.
+**Nothing here has to be installed by hand for a Raspberry Pi or a CM4.** Windows
+PowerShell and the window toolkit it draws with are part of Windows, and the window
+downloads and runs the `rpi-imager` and `rpiboot` installers for you. `Flash a Radio.cmd`
+runs on a machine with nothing on it at all.
+
+Only Rock 3A needs tools the flasher cannot fetch, and Rock 3A is not a priority platform.
+
+Some checks are better when a tool happens to be present: your setup scripts get a full
+`bash -n` parse if Git for Windows or WSL is installed, and a reduced one otherwise. That
+is a bonus, not a requirement, and the flasher never asks you to go and install anything
+for it.
 
 > **Finding these tools:** `windows.ps1` does not assume they are on the C: drive. It
 > checks the usual install folders on *every* fixed drive, then `PATH`, then its own
