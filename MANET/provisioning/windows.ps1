@@ -1103,14 +1103,14 @@ function Read-AdditionalScriptContent {
     # whose name ends in CR, and the script dies with a bare "not found" that
     # names the right path.
     $lf = $text -replace "`r`n", "`n" -replace "`r", "`n"
-    if ($lf -ne $text) { [void]$fixes.Add('Windows line endings converted') }
+    if ($lf -ne $text) { [void]$fixes.Add('line endings fixed') }
     $text = $lf
 
     # A file with no trailing newline would glue the heredoc delimiter onto its
     # last line, and the delimiter would not be recognised.
     if (-not $text.EndsWith("`n")) {
         $text += "`n"
-        [void]$fixes.Add('missing final newline added')
+        [void]$fixes.Add('final newline added')
     }
 
     $result.Text  = $text
@@ -1291,7 +1291,7 @@ function Test-AdditionalScript {
             '^(sh|bash|dash)$' {
                 $syntaxError = Test-ShellSyntax -Path $tmp
                 if ($null -eq $syntaxError) {
-                    return @{ Verdict = 'OK'; Reason = "shell (not syntax-checked, no bash here)$note$fixed" }
+                    return @{ Verdict = 'OK'; Reason = "shell, not checked (no bash on this PC)$note$fixed" }
                 }
                 if ($syntaxError -ne "") {
                     return @{ Verdict = 'FAIL'; Reason = "shell syntax error: $syntaxError" }
@@ -1317,18 +1317,18 @@ except SyntaxError as e:
                     $r = Invoke-CheckerProcess -Path $py.Source -Arguments @($checker, $tmp)
                     Remove-Item $checker -Force -ErrorAction SilentlyContinue
                     if ($r.TimedOut -or $r.Failed) {
-                        return @{ Verdict = 'OK'; Reason = "$interp (not syntax-checked, python did not answer)$note$fixed" }
+                        return @{ Verdict = 'OK'; Reason = "$interp, not checked (python did not answer)$note$fixed" }
                     }
                     if ($r.ExitCode -ne 0) {
                         return @{ Verdict = 'FAIL'; Reason = "python syntax error: $($r.Output)" }
                     }
                     return @{ Verdict = 'OK'; Reason = "python syntax clean$note$fixed" }
                 }
-                return @{ Verdict = 'OK'; Reason = "$interp (not syntax-checked, no python here)$note$fixed" }
+                return @{ Verdict = 'OK'; Reason = "$interp, not checked (no python on this PC)$note$fixed" }
             }
         }
 
-        return @{ Verdict = 'OK'; Reason = "$interp (not syntax-checked)$note$fixed" }
+        return @{ Verdict = 'OK'; Reason = "$interp, not checked$note$fixed" }
     } finally {
         Remove-Item $tmp -Force -ErrorAction SilentlyContinue
     }
