@@ -57,6 +57,37 @@ public static extern bool SetProcessDPIAware();
 [System.Windows.Forms.Application]::EnableVisualStyles()
 [System.Windows.Forms.Application]::SetCompatibleTextRenderingDefault($false)
 
+# Every position and size in this file is written for a 96 DPI screen and put
+# through S() to reach the real one. Telling Windows we are DPI aware, above,
+# stops it scaling the window for us, and a font measured in points then grows
+# with the display while a box measured in pixels does not: at 125% the text
+# is a quarter too big for the space it was given and every label is clipped.
+# Fonts are deliberately NOT scaled here. Points are already a physical unit,
+# so they come out right on their own; it is only the pixels that need it.
+$Script:UiScale = 1.0
+try {
+    $g = [System.Drawing.Graphics]::FromHwnd([System.IntPtr]::Zero)
+    if ($g.DpiX -gt 0) { $Script:UiScale = $g.DpiX / 96.0 }
+    $g.Dispose()
+} catch { }
+
+# Never smaller than the design, and never so large the window will not fit on
+# the screen it has to open on. A 175% laptop is short enough that the nominal
+# scale would put the buttons below the taskbar.
+$DESIGN_W = 838.0
+$DESIGN_H = 620.0
+try {
+    $area = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
+    $fit  = [math]::Min(($area.Width - 40) / $DESIGN_W, ($area.Height - 60) / $DESIGN_H)
+    if ($fit -lt $Script:UiScale) { $Script:UiScale = $fit }
+} catch { }
+if ($Script:UiScale -lt 1.0) { $Script:UiScale = 1.0 }
+
+function S {
+    param([double]$n)
+    return [int][math]::Round($n * $Script:UiScale)
+}
+
 # Dot-sourced, so the engine's $Script: variables land in this script's scope.
 # Setting $Script:MESH_SSID here is the same variable Build-ProvisioningScript
 # reads there.
@@ -88,8 +119,8 @@ function New-Text {
           [System.Drawing.Font]$Font = $null, [System.Drawing.Color]$Color = $UI.Text)
     $l          = New-Object System.Windows.Forms.Label
     $l.Text     = $Text
-    $l.Location = New-Object System.Drawing.Point($X, $Y)
-    $l.Size     = New-Object System.Drawing.Size($W, $H)
+    $l.Location = New-Object System.Drawing.Point((S $X), (S $Y))
+    $l.Size     = New-Object System.Drawing.Size((S $W), (S $H))
     $l.Font     = if ($Font) { $Font } else { $UI.Font }
     $l.ForeColor= $Color
     return $l
@@ -98,8 +129,8 @@ function New-Text {
 function New-Input {
     param([int]$X, [int]$Y, [int]$W = 300, [switch]$Password)
     $t          = New-Object System.Windows.Forms.TextBox
-    $t.Location = New-Object System.Drawing.Point($X, $Y)
-    $t.Size     = New-Object System.Drawing.Size($W, 24)
+    $t.Location = New-Object System.Drawing.Point((S $X), (S $Y))
+    $t.Size     = New-Object System.Drawing.Size((S $W), (S 24))
     $t.Font     = $UI.Font
     if ($Password) { $t.UseSystemPasswordChar = $false }
     return $t
@@ -109,8 +140,8 @@ function New-Btn {
     param([string]$Text, [int]$X, [int]$Y, [int]$W = 110, [int]$H = 28, [scriptblock]$OnClick)
     $b           = New-Object System.Windows.Forms.Button
     $b.Text      = $Text
-    $b.Location  = New-Object System.Drawing.Point($X, $Y)
-    $b.Size      = New-Object System.Drawing.Size($W, $H)
+    $b.Location  = New-Object System.Drawing.Point((S $X), (S $Y))
+    $b.Size      = New-Object System.Drawing.Size((S $W), (S $H))
     $b.Font      = $UI.Font
     $b.FlatStyle = 'System'
     if ($OnClick) { $b.Add_Click($OnClick) }
@@ -121,8 +152,8 @@ function New-Check {
     param([string]$Text, [int]$X, [int]$Y, [int]$W = 420, [bool]$Checked = $false)
     $c           = New-Object System.Windows.Forms.CheckBox
     $c.Text      = $Text
-    $c.Location  = New-Object System.Drawing.Point($X, $Y)
-    $c.Size      = New-Object System.Drawing.Size($W, 22)
+    $c.Location  = New-Object System.Drawing.Point((S $X), (S $Y))
+    $c.Size      = New-Object System.Drawing.Size((S $W), (S 22))
     $c.Font      = $UI.Font
     $c.Checked   = $Checked
     return $c
@@ -131,8 +162,8 @@ function New-Check {
 function New-Combo {
     param([int]$X, [int]$Y, [int]$W = 300, [string[]]$Items)
     $c               = New-Object System.Windows.Forms.ComboBox
-    $c.Location      = New-Object System.Drawing.Point($X, $Y)
-    $c.Size          = New-Object System.Drawing.Size($W, 24)
+    $c.Location      = New-Object System.Drawing.Point((S $X), (S $Y))
+    $c.Size          = New-Object System.Drawing.Size((S $W), (S 24))
     $c.Font          = $UI.Font
     $c.DropDownStyle = 'DropDownList'
     foreach ($i in $Items) { [void]$c.Items.Add($i) }
@@ -143,8 +174,8 @@ function New-GroupBox {
     param([string]$Text, [int]$X, [int]$Y, [int]$W, [int]$H)
     $g          = New-Object System.Windows.Forms.GroupBox
     $g.Text     = $Text
-    $g.Location = New-Object System.Drawing.Point($X, $Y)
-    $g.Size     = New-Object System.Drawing.Size($W, $H)
+    $g.Location = New-Object System.Drawing.Point((S $X), (S $Y))
+    $g.Size     = New-Object System.Drawing.Size((S $W), (S $H))
     $g.Font     = $UI.FontBold
     $g.ForeColor= $UI.Header
     return $g
@@ -690,8 +721,8 @@ $Script:CONTENT_H = 424
 
 function New-ContentPanel {
     $p           = New-Object System.Windows.Forms.Panel
-    $p.Size      = New-Object System.Drawing.Size($Script:CONTENT_W, $Script:CONTENT_H)
-    $p.Location  = New-Object System.Drawing.Point(0, 0)
+    $p.Size      = New-Object System.Drawing.Size((S $Script:CONTENT_W), (S $Script:CONTENT_H))
+    $p.Location  = New-Object System.Drawing.Point((S 0), (S 0))
     $p.BackColor = $UI.Panel
     $p.Visible   = $false
     return $p
@@ -720,8 +751,8 @@ function Build-HardwarePage {
         $rb.Text      = $r.T
         $rb.Font      = $UI.FontBold
         $rb.ForeColor = $UI.Text
-        $rb.Location  = New-Object System.Drawing.Point(28, $y)
-        $rb.Size      = New-Object System.Drawing.Size(500, 24)
+        $rb.Location  = New-Object System.Drawing.Point((S 28), (S $y))
+        $rb.Size      = New-Object System.Drawing.Size((S 500), (S 24))
         $p.Controls.Add($rb)
         $p.Controls.Add((New-Text $r.D 50 ($y + 24) 720 18 $UI.FontSmall $UI.Muted))
         $y += 62
@@ -751,14 +782,14 @@ function Build-PrereqPage {
     $p = New-ContentPanel
 
     $Script:PrereqHost            = New-Object System.Windows.Forms.Panel
-    $Script:PrereqHost.Location   = New-Object System.Drawing.Point(20, 14)
-    $Script:PrereqHost.Size       = New-Object System.Drawing.Size(798, 300)
+    $Script:PrereqHost.Location   = New-Object System.Drawing.Point((S 20), (S 14))
+    $Script:PrereqHost.Size       = New-Object System.Drawing.Size((S 798), (S 300))
     $Script:PrereqHost.AutoScroll = $true
     $p.Controls.Add($Script:PrereqHost)
 
     $Script:PrereqProgress          = New-Object System.Windows.Forms.ProgressBar
-    $Script:PrereqProgress.Location = New-Object System.Drawing.Point(20, 328)
-    $Script:PrereqProgress.Size     = New-Object System.Drawing.Size(798, 16)
+    $Script:PrereqProgress.Location = New-Object System.Drawing.Point((S 20), (S 328))
+    $Script:PrereqProgress.Size     = New-Object System.Drawing.Size((S 798), (S 16))
     $Script:PrereqProgress.Visible  = $false
     $p.Controls.Add($Script:PrereqProgress)
 
@@ -815,8 +846,8 @@ function Update-PrereqPage {
         }
 
         $sep           = New-Object System.Windows.Forms.Label
-        $sep.Location  = New-Object System.Drawing.Point(4, ($y + 82))
-        $sep.Size      = New-Object System.Drawing.Size(778, 1)
+        $sep.Location  = New-Object System.Drawing.Point((S 4), (S ($y + 82)))
+        $sep.Size      = New-Object System.Drawing.Size((S 778), (S 1))
         $sep.BorderStyle = 'Fixed3D'
         $host_.Controls.Add($sep)
 
@@ -939,7 +970,7 @@ function Build-ConfigPage {
     $g2.Controls.Add((New-Text 'Wi-Fi name' 12 55 124 20))
     $Script:TxtApSsid = New-Input 140 52 230
     $g2.Controls.Add($Script:TxtApSsid)
-    $g2.Controls.Add((New-Text 'The last 4 of the wired MAC is added to this, so each node is identifiable.' 12 78 370 16 $UI.FontSmall $UI.Muted))
+    $g2.Controls.Add((New-Text 'Each node adds the last 4 of its wired MAC to this.' 12 78 370 18 $UI.FontSmall $UI.Muted))
 
     $g2.Controls.Add((New-Text 'Wi-Fi password' 12 99 124 20))
     $Script:TxtApKey = New-Input 140 96 144
@@ -952,8 +983,8 @@ function Build-ConfigPage {
 
     $g2.Controls.Add((New-Text 'Clients per node' 12 127 124 20))
     $Script:NumEuds          = New-Object System.Windows.Forms.NumericUpDown
-    $Script:NumEuds.Location = New-Object System.Drawing.Point(140, 124)
-    $Script:NumEuds.Size     = New-Object System.Drawing.Size(60, 24)
+    $Script:NumEuds.Location = New-Object System.Drawing.Point((S 140), (S 124))
+    $Script:NumEuds.Size     = New-Object System.Drawing.Size((S 60), (S 24))
     $Script:NumEuds.Font     = $UI.Font
     $Script:NumEuds.Minimum  = 1
     $Script:NumEuds.Maximum  = 20
@@ -1022,11 +1053,11 @@ function Build-ConfigPage {
     $g6.Controls.Add((New-Btn 'Generate' 290 51 88 24 {
         $Script:TxtAdminPw.Text = Generate-Password -length 10
     }))
-    $g6.Controls.Add((New-Text 'Both are shown again on the last page. Write them down there.' 12 78 372 16 $UI.FontSmall $UI.Muted))
+    $g6.Controls.Add((New-Text 'Both are shown again at the end. Write them down there.' 12 78 372 18 $UI.FontSmall $UI.Muted))
     $p.Controls.Add($g6)
 
     # --- save row --------------------------------------------------------
-    $p.Controls.Add((New-Text 'Save these settings as' 16 390 140 20))
+    $p.Controls.Add((New-Text 'Save settings as' 16 390 140 20))
     $Script:TxtSaveName = New-Input 160 387 200
     $p.Controls.Add($Script:TxtSaveName)
     $p.Controls.Add((New-Btn 'Save' 368 386 90 26 { Save-ConfigFromPage }))
@@ -1259,15 +1290,15 @@ function Build-ScriptsPage {
     $p = New-ContentPanel
 
     $Script:LvScripts               = New-Object System.Windows.Forms.ListView
-    $Script:LvScripts.Location      = New-Object System.Drawing.Point(20, 14)
-    $Script:LvScripts.Size          = New-Object System.Drawing.Size(798, 240)
+    $Script:LvScripts.Location      = New-Object System.Drawing.Point((S 20), (S 14))
+    $Script:LvScripts.Size          = New-Object System.Drawing.Size((S 798), (S 240))
     $Script:LvScripts.View          = 'Details'
     $Script:LvScripts.FullRowSelect = $true
     $Script:LvScripts.GridLines     = $false
     $Script:LvScripts.Font          = $UI.Font
-    [void]$Script:LvScripts.Columns.Add('File', 250)
-    [void]$Script:LvScripts.Columns.Add('', 90)
-    [void]$Script:LvScripts.Columns.Add('Why', 434)
+    [void]$Script:LvScripts.Columns.Add('File', (S 250))
+    [void]$Script:LvScripts.Columns.Add('', (S 90))
+    [void]$Script:LvScripts.Columns.Add('Why', (S 434))
     $p.Controls.Add($Script:LvScripts)
 
     $Script:LblScriptsSummary = New-Text '' 20 264 798 56 $UI.Font $UI.Text
@@ -1337,18 +1368,18 @@ function Build-TargetPage {
     $p.Controls.Add($Script:GrpBoot)
 
     $Script:LvDisks               = New-Object System.Windows.Forms.ListView
-    $Script:LvDisks.Location      = New-Object System.Drawing.Point(20, 136)
-    $Script:LvDisks.Size          = New-Object System.Drawing.Size(798, 194)
+    $Script:LvDisks.Location      = New-Object System.Drawing.Point((S 20), (S 136))
+    $Script:LvDisks.Size          = New-Object System.Drawing.Size((S 798), (S 194))
     $Script:LvDisks.View          = 'Details'
     $Script:LvDisks.FullRowSelect = $true
     $Script:LvDisks.MultiSelect   = $false
     $Script:LvDisks.HideSelection = $false
     $Script:LvDisks.Font          = $UI.Font
-    [void]$Script:LvDisks.Columns.Add('Disk', 50)
-    [void]$Script:LvDisks.Columns.Add('Name', 300)
-    [void]$Script:LvDisks.Columns.Add('Size', 90)
-    [void]$Script:LvDisks.Columns.Add('Connected by', 110)
-    [void]$Script:LvDisks.Columns.Add('Contains', 224)
+    [void]$Script:LvDisks.Columns.Add('Disk', (S 50))
+    [void]$Script:LvDisks.Columns.Add('Name', (S 300))
+    [void]$Script:LvDisks.Columns.Add('Size', (S 90))
+    [void]$Script:LvDisks.Columns.Add('Connected by', (S 110))
+    [void]$Script:LvDisks.Columns.Add('Contains', (S 224))
     $Script:LvDisks.Add_SelectedIndexChanged({ Update-DiskWarning; Update-Nav })
     $p.Controls.Add($Script:LvDisks)
 
@@ -1463,8 +1494,8 @@ function Build-ConfirmPage {
     $p = New-ContentPanel
 
     $Script:TxtSummary            = New-Object System.Windows.Forms.TextBox
-    $Script:TxtSummary.Location   = New-Object System.Drawing.Point(20, 14)
-    $Script:TxtSummary.Size       = New-Object System.Drawing.Size(798, 310)
+    $Script:TxtSummary.Location   = New-Object System.Drawing.Point((S 20), (S 14))
+    $Script:TxtSummary.Size       = New-Object System.Drawing.Size((S 798), (S 310))
     $Script:TxtSummary.Multiline  = $true
     $Script:TxtSummary.ReadOnly   = $true
     $Script:TxtSummary.ScrollBars = 'Vertical'
@@ -1542,16 +1573,16 @@ function Build-FlashPage {
     $p = New-ContentPanel
 
     $Script:FlashProgress          = New-Object System.Windows.Forms.ProgressBar
-    $Script:FlashProgress.Location = New-Object System.Drawing.Point(20, 16)
-    $Script:FlashProgress.Size     = New-Object System.Drawing.Size(798, 22)
+    $Script:FlashProgress.Location = New-Object System.Drawing.Point((S 20), (S 16))
+    $Script:FlashProgress.Size     = New-Object System.Drawing.Size((S 798), (S 22))
     $p.Controls.Add($Script:FlashProgress)
 
     $Script:LblFlashStatus = New-Text 'Getting ready...' 20 44 798 20 $UI.Font $UI.Text
     $p.Controls.Add($Script:LblFlashStatus)
 
     $Script:LogBox            = New-Object System.Windows.Forms.TextBox
-    $Script:LogBox.Location   = New-Object System.Drawing.Point(20, 70)
-    $Script:LogBox.Size       = New-Object System.Drawing.Size(798, 338)
+    $Script:LogBox.Location   = New-Object System.Drawing.Point((S 20), (S 70))
+    $Script:LogBox.Size       = New-Object System.Drawing.Size((S 798), (S 338))
     $Script:LogBox.Multiline  = $true
     $Script:LogBox.ReadOnly   = $true
     $Script:LogBox.ScrollBars = 'Vertical'
@@ -1711,8 +1742,8 @@ function Build-DonePage {
                                'Leave it alone until it settles.') 20 34 798 34 $UI.Font $UI.Text))
 
     $Script:TxtReceipt            = New-Object System.Windows.Forms.TextBox
-    $Script:TxtReceipt.Location   = New-Object System.Drawing.Point(20, 76)
-    $Script:TxtReceipt.Size       = New-Object System.Drawing.Size(798, 262)
+    $Script:TxtReceipt.Location   = New-Object System.Drawing.Point((S 20), (S 76))
+    $Script:TxtReceipt.Size       = New-Object System.Drawing.Size((S 798), (S 262))
     $Script:TxtReceipt.Multiline  = $true
     $Script:TxtReceipt.ReadOnly   = $true
     $Script:TxtReceipt.ScrollBars = 'Vertical'
@@ -1866,9 +1897,9 @@ function Update-Nav {
 
     # The confirm button spells out which disk it is about to erase, so it is
     # wider than the others and Back has to move out of its way.
-    $Script:BtnNext.Width = if ($name -eq 'Confirm') { 280 } else { 150 }
-    $Script:BtnNext.Left  = $Script:Form.ClientSize.Width - $Script:BtnNext.Width - 20
-    $Script:BtnBack.Left  = $Script:BtnNext.Left - $Script:BtnBack.Width - 10
+    $Script:BtnNext.Width = if ($name -eq 'Confirm') { S 300 } else { S 150 }
+    $Script:BtnNext.Left  = $Script:Form.ClientSize.Width - $Script:BtnNext.Width - (S 20)
+    $Script:BtnBack.Left  = $Script:BtnNext.Left - $Script:BtnBack.Width - (S 10)
 }
 
 function Invoke-Next {
@@ -1929,30 +1960,31 @@ function Invoke-Back {
 function Build-Window {
     $form                 = New-Object System.Windows.Forms.Form
     $form.Text            = 'MANET radio flasher'
-    $form.ClientSize      = New-Object System.Drawing.Size(838, 610)
+    $form.ClientSize      = New-Object System.Drawing.Size((S 838), (S 620))
     $form.StartPosition   = 'CenterScreen'
     $form.FormBorderStyle = 'FixedDialog'
     $form.MaximizeBox     = $false
+    $form.AutoScaleMode   = 'None'
     $form.BackColor       = $UI.Bg
     $form.Font            = $UI.Font
     $Script:Form          = $form
 
     # --- header ---
     $header           = New-Object System.Windows.Forms.Panel
-    $header.Location  = New-Object System.Drawing.Point(0, 0)
-    $header.Size      = New-Object System.Drawing.Size(838, 76)
+    $header.Location  = New-Object System.Drawing.Point((S 0), (S 0))
+    $header.Size      = New-Object System.Drawing.Size((S 838), (S 84))
     $header.BackColor = $UI.Header
     $form.Controls.Add($header)
 
-    $Script:LblTitle = New-Text '' 20 14 798 28 $UI.FontTitle $UI.HeaderTxt
+    $Script:LblTitle = New-Text '' 20 12 798 32 $UI.FontTitle $UI.HeaderTxt
     $header.Controls.Add($Script:LblTitle)
-    $Script:LblBlurb = New-Text '' 22 46 798 20 $UI.FontSmall ([System.Drawing.Color]::FromArgb(190, 205, 220))
+    $Script:LblBlurb = New-Text '' 22 50 798 22 $UI.FontSmall ([System.Drawing.Color]::FromArgb(190, 205, 220))
     $header.Controls.Add($Script:LblBlurb)
 
     # --- content host ---
     $contentHost           = New-Object System.Windows.Forms.Panel
-    $contentHost.Location  = New-Object System.Drawing.Point(0, 76)
-    $contentHost.Size      = New-Object System.Drawing.Size($Script:CONTENT_W, $Script:CONTENT_H)
+    $contentHost.Location  = New-Object System.Drawing.Point((S 0), (S 84))
+    $contentHost.Size      = New-Object System.Drawing.Size((S $Script:CONTENT_W), (S $Script:CONTENT_H))
     $contentHost.BackColor = $UI.Panel
     $form.Controls.Add($contentHost)
 
@@ -1970,14 +2002,14 @@ function Build-Window {
 
     # --- footer ---
     $footer           = New-Object System.Windows.Forms.Panel
-    $footer.Location  = New-Object System.Drawing.Point(0, 508)
-    $footer.Size      = New-Object System.Drawing.Size(838, 102)
+    $footer.Location  = New-Object System.Drawing.Point((S 0), (S 512))
+    $footer.Size      = New-Object System.Drawing.Size((S 838), (S 108))
     $footer.BackColor = $UI.Bg
     $form.Controls.Add($footer)
 
     $rule             = New-Object System.Windows.Forms.Label
-    $rule.Location    = New-Object System.Drawing.Point(0, 0)
-    $rule.Size        = New-Object System.Drawing.Size(838, 1)
+    $rule.Location    = New-Object System.Drawing.Point((S 0), (S 0))
+    $rule.Size        = New-Object System.Drawing.Size((S 838), (S 1))
     $rule.BorderStyle = 'Fixed3D'
     $footer.Controls.Add($rule)
 
@@ -2005,8 +2037,8 @@ function Build-Window {
     # scripts live. Naming it, and opening it on a click, is the answer to
     # "where did my file go".
     $Script:LnkFolder             = New-Object System.Windows.Forms.LinkLabel
-    $Script:LnkFolder.Location    = New-Object System.Drawing.Point(20, 72)
-    $Script:LnkFolder.Size        = New-Object System.Drawing.Size(798, 18)
+    $Script:LnkFolder.Location    = New-Object System.Drawing.Point((S 20), (S 72))
+    $Script:LnkFolder.Size        = New-Object System.Drawing.Size((S 798), (S 18))
     $Script:LnkFolder.Font        = $UI.FontSmall
     $Script:LnkFolder.LinkColor   = $UI.Header
     $Script:LnkFolder.AutoEllipsis = $true
