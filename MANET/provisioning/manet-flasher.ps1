@@ -250,6 +250,7 @@ $Script:PageBlurbs  = @{
 $Script:Jobs = New-Object System.Collections.ArrayList
 
 $Script:FlashCount    = 0
+$Script:FlashRunning  = $false
 $Script:ScriptReport  = $null
 $Script:CandidateList = @()
 $Script:R3aTempImage  = ''
@@ -2065,6 +2066,29 @@ function Start-Flash {
     if ($hw.Model -eq 'r3a') { Start-Rock3aFlash } else { Start-RpiFlash }
 }
 
+# Did anything actually land on the card? A Pi OS image leaves a FAT32
+# partition Windows can see, usually labelled bootfs. That is evidence; an exit
+# code is only a claim, and this one could not always be read at all.
+function Test-CardWasWritten {
+    param([int]$DiskNumber, [int]$Seconds = 20)
+
+    for ($t = 0; $t -lt $Seconds; $t++) {
+        try { Update-HostStorageCache -ErrorAction SilentlyContinue } catch { }
+        try {
+            $parts = @(Get-Partition -DiskNumber $DiskNumber -ErrorAction Stop)
+            foreach ($p in $parts) {
+                if ($p.DriveLetter -and $p.DriveLetter -ne "`0") {
+                    $v = Get-Volume -DriveLetter $p.DriveLetter -ErrorAction SilentlyContinue
+                    if ($v -and ($v.FileSystemLabel -eq 'bootfs' -or $v.FileSystem -eq 'FAT32')) { return $true }
+                }
+            }
+        } catch { }
+        [System.Windows.Forms.Application]::DoEvents()
+        Start-Sleep -Seconds 1
+    }
+    return $false
+}
+
 function Start-RpiFlash {
     try {
         $content    = Build-ProvisioningScript -TemplatePath $TEMPLATE_FILE
@@ -2078,34 +2102,78 @@ function Start-RpiFlash {
 
     $imager = ($Script:PrereqItems | Where-Object { $_.Key -eq 'rpi-imager' } | Select-Object -First 1).Path
     $Script:RPI_IMAGER_PATH = $imager
-
     $target = "\\.\PhysicalDrive$($Script:TARGET_DEVICE)"
-    $Script:LblFlashStatus.Text = 'Raspberry Pi Imager is downloading and writing the image. This takes a few minutes.'
-    $Script:FlashProgress.Style = 'Marquee'
 
-    [void](Start-ProcessJob -Path $imager `
-        -Arguments @('--cli', $OS_IMAGE_URL, $target, '--first-run-script', $tempScript) `
-        -Label 'Raspberry Pi Imager' `
-        -StatusLabel $Script:LblFlashStatus `
-        -OnDone {
-            param($job, $ok, $err)
-            $Script:FlashProgress.Style = 'Blocks'
-            Remove-Item (Join-Path $ScriptDir 'firstrun.sh') -Force -ErrorAction SilentlyContinue
-            if (-not $ok) { Complete-Flash $false $err; return }
-            if ($job.ExitCode -ne 0) {
-                # A remembered path that does not flash must not be replayed on
-                # every future run, here or on the console.
-                Remove-CachedToolPath -Key 'rpi-imager' -Reason "it did not flash the card"
-                # Its own last words, because an exit code alone rarely says
-                # which of the many things went wrong.
-                $said = if ($job.Said -and $job.Said.Count -gt 0) {
-                    '  It said: ' + (($job.Said | Where-Object { $_.Trim() } | Select-Object -Last 3) -join ' / ')
-                } else { '' }
-                Complete-Flash $false "Raspberry Pi Imager exited with code $($job.ExitCode).$said"
-                return
-            }
-            Complete-Flash $true ''
-        })
+    # Its own window, for the same reason rpiboot has one: with --cli the imager
+    # prints download and write progress, and redirecting it captured nothing at
+    # all while leaving five minutes of blank marquee here. Watching it work is
+    # the point.
+    $argLine = (@(@('--cli', $OS_IMAGE_URL, $target, '--first-run-script', $tempScript) |
+                  ForEach-Object { Format-ProcessArgument $_ }) -join ' ')
+    $exe = $imager
+    if ([System.IO.Path]::GetExtension($imager) -in @('.cmd', '.bat')) {
+        $exe = $env:ComSpec
+        # The outer pair is what stops cmd stripping ours. See Start-ProcessJob.
+        $argLine = '/c "' + (Format-ProcessArgument $imager) + ' ' + $argLine + '"'
+    }
+
+    Add-Log "Running $exe $argLine"
+    $Script:LblFlashStatus.Text = 'Raspberry Pi Imager is running in its own window. Watch the progress there.'
+    $Script:FlashProgress.Style = 'Marquee'
+    $Script:FlashRunning = $true
+    [System.Windows.Forms.Application]::DoEvents()
+
+    try {
+        $proc = Start-Process -FilePath $exe -ArgumentList $argLine -PassThru
+    } catch {
+        $Script:FlashRunning = $false
+        Complete-Flash $false "Could not start Raspberry Pi Imager: $($_.Exception.Message)"
+        return
+    }
+
+    $started = Get-Date
+    while (-not $proc.HasExited) {
+        $mins = [int]((Get-Date) - $started).TotalMinutes
+        $secs = [int]((Get-Date) - $started).TotalSeconds % 60
+        $Script:LblFlashStatus.Text = ("Raspberry Pi Imager is running in its own window. " +
+                                       "Watch the progress there.  ({0}m {1:00}s)" -f $mins, $secs)
+        [System.Windows.Forms.Application]::DoEvents()
+        Start-Sleep -Milliseconds 500
+    }
+
+    # WaitForExit on an already-exited process returns at once and is what makes
+    # the exit code readable; without it this came back null and a five minute
+    # flash that had very likely worked was reported as a failure.
+    $code = $null
+    try { $proc.WaitForExit(); $code = $proc.ExitCode } catch { }
+
+    $Script:FlashRunning        = $false
+    $Script:FlashProgress.Style = 'Blocks'
+    Add-Log "Raspberry Pi Imager finished. Exit code: $(if ($null -ne $code) { $code } else { 'could not be read' })"
+
+    $Script:LblFlashStatus.Text = 'Checking the card...'
+    [System.Windows.Forms.Application]::DoEvents()
+    $written = Test-CardWasWritten -DiskNumber $Script:TARGET_DEVICE
+
+    Remove-Item (Join-Path $ScriptDir 'firstrun.sh') -Force -ErrorAction SilentlyContinue
+
+    # The card is the authority. A zero exit code with nothing written is a
+    # failure, and a card with a boot partition on it is a success whatever the
+    # exit code turned out to be or whether it could be read at all.
+    if ($written) {
+        if ($null -ne $code -and $code -ne 0) {
+            Add-Log "The imager reported code $code, but the card has a boot partition on it, so the write worked."
+        }
+        Complete-Flash $true ''
+        return
+    }
+
+    # A remembered path that does not flash must not be replayed on every
+    # future run, here or on the console.
+    Remove-CachedToolPath -Key 'rpi-imager' -Reason "it did not flash the card"
+    $codeText = if ($null -ne $code) { "exit code $code" } else { "its exit code could not be read" }
+    Complete-Flash $false ("Raspberry Pi Imager finished ($codeText) but the card has no boot partition on it. " +
+                           "Look at the imager window for what it said.")
 }
 
 function Start-Rock3aFlash {
@@ -2518,7 +2586,7 @@ function Build-Window {
     $form.Add_FormClosing({
         param($closingSender, $e)
 
-        if ($Script:Jobs.Count -gt 0) {
+        if ($Script:Jobs.Count -gt 0 -or $Script:FlashRunning) {
             $r = [System.Windows.Forms.MessageBox]::Show($Script:Form,
                 "Something is still running. Closing now can leave the card half written.`r`n`r`nClose anyway?",
                 'Still working', 'YesNo', 'Warning')
