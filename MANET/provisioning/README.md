@@ -31,6 +31,8 @@ You will need:
 3. Say yes when Windows asks for permission.
 4. Follow the window.
 
+Every page, with a screenshot of each: [Windows: step by step](#windows-step-by-step).
+
 That is the whole list. **You do not need the rest of this folder and you do not need to
 install anything.** Download it wherever you like, including straight into Downloads.
 
@@ -223,8 +225,105 @@ bash linux.sh
 
 ### Windows: step by step
 
-Windows blocks PowerShell scripts by default, so there are two things to do before
-`windows.ps1` will start. This is normal Windows behavior, not a fault in the script.
+Download
+**[Flash a Radio.cmd](https://raw.githubusercontent.com/very-srs/MANET/main/MANET/provisioning/Flash%20a%20Radio.cmd)**
+and put it in a folder of its own. It is the only file you need.
+
+Double-click it. Windows shows a security warning the first time, because the file came
+from the internet: choose **Run**. Then answer **Yes** when Windows asks for
+Administrator, which writing to a card requires.
+
+On the first run it makes a `MANET Flasher` folder beside itself, moves in, and downloads
+what it needs. From then on run it from that folder. Your saved settings
+(`.mesh-configs`) and your own setup scripts (`additional-scripts`) live there too, and
+the window shows the path along its bottom edge as a link that opens it.
+
+#### 1. Pick the board
+
+![Choosing the board](../../docs/images/provisioning/flasher-1-board.png)
+
+Choose **Compute Module 4** for the current reference build. The board type may differ
+from node to node; the mesh settings on the later pages may not.
+
+#### 2. Let it check this computer
+
+![The prerequisites page with both tools found](../../docs/images/provisioning/flasher-2-prerequisites.png)
+
+`rpi-imager` writes the card, and `rpiboot` makes a CM4's eMMC appear as a disk. Anything
+missing has an **Install it** button that downloads and runs the official installer, so
+there is nothing to go and find yourself. If a tool is already on this computer somewhere
+unusual, **I have it...** lets you point at it once and the answer is remembered.
+
+Nothing is downloaded until you ask for it, and **Next** stays greyed out until what is
+needed is present.
+
+#### 3. Enter the mesh settings
+
+![The mesh settings page](../../docs/images/provisioning/flasher-3-settings.png)
+
+Every node on one mesh needs the same **mesh name** and **mesh password** or they will not
+see each other. **Generate** makes a strong one for you.
+
+Save the settings under a name with the **Save** button, then load that same name for
+every other card. Saved settings are shared with `linux.sh`, so a mesh can be built from a
+mix of Windows and Linux machines.
+
+The address range shows how many nodes and clients it has room for as you type it. What
+each setting means is under [SETUP OPTIONS](#setup-options).
+
+#### 4. Review your own setup scripts
+
+![The setup scripts page](../../docs/images/provisioning/flasher-4-scripts.png)
+
+Anything in the `additional-scripts` folder is checked here before a card is touched, and
+each file is reported as it will be treated: **will run**, **ignored**, or **BROKEN** with
+the reason. Scripts written in a Windows editor are corrected on the way in, and each
+correction is named. Nothing is flashed while a file is broken.
+
+Skip this page if the folder is empty, which is the normal case. See
+[Additional setup scripts](additional-scripts/README.md).
+
+#### 5. Choose the card
+
+![The card selection page, with the CM4 eMMC found](../../docs/images/provisioning/flasher-5-card.png)
+
+For a CM4, follow the three steps in order. The jumper goes on **before** power and USB,
+not after. **Expose the eMMC** runs `rpiboot` in its own window so you can watch it, and
+reports which disk appeared.
+
+Disks are listed with what they are connected by and what is on them, and the disk you
+booted from is never shown. **Anything that is not removable media is listed in red**:
+read the size and the label before picking one.
+
+#### 6. Read the summary back
+
+![The confirmation page](../../docs/images/provisioning/flasher-6-confirm.png)
+
+Everything that is about to be written, on one page. Nothing happens until you tick the
+box naming the disk, which is the last point at which this can be stopped.
+
+The card is then written by Raspberry Pi Imager in its own window, which takes a few
+minutes and shows its own progress.
+
+#### 7. Write down what it tells you
+
+![The finished page](../../docs/images/provisioning/flasher-7-finished.png)
+
+The generated passwords are shown here and **are not shown again**. Use **Save to a
+file...** or **Copy** before closing the window.
+
+**Flash another card** returns to the card list with the same settings, which is how to
+build several nodes for one mesh in a row.
+
+---
+
+### Windows: the console script
+
+`windows.ps1` still works and is unchanged in what it does. The window is a front end over
+it: both call the same code and produce an identical image, so use whichever suits you.
+
+Windows blocks PowerShell scripts by default, which is what `Flash a Radio.cmd` exists to
+get past, so running `windows.ps1` directly means dealing with that yourself.
 
 #### 1. Open PowerShell as Administrator
 
@@ -235,9 +334,6 @@ script refuses to run and tells you so.
 ![Choosing Run as Administrator from the Start menu](../../docs/images/provisioning/01-run-as-admin.png)
 
 #### 2. Change to the folder you downloaded
-
-Type `cd` followed by the folder containing `windows.ps1`. If you unzipped it into your
-Downloads folder that is:
 
 ```powershell
 cd C:\Users\<your-username>\Downloads
@@ -252,20 +348,13 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 Get-ChildItem -Recurse | Unblock-File
 ```
 
-**The first command asks you to confirm, and the default answer is No.** Pressing Enter
-refuses the change and the script still will not start. Type **`A`** (Yes to All) and
-press Enter.
-
-The second command clears the "came from the internet" mark that Windows puts on every
-file inside a `.zip`. Skip it and the script is still blocked, this time with a
-different error about not being digitally signed.
-
-Both apply to this window only. Nothing is changed permanently, and closing the window
-undoes them.
+`Set-ExecutionPolicy` asks you to confirm and **the default answer is No**, so pressing
+Enter leaves the script just as blocked. Answer **`A`** (Yes to All). It applies to this
+window only and is forgotten when you close it.
 
 ![Allowing scripts to run in this window](../../docs/images/provisioning/03-allow-scripts.png)
 
-#### 4. Start the flasher
+#### 4. Start it
 
 ```powershell
 .\windows.ps1
@@ -273,8 +362,7 @@ undoes them.
 
 ![Starting windows.ps1 and choosing the hardware platform](../../docs/images/provisioning/04-start-script.png)
 
-If you would rather not change the execution policy at all, this single command does the
-same job without altering any setting:
+Or, without changing any setting at all:
 
 ```powershell
 powershell.exe -ExecutionPolicy Bypass -File .\windows.ps1
@@ -292,8 +380,8 @@ runs it for you, and reports which disk appeared so you can pick the right one:
 
 #### 6. Confirm before anything is written
 
-Nothing is written to the card until you type `yes` here. Check the device and size; everything
-on that disk is erased.
+Nothing is written to the card until you type `yes` here. Check the device and size;
+everything on that disk is erased.
 
 ![The final confirmation prompt](../../docs/images/provisioning/06-final-confirmation.png)
 
@@ -305,9 +393,13 @@ The script will:
 5. Show a final confirmation before writing: **all data on the target will be erased**
 6. Flash and configure the image
 
-> **Saved configs:** The script saves configurations to a `.mesh-configs/` directory so you can re-flash nodes with the same settings quickly.
+> **Saved configs:** Configurations are saved to a `.mesh-configs/` directory so nodes can
+> be reflashed with the same settings quickly. The window and `linux.sh` read the same
+> files.
 
-> **CM4 on Linux:** When you select CM4, the script will prompt you to connect the module in USB-boot mode, then run `rpiboot` automatically and detect the newly mounted eMMC device. CM4 is flashed through the Raspberry Pi (Pi 4) image path.
+> **CM4 on Linux:** When you select CM4, the script prompts you to connect the module in
+> USB-boot mode, then runs `rpiboot` automatically and detects the newly mounted eMMC
+> device. CM4 is flashed through the Raspberry Pi (Pi 4) image path.
 
 ---
 
@@ -487,6 +579,10 @@ it to a single run. Output is written to `/var/log/manet-user-scripts.log`.
 ## TROUBLESHOOTING
 
 ### Windows: the script will not start
+
+**Everything in this section is about running `windows.ps1` by hand.**
+[`Flash a Radio.cmd`](#windows-step-by-step) exists to deal with all of it for you, so if
+you have hit one of these, that is the shorter road.
 
 **`... cannot be loaded because running scripts is disabled on this system`**
 
