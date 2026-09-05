@@ -2449,13 +2449,9 @@ function Build-Window {
     $footer.Controls.Add($rule)
 
     $Script:BtnCancel = New-Btn 'Quit' 20 30 110 34 {
-        if ($Script:Jobs.Count -gt 0) {
-            $r = [System.Windows.Forms.MessageBox]::Show($Script:Form,
-                "Something is still running. Stopping now can leave the card half written.`r`n`r`nQuit anyway?",
-                'Still working', 'YesNo', 'Warning')
-            if ($r -ne [System.Windows.Forms.DialogResult]::Yes) { return }
-            Stop-AllJobs
-        }
+        # Nothing is asked here. Closing the form raises FormClosing, which is
+        # the one place that asks, and which also covers the X in the corner.
+        # Asking in both put two dialogs in front of anyone who pressed Quit.
         $Script:Form.Close()
     }
     $footer.Controls.Add($Script:BtnCancel)
@@ -2497,12 +2493,17 @@ function Build-Window {
     $Script:Timer.Add_Tick({ Invoke-WorkerTick })
     $Script:Timer.Start()
 
+    # The single confirmation, for the Quit button and the window's own X alike.
+    # Takes the event args explicitly: $_ is not reliably the CancelEventArgs in
+    # a PowerShell event handler, and cancelling has to actually cancel.
     $form.Add_FormClosing({
+        param($closingSender, $e)
+
         if ($Script:Jobs.Count -gt 0) {
             $r = [System.Windows.Forms.MessageBox]::Show($Script:Form,
                 "Something is still running. Closing now can leave the card half written.`r`n`r`nClose anyway?",
                 'Still working', 'YesNo', 'Warning')
-            if ($r -ne [System.Windows.Forms.DialogResult]::Yes) { $_.Cancel = $true; return }
+            if ($r -ne [System.Windows.Forms.DialogResult]::Yes) { $e.Cancel = $true; return }
             Stop-AllJobs
         }
         $Script:Timer.Stop()
