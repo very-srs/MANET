@@ -847,13 +847,28 @@ for _cfg in /boot/firmware/config.txt /boot/config.txt; do
     # CM4 USB: the stock image runs USB off the 2711 built-in XHCI controller
     # via otg_mode=1 in the [cm4] section.  Comment that out and drive USB
     # through the legacy DWC2 controller in host mode instead.  The overlay
-    # line is inserted directly beneath it so it stays inside [cm4] and has no
-    # effect on a Pi 4B flashed from the same branch.
+    # line goes directly beneath it so it stays inside [cm4] and has no effect
+    # on a Pi 4B flashed from the same branch.
+    #
+    # The "is it already there?" test has to be section aware.  The stock
+    # config.txt already carries an identical dtoverlay=dwc2,dr_mode=host line
+    # under [cm5].  A file-wide grep matched that one, skipped the insert, and
+    # left the CM4 with otg_mode commented out and no dwc2 line of its own:
+    # XHCI off, DWC2 never enabled, and so no USB host controller at all.  No
+    # root hub, therefore no USB HaLow card, therefore no mesh.  Found on two
+    # nodes flashed 2026-09-04.
+    _cm4_has_dwc2=$(awk '
+        /^\[/                                              { in_cm4 = ($0 == "[cm4]"); next }
+        in_cm4 && /^[[:space:]]*dtoverlay=dwc2,dr_mode=host/ { found = 1 }
+        END                                                 { print (found ? "yes" : "no") }
+    ' "$_cfg")
+
     sed -i 's/^otg_mode=1/#otg_mode=1/' "$_cfg"
-    if grep -q '^#otg_mode=1' "$_cfg" && ! grep -q '^dtoverlay=dwc2,dr_mode=host' "$_cfg"; then
+
+    if [ "$_cm4_has_dwc2" = "no" ] && grep -q '^#otg_mode=1' "$_cfg"; then
         awk '
             /^#otg_mode=1/ && !ins {
-                print; print ""; print "dtoverlay=dwc2,dr_mode=host"; ins = 1; next
+                print; print "dtoverlay=dwc2,dr_mode=host"; ins = 1; next
             }
             { print }
         ' "$_cfg" > "$_cfg.manet-otg" && mv "$_cfg.manet-otg" "$_cfg"
