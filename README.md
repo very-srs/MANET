@@ -56,21 +56,60 @@ You will need a supported SBC and a Linux or Windows machine to flash from, and 
 See [/provisioning/README.md](MANET/provisioning/README.md) for detailed requirements and download links.
 
 ### 2. Provisioning a Node
-1.  Navigate to the `provisioning` directory.
-2.  Run the flashing script appropriate for your host OS (`linux.sh` or `windows.ps1`).
-    * **On Windows**, scripts are blocked by default and `windows.ps1` will refuse to
-      start until you allow it. Run PowerShell as Administrator and see
-      [Windows: step by step](MANET/provisioning/README.md#windows-step-by-step).
-3.  Load a saved config or follow the interactive prompts to configure:
-    * **EUD Connection**: Wired, Wireless (local AP), or Auto.
-    * **Optional Services**: MediaMTX, (Mumble is untested).
-    * **Mesh Security**: SSID and SAE Password.
-    * **Network Settings**: CIDR blocks and addressing.
-4.  *(Optional)* Place site-specific setup scripts in
-    `provisioning/additional-scripts/`. They are validated before anything is written
-    to the card, embedded in the image, and run **once as root on the node** after the
-    mesh is up: for static routes, organization SSH keys, or additional packages. See
-    [Additional setup scripts](MANET/provisioning/additional-scripts/README.md).
+
+#### On Windows: download one file
+
+Download
+**[Flash a Radio.cmd](https://raw.githubusercontent.com/very-srs/MANET/main/MANET/provisioning/Flash%20a%20Radio.cmd)**,
+put it in a folder of its own, and double-click it.
+
+That is the whole list. There is nothing else to download and nothing to install. The
+launcher fetches what it needs, and the window offers to install `rpi-imager` and, for a
+CM4, `rpiboot` if this computer does not already have them. On first run it makes itself a
+`MANET Flasher` folder beside where you put it and moves in, so your saved settings and
+your own setup scripts stay in one place.
+
+Windows shows a security warning the first time, because the file came from the internet.
+Choose **Run**, then **Yes** when Windows asks for Administrator: writing to a card needs
+it.
+
+![Choosing the board on the first page of the flasher](docs/images/provisioning/flasher-1-board.png)
+
+Six pages, in order: pick the board, let it check this computer, enter the mesh settings,
+review any setup scripts of your own, choose the card, and read the summary back before
+anything is written.
+
+Every page is shown in
+[Windows: step by step](MANET/provisioning/README.md#windows-step-by-step).
+
+> The older console script, `windows.ps1`, still works and does exactly the same thing.
+> The window is a front end over it, so both produce an identical image.
+
+#### On Linux
+
+Download or clone the `MANET/provisioning` directory, then:
+
+```bash
+cd MANET/provisioning
+sudo ./linux.sh
+```
+
+#### What you will be asked, on either host
+
+* **EUD Connection**: Wired, Wireless (local AP), or Auto.
+* **Optional Services**: MediaMTX, (Mumble is untested).
+* **Mesh Security**: SSID and SAE Password.
+* **Network Settings**: CIDR blocks and addressing.
+
+Settings can be saved under a name and loaded again for the next card, which is how you
+give every node on one mesh the same configuration. A saved configuration works in both
+flashers, so a mesh can be built from a mix of Windows and Linux machines.
+
+*(Optional)* Place site-specific setup scripts in `provisioning/additional-scripts/`. They
+are validated before anything is written to the card, embedded in the image, and run
+**once as root on the node** after the mesh is up: for static routes, organization SSH
+keys, or additional packages. See
+[Additional setup scripts](MANET/provisioning/additional-scripts/README.md).
 
 ### 3. First Boot
 Insert the storage media into the node and power it on. The `firstrun.sh` script will, over the course of a few reboots:
