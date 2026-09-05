@@ -2066,27 +2066,31 @@ function Start-Flash {
     if ($hw.Model -eq 'r3a') { Start-Rock3aFlash } else { Start-RpiFlash }
 }
 
-# Did anything actually land on the card? A Pi OS image leaves a FAT32
-# partition Windows can see, usually labelled bootfs. That is evidence; an exit
-# code is only a claim, and this one could not always be read at all.
+# Only consulted when the exit code could not be read. Answers 'written',
+# 'gone' or 'empty'.
+#
+# 'gone' is not a failure. The imager ejects the device when it has finished,
+# and a CM4 eMMC leaves the USB bus entirely when it does, so a disk that has
+# disappeared is what a successful write looks like from here.
+#
+# A drive letter is deliberately not required. Windows does not always mount
+# the boot partition, and the earlier version of this insisted on one, so a
+# card that had just been written and verified was declared empty.
 function Test-CardWasWritten {
-    param([int]$DiskNumber, [int]$Seconds = 20)
+    param([int]$DiskNumber, [int]$Seconds = 15)
 
     for ($t = 0; $t -lt $Seconds; $t++) {
         try { Update-HostStorageCache -ErrorAction SilentlyContinue } catch { }
-        try {
-            $parts = @(Get-Partition -DiskNumber $DiskNumber -ErrorAction Stop)
-            foreach ($p in $parts) {
-                if ($p.DriveLetter -and $p.DriveLetter -ne "`0") {
-                    $v = Get-Volume -DriveLetter $p.DriveLetter -ErrorAction SilentlyContinue
-                    if ($v -and ($v.FileSystemLabel -eq 'bootfs' -or $v.FileSystem -eq 'FAT32')) { return $true }
-                }
-            }
-        } catch { }
+
+        $disk = Get-Disk -Number $DiskNumber -ErrorAction SilentlyContinue
+        if (-not $disk) { return 'gone' }
+        if ($disk.PartitionStyle -and $disk.PartitionStyle -ne 'RAW') { return 'written' }
+        if (@(Get-Partition -DiskNumber $DiskNumber -ErrorAction SilentlyContinue).Count -gt 0) { return 'written' }
+
         [System.Windows.Forms.Application]::DoEvents()
         Start-Sleep -Seconds 1
     }
-    return $false
+    return 'empty'
 }
 
 function Start-RpiFlash {
@@ -2151,29 +2155,35 @@ function Start-RpiFlash {
     $Script:FlashProgress.Style = 'Blocks'
     Add-Log "Raspberry Pi Imager finished. Exit code: $(if ($null -ne $code) { $code } else { 'could not be read' })"
 
-    $Script:LblFlashStatus.Text = 'Checking the card...'
-    [System.Windows.Forms.Application]::DoEvents()
-    $written = Test-CardWasWritten -DiskNumber $Script:TARGET_DEVICE
-
     Remove-Item (Join-Path $ScriptDir 'firstrun.sh') -Force -ErrorAction SilentlyContinue
 
-    # The card is the authority. A zero exit code with nothing written is a
-    # failure, and a card with a boot partition on it is a success whatever the
-    # exit code turned out to be or whether it could be read at all.
-    if ($written) {
-        if ($null -ne $code -and $code -ne 0) {
-            Add-Log "The imager reported code $code, but the card has a boot partition on it, so the write worked."
-        }
-        Complete-Flash $true ''
+    # The exit code is the answer when there is one. The imager writes, then
+    # verifies, then ejects, and zero after all of that means it worked.
+    # Second-guessing it by looking at the card was wrong: the device has
+    # usually left the USB bus by then, so a good flash looked like an empty
+    # one.
+    if ($null -ne $code) {
+        if ($code -eq 0) { Complete-Flash $true ''; return }
+
+        # A remembered path that does not flash must not be replayed on every
+        # future run, here or on the console.
+        Remove-CachedToolPath -Key 'rpi-imager' -Reason "it did not flash the card"
+        Complete-Flash $false ("Raspberry Pi Imager exited with code $code. " +
+                               "Look at the imager window for what it said.")
         return
     }
 
-    # A remembered path that does not flash must not be replayed on every
-    # future run, here or on the console.
+    # Only here, with no exit code at all, is the card worth asking.
+    $Script:LblFlashStatus.Text = 'Checking the card...'
+    [System.Windows.Forms.Application]::DoEvents()
+    $state = Test-CardWasWritten -DiskNumber $Script:TARGET_DEVICE
+    Add-Log "Exit code unreadable; the card says: $state"
+
+    if ($state -eq 'written' -or $state -eq 'gone') { Complete-Flash $true ''; return }
+
     Remove-CachedToolPath -Key 'rpi-imager' -Reason "it did not flash the card"
-    $codeText = if ($null -ne $code) { "exit code $code" } else { "its exit code could not be read" }
-    Complete-Flash $false ("Raspberry Pi Imager finished ($codeText) but the card has no boot partition on it. " +
-                           "Look at the imager window for what it said.")
+    Complete-Flash $false ("Raspberry Pi Imager finished but its exit code could not be read, and the card " +
+                           "still has nothing on it. Look at the imager window for what it said.")
 }
 
 function Start-Rock3aFlash {
@@ -2266,7 +2276,7 @@ function Build-DonePage {
 
     $p.Controls.Add((New-Text 'The card is ready. Put it in the board and connect Ethernet with internet access.' 20 12 798 20 $Script:UI.FontBold $Script:UI.Good))
     $p.Controls.Add((New-Text ('The node sets itself up on first boot and reboots several times. It takes about ten minutes. ' +
-                               'Leave it alone until it settles.') 20 34 798 34 $Script:UI.Font $Script:UI.Text))
+                               'Leave it alone until it settles; SSH is not up for all of that.') 20 34 798 34 $Script:UI.Font $Script:UI.Text))
 
     $Script:TxtReceipt            = New-Object System.Windows.Forms.TextBox
     $Script:TxtReceipt.Location   = New-Object System.Drawing.Point((S 20), (S 76))
@@ -2317,6 +2327,12 @@ function Get-ReceiptText {
         "Every node on this mesh must be flashed with the same mesh name and"
         "mesh password, or they will not see each other. Load the saved"
         "settings of the same name for each card."
+        ""
+        "The node reboots several times over about ten minutes while it sets"
+        "itself up, and SSH is not up for all of that. If it still answers a"
+        "ping but not SSH once it has settled, put the card back in this"
+        "computer and read firstrun.log in the root of the bootfs drive: the"
+        "whole of the first-boot run is in there, and the reason will be too."
     )
     if ($Script:HARDWARE_MODEL -eq 'r3a') {
         $lines += @(
