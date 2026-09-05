@@ -743,13 +743,15 @@ function Format-ProcessArgument {
 # rather than in a console that has been hidden.
 function Start-ProcessJob {
     param([string]$Path, [string[]]$Arguments = @(), [string]$Label, [scriptblock]$OnDone,
-          $Bar = $null, $StatusLabel = $null, [hashtable]$State = $null)
+          $Bar = $null, $StatusLabel = $null, [hashtable]$State = $null,
+          [string]$WorkingDirectory = '')
 
     $job = New-Job -Kind 'process' -Status $Label -Bar $Bar -StatusLabel $StatusLabel -State $State
     $job.PrOut   = [System.IO.Path]::GetTempFileName()
     $job.PrErr   = [System.IO.Path]::GetTempFileName()
     $job.PrShown = 0
     $job.PrLabel = $Label
+    $job.Said    = New-Object System.Collections.ArrayList
     $job.Step    = $Script:ProcessStep
     $job.Finish  = $OnDone
 
@@ -773,6 +775,13 @@ function Start-ProcessJob {
         RedirectStandardError  = $job.PrErr
     }
     if ($argLine) { $splat['ArgumentList'] = $argLine }
+    # Without this the child inherits ours, which is wherever the launcher
+    # ended up. rpiboot looks for its boot files relative to the current
+    # folder, so from anywhere else it finds nothing and exits having done
+    # nothing at all.
+    if ($WorkingDirectory -and (Test-Path -LiteralPath $WorkingDirectory)) {
+        $splat['WorkingDirectory'] = $WorkingDirectory
+    }
     $job.PrProc = Start-Process @splat
 
     Add-Job $job
@@ -786,7 +795,10 @@ $Script:ProcessStep = {
     $lines = @()
     try { $lines = @(Get-Content -LiteralPath $w.PrOut -ErrorAction SilentlyContinue) } catch { }
     if ($lines.Count -gt $w.PrShown) {
-        for ($i = $w.PrShown; $i -lt $lines.Count; $i++) { Add-Log "  $($lines[$i])" }
+        for ($i = $w.PrShown; $i -lt $lines.Count; $i++) {
+            Add-Log "  $($lines[$i])"
+            if ($w.Said) { [void]$w.Said.Add($lines[$i]) }
+        }
         $w.PrShown = $lines.Count
     }
 
@@ -794,8 +806,12 @@ $Script:ProcessStep = {
         try {
             $tail = @(Get-Content -LiteralPath $w.PrOut -ErrorAction SilentlyContinue)
             for ($i = $w.PrShown; $i -lt $tail.Count; $i++) { Add-Log "  $($tail[$i])" }
+            for ($i = $w.PrShown; $i -lt $tail.Count; $i++) { if ($w.Said) { [void]$w.Said.Add($tail[$i]) } }
             $err = (Get-Content -LiteralPath $w.PrErr -Raw -ErrorAction SilentlyContinue)
-            if ($err -and $err.Trim()) { Add-Log "  $($err.Trim())" }
+            if ($err -and $err.Trim()) {
+                Add-Log "  $($err.Trim())"
+                if ($w.Said) { [void]$w.Said.Add($err.Trim()) }
+            }
         } catch { }
         Remove-Item $w.PrOut, $w.PrErr -Force -ErrorAction SilentlyContinue
         $w.ExitCode = $w.PrProc.ExitCode
@@ -1753,7 +1769,12 @@ function Update-DiskWarning {
         $Script:LblDiskWarn.ForeColor = $Script:UI.Muted
         return
     }
-    if ($d.IsRemovable) {
+    if ($d.Status -and $d.Status -ne 'Online') {
+        $Script:LblDiskWarn.Text = ("Disk $($d.Number) is $($d.Status.ToLower()). Windows has not brought it up, which is " +
+                                    "normal for a blank card or a CM4 straight out of rpiboot.`r`n" +
+                                    "It can still be written. Everything on it will be destroyed.")
+        $Script:LblDiskWarn.ForeColor = $Script:UI.Warn
+    } elseif ($d.IsRemovable) {
         $Script:LblDiskWarn.Text = "Disk $($d.Number), $($d.SizeGB) GB. Everything on it will be destroyed."
         $Script:LblDiskWarn.ForeColor = $Script:UI.Text
     } else {
@@ -1777,28 +1798,61 @@ function Invoke-RpiBootFromGui {
     $Script:LblBootState.Text = 'Running rpiboot...'
     $Script:LblBootState.ForeColor = $Script:UI.Muted
 
+    # rpiboot finds bootcode and the recovery files relative to the folder it
+    # runs in, so it has to run in its own. The Start Menu shortcut sets that;
+    # nothing else does, and started from anywhere else it exits having pushed
+    # nothing and no disk ever appears.
+    $rpibootDir = Split-Path -Parent $item.Path
+
     [void](Start-ProcessJob -Path $item.Path -Label 'rpiboot' `
+        -WorkingDirectory $rpibootDir `
         -StatusLabel $Script:LblBootState `
         -State @{ DisksBefore = @(Get-Disk | Select-Object -ExpandProperty Number) } `
         -OnDone {
         param($job, $ok, $err)
+
         # rpiboot exits non-zero when no module answers, so its code is not
-        # evidence on its own. A new disk appearing is. The wait is broken up
-        # rather than one Start-Sleep, which would freeze the window for eight
-        # seconds at the moment the user is watching it hardest.
-        for ($t = $DEVICE_WAIT; $t -gt 0; $t--) {
+        # evidence on its own. A new disk appearing is. Polled rather than
+        # waited out in one go: the eMMC can take a good while to enumerate on
+        # a slow port, and a fixed wait either gives up too early or stands
+        # there for longer than it needs to.
+        $new = @()
+        for ($t = 1; $t -le 25; $t++) {
             $Script:LblBootState.Text = "Waiting for the eMMC to appear ($t)..."
             [System.Windows.Forms.Application]::DoEvents()
             Start-Sleep -Seconds 1
+
+            # Windows caches what it knows about disks, and a card that has
+            # just arrived is exactly the case where that is stale.
+            try { Update-HostStorageCache -ErrorAction SilentlyContinue } catch { }
+
+            $after = @(Get-Disk | Select-Object -ExpandProperty Number)
+            $new   = @($after | Where-Object { $job.DisksBefore -notcontains $_ })
+            if ($new.Count -gt 0) { break }
         }
-        $after = @(Get-Disk | Select-Object -ExpandProperty Number)
-        $new   = @($after | Where-Object { $job.DisksBefore -notcontains $_ })
+
         if ($new.Count -gt 0) {
             $Script:LblBootState.Text = "The eMMC appeared as disk $($new -join ', '). Pick it below."
             $Script:LblBootState.ForeColor = $Script:UI.Good
         } else {
-            $Script:LblBootState.Text = 'No new disk appeared. Check the boot jumper and the USB cable, then try again.'
+            $Script:LblBootState.Text = 'No new disk appeared. What rpiboot said is below.'
             $Script:LblBootState.ForeColor = $Script:UI.Warn
+
+            # Its own words, rather than a guess. Without this the output goes
+            # to a log box that only exists on the flashing page, so the one
+            # thing that would explain the failure is shown to nobody.
+            $said = if ($job.Said -and $job.Said.Count -gt 0) {
+                ($job.Said | Select-Object -Last 12) -join "`r`n"
+            } else {
+                '(rpiboot printed nothing at all)'
+            }
+            [System.Windows.Forms.MessageBox]::Show($Script:Form,
+                ("rpiboot ran but no new disk appeared.`r`n`r`n" +
+                 "It was run from:`r`n$(Split-Path -Parent $Script:RPIBOOT_PATH)`r`n`r`n" +
+                 "and it said:`r`n`r`n$said`r`n`r`n" +
+                 "If the module is already mounted from an earlier attempt, it will " +
+                 "be in the list below and can simply be picked."),
+                'rpiboot', 'OK', 'Warning') | Out-Null
         }
         Update-TargetPage
     })
