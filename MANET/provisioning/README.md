@@ -29,22 +29,23 @@ You will need:
    and put it in a folder of its own.
 2. Double-click it.
 3. Say yes when Windows asks for permission.
-4. Follow the window.
+4. Follow the steps in the GUI.
 
 Every page, with a screenshot of each: [Windows: step by step](#windows-step-by-step).
 
 That is the whole list. **You do not need the rest of this folder and you do not need to
-install anything.** Download it wherever you like, including straight into Downloads.
+install anything prior to running the cmd file.**
 
 The first time it runs it makes itself a folder called **`MANET Flasher`** next to where
 you put it, moves itself in, and fetches what it needs from GitHub. Everything to do with
 flashing then lives in that one folder: the launcher, your saved settings
-(`.mesh-configs`) and your own setup scripts (`additional-scripts`). The window names
-that folder along its bottom edge, and clicking it opens it, so it is never lost.
+(`.mesh-configs`) and your own setup scripts (`additional-scripts`). The GUI displays the path to
+that folder along its bottom edge, and clicking it opens it, so it is easily found.
 
-Run it again from that folder from then on. It refreshes its downloaded files on every
-run so they cannot quietly go stale, and if it cannot reach GitHub it uses the copies it
-fetched last time and says so.
+Run it again from that folder from then on. **It refreshes its own downloaded files every
+time it starts**, so there is never anything to delete by hand to pick up a newer version.
+If it cannot reach GitHub it carries on with the copies it fetched last time and says so
+on the console before the window opens.
 
 The window then checks for `rpi-imager` and, for a CM4, `rpiboot`, and downloads and runs
 their installers for you if they are missing. Only Rock 3A needs tools it cannot fetch.
@@ -52,9 +53,18 @@ their installers for you if they are missing. Only Rock 3A needs tools it cannot
 Windows may show *"Open File - Security Warning"* the first time, because the file came
 from the internet. Choose **Run**.
 
-**If you already have a checkout**, `Flash a Radio.cmd` notices `windows.ps1` sitting
-next to it and uses the folder as it stands. It does not relocate, download, or overwrite
-anything, so work in progress is safe.
+**If you already have a checkout**, this does not apply to you. `Flash a Radio.cmd`
+tells the two cases apart by a marker file it writes into the folder it creates for
+itself:
+
+| Where you run it from | What it does |
+|-----------------------|--------------|
+| On its own, anywhere | makes a `MANET Flasher` folder, moves in, downloads what it needs |
+| The `MANET Flasher` folder it made | refreshes those downloads, every time |
+| A clone or a download of this repo | runs what is there. No relocating, no downloading, no overwriting |
+
+So a checkout is never touched and work in progress is safe, while a folder the launcher
+manages is always current. Nothing has to be deleted in either case.
 
 Why the `.cmd` exists at all: Windows will not run a `.ps1` on a double-click, and
 writing to a card needs Administrator. It deals with both, then starts

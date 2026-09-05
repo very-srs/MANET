@@ -66,15 +66,20 @@ rem on the current folder, but leaving a user sitting in System32 after a
 rem failure is its own small horror.
 cd /d "%HERE%" 2>nul
 
-rem A checkout: windows.ps1 is right there. Use it as it stands, download
-rem nothing, overwrite nothing. Somebody's work in progress may be in it.
-if exist "%HERE%windows.ps1" goto :run_here
-
-rem Our own folder, from a previous run. The name is checked as well as the
-rem marker so that deleting the marker does not nest a folder inside a folder.
+rem Our own folder, from a previous run, so refresh what is in it. This is
+rem tested BEFORE the checkout test below and that order matters: the first run
+rem downloads windows.ps1 into this folder, so a checkout test that ran first
+rem would match from the second run onwards and the files would never be
+rem refreshed again. The marker is only ever written by us. The folder name is
+rem checked too, so deleting the marker does not nest a folder inside a folder.
 if exist "%HERE%%HOMEMARK%" goto :work_here
 for %%I in ("%HERE:~0,-1%") do set "MYDIR=%%~nxI"
 if /i "%MYDIR%"=="%FOLDER%" goto :work_here
+
+rem A checkout: windows.ps1 is right there and no marker of ours beside it. Use
+rem the folder as it stands, download nothing, overwrite nothing. Somebody's
+rem work in progress may be in it.
+if exist "%HERE%windows.ps1" goto :run_here
 
 rem Nothing here but us: make a home and move into it. There is no relaunch.
 rem This process simply carries on with the new folder as its working folder,
