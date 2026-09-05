@@ -1321,6 +1321,39 @@ function Get-ShellChecker {
     }
 }
 
+# A shell that could not read what it was handed has not found a fault in the
+# operator's script, and a wrong FAIL blocks a flash. Any message of this kind
+# means the checker is unusable on this machine, whatever the reason, and the
+# built-in check takes over instead.
+#
+# This exists because Git Bash, which is MSYS2, ate the backslashes out of the
+# Windows path it was given and then reported the file as missing, and that was
+# reported as a syntax error in a script that was perfectly good. A tool nobody
+# is required to install must never be able to make things worse by being
+# there.
+function Test-ShellCheckerUnusable {
+    param([string]$Text)
+    return ($Text -match 'No such file or directory|cannot open|Permission denied|command not found|is a directory')
+}
+
+# bash prefixes its message with the path it was given, and the filename is
+# already in the column to the left of this, so it comes off. linux.sh does
+# that with `sed 's|^[^:]*: ||'`, which cannot be copied here: a Windows path
+# begins with a drive letter and a colon, so that rule would strip "C:" and
+# leave the rest of the path in the message. The path we actually passed is
+# known, so it is removed by name and anything unrecognised is left alone.
+function Format-ShellSyntaxMessage {
+    param([string]$Text, [string[]]$Paths)
+
+    $first = (($Text -split "`n")[0]).Trim()
+    foreach ($p in $Paths) {
+        if ($p -and $first.StartsWith($p + ':')) {
+            return $first.Substring($p.Length + 1).TrimStart()
+        }
+    }
+    return ($first -replace '^/[^:]*: ', '')
+}
+
 # Syntax-check a shell script if any Linux shell is reachable from Windows.
 # Returns "" for clean, the message for a syntax error, and $null when there is
 # nothing here that can check it.
@@ -1333,13 +1366,21 @@ function Test-ShellSyntax {
     # already has rpi-imager and Git installed.
     if ($Script:ShellCheckerKind -eq 'bash') {
         $bash = $Script:ShellCheckerPath
-        $r = Invoke-CheckerProcess -Path $bash -Arguments @('-n', $Path)
+
+        # Forward slashes, deliberately. Git Bash is MSYS2 and does its own
+        # command line to argv conversion, and in that conversion a backslash
+        # escapes the next character: C:\Users\me\x.tmp arrives as
+        # C:Usersmex.tmp and bash reports a file it was never given. Forward
+        # slashes carry no such meaning and Git Bash takes a drive path with
+        # them quite happily.
+        $shellPath = $Path -replace '\\', '/'
+
+        $r = Invoke-CheckerProcess -Path $bash -Arguments @('-n', $shellPath)
         if ($r.TimedOut -or $r.Failed) { return $null }
         if ($r.ExitCode -eq 0) { return "" }
-        if (Test-WslUnavailable -Text $r.Output) { return $null }
-        # bash prefixes the message with the full path; the filename is already
-        # in the column to the left of this, so strip it. Matches linux.sh.
-        return ((($r.Output -split "`n")[0]).Trim() -replace '^[^:]*: ', '')
+        if (Test-WslUnavailable -Text $r.Output)      { return $null }
+        if (Test-ShellCheckerUnusable -Text $r.Output) { return $null }
+        return (Format-ShellSyntaxMessage -Text $r.Output -Paths @($shellPath, $Path))
     }
 
     if ($Script:ShellCheckerKind -eq 'wsl') {
@@ -1351,8 +1392,9 @@ function Test-ShellSyntax {
         $r = Invoke-CheckerProcess -Path $wsl.Source -Arguments @('bash', '-n', $wslPath)
         if ($r.TimedOut -or $r.Failed) { return $null }
         if ($r.ExitCode -eq 0) { return "" }
-        if (Test-WslUnavailable -Text $r.Output) { return $null }
-        return ((($r.Output -split "`n")[0]).Trim() -replace '^[^:]*: ', '')
+        if (Test-WslUnavailable -Text $r.Output)      { return $null }
+        if (Test-ShellCheckerUnusable -Text $r.Output) { return $null }
+        return (Format-ShellSyntaxMessage -Text $r.Output -Paths @($wslPath))
     }
 
     return $null
@@ -1449,6 +1491,9 @@ except SyntaxError as e:
                         return @{ Verdict = 'OK'; Reason = "$interp, not checked (python did not answer)$note$fixed" }
                     }
                     if ($r.ExitCode -ne 0) {
+                        if (Test-ShellCheckerUnusable -Text $r.Output) {
+                            return @{ Verdict = 'OK'; Reason = "$interp, not checked (python could not read it)$note$fixed" }
+                        }
                         return @{ Verdict = 'FAIL'; Reason = "python syntax error: $($r.Output)" }
                     }
                     return @{ Verdict = 'OK'; Reason = "python syntax clean$note$fixed" }
