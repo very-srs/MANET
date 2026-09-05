@@ -884,11 +884,19 @@ function Test-Ext4Driver {
 # 29.7GB" is not enough for someone who does not already know what their
 # disks are called, and this list is about to be erased.
 function Get-CandidateDisks {
+    # Windows caches what it knows about disks, and a card that has just been
+    # plugged in is exactly the case where that is stale.
+    try { Update-HostStorageCache -ErrorAction SilentlyContinue } catch { }
+
     $bootDisk = (Get-Disk | Where-Object { $_.IsBoot -eq $true } | Select-Object -First 1).Number
 
+    # Not filtered to Online. A CM4 eMMC that rpiboot has just exposed, and any
+    # card with no partition table Windows recognises, can arrive Offline; the
+    # old filter hid it and the operator was told no card was found. It is
+    # listed with its status instead, and picking one still takes a deliberate
+    # confirmation naming the disk.
     $disks = @(Get-Disk | Where-Object {
         $_.Number -ne $bootDisk -and
-        $_.OperationalStatus -eq "Online" -and
         $_.Size -gt 0
     })
 
@@ -910,7 +918,9 @@ function Get-CandidateDisks {
                         })
         } catch { }
 
-        $bus = if ($disk.BusType) { [string]$disk.BusType } else { "Unknown" }
+        $bus    = if ($disk.BusType) { [string]$disk.BusType } else { "Unknown" }
+        $status = if ($disk.OperationalStatus) { [string]$disk.OperationalStatus } else { "Unknown" }
+        if ($status -ne 'Online') { $labels += "$($status.ToLower())" }
 
         # Removable media is what we expect: an SD card, a USB reader, or a
         # CM4 eMMC exposed by rpiboot (which enumerates as USB). Anything else
@@ -922,6 +932,7 @@ function Get-CandidateDisks {
             FriendlyName = $disk.FriendlyName
             SizeGB       = [math]::Round($disk.Size / 1GB, 2)
             BusType      = $bus
+            Status       = $status
             IsRemovable  = $removable
             IsSystem     = [bool]$disk.IsSystem
             Volumes      = $labels
