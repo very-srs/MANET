@@ -96,15 +96,15 @@ behaves exactly as it always has.
 
 | Tool | Purpose | Install |
 |------|---------|---------|
-| `rpi-imager` | Flashing Raspberry Pi boards | The window installs it for you, or [download it](https://downloads.raspberrypi.com/imager/imager_latest.exe) |
-| `rpiboot` | Mounting CM4 eMMC | The window installs it for you, or [usbboot releases](https://github.com/raspberrypi/usbboot/releases) (CM4 only) |
+| `rpi-imager` | Flashing Raspberry Pi boards | The gui installs it for you, or [download it](https://downloads.raspberrypi.com/imager/imager_latest.exe) |
+| `rpiboot` | Mounting CM4 eMMC | The gui installs it for you, or [usbboot releases](https://github.com/raspberrypi/usbboot/releases) (CM4 only) |
 | Ext2Fsd | Mounting ext4 partitions for Rock 3A | [Ext2Fsd on SourceForge](https://sourceforge.net/projects/ext2fsd/), then start its service. Rock 3A only |
 | 7-Zip | Unpacking the Armbian `.img.xz` | [7-zip.org](https://www.7-zip.org/download.html). Rock 3A only, and WSL will do instead |
 
 **Nothing here has to be installed by hand for a Raspberry Pi or a CM4.** Windows
 PowerShell and the window toolkit it draws with are part of Windows, and the window
 downloads and runs the `rpi-imager` and `rpiboot` installers for you. `Flash a Radio.cmd`
-runs on a machine with nothing on it at all.
+runs on a machine with nothing prepared for it at all.
 
 Only Rock 3A needs tools the flasher cannot fetch, and Rock 3A is not a priority platform.
 
