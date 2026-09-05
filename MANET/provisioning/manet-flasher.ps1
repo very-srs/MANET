@@ -762,8 +762,15 @@ function Start-ProcessJob {
     # rpi-imager-cli.cmd, so this is the normal case, not an edge one.
     $exe = $Path
     if ([System.IO.Path]::GetExtension($Path) -in @('.cmd', '.bat')) {
-        $exe     = $env:ComSpec
-        $argLine = "/c " + (Format-ProcessArgument $Path) + $(if ($argLine) { " $argLine" } else { "" })
+        $exe = $env:ComSpec
+        # The outer quote pair round the whole command is not decoration. With
+        # more than two quotes on the line, cmd /c strips the leading one and
+        # the last one and runs what is left, so a quoted program path plus a
+        # quoted argument becomes the program "C:\Program". Wrapping the lot in
+        # one more pair gives cmd something to strip that is not ours. This is
+        # the documented workaround in cmd /?.
+        $inner   = (Format-ProcessArgument $Path) + $(if ($argLine) { " $argLine" } else { "" })
+        $argLine = '/c "' + $inner + '"'
     }
 
     Add-Log "Running $Label"
@@ -814,7 +821,12 @@ $Script:ProcessStep = {
             }
         } catch { }
         Remove-Item $w.PrOut, $w.PrErr -Force -ErrorAction SilentlyContinue
-        $w.ExitCode = $w.PrProc.ExitCode
+        # Reading ExitCode can throw depending on how the process object was
+        # obtained, and a null there reported "exited with code ." which says
+        # nothing at all.
+        $code = $null
+        try { $code = $w.PrProc.ExitCode } catch { }
+        $w.ExitCode = if ($null -ne $code) { [int]$code } else { -1 }
         return $false
     }
     return $true
@@ -2084,7 +2096,12 @@ function Start-RpiFlash {
                 # A remembered path that does not flash must not be replayed on
                 # every future run, here or on the console.
                 Remove-CachedToolPath -Key 'rpi-imager' -Reason "it did not flash the card"
-                Complete-Flash $false "Raspberry Pi Imager exited with code $($job.ExitCode)."
+                # Its own last words, because an exit code alone rarely says
+                # which of the many things went wrong.
+                $said = if ($job.Said -and $job.Said.Count -gt 0) {
+                    '  It said: ' + (($job.Said | Where-Object { $_.Trim() } | Select-Object -Last 3) -join ' / ')
+                } else { '' }
+                Complete-Flash $false "Raspberry Pi Imager exited with code $($job.ExitCode).$said"
                 return
             }
             Complete-Flash $true ''
