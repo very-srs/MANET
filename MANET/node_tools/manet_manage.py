@@ -2578,6 +2578,8 @@ VOICE_TAB_HTML = r"""
       <div class="voice-row"><span class="k">Codec</span><span class="v" id="voice-codec">--</span></div>
       <div class="voice-row"><span class="k">QoS</span><span class="v" id="voice-qos">--</span></div>
       <div class="voice-row"><span class="k">Talkers heard</span><span class="v" id="voice-talkers">--</span></div>
+      <div class="voice-row"><span class="k">Audio path</span>
+        <span class="v"><span class="voice-dot" id="voice-health-dot"></span><span id="voice-health">--</span></span></div>
     </div>
   </div>
 
@@ -2808,6 +2810,28 @@ async function voiceSetChannel(ch) {
   }
 }
 
+// Audio-path health, from the same two flows the daemon's watchdog judges:
+// capture buffers reaching the valve and playback buffers reaching the sink.
+// Both run continuously on a healthy node whether or not anyone is talking,
+// which is exactly why the packet counters cannot be used for this.
+function voicePaintHealth(d, running) {
+  if (!running) { vDot('voice-health-dot', ''); vTxt('voice-health', '--'); return; }
+  if (d.watchdog === false) { vDot('voice-health-dot', ''); vTxt('voice-health', 'Not watched'); return; }
+  // The daemon owns the threshold (voice_watchdog_sec), so take it from the
+  // state file rather than keeping a second copy here that can disagree.
+  const lim = d.watchdog_sec || 15;
+  const bad = [];
+  // null means the flow has never run: no audio device, not a stall.
+  if (d.capture_idle === null) bad.push('no capture');
+  else if (d.capture_idle > lim) bad.push('capture stalled');
+  if (d.playback_idle === null) bad.push('no playback');
+  else if (d.playback_idle > lim) bad.push('playback stalled');
+  if (d.igmp_joined === false) bad.push('not in multicast group');
+  const stalls = d.stalls ? ' (' + d.stalls + ' stall' + (d.stalls === 1 ? '' : 's') + ')' : '';
+  vDot('voice-health-dot', bad.length ? 'warn' : 'on');
+  vTxt('voice-health', (bad.length ? bad.join(', ') : 'Flowing') + stalls);
+}
+
 async function refreshVoice() {
   let d;
   try {
@@ -2817,9 +2841,15 @@ async function refreshVoice() {
   } catch (e) { return; }
 
   const running = d.service === 'running';
+  // The daemon writes this on its way out when it has decided to rebuild the
+  // whole stack, so the tab says why for the ten seconds systemd takes rather
+  // than flipping to a bare "Stopped".
+  const restarting = d.service === 'restarting';
 
-  vDot('voice-svc-dot', running ? 'on' : '');
-  vTxt('voice-svc', running ? 'Running' : (d.stale ? 'Stopped (stale state)' : 'Stopped'));
+  vDot('voice-svc-dot', running ? 'on' : (restarting ? 'warn' : ''));
+  vTxt('voice-svc', running ? 'Running'
+        : restarting ? 'Restarting (' + (d.fault || 'stalled') + ')'
+        : (d.stale ? 'Stopped (stale state)' : 'Stopped'));
   vTxt('voice-uptime', running ? vDuration(d.uptime) : '--');
   vTxt('voice-group', d.group ? (d.group + ':' + d.port + '  (ch ' + d.channel + ')') : '--');
 
@@ -2829,6 +2859,7 @@ async function refreshVoice() {
     if (d.channel) voiceChannel = d.channel;
     voiceTgPaint(voiceChannel);
   }
+  voicePaintHealth(d, running);
   vTxt('voice-iface', d.interface);
   // Lyra adapts packing at runtime, so show frames/packet alongside the rate —
   // it is the number that actually moves, and the one that explains the

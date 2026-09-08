@@ -305,6 +305,31 @@ in normal operation, but expect a brief window after start-up before joins
 propagate, and note that a sender with no listeners is silently idle rather
 than wasting air.
 
+**A node must never hear itself, and there are two layers making sure of it.**
+`multiudpsink`'s own `loop` property is silently ignored with
+`auto-multicast=false`, because GStreamer only applies it on the code path that
+also joins the group, so loopback is cleared on the socket instead, reached
+through `used-socket`. That call is now retried for up to 5 s: the sink has no
+socket until it has started, a GStreamer state change is asynchronous, and the
+original code asked once, got `None`, logged a warning and never asked again.
+A pipeline that lost that race ran its whole life with loopback on, and what
+the operator hears then is their own voice back in the headset one jitter
+buffer late.
+
+The second layer is the guarantee: any packet arriving with this node's own
+SSRC is dropped at the `udpsrc` probe, before `rtpbin` sees it. That is safe to
+key on because the SSRC is a hash of the node's own mesh address plus a per-run
+generation byte, so no peer can collide without already sharing its IP. It also
+keeps `rx_active` honest, which matters with `voice_half_duplex=y`: without it
+a node reads its own transmission as a remote talker and refuses to key.
+`rx_loopback` in `/run/mesh-voice.json` counts these; anything other than 0
+means the socket-level suppression did not take.
+
+**Note for bench testing:** `IP_MULTICAST_LOOP` has no effect on `lo`. A node
+configured with `voice_iface=lo` will always receive its own multicast, and
+that is the loopback device, not a bug in the daemon. Verified both ways on a
+real interface, where clearing it works correctly.
+
 **Receive is conference style; transmit is still push-to-talk.** `rtpbin`
 demultiplexes by SSRC and gives every talker their own jitter buffer, and
 `audiomixer` sums them, so two people speaking at once are *mixed*, the way a
@@ -392,6 +417,23 @@ talker, and an evicted one pays the first-contact penalty again, so
 `voice_max_talkers` (default 8) is a floor rather than a fixed size: on each
 registry poll the table is raised to known nodes + 2 headroom. It never
 shrinks below the configured value and never exceeds the hard cap of 64.
+
+**An evicted talker is parked, not abandoned.** Dropping the decode branch
+leaves rtpbin's receive pad for that talker with nothing on the end of it, and
+rtpbin never takes the pad back, because `autoremove=false` keeps every source
+for the life of the daemon. So no second `pad-added` ever arrives to rebuild
+the branch. Before this was fixed, an evicted talker was inaudible **for good**,
+and silently so at both ends: they hear the mesh fine and have no idea nobody
+can hear them. It was also noisy, because pushing to the unlinked pad returned
+`not-linked`, which posted a bus error and restarted the whole receive
+pipeline, dropping everyone else's audio with it.
+
+Eviction now links the pad to a `fakesink` and puts a buffer probe on it. The
+probe is what `pad-added` would have been: it fires when that talker next
+speaks, and the branch is rebuilt. The cost is the same measured ~180 ms of
+head loss that eviction was always documented to cost, rather than permanent
+silence. `talkers_parked` in `/run/mesh-voice.json` says how many are in this
+state.
 
 **The ceiling is RAM.** A warm branch costs about **5.3 MB with lyra** and
 **0.6 MB with opus**, measured on a CM4. So the hard cap of 64 is roughly
@@ -498,8 +540,33 @@ it drops both pipelines to `NULL`, rebuilds them on the new port and returns to
 `PLAYING`, holding the PTT valve open if the operator was mid-transmission.
 Only the talk group is re-read; codec, bitrate and audio devices are start-up
 settings, because rebuilding the audio path under someone's thumb on the PTT is
-a good way to lose a transmission mid-word. If the rebuild fails the daemon
-reverts to the previous group rather than leaving the node deaf.
+a good way to lose a transmission mid-word.
+
+**Every step of the rebuild is checked, and there is a floor under it.** A
+successful `parse_launch()` is not a working pipeline: a port already bound or
+an ALSA device held by something else fails during the *state change*, so both
+pipelines are taken to `PLAYING` and then confirmed with `get_state()`. Build
+failures are caught as `Exception` rather than `GLib.Error`, because `build()`
+reaches for elements by name and hangs pad probes off them, and PyGObject
+prints an exception raised inside a signal handler and then swallows it, which
+`SIGHUP` arrives through. That combination used to leave the daemon alive with
+`self.tx` on the new pipeline, `self.rx` on the old one it had already set to
+`NULL`, and `self.valve` on elements of neither: no audio, no error in the
+journal, and a state file still saying `running`. If the new group does not
+come up the daemon reverts to the previous one; if the revert fails too it
+exits non-zero and lets systemd rebuild the whole stack, because by then there
+is nothing left in process to fall back to.
+
+**Retuning releases what it replaces.** `gst_bus_add_signal_watch()` attaches a
+GSource that holds a reference to the bus, so a bus whose watch is never
+removed is never finalised, and every `GstBus` carries a `GstPoll` control
+pipe. A retune builds two new pipelines, so a talk group change that only set
+the old ones to `NULL` leaked **four file descriptors and two live GSources
+every time**. Measured on the bench: 4 fds per retune, and dead flat once the
+watch is removed. This is exactly the case a rotary channel selector produces,
+and at the default 1024-descriptor limit an operator could reach it inside a
+single operation, after which the daemon fails to open the very sockets and
+ALSA devices voice needs.
 
 Retuning in place rather than restarting the unit is what makes a hardware
 channel selector practical; clicking through groups on a rotary switch would
@@ -627,11 +694,170 @@ start-up; see Buffering above for what that does and does not cover. For a
 PTT system where the multiplier is unicast redundancy rather than continuous
 full-duplex, 40–60 ms is usually the right trade.
 
+### Transmit shaping
+
+Nothing a headset picks up below about 80 Hz is speech: it is mains hum, wind,
+handling rumble and a boom mic rubbing on a face. Opus rolls some of that off
+inside the encoder, but removing it before the encoder is cleaner, and with
+lyra there is no equivalent to lean on. The elements used are `audiocheblimit`,
+`audiochebband` and `equalizer-3bands`, all from `gstreamer1.0-plugins-good`,
+which every voice node already installs, so none of this costs a dependency.
+
+The stage sits **ahead of `level`**, so the mic dB the web UI shows is the level
+of what is actually transmitted. Downstream of the meter, rumble would drive it
+on a node that was sending none of it, which is the opposite of what the meter
+is for. It is a self-contained block: with `voice_highpass_hz=0` and
+`voice_eq=n` the transmit pipeline is byte for byte the one that existed before
+any of this, so backing it out in the field is a config change, not a code
+change.
+
+**High-pass (on by default, 80 Hz).** Measured, identical at 16 and 48 kHz:
+
+| 20 Hz | 40 Hz | 50 Hz | 60 Hz | 80 Hz | 120 Hz | 300 Hz | 3 kHz |
+|---|---|---|---|---|---|---|---|
+| -53.2 dB | -27.2 dB | -17.9 dB | -9.6 dB | 0.0 dB | 0.0 dB | +0.2 dB | 0.0 dB |
+
+80 Hz keeps a male fundamental (~85 Hz up) and takes out everything below. Note
+60 Hz mains only sees -9.6 dB at that corner; raise the corner toward 120 if
+hum rather than rumble is the actual complaint.
+
+**Band-pass (off by default).** Setting `voice_lowpass_hz` as well switches the
+stage to `audiochebband`. Narrowing to something like 100-4000 Hz is the
+classic walkie-talkie sound: clearer and more cutting on some headsets, thin on
+others. It is a taste call that needs a field comparison, which is why it is
+off rather than defaulted. Measured at 100-4000 Hz:
+
+| 40 Hz | 60 Hz | 100 Hz | 300 Hz | 1 kHz | 4 kHz | 5 kHz | 6 kHz |
+|---|---|---|---|---|---|---|---|
+| -36.9 dB | -20.6 dB | -0.2 dB | 0.0 dB | -0.1 dB | -0.2 dB | -7.8 dB | -17.2 dB |
+
+**Pole counts are fixed, and they differ per element, because both were
+measured.** `audiocheblimit` uses 4: at 8 poles and 48 kHz, an 80 Hz corner is a
+normalised frequency of 0.0017 and the coefficients lose their precision, which
+shows up not as a bad filter but as **a flat +4.9 dB of gain at every frequency
+from 20 Hz to 3 kHz**. `audiochebband` uses 8, because it splits its poles
+between the two edges (4 gives a limp -3.5 dB at 60 Hz) and, unlike
+`audiocheblimit`, is still stable there at 48 kHz. Both use Chebyshev type 1:
+type 2 puts its ripple in the stopband and its cutoff means the stopband edge,
+so at the same setting it measures -0.3 dB at 60 Hz against type 1's -9.6 dB.
+
+**Three-band EQ (off by default).** `voice_eq=y` adds `equalizer-3bands` with
+fixed centres at 100 Hz, 1100 Hz and 11 kHz, for a formant or presence lift.
+`voice_eq_mid=3.0` measures +2.6 dB at 1-1.1 kHz, tapering to +1.5 dB at 500 Hz
+and +1.9 dB at 2 kHz, so it is a wide gentle lift rather than a peak.
+
+Two things about it are not obvious:
+
+- **The 11 kHz band is forced to 0 under lyra.** Lyra's raw rate is 16 kHz, so
+  11 kHz is above Nyquist, and the band does not politely do nothing there: at
+  16 kHz, `band2=+6` lifted a 1 kHz tone by 2.6 dB and clipped 4608 samples,
+  and `band2=-12` cut the same tone by 6 dB. The daemon zeroes it and logs why.
+- **A boost is paid for with headroom ahead of it.** The block converts back to
+  S16LE at its end, so a boost clips there and no attenuation further down the
+  pipeline can undo it. A `volume` element is inserted at the *head* of the
+  block and trimmed by the largest positive gain, which makes a boost a change
+  of tone rather than a change of level. Measured at the encoder input with a
+  0.8 full-scale tone and `voice_eq_mid=6.0`: **37,645 clipped samples with the
+  trim defeated, zero with it applied.** The cost is level, not headroom, and
+  playback has 20 dB spare.
+
+**Tuning is live.** Every property of these elements is `controllable`, so
+`systemctl reload mesh-voice` applies new cutoffs and gains to the running
+pipeline with no gap in the audio and no TFLite model reload. That matters
+because picking a voice band and a formant lift is a listening test across
+headsets, and a listening test is useless if every change costs a restart.
+Adding or removing a stage does change the pipeline's shape, and that still
+rebuilds, through the same checked path a talk group change uses.
+
+Cost is negligible: the high-pass measured 0.03% of realtime at 16 kHz on a dev
+box, so under 1% of one CM4 core even allowing 20x, and a flat equalizer is
+about a tenth of that.
+
+**`rnnoise` is not packaged.** There is no stock GStreamer element for it, and
+`webrtcdsp` (which has noise suppression, AGC and its own high-pass) lives in
+`gstreamer1.0-plugins-bad`, which nodes do not install. Either is a real
+addition rather than a config change, and neither has been measured on a CM4.
+Worth noting before reaching for one: lyra is itself a neural speech codec, so
+some of what a denoiser would do is already happening inside it.
+
+### Stall watchdog and recovery
+
+GStreamer posts a bus error when an element *fails*, and `mesh-voice.py` backs
+those off (`PIPELINE_RETRY_BASE_SEC` doubling to five minutes, identical
+repeats suppressed). It posts nothing at all when a pipeline stops moving audio
+while still sitting in `PLAYING`. A USB audio device that resets under the
+CM108B comes back as a device that accepts state changes and delivers nothing,
+and a multicast membership dropped when `br0` is rebuilt leaves `udpsrc` bound,
+`PLAYING` and deaf. In both cases the unit stays active, the web UI still says
+running, and the first anyone knows is an operator keying up into a dead radio.
+
+**The counters this runs on are not `tx_packets` and `rx_packets`.** In a
+push-to-talk system those are flat almost all the time by design: the valve is
+shut until somebody keys up, and nothing is received until somebody else does.
+A watchdog driven off them would either restart a healthy quiet node or need a
+timeout so long it never fires. Two other flows do not stop while the pipelines
+are healthy, and those are what is counted, both at about one buffer per 20 ms:
+
+- **Capture buffers arriving at the valve.** The probe sits on the valve's
+  *sink* pad, so buffers are counted before the valve drops them, and the count
+  therefore runs with the PTT released.
+- **Playback buffers reaching the sink**, fed continuously by the permanent
+  silent mixer input the receive pipeline already carries for its own reasons.
+
+Multicast membership is checked separately, by reading `/proc/net/igmp`,
+because there is no dataflow to miss: a receiver nobody is talking to looks
+exactly like one that has fallen out of the group. A membership that cannot be
+read at all counts as unknown, never as a fault. Losing the join takes out both
+directions, not just receive, since batman-adv drops multicast to a group with
+no listeners.
+
+The ladder, in order of cost:
+
+| Symptom | Response |
+|---------|----------|
+| A flow stopped for `voice_watchdog_sec` | Restart that pipeline in place |
+| Three such restarts inside 10 minutes | Exit non-zero; `Restart=on-failure` rebuilds the whole stack |
+| Talk group change fails to come up | Revert to the group that was working |
+| The revert fails too | Exit non-zero, same whole-stack rebuild |
+| The GLib main loop stops turning | `WatchdogSec=60` in the unit; systemd aborts and restarts |
+
+Exiting **is** the restart. `systemctl restart mesh-voice` from inside
+mesh-voice blocks on the very unit issuing it, and the `--no-block` form races
+the process it is killing; `Restart=on-failure` with `RestartSec=10` already
+does it properly. A fresh process is the point: new ALSA handles, new sockets,
+a new multicast join, `mesh.conf` read again and, with lyra, freshly loaded
+TFLite models. `/etc/mesh.conf` already holds the operator's talk group by the
+time a failed change gets this far, so the restarted daemon comes up on the
+group they asked for.
+
+Two things it deliberately does **not** do. It never touches a pipeline the
+bus-error backoff already owns, so a node provisioned with `voice=y` before its
+OpenVLM board was fitted keeps its quiet five-minute retry instead of being
+restarted every fifteen seconds. And it never escalates a pipeline that has
+never produced a buffer at all: that node was never working, so there is
+nothing to recover.
+
+`WatchdogSec=60` in the unit means the unit and `node_tools` must be updated
+together. A node given the unit with a `mesh-voice.py` that predates the
+keep-alive would be killed every 60 s for ever. Both ship in the same tarballs,
+so the only way to reach that state is to install one of them by hand.
+
+The VOICE tab shows all of this on an **Audio path** row, and
+`/run/mesh-voice.json` carries `capture_idle`, `playback_idle` (both `null`
+when the flow has never run, which is a missing audio device rather than a
+stall), `igmp_joined`, `stalls` and `watchdog_sec`.
+
 Config keys in `/etc/mesh.conf`:
 
 | Key | Default | Meaning |
 |-----|---------|---------|
 | `voice` | `n` | Master enable; `n` makes the daemon exit 0 immediately |
+| `voice_highpass_hz` | `80` | Transmit high-pass corner, 0-400. 0 disables the filter |
+| `voice_lowpass_hz` | `0` | Upper edge, 0-8000. Non-zero switches the stage to a band-pass. Try 4000 with a 100 Hz corner |
+| `voice_eq` | `n` | Add the three-band transmit EQ. Its gains then retune live on reload |
+| `voice_eq_low` / `voice_eq_mid` / `voice_eq_high` | `0` | EQ gain in dB at 100 / 1100 / 11000 Hz, -24 to +12. The high band is forced to 0 under lyra |
+| `voice_watchdog` | `y` | Stall watchdog, see above. `n` disables the stall judgement only, not the systemd keep-alive |
+| `voice_watchdog_sec` | `15` | Seconds without audio flowing before a pipeline counts as stalled, 5-300 |
 | `voice_iface` | `br0` | Interface for the multicast group and send socket |
 | `voice_channel` | `1` | Talk group, 1–32 |
 | `voice_ptt` | `openvlm` | `openvlm`, `always` (open mic), or anything else for receive-only |
