@@ -22,6 +22,17 @@ RestartSec=10
 # not tear down the audio path (and, with lyra, reload the TFLite models).
 ExecReload=/bin/kill -HUP $MAINPID
 TimeoutStopSec=5
+# The daemon watches its own pipelines for stalls and restarts itself when that
+# is not enough, but it cannot watch the GLib main loop it runs on. This does.
+# Setting WatchdogSec is on its own enough for systemd to pass NOTIFY_SOCKET,
+# so Type stays simple; mesh-voice.py sends WATCHDOG=1 every 5s from its health
+# tick, and systemd aborts and restarts the process if 60s pass without one.
+#
+# It follows that the unit and node_tools must be updated together. A node
+# given this unit with a mesh-voice.py that predates the keep-alive would be
+# killed every 60s for ever. Both ship in the same tarballs, so the only way to
+# get there is to install one by hand.
+WatchdogSec=60
 StandardOutput=journal
 StandardError=journal
 
