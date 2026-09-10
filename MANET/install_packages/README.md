@@ -1,18 +1,12 @@
-# MANET Install Packages
+# Install packages
 
-This directory contains the software packages required for installing and updating MANET mesh nodes.
+Two kinds of archive are published here, one pair per board.
 
-## Package Types
+`*-tools.tar.gz` updates a node that is already running. `node-update.sh`
+fetches one and extracts it. It carries the node scripts, systemd units and
+supporting files, and no kernel.
 
-There are two categories of platform specific tar archives available in this directory:
-
-### 1. Tools Archives
-* **Naming Convention:** `*-tools.tar.gz`
-* **Contents:** The most recent release of the MANET tools.
-* **Purpose:** These archives are used to update an existing mesh node to the current version of the software.
-* **Installation:** These packages are installed using the `node-update.sh` script.
-
-### 2. Install Archives
-* **Naming Convention:** `*-install.tar.gz`
-* **Contents:** Includes the MANET tools found in the tools archive, plus the system kernel and other static files required for a full system setup.
-* **Purpose:** These archives are designed for the initial installation and bootstrapping of a new node.
+`*-install.tar.gz` sets up a new node. It carries everything the tools archive
+does, plus the kernel, device trees, modules and radio firmware for that board.
+First-boot provisioning downloads it by exact filename, so these are not
+renamed.

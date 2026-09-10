@@ -1,9 +1,10 @@
 # Node tools internals
 
-Engineering record for the scripts in `MANET/node_tools`: reasoning,
+Engineering record for the node runtime: reasoning,
 measurements, and approaches that were tried and rejected. Operator-facing
 behaviour and the config keys live in
-[`MANET/node_tools/README.md`](../MANET/node_tools/README.md).
+[`MANET/node_tools/README.md`](../MANET/node_tools/README.md) and
+[`MANET/networkd-dispatcher/README.md`](../MANET/networkd-dispatcher/README.md).
 
 This file is for someone developing on the project. It is not user
 documentation.
@@ -880,7 +881,7 @@ on a solo bench node "the mesh did not come back" cannot be told apart from
 ## Updates
 
 `auto_update=` set to a true value. See
-[networkd-dispatcher/README.md](../networkd-dispatcher/README.md).
+[networkd-dispatcher/README.md](../MANET/networkd-dispatcher/README.md).
 
 **Publish in the right order.** The remote *version* is read from GitHub `main`
 while the *tarball* comes from colorado-governor.com, so the tarballs have to be
@@ -942,7 +943,7 @@ back to interpreting it, so a configuration file whose lines happen to parse as
 shell would run and report success.
 
 Flash-time validation is performed by the flashers rather than here; see
-[additional-scripts/README.md](../provisioning/additional-scripts/README.md).
+[additional-scripts/README.md](../MANET/provisioning/additional-scripts/README.md).
 The checks in this script cover the files that reach the directory without
 passing through a flasher.
 
@@ -976,3 +977,55 @@ The venv is not optional for the full run. One case,
 with an older protobuf fails that test; a system Python with a *newer* one is
 worse, because 5.x and later accept generated code every node refuses to import,
 so the test passes while proving nothing.
+
+---
+
+## Dispatcher hooks
+
+The teardown reloads networkd and reconfigures `end0` only. A full
+`systemctl restart systemd-networkd` would reconfigure `wlan0` and `wlan2` on
+the way past and kick them out of `bat0`, so it is deliberately avoided.
+
+
+## What actually runs on a node
+
+**Only the contents of `/etc/networkd-dispatcher/<state>.d/` are executed.**
+A file named for the state, sitting directly in `/etc/networkd-dispatcher/`, is
+not run by anything. Every builder stages this set through
+`stage_dispatcher_hooks` in `MANET/packaging/lib-dispatcher.sh`, for the tools
+tarball as well as the three install tarballs, so a corrected hook can be
+delivered over the air instead of needing a reflash.
+
+| Repo path | Installed as | Runs |
+|---|---|---|
+| `carrier.d/50-ethernet-detect` | `/etc/networkd-dispatcher/carrier.d/50-ethernet-detect` | **yes**, on carrier |
+| `routable.d/50-manet-uplink` | `/etc/networkd-dispatcher/routable.d/50-manet-uplink` | **yes**, on routable |
+| `off` | `…/off.d/50-gateway-disable`, and the same file again in `no-carrier.d/` and `degraded.d/` | **yes**, on all three states |
+| `carrier` | `/root/networkd-dispatcher/carrier` | no (reference copy) |
+| `off` | `/root/networkd-dispatcher/off` | no (reference copy) |
+| `no-carrier`, `degraded`, `routable` | nothing installs them | **no** |
+
+
+## Two scripts called `carrier`
+
+`carrier` and `carrier.d/50-ethernet-detect` are **different scripts** and only
+the second one runs. The reference copy calls
+`ethernet-autodetect.sh --hotplug`; the installed hook calls
+`manet-uplink-dispatch.sh carrier`. `off` is the same file in both places.
+
+`no-carrier`, `degraded` and `routable` in this directory are three-line wrappers
+around `manet-uplink-dispatch.sh <state>`. Nothing installs them, and their
+states are covered by the `.d/` entries above.
+
+
+## Adding or changing a hook
+
+Change the file under `carrier.d/`, `routable.d/`, or `off`, and rebuild the
+tarballs; every builder picks the set up from `stage_dispatcher_hooks`, so there
+is one copy of each. The two generated hooks used to be heredocs duplicated
+across the three install builders, which is how one wrong `grep` came to need
+fixing in four places and how the rpi5 copy drifted from the other two.
+
+`node-update.sh` extracts the tools tarball and nothing else; it does not run
+`daemon-reload` or `udevadm`. Dispatcher hooks need neither; networkd-dispatcher
+reads the directory on each event, so a replaced hook is live immediately.
