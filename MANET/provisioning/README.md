@@ -1,23 +1,27 @@
 # Provisioning Guide
 
-This directory contains the scripts and templates needed to flash a new mesh radio node.
+How to flash a card and bring up a new mesh radio.
 
 ---
 
-## How It Works
+## How it works
 
-The provisioning process has two phases:
+There are two phases. First you flash a card on your own computer, with
+`linux.sh` on Linux or by double-clicking **`Flash a Radio.cmd`** on Windows
+(`windows.ps1` is still there if you prefer the console). That walks you
+through picking the hardware, loading or creating a configuration, and writing
+the image. Your mesh settings are baked into the image as it is written.
 
-**Phase 1 – Flashing (on your computer):** You run `linux.sh` on Linux, or on Windows you double-click **`Flash a Radio.cmd`** to get a window (`windows.ps1` is still there if you prefer the console). The script walks you through selecting hardware, loading or creating a configuration, then prepares and flashes the OS image to your target storage device. All your mesh settings are baked into the image during this step.
-
-**Phase 2 – First Boot (on the node):** You insert the storage, connect Ethernet, and power on the node. A systemd service embedded in the image runs automatically once the network is available, downloads packages, configures the radio interfaces, and reboots into a fully functional mesh node.
+Then you put the card in the node, connect Ethernet and power it on. A service
+embedded in the image runs as soon as the network is up, downloads what it
+needs, configures the radio interfaces, and reboots into a working mesh node.
 
 ---
 
-## PREREQUISITES
+## Prerequisites
 
 You will need:
-- A supported SBC. The **Compute Module 4 (CM4) is the current reference platform**; Raspberry Pi 5 and Radxa Rock 3A are also supported, though both are currently deprioritized because of thermal limits in enclosed builds. See the main README for the hardware support table.
+- A supported SBC. The **Compute Module 4 (CM4) is the current reference platform**. Raspberry Pi 5 and Radxa Rock 3A are also supported, though both are currently deprioritized because of thermal limits in enclosed builds. See the main README for the hardware support table.
 - A Linux or Windows computer to flash from
 - An SD card or cm4 eMMC, appropriate for your hardware
 - Ethernet internet access on the node during its first boot
@@ -121,15 +125,15 @@ for it.
 >
 > A wrong answer cannot get stuck. Pointing at something that is clearly not the right
 > program (`notepad.exe`, say) is used for that run only and never saved, and a saved
-> location that then fails to flash is dropped automatically; the next run searches
+> location that then fails to flash is dropped automatically. The next run searches
 > again, and only asks you if the search still comes up empty. Deleting
 > `.mesh-configs\tool-paths.json` clears every saved location.
 
 > **CM4 on Windows:** the script runs `rpiboot` for you, the same way the Linux script
-> does. Connect the module in USB-boot mode when prompted; the script then reports which
+> does. Connect the module in USB-boot mode when prompted. The script then reports which
 > disk appeared so you can pick the right one.
 
-> **Rock 3A on Windows (password hashing):** The script pre-creates the `radio` user by writing directly to `/etc/shadow`, which requires generating a Linux SHA-512 password hash on your Windows machine. The script tries `openssl` (available if Git for Windows is installed), then WSL, then Python. If none of these are available the `radio` account will be created with a locked password; you can still log in as `root` (password `1234`) and run `passwd radio` to set it manually. Having Git for Windows installed is the easiest way to satisfy this.
+> **Rock 3A on Windows (password hashing):** The script pre-creates the `radio` user by writing directly to `/etc/shadow`, which requires generating a Linux SHA-512 password hash on your Windows machine. The script tries `openssl` (available if Git for Windows is installed), then WSL, then Python. If none of these are available the `radio` account will be created with a locked password. You can still log in as `root` (password `1234`) and run `passwd radio` to set it manually. Having Git for Windows installed is the easiest way to satisfy this.
 
 ### Files needed from this directory
 
@@ -140,62 +144,16 @@ to be present alongside them:
 - `linux.sh`: flashing script for Linux hosts
 - `windows.ps1`: flashing script for Windows hosts, and the engine the window drives
 - `manet-flasher.ps1`: the window. Dot-sources `windows.ps1` and calls its functions,
-  so it is a front end rather than a second flasher
+  so it is a front end and not a second flasher
 - `Flash a Radio.cmd`: what a Windows user double-clicks, and the only file they need.
   Asks for Administrator, gets past the execution policy, moves itself into a
   `MANET Flasher` folder if it is on its own, downloads the files below into it, and
-  opens the window. The list of what it fetches is the `FILES` line at the top of it:
-  **add to that line if the flasher ever needs another file at run time**, or a
-  standalone launcher will come up short while a checkout carries on working
+  opens the window
 - `firstrun.sh.template`: Raspberry Pi first-boot script template
 - `rock3a-provision.sh.template`: Rock 3A first-boot provisioning script template
-- `additional-scripts/`: optional; your own setup scripts, baked into the
+- `additional-scripts/`: optional. Your own setup scripts, baked into the
   image and run once on the node after setup completes. Empty is fine. See
   [additional-scripts/README.md](additional-scripts/README.md).
-
-### Template tokens
-
-`linux.sh` and `windows.ps1` bake mesh settings into the image by substituting
-`__TOKEN__` placeholders in those templates at flash time. Edit the templates
-using the tokens, not concrete values; a leftover `__MESH_SSID__` in a flashed
-image means the substitution list in the flasher was not updated.
-
-Tokens (same set on Linux and Windows):
-
-`__HARDWARE_MODEL__` `__EUD_CONNECTION__` `__LAN_AP_SSID__` `__LAN_AP_KEY__`
-`__MAX_EUDS_PER_NODE__` `__INSTALL_MEDIAMTX__` `__INSTALL_MUMBLE__`
-`__VOICE_ENABLED__` `__MESH_SSID__` `__MESH_SAE_KEY__` `__LAN_CIDR_BLOCK__`
-`__AUTO_CHANNEL__` `__RADIO_PW__` `__REGULATORY_DOMAIN__`
-`__HALOW_REGULATORY_DOMAIN__` `__ADMIN_PW__` `__AUTO_UPDATE__`
-
-Adding a new flash-time setting means the token in both templates **and** the
-`sed` / `-replace` list in both flashers. The lists live in `linux.sh`
-(`flash_rpi` and the Rock 3A path) and in `windows.ps1`, in
-`Expand-ProvisioningTokens`, which is one list covering the Raspberry Pi path,
-the Rock 3A path, and the window.
-
-The window adds no third list. It writes the same `.mesh-configs/*.conf` file
-that `windows.ps1` and `linux.sh` already share, then calls
-`Build-ProvisioningScript`, so a setting added in the two places above reaches
-it with no further work.
-
-Scripts from `additional-scripts/` are inserted **after** substitution and are
-never token-substituted, so a script containing a literal `__ADMIN_PW__`
-retains it.
-
-They are inserted at an anchor rather than appended. Both templates carry the
-line:
-
-```
-# >>> MANET_ADDITIONAL_SCRIPTS <<<
-```
-
-The flashers replace that line with the generated heredocs, and remove it when
-there is nothing to embed. An anchor is required because neither template
-executes to its final line: `firstrun.sh.template` ends with completion
-messages and `rock3a-provision.sh.template` ends with `reboot`, so an appended
-block would never run. A template with the anchor removed causes the flasher to
-abort rather than produce an image whose scripts have no effect.
 
 ### OS Images
 
@@ -203,11 +161,11 @@ abort rather than produce an image whose scripts have no effect.
 
 - **Raspberry Pi (all models, including CM4):** `rpi-imager` downloads the correct Raspberry Pi OS Lite image directly from the Raspberry Pi Foundation's servers and caches it locally.
 
-- **Rock 3A:** The script will offer to download the correct Armbian image automatically. If you already have an Armbian `.img` or `.img.xz` file locally, you can point the script to it instead. The expected image is Armbian Trixie (Debian 13) minimal for the Rock 3A. Do not use a generic ARM64 image; it must be the board-specific build.
+- **Rock 3A:** The script will offer to download the correct Armbian image automatically. If you already have an Armbian `.img` or `.img.xz` file locally, you can point the script to it instead. The expected image is Armbian Trixie (Debian 13) minimal for the Rock 3A. Do not use a generic ARM64 image. It must be the board-specific build.
 
 ---
 
-## RADIO HARDWARE
+## Radio hardware
 
 Each node carries two radios: an **MT7916** dual-band card for the 2.4/5 GHz 802.11ax mesh links, and an **802.11ah (HaLow)** radio for the long-range backhaul.
 
@@ -220,11 +178,11 @@ On the CM4 reference platform the HaLow radio can be attached two ways, and the 
 
 For the SPI path, provisioning handles the hardware setup automatically: it enables SPI, loads the `mm610x-spi` device-tree overlay, drives the Morse power/reset GPIOs (3, 7, 17) high at boot, and, for the PCIe-attached MT7916, adds the `pcie-32bit-dma` overlay. No manual `config.txt` editing is required.
 
-The Raspberry Pi 5 and Rock 3A platforms use an MM8108 USB HaLow adapter (e.g. Gateworks GW16167 or Lunpid) rather than the SPI module.
+The Raspberry Pi 5 and Rock 3A platforms use an MM8108 USB HaLow adapter (e.g. Gateworks GW16167 or Lunpid) instead of the SPI module.
 
 ---
 
-## FLASHING
+## Flashing
 
 From the `provisioning/` directory, run the script matching your host OS:
 
@@ -253,7 +211,7 @@ the window shows the path along its bottom edge as a link that opens it.
 ![Choosing the board](../../docs/images/provisioning/flasher-1-board.png)
 
 Choose **Compute Module 4** for the current reference build. The board type may differ
-from node to node; the mesh settings on the later pages may not.
+from node to node. The mesh settings on the later pages may not.
 
 #### 2. Let it check this computer
 
@@ -390,13 +348,13 @@ runs it for you, and reports which disk appeared so you can pick the right one:
 
 #### 6. Confirm before anything is written
 
-Nothing is written to the card until you type `yes` here. Check the device and size;
+Nothing is written to the card until you type `yes` here. Check the device and size.
 everything on that disk is erased.
 
 ![The final confirmation prompt](../../docs/images/provisioning/06-final-confirmation.png)
 
 The script will:
-1. Ask you to select your hardware platform (Rock 3A, Pi 5, Pi 4B, or CM4; **select CM4 for the current reference build**)
+1. Ask you to select your hardware platform (Rock 3A, Pi 5, Pi 4B, or CM4. **Select CM4 for the current reference build**)
 2. Offer to load a saved configuration or create a new one
 3. Acquire the OS image (download automatically or use a local file)
 4. Ask you to select the target device
@@ -413,7 +371,7 @@ The script will:
 
 ---
 
-## SETUP OPTIONS
+## Setup options
 
 The script will ask the following questions. These can also be loaded from a saved config file.
 
@@ -437,10 +395,10 @@ If yes, a Mumble voice server will be available on the mesh at the address endin
 
 Push-to-talk voice over the mesh, using a headset and PTT switch plugged into
 the node itself, not a browser. Defaults to **no**, because it needs an
-OpenVLM (C-Media CM108B) board fitted for the headset audio and PTT switch; a
+OpenVLM (C-Media CM108B) board fitted for the headset audio and PTT switch. A
 node without one would run the daemon to no purpose. A headset with a **dynamic**
 microphone needs an external mic preamp between the element and the OpenVLM's
-`MIC+`; the CM108B mic input is built for an electret and a dynamic element
+`MIC+`. The CM108B mic input is built for an electret and a dynamic element
 sits at or below its own noise floor.
 
 **Talk group is not asked here.** Every node is flashed on group 1, and the
@@ -471,7 +429,7 @@ The maximum number of end-user devices each node will serve. This controls DHCP 
 
 ### 9. Regulatory Domain
 
-Your country code for Wi-Fi regulatory compliance (e.g. `US`, `GB`, `AU`). A matching HaLow regulatory region is derived from this automatically; see **Radio Hardware** above for the EU band caveat (EU nodes need the USB MM8108).
+Your country code for Wi-Fi regulatory compliance (e.g. `US`, `GB`, `AU`). A matching HaLow regulatory region is derived from this automatically. See **Radio hardware** above for the EU band caveat (EU nodes need the USB MM8108).
 
 ### 10. Auto Channel Selection
 
@@ -482,7 +440,7 @@ If enabled, nodes negotiate channel selection automatically. If disabled, a fixe
 - **Radio user password.** SSH/login password for the `radio` account on the node.
 - **Admin password.** Gates the management UI at `http://<node>/manage`. Stored
   as `admin_password` in `/etc/mesh.conf`. The status page at `http://<node>/`
-  needs no password; everything that can change this node or the mesh does.
+  needs no password. Everything that can change this node or the mesh does.
 
 ### 12. Additional setup scripts (not prompted)
 
@@ -512,7 +470,7 @@ here, are in
 
 ---
 
-## FIRST BOOT
+## First boot
 
 Insert the storage media, connect Ethernet, and power on the node. What happens next depends on the hardware:
 
@@ -554,7 +512,7 @@ After the reboot the node is fully operational.
 
 ---
 
-## FINAL SETUP: `radio-setup.sh`
+## Final setup: `radio-setup.sh`
 
 `radio-setup.sh` is the last provisioning stage and does most of the node-specific radio and service configuration. The earlier stages enable it to run once on the following boot (via `radio-setup-run-once.service`, after a short delay). By then the wireless drivers have loaded and the radio interfaces actually exist, which is what this stage depends on. It is the "final mesh configuration" the boot flow above reboots into, and runs on both the Raspberry Pi / CM4 and Rock 3A platforms.
 
@@ -577,16 +535,16 @@ it to a single run. Output is written to `/var/log/manet-user-scripts.log`.
 
 ---
 
-## DEFAULT CREDENTIALS
+## Default credentials
 
 | Account | Username | Default Password |
 |---------|----------|-----------------|
 | SSH / radio user | `radio` | Set during provisioning |
-| Armbian root (Rock 3A) | `root` | `1234` (Armbian default; change this) |
+| Armbian root (Rock 3A) | `root` | `1234` (Armbian default, change this) |
 
 ---
 
-## TROUBLESHOOTING
+## Troubleshooting
 
 ### Windows: the script will not start
 
@@ -639,14 +597,14 @@ button, then *Terminal (Admin)* or *Windows PowerShell (Admin)*.
 
 **Radios misbehaving: check power first.** A HaLow card that stops answering, a Wi-Fi
 interface that will not associate, or a board that resets with nothing in the log are all
-symptoms of an inadequate supply rather than a software fault. The node reports this
+symptoms of an inadequate supply, not a software fault. The node reports this
 itself, on the SSH login banner and on the web status page:
 
 ![Under-voltage warning on the SSH login banner](../../docs/images/webui/login-banner-undervoltage.png)
 
 `manet-power-status.sh` on the node prints the same thing on demand, and
-`vcgencmd get_throttled` gives the raw value (`0x0` is clean; bit 0 set means it is
-under-volting right now; bits 16 and up mean it has happened since boot). Check the PSU
+`vcgencmd get_throttled` gives the raw value (`0x0` is clean, bit 0 set means it is
+under-volting right now, and bits 16 and up mean it has happened since boot). Check the PSU
 and the cable before suspecting the software.
 
 **Node hasn't provisioned after 10 minutes:** Check that Ethernet is connected and has a working internet connection. The provisioning script waits up to 5 minutes for connectivity before timing out.
