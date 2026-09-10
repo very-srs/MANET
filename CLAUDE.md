@@ -73,7 +73,9 @@ OS is Debian 13 (Trixie), merged-usr: modules go to `/usr/lib/modules/`.
   3.21.x only — see node_tools README). Use the venv's protoc, never
   `/usr/bin/protoc`: the distro ships 3.12.4, whose output every node rejects.
   `bash MANET/packaging/setup-dev-env.sh` builds the toolchain and proves it by
-  reproducing the committed pb2 byte for byte.
+  reproducing the committed pb2 byte for byte. `MANET/packaging/` is build
+  tooling and is deliberately not tracked in this repo; it lives on the dev
+  machine only.
 - Never extract a kernel tarball onto a live CM4 FAT32 boot partition. Power
   down and extract on a dev machine; run `depmod` after. Sequence:
   [docs/kernel-6.18-morse-port.md](docs/kernel-6.18-morse-port.md) §8.
@@ -86,7 +88,7 @@ OS is Debian 13 (Trixie), merged-usr: modules go to `/usr/lib/modules/`.
 | Runtime, web UI, voice, Alfred, elections | [MANET/node_tools/README.md](MANET/node_tools/README.md) — jump by section, do not ingest the whole file |
 | Flash / first boot / placeholders | [MANET/provisioning/README.md](MANET/provisioning/README.md) |
 | Operator's own setup scripts (flash-time hook) | [MANET/provisioning/additional-scripts/README.md](MANET/provisioning/additional-scripts/README.md) |
-| Install or tools tarball / version bump | [MANET/packaging/README.md](MANET/packaging/README.md) |
+| Runtime internals: why a thing works the way it does | [docs/node-tools-internals.md](docs/node-tools-internals.md) |
 | Lyra codec artifacts | [MANET/lyra_arm64/README.md](MANET/lyra_arm64/README.md) |
 | Prebuilt alfred / batctl / s1g wpa | [MANET/binaries_arm64/README.md](MANET/binaries_arm64/README.md) |
 | Ethernet / uplink / EUD mode switch | [MANET/networkd-dispatcher/README.md](MANET/networkd-dispatcher/README.md) |
@@ -124,5 +126,5 @@ The encoder roundtrip test needs `protobuf`, and specifically **4.21.12** — th
 version nodes run. A system python without it errors; a system python with a
 *newer* one is worse, because it accepts pb2 files nodes refuse to import.
 Check behavior on CM4.
-Packaging changes also need a tarball rebuild; see
-[MANET/packaging/README.md](MANET/packaging/README.md).
+Packaging changes also need a tarball rebuild. The builders are in the
+untracked `MANET/packaging/` on the dev machine.
