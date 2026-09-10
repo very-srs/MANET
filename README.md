@@ -1,38 +1,47 @@
 # MANET Project
 
-This repository contains a complete software suite for provisioning, configuring, and orchestrating Mobile Ad-hoc Network (MANET) nodes on Single Board Computers (SBCs).
+Software for building mesh radios out of single-board computers. Flash a card,
+power the node on, and it finds the others and starts carrying traffic for
+them. Nothing assigns it an address, picks its channel, or decides which node
+hosts the video stream. The nodes work that out between themselves, and keep
+working it out as they move and as the mesh splits and rejoins.
 
-The project transforms hardware like a Rock3a or a Raspberry Pi CM4 (recommended) into self-forming, self-healing mesh nodes using **B.A.T.M.A.N. Advanced** (Layer 2 routing) and **802.11s / 802.11ah HaLow** (Layer 1/2). It features orchestration for automatic addressing and channel selection, partition healing, jamming detection, and decentralized service elections.
+Routing is `batman-adv` at Layer 2, running the BATMAN V algorithm. The radios
+are 802.11ax/ac/n on 2.4 and 5 GHz, plus 802.11ah HaLow, which reaches much
+further at much lower rates.
 
-## Key Features
+## What the nodes do on their own
 
-* **Advanced Mesh Networking**:
-    * Utilizes `batman-adv` (BATMAN V algorithm) for Layer 2 routing.
-    * Supports standard 802.11ax/ac/n (2.4GHz/5GHz) and long-range 802.11ah (Wi-Fi HaLow).
-    * **Auto-Channel Selection (ACS)**: Decentralized scanning and election to avoid interference.
-    * **Limp Mode**: Detects jamming/interference and automatically downgrades bitrates to maintain connectivity.
-* **Zero-Conf Architecture**:
-    * **Distributed IPv4 Management**: Nodes automatically claim non-conflicting IP chunks for connected clients (EUDs).
-    * **IPv6 Support**: SLAAC for mesh infrastructure and auto-configured gateways.
-    * **EUD Support**: Connect End User Devices (phones/laptops) via Ethernet or a local WiFi Access Point.
-* **Resilience & Healing**:
-    * **Tourguide System**: Detects network partitions and "guides" isolated clusters back to the main mesh.
-    * **Quorum Checking**: Monitors network health and resets isolated nodes to a "Lobby" state to re-establish connections.
-* **Decentralized Services**:
-    * **Service Elections**: Nodes elect hosts for services like **MediaMTX** (video streaming); the best-connected node wins, measured by mean BATMAN_V throughput.
-    * **Distributed NTP**: Time synchronization across the mesh without internet access.
+Each node claims a block of IPv4 addresses for its own clients without
+colliding with any other node, and IPv6 comes up over SLAAC. Nodes scan the 2.4
+and 5 GHz bands, share what they found, and elect a channel together. Every
+node computes the same answer from the same data, so there is no coordinator to
+lose.
 
-## Repository Structure
+When a mesh splits in two, a node from each side takes turns hopping to a
+common lobby channel to look for the other half, and the smaller partition
+moves to rejoin the larger. When links start to degrade, a node says so, and
+once more than half the mesh agrees, every node drops to the legacy 802.11
+bitrates to keep the links alive.
 
-* **`provisioning/`**: Scripts and templates for flashing the OS image.
-    * `additional-scripts/`: optional site-specific setup scripts, embedded in the image and run once on the node after setup finishes.
-* **`node_tools/`**: The runtime logic for the node. Contains the scripts that run the mesh, including:
-    * `node-manager`: The core orchestrator for cooperative mesh functions.
-    * `radio-setup.sh`: Initial provisioning tool.
-    * `mesh-registry-builder.sh`: Decodes gossip data (via Alfred) to build a map of the network.
-* **`binaries_arm64/`**: Pre-compiled custom binaries for ARM64, including `alfred`, `batctl`, and a modified `wpa_supplicant` for HaLow support.
-* **`packaging/`**: Builders for the install and tools tarballs, per board.
-* **`systemd/`, `systemd-network/`, `udev/`, `networkd-dispatcher/`, `etc/`**: Units, network and hook files installed onto the node.
+Services are elected the same way. The best-connected node hosts MediaMTX for
+video, another serves time to the rest of the mesh, and if either goes away the
+next election moves the service elsewhere. Push-to-talk voice runs across the
+mesh from a headset plugged into the node, mixing everyone who is talking.
+
+## Repository layout
+
+All of it sits under `MANET/`.
+
+* `provisioning/` flashes a card. `additional-scripts/` inside it holds your
+  own setup scripts, embedded in the image and run once on the node.
+* `node_tools/` is what runs on the node: the orchestrator, the web interface,
+  voice, the registry builder, and the script that configures a fresh radio.
+* `binaries_arm64/` holds prebuilt `alfred` and `batctl`, and a
+  `wpa_supplicant` patched for HaLow.
+* `lyra_arm64/` holds the Lyra voice codec plugin and its model weights.
+* `systemd/`, `systemd-network/`, `udev/`, `networkd-dispatcher/` and `etc/`
+  are the units, network files and hooks installed onto the node.
 
 ## Supported Hardware
 
@@ -45,7 +54,7 @@ The project transforms hardware like a Rock3a or a Raspberry Pi CM4 (recommended
 
 The Pi 5 and Rock 3A both work, but they run too hot for a sealed radio
 enclosure, which is the form factor this project targets. They are no longer the
-focus of testing; the CM4 is. Expect fixes to land and be verified on CM4
+focus of testing. The CM4 is. Expect fixes to land and be verified on CM4
 first.
 
 ## Getting Started
@@ -117,9 +126,9 @@ Insert the storage media into the node and power it on. The `firstrun.sh` script
 2.  Wait for internet connectivity (via Ethernet) to download the latest kernel and tools.
 3.  Install necessary packages (`batctl`, `alfred`, `wpa_supplicant`, etc.).
 4.  Configure the radio interfaces.
-5.  Result in a fully functional mesh node
+5.  Leave a working mesh node.
 6.  Run any scripts supplied in `additional-scripts/`. Their outcome is reported on
-    the SSH login banner; a failure there does not mark the node unprovisioned.
+    the SSH login banner. A failure there does not mark the node unprovisioned.
 
 ## Web Interface
 
@@ -165,11 +174,16 @@ access-control layers, and what each management tab does.
 
 ## Connectivity Modes
 
-The nodes support connecting external devices (End User Devices) in three ways:
+A phone, laptop or camera reaches the mesh through whichever node is nearest.
+Those are End User Devices, EUDs throughout this documentation, and a node
+handles them three ways:
 
-* **Wired**: Connect via Ethernet. The node acts as a bridge or gateway depending on upstream internet access.
-* **Wireless**: The node broadcasts a local 5GHz AP (separate from the mesh backhaul) for clients to join.
-* **Auto**: Default behavior. Acts as "Wireless" unless an Ethernet device is detected, then switches priority to "Wired".
+* **Wired.** Over Ethernet. The node bridges the device onto the mesh, or acts
+  as a gateway when the cable leads to the internet.
+* **Wireless.** The node runs a 5 GHz access point, separate from the mesh
+  backhaul, for clients to join.
+* **Auto.** The default. Wireless until an Ethernet device appears, then wired
+  takes priority.
 
 ## Documentation
 * [Provisioning Guide](MANET/provisioning/README.md)
