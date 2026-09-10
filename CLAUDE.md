@@ -103,9 +103,12 @@ Useful `node_tools/README.md` sections: [Core Orchestration](MANET/node_tools/RE
 `MANET/README.md` is a feature roadmap and can disagree with the docs above;
 do not treat it as current status.
 
-USB HaLow enumerates (`lsusb` `325b:8100`) but `Driver=[none]`: module built
-without `CONFIG_MORSE_USB`. `morse_spi ... CMD63 (ret:-61)` is the SPI overlay
-probing a missing hat — unrelated. Details in the kernel port doc §6.1.
+USB HaLow (MM8108, `lsusb` `325b:8100`) is supported: the CM4 build sets
+`CONFIG_MORSE_USB=y`, so the driver binds as `morse_usb`. A card showing
+`Driver=[none]` means the module was built without that flag; confirm with
+`modinfo morse | grep alias` (want `usb:v325Bp8100*`). `morse_spi ... CMD63
+(ret:-61)` is the SPI overlay probing a missing hat, harmless and unrelated.
+Details in the kernel port doc §6.1.
 
 ## Verify
 
