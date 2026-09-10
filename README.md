@@ -176,5 +176,4 @@ The nodes support connecting external devices (End User Devices) in three ways:
 * [Additional setup scripts](MANET/provisioning/additional-scripts/README.md)
 * [Node Tools Documentation](MANET/node_tools/README.md)
 * [Binary Details](MANET/binaries_arm64/README.md)
-* [Packaging](MANET/packaging/README.md)
 * [Dispatcher Hooks](MANET/networkd-dispatcher/README.md)
