@@ -89,6 +89,7 @@ OS is Debian 13 (Trixie), merged-usr: modules go to `/usr/lib/modules/`.
 | Flash / first boot / placeholders | [MANET/provisioning/README.md](MANET/provisioning/README.md) |
 | Operator's own setup scripts (flash-time hook) | [MANET/provisioning/additional-scripts/README.md](MANET/provisioning/additional-scripts/README.md) |
 | Runtime internals: why a thing works the way it does | [docs/node-tools-internals.md](docs/node-tools-internals.md) |
+| Flasher internals: template tokens, script embedding | [docs/provisioning-internals.md](docs/provisioning-internals.md) |
 | Lyra codec artifacts | [MANET/lyra_arm64/README.md](MANET/lyra_arm64/README.md) |
 | Prebuilt alfred / batctl / s1g wpa | [MANET/binaries_arm64/README.md](MANET/binaries_arm64/README.md) |
 | Ethernet / uplink / EUD mode switch | [MANET/networkd-dispatcher/README.md](MANET/networkd-dispatcher/README.md) |

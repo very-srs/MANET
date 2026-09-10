@@ -29,7 +29,7 @@ additional-scripts/            (this directory, on your machine)
   run once, in order, logged to /var/log/manet-user-scripts.log
 ```
 
-They run after provisioning rather than during it, so the mesh, the AP, the
+They run after provisioning finishes, not during it, so the mesh, the AP, the
 radios and the network are already available to them.
 
 ## Where things land on the node
@@ -40,19 +40,19 @@ is treated as a script.
 
 | Path | What |
 |---|---|
-| `/var/lib/manet-user-scripts/` | the scripts, mode `0755`; flat, no subdirectories |
+| `/var/lib/manet-user-scripts/` | the scripts, mode `0755`, flat, no subdirectories |
 | `/var/lib/manet-user-scripts.state` | one line per completed script: `name<TAB>exit<TAB>epoch` |
-| `/var/lib/manet-user-scripts.done` | marker; its presence is what stops a re-run |
+| `/var/lib/manet-user-scripts.done` | marker. Its presence is what stops a re-run |
 | `/var/log/manet-user-scripts.log` | full output of every run, appended |
 
 Files are neither nested nor renamed: `10-site-routes.sh` in this directory
 arrives as `/var/lib/manet-user-scripts/10-site-routes.sh` byte for byte, with
 CRLF stripped and the executable bit set.
 
-Two further files implement the mechanism rather than belonging to it:
+Two further files run the mechanism and are not part of it:
 `/usr/local/bin/manet-user-scripts.sh` and
-`/etc/systemd/system/manet-user-scripts.service`. Both are delivered by the
-install tarball, not from this directory.
+`/etc/systemd/system/manet-user-scripts.service`. Both arrive with the install
+tarball, not from this directory.
 
 ## Naming and order
 
@@ -98,13 +98,13 @@ environment for a later one:
 ```
 
 A script whose shebang names an interpreter absent from the list above is still
-embedded; the flasher only reports it, since an earlier script may be
+embedded. The flasher only reports it, since an earlier script may be
 installing it.
 
 ## What is accepted
 
 Every file needs a **shebang on line 1**. A file without one is skipped with a
-notice, not treated as an error; a `README.md` or a notes file living here is
+notice, not treated as an error. A `README.md` or a notes file living here is
 fine and must never be executed on a node.
 
 The flasher checks each file **before anything is written to a card**:
@@ -133,7 +133,7 @@ wrong rejection blocks a flash, which is worse than an unchecked script. Other
 languages are accepted at their shebang and reported as `not checked`.
 
 > **Nothing has to be installed for any of this.** The full shell check needs
-> `bash` and the Python check needs `python3`; on Windows those turn up if you
+> `bash` and the Python check needs `python3`. On Windows those turn up if you
 > happen to have Git for Windows, WSL or Python already, and the report says so
 > when they do not. With neither present the flasher still checks what it can
 > without a parser: an unclosed quote and an unclosed heredoc, which are the
@@ -157,10 +157,10 @@ So a file saved every wrong way still reports, for example,
 `ok  bash -n clean [byte order mark removed, Windows line endings converted]`.
 
 **Your file is never rewritten.** The corrections are made to a copy on the way
-into the image; what is on your disk is left exactly as you saved it.
+into the image. What is on your disk is left exactly as you saved it.
 
 Two of these are not cosmetic. A byte order mark sits in front of the `#!`,
-where the kernel does not look, so the node would run nothing at all; and a
+where the kernel does not look, so the node would run nothing at all. A
 shebang ending in CR makes the kernel hunt for an interpreter whose name ends
 in a carriage return, which fails with a "not found" naming the right path.
 
@@ -192,7 +192,7 @@ tar xzf /tmp/b.tar.gz -C /opt
 
 The node confirms internet connectivity during provisioning, so a working path
 exists by the time these scripts run. Fetching also keeps the payload off the
-boot partition; see the warning below.
+boot partition. See the warning below.
 
 Embedded scripts produce a warning above **256 KB** in total and are refused
 above **2 MB**. Neither figure is a limit imposed by `rpi-imager` or FAT32. They
@@ -229,8 +229,8 @@ Scripts can also be added to a node directly by placing them in
 `/var/lib/manet-user-scripts/` and invoking `manet-user-scripts.sh`. The same
 rules apply: the shebang requirement and the `.disabled`, `.bak`, `.orig` and
 `~` suffixes are re-checked on the node, so a configuration file placed
-alongside the scripts is skipped rather than executed. Without that check it
-would be executed, because a file with no shebang does not fail to run; the
+alongside the scripts is skipped instead of executed. Without that check it
+would be executed, because a file with no shebang does not fail to run. The
 kernel refuses it and the shell falls back to interpreting it.
 
 The SSH login banner reports the outcome next to the provisioning line:
@@ -246,5 +246,5 @@ Each script gets **300 seconds** by default, then it is killed. Change it per
 node with `user_script_timeout=` in `/etc/mesh.conf`.
 
 A script interrupted by power loss part-way through the set is re-run on the
-next boot; those that already completed are not. A script that ran and failed
-is not retried automatically; use `--force` to run the set again.
+next boot. Those that already completed are not. A script that ran and failed
+is not retried automatically, so use `--force` to run the set again.
