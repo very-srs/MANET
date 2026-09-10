@@ -13,3 +13,6 @@ install_packages-orig/
 
 # Kernel build infrastructure — deliberately not in this repo
 kernel-work/
+
+# Build tooling. The published repo is the user's manual, not a dev guide.
+MANET/packaging/
