@@ -207,6 +207,17 @@ those downloads and itself every time it starts, so there is nothing to delete
 by hand to pick up a newer version. If it cannot reach GitHub it carries on
 with the copies it fetched last time and says so.
 
+`rpi-imager` has to be version 1.8 or newer. Older builds cannot put the mesh
+setup script onto the card, and they fail only after the card has been written,
+leaving something that boots stock Raspberry Pi OS and never sets itself up.
+Ubuntu 22.04 ships 1.7.2, which is too old. The script tests the one on this
+machine instead of trusting its version number, since a package built for a
+newer distribution can be new enough and still not run at all. If it is usable
+you keep it. If your package manager offers 1.8 or later you are told the
+command. Otherwise the script downloads its own copy into the `manet-flasher`
+folder and uses it from there, which costs about 110 MB and needs no root. It
+never replaces an rpi-imager that works.
+
 Next it checks this computer for the tools it uses, naming what each one is
 for. On Debian and Ubuntu it offers to install the missing ones with apt, and
 on Fedora with dnf. For pacman, zypper and apk it prints the exact command and
