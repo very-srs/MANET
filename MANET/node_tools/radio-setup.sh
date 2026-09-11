@@ -17,10 +17,11 @@ echo "=============================================================="
 echo " radio-setup starting: $(date -Is)"
 echo "=============================================================="
 
-led_error() {
-    echo heartbeat > /sys/class/leds/PWR/trigger
-}
-trap led_error ERR
+# The LEDs are driven from the recorded provisioning verdict, by
+# manet-led-status.sh, not from an ERR trap. A trap here fired on every
+# unguarded non-zero return, and this script continues past failures by design,
+# so a perfectly healthy run could finish showing the failure colour with
+# nothing to reset it.
 
 # ── Provisioning state ──────────────────────────────────────────────────────
 # A node takes several reboots and about ten minutes to provision. Nothing used
@@ -1956,8 +1957,6 @@ networkctl
 iw dev
 ip -br a
 
-echo heartbeat > /sys/class/leds/ACT/trigger
-
 if [ -f /var/lib/radio-setup-reboot-pending ]; then
     rm -f /var/lib/radio-setup-reboot-pending
     echo ""
@@ -1992,11 +1991,12 @@ if [ "$PROVISION_FAILURES" -gt 0 ]; then
     echo "=================================================="
     echo ""
     # Leave radio-setup-run-once.service enabled: the next boot retries.
-    echo heartbeat > /sys/class/leds/PWR/trigger 2>/dev/null || true
+    manet-led-status.sh 2>/dev/null || true
     exit 1
 fi
 
 provision_state complete "$(date +%s)"
+manet-led-status.sh 2>/dev/null || true
 
 if [[ "$FIRST_BOOT_UNIT_ENABLED" -eq 1 ]]; then
     echo " >> Removing radio-setup-run-once.service"
