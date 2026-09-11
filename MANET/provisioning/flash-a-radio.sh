@@ -102,8 +102,18 @@ resolve_commit() {
 }
 
 bootstrap_fetch() {
-    local ref base tmp bad=0 f
+    local ref base tmp bad=0 f absent=0
     if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
+        # Nothing can be refreshed, which only matters if something is actually
+        # missing. A folder that already has the templates is perfectly usable.
+        for f in $FLASHER_FILES; do
+            [ -f "$f" ] || absent=$((absent + 1))
+        done
+        if [ "$absent" -eq 0 ]; then
+            echo "  Neither curl nor wget is installed, so nothing could be refreshed."
+            echo "  Carrying on with the copies already here."
+            return 0
+        fi
         echo "  Neither curl nor wget is installed, so nothing can be downloaded."
         echo "  Install one of them, or download the whole provisioning folder from"
         echo "  https://github.com/$FLASHER_REPO and run this from inside it."
