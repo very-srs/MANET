@@ -87,3 +87,51 @@ else means the script is on its own and builds itself a folder. The order
 matters, because the first run downloads templates into the managed folder, so
 a checkout test running first would match from the second run onward and
 nothing would ever be refreshed again.
+
+---
+
+## Finding a usable rpi-imager
+
+The flasher passes `--first-run-script`, which is the only way the generated
+setup script reaches the card. Builds before 1.8 do not have that option and
+reject it *after* the image has been written, so the card looks flashed and
+boots a stock Raspberry Pi OS. Ubuntu 22.04 still ships 1.7.2.
+
+Capability is tested, not inferred from the version, and the test has three
+outcomes rather than two:
+
+| Outcome | How it shows |
+|---|---|
+| usable | takes the option |
+| too-old | `Unknown option 'first-run-script'` |
+| broken | dies in the dynamic loader before parsing anything |
+
+The third case is why a version comparison alone is not enough. Ubuntu 24.04's
+1.8.5 package is new enough on paper, and on a 22.04 host it will not start at
+all because it wants a newer `GLIBCXX`. A version check reads that as fine. The
+probe passes `--first-run-script` with no device, so the option parser rejects
+it long before anything could be opened.
+
+`resolve_rpi_imager` takes the first match:
+
+1. a copy in the working folder, when it is *strictly* newer than the system
+   one, on the assumption it was put there deliberately
+2. the system `rpi-imager`, when the probe says it works
+3. the package manager, when its candidate is 1.8.0 or later
+4. the AppImage from raspberrypi.org, unpacked once into the working folder
+
+Nothing replaces a working system install. That rule exists because doing it
+once, from a non-interactive test where an empty answer took the `[Y/n]`
+default, removed a working 1.9.6 from a machine and left 1.7.2 in its place.
+
+The AppImage is unpacked with `--appimage-extract` rather than run directly.
+That costs about 110 MB in the folder and avoids FUSE entirely, so no root is
+needed to set it up and no re-extraction happens per flash. Raspberry Pi
+publishes it for x86_64 only, with no arm64 `.deb` or AppImage, so an arm64
+host falls back to its distribution's package or to Flathub, which does build
+`org.raspberrypi.rpi-imager` for aarch64.
+
+No checksum is published next to the AppImage, so the download is judged by
+whether it runs and accepts the option. Two version banner formats exist and
+both print on stderr: `rpi-imager version 1.7.2` on 1.x, and
+`Raspberry Pi Imager v2.0.11.1` on 2.x.

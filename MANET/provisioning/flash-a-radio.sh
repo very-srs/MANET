@@ -237,7 +237,177 @@ fi
 # already typed a mesh key.
 
 PKG_MGR=""          # apt | dnf | pacman | zypper | apk | ""
-PKG_INSTALL=""      # the command that installs, when we can run one
+
+# --- rpi-imager ------------------------------------------------------------
+# The flasher passes --first-run-script, which is how the mesh setup script
+# reaches the card. Builds older than 1.8 do not have that option and fail with
+# "Unknown option 'first-run-script'" *after* writing the image, leaving a card
+# that boots stock Raspberry Pi OS and never becomes a mesh node. Ubuntu 22.04
+# still ships 1.7.2.
+#
+# Rather than install over whatever the system has, a usable copy is found in
+# this order and the first match wins:
+#
+#   1. a copy in this folder, if it is newer than the system one
+#   2. the system rpi-imager, if it actually works
+#   3. the package manager, when it offers 1.8 or later
+#   4. the AppImage from raspberrypi.org, extracted into this folder
+#
+# Nothing here replaces a working system install. That is deliberate: doing so
+# once cost a working machine its imager.
+RPI_IMAGER_MIN_VERSION="1.8.0"
+RPI_IMAGER_APPIMAGE_URL="https://downloads.raspberrypi.org/imager/imager_latest_amd64.AppImage"
+RPI_IMAGER_LOCAL_DIR="imager"
+RPI_IMAGER_CMD=""
+
+local_imager_path() { printf '%s' "$PWD/$RPI_IMAGER_LOCAL_DIR/squashfs-root/AppRun"; }
+
+# Two formats are in the wild and both print on stderr:
+#   rpi-imager version 1.7.2        (1.x)
+#   Raspberry Pi Imager v2.0.11.1   (2.x)
+imager_version_of() {
+    [ -x "$1" ] || return 1
+    QT_QPA_PLATFORM=offscreen "$1" --version 2>&1 \
+        | sed -n -E 's/.*[Vv]ersion[[:space:]]+([0-9][0-9.]*).*/\1/p;s/.*[[:space:]]v([0-9]+\.[0-9][0-9.]*).*/\1/p' \
+        | head -1
+}
+
+# usable | too-old | broken. Asks the binary instead of trusting a version,
+# because a package built for a newer distribution than the host dies in the
+# dynamic loader before parsing arguments, which a version check reads as fine.
+# No device is given, so nothing can be written either way.
+imager_state_of() {
+    local bin="$1" out
+    [ -n "$bin" ] && [ -x "$bin" ] || { echo broken; return; }
+    out=$(QT_QPA_PLATFORM=offscreen "$bin" --cli --first-run-script /dev/null 2>&1)
+    if printf '%s' "$out" | grep -qi "unknown option.*first-run-script"; then echo too-old; return; fi
+    if printf '%s' "$out" | grep -qiE 'error while loading shared|cannot open shared object|not found \(required by|version .GLIBC'; then
+        echo broken; return
+    fi
+    echo usable
+}
+
+version_ge() { [ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | head -1)" = "$2" ]; }
+
+pkg_candidate_version() {
+    case "$PKG_MGR" in
+        apt) apt-cache policy "$1" 2>/dev/null \
+                 | sed -n 's/^[[:space:]]*Candidate:[[:space:]]*\([0-9][0-9.]*\).*/\1/p' | head -1 ;;
+        dnf) dnf -q info "$1" 2>/dev/null \
+                 | sed -n 's/^Version[[:space:]]*:[[:space:]]*\([0-9][0-9.]*\).*/\1/p' | head -1 ;;
+        *)   echo "" ;;
+    esac
+}
+
+# Fetch the AppImage and unpack it once. Extracting costs about 110 MB here and
+# means every later flash starts immediately, with no FUSE and no root needed to
+# set it up.
+download_imager() {
+    local arch dest tmp
+    arch=$(uname -m)
+    if [ "$arch" != "x86_64" ]; then
+        echo "  Raspberry Pi publishes an AppImage for x86_64 only, and this is $arch."
+        echo "  Install rpi-imager $RPI_IMAGER_MIN_VERSION or newer from your distribution,"
+        echo "  or from Flathub: flatpak install flathub org.raspberrypi.rpi-imager"
+        return 1
+    fi
+
+    dest="$PWD/$RPI_IMAGER_LOCAL_DIR"
+    rm -rf "$dest"
+    mkdir -p "$dest" || { echo "  Could not create $dest"; return 1; }
+
+    tmp="$dest/imager.AppImage"
+    echo "  Downloading rpi-imager from raspberrypi.org (about 33 MB)..."
+    if ! fetch_url "$RPI_IMAGER_APPIMAGE_URL" "$tmp"; then
+        echo "  Download failed. Check the network, or install rpi-imager yourself."
+        rm -rf "$dest"; return 1
+    fi
+    chmod +x "$tmp"
+
+    echo "  Unpacking it..."
+    ( cd "$dest" && ./imager.AppImage --appimage-extract >/dev/null 2>&1 ) || {
+        echo "  Could not unpack the download."
+        rm -rf "$dest"; return 1
+    }
+    rm -f "$tmp"
+
+    # No checksum is published next to the AppImage, so the download is judged
+    # by whether it runs and takes the option we need.
+    if [ "$(imager_state_of "$(local_imager_path)")" != usable ]; then
+        echo "  The downloaded copy does not work on this machine."
+        rm -rf "$dest"; return 1
+    fi
+    echo "  rpi-imager $(imager_version_of "$(local_imager_path)") is ready in $dest"
+    return 0
+}
+
+# Decide which rpi-imager this run will use. Sets RPI_IMAGER_CMD.
+resolve_rpi_imager() {
+    local sys_bin sys_state="" sys_ver="" loc_bin loc_state="" loc_ver="" cand
+
+    sys_bin="$(command -v rpi-imager 2>/dev/null || true)"
+    [ -n "$sys_bin" ] && { sys_state="$(imager_state_of "$sys_bin")"; sys_ver="$(imager_version_of "$sys_bin")"; }
+
+    loc_bin="$(local_imager_path)"
+    [ -x "$loc_bin" ] && { loc_state="$(imager_state_of "$loc_bin")"; loc_ver="$(imager_version_of "$loc_bin")"; }
+
+    # A copy in this folder that is newer than the system one is assumed to be
+    # here on purpose, so it wins.
+    if [ "$loc_state" = usable ]; then
+        # Strictly newer. On a tie there is no reason to prefer our download
+        # over the copy the system maintains.
+        if [ "$sys_state" != usable ] || \
+           { [ "${loc_ver:-0}" != "${sys_ver:-0}" ] && version_ge "${loc_ver:-0}" "${sys_ver:-0}"; }; then
+            RPI_IMAGER_CMD="$loc_bin"
+            echo "Using rpi-imager ${loc_ver:-unknown} from this folder."
+            return 0
+        fi
+    fi
+
+    if [ "$sys_state" = usable ]; then
+        RPI_IMAGER_CMD="$sys_bin"
+        echo "Using the system rpi-imager ${sys_ver:-unknown}."
+        return 0
+    fi
+
+    case "$sys_state" in
+        too-old) echo "rpi-imager $sys_ver is installed but does not support --first-run-script." ;;
+        broken)  echo "rpi-imager is installed but will not run on this machine." ;;
+        *)       echo "rpi-imager is not installed." ;;
+    esac
+    echo "Without it a card gets written and then fails at the last step, leaving a"
+    echo "node that boots stock Raspberry Pi OS and never sets itself up."
+    echo
+
+    cand="$(pkg_candidate_version rpi-imager)"
+    if [ -n "$cand" ] && version_ge "$cand" "$RPI_IMAGER_MIN_VERSION"; then
+        echo "$PKG_MGR offers $cand, which is new enough:"
+        echo
+        echo "  $PKG_INSTALL rpi-imager"
+        echo
+        echo "Install that and run this again, or let this script fetch its own copy below."
+        echo
+    elif [ -n "$cand" ]; then
+        echo "The $PKG_MGR package is $cand, which is too old to use."
+    else
+        echo "${PKG_MGR:-This system} has no rpi-imager package to fall back on."
+    fi
+
+    if [ ! -t 0 ]; then
+        echo "Not running interactively, so nothing will be downloaded here."
+        return 1
+    fi
+    echo "Download rpi-imager into this folder instead? Nothing outside it is touched. [Y/n]: "
+    read -r ans
+    if [[ "$ans" =~ ^[Nn] ]]; then
+        echo "Install rpi-imager $RPI_IMAGER_MIN_VERSION or newer yourself, then run this again."
+        return 1
+    fi
+    echo
+    download_imager || return 1
+    RPI_IMAGER_CMD="$(local_imager_path)"
+    return 0
+}
 
 detect_pkg_manager() {
     if   command -v apt-get >/dev/null 2>&1; then PKG_MGR=apt;    PKG_INSTALL="sudo apt-get install -y"
@@ -310,8 +480,7 @@ required_tools_for_board() {
     echo "openssl bc lsblk findmnt sha256sum"
     case "$board" in
         r3a) echo "xz losetup" ;;
-        cm4) echo "rpi-imager rpiboot" ;;
-        *)   echo "rpi-imager" ;;
+        cm4) echo "rpiboot" ;;
     esac
 }
 
@@ -1953,7 +2122,7 @@ flash_rpi() {
         # their own __TOKEN__-looking text rewritten by the sed above.
         append_additional_scripts "$TEMP_SCRIPT_FILE"
 
-        sudo rpi-imager --cli "$PI_OS_IMAGE_URL" "$target" --first-run-script "$TEMP_SCRIPT_FILE"
+        sudo "$RPI_IMAGER_CMD" --cli "$PI_OS_IMAGE_URL" "$target" --first-run-script "$TEMP_SCRIPT_FILE"
 
         echo ""
         echo "=============================================="
@@ -1977,6 +2146,15 @@ echo "--- Checking this computer ---"
 echo
 if ! preflight_dependencies "$HARDWARE_MODEL"; then
         exit 1
+fi
+
+# rpi-imager is resolved separately, because "installed" and "usable" are not
+# the same thing for it. Rock 3A writes its image with losetup and never calls it.
+if [ "$HARDWARE_MODEL" != "r3a" ]; then
+        if ! resolve_rpi_imager; then
+                exit 1
+        fi
+        echo
 fi
 
 if [ ! -f "$TEMPLATE_FILE" ]; then
