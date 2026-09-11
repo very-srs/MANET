@@ -142,6 +142,23 @@ Insert the storage media into the node and power it on. The `firstrun.sh` script
 6.  Run any scripts supplied in `additional-scripts/`. Their outcome is reported on
     the SSH login banner. A failure there does not mark the node unprovisioned.
 
+Provisioning takes about ten minutes and reboots the node several times. Leave
+Ethernet and power connected until it settles.
+
+The two onboard LEDs tell you how it went, so you can check a node without
+logging in:
+
+| LEDs | Meaning |
+|---|---|
+| Green heartbeat, red off | Provisioned and ready |
+| Red heartbeat, green solid | Provisioning did not complete |
+| Unchanged from boot | Still working, do not disconnect |
+
+Red carries the same meaning as the SSH login banner, and the usual cause is
+Ethernet being unplugged before setup finished. Reconnect it and reboot, and
+the node retries on its own. The pattern is set on every boot from the recorded
+result, so it stays put until the status actually changes.
+
 ## Web Interface
 
 Each node serves two things on port 80, reachable from a device connected to
