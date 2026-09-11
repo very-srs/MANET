@@ -525,6 +525,18 @@ After a reboot, `provision-mesh.sh` runs once network is available. It:
 
 The full process takes a few minutes (up to ten with slow internet) and involves two reboots.
 
+The two onboard LEDs report the outcome once it is done, so you can tell a
+finished node from a failed one without logging in:
+
+| LEDs | Meaning |
+|---|---|
+| Green heartbeat, red off | Provisioned and ready |
+| Red heartbeat, green solid | Provisioning did not complete |
+
+Red means the same thing the login banner does. Reconnect Ethernet and reboot,
+and the node retries on its own. The pattern is set on every boot from the
+recorded result, so it stays put until the status actually changes.
+
 ### Rock 3A
 
 The provisioning script and all configuration are embedded directly into the Armbian image during flashing. No `rpi-imager` first-run injection is involved.

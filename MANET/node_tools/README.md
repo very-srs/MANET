@@ -628,6 +628,26 @@ use a config broadcast to write arbitrary supplicant configuration.
 
 ## Hardware Support
 
+**manet-led-status.sh**
+
+Shows the provisioning verdict on the board's two onboard LEDs, so a node can
+be read across a bench without logging in.
+
+| LEDs | Meaning |
+|---|---|
+| Green heartbeat, red off | Provisioned and ready |
+| Red heartbeat, green solid | Provisioning did not complete |
+| Unchanged from boot | Still provisioning, or nothing recorded yet |
+
+It reads the same state `manet-provision-status.sh` reports on the login
+banner, so the LEDs and the banner always agree. `manet-led-status.service`
+runs it on every boot, and `radio-setup.sh` runs it again as soon as the
+verdict is written, so the pattern survives a reboot and changes only when the
+status does.
+
+On a Raspberry Pi or CM4 these are the PWR and ACT LEDs. A board that wires
+neither is left alone.
+
 **battery-reader.py**
 
 Reads the UPS HAT battery over I²C and writes `/run/battery_status.json`. The
@@ -641,9 +661,10 @@ when idle.
 
 **led-boot.sh** / **led-info.sh**
 
-Boot-progress LED states, and an on-demand blink sequence giving the neighbor
-count. Both need libgpiod v2. The pin wiring is not finalized, so on current
-hardware they are inactive.
+Boot-progress states and an on-demand blink sequence giving the neighbor count,
+both for an external LED harness driven over GPIO. These are separate from the
+onboard LEDs above. Both need libgpiod v2, and the pin wiring is not finalized,
+so on current hardware they are inactive.
 
 ---
 

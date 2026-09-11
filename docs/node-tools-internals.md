@@ -1029,3 +1029,38 @@ fixing in four places and how the rpi5 copy drifted from the other two.
 `node-update.sh` extracts the tools tarball and nothing else; it does not run
 `daemon-reload` or `udevadm`. Dispatcher hooks need neither; networkd-dispatcher
 reads the directory on each event, so a replaced hook is live immediately.
+
+---
+
+## Onboard LEDs
+
+`radio-setup.sh` used to drive the LEDs directly from three places, and the
+result was unreliable in both directions.
+
+The success signal was `echo heartbeat > /sys/class/leds/ACT/trigger`, written
+unconditionally before the failure gate was reached, so a node that was about
+to be marked incomplete got the success colour anyway.
+
+The failure signal was worse. It came from `trap led_error ERR`, and the script
+sets neither `set -e` nor `set -E`. An ERR trap still fires without `set -e` on
+any command that returns non-zero outside a condition, and this script
+continues past failures deliberately: every apt call, and around a dozen
+top-level `grep`, `test` and `systemctl is-active` calls, can return non-zero
+on a completely healthy run. Nothing ever reset the trigger, so a good
+provision could finish heartbeating red.
+
+Neither signal survived a reboot either, because `radio-setup-run-once.service`
+disables itself, so on the next boot nothing ran and both LEDs came back on
+their kernel defaults.
+
+`manet-led-status.sh` replaces all three. It reads the recorded verdict, the
+same `STATE` and `radio-setup.done` fallback that `manet-provision-status.sh`
+reports on the login banner, so the two cannot disagree.
+`manet-led-status.service` runs it on every boot and `radio-setup.sh` runs it
+again the moment the verdict is written, which is what makes the pattern
+persist and what makes it change only when the status does.
+
+Solid and off both clear the trigger to `none` before writing `brightness`,
+because whatever the kernel had driving the LED will otherwise overwrite the
+value immediately. Brightness comes from the LED's own `max_brightness`, since
+that is 1 on some class devices and 255 on others.
