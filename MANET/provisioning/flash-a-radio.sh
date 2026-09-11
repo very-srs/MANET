@@ -43,11 +43,444 @@ ADDITIONAL_SCRIPTS_MAX_BYTES=2097152      # 2 MB
 # RPI OS image URL. rpi-imager will download and cache this.
 PI_OS_IMAGE_URL="https://downloads.raspberrypi.com/raspios_lite_arm64/images/raspios_lite_arm64-2025-10-02/2025-10-01-raspios-trixie-arm64-lite.img.xz"
 
-if ! command -v ipcalc &> /dev/null; then
-	echo "ERROR: 'ipcalc' command not found. Needed for subnet math."
-    echo "Please install it (e.g., 'sudo apt install ipcalc')."
+# --- Bootstrap -------------------------------------------------------------
+# This file is meant to work on its own. Downloaded by itself and run, it makes
+# a folder, moves in, fetches the templates it needs, and carries on. Sitting
+# in a checkout next to those templates it changes nothing and downloads
+# nothing, because somebody's work in progress may be in that folder.
+#
+# The same arrangement as "Flash a Radio.cmd" on Windows, for the same reason:
+# a user should need one file and no instructions.
+
+FLASHER_REPO="very-srs/MANET"
+FLASHER_BRANCH="main"
+FLASHER_SUBDIR="MANET/provisioning"
+FLASHER_SELF_NAME="flash-a-radio.sh"
+FLASHER_HOME="manet-flasher"
+FLASHER_HOMEMARK=".manet-flasher-home"
+# Fetched into the work folder on every run. Anything the flasher needs at run
+# time belongs on this list, or a standalone copy comes up short while a
+# checkout carries on working.
+FLASHER_FILES="firstrun.sh.template rock3a-provision.sh.template additional-scripts/README.md"
+
+SELF_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+
+# curl or wget, whichever is here. Returns non-zero on any failure so the
+# caller can fall back to whatever was fetched last time.
+fetch_url() {
+    local url="$1" dest="$2"
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsSL --connect-timeout 15 --max-time 120 -o "$dest" "$url" 2>/dev/null
+    elif command -v wget >/dev/null 2>&1; then
+        wget -q --timeout=30 --tries=2 -O "$dest" "$url" 2>/dev/null
+    else
+        return 127
+    fi
+}
+
+# A download that is really a sign-in page or a 404 body is worse than none,
+# because it lands on disk looking like the real thing.
+looks_like_a_page() {
+    local f="$1"
+    [ -s "$f" ] || return 0
+    [ "$(wc -c < "$f")" -lt 200 ] && return 0
+    head -c 1 "$f" | grep -q '<' && return 0
+    return 1
+}
+
+# raw.githubusercontent caches a branch URL for several minutes, so fetching
+# .../main/... just after a change hands back the previous file. A URL pinned
+# to a commit is a different URL whenever the content differs.
+resolve_commit() {
+    local tmp sha
+    tmp="$(mktemp)"
+    if fetch_url "https://api.github.com/repos/$FLASHER_REPO/commits/$FLASHER_BRANCH" "$tmp"; then
+        sha="$(sed -n 's/.*"sha"[[:space:]]*:[[:space:]]*"\([0-9a-f]\{40\}\)".*/\1/p' "$tmp" | head -1)"
+    fi
+    rm -f "$tmp"
+    if [ -n "${sha:-}" ]; then echo "$sha"; else echo "$FLASHER_BRANCH"; fi
+}
+
+bootstrap_fetch() {
+    local ref base tmp bad=0 f
+    if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
+        echo "  Neither curl nor wget is installed, so nothing can be downloaded."
+        echo "  Install one of them, or download the whole provisioning folder from"
+        echo "  https://github.com/$FLASHER_REPO and run this from inside it."
+        return 1
+    fi
+
+    ref="$(resolve_commit)"
+    base="https://raw.githubusercontent.com/$FLASHER_REPO/$ref/$FLASHER_SUBDIR"
+    if [ "$ref" = "$FLASHER_BRANCH" ]; then
+        echo "  could not resolve the commit, this copy may be a few minutes behind"
+    else
+        echo "  from commit ${ref:0:12}"
+    fi
+
+    # Our own copy first. Replacing a running bash script under itself corrupts
+    # the rest of the parse, so the new one is started instead of spliced in.
+    if [ -z "${MANET_FLASHER_UPDATED:-}" ]; then
+        tmp="$(mktemp)"
+        if fetch_url "$base/$FLASHER_SELF_NAME" "$tmp" && ! looks_like_a_page "$tmp"; then
+            if ! cmp -s "$tmp" "$SELF_PATH"; then
+                cat "$tmp" > "$SELF_PATH"
+                chmod +x "$SELF_PATH"
+                rm -f "$tmp"
+                echo "  updated this script, restarting"
+                echo
+                MANET_FLASHER_UPDATED=1 exec bash "$SELF_PATH" "$@"
+            fi
+        fi
+        rm -f "$tmp"
+    fi
+
+    for f in $FLASHER_FILES; do
+        mkdir -p "$(dirname "$f")"
+        tmp="$(mktemp)"
+        if fetch_url "$base/$f" "$tmp" && ! looks_like_a_page "$tmp"; then
+            mv "$tmp" "$f"
+            printf '  ok      %-34s %s bytes\n' "$f" "$(wc -c < "$f")"
+        else
+            rm -f "$tmp"
+            if [ -f "$f" ]; then
+                printf '  cached  %s\n' "$f"
+            else
+                printf '  FAILED  %s\n' "$f"
+                bad=$((bad + 1))
+            fi
+        fi
+    done
+    [ "$bad" -eq 0 ]
+}
+
+bootstrap() {
+    local here mydir target
+    here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    mydir="$(basename "$here")"
+
+    # Our own folder from a previous run. Tested before the checkout test below,
+    # and that order matters: the first run downloads templates into this
+    # folder, so a checkout test running first would match from the second run
+    # onward and nothing would ever be refreshed again.
+    if [ -f "$here/$FLASHER_HOMEMARK" ] || [ "$mydir" = "$FLASHER_HOME" ]; then
+        cd "$here"
+        echo "Getting what the flasher needs..."
+        echo
+        bootstrap_fetch "$@" || return 1
+        echo
+        return 0
+    fi
+
+    # A checkout: the templates are right here and no marker of ours beside
+    # them. Use the folder as it stands and touch nothing.
+    if [ -f "$here/$TEMPLATE_FILE" ]; then
+        cd "$here"
+        return 0
+    fi
+
+    # On our own. Make a home and move into it.
+    target="$here/$FLASHER_HOME"
+    if ! mkdir -p "$target" 2>/dev/null; then
+        target="${XDG_DATA_HOME:-$HOME/.local/share}/$FLASHER_HOME"
+        if ! mkdir -p "$target" 2>/dev/null; then
+            echo "Could not make a folder to work in, either beside this file or in"
+            echo "  ${XDG_DATA_HOME:-$HOME/.local/share}"
+            echo
+            echo "Copy this file somewhere you can write to and run it again."
+            return 1
+        fi
+    fi
+
+    if [ "$SELF_PATH" != "$target/$FLASHER_SELF_NAME" ]; then
+        cp -f "$SELF_PATH" "$target/$FLASHER_SELF_NAME"
+        chmod +x "$target/$FLASHER_SELF_NAME"
+    fi
+    : > "$target/$FLASHER_HOMEMARK"
+    cd "$target"
+    SELF_PATH="$target/$FLASHER_SELF_NAME"
+
+    echo
+    echo "Everything for the flasher now lives in"
+    echo "  $target"
+    echo "including your saved settings and your own setup scripts."
+    echo "Run it from there next time."
+    echo
+    echo "Getting what the flasher needs..."
+    echo
+    bootstrap_fetch "$@" || return 1
+    echo
+    return 0
+}
+
+if ! bootstrap "$@"; then
+    echo
+    echo "Could not get everything the flasher needs, and there is no copy here"
+    echo "from a previous run. Check this machine is online and try again."
     exit 1
 fi
+
+# --- Dependencies ----------------------------------------------------------
+# One place that knows what this script needs, which package provides it, and
+# how to install it here. The checks used to be scattered through the file, so
+# a missing tool surfaced halfway through the questions, after the operator had
+# already typed a mesh key.
+
+PKG_MGR=""          # apt | dnf | pacman | zypper | apk | ""
+PKG_INSTALL=""      # the command that installs, when we can run one
+
+detect_pkg_manager() {
+    if   command -v apt-get >/dev/null 2>&1; then PKG_MGR=apt;    PKG_INSTALL="sudo apt-get install -y"
+    elif command -v dnf     >/dev/null 2>&1; then PKG_MGR=dnf;    PKG_INSTALL="sudo dnf install -y"
+    elif command -v pacman  >/dev/null 2>&1; then PKG_MGR=pacman; PKG_INSTALL="sudo pacman -S --needed"
+    elif command -v zypper  >/dev/null 2>&1; then PKG_MGR=zypper; PKG_INSTALL="sudo zypper install -y"
+    elif command -v apk     >/dev/null 2>&1; then PKG_MGR=apk;    PKG_INSTALL="sudo apk add"
+    fi
+}
+
+# Package that provides a tool, for the manager we found. An empty answer means
+# this distro does not package it and the operator is told where to get it.
+pkg_for_tool() {
+    local tool="$1"
+    case "$tool:$PKG_MGR" in
+        openssl:*)                      echo openssl ;;
+        bc:*)                           echo bc ;;
+        curl:*)                         echo curl ;;
+        lsblk:*|findmnt:*)              echo util-linux ;;
+        sha256sum:apk)                  echo coreutils ;;
+        sha256sum:*)                    echo coreutils ;;
+        xz:apt)                         echo xz-utils ;;
+        xz:*)                           echo xz ;;
+        losetup:*)                      echo util-linux ;;
+        python3:pacman)                 echo python ;;
+        python3:*)                      echo python3 ;;
+        iconv:apt)                      echo libc-bin ;;
+        iconv:dnf)                      echo glibc-common ;;
+        iconv:*)                        echo glibc ;;
+        rpi-imager:apt)                 echo rpi-imager ;;
+        rpiboot:apt)                    echo rpiboot ;;
+        *)                              echo "" ;;
+    esac
+}
+
+# What to say when a tool has no package here.
+hint_for_tool() {
+    case "$1" in
+        rpi-imager)
+            echo "not packaged for this distro. Flatpak: flatpak install flathub org.raspberrypi.rpi-imager"
+            echo "               or download it from https://www.raspberrypi.com/software/" ;;
+        rpiboot)
+            echo "not packaged for this distro. Build it from https://github.com/raspberrypi/usbboot" ;;
+        *)  echo "install it with your distribution's package manager" ;;
+    esac
+}
+
+why_tool_is_needed() {
+    case "$1" in
+        openssl)    echo "generating the mesh SAE key" ;;
+        bc)         echo "network range arithmetic" ;;
+        curl|wget)  echo "downloading images and templates" ;;
+        lsblk)      echo "listing the storage devices to write to" ;;
+        findmnt)    echo "refusing to write to the disk you booted from" ;;
+        sha256sum)  echo "verifying a downloaded image" ;;
+        xz)         echo "decompressing the Armbian image" ;;
+        losetup)    echo "mounting the Armbian image to edit it" ;;
+        rpi-imager) echo "writing the Raspberry Pi image to the card" ;;
+        rpiboot)    echo "exposing the CM4 eMMC as a USB disk" ;;
+        python3)    echo "syntax-checking your own Python setup scripts" ;;
+        iconv)      echo "converting setup scripts saved as UTF-16" ;;
+        *)          echo "" ;;
+    esac
+}
+
+# Tools this run actually needs, given the board. Optional ones are checked
+# separately and never block a flash.
+required_tools_for_board() {
+    local board="$1"
+    echo "openssl bc lsblk findmnt sha256sum"
+    case "$board" in
+        r3a) echo "xz losetup" ;;
+        cm4) echo "rpi-imager rpiboot" ;;
+        *)   echo "rpi-imager" ;;
+    esac
+}
+
+preflight_dependencies() {
+    local board="$1"
+    local tool missing=() optional_missing=() pkgs=() unpackaged=()
+
+    detect_pkg_manager
+
+    for tool in $(required_tools_for_board "$board"); do
+        command -v "$tool" >/dev/null 2>&1 || missing+=("$tool")
+    done
+    # curl or wget, either will do
+    if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
+        missing+=("curl")
+    fi
+    for tool in python3 iconv; do
+        command -v "$tool" >/dev/null 2>&1 || optional_missing+=("$tool")
+    done
+
+    if [ ${#missing[@]} -eq 0 ]; then
+        echo "All required tools are present."
+        if [ ${#optional_missing[@]} -gt 0 ]; then
+            echo
+            echo "Optional, and only used if you supply your own setup scripts:"
+            for tool in "${optional_missing[@]}"; do
+                printf '  %-12s %s\n' "$tool" "$(why_tool_is_needed "$tool")"
+            done
+        fi
+        echo
+        return 0
+    fi
+
+    echo "These are missing:"
+    echo
+    for tool in "${missing[@]}"; do
+        printf '  %-12s %s\n' "$tool" "$(why_tool_is_needed "$tool")"
+    done
+    echo
+
+    for tool in "${missing[@]}"; do
+        local pkg
+        pkg="$(pkg_for_tool "$tool")"
+        if [ -n "$pkg" ]; then pkgs+=("$pkg"); else unpackaged+=("$tool"); fi
+    done
+
+    # Nothing we can install: say what to do and stop.
+    if [ -z "$PKG_MGR" ]; then
+        echo "No package manager this script knows was found, so install these yourself:"
+        echo
+        for tool in "${missing[@]}"; do
+            printf '  %-12s %s\n' "$tool" "$(hint_for_tool "$tool")"
+        done
+        echo
+        return 1
+    fi
+
+    # What this distro cannot supply is said before the install offer, so the
+    # whole picture arrives in one pass. Reporting it afterwards meant a Fedora
+    # or Arch operator ran the install, saw it succeed, and only then found out
+    # that rpi-imager was never in it.
+    if [ ${#unpackaged[@]} -gt 0 ]; then
+        echo "Not available from $PKG_MGR, so get these yourself:"
+        echo
+        for tool in "${unpackaged[@]}"; do
+            printf '  %-12s %s\n' "$tool" "$(hint_for_tool "$tool")"
+        done
+        echo
+    fi
+
+    if [ ${#pkgs[@]} -gt 0 ]; then
+        # Deduplicate: util-linux covers several of these on its own.
+        local uniq_pkgs
+        uniq_pkgs=$(printf '%s\n' "${pkgs[@]}" | sort -u | tr '\n' ' ')
+        uniq_pkgs=${uniq_pkgs% }
+        if [ ${#unpackaged[@]} -gt 0 ]; then
+            echo "The rest this system can install:"
+        else
+            echo "On this system that is:"
+        fi
+        echo
+        echo "  $PKG_INSTALL $uniq_pkgs"
+        echo
+        case "$PKG_MGR" in
+            apt|dnf)
+                # Without a terminal there is nobody to answer, and an empty
+                # read would be taken as the [Y/n] default and install packages
+                # nobody agreed to.
+                if [ ! -t 0 ]; then
+                    echo "Not running interactively, so nothing will be installed here."
+                    echo "Run the command above, then start this script again."
+                    return 1
+                fi
+                read -p "Run that now? [Y/n]: " ans
+                if [[ ! "$ans" =~ ^[Nn] ]]; then
+                    echo
+                    if [ "$PKG_MGR" = apt ]; then sudo apt-get update || true; fi
+                    # shellcheck disable=SC2086
+                    if ! $PKG_INSTALL $uniq_pkgs; then
+                        echo
+                        echo "That did not complete. Fix the errors above and run this script again."
+                        return 1
+                    fi
+                    echo
+                else
+                    echo "Run it yourself, then start this script again."
+                    return 1
+                fi
+                ;;
+            *)
+                # pacman, zypper and apk are recognised but not driven. The
+                # command above is the whole answer, and running someone's
+                # package manager for them on a distro this is not tested on
+                # is not a favour.
+                echo "Run that, then start this script again."
+                return 1
+                ;;
+        esac
+    fi
+
+    if [ ${#unpackaged[@]} -gt 0 ]; then
+        echo "Install the tools above, then run this script again."
+        echo
+        return 1
+    fi
+
+    # Re-check, because a package can install and still not put the tool on PATH.
+    local still=()
+    for tool in "${missing[@]}"; do
+        command -v "$tool" >/dev/null 2>&1 || still+=("$tool")
+    done
+    if [ ${#still[@]} -gt 0 ]; then
+        echo "Installed, but these are still not on PATH: ${still[*]}"
+        echo "Open a new shell and try again."
+        return 1
+    fi
+
+    echo "All required tools are present."
+    echo
+    return 0
+}
+
+
+# Subnet math, done here rather than by shelling out to ipcalc. Debian's
+# ipcalc and Fedora's are different programs: the Debian one prints the
+# HostMin:/HostMax: lines parsed below, the Fedora one prints NETWORK=/NETMASK=
+# and nothing this understands. Installing "ipcalc" on the wrong distro would
+# therefore satisfy the dependency check and still produce no usable output.
+# Same math as node_tools/manet-ipcalc.sh, which exists on the node for the
+# same reason.
+ipcalc_fields() {
+    local cidr="$1" ip prefix a b c d ip_int mask net bcast
+
+    ip=${cidr%/*}
+    prefix=${cidr#*/}
+    [[ "$ip" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]] || return 1
+    [[ "$prefix" =~ ^[0-9]+$ ]] || return 1
+    [ "$prefix" -ge 1 ] && [ "$prefix" -le 30 ] || return 1
+
+    IFS=. read -r a b c d <<< "$ip"
+    [ "$a" -le 255 ] && [ "$b" -le 255 ] && [ "$c" -le 255 ] && [ "$d" -le 255 ] || return 1
+
+    _int_to_ip() {
+        echo "$(( ($1 >> 24) & 255 )).$(( ($1 >> 16) & 255 )).$(( ($1 >> 8) & 255 )).$(( $1 & 255 ))"
+    }
+
+    ip_int=$(( (a << 24) + (b << 16) + (c << 8) + d ))
+    mask=$(( (0xFFFFFFFF << (32 - prefix)) & 0xFFFFFFFF ))
+    net=$(( ip_int & mask ))
+    bcast=$(( net | (~mask & 0xFFFFFFFF) ))
+
+    echo "Address:   $ip"
+    echo "Netmask:   $(_int_to_ip "$mask") = $prefix"
+    echo "Network:   $(_int_to_ip "$net")/$prefix"
+    echo "HostMin:   $(_int_to_ip $((net + 1)))"
+    echo "HostMax:   $(_int_to_ip $((bcast - 1)))"
+    echo "Broadcast: $(_int_to_ip "$bcast")"
+    echo "Hosts/Net: $(( bcast - net - 1 ))"
+}
 
 # --- Helper Functions ---
 # Function to validate regulatory domain
@@ -112,7 +545,7 @@ calculate_capacity() {
         local max_euds=$2
 
         # Calculate total usable IPs
-        local CALC_OUTPUT=$(ipcalc "$cidr" 2>/dev/null)
+        local CALC_OUTPUT=$(ipcalc_fields "$cidr" 2>/dev/null)
         if [ -z "$CALC_OUTPUT" ]; then
                 echo "0"
                 return 1
@@ -773,16 +1206,6 @@ select_hardware() {
                 case $hw_choice in
                         "Raxda Rock 3A" )
                                HARDWARE_MODEL="r3a"
-                               if ! command -v losetup &> /dev/null; then
-                                echo "ERROR: 'losetup' command not found."
-                                echo "Cannot customize disk image without losetup"
-                                exit 1
-                               fi
-                               if ! command -v xz &> /dev/null; then
-                                echo "ERROR: 'xz' command not found. Needed for decompressing Armbian images."
-                                echo "Please install it (e.g., 'sudo apt install xz-utils')."
-                                exit 1
-                               fi
                                break
                                ;;
                         "Raspberry Pi 5" )
@@ -795,11 +1218,6 @@ select_hardware() {
                                ;;
                         "Compute Module 4 (CM4)" )
                                echo "Compute Module 4 selected."
-                               if ! command -v rpiboot &> /dev/null; then
-                                echo "ERROR: 'rpiboot' command not found."
-                                echo "Please install it (e.g., 'sudo apt install rpiboot') and re-run."
-                                exit 1
-                               fi
                                HARDWARE_MODEL="cm4"
                                break
                                ;;
@@ -1544,37 +1962,15 @@ flash_rpi() {
 select_hardware
 
 # --- 1. Check Dependencies ---
-if [ "$HARDWARE_MODEL" != "r3a" ]; then
-        if ! command -v rpi-imager &> /dev/null; then
-                echo "ERROR: 'rpi-imager' command not found. Please install it."
-                exit 1
-        fi
+echo
+echo "--- Checking this computer ---"
+echo
+if ! preflight_dependencies "$HARDWARE_MODEL"; then
+        exit 1
 fi
 
 if [ ! -f "$TEMPLATE_FILE" ]; then
         echo "ERROR: Template file '$TEMPLATE_FILE' not found."
-        exit 1
-fi
-if ! command -v openssl &> /dev/null; then
-        echo "ERROR: 'openssl' command not found. Needed for generating SAE key."
-        exit 1
-fi
-if ! command -v bc &> /dev/null; then
-        echo "ERROR: 'bc' command not found. Needed for network calculation."
-        echo "Please install it (e.g., 'sudo apt install bc')."
-        exit 1
-fi
-if ! command -v lsblk &> /dev/null; then
-        echo "ERROR: 'lsblk' command not found. Needed for device detection."
-        exit 1
-fi
-if ! command -v findmnt &> /dev/null; then
-        echo "ERROR: 'findmnt' command not found. Needed for boot device detection."
-        echo "Please install it (e.g., 'sudo apt install util-linux')."
-        exit 1
-fi
-if ! command -v sha256sum &> /dev/null; then
-        echo "ERROR: 'sha256sum' command not found. Needed for image verification."
         exit 1
 fi
 

@@ -16,3 +16,6 @@ kernel-work/
 
 # Build tooling. The published repo is the user's manual, not a dev guide.
 MANET/packaging/
+
+# Working folder a standalone flasher copy makes for itself
+manet-flasher/

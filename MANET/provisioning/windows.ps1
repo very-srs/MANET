@@ -3,7 +3,7 @@
 .SYNOPSIS
     A script to image new mesh radio nodes on Windows
 .DESCRIPTION
-    Equivalent to linux.sh - flashes Raspberry Pi and Radxa Rock 3A devices
+    Equivalent to flash-a-radio.sh - flashes Raspberry Pi and Radxa Rock 3A devices
     with mesh network configurations. Rock 3A images are customised by mounting
     the Armbian ext4 root partition via Ext2Fsd. Raspberry Pi images are written
     with rpi-imager.
@@ -20,7 +20,7 @@
     dot-source this file and drive the flash itself. manet-flasher.ps1, the
     window front end, does exactly that: it is a front end over these
     functions, not a second flasher, so there is only ever one copy of the
-    token substitution and the flashing logic to keep in step with linux.sh.
+    token substitution and the flashing logic to keep in step with flash-a-radio.sh.
 #>
 
 param(
@@ -630,7 +630,7 @@ function Find-ProgramPath {
 }
 
 # CM4 only: put the module into USB-boot mode so its eMMC appears as a disk.
-# linux.sh runs rpiboot itself; this does the same rather than sending the user
+# flash-a-radio.sh runs rpiboot itself; this does the same rather than sending the user
 # off to run a second program by hand.
 function Invoke-RpiBoot {
     Write-Host ""
@@ -1337,7 +1337,7 @@ function Test-ShellCheckerUnusable {
 }
 
 # bash prefixes its message with the path it was given, and the filename is
-# already in the column to the left of this, so it comes off. linux.sh does
+# already in the column to the left of this, so it comes off. flash-a-radio.sh does
 # that with `sed 's|^[^:]*: ||'`, which cannot be copied here: a Windows path
 # begins with a drive letter and a colon, so that rule would strip "C:" and
 # leave the rest of the path in the message. The path we actually passed is
@@ -1532,7 +1532,7 @@ function Get-AdditionalScriptReport {
 
     if ($found.Count -eq 0) { return $report }
 
-    # Ordinal sort, to match `LC_ALL=C sort` in linux.sh exactly. A culture
+    # Ordinal sort, to match `LC_ALL=C sort` in flash-a-radio.sh exactly. A culture
     # sort would order 10-/20-/90- differently from the Linux flasher on some
     # locales, and the whole point of the numeric prefix convention is that
     # the operator can predict the order.
@@ -1875,7 +1875,7 @@ function Ask-Questions {
             $key = Read-Host "Enter LAN AP WPA2 Key (8-63 chars) [or press Enter to generate]"
             Write-Host ""
             if ([string]::IsNullOrWhiteSpace($key)) {
-                # Sixteen letters and digits, matching linux.sh's
+                # Sixteen letters and digits, matching flash-a-radio.sh's
                 # 'generate_password 16'. Base64 of ten bytes ends in '=='
                 # padding every time, and this is the key somebody types into
                 # a phone by hand, so it does without '+' and '/' as well.
