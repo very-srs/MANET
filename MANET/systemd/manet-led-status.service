@@ -1,0 +1,12 @@
+[Unit]
+Description=Show MANET provisioning status on the onboard LEDs
+After=local-fs.target
+ConditionPathExistsGlob=/sys/class/leds/*
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/manet-led-status.sh
+RemainAfterExit=no
+
+[Install]
+WantedBy=multi-user.target
