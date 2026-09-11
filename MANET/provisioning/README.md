@@ -6,9 +6,9 @@ How to flash a card and bring up a new mesh radio.
 
 ## How it works
 
-There are two phases. First you flash a card on your own computer, with
-`linux.sh` on Linux or by double-clicking **`Flash a Radio.cmd`** on Windows
-(`windows.ps1` is still there if you prefer the console). That walks you
+There are two phases. First you flash a card on your own computer, by running
+**`flash-a-radio.sh`** on Linux or double-clicking **`Flash a Radio.cmd`** on
+Windows (`windows.ps1` is still there if you prefer the console). That walks you
 through picking the hardware, loading or creating a configuration, and writing
 the image. Your mesh settings are baked into the image as it is written.
 
@@ -74,7 +74,7 @@ Why the `.cmd` exists at all: Windows will not run a `.ps1` on a double-click, a
 writing to a card needs Administrator. It deals with both, then starts
 `manet-flasher.ps1`, which is a front end over `windows.ps1`. The same code decides what
 goes on the card either way, and settings saved in one are read by the other and by
-`linux.sh`.
+`flash-a-radio.sh`.
 
 If you would rather use the console, run `windows.ps1` from an elevated PowerShell. It
 behaves exactly as it always has.
@@ -137,11 +137,13 @@ for it.
 
 ### Files needed from this directory
 
-On Windows, none: `Flash a Radio.cmd` fetches them. On Linux, clone or download the
-entire `provisioning/` directory to your working folder. The scripts require these files
-to be present alongside them:
+None on either platform. `Flash a Radio.cmd` and `flash-a-radio.sh` each fetch what
+they need. Cloning the whole `provisioning/` directory also works, and a checkout is
+used exactly as it stands with nothing downloaded and nothing overwritten.
 
-- `linux.sh`: flashing script for Linux hosts
+- `flash-a-radio.sh`: the Linux flasher, and the only file a Linux user needs.
+  Makes a `manet-flasher` folder if it is on its own, downloads the templates
+  into it, checks the host for missing tools, and refreshes itself on every run
 - `windows.ps1`: flashing script for Windows hosts, and the engine the window drives
 - `manet-flasher.ps1`: the window. Dot-sources `windows.ps1` and calls its functions,
   so it is a front end and not a second flasher
@@ -184,11 +186,39 @@ The Raspberry Pi 5 and Rock 3A platforms use an MM8108 USB HaLow adapter (e.g. G
 
 ## Flashing
 
-From the `provisioning/` directory, run the script matching your host OS:
+### Linux: download one file
+
+Download
+**[flash-a-radio.sh](https://raw.githubusercontent.com/very-srs/MANET/main/MANET/provisioning/flash-a-radio.sh)**,
+put it in a folder of its own, and run it:
 
 ```bash
-# Linux
-bash linux.sh
+chmod +x flash-a-radio.sh
+./flash-a-radio.sh
+```
+
+Run it as yourself. It asks for your password at the points where it needs to
+write to the card, and running the whole script under `sudo` would leave your
+saved settings owned by root.
+
+On the first run it makes a `manet-flasher` folder beside itself, moves in, and
+downloads the templates. From then on run it from that folder. It refreshes
+those downloads and itself every time it starts, so there is nothing to delete
+by hand to pick up a newer version. If it cannot reach GitHub it carries on
+with the copies it fetched last time and says so.
+
+Next it checks this computer for the tools it uses, naming what each one is
+for. On Debian and Ubuntu it offers to install the missing ones with apt, and
+on Fedora with dnf. For pacman, zypper and apk it prints the exact command and
+stops, and where a tool is not packaged at all, such as `rpi-imager` on Fedora,
+it says where to get it. Only the tools your chosen board actually needs are
+checked, so picking Rock 3A never asks for `rpiboot`.
+
+From a checkout, run it in place:
+
+```bash
+cd MANET/provisioning
+./flash-a-radio.sh
 ```
 
 ### Windows: step by step
@@ -233,7 +263,7 @@ Every node on one mesh needs the same **mesh name** and **mesh password** or the
 see each other. **Generate** makes a strong one for you.
 
 Save the settings under a name with the **Save** button, then load that same name for
-every other card. Saved settings are shared with `linux.sh`, so a mesh can be built from a
+every other card. Saved settings are shared with `flash-a-radio.sh`, so a mesh can be built from a
 mix of Windows and Linux machines.
 
 The address range shows how many nodes and clients it has room for as you type it. What
@@ -362,7 +392,7 @@ The script will:
 6. Flash and configure the image
 
 > **Saved configs:** Configurations are saved to a `.mesh-configs/` directory so nodes can
-> be reflashed with the same settings quickly. The window and `linux.sh` read the same
+> be reflashed with the same settings quickly. The window and `flash-a-radio.sh` read the same
 > files.
 
 > **CM4 on Linux:** When you select CM4, the script prompts you to connect the module in

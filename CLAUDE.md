@@ -33,7 +33,7 @@ MANET/
   root/                # regulatory.db
   binaries_arm64/      # alfred, batctl, wpa_supplicant_s1g, wpa_cli_s1g
   lyra_arm64/          # GStreamer Lyra plugin + model_coeffs
-  provisioning/        # linux.sh, windows.ps1, firstrun templates
+  provisioning/        # flash-a-radio.sh, windows.ps1, firstrun templates
     additional-scripts/  # operator's own setup scripts, baked in at flash time
   packaging/           # install/tools tarball builders
   install_packages/    # built tarballs (not source)
