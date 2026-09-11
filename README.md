@@ -95,14 +95,25 @@ Every page is shown in
 > The older console script, `windows.ps1`, still works and does exactly the same thing.
 > The GUI is a front end over it, so both produce an identical image.
 
-#### On Linux
+#### On Linux: download one file
 
-Download or clone the `MANET/provisioning` directory, then:
+Download
+**[flash-a-radio.sh](https://raw.githubusercontent.com/very-srs/MANET/main/MANET/provisioning/flash-a-radio.sh)**
+and run it:
 
 ```bash
-cd MANET/provisioning
-sudo ./linux.sh
+chmod +x flash-a-radio.sh
+./flash-a-radio.sh
 ```
+
+There is nothing else to download. The script fetches what it needs, and offers to
+install any missing software with apt or dnf. On other distributions it prints the exact
+command for your package manager instead of running it. On first run `flash-a-radio.sh`
+makes itself a `manet-flasher` folder beside where you put it and moves itself in, so
+your saved settings and your own setup scripts stay in one place.
+
+Run it as yourself, not with `sudo`. It asks for your password at the points where it
+needs to write to the card.
 
 #### What you will be asked, on either host
 
