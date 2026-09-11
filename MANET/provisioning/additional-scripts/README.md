@@ -14,7 +14,7 @@ additional-scripts/            (this directory, on your machine)
   10-site-routes.sh
   20-org-ssh-keys.sh
         |
-        |  linux.sh / windows.ps1 validate each file, then append one
+        |  flash-a-radio.sh / windows.ps1 validate each file, then append one
         |  quoted heredoc per script to the generated firstrun.sh
         v
   firstrun.sh                  (baked into the image by rpi-imager)

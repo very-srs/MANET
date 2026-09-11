@@ -6,7 +6,7 @@
     A front end over windows.ps1, not a second flasher. It dot-sources
     windows.ps1 with -NoRun and calls the same functions the console flow
     calls, so the image a card receives is decided in exactly one place and
-    stays in step with linux.sh.
+    stays in step with flash-a-radio.sh.
 
     It needs nothing installed. Windows PowerShell 5.1 and Windows Forms are
     part of Windows, and rpi-imager and rpiboot are downloaded and installed
@@ -1416,7 +1416,7 @@ function Save-ConfigFromPage {
     $file = Join-Path $CONFIG_DIR "$name.conf"
 
     # Written by hand rather than through Save-Config, which asks two questions
-    # on the console. Same keys, same order, same quoting: linux.sh reads these.
+    # on the console. Same keys, same order, same quoting: flash-a-radio.sh reads these.
     $content = @"
 # Mesh Config: $name
 EUD_CONNECTION="$($Script:EUD_CONNECTION)"
