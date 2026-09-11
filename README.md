@@ -95,42 +95,30 @@ Every page is shown in
 > The older console script, `windows.ps1`, still works and does exactly the same thing.
 > The GUI is a front end over it, so both produce an identical image.
 
-#### On Linux: download one file
+#### On Linux
 
-Download
-**[flash-a-radio.sh](https://raw.githubusercontent.com/very-srs/MANET/main/MANET/provisioning/flash-a-radio.sh)**,
-put it in a folder of its own, and run it:
+Download or clone the `MANET/provisioning` directory, then:
 
 ```bash
-chmod +x flash-a-radio.sh
-./flash-a-radio.sh
+cd MANET/provisioning
+sudo ./linux.sh
 ```
-
-That is the whole list, the same as on Windows. It makes itself a
-`manet-flasher` folder beside where you put it, moves in, and fetches what it
-needs, so your saved settings and your own setup scripts stay in one place.
-
-It then checks this computer for the tools it uses and offers to install
-anything missing with apt or dnf. On other distributions it prints the exact
-command for your package manager instead of running it. Run it as yourself,
-not with `sudo`. It asks for your password at the points where it writes to the
-card.
 
 #### What you will be asked, on either host
 
 * **EUD Connection**: Wired, Wireless (local AP), or Auto.
-* **Optional Services**: MediaMTX, (Mumble is untested).
+* **Optional Services**: MediaMTX, mesh voice (Mumble is untested).
 * **Mesh Security**: SSID and SAE Password.
 * **Network Settings**: CIDR blocks and addressing.
 
-Settings can be saved under a name and loaded again for the next card, which is how you
-give every node on one mesh the same configuration. A saved configuration works in both
-flashers, so a mesh can be built from a mix of Windows and Linux machines.
+Settings can be named and saved, allowing you to load a saved config and flash many radios 
+with the same configuration, rather than manually entering this into every node one by one.  
+A saved configuration works in both flashers, so a mesh can be built from a mix of Windows and Linux machines.
 
-*(Optional)* Place site-specific setup scripts in `provisioning/additional-scripts/`. They
-are validated before anything is written to the card, embedded in the image, and run
-**once as root on the node** after the mesh is up: for static routes, organization SSH
-keys, or additional packages. See
+*(Optional)* Place site-specific setup scripts in `additional-scripts/`. They
+are sanity checked before anything is written to the card, embedded in the image, and run
+**once as root on the node** after the node is configured for the first time: for static routes, organization SSH
+keys, or additional custom configurations. See
 [Additional setup scripts](MANET/provisioning/additional-scripts/README.md).
 
 ### 3. First Boot
@@ -151,12 +139,12 @@ that node (Ethernet or its AP), or over an SSH port-forward:
 * **`http://<node>/`**: status page. Mesh topology, link throughput, per-node
   health and detail. No password.
 * **`http://<node>/manage`**: management UI. Radio control, throughput and ping
-  measurement, saved sessions, uplink credentials, and the mesh configuration
+  measurement, uplink credentials, and the mesh configuration
   form. Requires the **admin password** chosen at flash time.
 
 Both are restricted to that node's own clients and localhost, not other radios,
 not other radios' clients, and not the upstream LAN when the node is acting as a
-gateway. Nodes that resolve mDNS can also use `http://manet.local/`.
+gateway. Clients of that radio may access this page at `http://manet.local/` or its IP.
 
 ### Status page
 
@@ -165,7 +153,7 @@ the best route to each peer.
 
 ![Mesh topology on the status page](docs/images/webui/status-topology.png)
 
-Expanding a node gives its addresses, uptime, GPS and battery state, supply health, every
+Expanding a node gives its addresses, uptime, GPS info, battery state, every network
 interface with the role it is playing, connected EUDs, and which services it is hosting.
 
 ![Per-node detail card](docs/images/webui/node-detail.png)
@@ -187,16 +175,16 @@ access-control layers, and what each management tab does.
 
 ## Connectivity Modes
 
-A phone, laptop or camera reaches the mesh through whichever node is nearest.
+A phone or compter reaches the mesh through whichever node it is connected to.
 Those are End User Devices, EUDs throughout this documentation, and a node
 handles them three ways:
 
 * **Wired.** Over Ethernet. The node bridges the device onto the mesh, or acts
-  as a gateway when the cable leads to the internet.
+  as a gateway when the cable leads to the internet instead of an EUD.
 * **Wireless.** The node runs a 5 GHz access point, separate from the mesh
   backhaul, for clients to join.
-* **Auto.** The default. Wireless until an Ethernet device appears, then wired
-  takes priority.
+* **Auto.** The default. Wireless until an EUD is plugged in, then wired
+  takes priority and the wireless access point turns off and that interface rejoins the mesh.
 
 ## Documentation
 * [Provisioning Guide](MANET/provisioning/README.md)
@@ -204,3 +192,4 @@ handles them three ways:
 * [Node Tools Documentation](MANET/node_tools/README.md)
 * [Binary Details](MANET/binaries_arm64/README.md)
 * [Dispatcher Hooks](MANET/networkd-dispatcher/README.md)
+
