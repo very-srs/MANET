@@ -9,8 +9,8 @@
 ### Feature Roadmap
 
 Verification happens on the CM4. A feature under **Working** has run on
-hardware. One under **In Testing** is complete in the tree but has not yet been
-proven on a bench pair.
+hardware. One under **In Testing** has code written, may have been bench tested, but has not yet been
+proven enough to be "finished".
 
 #### ✅ Working
 - [x] Wireless EUD
@@ -27,6 +27,7 @@ proven on a bench pair.
 - [x] Mesh-wide configuration change, staged over Alfred with a per-node ACK
 - [x] Supply-voltage and throttling reported on the status page and login banner
 - [x] Region-aware HaLow channel and bandwidth selection
+- [x] Over-the-air tools update
 
 #### 🧪 In Testing
 - [ ] Mumble Server - server launches, migration not tested
@@ -36,16 +37,15 @@ proven on a bench pair.
 - [ ] Push-to-talk voice over the mesh (Lyra codec). Verified one way between two
       nodes at 0% loss. A two-way test needs a second OpenVLM board. A headset with a
       dynamic microphone needs an external mic preamp ahead of the OpenVLM
-- [ ] Operator setup scripts run once at first boot. The node-side runner is verified. The flash-time half needs a reflash
-- [ ] Over-the-air tools update on Ethernet carrier. Works manually. The carrier-triggered path is still being tested
+- [ ] Operator setup scripts run once at first boot. Only basic test scripts have been tested.
 - [ ] Self-rollback after a mesh key or SSID change
+- [ ] Status indication
+- [ ] Enclosure design
 
 #### 📅 Future Work
 - [ ] Further reduction in network traffic
-- [ ] Enclosure selection
 - [ ] Physical interaction (buttons, knobs). The button and LED scripts are in
       the tree but exit immediately, since the pin wiring is not finalized. Planned as
       a dual rotary encoder for power, talk group and headset volume. Talk-group
       switching already works from a script: write `voice_channel` to `/etc/mesh.conf`
       and send `mesh-voice` a SIGHUP, which retunes in place instead of restarting
-- [ ] Display or status indication
