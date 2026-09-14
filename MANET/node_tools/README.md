@@ -346,16 +346,37 @@ Integrity-checked backups are taken before each sync.
 **channel-election.sh**
 
 Decentralized election for the 2.4 and 5 GHz channels. It aggregates the scan
-reports every node publishes, scores each channel on noise floor and BSS count,
-and applies a bias toward the current channel so the mesh does not migrate for
-a marginal gain. Every node runs the same computation over the same replicated
-reports and reaches the same answer without a coordinator.
+reports every node publishes and scores each candidate on how much of the air
+is already occupied, with smaller contributions from the noise floor and the
+number of competing networks. A bias toward the current channel keeps the mesh
+from migrating for a marginal gain. Every node runs the same computation over
+the same replicated reports and reaches the same answer without a coordinator.
+
+Occupancy is the share of a scan visit that the channel was busy with traffic
+this radio did not send. It is a ratio of two counters from one driver, so it
+compares directly between nodes and between radio chips. The noise floor does
+not: it is uncalibrated in absolute terms and varies with the chip, which is
+why it contributes a capped penalty instead of deciding the election.
+
+A channel is disqualified when enough of the nodes reporting on it call it bad,
+either too noisy or too congested. Once three or more nodes report, a single
+one cannot take a channel away from the mesh, so a radio with a bad connector
+or a driver returning garbage no longer costs everyone a band.
 
 A band whose radios reported no measurements at all is a different case from
 one where every candidate was measured and rejected, though both leave the
-candidate list empty. Missing data holds the current channel and logs `No scan
-data for any candidate channel`. Only a real RF result drops the mesh to the
-lobby channels or asserts limp mode.
+qualified list empty. Missing data holds the current channel and logs `No scan
+data for any candidate channel`. When every measured candidate is disqualified,
+the election takes the least bad channel it did measure and asserts limp mode.
+It never moves the mesh to the lobby frequencies: those are the rendezvous
+point, they are not scanned, and a node parked there stops scanning and
+electing.
+
+Channel changes are applied with `wpa_cli reconfigure`, which re-reads the
+supplicant configuration in place instead of restarting the service, and the
+radio is then polled until it reports the new frequency. A supplicant that does
+not answer, or a radio that has not landed within 10 seconds, falls back to
+restarting the unit.
 
 **limp-mode-manager.sh**
 

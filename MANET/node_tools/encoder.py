@@ -114,6 +114,10 @@ def build_telemetry(args):
             result.channel = int(r.get('channel', 0))
             result.noise_floor = int(r.get('noise_floor', 0))
             result.bss_count = int(r.get('bss_count', 0))
+            # Left absent when the scan could not measure it -- see the field
+            # comment in NodeInfo.proto.
+            if r.get('busy_pct') is not None:
+                result.busy_pct = max(0, min(100, int(r['busy_pct'])))
     except (json.JSONDecodeError, KeyError, TypeError, ValueError):
         pass
 
