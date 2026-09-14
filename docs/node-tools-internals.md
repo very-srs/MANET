@@ -659,14 +659,113 @@ in `node-manager-acs.sh`), which keeps the exclusion inside the replicated
 report and therefore symmetric across the mesh.
 
 **"Every candidate was measured and rejected" and "nothing reported a
-measurement at all" are different verdicts.** Both leave the candidate list
-empty. The first is a real RF result and drops to the lobby channels. The
-second is an outage: the band's radio is absent so its scan report carries no
-entries, or the scan request was refused wholesale, or Alfred was down and no
-reports replicated, and it now **holds the current channel and does not assert
-limp mode**, logging `No scan data for any candidate channel`. Treating it as
-jamming throttled the whole mesh to legacy bitrates on the strength of missing
-data.
+measurement at all" are different verdicts.** Both leave the qualified list
+empty. The first is a real RF result, and the least bad measured channel is
+elected with limp mode asserted. The second is an outage: the band's radio is
+absent so its scan report carries no entries, or the scan request was refused
+wholesale, or Alfred was down and no reports replicated, and it now **holds the
+current channel and does not assert limp mode**, logging `No scan data for any
+candidate channel`. Treating it as jamming throttled the whole mesh to legacy
+bitrates on the strength of missing data.
+
+### Channel scoring
+
+The score, lowest wins, is
+
+    occupancy% + max(0, median_noise - (-95 dBm)) * 0.5 + mean_bss_count * 0.5
+
+Occupancy comes from the survey counters bracketing each scan,
+`(busy - transmit) / active`, taken as the difference between a `survey dump`
+before the scan request and one after. That bracket is what makes the numbers
+comparable: the counters are cumulative since the interface came up, so without
+it the home channel reports a running average over its whole uptime while the
+other candidates report only the milliseconds the radio spent visiting them. A
+channel with under 25 ms of dwell in the window reports no occupancy at all,
+because busy time counts in whole milliseconds and the ratio would move in 10%
+steps.
+
+The score was `avg_noise + total_bss * 0.1` until 0.548, which decided every
+election on `survey dump`'s noise field. A BSS was worth 0.1 dB, so ten
+co-channel networks equalled 1 dB of noise floor, and the elections turned
+almost entirely on the weakest number collected: driver-derived, uncalibrated
+in absolute terms, and different between chip revisions. `perform_scan` was
+already running the command that returns busy, receive and transmit time and
+discarding everything but the `noise:` line. Noise still contributes, capped
+and weighted at 0.5 per dB above -95 dBm, because it catches non-802.11 energy
+that busy time can attribute to nothing. It no longer decides the answer alone.
+The BSS count is a mean per reporting node, not a sum, so a channel is not
+scored worse for having been measured by more radios.
+
+**Disqualification takes a quorum, not one node.** `max_noise > -70` removed a
+channel from the election mesh-wide if any single node reported it, with no
+outlier rejection and no weighting by whether that node carried traffic. One
+bad connector, one radio parked next to a microwave, or one mt76 instance
+returning garbage disqualified the channel for everybody, and with only two
+candidates at 2.4 GHz a single misbehaving node could take out the whole band.
+It now takes `ceil(reporters * 0.34)` nodes, minimum one, to disqualify: 1 of
+1, 1 of 2, 2 of 3, 2 of 5, 3 of 6. Two nodes cannot outvote each other and a
+veto still stands there, which is the honest answer for a two-node mesh.
+Scoring takes the median across reporters, so an outlier that fails to reach
+quorum also fails to drag the score.
+
+**The jamming fallback is no longer the lobby.** Both failure exits used to
+land on 2412/5180: a hardcoded pair, published in this repo, excluded from
+every scan list, and converged on by every node by design. The answer to "every
+channel I can measure is unusable" was a move to two frequencies with no
+measurements behind them, and the most predictable destination available.
+Landing there also made `is_in_lobby` true, which drops the node out of data
+state, and the lobby bootstrap only elects with `mesh_peer_count > 0`, so a
+node that was jammed and alone sat in the lobby indefinitely. The comment above
+`CHANNELS_2_4` had said for some time that the lobby pair must never be elected
+for exactly this reason, while the failure path elected it anyway. Total
+disqualification now takes the least bad measured channel and asserts limp
+mode. The channel is not a good one and limp mode says so, but the node keeps
+scanning and re-electing from it.
+
+**`LIMP_MODE_SCORE_THRESHOLD` is reachable now.** It was not before. A channel
+that survived disqualification had `max_noise <= -70`, so `avg_noise <= -70`
+too, and crossing the old -60 threshold needed `total_bss * 0.1 > 10`, which is
+more than 100 BSSes summed across every node's report for one channel. The
+branch logging `JAMMING DETECTED` was a congestion detector wearing a jamming
+label: it fires in a dense urban RF environment and essentially never in the
+field, real jamming always exited through `ALL CHANNELS DISQUALIFIED`, and the
+threshold that looked like the jamming sensitivity knob did nothing. In
+occupancy units the threshold of 60 reads as "the quietest channel available is
+still about two thirds occupied". It is compared against the raw score, not the
+one `CHANNEL_BIAS_SCORE` has discounted, so sitting on a band while it goes bad
+cannot hide it.
+
+**Migration reconfigures the supplicant instead of restarting it.** The
+election used to `sed` the config and `systemctl restart
+wpa_supplicant@<iface>.service`, then let the caller sleep 5 seconds and assume
+the move worked. `tourguide-manager.sh` already had the better path for its
+lobby hops: `wpa_cli reconfigure` re-reads the config in place, so the mesh
+point is not destroyed and rebuilt and SAE does not start over from scratch,
+and a poll loop confirms `iw dev ... info` reports the target frequency. The
+election now uses the same path, keeping the unit restart as the fallback for a
+supplicant that does not answer or a radio that has not landed within 10
+seconds. This also matters for any SAE problem in the shared `radio-setup.sh`
+config, since the election was hitting the full-restart path on every channel
+change while the tourguide was not.
+
+One malformed report no longer takes out the election. The registry's reports
+were concatenated into a JSON array in awk, so one truncated or corrupt payload
+made the whole document unparseable, and the `bc` comparisons that followed
+then ran on empty operands under `set -eo pipefail` inside the `flock`
+subshell, leaving nothing behind but an exit status. Reports are parsed one per
+line now (`jq -Rn '[inputs | fromjson? // empty]'`), a bad one is dropped and
+the rest of the mesh still votes, and every per-channel arithmetic step happens
+in a single jq pass with no `bc` anywhere.
+
+`ChannelScanResult.busy_pct` in `NodeInfo.proto` is `optional`, so it carries
+explicit presence. A channel measured at 0% busy and a channel the radio could
+not measure are different answers, and a proto3 scalar default cannot tell them
+apart. The election filters absent values out of the median instead of counting
+them as zero, so a node on an older build still contributes its noise and BSS
+counts without making every channel it reports look empty. A rolling update is
+the one case where nodes legitimately disagree: a node still running the old
+scoring reads the same reports and can pick a different channel, so update the
+whole mesh in one pass.
 
 4. Listens for other partitions.
 5. If the other partition should win, triggers migration.
