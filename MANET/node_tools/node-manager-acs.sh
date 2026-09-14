@@ -35,6 +35,11 @@ WPA_CONF_5_0=""
 SCAN_FREQS_2_4="2437 2462"
 SCAN_FREQS_5_0="5200 5220 5240 5745 5765 5785 5805 5825"
 
+# A channel whose survey shows less than this much dwell during the scan gets
+# no occupancy figure. Busy time is counted in whole milliseconds, so on a
+# 10 ms visit the ratio moves in 10% steps and means nothing.
+SURVEY_MIN_DWELL_MS=25
+
 # Helper scripts
 REGISTRY_BUILDER="/usr/local/bin/mesh-registry-builder.sh"
 IP_MANAGER="/usr/local/bin/mesh-ip-manager.sh"
@@ -340,9 +345,32 @@ phy_usable_freqs() {
     fi
 }
 
+# Parse "iw dev X survey dump" into one line per frequency:
+#   <freq> <noise|-> <active_ms|-> <busy_ms|-> <tx_ms|->
+# These are the driver's counters since the interface came up, so they only
+# mean anything as the difference between two snapshots.
+parse_survey() {
+    awk '
+        $1 == "frequency:" { f = $2; seen[f] = 1; next }
+        f == "" { next }
+        $1 == "noise:" { noise[f] = $2; next }
+        /channel active time:/ { act[f] = $4; next }
+        /channel busy time:/ { busy[f] = $4; next }
+        /channel transmit time:/ { tx[f] = $4; next }
+        END {
+            for (k in seen)
+                printf "%s %s %s %s %s\n", k, (k in noise ? noise[k] : "-"), (k in act ? act[k] : "-"), (k in busy ? busy[k] : "-"), (k in tx ? tx[k] : "-")
+        }'
+}
+
 perform_scan() {
     local json_out='{"results": ['
     local first_entry=true
+    # Survey counters bracketing the scan. Keyed by frequency; frequencies do
+    # not repeat between the two bands, but they are cleared per interface
+    # anyway so a stale entry can never leak into the next radio's deltas.
+    local -A pre_act pre_busy pre_tx post_act post_busy post_tx post_noise
+    local f n a b t
 
     load_mesh_roles
 
@@ -353,6 +381,19 @@ perform_scan() {
         [ "$iface" == "$WPA_IFACE_5_0" ] && freqs_to_scan=$SCAN_FREQS_5_0
         freqs_to_scan="$(phy_usable_freqs "$iface" "$freqs_to_scan")"
 
+        pre_act=(); pre_busy=(); pre_tx=()
+        post_act=(); post_busy=(); post_tx=(); post_noise=()
+
+        # Snapshot before and after so every candidate is measured over the
+        # same event -- this scan -- rather than over its lifetime. Without
+        # the bracket the home channel reports a running average since boot
+        # while the other candidates report only the milliseconds the radio
+        # spent visiting them, and the two are not comparable.
+        while read -r f n a b t; do
+            [ -z "$f" ] && continue
+            pre_act[$f]=$a; pre_busy[$f]=$b; pre_tx[$f]=$t
+        done < <(iw dev "$iface" survey dump 2>/dev/null | parse_survey)
+
         (iw dev "$iface" scan freq $freqs_to_scan > /dev/null 2>&1) &
         SCAN_PID=$!
 
@@ -362,11 +403,15 @@ perform_scan() {
         done
         kill $SCAN_PID 2>/dev/null || true
 
-        local survey_data=$(iw dev "$iface" survey dump 2>/dev/null)
+        while read -r f n a b t; do
+            [ -z "$f" ] && continue
+            post_noise[$f]=$n; post_act[$f]=$a; post_busy[$f]=$b; post_tx[$f]=$t
+        done < <(iw dev "$iface" survey dump 2>/dev/null | parse_survey)
+
         local scan_data=$(iw dev "$iface" scan dump 2>/dev/null)
 
         for freq in $freqs_to_scan; do
-            local noise=$(echo "$survey_data" | awk -v f=$freq '$1=="frequency:" && $2==f {getline; if ($1=="noise:") print $2}' | head -1)
+            local noise="${post_noise[$freq]:--}"
             # No survey entry means the radio never actually visited this
             # frequency (scan request rejected, channel unavailable, driver
             # hiccup). Report nothing for it rather than a synthetic floor:
@@ -375,11 +420,44 @@ perform_scan() {
             # nobody can hear. Missing data is handled correctly downstream --
             # find_best_channel holds the current channel when a band has no
             # measurements at all.
-            [ -z "$noise" ] && continue
+            [ "$noise" = "-" ] && continue
             local bss_count=$(echo "$scan_data" | grep -c "freq: ${freq}\." )
 
+            # Occupancy: the share of the visit the channel was busy with
+            # something that was not our own transmission. Unlike the noise
+            # floor this is a ratio of two counters from the same driver, so
+            # it is comparable between nodes and between chip revisions
+            # without any calibration. Our own receive time is still counted
+            # against the home channel; the election's hysteresis covers the
+            # few percent of duty cycle a healthy mesh adds.
+            local occupancy_field=""
+            local ca="${post_act[$freq]:--}" cb="${post_busy[$freq]:--}"
+            local ct="${post_tx[$freq]:-0}"
+            if [ "$ca" != "-" ] && [ "$cb" != "-" ]; then
+                [ "$ct" = "-" ] && ct=0
+                local pa="${pre_act[$freq]:-0}" pb="${pre_busy[$freq]:-0}"
+                local pt="${pre_tx[$freq]:-0}"
+                [ "$pa" = "-" ] && pa=0
+                [ "$pb" = "-" ] && pb=0
+                [ "$pt" = "-" ] && pt=0
+                local d_act=$((ca - pa)) d_busy=$((cb - pb)) d_tx=$((ct - pt))
+                # Negative means the counters were reset under us (supplicant
+                # restart, netdev bounce) and the pre-snapshot belongs to a
+                # dead epoch. Fall back to the post values, which are then
+                # already the counts since that reset.
+                if [ "$d_act" -lt 0 ] || [ "$d_busy" -lt 0 ] || [ "$d_tx" -lt 0 ]; then
+                    d_act=$ca; d_busy=$cb; d_tx=$ct
+                fi
+                if [ "$d_act" -ge "$SURVEY_MIN_DWELL_MS" ]; then
+                    local occupancy=$(( (d_busy - d_tx) * 100 / d_act ))
+                    [ "$occupancy" -lt 0 ] && occupancy=0
+                    [ "$occupancy" -gt 100 ] && occupancy=100
+                    occupancy_field=", \"busy_pct\": ${occupancy}"
+                fi
+            fi
+
             [ "$first_entry" = true ] && first_entry=false || json_out+=","
-            json_out+="{\"channel\": ${freq}, \"noise_floor\": ${noise}, \"bss_count\": ${bss_count}}"
+            json_out+="{\"channel\": ${freq}, \"noise_floor\": ${noise}, \"bss_count\": ${bss_count}${occupancy_field}}"
         done
     done
 

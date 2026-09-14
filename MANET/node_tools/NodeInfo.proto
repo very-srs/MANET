@@ -83,6 +83,14 @@ message NodeTelemetry {
     uint32 channel     = 1;  // MHz
     sint32 noise_floor = 2;  // dBm
     uint32 bss_count   = 3;
+    // Share of the measurement window the channel was busy with traffic that
+    // is not ours, 0-100. Driver-independent and needs no calibration, unlike
+    // noise_floor, so the election scores on this first.
+    //
+    // Explicitly optional: a channel measured at 0% busy and a channel the
+    // radio never dwelled on long enough to measure are different answers,
+    // and proto3 scalar defaults cannot tell them apart.
+    optional uint32 busy_pct = 4;
   }
   message ChannelReport {
     repeated ChannelScanResult results = 1;
