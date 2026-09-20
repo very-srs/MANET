@@ -565,11 +565,6 @@ while true; do
         LAST_ACK_PUBLISHED="$CURRENT_ACK"
     fi
 
-    # Load current chunk assignment from IP manager
-    MY_CHUNK=0
-    if [ -f /var/run/my_ipv4_chunk ]; then
-        MY_CHUNK=$(cat /var/run/my_ipv4_chunk)
-    fi
     # === PUBLISH IDENTITY (Alfred type 67) ===
     if [ $((NOW - LAST_IDENTITY_PUBLISH)) -ge $IDENTITY_PUBLISH_INTERVAL ]; then
         # br0's MAC must come first: encoder.py drops it, because Alfred
@@ -583,14 +578,17 @@ while true; do
             fi
         done
 
+        # Empty means unallocated; zero is a valid allocation. Omit the address
+        # when unallocated so peers can distinguish the protobuf zero default.
+        MY_CHUNK=$(cat /var/run/my_ipv4_chunk 2>/dev/null || true)
         IDENT_IPV4=$(ip addr show dev "$CONTROL_IFACE" 2>/dev/null | grep -oP 'inet \K[\d.]+' | head -1)
         IDENTITY_ARGS=(
             "--hostname" "$(hostname)"
             "--mac-addresses" "${IDENT_MACS[@]}"
             "--syncthing-id" "$(runuser -u radio -- syncthing --device-id 2>/dev/null || echo "")"
-            "--ipv4-chunk" "$MY_CHUNK"
+            "--ipv4-chunk" "${MY_CHUNK:-0}"
         )
-        [ -n "$IDENT_IPV4" ] && IDENTITY_ARGS+=("--ipv4-address" "$IDENT_IPV4")
+        [ -n "$MY_CHUNK" ] && [ -n "$IDENT_IPV4" ] && IDENTITY_ARGS+=("--ipv4-address" "$IDENT_IPV4")
 
         IDENTITY_PAYLOAD=$("$ENCODER_PATH" identity "${IDENTITY_ARGS[@]}" 2>/dev/null)
         if [ -n "$IDENTITY_PAYLOAD" ]; then

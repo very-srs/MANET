@@ -806,6 +806,14 @@ and `mesh-registry-builder.sh` decodes those into `/tmp/claimed_chunks.txt` as
 itself. On a successful claim it writes the chunk to `/var/run/my_ipv4_chunk`,
 which the node manager hands back to the encoder.
 
+Chunk numbers start at **zero**, after the five reserved service addresses:
+in `10.30.0.0/24`, chunk zero starts at `10.30.0.6`. The registry includes it
+in the claimed-chunk index. Because protobuf also returns zero for an unset
+chunk, a claim requires an advertised IPv4 address as well as a chunk number.
+The node managers omit that address until `/var/run/my_ipv4_chunk` exists;
+the static manager reads the chunk after running IP management, so the first
+identity publication describes the allocation just made.
+
 Four properties of that file matter:
 
 - Only nodes the registry marks **ACTIVE** appear. One unheard from for 300 s
