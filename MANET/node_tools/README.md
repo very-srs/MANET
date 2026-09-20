@@ -782,6 +782,10 @@ Updates the node tools to the latest release. It checks connectivity, compares
 the local and remote versions, and installs the board's tools tarball when the
 node is behind. `--routine` runs silently and no more than once a day.
 
+Every board reads the release version from `MANET/node_tools/version.txt` on
+GitHub `main`. `/etc/manet_version.txt` records the installed version and is
+included inside the tarball; it is not uploaded separately to the server.
+
 The networkd-dispatcher carrier hook is the only thing that calls it. There is
 no cron job and no timer, so a node checks for a new release when Ethernet gets
 carrier and `auto_update=` is set to a true value in `/etc/mesh.conf`. See
