@@ -676,9 +676,21 @@ A wrong mesh key takes the mesh down, and with it the only route a correction
 could travel, so each node has to be able to undo the change on its own.
 
 Before a dangerous change a node snapshots `/etc/mesh.conf` and the supplicant
-configs, and records how many batman peers it had. If the peers do not come
-back within five minutes it restores the snapshot and restarts the supplicants.
-`MANET_ROLLBACK_GRACE` changes that window.
+configs, and counts distinct peers using BATMAN's `originators_json` output.
+If it had peers before the change, at least one must be visible at the
+five-minute deadline; otherwise it restores the snapshot and restarts the
+supplicants. A failed peer query at that deadline also triggers restoration.
+`MANET_ROLLBACK_GRACE` changes that window. A successful empty query before
+the change identifies a solo node, which keeps its new settings.
+
+A failed baseline query, incomplete backup, or missing rollback helper blocks
+the dangerous change unless **Skip the safety net** was explicitly selected.
+An existing trial keeps its original backup and deadline; a second protected
+change waits until that trial finishes. Failed preparation can be retried on
+the next manager cycle while the activation message remains valid.
+
+If restoring a file or restarting a service fails, the snapshot is kept and
+restoration is retried on the next cycle, including after a reboot.
 
 Danger is judged per node against its own current values, so re-broadcasting an
 SSID a node already has does not put it into a trial window.

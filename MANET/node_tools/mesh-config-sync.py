@@ -154,6 +154,8 @@ def validate_package(pkg):
     activate_at = pkg.get("activate_at", 0)
     if not isinstance(activate_at, int) or activate_at < 0:
         return False, "malformed activate_at"
+    if not isinstance(pkg.get("no_rollback", False), bool):
+        return False, "no_rollback must be a boolean"
     return True, ""
 
 
@@ -285,10 +287,15 @@ def sync_once():
     # Arm the safety net before touching anything, so a change that takes the
     # mesh down can still be undone by this node on its own.
     if package_is_dangerous(pkg) and not pkg.get("no_rollback"):
-        if os.path.exists(ROLLBACK_SCRIPT):
-            run([ROLLBACK_SCRIPT, "arm", version], timeout=30)
-        else:
-            log("WARNING: rollback script missing; applying without a safety net")
+        try:
+            armed = run([ROLLBACK_SCRIPT, "arm", version], timeout=30)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            log(f"Cannot prepare rollback; config not applied: {exc}")
+            return 1
+        if armed.returncode != 0:
+            log(f"Cannot prepare rollback; config not applied: "
+                f"{(armed.stderr or armed.stdout).strip()}")
+            return 1
 
     # Applying acs can restart this very service. Consume the command before
     # invoking anything disruptive so a kill/reboot cannot make a recorded
