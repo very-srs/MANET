@@ -1098,15 +1098,32 @@ The safety net for dangerous changes. A wrong mesh key takes the mesh down, and
 with it the only way to push a correction, so each node has to be able to undo
 the change on its own, with no help from the network.
 
-`arm` snapshots `/etc/mesh.conf` and the supplicant configs, records how many
-batman peers the node had, and sets a deadline (default 300 s, `MANET_ROLLBACK_GRACE`).
+`arm` counts distinct `orig_address` values from
+`batctl meshif bat0 originators_json`, snapshots `/etc/mesh.conf` and the
+supplicant configs, and sets a deadline (default 300 s, `MANET_ROLLBACK_GRACE`).
+The JSON query has a five-second timeout. Selected routes count, duplicate
+paths count once, and command/JSON failures are errors rather than zero peers.
+The snapshot is built in a private temporary directory and published only
+after every copy and the state write succeeds. An already armed trial cannot
+be overwritten or have its deadline reset by another `arm`.
+
+The config receiver requires a successful `arm` before a dangerous apply.
+A missing helper, timeout or nonzero exit leaves the settings untouched and
+the activation unconsumed, so a later manager cycle can retry while the
+message is valid. Only an explicit boolean `no_rollback: true` bypasses this
+gate; safe changes and unchanged dangerous settings do not need it.
+
 `check` runs every node-manager cycle and is a no-op until the deadline passes,
-then either commits or restores and restarts the supplicants. State lives in
-`/var/lib` because a dangerous apply can end in a reboot.
+then commits if at least one peer is visible or restores and restarts the
+supplicants if none is visible or the query fails. State lives in `/var/lib`
+because a dangerous apply can end in a reboot. A persistent `restoring` marker
+ensures an incomplete restore is retried even if a peer becomes visible in
+the meantime. Failed file restores or service restarts retain the snapshot.
 
 A node that had no peers before the change commits rather than rolling back:
 on a solo bench node "the mesh did not come back" cannot be told apart from
-"there was never anyone there".
+"there was never anyone there". This requires a successful empty baseline
+query; an unreadable or incomplete state cannot select the solo-node branch.
 
 ---
 
@@ -1194,6 +1211,7 @@ Tests sit alongside the code they cover and run without hardware or a node:
 | `test_peer_radios.py` | The peer radio chips in `manet_peer_radios.py`: frequency-to-channel conversion, published `INTERFACES_JSON` winning over the registry fallback, the fallback filling in when it is empty, and the channel fields surviving an encode/decode round trip |
 | `test_mesh_registry.py` | Real encoder/decoder/registry integration, chunk zero, saved chunks, read failures, and timely publication |
 | `test_mesh_ip_startup.py` | Bounded discovery, late/missing peers, failed queries, and allocation barriers |
+| `test_mesh_config_rollback.py` | Real rollback script with simulated BATMAN: unique peer counts, solo nodes, bounded recovery, failed queries/backups, interrupted restoration, and the receiver's apply gate |
 | `test_manet_admin.py` | Real encryption, wrong keys, tampering, authenticated ACKs, expiry, replay after restart/rollback/interrupted apply, password rotation, and literal config writes |
 
 Run them from the git root, so this directory is on `sys.path`, and from the dev
