@@ -1638,10 +1638,10 @@ systemctl enable mesh-status
 # Clients connected to the EUD AP can reach the admin panel at http://manet.local
 
 if have_package_network; then
-    provision_try "apt install failed: avahi-daemon iperf3 traceroute sqlite3 python3-zeroconf" \
-        apt install -y avahi-daemon iperf3 traceroute sqlite3 python3-zeroconf
+    provision_try "apt install failed: avahi-daemon iperf3 traceroute sqlite3 python3-zeroconf python3-cryptography" \
+        apt install -y avahi-daemon iperf3 traceroute sqlite3 python3-zeroconf python3-cryptography
 else
-    provision_fail "no network: cannot install avahi-daemon iperf3 traceroute sqlite3 python3-zeroconf"
+    provision_fail "no network: cannot install avahi-daemon iperf3 traceroute sqlite3 python3-zeroconf python3-cryptography"
 fi
 install -m 644 /etc/avahi/avahi-daemon.conf /etc/avahi/avahi-daemon.conf.bak 2>/dev/null || true
 cp /usr/local/share/manet/avahi-daemon.conf /etc/avahi/avahi-daemon.conf

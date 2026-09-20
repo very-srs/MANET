@@ -28,6 +28,7 @@ PENDING_CONFIG="/var/run/mesh_pending_config.json"
 MESH_CONF="/etc/mesh.conf"
 APPLY_LOG="/var/log/mesh-config-apply.log"
 APPLIED_VERSION_FILE="/var/run/mesh_applied_config_version"
+CONFIG_WRITER="${MANET_CONFIG_WRITER:-/usr/local/bin/mesh-config-write.py}"
 
 log() {
     echo "[$(date +'%Y-%m-%d %H:%M:%S')] - CONFIG-APPLY: $1" | tee -a "$APPLY_LOG" | systemd-cat -t mesh-config-apply
@@ -69,13 +70,7 @@ print(val if val is not None else '')
 # Helper: update a key=value in /etc/mesh.conf (or add if missing)
 # ==============================================================================
 conf_set() {
-    local key="$1"
-    local val="$2"
-    if grep -q "^${key}=" "$MESH_CONF" 2>/dev/null; then
-        sed -i "s|^${key}=.*|${key}=${val}|" "$MESH_CONF"
-    else
-        echo "${key}=${val}" >> "$MESH_CONF"
-    fi
+    python3 "$CONFIG_WRITER" "$MESH_CONF" "$1" "$2" || die "Cannot update $1"
 }
 
 # ==============================================================================
@@ -92,7 +87,12 @@ apply_safe_settings() {
         local current
         current=$(grep "^${key}=" "$MESH_CONF" 2>/dev/null | cut -d'=' -f2-)
         if [ "$val" != "$current" ]; then
-            log "  $key: '$current' → '$val'"
+            # Passwords must never be copied into the journal/apply log.
+            if [ "$key" = admin_password ]; then
+                log "  admin_password: changed"
+            else
+                log "  $key: '$current' → '$val'"
+            fi
             conf_set "$key" "$val"
             changed=true
         fi
@@ -193,7 +193,8 @@ apply_dangerous_settings() {
         conf_set "mesh_ssid" "$new_ssid"
         # Update wpa_supplicant configs
         for conf in /etc/wpa_supplicant/wpa_supplicant-wlan*.conf; do
-            [ -f "$conf" ] && sed -i "s|ssid=\".*\"|ssid=\"${new_ssid}\"|" "$conf"
+            [ -f "$conf" ] || continue
+            python3 "$CONFIG_WRITER" "$conf" ssid "$new_ssid" --quoted || die "Cannot update supplicant SSID"
         done
     }
 
@@ -201,7 +202,8 @@ apply_dangerous_settings() {
         log "  mesh_key: changed"
         conf_set "mesh_key" "$new_key"
         for conf in /etc/wpa_supplicant/wpa_supplicant-wlan*.conf; do
-            [ -f "$conf" ] && sed -i "s|sae_password=.*|sae_password=${new_key}|" "$conf"
+            [ -f "$conf" ] || continue
+            python3 "$CONFIG_WRITER" "$conf" sae_password "$new_key" || die "Cannot update supplicant password"
         done
     }
 

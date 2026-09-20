@@ -87,8 +87,8 @@ do_restore() {
     done
     systemctl restart batman-enslave.service 2>/dev/null || true
 
-    # Forget that the rolled-back version was ever applied, so a later
-    # re-broadcast of it is treated as new rather than skipped.
+    # Clear volatile UI/staging state. Persistent admin replay history stays
+    # intact: retrying a rolled-back change requires a fresh admin transaction.
     rm -f /var/run/mesh_applied_config_version /var/run/mesh_pending_config.json \
           /var/run/mesh_config_ack_version 2>/dev/null
 

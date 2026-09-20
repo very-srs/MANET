@@ -78,7 +78,9 @@ Open routes, no password:
   calls it.
 
 Password-gated routes. The password is `admin_password` from `/etc/mesh.conf`,
-set at flash time, and logging in sets an HttpOnly cookie:
+shared across the mesh and set at flash time. Logging in sets an HttpOnly
+cookie. A missing admin password disables login; radio/AP passwords do not
+grant management access:
 
 - `/manage/`: the management UI and every route beneath it, including the
   radio, measurement, voice and uplink APIs.
@@ -615,11 +617,31 @@ A change made in the Node config tab is not written straight to the other
 radios. It is staged across the mesh over Alfred, acknowledged by every node,
 and then applied by all of them at the same moment.
 
+Control messages and acknowledgements are encrypted and authenticated using
+the shared admin password. Mesh membership does not grant permission to send
+changes. The public status page and identity/telemetry exchange remain usable
+without the admin password. New admin passwords travel inside the encrypted
+package, protected using the current password.
+
+Every participating node needs the updated tools and `python3-cryptography`.
+The setup script installs it; a tools update also carries
+`manet-admin-setup.service` to check/install it at boot. When upgrading from an
+older updater, reboot or run `sudo manet-admin-setup.sh` and restart
+`mesh-status.service` before using management. Older plaintext control packets
+are rejected, so upgrade the whole mesh before changing settings. Keep node
+clocks synchronized for scheduled activation and command expiry.
+
+Earlier versions included the admin password in readable config broadcasts.
+If that password was exposed, provision a fresh shared password on every node
+through a trusted path. Rotating it over Alfred using a known old password
+does not exclude someone who already knows that old password.
+
 ### The flow
 
 1. **Stage.** The UI writes a package and broadcasts it.
-2. **ACK.** Every node stages it and publishes its acknowledgement, which fills
-   the ACK table in the tab. The table fills within seconds.
+2. **ACK.** Every node validates and stages it, then publishes an authenticated
+   acknowledgement. Only authenticated ACKs fill the approval table; the
+   public telemetry ACK field is informational.
 3. **Apply.** Press Apply once the table shows 100%. The button refuses until
    then. **Force Apply** skips that gate when a node is unreachable.
 4. **Activate.** The activation time is set 60 seconds out and rebroadcast, so
@@ -628,6 +650,10 @@ and then applied by all of them at the same moment.
    first. If its peers come back it keeps the change. If they do not, it
    restores itself. **Skip the safety net** tells it to keep the change either
    way.
+
+An activation is recorded before applying it, so restarting a service,
+rebooting, or rolling back cannot execute the same recorded activation again.
+If an apply attempt fails or is interrupted, stage a new change to retry.
 
 ### When each setting takes effect
 

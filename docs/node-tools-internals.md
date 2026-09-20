@@ -999,6 +999,84 @@ Protocol buffer schema for both messages.
 
 ## Mesh configuration push
 
+**manet_admin.py — shared admin authority over Alfred**
+
+One administrator normally knows the password; other users read status. Every
+node has the same `admin_password`. SAE membership, a publisher MAC, and
+unencrypted telemetry cannot authorize a change. Receivers authenticate before
+inspecting actions, choosing the newest message, staging, ACKing, cancelling,
+or applying. Web authentication uses only `admin_password`, with no radio/AP
+password fallback.
+
+| Alfred type | Authenticated payloads |
+|-------------|------------------------|
+| 70 | `mesh_config`, `mesh_config_cancel` |
+| 71 | `radio_state`, `radio_cancel` |
+| 72 | `radio_ack` |
+| 73 | `config_ack` |
+
+The wire format is a `manet_admin_v1` envelope carrying a 16-byte publisher
+salt, 12-byte random nonce, and AES-256-GCM ciphertext with its authentication
+tag. The encrypted body carries the action, a random message ID, and a send
+timestamp in nanoseconds. Additional authenticated data binds the protocol
+version and Alfred type, preventing a message from being used on another
+control channel. A new nonce is generated on every send. Password-derived
+keys use scrypt (`n=32768`, `r=8`, `p=1`, 32 MiB) and a domain-separated random
+salt per publisher. Keys are cached only in process memory. The implementation
+uses the cryptography library's
+[AEAD](https://cryptography.io/en/43.0.0/hazmat/primitives/aead/) and
+[scrypt](https://cryptography.io/en/43.0.0/hazmat/primitives/key-derivation-functions/#scrypt)
+APIs. Password rotation encrypts the new password under the current password;
+the apply log never prints either value.
+
+Replay history lives in `/var/lib/manet-admin`, with directory mode 0700 and
+atomic, fsynced 0600 files. Each control channel remembers its newest accepted
+message and whether it was consumed. Repeated delivery of a pending stage is
+allowed. Older messages and consumed activations/cancellations are rejected,
+including after loss of `/run` or a rollback. The receiver records consumption
+**before** applying: an ACS change can kill its own node manager, and a radio
+change can interrupt the process. This gives at most one apply attempt per
+message; an interrupted/failed attempt requires a fresh administrator request.
+Do not erase this history during rollback. Corrupt history fails closed.
+
+Authenticated envelopes expire after 900 seconds and may be at most 60 seconds
+ahead of the receiver's clock. Newly provisioned nodes lack replay history,
+so expiry bounds their acceptance of previously recorded, otherwise valid
+messages. These checks require synchronized clocks, as scheduled activation
+already does. Each staged edit also gets a fresh random transaction version;
+repeating identical settings does not reuse an earlier ACK. Config activation
+uses encrypted type-73 ACKs, never `CONFIG_ACK_VERSION` from public telemetry.
+
+The dependency is Debian's `python3-cryptography`; imports are lazy so its
+absence disables control without disabling the public status page. Setup and
+the updater install it, and an enabled `manet-admin-setup.service` handles
+older tools updaters at the next boot. The service runs independently of
+node-manager startup. Upgrade every node and restart the web publisher before
+using control; there is no plaintext compatibility fallback. No protobuf
+schema changes are needed.
+
+Earlier publishers included `admin_password` in plaintext config packages.
+An exposed password must be replaced through a trusted path on all nodes;
+encrypting a replacement under a password already known to an observer cannot
+revoke that observer. The encryption change does not retroactively protect
+old broadcasts or old apply logs containing passwords.
+
+This protects the Alfred control path. Browser management intentionally uses
+HTTP over the local AP or Ethernet for trusted-team deployments. The shared
+admin password primarily prevents accidental settings changes by teammates;
+HTTPS is optional rather than a deployment prerequisite. HTTP does not
+protect credentials against a participant who intercepts the connection.
+The shared password also exists on each node: root access to a node conveys
+network administration.
+
+**mesh-config-write.py**
+
+Config and supplicant values are written as literal data using atomic file
+replacement, preserving ownership and permissions. The old interpolated sed
+replacement interpreted delimiters, ampersands, and executable sed commands
+inside accepted values. Regression tests cover those strings, backslashes,
+quoted SSIDs, and rejected newlines.
+
 **mesh_config.py**
 
 The one place that decides which settings are this node's own and which belong
@@ -1107,20 +1185,23 @@ passing through a flasher.
 
 ## Tests
 
-Three unit-test files sit alongside the code they cover: 38 tests, pure Python,
-no hardware and no node:
+Tests sit alongside the code they cover and run without hardware or a node:
 
 | File | Covers |
 |------|--------|
 | `test_halow_plan.py` | The region HaLow plan in `manet_radio.py`: EU capping at 2 MHz and US reaching 8, channel numbers and center frequencies unique within a region and resolving each other, every region/bandwidth pair carrying an operating class, an unknown region falling back to EU, and a channel or bandwidth the region does not have being refused |
 | `test_mesh_config.py` | The local/mesh key split in `mesh_config.py`: EUD and AP keys never reaching Alfred, mesh keys still going, only values that differ from `mesh.conf` counting as changes, and `max_euds_per_node` never being written |
 | `test_peer_radios.py` | The peer radio chips in `manet_peer_radios.py`: frequency-to-channel conversion, published `INTERFACES_JSON` winning over the registry fallback, the fallback filling in when it is empty, and the channel fields surviving an encode/decode round trip |
+| `test_mesh_registry.py` | Real encoder/decoder/registry integration, chunk zero, saved chunks, read failures, and timely publication |
+| `test_mesh_ip_startup.py` | Bounded discovery, late/missing peers, failed queries, and allocation barriers |
+| `test_manet_admin.py` | Real encryption, wrong keys, tampering, authenticated ACKs, expiry, replay after restart/rollback/interrupted apply, password rotation, and literal config writes |
 
 Run them from the git root, so this directory is on `sys.path`, and from the dev
 venv, so the protobuf runtime matches the fleet:
 
 ```bash
 source ~/.venvs/manet/bin/activate    # bash ../packaging/setup-dev-env.sh
+python -m pip install cryptography==43.0.0
 python -m unittest discover -s MANET/node_tools -p 'test_*.py'
 ```
 

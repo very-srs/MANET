@@ -47,6 +47,7 @@ from urllib.parse import urlparse, parse_qs, quote
 from manet_manage import ManageRoutes
 from manet_peer_radios import interfaces_for_telemetry, peer_status_panel
 from mesh_config import apply_local_to_conf, local_changes, mesh_changes, strip_local_keys
+from manet_admin import AdminTransport, CONFIG_ACK_TYPE, new_version, private_json_write
 from manet_radio import (
     HALOW_BW_TXPOWER_CAP_DBM, halow_channel_options,
     _format_halow_bw, get_halow_driver_info, wifi_channel_to_freq, _fmt_dbm,
@@ -60,6 +61,7 @@ from manet_radio import (
 # ─────────────────────────────────────────────────────────────────────────────
 REGISTRY_FILE   = "/var/run/mesh_node_registry"
 MESH_CONF_FILE  = "/etc/mesh.conf"
+ADMIN = AdminTransport()
 # Seconds before /run/gps_status.json counts as stale. gps-reader polls every 5 s;
 # node-manager uses the same budget so the UI and the mesh agree on the position.
 GPS_FIX_MAX_AGE = 60
@@ -131,11 +133,7 @@ def _machine_token_salt():
 
 def get_provisioned_manage_password(conf=None):
     conf = conf or load_kv_file(MESH_CONF_FILE)
-    for key in ('admin_password', 'radio_password', 'lan_ap_key'):
-        value = conf.get(key, '').strip()
-        if value:
-            return value
-    return ''
+    return conf.get('admin_password', '').strip()
 
 def get_perf_auth_token():
     conf = load_kv_file(MESH_CONF_FILE)
@@ -2571,9 +2569,9 @@ PENDING_CONFIG_FILE = '/var/run/mesh_pending_config.json'
 ROLLBACK_STATE_FILE = '/var/lib/manet-config-rollback/state'
 
 def broadcast_config_package(pkg):
-    """Write config package to Alfred type 70."""
-    payload = json.dumps(pkg, separators=(',', ':'))
+    """Write an authenticated, encrypted config package to Alfred type 70."""
     try:
+        payload = json.dumps(ADMIN.seal(ALFRED_CONFIG_TYPE, pkg), separators=(',', ':'))
         r = subprocess.run(
             ['alfred', '-s', str(ALFRED_CONFIG_TYPE)],
             input=payload, capture_output=True, text=True, timeout=5)
@@ -2591,8 +2589,7 @@ def get_pending_config():
 
 def save_pending_config(pkg):
     try:
-        with open(PENDING_CONFIG_FILE, 'w') as f:
-            json.dump(pkg, f)
+        private_json_write(PENDING_CONFIG_FILE, pkg)
         return True
     except Exception:
         return False
@@ -2604,9 +2601,21 @@ def clear_pending_config():
         pass
 
 def make_config_version(config_dict):
-    """8-char SHA-256 prefix of the JSON config (deterministic)."""
-    s = json.dumps(config_dict, sort_keys=True, separators=(',', ':'))
-    return hashlib.sha256(s.encode()).hexdigest()[:8]
+    """Fresh transaction ID: old ACKs cannot approve a repeated edit."""
+    return new_version()
+
+
+def authenticated_config_acks():
+    try:
+        result = subprocess.run(['alfred', '-r', str(CONFIG_ACK_TYPE)],
+                                capture_output=True, text=True, timeout=5)
+        if result.returncode != 0:
+            return {}
+        return {message.payload.get('hostname'): message.payload.get('version')
+                for message in ADMIN.messages(CONFIG_ACK_TYPE, result.stdout)
+                if message.payload.get('kind') == 'config_ack'}
+    except Exception:
+        return {}
 
 
 def restart_eud_ap(changes):
@@ -2663,13 +2672,14 @@ def assemble_admin_status():
     conf       = load_kv_file(MESH_CONF_FILE)
     nodes_raw  = parse_registry()
     pending    = get_pending_config()
+    acks       = authenticated_config_acks()
 
     node_status = []
     for nid, nd in nodes_raw.items():
         node_status.append({
             'hostname':   nd.get('HOSTNAME', 'unknown'),
             'ip':         nd.get('IPV4_ADDRESS', ''),
-            'ack':        nd.get('CONFIG_ACK_VERSION', ''),
+            'ack':        acks.get(nd.get('HOSTNAME', ''), ''),
             'last_seen':  nd.get('LAST_SEEN_TIMESTAMP', '0'),
             'node_state': nd.get('NODE_STATE', 'ACTIVE'),
         })
@@ -3329,15 +3339,15 @@ class MeshHandler(ManageRoutes, http.server.BaseHTTPRequestHandler):
                     'dangerous':  dangerous,
                     'config':     mesh_cfg,
                 }
-                save_pending_config(pkg)
-                broadcast_config_package(pkg)
+                if not broadcast_config_package(pkg):
+                    self.send_json({'ok': False, 'error': 'Cannot publish an authenticated admin change. Check the admin password and node setup log.'})
+                    return
+                if not save_pending_config(pkg):
+                    self.send_json({'ok': False, 'error': 'Cannot save pending configuration'})
+                    return
 
-                # This node ACKs immediately (it's the one staging)
-                try:
-                    with open('/var/run/mesh_config_ack_version', 'w') as f:
-                        f.write(version)
-                except Exception:
-                    pass
+                # This node ACKs through the same authenticated receive and
+                # validation path as its peers on the next manager pass.
 
                 self.send_json({
                     'ok': True,
@@ -3364,10 +3374,11 @@ class MeshHandler(ManageRoutes, http.server.BaseHTTPRequestHandler):
                 if not force:
                     nodes_raw = parse_registry()
                     version   = pkg['version']
+                    acks      = authenticated_config_acks()
                     not_acked = [
                         nd.get('HOSTNAME', nid)
                         for nid, nd in nodes_raw.items()
-                        if nd.get('CONFIG_ACK_VERSION', '') != version
+                        if acks.get(nd.get('HOSTNAME', '')) != version
                     ]
                     if not_acked:
                         self.send_json({
@@ -3380,8 +3391,10 @@ class MeshHandler(ManageRoutes, http.server.BaseHTTPRequestHandler):
                 activate_at = int(time.time()) + 60
                 pkg['activate_at'] = activate_at
                 pkg['no_rollback'] = no_rollback
+                if not broadcast_config_package(pkg):
+                    self.send_json({'ok': False, 'error': 'Cannot encrypt or publish activation'})
+                    return
                 save_pending_config(pkg)
-                broadcast_config_package(pkg)
                 self.send_json({'ok': True, 'activate_at': activate_at,
                                 'no_rollback': no_rollback})
             except Exception as e:
@@ -3394,12 +3407,15 @@ class MeshHandler(ManageRoutes, http.server.BaseHTTPRequestHandler):
                 # re-stage it on the next sync. Broadcast a cancel the way the
                 # radio path does.
                 pending = get_pending_config() or {}
-                broadcast_config_package({
+                sent = broadcast_config_package({
                     'kind':      'mesh_config_cancel',
                     'version':   pending.get('version', ''),
                     'issued_by': get_my_hostname(),
                     'issued_at': int(time.time()),
                 })
+                if not sent:
+                    self.send_json({'ok': False, 'error': 'Cannot encrypt or publish cancellation'})
+                    return
                 clear_pending_config()
                 try:
                     os.remove('/var/run/mesh_config_ack_version')

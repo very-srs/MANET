@@ -161,6 +161,16 @@ tar -zxf /root/tools.tar.gz --no-overwrite-dir -C / 2>/dev/null
 # run again. Only reached on an actual update, so this costs nothing in
 # steady state.
 systemctl daemon-reload 2>/dev/null || true
+# New control messages require authenticated encryption. Install its runtime
+# before restarting the web publisher. Older updaters pick up the enabled
+# setup unit on the next boot; there is never a plaintext compatibility mode.
+if [ -x /usr/local/bin/manet-admin-setup.sh ]; then
+    /usr/local/bin/manet-admin-setup.sh || {
+        echo "ERROR: admin transport dependency unavailable; install python3-cryptography before using network administration" >&2
+        exit 1
+    }
+    systemctl restart mesh-status.service 2>/dev/null || true
+fi
 mkdir -p /etc/update-motd.d
 [ -x /usr/local/bin/manet-provision-status.sh ] && \
     ln -sf /usr/local/bin/manet-provision-status.sh /etc/update-motd.d/50-manet-provision
