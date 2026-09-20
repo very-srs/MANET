@@ -68,22 +68,13 @@ if [[ -f /etc/manet_version.txt ]]; then
 	fi
 fi
 
+# Every board uses GitHub to discover releases. manet_version.txt is the
+# installed version marker carried inside the tarball, not a server asset.
 REMOTE_VERSION_URL="https://raw.githubusercontent.com/very-srs/MANET/refs/heads/main/MANET/node_tools/version.txt"
-case "$BOARD" in
-    rpi5)
-        REMOTE_VERSION_URL="https://www.colorado-governor.com/manet/rpi5/manet_version.txt"
-        ;;
-esac
 
 REMOTE_VERSION=$(curl -H 'Cache-Control: no-cache, no-store' \
     -H 'Pragma: no-cache' \
     -fs "$REMOTE_VERSION_URL" | head -n 1 2>/dev/null)
-
-if [ -z "$REMOTE_VERSION" ] && [ "$REMOTE_VERSION_URL" != "https://raw.githubusercontent.com/very-srs/MANET/refs/heads/main/MANET/node_tools/version.txt" ]; then
-    REMOTE_VERSION=$(curl -H 'Cache-Control: no-cache, no-store' \
-        -H 'Pragma: no-cache' \
-        -fs https://raw.githubusercontent.com/very-srs/MANET/refs/heads/main/MANET/node_tools/version.txt | head -n 1 2>/dev/null)
-fi
 
 if [ -z "$REMOTE_VERSION" ]; then
     if [ "$ROUTINE_MODE" = false ]; then
