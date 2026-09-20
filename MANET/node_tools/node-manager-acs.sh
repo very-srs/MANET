@@ -11,6 +11,7 @@ ALFRED_IDENTITY_TYPE=67
 ALFRED_DATA_TYPE=68
 ALFRED_HELPER_TYPE=69
 MONITOR_INTERVAL=15
+STARTUP_MONITOR_INTERVAL=5
 
 # Lobby channels
 LOBBY_FREQ_2_4=2412
@@ -41,7 +42,6 @@ SCAN_FREQS_5_0="5200 5220 5240 5745 5765 5785 5805 5825"
 SURVEY_MIN_DWELL_MS=25
 
 # Helper scripts
-REGISTRY_BUILDER="/usr/local/bin/mesh-registry-builder.sh"
 IP_MANAGER="/usr/local/bin/mesh-ip-manager.sh"
 CHANNEL_ELECTION="/usr/local/bin/channel-election.sh"
 TOURGUIDE_MANAGER="/usr/local/bin/tourguide-manager.sh"
@@ -61,13 +61,13 @@ HALOW_MCS_SUMMARY="/usr/local/bin/halow-mcs-summary.py"
 LAST_PUBLISHED_PAYLOAD=""
 LAST_PUBLISH_TIME=0
 
-# Identity (hostname, MACs, syncthing ID) does not change while we are up, so
-# it goes out on its own Alfred type and only often enough to stay resident.
+# Identity has a slow keepalive; startup and allocation changes publish sooner.
 # Alfred purges any record it has not seen for ALFRED_DATA_TIMEOUT = 600 s, so
 # at 270 s a publish can fail once and the record still survives. This runs on
 # its own timer rather than inside a pipeline stage, so it keeps ticking in
 # both lobby and data state.
 LAST_IDENTITY_PUBLISH=0
+LAST_IDENTITY_ALLOCATION=""
 LAST_ACK_PUBLISHED=""
 IDENTITY_PUBLISH_INTERVAL=270
 CACHED_SCAN_REPORT_JSON="{}"
@@ -566,7 +566,14 @@ while true; do
     fi
 
     # === PUBLISH IDENTITY (Alfred type 67) ===
-    if [ $((NOW - LAST_IDENTITY_PUBLISH)) -ge $IDENTITY_PUBLISH_INTERVAL ]; then
+    # Advertise while discovering, and on the first pass after a claim/release.
+    # The 270 s interval is only a keepalive for an unchanged allocation.
+    MY_CHUNK=$(cat /var/run/my_ipv4_chunk 2>/dev/null || true)
+    IDENT_IPV4=$(ip addr show dev "$CONTROL_IFACE" 2>/dev/null | grep -oP 'inet \K[\d.]+' | head -1)
+    [ -z "$MY_CHUNK" ] && IDENT_IPV4=""
+    IDENTITY_ALLOCATION="${MY_CHUNK}:${IDENT_IPV4}"
+    if [ -z "$MY_CHUNK" ] || [ "$IDENTITY_ALLOCATION" != "$LAST_IDENTITY_ALLOCATION" ] ||
+            [ $((NOW - LAST_IDENTITY_PUBLISH)) -ge $IDENTITY_PUBLISH_INTERVAL ]; then
         # br0's MAC must come first: encoder.py drops it, because Alfred
         # already stamps every record we publish with it.
         IDENT_MACS=("$MY_MAC")
@@ -578,10 +585,6 @@ while true; do
             fi
         done
 
-        # Empty means unallocated; zero is a valid allocation. Omit the address
-        # when unallocated so peers can distinguish the protobuf zero default.
-        MY_CHUNK=$(cat /var/run/my_ipv4_chunk 2>/dev/null || true)
-        IDENT_IPV4=$(ip addr show dev "$CONTROL_IFACE" 2>/dev/null | grep -oP 'inet \K[\d.]+' | head -1)
         IDENTITY_ARGS=(
             "--hostname" "$(hostname)"
             "--mac-addresses" "${IDENT_MACS[@]}"
@@ -592,8 +595,10 @@ while true; do
 
         IDENTITY_PAYLOAD=$("$ENCODER_PATH" identity "${IDENTITY_ARGS[@]}" 2>/dev/null)
         if [ -n "$IDENTITY_PAYLOAD" ]; then
-            echo -n "$IDENTITY_PAYLOAD" | alfred -s $ALFRED_IDENTITY_TYPE
-            LAST_IDENTITY_PUBLISH=$NOW
+            if echo -n "$IDENTITY_PAYLOAD" | alfred -s $ALFRED_IDENTITY_TYPE; then
+                LAST_IDENTITY_PUBLISH=$NOW
+                LAST_IDENTITY_ALLOCATION="$IDENTITY_ALLOCATION"
+            fi
         else
             log "WARN: identity encoder produced no payload"
         fi
@@ -646,10 +651,7 @@ while true; do
             fi
         fi
 
-        # === REGISTRY BUILD (always needed) ===
-        [ -x "$REGISTRY_BUILDER" ] && "$REGISTRY_BUILDER"
-
-        # === IP MANAGEMENT (always needed) ===
+        # === REGISTRY REFRESH AND IP MANAGEMENT (always needed) ===
         [ -x "$IP_MANAGER" ] && "$IP_MANAGER"
 
         # === BOOTSTRAP STAGE 1: RF SCAN (every 3 min at :10) ===
@@ -671,6 +673,9 @@ while true; do
             time_since_publish=$((NOW - LAST_PUBLISH_TIME))
             [ $time_since_publish -ge 180 ] && DO_LOBBY_PUBLISH=true
         fi
+        # Cold nodes must advertise before allocation; do not wait for an ACS
+        # scan/publish window to make their presence visible to other joiners.
+        [ ! -s /var/run/my_ipv4_chunk ] && DO_LOBBY_PUBLISH=true
         if [ "$DO_LOBBY_PUBLISH" = true ]; then
             log "=== LOBBY PUBLISH ($(date +'%H:%M:%S')) ==="
             
@@ -852,7 +857,7 @@ except Exception:
         fi
 
         # === STAGE 2: PUBLISH (every 3 min at :15) ===
-        if should_perform_action "PUBLISH" 180 15; then
+        if [ ! -s /var/run/my_ipv4_chunk ] || should_perform_action "PUBLISH" 180 15; then
             log "=== PUBLISH ($(date +'%H:%M:%S')) ==="
 
         # Not a positional field: `batctl o` shifts columns on the starred
@@ -946,20 +951,14 @@ except Exception:
             fi
         fi
 
-        # === STAGE 3: REGISTRY BUILD (every 3 min at :20) ===
-        if should_perform_action "REGISTRY" 180 20; then
-            log "=== REGISTRY BUILD ($(date +'%H:%M:%S')) ==="
-            [ -x "$REGISTRY_BUILDER" ] && "$REGISTRY_BUILDER"
-        fi
+        # === STAGE 3: REGISTRY REFRESH AND IP MANAGEMENT (every pass) ===
+        [ -x "$IP_MANAGER" ] && "$IP_MANAGER"
 
         # === STAGE 4: CHANNEL ELECTION (every 3 min at :25) ===
         if should_perform_action "ELECTION" 180 25; then
             log "=== CHANNEL ELECTION ($(date +'%H:%M:%S')) ==="
             [ -x "$CHANNEL_ELECTION" ] && "$CHANNEL_ELECTION"
         fi
-
-        # === STAGE 5: IP MANAGEMENT ===
-        [ -x "$IP_MANAGER" ] && "$IP_MANAGER"
 
         # === STAGE 6: QUORUM CHECK ===
         if [ -x "$QUORUM_CHECKER" ]; then
@@ -1020,7 +1019,12 @@ except Exception:
 
     fi  # End of data channel state
 
-    sleep "$MONITOR_INTERVAL"
+    # Poll discovery promptly while waiting for the first allocation.
+    if [ -s /var/run/my_ipv4_chunk ]; then
+        sleep "$MONITOR_INTERVAL"
+    else
+        sleep "$STARTUP_MONITOR_INTERVAL"
+    fi
 done
 
 log "Main loop exited unexpectedly. Restarting..."

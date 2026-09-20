@@ -45,7 +45,10 @@ class ChunkClaimsTests(unittest.TestCase):
             '#!/bin/bash\n'
             'case "$1" in\n'
             '  -r) cat "$REVIEW_RECORDS/$2" ;;\n'
-            '  -s) cat > "$REVIEW_RECORDS/published-$2" ;;\n'
+            '  -s) if [ -f "$REVIEW_RECORDS/fail-publish-once" ]; then\n'
+            '        rm "$REVIEW_RECORDS/fail-publish-once"; cat >/dev/null; exit 1\n'
+            '      fi\n'
+            '      cat > "$REVIEW_RECORDS/published-$2" ;;\n'
             '  *) exit 1 ;;\n'
             'esac\n'
         )
@@ -130,14 +133,52 @@ class ChunkClaimsTests(unittest.TestCase):
         (self.records / '67').write_text('')
         self.assertEqual(self.build_registry(), [f'0,{MAC}'])
 
-    def publish_identity(self, script, allocate=False):
+    def test_failed_alfred_read_preserves_previous_claims_and_registry(self):
+        self.add_node()
+        self.build_registry()
+        previous = self.registry.read_bytes(), self.claims.read_bytes()
+        for kind in (67, 68):
+            with self.subTest(kind=kind):
+                record = self.records / str(kind)
+                contents = record.read_text()
+                record.unlink()
+                result = subprocess.run(['bash', str(TOOLS / 'mesh-registry-builder.sh')],
+                                        env=self.env, capture_output=True, text=True, timeout=10)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual((self.registry.read_bytes(), self.claims.read_bytes()), previous)
+                record.write_text(contents)
+
+    def test_saved_chunk_recovery_respects_peer_claims(self):
+        source = (TOOLS / 'mesh-ip-manager.sh').read_text()
+        selection = source.split('# --- State Machine ---\n', 1)[1].split('        # Get chunk IPs', 1)[0]
+        selection += 'printf "%s\\n" "$PROPOSED_CHUNK"\n;;\nesac\n'
+        setup = ('IPV4_NETWORK=10.30.0.0/27\nIPV4_STATE=UNCONFIGURED\n'
+                 'PERSISTENT_CHUNK=0\nPERSISTENT_IPV4=10.30.0.6\n'
+                 'mapfile -t CLAIMED_CHUNKS < "$CLAIMED_CHUNKS_FILE"\n'
+                 'mac_is_local() { [ "$1" = "' + MAC + '" ]; }\n')
+        # The /27 has three chunks. The saved chunk and one alternative are
+        # taken, leaving exactly chunk 2. Own cached advertisements are ignored.
+        self.claims.write_text('0,02:00:00:00:00:02\n1,02:00:00:00:00:03\n')
+        result = self.allocator(setup + selection)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), '2')
+        self.claims.write_text(f'0,{MAC}\n')
+        result = self.allocator(setup + selection)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), '0')
+
+    def publish_identity(self, script, allocate=False, recent=False, fail_first=False):
         # Execute one real manager loop through identity publication only.
         # Redirect runtime files and hardware discovery into this fixture;
         # stub hardware/config operations, leaving the real encoder in place.
         source = (TOOLS / script).read_text().split('# === MAIN LOOP ===\n', 1)[1]
         stop = ('# === CHECK STATE: LOBBY OR DATA ===' if script.endswith('-acs.sh')
                 else '# === PUBLISH TELEMETRY (Alfred type 68) ===')
-        source = source.split(stop, 1)[0] + '\n    break\ndone\n'
+        source = source.split(stop, 1)[0]
+        if fail_first:
+            (self.records / 'fail-publish-once').touch()
+            source += '\nif [ "${REVIEW_PASS:-0}" = 0 ]; then REVIEW_PASS=1; continue; fi\n'
+        source += '\n    break\ndone\n'
         run = self.root / 'run'
         run.mkdir(exist_ok=True)
         source = source.replace('/var/run/', str(run) + '/')
@@ -150,7 +191,8 @@ class ChunkClaimsTests(unittest.TestCase):
                   'runuser() { :; }\nhostname() { printf "mesh-test\\n"; }\n'
                   'ip() { printf "    inet %s/28 scope global br0\\n" "$REVIEW_IPV4"; }\n')
         env = dict(self.env, ENCODER_PATH=str(TOOLS / 'encoder.py'), MY_MAC=MAC,
-                   LAST_IDENTITY_PUBLISH='0', IDENTITY_PUBLISH_INTERVAL='270',
+                   LAST_IDENTITY_PUBLISH=str(int(time.time())) if recent else '0',
+                   LAST_IDENTITY_ALLOCATION=':', IDENTITY_PUBLISH_INTERVAL='270',
                    ALFRED_IDENTITY_TYPE='67', CONTROL_IFACE='br0',
                    RADIO_STATE_SYNC='', CONFIG_SYNC='', CONFIG_ROLLBACK='',
                    REGISTRY_BUILDER='', IP_MANAGER=str(allocator) if allocate else '',
@@ -183,6 +225,18 @@ class ChunkClaimsTests(unittest.TestCase):
                 identity = self.publish_identity(script)
                 self.assertEqual(identity.ipv4_chunk, 0)
                 self.assertEqual(int_to_ipv4(identity.ipv4_address), '10.30.0.6')
+
+
+    def test_allocation_change_publishes_before_keepalive_and_retries_failure(self):
+        marker = self.root / 'run/my_ipv4_chunk'
+        marker.parent.mkdir()
+        marker.write_text('0\n')
+        for script in ('node-manager-acs.sh', 'node-manager-static.sh', 'node-manager.sh'):
+            for fail_first in (False, True):
+                with self.subTest(script=script, fail_first=fail_first):
+                    (self.records / 'published-67').unlink(missing_ok=True)
+                    identity = self.publish_identity(script, recent=True, fail_first=fail_first)
+                    self.assertEqual(int_to_ipv4(identity.ipv4_address), '10.30.0.6')
 
 
 if __name__ == '__main__':

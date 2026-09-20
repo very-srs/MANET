@@ -13,6 +13,7 @@ CONTROL_IFACE="br0"
 ALFRED_IDENTITY_TYPE=67
 ALFRED_DATA_TYPE=68
 MONITOR_INTERVAL=15
+STARTUP_MONITOR_INTERVAL=5
 
 # Static channels (lobby channels used as permanent data channels)
 STATIC_FREQ_2_4=2412
@@ -26,7 +27,6 @@ WPA_IFACE_2_4=""
 WPA_IFACE_5_0=""
 
 # Helper scripts
-REGISTRY_BUILDER="/usr/local/bin/mesh-registry-builder.sh"
 IP_MANAGER="/usr/local/bin/mesh-ip-manager.sh"
 REGISTRY_STATE_FILE="/var/run/mesh_node_registry"
 ENCODER_PATH="/usr/local/bin/encoder.py"
@@ -42,11 +42,11 @@ LAST_PUBLISHED_PAYLOAD=""
 LAST_PUBLISH_TIME=0
 PUBLISH_INTERVAL=180  # Publish every 3 minutes
 
-# Identity (hostname, MACs, syncthing ID) does not change while we are up, so
-# it goes out on its own Alfred type and only often enough to stay resident.
+# Identity has a slow keepalive; startup and allocation changes publish sooner.
 # Alfred purges any record it has not seen for ALFRED_DATA_TIMEOUT = 600 s, so
 # at 270 s a publish can fail once and the record still survives.
 LAST_IDENTITY_PUBLISH=0
+LAST_IDENTITY_ALLOCATION=""
 LAST_ACK_PUBLISHED=""
 IDENTITY_PUBLISH_INTERVAL=270
 
@@ -308,16 +308,18 @@ while true; do
     # Verify we haven't drifted from static channels (safety check)
     ensure_static_channels
     
-    # === REGISTRY BUILD ===
-    [ -x "$REGISTRY_BUILDER" ] && "$REGISTRY_BUILDER"
-    
-    # === IP MANAGEMENT ===
+    # === REGISTRY REFRESH AND IP MANAGEMENT ===
     [ -x "$IP_MANAGER" ] && "$IP_MANAGER"
     
     # === PUBLISH IDENTITY (Alfred type 67) ===
-    # Hostname, MACs and syncthing ID do not change while we are up, so they
-    # ride their own type and only refresh often enough to stay resident.
-    if [ $((NOW - LAST_IDENTITY_PUBLISH)) -ge $IDENTITY_PUBLISH_INTERVAL ]; then
+    # Publish during discovery and whenever allocation changes; 270 s is only
+    # the keepalive interval once configured. Zero is a valid chunk.
+    MY_CHUNK=$(cat /var/run/my_ipv4_chunk 2>/dev/null || true)
+    CURRENT_IPV4=$(ip addr show dev "$CONTROL_IFACE" 2>/dev/null | grep -oP 'inet \K[\d.]+' | head -1)
+    [ -z "$MY_CHUNK" ] && CURRENT_IPV4=""
+    IDENTITY_ALLOCATION="${MY_CHUNK}:${CURRENT_IPV4}"
+    if [ -z "$MY_CHUNK" ] || [ "$IDENTITY_ALLOCATION" != "$LAST_IDENTITY_ALLOCATION" ] ||
+            [ $((NOW - LAST_IDENTITY_PUBLISH)) -ge $IDENTITY_PUBLISH_INTERVAL ]; then
         # br0's MAC must come first: encoder.py drops it, because Alfred
         # already stamps every record we publish with it.
         ALL_MACS=("$MY_MAC")
@@ -329,11 +331,6 @@ while true; do
             fi
         done
 
-        # Read after IP management: it may have just claimed or released a chunk.
-        # Empty means unallocated; zero is a valid allocation. Omit the address
-        # when unallocated so peers can distinguish the protobuf zero default.
-        MY_CHUNK=$(cat /var/run/my_ipv4_chunk 2>/dev/null || true)
-        CURRENT_IPV4=$(ip addr show dev "$CONTROL_IFACE" 2>/dev/null | grep -oP 'inet \K[\d.]+' | head -1)
         SYNCTHING_ID=$(runuser -u radio -- syncthing --device-id 2>/dev/null || echo "")
 
         IDENTITY_ARGS=(
@@ -346,8 +343,10 @@ while true; do
 
         IDENTITY_PAYLOAD=$("$ENCODER_PATH" identity "${IDENTITY_ARGS[@]}" 2>/dev/null)
         if [ -n "$IDENTITY_PAYLOAD" ]; then
-            echo -n "$IDENTITY_PAYLOAD" | alfred -s $ALFRED_IDENTITY_TYPE
-            LAST_IDENTITY_PUBLISH=$NOW
+            if echo -n "$IDENTITY_PAYLOAD" | alfred -s $ALFRED_IDENTITY_TYPE; then
+                LAST_IDENTITY_PUBLISH=$NOW
+                LAST_IDENTITY_ALLOCATION="$IDENTITY_ALLOCATION"
+            fi
         else
             log "WARN: identity encoder produced no payload: $("$ENCODER_PATH" identity "${IDENTITY_ARGS[@]}" 2>&1 >/dev/null | tr '\n' ' ')"
         fi
@@ -356,7 +355,7 @@ while true; do
     # === PUBLISH TELEMETRY (Alfred type 68) ===
     time_since_publish=$((NOW - LAST_PUBLISH_TIME))
 
-    if [ $time_since_publish -ge $PUBLISH_INTERVAL ]; then
+    if [ ! -s /var/run/my_ipv4_chunk ] || [ $time_since_publish -ge $PUBLISH_INTERVAL ]; then
         log "Publishing status to Alfred..."
 
         # Not a positional field: `batctl o` shifts columns on the starred
@@ -457,7 +456,12 @@ except Exception:
 	        "$election_script" &    # ← NOW runs only if checks pass
 	    fi
 	done
-    sleep "$MONITOR_INTERVAL"
+    # Poll discovery promptly while waiting for the first allocation.
+    if [ -s /var/run/my_ipv4_chunk ]; then
+        sleep "$MONITOR_INTERVAL"
+    else
+        sleep "$STARTUP_MONITOR_INTERVAL"
+    fi
 done
 
 log "Main loop exited unexpectedly. Restarting..."

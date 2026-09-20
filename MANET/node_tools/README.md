@@ -24,8 +24,8 @@ The scripts that run a mesh node. Everything in this directory is installed to
 
 **node-manager-acs.sh**
 
-The orchestrator for Automatic Channel Selection mode. It runs every mesh
-operation on a synchronized schedule:
+The orchestrator for Automatic Channel Selection mode. RF scans and elections
+run on a synchronized schedule; registry/IP management runs every loop:
 
 - RF scanning, every 3 minutes
 - Status publishing to Alfred
@@ -438,7 +438,7 @@ enables the AP.
 
 ## Network Management
 
-**mesh-ip-manager.sh**
+**mesh-ip-manager.sh** and **mesh-ip-startup.py**
 
 Chunk-based IPv4 allocation. Each node claims a chunk of addresses sized
 `max_euds_per_node + 2`.
@@ -456,6 +456,22 @@ not isolation. `manet-ui-firewall.sh` is what separates them.
 The first five addresses network-wide are reserved for services. A chunk is
 claimed from those peers have not taken, and a collision is resolved by a MAC
 tie-break. `dnsmasq` is configured for the pool when a node needs it.
+
+On each boot, IPv4 allocation waits for usable `br0` link-local IPv6, active
+Alfred, and the node's initial identity/telemetry publication. It then observes
+BATMAN peers for 10 seconds (one Alfred synchronization period). If visible
+peers still lack identity or telemetry, it waits up to 20 seconds total, then
+allocates using the claims received so far. Peer changes never restart either
+deadline. Transient local failures defer allocation but preserve elapsed time;
+the deadline does not bypass a failed registry read or local readiness checks.
+Nodes continue publishing over IPv6 throughout the wait. Startup checks run
+with a 5-second loop sleep, returning to 15 seconds after allocation; work
+within a loop can delay the check past its deadline.
+
+The registry and wait state are rebuilt each boot. A remembered IPv4 chunk in
+`/etc/mesh_ipv4_state` must pass the same wait and is reused only if no peer
+claims it. Every allocation pass refreshes the registry, and changed claims
+are published on the next manager pass instead of waiting for the keepalive.
 
 Chunk size is uniform across the mesh and set at flash time, which is why the
 management UI shows `max_euds_per_node` without letting you write it. There is

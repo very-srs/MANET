@@ -804,7 +804,11 @@ publishes its own chunk in its identity record (`ipv4_chunk`, Alfred type 67),
 and `mesh-registry-builder.sh` decodes those into `/tmp/claimed_chunks.txt` as
 `<chunk>,<mac>` lines. This script reads that file and never queries Alfred
 itself. On a successful claim it writes the chunk to `/var/run/my_ipv4_chunk`,
-which the node manager hands back to the encoder.
+which the node manager hands back to the encoder. The IP manager calls
+`mesh-ip-startup.py` before any allocation or restoration. That helper refreshes
+the registry on every pass, including after startup; ACS no longer waits up to
+180 seconds to rebuild the allocation snapshot. Failed Alfred reads leave the
+previous registry and claims intact and defer IP management.
 
 Chunk numbers start at **zero**, after the five reserved service addresses:
 in `10.30.0.0/24`, chunk zero starts at `10.30.0.6`. The registry includes it
@@ -814,18 +818,61 @@ The node managers omit that address until `/var/run/my_ipv4_chunk` exists;
 the static manager reads the chunk after running IP management, so the first
 identity publication describes the allocation just made.
 
-Four properties of that file matter:
+**Boot discovery is deliberately nonblocking.** The node manager must keep
+publishing types 67 and 68 while IPv4 is unassigned, or a whole mesh booting
+together would wait forever for records nobody has published. Both manager
+variants publish each loop until allocated; allocation changes bypass the
+270-second identity keepalive, and failed identity sends are retried.
+
+The startup helper requires a usable (non-tentative, non-failed) link-local
+IPv6 address on `br0`, an active Alfred primary on `br0`, a successful BATMAN
+originator query, and our own joined identity/telemetry in the registry. The
+generated Alfred unit now waits on `br0`, the interface Alfred actually uses.
+It explicitly sets Alfred's existing default synchronization period to 10 s.
+
+With those prerequisites met, start **one fixed observation window** using
+monotonic time. Allow allocation after **10 seconds** if every visible peer has
+joined identity/telemetry (including the solo case). Missing peer records can
+extend discovery only until **20 seconds from the original start**, when the
+node logs the missing peers and proceeds with the claims received so far.
+Peer arrivals, departures, and repeated membership changes never reset the
+start time or extend the deadline. Records arriving between 10 and 20 seconds
+can complete discovery immediately on the next successful check.
+
+These limits allow one Alfred synchronization period normally and a second
+period for incomplete peer data. All nodes are primary on the same BATMAN L2
+domain, so the delay is not multiplied by RF hop count. `alfred -r` reads the
+primary's local cache; an empty reply does not establish that no peers exist.
+The helper uses
+`batctl meshif bat0 originators_json` and matches originator MACs against the
+identity's interface MAC list. Peers **do not need IPv4** to satisfy that check.
+
+Proceeding at the deadline deliberately accepts an incomplete view. Delayed
+radios, lost data, simultaneous choices, and partition merges can cause
+collisions; prompt claim publication and MAC conflict resolution remain
+necessary. Failed local commands or missing local readiness still defer
+allocation even after the deadline, but preserve the original start time.
+On recovery, the node uses that elapsed time rather than starting over.
+
+Both managers sleep 5 seconds between loops while unallocated, then return to
+15 seconds. The deadline is acted on at the next successful check; work within
+a loop can delay it, so 20 seconds is a limit on the deliberate peer-data wait,
+not a guarantee of IPv4 within 20 seconds of boot. Progress is recorded in
+`/var/run/mesh-ip-startup.json` only for this boot. No registry is required from
+a prior boot.
+
+Four properties of the claimed-chunk file matter:
 
 - Only nodes the registry marks **ACTIVE** appear. One unheard from for 300 s
   goes STALE and its chunk returns to the pool.
-- A free chunk is chosen at **random**, not lowest-first, so two nodes booting
-  together with the same view do not pick the same one.
-- The file lives in `/tmp` and is empty at boot. Absent means "nothing claimed",
-  so a node starting before Alfred has converged sees the whole space as free.
-- **A node with saved state ignores the file** and reasserts its remembered
-  chunk. A false conflict from stale `/tmp` data would clear that state and
-  cause exactly the churn persistence exists to prevent. Real collisions are
-  caught after configuration by the MAC tie-break, which works on live data.
+- A free chunk is chosen at **random**, reducing but not eliminating the
+  chance that nodes booting together pick the same one.
+- The file lives in `/tmp` and is rebuilt at boot. Its absence cannot bypass
+  discovery or a successful registry refresh.
+- A saved chunk in `/etc/mesh_ipv4_state` is a preference. After discovery,
+  reuse it only if no other node claims it; otherwise choose a free chunk.
+  Ignore our own cached advertisement when checking the saved chunk. Later
+  collisions are resolved by the MAC tie-break using Alfred's claim list.
 
 Chunk size is uniform across the mesh: `max_euds_per_node + 2`, set at flash
 time, which is why `mesh_config.py` keeps that key display-only in the
@@ -871,8 +918,8 @@ so anything that repeats is paid for continuously.
 
 | Type | Message | Published | Contents |
 |------|---------|-----------|----------|
-| 67 | `NodeIdentity` | every 270 s | hostname, MACs, Syncthing ID, chunk, IP |
-| 68 | `NodeTelemetry` | every 180 s | everything volatile |
+| 67 | `NodeIdentity` | startup, allocation changes, 270 s keepalive | hostname, MACs, Syncthing ID, chunk, IP |
+| 68 | `NodeTelemetry` | every startup loop, then 180 s | everything volatile |
 | 69 | `NodeTelemetry` | tourguide window | helper beacons (channels, partition size) |
 
 Alfred stamps every record with the publishing node's MAC; it runs `-i br0`, so
