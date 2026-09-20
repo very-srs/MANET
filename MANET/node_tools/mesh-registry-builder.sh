@@ -150,7 +150,10 @@ for NODE_MAC in "${!TELEMETRY_B64[@]}"; do
         echo ""
     } >> "$REGISTRY_TMP"
 
-    if [[ "$EFFECTIVE_NODE_STATE" == "ACTIVE" && -n "${F[IPV4_CHUNK]}" && "${F[IPV4_CHUNK]}" != "0" ]]; then
+    # Chunk numbers start at zero AFTER the five reserved service addresses.
+    # Proto3 also decodes an unset chunk as zero; require an advertised IPv4
+    # address so a node awaiting allocation does not claim chunk zero by default.
+    if [[ "$EFFECTIVE_NODE_STATE" == "ACTIVE" && -n "${F[IPV4_CHUNK]}" && -n "${F[IPV4_ADDRESS]}" ]]; then
         echo "${F[IPV4_CHUNK]},${NODE_MAC}" >> "$CLAIMED_CHUNKS_TMP"
     fi
 
