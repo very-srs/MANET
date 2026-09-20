@@ -1420,8 +1420,8 @@ Requires=batman-enslave.service
 
 [Service]
 Type=simple
-ExecStartPre=/bin/bash -c 'for i in {1..20}; do if ip -6 addr show dev bat0 | grep "inet6 fe80::" | grep -qv "tentative"; then exit 0; fi; sleep 1; done; echo "bat0 link-local IPv6 address not ready" >&2; exit 1'
-ExecStart=/usr/sbin/alfred -m -i br0 -f
+ExecStartPre=/bin/bash -c 'for i in {1..20}; do if ip -6 addr show dev br0 | grep "inet6 fe80:" | grep -qvE "tentative|dadfailed"; then exit 0; fi; sleep 1; done; echo "br0 link-local IPv6 address not ready" >&2; exit 1'
+ExecStart=/usr/sbin/alfred -m -i br0 -f -p 10
 UMask=0000
 Restart=always
 RestartSec=10

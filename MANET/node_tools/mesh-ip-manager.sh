@@ -31,6 +31,7 @@
 CONTROL_IFACE="br0"
 CLAIMED_CHUNKS_FILE="/tmp/claimed_chunks.txt"
 PERSISTENT_STATE_FILE="/etc/mesh_ipv4_state"
+STARTUP_HELPER="${MESH_IP_STARTUP_HELPER:-/usr/local/bin/mesh-ip-startup.py}"
 
 # Source the network configuration
 MAX_EUDS=1
@@ -183,6 +184,19 @@ is_service_reserved_ip() {
 
     offset=$((IP_INT - MIN_INT))
     [ "$offset" -ge 0 ] && [ "$offset" -lt "$SERVICES_RESERVED" ]
+}
+
+# A saved allocation is a preference, not ownership. Check the fresh registry
+# before restoring it, ignoring our own identity cached elsewhere in the mesh.
+chunk_claimed_by_peer() {
+    local proposed="$1" chunk mac entry
+    for entry in "${CLAIMED_CHUNKS[@]}"; do
+        IFS=, read -r chunk mac <<< "$entry"
+        if [[ "$chunk" == "$proposed" ]] && ! mac_is_local "$mac"; then
+            return 0
+        fi
+    done
+    return 1
 }
 
 # Get a random available chunk
@@ -456,6 +470,11 @@ ensure_control_addr() {
 
 # --- Main Logic ---
 
+# This refreshes the registry on every pass and returns promptly while boot
+# discovery is pending. Leave node-manager free to publish over IPv6. Run it
+# before restoring even a saved chunk or changing any interface/DHCP state.
+python3 "$STARTUP_HELPER" || exit 0
+
 # Get our MAC address
 MY_MAC=$(cat "/sys/class/net/${CONTROL_IFACE}/address" 2>/dev/null || echo "")
 if [ -z "$MY_MAC" ]; then
@@ -500,7 +519,6 @@ fi
 case $IPV4_STATE in
     "UNCONFIGURED")
         PROPOSED_CHUNK=""
-        SHOULD_USE_PERSISTENT=false
 
         # Check if we have a persistent chunk and if network has changed
         if [ -n "$PERSISTENT_CHUNK" ] && [ -n "$PERSISTENT_IPV4" ]; then
@@ -514,9 +532,12 @@ case $IPV4_STATE in
             else
                 # Verify persistent IP is in current network
                 if ip_in_cidr "$PERSISTENT_IPV4" "$IPV4_NETWORK"; then
-                    log "Attempting to reclaim previous chunk $PERSISTENT_CHUNK (IP: ${PERSISTENT_IPV4})"
-                    PROPOSED_CHUNK="$PERSISTENT_CHUNK"
-                    SHOULD_USE_PERSISTENT=true
+                    if chunk_claimed_by_peer "$PERSISTENT_CHUNK"; then
+                        log "Previous chunk $PERSISTENT_CHUNK is claimed by a peer. Selecting a free chunk."
+                    else
+                        log "Reclaiming previous chunk $PERSISTENT_CHUNK (IP: ${PERSISTENT_IPV4})"
+                        PROPOSED_CHUNK="$PERSISTENT_CHUNK"
+                    fi
                 else
                     log "Persistent IP ${PERSISTENT_IPV4} not in network ${IPV4_NETWORK}. Selecting new chunk."
                     PERSISTENT_IPV4=""
@@ -543,24 +564,9 @@ case $IPV4_STATE in
         
         log "Proposed chunk $PROPOSED_CHUNK: primary=$BR0_PRIMARY, gateway=$BR0_SECONDARY, dhcp=$DHCP_START-$DHCP_END"
 
-        # For persistent chunks, skip the claimed_chunks conflict check and assign directly.
-        # claimed_chunks.txt lives in /tmp and is lost on reboot, so it routinely contains
-        # stale entries from other nodes. A false conflict here clears persistent state and
-        # causes the node to pick a random new chunk — exactly the churn we want to avoid.
-        # Real conflicts (two live nodes with the same IPs) are resolved by the MAC tie-breaker
-        # in the CONFIGURED branch, which operates on actual live ARP data.
-        CONFLICT=false
-        if [ "$SHOULD_USE_PERSISTENT" = false ]; then
-            for entry in "${CLAIMED_CHUNKS[@]}"; do
-                CLAIMED_CHUNK=$(echo "$entry" | cut -d',' -f1)
-                if [[ "$CLAIMED_CHUNK" == "$PROPOSED_CHUNK" ]]; then
-                    CONFLICT=true
-                    break
-                fi
-            done
-        fi
-
-        if [ "$CONFLICT" = true ]; then
+        # A fresh snapshot protects both new and remembered allocations.
+        # Simultaneous claims / partition merges still need the MAC tie-break.
+        if chunk_claimed_by_peer "$PROPOSED_CHUNK"; then
             log "Proposed chunk ${PROPOSED_CHUNK} is in use. Will retry next cycle."
         else
             log "Claiming chunk ${PROPOSED_CHUNK} with br0 IPs ${BR0_PRIMARY} and ${BR0_SECONDARY}..."

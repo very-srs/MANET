@@ -34,8 +34,9 @@ log() {
 # Alfred prints one record per line as:  { "aa:bb:cc:dd:ee:ff", "<base64>" },
 # Emit "<mac> <base64>" so the key travels with the payload.
 alfred_records() {
-    alfred -r "$1" 2>/dev/null |
-        sed -n 's/^[[:space:]]*{[[:space:]]*"\([0-9a-fA-F:]\{17\}\)"[[:space:]]*,[[:space:]]*"\([^"]*\)".*/\1 \2/p'
+    local records
+    records=$(timeout 5 alfred -r "$1" 2>/dev/null) || return 1
+    sed -n 's/^[[:space:]]*{[[:space:]]*"\([0-9a-fA-F:]\{17\}\)"[[:space:]]*,[[:space:]]*"\([^"]*\)".*/\1 \2/p' <<< "$records"
 }
 
 # Single-quote a value for the registry file. Network-sourced strings land in
@@ -56,13 +57,21 @@ NOW=$(date +%s)
 declare -A IDENTITY_B64=()
 declare -A TELEMETRY_B64=()
 
+# Read both types successfully before replacing either snapshot. A failed
+# Alfred request is not an empty mesh. Process substitution hides that error.
+IDENTITY_RECORDS=$(alfred_records "$ALFRED_IDENTITY_TYPE") &&
+    TELEMETRY_RECORDS=$(alfred_records "$ALFRED_DATA_TYPE") || {
+        log "Alfred read failed; keeping the previous registry and claims"
+        exit 1
+    }
+
 while read -r _mac _payload; do
     [ -n "$_mac" ] && [ -n "$_payload" ] && IDENTITY_B64[${_mac,,}]="$_payload"
-done < <(alfred_records "$ALFRED_IDENTITY_TYPE")
+done <<< "$IDENTITY_RECORDS"
 
 while read -r _mac _payload; do
     [ -n "$_mac" ] && [ -n "$_payload" ] && TELEMETRY_B64[${_mac,,}]="$_payload"
-done < <(alfred_records "$ALFRED_DATA_TYPE")
+done <<< "$TELEMETRY_RECORDS"
 
 log "Found ${#TELEMETRY_B64[@]} telemetry and ${#IDENTITY_B64[@]} identity payloads from Alfred"
 
