@@ -1,0 +1,12 @@
+[Unit]
+Description=Install MANET admin transport dependency
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/manet-admin-setup.sh
+TimeoutStartSec=180
+
+[Install]
+WantedBy=multi-user.target

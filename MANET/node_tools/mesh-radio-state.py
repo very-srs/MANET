@@ -18,6 +18,7 @@ import socket
 import subprocess
 import sys
 import time
+from manet_admin import AdminTransport, private_json_write
 
 # Same implementations the management UI uses for a local change, so an
 # Alfred-staged channel or power change means exactly the same thing.
@@ -37,6 +38,7 @@ CURRENT_STATE_FILE = "/var/lib/mesh_radio_state.json"
 LOG_FILE = "/var/log/mesh-radio-state.log"
 VALID_IFACES = ("wlan0", "wlan1", "wlan2")
 VALID_STATES = ("up", "down")
+ADMIN = AdminTransport()
 # Keys a radio_state package may carry besides "desired". Every one of these
 # is a change that has to land on every node at the same time, which is why
 # they are staged through Alfred rather than pushed node to node.
@@ -89,10 +91,7 @@ def read_json(path):
 
 
 def write_json(path, value):
-    tmp = path + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(value, f, separators=(",", ":"))
-    os.replace(tmp, path)
+    private_json_write(path, value)
 
 
 def load_halow_ifaces():
@@ -220,8 +219,8 @@ def validate_pkg(pkg):
 
 
 def send_alfred(type_id, payload):
-    body = json.dumps(payload, separators=(",", ":"))
     try:
+        body = json.dumps(ADMIN.seal(type_id, payload), separators=(",", ":"))
         r = subprocess.run(["alfred", "-s", str(type_id)], input=body,
                            capture_output=True, text=True, timeout=5)
         return r.returncode == 0
@@ -242,48 +241,6 @@ def publish_ack(version, ok=True, error="", target=False):
     send_alfred(ALFRED_RADIO_ACK_TYPE, payload)
 
 
-def add_candidate(candidates, value):
-    if isinstance(value, bytes):
-        value = value.decode(errors="ignore")
-    if isinstance(value, str):
-        value = value.strip()
-        if not value:
-            return
-        try:
-            value = json.loads(value)
-        except Exception:
-            return
-    if isinstance(value, dict) and value.get("kind") in ("radio_state", "radio_cancel"):
-        candidates.append(value)
-
-
-def extract_alfred_payloads(raw):
-    candidates = []
-    add_candidate(candidates, raw)
-    try:
-        data = json.loads(raw)
-        if isinstance(data, dict):
-            for value in data.values():
-                add_candidate(candidates, value)
-        elif isinstance(data, list):
-            for value in data:
-                add_candidate(candidates, value)
-    except Exception:
-        pass
-
-    for line in raw.splitlines():
-        add_candidate(candidates, line)
-
-    for match in re.finditer(r'"((?:\\.|[^"\\])*)"\s*(?:[,}])', raw):
-        try:
-            text = bytes(match.group(1), "utf-8").decode("unicode_escape")
-        except Exception:
-            continue
-        add_candidate(candidates, text)
-
-    return candidates
-
-
 def latest_radio_package():
     try:
         r = run(["alfred", "-r", str(ALFRED_RADIO_TYPE)], timeout=5)
@@ -291,11 +248,8 @@ def latest_radio_package():
         return None
     if r.returncode != 0:
         return None
-    pkgs = extract_alfred_payloads(r.stdout)
-    if not pkgs:
-        return None
-    pkgs.sort(key=lambda p: (int(p.get("issued_at", 0) or 0), str(p.get("version", ""))))
-    return pkgs[-1]
+    messages = ADMIN.messages(ALFRED_RADIO_TYPE, r.stdout)
+    return messages[-1] if messages else None
 
 
 def clear_pending(version=None):
@@ -373,19 +327,21 @@ def record_current_state(pkg):
 
 
 def sync_once():
-    pkg = latest_radio_package()
+    message = latest_radio_package()
     pending = read_json(PENDING_FILE)
 
-    if not pkg:
-        if pending and pending.get("version"):
-            publish_ack(pending["version"], True, "", target_matches(pending))
+    if not message:
         return 0
+    pkg = message.payload
 
     if pkg.get("kind") == "radio_cancel":
+        if not ADMIN.accept(ALFRED_RADIO_TYPE, message):
+            return 0
         version = pkg.get("version", "")
         clear_pending(version)
         publish_ack(version, True, "cancelled", False)
         log(f"Cancelled pending radio state {version}")
+        ADMIN.complete(ALFRED_RADIO_TYPE, message)
         return 0
 
     version = pkg.get("version", "")
@@ -396,11 +352,15 @@ def sync_once():
         log(f"Rejected radio state {version}: {error}")
         return 1
 
+    if not ADMIN.accept(ALFRED_RADIO_TYPE, message):
+        return 0
+
     activate_at = int(pkg.get("activate_at", 0) or 0)
     already_applied = read_text(APPLIED_VERSION_FILE) == version
     if activate_at > 0 and already_applied:
         clear_pending(version)
         publish_ack(version, True, "applied", target)
+        ADMIN.complete(ALFRED_RADIO_TYPE, message)
         return 0
 
     if not pending or pending.get("version") != version or pending.get("activate_at") != pkg.get("activate_at"):
@@ -412,6 +372,9 @@ def sync_once():
 
     if activate_at > 0 and int(time.time()) >= activate_at and not already_applied:
         try:
+            # Persist consumption before a radio/service change can interrupt
+            # us. Retry failures by staging a new authenticated transaction.
+            ADMIN.complete(ALFRED_RADIO_TYPE, message)
             apply_package(pkg)
             write_text(APPLIED_VERSION_FILE, version)
             clear_pending(version)

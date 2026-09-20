@@ -26,6 +26,7 @@ import sys
 import time
 
 from mesh_config import strip_local_keys
+from manet_admin import AdminTransport, CONFIG_ACK_TYPE, private_json_write
 
 ALFRED_CONFIG_TYPE = 70
 PENDING_FILE = "/var/run/mesh_pending_config.json"
@@ -34,6 +35,7 @@ APPLIED_VERSION_FILE = "/var/run/mesh_applied_config_version"
 APPLY_SCRIPT = "/usr/local/bin/mesh-config-apply.sh"
 ROLLBACK_SCRIPT = "/usr/local/bin/mesh-config-rollback.sh"
 LOG_FILE = "/var/log/mesh-config-sync.log"
+ADMIN = AdminTransport()
 
 # Only these may be carried in a package. EUD/AP settings are per-node and are
 # stripped even if an older publisher still includes them.
@@ -72,6 +74,16 @@ def write_file(path, text):
     except Exception as e:
         log(f"cannot write {path}: {e}")
         return False
+
+
+def publish_ack(version):
+    import socket
+    envelope = ADMIN.seal(CONFIG_ACK_TYPE, {
+        'kind': 'config_ack', 'version': version, 'hostname': socket.gethostname(),
+    })
+    result = run(['alfred', '-s', str(CONFIG_ACK_TYPE)],
+                 input=json.dumps(envelope, separators=(',', ':')), timeout=5)
+    return result.returncode == 0
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -173,7 +185,7 @@ def package_is_dangerous(pkg, mesh_conf="/etc/mesh.conf"):
 # Alfred
 # ─────────────────────────────────────────────────────────────────────────────
 def latest_config_package():
-    """Newest valid package on type 70, or None.
+    """Newest authenticated message on type 70, or None.
 
     Alfred hands back one record per publishing node; the newest issue wins so
     a stale copy from a node that has not refreshed cannot override a newer
@@ -187,24 +199,8 @@ def latest_config_package():
     if r.returncode != 0:
         return None
 
-    packages = []
-    # Records look like:  { "aa:bb:cc:dd:ee:ff", "<json>" },
-    for match in re.finditer(r'"((?:\\.|[^"\\])*)"\s*(?:[,}])', r.stdout):
-        text = match.group(1)
-        if "{" not in text:
-            continue
-        try:
-            candidate = json.loads(text.encode().decode("unicode_escape"))
-        except Exception:
-            continue
-        if isinstance(candidate, dict) and (
-                candidate.get("config") or candidate.get("kind") == "mesh_config_cancel"):
-            packages.append(candidate)
-
-    if not packages:
-        return None
-    packages.sort(key=lambda p: (int(p.get("issued_at", 0) or 0), str(p.get("version", ""))))
-    return packages[-1]
+    messages = ADMIN.messages(ALFRED_CONFIG_TYPE, r.stdout)
+    return messages[-1] if messages else None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -223,15 +219,18 @@ def clear_staging(reason):
 
 
 def sync_once():
-    pkg = latest_config_package()
-    if not pkg:
+    message = latest_config_package()
+    if not message:
         return 0
+    pkg = message.payload
 
     # A cancel has no config block, so it is handled before validation. Without
     # this the operator's cancel would be undone on the next cycle: the
     # original package is still resident in Alfred, and we would re-stage it.
     if pkg.get("kind") == "mesh_config_cancel":
-        clear_staging(f"cancelled by {pkg.get('issued_by', 'operator')}")
+        if ADMIN.accept(ALFRED_CONFIG_TYPE, message):
+            clear_staging('cancelled by authenticated administrator')
+            ADMIN.complete(ALFRED_CONFIG_TYPE, message)
         return 0
 
     ok, why = validate_package(pkg)
@@ -245,26 +244,35 @@ def sync_once():
         log("Ignoring config package: only per-node settings")
         return 0
 
+    if not ADMIN.accept(ALFRED_CONFIG_TYPE, message):
+        return 0
+
     version = pkg["version"]
     if read_file(APPLIED_VERSION_FILE) == version:
         # Already applied. Drop any leftover staging state so a re-broadcast of
         # the same version does not make us apply it twice.
         clear_staging(f"version {version} already applied")
+        ADMIN.complete(ALFRED_CONFIG_TYPE, message)
         return 0
 
     staged = ""
     try:
         with open(PENDING_FILE) as f:
-            staged = json.load(f).get("version", "")
+            staged = json.load(f)
     except Exception:
         pass
 
-    if staged != version or read_file(ACK_VERSION_FILE) != version:
-        if not write_file(PENDING_FILE, json.dumps(pkg)):
-            return 1
+    if staged != pkg or read_file(ACK_VERSION_FILE) != version:
+        private_json_write(PENDING_FILE, pkg)
         write_file(ACK_VERSION_FILE, version)
         log(f"Staged config version {version}"
             f"{' (dangerous)' if package_is_dangerous(pkg) else ''}; ACK published")
+
+    # The telemetry field remains informational. Only this authenticated ACK
+    # can satisfy the management UI's activation gate.
+    if not publish_ack(version):
+        log('Failed to publish authenticated config ACK')
+        return 1
 
     activate_at = int(pkg.get("activate_at", 0) or 0)
     if activate_at <= 0:
@@ -282,6 +290,10 @@ def sync_once():
         else:
             log("WARNING: rollback script missing; applying without a safety net")
 
+    # Applying acs can restart this very service. Consume the command before
+    # invoking anything disruptive so a kill/reboot cannot make a recorded
+    # activation execute again. A failed attempt needs a freshly staged edit.
+    ADMIN.complete(ALFRED_CONFIG_TYPE, message)
     r = run([APPLY_SCRIPT], timeout=180)
     if r.returncode != 0:
         log(f"apply failed: {(r.stderr or r.stdout).strip()}")

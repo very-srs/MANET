@@ -47,6 +47,7 @@ from datetime import datetime, timezone
 from urllib.parse import urlparse, unquote
 
 from manet_peer_radios import peer_radio_interfaces
+from manet_admin import AdminTransport, new_version
 from manet_radio import (halow_bandwidth_for_channel, halow_channel_for_frequency,
                         halow_channel_options)
 
@@ -57,6 +58,7 @@ SESSIONS_DIR    = '/var/log/manet-measurements'
 CONTROL_PORT    = 80  # mesh-status.py port on each node
 ALFRED_RADIO_TYPE = 71
 ALFRED_RADIO_ACK_TYPE = 72
+ADMIN = AdminTransport()
 # The hexagon badge is line art with no fill, so it needs two inks: near-black
 # strokes on light themes, white strokes on dark. Same artwork, same geometry.
 FER_LOGO_DARK_INK_FILE  = '/usr/local/share/manet/fer-logo-black.png'
@@ -643,56 +645,20 @@ def get_iface_txpower_cap(iface):
     except Exception:
         return ''
 
-def _add_alfred_candidate(items, value, kind):
-    if isinstance(value, bytes):
-        value = value.decode(errors='ignore')
-    if isinstance(value, str):
-        value = value.strip()
-        if not value:
-            return
-        try:
-            value = json.loads(value)
-        except Exception:
-            return
-    if isinstance(value, dict) and value.get('kind') == kind:
-        items.append(value)
-
-def _extract_alfred_objects(raw, kind):
-    items = []
-    _add_alfred_candidate(items, raw, kind)
-    try:
-        data = json.loads(raw)
-        if isinstance(data, dict):
-            for value in data.values():
-                _add_alfred_candidate(items, value, kind)
-        elif isinstance(data, list):
-            for value in data:
-                _add_alfred_candidate(items, value, kind)
-    except Exception:
-        pass
-    for line in raw.splitlines():
-        _add_alfred_candidate(items, line, kind)
-    for match in re.finditer(r'"((?:\\.|[^"\\])*)"\s*(?:[,}])', raw):
-        try:
-            text = bytes(match.group(1), 'utf-8').decode('unicode_escape')
-        except Exception:
-            continue
-        _add_alfred_candidate(items, text, kind)
-    return items
-
 def read_alfred_objects(type_id, kind):
     try:
         r = subprocess.run(['alfred', '-r', str(type_id)],
                            capture_output=True, text=True, timeout=5)
         if r.returncode != 0:
             return []
-        return _extract_alfred_objects(r.stdout, kind)
+        return [message.payload for message in ADMIN.messages(type_id, r.stdout)
+                if message.payload.get('kind') == kind]
     except Exception:
         return []
 
 def send_alfred_object(type_id, obj):
-    payload = json.dumps(obj, separators=(',', ':'))
     try:
+        payload = json.dumps(ADMIN.seal(type_id, obj), separators=(',', ':'))
         r = subprocess.run(['alfred', '-s', str(type_id)],
                            input=payload, capture_output=True, text=True, timeout=5)
         return r.returncode == 0, (r.stderr or r.stdout or '').strip()
@@ -737,8 +703,7 @@ def radio_target_for_node(node_ip):
     raise ValueError(f'Unknown node IP {node_ip}')
 
 def make_radio_version(pkg):
-    basis = json.dumps(pkg, sort_keys=True, separators=(',', ':'))
-    return hashlib.sha256(basis.encode()).hexdigest()[:10]
+    return new_version()
 
 def radio_ack_snapshot(version):
     latest = {}
