@@ -1,6 +1,8 @@
 *.img
 *.deb
 *.tar.gz
+*.tar.gz.sha256
+*.tar.gz.sha256.tmp
 
 # Compressed OS images and their checksums (provisioning/)
 *.img.xz
