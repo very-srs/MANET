@@ -123,8 +123,6 @@ selected the static variant on every node and the ACS orchestrator never ran.
 
 ---
 
----
-
 ## Web interface
 
 There is no unauthenticated route that changes anything. A set of
@@ -187,8 +185,6 @@ remote node arrives on `br0` exactly like one from a local EUD. Re-run by
 
 ---
 
----
-
 ## Voice
 
 The audio path is entirely GStreamer, so no Python code runs on the audio
@@ -201,20 +197,15 @@ RX  udpsrc  -> rtpbin -+-> <depay> -> <dec> -\
                                 (one branch per talker)
 ```
 
-**The two codecs do not interoperate, and the failure mode is silence.** Both
-the RTP payload type and the clock rate come from this one setting, and a
-receiver builds every decode branch from its *own* configured codec rather
-than from what actually arrived, so a node left on the other codec does not
-get degraded audio, it gets nothing. That is why the codec is a mesh-wide
-setting staged over Alfred (see below) and not a per-radio one like the talk
-group, and it is why the silent fallback above matters: on a Lyra mesh, a node
-whose plugin is missing is both deaf and mute. Check for the fallback log line
-after any install.
+All nodes must use the same codec. The codec setting determines RTP parameters
+and receive decoders; mismatched nodes cannot exchange voice. Codec changes
+are staged across the mesh over Alfred (see below). Missing Lyra plugins cause
+a logged fallback to Opus, so check for that message after installation.
 
 The daemon only supervises: it reads the PTT button, keeps the unicast peer
 list current, and publishes `/run/mesh-voice.json` for the UI.
 
-**Unicast redundancy: off by default, because batman-adv already does it.** With
+**Unicast redundancy defaults off.** With
 `multicast_forceflood` disabled, as this node configures it, and listeners at or below
 `multicast_fanout` (default 16), `batadv_mcast_forw_mode_by_count()` returns
 `BATADV_FORW_UCASTS` and emits **one unicast frame per listener**. Measured on
@@ -227,9 +218,7 @@ userspace unicast copy per peer would double airtime for no extra reliability.
 redundant: more than `multicast_fanout` listeners, where batman-adv falls back
 to `BATADV_FORW_BCAST`; and any future configuration that enables
 `multicast_forceflood`. When enabled, `multiudpsink`'s `clients` property is
-rewritten live from the registry rather than from learned senders, because in a
-PTT system a node that has never transmitted is exactly the one that needs to
-hear you.
+rewritten live from the registry, including nodes that have never transmitted.
 
 **Receivers must join the group or nothing transmits.** The same optimization
 means `batadv_mcast_forw_mode()` returns `BATADV_FORW_NONE`, dropping the
@@ -240,7 +229,7 @@ in normal operation, but expect a brief window after start-up before joins
 propagate, and note that a sender with no listeners is silently idle rather
 than wasting air.
 
-**A node must never hear itself, and there are two layers making sure of it.**
+**Loopback suppression uses both the socket and the RTP source ID.**
 `multiudpsink`'s own `loop` property is silently ignored with
 `auto-multicast=false`, because GStreamer only applies it on the code path that
 also joins the group, so loopback is cleared on the socket instead, reached
@@ -251,7 +240,7 @@ A pipeline that lost that race ran its whole life with loopback on, and what
 the operator hears then is their own voice back in the headset one jitter
 buffer late.
 
-The second layer is the guarantee: any packet arriving with this node's own
+Any packet arriving with this node's own
 SSRC is dropped at the `udpsrc` probe, before `rtpbin` sees it. That is safe to
 key on because the SSRC is a hash of the node's own mesh address plus a per-run
 generation byte, so no peer can collide without already sharing its IP. It also
@@ -267,9 +256,8 @@ real interface, where clearing it works correctly.
 
 `voice_half_duplex=y` restores the refuse-to-key behavior if you want it.
 
-This is not just a policy change. A single `rtpjitterbuffer` cannot do it: two
-senders' sequence numbers interleave in one buffer and the output is garbage.
-That limitation, not policy, is what the old lockout was really working around.
+A single `rtpjitterbuffer` mixes the two senders' sequence numbers and corrupts
+the output. Each talker therefore needs a separate receive branch.
 Verified by feeding two senders (440 Hz and 880 Hz, distinct SSRCs) into the
 receive pipeline: with one talker only 440 Hz is present; with both, 440 Hz and
 880 Hz appear together at comparable amplitude.
@@ -280,8 +268,8 @@ talking and every transmission starts with the DAC spinning up. Branches are
 built on `pad-added` and torn down on `pad-removed`, so a decoder is not leaked
 per talker; measured, two idle talkers were reaped and the count returned to 0.
 
-**Decode branches are kept, not reaped; this is what stops transmissions
-being clipped.** `rtpbin autoremove=false` (its own default) means a talker's
+**Keeping decode branches avoids clipping the next transmission.**
+`rtpbin autoremove=false` (its own default) means a talker's
 branch survives their silence, so the next thing they say plays from the first
 frame. Measured on a CM4 with lyra, 3.00 s bursts:
 
@@ -291,13 +279,13 @@ frame. Measured on a CM4 with lyra, 3.00 s bursts:
 | branch pre-built and attached | 2.92 s | 80 ms |
 | talker already established | 3.04 s | none |
 
-Only a source `rtpbin` has already seen costs nothing. Blocking the pad during
+An established `rtpbin` source avoids this delay. Blocking the pad during
 construction, lowering RTP source probation, and raising the mixer's
 `min-upstream-latency` were each tried and none of them helped; the residual
 is `rtpbin` establishing a new source rather than the pipeline linking, so the
 fix is to ensure the source is not new.
 
-**Pre-establishing a talker: only the sender can do it.** A receive slot in
+**The sender establishes its RTP source.** A receive slot in
 `rtpbin` is keyed by **SSRC, not by IP**, and it exists only once a packet
 carrying that SSRC arrives. Two pieces close that gap.
 
@@ -306,12 +294,11 @@ address) and **8 bits identifying the run** of the daemon. The prefix lets any
 receiver build address → prefix for every node in the registry and name a
 talker with no back channel; verified collision-free across a full /24.
 
-The generation is not cosmetic, and this is the subtle part. Because a receiver
-never forgets a source, a node that restarted and reused its SSRC would find
-its fresh sequence-number base did not match the source the receiver was still
-holding. Measured: a three-second transmission arrived as **nothing at all**,
-and neither a beacon nor `max-misorder-time`/`max-dropout-time` tuning rescued
-it. A new generation makes the restarted node a new source, which is clean:
+A node that reuses its SSRC after restarting has a fresh sequence-number base
+that no longer matches the receiver's stored source. In testing, an entire
+three-second transmission was lost; neither a beacon nor
+`max-misorder-time`/`max-dropout-time` tuning recovered it. A new generation
+lets the receiver establish a new source:
 
 | after a sender restart | speech arrived of 3.00 s |
 |---|---|
@@ -320,9 +307,8 @@ it. A new generation makes the restarted node a new source, which is clean:
 | new generation + beacon | **3.00 s** |
 
 Second, each node sends a **presence beacon**: a ~140 ms muted transmission
-(`volume` to 0, valve open, valve shut, volume back) carrying real RTP from the
-real payloader with real sequence numbers, so receivers establish the source
-before anything is said.
+(`volume` to 0, valve open, valve shut, volume back) through the normal RTP
+payloader, so receivers establish the source before speech begins.
 
 Beacons are **event driven, not a heartbeat**. There is nothing to refresh
 (`autoremove=false` means a source is never forgotten), so one is sent at
@@ -332,14 +318,12 @@ only a safety net for a peer whose arrival was somehow missed, and 0 disables
 it. That is about **21 packets an hour, ~5 bps averaged**, against 420/hour at
 the 30 s heartbeat this replaced.
 
-**Synthesizing a source locally from the registry does not work; it is worse
-than doing nothing.** Every peer's address is already known, so the apparent
-solution is to inject a packet with their SSRC and pre-fill the slot. Measured,
-it does create the slot, and then it destroys the stream. The injected sequence
-numbers and timestamps become the source's base; the real sender's do not
-match; the jitter buffer resyncs and discards. The peer talked for three
-seconds and the output was **digital silence, peak amplitude zero**, with
-`rtpjitterbuffer` logging a single `resync`. Do not reintroduce this.
+**Locally injected RTP cannot establish a peer's source.** Injecting a packet
+with a peer's SSRC creates a slot with sequence numbers and timestamps that do
+not match the sender. The jitter buffer then resyncs and discards incoming
+audio. In testing, a three-second transmission produced silence (peak
+amplitude zero), with `rtpjitterbuffer` logging one `resync`. Use the sender's
+beacon to establish the source.
 
 **Table size follows the node registry.** Every known node is a potential
 talker, and an evicted one pays the first-contact penalty again, so
@@ -347,7 +331,7 @@ talker, and an evicted one pays the first-contact penalty again, so
 registry poll the table is raised to known nodes + 2 headroom. It never
 shrinks below the configured value and never exceeds the hard cap of 64.
 
-**An evicted talker is parked, not abandoned.** Dropping the decode branch
+**Evicted talkers retain a receive pad.** Dropping the decode branch
 leaves rtpbin's receive pad for that talker with nothing on the end of it, and
 rtpbin never takes the pad back, because `autoremove=false` keeps every source
 for the life of the daemon. So no second `pad-added` ever arrives to rebuild
@@ -431,7 +415,7 @@ capture device collected beforehand. The only delay on the transmit side is
 packetization: 20 ms per Lyra frame times `frames-per-packet` must accumulate
 before a packet leaves.
 
-**Every step of the rebuild is checked, and there is a floor under it.** A
+**Pipeline rebuilds are checked and can roll back.** A
 successful `parse_launch()` is not a working pipeline: a port already bound or
 an ALSA device held by something else fails during the *state change*, so both
 pipelines are taken to `PLAYING` and then confirmed with `get_state()`. Build
@@ -463,9 +447,9 @@ otherwise mean a systemd restart per detent, several seconds each, plus a
 TFLite model reload under lyra. Anything that can write `mesh.conf` and send
 `SIGHUP` drives this, so the web UI and a future panel switch share one path.
 
-**Adaptive packing: the lever is packet size, not codec bitrate.** With
+**Adaptive packing changes packet size.** With
 `voice_codec=lyra` the daemon adapts `frames-per-packet` to measured receive
-loss, and deliberately does *not* adapt bitrate. The reason is measured. On the
+loss while keeping bitrate fixed. On the
 HaLow link a batman-adv frame carrying one 20 ms Lyra frame is 101 bytes, of
 which 86 is header, so at 6 kbps the packet overhead dominates completely:
 
@@ -480,8 +464,8 @@ Going 1 → 2 frames/packet takes **43 %** off the wire. Dropping the codec from
 6000 to 3200 bps takes **12 %** off (23.2 → 20.4 kbps at 40 ms) and is plainly
 audible. So bitrate stays fixed and packing moves.
 
-The direction is the opposite of the intuitive one: **under loss, packetization
-gets smaller.** A lost packet takes `frames-per-packet` frames with it, and the
+Under loss, packets get smaller. A lost packet takes `frames-per-packet` frames
+with it, and the
 audibility knee sits exactly in this range, so the loss response spends airtime
 to keep each loss short enough for Lyra's concealment to hide. That is only
 safe while loss means fades rather than congestion; on a saturated link,
@@ -502,8 +486,8 @@ the payload length alone and follows a mid-stream change with no renegotiation.
 Verified on hardware: switching 2 → 1 → 3 → 2 while playing produced 27/42/57
 byte payloads and 1001 frames decoded against 1000 sent.
 
-**QoS: use CS6 (48), not EF (46).** This is counter-intuitive and worth
-understanding before changing `voice_dscp`.
+**QoS uses CS6 (48).** The `voice_dscp` value accounts for batman-adv's priority
+mapping.
 
 Linux 6.12+ added an RFC 8325 mapping to `cfg80211_classify8021d()`
 (`net/wireless/util.c`) that sends DSCP 46/EF to 802.1d UP 6, i.e. WMM AC_VO.
@@ -541,11 +525,10 @@ batman-adv will make of it.
 Multicast TTL is set explicitly to 32: the default of 1 silently black-holes
 voice one hop out.
 
-Multicast tuning is deliberately untouched; the mesh's arrangement is the way
-it is on purpose, and `multicast_forceflood` stays off, which is what leaves
-batman-adv's own multicast→unicast fanout available.
+`multicast_forceflood` stays off to allow batman-adv's multicast-to-unicast
+fanout.
 
-**Bandwidth: headers dominate, not the codec.** Every packet carries 12 B RTP +
+**Packet overhead.** Every packet carries 12 B RTP +
 8 UDP + 20 IP + 14 Ethernet = 54 B of overhead. At 20 ms framing that is 50
 packets/sec, so ~21.6 kbps is spent on headers no matter which codec is used.
 Measured on-wire cost:
@@ -585,10 +568,10 @@ off rather than defaulted. Measured at 100-4000 Hz:
 |---|---|---|---|---|---|---|---|
 | -36.9 dB | -20.6 dB | -0.2 dB | 0.0 dB | -0.1 dB | -0.2 dB | -7.8 dB | -17.2 dB |
 
-**Pole counts are fixed, and they differ per element, because both were
-measured.** `audiocheblimit` uses 4: at 8 poles and 48 kHz, an 80 Hz corner is a
+**Filter pole counts follow the measurements.** `audiocheblimit` uses 4:
+at 8 poles and 48 kHz, an 80 Hz corner is a
 normalised frequency of 0.0017 and the coefficients lose their precision, which
-shows up not as a bad filter but as **a flat +4.9 dB of gain at every frequency
+produces **a flat +4.9 dB of gain at every frequency
 from 20 Hz to 3 kHz**. `audiochebband` uses 8, because it splits its poles
 between the two edges (4 gives a limp -3.5 dB at 60 Hz) and, unlike
 `audiocheblimit`, is still stable there at 48 kHz. Both use Chebyshev type 1:
@@ -600,13 +583,13 @@ fixed centres at 100 Hz, 1100 Hz and 11 kHz, for a formant or presence lift.
 `voice_eq_mid=3.0` measures +2.6 dB at 1-1.1 kHz, tapering to +1.5 dB at 500 Hz
 and +1.9 dB at 2 kHz, so it is a wide gentle lift rather than a peak.
 
-Two things about it are not obvious:
+EQ constraints:
 
 - **The 11 kHz band is forced to 0 under lyra.** Lyra's raw rate is 16 kHz, so
-  11 kHz is above Nyquist, and the band does not politely do nothing there: at
+  11 kHz is above Nyquist. At
   16 kHz, `band2=+6` lifted a 1 kHz tone by 2.6 dB and clipped 4608 samples,
   and `band2=-12` cut the same tone by 6 dB. The daemon zeroes it and logs why.
-- **A boost is paid for with headroom ahead of it.** The block converts back to
+- **Attenuation before the EQ prevents clipping.** The block converts back to
   S16LE at its end, so a boost clips there and no attenuation further down the
   pipeline can undo it. A `volume` element is inserted at the *head* of the
   block and trimmed by the largest positive gain, which makes a boost a change
@@ -634,8 +617,8 @@ addition rather than a config change, and neither has been measured on a CM4.
 Worth noting before reaching for one: lyra is itself a neural speech codec, so
 some of what a denoiser would do is already happening inside it.
 
-**The counters this runs on are not `tx_packets` and `rx_packets`.** In a
-push-to-talk system those are flat almost all the time by design: the valve is
+**The stall watchdog counts continuous audio buffers.** In a
+push-to-talk system `tx_packets` and `rx_packets` stay flat while idle: the valve is
 shut until somebody keys up, and nothing is received until somebody else does.
 A watchdog driven off them would either restart a healthy quiet node or need a
 timeout so long it never fires. Two other flows do not stop while the pipelines
@@ -650,8 +633,8 @@ are healthy, and those are what is counted, both at about one buffer per 20 ms:
 Multicast membership is checked separately, by reading `/proc/net/igmp`,
 because there is no dataflow to miss: a receiver nobody is talking to looks
 exactly like one that has fallen out of the group. A membership that cannot be
-read at all counts as unknown, never as a fault. Losing the join takes out both
-directions, not just receive, since batman-adv drops multicast to a group with
+read at all counts as unknown, never as a fault. Losing the join stops both
+transmission and reception, since batman-adv drops multicast to a group with
 no listeners.
 
 The ladder, in order of cost:
@@ -664,7 +647,7 @@ The ladder, in order of cost:
 | The revert fails too | Exit non-zero, same whole-stack rebuild |
 | The GLib main loop stops turning | `WatchdogSec=60` in the unit; systemd aborts and restarts |
 
-Exiting **is** the restart. `systemctl restart mesh-voice` from inside
+The daemon exits to let systemd restart it. `systemctl restart mesh-voice` from inside
 mesh-voice blocks on the very unit issuing it, and the `--no-block` form races
 the process it is killing; `Restart=on-failure` with `RestartSec=10` already
 does it properly. A fresh process is the point: new ALSA handles, new sockets,
@@ -1296,7 +1279,7 @@ replace its config or stop it independently. This prevents a completing client
 attempt or departing Ethernet link from stopping a newly available GPS source.
 The active uplink dispatcher already records `mesh-gateway.state` and
 `upstream_iface`; the controller observes those files as well as carrier, so
-internet sync works through the active dispatcher, not only the legacy detector.
+both the active dispatcher and the legacy detector can trigger internet sync.
 
 Local roles are checked every 15 seconds. A recent `gps_status.json` fix enables
 the GPS SHM refclock. A direct uplink enables the public pool, with
@@ -1477,11 +1460,9 @@ Protocol buffer schema for both messages.
 
 ---
 
----
-
 ## Mesh configuration push
 
-**manet_admin.py — shared admin authority over Alfred**
+**manet_admin.py: shared admin authority over Alfred**
 
 One administrator normally knows the password; other users read status. Every
 node has the same `admin_password`. SAE membership, a publisher MAC, and
@@ -1630,8 +1611,6 @@ and a published tarball is normally already older than a day.
 
 ---
 
----
-
 ## Provisioning
 
 **manet-ap-guard.sh**
@@ -1639,9 +1618,7 @@ and a published tarball is normally already older than a day.
 Decides, for one interface, whether a mesh supplicant may start on it right
 now. Installed as an `ExecCondition` on `wpa_supplicant@.service` through
 `/etc/systemd/system/wpa_supplicant@.service.d/10-manet-ap-guard.conf`, so it
-applies to every caller rather than to whichever call site was remembered;
-twelve places in this directory restart `wpa_supplicant@<iface>` from
-interface lists assembled in different ways.
+applies to every caller that starts or restarts a mesh supplicant.
 
 The AP radio legitimately needs a mesh config on disk: in wired EUD mode it is
 always a mesh interface, and in auto mode it joins the mesh whenever an EUD
@@ -1653,7 +1630,7 @@ hostapd `active` over a dead BSS, logging nothing.
 Exits 0 to allow (not the AP radio, or hostapd is not holding it), 1 to skip.
 
 `have_package_network` is checked before each apt phase, so "no network" is
-recorded once, plainly, instead of as a wall of resolver errors.
+recorded once before attempting package downloads.
 
 This exists because a node reached the field with none of its packages
 installed: its Ethernet was unplugged part-way through provisioning, every apt
@@ -1687,8 +1664,6 @@ passing through a flasher.
 
 ---
 
----
-
 ## Tests
 
 Tests sit alongside the code they cover and run without hardware or a node:
@@ -1702,6 +1677,7 @@ Tests sit alongside the code they cover and run without hardware or a node:
 | `test_mesh_ip_startup.py` | Bounded discovery, late/missing peers, failed queries, and allocation barriers |
 | `test_mesh_config_rollback.py` | Real rollback script with simulated BATMAN: unique peer counts, solo nodes, bounded recovery, failed queries/backups, interrupted restoration, and the receiver's apply gate |
 | `test_mesh_peer_count.py` | JSON counts and real shell callers with simulated BATMAN: empty/single/multiple peers, alternate routes and MAC case, failed queries, bootstrap reset/recovery, quorum return-to-lobby gating, and partition size/beacon/migration failure handling |
+| `test_led.py` | Real boot/button displays with fake GPIO holders and BATMAN: direct nodes across radio aliases, multihop exclusion, connected before registry arrival, unknown versus zero, recovery, opt-in hardware, GPIO errors, exclusive ownership, signal cleanup and onboard provisioning verdicts |
 | `test_mesh_time_sync.py` | Selected BATMAN routes and canonical identities, safe registry/address parsing, late/missing peers, bounded attempts and six-hour refreshes across restarts/clock steps, correction and source freshness, GPS/uplink transitions, quiet intervals and holdover on source loss, disarming startup steps, unchanged advertisement path and provisioning unit parity |
 | `test_acs_agreement.py` | Majority/timeouts, message loss, replay/restart safety, real scoring/activation, failed persistence and radio landing, authenticated straggler recovery |
 | `test_acs_bootstrap.py` | Clockless recovery with real encryption, boot/recipient/nonce binding, expiry after restart and slow reads, consume-before-move failure, radio compatibility, traffic bounds, live tourguide response and no unsynchronized timed work |
@@ -1783,7 +1759,52 @@ reads the directory on each event, so a replaced hook is live immediately.
 
 ---
 
-## Onboard LEDs
+## LEDs
+
+### External harness audit
+
+`led-boot.sh` and `led-info.sh` previously counted text rows in `batctl neighbors`.
+Their filter retained a column header and counted multiple radio links as
+multiple neighbors, while command failures could become a false zero. Both now
+use `mesh-neighbor-count.py`: a five-second-bounded `neighbors_json` query of
+direct neighbors, including HaLow and wired mesh links, excluding multihop nodes.
+The existing registry's `MAC_ADDRESSES` maps radio MACs to canonical node keys,
+so multiple radios to one node produce one blink. Registry entries alone never
+establish connectivity. See [batctl's direct-neighbor query](https://github.com/open-mesh-mirror/batctl#batctl-neighbors_json).
+
+The helper returns 0 with an exact count, 1 for an unavailable query, or 3 when
+live neighbors exist but their identities cannot yet be resolved. Exit 3 is
+distinct from Python/argparse's exit 2 on launch/argument errors. Zero or one
+neighbor address needs no registry. Missing, invalid or ambiguous registry
+aliases for multiple addresses yield connected-without-a-count, never invented
+node totals. The button shows N green blinks for N direct nodes, red for confirmed
+zero, amber for an unavailable neighbor query, or three seconds solid green for
+connected-without-a-count. Boot retries failed/empty queries and completes its
+connected indication as soon as direct neighbors are confirmed, even before
+registry identity discovery. ACS/quorum/tourguide originator counting is unchanged.
+
+`manet-led-common.sh` also centralizes the optional harness configuration. An
+existing GPIO controller is not evidence of attached LEDs: `/etc/default/manet-led`
+must explicitly set `LED_ENABLED=1`. Pin defaults remain provisional. A shared
+flock prevents competing boot/button holders; boot yields between half-cycles,
+and the button owns its whole count sequence. Each dwell checks the gpioset
+holder for failure. EXIT/INT/TERM cleanup kills and reaps it. An explicit off
+request is held briefly before normal exit, but the electrical state after GPIO
+release still depends on the circuit; no software test proves that it is dark.
+See [libgpiod's lifetime contract](https://libgpiod.readthedocs.io/en/master/gpioset.html).
+
+The external boot and button units now live in `MANET/systemd/`, so tools updates
+carry the same definitions as installation. Both are ordinary simple services
+wanted by `multi-user.target`, with no ordering after that target. The previous
+boot unit remained activating indefinitely without peers because it was an
+unbounded oneshot; its `DefaultDependencies=no` avoided implicit target ordering.
+The button unit, which kept default dependencies, ordered itself after its own
+target and conflicted with that target's implicit ordering after wanted services.
+`radio-setup.sh` enables the shipped definitions instead of overwriting them.
+Onboard LED behavior is independent and unchanged; regression tests cover its
+complete/incomplete/running states and legacy completion-marker fallback.
+
+### Provisioning verdict
 
 `radio-setup.sh` used to drive the LEDs directly from three places, and the
 result was unreliable in both directions.

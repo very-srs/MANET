@@ -1,9 +1,6 @@
 #!/bin/bash
-# ==============================================================================
 # Mesh Node Manager - Main Orchestrator
-# ==============================================================================
 # Coordinates timing and delegates complex tasks to specialized scripts
-# ==============================================================================
 
 . "${MANET_TOOLS_DIR:-$(dirname "${BASH_SOURCE[0]}")}/mesh-acs-common.sh" || exit 1
 
@@ -22,7 +19,7 @@ LOBBY_FREQ_5_0=5180
 # Cold-start bootstrap: a fresh mesh is all-lobby, so no data-state node exists
 # to send helper beacons and nothing would ever pick initial data channels.
 # After this many seconds in the lobby without being rescued (several missed
-# tourguide windows — an established mesh gets to rescue us first), run the
+# tourguide windows: an established mesh gets to rescue us first), run the
 # scan/publish/election pipeline from the lobby to elect data channels.
 LOBBY_BOOTSTRAP_DWELL=300
 
@@ -34,7 +31,7 @@ WPA_CONF_2_4=""
 WPA_CONF_5_0=""
 
 # Scan frequencies (must match the candidate lists in channel-election.sh;
-# lobby frequencies are excluded — they are reserved as the rendezvous point)
+# lobby frequencies are excluded: they are reserved as the rendezvous point)
 SCAN_FREQS_2_4="2437 2462"
 SCAN_FREQS_5_0="5200 5220 5240 5745 5765 5785 5805 5825"
 
@@ -89,9 +86,7 @@ log() {
 }
 
 
-# ==============================================================================
 # === GATEWAY DETECTION ===
-# ==============================================================================
 # Gateway state is owned by manet-uplink-dispatch.sh. Node manager only
 # asks it to reconcile periodically before publishing status to Alfred.
 GATEWAY_STATE_FILE="/var/run/mesh-gateway.state"
@@ -111,9 +106,7 @@ detect_and_update_gateway_state() {
     [ -x /usr/local/bin/manet-uplink-dispatch.sh ] && /usr/local/bin/manet-uplink-dispatch.sh reconcile >/dev/null 2>&1 || true
 }
 
-# ==============================================================================
 # Time source advertisement (the time service owns chrony and these markers)
-# ==============================================================================
 GPS_STATUS_FILE="/run/gps_status.json"
 GPS_FIX_MAX_AGE=60
 
@@ -174,7 +167,7 @@ restart_mesh_supplicants() {
 }
 
 # Leaving the lobby for data channels: clear any legacy bitrate masks (set by
-# tourguide lobby hops or limp-mode entry — they persist on the netdev across
+# tourguide lobby hops or limp-mode entry: they persist on the netdev across
 # supplicant restarts) and drop the limp-mode state file. limp-mode-manager
 # only runs in data state, so without this a lobby fallback never resets them.
 leave_lobby_cleanup() {
@@ -603,9 +596,7 @@ while true; do
     IS_IN_LOBBY=$(is_in_lobby)
 
     if [ "$IS_IN_LOBBY" = "true" ]; then
-        # ===================================
         # === LOBBY STATE ===
-        # ===================================
 
         # === COLD-START BOOTSTRAP DWELL TRACKING ===
         # Dwell only counts once the WPA configs exist (is_in_lobby also
@@ -699,11 +690,8 @@ while true; do
             [ -n "$CPU_LOAD" ] && ENCODER_ARGS+=("--cpu-load-average" "$CPU_LOAD")
 
             # --- GPS Location ---
-            # A stale file is rejected as well as a missing fix. gps-reader stamps
-            # every write, so a frozen timestamp means it died or hung while still
-            # holding a fix — and a moving node would otherwise keep beaconing the
-            # position it had when the reader stopped. Only has_fix was checked
-            # before, so that stale position was published indefinitely.
+            # Reject stale files as well as missing fixes. If gps-reader stops updating
+            # its timestamp, the last recorded position is no longer safe to publish.
             GPS_LAT=""; GPS_LON=""; GPS_ALT=""
             if [ -f "$GPS_STATUS_FILE" ]; then
                 eval "$(python3 -c "
@@ -771,7 +759,7 @@ except Exception:
         # A helper rescue this cycle wins over self-election: joining the
         # established mesh's channels beats electing our own. The election
         # also sits out the (partial) window in which bootstrap began so one
-        # full scan->publish->replicate round completes first — otherwise a
+        # full scan->publish->replicate round completes first: otherwise a
         # dwell expiring mid-window fires all three stages back-to-back and
         # elects before any peer report can be in the registry.
         if [ "$BOOTSTRAPPING" = true ] && [ "$HELPER_MIGRATED" = false ] && \
@@ -786,9 +774,7 @@ except Exception:
         fi
 
     else
-        # ===================================
         # === DATA CHANNEL STATE ===
-        # ===================================
 
         LOBBY_ENTERED_TIME=0
         BOOTSTRAP_START_WINDOW=-1
@@ -866,11 +852,8 @@ except Exception:
             [ -n "$LIMP_MODE_FLAG" ] && ENCODER_ARGS+=("$LIMP_MODE_FLAG")
 
             # --- GPS Location ---
-            # A stale file is rejected as well as a missing fix. gps-reader stamps
-            # every write, so a frozen timestamp means it died or hung while still
-            # holding a fix — and a moving node would otherwise keep beaconing the
-            # position it had when the reader stopped. Only has_fix was checked
-            # before, so that stale position was published indefinitely.
+            # Reject stale files as well as missing fixes. If gps-reader stops updating
+            # its timestamp, the last recorded position is no longer safe to publish.
             GPS_LAT=""; GPS_LON=""; GPS_ALT=""
             if [ -f "$GPS_STATUS_FILE" ]; then
                 eval "$(python3 -c "

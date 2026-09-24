@@ -74,7 +74,7 @@ IPV4_VIP_WITH_MASK="${MEDIAMTX_IPV4_VIP}/${IPV4_NETWORK#*/}"
 # --- Detect Current Incumbent ---
 # Use the Alfred node registry as the authoritative source for incumbency.
 # node-manager publishes IS_MEDIAMTX_SERVER=true only when the local node holds
-# both the mediamtx service AND the MediaMTX VIP — all nodes read the same
+# both the mediamtx service AND the MediaMTX VIP: all nodes read the same
 # Alfred-propagated registry, so there is no per-node ARP/local-IP ambiguity.
 CURRENT_LEADER_MAC=""
 if [ -f "$REGISTRY_STATE_FILE" ]; then

@@ -1,9 +1,6 @@
 #!/bin/bash
-# ==============================================================================
 # Limp Mode Manager
-# ==============================================================================
 # Manages limp mode entry/exit based on mesh consensus
-# ==============================================================================
 
 REGISTRY_STATE_FILE="/var/run/mesh_node_registry"
 LIMP_STATE_FILE="/var/run/mesh_limp_mode.state"

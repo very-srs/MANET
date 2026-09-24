@@ -1,11 +1,8 @@
 #!/bin/bash
-# ==============================================================================
 # Channel Election Manager
-# ==============================================================================
 # This script requests an agreed channel change, or scores a proposal for the
 # coordinator (--score). If every channel is terrible it elects the
 # least-bad one it actually measured and asserts limp mode.
-# ==============================================================================
 
 set -eo pipefail
 

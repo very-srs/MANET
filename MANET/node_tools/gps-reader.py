@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-gps-reader.py — reads GPS fix from gpsd and writes /run/gps_status.json.
+Read GPS fixes from gpsd and write /run/gps_status.json.
 
 Runs as a daemon every POLL_INTERVAL seconds. Writes has_fix=false if
 gpsd is unavailable (device not plugged in, service not running, no fix).
-Designed to be robust: any error produces a safe no-fix status rather than
-crashing the daemon.
+Query errors clear the fix status; the daemon retries on its next cycle.
 """
 
 import json

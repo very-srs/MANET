@@ -5,19 +5,15 @@
 # Managed by button-monitor.service
 # Requires libgpiod v2 tools (gpiomon --chip <chip> <line>).
 
-# ── Hardware config (update after wiring test) ───────────────────────
-GPIO_CHIP="gpiochip0"
-BTN_LINE=23
-# ─────────────────────────────────────────────────────────────────────
+source "$(dirname "${BASH_SOURCE[0]}")/manet-led-common.sh"
 
-LED_INFO_SCRIPT="/usr/local/bin/led-info.sh"
+LED_INFO_SCRIPT="$LED_TOOLS_DIR/led-info.sh"
 DEBOUNCE_MS=50      # gpiomon debounce in milliseconds
 
 # Exit 0 (not failure) when the hardware isn't there: the unit uses
 # Restart=on-failure, so a clean exit stops the service instead of
 # spinning the relaunch loop on nodes without button/LED wiring.
-if ! gpioinfo --chip "$GPIO_CHIP" >/dev/null 2>&1; then
-    echo "button-monitor: GPIO chip ${GPIO_CHIP} not present/usable; exiting"
+if ! led_hardware_ready; then
     exit 0
 fi
 

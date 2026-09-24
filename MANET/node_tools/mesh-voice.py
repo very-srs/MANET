@@ -1,96 +1,65 @@
 #!/usr/bin/env python3
 """Mesh push-to-talk voice over multicast RTP.
 
-The audio path is entirely GStreamer — encode/decode, RTP framing, the jitter
-buffer and the multicast/unicast fanout are all elements. This process only
-supervises: it reads the PTT button, keeps the unicast peer list current,
-adapts packing to measured loss, and publishes state for the web UI. Nothing
-Python touches the audio thread, which is the whole reason this is not a
-compiled daemon.
+GStreamer handles encoding, decoding, RTP, jitter buffers, and packet fanout.
+Python reads the PTT button, updates the unicast peer list, adapts packet
+packing to measured loss, and publishes state for the web UI.
 
     TX  alsasrc -> level -> valve -> <enc> -> <pay> -> multiudpsink
     RX  udpsrc  -> rtpbin -+-> <depay> -> <dec> -\
                            +-> <depay> -> <dec> --+-> audiomixer -> alsasink
                                     (one branch per talker)
 
-Receive is conference style: rtpbin demultiplexes by SSRC, gives every talker
-their own jitter buffer, and audiomixer sums them, so simultaneous speakers are
-mixed rather than corrupting one another. Transmit is still push-to-talk — the
-valve is shut until the button is pressed, so nobody is hot-miked — and there
-is no software lockout on talking over someone. That is etiquette, like any
-conference bridge. voice_half_duplex=y restores the old refuse-to-key
-behaviour for anyone who wants it.
+rtpbin separates speakers by SSRC, gives each a jitter buffer, and passes their
+audio to audiomixer. Sharing one jitter buffer would interleave independent
+sequence numbers and corrupt the output. Transmit opens only while PTT is
+pressed. Speakers may overlap; voice_half_duplex=y blocks transmit while
+receiving.
 
-A single rtpjitterbuffer cannot do this: two senders' sequence numbers
-interleave in one buffer and the output is garbage. That limitation, not
-policy, is what the old half-duplex lockout was really working around.
+voice_codec selects lyra (the default, using libgstlyra.so and model weights)
+or opus (stock elements). Both use the same transport. Receivers build decode
+branches for their configured codec, so all nodes must use the same one.
+Changes are staged across the mesh through Alfred radio_state. Missing Lyra
+plugins or model weights trigger a logged fallback to Opus, leaving the node
+unable to exchange voice with Lyra peers.
 
-voice_codec picks the pair: lyra (the default -- libgstlyra.so plus model
-weights) or opus (stock elements). Only the codec stages differ; the transport
-around them was measured with Opus and is unchanged.
-
-The two do not interoperate, and the failure is silence rather than bad audio.
-Both derive the RTP payload type and clock rate from this one setting, and a
-receiver builds every decode branch from its own configured codec rather than
-from what arrived, so a node on the other codec hears nothing. That is why the
-setting is staged mesh-wide over Alfred (radio_state, like a channel or key
-change) instead of being a per-node choice, and why the fallback below matters:
-a node whose lyra plugin or model weights are missing silently drops to opus,
-which on a lyra mesh means it is deaf and mute. Check the log line.
-
-With lyra, frames-per-packet adapts to receive loss — see _tick_packing. The
-short version: at these bitrates the headers dominate, so packing is a much
-bigger airtime lever than codec bitrate, and the loss response is to packetise
-*smaller*, spending airtime to keep each loss short enough to conceal.
+Lyra frames-per-packet adapts to receive loss; see _tick_packing. Headers
+dominate airtime at these bitrates. Smaller packets cost more airtime but
+keep lost audio intervals short enough to conceal.
 
 Addressing follows OpenMANET's scheme: every talk group shares one multicast
 group and differs only by port, so switching channels never causes an IGMP
-leave/join. Channel n uses port 38801 + (n-1)*2 — the stride is 2 because
+leave/join. Channel n uses port 38801 + (n-1)*2: the stride is 2 because
 port+1 is that channel's RTCP, per the RTP port-pairing convention.
 
-Two things about the transport that are easy to get wrong:
+Transport constraints:
 
-  * Multicast TTL defaults to 1, which silently black-holes voice the moment a
-    peer is more than one hop away. `ttl-mc` is set explicitly.
-  * DSCP 48 (CS6), not the obvious 46 (EF), is what gets voice into WMM AC_VO
-    on a batman-adv mesh. Linux 6.12+ added an RFC 8325 mapping to
-    cfg80211_classify8021d() that sends EF to UP 6 (AC_VO) — but batman-adv
-    never lets it run. batadv_skb_set_priority() (net/batman-adv/main.c),
-    called from batadv_interface_tx() for every packet entering bat0, stamps
-    skb->priority with 256 + (TOS >> 5) using the OLD naive rule, and
-    mac80211 takes that 802.1d passthrough value before it ever looks at the
-    DSCP. So EF gives 256+5 = UP 5 = AC_VI, and CS6 gives 256+6 = UP 6 =
-    AC_VO, on every kernel version. Confirm on-air before trusting it.
+  * Set `ttl-mc` explicitly; the default TTL of 1 prevents multihop delivery.
+  * DSCP 48 (CS6) maps to WMM AC_VO through batman-adv. In net/batman-adv/main.c,
+    batadv_interface_tx() calls batadv_skb_set_priority(), which sets
+    skb->priority to 256 + (TOS >> 5). mac80211 uses that 802.1d priority before
+    checking DSCP. This bypasses the Linux 6.12+ RFC 8325 mapping in
+    cfg80211_classify8021d(): EF (46) gets UP 5 / AC_VI, while CS6 gets
+    UP 6 / AC_VO. Confirm the priority on-air when changing this path.
 
-Unicast redundancy is OFF by default, and the reason is measured, not assumed.
-batman-adv already converts multicast to unicast for us: with
-multicast_forceflood disabled (our configuration) and listeners at or below
-multicast_fanout (default 16), batadv_mcast_forw_mode_by_count() returns
-BATADV_FORW_UCASTS and emits one unicast frame per listener. Verified on the
-bench: 200 multicast packets produced exactly 200 unicast frames addressed to
-the peer's MAC on wlan2, with no broadcast frames above baseline. Those frames
-get 802.11 ACKs and retries already, so adding a userspace unicast copy per
-peer would double airtime for zero extra reliability.
+Unicast redundancy defaults off. With multicast_forceflood disabled and no
+more than multicast_fanout listeners (default 16), batadv_mcast_forw_mode_by_count()
+returns BATADV_FORW_UCASTS and sends a unicast frame per listener, with 802.11
+ACKs and retries. On the bench, 200 multicast packets produced 200 unicast
+frames to the peer on wlan2, with no broadcast frames above baseline.
+Additional userspace copies would duplicate this traffic. The option remains
+useful above multicast_fanout, where batman-adv selects BATADV_FORW_BCAST, or
+when multicast_forceflood is enabled. The Alfred registry supplies peers,
+including receivers that have never transmitted.
 
-The option remains because it stops being redundant above multicast_fanout
-listeners, where batman-adv falls back to BATADV_FORW_BCAST, and if
-multicast_forceflood is ever turned on. Peers come from the Alfred-built node
-registry rather than from learning senders, because in a PTT system the node
-that has never transmitted is exactly the one that needs to hear you.
+With no listeners, batadv_mcast_forw_mode() returns BATADV_FORW_NONE and drops
+multicast at the sender. udpsrc joins the group with auto-multicast=true;
+traffic may pause at startup until the joins propagate.
 
-One consequence of the same optimisation, and it is not optional: multicast to
-a group nobody has joined is DROPPED at the sender -- batadv_mcast_forw_mode()
-returns BATADV_FORW_NONE when the listener count is zero. Receivers joining the
-group is therefore what makes transmission work at all, not merely what makes
-it arrive. udpsrc does the IGMP join (auto-multicast=true); expect a brief
-window after start-up where nothing flows until joins propagate.
-
-A stalled pipeline is watched for separately from a failing one. GStreamer
-posts a bus error when an element fails, and _note_pipeline_error backs those
-off; it posts nothing at all when a pipeline stops moving audio while still
-PLAYING, which is what a USB audio reset and a dropped multicast membership
-both look like. See the stall watchdog constants below for the two flows that
-are counted instead, and why tx_packets/rx_packets cannot do that job.
+_note_pipeline_error backs off GStreamer bus errors. The stall watchdog also
+checks for pipelines that stay PLAYING without moving audio, as can happen
+after a USB audio reset or lost multicast membership. The constants below
+explain which flows it counts and why tx_packets/rx_packets are insufficient.
 
 Reads /etc/mesh.conf, writes /run/mesh-voice.json.
 """
@@ -110,13 +79,9 @@ import threading
 import time
 import zlib
 
-# GStreamer is a hard requirement for voice but must not be one for the unit to
-# exist. The install tarball enables mesh-voice.service on every node, including
-# nodes provisioned before python3-gi and the gstreamer packages were added to
-# firstrun.sh — on those, importing gi raises and, with Restart=on-failure and
-# RestartSec=10, systemd would retry every ten seconds forever without ever
-# tripping the start limit. Exit 0 instead: a node without the runtime is simply
-# a node with no voice, which is also what voice=n gives.
+# mesh-voice.service is enabled on every node. Exit successfully if the
+# GStreamer runtime is missing, so systemd's Restart=on-failure does not retry
+# the failed import every ten seconds. Voice remains unavailable on that node.
 try:
     import gi
 
@@ -136,12 +101,9 @@ TALK_GROUP_BASE_PORT = 38801
 TALK_GROUP_PORT_STRIDE = 2
 TALK_GROUP_MAX = 32
 
-# One payload type for both codecs. 111 is the conventional dynamic PT for
-# Opus, and Lyra reuses it rather than claiming a second number, which is
-# exactly why the two cannot interoperate: a node running opus accepts a
-# PT=111 lyra packet as if it were opus. Nothing on the wire distinguishes
-# them, so the codec is a fleet-wide setting staged through alfred rather
-# than a per-radio one. See apply_voice_codec() in manet_radio.py.
+# Both codecs use payload type 111, the conventional dynamic PT for Opus.
+# The PT cannot distinguish Lyra from Opus, so codec selection must be
+# coordinated across the mesh. See apply_voice_codec() in manet_radio.py.
 RTP_PAYLOAD_TYPE = 111
 SAMPLE_RATE = 48000
 # Opus pins its RTP clock at 48 kHz whatever the input rate; Lyra is a 16 kHz
@@ -168,20 +130,18 @@ PACKING_MIN_SAMPLE = 25          # packets per window needed to judge at all
 PACKING_LINK_FLOOR_MBPS = 2.0    # below this, treat loss as congestion
 
 # OpenVLM is a C-Media CM108B. The PTT switch lands on the codec's GPIO3 and is
-# read from USB HID input reports — there is no SBC GPIO involved.
+# read from USB HID input reports: there is no SBC GPIO involved.
 OPENVLM_VID = 0x0D8C
 OPENVLM_PID = 0x0012
 HID_REPORT_LEN = 5
-HID_GPIO3_MASK = 0x04  # IR1 bit 2 — PTT
-HID_GPIO1_MASK = 0x01  # IR1 bit 0 — OpenVLM identity strap
+HID_GPIO3_MASK = 0x04  # IR1 bit 2: PTT
+HID_GPIO1_MASK = 0x01  # IR1 bit 0: OpenVLM identity strap
 # CM108B datasheet 7.4: IR1[3:0] only reflects live GPIO when IR0[7:6] == 0.
 HID_IR0_VALID_MASK = 0xC0
 
-# Decode branches are kept warm (see the rx pipeline), so the table is sized
-# from the node registry rather than guessed. HARD is the ceiling: at roughly
-# 5.3 MB per lyra branch, 64 is ~340 MB, which is the point where this stops
-# being free on a 3.7 GB node. HEADROOM keeps a margin above the known node
-# count so a node joining mid-operation is never the one that gets evicted.
+# Size the warm decode-branch table from the node registry. Each Lyra branch
+# uses about 5.3 MB; the hard limit of 64 caps that at roughly 340 MB on a
+# 3.7 GB node. HEADROOM allows new nodes to join without immediate eviction.
 VOICE_MAX_TALKERS_HARD = 64
 VOICE_TALKER_HEADROOM = 2
 
@@ -193,13 +153,9 @@ PTT_DEBOUNCE_MS = 150
 HALF_DUPLEX_HOLD_MS = 500
 RX_IDLE_MS = 500
 
-# Pipeline restart backoff. A pipeline whose audio device is simply not there —
-# a node provisioned with voice=y before its OpenVLM board is fitted — used to
-# retry on a flat 5s timer for ever, logging the same two ALSA errors each
-# time: ~73 journal lines a minute, ~105k a day. That was survivable while the
-# journal lived in RAM, but it now persists to the card, so the noise wears the
-# card and evicts the history that persistence exists to keep. Back off instead,
-# and say it once.
+# Back off pipeline restarts when audio hardware is missing or unavailable.
+# A fixed 5s retry produced about 73 journal lines/minute (105k/day), wearing
+# the card and displacing useful history in the persistent journal.
 PIPELINE_RETRY_BASE_SEC = 5
 PIPELINE_RETRY_MAX_SEC = 300
 # An error arriving this long after the previous one is a fresh fault, not a
@@ -488,7 +444,7 @@ class Config:
         self.enabled = conf_bool(conf, "voice", False)
         self.iface = conf_str(conf, "voice_iface", "br0", IFACE_RE)
         self.channel = conf_int(conf, "voice_channel", 1, 1, TALK_GROUP_MAX)
-        # 48 = CS6, not 46/EF — see the module docstring for why.
+        # 48 = CS6, not 46/EF: see the module docstring for why.
         self.dscp = conf_int(conf, "voice_dscp", 48, 0, 63)
         # "opus" or "lyra". Opus stays the default because it is in the stock
         # gst-plugins-base every node already has, whereas lyra needs
@@ -513,7 +469,7 @@ class Config:
         # Packet headers dominate the on-air cost at these bitrates: 12 B RTP +
         # 8 UDP + 20 IP + 14 Ethernet is 42-54 B per packet against a 32-132 B
         # payload. Fewer, larger frames is therefore a bigger lever than a
-        # lower bitrate — measured, 16 kbps at 60 ms costs less on the wire
+        # lower bitrate: measured, 16 kbps at 60 ms costs less on the wire
         # than 6 kbps at 20 ms. Costs latency and makes each lost packet take
         # a longer chunk of audio with it. Opus permits 2.5/5/10/20/40/60.
         self.frame_ms = conf_int(conf, "voice_frame_ms", FRAME_MS)
@@ -738,7 +694,7 @@ def read_registry(exclude_ips):
     """Active peers from the Alfred-built registry, as [(ip, hostname), ...].
 
     The registry is a shell-sourceable file of NODE_<id>_<KEY>='value' lines;
-    it is parsed rather than sourced. Only ACTIVE nodes are returned — a STALE
+    it is parsed rather than sourced. Only ACTIVE nodes are returned: a STALE
     node has stopped publishing telemetry and unicasting to it is wasted air.
     """
     nodes = {}
@@ -989,11 +945,11 @@ class MeshVoice:
                                    "rtplyradepay")
                        if Gst.ElementFactory.find(n) is None]
             if missing:
-                log("voice_codec=lyra but %s not registered — falling back to "
+                log("voice_codec=lyra but %s not registered: falling back to "
                     "opus. Install libgstlyra.so and %s."
                     % (", ".join(missing), self.cfg.lyra_model))
             elif not os.path.isdir(self.cfg.lyra_model):
-                log("voice_codec=lyra but model dir %s is missing — falling "
+                log("voice_codec=lyra but model dir %s is missing: falling "
                     "back to opus" % self.cfg.lyra_model)
             else:
                 # Packing is link state, not configuration. build() runs again
@@ -1187,7 +1143,7 @@ class MeshVoice:
         if self.cfg.test_tone:
             src_desc = ("audiotestsrc name=cap is-live=true wave=sine freq=440")
             playback_desc = "fakesink name=play sync=false"
-            log("audio: BENCH MODE — 440 Hz tone in, null sink out")
+            log("audio: BENCH MODE: 440 Hz tone in, null sink out")
         else:
             card = find_openvlm_card()
             dev_in = alsa_device(self.cfg.alsa_in, card)
@@ -1201,7 +1157,7 @@ class MeshVoice:
         # group collides with our own udpsrc, which already holds it.
         bind_ip = iface_ipv4(self.cfg.iface)
         if not bind_ip:
-            log("warning: %s has no IPv4 address yet — multicast egress will "
+            log("warning: %s has no IPv4 address yet: multicast egress will "
                 "follow the route table" % self.cfg.iface)
 
         (enc_desc, pay_desc, depay_desc, dec_desc, encoding, packet_ms,
@@ -1243,7 +1199,7 @@ class MeshVoice:
 
         # Conference receive: rtpbin demultiplexes by SSRC and gives each talker
         # its own jitter buffer, and audiomixer sums them. A single
-        # rtpjitterbuffer cannot do this — two senders' sequence numbers
+        # rtpjitterbuffer cannot do this: two senders' sequence numbers
         # interleave in one buffer and the output is garbage, which is why the
         # old pipeline needed a half-duplex lockout to be usable at all.
         #
@@ -1390,7 +1346,7 @@ class MeshVoice:
             self.ptt_connected = True
             self.on_ptt(True)
         else:
-            log("PTT: mode %r — receive only" % self.cfg.ptt_mode)
+            log("PTT: mode %r: receive only" % self.cfg.ptt_mode)
 
         self.refresh_peers()
         GLib.timeout_add_seconds(REGISTRY_POLL_SEC, self._tick_peers)
@@ -1424,7 +1380,7 @@ class MeshVoice:
 
         multiudpsink's `loop` property is only applied on the code path that
         also joins the group, so with auto-multicast=false it is silently
-        ignored (`ttl-mc` and `qos-dscp` are applied regardless — both verified
+        ignored (`ttl-mc` and `qos-dscp` are applied regardless: both verified
         on the wire). Without this the operator hears themselves through the
         headset one jitter-buffer late, and the UI shows RX during every
         transmission.
@@ -1517,7 +1473,7 @@ class MeshVoice:
 
         Retuning in-process rather than restarting the unit matters for the
         rotary switch, where clicking through groups would otherwise mean a
-        systemd restart per detent — several seconds each, and with lyra a
+        systemd restart per detent: several seconds each, and with lyra a
         TFLite model reload on top.
 
         Only the channel is applied. Codec, bitrate and device settings are
@@ -1604,15 +1560,10 @@ class MeshVoice:
     def _retune(self, channel, port):
         """Rebuild both pipelines on one talk group. True only if both play.
 
-        Every step is guarded, and not only against GLib.Error. build() reaches
-        for elements by name and hangs pad probes off them, so a pipeline that
-        parsed but came back missing an element raises AttributeError, and
-        PyGObject prints an exception raised inside a signal handler and then
-        swallows it. SIGHUP arrives through a signal handler, so that
-        combination used to leave the daemon alive with self.tx pointing at the
-        new pipeline, self.rx at the old one it had already set to NULL, and
-        self.valve at elements of neither: no audio, no error in the journal,
-        and a state file still saying "running".
+        Catch all build failures, including AttributeError from missing
+        elements. PyGObject swallows exceptions from signal handlers, which
+        could otherwise leave SIGHUP with mismatched pipelines and a state
+        file that still reports "running".
         """
         self.cfg.channel = channel
         self.cfg.port = port
@@ -1749,7 +1700,7 @@ class MeshVoice:
 
         The first occurrence of a given error is logged in full, along with when
         the retry will happen. Identical errors after that are counted, not
-        logged — a missing sound card produces the same two lines for ever, and
+        logged: a missing sound card produces the same two lines for ever, and
         printing them every few seconds buries everything else in the journal.
         The tally is emitted once, on recovery or when the error changes.
         """
@@ -1769,7 +1720,7 @@ class MeshVoice:
             # completely silent, then stay quiet.
             if state["delay"] >= PIPELINE_RETRY_MAX_SEC and not state["capped"]:
                 state["capped"] = True
-                log("%s pipeline: still failing after %d attempt(s) — retrying "
+                log("%s pipeline: still failing after %d attempt(s): retrying "
                     "every %ds, further identical errors suppressed"
                     % (which, state["repeats"], PIPELINE_RETRY_MAX_SEC))
         else:
@@ -1777,7 +1728,7 @@ class MeshVoice:
             state["text"] = text
             state["repeats"] = 0
             state["capped"] = False
-            log("%s pipeline error: %s (%s) — retrying in %ds"
+            log("%s pipeline error: %s (%s): retrying in %ds"
                 % (which, text, debug, state["delay"]))
 
         GLib.timeout_add_seconds(state["delay"], self._restart, which)
@@ -1975,7 +1926,7 @@ class MeshVoice:
         self.ptt_pressed = pressed
         if pressed:
             if self.cfg.half_duplex and self._remote_active():
-                log("TX: blocked — half duplex, remote active")
+                log("TX: blocked: half duplex, remote active")
                 return False
             self._set_tx(True)
         else:
@@ -2055,9 +2006,7 @@ class MeshVoice:
             return False
 
         depay.sync_state_with_parent()
-        # The rtpbin pad is kept, not just the elements hanging off it. Eviction
-        # has to be able to find this pad again to park it, and revival has to
-        # be able to re-link it.
+        # Retain the rtpbin pad so eviction can park it and revival can re-link it.
         self.rx_branches[name] = (pad, depay, mixpad)
         self.branch_seen[name] = time.time()
         # Touch on every decoded buffer so the LRU below evicts the talker who
@@ -2118,13 +2067,13 @@ class MeshVoice:
         """
         want = min(peer_count + VOICE_TALKER_HEADROOM, VOICE_MAX_TALKERS_HARD)
         if want > self.cfg.max_talkers:
-            log("rx: %d nodes known — raising warm talker table %d -> %d "
+            log("rx: %d nodes known: raising warm talker table %d -> %d "
                 "(~%d MB with lyra)"
                 % (peer_count, self.cfg.max_talkers, want, want * 5))
             self.cfg.max_talkers = want
         elif peer_count + VOICE_TALKER_HEADROOM > VOICE_MAX_TALKERS_HARD:
-            log("rx: %d nodes known but the warm talker table is capped at %d "
-                "— the least recently heard will be evicted and pay a "
+            log("rx: %d nodes known but the warm talker table is capped at %d: "
+                "the least recently heard will be evicted and pay a "
                 "first-contact delay when they next speak"
                 % (peer_count, VOICE_MAX_TALKERS_HARD))
 
@@ -2133,7 +2082,7 @@ class MeshVoice:
 
         Branches are never reaped on idle (see the pipeline comment), so the
         only bound is this one. Each costs about 5.3 MB with lyra, measured, so
-        the default cap is roughly 40 MB against 3.4 GB free — the cap exists to
+        the default cap is roughly 40 MB against 3.4 GB free: the cap exists to
         stop unbounded growth when nodes churn SSRCs across restarts and
         retunes, not because the memory is scarce.
 
@@ -2233,7 +2182,7 @@ class MeshVoice:
         """Tear the branch down when rtpbin times the talker out.
 
         Without this the pipeline accumulates a decoder per talker per session
-        for the life of the daemon — on a busy net that is a slow leak of both
+        for the life of the daemon: on a busy net that is a slow leak of both
         memory and CPU, and with lyra each one holds a TFLite interpreter.
         """
         name = pad.get_name()
@@ -2307,7 +2256,7 @@ class MeshVoice:
         except Exception as exc:
             log("packing: could not set frames-per-packet=%d: %s" % (fpp, exc))
             return
-        log("packing: %d frame(s)/packet (%d ms, ~%.1f kbps on air) — %s"
+        log("packing: %d frame(s)/packet (%d ms, ~%.1f kbps on air): %s"
             % (fpp, fpp * 20, 0.4 * (86.0 / fpp + LYRA_FRAME_BYTES.get(
                 self.cfg.lyra_bitrate, 15)), why))
 
@@ -2442,14 +2391,14 @@ class MeshVoice:
         # announce ourselves rather than waiting for the periodic beacon.
         new_ips = {ip for ip, _ in registry} - self._known_peer_ips
         if new_ips and self.cfg.beacon_sec:
-            log("beacon: %d new node(s) in registry — announcing" % len(new_ips))
+            log("beacon: %d new node(s) in registry: announcing" % len(new_ips))
             GLib.timeout_add(500, self._tick_beacon)
         self._known_peer_ips = {ip for ip, _ in registry}
 
         if peers != self.peers:
             log("peers: %d unicast target(s)%s" % (
                 len(peers),
-                (" — " + ", ".join(h or ip for ip, h in peers)) if peers else ""))
+                (": " + ", ".join(h or ip for ip, h in peers)) if peers else ""))
         self.peers = peers
         if self.sink:
             self.sink.set_property("clients", ",".join(clients))
@@ -2558,14 +2507,14 @@ class MeshVoice:
 
 def main():
     if GST_IMPORT_ERROR is not None:
-        log("GStreamer Python bindings unavailable (%s) — voice disabled. "
+        log("GStreamer Python bindings unavailable (%s): voice disabled. "
             "Install python3-gi gir1.2-gstreamer-1.0 gstreamer1.0-plugins-base "
             "gstreamer1.0-plugins-good gstreamer1.0-alsa." % GST_IMPORT_ERROR)
         return 0
 
     cfg = Config()
     if not cfg.enabled and "--force" not in sys.argv:
-        log("voice=n in %s — nothing to do" % MESH_CONF)
+        log("voice=n in %s: nothing to do" % MESH_CONF)
         return 0
 
     Gst.init(None)

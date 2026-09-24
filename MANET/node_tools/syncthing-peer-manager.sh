@@ -52,7 +52,7 @@ add_peer_to_config() {
     local device_xml
     device_xml=$(printf '\n    <device id="%s" name="%s" compression="metadata" introducer="false" skipIntroductionRemovals="false" introducedBy="">\n        <address>dynamic</address>\n    </device>' "$peer_id" "$peer_name")
 
-    # Insert the new <device> block just before the closing </configuration> tag using awk for robustness
+    # Insert the device block before the closing configuration tag.
     awk -v device_xml="$device_xml" '/<\/configuration>/ { print device_xml } { print }' "$SYNCTHING_CONFIG_FILE" > "$SYNCTHING_CONFIG_FILE.tmp" && \
     mv "$SYNCTHING_CONFIG_FILE.tmp" "$SYNCTHING_CONFIG_FILE"
 }
@@ -146,4 +146,3 @@ while true; do
     log "Check complete. Waiting for ${LOOP_INTERVAL} seconds."
     sleep "$LOOP_INTERVAL"
 done
-

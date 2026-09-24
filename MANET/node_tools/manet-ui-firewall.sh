@@ -1,7 +1,5 @@
 #!/usr/bin/env bash
-# ==============================================================================
 # Web UI / iperf firewall
-# ==============================================================================
 # Kernel-enforced answer to "who can reach the pages on this node".
 #
 #   port 80    localhost, and clients holding a DHCP lease from THIS node.
@@ -11,7 +9,7 @@
 #
 # Why source address and not interface: br0 bridges bat0, so a packet from a
 # remote node arrives on br0 exactly like one from a locally attached EUD.
-# The only thing that separates them is which address it came from — this
+# The only thing that separates them is which address it came from: this
 # node's own DHCP pool versus the rest of ipv4_network.
 #
 # Lives in its own table at a priority ahead of the main filter chain, so it
@@ -20,7 +18,6 @@
 #
 # Re-run whenever the DHCP range moves (mesh-ip-manager calls it after
 # rewriting the dnsmasq config). Idempotent, and a no-op when nothing changed.
-# ==============================================================================
 
 TABLE="manet_ui"
 DNSMASQ_CONF="${MANET_DNSMASQ_CONF:-/etc/dnsmasq.d/mesh-eud.conf}"
@@ -53,7 +50,7 @@ apply_rules() {
     $NFT add chain inet "$TABLE" input \
         '{ type filter hook input priority -10; policy accept; }' || return 1
 
-    # Loopback first — an SSH port-forward to the node lands here, which is
+    # Loopback first: an SSH port-forward to the node lands here, which is
     # how the pages get looked at from a dev machine.
     $NFT add rule inet "$TABLE" input iifname "lo" accept
 

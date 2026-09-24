@@ -2,7 +2,7 @@
 """Wire/display conversions for identifiers carried in Alfred payloads.
 
 MACs and syncthing device IDs are published as raw bytes rather than in their
-printed spellings — a MAC is 6 bytes but 17 characters, and a syncthing ID is
+printed spellings: a MAC is 6 bytes but 17 characters, and a syncthing ID is
 32 bytes but 63. Alfred replicates these to every node on a timer, so the
 printed forms cost real airtime. Everything here converts between the two.
 

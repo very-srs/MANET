@@ -12,7 +12,7 @@ Verification happens on the CM4. A feature under **Working** has run on
 hardware. One under **In Testing** has code written, may have been bench tested, but has not yet been
 proven enough to be "finished".
 
-#### ✅ Working
+#### Working
 - [x] Wireless EUD
 - [x] Wired EUD
 - [x] Auto EUD
@@ -29,23 +29,32 @@ proven enough to be "finished".
 - [x] Region-aware HaLow channel and bandwidth selection
 - [x] Over-the-air tools update
 
-#### 🧪 In Testing
+#### In Testing
 - [ ] Mumble Server - server launches, migration not tested
-- [ ] Automatic channel selection
-- [ ] Partition healing (tourguide) and limp mode
-- [ ] In mesh NTP
+- [ ] Automatic channel selection: one agreed plan across all connected radios,
+      bounded majority acknowledgements and straggler recovery. Automated tests
+      pass; CM4 bench validation is waiting for hardware setup.
+- [ ] Partition healing: HaLow-assisted recovery, rotating Wi-Fi lobby fallback
+      and reconciliation when isolated groups reconnect. CM4 bench validation
+      is pending. Limp mode also remains in testing.
+- [ ] In-mesh time synchronization: verified GPS/Internet sources, registry
+      discovery and periodic client refreshes. Drift and source transitions
+      still need CM4 bench measurement.
 - [ ] Push-to-talk voice over the mesh (Lyra codec). Verified one way between two
       nodes at 0% loss. A two-way test needs a second OpenVLM board. A headset with a
       dynamic microphone needs an external mic preamp ahead of the OpenVLM
 - [ ] Operator setup scripts run once at first boot. Only basic test scripts have been tested.
 - [ ] Self-rollback after a mesh key or SSID change
-- [ ] Status indication
+- [ ] External LED/button connectivity indication: direct-neighbor counts,
+      deduplicated across radios, with separate disconnected/unavailable states.
+      Software tests pass; pin wiring and electrical behavior remain unverified.
 - [ ] Enclosure design
 
-#### 📅 Future Work
+#### Future Work
 - [ ] Further reduction in network traffic
-- [ ] Physical interaction (buttons, knobs). The button and LED scripts are in
-      the tree but exit immediately, since the pin wiring is not finalized. Planned as
+- [ ] Physical interaction (buttons, knobs). The existing button and LED scripts
+      require explicit harness configuration and are disabled by default while
+      pin wiring is unfinished. Further controls are planned as
       a dual rotary encoder for power, talk group and headset volume. Talk-group
       switching already works from a script: write `voice_channel` to `/etc/mesh.conf`
       and send `mesh-voice` a SIGHUP, which retunes in place instead of restarting

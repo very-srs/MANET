@@ -1,7 +1,5 @@
 #!/bin/bash
-# ==============================================================================
 # Mesh IP Manager - Chunk-Based Allocation with Bridged EUD Architecture
-# ==============================================================================
 # This script manages IPv4 address claiming using a chunk-based approach where
 # each node claims a contiguous block of IPs for itself and its EUDs.
 #
@@ -25,7 +23,6 @@
 #   - When AP: wlan1 enslaved to br0 (not in bat0), DHCP allowed
 #   - When mesh: wlan1 enslaved to bat0, DHCP blocked
 #
-# ==============================================================================
 
 # --- Configuration ---
 CONTROL_IFACE="br0"
@@ -49,7 +46,7 @@ if [ -f /etc/mesh.conf ]; then
 fi
 EUD_MODE=${EUD_MODE:-"none"}
 
-# Calculate service VIPs from ipv4_network — same formula as election scripts
+# Calculate service VIPs from ipv4_network: same formula as election scripts
 # MTX VIP = HostMin+1, Mumble VIP = HostMin+2
 MTX_VIP=""
 MUMBLE_VIP=""
@@ -427,7 +424,7 @@ local=/mesh.local/
 address=/manet.local/$br0_secondary
 address=/perf.local/$br0_secondary
 
-# Service VIPs — stable across the mesh regardless of which node is leader
+# Service VIPs: stable across the mesh regardless of which node is leader
 ${_MUMBLE_VIP_LINE}
 ${_MTX_VIP_LINE}
 
@@ -441,7 +438,7 @@ EOF
 
     # Ensure dnsmasq is unmasked, enabled, and running.
     # unmask triggers a full systemd daemon-reload even when nothing is
-    # masked — only call it when the unit is actually masked.
+    # masked: only call it when the unit is actually masked.
     if [ "$(systemctl is-enabled dnsmasq.service 2>/dev/null)" = "masked" ]; then
         systemctl unmask dnsmasq.service 2>/dev/null
     fi

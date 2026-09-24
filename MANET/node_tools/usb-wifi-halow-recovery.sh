@@ -20,12 +20,12 @@ esac
 # Only act if wlan2 exists
 [ -e /sys/class/net/wlan2 ] || exit 0
 
-log "$ACTION on $IFACE — scheduling HaLow recovery in ${DELAY}s"
+log "$ACTION on $IFACE: scheduling HaLow recovery in ${DELAY}s"
 
 # Run restart in background so udev isn't blocked
 (
     sleep "$DELAY"
-    # Check if wlan2 is already up — skip restart if it recovered on its own
+    # Check if wlan2 is already up: skip restart if it recovered on its own
     state="$(cat /sys/class/net/wlan2/operstate 2>/dev/null)"
     if [ "$ACTION" = "add" ] && [ "$state" = "up" ]; then
         log "wlan2 already up, skipping restart"

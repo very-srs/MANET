@@ -1,10 +1,7 @@
 #!/bin/bash
-# ==============================================================================
 # Quorum Checker
-# ==============================================================================
 # Determines if node is isolated and should return to lobby
 # Exit codes: 0 = stay put, 1 = return to lobby needed, 2 = check unavailable
-# ==============================================================================
 
 REGISTRY_STATE_FILE="${REGISTRY_STATE_FILE:-/var/run/mesh_node_registry}"
 BATCTL_PATH="${BATCTL_PATH:-/usr/sbin/batctl}"

@@ -22,10 +22,10 @@ JSON schema:
 
 MCU register map (I2C addr 0x2D, little-endian 16-bit values):
   0x02        Status byte (bit6=fast charging, bit7=charging, bit5=discharging)
-  0x10-0x15   VBUS: voltage(mV), current(mA), power(mW)  — 3×uint16 LE
+  0x10-0x15   VBUS: voltage(mV), current(mA), power(mW) : 3×uint16 LE
   0x20-0x2B   Battery: voltage(mV), current(mA signed), percent, capacity(mAh),
-              runtime_to_empty(min), time_to_full(min)   — 6×uint16 LE
-  0x30-0x37   Cell voltages V1-V4                        — 4×uint16 LE
+              runtime_to_empty(min), time_to_full(min)  : 6×uint16 LE
+  0x30-0x37   Cell voltages V1-V4                       : 4×uint16 LE
 """
 
 import json
@@ -39,7 +39,7 @@ I2C_BUS              = 1
 MCU_ADDR             = 0x2D
 READ_INTERVAL        = 30        # seconds
 OUTPUT_FILE          = "/run/battery_status.json"
-CELL_LOW_MV          = 3150      # mV — matches Waveshare sample
+CELL_LOW_MV          = 3150      # mV: matches Waveshare sample
 CHARGE_THRESHOLD_MA  = 50        # mA above this = charging
 
 logging.basicConfig(
@@ -57,7 +57,7 @@ def open_bus():
             return m.SMBus(I2C_BUS)
         except ImportError:
             continue
-    log.error("Neither smbus2 nor smbus installed — run: apt-get install python3-smbus")
+    log.error("Neither smbus2 nor smbus installed. Run: apt-get install python3-smbus")
     sys.exit(1)
 
 
@@ -124,7 +124,7 @@ def write_atomic(path, data):
 
 
 def main():
-    log.info("Starting — I2C bus %d MCU addr 0x%02X", I2C_BUS, MCU_ADDR)
+    log.info("Starting: I2C bus %d MCU addr 0x%02X", I2C_BUS, MCU_ADDR)
     bus = open_bus()
 
     shutdown_triggered = False
@@ -144,7 +144,7 @@ def main():
             if not shutdown_triggered and not data["charging"]:
                 low_cells = [v for v in data["cell_mv"] if 0 < v < CELL_LOW_MV]
                 if low_cells:
-                    log.critical("Cell voltage critical %s mV — initiating graceful shutdown", low_cells)
+                    log.critical("Cell voltage critical %s mV: initiating graceful shutdown", low_cells)
                     shutdown_triggered = True
                     subprocess.run(["systemctl", "poweroff"], check=False)
 

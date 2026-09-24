@@ -1,12 +1,9 @@
 #!/bin/bash
-# ==============================================================================
 # Mesh Node Manager - Static Channel Mode
-# ==============================================================================
 # Simplified version for static channel operation
 # - No RF scanning or channel selection
 # - No tourguide (all nodes on same channels always)
 # - Just publishes status and manages services
-# ==============================================================================
 
 # --- Configuration ---
 CONTROL_IFACE="br0"
@@ -56,9 +53,7 @@ log() {
 }
 
 
-# ==============================================================================
 # === GATEWAY DETECTION ===
-# ==============================================================================
 # Gateway state is owned by manet-uplink-dispatch.sh. Node manager only
 # asks it to reconcile periodically before publishing status to Alfred.
 GATEWAY_STATE_FILE="/var/run/mesh-gateway.state"
@@ -78,9 +73,7 @@ detect_and_update_gateway_state() {
     [ -x /usr/local/bin/manet-uplink-dispatch.sh ] && /usr/local/bin/manet-uplink-dispatch.sh reconcile >/dev/null 2>&1 || true
 }
 
-# ==============================================================================
 # Time source advertisement (the time service owns chrony and these markers)
-# ==============================================================================
 GPS_STATUS_FILE="/run/gps_status.json"
 GPS_FIX_MAX_AGE=60
 
@@ -135,7 +128,7 @@ load_mesh_wpa_confs() {
 
     # The 5 GHz radio is absent from mesh_if when it is reserved for AP duty
     # (ethernet-autodetect moves it between hostapd and the mesh), so a second
-    # entry is optional — no wlan1 fallback.
+    # entry is optional: no wlan1 fallback.
     WPA_IFACE_2_4="${mesh_ifaces[0]:-wlan0}"
     WPA_IFACE_5_0="${mesh_ifaces[1]:-}"
     WPA_CONF_2_4="/etc/wpa_supplicant/wpa_supplicant-${WPA_IFACE_2_4}.conf"
@@ -360,11 +353,8 @@ while true; do
         [ -n "$CPU_LOAD" ] && ENCODER_ARGS+=("--cpu-load-average" "$CPU_LOAD")
 
         # --- GPS Location ---
-        # A stale file is rejected as well as a missing fix. gps-reader stamps
-        # every write, so a frozen timestamp means it died or hung while still
-        # holding a fix — and a moving node would otherwise keep beaconing the
-        # position it had when the reader stopped. Only has_fix was checked
-        # before, so that stale position was published indefinitely.
+        # Reject stale files as well as missing fixes. If gps-reader stops updating
+        # its timestamp, the last recorded position is no longer safe to publish.
         GPS_LAT=""; GPS_LON=""; GPS_ALT=""
         if [ -f "$GPS_STATUS_FILE" ]; then
             eval "$(python3 -c "

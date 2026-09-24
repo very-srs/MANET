@@ -63,7 +63,7 @@ lookup_gateway_ip_by_mac() {
 while true; do
     if [ -f /var/run/mesh-gateway.state ]; then
         cur="$(ip route show default | head -n1 || true)"
-        # Only log when actually removing a route — this branch runs every
+        # Only log when actually removing a route: this branch runs every
         # poll cycle while in gateway mode, and log() forks date.
         if echo "$cur" | grep -q " dev br0 "; then
             ip route del default dev br0 2>/dev/null || true
@@ -77,7 +77,7 @@ while true; do
     if [ -z "${gw_mac:-}" ]; then
         # Nobody is announcing a gateway any more. A default route installed on
         # an earlier pass now points at a node that has stopped NATing, so
-        # traffic black-holes instead of visibly failing — withdraw it. Only
+        # traffic black-holes instead of visibly failing: withdraw it. Only
         # br0 routes are ours; a local uplink route lives on the ethernet iface
         # and must be left alone.
         cur="$(ip route show default | head -n1 || true)"

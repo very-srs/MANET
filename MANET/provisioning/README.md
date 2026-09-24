@@ -37,8 +37,7 @@ You will need:
 
 Every page, with a screenshot of each: [Windows: step by step](#windows-step-by-step).
 
-That is the whole list. **You do not need the rest of this folder and you do not need to
-install anything prior to running the cmd file.**
+The launcher downloads the supporting files and offers to install required tools.
 
 The first time it runs it makes itself a folder called **`MANET Flasher`** next to where
 you put it, moves itself in, and fetches what it needs from GitHub. Everything to do with
@@ -607,8 +606,7 @@ you have hit one of these, that is the shorter road.
 
 **`... cannot be loaded because running scripts is disabled on this system`**
 
-Windows' execution policy is blocking the script. This is the default on Windows and
-affects every PowerShell script, not just this one. In an **Administrator** PowerShell
+Windows' execution policy is blocking PowerShell scripts. In an **Administrator** PowerShell
 window, in the `provisioning` folder:
 
 ```powershell

@@ -1,75 +1,40 @@
 #!/bin/bash
-# led-info.sh
-# One-shot. Called by button-monitor.sh on button press.
-# Displays neighbor count via LED blink sequence, then exits.
-# Requires libgpiod v2 tools (gpioset --chip <chip> <line>=<value>).
+# One-shot external LED display, invoked by button-monitor.sh.
+# Count directly connected nodes across BATMAN radios, excluding multihop peers.
+source "$(dirname "${BASH_SOURCE[0]}")/manet-led-common.sh"
 
-# ── Hardware config (update after wiring test) ───────────────────────
-GPIO_CHIP="gpiochip0"
-LED_R=20
-LED_G=21
-LED_B=22
-GPIO_CONSUMER="manet-led"
-# ─────────────────────────────────────────────────────────────────────
+BLINK_ON=0.3
+BLINK_OFF=0.4
+STATUS_SOLID=3
 
-BLINK_ON=0.3        # seconds LED on per blink
-BLINK_OFF=0.4       # seconds LED off between blinks
-NO_PEER_SOLID=3     # seconds of solid red if no neighbors
+led_init
+# Wait through a boot blink or its ten-second success indication. Never
+# interleave two counts or block the button monitor indefinitely.
+flock -w 12 9 || exit 0
 
-if ! gpioinfo --chip "$GPIO_CHIP" >/dev/null 2>&1; then
-    echo "led-info: GPIO chip ${GPIO_CHIP} not present/usable; exiting"
-    exit 0
-fi
-
-# ── LED control ───────────────────────────────────────────────────────
-# libgpiod v2 gpioset only holds line values while it runs, so keep one
-# holder process alive and replace it on each state change.
-
-LED_HOLD_PID=""
-
-led_set() {
-    if [ -n "$LED_HOLD_PID" ]; then
-        kill "$LED_HOLD_PID" 2>/dev/null
-        wait "$LED_HOLD_PID" 2>/dev/null
-    fi
-    gpioset --chip "$GPIO_CHIP" \
-        "${LED_R}=$1" "${LED_G}=$2" "${LED_B}=$3" 2>/dev/null &
-    LED_HOLD_PID=$!
-}
-
-led_off() { led_set 0 0 0; }
-
-cleanup() {
-    [ -n "$LED_HOLD_PID" ] && kill "$LED_HOLD_PID" 2>/dev/null
-}
-trap cleanup EXIT
-
-# ── Neighbor count ────────────────────────────────────────────────────
-
-get_neighbor_count() {
-    /usr/sbin/batctl neighbors 2>/dev/null \
-        | grep -v -e '^$' -e 'B.A.T.M.A.N' -e 'No batman' \
-        | wc -l
-}
-
-# ── Main ──────────────────────────────────────────────────────────────
-
-count=$(get_neighbor_count)
-echo "led-info: neighbor count = ${count}"
-
-if (( count == 0 )); then
-    # No peers: solid red for NO_PEER_SOLID seconds
+count=$(get_peer_count)
+result=$?
+if (( result == 3 )); then
+    echo "led-info: connected; neighbor count pending identity discovery"
+    led_set 0 1 0  # A connection is confirmed even before radio aliases arrive.
+    led_sleep "$STATUS_SOLID"
+elif (( result != 0 )); then
+    echo "led-info: peer count unavailable"
+    led_set 1 1 0  # Amber: unknown, distinct from confirmed isolation.
+    led_sleep "$STATUS_SOLID"
+elif (( count == 0 )); then
+    echo "led-info: peer count = 0"
     led_set 1 0 0
-    sleep "$NO_PEER_SOLID"
-    led_off
+    led_sleep "$STATUS_SOLID"
 else
-    # N peers: blink green N times
+    echo "led-info: peer count = ${count}"
     led_off
-    sleep 0.3   # brief pause before sequence starts
+    led_sleep 0.3
     for (( i = 0; i < count; i++ )); do
         led_set 0 1 0
-        sleep "$BLINK_ON"
-        led_off
-        sleep "$BLINK_OFF"
+        led_sleep "$BLINK_ON"
+        led_set 0 0 0
+        led_sleep "$BLINK_OFF"
     done
 fi
+led_off

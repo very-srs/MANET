@@ -107,7 +107,7 @@ def build_telemetry(args):
     t.ap_ssid = args.ap_ssid
     t.eud_count = args.eud_count
 
-    # Structured, not a nested JSON string — see the note in NodeInfo.proto.
+    # Structured, not a nested JSON string: see the note in NodeInfo.proto.
     try:
         for r in json.loads(args.channel_report_json).get('results', []):
             result = t.channel_report.results.add()
@@ -128,7 +128,7 @@ def build_telemetry(args):
 def _add_interfaces(t, interfaces_json):
     """Populate the interface list so peers render from the registry.
 
-    Health and fault text are deliberately not published — the viewer derives
+    Health and fault text are deliberately not published: the viewer derives
     them from role and state, rather than every node shipping prose on every
     cycle.
     """
@@ -175,7 +175,7 @@ def main():
     parser = argparse.ArgumentParser(description='Encode an Alfred payload.')
     sub = parser.add_subparsers(dest='kind', required=True)
 
-    # ── identity (Alfred type 67) ────────────────────────────────────────────
+    # identity (Alfred type 67)
     p = sub.add_parser('identity', help='static node identity')
     p.add_argument('--hostname', required=True)
     p.add_argument('--mac-addresses', nargs='+', type=str, required=True,
@@ -185,7 +185,7 @@ def main():
     p.add_argument('--syncthing-id', default='')
     p.add_argument('--ipv4-chunk', type=int, default=0)
 
-    # ── telemetry (Alfred types 68 and 69) ───────────────────────────────────
+    # telemetry (Alfred types 68 and 69)
     p = sub.add_parser('telemetry', help='volatile node state')
     p.add_argument('--timestamp', type=int, required=True)
 

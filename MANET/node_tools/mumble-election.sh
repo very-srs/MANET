@@ -1,10 +1,7 @@
 #!/bin/bash
-# ==============================================================================
 # Mumble Election Script with Database Synchronization
-# ==============================================================================
 # Elects Mumble server based on mesh centrality (TQ)
 # Manages database sync via Syncthing to prevent data loss
-# ==============================================================================
 
 # --- Configuration ---
 REGISTRY_STATE_FILE="/var/run/mesh_node_registry"
@@ -393,10 +390,9 @@ log "Mumble VIPs: IPv4=$MUMBLE_IPV4_VIP, IPv6=$MUMBLE_IPV6_VIP"
 
 # --- Detect Current Incumbent ---
 # Use the Alfred node registry as the authoritative source for incumbency.
-# node-manager publishes IS_MUMBLE_SERVER=true only when the local node holds
-# both mumble-server.service AND the Mumble VIP — so the registry reflects the
-# actual winner, not just who has the IP configured.  All nodes read the same
-# Alfred-propagated registry, so there is no per-node ARP/local-IP ambiguity.
+# node-manager publishes IS_MUMBLE_SERVER=true only when the local node runs
+# mumble-server.service and holds the Mumble VIP. All nodes use the same
+# Alfred-propagated registry to identify the active host.
 CURRENT_LEADER_MAC=""
 if [ -f "$REGISTRY_STATE_FILE" ]; then
     INCUMBENT_NODE_ID=$(grep "IS_MUMBLE_SERVER='true'" "$REGISTRY_STATE_FILE" \

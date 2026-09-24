@@ -1,14 +1,11 @@
 #!/bin/bash
 # One-shot voice bring-up for a node updated over the air.
 #
-# The tools tarball can carry anything that is a file — scripts, units, udev
-# rules, modules — but it cannot run apt, and mesh-voice needs the GStreamer
-# runtime. This is the piece that closes that gap on a fielded board: it is
-# dropped in by the update, runs once, and removes itself.
+# Tools updates install this script to add the GStreamer runtime through apt.
+# It runs once and removes itself after completing setup.
 #
-# Safe to run on a node that needs nothing: it checks first, changes nothing,
-# and still tidies up after itself. A fresh flash lands here with the packages
-# already installed by firstrun.sh, so it is a no-op there by design.
+# Freshly flashed nodes already have these packages from firstrun.sh and skip
+# installation. The script still removes itself when no changes are needed.
 
 set -u
 LOG="/var/log/manet-voice-setup.log"
@@ -67,10 +64,10 @@ fi
 # Only start voice if this node is configured for it; the daemon exits 0 on
 # voice=n anyway, but starting it would be noise.
 if grep -qE '^voice=(y|yes|true|1|on)$' /etc/mesh.conf 2>/dev/null; then
-    echo "voice=y — starting mesh-voice"
+    echo "voice=y: starting mesh-voice"
     systemctl enable --now mesh-voice.service 2>/dev/null || true
 else
-    echo "voice not enabled in /etc/mesh.conf — unit left enabled but idle"
+    echo "voice not enabled in /etc/mesh.conf: unit left enabled but idle"
 fi
 
 echo "done; removing self"

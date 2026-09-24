@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# sae-watchdog.sh — monitors wpa_supplicant for MESH-SAE-AUTH-BLOCKED events
+# sae-watchdog.sh: monitors wpa_supplicant for MESH-SAE-AUTH-BLOCKED events
 # and automatically restarts wpa_supplicant + batman-enslave to recover.
 #
 # Background: when SAE handshake fails 4 times, wpa_supplicant blocks the peer
@@ -66,7 +66,7 @@ restart_mesh() {
 }
 
 # Track which interfaces already have all bat0 slaves active.
-# Only restart if bat0 is actually missing mesh interfaces — avoids
+# Only restart if bat0 is actually missing mesh interfaces: avoids
 # thrashing on a healthy node that just happens to see a blocked peer.
 bat0_has_all_interfaces() {
     for iface in $STANDARD_MESH_INTERFACES; do
@@ -96,15 +96,15 @@ while IFS= read -r line; do
     if echo "$line" | grep -q "MESH-SAE-AUTH-BLOCKED"; then
         log "Detected: $line"
 
-        # Only react if bat0 is missing interfaces — if we already have
+        # Only react if bat0 is missing interfaces: if we already have
         # all mesh interfaces in bat0 the block is on a genuinely bad peer
         # and restarting would cause unnecessary disruption.
         if bat0_has_all_interfaces; then
-            log "bat0 has all expected interfaces — skipping restart (blocked peer may be genuinely unreachable)"
+            log "bat0 has all expected interfaces: skipping restart (blocked peer may be genuinely unreachable)"
             continue
         fi
 
-        log "bat0 is missing mesh interfaces — initiating recovery restart"
+        log "bat0 is missing mesh interfaces: initiating recovery restart"
         restart_mesh "$line"
     fi
 done

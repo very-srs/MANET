@@ -65,7 +65,7 @@ def decode_telemetry(raw):
 
     emit_raw('UPTIME_SECONDS', t.uptime_seconds)
     # proto3 cannot tell 0 from unset for a scalar, and these boards have no
-    # battery reader yet — publishing 0 would paint every node with a red
+    # battery reader yet: publishing 0 would paint every node with a red
     # critical-battery badge. Absent means unknown, which renders as "—".
     emit_raw('BATTERY_PERCENTAGE', t.battery_percentage or '')
     emit_raw('CPU_LOAD_AVERAGE', f'{t.cpu_load_average:.2f}')

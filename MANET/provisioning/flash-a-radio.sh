@@ -923,7 +923,7 @@ detect_sd_cards() {
                         devtype=$(cat "/sys/block/$NAME/device/type" 2>/dev/null || echo "")
                         [ "$devtype" = "SD" ] || [ "$devtype" = "MMC" ] || continue
                 elif [ "$TRAN" = "usb" ]; then
-                        # USB-attached card reader — accept any non-zero-size disk
+                        # USB-attached card reader: accept any non-zero-size disk
                         [ "$SIZE" = "0B" ] && continue
                 else
                         continue
@@ -995,7 +995,7 @@ ask_questions() {
         if [ "$VOICE_ENABLED" = "y" ] || [ "$VOICE_ENABLED" = "Y" ]; then VOICE_ENABLED="y"; else VOICE_ENABLED="n"; fi
         # Talk group is deliberately not asked here. Every node ships on group 1
         # and the operator changes it from the web UI (and, later, the enclosure
-        # rotary switch) — it is a per-radio setting like a channel knob, not a
+        # rotary switch): it is a per-radio setting like a channel knob, not a
         # fleet-build decision, and baking it into the image would mean
         # reflashing to change channel.
 
@@ -1219,7 +1219,7 @@ acquire_armbian_image() {
                         ARMBIAN_IMAGE="$ARMBIAN_IMAGE_FILENAME"
                         return 0
                 else
-                        echo "Local image failed checksum — re-downloading."
+                        echo "Local image failed checksum: re-downloading."
                         rm -f "$ARMBIAN_IMAGE_FILENAME"
                 fi
         fi
@@ -1235,7 +1235,7 @@ acquire_armbian_image() {
                                 echo "Decompression complete."
                                 return 0
                         else
-                                echo "Decompressed image failed checksum — re-downloading."
+                                echo "Decompressed image failed checksum: re-downloading."
                                 rm -f "$ARMBIAN_IMAGE_FILENAME" "${ARMBIAN_IMAGE_FILENAME}.xz"
                         fi
                 else
@@ -1506,7 +1506,7 @@ confirm_flash() {
         echo "Proceeding with flash..."
 }
 
-# Flash one SD card — Rock3A path (dd)
+# Flash one SD card: Rock3A path (dd)
 flash_r3a() {
         local target="$1"
 
@@ -1521,7 +1521,7 @@ flash_r3a() {
         LOOP_DEV=$(sudo losetup -fP --show "$TEMP_IMAGE")
         echo "Mounted image as: $LOOP_DEV"
 
-        # Find the ext4 rootfs partition — auto-detects single or split layout
+        # Find the ext4 rootfs partition: auto-detects single or split layout
         local ROOT_PART=""
         for part in "${LOOP_DEV}p"*; do
                 local fstype
@@ -1568,9 +1568,7 @@ admin_password=${ADMIN_PW}
 auto_update=${AUTO_UPDATE}
 EOF
 
-        # ============================================================
         # BYPASS ARMBIAN-FIRSTLOGIN - Headless auto-provisioning
-        # ============================================================
 
         # Remove .not_logged_in_yet to prevent armbian-firstlogin from running
         echo "Removing .not_logged_in_yet to bypass interactive setup..."
@@ -1602,9 +1600,7 @@ EOF
         echo "radio ALL=(ALL) NOPASSWD: ALL" | sudo tee "$ROOT_MOUNT/etc/sudoers.d/radio" > /dev/null
         sudo chmod 440 "$ROOT_MOUNT/etc/sudoers.d/radio"
 
-        # ============================================================
         # Generate and install the provisioning script
-        # ============================================================
 
         echo "Generating provisioning script from Rock3A template..."
         local TEMP_PROVISION_SCRIPT
@@ -1646,9 +1642,7 @@ EOF
         sudo chmod +x "$ROOT_MOUNT/usr/local/bin/provision-mesh.sh"
         rm -f "$TEMP_PROVISION_SCRIPT"
 
-        # ============================================================
         # Create systemd service for auto-provisioning on first boot
-        # ============================================================
 
         echo "Creating mesh-provision systemd service..."
         sudo tee "$ROOT_MOUNT/etc/systemd/system/mesh-provision.service" > /dev/null << 'SERVICE_EOF'
@@ -1678,9 +1672,7 @@ SERVICE_EOF
         sudo ln -sf /etc/systemd/system/mesh-provision.service \
                 "$ROOT_MOUNT/etc/systemd/system/multi-user.target.wants/mesh-provision.service"
 
-        # ============================================================
         # Unmount and flash
-        # ============================================================
 
         echo "Unmounting image..."
         sudo sync
@@ -1715,7 +1707,7 @@ SERVICE_EOF
         echo " minutes"
 }
 
-# Flash one SD card — Raspberry Pi path (rpi-imager)
+# Flash one SD card: Raspberry Pi path (rpi-imager)
 # ---------------------------------------------------------------------------
 # Operator setup scripts
 # ---------------------------------------------------------------------------
@@ -1962,7 +1954,7 @@ validate_additional_scripts() {
         echo ""
         echo " ERROR: embedded scripts total $ADDITIONAL_SCRIPTS_BYTES bytes," \
              "over the ${ADDITIONAL_SCRIPTS_MAX_BYTES}-byte limit."
-        echo "        Have a script fetch the bulk at run time instead — the"
+        echo "        Have a script fetch the bulk at run time instead: the"
         echo "        node has confirmed internet before these are run."
         exit 1
     fi
@@ -2222,7 +2214,7 @@ fi
 validate_additional_scripts
 
 
-# --- 3. Acquire image (Rock3A only — checksum verified here) ---
+# --- 3. Acquire image (Rock3A only: checksum verified here) ---
 if [ "$HARDWARE_MODEL" = "r3a" ]; then
         acquire_armbian_image
 fi

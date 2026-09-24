@@ -1,7 +1,5 @@
 #!/bin/bash
-# ==============================================================================
 # Ethernet Auto-Detection Script
-# ==============================================================================
 # Detects ethernet role and configures bridging appropriately
 #
 # Modes:
@@ -15,7 +13,6 @@
 #	-  - EUD wired: wlan1 into mesh
 #   -  - Wireless:  wlan1 AP
 #   -  - Auto:  wlan1 into mesh
-# ==============================================================================
 
 # Full xtrace + tee-to-journal only when debugging: set -x sends every traced
 # line to journald via the dispatcher, which is real load when events loop.
@@ -131,13 +128,13 @@ log() {
 #
 # ICMP echo alone is not a usable test. Plenty of LANs (the bench LAN included)
 # drop or heavily rate-limit echo to public addresses while passing TCP and UDP
-# normally — measured 95-100% echo loss to 8.8.8.8/1.1.1.1 there while DNS,
+# normally: measured 95-100% echo loss to 8.8.8.8/1.1.1.1 there while DNS,
 # HTTP and traceroute all worked. A ping-only probe made this node flap in and
 # out of gateway mode, so try progressively less-filtered methods:
-#   1. ICMP  — cheapest, answers in milliseconds on a normal LAN
-#   2. HTTP  — the standard 204 captive-portal endpoints; a portal answers
+#   1. ICMP : cheapest, answers in milliseconds on a normal LAN
+#   2. HTTP : the standard 204 captive-portal endpoints; a portal answers
 #              200/302 rather than 204, which correctly counts as "no internet"
-#   3. TCP   — bare connect to public DNS, for images without curl
+#   3. TCP  : bare connect to public DNS, for images without curl
 internet_probe() {
     local iface="$1"
     local url code ip
@@ -240,7 +237,7 @@ detect_hotplug_mode() {
     if [ -f /var/run/mesh-gateway.state ] && [ -n "$ip" ] && \
        ip route show dev "$ETH_IFACE" | grep -q '^default '; then
         log "Existing gateway state is healthy on $ETH_IFACE ($ip); skipping re-detection"
-        # Exit the whole script — returning here would still run the gateway
+        # Exit the whole script: returning here would still run the gateway
         # mode section, which rewrites 20-end0.network, triggers a networkd
         # inotify reconfigure, and restarts this loop.
         exit 0
@@ -419,14 +416,10 @@ fi
 # Get existing IP if any
 EXISTING_IP=$(ip -4 addr show dev "$ETH_IFACE" | grep -oP 'inet \K[\d.]+' | head -1)
 
-# ===================================================================
 # CONFIGURE BASED ON DETECTED MODE
-# ===================================================================
 
 if [ "$DETECTED_MODE" == "gateway" ]; then
-    # ===================================
     # GATEWAY MODE - Has internet
-    # ===================================
     log "Configuring as gateway/uplink..."
 
     if [ -z "$EXISTING_IP" ]; then
@@ -436,7 +429,7 @@ if [ "$DETECTED_MODE" == "gateway" ]; then
 
     ETH_IP="$EXISTING_IP"
 
-    # Do not rewrite $ACTIVE_CONFIG here — it was already written (if needed)
+    # Do not rewrite $ACTIVE_CONFIG here: it was already written (if needed)
     # during detect_hotplug_mode, and rewriting it triggers an inotify event
     # that causes networkd to reconfigure end0, briefly drops the DHCP lease,
     # and restarts this loop. networkd uses 10-end0.network regardless.
@@ -571,9 +564,7 @@ EOF
 
 
 
-    # ===================================
     # WIRED EUD MODE - Bridge to mesh
-    # ===================================
 elif [ "$DETECTED_MODE" == "wired-eud" ]; then
     log "Configuring as wired EUD (bridged mode)..."
 

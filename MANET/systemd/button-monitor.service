@@ -1,0 +1,12 @@
+[Unit]
+Description=Optional MANET LED information button
+After=local-fs.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/button-monitor.sh
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

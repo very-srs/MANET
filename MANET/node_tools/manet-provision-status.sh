@@ -1,20 +1,17 @@
 #!/usr/bin/env bash
-# ==============================================================================
 # Provisioning status
-# ==============================================================================
 # Answers one question, on login and on demand: is this node finished setting
 # itself up, or not?
 #
 # A node provisions across several reboots and can take ten minutes. Pulling
 # the Ethernet cable or the power part-way through leaves it half-configured,
-# and until now nothing said so — the node looked identical to a finished one.
+# and until now nothing said so: the node looked identical to a finished one.
 # That is how a node ended up in the field with none of its packages installed.
 #
 # Installed as /etc/update-motd.d/50-manet-provision, so it prints on every SSH
 # login, and runnable directly as `manet-provision-status.sh`.
 #
 # Never fails: a motd hook that errors breaks the login banner.
-# ==============================================================================
 
 STATE_FILE="${MANET_PROVISION_STATE:-/var/lib/manet-provision.state}"
 FAIL_FILE="${MANET_PROVISION_FAILURES:-/var/lib/manet-provision.failures}"
@@ -112,7 +109,7 @@ case "$STATE" in
 running)
     echo
     rule
-    printf '  MANET PROVISIONING IN PROGRESS — do not disconnect\n'
+    printf '  MANET PROVISIONING IN PROGRESS: do not disconnect\n'
     rule
     printf '  Stage    : %s\n' "${PHASE:-unknown}"
     printf '  Running  : %s\n' "$(human_delta "$STARTED")"
@@ -138,11 +135,11 @@ incomplete)
         [ "$total" -gt 8 ] && printf '    ... and %s more\n' "$((total - 8))"
     fi
     printf '\n  This node is NOT ready for use. Most failures are a missing\n'
-    printf '  network during setup — the usual cause is the Ethernet cable\n'
+    printf '  network during setup: the usual cause is the Ethernet cable\n'
     printf '  being unplugged before provisioning finished.\n\n'
     printf '  To retry: reconnect Ethernet, confirm internet, then run\n'
     printf '      sudo radio-setup.sh\n'
-    printf '  or simply reboot — it retries automatically.\n'
+    printf '  or simply reboot: it retries automatically.\n'
     printf '  Details : %s\n' "$FAIL_FILE"
     printf '  Full log: %s\n' "$LOG_FILE"
     user_scripts_line

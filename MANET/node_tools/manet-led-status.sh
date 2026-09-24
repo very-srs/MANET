@@ -1,7 +1,5 @@
 #!/usr/bin/env bash
-# ==============================================================================
 # Provisioning status on the onboard LEDs
-# ==============================================================================
 # The verdict manet-provision-status.sh prints on login, shown on the board's
 # two LEDs, so a node can be read across a bench without a terminal:
 #
@@ -13,9 +11,7 @@
 # when the verdict is written. The state it reads lives in /var/lib, so the
 # LEDs survive a reboot and only change when the status does.
 #
-# Never fails and never exits non-zero. A carrier board that wires neither LED
-# is a board this has nothing to say about, not a board with a problem.
-# ==============================================================================
+# Always exits successfully, including on boards without these LEDs.
 
 STATE_FILE="${MANET_PROVISION_STATE:-/var/lib/manet-provision.state}"
 DONE_FILE="${MANET_PROVISION_DONE:-/var/lib/radio-setup.done}"

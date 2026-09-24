@@ -1,7 +1,5 @@
 #!/bin/bash
-# ==============================================================================
 # mesh-config-apply.sh
-# ==============================================================================
 # Applies a staged config package from /var/run/mesh_pending_config.json
 # to /etc/mesh.conf and activates the appropriate services.
 #
@@ -22,7 +20,6 @@
 # Every key mesh-config-sync.py accepts must be handled by one of the three
 # blocks below. acs and regulatory_domain were validated and staged but never
 # written, so a change to either ACKed, reported applied, and did nothing.
-# ==============================================================================
 
 PENDING_CONFIG="/var/run/mesh_pending_config.json"
 MESH_CONF="/etc/mesh.conf"
@@ -39,9 +36,7 @@ die() {
     exit 1
 }
 
-# ==============================================================================
 # Read pending config
-# ==============================================================================
 [ -f "$PENDING_CONFIG" ] || die "No pending config at $PENDING_CONFIG"
 
 VERSION=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('version',''))" "$PENDING_CONFIG" 2>/dev/null)
@@ -49,11 +44,9 @@ VERSION=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('v
 
 log "Applying config version $VERSION"
 
-# ==============================================================================
 # Helper: read a value from the staged config
-# ==============================================================================
 # The file is written from an Alfred broadcast, so the value is remote input.
-# It is read straight out of the JSON by key and passed as an argv element —
+# It is read straight out of the JSON by key and passed as an argv element,
 # never interpolated into the Python source, where a quote in a value would
 # otherwise end up as code. mesh-config-sync.py has already whitelisted the
 # keys and rejected quotes and newlines; this is the second layer.
@@ -66,16 +59,12 @@ print(val if val is not None else '')
 " "$PENDING_CONFIG" "$1" 2>/dev/null
 }
 
-# ==============================================================================
 # Helper: update a key=value in /etc/mesh.conf (or add if missing)
-# ==============================================================================
 conf_set() {
     python3 "$CONFIG_WRITER" "$MESH_CONF" "$1" "$2" || die "Cannot update $1"
 }
 
-# ==============================================================================
 # Apply safe settings (no mesh disruption)
-# ==============================================================================
 apply_safe_settings() {
     local changed=false
 
@@ -115,9 +104,7 @@ apply_safe_settings() {
     fi
 }
 
-# ==============================================================================
 # Apply deferred settings (acs, regulatory_domain)
-# ==============================================================================
 # Both are mesh-wide agreements whose radio-level effect is written by
 # radio-setup.sh out of mesh.conf: the regulatory domain lands in
 # /etc/modprobe.d/{cfg80211,morse}.conf and in the supplicant country_code,
@@ -163,10 +150,8 @@ apply_deferred_settings() {
     done
 }
 
-# ==============================================================================
 # Apply dangerous settings (mesh SSID, key, IP range)
-# These require wpa_supplicant restart — the mesh will briefly disconnect
-# ==============================================================================
+# These require wpa_supplicant restart: the mesh will briefly disconnect
 apply_dangerous_settings() {
     local any_dangerous=false
 
@@ -225,9 +210,7 @@ apply_dangerous_settings() {
     log "  Dangerous settings applied. Mesh reconnecting..."
 }
 
-# ==============================================================================
 # Main
-# ==============================================================================
 log "=== Config apply starting (version: $VERSION) ==="
 
 apply_safe_settings
@@ -237,7 +220,7 @@ apply_dangerous_settings
 # Record which version was applied
 echo "$VERSION" > "$APPLIED_VERSION_FILE"
 
-# Clear the pending config — it's been applied
+# Clear the pending config: it's been applied
 rm -f "$PENDING_CONFIG"
 
 # Clear the ACK version state file so node-manager stops broadcasting it

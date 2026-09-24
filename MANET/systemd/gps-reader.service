@@ -1,5 +1,5 @@
 [Unit]
-Description=GPS reader — gpsd to /run/gps_status.json
+Description=GPS reader: gpsd to /run/gps_status.json
 # Start after gpsd if available; still starts cleanly when gpsd is absent
 # (gps-reader.py writes has_fix=false on connection failure).
 After=gpsd.service gpsd.socket

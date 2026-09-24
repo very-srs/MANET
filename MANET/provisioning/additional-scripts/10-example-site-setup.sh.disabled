@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# EXAMPLE — rename to 10-example-site-setup.sh to make it run.
+# EXAMPLE: rename to 10-example-site-setup.sh to make it run.
 #
 # Anything in this directory with a #! on line 1 is baked into the image at
 # flash time and run ONCE as root on the node, after radio-setup has finished
@@ -17,7 +17,7 @@ echo "site setup starting on $(hostname)"
 
 # ---------------------------------------------------------------------------
 # Small data files go in your own heredoc, right next to the code that uses
-# them. There is no separate data/ directory and none is needed — a quoted
+# them. There is no separate data/ directory and none is needed: a quoted
 # heredoc carries any text verbatim, including one nested inside this script.
 # ---------------------------------------------------------------------------
 install -d -m 700 -o radio -g radio /home/radio/.ssh
@@ -30,7 +30,7 @@ chmod 600 /home/radio/.ssh/authorized_keys
 # ---------------------------------------------------------------------------
 # Anything large or binary belongs behind a fetch, not in the image. The node
 # has already proven internet during provisioning, and this keeps the payload
-# off the boot partition — where firstrun.sh sits unencrypted and is readable
+# off the boot partition: where firstrun.sh sits unencrypted and is readable
 # by anyone who puts the card in a laptop.
 # ---------------------------------------------------------------------------
 # curl -fsSL --retry 3 https://files.example.org/site-bundle.tar.gz \

@@ -42,7 +42,7 @@ class PeerRadioInterfacesTests(unittest.TestCase):
         self.assertEqual(ifaces['wlan0']['tx_mcs'], 'MCS7 N2')
         self.assertEqual(ifaces['wlan0']['rx_mcs'], 'MCS5 N2')
 
-        # 5 GHz is often the AP, not a mesh radio — do not guess it ON.
+        # 5 GHz is often the AP, not a mesh radio: do not guess it ON.
         self.assertFalse(ifaces['wlan1']['active'])
         self.assertEqual(ifaces['wlan1']['channel'], '36')
         self.assertEqual(ifaces['wlan1']['rx_mcs'], 'MCS8 N2')
@@ -149,8 +149,8 @@ class PeerStatusPanelTests(unittest.TestCase):
         })
         by_name = {i['name']: i for i in panel['interfaces']}
         self.assertEqual(by_name['wlan0']['tx_mcs'], 'MCS15')
-        self.assertEqual(by_name['wlan0']['detail'], '2.4 GHz — ch1')
-        self.assertEqual(by_name['wlan2']['detail'], 'HaLow — ch1')
+        self.assertEqual(by_name['wlan0']['detail'], '2.4 GHz: ch1')
+        self.assertEqual(by_name['wlan2']['detail'], 'HaLow: ch1')
         self.assertIn('mesh-ap-6b28', by_name['wlan1']['detail'])
         self.assertEqual(by_name['bat0']['role'], 'bat')
         self.assertEqual(by_name['bat0']['detail'], 'BATMAN-ADV mesh bridge')

@@ -1,10 +1,7 @@
 #!/bin/bash
-# ==============================================================================
 # USB Ethernet Watch
-# ==============================================================================
 # Called by udev when a USB ethernet interface (tethering, LTE dongle) appears
 # or disappears. Triggers ethernet-autodetect.sh with the correct interface.
-# ==============================================================================
 
 exec >> /var/log/usb-ethernet-watch.log 2>&1
 set -x
@@ -38,7 +35,7 @@ log "$ACTION on $IFACE"
 
 case "$ACTION" in
     add|online)
-        log "USB ethernet appeared: $IFACE — ensuring networkd DHCP config..."
+        log "USB ethernet appeared: $IFACE: ensuring networkd DHCP config..."
         # Always create a networkd DHCP config so the interface gets an IP,
         # even if end0 is currently the active gateway. Without this, the
         # interface has no IP and cannot take over if end0 later disconnects.
@@ -71,7 +68,7 @@ EOF
             sleep 3
         fi
 
-        # If end0 is already the active gateway, don't take over — just ensure IP is assigned
+        # If end0 is already the active gateway, don't take over: just ensure IP is assigned
         if [ -f /var/run/upstream_iface ] && [ "$(cat /var/run/upstream_iface)" = "end0" ] && \
            [ -f /var/run/mesh-gateway.state ] && \
            ip route show dev end0 2>/dev/null | grep -q '^default'; then
@@ -83,7 +80,7 @@ EOF
         /usr/local/bin/manet-uplink-dispatch.sh add "$IFACE"
         ;;
     remove|offline)
-        log "USB ethernet removed: $IFACE — running cleanup"
+        log "USB ethernet removed: $IFACE: running cleanup"
         # Clear upstream_iface if it was this interface
         if [ -f /var/run/upstream_iface ] && [ "$(cat /var/run/upstream_iface)" = "$IFACE" ]; then
             rm -f /var/run/upstream_iface

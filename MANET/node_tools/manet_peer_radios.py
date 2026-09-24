@@ -163,15 +163,15 @@ def _peer_iface_detail(iface, nd):
         return 'Internet gateway'
     if role == 'ap':
         ssid = nd.get('AP_SSID', '') or ''
-        return f'EUD AP — {ssid}' if ssid else 'EUD AP'
+        return f'EUD AP: {ssid}' if ssid else 'EUD AP'
     if role == 'mesh':
         if name == 'wlan2' or iface.get('halow_bw'):
-            return f'HaLow — ch{channel}' if channel else 'HaLow'
+            return f'HaLow: ch{channel}' if channel else 'HaLow'
         if name == 'wlan0':
-            return f'2.4 GHz — ch{channel}' if channel else '2.4 GHz'
+            return f'2.4 GHz: ch{channel}' if channel else '2.4 GHz'
         if name == 'wlan1':
-            return f'5 GHz — ch{channel}' if channel else '5 GHz'
-        return f'Mesh — ch{channel}' if channel else 'Mesh radio'
+            return f'5 GHz: ch{channel}' if channel else '5 GHz'
+        return f'Mesh: ch{channel}' if channel else 'Mesh radio'
     return ''
 
 
