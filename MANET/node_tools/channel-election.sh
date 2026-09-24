@@ -2,20 +2,26 @@
 # ==============================================================================
 # Channel Election Manager
 # ==============================================================================
-# This script performs a decentralized, deterministic election for the best
-# 2.4GHz and 5GHz channels. If every channel is terrible it elects the
+# This script requests an agreed channel change, or scores a proposal for the
+# coordinator (--score). If every channel is terrible it elects the
 # least-bad one it actually measured and asserts limp mode.
 # ==============================================================================
 
 set -eo pipefail
 
-# --- Dry Run Mode (set to true for testing) ---
-DRY_RUN=false
+# Scoring never changes a radio. Normal calls make this round eligible for the
+# agreement service, which owns proposal, ACK, activation and recovery.
+if [ "${1:-}" != "--score" ]; then
+    [ "$#" -eq 0 ] || exit 2
+    exec python3 "${MANET_TOOLS_DIR:-$(dirname "${BASH_SOURCE[0]}")}/mesh-channel-agreement.py" request
+fi
+
+. "${MANET_TOOLS_DIR:-$(dirname "${BASH_SOURCE[0]}")}/mesh-acs-common.sh" || exit 1
 
 # --- Configuration ---
-REGISTRY_FILE="/var/run/mesh_node_registry"
-OUTPUT_FILE="/var/run/mesh_channel_election"
-LOCK_FILE="/var/run/channel-election.lock"
+REGISTRY_FILE="${REGISTRY_FILE:-/var/run/mesh_node_registry}"
+OUTPUT_FILE="${OUTPUT_FILE:-/var/run/mesh_channel_election}"
+LOCK_FILE="${MANET_ACS_LOCK_FILE:-${LOCK_FILE:-/var/run/channel-election.lock}}"
 WPA_IFACE_2_4=""
 WPA_IFACE_5_0=""
 WPA_CONF_2_4=""
@@ -73,15 +79,10 @@ LIMP_MODE_SCORE_THRESHOLD=60
 # rendezvous point, not a destination this script can choose -- see the
 # ALL CHANNELS DISQUALIFIED branch in find_best_channel.
 #
-# These are deliberately NOT filtered against the local phy's capabilities here.
-# The election is an implicit-consensus algorithm: every node must run the same
-# computation over the same replicated inputs, so injecting a per-node hardware
-# filter at this stage would let two nodes reach different answers from
-# identical data. Unusable frequencies are excluded at scan time instead
-# (phy_usable_freqs in node-manager-acs.sh), which keeps the exclusion visible
-# in the replicated reports and therefore symmetric across the mesh.
-CHANNELS_2_4="2437 2462"
-CHANNELS_5_0="5200 5220 5240 5745 5765 5785 5805 5825"
+# The coordinator supplies candidate capabilities and a shared incumbent.
+# Receivers ACK this frozen result; they never re-score their own registry.
+CHANNELS_2_4="${ACS_CHANNELS_2_4-2437 2462}"
+CHANNELS_5_0="${ACS_CHANNELS_5_0-5200 5220 5240 5745 5765 5785 5805 5825}"
 
 # --- Helper Functions ---
 log() {
@@ -89,52 +90,14 @@ log() {
 }
 
 # Get the currently configured frequency for an interface
-get_current_freq() {
-    local conf_file=$1
-    if [ -f "$conf_file" ]; then
-        grep -oP 'frequency=\K[0-9]+' "$conf_file" | head -1
-    else
-        echo ""
-    fi
-}
-
-radio_iface_enabled() {
-    python3 - "$1" <<'PY'
-import json, sys
-iface = sys.argv[1]
-try:
-    with open('/var/lib/mesh_radio_state.json') as f:
-        state = json.load(f).get('desired', {}).get(iface, 'up')
-except Exception:
-    state = 'up'
-sys.exit(1 if state == 'down' else 0)
-PY
-}
-
-load_mesh_roles() {
-    local mesh_ifaces=()
-
-    [ -f /var/lib/mesh_if ] && mapfile -t mesh_ifaces < /var/lib/mesh_if
-
-    WPA_IFACE_2_4="$(cat /var/lib/mesh_24_if 2>/dev/null || true)"
-    WPA_IFACE_5_0="$(cat /var/lib/mesh_5_if 2>/dev/null || true)"
-
-    [ -z "$WPA_IFACE_2_4" ] && WPA_IFACE_2_4="${mesh_ifaces[0]:-}"
-    [ -z "$WPA_IFACE_5_0" ] && WPA_IFACE_5_0="${mesh_ifaces[1]:-}"
-
-    WPA_CONF_2_4="/etc/wpa_supplicant/wpa_supplicant-${WPA_IFACE_2_4}.conf"
-    WPA_CONF_5_0="/etc/wpa_supplicant/wpa_supplicant-${WPA_IFACE_5_0}.conf"
-}
-
 # --- Main Logic ---
 
-# Use flock to ensure this script only runs once
+# The agreement service holds the channel lock while taking its snapshot.
 (
-    flock -n 9 || { log "Channel election already in progress. Exiting."; exit 1; }
     log "--- Starting Channel Election ---"
     load_mesh_roles
-    if [ -z "$WPA_IFACE_2_4" ] || [ -z "$WPA_IFACE_5_0" ]; then
-        log "Mesh role files not ready; cannot run channel election."
+    if ! acs_configs_ready; then
+        log "No enabled ACS radio with ready configs; cannot run channel election."
         exit 1
     fi
 
@@ -164,12 +127,14 @@ load_mesh_roles() {
     # invalid and took the election out with it. Now a bad line is dropped and
     # the rest of the mesh still votes.
     FRESH_REPORTS=$(awk -F"['=]" \
-        -v now="$NOW" -v stale="$STALE_THRESHOLD" \
-        '/_LAST_SEEN_TIMESTAMP=/ { k=$1; sub(/_LAST_SEEN_TIMESTAMP$/, "", k); ts[k]=$3 }
+        -v now="$NOW" -v stale="$STALE_THRESHOLD" -v members="${ACS_MEMBERS-}" \
+        'BEGIN { n=split(members, list, " "); for (i=1; i<=n; i++) allowed[list[i]]=1 }
+         /_LAST_SEEN_TIMESTAMP=/ { k=$1; sub(/_LAST_SEEN_TIMESTAMP$/, "", k); ts[k]=$3 }
          /_CHANNEL_REPORT_JSON=/ { k=$1; sub(/_CHANNEL_REPORT_JSON$/, "", k); rpt[k]=$3 }
          END{
              for (k in rpt)
-                 if (rpt[k] != "" && (k in ts) && (now - ts[k]) < stale)
+                 if ((members == "" || (k in allowed)) && rpt[k] != "" && (k in ts) &&
+                     (now - ts[k]) >= -5 && (now - ts[k]) < stale)
                      print rpt[k]
          }' "$REGISTRY_FILE")
 
@@ -197,7 +162,7 @@ load_mesh_roles() {
     # died inside the flock subshell with nothing but an exit status to show.
     score_band() {
         local chans_json
-        chans_json=$(printf '%s' "$1" | jq -Rc 'split(" ") | map(select(length > 0) | tonumber)')
+        chans_json=$(printf '%s\n' "$1" | jq -Rc 'split(" ") | map(select(length > 0) | tonumber)')
 
         printf '%s' "$ALL_REPORTS_JSON" | jq -r \
             --argjson chans "$chans_json" \
@@ -338,8 +303,8 @@ load_mesh_roles() {
     }
 
     # --- Get Current State ---
-    CURRENT_2_4=$(get_current_freq "$WPA_CONF_2_4")
-    CURRENT_5_0=$(get_current_freq "$WPA_CONF_5_0")
+    CURRENT_2_4=${ACS_CURRENT_2_4-$(get_current_freq "$WPA_CONF_2_4")}
+    CURRENT_5_0=${ACS_CURRENT_5_0-$(get_current_freq "$WPA_CONF_5_0")}
     log "Current channels: 2.4G=${CURRENT_2_4:-none}, 5.0G=${CURRENT_5_0:-none}"
 
     # --- Run Elections ---
@@ -353,83 +318,5 @@ load_mesh_roles() {
 		LIMP_MODE=$LIMP_MODE_NEEDED
 	EOF
 
-    # --- Act on Changes ---
-    #
-    # Apply a new frequency without tearing the supplicant down, and confirm
-    # the radio landed there. This is the path tourguide-manager.sh already
-    # uses for its lobby hops: "wpa_cli reconfigure" re-reads the conf in
-    # place, so the mesh point is not destroyed and rebuilt and SAE does not
-    # start over from scratch. Restarting the unit stays as the fallback for
-    # when the supplicant is not answering -- and because we poll, we find
-    # that out instead of assuming the move worked and sleeping on it.
-    apply_frequency() {
-        local iface=$1
-        local freq=$2
-        local landed=""
-        local i
-
-        if wpa_cli -i "$iface" reconfigure >/dev/null 2>&1; then
-            for i in $(seq 1 20); do
-                landed=$(iw dev "$iface" info 2>/dev/null | grep -oP 'channel.*\((\K[0-9]+)' || true)
-                if [ "$landed" = "$freq" ]; then
-                    log "$iface is on $freq"
-                    return 0
-                fi
-                sleep 0.5
-            done
-            log "$iface did not reach $freq within 10s (currently ${landed:-unknown}); restarting supplicant"
-        else
-            log "wpa_cli reconfigure failed on $iface; restarting supplicant"
-        fi
-
-        systemctl restart "wpa_supplicant@${iface}.service"
-    }
-
-    MIGRATION_2_4_NEEDED=false
-    MIGRATION_5_0_NEEDED=false
-
-    if [[ -n "$WINNER_2_4" && "$WINNER_2_4" != "$CURRENT_2_4" ]]; then
-        log ">>> MIGRATION: 2.4GHz channel changing: $CURRENT_2_4 -> $WINNER_2_4"
-
-        if [ "$DRY_RUN" = false ]; then
-            sed -i "s/frequency=.*/frequency=${WINNER_2_4}/" "$WPA_CONF_2_4"
-            MIGRATION_2_4_NEEDED=true
-        else
-            log "DRY RUN: Would migrate 2.4GHz but not actually doing it"
-        fi
-    fi
-
-    if [[ -n "$WINNER_5_0" && "$WINNER_5_0" != "$CURRENT_5_0" ]]; then
-        log ">>> MIGRATION: 5.0GHz channel changing: $CURRENT_5_0 -> $WINNER_5_0"
-
-        if [ "$DRY_RUN" = false ]; then
-            sed -i "s/frequency=.*/frequency=${WINNER_5_0}/" "$WPA_CONF_5_0"
-            MIGRATION_5_0_NEEDED=true
-        else
-            log "DRY RUN: Would migrate 5.0GHz but not actually doing it"
-        fi
-    fi
-
-    # Reconfigure *after* all configs are written
-    if [ "$DRY_RUN" = false ]; then
-        if [ "$MIGRATION_2_4_NEEDED" = true ]; then
-            if radio_iface_enabled "$WPA_IFACE_2_4"; then
-                apply_frequency "$WPA_IFACE_2_4" "$WINNER_2_4"
-            else
-                log "Skipping reconfigure for ${WPA_IFACE_2_4}; radio-state says down"
-            fi
-        fi
-
-        if [ "$MIGRATION_5_0_NEEDED" = true ]; then
-            if radio_iface_enabled "$WPA_IFACE_5_0"; then
-                apply_frequency "$WPA_IFACE_5_0" "$WINNER_5_0"
-            else
-                log "Skipping reconfigure for ${WPA_IFACE_5_0}; radio-state says down"
-            fi
-        fi
-    else
-        log "DRY RUN: Skipping supplicant reconfigure"
-    fi
-   	log "--- Election Complete ---"
-
-) 9>/var/run/channel-election.lock
+    log "--- Proposal Scoring Complete ---"
+)

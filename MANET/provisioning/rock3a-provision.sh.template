@@ -378,64 +378,34 @@ EOF
 
 systemctl enable radvd
 
-# Attempt to sync network time at boot
-# Uses data from Alfred to look for any NTP servers (a gw that has
-# sync'd its time from the internet) on the mesh.
-# It picks the
-# one with the best transmission quality, does a time sync with it,
-# and then disables chrony to prevent excess network traffic
-cat << EOF > /etc/systemd/system/one-shot-time-sync.service
+# Time service: continuous local GPS/uplink discipline, occasional peer refresh.
+# Keep this generated unit identical to MANET/systemd/one-shot-time-sync.service.
+cat <<'EOF' > /etc/systemd/system/one-shot-time-sync.service
 [Unit]
-Description=One-Shot Mesh Time Synchronization
-# This must run after the mesh is fully up and the manager has started.
-After=node-manager.service
-Wants=node-manager.service
+Description=MANET GPS, uplink and periodic peer time synchronization
+After=node-manager.service gps-reader.service
+Wants=node-manager.service gps-reader.service
+PartOf=node-manager.service
 
 [Service]
-Type=oneshot
-ExecStartPre=/bin/sleep 5
+Type=simple
 ExecStart=/usr/local/bin/one-shot-time-sync.sh
+Restart=always
+RestartSec=10
+TimeoutStopSec=20
+ExecStopPost=/usr/bin/rm -f /run/mesh-ntp.state /run/mesh-ntp-gps.state
 
 [Install]
 WantedBy=multi-user.target
 EOF
-# this will be enabled by radio-setup.sh
-#systemctl enable one-shot-time-sync.service
+# radio-setup enables it; the node-manager drop-in also starts it.
 
-# Config for the active gateway acting as a mesh NTP server
-cat << EOF > /etc/chrony/chrony-server.conf
-# Use public NTP servers from the internet.
-pool pool.ntp.org iburst
+# Quiet bootstrap config; mesh-time-sync.py manages the active role after boot.
+cat <<'EOF' > /etc/chrony/chrony.conf
 driftfile /var/lib/chrony/chrony.drift
-makestep 1.0 3
-# Allow clients from our private mesh prefix.
-allow fd01:ed20:ecb4::/64
-# Serve time even if internet connection is lost.
-local stratum 10
-EOF
-
-# Config used ONLY to test external NTP connectivity
-cat << EOF > /etc/chrony/chrony-test.conf
-# Use public NTP servers from the internet.
-pool pool.ntp.org iburst
-driftfile /var/lib/chrony/chrony.drift
-makestep 1.0 3
-# Do NOT allow any clients - this is just a test config.
+makestep 0.1 3
 deny all
 EOF
-
-# Set the default configuration to be a client.  Allows chrony to start
-echo "Setting default NTP mode to offline"
-cat << EOF > /etc/chrony/chrony-default.conf
-# Default client config: chronyd starts with no network time sources, so it
-# generates no traffic until one is added. This carried a bare "offline"
-# directive until that was found to be invalid — chronyd refused to start at
-# all. With no sources configured the intended effect is the same.
-driftfile /var/lib/chrony/chrony.drift
-makestep 1.0 3
-deny all
-EOF
-cp /etc/chrony/chrony-default.conf /etc/chrony/chrony.conf
 systemctl enable chrony.service
 
 # Set br0 to be the wait online interface, avoids boot delay

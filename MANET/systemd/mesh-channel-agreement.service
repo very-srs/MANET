@@ -1,0 +1,12 @@
+[Unit]
+Description=MANET channel agreement and straggler recovery
+After=alfred.service
+Wants=alfred.service
+PartOf=node-manager.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/mesh-channel-agreement.py run
+Restart=always
+RestartSec=5
+TimeoutStopSec=10

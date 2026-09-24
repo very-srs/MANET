@@ -5,6 +5,8 @@
 # Coordinates timing and delegates complex tasks to specialized scripts
 # ==============================================================================
 
+. "${MANET_TOOLS_DIR:-$(dirname "${BASH_SOURCE[0]}")}/mesh-acs-common.sh" || exit 1
+
 # --- Configuration ---
 CONTROL_IFACE="br0"
 ALFRED_IDENTITY_TYPE=67
@@ -51,6 +53,7 @@ ELECTION_OUTPUT_FILE="/var/run/mesh_channel_election"
 REGISTRY_STATE_FILE="/var/run/mesh_node_registry"
 ENCODER_PATH="/usr/local/bin/encoder.py"
 BATCTL_PATH="/usr/sbin/batctl"
+PEER_COUNTER="$(dirname "${BASH_SOURCE[0]}")/mesh-peer-count.py"
 THROUGHPUT_MEAN="/usr/local/bin/mesh-throughput-mean.sh"
 RADIO_STATE_SYNC="/usr/local/bin/mesh-radio-state.py"
 CONFIG_SYNC="/usr/local/bin/mesh-config-sync.py"
@@ -75,6 +78,7 @@ LAST_SCAN_COMPLETE_TIME=0
 LOBBY_ENTERED_TIME=0
 BOOTSTRAP_START_WINDOW=-1
 LOBBY_SOLO_LOGGED=false
+CLOCK_READY_SEEN=false
 LIMP_STATE_FILE="/var/run/mesh_limp_mode.state"
 
 # Window tracking
@@ -108,65 +112,14 @@ detect_and_update_gateway_state() {
 }
 
 # ==============================================================================
-# GPS time source
+# Time source advertisement (the time service owns chrony and these markers)
 # ==============================================================================
-# A node holding a live GPS fix disciplines its clock from gpsd's SHM 0
-# refclock. That costs no network traffic at all — the refclock is shared
-# memory, not a peer — so such a node keeps chrony running and serves time to
-# the mesh, giving GPS-less nodes something to do their one-shot sync against.
-#
-# Gateways advertise themselves through mesh-ntp.state, which is owned by
-# ethernet-autodetect.sh and deleted by it on carrier loss. This marker is kept
-# separate so the two owners never race to remove each other's state; the
-# published flag is the OR of the two.
-#
-# Which config chrony runs with is deliberately not managed here. That is owned
-# by provision-mesh.sh, ethernet-autodetect.sh and the networkd-dispatcher off
-# hook, and a third writer would reintroduce exactly the race this file avoids.
-GPS_NTP_STATE_FILE="/var/run/mesh-ntp-gps.state"
 GPS_STATUS_FILE="/run/gps_status.json"
-GPS_FIX_MAX_AGE=60      # seconds before a status file counts as stale
-LAST_GPS_CHECK=0
-GPS_CHECK_INTERVAL=60
-
-gps_has_live_fix() {
-    python3 - "$GPS_STATUS_FILE" "$GPS_FIX_MAX_AGE" <<'PY'
-import json, sys, time
-try:
-    with open(sys.argv[1]) as f:
-        d = json.load(f)
-except Exception:
-    sys.exit(1)
-if not d.get('has_fix'):
-    sys.exit(1)
-# gps-reader stamps every write. A frozen file means the daemon died or hung
-# still holding a fix, and time from a dead reader is not time we should serve.
-if time.time() - d.get('timestamp', 0) > float(sys.argv[2]):
-    sys.exit(1)
-sys.exit(0)
-PY
-}
-
-update_gps_time_source() {
-    local NOW
-    NOW=$(date +%s)
-    [ $(( NOW - LAST_GPS_CHECK )) -lt "$GPS_CHECK_INTERVAL" ] && return
-    LAST_GPS_CHECK=$NOW
-
-    if gps_has_live_fix; then
-        # chrony must actually be running for the SHM refclock to be read.
-        systemctl is-active --quiet chrony.service || systemctl start chrony.service
-        touch "$GPS_NTP_STATE_FILE"
-    else
-        # Stop advertising, but leave chrony alone: on a node whose chrony.conf
-        # has no network sources it is idle rather than chatty, and stopping it
-        # would only slow re-acquisition when the fix comes back.
-        rm -f "$GPS_NTP_STATE_FILE"
-    fi
-}
+GPS_FIX_MAX_AGE=60
 
 is_ntp_time_source() {
-    [ -f /var/run/mesh-ntp.state ] || [ -f "$GPS_NTP_STATE_FILE" ]
+    local run_dir="${MANET_TIME_RUN_DIR:-/run}"
+    [ -f "$run_dir/mesh-ntp.state" ] || [ -f "$run_dir/mesh-ntp-gps.state" ]
 }
 
 # --- Clock-synchronized action checker ---
@@ -178,6 +131,8 @@ should_perform_action() {
     local action_name=$1
     local interval_seconds=$2
     local offset_seconds=$3
+
+    case "$action_name" in SCAN|ELECTION) acs_clock_ready || return 1 ;; esac
 
     local NOW=$(date +%s)
     local SECONDS_INTO_INTERVAL=$((NOW % interval_seconds))
@@ -192,11 +147,6 @@ should_perform_action() {
     fi
 
     return 1
-}
-
-get_current_freq() {
-    local conf_file=$1
-    grep -oP 'frequency=\K[0-9]+' "$conf_file" 2>/dev/null | head -1
 }
 
 collect_radio_mcs() {
@@ -218,34 +168,6 @@ collect_ap_ssid() {
     grep "^lan_ap_ssid=" /etc/mesh.conf 2>/dev/null | head -1 | cut -d'=' -f2-
 }
 
-radio_iface_enabled() {
-    python3 - "$1" <<'PY'
-import json, sys
-iface = sys.argv[1]
-try:
-    with open('/var/lib/mesh_radio_state.json') as f:
-        state = json.load(f).get('desired', {}).get(iface, 'up')
-except Exception:
-    state = 'up'
-sys.exit(1 if state == 'down' else 0)
-PY
-}
-
-load_mesh_roles() {
-    local mesh_ifaces=()
-
-    [ -f /var/lib/mesh_if ] && mapfile -t mesh_ifaces < /var/lib/mesh_if
-
-    WPA_IFACE_2_4="$(cat /var/lib/mesh_24_if 2>/dev/null || true)"
-    WPA_IFACE_5_0="$(cat /var/lib/mesh_5_if 2>/dev/null || true)"
-
-    [ -z "$WPA_IFACE_2_4" ] && WPA_IFACE_2_4="${mesh_ifaces[0]:-}"
-    [ -z "$WPA_IFACE_5_0" ] && WPA_IFACE_5_0="${mesh_ifaces[1]:-}"
-
-    WPA_CONF_2_4="/etc/wpa_supplicant/wpa_supplicant-${WPA_IFACE_2_4}.conf"
-    WPA_CONF_5_0="/etc/wpa_supplicant/wpa_supplicant-${WPA_IFACE_5_0}.conf"
-}
-
 restart_mesh_supplicants() {
     [ -n "$WPA_IFACE_2_4" ] && radio_iface_enabled "$WPA_IFACE_2_4" && systemctl restart "wpa_supplicant@${WPA_IFACE_2_4}.service"
     [ -n "$WPA_IFACE_5_0" ] && radio_iface_enabled "$WPA_IFACE_5_0" && systemctl restart "wpa_supplicant@${WPA_IFACE_5_0}.service"
@@ -261,38 +183,92 @@ leave_lobby_cleanup() {
     rm -f "$LIMP_STATE_FILE"
 }
 
+adopt_helper_channels() {
+    local target24="$1" target5="$2" band iface target actual
+    local -a changed=()
+    for band in 2_4 5_0; do
+        local iface_var="WPA_IFACE_$band"
+        iface=${!iface_var}
+        target="$target24"; [ "$band" != 5_0 ] || target="$target5"
+        [ -n "$target" ] && radio_iface_enabled "$iface" || continue
+        actual=$(timeout 2 iw dev "$iface" info 2>/dev/null | grep -oP 'channel.*\((\K[0-9]+)' || true)
+        [ "$actual" = "$target" ] || changed+=("$iface")
+    done
+    acs_write_channels "$target24" "$target5" || return 1
+    # A rotating lobby can be the live data channel. Accept the authenticated
+    # helper and finish discovery there without disturbing an established link.
+    for iface in "${changed[@]}"; do
+        systemctl restart "wpa_supplicant@${iface}.service" || return 1
+    done
+    leave_lobby_cleanup
+    [ "${#changed[@]}" -eq 0 ] || sleep 5
+    return 0
+}
+
 is_in_lobby() {
     load_mesh_roles
 
-    if [ ! -f "$WPA_CONF_2_4" ] || [ ! -f "$WPA_CONF_5_0" ]; then
+    if ! acs_configs_ready; then
         log "Mesh WPA configs not ready: $WPA_CONF_2_4 / $WPA_CONF_5_0"
         echo "true"
         return
     fi
 
-    local freq_2_4=$(get_current_freq "$WPA_CONF_2_4")
-    local freq_5_0=$(get_current_freq "$WPA_CONF_5_0")
-
-    if [[ "$freq_2_4" == "$LOBBY_FREQ_2_4" && "$freq_5_0" == "$LOBBY_FREQ_5_0" ]]; then
-        echo "true"
-    else
-        echo "false"
-    fi
+    # Search channels overlap real data channels. Frequency is only a startup
+    # hint; authenticated adoption and explicit return-to-lobby set the mode.
+    acs_discovery_state || echo "true"
 }
 
 # How many other nodes are meshed with us right now, by batman-adv's data-plane
-# view (same idiom as quorum-checker.sh and tourguide-manager.sh's
-# get_partition_size). Counts a peer found over ANY batman interface, HaLow
+# view. Counts a peer found over ANY batman interface, HaLow
 # included -- what the lobby bootstrap needs is somebody to run a joint
 # deterministic election with, and it does not matter which radio found them.
 mesh_peer_count() {
-    "$BATCTL_PATH" o 2>/dev/null | awk 'NR>1 {print $1}' | sort -u | wc -l
+    python3 "$PEER_COUNTER" --batctl "$BATCTL_PATH"
+}
+
+update_lobby_bootstrap() {
+    local peers
+    if ! acs_clock_ready; then
+        BOOTSTRAPPING=false
+        BOOTSTRAP_START_WINDOW=-1
+        return
+    fi
+    if ! peers=$(mesh_peer_count); then
+        # Do not elect from an unknown topology. A later successful query
+        # must start a fresh scan/publish round before elections resume.
+        BOOTSTRAPPING=false
+        BOOTSTRAP_START_WINDOW=-1
+        LOBBY_SOLO_LOGGED=false
+        log "Cannot read BATMAN peers. Deferring lobby bootstrap."
+    elif [ "$peers" -gt 0 ]; then
+        BOOTSTRAPPING=true
+        [ "$BOOTSTRAP_START_WINDOW" -lt 0 ] && BOOTSTRAP_START_WINDOW=$((NOW / 180))
+        LOBBY_SOLO_LOGGED=false
+    else
+        BOOTSTRAPPING=false
+        BOOTSTRAP_START_WINDOW=-1
+        if [ "$LOBBY_SOLO_LOGGED" = false ]; then
+            log "Solo in discovery (no batman peers). Searching for a tourguide or another radio; not electing."
+            LOBBY_SOLO_LOGGED=true
+        fi
+    fi
+}
+
+check_mesh_quorum() {
+    local status
+    "$QUORUM_CHECKER"
+    status=$?
+    case "$status" in
+        0) return 0 ;;
+        1) return 1 ;;  # Confirmed quorum loss: return to the lobby.
+        *) log "Quorum check unavailable (exit $status). Holding current channels."; return 0 ;;
+    esac
 }
 
 return_to_lobby() {
     log "Returning to lobby channels..."
-    sed -i "s/frequency=.*/frequency=${LOBBY_FREQ_2_4}/" "$WPA_CONF_2_4"
-    sed -i "s/frequency=.*/frequency=${LOBBY_FREQ_5_0}/" "$WPA_CONF_5_0"
+    acs_write_channels "$LOBBY_FREQ_2_4" "$LOBBY_FREQ_5_0" search || return 1
     restart_mesh_supplicants
     sleep 5
 }
@@ -375,7 +351,7 @@ perform_scan() {
     load_mesh_roles
 
     for iface in "$WPA_IFACE_2_4" "$WPA_IFACE_5_0"; do
-        [ -z "$iface" ] && continue
+        radio_iface_enabled "$iface" || continue
         local freqs_to_scan=""
         [ "$iface" == "$WPA_IFACE_2_4" ] && freqs_to_scan=$SCAN_FREQS_2_4
         [ "$iface" == "$WPA_IFACE_5_0" ] && freqs_to_scan=$SCAN_FREQS_5_0
@@ -514,6 +490,7 @@ is_hosting_mumble_service() {
 }
 
 should_perform_tourguide() {
+    acs_clock_ready || return 1
     local NOW=$(date +%s)
     local MINUTE_OF_HOUR=$(( (NOW % 3600) / 60 ))
 
@@ -542,6 +519,24 @@ log "Mesh roles: 2.4G=${WPA_IFACE_2_4:-unset}, 5G=${WPA_IFACE_5_0:-unset}"
 # === MAIN LOOP ===
 while true; do
     NOW=$(date +%s)
+
+    if [ "$CLOCK_READY_SEEN" = false ] && acs_clock_ready; then
+        CLOCK_READY_SEEN=true
+        LAST_ACTION_WINDOW=()
+        LAST_PUBLISH_TIME=0; LAST_IDENTITY_PUBLISH=0; LAST_GW_CHECK=0
+        LAST_SCAN_COMPLETE_TIME=0; CACHED_SCAN_REPORT_JSON="{}"
+        LOBBY_ENTERED_TIME=0; BOOTSTRAP_START_WINDOW=-1
+        log "Initial time sync complete; restarting discovery and ACS scheduling."
+    fi
+
+    # Tourguide temporarily rewrites a config to the lobby. Do not interpret
+    # that as our operating state, scan it, or run quorum/elections over the
+    # hop's temporary loss of data peers. The child holds the channel lock.
+    ACS_LOCK_FILE="${MANET_ACS_LOCK_FILE:-/var/run/channel-election.lock}"
+    if [ -e "$ACS_LOCK_FILE" ] && ! flock -n "$ACS_LOCK_FILE" true; then
+        sleep "$STARTUP_MONITOR_INTERVAL"
+        continue
+    fi
 
     # === ALFRED RADIO STATE SYNC ===
     # Global radio up/down changes are staged through Alfred and only applied
@@ -616,38 +611,14 @@ while true; do
         # Dwell only counts once the WPA configs exist (is_in_lobby also
         # returns true while radio-setup hasn't produced them yet).
         BOOTSTRAPPING=false
-        if [ -f "$WPA_CONF_2_4" ] && [ -f "$WPA_CONF_5_0" ]; then
+        if acs_configs_ready; then
             [ "$LOBBY_ENTERED_TIME" -eq 0 ] && LOBBY_ENTERED_TIME=$NOW
             if [ $((NOW - LOBBY_ENTERED_TIME)) -ge "$LOBBY_BOOTSTRAP_DWELL" ]; then
-                # A SOLO node never elects and never hops. It waits at the
-                # lobby until either a tourguide rescues it onto the mesh's
-                # data channels, or another radio turns up and meshes with it
-                # here -- and only then do the two of them run a joint
-                # deterministic election and migrate together.
-                #
-                # Bootstrapping alone was the old behaviour and bought nothing:
-                # one node's view of the RF is not a consensus, and having
-                # elected, it then had to tourguide back into the lobby every
-                # two minutes to stay findable. Parking on the lobby pair costs
-                # a solo radio nothing, since there is no mesh link to optimise.
-                # The whole-site cold start still works: every node powers on
-                # into the lobby, they mesh with each other there, so each sees
-                # peers and they bootstrap together -- which is the case this
-                # dwell was built for in the first place.
-                if [ "$(mesh_peer_count)" -gt 0 ]; then
-                    BOOTSTRAPPING=true
-                    [ "$BOOTSTRAP_START_WINDOW" -lt 0 ] && BOOTSTRAP_START_WINDOW=$((NOW / 180))
-                    LOBBY_SOLO_LOGGED=false
-                else
-                    # Lost every peer mid-bootstrap: drop the start window so a
-                    # later rejoin sits out a fresh scan->publish->replicate
-                    # round before electing, exactly like a first entry.
-                    BOOTSTRAP_START_WINDOW=-1
-                    if [ "$LOBBY_SOLO_LOGGED" = false ]; then
-                        log "Solo at the lobby (no batman peers). Holding for a tourguide or another radio; not electing."
-                        LOBBY_SOLO_LOGGED=true
-                    fi
-                fi
+                # A solo searcher never elects itself onto data channels.
+                # The agreement daemon follows the synchronized rotation, or
+                # parks at fixed anchors before clock sync. Any BATMAN contact
+                # holds discovery still for recovery or joint bootstrap.
+                update_lobby_bootstrap
             fi
         fi
 
@@ -655,7 +626,7 @@ while true; do
         [ -x "$IP_MANAGER" ] && "$IP_MANAGER"
 
         # === BOOTSTRAP STAGE 1: RF SCAN (every 3 min at :10) ===
-        if [ "$BOOTSTRAPPING" = true ] && should_perform_action "SCAN" 180 10; then
+        if [ "$BOOTSTRAPPING" = true ] && ! acs_agreement_busy && should_perform_action "SCAN" 180 10; then
             log "=== LOBBY BOOTSTRAP SCAN ($(date +'%H:%M:%S')) ==="
             CACHED_SCAN_REPORT_JSON=$(perform_scan)
             LAST_SCAN_COMPLETE_TIME=$NOW
@@ -686,7 +657,6 @@ while true; do
             
             # Service flags
             detect_and_update_gateway_state
-            update_gps_time_source
             IS_GATEWAY_FLAG=$([ -f /var/run/mesh-gateway.state ] && echo "--is-internet-gateway" || echo "")
             GATEWAY_IFACE=$(cat /var/run/upstream_iface 2>/dev/null || echo "")
             IS_NTP_FLAG=$(is_ntp_time_source && echo "--is-ntp-server" || echo "")
@@ -784,40 +754,20 @@ except Exception:
         
         # === CHECK FOR HELPER BEACON (non-blocking) ===
         HELPER_MIGRATED=false
-        HELPER_PAYLOAD=$(timeout 2 alfred -r $ALFRED_HELPER_TYPE 2>/dev/null |
-            sed -n 's/^[[:space:]]*{[[:space:]]*"[0-9a-fA-F:]\{17\}"[[:space:]]*,[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
-
-        if [ -n "$HELPER_PAYLOAD" ]; then
-            # No eval on network data — parse assignments with printf -v
-            DATA_CHANNEL_2_4=""; DATA_CHANNEL_5_0=""
-            while IFS= read -r _line; do
-                _varname="${_line%%=*}"
-                _val="${_line#*=}"
-                _val="${_val#\'}"
-                _val="${_val%\'}"
-                printf -v "$_varname" '%s' "$_val"
-            done < <("/usr/local/bin/decoder.py" telemetry "$HELPER_PAYLOAD" 2>/dev/null | grep -E "^DATA_CHANNEL_(2_4|5_0)=")
-
-            if [[ "$DATA_CHANNEL_2_4" =~ ^[0-9]{4}$ && "$DATA_CHANNEL_5_0" =~ ^[0-9]{4}$ ]]; then
-                log "Helper beacon received. Migrating to data channels: 2.4=${DATA_CHANNEL_2_4}, 5=${DATA_CHANNEL_5_0}"
-
-                sed -i "s/frequency=.*/frequency=${DATA_CHANNEL_2_4}/" "$WPA_CONF_2_4"
-                sed -i "s/frequency=.*/frequency=${DATA_CHANNEL_5_0}/" "$WPA_CONF_5_0"
-
-                restart_mesh_supplicants
-                leave_lobby_cleanup
-                HELPER_MIGRATED=true
-                sleep 5
+        if ! acs_agreement_busy; then
+            HELPER_CHANNELS=$(python3 "${MANET_TOOLS_DIR:-$(dirname "${BASH_SOURCE[0]}")}/mesh-channel-agreement.py" helper-select 2>/dev/null) || HELPER_CHANNELS=""
+            if [ -n "$HELPER_CHANNELS" ]; then
+                IFS='|' read -r DATA_CHANNEL_2_4 DATA_CHANNEL_5_0 <<< "$HELPER_CHANNELS"
+                if adopt_helper_channels "$DATA_CHANNEL_2_4" "$DATA_CHANNEL_5_0"; then
+                    log "Fresh authenticated helper. Migrating to 2.4=${DATA_CHANNEL_2_4}, 5=${DATA_CHANNEL_5_0}"
+                    HELPER_MIGRATED=true
+                fi
             fi
         fi
 
         # === BOOTSTRAP STAGE 2: CHANNEL ELECTION (every 3 min at :25) ===
-        # Same deterministic election as data state, over the replicated lobby
-        # scan reports — every bootstrapping node computes the same winners and
-        # migrates independently. channel-election.sh itself rewrites the WPA
-        # configs and restarts the supplicants; if all channels are disqualified
-        # it elects the lobby pair (no-op here) and we stay put and re-scan,
-        # which is also the limp-mode lobby fallback's exit path.
+        # Request this round after a full scan/publish window. The agreement
+        # service proposes one plan, gathers a majority and activates it later.
         # A helper rescue this cycle wins over self-election: joining the
         # established mesh's channels beats electing our own. The election
         # also sits out the (partial) window in which bootstrap began so one
@@ -845,7 +795,7 @@ except Exception:
         LOBBY_SOLO_LOGGED=false
 
         # === STAGE 1: RF SCAN (every 3 min at :10) ===
-        if should_perform_action "SCAN" 180 10; then
+        if ! acs_agreement_busy && should_perform_action "SCAN" 180 10; then
             log "=== SCAN ($(date +'%H:%M:%S')) ==="
             SCAN_REPORT_JSON=$(perform_scan)
             LAST_SCAN_COMPLETE_TIME=$NOW
@@ -867,7 +817,6 @@ except Exception:
 
             # Service flags
             detect_and_update_gateway_state
-            update_gps_time_source
             IS_GATEWAY_FLAG=$([ -f /var/run/mesh-gateway.state ] && echo "--is-internet-gateway" || echo "")
             GATEWAY_IFACE=$(cat /var/run/upstream_iface 2>/dev/null || echo "")
             IS_NTP_FLAG=$(is_ntp_time_source && echo "--is-ntp-server" || echo "")
@@ -961,18 +910,12 @@ except Exception:
         fi
 
         # === STAGE 6: QUORUM CHECK ===
-        if [ -x "$QUORUM_CHECKER" ]; then
-            if ! "$QUORUM_CHECKER"; then
+        if ! acs_agreement_busy && [ -x "$QUORUM_CHECKER" ]; then
+            if ! check_mesh_quorum; then
                 log "Quorum check failed. Returning to lobby."
                 return_to_lobby
                 continue
             fi
-        fi
-
-        # === STAGE 7: TOURGUIDE (every 2 min at :30) ===
-        if should_perform_tourguide; then
-            log "=== TOURGUIDE WINDOW ($(date +'%H:%M:%S')) ==="
-            [ -x "$TOURGUIDE_MANAGER" ] && "$TOURGUIDE_MANAGER" &
         fi
 
         # === STAGE 7.5: PARTITION MERGE ===
@@ -981,15 +924,13 @@ except Exception:
         # so the next channel election starts clean. This migrates one node
         # per tourguide turn; the shrinking remainder either follows the same
         # way or fails quorum and gets rescued via the lobby.
-        if [ -f "$ELECTION_OUTPUT_FILE" ] && grep -q "^PARTITION_MERGE=true" "$ELECTION_OUTPUT_FILE"; then
+        if ! acs_agreement_busy && [ -f "$ELECTION_OUTPUT_FILE" ] && grep -q "^PARTITION_MERGE=true" "$ELECTION_OUTPUT_FILE"; then
             MERGE_2_4=$(grep "^WINNER_2_4=" "$ELECTION_OUTPUT_FILE" | cut -d'=' -f2)
             MERGE_5_0=$(grep "^WINNER_5_0=" "$ELECTION_OUTPUT_FILE" | cut -d'=' -f2)
             rm -f "$ELECTION_OUTPUT_FILE"
 
-            if [[ "$MERGE_2_4" =~ ^[0-9]{4}$ && "$MERGE_5_0" =~ ^[0-9]{4}$ ]]; then
+            if acs_write_channels "$MERGE_2_4" "$MERGE_5_0"; then
                 log ">>> PARTITION MERGE: migrating to 2.4=${MERGE_2_4}, 5=${MERGE_5_0}"
-                sed -i "s/frequency=.*/frequency=${MERGE_2_4}/" "$WPA_CONF_2_4"
-                sed -i "s/frequency=.*/frequency=${MERGE_5_0}/" "$WPA_CONF_5_0"
                 restart_mesh_supplicants
                 sleep 5
                 continue
@@ -1016,6 +957,14 @@ except Exception:
                 "$election_script" &
             fi
         done
+
+        # === STAGE 10: TOURGUIDE (every 2 min at :30) ===
+        # The runner checks live HaLow readiness before election and departure;
+        # an available S1G recovery radio keeps both Wi-Fi radios on data.
+        if ! acs_agreement_busy && should_perform_tourguide; then
+            log "=== TOURGUIDE WINDOW ($(date +'%H:%M:%S')) ==="
+            [ -x "$TOURGUIDE_MANAGER" ] && "$TOURGUIDE_MANAGER" &
+        fi
 
     fi  # End of data channel state
 

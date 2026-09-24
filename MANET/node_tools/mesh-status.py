@@ -47,7 +47,7 @@ from urllib.parse import urlparse, parse_qs, quote
 from manet_manage import ManageRoutes
 from manet_peer_radios import interfaces_for_telemetry, peer_status_panel
 from mesh_config import apply_local_to_conf, local_changes, mesh_changes, strip_local_keys
-from manet_admin import AdminTransport, CONFIG_ACK_TYPE, new_version, private_json_write
+from manet_admin import AdminTransport, CONFIG_ACK_TYPE, new_version, private_json_write, require_clock
 from manet_radio import (
     HALOW_BW_TXPOWER_CAP_DBM, halow_channel_options,
     _format_halow_bw, get_halow_driver_info, wifi_channel_to_freq, _fmt_dbm,
@@ -3305,6 +3305,9 @@ class MeshHandler(ManageRoutes, http.server.BaseHTTPRequestHandler):
                     self.send_json({'ok': False, 'error': 'No config provided'})
                     return
 
+                if mesh_changes(config, conf):
+                    require_clock()
+
                 applied_local = local_changes(config, conf)
                 if applied_local:
                     apply_local_to_conf(applied_local, MESH_CONF_FILE)
@@ -3360,6 +3363,7 @@ class MeshHandler(ManageRoutes, http.server.BaseHTTPRequestHandler):
 
         elif path == '/api/admin/activate':
             try:
+                require_clock()
                 req   = json.loads(body)
                 force = req.get('force', False)
                 # Carried in the package rather than decided per node, so the
@@ -3402,6 +3406,7 @@ class MeshHandler(ManageRoutes, http.server.BaseHTTPRequestHandler):
 
         elif path == '/api/admin/cancel':
             try:
+                require_clock()
                 # Clearing our own files is not enough: the package is still
                 # resident in Alfred, so every node (including this one) would
                 # re-stage it on the next sync. Broadcast a cancel the way the
