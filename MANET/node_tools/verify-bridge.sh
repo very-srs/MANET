@@ -1,10 +1,7 @@
 #!/bin/bash
-# ==============================================================================
 # Bridged Architecture Verification Script
-# ==============================================================================
 # Verifies that the bridged EUD architecture is correctly configured
 # with proper handling of wlan1's dual-purpose role
-# ==============================================================================
 
 GREEN='\033[0;32m'
 RED='\033[0;31m'

@@ -25,9 +25,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-# ============================================================
 # Bootstrap
-# ============================================================
 
 $FlasherDir = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
 $EnginePath = Join-Path $FlasherDir 'windows.ps1'
@@ -118,9 +116,7 @@ try {
     $sha.Dispose()
 } catch { }
 
-# ============================================================
 # Look and feel
-# ============================================================
 
 $Script:UI = @{
     Bg        = [System.Drawing.Color]::FromArgb(250, 250, 250)
@@ -209,9 +205,7 @@ function New-GroupBox {
     return $g
 }
 
-# ============================================================
 # Window state
-# ============================================================
 
 $Script:PageOrder   = @('Hardware', 'Prereqs', 'Config', 'Scripts', 'Target', 'Confirm', 'Flash', 'Done')
 $Script:PageIndex   = 0
@@ -256,9 +250,7 @@ $Script:CandidateList = @()
 $Script:R3aTempImage  = ''
 $Script:LoadedConfig  = ''
 
-# ============================================================
 # Routing the engine's output into the window
-# ============================================================
 #
 # windows.ps1 reports what it is doing with Write-Host, and it is dot-sourced
 # into this scope, so a function of that name here wins over the cmdlet and
@@ -386,9 +378,7 @@ public static extern bool ShowWindow(System.IntPtr hWnd, int nCmdShow);
     } catch { }
 }
 
-# ============================================================
 # Prerequisites
-# ============================================================
 #
 # The console flow finds these when it needs them and sends the user away to
 # install anything missing. Here they are all checked up front and installed
@@ -596,9 +586,7 @@ function Get-GithubAssetUrl {
     return $null
 }
 
-# ============================================================
 # The step machine for long jobs
-# ============================================================
 
 function New-Job {
     param([string]$Kind, [string]$Status = '', $Bar = $null, $StatusLabel = $null,
@@ -873,9 +861,7 @@ $Script:RawWriteStep = {
     return $true
 }
 
-# ============================================================
 # Page 1: hardware
-# ============================================================
 
 $Script:CONTENT_W = 838
 $Script:CONTENT_H = 424
@@ -935,9 +921,7 @@ function Get-SelectedHardware {
     return @{ Model = 'rpi4'; IsCm4 = $true }     # CM4 flashes as rpi4, same as the console flow
 }
 
-# ============================================================
 # Page 2: prerequisites
-# ============================================================
 
 function Build-PrereqPage {
     $p = New-ContentPanel
@@ -1187,9 +1171,7 @@ $Script:AfterPrereqInstall = {
     Start-NextInstaller
 }
 
-# ============================================================
 # Page 3: mesh settings
-# ============================================================
 
 function Build-ConfigPage {
     $p = New-ContentPanel
@@ -1545,9 +1527,7 @@ function Copy-EngineToPage {
     Update-CapacityLabel
 }
 
-# ============================================================
 # Page 4: operator setup scripts
-# ============================================================
 
 # Widen each column to whatever it is actually showing, but never below the
 # width it was laid out with. A Details list view silently truncates with an
@@ -1696,9 +1676,7 @@ function Reset-ScriptsPageBusy {
     $Script:BtnOpenScripts.Enabled   = $true
 }
 
-# ============================================================
 # Page 5: target card
-# ============================================================
 
 function Build-TargetPage {
     $p = New-ContentPanel
@@ -1940,9 +1918,7 @@ function Show-RpiBootResult {
     Update-TargetPage
 }
 
-# ============================================================
 # Page 6: confirmation
-# ============================================================
 
 function Build-ConfirmPage {
     $p = New-ContentPanel
@@ -2019,9 +1995,7 @@ function Update-ConfirmPage {
     Update-Nav
 }
 
-# ============================================================
 # Page 7: flashing
-# ============================================================
 
 function Build-FlashPage {
     $p = New-ContentPanel
@@ -2267,9 +2241,7 @@ function Complete-Flash {
     }
 }
 
-# ============================================================
 # Page 8: what to write down
-# ============================================================
 
 function Build-DonePage {
     $p = New-ContentPanel
@@ -2380,9 +2352,7 @@ function Save-Receipt {
     }
 }
 
-# ============================================================
 # Navigation
-# ============================================================
 
 function Go-Page {
     param([string]$Name)
@@ -2491,9 +2461,7 @@ function Invoke-Back {
     }
 }
 
-# ============================================================
 # The window
-# ============================================================
 
 function Build-Window {
     $form                 = New-Object System.Windows.Forms.Form
@@ -2619,9 +2587,7 @@ function Build-Window {
     return $form
 }
 
-# ============================================================
 # Start
-# ============================================================
 
 function Show-StartupProblem {
     param([string]$Text)
@@ -2637,7 +2603,7 @@ if (-not $Preview) {
     }
     if (-not (Test-Path $TEMPLATE_FILE)) {
         Show-StartupProblem ("firstrun.sh.template is missing from:`r`n$ScriptDir`r`n`r`n" +
-                             "Copy the whole provisioning folder, not just some of the files in it.")
+                             "Copy the entire provisioning folder, including its supporting files.")
         exit 1
     }
 }

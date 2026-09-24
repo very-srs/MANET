@@ -6,7 +6,7 @@
 # provisioning boots, when the radios have no configuration and the mesh does
 # not exist yet. radio-setup.sh enables and starts it as its last act, once the
 # node is genuinely finished. The conditions below are what make it one-time
-# after that — the marker exists from the first completed run onward, so every
+# after that: the marker exists from the first completed run onward, so every
 # later boot skips the unit without running anything.
 Description=MANET operator setup scripts (one-time)
 Documentation=file:/var/log/manet-user-scripts.log

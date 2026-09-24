@@ -1,10 +1,10 @@
 [Unit]
-Description=Mesh push-to-talk voice — Lyra/RTP over multicast
+Description=Mesh push-to-talk voice: Lyra/RTP over multicast
 # br0 must exist and hold an address before the send socket can be bound to
 # it, and the multicast group is joined on it. batman-enslave brings the mesh
 # side of that bridge up.
 #
-# Ordering only — deliberately no Wants=/Requires= on batman-enslave. This unit
+# Ordering only: deliberately no Wants=/Requires= on batman-enslave. This unit
 # is enabled on every node by the install tarball, so a Wants= would pull
 # batman-enslave in at boot everywhere, including on a node where someone had
 # disabled it on purpose. Voice must not be able to start the mesh.

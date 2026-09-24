@@ -1,10 +1,7 @@
 #!/bin/bash
-# ==============================================================================
 # Tourguide Manager
-# ==============================================================================
 # Handles tourguide election, radio hopping, broadcasting, and partition detection
 # Called by node-manager.sh during tourguide windows
-# ==============================================================================
 
 . "${MANET_TOOLS_DIR:-$(dirname "${BASH_SOURCE[0]}")}/mesh-acs-common.sh" || exit 1
 

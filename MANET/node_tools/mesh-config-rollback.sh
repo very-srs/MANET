@@ -1,11 +1,8 @@
 #!/usr/bin/env bash
-# ==============================================================================
 # Config rollback safety net
-# ==============================================================================
 # Changing mesh_ssid, mesh_key or ipv4_network drops the mesh while every node
-# reconnects. If the change was wrong, the mesh does not come back — and with
-# it goes the only way to push a correction. Each node therefore has to be able
-# to undo the change on its own, with no help from the network.
+# reconnects. A bad setting can prevent remote correction, so each node must
+# be able to restore its previous configuration without network access.
 #
 #   arm <version>   snapshot the files a dangerous apply rewrites, record how
 #                   many batman peers we had, and set a deadline
@@ -18,9 +15,8 @@
 # and the node still has to honour the deadline afterwards.
 #
 # A node with no peers before the change has nothing to compare against and
-# commits — that is the solo bench case, where "the mesh did not come back"
+# commits: that is the solo bench case, where "the mesh did not come back"
 # cannot be distinguished from "there was never anyone there".
-# ==============================================================================
 
 STATE_DIR="${MANET_ROLLBACK_DIR:-/var/lib/manet-config-rollback}"
 STATE_FILE="$STATE_DIR/state"
@@ -107,7 +103,7 @@ do_arm() (
 
 # --------------------------------------------------------------- restore -----
 do_restore() {
-    log "Mesh did not re-form — restoring the previous configuration"
+    log "Mesh did not re-form: restoring the previous configuration"
     # Once restoration starts, finish it even if a partial restore brings a
     # peer back. Otherwise the next check could discard an unfinished backup.
     touch "$STATE_DIR/restoring" || return 1
@@ -148,7 +144,7 @@ do_check() {
     [ -f "$STATE_FILE" ] || return 0
 
     VERSION=''; PEERS_BEFORE=''; DEADLINE=''
-    # Our own file, written by do_arm — safe to source.
+    # Our own file, written by do_arm: safe to source.
     . "$STATE_FILE" || return 1
     if [[ ! "$PEERS_BEFORE" =~ ^[0-9]+$ || ! "$DEADLINE" =~ ^[0-9]+$ ]]; then
         log "ERROR: incomplete rollback state; keeping snapshot"

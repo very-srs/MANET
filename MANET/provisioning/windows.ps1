@@ -98,9 +98,7 @@ $Script:RPIBOOT_PATH      = $null
 $Script:R3A_RADIO_HASH    = ""
 
 
-# ============================================================
 # Helper Functions
-# ============================================================
 
 function Generate-Password {
     param([int]$length = 10)
@@ -242,9 +240,7 @@ function Expand-XzFile {
     return $false
 }
 
-# ============================================================
 # Finding installed programs (rpi-imager, rpiboot)
-# ============================================================
 #
 # These used to be a hardcoded list of C:\Program Files paths, which finds
 # nothing on a machine set up any other way - a second hard drive, a
@@ -308,7 +304,7 @@ function Get-ProgramSearchRoots {
     if ($env:LOCALAPPDATA) { $roots.Add((Join-Path $env:LOCALAPPDATA 'Programs')) }
     if ($ScriptDir)        { $roots.Add($ScriptDir) }
 
-    # Every fixed drive, not just the system one. A machine with a second hard
+    # Protect every fixed drive. A machine with a second hard
     # drive very often has the program under D:\Program Files, or plain D:\.
     $drives = @()
     try {
@@ -706,9 +702,7 @@ function Invoke-RpiBoot {
     }
 }
 
-# ============================================================
 # Armbian Image Acquisition (Rock 3A)
-# ============================================================
 
 function Test-ArmbianChecksum {
     param([string]$ImagePath, [string]$ChecksumFile)
@@ -859,9 +853,7 @@ function Select-CustomArmbianImage {
     }
 }
 
-# ============================================================
 # Hardware and Device Selection
-# ============================================================
 
 function Test-Ext4Driver {
     $svc = Get-Service -Name "Ext2Srv" -ErrorAction SilentlyContinue
@@ -1036,9 +1028,7 @@ function Select-HardwareAndTargetDevice {
     $Script:TARGET_DEVICE = $picked
 }
 
-# ============================================================
 # Operator setup scripts
-# ============================================================
 # These are embedded in the generated firstrun.sh as one quoted heredoc per
 # file, and written out to /var/lib/manet-user-scripts on the node's first
 # boot. manet-user-scripts.service runs them once, after radio-setup has
@@ -1784,9 +1774,7 @@ function Confirm-Flash {
     Write-Host ""; Write-Host "Proceeding with flash..."
 }
 
-# ============================================================
 # Configuration Questions / Save / Load
-# ============================================================
 
 function Ask-LanCidr {
     param([int]$maxEuds)
@@ -2079,9 +2067,7 @@ function Load-Config {
 }
 
 
-# ============================================================
 # Image content builders and flash primitives
-# ============================================================
 #
 # Pure enough to be called twice, and callable from a host script. Everything
 # that decides what lands on a card lives here so the console flow and the
@@ -2376,9 +2362,7 @@ WantedBy=multi-user.target
 }
 
 
-# ============================================================
 # Main Script
-# ============================================================
 #
 # Everything below is the console flow. It is a function so that a host script
 # can dot-source this file with -NoRun and drive the pieces itself; nothing
@@ -2463,9 +2447,7 @@ function Invoke-Main {
         }
     }
 
-    # ============================================================
     # Rock 3A Flashing Path
-    # ============================================================
 
     if ($Script:HARDWARE_MODEL -eq "r3a") {
 
@@ -2558,9 +2540,7 @@ function Invoke-Main {
         Write-Host "=============================================="
         Write-Host ""
 
-    # ============================================================
     # Raspberry Pi Flashing Path (all Pi models including CM4)
-    # ============================================================
 
     } else {
 

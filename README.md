@@ -1,10 +1,9 @@
 # MANET Project
 
-Software for building mesh radios out of single-board computers. Flash a card/emmc,
-power the node on, and it finds the others and starts carrying traffic for
-them. Nothing assigns it an address, picks its channel, or decides which node
-hosts a video stream. The nodes work that out between themselves, and keep
-working it out as they move and as the mesh splits and rejoins.
+Software for building mesh radios out of single-board computers. After flashing
+a card or eMMC, power on the node to join nearby peers and carry mesh traffic.
+Nodes coordinate addresses, channels, and service hosts as they move and as the
+mesh splits and rejoins.
 
 Routing is `batman-adv` at Layer 2, running the BATMAN V algorithm. The radios
 are 802.11ax/ac/n on 2.4 and 5 GHz, plus 802.11ah HaLow, which reaches further 
@@ -13,22 +12,34 @@ at lower speed.
 ## What the nodes do on their own
 
 Each node claims a block of IPv4 addresses for its own clients without
-colliding with any other node, and IPv6 comes up over SLAAC. Nodes scan the 2.4
-and 5 GHz bands, share what they found, and elect a channel together. Every
-node computes the same answer from the same data, so there is no coordinator to
-lose.  Any node that has Internet access becomes a gateway and shares that access 
-with the rest of the nodes.
+colliding with any other node, and IPv6 comes up over SLAAC. In automatic channel
+selection (ACS) mode, nodes scan the 2.4 and 5 GHz bands and share their observations.
+A coordinator proposes one channel plan for the connected mesh and waits up to
+60 seconds for a majority to acknowledge it, with activation 30 seconds later.
+Missing participants can recover the agreed plan afterward. Wi-Fi groups linked
+through HaLow are part of that same decision: they do not choose separate Wi-Fi
+channels. Any node with Internet access can share it as a gateway.
 
-When a mesh splits in two, a node from each side takes turns hopping to a
-common lobby channel to look for the other half, and the smaller partition
-moves to rejoin the larger. When links start to degrade, a node says so, and
-once more than half the mesh agrees, every node drops to the legacy 802.11
-bitrates to keep the links alive.
+HaLow carries recovery information while keeping the Wi-Fi radios on their data
+channels. Nodes with working HaLow skip Wi-Fi tourguide excursions. Where HaLow
+is unavailable, guides visit a rotating set of lobby channels: synchronized lost
+nodes follow the rotation, while nodes without clock synchronization wait on
+fixed anchors within it. Truly isolated groups reconcile their channel plans
+when a radio path reconnects them. See
+[discovery and partition healing](MANET/node_tools/README.md#discovery--partition-healing)
+for the schedule and recovery behavior.
 
-Services are elected based on connectivity. The best-connected node hosts MediaMTX for
-video, another serves time to the rest of the mesh, and if either goes away the
-next election moves the service elsewhere. Push-to-talk voice runs across the
-mesh from a headset plugged into the node, mixing everyone who is talking.
+When links start to degrade, a node says so, and once more than half the mesh
+agrees, every node drops to the legacy 802.11 bitrates to keep the links alive.
+Services such as MediaMTX are elected based on connectivity, with a new host
+chosen when the previous one disappears. Push-to-talk voice runs across the mesh
+from a headset plugged into the node, mixing everyone who is talking.
+
+Nodes with verified GPS or Internet time can serve time to their peers. Availability
+rides the existing Alfred telemetry; clients discover sources through the registry
+and refresh periodically instead of continuously polling across the mesh. Timed
+channel decisions wait for initial clock synchronization. See
+[time synchronization](MANET/node_tools/README.md#time-synchronization).
 
 ## Repository layout
 
@@ -54,9 +65,7 @@ All of it sits under `MANET/`.
 | **Radxa Rock 3A** | Functional, not a focus | Supports 802.11ax + HaLow. |
 
 The Pi 5 and Rock 3A both work, but they run too hot for a sealed radio
-enclosure, which is the form factor this project targets. They are no longer the
-focus of testing. The CM4 is. Expect fixes to land and be verified on CM4
-first.
+enclosure. Development and testing now focus on the CM4.
 
 ## Getting Started
 
@@ -159,6 +168,14 @@ Ethernet being unplugged before setup finished. Reconnect it and reboot, and
 the node retries on its own. The pattern is set on every boot from the recorded
 result, so it stays put until the status actually changes.
 
+An optional external LED and button harness provides a quick connectivity check:
+one green blink per directly connected neighbor, counting each node once across
+its radio links. Multihop nodes are left to the web UI. Red means no neighbors;
+amber means the check is unavailable. Solid green confirms a connection when
+identity metadata is still arriving. The harness is disabled by default and its
+wiring still needs bench validation. Configuration and all patterns are in
+[hardware support](MANET/node_tools/README.md#hardware-support).
+
 ## Web Interface
 
 Each node serves two things on port 80, reachable from a device connected to
@@ -203,7 +220,7 @@ access-control layers, and what each management tab does.
 
 ## Connectivity Modes
 
-A phone or compter reaches the mesh through whichever node it is connected to.
+A phone or computer reaches the mesh through whichever node it is connected to.
 Those are End User Devices, EUDs throughout this documentation, and a node
 handles them three ways:
 
@@ -218,6 +235,8 @@ handles them three ways:
 * [Provisioning Guide](MANET/provisioning/README.md)
 * [Additional setup scripts](MANET/provisioning/additional-scripts/README.md)
 * [Node Tools Documentation](MANET/node_tools/README.md)
+* [Runtime Internals](docs/node-tools-internals.md)
+* [Install Packages and Checksums](MANET/install_packages/README.md)
+* [Feature Roadmap and Validation Status](MANET/README.md#feature-roadmap)
 * [Binary Details](MANET/binaries_arm64/README.md)
 * [Dispatcher Hooks](MANET/networkd-dispatcher/README.md)
-

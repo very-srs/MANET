@@ -56,9 +56,9 @@ from manet_radio import (
     get_iface_txpower_cap, read_iface_txpower_dbm, set_iface_txpower_verified,
 )
 
-# ─────────────────────────────────────────────────────────────────────────────
+
 # Constants
-# ─────────────────────────────────────────────────────────────────────────────
+
 REGISTRY_FILE   = "/var/run/mesh_node_registry"
 MESH_CONF_FILE  = "/etc/mesh.conf"
 ADMIN = AdminTransport()
@@ -101,9 +101,9 @@ def logo_asset_token():
         except OSError:
             parts.append('missing')
     return hashlib.sha1('|'.join(parts).encode()).hexdigest()[:8]
-# ─────────────────────────────────────────────────────────────────────────────
+
 # Config / State Loaders
-# ─────────────────────────────────────────────────────────────────────────────
+
 def load_kv_file(path):
     """Parse a key=value or key='value' file into a dict."""
     conf = {}
@@ -185,9 +185,9 @@ def normalize_local_redirect(target):
 
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+
 # Registry Parser
-# ─────────────────────────────────────────────────────────────────────────────
+
 
 
 def parse_registry():
@@ -206,9 +206,9 @@ def parse_registry():
         pass
     return nodes
 
-# ─────────────────────────────────────────────────────────────────────────────
+
 # batctl Wrappers
-# ─────────────────────────────────────────────────────────────────────────────
+
 def norm_mac(mac):
     return mac.lower().replace('-', ':').strip()
 
@@ -217,7 +217,7 @@ def run_batctl_originators():
       mbps_map: {mac -> best throughput}  (indexes both orig + nexthop MACs)
       orig_map: {orig_mac -> {mbps, nexthop, iface}}  (best path per originator)
 
-    The mesh runs BATMAN_V, whose metric is throughput in Mbit/s — batctl
+    The mesh runs BATMAN_V, whose metric is throughput in Mbit/s: batctl
     prints it as `%u.%u` (originators.c), so 43.2 means 43.2 Mbit/s. It is
     carried through as-is; there is no 0-255 link quality here to scale to.
     """
@@ -315,9 +315,9 @@ def get_my_hostname():
     except Exception:
         return 'unknown'
 
-# ─────────────────────────────────────────────────────────────────────────────
+
 # Local Node Detail Gathering
-# ─────────────────────────────────────────────────────────────────────────────
+
 def get_battery():
     """Return battery dict from battery-reader.py output, or None.
 
@@ -405,10 +405,10 @@ def get_interfaces():
     Return list of interface dicts with role, health, and fault details.
 
     Health values:
-      'ok'      — up and doing its job
-      'warn'    — up but something is degraded (e.g. wpa_supplicant stopped)
-      'fault'   — interface is DOWN or not participating when it should be
-      'info'    — informational (bridge, bat0, loopback — no health expectation)
+      'ok'     : up and doing its job
+      'warn'   : up but something is degraded (e.g. wpa_supplicant stopped)
+      'fault'  : interface is DOWN or not participating when it should be
+      'info'   : informational (bridge, bat0, loopback: no health expectation)
     """
     ifaces = []
     try:
@@ -417,7 +417,7 @@ def get_interfaces():
     except Exception:
         return ifaces
 
-    # ── iw dev info ──
+    # iw dev info
     iw_info = {}
     try:
         r2 = subprocess.run(['iw', 'dev'], capture_output=True, text=True, timeout=5)
@@ -510,7 +510,7 @@ def get_interfaces():
         if 'morse' in iw_info[iname].get('driver', ''):
             iw_info[iname].update(get_halow_driver_info(iname))
 
-    # ── bat0 slaves (active interfaces per batctl) ──
+    # bat0 slaves (active interfaces per batctl)
     bat0_slaves_active   = set()   # confirmed active in batctl
     bat0_slaves_inactive = set()   # listed but NOT active
     try:
@@ -524,7 +524,7 @@ def get_interfaces():
         pass
     bat0_all_slaves = bat0_slaves_active | bat0_slaves_inactive
 
-    # ── which wpa_supplicant units are running ──
+    # which wpa_supplicant units are running
     wpa_running = set()
     try:
         sp = subprocess.run(
@@ -541,7 +541,7 @@ def get_interfaces():
     conf     = load_kv_file(MESH_CONF_FILE)
     eud_mode = conf.get('eud', 'wired')
 
-    # Non-mesh interfaces (EUD AP) — must not be checked for bat0/wpa_supplicant
+    # Non-mesh interfaces (EUD AP): must not be checked for bat0/wpa_supplicant
     no_mesh_ifaces = set()
     try:
         with open('/var/lib/no_mesh_if') as f:
@@ -604,9 +604,9 @@ def get_interfaces():
             ch          = iw.get('channel', '')
             band_label  = iw.get('band_label', '')
             if band_label:
-                detail = f"{band_label} — ch{ch}" if ch else band_label
+                detail = f"{band_label}: ch{ch}" if ch else band_label
             elif freq:
-                detail = f"Mesh radio — {freq}GHz ch{ch}"
+                detail = f"Mesh radio: {freq}GHz ch{ch}"
             else:
                 detail = 'Mesh radio'
             if iw.get('ssid'):
@@ -631,7 +631,7 @@ def get_interfaces():
             role = 'ap'
             ssid = iw.get('ssid', '')
             freq = iw.get('freq', '')
-            detail = f"EUD AP — {ssid}" + (f" ({freq}GHz)" if freq else '')
+            detail = f"EUD AP: {ssid}" + (f" ({freq}GHz)" if freq else '')
             if is_down:
                 health = 'fault'
                 faults.append(f'{name} AP is DOWN')
@@ -650,28 +650,28 @@ def get_interfaces():
 
             if has_gw:
                 role   = 'gateway'
-                detail = 'Ethernet — Internet gateway'
+                detail = 'Ethernet: Internet gateway'
             elif is_up and eud_mode == 'wired':
                 role   = 'eud-bridge'
-                detail = 'Ethernet — EUD connection'
+                detail = 'Ethernet: EUD connection'
             else:
                 role   = 'other'
                 detail = 'Ethernet'
-            # Ethernet DOWN is usually fine (cable unplugged) — just informational
+            # Ethernet DOWN is usually fine (cable unplugged): just informational
             if is_down:
                 health = 'info'
                 detail += ' (no cable)' if not detail.endswith(')') else ''
 
         elif (name.startswith('wlan') or name.startswith(('halow', 'mlan'))) and name not in no_mesh_ifaces and name not in bat0_all_slaves:
-            # wlan not in bat0 and not AP — unexpected
+            # wlan not in bat0 and not AP: unexpected
             freq = iw.get('freq', '')
             detail = f"Wireless {freq}GHz" if freq else 'Wireless'
             if is_down:
                 health = 'fault'
-                faults.append(f'{name} is DOWN — not participating in mesh')
+                faults.append(f'{name} is DOWN: not participating in mesh')
             elif name not in bat0_all_slaves and iw.get('type') != 'AP':
                 health = 'warn'
-                faults.append(f'Not in bat0 and not an AP — check wpa_supplicant')
+                faults.append(f'Not in bat0 and not an AP: check wpa_supplicant')
 
         # bat0/br0 report operstate=UNKNOWN (virtual iface); derive from UP flag instead
         display_state = state
@@ -849,7 +849,7 @@ def assemble_local_data():
 
     ifaces = enrich_interfaces_with_registry_mcs(ifaces, my_node)
 
-    # GPS — read directly from gps-reader output for freshness; fall back to registry.
+    # GPS: read directly from gps-reader output for freshness; fall back to registry.
     # gps-reader stamps every write, so a frozen timestamp means it died or hung
     # while still holding a fix. Presenting that position as current is worse than
     # showing none, so a stale file is treated the same as no fix.
@@ -893,10 +893,8 @@ def assemble_local_data():
 def assemble_peer_data(peer_ip):
     """Peer detail for the status drawer, entirely from the registry.
 
-    This used to proxy the peer's own /api/local over HTTP. Everything it
-    showed is replicated over Alfred now, so a peer that is briefly
-    unreachable still renders — and one unreachable peer no longer stalls the
-    page waiting on a timeout.
+    Alfred replicates the detail data, so briefly unreachable peers can still
+    be shown without waiting for an HTTP request to time out.
     """
     for ndata in parse_registry().values():
         if ndata.get('IPV4_ADDRESS') != peer_ip:
@@ -952,9 +950,9 @@ def fmt_uptime(seconds):
     except Exception:
         return seconds
 
-# ─────────────────────────────────────────────────────────────────────────────
+
 # Access Control
-# ─────────────────────────────────────────────────────────────────────────────
+
 def is_allowed_ip(client_ip, conf):
     if client_ip in ('127.0.0.1', '::1'):
         return True
@@ -966,9 +964,9 @@ def is_allowed_ip(client_ip, conf):
         pass
     return False
 
-# ─────────────────────────────────────────────────────────────────────────────
+
 # Data Assembly
-# ─────────────────────────────────────────────────────────────────────────────
+
 def assemble_status_data():
     conf       = load_kv_file(MESH_CONF_FILE)
     state      = load_kv_file(MESH_STATE_FILE)
@@ -1090,7 +1088,7 @@ def assemble_status_data():
 
     node_list.sort(key=lambda n: (not n['is_me'], -(n['mbps'] if n['mbps'] is not None else -1)))
 
-    # ── Build topology edges from batctl o nexthop data ──
+    # Build topology edges from batctl o nexthop data
     # mac_to_node_id: every MAC (all interfaces) -> node_id
     mac_to_node_id = {}
     for node in node_list:
@@ -1120,7 +1118,7 @@ def assemble_status_data():
                         best_entry = odata
 
             if best_entry is None:
-                # Node in registry but not in originator table — no path known
+                # Node in registry but not in originator table: no path known
                 edges.append({
                     'source':  self_node['id'],
                     'target':  node['id'],
@@ -1183,9 +1181,9 @@ def assemble_status_data():
         'timestamp':      int(time.time()),
     }
 
-# ─────────────────────────────────────────────────────────────────────────────
+
 # HTML Pages
-# ─────────────────────────────────────────────────────────────────────────────
+
 CSS = """
 :root {
   --bg:       #ebeae8;
@@ -1239,7 +1237,7 @@ body {
 #header { background: rgba(255,255,255,.94); backdrop-filter: blur(18px); border-bottom: 1px solid var(--border2); padding: 10px 14px 10px 0; display: grid; grid-template-columns: auto 1fr; grid-template-areas: "brand brand" "meta meta" "actions actions"; row-gap: 8px; column-gap: 12px; flex-shrink: 0; min-height: 58px; box-shadow: 0 1px 0 rgba(2,0,13,.05); position: relative; }
 #header::after { content:''; position:absolute; left:0; right:0; bottom:0; height:2px; background: linear-gradient(90deg, rgba(236,176,0,.92) 0 36%, rgba(236,176,0,.28) 36% 68%, transparent 68%); pointer-events:none; }
 :root[data-theme="dark"] #header { background: rgba(18,17,24,.92); }
-/* Health pill — left edge strip */
+/* Health pill: left edge strip */
 #hdr-health { display: flex; align-items: center; gap: 7px; padding: 0 14px 0 12px;
               border-right: 1px solid var(--border); margin-right: 12px; flex-shrink: 0;
               transition: background 0.4s; }
@@ -1254,10 +1252,10 @@ body {
 .hdr-brand { grid-area: brand; display:flex; align-items:center; gap:8px; min-width:0; padding-left:12px; }
 .fer-lockup { display:flex; align-items:center; justify-content:flex-start; align-self:center; height:58px; padding:0 12px 0 0; border-right:1px solid var(--border); color:var(--fer-black); overflow:hidden; flex:0 0 auto; }
 /* the badge is near-square, so height drives the size and width follows the
-   aspect ratio — a fixed width would letterbox it and leave dead space */
+   aspect ratio: a fixed width would letterbox it and leave dead space */
 .fer-logo-img { display:block; width:auto; height:44px; max-width:100%; object-fit:contain; object-position:left center; filter:none; transition:height .18s ease; }
 :root[data-theme="dark"] .fer-lockup { color:#ffffff; }
-/* no brightness(0) invert(1) here — that flattens the badge to a solid silhouette */
+/* no brightness(0) invert(1) here: that flattens the badge to a solid silhouette */
 .hdr-logo { color: var(--text); font-size: 17px; letter-spacing: 0; font-weight: 900; display:flex; align-items:center; min-height:46px; line-height:1; }
 .hdr-logo span { color: var(--accent2); }
 .theme-toggle { border:1px solid var(--accent2); background:rgba(236,176,0,.10); color:var(--text); border-radius:999px; padding:6px 10px; font-family:var(--font); font-size:11px; font-weight:850; cursor:pointer; min-width:74px; }
@@ -1883,7 +1881,7 @@ function simStep() {
     b.fx -= fx; b.fy -= fy;
   });
 
-  // Center gravity — stronger pull keeps everything near center
+  // Center gravity: stronger pull keeps everything near center
   nodes.forEach(n => {
     n.fx += (cx - n.x) * 0.03;
     n.fy += (cy - n.y) * 0.03;
@@ -2559,9 +2557,9 @@ function renderPeerDrawer(d, hostname) {
 </body>
 </html>"""
 
-# ─────────────────────────────────────────────────────────────────────────────
+
 # Admin API helpers
-# ─────────────────────────────────────────────────────────────────────────────
+
 import hashlib
 
 ALFRED_CONFIG_TYPE = 70
@@ -2900,7 +2898,7 @@ button {{
   background: transparent;
 }}
 /* dark mode swaps in the dedicated white asset (see data-dark) rather than
-   filtering — brightness(0) invert(1) flattens artwork to a solid silhouette */
+   filtering: brightness(0) invert(1) flattens artwork to a solid silhouette */
 :root[data-theme="dark"] p {{
   color: #aaa5b2;
 }}
@@ -2952,9 +2950,9 @@ button {{
 </body>
 </html>"""
 
-# ─────────────────────────────────────────────────────────────────────────────
+
 # HTTP Handler
-# ─────────────────────────────────────────────────────────────────────────────
+
 class MeshHandler(ManageRoutes, http.server.BaseHTTPRequestHandler):
 
     def log_message(self, fmt, *args):
@@ -2968,7 +2966,7 @@ class MeshHandler(ManageRoutes, http.server.BaseHTTPRequestHandler):
         self.wfile.write(b'Forbidden')
 
     def send_401_json(self, error='Management password required'):
-        """Unauthenticated XHR from the management UI — the page turns this
+        """Unauthenticated XHR from the management UI: the page turns this
         into a bounce back to the login form rather than a silent failure."""
         body = json.dumps({'ok': False, 'auth_required': True, 'error': error}).encode('utf-8')
         self.send_response(401)
@@ -3129,7 +3127,7 @@ class MeshHandler(ManageRoutes, http.server.BaseHTTPRequestHandler):
         conf       = load_kv_file(MESH_CONF_FILE)
         client_ip  = self.client_address[0]
 
-        # Nothing this server offers is meant for the uplink/LAN side — only
+        # Nothing this server offers is meant for the uplink/LAN side: only
         # localhost and clients holding a DHCP lease from the mesh.
         if not is_allowed_ip(client_ip, conf):
             self.send_403()
@@ -3216,7 +3214,7 @@ class MeshHandler(ManageRoutes, http.server.BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(str(e).encode())
         elif path == '/api/admin/status':
-            # Hands out the mesh SAE key and admin password — same gate as /manage.
+            # Hands out the mesh SAE key and admin password: same gate as /manage.
             if not self._perf_cookie_valid():
                 self.send_401_json()
                 return
@@ -3292,7 +3290,7 @@ class MeshHandler(ManageRoutes, http.server.BaseHTTPRequestHandler):
             return
 
         # Reprovisioning the mesh (SAE key, SSID, IP range) is the most
-        # destructive thing this UI can do — never without the password.
+        # destructive thing this UI can do: never without the password.
         if path.startswith('/api/admin/') and not self._perf_cookie_valid():
             self.send_401_json()
             return
@@ -3435,9 +3433,9 @@ class MeshHandler(ManageRoutes, http.server.BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(b'Not found')
 
-# ─────────────────────────────────────────────────────────────────────────────
+
 # Entry Point
-# ─────────────────────────────────────────────────────────────────────────────
+
 class ThreadedServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
     daemon_threads = True
     allow_reuse_address = True

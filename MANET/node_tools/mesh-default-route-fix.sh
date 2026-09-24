@@ -6,7 +6,7 @@ REGISTRY=/var/run/mesh_node_registry
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] - DEFAULT-ROUTE-FIX: $*" >&2; }
 
-# Only run on non-gateway (client) nodes — gateway nodes keep their ethernet default route
+# Only run on non-gateway (client) nodes: gateway nodes keep their ethernet default route
 gw_mode=$("$BATCTL" gw_mode 2>/dev/null | awk '{print $1}' || true)
 if [ "$gw_mode" = "server" ] || [ -f /var/run/mesh-gateway.state ]; then
     log "Gateway mode active ($gw_mode); skipping mesh route fix"

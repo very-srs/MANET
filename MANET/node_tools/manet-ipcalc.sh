@@ -4,7 +4,7 @@
 # Prints the fields they parse (awk '/HostMin/ {print $2}' etc.) in the
 # same column layout. The Perl ipcalc costs ~1.5s of CPU per call on a
 # CM4, and mesh-ip-manager + the election scripts call it every
-# node-manager cycle — this script does the same math in a few ms.
+# node-manager cycle: this script does the same math in a few ms.
 #
 # Usage: manet-ipcalc.sh <a.b.c.d/prefix>   (prefix 1-30)
 

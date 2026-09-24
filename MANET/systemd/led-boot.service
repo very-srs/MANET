@@ -1,0 +1,10 @@
+[Unit]
+Description=Optional MANET external LED boot display
+After=local-fs.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/led-boot.sh
+
+[Install]
+WantedBy=multi-user.target

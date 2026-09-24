@@ -1,7 +1,5 @@
 #!/usr/bin/env bash
-# ==============================================================================
 # Mean mesh throughput to peers
-# ==============================================================================
 # Prints the mean of BATMAN_V's metric across this node's originators, in
 # Mbit/s, to two decimals. Service elections use it to pick the best-connected
 # node, and it is published as MEAN_THROUGHPUT_MBPS.
@@ -13,14 +11,11 @@
 #    * 0c:bf:74:00:2b:f1    0.372s (       43.2)  0c:bf:74:00:2b:f1 [     wlan2]
 #      0c:bf:74:00:2b:f1    0.372s (        4.2)  00:0a:52:09:60:fe [     wlan0]
 #
-# So $3 is "0.372s" on the starred row and "(" on the others. Reading $3 as the
-# metric — as this did until 2026-08-16 — averaged the last-seen timestamp and
-# produced numbers like 0.14 on a mesh running at 43 Mbit/s. Match the
-# parenthesised value instead, and never a positional field.
+# $3 is "0.372s" on the starred row and "(" on the others. Parse the
+# parenthesised value; a fixed column can average timestamps as throughput.
 #
 # One peer reachable over two radios is still one peer: keep the best path per
 # originator, then average those, so a second radio cannot drag the mean down.
-# ==============================================================================
 
 BATCTL="${BATCTL:-/usr/sbin/batctl}"
 

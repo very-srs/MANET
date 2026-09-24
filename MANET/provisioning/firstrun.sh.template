@@ -26,7 +26,7 @@ echo "APT::Check-Date "false";" >  /etc/apt/apt.conf.d/99no-time-checks.conf
 
 # Persistent logging. The install tarball drops
 # /etc/systemd/journald.conf.d/99-manet-persistent.conf, which is what actually
-# turns this on — it has to sort after RPi OS's own 40-rpi-volatile-storage.conf
+# turns this on: it has to sort after RPi OS's own 40-rpi-volatile-storage.conf
 # (Storage=volatile) to win. Creating the directory and fixing its ownership is
 # still worth doing here so journald has somewhere to flush to on this first
 # boot, before the tarball has been extracted. An earlier version of this block
@@ -204,7 +204,7 @@ apt install -y ipcalc nmap lshw tcpdump net-tools nftables wireless-tools iperf3
 tar -zxf /root/morse-pi-install.tar.gz --no-overwrite-dir -C /
 
 # Anyone who logs in from here until radio-setup finishes should be told the
-# node is still provisioning — pulling the Ethernet or power part-way through
+# node is still provisioning: pulling the Ethernet or power part-way through
 # leaves it half-configured, and it used to look identical to a finished node.
 mkdir -p /var/lib
 {
@@ -297,11 +297,10 @@ morse
 dot11ah
 EOF
 
-# Detect a USB MM81xx HaLow card (325b:8100) from sysfs.  Boards with one need
-# none of the SPI-hat plumbing below — not the mm6108 BCF / SPI clock modparams
-# (wrong board file: probe dies with "morse_firmware_init failed: -5"), and not
-# the config.txt SPI overlay/GPIO entries further down.  The card is enumerated
-# by the time provision-mesh runs.  Detection failure falls back to the SPI
+# Detect a USB MM81xx HaLow card (325b:8100) from sysfs. Skip SPI modparams and
+# config.txt overlay/GPIO entries on these boards. The mm6108 BCF causes USB
+# probe to fail with "morse_firmware_init failed: -5". The card is enumerated
+# by the time provision-mesh runs. Detection failure falls back to the SPI
 # settings, which is the safe default for hat boards.
 _halow_on_spi=1
 for _usbdev in /sys/bus/usb/devices/*; do
@@ -309,7 +308,7 @@ for _usbdev in /sys/bus/usb/devices/*; do
     if cat "$_usbdev/product" "$_usbdev/manufacturer" 2>/dev/null \
         | tr '[:upper:]' '[:lower:]' | grep -Eq 'morse|mm81|halow|802\.11ah'; then
         _halow_on_spi=0
-        echo " > USB Morse HaLow card detected — using USB modparams, skipping SPI entries"
+        echo " > USB Morse HaLow card detected: using USB modparams, skipping SPI entries"
         break
     fi
 done
@@ -767,8 +766,8 @@ echo "mtx=__INSTALL_MEDIAMTX__" >> /etc/mesh.conf
 # immediately unless voice=y, so this line is what actually turns it on.
 echo "voice=__VOICE_ENABLED__" >> /etc/mesh.conf
 # Talk group 1 for every node. This is a per-radio setting changed from the
-# web UI (and later the enclosure rotary switch), not a build-time one —
-# baking it into the image would mean reflashing to change channel.
+# web UI (and later the enclosure rotary switch), not a build-time one.
+# Baking it into the image would mean reflashing to change channel.
 echo "voice_channel=1" >> /etc/mesh.conf
 # Codec, written explicitly rather than left to the daemon's default. This is
 # a mesh-wide setting -- the two codecs cannot hear each other -- so every node

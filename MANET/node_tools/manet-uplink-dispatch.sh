@@ -156,7 +156,7 @@ EOF
 
     # Only reconfigure (restart DHCP) when the interface has no IP yet.
     # networkctl reconfigure always causes a brief DHCP lease loss even without
-    # a file change — avoid it when DHCP is already working.
+    # a file change: avoid it when DHCP is already working.
     if [ -z "$(iface_ip "$iface")" ]; then
         networkctl reconfigure "$iface" 2>/dev/null || true
     fi
@@ -261,7 +261,7 @@ find_working_uplink() {
         ip link set "$iface" nomaster 2>/dev/null || true
 
         # Skip reconfiguring if the interface already has an IP and a default
-        # route — rewriting the networkd config triggers inotify, briefly drops
+        # route: rewriting the networkd config triggers inotify, briefly drops
         # the DHCP lease, and causes the internet probe to fail on the route
         # re-installation race, which creates a demote→carrier→loop cycle.
         ip=$(iface_ip "$iface")
@@ -301,7 +301,7 @@ configure_firewall() {
     nft add rule inet filter input ct state invalid drop
     # These accepts are deliberately broad. Access to the web UI (80) and the
     # iperf3 daemon (5201) is decided in the manet_ui table, which runs at an
-    # earlier hook priority — see manet-ui-firewall.sh. Do not try to encode
+    # earlier hook priority: see manet-ui-firewall.sh. Do not try to encode
     # that policy here as well.
     nft add rule inet filter input iifname "lo" accept
     nft add rule inet filter input iifname "br0" accept

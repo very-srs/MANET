@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Alfred-coordinated mesh configuration changes — the receiving half.
+"""Alfred-coordinated mesh configuration changes: the receiving half.
 
 sync:
   - reads the newest config package from Alfred type 70
@@ -15,7 +15,7 @@ sets activate_at and every node applies at the same moment.
 Everything in a package arrives from the network and ends up in /etc/mesh.conf
 and in wpa_supplicant configs, so it is validated here rather than trusted.
 EUD/AP settings (eud, lan_ap_ssid, lan_ap_key, max_euds_per_node) are stripped
-and never applied from Alfred — those stay on the node that staged them.
+and never applied from Alfred: those stay on the node that staged them.
 """
 
 import json
@@ -86,9 +86,9 @@ def publish_ack(version):
     return result.returncode == 0
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+
 # Validation
-# ─────────────────────────────────────────────────────────────────────────────
+
 # A value ends up on a `key=value` line in mesh.conf, and some are substituted
 # into wpa_supplicant configs inside double quotes. Newlines and quotes would
 # let a peer write arbitrary configuration, so they are refused outright.
@@ -165,7 +165,7 @@ def package_is_dangerous(pkg, mesh_conf="/etc/mesh.conf"):
     Presence of the key is not enough: re-broadcasting the current SSID is a
     no-op and should not put the node into a five-minute trial window. The
     comparison is per node, because two nodes can hold different current
-    values — the one that really is changing arms, the one already on the new
+    values: the one that really is changing arms, the one already on the new
     value does not.
     """
     config = pkg.get("config", {})
@@ -183,9 +183,9 @@ def package_is_dangerous(pkg, mesh_conf="/etc/mesh.conf"):
     return any(k in config and config[k] != current.get(k, "") for k in DANGEROUS_KEYS)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+
 # Alfred
-# ─────────────────────────────────────────────────────────────────────────────
+
 def latest_config_package():
     """Newest authenticated message on type 70, or None.
 
@@ -205,9 +205,9 @@ def latest_config_package():
     return messages[-1] if messages else None
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+
 # Sync
-# ─────────────────────────────────────────────────────────────────────────────
+
 def clear_staging(reason):
     removed = False
     for path in (PENDING_FILE, ACK_VERSION_FILE):

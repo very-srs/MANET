@@ -1,7 +1,5 @@
 #!/usr/bin/env bash
-# ==============================================================================
 # Power / throttling status
-# ==============================================================================
 # Answers one question, on login and on demand: is this board getting enough
 # power?
 #
@@ -20,7 +18,6 @@
 #
 # Never fails: a motd hook that errors breaks the login banner, and the status
 # page must render on hardware that has no throttling interface at all.
-# ==============================================================================
 
 # vcgencmd reports a bitmask. Low bits are live state, bits 16+ are sticky
 # "has happened since boot" flags - which are the useful ones, because the
@@ -93,13 +90,13 @@ ok)
     printf '  Power: OK (no under-voltage or throttling since boot)\n'
     ;;
 notice)
-    printf '  Power: throttling has occurred since boot (%s) — see: vcgencmd get_throttled\n' "$RAW"
+    printf '  Power: throttling has occurred since boot (%s). See: vcgencmd get_throttled\n' "$RAW"
     ;;
 warning|critical)
     echo
     rule
     if [ "$STATE" = critical ]; then
-        printf '  ** UNDER-VOLTAGE RIGHT NOW — THIS BOARD IS NOT GETTING ENOUGH POWER **\n'
+        printf '  ** UNDER-VOLTAGE RIGHT NOW: THIS BOARD IS NOT GETTING ENOUGH POWER **\n'
     else
         printf '  ** UNDER-VOLTAGE / THROTTLING HAS OCCURRED ON THIS BOARD **\n'
     fi

@@ -5,11 +5,8 @@
 #  if the mesh config file is updated
 #
 
-# log the output of this script to a file for debugging. Append, never
-# truncate: this script runs more than once (first boot, post-rename re-run,
-# manual retry) and overwriting destroyed the history of the run that actually
-# went wrong. Two runs writing a truncating tee also interleave into an
-# unreadable file.
+# Append setup output so first boot, post-rename runs, and manual retries
+# retain the history needed to diagnose failures.
 exec >> >(tee -a /var/log/radio-setup.log) 2>&1
 set -x
 
@@ -17,17 +14,12 @@ echo "=============================================================="
 echo " radio-setup starting: $(date -Is)"
 echo "=============================================================="
 
-# The LEDs are driven from the recorded provisioning verdict, by
-# manet-led-status.sh, not from an ERR trap. A trap here fired on every
-# unguarded non-zero return, and this script continues past failures by design,
-# so a perfectly healthy run could finish showing the failure colour with
-# nothing to reset it.
+# manet-led-status.sh sets the LEDs from the recorded provisioning result.
+# An ERR trap would also flag non-zero returns that this script can recover from.
 
-# ── Provisioning state ──────────────────────────────────────────────────────
-# A node takes several reboots and about ten minutes to provision. Nothing used
-# to record whether that finished, so a node whose Ethernet was unplugged
-# part-way through looked exactly like a finished one — and got marked done.
-# These files are what `manet-provision-status.sh` reports on login.
+# Provisioning state
+# Provisioning takes several reboots and about ten minutes. Record its progress
+# so an interrupted run can be identified by manet-provision-status.sh on login.
 PROVISION_STATE_FILE="/var/lib/manet-provision.state"
 PROVISION_FAIL_FILE="/var/lib/manet-provision.failures"
 PROVISION_STARTED=$(date +%s)
@@ -43,8 +35,8 @@ provision_state() {
     } > "$PROVISION_STATE_FILE"
 }
 
-# Record a step that did not work. The run continues — a node with no GPS
-# tooling is still a useful node — but it will not be marked provisioned.
+# Record failed steps and continue with the remaining setup. The node may be
+# usable, but it will not be marked fully provisioned until all steps succeed.
 provision_fail() {
     echo "$1" >> "$PROVISION_FAIL_FILE"
     echo " !! PROVISION FAILURE: $1"
@@ -60,9 +52,7 @@ provision_try() {
     return 0
 }
 
-# Is there a working path to the package repositories? Checked before the apt
-# phases so "no network" is reported once, plainly, instead of as a wall of
-# apt resolver errors.
+# Check repository DNS before apt and report a missing connection once.
 have_package_network() {
     getent hosts deb.debian.org >/dev/null 2>&1 || return 1
     return 0
@@ -415,7 +405,7 @@ if [ -z "$HALOW_REGULATORY_DOMAIN" ] || uses_eu_halow_region "$REGULATORY_DOMAIN
     HALOW_REGULATORY_DOMAIN="EU"
 fi
 
-# cfg80211 regdomain for the 2.4/5 GHz (mt7915) radios — use the real ISO
+# cfg80211 regdomain for the 2.4/5 GHz (mt7915) radios: use the real ISO
 # country code (e.g. HR). The Morse HaLow phy is self-managed and applies
 # HALOW_REGULATORY_DOMAIN (EU) on its own via the morse module param, so
 # cfg80211 must NOT be forced to "EU": that is a synthetic DFS-invalid regdb
@@ -452,9 +442,7 @@ if [ "$PHY_COUNT" -eq 0 ]; then
     echo "  If you expect wireless: check 'dmesg | grep -i firmware'"
 fi
 
-# ============================================================================
 # === INTERFACE DETECTION ===
-# ============================================================================
 
 # Detect interfaces, classify by type
 mesh_ifaces=()
@@ -638,9 +626,7 @@ echo "  Non-mesh: ${#nonmesh_ifaces[@]} (${nonmesh_ifaces[*]})"
 echo "  Logical mapping:"
 cat /var/lib/iface_map
 
-# ============================================================================
 # === AP INTERFACE SELECTION (for wireless/auto EUD modes) ===
-# ============================================================================
 
 AP_INTERFACE=""
 
@@ -689,9 +675,7 @@ if [[ "$eud" == "wireless" ]] || [[ "$eud" == "auto" ]]; then
     fi
 fi
 
-# ============================================================================
 # === CLEANUP STALE PER-INTERFACE SERVICES AND CONFIGS ===
-# ============================================================================
 # Previous runs may have enabled wpa_supplicant or s1g services for interfaces
 # that no longer hold those roles (e.g. after a .link rename swapped which
 # physical card is wlanX). Disable any per-interface service whose target
@@ -754,15 +738,13 @@ for conf in /etc/wpa_supplicant/wpa_supplicant-wlan*.conf; do
     fi
 done
 
-# ============================================================================
 # === CONFIGURE MESH INTERFACES (excluding AP if needed) ===
-# ============================================================================
 
 # Pin wlanX names by MAC so role assignments survive reboot in a predictable
 # order: wlan0=2.4GHz mesh, wlan1=5GHz mesh, wlan2=HaLow, wlan3=non-mesh AP.
 # The classification above already determined which physical phy plays which
 # role; we now bind that role to a stable MAC-keyed name via systemd .link.
-# These take effect at next boot — current run uses kernel-assigned names from
+# These take effect at next boot: current run uses kernel-assigned names from
 # the role files.
 rm -f /etc/systemd/network/10-wlan*.link
 
@@ -871,7 +853,7 @@ for WLAN in $(cat /var/lib/mesh_if); do
     # names. Skip config writes; the post-reboot re-run will write them with
     # the correct names.
     if [ "$needs_rerun" -eq 1 ]; then
-        echo " > Rename pending — deferring wpa config for $WLAN to post-reboot re-run"
+        echo " > Rename pending: deferring wpa config for $WLAN to post-reboot re-run"
         continue
     fi
 
@@ -910,9 +892,7 @@ done
 # after initialization because rotating rendezvous can share a data channel.
 rm -f /run/manet-rendezvous.json
 
-# ============================================================================
 # === CONFIGURE AP INTERFACE (if wireless/auto mode) ===
-# ============================================================================
 
 HOST_MAC=$(ip a | grep -A1 $(networkctl | grep -v bat | awk '/ether/ {print $2}' | head -1) \
    | awk '/ether/ {print $2}' | cut -d':' -f 5-6 | sed 's/://g')
@@ -1094,9 +1074,7 @@ EOF
     echo "AP configuration complete for $AP_INTERFACE"
 fi
 
-# ============================================================================
 # === CONFIGURE CLIENT AP (if exists and not used for mesh AP) ===
-# ============================================================================
 
 for WLAN in $(cat /var/lib/no_mesh_if | head -n 1); do
     # Skip if this is already the AP interface
@@ -1119,13 +1097,11 @@ EOF
     systemctl enable mesh-interface-setup@$WLAN
 done
 
-# ============================================================================
 # === HALOW CONFIGURATION ===
-# ============================================================================
 
 for WLAN in $(cat /var/lib/halow_if | head -n 1); do
     if [ "$needs_rerun" -eq 1 ]; then
-        echo " > Rename pending — deferring HaLow wpa config for $WLAN to post-reboot re-run"
+        echo " > Rename pending: deferring HaLow wpa config for $WLAN to post-reboot re-run"
         continue
     fi
 
@@ -1256,9 +1232,7 @@ EOF
 
 done
 
-# ============================================================================
 # === MORSE / HALOW MODULE OPTIONS ===
-# ============================================================================
 echo "options cfg80211 ieee80211_regdom=$CFG80211_REGDOM" > /etc/modprobe.d/cfg80211.conf
 
 # Preserve hardware-specific SPI modprobe options that were written by firstrun.
@@ -1281,45 +1255,12 @@ if [[ "$HALOW_REGULATORY_DOMAIN" == "EU" ]]; then
     echo "options morse enable_auto_duty_cycle=0 enable_auto_mpsw=0" >> /etc/modprobe.d/morse.conf
 fi
 
-# ============================================================================
 # === SYSTEM SERVICE SETUP ===
-# ============================================================================
 
-# Watch for button presses
-cat << EOF > /etc/systemd/system/led-boot.service
-[Unit]
-Description=LED boot
-After=sysinit.target
-DefaultDependencies=no
-
-[Service]
-Type=oneshot
-RemainAfterExit=no
-ExecStart=/usr/local/bin/led-boot.sh
-TimeoutStartSec=infinity
-
-[Install]
-WantedBy=sysinit.target
-EOF
+# Canonical optional-harness units are installed from MANET/systemd. The boot
+# display must not hold startup open while it waits for mesh peers.
 systemctl enable led-boot.service
 systemctl enable wifi-rfkill-unblock.service
-
-cat << EOF > /etc/systemd/system/button-monitor.service
-[Unit]
-Description=Button monitor - launches LED info on press
-After=multi-user.target
-
-[Service]
-Type=simple
-ExecStart=/usr/local/bin/button-monitor.sh
-# on-failure (not always): the script exits 0 when the GPIO chip is absent,
-# and that must stay exited instead of relaunching every second.
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-EOF
 systemctl enable button-monitor.service
 
 cat << EOF > /etc/systemd/system/mesh-clone-identity.service
@@ -1605,18 +1546,14 @@ EOF
 systemctl enable mesh-hosts-update.timer
 
 
-# ============================================================================
 # === HOSTNAME ===
-# ============================================================================
 
 HOST_MAC=$(ip a | grep -A1 $(networkctl | grep -v bat | awk '/ether/ {print $2}' | head -1) \
    | awk '/ether/ {print $2}' | cut -d':' -f 5-6 | sed 's/://g')
 
 set_mesh_hostname "mesh-${HOST_MAC}"
 
-# ============================================================================
 # === Web Status / config ===
-# ============================================================================
 cat << EOF > /etc/systemd/system/mesh-status.service
 [Unit]
 Description=MANET Node Status Web Server
@@ -1638,11 +1575,9 @@ EOF
 
 systemctl enable mesh-status
 
-# ============================================================================
-# === mDNS — manet.local ===
-# ============================================================================
+# === mDNS: manet.local ===
 # Advertise this node as manet.local on the AP/EUD interface only. One record,
-# port 80 — the management UI lives at /manage on the same server now, so
+# port 80: the management UI lives at /manage on the same server now, so
 # there is no second port to advertise.
 # avahi-daemon is kept but restricted to deny mesh interfaces (bat0, wlan0-2).
 # Clients connected to the EUD AP can reach the admin panel at http://manet.local
@@ -1672,11 +1607,9 @@ fi
 systemctl enable avahi-daemon
 systemctl restart avahi-daemon || true
 
-# ============================================================================
 # === UPS HAT (E) BATTERY MONITOR ===
-# ============================================================================
 
-# Enable I2C for battery fuel gauge (Waveshare UPS HAT E — IP2368 MCU at 0x2D)
+# Enable I2C for battery fuel gauge (Waveshare UPS HAT E: IP2368 MCU at 0x2D)
 # Bookworm+: /boot/firmware/config.txt; older images: /boot/config.txt
 for _cfg in /boot/firmware/config.txt /boot/config.txt; do
     [ -f "$_cfg" ] || continue
@@ -1688,13 +1621,11 @@ for _cfg in /boot/firmware/config.txt /boot/config.txt; do
     fi
 done
 
-# ============================================================================
-# === RPi config.txt — SPI, Morse HaLow overlay, CM4 PCIe 32-bit DMA ===
-# ============================================================================
+# === RPi config.txt: SPI, Morse HaLow overlay, CM4 PCIe 32-bit DMA ===
 # The Morse mm610x HaLow chip uses SPI on CM4 and RPi5 (Seeed-style SPI hat):
 # config.txt must load the DT overlay, enable SPI, and drive GPIO 3/7/17 HIGH at
 # boot (Morse power/reset pins). Boards carrying a USB MM81xx card instead need
-# none of that — the card enumerates on USB and the SPI overlay only creates a
+# none of that: the card enumerates on USB and the SPI overlay only creates a
 # phantom spi0.0 that fails probe every boot ("morse_spi_probe failed"), while
 # gpio=3=op,dh fights dtparam=i2c_arm=on for the same pin. CM4 nodes with a PCIe
 # mt7916 WiFi card also need pcie-32bit-dma: the BCM2711 PCIe outbound window
@@ -1702,7 +1633,7 @@ done
 _config_txt_changed=0
 if has_usb_morse_device; then
     _halow_on_spi=0
-    echo " > USB Morse HaLow card present — skipping SPI overlay/GPIO config.txt entries"
+    echo " > USB Morse HaLow card present: skipping SPI overlay/GPIO config.txt entries"
 else
     _halow_on_spi=1
 fi
@@ -1729,7 +1660,7 @@ for _cfg in /boot/firmware/config.txt /boot/config.txt; do
         echo " > Morse GPIO power/reset pins set in $_cfg"
     fi
 
-    # CM4 only: PCIe WiFi cards (mt7916) need 32-bit DMA — the BCM2711 PCIe
+    # CM4 only: PCIe WiFi cards (mt7916) need 32-bit DMA: the BCM2711 PCIe
     # outbound window is above 4GB which the card cannot address otherwise.
     if grep -q 'Compute Module 4' /proc/device-tree/model 2>/dev/null; then
         if ! grep -q 'pcie-32bit-dma' "$_cfg"; then
@@ -1741,11 +1672,11 @@ for _cfg in /boot/firmware/config.txt /boot/config.txt; do
 done
 
 if [ "$_config_txt_changed" -eq 1 ]; then
-    echo " > config.txt modified — a reboot is needed to apply overlay changes"
+    echo " > config.txt modified: a reboot is needed to apply overlay changes"
     echo " > On a standard provision flow this should have been written by provision-mesh.sh"
 fi
 
-# RPi5 uses i2c_designware — i2c-dev module must load at boot for /dev/i2c-1
+# RPi5 uses i2c_designware: i2c-dev module must load at boot for /dev/i2c-1
 if ! grep -q '^i2c-dev$' /etc/modules 2>/dev/null; then
     echo 'i2c-dev' >> /etc/modules
     echo " > i2c-dev added to /etc/modules"
@@ -1761,11 +1692,9 @@ fi
 
 systemctl enable battery-reader.service
 
-# ============================================================================
-# === GPS — u-blox USB dongle + chrony SHM NTP ===
-# ============================================================================
+# === GPS: u-blox USB dongle + chrony SHM NTP ===
 # Supports optional u-blox 7 (USB VID 1546:01a7) GPS receivers.
-# Nodes without a dongle still run gps-reader.service safely — it writes
+# Nodes without a dongle still run gps-reader.service safely: it writes
 # has_fix=false when gpsd is unreachable or has no fix.
 #
 # mesh-time-sync owns chrony. GPS and directly connected internet nodes serve
@@ -1779,7 +1708,7 @@ else
     provision_fail "no network: cannot install gpsd gpsd-clients"
 fi
 
-# /etc/default/gpsd — hotplug via gpsd's own udev rules (USBAUTO=true).
+# /etc/default/gpsd: hotplug via gpsd's own udev rules (USBAUTO=true).
 # DEVICES="" means gpsd starts without a fixed device path and picks up
 # any GPS device added after boot through its udev integration.
 cat > /etc/default/gpsd <<'GPSD_CONF'
@@ -1797,9 +1726,7 @@ systemctl restart gps-reader.service 2>/dev/null || true
 systemctl enable one-shot-time-sync.service 2>/dev/null || true
 systemctl --no-block restart one-shot-time-sync.service 2>/dev/null || true
 
-# ============================================================================
 # === FIRST RUN vs RE-RUN ===
-# ============================================================================
 
 # Determine if this script is being run by the first-boot systemd unit. When
 # interface renames are staged, keep the unit enabled until the post-reboot run
@@ -1865,7 +1792,7 @@ if grep -q 'run-startup-triggers' /etc/default/networkd-dispatcher 2>/dev/null; 
     cat <<-'EOF' > /etc/default/networkd-dispatcher
 	# Specify command line options here. This config file is used
 	# by the included systemd service file.
-	# MANET: --run-startup-triggers removed — it blocks startup on the USB Morse
+	# MANET: --run-startup-triggers removed: it blocks startup on the USB Morse
 	# HaLow card (iw/networkctl with no timeout while the firmware inits at boot).
 	networkd_dispatcher_args=""
 	EOF
@@ -1910,10 +1837,8 @@ if [ -f /var/lib/radio-setup-reboot-pending ]; then
     reboot
 fi
 
-# ============================================================================
 # === DID THIS ACTUALLY WORK? ===
-# ============================================================================
-# Everything above continues past failures on purpose — a node with no GPS
+# Everything above continues past failures on purpose: a node with no GPS
 # tooling still meshes. What is not acceptable is calling such a node finished.
 # If anything was recorded as failed, leave the first-boot unit enabled so the
 # next boot retries, and leave the node visibly unprovisioned.
@@ -1924,7 +1849,7 @@ if [ "$PROVISION_FAILURES" -gt 0 ]; then
     provision_state incomplete "$(date +%s)"
     echo ""
     echo "=================================================="
-    echo " PROVISIONING INCOMPLETE — $PROVISION_FAILURES step(s) failed"
+    echo " PROVISIONING INCOMPLETE: $PROVISION_FAILURES step(s) failed"
     sed 's/^/   - /' "$PROVISION_FAIL_FILE"
     echo ""
     echo " This node has NOT been marked provisioned."
@@ -1947,17 +1872,15 @@ if [[ "$FIRST_BOOT_UNIT_ENABLED" -eq 1 ]]; then
     touch /var/lib/radio-setup.done
 fi
 
-# ============================================================================
 # === OPERATOR SETUP SCRIPTS ===
-# ============================================================================
-# Last thing, and only on a run that got this far — past the failure gate above
+# Last thing, and only on a run that got this far: past the failure gate above
 # and past the rename-reboot branch, so the node is a working mesh node before
 # anybody else's code touches it.
 #
 # --now starts it immediately instead of waiting for a reboot that a clean run
 # never performs. --no-block means operator code cannot hold radio-setup open:
 # systemd owns the run from here, and the unit's own conditions make it
-# one-time (see manet-user-scripts.service). Safe to reach on a re-run — the
+# one-time (see manet-user-scripts.service). Safe to reach on a re-run: the
 # completion marker makes systemd skip the unit.
 #
 # Failures in there are advisory by design and are reported on the login

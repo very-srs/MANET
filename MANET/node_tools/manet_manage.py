@@ -3,7 +3,7 @@
 MANET Management UI
 -------------------
 Not a server. This is the route set behind /manage on mesh-status.py's port
-80, mixed into its request handler — there is no second listening port, and
+80, mixed into its request handler: there is no second listening port, and
 nothing here is reachable without the admin password.
 
 Peers are never queried directly: node state comes from the Alfred-built
@@ -103,9 +103,9 @@ _measure_status = {
     'current': None, 'last_result': None,
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
+
 # Helpers
-# ─────────────────────────────────────────────────────────────────────────────
+
 def load_kv_file(path):
     conf = {}
     try:
@@ -224,10 +224,8 @@ def apply_usb_wifi_uplink(ssid, password, enabled=True):
 def apply_usb_wifi_uplink_all(ssid, password, enabled=True):
     """Push uplink credentials to every node via Alfred.
 
-    This used to POST to each peer's port 8081 — the one place in the system
-    that talked to another node over HTTP. It is staged like any other
-    mesh-wide radio change now, so every node applies the same credentials at
-    the same activate_at.
+    Stage credentials as a mesh-wide radio change. Each node applies them at
+    the agreed activate_at time.
     """
     result = coordinate_radio_change({'uplink_wifi': {
         'ssid': ssid, 'password': password, 'enabled': bool(enabled),
@@ -463,8 +461,7 @@ def fmt_uptime(seconds):
 def get_session_hop_count(src_ip, dst_ip):
     """Hops from this node to dst, straight out of batman's own table.
 
-    Measurements always originate here, so the local hop count is the right
-    one — and asking a peer for it over HTTP is exactly what we are removing.
+    Measurements originate here, so use the local routing table.
     """
     if not dst_ip:
         return None, 'missing'
@@ -752,7 +749,7 @@ def coordinate_radio_change(actions, node_ip='all'):
     """Stage a radio change over Alfred and apply it once everyone has ACKed.
 
     This is the only way a change reaches another node. Targeting one node
-    still goes through Alfred — the difference is the `targets` list, not the
+    still goes through Alfred: the difference is the `targets` list, not the
     transport, so there is no second code path that talks to peers directly.
     """
     targets = 'all'
@@ -851,9 +848,9 @@ def get_iw_info(iface):
 
     return info
 
-# ─────────────────────────────────────────────────────────────────────────────
+
 # Topology
-# ─────────────────────────────────────────────────────────────────────────────
+
 def build_topology():
     nodes_raw = parse_registry()
     my_host   = get_my_hostname()
@@ -919,9 +916,9 @@ def build_topology():
         'timestamp':  int(time.time()),
     }
 
-# ─────────────────────────────────────────────────────────────────────────────
+
 # Measurements
-# ─────────────────────────────────────────────────────────────────────────────
+
 def ensure_sessions_dir():
     os.makedirs(SESSIONS_DIR, exist_ok=True)
 
@@ -1121,7 +1118,7 @@ def run_local_iperf3(server_ip, test_type, duration, bitrate,
 
 
 def run_measurement_session(label, pairs, tests, duration, udp_bitrate):
-    """Run all test combinations. Blocking — call in thread."""
+    """Run all test combinations. Blocking: call in thread."""
     global _measure_status
     done = 0
     try:
@@ -1183,7 +1180,7 @@ def run_measurement_session(label, pairs, tests, duration, udp_bitrate):
                         result_record['error'] = 'ping failed'
                 else:
                     # iperf3 runs as a daemon on every node, so there is no
-                    # server to start or stop remotely — just point a local
+                    # server to start or stop remotely: just point a local
                     # client at the peer that is already listening.
                     try:
                         ok, payload, err = run_local_iperf3(
@@ -1213,7 +1210,7 @@ def run_measurement_session(label, pairs, tests, duration, udp_bitrate):
 
         with _measure_lock:
             _measure_status['running']  = False
-            _measure_status['progress'] = f'Done — {done} tests saved'
+            _measure_status['progress'] = f'Done: {done} tests saved'
             _measure_status['error']    = ''
             _measure_status['done']     = done
             _measure_status['total']    = total
@@ -1227,9 +1224,9 @@ def run_measurement_session(label, pairs, tests, duration, udp_bitrate):
             _measure_status['done']     = done
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+
 # HTML
-# ─────────────────────────────────────────────────────────────────────────────
+
 CSS = """
 :root {
   --bg:      #ebeae8;
@@ -1285,10 +1282,10 @@ body{
 :root[data-theme="dark"] #hdr{background:rgba(18,17,24,.92)}
 .fer-lockup{display:flex;align-items:center;justify-content:flex-start;height:58px;padding-right:12px;border-right:1px solid var(--border);color:var(--fer-black);overflow:hidden;flex:0 0 auto}
 /* the badge is near-square, so height drives the size and width follows the
-   aspect ratio — a fixed width would letterbox it and leave dead space */
+   aspect ratio: a fixed width would letterbox it and leave dead space */
 .fer-logo-img{display:block;width:auto;height:44px;max-width:100%;object-fit:contain;object-position:left center;filter:none;transition:height .18s ease}
 :root[data-theme="dark"] .fer-lockup{color:#ffffff}
-/* no brightness(0) invert(1) here — that flattens the badge to a solid silhouette */
+/* no brightness(0) invert(1) here: that flattens the badge to a solid silhouette */
 #hdr-logo{color:var(--text);font-size:17px;letter-spacing:0;font-weight:900;display:flex;align-items:center;min-height:46px;line-height:1}
 #hdr-logo span{color:var(--accent2)}
 #hdr-node{font-size:12px;color:var(--muted);border-left:1px solid var(--border);padding-left:16px;transition:opacity .18s ease,max-width .18s ease,padding .18s ease,border .18s ease}
@@ -1547,7 +1544,7 @@ const MANAGE_BASE = (() => {
 //
 // Any new fetch to a route in this file has to go through U(). Without it the
 // request lands on mesh-status.py's root router, which answers 404 with the
-// text "Not found" — and the caller dies in JSON.parse rather than saying so.
+// text "Not found", causing JSON.parse to fail.
 function U(path) { return MANAGE_BASE + path; }
 
 const VALID_TABS = ['topology','radio','measure','sessions','uplink','voice','config'];
@@ -2126,7 +2123,7 @@ async function applyHalow() {
   const bw = document.getElementById('halow-bw').value;
   const dbm = document.getElementById('txpwr-all-wlan2').value;
   setButtonBusy('btn-apply-halow', true, 'APPLYING...', 'APPLY TO ALL NODES');
-  showOverlay(`Applying HaLow ch${ch} / ${bw} / ${dbm} dBm — verifying all nodes...`, 'info');
+  showOverlay(`Applying HaLow ch${ch} / ${bw} / ${dbm} dBm: verifying all nodes...`, 'info');
   try {
     const r = await fetch(U('/api/halow/channel'), {
       method: 'POST',
@@ -2137,7 +2134,7 @@ async function applyHalow() {
     if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
     if (!d.ok) {
       const msg = d.rolled_back
-        ? `ROLLED BACK — ${d.error}` + (d.unreachable?.length ? ` · not in mesh: ${d.unreachable.join(', ')}` : '')
+        ? `ROLLED BACK: ${d.error}` + (d.unreachable?.length ? ` · not in mesh: ${d.unreachable.join(', ')}` : '')
         : d.error;
       showMsg(msg, 'err');
       return;
@@ -2349,9 +2346,9 @@ async function pollStatus() {
       showMsg('Error: ' + d.error, 'err');
     } else {
       setRunButton(false);
-      setProgress(d.progress || 'Measurement complete — results saved.', 'done');
+      setProgress(d.progress || 'Measurement complete: results saved.', 'done');
       renderMeasureStats(d);
-      showMsg('Measurement complete — results saved.', 'ok');
+      showMsg('Measurement complete: results saved.', 'ok');
       loadSessions();
     }
   } catch (e) {
@@ -2428,9 +2425,9 @@ document.addEventListener('visibilitychange', () => {
 });
 """
 
-# ─────────────────────────────────────────────────────────────────────────────
+
 # NODE CONFIG tab
-# ─────────────────────────────────────────────────────────────────────────────
+
 # Was the standalone /admin page on port 80 with no authentication at all,
 # handing out the mesh SAE key in a text field. Same staging/ACK/apply flow,
 # now a tab in here behind the admin password.
@@ -2561,9 +2558,8 @@ VOICE_TAB_HTML = r"""
       <div class="voice-tg-grid" id="voice-tg-grid"></div>
       <div class="voice-tg-msg" id="voice-tg-msg"></div>
     </div>
-    <div class="voice-note">Talk group is this radio only — it is not pushed to
-      the mesh. Every group shares one multicast address and differs by port, so
-      changing it never causes an IGMP leave/join.</div>
+    <div class="voice-note">Select the talk group for this radio. Other radios
+      keep their current group.</div>
   </div>
 
   <div class="voice-card">
@@ -2571,17 +2567,16 @@ VOICE_TAB_HTML = r"""
     <div class="voice-card-body">
       <div class="voice-codec-pick">
         <button class="voice-codec-opt" id="voice-codec-lyra" onclick="voiceSetCodec('lyra')">
-          <b>Lyra</b><span>6 kbps neural — default</span></button>
+          <b>Lyra</b><span>6 kbps neural: default</span></button>
         <button class="voice-codec-opt" id="voice-codec-opus" onclick="voiceSetCodec('opus')">
           <b>Opus</b><span>32 kbps, stock elements</span></button>
       </div>
       <div class="voice-tg-msg" id="voice-codec-msg"></div>
     </div>
-    <div class="voice-note">Codec is mesh-wide, not per radio. The two do not
-      interoperate — a node left on the other codec hears silence, not degraded
-      audio — so this is staged over Alfred like a channel or key change: every
-      node ACKs, then all switch together. If any node fails to ACK, nothing
-      moves. Expect a short break in audio as each node restarts its pipeline.</div>
+    <div class="voice-note">All radios must use the same codec to hear each
+      other. The change waits for every node to acknowledge, then switches them
+      together. If any node fails to acknowledge, the codec stays unchanged.
+      Audio pauses briefly during the switch.</div>
   </div>
 
   <div class="voice-card">
@@ -2594,7 +2589,7 @@ VOICE_TAB_HTML = r"""
       <div class="voice-row"><span class="k">Duplicates</span><span class="v" id="voice-dup">--</span></div>
     </div>
     <div class="voice-note">Lost counts frames the jitter buffer never saw.
-      Duplicates are expected when unicast redundancy is on — each is a
+      Duplicates are expected when unicast redundancy is on: each is a
       multicast copy that also arrived by unicast.</div>
   </div>
 
@@ -2698,9 +2693,8 @@ function voiceCodecMsg(text, isErr) {
   m.className = 'voice-tg-msg' + (isErr ? ' err' : '');
 }
 
-// Mesh-wide and disruptive, so unlike the talk group this asks first. The
-// round trip is long — every node has to ACK before anything activates — so
-// the button stays disabled for the duration rather than looking idle.
+// Confirm the mesh-wide codec change and disable the button while waiting
+// for every node to acknowledge it.
 async function voiceSetCodec(codec) {
   if (voiceCodecBusy || codec === voiceCodec) return;
   const other = codec === 'lyra' ? 'Opus' : 'Lyra';
@@ -2710,7 +2704,7 @@ async function voiceSetCodec(codec) {
                'seconds. If any node does not ACK, the change is cancelled.')) return;
   voiceCodecBusy = true;
   voiceCodecPaint(voiceCodec);
-  voiceCodecMsg('Staging across the mesh — waiting for every node to ACK…');
+  voiceCodecMsg('Staging across the mesh: waiting for every node to ACK…');
   try {
     const r = await fetch(U('/api/voice/codec'), {
       method: 'POST',
@@ -2724,7 +2718,7 @@ async function voiceSetCodec(codec) {
       // package activates on a common clock ~20 s later, so this is staged,
       // not done. The poll above repaints from the daemon when it lands.
       voiceCodecMsg('Staged on ' + ((j.acked || []).length || 'all') +
-                    ' node(s) — all switching to ' +
+                    ' node(s): all switching to ' +
                     (j.codec === 'lyra' ? 'Lyra' : 'Opus') + ' together in ~20 s');
     } else {
       voiceCodecMsg(j.error || 'Change failed', true);
@@ -2761,7 +2755,7 @@ async function voiceSetChannel(ch) {
     const j = await r.json();
     if (j.ok) {
       voiceTgMsg(j.reloaded ? ('Talk group ' + j.channel)
-                            : ('Talk group ' + j.channel + ' — saved; applies when voice starts'));
+                            : ('Talk group ' + j.channel + ': saved; applies when voice starts'));
     } else {
       voiceTgMsg(j.error || 'Change failed', true);
       voiceChannel = null;            // force the next poll to resync
@@ -2826,16 +2820,15 @@ async function refreshVoice() {
   }
   voicePaintHealth(d, running);
   vTxt('voice-iface', d.interface);
-  // Lyra adapts packing at runtime, so show frames/packet alongside the rate —
-  // it is the number that actually moves, and the one that explains the
-  // on-air cost. Opus keeps a fixed frame size and has none to show.
+  // Show Lyra's adaptive frames/packet alongside bitrate to explain airtime
+  // usage. Opus keeps a fixed frame size.
   vTxt('voice-codec', d.bitrate
         ? ((d.codec === 'lyra' ? 'Lyra ' : 'Opus ')
            + (d.bitrate / 1000).toFixed(d.codec === 'lyra' ? 1 : 0) + ' kbps / '
            + (d.frame_ms || 20) + ' ms'
            + (d.frames_per_packet ? ' (' + d.frames_per_packet + ' fr/pkt)' : ''))
         : '--');
-  // The picker shows the configured codec — that is the mesh-wide setting the
+  // The picker shows the configured codec: that is the mesh-wide setting the
   // buttons actually change. d.codec is what the daemon *built* with, and the
   // two differ when a missing lyra plugin or model dir forced a fallback. That
   // gap is worth shouting about rather than hiding: on a Lyra mesh a node that
@@ -2849,7 +2842,7 @@ async function refreshVoice() {
     if (d.codec_fallback) {
       voiceCodecMsg('Configured for ' + (cfgCodec === 'lyra' ? 'Lyra' : 'Opus') +
                     ' but running ' + (d.codec === 'lyra' ? 'Lyra' : 'Opus') +
-                    ' — plugin or model weights missing. This node cannot hear ' +
+                    ': plugin or model weights missing. This node cannot hear ' +
                     'the rest of the mesh.', true);
     } else if (document.getElementById('voice-codec-msg') &&
                document.getElementById('voice-codec-msg').classList.contains('err')) {
@@ -2945,7 +2938,7 @@ def set_voice_channel(channel):
     Local only, and deliberately so: a talk group is a per-radio setting like
     the channel knob on a handheld, not a fleet-wide one. This is why it does
     not go through coordinate_radio_change() the way the HaLow and Wi-Fi
-    channel changes do — every operator picks their own group.
+    channel changes do: every operator picks their own group.
 
     mesh.conf holds mesh_key and admin_password, so the rewrite is careful:
     only the one key is touched, every other line is passed through byte for
@@ -3000,7 +2993,7 @@ def set_voice_channel(channel):
         return {'ok': False, 'error': 'Cannot write %s: %s' % (MESH_CONF_FILE, e)}
 
     # reload, not restart: mesh-voice retunes in place on SIGHUP, which keeps
-    # the audio path up. Not fatal if it fails — the config is already correct,
+    # the audio path up. Not fatal if it fails: the config is already correct,
     # so the change takes effect at the next start either way.
     reloaded = False
     try:
@@ -3044,13 +3037,13 @@ def voice_status():
     """Voice state for the VOICE tab.
 
     Everything comes from the state file mesh-voice.py publishes plus the unit
-    state — this node never asks a peer anything, and the daemon is the only
+    state: this node never asks a peer anything, and the daemon is the only
     thing that touches the audio path.
     """
     out = {'service': 'stopped', 'enabled': False, 'state_age': None}
 
     # Talk group comes from mesh.conf first so the picker still shows the
-    # configured group when the daemon is not running — with voice=n there is
+    # configured group when the daemon is not running: with voice=n there is
     # no state file at all, and a picker stuck on "--" would look broken.
     # A running daemon overwrites this below with what it actually tuned.
     conf = load_kv_file(MESH_CONF_FILE)
@@ -3138,7 +3131,7 @@ body { overflow-y: auto; }
 :root[data-theme="dark"] .cfg-btn-cancel { color:#fca5a5; border-color:#7f1d1d; }
 :root[data-theme="dark"] .cfg-btn-cancel:hover:not(:disabled) { background:#b42318; color:#ffffff; border-color:#b42318; }
 .cfg-btn:disabled { opacity: 0.35; cursor: not-allowed; }
-/* Status column — node ACK table */
+/* Status column: node ACK table */
 .ack-table { width: 100%; border-collapse: collapse; }
 .ack-table th { font-size: 9px; color: var(--muted); text-align: left; padding: 4px 6px;
                 letter-spacing: .8px; text-transform: uppercase; border-bottom: 1px solid var(--border); }
@@ -3300,7 +3293,7 @@ CONFIG_TAB_HTML = r"""
         All nodes will briefly disconnect while applying. Ensure 100% ACK before applying.
         <label style="display:flex;align-items:center;gap:6px;margin-top:8px;color:var(--muted);cursor:pointer">
           <input type="checkbox" id="f-no-rollback" style="width:14px;height:14px;margin:0">
-          Skip the safety net — keep the change even if the mesh does not come back
+          Skip the safety net: keep the change even if the mesh does not come back
         </label>
       </div>
 
@@ -3320,7 +3313,7 @@ CONFIG_TAB_HTML = r"""
       <div class="modal-title">⚠ Force Apply</div>
       <div class="modal-body" id="force-modal-body">
         Not all nodes have acknowledged the pending config.
-        Forcing apply will push changes to this node only — unreachable nodes
+        Forcing apply will push changes to this node only: unreachable nodes
         will remain on the old config and may need manual intervention.
       </div>
       <div class="modal-actions">
@@ -3340,7 +3333,7 @@ let STATUS = null;
 let pollTimer = null;
 
 // ── Init ────────────────────────────────────────────────────────────────────
-// Polls only while the NODE CONFIG tab is on screen — this is a 5 s poll and
+// Polls only while the NODE CONFIG tab is on screen: this is a 5 s poll and
 // there is no reason to run it while the operator is looking at the topology.
 function startConfigPolling() {
   if (pollTimer) return;
@@ -3534,7 +3527,7 @@ async function stageChanges() {
         await refreshStatus();
         return;
       }
-      toast('Changes staged — waiting for nodes to ACK', 'ok');
+      toast('Changes staged: waiting for nodes to ACK', 'ok');
       cfgShowMsg('Staged. Waiting for ' + (STATUS && STATUS.total_nodes || '?') + ' nodes to ACK.', 'ok');
       await refreshStatus();
     } else {
@@ -3558,9 +3551,9 @@ async function applyChanges(force) {
     });
     const res = await r.json();
     if (r.ok && res.ok) {
-      toast('Activate signal sent — applying in 60s', 'ok');
+      toast('Activate signal sent: applying in 60s', 'ok');
       cfgShowMsg(res.no_rollback
-        ? 'All nodes will apply in ~60s. Safety net skipped — this change is permanent.'
+        ? 'All nodes will apply in ~60s. Safety net skipped: this change is permanent.'
         : 'All nodes will apply in ~60s. Dangerous changes roll back automatically if the mesh does not re-form.',
         'ok');
       await refreshStatus();
@@ -3889,9 +3882,9 @@ def render_dashboard():
 {VOICE_TAB_JS}</script>
 </body></html>"""
 
-# ─────────────────────────────────────────────────────────────────────────────
+
 # Request Handler
-# ─────────────────────────────────────────────────────────────────────────────
+
 ASSET_CONTENT_TYPES = {
     '.svg':  'image/svg+xml',
     '.png':  'image/png',
@@ -3914,7 +3907,7 @@ def logo_asset_file(url_path):
 class ManageRoutes:
     """Mixed into mesh-status.py's handler; relies on its send_json/send_html.
 
-    Route methods are prefixed so they never shadow the real do_* dispatch —
+    Route methods are prefixed so they never shadow the real do_* dispatch.
     mesh-status calls them only after the password cookie checks out.
     """
     def log_message(self, fmt, *args):
@@ -4015,7 +4008,7 @@ class ManageRoutes:
                 self.send_json({'ok': False, 'error': str(e)})
 
         elif path == '/api/voice/channel':
-            # Local only — a talk group is this radio's setting, not the mesh's.
+            # Local only: a talk group is this radio's setting, not the mesh's.
             try:
                 req = json.loads(body)
                 self.send_json(set_voice_channel(req.get('channel')))

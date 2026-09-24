@@ -21,8 +21,8 @@ import time
 # dot11ah/s1g_channels_rules.c ({eu,us}_s1g_channels).  Keys are the S1G
 # channel number the supplicant config wants; values the centre frequency in
 # kHz.  A bandwidth appears for a region only where the driver defines a
-# channel of that width — which is why EU stops at 2 MHz: the whole 863-868
-# allocation is 5 MHz wide, so there is nowhere to put a 4 or 8 MHz channel.
+# channel of that width. EU stops at 2 MHz because its 863-868 MHz allocation
+# has no suitable channel placement for 4 or 8 MHz.
 #
 # Only EU and US are listed because radio-setup.sh generates exactly two
 # supplicant templates: US, and everything else on the EU plan
@@ -78,7 +78,7 @@ USB_WIFI_UPLINK_SCRIPT = '/usr/local/bin/usb-wifi-uplink.sh'
 
 
 def halow_region():
-    """'US' or 'EU' — mirrors radio-setup.sh:1132, which is the only place a
+    """'US' or 'EU': mirrors radio-setup.sh:1132, which is the only place a
     HaLow supplicant config is generated: US gets its own template, every
     other region gets the EU one."""
     domain = ''
@@ -474,9 +474,9 @@ def set_iface_txpower_verified(iface, dbm, retries=6, delay=0.25):
     )
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+
 # Apply operations
-# ─────────────────────────────────────────────────────────────────────────────
+
 # Each returns a result dict and raises only on genuine failure. They act on
 # this node alone; mesh-wide application is Alfred's job, not theirs.
 

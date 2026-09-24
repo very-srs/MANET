@@ -890,14 +890,61 @@ with no battery hardware the percentage is simply not published.
 **button-monitor.sh**
 
 Blocks on a GPIO interrupt and runs `led-info.sh` on each press. Near-zero CPU
-when idle.
+when idle. A GPIO monitor error ends the process instead of spinning.
 
 **led-boot.sh** / **led-info.sh**
 
-Boot-progress states and an on-demand blink sequence giving the neighbor count,
-both for an external LED harness driven over GPIO. These are separate from the
-onboard LEDs above. Both need libgpiod v2, and the pin wiring is not finalized,
-so on current hardware they are inactive.
+Boot-progress states and an on-demand blink sequence for an external GPIO LED
+harness, separate from the onboard provisioning LEDs above. The button display
+counts **directly connected neighbor nodes**, using a bounded BATMAN
+`neighbors_json` query. HaLow, Wi-Fi and wired mesh links all count; registry
+radio aliases merge multiple links to the same node into one blink. Multihop
+nodes are excluded, keeping this a quick local connectivity check. ACS continues
+to use its separate whole-mesh originator counter.
+
+| Button display | Meaning |
+|---|---|
+| N green blinks | N directly connected neighbor nodes |
+| Solid green for three seconds | Connected; identity metadata is still needed for an exact count |
+| Solid red for three seconds | Confirmed zero peers |
+| Solid amber for three seconds | Peer count unavailable; retry with another press |
+
+The boot display blinks red until node-manager is active and bat0 exists, then
+green while awaiting peers. An unavailable peer query changes it to amber
+blinking until a successful query. At least one confirmed direct neighbor produces ten
+seconds of solid green, then the process exits. It never blocks boot completion.
+Button displays take exclusive ownership; boot blinks yield between half-cycles.
+A button press waits up to twelve seconds for ownership, including an ongoing
+boot success indication. GPIO failures stop a display and termination releases
+its holder process.
+
+The live neighbor table establishes connectivity; the registry only joins radio
+addresses to node identities. Old registry entries cannot create neighbors. If
+multiple radio addresses cannot yet be resolved, solid green confirms the
+connection without inventing a count. Zero or one neighbor address needs no
+registry metadata. Boot can complete its connected indication while identities
+are still arriving. No extra network announcement or polling stream is added.
+
+These scripts require libgpiod v2 and are **disabled unless explicitly configured**:
+the presence of a GPIO controller does not establish that a harness is wired.
+After confirming the wiring, create `/etc/default/manet-led` with shell assignments:
+
+```sh
+LED_ENABLED=1
+GPIO_CHIP=gpiochip0
+LED_R=20
+LED_G=21
+LED_B=22
+BTN_LINE=23
+```
+
+The pins above are provisional active-high LED / active-low button assignments,
+not a verified CM4 wiring diagram. Restart `button-monitor.service` and
+`led-boot.service` after configuring them. The harness must provide an inactive
+electrical bias after GPIO release; libgpiod does not guarantee the output state
+after its holder exits. Pin assignments, polarity, debounce and off-state remain
+bench checks pending hardware. Configuration is shared by all three scripts
+through `manet-led-common.sh`.
 
 ---
 
@@ -998,7 +1045,7 @@ node is marked incomplete, `radio-setup-run-once.service` is left enabled so
 the next boot retries, and `manet-provision-status.sh` reports it at login.
 
 Network reachability is checked before each apt phase, so a node with no
-network records that once, plainly, instead of a wall of resolver errors.
+network records that once before attempting package downloads.
 
 **manet-provision-status.sh**
 

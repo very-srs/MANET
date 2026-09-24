@@ -1,9 +1,7 @@
 #!/usr/bin/env bash
-# ==============================================================================
 # Mesh Registry Builder
-# ==============================================================================
 # Builds /var/run/mesh_node_registry from Alfred. This is the only place peer
-# state comes from — nothing in this system queries another node directly.
+# state comes from: nothing in this system queries another node directly.
 #
 # Peer data arrives as two Alfred types, joined on the record key:
 #
@@ -16,7 +14,6 @@
 # Alfred stamps each record with the publishing node's MAC (it runs `-i br0`).
 # That key is the join column AND the node's primary MAC, which is why the
 # identity payload does not carry it.
-# ==============================================================================
 
 # --- Configuration ---
 ALFRED_IDENTITY_TYPE=67
@@ -94,7 +91,7 @@ for NODE_MAC in "${!TELEMETRY_B64[@]}"; do
         continue
     fi
 
-    # Parse assignments without eval — this is network data.
+    # Parse assignments without eval: this is network data.
     while IFS= read -r _line; do
         _varname="${_line%%=*}"
         _val="${_line#*=}"

@@ -22,7 +22,7 @@ if [ -z "$MY_MAC" ]; then
     exit 1
 fi
 
-# A tombstone is pure telemetry — it says this node is going away, and peers
+# A tombstone is pure telemetry: it says this node is going away, and peers
 # already hold its identity record. Nothing here needs to repeat the hostname
 # or MACs, and Alfred stamps the record with our MAC so the registry still
 # knows which node it refers to.

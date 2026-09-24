@@ -1,10 +1,7 @@
 #!/usr/bin/env bash
-# ==============================================================================
 # Mesh Hosts Updater
-# ==============================================================================
 # Reads /var/run/mesh_node_registry and populates /etc/hosts with
 # hostname -> IP mappings for all mesh nodes.
-# ==============================================================================
 
 REGISTRY_FILE="/var/run/mesh_node_registry"
 HOSTS_FILE="/etc/hosts"

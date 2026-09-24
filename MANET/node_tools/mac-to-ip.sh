@@ -1,10 +1,7 @@
 #!/bin/bash
-# ==============================================================================
 # MAC to IP Lookup
-# ==============================================================================
 # Queries the mesh registry to find the IPv4 address for a given MAC address
 # Usage: mac-to-ip.sh <MAC_ADDRESS>
-# ==============================================================================
 
 REGISTRY_FILE="/var/run/mesh_node_registry"
 

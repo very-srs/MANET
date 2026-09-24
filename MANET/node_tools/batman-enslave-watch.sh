@@ -126,7 +126,7 @@ while true; do
             continue
         fi
 
-        # Interface should be in bat0 but isn't — re-enslave
+        # Interface should be in bat0 but isn't: re-enslave
         log "WARNING: $IFACE not in bat0, re-enslaving..."
         ip link set "$IFACE" up 2>/dev/null || true
         ip link set "$IFACE" mtu 1532 2>/dev/null || true

@@ -75,7 +75,7 @@ apt install -y ipcalc-ng nmap lshw tcpdump net-tools nftables wireless-tools ipe
 		python3-protobuf unzip chrony build-essential systemd-resolved dhcping mpg123\
 		libnl-3-dev libnl-genl-3-dev libnl-route-3-dev ebtables libdbus-1-dev gpsd pulseaudio-utils
 
-# Unpack the tar file — contains kernel, modules, firmware, and mesh tools
+# Unpack the tar file: contains kernel, modules, firmware, and mesh tools
 tar -zxf /root/morse-pi-install.tar.gz -C /
 
 # Link this to where scripts expect it, updated from the old perl version
@@ -551,12 +551,12 @@ echo "ipv4_network=__LAN_CIDR_BLOCK__"  >> /etc/mesh.conf
 echo "mumble=__INSTALL_MUMBLE__" >> /etc/mesh.conf
 echo "mtx=__INSTALL_MEDIAMTX__" >> /etc/mesh.conf
 # This block rewrites the mesh.conf the flasher already wrote, so the voice
-# keys have to be repeated here or they are lost — same trap as admin_password
+# keys have to be repeated here or they are lost: same trap as admin_password
 # below.
 echo "voice=__VOICE_ENABLED__" >> /etc/mesh.conf
 # Talk group 1 for every node. This is a per-radio setting changed from the
-# web UI (and later the enclosure rotary switch), not a build-time one —
-# baking it into the image would mean reflashing to change channel.
+# web UI (and later the enclosure rotary switch), not a build-time one.
+# Baking it into the image would mean reflashing to change channel.
 echo "voice_channel=1" >> /etc/mesh.conf
 # Codec, written explicitly rather than left to the daemon's default. This is
 # a mesh-wide setting -- the two codecs cannot hear each other -- so every node
