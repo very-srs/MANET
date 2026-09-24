@@ -59,11 +59,8 @@ rm -f /etc/dnsmasq.d/mesh-wired-eud.conf 2>/dev/null
 if [ -f "$GATEWAY_STATE_FILE" ]; then
     log "Was gateway - reverting gateway-specific settings..."
 
-    # Stop NTP server
-    if systemctl is-active --quiet chrony.service; then
-        systemctl stop chrony.service
-        cp /etc/chrony/chrony-default.conf /etc/chrony/chrony.conf
-    fi
+    # The time service observes gateway loss and removes internet sources.
+    # Do not stop chrony here: a local GPS may still be disciplining it.
 
     # Revert batman-adv mode
     batctl gw_mode client 2>/dev/null

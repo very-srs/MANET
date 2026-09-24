@@ -21,9 +21,66 @@ with numeric owner/group `0/0`. Keep the shipped binaries marked as binary in
 `.gitattributes` (`morse_cli`, `chronyc`, `alfred`, `batctl`, `wpa_cli_s1g`,
 `wpa_supplicant_s1g`), or line-ending normalization corrupts them.
 
+### Tools update failure handling
+
+`node-update.sh` executes `node-update.py`. Loading the Python program before
+installation allows it to replace its own installed sources safely. A nonblocking
+`flock` on `/run/manet-update.lock` covers the entire update. Each attempt has a
+private directory under `/var/lib/manet-update`, removed on ordinary success or
+failure. Killed processes may leave a staging directory for manual cleanup.
+
+Downloads use HTTPS, bounded curl retries/timeouts, and limits of 1 KiB for
+version/checksum files and 64 MiB for tools archives. Builders emit a single-line
+SHA-256 sidecar naming the exact archive basename. The updater requires a hash
+match, reads gzip through its footer (with a 512 MiB expanded limit), and rejects
+unsafe paths, duplicate names, hardlinks/devices/sparse files, non-root ownership,
+special mode bits, writable directories, and symlink traversal. Relative symlinks
+must target regular files included in the archive. Existing directory modes are
+preserved, and installation cannot traverse existing directory symlinks. Tools
+archives cannot carry kernel modules/firmware, networkd interface definitions,
+`mesh.conf`, or the generated `node-manager.sh`.
+
+Both embedded version files must match each other and the advertised release.
+Required updater, manager, status, dependency, agreement, time-service and MOTD
+files must be present, including the node-manager service drop-ins.
+The updater estimates staging plus installation space per filesystem, leaving
+16 MiB headroom. It stages regular files, resolves the admin dependency, checks
+installation space again, then creates a durable `in-progress` marker before
+replacing payload files. Files are copied to temporary siblings, fsynced and
+renamed; the version files are withheld until the end. Required commands have
+checked exit status and timeouts; timeout/interruption terminates their process
+groups so child installers cannot continue after the updater exits.
+
+The selected static/ACS manager is regenerated, MOTD links refreshed, and systemd
+reloaded. Both mesh-status and node-manager are restarted on every installation
+attempt, including retries. They and the agreement/time services are checked
+active; the latter follow node-manager through their drop-ins and `PartOf=`.
+Only then are the version files
+replaced and the retry marker removed. This fixes false success after extraction,
+copy, dependency or service failure. It does not provide whole-update rollback
+or guarantee that radio functionality is healthy just because services are active.
+After interruption, the durable marker bypasses version equality and the routine
+24-hour throttle on the next attempt. Error details go to the journal even in
+routine mode. Ethernet carrier remains the only automatic update trigger.
+
 ---
 
 ## Core orchestration
+
+`mesh-acs-common.sh` supplies the role/config handling shared by the ACS
+orchestrator, channel election and tourguide. Explicit `mesh_24_if` and
+`mesh_5_if` files are authoritative: an empty file is an absent band, not a
+request to guess from `mesh_if` array positions. Readiness and lobby detection
+consider enabled roles only. One band is sufficient; no conventional Wi-Fi
+roles means status/IP management continues without Wi-Fi ACS activity.
+Helper adoption and partition merge require at least one shared enabled band,
+write only the channels supplied for those bands, and preserve others.
+
+`radio-setup.sh` assigns roles by capabilities even with one standard Wi-Fi
+radio, so a lone 5 GHz interface is not mislabeled as 2.4 GHz. A dual-band
+interface assigned to the 5 GHz role starts on 5180 rather than the first
+frequency its phy supports. Reserving an interface for AP use clears either
+mesh role that referred to it.
 
 - Limp mode management
 
@@ -35,15 +92,13 @@ survey. The filter fails open: if the phy cannot be read, or nothing parses, the
 requested list is used unchanged, because filtering to an empty set would take a
 band off the air on every node at once.
 
-**A solo node at the lobby neither elects nor hops.** It waits until a
-tourguide brings it onto the mesh's data channels, or another radio turns up and
-meshes with it there, and only then do the two run a joint election and migrate
-together. One node's view of the RF is not a consensus, and a node that elected
-alone then had to tourguide back to the lobby every two minutes to stay
-findable. Parking costs a solo radio nothing, since there is no mesh link to
-optimize. A whole-site cold start is unaffected: every node powers on into the
-lobby and meshes with the others there, so each one sees peers and they
-bootstrap together, which is the case the lobby dwell was built for.
+**A solo discovery node never elects itself onto data channels.** With a qualified
+clock it follows the rotating rendezvous schedule; without one it parks on the
+fixed anchors. Any BATMAN peer contact stops rotation while nodes recover or
+bootstrap together. Authenticated confirmation of a live destination ends
+discovery, including when the visited channel already is the data channel.
+The explicit mode survives daemon restarts; a frequency match alone cannot
+identify whether a node is searching or operating a data plan.
 
 editing the publish path.
 
@@ -639,6 +694,31 @@ stall), `igmp_joined`, `stalls` and `watchdog_sec`.
 
 ## Elections, channels and healing
 
+### BATMAN peer counts
+
+`mesh-peer-count.py` queries `batctl meshif bat0 originators_json` with a
+five-second timeout. It validates the complete list, normalizes MAC case, and
+counts distinct `orig_address` values across all interfaces. Only a successful
+empty list means zero peers; command errors, timeouts and malformed rows return
+nonzero without a count. The ACS bootstrap, quorum checker and tourguide
+partition sizing share this reader.
+
+The old `awk 'NR>1 {print $1}' | sort -u | wc -l` counted the table's second
+header and treated every selected route as the same `*` entry. It could let a
+solo lobby node bootstrap, hide isolation, and distort partition comparisons.
+Multiple routes to one originator could also inflate the count.
+
+On a query failure, lobby bootstrap clears its start window and waits for a
+fresh scan/publish round after recovery. `quorum-checker.sh` returns 2 for an
+unavailable check; its caller returns to the lobby only for exit 1, so a failed
+query cannot force a channel change. The quorum thresholds are unchanged.
+Tourguide sizing adds self only to a valid peer count and aborts a hop if sizing
+fails before beacon encoding. The pre-hop size is retained for partition
+comparison rather than querying the temporary lobby topology. `--list` on the
+same peer helper supplies originator MACs for tourguide election.
+
+### Service elections
+
 All service elections share the same algorithm: the best-connected node wins,
 measured by `MEAN_THROUGHPUT_MBPS` in the registry, the mean of BATMAN_V's
 metric across that node's originators, in Mbit/s. Stale nodes (not seen within
@@ -648,15 +728,209 @@ This field used to be called `TQ_AVERAGE`, which was wrong: BATMAN_V's metric is
 throughput, not a 0-255 link quality. The behavior never changed (highest
 wins either way), but the name misled, so it now says what it holds.
 
-- Includes channel bias to prevent unnecessary migrations.
+### Channel agreement and recovery
 
-Candidate frequencies are deliberately **not** filtered against the local phy
-here. The election reaches its answer by implicit consensus (every node runs
-the same computation over the same replicated reports), so a per-node hardware
-filter at this stage would let two nodes derive different winners from identical
-data. Unusable frequencies are dropped at scan time instead (`phy_usable_freqs`
-in `node-manager-acs.sh`), which keeps the exclusion inside the replicated
-report and therefore symmetric across the mesh.
+Independent scoring used to diverge when scan reports or incumbents differed.
+For channels 2437/2462, A reporting busy 10/80 and B reporting 80/10 gives a
+45/45 median tie. With both reports the incumbent wins; B seeing only itself
+moves to 2462. Equal reports arriving later preserve that split through bias.
+
+`channel-election.sh` now requests readiness for the current 180-second round.
+Only `--score` executes its scoring logic, without radio writes. The
+`mesh-channel-agreement.service` starts through the node-manager drop-in and
+restarts with it. Static nodes participate passively as compatibility voters.
+The generated/static manager publication path is unchanged.
+
+`manet_acs_agreement.py` contains the protocol; `mesh-channel-agreement.py`
+handles discovery, authentication, persistence and application:
+
+- The :25 manager request follows scan/publication. Proposal creation is allowed
+  at :45–:60 to allow readiness to replicate. The lowest ready ACS identity
+  coordinates; it freezes one result, participant list and activation time.
+- Discovery maps BATMAN originators to canonical Alfred identities using
+  registry identities and authenticated status aliases. Missing identity or
+  query failure defers discovery. Missing status keeps that member in the
+  denominator. The protocol supports up to 64 participants.
+- The view is the entire component reachable over **any** BATMAN radio. HaLow
+  linking two Wi-Fi neighborhoods makes them one decision domain. The coordinator
+  scores their shared registry observations, filtered to reachable identities;
+  no per-Wi-Fi-island channel decision or separate discovery registry is created.
+- A node ACKs only a compatible plan whose membership matches its view. Votes
+  bind the full plan hash and boot session. Durable state in
+  `/var/lib/manet-acs/agreement.json` precedes publishing or applying; a process
+  restart cannot cast a different vote in the same round.
+- The ACK deadline is exactly proposal time + 60 seconds. The coordinator
+  attests a strict majority of the frozen membership after that deadline.
+  Two nodes need both; three need two. No majority means expiry. Topology churn
+  cannot extend the deadline or remove a nonresponder mid-attempt.
+  Expansion of reachable membership cancels an uncommitted island proposal;
+  commitments already issued remain binding, then reconcile in a shared round.
+- Activation is deadline + 30 seconds. A receiver accepts a commit only before
+  activation minus five seconds and applies within a five-second grace. Slow
+  discovery refreshes the clock before deciding, so a timed-out query cannot
+  authorize a late switch. A fresh round rediscovers departed peers.
+- Candidates come from advertised radio capabilities; peers validate their
+  own shared bands rather than re-score local reports. Missing bands remain
+  unchanged. Static nodes refuse changes to their configured bands. HaLow-only
+  nodes can ACK without becoming the Wi-Fi coordinator.
+
+Types 74 (`acs_state`) and 75 (`acs_helper`) reuse `manet_admin.py` encryption
+and the shared admin password; payload identities are bound to Alfred record
+keys. Records older than 45 seconds or over five seconds in the future are
+ignored. A commit is the authenticated coordinator's attestation, not a set
+of independent cryptographic signatures. Members sharing the admin password
+are trusted. This does not provide global consensus across different partition
+views or atomic final-message delivery; clock alignment remains required.
+
+The daemon polls separately from the manager. An expiring `/run/manet-acs-busy`
+marker suppresses ACS mutations during preparation while ordinary status/IP
+work continues. Activation and tourguide hops use the shared channel lock.
+After switching, a 30-second settling interval prevents premature quorum loss.
+Application reconfigures all changed radios, checks actual frequencies, and
+uses a bounded restart fallback with a second frequency check. Failed landing
+is reported, with bounded repair retries; systemd active state alone is not
+radio success.
+
+After a moving plan, participants suppress further election votes for 1560
+seconds (26 minutes), allowing two twelve-minute rendezvous cycles and an
+exchange window even when a band has only one usable entry.
+An unchanged plan can update limp mode without starting that hold. A node
+still reachable on another band can follow a freshly advertised committed
+destination from a reachable peer already operating there, even days after
+the original switch. Otherwise lobby recollection handles the straggler. No radio that
+is physically out of range is guaranteed to rejoin until contact returns.
+
+### Recovery and reconciliation across all radios
+
+Type 74 now carries the currently operating plan for as long as it remains
+applicable, rather than stopping at the end of the election hold.
+The 45-second envelope age limit remains: an old plan is usable only through a
+fresh authenticated statement from a currently reachable node whose actual,
+stable radio settings match it. Old cached Alfred records, future activation,
+incomplete majority certificates, changed radio settings and failed discovery
+cannot authorize recovery. Only enabled conventional Wi-Fi radios are touched;
+there is no S1G hop, new transport or new periodic announcement stream.
+
+To limit airtime, holders piggyback the plan hash on their existing type-74
+status. The lowest reachable holder of each plan includes its full certificate;
+stale or unreachable publishers no longer suppress another holder. The old
+certificate is omitted when publishing the next round's commit so two full
+64-member certificates cannot exceed the authenticated envelope limit. It
+returns after activation. A newly recovered node can retain the certificate
+without hopping again when its radios already match. After a reboot only a
+validated, actually operating destination survives; old rounds/votes/holds do not.
+
+A newer committed plan that includes the entire currently reachable membership
+supersedes a straggler's older plan. If incompatible operating plans came from
+independent islands, neither a newer timestamp nor a certificate hash chooses
+the winner: clear the recollection hold and use the next normal shared
+scan/publication/majority round. Conflicting plans in the same latest round also
+require reconciliation. Per-band capability checks and the frozen majority
+deadline remain. Static participants can ACK an unchanged plan without running
+the ACS radio-application path.
+
+The distinction is between **different radio settings** and **lost connectivity**.
+No Wi-Fi peers while on the agreed frequencies is not an invitation to hop if
+HaLow still links the node. Different Wi-Fi RF observations across a HaLow-linked
+area remain inputs to one channel decision. Only loss of all paths separates
+decision domains; any re-established path brings their registry data and ACS
+state together again. Asymmetric or incomplete discovery can delay convergence;
+this remains bounded agreement, not an atomic global consensus guarantee.
+
+Cold nodes use the challenge exchange below over any surviving link. A holder
+of the live plan answers without leaving its data channel, with one lowest-MAC
+source per request/common band and duplicate suppression. Under inconsistent
+discovery more than one source can temporarily reply; nonce validation still
+applies. A matching channel plan needs no radio change. A clockless requester
+in discovery still receives confirmation to finish searching; an established
+data node with matching channels does not provoke a reply.
+Failed radio applications retry at most once per 30 seconds. Working HaLow now
+suppresses local Wi-Fi tourguide duty. Nodes without it retain scheduled visits
+for newcomers and genuinely disconnected groups.
+
+### Rotating rendezvous fallback
+
+`manet_rendezvous.py` supplies one absolute schedule to the agreement daemon
+and tourguide. Schedule v1 uses 2412/2437/2462 MHz on 2.4 GHz and
+5180/5220/5745 MHz on 5 GHz. The existing 2412/5180 anchors are the first entries.
+Globally aligned 120-second windows alternate bands; `floor(epoch / 240) modulo 3`
+selects each band's entry. Each frequency recurs every twelve minutes. A node
+skips unsupported, disabled, non-initiating or DFS entries using its actual PHY
+report; it never substitutes frequencies or prunes/reindexes its schedule.
+All nodes need the same provisioned schedule. Existing mesh width/mode settings
+are retained; compatibility and geographic guide coverage remain bench checks.
+
+A disconnected synchronized searcher tunes each enabled band to its entry at
+four-minute boundaries. A clockless searcher stays at the fixed anchors until
+authenticated recovery or clock qualification; it does not perform an unsynchronized
+scan rotation. On cold daemon startup a disconnected searcher left at a rotating
+frequency returns to its anchors. Any surviving BATMAN path, including HaLow,
+holds discovery still for recovery or joint bootstrap. A failed peer query does
+not authorize movement. A solo searcher cannot self-elect a data plan.
+
+Healthy data nodes with working HaLow keep their Wi-Fi channels throughout.
+Other nodes can perform elected guide duty: visit one band/frequency per window,
+enter between seconds 30 and 49,
+and dwell until second 75. The entry deadline is rechecked after slow preparation;
+existing restoration traps and the monotonic duration limit remain. The other
+band and HaLow stay in place. A guide whose data frequency equals that slot
+advertises and listens there without outbound or return reconfiguration.
+Nodes without working HaLow still serve unknown newcomers even when all known
+nodes are reachable. No extra periodic announcement stream or S1G hopping was added.
+
+`manet_rendezvous.halow_ready()` identifies S1G radios from `/var/lib/halow_if`,
+which provisioning populates for either USB or SPI devices. It requires an
+enabled interface with the administrative UP flag, an active entry in `batctl if`,
+an active `wpa_supplicant-s1g-<iface>.service`, `iw` mesh-point mode and a successful
+`mesh_plink_timeout` query (the same joined-mesh query used by the watchdog).
+Each command has a two-second timeout. It does not infer S1G from an `iw` frequency
+or a fixed interface name: Morse can expose an ordinary Wi-Fi frequency there.
+No current peer is required. The policy assumes a working HaLow radio reaches at
+least as far as Wi-Fi; this is a local readiness check, not an RF range test.
+
+The guide checks readiness before election and immediately before departure, so
+HaLow becoming available during preparation cancels that visit. Missing/down,
+disabled, inactive, unjoined or unresponsive HaLow permits the existing fallback
+without a manager restart. The agreement daemon caches readiness for fifteen
+monotonic seconds and includes `halow_ready` in existing encrypted type-74 status.
+The guide reads fresh authenticated peer flags through `tourguide-exclusions`;
+the election removes those canonical identities from its band-capable candidates.
+This prevents a mixed group from repeatedly electing a node that will skip duty.
+The live local probe overrides a cached report about this node. Stale or missing
+peer flags do not suppress fallback; inconsistent views can defer a visit until
+status converges. There is no new registry schema or additional broadcast stream.
+
+This gate applies to elected guide excursions from data channels. Fully
+disconnected searchers retain their rotating/fixed-anchor discovery behavior;
+any BATMAN connection already holds them still for authenticated recovery or
+joint bootstrap. The twelve-minute fallback cycle and 26-minute recovery hold
+remain, allowing nodes without usable HaLow to recover too.
+
+`/run/manet-rendezvous.json` stores `search` or `data`. The first usable config
+seeds it from the fixed anchors; it survives process restarts and is reset by
+radio setup/boot anchor restoration. Ordinary frequency changes never redefine
+mode. This lets a rotating rendezvous also be a valid data channel. A fresh
+authenticated operating certificate, helper beacon or consumed cold nonce reply
+can end discovery on the current channel, without restarting that radio. The
+next slot cannot pull the recovered node away. A searcher visiting the frequency
+of an old saved certificate cannot advertise it as its operating plan.
+
+Discovery uses the shared channel lock and respects prepared/committed work and
+the busy marker. Failed discovery applications retry at most every 30 seconds,
+with a boot-bound monotonic marker surviving daemon restarts. The recovery hold
+is now 26 minutes: two full cycles plus an exchange window. Reconnected conflicting
+plans still lift that hold for one shared decision. Bounded collection requires
+at least one common usable frequency, overlapping coverage and successful
+delivery. A clockless node cannot escape jammed fixed anchors through rotation;
+GPS or a surviving HaLow/time path is needed to enable the rotating fallback.
+
+CM4 bench to-do remains deferred for hardware setup: measure request-to-actual
+frequency, first authenticated peer packet, BATMAN forwarding recovery, Alfred
+request/reply latency, and PTT/traffic disruption on both the hopped and remaining
+MT7916 band. Also test HaLow-only continuity, one jammed rendezvous frequency,
+single-band and clockless newcomers, and completely separated groups reconnecting
+through HaLow. The rotation offers frequency diversity, not immunity to a jammer
+covering/following the full channel set.
 
 **"Every candidate was measured and rejected" and "nothing reported a
 measurement at all" are different verdicts.** Both leave the qualified list
@@ -667,6 +941,75 @@ wholesale, or Alfred was down and no reports replicated, and it now **holds the
 current channel and does not assert limp mode**, logging `No scan data for any
 candidate channel`. Treating it as jamming throttled the whole mesh to legacy
 bitrates on the strength of missing data.
+
+### Clock readiness and cold-node recovery
+
+Timed ACS and admin transport wait for `/run/initial_time_synced`, created only
+after the time service qualifies GPS or NTP. This includes scan/election
+requests, static/HaLow compatibility votes, timed channel-plan application and scheduled
+tourguide duty. Until then the agreement daemon neither advances protocol state
+nor publishes timestamped envelopes. The common admin transport gates types
+70–75 on send and receive, preventing a bad startup clock from writing future
+sender/replay history. The configuration UI reports the wait before staging a
+mesh change; local-only changes remain available. Public status, identity,
+allocation and ordinary forwarding continue without this gate.
+Parking a disconnected searcher at fixed anchors is also allowed before sync;
+rotation itself waits for clock qualification.
+
+The managers reset publication/action timers on the first observed sync, so a
+backward startup step does not suppress discovery. The agreement state records
+the local boot identity after synchronization. A different boot clears old ACS
+rounds and holds; a validated destination can survive if the actual radios still
+operate it. A process restart in the same boot preserves
+votes. This is a new voting session, already bound into the protocol. Persistent
+admin replay history is never cleared. An existing admin history timestamp far
+ahead of correct UTC still needs investigation; this change prevents creating
+one at unsynchronized startup rather than bypassing its replay protection.
+
+Simply waiting for time before accepting any helper creates a loop: a cold
+node may need recovery onto data channels to reach NTP. It cannot safely compare
+a type-75 beacon's timestamp yet. A separate authenticated challenge exchange
+provides freshness without UTC:
+
+- A clockless ACS node with BATMAN peers present, on lobby or old data channels, publishes an
+  encrypted type-76 `acs_probe` at most once per minute. A random 128-bit nonce
+  is bound to its canonical MAC and boot. Its monotonic 60-second lifetime is
+  stored in `/run/manet-acs-probe.json`; neither process restarts nor clock steps
+  extend it. Sixty seconds allows Alfred request/reply replication and a normal
+  15-second manager wakeup. There is no probe when no peer is present.
+- A synchronized current-plan holder checks probes in the agreement daemon and
+  answers over any surviving mesh path, without waiting for a physical visit.
+  A synchronized tourguide also checks probes through the existing `helper-encode`
+  calls around its lobby visit. It replies only to currently reachable radio
+  aliases. Type 77 carries its original compatible data channels, partition
+  size and up to 64 recipient boot/nonce pairs. Replies are bounded to one batch
+  per five seconds, with a bounded ten-minute cache suppressing repeated probes.
+  The extra exchange is demand-driven; ordinary type-75 beacons are unchanged.
+- `helper-select` accepts only a reply authenticated under the admin password,
+  bound to its Alfred publisher, containing this node's current boot and exact
+  outstanding nonce. The largest compatible partition wins, with the usual MAC
+  tie-break. Deadline checks run again after I/O. The challenge is atomically
+  consumed before exposing the destination to the manager. Wrong, expired,
+  replayed, foreign-recipient and previous-boot replies cannot authorize a hop.
+- The exception is limited to following a consumed nonce-bound reply. It never sets the clock,
+  advertises an NTP server, votes, runs a scheduled partition merge or authorizes
+  an admin action. The node still needs GPS/NTP after joining. Unsynchronized
+  nodes cannot answer probes or act as tourguides.
+
+`seal_challenge`/`open_challenge` accept only types 76–77 and their corresponding
+kinds. They reuse AES-GCM with channel binding but separate salt state and a
+fixed zero timestamp; they never alter the timed sender counter. Normal
+`seal`/`open` cannot use these types, and admin/control types cannot enter the
+challenge path. A probe itself grants no authority; its matching, timely reply
+is the sole freshness proof for cold recovery. Shared admin-key holders remain
+trusted as in the rest of ACS.
+
+If no usable source or synchronized tourguide ever appears, nodes retain their
+current/lobby mesh operation and defer timed changes. No unsynchronized election
+fallback or fake time server is introduced. Arbitrary external clock steps after
+initial synchronization and unbounded source outages remain outside the timing
+guarantees. Actual Alfred loss/latency and cold single-band recovery need the
+pending CM4 bench validation.
 
 ### Channel scoring
 
@@ -762,14 +1105,44 @@ explicit presence. A channel measured at 0% busy and a channel the radio could
 not measure are different answers, and a proto3 scalar default cannot tell them
 apart. The election filters absent values out of the median instead of counting
 them as zero, so a node on an older build still contributes its noise and BSS
-counts without making every channel it reports look empty. A rolling update is
-the one case where nodes legitimately disagree: a node still running the old
-scoring reads the same reports and can pick a different channel, so update the
-whole mesh in one pass.
+counts without making every channel it reports look empty. A rolling update
+can also make nodes disagree: a node still running the old scoring reads the
+same reports and can pick a different channel, so update the whole mesh in one
+pass. All participants need the agreement service; an older independently switching
+node is not a participant in this protocol.
 
-4. Listens for other partitions.
-5. If the other partition should win, triggers migration.
-6. Returns to data channel.
+### Tourguide election and partition comparison
+
+`mesh-tourguide-election.py` maps reachable originator MACs to Alfred identities
+using the registry's `MAC_ADDRESSES`, then elects across the reachable partition.
+Direct-neighbor interface addresses were previously compared to the local
+bridge MAC, often producing a winner that no node recognized as itself; the
+text-table wlan pattern could also discard all neighbors. JSON discovery
+includes HaLow and multi-hop reachability. Missing or ambiguous identities
+defer the election. Candidates must advertise an UP mesh interface on the
+scheduled band; service hosts are avoided when another candidate is eligible.
+Oldest helper timestamp wins, with a MAC tie-break and the same ranking when
+every eligible node hosts a service. A confirmed solo node elects itself.
+
+The helper beacon and foreign-partition comparison use the channels and size
+captured before hopping. Reading configs after the hop compares a data channel
+against the temporarily written lobby frequency; recounting peers then can
+include visitors or lose the original partition. Missing bands encode as absent
+protobuf fields for public diagnostics. Actual adoption uses encrypted type 75
+and checks the local PHY's supported shared bands. Helpers are repeated every
+five seconds until second 75 of the common 120-second window, with a monotonic
+dwell cap. A late start outside seconds 30–49 is skipped. A trap restores the
+data channel on exit/signals; both outward and return hops check the radio.
+
+Receivers reject unsigned or stale (>45-second) helpers. The largest compatible
+partition wins consideration, with a MAC tie-break. The lobby no longer takes
+the first cached type-69 record. Partition comparisons exclude canonical peers
+captured before hopping instead of trusting cached ACTIVE registry entries.
+
+Tourguide holds `channel-election.lock` for its whole run. Agreement activation
+uses the same lock; the orchestrator waits while it is held and launches
+tourguide only after its other data-state work. This prevents local ACS work
+from interpreting a single-radio hop as a genuine channel or topology change.
 
 **Which radio hops is derived from the clock, never from this node's own
 history**: `(epoch / 120) % 2`, the same window index `should_perform_tourguide`
@@ -782,6 +1155,10 @@ excluded for hosting a service, a restart, a failed hop), after which the two
 partitions alternated to opposite bands forever and partition healing was
 silently dead. For a 2-node mesh that is the only recovery path there is:
 `quorum-checker.sh` cannot rescue an isolated node below 3 remembered peers.
+
+An absent or disabled scheduled band skips the window rather than substituting
+the other band. A single-band node therefore has one usable window every four
+minutes, aligned with dual-band nodes using that band.
 
 **The smaller partition migrates; equal sizes break the tie on MAC**, lowest
 stays put. Both tourguides run the comparison in the same window and each sees
@@ -910,6 +1287,107 @@ Manages BATMAN-ADV interface lifecycle:
 
 ---
 
+## Time synchronization
+
+`mesh-time-sync.py`, started by `one-shot-time-sync.service` through the retained
+shell entry point, is the sole runtime owner of chrony's configuration and
+start/stop lifecycle. The manager, Ethernet detector and off hook no longer
+replace its config or stop it independently. This prevents a completing client
+attempt or departing Ethernet link from stopping a newly available GPS source.
+The active uplink dispatcher already records `mesh-gateway.state` and
+`upstream_iface`; the controller observes those files as well as carrier, so
+internet sync works through the active dispatcher, not only the legacy detector.
+
+Local roles are checked every 15 seconds. A recent `gps_status.json` fix enables
+the GPS SHM refclock. A direct uplink enables the public pool, with
+`bindacqdevice` restricting NTP acquisition to that interface. Source profiles
+allow the configured IPv4 mesh CIDR and the existing IPv6 mesh prefix. Client
+and idle profiles deny serving; no profile has a `local stratum` fallback or
+unconditional internet sources on an ordinary mesh client. Both provisioning
+templates emit the same service and a quiet initial chrony config.
+
+The controller reads `chronyc -n tracking` and `sources` with checked exit status
+and bounded command timeouts. Qualification requires a real reference, stratum
+1–15, a synchronized leap status, at most 0.1 seconds of remaining system-clock
+correction, and a recent selected source with nonzero reachability. This is a
+completion criterion, **not a bound on absolute UTC error**. GPS and internet
+markers require a selected GPS refclock or an uplink NTP source respectively.
+Invalid queries or loss of qualification withdraw those markers. The existing
+manager publish path ORs `/run/mesh-ntp-gps.state` and `/run/mesh-ntp.state` into
+type-68 `is_ntp_server`; cadence is unchanged and no separate announcement is
+sent. Cached advertisements can therefore outlive source availability until
+the next telemetry update; actual NTP validation still has to succeed.
+
+Ordinary clients parse registry assignments as data, never source them as shell.
+`MAC_ADDRESSES` maps interface originators to canonical identities, and IPv4
+addresses must be unambiguous host addresses within the mesh CIDR. Only selected
+`originators_json` routes (`best: true`) with positive BATMAN_V throughput and
+last-seen age at most 30 seconds qualify. Highest throughput wins, with a MAC
+tie-break. Self, shutting-down and unadvertised nodes are excluded. Registry
+wall-clock timestamps and the derived STALE state are deliberately not liveness
+gates: the local clock being repaired cannot reliably compare them. Kernel
+route age and an actual recent NTP measurement provide bootstrap liveness.
+
+No usable peer or failed discovery causes a local retry after 30 seconds. A
+selected peer gets a 90-second attempt, followed by a five-minute exclusion on
+failure so another source can be tried. Deadlines and exclusions use monotonic
+time and persist in `/run/mesh-time-client.json` across service restarts, without
+extending the attempt. Successful client sync requires the selected source to
+match the chosen address and the sample to be from the current attempt. It
+creates `/run/initial_time_synced`, writes the quiet profile and stops chrony.
+The marker survives process restarts, not reboot. A nonblocking file lock
+prevents duplicate owners.
+
+The operational expectation is one or two days of use, sometimes longer, with
+most nodes directly using GPS. ACS needs alignment on a seconds scale, not
+millisecond accuracy. Ordinary mesh clients therefore refresh after **six
+hours plus 0–600 seconds of per-node staggering**. The jitter is generated once
+per boot and persisted with the monotonic refresh deadline. Service restarts
+and wall-clock corrections cannot postpone it. Local source qualification
+renews the deadline, so losing GPS/internet starts a holdover period based on
+the last verified source. Between refreshes there are only local role checks;
+no BATMAN query, NTP polling or extra Alfred announcement is required.
+
+For scale, an assumed residual error of 50 ppm accumulates 1.08 seconds in six
+hours, versus 8.64 seconds in two days. Oppositely drifting nodes can differ by
+twice that amount. Those are arithmetic examples, **not measured CM4 limits**.
+ACS has a five-second future-message allowance and late-apply grace; those
+checks are not a blanket guarantee that every operation tolerates five seconds
+of skew. Hardware measurements should determine whether the refresh interval
+needs adjustment. No freshness guarantee is made if sources remain unreachable.
+
+Each due refresh uses the same 90-second attempt and peer backoff as initial
+sync. An unsuccessful refresh retains the boot-sync marker and previous success
+time, keeps serving flags off, and retries discovery without claiming accuracy
+or blocking ordinary mesh operation. If the refresh state is missing, a boot
+marker alone cannot grant another six-hour delay. Startup may step the clock;
+after the first verified sync the controller disables remaining live startup
+steps with `chronyc makestep 0.1 0` and removes the directive from the config.
+All later source changes, daemon restarts and client refreshes use slewing, so
+routine correction does not jump backwards through saved ACS/admin timestamps.
+`leapsecmode slew` also avoids a kernel leap-second step. Peer profiles use
+`corrtimeratio 1`, preferring an average correction over one poll interval rather
+than three to fit the bounded attempt, still subject to chrony's slew-rate cap.
+The current source daemon is not restarted just to disarm stepping.
+
+The old positional `batctl o` reader treated last-seen timestamps or `(` as the
+metric and did not map radio MACs. Its unchecked command failures, executable
+registry input and unbounded registry wait are removed. The old
+`waitsync 60 0 0 1` also skipped the remaining-correction check: zero disables
+that bound. See the primary [chronyc command reference](https://chrony-project.org/doc/4.6/chronyc.html)
+for `tracking`, `sources` and `waitsync`, and the [chrony configuration reference](https://chrony-project.org/doc/4.6/chrony.conf.html)
+for acquisition binding and source settings.
+
+Remaining limits: ACS/admin activation and tourguide rendezvous still depend
+on wall-clock alignment. Initial synchronization now gates timed control, with
+nonce-bound cold lobby recovery as described above. Arbitrary external clock
+steps after synchronization are not repaired by ACS. An unusually large
+later correction may not settle inside a bounded refresh; it is not forced by
+stepping. CM4 checks of real chrony/GPS timing, 24–48-hour drift, source loss,
+missed telemetry and on-air traffic remain pending hardware setup.
+
+---
+
 ## Data management
 
 Node state is exchanged over Alfred as two message types, split by how often
@@ -920,7 +1398,11 @@ so anything that repeats is paid for continuously.
 |------|---------|-----------|----------|
 | 67 | `NodeIdentity` | startup, allocation changes, 270 s keepalive | hostname, MACs, Syncthing ID, chunk, IP |
 | 68 | `NodeTelemetry` | every startup loop, then 180 s | everything volatile |
-| 69 | `NodeTelemetry` | tourguide window | helper beacons (channels, partition size) |
+| 69 | `NodeTelemetry` | tourguide window | public helper diagnostics; not migration authority |
+| 74 | encrypted `acs_state` | 5 s and protocol changes | readiness, proposal, votes, commit, operating plan ID; one full-certificate publisher per plan |
+| 75 | encrypted `acs_helper` | 5 s during lobby dwell | authenticated recovery channels and partition size |
+| 76 | encrypted `acs_probe` | at most once per 60 s, only clockless nodes with peers | requester boot, random challenge, current Wi-Fi channels and radio aliases |
+| 77 | encrypted `acs_probe_reply` | on demand over surviving paths or during tourguide visits, at most once per 5 s | channels/size and recipient boot/challenge pairs |
 
 Alfred stamps every record with the publishing node's MAC; it runs `-i br0`, so
 that key *is* the node's primary MAC. It is the join column between the two
@@ -1014,6 +1496,10 @@ password fallback.
 | 71 | `radio_state`, `radio_cancel` |
 | 72 | `radio_ack` |
 | 73 | `config_ack` |
+| 74 | `acs_state` |
+| 75 | `acs_helper` |
+| 76 | `acs_probe` (clock-independent discovery only) |
+| 77 | `acs_probe_reply` (nonce-bound cold recovery only) |
 
 The wire format is a `manet_admin_v1` envelope carrying a 16-byte publisher
 salt, 12-byte random nonce, and AES-256-GCM ciphertext with its authentication
@@ -1039,13 +1525,16 @@ change can interrupt the process. This gives at most one apply attempt per
 message; an interrupted/failed attempt requires a fresh administrator request.
 Do not erase this history during rollback. Corrupt history fails closed.
 
-Authenticated envelopes expire after 900 seconds and may be at most 60 seconds
+Normal authenticated envelopes expire after 900 seconds and may be at most 60 seconds
 ahead of the receiver's clock. Newly provisioned nodes lack replay history,
 so expiry bounds their acceptance of previously recorded, otherwise valid
 messages. These checks require synchronized clocks, as scheduled activation
 already does. Each staged edit also gets a fresh random transaction version;
 repeating identical settings does not reuse an earlier ACK. Config activation
 uses encrypted type-73 ACKs, never `CONFIG_ACK_VERSION` from public telemetry.
+Both send and receive wait for the initial-sync marker. Types 76–77 use only
+the separate challenge API and the monotonic nonce lifetime described above;
+their fixed zero timestamp is never considered a time source or an admin order.
 
 The dependency is Debian's `python3-cryptography`; imports are lazy so its
 absence disables control without disabling the public status page. Setup and
@@ -1212,7 +1701,16 @@ Tests sit alongside the code they cover and run without hardware or a node:
 | `test_mesh_registry.py` | Real encoder/decoder/registry integration, chunk zero, saved chunks, read failures, and timely publication |
 | `test_mesh_ip_startup.py` | Bounded discovery, late/missing peers, failed queries, and allocation barriers |
 | `test_mesh_config_rollback.py` | Real rollback script with simulated BATMAN: unique peer counts, solo nodes, bounded recovery, failed queries/backups, interrupted restoration, and the receiver's apply gate |
+| `test_mesh_peer_count.py` | JSON counts and real shell callers with simulated BATMAN: empty/single/multiple peers, alternate routes and MAC case, failed queries, bootstrap reset/recovery, quorum return-to-lobby gating, and partition size/beacon/migration failure handling |
+| `test_mesh_time_sync.py` | Selected BATMAN routes and canonical identities, safe registry/address parsing, late/missing peers, bounded attempts and six-hour refreshes across restarts/clock steps, correction and source freshness, GPS/uplink transitions, quiet intervals and holdover on source loss, disarming startup steps, unchanged advertisement path and provisioning unit parity |
+| `test_acs_agreement.py` | Majority/timeouts, message loss, replay/restart safety, real scoring/activation, failed persistence and radio landing, authenticated straggler recovery |
+| `test_acs_bootstrap.py` | Clockless recovery with real encryption, boot/recipient/nonce binding, expiry after restart and slow reads, consume-before-move failure, radio compatibility, traffic bounds, live tourguide response and no unsynchronized timed work |
+| `test_acs_connected.py` | Day-old plan recovery over HaLow, actual-channel and freshness checks, one certificate publisher and failover, bounded retries, shared RF scoring after real partitions reconnect, static ACKs, and clockless replies without tourguide hops |
+| `test_acs_rendezvous.py` | Absolute rotation, cold anchor waiting, HaLow precedence, unavailable slots and peer queries, restart/retry behavior, authenticated data-channel overlap, selective helper adoption and real tourguide visits without redundant retunes |
+| `test_acs_halow_tourguide.py` | Live S1G readiness without peers, failure/recovery and pre-departure cancellation, bounded health probes, readiness in existing encrypted status, fresh peer exclusions and mixed-group guide selection |
+| `test_acs.py` | Single/dual-band roles, lobby transitions and channel application, real channel elections, provisioning role selection, canonical tourguide identities and eligibility, shared channel locking, pre-hop comparisons, and real single-band helper encoding/return hops |
 | `test_manet_admin.py` | Real encryption, wrong keys, tampering, authenticated ACKs, expiry, replay after restart/rollback/interrupted apply, password rotation, and literal config writes |
+| `test_node_update.py` | Real archive staging and installation in a temporary root: checksum/version rejection, unsafe paths and links, download/disk/copy/dependency/service failures, locking, daily throttle and interrupted-install retries |
 
 Run them from the git root, so this directory is on `sys.path`, and from the dev
 venv, so the protobuf runtime matches the fleet:
@@ -1279,8 +1777,8 @@ is one copy of each. The two generated hooks used to be heredocs duplicated
 across the three install builders, which is how one wrong `grep` came to need
 fixing in four places and how the rpi5 copy drifted from the other two.
 
-`node-update.sh` extracts the tools tarball and nothing else; it does not run
-`daemon-reload` or `udevadm`. Dispatcher hooks need neither; networkd-dispatcher
+`node-update.sh` reloads systemd after installing the tools payload; it does not
+run `udevadm`. Dispatcher hooks need neither; networkd-dispatcher
 reads the directory on each event, so a replaced hook is live immediately.
 
 ---

@@ -28,12 +28,18 @@ Once DHCP has finished and a route exists, gateway and NAT state are
 reconciled. Carrier alone does not mean the interface can reach anything, which
 is why this is a separate step.
 
+The time service observes the selected uplink and starts internet time
+synchronization through it. Only a verified chrony source sets the NTP flag
+carried in normal Alfred telemetry; becoming a gateway alone does not set it.
+
 ## When carrier is lost
 
 Losing carrier, or a link that only ever comes half up, returns `end0` to its
 baseline. `dnsmasq` stops, the interface is flushed, the generated `.network`
 files are replaced with the default DHCP one, the wired-EUD dnsmasq config is
-dropped, and gateway and NTP state are reverted if this node held either.
+dropped, and gateway and internet-NTP state are reverted if this node held
+either. The hook leaves chrony control to the time service, which preserves a
+usable local GPS source when the internet uplink disappears.
 
 Only `end0` is reconfigured. A wireless or USB interface losing carrier does
 not run the wired teardown.

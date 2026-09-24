@@ -44,6 +44,9 @@ class AdminTests(unittest.TestCase):
         self.scratch = tempfile.TemporaryDirectory()
         self.addCleanup(self.scratch.cleanup)
         self.root = Path(self.scratch.name)
+        (self.root / 'initial_time_synced').touch()
+        clock_env = patch.dict(os.environ, MANET_TIME_RUN_DIR=str(self.root))
+        clock_env.start(); self.addCleanup(clock_env.stop)
         self.conf = self.root / 'mesh.conf'
         self.conf.write_text('admin_password=shared-test-password\nmtx=y\n')
         self.sender = AdminTransport(self.conf, self.root / 'sender')
@@ -88,6 +91,50 @@ class AdminTests(unittest.TestCase):
         second = self.sender.seal(70, self.payload)
         self.assertNotEqual(envelope['nonce'], second['nonce'])
         self.assertNotEqual(envelope['ciphertext'], second['ciphertext'])
+
+    def test_unsynchronized_control_cannot_write_sender_or_receiver_history(self):
+        envelope = self.sender.seal(70, self.payload)
+        before = (self.root / 'sender/sender.json').read_bytes()
+        (self.root / 'initial_time_synced').unlink()
+        self.now += 1000000000000000000
+        with self.assertRaisesRegex(AdminError, 'initial GPS/NTP'):
+            self.sender.seal(70, self.payload)
+        with self.assertRaisesRegex(AdminError, 'initial GPS/NTP'):
+            self.receiver.open(70, envelope)
+        self.assertEqual((self.root / 'sender/sender.json').read_bytes(), before)
+        self.assertFalse((self.root / 'receiver/received-70.json').exists())
+
+    def test_bootstrap_transport_has_no_clock_or_control_channel_escape(self):
+        (self.root / 'initial_time_synced').unlink()
+        payload = {'kind': 'acs_probe', 'node': '02:00:00:00:00:01',
+                   'boot': 'a' * 32, 'nonce': 'b' * 32}
+        envelope = self.sender.seal_challenge(76, payload)
+        self.now = 0
+        self.assertEqual(self.receiver.open_challenge(76, envelope).payload, payload)
+        self.assertFalse((self.root / 'sender/sender.json').exists())
+        with self.assertRaises(AdminError):
+            self.sender.seal_challenge(70, self.payload)
+        with self.assertRaises(AdminError):
+            self.receiver.open_challenge(70, envelope)
+        with self.assertRaises(InvalidTag):
+            self.receiver.open_challenge(77, envelope)
+        (self.root / 'initial_time_synced').touch()
+        with self.assertRaises(AdminError):
+            self.receiver.open(76, envelope)
+        normal = self.sender.seal(70, self.payload)
+        with self.assertRaises(AdminError):
+            self.receiver.open_challenge(70, normal)
+
+    def test_bootstrap_transport_still_requires_password_and_integrity(self):
+        envelope = self.sender.seal_challenge(76, {'kind': 'acs_probe'})
+        other = self.root / 'wrong.conf'
+        other.write_text('admin_password=wrong-password\n')
+        with self.assertRaises(InvalidTag):
+            AdminTransport(other, self.root / 'other').open_challenge(76, envelope)
+        raw = bytearray(base64.b64decode(envelope['ciphertext'])); raw[0] ^= 1
+        envelope['ciphertext'] = base64.b64encode(raw).decode()
+        with self.assertRaises(InvalidTag):
+            self.receiver.open_challenge(76, envelope)
 
     def test_wrong_password_and_tampering_are_rejected(self):
         envelope = self.sender.seal(70, self.payload)
@@ -329,6 +376,14 @@ class LiteralConfigTests(unittest.TestCase):
 
 
 class WebBoundaryTests(unittest.TestCase):
+    def setUp(self):
+        scratch = tempfile.TemporaryDirectory()
+        self.addCleanup(scratch.cleanup)
+        self.clock_marker = Path(scratch.name) / 'initial_time_synced'
+        self.clock_marker.touch()
+        env = patch.dict(os.environ, MANET_TIME_RUN_DIR=scratch.name)
+        env.start(); self.addCleanup(env.stop)
+
     def handler(self, path, authenticated=False):
         handler = object.__new__(status.MeshHandler)
         handler.path = path
@@ -378,6 +433,40 @@ class WebBoundaryTests(unittest.TestCase):
             handler.do_POST()
             self.assertFalse(handler.send_json.call_args.args[0]['ok'])
             self.assertIn('not ACKed', handler.send_json.call_args.args[0]['error'])
+            broadcast.assert_not_called()
+
+    def test_clock_wait_is_reported_before_mesh_edits_or_forced_activation(self):
+        self.clock_marker.unlink()
+        with patch.object(status, 'load_kv_file', return_value={'admin_password': 'test', 'mesh_ssid': 'old'}), \
+                patch.object(status, 'is_allowed_ip', return_value=True), \
+                patch.object(status, 'apply_local_to_conf') as local, \
+                patch.object(status, 'broadcast_config_package') as broadcast, \
+                patch.object(status, 'clear_pending_config') as clear:
+            for path in ('/api/admin/stage', '/api/admin/activate', '/api/admin/cancel'):
+                handler = self.handler(path, authenticated=True)
+                body = json.dumps({'force': True, 'config': {'mesh_ssid': 'new', 'lan_ap_ssid': 'local'}}).encode()
+                handler.headers = {'Content-Length': str(len(body))}
+                handler.rfile = io.BytesIO(body)
+                handler.do_POST()
+                self.assertIn('initial GPS/NTP', handler.send_json.call_args.args[0]['error'])
+            local.assert_not_called()
+            broadcast.assert_not_called()
+            clear.assert_not_called()
+
+    def test_local_only_configuration_does_not_need_clock_sync(self):
+        self.clock_marker.unlink()
+        with patch.object(status, 'load_kv_file', return_value={'admin_password': 'test', 'lan_ap_ssid': 'old'}), \
+                patch.object(status, 'is_allowed_ip', return_value=True), \
+                patch.object(status, 'apply_local_to_conf') as local, \
+                patch.object(status, 'restart_eud_ap'), \
+                patch.object(status, 'broadcast_config_package') as broadcast:
+            handler = self.handler('/api/admin/stage', authenticated=True)
+            body = json.dumps({'config': {'lan_ap_ssid': 'new'}}).encode()
+            handler.headers = {'Content-Length': str(len(body))}
+            handler.rfile = io.BytesIO(body)
+            handler.do_POST()
+            self.assertTrue(handler.send_json.call_args.args[0]['local_only'])
+            local.assert_called_once()
             broadcast.assert_not_called()
 
 

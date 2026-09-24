@@ -1,0 +1,16 @@
+[Unit]
+Description=MANET GPS, uplink and periodic peer time synchronization
+After=node-manager.service gps-reader.service
+Wants=node-manager.service gps-reader.service
+PartOf=node-manager.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/one-shot-time-sync.sh
+Restart=always
+RestartSec=10
+TimeoutStopSec=20
+ExecStopPost=/usr/bin/rm -f /run/mesh-ntp.state /run/mesh-ntp-gps.state
+
+[Install]
+WantedBy=multi-user.target

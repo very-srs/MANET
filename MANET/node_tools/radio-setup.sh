@@ -530,6 +530,11 @@ iface_supports_freq() {
 iface_mesh_freq() {
     local iface="$1"
     local phyname
+    # A dual-band interface assigned to the 5 GHz role must start there.
+    if [ "$iface" = "$(cat /var/lib/mesh_5_if 2>/dev/null)" ]; then
+        echo "5180"
+        return
+    fi
     phyname="$(iface_phy "$iface")"
     [[ -z "$phyname" ]] && echo "" && return
 
@@ -554,13 +559,12 @@ for iface in $(iw dev | awk '$1 == "Interface" {print $2}'); do
     fi
 done
 
-# Order standard mesh interfaces by role, not by volatile wlanX name. The first
-# interface receives the 2.4 GHz lobby config and the second receives the 5 GHz
-# lobby config. Prefer single-band matches when possible, then fall back to any
-# device supporting the required lobby frequency.
-if [ "${#mesh_ifaces[@]}" -gt 1 ]; then
-    mesh_24=""
-    mesh_5=""
+# Assign standard mesh roles by capabilities, not array position or wlanX name.
+# Prefer single-band matches, then distinct devices supporting each lobby
+# frequency. A missing band keeps its role empty, including on one-radio nodes.
+mesh_24=""
+mesh_5=""
+if [ "${#mesh_ifaces[@]}" -gt 0 ]; then
 
     for iface in "${mesh_ifaces[@]}"; do
         if iface_supports_freq "$iface" 2412 && ! iface_supports_freq "$iface" 5180; then
@@ -591,8 +595,6 @@ if [ "${#mesh_ifaces[@]}" -gt 1 ]; then
         reordered+=("$iface")
     done
     mesh_ifaces=("${reordered[@]}")
-elif [ "${#mesh_ifaces[@]}" -eq 1 ]; then
-    mapfile -t mesh_ifaces < <(printf '%s\n' "${mesh_ifaces[@]}" | sort -V)
 fi
 
 # Create directory and files (supports wired-only configs if arrays are empty)
@@ -613,8 +615,8 @@ for iface in "${mesh_ifaces[@]}"; do
     echo "$iface:$iface" >> /var/lib/iface_map
     echo " > Mapped $iface (mesh)"
 done
-[ "${#mesh_ifaces[@]}" -gt 0 ] && echo "${mesh_ifaces[0]}" > /var/lib/mesh_24_if
-[ "${#mesh_ifaces[@]}" -gt 1 ] && echo "${mesh_ifaces[1]}" > /var/lib/mesh_5_if
+[ -z "$mesh_24" ] || echo "$mesh_24" > /var/lib/mesh_24_if
+[ -z "$mesh_5" ] || echo "$mesh_5" > /var/lib/mesh_5_if
 for iface in "${halow_ifaces[@]}"; do
     echo "$iface" >> /var/lib/halow_if
     echo "$iface:$iface" >> /var/lib/iface_map
@@ -677,6 +679,9 @@ if [[ "$eud" == "wireless" ]] || [[ "$eud" == "auto" ]]; then
         echo "$AP_INTERFACE" > /var/lib/ap_interface
         echo "AP interface selected: $AP_INTERFACE"
         sed -i "/^${AP_INTERFACE}$/d" /var/lib/mesh_if
+        if [ "$(cat /var/lib/mesh_24_if 2>/dev/null)" = "$AP_INTERFACE" ]; then
+            > /var/lib/mesh_24_if
+        fi
         if [ "$(cat /var/lib/mesh_5_if 2>/dev/null)" = "$AP_INTERFACE" ]; then
             > /var/lib/mesh_5_if
         fi
@@ -900,6 +905,10 @@ EOF
     echo " > Enabling $WLAN for mesh use ..."
     systemctl enable wpa_supplicant@$WLAN.service
 done
+
+# Configs have been reset to their startup frequencies. Discovery is explicit
+# after initialization because rotating rendezvous can share a data channel.
+rm -f /run/manet-rendezvous.json
 
 # ============================================================================
 # === CONFIGURE AP INTERFACE (if wireless/auto mode) ===
@@ -1349,11 +1358,12 @@ systemctl enable ssh-recovery.service
 cat <<- EOF > /etc/systemd/system/mesh-boot-lobby.service
 [Unit]
 Description=Set mesh interfaces to Lobby channels
-Before=wpa_supplicant@.service
+Before=wpa_supplicant@.service mesh-channel-agreement.service node-manager.service
 
 [Service]
 Type=oneshot
 ExecStart=/bin/sh -c 'for LOBBY_FILE in /etc/wpa_supplicant/wpa_supplicant-wlan*-lobby.conf; do [ -e "\$\$LOBBY_FILE" ] || continue; DEST_FILE="\$\${LOBBY_FILE%-lobby.conf}.conf"; cp "\$\$LOBBY_FILE" "\$\$DEST_FILE"; done'
+ExecStartPost=/bin/rm -f /run/manet-rendezvous.json
 RemainAfterExit=yes
 
 [Install]
@@ -1758,24 +1768,9 @@ systemctl enable battery-reader.service
 # Nodes without a dongle still run gps-reader.service safely — it writes
 # has_fix=false when gpsd is unreachable or has no fix.
 #
-# NTP strategy — sync once, then stop. Continuous polling is not worth the
-# HaLow airtime for a deployment measured in days, and a second of skew does
-# not matter. Only nodes that cost nothing to keep synced stay synced:
-#   - GPS fix: disciplines from the SHM 0 refclock, which is shared memory
-#     rather than a peer, so it costs no traffic at all. Such a node keeps
-#     chrony running and serves the mesh. node-manager marks it with
-#     /var/run/mesh-ntp-gps.state.
-#   - Ethernet gateway: syncs from pool.ntp.org over the wire, not over the
-#     mesh, and also serves. ethernet-autodetect.sh marks it with
-#     /var/run/mesh-ntp.state.
-#   - Everyone else: one-shot-time-sync.sh syncs once against whichever of
-#     those peers has the best TQ, then stops chrony for the rest of the boot.
-#
-# is_ntp_server in telemetry is the OR of the two markers, which is what makes
-# a GPS node discoverable as a time source. An earlier note here claimed this
-# happened by itself through stratum comparison — it did not. GPS-less nodes
-# do not run chrony at all, so there was no stratum to compare, and GPS was
-# never wired into the election.
+# mesh-time-sync owns chrony. GPS and directly connected internet nodes serve
+# time after source validation; other nodes stop polling between brief refreshes.
+# Existing Alfred telemetry carries is_ntp_server; no separate announcements.
 
 if have_package_network; then
     provision_try "apt install failed: gpsd gpsd-clients" \
@@ -1794,66 +1789,13 @@ START_DAEMON="true"
 USBAUTO="true"
 GPSD_CONF
 
-# Patch chrony configs — add SHM 0 refclock and IPv4 mesh allow if absent.
-# ethernet-autodetect.sh can replace chrony.conf from these templates, so all
-# available templates must carry the GPS/mesh-NTP additions too.
-ensure_chrony_gps_config() {
-    local conf="$1"
-    [ -f "$conf" ] || return 0
-
-    if ! grep -q 'refclock SHM 0' "$conf"; then
-        cat >> "$conf" <<'CHRONY_GPS'
-
-# GPS SHM refclock — populated by gpsd when a GPS dongle is present.
-# SHM 0 = NMEA sentences (~100 ms accuracy, stratum 0 source).
-# Nodes without a dongle: gpsd is not running so this refclock stays
-# unreachable and chrony ignores it transparently.
-refclock SHM 0 refid GPS precision 1e-1 delay 0.2 poll 4 offset 0.0
-CHRONY_GPS
-        echo " > chrony: SHM 0 refclock added to $conf"
-    fi
-    if ! grep -q 'allow 10\.30\.2\.' "$conf"; then
-        echo "allow 10.30.2.0/24" >> "$conf"
-        echo " > chrony: allow 10.30.2.0/24 added to $conf"
-    fi
-}
-
-# Seed chrony-default.conf when it is missing. Nodes provisioned before the
-# path fix got this written to /etc/chrony-default.conf, one directory too
-# high, where chronyd never reads it. Both ethernet-autodetect.sh and the
-# networkd-dispatcher off hook cp this file over chrony.conf after stopping
-# chrony; when it does not exist the cp fails silently and the node is left
-# stopped with the throwaway test config still in place.
-if [ ! -f /etc/chrony/chrony-default.conf ]; then
-    cat > /etc/chrony/chrony-default.conf <<'CHRONY_DEFAULT'
-# Default client config: chronyd starts with no network time sources, so it
-# generates no traffic until one is added. This carried a bare "offline"
-# directive until that was found to be invalid — chronyd refused to start at
-# all. With no sources configured the intended effect is the same.
-driftfile /var/lib/chrony/chrony.drift
-makestep 1.0 3
-deny all
-CHRONY_DEFAULT
-    echo " > chrony: seeded missing /etc/chrony/chrony-default.conf"
-fi
-
-for chrony_conf in \
-    /etc/chrony/chrony.conf \
-    /etc/chrony/chrony-default.conf \
-    /etc/chrony/chrony-server.conf \
-    /etc/chrony/chrony-test.conf; do
-    ensure_chrony_gps_config "$chrony_conf"
-done
-
+# The time service writes the active chrony config for the current role,
+# including the configured IPv4 mesh allow range and GPS SHM refclock.
 systemctl enable gps-reader.service
 systemctl restart gps-reader.service 2>/dev/null || true
-systemctl restart chrony 2>/dev/null || true
 
-# provision-mesh.sh writes this unit but leaves it disabled, with a note saying
-# radio-setup would enable it. That never happened, so the one-shot mesh time
-# sync has never run on any node. Nodes that are their own time source — GPS
-# fix, or Ethernet gateway — exit from it immediately and keep chrony running.
 systemctl enable one-shot-time-sync.service 2>/dev/null || true
+systemctl --no-block restart one-shot-time-sync.service 2>/dev/null || true
 
 # ============================================================================
 # === FIRST RUN vs RE-RUN ===

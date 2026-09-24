@@ -25,7 +25,9 @@ STATE_DIR = '/var/lib/manet-admin'
 CONFIG_ACK_TYPE = 73
 KINDS = {70: {'mesh_config', 'mesh_config_cancel'},
          71: {'radio_state', 'radio_cancel'},
-         72: {'radio_ack'}, 73: {'config_ack'}}
+         72: {'radio_ack'}, 73: {'config_ack'},
+         74: {'acs_state'}, 75: {'acs_helper'}}
+CHALLENGE_KINDS = {76: {'acs_probe'}, 77: {'acs_probe_reply'}}
 MAX_MESSAGE_BYTES = 16384
 MAX_AGE_SECONDS = 900
 FUTURE_SKEW_SECONDS = 60
@@ -34,6 +36,16 @@ ENVELOPE_KIND = 'manet_admin_v1'
 
 class AdminError(ValueError):
     pass
+
+
+def clock_ready():
+    directory = os.environ.get('MANET_TIME_RUN_DIR', os.environ.get('MANET_ACS_RUN_DIR', '/run'))
+    return (Path(directory) / 'initial_time_synced').is_file()
+
+
+def require_clock():
+    if not clock_ready():
+        raise AdminError('Waiting for initial GPS/NTP synchronization before timed mesh control')
 
 
 def password_from_conf(path=MESH_CONF):
@@ -127,7 +139,7 @@ class AdminTransport:
             yield
 
     def seal(self, type_id, payload):
-        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+        require_clock()
         if payload.get('kind') not in KINDS.get(type_id, set()):
             raise AdminError('Wrong admin message kind for Alfred type')
         password = password_from_conf(self.conf)
@@ -142,6 +154,28 @@ class AdminTransport:
             if sent_ns > now + FUTURE_SKEW_SECONDS * 10**9:
                 raise AdminError('Clock behind admin history; synchronize time before changing settings')
             private_json_write(path, {'salt': _b64(salt), 'sent_ns': sent_ns})
+        return self._encrypt(type_id, payload, password, salt, sent_ns)
+
+    def seal_challenge(self, type_id, payload):
+        """Clock-independent ACS discovery only; the caller must bind a nonce.
+
+        This has separate salt state and never advances timed sender/replay
+        history. No administrative command can use this transport.
+        """
+        if payload.get('kind') not in CHALLENGE_KINDS.get(type_id, set()):
+            raise AdminError('Wrong bootstrap message kind for Alfred type')
+        password = password_from_conf(self.conf)
+        with self._locked():
+            path = self.state_dir / 'bootstrap-sender.json'
+            sender = _read_json(path)
+            salt = _unb64(sender['salt'], 16) if sender else os.urandom(16)
+            if not sender:
+                private_json_write(path, {'salt': _b64(salt)})
+        return self._encrypt(type_id, payload, password, salt, 0)
+
+    @staticmethod
+    def _encrypt(type_id, payload, password, salt, sent_ns):
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
         body = json.dumps({'payload': payload, 'sent_ns': sent_ns,
                            'message_id': secrets.token_hex(16)},
                           separators=(',', ':'), allow_nan=False).encode()
@@ -154,10 +188,25 @@ class AdminTransport:
                 'nonce': _b64(nonce), 'ciphertext': _b64(ciphertext)}
 
     def open(self, type_id, envelope):
+        require_clock()
+        message = self._decrypt(type_id, envelope, KINDS)
+        age = (time.time_ns() - message.sent_ns) / 10**9
+        if not -FUTURE_SKEW_SECONDS <= age <= MAX_AGE_SECONDS:
+            raise AdminError('Expired admin message or clocks out of sync')
+        return message
+
+    def open_challenge(self, type_id, envelope):
+        """Authenticate type 76/77 only. Freshness requires the caller's nonce."""
+        message = self._decrypt(type_id, envelope, CHALLENGE_KINDS)
+        if message.sent_ns != 0:
+            raise AdminError('Invalid bootstrap timestamp')
+        return message
+
+    def _decrypt(self, type_id, envelope, kinds):
         from cryptography.hazmat.primitives.ciphers.aead import AESGCM
         if not isinstance(envelope, dict) or envelope.get('kind') != ENVELOPE_KIND:
             raise AdminError('Unsigned admin message')
-        if type_id not in KINDS:
+        if type_id not in kinds:
             raise AdminError('Unknown admin channel')
         salt = _unb64(envelope.get('salt'), 16)
         nonce = _unb64(envelope.get('nonce'), 12)
@@ -168,13 +217,10 @@ class AdminTransport:
             nonce, ciphertext, f'MANET admin v1 Alfred {type_id}'.encode())
         body = json.loads(plaintext)
         payload, sent_ns, message_id = body['payload'], body['sent_ns'], body['message_id']
-        if (not isinstance(payload, dict) or payload.get('kind') not in KINDS[type_id]
+        if (not isinstance(payload, dict) or payload.get('kind') not in kinds[type_id]
                 or type(sent_ns) is not int or not isinstance(message_id, str)
                 or not re.fullmatch('[0-9a-f]{32}', message_id)):
             raise AdminError('Invalid authenticated message')
-        age = (time.time_ns() - sent_ns) / 10**9
-        if not -FUTURE_SKEW_SECONDS <= age <= MAX_AGE_SECONDS:
-            raise AdminError('Expired admin message or clocks out of sync')
         return Message(payload, sent_ns, message_id)
 
     def messages(self, type_id, raw):

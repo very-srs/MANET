@@ -3,11 +3,12 @@
 # Quorum Checker
 # ==============================================================================
 # Determines if node is isolated and should return to lobby
-# Exit codes: 0 = healthy, 1 = return to lobby needed
+# Exit codes: 0 = stay put, 1 = return to lobby needed, 2 = check unavailable
 # ==============================================================================
 
-REGISTRY_STATE_FILE="/var/run/mesh_node_registry"
-BATCTL_PATH="/usr/sbin/batctl"
+REGISTRY_STATE_FILE="${REGISTRY_STATE_FILE:-/var/run/mesh_node_registry}"
+BATCTL_PATH="${BATCTL_PATH:-/usr/sbin/batctl}"
+PEER_COUNTER="$(dirname "${BASH_SOURCE[0]}")/mesh-peer-count.py"
 STALE_NODE_THRESHOLD=600
 QUORUM_THRESHOLD=0.5
 
@@ -21,14 +22,17 @@ NOW=$(date +%s)
 
 # Count active nodes
 ACTIVE_ALFRED_COUNT=$(awk -F"['=]" -v now="$NOW" -v stale="$STALE_NODE_THRESHOLD" \
-    '/LAST_SEEN_TIMESTAMP/ { if (now - $3 < stale) count++ } END { print count }' \
+    '/LAST_SEEN_TIMESTAMP/ { if (now - $3 < stale) count++ } END { print count+0 }' \
     "$REGISTRY_STATE_FILE")
 
 # Count shutting down nodes
 SHUTTING_DOWN_COUNT=$(grep -c "NODE_STATE='SHUTTING_DOWN'" "$REGISTRY_STATE_FILE" 2>/dev/null)
 
 # Count reachable mesh nodes (originators)
-UNIQUE_BATMAN_ORIGINATORS=$("$BATCTL_PATH" o 2>/dev/null | awk 'NR>1 {print $1}' | sort -u | wc -l)
+if ! UNIQUE_BATMAN_ORIGINATORS=$(python3 "$PEER_COUNTER" --batctl "$BATCTL_PATH"); then
+    log "Cannot read BATMAN peers. Deferring quorum check."
+    exit 2
+fi
 
 log "Health: Originators=$UNIQUE_BATMAN_ORIGINATORS, Active=$ACTIVE_ALFRED_COUNT, Shutdown=$SHUTTING_DOWN_COUNT"
 

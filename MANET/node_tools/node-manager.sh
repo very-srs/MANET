@@ -48,6 +48,7 @@ PUBLISH_INTERVAL=180  # Publish every 3 minutes
 LAST_IDENTITY_PUBLISH=0
 LAST_IDENTITY_ALLOCATION=""
 LAST_ACK_PUBLISHED=""
+CLOCK_READY_SEEN=false
 IDENTITY_PUBLISH_INTERVAL=270
 
 log() {
@@ -78,65 +79,14 @@ detect_and_update_gateway_state() {
 }
 
 # ==============================================================================
-# GPS time source
+# Time source advertisement (the time service owns chrony and these markers)
 # ==============================================================================
-# A node holding a live GPS fix disciplines its clock from gpsd's SHM 0
-# refclock. That costs no network traffic at all — the refclock is shared
-# memory, not a peer — so such a node keeps chrony running and serves time to
-# the mesh, giving GPS-less nodes something to do their one-shot sync against.
-#
-# Gateways advertise themselves through mesh-ntp.state, which is owned by
-# ethernet-autodetect.sh and deleted by it on carrier loss. This marker is kept
-# separate so the two owners never race to remove each other's state; the
-# published flag is the OR of the two.
-#
-# Which config chrony runs with is deliberately not managed here. That is owned
-# by provision-mesh.sh, ethernet-autodetect.sh and the networkd-dispatcher off
-# hook, and a third writer would reintroduce exactly the race this file avoids.
-GPS_NTP_STATE_FILE="/var/run/mesh-ntp-gps.state"
 GPS_STATUS_FILE="/run/gps_status.json"
-GPS_FIX_MAX_AGE=60      # seconds before a status file counts as stale
-LAST_GPS_CHECK=0
-GPS_CHECK_INTERVAL=60
-
-gps_has_live_fix() {
-    python3 - "$GPS_STATUS_FILE" "$GPS_FIX_MAX_AGE" <<'PY'
-import json, sys, time
-try:
-    with open(sys.argv[1]) as f:
-        d = json.load(f)
-except Exception:
-    sys.exit(1)
-if not d.get('has_fix'):
-    sys.exit(1)
-# gps-reader stamps every write. A frozen file means the daemon died or hung
-# still holding a fix, and time from a dead reader is not time we should serve.
-if time.time() - d.get('timestamp', 0) > float(sys.argv[2]):
-    sys.exit(1)
-sys.exit(0)
-PY
-}
-
-update_gps_time_source() {
-    local NOW
-    NOW=$(date +%s)
-    [ $(( NOW - LAST_GPS_CHECK )) -lt "$GPS_CHECK_INTERVAL" ] && return
-    LAST_GPS_CHECK=$NOW
-
-    if gps_has_live_fix; then
-        # chrony must actually be running for the SHM refclock to be read.
-        systemctl is-active --quiet chrony.service || systemctl start chrony.service
-        touch "$GPS_NTP_STATE_FILE"
-    else
-        # Stop advertising, but leave chrony alone: on a node whose chrony.conf
-        # has no network sources it is idle rather than chatty, and stopping it
-        # would only slow re-acquisition when the fix comes back.
-        rm -f "$GPS_NTP_STATE_FILE"
-    fi
-}
+GPS_FIX_MAX_AGE=60
 
 is_ntp_time_source() {
-    [ -f /var/run/mesh-ntp.state ] || [ -f "$GPS_NTP_STATE_FILE" ]
+    local run_dir="${MANET_TIME_RUN_DIR:-/run}"
+    [ -f "$run_dir/mesh-ntp.state" ] || [ -f "$run_dir/mesh-ntp-gps.state" ]
 }
 
 get_current_freq() {
@@ -282,6 +232,11 @@ ensure_static_channels
 while true; do
     NOW=$(date +%s)
 
+    if [ "$CLOCK_READY_SEEN" = false ] && [ -f "${MANET_TIME_RUN_DIR:-/run}/initial_time_synced" ]; then
+        CLOCK_READY_SEEN=true
+        LAST_PUBLISH_TIME=0; LAST_IDENTITY_PUBLISH=0; LAST_GW_CHECK=0
+    fi
+
     # === ALFRED RADIO STATE SYNC ===
     # Global radio up/down changes are staged through Alfred and only applied
     # after all nodes have ACKed the same version.
@@ -365,7 +320,6 @@ while true; do
 
         # Service flags
         detect_and_update_gateway_state
-        update_gps_time_source
         IS_GATEWAY_FLAG=$([ -f /var/run/mesh-gateway.state ] && echo "--is-internet-gateway" || echo "")
         GATEWAY_IFACE=$(cat /var/run/upstream_iface 2>/dev/null || echo "")
         IS_NTP_FLAG=$(is_ntp_time_source && echo "--is-ntp-server" || echo "")
