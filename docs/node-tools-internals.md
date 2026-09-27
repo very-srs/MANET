@@ -131,6 +131,29 @@ channel changes locally, behind nothing but the subnet check, and were removed
 once every caller had moved to the Alfred-staged path; a local change and a
 mesh-wide one now take the same route through `manet_manage.py`.
 
+**manet_web_sessions.py**
+
+Management logins use a fresh 256-bit random token per session. The threaded
+web process stores only the token's SHA-256 digest and deadline, under a lock.
+The 48-hour absolute limit has no idle timeout, allowing a login to cover a
+typical deployment. Deadlines use monotonic elapsed time, so GPS/NTP corrections
+cannot extend or prematurely end a session. No session state is written to disk
+or announced to peers; a service restart or reboot requires a new login.
+
+Login and validation read the current admin password under the same lock. A
+changed or missing password clears all sessions when observed. An unrelated
+config edit preserves them. Logout revokes the presented token; successful
+re-login replaces that browser's token. Each node keeps at most 64 sessions,
+discarding expired entries first and then the oldest if a new login needs room.
+
+The cookie is HttpOnly with SameSite=Lax. Its Max-Age matches the server's
+lifetime, but the server enforces expiry and revocation independently. Login,
+logout and dynamic HTML/JSON/CSV responses use `Cache-Control: no-store`.
+Management APIs return JSON 401 for invalid sessions; the dashboard returns to
+login while retaining its tab and query. Both form-login aliases and the JSON
+login endpoint use the same store. `test_web_sessions.py` checks token replay,
+expiry, concurrent requests, password changes and HTTP route authorization.
+
 **manet_radio.py**
 
 Radio primitives shared by the UI that offers a change and the code that

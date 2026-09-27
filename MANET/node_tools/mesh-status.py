@@ -37,7 +37,6 @@ import threading
 import time
 import urllib.request
 import hashlib
-import hmac
 import html
 from urllib.parse import urlparse, parse_qs, quote
 
@@ -46,6 +45,7 @@ from urllib.parse import urlparse, parse_qs, quote
 # this server has no local apply path of its own.
 from manet_manage import ManageRoutes
 from manet_peer_radios import interfaces_for_telemetry, peer_status_panel
+from manet_web_sessions import SessionStore
 from mesh_config import apply_local_to_conf, local_changes, mesh_changes, strip_local_keys
 from manet_admin import AdminTransport, CONFIG_ACK_TYPE, new_version, private_json_write, require_clock
 from manet_radio import (
@@ -69,7 +69,6 @@ MESH_STATE_FILE = "/etc/mesh_ipv4_state"
 PORT            = 8080
 REFRESH_MS      = 15000   # Status page polling interval (ms)
 PERF_AUTH_COOKIE = 'manet_perf_auth'
-PERF_AUTH_COOKIE_MAX_AGE = 15552000
 # The management UI lives behind this prefix on port 80, served in-process by
 # the ManageRoutes mixin. Nothing reaches it without the password cookie.
 MANAGE_PREFIX = '/manage'
@@ -120,32 +119,13 @@ def load_kv_file(path):
         pass
     return conf
 
-def _machine_token_salt():
-    for path in ('/etc/machine-id', '/var/lib/dbus/machine-id'):
-        try:
-            with open(path) as f:
-                value = f.read().strip()
-            if value:
-                return value
-        except Exception:
-            pass
-    return socket.gethostname()
-
 def get_provisioned_manage_password(conf=None):
-    conf = conf or load_kv_file(MESH_CONF_FILE)
+    if conf is None:
+        conf = load_kv_file(MESH_CONF_FILE)
     return conf.get('admin_password', '').strip()
 
-def get_perf_auth_token():
-    conf = load_kv_file(MESH_CONF_FILE)
-    manage_password = get_provisioned_manage_password(conf)
-    if not manage_password:
-        return ''
-    raw = f'{manage_password}|perf-local|v1|{_machine_token_salt()}'
-    return hashlib.sha256(raw.encode('utf-8')).hexdigest()
 
-def is_valid_perf_auth_token(token):
-    expected = get_perf_auth_token()
-    return bool(expected and token) and hmac.compare_digest(str(token), expected)
+WEB_SESSIONS = SessionStore(get_provisioned_manage_password)
 
 def parse_cookie_header(header):
     cookies = {}
@@ -160,6 +140,8 @@ def parse_cookie_header(header):
 
 def normalize_local_redirect(target):
     target = str(target or '/').strip()
+    if re.search(r'[\x00-\x1f\x7f\\]', target):
+        return '/'
     if not target.startswith('/'):
         return '/'
     if target.startswith('//'):
@@ -2981,16 +2963,16 @@ class MeshHandler(ManageRoutes, http.server.BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header('Content-Type', 'text/html; charset=utf-8')
         self.send_header('Content-Length', str(len(encoded)))
-        self.send_header('Cache-Control', 'no-cache')
+        self.send_header('Cache-Control', 'no-store')
         self.end_headers()
         self.wfile.write(encoded)
 
-    def send_json(self, obj):
+    def send_json(self, obj, status=200):
         body = json.dumps(obj, default=str).encode('utf-8')
-        self.send_response(200)
+        self.send_response(status)
         self.send_header('Content-Type', 'application/json')
         self.send_header('Content-Length', str(len(body)))
-        self.send_header('Cache-Control', 'no-cache')
+        self.send_header('Cache-Control', 'no-store')
         self.end_headers()
         self.wfile.write(body)
 
@@ -3004,20 +2986,39 @@ class MeshHandler(ManageRoutes, http.server.BaseHTTPRequestHandler):
         raw = self.rfile.read(length) if length else b''
         return parse_qs(raw.decode('utf-8'), keep_blank_values=True)
 
-    def _perf_cookie_valid(self):
+    def _perf_cookie_token(self):
         cookies = parse_cookie_header(self.headers.get('Cookie', ''))
-        return is_valid_perf_auth_token(cookies.get(PERF_AUTH_COOKIE, ''))
+        return cookies.get(PERF_AUTH_COOKIE, '')
+
+    def _perf_cookie_valid(self):
+        return WEB_SESSIONS.valid(self._perf_cookie_token())
+
+    def _set_perf_cookie(self, token):
+        self.send_header(
+            'Set-Cookie',
+            f'{PERF_AUTH_COOKIE}={token}; Path=/; Max-Age={WEB_SESSIONS.lifetime}; '
+            'HttpOnly; SameSite=Lax'
+        )
 
     def _send_perf_cookie_redirect(self, target_path, token):
         target_path = normalize_local_redirect(target_path)
         self.send_response(303)
         self.send_header('Location', target_path or MANAGE_PREFIX + '/')
-        self.send_header(
-            'Set-Cookie',
-            f'{PERF_AUTH_COOKIE}={token}; Path=/; Max-Age={PERF_AUTH_COOKIE_MAX_AGE}; '
-            'HttpOnly; SameSite=Lax'
-        )
+        self.send_header('Cache-Control', 'no-store')
+        self.send_header('Content-Length', '0')
+        self._set_perf_cookie(token)
         self.end_headers()
+
+    def _send_perf_login_json(self, token):
+        body = json.dumps({'ok': True, 'token': token,
+                           'expires_in': WEB_SESSIONS.lifetime}).encode('utf-8')
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Content-Length', str(len(body)))
+        self.send_header('Cache-Control', 'no-store')
+        self._set_perf_cookie(token)
+        self.end_headers()
+        self.wfile.write(body)
 
     def _send_perf_auth_required(self, next_path='/', error=''):
         next_path = normalize_local_redirect(next_path)
@@ -3030,9 +3031,12 @@ class MeshHandler(ManageRoutes, http.server.BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _send_perf_logout_redirect(self):
+        WEB_SESSIONS.logout(self._perf_cookie_token())
         self.send_response(303)
         self.send_header('Location', MANAGE_PREFIX + '/login')
         self.send_header('Set-Cookie', f'{PERF_AUTH_COOKIE}=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax')
+        self.send_header('Cache-Control', 'no-store')
+        self.send_header('Content-Length', '0')
         self.end_headers()
 
     def _send_redirect(self, location):
@@ -3071,8 +3075,9 @@ class MeshHandler(ManageRoutes, http.server.BaseHTTPRequestHandler):
                 next_path = normalize_local_redirect((form.get('next', [''])[0] or '').strip())
                 if not self._is_manage_path(next_path):
                     next_path = MANAGE_PREFIX + '/'
-                if password and password == get_provisioned_manage_password():
-                    self._send_perf_cookie_redirect(next_path, get_perf_auth_token())
+                token = WEB_SESSIONS.login(password, self._perf_cookie_token())
+                if token:
+                    self._send_perf_cookie_redirect(next_path, token)
                 else:
                     self._send_perf_auth_required(next_path=next_path,
                                                   error='Wrong management password')
@@ -3086,6 +3091,9 @@ class MeshHandler(ManageRoutes, http.server.BaseHTTPRequestHandler):
         # Everything else under /manage is the UI itself. This is the gate:
         # without a valid cookie the request never reaches a management route.
         if not self._perf_cookie_valid():
+            if path.startswith(MANAGE_PREFIX + '/api/'):
+                self.send_401_json()
+                return
             next_path = path
             if parsed.query:
                 next_path += '?' + parsed.query
@@ -3270,23 +3278,18 @@ class MeshHandler(ManageRoutes, http.server.BaseHTTPRequestHandler):
         length    = int(self.headers.get('Content-Length', 0))
         body      = self.rfile.read(length) if length else b'{}'
 
-        # Runtime control endpoints are called server-to-server by the
-        # management UI on peer nodes, so they authenticate by source IP rather
-        # than by cookie. Admin POSTs below are operator actions and need the
-        # password.
         if path == '/api/perf-auth':
             try:
                 req = json.loads(body)
             except Exception:
                 req = {}
-            password = str(req.get('password', '')).strip()
-            if password and password == get_provisioned_manage_password(conf):
-                self.send_json({'ok': True, 'token': get_perf_auth_token()})
+            password = req.get('password', '') if isinstance(req, dict) else ''
+            password = password.strip() if isinstance(password, str) else ''
+            token = WEB_SESSIONS.login(password, self._perf_cookie_token())
+            if token:
+                self._send_perf_login_json(token)
             else:
-                self.send_response(401)
-                self.send_header('Content-Type', 'application/json')
-                self.end_headers()
-                self.wfile.write(json.dumps({'ok': False, 'error': 'Wrong management password'}).encode('utf-8'))
+                self.send_401_json('Wrong management password')
             return
 
         # Reprovisioning the mesh (SAE key, SSID, IP range) is the most
