@@ -30,7 +30,6 @@
 | **HaLow Option B:** Lunpid USB MM8108 HaLow | 802.11ah over USB-C. **NA 902–928 MHz + EU 863–870 MHz.** Ships without antenna or USB cable. Pre-order. Use instead of Option A for EU. | €39.90 (~$43) | [lunpid](https://lunpid.com/products/usb-mm8108-halow) |
 | USB-A → USB-C cable/adapter | Connects the Lunpid dongle (USB-C female) to a USB-A port. Option B only. | ~$5 _(confirm)_ | n/a |
 
-> **HaLow antenna note:** the 915 MHz antenna below suits the NA 902–928 MHz band. For EU 863–870 MHz (Option B), use an 868 MHz antenna instead.
 
 ---
 
