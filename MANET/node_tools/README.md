@@ -94,9 +94,18 @@ grant management access:
 - `/manage/`: the management UI and every route beneath it, including the
   radio, measurement, voice and uplink APIs.
 - `/manage/login`, `/manage/logout`
-- `/api/perf-auth`: POST the password, receive the cookie token.
+- `/api/perf-auth`: POST a JSON `password`, set the cookie and receive its
+  `token` and `expires_in` (seconds).
 - `/api/admin/*`: mesh config staging, ACK status and apply.
 - `/admin`: redirects to `/manage/#config`.
+
+Each login creates a separate session on this node, valid for 48 hours with no
+idle timeout. Activity does not extend it. Logout invalidates that session;
+other devices stay logged in. Changing or removing the admin password,
+restarting the web service, or rebooting the node ends all its sessions.
+GPS/NTP clock corrections do not affect the deadline. When a management request
+finds an expired session, the page returns to login and preserves the current
+tab for after sign-in. Status pages remain available without a login.
 
 No unauthenticated route changes anything.
 

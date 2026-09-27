@@ -1547,6 +1547,16 @@ const MANAGE_BASE = (() => {
 // text "Not found", causing JSON.parse to fail.
 function U(path) { return MANAGE_BASE + path; }
 
+async function manageFetch(url, options) {
+  const response = await fetch(url, options);
+  if (response.status === 401) {
+    const next = window.location.pathname + window.location.search + window.location.hash;
+    window.location.replace(U('/login') + '?next=' + encodeURIComponent(next));
+    throw new Error('Management login expired. Please sign in again.');
+  }
+  return response;
+}
+
 const VALID_TABS = ['topology','radio','measure','sessions','uplink','voice','config'];
 const AUTO_REFRESH_MS = 15000;
 const THEME_KEY = 'manetUiTheme';
@@ -1584,7 +1594,7 @@ setTheme(preferredTheme());
 
 async function fetchTopo() {
   try {
-    const r = await fetch(U('/api/topology'));
+    const r = await manageFetch(U('/api/topology'));
     _topo = await r.json();
     renderTopology();
     buildHalowConfig();
@@ -1987,7 +1997,7 @@ async function toggleIface(nodeIp, nodeId, iface, state) {
     ? `Staging ${iface} ${state}; waiting for mesh ACKs...`
     : `Setting ${iface} ${state} on ${nodeIp}...`, 'info');
   try {
-    const r = await fetch(U('/api/interface/toggle'), {
+    const r = await manageFetch(U('/api/interface/toggle'), {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
       body: JSON.stringify({node_ip: nodeIp, iface, state})
@@ -2020,7 +2030,7 @@ async function setTxPower(nodeIp, nodeId, iface) {
     showMsg(`No TX power options available for ${iface}@${nodeIp}`, 'err');
     return;
   }
-  const r = await fetch(U('/api/txpower'), {
+  const r = await manageFetch(U('/api/txpower'), {
     method: 'POST',
     headers: {'Content-Type':'application/json'},
     body: JSON.stringify({node_ip: nodeIp, iface, dbm: parseFloat(dbm)})
@@ -2035,7 +2045,7 @@ async function toggleAll(iface, state) {
   showOverlay(`Coordinating ${iface} ${state} on all nodes through Alfred...`, 'info');
   showMsg(`Staging ${iface} ${state}; waiting for all mesh ACKs...`, 'info');
   try {
-    const r = await fetch(U('/api/interface/toggle'), {
+    const r = await manageFetch(U('/api/interface/toggle'), {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
       body: JSON.stringify({node_ip: 'all', iface, state})
@@ -2125,7 +2135,7 @@ async function applyHalow() {
   setButtonBusy('btn-apply-halow', true, 'APPLYING...', 'APPLY TO ALL NODES');
   showOverlay(`Applying HaLow ch${ch} / ${bw} / ${dbm} dBm: verifying all nodes...`, 'info');
   try {
-    const r = await fetch(U('/api/halow/channel'), {
+    const r = await manageFetch(U('/api/halow/channel'), {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
       body: JSON.stringify({channel: parseInt(ch), bw, dbm: parseFloat(dbm)})
@@ -2158,7 +2168,7 @@ async function apply2G() {
   showOverlay(`Applying 2.4G ch${ch} / ${dbm} dBm to all nodes...`, 'info');
   showMsg(`Applying 2.4G ch${ch} / ${dbm} dBm to all nodes...`, 'info');
   try {
-    const r = await fetch(U('/api/wifi/channel'), {
+    const r = await manageFetch(U('/api/wifi/channel'), {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
       body: JSON.stringify({interface: 'wlan0', channel: parseInt(ch), dbm: parseFloat(dbm)})
@@ -2180,7 +2190,7 @@ async function apply5G() {
   setButtonBusy('btn-apply-5g', true, 'APPLYING...', 'APPLY TO ALL NODES');
   showOverlay(`Applying 5G ch${ch} / ${dbm} dBm to all nodes...`, 'info');
   try {
-    const r = await fetch(U('/api/wifi/channel'), {
+    const r = await manageFetch(U('/api/wifi/channel'), {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
       body: JSON.stringify({interface: 'wlan1', channel: parseInt(ch), dbm: parseFloat(dbm)})
@@ -2199,7 +2209,7 @@ async function apply5G() {
 // ── Measurements tab ──
 async function loadUsbWifiUplink() {
   try {
-    const r = await fetch(U('/api/uplink/wifi'));
+    const r = await manageFetch(U('/api/uplink/wifi'));
     const d = await r.json();
     if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
     const ssid = document.getElementById('uplink-wifi-ssid');
@@ -2233,7 +2243,7 @@ async function applyUsbWifiUplink() {
   if (btn) { btn.disabled = true; btn.textContent = 'APPLYING...'; }
   showMsg(`Configuring USB Wi-Fi uplink for SSID ${ssid}...`, 'info');
   try {
-    const r = await fetch(U('/api/uplink/wifi'), {
+    const r = await manageFetch(U('/api/uplink/wifi'), {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
       body: JSON.stringify({ssid, password, enabled: true})
@@ -2308,7 +2318,7 @@ async function startMeasurement() {
   showMsg('Starting measurement session...', 'info');
 
   try {
-    const r = await fetch(U('/api/measure/start'), {
+    const r = await manageFetch(U('/api/measure/start'), {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
       body: JSON.stringify({label, pairs, tests, duration, udp_bitrate: udpBitrate})
@@ -2330,7 +2340,7 @@ async function startMeasurement() {
 
 async function pollStatus() {
   try {
-    const r = await fetch(U('/api/measure/status'));
+    const r = await manageFetch(U('/api/measure/status'));
     const d = await r.json();
     if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
 
@@ -2360,7 +2370,7 @@ async function pollStatus() {
 
 // ── Sessions tab ──
 async function loadSessions() {
-  const r = await fetch(U('/api/sessions'));
+  const r = await manageFetch(U('/api/sessions'));
   const d = await r.json();
   const list = document.getElementById('sessions-list');
   if (!d.length) {
@@ -2397,7 +2407,7 @@ async function deleteSession(encodedLabel) {
   const label = decodeURIComponent(encodedLabel);
   if (!confirm(`Delete measurement session "${label}"? This cannot be undone.`)) return;
   try {
-    const r = await fetch(U(`/api/sessions/${encodedLabel}`), {method: 'DELETE'});
+    const r = await manageFetch(U(`/api/sessions/${encodedLabel}`), {method: 'DELETE'});
     const d = await r.json();
     if (!r.ok || !d.ok) throw new Error(d.error || `HTTP ${r.status}`);
     showMsg(`Deleted session ${label}`, 'ok');
@@ -2706,7 +2716,7 @@ async function voiceSetCodec(codec) {
   voiceCodecPaint(voiceCodec);
   voiceCodecMsg('Staging across the mesh: waiting for every node to ACK…');
   try {
-    const r = await fetch(U('/api/voice/codec'), {
+    const r = await manageFetch(U('/api/voice/codec'), {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({codec})
@@ -2747,7 +2757,7 @@ async function voiceSetChannel(ch) {
   voiceTgPaint(ch);
   voiceTgMsg('Switching to talk group ' + ch + '…');
   try {
-    const r = await fetch(U('/api/voice/channel'), {
+    const r = await manageFetch(U('/api/voice/channel'), {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({channel: ch})
@@ -2794,7 +2804,7 @@ function voicePaintHealth(d, running) {
 async function refreshVoice() {
   let d;
   try {
-    const r = await fetch(U('/api/voice'));
+    const r = await manageFetch(U('/api/voice'));
     if (!r.ok) return;
     d = await r.json();
   } catch (e) { return; }
@@ -3348,7 +3358,7 @@ function stopConfigPolling() {
 // ── Fetch status ─────────────────────────────────────────────────────────────
 async function refreshStatus() {
   try {
-    const r = await fetch('/api/admin/status');
+    const r = await manageFetch('/api/admin/status');
     if (!r.ok) return;
     STATUS = await r.json();
     renderStatus(STATUS);
@@ -3512,7 +3522,7 @@ async function stageChanges() {
   const cfg = readForm();
   cfgShowMsg('Staging...', 'muted');
   try {
-    const r   = await fetch('/api/admin/stage', {
+    const r   = await manageFetch('/api/admin/stage', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({config: cfg})
@@ -3544,7 +3554,7 @@ async function applyChanges(force) {
   closeForceModal();
   cfgShowMsg('Sending activate signal...', 'ok');
   try {
-    const r   = await fetch('/api/admin/activate', {
+    const r   = await manageFetch('/api/admin/activate', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({force: force, no_rollback: skipRollback()})
@@ -3568,7 +3578,7 @@ async function applyChanges(force) {
 // ── Cancel pending ────────────────────────────────────────────────────────────
 async function cancelPending() {
   try {
-    const r   = await fetch('/api/admin/cancel', {method: 'POST'});
+    const r   = await manageFetch('/api/admin/cancel', {method: 'POST'});
     const res = await r.json();
     if (r.ok && res.ok) {
       toast('Pending config cancelled', 'warn');
@@ -3967,6 +3977,7 @@ class ManageRoutes:
                 self.send_header('Content-Type', 'text/csv')
                 self.send_header('Content-Disposition', f'attachment; filename="{label}.csv"')
                 self.send_header('Content-Length', str(len(csv_data)))
+                self.send_header('Cache-Control', 'no-store')
                 self.end_headers()
                 self.wfile.write(csv_data)
             else:
