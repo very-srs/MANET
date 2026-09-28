@@ -150,6 +150,7 @@ class Runtime:
         self.discovery = rendezvous.Discovery(self.run_dir)
         self.rendezvous_allowed = {}
         self.halow_health = None
+        self.ui_status = {}
 
     @contextmanager
     def channel_lock(self):
@@ -211,6 +212,8 @@ class Runtime:
                   'discovery': self.discovery.mode(configured_channels) == 'search'}
         if not protocol.valid_status(status):
             raise ValueError('invalid local radio state')
+        self.ui_status.update(current=current, halow_ready=status['halow_ready'],
+                              searching=status['discovery'])
         return status
 
     def busy(self, now):
@@ -241,7 +244,14 @@ class Runtime:
                       and record['status'].get('halow_ready') is True)
 
     def members(self, records):
-        peers = command([sys.executable, TOOLS / 'mesh-peer-count.py', '--batctl', self.batctl, '--list'], timeout=7).split()
+        rows = json.loads(command([self.batctl, 'meshif', 'bat0', 'originators_json']))
+        if not isinstance(rows, list) or any(not isinstance(r, dict) or
+                not isinstance(r.get('orig_address'), str) or
+                not protocol.MAC.fullmatch(r['orig_address'].lower()) for r in rows):
+            raise ValueError('invalid originator table')
+        peers = sorted({r['orig_address'].lower() for r in rows})
+        self.ui_status['route_interfaces'] = sorted({r['hard_ifname'] for r in rows
+            if r.get('best') is True and isinstance(r.get('hard_ifname'), str)})
         registry = self.registry.read_text() if self.registry.exists() else ''
         return canonical_members(self.own, peers, registry, records)
 
@@ -281,7 +291,7 @@ class Runtime:
             private_json_write(self.path, self.state)
             self.persisted = serialized
 
-    def apply(self, channels, limp=False, *, challenged=False, discovering=False):
+    def apply(self, channels, limp=False, *, challenged=False, discovering=False, reason='Agreed channel plan'):
         # Clockless callers may follow a consumed nonce reply or park a
         # disconnected searcher at fixed anchors, never run a timed election.
         if not challenged and not discovering:
@@ -340,6 +350,15 @@ class Runtime:
                 else:
                     raise ValueError(f'{iface} did not reach {freq}')
         self.discovery.set_mode('search' if discovering else 'data')
+        if changes:
+            event = {'at': int(time.time()), 'monotonic': time.monotonic(), 'channels': channels,
+                     'reason': ('Lobby rotation' if discovering else
+                                'Clockless peer recovery' if challenged else reason)}
+            try:
+                private_json_write(self.run_dir / 'manet-last-channel-change.json', event)
+            except OSError:
+                pass  # A display failure must not interrupt channel recovery.
+
         if discovering:
             print('ACS discovery channels ' + json.dumps(channels), flush=True)
             return
@@ -367,6 +386,27 @@ class Runtime:
         return True
 
     def tick(self, now):
+        self.ui_status = {'clock_ready': clock_ready()}
+        try:
+            self._tick(now)
+        except Exception:
+            self.ui_status['error'] = 'Channel recovery could not read or apply radio state'
+            raise
+        finally:
+            saved = self.state.get('protocol', {})
+            plan = saved.get('plan', {})
+            self.ui_status.update(monotonic=time.monotonic(), phase=saved.get('phase', 'idle'),
+                                  target=self.state.get('destination', {}).get('plan', {}).get('channels', {}),
+                                  pending_channels=plan.get('channels', {}),
+                                  votes=len(saved.get('votes', {})), participants=len(plan.get('participants', {})),
+                                  deadline=plan.get('deadline'), activate_at=plan.get('activate_at'),
+                                  hold_until=self.state.get('hold_until', 0))
+            try:
+                private_json_write(self.run_dir / 'manet-acs-status.json', self.ui_status)
+            except OSError:
+                pass
+
+    def _tick(self, now):
         if not clock_ready():
             with self.channel_lock():
                 destination = self.bootstrap_select()
@@ -376,6 +416,7 @@ class Runtime:
                     local = self.status(now)
                     if local['acs'] and local['discovery']:
                         peers = command([sys.executable, TOOLS / 'mesh-peer-count.py', '--batctl', self.batctl, '--list'], timeout=7).split()
+                        self.ui_status['reachable'] = len(peers)
                         self.discovery_step(now, local, bool(peers))
             return  # Never persist rounds or poison the timed sender history.
         with self.channel_lock():
@@ -411,6 +452,7 @@ class Runtime:
             destinations = self.connected_destinations(view, records, local, now)
             destinations = protocol.network_destinations(destinations, view or {})
             conflicting = protocol.conflicting_destinations(destinations.values())
+            self.ui_status.update(reachable=len(view) - 1 if view else None, conflicting=conflicting)
             if conflicting and self.state.get('hold_until', 0) > now:
                 # The recollection hold must not keep reunited
                 # groups on different channels. Their next common scan/round
@@ -437,6 +479,7 @@ class Runtime:
                 expiry = int(self.busy_path.read_text())
                 if expiry < now or expiry - now > 125:
                     self.busy_path.unlink(missing_ok=True)
+            apply_reason = 'Agreed channel plan'
             if plan is not None and local['acs']:
                 self.state['destination'] = {'plan': plan, 'commit': updated['commit']}
                 self.state['recovered_round'] = plan['round']
@@ -467,6 +510,7 @@ class Runtime:
                     else:
                         candidates.append(entry)
                 if candidates:
+                    apply_reason = 'Returning to the connected mesh channel plan'
                     destination = max(candidates, key=lambda c: c[:2])[2]
                     plan = destination['plan']
                     self.state.update(destination=destination, recovered_round=plan['round'],
@@ -494,7 +538,7 @@ class Runtime:
                 self.state['retry_at'] = now + 30
                 self.save()
                 moved = any(local['current'].get(b, f) != f for b, f in plan['channels'].items())
-                self.apply(plan['channels'], plan['limp'])
+                self.apply(plan['channels'], plan['limp'], reason=apply_reason)
                 self.state.pop('repair_until', None)
                 local = self.status(int(time.time()))
                 if moved:

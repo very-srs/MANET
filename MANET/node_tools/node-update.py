@@ -40,6 +40,8 @@ REQUIRED = MARKERS | {
     "usr/local/bin/node-update.sh", "usr/local/bin/node-update.py",
     "usr/local/bin/node-manager-static.sh", "usr/local/bin/node-manager-acs.sh",
     "usr/local/bin/manet-admin-setup.sh", "usr/local/bin/mesh-status.py",
+    "usr/local/bin/manet_manage.py", "usr/local/bin/manet_web_sessions.py",
+    "usr/local/bin/manet_web_limits.py", "usr/local/bin/manet_recovery_status.py",
     "usr/local/bin/manet-provision-status.sh", "usr/local/bin/manet-power-status.sh",
     "etc/systemd/system/manet-admin-setup.service",
     "usr/local/bin/mesh-channel-agreement.py", "usr/local/bin/manet_acs_agreement.py",
