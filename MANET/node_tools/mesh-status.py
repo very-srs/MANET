@@ -26,7 +26,6 @@ Calls:
 """
 
 import http.server
-import socketserver
 import json
 import subprocess
 import re
@@ -45,7 +44,9 @@ from urllib.parse import urlparse, parse_qs, quote
 # this server has no local apply path of its own.
 from manet_manage import ManageRoutes
 from manet_peer_radios import interfaces_for_telemetry, peer_status_panel
+from manet_recovery_status import recovery_status, RECOVERY_JS
 from manet_web_sessions import SessionStore
+from manet_web_limits import BoundedHTTPServer, RequestLimits, STATUS_CACHE, MANAGEMENT_WRITE, Busy
 from mesh_config import apply_local_to_conf, local_changes, mesh_changes, strip_local_keys
 from manet_admin import AdminTransport, CONFIG_ACK_TYPE, new_version, private_json_write, require_clock
 from manet_radio import (
@@ -870,6 +871,7 @@ def assemble_local_data():
         'eud_mode':  conf.get('eud', 'wired'),
         'ap_ssid':   conf.get('lan_ap_ssid', ''),
         'mesh_ssid': conf.get('mesh_ssid', ''),
+        'recovery': recovery_status(conf, nodes_raw, hostname),
     }
 
 def assemble_peer_data(peer_ip):
@@ -948,6 +950,27 @@ def is_allowed_ip(client_ip, conf):
 
 
 # Data Assembly
+
+def assemble_debug_data():
+    _, orig_map = run_batctl_originators()
+    neighbors  = run_batctl_neighbors()
+    gateways   = run_batctl_gateways()
+    nodes_raw  = parse_registry()
+    debug = {
+        'gateways':  gateways,
+        'neighbors': neighbors,
+        'orig_map_sample': {k: v for k, v in list(orig_map.items())[:5]},
+        'node_macs': {
+            nid: {
+                'hostname': nd.get('HOSTNAME'),
+                'primary':  nd.get('MAC_ADDRESS'),
+                'all':      nd.get('MAC_ADDRESSES'),
+            }
+            for nid, nd in nodes_raw.items()
+        }
+    }
+    return debug
+
 
 def assemble_status_data():
     conf       = load_kv_file(MESH_CONF_FILE)
@@ -1507,6 +1530,7 @@ STATUS_HTML = r"""<!DOCTYPE html>
   </div>
 </div>
 <script>
+__RECOVERY_JS__
 // ── Data & State ────────────────────────────────────────────────────────────
 let DATA = null;
 let SIM  = { nodes: [], links: [], running: false, raf: null };
@@ -1516,6 +1540,17 @@ let EXPANDED_NODE_IDS = new Set();
 let LOCAL_DETAIL_HTML = '<div class="peer-loading">Loading…</div>';
 let PEER_DETAIL_CACHE = {};
 let PEER_LOADING_IDS = new Set();
+let localBusy = false, dataBusy = false;
+let webRetryAt = 0;
+async function statusFetch(url) {
+  if (Date.now() < webRetryAt) throw new Error('Radio busy; retrying shortly');
+  const r = await fetch(url, {signal: AbortSignal.timeout(45000)});
+  if (r.status === 503) {
+    webRetryAt = Date.now() + 5000;
+    throw new Error('Radio busy; retrying shortly');
+  }
+  return r;
+}
 const POLL_INTERVAL_MS = __REFRESH__;
 const THEME_KEY = 'manetUiTheme';
 
@@ -2205,7 +2240,7 @@ function battColor(pct) {
 
 function renderLocalPanel(d) {
   // ── Identity rows ──
-  let html = '';
+  let html = '<details><summary style="padding:10px;cursor:pointer">Mesh recovery</summary>' + recoveryPanel(d.recovery) + '</details>';
 
   // Battery
   let battHtml = '—';
@@ -2331,8 +2366,10 @@ function renderLocalPanel(d) {
 }
 
 async function fetchLocal() {
+  if (localBusy || document.hidden) return;
+  localBusy = true;
   try {
-    const r = await fetch('/api/local');
+    const r = await statusFetch('/api/local');
     if (!r.ok) throw new Error(r.status);
     const d = await r.json();
     updateHealthPill(d);
@@ -2342,13 +2379,15 @@ async function fetchLocal() {
   } catch (err) {
     LOCAL_DETAIL_HTML = `<div class="peer-loading" style="color:var(--bad)">Error: ${err.message}</div>`;
     if (DATA) renderNodeList(DATA.nodes);
-  }
+  } finally { localBusy = false; }
 }
 
 // ── Data Fetching ─────────────────────────────────────────────────────────────
 async function fetchData() {
+  if (dataBusy || document.hidden) return;
+  dataBusy = true;
   try {
-    const r = await fetch('/api/data');
+    const r = await statusFetch('/api/data');
     if (!r.ok) throw new Error(r.status);
     DATA = await r.json();
     document.getElementById('loading').style.display = 'none';
@@ -2357,7 +2396,7 @@ async function fetchData() {
     startSim(DATA);
   } catch (err) {
     document.getElementById('loading').textContent = `ERROR: ${err.message}`;
-  }
+  } finally { dataBusy = false; }
 }
 
 fetchData();
@@ -2427,7 +2466,7 @@ async function fetchPeer(ip, hostname) {
     : null;
   const nodeId = node ? node.id : null;
   try {
-    const r = await fetch('/api/peer/' + ip);
+    const r = await statusFetch('/api/peer/' + ip);
     const d = await r.json();
     if (!r.ok || d.error) throw new Error(d.error || r.status);
     if (nodeId) PEER_DETAIL_CACHE[nodeId] = renderPeerDrawer(d, hostname);
@@ -2690,6 +2729,7 @@ def assemble_admin_status():
 
 def render_status_page():
     html = STATUS_HTML
+    html = html.replace('__RECOVERY_JS__', RECOVERY_JS)
     html = html.replace('__CSS__',     CSS)
     html = html.replace('__REFRESH__', str(REFRESH_MS))
     html = html.replace('__LOGO_V__',  logo_asset_token())
@@ -2935,7 +2975,7 @@ button {{
 
 # HTTP Handler
 
-class MeshHandler(ManageRoutes, http.server.BaseHTTPRequestHandler):
+class MeshHandler(RequestLimits, ManageRoutes, http.server.BaseHTTPRequestHandler):
 
     def log_message(self, fmt, *args):
         # Suppress default access logs (use stderr only for errors)
@@ -2977,13 +3017,11 @@ class MeshHandler(ManageRoutes, http.server.BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def read_json_body(self):
-        length = int(self.headers.get('Content-Length', '0') or '0')
-        raw = self.rfile.read(length) if length else b'{}'
+        raw = self.read_body() or b'{}'
         return json.loads(raw.decode('utf-8') or '{}')
 
     def read_form_body(self):
-        length = int(self.headers.get('Content-Length', '0') or '0')
-        raw = self.rfile.read(length) if length else b''
+        raw = self.read_body()
         return parse_qs(raw.decode('utf-8'), keep_blank_values=True)
 
     def _perf_cookie_token(self):
@@ -3126,6 +3164,22 @@ class MeshHandler(ManageRoutes, http.server.BaseHTTPRequestHandler):
             self.path = original
 
     def do_GET(self):
+        try:
+            self._do_GET()
+        except Busy as exc:
+            self.send_busy(exc)
+
+    def send_busy(self, error):
+        body = json.dumps({'error': str(error)}).encode()
+        self.send_response(503)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Content-Length', str(len(body)))
+        self.send_header('Cache-Control', 'no-store')
+        self.send_header('Retry-After', '5')
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _do_GET(self):
         parsed = urlparse(self.path)
         logo_file = logo_asset_file(parsed.path)
         if logo_file:
@@ -3162,8 +3216,10 @@ class MeshHandler(ManageRoutes, http.server.BaseHTTPRequestHandler):
 
         elif path == '/api/data':
             try:
-                data = assemble_status_data()
+                data = STATUS_CACHE.get('status', assemble_status_data)
                 self.send_json(data)
+            except Busy:
+                raise
             except Exception as e:
                 self.send_response(500)
                 self.end_headers()
@@ -3172,8 +3228,10 @@ class MeshHandler(ManageRoutes, http.server.BaseHTTPRequestHandler):
 
         elif path == '/api/local':
             try:
-                data = assemble_local_data()
+                data = STATUS_CACHE.get('local', assemble_local_data)
                 self.send_json(data)
+            except Busy:
+                raise
             except Exception as e:
                 self.send_response(500)
                 self.end_headers()
@@ -3199,24 +3257,10 @@ class MeshHandler(ManageRoutes, http.server.BaseHTTPRequestHandler):
 
         elif path == '/api/debug':
             try:
-                _, orig_map = run_batctl_originators()
-                neighbors  = run_batctl_neighbors()
-                gateways   = run_batctl_gateways()
-                nodes_raw  = parse_registry()
-                debug = {
-                    'gateways':  gateways,
-                    'neighbors': neighbors,
-                    'orig_map_sample': {k: v for k, v in list(orig_map.items())[:5]},
-                    'node_macs': {
-                        nid: {
-                            'hostname': nd.get('HOSTNAME'),
-                            'primary':  nd.get('MAC_ADDRESS'),
-                            'all':      nd.get('MAC_ADDRESSES'),
-                        }
-                        for nid, nd in nodes_raw.items()
-                    }
-                }
+                debug = STATUS_CACHE.get('debug', assemble_debug_data)
                 self.send_json(debug)
+            except Busy:
+                raise
             except Exception as e:
                 self.send_response(500)
                 self.end_headers()
@@ -3227,9 +3271,11 @@ class MeshHandler(ManageRoutes, http.server.BaseHTTPRequestHandler):
                 self.send_401_json()
                 return
             try:
-                data = assemble_admin_status()
+                data = dict(STATUS_CACHE.get('admin', assemble_admin_status, ttl=2))
                 data['my_hostname'] = get_my_hostname()
                 self.send_json(data)
+            except Busy:
+                raise
             except Exception as e:
                 self.send_response(500)
                 self.end_headers()
@@ -3258,6 +3304,19 @@ class MeshHandler(ManageRoutes, http.server.BaseHTTPRequestHandler):
         self.wfile.write(b'Not found')
 
     def do_POST(self):
+        path = urlparse(self.path).path
+        changing = (path.startswith('/manage/api/') or path.startswith('/api/admin/'))
+        if changing and not MANAGEMENT_WRITE.acquire(blocking=False):
+            self.send_busy('Another management change is running; retry when it finishes')
+            return
+        try:
+            self._do_POST()
+        finally:
+            if changing:
+                STATUS_CACHE.invalidate()
+                MANAGEMENT_WRITE.release()
+
+    def _do_POST(self):
         conf      = load_kv_file(MESH_CONF_FILE)
         client_ip = self.client_address[0]
         parsed    = urlparse(self.path)
@@ -3275,8 +3334,7 @@ class MeshHandler(ManageRoutes, http.server.BaseHTTPRequestHandler):
             return
 
         path      = parsed.path.rstrip('/') or '/'
-        length    = int(self.headers.get('Content-Length', 0))
-        body      = self.rfile.read(length) if length else b'{}'
+        body = self.read_body() or b'{}'
 
         if path == '/api/perf-auth':
             try:
@@ -3439,9 +3497,8 @@ class MeshHandler(ManageRoutes, http.server.BaseHTTPRequestHandler):
 
 # Entry Point
 
-class ThreadedServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
-    daemon_threads = True
-    allow_reuse_address = True
+class ThreadedServer(BoundedHTTPServer):
+    pass
 
 if __name__ == '__main__':
     import sys

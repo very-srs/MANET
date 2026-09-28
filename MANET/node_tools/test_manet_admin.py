@@ -390,6 +390,8 @@ class WebBoundaryTests(unittest.TestCase):
         handler.client_address = ('127.0.0.1', 12345)
         handler.headers = {}
         handler.rfile = io.BytesIO(b'{}')
+        handler.read_body = lambda: handler.rfile.read(int(handler.headers.get('Content-Length', 0)))
+        status.STATUS_CACHE.invalidate()
         handler._is_perf_host = Mock(return_value=False)
         handler._perf_cookie_valid = Mock(return_value=authenticated)
         handler.send_json = Mock()

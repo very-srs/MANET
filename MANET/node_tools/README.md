@@ -115,8 +115,29 @@ Access control has two layers:
   subnet (`ipv4_network`), and management routes additionally require the
   cookie.
 - **Kernel.** `manet-ui-firewall.sh` limits port 80 to localhost and this
-  node's own DHCP clients, so the pages are unreachable from other radios, from
-  other radios' EUDs, and from the uplink LAN.
+  node's DHCP address pool. This is an intentional convenience boundary for
+  the trusted team; management actions still require the admin password.
+
+The server accepts at most eight concurrent connections, with a ten-second
+idle read timeout and a ten-second total body deadline. Request bodies are
+limited to 64 KiB. At most two status collections run together; browser tabs
+share results for five seconds (two seconds for voice and config status).
+An overloaded server returns HTTP 503 and asks the browser to retry after five
+seconds. Only one management POST can run at a time. Background tabs stop
+polling, and visible tabs wait for an outstanding poll before starting another.
+
+Measurement batches allow up to 64 pairs and seven test types, with 5-300 seconds
+per throughput test and a one-hour total execution budget including command
+timeouts. A second measurement cannot start while one is running.
+
+Expand **Mesh recovery** on the management page or in this node's status panel
+for observed and agreed Wi-Fi channels, acknowledgement progress, recovery holds,
+the last verified clock source, peer metadata age and the last automatic Wi-Fi
+switch. Reachability covers all radios: a working route through HaLow still
+counts as a connected mesh. A ready HaLow interface alone is not proof of a peer
+connection. Missing or stale observations are labelled accordingly. These
+details come from local files and the existing registry, with no new mesh
+announcements.
 
 Link quality is BATMAN_V's metric, which is throughput in Mbit/s and not a
 0-255 link quality. `batctl` prints 43.2 for a 43.2 Mbit/s link. The color

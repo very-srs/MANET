@@ -154,6 +154,32 @@ login while retaining its tab and query. Both form-login aliases and the JSON
 login endpoint use the same store. `test_web_sessions.py` checks token replay,
 expiry, concurrent requests, password changes and HTTP route authorization.
 
+**Web resource limits and recovery status**
+
+`manet_web_limits.py` bounds the HTTP worker count at eight and concurrent status
+collectors at two. Fixed cache keys share status work across clients; a busy
+collector returns 503 instead of starting duplicate subprocesses. Management
+POSTs are serialized and invalidate cached observations when they finish.
+Authentication is checked before serving any cached management data. Body
+validation rejects oversized, ambiguous and incomplete requests before routing
+them to actions. Reads have a ten-second socket timeout and bodies also have a
+ten-second elapsed-time deadline.
+
+`mesh-channel-agreement.py` writes a local observation to
+`/run/manet-acs-status.json` each tick. Successful automatic channel changes
+record their reason in `/run/manet-last-channel-change.json`. Both are volatile;
+failure to write display state cannot stop channel recovery. No extra Alfred
+fields or messages are added. `manet_recovery_status.py` combines these with the
+existing time-client state and registry, and rejects observations older than
+45 seconds as current evidence. A HaLow route is identified by its assigned
+interface, while HaLow readiness only explains why Wi-Fi tours are suppressed.
+
+`test_mesh_recovery_sequence.py` runs three independent ACS instances with real
+authenticated messages, simulated radios and delayed/lost Alfred delivery. It
+covers missing votes, restart before activation, straggler recovery, complete
+link loss and reconnection, and the existing advertisement interval. This does
+not measure physical switching time or RF airtime.
+
 **manet_radio.py**
 
 Radio primitives shared by the UI that offers a change and the code that
@@ -204,7 +230,11 @@ Installs the nftables rules described above: port 80 restricted to localhost and
 this node's DHCP pool, port 5201 (iperf3) to the mesh subnet. Uses source
 addresses rather than interfaces, because `br0` bridges `bat0`; a packet from a
 remote node arrives on `br0` exactly like one from a local EUD. Re-run by
-`mesh-ip-manager.sh` whenever the DHCP pool moves.
+`mesh-ip-manager.sh` whenever the DHCP pool moves. The pool-based policy is
+intentional. Replacement runs as one nftables transaction under a local lock;
+if any rule fails, the previous table and success marker remain intact. The
+marker is replaced only after nft reports success, so a later invocation can
+retry. Missing pool data continues to leave existing rules alone.
 
 ---
 

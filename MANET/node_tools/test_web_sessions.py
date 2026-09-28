@@ -136,6 +136,9 @@ class MemoryConnection:
         self.raw = raw
         self.output = bytearray()
 
+    def settimeout(self, seconds):
+        pass
+
     def makefile(self, *args):
         return io.BytesIO(self.raw)
 
@@ -145,6 +148,7 @@ class MemoryConnection:
 
 class WebSessionTests(unittest.TestCase):
     def setUp(self):
+        status.STATUS_CACHE.invalidate()
         scratch = tempfile.TemporaryDirectory()
         self.addCleanup(scratch.cleanup)
         self.conf = Path(scratch.name) / 'mesh.conf'

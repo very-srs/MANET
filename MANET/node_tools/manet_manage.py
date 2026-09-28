@@ -46,6 +46,8 @@ import ipaddress
 from datetime import datetime, timezone
 from urllib.parse import urlparse, unquote
 
+from manet_web_limits import STATUS_CACHE, Busy
+from manet_recovery_status import recovery_status, RECOVERY_JS
 from manet_peer_radios import peer_radio_interfaces
 from manet_admin import AdminTransport, new_version
 from manet_radio import (halow_bandwidth_for_channel, halow_channel_for_frequency,
@@ -913,6 +915,7 @@ def build_topology():
         'my_ip':      my_ip,
         'internet':   has_internet(),
         'halow_plan': halow_channel_options(),
+        'recovery': recovery_status(conf, nodes_raw, my_host),
         'timestamp':  int(time.time()),
     }
 
@@ -1547,8 +1550,14 @@ const MANAGE_BASE = (() => {
 // text "Not found", causing JSON.parse to fail.
 function U(path) { return MANAGE_BASE + path; }
 
+let manageRetryAt = 0;
 async function manageFetch(url, options) {
-  const response = await fetch(url, options);
+  if (Date.now() < manageRetryAt) throw new Error('Radio busy; retry shortly');
+  const response = await fetch(url, {...options, signal: AbortSignal.timeout(options ? 180000 : 45000)});
+  if (response.status === 503) {
+    manageRetryAt = Date.now() + 5000;
+    throw new Error('Radio busy; retry shortly');
+  }
   if (response.status === 401) {
     const next = window.location.pathname + window.location.search + window.location.hash;
     window.location.replace(U('/login') + '?next=' + encodeURIComponent(next));
@@ -1592,7 +1601,10 @@ function toggleTheme() {
 
 setTheme(preferredTheme());
 
+let topoBusy = false;
 async function fetchTopo() {
+  if (topoBusy || document.hidden) return;
+  topoBusy = true;
   try {
     const r = await manageFetch(U('/api/topology'));
     _topo = await r.json();
@@ -1600,6 +1612,7 @@ async function fetchTopo() {
     buildHalowConfig();
     updatePairs();
   } catch(e) { showMsg('Topology fetch failed: ' + e, 'err'); }
+  finally { topoBusy = false; }
 }
 
 function userIsEditing() {
@@ -1910,6 +1923,8 @@ tickLocalTime();
 // ── Topology tab ──
 function renderTopology() {
   if (!_topo) return;
+  document.getElementById('recovery-status').innerHTML = recoveryPanel(_topo.recovery);
+  document.getElementById('recovery-summary').textContent = 'Mesh recovery: ' + (_topo.recovery?.summary || 'status unavailable');
   const grid = document.getElementById('node-grid');
   grid.innerHTML = '';
   for (const node of _topo.nodes) {
@@ -2801,13 +2816,17 @@ function voicePaintHealth(d, running) {
   vTxt('voice-health', (bad.length ? bad.join(', ') : 'Flowing') + stalls);
 }
 
+let voiceFetchBusy = false;
 async function refreshVoice() {
+  if (voiceFetchBusy || document.hidden) return;
+  voiceFetchBusy = true;
   let d;
   try {
     const r = await manageFetch(U('/api/voice'));
     if (!r.ok) return;
     d = await r.json();
   } catch (e) { return; }
+  finally { voiceFetchBusy = false; }
 
   const running = d.service === 'running';
   // The daemon writes this on its way out when it has decided to rebuild the
@@ -3356,13 +3375,17 @@ function stopConfigPolling() {
 }
 
 // ── Fetch status ─────────────────────────────────────────────────────────────
+let configFetchBusy = false;
 async function refreshStatus() {
+  if (configFetchBusy || document.hidden) return;
+  configFetchBusy = true;
   try {
     const r = await manageFetch('/api/admin/status');
     if (!r.ok) return;
     STATUS = await r.json();
     renderStatus(STATUS);
   } catch(e) {}
+  finally { configFetchBusy = false; }
 }
 
 // ── Populate form from current config ────────────────────────────────────────
@@ -3677,6 +3700,7 @@ def render_dashboard():
 
 <div id="content">
   <div id="msg"></div>
+  <details class="card"><summary id="recovery-summary" style="cursor:pointer">Mesh recovery</summary><div id="recovery-status"></div></details>
 
   <!-- ── TOPOLOGY ── -->
   <div id="tab-topology" class="tab-pane">
@@ -3887,7 +3911,8 @@ def render_dashboard():
 </div><!-- #content -->
 </div><!-- #page -->
 
-<script>{JS}
+<script>{RECOVERY_JS}
+{JS}
 {CONFIG_TAB_JS}
 {VOICE_TAB_JS}</script>
 </body></html>"""
@@ -3948,7 +3973,9 @@ class ManageRoutes:
 
         elif path == '/api/topology':
             try:
-                self.send_json(build_topology())
+                self.send_json(STATUS_CACHE.get('topology', build_topology))
+            except Busy:
+                raise
             except Exception as e:
                 self.send_json({'error': str(e)}, 500)
 
@@ -3957,11 +3984,13 @@ class ManageRoutes:
                 self.send_json(dict(_measure_status))
 
         elif path == '/api/uplink/wifi':
-            self.send_json(get_usb_wifi_uplink_status())
+            self.send_json(STATUS_CACHE.get('uplink', get_usb_wifi_uplink_status))
 
         elif path == '/api/voice':
             try:
-                self.send_json(voice_status())
+                self.send_json(STATUS_CACHE.get('voice', voice_status, ttl=2))
+            except Busy:
+                raise
             except Exception as e:
                 self.send_json({'error': str(e)}, 500)
 
@@ -4005,8 +4034,7 @@ class ManageRoutes:
         global _measure_status
         parsed = urlparse(self.path)
         path   = parsed.path.rstrip('/') or '/'
-        length = int(self.headers.get('Content-Length', 0))
-        body   = self.rfile.read(length) if length else b'{}'
+        body = self.read_body() or b'{}'
 
         if path == '/api/interface/toggle':
             try:
@@ -4089,8 +4117,18 @@ class ManageRoutes:
                     tests  = req.get('tests', [])
                     dur    = int(req.get('duration', 30))
                     bitrate = req.get('udp_bitrate', '4M')
-                    if not label or not pairs or not tests:
-                        self.send_json({'ok': False, 'error': 'Missing label, pairs, or tests'})
+                    allowed_tests = {'tcp_1stream', 'tcp_4stream', 'udp_throughput',
+                                     'udp_jitter', 'packet_loss', 'reverse', 'icmp_ping'}
+                    if (not label or not isinstance(pairs, list) or not 1 <= len(pairs) <= 64
+                            or not isinstance(tests, list) or not 1 <= len(tests) <= 7
+                            or any(not isinstance(t, str) or t not in allowed_tests for t in tests)
+                            or not 5 <= dur <= 300):
+                        self.send_json({'ok': False, 'error':
+                            'Choose 1-64 pairs, 1-7 test types, and a duration of 5-300 seconds'}, 400)
+                        return
+                    if len(pairs) * sum(30 if t == 'icmp_ping' else dur + 25 for t in tests) > 3600:
+                        self.send_json({'ok': False, 'error':
+                            'A measurement batch must fit within one hour; choose fewer pairs or shorter tests'}, 400)
                         return
                     _measure_status['running']  = True
                     _measure_status['label']    = label

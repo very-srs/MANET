@@ -29,7 +29,11 @@ GitHub, and stages the files before installation. Install archive checksums are
 available for manual verification with `sha256sum -c <archive-name>.sha256`;
 first-boot provisioning does not yet enforce them.
 
-Upload and verify the archive/checksum pairs before pushing the matching version
-bump to GitHub. No separate version file is uploaded to the download server.
+Increment both source version files for each newly published set of tarballs;
+replacing an archive without a version change does not update nodes already at
+that version. Upload and verify the archive/checksum pairs before pushing the
+matching version bump to GitHub. Every board reads the same GitHub version, so
+publish matching tools archives at all three board download paths. No separate
+version file is uploaded to the download server.
 If copying an identical tools archive to another board's filename, regenerate
 its checksum file with that board's basename; the updater checks the name too.
