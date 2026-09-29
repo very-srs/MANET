@@ -649,6 +649,22 @@ uplink or a wired EUD port, and on promotion configures NAT, the firewall,
 the networkd-dispatcher hooks and reconciled once a cycle by the node manager.
 Both paths return early when nothing has changed.
 
+**manet-dns-setup.sh**
+
+Node and EUD DNS use the upstream servers learned by systemd-resolved from
+DHCP/IPv6 RA. Public resolvers are fallback servers only when no other DNS
+servers are known. Provisioning and dnsmasq startup run this idempotent helper;
+renewed leases update DNS without restarting dnsmasq or clearing EUD leases.
+`manet.local`, `perf.local`, and service aliases remain local to dnsmasq.
+
+**prepare-ap-iface.sh**
+
+Runs before every hostapd start or restart, including starts from uplink and
+Ethernet auto-detection. It stops the AP radio's mesh supplicant, detaches the
+radio from its old bridge/mesh master, and prepares managed mode. A failed
+preparation prevents hostapd startup. Concurrent preparation requests are
+serialized, and a standalone request leaves an already-running AP untouched.
+
 **mesh-default-route-fix.sh**
 
 Repairs the default route on nodes that are not the gateway. Gateway nodes keep
@@ -1072,6 +1088,13 @@ up:
 - Optional GPS and NTP support through `gpsd`, `gps-reader.service` and chrony
   `SHM 0`.
 - The systemd service for the node manager.
+
+Before assigning roles, `manet-wait-radios.py` observes wireless enumeration
+for at least ten seconds and requires five seconds with unchanged devices and
+bound drivers, plus an empty udev queue. The total wait is at most sixty seconds.
+An unstable or failed query leaves existing role files intact and provisioning
+incomplete. No radios throughout the window permits wired-only setup. This is
+a bounded settling check, not proof that an undetected radio cannot arrive later.
 
 Provisioning takes several reboots and about ten minutes. Every `apt` call
 continues on failure, so a missing optional package does not abort the run, but

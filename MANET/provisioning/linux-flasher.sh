@@ -4,7 +4,6 @@
 set -e
 
 # --- Configuration ---
-DEVICE_WAIT=4   # seconds to wait for USB to populate, for cm4 flashing
 TEMPLATE_FILE="firstrun.sh.template"  # these template files are the device setup scripts to be written/modified
 ROCK3A_TEMPLATE="rock3a-provision.sh.template"
 TEMP_SCRIPT_FILE=$(mktemp)
@@ -1243,6 +1242,49 @@ select_hardware() {
         done
 }
 
+# Wait for one new, writable disk with a usable size. Require two observations
+# so a just-created USB block device has time to finish enumerating. Never pick
+# an arbitrary disk if more than one appears during rpiboot.
+wait_for_cm4_disk() {
+        local before="$1" deadline=$((SECONDS + ${2:-60}))
+        local snapshot name kind size readonly previous="" ready="" count remaining
+        local -a candidates
+        while (( SECONDS < deadline )); do
+                remaining=$((deadline - SECONDS))
+                (( remaining <= 3 )) || remaining=3
+                snapshot=$(timeout "$remaining" lsblk -dnb -o NAME,TYPE,SIZE,RO) || return 3
+                (( SECONDS < deadline )) || break
+                candidates=()
+                count=0
+                ready=""
+                while read -r name kind size readonly; do
+                        [[ "$kind" = disk ]] || continue
+                        grep -Fxq -- "$name" <<< "$before" && continue
+                        count=$((count + 1))
+                        [[ "$size" =~ ^[0-9]+$ && "$readonly" = 0 ]] || continue
+                        (( size > 0 )) || continue
+                        candidates+=("$name")
+                        ready="$name:$size"
+                done <<< "$snapshot"
+                if (( count > 1 )); then
+                        echo "More than one new disk appeared; disconnect unrelated storage and retry." >&2
+                        return 2
+                fi
+                if (( ${#candidates[@]} == 1 )); then
+                        if [[ "$previous" = "$ready" ]]; then
+                                printf '%s\n' "${candidates[0]}"
+                                return 0
+                        fi
+                        previous="$ready"
+                else
+                        previous=""
+                fi
+                sleep 1
+        done
+        echo "No new writable CM4 disk became ready within ${2:-60} seconds." >&2
+        return 1
+}
+
 # Selects a single SD card target. Sets TARGET_DEVICE global.
 # For CM4 uses rpiboot before/after detection.
 select_target_device() {
@@ -1257,16 +1299,10 @@ select_target_device() {
                 read -p "Press Enter to run 'sudo rpiboot' and mount the eMMC..."
                 echo
                 sudo rpiboot
-                echo "'rpiboot' finished. Waiting $DEVICE_WAIT seconds for device to settle..."
-                sleep $DEVICE_WAIT
-
-                local DISKS_AFTER
-                DISKS_AFTER=$(lsblk -d -n -o NAME)
                 local NEW_DISK
-                NEW_DISK=$(comm -13 <(echo "$DISKS_BEFORE" | sort) <(echo "$DISKS_AFTER" | sort))
-
-                if [ -z "$NEW_DISK" ]; then
-                        echo "ERROR: No new disk detected after rpiboot."
+                echo "'rpiboot' finished. Waiting up to 60 seconds for the eMMC..."
+                if ! NEW_DISK=$(wait_for_cm4_disk "$DISKS_BEFORE"); then
+                        echo "ERROR: Could not identify a ready CM4 eMMC disk."
                         echo "Please check connections and try again."
                         exit 1
                 fi
