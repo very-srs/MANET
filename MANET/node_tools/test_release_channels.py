@@ -172,11 +172,12 @@ class PublicationTests(unittest.TestCase):
             client.releases.return_value = []
             client.request.side_effect = [
                 {'id': 1, 'upload_url': 'https://uploads.github.com/test{?name}', 'assets': []},
-                asset, {'assets': [asset]}, {'html_url': 'https://github.com/example/release'},
+                asset, {'assets': [asset]}, {'html_url': 'https://github.com/example/release', 'tag_name': 'v0.551', 'draft': False, 'prerelease': True},
             ]
             publisher.publish(client, manifest(), {'package': path}, 'notes')
         calls = client.request.call_args_list
         self.assertEqual(calls[2].args, ('/releases/1',))
+        self.assertEqual(calls[3].args[2]['tag_name'], 'v0.551')
         self.assertTrue(calls[3].args[2]['prerelease'])
         self.assertFalse(calls[3].args[2]['draft'])
         self.assertEqual(calls[3].args[2]['make_latest'], 'false')
@@ -197,11 +198,12 @@ class PublicationTests(unittest.TestCase):
         client.releases.side_effect = [[draft], []]
         refreshed = dict(draft, target_commitish='a' * 40, assets=[])
         client.request.side_effect = [draft, None, refreshed, refreshed,
-                                      {'html_url': 'https://github.com/example/release'}]
+                                      {'html_url': 'https://github.com/example/release', 'tag_name': 'v0.551', 'draft': False, 'prerelease': True}]
         publisher.publish(client, manifest(), {}, 'notes', replace_draft=True)
         calls = client.request.call_args_list
         self.assertEqual(calls[1].args, ('/releases/assets/7', 'DELETE'))
         self.assertEqual(calls[2].args[2]['target_commitish'], 'a' * 40)
+        self.assertEqual(calls[2].args[2]['tag_name'], 'v0.551')
 
     def test_replace_draft_stops_if_someone_published_it(self):
         client = Mock()
@@ -210,6 +212,18 @@ class PublicationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'already been published'):
             publisher.publish(client, manifest(), {}, 'notes', replace_draft=True)
         self.assertEqual(client.request.call_count, 1)
+
+    def test_unexpected_published_tag_is_reported_as_failure(self):
+        client = Mock()
+        client.releases.return_value = []
+        client.request.side_effect = [
+            {'id': 1, 'upload_url': 'https://uploads.github.com/test{?name}', 'assets': []},
+            {'assets': []},
+            {'tag_name': 'untagged-example', 'draft': False, 'prerelease': True},
+        ]
+        with self.assertRaisesRegex(ValueError, 'unexpected release metadata'):
+            publisher.publish(client, manifest(), {}, 'notes')
+        self.assertEqual(client.releases.call_count, 1)
 
 
 if __name__ == '__main__':

@@ -184,7 +184,7 @@ def publish(client, manifest, uploads, notes, stable=False, replace_draft=False)
             for asset in current["assets"]:
                 client.request(f"/releases/assets/{asset['id']}", "DELETE")
             release = client.request(f"/releases/{release['id']}", "PATCH", {
-                "target_commitish": manifest["commit"], "name": title, "body": notes,
+                "tag_name": tag, "target_commitish": manifest["commit"], "name": title, "body": notes,
             })
         elif release["target_commitish"] != manifest["commit"]:
             raise ValueError("Existing draft targets a different source commit")
@@ -210,9 +210,13 @@ def publish(client, manifest, uploads, notes, stable=False, replace_draft=False)
     for name, path in uploads.items():
         verify_upload(remote_assets[name], path)
     published = client.request(f"/releases/{release['id']}", "PATCH", {
+        "tag_name": tag,
         "draft": False, "prerelease": not stable, "make_latest": "true" if stable else "false",
         "name": title, "body": notes,
     })
+    if (published.get("tag_name") != tag or published.get("draft") is not False
+            or published.get("prerelease") is not (not stable)):
+        raise ValueError("GitHub published unexpected release metadata; check the tag and channel")
     print(f"Published {published['html_url']}")
     cleanup(client, apply=True)
 
@@ -240,7 +244,7 @@ def promote(client, tag, fetch=download):
                     or remote[name].get("digest") != "sha256:" + asset["sha256"]):
                 raise ValueError(f"Release asset does not match the manifest: {name}")
     client.request(f"/releases/{release['id']}", "PATCH", {
-        "prerelease": False, "make_latest": "true", "name": f"MANET {tag[1:]} (stable)",
+        "tag_name": tag, "prerelease": False, "make_latest": "true", "name": f"MANET {tag[1:]} (stable)",
     })
     print(f"Marked {tag} stable and Latest; packages are unchanged")
 
