@@ -87,6 +87,14 @@ imaging and first boot. Deleted prereleases require reflashing old test images.
 
 ---
 
+## CM4 disk enumeration
+
+The Linux CM4 path takes a disk inventory before `rpiboot` and polls afterward
+for at most sixty seconds. One new writable disk must report the same nonzero
+size in two consecutive one-second observations. Multiple new disks are an
+error, even if one is still reporting zero size. `lsblk` failures stop the flow;
+existing disks and loop devices cannot become the automatic target.
+
 ## Finding a usable rpi-imager
 
 The flasher passes `--first-run-script`, which is the only way the generated

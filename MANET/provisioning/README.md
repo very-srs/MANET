@@ -76,6 +76,10 @@ behaves exactly as it always has.
 
 > **CM4 on Linux:** `rpi-imager` and `rpiboot` are both required.
 
+After `rpiboot`, Linux waits up to sixty seconds for the eMMC to enumerate.
+It requires one new writable disk with a stable, nonzero size. If several new
+disks appear, it stops before imaging; disconnect unrelated storage and retry.
+
 > **Raspberry Pi (5 / 4B) on Linux:** `rpi-imager` is required. `losetup` and `xz` are not required.
 
 > **Rock 3A on Linux:** `rpi-imager` is not needed. `rpiboot` is not needed. You do need `losetup`, `xz`, `bc`, and `openssl`.

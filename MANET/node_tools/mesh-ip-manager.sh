@@ -428,9 +428,10 @@ address=/perf.local/$br0_secondary
 ${_MUMBLE_VIP_LINE}
 ${_MTX_VIP_LINE}
 
-# Upstream DNS for EUD internet access through Ethernet
-server=1.1.1.1
-server=8.8.8.8
+# Follow DHCP/RA DNS changes without restarting DHCP or discarding leases.
+# This is resolved's upstream list, never its localhost stub (no DNS loop).
+resolv-file=/run/systemd/resolve/resolv.conf
+clear-on-reload
 
 # Log for debugging
 log-dhcp
@@ -652,9 +653,15 @@ case $IPV4_STATE in
                     NEEDS_DNSMASQ_UPDATE=true
                 elif grep -q "^no-resolv" "$DNSMASQ_CONF" 2>/dev/null; then
                     NEEDS_DNSMASQ_UPDATE=true
-                elif ! grep -q "^server=" "$DNSMASQ_CONF" 2>/dev/null; then
+                elif ! grep -Fxq 'resolv-file=/run/systemd/resolve/resolv.conf' "$DNSMASQ_CONF"; then
                     NEEDS_DNSMASQ_UPDATE=true
-                elif ! grep -q "^address=/mumble.local/" "$DNSMASQ_CONF" 2>/dev/null; then
+                elif grep -q '^server=' "$DNSMASQ_CONF"; then
+                    NEEDS_DNSMASQ_UPDATE=true
+                elif ! grep -Fxq 'clear-on-reload' "$DNSMASQ_CONF"; then
+                    NEEDS_DNSMASQ_UPDATE=true
+                elif [ -n "$MUMBLE_VIP" ] && ! grep -Fxq "address=/mumble.local/$MUMBLE_VIP" "$DNSMASQ_CONF"; then
+                    NEEDS_DNSMASQ_UPDATE=true
+                elif [ -n "$MTX_VIP" ] && ! grep -Fxq "address=/mtx.local/$MTX_VIP" "$DNSMASQ_CONF"; then
                     NEEDS_DNSMASQ_UPDATE=true
                 fi
 

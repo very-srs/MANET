@@ -1208,6 +1208,28 @@ channel once both sides are talking again.
 
 ## Network management
 
+`manet-dns-setup.sh` makes `/etc/resolv.conf` point to
+`/run/systemd/resolve/resolv.conf`. A managed resolved drop-in clears static
+global DNS and supplies `1.1.1.1`/`8.8.8.8` as `FallbackDNS`, used only when no
+other servers are known, not when a DHCP server returns an unwanted answer.
+dnsmasq reads that same upstream file with `clear-on-reload`, so DHCP renewal
+changes its upstreams and invalidates stale cached answers without restarting
+DHCP. No localhost forwarding chain is involved. This follows local uplink
+DNS; it does not distribute a gateway's private DNS servers over the mesh.
+
+Both first-boot templates invoke the helper, and a dnsmasq `ExecStartPre`
+invokes it on service startup. Unchanged configuration does not restart
+resolved. The IP manager recognizes this resolver configuration as current
+and checks service aliases only when their VIPs are available, avoiding a
+repeated DHCP restart when no optional service VIP is configured.
+
+The hostapd drop-in runs `prepare-ap-iface.sh` before each real start/restart.
+The older `ap-interface-setup.service` calls the same helper, but its retained
+oneshot state cannot suppress preparation after an AP/mesh mode transition.
+The helper serializes callers, skips an active hostapd, and bounds preparation
+commands. Failures propagate to hostapd. Uplink dispatch and Ethernet
+auto-detection therefore share the same startup sequence.
+
 - First 5 IPs network-wide are reserved for services.
 - Handles conflicts via MAC tie-breaker.
 - Configures `dnsmasq` DHCP when needed.

@@ -413,33 +413,12 @@ fi
 CFG80211_REGDOM="$REGULATORY_DOMAIN"
 
 
-# Wait for wireless drivers to load
-echo "Waiting for wireless drivers to load..."
-DRIVER_WAIT_COUNT=0
-MAX_DRIVER_WAIT=30  # 60 seconds total
-
-while [ $DRIVER_WAIT_COUNT -lt $MAX_DRIVER_WAIT ]; do
-    PHY_COUNT=$(iw dev 2>/dev/null | grep -c "^phy#")
-
-    if [ "$PHY_COUNT" -gt 0 ]; then
-        echo "✓ Found $PHY_COUNT wireless PHY(s)"
-        break
-    fi
-
-    if [ $DRIVER_WAIT_COUNT -eq 0 ]; then
-        echo "No wireless interfaces detected yet, waiting for drivers..."
-    elif [ $((DRIVER_WAIT_COUNT % 5)) -eq 0 ]; then
-        echo "Still waiting... (${DRIVER_WAIT_COUNT}/${MAX_DRIVER_WAIT})"
-    fi
-
-    sleep 2
-    ((DRIVER_WAIT_COUNT++))
-done
-
-if [ "$PHY_COUNT" -eq 0 ]; then
-    echo "⚠ WARNING: No wireless interfaces found after $((MAX_DRIVER_WAIT * 2)) seconds"
-    echo "  This is normal for wired-only configurations"
-    echo "  If you expect wireless: check 'dmesg | grep -i firmware'"
+# Finish a bounded enumeration window before overwriting role files. This
+# catches late netdevs, driver binding, and same-count device/name changes.
+if ! python3 /usr/local/bin/manet-wait-radios.py; then
+    provision_fail "wireless enumeration did not settle; retry radio-setup"
+    provision_state incomplete "$(date +%s)"
+    exit 1
 fi
 
 # === INTERFACE DETECTION ===
@@ -918,23 +897,14 @@ cat <<-EOF > /etc/systemd/system/ap-interface-setup.service
 [Unit]
 Description=Set $AP_INTERFACE to managed mode for hostapd
 Before=hostapd.service
-After=wifi-rfkill-unblock.service wpa_supplicant@${AP_INTERFACE}.service
+After=wifi-rfkill-unblock.service
 Wants=wifi-rfkill-unblock.service
 
 [Service]
 Type=oneshot
-# Do nothing if hostapd already has the radio. Before= only orders units
-# queued in one transaction, and ethernet-autodetect starts hostapd from a
-# carrier event outside it - so this unit can land after the AP is live, and
-# downing the interface here leaves hostapd active with a dead BSS that
-# nothing brings back.
-ExecCondition=/bin/sh -c '! ( systemctl is-active --quiet hostapd.service && /usr/sbin/iw dev $AP_INTERFACE info 2>/dev/null | grep -q "type AP" )'
-ExecStartPre=/usr/local/bin/unblock-wifi-rfkill.sh
-ExecStartPre=/bin/sleep 2
-ExecStartPre=-/bin/systemctl stop wpa_supplicant@${AP_INTERFACE}.service
-ExecStart=-/usr/sbin/ip link set $AP_INTERFACE down
-ExecStart=-/usr/sbin/iw dev $AP_INTERFACE set type managed
-ExecStart=-/usr/sbin/ip link set $AP_INTERFACE up
+# The hostapd drop-in runs this helper on every start/restart too. The helper
+# serializes callers and leaves an already-running AP untouched.
+ExecStart=/usr/local/bin/prepare-ap-iface.sh
 RemainAfterExit=yes
 
 [Install]
@@ -1042,6 +1012,9 @@ net.ipv4.conf.br0.proxy_arp=1
 EOF
     sysctl -p /etc/sysctl.d/99-mesh.conf
 
+    # Load the generated units and the shipped hostapd preparation drop-in
+    # before any startup path can launch the AP.
+    systemctl daemon-reload
     systemctl enable ap-txpower.service
     systemctl unmask dnsmasq.service
     systemctl enable dnsmasq.service

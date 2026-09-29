@@ -664,7 +664,8 @@ kernel.panic = 10
 kernel.panic_on_oops = 1
 EOF
 
-# Get DNS working again after dnsmasq install
+# Restore DNS after installing dnsmasq. Keep the image's working resolver for
+# remaining package downloads until networkd takes over the uplink below.
 systemctl restart systemd-resolved
 
 
@@ -757,10 +758,9 @@ systemctl mask NetworkManager
 
 echo "Enabling systemd-networkd and systemd-resolved"
 systemctl enable --now systemd-networkd
-systemctl enable systemd-resolved
-
-# Force systemd-resolved to be the DNS provider
-#ln -sf /run/systemd/resolve/resolv.conf /etc/resolv.conf
+# Follow networkd's DHCP DNS on this boot and subsequent boots. Public servers
+# are used only when no DNS servers are supplied by the network.
+/usr/local/bin/manet-dns-setup.sh || exit 1
 
 
 #write out the config selections for future use
@@ -798,10 +798,6 @@ echo "auto_update=__AUTO_UPDATE__" >> /etc/mesh.conf
 
 # Disable the current script so it won't run again at next boot
 systemctl disable mesh-provision
-
-#use a known dns for next setup
-rm /etc/resolv.conf
-echo "nameserver 1.1.1.1" > /etc/resolv.conf
 
 # Write HaLow/SPI config.txt entries now so they take effect on the next
 # (provisioning) reboot.  radio-setup runs on that boot and will find the
