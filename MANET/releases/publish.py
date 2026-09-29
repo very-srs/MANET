@@ -267,12 +267,16 @@ def main():
         if args.command == "publish":
             client = GitHub()
             try:
-                tagged = client.request("/commits/" + manifest["tag"])
+                tagged = client.request("/git/ref/tags/" + manifest["tag"])["object"]
             except HTTPError as error:
                 if error.code != 404:
                     raise
             else:
-                if tagged["sha"] != manifest["commit"]:
+                for _ in range(10):
+                    if tagged["type"] != "tag":
+                        break
+                    tagged = client.request("/git/tags/" + tagged["sha"])["object"]
+                if tagged["type"] != "commit" or tagged["sha"] != manifest["commit"]:
                     raise ValueError("The release tag already points to different source; use a new version")
             publish(client, manifest, uploads, args.notes_file.read_text(), args.stable, args.replace_draft)
     elif args.command == "promote":
