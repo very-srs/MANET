@@ -29,7 +29,7 @@ You will need:
 ### Windows: the short version
 
 1. Download the single file
-   **[`Flash a Radio.cmd`](https://github.com/very-srs/MANET/releases/latest/download/Flash%20a%20Radio.cmd)**
+   **[`Flash-a-Radio.cmd`](https://github.com/very-srs/MANET/releases/latest/download/Flash-a-Radio.cmd)**
    and put it in a folder of its own.
 2. Double-click it.
 3. Say yes when Windows asks for permission.
@@ -146,8 +146,12 @@ To test the most recently published build, including prereleases:
 From Windows Command Prompt:
 
 ```bat
-"Flash a Radio.cmd" --development
+"Flash-a-Radio.cmd" --development
 ```
+
+The downloaded launcher is named `Flash-a-Radio.cmd`; its working copy and
+the copy in a source checkout are named `Flash a Radio.cmd`. Use that filename
+when running from either of those locations.
 
 These options fetch the newest uploaded setup scripts too. To test unpublished
 setup changes from a checkout, add `--local-scripts`; the board package still
@@ -236,7 +240,7 @@ cd MANET/provisioning
 ### Windows: step by step
 
 Download
-**[Flash a Radio.cmd](https://github.com/very-srs/MANET/releases/latest/download/Flash%20a%20Radio.cmd)**
+**[Flash-a-Radio.cmd](https://github.com/very-srs/MANET/releases/latest/download/Flash-a-Radio.cmd)**
 and put it in a folder of its own. It is the only file you need.
 
 Double-click it. Windows shows a security warning the first time, because the file came

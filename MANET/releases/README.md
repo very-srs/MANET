@@ -28,7 +28,9 @@ both embedded version files. It packages the committed provisioning scripts in
 manifest with the source commit, version, file sizes and SHA-256 digests. It
 uploads everything to a draft, checks GitHub's stored sizes and digests, and
 publishes only when the complete set matches. An interrupted upload leaves a
-draft; rerunning with the same commit and packages resumes it. Published assets
+draft; rerunning with the same commit and packages resumes it. To correct an
+unpublished draft after changing the source or packages, use `--replace-draft`.
+This discards only that draft's uploaded files. Published assets
 are never overwritten by this script.
 
 Authentication uses `GH_TOKEN`, `GITHUB_TOKEN`, or the existing Git HTTPS
@@ -86,3 +88,7 @@ older stable version requires `sudo node-update.sh --allow-downgrade`.
 The flashers pin the selected release into the generated first-boot script.
 Later uploads cannot change its download target. If an old prerelease was
 deleted before that image first boots, reflash with a retained release.
+
+The standalone Windows download is named `Flash-a-Radio.cmd` because GitHub
+renames filenames containing spaces. It creates a working copy named
+`Flash a Radio.cmd`, matching the launcher inside the flasher ZIP and checkout.

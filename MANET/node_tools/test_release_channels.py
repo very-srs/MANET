@@ -145,7 +145,7 @@ class PublicationTests(unittest.TestCase):
 
     def test_promotion_preserves_assets_and_sets_stable_latest(self):
         value = manifest()
-        for name in ('manet-flasher.zip', 'flash-a-radio.sh', 'Flash a Radio.cmd'):
+        for name in ('manet-flasher.zip', 'flash-a-radio.sh', 'Flash-a-Radio.cmd'):
             value['assets'][name] = {'size': 1, 'sha256': 'b' * 64}
         body = json.dumps(value).encode()
         assets = [{'name': name, 'size': a['size'], 'digest': 'sha256:' + a['sha256']}
@@ -180,6 +180,36 @@ class PublicationTests(unittest.TestCase):
         self.assertTrue(calls[3].args[2]['prerelease'])
         self.assertFalse(calls[3].args[2]['draft'])
         self.assertEqual(calls[3].args[2]['make_latest'], 'false')
+
+    def test_upload_verification_rejects_a_renamed_asset(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'Flash-a-Radio.cmd'
+            path.write_bytes(b'launcher')
+            asset = {'name': 'Flash.a.Radio.cmd', 'size': 8,
+                     'digest': 'sha256:' + publisher.digest(path)}
+            with self.assertRaisesRegex(ValueError, 'verification failed'):
+                publisher.verify_upload(asset, path)
+
+    def test_replace_draft_updates_source_and_clears_only_unpublished_assets(self):
+        client = Mock()
+        draft = {'id': 1, 'tag_name': 'v0.551', 'draft': True, 'target_commitish': 'c' * 40,
+                 'upload_url': 'https://uploads.github.com/test{?name}', 'assets': [{'id': 7}]}
+        client.releases.side_effect = [[draft], []]
+        refreshed = dict(draft, target_commitish='a' * 40, assets=[])
+        client.request.side_effect = [draft, None, refreshed, refreshed,
+                                      {'html_url': 'https://github.com/example/release'}]
+        publisher.publish(client, manifest(), {}, 'notes', replace_draft=True)
+        calls = client.request.call_args_list
+        self.assertEqual(calls[1].args, ('/releases/assets/7', 'DELETE'))
+        self.assertEqual(calls[2].args[2]['target_commitish'], 'a' * 40)
+
+    def test_replace_draft_stops_if_someone_published_it(self):
+        client = Mock()
+        client.releases.return_value = [{'id': 1, 'tag_name': 'v0.551', 'draft': True}]
+        client.request.return_value = {'draft': False}
+        with self.assertRaisesRegex(ValueError, 'already been published'):
+            publisher.publish(client, manifest(), {}, 'notes', replace_draft=True)
+        self.assertEqual(client.request.call_count, 1)
 
 
 if __name__ == '__main__':

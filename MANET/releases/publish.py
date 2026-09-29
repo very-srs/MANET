@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+from urllib.error import HTTPError
 from urllib.parse import quote, urlsplit
 from urllib.request import Request, urlopen
 import zipfile
@@ -76,9 +77,12 @@ def build_assets(packages, output):
         entry.compress_type = zipfile.ZIP_DEFLATED
         archive.writestr(entry, git("show", "HEAD:MANET/node_tools/manet_release.py"))
     paths.append(bundle)
-    for name in ("flash-a-radio.sh", "Flash a Radio.cmd"):
+    # GitHub replaces spaces in uploaded filenames. Keep public asset names
+    # portable while retaining the familiar launcher name inside the ZIP.
+    for source, name in (("flash-a-radio.sh", "flash-a-radio.sh"),
+                         ("Flash a Radio.cmd", "Flash-a-Radio.cmd")):
         path = output / name
-        path.write_bytes(git("show", f"HEAD:MANET/provisioning/{name}"))
+        path.write_bytes(git("show", f"HEAD:MANET/provisioning/{source}"))
         paths.append(path)
     assets = {}
     uploads = {}
@@ -160,11 +164,12 @@ def cleanup(client, apply=False):
 
 
 def verify_upload(asset, path):
-    if asset.get("size") != path.stat().st_size or asset.get("digest") != "sha256:" + digest(path):
+    if (asset.get("name") != path.name or asset.get("size") != path.stat().st_size
+            or asset.get("digest") != "sha256:" + digest(path)):
         raise ValueError(f"GitHub upload verification failed for {path.name}")
 
 
-def publish(client, manifest, uploads, notes, stable=False):
+def publish(client, manifest, uploads, notes, stable=False, replace_draft=False):
     tag = manifest["tag"]
     existing = next((r for r in client.releases() if r["tag_name"] == tag), None)
     if existing and not existing["draft"]:
@@ -172,7 +177,16 @@ def publish(client, manifest, uploads, notes, stable=False):
     title = f"MANET {manifest['version']}" + (" (stable)" if stable else " (prerelease)")
     if existing:
         release = existing
-        if release["target_commitish"] != manifest["commit"]:
+        if replace_draft:
+            current = client.request(f"/releases/{release['id']}")
+            if not current["draft"]:
+                raise ValueError("The release has already been published")
+            for asset in current["assets"]:
+                client.request(f"/releases/assets/{asset['id']}", "DELETE")
+            release = client.request(f"/releases/{release['id']}", "PATCH", {
+                "target_commitish": manifest["commit"], "name": title, "body": notes,
+            })
+        elif release["target_commitish"] != manifest["commit"]:
             raise ValueError("Existing draft targets a different source commit")
     else:
         release = client.request("/releases", "POST", {
@@ -211,7 +225,7 @@ def promote(client, tag, fetch=download):
         raise ValueError("Publish the complete draft before promoting it")
     names = {a["name"] for a in release["assets"]}
     required = set(PACKAGES) | {name + ".sha256" for name in PACKAGES}
-    required |= {"manet-release.json", "manet-flasher.zip", "flash-a-radio.sh", "Flash a Radio.cmd"}
+    required |= {"manet-release.json", "manet-flasher.zip", "flash-a-radio.sh", "Flash-a-Radio.cmd"}
     if not required <= names:
         raise ValueError("Release is missing required downloads")
     with tempfile.TemporaryDirectory(prefix="manet-promote-") as scratch:
@@ -220,7 +234,7 @@ def promote(client, tag, fetch=download):
         remote = {a["name"]: a for a in release["assets"]}
         verify_upload(remote["manet-release.json"], manifest_file)
         manifest = validate_manifest(json.loads(manifest_file.read_text()), tag)
-        for name in set(PACKAGES) | {"manet-flasher.zip", "flash-a-radio.sh", "Flash a Radio.cmd"}:
+        for name in set(PACKAGES) | {"manet-flasher.zip", "flash-a-radio.sh", "Flash-a-Radio.cmd"}:
             asset = manifest["assets"].get(name)
             if (not asset or remote[name].get("size") != asset["size"]
                     or remote[name].get("digest") != "sha256:" + asset["sha256"]):
@@ -241,6 +255,7 @@ def main():
         if command == "publish":
             sub.add_argument("--notes-file", type=Path, required=True)
             sub.add_argument("--stable", action="store_true", help="explicitly publish a stable release and mark it Latest")
+            sub.add_argument("--replace-draft", action="store_true", help="replace an unpublished draft's uploads after correcting a build")
     sub = commands.add_parser("promote")
     sub.add_argument("tag")
     sub = commands.add_parser("cleanup")
@@ -250,7 +265,16 @@ def main():
         manifest, uploads = build_assets(args.packages, args.output)
         print(f"Verified {manifest['tag']} from {manifest['commit']}: {len(uploads)} assets")
         if args.command == "publish":
-            publish(GitHub(), manifest, uploads, args.notes_file.read_text(), args.stable)
+            client = GitHub()
+            try:
+                tagged = client.request("/commits/" + manifest["tag"])
+            except HTTPError as error:
+                if error.code != 404:
+                    raise
+            else:
+                if tagged["sha"] != manifest["commit"]:
+                    raise ValueError("The release tag already points to different source; use a new version")
+            publish(client, manifest, uploads, args.notes_file.read_text(), args.stable, args.replace_draft)
     elif args.command == "promote":
         promote(GitHub(), args.tag)
     else:
