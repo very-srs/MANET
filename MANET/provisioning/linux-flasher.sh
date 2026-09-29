@@ -1,0 +1,2165 @@
+#!/bin/bash
+#
+#  A script to image new mesh radio nodes
+set -e
+
+# --- Configuration ---
+DEVICE_WAIT=4   # seconds to wait for USB to populate, for cm4 flashing
+TEMPLATE_FILE="firstrun.sh.template"  # these template files are the device setup scripts to be written/modified
+ROCK3A_TEMPLATE="rock3a-provision.sh.template"
+TEMP_SCRIPT_FILE=$(mktemp)
+
+# Armbian imgage source, does need to be updated from time to time as it ages out
+ARMBIAN_IMAGE_URL="https://fi.mirror.armbian.de/dl/rock-3a/archive/Armbian_26.2.1_Rock-3a_trixie_vendor_6.1.115_minimal.img.xz"
+ARMBIAN_IMAGE_FILENAME="Armbian_26.2.1_Rock-3a_trixie_vendor_6.1.115_minimal.img"
+ARMBIAN_IMAGE=""  # Will be set by acquire_armbian_image function
+CONFIG_DIR=".mesh-configs"  # configs are stored locally in this subdirectory
+
+# Operator-supplied setup scripts. Anything dropped in here is baked into the
+# generated firstrun.sh and runs once on the node after radio-setup finishes.
+# See additional-scripts/README.md.
+ADDITIONAL_SCRIPTS_DIR="additional-scripts"
+ADDITIONAL_SCRIPTS=()          # filled by validate_additional_scripts
+ADDITIONAL_SCRIPTS_BYTES=0
+# Warn above the first, refuse above the second. Neither is a limit imposed by
+# rpi-imager or by FAT32 -- the boot partition has ~512 MB and bash parses a
+# multi-MB script without complaint. They exist because the whole generated
+# file is held in memory as one string by both flashers, and because a payload
+# this large almost always wants to be fetched by the script at run time
+# instead: the node has proven internet before these ever run.
+# The line both templates carry, which the block replaces. An anchor rather
+# than a plain append because neither template runs off the end: firstrun.sh
+# has trailing completion echoes and rock3a-provision.sh ends with `reboot`, so
+# anything tacked on after the last line would never execute.
+ADDITIONAL_SCRIPTS_ANCHOR="# >>> MANET_ADDITIONAL_SCRIPTS <<<"
+# Interpreters present on a stock provisioned node (Debian 13). A script whose
+# shebang names anything else is still embedded -- an earlier script may well
+# install it -- but the operator is told, because the alternative is a script
+# that fails at first boot with a bare exit 127.
+ADDITIONAL_SCRIPTS_NODE_INTERPRETERS="sh bash dash python python3 perl lua awk mawk"
+ADDITIONAL_SCRIPTS_WARN_BYTES=262144      # 256 KB
+ADDITIONAL_SCRIPTS_MAX_BYTES=2097152      # 2 MB
+
+# RPI OS image URL. rpi-imager will download and cache this.
+PI_OS_IMAGE_URL="https://downloads.raspberrypi.com/raspios_lite_arm64/images/raspios_lite_arm64-2025-10-02/2025-10-01-raspios-trixie-arm64-lite.img.xz"
+
+# The launcher supplies a verified release manifest and keeps user files here.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+: "${MANET_RELEASE_FILE:?Start this through flash-a-radio.sh}"
+: "${MANET_FLASHER_WORK:?Start this through flash-a-radio.sh}"
+TEMPLATE_FILE="$SCRIPT_DIR/firstrun.sh.template"
+ROCK3A_TEMPLATE="$SCRIPT_DIR/rock3a-provision.sh.template"
+cd "$MANET_FLASHER_WORK"
+
+fetch_url() {
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsSL --connect-timeout 15 --max-time 120 -o "$2" "$1"
+    else
+        wget -q --timeout=30 --tries=2 -O "$2" "$1"
+    fi
+}
+
+prepare_release() {
+    local board="$HARDWARE_MODEL" values
+    [ "$board" != rpi4 ] || board=cm4
+    values=$(python3 "$SCRIPT_DIR/prepare-release.py" "$MANET_RELEASE_FILE" "$board") || return 1
+    mapfile -t release_values <<< "$values"
+    RELEASE_VERSION="${release_values[0]}"
+    INSTALL_URL="${release_values[1]}"
+    INSTALL_SHA256="${release_values[2]}"
+}
+
+# --- Dependencies ----------------------------------------------------------
+# One place that knows what this script needs, which package provides it, and
+# how to install it here. The checks used to be scattered through the file, so
+# a missing tool surfaced halfway through the questions, after the operator had
+# already typed a mesh key.
+
+PKG_MGR=""          # apt | dnf | pacman | zypper | apk | ""
+
+# --- rpi-imager ------------------------------------------------------------
+# The flasher passes --first-run-script, which is how the mesh setup script
+# reaches the card. Builds older than 1.8 do not have that option and fail with
+# "Unknown option 'first-run-script'" *after* writing the image, leaving a card
+# that boots stock Raspberry Pi OS and never becomes a mesh node. Ubuntu 22.04
+# still ships 1.7.2.
+#
+# Rather than install over whatever the system has, a usable copy is found in
+# this order and the first match wins:
+#
+#   1. a copy in this folder, if it is newer than the system one
+#   2. the system rpi-imager, if it actually works
+#   3. the package manager, when it offers 1.8 or later
+#   4. the AppImage from raspberrypi.org, extracted into this folder
+#
+# Nothing here replaces a working system install. That is deliberate: doing so
+# once cost a working machine its imager.
+RPI_IMAGER_MIN_VERSION="1.8.0"
+RPI_IMAGER_APPIMAGE_URL="https://downloads.raspberrypi.org/imager/imager_latest_amd64.AppImage"
+RPI_IMAGER_LOCAL_DIR="imager"
+RPI_IMAGER_CMD=""
+
+local_imager_path() { printf '%s' "$PWD/$RPI_IMAGER_LOCAL_DIR/squashfs-root/AppRun"; }
+
+# Two formats are in the wild and both print on stderr:
+#   rpi-imager version 1.7.2        (1.x)
+#   Raspberry Pi Imager v2.0.11.1   (2.x)
+imager_version_of() {
+    [ -x "$1" ] || return 1
+    QT_QPA_PLATFORM=offscreen "$1" --version 2>&1 \
+        | sed -n -E 's/.*[Vv]ersion[[:space:]]+([0-9][0-9.]*).*/\1/p;s/.*[[:space:]]v([0-9]+\.[0-9][0-9.]*).*/\1/p' \
+        | head -1
+}
+
+# usable | too-old | broken. Asks the binary instead of trusting a version,
+# because a package built for a newer distribution than the host dies in the
+# dynamic loader before parsing arguments, which a version check reads as fine.
+# No device is given, so nothing can be written either way.
+imager_state_of() {
+    local bin="$1" out
+    [ -n "$bin" ] && [ -x "$bin" ] || { echo broken; return; }
+    out=$(QT_QPA_PLATFORM=offscreen "$bin" --cli --first-run-script /dev/null 2>&1)
+    if printf '%s' "$out" | grep -qi "unknown option.*first-run-script"; then echo too-old; return; fi
+    if printf '%s' "$out" | grep -qiE 'error while loading shared|cannot open shared object|not found \(required by|version .GLIBC'; then
+        echo broken; return
+    fi
+    echo usable
+}
+
+version_ge() { [ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | head -1)" = "$2" ]; }
+
+pkg_candidate_version() {
+    case "$PKG_MGR" in
+        apt) apt-cache policy "$1" 2>/dev/null \
+                 | sed -n 's/^[[:space:]]*Candidate:[[:space:]]*\([0-9][0-9.]*\).*/\1/p' | head -1 ;;
+        dnf) dnf -q info "$1" 2>/dev/null \
+                 | sed -n 's/^Version[[:space:]]*:[[:space:]]*\([0-9][0-9.]*\).*/\1/p' | head -1 ;;
+        *)   echo "" ;;
+    esac
+}
+
+# Fetch the AppImage and unpack it once. Extracting costs about 110 MB here and
+# means every later flash starts immediately, with no FUSE and no root needed to
+# set it up.
+download_imager() {
+    local arch dest tmp
+    arch=$(uname -m)
+    if [ "$arch" != "x86_64" ]; then
+        echo "  Raspberry Pi publishes an AppImage for x86_64 only, and this is $arch."
+        echo "  Install rpi-imager $RPI_IMAGER_MIN_VERSION or newer from your distribution,"
+        echo "  or from Flathub: flatpak install flathub org.raspberrypi.rpi-imager"
+        return 1
+    fi
+
+    dest="$PWD/$RPI_IMAGER_LOCAL_DIR"
+    rm -rf "$dest"
+    mkdir -p "$dest" || { echo "  Could not create $dest"; return 1; }
+
+    tmp="$dest/imager.AppImage"
+    echo "  Downloading rpi-imager from raspberrypi.org (about 33 MB)..."
+    if ! fetch_url "$RPI_IMAGER_APPIMAGE_URL" "$tmp"; then
+        echo "  Download failed. Check the network, or install rpi-imager yourself."
+        rm -rf "$dest"; return 1
+    fi
+    chmod +x "$tmp"
+
+    echo "  Unpacking it..."
+    ( cd "$dest" && ./imager.AppImage --appimage-extract >/dev/null 2>&1 ) || {
+        echo "  Could not unpack the download."
+        rm -rf "$dest"; return 1
+    }
+    rm -f "$tmp"
+
+    # No checksum is published next to the AppImage, so the download is judged
+    # by whether it runs and takes the option we need.
+    if [ "$(imager_state_of "$(local_imager_path)")" != usable ]; then
+        echo "  The downloaded copy does not work on this machine."
+        rm -rf "$dest"; return 1
+    fi
+    echo "  rpi-imager $(imager_version_of "$(local_imager_path)") is ready in $dest"
+    return 0
+}
+
+# Decide which rpi-imager this run will use. Sets RPI_IMAGER_CMD.
+resolve_rpi_imager() {
+    local sys_bin sys_state="" sys_ver="" loc_bin loc_state="" loc_ver="" cand
+
+    sys_bin="$(command -v rpi-imager 2>/dev/null || true)"
+    [ -n "$sys_bin" ] && { sys_state="$(imager_state_of "$sys_bin")"; sys_ver="$(imager_version_of "$sys_bin")"; }
+
+    loc_bin="$(local_imager_path)"
+    [ -x "$loc_bin" ] && { loc_state="$(imager_state_of "$loc_bin")"; loc_ver="$(imager_version_of "$loc_bin")"; }
+
+    # A copy in this folder that is newer than the system one is assumed to be
+    # here on purpose, so it wins.
+    if [ "$loc_state" = usable ]; then
+        # Strictly newer. On a tie there is no reason to prefer our download
+        # over the copy the system maintains.
+        if [ "$sys_state" != usable ] || \
+           { [ "${loc_ver:-0}" != "${sys_ver:-0}" ] && version_ge "${loc_ver:-0}" "${sys_ver:-0}"; }; then
+            RPI_IMAGER_CMD="$loc_bin"
+            echo "Using rpi-imager ${loc_ver:-unknown} from this folder."
+            return 0
+        fi
+    fi
+
+    if [ "$sys_state" = usable ]; then
+        RPI_IMAGER_CMD="$sys_bin"
+        echo "Using the system rpi-imager ${sys_ver:-unknown}."
+        return 0
+    fi
+
+    case "$sys_state" in
+        too-old) echo "rpi-imager $sys_ver is installed but does not support --first-run-script." ;;
+        broken)  echo "rpi-imager is installed but will not run on this machine." ;;
+        *)       echo "rpi-imager is not installed." ;;
+    esac
+    echo "Without it a card gets written and then fails at the last step, leaving a"
+    echo "node that boots stock Raspberry Pi OS and never sets itself up."
+    echo
+
+    cand="$(pkg_candidate_version rpi-imager)"
+    if [ -n "$cand" ] && version_ge "$cand" "$RPI_IMAGER_MIN_VERSION"; then
+        echo "$PKG_MGR offers $cand, which is new enough:"
+        echo
+        echo "  $PKG_INSTALL rpi-imager"
+        echo
+        echo "Install that and run this again, or let this script fetch its own copy below."
+        echo
+    elif [ -n "$cand" ]; then
+        echo "The $PKG_MGR package is $cand, which is too old to use."
+    else
+        echo "${PKG_MGR:-This system} has no rpi-imager package to fall back on."
+    fi
+
+    if [ ! -t 0 ]; then
+        echo "Not running interactively, so nothing will be downloaded here."
+        return 1
+    fi
+    echo "Download rpi-imager into this folder instead? Nothing outside it is touched. [Y/n]: "
+    read -r ans
+    if [[ "$ans" =~ ^[Nn] ]]; then
+        echo "Install rpi-imager $RPI_IMAGER_MIN_VERSION or newer yourself, then run this again."
+        return 1
+    fi
+    echo
+    download_imager || return 1
+    RPI_IMAGER_CMD="$(local_imager_path)"
+    return 0
+}
+
+detect_pkg_manager() {
+    if   command -v apt-get >/dev/null 2>&1; then PKG_MGR=apt;    PKG_INSTALL="sudo apt-get install -y"
+    elif command -v dnf     >/dev/null 2>&1; then PKG_MGR=dnf;    PKG_INSTALL="sudo dnf install -y"
+    elif command -v pacman  >/dev/null 2>&1; then PKG_MGR=pacman; PKG_INSTALL="sudo pacman -S --needed"
+    elif command -v zypper  >/dev/null 2>&1; then PKG_MGR=zypper; PKG_INSTALL="sudo zypper install -y"
+    elif command -v apk     >/dev/null 2>&1; then PKG_MGR=apk;    PKG_INSTALL="sudo apk add"
+    fi
+}
+
+# Package that provides a tool, for the manager we found. An empty answer means
+# this distro does not package it and the operator is told where to get it.
+pkg_for_tool() {
+    local tool="$1"
+    case "$tool:$PKG_MGR" in
+        openssl:*)                      echo openssl ;;
+        bc:*)                           echo bc ;;
+        curl:*)                         echo curl ;;
+        lsblk:*|findmnt:*)              echo util-linux ;;
+        sha256sum:apk)                  echo coreutils ;;
+        sha256sum:*)                    echo coreutils ;;
+        xz:apt)                         echo xz-utils ;;
+        xz:*)                           echo xz ;;
+        losetup:*)                      echo util-linux ;;
+        python3:pacman)                 echo python ;;
+        python3:*)                      echo python3 ;;
+        iconv:apt)                      echo libc-bin ;;
+        iconv:dnf)                      echo glibc-common ;;
+        iconv:*)                        echo glibc ;;
+        rpi-imager:apt)                 echo rpi-imager ;;
+        rpiboot:apt)                    echo rpiboot ;;
+        *)                              echo "" ;;
+    esac
+}
+
+# What to say when a tool has no package here.
+hint_for_tool() {
+    case "$1" in
+        rpi-imager)
+            echo "not packaged for this distro. Flatpak: flatpak install flathub org.raspberrypi.rpi-imager"
+            echo "               or download it from https://www.raspberrypi.com/software/" ;;
+        rpiboot)
+            echo "not packaged for this distro. Build it from https://github.com/raspberrypi/usbboot" ;;
+        *)  echo "install it with your distribution's package manager" ;;
+    esac
+}
+
+why_tool_is_needed() {
+    case "$1" in
+        openssl)    echo "generating the mesh SAE key" ;;
+        bc)         echo "network range arithmetic" ;;
+        curl|wget)  echo "downloading images and templates" ;;
+        lsblk)      echo "listing the storage devices to write to" ;;
+        findmnt)    echo "refusing to write to the disk you booted from" ;;
+        sha256sum)  echo "verifying a downloaded image" ;;
+        xz)         echo "decompressing the Armbian image" ;;
+        losetup)    echo "mounting the Armbian image to edit it" ;;
+        rpi-imager) echo "writing the Raspberry Pi image to the card" ;;
+        rpiboot)    echo "exposing the CM4 eMMC as a USB disk" ;;
+        python3)    echo "syntax-checking your own Python setup scripts" ;;
+        iconv)      echo "converting setup scripts saved as UTF-16" ;;
+        *)          echo "" ;;
+    esac
+}
+
+# Tools this run actually needs, given the board. Optional ones are checked
+# separately and never block a flash.
+required_tools_for_board() {
+    local board="$1"
+    echo "openssl bc lsblk findmnt sha256sum"
+    case "$board" in
+        r3a) echo "xz losetup" ;;
+        cm4) echo "rpiboot" ;;
+    esac
+}
+
+preflight_dependencies() {
+    local board="$1"
+    local tool missing=() optional_missing=() pkgs=() unpackaged=()
+
+    detect_pkg_manager
+
+    for tool in $(required_tools_for_board "$board"); do
+        command -v "$tool" >/dev/null 2>&1 || missing+=("$tool")
+    done
+    # curl or wget, either will do
+    if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
+        missing+=("curl")
+    fi
+    for tool in python3 iconv; do
+        command -v "$tool" >/dev/null 2>&1 || optional_missing+=("$tool")
+    done
+
+    if [ ${#missing[@]} -eq 0 ]; then
+        echo "All required tools are present."
+        if [ ${#optional_missing[@]} -gt 0 ]; then
+            echo
+            echo "Optional, and only used if you supply your own setup scripts:"
+            for tool in "${optional_missing[@]}"; do
+                printf '  %-12s %s\n' "$tool" "$(why_tool_is_needed "$tool")"
+            done
+        fi
+        echo
+        return 0
+    fi
+
+    echo "These are missing:"
+    echo
+    for tool in "${missing[@]}"; do
+        printf '  %-12s %s\n' "$tool" "$(why_tool_is_needed "$tool")"
+    done
+    echo
+
+    for tool in "${missing[@]}"; do
+        local pkg
+        pkg="$(pkg_for_tool "$tool")"
+        if [ -n "$pkg" ]; then pkgs+=("$pkg"); else unpackaged+=("$tool"); fi
+    done
+
+    # Nothing we can install: say what to do and stop.
+    if [ -z "$PKG_MGR" ]; then
+        echo "No package manager this script knows was found, so install these yourself:"
+        echo
+        for tool in "${missing[@]}"; do
+            printf '  %-12s %s\n' "$tool" "$(hint_for_tool "$tool")"
+        done
+        echo
+        return 1
+    fi
+
+    # What this distro cannot supply is said before the install offer, so the
+    # whole picture arrives in one pass. Reporting it afterwards meant a Fedora
+    # or Arch operator ran the install, saw it succeed, and only then found out
+    # that rpi-imager was never in it.
+    if [ ${#unpackaged[@]} -gt 0 ]; then
+        echo "Not available from $PKG_MGR, so get these yourself:"
+        echo
+        for tool in "${unpackaged[@]}"; do
+            printf '  %-12s %s\n' "$tool" "$(hint_for_tool "$tool")"
+        done
+        echo
+    fi
+
+    if [ ${#pkgs[@]} -gt 0 ]; then
+        # Deduplicate: util-linux covers several of these on its own.
+        local uniq_pkgs
+        uniq_pkgs=$(printf '%s\n' "${pkgs[@]}" | sort -u | tr '\n' ' ')
+        uniq_pkgs=${uniq_pkgs% }
+        if [ ${#unpackaged[@]} -gt 0 ]; then
+            echo "The rest this system can install:"
+        else
+            echo "On this system that is:"
+        fi
+        echo
+        echo "  $PKG_INSTALL $uniq_pkgs"
+        echo
+        case "$PKG_MGR" in
+            apt|dnf)
+                # Without a terminal there is nobody to answer, and an empty
+                # read would be taken as the [Y/n] default and install packages
+                # nobody agreed to.
+                if [ ! -t 0 ]; then
+                    echo "Not running interactively, so nothing will be installed here."
+                    echo "Run the command above, then start this script again."
+                    return 1
+                fi
+                read -p "Run that now? [Y/n]: " ans
+                if [[ ! "$ans" =~ ^[Nn] ]]; then
+                    echo
+                    if [ "$PKG_MGR" = apt ]; then sudo apt-get update || true; fi
+                    # shellcheck disable=SC2086
+                    if ! $PKG_INSTALL $uniq_pkgs; then
+                        echo
+                        echo "That did not complete. Fix the errors above and run this script again."
+                        return 1
+                    fi
+                    echo
+                else
+                    echo "Run it yourself, then start this script again."
+                    return 1
+                fi
+                ;;
+            *)
+                # pacman, zypper and apk are recognised but not driven. The
+                # command above is the whole answer, and running someone's
+                # package manager for them on a distro this is not tested on
+                # is not a favour.
+                echo "Run that, then start this script again."
+                return 1
+                ;;
+        esac
+    fi
+
+    if [ ${#unpackaged[@]} -gt 0 ]; then
+        echo "Install the tools above, then run this script again."
+        echo
+        return 1
+    fi
+
+    # Re-check, because a package can install and still not put the tool on PATH.
+    local still=()
+    for tool in "${missing[@]}"; do
+        command -v "$tool" >/dev/null 2>&1 || still+=("$tool")
+    done
+    if [ ${#still[@]} -gt 0 ]; then
+        echo "Installed, but these are still not on PATH: ${still[*]}"
+        echo "Open a new shell and try again."
+        return 1
+    fi
+
+    echo "All required tools are present."
+    echo
+    return 0
+}
+
+
+# Subnet math, done here rather than by shelling out to ipcalc. Debian's
+# ipcalc and Fedora's are different programs: the Debian one prints the
+# HostMin:/HostMax: lines parsed below, the Fedora one prints NETWORK=/NETMASK=
+# and nothing this understands. Installing "ipcalc" on the wrong distro would
+# therefore satisfy the dependency check and still produce no usable output.
+# Same math as node_tools/manet-ipcalc.sh, which exists on the node for the
+# same reason.
+ipcalc_fields() {
+    local cidr="$1" ip prefix a b c d ip_int mask net bcast
+
+    ip=${cidr%/*}
+    prefix=${cidr#*/}
+    [[ "$ip" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]] || return 1
+    [[ "$prefix" =~ ^[0-9]+$ ]] || return 1
+    [ "$prefix" -ge 1 ] && [ "$prefix" -le 30 ] || return 1
+
+    IFS=. read -r a b c d <<< "$ip"
+    [ "$a" -le 255 ] && [ "$b" -le 255 ] && [ "$c" -le 255 ] && [ "$d" -le 255 ] || return 1
+
+    _int_to_ip() {
+        echo "$(( ($1 >> 24) & 255 )).$(( ($1 >> 16) & 255 )).$(( ($1 >> 8) & 255 )).$(( $1 & 255 ))"
+    }
+
+    ip_int=$(( (a << 24) + (b << 16) + (c << 8) + d ))
+    mask=$(( (0xFFFFFFFF << (32 - prefix)) & 0xFFFFFFFF ))
+    net=$(( ip_int & mask ))
+    bcast=$(( net | (~mask & 0xFFFFFFFF) ))
+
+    echo "Address:   $ip"
+    echo "Netmask:   $(_int_to_ip "$mask") = $prefix"
+    echo "Network:   $(_int_to_ip "$net")/$prefix"
+    echo "HostMin:   $(_int_to_ip $((net + 1)))"
+    echo "HostMax:   $(_int_to_ip $((bcast - 1)))"
+    echo "Broadcast: $(_int_to_ip "$bcast")"
+    echo "Hosts/Net: $(( bcast - net - 1 ))"
+}
+
+# --- Helper Functions ---
+# Function to validate regulatory domain
+validate_regulatory_domain() {
+    local domain=$1
+
+    # List of valid regulatory domains (common ones)
+    local valid_domains=(
+        "US" "CA" "GB" "DE" "FR" "IT" "ES" "NL" "BE" "AT" "CH" "SE" "NO" "DK" "FI"
+        "PL" "CZ" "HU" "GR" "PT" "IE" "RO" "BG" "HR" "SI" "SK" "LT" "LV" "EE" "CY"
+        "MT" "LU" "AU" "NZ" "JP" "KR" "TW" "SG" "MY" "TH" "PH" "ID" "VN" "IN" "CN"
+        "BR" "AR" "MX" "CL" "CO" "PE" "ZA" "IL" "AE" "SA" "RU" "UA" "TR" "EG"
+    )
+
+    # Convert to uppercase for comparison
+    domain=$(echo "$domain" | tr '[:lower:]' '[:upper:]')
+
+    for valid in "${valid_domains[@]}"; do
+        if [ "$domain" == "$valid" ]; then
+            echo "$domain"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+# This pair of functions are for setting "eu" as the reg domain for only halow config files
+uses_eu_halow_region() {
+    local domain
+    domain=$(echo "$1" | tr '[:lower:]' '[:upper:]')
+
+    local eu_halow_domains=(
+        "AT" "BE" "BG" "HR" "CY" "CZ" "DK" "EE" "FI" "FR" "DE" "GR" "HU" "IE"
+        "IT" "LV" "LT" "LU" "MT" "NL" "PL" "PT" "RO" "SK" "SI" "ES" "SE"
+        "GB" "CH" "NO"
+    )
+
+    for eu_halow_domain in "${eu_halow_domains[@]}"; do
+        if [ "$domain" == "$eu_halow_domain" ]; then
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+halow_regulatory_domain_for_wifi_domain() {
+    local domain
+    domain=$(echo "$1" | tr '[:lower:]' '[:upper:]')
+
+    if uses_eu_halow_region "$domain"; then
+        echo "EU"
+    else
+        echo "$domain"
+    fi
+}
+
+# Function to calculate network capacity (number of nodes per CIDR range)
+calculate_capacity() {
+        local cidr=$1
+        local max_euds=$2
+
+        # Calculate total usable IPs
+        local CALC_OUTPUT=$(ipcalc_fields "$cidr" 2>/dev/null)
+        if [ -z "$CALC_OUTPUT" ]; then
+                echo "0"
+                return 1
+        fi
+
+        local HOST_MIN=$(echo "$CALC_OUTPUT" | awk '/HostMin/ {print $2}')
+        local HOST_MAX=$(echo "$CALC_OUTPUT" | awk '/HostMax/ {print $2}')
+
+        if [ -z "$HOST_MIN" ] || [ -z "$HOST_MAX" ]; then
+                echo "0"
+                return 1
+        fi
+
+        # Convert to integers for calculation
+        local MIN_INT=$(echo $HOST_MIN | awk -F. '{print ($1 * 256^3) + ($2 * 256^2) + ($3 * 256) + $4}')
+        local MAX_INT=$(echo $HOST_MAX | awk -F. '{print ($1 * 256^3) + ($2 * 256^2) + ($3 * 256) + $4}')
+
+        local TOTAL_USABLE=$((MAX_INT - MIN_INT + 1))
+
+        # Reserved IPs: 5 for services
+        local RESERVED_SERVICES=5
+
+        # Calculate based on max EUDs
+        local AVAILABLE_FOR_NODES=$((TOTAL_USABLE - RESERVED_SERVICES))
+
+        if [ "$max_euds" -gt 0 ]; then
+                # Solve: nodes + (nodes * max_euds) = available
+                # nodes * (1 + max_euds) = available
+                # nodes = available / (1 + max_euds)
+                local MAX_NODES=$((AVAILABLE_FOR_NODES / (1 + max_euds)))
+                local EUD_POOL=$((MAX_NODES * max_euds))
+                AVAILABLE_FOR_NODES=$((TOTAL_USABLE - RESERVED_SERVICES - EUD_POOL))
+        else
+                local MAX_NODES=$((AVAILABLE_FOR_NODES))
+                local EUD_POOL=0
+        fi
+
+        echo "$TOTAL_USABLE $RESERVED_SERVICES $EUD_POOL $MAX_NODES"
+}
+
+# Function to ask for and validate the LAN CIDR block
+ask_lan_cidr() {
+        local max_euds=${1:-0}
+        local DEFAULT_CIDR="10.30.2.0/24"
+        local custom_cidr
+        local confirm_default
+        local ip_part
+        local prefix_part
+
+        while true; do
+                read -p "Use default mesh network range ( $DEFAULT_CIDR )? (Y/n): " confirm_default
+                confirm_default=${confirm_default:-y}
+
+                if [ "$confirm_default" = "y" ] || [ "$confirm_default" = "Y" ]; then
+                        LAN_CIDR_BLOCK="$DEFAULT_CIDR"
+                else
+                        # --- Custom CIDR Loop ---
+                        while true; do
+                               read -p "Enter custom CIDR block for the mesh (e.g., 10.10.0.0/16): " custom_cidr
+
+                               # 1. Validate general format (IP/Prefix)
+                               if ! [[ "$custom_cidr" =~ ^([0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3})\/([0-9]{1,2})$ ]]; then
+                                echo "ERROR: Invalid format. Must be x.x.x.x/yy"
+                                continue
+                               fi
+
+                               ip_part="${BASH_REMATCH[1]}"
+                               prefix_part="${BASH_REMATCH[2]}"
+
+                               # 2. Validate Prefix (16-28 is a reasonable range for a LAN)
+                               if (( prefix_part < 16 || prefix_part > 26 )); then
+                                echo "ERROR: Prefix /${prefix_part} is invalid. Must be between /16 and /26."
+                                continue
+                               fi
+
+                               # 3. Validate IP as a private range
+                               OIFS="$IFS"; IFS='.'; ip_octets=($ip_part); IFS="$OIFS"
+                               local o1=${ip_octets[0]}
+                               local o2=${ip_octets[1]}
+
+                               local is_private=0
+                               if [ "$o1" -eq 10 ]; then
+                                is_private=1
+                               elif [ "$o1" -eq 172 ] && [ "$o2" -ge 16 ] && [ "$o2" -le 31 ]; then
+                                is_private=1
+                               elif [ "$o1" -eq 192 ] && [ "$o2" -eq 168 ]; then
+                                is_private=1
+                               fi
+
+                               if [ "$is_private" -eq 0 ]; then
+                                echo "ERROR: IP $ip_part is not in a private range."
+                                echo "Must be in 10.0.0.0/8, 172.16.0.0/12, or 192.168.0.0/16."
+                                continue
+                               fi
+
+                               # 4. Check if it's a valid network address (e.g. not 192.168.1.1/24)
+                               if [ "$prefix_part" -eq 24 ] && [ "${ip_octets[3]}" -ne 0 ]; then
+                                echo "WARNING: For a /24 network, the IP should end in .0 (e.g., 192.168.1.0/24)."
+                                echo "Your entry $custom_cidr may cause routing issues."
+                                read -p "Use it anyway? (y/N): " use_anyway
+                                use_anyway=${use_anyway:-n}
+                                if [ "$use_anyway" != "y" ]; then
+                                      continue
+                                fi
+                               fi
+
+                               # All checks passed
+                               LAN_CIDR_BLOCK="$custom_cidr"
+                               break
+                        done
+                fi
+
+                # Show capacity calculation if EUDs are configured (which is typical)
+                if [ "$max_euds" -gt 0 ]; then
+                        echo ""
+                        echo "=== Network Capacity Analysis ==="
+                        read TOTAL SERVICES EUD_POOL NODES <<< $(calculate_capacity "$LAN_CIDR_BLOCK" "$max_euds")
+
+                        echo "Network: $LAN_CIDR_BLOCK"
+                        echo "  Total usable IPs: $TOTAL"
+                        echo "  Reserved for services: $SERVICES"
+                        echo "  Reserved for EUD pool: $EUD_POOL (${max_euds} EUDs × ${NODES} nodes)"
+                        echo "  Available for mesh nodes: $NODES"
+                        echo "=================================="
+                        echo ""
+
+                        if [ "$NODES" -lt 5 ]; then
+                               echo "WARNING: This configuration only supports $NODES mesh nodes."
+                               echo "Consider using a larger network or reducing max EUDs per node."
+                        fi
+
+                        read -p "Accept this configuration? (Y/n): " accept
+                        accept=${accept:-y}
+                        if [ "$accept" = "y" ] || [ "$accept" = "Y" ]; then
+                               break
+                        fi
+                        echo "Let's reconfigure..."
+                else
+                        echo "Using network: $LAN_CIDR_BLOCK"
+                        break
+                fi
+        done
+}
+
+
+# This finds the top-level disk (e.g., nvme0n1) that hosts the / filesystem of the
+# flashing computer
+find_boot_disk() {
+        local root_dev
+        local physical_disk
+
+        # Find the device hosting the root filesystem
+        root_dev=$(findmnt -n -o SOURCE /)
+        if [ -z "$root_dev" ]; then
+                echo "ERROR: Could not find root filesystem." >&2
+                return 1
+        fi
+
+        # Use lsblk with -s (inverse) to show all ancestor devices
+        # Then filter for TYPE="disk" to get the physical disk
+        physical_disk=$(lsblk -n -s -o NAME,TYPE "$root_dev" | awk '$2 == "disk" {print $1; exit}' | \
+                sed 's/^[├└│─ ]*//')
+
+        if [ -z "$physical_disk" ]; then
+                echo "ERROR: Could not trace root device to physical disk." >&2
+                return 1
+        fi
+
+        echo "$physical_disk"
+}
+
+# Function to generate a random alphanumeric password
+generate_password() {
+        local length=${1:-10}
+        # Generate password with alphanumeric characters only (easier to type)
+        openssl rand -base64 48 | tr -dc 'a-zA-Z0-9' | head -c "$length"
+}
+
+# Detect SD card devices: mmcblk (native readers) + USB-attached disks (external card readers).
+# Excludes boot disk and eMMC internal storage.
+# Returns array of "/dev/NAME (size)" strings in SD_DEVICES global.
+detect_sd_cards() {
+        local boot_disk="$1"
+        SD_DEVICES=()
+
+        while IFS= read -r line; do
+                local NAME="" SIZE="" TYPE="" TRAN=""
+                eval "$line"
+
+                [ "$TYPE" = "disk" ] || continue
+                [ "$NAME" = "$boot_disk" ] && continue
+
+                if [[ "$NAME" =~ ^mmcblk[0-9]+$ ]]; then
+                        # Native MMC slot: accept SD and MMC types, skip eMMC (empty sysfs type = internal eMMC on most SBCs)
+                        local devtype
+                        devtype=$(cat "/sys/block/$NAME/device/type" 2>/dev/null || echo "")
+                        [ "$devtype" = "SD" ] || [ "$devtype" = "MMC" ] || continue
+                elif [ "$TRAN" = "usb" ]; then
+                        # USB-attached card reader: accept any non-zero-size disk
+                        [ "$SIZE" = "0B" ] && continue
+                else
+                        continue
+                fi
+
+                SD_DEVICES+=("/dev/$NAME ($SIZE)")
+        done < <(lsblk -d -n -P -o NAME,SIZE,TYPE,TRAN)
+}
+
+# Function to ask all setup questions
+ask_questions() {
+        echo "--- Starting New Configuration ---"
+
+        echo "Select EUD (client) connection type:"
+        select eud_choice in "Wired" "Wireless" "Auto"; do
+                case $eud_choice in
+                        "Wired" ) EUD_CONNECTION="wired"; break;;
+                        "Wireless" ) EUD_CONNECTION="wireless"; break;;
+                        "Auto" ) EUD_CONNECTION="auto"; break;;
+                esac
+        done
+
+        # If Wireless or Auto, ask for LAN AP configuration
+        if [ "$EUD_CONNECTION" = "wireless" ] || [ "$EUD_CONNECTION" = "auto" ]; then
+                echo "EUD wifi network name.  This name will have the last 4 of the ethernet MAC address appended to it for node identification"
+                read -p "Enter EUD access point SSID name: " LAN_AP_SSID
+
+                while true; do
+                        read -p "Enter EUD AP WPA2 Key (8-63 chars) [or press Enter to generate]: " LAN_AP_KEY
+                        echo
+                        if [ -z "$LAN_AP_KEY" ]; then
+                               # Letters and digits, not base64: ten random bytes
+                               # encode to sixteen base64 characters of which the
+                               # last two are always '==' padding, and this is the
+                               # key somebody types into a phone by hand.
+                               LAN_AP_KEY=$(generate_password 16)
+                               echo "Generated LAN AP Key: $LAN_AP_KEY"
+                               break
+                        fi
+
+                        key_len=${#LAN_AP_KEY}
+                        if (( key_len < 8 || key_len > 63 )); then
+                               echo "ERROR: Key must be between 8 and 63 characters. You entered $key_len characters."
+                        else
+                               break # Valid key
+                        fi
+                done
+        else
+                LAN_AP_SSID=""
+                LAN_AP_KEY=""
+                MAX_EUDS_PER_NODE=0
+        fi
+
+        # Optional Software
+        read -p "Install MediaMTX Server? (y/N): " INSTALL_MEDIAMTX
+        INSTALL_MEDIAMTX=${INSTALL_MEDIAMTX:-n}
+        if [ "$INSTALL_MEDIAMTX" = "y" ] || [ "$INSTALL_MEDIAMTX" = "Y" ]; then INSTALL_MEDIAMTX="y"; else INSTALL_MEDIAMTX="n"; fi
+
+        read -p "Install Mumble Server (murmur)? (y/N): " INSTALL_MUMBLE
+        INSTALL_MUMBLE=${INSTALL_MUMBLE:-n}
+        if [ "$INSTALL_MUMBLE" = "y" ] || [ "$INSTALL_MUMBLE" = "Y" ]; then INSTALL_MUMBLE="y"; else INSTALL_MUMBLE="n"; fi
+
+        # Mesh PTT voice is on by default: a node that ships with the OpenVLM
+        # board fitted is the normal build now. Without the board the daemon
+        # simply has nothing to drive; turning it off later is a mesh.conf edit
+        # and a service restart.
+        read -p "Enable mesh PTT voice (needs an OpenVLM board)? (Y/n): " VOICE_ENABLED
+        VOICE_ENABLED=${VOICE_ENABLED:-y}
+        if [ "$VOICE_ENABLED" = "y" ] || [ "$VOICE_ENABLED" = "Y" ]; then VOICE_ENABLED="y"; else VOICE_ENABLED="n"; fi
+        # Talk group is deliberately not asked here. Every node ships on group 1
+        # and the operator changes it from the web UI (and, later, the enclosure
+        # rotary switch): it is a per-radio setting like a channel knob, not a
+        # fleet-build decision, and baking it into the image would mean
+        # reflashing to change channel.
+
+        # Mesh Configuration
+        read -p "Enter global MESH SSID Name: " MESH_SSID
+
+        while true; do
+                read -p "Enter MESH SAE Key (WPA3 password, 8-63 chars) [or press Enter to generate, which is recommended]: " MESH_SAE_KEY
+                echo
+                if [ -z "$MESH_SAE_KEY" ]; then
+                        MESH_SAE_KEY=$(openssl rand -base64 45  | tr -d '\n')
+                        echo "Generated SAE Key: $MESH_SAE_KEY"
+                        break
+                fi
+
+                key_len=${#MESH_SAE_KEY}
+                if (( key_len < 8 || key_len > 63 )); then
+                        echo "ERROR: Key must be between 8 and 63 characters. You entered $key_len characters."
+                else
+                        break # Valid key
+                fi
+        done
+
+        # WiFi Regulatory Domain
+    while true; do
+        read -p "Enter WiFi regulatory domain (2-letter country code, default: US): " REGULATORY_DOMAIN
+        REGULATORY_DOMAIN=${REGULATORY_DOMAIN:-US}
+
+        if validated_domain=$(validate_regulatory_domain "$REGULATORY_DOMAIN"); then
+            REGULATORY_DOMAIN="$validated_domain"
+            echo "Using regulatory domain: $REGULATORY_DOMAIN"
+            HALOW_REGULATORY_DOMAIN=$(halow_regulatory_domain_for_wifi_domain "$REGULATORY_DOMAIN")
+            if [ "$HALOW_REGULATORY_DOMAIN" != "$REGULATORY_DOMAIN" ]; then
+                echo "Using HaLow regulatory region: $HALOW_REGULATORY_DOMAIN"
+            fi
+            break
+        else
+            echo "ERROR: Invalid regulatory domain code: $REGULATORY_DOMAIN"
+            echo "Please enter a valid 2-letter ISO country code (e.g., US, GB, DE, FR, JP)"
+            echo "Common codes: US (United States), GB (UK), DE (Germany), FR (France), JP (Japan)"
+            echo "              CA (Canada), AU (Australia), NZ (New Zealand), CN (China)"
+			echo "NOTE: EU is not a country code, use your actual country"
+        fi
+    done
+
+        echo "The device will have a user called radio, for ssh access."
+        read -p "Enter a password for the radio user [or press Enter to default to 'radio']: " RADIO_PW
+        echo
+
+        if [ -z "$RADIO_PW" ]; then
+                RADIO_PW="radio"
+                echo "Setting default password"
+        fi
+        echo "Setting radio password to be $RADIO_PW"
+
+        # Network administrator password
+        echo ""
+        echo "The network administrator password is used to access the mesh admin interface to modify a working mesh."
+        read -p "Enter network admin password [or press Enter to generate 10-char random]: " ADMIN_PW
+        echo
+        if [ -z "$ADMIN_PW" ]; then
+                ADMIN_PW=$(generate_password 10)
+                echo "Generated network admin password: $ADMIN_PW"
+        else
+                echo "Network admin password set."
+        fi
+
+        # Automatic updates for MANET tools
+        echo ""
+        read -p "Enable automatic updates for MANET tools? (Y/n): " AUTO_UPDATE
+        AUTO_UPDATE=${AUTO_UPDATE:-y}
+        if [ "$AUTO_UPDATE" = "y" ] || [ "$AUTO_UPDATE" = "Y" ]; then
+                AUTO_UPDATE="y"
+                echo "Automatic updates enabled."
+        else
+                AUTO_UPDATE="n"
+                echo "Automatic updates disabled."
+        fi
+
+        # Ask for max EUDs before CIDR selection
+        if [ "$EUD_CONNECTION" = "wireless" ] || [ "$EUD_CONNECTION" = "auto" ]; then
+                while true; do
+                        read -p "Maximum EUDs per radio (via wifi) (1-20): " MAX_EUDS_PER_NODE
+                        if [[ "$MAX_EUDS_PER_NODE" =~ ^[0-9]+$ ]] && [ "$MAX_EUDS_PER_NODE" -ge 1 ] && [ "$MAX_EUDS_PER_NODE" -le 20 ]; then
+                               break
+                        else
+                               echo "ERROR: Please enter a number between 1 and 20."
+                        fi
+                done
+        fi
+
+        # CIDR selection
+        ask_lan_cidr "$MAX_EUDS_PER_NODE"
+
+        # Auto Channel Selection (skip if wireless or auto)
+        if [ "$EUD_CONNECTION" = "wireless" ] || [ "$EUD_CONNECTION" = "auto" ]; then
+                AUTO_CHANNEL="n"
+                echo "Automatic WiFi Channel Selection disabled (not compatible with Wireless/Auto EUD mode)"
+        else
+                read -p "Use Automatic WiFi Channel Selection? (Y/n): " AUTO_CHANNEL
+                AUTO_CHANNEL=${AUTO_CHANNEL:-y}
+                if [ "$AUTO_CHANNEL" = "y" ] || [ "$AUTO_CHANNEL" = "Y" ]; then AUTO_CHANNEL="y"; else AUTO_CHANNEL="n"; fi
+        fi
+
+        echo "----------------------------------"
+}
+
+# Function to save the current variables to a config file
+save_config() {
+        echo ""
+        read -p "Save this configuration? (Y/n): " save_choice
+        save_choice=${save_choice:-y}
+        if [ "$save_choice" = "y" ] || [ "$save_choice" = "Y" ]; then
+                read -p "Enter a name for this config: " config_name
+                if [ -z "$config_name" ]; then
+                        echo "Invalid name, skipping save."
+                        return
+                fi
+
+                local CONFIG_FILE="$CONFIG_DIR/$config_name.conf"
+
+                cat << EOF > "$CONFIG_FILE"
+# Mesh Config: $config_name
+EUD_CONNECTION="$EUD_CONNECTION"
+LAN_AP_SSID="$LAN_AP_SSID"
+LAN_AP_KEY="$LAN_AP_KEY"
+MAX_EUDS_PER_NODE="$MAX_EUDS_PER_NODE"
+INSTALL_MEDIAMTX="$INSTALL_MEDIAMTX"
+INSTALL_MUMBLE="$INSTALL_MUMBLE"
+VOICE_ENABLED="$VOICE_ENABLED"
+REGULATORY_DOMAIN="$REGULATORY_DOMAIN"
+HALOW_REGULATORY_DOMAIN="$HALOW_REGULATORY_DOMAIN"
+MESH_SSID="$MESH_SSID"
+MESH_SAE_KEY="$MESH_SAE_KEY"
+LAN_CIDR_BLOCK="$LAN_CIDR_BLOCK"
+AUTO_CHANNEL="$AUTO_CHANNEL"
+RADIO_PW="$RADIO_PW"
+ADMIN_PW="$ADMIN_PW"
+AUTO_UPDATE="$AUTO_UPDATE"
+EOF
+
+                echo "Configuration saved to $CONFIG_FILE"
+        fi
+}
+
+# Function to load variables from a config file
+load_config() {
+        local CONFIG_FILE="$1"
+        echo "Loading config from $CONFIG_FILE..."
+        # Source the file to load the variables into this script
+        source "$CONFIG_FILE"
+        HALOW_REGULATORY_DOMAIN=${HALOW_REGULATORY_DOMAIN:-$(halow_regulatory_domain_for_wifi_domain "$REGULATORY_DOMAIN")}
+        # Config files saved before voice existed have neither key. Default them
+        # rather than substituting an empty string into mesh.conf.
+        VOICE_ENABLED=${VOICE_ENABLED:-n}
+
+        # Display the loaded settings
+        echo "--- Loaded Configuration ---"
+        head -n 1 "$CONFIG_FILE" | sed 's/\#//'
+        echo "  EUD Connection: $EUD_CONNECTION"
+        if [ "$EUD_CONNECTION" = "wireless" ] || [ "$EUD_CONNECTION" = "auto" ]; then
+                echo "  LAN AP SSID: $LAN_AP_SSID"
+                echo "  LAN AP Key: $LAN_AP_KEY"
+                echo "  Max EUDs per node: $MAX_EUDS_PER_NODE"
+        fi
+        echo "  Install MediaMTX: $INSTALL_MEDIAMTX"
+        echo "  Install Mumble: $INSTALL_MUMBLE"
+        echo "  Mesh PTT voice: $VOICE_ENABLED"
+        echo "  Regulatory Domain: $REGULATORY_DOMAIN"
+        echo "  HaLow Regulatory Region: $HALOW_REGULATORY_DOMAIN"
+        echo "  Mesh SSID: $MESH_SSID"
+        echo "  Mesh SAE Key: $MESH_SAE_KEY"
+        echo "  LAN CIDR Block: $LAN_CIDR_BLOCK"
+        echo "  Auto Channel: $AUTO_CHANNEL"
+        echo "  User password: $RADIO_PW"
+        echo "  Network admin password: ${ADMIN_PW:-(not set)}"
+        echo "  Auto Update: ${AUTO_UPDATE:-n}"
+        echo "----------------------------"
+}
+
+# Function to acquire Armbian image for Rock 3A
+# Sets ARMBIAN_IMAGE to the path of a usable .img file
+# Verifies SHA256 checksum if a .sha256 sidecar exists; saves checksum after first download.
+acquire_armbian_image() {
+        echo ""
+        echo "--- Armbian Image Setup for Rock 3A ---"
+
+        local checksum_file="${ARMBIAN_IMAGE_FILENAME}.sha256"
+
+        verify_armbian_checksum() {
+                local img="$1"
+                if [ ! -f "$checksum_file" ]; then
+                        return 0  # No checksum on file, skip verification
+                fi
+                echo "Verifying image checksum..."
+                local expected
+                expected=$(awk '{print $1}' "$checksum_file")
+                local actual
+                actual=$(sha256sum "$img" | awk '{print $1}')
+                if [ "$expected" = "$actual" ]; then
+                        echo "Checksum OK."
+                        return 0
+                else
+                        echo "ERROR: Checksum mismatch!"
+                        echo "  Expected: $expected"
+                        echo "  Actual:   $actual"
+                        return 1
+                fi
+        }
+
+        save_armbian_checksum() {
+                local img="$1"
+                echo "Saving checksum to $checksum_file..."
+                sha256sum "$img" | awk '{print $1}' > "$checksum_file"
+        }
+
+        # Check if default image exists locally (uncompressed)
+        if [ -f "$ARMBIAN_IMAGE_FILENAME" ]; then
+                echo "Found local Armbian image: $ARMBIAN_IMAGE_FILENAME"
+                if verify_armbian_checksum "$ARMBIAN_IMAGE_FILENAME"; then
+                        ARMBIAN_IMAGE="$ARMBIAN_IMAGE_FILENAME"
+                        return 0
+                else
+                        echo "Local image failed checksum: re-downloading."
+                        rm -f "$ARMBIAN_IMAGE_FILENAME"
+                fi
+        fi
+
+        # Check for compressed version
+        if [ -f "${ARMBIAN_IMAGE_FILENAME}.xz" ]; then
+                echo "Found compressed Armbian image: ${ARMBIAN_IMAGE_FILENAME}.xz"
+                echo "Decompressing (this may take a moment)..."
+                xz -dk "${ARMBIAN_IMAGE_FILENAME}.xz"
+                if [ $? -eq 0 ]; then
+                        if verify_armbian_checksum "$ARMBIAN_IMAGE_FILENAME"; then
+                                ARMBIAN_IMAGE="$ARMBIAN_IMAGE_FILENAME"
+                                echo "Decompression complete."
+                                return 0
+                        else
+                                echo "Decompressed image failed checksum: re-downloading."
+                                rm -f "$ARMBIAN_IMAGE_FILENAME" "${ARMBIAN_IMAGE_FILENAME}.xz"
+                        fi
+                else
+                        echo "ERROR: Decompression failed."
+                        return 1
+                fi
+        fi
+
+        echo "Armbian image not found locally."
+        echo ""
+        echo "Options:"
+        echo "  1. Download from Armbian mirror (recommended)"
+        echo "     URL: $ARMBIAN_IMAGE_URL"
+        echo "  2. Provide path to an existing Armbian Trixie image"
+        echo ""
+
+        while true; do
+                read -p "Select option (1 or 2): " img_choice
+                case $img_choice in
+                        1)
+                               download_armbian_image
+                               if [ $? -eq 0 ]; then
+                                       save_armbian_checksum "$ARMBIAN_IMAGE"
+                               fi
+                               return $?
+                               ;;
+                        2)
+                               select_custom_armbian_image
+                               if [ $? -eq 0 ]; then
+                                       save_armbian_checksum "$ARMBIAN_IMAGE"
+                               fi
+                               return $?
+                               ;;
+                        *)
+                               echo "Invalid selection. Please enter 1 or 2."
+                               ;;
+                esac
+        done
+}
+
+# Function to download Armbian image from mirror
+download_armbian_image() {
+        local compressed_file="${ARMBIAN_IMAGE_FILENAME}.xz"
+
+        echo ""
+        echo "Downloading Armbian image..."
+        echo "Source: $ARMBIAN_IMAGE_URL"
+        echo ""
+
+        # Check for wget or curl
+        if command -v wget &> /dev/null; then
+                wget --progress=bar:force -O "$compressed_file" "$ARMBIAN_IMAGE_URL"
+        elif command -v curl &> /dev/null; then
+                curl -L --progress-bar -o "$compressed_file" "$ARMBIAN_IMAGE_URL"
+        else
+                echo "ERROR: Neither wget nor curl found. Please install one to download."
+                return 1
+        fi
+
+        if [ $? -ne 0 ]; then
+                echo "ERROR: Download failed."
+                rm -f "$compressed_file" 2>/dev/null
+                return 1
+        fi
+
+        echo ""
+        echo "Download complete. Decompressing..."
+        xz -dk "$compressed_file"
+
+        if [ $? -ne 0 ]; then
+                echo "ERROR: Decompression failed."
+                return 1
+        fi
+
+        ARMBIAN_IMAGE="$ARMBIAN_IMAGE_FILENAME"
+        echo "Image ready: $ARMBIAN_IMAGE"
+        return 0
+}
+
+# Function to select a custom Armbian image path
+select_custom_armbian_image() {
+        echo ""
+        echo "=============================================="
+        echo "  IMPORTANT: Armbian Image Selection"
+        echo "=============================================="
+        echo "Please ensure you are selecting an Armbian image"
+        echo "that is compatible with the Radxa Rock 3A board."
+        echo ""
+        echo "       The expected environment is:"
+        echo "    minimal/IoT Armbian Trixie ( Debian 13)"
+        echo ""
+        echo "The image should be an uncompressed .img file."
+        echo "If you have a .img.xz file, it will be decompressed."
+        echo "=============================================="
+        echo ""
+
+        while true; do
+                read -p "Enter path to Armbian image: " custom_path
+
+                # Expand ~ if present
+                custom_path="${custom_path/#\~/$HOME}"
+
+                if [ -z "$custom_path" ]; then
+                        echo "No path entered. Please try again or press Ctrl+C to cancel."
+                        continue
+                fi
+
+                # Check if it's a compressed file
+                if [ -f "$custom_path" ] && [[ "$custom_path" == *.xz ]]; then
+                        echo "Compressed image detected. Decompressing..."
+                        local decompressed_path="${custom_path%.xz}"
+                        xz -dk "$custom_path"
+                        if [ $? -eq 0 ]; then
+                               ARMBIAN_IMAGE="$decompressed_path"
+                               echo "Image ready: $ARMBIAN_IMAGE"
+                               return 0
+                        else
+                               echo "ERROR: Decompression failed."
+                               return 1
+                        fi
+                elif [ -f "$custom_path" ] && [[ "$custom_path" == *.img ]]; then
+                        ARMBIAN_IMAGE="$custom_path"
+                        echo "Using image: $ARMBIAN_IMAGE"
+                        return 0
+                elif [ -f "$custom_path" ]; then
+                        echo "WARNING: File exists but doesn't have .img or .img.xz extension."
+                        read -p "Use this file anyway? (y/N): " use_anyway
+                        if [ "$use_anyway" = "y" ] || [ "$use_anyway" = "Y" ]; then
+                               ARMBIAN_IMAGE="$custom_path"
+                               echo "Using image: $ARMBIAN_IMAGE"
+                               return 0
+                        fi
+                else
+                        echo "ERROR: File not found: $custom_path"
+                        echo "Please check the path and try again."
+                fi
+        done
+}
+
+# Selects hardware model. Sets HARDWARE_MODEL global.
+select_hardware() {
+        echo ""
+        echo "--- 1. Select Hardware ---"
+
+        echo "Select hardware model:"
+        select hw_choice in "Raxda Rock 3A" "Raspberry Pi 5" "Raspberry Pi 4B" "Compute Module 4 (CM4)"; do
+                case $hw_choice in
+                        "Raxda Rock 3A" )
+                               HARDWARE_MODEL="r3a"
+                               break
+                               ;;
+                        "Raspberry Pi 5" )
+                               HARDWARE_MODEL="rpi5"
+                               break
+                               ;;
+                        "Raspberry Pi 4B" )
+                               HARDWARE_MODEL="rpi4"
+                               break
+                               ;;
+                        "Compute Module 4 (CM4)" )
+                               echo "Compute Module 4 selected."
+                               HARDWARE_MODEL="cm4"
+                               break
+                               ;;
+                esac
+        done
+}
+
+# Selects a single SD card target. Sets TARGET_DEVICE global.
+# For CM4 uses rpiboot before/after detection.
+select_target_device() {
+        echo ""
+        echo "--- Select Target SD Card ---"
+
+        # CM4: use rpiboot before/after detection
+        if [ "$HARDWARE_MODEL" = "cm4" ]; then
+                local DISKS_BEFORE
+                DISKS_BEFORE=$(lsblk -d -n -o NAME)
+                echo "Please connect your CM4 to this computer in USB-boot mode."
+                read -p "Press Enter to run 'sudo rpiboot' and mount the eMMC..."
+                echo
+                sudo rpiboot
+                echo "'rpiboot' finished. Waiting $DEVICE_WAIT seconds for device to settle..."
+                sleep $DEVICE_WAIT
+
+                local DISKS_AFTER
+                DISKS_AFTER=$(lsblk -d -n -o NAME)
+                local NEW_DISK
+                NEW_DISK=$(comm -13 <(echo "$DISKS_BEFORE" | sort) <(echo "$DISKS_AFTER" | sort))
+
+                if [ -z "$NEW_DISK" ]; then
+                        echo "ERROR: No new disk detected after rpiboot."
+                        echo "Please check connections and try again."
+                        exit 1
+                fi
+
+                local NEW_DISK_SIZE
+                NEW_DISK_SIZE=$(lsblk -d -n -o SIZE "/dev/$NEW_DISK")
+                TARGET_DEVICE="/dev/$NEW_DISK"
+                echo "Detected CM4 device: $TARGET_DEVICE ($NEW_DISK_SIZE)"
+                HARDWARE_MODEL="rpi4"  # Use rpi4 template for CM4
+                return
+        fi
+
+        echo "Detecting SD cards..."
+        local BOOT_DISK
+        BOOT_DISK=$(find_boot_disk)
+        echo "(Excluding boot disk: $BOOT_DISK)"
+
+        detect_sd_cards "$BOOT_DISK"
+
+        if [ ${#SD_DEVICES[@]} -eq 0 ]; then
+                echo "ERROR: No SD cards detected."
+                echo "Please insert an SD card and try again."
+                exit 1
+        fi
+
+        echo "Please select the target SD card:"
+        PS3="Enter number (or 'q' to quit): "
+        select device_choice in "${SD_DEVICES[@]}" "Quit"; do
+                if [[ "$REPLY" =~ ^[Qq]$ ]] || [ "$device_choice" = "Quit" ]; then
+                        echo "Aborting."
+                        rm -f "$TEMP_SCRIPT_FILE"
+                        exit 0
+                fi
+                if [ -n "$device_choice" ]; then
+                        TARGET_DEVICE=$(echo "$device_choice" | awk '{print $1}')
+                        echo "Selected: $TARGET_DEVICE"
+                        break
+                else
+                        echo "Invalid selection."
+                fi
+        done
+}
+
+# Function to display final confirmation before flashing
+confirm_flash() {
+        local device="$1"
+        local device_size=$(lsblk -d -n -o SIZE "$device" 2>/dev/null || echo "unknown")
+
+        echo ""
+        echo "=============================================="
+        echo "         ⚠️  FINAL CONFIRMATION  ⚠️"
+        echo "=============================================="
+        echo ""
+        echo "You are about to ERASE and FLASH:"
+        echo ""
+        echo "  Device: $device"
+        echo "  Size:   $device_size"
+        echo ""
+        echo "  Hardware: $HARDWARE_MODEL"
+        echo "  Mesh SSID: $MESH_SSID"
+        echo "  Network: $LAN_CIDR_BLOCK"
+        echo ""
+        echo "⚠️  ALL DATA ON $device WILL BE DESTROYED! ⚠️"
+        echo ""
+        echo "=============================================="
+        echo ""
+
+        read -p "Type 'yes' to proceed, anything else to abort: " confirm
+        if [ "$confirm" != "yes" ]; then
+                echo ""
+                echo "Aborted by user."
+                exit 0
+        fi
+
+        echo ""
+        echo "Proceeding with flash..."
+}
+
+# Flash one SD card: Rock3A path (dd)
+flash_r3a() {
+        local target="$1"
+
+        # Create temp copy of image to avoid modifying original
+        local TEMP_IMAGE
+        TEMP_IMAGE=$(mktemp --suffix=.img)
+        echo "Creating temporary copy of $ARMBIAN_IMAGE..."
+        cp "$ARMBIAN_IMAGE" "$TEMP_IMAGE"
+
+        # Loop mount the temp image
+        local LOOP_DEV
+        LOOP_DEV=$(sudo losetup -fP --show "$TEMP_IMAGE")
+        echo "Mounted image as: $LOOP_DEV"
+
+        # Find the ext4 rootfs partition: auto-detects single or split layout
+        local ROOT_PART=""
+        for part in "${LOOP_DEV}p"*; do
+                local fstype
+                fstype=$(sudo blkid -s TYPE -o value "$part" 2>/dev/null)
+                if [ "$fstype" = "ext4" ]; then
+                        ROOT_PART="$part"
+                        break
+                fi
+        done
+        if [ -z "$ROOT_PART" ]; then
+                echo "ERROR: No ext4 partition found in $TEMP_IMAGE"
+                sudo losetup -d "$LOOP_DEV"
+                rm -f "$TEMP_IMAGE"
+                exit 1
+        fi
+        echo "Found rootfs partition: $ROOT_PART"
+
+        local ROOT_MOUNT="/tmp/armbian-root"
+        sudo mkdir -p "$ROOT_MOUNT"
+        sudo mount "$ROOT_PART" "$ROOT_MOUNT"
+
+        # Write mesh configuration to /etc/mesh.conf
+        echo "Writing /etc/mesh.conf..."
+        sudo tee "$ROOT_MOUNT/etc/mesh.conf" > /dev/null << EOF
+# Mesh Network Configuration
+# Generated by provisioning script on $(date)
+hardware_model=${HARDWARE_MODEL}
+eud=${EUD_CONNECTION}
+lan_ap_ssid=${LAN_AP_SSID}
+lan_ap_key=${LAN_AP_KEY}
+max_euds_per_node=${MAX_EUDS_PER_NODE}
+mtx=${INSTALL_MEDIAMTX}
+mumble=${INSTALL_MUMBLE}
+voice=${VOICE_ENABLED}
+# Every node ships on talk group 1; changed from the web UI, not at flash time.
+voice_channel=1
+mesh_ssid=${MESH_SSID}
+mesh_key=${MESH_SAE_KEY}
+ipv4_network=${LAN_CIDR_BLOCK}
+acs=${AUTO_CHANNEL}
+regulatory_domain=${REGULATORY_DOMAIN}
+halow_regulatory_domain=${HALOW_REGULATORY_DOMAIN}
+admin_password=${ADMIN_PW}
+auto_update=${AUTO_UPDATE}
+EOF
+
+        # BYPASS ARMBIAN-FIRSTLOGIN - Headless auto-provisioning
+
+        # Remove .not_logged_in_yet to prevent armbian-firstlogin from running
+        echo "Removing .not_logged_in_yet to bypass interactive setup..."
+        sudo rm -f "$ROOT_MOUNT/root/.not_logged_in_yet"
+
+        # Pre-create the radio user with hashed password
+        echo "Creating radio user..."
+        local RADIO_PW_HASH
+        RADIO_PW_HASH=$(openssl passwd -6 "$RADIO_PW")
+
+        # Add radio user to passwd (UID 1000, GID 1000, home /home/radio, shell /bin/bash)
+        echo "radio:x:1000:1000:radio:/home/radio:/bin/bash" | sudo tee -a "$ROOT_MOUNT/etc/passwd" > /dev/null
+
+        # Add radio group
+        echo "radio:x:1000:" | sudo tee -a "$ROOT_MOUNT/etc/group" > /dev/null
+
+        # Add radio to shadow with hashed password
+        echo "radio:${RADIO_PW_HASH}:19700:0:99999:7:::" | sudo tee -a "$ROOT_MOUNT/etc/shadow" > /dev/null
+
+        # Add radio to sudo group
+        sudo sed -i 's/^sudo:x:\([0-9]*\):.*$/sudo:x:\1:radio/' "$ROOT_MOUNT/etc/group"
+
+        # Create home directory
+        sudo mkdir -p "$ROOT_MOUNT/home/radio"
+        sudo chown 1000:1000 "$ROOT_MOUNT/home/radio"
+        sudo chmod 755 "$ROOT_MOUNT/home/radio"
+
+        # Add radio to sudoers (passwordless sudo)
+        echo "radio ALL=(ALL) NOPASSWD: ALL" | sudo tee "$ROOT_MOUNT/etc/sudoers.d/radio" > /dev/null
+        sudo chmod 440 "$ROOT_MOUNT/etc/sudoers.d/radio"
+
+        # Generate and install the provisioning script
+
+        echo "Generating provisioning script from Rock3A template..."
+        local TEMP_PROVISION_SCRIPT
+        TEMP_PROVISION_SCRIPT=$(mktemp)
+
+        if [ ! -f "$ROCK3A_TEMPLATE" ]; then
+                echo "ERROR: Rock3A template '$ROCK3A_TEMPLATE' not found."
+                sudo umount "$ROOT_MOUNT" 2>/dev/null; sudo losetup -d "$LOOP_DEV" 2>/dev/null
+                rm -f "$TEMP_IMAGE"
+                exit 1
+        fi
+
+        prepare_release
+        cp "$ROCK3A_TEMPLATE" "$TEMP_PROVISION_SCRIPT"
+        sed -i "s|__RELEASE_VERSION__|${RELEASE_VERSION}|g; s|__INSTALL_URL__|${INSTALL_URL}|g; s|__INSTALL_SHA256__|${INSTALL_SHA256}|g" "$TEMP_PROVISION_SCRIPT"
+
+        sed -i "s|__HARDWARE_MODEL__|${HARDWARE_MODEL}|g" "$TEMP_PROVISION_SCRIPT"
+        sed -i "s|__EUD_CONNECTION__|${EUD_CONNECTION}|g" "$TEMP_PROVISION_SCRIPT"
+        sed -i "s|__LAN_AP_SSID__|${LAN_AP_SSID}|g" "$TEMP_PROVISION_SCRIPT"
+        sed -i "s|__LAN_AP_KEY__|${LAN_AP_KEY}|g" "$TEMP_PROVISION_SCRIPT"
+        sed -i "s|__MAX_EUDS_PER_NODE__|${MAX_EUDS_PER_NODE}|g" "$TEMP_PROVISION_SCRIPT"
+        sed -i "s|__INSTALL_MEDIAMTX__|${INSTALL_MEDIAMTX}|g" "$TEMP_PROVISION_SCRIPT"
+        sed -i "s|__INSTALL_MUMBLE__|${INSTALL_MUMBLE}|g" "$TEMP_PROVISION_SCRIPT"
+        sed -i "s|__VOICE_ENABLED__|${VOICE_ENABLED}|g" "$TEMP_PROVISION_SCRIPT"
+        sed -i "s|__MESH_SSID__|${MESH_SSID}|g" "$TEMP_PROVISION_SCRIPT"
+        sed -i "s|__MESH_SAE_KEY__|${MESH_SAE_KEY}|g" "$TEMP_PROVISION_SCRIPT"
+        sed -i "s|__LAN_CIDR_BLOCK__|${LAN_CIDR_BLOCK}|g" "$TEMP_PROVISION_SCRIPT"
+        sed -i "s|__AUTO_CHANNEL__|${AUTO_CHANNEL}|g" "$TEMP_PROVISION_SCRIPT"
+        sed -i "s|__RADIO_PW__|${RADIO_PW}|g" "$TEMP_PROVISION_SCRIPT"
+        sed -i "s|__REGULATORY_DOMAIN__|${REGULATORY_DOMAIN}|g" "$TEMP_PROVISION_SCRIPT"
+        sed -i "s|__HALOW_REGULATORY_DOMAIN__|${HALOW_REGULATORY_DOMAIN}|g" "$TEMP_PROVISION_SCRIPT"
+        sed -i "s|__ADMIN_PW__|${ADMIN_PW}|g" "$TEMP_PROVISION_SCRIPT"
+        sed -i "s|__AUTO_UPDATE__|${AUTO_UPDATE}|g" "$TEMP_PROVISION_SCRIPT"
+
+        # Same embedding as the Pi path, and for the same reason it goes after
+        # the substitutions above rather than before.
+        append_additional_scripts "$TEMP_PROVISION_SCRIPT"
+
+        echo "Installing provisioning script to /usr/local/bin/provision-mesh.sh..."
+        sudo cp "$TEMP_PROVISION_SCRIPT" "$ROOT_MOUNT/usr/local/bin/provision-mesh.sh"
+        sudo chmod +x "$ROOT_MOUNT/usr/local/bin/provision-mesh.sh"
+        rm -f "$TEMP_PROVISION_SCRIPT"
+
+        # Create systemd service for auto-provisioning on first boot
+
+        echo "Creating mesh-provision systemd service..."
+        sudo tee "$ROOT_MOUNT/etc/systemd/system/mesh-provision.service" > /dev/null << 'SERVICE_EOF'
+[Unit]
+Description=Mesh Network First Boot Provisioning
+ConditionPathExists=/root/.mesh-not-provisioned
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/provision-mesh.sh
+ExecStartPost=/bin/rm -f /root/.mesh-not-provisioned
+RemainAfterExit=yes
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=multi-user.target
+SERVICE_EOF
+
+        echo "Creating provisioning trigger flag..."
+        sudo touch "$ROOT_MOUNT/root/.mesh-not-provisioned"
+
+        echo "Enabling mesh-provision service..."
+        sudo mkdir -p "$ROOT_MOUNT/etc/systemd/system/multi-user.target.wants"
+        sudo ln -sf /etc/systemd/system/mesh-provision.service \
+                "$ROOT_MOUNT/etc/systemd/system/multi-user.target.wants/mesh-provision.service"
+
+        # Unmount and flash
+
+        echo "Unmounting image..."
+        sudo sync
+        sudo umount "$ROOT_MOUNT"
+        sudo rmdir "$ROOT_MOUNT"
+        sudo losetup -d "$LOOP_DEV"
+
+        echo "Wiping target device..."
+        sudo wipefs -a "$target"
+
+        echo "Flashing image to $target..."
+        sudo dd if="$TEMP_IMAGE" of="$target" bs=4M status=progress conv=fsync
+        sudo sync
+
+        rm -f "$TEMP_IMAGE"
+
+        echo ""
+        echo "=============================================="
+        echo "           ✅ Flash complete: $target"
+        echo "=============================================="
+        echo ""
+        echo "You can now remove the SD card and boot your"
+        echo "Rock 3A. First boot provisioning will run"
+        echo "automatically when connected to the internet."
+        echo ""
+        echo "  - Root password: 1234 (Armbian default)"
+        echo "  - Radio user: radio / <your configured password>"
+        echo ""
+        echo " ONCE BOOTED, THE MESH NODE WILL AUTOMATICALLY START"
+        echo " SETTING ITSELF UP AND WILL REBOOT MULTIPLE TIMES"
+        echo " Just leave it alone, this process takes about ten"
+        echo " minutes"
+}
+
+# Flash one SD card: Raspberry Pi path (rpi-imager)
+# ---------------------------------------------------------------------------
+# Operator setup scripts
+# ---------------------------------------------------------------------------
+# These are embedded in the generated firstrun.sh as one quoted heredoc per
+# file, and written out to /var/lib/manet-user-scripts on the node's first
+# boot. manet-user-scripts.service runs them once, after radio-setup has
+# finished (radio-setup.sh starts it as its last act).
+#
+# Validation happens BEFORE any card is touched. Baking a syntactically broken
+# script into an image is a wasted flash and a node that silently does not do
+# what the operator asked; failing here costs nothing.
+
+# Is this file safe to embed in a quoted heredoc, and does it look like a
+# script? Echoes a verdict word plus a reason. Never modifies the file.
+# Read an operator script and put right the things a Windows editor does to a
+# file without telling anyone. Writes the corrected text to $2 and echoes the
+# list of corrections, comma separated, so they can be reported. Returns 1 with
+# the reason on stdout for the things that cannot be guessed at.
+#
+# The corrections happen on a copy. The operator's file is never rewritten:
+# they wrote it, and a flasher that silently edits the input is worse than one
+# that explains itself.
+#
+# Must stay in step with Read-AdditionalScriptContent in windows.ps1, which
+# does exactly this. The two flashers are meant to produce the same image.
+normalize_additional_script() {
+    local src="$1" dst="$2"
+    local fixes=() head3
+
+    if [ ! -s "$src" ]; then
+        echo "empty file"; return 1
+    fi
+
+    # Encoding, decided by the byte order mark the editor left behind. Notepad
+    # writes one for "UTF-8 with BOM" and for "Unicode", which is UTF-16 LE.
+    head3=$(head -c 3 "$src" | od -An -tx1 | tr -d ' \n')
+
+    case "$head3" in
+        efbbbf*)
+            # A BOM sits in front of the shebang, where the kernel does not
+            # look, so the node would run nothing at all.
+            tail -c +4 "$src" > "$dst"
+            fixes+=("byte order mark removed")
+            ;;
+        fffe*|feff*)
+            if ! command -v iconv >/dev/null 2>&1; then
+                echo "UTF-16 text and no iconv here to convert it - save it as UTF-8"; return 1
+            fi
+            if ! iconv -f UTF-16 -t UTF-8 "$src" > "$dst" 2>/dev/null; then
+                echo "not valid UTF-16 text"; return 1
+            fi
+            fixes+=("converted from UTF-16")
+            ;;
+        *)
+            cat "$src" > "$dst"
+            ;;
+    esac
+
+    # After decoding, not before: a UTF-16 file is full of zero bytes that are
+    # not NULs in the text at all. A heredoc is a byte stream through bash, and
+    # bash cannot carry a real NUL. This is the one hard technical limit.
+    #
+    # Detected by size comparison rather than `grep -P '\x00'`, which needs a
+    # PCRE-capable grep that is not guaranteed on every host. `tr -d` is POSIX.
+    # This cannot be left to the UTF-8 check below: U+0000 is perfectly valid
+    # UTF-8, so iconv accepts it happily.
+    local raw_bytes text_bytes nul_at
+    raw_bytes=$(wc -c < "$dst")
+    text_bytes=$(tr -d '\000' < "$dst" | wc -c)
+    if [ "$raw_bytes" -ne "$text_bytes" ]; then
+        nul_at=$(LC_ALL=C grep -aobUP '\x00' "$dst" 2>/dev/null | head -1 | cut -d: -f1)
+        echo "binary content${nul_at:+ (NUL byte at offset $nul_at)} - fetch binaries at run time"
+        return 1
+    fi
+
+    # Nothing is guessed here. An encoding with no mark could be any of a dozen
+    # code pages and picking wrong corrupts the script quietly.
+    if command -v iconv >/dev/null 2>&1; then
+        if ! iconv -f UTF-8 -t UTF-8 "$dst" >/dev/null 2>&1; then
+            echo "not valid UTF-8 text"; return 1
+        fi
+    fi
+
+    # A shebang with a trailing CR makes the kernel look for an interpreter
+    # whose name ends in CR, and the script dies with a bare "not found" that
+    # names the right path. The second expression catches a lone CR, which is
+    # what windows.ps1's second -replace does.
+    if LC_ALL=C grep -q $'\r' "$dst" 2>/dev/null; then
+        sed -e 's/\r$//' -e 's/\r/\n/g' "$dst" > "$dst.lf" && mv "$dst.lf" "$dst"
+        fixes+=("line endings fixed")
+    fi
+
+    # A file with no trailing newline would glue the heredoc delimiter onto its
+    # last line, and the delimiter would not be recognised.
+    if [ -n "$(tail -c 1 "$dst")" ]; then
+        printf '\n' >> "$dst"
+        fixes+=("final newline added")
+    fi
+
+    local IFS=,
+    echo "${fixes[*]}"
+    return 0
+}
+
+classify_additional_script() {
+    local f="$1" name shebang tmp fixes fixed interp note
+    name=$(basename "$f")
+
+    # Filename becomes a path on the node and appears in a shell heredoc
+    # header, so keep it boring.
+    if ! [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+        echo "FAIL filename must match [A-Za-z0-9][A-Za-z0-9._-]*"; return
+    fi
+
+    tmp=$(mktemp) || { echo "FAIL could not create a temporary file"; return; }
+
+    # Everything below is judged on the corrected copy, never the original.
+    # A UTF-16 file would choke bash -n before it got as far as the syntax.
+    if ! fixes=$(normalize_additional_script "$f" "$tmp"); then
+        rm -f "$tmp"
+        echo "FAIL $fixes"; return
+    fi
+    fixed=""
+    [ -n "$fixes" ] && fixed=" [${fixes//,/, }]"
+
+    # Shebang decides whether this is a script at all. No shebang is a skip,
+    # not an error: a README or a notes file living in the directory is
+    # perfectly reasonable and must not be executed as root on a mesh node.
+    shebang=$(head -1 "$tmp")
+    if [[ "$shebang" != '#!'* ]]; then
+        rm -f "$tmp"; echo "SKIP no #! on line 1"; return
+    fi
+
+    # The interpreter, as a bare name: "#!/usr/bin/env python3" -> python3,
+    # "#!/usr/bin/perl -w" -> perl. Used for the syntax check below and for the
+    # availability note.
+    interp=$(echo "${shebang#\#!}" | awk '{ if ($1 ~ /\/env$/) print $2; else print $1 }')
+    interp=$(basename "${interp:-sh}")
+
+    note=""
+    case " $ADDITIONAL_SCRIPTS_NODE_INTERPRETERS " in
+        *" $interp "*) ;;
+        *) note=" - $interp is not installed on a stock node" ;;
+    esac
+
+    # Any interpreter is accepted. Only some can be syntax-checked, and only
+    # those that can be checked without executing the script:
+    #
+    #   shell  - bash -n parses without running.
+    #   python - ast.parse is a pure parse; imports are not executed.
+    #
+    # perl is deliberately not checked. `perl -c` executes BEGIN blocks, which
+    # would run operator code on the flashing host, and it resolves `use`
+    # statements against the host's module path, so a script using a module
+    # present on the node but not here would be failed wrongly. A wrong FAIL
+    # blocks a flash, which is worse than an unchecked script.
+    case "$interp" in
+        sh|bash|dash)
+            local errs
+            if ! errs=$(bash -n "$tmp" 2>&1); then
+                rm -f "$tmp"
+                echo "FAIL shell syntax error: $(echo "$errs" | head -1 | sed 's|^[^:]*: ||')"
+                return
+            fi
+            rm -f "$tmp"; echo "OK bash -n clean$note$fixed"; return
+            ;;
+        python|python3|python2)
+            if command -v python3 >/dev/null 2>&1; then
+                local pycheck='import ast,sys
+try:
+    ast.parse(open(sys.argv[1], encoding="utf-8", errors="replace").read())
+except SyntaxError as e:
+    sys.stderr.write("line %s: %s" % (e.lineno, e.msg)); sys.exit(1)'
+                local perrs
+                if ! perrs=$(python3 -c "$pycheck" "$tmp" 2>&1); then
+                    rm -f "$tmp"
+                    echo "FAIL python syntax error: $perrs"
+                    return
+                fi
+                rm -f "$tmp"; echo "OK python syntax clean$note$fixed"; return
+            fi
+            rm -f "$tmp"; echo "OK $interp, not checked (no python3 here)$note$fixed"; return
+            ;;
+    esac
+    rm -f "$tmp"
+    echo "OK $interp, not checked$note$fixed"
+}
+
+validate_additional_scripts() {
+    ADDITIONAL_SCRIPTS=()
+    ADDITIONAL_SCRIPTS_BYTES=0
+
+    [ -d "$ADDITIONAL_SCRIPTS_DIR" ] || return 0
+
+    local candidates=()
+    while IFS= read -r f; do
+        [ -n "$f" ] && candidates+=("$f")
+    done < <(find "$ADDITIONAL_SCRIPTS_DIR" -maxdepth 1 -type f -printf '%f\n' 2>/dev/null \
+        | grep -v -e '^\.' -e '\.disabled$' -e '\.bak$' -e '\.orig$' -e '~$' \
+        | LC_ALL=C sort)
+
+    [ ${#candidates[@]} -eq 0 ] && return 0
+
+    echo ""
+    echo "=============================================="
+    echo " Additional setup scripts"
+    echo "=============================================="
+    echo " From: $ADDITIONAL_SCRIPTS_DIR/"
+    echo ""
+
+    local failed=0 name path verdict reason
+    for name in "${candidates[@]}"; do
+        path="$ADDITIONAL_SCRIPTS_DIR/$name"
+        local result; result=$(classify_additional_script "$path")
+        verdict="${result%% *}"
+        reason="${result#* }"
+
+        case "$verdict" in
+            OK)
+                ADDITIONAL_SCRIPTS+=("$name")
+                ADDITIONAL_SCRIPTS_BYTES=$((ADDITIONAL_SCRIPTS_BYTES + $(stat -c %s "$path")))
+                printf '   %-36s ok    %s\n' "$name" "$reason"
+                ;;
+            SKIP) printf '   %-36s SKIP  %s\n' "$name" "$reason" ;;
+            FAIL) printf '   %-36s FAIL  %s\n' "$name" "$reason"; failed=1 ;;
+        esac
+    done
+
+    if [ "$failed" -eq 1 ]; then
+        echo ""
+        echo " ERROR: one or more scripts did not pass validation."
+        echo "        Nothing has been written to any card. Fix the files"
+        echo "        above (or rename them to .disabled) and run again."
+        exit 1
+    fi
+
+    if [ ${#ADDITIONAL_SCRIPTS[@]} -eq 0 ]; then
+        echo ""
+        echo " Nothing to embed."
+        return 0
+    fi
+
+    if [ "$ADDITIONAL_SCRIPTS_BYTES" -gt "$ADDITIONAL_SCRIPTS_MAX_BYTES" ]; then
+        echo ""
+        echo " ERROR: embedded scripts total $ADDITIONAL_SCRIPTS_BYTES bytes," \
+             "over the ${ADDITIONAL_SCRIPTS_MAX_BYTES}-byte limit."
+        echo "        Have a script fetch the bulk at run time instead: the"
+        echo "        node has confirmed internet before these are run."
+        exit 1
+    fi
+    if [ "$ADDITIONAL_SCRIPTS_BYTES" -gt "$ADDITIONAL_SCRIPTS_WARN_BYTES" ]; then
+        echo ""
+        echo " NOTE: $ADDITIONAL_SCRIPTS_BYTES bytes of scripts is a lot to bake"
+        echo "       into an image. Consider fetching large payloads at run time."
+    fi
+
+    echo ""
+    echo " ${#ADDITIONAL_SCRIPTS[@]} script(s) will be embedded and run ONCE as"
+    echo " root on each node, after setup completes."
+    echo ""
+    echo " Note: firstrun.sh is stored unencrypted on the boot partition and is"
+    echo " not deleted. Anyone who reads the card reads these scripts. Do not"
+    echo " put private keys or long-lived secrets in them."
+    echo "=============================================="
+    echo ""
+}
+
+# Pick a heredoc terminator that cannot appear in the file. A quoted heredoc
+# ends at the first line consisting solely of the delimiter, so an operator
+# script that legitimately contains our default -- one that embeds its own
+# heredoc, say -- would truncate itself and leave the rest as loose shell.
+heredoc_delimiter_for() {
+    local f="$1" i=0 delim="MANET_USER_SCRIPT_EOF"
+    while LC_ALL=C grep -qxF "$delim" "$f" 2>/dev/null; do
+        i=$((i + 1))
+        delim="MANET_USER_SCRIPT_EOF_$i"
+        [ "$i" -gt 64 ] && { echo "" ; return 1; }
+    done
+    echo "$delim"
+}
+
+# Append the embedding block to an already-generated setup script.
+#
+# Called AFTER token substitution, deliberately. The flasher rewrites every
+# __TOKEN__ in the template with sed; running that over operator content would
+# silently rewrite a script that happens to mention __ADMIN_PW__ or any other
+# token, which is both wrong and invisible.
+append_additional_scripts() {
+    local target="$1"
+    local block; block=$(mktemp)
+    : > "$block"
+
+    # The block is built into a temp file first, then substituted for the
+    # anchor line. Doing it in that order means a run with no scripts still
+    # strips the marker out of the generated image.
+    if [ ${#ADDITIONAL_SCRIPTS[@]} -gt 0 ]; then
+        {
+            echo ""
+            echo "# ===================================================================="
+            echo "# Operator setup scripts, embedded at flash time from"
+            # Literal, not "$ADDITIONAL_SCRIPTS_DIR": that variable can hold an
+            # absolute path, and this comment is baked into every flashed image
+            # on a boot partition anyone can read. It should not carry the
+            # operator's directory layout. Matches windows.ps1 verbatim.
+            echo "# additional-scripts/. Written out here; run once by"
+            echo "# manet-user-scripts.service, which radio-setup.sh starts after"
+            echo "# provisioning completes."
+            echo "# ===================================================================="
+            echo 'echo "Writing operator setup scripts..."'
+            echo 'mkdir -p /var/lib/manet-user-scripts'
+        } > "$block"
+
+        local name path delim tmp
+        for name in "${ADDITIONAL_SCRIPTS[@]}"; do
+            path="$ADDITIONAL_SCRIPTS_DIR/$name"
+            tmp=$(mktemp)
+
+            # The same corrections the validator applied, so what lands on the
+            # card is exactly what was checked: byte order mark gone, UTF-16
+            # decoded, LF line endings, and the trailing newline the heredoc
+            # delimiter needs to be recognised.
+            if ! normalize_additional_script "$path" "$tmp" >/dev/null; then
+                echo "ERROR: $name could not be read" >&2
+                rm -f "$tmp" "$block"
+                exit 1
+            fi
+
+            # Chosen from the corrected text, not the original: a delimiter
+            # that only collides once the CRs are gone would truncate the
+            # heredoc on the node.
+            delim=$(heredoc_delimiter_for "$tmp")
+            if [ -z "$delim" ]; then
+                echo "ERROR: could not find a safe heredoc delimiter for $name" >&2
+                rm -f "$tmp" "$block"
+                exit 1
+            fi
+            {
+                echo ""
+                echo "cat > '/var/lib/manet-user-scripts/$name' << '$delim'"
+                cat "$tmp"
+                echo "$delim"
+                echo "chmod 0755 '/var/lib/manet-user-scripts/$name'"
+            } >> "$block"
+            rm -f "$tmp"
+        done
+
+        {
+            echo ""
+            echo "echo \"Operator setup scripts staged: \$(ls -1 /var/lib/manet-user-scripts | wc -l)\""
+        } >> "$block"
+    fi
+
+    if grep -qxF "$ADDITIONAL_SCRIPTS_ANCHOR" "$target"; then
+        awk -v anchor="$ADDITIONAL_SCRIPTS_ANCHOR" -v blockfile="$block" '
+            $0 == anchor {
+                while ((getline l < blockfile) > 0) print l
+                close(blockfile)
+                next
+            }
+            { print }
+        ' "$target" > "$target.manet-tmp" && mv "$target.manet-tmp" "$target"
+    elif [ ${#ADDITIONAL_SCRIPTS[@]} -gt 0 ]; then
+        # No anchor in an older or hand-edited template. Appending would be
+        # worse than nothing on a script that ends in `reboot`, so refuse
+        # rather than silently produce an image whose scripts never run.
+        echo "ERROR: '$(basename "$target")' has no anchor line:" >&2
+        echo "       $ADDITIONAL_SCRIPTS_ANCHOR" >&2
+        echo "       Cannot place the operator setup scripts. Aborting." >&2
+        rm -f "$block"
+        exit 1
+    fi
+
+    rm -f "$block"
+    if [ ${#ADDITIONAL_SCRIPTS[@]} -gt 0 ]; then
+        echo "Embedded ${#ADDITIONAL_SCRIPTS[@]} operator setup script(s)."
+    fi
+    return 0
+}
+
+flash_rpi() {
+        local target="$1"
+
+        prepare_release
+        echo "Generating firstrun script from template..."
+        sed -e "s|__RELEASE_VERSION__|${RELEASE_VERSION}|g" \
+            -e "s|__INSTALL_URL__|${INSTALL_URL}|g" \
+            -e "s|__INSTALL_SHA256__|${INSTALL_SHA256}|g" \
+            -e "s|__HARDWARE_MODEL__|${HARDWARE_MODEL}|g" \
+            -e "s|__EUD_CONNECTION__|${EUD_CONNECTION}|g" \
+            -e "s|__LAN_AP_SSID__|${LAN_AP_SSID}|g" \
+            -e "s|__LAN_AP_KEY__|${LAN_AP_KEY}|g" \
+            -e "s|__MAX_EUDS_PER_NODE__|${MAX_EUDS_PER_NODE}|g" \
+            -e "s|__INSTALL_MEDIAMTX__|${INSTALL_MEDIAMTX}|g" \
+            -e "s|__INSTALL_MUMBLE__|${INSTALL_MUMBLE}|g" \
+            -e "s|__VOICE_ENABLED__|${VOICE_ENABLED}|g" \
+            -e "s|__MESH_SSID__|${MESH_SSID}|g" \
+            -e "s|__MESH_SAE_KEY__|${MESH_SAE_KEY}|g" \
+            -e "s|__LAN_CIDR_BLOCK__|${LAN_CIDR_BLOCK}|g" \
+            -e "s|__AUTO_CHANNEL__|${AUTO_CHANNEL}|g" \
+            -e "s|__RADIO_PW__|${RADIO_PW}|g" \
+            -e "s|__REGULATORY_DOMAIN__|${REGULATORY_DOMAIN}|g" \
+            -e "s|__HALOW_REGULATORY_DOMAIN__|${HALOW_REGULATORY_DOMAIN}|g" \
+            -e "s|__ADMIN_PW__|${ADMIN_PW}|g" \
+            -e "s|__AUTO_UPDATE__|${AUTO_UPDATE}|g" \
+            "$TEMPLATE_FILE" | tr -d '\r' > "$TEMP_SCRIPT_FILE"
+
+        # After substitution, never before: operator scripts must not have
+        # their own __TOKEN__-looking text rewritten by the sed above.
+        append_additional_scripts "$TEMP_SCRIPT_FILE"
+
+        sudo "$RPI_IMAGER_CMD" --cli "$PI_OS_IMAGE_URL" "$target" --first-run-script "$TEMP_SCRIPT_FILE"
+
+        echo ""
+        echo "=============================================="
+        echo "           ✅ Flash complete: $target"
+        echo "=============================================="
+        echo ""
+        echo " ONCE BOOTED, THE MESH NODE WILL AUTOMATICALLY START"
+        echo " SETTING ITSELF UP AND WILL REBOOT MULTIPLE TIMES"
+        echo " Just leave it alone, this process takes about ten"
+        echo " minutes"
+}
+
+
+# --- Main Script ---
+
+select_hardware
+
+# --- 1. Check Dependencies ---
+echo
+echo "--- Checking this computer ---"
+echo
+if ! preflight_dependencies "$HARDWARE_MODEL"; then
+        exit 1
+fi
+
+# rpi-imager is resolved separately, because "installed" and "usable" are not
+# the same thing for it. Rock 3A writes its image with losetup and never calls it.
+if [ "$HARDWARE_MODEL" != "r3a" ]; then
+        if ! resolve_rpi_imager; then
+                exit 1
+        fi
+        echo
+fi
+
+if [ ! -f "$TEMPLATE_FILE" ]; then
+        echo "ERROR: Template file '$TEMPLATE_FILE' not found."
+        exit 1
+fi
+
+# Ensure config directory exists
+mkdir -p "$CONFIG_DIR"
+
+# --- 2. Load or Create Config ---
+config_files=("$CONFIG_DIR"/*.conf)
+num_configs=${#config_files[@]}
+
+if [ ! -f "${config_files[0]}" ]; then
+        num_configs=0
+fi
+
+if [ "$num_configs" -gt 0 ]; then
+        echo "Found $num_configs saved configuration(s)."
+        echo "What would you like to do?"
+        select choice in "Load a saved configuration" "Create a new configuration"; do
+                case $choice in
+                        "Load a saved configuration" )
+                               echo "Please select a configuration to load:"
+                               config_names=()
+                               for f in "${config_files[@]}"; do
+                                config_names+=("$(basename "$f" .conf)")
+                               done
+                               config_names+=("Cancel")
+
+                               PS3="Select config (or 'Cancel'): "
+                               select config_name in "${config_names[@]}"; do
+                                if [ "$config_name" == "Cancel" ]; then
+                                      echo "Aborting."
+                                      exit 0
+                                fi
+                                if [ -n "$config_name" ]; then
+                                      load_config "$CONFIG_DIR/$config_name.conf"
+                                      break
+                                else
+                                      echo "Invalid selection."
+                                fi
+                               done
+                               break
+                               ;;
+                        "Create a new configuration" )
+                               ask_questions
+                               save_config
+                               break
+                               ;;
+                esac
+        done
+else
+        echo "No saved configs found. Starting new setup."
+        ask_questions
+        save_config
+fi
+
+
+# --- 2b. Validate operator setup scripts ---
+# Before any device selection, and long before anything is written: a bad
+# script here is a wasted flash, and the operator should find out while the
+# card is still safely in their hand.
+validate_additional_scripts
+
+
+# --- 3. Acquire image (Rock3A only: checksum verified here) ---
+if [ "$HARDWARE_MODEL" = "r3a" ]; then
+        acquire_armbian_image
+fi
+
+# --- 4. Multi-SD flash ---
+
+# CM4 goes through its own single-device flow (rpiboot required)
+if [ "$HARDWARE_MODEL" = "cm4" ]; then
+        select_target_device
+        confirm_flash "$TARGET_DEVICE"
+        flash_rpi "$TARGET_DEVICE"
+        rm -f "$TEMP_SCRIPT_FILE"
+        exit 0
+fi
+
+# For all other hardware: detect all SD cards upfront, let user pick multiple
+
+flash_multiple_cards() {
+        local BOOT_DISK
+        BOOT_DISK=$(find_boot_disk)
+
+        while true; do
+                echo ""
+                echo "=============================================="
+                echo "  Insert all SD cards you want to flash now,"
+                echo "  then press Enter to detect them."
+                echo "=============================================="
+                read -p ""
+
+                detect_sd_cards "$BOOT_DISK"
+
+                if [ ${#SD_DEVICES[@]} -eq 0 ]; then
+                        echo "No SD cards detected. Please insert cards and try again."
+                        continue
+                fi
+
+                echo ""
+                echo "Detected SD cards:"
+                local i=1
+                for dev in "${SD_DEVICES[@]}"; do
+                        printf "  %d) %s\n" "$i" "$dev"
+                        i=$((i + 1))
+                done
+                echo ""
+
+                local selected_nums
+                read -p "Enter card numbers to flash (e.g. 1 2 3), or 'r' to re-scan: " selected_nums
+
+                [[ "$selected_nums" =~ ^[Rr]$ ]] && continue
+
+                # Validate input
+                local valid=true
+                local nums=()
+                for n in $selected_nums; do
+                        if ! [[ "$n" =~ ^[0-9]+$ ]] || [ "$n" -lt 1 ] || [ "$n" -gt "${#SD_DEVICES[@]}" ]; then
+                                echo "Invalid number: $n (valid range: 1-${#SD_DEVICES[@]})"
+                                valid=false
+                                break
+                        fi
+                        nums+=("$n")
+                done
+                $valid || continue
+
+                [ ${#nums[@]} -eq 0 ] && echo "No cards selected." && continue
+
+                echo ""
+                echo "Will flash ${#nums[@]} card(s):"
+                for n in "${nums[@]}"; do
+                        echo "  - ${SD_DEVICES[$((n-1))]}"
+                done
+                echo ""
+                read -p "Proceed? (Y/n): " proceed
+                proceed=${proceed:-y}
+                [[ "$proceed" =~ ^[Yy]$ ]] || continue
+
+                local FLASH_COUNT=0
+                for n in "${nums[@]}"; do
+                        local dev_entry="${SD_DEVICES[$((n-1))]}"
+                        TARGET_DEVICE=$(echo "$dev_entry" | awk '{print $1}')
+                        echo ""
+                        echo "=== Flashing card $((FLASH_COUNT+1)) of ${#nums[@]}: $TARGET_DEVICE ==="
+                        if [ "$HARDWARE_MODEL" = "r3a" ]; then
+                                flash_r3a "$TARGET_DEVICE"
+                        else
+                                flash_rpi "$TARGET_DEVICE"
+                        fi
+                        FLASH_COUNT=$((FLASH_COUNT + 1))
+                done
+
+                echo ""
+                echo "=============================================="
+                echo "  Done. $FLASH_COUNT SD card(s) flashed."
+                echo "=============================================="
+                echo ""
+                read -p "Flash another batch with the same settings? (y/N): " again
+                again=${again:-n}
+                [[ "$again" =~ ^[Yy]$ ]] || break
+        done
+}
+
+flash_multiple_cards
+
+rm -f "$TEMP_SCRIPT_FILE"

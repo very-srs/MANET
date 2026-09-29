@@ -24,16 +24,20 @@ cm4-tools.tar.gz
 cm4-tools.tar.gz.sha256
 ```
 
-The tools updater requires the checksum, checks the archive's version against
-GitHub, and stages the files before installation. Install archive checksums are
-available for manual verification with `sha256sum -c <archive-name>.sha256`;
-first-boot provisioning does not yet enforce them.
+The updater requires the checksum and verifies the archive against its release
+manifest before staging it. First-boot provisioning also checks the install
+archive's SHA-256 and embedded version before extraction.
 
-Increment both source version files for each newly published set of tarballs;
-replacing an archive without a version change does not update nodes already at
-that version. Upload and verify the archive/checksum pairs before pushing the
-matching version bump to GitHub. Every board reads the same GitHub version, so
-publish matching tools archives at all three board download paths. No separate
-version file is uploaded to the download server.
+Increment both source version files for every newly published package set.
+Build all three boards' tools/install archives and sidecars, commit and push the
+source, then publish the complete set as a GitHub prerelease. Source pushes no
+longer announce an update. Normal installs and updates follow the stable release
+marked Latest; testing uses an explicit `--development` option.
+
+The publisher creates a draft, uploads and verifies all assets, then publishes
+it. It keeps the newest three prereleases and preserves stable releases. See
+[Publishing MANET releases](../releases/README.md) for publishing, promotion and
+cleanup commands. Tarballs remain outside Git history.
+
 If copying an identical tools archive to another board's filename, regenerate
 its checksum file with that board's basename; the updater checks the name too.

@@ -46,12 +46,26 @@ cd /root
 # Get rid of the extra nonsense printed on an SSH connection
 > /etc/motd
 
-# Download the Rock 3A install package
-echo "Downloading Rock 3A install package..."
-wget -q https://www.colorado-governor.com/manet/r3a-install.tar.gz -O /root/morse-pi-install.tar.gz || {
-	echo "ERROR: Failed to download Rock 3A package"
-	exit 1
-}
+# The flasher pins setup and packages to the same published release.
+MANET_INSTALL_URL='__INSTALL_URL__'
+MANET_INSTALL_SHA256='__INSTALL_SHA256__'
+MANET_INSTALL_VERSION='__RELEASE_VERSION__'
+case "$MANET_INSTALL_URL" in
+    https://github.com/very-srs/MANET/releases/download/v[0-9]*/*-install.tar.gz) ;;
+    *) echo "ERROR: Missing or invalid MANET release selection"; exit 1 ;;
+esac
+echo "Downloading MANET $MANET_INSTALL_VERSION install package..."
+curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
+    --connect-timeout 15 --max-time 600 --retry 3 \
+    "$MANET_INSTALL_URL" -o /root/morse-pi-install.tar.gz || exit 1
+printf '%s  %s\n' "$MANET_INSTALL_SHA256" /root/morse-pi-install.tar.gz | sha256sum -c - || exit 1
+for marker in ./etc/manet_version.txt ./usr/local/bin/version.txt; do
+    installed_version=$(tar -xzOf /root/morse-pi-install.tar.gz "$marker") || exit 1
+    [ "${installed_version%%$'\n'*}" = "$MANET_INSTALL_VERSION" ] || {
+        echo "ERROR: Install package version does not match the selected release"
+        exit 1
+    }
+done
 
 #
 #  Setup base system

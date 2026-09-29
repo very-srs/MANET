@@ -20,10 +20,17 @@
 param(
     # Skip the elevation and Windows-only checks and just build the window.
     # For looking at the layout, nothing else; every flash path needs admin.
-    [switch]$Preview
+    [switch]$Preview,
+    [switch]$Development
 )
 
 $ErrorActionPreference = 'Stop'
+if (-not $Preview -and -not $env:MANET_RELEASE_FILE) {
+    $launchArgs = @()
+    if ($Development) { $launchArgs += '--development' }
+    & (Join-Path $PSScriptRoot 'Flash a Radio.cmd') @launchArgs
+    exit $LASTEXITCODE
+}
 
 # Bootstrap
 
@@ -2199,8 +2206,8 @@ function Start-Rock3aFlash {
 # is the answer unless a copy is already sitting next to the script, because
 # the alternative is a file-path question this audience should not be asked.
 function Get-ArmbianImageForGui {
-    $localImage      = Join-Path $ScriptDir $ARMBIAN_IMAGE_FILENAME
-    $localCompressed = Join-Path $ScriptDir "${ARMBIAN_IMAGE_FILENAME}.xz"
+    $localImage      = Join-Path $WorkDir $ARMBIAN_IMAGE_FILENAME
+    $localCompressed = Join-Path $WorkDir "${ARMBIAN_IMAGE_FILENAME}.xz"
 
     if (Test-Path $localImage) { $Script:ARMBIAN_IMAGE = $localImage; return $true }
 
@@ -2544,10 +2551,10 @@ function Build-Window {
     $Script:LnkFolder.Font        = $Script:UI.FontSmall
     $Script:LnkFolder.LinkColor   = $Script:UI.Header
     $Script:LnkFolder.AutoEllipsis = $true
-    $Script:LnkFolder.Text        = "Settings and setup scripts live in  $ScriptDir"
-    $Script:LnkFolder.LinkArea    = New-Object System.Windows.Forms.LinkArea(36, $ScriptDir.Length)
+    $Script:LnkFolder.Text        = "Settings and setup scripts live in  $WorkDir"
+    $Script:LnkFolder.LinkArea    = New-Object System.Windows.Forms.LinkArea(36, $WorkDir.Length)
     $Script:LnkFolder.Add_LinkClicked({
-        try { Start-Process explorer.exe $ScriptDir } catch { }
+        try { Start-Process explorer.exe $WorkDir } catch { }
     })
     $footer.Controls.Add($Script:LnkFolder)
 

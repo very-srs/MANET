@@ -1013,21 +1013,26 @@ coordinating.
 
 **node-update.sh**
 
-Updates the node tools to the latest release. It checks connectivity, compares
-the local and remote versions, and installs the board's tools tarball when the
-versions differ. The shell entry point runs `node-update.py` (Python standard
+Updates node tools to the stable GitHub release marked Latest. It compares
+the local and selected versions and installs the board's tools archive when a
+newer release is available. The shell entry point runs `node-update.py` (Python standard
 library plus the existing `curl` command). `--routine` is quiet on the console
 and skips checks for 24 hours after a successful check or installation.
 
-Every board reads the release version from `MANET/node_tools/version.txt` on
-GitHub `main`. `/etc/manet_version.txt` records the installed version and is
-included inside the tarball; it is not uploaded separately to the server.
+Every board reads `manet-release.json` from that published release. The manifest
+pins the version, source commit, package sizes and SHA-256 digests. Archives and
+checksum sidecars come from URLs for that exact release. Pushing source code to
+`main` does not announce a tools update.
 
-Each tarball requires a matching `<filename>.sha256` alongside it on the download
-server. The updater verifies SHA-256, reads the entire gzip stream, validates
-archive paths and required files, and checks both embedded versions against
-GitHub before staging the payload. It checks free space and dependencies before
-installing files. Concurrent update attempts are locked out.
+`sudo node-update.sh --development` selects the most recently published build,
+including prereleases. This affects only that invocation. Stable checks leave a
+newer installed development version alone; use `--allow-downgrade` explicitly
+to return to an older stable build.
+
+The updater verifies the manifest digest and adjacent `<filename>.sha256`, reads
+the entire gzip stream, validates archive paths and required files, and checks
+both embedded version files before staging the payload. It checks free space
+and dependencies before installing files. Concurrent attempts are locked out.
 
 The installed version is recorded only after file installation, manager
 selection, systemd reload, and the status/node-manager restarts and active-state

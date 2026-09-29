@@ -15,6 +15,8 @@ import tarfile
 import tempfile
 import time
 import unittest
+
+from manet_release import STABLE_MANIFEST, DOWNLOADS, PACKAGES
 from unittest.mock import patch, Mock
 
 SPEC = importlib.util.spec_from_file_location('node_update', Path(__file__).with_name('node-update.py'))
@@ -44,8 +46,7 @@ class UpdateTests(unittest.TestCase):
         self.server.mkdir()
         self.package = self.server / 'cm4-tools.tar.gz'
         self.checksum = self.server / 'cm4-tools.tar.gz.sha256'
-        self.release = self.server / 'release.txt'
-        self.release.write_text(self.new_version)
+        self.release = self.server / 'manet-release.json'
         self.events = self.work / 'events'
         commands = self.work / 'bin'
         commands.mkdir()
@@ -56,7 +57,7 @@ with open(os.environ['TEST_EVENTS'], 'a') as stream:
     stream.write('curl ' + args[-1] + '\\n')
 if os.environ.get('TEST_DOWNLOAD_FAIL') == args[-1]:
     sys.exit(22)
-name = 'release.txt' if 'raw.githubusercontent.com' in args[-1] else args[-1].rsplit('/', 1)[1]
+name = args[-1].rsplit('/', 1)[1]
 source = Path(os.environ['TEST_SERVER']) / name
 if not source.exists():
     sys.exit(22)
@@ -108,6 +109,10 @@ if os.environ.get('TEST_SYSTEMCTL_FAIL') == args:
 
     def hash_archive(self):
         self.checksum.write_text(hashlib.sha256(self.package.read_bytes()).hexdigest() + '  cm4-tools.tar.gz\n')
+        asset = {'sha256': hashlib.sha256(self.package.read_bytes()).hexdigest(), 'size': self.package.stat().st_size}
+        self.manifest = {'schema': 1, 'version': '0.550', 'tag': 'v0.550', 'commit': 'a' * 40,
+                         'assets': {name: asset for name in PACKAGES}}
+        self.release.write_text(json.dumps(self.manifest))
 
     def history(self):
         return self.events.read_text() if self.events.exists() else ''
@@ -159,12 +164,13 @@ if os.environ.get('TEST_SYSTEMCTL_FAIL') == args:
                 self.assert_rejected_before_install()
 
     def test_download_failure(self):
-        for url in (update.VERSION_URL, update.PACKAGE_URLS['cm4']):
+        for url in (STABLE_MANIFEST, DOWNLOADS + '/v0.550/cm4-tools.tar.gz'):
             with self.subTest(url=url), patch.dict(os.environ, TEST_DOWNLOAD_FAIL=url):
                 self.assert_rejected_before_install()
 
     def test_wrong_release_even_with_valid_hash(self):
-        self.release.write_text('0.551\n09/2026\n')
+        self.manifest.update(version='0.551', tag='v0.551')
+        self.release.write_text(json.dumps(self.manifest))
         self.assert_rejected_before_install()
 
     def test_disagreeing_version_markers(self):
@@ -335,7 +341,7 @@ if os.environ.get('TEST_SYSTEMCTL_FAIL') == args:
         old = time.time() - 90000
         os.utime(self.updater.marker, (old, old))
         self.updater.update()
-        self.assertIn('curl ' + update.VERSION_URL, self.history())
+        self.assertIn('curl ' + STABLE_MANIFEST, self.history())
         self.assertNotIn('tools.tar.gz', self.history())
         self.assertGreater(self.updater.marker.stat().st_mtime, old)
 
@@ -344,12 +350,12 @@ if os.environ.get('TEST_SYSTEMCTL_FAIL') == args:
             with self.subTest(board=board):
                 (self.root / 'proc/device-tree/model').write_text(model)
                 self.assertEqual(self.updater.board(), board)
-                filename = update.PACKAGE_URLS[board].rsplit('/', 1)[1]
+                filename = f'{board}-tools.tar.gz'
                 shutil.copyfile(self.package, self.server / filename)
                 (self.server / (filename + '.sha256')).write_text(self.checksum.read_text().replace('cm4-tools.tar.gz', filename))
                 self.updater.marker.write_text(self.old_version)
                 self.updater.update()
-                self.assertIn(update.PACKAGE_URLS[board] + '.sha256', self.history())
+                self.assertIn(DOWNLOADS + '/v0.550/' + filename + '.sha256', self.history())
 
     def test_command_failure_and_timeout_are_reported(self):
         with self.assertRaisesRegex(update.UpdateError, 'failed \\(7\\)'):
@@ -375,6 +381,28 @@ if os.environ.get('TEST_SYSTEMCTL_FAIL') == args:
             quiet.log('example error', error=True)
             self.assertEqual(stdout.getvalue() + stderr.getvalue(), '')
             logger.assert_called_once_with(update.syslog.LOG_ERR, 'example error')
+
+    def test_stable_does_not_silently_downgrade_a_development_node(self):
+        for name in update.MARKERS:
+            (self.root / name).write_text('0.551\n09/2026\n')
+        self.updater.update()
+        self.assertNotIn('systemctl', self.history())
+        self.assertIn('newer than selected', self.updater.log.call_args.args[0])
+        self.updater.allow_downgrade = True
+        self.updater.update()
+        self.assertEqual(self.updater.marker.read_text(), self.new_version)
+
+    def test_development_download_stays_on_selected_release(self):
+        self.updater.development = True
+        (self.server / 'releases?per_page=100&page=1').write_text(json.dumps([{
+            'id': 1, 'tag_name': 'v0.550', 'draft': False, 'prerelease': True,
+            'published_at': '2026-09-28T00:00:00Z',
+            'assets': [{'name': 'manet-release.json'}],
+        }]))
+        self.updater.update()
+        self.assertNotIn(STABLE_MANIFEST, self.history())
+        self.assertIn(DOWNLOADS + '/v0.550/manet-release.json', self.history())
+        self.assertEqual(self.updater.marker.read_text(), self.new_version)
 
 
 if __name__ == '__main__':

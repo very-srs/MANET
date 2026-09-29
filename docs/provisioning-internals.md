@@ -12,7 +12,7 @@ documentation.
 
 ### Template tokens
 
-`flash-a-radio.sh` and `windows.ps1` bake mesh settings into the image by substituting
+`linux-flasher.sh` and `windows.ps1` bake mesh settings into the image by substituting
 `__TOKEN__` placeholders in those templates at flash time. Edit the templates
 using the tokens, not concrete values; a leftover `__MESH_SSID__` in a flashed
 image means the substitution list in the flasher was not updated.
@@ -24,9 +24,10 @@ Tokens (same set on Linux and Windows):
 `__VOICE_ENABLED__` `__MESH_SSID__` `__MESH_SAE_KEY__` `__LAN_CIDR_BLOCK__`
 `__AUTO_CHANNEL__` `__RADIO_PW__` `__REGULATORY_DOMAIN__`
 `__HALOW_REGULATORY_DOMAIN__` `__ADMIN_PW__` `__AUTO_UPDATE__`
+`__RELEASE_VERSION__` `__INSTALL_URL__` `__INSTALL_SHA256__`
 
 Adding a new flash-time setting means the token in both templates **and** the
-`sed` / `-replace` list in both flashers. The lists live in `flash-a-radio.sh`
+`sed` / `-replace` list in both flashers. The lists live in `linux-flasher.sh`
 (`flash_rpi` and the Rock 3A path) and in `windows.ps1`, in
 `Expand-ProvisioningTokens`, which is one list covering the Raspberry Pi path,
 the Rock 3A path, and the window.
@@ -58,35 +59,31 @@ abort rather than produce an image whose scripts have no effect.
 
 ## What each launcher fetches
 
-Both launchers work from a standalone copy and download what they need, so each
-carries a list of files that has to be kept in step with what the flasher
-actually reads at run time. Add a new run-time file to the wrong one and a
-standalone copy comes up short while a checkout carries on working, which is
-the hardest version of this bug to notice.
+Both launchers select a published release before downloading setup code. Stable
+reads `/releases/latest/download/manet-release.json`; development lists published
+releases and selects by `published_at` and release ID, excluding drafts and
+unrelated releases without a MANET manifest. Both then use the selected tag's
+fixed download URL for `manet-flasher.zip` and verify its size and SHA-256.
 
-| Launcher | The list |
-|---|---|
-| `Flash a Radio.cmd` | the `FILES` line near the top |
-| `flash-a-radio.sh` | `FLASHER_FILES` in the Bootstrap block |
+The publisher builds the ZIP from committed provisioning sources, with a copy
+of `manet_release.py`. `MANET/releases/publish.py:PROVISIONING` lists its inputs.
+The Linux launcher runs `linux-flasher.sh`; Windows runs the GUI or console
+engine. `MANET_RELEASE_FILE` passes the selected manifest, and
+`MANET_FLASHER_WORK` keeps saved settings, downloaded images, tool paths and
+operator setup scripts outside the temporary extracted bundle. No source files
+are overwritten. `--local-scripts` explicitly runs a checkout's scripts against
+the selected published packages.
 
-Both resolve the branch to a commit through the GitHub API before fetching, and
-pull from URLs pinned to that commit. `raw.githubusercontent` caches a branch
-URL for several minutes, so fetching `.../main/...` shortly after a change hands
-back the previous file and the flasher appears not to have changed at all. A
-query string does not help, because that cache ignores it.
+The Linux launcher passes its embedded Python program with `-c`, preserving
+stdin for the interactive engine. The Windows launcher carries its PowerShell
+bootstrap below the batch entry point and passes channel options through UAC.
+Network or verification failures stop startup; there is no fallback to a
+cached build from a different channel.
 
-`flash-a-radio.sh` also refreshes itself. Overwriting a running bash script
-corrupts the rest of the parse, since bash reads it lazily by byte offset, so
-the new copy is written and then started with `exec` instead of being spliced
-in. `MANET_FLASHER_UPDATED` in the environment is what stops that looping.
-
-Three modes, decided in this order: a folder carrying `.manet-flasher-home` or
-named `manet-flasher` is one of ours and gets refreshed; a folder holding
-`firstrun.sh.template` is a checkout and is used exactly as it stands; anything
-else means the script is on its own and builds itself a folder. The order
-matters, because the first run downloads templates into the managed folder, so
-a checkout test running first would match from the second run onward and
-nothing would ever be refreshed again.
+At flash time `prepare-release.py` (Linux) and `Expand-ProvisioningTokens`
+(Windows) insert the install URL, digest and version. First boot checks all three
+before extraction. The selected package cannot drift to another release between
+imaging and first boot. Deleted prereleases require reflashing old test images.
 
 ---
 
