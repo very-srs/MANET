@@ -29,7 +29,7 @@ You will need:
 ### Windows: the short version
 
 1. Download the single file
-   **[`Flash a Radio.cmd`](https://raw.githubusercontent.com/very-srs/MANET/main/MANET/provisioning/Flash%20a%20Radio.cmd)**
+   **[`Flash a Radio.cmd`](https://github.com/very-srs/MANET/releases/latest/download/Flash%20a%20Radio.cmd)**
    and put it in a folder of its own.
 2. Double-click it.
 3. Say yes when Windows asks for permission.
@@ -39,16 +39,11 @@ Every page, with a screenshot of each: [Windows: step by step](#windows-step-by-
 
 The launcher downloads the supporting files and offers to install required tools.
 
-The first time it runs it makes itself a folder called **`MANET Flasher`** next to where
-you put it, moves itself in, and fetches what it needs from GitHub. Everything to do with
-flashing then lives in that one folder: the launcher, your saved settings
-(`.mesh-configs`) and your own setup scripts (`additional-scripts`). The GUI displays the path to
-that folder along its bottom edge, and clicking it opens it, so it is easily found.
-
-Run it again from that folder from then on. **It refreshes its own downloaded files every
-time it starts**, so there is never anything to delete by hand to pick up a newer version.
-If it cannot reach GitHub it carries on with the copies it fetched last time and says so
-on the console before the window opens.
+The launcher creates a **`MANET Flasher`** folder beside a standalone copy.
+Your settings (`.mesh-configs`) and setup scripts (`additional-scripts`) stay
+there. Each run downloads and verifies the selected release's setup scripts
+into a temporary directory, then removes that directory when the window closes.
+A failed download stops the launcher before a card is written.
 
 The window then checks for `rpi-imager` and, for a CM4, `rpiboot`, and downloads and runs
 their installers for you if they are missing. Only Rock 3A needs tools it cannot fetch.
@@ -56,18 +51,8 @@ their installers for you if they are missing. Only Rock 3A needs tools it cannot
 Windows may show *"Open File - Security Warning"* the first time, because the file came
 from the internet. Choose **Run**.
 
-**If you already have a checkout**, this does not apply to you. `Flash a Radio.cmd`
-tells the two cases apart by a marker file it writes into the folder it creates for
-itself:
-
-| Where you run it from | What it does |
-|-----------------------|--------------|
-| On its own, anywhere | makes a `MANET Flasher` folder, moves in, downloads what it needs |
-| The `MANET Flasher` folder it made | refreshes those downloads, every time |
-| A clone or a download of this repo | runs what is there. No relocating, no downloading, no overwriting |
-
-So a checkout is never touched and work in progress is safe, while a folder the launcher
-manages is always current. Nothing has to be deleted in either case.
+A source checkout also uses the published stable scripts by default. Source
+files are never overwritten. Use the development options below when testing.
 
 Why the `.cmd` exists at all: Windows will not run a `.ps1` on a double-click, and
 writing to a card needs Administrator. It deals with both, then starts
@@ -136,25 +121,43 @@ for it.
 
 ### Files needed from this directory
 
-None on either platform. `Flash a Radio.cmd` and `flash-a-radio.sh` each fetch what
-they need. Cloning the whole `provisioning/` directory also works, and a checkout is
-used exactly as it stands with nothing downloaded and nothing overwritten.
+Download just `Flash a Radio.cmd` on Windows or `flash-a-radio.sh` on Linux.
+The launcher downloads the selected release's complete flasher bundle. Linux
+requires Python 3 and curl; Windows uses its included PowerShell 5.1.
 
-- `flash-a-radio.sh`: the Linux flasher, and the only file a Linux user needs.
-  Makes a `manet-flasher` folder if it is on its own, downloads the templates
-  into it, checks the host for missing tools, and refreshes itself on every run
-- `windows.ps1`: flashing script for Windows hosts, and the engine the window drives
-- `manet-flasher.ps1`: the window. Dot-sources `windows.ps1` and calls its functions,
-  so it is a front end and not a second flasher
-- `Flash a Radio.cmd`: what a Windows user double-clicks, and the only file they need.
-  Asks for Administrator, gets past the execution policy, moves itself into a
-  `MANET Flasher` folder if it is on its own, downloads the files below into it, and
-  opens the window
-- `firstrun.sh.template`: Raspberry Pi first-boot script template
-- `rock3a-provision.sh.template`: Rock 3A first-boot provisioning script template
-- `additional-scripts/`: optional. Your own setup scripts, baked into the
-  image and run once on the node after setup completes. Empty is fine. See
-  [additional-scripts/README.md](additional-scripts/README.md).
+The bundle contains `linux-flasher.sh`, the Windows GUI and console engine,
+both first-boot templates, and the release helper. Your own `additional-scripts/`
+folder stays beside the launcher and is embedded into the image as before.
+See [Additional setup scripts](additional-scripts/README.md).
+
+### Stable and development installs
+
+Normal runs select the stable GitHub release marked **Latest**. That selection
+supplies both the setup scripts and board package, so an upload during imaging
+cannot mix versions. First boot checks the package SHA-256 and embedded version
+before extracting it. It installs the release selected when the image was made.
+
+To test the most recently published build, including prereleases:
+
+```bash
+./flash-a-radio.sh --development
+```
+
+From Windows Command Prompt:
+
+```bat
+"Flash a Radio.cmd" --development
+```
+
+These options fetch the newest uploaded setup scripts too. To test unpublished
+setup changes from a checkout, add `--local-scripts`; the board package still
+comes from the selected stable or development release. Downloaded scripts never
+overwrite the checkout. A deleted prerelease cannot provision an image that was
+pinned to it; reflash using a retained build.
+
+Normal node updates also use stable. Testing nodes can run
+`sudo node-update.sh --development` explicitly. See
+[release publishing and retention](../releases/README.md).
 
 ### OS Images
 
@@ -188,7 +191,7 @@ The Raspberry Pi 5 and Rock 3A platforms use an MM8108 USB HaLow adapter (e.g. G
 ### Linux: download one file
 
 Download
-**[flash-a-radio.sh](https://raw.githubusercontent.com/very-srs/MANET/main/MANET/provisioning/flash-a-radio.sh)**,
+**[flash-a-radio.sh](https://github.com/very-srs/MANET/releases/latest/download/flash-a-radio.sh)**,
 put it in a folder of its own, and run it:
 
 ```bash
@@ -200,11 +203,10 @@ Run it as yourself. It asks for your password at the points where it needs to
 write to the card, and running the whole script under `sudo` would leave your
 saved settings owned by root.
 
-On the first run it makes a `manet-flasher` folder beside itself, moves in, and
-downloads the templates. From then on run it from that folder. It refreshes
-those downloads and itself every time it starts, so there is nothing to delete
-by hand to pick up a newer version. If it cannot reach GitHub it carries on
-with the copies it fetched last time and says so.
+On the first run a standalone copy creates a `manet-flasher` folder beside
+itself and copies the launcher there. Run that copy next time. Settings and
+additional setup scripts stay in this folder; each run fetches and verifies the
+selected release's flasher bundle. Python 3, curl and internet access are needed.
 
 `rpi-imager` has to be version 1.8 or newer. Older builds cannot put the mesh
 setup script onto the card, and they fail only after the card has been written,
@@ -234,7 +236,7 @@ cd MANET/provisioning
 ### Windows: step by step
 
 Download
-**[Flash a Radio.cmd](https://raw.githubusercontent.com/very-srs/MANET/main/MANET/provisioning/Flash%20a%20Radio.cmd)**
+**[Flash a Radio.cmd](https://github.com/very-srs/MANET/releases/latest/download/Flash%20a%20Radio.cmd)**
 and put it in a folder of its own. It is the only file you need.
 
 Double-click it. Windows shows a security warning the first time, because the file came
@@ -327,8 +329,9 @@ build several nodes for one mesh in a row.
 
 ### Windows: the console script
 
-`windows.ps1` still works and is unchanged in what it does. The window is a front end over
-it: both call the same code and produce an identical image, so use whichever suits you.
+`windows.ps1` starts the console engine from the selected release. The window
+uses the same engine and produces the same image. Add `-Development` to test
+the newest published build.
 
 Windows blocks PowerShell scripts by default, which is what `Flash a Radio.cmd` exists to
 get past, so running `windows.ps1` directly means dealing with that yourself.

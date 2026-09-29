@@ -24,13 +24,9 @@ import tempfile
 import time
 import zlib
 
+from manet_release import asset_url, select_release, verify_asset
 
-VERSION_URL = "https://raw.githubusercontent.com/very-srs/MANET/refs/heads/main/MANET/node_tools/version.txt"
-PACKAGE_URLS = {
-    "cm4": "https://www.colorado-governor.com/manet/cm4-tools.tar.gz",
-    "r3a": "https://www.colorado-governor.com/manet/r3a-tools.tar.gz",
-    "rpi5": "https://www.colorado-governor.com/manet/rpi5/rpi5-tools.tar.gz",
-}
+
 MIB = 1024 * 1024
 MAX_DOWNLOAD = 64 * MIB
 MAX_EXPANDED = 512 * MIB
@@ -38,6 +34,7 @@ RESERVE = 16 * MIB
 MARKERS = {"etc/manet_version.txt", "usr/local/bin/version.txt"}
 REQUIRED = MARKERS | {
     "usr/local/bin/node-update.sh", "usr/local/bin/node-update.py",
+    "usr/local/bin/manet_release.py",
     "usr/local/bin/node-manager-static.sh", "usr/local/bin/node-manager-acs.sh",
     "usr/local/bin/manet-admin-setup.sh", "usr/local/bin/mesh-status.py",
     "usr/local/bin/manet_manage.py", "usr/local/bin/manet_web_sessions.py",
@@ -138,9 +135,11 @@ def archive_path(name):
 
 
 class Updater:
-    def __init__(self, root=Path("/"), routine=False):
+    def __init__(self, root=Path("/"), routine=False, development=False, allow_downgrade=False):
         self.root = Path(root)
         self.routine = routine
+        self.development = development
+        self.allow_downgrade = allow_downgrade
         self.marker = self.root / "etc/manet_version.txt"
         self.state = self.root / "var/lib/manet-update"
         self.pending = self.state / "in-progress"
@@ -378,18 +377,23 @@ class Updater:
             self.state.mkdir(parents=True, exist_ok=True, mode=0o700)
             with tempfile.TemporaryDirectory(prefix="download-", dir=self.state) as scratch:
                 work = Path(scratch)
-                remote = work / "release.txt"
-                self.download(VERSION_URL, remote, 1024)
-                expected = version(remote.read_text(encoding="ascii"))
+                release = select_release(self.development, self.download, work)
+                expected = release["version"]
+                if (local != "unknown" and not pending and not self.allow_downgrade
+                        and tuple(map(int, local.split("."))) > tuple(map(int, expected.split(".")))):
+                    self.marker.touch()
+                    self.log(f"Installed {local} is newer than selected {expected}; use --allow-downgrade to replace it")
+                    return
                 if local == expected and not pending:
                     self.marker.touch()
                     self.log(f"Node is already running release {expected}")
                     return
-                url = PACKAGE_URLS[board]
-                filename = url.rsplit("/", 1)[1]
+                filename = f"{board}-tools.tar.gz"
+                url = asset_url(release, filename)
                 package, checksum = work / filename, work / (filename + ".sha256")
                 self.download(url + ".sha256", checksum, 1024)
                 self.download(url, package, MAX_DOWNLOAD)
+                verify_asset(package, release["assets"][filename])
                 members = self.validate(package, checksum, filename, expected)
                 staged = work / "stage"
                 self.stage(package, members, staged)
@@ -404,9 +408,12 @@ def interrupted(signum, frame):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--routine", action="store_true", help="quiet daily check; errors go to the journal")
+    parser.add_argument("--development", action="store_true", help="use the newest published build, including prereleases")
+    parser.add_argument("--allow-downgrade", action="store_true", help="allow replacement by an older selected release")
     args = parser.parse_args()
     syslog.openlog("manet-update", syslog.LOG_PID, syslog.LOG_DAEMON)
-    updater = Updater(routine=args.routine)
+    updater = Updater(routine=args.routine, development=args.development,
+                      allow_downgrade=args.allow_downgrade)
     try:
         if os.geteuid() != 0:
             raise UpdateError("Run node-update.sh as root")

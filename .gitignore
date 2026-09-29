@@ -21,3 +21,5 @@ MANET/packaging/
 
 # Working folder a standalone flasher copy makes for itself
 manet-flasher/
+MANET Flasher/
+.release-*/

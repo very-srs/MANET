@@ -29,8 +29,8 @@ installation allows it to replace its own installed sources safely. A nonblockin
 private directory under `/var/lib/manet-update`, removed on ordinary success or
 failure. Killed processes may leave a staging directory for manual cleanup.
 
-Downloads use HTTPS, bounded curl retries/timeouts, and limits of 1 KiB for
-version/checksum files and 64 MiB for tools archives. Builders emit a single-line
+Downloads use HTTPS, bounded curl retries/timeouts, and limits of 4 MiB for
+release metadata, 1 KiB for checksum files and 64 MiB for tools archives. Builders emit a single-line
 SHA-256 sidecar naming the exact archive basename. The updater requires a hash
 match, reads gzip through its footer (with a 512 MiB expanded limit), and rejects
 unsafe paths, duplicate names, hardlinks/devices/sparse files, non-root ownership,
@@ -1655,12 +1655,20 @@ query; an unreadable or incomplete state cannot select the solo-node branch.
 `auto_update=` set to a true value. See
 [networkd-dispatcher/README.md](../MANET/networkd-dispatcher/README.md).
 
-**Publish in the right order.** The remote *version* is read from GitHub `main`
-while the *tarball* comes from colorado-governor.com, so the tarballs have to be
-uploaded before the version bump is pushed. The 24 h mtime throttle does not
-protect against getting this wrong: `tar` restores the build machine's mtime,
-and a published tarball is normally already older than a day.
-- Version metadata still points at `very-srs/MANET`; that upstream now has matching `.gitattributes` binary protection on all branches as of 2026-05-03.
+GitHub Releases now supplies metadata and packages together. Stable selection
+reads `manet-release.json` through the Latest release URL; development explicitly
+selects the newest published MANET release by publication timestamp and ID.
+Fixed tag URLs bind the manifest, archive and checksum to one release. A source
+push does not trigger updates. Publication checks all six archive versions,
+uploads to a draft, verifies GitHub asset digests, then publishes. Routine builds
+are prereleases; explicit promotion sets stable and Latest. Cleanup retains the
+newest three prereleases and every stable release.
+
+The updater checks both the manifest digest/size and the checksum sidecar before
+its existing archive validation. A newer installed development version is left
+alone by stable checks unless `--allow-downgrade` is supplied. Channel selection
+is per invocation; Ethernet-triggered automatic runs always select stable.
+See [release tooling](../MANET/releases/README.md).
 
 ---
 

@@ -26,19 +26,29 @@
 param(
     # Load the functions and stop. For `. .\windows.ps1 -NoRun` from a host
     # script; without it the console flow runs as it always has.
-    [switch]$NoRun
+    [switch]$NoRun,
+    [switch]$Development
 )
+
+# Direct console invocations use the same released scripts as the GUI launcher.
+if (-not $NoRun -and -not $env:MANET_RELEASE_FILE) {
+    $launchArgs = @('--console')
+    if ($Development) { $launchArgs += '--development' }
+    & (Join-Path $PSScriptRoot 'Flash a Radio.cmd') @launchArgs
+    exit $LASTEXITCODE
+}
 
 # --- Configuration ---
 $ScriptDir          = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
 $TEMPLATE_FILE      = Join-Path $ScriptDir "firstrun.sh.template"
 $ROCK3A_TEMPLATE    = Join-Path $ScriptDir "rock3a-provision.sh.template"
-$CONFIG_DIR         = Join-Path $ScriptDir ".mesh-configs"
+$WorkDir            = if ($env:MANET_FLASHER_WORK) { $env:MANET_FLASHER_WORK } else { $ScriptDir }
+$CONFIG_DIR         = Join-Path $WorkDir ".mesh-configs"
 
 # Operator-supplied setup scripts. Anything dropped in here is baked into the
 # generated firstrun.sh and runs once on the node after radio-setup finishes.
 # See additional-scripts\README.md.
-$ADDITIONAL_SCRIPTS_DIR = Join-Path $ScriptDir "additional-scripts"
+$ADDITIONAL_SCRIPTS_DIR = Join-Path $WorkDir "additional-scripts"
 # Warn above the first, refuse above the second. Neither is a limit imposed by
 # rpi-imager or by FAT32 - the boot partition has ~512 MB and bash parses a
 # multi-MB script without complaint. They exist because the whole generated
@@ -303,6 +313,7 @@ function Get-ProgramSearchRoots {
     }
     if ($env:LOCALAPPDATA) { $roots.Add((Join-Path $env:LOCALAPPDATA 'Programs')) }
     if ($ScriptDir)        { $roots.Add($ScriptDir) }
+    if ($WorkDir)          { $roots.Add($WorkDir) }
 
     # Protect every fixed drive. A machine with a second hard
     # drive very often has the program under D:\Program Files, or plain D:\.
@@ -738,9 +749,9 @@ function Get-ArmbianImage {
     Write-Host ""
     Write-Host "--- Armbian Image Setup for Rock 3A ---"
 
-    $localImage      = Join-Path $ScriptDir $ARMBIAN_IMAGE_FILENAME
-    $localCompressed = Join-Path $ScriptDir "${ARMBIAN_IMAGE_FILENAME}.xz"
-    $checksumFile    = Join-Path $ScriptDir "${ARMBIAN_IMAGE_FILENAME}.sha256"
+    $localImage      = Join-Path $WorkDir $ARMBIAN_IMAGE_FILENAME
+    $localCompressed = Join-Path $WorkDir "${ARMBIAN_IMAGE_FILENAME}.xz"
+    $checksumFile    = Join-Path $WorkDir "${ARMBIAN_IMAGE_FILENAME}.sha256"
 
     if (Test-Path $localImage) {
         Write-Host "Found local Armbian image: $localImage"
@@ -798,8 +809,8 @@ function Get-ArmbianImage {
 }
 
 function Download-ArmbianImage {
-    $compressedFile  = Join-Path $ScriptDir "${ARMBIAN_IMAGE_FILENAME}.xz"
-    $outputFile      = Join-Path $ScriptDir $ARMBIAN_IMAGE_FILENAME
+    $compressedFile  = Join-Path $WorkDir "${ARMBIAN_IMAGE_FILENAME}.xz"
+    $outputFile      = Join-Path $WorkDir $ARMBIAN_IMAGE_FILENAME
 
     Write-Host ""
     Write-Host "Downloading Armbian image..."
@@ -2082,7 +2093,22 @@ function Load-Config {
 function Expand-ProvisioningTokens {
     param([string]$Content)
 
+    if (-not $env:MANET_RELEASE_FILE) { throw 'Start the flasher through Flash a Radio.cmd.' }
+    $release = Get-Content -LiteralPath $env:MANET_RELEASE_FILE -Raw | ConvertFrom-Json
+    if ($release.schema -ne 1 -or $release.tag -notmatch '^v[0-9]+(?:\.[0-9]+)+$' -or $release.tag -ne ('v' + $release.version)) {
+        throw 'Invalid MANET release manifest.'
+    }
+    $board = if ($Script:HARDWARE_MODEL -eq 'rpi4') { 'cm4' } else { $Script:HARDWARE_MODEL }
+    if ($board -notin @('cm4', 'r3a', 'rpi5')) { throw 'Unknown board.' }
+    $filename = "$board-install.tar.gz"
+    $asset = $release.assets.$filename
+    if ($asset.sha256 -notmatch '^[0-9a-f]{64}$') { throw 'Missing install checksum.' }
+    $installUrl = "https://github.com/very-srs/MANET/releases/download/$($release.tag)/$filename"
+
     return ($Content `
+        -replace '__RELEASE_VERSION__',         $release.version `
+        -replace '__INSTALL_URL__',             $installUrl `
+        -replace '__INSTALL_SHA256__',          $asset.sha256 `
         -replace '__HARDWARE_MODEL__',          $Script:HARDWARE_MODEL `
         -replace '__EUD_CONNECTION__',          $Script:EUD_CONNECTION `
         -replace '__LAN_AP_SSID__',             $Script:LAN_AP_SSID `

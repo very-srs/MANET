@@ -79,13 +79,13 @@ See [/provisioning/README.md](MANET/provisioning/README.md) for detailed require
 #### On Windows: download one file
 
 Download
-**[Flash a Radio.cmd](https://raw.githubusercontent.com/very-srs/MANET/main/MANET/provisioning/Flash%20a%20Radio.cmd)** 
+**[Flash a Radio.cmd](https://github.com/very-srs/MANET/releases/latest/download/Flash%20a%20Radio.cmd)**
 and double-click it.
 
 There is nothing else to download. The
 launcher fetches what it needs, and the GUI offers to install `rpi-imager` and, for a
 CM4, `rpiboot` if this computer does not already have them. On first run `Flash a Radio.cmd` makes itself a
-`MANET Flasher` folder beside where you put it and moves itself in, so your saved settings and
+`MANET Flasher` folder beside where you put it and copies the launcher there, so your saved settings and
 your own setup scripts stay in one place.
 
 Windows shows a security warning the first time, because the file came from the internet.
@@ -107,7 +107,7 @@ Every page is shown in
 #### On Linux: download one file
 
 Download
-**[flash-a-radio.sh](https://raw.githubusercontent.com/very-srs/MANET/main/MANET/provisioning/flash-a-radio.sh)**
+**[flash-a-radio.sh](https://github.com/very-srs/MANET/releases/latest/download/flash-a-radio.sh)**
 and run it:
 
 ```bash
@@ -115,10 +115,10 @@ chmod +x flash-a-radio.sh
 ./flash-a-radio.sh
 ```
 
-There is nothing else to download. The script fetches what it needs, and offers to
+With Python 3 and curl installed, there is nothing else to download. The script fetches what it needs, and offers to
 install any missing software with apt or dnf. On other distributions it prints the exact
 command for your package manager instead of running it. On first run `flash-a-radio.sh`
-makes itself a `manet-flasher` folder beside where you put it and moves itself in, so
+makes itself a `manet-flasher` folder beside where you put it and copies the launcher there, so
 your saved settings and your own setup scripts stay in one place.
 
 Run it as yourself, not with `sudo`. It asks for your password at the points where it
@@ -240,3 +240,8 @@ handles them three ways:
 * [Feature Roadmap and Validation Status](MANET/README.md#feature-roadmap)
 * [Binary Details](MANET/binaries_arm64/README.md)
 * [Dispatcher Hooks](MANET/networkd-dispatcher/README.md)
+
+Normal installs and updates use the stable GitHub release marked **Latest**.
+Use `--development` with the flasher or `node-update.sh` to test the newest
+published build, including prereleases. See the [provisioning guide](MANET/provisioning/README.md#stable-and-development-installs)
+and [release publishing instructions](MANET/releases/README.md).

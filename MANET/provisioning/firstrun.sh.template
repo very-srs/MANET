@@ -113,13 +113,31 @@ cd /root
 # files.  Here we can also differentiate between hardware types if he need different setup options.
 # This tar file also contains the manet kernel, modified to include the drivers for the various radios used
 
+# The flasher pins setup and packages to the same published release.
+MANET_INSTALL_URL='__INSTALL_URL__'
+MANET_INSTALL_SHA256='__INSTALL_SHA256__'
+MANET_INSTALL_VERSION='__RELEASE_VERSION__'
+case "$MANET_INSTALL_URL" in
+    https://github.com/very-srs/MANET/releases/download/v[0-9]*/*-install.tar.gz) ;;
+    *) echo "ERROR: Missing or invalid MANET release selection"; exit 1 ;;
+esac
+echo "Downloading MANET $MANET_INSTALL_VERSION install package..."
+curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
+    --connect-timeout 15 --max-time 600 --retry 3 \
+    "$MANET_INSTALL_URL" -o /root/morse-pi-install.tar.gz || exit 1
+printf '%s  %s\n' "$MANET_INSTALL_SHA256" /root/morse-pi-install.tar.gz | sha256sum -c - || exit 1
+for marker in ./etc/manet_version.txt ./usr/local/bin/version.txt; do
+    installed_version=$(tar -xzOf /root/morse-pi-install.tar.gz "$marker") || exit 1
+    [ "${installed_version%%$'\n'*}" = "$MANET_INSTALL_VERSION" ] || {
+        echo "ERROR: Install package version does not match the selected release"
+        exit 1
+    }
+done
+
 #  The tar file will be extracted after apt install happens
 if [ "__HARDWARE_MODEL__" = "rpi5" ]; then
 		echo "Applying RPi 5 specific settings..."
-		wget -q  https://www.colorado-governor.com/manet/rpi5-install.tar.gz -O /root/morse-pi-install.tar.gz || {
-                echo "ERROR: Failed to download rpi4 package"
-                exit 1
-        }
+
 		# The rpi5 is using an SD card and may need to be resized
 		# Check if filesystem is nearly full (indicating small partition)
 		USAGE_PERCENT=$(df / | tail -1 | awk '{print $5}' | tr -d '%')
@@ -142,10 +160,6 @@ if [ "__HARDWARE_MODEL__" = "rpi5" ]; then
 		touch /var/lib/expand-root-done
 elif [ "__HARDWARE_MODEL__" = "rpi4" ]; then
 		echo "Applying RPi 4 specific settings..."
-		wget -q  https://www.colorado-governor.com/manet/cm4-install.tar.gz -O /root/morse-pi-install.tar.gz || {
-				echo "ERROR: Failed to download rpi4 package"
-				exit 1
-		}
 
 		USAGE_PERCENT=$(df / | tail -1 | awk '{print $5}' | tr -d '%')
 		echo "Root filesystem is ${USAGE_PERCENT}% full"
@@ -167,10 +181,7 @@ elif [ "__HARDWARE_MODEL__" = "rpi4" ]; then
 		touch /var/lib/expand-root-done
 elif [ "__HARDWARE_MODEL__" = "r3a" ]; then
 		echo "Applying Rock 3A specific settings..."
-        wget -q  https://www.colorado-governor.com/manet/r3a-install.tar.gz -O /root/morse-pi-install.tar.gz || {
-                echo "ERROR: Failed to download rock3a package"
-                exit 1
-        }
+
 fi
 
 #
