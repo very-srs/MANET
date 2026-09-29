@@ -79,7 +79,7 @@ See [/provisioning/README.md](MANET/provisioning/README.md) for detailed require
 #### On Windows: download one file
 
 Download
-**[Flash a Radio.cmd](https://github.com/very-srs/MANET/releases/latest/download/Flash%20a%20Radio.cmd)**
+**[Flash-a-Radio.cmd](https://github.com/very-srs/MANET/releases/latest/download/Flash-a-Radio.cmd)**
 and double-click it.
 
 There is nothing else to download. The
