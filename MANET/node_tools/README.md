@@ -596,6 +596,21 @@ enables the AP.
 
 ## Network Management
 
+**manet-radio-names.py**
+
+Finishes MAC-pinned radio naming before networking starts. When udev cannot
+exchange occupied `wlan` names, it moves the affected radios aside, assigns
+their intended names, and retries their device events. The boot service runs
+before networkd and supplicants so radio roles do not depend on driver order.
+
+**manet-os-cleanup.py**
+
+Previews or applies the Raspberry Pi OS Trixie footprint cleanup. Setup runs it
+once before operator scripts. It protects MANET runtime packages, previews APT's
+removal plan, refuses removals of protected dependencies, and then clears the
+inactive stock swap file and downloaded package cache. See the provisioning
+README for manual use and the saved package inventory.
+
 **mesh-ip-manager.sh** and **mesh-ip-startup.py**
 
 Chunk-based IPv4 allocation. Each node claims a chunk of addresses sized
@@ -623,13 +638,18 @@ allocates using the claims received so far. Peer changes never restart either
 deadline. Transient local failures defer allocation but preserve elapsed time;
 the deadline does not bypass a failed registry read or local readiness checks.
 Nodes continue publishing over IPv6 throughout the wait. Startup checks run
-with a 5-second loop sleep, returning to 15 seconds after allocation; work
-within a loop can delay the check past its deadline.
+with a 1-second loop sleep, returning to 15 seconds after allocation; work
+within a loop can delay the check past its deadline. Both managers publish
+their initial records before the first discovery check, so the observation
+window can start on that pass. A successful Syncthing ID lookup is cached for
+the manager's lifetime; a missing ID is retried.
 
 The registry and wait state are rebuilt each boot. A remembered IPv4 chunk in
 `/etc/mesh_ipv4_state` must pass the same wait and is reused only if no peer
 claims it. Every allocation pass refreshes the registry, and changed claims
 are published on the next manager pass instead of waiting for the keepalive.
+After the first allocation, that next pass runs without the usual 15-second
+sleep, so peers can learn the new claim promptly.
 
 Chunk size is uniform across the mesh and set at flash time, which is why the
 management UI shows `max_euds_per_node` without letting you write it. There is
@@ -639,7 +659,11 @@ no per-node override.
 
 Watches `batctl` gateway selection and points the system default route at the
 selected gateway's mesh IP. Removes the route when no gateway is available.
-Polls every 10 seconds.
+While a mesh route is pending, sleeps 1 second between checks during its first
+90 seconds, measured with monotonic uptime. Once ready, or after that startup
+period, sleeps 10 seconds. Failed reachability checks and route installs retry.
+Uses the node's assigned primary address as the route source, excluding service
+VIPs and the EUD gateway alias, and preserves an existing local uplink route.
 
 **manet-uplink-dispatch.sh**
 

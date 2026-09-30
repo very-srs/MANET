@@ -2,6 +2,11 @@
 set -euo pipefail
 
 POLL_INTERVAL=10
+STARTUP_POLL_INTERVAL=1
+# Bound the extra polling when no gateway exists. /proc/uptime is unaffected
+# by the large clock corrections common on nodes without an RTC.
+read -r started _ < /proc/uptime
+FAST_POLL_UNTIL=$(( ${started%.*} + 90 ))
 LOCK_FILE=/var/run/gateway-route-manager.lock
 
 exec 200>"$LOCK_FILE"
@@ -16,9 +21,19 @@ log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] - GW-ROUTE-MGR: $*" >&2
 }
 
+poll_wait() {
+    local uptime unused
+    read -r uptime unused < /proc/uptime
+    if [ "${1:-pending}" = pending ] && [ "${uptime%.*}" -lt "$FAST_POLL_UNTIL" ]; then
+        sleep "$STARTUP_POLL_INTERVAL"
+    else
+        sleep "$POLL_INTERVAL"
+    fi
+}
+
 get_gateway_mac() {
     batctl gwl 2>/dev/null | awk '
-        /^\*/ && tolower($2) ~ /^([0-9a-f]{2}:){5}[0-9a-f]{2}$/ { print tolower($2); exit }
+        $1 == "*" && tolower($2) ~ /^([0-9a-f]{2}:){5}[0-9a-f]{2}$/ { print tolower($2); exit }
     '
 }
 
@@ -30,7 +45,7 @@ resolve_gateway_ip() {
     [ -n "$ip" ] && printf "%s\n" "$ip"
 }
 
-log "Starting Gateway Route Manager (polling every ${POLL_INTERVAL}s)"
+log "Starting Gateway Route Manager (pending startup ${STARTUP_POLL_INTERVAL}s, steady ${POLL_INTERVAL}s)"
 
 lookup_gateway_ip_by_mac() {
     local gw_mac="$1"
@@ -61,15 +76,22 @@ lookup_gateway_ip_by_mac() {
 }
 
 while true; do
+    cur="$(ip route show default | head -n1 || true)"
     if [ -f /var/run/mesh-gateway.state ]; then
-        cur="$(ip route show default | head -n1 || true)"
         # Only log when actually removing a route: this branch runs every
         # poll cycle while in gateway mode, and log() forks date.
-        if echo "$cur" | grep -q " dev br0 "; then
+        if [[ " $cur " == *" dev br0 "* ]]; then
             ip route del default dev br0 2>/dev/null || true
             log "Local gateway mode active; removed mesh-managed default route"
         fi
-        sleep "$POLL_INTERVAL"
+        poll_wait ready
+        continue
+    fi
+
+    # A dispatcher may not have written its gateway marker yet. Preserve an
+    # existing local uplink route during that transition too.
+    if [ -n "$cur" ] && [[ " $cur " != *" dev br0 "* ]]; then
+        poll_wait ready
         continue
     fi
 
@@ -80,39 +102,47 @@ while true; do
         # traffic black-holes instead of visibly failing: withdraw it. Only
         # br0 routes are ours; a local uplink route lives on the ethernet iface
         # and must be left alone.
-        cur="$(ip route show default | head -n1 || true)"
-        if echo "$cur" | grep -q " dev br0 "; then
+        if [[ " $cur " == *" dev br0 "* ]]; then
             ip route del default dev br0 2>/dev/null || true
             log "No mesh gateway announced; removed stale default route ($cur)"
         fi
-        sleep "$POLL_INTERVAL"
+        poll_wait
         continue
     fi
 
     gw_ip="$(lookup_gateway_ip_by_mac "$gw_mac" || true)"
     if [ -z "${gw_ip:-}" ]; then
         log "Warning: No registry entry found for MAC $gw_mac"
-        sleep "$POLL_INTERVAL"
+        poll_wait
         continue
     fi
 
-    local_ip="$(ip -4 -o addr show dev br0 | awk '{print $4}' | cut -d/ -f1 | head -n1)"
+    # The first address on br0 may be a service VIP or the EUD gateway alias.
+    local_ip="$(python3 /usr/local/bin/manet_node_ipv4.py br0 2>/dev/null || true)"
     if [ -z "$local_ip" ]; then
         log "br0 has no IPv4 address yet; skipping route install"
-        sleep "$POLL_INTERVAL"
+        poll_wait
         continue
     fi
-    cur="$(ip route show default | head -n1 || true)"
 
+    route_ready=false
     if ping -c 1 -W 1 "$gw_ip" >/dev/null 2>&1; then
-        if ! echo "$cur" | grep -q "via $gw_ip dev br0"; then
-            ip route replace default via "$gw_ip" dev br0 src "$local_ip"
+        if [[ " $cur " == *" via $gw_ip dev br0 "* && " $cur " == *" src $local_ip "* ]]; then
+            route_ready=true
+        elif ip route replace default via "$gw_ip" dev br0 src "$local_ip"; then
+            route_ready=true
             log "Gateway detected: $gw_mac at $gw_ip"
             log "Default route updated: via $gw_ip src $local_ip"
+        else
+            log "Route installation failed; retrying"
         fi
     else
         log "Gateway IP $gw_ip not reachable; skipping route install"
     fi
 
-    sleep "$POLL_INTERVAL"
+    if [ "$route_ready" = true ]; then
+        poll_wait ready
+    else
+        poll_wait
+    fi
 done

@@ -1,0 +1,16 @@
+[Unit]
+Description=Restore MAC-pinned radio names before networking
+DefaultDependencies=no
+Wants=systemd-udev-settle.service network-pre.target
+After=local-fs.target systemd-udev-settle.service
+Before=sysinit.target network-pre.target shutdown.target
+Conflicts=shutdown.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /usr/local/bin/manet-radio-names.py
+RemainAfterExit=yes
+TimeoutStartSec=60
+
+[Install]
+WantedBy=sysinit.target

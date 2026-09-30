@@ -581,12 +581,13 @@ After the reboot the node is fully operational.
 
 It performs:
 
-- **Interface detection and naming.** Waits for the wireless PHYs to appear, classifies each interface as 2.4 GHz mesh, 5 GHz mesh, HaLow, or non-mesh (EUD AP), and writes MAC-keyed `.link` files so the names stay stable across reboots. If an interface still needs renaming, it stages a one-shot re-run and reboots once, so the rest of the configuration is written against the final names.
+- **Interface detection and naming.** Waits for the wireless PHYs to appear, classifies each interface as 2.4 GHz mesh, 5 GHz mesh, HaLow, or non-mesh (EUD AP), and writes MAC-keyed `.link` files. Before networking starts on later boots, `manet-radio-names.service` resolves occupied-name collisions that udev cannot handle, preserving the assigned roles when driver enumeration changes. If an interface still needs renaming, setup keeps the same first-boot unit enabled and reboots once, so it retries against the final names. A process lock prevents concurrent setup runs from changing configuration or provisioning state.
 - **Per-interface supplicant configs.** Writes `wpa_supplicant` mesh-point / SAE configs for the 2.4 and 5 GHz radios and `wpa_supplicant_s1g` (S1G) configs for the HaLow interface, along with the matching `systemd-networkd` link/network files.
 - **HaLow / Morse setup.** Sets the HaLow TX power, writes `/etc/modprobe.d/morse.conf` and the `cfg80211` regulatory domain (including EU handling), and ensures the SPI overlay, Morse power/reset GPIOs, and CM4 `pcie-32bit-dma` settings are present in `config.txt`.
 - **Core services.** Enables and starts the mesh stack (`alfred`, BATMAN-adv (`batman-enslave`), `node-manager`, and `radvd`) plus support services for LED/button handling, SSH recovery, cloned-identity reset, the boot lobby channels, and time synchronization. `one-shot-time-sync.service` owns chrony: verified GPS/uplink sources keep it running, while mesh clients stop polling between brief refreshes about every six hours.
 - **Optional services.** Brings up MediaMTX and Mumble when selected. `gpsd` and `gps-reader.service` support an optional GPS; the time service uses chrony `SHM 0` when a current fix is available.
 - **Identity and web UI.** Derives the hostname from the node's MAC (`mesh-XXXX`) and starts the web server (`mesh-status.py`) on port 80: open status page at `/`, password-gated management UI at `/manage`. Also advertises the node as `manet.local` over mDNS on the EUD-facing interface only.
+- **OS footprint.** On Raspberry Pi OS Trixie running the MANET kernel, removes the unused build tools, kernel headers, desktop GPS clients, camera utilities, desktop storage/modem/Bluetooth daemons, and stock swap machinery. GPS uses the command-line `gpsd-tools` package. Runtime libraries, radio firmware, kernel images, audio/video, diagnostics, user files, and logs are retained. The inactive stock `/var/swap` and downloaded APT package cache are removed after the package transaction succeeds.
 
 When it finishes, and after any pending interface rename has settled, it disables its own run-once service, marks the node provisioned, and brings the mesh up by restarting `systemd-networkd`, the supplicants, `node-manager`, BATMAN-adv, and `alfred`. Output is logged to `/var/log/radio-setup.log`.
 
@@ -595,6 +596,15 @@ Finally, on a run that reaches this point with no recorded failures, it starts
 `additional-scripts/`. The unit is started with `--no-block` so that operator
 code cannot delay the completion of provisioning, and its conditions restrict
 it to a single run. Output is written to `/var/log/manet-user-scripts.log`.
+
+The OS cleanup runs before operator scripts and records completion in
+`/var/lib/manet-os-cleanup/complete`, so subsequent setup runs preserve software
+added by the operator. Package selections and the removal plan are saved in that
+directory. To preview an existing node, run
+`sudo python3 /usr/local/bin/manet-os-cleanup.py`; add `--apply` to perform the
+cleanup. An explicit `--force` reapplies a previously completed cleanup. Active
+swap or a nonempty `dpkg --audit` stops cleanup without removing packages.
+Tools updates carry this helper but do not automatically run it.
 
 ---
 

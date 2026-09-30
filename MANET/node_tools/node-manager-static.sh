@@ -10,7 +10,7 @@ CONTROL_IFACE="br0"
 ALFRED_IDENTITY_TYPE=67
 ALFRED_DATA_TYPE=68
 MONITOR_INTERVAL=15
-STARTUP_MONITOR_INTERVAL=5
+STARTUP_MONITOR_INTERVAL=1
 
 # Static channels (lobby channels used as permanent data channels)
 STATIC_FREQ_2_4=2412
@@ -45,6 +45,7 @@ PUBLISH_INTERVAL=180  # Publish every 3 minutes
 LAST_IDENTITY_PUBLISH=0
 LAST_IDENTITY_ALLOCATION=""
 LAST_ACK_PUBLISHED=""
+SYNCTHING_ID=""
 CLOCK_READY_SEEN=false
 IDENTITY_PUBLISH_INTERVAL=270
 
@@ -256,8 +257,12 @@ while true; do
     # Verify we haven't drifted from static channels (safety check)
     ensure_static_channels
     
-    # === REGISTRY REFRESH AND IP MANAGEMENT ===
-    [ -x "$IP_MANAGER" ] && "$IP_MANAGER"
+    # Established nodes check claims before publishing any allocation changes.
+    # Cold nodes first publish below, so discovery can see our own records on
+    # this pass instead of waiting through another complete manager loop.
+    if [ -s /var/run/my_ipv4_chunk ]; then
+        [ -x "$IP_MANAGER" ] && "$IP_MANAGER"
+    fi
     
     # === PUBLISH IDENTITY (Alfred type 67) ===
     # Publish during discovery and whenever allocation changes; 270 s is only
@@ -279,7 +284,11 @@ while true; do
             fi
         done
 
-        SYNCTHING_ID=$(runuser -u radio -- syncthing --device-id 2>/dev/null || echo "")
+        # Stable for this manager process. Retry a missing ID, but avoid starting
+        # Syncthing just to read the same ID on every discovery pass.
+        if [ -z "$SYNCTHING_ID" ]; then
+            SYNCTHING_ID=$(timeout 3 runuser -u radio -- syncthing --device-id 2>/dev/null || true)
+        fi
 
         IDENTITY_ARGS=(
             "--hostname" "$(hostname)"
@@ -381,6 +390,17 @@ except Exception:
             echo -n "$CURRENT_PAYLOAD" | alfred -s $ALFRED_DATA_TYPE
             LAST_PUBLISHED_PAYLOAD="$CURRENT_PAYLOAD"
             LAST_PUBLISH_TIME=$NOW
+        fi
+    fi
+
+    # Bootstrap only after both identity and telemetry have been published.
+    # The existing helper still enforces readiness and the 10/20-second wait.
+    if [ ! -s /var/run/my_ipv4_chunk ]; then
+        [ -x "$IP_MANAGER" ] && "$IP_MANAGER"
+        if [ -s /var/run/my_ipv4_chunk ]; then
+            # Publish the new claim immediately, before the steady-state sleep.
+            LAST_PUBLISH_TIME=0
+            continue
         fi
     fi
 	# === RUN SERVICE ELECTIONS ===

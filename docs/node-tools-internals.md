@@ -1260,14 +1260,20 @@ in `10.30.0.0/24`, chunk zero starts at `10.30.0.6`. The registry includes it
 in the claimed-chunk index. Because protobuf also returns zero for an unset
 chunk, a claim requires an advertised IPv4 address as well as a chunk number.
 The node managers omit that address until `/var/run/my_ipv4_chunk` exists;
-the static manager reads the chunk after running IP management, so the first
-identity publication describes the allocation just made.
+on an already allocated node, the static manager runs IP management before
+reading the chunk, so a changed allocation is advertised in the same pass.
 
 **Boot discovery is deliberately nonblocking.** The node manager must keep
 publishing types 67 and 68 while IPv4 is unassigned, or a whole mesh booting
 together would wait forever for records nobody has published. Both manager
 variants publish each loop until allocated; allocation changes bypass the
 270-second identity keepalive, and failed identity sends are retried.
+Cold nodes publish both records before the first discovery check, allowing the
+observation window to start on that pass. After the first allocation, both
+managers immediately start another pass to advertise the new claim, without
+the usual 15-second sleep. A successful Syncthing ID lookup is cached for the
+manager process; a missing ID is retried and each lookup has a three-second
+timeout.
 
 The startup helper requires a usable (non-tentative, non-failed) link-local
 IPv6 address on `br0`, an active Alfred primary on `br0`, a successful BATMAN
@@ -1299,12 +1305,22 @@ necessary. Failed local commands or missing local readiness still defer
 allocation even after the deadline, but preserve the original start time.
 On recovery, the node uses that elapsed time rather than starting over.
 
-Both managers sleep 5 seconds between loops while unallocated, then return to
+Both managers sleep 1 second between loops while unallocated, then return to
 15 seconds. The deadline is acted on at the next successful check; work within
 a loop can delay it, so 20 seconds is a limit on the deliberate peer-data wait,
 not a guarantee of IPv4 within 20 seconds of boot. Progress is recorded in
 `/var/run/mesh-ip-startup.json` only for this boot. No registry is required from
 a prior boot.
+
+The gateway route manager similarly sleeps one second between pending-route
+checks during its first 90 seconds, using `/proc/uptime` so an NTP clock step
+cannot extend that period. A ready route, a local uplink, or expiry of that
+startup period returns it to ten-second sleeps. Missing registry data, a
+missing primary address, failed pings and failed route installation all retry.
+`manet_node_ipv4.py` chooses the route's source address from the current
+allocation, excluding service VIPs and the EUD alias; a changed source triggers
+route replacement. An existing non-`br0` default route is preserved even before
+the uplink dispatcher writes its gateway marker.
 
 Four properties of the claimed-chunk file matter:
 
@@ -1734,7 +1750,56 @@ The log is opened with `tee -a`, not `tee`. It used to truncate per run, which
 destroyed the history of the run that went wrong, and two overlapping runs
 interleaved into an unreadable file.
 
-repeating the ones that finished.
+Interface renames reuse `radio-setup-run-once.service`, which stays enabled
+until setup succeeds. A separate rename service previously started alongside
+it after reboot, racing package installs and sharing the failure file. Setup
+now takes a nonblocking process lock before opening its log or clearing state.
+The lock belongs to the `flock` supervisor and is closed in its child, so
+background descendants cannot keep it held after setup exits. Duplicate calls
+return without modifying the active run. A requested rename reboot exits setup
+immediately rather than falling through to the completion checks.
+
+`manet-radio-names.service` runs after coldplug udev processing, before
+`sysinit.target` and `network-pre.target`. MAC-keyed `.link` rules can fail
+with `File exists` when two radios must exchange occupied `wlan` names.
+The helper reads only the generated `10-wlan*.link` pins, validates the whole
+exchange, moves displaced radios to temporary names, then assigns their final
+names. It retries the udev add events so device units become available to the
+supplicants. It refuses to move an active or enslaved radio or displace an
+unpinned interface. Missing hardware is reported without preventing other
+radios from being named. No pin files on first boot means no work; setup
+enables the service for subsequent boots. The packaged enable symlink also
+covers tools updates, taking effect at the next boot.
+
+`manet-os-cleanup.py` runs once during setup on Raspberry Pi OS Trixie after the
+MANET kernel is running. The Pi first-boot package list installs runtime libraries
+instead of development headers, and setup installs `gpsd-tools` instead of the
+GUI `gpsd-clients` dependency tree. Cleanup explicitly removes unused appliance
+packages and their orphaned dependencies, treating recommendations as optional
+for this transaction. Required recommendations such as ALSA profiles, rtkit,
+rfkill, regulatory data and NSS modules are protected alongside core runtime
+packages and libraries used by the prebuilt radio tools. Kernel images and radio
+firmware are protected too.
+
+A dry run pins those runtime roots in a temporary copy of APT's extended state;
+it does not alter live auto/manual selections. Apply saves the package inventory,
+manual selections and plan, pins the real runtime roots, validates the plan again,
+then purges. Plans that remove protected packages or install/upgrade anything are
+rejected. The stock swap file is deleted only after checking its signature, that
+no swap is active, and that no loop device references it. A success marker prevents
+later setup runs from undoing operator additions. Cleanup failure is recorded as a
+provisioning failure, not silently marked complete.
+
+On the two CM4 Trixie bench nodes, cleanup reduced root filesystem usage from
+5.3/5.4 GiB to 1.8/1.9 GiB. Most savings came from the unused 2 GiB swap file,
+about 1.1 GiB of packages, and the APT cache. Both rebooted with healthy mesh,
+AP, DNS, dashboard and internet access; the second rejoined with Ethernet
+unplugged. Native tool dependencies and a Lyra encode/RTP/decode pipeline were
+checked. This verifies existing installations; the revised first-boot package
+list still needs a fresh-image hardware test.
+
+Operator scripts run through `manet-user-scripts.sh`. Per-script completion
+markers allow an interrupted run to resume without repeating scripts that finished.
 
 Failures are advisory. Nothing here writes to `/var/lib/manet-provision.*`, so
 a failing operator script cannot cause a working node to report itself
@@ -1768,6 +1833,8 @@ Tests sit alongside the code they cover and run without hardware or a node:
 | `test_peer_radios.py` | The peer radio chips in `manet_peer_radios.py`: frequency-to-channel conversion, published `INTERFACES_JSON` winning over the registry fallback, the fallback filling in when it is empty, and the channel fields surviving an encode/decode round trip |
 | `test_mesh_registry.py` | Real encoder/decoder/registry integration, chunk zero, saved chunks, read failures, and timely publication |
 | `test_mesh_ip_startup.py` | Bounded discovery, late/missing peers, failed queries, and allocation barriers |
+| `test_mesh_boot_pipeline.py` | Real manager loops, encoded Alfred records and discovery helper with a simulated clock: first-pass discovery, full observation window, failed publication, Syncthing ID caching/retry, and claim publication without the steady-state sleep |
+| `test_gateway_startup.py` | Real route manager with simulated networking: late addresses, missing registry, reachability/install retries, bounded fast polling, preservation of local uplinks, stale-route removal and correct primary source |
 | `test_mesh_config_rollback.py` | Real rollback script with simulated BATMAN: unique peer counts, solo nodes, bounded recovery, failed queries/backups, interrupted restoration, and the receiver's apply gate |
 | `test_mesh_peer_count.py` | JSON counts and real shell callers with simulated BATMAN: empty/single/multiple peers, alternate routes and MAC case, failed queries, bootstrap reset/recovery, quorum return-to-lobby gating, and partition size/beacon/migration failure handling |
 | `test_led.py` | Real boot/button displays with fake GPIO holders and BATMAN: direct nodes across radio aliases, multihop exclusion, connected before registry arrival, unknown versus zero, recovery, opt-in hardware, GPIO errors, exclusive ownership, signal cleanup and onboard provisioning verdicts |

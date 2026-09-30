@@ -200,11 +200,13 @@ echo "iperf3 iperf3/start_daemon boolean true" | debconf-set-selections
 chmod -x /etc/kernel/postinst.d/initramfs-tools
 
 # Install packages for this system
-apt install -y ipcalc nmap lshw tcpdump net-tools nftables wireless-tools iperf3\
+apt install -y --no-install-recommends ipcalc nmap lshw tcpdump net-tools nftables wireless-tools iperf3\
 		radvd bridge-utils firmware-mediatek libnss-mdns syncthing networkd-dispatcher\
-		libgps-dev libcap-dev screen arping bc jq git libssl-dev hostapd dnsmasq pulseaudio\
+		screen arping bc jq hostapd dnsmasq pulseaudio\
 		python3-protobuf unzip chrony systemd-resolved dhcping mpg123\
-		libnl-3-dev libnl-genl-3-dev libnl-route-3-dev ebtables libdbus-1-dev gpsd pulseaudio-utils\
+		libnl-3-200 libnl-genl-3-200 libnl-route-3-200 ebtables gpsd gpsd-tools pulseaudio-utils\
+		alsa-utils alsa-ucm-conf alsa-topology-conf rtkit dbus-user-session\
+		libnss-resolve libnss-myhostname rfkill iw wireless-regdb netcat-openbsd\
 		gstreamer1.0-alsa gstreamer1.0-plugins-base gstreamer1.0-plugins-good python3-gi gir1.2-gstreamer-1.0
 
 

@@ -5,6 +5,15 @@
 #  if the mesh config file is updated
 #
 
+# Serialize every entry point before touching logs or provisioning state.
+# flock owns the lock; --close keeps subprocesses from retaining it after setup.
+# A duplicate caller leaves the active run in charge, including its failure state.
+if [[ "${MANET_RADIO_SETUP_LOCKED:-}" != 1 ]]; then
+    exec flock --nonblock --conflict-exit-code 0 --close \
+        /run/lock/manet-radio-setup.lock \
+        env MANET_RADIO_SETUP_LOCKED=1 /bin/bash "$0" "$@"
+fi
+
 # Append setup output so first boot, post-rename runs, and manual retries
 # retain the history needed to diagnose failures.
 exec >> >(tee -a /var/log/radio-setup.log) 2>&1
@@ -725,6 +734,10 @@ done
 # role; we now bind that role to a stable MAC-keyed name via systemd .link.
 # These take effect at next boot: current run uses kernel-assigned names from
 # the role files.
+# udev alone cannot swap occupied wlan names. The early boot helper resolves
+# exchanges before networkd and the radio services can bring interfaces up.
+provision_try "cannot enable radio name reconciliation" \
+    systemctl enable manet-radio-names.service
 rm -f /etc/systemd/network/10-wlan*.link
 
 iface_mac() {
@@ -775,26 +788,13 @@ check_rename() {
 
 if [ "$needs_rerun" -eq 1 ]; then
     echo " > Interface renames staged. Scheduling post-reboot re-run."
-
-cat << 'EOF' > /etc/systemd/system/radio-setup-rerun.service
-[Unit]
-Description=Re-run radio-setup after interface rename
-After=multi-user.target
-
-[Service]
-Type=oneshot
-ExecStart=/usr/local/bin/radio-setup.sh
-ExecStartPost=/bin/systemctl disable radio-setup-rerun.service
-ExecStartPost=/bin/rm -f /etc/systemd/system/radio-setup-rerun.service
-RemainAfterExit=no
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-    systemctl daemon-reload
-    systemctl enable radio-setup-rerun.service
-    touch /var/lib/radio-setup-reboot-pending
+    # The first-boot unit already retries until setup succeeds. A second unit
+    # would run the same setup concurrently after the rename reboot. Enabling
+    # this unit also covers renames requested by a later manual setup run.
+    if provision_try "cannot schedule post-rename setup" \
+        systemctl enable radio-setup-run-once.service; then
+        touch /var/lib/radio-setup-reboot-pending
+    fi
 else
     echo " > Interface names already match desired layout, no rename needed"
 fi
@@ -1558,7 +1558,7 @@ systemctl enable mesh-status
 
 if have_package_network; then
     provision_try "apt install failed: avahi-daemon iperf3 traceroute sqlite3 python3-zeroconf python3-cryptography" \
-        apt install -y avahi-daemon iperf3 traceroute sqlite3 python3-zeroconf python3-cryptography
+        apt install -y --no-install-recommends avahi-daemon iperf3 traceroute sqlite3 python3-zeroconf python3-cryptography
 else
     provision_fail "no network: cannot install avahi-daemon iperf3 traceroute sqlite3 python3-zeroconf python3-cryptography"
 fi
@@ -1659,7 +1659,7 @@ fi
 # Install smbus and i2c-tools for battery-reader.py and diagnostics
 if have_package_network; then
     provision_try "apt install failed: python3-smbus i2c-tools" \
-        sh -c 'apt update -qq && apt install -y python3-smbus i2c-tools'
+        sh -c 'apt update -qq && apt install -y --no-install-recommends python3-smbus i2c-tools'
 else
     provision_fail "no network: cannot install python3-smbus i2c-tools"
 fi
@@ -1676,10 +1676,10 @@ systemctl enable battery-reader.service
 # Existing Alfred telemetry carries is_ntp_server; no separate announcements.
 
 if have_package_network; then
-    provision_try "apt install failed: gpsd gpsd-clients" \
-        apt-get install -y gpsd gpsd-clients
+    provision_try "apt install failed: gpsd gpsd-tools" \
+        apt-get install -y --no-install-recommends gpsd gpsd-tools
 else
-    provision_fail "no network: cannot install gpsd gpsd-clients"
+    provision_fail "no network: cannot install gpsd gpsd-tools"
 fi
 
 # /etc/default/gpsd: hotplug via gpsd's own udev rules (USBAUTO=true).
@@ -1699,6 +1699,10 @@ systemctl restart gps-reader.service 2>/dev/null || true
 
 systemctl enable one-shot-time-sync.service 2>/dev/null || true
 systemctl --no-block restart one-shot-time-sync.service 2>/dev/null || true
+
+# Remove the unused RPi OS desktop/build stack once, before operator scripts.
+# The helper previews the transaction and protects MANET runtime dependencies.
+provision_try "OS cleanup failed" python3 /usr/local/bin/manet-os-cleanup.py --apply
 
 # === FIRST RUN vs RE-RUN ===
 
@@ -1808,7 +1812,9 @@ if [ -f /var/lib/radio-setup-reboot-pending ]; then
     echo " radio-setup will re-run automatically after boot"
     echo "=================================================="
     sleep 5
-    reboot
+    if provision_try "reboot failed" reboot; then
+        exit 0
+    fi
 fi
 
 # Start the services enabled above on this boot too. A clean final setup run
