@@ -187,8 +187,13 @@ class ChunkClaimsTests(unittest.TestCase):
         allocator.write_text('#!/bin/bash\nprintf "1\\n" > ' +
                              shlex.quote(str(run / 'my_ipv4_chunk')) + '\n')
         allocator.chmod(0o755)
+        # timeout invokes an executable, so a shell function cannot isolate
+        # this lookup from the host's runuser/Syncthing installation.
+        runuser = self.bin / 'runuser'
+        runuser.write_text('#!/bin/bash\nexit 0\n')
+        runuser.chmod(0o755)
         prefix = ('log() { :; }\nensure_static_channels() { :; }\n'
-                  'runuser() { :; }\nhostname() { printf "mesh-test\\n"; }\n'
+                  'hostname() { printf "mesh-test\\n"; }\n'
                   'python3() { if [ "$1" = /usr/local/bin/manet_node_ipv4.py ]; then '
                   'printf "%s\\n" "$REVIEW_IPV4"; else command python3 "$@"; fi; }\n'
                   'ip() { printf "    inet %s/28 scope global br0\\n" "$REVIEW_IPV4"; }\n')
@@ -207,11 +212,12 @@ class ChunkClaimsTests(unittest.TestCase):
             (self.records / 'published-67').read_text()))
         return identity
 
-    def test_static_publish_reads_chunk_after_allocation(self):
+    def test_static_publish_reads_chunk_after_reallocation(self):
         for script in ('node-manager-static.sh', 'node-manager.sh'):
             with self.subTest(script=script):
                 marker = self.root / 'run/my_ipv4_chunk'
-                marker.unlink(missing_ok=True)
+                marker.parent.mkdir(exist_ok=True)
+                marker.write_text('0\n')
                 identity = self.publish_identity(script, allocate=True)
                 self.assertEqual(identity.ipv4_chunk, 1)
                 self.assertEqual(int_to_ipv4(identity.ipv4_address), '10.30.0.13')

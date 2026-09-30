@@ -1,10 +1,12 @@
 """Regressions found on a freshly provisioned CM4 and its first normal boot."""
 import json
+import os
 from pathlib import Path
 import re
 import shlex
 import subprocess
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -59,6 +61,98 @@ class NodeAddressTests(unittest.TestCase):
 
 
 class CompletionTests(unittest.TestCase):
+    def setup_lock_prefix(self, root):
+        source = (TOOLS / 'radio-setup.sh').read_text()
+        return source[:source.index('# Append setup output')].replace(
+            '/run/lock/manet-radio-setup.lock', str(root / 'setup.lock'))
+
+    def test_overlapping_setup_does_not_enter_or_clear_state_and_retry_keeps_exit_code(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch)
+            script = root / 'setup.sh'
+            script.write_text(self.setup_lock_prefix(root) + '''
+echo entered >> "$1"
+if [[ ${2:-} == hold ]]; then
+    touch "$1.ready"
+    while [[ ! -e "$1.release" ]]; do sleep 0.02; done
+fi
+exit "${3:-0}"
+''')
+            state = root / 'state'
+            env = dict(os.environ)
+            env.pop('MANET_RADIO_SETUP_LOCKED', None)
+            first = subprocess.Popen(['bash', str(script), str(state), 'hold', '7'], env=env)
+            try:
+                deadline = time.monotonic() + 5
+                while not (root / 'state.ready').exists() and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                self.assertTrue((root / 'state.ready').exists())
+                second = subprocess.run(['bash', str(script), str(state)], env=env, timeout=2)
+                self.assertEqual(second.returncode, 0)
+                self.assertEqual(state.read_text(), 'entered\n')
+                (root / 'state.release').touch()
+                self.assertEqual(first.wait(timeout=3), 7)
+                retry = subprocess.run(['bash', str(script), str(state)], env=env, timeout=2)
+                self.assertEqual(retry.returncode, 0)
+                self.assertEqual(state.read_text(), 'entered\nentered\n')
+            finally:
+                (root / 'state.release').touch()
+                first.wait(timeout=3)
+
+    def test_background_child_cannot_keep_setup_locked(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch)
+            script = root / 'setup.sh'
+            script.write_text(self.setup_lock_prefix(root) + '''
+sleep 30 >/dev/null 2>&1 &
+echo $! > "$1"
+''')
+            child_file = root / 'child'
+            env = dict(os.environ)
+            env.pop('MANET_RADIO_SETUP_LOCKED', None)
+            try:
+                subprocess.run(['bash', str(script), str(child_file)], env=env, check=True, timeout=3)
+                result = subprocess.run(['flock', '-n', str(root / 'setup.lock'), 'true'], timeout=2)
+                self.assertEqual(result.returncode, 0)
+            finally:
+                if child_file.exists():
+                    os.kill(int(child_file.read_text()), 15)
+
+    def test_rename_reuses_first_boot_unit_and_only_reboots_when_enabled(self):
+        source = (TOOLS / 'radio-setup.sh').read_text()
+        start = source.index('if [ "$needs_rerun" -eq 1 ]; then')
+        end = source.index('# Mesh (SAE) supplicant config', start)
+        with tempfile.TemporaryDirectory() as scratch:
+            marker = Path(scratch) / 'reboot-pending'
+            branch = source[start:end].replace('/var/lib/radio-setup-reboot-pending', str(marker))
+            for succeeds in (True, False):
+                marker.unlink(missing_ok=True)
+                body = 'needs_rerun=1\n' + '''
+systemctl() { echo "systemctl $*"; return ''' + ('0' if succeeds else '1') + '''; }
+provision_try() { shift; "$@"; }
+''' + branch
+                result = subprocess.run(['bash', '-c', body], capture_output=True, text=True)
+                self.assertIn('systemctl enable radio-setup-run-once.service', result.stdout)
+                self.assertNotIn('radio-setup-rerun.service', result.stdout)
+                self.assertEqual(marker.exists(), succeeds)
+
+    def test_rename_reboot_does_not_fall_through_to_completion(self):
+        source = (TOOLS / 'radio-setup.sh').read_text()
+        start = source.index('if [ -f /var/lib/radio-setup-reboot-pending ]; then')
+        end = source.index('# Start the services enabled above', start)
+        with tempfile.TemporaryDirectory() as scratch:
+            marker = Path(scratch) / 'reboot-pending'
+            marker.touch()
+            body = '''
+sleep() { :; }
+reboot() { echo REBOOT; }
+provision_try() { shift; "$@"; }
+''' + source[start:end].replace('/var/lib/radio-setup-reboot-pending', str(marker)) + '\necho COMPLETED\n'
+            result = subprocess.run(['bash', '-c', body], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn('REBOOT', result.stdout)
+            self.assertNotIn('COMPLETED', result.stdout)
+
     def test_runtime_services_start_before_success_and_failure_is_recorded(self):
         source = (TOOLS / 'radio-setup.sh').read_text()
         begin = source.index('# Start the services enabled above on this boot too.')

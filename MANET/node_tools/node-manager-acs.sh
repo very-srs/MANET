@@ -10,7 +10,7 @@ ALFRED_IDENTITY_TYPE=67
 ALFRED_DATA_TYPE=68
 ALFRED_HELPER_TYPE=69
 MONITOR_INTERVAL=15
-STARTUP_MONITOR_INTERVAL=5
+STARTUP_MONITOR_INTERVAL=1
 
 # Lobby channels
 LOBBY_FREQ_2_4=2412
@@ -69,6 +69,7 @@ LAST_PUBLISH_TIME=0
 LAST_IDENTITY_PUBLISH=0
 LAST_IDENTITY_ALLOCATION=""
 LAST_ACK_PUBLISHED=""
+SYNCTHING_ID=""
 IDENTITY_PUBLISH_INTERVAL=270
 CACHED_SCAN_REPORT_JSON="{}"
 LAST_SCAN_COMPLETE_TIME=0
@@ -573,10 +574,13 @@ while true; do
             fi
         done
 
+        if [ -z "$SYNCTHING_ID" ]; then
+            SYNCTHING_ID=$(timeout 3 runuser -u radio -- syncthing --device-id 2>/dev/null || true)
+        fi
         IDENTITY_ARGS=(
             "--hostname" "$(hostname)"
             "--mac-addresses" "${IDENT_MACS[@]}"
-            "--syncthing-id" "$(runuser -u radio -- syncthing --device-id 2>/dev/null || echo "")"
+            "--syncthing-id" "$SYNCTHING_ID"
             "--ipv4-chunk" "${MY_CHUNK:-0}"
         )
         [ -n "$MY_CHUNK" ] && [ -n "$IDENT_IPV4" ] && IDENTITY_ARGS+=("--ipv4-address" "$IDENT_IPV4")
@@ -612,9 +616,6 @@ while true; do
                 update_lobby_bootstrap
             fi
         fi
-
-        # === REGISTRY REFRESH AND IP MANAGEMENT (always needed) ===
-        [ -x "$IP_MANAGER" ] && "$IP_MANAGER"
 
         # === BOOTSTRAP STAGE 1: RF SCAN (every 3 min at :10) ===
         if [ "$BOOTSTRAPPING" = true ] && ! acs_agreement_busy && should_perform_action "SCAN" 180 10; then
@@ -719,6 +720,14 @@ except Exception:
                 LAST_PUBLISHED_PAYLOAD="$CURRENT_PAYLOAD"
                 LAST_PUBLISH_TIME=$NOW
             fi
+        fi
+
+        # Check discovery after publishing both records, including on the first
+        # pass. The helper retains its full 10/20-second observation window.
+        [ -x "$IP_MANAGER" ] && "$IP_MANAGER"
+        if [ -z "$MY_CHUNK" ] && [ -s /var/run/my_ipv4_chunk ]; then
+            LAST_PUBLISH_TIME=0
+            continue  # advertise the new claim before the steady-state sleep
         fi
 
         # === RUN SERVICE ELECTIONS (needed for services to start) ===
@@ -885,6 +894,10 @@ except Exception:
 
         # === STAGE 3: REGISTRY REFRESH AND IP MANAGEMENT (every pass) ===
         [ -x "$IP_MANAGER" ] && "$IP_MANAGER"
+        if [ -z "$MY_CHUNK" ] && [ -s /var/run/my_ipv4_chunk ]; then
+            LAST_PUBLISH_TIME=0
+            continue  # publish the allocation without waiting another 15 seconds
+        fi
 
         # === STAGE 4: CHANNEL ELECTION (every 3 min at :25) ===
         if should_perform_action "ELECTION" 180 25; then
