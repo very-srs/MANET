@@ -234,6 +234,13 @@ stops, and where a tool is not packaged at all, such as `rpi-imager` on Fedora,
 it says where to get it. Only the tools your chosen board actually needs are
 checked, so picking Rock 3A never asks for `rpiboot`.
 
+Disk selection shows model, capacity, serial, removability and mounted volumes.
+Each selected target, including every card in a batch, requires typing `yes`.
+Enter alone does not confirm. System-mounted disks and active mapped storage
+are refused; ordinary desktop automounts are unmounted before writing. The
+flasher rechecks disk identity immediately before each erase/write operation.
+Disk inspection requires `lsblk` with `MOUNTPOINTS` support (util-linux 2.37+).
+
 From a checkout, run it in place:
 
 ```bash

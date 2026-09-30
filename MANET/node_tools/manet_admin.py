@@ -7,17 +7,20 @@ or cancelled command from becoming new again after reboot or rollback.
 """
 
 import base64
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
+from collections import OrderedDict
 from dataclasses import dataclass
 import fcntl
-from functools import lru_cache
+import hashlib
 import json
 import os
 from pathlib import Path
 import re
 import secrets
 import tempfile
+import threading
 import time
+from manet_admin_limits import ReceiveLimits
 
 
 MESH_CONF = '/etc/mesh.conf'
@@ -104,13 +107,26 @@ def _unb64(text, length=None):
     return data
 
 
-@lru_cache(maxsize=64)
-def _derive_key(password, salt):
+_KEYS = OrderedDict()
+_KEY_LOCK = threading.RLock()
+
+
+def _derive_key(password, salt, guard=nullcontext):
     # 32 MiB; salts are random per publishing node, reused with fresh nonces.
     # Cache only in process memory. Receivers never persist derived keys.
     from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
-    return Scrypt(salt=b'MANET admin v1\0' + salt, length=32,
-                  n=2**15, r=8, p=1).derive(password.encode('utf-8'))
+    with _KEY_LOCK:
+        cache_key = (password, salt)
+        if cache_key in _KEYS:
+            _KEYS.move_to_end(cache_key)
+            return _KEYS[cache_key]
+        with guard():
+            key = Scrypt(salt=b'MANET admin v1\0' + salt, length=32,
+                         n=2**15, r=8, p=1).derive(password.encode('utf-8'))
+        _KEYS[cache_key] = key
+        while len(_KEYS) > 64:
+            _KEYS.popitem(last=False)
+        return key
 
 
 @dataclass(frozen=True)
@@ -128,6 +144,9 @@ class AdminTransport:
     def __init__(self, conf=MESH_CONF, state_dir=STATE_DIR):
         self.conf = conf
         self.state_dir = Path(state_dir)
+        directory = (Path('/run/manet-admin-receive') if self.state_dir == Path(STATE_DIR)
+                     else self.state_dir / 'receive-limits')
+        self.receive_limits = ReceiveLimits(directory)
 
     @contextmanager
     def _locked(self):
@@ -203,6 +222,7 @@ class AdminTransport:
         return message
 
     def _decrypt(self, type_id, envelope, kinds):
+        from cryptography.exceptions import InvalidTag
         from cryptography.hazmat.primitives.ciphers.aead import AESGCM
         if not isinstance(envelope, dict) or envelope.get('kind') != ENVELOPE_KIND:
             raise AdminError('Unsigned admin message')
@@ -213,14 +233,30 @@ class AdminTransport:
         ciphertext = _unb64(envelope.get('ciphertext'))
         if not 16 <= len(ciphertext) <= MAX_MESSAGE_BYTES + 16:
             raise AdminError('Invalid admin ciphertext length')
-        plaintext = AESGCM(_derive_key(password_from_conf(self.conf), salt)).decrypt(
-            nonce, ciphertext, f'MANET admin v1 Alfred {type_id}'.encode())
+        password = password_from_conf(self.conf)
+        metadata = os.stat(self.conf)
+        # Never cache a rejection by salt or sender. A forged ciphertext can
+        # reuse a legitimate salt. Bind to the exact envelope and credential
+        # file generation, without persisting a password verifier or key.
+        generation = f'{os.path.realpath(self.conf)}:{metadata.st_ino}:{metadata.st_mtime_ns}:{metadata.st_ctime_ns}'
+        salt_identity = hashlib.sha256(generation.encode() + salt).hexdigest()
+        fingerprint = hashlib.sha256(generation.encode() + bytes([type_id]) + salt + nonce + ciphertext).hexdigest()
+        if self.receive_limits.rejected(fingerprint):
+            raise InvalidTag
+        try:
+            guard = lambda: self.receive_limits.derivation(salt_identity)
+            plaintext = AESGCM(_derive_key(password, salt, guard)).decrypt(
+                nonce, ciphertext, f'MANET admin v1 Alfred {type_id}'.encode())
+        except InvalidTag:
+            self.receive_limits.reject(fingerprint)
+            raise
         body = json.loads(plaintext)
         payload, sent_ns, message_id = body['payload'], body['sent_ns'], body['message_id']
         if (not isinstance(payload, dict) or payload.get('kind') not in kinds[type_id]
                 or type(sent_ns) is not int or not isinstance(message_id, str)
                 or not re.fullmatch('[0-9a-f]{32}', message_id)):
             raise AdminError('Invalid authenticated message')
+        self.receive_limits.authenticate(salt_identity)
         return Message(payload, sent_ns, message_id)
 
     def messages(self, type_id, raw):

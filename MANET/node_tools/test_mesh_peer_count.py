@@ -72,8 +72,10 @@ elif sys.argv[1] == 'helper-encode':
         self.table.write_text(json.dumps(rows))
 
     def active_nodes(self, count):
+        (self.root / 'uptime').write_text('10000.50 1.00\n')
+        self.env['MESH_UPTIME_FILE'] = str(self.root / 'uptime')
         self.registry.write_text(''.join(
-            f"NODE_02000000{i:04x}_LAST_SEEN_TIMESTAMP='990'\n"
+            f"NODE_02000000{i:04x}_OBSERVED_AT_UPTIME='9990'\n"
             f"NODE_02000000{i:04x}_NODE_STATE='ACTIVE'\n"
             for i in range(count)))
 

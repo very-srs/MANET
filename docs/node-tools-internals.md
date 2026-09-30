@@ -80,7 +80,8 @@ write only the channels supplied for those bands, and preserve others.
 radio, so a lone 5 GHz interface is not mislabeled as 2.4 GHz. A dual-band
 interface assigned to the 5 GHz role starts on 5180 rather than the first
 frequency its phy supports. Reserving an interface for AP use clears either
-mesh role that referred to it.
+mesh role that referred to it, but preserves the original band in
+`/var/lib/ap_mesh_band`. An empty saved band denotes AP-only hardware.
 
 - Limp mode management
 
@@ -153,6 +154,11 @@ Management APIs return JSON 401 for invalid sessions; the dashboard returns to
 login while retaining its tab and query. Both form-login aliases and the JSON
 login endpoint use the same store. `test_web_sessions.py` checks token replay,
 expiry, concurrent requests, password changes and HTTP route authorization.
+
+Login failures share a monotonic sixty-second window across all login aliases:
+five failures per client address, thirty per node. The bounded list is updated
+under the session lock. HTTP 429 includes `Retry-After`; throttling does not
+revoke established sessions or grow memory with attacker-selected addresses.
 
 **Web resource limits and recovery status**
 
@@ -764,6 +770,21 @@ This field used to be called `TQ_AVERAGE`, which was wrong: BATMAN_V's metric is
 throughput, not a 0-255 link quality. The behavior never changed (highest
 wins either way), but the name misled, so it now says what it holds.
 
+Managers wait for `/run/my_ipv4_chunk` before running service elections and
+limit them to one pass per fifteen seconds of boot uptime, including discovery
+loops. MediaMTX and Mumble serialize their own local runs. These locks cannot
+prevent one winner in each disconnected partition; the existing deterministic
+election releases a losing node's service and VIP after the partitions merge.
+
+Manual Wi-Fi changes use the band (`2.4` or `5`) as their Alfred identity,
+then resolve each receiver's `mesh_24_if` or `mesh_5_if`. Static plans live in
+`/etc/manet/static-channels.json`; an absent band is saved without restarting
+a radio. The API, receiver and apply path reject manual changes while ACS is
+enabled. Plan, live config, lobby config and restart share the channel lock;
+an apply waits at most ten seconds for it. Failure restores the previous plan
+and configs. Static enforcement reads the plan only while holding that lock,
+skips a busy pass, and leaves radios alone if the plan is malformed.
+
 ### Channel agreement and recovery
 
 Independent scoring used to diverge when scan reports or incumbents differed.
@@ -1236,20 +1257,50 @@ not identity: MediaMTX's service VIP or the EUD gateway can appear first.
 The hostapd drop-in runs `prepare-ap-iface.sh` before each real start/restart.
 The older `ap-interface-setup.service` calls the same helper, but its retained
 oneshot state cannot suppress preparation after an AP/mesh mode transition.
-The helper serializes callers, skips an active hostapd, and bounds preparation
-commands. Failures propagate to hostapd. Uplink dispatch and Ethernet
-auto-detection therefore share the same startup sequence.
+`manet_ap_mesh.py` owns both directions. It withdraws active mesh roles under
+`channel-election.lock` before preparing AP mode. Returning to mesh restores
+the provisioned band, rebuilds live/lobby supplicant files from current mesh
+credentials and the current band plan, clears the AP PHY power cap, verifies
+PONG and the actual mesh channel, then attaches the radio to bat0. Disabled
+mesh radios keep their roles/configuration while remaining down; AP-only
+hardware never becomes mesh. Failed transitions restore prior files/roles
+and restart the previous AP outside the channel lock. Busy transitions leave
+the AP serving and retry at the next uplink reconcile. An unplug during a
+tourguide visit can similarly delay AP startup until the channel lock is
+released; the next reconcile retries. Hostapd start/stop jobs are bounded by
+the unit itself, so a timed-out client cannot leave a stale start queued.
+
+Static mode uses the saved authenticated band plan, including changes received
+while that band was reserved for AP use. Fresh registry radio observations
+validate the chosen frequency and report confirmed/conflict/unknown; they never
+rewrite the plan. A node powered off during a static change still needs that
+change re-applied through the authenticated management path. ACS uses a valid
+local committed destination supported by the returning PHY and consistent with
+remaining active radios, or the band's anchor and authenticated recovery. With
+no other active Wi-Fi band it enters discovery. Telemetry cannot authorize an
+ACS move. Registry evidence excludes stale, down, AP and recent tourguide
+radios; its publication interval means validation can lag a channel change.
+
+BATMAN setup/watch and ACS activation use the same channel lock and reload
+active roles after acquiring it. They cannot restart or enslave a radio using
+an interface list cached before an AP transition. Ethernet detection, unplug
+cleanup and uplink reconciliation also serialize their policy decisions; the
+radio helper never calls those policy scripts. Hostapd starts happen outside
+the channel lock because its preparation helper takes that lock.
 
 - First 5 IPs network-wide are reserved for services.
 - Handles conflicts via MAC tie-breaker.
 - Configures `dnsmasq` DHCP when needed.
 
 **Which chunks are taken comes from Alfred, one step removed.** Every node
-publishes its own chunk in its identity record (`ipv4_chunk`, Alfred type 67),
+publishes its chunk, primary address and provisioned width in its identity
+record (`ipv4_chunk`, `ipv4_address`, `ipv4_chunk_size`, Alfred type 67),
 and `mesh-registry-builder.sh` decodes those into `/tmp/claimed_chunks.txt` as
-`<chunk>,<mac>` lines. This script reads that file and never queries Alfred
-itself. On a successful claim it writes the chunk to `/var/run/my_ipv4_chunk`,
-which the node manager hands back to the encoder. The IP manager calls
+`<chunk>,<mac>,<first-address-integer>,<size>` lines. Allocation and conflict
+detection compare absolute ranges, since chunk numbers depend on local width.
+This script reads that file and never queries Alfred itself. A successful claim
+writes `/var/run/my_ipv4_chunk` and `/var/run/my_ipv4_chunk_size`, which the
+node manager hands back to the encoder. The IP manager calls
 `mesh-ip-startup.py` before any allocation or restoration. That helper refreshes
 the registry on every pass, including after startup; ACS no longer waits up to
 180 seconds to rebuild the allocation snapshot. Failed Alfred reads leave the
@@ -1335,9 +1386,12 @@ Four properties of the claimed-chunk file matter:
   Ignore our own cached advertisement when checking the saved chunk. Later
   collisions are resolved by the MAC tie-break using Alfred's claim list.
 
-Chunk size is uniform across the mesh: `max_euds_per_node + 2`, set at flash
-time, which is why `mesh_config.py` keeps that key display-only in the
-management UI. There is no per-node override: pinning a node's chunk by hand
+Chunk size is `max(max_euds_per_node, 1) + 2`, fixed for each node at provisioning.
+Mixed sizes are supported; unknown or implausible advertised widths block new
+allocations until complete identities arrive. Existing allocations still check
+the known primary address for conflict. `mesh_config.py` rejects attempts to
+change the provisioned width through the UI. There is no manual allocation
+override: pinning a node's chunk by hand
 skips the registry check and the MAC tie-break, so two pinned nodes, or a pinned
 chunk that a peer later claims, collide with nothing left to resolve them. An
 `/etc/manet/mesh-ip-force.conf` mechanism that did this was removed.
@@ -1362,7 +1416,7 @@ core. This runs in ~10 ms.
 
 Manages BATMAN-ADV interface lifecycle:
 - Creates `bat0` interface.
-- Enslaves mesh wireless interfaces (excludes AP interface).
+- Enslaves active mesh roles (including a returned AP candidate).
 - Sets BATMAN_V algorithm.
 - Handles start/stop operations.
 - HaLow is added first so it becomes batman's primary (longest-range link).
@@ -1509,11 +1563,26 @@ Central registry builder.
   refreshed yet keeps the values from the previous registry rather than
   appearing nameless.
 
+Freshness uses this node's boot clock and changes to the telemetry payload,
+not the sender's timestamp. `/run/manet-registry/observed.tsv` stores the payload
+hash, the uptime when it last changed, and the uptime when last present. Reading
+an identical record does not refresh it. Missing records retain tombstones for
+900 seconds, beyond Alfred's record expiry, so a cached record reappearing does
+not regain freshness. Failed Alfred reads preserve the last complete snapshot.
+
+`OBSERVED_AGE_SECONDS` is the local observation age at registry construction;
+`OBSERVED_AT_UPTIME` is the corresponding `/proc/uptime` time and lets readers
+age a saved registry without wall clocks. After 300 seconds the registry marks
+a record `STALE` and excludes its claim. `LAST_SEEN_TIMESTAMP` is sender time
+for display only; `LAST_REGISTRY_UPDATE` is local wall time for display. A peer
+first observed after our boot initially counts as fresh, conservatively keeping
+its claim while discovery proceeds.
+
 **encoder.py**
 
 Encodes this node's Alfred payloads to protobuf and Base64. Two subcommands:
 
-- `encoder.py identity`: hostname, secondary MACs, Syncthing ID, chunk, IP.
+- `encoder.py identity`: hostname, secondary MACs, Syncthing ID, chunk, block size, IP.
 - `encoder.py telemetry`: mean throughput, service flags, uptime, battery, CPU load,
   GPS (when `/run/gps_status.json` reports `has_fix=true`), channels and scan
   reports, MCS rates, interface list, EUD mode/SSID/count, tourguide tracking,
@@ -1597,6 +1666,15 @@ uses the cryptography library's
 APIs. Password rotation encrypts the new password under the current password;
 the apply log never prints either value.
 
+`manet_admin_limits.py` bounds receive-side scrypt work across processes using
+root-private tmpfs state in `/run/manet-admin-receive`. Unknown salts share a
+burst of eight derivations, refilling at one per second; cache-miss derivations
+serialize their memory use. A bounded allowlist of authenticated salt identifiers
+keeps healthy senders off that budget across receiver restarts. Derived keys
+remain in process memory. Exact invalid envelopes are cached for sixty seconds;
+salt alone is never a rejection key. Credential-file generation scopes both
+caches. Separate bounded-wait locks keep cache reads independent of slow KDFs.
+
 Replay history lives in `/var/lib/manet-admin`, with directory mode 0700 and
 atomic, fsynced 0600 files. Each control channel remembers its newest accepted
 message and whether it was consumed. Repeated delivery of a pending stage is
@@ -1648,6 +1726,13 @@ replacement interpreted delimiters, ampersands, and executable sed commands
 inside accepted values. Regression tests cover those strings, backslashes,
 quoted SSIDs, and rejected newlines.
 
+Ordinary supplicant quotes delimit literal bytes, so the writer does not double
+backslashes. Embedded quotes use hexadecimal string encoding. Mesh changes and
+rollback exclude USB `*-uplink.conf` files. A shared helper selects the standard
+or HaLow service from configured roles and checks both service activity and a
+control-socket PONG. A failed restart prevents a successful apply marker and
+retains a rollback snapshot for retry.
+
 **mesh_config.py**
 
 The one place that decides which settings are this node's own and which belong
@@ -1662,6 +1747,16 @@ it renamed every AP on the mesh.
 management UI shows it and never writes it. Shared by `mesh-config-sync.py`,
 `mesh-status.py` and `manet_manage.py`, so the receiving end and the submitting
 end cannot disagree about which half a key is in.
+
+The form validates all changed fields before local writes or mesh publication;
+unchanged provisioned values do not block unrelated edits. Receivers use the
+same allowed keys, byte lengths, enums, and IPv4 allocation-capacity checks.
+`manet_eud_ap.py` preserves the `-xxxx` node suffix, so an AP base SSID may use
+at most 27 UTF-8 bytes. It writes mesh.conf and hostapd atomically per file,
+restarts hostapd, and restores both files if activation fails. Telemetry reads
+the actual configured broadcast SSID. Measurement session paths use a bounded
+label alphabet, reject dot/parent and symlink paths, and generate random result
+filenames; peer display names remain JSON data.
 
 **mesh-config-rollback.sh**
 
@@ -1729,14 +1824,15 @@ now. Installed as an `ExecCondition` on `wpa_supplicant@.service` through
 `/etc/systemd/system/wpa_supplicant@.service.d/10-manet-ap-guard.conf`, so it
 applies to every caller that starts or restarts a mesh supplicant.
 
-The AP radio legitimately needs a mesh config on disk: in wired EUD mode it is
-always a mesh interface, and in auto mode it joins the mesh whenever an EUD
-appears on Ethernet. Only `ethernet-autodetect.sh` makes that call, and it
-stops hostapd first. Any other start while hostapd holds the radio fails the
-mesh join with -95 and, worse, deinits the netdev on the way out, leaving
-hostapd `active` over a dead BSS, logging nothing.
+The AP candidate may serve mesh when a wired EUD takes priority in auto mode.
+The transition helper publishes its active mesh role before starting the
+supplicant. This guard requires that membership and an inactive hostapd; a
+missing mesh role refuses startup even while hostapd is still preparing.
+Starting a mesh supplicant against an AP otherwise fails with -95 and can
+leave hostapd active over a dead BSS.
 
-Exits 0 to allow (not the AP radio, or hostapd is not holding it), 1 to skip.
+Exits 0 to allow non-AP radios or a released candidate with an active mesh role,
+and 1 to skip a radio reserved for AP.
 
 `have_package_network` is checked before each apt phase, so "no network" is
 recorded once before attempting package downloads.
@@ -1895,10 +1991,18 @@ delivered over the air instead of needing a reflash.
 
 ## Two scripts called `carrier`
 
-`carrier` and `carrier.d/50-ethernet-detect` are **different scripts** and only
-the second one runs. The reference copy calls
-`ethernet-autodetect.sh --hotplug`; the installed hook calls
-`manet-uplink-dispatch.sh carrier`. `off` is the same file in both places.
+`carrier.d/50-ethernet-detect` is the canonical hook. The reference `carrier`
+delegates to it, and setup no longer overwrites it. The hook retains
+`ethernet-autodetect.sh --hotplug` for end0; other interfaces use
+`manet-uplink-dispatch.sh carrier`. The packaged Ethernet boot unit and setup
+use the same hotplug command. `off` is the same file in both places.
+
+The routable hook queues `manet-auto-update.service` with `--no-block` after
+uplink reconciliation. Its wrapper rechecks opt-in and a selected non-mesh
+uplink with a default route, then runs the routine updater. No ICMP probe gates
+downloads and no download holds up a dispatcher event. The obsolete
+`mesh-default-route-fix.service` is disabled and removed by updates; the gateway
+route manager owns mesh default routes and preserves service VIPs.
 
 `no-carrier`, `degraded` and `routable` in this directory are three-line wrappers
 around `manet-uplink-dispatch.sh <state>`. Nothing installs them, and their

@@ -50,7 +50,8 @@ if [ -n "${PRIMARY_MAC:-}" ]; then
     rm -f /etc/ssh/ssh_host_*
     ssh-keygen -A 2>/dev/null || true
 
-    rm -f /etc/mesh_ipv4_state /var/run/my_ipv4_chunk /tmp/claimed_chunks.txt
+    rm -f /etc/mesh_ipv4_state /var/run/my_ipv4_chunk /var/run/my_ipv4_chunk_size \
+          /tmp/claimed_chunks.txt /run/manet-registry/observed.tsv
 
     HOST_SUFFIX="$(mac_suffix "$CURRENT_MAC")"
     if [ -n "$HOST_SUFFIX" ]; then

@@ -17,6 +17,7 @@ from manet_ids import int_to_ipv4
 
 TOOLS = Path(__file__).resolve().parent
 MAC = '02:00:00:00:00:01'
+A6 = (10 << 24) + (30 << 16) + 6   # 10.30.0.6 as an integer
 
 
 class ChunkClaimsTests(unittest.TestCase):
@@ -38,8 +39,11 @@ class ChunkClaimsTests(unittest.TestCase):
             MESH_CLAIMED_CHUNKS_FILE=str(self.claims),
             MESH_DECODER_PATH=str(TOOLS / 'decoder.py'),
             MESH_REGISTRY_STALE_AFTER='300',
+            MESH_REGISTRY_OBSERVED_FILE=str(self.root / 'observed' / 'observed.tsv'),
+            MESH_UPTIME_FILE=str(self.root / 'uptime'),
             REVIEW_RECORDS=str(self.records),
         )
+        self.set_uptime(1000)
         alfred = self.bin / 'alfred'
         alfred.write_text(
             '#!/bin/bash\n'
@@ -61,11 +65,14 @@ class ChunkClaimsTests(unittest.TestCase):
             [sys.executable, str(TOOLS / 'encoder.py'), kind, *args], text=True,
         )
 
+    def set_uptime(self, seconds):
+        (self.root / 'uptime').write_text(f'{seconds}.25 {seconds * 3}.50\n')
+
     def add_node(self, mac=MAC, chunk=0, ip='10.30.0.6', age=0,
-                 state='ACTIVE', identity=True):
+                 state='ACTIVE', identity=True, size=7):
         if identity:
             args = ['--hostname', 'mesh-' + mac[-2:], '--mac-addresses', mac,
-                    '--ipv4-chunk', str(chunk)]
+                    '--ipv4-chunk', str(chunk), '--ipv4-chunk-size', str(size)]
             if ip:
                 args += ['--ipv4-address', ip]
             payload = self.encode('identity', *args)
@@ -84,20 +91,20 @@ class ChunkClaimsTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         return self.claims.read_text().splitlines()
 
-    def allocator(self, command):
+    def allocator(self, command, network='10.30.0.0/28', chunk_size=7):
         # Load only the existing function definitions, avoiding live interface
         # configuration. Exercise allocation against the registry's real output.
         source = (TOOLS / 'mesh-ip-manager.sh').read_text()
         functions = source.split('# --- Helper Functions ---\n', 1)[1]
         functions = functions.split('# --- Main Logic ---\n', 1)[0]
-        env = dict(self.env, IPV4_NETWORK='10.30.0.0/28', CHUNK_SIZE='7',
+        env = dict(self.env, IPV4_NETWORK=network, CHUNK_SIZE=str(chunk_size),
                    SERVICES_RESERVED='5', CLAIMED_CHUNKS_FILE=str(self.claims))
         return subprocess.run(['bash', '-c', functions + '\n' + command],
                               env=env, capture_output=True, text=True, timeout=5)
 
     def test_chunk_zero_is_claimed_and_allocator_cannot_reuse_it(self):
         self.add_node()
-        self.assertEqual(self.build_registry(), [f'0,{MAC}'])
+        self.assertEqual(self.build_registry(), [f'0,{MAC},{A6},7'])
         # A /28 has room for only one seven-address chunk after reservations.
         result = self.allocator('get_random_chunk')
         self.assertNotEqual(result.returncode, 0)
@@ -114,24 +121,23 @@ class ChunkClaimsTests(unittest.TestCase):
         self.add_node()
         self.add_node(mac='02:00:00:00:00:02')
         self.assertEqual(self.build_registry(),
-                         [f'0,{MAC}', '0,02:00:00:00:00:02'])
+                         [f'0,{MAC},{A6},7', f'0,02:00:00:00:00:02,{A6},7'])
 
     def test_nonzero_chunk_still_claimed(self):
         self.add_node(chunk=1, ip='10.30.0.13')
-        self.assertEqual(self.build_registry(), [f'1,{MAC}'])
+        self.assertEqual(self.build_registry(), [f'1,{MAC},{A6 + 7},7'])
 
     def test_unknown_or_inactive_allocations_are_excluded(self):
         self.add_node(mac='02:00:00:00:00:02', ip='')
         self.add_node(mac='02:00:00:00:00:03', identity=False)
-        self.add_node(mac='02:00:00:00:00:04', age=600)
         self.add_node(mac='02:00:00:00:00:05', state='SHUTTING_DOWN')
         self.assertEqual(self.build_registry(), [])
 
     def test_chunk_zero_survives_cached_identity(self):
         self.add_node()
-        self.assertEqual(self.build_registry(), [f'0,{MAC}'])
+        self.assertEqual(self.build_registry(), [f'0,{MAC},{A6},7'])
         (self.records / '67').write_text('')
-        self.assertEqual(self.build_registry(), [f'0,{MAC}'])
+        self.assertEqual(self.build_registry(), [f'0,{MAC},{A6},7'])
 
     def test_failed_alfred_read_preserves_previous_claims_and_registry(self):
         self.add_node()
@@ -154,18 +160,154 @@ class ChunkClaimsTests(unittest.TestCase):
         selection += 'printf "%s\\n" "$PROPOSED_CHUNK"\n;;\nesac\n'
         setup = ('IPV4_NETWORK=10.30.0.0/27\nIPV4_STATE=UNCONFIGURED\n'
                  'PERSISTENT_CHUNK=0\nPERSISTENT_IPV4=10.30.0.6\n'
-                 'mapfile -t CLAIMED_CHUNKS < "$CLAIMED_CHUNKS_FILE"\n'
-                 'mac_is_local() { [ "$1" = "' + MAC + '" ]; }\n')
+                 'mac_is_local() { [ "$1" = "' + MAC + '" ]; }\n'
+                 'load_claims\n')
         # The /27 has three chunks. The saved chunk and one alternative are
         # taken, leaving exactly chunk 2. Own cached advertisements are ignored.
-        self.claims.write_text('0,02:00:00:00:00:02\n1,02:00:00:00:00:03\n')
+        self.claims.write_text(f'0,02:00:00:00:00:02,{A6},7\n'
+                               f'1,02:00:00:00:00:03,{A6 + 7},7\n')
         result = self.allocator(setup + selection)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), '2')
-        self.claims.write_text(f'0,{MAC}\n')
+        self.claims.write_text(f'0,{MAC},{A6},7\n')
         result = self.allocator(setup + selection)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), '0')
+
+    def registry_value(self, mac, key):
+        prefix = 'NODE_' + mac.replace(':', '') + '_' + key + "='"
+        for line in self.registry.read_text().splitlines():
+            if line.startswith(prefix):
+                return line[len(prefix):-1]
+        return None
+
+    def test_sender_clock_does_not_decide_freshness(self):
+        # A node without an RTC can boot days behind; it is still alive.
+        self.add_node(age=100000)
+        self.add_node(mac='02:00:00:00:00:02', ip='10.30.0.13', chunk=1, age=-100000)
+        self.assertEqual(self.build_registry(),
+                         [f'0,{MAC},{A6},7', f'1,02:00:00:00:00:02,{A6 + 7},7'])
+        self.assertEqual(self.registry_value(MAC, 'NODE_STATE'), 'ACTIVE')
+        self.assertEqual(self.registry_value(MAC, 'OBSERVED_AGE_SECONDS'), '0')
+
+    def test_unchanged_payload_ages_on_local_clock_and_change_refreshes(self):
+        self.add_node()
+        self.build_registry()
+        self.set_uptime(1250)
+        self.assertEqual(self.build_registry(), [f'0,{MAC},{A6},7'])
+        self.assertEqual(self.registry_value(MAC, 'OBSERVED_AGE_SECONDS'), '250')
+        self.set_uptime(1301)
+        self.assertEqual(self.build_registry(), [])
+        self.assertEqual(self.registry_value(MAC, 'NODE_STATE'), 'STALE')
+        # Any republish changes the payload (it carries a timestamp).
+        (self.records / '68').write_text('')
+        self.add_node(age=5)
+        self.assertEqual(self.build_registry(), [f'0,{MAC},{A6},7'])
+        self.assertEqual(self.registry_value(MAC, 'NODE_STATE'), 'ACTIVE')
+
+    def test_reappearing_identical_record_keeps_its_age(self):
+        self.add_node()
+        self.build_registry()
+        saved = {kind: (self.records / str(kind)).read_text() for kind in (67, 68)}
+        for kind in (67, 68):
+            (self.records / str(kind)).write_text('')
+        self.set_uptime(1100)
+        self.assertEqual(self.build_registry(), [])
+        for kind, text in saved.items():
+            (self.records / str(kind)).write_text(text)
+        self.set_uptime(1400)
+        self.assertEqual(self.build_registry(), [])
+        self.assertEqual(self.registry_value(MAC, 'OBSERVED_AGE_SECONDS'), '400')
+        # Tombstones are forgotten once well past Alfred's own expiry.
+        for kind in (67, 68):
+            (self.records / str(kind)).write_text('')
+        self.set_uptime(2400)
+        self.build_registry()
+        self.assertNotIn(MAC, (self.root / 'observed' / 'observed.tsv').read_text())
+
+    def test_failed_read_keeps_observations(self):
+        self.add_node()
+        self.build_registry()
+        observed = self.root / 'observed' / 'observed.tsv'
+        before = observed.read_text()
+        (self.records / '68').unlink()
+        self.set_uptime(1200)
+        result = subprocess.run(['bash', str(TOOLS / 'mesh-registry-builder.sh')],
+                                env=self.env, capture_output=True, text=True, timeout=10)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(observed.read_text(), before)
+
+    def test_mixed_block_sizes_are_compared_as_address_ranges(self):
+        # Peer provisioned for 5 EUDs holds 10.30.0.13-19. With our 3-address
+        # blocks in a /27, local chunks 2, 3 and 4 overlap it.
+        self.claims.write_text(f'1,02:00:00:00:00:02,{A6 + 7},7\n')
+        script = ('for i in 0 1 2 3 4 5 6 7; do chunk_claimed_by_peer $i || printf "%s " $i; done\n'
+                  'range_claimed_by_peer $(( ' + str(A6) + ' + 9 )) $(( ' + str(A6) + ' + 11 ))\n')
+        result = self.allocator(script, network='10.30.0.0/27', chunk_size=3)
+        self.assertEqual(result.stdout.split(), ['0', '1', '5', '6', '7', '02:00:00:00:00:02'],
+                         result.stderr)
+        for _ in range(20):
+            result = self.allocator('get_random_chunk', network='10.30.0.0/27', chunk_size=3)
+            self.assertIn(result.stdout.strip(), {'0', '1', '5', '6', '7'}, result.stderr)
+
+    def test_claim_without_block_size_defers_allocation(self):
+        # Guessing our own size would recreate the mixed-size overlap.
+        source = (TOOLS / 'mesh-ip-manager.sh').read_text()
+        selection = source.split('# --- State Machine ---\n', 1)[1].split('        # Get chunk IPs', 1)[0]
+        selection += 'printf "%s\\n" "$PROPOSED_CHUNK"\n;;\nesac\n'
+        setup = 'IPV4_STATE=UNCONFIGURED\nload_claims\n'
+        for line in (f'1,02:00:00:00:00:02,{A6 + 7},0', '1,02:00:00:00:00:02'):
+            with self.subTest(line=line):
+                self.claims.write_text(line + '\n')
+                result = self.allocator(setup + selection, network='10.30.0.0/27')
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, '')
+                self.assertIn('Deferring allocation', result.stderr)
+        # Its known primary still counts as a conflict for an existing block.
+        self.claims.write_text(f'1,02:00:00:00:00:02,{A6 + 7},0\n')
+        result = self.allocator(f'load_claims; range_claimed_by_peer {A6 + 6} {A6 + 12}',
+                                network='10.30.0.0/27')
+        self.assertEqual(result.stdout.strip(), '02:00:00:00:00:02')
+
+    def test_implausible_claims_are_incomplete_not_ignored(self):
+        source = (TOOLS / 'mesh-ip-manager.sh').read_text()
+        selection = source.split('# --- State Machine ---\n', 1)[1].split('        # Get chunk IPs', 1)[0]
+        selection += 'printf "%s\\n" "$PROPOSED_CHUNK"\n;;\nesac\n'
+        for line in (f'1,02:00:00:00:00:02,{A6 + 7},256', '1,02:00:00:00:00:02,,7',
+                     '1,02:00:00:00:00:02,99999999999,7'):
+            with self.subTest(line=line):
+                self.claims.write_text(line + '\n')
+                result = self.allocator('IPV4_STATE=UNCONFIGURED\nload_claims\n' + selection,
+                                        network='10.30.0.0/27')
+                self.assertEqual(result.stdout, '', result.stderr)
+                self.assertIn('Deferring allocation', result.stderr)
+
+    def test_out_of_range_advertised_address_becomes_incomplete_claim(self):
+        # The decoder only ever emits dotted quads; simulate a corrupted cache.
+        self.add_node()
+        self.build_registry()
+        text = self.registry.read_text().replace("IPV4_ADDRESS='10.30.0.6'", "IPV4_ADDRESS='10.30.0.999'")
+        self.registry.write_text(text)
+        (self.records / '67').write_text('')
+        self.assertEqual(self.build_registry(), [f'0,{MAC},,7'])
+
+    def test_large_network_allocation_is_one_pass(self):
+        # A /16 with 3-address blocks has over 21000 candidate chunks.
+        self.claims.write_text(''.join(f'{i},02:00:00:00:01:{i:02x},{A6 + 30 * i},12\n'
+                                       for i in range(40)))
+        started = time.monotonic()
+        result = self.allocator('get_random_chunk', network='10.30.0.0/16', chunk_size=3)
+        self.assertLess(time.monotonic() - started, 5, 'allocation should not spawn per chunk')
+        chunk = int(result.stdout.strip())
+        start = A6 + chunk * 3
+        for i in range(40):
+            peer = A6 + 30 * i
+            self.assertFalse(start <= peer + 11 and peer <= start + 2, (chunk, i))
+
+    def test_published_block_size_round_trips(self):
+        self.add_node(size=12)
+        self.build_registry()
+        self.assertEqual(self.registry_value(MAC, 'IPV4_CHUNK_SIZE'), '12')
 
     def publish_identity(self, script, allocate=False, recent=False, fail_first=False):
         # Execute one real manager loop through identity publication only.

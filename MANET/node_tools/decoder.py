@@ -46,6 +46,7 @@ def decode_identity(raw, node_mac):
     emit('MAC_ADDRESSES', ','.join(macs))
     emit('IPV4_ADDRESS', int_to_ipv4(ident.ipv4_address))
     emit_raw('IPV4_CHUNK', ident.ipv4_chunk)
+    emit_raw('IPV4_CHUNK_SIZE', ident.ipv4_chunk_size)
     emit('SYNCTHING_ID', bytes_to_syncthing_id(ident.syncthing_id))
 
 

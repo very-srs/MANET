@@ -12,6 +12,8 @@ log() {
     echo "[$(date +'%Y-%m-%d %H:%M:%S')] - LIMP-MODE: $1" | systemd-cat -t limp-mode-manager
 }
 
+exec 8>"${MANET_ACS_LOCK_FILE:-/run/channel-election.lock}"
+flock -n 8 || exit 0
 mesh_iface_24="$(cat /var/lib/mesh_24_if 2>/dev/null || true)"
 mesh_iface_5="$(cat /var/lib/mesh_5_if 2>/dev/null || true)"
 
@@ -20,8 +22,13 @@ mesh_iface_5="$(cat /var/lib/mesh_5_if 2>/dev/null || true)"
 NOW=$(date +%s)
 
 # Count active nodes
-ACTIVE_ALFRED_COUNT=$(awk -F"['=]" -v now="$NOW" -v stale="$STALE_NODE_THRESHOLD" \
-    '/LAST_SEEN_TIMESTAMP/ { if (now - $3 < stale) count++ } END { print count }' \
+# Freshness is this node's own observation, not the peer's clock.
+read -r UPTIME_NOW _ < "${MESH_UPTIME_FILE:-/proc/uptime}"
+UPTIME_NOW=${UPTIME_NOW%.*}
+# Age from the boot-clock observation time, so a registry that could not be
+# rebuilt keeps aging instead of freezing its peers as fresh.
+ACTIVE_ALFRED_COUNT=$(awk -F"['=]" -v now="$UPTIME_NOW" -v stale="$STALE_NODE_THRESHOLD" \
+    '/_OBSERVED_AT_UPTIME=/ { if ($3 ~ /^[0-9]+$/ && now - $3 < stale) count++ } END { print count+0 }' \
     "$REGISTRY_STATE_FILE")
 
 [ "$ACTIVE_ALFRED_COUNT" -eq 0 ] && exit 0

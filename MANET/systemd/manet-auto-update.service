@@ -1,0 +1,8 @@
+[Unit]
+Description=Check for MANET updates after uplink readiness
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/manet-auto-update.sh
+TimeoutStartSec=20min

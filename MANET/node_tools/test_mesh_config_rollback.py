@@ -36,7 +36,7 @@ class RollbackHarness(unittest.TestCase):
         self.wpa = self.root / 'wpa'
         self.wpa.mkdir()
         self.supplicant = self.wpa / 'wpa_supplicant-wlan0.conf'
-        self.old_supplicant = 'network={\nsae_password=previous-working-key\n}\n'
+        self.old_supplicant = 'network={\nsae_password="previous-working-key"\n}\n'
         self.supplicant.write_text(self.old_supplicant)
         self.state = self.root / 'rollback'
         self.runtime = self.root / 'run'
@@ -74,6 +74,8 @@ with open(os.environ['TEST_SERVICE_LOG'], 'a') as log:
     log.write(' '.join(sys.argv[1:]) + '\\n')
 sys.exit(int(os.environ['TEST_SERVICE_RC']))
 ''')
+        self.command('wpa_cli', 'print("PONG")\n')
+        self.command('wpa_cli_s1g', 'print("PONG")\n')
         self.command('cp', f'''
 if os.environ.get('TEST_COPY_FAIL') == sys.argv[-2]:
     sys.exit(1)
@@ -99,13 +101,28 @@ os.execv({shutil.which('cp')!r}, ['cp', *sys.argv[1:]])
 
     def changed(self):
         self.conf.write_text('mesh_key=changed-nonworking-key\nmtx=y\n')
-        self.supplicant.write_text('network={\nsae_password=changed-nonworking-key\n}\n')
+        self.supplicant.write_text('network={\nsae_password="changed-nonworking-key"\n}\n')
 
     def deadline(self):
         self.env['TEST_NOW'] = '1300'
 
 
 class RollbackScriptTests(RollbackHarness):
+    def test_uplink_config_is_neither_snapshotted_nor_restored(self):
+        uplink = self.wpa / 'wpa_supplicant-wlan4-uplink.conf'
+        uplink.write_text('network={\nssid="hotspot"\npsk="hotspot-password"\n}\n')
+        self.arm()
+        self.assertFalse((self.state / 'wpa' / uplink.name).exists())
+        self.changed()
+        uplink.write_text('network={\nssid="new hotspot"\npsk="new-password"\n}\n')
+        expected = uplink.read_bytes()
+        # Even a snapshot left by older code must not restore an uplink.
+        (self.state / 'wpa' / uplink.name).write_text('stale uplink configuration')
+        self.peers([]); self.deadline()
+        result = self.call('check')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(uplink.read_bytes(), expected)
+
     def test_counts_selected_routes_and_deduplicates_originators(self):
         self.peers([
             {'orig_address': PEER, 'best': True},
@@ -120,7 +137,7 @@ class RollbackScriptTests(RollbackHarness):
         self.assertIn('PEERS_BEFORE=1\n', self.arm())
         self.changed()
         self.peers([])
-        volatile = ('my_ipv4_chunk', 'mesh_ipv4_state', 'mesh_applied_config_version',
+        volatile = ('my_ipv4_chunk', 'my_ipv4_chunk_size', 'mesh_ipv4_state', 'mesh_applied_config_version',
                     'mesh_pending_config.json', 'mesh_config_ack_version')
         for name in volatile:
             (self.runtime / name).write_text('new state')
@@ -137,7 +154,8 @@ class RollbackScriptTests(RollbackHarness):
         self.assertFalse(self.state.exists())
         self.assertTrue(all(not (self.runtime / name).exists() for name in volatile))
         self.assertIn('restart wpa_supplicant@wlan0.service', self.service_log.read_text())
-        self.assertIn('restart wpa_supplicant@wlan1.service', self.service_log.read_text())
+        self.assertIn('restart wpa_supplicant-s1g-wlan1.service', self.service_log.read_text())
+        self.assertNotIn('restart wpa_supplicant@wlan1.service', self.service_log.read_text())
         self.assertIn('restart batman-enslave.service', self.service_log.read_text())
 
     def test_returned_peer_commits_new_configuration(self):

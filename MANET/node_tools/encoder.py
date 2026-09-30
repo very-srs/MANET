@@ -46,6 +46,7 @@ def build_identity(args):
 
     ident.ipv4_chunk = args.ipv4_chunk
     ident.ipv4_address = ipv4_to_int(args.ipv4_address)
+    ident.ipv4_chunk_size = args.ipv4_chunk_size
     return ident
 
 
@@ -184,6 +185,8 @@ def main():
     p.add_argument('--ipv4-address', default='')
     p.add_argument('--syncthing-id', default='')
     p.add_argument('--ipv4-chunk', type=int, default=0)
+    p.add_argument('--ipv4-chunk-size', type=int, default=0,
+                   help='Addresses in the claimed block (max_euds_per_node + 2).')
 
     # telemetry (Alfred types 68 and 69)
     p = sub.add_parser('telemetry', help='volatile node state')

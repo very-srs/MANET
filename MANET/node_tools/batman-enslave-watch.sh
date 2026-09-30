@@ -61,7 +61,10 @@ ap_is_serving() {
         END { exit !(t == "AP" && s) }'
 }
 
-restart_dead_ap_if_needed() {
+restart_dead_ap_if_needed() (
+    # Keep the active check and restart together against mesh-return policy.
+    exec 9>"${MANET_AP_ROLE_LOCK:-/run/manet-ap-role.lock}"
+    flock -n 9 || return 0
     local ap now last cooldown_file strikes_file strikes
 
     ap="$(cat /var/lib/ap_interface 2>/dev/null)"
@@ -90,11 +93,15 @@ restart_dead_ap_if_needed() {
 
     log "WARNING: hostapd is active but $ap is not serving; restarting hostapd"
     systemctl restart hostapd.service 2>/dev/null || true
-}
+)
 
 while true; do
     sleep 8
 
+    # Read roles only after acquiring the transition/channel lock. Release it
+    # before service restarts whose helpers take the same lock.
+    exec 8>"${MANET_ACS_LOCK_FILE:-/run/channel-election.lock}"
+    flock -n 8 || continue
     HALOW_IFS="$(cat /var/lib/halow_if 2>/dev/null)"
     MESH_IFS="$(cat /var/lib/mesh_if 2>/dev/null)"
 
@@ -143,6 +150,8 @@ while true; do
         done
     done
 
+    flock -u 8
+    exec 8>&-
     restore_halow_primary_if_needed
     restart_dead_ap_if_needed
 done

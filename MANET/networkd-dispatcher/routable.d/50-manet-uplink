@@ -1,3 +1,8 @@
 #!/bin/bash
 set -euo pipefail
 /usr/local/bin/manet-uplink-dispatch.sh routable "${IFACE:-}"
+# The service serializes starts and runs outside the dispatcher. Re-check the
+# current uplink and opt-in there: routable events can arrive from mesh bridges.
+if grep -qiE '^auto_update=(y|yes|1|true)[[:space:]]*$' /etc/mesh.conf 2>/dev/null; then
+    systemctl start --no-block manet-auto-update.service
+fi

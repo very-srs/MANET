@@ -7,6 +7,8 @@ LEGACY_NTP_STATE=/var/run/mesh-ntp.state
 LEGACY_ETH_STATE=/var/run/ethernet_detection_state
 UPSTREAM_IFACE_FILE=/var/run/upstream_iface
 LOCK_FILE=/run/manet-uplink-dispatch.lock
+ETH_DETECT_LOCK=${MANET_ETH_DETECT_LOCK:-/var/run/ethernet-autodetect.lock}
+AP_MESH_HELPER=${MANET_AP_MESH_HELPER:-/usr/local/bin/manet_ap_mesh.py}
 NETWORKD_DIR=/etc/systemd/network
 
 EVENT="${1:-${STATE:-reconcile}}"
@@ -14,6 +16,16 @@ IFACE="${2:-${IFACE:-${INTERFACE:-}}}"
 
 exec 200>"$LOCK_FILE"
 flock -n 200 || exit 0
+
+# ethernet-autodetect owns end0's role (gateway or wired EUD) while it runs:
+# DHCP probing and bridging there must not interleave with ours. Never wait on
+# it (autodetect waits on us instead), just skip this pass; node-manager
+# reconciles again within a minute. Autodetect never calls this script, so
+# this order cannot deadlock.
+exec 201>"$ETH_DETECT_LOCK"
+if ! flock -n 201; then
+    exit 0
+fi
 
 log() {
     local msg="[$(date '+%Y-%m-%d %H:%M:%S')] - MANET-UPLINK: $*"
@@ -109,6 +121,25 @@ is_upstream_iface() {
 has_carrier() {
     local iface="$1"
     [ "$(cat "/sys/class/net/$iface/carrier" 2>/dev/null || echo 0)" = "1" ]
+}
+
+# A wired-EUD port: an Ethernet-class interface with carrier that
+# ethernet-autodetect has bridged into br0. An uplink is never a br0 port, so
+# membership is the ground truth; no state file has to agree.
+is_wired_eud_port() {
+    local iface="$1" master
+    is_upstream_iface "$iface" || return 1
+    has_carrier "$iface" || return 1
+    master=$(basename "$(readlink "/sys/class/net/$iface/master" 2>/dev/null)" 2>/dev/null || true)
+    [ "$master" = "br0" ]
+}
+
+wired_eud_active() {
+    local path
+    for path in /sys/class/net/*; do
+        is_wired_eud_port "$(basename "$path")" && return 0
+    done
+    return 1
 }
 
 iface_ip() {
@@ -257,6 +288,8 @@ find_working_uplink() {
     for iface in $(candidate_ifaces); do
         is_upstream_iface "$iface" || continue
         has_carrier "$iface" || continue
+        # Never detach or DHCP-probe a port serving a wired EUD.
+        is_wired_eud_port "$iface" && continue
 
         ip link set "$iface" nomaster 2>/dev/null || true
 
@@ -334,24 +367,70 @@ eud_mode() {
     awk -F= '$1 == "eud" {print $2; exit}' /etc/mesh.conf 2>/dev/null || true
 }
 
+start_ap_services() {
+    local ap_iface="$1"   # for the log only
+    unmask_if_masked dnsmasq.service
+    enable_if_disabled hostapd.service
+    # Synchronous, so a start cannot stay queued past this pass and race the
+    # next mesh return. hostapd's ExecStartPre (prepare-ap) bounds its wait for
+    # the channel lock, and systemd bounds the start as a whole.
+    if ! systemctl is-active --quiet hostapd.service 2>/dev/null &&
+            ! systemctl start hostapd.service 2>/dev/null; then
+        log "hostapd start failed on $ap_iface; retrying next reconcile"
+        return 1
+    fi
+    enable_if_disabled dnsmasq.service
+    start_if_inactive dnsmasq.service
+    start_if_inactive ap-txpower.service
+    # hostapd bridges the AP into br0 itself (bridge=br0). Enslaving the
+    # radio here could grab it while it is still a mesh point.
+}
+
+# Return the AP candidate radio to the mesh. The helper is idempotent (a radio
+# already meshing on the right channel is left alone) and owns roles, configs,
+# channel choice and locking, so calling it every reconcile doubles as retry.
+return_ap_radio_to_mesh() {
+    if [ ! -x "$AP_MESH_HELPER" ]; then
+        log "Cannot return AP radio to mesh: $AP_MESH_HELPER missing"
+        return 0
+    fi
+    local out err
+    err=$(mktemp)
+    if out=$(python3 "$AP_MESH_HELPER" mesh 2>"$err"); then
+        # Quiet when nothing changed and the registry agrees; otherwise the
+        # operator needs to see what moved and whether peers disagree.
+        if printf '%s' "$out" | grep -Eq '"changed": *true|"registry": *"conflict"'; then
+            log "AP radio mesh transition: $out"
+        fi
+    else
+        log "AP radio mesh return deferred; retrying next reconcile: $(tail -c 400 "$err" | tr '\n' ' ')"
+    fi
+    rm -f "$err"
+}
+
 ensure_eud_services() {
     local mode ap_iface=""
     mode=$(eud_mode)
     [ -f /var/lib/ap_interface ] && ap_iface=$(cat /var/lib/ap_interface)
+    [ -n "$ap_iface" ] || return 0
 
-    if { [ "$mode" = "wireless" ] || [ "$mode" = "auto" ]; } && [ -n "$ap_iface" ]; then
-        unmask_if_masked dnsmasq.service
-        enable_if_disabled hostapd.service
-        start_if_inactive hostapd.service
-        enable_if_disabled dnsmasq.service
-        start_if_inactive dnsmasq.service
-        start_if_inactive ap-txpower.service
-
-        if ! ip link show "$ap_iface" 2>/dev/null | grep -q "master br0"; then
-            ip link set "$ap_iface" master br0 2>/dev/null || true
-            ip link set "$ap_iface" up 2>/dev/null || true
-        fi
-    fi
+    case "$mode" in
+        wireless)
+            start_ap_services "$ap_iface" || true
+            ;;
+        auto)
+            # A wired EUD takes over the EUD role: the radio belongs in the
+            # mesh, and starting hostapd here would pull it back out.
+            if wired_eud_active; then
+                return_ap_radio_to_mesh
+            else
+                start_ap_services "$ap_iface" || true
+            fi
+            ;;
+        wired)
+            return_ap_radio_to_mesh
+            ;;
+    esac
 }
 
 promote_gateway() {
@@ -399,6 +478,8 @@ UPLINK_IP=$ip
 UPLINK_GW=${gw:-}
 UPDATED_AT=$(date +%s)
 EOF
+    # A USB uplink can serve while end0 carries a wired EUD; keep that record.
+    grep -qx 'ETH_MODE=WIRED_EUD' "$LEGACY_ETH_STATE" 2>/dev/null && wired_eud_active || \
     cat > "$LEGACY_ETH_STATE" <<EOF
 ETH_MODE=GATEWAY
 ETH_IP=$ip
@@ -419,15 +500,22 @@ demote_gateway() {
     local old_iface="${1:-}"
     local was_gateway=false
 
-    if [ -f "$STATE_FILE" ] || [ -f "$LEGACY_GATEWAY_STATE" ] || [ -f "$LEGACY_ETH_STATE" ]; then
+    # The Ethernet record counts only when it describes a gateway: in wired-EUD
+    # mode it persists, and must not make every pass look like a demotion.
+    if [ -f "$STATE_FILE" ] || [ -f "$LEGACY_GATEWAY_STATE" ] ||
+            grep -qx 'ETH_MODE=GATEWAY' "$LEGACY_ETH_STATE" 2>/dev/null; then
         was_gateway=true
     fi
 
     clear_firewall
     batctl gw_mode client 2>/dev/null || true
-    rm -f "$LEGACY_GATEWAY_STATE" "$LEGACY_NTP_STATE" "$LEGACY_ETH_STATE" "$STATE_FILE" "$UPSTREAM_IFACE_FILE"
+    rm -f "$LEGACY_GATEWAY_STATE" "$LEGACY_NTP_STATE" "$STATE_FILE" "$UPSTREAM_IFACE_FILE"
+    # ethernet-autodetect's record of an active wired EUD is not ours to clear.
+    if ! { grep -qx 'ETH_MODE=WIRED_EUD' "$LEGACY_ETH_STATE" 2>/dev/null && wired_eud_active; }; then
+        rm -f "$LEGACY_ETH_STATE"
+    fi
 
-    if [ -n "$old_iface" ] && is_upstream_iface "$old_iface"; then
+    if [ -n "$old_iface" ] && is_upstream_iface "$old_iface" && ! is_wired_eud_port "$old_iface"; then
         ip addr flush dev "$old_iface" 2>/dev/null || true
         ip link set "$old_iface" nomaster 2>/dev/null || true
         # Do not delete 20-*.network or call networkctl reload: removing the
@@ -451,14 +539,18 @@ demote_gateway() {
 }
 
 current_uplink_iface() {
+    local iface=""
     if [ -f "$STATE_FILE" ]; then
-        # shellcheck disable=SC1090
-        . "$STATE_FILE" 2>/dev/null || true
-        echo "${UPLINK_IFACE:-}"
-        return
+        iface=$(awk -F= '$1 == "UPLINK_IFACE" {print $2; exit}' "$STATE_FILE" 2>/dev/null)
+    else
+        # ethernet-autodetect writes this in wired-EUD mode too.
+        iface=$(cat "$UPSTREAM_IFACE_FILE" 2>/dev/null || true)
     fi
-
-    cat "$UPSTREAM_IFACE_FILE" 2>/dev/null || true
+    # A wired-EUD port is never an uplink, whatever a state file says.
+    if [ -n "$iface" ] && is_wired_eud_port "$iface"; then
+        iface=""
+    fi
+    echo "$iface"
 }
 
 reconcile() {

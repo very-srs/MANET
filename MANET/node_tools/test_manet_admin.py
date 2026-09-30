@@ -364,11 +364,11 @@ class LiteralConfigTests(unittest.TestCase):
     def test_supplicant_values_are_literal_and_other_lines_survive(self):
         with tempfile.TemporaryDirectory() as scratch:
             conf = Path(scratch) / 'wpa.conf'
-            conf.write_text('network={\n  ssid="old"\n  sae_password=old\n}\n')
+            conf.write_text('network={\n  ssid="old"\n  sae_password="old"\n}\n')
             writer.write_key(conf, 'ssid', r'MANET|&\test', quoted=True)
-            writer.write_key(conf, 'sae_password', 'pass|&word')
+            writer.write_key(conf, 'sae_password', 'pass|&word', quoted=True)
             self.assertEqual(conf.read_text(),
-                             'network={\n  ssid="MANET|&\\\\test"\n  sae_password=pass|&word\n}\n')
+                             'network={\n  ssid="MANET|&\\test"\n  sae_password="pass|&word"\n}\n')
             before = conf.read_bytes()
             with self.assertRaises(ValueError):
                 writer.write_key(conf, 'sae_password', 'bad\ninjected=1')
@@ -441,7 +441,7 @@ class WebBoundaryTests(unittest.TestCase):
         self.clock_marker.unlink()
         with patch.object(status, 'load_kv_file', return_value={'admin_password': 'test', 'mesh_ssid': 'old'}), \
                 patch.object(status, 'is_allowed_ip', return_value=True), \
-                patch.object(status, 'apply_local_to_conf') as local, \
+                patch.object(status, 'apply_local_settings') as local, \
                 patch.object(status, 'broadcast_config_package') as broadcast, \
                 patch.object(status, 'clear_pending_config') as clear:
             for path in ('/api/admin/stage', '/api/admin/activate', '/api/admin/cancel'):
@@ -459,8 +459,7 @@ class WebBoundaryTests(unittest.TestCase):
         self.clock_marker.unlink()
         with patch.object(status, 'load_kv_file', return_value={'admin_password': 'test', 'lan_ap_ssid': 'old'}), \
                 patch.object(status, 'is_allowed_ip', return_value=True), \
-                patch.object(status, 'apply_local_to_conf') as local, \
-                patch.object(status, 'restart_eud_ap'), \
+                patch.object(status, 'apply_local_settings') as local, \
                 patch.object(status, 'broadcast_config_package') as broadcast:
             handler = self.handler('/api/admin/stage', authenticated=True)
             body = json.dumps({'config': {'lan_ap_ssid': 'new'}}).encode()

@@ -66,10 +66,27 @@ acs_channels_usable() {
 acs_write_channels() (
     exec 8>"${MANET_ACS_LOCK_FILE:-/var/run/channel-election.lock}"
     flock -n 8 || return 1
+    load_mesh_roles
     acs_agreement_busy && return 1
-    local freq24="$1" freq5="$2" mode="${3:-data}"
+    local freq24="$1" freq5="$2" mode="${3:-data}" activation="${4:-none}"
+    local band iface target actual
     [ "$mode" = data ] || [ "$mode" = search ] || return 1
     acs_configs_ready && acs_channels_usable "$freq24" "$freq5" || return 1
+    local -a changed=()
+    # Keep activation under the same lock as the fresh role read and writes.
+    # Otherwise an AP transition can occur between writing and restarting.
+    if [ "$activation" != none ]; then
+        for band in 2_4 5_0; do
+            local iface_var="WPA_IFACE_$band"
+            iface=${!iface_var}
+            target="$freq24"; [ "$band" != 5_0 ] || target="$freq5"
+            [ -n "$target" ] && radio_iface_enabled "$iface" || continue
+            actual=$(timeout 2 iw dev "$iface" info 2>/dev/null | grep -oP 'channel.*\((\K[0-9]+)' || true)
+            if [ "$activation" = all ] || [ "$actual" != "$target" ]; then
+                changed+=("$iface")
+            fi
+        done
+    fi
     if [ -n "$freq24" ] && radio_iface_enabled "$WPA_IFACE_2_4"; then
         sed -i "s/frequency=.*/frequency=${freq24}/" "$WPA_CONF_2_4" || return 1
     fi
@@ -78,6 +95,9 @@ acs_write_channels() (
     fi
     python3 "${MANET_TOOLS_DIR:-$(dirname "${BASH_SOURCE[0]}")}/manet_rendezvous.py" set-mode "$mode" || return 1
     echo "$(( $(date +%s) + 30 ))" > "${MANET_ACS_RUN_DIR:-/run}/manet-acs-busy"
+    for iface in "${changed[@]}"; do
+        timeout 30 systemctl restart "wpa_supplicant@${iface}.service" || return 1
+    done
     return 0
 )
 

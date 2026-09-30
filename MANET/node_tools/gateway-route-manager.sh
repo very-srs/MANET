@@ -37,14 +37,6 @@ get_gateway_mac() {
     '
 }
 
-resolve_gateway_ip() {
-    local mac="${1,,}"
-    local ip=""
-    [ -f /var/run/mesh_node_registry ] || return 0
-    ip="$(grep -i "$mac" /var/run/mesh_node_registry 2>/dev/null | grep -Eo "10\.30\.2\.[0-9]+" | head -n1 || true)"
-    [ -n "$ip" ] && printf "%s\n" "$ip"
-}
-
 log "Starting Gateway Route Manager (pending startup ${STARTUP_POLL_INTERVAL}s, steady ${POLL_INTERVAL}s)"
 
 lookup_gateway_ip_by_mac() {

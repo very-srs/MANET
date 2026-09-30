@@ -18,8 +18,14 @@ log() {
 NOW=$(date +%s)
 
 # Count active nodes
-ACTIVE_ALFRED_COUNT=$(awk -F"['=]" -v now="$NOW" -v stale="$STALE_NODE_THRESHOLD" \
-    '/LAST_SEEN_TIMESTAMP/ { if (now - $3 < stale) count++ } END { print count+0 }' \
+# Freshness is this node's own observation on its boot clock,
+# never the peer's timestamp: a peer's clock can be far off and still alive.
+read -r UPTIME_NOW _ < "${MESH_UPTIME_FILE:-/proc/uptime}"
+UPTIME_NOW=${UPTIME_NOW%.*}
+# Age from the boot-clock observation time, so a registry that could not be
+# rebuilt keeps aging instead of freezing its peers as fresh.
+ACTIVE_ALFRED_COUNT=$(awk -F"['=]" -v now="$UPTIME_NOW" -v stale="$STALE_NODE_THRESHOLD" \
+    '/_OBSERVED_AT_UPTIME=/ { if ($3 ~ /^[0-9]+$/ && now - $3 < stale) count++ } END { print count+0 }' \
     "$REGISTRY_STATE_FILE")
 
 # Count shutting down nodes

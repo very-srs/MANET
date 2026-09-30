@@ -25,7 +25,8 @@ import subprocess
 import sys
 import time
 
-from mesh_config import strip_local_keys
+from mesh_config import (strip_local_keys, valid_value, validate_config,
+                         SAFE_KEYS, DANGEROUS_KEYS, MESH_KEYS)
 from manet_admin import AdminTransport, CONFIG_ACK_TYPE, private_json_write
 
 ALFRED_CONFIG_TYPE = 70
@@ -39,9 +40,7 @@ ADMIN = AdminTransport()
 
 # Only these may be carried in a package. EUD/AP settings are per-node and are
 # stripped even if an older publisher still includes them.
-SAFE_KEYS = ("admin_password", "mtx", "mumble", "auto_update")
-DANGEROUS_KEYS = ("mesh_ssid", "mesh_key", "ipv4_network")
-ALLOWED_KEYS = SAFE_KEYS + DANGEROUS_KEYS + ("regulatory_domain", "acs")
+ALLOWED_KEYS = tuple(MESH_KEYS)
 
 
 def log(msg):
@@ -87,50 +86,7 @@ def publish_ack(version):
 
 
 
-# Validation
-
-# A value ends up on a `key=value` line in mesh.conf, and some are substituted
-# into wpa_supplicant configs inside double quotes. Newlines and quotes would
-# let a peer write arbitrary configuration, so they are refused outright.
-_FORBIDDEN = re.compile(r'["\'\n\r\x00]')
-
-
-def valid_value(key, value):
-    if not isinstance(value, str):
-        return False, "not a string"
-    if _FORBIDDEN.search(value):
-        return False, "contains a quote, newline or NUL"
-    if len(value) > 128:
-        return False, "longer than 128 characters"
-
-    if key == "ipv4_network":
-        m = re.fullmatch(r"(\d{1,3}(?:\.\d{1,3}){3})/(\d{1,2})", value)
-        if not m:
-            return False, "not a CIDR block"
-        if any(int(o) > 255 for o in m.group(1).split(".")):
-            return False, "octet out of range"
-        if not 8 <= int(m.group(2)) <= 30:
-            return False, "prefix length out of range"
-    elif key == "mesh_ssid":
-        if not 1 <= len(value) <= 32:
-            return False, "SSID must be 1-32 characters"
-    elif key == "mesh_key":
-        if not 8 <= len(value) <= 63:
-            return False, "SAE key must be 8-63 characters"
-    elif key == "eud":
-        if value not in ("wired", "wireless", "auto"):
-            return False, "must be wired, wireless or auto"
-    elif key in ("mtx", "mumble", "auto_update", "acs"):
-        if value not in ("y", "n"):
-            return False, "must be y or n"
-    elif key == "regulatory_domain":
-        if not re.fullmatch(r"[A-Z]{2}", value):
-            return False, "must be a 2-letter country code"
-    elif key == "max_euds_per_node":
-        if not value.isdigit() or int(value) > 253:
-            return False, "must be a number 0-253"
-    return True, ""
-
+# Shared validation is also used before local changes or broadcasting.
 
 def validate_package(pkg):
     if not isinstance(pkg, dict):
@@ -144,12 +100,18 @@ def validate_package(pkg):
     if not isinstance(config, dict) or not config:
         return False, "missing config block"
 
-    for key, value in config.items():
-        if key not in ALLOWED_KEYS:
-            return False, f"unknown setting {key!r}"
-        ok, why = valid_value(key, value)
-        if not ok:
-            return False, f"{key}: {why}"
+    current = {}
+    try:
+        with open('/etc/mesh.conf') as source:
+            for line in source:
+                key, sep, value = line.strip().partition('=')
+                if sep:
+                    current[key] = value
+    except FileNotFoundError:
+        pass
+    ok, why = validate_config(config, current=current)
+    if not ok:
+        return False, why
 
     activate_at = pkg.get("activate_at", 0)
     if not isinstance(activate_at, int) or activate_at < 0:

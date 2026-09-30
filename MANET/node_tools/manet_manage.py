@@ -43,15 +43,18 @@ import shutil
 import hashlib
 import urllib.request
 import ipaddress
+import secrets
+from pathlib import Path
 from datetime import datetime, timezone
 from urllib.parse import urlparse, unquote
 
 from manet_web_limits import STATUS_CACHE, Busy
 from manet_recovery_status import recovery_status, RECOVERY_JS
 from manet_peer_radios import peer_radio_interfaces
+from manet_registry import node_state
 from manet_admin import AdminTransport, new_version
 from manet_radio import (halow_bandwidth_for_channel, halow_channel_for_frequency,
-                        halow_channel_options)
+                        halow_channel_options, validate_wifi_channel, acs_enabled)
 
 MESH_CONF_FILE  = '/etc/mesh.conf'
 MESH_STATE_FILE = '/etc/mesh_ipv4_state'
@@ -671,19 +674,12 @@ def radio_expected_hosts():
     except Exception:
         pass
     nodes = parse_registry()
-    now = int(time.time())
     hosts = []
     for nd in nodes.values():
         host = nd.get('HOSTNAME', '')
         if not host:
             continue
-        if nd.get('NODE_STATE', 'ACTIVE') == 'SHUTTING_DOWN':
-            continue
-        try:
-            last_seen = int(nd.get('LAST_SEEN_TIMESTAMP', '0') or 0)
-        except Exception:
-            last_seen = 0
-        if last_seen and now - last_seen > 600:
+        if node_state(nd) != 'ACTIVE':
             continue
         hosts.append(host)
     my_host = get_my_hostname()
@@ -915,6 +911,7 @@ def build_topology():
         'my_ip':      my_ip,
         'internet':   has_internet(),
         'halow_plan': halow_channel_options(),
+        'acs_enabled': str(conf.get('acs', 'n')).lower() in ('y', 'yes', '1', 'true'),
         'recovery': recovery_status(conf, nodes_raw, my_host),
         'timestamp':  int(time.time()),
     }
@@ -925,11 +922,27 @@ def build_topology():
 def ensure_sessions_dir():
     os.makedirs(SESSIONS_DIR, exist_ok=True)
 
+
+def session_path(label):
+    """Only direct, real children of the measurements directory are sessions."""
+    if (not isinstance(label, str) or not re.fullmatch(r'[A-Za-z0-9._-]{1,64}', label)
+            or label in ('.', '..')):
+        raise ValueError('Invalid session label: use 1-64 letters, digits, dots, underscores or hyphens')
+    root = Path(SESSIONS_DIR).resolve()
+    path = root / label
+    if path.is_symlink() or path.resolve().parent != root:
+        raise ValueError('Invalid session path')
+    return path
+
+
 def list_sessions():
     ensure_sessions_dir()
     sessions = []
     for name in sorted(os.listdir(SESSIONS_DIR), reverse=True):
-        d = os.path.join(SESSIONS_DIR, name)
+        try:
+            d = session_path(name)
+        except ValueError:
+            continue
         if os.path.isdir(d):
             files = [f for f in os.listdir(d) if f.endswith('.json')]
             results = get_session_results(name)
@@ -941,12 +954,12 @@ def list_sessions():
     return sessions
 
 def get_session_results(label):
-    d = os.path.join(SESSIONS_DIR, label)
+    d = session_path(label)
     results = []
     if not os.path.isdir(d):
         return results
     for fname in sorted(os.listdir(d)):
-        if fname.endswith('.json'):
+        if fname.endswith('.json') and not (d / fname).is_symlink():
             try:
                 with open(os.path.join(d, fname)) as f:
                     results.append(json.load(f))
@@ -955,10 +968,10 @@ def get_session_results(label):
     return results
 
 def delete_session(label):
-    safe_label = os.path.basename(label)
-    if safe_label != label or not label:
-        return False, 'Invalid session label'
-    d = os.path.join(SESSIONS_DIR, safe_label)
+    try:
+        d = session_path(label)
+    except ValueError as error:
+        return False, str(error)
     if not os.path.isdir(d):
         return False, 'Session not found'
     shutil.rmtree(d)
@@ -1126,7 +1139,7 @@ def run_measurement_session(label, pairs, tests, duration, udp_bitrate):
     done = 0
     try:
         ensure_sessions_dir()
-        session_dir = os.path.join(SESSIONS_DIR, label)
+        session_dir = session_path(label)
         os.makedirs(session_dir, exist_ok=True)
         topo = snapshot_topology()
 
@@ -1156,7 +1169,7 @@ def run_measurement_session(label, pairs, tests, duration, udp_bitrate):
                     })
 
                 ts    = datetime.now().strftime('%Y%m%dT%H%M%S')
-                fname = f'{ts}_{src_name}_{dst_name}_{test_type}.json'
+                fname = f'{ts}_{secrets.token_hex(12)}.json'
                 result_record = {
                     'session_label':    label,
                     'timestamp':        datetime.now().isoformat(),
@@ -1199,7 +1212,7 @@ def run_measurement_session(label, pairs, tests, duration, udp_bitrate):
                         result_record['error'] = str(e)
 
                 # Save result
-                with open(os.path.join(session_dir, fname), 'w') as f:
+                with open(session_path(label) / fname, 'x') as f:
                     json.dump(result_record, f, indent=2)
 
                 done += 1
@@ -2127,6 +2140,14 @@ function onHalowBandwidthChange() {
 }
 
 function buildHalowConfig() {
+  const managed = _topo.acs_enabled !== false;
+  for (const id of ['ch-2g', 'ch-5g', 'btn-apply-2g', 'btn-apply-5g']) {
+    const element = document.getElementById(id);
+    if (element) element.disabled = managed;
+  }
+  for (const element of document.querySelectorAll('.acs-channel-note')) {
+    element.textContent = managed ? 'Channels are selected automatically by ACS.' : '';
+  }
   const halowInfo = getNodeInfo('all', 'wlan2');
   const bw = renderHalowBandwidths(halowInfo.halow_bw);
   renderHalowChannels(bw, halowInfo.channel);
@@ -2186,7 +2207,7 @@ async function apply2G() {
     const r = await manageFetch(U('/api/wifi/channel'), {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({interface: 'wlan0', channel: parseInt(ch), dbm: parseFloat(dbm)})
+      body: JSON.stringify({band: '2.4', channel: parseInt(ch), dbm: parseFloat(dbm)})
     });
     const d = await r.json();
     if (!r.ok || !d.ok) throw new Error(d.error || `HTTP ${r.status}`);
@@ -2208,7 +2229,7 @@ async function apply5G() {
     const r = await manageFetch(U('/api/wifi/channel'), {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({interface: 'wlan1', channel: parseInt(ch), dbm: parseFloat(dbm)})
+      body: JSON.stringify({band: '5', channel: parseInt(ch), dbm: parseFloat(dbm)})
     });
     const d = await r.json();
     if (!r.ok || !d.ok) throw new Error(d.error || `HTTP ${r.status}`);
@@ -3511,8 +3532,7 @@ function renderStatus(s) {
       dotCls   = 'ack-dot-no';
       ackLabel = 'Waiting';
     }
-    const staleMs = (DATA.timestamp - parseInt(n.last_seen || 0));
-    const stale   = staleMs > 300;
+    const stale = n.node_state !== 'ACTIVE';
     const nameStyle = stale ? 'color:var(--muted)' : '';
     return `<tr>
       <td style="${nameStyle}">${n.hostname}</td>
@@ -3749,7 +3769,7 @@ def render_dashboard():
       <div class="card-title">2.4 GHz</div>
       <div class="row">
         <span class="row-label">Channel</span>
-        <select id="ch-2g">
+        <select id="ch-2g" disabled>
           ${''.join(f'<option value="{c}"{" selected" if c==6 else ""}>ch {c} ({2407+c*5} MHz)</option>' for c in range(1,14))}
         </select>
       </div>
@@ -3759,14 +3779,15 @@ def render_dashboard():
       </div>
       <div class="row">
         <span class="row-label"></span>
-        <button class="btn btn-green" id="btn-apply-2g" onclick="apply2G()">APPLY TO ALL NODES</button>
+        <button class="btn btn-green" id="btn-apply-2g" onclick="apply2G()" disabled>APPLY TO ALL NODES</button>
       </div>
+      <div class="acs-channel-note"></div>
     </div>
     <div class="card">
       <div class="card-title">5 GHz</div>
       <div class="row">
         <span class="row-label">Channel</span>
-        <select id="ch-5g">
+        <select id="ch-5g" disabled>
           <option value="36">ch 36 (5180 MHz)</option>
           <option value="40">ch 40 (5200 MHz)</option>
           <option value="44">ch 44 (5220 MHz)</option>
@@ -3799,8 +3820,9 @@ def render_dashboard():
       </div>
       <div class="row">
         <span class="row-label"></span>
-        <button class="btn btn-green" id="btn-apply-5g" onclick="apply5G()">APPLY TO ALL NODES</button>
+        <button class="btn btn-green" id="btn-apply-5g" onclick="apply5G()" disabled>APPLY TO ALL NODES</button>
       </div>
+      <div class="acs-channel-note"></div>
     </div>
   </div>
 
@@ -3999,7 +4021,12 @@ class ManageRoutes:
 
         elif path.startswith('/api/sessions/'):
             parts = path[len('/api/sessions/'):].split('/')
-            label = parts[0]
+            label = unquote(parts[0])
+            try:
+                session_path(label)
+            except ValueError as error:
+                self.send_json({'ok': False, 'error': str(error)}, 400)
+                return
             if len(parts) > 1 and parts[1] == 'csv':
                 csv_data = session_to_csv(label).encode()
                 self.send_response(200)
@@ -4023,6 +4050,11 @@ class ManageRoutes:
 
         if path.startswith('/api/sessions/'):
             label = unquote(path[len('/api/sessions/'):].split('/')[0])
+            try:
+                session_path(label)
+            except ValueError as error:
+                self.send_json({'ok': False, 'error': str(error)}, 400)
+                return
             ok, error = delete_session(label)
             self.send_json({'ok': ok, 'error': error})
         else:
@@ -4093,12 +4125,10 @@ class ManageRoutes:
         elif path == '/api/wifi/channel':
             try:
                 req = json.loads(body)
-                iface = req.get('interface', req.get('iface', ''))
-                if iface not in ('wlan0', 'wlan1'):
-                    self.send_json({'ok': False, 'error': 'Invalid Wi-Fi interface'})
-                    return
+                band = req.get('band')
+                validate_wifi_channel(band, req.get('channel'))
                 self.send_json(coordinate_radio_change({'wifi_channel': {
-                    'iface': iface,
+                    'band': band,
                     'channel': req.get('channel'),
                     'dbm': req.get('dbm'),
                 }}))
@@ -4112,7 +4142,8 @@ class ManageRoutes:
                     return
                 try:
                     req    = json.loads(body)
-                    label  = req.get('label', '').strip()
+                    label  = req.get('label', '')
+                    session_path(label)
                     pairs  = req.get('pairs', [])
                     tests  = req.get('tests', [])
                     dur    = int(req.get('duration', 30))
@@ -4147,6 +4178,9 @@ class ManageRoutes:
                     )
                     t.start()
                     self.send_json({'ok': True})
+                except ValueError as e:
+                    _measure_status['running'] = False
+                    self.send_json({'ok': False, 'error': str(e)}, 400)
                 except Exception as e:
                     _measure_status['running'] = False
                     self.send_json({'ok': False, 'error': str(e)})

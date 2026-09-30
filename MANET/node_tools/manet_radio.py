@@ -11,11 +11,16 @@ by the caller.
 """
 
 import json
+from contextlib import contextmanager
+import fcntl
 import os
+from pathlib import Path
 import re
 import stat
 import subprocess
 import time
+from manet_config_io import atomic_write, rewrite_keys
+import manet_static_channels as static_channels
 
 # S1G channel plans, transcribed from the Morse driver's own tables in
 # dot11ah/s1g_channels_rules.c ({eu,us}_s1g_channels).  Keys are the S1G
@@ -612,26 +617,105 @@ def apply_halow_channel(channel, bw='1MHz', dbm=None):
             'dbm': requested, 'actual_dbm': actual}
 
 
-def apply_wifi_channel(iface, channel, dbm=None):
-    if not iface or not channel:
-        raise ValueError('Missing iface or channel')
-    freq = wifi_channel_to_freq(iface, channel)
-    if not freq:
-        raise ValueError(f'Invalid channel {channel} for {iface}')
+def acs_enabled():
+    conf = Path(os.environ.get('MANET_MESH_CONF', '/etc/mesh.conf')).read_text()
+    return bool(re.search(r'^acs=(y|yes|1|true)\s*$', conf, re.I | re.M))
 
-    conf = f'/etc/wpa_supplicant/wpa_supplicant-{iface}.conf'
-    with open(conf) as f:
-        content = f.read()
-    content = re.sub(r'(frequency\s*=\s*)\d+', rf'\g<1>{freq}', content)
-    with open(conf, 'w') as f:
-        f.write(content)
-    subprocess.run(['systemctl', 'restart', f'wpa_supplicant@{iface}.service'],
-                   capture_output=True, text=True, timeout=25)
 
+def validate_wifi_channel(band, channel):
+    if acs_enabled():
+        raise ValueError('Wi-Fi channels are managed by ACS; select static mode before changing them')
+    if band not in ('2.4', '5'):
+        raise ValueError('Invalid Wi-Fi band')
+    roles = Path(os.environ.get('MANET_IFACE_STATE_DIR', '/var/lib'))
+    try:
+        iface = (roles / ('mesh_24_if' if band == '2.4' else 'mesh_5_if')).read_text().strip()
+    except FileNotFoundError:
+        iface = ''
+    if iface and not re.fullmatch(r'[A-Za-z0-9_.-]{1,15}', iface):
+        raise ValueError('Invalid Wi-Fi mesh role on this node')
+    if type(channel) is bool or not str(channel).isdigit():
+        raise ValueError('Invalid Wi-Fi channel')
+    freq = (2407 if band == '2.4' else 5000) + 5 * int(channel)
+    if not static_channels.valid(band, freq):
+        raise ValueError('Invalid channel for this Wi-Fi band')
+    return iface, freq
+
+
+CHANNEL_LOCK_TIMEOUT = 10
+
+
+@contextmanager
+def channel_lock(path):
+    with path.open('a') as lock:
+        deadline = time.monotonic() + CHANNEL_LOCK_TIMEOUT
+        while True:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError as error:
+                if time.monotonic() >= deadline:
+                    raise RuntimeError('Another channel change is in progress; retry shortly') from error
+                time.sleep(0.05)
+        yield
+
+
+def apply_wifi_channel(band, channel, dbm=None):
+    iface, freq = validate_wifi_channel(band, channel)
+    wpa = Path(os.environ.get('MANET_WPA_DIR', '/etc/wpa_supplicant'))
+    plan = Path(os.environ.get('MANET_STATIC_CHANNELS', static_channels.PATH))
+    lock_path = Path(os.environ.get('MANET_ACS_LOCK_FILE', '/run/channel-election.lock'))
     requested = actual = ''
-    if dbm is not None:
-        requested, actual = set_iface_txpower_verified(iface, dbm)
-    return {'ok': True, 'iface': iface, 'channel': int(channel), 'freq': freq,
+    with channel_lock(lock_path):
+        iface, freq = validate_wifi_channel(band, channel)
+        # A node lacking this band still persists and ACKs the mesh's plan.
+        paths = [wpa / f'wpa_supplicant-{iface}{suffix}.conf' for suffix in ('', '-lobby')] if iface else []
+        previous = {path: path.read_bytes() for path in paths}
+        for content in previous.values():
+            if not re.search(rb'^\s*frequency=\d+', content, re.M):
+                raise ValueError('Mesh supplicant configuration has no frequency')
+        previous[plan] = plan.read_bytes() if plan.exists() else None
+        static_channels.load(plan)  # A corrupt plan must not silently reset the other band.
+        old_power = ''
+        if dbm is not None and iface:
+            old_power = read_iface_txpower_dbm(iface)
+            if not old_power:
+                raise ValueError('Cannot read current Wi-Fi power for rollback')
+            requested = _fmt_dbm(dbm)
+            cap = get_iface_txpower_cap(iface)
+            options = txpower_options_for_iface(iface, cap, old_power)
+            if cap and not txpower_request_allowed(iface, requested, cap, options):
+                return unsupported_txpower_response(iface, requested, cap, options)
+        try:
+            static_channels.save(band, freq, plan)
+            for path in paths:
+                atomic_write(path, rewrite_keys(previous[path].decode(), {'frequency': str(freq)}))
+            from manet_supplicant import restart_configured
+            if iface:
+                restart_configured(only={iface})
+                if dbm is not None:
+                    requested, actual = set_iface_txpower_verified(iface, dbm)
+        except Exception as error:
+            failures = []
+            for path, content in previous.items():
+                try:
+                    if content is None:
+                        path.unlink(missing_ok=True)
+                    else:
+                        atomic_write(path, content)
+                except OSError:
+                    failures.append(path.name)
+            try:
+                from manet_supplicant import restart_configured
+                if iface:
+                    restart_configured(only={iface})
+                    if old_power:
+                        set_iface_txpower_verified(iface, old_power)
+            except Exception:
+                failures.append('radio restart')
+            detail = '; recovery failed: ' + ', '.join(failures) if failures else '; previous channel restored'
+            raise RuntimeError('Cannot apply static Wi-Fi channel' + detail) from error
+    return {'ok': True, 'band': band, 'iface': iface, 'channel': int(channel), 'freq': freq,
             'dbm': requested, 'actual_dbm': actual}
 
 

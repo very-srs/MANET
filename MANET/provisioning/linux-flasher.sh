@@ -44,6 +44,7 @@ PI_OS_IMAGE_URL="https://downloads.raspberrypi.com/raspios_lite_arm64/images/ras
 
 # The launcher supplies a verified release manifest and keeps user files here.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+declare -A FLASH_TARGET_IDS=()
 : "${MANET_RELEASE_FILE:?Start this through flash-a-radio.sh}"
 : "${MANET_FLASHER_WORK:?Start this through flash-a-radio.sh}"
 TEMPLATE_FILE="$SCRIPT_DIR/firstrun.sh.template"
@@ -745,30 +746,25 @@ generate_password() {
 # Excludes boot disk and eMMC internal storage.
 # Returns array of "/dev/NAME (size)" strings in SD_DEVICES global.
 detect_sd_cards() {
-        local boot_disk="$1"
+        local boot_disk="$1" inventory device fingerprint description
         SD_DEVICES=()
+        FLASH_TARGET_IDS=()
+        inventory=$(python3 "$SCRIPT_DIR/flash-target.py" list) || return 1
+        while IFS=$'\t' read -r device fingerprint description; do
+                [ -n "$device" ] || continue
+                [ "${device##*/}" != "$boot_disk" ] || continue
+                SD_DEVICES+=("$device ($description)")
+                FLASH_TARGET_IDS[$device]="$fingerprint"
+        done <<< "$inventory"
+}
 
-        while IFS= read -r line; do
-                local NAME="" SIZE="" TYPE="" TRAN=""
-                eval "$line"
-
-                [ "$TYPE" = "disk" ] || continue
-                [ "$NAME" = "$boot_disk" ] && continue
-
-                if [[ "$NAME" =~ ^mmcblk[0-9]+$ ]]; then
-                        # Native MMC slot: accept SD and MMC types, skip eMMC (empty sysfs type = internal eMMC on most SBCs)
-                        local devtype
-                        devtype=$(cat "/sys/block/$NAME/device/type" 2>/dev/null || echo "")
-                        [ "$devtype" = "SD" ] || [ "$devtype" = "MMC" ] || continue
-                elif [ "$TRAN" = "usb" ]; then
-                        # USB-attached card reader: accept any non-zero-size disk
-                        [ "$SIZE" = "0B" ] && continue
-                else
-                        continue
-                fi
-
-                SD_DEVICES+=("/dev/$NAME ($SIZE)")
-        done < <(lsblk -d -n -P -o NAME,SIZE,TYPE,TRAN)
+prepare_flash_target() {
+        local device="$1"
+        [ -n "${FLASH_TARGET_IDS[$device]:-}" ] || {
+                echo "ERROR: Target has not been confirmed." >&2
+                return 1
+        }
+        sudo python3 "$SCRIPT_DIR/flash-target.py" prepare "$device" "${FLASH_TARGET_IDS[$device]}"
 }
 
 # Function to ask all setup questions
@@ -1350,6 +1346,13 @@ select_target_device() {
 confirm_flash() {
         local device="$1"
         local device_size=$(lsblk -d -n -o SIZE "$device" 2>/dev/null || echo "unknown")
+        local fingerprint
+        fingerprint=$(python3 "$SCRIPT_DIR/flash-target.py" fingerprint "$device") || return 1
+        if [[ -n "${FLASH_TARGET_IDS[$device]:-}" && "${FLASH_TARGET_IDS[$device]}" != "$fingerprint" ]]; then
+                echo "ERROR: Target changed since selection. Rescan before flashing." >&2
+                return 1
+        fi
+        FLASH_TARGET_IDS[$device]="$fingerprint"
 
         echo ""
         echo "=============================================="
@@ -1360,6 +1363,7 @@ confirm_flash() {
         echo ""
         echo "  Device: $device"
         echo "  Size:   $device_size"
+        python3 "$SCRIPT_DIR/flash-target.py" describe "$device" || return 1
         echo ""
         echo "  Hardware: $HARDWARE_MODEL"
         echo "  Mesh SSID: $MESH_SSID"
@@ -1558,9 +1562,11 @@ SERVICE_EOF
         sudo losetup -d "$LOOP_DEV"
 
         echo "Wiping target device..."
+        prepare_flash_target "$target"
         sudo wipefs -a "$target"
 
         echo "Flashing image to $target..."
+        prepare_flash_target "$target"
         sudo dd if="$TEMP_IMAGE" of="$target" bs=4M status=progress conv=fsync
         sudo sync
 
@@ -1995,6 +2001,7 @@ flash_rpi() {
         # their own __TOKEN__-looking text rewritten by the sed above.
         append_additional_scripts "$TEMP_SCRIPT_FILE"
 
+        prepare_flash_target "$target"
         sudo "$RPI_IMAGER_CMD" --cli "$PI_OS_IMAGE_URL" "$target" --first-run-script "$TEMP_SCRIPT_FILE"
 
         echo ""
@@ -2167,9 +2174,9 @@ flash_multiple_cards() {
                         echo "  - ${SD_DEVICES[$((n-1))]}"
                 done
                 echo ""
-                read -p "Proceed? (Y/n): " proceed
-                proceed=${proceed:-y}
-                [[ "$proceed" =~ ^[Yy]$ ]] || continue
+                for n in "${nums[@]}"; do
+                        confirm_flash "${SD_DEVICES[$((n-1))]%% *}"
+                done
 
                 local FLASH_COUNT=0
                 for n in "${nums[@]}"; do
