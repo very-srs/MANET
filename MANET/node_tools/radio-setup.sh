@@ -1233,6 +1233,7 @@ fi
 # Canonical optional-harness units are installed from MANET/systemd. The boot
 # display must not hold startup open while it waits for mesh peers.
 systemctl enable led-boot.service
+systemctl enable manet-led-status.service
 systemctl enable wifi-rfkill-unblock.service
 systemctl enable button-monitor.service
 
@@ -1477,15 +1478,15 @@ RemainAfterExit=yes
 ExecStart=/bin/bash -c 'echo powersave > /sys/devices/system/cpu/cpufreq/policy0/scaling_governor'
 # Cap max frequency to 1.0 GHz
 ExecStart=/bin/bash -c 'echo 1008000 > /sys/devices/system/cpu/cpufreq/policy0/scaling_max_freq'
-# Disable cores 2 and 3
-ExecStart=/bin/bash -c 'echo 0 > /sys/devices/system/cpu/cpu2/online'
-ExecStart=/bin/bash -c 'echo 0 > /sys/devices/system/cpu/cpu3/online'
+# Some kernels expose no CPU hotplug controls. Keep frequency scaling usable.
+ExecStart=/bin/bash -c 'if [ -e /sys/devices/system/cpu/cpu2/online ]; then echo 0 > /sys/devices/system/cpu/cpu2/online; fi'
+ExecStart=/bin/bash -c 'if [ -e /sys/devices/system/cpu/cpu3/online ]; then echo 0 > /sys/devices/system/cpu/cpu3/online; fi'
 
 # Restore on stop (or when election scripts call systemctl stop cpu-powersave)
-ExecStop=/bin/bash -c 'echo 1 > /sys/devices/system/cpu/cpu2/online'
-ExecStop=/bin/bash -c 'echo 1 > /sys/devices/system/cpu/cpu3/online'
+ExecStop=/bin/bash -c 'if [ -e /sys/devices/system/cpu/cpu2/online ]; then echo 1 > /sys/devices/system/cpu/cpu2/online; fi'
+ExecStop=/bin/bash -c 'if [ -e /sys/devices/system/cpu/cpu3/online ]; then echo 1 > /sys/devices/system/cpu/cpu3/online; fi'
 ExecStop=/bin/bash -c 'echo ondemand > /sys/devices/system/cpu/cpufreq/policy0/scaling_governor'
-ExecStop=/bin/bash -c 'echo 1416000 > /sys/devices/system/cpu/cpufreq/policy0/scaling_max_freq'
+ExecStop=/bin/bash -c 'cat /sys/devices/system/cpu/cpufreq/policy0/cpuinfo_max_freq > /sys/devices/system/cpu/cpufreq/policy0/scaling_max_freq'
 
 [Install]
 WantedBy=multi-user.target
@@ -1809,6 +1810,19 @@ if [ -f /var/lib/radio-setup-reboot-pending ]; then
     sleep 5
     reboot
 fi
+
+# Start the services enabled above on this boot too. A clean final setup run
+# does not reboot; enabling alone leaves the UI, watchdog and other runtime
+# services idle until the operator happens to restart the node. Boot-only
+# identity/lobby/shutdown units deliberately stay outside this list.
+provision_try "systemd reload failed" systemctl daemon-reload
+for unit in mesh-status.service batman-enslave-watch.service \
+    gateway-route-manager.service syncthing@radio.service \
+    syncthing-peer-manager.service mesh-hosts-update.timer \
+    ethernet-autodetect.service cpu-powersave.service battery-reader.service \
+    button-monitor.service led-boot.service; do
+    provision_try "service start failed: $unit" systemctl start "$unit"
+done
 
 # === DID THIS ACTUALLY WORK? ===
 # Everything above continues past failures on purpose: a node with no GPS

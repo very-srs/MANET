@@ -149,12 +149,39 @@ cat /var/lib/misc/dnsmasq.leases
                 self.assertEqual(self.history().count('systemctl restart dnsmasq.service'), 1)
                 config = self.root / 'etc/dnsmasq.d/mesh-eud.conf'
                 self.assertIn('address=/manet.local/10.30.0.7', config.read_text())
+                self.assertIn('\nbind-dynamic\n', config.read_text())
+                self.assertNotIn('\nbind-interfaces\n', config.read_text())
                 self.assertNotRegex(config.read_text(), r'(?m)^server=')
                 dnsmasq = shutil.which('dnsmasq')
                 if dnsmasq:
                     result = subprocess.run([dnsmasq, '--test', '-C', str(config)],
                                             capture_output=True, text=True)
                     self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_existing_static_dns_binding_is_reconfigured_once(self):
+        source = (TOOLS / 'mesh-ip-manager.sh').read_text()
+        start = source.index('                # Only reconfigure dnsmasq if the config has changed')
+        end = source.index('                # The web UI is restricted', start)
+        check = source[start:end]
+        config = self.root / 'etc/dnsmasq.d/mesh-eud.conf'
+        config.write_text(self.isolated('''interface=br0
+bind-interfaces
+dhcp-range=10.30.0.8,10.30.0.15,4m
+dhcp-option=3,10.30.0.7
+resolv-file=/run/systemd/resolve/resolv.conf
+clear-on-reload
+'''))
+        body = '''
+log() { :; }
+configure_ebtables_dhcp_isolation() { :; }
+configure_dnsmasq() { sed -i s/bind-interfaces/bind-dynamic/ "$DNSMASQ_CONF"; echo REBOUND; }
+BR0_PRIMARY=10.30.0.6; BR0_SECONDARY=10.30.0.7
+DHCP_START=10.30.0.8; DHCP_END=10.30.0.15
+''' + check + check
+        result = subprocess.run(['bash', '-c', self.isolated(body)], env=self.env,
+                                capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, 'REBOUND\n')
 
     def test_service_dropins_run_preparation_on_every_start(self):
         for unit, script in [('hostapd', 'prepare-ap-iface.sh'), ('dnsmasq', 'manet-dns-setup.sh')]:

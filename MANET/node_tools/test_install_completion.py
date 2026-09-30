@@ -1,0 +1,120 @@
+"""Regressions found on a freshly provisioned CM4 and its first normal boot."""
+import json
+from pathlib import Path
+import re
+import shlex
+import subprocess
+import tempfile
+import unittest
+from unittest.mock import patch
+
+import manet_node_ipv4 as address
+
+TOOLS = Path(__file__).resolve().parent
+
+
+class NodeAddressTests(unittest.TestCase):
+    def setUp(self):
+        self.state = {'PERSISTENT_IPV4': '10.30.2.136', 'PERSISTENT_CHUNK': '26',
+                      'PERSISTENT_NETWORK': '10.30.2.0/24'}
+        self.config = {'ipv4_network': '10.30.2.0/24'}
+
+    def test_service_vip_and_eud_gateway_never_replace_the_assigned_primary(self):
+        for ips in (['10.30.2.2', '10.30.2.136', '10.30.2.137'],
+                    ['10.30.2.137', '10.30.2.2', '10.30.2.136']):
+            self.assertEqual(address.primary_ipv4(self.state, self.config, ips), '10.30.2.136')
+
+    def test_remembered_allocation_is_not_published_before_it_is_installed(self):
+        for ips in ([], ['10.30.2.2'], ['10.30.2.137']):
+            self.assertEqual(address.primary_ipv4(self.state, self.config, ips), '')
+
+    def test_changed_network_invalidates_the_old_allocation(self):
+        self.assertEqual(address.primary_ipv4(self.state, {'ipv4_network': '10.40.0.0/24'},
+                                             ['10.30.2.136']), '')
+
+    def test_missing_invalid_or_service_reserved_state_is_not_an_allocation(self):
+        for state in ({}, dict(self.state, PERSISTENT_CHUNK=''),
+                      dict(self.state, PERSISTENT_IPV4='10.30.2.2'),
+                      dict(self.state, PERSISTENT_IPV4='10.30.2.255'),
+                      dict(self.state, PERSISTENT_IPV4='not-an-ip')):
+            self.assertEqual(address.primary_ipv4(state, self.config,
+                                                 ['10.30.2.136', '10.30.2.2', '10.30.2.255']), '')
+
+    def test_chunk_zero_is_valid(self):
+        state = dict(self.state, PERSISTENT_CHUNK='0', PERSISTENT_IPV4='10.30.2.6')
+        self.assertEqual(address.primary_ipv4(state, self.config, ['10.30.2.6']), '10.30.2.6')
+
+    def test_interface_query_failure_is_not_an_empty_interface(self):
+        with patch.object(address, 'read_values', side_effect=[self.state, self.config]), \
+                patch.object(address.subprocess, 'run', side_effect=subprocess.TimeoutExpired('ip', 3)):
+            with self.assertRaises(subprocess.TimeoutExpired):
+                address.current_ipv4()
+
+    def test_real_address_reader_ignores_list_order(self):
+        response = subprocess.CompletedProcess([], 0, json.dumps([{'addr_info': [
+            {'family': 'inet', 'local': ip} for ip in ['10.30.2.2', '10.30.2.136']]}]))
+        with patch.object(address, 'read_values', side_effect=[self.state, self.config]), \
+                patch.object(address.subprocess, 'run', return_value=response):
+            self.assertEqual(address.current_ipv4(), '10.30.2.136')
+
+
+class CompletionTests(unittest.TestCase):
+    def test_runtime_services_start_before_success_and_failure_is_recorded(self):
+        source = (TOOLS / 'radio-setup.sh').read_text()
+        begin = source.index('# Start the services enabled above on this boot too.')
+        end = source.index('# === DID THIS ACTUALLY WORK? ===', begin)
+        self.assertLess(end, source.index('provision_state complete'))
+        body = '''
+systemctl() { echo "$*"; [ "$*" != 'start mesh-status.service' ]; }
+provision_try() { local what="$1"; shift; "$@" || echo "FAIL:$what"; }
+''' + source[begin:end]
+        result = subprocess.run(['bash', '-c', body], capture_output=True, text=True, timeout=5)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('FAIL:service start failed: mesh-status.service', result.stdout)
+        self.assertIn('start batman-enslave-watch.service', result.stdout)
+        for unit in ('mesh-clone-identity', 'mesh-boot-lobby', 'mesh-shutdown'):
+            self.assertNotIn('start ' + unit, result.stdout)
+
+    def test_cpu_frequency_control_works_without_hotplug_and_restores_board_maximum(self):
+        source = (TOOLS / 'radio-setup.sh').read_text()
+        unit = source.split('cat << EOF > /etc/systemd/system/cpu-powersave.service\n', 1)[1].split('\nEOF', 1)[0]
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch)
+            policy = root / 'cpufreq/policy0'
+            policy.mkdir(parents=True)
+            (policy / 'cpuinfo_max_freq').write_text('1500000\n')
+            for present in (False, True):
+                with self.subTest(hotplug=present):
+                    if present:
+                        for cpu in (2, 3):
+                            (root / f'cpu{cpu}').mkdir()
+                            (root / f'cpu{cpu}/online').write_text('1\n')
+                    for directive, governor, maximum in [('ExecStart', 'powersave', '1008000'),
+                                                          ('ExecStop', 'ondemand', '1500000')]:
+                        for line in unit.splitlines():
+                            if line.startswith(directive + '='):
+                                args = shlex.split(line.split('=', 1)[1].replace('/sys/devices/system/cpu', str(root)))
+                                result = subprocess.run(args, capture_output=True, text=True)
+                                self.assertEqual(result.returncode, 0, result.stderr)
+                        self.assertEqual((policy / 'scaling_governor').read_text().strip(), governor)
+                        self.assertEqual((policy / 'scaling_max_freq').read_text().strip(), maximum)
+                    if present:
+                        self.assertEqual((root / 'cpu2/online').read_text().strip(), '1')
+
+    def test_dhcp_isolation_matches_both_directions_and_exact_interface(self):
+        source = (TOOLS / 'verify-bridge.sh').read_text()
+        function = re.search(r'^dhcp_is_blocked\(\) \{\n.*?^\}', source, re.M | re.S)[0]
+        rules = '\n'.join(f'-p IPv4 -{direction} bat0 --ip-proto udp --ip-dport 67:68 -j DROP'
+                          for direction in ('i', 'o'))
+        for text, iface, mode, expected in [(rules, 'bat0', 'both', 0),
+                                            (rules, 'bat', 'both', 1),
+                                            (rules.splitlines()[0], 'bat0', 'both', 1),
+                                            (rules.splitlines()[0], 'bat0', 'any', 0),
+                                            (rules.replace('DROP', 'ACCEPT'), 'bat0', 'both', 1)]:
+            body = 'EBTABLES_OUTPUT=' + shlex.quote(text) + '\n' + function + f'\ndhcp_is_blocked {iface} {mode}\n'
+            result = subprocess.run(['bash', '-c', body], capture_output=True, text=True)
+            self.assertEqual(result.returncode, expected, result.stderr)
+
+
+if __name__ == '__main__':
+    unittest.main()

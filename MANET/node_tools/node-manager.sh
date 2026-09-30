@@ -263,7 +263,7 @@ while true; do
     # Publish during discovery and whenever allocation changes; 270 s is only
     # the keepalive interval once configured. Zero is a valid chunk.
     MY_CHUNK=$(cat /var/run/my_ipv4_chunk 2>/dev/null || true)
-    CURRENT_IPV4=$(ip addr show dev "$CONTROL_IFACE" 2>/dev/null | grep -oP 'inet \K[\d.]+' | head -1)
+    CURRENT_IPV4=$(python3 /usr/local/bin/manet_node_ipv4.py "$CONTROL_IFACE" 2>/dev/null || true)
     [ -z "$MY_CHUNK" ] && CURRENT_IPV4=""
     IDENTITY_ALLOCATION="${MY_CHUNK}:${CURRENT_IPV4}"
     if [ -z "$MY_CHUNK" ] || [ "$IDENTITY_ALLOCATION" != "$LAST_IDENTITY_ALLOCATION" ] ||

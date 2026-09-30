@@ -1223,6 +1223,16 @@ resolved. The IP manager recognizes this resolver configuration as current
 and checks service aliases only when their VIPs are available, avoiding a
 repeated DHCP restart when no optional service VIP is configured.
 
+The generated bridge configuration uses `bind-dynamic`: br0 and its IPv4
+addresses can appear after dnsmasq starts. Static `bind-interfaces` could leave
+DNS listening only on loopback and IPv6 for the rest of the boot. An existing
+static binding is replaced once; unchanged dynamic configuration is retained.
+
+`manet_node_ipv4.py` selects the persisted allocation's primary address only
+while it is present on br0 and belongs to the configured subnet. The allocator,
+both node managers and dashboard share this selection. Address-list order is
+not identity: MediaMTX's service VIP or the EUD gateway can appear first.
+
 The hostapd drop-in runs `prepare-ap-iface.sh` before each real start/restart.
 The older `ap-interface-setup.service` calls the same helper, but its retained
 oneshot state cannot suppress preparation after an AP/mesh mode transition.

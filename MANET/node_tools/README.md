@@ -1096,6 +1096,11 @@ An unstable or failed query leaves existing role files intact and provisioning
 incomplete. No radios throughout the window permits wired-only setup. This is
 a bounded settling check, not proof that an undetected radio cannot arrive later.
 
+The final setup pass starts the runtime services before recording success;
+the dashboard and BATMAN watchdog do not need another reboot. It also enables
+the onboard LED verdict for later boots. CPU powersave tolerates kernels without
+CPU hotplug controls and restores the board's reported maximum frequency on stop.
+
 Provisioning takes several reboots and about ten minutes. Every `apt` call
 continues on failure, so a missing optional package does not abort the run, but
 each step that failed is recorded. If that list is not empty at the end, the

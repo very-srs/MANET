@@ -407,7 +407,8 @@ configure_dnsmasq() {
     cat > /etc/dnsmasq.d/mesh-eud.conf <<- EOF
 # Listen only on br0 bridge
 interface=br0
-bind-interfaces
+# br0 and its IPv4 addresses can appear after dnsmasq starts during boot.
+bind-dynamic
 
 # DHCP configuration from this node's chunk
 dhcp-range=$dhcp_start,$dhcp_end,4m
@@ -493,16 +494,13 @@ fi
 cleanup_control_aliases
 
 # Check if we already have an IP configured on br0
-CURRENT_IPV4=$(ip addr show dev "$CONTROL_IFACE" | grep -oP 'inet \K[\d.]+' | head -1)
+if ! CURRENT_IPV4=$(python3 /usr/local/bin/manet_node_ipv4.py "$CONTROL_IFACE"); then
+    log "Cannot inspect the assigned node address; deferring allocation"
+    exit 0
+fi
 if [ -n "$CURRENT_IPV4" ]; then
     IPV4_STATE="CONFIGURED"
     log "Current IPv4 on br0: ${CURRENT_IPV4}"
-
-    if [ -z "$PERSISTENT_CHUNK" ] && is_service_reserved_ip "$CURRENT_IPV4"; then
-        log "Only service-reserved br0 IPv4 is present; selecting a node/EUD chunk"
-        CURRENT_IPV4=""
-        IPV4_STATE="UNCONFIGURED"
-    fi
 fi
 
 # Load claimed chunks from registry
@@ -650,6 +648,8 @@ case $IPV4_STATE in
                 elif ! grep -q "dhcp-range=$DHCP_START,$DHCP_END" "$DNSMASQ_CONF" 2>/dev/null; then
                     NEEDS_DNSMASQ_UPDATE=true
                 elif ! grep -q "dhcp-option=3,$BR0_SECONDARY" "$DNSMASQ_CONF" 2>/dev/null; then
+                    NEEDS_DNSMASQ_UPDATE=true
+                elif ! grep -Fxq 'bind-dynamic' "$DNSMASQ_CONF" || grep -q '^bind-interfaces' "$DNSMASQ_CONF"; then
                     NEEDS_DNSMASQ_UPDATE=true
                 elif grep -q "^no-resolv" "$DNSMASQ_CONF" 2>/dev/null; then
                     NEEDS_DNSMASQ_UPDATE=true

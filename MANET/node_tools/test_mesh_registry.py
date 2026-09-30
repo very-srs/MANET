@@ -189,6 +189,8 @@ class ChunkClaimsTests(unittest.TestCase):
         allocator.chmod(0o755)
         prefix = ('log() { :; }\nensure_static_channels() { :; }\n'
                   'runuser() { :; }\nhostname() { printf "mesh-test\\n"; }\n'
+                  'python3() { if [ "$1" = /usr/local/bin/manet_node_ipv4.py ]; then '
+                  'printf "%s\\n" "$REVIEW_IPV4"; else command python3 "$@"; fi; }\n'
                   'ip() { printf "    inet %s/28 scope global br0\\n" "$REVIEW_IPV4"; }\n')
         env = dict(self.env, ENCODER_PATH=str(TOOLS / 'encoder.py'), MY_MAC=MAC,
                    LAST_IDENTITY_PUBLISH=str(int(time.time())) if recent else '0',
