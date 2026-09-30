@@ -45,6 +45,7 @@ from urllib.parse import urlparse, parse_qs, quote
 from manet_manage import ManageRoutes
 from manet_peer_radios import interfaces_for_telemetry, peer_status_panel
 from manet_recovery_status import recovery_status, RECOVERY_JS
+from manet_node_ipv4 import primary_ipv4
 from manet_web_sessions import SessionStore
 from manet_web_limits import BoundedHTTPServer, RequestLimits, STATUS_CACHE, MANAGEMENT_WRITE, Busy
 from mesh_config import apply_local_to_conf, local_changes, mesh_changes, strip_local_keys
@@ -859,7 +860,8 @@ def assemble_local_data():
 
     return {
         'hostname':  hostname,
-        'ip':        (state.get('CURRENT_IPV4') or my_node.get('IPV4_ADDRESS', '')),
+        'ip':        primary_ipv4(state, conf, next(
+            (iface['addrs'] for iface in ifaces if iface['name'] == 'br0'), [])),
         'mac':       my_mac or '',
         'uptime':    uptime,
         'battery':   battery,

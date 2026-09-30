@@ -42,6 +42,7 @@ REQUIRED = MARKERS | {
     "usr/local/bin/manet-provision-status.sh", "usr/local/bin/manet-power-status.sh",
     "usr/local/bin/prepare-ap-iface.sh", "usr/local/bin/manet-wait-radios.py",
     "usr/local/bin/manet-dns-setup.sh",
+    "usr/local/bin/manet_node_ipv4.py",
     "etc/systemd/system/hostapd.service.d/10-manet-prepare.conf",
     "etc/systemd/system/dnsmasq.service.d/10-manet-resolved.conf",
     "etc/systemd/system/manet-admin-setup.service",

@@ -557,7 +557,7 @@ while true; do
     # Advertise while discovering, and on the first pass after a claim/release.
     # The 270 s interval is only a keepalive for an unchanged allocation.
     MY_CHUNK=$(cat /var/run/my_ipv4_chunk 2>/dev/null || true)
-    IDENT_IPV4=$(ip addr show dev "$CONTROL_IFACE" 2>/dev/null | grep -oP 'inet \K[\d.]+' | head -1)
+    IDENT_IPV4=$(python3 /usr/local/bin/manet_node_ipv4.py "$CONTROL_IFACE" 2>/dev/null || true)
     [ -z "$MY_CHUNK" ] && IDENT_IPV4=""
     IDENTITY_ALLOCATION="${MY_CHUNK}:${IDENT_IPV4}"
     if [ -z "$MY_CHUNK" ] || [ "$IDENTITY_ALLOCATION" != "$LAST_IDENTITY_ALLOCATION" ] ||

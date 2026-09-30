@@ -25,6 +25,29 @@ log_warn() {
     ((WARNINGS++))
 }
 
+# ebtables prints -j DROP last. Match tokens instead of their display order,
+# and require isolation in both directions for a mesh interface.
+dhcp_is_blocked() {
+    awk -v iface="$1" -v need="${2:-both}" '
+        {
+            input=output=ipv4=udp=ports=drop=0
+            for (i=1; i<NF; i++) {
+                if ($i == "-i" && $(i+1) == iface) input=1
+                if ($i == "-o" && $(i+1) == iface) output=1
+                if ($i == "-p" && $(i+1) == "IPv4") ipv4=1
+                if (($i == "--ip-proto" || $i == "--ip-protocol") && $(i+1) == "udp") udp=1
+                if (($i == "--ip-dport" || $i == "--ip-destination-port") && $(i+1) == "67:68") ports=1
+                if ($i == "-j" && $(i+1) == "DROP") drop=1
+            }
+            if (ipv4 && udp && ports && drop) {
+                inbound = inbound || input
+                outbound = outbound || output
+            }
+        }
+        END { exit !(need == "any" ? inbound || outbound : inbound && outbound) }
+    ' <<< "$EBTABLES_OUTPUT"
+}
+
 echo "========================================"
 echo "Bridged Architecture Verification"
 echo "========================================"
@@ -109,14 +132,13 @@ echo ""
 echo "=== IP Configuration on br0 ==="
 
 BR0_IPS=$(ip addr show dev br0 | grep -oP 'inet \K[\d.]+')
-IP_COUNT=$(echo "$BR0_IPS" | wc -l)
+IP_COUNT=$(printf '%s\n' "$BR0_IPS" | grep -c .)
 
 if [ "$IP_COUNT" -ge 2 ]; then
     log_pass "br0 has multiple IPs (expected for chunk allocation)"
-    PRIMARY_IP=$(echo "$BR0_IPS" | head -1)
-    SECONDARY_IP=$(echo "$BR0_IPS" | head -2 | tail -1)
-    echo "    Primary: $PRIMARY_IP"
-    echo "    Secondary (gateway): $SECONDARY_IP"
+    PRIMARY_IP=$(python3 /usr/local/bin/manet_node_ipv4.py br0 2>/dev/null || true)
+    echo "    Node primary: ${PRIMARY_IP:-not allocated}"
+    echo "    All bridge addresses: $(echo "$BR0_IPS" | paste -sd ', ' -)"
 elif [ "$IP_COUNT" -eq 1 ]; then
     log_warn "br0 has only one IP (chunk allocation may not be complete)"
     echo "    IP: $(echo "$BR0_IPS" | head -1)"
@@ -134,7 +156,7 @@ if ! command -v ebtables &>/dev/null; then
 else
     EBTABLES_OUTPUT=$(ebtables -L FORWARD 2>/dev/null)
     
-    if echo "$EBTABLES_OUTPUT" | grep -q "DROP.*udp.*67:68.*bat0"; then
+    if dhcp_is_blocked bat0; then
         log_pass "DHCP blocked on bat0"
     else
         log_fail "DHCP is NOT blocked on bat0"
@@ -142,7 +164,7 @@ else
     
     for iface in "${MESH_INTERFACES[@]}" "${HALOW_INTERFACES[@]}"; do
         [ -z "$iface" ] && continue
-        if echo "$EBTABLES_OUTPUT" | grep -q "DROP.*udp.*67:68.*${iface}"; then
+        if dhcp_is_blocked "$iface"; then
             log_pass "DHCP blocked on $iface"
         else
             log_warn "DHCP is NOT blocked on $iface"
@@ -150,7 +172,7 @@ else
     done
 
     if [ -n "$AP_INTERFACE" ]; then
-        if echo "$EBTABLES_OUTPUT" | grep -q "DROP.*udp.*67:68.*${AP_INTERFACE}"; then
+        if dhcp_is_blocked "$AP_INTERFACE" any; then
             log_fail "DHCP is blocked on $AP_INTERFACE (AP interface - should allow!)"
         else
             log_pass "DHCP is allowed on $AP_INTERFACE (AP interface)"
