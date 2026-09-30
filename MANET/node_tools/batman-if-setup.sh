@@ -85,7 +85,7 @@ refresh_interfaces() {
     # Prefer role files written by radio-setup. This is important when a Morse
     # USB device exists but is intentionally disabled because the driver can
     # create a netdev that times out on link-up.
-    if [ -s /var/lib/mesh_if ] || [ -s /var/lib/halow_if ] || [ -s /var/lib/no_mesh_if ]; then
+    if [ -f /var/lib/mesh_if ]; then
         # Wait for role-file interfaces to appear in sysfs (drivers may be slow at boot)
         local all_ifaces
         all_ifaces="$(cat /var/lib/mesh_if /var/lib/halow_if /var/lib/no_mesh_if 2>/dev/null | tr '\n' ' ')"
@@ -98,7 +98,6 @@ refresh_interfaces() {
         done
 
         for WLAN in $(cat /var/lib/mesh_if 2>/dev/null); do
-            [ "$WLAN" = "$AP_IFACE" ] && continue
             [ -d "/sys/class/net/$WLAN" ] && STANDARD_MESH_INTERFACES+="$WLAN "
         done
         for WLAN in $(cat /var/lib/halow_if 2>/dev/null); do
@@ -358,6 +357,9 @@ stop() {
 
 case "$1" in
     start|stop)
+        # Role changes and ACS must not race a cached interface list.
+        exec 8>"${MANET_ACS_LOCK_FILE:-/run/channel-election.lock}"
+        flock -w 10 8 || exit 1
         "$1"
         ;;
     *)

@@ -111,11 +111,13 @@ log() {
     fi
 
     NOW=$(date +%s)
+    read -r UPTIME_NOW _ < "${MESH_UPTIME_FILE:-/proc/uptime}"
+    UPTIME_NOW=${UPTIME_NOW%.*}
 
     # 1. Aggregate all *active* scan reports from the registry, one per line.
     #
     # Key by the NODE_<mac> prefix in $1 and pair report/timestamp in END:
-    # the registry writes CHANNEL_REPORT_JSON before LAST_SEEN_TIMESTAMP, so
+    # the registry writes CHANNEL_REPORT_JSON before OBSERVED_AT_UPTIME, so
     # a single pass keyed on $2 (always empty with this FS) dropped the first
     # node's report and matched each report against the previous node's age.
     #
@@ -124,14 +126,14 @@ log() {
     # invalid and took the election out with it. Now a bad line is dropped and
     # the rest of the mesh still votes.
     FRESH_REPORTS=$(awk -F"['=]" \
-        -v now="$NOW" -v stale="$STALE_THRESHOLD" -v members="${ACS_MEMBERS-}" \
+        -v now="$NOW" -v uptime="$UPTIME_NOW" -v stale="$STALE_THRESHOLD" -v members="${ACS_MEMBERS-}" \
         'BEGIN { n=split(members, list, " "); for (i=1; i<=n; i++) allowed[list[i]]=1 }
-         /_LAST_SEEN_TIMESTAMP=/ { k=$1; sub(/_LAST_SEEN_TIMESTAMP$/, "", k); ts[k]=$3 }
+         /_OBSERVED_AT_UPTIME=/ { k=$1; sub(/_OBSERVED_AT_UPTIME$/, "", k); if ($3 ~ /^[0-9]+$/) seen[k]=uptime - $3 }
          /_CHANNEL_REPORT_JSON=/ { k=$1; sub(/_CHANNEL_REPORT_JSON$/, "", k); rpt[k]=$3 }
          END{
              for (k in rpt)
-                 if ((members == "" || (k in allowed)) && rpt[k] != "" && (k in ts) &&
-                     (now - ts[k]) >= -5 && (now - ts[k]) < stale)
+                 if ((members == "" || (k in allowed)) && rpt[k] != "" && (k in seen) &&
+                     seen[k] < stale)
                      print rpt[k]
          }' "$REGISTRY_FILE")
 

@@ -158,44 +158,62 @@ collect_interfaces_json() {
     python3 /usr/local/bin/mesh-status.py --dump-interfaces 2>/dev/null || echo '[]'
 }
 
+# The SSID hostapd actually broadcasts (base name plus node suffix), not the
+# base value in mesh.conf.
 collect_ap_ssid() {
-    grep "^lan_ap_ssid=" /etc/mesh.conf 2>/dev/null | head -1 | cut -d'=' -f2-
+    python3 /usr/local/bin/manet_eud_ap.py current 2>/dev/null || true
 }
 
-restart_mesh_supplicants() {
-    [ -n "$WPA_IFACE_2_4" ] && radio_iface_enabled "$WPA_IFACE_2_4" && systemctl restart "wpa_supplicant@${WPA_IFACE_2_4}.service"
-    [ -n "$WPA_IFACE_5_0" ] && radio_iface_enabled "$WPA_IFACE_5_0" && systemctl restart "wpa_supplicant@${WPA_IFACE_5_0}.service"
+# Service elections choose the holder of a shared VIP. Run them only once this
+# node holds an address allocation: until discovery has finished (complete, or
+# at its bounded deadline) the registry may contain only this node, which then
+# always wins and takes a VIP a peer still holds. Also run them at most once per
+# steady interval, not on every one-second startup pass. Local locks and this
+# gate reduce churn; they cannot guarantee a single holder across a partition,
+# which the elections resolve once the registries converge.
+ELECTION_INTERVAL=15
+LAST_ELECTION_RUN=""
+run_service_elections() {
+    local now election_script
+    [ -s /var/run/my_ipv4_chunk ] || return 0
+    read -r now _ < "${MESH_UPTIME_FILE:-/proc/uptime}"
+    now=${now%.*}
+    if [ -n "$LAST_ELECTION_RUN" ] && [ $((now - LAST_ELECTION_RUN)) -lt "$ELECTION_INTERVAL" ]; then
+        return 0
+    fi
+    LAST_ELECTION_RUN=$now
+    for election_script in "${ELECTION_DIR:-/usr/local/bin}"/*-election.sh; do
+        [[ -f "$election_script" && -x "$election_script" ]] || continue
+        # Channel election has its own schedule (ACS) or does not apply (static)
+        [[ "$election_script" =~ channel-election ]] && continue
+        if [[ "$election_script" =~ mediamtx-election ]]; then
+            [[ "$(grep "^mtx=" /etc/mesh.conf 2>/dev/null | cut -d'=' -f2)" == "y" ]] || continue
+        fi
+        if [[ "$election_script" =~ mumble-election ]]; then
+            [[ "$(grep "^mumble=" /etc/mesh.conf 2>/dev/null | cut -d'=' -f2)" == "y" ]] || continue
+        fi
+        "$election_script" &
+    done
 }
 
 # Leaving the lobby for data channels: clear any legacy bitrate masks (set by
 # tourguide lobby hops or limp-mode entry: they persist on the netdev across
 # supplicant restarts) and drop the limp-mode state file. limp-mode-manager
 # only runs in data state, so without this a lobby fallback never resets them.
-leave_lobby_cleanup() {
+leave_lobby_cleanup() (
+    exec 8>"${MANET_ACS_LOCK_FILE:-/run/channel-election.lock}"
+    flock -n 8 || return 1
+    load_mesh_roles
     [ -n "$WPA_IFACE_2_4" ] && iw dev "$WPA_IFACE_2_4" set bitrates 2>/dev/null
     [ -n "$WPA_IFACE_5_0" ] && iw dev "$WPA_IFACE_5_0" set bitrates 2>/dev/null
     rm -f "$LIMP_STATE_FILE"
-}
+)
 
 adopt_helper_channels() {
-    local target24="$1" target5="$2" band iface target actual
-    local -a changed=()
-    for band in 2_4 5_0; do
-        local iface_var="WPA_IFACE_$band"
-        iface=${!iface_var}
-        target="$target24"; [ "$band" != 5_0 ] || target="$target5"
-        [ -n "$target" ] && radio_iface_enabled "$iface" || continue
-        actual=$(timeout 2 iw dev "$iface" info 2>/dev/null | grep -oP 'channel.*\((\K[0-9]+)' || true)
-        [ "$actual" = "$target" ] || changed+=("$iface")
-    done
-    acs_write_channels "$target24" "$target5" || return 1
-    # A rotating lobby can be the live data channel. Accept the authenticated
-    # helper and finish discovery there without disturbing an established link.
-    for iface in "${changed[@]}"; do
-        systemctl restart "wpa_supplicant@${iface}.service" || return 1
-    done
+    # A live lobby channel may already be the authenticated data destination.
+    # Check actual channels and restart only changed radios, under one lock.
+    acs_write_channels "$1" "$2" data changed || return 1
     leave_lobby_cleanup
-    [ "${#changed[@]}" -eq 0 ] || sleep 5
     return 0
 }
 
@@ -262,8 +280,7 @@ check_mesh_quorum() {
 
 return_to_lobby() {
     log "Returning to lobby channels..."
-    acs_write_channels "$LOBBY_FREQ_2_4" "$LOBBY_FREQ_5_0" search || return 1
-    restart_mesh_supplicants
+    acs_write_channels "$LOBBY_FREQ_2_4" "$LOBBY_FREQ_5_0" search all || return 1
     sleep 5
 }
 
@@ -582,6 +599,7 @@ while true; do
             "--mac-addresses" "${IDENT_MACS[@]}"
             "--syncthing-id" "$SYNCTHING_ID"
             "--ipv4-chunk" "${MY_CHUNK:-0}"
+            "--ipv4-chunk-size" "$(cat /var/run/my_ipv4_chunk_size 2>/dev/null || echo 0)"
         )
         [ -n "$MY_CHUNK" ] && [ -n "$IDENT_IPV4" ] && IDENTITY_ARGS+=("--ipv4-address" "$IDENT_IPV4")
 
@@ -731,23 +749,7 @@ except Exception:
         fi
 
         # === RUN SERVICE ELECTIONS (needed for services to start) ===
-        for election_script in /usr/local/bin/*-election.sh; do
-            if [[ -f "$election_script" && -x "$election_script" ]]; then
-                # Skip channel-election here; the bootstrap stage below runs it
-                # on the clock-synchronized :25 window once dwell expires
-                [[ "$election_script" =~ channel-election ]] && continue
-                # Skip mediamtx-election.sh if MTX not enabled
-                if [[ "$election_script" =~ mediamtx-election ]]; then
-                    MTX_ENABLED=$(grep "^mtx=" /etc/mesh.conf 2>/dev/null | cut -d'=' -f2)
-                    [[ "$MTX_ENABLED" != "y" ]] && continue
-                fi
-                if [[ "$election_script" =~ mumble-election ]]; then
-                    MUMBLE_ENABLED=$(grep "^mumble=" /etc/mesh.conf 2>/dev/null | cut -d'=' -f2)
-                    [[ "$MUMBLE_ENABLED" != "y" ]] && continue
-                fi
-                "$election_script" &
-            fi
-        done
+        run_service_elections
         
         # === CHECK FOR HELPER BEACON (non-blocking) ===
         HELPER_MIGRATED=false
@@ -925,9 +927,8 @@ except Exception:
             MERGE_5_0=$(grep "^WINNER_5_0=" "$ELECTION_OUTPUT_FILE" | cut -d'=' -f2)
             rm -f "$ELECTION_OUTPUT_FILE"
 
-            if acs_write_channels "$MERGE_2_4" "$MERGE_5_0"; then
+            if acs_write_channels "$MERGE_2_4" "$MERGE_5_0" data all; then
                 log ">>> PARTITION MERGE: migrating to 2.4=${MERGE_2_4}, 5=${MERGE_5_0}"
-                restart_mesh_supplicants
                 sleep 5
                 continue
             else
@@ -939,20 +940,7 @@ except Exception:
         [ -x "$LIMP_MODE_MANAGER" ] && "$LIMP_MODE_MANAGER"
 
         # === STAGE 9: OTHER ELECTIONS ===
-        for election_script in /usr/local/bin/*-election.sh; do
-            if [[ -f "$election_script" && -x "$election_script" && "$election_script" != "$CHANNEL_ELECTION" ]]; then
-                # Skip mediamtx-election.sh if MTX not enabled
-                if [[ "$election_script" =~ mediamtx-election ]]; then
-                    MTX_ENABLED=$(grep "^mtx=" /etc/mesh.conf 2>/dev/null | cut -d'=' -f2)
-                    [[ "$MTX_ENABLED" != "y" ]] && continue
-                fi
-                if [[ "$election_script" =~ mumble-election ]]; then
-                    MUMBLE_ENABLED=$(grep "^mumble=" /etc/mesh.conf 2>/dev/null | cut -d'=' -f2)
-                    [[ "$MUMBLE_ENABLED" != "y" ]] && continue
-                fi
-                "$election_script" &
-            fi
-        done
+        run_service_elections
 
         # === STAGE 10: TOURGUIDE (every 2 min at :30) ===
         # The runner checks live HaLow readiness before election and departure;

@@ -79,9 +79,14 @@ class RecoveryStatusTests(unittest.TestCase):
         (self.root / 'manet-last-channel-change.json').write_text(json.dumps(
             {'reason': 'Returning to the connected mesh channel plan',
              'channels': {'2.4': 2462}, 'monotonic': time.monotonic() - 20}))
-        registry = {'one': {'LAST_REGISTRY_UPDATE': str(time.time() - 10)},
-                    'two': {'LAST_REGISTRY_UPDATE': str(time.time() - 600)},
-                    'three': {'LAST_REGISTRY_UPDATE': '0'},
+        # Freshness comes from local observation. A sender clock far behind
+        # (LAST_SEEN_TIMESTAMP) must not make a current peer look stale.
+        boot = time.clock_gettime(time.CLOCK_BOOTTIME)
+        registry = {'one': {'OBSERVED_AT_UPTIME': str(int(boot - 20)),
+                            'LAST_SEEN_TIMESTAMP': '100', 'LAST_REGISTRY_UPDATE': '100'},
+                    'two': {'OBSERVED_AT_UPTIME': str(int(boot - 400)),
+                            'LAST_REGISTRY_UPDATE': str(time.time())},
+                    'three': {'LAST_REGISTRY_UPDATE': str(time.time())},
                     'self': {'HOSTNAME': 'self'}}
         rows = self.values(recovery_status({'acs': 'y'}, registry, 'self'))
         self.assertIn('GPS, 2 minutes ago', rows['Clock'])

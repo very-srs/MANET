@@ -326,9 +326,9 @@ case "$driver" in
         ;;
 esac
 
-# Do not force mesh point mode if this interface is the designated AP
+# AP candidates may rejoin mesh after a wired EUD connects. Active roles win.
 AP_IF="$(cat /var/lib/ap_interface 2>/dev/null)"
-if [ -n "$AP_IF" ] && [ "$IFACE" = "$AP_IF" ]; then
+if [ "$IFACE" = "$AP_IF" ] && ! grep -Fxq "$IFACE" /var/lib/mesh_if 2>/dev/null; then
     exit 0
 fi
 
@@ -617,6 +617,8 @@ cat /var/lib/iface_map
 # === AP INTERFACE SELECTION (for wireless/auto EUD modes) ===
 
 AP_INTERFACE=""
+> /var/lib/ap_interface
+> /var/lib/ap_mesh_band
 
 if [[ "$eud" == "wireless" ]] || [[ "$eud" == "auto" ]]; then
     echo "EUD mode is $eud - selecting AP interface..."
@@ -654,9 +656,11 @@ if [[ "$eud" == "wireless" ]] || [[ "$eud" == "auto" ]]; then
         echo "AP interface selected: $AP_INTERFACE"
         sed -i "/^${AP_INTERFACE}$/d" /var/lib/mesh_if
         if [ "$(cat /var/lib/mesh_24_if 2>/dev/null)" = "$AP_INTERFACE" ]; then
+            echo 2.4 > /var/lib/ap_mesh_band
             > /var/lib/mesh_24_if
         fi
         if [ "$(cat /var/lib/mesh_5_if 2>/dev/null)" = "$AP_INTERFACE" ]; then
+            echo 5 > /var/lib/ap_mesh_band
             > /var/lib/mesh_5_if
         fi
         echo " > Removed $AP_INTERFACE from mesh_if (reserved for AP)"
@@ -806,6 +810,14 @@ fi
 # that service just fails.
 write_mesh_wpa_conf() {
     local iface="$1" freq="$2"
+    if [[ ! "$acs" =~ ^([Yy]|[Yy][Ee][Ss]|1|[Tt][Rr][Uu][Ee])$ ]]; then
+        local band="2.4"
+        [ "$freq" -lt 5000 ] || band="5"
+        freq=$(python3 /usr/local/bin/manet_static_channels.py get "$band") || {
+            provision_fail "Cannot load static channel plan for $iface"
+            return 1
+        }
+    fi
 cat <<-EOF > /etc/wpa_supplicant/wpa_supplicant-$iface-lobby.conf
 ctrl_interface=/var/run/wpa_supplicant
 country=$CFG80211_REGDOM
@@ -849,7 +861,11 @@ for WLAN in $(cat /var/lib/mesh_if); do
     fi
 
     echo " > Setting SAE key/SSID for $WLAN (${FREQ} MHz) ..."
-    write_mesh_wpa_conf "$WLAN" "$FREQ"
+    write_mesh_wpa_conf "$WLAN" "$FREQ" || {
+        provision_fail "Cannot write mesh supplicant configuration for $WLAN"
+        provision_state incomplete "$(date +%s)"
+        exit 1
+    }
 
     # Create the network interface config
 cat <<-EOF > /etc/systemd/network/30-$WLAN.network
@@ -873,8 +889,11 @@ rm -f /run/manet-rendezvous.json
 
 # === CONFIGURE AP INTERFACE (if wireless/auto mode) ===
 
-HOST_MAC=$(ip a | grep -A1 $(networkctl | grep -v bat | awk '/ether/ {print $2}' | head -1) \
-   | awk '/ether/ {print $2}' | cut -d':' -f 5-6 | sed 's/://g')
+HOST_MAC=$(python3 /usr/local/bin/manet_eud_ap.py suffix) || {
+    provision_fail "Cannot determine the node identity suffix"
+    provision_state incomplete "$(date +%s)"
+    exit 1
+}
 
 if [[ -n "$AP_INTERFACE" ]] && [ "$needs_rerun" -eq 1 ]; then
     echo " > Rename pending - deferring AP config to post-reboot re-run"
@@ -963,11 +982,16 @@ EOF
         AP_80211AC=""
     fi
 
+    AP_BROADCAST_SSID=$(python3 /usr/local/bin/manet_eud_ap.py ssid "$LAN_AP_SSID") || {
+        provision_fail "Invalid AP SSID or unavailable node identity"
+        provision_state incomplete "$(date +%s)"
+        exit 1
+    }
     cat <<-EOF > /etc/hostapd/hostapd.conf
 interface=$AP_INTERFACE
 bridge=br0
 driver=nl80211
-ssid=${LAN_AP_SSID}-${HOST_MAC}
+ssid=$AP_BROADCAST_SSID
 country_code=$REGULATORY_DOMAIN
 ieee80211d=1
 
@@ -1400,7 +1424,9 @@ systemctl enable --now nftables.service
 cp /root/networkd-dispatcher/off /etc/networkd-dispatcher/off.d/50-gateway-disable
 cp /root/networkd-dispatcher/off /etc/networkd-dispatcher/no-carrier.d/50-gateway-disable
 cp /root/networkd-dispatcher/off /etc/networkd-dispatcher/degraded.d/50-gateway-disable
-cp /root/networkd-dispatcher/carrier /etc/networkd-dispatcher/carrier.d/50-ethernet-detect
+# Canonical carrier/routable hooks are installed by the package builders.
+# Do not replace them with a second implementation during setup.
+systemctl disable --now mesh-default-route-fix.service 2>/dev/null || true
 chmod -R 755 /etc/networkd-dispatcher
 
 cat <<- EOF > /etc/systemd/system/ethernet-autodetect.service
@@ -1413,7 +1439,7 @@ ConditionPathExists=/usr/local/bin/ethernet-autodetect.sh
 [Service]
 Type=oneshot
 ExecStart=/usr/local/bin/ethernet-autodetect.sh --hotplug
-TimeoutStartSec=45
+TimeoutStartSec=240
 
 [Install]
 WantedBy=multi-user.target
@@ -1521,9 +1547,6 @@ systemctl enable mesh-hosts-update.timer
 
 
 # === HOSTNAME ===
-
-HOST_MAC=$(ip a | grep -A1 $(networkctl | grep -v bat | awk '/ether/ {print $2}' | head -1) \
-   | awk '/ether/ {print $2}' | cut -d':' -f 5-6 | sed 's/://g')
 
 set_mesh_hostname "mesh-${HOST_MAC}"
 

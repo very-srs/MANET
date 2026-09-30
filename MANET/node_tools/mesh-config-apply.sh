@@ -21,11 +21,14 @@
 # blocks below. acs and regulatory_domain were validated and staged but never
 # written, so a change to either ACKed, reported applied, and did nothing.
 
-PENDING_CONFIG="/var/run/mesh_pending_config.json"
-MESH_CONF="/etc/mesh.conf"
-APPLY_LOG="/var/log/mesh-config-apply.log"
-APPLIED_VERSION_FILE="/var/run/mesh_applied_config_version"
+RUN_DIR="${MANET_RUN_DIR:-/var/run}"
+WPA_DIR="${MANET_WPA_DIR:-/etc/wpa_supplicant}"
+PENDING_CONFIG="$RUN_DIR/mesh_pending_config.json"
+MESH_CONF="${MANET_MESH_CONF:-/etc/mesh.conf}"
+APPLY_LOG="${MANET_APPLY_LOG:-/var/log/mesh-config-apply.log}"
+APPLIED_VERSION_FILE="$RUN_DIR/mesh_applied_config_version"
 CONFIG_WRITER="${MANET_CONFIG_WRITER:-/usr/local/bin/mesh-config-write.py}"
+SUPPLICANT_HELPER="${MANET_SUPPLICANT_HELPER:-$(dirname "$0")/manet_supplicant.py}"
 
 log() {
     echo "[$(date +'%Y-%m-%d %H:%M:%S')] - CONFIG-APPLY: $1" | tee -a "$APPLY_LOG" | systemd-cat -t mesh-config-apply
@@ -177,7 +180,8 @@ apply_dangerous_settings() {
         log "  mesh_ssid: '$cur_ssid' → '$new_ssid'"
         conf_set "mesh_ssid" "$new_ssid"
         # Update wpa_supplicant configs
-        for conf in /etc/wpa_supplicant/wpa_supplicant-wlan*.conf; do
+        for conf in "$WPA_DIR"/wpa_supplicant-wlan*.conf; do
+            [[ "$conf" == *-uplink.conf ]] && continue
             [ -f "$conf" ] || continue
             python3 "$CONFIG_WRITER" "$conf" ssid "$new_ssid" --quoted || die "Cannot update supplicant SSID"
         done
@@ -186,9 +190,10 @@ apply_dangerous_settings() {
     [ -n "$new_key" ] && [ "$new_key" != "$cur_key" ] && {
         log "  mesh_key: changed"
         conf_set "mesh_key" "$new_key"
-        for conf in /etc/wpa_supplicant/wpa_supplicant-wlan*.conf; do
+        for conf in "$WPA_DIR"/wpa_supplicant-wlan*.conf; do
+            [[ "$conf" == *-uplink.conf ]] && continue
             [ -f "$conf" ] || continue
-            python3 "$CONFIG_WRITER" "$conf" sae_password "$new_key" || die "Cannot update supplicant password"
+            python3 "$CONFIG_WRITER" "$conf" sae_password "$new_key" --quoted || die "Cannot update supplicant password"
         done
     }
 
@@ -196,16 +201,12 @@ apply_dangerous_settings() {
         log "  ipv4_network: '$cur_cidr' → '$new_cidr'"
         conf_set "ipv4_network" "$new_cidr"
         # IP manager will recalculate chunk on next cycle
-        rm -f /var/run/my_ipv4_chunk /var/run/mesh_ipv4_state 2>/dev/null
+        rm -f "$RUN_DIR/my_ipv4_chunk" "$RUN_DIR/my_ipv4_chunk_size" "$RUN_DIR/mesh_ipv4_state" 2>/dev/null
     }
 
     # Restart wpa_supplicant on configured mesh interfaces
     log "  Restarting wpa_supplicant on mesh interfaces..."
-    for iface in $(cat /var/lib/mesh_if /var/lib/halow_if 2>/dev/null); do
-        [ -z "$iface" ] && continue
-        systemctl restart "wpa_supplicant@${iface}.service" 2>/dev/null || \
-        systemctl restart "wpa_supplicant-s1g-${iface}.service" 2>/dev/null || true
-    done
+    python3 "$SUPPLICANT_HELPER" restart || die "Mesh supplicant restart failed"
 
     log "  Dangerous settings applied. Mesh reconnecting..."
 }
@@ -224,6 +225,6 @@ echo "$VERSION" > "$APPLIED_VERSION_FILE"
 rm -f "$PENDING_CONFIG"
 
 # Clear the ACK version state file so node-manager stops broadcasting it
-rm -f /var/run/mesh_config_ack_version
+rm -f "$RUN_DIR/mesh_config_ack_version"
 
 log "=== Config apply complete ==="

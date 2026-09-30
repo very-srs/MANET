@@ -183,17 +183,71 @@ is_service_reserved_ip() {
     [ "$offset" -ge 0 ] && [ "$offset" -lt "$SERVICES_RESERVED" ]
 }
 
-# A saved allocation is a preference, not ownership. Check the fresh registry
-# before restoring it, ignoring our own identity cached elsewhere in the mesh.
-chunk_claimed_by_peer() {
-    local proposed="$1" chunk mac entry
-    for entry in "${CLAIMED_CHUNKS[@]}"; do
-        IFS=, read -r chunk mac <<< "$entry"
-        if [[ "$chunk" == "$proposed" ]] && ! mac_is_local "$mac"; then
+# Peer claims as absolute address ranges. Block sizes are provisioned per node,
+# so a peer's chunk NUMBER means nothing here: only its advertised address and
+# size do. Claims file lines are chunk,mac,start_int,size.
+#
+# A claim without a size cannot be placed. Guessing our own size would recreate
+# the mixed-size overlap this format exists to prevent, so such a claim marks
+# the snapshot incomplete: new allocation waits for a complete identity, while
+# its known primary address still counts for conflict checks.
+MAX_PEER_CHUNK_SIZE=255   # max_euds_per_node is at most 253
+load_claims() {
+    local chunk mac start size
+    CLAIM_STARTS=(); CLAIM_ENDS=(); CLAIM_MACS=(); INCOMPLETE_CLAIMS=()
+    CLAIMS_LOADED=1
+    [ -f "$CLAIMED_CHUNKS_FILE" ] || return 0
+    while IFS=, read -r chunk mac start size; do
+        [[ "$chunk" =~ ^[0-9]+$ && -n "$mac" ]] || continue
+        mac_is_local "$mac" && continue
+        [[ "$size" =~ ^[0-9]+$ ]] || size=0
+        if ! [[ "$start" =~ ^[0-9]{1,10}$ ]] || [ "$start" -gt 4294967295 ]; then
+            INCOMPLETE_CLAIMS+=("$mac")
+            continue
+        fi
+        if [ "$size" -eq 0 ]; then
+            INCOMPLETE_CLAIMS+=("$mac")
+            size=1
+        elif [ "$size" -gt "$MAX_PEER_CHUNK_SIZE" ]; then
+            # Implausible, so unusable as a range; never allocate over it.
+            log "Implausible claim from $mac: $size addresses"
+            INCOMPLETE_CLAIMS+=("$mac")
+            size=1
+        fi
+        CLAIM_STARTS+=("$start")
+        CLAIM_ENDS+=($((start + size - 1)))
+        CLAIM_MACS+=("$mac")
+    done < "$CLAIMED_CHUNKS_FILE"
+}
+
+# Absolute first and last address (as integers) of one of OUR chunks.
+chunk_range() {
+    local ips primary
+    ips=$(get_chunk_ips "$1") || return 1
+    primary=$(ip_to_int "${ips%%:*}") || return 1
+    echo "$primary $((primary + CHUNK_SIZE - 1))"
+}
+
+# Print the MAC of a peer whose claim overlaps [start, end]; succeed if found.
+# Our own identity cached elsewhere in the mesh is not a peer.
+range_claimed_by_peer() {
+    local start="$1" end="$2" i
+    [ -n "${CLAIMS_LOADED:-}" ] || load_claims
+    for i in "${!CLAIM_STARTS[@]}"; do
+        if [ "${CLAIM_STARTS[$i]}" -le "$end" ] && [ "${CLAIM_ENDS[$i]}" -ge "$start" ]; then
+            echo "${CLAIM_MACS[$i]}"
             return 0
         fi
     done
     return 1
+}
+
+# A saved allocation is a preference, not ownership. Check the fresh registry
+# before restoring it.
+chunk_claimed_by_peer() {
+    local range
+    range=$(chunk_range "$1") || return 1
+    range_claimed_by_peer ${range} >/dev/null
 }
 
 # Get a random available chunk
@@ -221,20 +275,24 @@ get_random_chunk() {
     
     log "Network supports $MAX_CHUNKS chunks (chunk_size=$CHUNK_SIZE, max_euds=$MAX_EUDS)"
     
-    # Build list of claimed chunks
-    declare -A claimed_chunks
-    if [ -f "$CLAIMED_CHUNKS_FILE" ]; then
-        while IFS=, read -r chunk mac; do
-            claimed_chunks[$chunk]=1
-        done < "$CLAIMED_CHUNKS_FILE"
-    fi
-    
-    # Find available chunks
+    # Mark every local chunk index a peer range touches, then collect the
+    # rest. One pass over claims plus one over chunks, no per-chunk subshells.
+    [ -n "${CLAIMS_LOADED:-}" ] || load_claims
+    local base=$((MIN_INT + SERVICES_RESERVED)) first last j c
+    local -A blocked=()
+    for j in "${!CLAIM_STARTS[@]}"; do
+        [ "${CLAIM_ENDS[$j]}" -ge "$base" ] || continue
+        first=$(( (CLAIM_STARTS[j] - base) / CHUNK_SIZE ))
+        [ "${CLAIM_STARTS[$j]}" -ge "$base" ] || first=0
+        last=$(( (CLAIM_ENDS[j] - base) / CHUNK_SIZE ))
+        [ "$last" -lt "$MAX_CHUNKS" ] || last=$((MAX_CHUNKS - 1))
+        for ((c=first; c<=last; c++)); do
+            blocked[$c]=1
+        done
+    done
     local available_chunks=()
     for ((i=0; i<MAX_CHUNKS; i++)); do
-        if [ -z "${claimed_chunks[$i]}" ]; then
-            available_chunks+=($i)
-        fi
+        [ -n "${blocked[$i]:-}" ] || available_chunks+=($i)
     done
     
     if [ ${#available_chunks[@]} -eq 0 ]; then
@@ -359,7 +417,7 @@ configure_ebtables_dhcp_isolation() {
         fi
         
         # Skip if this is the AP interface
-        if [ -n "$AP_INTERFACE" ] && [ "$iface" == "$AP_INTERFACE" ]; then
+        if [ "$iface" = "$AP_INTERFACE" ] && ! grep -Fxq "$iface" /var/lib/mesh_if 2>/dev/null; then
             log "Allowing DHCP on $iface (AP interface)"
             continue
         fi
@@ -503,18 +561,19 @@ if [ -n "$CURRENT_IPV4" ]; then
     log "Current IPv4 on br0: ${CURRENT_IPV4}"
 fi
 
-# Load claimed chunks from registry
-if [ -f "$CLAIMED_CHUNKS_FILE" ]; then
-    mapfile -t CLAIMED_CHUNKS < "$CLAIMED_CHUNKS_FILE"
-else
-    CLAIMED_CHUNKS=()
-    log "Warning: Claimed chunks file not found"
-fi
+# Load claimed ranges from registry
+[ -f "$CLAIMED_CHUNKS_FILE" ] || log "Warning: Claimed chunks file not found"
+load_claims
 
 # --- State Machine ---
 case $IPV4_STATE in
     "UNCONFIGURED")
         PROPOSED_CHUNK=""
+
+        if [ "${#INCOMPLETE_CLAIMS[@]}" -gt 0 ]; then
+            log "Deferring allocation: peer claim without a block size from ${INCOMPLETE_CLAIMS[*]} (identity incomplete or outdated software)"
+            exit 0
+        fi
 
         # Check if we have a persistent chunk and if network has changed
         if [ -n "$PERSISTENT_CHUNK" ] && [ -n "$PERSISTENT_IPV4" ]; then
@@ -586,33 +645,23 @@ case $IPV4_STATE in
             
             log "Successfully claimed chunk ${PROPOSED_CHUNK}"
             
-            # Write chunk to temp file for encoder to pick up
+            # Write chunk and block size for the identity publisher to pick up
+            echo "$CHUNK_SIZE" > /var/run/my_ipv4_chunk_size
             echo "$PROPOSED_CHUNK" > /var/run/my_ipv4_chunk
         fi
         ;;
 
     "CONFIGURED")
-        # Check for conflicts
+        # Check for conflicts: any peer range overlapping our whole block,
+        # not only a peer whose primary equals ours.
         CONFLICTING_MAC=""
-        CONFLICTING_CHUNK=""
-        
-        for entry in "${CLAIMED_CHUNKS[@]}"; do
-            IFS=, read -r CLAIMED_CHUNK CLAIMED_MAC <<< "$entry"
-            
-            # Get this chunk's br0 primary IP
-            CHUNK_IPS=$(get_chunk_ips "$CLAIMED_CHUNK")
-            IFS=: read -r CHUNK_BR0_PRIMARY _ _ _ <<< "$CHUNK_IPS"
-            
-            # Check if someone else claimed our IP
-            if [[ "$CHUNK_BR0_PRIMARY" == "$CURRENT_IPV4" ]] && ! mac_is_local "$CLAIMED_MAC"; then
-                CONFLICTING_MAC="$CLAIMED_MAC"
-                CONFLICTING_CHUNK="$CLAIMED_CHUNK"
-                break
-            fi
-        done
+        MY_START=$(ip_to_int "$CURRENT_IPV4")
+        if [ -n "$MY_START" ]; then
+            CONFLICTING_MAC=$(range_claimed_by_peer "$MY_START" $((MY_START + CHUNK_SIZE - 1))) || true
+        fi
 
         if [[ -n "$CONFLICTING_MAC" ]]; then
-            log "CONFLICT DETECTED for ${CURRENT_IPV4}! Conflicting MAC: ${CONFLICTING_MAC} (chunk ${CONFLICTING_CHUNK})"
+            log "CONFLICT DETECTED for ${CURRENT_IPV4}/${CHUNK_SIZE} addresses! Overlapping claim from ${CONFLICTING_MAC}"
 
             # Tie-breaker: higher MAC wins
             if [[ "$MY_MAC" > "$CONFLICTING_MAC" ]]; then
@@ -625,11 +674,12 @@ case $IPV4_STATE in
                 PERSISTENT_CHUNK=""
                 PERSISTENT_NETWORK=""
                 save_persistent_state
-                rm -f /var/run/my_ipv4_chunk
+                rm -f /var/run/my_ipv4_chunk /var/run/my_ipv4_chunk_size
             fi
         else
             # No conflict, only reconfigure if something actually changed
             if [ -n "$PERSISTENT_CHUNK" ]; then
+                echo "$CHUNK_SIZE" > /var/run/my_ipv4_chunk_size
                 echo "$PERSISTENT_CHUNK" > /var/run/my_ipv4_chunk
 
                 # Get current chunk IPs

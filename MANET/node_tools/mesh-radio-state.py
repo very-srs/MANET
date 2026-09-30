@@ -118,9 +118,8 @@ def is_halow_iface(iface):
 
 
 def service_for_iface(iface):
-    if is_halow_iface(iface):
-        return f"wpa_supplicant-s1g-{iface}.service"
-    return f"wpa_supplicant@{iface}.service"
+    from manet_supplicant import service_name
+    return service_name(iface, is_halow_iface(iface))
 
 
 def active_bat_ifaces():
@@ -191,6 +190,16 @@ def validate_pkg(pkg):
         return False, "missing version"
     if not any(pkg.get(key) for key in ACTION_KEYS):
         return False, "package carries no action"
+
+    if pkg.get('wifi_channel') and target_matches(pkg):
+        from manet_radio import validate_wifi_channel
+        wifi = pkg['wifi_channel']
+        if not isinstance(wifi, dict):
+            return False, 'Wi-Fi channel action must be an object'
+        try:
+            validate_wifi_channel(wifi.get('band'), wifi.get('channel'))
+        except (OSError, ValueError, TypeError) as error:
+            return False, str(error)
 
     desired = pkg.get("desired") or {}
     if not isinstance(desired, dict):
@@ -292,8 +301,8 @@ def apply_package(pkg):
 
     wifi = pkg.get("wifi_channel")
     if wifi:
-        log(f"Applying Wi-Fi channel {wifi.get('iface')}={wifi.get('channel')}")
-        result = apply_wifi_channel(wifi.get("iface"), wifi.get("channel"), wifi.get("dbm"))
+        log(f"Applying Wi-Fi channel {wifi.get('band')} GHz={wifi.get('channel')}")
+        result = apply_wifi_channel(wifi.get("band"), wifi.get("channel"), wifi.get("dbm"))
         if not result.get("ok"):
             raise RuntimeError(result.get("error", "wifi channel failed"))
 

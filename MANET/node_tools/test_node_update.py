@@ -153,6 +153,21 @@ if os.environ.get('TEST_SYSTEMCTL_FAIL') == args:
         self.updater.update()
         self.assertIn('node-manager-static.sh', self.old_manager.read_text())
 
+    def test_update_retires_vip_deleting_route_service(self):
+        unit = self.root / 'etc/systemd/system/mesh-default-route-fix.service'
+        unit.parent.mkdir(parents=True)
+        unit.write_text('old unit')
+        link = unit.parent / 'multi-user.target.wants/mesh-default-route-fix.service'
+        link.parent.mkdir()
+        link.symlink_to('../mesh-default-route-fix.service')
+        script = self.root / 'usr/local/bin/mesh-default-route-fix.sh'
+        script.write_text('old script')
+        self.updater.update()
+        self.assertFalse(unit.exists())
+        self.assertFalse(link.is_symlink())
+        self.assertFalse(script.exists())
+        self.assertIn('systemctl disable --now mesh-default-route-fix.service', self.history())
+
     def test_missing_malformed_wrong_filename_and_mismatched_checksum(self):
         valid = self.checksum.read_text()
         for content in (None, '', 'garbage', valid.replace('cm4-', 'r3a-'), '0' * 64 + '  cm4-tools.tar.gz\n', valid + valid):

@@ -44,6 +44,7 @@ def recovery_status(conf, registry, hostname):
     time_run = Path(os.environ.get('MANET_TIME_RUN_DIR', '/run'))
     roles = Path(os.environ.get('MANET_IFACE_STATE_DIR', '/var/lib'))
     now, elapsed = time.time(), time.monotonic()
+    boot_now = time.clock_gettime(time.CLOCK_BOOTTIME)
     acs = read_json(run / 'manet-acs-status.json')
     observation_age = age(acs.get('monotonic'), elapsed)
     fresh = observation_age is not None and observation_age <= 45
@@ -111,9 +112,14 @@ def recovery_status(conf, registry, hostname):
     for node in registry.values():
         if node.get('HOSTNAME') == hostname:
             continue
-        stamp = node.get('LAST_REGISTRY_UPDATE', node.get('LAST_SEEN_TIMESTAMP'))
-        seconds = age(stamp, now)
-        if seconds is None or str(stamp) in ('0', '0.0'):
+        # When this node last saw the peer's record change, on the boot clock
+        # (/proc/uptime), so wall-clock corrections cannot age or refresh it.
+        # The peer's own timestamp is not a freshness signal.
+        try:
+            seconds = boot_now - float(node.get('OBSERVED_AT_UPTIME'))
+        except (TypeError, ValueError):
+            seconds = None
+        if seconds is None or not math.isfinite(seconds) or seconds < 0:
             counts['unknown'] += 1
         else:
             counts['fresh' if seconds <= 300 else 'stale'] += 1

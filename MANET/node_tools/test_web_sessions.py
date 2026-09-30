@@ -14,7 +14,7 @@ import unittest
 from unittest.mock import patch
 from urllib.parse import urlencode
 
-from manet_web_sessions import SessionStore
+from manet_web_sessions import SessionStore, LoginThrottled
 
 
 TOOLS = Path(__file__).resolve().parent
@@ -130,6 +130,29 @@ class SessionTests(unittest.TestCase):
             self.assertEqual(list(pool.map(self.store.valid, tokens)),
                              [bool(i % 2) for i in range(32)])
 
+    def test_failure_budgets_expire_without_revoking_sessions(self):
+        token = self.store.login(self.password, client='a')
+        for _ in range(5):
+            self.assertIsNone(self.store.login('wrong', client='a'))
+        with self.assertRaises(LoginThrottled) as raised:
+            self.store.login(self.password, client='a')
+        self.assertEqual(raised.exception.retry_after, 60)
+        self.assertTrue(self.store.valid(token))
+        self.assertIsNotNone(self.store.login(self.password, client='b'))
+        self.now += 60
+        self.assertIsNotNone(self.store.login(self.password, client='a'))
+
+    def test_parallel_and_rotating_clients_cannot_exceed_global_budget(self):
+        def attempt(index):
+            try:
+                self.store.login('wrong', client=str(index))
+                return True
+            except LoginThrottled:
+                return False
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            self.assertEqual(sum(pool.map(attempt, range(100))), 30)
+        self.assertEqual(len(self.store._login_failures), 30)
+
 
 class MemoryConnection:
     def __init__(self, raw):
@@ -212,16 +235,55 @@ class WebSessionTests(unittest.TestCase):
         self.assertEqual(response.getheader('Cache-Control'), 'no-store')
         self.assertTrue(self.store.valid(data['token']))
 
+    def test_invalid_stage_has_no_local_or_mesh_effect(self):
+        _, token = self.login()
+        with patch.object(status, 'apply_local_settings') as local, \
+                patch.object(status, 'broadcast_config_package') as broadcast:
+            for changes in ({'lan_ap_ssid': 'Good', 'mesh_ssid': 'é' * 17},
+                            {'max_euds_per_node': '5'}, {'unknown': ''}):
+                response = self.request('POST', '/api/admin/stage',
+                                        json.dumps({'config': changes}).encode(), token)
+                self.assertEqual(response.status, 400, response.payload)
+            local.assert_not_called(); broadcast.assert_not_called()
+
+    def test_unchanged_older_values_do_not_block_unrelated_edit(self):
+        self.conf.write_text(self.conf.read_text() + "mesh_ssid=Team's Mesh\n")
+        _, token = self.login()
+        with patch.object(status, 'apply_local_settings') as local, \
+                patch.object(status, 'broadcast_config_package') as broadcast:
+            response = self.request('POST', '/api/admin/stage', json.dumps({'config': {
+                'mesh_ssid': "Team's Mesh", 'lan_ap_ssid': 'New AP'}}).encode(), token)
+        self.assertEqual(response.status, 200, response.payload)
+        self.assertTrue(json.loads(response.payload)['local_only'])
+        local.assert_called_once_with({'lan_ap_ssid': 'New AP'}, str(self.conf))
+        broadcast.assert_not_called()
+
     def test_json_login_rejects_bad_body_and_non_admin_passwords(self):
         bodies = [b'not json', b'[]', b'null', b'{}']
         bodies += [json.dumps({'password': value}).encode()
                    for value in (None, [], '\ud800', 'wrong', 'radio-password', 'ap-password')]
         for body in bodies:
             with self.subTest(body=body):
+                self.now += 60  # Each malformed-input case has its own budget.
                 response = self.request('POST', '/api/perf-auth', body)
                 self.assertEqual(response.status, 401)
                 self.assertFalse(json.loads(response.payload)['ok'])
                 self.assertIsNone(response.getheader('Set-Cookie'))
+
+    def test_login_aliases_share_limit_and_return_retry_header(self):
+        paths = ['/manage/login', '/auth/perf-login', '/api/perf-auth']
+        for i in range(6):
+            path = paths[i % len(paths)]
+            body = (json.dumps({'password': 'wrong'}).encode() if path == '/api/perf-auth'
+                    else urlencode({'password': 'wrong'}).encode())
+            response = self.request('POST', path, body)
+            if i < 5:
+                self.assertNotEqual(response.status, 429)
+            else:
+                self.assertEqual(response.status, 429)
+                self.assertEqual(response.getheader('Retry-After'), '60')
+        self.now += 60
+        self.login()
 
     def test_logout_rejects_replayed_cookie_but_other_login_survives(self):
         for path in ('/manage/logout', '/auth/perf-logout'):

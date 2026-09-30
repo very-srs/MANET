@@ -39,6 +39,16 @@ get_mediamtx_ipv4_vip() {
     echo "${FIRST_IP%.*}.$((${FIRST_IP##*.} + 1))"
 }
 
+# --- Single run at a time ---
+# The node manager starts elections in the background; an overlapping run could
+# add and remove the VIP or restart the service underneath this one.
+LOCK_FILE="${MEDIAMTX_ELECTION_LOCK:-/var/run/mediamtx-election.lock}"
+exec 200>"$LOCK_FILE"
+if ! flock -n 200; then
+    log "Election already in progress, exiting"
+    exit 0
+fi
+
 # --- Check Dependencies ---
 if [ -z "$MY_MAC" ]; then
     log "Cannot determine local MAC address (${CONTROL_IFACE} not up). Exiting."
@@ -97,6 +107,8 @@ BEST_CANDIDATE_MAC=""
 HIGHEST_TQ="-1"
 NOW=$(date +%s)
 STALE_THRESHOLD=600 # 10 minutes (must match node-manager)
+read -r UPTIME_NOW _ < "${MESH_UPTIME_FILE:-/proc/uptime}"
+UPTIME_NOW=${UPTIME_NOW%.*}
 
 # Read TQ values directly from the registry file
 while read tq_line; do
@@ -105,16 +117,13 @@ while read tq_line; do
     MAC_SANITIZED=$(echo "$metric_varname" | sed -n 's/NODE_\([0-9a-fA-F]\+\)_MEAN_THROUGHPUT_MBPS/\1/p')
 
     if [ -n "$MAC_SANITIZED" ]; then
-        # --- Check Timestamp ---
-        TIMESTAMP_VAR="NODE_${MAC_SANITIZED}_LAST_SEEN_TIMESTAMP"
-        TIMESTAMP_LINE=$(grep "^${TIMESTAMP_VAR}=" "$REGISTRY_STATE_FILE")
-        TIMESTAMP_VAL=$(echo "$TIMESTAMP_LINE" | cut -d'=' -f2 | tr -d "'")
-        
-        if [ -z "$TIMESTAMP_VAL" ] || [ $((NOW - TIMESTAMP_VAL)) -gt $STALE_THRESHOLD ]; then
+        # Freshness as observed by this node (boot clock), not the peer's clock.
+        AT_VAL=$(grep "^NODE_${MAC_SANITIZED}_OBSERVED_AT_UPTIME=" "$REGISTRY_STATE_FILE" | cut -d'=' -f2 | tr -d "'")
+        if ! [[ "$AT_VAL" =~ ^[0-9]+$ ]] || [ $((UPTIME_NOW - AT_VAL)) -gt $STALE_THRESHOLD ]; then
             log "Skipping stale candidate $MAC_SANITIZED"
             continue # Skip to the next node
         fi
-        # --- End Timestamp Check ---
+        # --- End freshness check ---
 
         MAC_VAR="NODE_${MAC_SANITIZED}_MAC_ADDRESS"
         MAC_LINE=$(grep "^${MAC_VAR}=" "$REGISTRY_STATE_FILE")

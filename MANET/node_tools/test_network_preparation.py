@@ -25,7 +25,7 @@ class PreparationTests(unittest.TestCase):
         self.events = self.root / 'events'
         self.env = dict(os.environ, PATH=str(self.bin) + os.pathsep + os.environ['PATH'],
                         TEST_EVENTS=str(self.events), TEST_FAIL='', TEST_AP_ACTIVE='0')
-        for name in ('systemctl', 'ip', 'iw', 'unblock-wifi-rfkill.sh'):
+        for name in ('systemctl', 'ip', 'iw', 'batctl', 'unblock-wifi-rfkill.sh'):
             target = self.bin / name
             if name == 'unblock-wifi-rfkill.sh':
                 target = self.root / 'usr/local/bin' / name
@@ -45,6 +45,12 @@ if name == 'systemctl' and args == 'is-enabled dnsmasq.service':
 ''')
             target.chmod(0o755)
         (self.root / 'var/lib/ap_interface').write_text('wlan3\n')
+        (self.root / 'var/lib/mesh_if').write_text('')
+        helper = self.root / 'usr/local/bin/manet_ap_mesh.py'
+        helper.write_text(self.isolated((TOOLS / 'manet_ap_mesh.py').read_text()))
+        self.env.update(PYTHONPATH=str(TOOLS),
+                        MANET_IFACE_STATE_DIR=str(self.root / 'var/lib'),
+                        MANET_ACS_LOCK_FILE=str(self.root / 'run/channel-election.lock'))
 
     def isolated(self, text):
         # Only file paths are redirected. The real shell logic is unchanged.
@@ -67,6 +73,7 @@ if name == 'systemctl' and args == 'is-enabled dnsmasq.service':
             'systemctl is-active --quiet hostapd.service',
             'unblock-wifi-rfkill.sh ',
             'systemctl stop wpa_supplicant@wlan3.service',
+            'batctl if',
             'ip link set wlan3 down', 'ip link set wlan3 nomaster',
             'iw dev wlan3 set type managed', 'ip link set wlan3 up'])
         # A restart must prepare again even if the old preparation unit remains

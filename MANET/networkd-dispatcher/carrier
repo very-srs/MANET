@@ -1,31 +1,3 @@
 #!/bin/bash
-#
-# This script is triggered on network interface state changes and then does nothing unless
-# the interface is end0 (the ethernet interface).  It first checks for internet access and
-# if found triggers the ethernet-autodetect script to continue with ethernet based gateway
-# swap or EUD access logic
-#
-
-TARGET_IFACE="end0"
-
-log() {
-    echo "[$(date +'%Y-%m-%d %H:%M:%S')] - CARRIER-DETECT: $1" | systemd-cat -t ethernet-carrier
-}
-
-# Exit when the interface that changed is not end0
-if [ "$IFACE" != "$TARGET_IFACE" ]; then
-    exit 0
-fi
-
-log "Carrier state changed on $IFACE - running hotplug detection"
-/usr/local/bin/ethernet-autodetect.sh --hotplug
-
-# Automatic tool updates if enabled and internet is now available.
-#
-# auto_update is written as y/n -- by the flasher, by the web UI
-# (manet_manage.py writes 'y':'n'), and mesh-config-sync.py validates it as
-# exactly y or n. This tested for '=1' until 2026-08-31, which no code path
-# has ever written, so auto-update never ran on any node.
-if grep -qiE '^auto_update=(y|yes|1|true)[[:space:]]*$' /etc/mesh.conf 2>/dev/null && ping -c 1 -W 2 -I "$IFACE" 8.8.8.8 >/dev/null 2>&1; then
-    /usr/local/bin/node-update.sh --routine
-fi
+# Compatibility entry point; all behavior lives in the packaged state hook.
+exec /etc/networkd-dispatcher/carrier.d/50-ethernet-detect "$@"

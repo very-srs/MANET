@@ -95,6 +95,16 @@ size in two consecutive one-second observations. Multiple new disks are an
 error, even if one is still reporting zero size. `lsblk` failures stop the flow;
 existing disks and loop devices cannot become the automatic target.
 
+`flash-target.py` is included in the release flasher bundle. It checks the whole
+disk and all descendant devices, rejects active mapped storage and mounts outside
+`/media` or `/run/media`, and reports disk identity for confirmation. The selected
+fingerprint includes name, major/minor number, capacity, model, serial, WWN and
+the kernel disk sequence when available. `prepare` rechecks it, unmounts allowed
+desktop mounts, then rechecks identity and mount state. Linux calls it before
+wipefs, dd and rpi-imager. Batch flashing requires typed confirmation for each
+target and blank input never authorizes a write. These checks are tested with
+simulated inventories; physical unplug/replug behavior still needs a bench test.
+
 ## Finding a usable rpi-imager
 
 The flasher passes `--first-run-script`, which is the only way the generated

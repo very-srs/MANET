@@ -341,6 +341,7 @@ class Updater:
         for label, script in (("50-manet-provision", "manet-provision-status.sh"),
                               ("55-manet-power", "manet-power-status.sh")):
             self.install_link(motd / label, f"/usr/local/bin/{script}")
+        self.retire_route_fix()
         run_command(["systemctl", "daemon-reload"])
         for service in ("mesh-status.service", "node-manager.service"):
             run_command(["systemctl", "restart", service])
@@ -360,6 +361,16 @@ class Updater:
             temporary.symlink_to(link)
             os.replace(temporary, target)
             sync_directory(target.parent)
+
+    def retire_route_fix(self):
+        unit = self.destination('etc/systemd/system/mesh-default-route-fix.service')
+        if unit.exists():
+            run_command(['systemctl', 'disable', '--now', 'mesh-default-route-fix.service'])
+        for name in ('etc/systemd/system/multi-user.target.wants/mesh-default-route-fix.service',
+                     'etc/systemd/system/mesh-default-route-fix.service',
+                     'usr/local/bin/mesh-default-route-fix.sh'):
+            path = self.destination(name)
+            path.unlink(missing_ok=True)
 
     def update(self):
         run = self.root / "run"

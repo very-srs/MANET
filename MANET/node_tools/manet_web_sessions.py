@@ -2,6 +2,7 @@
 
 import hashlib
 import hmac
+import math
 import re
 import secrets
 import threading
@@ -11,6 +12,15 @@ import time
 SESSION_SECONDS = 48 * 60 * 60
 MAX_SESSIONS = 64
 TOKEN_PATTERN = re.compile(r'[A-Za-z0-9_-]{43}')
+LOGIN_WINDOW = 60
+LOGIN_CLIENT_FAILURES = 5
+LOGIN_GLOBAL_FAILURES = 30
+
+
+class LoginThrottled(ValueError):
+    def __init__(self, retry_after):
+        self.retry_after = max(1, math.ceil(retry_after))
+        super().__init__('Too many login attempts; try again shortly')
 
 
 class SessionStore:
@@ -22,6 +32,7 @@ class SessionStore:
         self.clock = clock
         self._password_digest = None
         self._sessions = {}
+        self._login_failures = []
         self._lock = threading.Lock()
 
     @staticmethod
@@ -37,22 +48,35 @@ class SessionStore:
         digest = hashlib.sha256(password.encode('utf-8')).digest()
         if digest != self._password_digest:
             self._sessions.clear()
+            self._login_failures.clear()
             self._password_digest = digest
         now = self.clock()
         self._sessions = {key: deadline for key, deadline in self._sessions.items()
                           if deadline > now}
         return password, now
 
-    def login(self, password, previous_token=''):
+    def login(self, password, previous_token='', client='local'):
         with self._lock:
             expected, now = self._refresh()
-            if not expected or not isinstance(password, str):
-                return None
+            # All HTTP aliases share this budget. Bound memory by the global
+            # failure limit; arbitrary client addresses cannot grow a map.
+            self._login_failures = [(when, ip) for when, ip in self._login_failures
+                                    if when + LOGIN_WINDOW > now]
+            own = [when for when, ip in self._login_failures if ip == client]
+            deadlines = []
+            if len(own) >= LOGIN_CLIENT_FAILURES:
+                deadlines.append(own[-LOGIN_CLIENT_FAILURES] + LOGIN_WINDOW)
+            if len(self._login_failures) >= LOGIN_GLOBAL_FAILURES:
+                deadlines.append(self._login_failures[-LOGIN_GLOBAL_FAILURES][0] + LOGIN_WINDOW)
+            if deadlines:
+                raise LoginThrottled(max(deadlines) - now)
             try:
-                supplied = password.encode('utf-8')
+                matches = (bool(expected) and isinstance(password, str)
+                           and hmac.compare_digest(password.encode('utf-8'), expected.encode('utf-8')))
             except UnicodeEncodeError:
-                return None
-            if not hmac.compare_digest(supplied, expected.encode('utf-8')):
+                matches = False
+            if not matches:
+                self._login_failures.append((now, client))
                 return None
             token = secrets.token_urlsafe(32)
             # A successful re-login replaces only this browser's session.

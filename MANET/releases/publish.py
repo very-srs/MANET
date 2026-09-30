@@ -22,7 +22,7 @@ from manet_release import API, DOWNLOADS, PACKAGES, TAG_PATTERN, download, valid
 
 PROVISIONING = (
     "flash-a-radio.sh", "linux-flasher.sh", "Flash a Radio.cmd", "windows.ps1",
-    "manet-flasher.ps1", "prepare-release.py", "firstrun.sh.template",
+    "manet-flasher.ps1", "prepare-release.py", "flash-target.py", "firstrun.sh.template",
     "rock3a-provision.sh.template", "additional-scripts/README.md",
 )
 

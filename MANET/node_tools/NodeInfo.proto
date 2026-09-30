@@ -39,6 +39,11 @@ message NodeIdentity {
 
   uint32  ipv4_chunk   = 4;  // chunk claimed for EUD IP allocation
   fixed32 ipv4_address = 5;  // network byte order, big-endian
+
+  // Addresses in this node's block, starting at ipv4_address: the node's own
+  // two plus its EUD pool. Set at provisioning and differs between nodes, so
+  // peers compare absolute ranges, never chunk numbers. 0 = not advertised.
+  uint32  ipv4_chunk_size = 6;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

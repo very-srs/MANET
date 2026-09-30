@@ -56,6 +56,11 @@ publishing status and managing IP addresses without running Wi-Fi elections.
 The orchestrator for static channel operation. It handles status publishing,
 registry building, service elections and IP management.
 
+Manual Wi-Fi changes persist in `/etc/manet/static-channels.json`, including
+the boot/lobby copies. Changes identify a band, so nodes with different radio
+layouts follow the same plan. Manual Wi-Fi controls are disabled while ACS
+owns the channels; the API and receiver enforce the same rule.
+
 **node-manager.sh**
 
 The file `node-manager.service` runs. It is a copy of whichever orchestrator
@@ -106,6 +111,10 @@ restarting the web service, or rebooting the node ends all its sessions.
 GPS/NTP clock corrections do not affect the deadline. When a management request
 finds an expired session, the page returns to login and preserves the current
 tab for after sign-in. Status pages remain available without a login.
+
+Failed logins are limited to five per client address and thirty per node in
+sixty seconds. Throttled requests return HTTP 429 with `Retry-After`;
+existing sessions remain usable.
 
 No unauthenticated route changes anything.
 
@@ -365,6 +374,10 @@ measured by `MEAN_THROUGHPUT_MBPS` in the registry, which is the mean of
 BATMAN_V's metric across that node's originators in Mbit/s. Nodes not seen
 within 10 minutes are excluded, and ties break deterministically on MAC
 address.
+
+Service elections start after address allocation and run at most once every
+fifteen seconds. Their locks prevent overlapping local runs. Separate network
+partitions may each elect a server; they converge after connectivity returns.
 
 **mediamtx-election.sh**
 
@@ -651,9 +664,10 @@ are published on the next manager pass instead of waiting for the keepalive.
 After the first allocation, that next pass runs without the usual 15-second
 sleep, so peers can learn the new claim promptly.
 
-Chunk size is uniform across the mesh and set at flash time, which is why the
-management UI shows `max_euds_per_node` without letting you write it. There is
-no per-node override.
+Each node's chunk size is fixed at provisioning; the management UI shows
+`max_euds_per_node` without allowing changes. Nodes may have different sizes:
+allocation compares advertised absolute address ranges. A peer without a
+known block size blocks new allocations until it publishes one.
 
 **gateway-route-manager.sh**
 
@@ -688,11 +702,16 @@ Ethernet auto-detection. It stops the AP radio's mesh supplicant, detaches the
 radio from its old bridge/mesh master, and prepares managed mode. A failed
 preparation prevents hostapd startup. Concurrent preparation requests are
 serialized, and a standalone request leaves an already-running AP untouched.
+The shared `manet_ap_mesh.py` helper removes active mesh roles on AP entry and
+restores the original provisioned band on mesh return. It rebuilds supplicant
+files from current credentials and the saved/authenticated channel plan,
+checks the resulting radio channel, and rolls back failed transitions. Fresh
+registry observations validate that channel without authorizing a plan change.
+AP-only hardware stays out of the mesh; disabled mesh radios remain down.
 
-**mesh-default-route-fix.sh**
-
-Repairs the default route on nodes that are not the gateway. Gateway nodes keep
-their own Ethernet default route and are skipped.
+`gateway-route-manager.sh` is the sole mesh default-route manager. The obsolete
+`mesh-default-route-fix.service` is retired during updates and setup; it could
+remove elected service VIPs.
 
 **usb-ethernet-watch.sh**
 
@@ -739,8 +758,8 @@ right interface, and that multicast forwarding is set.
 **batman-if-setup.sh**
 
 Manages the `bat0` lifecycle. Creates the interface, sets the BATMAN_V
-algorithm, and enslaves the mesh wireless interfaces while excluding the AP
-interface. HaLow is added first so it becomes batman's primary, being the
+algorithm, and enslaves the active mesh wireless roles, including an AP
+candidate that has returned to mesh. HaLow is added first so it becomes batman's primary, being the
 longest-range link.
 
 **batman-enslave-watch.sh**

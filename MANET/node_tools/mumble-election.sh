@@ -412,6 +412,8 @@ log "Running Mumble election..."
 
 NOW=$(date +%s)
 STALE_THRESHOLD=600
+read -r UPTIME_NOW _ < "${MESH_UPTIME_FILE:-/proc/uptime}"
+UPTIME_NOW=${UPTIME_NOW%.*}
 BEST_CANDIDATE_MAC=""
 HIGHEST_TQ="-1"
 
@@ -422,11 +424,9 @@ while read tq_line; do
     MAC_SANITIZED=$(echo "$metric_varname" | sed -n 's/NODE_\([0-9a-fA-F]\+\)_MEAN_THROUGHPUT_MBPS/\1/p')
 
     if [ -n "$MAC_SANITIZED" ]; then
-        # Check timestamp
-        TIMESTAMP_VAR="NODE_${MAC_SANITIZED}_LAST_SEEN_TIMESTAMP"
-        TIMESTAMP_VAL=$(grep "^${TIMESTAMP_VAR}=" "$REGISTRY_STATE_FILE" | cut -d'=' -f2 | tr -d "'")
-        
-        if [ -z "$TIMESTAMP_VAL" ] || [ $((NOW - TIMESTAMP_VAL)) -gt $STALE_THRESHOLD ]; then
+        # Freshness as observed by this node (boot clock), not the peer's clock.
+        AT_VAL=$(grep "^NODE_${MAC_SANITIZED}_OBSERVED_AT_UPTIME=" "$REGISTRY_STATE_FILE" | cut -d'=' -f2 | tr -d "'")
+        if ! [[ "$AT_VAL" =~ ^[0-9]+$ ]] || [ $((UPTIME_NOW - AT_VAL)) -gt $STALE_THRESHOLD ]; then
             continue
         fi
 

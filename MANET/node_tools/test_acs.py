@@ -71,7 +71,10 @@ class AcsHarness(unittest.TestCase):
                         MANET_MESH_CONF=str(self.root / 'mesh.conf'), MANET_SYS_NET=str(self.root / 'net'),
                         MANET_BOOT_ID_FILE=str(self.root / 'boot'),
                         MANET_ADMIN_STATE_DIR=str(self.root / 'admin'), BATCTL_PATH=str(self.bin / 'batctl'),
-                        TEST_ROOT=str(self.root), TEST_NOW='1000', TEST_BATCTL_RC='0')
+                        TEST_ROOT=str(self.root), TEST_NOW='1000', TEST_BATCTL_RC='0',
+                        # Boot clock pinned at 10000 s for registry observation ages.
+                        MESH_UPTIME_FILE=str(self.root / 'uptime'))
+        (self.root / 'uptime').write_text('10000.50 1.00\n')
         (self.root / 'mesh.conf').write_text('acs=y\nadmin_password=test-secret\n')
         (self.root / 'boot').write_text('a' * 32)
         (self.root / 'net/br0').mkdir(parents=True)
@@ -153,7 +156,7 @@ load_mesh_roles
         macs = macs or [f'02:00:00:00:00:{i:02x}' for i in range(len(reports))]
         self.registry.write_text(''.join(
             f"NODE_{mac.replace(':', '')}_CHANNEL_REPORT_JSON='{json.dumps({'results': report})}'\n"
-            f"NODE_{mac.replace(':', '')}_LAST_SEEN_TIMESTAMP='{self.env['TEST_NOW']}'\n"
+            f"NODE_{mac.replace(':', '')}_OBSERVED_AT_UPTIME='10000'\n"
             for mac, report in zip(macs, reports)))
 
     def election(self):
@@ -244,6 +247,22 @@ class ChannelElectionTests(AcsHarness):
                 self.assertIn('frequency=' + str(freq24 or freq5), (self.wpa / f'wpa_supplicant-{iface}.conf').read_text())
                 self.assertIn('WINNER_' + ('2_4' if freq24 else '5_0') + '=' + winner, (self.root / 'election').read_text())
                 self.assertFalse((self.wpa / 'wpa_supplicant-.conf').exists())
+
+    def test_report_freshness_uses_local_observation_not_sender_clock(self):
+        # One report aged past the 240 s window by our own observation, one
+        # from a node whose clock is days behind but whose record is current.
+        stale = [{'channel': 2437, 'noise_floor': -95, 'busy_pct': 5}]
+        fresh = [{'channel': 2462, 'noise_floor': -95, 'busy_pct': 5}]
+        self.configure(2412, None)
+        self.reports([stale, fresh])
+        text = self.registry.read_text().splitlines()
+        text[1] = text[1].replace("'10000'", "'9700'")   # observed 300 s ago
+        text.append("NODE_020000000001_LAST_SEEN_TIMESTAMP='100'")
+        self.registry.write_text('\n'.join(text) + '\n')
+        result = self.election()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('Scoring 1 scan report(s)', result.stderr)
+        self.assertIn('WINNER_2_4=2462', (self.root / 'election').read_text())
 
     def test_identical_reports_and_incumbents_ignore_registry_order(self):
         reports = [[{'channel': 2437, 'noise_floor': -95, 'busy_pct': 70},

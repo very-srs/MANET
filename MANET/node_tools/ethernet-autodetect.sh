@@ -64,12 +64,11 @@ start_hostapd_checked() {
             if ! hostapd_serving "$want"; then
                 log "hostapd is up but $want is not serving - restarting onto it"
                 systemctl restart hostapd.service 2>/dev/null
-                return 0
+                return $?
             fi
         fi
     fi
     systemctl start hostapd.service 2>/dev/null
-    return 0
 }
 
 # Determine which upstream interface to use.
@@ -186,9 +185,9 @@ run_no_carrier_cleanup() {
     log "${1:-No carrier on $ETH_IFACE} - running unplug cleanup"
 
     if [ -x /etc/networkd-dispatcher/off.d/50-gateway-disable ]; then
-        IFACE="$ETH_IFACE" /etc/networkd-dispatcher/off.d/50-gateway-disable
+        MANET_ETH_LOCK_HELD=1 MANET_ETH_FORCE_CLEANUP="${2:-0}" IFACE="$ETH_IFACE" /etc/networkd-dispatcher/off.d/50-gateway-disable
     elif [ -x /root/networkd-dispatcher/off ]; then
-        IFACE="$ETH_IFACE" /root/networkd-dispatcher/off
+        MANET_ETH_LOCK_HELD=1 MANET_ETH_FORCE_CLEANUP="${2:-0}" IFACE="$ETH_IFACE" /root/networkd-dispatcher/off
     else
         rm -f "$ACTIVE_CONFIG" /var/run/mesh-gateway.state /var/run/mesh-ntp.state /var/run/ethernet_detection_state
         ip addr flush dev "$ETH_IFACE" 2>/dev/null || true
@@ -280,7 +279,7 @@ detect_hotplug_mode() {
 
         log "DHCP succeeded but internet test failed; leaving as mesh client"
         echo "$ETH_IFACE $ip $(date +%s)" > "$NO_INET_STATE"
-        run_no_carrier_cleanup "Internet test failed on $ETH_IFACE"
+        run_no_carrier_cleanup "Internet test failed on $ETH_IFACE" 1
         exit 0
     fi
 
@@ -289,7 +288,7 @@ detect_hotplug_mode() {
 
 # Ensure only one instance runs
 exec 200>"$LOCK_FILE"
-flock -n 200 || { log "Already running. Exiting."; exit 0; }
+flock -w 90 200 || { log "Ethernet policy busy; carrier detection deferred"; exit 1; }
 
 # Parse CLI argument
 DETECTED_MODE=""
@@ -352,29 +351,15 @@ if [ "$CARRIER" != "1" ]; then
         AP_INTERFACE=$(cat /var/lib/ap_interface)
         log "Auto mode: No ethernet, ensuring AP on $AP_INTERFACE"
 
-        # Ensure wlan1 is NOT in bat0 (will be in br0 via hostapd/bridge config)
-        if batctl if | grep -q "$AP_INTERFACE"; then
-            log "Removing $AP_INTERFACE from bat0 (will be AP)"
-            batctl if del "$AP_INTERFACE" 2>/dev/null || true
-        fi
-
         unmask_if_masked dnsmasq.service
         enable_if_disabled hostapd.service
-        start_hostapd_checked
+        start_hostapd_checked || { log "AP start failed"; exit 1; }
         enable_if_disabled dnsmasq.service
         systemctl start dnsmasq.service 2>/dev/null
 
 		# If acting as an AP, lower the tx power
         systemctl start ap-txpower.service 2>/dev/null
 
-        # Bridge AP interface to br0 for EUD connectivity
-        if ! ip link show "$AP_INTERFACE" | grep -q "master br0"; then
-            log "Bridging $AP_INTERFACE to br0"
-            ip link set "$AP_INTERFACE" master br0
-            ip link set "$AP_INTERFACE" up
-        else
-            log "$AP_INTERFACE already bridged to br0"
-        fi
 
         # Reconfigure ebtables (wlan1 should allow DHCP)
         /usr/local/bin/mesh-ip-manager.sh
@@ -472,40 +457,20 @@ if [ "$DETECTED_MODE" == "gateway" ]; then
     if [ "$EUD_MODE" == "auto" ] && [ -n "$AP_INTERFACE" ]; then
         log "Auto mode + Gateway: Keeping AP enabled"
 
-        # Ensure wlan1 is NOT in bat0 (it's the AP)
-        if batctl if | grep -q "$AP_INTERFACE"; then
-            log "Removing $AP_INTERFACE from bat0 (dual role gateway+AP)"
-            batctl if del "$AP_INTERFACE" 2>/dev/null || true
-        fi
-
         unmask_if_masked dnsmasq.service
         enable_if_disabled hostapd.service
-        start_hostapd_checked
+        start_hostapd_checked || { log "AP start failed"; exit 1; }
         enable_if_disabled dnsmasq.service
         systemctl start dnsmasq.service 2>/dev/null
         systemctl start ap-txpower.service 2>/dev/null
 
-        # Bridge AP interface to br0 for EUD connectivity
-        if ! ip link show "$AP_INTERFACE" | grep -q "master br0"; then
-            log "Bridging $AP_INTERFACE to br0"
-            ip link set "$AP_INTERFACE" master br0
-            ip link set "$AP_INTERFACE" up
-        else
-            log "$AP_INTERFACE already bridged to br0"
-        fi
 
     elif [ "$EUD_MODE" == "wireless" ] && [ -n "$AP_INTERFACE" ]; then
         log "Wireless mode: Ensuring AP is enabled"
 
-        # Ensure wlan1 is NOT in bat0
-        if batctl if | grep -q "$AP_INTERFACE"; then
-            log "Removing $AP_INTERFACE from bat0 (wireless mode AP)"
-            batctl if del "$AP_INTERFACE" 2>/dev/null || true
-        fi
-
         unmask_if_masked dnsmasq.service
         enable_if_disabled hostapd.service
-        start_hostapd_checked
+        start_hostapd_checked || { log "AP start failed"; exit 1; }
         enable_if_disabled dnsmasq.service
         systemctl start dnsmasq.service 2>/dev/null
         systemctl start ap-txpower.service 2>/dev/null
@@ -513,38 +478,8 @@ if [ "$DETECTED_MODE" == "gateway" ]; then
     elif [ "$EUD_MODE" == "wired" ] && [ -n "$AP_INTERFACE" ]; then
         log "Wired mode: Disabling AP, returning $AP_INTERFACE to mesh"
 
-        systemctl stop hostapd.service 2>/dev/null
-        systemctl stop dnsmasq.service 2>/dev/null
-        systemctl stop ap-txpower.service 2>/dev/null
-        systemctl disable hostapd.service 2>/dev/null
-
-        # Add wlan1 back to bat0
-        if ! batctl if | grep -q "$AP_INTERFACE"; then
-            log "Adding $AP_INTERFACE back to bat0 (wired mode)"
-
-            systemctl stop hostapd.service 2>/dev/null
-            ip link set "$AP_INTERFACE" down
-            ip link set "$AP_INTERFACE" nomaster 2>/dev/null || true
-            sleep 1
-
-            # Set to mesh mode and bring up. The AP interface carries no
-            # MTUBytes from networkd (its .network is Unmanaged for hostapd),
-            # so set the batman header allowance here or bat0 drops to 1468.
-            iw dev "$AP_INTERFACE" set type mesh
-            ip link set "$AP_INTERFACE" mtu 1532 2>/dev/null || true
-            ip link set "$AP_INTERFACE" up
-            sleep 1
-            # Restart wpa_supplicant for this interface to join mesh
-            systemctl restart wpa_supplicant@$AP_INTERFACE.service 2>/dev/null
-        fi
-		sleep 3
-
-        # Add to bat0
-        if batctl if add "$AP_INTERFACE" 2>/dev/null; then
-           log "$AP_INTERFACE added to bat0"
-        else
-           log "Failed to add $AP_INTERFACE to bat0"
-        fi
+        python3 /usr/local/bin/manet_ap_mesh.py mesh ||
+            log "AP-to-mesh transition deferred; reconcile will retry"
 
     fi
 
@@ -588,44 +523,8 @@ elif [ "$DETECTED_MODE" == "wired-eud" ]; then
         if [ -n "$AP_INTERFACE" ]; then
             log "$EUD_MODE mode with wired EUD: Disabling AP, returning $AP_INTERFACE to mesh"
 
-            systemctl stop hostapd.service 2>/dev/null
-            systemctl stop ap-txpower.service 2>/dev/null
-            systemctl disable hostapd.service 2>/dev/null
-
-            # Remove wlan1 from br0 if it's there
-            if ip link show "$AP_INTERFACE" 2>/dev/null | grep -q "master br0"; then
-                log "Removing $AP_INTERFACE from br0"
-                ip link set "$AP_INTERFACE" nomaster 2>/dev/null || true
-            fi
-
-            # Add wlan1 back to bat0
-            if ! batctl if | grep -q "$AP_INTERFACE"; then
-
-                log "Adding $AP_INTERFACE back to bat0"
-
-                # Stop hostapd first to release the interface
-                systemctl stop hostapd.service 2>/dev/null
-                ip link set "$AP_INTERFACE" down
-                sleep 1
-
-                # Set to mesh mode and bring up. The AP interface carries no
-                # MTUBytes from networkd (its .network is Unmanaged for hostapd),
-                # so set the batman header allowance here or bat0 drops to 1468.
-                iw dev "$AP_INTERFACE" set type mesh
-                ip link set "$AP_INTERFACE" mtu 1532 2>/dev/null || true
-                ip link set "$AP_INTERFACE" up
-                sleep 1
-                # Restart wpa_supplicant for this interface to join mesh
-                systemctl restart wpa_supplicant@$AP_INTERFACE.service 2>/dev/null
-            fi
-				sleep 2
-
-                # Add to bat0
-            if batctl if add "$AP_INTERFACE" 2>/dev/null; then
-               log "$AP_INTERFACE added to bat0"
-            else
-               log "Failed to add $AP_INTERFACE to bat0"
-            fi
+            python3 /usr/local/bin/manet_ap_mesh.py mesh ||
+                log "AP-to-mesh transition deferred; reconcile will retry"
 
         fi
     elif [ "$EUD_MODE" == "wireless" ] && [ -n "$AP_INTERFACE" ]; then

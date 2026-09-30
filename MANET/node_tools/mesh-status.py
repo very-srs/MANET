@@ -46,9 +46,12 @@ from manet_manage import ManageRoutes
 from manet_peer_radios import interfaces_for_telemetry, peer_status_panel
 from manet_recovery_status import recovery_status, RECOVERY_JS
 from manet_node_ipv4 import primary_ipv4
-from manet_web_sessions import SessionStore
+from manet_registry import node_state, observed_age
+from manet_web_sessions import SessionStore, LoginThrottled
 from manet_web_limits import BoundedHTTPServer, RequestLimits, STATUS_CACHE, MANAGEMENT_WRITE, Busy
-from mesh_config import apply_local_to_conf, local_changes, mesh_changes, strip_local_keys
+from mesh_config import (local_changes, mesh_changes, strip_local_keys,
+                         validate_config, submitted_changes, LOCAL_APPLY_KEYS, MESH_KEYS)
+from manet_eud_ap import apply_local as apply_local_settings, configured_ssid
 from manet_admin import AdminTransport, CONFIG_ACK_TYPE, new_version, private_json_write, require_clock
 from manet_radio import (
     HALOW_BW_TXPOWER_CAP_DBM, halow_channel_options,
@@ -416,8 +419,10 @@ def get_interfaces():
                 if tm: iw_info[cur_iface]['type'] = tm.group(1)
                 sm = re.search(r'ssid (.+)', line)
                 if sm: iw_info[cur_iface]['ssid'] = sm.group(1).strip()
-                fm = re.search(r'channel (\d+).*MHz', line)
-                if fm: iw_info[cur_iface]['channel'] = fm.group(1)
+                fm = re.search(r'channel (\d+) \((\d+) MHz\)', line)
+                if fm:
+                    iw_info[cur_iface]['channel'] = fm.group(1)
+                    iw_info[cur_iface]['freq_mhz'] = fm.group(2)
                 pm = re.search(r'txpower ([\d.]+) dBm', line)
                 if pm: iw_info[cur_iface]['txpower_dbm'] = pm.group(1)
                 freqm = re.search(r'([\d.]+) GHz', line)
@@ -871,7 +876,7 @@ def assemble_local_data():
         'services':  services,
         'power':     power,
         'eud_mode':  conf.get('eud', 'wired'),
-        'ap_ssid':   conf.get('lan_ap_ssid', ''),
+        'ap_ssid':   configured_ssid(),
         'mesh_ssid': conf.get('mesh_ssid', ''),
         'recovery': recovery_status(conf, nodes_raw, hostname),
     }
@@ -920,7 +925,7 @@ def assemble_peer_data(peer_ip):
             'eud_mode':   ndata.get('EUD_MODE', ''),
             'ap_ssid':    ndata.get('AP_SSID', ''),
             'mesh_ssid':  '',
-            'stale':      ndata.get('NODE_STATE', 'ACTIVE') != 'ACTIVE',
+            'stale':      node_state(ndata) != 'ACTIVE',
         }
     return None
 
@@ -1068,14 +1073,14 @@ def assemble_status_data():
             'mumble':       ndata.get('IS_MUMBLE_SERVER', 'false').lower() == 'true',
             'mediamtx':     ndata.get('IS_MEDIAMTX_SERVER', 'false').lower() == 'true',
             'ntp':          ndata.get('IS_NTP_SERVER', 'false').lower() == 'true',
-            'state':        ndata.get('NODE_STATE', 'ACTIVE'),
+            'state':        node_state(ndata),
             'ch_2g':        ndata.get('DATA_CHANNEL_2_4', ''),
             'ch_5g':        ndata.get('DATA_CHANNEL_5_0', ''),
             'limp':         ndata.get('IS_IN_LIMP_MODE', 'false').lower() == 'true',
             'all_macs':     [norm_mac(m) for m in ndata.get('MAC_ADDRESSES', '').split(',') if m.strip()],
             'best_link':    best_link,
             'hop_count':    None,
-            'last_seen':    ndata.get('LAST_REGISTRY_UPDATE', ndata.get('LAST_SEEN_TIMESTAMP', '0')),
+            'last_seen':    int(time.time() - observed_age(ndata)) if observed_age(ndata) is not None else 0,
         })
 
     # If self not in registry, inject a placeholder
@@ -1681,7 +1686,7 @@ function renderNodeList(nodes) {
     const thisNodeLabel = n.is_me
       ? `<span class="self-node-badge">THIS NODE</span>`
       : '';
-    const nodeStale = !n.is_me && (DATA.timestamp - parseInt(n.last_seen || 0)) > 300;
+    const nodeStale = !n.is_me && n.state !== 'ACTIVE';
     const rateBadge = (n.is_me || nodeStale) ? '' : `<span class="badge ${linkClass(n.mbps)}">${linkLabel(n.mbps)}</span>`;
     const bar = nodeStale ? '' : `<div class="link-bar-wrap"><div class="link-bar" style="width:${linkPct(n.mbps)}%;background:${linkColor(n.mbps)}"></div></div>`;
     const meta = (!nodeStale && n.uptime) ? `<span style="color:var(--muted)">up ${n.uptime}</span>` : '';
@@ -2032,7 +2037,7 @@ function drawTopo() {
   SIM.nodes.forEach(n => {
     const isHover = HOVER_NODE && HOVER_NODE.id === n.id;
     const isSelected = EXPANDED_NODE_IDS.has(n.id);
-    const nodeStaleCanvas = !n.is_me && (DATA.timestamp - parseInt(n.last_seen || 0)) > 300;
+    const nodeStaleCanvas = !n.is_me && n.state !== 'ACTIVE';
     const col = n.is_me ? '#ecb000' : (nodeStaleCanvas ? '#6b7280' : (n.is_gateway ? '#ecb000' : linkColor(n.mbps)));
     const r = n.r + (isHover ? 3 : (isSelected ? 2 : 0));
 
@@ -2639,33 +2644,6 @@ def authenticated_config_acks():
         return {}
 
 
-def restart_eud_ap(changes):
-    """Restart hostapd on this node when AP SSID or key changed."""
-    if not ({'lan_ap_ssid', 'lan_ap_key'} & set(changes)):
-        return
-    ap_iface = ''
-    try:
-        with open('/var/lib/ap_interface') as f:
-            ap_iface = f.read().strip()
-    except Exception:
-        return
-    if not ap_iface or not os.path.isfile('/etc/hostapd/hostapd.conf'):
-        return
-    ssid = changes.get('lan_ap_ssid', '')
-    key = changes.get('lan_ap_key', '')
-    try:
-        with open('/etc/hostapd/hostapd.conf') as f:
-            text = f.read()
-        if ssid:
-            text = re.sub(r'^ssid=.*', f'ssid={ssid}', text, flags=re.M)
-        if key:
-            text = re.sub(r'^wpa_passphrase=.*', f'wpa_passphrase={key}', text, flags=re.M)
-        with open('/etc/hostapd/hostapd.conf', 'w') as f:
-            f.write(text)
-        subprocess.run(['systemctl', 'restart', 'hostapd'], capture_output=True, timeout=30)
-    except Exception:
-        pass
-
 def read_rollback_state():
     """Whether this node has a config rollback armed, and until when.
 
@@ -2702,7 +2680,7 @@ def assemble_admin_status():
             'ip':         nd.get('IPV4_ADDRESS', ''),
             'ack':        acks.get(nd.get('HOSTNAME', ''), ''),
             'last_seen':  nd.get('LAST_SEEN_TIMESTAMP', '0'),
-            'node_state': nd.get('NODE_STATE', 'ACTIVE'),
+            'node_state': node_state(nd),
         })
     node_status.sort(key=lambda n: n['hostname'])
 
@@ -3009,6 +2987,17 @@ class MeshHandler(RequestLimits, ManageRoutes, http.server.BaseHTTPRequestHandle
         self.end_headers()
         self.wfile.write(encoded)
 
+    def _send_login_throttled(self, error):
+        data = json.dumps({'ok': False, 'error': str(error),
+                           'retry_after': error.retry_after}).encode()
+        self.send_response(429)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Content-Length', str(len(data)))
+        self.send_header('Cache-Control', 'no-store')
+        self.send_header('Retry-After', str(error.retry_after))
+        self.end_headers()
+        self.wfile.write(data)
+
     def send_json(self, obj, status=200):
         body = json.dumps(obj, default=str).encode('utf-8')
         self.send_response(status)
@@ -3115,7 +3104,11 @@ class MeshHandler(RequestLimits, ManageRoutes, http.server.BaseHTTPRequestHandle
                 next_path = normalize_local_redirect((form.get('next', [''])[0] or '').strip())
                 if not self._is_manage_path(next_path):
                     next_path = MANAGE_PREFIX + '/'
-                token = WEB_SESSIONS.login(password, self._perf_cookie_token())
+                try:
+                    token = WEB_SESSIONS.login(password, self._perf_cookie_token(), self.client_address[0])
+                except LoginThrottled as error:
+                    self._send_login_throttled(error)
+                    return
                 if token:
                     self._send_perf_cookie_redirect(next_path, token)
                 else:
@@ -3345,7 +3338,11 @@ class MeshHandler(RequestLimits, ManageRoutes, http.server.BaseHTTPRequestHandle
                 req = {}
             password = req.get('password', '') if isinstance(req, dict) else ''
             password = password.strip() if isinstance(password, str) else ''
-            token = WEB_SESSIONS.login(password, self._perf_cookie_token())
+            try:
+                token = WEB_SESSIONS.login(password, self._perf_cookie_token(), client_ip)
+            except LoginThrottled as error:
+                self._send_login_throttled(error)
+                return
             if token:
                 self._send_perf_login_json(token)
             else:
@@ -3366,13 +3363,20 @@ class MeshHandler(RequestLimits, ManageRoutes, http.server.BaseHTTPRequestHandle
                     self.send_json({'ok': False, 'error': 'No config provided'})
                     return
 
+                if not isinstance(config, dict):
+                    self.send_json({'ok': False, 'error': 'Config must be an object'}, 400)
+                    return
+                config = submitted_changes(config, conf)
+                ok, why = validate_config(config, current=conf, local=True) if config else (True, '')
+                if not ok:
+                    self.send_json({'ok': False, 'error': why}, 400)
+                    return
                 if mesh_changes(config, conf):
                     require_clock()
 
                 applied_local = local_changes(config, conf)
                 if applied_local:
-                    apply_local_to_conf(applied_local, MESH_CONF_FILE)
-                    restart_eud_ap(applied_local)
+                    apply_local_settings(applied_local, MESH_CONF_FILE)
 
                 mesh_cfg = strip_local_keys(config)
                 if not mesh_changes(config, conf):

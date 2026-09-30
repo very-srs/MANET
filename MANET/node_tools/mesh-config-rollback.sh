@@ -25,6 +25,7 @@ WPA_DIR="${MANET_WPA_DIR:-/etc/wpa_supplicant}"
 BATCTL="${BATCTL:-/usr/sbin/batctl}"
 RUN_DIR="${MANET_RUN_DIR:-/var/run}"
 IFACE_STATE_DIR="${MANET_IFACE_STATE_DIR:-/var/lib}"
+SUPPLICANT_HELPER="${MANET_SUPPLICANT_HELPER:-$(dirname "$0")/manet_supplicant.py}"
 LOG_TAG="CONFIG-ROLLBACK"
 # How long the mesh gets to re-form before we give up on the change. Supplicant
 # restart, SAE, and batman re-discovery all have to fit inside it.
@@ -85,6 +86,7 @@ do_arm() (
     cp -aL "$MESH_CONF" "$snapshot/mesh.conf" 2>/dev/null || {
         log "ERROR: cannot snapshot $MESH_CONF"; return 1; }
     for f in "$WPA_DIR"/wpa_supplicant-wlan*.conf; do
+        [[ "$f" == *-uplink.conf ]] && continue
         [ -e "$f" ] || [ -L "$f" ] || continue
         cp -aL "$f" "$snapshot/wpa/" 2>/dev/null || {
             log "ERROR: cannot snapshot $f"; return 1; }
@@ -111,6 +113,7 @@ do_restore() {
     cp -a "$STATE_DIR/mesh.conf" "$MESH_CONF" 2>/dev/null || {
         log "ERROR: cannot restore $MESH_CONF"; return 1; }
     for f in "$STATE_DIR"/wpa/wpa_supplicant-wlan*.conf; do
+        [[ "$f" == *-uplink.conf ]] && continue
         [ -e "$f" ] || continue
         cp -a "$f" "$WPA_DIR/$(basename "$f")" 2>/dev/null || {
             log "ERROR: cannot restore $f; keeping snapshot for retry"; return 1; }
@@ -118,14 +121,10 @@ do_restore() {
 
     # The chunk is derived from ipv4_network, so it has to be recalculated
     # against the restored value rather than kept.
-    rm -f "$RUN_DIR/my_ipv4_chunk" "$RUN_DIR/mesh_ipv4_state" 2>/dev/null
+    rm -f "$RUN_DIR/my_ipv4_chunk" "$RUN_DIR/my_ipv4_chunk_size" "$RUN_DIR/mesh_ipv4_state" 2>/dev/null
 
     local restart_failed=0
-    for iface in $(cat "$IFACE_STATE_DIR/mesh_if" "$IFACE_STATE_DIR/halow_if" 2>/dev/null); do
-        [ -z "$iface" ] && continue
-        systemctl restart "wpa_supplicant@${iface}.service" 2>/dev/null || \
-        systemctl restart "wpa_supplicant-s1g-${iface}.service" 2>/dev/null || restart_failed=1
-    done
+    python3 "$SUPPLICANT_HELPER" restart || restart_failed=1
     systemctl restart batman-enslave.service 2>/dev/null || restart_failed=1
     [ "$restart_failed" -eq 0 ] || {
         log "ERROR: cannot restart mesh services; keeping snapshot for retry"; return 1; }
