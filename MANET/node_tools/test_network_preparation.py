@@ -127,7 +127,8 @@ if name == 'systemctl' and args == 'is-enabled dnsmasq.service':
 
     def test_generated_dnsmasq_config_stays_current_after_lease_change(self):
         source = (TOOLS / 'mesh-ip-manager.sh').read_text()
-        function = re.search(r'^configure_dnsmasq\(\) \{\n.*?^\}', source, re.M | re.S)[0]
+        function = '\n'.join(re.search(r'^' + name + r'\(\) \{\n.*?^\}', source, re.M | re.S)[0]
+                             for name in ('configure_dnsmasq', 'ensure_dnsmasq_running'))
         start = source.index('                # Only reconfigure dnsmasq if the config has changed')
         end = source.index('                # The web UI is restricted', start)
         check = source[start:end]
@@ -136,7 +137,7 @@ if name == 'systemctl' and args == 'is-enabled dnsmasq.service':
                 self.events.write_text('')
                 body = '''
 log() { :; }
-configure_ebtables_dhcp_isolation() { echo UNEXPECTED_DHCP_RESET; }
+python3() { return 0; }
 MUMBLE_VIP="$TEST_MUMBLE"; MTX_VIP="$TEST_MTX"
 BR0_PRIMARY=10.30.0.6; BR0_SECONDARY=10.30.0.7
 DHCP_START=10.30.0.8; DHCP_END=10.30.0.15
@@ -180,7 +181,7 @@ clear-on-reload
 '''))
         body = '''
 log() { :; }
-configure_ebtables_dhcp_isolation() { :; }
+ensure_dnsmasq_running() { :; }
 configure_dnsmasq() { sed -i s/bind-interfaces/bind-dynamic/ "$DNSMASQ_CONF"; echo REBOUND; }
 BR0_PRIMARY=10.30.0.6; BR0_SECONDARY=10.30.0.7
 DHCP_START=10.30.0.8; DHCP_END=10.30.0.15

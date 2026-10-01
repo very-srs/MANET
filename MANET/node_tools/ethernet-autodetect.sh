@@ -114,6 +114,16 @@ LOCK_FILE="/var/run/ethernet-autodetect.lock"
 NO_INET_STATE="/var/run/eth-no-internet.state"
 NO_INET_RECHECK_SECS=600
 
+# Which physical link a decision was made on: "<iface> <mode> <carrier_changes>".
+# Bridging, flushing or reconfiguring end0 makes networkd report "Gained
+# carrier" again, and networkd-dispatcher then runs this script once more. The
+# kernel's carrier_changes counter moves only on real link transitions (cable
+# pulled, swapped, or the far end power-cycled), so an unchanged count means
+# the same cable and the same peer: the earlier decision still holds. Without
+# this, each wired-EUD run triggered the next and the port was detached for
+# ~20 s of every ~30 s.
+CARRIER_GEN_STATE="/var/run/eth-carrier-generation"
+
 # Networkd config paths
 NETWORKD_DIR="/etc/systemd/network"
 GATEWAY_CONFIG="${NETWORKD_DIR}/20-end0-gateway.network.off"
@@ -121,6 +131,39 @@ ACTIVE_CONFIG="${NETWORKD_DIR}/20-${ETH_IFACE}.network"
 
 log() {
     echo "[$(date +'%Y-%m-%d %H:%M:%S')] - ETH-DETECT: $1" | systemd-cat -t ethernet-autodetect
+}
+
+carrier_generation() {
+    cat "/sys/class/net/$ETH_IFACE/carrier_changes" 2>/dev/null
+}
+
+# Detection takes ~20 s (DHCP probe). The decision describes the link as it
+# was when detection STARTED, so record that generation. If the cable was
+# swapped mid-probe, the recorded count is already stale and the event queued
+# by that swap re-detects instead of being suppressed by this result.
+DETECT_GENERATION=""
+
+record_carrier_generation() {
+    local generation now
+    now=$(carrier_generation)
+    generation=${DETECT_GENERATION:-$now}
+    if [[ "$generation" =~ ^[0-9]+$ ]]; then
+        echo "$ETH_IFACE $1 $generation" > "$CARRIER_GEN_STATE"
+        [ "$generation" = "$now" ] ||
+            log "Link changed on $ETH_IFACE during detection; the pending event will re-detect"
+    else
+        rm -f "$CARRIER_GEN_STATE"
+    fi
+}
+
+# Was the current decision of mode $1 made on this exact physical link?
+same_carrier_generation() {
+    local iface mode generation now
+    [ -f "$CARRIER_GEN_STATE" ] || return 1
+    read -r iface mode generation < "$CARRIER_GEN_STATE" || return 1
+    now=$(carrier_generation)
+    [[ "$now" =~ ^[0-9]+$ ]] && [ "$iface" = "$ETH_IFACE" ] &&
+        [ "$mode" = "$1" ] && [ "$generation" = "$now" ]
 }
 
 # Is there real internet behind $1?
@@ -199,41 +242,101 @@ run_no_carrier_cleanup() {
     fi
 }
 
-wait_for_end0_ip() {
-    local wait_count=0
-    local max_wait="${1:-20}"
-    local ip=""
+# What is on the other end of the cable, judged from frames it sends while we
+# wait for DHCP. Absence of a DHCP reply alone does not mean a single user
+# device: a static-addressed LAN, a slow DHCP server, or a switch port still
+# coming up stays silent too, and bridging such a network would make this node
+# a rogue DHCP server on it. Prints one of:
+#   network <reason>   a router, switch or several devices are attached
+#   eud                exactly one device, and it is asking for an address
+#   unknown            nothing conclusive (old rule: treat as a user device)
+LINK_CAPTURE=""
+LINK_CAPTURE_PID=""
+EUD_DECISION_SECS=5
 
-    while [ "$wait_count" -lt "$max_wait" ]; do
-        ip=$(ip -4 addr show dev "$ETH_IFACE" | grep -oP 'inet \K[\d.]+' | head -1)
-        if [ -n "$ip" ]; then
-            echo "$ip"
-            return 0
-        fi
+start_link_capture() {
+    command -v tcpdump >/dev/null 2>&1 || return 0
+    LINK_CAPTURE=$(mktemp /var/run/eth-detect-capture.XXXXXX) || return 0
+    trap stop_link_capture EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    # Inbound only: our own DHCP requests and solicitations are not evidence.
+    # Limit the capture to at most 2 MiB (1 MiB in POSIX mode). The classifier
+    # treats 1 MiB as network evidence before scanning it; a busy link must
+    # not fill /run or turn a truncated capture into a confident EUD decision.
+    # The capture must not inherit this detector's Ethernet policy lock.
+    ( ulimit -f 2048 || exit 1
+      exec timeout --kill-after=2 30 tcpdump -i "$ETH_IFACE" -Q in -nn -e -l -s 256
+    ) 200>&- > "$LINK_CAPTURE" 2>/dev/null &
+    LINK_CAPTURE_PID=$!
+}
 
-        sleep 1
-        ((wait_count++))
-    done
+stop_link_capture() {
+    [ -n "$LINK_CAPTURE_PID" ] && kill "$LINK_CAPTURE_PID" 2>/dev/null
+    [ -n "$LINK_CAPTURE_PID" ] && wait "$LINK_CAPTURE_PID" 2>/dev/null
+    [ -n "$LINK_CAPTURE" ] && rm -f "$LINK_CAPTURE"
+    LINK_CAPTURE_PID=""
+    LINK_CAPTURE=""
+}
 
-    return 1
+classify_link() {
+    local own size
+    [ -n "$LINK_CAPTURE" ] && [ -f "$LINK_CAPTURE" ] || { echo unknown; return; }
+    size=$(stat -c %s "$LINK_CAPTURE" 2>/dev/null || echo 0)
+    if [ "$size" -ge 1048576 ]; then
+        echo "network capture-limit"
+        return
+    fi
+    own=$(cat "/sys/class/net/$ETH_IFACE/address" 2>/dev/null)
+    awk -v own="${own,,}" '
+        { src = tolower($2); dst = tolower($4); sub(/,$/, "", dst) }
+        /router advertisement/ { network = network ? network : "router-advertisement" }
+        dst ~ /^01:80:c2:00:00:0[02e]$/ || dst == "01:00:0c:cc:cc:cc" ||
+            / STP | LLDP|CDPv|LACPv/ { network = network ? network : "switch-protocol" }
+        /BOOTP\/DHCP, Reply/ { network = network ? network : "dhcp-server" }
+        src ~ /^([0-9a-f][0-9a-f]:){5}[0-9a-f][0-9a-f]$/ && src != own {
+            macs[src] = 1
+            if (/BOOTP\/DHCP, Request/) asking[src] = 1
+        }
+        END {
+            n = 0; for (m in macs) n++
+            if (network) print "network " network
+            else if (n > 1) print "network multiple-devices"
+            else if (n == 1) { for (m in asking) { print "eud"; exit } print "unknown" }
+            else print "unknown"
+        }' "$LINK_CAPTURE"
 }
 
 detect_hotplug_mode() {
-    local carrier ip
+    local carrier ip verdict waited
 
     carrier=$(cat /sys/class/net/$ETH_IFACE/carrier 2>/dev/null || echo 0)
     if [ "$carrier" != "1" ]; then
         # Cable gone: forget the no-internet verdict so a re-plug re-detects.
-        rm -f "$NO_INET_STATE"
+        rm -f "$NO_INET_STATE" "$CARRIER_GEN_STATE"
         run_no_carrier_cleanup
+        exit 0
+    fi
+
+    # A wired EUD configured on this same physical link needs nothing more.
+    # Re-detecting would detach it from br0 for the whole DHCP probe.
+    if same_carrier_generation wired-eud &&
+       [ "$(basename "$(readlink "/sys/class/net/$ETH_IFACE/master" 2>/dev/null)" 2>/dev/null)" = br0 ] &&
+       grep -qx 'ETH_MODE=WIRED_EUD' /var/run/ethernet_detection_state 2>/dev/null; then
+        log "Existing wired-EUD state is current on $ETH_IFACE (no carrier change); skipping re-detection"
         exit 0
     fi
 
     # Hotplug events can be emitted repeatedly after networkd restarts. If this
     # node is already a working gateway, do not flush end0 or restart networkd;
-    # that creates a loop which interrupts dnsmasq and EUD DHCP.
+    # that creates a loop which interrupts dnsmasq and EUD DHCP. A recorded
+    # decision from an earlier link (a fast cable swap whose unplug event was
+    # coalesced) must not pass for healthy: the old lease and route outlive it.
+    # Without a record (a gateway promoted by the uplink dispatcher) the
+    # address/route check alone applies, as before.
     ip=$(ip -4 addr show dev "$ETH_IFACE" | grep -oP 'inet \K[\d.]+' | head -1)
     if [ -f /var/run/mesh-gateway.state ] && [ -n "$ip" ] && \
+       { [ ! -f "$CARRIER_GEN_STATE" ] || same_carrier_generation gateway; } && \
        ip route show dev "$ETH_IFACE" | grep -q '^default '; then
         log "Existing gateway state is healthy on $ETH_IFACE ($ip); skipping re-detection"
         # Exit the whole script: returning here would still run the gateway
@@ -257,6 +360,14 @@ detect_hotplug_mode() {
         fi
     fi
 
+    # A network without DHCP was already found on this physical connection.
+    # Our own flush/reconfigure re-triggers this script; do not probe again.
+    if same_carrier_generation network; then
+        log "Network without DHCP already detected on $ETH_IFACE (no carrier change); not bridging"
+        exit 0
+    fi
+
+    DETECT_GENERATION=$(carrier_generation)
     log "Carrier present on $ETH_IFACE - detecting role"
 
     # Detach from any bridge before DHCP (wired-EUD may have enslaved it).
@@ -267,9 +378,25 @@ detect_hotplug_mode() {
     # 20-end0.network fires an inotify event that causes networkd to
     # reconfigure, briefly drops any existing lease, and restarts this loop.
     # networkd uses 10-end0.network (or equivalent) for DHCP automatically.
+    # Listen before asking: networkd's router solicitation and DHCP request
+    # draw replies within a second or two on a real network.
+    start_link_capture
     networkctl reconfigure "$ETH_IFACE" 2>/dev/null || true
 
-    ip=$(wait_for_end0_ip 20 || true)
+    # A lease means an uplink. A lone device asking for an address is a user
+    # device, decided after EUD_DECISION_SECS rather than the full 20 s.
+    ip=""
+    verdict=unknown
+    for ((waited = 0; waited < 20; waited++)); do
+        ip=$(ip -4 addr show dev "$ETH_IFACE" | grep -oP 'inet \K[\d.]+' | head -1)
+        [ -n "$ip" ] && break
+        verdict=$(classify_link)
+        [ "$verdict" = eud ] && [ "$waited" -ge "$EUD_DECISION_SECS" ] && break
+        sleep 1
+    done
+    [ -n "$ip" ] || verdict=$(classify_link)
+    stop_link_capture
+
     if [ -n "$ip" ]; then
         log "IP acquired on $ETH_IFACE: $ip"
         if internet_probe_confirmed "$ETH_IFACE"; then
@@ -283,6 +410,17 @@ detect_hotplug_mode() {
         exit 0
     fi
 
+    if [ "${verdict%% *}" = network ]; then
+        # Never serve DHCP onto someone else's network. Leave end0 routed;
+        # networkd keeps asking for a lease, and if one arrives later the
+        # uplink dispatcher promotes it as usual. Force a wired EUD with
+        # `ethernet-autodetect.sh --mode wired-eud` if this is wrong.
+        log "Not bridging $ETH_IFACE: a network is attached (${verdict#network }) but gave no DHCP lease"
+        record_carrier_generation network
+        exit 0
+    fi
+
+    log "Wired EUD detected on $ETH_IFACE after ${waited} s ($verdict)"
     DETECTED_MODE="wired-eud"
 }
 
@@ -361,7 +499,7 @@ if [ "$CARRIER" != "1" ]; then
         systemctl start ap-txpower.service 2>/dev/null
 
 
-        # Reconfigure ebtables (wlan1 should allow DHCP)
+        # Refresh address/DHCP configuration and its isolation rules
         /usr/local/bin/mesh-ip-manager.sh
 
 
@@ -483,7 +621,7 @@ if [ "$DETECTED_MODE" == "gateway" ]; then
 
     fi
 
-    # Reconfigure ebtables and dnsmasq (handles wlan1 role changes)
+    # Refresh DHCP isolation and dnsmasq (handles wlan1 role changes)
     /usr/local/bin/mesh-ip-manager.sh
 
     # Save state
@@ -495,6 +633,7 @@ DETECTED_AT=$(date +%s)
 DETECTION_METHOD=CARRIER_WITH_INTERNET
 EOF
 
+    record_carrier_generation gateway
     log "Gateway configuration complete"
 
 
@@ -549,7 +688,7 @@ elif [ "$DETECTED_MODE" == "wired-eud" ]; then
     # Remove NAT rules
     nft flush chain ip nat postrouting 2>/dev/null || true
 
-    # Reconfigure ebtables and dnsmasq (handles wlan1 role + end0 addition)
+    # Refresh DHCP isolation and dnsmasq (handles wlan1 role + end0 addition)
     /usr/local/bin/mesh-ip-manager.sh
 
     # Save state
@@ -560,6 +699,7 @@ DETECTED_AT=$(date +%s)
 DETECTION_METHOD=CARRIER_NO_DHCP
 EOF
 
+    record_carrier_generation wired-eud
     log "Wired EUD configuration complete"
 
 else

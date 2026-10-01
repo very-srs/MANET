@@ -1,0 +1,13 @@
+[Unit]
+Description=Request automatic transmit power on HaLow mesh radios
+# HaLow is enslaved to bat0 after its S1G supplicant starts, so by then the
+# interface is up and on its channel.
+After=batman-enslave.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/manet-halow-power.py
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

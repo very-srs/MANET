@@ -2,7 +2,6 @@
 import json
 import os
 from pathlib import Path
-import re
 import shlex
 import subprocess
 import tempfile
@@ -195,19 +194,6 @@ provision_try() { local what="$1"; shift; "$@" || echo "FAIL:$what"; }
                     if present:
                         self.assertEqual((root / 'cpu2/online').read_text().strip(), '1')
 
-    def test_dhcp_isolation_matches_both_directions_and_exact_interface(self):
-        source = (TOOLS / 'verify-bridge.sh').read_text()
-        function = re.search(r'^dhcp_is_blocked\(\) \{\n.*?^\}', source, re.M | re.S)[0]
-        rules = '\n'.join(f'-p IPv4 -{direction} bat0 --ip-proto udp --ip-dport 67:68 -j DROP'
-                          for direction in ('i', 'o'))
-        for text, iface, mode, expected in [(rules, 'bat0', 'both', 0),
-                                            (rules, 'bat', 'both', 1),
-                                            (rules.splitlines()[0], 'bat0', 'both', 1),
-                                            (rules.splitlines()[0], 'bat0', 'any', 0),
-                                            (rules.replace('DROP', 'ACCEPT'), 'bat0', 'both', 1)]:
-            body = 'EBTABLES_OUTPUT=' + shlex.quote(text) + '\n' + function + f'\ndhcp_is_blocked {iface} {mode}\n'
-            result = subprocess.run(['bash', '-c', body], capture_output=True, text=True)
-            self.assertEqual(result.returncode, expected, result.stderr)
 
 
 if __name__ == '__main__':

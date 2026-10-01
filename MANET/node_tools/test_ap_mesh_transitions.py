@@ -8,10 +8,12 @@ mode changes, real supplicant timing, RF) is not established here.
 """
 
 import fcntl
+import io
 import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -39,6 +41,8 @@ class Radio:
         self.bat = set()
         self.kind = {IFACE: 'AP', OTHER: 'mesh point'}
         self.freq = {IFACE: 5745, OTHER: 2462}
+        self.power = {IFACE: 5, OTHER: 23}
+        self.ignore_power = False
         self.caps = CAPS
         self.fail_attach = False
         self.fail_supplicant = False
@@ -81,6 +85,9 @@ class SimTransition(manet_ap_mesh.Transition):
         elif args[:2] == ['iw', 'dev'] and args[3:5] == ['set', 'type']:
             sim.kind[args[2]] = 'mesh point' if args[5] == 'mp' else args[5]
         elif args[:2] == ['iw', 'phy']:
+            if args[3:5] == ['set', 'txpower'] and not sim.ignore_power:
+                iface = IFACE if args[2] == 'phy1' else OTHER
+                sim.power[iface] = float(args[6]) / 100 if args[5] == 'fixed' else 23
             return sim.caps
         elif args[0] == 'wpa_cli':
             if f'wpa_supplicant@{args[4]}.service' not in sim.active:
@@ -94,7 +101,8 @@ class SimTransition(manet_ap_mesh.Transition):
     def radio_info(self, iface):
         freq = self.sim.freq.get(iface)
         channel = (freq - 5000) // 5 if freq and freq > 5000 else ((freq - 2407) // 5 if freq else 0)
-        return (f'Interface {iface}\n\ttype {self.sim.kind.get(iface, "managed")}\n\twiphy 1\n'
+        return (f'Interface {iface}\n\ttype {self.sim.kind.get(iface, "managed")}\n\twiphy {1 if iface == IFACE else 0}\n'
+                + f'\ttxpower {self.sim.power.get(iface, 21):.2f} dBm\n'
                 + (f'\tchannel {channel} ({freq} MHz), width: 20 MHz\n' if freq else ''))
 
 
@@ -171,6 +179,82 @@ class Harness(unittest.TestCase):
                       f"{key}_NODE_STATE='ACTIVE'", f"{key}_OBSERVED_AT_UPTIME='{at}'",
                       f"{key}_INTERFACES_JSON='{interfaces}'"]
         self.registry.write_text('\n'.join(lines) + '\n')
+
+
+class PowerOwnershipTests(Harness):
+    def test_post_start_logs_cap_failure_without_failing_hostapd(self):
+        transition = mock.Mock()
+        transition.ap_power.side_effect = RuntimeError('cap did not stick')
+        with mock.patch.object(manet_ap_mesh, 'Transition', return_value=transition), \
+                mock.patch.object(sys, 'argv', ['helper', 'ap-power-post-start']), \
+                mock.patch.object(sys, 'stderr', new_callable=io.StringIO) as warning, \
+                mock.patch.object(sys, 'stdout', new_callable=io.StringIO):
+            manet_ap_mesh.main()
+            self.assertIn('WARNING: AP TX power cap failed', warning.getvalue())
+        with mock.patch.object(manet_ap_mesh, 'Transition', return_value=transition), \
+                mock.patch.object(sys, 'argv', ['helper', 'ap-power']), \
+                self.assertRaisesRegex(RuntimeError, 'cap did not stick'):
+            manet_ap_mesh.main()
+
+    def test_ap_power_requires_both_ap_type_and_no_active_mesh_role(self):
+        for kind, members, expected in [('AP', OTHER, True), ('mesh point', OTHER, False),
+                                        ('managed', OTHER, False), ('AP', OTHER + ' ' + IFACE, False)]:
+            with self.subTest(kind=kind, members=members):
+                self.radio.kind[IFACE] = kind
+                self.radio.power[IFACE] = 23
+                self.write('mesh_if', members)
+                self.radio.calls.clear()
+                self.assertEqual(self.transition().ap_power()['changed'], expected)
+                self.assertEqual('iw phy phy1 set txpower fixed 500' in self.radio.calls, expected)
+
+    def test_stale_ap_role_cannot_prepare_or_cap_halow(self):
+        for evidence in ('role', 'driver'):
+            with self.subTest(evidence=evidence):
+                self.write('halow_if', IFACE if evidence == 'role' else '')
+                if evidence == 'driver':
+                    device = self.root / 'net' / IFACE / 'device'
+                    device.mkdir()
+                    (device / 'driver').symlink_to(self.root / 'morse_usb')
+                self.radio.calls.clear()
+                for action in ('prepare_ap', 'ap_power', 'to_mesh'):
+                    with self.assertRaisesRegex(ValueError, 'HaLow'):
+                        getattr(self.transition(), action)()
+                self.assertFalse(self.radio.calls)
+
+    def test_successful_setter_without_effect_is_an_error(self):
+        self.radio.ignore_power = True
+        self.radio.power[IFACE] = 23
+        with mock.patch.object(manet_ap_mesh.time, 'sleep'), \
+                self.assertRaisesRegex(RuntimeError, 'TX power'):
+            self.transition().ap_power()
+
+    def test_lower_regulatory_ceiling_is_accepted(self):
+        self.radio.ignore_power = True
+        self.radio.power[IFACE] = 4
+        self.assertFalse(self.transition().ap_power()['changed'])
+        self.assertFalse(self.radio.calls)
+
+    def test_ap_cap_is_idempotent_and_heals_a_later_power_reset(self):
+        self.assertFalse(self.transition().ap_power()['changed'])
+        self.assertFalse(self.radio.calls)
+        self.radio.power[IFACE] = 23
+        self.assertTrue(self.transition().ap_power()['changed'])
+        self.assertEqual(self.radio.power[IFACE], 5)
+        self.radio.calls.clear()
+        self.assertFalse(self.transition().ap_power()['changed'])
+        self.assertFalse(self.radio.calls)
+
+    def test_phy_write_refuses_another_active_interface_on_the_same_radio(self):
+        self.radio.power[IFACE] = 23
+        directory = self.root / 'net' / OTHER
+        (directory / 'phy80211').mkdir()
+        (directory / 'phy80211/name').write_text('phy1\n')
+        (directory / 'flags').write_text('0x1003\n')
+        with self.assertRaisesRegex(ValueError, 'also serves'):
+            self.transition().ap_power()
+        self.assertEqual(self.radio.calls, [])
+        (directory / 'flags').write_text('0x1002\n')
+        self.assertTrue(self.transition().ap_power()['changed'])
 
 
 class ToMeshTests(Harness):

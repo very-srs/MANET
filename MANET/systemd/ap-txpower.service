@@ -1,0 +1,7 @@
+[Unit]
+Description=Apply low transmit power only to the active EUD AP
+After=hostapd.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/manet_ap_mesh.py ap-power
