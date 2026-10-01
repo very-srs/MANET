@@ -1255,8 +1255,20 @@ both node managers and dashboard share this selection. Address-list order is
 not identity: MediaMTX's service VIP or the EUD gateway can appear first.
 
 The hostapd drop-in runs `prepare-ap-iface.sh` before each real start/restart.
-The older `ap-interface-setup.service` calls the same helper, but its retained
-oneshot state cannot suppress preparation after an AP/mesh mode transition.
+The older independently enabled `ap-interface-setup.service` is retired:
+it could prepare an AP at boot even while that radio belonged to the mesh.
+Hostapd's post-start action applies the AP PHY power cap under the channel
+lock after checking active roles and actual AP type. The packaged
+`ap-txpower.service` offers the same guarded action for reconciliation and
+has no boot enable link. A cap already at or below 5 dBm is left alone; a
+later power reset above that ceiling is corrected. Hostapd also queues an
+asynchronous dnsmasq start after its AP setup, including boot and recovery;
+dnsmasq's own port and isolation guards still apply. The fixed 23/24 dBm conventional mesh lab-power unit
+is retired; those radios use automatic power. HaLow's role-aware power unit
+also requests auto, replacing the generated fixed-ceiling units. The Morse
+module parameter `tx_max_power_mbm` is a fallback when the firmware maximum
+query fails, not proof of the active limit. The AP cap is read back after setting it, accepting a lower
+regulatory ceiling; a PHY shared with another active interface is rejected.
 `manet_ap_mesh.py` owns both directions. It withdraws active mesh roles under
 `channel-election.lock` before preparing AP mode. Returning to mesh restores
 the provisioned band, rebuilds live/lobby supplicant files from current mesh

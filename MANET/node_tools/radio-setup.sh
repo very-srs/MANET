@@ -305,45 +305,8 @@ EOF
 chmod +x /usr/local/bin/unblock-wifi-rfkill.sh
 /usr/local/bin/unblock-wifi-rfkill.sh
 
-cat << 'EOF' > /usr/local/bin/prepare-standard-mesh-iface.sh
-#!/bin/sh
-set -u
+# prepare-standard-mesh-iface.sh is shipped by the package.
 
-IFACE="${1:-}"
-[ -n "$IFACE" ] || exit 0
-[ -e "/sys/class/net/$IFACE" ] || exit 0
-
-/usr/local/bin/unblock-wifi-rfkill.sh 2>/dev/null || true
-
-driver="$(basename "$(readlink -f "/sys/class/net/$IFACE/device/driver" 2>/dev/null)")"
-if [ -z "$driver" ] || [ "$driver" = "." ]; then
-    driver="$(ethtool -i "$IFACE" 2>/dev/null | awk -F': ' '$1 == "driver" {print $2; exit}')"
-fi
-
-case "$driver" in
-    brcmfmac|morse*)
-        exit 0
-        ;;
-esac
-
-# AP candidates may rejoin mesh after a wired EUD connects. Active roles win.
-AP_IF="$(cat /var/lib/ap_interface 2>/dev/null)"
-if [ "$IFACE" = "$AP_IF" ] && ! grep -Fxq "$IFACE" /var/lib/mesh_if 2>/dev/null; then
-    exit 0
-fi
-
-iw dev "$IFACE" info 2>/dev/null | grep -q 'type mesh point' && exit 0
-
-ip link set "$IFACE" down 2>/dev/null || true
-sleep 1
-iw dev "$IFACE" set type mp 2>/dev/null || true
-sleep 1
-
-if ! iw dev "$IFACE" info 2>/dev/null | grep -q 'type mesh point'; then
-    echo "Warning: $IFACE did not enter mesh point mode before wpa_supplicant" >&2
-fi
-EOF
-chmod +x /usr/local/bin/prepare-standard-mesh-iface.sh
 
 cat << EOF > /etc/systemd/system/wifi-rfkill-unblock.service
 [Unit]
@@ -889,6 +852,14 @@ rm -f /run/manet-rendezvous.json
 
 # === CONFIGURE AP INTERFACE (if wireless/auto mode) ===
 
+# Retire independent AP boot jobs even when this setup selects wired-only
+# operation. Hostapd owns preparation and the guarded power post-start action.
+systemctl disable --now ap-interface-setup.service 2>/dev/null || true
+rm -f /etc/systemd/system/ap-interface-setup.service
+rm -f /etc/systemd/system/multi-user.target.wants/ap-interface-setup.service
+systemctl disable --now ap-txpower.service 2>/dev/null || true
+rm -f /etc/systemd/system/multi-user.target.wants/ap-txpower.service
+
 HOST_MAC=$(python3 /usr/local/bin/manet_eud_ap.py suffix) || {
     provision_fail "Cannot determine the node identity suffix"
     provision_state incomplete "$(date +%s)"
@@ -911,24 +882,6 @@ elif [[ -n "$AP_INTERFACE" ]]; then
     else
         echo " > WARNING: cannot determine mesh band for $AP_INTERFACE, no mesh config written"
     fi
-
-cat <<-EOF > /etc/systemd/system/ap-interface-setup.service
-[Unit]
-Description=Set $AP_INTERFACE to managed mode for hostapd
-Before=hostapd.service
-After=wifi-rfkill-unblock.service
-Wants=wifi-rfkill-unblock.service
-
-[Service]
-Type=oneshot
-# The hostapd drop-in runs this helper on every start/restart too. The helper
-# serializes callers and leaves an already-running AP untouched.
-ExecStart=/usr/local/bin/prepare-ap-iface.sh
-RemainAfterExit=yes
-
-[Install]
-WantedBy=multi-user.target
-EOF
 
     # Create networkd config for AP interface (unmanaged, hostapd will control it)
     cat <<-EOF > /etc/systemd/network/30-${AP_INTERFACE}.network
@@ -1011,23 +964,8 @@ rsn_pairwise=CCMP
 wpa_passphrase=$LAN_AP_KEY
 EOF
 
-cat <<-EOF > /etc/systemd/system/ap-txpower.service
-[Unit]
-Description=Set low TX power on AP interface
-After=ap-interface-setup.service
-Wants=ap-interface-setup.service
-
-[Service]
-Type=oneshot
-ExecStartPre=/bin/sleep 2
-# mt7915e ignores per-netdev txpower in AP mode; must set on the wiphy.
-ExecStart=-/bin/sh -c '/usr/sbin/iw phy "\$(cat /sys/class/net/$AP_INTERFACE/phy80211/name)" set txpower fixed 500'
-RemainAfterExit=yes
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
+# ap-txpower.service is packaged, role-aware, and is not independently enabled.
+# Hostapd's ExecStartPost applies its cap on every actual AP start.
     # Enable proxy ARP on br0 for EUD routing
     cat <<-EOF >> /etc/sysctl.d/99-mesh.conf
 
@@ -1039,16 +977,13 @@ EOF
     # Load the generated units and the shipped hostapd preparation drop-in
     # before any startup path can launch the AP.
     systemctl daemon-reload
-    systemctl enable ap-txpower.service
     systemctl unmask dnsmasq.service
     systemctl enable dnsmasq.service
 
     if [[ "$eud" == "wireless" ]]; then
         echo " > Wireless mode: Enabling and starting AP services"
         systemctl unmask hostapd.service
-        systemctl enable ap-interface-setup.service
         systemctl enable hostapd.service
-        systemctl restart ap-interface-setup.service 2>/dev/null || true
         systemctl restart hostapd.service 2>/dev/null || true
         systemctl restart dnsmasq.service 2>/dev/null || true
         systemctl restart ap-txpower.service 2>/dev/null || true
@@ -1188,24 +1123,6 @@ network={
 EOF
     fi
 
-    # Set HaLow TX power to 24 dBm (2400 mBm) after interface comes up
-cat << EOF > /etc/systemd/system/halow-txpower-$WLAN.service
-[Unit]
-Description=Set HaLow TX power for $WLAN
-After=wpa_supplicant-s1g-$WLAN.service
-Wants=wpa_supplicant-s1g-$WLAN.service
-
-[Service]
-Type=oneshot
-ExecStartPre=/bin/sleep 5
-ExecStart=/usr/sbin/iw dev $WLAN set txpower fixed 2400
-RemainAfterExit=yes
-
-[Install]
-WantedBy=multi-user.target
-EOF
-    systemctl enable halow-txpower-$WLAN.service
-
 cat << EOF > /etc/systemd/system/wpa_supplicant-s1g-$WLAN.service
 [Unit]
 Description=WPA supplicant (S1G/HaLow) for $WLAN
@@ -1228,6 +1145,15 @@ EOF
     systemctl enable wpa_supplicant-s1g-$WLAN.service
 
 done
+
+# One role-aware HaLow power action replaces per-interface fixed ceilings.
+for old_power_unit in /etc/systemd/system/halow-txpower-wlan*.service; do
+    [ -f "$old_power_unit" ] || continue
+    old_power_name=$(basename "$old_power_unit")
+    systemctl disable --now "$old_power_name" 2>/dev/null || true
+    rm -f "$old_power_unit" "/etc/systemd/system/multi-user.target.wants/$old_power_name"
+done
+systemctl enable manet-halow-power.service
 
 # === MORSE / HALOW MODULE OPTIONS ===
 echo "options cfg80211 ieee80211_regdom=$CFG80211_REGDOM" > /etc/modprobe.d/cfg80211.conf
@@ -1419,6 +1345,18 @@ systemctl enable syncthing@radio.service
 
 systemctl daemon-reload
 systemctl enable --now nftables.service
+systemctl disable --now ebtables-restore.service 2>/dev/null || true
+rm -f /etc/systemd/system/ebtables-restore.service /etc/ebtables.rules
+rm -f /etc/systemd/system/multi-user.target.wants/ebtables-restore.service
+# Conventional mesh radios use automatic power. HaLow's own unit remains.
+systemctl disable --now manet-txpower.service 2>/dev/null || true
+rm -f /etc/systemd/system/manet-txpower.service
+rm -f /etc/systemd/system/multi-user.target.wants/manet-txpower.service
+systemctl daemon-reload
+provision_try "DHCP isolation service failed" systemctl enable --now manet-dhcp-isolation.service
+if ! provision_try "DHCP isolation verification failed" /usr/local/bin/manet-dhcp-isolation.py ensure; then
+    systemctl stop dnsmasq.service 2>/dev/null || true
+fi
 
 # Install scripts for auto gateway management
 cp /root/networkd-dispatcher/off /etc/networkd-dispatcher/off.d/50-gateway-disable

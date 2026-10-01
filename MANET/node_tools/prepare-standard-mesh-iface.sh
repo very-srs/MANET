@@ -18,6 +18,12 @@ case "$driver" in
         ;;
 esac
 
+# AP candidates may rejoin mesh after a wired EUD connects. Active roles win.
+AP_IF="$(cat /var/lib/ap_interface 2>/dev/null)"
+if [ "$IFACE" = "$AP_IF" ] && ! grep -Fxq "$IFACE" /var/lib/mesh_if 2>/dev/null; then
+    exit 0
+fi
+
 iw dev "$IFACE" info 2>/dev/null | grep -q 'type mesh point' && exit 0
 
 ip link set "$IFACE" down 2>/dev/null || true

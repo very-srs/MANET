@@ -57,6 +57,14 @@ REQUIRED = MARKERS | {
     "usr/local/bin/mesh-time-sync.py", "usr/local/bin/one-shot-time-sync.sh",
     "etc/systemd/system/one-shot-time-sync.service",
     "etc/systemd/system/node-manager.service.d/time-sync.conf",
+    "usr/local/bin/manet-dhcp-isolation.py",
+    "usr/local/share/manet/dhcp-isolation.nft",
+    "etc/systemd/system/manet-dhcp-isolation.service",
+    "etc/systemd/system/dnsmasq.service.d/20-manet-dhcp-isolation.conf",
+    "usr/local/bin/manet_ap_mesh.py",
+    "etc/systemd/system/ap-txpower.service",
+    "etc/systemd/system/manet-halow-power.service",
+    "usr/local/bin/manet-halow-power.py",
 }
 VERSION_PATTERN = re.compile(r"[0-9]+(?:\.[0-9]+)+")
 
@@ -342,7 +350,17 @@ class Updater:
                               ("55-manet-power", "manet-power-status.sh")):
             self.install_link(motd / label, f"/usr/local/bin/{script}")
         self.retire_route_fix()
+        self.retire_network_boot_units()
         run_command(["systemctl", "daemon-reload"])
+        try:
+            run_command(["systemctl", "enable", "--now", "manet-dhcp-isolation.service"])
+            run_command([str(self.destination('usr/local/bin/manet-dhcp-isolation.py')), 'ensure'])
+        except (UpdateError, OSError, subprocess.SubprocessError):
+            # An already running dnsmasq does not execute the new start guard.
+            # Leave the update pending and stop serving if isolation failed.
+            run_command(["systemctl", "stop", "dnsmasq.service"])
+            raise
+        run_command(["systemctl", "enable", "--now", "manet-halow-power.service"])
         for service in ("mesh-status.service", "node-manager.service"):
             run_command(["systemctl", "restart", service])
         for service in ("mesh-status.service", "node-manager.service", "mesh-channel-agreement.service", "one-shot-time-sync.service"):
@@ -371,6 +389,22 @@ class Updater:
                      'usr/local/bin/mesh-default-route-fix.sh'):
             path = self.destination(name)
             path.unlink(missing_ok=True)
+
+    def retire_network_boot_units(self):
+        services = ['ebtables-restore.service', 'ap-interface-setup.service',
+                    'ap-txpower.service', 'manet-txpower.service']
+        services.extend(path.name for path in self.destination('etc/systemd/system').glob(
+            'halow-txpower-wlan*.service'))
+        for service in services:
+            unit = self.destination('etc/systemd/system/' + service)
+            if unit.exists():
+                run_command(['systemctl', 'disable', '--now', service])
+            self.destination('etc/systemd/system/multi-user.target.wants/' + service).unlink(missing_ok=True)
+            # ap-txpower remains an explicit, role-aware policy action. It is
+            # also invoked by hostapd itself; never independently at boot.
+            if service != 'ap-txpower.service':
+                unit.unlink(missing_ok=True)
+        self.destination('etc/ebtables.rules').unlink(missing_ok=True)
 
     def update(self):
         run = self.root / "run"

@@ -25,29 +25,6 @@ log_warn() {
     ((WARNINGS++))
 }
 
-# ebtables prints -j DROP last. Match tokens instead of their display order,
-# and require isolation in both directions for a mesh interface.
-dhcp_is_blocked() {
-    awk -v iface="$1" -v need="${2:-both}" '
-        {
-            input=output=ipv4=udp=ports=drop=0
-            for (i=1; i<NF; i++) {
-                if ($i == "-i" && $(i+1) == iface) input=1
-                if ($i == "-o" && $(i+1) == iface) output=1
-                if ($i == "-p" && $(i+1) == "IPv4") ipv4=1
-                if (($i == "--ip-proto" || $i == "--ip-protocol") && $(i+1) == "udp") udp=1
-                if (($i == "--ip-dport" || $i == "--ip-destination-port") && $(i+1) == "67:68") ports=1
-                if ($i == "-j" && $(i+1) == "DROP") drop=1
-            }
-            if (ipv4 && udp && ports && drop) {
-                inbound = inbound || input
-                outbound = outbound || output
-            }
-        }
-        END { exit !(need == "any" ? inbound || outbound : inbound && outbound) }
-    ' <<< "$EBTABLES_OUTPUT"
-}
-
 echo "========================================"
 echo "Bridged Architecture Verification"
 echo "========================================"
@@ -148,44 +125,13 @@ fi
 
 echo ""
 
-# --- 4. Check ebtables Rules ---
-echo "=== ebtables DHCP Isolation ==="
-
-if ! command -v ebtables &>/dev/null; then
-    log_fail "ebtables not installed"
+# --- 4. Check DHCP isolation rules ---
+echo "=== nftables DHCP Isolation ==="
+if python3 /usr/local/bin/manet-dhcp-isolation.py check; then
+    log_pass "DHCP isolated at bat0 (forwarding and local server traffic)"
 else
-    EBTABLES_OUTPUT=$(ebtables -L FORWARD 2>/dev/null)
-    
-    if dhcp_is_blocked bat0; then
-        log_pass "DHCP blocked on bat0"
-    else
-        log_fail "DHCP is NOT blocked on bat0"
-    fi
-    
-    for iface in "${MESH_INTERFACES[@]}" "${HALOW_INTERFACES[@]}"; do
-        [ -z "$iface" ] && continue
-        if dhcp_is_blocked "$iface"; then
-            log_pass "DHCP blocked on $iface"
-        else
-            log_warn "DHCP is NOT blocked on $iface"
-        fi
-    done
-
-    if [ -n "$AP_INTERFACE" ]; then
-        if dhcp_is_blocked "$AP_INTERFACE" any; then
-            log_fail "DHCP is blocked on $AP_INTERFACE (AP interface - should allow!)"
-        else
-            log_pass "DHCP is allowed on $AP_INTERFACE (AP interface)"
-        fi
-    fi
-    
-    if [ -f /etc/ebtables.rules ]; then
-        log_pass "ebtables rules file exists (/etc/ebtables.rules)"
-    else
-        log_warn "ebtables rules file not found (won't persist across reboots)"
-    fi
+    log_fail "DHCP isolation rules are missing or incorrect"
 fi
-
 echo ""
 
 # --- 5. Check dnsmasq Configuration ---

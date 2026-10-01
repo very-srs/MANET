@@ -15,6 +15,25 @@ For `end0`, the carrier hook runs `ethernet-autodetect.sh --hotplug`, matching
 the boot service. Other interfaces enter uplink reconciliation through
 `manet-uplink-dispatch.sh`. Carrier detection does not download updates.
 
+While it waits for an address on `end0`, the node listens to what the other
+end sends. A lease means an upstream network. A single device asking for an
+address is treated as a wired EUD after about 5 seconds. Router
+advertisements, switch protocol frames (STP, LLDP, CDP) or traffic from more
+than one device mean a network is attached. If that network gives the node no
+address within 20 seconds, the port is left unbridged and the node does not
+serve DHCP onto it. A capture reaching 1 MiB is also treated conservatively
+as a network; capture storage and process lifetime are bounded. A completely
+silent cable is treated as a wired EUD after
+20 seconds. To force a wired EUD anyway, run
+`ethernet-autodetect.sh --mode wired-eud`.
+
+Detection on `end0` runs once per physical connection. Bridging or reconfiguring
+the port makes networkd report carrier again, and those repeat events are
+ignored while the link itself has not changed. Unplugging the cable, swapping it
+to another device, or power-cycling the device at the other end starts a fresh
+detection. If you move the cable during the 20-second detection, the node
+detects again once the current run finishes.
+
 ## When the interface becomes routable
 
 Once DHCP has finished and a route exists, gateway and NAT state are

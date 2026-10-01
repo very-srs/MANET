@@ -15,7 +15,7 @@
 #
 # Bridged Architecture:
 #   - All EUD interfaces (wlan1 when AP, end0 when wired) are bridged to br0
-#   - ebtables blocks DHCP on mesh interfaces (bat0, wlan0, wlan2, and wlan1 if mesh)
+#   - nftables isolates DHCP at bat0, the mesh-facing br0 port
 #   - dnsmasq listens on br0 for DHCP requests from EUDs
 #   - Multicast works at L2 (bridge), no routing needed
 #
@@ -381,58 +381,33 @@ cleanup_control_aliases() {
     done < <(ip -4 -o addr show dev "$CONTROL_IFACE" 2>/dev/null | awk '{print $4}' | cut -d/ -f1)
 }
 
-# Configure ebtables to block DHCP on mesh interfaces
-configure_ebtables_dhcp_isolation() {
-    local br0_secondary=$1
-    local iface_path
-    local iface
-    
-    log "Configuring ebtables DHCP isolation..."
-    
-    # Flush existing rules
-    ebtables -F FORWARD 2>/dev/null || true
-    
-    # Get AP interface if configured. DHCP is allowed only on the selected EUD
-    # AP interface; all mesh radios and bat0 must block forwarded DHCP.
-    local AP_INTERFACE=""
-    if [ -f /var/lib/ap_interface ]; then
-        AP_INTERFACE=$(cat /var/lib/ap_interface)
-        log "AP interface: $AP_INTERFACE"
+# bat0 is the only mesh-facing bridge port. The rule set does not depend on
+# which physical radio currently serves as AP or mesh.
+ensure_dhcp_isolation() {
+    if ! python3 /usr/local/bin/manet-dhcp-isolation.py ensure; then
+        log "ERROR: DHCP isolation failed; stopping dnsmasq to prevent foreign offers"
+        systemctl stop dnsmasq.service 2>/dev/null || true
+        return 1
     fi
-    
-    # Block DHCP on bat0 (the BATMAN-adv backbone)
-    if [ -d "/sys/class/net/bat0" ]; then
-        ebtables -A FORWARD -o bat0 -p IPv4 --ip-protocol udp --ip-destination-port 67:68 -j DROP
-        ebtables -A FORWARD -i bat0 -p IPv4 --ip-protocol udp --ip-destination-port 67:68 -j DROP
-        log "Blocked DHCP on bat0"
+}
+
+# Reuse the validated pool and leases after a temporary isolation failure.
+# Called only after this pass has checked the node's allocation/configuration.
+ensure_dnsmasq_running() {
+    if ! python3 /usr/local/bin/manet-dhcp-isolation.py eud-ready; then
+        if systemctl is-active --quiet dnsmasq.service; then
+            systemctl stop dnsmasq.service || return 1
+            log "dnsmasq stopped: no forwarding EUD port on br0"
+        fi
+        return 0
     fi
-    
-    # Block DHCP on all wireless interfaces EXCEPT the AP. Do not assume a
-    # specific wlanX mapping; Pi onboard, MT7915, and HaLow names vary by boot.
-    for iface_path in /sys/class/net/wlan*; do
-        [ -e "$iface_path" ] || continue
-        iface=$(basename "$iface_path")
-        if [ ! -d "/sys/class/net/$iface" ]; then
-            continue
+    if ! systemctl is-active --quiet dnsmasq.service; then
+        if ! systemctl start dnsmasq.service; then
+            log "ERROR: dnsmasq recovery failed; retrying next allocation pass"
+            return 1
         fi
-        
-        # Skip if this is the AP interface
-        if [ "$iface" = "$AP_INTERFACE" ] && ! grep -Fxq "$iface" /var/lib/mesh_if 2>/dev/null; then
-            log "Allowing DHCP on $iface (AP interface)"
-            continue
-        fi
-        
-        # Check if interface exists and has a master
-        if ip link show "$iface" 2>/dev/null | grep -q "master"; then
-            ebtables -A FORWARD -o "$iface" -p IPv4 --ip-protocol udp --ip-destination-port 67:68 -j DROP
-            ebtables -A FORWARD -i "$iface" -p IPv4 --ip-protocol udp --ip-destination-port 67:68 -j DROP
-            log "Blocked DHCP on $iface"
-        fi
-    done
-    
-    # Save rules for restore on boot
-    ebtables-save > /etc/ebtables.rules
-    log "ebtables rules saved to /etc/ebtables.rules"
+        log "dnsmasq resumed with existing pool and leases"
+    fi
 }
 
 # Configure dnsmasq for DHCP on br0
@@ -504,12 +479,12 @@ EOF
     fi
 #    systemctl enable dnsmasq.service 2>/dev/null
 
-    if systemctl is-active --quiet dnsmasq.service; then
+    if python3 /usr/local/bin/manet-dhcp-isolation.py eud-ready &&
+            systemctl is-active --quiet dnsmasq.service; then
         systemctl restart dnsmasq.service
         log "dnsmasq restarted"
     else
-        systemctl start dnsmasq.service
-        log "dnsmasq started"
+        ensure_dnsmasq_running
     fi
 }
 
@@ -531,6 +506,8 @@ ensure_control_addr() {
 # discovery is pending. Leave node-manager free to publish over IPv6. Run it
 # before restoring even a saved chunk or changing any interface/DHCP state.
 python3 "$STARTUP_HELPER" || exit 0
+
+ensure_dhcp_isolation || exit 1
 
 # Get our MAC address
 MY_MAC=$(cat "/sys/class/net/${CONTROL_IFACE}/address" 2>/dev/null || echo "")
@@ -631,8 +608,6 @@ case $IPV4_STATE in
             ip addr add "${BR0_SECONDARY}/${IPV4_NETWORK#*/}" dev "$CONTROL_IFACE"
             log "Assigned br0 primary: $BR0_PRIMARY, secondary (gateway): $BR0_SECONDARY"
             
-            # Configure ebtables DHCP isolation
-            configure_ebtables_dhcp_isolation "$BR0_SECONDARY"
             
             # Configure dnsmasq
             configure_dnsmasq "$BR0_PRIMARY" "$BR0_SECONDARY" "$DHCP_START" "$DHCP_END"
@@ -717,8 +692,9 @@ case $IPV4_STATE in
 
                 if [ "$NEEDS_DNSMASQ_UPDATE" = true ]; then
                     log "DHCP config changed, reconfiguring..."
-                    configure_ebtables_dhcp_isolation "$BR0_SECONDARY"
                     configure_dnsmasq "$BR0_PRIMARY" "$BR0_SECONDARY" "$DHCP_START" "$DHCP_END"
+                else
+                    ensure_dnsmasq_running || exit 1
                 fi
 
                 # The web UI is restricted to whoever holds a lease from this

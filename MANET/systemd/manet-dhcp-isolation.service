@@ -1,0 +1,14 @@
+[Unit]
+Description=Isolate each node's DHCP clients from the mesh
+After=nftables.service
+# nftables' base configuration flushes all tables. The IP manager verifies
+# and repairs this private table each allocation pass after a later reload.
+Before=dnsmasq.service batman-enslave.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/manet-dhcp-isolation.py apply
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

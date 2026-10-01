@@ -86,6 +86,8 @@ if os.environ.get('TEST_SYSTEMCTL_FAIL') == args:
                 body = self.new_version.encode()
             elif name.endswith('manet-admin-setup.sh'):
                 body = b'#!/bin/sh\necho dependency >> "$TEST_EVENTS"\nexit "$TEST_DEPENDENCY_FAIL"\n'
+            elif name.endswith('manet-dhcp-isolation.py'):
+                body = b'#!/bin/sh\necho isolation >> "$TEST_EVENTS"\nexit "${TEST_ISOLATION_FAIL:-0}"\n'
             else:
                 body = ('#!/bin/sh\n# ' + name + '\n').encode()
             self.members[name] = (body, 0o755 if name.endswith(('.sh', '.py')) else 0o644)
@@ -178,6 +180,37 @@ if os.environ.get('TEST_SYSTEMCTL_FAIL') == args:
                     self.checksum.write_text(content)
                 self.assert_rejected_before_install()
 
+    def test_update_retires_role_blind_boot_units_but_keeps_guarded_ap_action(self):
+        directory = self.root / 'etc/systemd/system'
+        links = directory / 'multi-user.target.wants'
+        links.mkdir(parents=True)
+        units = ('ap-interface-setup.service', 'ap-txpower.service', 'ebtables-restore.service',
+                 'manet-txpower.service', 'halow-txpower-wlan2.service')
+        for name in units:
+            (directory / name).write_text('old boot unit')
+            (links / name).symlink_to('../' + name)
+        (self.root / 'etc/ebtables.rules').write_text('obsolete rules')
+        self.updater.update()
+        for name in units:
+            self.assertIn('systemctl disable --now ' + name, self.history())
+            self.assertFalse((links / name).is_symlink())
+            self.assertEqual((directory / name).exists(), name == 'ap-txpower.service')
+        self.assertFalse((self.root / 'etc/ebtables.rules').exists())
+        self.assertLess(self.history().index('isolation'), self.history().index('restart node-manager.service'))
+
+    def test_isolation_failure_stops_existing_dhcp_and_preserves_pending_retry(self):
+        with patch.dict(os.environ, TEST_ISOLATION_FAIL='1'):
+            with self.assertRaises(update.UpdateError):
+                self.updater.update()
+        self.assertEqual(self.updater.marker.read_text(), self.old_version)
+        self.assertTrue(self.updater.pending.exists())
+        self.assertIn('systemctl stop dnsmasq.service', self.history())
+        self.assertNotIn('restart node-manager.service', self.history())
+        self.updater.routine = True
+        self.updater.update()
+        self.assertEqual(self.updater.marker.read_text(), self.new_version)
+        self.assertFalse(self.updater.pending.exists())
+
     def test_download_failure(self):
         for url in (STABLE_MANIFEST, DOWNLOADS + '/v0.550/cm4-tools.tar.gz'):
             with self.subTest(url=url), patch.dict(os.environ, TEST_DOWNLOAD_FAIL=url):
@@ -258,7 +291,8 @@ if os.environ.get('TEST_SYSTEMCTL_FAIL') == args:
         self.assertNotIn('systemctl', self.history())
 
     def test_service_failures_preserve_marker_and_retry_in_routine_mode(self):
-        for failure in ('daemon-reload', 'restart mesh-status.service',
+        for failure in ('daemon-reload', 'enable --now manet-dhcp-isolation.service',
+                        'enable --now manet-halow-power.service', 'restart mesh-status.service',
                         'restart node-manager.service', 'is-active --quiet node-manager.service'):
             with self.subTest(failure=failure):
                 for name in update.MARKERS:

@@ -643,6 +643,29 @@ The first five addresses network-wide are reserved for services. A chunk is
 claimed from those peers have not taken, and a collision is resolved by a MAC
 tie-break. `dnsmasq` is configured for the pool when a node needs it.
 
+**manet-dhcp-isolation.py**
+
+Keeps each node's DHCP pool local using the native nftables bridge table
+`manet_dhcp`. Rules on the `bat0` bridge port block DHCP forwarding in both
+directions, remote requests to the node's own server, and local server replies
+onto the mesh. Other bridge traffic and local EUD DHCP remain available.
+The service installs the rules before dnsmasq; dnsmasq's start guard and the
+IP manager verify and repair them. Failure prevents DHCP service. `check`
+verifies without changing rules; `ensure` preserves healthy rules and counters.
+The private table is replaced atomically, leaving NAT and UI policy intact.
+The base `nftables.service` configuration flushes the ruleset on restart;
+the IP manager repairs isolation on its next allocation pass. If isolation
+temporarily fails, DHCP stops and resumes with its existing leases after
+protection and the node's pool have been validated again.
+DHCP runs only while a local EUD port on `br0` has carrier and is forwarding:
+the active AP or a bridged Ethernet client port. A routed uplink and `bat0`
+alone do not qualify. Every service start checks this condition, and the IP
+manager stops DHCP if the last EUD port disappears.
+Every hostapd start also queues a DHCP start after the AP is ready, including
+boot and recovery, so clients do not wait for the next IP-manager pass.
+If the path bringing an EUD port up does not start DHCP itself, service
+resumes on the next IP-manager pass (normally within about 15 seconds).
+
 On each boot, IPv4 allocation waits for usable `br0` link-local IPv6, active
 Alfred, and the node's initial identity/telemetry publication. It then observes
 BATMAN peers for 10 seconds (one Alfred synchronization period). If visible
@@ -708,6 +731,15 @@ files from current credentials and the saved/authenticated channel plan,
 checks the resulting radio channel, and rolls back failed transitions. Fresh
 registry observations validate that channel without authorizing a plan change.
 AP-only hardware stays out of the mesh; disabled mesh radios remain down.
+
+AP preparation runs through hostapd, and its post-start helper applies the
+5 dBm cap only to the active AP role. The old independently enabled AP boot
+units and the conventional mesh lab-power unit are retired. Conventional mesh
+radios use automatic power; mesh return clears the AP cap. HaLow's separate
+role-aware power unit also requests automatic power and logs the readback,
+leaving the limit to its driver and firmware. The AP setter verifies the cap
+and refuses a PHY shared with another active interface. Healthy mesh reconciliation preserves operator
+power changes; manual power settings currently do not persist across reboot.
 
 `gateway-route-manager.sh` is the sole mesh default-route manager. The obsolete
 `mesh-default-route-fix.service` is retired during updates and setup; it could

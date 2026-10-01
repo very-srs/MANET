@@ -95,15 +95,63 @@ class Transition:
                                    if '=' in line and not line.lstrip().startswith('#'))}
 
     def identity(self):
-        iface = text(self.roles / 'ap_interface')
-        if not re.fullmatch(r'[A-Za-z0-9_.-]{1,15}', iface):
-            raise ValueError('Invalid or missing AP interface')
+        iface = self.ap_identity()
         band = text(self.roles / 'ap_mesh_band', default='missing')
         if band not in ('', '2.4', '5'):
             raise ValueError('Missing AP mesh capability; rerun radio-setup')
         if band and iface in (text(self.roles / 'no_mesh_if').split() + text(self.roles / 'halow_if').split()):
             raise ValueError('AP-only/HaLow hardware cannot become a conventional mesh radio')
         return iface, band
+
+    def ap_identity(self):
+        iface = text(self.roles / 'ap_interface')
+        if not re.fullmatch(r'[A-Za-z0-9_.-]{1,15}', iface):
+            raise ValueError('Invalid or missing AP interface')
+        driver = (self.sysnet / iface / 'device/driver').resolve().name
+        if iface in text(self.roles / 'halow_if').split() or driver.startswith('morse'):
+            raise ValueError('HaLow hardware cannot serve as the EUD AP')
+        return iface
+
+    def phy_power(self, iface, value):
+        phy = re.search(r'\bwiphy (\d+)', self.radio_info(iface))
+        if not phy:
+            raise ValueError('Cannot identify radio PHY')
+        name = 'phy' + phy[1]
+        # PHY power affects every virtual interface on that radio. A second
+        # active interface may have a different AP/mesh/uplink policy.
+        for other in self.sysnet.iterdir():
+            if (other.name != iface and text(other / 'phy80211/name') == name
+                    and int(text(other / 'flags', '0x1'), 0) & 1):
+                raise ValueError(f'Cannot change {iface} power: {name} also serves {other.name}')
+        self.command(['iw', 'phy', name, 'set', 'txpower', *value])
+        if value[0] == 'fixed':
+            ceiling = int(value[1]) / 100
+            # A regulatory/driver ceiling below the request is valid. A
+            # successful iw exit alone does not prove the requested cap stuck.
+            for attempt in range(5):
+                actual = re.search(r'^\s*txpower (-?\d+(?:\.\d+)?) dBm', self.radio_info(iface), re.M)
+                if actual and float(actual[1]) <= ceiling + .01:
+                    return
+                if attempt < 4:
+                    time.sleep(.1)
+            raise RuntimeError(f'TX power on {iface} did not settle at or below {ceiling:g} dBm')
+
+    def ap_power(self):
+        # Called by hostapd ExecStartPost and by policy reconciliation. A
+        # queued old AP job must not cap a radio which has since joined mesh.
+        with locked(self.channel_lock):
+            iface = self.ap_identity()
+            info = self.radio_info(iface)
+            if (iface in text(self.roles / 'mesh_if').split()
+                    or not re.search(r'^\s*type AP\s*$', info, re.M)):
+                return {'mode': 'ap-power', 'changed': False}
+            actual = re.search(r'^\s*txpower (-?\d+(?:\.\d+)?) dBm', info, re.M)
+            if actual and float(actual[1]) <= 5.01:
+                # Keep healing driver resets without rewriting a healthy cap
+                # or raising a deliberately lower operator setting.
+                return {'mode': 'ap-power', 'changed': False}
+            self.phy_power(iface, ['fixed', '500'])
+            return {'mode': 'ap-power', 'changed': True}
 
     def disabled(self, iface):
         desired = read_json(self.radio_state).get('desired', {})
@@ -249,10 +297,7 @@ class Transition:
         self.command(['ip', 'link', 'set', iface, 'up'])
         # AP operation sets a PHY-wide 5 dBm cap. Stopping its oneshot does
         # not undo that cap; let cfg80211 choose mesh power for this channel.
-        phy = re.search(r'\bwiphy (\d+)', self.radio_info(iface))
-        if not phy:
-            raise ValueError('Cannot identify returning mesh PHY')
-        self.command(['iw', 'phy', 'phy' + phy[1], 'set', 'txpower', 'auto'])
+        self.phy_power(iface, ['auto'])
         self.command(['systemctl', 'restart', f'wpa_supplicant@{iface}.service'], timeout=30)
         self.ready(iface, freq)
         if not self.attached(iface):
@@ -356,9 +401,7 @@ class Transition:
 
     def prepare_ap(self):
         with locked(self.channel_lock):
-            iface = text(self.roles / 'ap_interface')
-            if not re.fullmatch(r'[A-Za-z0-9_.-]{1,15}', iface):
-                raise ValueError('Invalid or missing AP interface')
+            iface = self.ap_identity()
             before = self.snapshot(self.role_paths())
             had_mesh = iface in text(self.roles / 'mesh_if').split()
             try:
@@ -393,9 +436,21 @@ def main():
         result = transition.to_mesh()
     elif sys.argv[1:] == ['prepare-ap']:
         result = transition.prepare_ap()
+    elif sys.argv[1:] == ['ap-power']:
+        result = transition.ap_power()
+    elif sys.argv[1:] == ['ap-power-post-start']:
+        try:
+            result = transition.ap_power()
+        except Exception as error:
+            # The EUD range cap is a preference, not a prerequisite for AP
+            # availability. Keep hostapd up; the standalone policy action
+            # still fails visibly and reconciliation retries it.
+            print(f'WARNING: AP TX power cap failed: {error}', file=sys.stderr)
+            result = {'mode': 'ap-power', 'changed': False, 'warning': str(error)}
     else:
-        raise ValueError('usage: manet_ap_mesh.py {mesh|prepare-ap}')
-    print(json.dumps(result))
+        raise ValueError('usage: manet_ap_mesh.py {mesh|prepare-ap|ap-power|ap-power-post-start}')
+    if sys.argv[1:] != ['ap-power'] or result.get('changed'):
+        print(json.dumps(result))
 
 
 if __name__ == '__main__':
