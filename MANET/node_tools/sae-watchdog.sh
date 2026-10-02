@@ -9,6 +9,7 @@
 # A restart of wpa_supplicant clears the block state; batman-enslave re-run
 # re-adds the interfaces.
 #
+. "${MANET_TOOLS_DIR:-$(dirname "${BASH_SOURCE[0]}")}/manet-common.sh" || exit 1
 
 STANDARD_MESH_INTERFACES=""
 if [ -s /var/lib/mesh_if ]; then
@@ -19,18 +20,7 @@ log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] - SAE-WATCHDOG: $*"
 }
 
-radio_iface_enabled() {
-    python3 - "$1" <<'PY'
-import json, sys
-iface = sys.argv[1]
-try:
-    with open('/var/lib/mesh_radio_state.json') as f:
-        state = json.load(f).get('desired', {}).get(iface, 'up')
-except Exception:
-    state = 'up'
-sys.exit(1 if state == 'down' else 0)
-PY
-}
+# radio_iface_enabled: manet-common.sh
 
 service_unit_for_iface() {
     local iface="$1"

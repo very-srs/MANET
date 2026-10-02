@@ -57,14 +57,20 @@ REQUIRED = MARKERS | {
     "usr/local/bin/mesh-time-sync.py", "usr/local/bin/one-shot-time-sync.sh",
     "etc/systemd/system/one-shot-time-sync.service",
     "etc/systemd/system/node-manager.service.d/time-sync.conf",
+    "etc/systemd/system/node-manager.service.d/select.conf",
+    "usr/local/bin/node-manager-select.sh",
     "usr/local/bin/manet-dhcp-isolation.py",
     "usr/local/share/manet/dhcp-isolation.nft",
     "etc/systemd/system/manet-dhcp-isolation.service",
     "etc/systemd/system/dnsmasq.service.d/20-manet-dhcp-isolation.conf",
     "usr/local/bin/manet_ap_mesh.py",
     "etc/systemd/system/ap-txpower.service",
-    "etc/systemd/system/manet-halow-power.service",
-    "usr/local/bin/manet-halow-power.py",
+    "etc/systemd/system/manet-mesh-power.service",
+    "usr/local/bin/manet-mesh-power.sh",
+    "usr/local/bin/manet-region.py",
+    "usr/local/bin/mesh-service-election.py",
+    "usr/local/bin/manet-common.sh",
+    "usr/local/bin/mesh-peer-count.sh",
 }
 VERSION_PATTERN = re.compile(r"[0-9]+(?:\.[0-9]+)+")
 
@@ -343,8 +349,8 @@ class Updater:
                 atomic_file(target, source=directory / name, mode=member.mode & 0o777)
             else:
                 self.install_link(target, member.linkname)
-        atomic_file(self.destination("usr/local/bin/node-manager.sh"),
-                    source=directory / "usr/local/bin" / selected, mode=0o755)
+        # Same choice node-manager-select.sh makes before every service start.
+        self.install_link(self.destination("usr/local/bin/node-manager.sh"), selected)
         self.make_directory(motd)
         for label, script in (("50-manet-provision", "manet-provision-status.sh"),
                               ("55-manet-power", "manet-power-status.sh")):
@@ -360,7 +366,7 @@ class Updater:
             # Leave the update pending and stop serving if isolation failed.
             run_command(["systemctl", "stop", "dnsmasq.service"])
             raise
-        run_command(["systemctl", "enable", "--now", "manet-halow-power.service"])
+        run_command(["systemctl", "enable", "--now", "manet-mesh-power.service"])
         for service in ("mesh-status.service", "node-manager.service"):
             run_command(["systemctl", "restart", service])
         for service in ("mesh-status.service", "node-manager.service", "mesh-channel-agreement.service", "one-shot-time-sync.service"):
@@ -392,7 +398,8 @@ class Updater:
 
     def retire_network_boot_units(self):
         services = ['ebtables-restore.service', 'ap-interface-setup.service',
-                    'ap-txpower.service', 'manet-txpower.service']
+                    'ap-txpower.service', 'manet-txpower.service',
+                    'manet-halow-power.service']
         services.extend(path.name for path in self.destination('etc/systemd/system').glob(
             'halow-txpower-wlan*.service'))
         for service in services:
@@ -404,6 +411,7 @@ class Updater:
             # also invoked by hostapd itself; never independently at boot.
             if service != 'ap-txpower.service':
                 unit.unlink(missing_ok=True)
+        self.destination('usr/local/bin/manet-halow-power.py').unlink(missing_ok=True)
         self.destination('etc/ebtables.rules').unlink(missing_ok=True)
 
     def update(self):

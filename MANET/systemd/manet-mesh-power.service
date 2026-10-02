@@ -1,0 +1,13 @@
+[Unit]
+Description=Request 30 dBm on mesh radios, with no MANET power ceiling
+# Mesh radios are enslaved to bat0 after their supplicants start, so by then
+# each interface is up and on its channel.
+After=batman-enslave.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/manet-mesh-power.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

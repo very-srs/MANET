@@ -158,7 +158,7 @@ sleep() {
             return events, identity
 
     def test_first_pass_starts_discovery_and_claim_publication_does_not_sleep(self):
-        for name, lobby in (('node-manager-static.sh', True), ('node-manager.sh', True),
+        for name, lobby in (('node-manager-static.sh', True),
                             ('node-manager-acs.sh', True), ('node-manager-acs.sh', False)):
             with self.subTest(manager=name, lobby=lobby):
                 events, identity = self.run_manager(name, lobby)

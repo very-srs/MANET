@@ -227,7 +227,9 @@ the only cap:
  		chan->orig_mpwr = target_power;
 ```
 
-(Actual TX power is then enforced at runtime by `manet-txpower.service`.)
+At runtime `manet-mesh-power.service` requests 30 dBm on every mesh radio, so
+regulatory (30 dBm in every country in MANET's `regulatory.db`) and the
+card's own hardware are the only limits.
 
 **When porting:** both patches are uncommitted working-tree diffs in the kernel
 trees. Re-apply after any tree update; `git diff` in each tree is the source of
@@ -359,15 +361,61 @@ the dev machine).
 
 ---
 
-## 7. dot11ah.ko regulatory power patch (post-build, all targets)
+## 7. HaLow transmit power: no software ceilings
 
-`kernel-work/morse-dot11ah-power-patch.py` rewrites `max_eirp` in **every**
-HaLow regulatory rule baked into `dot11ah.ko`, run by all three build scripts with
-`--power-dbm 30`. It scans the binary for plausible `ieee80211_reg_rule` structs
-(start_freq 700–960 MHz) instead of using hardcoded offsets, so it survives
-kernel/driver rebuilds. The driver's built-in rules are otherwise conservative and
-would cap TX power below what the hardware/region allows. (`--min-only` raises
-only rules below the target.)
+Three layers would otherwise cap HaLow below what the hardware can do. All
+three are raised to 30 dBm for every region. What remains is the firmware's own
+per-bandwidth limit and the hardware; nothing here measures radiated output.
+
+**dot11ah.ko regulatory rules.** `kernel-work/morse-dot11ah-power-patch.py`
+rewrites `max_eirp` in **every** HaLow regulatory rule baked into `dot11ah.ko`,
+run by all three build scripts with `--power-dbm 30`. It scans the binary for
+plausible `ieee80211_reg_rule` structs (start_freq 700-960 MHz) instead of
+using hardcoded offsets, so it survives kernel/driver rebuilds. (`--min-only`
+raises only rules below the target, and doubles as a check: on the deployed
+6.18.33 CM4 module it finds 33 rules, none below 30.)
+
+**BCF per-region power tables.** Each BCF carries a TX power TLV per channel
+in each `.regdom_XX` section, and the firmware will not exceed it. All three
+`build-*-sbc-overlay.sh` scripts run `kernel-work/morse-bcf-patch.py
+--country ALL --power-dbm 30` over **every** `bcf_*.bin`, because a USB MM8108
+picks its BCF by OTP board type (`bcf_boardtype_XXXX.bin`) and SPI modules
+name theirs in a module option. A region with no power TLVs is left as is;
+`bcf_boardtype_0802`, `bcf_fgh100maamd` and `bcf_mf08651_jp` have none at
+all and are skipped. Regression this replaced: the CM4 overlay used to patch
+only `bcf_fgh100mhaamd.bin` (US), so the USB card's stock
+`bcf_boardtype_0807.bin` held the bench nodes at 21.25 dBm (908 MHz, 8 MHz).
+
+**Driver clamp to the firmware maximum.** `morse_mac_set_txpower()` in
+`morse-driver-1.16/mac.c` clamped every request to the firmware's reported
+maximum (2475 mBm on the bench MM8108), and `CHAN5GHZ()` advertised a 22 dBm
+`max_power` on the 5 GHz-mapped channels. The working-tree patch removes the
+clamp (the firmware maximum is still queried and logged) and sets the channel
+`max_power` to 30. The firmware then applies its own limit and reports the
+result, which is what `iw` shows. On the 6.6 kernel this was a binary patch,
+`kernel-work/morse-force-txpower.py`; it was not carried into the 6.18 port.
+`git diff mac.c` in `morse-driver-1.16` is the source of truth.
+
+**Channel table.** `dot11ah/s1g_channels_rules.c` gives each S1G channel its
+own `max_reg_power`, which the driver requests at every channel set. US is
+36 dBm, but other regions run as low as 4.77 dBm (EU 16). The working-tree
+patch wraps the table macro in `MANET_S1G_POWER()`, raising anything below
+30 dBm to 30.
+
+**What remains is the firmware.** With all of the above in place the driver
+requests 30 to 36 dBm and the MM8108 firmware answers with its own
+per-bandwidth limit. These are firmware/driver reports, not RF measurements,
+and they do not show whether a PA protection circuit or the firmware is the
+limiting stage. Measured on cm4.2 (bench MM8108, `bcf_boardtype_0807`),
+2026-10-02: 24.00 dBm at 2 MHz, 22.25 at 4 MHz, 22.00 at 8 MHz. The firmware
+reports 24.75 dBm as its maximum. `iw dev wlan2 set txpower` does not reach
+the firmware on this driver; the power is fixed at each channel set.
+A likely cause (source reading, not yet instrumented): on 6.18, mac80211
+delivers a user power change as `BSS_CHANGED_TXPOWER` to
+`bss_info_changed`, which `morse_mac_ops_bss_info_changed()` does not handle;
+the driver only handles `IEEE80211_CONF_CHANGE_POWER` in `.config`. The
+runtime therefore treats HaLow power as fixed until reboot and the UI shows
+it read-only. Handling the callback is a possible future driver fix.
 
 ---
 

@@ -36,33 +36,9 @@ log() {
 }
 
 peer_count() {
-    # Selected text-table routes start with '*', and multiple routes can name
-    # the same originator. A failed query must never mean "solo node".
-    python3 - "$BATCTL" <<'PY'
-import json
-import re
-import subprocess
-import sys
-
-try:
-    result = subprocess.run(
-        [sys.argv[1], 'meshif', 'bat0', 'originators_json'],
-        check=True, capture_output=True, text=True, timeout=5,
-    )
-    rows = json.loads(result.stdout)
-    if not isinstance(rows, list):
-        raise ValueError('originators response is not a list')
-    peers = set()
-    for row in rows:
-        mac = row.get('orig_address') if isinstance(row, dict) else None
-        if not isinstance(mac, str) or not re.fullmatch(r'(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}', mac):
-            raise ValueError('invalid originator address')
-        peers.add(mac.lower())
-    print(len(peers))
-except (OSError, subprocess.SubprocessError, ValueError) as exc:
-    print(f'Cannot read BATMAN peers: {exc}', file=sys.stderr)
-    sys.exit(1)
-PY
+    # Multiple routes to one originator count once, and a failed query must
+    # never mean "solo node": mesh-peer-count.sh exits non-zero instead.
+    "${MANET_TOOLS_DIR:-$(dirname "${BASH_SOURCE[0]}")}/mesh-peer-count.sh" --batctl "$BATCTL"
 }
 
 # ------------------------------------------------------------------ arm ------

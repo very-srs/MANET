@@ -214,6 +214,11 @@ def validate_pkg(pkg):
     for iface in txpower:
         if iface not in VALID_IFACES:
             return False, f"invalid txpower interface {iface}"
+        if target_matches(pkg) and is_halow_iface(iface):
+            return False, f"{iface}: HaLow transmit power cannot be changed live; it needs a reboot"
+    halow = pkg.get("halow_channel")
+    if isinstance(halow, dict) and halow.get("dbm") is not None:
+        return False, "HaLow transmit power cannot be changed live; it needs a reboot"
 
     if desired and target_matches(pkg):
         post = active_bat_ifaces()
@@ -293,8 +298,8 @@ def apply_package(pkg):
 
     halow = pkg.get("halow_channel")
     if halow:
-        log(f"Applying HaLow channel {halow.get('channel')} @ {halow.get('bw', '1MHz')}")
-        result = apply_halow_channel(halow.get("channel"), halow.get("bw", "1MHz"),
+        log(f"Applying HaLow channel {halow.get('channel')} @ {halow.get('bw', '2MHz')}")
+        result = apply_halow_channel(halow.get("channel"), halow.get("bw", "2MHz"),
                                      halow.get("dbm"))
         if not result.get("ok"):
             raise RuntimeError(result.get("error", "halow channel failed"))

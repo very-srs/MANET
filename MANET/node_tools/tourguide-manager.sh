@@ -18,7 +18,7 @@ WPA_CONF_5_0=""
 HELPER_STALE_SECONDS=300  # Ignore foreign helper beacons older than this
 ENCODER_PATH="/usr/local/bin/encoder.py"
 BATCTL_PATH="/usr/sbin/batctl"
-PEER_COUNTER="${MANET_TOOLS_DIR:-$(dirname "${BASH_SOURCE[0]}")}/mesh-peer-count.py"
+PEER_COUNTER="${MANET_TOOLS_DIR:-$(dirname "${BASH_SOURCE[0]}")}/mesh-peer-count.sh"
 ELECTION_OUTPUT_FILE="/var/run/mesh_channel_election"
 
 log() {
@@ -27,7 +27,7 @@ log() {
 
 elect_tourguide() {
     local peers excluded
-    peers=$(python3 "$PEER_COUNTER" --batctl "$BATCTL_PATH" --list) || return 1
+    peers=$("$PEER_COUNTER" --batctl "$BATCTL_PATH" --list) || return 1
     excluded=$(python3 "$AGREEMENT_TOOL" tourguide-exclusions) || return 1
     python3 "${MANET_TOOLS_DIR:-$(dirname "${BASH_SOURCE[0]}")}/mesh-tourguide-election.py" \
         --self "$1" --peers "$peers" --registry "$REGISTRY_STATE_FILE" --band "$TOURGUIDE_BAND" --exclude "$excluded"
@@ -110,7 +110,7 @@ hop_to_data_frequency() {
 get_partition_size() {
     # Own partition size = unique batman originators + self
     local peers
-    peers=$(python3 "$PEER_COUNTER" --batctl "$BATCTL_PATH") || return 1
+    peers=$("$PEER_COUNTER" --batctl "$BATCTL_PATH") || return 1
     echo $((peers + 1))
 }
 

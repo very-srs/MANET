@@ -284,20 +284,20 @@ class ReceiverRollbackTests(RollbackHarness):
 
     def receiver_run(self, args, **kwargs):
         self.calls.append(args)
-        if args == [config_sync.APPLY_SCRIPT]:
+        if args == config_sync.APPLY_COMMAND:
             self.admin.complete.assert_called_once()
             self.changed()  # The real apply touches live interfaces; simulate it.
             return subprocess.CompletedProcess(args, 0, '', '')
         return subprocess.run(args, env=self.env, capture_output=True, text=True, **kwargs)
 
     def assert_not_applied(self):
-        self.assertNotIn([config_sync.APPLY_SCRIPT], self.calls)
+        self.assertNotIn(config_sync.APPLY_COMMAND, self.calls)
         self.assertEqual(self.conf.read_text(), self.old_config)
         self.admin.complete.assert_not_called()
 
     def test_dangerous_change_arms_before_applying(self):
         self.assertEqual(config_sync.sync_once(), 0)
-        self.assertEqual(self.calls, [[str(SCRIPT), 'arm', VERSION], [config_sync.APPLY_SCRIPT]])
+        self.assertEqual(self.calls, [[str(SCRIPT), 'arm', VERSION], config_sync.APPLY_COMMAND])
         self.assertEqual((self.state / 'mesh.conf').read_text(), self.old_config)
 
     def test_failed_baseline_blocks_apply_and_can_retry_after_query_recovers(self):
@@ -307,7 +307,7 @@ class ReceiverRollbackTests(RollbackHarness):
         self.env['TEST_BATCTL_RC'] = '0'
         self.assertEqual(config_sync.sync_once(), 0)
         self.assertTrue(self.state.exists())
-        self.assertEqual(self.calls.count([config_sync.APPLY_SCRIPT]), 1)
+        self.assertEqual(self.calls.count(config_sync.APPLY_COMMAND), 1)
 
     def test_failed_snapshot_blocks_apply(self):
         self.env['TEST_COPY_FAIL'] = str(self.supplicant)
@@ -332,7 +332,7 @@ class ReceiverRollbackTests(RollbackHarness):
         self.payload['no_rollback'] = True
         self.env['TEST_BATCTL_RC'] = '1'
         self.assertEqual(config_sync.sync_once(), 0)
-        self.assertEqual(self.calls, [[config_sync.APPLY_SCRIPT]])
+        self.assertEqual(self.calls, [config_sync.APPLY_COMMAND])
         self.assertFalse(self.state.exists())
 
     def test_override_must_be_a_boolean(self):
@@ -347,7 +347,7 @@ class ReceiverRollbackTests(RollbackHarness):
         self.payload['config'] = {'mtx': 'n'}
         self.env['TEST_BATCTL_RC'] = '1'
         self.assertEqual(config_sync.sync_once(), 0)
-        self.assertEqual(self.calls, [[config_sync.APPLY_SCRIPT]])
+        self.assertEqual(self.calls, [config_sync.APPLY_COMMAND])
         self.assertFalse(self.state.exists())
 
 

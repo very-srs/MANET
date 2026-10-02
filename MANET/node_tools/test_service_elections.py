@@ -14,7 +14,7 @@ import unittest
 TOOLS = Path(__file__).resolve().parent
 SELF = '02:00:00:00:00:01'
 PEER = '02:00:00:00:00:02'
-MANAGERS = ('node-manager-static.sh', 'node-manager-acs.sh', 'node-manager.sh')
+MANAGERS = ('node-manager-static.sh', 'node-manager-acs.sh')
 
 
 class Fixture(unittest.TestCase):
@@ -98,6 +98,7 @@ class MediaMtxElectionTests(Fixture):
         (self.root / 'mac').write_text(SELF + '\n')
         (self.root / 'uptime').write_text('10000.50 1.00\n')
         self.env['MESH_UPTIME_FILE'] = str(self.root / 'uptime')
+        self.env['MANET_TOOLS_DIR'] = str(TOOLS)
         self.stub('systemd-cat', 'cat > /dev/null\n')
         self.stub('mtx-ip', 'echo fd00:1:2:3::64/128\n')
         # ip: remember added/removed addresses and show them back.
@@ -168,6 +169,59 @@ esac
         self.registry.write_text(self.node(SELF, 10) + self.node(PEER, 90, age=601))
         self.elect()
         self.assertTrue(self.holds_vip())
+
+    def test_departed_host_releases_the_service_at_the_next_election(self):
+        # D1: a shutting-down incumbent with a zero metric and the lower MAC
+        # used to keep winning the tie for up to ten minutes.
+        departed, survivor = '02:00:00:00:00:00', SELF
+        record = self.node(departed, 0, server=True).replace("'false'", "'true'")
+        key = 'NODE_' + departed.replace(':', '')
+        self.registry.write_text(record + f"{key}_NODE_STATE='SHUTTING_DOWN'\n" + self.node(survivor, 0))
+        self.assertEqual(self.elect().returncode, 0)
+        self.assertTrue(self.holds_vip())
+
+    def test_unreadable_registry_leaves_the_service_alone(self):
+        self.registry.write_text(self.node(SELF, 50))
+        self.elect()
+        self.assertTrue(self.holds_vip())
+        (self.root / 'uptime').write_text('garbage\n')
+        result = self.elect()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue(self.holds_vip())
+
+
+
+class MumbleElectionTests(MediaMtxElectionTests):
+    """The real mumble-election.sh with the shared helper. Database sync and
+    the Syncthing folder are stubbed; ranking and VIP/service handling run
+    unchanged. Every MediaMTX scenario above runs here too."""
+    VIP = '10.30.0.3'
+
+    def setUp(self):
+        super().setUp()
+        (self.root / 'mesh.conf').write_text('ipv4_network=10.30.0.0/24\nmumble=y\n')
+        self.stub('mumble-ip', 'echo fd00:1:2:3::65/128\n')
+        self.stub('sqlite3', 'exit 0\n')
+        self.stub('bc', 'exit 0\n')
+        self.stub('logger', 'cat > /dev/null\n')
+
+    def node(self, mac, mbps, age=0, server=False):
+        return super().node(mac, mbps, age, server).replace('IS_MEDIAMTX_SERVER', 'IS_MUMBLE_SERVER')
+
+    def elect(self, lock=None):
+        source = (TOOLS / 'mumble-election.sh').read_text()
+        source = source.replace('# --- Main Election Logic ---', """ensure_shared_directory() { :; }
+sync_database_from_shared() { :; }
+sync_database_to_shared() { :; }
+# --- Main Election Logic ---""")
+        for old, new in (('/var/run/mesh_node_registry', str(self.registry)),
+                         ('/sys/class/net/${CONTROL_IFACE}/address', str(self.root / 'mac')),
+                         ('/usr/local/bin/mumble-ip.sh', str(self.bin / 'mumble-ip')),
+                         ('/etc/mesh.conf', str(self.root / 'mesh.conf')),
+                         ('/var/run/mumble-election.lock', lock or str(self.root / 'lock'))):
+            source = source.replace(old, new)
+        return subprocess.run(['bash', '-c', source], env=self.env,
+                              capture_output=True, text=True, timeout=15)
 
 
 if __name__ == '__main__':

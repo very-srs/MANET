@@ -415,7 +415,7 @@ class Runtime:
                 else:
                     local = self.status(now)
                     if local['acs'] and local['discovery']:
-                        peers = command([sys.executable, TOOLS / 'mesh-peer-count.py', '--batctl', self.batctl, '--list'], timeout=7).split()
+                        peers = command([str(TOOLS / 'mesh-peer-count.sh'), '--batctl', self.batctl, '--list'], timeout=7).split()
                         self.ui_status['reachable'] = len(peers)
                         self.discovery_step(now, local, bool(peers))
             return  # Never persist rounds or poison the timed sender history.
@@ -621,7 +621,7 @@ class Runtime:
             if now < probe.get('next_probe', 0):
                 return None
             # No peers means no one can answer. This query is local to BATMAN.
-            peers = command([sys.executable, TOOLS / 'mesh-peer-count.py', '--batctl', self.batctl, '--list'], timeout=7).split()
+            peers = command([str(TOOLS / 'mesh-peer-count.sh'), '--batctl', self.batctl, '--list'], timeout=7).split()
             if not peers:
                 return None
             now = time.monotonic()
@@ -645,7 +645,7 @@ class Runtime:
         records = challenge_records(self.transport, 76, command(['alfred', '-r', 76], timeout=2))
         if not records:
             return
-        peers = set(command([sys.executable, TOOLS / 'mesh-peer-count.py', '--batctl', self.batctl, '--list'], timeout=7).split())
+        peers = set(command([str(TOOLS / 'mesh-peer-count.sh'), '--batctl', self.batctl, '--list'], timeout=7).split())
         previous = saved.get('answered', {}) if saved.get('boot') == self.boot else {}
         answered = {key: stamp for key, stamp in previous.items() if 0 <= now - stamp < 600}
         answers = {}

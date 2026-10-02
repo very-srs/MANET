@@ -34,6 +34,15 @@ PENDING_FILE = "/var/run/mesh_pending_config.json"
 ACK_VERSION_FILE = "/var/run/mesh_config_ack_version"
 APPLIED_VERSION_FILE = "/var/run/mesh_applied_config_version"
 APPLY_SCRIPT = "/usr/local/bin/mesh-config-apply.sh"
+# The apply runs as its own transient unit: this process lives in
+# node-manager.service, which an acs change restarts. In its own cgroup the
+# apply survives that restart, finishes the whole package and verifies the
+# restart before recording success. The fixed unit name refuses an overlap.
+# TimeoutStartSec bounds the job itself: once the manager restart kills this
+# process, nothing else would, and a hung apply would hold the unit name.
+APPLY_COMMAND = ["systemd-run", "--unit=mesh-config-apply", "--wait", "--collect",
+                 "--quiet", "--service-type=oneshot", "--property=TimeoutStartSec=180",
+                 APPLY_SCRIPT]
 ROLLBACK_SCRIPT = "/usr/local/bin/mesh-config-rollback.sh"
 LOG_FILE = "/var/log/mesh-config-sync.log"
 ADMIN = AdminTransport()
@@ -263,7 +272,7 @@ def sync_once():
     # invoking anything disruptive so a kill/reboot cannot make a recorded
     # activation execute again. A failed attempt needs a freshly staged edit.
     ADMIN.complete(ALFRED_CONFIG_TYPE, message)
-    r = run([APPLY_SCRIPT], timeout=180)
+    r = run(APPLY_COMMAND, timeout=180)
     if r.returncode != 0:
         log(f"apply failed: {(r.stderr or r.stdout).strip()}")
         return 1

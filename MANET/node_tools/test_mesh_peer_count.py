@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Exercise BATMAN counts and channel decisions without touching live radios."""
 
-import importlib.util
 import json
 import os
 from pathlib import Path
@@ -14,10 +13,7 @@ from test_acs import runtime
 
 
 TOOLS = Path(__file__).resolve().parent
-COUNTER = TOOLS / 'mesh-peer-count.py'
-SPEC = importlib.util.spec_from_file_location('mesh_peer_count', COUNTER)
-counter = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(counter)
+COUNTER = TOOLS / 'mesh-peer-count.sh'
 PEER = '0c:bf:74:00:2b:f1'
 SECOND_PEER = '02:00:00:00:00:02'
 
@@ -102,7 +98,7 @@ log() { echo "$1" >&2; }
 
 class PeerCountTests(PeerHarness):
     def count(self):
-        return self.run_command([sys.executable, str(COUNTER), '--batctl', self.env['BATCTL_PATH']])
+        return self.run_command([str(COUNTER), '--batctl', self.env['BATCTL_PATH']])
 
     def test_empty_single_and_multiple_originators(self):
         for rows, expected in [([], 0), ([{'orig_address': PEER, 'best': True}], 1),
@@ -143,11 +139,39 @@ class PeerCountTests(PeerHarness):
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(result.stdout, '')
 
-    def test_query_has_a_five_second_timeout(self):
-        with patch.object(counter.subprocess, 'run', side_effect=subprocess.TimeoutExpired('batctl', 5)) as run:
-            with self.assertRaises(subprocess.TimeoutExpired):
-                counter.peer_count('/test/batctl')
-            self.assertEqual(run.call_args.kwargs['timeout'], 5)
+    def test_more_than_one_json_document_is_refused(self):
+        # Codex 055: streaming documents one by one would count 2 or 0 here.
+        one = json.dumps([{'orig_address': PEER}])
+        for text in (one + one, '[]\n[]', one + '\n[]'):
+            with self.subTest(text=text):
+                self.table.write_text(text)
+                result = self.count()
+                self.assertEqual((result.returncode, result.stdout), (1, ''))
+
+    def test_mac_with_trailing_newline_is_refused(self):
+        # Codex 056: jq's $ also matches before a final newline.
+        self.peers([{'orig_address': PEER + '\n'}])
+        result = self.count()
+        self.assertEqual((result.returncode, result.stdout), (1, ''))
+
+    def test_missing_option_value_is_a_usage_error_not_a_hang(self):
+        result = self.run_command([str(COUNTER), '--batctl'])
+        self.assertEqual((result.returncode, result.stdout), (2, ''))
+
+    def test_list_prints_unique_lowercase_macs(self):
+        self.peers([{'orig_address': SECOND_PEER}, {'orig_address': PEER.upper()},
+                    {'orig_address': PEER}])
+        result = self.run_command([str(COUNTER), '--batctl', self.env['BATCTL_PATH'], '--list'])
+        self.assertEqual(result.stdout, f'{SECOND_PEER}\n{PEER}\n')
+        self.peers([])
+        result = self.run_command([str(COUNTER), '--batctl', self.env['BATCTL_PATH'], '--list'])
+        self.assertEqual((result.returncode, result.stdout), (0, ''))
+
+    def test_hung_query_is_a_failure_not_a_count(self):
+        self.command('batctl', 'import time\ntime.sleep(30)\n')
+        result = self.run_command([str(COUNTER), '--batctl', self.env['BATCTL_PATH']])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, '')
 
 
 class QuorumTests(PeerHarness):
@@ -196,7 +220,7 @@ for pass in 1; do
         # Execute the real quorum script through the manager's actual caller.
         (self.bin / 'quorum').symlink_to(TOOLS / 'quorum-checker.sh')
         # Its sibling counter is resolved beside the invoked path.
-        (self.bin / 'mesh-peer-count.py').symlink_to(COUNTER)
+        (self.bin / 'mesh-peer-count.sh').symlink_to(COUNTER)
         for output, status, moves in [('[]', '0', True), ('[]', '1', False),
                                       ('not-json', '0', False),
                                       (json.dumps([{'orig_address': PEER},

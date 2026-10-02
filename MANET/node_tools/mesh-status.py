@@ -54,10 +54,10 @@ from mesh_config import (local_changes, mesh_changes, strip_local_keys,
 from manet_eud_ap import apply_local as apply_local_settings, configured_ssid
 from manet_admin import AdminTransport, CONFIG_ACK_TYPE, new_version, private_json_write, require_clock
 from manet_radio import (
-    HALOW_BW_TXPOWER_CAP_DBM, halow_channel_options,
+    halow_channel_options,
     _format_halow_bw, get_halow_driver_info, wifi_channel_to_freq, _fmt_dbm,
     parse_phy_txpower_options, txpower_choices_from_cap, txpower_options_for_iface,
-    txpower_request_allowed, unsupported_txpower_response, get_halow_bw_txpower_cap,
+    txpower_request_allowed, unsupported_txpower_response,
     get_iface_txpower_cap, read_iface_txpower_dbm, set_iface_txpower_verified,
 )
 

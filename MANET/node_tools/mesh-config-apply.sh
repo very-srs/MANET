@@ -29,6 +29,9 @@ APPLY_LOG="${MANET_APPLY_LOG:-/var/log/mesh-config-apply.log}"
 APPLIED_VERSION_FILE="$RUN_DIR/mesh_applied_config_version"
 CONFIG_WRITER="${MANET_CONFIG_WRITER:-/usr/local/bin/mesh-config-write.py}"
 SUPPLICANT_HELPER="${MANET_SUPPLICANT_HELPER:-$(dirname "$0")/manet_supplicant.py}"
+REGION_HELPER="${MANET_REGION_HELPER:-$(dirname "$0")/manet-region.py}"
+NODE_MANAGER_SELECT="${NODE_MANAGER_SELECT:-$(dirname "$0")/node-manager-select.sh}"
+NODE_MANAGER_LINK="${MANET_BIN_DIR:-$(dirname "$0")}/node-manager.sh"
 
 log() {
     echo "[$(date +'%Y-%m-%d %H:%M:%S')] - CONFIG-APPLY: $1" | tee -a "$APPLY_LOG" | systemd-cat -t mesh-config-apply
@@ -107,17 +110,25 @@ apply_safe_settings() {
     fi
 }
 
+# Whether node-manager is running the variant node-manager.sh now selects.
+node_manager_matches_selection() {
+    systemctl is-active --quiet node-manager.service &&
+        [ "$(cat "$RUN_DIR/node-manager.running" 2>/dev/null)" = \
+          "$(readlink "$NODE_MANAGER_LINK" 2>/dev/null)" ]
+}
+
 # Apply deferred settings (acs, regulatory_domain)
-# Both are mesh-wide agreements whose radio-level effect is written by
-# radio-setup.sh out of mesh.conf: the regulatory domain lands in
-# /etc/modprobe.d/{cfg80211,morse}.conf and in the supplicant country_code,
-# which only take hold when the modules next load. Persist the value and say
-# so rather than restarting radios from here -- that is the dangerous class,
-# and the rollback snapshot does not cover a regdomain change.
+# The regulatory domain is written by manet-region.py into the same radio
+# files radio-setup.sh uses: /etc/modprobe.d/{cfg80211,morse}.conf, crda,
+# hostapd and every supplicant's country (and the HaLow region's default
+# channel when the US/EU plan changes). Those take hold when the modules and
+# supplicants next start, so the change applies at the next boot. Radios are
+# not restarted from here: that is the dangerous class, and the rollback
+# snapshot does not cover a regdomain change.
 #
-# acs is the exception: which orchestrator runs is decided by copying a variant
-# over node-manager.sh, exactly as radio-setup.sh does, so it can take effect
-# now for no more than a node-manager restart.
+# acs is the exception: node-manager-select.sh points node-manager.sh at the
+# matching variant before every node-manager start, so it takes effect now
+# for no more than a node-manager restart.
 apply_deferred_settings() {
     local val current
 
@@ -126,28 +137,40 @@ apply_deferred_settings() {
         [ -z "$val" ] && continue
 
         current=$(grep "^${key}=" "$MESH_CONF" 2>/dev/null | cut -d'=' -f2-)
-        [ "$val" = "$current" ] && continue
-
-        log "  $key: '$current' -> '$val'"
-        conf_set "$key" "$val"
+        # Both keys reconcile on every package that names them, even when
+        # mesh.conf already holds the value, so a newly staged activation
+        # repairs an earlier partial failure. A healthy node is a no-op.
+        if [ "$val" != "$current" ]; then
+            log "  $key: '$current' -> '$val'"
+            conf_set "$key" "$val"
+        fi
 
         case "$key" in
             regulatory_domain)
+                # Reconcile the radio files on every package that names a
+                # region, even when mesh.conf already holds it, so a new
+                # activation repairs an earlier partial failure. A failure
+                # stops the apply: the version is not recorded as applied.
+                local region_out region_rc
+                region_out=$(python3 "$REGION_HELPER" apply 2>&1)
+                region_rc=$?
+                while IFS= read -r line; do log "  $line"; done <<< "$region_out"
+                [ "$region_rc" -eq 0 ] ||
+                    die "regulatory domain saved but the radio files were not updated"
                 log "  regulatory domain takes effect at the next boot"
                 ;;
             acs)
-                # Same liberal match as the auto_update carrier gate: every
-                # writer produces y/n, but mesh.conf is operator-editable.
-                if echo "$val" | grep -qiE '^(y|yes|1|true)$'; then
-                    cp /usr/local/bin/node-manager-acs.sh \
-                       /usr/local/bin/node-manager.sh
-                    log "  node-manager.sh -> ACS variant"
-                else
-                    cp /usr/local/bin/node-manager-static.sh \
-                       /usr/local/bin/node-manager.sh
-                    log "  node-manager.sh -> static variant"
+                # The selector is a quiet no-op when node-manager.sh already
+                # points at the right variant. The running manager must also
+                # be that variant: node-manager-select.sh --service-start
+                # records it at every start. Otherwise restart it, below.
+                local select_out
+                select_out=$("$NODE_MANAGER_SELECT" 2>&1) ||
+                    die "cannot select the node manager: $select_out"
+                [ -n "$select_out" ] && log "  $select_out"
+                if ! node_manager_matches_selection; then
+                    RESTART_NODE_MANAGER=true
                 fi
-                systemctl restart node-manager.service 2>/dev/null || true
                 ;;
         esac
     done
@@ -217,6 +240,20 @@ log "=== Config apply starting (version: $VERSION) ==="
 apply_safe_settings
 apply_deferred_settings
 apply_dangerous_settings
+
+# An orchestrator change restarts node-manager, synchronously and verified,
+# before the version is recorded. mesh-config-sync.py runs this script as its
+# own transient unit, so restarting the manager (and the sync process inside
+# it) does not cut this script short. A failure leaves the version
+# unrecorded; a newly staged activation re-checks and retries.
+if [ "${RESTART_NODE_MANAGER:-false}" = true ]; then
+    log "  Restarting node-manager for the orchestrator change"
+    systemctl restart node-manager.service ||
+        die "node-manager did not restart after the orchestrator change"
+    node_manager_matches_selection ||
+        die "node-manager is not running the selected orchestrator after restart"
+    log "  node-manager running $(cat "$RUN_DIR/node-manager.running")"
+fi
 
 # Record which version was applied
 echo "$VERSION" > "$APPLIED_VERSION_FILE"

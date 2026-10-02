@@ -279,11 +279,11 @@ if [[ -n "$acs" ]]; then
     # hand-edited conf; cannot match n/no/0/false.
     if [[ "$acs" =~ ^([Yy]|[Yy][Ee][Ss]|1|[Tt][Rr][Uu][Ee])$ ]]; then
         echo " > This mesh will channel hop ..."
-        cp /usr/local/bin/node-manager-acs.sh /usr/local/bin/node-manager.sh
     else
         echo " > This mesh will remain on a static channel ..."
-        cp /usr/local/bin/node-manager-static.sh /usr/local/bin/node-manager.sh
     fi
+    # node-manager.service runs the same selector before every start.
+    /usr/local/bin/node-manager-select.sh || provision_fail "Cannot select the node manager"
 
 fi
 
@@ -1064,11 +1064,11 @@ network={
     ssid="$mesh_ssid"
     key_mgmt=SAE
     mode=5
-    channel=12
-    op_class=71
+    channel=10
+    op_class=69
     country="US"
     s1g_prim_chwidth=1
-    s1g_prim_1mhz_chan_index=3
+    s1g_prim_1mhz_chan_index=1
     dtim_period=1
     mesh_rssi_threshold=-85
     dot11MeshHWMPRootMode=0
@@ -1146,14 +1146,20 @@ EOF
 
 done
 
-# One role-aware HaLow power action replaces per-interface fixed ceilings.
+# One role-aware power action (every mesh radio at 30 dBm) replaces the old
+# per-interface fixed ceilings.
 for old_power_unit in /etc/systemd/system/halow-txpower-wlan*.service; do
     [ -f "$old_power_unit" ] || continue
     old_power_name=$(basename "$old_power_unit")
     systemctl disable --now "$old_power_name" 2>/dev/null || true
     rm -f "$old_power_unit" "/etc/systemd/system/multi-user.target.wants/$old_power_name"
 done
-systemctl enable manet-halow-power.service
+# Replaced by manet-mesh-power, which covers Wi-Fi mesh radios too.
+systemctl disable --now manet-halow-power.service 2>/dev/null || true
+rm -f /etc/systemd/system/manet-halow-power.service \
+    /etc/systemd/system/multi-user.target.wants/manet-halow-power.service \
+    /usr/local/bin/manet-halow-power.py
+systemctl enable manet-mesh-power.service
 
 # === MORSE / HALOW MODULE OPTIONS ===
 echo "options cfg80211 ieee80211_regdom=$CFG80211_REGDOM" > /etc/modprobe.d/cfg80211.conf

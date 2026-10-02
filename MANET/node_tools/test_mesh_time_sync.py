@@ -493,12 +493,11 @@ class IntegrationTests(unittest.TestCase):
         self.assertIn('PartOf=node-manager.service', unit)
 
     def test_managers_publish_existing_flag_without_owning_chrony(self):
-        for name in ('node-manager-acs.sh', 'node-manager-static.sh', 'node-manager.sh'):
+        for name in ('node-manager-acs.sh', 'node-manager-static.sh'):
             text = (TOOLS / name).read_text()
             self.assertIn('IS_NTP_FLAG=$(is_ntp_time_source', text)
             self.assertNotIn('update_gps_time_source', text)
             self.assertNotIn('chrony.service', text)
-        self.assertEqual((TOOLS / 'node-manager.sh').read_bytes(), (TOOLS / 'node-manager-static.sh').read_bytes())
 
     def test_legacy_ethernet_paths_cannot_stop_gps_chrony(self):
         for path in [TOOLS / 'ethernet-autodetect.sh', TOOLS.parent / 'networkd-dispatcher/off']:

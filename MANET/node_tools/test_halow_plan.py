@@ -5,23 +5,29 @@ not in this repo, so these tests guard the properties the rest of the code
 relies on rather than re-deriving the numbers.
 """
 
+from pathlib import Path
 import unittest
 
 import manet_radio as mr
 
 
 class ChannelPlanTests(unittest.TestCase):
-    def test_eu_stops_at_2mhz_and_us_reaches_8mhz(self):
-        # EU has 5 MHz of allocation in total, so there is no room for a 4 or
-        # 8 MHz channel; the US 902-928 plan has both.
-        self.assertEqual(sorted(mr.HALOW_CHANNEL_PLANS['EU']), ['1MHz', '2MHz'])
+    def test_eu_is_1mhz_only_and_us_reaches_8mhz(self):
+        # EU's 5 MHz allocation has no room for 4 or 8 MHz, and the Morse
+        # supplicant refuses EU 2 MHz mesh; the US 902-928 plan has all four.
+        self.assertEqual(sorted(mr.HALOW_CHANNEL_PLANS['EU']), ['1MHz'])
+        self.assertNotIn(('EU', '2MHz'), mr.HALOW_OP_CLASS)
         self.assertEqual(sorted(mr.HALOW_CHANNEL_PLANS['US']),
                          ['1MHz', '2MHz', '4MHz', '8MHz'])
 
-    def test_us_8mhz_channels_match_the_shipped_supplicant_template(self):
-        # radio-setup.sh's US template joins on channel 12, and the bench node
-        # reports 908 MHz / 8 MHz there.
-        self.assertEqual(mr.HALOW_CHANNEL_PLANS['US']['8MHz'][12], 908000)
+    def test_shipped_supplicant_templates_match_the_plan(self):
+        # radio-setup.sh's US template joins on channel 10 (907 MHz, 2 MHz,
+        # op_class 69) and the non-US one on channel 1 (863.5 MHz, 1 MHz, 66).
+        self.assertEqual(mr.HALOW_CHANNEL_PLANS['US']['2MHz'][10], 907000)
+        self.assertEqual(mr.HALOW_OP_CLASS[('US', '2MHz')], 69)
+        template = (Path(__file__).resolve().parent / 'radio-setup.sh').read_text()
+        self.assertIn('channel=10\n    op_class=69', template)
+        self.assertIn('channel=1\n    op_class=66', template)
 
     def test_eu_1mhz_channel_1_matches_the_non_us_template(self):
         self.assertEqual(mr.HALOW_CHANNEL_PLANS['EU']['1MHz'][1], 863500)
@@ -102,7 +108,7 @@ class ApplyValidationTests(unittest.TestCase):
 
     def test_channel_from_another_bandwidth_is_refused(self):
         with self.assertRaises(ValueError) as cm:
-            mr.apply_halow_channel(2, '1MHz')   # ch 2 is a 2 MHz channel
+            mr.apply_halow_channel(2, '1MHz')   # ch 2 is not an EU 1 MHz channel
         self.assertIn('not a 1MHz channel', str(cm.exception))
 
     def test_missing_channel_is_refused(self):
