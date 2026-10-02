@@ -820,7 +820,9 @@ which the supplicant resets each time it rejoins the mesh.
 
 Watches the journal for `MESH-SAE-AUTH-BLOCKED` and restarts `wpa_supplicant`
 and `batman-enslave` to recover. It acts only when `bat0` is actually missing
-interfaces, so a transient block does not cause a restart storm.
+interfaces, so a transient block does not cause a restart storm. Until there is
+an enabled mesh interface to watch (first boot before roles are assigned, or
+every mesh radio turned off), it waits rather than exiting.
 
 **prepare-standard-mesh-iface.sh**
 

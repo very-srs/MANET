@@ -44,7 +44,9 @@ journalctl --flush 2>/dev/null || true
 if ! id -u radio > /dev/null 2>&1; then
 	echo "Creating user 'radio'..."
 	useradd -m -s /bin/bash -G sudo,adm,dialout,cdrom,audio,video,plugdev,games,users,input,netdev,gpio,i2c,spi radio
+	{ set +x; } 2>/dev/null   # secrets follow: keep them out of the trace log
 	echo "radio:__RADIO_PW__" | chpasswd
+	set -x
 
 	# Set up SSH directory
 	mkdir -p /home/radio/.ssh
@@ -759,6 +761,7 @@ systemctl enable --now systemd-networkd
 
 
 #write out the config selections for future use
+{ set +x; } 2>/dev/null   # secrets follow: keep them out of the trace log
 echo "mesh_key=__MESH_SAE_KEY__" > /etc/mesh.conf
 echo "mesh_ssid=__MESH_SSID__" >> /etc/mesh.conf
 echo "regulatory_domain=__REGULATORY_DOMAIN__" >> /etc/mesh.conf
@@ -789,6 +792,7 @@ echo "max_euds_per_node=__MAX_EUDS_PER_NODE__" >> /etc/mesh.conf
 # and management is unreachable.
 echo "admin_password=__ADMIN_PW__" >> /etc/mesh.conf
 echo "auto_update=__AUTO_UPDATE__" >> /etc/mesh.conf
+set -x
 
 # node-manager.sh is a symlink to the orchestrator acs= selects; the service
 # re-runs this selector before every start, so later acs changes follow.

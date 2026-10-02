@@ -1,13 +1,25 @@
 #!/usr/bin/env python3
 """Inspect and revalidate Linux flash destinations before destructive writes."""
 
+import errno
 import hashlib
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
+import time
 
 COLUMNS = 'NAME,TYPE,SIZE,MODEL,SERIAL,WWN,RO,RM,TRAN,MOUNTPOINTS,MAJ:MIN'
+# While the flasher runs, the desktop must not automount the destination: an
+# automount racing the unmount leaves it busy (GNOME reads every new mount),
+# and a mount finishing after the unmount (ext4 journal recovery takes
+# seconds) is live while the image is written. UDISKS_AUTO=0 stops udisks and
+# GNOME automounting it. /run keeps a leftover rule from outliving a reboot.
+NOAUTO_RULES = Path(os.environ.get('MANET_UDEV_RULES_DIR', '/run/udev/rules.d')) / '99-manet-flash-noauto.rules'
+# The eMMC rpiboot exposes: "Raspberry Pi Compute Module" mass storage.
+CM4_RULE = 'SUBSYSTEM=="block", ATTRS{idVendor}=="0a5c", ATTRS{idProduct}=="0001", ENV{UDISKS_AUTO}="0"'
+UNMOUNT_WAIT = 30
 
 
 def descendants(disk):
@@ -63,15 +75,87 @@ def inspect_target(device):
     return inspect_disk(rows[0])
 
 
+def hold(rule):
+    """Add a no-automount rule; it applies to events from now on."""
+    NOAUTO_RULES.parent.mkdir(parents=True, exist_ok=True)
+    lines = NOAUTO_RULES.read_text().splitlines() if NOAUTO_RULES.exists() else []
+    if rule not in lines:
+        NOAUTO_RULES.write_text('\n'.join(lines + [rule]) + '\n')
+    subprocess.run(['udevadm', 'control', '--reload'], check=True, timeout=30)
+
+
+def release():
+    if NOAUTO_RULES.exists():
+        NOAUTO_RULES.unlink()
+        subprocess.run(['udevadm', 'control', '--reload'], check=True, timeout=30)
+
+
+def hold_device(device):
+    """No automount for this disk and its partitions, from now on."""
+    name = Path(device).name
+    hold(f'SUBSYSTEM=="block", KERNEL=="{name}|{name}[0-9]*|{name}p[0-9]*", ENV{{UDISKS_AUTO}}="0"')
+    subprocess.run(['udevadm', 'trigger', '--action=change', '--subsystem-match=block',
+                    f'--sysname-match={name}*'], check=True, timeout=30)
+    subprocess.run(['udevadm', 'settle', '--timeout=10'], timeout=30)
+
+
+def claimed(device):
+    """True while anything holds the disk: a mount, or one still in progress,
+    which lsblk does not show yet but which already claims the device."""
+    try:
+        os.close(os.open(device, os.O_RDONLY | os.O_EXCL))
+    except OSError as error:
+        if error.errno == errno.EBUSY:
+            return True
+        raise
+    return False
+
+
+def holders(mount):
+    """Processes using a mount, for the error message."""
+    names = set()
+    for proc in Path('/proc').iterdir():
+        if not proc.name.isdigit():
+            continue
+        try:
+            links = [proc / 'cwd', proc / 'root'] + list((proc / 'fd').iterdir())
+            paths = [os.readlink(link) for link in links]
+            if any(p == mount or p.startswith(mount + '/') for p in paths):
+                names.add(f"{(proc / 'comm').read_text().strip()} (pid {proc.name})")
+        except OSError:
+            continue
+    return sorted(names)
+
+
 def prepare(device, expected):
+    """Unmount the confirmed destination and keep it unmounted. Desktop
+    automounters can hold a fresh mount busy for a few seconds, or finish a
+    mount after an unmount, so wait until the disk stays free."""
     target = inspect_target(device)
     if target['fingerprint'] != expected:
         raise ValueError('Target identity changed since confirmation; rescan and confirm again')
-    for mount in sorted(set(target['mounts']), key=len, reverse=True):
-        subprocess.run(['umount', '--', mount], check=True, timeout=30)
-    target = inspect_target(device)
-    if target['fingerprint'] != expected or target['mounts']:
-        raise ValueError('Target changed or remains mounted; refusing to flash')
+    hold_device(device)
+    deadline = time.monotonic() + UNMOUNT_WAIT
+    free = 0
+    while True:
+        target = inspect_target(device)
+        if target['fingerprint'] != expected:
+            raise ValueError('Target changed while unmounting; refusing to flash')
+        busy = {}
+        for mount in sorted(set(target['mounts']), key=lambda m: (-len(m), m)):
+            result = subprocess.run(['umount', '--', mount], capture_output=True, text=True,
+                                    timeout=30)
+            if result.returncode:
+                busy[mount] = result.stderr.strip()
+        free = 0 if target['mounts'] or claimed(device) else free + 1
+        if free >= 2:
+            return
+        if time.monotonic() >= deadline:
+            detail = '; '.join(f"{mount} is in use by {', '.join(holders(mount)) or 'unknown'}"
+                               for mount in busy) or 'the disk is still claimed'
+            raise ValueError(f'Target stays mounted ({detail}). Close any window showing it '
+                             'and run the flasher again')
+        time.sleep(1)
 
 
 def main():
@@ -95,8 +179,13 @@ def main():
         print(info['description' if sys.argv[1] == 'describe' else 'fingerprint'])
     elif len(sys.argv) == 4 and sys.argv[1] == 'prepare':
         prepare(sys.argv[2], sys.argv[3])
+    elif sys.argv[1:] == ['hold-cm4']:
+        hold(CM4_RULE)
+    elif sys.argv[1:] == ['release']:
+        release()
     else:
-        raise ValueError('usage: flash-target.py {list|describe DEVICE|fingerprint DEVICE|prepare DEVICE FINGERPRINT}')
+        raise ValueError('usage: flash-target.py {list|describe DEVICE|fingerprint DEVICE|'
+                         'prepare DEVICE FINGERPRINT|hold-cm4|release}')
 
 
 if __name__ == '__main__':
