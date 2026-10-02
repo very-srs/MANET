@@ -82,7 +82,9 @@ if [ -x /usr/local/bin/manet-power-status.sh ]; then
     ln -sf /usr/local/bin/manet-power-status.sh /etc/update-motd.d/55-manet-power
 fi
 
-# This loop reads the stored setup variables to set the current config
+# This loop reads the stored setup variables to set the current config.
+# mesh.conf holds keys and passwords, so tracing is off until they are used.
+{ set +x; } 2>/dev/null   # secrets follow: keep them out of the trace log
 while IFS= read -r line; do
     # Skip empty lines
     if [[ -z "$line" ]]; then
@@ -102,6 +104,7 @@ while IFS= read -r line; do
         echo "Checking config: $sanitized_key"
     fi
 done < <(cat /etc/mesh.conf)
+set -x
 
 # Look up the current physical interface name for a logical name.
 # During provisioning, logical names (wlan0/1/2) may not yet match kernel names.
@@ -215,9 +218,10 @@ modprobe morse
 
 echo "Applying settings..."
 sleep 0.5
+{ set +x; } 2>/dev/null   # secrets follow: keep them out of the trace log
 if [[ -n "$mesh_key" ]]; then
     KEY=$mesh_key
-    echo " > Using SAE Key: $KEY"
+    echo " > Using the SAE key from mesh.conf"
     sleep 0.5
 fi
 
@@ -253,6 +257,7 @@ if [[ -n "$new_user_password" ]]; then
 elif [[ -n "$radio_password" ]]; then
     echo "radio:$radio_password" | chpasswd
 fi
+set -x
 passwd -u radio 2>/dev/null || true
 mkdir -p /home/radio/.ssh /etc/ssh/sshd_config.d
 chmod 700 /home/radio/.ssh
@@ -894,6 +899,7 @@ ActivationPolicy=manual
 EOF
 
     # Get configuration from mesh.conf
+    { set +x; } 2>/dev/null   # secrets follow: keep them out of the trace log
     while IFS= read -r line; do
         [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
         key="${line%%=*}"
@@ -905,6 +911,7 @@ EOF
             ipv4_network) IPV4_NETWORK="$value" ;;
         esac
     done < /etc/mesh.conf
+    set -x
 
     # Calculate DHCP pool based on max EUDs
     CALC_OUTPUT=$(manet-ipcalc.sh "$IPV4_NETWORK" 2>/dev/null)
@@ -1755,6 +1762,11 @@ for WLAN in $(cat /var/lib/mesh_if 2>/dev/null); do
     systemctl reset-failed wpa_supplicant@$WLAN.service 2>/dev/null || true
     systemctl restart wpa_supplicant@$WLAN.service 2>/dev/null || true
 done
+# The AP runs hostapd, not a supplicant. A supplicant started for it before
+# roles were assigned leaves a stale failed unit; clear that record.
+if [[ -n "$AP_INTERFACE" ]]; then
+    systemctl reset-failed "wpa_supplicant@$AP_INTERFACE.service" 2>/dev/null || true
+fi
 
 echo " > resetting ipv4..."
 systemctl restart node-manager
@@ -1762,6 +1774,12 @@ systemctl restart node-manager
 sleep 6 # wait for wpa_supplicant to catch up
 echo " > resetting BATMAN-ADV bond..."
 systemctl restart batman-enslave.service
+
+# On the first boot manet-mesh-power ran before this script assigned roles,
+# so it had nothing to set. Power requests apply at once; no reboot needed.
+echo " > requesting mesh radio power..."
+systemctl restart manet-mesh-power.service || \
+    echo " > WARNING: mesh radio power not fully applied; see journalctl -u manet-mesh-power"
 
 echo " > restarting alfred..."
 systemctl restart alfred.service

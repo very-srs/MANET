@@ -101,7 +101,20 @@ disk and all descendant devices, rejects active mapped storage and mounts outsid
 fingerprint includes name, major/minor number, capacity, model, serial, WWN and
 the kernel disk sequence when available. `prepare` rechecks it, unmounts allowed
 desktop mounts, then rechecks identity and mount state. Linux calls it before
-wipefs, dd and rpi-imager. Batch flashing requires typed confirmation for each
+wipefs, dd and rpi-imager.
+
+Desktop automounting raced the unmount. GNOME reads each new mount for a few
+seconds, so `umount` failed with "target is busy", and an ext4 mount doing
+journal recovery could finish after the unmount, leaving the old rootfs mounted
+read-write while rpi-imager wrote the new image. Two changes close this. A udev
+rule in `/run/udev/rules.d/99-manet-flash-noauto.rules` sets `UDISKS_AUTO=0`,
+which udisks and GNOME honor: `hold-cm4` installs it for the rpiboot mass
+storage device (USB `0a5c:0001`) before `rpiboot` runs, so a CM4 eMMC is never
+automounted, and `prepare` installs it for the chosen disk. The flasher removes
+the file on exit. `prepare` then retries the unmount for up to 30 seconds and
+requires the disk to open with `O_EXCL` on two checks a second apart. A mount
+still in progress already claims the device, though `lsblk` does not show it
+yet. If the disk stays busy, the error names the processes using the mount. Batch flashing requires typed confirmation for each
 target and blank input never authorizes a write. These checks are tested with
 simulated inventories; physical unplug/replug behavior still needs a bench test.
 

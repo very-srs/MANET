@@ -237,8 +237,11 @@ checked, so picking Rock 3A never asks for `rpiboot`.
 Disk selection shows model, capacity, serial, removability and mounted volumes.
 Each selected target, including every card in a batch, requires typing `yes`.
 Enter alone does not confirm. System-mounted disks and active mapped storage
-are refused; ordinary desktop automounts are unmounted before writing. The
-flasher rechecks disk identity immediately before each erase/write operation.
+are refused; ordinary desktop automounts are unmounted before writing, and
+the desktop is kept from mounting the target again until the flasher exits.
+If a file window is open on the card, the flasher waits up to 30 seconds,
+then names the program holding it. The flasher rechecks disk identity
+immediately before each erase/write operation.
 Disk inspection requires `lsblk` with `MOUNTPOINTS` support (util-linux 2.37+).
 
 From a checkout, run it in place:
@@ -673,6 +676,10 @@ button, then *Terminal (Admin)* or *Windows PowerShell (Admin)*.
 **Provisioning logs (Rock 3A):**
 - `/var/log/mesh-provision.log`
 - `/var/log/radio-setup.log`
+
+These logs trace every command, but tracing is switched off wherever the mesh
+key, hotspot key or passwords are handled, so the logs are safe to share.
+Logs from releases before 0.558 contain them.
 
 **Radios misbehaving: check power first.** A HaLow card that stops answering, a Wi-Fi
 interface that will not associate, or a board that resets with nothing in the log are all

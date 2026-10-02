@@ -11,10 +11,9 @@
 #
 . "${MANET_TOOLS_DIR:-$(dirname "${BASH_SOURCE[0]}")}/manet-common.sh" || exit 1
 
+MESH_IF_FILE="${MANET_MESH_IF_FILE:-/var/lib/mesh_if}"
+WAIT_SECS="${SAE_WATCHDOG_WAIT_SECS:-15}"
 STANDARD_MESH_INTERFACES=""
-if [ -s /var/lib/mesh_if ]; then
-    STANDARD_MESH_INTERFACES=$(cat /var/lib/mesh_if | tr '\n' ' ')
-fi
 
 log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] - SAE-WATCHDOG: $*"
@@ -66,19 +65,30 @@ bat0_has_all_interfaces() {
     return 0
 }
 
-log "Starting SAE watchdog (monitoring: ${STANDARD_MESH_INTERFACES:-all wpa_supplicant@wlan*.service})"
-
-# Monitor journald for SAE block events across enabled mesh interfaces
+# Monitor journald for SAE block events across enabled mesh interfaces.
+# Until there is one (first boot before radio-setup assigns roles, or every
+# mesh radio turned off), wait here. Exiting instead made Restart=always
+# re-run the unit, and each start pulled in batman-enslave, which starts the
+# supplicants before they have a config.
 JOURNAL_ARGS=()
-for iface in $STANDARD_MESH_INTERFACES; do
-    radio_iface_enabled "$iface" || continue
-    JOURNAL_ARGS+=("-fu" "$(service_unit_for_iface "$iface")")
+waiting=""
+while :; do
+    STANDARD_MESH_INTERFACES=""
+    [ -s "$MESH_IF_FILE" ] && STANDARD_MESH_INTERFACES=$(tr '\n' ' ' < "$MESH_IF_FILE")
+    JOURNAL_ARGS=()
+    for iface in $STANDARD_MESH_INTERFACES; do
+        radio_iface_enabled "$iface" || continue
+        JOURNAL_ARGS+=("-fu" "$(service_unit_for_iface "$iface")")
+    done
+    [ ${#JOURNAL_ARGS[@]} -gt 0 ] && break
+    if [ -z "$waiting" ]; then
+        log "No enabled mesh interfaces yet; waiting for them"
+        waiting=1
+    fi
+    sleep "$WAIT_SECS"
 done
 
-if [ ${#JOURNAL_ARGS[@]} -eq 0 ]; then
-    log "No enabled mesh interfaces in radio-state; exiting SAE watchdog monitor"
-    exit 0
-fi
+log "Starting SAE watchdog (monitoring: ${STANDARD_MESH_INTERFACES% })"
 
 journalctl "${JOURNAL_ARGS[@]}" \
     --output=cat 2>/dev/null | \

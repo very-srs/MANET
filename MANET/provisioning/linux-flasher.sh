@@ -758,12 +758,23 @@ detect_sd_cards() {
         done <<< "$inventory"
 }
 
+# flash-target.py stops the desktop automounting the destination while the
+# flasher runs. The hold is a udev rule in /run; lift it on any exit.
+AUTOMOUNT_HELD=""
+release_automount_hold() {
+        [ -n "$AUTOMOUNT_HELD" ] || return 0
+        sudo python3 "$SCRIPT_DIR/flash-target.py" release || \
+                echo "WARNING: could not lift the automount hold; it ends at the next reboot." >&2
+}
+trap release_automount_hold EXIT
+
 prepare_flash_target() {
         local device="$1"
         [ -n "${FLASH_TARGET_IDS[$device]:-}" ] || {
                 echo "ERROR: Target has not been confirmed." >&2
                 return 1
         }
+        AUTOMOUNT_HELD=1
         sudo python3 "$SCRIPT_DIR/flash-target.py" prepare "$device" "${FLASH_TARGET_IDS[$device]}"
 }
 
@@ -1294,6 +1305,9 @@ select_target_device() {
                 echo "Please connect your CM4 to this computer in USB-boot mode."
                 read -p "Press Enter to run 'sudo rpiboot' and mount the eMMC..."
                 echo
+                # Before the eMMC appears, so the desktop never mounts it.
+                AUTOMOUNT_HELD=1
+                sudo python3 "$SCRIPT_DIR/flash-target.py" hold-cm4
                 sudo rpiboot
                 local NEW_DISK
                 echo "'rpiboot' finished. Waiting up to 60 seconds for the eMMC..."
