@@ -273,8 +273,8 @@ class ToMeshTests(Harness):
         self.assertEqual(self.read('mesh_24_if'), OTHER)
         # The AP's PHY-wide 5 dBm cap must not follow the radio into the mesh.
         calls = self.radio.calls
-        self.assertIn('iw phy phy1 set txpower auto', calls)
-        self.assertLess(calls.index('iw phy phy1 set txpower auto'),
+        self.assertIn('iw phy phy1 set txpower fixed 3000', calls)
+        self.assertLess(calls.index('iw phy phy1 set txpower fixed 3000'),
                         calls.index(f'systemctl restart wpa_supplicant@{IFACE}.service'))
 
     def test_registry_evidence_does_not_persist_a_static_plan(self):

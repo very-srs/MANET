@@ -4,6 +4,7 @@
 # - No RF scanning or channel selection
 # - No tourguide (all nodes on same channels always)
 # - Just publishes status and manages services
+. "${MANET_TOOLS_DIR:-$(dirname "${BASH_SOURCE[0]}")}/manet-common.sh" || exit 1
 
 # --- Configuration ---
 CONTROL_IFACE="br0"
@@ -92,18 +93,7 @@ get_current_freq() {
     grep -oP 'frequency=\K[0-9]+' "$conf_file" 2>/dev/null | head -1
 }
 
-radio_iface_enabled() {
-    python3 - "$1" <<'PY'
-import json, sys
-iface = sys.argv[1]
-try:
-    with open('/var/lib/mesh_radio_state.json') as f:
-        state = json.load(f).get('desired', {}).get(iface, 'up')
-except Exception:
-    state = 'up'
-sys.exit(1 if state == 'down' else 0)
-PY
-}
+# radio_iface_enabled: manet-common.sh
 
 collect_radio_mcs() {
     WLAN0_TX_MCS=""; WLAN0_RX_MCS=""
@@ -426,7 +416,7 @@ while true; do
         [ -n "$IS_NTP_FLAG" ] && ENCODER_ARGS+=("$IS_NTP_FLAG")
         [ -n "$IS_MEDIAMTX_FLAG" ] && ENCODER_ARGS+=("$IS_MEDIAMTX_FLAG")
         [ -n "$IS_MUMBLE_FLAG" ] && ENCODER_ARGS+=("$IS_MUMBLE_FLAG")
-        BATT_PCT=$(python3 -c "import json;d=json.load(open('/run/battery_status.json'));p=d.get('percentage');print('' if p is None else p)" 2>/dev/null)
+        BATT_PCT=$(jq -r '.percentage // empty' /run/battery_status.json 2>/dev/null)
         [ -n "$BATT_PCT" ] && ENCODER_ARGS+=("--battery-percentage" "$BATT_PCT")
         UPTIME_SECS=$(awk '{print int($1)}' /proc/uptime 2>/dev/null)
         [ -n "$UPTIME_SECS" ] && ENCODER_ARGS+=("--uptime-seconds" "$UPTIME_SECS")
@@ -438,17 +428,11 @@ while true; do
         # its timestamp, the last recorded position is no longer safe to publish.
         GPS_LAT=""; GPS_LON=""; GPS_ALT=""
         if [ -f "$GPS_STATUS_FILE" ]; then
-            eval "$(python3 -c "
-import json, sys, time
-try:
-    d = json.load(open(sys.argv[1]))
-    if d.get('has_fix') and time.time() - d.get('timestamp', 0) <= float(sys.argv[2]):
-        print('GPS_LAT=' + str(d['latitude']))
-        print('GPS_LON=' + str(d['longitude']))
-        print('GPS_ALT=' + str(d['altitude']))
-except Exception:
-    pass
-" "$GPS_STATUS_FILE" "$GPS_FIX_MAX_AGE" 2>/dev/null)"
+            read -r GPS_LAT GPS_LON GPS_ALT < <(jq -r --argjson max "$GPS_FIX_MAX_AGE" '
+                select(.has_fix and ((.timestamp // 0) | type) == "number"
+                       and now - (.timestamp // 0) <= $max
+                       and ([.latitude, .longitude, .altitude] | all(type == "number")))
+                | "\(.latitude) \(.longitude) \(.altitude)"' "$GPS_STATUS_FILE" 2>/dev/null) || true
         fi
         [ -n "$GPS_LAT" ] && ENCODER_ARGS+=("--latitude" "$GPS_LAT" "--longitude" "$GPS_LON" "--altitude" "$GPS_ALT")
 

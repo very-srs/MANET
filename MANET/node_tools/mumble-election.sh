@@ -22,7 +22,6 @@ MUMBLE_IPV6_VIP=""
 
 # Incumbent bias: current leader gets this many TQ points added to their score.
 # Prevents service migration due to normal TQ fluctuation.
-INCUMBENT_BIAS=10
 
 # State
 MY_MAC=$(cat "/sys/class/net/${CONTROL_IFACE}/address" 2>/dev/null || true)
@@ -388,70 +387,21 @@ fi
 IPV4_VIP_WITH_MASK="${MUMBLE_IPV4_VIP}/${IPV4_NETWORK#*/}"
 log "Mumble VIPs: IPv4=$MUMBLE_IPV4_VIP, IPv6=$MUMBLE_IPV6_VIP"
 
-# --- Detect Current Incumbent ---
-# Use the Alfred node registry as the authoritative source for incumbency.
-# node-manager publishes IS_MUMBLE_SERVER=true only when the local node runs
-# mumble-server.service and holds the Mumble VIP. All nodes use the same
-# Alfred-propagated registry to identify the active host.
-CURRENT_LEADER_MAC=""
-if [ -f "$REGISTRY_STATE_FILE" ]; then
-    INCUMBENT_NODE_ID=$(grep "IS_MUMBLE_SERVER='true'" "$REGISTRY_STATE_FILE" \
-        | head -1 | sed "s/NODE_\([^_]*\)_.*/\1/")
-    if [ -n "$INCUMBENT_NODE_ID" ]; then
-        INCUMBENT_MAC=$(grep "^NODE_${INCUMBENT_NODE_ID}_MAC_ADDRESS=" "$REGISTRY_STATE_FILE" \
-            | cut -d"'" -f2)
-        [ -n "$INCUMBENT_MAC" ] && CURRENT_LEADER_MAC="$INCUMBENT_MAC"
-    fi
+# --- Rank candidates ---
+# mesh-service-election.py reads one registry snapshot and applies the shared
+# rules: eligibility (state, observed age, valid metric), one deterministic
+# incumbent with its +10 bias, highest score wins, lowest MAC breaks a tie.
+ELECTION_HELPER="${MANET_TOOLS_DIR:-/usr/local/bin}/mesh-service-election.py"
+if ! ELECTION_RESULT=$(python3 "$ELECTION_HELPER" mumble "$REGISTRY_STATE_FILE" 2> >(while IFS= read -r line; do log "$line"; done)); then
+    log "Cannot rank candidates; leaving the service as it is"
+    exit 1
 fi
+read -r BEST_CANDIDATE_MAC HIGHEST_TQ CURRENT_LEADER_MAC <<< "$ELECTION_RESULT"
+[ "$BEST_CANDIDATE_MAC" = - ] && BEST_CANDIDATE_MAC=""
+[ "$CURRENT_LEADER_MAC" = - ] && CURRENT_LEADER_MAC=""
 if [ -n "$CURRENT_LEADER_MAC" ]; then
-    log "Current incumbent: $CURRENT_LEADER_MAC (bias: +${INCUMBENT_BIAS} TQ)"
+    log "Current incumbent: $CURRENT_LEADER_MAC (incumbent bias applied)"
 fi
-
-# --- Run Election ---
-log "Running Mumble election..."
-
-NOW=$(date +%s)
-STALE_THRESHOLD=600
-read -r UPTIME_NOW _ < "${MESH_UPTIME_FILE:-/proc/uptime}"
-UPTIME_NOW=${UPTIME_NOW%.*}
-BEST_CANDIDATE_MAC=""
-HIGHEST_TQ="-1"
-
-# Find best candidate by TQ
-while read tq_line; do
-    metric_varname=$(echo "$tq_line" | cut -d'=' -f1)
-    CURRENT_TQ=$(echo "$tq_line" | cut -d'=' -f2 | tr -d "'")
-    MAC_SANITIZED=$(echo "$metric_varname" | sed -n 's/NODE_\([0-9a-fA-F]\+\)_MEAN_THROUGHPUT_MBPS/\1/p')
-
-    if [ -n "$MAC_SANITIZED" ]; then
-        # Freshness as observed by this node (boot clock), not the peer's clock.
-        AT_VAL=$(grep "^NODE_${MAC_SANITIZED}_OBSERVED_AT_UPTIME=" "$REGISTRY_STATE_FILE" | cut -d'=' -f2 | tr -d "'")
-        if ! [[ "$AT_VAL" =~ ^[0-9]+$ ]] || [ $((UPTIME_NOW - AT_VAL)) -gt $STALE_THRESHOLD ]; then
-            continue
-        fi
-
-        MAC_VAR="NODE_${MAC_SANITIZED}_MAC_ADDRESS"
-        MAC_LINE=$(grep "^${MAC_VAR}=" "$REGISTRY_STATE_FILE")
-
-        if [ -n "$MAC_LINE" ]; then
-            CURRENT_MAC=$(echo "$MAC_LINE" | cut -d'=' -f2 | tr -d "'")
-
-            # Apply incumbent bias: current leader gets a TQ bonus to prevent
-            # unnecessary service migration from normal TQ fluctuation
-            EFFECTIVE_TQ="$CURRENT_TQ"
-            if [ -n "$CURRENT_LEADER_MAC" ] && [ "$CURRENT_MAC" == "$CURRENT_LEADER_MAC" ]; then
-                EFFECTIVE_TQ=$(echo "$CURRENT_TQ + $INCUMBENT_BIAS" | bc -l)
-            fi
-
-            if (( $(echo "$EFFECTIVE_TQ > $HIGHEST_TQ" | bc -l) )); then
-                HIGHEST_TQ=$EFFECTIVE_TQ
-                BEST_CANDIDATE_MAC=$CURRENT_MAC
-            elif (( $(echo "$EFFECTIVE_TQ == $HIGHEST_TQ" | bc -l) )) && [[ "$CURRENT_MAC" < "$BEST_CANDIDATE_MAC" ]]; then
-                BEST_CANDIDATE_MAC=$CURRENT_MAC
-            fi
-        fi
-    fi
-done < <(grep 'NODE_.*_MEAN_THROUGHPUT_MBPS=' "$REGISTRY_STATE_FILE")
 
 # --- Decision and Action ---
 if [ -z "$BEST_CANDIDATE_MAC" ]; then

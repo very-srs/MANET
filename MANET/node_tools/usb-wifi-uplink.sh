@@ -243,21 +243,12 @@ status_json() {
             state="idle"
         fi
     fi
-    python3 - "$enabled" "$iface" "$ssid" "$state" "$connected" "$ip" "$service" <<'PY'
-import json
-import sys
-
-enabled, iface, ssid, state, connected, ip, service = sys.argv[1:]
-print(json.dumps({
-    "enabled": enabled == "1",
-    "iface": iface,
-    "ssid": ssid,
-    "state": state,
-    "connected": connected == "true",
-    "ip": ip,
-    "service": service,
-}))
-PY
+    jq -cn --arg iface "$iface" --arg ssid "$ssid" --arg state "$state" \
+        --arg ip "$ip" --arg service "$service" \
+        --argjson enabled "$([ "$enabled" = 1 ] && echo true || echo false)" \
+        --argjson connected "$([ "$connected" = true ] && echo true || echo false)" \
+        '{enabled: $enabled, iface: $iface, ssid: $ssid, state: $state,
+          connected: $connected, ip: $ip, service: $service}'
 }
 
 case "$ACTION" in

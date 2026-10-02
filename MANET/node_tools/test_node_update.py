@@ -141,7 +141,7 @@ if os.environ.get('TEST_SYSTEMCTL_FAIL') == args:
         self.updater.update()
         for name in update.MARKERS:
             self.assertEqual((self.root / name).read_text(), self.new_version)
-        self.assertIn('node-manager-acs.sh', self.old_manager.read_text())
+        self.assertEqual(self.old_manager.readlink(), Path('node-manager-acs.sh'))
         self.assertEqual((self.root / 'usr').stat().st_mode, original_mode)
         self.assertEqual((self.root / link.name).readlink(), Path('../manet-admin-setup.service'))
         self.assertIn('systemctl is-active --quiet node-manager.service', self.history())
@@ -153,7 +153,7 @@ if os.environ.get('TEST_SYSTEMCTL_FAIL') == args:
     def test_static_selection(self):
         (self.root / 'etc/mesh.conf').write_text('acs=n\n')
         self.updater.update()
-        self.assertIn('node-manager-static.sh', self.old_manager.read_text())
+        self.assertEqual(self.old_manager.readlink(), Path('node-manager-static.sh'))
 
     def test_update_retires_vip_deleting_route_service(self):
         unit = self.root / 'etc/systemd/system/mesh-default-route-fix.service'
@@ -185,7 +185,8 @@ if os.environ.get('TEST_SYSTEMCTL_FAIL') == args:
         links = directory / 'multi-user.target.wants'
         links.mkdir(parents=True)
         units = ('ap-interface-setup.service', 'ap-txpower.service', 'ebtables-restore.service',
-                 'manet-txpower.service', 'halow-txpower-wlan2.service')
+                 'manet-txpower.service', 'halow-txpower-wlan2.service',
+                 'manet-halow-power.service')
         for name in units:
             (directory / name).write_text('old boot unit')
             (links / name).symlink_to('../' + name)
@@ -196,6 +197,7 @@ if os.environ.get('TEST_SYSTEMCTL_FAIL') == args:
             self.assertFalse((links / name).is_symlink())
             self.assertEqual((directory / name).exists(), name == 'ap-txpower.service')
         self.assertFalse((self.root / 'etc/ebtables.rules').exists())
+        self.assertFalse((self.root / 'usr/local/bin/manet-halow-power.py').exists())
         self.assertLess(self.history().index('isolation'), self.history().index('restart node-manager.service'))
 
     def test_isolation_failure_stops_existing_dhcp_and_preserves_pending_retry(self):
@@ -292,7 +294,7 @@ if os.environ.get('TEST_SYSTEMCTL_FAIL') == args:
 
     def test_service_failures_preserve_marker_and_retry_in_routine_mode(self):
         for failure in ('daemon-reload', 'enable --now manet-dhcp-isolation.service',
-                        'enable --now manet-halow-power.service', 'restart mesh-status.service',
+                        'enable --now manet-mesh-power.service', 'restart mesh-status.service',
                         'restart node-manager.service', 'is-active --quiet node-manager.service'):
             with self.subTest(failure=failure):
                 for name in update.MARKERS:

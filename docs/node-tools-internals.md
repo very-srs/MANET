@@ -38,7 +38,8 @@ special mode bits, writable directories, and symlink traversal. Relative symlink
 must target regular files included in the archive. Existing directory modes are
 preserved, and installation cannot traverse existing directory symlinks. Tools
 archives cannot carry kernel modules/firmware, networkd interface definitions,
-`mesh.conf`, or the generated `node-manager.sh`.
+`mesh.conf`, or `node-manager.sh` (a node-local symlink the updater points at
+the selected orchestrator, as `node-manager-select.sh` does at every start).
 
 Both embedded version files must match each other and the advertised release.
 Required updater, manager, status, dependency, agreement, time-service and MOTD
@@ -196,8 +197,11 @@ implementation, so what the UI offers and what the node does cannot diverge.
 **The HaLow channel plan is derived from the node's region.** The channel,
 bandwidth and S1G operating-class tables are transcribed from the Morse driver's
 `dot11ah` tables, and a bandwidth appears for a region only where the driver
-defines a channel of that width, which is why **EU stops at 2 MHz** (the whole
-863–868 MHz allocation is too narrow for more) while **US reaches 8 MHz**.
+defines a channel of that width and the Morse supplicant will join it. **US
+reaches 8 MHz.** **EU is 1 MHz only**: the 863–868 MHz allocation has no room
+for 4 or 8 MHz, and `wpa_supplicant_s1g` 1.16.4 rejects every EU 2 MHz mesh
+config ("Invalid S1G configuration of operating class, country code and
+channel", channels 2 and 6, op_class 67 and 7, tested on cm4.2 2026-10-02).
 `halow_channel_options()` builds the menu the Radio config tab renders, so an
 EU node is never offered a width it cannot use. Channel numbers and center
 frequencies are both unique within a region, so either resolves the other:
@@ -206,13 +210,24 @@ which is how the status readout avoids `s1g_prim_chwidth`; that reports the
 *primary* channel width, 2 MHz for every operating width above 1 MHz, and
 reading it as the operating width reports a 4 or 8 MHz channel as 2 MHz.
 
-**HaLow TX power is fixed per bandwidth by the driver and BCF**, not freely
-settable: `HALOW_BW_TXPOWER_CAP_DBM` holds the caps, and a request outside them
-is refused with an explanation rather than silently clamped
-(`txpower_request_allowed`, `unsupported_txpower_response`). Wi-Fi TX power
-options come from the phy's own advertised range (`parse_phy_txpower_options`),
-and a set is read back and verified rather than assumed
-(`set_iface_txpower_verified`).
+TX power options for every radio, HaLow included, come from the phy's own
+advertised channel range (`parse_phy_txpower_options`). There is no
+per-bandwidth HaLow table any more. A request above that range is refused
+(`txpower_request_allowed`, `unsupported_txpower_response`).
+`set_iface_txpower_verified` requests the power, reads it back and returns the
+reported value, which may be lower than requested when the card limits itself.
+Only a radio reporting no power at all is an error.
+
+`manet-region.py apply` is the runtime counterpart of radio-setup's region
+writes. `mesh-config-apply.sh` runs it when a `regulatory_domain` change is
+applied, so a web UI change reaches `/etc/modprobe.d/{cfg80211,morse}.conf`,
+`/etc/default/crda`, hostapd's `country_code` and every supplicant's country
+before the reboot that loads them. A US/EU plan change also rewrites the
+HaLow supplicant to that region's template channel (`HALOW_DEFAULT_CHANNEL`,
+checked against `radio-setup.sh` by `test_region.py`, as is the EU country
+list). Within one plan the operator's HaLow channel is kept. Verified on
+cm4/cm4.2 2026-10-02: DE to US through the apply step, reboot, both nodes up
+on 907 MHz / 2 MHz.
 
 An unknown region falls back to the EU plan, the narrower of the two, so a
 misconfigured node cannot be offered channels its region may not permit.
@@ -1263,11 +1278,14 @@ lock after checking active roles and actual AP type. The packaged
 has no boot enable link. A cap already at or below 5 dBm is left alone; a
 later power reset above that ceiling is corrected. Hostapd also queues an
 asynchronous dnsmasq start after its AP setup, including boot and recovery;
-dnsmasq's own port and isolation guards still apply. The fixed 23/24 dBm conventional mesh lab-power unit
-is retired; those radios use automatic power. HaLow's role-aware power unit
-also requests auto, replacing the generated fixed-ceiling units. The Morse
-module parameter `tx_max_power_mbm` is a fallback when the firmware maximum
-query fails, not proof of the active limit. The AP cap is read back after setting it, accepting a lower
+dnsmasq's own port and isolation guards still apply. The fixed 23/24 dBm lab-power unit, the generated
+HaLow fixed-ceiling units and the auto-power HaLow unit are retired.
+`manet-mesh-power.service` asks every radio named in `mesh_if` or `halow_if`
+for 30 dBm (`iw dev <if> set txpower fixed 3000`) after bat0 enslavement,
+skips any interface currently in AP mode, and logs the reported value. The
+AP-to-mesh transition requests the same 30 dBm when it clears the AP cap. The
+kernel side removes the matching driver and firmware ceilings (see
+[the kernel port record](kernel-6.18-morse-port.md) §4.2 and §7). The AP cap is read back after setting it, accepting a lower
 regulatory ceiling; a PHY shared with another active interface is rejected.
 `manet_ap_mesh.py` owns both directions. It withdraws active mesh roles under
 `channel-election.lock` before preparing AP mode. Returning to mesh restores

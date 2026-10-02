@@ -355,7 +355,7 @@ class ChunkClaimsTests(unittest.TestCase):
         return identity
 
     def test_static_publish_reads_chunk_after_reallocation(self):
-        for script in ('node-manager-static.sh', 'node-manager.sh'):
+        for script in ('node-manager-static.sh',):
             with self.subTest(script=script):
                 marker = self.root / 'run/my_ipv4_chunk'
                 marker.parent.mkdir(exist_ok=True)
@@ -365,7 +365,7 @@ class ChunkClaimsTests(unittest.TestCase):
                 self.assertEqual(int_to_ipv4(identity.ipv4_address), '10.30.0.13')
 
     def test_managers_distinguish_chunk_zero_from_no_allocation(self):
-        for script in ('node-manager-acs.sh', 'node-manager-static.sh', 'node-manager.sh'):
+        for script in ('node-manager-acs.sh', 'node-manager-static.sh'):
             with self.subTest(script=script):
                 marker = self.root / 'run/my_ipv4_chunk'
                 marker.unlink(missing_ok=True)
@@ -381,7 +381,7 @@ class ChunkClaimsTests(unittest.TestCase):
         marker = self.root / 'run/my_ipv4_chunk'
         marker.parent.mkdir()
         marker.write_text('0\n')
-        for script in ('node-manager-acs.sh', 'node-manager-static.sh', 'node-manager.sh'):
+        for script in ('node-manager-acs.sh', 'node-manager-static.sh'):
             for fail_first in (False, True):
                 with self.subTest(script=script, fail_first=fail_first):
                     (self.records / 'published-67').unlink(missing_ok=True)

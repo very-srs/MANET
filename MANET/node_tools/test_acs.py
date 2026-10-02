@@ -146,7 +146,7 @@ elif sys.argv[1] == 'phy':
         marker = '# === MAIN SETUP ===' if script == 'node-manager-acs.sh' else '# === MAIN EXECUTION ==='
         return (TOOLS / script).read_text().split(marker, 1)[0] + '''
 BATCTL_PATH="$TEST_ROOT/bin/batctl"
-PEER_COUNTER="$MANET_TOOLS_DIR/mesh-peer-count.py"
+PEER_COUNTER="$MANET_TOOLS_DIR/mesh-peer-count.sh"
 REGISTRY_STATE_FILE="$TEST_ROOT/registry"
 log() { echo "$1" >&2; }
 load_mesh_roles

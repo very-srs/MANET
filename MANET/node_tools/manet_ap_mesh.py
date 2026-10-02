@@ -296,8 +296,9 @@ class Transition:
         self.command(['ip', 'link', 'set', iface, 'mtu', '1532'])
         self.command(['ip', 'link', 'set', iface, 'up'])
         # AP operation sets a PHY-wide 5 dBm cap. Stopping its oneshot does
-        # not undo that cap; let cfg80211 choose mesh power for this channel.
-        self.phy_power(iface, ['auto'])
+        # not undo that cap. Mesh radios ask for 30 dBm and leave any lower
+        # limit to the card's own firmware and hardware.
+        self.phy_power(iface, ['fixed', '3000'])
         self.command(['systemctl', 'restart', f'wpa_supplicant@{iface}.service'], timeout=30)
         self.ready(iface, freq)
         if not self.attached(iface):

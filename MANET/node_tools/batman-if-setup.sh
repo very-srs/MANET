@@ -10,6 +10,7 @@
 #    - DO NOT set type mesh (will fail / interrupt the S1G driver)
 #    - Just wait for interface UP, then add to bat0
 #
+. "${MANET_TOOLS_DIR:-$(dirname "${BASH_SOURCE[0]}")}/manet-common.sh" || exit 1
 
 set -e
 
@@ -54,18 +55,7 @@ is_nonmesh_wifi() {
     [[ "$(iface_driver "$1")" == brcmfmac ]]
 }
 
-radio_iface_enabled() {
-    python3 - "$1" <<'PY'
-import json, sys
-iface = sys.argv[1]
-try:
-    with open('/var/lib/mesh_radio_state.json') as f:
-        state = json.load(f).get('desired', {}).get(iface, 'up')
-except Exception:
-    state = 'up'
-sys.exit(1 if state == 'down' else 0)
-PY
-}
+# radio_iface_enabled: manet-common.sh
 
 refresh_interfaces() {
     STANDARD_MESH_INTERFACES=""

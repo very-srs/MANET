@@ -5,7 +5,7 @@
 
 REGISTRY_STATE_FILE="${REGISTRY_STATE_FILE:-/var/run/mesh_node_registry}"
 BATCTL_PATH="${BATCTL_PATH:-/usr/sbin/batctl}"
-PEER_COUNTER="$(dirname "${BASH_SOURCE[0]}")/mesh-peer-count.py"
+PEER_COUNTER="$(dirname "${BASH_SOURCE[0]}")/mesh-peer-count.sh"
 STALE_NODE_THRESHOLD=600
 QUORUM_THRESHOLD=0.5
 
@@ -32,7 +32,7 @@ ACTIVE_ALFRED_COUNT=$(awk -F"['=]" -v now="$UPTIME_NOW" -v stale="$STALE_NODE_TH
 SHUTTING_DOWN_COUNT=$(grep -c "NODE_STATE='SHUTTING_DOWN'" "$REGISTRY_STATE_FILE" 2>/dev/null)
 
 # Count reachable mesh nodes (originators)
-if ! UNIQUE_BATMAN_ORIGINATORS=$(python3 "$PEER_COUNTER" --batctl "$BATCTL_PATH"); then
+if ! UNIQUE_BATMAN_ORIGINATORS=$("$PEER_COUNTER" --batctl "$BATCTL_PATH"); then
     log "Cannot read BATMAN peers. Deferring quorum check."
     exit 2
 fi

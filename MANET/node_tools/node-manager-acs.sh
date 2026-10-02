@@ -50,7 +50,7 @@ ELECTION_OUTPUT_FILE="/var/run/mesh_channel_election"
 REGISTRY_STATE_FILE="/var/run/mesh_node_registry"
 ENCODER_PATH="/usr/local/bin/encoder.py"
 BATCTL_PATH="/usr/sbin/batctl"
-PEER_COUNTER="$(dirname "${BASH_SOURCE[0]}")/mesh-peer-count.py"
+PEER_COUNTER="$(dirname "${BASH_SOURCE[0]}")/mesh-peer-count.sh"
 THROUGHPUT_MEAN="/usr/local/bin/mesh-throughput-mean.sh"
 RADIO_STATE_SYNC="/usr/local/bin/mesh-radio-state.py"
 CONFIG_SYNC="/usr/local/bin/mesh-config-sync.py"
@@ -236,7 +236,7 @@ is_in_lobby() {
 # included -- what the lobby bootstrap needs is somebody to run a joint
 # deterministic election with, and it does not matter which radio found them.
 mesh_peer_count() {
-    python3 "$PEER_COUNTER" --batctl "$BATCTL_PATH"
+    "$PEER_COUNTER" --batctl "$BATCTL_PATH"
 }
 
 update_lobby_bootstrap() {
@@ -701,7 +701,7 @@ while true; do
             # Bootstrap election needs every lobby node's scan report replicated
             [ "$BOOTSTRAPPING" = true ] && [ "$CACHED_SCAN_REPORT_JSON" != "{}" ] && \
                 ENCODER_ARGS+=("--channel-report-json" "$CACHED_SCAN_REPORT_JSON")
-            BATT_PCT=$(python3 -c "import json;d=json.load(open('/run/battery_status.json'));p=d.get('percentage');print('' if p is None else p)" 2>/dev/null)
+            BATT_PCT=$(jq -r '.percentage // empty' /run/battery_status.json 2>/dev/null)
             [ -n "$BATT_PCT" ] && ENCODER_ARGS+=("--battery-percentage" "$BATT_PCT")
             UPTIME_SECS=$(awk '{print int($1)}' /proc/uptime 2>/dev/null)
             [ -n "$UPTIME_SECS" ] && ENCODER_ARGS+=("--uptime-seconds" "$UPTIME_SECS")
@@ -713,17 +713,11 @@ while true; do
             # its timestamp, the last recorded position is no longer safe to publish.
             GPS_LAT=""; GPS_LON=""; GPS_ALT=""
             if [ -f "$GPS_STATUS_FILE" ]; then
-                eval "$(python3 -c "
-import json, sys, time
-try:
-    d = json.load(open(sys.argv[1]))
-    if d.get('has_fix') and time.time() - d.get('timestamp', 0) <= float(sys.argv[2]):
-        print('GPS_LAT=' + str(d['latitude']))
-        print('GPS_LON=' + str(d['longitude']))
-        print('GPS_ALT=' + str(d['altitude']))
-except Exception:
-    pass
-" "$GPS_STATUS_FILE" "$GPS_FIX_MAX_AGE" 2>/dev/null)"
+                read -r GPS_LAT GPS_LON GPS_ALT < <(jq -r --argjson max "$GPS_FIX_MAX_AGE" '
+                    select(.has_fix and ((.timestamp // 0) | type) == "number"
+                           and now - (.timestamp // 0) <= $max
+                           and ([.latitude, .longitude, .altitude] | all(type == "number")))
+                    | "\(.latitude) \(.longitude) \(.altitude)"' "$GPS_STATUS_FILE" 2>/dev/null) || true
             fi
             [ -n "$GPS_LAT" ] && ENCODER_ARGS+=("--latitude" "$GPS_LAT" "--longitude" "$GPS_LON" "--altitude" "$GPS_ALT")
 
@@ -867,17 +861,11 @@ except Exception:
             # its timestamp, the last recorded position is no longer safe to publish.
             GPS_LAT=""; GPS_LON=""; GPS_ALT=""
             if [ -f "$GPS_STATUS_FILE" ]; then
-                eval "$(python3 -c "
-import json, sys, time
-try:
-    d = json.load(open(sys.argv[1]))
-    if d.get('has_fix') and time.time() - d.get('timestamp', 0) <= float(sys.argv[2]):
-        print('GPS_LAT=' + str(d['latitude']))
-        print('GPS_LON=' + str(d['longitude']))
-        print('GPS_ALT=' + str(d['altitude']))
-except Exception:
-    pass
-" "$GPS_STATUS_FILE" "$GPS_FIX_MAX_AGE" 2>/dev/null)"
+                read -r GPS_LAT GPS_LON GPS_ALT < <(jq -r --argjson max "$GPS_FIX_MAX_AGE" '
+                    select(.has_fix and ((.timestamp // 0) | type) == "number"
+                           and now - (.timestamp // 0) <= $max
+                           and ([.latitude, .longitude, .altitude] | all(type == "number")))
+                    | "\(.latitude) \(.longitude) \(.altitude)"' "$GPS_STATUS_FILE" 2>/dev/null) || true
             fi
             [ -n "$GPS_LAT" ] && ENCODER_ARGS+=("--latitude" "$GPS_LAT" "--longitude" "$GPS_LON" "--altitude" "$GPS_ALT")
 

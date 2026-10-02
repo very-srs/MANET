@@ -224,7 +224,7 @@ class AdminTests(unittest.TestCase):
                 self.raw = frame(payload)
                 self.assertEqual(config_sync.sync_once(), 0)
                 self.assertTrue(pending.exists())
-                self.assertFalse(any(args == [config_sync.APPLY_SCRIPT] for args, _ in self.calls))
+                self.assertFalse(any(args == config_sync.APPLY_COMMAND for args, _ in self.calls))
                 self.assertFalse(Path(config_sync.ACK_VERSION_FILE).exists())
 
     def test_authenticated_config_stages_acks_activates_once_and_resists_rollback_replay(self):
@@ -232,7 +232,7 @@ class AdminTests(unittest.TestCase):
         self.raw = frame(self.sender.seal(70, self.payload))
         self.assertEqual(config_sync.sync_once(), 0)
         self.assertTrue(Path(config_sync.PENDING_FILE).exists())
-        self.assertFalse(any(args == [config_sync.APPLY_SCRIPT] for args, _ in self.calls))
+        self.assertFalse(any(args == config_sync.APPLY_COMMAND for args, _ in self.calls))
         ack_wire = next(kwargs['input'] for args, kwargs in self.calls
                         if args == ['alfred', '-s', str(CONFIG_ACK_TYPE)])
         self.assertEqual(self.sender.open(CONFIG_ACK_TYPE, json.loads(ack_wire)).payload['version'],
@@ -243,7 +243,7 @@ class AdminTests(unittest.TestCase):
         for name in ('PENDING_FILE', 'ACK_VERSION_FILE', 'APPLIED_VERSION_FILE'):
             Path(getattr(config_sync, name)).unlink(missing_ok=True)
         self.assertEqual(config_sync.sync_once(), 0)
-        self.assertEqual(sum(args == [config_sync.APPLY_SCRIPT] for args, _ in self.calls), 1)
+        self.assertEqual(sum(args == config_sync.APPLY_COMMAND for args, _ in self.calls), 1)
         self.assertFalse(Path(config_sync.PENDING_FILE).exists())
 
     def test_authenticated_cancel_clears_pending(self):
@@ -306,7 +306,7 @@ class AdminTests(unittest.TestCase):
         self.receiver_patches(config_sync, 70)
         self.raw = frame(self.sender.seal(70, dict(self.payload, activate_at=1)))
         def interrupted(args, **kwargs):
-            if args == [config_sync.APPLY_SCRIPT]:
+            if args == config_sync.APPLY_COMMAND:
                 raise SystemExit
             return self.fake_run(args, **kwargs)
         with patch.object(config_sync, 'run', side_effect=interrupted) as run:
@@ -315,7 +315,7 @@ class AdminTests(unittest.TestCase):
             for name in ('PENDING_FILE', 'ACK_VERSION_FILE', 'APPLIED_VERSION_FILE'):
                 Path(getattr(config_sync, name)).unlink(missing_ok=True)
             self.assertEqual(config_sync.sync_once(), 0)
-            self.assertEqual(sum(call.args[0] == [config_sync.APPLY_SCRIPT]
+            self.assertEqual(sum(call.args[0] == config_sync.APPLY_COMMAND
                                  for call in run.call_args_list), 1)
 
     def test_publishers_encrypt_and_report_failures(self):

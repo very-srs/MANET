@@ -21,18 +21,8 @@ get_current_freq() {
     grep -oP 'frequency=\K[0-9]+' "$1" | head -1
 }
 
-radio_iface_enabled() {
-    [ -n "$1" ] || return 1
-    python3 - "$1" "${MANET_RADIO_STATE_FILE:-/var/lib/mesh_radio_state.json}" <<'PY'
-import json, sys
-try:
-    with open(sys.argv[2]) as f:
-        state = json.load(f).get('desired', {}).get(sys.argv[1], 'up')
-except (OSError, ValueError, AttributeError):
-    state = 'up'
-sys.exit(1 if state == 'down' else 0)
-PY
-}
+. "${MANET_TOOLS_DIR:-$(dirname "${BASH_SOURCE[0]}")}/manet-common.sh" || return 1
+# radio_iface_enabled: manet-common.sh
 
 acs_configs_ready() {
     local band iface conf seen=0

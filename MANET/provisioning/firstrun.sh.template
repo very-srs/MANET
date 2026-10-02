@@ -723,13 +723,6 @@ WantedBy=multi-user.target
 EOF
 fi
 
-# Install optional service selections
-if [ "__AUTO_CHANNEL__" = "y" ]; then
-	cp /usr/local/bin/node-manager-acs.sh /usr/local/bin/node-manager.sh
-else
-	cp /usr/local/bin/node-manager-static.sh /usr/local/bin/node-manager.sh
-fi
-chmod +x /usr/local/bin/node-manager.sh
 chmod +x /usr/local/bin/*
 
 echo "Setting radio-setup.sh to run at next reboot"
@@ -796,6 +789,10 @@ echo "max_euds_per_node=__MAX_EUDS_PER_NODE__" >> /etc/mesh.conf
 # and management is unreachable.
 echo "admin_password=__ADMIN_PW__" >> /etc/mesh.conf
 echo "auto_update=__AUTO_UPDATE__" >> /etc/mesh.conf
+
+# node-manager.sh is a symlink to the orchestrator acs= selects; the service
+# re-runs this selector before every start, so later acs changes follow.
+/usr/local/bin/node-manager-select.sh
 
 
 # Disable the current script so it won't run again at next boot

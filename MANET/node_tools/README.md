@@ -63,9 +63,11 @@ owns the channels; the API and receiver enforce the same rule.
 
 **node-manager.sh**
 
-The file `node-manager.service` runs. It is a copy of whichever orchestrator
-`acs=` in `/etc/mesh.conf` selects, put in place by `radio-setup.sh`. Changing
-`acs` from the Node config tab re-publishes it and restarts `node-manager`.
+What `node-manager.service` runs: a symlink to whichever orchestrator `acs=`
+in `/etc/mesh.conf` selects, `node-manager-acs.sh` (automatic channels) or
+`node-manager-static.sh`. `node-manager-select.sh` sets it before every
+service start, so the choice follows `mesh.conf` at each boot. Changing `acs`
+from the Node config tab restarts `node-manager`, which switches it.
 
 ---
 
@@ -184,14 +186,26 @@ client against the peer's always-listening daemon.
 **Radio settings**
 
 The HaLow channel plan follows the node's region. A bandwidth is offered only
-where the region defines a channel of that width, so EU stops at 2 MHz while US
-reaches 8 MHz. The 863-868 MHz allocation EU uses is too narrow for anything
-wider. The Radio config tab offers only widths the region can use.
+where the region defines a channel of that width and the HaLow supplicant
+accepts it. US reaches 8 MHz. EU is 1 MHz only: its 863-868 MHz allocation
+is too narrow for 4 or 8 MHz, and the supplicant refuses EU 2 MHz. New US
+nodes start on channel 10 (907 MHz, 2 MHz), the best balance of range and
+reliability. New EU nodes start on channel 1 (863.5 MHz, 1 MHz). The Radio config tab offers only widths the region can use.
 
-HaLow TX power is fixed per bandwidth by the driver and the BCF. A request
-outside those caps is refused with an explanation instead of being silently
-clamped. Wi-Fi TX power options come from the phy's own advertised range, and a
-change is read back and verified.
+Mesh radios, HaLow and Wi-Fi alike, start at 30 dBm in every region. MANET
+sets no lower ceiling of its own; the card's firmware and hardware apply
+their own limits. Wi-Fi TX power options run up to the highest power the
+radio's channels advertise. After a change the radio's reported power is read
+back and shown. That is the driver's report, not a measurement of RF output,
+and it can be lower than the request when the card limits itself. A requested
+reduction that does not take is reported as a failure.
+
+HaLow power is shown but cannot be changed from the UI. The Morse driver sets
+it when the radio starts, and reloading the driver can wedge the USB card, so
+a change needs a reboot. The bench MM8108 firmware reports 24 dBm at 1 and
+2 MHz, 22.25 dBm at 4 MHz and 22 dBm at 8 MHz.
+
+The EUD access point is the exception and stays at 5 dBm.
 
 **mesh-radio-state.py**
 
@@ -369,11 +383,13 @@ Config keys in `/etc/mesh.conf`:
 
 ## Service Elections
 
-Every service election uses the same rule. The best-connected node wins,
-measured by `MEAN_THROUGHPUT_MBPS` in the registry, which is the mean of
-BATMAN_V's metric across that node's originators in Mbit/s. Nodes not seen
-within 10 minutes are excluded, and ties break deterministically on MAC
-address.
+Every service election uses the same rule, applied by one shared helper,
+`mesh-service-election.py`. The best-connected node wins, measured by
+`MEAN_THROUGHPUT_MBPS` in the registry, which is the mean of BATMAN_V's metric
+across that node's originators in Mbit/s. A node that announced its shutdown,
+or that this node has not heard from for 5 minutes, cannot win or keep the
+service. The current host gets a small bonus so normal metric jitter does not
+move the service. Ties break deterministically on MAC address.
 
 Service elections start after address allocation and run at most once every
 fifteen seconds. Their locks prevent overlapping local runs. Separate network
@@ -942,9 +958,11 @@ If an apply attempt fails or is interrupted, stage a new change to retry.
   and the tab shows it without writing it.
 - **Safe.** `admin_password`, `mtx`, `mumble` and `auto_update` apply mesh-wide
   straight away.
-- **Deferred.** `regulatory_domain` is written now and reaches the radios at
-  the next boot, through the module options and the supplicant country code
-  that `radio-setup.sh` writes from `mesh.conf`. `acs` selects the orchestrator
+- **Deferred.** `regulatory_domain` is written now, together with every radio
+  file that carries the country (`manet-region.py`): the cfg80211 and Morse
+  module options, crda, hostapd and each supplicant. The radios use it from
+  their next boot. Moving between the US and EU HaLow plans also puts HaLow
+  on that region's default channel, since the two plans share none. `acs` selects the orchestrator
   and applies at once, with a `node-manager` restart.
 - **Dangerous.** `mesh_ssid`, `mesh_key` and `ipv4_network` rewrite the
   supplicant configs and restart the supplicants, so the mesh drops briefly.

@@ -34,9 +34,12 @@ import manet_static_channels as static_channels
 # (radio-setup.sh:1132).  Offering a third region's channels here would write
 # a config no template backs.
 HALOW_CHANNEL_PLANS = {
+    # EU 2 MHz (channels 2 and 6, op_class 67) is in the band plan, but the
+    # Morse wpa_supplicant_s1g 1.16.4 build refuses every EU 2 MHz mesh
+    # config ("Invalid S1G configuration of operating class, country code and
+    # channel"; cm4.2, 2026-10-02). Offer only what the supplicant will join.
     'EU': {
         '1MHz': {1: 863500, 3: 864500, 5: 865500, 7: 866500, 9: 867500},
-        '2MHz': {2: 864000, 6: 866000},
     },
     'US': {
         '1MHz': {1: 902500, 3: 903500, 5: 904500, 7: 905500, 9: 906500,
@@ -58,24 +61,20 @@ HALOW_CHANNEL_PLANS = {
 # rejects a class that disagrees with the country or the channel, and a
 # rejected config is a silent crashloop, so treat these as load-bearing.
 #
-# VERIFIED - these two are the values radio-setup.sh's own working templates
-# ship: EU 1 MHz = 66 (non-US template), US 8 MHz = 71 (US template).
-# INFERRED - the rest follow the standard's contiguous S1G block (EU 2 MHz =
-# 67 is documented; US 1/2/4 MHz then fill 68/69/70 below the verified 71).
+# VERIFIED on hardware: EU 1 MHz = 66 (the former non-US template), US 8 MHz
+# = 71 (the former US template), US 2 MHz = 69 (cm4.2, 2026-10-02: supplicant
+# up with no restarts, 907 MHz / 2 MHz, peered).
+# INFERRED - US 1/4 MHz fill 68/70 around the verified 69/71. EU 2 MHz (67)
+# is left out: the supplicant rejects it (see HALOW_CHANNEL_PLANS).
 # They have not been confirmed against the standard text or on hardware, so
 # apply_halow_channel() restarts the supplicant and rolls the config back if
 # it will not come up on a class it has not used before.
 HALOW_OP_CLASS = {
-    ('EU', '1MHz'): 66, ('EU', '2MHz'): 67,
+    ('EU', '1MHz'): 66,
     ('US', '1MHz'): 68, ('US', '2MHz'): 69,
     ('US', '4MHz'): 70, ('US', '8MHz'): 71,
 }
 
-# The Morse driver/BCF fixes TX power per bandwidth; these are the caps.
-# Measured on mesh-f86f (2026-04-22).  8 MHz has never been measured, so it is
-# deliberately absent: callers fall back to reading the interface's own cap
-# rather than acting on a number nobody checked.
-HALOW_BW_TXPOWER_CAP_DBM = {'1MHz': '24', '2MHz': '24', '4MHz': '22'}
 
 HALOW_WPA_CONF = '/etc/wpa_supplicant/wpa_supplicant-wlan2-s1g.conf'
 HALOW_OVERRIDE_FILE = '/var/run/halow-channel-override'
@@ -378,19 +377,9 @@ def txpower_choices_from_cap(cap_dbm):
     return [str(v) for v in range(cap, 0, -1)]
 
 def txpower_options_for_iface(iface, cap_dbm, current_dbm=''):
-    if iface == 'wlan2':
-        fixed = _fmt_dbm(cap_dbm or current_dbm)
-        return [fixed] if fixed else []
     return txpower_choices_from_cap(cap_dbm)
 
 def txpower_request_allowed(iface, requested, cap_dbm, options=None):
-    if iface == 'wlan2':
-        opts = options if options is not None else txpower_options_for_iface(iface, cap_dbm)
-        try:
-            req = float(requested)
-            return any(abs(req - float(opt)) < 0.05 for opt in opts)
-        except Exception:
-            return False
     try:
         return not cap_dbm or float(requested) <= float(cap_dbm)
     except Exception:
@@ -398,33 +387,17 @@ def txpower_request_allowed(iface, requested, cap_dbm, options=None):
 
 def unsupported_txpower_response(iface, requested, cap_dbm, options=None):
     opts = options if options is not None else txpower_options_for_iface(iface, cap_dbm)
-    if iface == 'wlan2':
-        return {
-            'ok': False,
-            'error': (
-                f'Unsupported txpower {requested} dBm for {iface}; '
-                f'HaLow txpower is fixed by the Morse driver/BCF for the selected bandwidth'
-            ),
-            'options': opts,
-        }
     return {
         'ok': False,
         'error': f'Unsupported txpower {requested} dBm for {iface} (max {cap_dbm} dBm)',
         'options': opts,
     }
 
-def get_halow_bw_txpower_cap(bw):
-    return HALOW_BW_TXPOWER_CAP_DBM.get(_format_halow_bw(bw), '')
-
 def get_iface_txpower_cap(iface):
     try:
         r = subprocess.run(['iw', 'dev', iface, 'info'], capture_output=True, text=True, timeout=5)
         if r.returncode != 0:
             return ''
-        if iface == 'wlan2':
-            bw_cap = get_halow_bw_txpower_cap(get_halow_driver_info(iface).get('halow_bw', ''))
-            if bw_cap:
-                return bw_cap
         phy = ''
         current = ''
         m = re.search(r'txpower ([\d.]+) dBm', r.stdout)
@@ -443,12 +416,30 @@ def get_iface_txpower_cap(iface):
         options = parse_phy_txpower_options(r.stdout).get(phy, [])
         if not options:
             return current
-        cap = max(options, key=lambda v: float(v))
-        if iface == 'wlan2' and current:
-            return _fmt_dbm(min(float(cap), float(current)))
-        return _fmt_dbm(cap)
+        return _fmt_dbm(max(options, key=lambda v: float(v)))
     except Exception:
         return ''
+
+HALOW_POWER_FIXED = ('HaLow transmit power is set when the radio starts and cannot be '
+                     'changed live; changing it needs a reboot')
+
+
+def is_halow_iface(iface):
+    """A HaLow radio by role or by driver. Its power cannot change live: the
+    Morse driver applies power only when it sets a channel, and reloading the
+    driver can wedge the USB card."""
+    roles = Path(os.environ.get('MANET_IFACE_STATE_DIR', '/var/lib'))
+    try:
+        if iface in (roles / 'halow_if').read_text().split():
+            return True
+    except OSError:
+        pass
+    sysnet = Path(os.environ.get('MANET_SYS_NET', '/sys/class/net'))
+    try:
+        return (sysnet / iface / 'device/driver').resolve(strict=True).name.startswith('morse')
+    except OSError:
+        return False
+
 
 def read_iface_txpower_dbm(iface):
     try:
@@ -462,6 +453,13 @@ def read_iface_txpower_dbm(iface):
     return ''
 
 def set_iface_txpower_verified(iface, dbm, retries=6, delay=0.25):
+    """Request a power and return (requested, reported).
+
+    MANET does not cap the radios. The driver or the card itself may report
+    less than was asked for; that is accepted and returned. A radio that
+    reports no power, or more than was requested (a reduction that did not
+    take), is an error.
+    """
     requested = _fmt_dbm(dbm)
     subprocess.run(
         ['iw', 'dev', iface, 'set', 'txpower', 'fixed', str(int(float(requested) * 100))],
@@ -472,11 +470,15 @@ def set_iface_txpower_verified(iface, dbm, retries=6, delay=0.25):
         time.sleep(delay)
         actual = read_iface_txpower_dbm(iface)
         if actual and abs(float(actual) - float(requested)) < 0.05:
-            return requested, actual
-    raise RuntimeError(
-        f'TX power command accepted but {iface} is still '
-        f'{actual or "unknown"} dBm, expected {requested} dBm'
-    )
+            break
+    if not actual:
+        raise RuntimeError(f'TX power command accepted but {iface} reports no power')
+    if float(actual) > float(requested) + 0.05:
+        # A lower report is the card limiting a high request. A higher one
+        # means a requested reduction did not take.
+        raise RuntimeError(f'TX power on {iface} is still {actual} dBm, '
+                           f'above the requested {requested} dBm')
+    return requested, actual
 
 
 
@@ -488,6 +490,8 @@ def set_iface_txpower_verified(iface, dbm, retries=6, delay=0.25):
 def apply_txpower(iface, dbm):
     if not iface or dbm is None:
         raise ValueError('Missing iface or dbm')
+    if is_halow_iface(iface):
+        return {'ok': False, 'error': HALOW_POWER_FIXED}
     requested = _fmt_dbm(dbm)
     cap = get_iface_txpower_cap(iface)
     options = txpower_options_for_iface(iface, cap, read_iface_txpower_dbm(iface))
@@ -529,11 +533,13 @@ def _s1g_supplicant_healthy(settle=6):
     return active and counter() == before
 
 
-def apply_halow_channel(channel, bw='1MHz', dbm=None):
+def apply_halow_channel(channel, bw='2MHz', dbm=None):
+    if dbm is not None:
+        return {'ok': False, 'error': HALOW_POWER_FIXED}
     if not channel:
         raise ValueError('Missing channel')
     region = halow_region()
-    bw = _format_halow_bw(bw) or '1MHz'
+    bw = _format_halow_bw(bw) or '2MHz'
     plan = halow_plan(region)
     if bw not in plan:
         raise ValueError(
@@ -549,13 +555,6 @@ def apply_halow_channel(channel, bw='1MHz', dbm=None):
         raise ValueError(f'No S1G operating class known for {region} {bw}')
 
     bw_mhz = int(bw[:-3])
-    requested = actual = ''
-    if dbm is not None:
-        cap = get_halow_bw_txpower_cap(bw) or get_iface_txpower_cap('wlan2')
-        requested = _fmt_dbm(dbm)
-        options = txpower_options_for_iface('wlan2', cap, read_iface_txpower_dbm('wlan2'))
-        if cap and not txpower_request_allowed('wlan2', requested, cap, options):
-            return unsupported_txpower_response('wlan2', requested, cap, options)
 
     # s1g_prim_chwidth: 0 = 1 MHz primary, 1 = 2 MHz primary. Everything wider
     # than 1 MHz keeps a 2 MHz primary, which is what both radio-setup
@@ -610,11 +609,9 @@ def apply_halow_channel(channel, bw='1MHz', dbm=None):
                 f'{region} {bw} (channel {s1g_channel}, op_class {op_class}) '
                 f'was refused by wpa_supplicant_s1g - config restored')}
 
-    if dbm is not None:
-        requested, actual = set_iface_txpower_verified('wlan2', dbm)
     return {'ok': True, 'channel': s1g_channel, 'freq_khz': freq_khz, 'bw': bw,
             'region': region, 'op_class': op_class,
-            'dbm': requested, 'actual_dbm': actual}
+            'actual_dbm': read_iface_txpower_dbm('wlan2')}
 
 
 def acs_enabled():

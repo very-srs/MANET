@@ -53,7 +53,8 @@ from manet_recovery_status import recovery_status, RECOVERY_JS
 from manet_peer_radios import peer_radio_interfaces
 from manet_registry import node_state
 from manet_admin import AdminTransport, new_version
-from manet_radio import (halow_bandwidth_for_channel, halow_channel_for_frequency,
+from manet_radio import (HALOW_POWER_FIXED, is_halow_iface,
+                        halow_bandwidth_for_channel, halow_channel_for_frequency,
                         halow_channel_options, validate_wifi_channel, acs_enabled)
 
 MESH_CONF_FILE  = '/etc/mesh.conf'
@@ -96,9 +97,6 @@ USB_WIFI_UPLINK_SCRIPT = '/usr/local/bin/usb-wifi-uplink.sh'
 
 # The S1G channel plan is region-dependent and lives in manet_radio, so the
 # UI, the Alfred applier and mesh-status all offer the same channels.
-# Empirical HaLow TX-power ceilings verified on mesh-f86f (2026-04-22)
-# by applying channel/BW changes on the live node and reading back /api/local.
-HALOW_BW_TXPOWER_CAP_DBM = {'1MHz': '24', '2MHz': '24', '4MHz': '22'}
 
 # Active measurement state
 _measure_lock   = threading.Lock()
@@ -604,24 +602,13 @@ def txpower_choices_from_cap(cap_dbm):
 
 
 def txpower_options_for_iface(iface, cap_dbm, current_dbm=''):
-    if iface == 'wlan2':
-        fixed = _fmt_dbm(cap_dbm or current_dbm)
-        return [fixed] if fixed else []
     return txpower_choices_from_cap(cap_dbm)
-
-
-def get_halow_bw_txpower_cap(bw):
-    return HALOW_BW_TXPOWER_CAP_DBM.get(_format_halow_bw(bw), '')
 
 def get_iface_txpower_cap(iface):
     try:
         r = subprocess.run(['iw', 'dev', iface, 'info'], capture_output=True, text=True, timeout=5)
         if r.returncode != 0:
             return ''
-        if iface == 'wlan2':
-            bw_cap = get_halow_bw_txpower_cap(get_halow_driver_info(iface).get('halow_bw', ''))
-            if bw_cap:
-                return bw_cap
         phy = ''
         current = ''
         m = re.search(r'txpower ([\d.]+) dBm', r.stdout)
@@ -640,10 +627,7 @@ def get_iface_txpower_cap(iface):
         options = parse_phy_txpower_options(r.stdout).get(phy, [])
         if not options:
             return current
-        cap = max(options, key=lambda v: float(v))
-        if iface == 'wlan2' and current:
-            return _fmt_dbm(min(float(cap), float(current)))
-        return _fmt_dbm(cap)
+        return _fmt_dbm(max(options, key=lambda v: float(v)))
     except Exception:
         return ''
 
@@ -1704,14 +1688,6 @@ function normalizeDbm(value) {
   return Number.isInteger(num) ? String(num) : String(num.toFixed(1)).replace(/[.]0$/, '');
 }
 
-const HALOW_BW_TXPOWER_CAPS = { '1MHz': '24', '2MHz': '24', '4MHz': '22' };
-
-function txPowerOptionsForCap(cap) {
-  const num = parseFloat(cap);
-  if (!Number.isFinite(num) || num < 1) return [];
-  return [normalizeDbm(num)];
-}
-
 function txPowerOptions(info) {
   const opts = Array.isArray(info?.txpower_options_dbm) ? info.txpower_options_dbm.map(normalizeDbm).filter(Boolean) : [];
   const cur = normalizeDbm(info?.txpower_dbm);
@@ -1732,34 +1708,22 @@ function renderTxPowerSelect(id, info) {
     `</select>`;
 }
 
-function updateHalowTxpowerOptions(preferredValue = '') {
-  const bwEl = document.getElementById('halow-bw');
-  let select = document.getElementById('txpwr-all-wlan2');
-  if (!bwEl || !select) return;
+// HaLow power is set by the Morse driver when the radio starts and cannot be
+// changed live (reloading the driver can wedge the USB card), so it is shown,
+// not offered as a control. The value is what the firmware/driver reports.
+function isHalowIface(iface, info) {
+  return iface === 'wlan2' || !!(info && info.halow_bw);
+}
 
-  const bw = bwEl.value || '1MHz';
-  const cap = normalizeDbm(HALOW_BW_TXPOWER_CAPS[bw]);
-  const opts = txPowerOptionsForCap(cap);
-  if (!opts.length) {
-    // No measured cap for this width (8 MHz has never been measured here).
-    // Offer what the radio itself reports rather than greying the control out.
-    select.outerHTML = renderTxPowerSelect('txpwr-all-wlan2', getNodeInfo('all', 'wlan2'));
-    return;
-  }
+function renderHalowPower(info) {
+  const cur = normalizeDbm(info?.txpower_dbm);
+  return `<strong>${cur ? cur + ' dBm' : '-'}</strong> ` +
+    `<span style="color:var(--muted)">reported; set when the radio starts, a change needs a reboot</span>`;
+}
 
-  const prevVal = normalizeDbm(preferredValue || select.value);
-  const prevCap = normalizeDbm(select.dataset.cap);
-  let nextVal = opts[0];
-
-  if (prevVal && opts.includes(prevVal)) {
-    nextVal = prevVal;
-  } else if (prevVal && prevCap && prevVal === prevCap) {
-    nextVal = cap;
-  }
-
-  select.outerHTML = `<select id="txpwr-all-wlan2" data-cap="${cap}">` +
-    opts.map(v => `<option value="${v}"${v === nextVal ? ' selected' : ''}>${v} dBm</option>`).join('') +
-    `</select>`;
+function updateHalowTxpowerOptions() {
+  const el = document.getElementById('halow-txpower');
+  if (el) el.innerHTML = renderHalowPower(getNodeInfo('all', 'wlan2'));
 }
 
 function getNodeInfo(nodeIp, iface) {
@@ -2005,8 +1969,8 @@ function buildIfaceControl() {
         </div>
         <div class="txpwr-row">
           TX POWER
-          ${renderTxPowerSelect(`txpwr-${node.id}-${iface}`, info)}
-          <button class="btn" style="padding:4px 10px;font-size:10px" onclick="setTxPower('${node.ip}','${node.id}','${iface}')">SET</button>
+          ${isHalowIface(iface, info) ? renderHalowPower(info) : `${renderTxPowerSelect(`txpwr-${node.id}-${iface}`, info)}
+          <button class="btn" style="padding:4px 10px;font-size:10px" onclick="setTxPower('${node.ip}','${node.id}','${iface}')">SET</button>`}
         </div>
       </div>`;
     }
@@ -2154,27 +2118,26 @@ function buildHalowConfig() {
   syncSelectValue('halow-ch', halowInfo.channel);
   syncSelectValue('ch-2g', getNodeInfo('all', 'wlan0').channel);
   syncSelectValue('ch-5g', getNodeInfo('all', 'wlan1').channel);
-  for (const iface of ['wlan0', 'wlan1', 'wlan2']) {
+  for (const iface of ['wlan0', 'wlan1']) {
     const info = getNodeInfo('all', iface);
     const select = document.getElementById(`txpwr-all-${iface}`);
     if (select) {
       select.outerHTML = renderTxPowerSelect(`txpwr-all-${iface}`, info);
     }
   }
-  updateHalowTxpowerOptions(halowInfo.txpower_dbm);
+  updateHalowTxpowerOptions();
 }
 
 async function applyHalow() {
   const ch = document.getElementById('halow-ch').value;
   const bw = document.getElementById('halow-bw').value;
-  const dbm = document.getElementById('txpwr-all-wlan2').value;
   setButtonBusy('btn-apply-halow', true, 'APPLYING...', 'APPLY TO ALL NODES');
-  showOverlay(`Applying HaLow ch${ch} / ${bw} / ${dbm} dBm: verifying all nodes...`, 'info');
+  showOverlay(`Applying HaLow ch${ch} / ${bw}: verifying all nodes...`, 'info');
   try {
     const r = await manageFetch(U('/api/halow/channel'), {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({channel: parseInt(ch), bw, dbm: parseFloat(dbm)})
+      body: JSON.stringify({channel: parseInt(ch), bw})
     });
     const d = await r.json();
     if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
@@ -2185,7 +2148,7 @@ async function applyHalow() {
       showMsg(msg, 'err');
       return;
     }
-    let msg = `HaLow ch${ch} / ${bw} / ${dbm} dBm applied to: ${d.applied?.join(', ')}`;
+    let msg = `HaLow ch${ch} / ${bw} applied to: ${d.applied?.join(', ')}`;
     if (d.unreachable?.length) msg += ` · WARNING: not in mesh: ${d.unreachable.join(', ')}`;
     if (d.warning) msg += ` - WARNING: ${d.warning}`;
     showMsg(msg, (d.warning || d.unreachable?.length) ? 'info' : 'ok');
@@ -3270,7 +3233,7 @@ CONFIG_TAB_HTML = r"""
           <input type="text" id="f-ipv4-network">
         </div>
         <div class="cfg-row">
-          <label>Regulatory Domain<span class="hint">2-letter country code for RF</span></label>
+          <label>Regulatory Domain<span class="hint">2-letter country code for RF. Takes effect when each radio reboots; switching between US and Europe also moves HaLow to that region's default channel</span></label>
           <input type="text" id="f-regulatory-domain" maxlength="2" style="width:48px;flex:none;">
         </div>
         <div class="cfg-row">
@@ -3758,7 +3721,7 @@ def render_dashboard():
       </div>
       <div class="row">
         <span class="row-label">TX Power</span>
-        <select id="txpwr-all-wlan2"><option value="">Loading...</option></select>
+        <span id="halow-txpower">Loading...</span>
       </div>
       <div class="row">
         <span class="row-label"></span>
@@ -4098,6 +4061,9 @@ class ManageRoutes:
         elif path == '/api/txpower':
             try:
                 req = json.loads(body)
+                if is_halow_iface(req.get('iface', '')):
+                    self.send_json({'ok': False, 'error': HALOW_POWER_FIXED})
+                    return
                 self.send_json(coordinate_radio_change(
                     {'txpower': {req.get('iface', ''): req.get('dbm')}},
                     req.get('node_ip', 'all')))
@@ -4114,10 +4080,12 @@ class ManageRoutes:
                 if not int(req.get('channel', 0)):
                     self.send_json({'ok': False, 'error': 'Missing channel'})
                     return
+                if req.get('dbm') is not None:
+                    self.send_json({'ok': False, 'error': HALOW_POWER_FIXED})
+                    return
                 self.send_json(coordinate_radio_change({'halow_channel': {
                     'channel': int(req['channel']),
-                    'bw': req.get('bw', '1MHz'),
-                    'dbm': req.get('dbm'),
+                    'bw': req.get('bw', '2MHz'),
                 }}))
             except Exception as e:
                 self.send_json({'ok': False, 'error': str(e)})
