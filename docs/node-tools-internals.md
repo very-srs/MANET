@@ -1403,6 +1403,51 @@ allocation, excluding service VIPs and the EUD alias; a changed source triggers
 route replacement. An existing non-`br0` default route is preserved even before
 the uplink dispatcher writes its gateway marker.
 
+### Gateway choice and uplink speed
+
+batman-adv picks a gateway itself (the `*` in `batctl gwl`), but that pick only
+steers its DHCP handling. Linux needs a default route, which is why this
+script exists. It used to route to batman's pick, which switches as
+soon as another gateway scores 5 Mbit/s more (`gw_sel_class` 50, BATMAN_V's
+absolute threshold), on a single reading, with no time component. On a 6
+Mbit/s HaLow path that margin is huge; on a 200 Mbit/s Wi-Fi path it is noise.
+And every gateway announced batman's default 10/2 Mbit/s, so the score could
+not see uplink speed, and paths faster than 10 Mbit/s all tied.
+
+The script now reads every gateway from `batctl gwl -H -n` and decides itself.
+The score matches batman's idea, the bottleneck: the lower of the path
+throughput and the announced download bandwidth. A switch breaks every open
+internet connection, because the new gateway NATs from a different public
+address, so a voluntary switch needs a noticeable gain: at least 1.5 times
+the current score and 2 Mbit/s more (relative and absolute, so it means the
+same at HaLow and Wi-Fi rates), sustained for 60 seconds, and not within 300
+seconds of the last switch. The first choice counts as a switch, so a node that
+picked early from a partial list waits out the hold before improving. A gateway
+missing from the list, or failing two consecutive one-second pings (about 20
+seconds at the steady poll), is replaced at once, best remaining first. After
+a restart the gateway the existing `br0` route points at is current, so
+restarting the service does not move the node.
+
+Gateways announce a measured download speed. `manet-uplink-speed.sh` downloads
+5 MB over HTTPS (Cloudflare's speed endpoint, or a 5 MB range of an OVH test
+file) and divides by the time after the first byte, excluding DNS, TCP and TLS
+setup. 5 MB keeps it cheap but under-reads fast links, since TCP is still
+ramping. That matters little because the mesh path, not the uplink, is the
+bottleneck above roughly 100 Mbit/s. A result is reused while the interface
+keeps the same address and router, and dropped on demotion, so a replug or a
+new network measures again. The download doubles as the internet check for
+Ethernet uplinks: the earlier ICMP or 204 probe passes through a captive portal
+that allows them, but a portal cannot complete HTTPS to the test host. A
+failure is retried at most once a minute (exit 3 until then, so the dispatcher
+does not log every pass). In practice the next attempt comes from the node
+manager's status publish, every 3 minutes. Only Ethernet is tested: a phone
+tether or cellular modem (by driver: `rndis_host`, `ipheth`, `cdc_ether`,
+`cdc_ncm`, `qmi_wwan` and similar) and Wi-Fi uplinks pay for the data, so they
+keep the probe and announce 10/2. `batctl gw_mode server` takes whole kbit
+values and keeps the previous bandwidth when given none, so every announce
+passes an explicit `down/up`. Upload is not measured; it is announced as a
+fifth of download, batman's usual ratio, and nothing selects on it.
+
 Four properties of the claimed-chunk file matter:
 
 - Only nodes the registry marks **ACTIVE** appear. One unheard from for 300 s

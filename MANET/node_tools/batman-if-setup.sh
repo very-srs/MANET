@@ -199,7 +199,9 @@ start() {
 
     # Set gateway mode based on state
     if [ -f /var/run/mesh-gateway.state ]; then
-        batctl gw_mode server
+        # Measured bandwidth for an Ethernet uplink, otherwise the default.
+        /usr/local/bin/manet-uplink-speed.sh announce "$(cat /var/run/upstream_iface 2>/dev/null)" ||
+            batctl gw_mode server
         echo "Set to gateway server mode"
     else
         batctl gw_mode client

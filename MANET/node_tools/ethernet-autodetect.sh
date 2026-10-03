@@ -112,6 +112,7 @@ LOCK_FILE="/var/run/ethernet-autodetect.lock"
 # Written when DHCP works but the internet test fails, so repeated dispatcher
 # events on the same iface+IP don't rerun the cleanup/reconfigure cycle.
 NO_INET_STATE="/var/run/eth-no-internet.state"
+UPLINK_SPEED="${MANET_UPLINK_SPEED:-/usr/local/bin/manet-uplink-speed.sh}"
 NO_INET_RECHECK_SECS=600
 
 # Which physical link a decision was made on: "<iface> <mode> <carrier_changes>".
@@ -236,6 +237,7 @@ run_no_carrier_cleanup() {
         ip addr flush dev "$ETH_IFACE" 2>/dev/null || true
         ip link set "$ETH_IFACE" nomaster 2>/dev/null || true
         batctl gw_mode client 2>/dev/null || true
+        "$UPLINK_SPEED" forget 2>/dev/null || true
         nft flush chain ip nat postrouting 2>/dev/null || true
         systemctl restart gateway-route-manager.service 2>/dev/null || true
         systemctl restart dnsmasq.service 2>/dev/null || true
@@ -399,7 +401,16 @@ detect_hotplug_mode() {
 
     if [ -n "$ip" ]; then
         log "IP acquired on $ETH_IFACE: $ip"
+        # The speed test is also the internet check that matters: a captive
+        # portal or a filtered network cannot complete it, and such a node
+        # must not announce itself as a gateway. Its result is what the
+        # gateway announces. Not an Ethernet port (exit 2): not tested.
+        speed_rc=1
         if internet_probe_confirmed "$ETH_IFACE"; then
+            speed_rc=0
+            "$UPLINK_SPEED" measure "$ETH_IFACE" >/dev/null || speed_rc=$?
+        fi
+        if [ "$speed_rc" -eq 0 ] || [ "$speed_rc" -eq 2 ]; then
             DETECTED_MODE="gateway"
             return 0
         fi
@@ -578,8 +589,8 @@ if [ "$DETECTED_MODE" == "gateway" ]; then
 
     # Enable BATMAN gateway mode
     if command -v batctl &>/dev/null; then
-        batctl gw_mode server 2>/dev/null || log "BATMAN not ready yet"
-        log "Enabled BATMAN gateway mode"
+        "$UPLINK_SPEED" announce "$ETH_IFACE" >/dev/null 2>&1 || log "BATMAN not ready yet"
+        log "Enabled BATMAN gateway mode ($(batctl gw 2>/dev/null))"
     fi
 
     # Update router advertisements

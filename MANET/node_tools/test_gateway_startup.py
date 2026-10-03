@@ -43,10 +43,11 @@ def event(kind, **extra):
     with (root / 'events').open('a') as out:
         out.write(json.dumps(dict(kind=kind, now=now, **extra)) + '\n')
 if name == 'batctl':
-    assert args == ['gwl'], args
+    assert args == ['gwl', '-H', '-n'], args
     if case['gateway']:
-        print('   02:00:00:00:09:10 100.0 (wrong unselected gateway)')
-        print(' * 02:00:00:00:01:10 100.0 (selected gateway)')
+        # batman's own "*" choice is ignored; the better score wins.
+        print('* 02:00:00:00:09:10 (       20.0) 02:00:00:00:09:10 [     wlan0]: 10.0/2.0 MBit')
+        print('  02:00:00:00:01:10 (       95.4) 02:00:00:00:01:10 [     wlan0]: 100.0/20.0 MBit')
 elif name == 'ip':
     if args == ['route', 'show', 'default']:
         print((root / 'route').read_text())

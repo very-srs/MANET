@@ -710,13 +710,32 @@ known block size blocks new allocations until it publishes one.
 
 **gateway-route-manager.sh**
 
-Watches `batctl` gateway selection and points the system default route at the
-selected gateway's mesh IP. Removes the route when no gateway is available.
-While a mesh route is pending, sleeps 1 second between checks during its first
+Chooses this node's internet gateway from every gateway in `batctl gwl` and
+points the system default route at its mesh IP. batman-adv's own choice is
+ignored: it never reaches IPv4 routing. Each gateway scores the lower of the
+mesh path throughput to it and the download bandwidth it announces. The best
+score is taken when the node has no gateway, or when its gateway stops
+announcing or misses two reachability checks (about 20 seconds). Otherwise the
+node switches only for a gateway scoring at least 1.5 times as much and 2 Mbit/s
+more, sustained for 60 seconds, and never within 5 minutes of its last switch,
+because a switch breaks every open internet connection. A restart keeps the
+gateway the existing route uses. Removes the route when no gateway is
+available. While a mesh route is pending, sleeps 1 second between checks during its first
 90 seconds, measured with monotonic uptime. Once ready, or after that startup
 period, sleeps 10 seconds. Failed reachability checks and route installs retry.
 Uses the node's assigned primary address as the route source, excluding service
 VIPs and the EUD gateway alias, and preserves an existing local uplink route.
+
+**manet-uplink-speed.sh**
+
+Measures an Ethernet uplink's internet download speed and announces it as the
+gateway's bandwidth (`batctl gw_mode server`). The test downloads at most 5 MB
+over HTTPS from Cloudflare's speed endpoint, or OVH as a fallback, once per
+uplink address and router. It is also the gateway's internet check: an
+Ethernet uplink that cannot complete it (a captive portal or filtered network)
+is not promoted, and the test is retried at most once a minute. Phone tethers,
+cellular modems and Wi-Fi uplinks are metered or wireless; they are never
+tested and announce batman's default 10/2 Mbit/s.
 
 **manet-uplink-dispatch.sh**
 
@@ -750,10 +769,9 @@ AP-only hardware stays out of the mesh; disabled mesh radios remain down.
 
 AP preparation runs through hostapd, and its post-start helper applies the
 5 dBm cap only to the active AP role. The old independently enabled AP boot
-units and the conventional mesh lab-power unit are retired. Conventional mesh
-radios use automatic power; mesh return clears the AP cap. HaLow's separate
-role-aware power unit also requests automatic power and logs the readback,
-leaving the limit to its driver and firmware. The AP setter verifies the cap
+units and the conventional mesh lab-power unit are retired. Mesh radios request
+30 dBm through `manet-mesh-power.sh`, leaving the limit to the driver and
+firmware; mesh return clears the AP cap. The AP setter verifies the cap
 and refuses a PHY shared with another active interface. Healthy mesh reconciliation preserves operator
 power changes; manual power settings currently do not persist across reboot.
 
