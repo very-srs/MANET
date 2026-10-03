@@ -712,9 +712,11 @@ known block size blocks new allocations until it publishes one.
 
 Chooses this node's internet gateway from every gateway in `batctl gwl` and
 points the system default route at its mesh IP. batman-adv's own choice is
-ignored: it never reaches IPv4 routing. Each gateway scores the lower of the
-mesh path throughput to it and the download bandwidth it announces. The best
-score is taken when the node has no gateway, or when its gateway stops
+ignored: it never reaches IPv4 routing. The node uses the gateway that gives it
+the fastest internet. Traffic crosses the mesh path to a gateway and then that
+gateway's uplink, so each gateway's score is the slower of the two: the mesh
+path throughput and the download bandwidth it announces. The highest score is
+taken when the node has no gateway, or when its gateway stops
 announcing or misses two reachability checks (about 20 seconds). Otherwise the
 node switches only for a gateway scoring at least 1.5 times as much and 2 Mbit/s
 more, sustained for 60 seconds, and never within 5 minutes of its last switch,
