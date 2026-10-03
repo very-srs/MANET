@@ -18,8 +18,10 @@ A coordinator proposes one channel plan for the connected mesh and waits up to
 60 seconds for a majority to acknowledge it, with activation 30 seconds later.
 Missing participants can recover the agreed plan afterward. Wi-Fi groups linked
 through HaLow are part of that same decision: they do not choose separate Wi-Fi
-channels. Any node with Internet access will automatically become a gateway for the mesh.  
-Multiple gateways can be active, with nodes selecting the one to which they have the best link.
+channels. Any node with Internet access will automatically become a gateway for the mesh.
+Multiple gateways can be active. Each node uses the gateway that gives it the
+fastest internet, counting both its mesh link to that gateway and the gateway's
+own internet speed, and changes gateway only when another is clearly faster.
 
 HaLow carries recovery information while keeping the Wi-Fi radios on their data
 channels. Nodes with working HaLow skip Wi-Fi tourguide excursions. Where HaLow
