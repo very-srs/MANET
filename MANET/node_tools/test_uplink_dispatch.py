@@ -12,6 +12,18 @@ import unittest
 
 TOOLS = Path(__file__).resolve().parent
 
+SPEED_STUB = r'''#!/bin/bash
+# measure: exit with $T/speed-rc/IFACE if present; metered names exit 2.
+T="$REVIEW_ROOT"
+echo "uplink-speed $*" >> "$T/calls"
+if [ "$1" = measure ]; then
+  [ -f "$T/speed-rc/$2" ] && exit "$(cat "$T/speed-rc/$2")"
+  case "$2" in usb*) exit 2 ;; esac
+  echo 50.0
+fi
+exit 0
+'''
+
 STUB = r'''#!/bin/bash
 T="$REVIEW_ROOT"
 echo "$(basename "$0") $*" >> "$T/calls"
@@ -50,6 +62,10 @@ class DispatchHarness(unittest.TestCase):
             path = self.root / 'bin' / tool
             path.write_text(STUB)
             path.chmod(0o755)
+        speed = self.root / 'bin' / 'uplink-speed'
+        speed.write_text(SPEED_STUB)
+        speed.chmod(0o755)
+        (self.root / 'speed-rc').mkdir()
         helper = self.root / 'bin' / 'manet_ap_mesh.py'
         helper.write_text('import os, sys\nroot = os.environ["REVIEW_ROOT"]\n'
                           'open(root + "/calls", "a").write("ap-mesh-helper " + " ".join(sys.argv[1:]) + "\\n")\n'
@@ -103,7 +119,8 @@ class DispatchHarness(unittest.TestCase):
         env = dict(os.environ, REVIEW_ROOT=root,
                    PATH=os.pathsep.join((str(self.root / 'bin'), os.environ['PATH'])),
                    MANET_ETH_DETECT_LOCK=str(self.eth_lock),
-                   MANET_AP_MESH_HELPER=str(self.root / 'bin' / 'manet_ap_mesh.py'))
+                   MANET_AP_MESH_HELPER=str(self.root / 'bin' / 'manet_ap_mesh.py'),
+                   MANET_UPLINK_SPEED=str(self.root / 'bin' / 'uplink-speed'))
         result = subprocess.run(['bash', str(script), event, iface], env=env,
                                 capture_output=True, text=True, timeout=60)
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -230,6 +247,51 @@ class WiredEudTests(DispatchHarness):
         (self.root / 'bin' / 'manet_ap_mesh.py').unlink()
         calls = self.dispatch()
         self.assertFalse([c for c in calls if 'hostapd' in c and 'start' in c])
+
+
+
+class SpeedGateTests(DispatchHarness):
+    def uplink(self, name, usb=False):
+        self.iface(name, usb=usb)
+        (self.root / 'addr' / name).write_text('192.168.1.20')
+        (self.root / 'gw' / name).write_text('192.168.1.1')
+        (self.root / 'internet' / name).touch()
+
+    def test_ethernet_gateway_announces_its_measured_speed(self):
+        self.uplink('end0')
+        calls = self.dispatch()
+        self.assertIn('uplink-speed measure end0', calls)
+        self.assertIn('uplink-speed announce end0', calls)
+        self.assertNotIn('batctl gw_mode server', calls)
+        self.assertEqual((self.root / 'run' / 'upstream_iface').read_text().strip(), 'end0')
+
+    def test_ethernet_without_the_speed_test_is_not_a_gateway(self):
+        # Captive portal or filtered network: the probe passes, the test fails.
+        self.uplink('end0')
+        (self.root / 'speed-rc' / 'end0').write_text('1')
+        calls = self.dispatch()
+        self.assertFalse((self.root / 'run' / 'upstream_iface').exists())
+        self.assertNotIn('uplink-speed announce end0', calls)
+        self.assertIn('batctl gw_mode client', calls)
+        self.assertIn('uplink-speed forget', calls)
+
+    def test_a_standing_failure_is_not_logged_again(self):
+        self.uplink('end0')
+        journal = self.root / 'journal'
+        for rc, logged in (('1', True), ('3', False)):
+            with self.subTest(rc=rc):
+                journal.unlink(missing_ok=True)
+                (self.root / 'speed-rc' / 'end0').write_text(rc)
+                self.dispatch()
+                text = journal.read_text() if journal.exists() else ''
+                self.assertEqual('not the speed test' in text, logged)
+                self.assertFalse((self.root / 'run' / 'upstream_iface').exists())
+
+    def test_metered_uplink_is_promoted_untested(self):
+        self.uplink('usb0', usb=True)
+        calls = self.dispatch()
+        self.assertIn('uplink-speed announce usb0', calls)
+        self.assertEqual((self.root / 'run' / 'upstream_iface').read_text().strip(), 'usb0')
 
 
 if __name__ == '__main__':

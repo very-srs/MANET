@@ -108,6 +108,8 @@ if { [ "$EUD_MODE" == "auto" ] || [ "$EUD_MODE" == "wireless" ]; } && [ -f /var/
 fi
 
 batctl gw_mode client 2>/dev/null || true
+# The uplink is gone; a new one is measured again before it is announced.
+/usr/local/bin/manet-uplink-speed.sh forget 2>/dev/null || true
 nft flush chain ip nat postrouting 2>/dev/null || true
 /usr/local/bin/mesh-ip-manager.sh 2>/dev/null || true
 systemctl restart gateway-route-manager.service 2>/dev/null || true

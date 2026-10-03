@@ -9,6 +9,7 @@ UPSTREAM_IFACE_FILE=/var/run/upstream_iface
 LOCK_FILE=/run/manet-uplink-dispatch.lock
 ETH_DETECT_LOCK=${MANET_ETH_DETECT_LOCK:-/var/run/ethernet-autodetect.lock}
 AP_MESH_HELPER=${MANET_AP_MESH_HELPER:-/usr/local/bin/manet_ap_mesh.py}
+UPLINK_SPEED=${MANET_UPLINK_SPEED:-/usr/local/bin/manet-uplink-speed.sh}
 NETWORKD_DIR=/etc/systemd/network
 
 EVENT="${1:-${STATE:-reconcile}}"
@@ -308,8 +309,20 @@ find_working_uplink() {
         iface_default_gw "$iface" >/dev/null || true
 
         if internet_probe "$iface"; then
-            echo "$iface"
-            return 0
+            # An Ethernet uplink must also complete the speed test, which
+            # measures what this gateway will announce. A captive portal or a
+            # filtered network fails it, and then this is not a gateway yet.
+            # Other uplinks are metered and not tested (exit 2).
+            local speed_rc=0
+            "$UPLINK_SPEED" measure "$iface" >/dev/null || speed_rc=$?
+            if [ "$speed_rc" -eq 0 ] || [ "$speed_rc" -eq 2 ]; then
+                echo "$iface"
+                return 0
+            fi
+            # 3: a recent failure stands and was not retested; already logged.
+            [ "$speed_rc" -eq 3 ] ||
+                log "$iface passes the internet probe but not the speed test; not a gateway yet"
+            continue
         fi
 
         log "$iface has IPv4 ($ip) but no verified internet"
@@ -448,7 +461,8 @@ promote_gateway() {
         ip route replace default via "$gw" dev "$iface" src "$ip" metric 100 2>/dev/null || true
     fi
 
-    batctl gw_mode server 2>/dev/null || true
+    # Announce the measured bandwidth (Ethernet) or batman's default.
+    "$UPLINK_SPEED" announce "$iface" >/dev/null 2>&1 || true
 
     # Steady state: reconcile runs every node-manager cycle; if this exact
     # uplink is already promoted, skip the reconfiguration below (firewall
@@ -509,6 +523,7 @@ demote_gateway() {
 
     clear_firewall
     batctl gw_mode client 2>/dev/null || true
+    "$UPLINK_SPEED" forget 2>/dev/null || true
     rm -f "$LEGACY_GATEWAY_STATE" "$LEGACY_NTP_STATE" "$STATE_FILE" "$UPSTREAM_IFACE_FILE"
     # ethernet-autodetect's record of an active wired EUD is not ours to clear.
     if ! { grep -qx 'ETH_MODE=WIRED_EUD' "$LEGACY_ETH_STATE" 2>/dev/null && wired_eud_active; }; then

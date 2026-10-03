@@ -67,6 +67,7 @@ REQUIRED = MARKERS | {
     "etc/systemd/system/ap-txpower.service",
     "etc/systemd/system/manet-mesh-power.service",
     "usr/local/bin/manet-mesh-power.sh",
+    "usr/local/bin/manet-uplink-speed.sh",
     "usr/local/bin/manet-region.py",
     "usr/local/bin/mesh-service-election.py",
     "usr/local/bin/manet-common.sh",

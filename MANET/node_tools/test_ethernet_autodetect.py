@@ -31,6 +31,19 @@ exit 0
 '''
 
 
+SPEED_STUB = r'''#!/bin/bash
+# measure: exit with $T/speed-rc/IFACE if present; metered names exit 2.
+T="$REVIEW_ROOT"
+echo "uplink-speed $*" >> "$T/calls"
+if [ "$1" = measure ]; then
+  [ -f "$T/speed-rc/$2" ] && exit "$(cat "$T/speed-rc/$2")"
+  case "$2" in usb*) exit 2 ;; esac
+  echo 50.0
+fi
+exit 0
+'''
+
+
 class AutodetectHarness(unittest.TestCase):
     def setUp(self):
         scratch = tempfile.TemporaryDirectory()
@@ -50,6 +63,8 @@ class AutodetectHarness(unittest.TestCase):
         # Passive capture: replay canned frames (tcpdump -e format), if any.
         self.stub('tcpdump', '#!/bin/bash\necho "tcpdump $*" >> "$REVIEW_ROOT/calls"\n'
                   'cat "$REVIEW_ROOT/frames" 2>/dev/null\nexit 0\n')
+        self.stub('manet-uplink-speed.sh', SPEED_STUB, where='usr/local/bin')
+        (self.root / 'speed-rc').mkdir()
         self.stub('mesh-ip-manager.sh', '#!/bin/bash\necho "mesh-ip-manager.sh $*" >> "$REVIEW_ROOT/calls"\n',
                   where='usr/local/bin')
         # Invoked as `python3 manet_ap_mesh.py mesh`, so the stub is Python.
@@ -363,6 +378,30 @@ class CaptureBoundTests(AutodetectHarness):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual((self.root / 'child-lock').read_text().strip(), 'closed')
         self.assertEqual(list((self.root / 'var/run').glob('eth-detect-capture.*')), [])
+
+
+
+class SpeedGateTests(AutodetectHarness):
+    def leased_with_internet(self):
+        (self.root / 'addr').write_text('192.168.69.51')
+        (self.root / 'route').touch()
+        self.stub('ping', '#!/bin/bash\necho "ping $*" >> "$REVIEW_ROOT/calls"\nexit 0\n')
+
+    def test_internet_and_speed_test_make_a_gateway(self):
+        self.leased_with_internet()
+        _, calls, journal = self.run_detector()
+        self.assertIn('uplink-speed measure end0', calls)
+        self.assertIn('Configuring as gateway/uplink', journal)
+        self.assertIn('uplink-speed announce end0', calls)
+
+    def test_failed_speed_test_is_not_a_gateway(self):
+        self.leased_with_internet()
+        (self.root / 'speed-rc' / 'end0').write_text('1')
+        _, calls, journal = self.run_detector()
+        self.assertIn('uplink-speed measure end0', calls)
+        self.assertIn('internet test failed; leaving as mesh client', journal)
+        self.assertNotIn('Configuring as gateway/uplink', journal)
+        self.assertNotIn('uplink-speed announce end0', calls)
 
 
 if __name__ == '__main__':

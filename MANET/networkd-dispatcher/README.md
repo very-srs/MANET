@@ -40,6 +40,13 @@ Once DHCP has finished and a route exists, gateway and NAT state are
 reconciled. Carrier alone does not mean the interface can reach anything, which
 is why this is a separate step.
 
+An Ethernet uplink becomes a gateway only after it downloads a speed test of
+at most 5 MB over HTTPS, and the measured download speed is what it announces
+to the mesh. A captive portal or a network that blocks the test leaves the node
+a mesh client; it is rechecked when the node manager next publishes its
+status, at most 3 minutes later. Phone tethers, cellular modems and Wi-Fi
+uplinks are not tested and announce the default 10/2 Mbit/s.
+
 After reconciliation, an opted-in node queues `manet-auto-update.service`
 without waiting for it. This oneshot rechecks `auto_update` and the selected
 uplink's IPv4 default route before running the updater. It excludes mesh
