@@ -59,14 +59,18 @@ HALOW_MCS_SUMMARY="/usr/local/bin/halow-mcs-summary.py"
 
 # --- State Variables ---
 LAST_PUBLISHED_PAYLOAD=""
-LAST_PUBLISH_TIME=0
+# Local timers run on the boot clock (MONO, from uptime_now) so a wall-clock
+# step from a time sync cannot fire them early or stall them. NEVER is "not
+# yet": far enough back that the first check is always due.
+NEVER=-1000000
+LAST_PUBLISH_TIME=$NEVER
 
 # Identity has a slow keepalive; startup and allocation changes publish sooner.
 # Alfred purges any record it has not seen for ALFRED_DATA_TIMEOUT = 600 s, so
 # at 270 s a publish can fail once and the record still survives. This runs on
 # its own timer rather than inside a pipeline stage, so it keeps ticking in
 # both lobby and data state.
-LAST_IDENTITY_PUBLISH=0
+LAST_IDENTITY_PUBLISH=$NEVER
 LAST_IDENTITY_ALLOCATION=""
 LAST_ACK_PUBLISHED=""
 SYNCTHING_ID=""
@@ -91,19 +95,20 @@ log() {
 # Gateway state is owned by manet-uplink-dispatch.sh. Node manager only
 # asks it to reconcile periodically before publishing status to Alfred.
 GATEWAY_STATE_FILE="/var/run/mesh-gateway.state"
-LAST_GW_CHECK=0
+LAST_GW_CHECK=$NEVER
 GW_CHECK_INTERVAL=60
 
-detect_and_update_gateway_state() {
-    local NOW
-    NOW=$(date +%s)
 
-    local time_since_check=$(( NOW - LAST_GW_CHECK ))
+detect_and_update_gateway_state() {
+    local mono
+    mono=$(uptime_now) || return
+
+    local time_since_check=$(( mono - LAST_GW_CHECK ))
     if [ "$time_since_check" -lt "$GW_CHECK_INTERVAL" ] && [ -f "$GATEWAY_STATE_FILE" ]; then
         return
     fi
 
-    LAST_GW_CHECK=$NOW
+    LAST_GW_CHECK=$mono
     [ -x /usr/local/bin/manet-uplink-dispatch.sh ] && /usr/local/bin/manet-uplink-dispatch.sh reconcile >/dev/null 2>&1 || true
 }
 
@@ -529,12 +534,13 @@ log "Mesh roles: 2.4G=${WPA_IFACE_2_4:-unset}, 5G=${WPA_IFACE_5_0:-unset}"
 
 # === MAIN LOOP ===
 while true; do
-    NOW=$(date +%s)
+    NOW=$(date +%s)  # shared clock-aligned windows only
+    MONO=$(uptime_now) || { log "WARN: boot clock unreadable; skipping this pass"; sleep 15; continue; }
 
     if [ "$CLOCK_READY_SEEN" = false ] && acs_clock_ready; then
         CLOCK_READY_SEEN=true
         LAST_ACTION_WINDOW=()
-        LAST_PUBLISH_TIME=0; LAST_IDENTITY_PUBLISH=0; LAST_GW_CHECK=0
+        LAST_PUBLISH_TIME=$NEVER; LAST_IDENTITY_PUBLISH=$NEVER; LAST_GW_CHECK=$NEVER
         LAST_SCAN_COMPLETE_TIME=0; CACHED_SCAN_REPORT_JSON="{}"
         LOBBY_ENTERED_TIME=0; BOOTSTRAP_START_WINDOW=-1
         log "Initial time sync complete; restarting discovery and ACS scheduling."
@@ -567,7 +573,7 @@ while true; do
     # the next telemetry publish forward instead of waiting out the interval.
     CURRENT_ACK=$(cat /var/run/mesh_config_ack_version 2>/dev/null || echo "")
     if [ "$CURRENT_ACK" != "$LAST_ACK_PUBLISHED" ]; then
-        LAST_PUBLISH_TIME=0
+        LAST_PUBLISH_TIME=$NEVER
         LAST_ACK_PUBLISHED="$CURRENT_ACK"
     fi
 
@@ -579,7 +585,7 @@ while true; do
     [ -z "$MY_CHUNK" ] && IDENT_IPV4=""
     IDENTITY_ALLOCATION="${MY_CHUNK}:${IDENT_IPV4}"
     if [ -z "$MY_CHUNK" ] || [ "$IDENTITY_ALLOCATION" != "$LAST_IDENTITY_ALLOCATION" ] ||
-            [ $((NOW - LAST_IDENTITY_PUBLISH)) -ge $IDENTITY_PUBLISH_INTERVAL ]; then
+            [ $((MONO - LAST_IDENTITY_PUBLISH)) -ge $IDENTITY_PUBLISH_INTERVAL ]; then
         # br0's MAC must come first: encoder.py drops it, because Alfred
         # already stamps every record we publish with it.
         IDENT_MACS=("$MY_MAC")
@@ -606,7 +612,7 @@ while true; do
         IDENTITY_PAYLOAD=$("$ENCODER_PATH" identity "${IDENTITY_ARGS[@]}" 2>/dev/null)
         if [ -n "$IDENTITY_PAYLOAD" ]; then
             if echo -n "$IDENTITY_PAYLOAD" | alfred -s $ALFRED_IDENTITY_TYPE; then
-                LAST_IDENTITY_PUBLISH=$NOW
+                LAST_IDENTITY_PUBLISH=$MONO
                 LAST_IDENTITY_ALLOCATION="$IDENTITY_ALLOCATION"
             fi
         else
@@ -625,8 +631,8 @@ while true; do
         # returns true while radio-setup hasn't produced them yet).
         BOOTSTRAPPING=false
         if acs_configs_ready; then
-            [ "$LOBBY_ENTERED_TIME" -eq 0 ] && LOBBY_ENTERED_TIME=$NOW
-            if [ $((NOW - LOBBY_ENTERED_TIME)) -ge "$LOBBY_BOOTSTRAP_DWELL" ]; then
+            [ "$LOBBY_ENTERED_TIME" -eq 0 ] && LOBBY_ENTERED_TIME=$MONO
+            if [ $((MONO - LOBBY_ENTERED_TIME)) -ge "$LOBBY_BOOTSTRAP_DWELL" ]; then
                 # A solo searcher never elects itself onto data channels.
                 # The agreement daemon follows the synchronized rotation, or
                 # parks at fixed anchors before clock sync. Any BATMAN contact
@@ -651,7 +657,7 @@ while true; do
         if [ "$BOOTSTRAPPING" = true ]; then
             should_perform_action "PUBLISH" 180 15 && DO_LOBBY_PUBLISH=true
         else
-            time_since_publish=$((NOW - LAST_PUBLISH_TIME))
+            time_since_publish=$((MONO - LAST_PUBLISH_TIME))
             [ $time_since_publish -ge 180 ] && DO_LOBBY_PUBLISH=true
         fi
         # Cold nodes must advertise before allocation; do not wait for an ACS
@@ -713,9 +719,11 @@ while true; do
             # its timestamp, the last recorded position is no longer safe to publish.
             GPS_LAT=""; GPS_LON=""; GPS_ALT=""
             if [ -f "$GPS_STATUS_FILE" ]; then
-                read -r GPS_LAT GPS_LON GPS_ALT < <(jq -r --argjson max "$GPS_FIX_MAX_AGE" '
+                read -r GPS_LAT GPS_LON GPS_ALT < <(jq -r --argjson max "$GPS_FIX_MAX_AGE" --argjson up "$(uptime_now)" '
                     select(.has_fix and ((.timestamp // 0) | type) == "number"
-                           and now - (.timestamp // 0) <= $max
+                           and (if (.written_boot | type) == "number"
+                                then ($up - .written_boot) as $age | $age >= -5 and $age <= $max
+                                else now - (.timestamp // 0) <= $max end)
                            and ([.latitude, .longitude, .altitude] | all(type == "number")))
                     | "\(.latitude) \(.longitude) \(.altitude)"' "$GPS_STATUS_FILE" 2>/dev/null) || true
             fi
@@ -730,7 +738,7 @@ while true; do
             if [ -n "$CURRENT_PAYLOAD" ]; then
                 echo -n "$CURRENT_PAYLOAD" | alfred -s $ALFRED_DATA_TYPE
                 LAST_PUBLISHED_PAYLOAD="$CURRENT_PAYLOAD"
-                LAST_PUBLISH_TIME=$NOW
+                LAST_PUBLISH_TIME=$MONO
             fi
         fi
 
@@ -738,7 +746,7 @@ while true; do
         # pass. The helper retains its full 10/20-second observation window.
         [ -x "$IP_MANAGER" ] && "$IP_MANAGER"
         if [ -z "$MY_CHUNK" ] && [ -s /var/run/my_ipv4_chunk ]; then
-            LAST_PUBLISH_TIME=0
+            LAST_PUBLISH_TIME=$NEVER
             continue  # advertise the new claim before the steady-state sleep
         fi
 
@@ -861,9 +869,11 @@ while true; do
             # its timestamp, the last recorded position is no longer safe to publish.
             GPS_LAT=""; GPS_LON=""; GPS_ALT=""
             if [ -f "$GPS_STATUS_FILE" ]; then
-                read -r GPS_LAT GPS_LON GPS_ALT < <(jq -r --argjson max "$GPS_FIX_MAX_AGE" '
+                read -r GPS_LAT GPS_LON GPS_ALT < <(jq -r --argjson max "$GPS_FIX_MAX_AGE" --argjson up "$(uptime_now)" '
                     select(.has_fix and ((.timestamp // 0) | type) == "number"
-                           and now - (.timestamp // 0) <= $max
+                           and (if (.written_boot | type) == "number"
+                                then ($up - .written_boot) as $age | $age >= -5 and $age <= $max
+                                else now - (.timestamp // 0) <= $max end)
                            and ([.latitude, .longitude, .altitude] | all(type == "number")))
                     | "\(.latitude) \(.longitude) \(.altitude)"' "$GPS_STATUS_FILE" 2>/dev/null) || true
             fi
@@ -878,14 +888,14 @@ while true; do
             if [ -n "$CURRENT_PAYLOAD" ]; then
                 echo -n "$CURRENT_PAYLOAD" | alfred -s $ALFRED_DATA_TYPE
                 LAST_PUBLISHED_PAYLOAD="$CURRENT_PAYLOAD"
-                LAST_PUBLISH_TIME=$NOW
+                LAST_PUBLISH_TIME=$MONO
             fi
         fi
 
         # === STAGE 3: REGISTRY REFRESH AND IP MANAGEMENT (every pass) ===
         [ -x "$IP_MANAGER" ] && "$IP_MANAGER"
         if [ -z "$MY_CHUNK" ] && [ -s /var/run/my_ipv4_chunk ]; then
-            LAST_PUBLISH_TIME=0
+            LAST_PUBLISH_TIME=$NEVER
             continue  # publish the allocation without waiting another 15 seconds
         fi
 

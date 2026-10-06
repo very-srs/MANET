@@ -196,9 +196,14 @@ class TimeService:
         gps = False
         try:
             data = json.loads((self.run / 'gps_status.json').read_text())
-            age = time.time() - float(data.get('timestamp', 0))
-            gps = data.get('has_fix') is True and math.isfinite(age) and -5 <= age <= 60
-        except (OSError, ValueError, TypeError, AttributeError):
+            # Age on the boot clock: chrony stepping the wall clock must not
+            # make a live fix look stale. Serve GPS time only when the reader
+            # says the receiver's time is fit to serve (time_ok: settled, no
+            # recent clock step, drift or discontinuity).
+            age = time.clock_gettime(time.CLOCK_BOOTTIME) - float(data['written_boot'])
+            gps = (data.get('has_fix') is True and data.get('time_ok') is True
+                   and math.isfinite(age) and -5 <= age <= 60)
+        except (OSError, ValueError, TypeError, AttributeError, KeyError):
             pass
         uplink = ''
         if (self.run / 'mesh-gateway.state').exists():

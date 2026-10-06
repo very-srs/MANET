@@ -883,7 +883,7 @@ class MeshVoice:
         self.rx_loss_pct = 0.0
         self._pk_last_pushed = 0
         self._pk_last_lost = 0
-        self._pk_clean_since = time.time()
+        self._pk_clean_since = time.monotonic()
 
         self.ptt_pressed = False
         self.ptt_connected = False
@@ -901,7 +901,7 @@ class MeshVoice:
         self.peers = []
         self.local_ips = local_ipv4_addresses()
         self.ptt = None
-        self.started_at = time.time()
+        self.started_at = time.monotonic()
 
         # Stall watchdog state, keyed "tx"/"rx". _flow_count and _flow_ts are
         # written from the streaming threads by the two pad probes; everything
@@ -1527,7 +1527,7 @@ class MeshVoice:
             # on the old one's numbers.
             self._pk_last_pushed = 0
             self._pk_last_lost = 0
-            self._pk_clean_since = time.time()
+            self._pk_clean_since = time.monotonic()
             self.rx_loss_pct = 0.0
 
             if new.channel != old_channel:
@@ -1705,7 +1705,7 @@ class MeshVoice:
         The tally is emitted once, on recovery or when the error changes.
         """
         state = self._pipeline_fault.get(which)
-        now = time.time()
+        now = time.monotonic()
 
         if state is None or now - state["last_ts"] > PIPELINE_RETRY_RESET_SEC:
             state = {"delay": PIPELINE_RETRY_BASE_SEC, "text": None, "repeats": 0,
@@ -2008,12 +2008,12 @@ class MeshVoice:
         depay.sync_state_with_parent()
         # Retain the rtpbin pad so eviction can park it and revival can re-link it.
         self.rx_branches[name] = (pad, depay, mixpad)
-        self.branch_seen[name] = time.time()
+        self.branch_seen[name] = time.monotonic()
         # Touch on every decoded buffer so the LRU below evicts the talker who
         # has been quiet longest, not whoever happened to arrive first.
         depay.get_static_pad("src").add_probe(
             Gst.PadProbeType.BUFFER,
-            lambda _p, _i, n=name: (self.branch_seen.__setitem__(n, time.time()),
+            lambda _p, _i, n=name: (self.branch_seen.__setitem__(n, time.monotonic()),
                                     Gst.PadProbeReturn.OK)[1])
         log("rx: talker branch up (%d active)" % len(self.rx_branches))
         return True
@@ -2317,7 +2317,7 @@ class MeshVoice:
             # by offering more packets.
             floor = max(floor, PACKING_DEFAULT)
 
-        now = time.time()
+        now = time.monotonic()
         if loss_pct > PACKING_LOSS_HIGH_PCT:
             self._pk_clean_since = now
             if self.packing > floor:
@@ -2437,7 +2437,7 @@ class MeshVoice:
             # the VOICE tab can say why rather than going blank.
             "service": "restarting" if self._fault else "running",
             "fault": self._fault,
-            "uptime": int(time.time() - self.started_at),
+            "uptime": int(time.monotonic() - self.started_at),
             "ptt_mode": self.cfg.ptt_mode,
             "ptt_connected": self.ptt_connected,
             "ptt_active": self.ptt_pressed,
@@ -2495,6 +2495,9 @@ class MeshVoice:
             "stalls": self._stalls["tx"] + self._stalls["rx"],
             "igmp_joined": self._igmp_ok,
             "updated": int(time.time()),
+            # Boot-clock stamp for freshness checks in other processes; the
+            # wall time above is for display and can be stepped by time sync.
+            "updated_boot": time.clock_gettime(time.CLOCK_BOOTTIME),
         }
         tmp = STATE_FILE + ".tmp"
         try:

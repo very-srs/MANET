@@ -70,14 +70,18 @@ class ManagerJsonReadTests(unittest.TestCase):
         a = text.index(start)
         return text[a:text.index(end, a)]
 
-    def gps(self, manager, data):
+    def gps(self, manager, data, uptime=5000):
         with tempfile.NamedTemporaryFile('w', suffix='.json', delete=False) as f:
             f.write(data if isinstance(data, str) else json.dumps(data))
         self.addCleanup(os.unlink, f.name)
+        with tempfile.NamedTemporaryFile('w', suffix='.uptime', delete=False) as u:
+            u.write(f'{uptime}.50 0.00\n')
+        self.addCleanup(os.unlink, u.name)
         block = self.snippet(manager, 'GPS_LAT=""; GPS_LON=""; GPS_ALT=""', '[ -n "$GPS_LAT" ]')
-        script = (f'GPS_STATUS_FILE={f.name}\nGPS_FIX_MAX_AGE=60\n' + block +
+        script = (f'. "{TOOLS}/manet-common.sh"\nGPS_STATUS_FILE={f.name}\nGPS_FIX_MAX_AGE=60\n' + block +
                   'echo "$GPS_LAT|$GPS_LON|$GPS_ALT"')
-        return subprocess.run(['bash', '-c', script], capture_output=True, text=True, timeout=10).stdout.strip()
+        return subprocess.run(['bash', '-c', script], capture_output=True, text=True, timeout=10,
+                              env=dict(os.environ, MESH_UPTIME_FILE=u.name)).stdout.strip()
 
     def test_fresh_fix_is_published_and_stale_or_partial_is_not(self):
         now = time.time()
@@ -91,6 +95,16 @@ class ManagerJsonReadTests(unittest.TestCase):
                 self.assertEqual(self.gps(manager, 'not json'), '||')
                 # Values are data, never shell: nothing is eval'd any more.
                 self.assertEqual(self.gps(manager, dict(fix, latitude='$(touch /tmp/x)')), '||')
+
+    def test_boot_clock_age_wins_over_a_stepped_wall_timestamp(self):
+        fix = {'has_fix': True, 'latitude': 39.7392, 'longitude': -104.9903, 'altitude': 1609.3}
+        for manager in ('node-manager-static.sh', 'node-manager-acs.sh'):
+            with self.subTest(manager=manager):
+                for wall in (time.time() + 3600, time.time() - 3600):
+                    live = dict(fix, timestamp=wall, written_boot=4998.0)
+                    self.assertEqual(self.gps(manager, live), '39.7392|-104.9903|1609.3')
+                stale = dict(fix, timestamp=time.time(), written_boot=4900.0)
+                self.assertEqual(self.gps(manager, stale), '||')
 
     def test_battery_percentage(self):
         for manager in ('node-manager-static.sh', 'node-manager-acs.sh'):

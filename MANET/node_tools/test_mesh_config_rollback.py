@@ -48,6 +48,9 @@ class RollbackHarness(unittest.TestCase):
         self.output = self.root / 'originators.json'
         self.peers([{'orig_address': PEER, 'best': True}])
         self.service_log = self.root / 'services'
+        self.uptime = self.root / 'uptime'
+        self.boot = self.root / 'boot_id'
+        self.boot.write_text('0a1b2c3d-0000-4000-8000-000000000001\n')
         self.env = dict(
             os.environ,
             PATH=str(self.bin) + os.pathsep + str(Path(sys.executable).parent)
@@ -59,15 +62,20 @@ class RollbackHarness(unittest.TestCase):
             TEST_NOW='1000', TEST_ORIGINATORS=str(self.output),
             TEST_SERVICE_LOG=str(self.service_log), TEST_BATCTL_RC='0',
             TEST_SERVICE_RC='0', TEST_COPY_FAIL='',
+            MESH_UPTIME_FILE=str(self.uptime), MANET_BOOT_ID_FILE=str(self.boot),
+            TEST_WALL='1791288000',
         )
+        self.uptime.write_text(self.env['TEST_NOW'] + '.42 1234.00\n')
         self.command('batctl', '''
 if sys.argv[1:] != ['meshif', 'bat0', 'originators_json']:
     sys.exit(99)
 sys.stdout.write(Path(os.environ['TEST_ORIGINATORS']).read_text())
 sys.exit(int(os.environ['TEST_BATCTL_RC']))
 ''')
+        # TEST_NOW is the boot clock the script must use; the wall clock
+        # (TEST_WALL) is separate so tests can step it underneath.
         self.command('date', '''
-print(os.environ['TEST_NOW'] if sys.argv[1:] == ['+%s'] else 'test-clock')
+print(os.environ['TEST_WALL'] if sys.argv[1:] == ['+%s'] else 'test-clock')
 ''')
         self.command('systemctl', '''
 with open(os.environ['TEST_SERVICE_LOG'], 'a') as log:
@@ -91,6 +99,7 @@ os.execv({shutil.which('cp')!r}, ['cp', *sys.argv[1:]])
         self.output.write_text(json.dumps(rows))
 
     def call(self, *args):
+        self.uptime.write_text(self.env['TEST_NOW'] + '.42 1234.00\n')
         return subprocess.run(['bash', str(SCRIPT), *args], env=self.env,
                               capture_output=True, text=True, timeout=15)
 
@@ -249,6 +258,56 @@ class RollbackScriptTests(RollbackHarness):
         self.env['TEST_SERVICE_RC'] = '0'
         self.assertEqual(self.call('check').returncode, 0)
         self.assertFalse(self.state.exists())
+
+    def test_wall_clock_steps_neither_end_nor_extend_the_trial(self):
+        self.arm()
+        self.changed()
+        self.peers([])
+        for wall in ('1791291600', '1791284400', '0'):  # +1 h, -1 h, epoch
+            self.env.update(TEST_WALL=wall, TEST_NOW='1200')
+            self.assertEqual(self.call('check').returncode, 0)
+            self.assertTrue(self.state.exists(), wall)
+        self.env['TEST_WALL'] = '1791284400'
+        self.deadline()
+        self.assertEqual(self.call('check').returncode, 0)
+        self.assertEqual(self.conf.read_text(), self.old_config)
+
+    def test_first_reboot_restarts_the_grace_on_the_new_boot(self):
+        self.arm()
+        self.changed()
+        self.peers([])
+        self.boot.write_text('0a1b2c3d-0000-4000-8000-000000000002\n')
+        self.env['TEST_NOW'] = '40'
+        self.assertEqual(self.call('check').returncode, 0)
+        self.assertIn('REARMED=1', (self.state / 'state').read_text())
+        self.env['TEST_NOW'] = '339'
+        self.call('check')
+        self.assertTrue(self.state.exists())
+        self.env['TEST_NOW'] = '340'
+        self.assertEqual(self.call('check').returncode, 0)
+        self.assertEqual(self.conf.read_text(), self.old_config)
+
+    def test_second_reboot_checks_at_once(self):
+        self.arm()
+        self.changed()
+        self.peers([])
+        self.boot.write_text('0a1b2c3d-0000-4000-8000-000000000002\n')
+        self.env['TEST_NOW'] = '40'
+        self.call('check')
+        self.boot.write_text('0a1b2c3d-0000-4000-8000-000000000003\n')
+        self.env['TEST_NOW'] = '35'
+        self.assertEqual(self.call('check').returncode, 0)
+        self.assertEqual(self.conf.read_text(), self.old_config)
+
+    def test_state_from_before_the_boot_clock_gets_one_grace(self):
+        self.arm()
+        self.changed()
+        self.peers([])
+        (self.state / 'state').write_text("VERSION='aabbcc001122'\nPEERS_BEFORE=1\nDEADLINE=1791288300\n")
+        self.env['TEST_NOW'] = '1000'
+        self.assertEqual(self.call('check').returncode, 0)
+        self.assertNotEqual(self.conf.read_text(), self.old_config)
+        self.assertIn('REARMED=1', (self.state / 'state').read_text())
 
     def test_incomplete_state_is_not_mistaken_for_solo_node(self):
         self.arm()

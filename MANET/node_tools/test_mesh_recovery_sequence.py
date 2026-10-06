@@ -55,6 +55,8 @@ else:
         with patch.dict(os.environ, self.nodes[index].env), \
                 patch.object(runtime.time, 'time', return_value=when), \
                 patch.object(runtime.time, 'time_ns', return_value=when * 10**9), \
+                patch.object(runtime.time, 'monotonic', return_value=10000 + when - self.now), \
+                patch.object(runtime.time, 'clock_gettime', return_value=10000 + when - self.now), \
                 patch.object(runtime.rendezvous, 'halow_ready', return_value=self.connected):
             yield
 

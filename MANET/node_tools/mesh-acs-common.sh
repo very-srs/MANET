@@ -84,18 +84,31 @@ acs_write_channels() (
         sed -i "s/frequency=.*/frequency=${freq5}/" "$WPA_CONF_5_0" || return 1
     fi
     python3 "${MANET_TOOLS_DIR:-$(dirname "${BASH_SOURCE[0]}")}/manet_rendezvous.py" set-mode "$mode" || return 1
-    echo "$(( $(date +%s) + 30 ))" > "${MANET_ACS_RUN_DIR:-/run}/manet-acs-busy"
+    acs_mark_busy || return 1
     for iface in "${changed[@]}"; do
         timeout 30 systemctl restart "wpa_supplicant@${iface}.service" || return 1
     done
     return 0
 )
 
+# /proc/uptime and Python CLOCK_BOOTTIME include time spent suspended.
+acs_mark_busy() {
+    local boot now rest
+    boot=$(cat "${MANET_BOOT_ID_FILE:-/proc/sys/kernel/random/boot_id}") || return 1
+    boot=${boot//-/}
+    read -r now rest < "${MESH_UPTIME_FILE:-/proc/uptime}" || return 1
+    [[ "$boot" =~ ^[a-f0-9]{32}$ && "$now" =~ ^[0-9]+([.][0-9]+)?$ ]] || return 1
+    LC_ALL=C awk -v boot="$boot" -v now="$now" 'BEGIN { printf "%s %.2f\n", boot, now + 30 }' > "${MANET_ACS_RUN_DIR:-/run}/manet-acs-busy"
+}
+
 # A fixed expiry prevents a stopped agreement process from suppressing healing.
 acs_agreement_busy() {
-    local expiry now
-    expiry=$(cat "${MANET_ACS_RUN_DIR:-/run}/manet-acs-busy" 2>/dev/null) || return 1
-    [[ "$expiry" =~ ^[0-9]+$ ]] || return 1
-    now=$(date +%s)
-    [ "$now" -le "$expiry" ] && [ "$((expiry - now))" -le 125 ]
+    local boot expiry extra own now rest
+    read -r boot expiry extra 2>/dev/null < "${MANET_ACS_RUN_DIR:-/run}/manet-acs-busy" || return 1
+    [[ "$boot" =~ ^[a-f0-9]{32}$ && "$expiry" =~ ^[0-9]+([.][0-9]+)?$ && -z "$extra" ]] || return 1
+    own=$(cat "${MANET_BOOT_ID_FILE:-/proc/sys/kernel/random/boot_id}") || return 1
+    [ "$boot" = "${own//-/}" ] || return 1
+    read -r now rest < "${MESH_UPTIME_FILE:-/proc/uptime}" || return 1
+    [[ "$now" =~ ^[0-9]+([.][0-9]+)?$ ]] || return 1
+    LC_ALL=C awk -v expiry="$expiry" -v now="$now" 'BEGIN { exit !(0 <= expiry - now && expiry - now <= 125) }'
 }

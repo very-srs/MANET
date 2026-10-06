@@ -353,10 +353,16 @@ detect_hotplug_mode() {
     # forever on LANs without internet. If we already concluded "no internet"
     # for this iface+IP recently, leave everything alone. The timestamp lets
     # a periodic re-check notice if internet comes back on the same lease.
+    # The timestamp is boot-clock seconds, so a time sync stepping the wall
+    # clock cannot end or extend it. One ahead of the boot clock (a wall time
+    # written by an older version) counts as expired.
     if [ -f "$NO_INET_STATE" ] && [ -n "$ip" ]; then
         read -r prev_iface prev_ip prev_ts < "$NO_INET_STATE" || true
+        read -r up_now _ < "${MESH_UPTIME_FILE:-/proc/uptime}"
+        up_now=${up_now%.*}
+        [[ "$prev_ts" =~ ^[0-9]+$ ]] && [ "$prev_ts" -le "$up_now" ] || prev_ts=-1000000
         if [ "$prev_iface" = "$ETH_IFACE" ] && [ "$prev_ip" = "$ip" ] && \
-           [ $(( $(date +%s) - ${prev_ts:-0} )) -lt "$NO_INET_RECHECK_SECS" ]; then
+           [ $(( up_now - prev_ts )) -lt "$NO_INET_RECHECK_SECS" ]; then
             log "No-internet state is current on $ETH_IFACE ($ip); skipping re-detection"
             exit 0
         fi
@@ -416,7 +422,8 @@ detect_hotplug_mode() {
         fi
 
         log "DHCP succeeded but internet test failed; leaving as mesh client"
-        echo "$ETH_IFACE $ip $(date +%s)" > "$NO_INET_STATE"
+        read -r up_now _ < "${MESH_UPTIME_FILE:-/proc/uptime}"
+        echo "$ETH_IFACE $ip ${up_now%.*}" > "$NO_INET_STATE"
         run_no_carrier_cleanup "Internet test failed on $ETH_IFACE" 1
         exit 0
     fi

@@ -12,3 +12,16 @@ radio_iface_enabled() {
         'if length == 1 then .[0].desired[$iface] == "down" else false end' \
         "${MANET_RADIO_STATE_FILE:-/var/lib/mesh_radio_state.json}" >/dev/null 2>&1
 }
+
+# Whole seconds on the boot clock (/proc/uptime). Local timers and cooldowns
+# use it, never the wall clock: a time sync can step the wall clock by any
+# amount in either direction. Not comparable between nodes or across boots.
+# Fails, printing nothing, unless the first field is a plain decimal number,
+# so a bad read cannot become an arithmetic zero in a caller.
+uptime_now() {
+    local up _
+    read -r up _ < "${MESH_UPTIME_FILE:-/proc/uptime}" || return 1
+    [[ "$up" =~ ^[0-9]+(\.[0-9]+)?$ ]] || return 1
+    up=${up%.*}
+    echo "$((10#$up))"
+}

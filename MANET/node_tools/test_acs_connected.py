@@ -30,6 +30,10 @@ else:
 ''')
         env = patch.dict(os.environ, self.env)
         env.start(); self.addCleanup(env.stop)
+        self.elapsed = 10000.5
+        for name in ('monotonic', 'clock_gettime'):
+            clock = patch.object(runtime.time, name, side_effect=lambda *args: self.elapsed)
+            clock.start(); self.addCleanup(clock.stop)
         self.runner = runtime.Runtime()
         self.remote = AdminTransport(self.root / 'mesh.conf', self.root / 'remote-admin')
 
@@ -42,7 +46,7 @@ else:
         return {'plan': plan, 'commit': commit}
 
     def keep(self, destination):
-        self.runner.state = {'clock_boot': self.runner.boot, 'destination': destination}
+        self.runner.state = {'clock_boot': self.runner.boot, 'timer_boot': self.runner.boot, 'destination': destination}
         self.runner.save()
 
     def record(self, freq, destination):
@@ -50,6 +54,7 @@ else:
 
     def tick(self, when, records=None):
         self.when = when
+        self.elapsed = 10000.5 + when - self.now
         with patch.object(runtime.time, 'time', return_value=when), patch.object(runtime.time, 'time_ns', return_value=when * 10**9):
             if records is None:
                 self.runner.tick(when)
@@ -156,7 +161,7 @@ else:
         left = self.destination(2437, created=self.now - 360, members={OWN: status('a')})
         right = self.destination(2462, created=self.now - 180, members={PEER: status('b')})
         self.keep(left)
-        self.runner.state['hold_until'] = self.now + 480
+        self.runner.state['hold_until'] = self.elapsed + 480
         records = {PEER: self.record(2462, right)}
         # No unilateral adoption just because the other island's plan is newer.
         self.tick(self.now - 1, records)

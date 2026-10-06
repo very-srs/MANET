@@ -23,6 +23,7 @@ TOOLS = Path(__file__).resolve().parent
 FRESH_SECONDS = 45
 PROBE_LIFETIME = 60  # Request/reply replication plus a 15-second manager wakeup.
 PROBE_INTERVAL = 60
+LOCAL_TIMERS = ('hold_until', 'repair_until', 'retry_at', 'settle_until', 'busy_until', 'busy_plan')
 RECORD = re.compile(r'\{\s*"([0-9a-fA-F:]{17})"\s*,\s*("(?:\\.|[^"\\])*")\s*\}')
 
 
@@ -118,6 +119,10 @@ def recovery_destination(records, local, now, own, excluded=(), own_size=None):
     return min(choices)[2] if choices else None
 
 
+def boot_time():
+    return time.clock_gettime(time.CLOCK_BOOTTIME)
+
+
 class Runtime:
     def __init__(self):
         self.run_dir = Path(os.environ.get('MANET_ACS_RUN_DIR', '/run'))
@@ -144,13 +149,41 @@ class Runtime:
         if not isinstance(self.state, dict):
             raise ValueError('invalid persisted agreement state')
         self.persisted = json.dumps(self.state, sort_keys=True)
+        if self.state and self.state.get('timer_boot') != self.boot:
+            try:
+                with self.channel_lock():
+                    # Helpers also construct Runtime; don't overwrite a daemon's
+                    # newer state when reconciling the first reader after reboot.
+                    self.state = read_json(self.path)
+                    self.persisted = json.dumps(self.state, sort_keys=True)
+                    self.reset_timers()
+                    self.save()
+            except BlockingIOError:
+                # A channel operation holds the lock, possibly our own caller
+                # (the tourguide runs members/helper-encode under it). Reconcile
+                # in memory only; the daemon saves it on its next pass.
+                self.reset_timers()
+        else:
+            self.reset_timers()
         self.capabilities = {}
-        self.last_publish = 0
-        self.last_probe_check = 0
+        self.last_publish = None
+        self.last_probe_check = None
         self.discovery = rendezvous.Discovery(self.run_dir)
         self.rendezvous_allowed = {}
         self.halow_health = None
         self.ui_status = {}
+
+    def reset_timers(self):
+        if not isinstance(self.state, dict):
+            raise ValueError('invalid persisted agreement state')
+        if self.state.get('timer_boot') != self.boot:
+            held = self.state.get('hold_until', 0) > 0
+            for key in LOCAL_TIMERS:
+                self.state.pop(key, None)
+            self.state['timer_boot'] = self.boot
+            # Unknown-boot holds restart in full; all other local timers drop.
+            if held:
+                self.state['hold_until'] = boot_time() + protocol.RECOVERY_SECONDS
 
     @contextmanager
     def channel_lock(self):
@@ -194,15 +227,16 @@ class Runtime:
             stable &= current[band] == configured
             key = (iface, band, phy[1])
             cached = self.capabilities.get(key)
-            if cached is None or now - cached[0] >= 60:
+            checked = time.monotonic()
+            if cached is None or checked - cached[0] >= 60:
                 data = command(['iw', 'phy', 'phy' + phy[1], 'info'], timeout=2)
-                cached = (now, sorted(rendezvous.permitted_frequencies(data)))
+                cached = (checked, sorted(rendezvous.permitted_frequencies(data)))
                 self.capabilities[key] = cached
             allowed[band] = [f for f in cached[1] if f in protocol.CHANNELS[band]]
             self.rendezvous_allowed[band] = [f for f in cached[1] if f in rendezvous.CHANNELS[band]]
-        cooling = now < self.state.get('hold_until', 0)
+        cooling = boot_time() < self.state.get('hold_until', 0)
         if self.state.get('protocol', {}).get('phase') not in ('prepared', 'committed'):
-            cooling |= self.busy(now)
+            cooling |= self.busy()
         checked = time.monotonic()
         if self.halow_health is None or checked - self.halow_health[0] >= rendezvous.HALOW_HEALTH_SECONDS:
             self.halow_health = (checked, rendezvous.halow_ready())
@@ -216,12 +250,15 @@ class Runtime:
                               searching=status['discovery'])
         return status
 
-    def busy(self, now):
+    def busy(self):
         try:
-            expiry = int(self.busy_path.read_text())
-            return 0 <= expiry - now <= 125
+            boot, expiry = self.busy_path.read_text().split()
+            return boot == self.boot and 0 <= float(expiry) - boot_time() <= 125
         except (OSError, ValueError):
             return False
+
+    def write_busy(self, expiry):
+        self.busy_path.write_text(f'{self.boot} {expiry:.6f}\n')
 
     def aliases(self):
         return sorted({p.read_text().strip().lower() for p in self.sysnet.glob('*/address')
@@ -371,7 +408,7 @@ class Runtime:
     def discovery_step(self, now, local, connected):
         # Any surviving BATMAN path, including HaLow, takes precedence. Hold
         # still while peers exchange a plan or bootstrap a new connected mesh.
-        if not local['acs'] or not local['discovery'] or connected or self.busy(now):
+        if not local['acs'] or not local['discovery'] or connected or self.busy():
             return False
         targets = {b: f for b, f in rendezvous.search_channels(now, clock_ready()).items()
                    if b in local['current'] and f in self.rendezvous_allowed.get(b, [])}
@@ -395,12 +432,14 @@ class Runtime:
         finally:
             saved = self.state.get('protocol', {})
             plan = saved.get('plan', {})
+            hold_left = max(0, self.state.get('hold_until', 0) - boot_time())
             self.ui_status.update(monotonic=time.monotonic(), phase=saved.get('phase', 'idle'),
                                   target=self.state.get('destination', {}).get('plan', {}).get('channels', {}),
                                   pending_channels=plan.get('channels', {}),
                                   votes=len(saved.get('votes', {})), participants=len(plan.get('participants', {})),
                                   deadline=plan.get('deadline'), activate_at=plan.get('activate_at'),
-                                  hold_until=self.state.get('hold_until', 0))
+                                  # The existing UI expects a wall-clock projection.
+                                  hold_until=time.time() + hold_left if hold_left else 0)
             try:
                 private_json_write(self.run_dir / 'manet-acs-status.json', self.ui_status)
             except OSError:
@@ -422,15 +461,16 @@ class Runtime:
         with self.channel_lock():
             if self.state.get('clock_boot') != self.boot:
                 # A new boot has a new voting session. Its old wall clock may
-                # have been ahead of GPS; don't inherit future rounds/holds.
+                # have been ahead of GPS; don't inherit future rounds.
                 previous = self.state.get('destination')
-                self.state = {'clock_boot': self.boot}
+                timers = {key: self.state[key] for key in LOCAL_TIMERS if key in self.state}
+                self.state = dict(timers, clock_boot=self.boot, timer_boot=self.boot)
                 # Re-attest only a validated plan actually operating after
-                # reboot. Old votes, future rounds and cooldowns are discarded.
+                # reboot. Local timers were already reconciled with this boot.
                 if protocol.live_destination(previous, self.status(now), now):
                     self.state['destination'] = previous
                 self.save()
-                self.last_publish = 0
+                self.last_publish = None
                 self.capabilities.clear()
             local = self.status(now)
             try:
@@ -453,7 +493,7 @@ class Runtime:
             destinations = protocol.network_destinations(destinations, view or {})
             conflicting = protocol.conflicting_destinations(destinations.values())
             self.ui_status.update(reachable=len(view) - 1 if view else None, conflicting=conflicting)
-            if conflicting and self.state.get('hold_until', 0) > now:
+            if conflicting and self.state.get('hold_until', 0) > boot_time():
                 # The recollection hold must not keep reunited
                 # groups on different channels. Their next common scan/round
                 # includes RF observations from the whole connected network.
@@ -473,27 +513,32 @@ class Runtime:
             fields = {mac: r.get('protocol', {}) for mac, r in records.items() if isinstance(r.get('protocol', {}), dict)}
             updated, outgoing, plan = protocol.advance(saved, self.own, now, view, fields, proposal, local)
             self.state['protocol'] = updated
+            elapsed = boot_time()
             if updated.get('phase') in ('prepared', 'committed'):
-                self.busy_path.write_text(str(updated['plan']['activate_at'] + protocol.APPLY_GRACE))
-            elif self.busy_path.exists():
-                expiry = int(self.busy_path.read_text())
-                if expiry < now or expiry - now > 125:
-                    self.busy_path.unlink(missing_ok=True)
+                plan_id = protocol.digest(updated['plan'])
+                if self.state.get('busy_plan') != plan_id:
+                    # Translate once per plan, including across daemon restarts.
+                    self.state['busy_plan'] = plan_id
+                    remaining = updated['plan']['activate_at'] + protocol.APPLY_GRACE - time.time()
+                    self.state['busy_until'] = boot_time() + remaining
+                self.write_busy(self.state['busy_until'])
+            elif not self.busy():
+                self.busy_path.unlink(missing_ok=True)
             apply_reason = 'Agreed channel plan'
             if plan is not None and local['acs']:
                 self.state['destination'] = {'plan': plan, 'commit': updated['commit']}
                 self.state['recovered_round'] = plan['round']
                 if plan['moving']:
-                    self.state['hold_until'] = now + protocol.RECOVERY_SECONDS
-                self.state['repair_until'] = now + 120
+                    self.state['hold_until'] = elapsed + protocol.RECOVERY_SECONDS
+                self.state['repair_until'] = elapsed + 120
             elif plan is not None:
                 plan = None  # A compatible static participant ACKs without applying ACS.
             self.save()  # Retry failed writes even if memory already contains the new state.
             # A live plan remains recoverable after its recollection
             # hold. Competing working plans require one new common election,
             # never independent "newest plan wins" decisions on each group.
-            if (plan is None and view and local['acs'] and not self.busy(now)
-                    and not conflicting and now >= self.state.get('retry_at', 0)
+            if (plan is None and view and local['acs'] and not self.busy()
+                    and not conflicting and elapsed >= self.state.get('retry_at', 0)
                     and updated.get('phase') not in ('prepared', 'committed')):
                 candidates = []
                 learned = []
@@ -514,7 +559,7 @@ class Runtime:
                     destination = max(candidates, key=lambda c: c[:2])[2]
                     plan = destination['plan']
                     self.state.update(destination=destination, recovered_round=plan['round'],
-                                      hold_until=now + protocol.RECOVERY_SECONDS, repair_until=now + 120)
+                                      hold_until=elapsed + protocol.RECOVERY_SECONDS, repair_until=elapsed + 120)
                     self.save()
                 elif learned and self.own not in destinations:
                     # A node recovered by a clockless/lobby reply can now keep
@@ -526,7 +571,7 @@ class Runtime:
                         # channel: adopt its authority and stop searching,
                         # without a needless reconfigure or a later hop away.
                         plan = self.state['destination']['plan']
-            if plan is None and now <= self.state.get('repair_until', -1) and now >= self.state.get('retry_at', 0):
+            if plan is None and elapsed <= self.state.get('repair_until', -1) and elapsed >= self.state.get('retry_at', 0):
                 destination = self.state.get('destination')
                 if destination:
                     target = destination['plan']['channels']
@@ -535,25 +580,26 @@ class Runtime:
                             and any(local['current'].get(b) != f for b, f in target.items() if b in local['current'])):
                         plan = destination['plan']
             if plan is not None:
-                self.state['retry_at'] = now + 30
+                self.state['retry_at'] = boot_time() + 30
                 self.save()
                 moved = any(local['current'].get(b, f) != f for b, f in plan['channels'].items())
                 self.apply(plan['channels'], plan['limp'], reason=apply_reason)
                 self.state.pop('repair_until', None)
                 local = self.status(int(time.time()))
                 if moved:
-                    self.state['settle_until'] = int(time.time()) + 30
-                    self.busy_path.write_text(str(self.state['settle_until']))
+                    self.state['settle_until'] = boot_time() + 30
+                    self.write_busy(self.state['settle_until'])
                 self.save()
                 outgoing = {}
-            if (plan is None and view and not self.busy(now)
+            if (plan is None and view and not self.busy()
                     and updated.get('phase') not in ('prepared', 'committed')
                     and self.discovery_step(now, local, len(view) > 1)):
                 local = self.status(int(time.time()))
             # No new gossip stream: current plans ride the existing type 74.
             # Readbacks while radios are moving cannot advertise a destination.
             destination = protocol.live_destination(self.state.get('destination'), local, int(time.time()))
-            if outgoing != self.state.get('last_outgoing') or now - self.last_publish >= 5:
+            checked = time.monotonic()
+            if outgoing != self.state.get('last_outgoing') or self.last_publish is None or checked - self.last_publish >= 5:
                 payload = {'kind': 'acs_state', 'node': self.own, 'aliases': self.aliases(), 'status': local, 'protocol': outgoing}
                 if destination:
                     plan_id = protocol.digest(destination['plan'])
@@ -573,11 +619,13 @@ class Runtime:
                 envelope = self.transport.seal(74, payload)
                 command(['alfred', '-s', 74], input=json.dumps(envelope), timeout=2)
                 self.state['last_outgoing'] = outgoing
-                self.last_publish = now
+                self.last_publish = checked
             # Recovery requests arriving over HaLow need no physical tourguide
             # visit. One reachable, compatible source replies for each request.
-            if view and destination and not conflicting and not self.busy(now) and now - self.last_probe_check >= 5:
-                self.last_probe_check = now
+            checked = time.monotonic()
+            if (view and destination and not conflicting and not self.busy()
+                    and (self.last_probe_check is None or checked - self.last_probe_check >= 5)):
+                self.last_probe_check = checked
                 destinations[self.own] = destination
                 self.answer_probes(destination['plan']['channels'], len(view), destinations)
 

@@ -25,8 +25,11 @@ restore_halow_primary_if_needed() {
     [ "$mainif" = "$halow" ] && return 0
 
     cooldown_file="/run/batman-enslave-watch-halow-primary-reset"
-    now="$(date +%s)"
-    last="$(cat "$cooldown_file" 2>/dev/null || echo 0)"
+    now="$(uptime_now)" || return 0
+    last="$(cat "$cooldown_file" 2>/dev/null)"
+    # Boot-clock seconds. Missing, malformed, or ahead of the boot clock (a
+    # wall time written by an older version) means no cooldown is running.
+    [[ "$last" =~ ^[0-9]+$ ]] && [ "$last" -le "$now" ] || last=-1000000
     if [ $((now - last)) -lt 60 ]; then
         return 0
     fi
@@ -74,8 +77,11 @@ restart_dead_ap_if_needed() (
     [ "$strikes" -ge 2 ] || return 0
 
     cooldown_file="/run/batman-enslave-watch-ap-restart"
-    now="$(date +%s)"
-    last="$(cat "$cooldown_file" 2>/dev/null || echo 0)"
+    now="$(uptime_now)" || return 0
+    last="$(cat "$cooldown_file" 2>/dev/null)"
+    # Boot-clock seconds. Missing, malformed, or ahead of the boot clock (a
+    # wall time written by an older version) means no cooldown is running.
+    [[ "$last" =~ ^[0-9]+$ ]] && [ "$last" -le "$now" ] || last=-1000000
     if [ $((now - last)) -lt 60 ]; then
         return 0
     fi

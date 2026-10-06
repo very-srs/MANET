@@ -406,3 +406,34 @@ class SpeedGateTests(AutodetectHarness):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class NoInternetCacheTests(AutodetectHarness):
+    """The no-internet cache runs on the boot clock, not the wall clock."""
+
+    def detect_with_cache(self, stamp, uptime=5000):
+        (self.root / 'addr').write_text('192.168.69.5')
+        (self.root / 'var/run/eth-no-internet.state').write_text(f'end0 192.168.69.5 {stamp}\n')
+        clock = self.root / 'uptime'
+        clock.write_text(f'{uptime}.25 0.00\n')
+        old = os.environ.get('MESH_UPTIME_FILE')
+        os.environ['MESH_UPTIME_FILE'] = str(clock)
+        try:
+            return self.run_detector()
+        finally:
+            if old is None:
+                os.environ.pop('MESH_UPTIME_FILE')
+            else:
+                os.environ['MESH_UPTIME_FILE'] = old
+
+    def test_recent_no_internet_verdict_skips_redetection(self):
+        _, _, journal = self.detect_with_cache(4990)
+        self.assertIn('No-internet state is current', journal)
+
+    def test_expired_verdict_redetects(self):
+        _, _, journal = self.detect_with_cache(4000)
+        self.assertNotIn('No-internet state is current', journal)
+
+    def test_wall_time_from_an_older_version_counts_as_expired(self):
+        _, _, journal = self.detect_with_cache(1791288000)
+        self.assertNotIn('No-internet state is current', journal)

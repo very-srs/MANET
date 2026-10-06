@@ -87,8 +87,11 @@ print((clock.read_text() if clock.exists() else os.environ['TEST_NOW']) if sys.a
         self.command('systemd-cat', 'sys.stderr.write(sys.stdin.read())')
         self.command('sleep', '''
 clock = Path(os.environ['TEST_ROOT'], 'clock')
+seconds = max(1, int(float(sys.argv[1])))
 if clock.exists():
-    clock.write_text(str(int(clock.read_text()) + max(1, int(float(sys.argv[1])))))
+    clock.write_text(str(int(clock.read_text()) + seconds))
+uptime = Path(os.environ['MESH_UPTIME_FILE'])
+uptime.write_text(str(float(uptime.read_text().split()[0]) + seconds) + ' 1.00\\n')
 ''')
         self.command('batctl', '''
 if sys.argv[1:] != ['meshif', 'bat0', 'originators_json']:
@@ -168,11 +171,12 @@ class RoleTests(AcsHarness):
         for freq24, freq5 in [(2412, None), (None, 5180), (2412, 5180)]:
             with self.subTest(freq24=freq24, freq5=freq5):
                 self.configure(freq24, freq5)
+                (self.root / 'uptime').write_text('10000.50 1.00\n')
                 body = self.definitions('node-manager-acs.sh') + '''
 is_in_lobby
 acs_write_channels 2437 5200 || exit
 is_in_lobby
-echo "$(( $(date +%s) + 31 ))" > "$TEST_ROOT/clock"
+echo "10031.50 1.00" > "$MESH_UPTIME_FILE"
 return_to_lobby
 is_in_lobby
 '''
@@ -311,7 +315,8 @@ class TourguideTests(AcsHarness):
 
     def test_manager_waits_while_tourguide_holds_channel_lock(self):
         source = (TOOLS / 'node-manager-acs.sh').read_text()
-        gate = source.split('while true; do\n    NOW=$(date +%s)\n', 1)[1]
+        gate = source.split('    # Tourguide temporarily rewrites a config to the lobby.', 1)[1]
+        gate = '    # Tourguide temporarily rewrites a config to the lobby.' + gate
         gate = gate.split('    # === ALFRED RADIO STATE SYNC ===', 1)[0]
         body = 'STARTUP_MONITOR_INTERVAL=5\nfor pass in 1; do\n' + gate + '\necho RAN_LOOP\ndone\n'
         with open(self.env['MANET_ACS_LOCK_FILE'], 'w') as lock:
