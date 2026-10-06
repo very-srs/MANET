@@ -447,10 +447,21 @@ class AgreementTests(Harness):
         self.assertNotIn(IFACE, self.radio.bat)
 
     def test_agreement_in_progress_keeps_serving_ap(self):
-        import time
-        (self.root / 'run' / 'manet-acs-busy').write_text(str(int(time.time()) + 60))
-        self.assert_ap_kept()
+        (self.root / 'run' / 'manet-acs-busy').write_text(f'{self.BOOT} 160.5\n')
+        with mock.patch.object(manet_ap_mesh.time, 'clock_gettime', return_value=100.5):
+            for step in (0, 3600, -3600, 137):
+                with self.subTest(step=step), mock.patch.object(manet_ap_mesh.time, 'time', return_value=1800000000 + step):
+                    self.assert_ap_kept()
         self.assertNotIn('systemctl stop hostapd.service', self.radio.calls)
+
+    def test_expired_foreign_boot_and_malformed_busy_markers_do_not_block_ap_return(self):
+        busy = self.root / 'run' / 'manet-acs-busy'
+        for value in (f'{self.BOOT} 99.5', f'{"cd" * 16} 160.5', 'invalid',
+                      f'{self.BOOT} nan', f'{self.BOOT} 160.5 extra'):
+            busy.write_text(value + '\n')
+            with self.subTest(value=value), mock.patch.object(manet_ap_mesh.time, 'clock_gettime', return_value=100.5):
+                freq, _ = self.transition().select_frequency(IFACE, '5', True)
+                self.assertEqual(freq, 5180)
 
     def test_held_channel_lock_keeps_serving_ap(self):
         # A tourguide visit holds this lock for its whole duration.

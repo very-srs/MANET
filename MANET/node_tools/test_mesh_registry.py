@@ -334,13 +334,19 @@ class ChunkClaimsTests(unittest.TestCase):
         runuser = self.bin / 'runuser'
         runuser.write_text('#!/bin/bash\nexit 0\n')
         runuser.chmod(0o755)
-        prefix = ('log() { :; }\nensure_static_channels() { :; }\n'
+        # The managers source manet-common.sh for uptime_now; the boot clock
+        # is fixed at 5000 s, so "recent" means published at 5000.
+        uptime = self.root / 'uptime'
+        uptime.write_text('5000.25 0.00\n')
+        prefix = (f'. {shlex.quote(str(TOOLS / "manet-common.sh"))}\n'
+                  'log() { :; }\nensure_static_channels() { :; }\n'
                   'hostname() { printf "mesh-test\\n"; }\n'
                   'python3() { if [ "$1" = /usr/local/bin/manet_node_ipv4.py ]; then '
                   'printf "%s\\n" "$REVIEW_IPV4"; else command python3 "$@"; fi; }\n'
                   'ip() { printf "    inet %s/28 scope global br0\\n" "$REVIEW_IPV4"; }\n')
         env = dict(self.env, ENCODER_PATH=str(TOOLS / 'encoder.py'), MY_MAC=MAC,
-                   LAST_IDENTITY_PUBLISH=str(int(time.time())) if recent else '0',
+                   LAST_IDENTITY_PUBLISH='5000' if recent else '0',
+                   MESH_UPTIME_FILE=str(uptime),
                    LAST_IDENTITY_ALLOCATION=':', IDENTITY_PUBLISH_INTERVAL='270',
                    ALFRED_IDENTITY_TYPE='67', CONTROL_IFACE='br0',
                    RADIO_STATE_SYNC='', CONFIG_SYNC='', CONFIG_ROLLBACK='',

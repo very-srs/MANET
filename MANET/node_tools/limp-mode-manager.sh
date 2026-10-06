@@ -2,8 +2,8 @@
 # Limp Mode Manager
 # Manages limp mode entry/exit based on mesh consensus
 
-REGISTRY_STATE_FILE="/var/run/mesh_node_registry"
-LIMP_STATE_FILE="/var/run/mesh_limp_mode.state"
+REGISTRY_STATE_FILE="${MESH_REGISTRY_FILE:-/var/run/mesh_node_registry}"
+LIMP_STATE_FILE="${MANET_LIMP_STATE_FILE:-/var/run/mesh_limp_mode.state}"
 LIMP_MODE_MIN_DURATION=300 #five minutes
 LIMP_MODE_CONSENSUS=0.5
 STALE_NODE_THRESHOLD=600
@@ -18,8 +18,6 @@ mesh_iface_24="$(cat /var/lib/mesh_24_if 2>/dev/null || true)"
 mesh_iface_5="$(cat /var/lib/mesh_5_if 2>/dev/null || true)"
 
 [ ! -f "$REGISTRY_STATE_FILE" ] && exit 0
-
-NOW=$(date +%s)
 
 # Count active nodes
 # Freshness is this node's own observation, not the peer's clock.
@@ -43,7 +41,14 @@ log "Limp mode consensus: $LIMP_NODE_COUNT/$ACTIVE_ALFRED_COUNT ($LIMP_RATIO)"
 # Check current state
 if [ -f "$LIMP_STATE_FILE" ]; then
     CURRENT_LIMP_STATE="true"
+    # Boot-clock seconds, so a time sync cannot cut short or stretch the
+    # minimum residence. A value ahead of the boot clock (a wall time from an
+    # older version) restarts the residence: the safe direction.
     LIMP_MODE_ENTRY_TIME=$(cat "$LIMP_STATE_FILE")
+    if ! [[ "$LIMP_MODE_ENTRY_TIME" =~ ^[0-9]+$ ]] || [ "$LIMP_MODE_ENTRY_TIME" -gt "$UPTIME_NOW" ]; then
+        LIMP_MODE_ENTRY_TIME=$UPTIME_NOW
+        echo "$UPTIME_NOW" > "$LIMP_STATE_FILE"
+    fi
 else
     CURRENT_LIMP_STATE="false"
     LIMP_MODE_ENTRY_TIME=0
@@ -56,12 +61,12 @@ if (( $(echo "$LIMP_RATIO > $LIMP_MODE_CONSENSUS" | bc -l) )); then
         log "ENTERING LIMP MODE (consensus: $LIMP_RATIO)"
         [ -n "$mesh_iface_24" ] && iw dev "$mesh_iface_24" set bitrates legacy-2.4 1 2 5.5 11
         [ -n "$mesh_iface_5" ] && iw dev "$mesh_iface_5" set bitrates legacy-5 6 9 12 18
-        echo "$NOW" > "$LIMP_STATE_FILE"
+        echo "$UPTIME_NOW" > "$LIMP_STATE_FILE"
     fi
 else
     # Should exit limp mode
     if [ "$CURRENT_LIMP_STATE" == "true" ]; then
-        TIME_IN_LIMP=$((NOW - LIMP_MODE_ENTRY_TIME))
+        TIME_IN_LIMP=$((UPTIME_NOW - LIMP_MODE_ENTRY_TIME))
 
         if [ $TIME_IN_LIMP -ge $LIMP_MODE_MIN_DURATION ]; then
             log "EXITING LIMP MODE (consensus: $LIMP_RATIO, duration: ${TIME_IN_LIMP}s)"

@@ -31,7 +31,8 @@ else:
         when = self.base + offset
         with patch.object(runtime.time, 'time', return_value=when), \
                 patch.object(runtime.time, 'time_ns', return_value=when * 10**9), \
-                patch.object(runtime.time, 'monotonic', return_value=when):
+                patch.object(runtime.time, 'monotonic', return_value=when), \
+                patch.object(runtime.time, 'clock_gettime', return_value=when):
             if records is None:
                 self.runner.tick(when)
             else:
@@ -198,14 +199,14 @@ else:
         self.assertIsNone(protocol.live_destination(destination, self.runner.status(self.base + 270), self.base + 270))
 
     def test_busy_agreement_prevents_rotation(self):
-        self.runner.busy_path.write_text(str(self.base + 290))
+        self.runner.write_busy(self.base + 290)
         self.tick(270, {})
         self.assertEqual(self.frequencies(), rendezvous.ANCHORS)
 
     def test_clockless_parking_waits_for_another_radio_operation(self):
         self.tick(270, {})
         (self.root / 'initial_time_synced').unlink()
-        self.runner.busy_path.write_text(str(self.base + 310))
+        self.runner.write_busy(self.base + 310)
         self.tick(300)
         self.assertEqual(self.frequencies(), {'2.4': 2437, '5': 5220})
         self.tick(311)

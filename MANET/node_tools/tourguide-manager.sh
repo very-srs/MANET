@@ -237,7 +237,10 @@ restore_data() {
 trap restore_data EXIT
 trap 'exit 1' HUP INT TERM
 log "Hopping $TOURGUIDE_RADIO to lobby ($LOBBY_FREQ)..."
-TOURGUIDE_DEADLINE=$((SECONDS + 55))
+# The hard cap on time away from the data channel runs on the boot clock.
+# Bash's SECONDS follows the wall clock, so a time sync stepping it back
+# could hold the radio in the lobby (and the channel lock) for that long.
+TOURGUIDE_DEADLINE=$(( $(uptime_now) + 55 ))
 if [ "$DATA_FREQ" != "$LOBBY_FREQ" ]; then
     hop_to_lobby_frequency "$TOURGUIDE_RADIO" "$LOBBY_FREQ" "$TOURGUIDE_CONF" || exit 1
 fi
@@ -245,7 +248,8 @@ sleep 3
 
 # Refresh the authenticated beacon throughout the common rendezvous interval.
 # Alfred replication and manager wakeups can miss a single early broadcast.
-while [ "$(date +%s)" -lt "$RENDEZVOUS_END" ] && [ "$SECONDS" -lt "$TOURGUIDE_DEADLINE" ]; do
+while [ "$(date +%s)" -lt "$RENDEZVOUS_END" ]; do
+    [ "$(uptime_now)" -lt "$TOURGUIDE_DEADLINE" ] || break
     AUTH_HELPER=$(python3 "$AGREEMENT_TOOL" helper-encode --channels "$CHANNELS_JSON" --size "$MY_PARTITION_SIZE") || break
     printf '%s' "$AUTH_HELPER" | timeout 2 alfred -s "$ALFRED_AUTH_HELPER_TYPE"
     printf '%s' "$HELPER_PAYLOAD" | timeout 2 alfred -s "$ALFRED_HELPER_TYPE"

@@ -14,6 +14,13 @@
 # State lives in /var/lib, not /var/run: a dangerous apply can end in a reboot,
 # and the node still has to honour the deadline afterwards.
 #
+# The deadline runs on the boot clock (/proc/uptime), never the wall clock:
+# a time sync that steps the wall clock must not end or extend the trial.
+# The boot clock restarts at a reboot, so the deadline is tied to a boot ID.
+# The first new boot during a trial gets the full grace again, because the
+# mesh has to re-form after the reboot; any later boot checks at once, so a
+# node that keeps rebooting cannot postpone its rollback.
+#
 # A node with no peers before the change has nothing to compare against and
 # commits: that is the solo bench case, where "the mesh did not come back"
 # cannot be distinguished from "there was never anyone there".
@@ -30,6 +37,24 @@ LOG_TAG="CONFIG-ROLLBACK"
 # How long the mesh gets to re-form before we give up on the change. Supplicant
 # restart, SAE, and batman re-discovery all have to fit inside it.
 GRACE_SECONDS="${MANET_ROLLBACK_GRACE:-300}"
+UPTIME_FILE="${MESH_UPTIME_FILE:-/proc/uptime}"
+BOOT_ID_FILE="${MANET_BOOT_ID_FILE:-/proc/sys/kernel/random/boot_id}"
+
+# Whole seconds on the boot clock, and this boot's ID.
+uptime_now() {
+    local up _
+    read -r up _ < "$UPTIME_FILE" || return 1
+    up=${up%.*}
+    [[ "$up" =~ ^[0-9]+$ ]] || return 1
+    echo "$up"
+}
+
+boot_id() {
+    local id
+    read -r id < "$BOOT_ID_FILE" || return 1
+    [[ "$id" =~ ^[0-9a-f-]+$ ]] || return 1
+    echo "$id"
+}
 
 log() {
     echo "[$(date +'%Y-%m-%d %H:%M:%S')] - $LOG_TAG: $1"
@@ -48,9 +73,10 @@ do_arm() (
     [[ "$GRACE_SECONDS" =~ ^[0-9]+$ ]] || { log "ERROR: invalid rollback grace period"; return 1; }
     [ ! -f "$STATE_FILE" ] || { log "ERROR: a rollback trial is already armed"; return 1; }
 
-    local peers deadline snapshot f
+    local peers deadline snapshot f now boot
     peers=$(peer_count) || { log "ERROR: cannot establish peers before the change"; return 1; }
-    deadline=$(( $(date +%s) + 10#$GRACE_SECONDS ))
+    now=$(uptime_now) && boot=$(boot_id) || { log "ERROR: cannot read the boot clock"; return 1; }
+    deadline=$(( now + 10#$GRACE_SECONDS ))
 
     # Publish only a complete snapshot. Failed copies/writes leave no armed
     # state, and a second change cannot replace an ongoing trial's backup.
@@ -71,7 +97,9 @@ do_arm() (
     {
         echo "VERSION='$version'"
         echo "PEERS_BEFORE=$peers"
+        echo "BOOT_ID='$boot'"
         echo "DEADLINE=$deadline"
+        echo "REARMED=0"
     } > "$snapshot/state" || { log "ERROR: cannot write rollback state"; return 1; }
     rm -rf "$STATE_DIR" || return 1
     mv -T "$snapshot" "$STATE_DIR" || return 1
@@ -114,11 +142,25 @@ do_restore() {
     log "Restore complete"
 }
 
+# Restart the grace on this boot's clock, once per trial.
+rearm() {
+    local now="$1" boot="$2" tmp
+    [[ "$GRACE_SECONDS" =~ ^[0-9]+$ ]] || return 1
+    tmp=$(mktemp "$STATE_DIR/state.XXXXXX") || return 1
+    {
+        echo "VERSION='$VERSION'"
+        echo "PEERS_BEFORE=$PEERS_BEFORE"
+        echo "BOOT_ID='$boot'"
+        echo "DEADLINE=$(( now + 10#$GRACE_SECONDS ))"
+        echo "REARMED=1"
+    } > "$tmp" && mv -f "$tmp" "$STATE_FILE" || { rm -f "$tmp"; return 1; }
+}
+
 # -------------------------------------------------------------- check --------
 do_check() {
     [ -f "$STATE_FILE" ] || return 0
 
-    VERSION=''; PEERS_BEFORE=''; DEADLINE=''
+    VERSION=''; PEERS_BEFORE=''; DEADLINE=''; BOOT_ID=''; REARMED=''
     # Our own file, written by do_arm: safe to source.
     . "$STATE_FILE" || return 1
     if [[ ! "$PEERS_BEFORE" =~ ^[0-9]+$ || ! "$DEADLINE" =~ ^[0-9]+$ ]]; then
@@ -130,9 +172,20 @@ do_check() {
         return $?
     fi
 
-    local now
-    now=$(date +%s)
-    [ "$now" -lt "$DEADLINE" ] && return 0
+    local now boot
+    now=$(uptime_now) && boot=$(boot_id) || { log "ERROR: cannot read the boot clock"; return 1; }
+    if [ "$BOOT_ID" != "$boot" ]; then
+        # A deadline from another boot means nothing on this boot's clock.
+        # A state file without BOOT_ID predates the boot clock (wall seconds).
+        if [ "${REARMED:-0}" = 0 ]; then
+            rearm "$now" "$boot" || return 1
+            log "Rebooted during the trial for $VERSION: deadline in ${GRACE_SECONDS}s"
+            return 0
+        fi
+        log "Rebooted again during the trial for $VERSION: checking now"
+    elif [ "$now" -lt "$DEADLINE" ]; then
+        return 0
+    fi
 
     if [ "${PEERS_BEFORE:-0}" -eq 0 ]; then
         log "Committing $VERSION: no peers before the change, nothing to compare"

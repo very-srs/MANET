@@ -15,6 +15,7 @@ TOOLS = Path(__file__).resolve().parent
 SPEC = importlib.util.spec_from_file_location('mesh_time_sync', TOOLS / 'mesh-time-sync.py')
 time_sync = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(time_sync)
+BOOT_NOW = 5000.0  # fake CLOCK_BOOTTIME
 OWN = '02:00:00:00:00:01'
 PEER = '02:00:00:00:00:02'
 THIRD = '02:00:00:00:00:03'
@@ -198,15 +199,21 @@ with (root / 'commands').open('a') as out:
 
     def step(self, advance=0):
         self.clock += advance
-        with patch.object(time_sync.time, 'monotonic', return_value=self.clock), patch.object(time_sync.time, 'time', return_value=2000):
+        with patch.object(time_sync.time, 'monotonic', return_value=self.clock), \
+                patch.object(time_sync.time, 'time', return_value=2000), \
+                patch.object(time_sync.time, 'clock_gettime', return_value=BOOT_NOW):
             return self.service.step()
 
     def good(self, address='10.30.2.7', mode='^', correction='0.00001', age='1'):
         (self.root / 'tracking').write_text(tracking(correction=correction))
         (self.root / 'sources').write_text(sources(address, mode, age))
 
-    def gps(self, timestamp=2000, fix=True):
-        (self.root / 'gps_status.json').write_text(json.dumps({'has_fix': fix, 'timestamp': timestamp}))
+    def gps(self, timestamp=2000, fix=True, time_ok=True):
+        # The reader's file age is on the boot clock (written_boot); timestamp
+        # keeps its old meaning here, as the same age against the wall at 2000.
+        status = {'has_fix': fix, 'timestamp': timestamp, 'time_ok': time_ok,
+                  'written_boot': BOOT_NOW - (2000 - timestamp)}
+        (self.root / 'gps_status.json').write_text(json.dumps(status))
 
     def uplink(self):
         (self.root / 'mesh-gateway.state').touch()
@@ -424,8 +431,26 @@ with (root / 'commands').open('a') as out:
     def test_future_or_stale_gps_status_is_not_a_local_time_source(self):
         for timestamp in [1900, 2010, float('nan')]:
             self.gps(timestamp=timestamp)
-            with patch.object(time_sync.time, 'time', return_value=2000):
+            with patch.object(time_sync.time, 'time', return_value=2000), \
+                    patch.object(time_sync.time, 'clock_gettime', return_value=BOOT_NOW):
                 self.assertEqual(self.service.roles(), (False, ''))
+
+    def test_gps_time_not_fit_to_serve_is_not_a_local_time_source(self):
+        self.gps(time_ok=False)
+        with patch.object(time_sync.time, 'clock_gettime', return_value=BOOT_NOW):
+            self.assertEqual(self.service.roles(), (False, ''))
+
+    def test_wall_clock_step_does_not_change_gps_freshness(self):
+        self.gps()
+        for wall in (2000 + 3600, 2000 - 3600, 0):
+            with patch.object(time_sync.time, 'time', return_value=wall), \
+                    patch.object(time_sync.time, 'clock_gettime', return_value=BOOT_NOW):
+                self.assertEqual(self.service.roles(), (True, ''), wall)
+
+    def test_status_without_boot_stamp_is_not_a_local_time_source(self):
+        (self.root / 'gps_status.json').write_text(json.dumps({'has_fix': True, 'timestamp': 2000}))
+        with patch.object(time_sync.time, 'clock_gettime', return_value=BOOT_NOW):
+            self.assertEqual(self.service.roles(), (False, ''))
 
     def test_current_uplink_marker_starts_internet_sync_and_verified_advertisement(self):
         self.uplink(); self.step()

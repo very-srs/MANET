@@ -790,7 +790,7 @@ def enrich_interfaces_with_registry_mcs(ifaces, node_data):
         iface['rx_mcs'] = extra.get('rx_mcs', '')
     return ifaces
 
-_POWER_CACHE = {'at': 0.0, 'data': {'available': False}}
+_POWER_CACHE = {'at': float('-inf'), 'data': {'available': False}}
 
 def get_power_status():
     """Throttling / under-voltage state, from manet-power-status.sh --json.
@@ -799,7 +799,7 @@ def get_power_status():
     too, and one reading of the bitmask is enough for the whole node. Cached
     briefly: every open dashboard polls this, and the answer changes slowly.
     """
-    now = time.time()
+    now = time.monotonic()
     if now - _POWER_CACHE['at'] < 10:
         return _POWER_CACHE['data']
     data = {'available': False}
@@ -846,7 +846,13 @@ def assemble_local_data():
     try:
         with open('/run/gps_status.json') as _gf:
             _gd = json.load(_gf)
-        if _gd.get('has_fix') and time.time() - _gd.get('timestamp', 0) <= GPS_FIX_MAX_AGE:
+        # Age on the boot clock where the reader provides it, so a time sync
+        # stepping the wall clock neither hides nor freezes the position.
+        if isinstance(_gd.get('written_boot'), (int, float)):
+            _age = time.clock_gettime(time.CLOCK_BOOTTIME) - _gd['written_boot']
+        else:
+            _age = time.time() - _gd.get('timestamp', 0)
+        if _gd.get('has_fix') and -5 <= _age <= GPS_FIX_MAX_AGE:
             gps = {
                 'available': True,
                 'lat': str(_gd['latitude']),
@@ -1550,10 +1556,10 @@ let PEER_LOADING_IDS = new Set();
 let localBusy = false, dataBusy = false;
 let webRetryAt = 0;
 async function statusFetch(url) {
-  if (Date.now() < webRetryAt) throw new Error('Radio busy; retrying shortly');
+  if (performance.now() < webRetryAt) throw new Error('Radio busy; retrying shortly');
   const r = await fetch(url, {signal: AbortSignal.timeout(45000)});
   if (r.status === 503) {
-    webRetryAt = Date.now() + 5000;
+    webRetryAt = performance.now() + 5000;
     throw new Error('Radio busy; retrying shortly');
   }
   return r;
@@ -2593,6 +2599,8 @@ import hashlib
 ALFRED_CONFIG_TYPE = 70
 PENDING_CONFIG_FILE = '/var/run/mesh_pending_config.json'
 ROLLBACK_STATE_FILE = '/var/lib/manet-config-rollback/state'
+BOOT_ID_FILE = '/proc/sys/kernel/random/boot_id'
+ROLLBACK_GRACE_SECONDS = 300  # mesh-config-rollback.sh GRACE_SECONDS default
 
 def broadcast_config_package(pkg):
     """Write an authenticated, encrypted config package to Alfred type 70."""
@@ -2649,6 +2657,10 @@ def read_rollback_state():
 
     Written by mesh-config-rollback.sh as shell assignments; read rather than
     sourced, because it is only ever consumed here for display.
+
+    The deadline is on the boot clock of the boot named by BOOT_ID, matching
+    the controller: after a first reboot it re-arms the full grace on its
+    next check, after a second it decides at once.
     """
     state = load_kv_file(ROLLBACK_STATE_FILE)
     if not state:
@@ -2657,11 +2669,21 @@ def read_rollback_state():
         deadline = int(state.get('DEADLINE', '0') or 0)
     except ValueError:
         deadline = 0
+    try:
+        with open(BOOT_ID_FILE) as f:
+            boot = f.read().strip()
+    except OSError:
+        boot = ''
+    if boot and state.get('BOOT_ID') == boot:
+        left = deadline - time.clock_gettime(time.CLOCK_BOOTTIME)
+    elif state.get('REARMED') != '1':
+        left = ROLLBACK_GRACE_SECONDS
+    else:
+        left = 0
     return {
         'armed':        True,
         'version':      state.get('VERSION', ''),
-        'deadline':     deadline,
-        'seconds_left': max(0, deadline - int(time.time())),
+        'seconds_left': max(0, int(left)),
         'peers_before': state.get('PEERS_BEFORE', '0'),
     }
 
@@ -3004,6 +3026,10 @@ class MeshHandler(RequestLimits, ManageRoutes, http.server.BaseHTTPRequestHandle
         self.send_header('Content-Type', 'application/json')
         self.send_header('Content-Length', str(len(body)))
         self.send_header('Cache-Control', 'no-store')
+        # The mesh's wall clock, which can differ from the browser's: a mesh
+        # without GPS or internet keeps its own shared time. Pages count down
+        # to mesh times (activate_at) against this, never Date.now().
+        self.send_header('X-Mesh-Time', f'{time.time():.3f}')
         self.end_headers()
         self.wfile.write(body)
 

@@ -242,8 +242,13 @@ class Transition:
             searching = False
         else:
             now = int(time.time())
-            busy = text(self.run / 'manet-acs-busy')
-            if busy and 0 <= int(busy) - now <= 125:
+            boot = text(self.boot_id).replace('-', '')
+            try:
+                busy_boot, expiry = text(self.run / 'manet-acs-busy').split()
+                busy = busy_boot == boot and 0 <= float(expiry) - time.clock_gettime(time.CLOCK_BOOTTIME) <= 125
+            except ValueError:
+                busy = False
+            if busy:
                 raise RuntimeError('Channel agreement is in progress; retry the role transition')
             state = read_json(self.state / 'agreement.json')
             current, configured = {}, {}
@@ -261,7 +266,7 @@ class Transition:
                     stable = False
             searching = not current
             freq = rendezvous.ANCHORS[band]
-            status = {'boot': text(self.boot_id).replace('-', ''), 'acs': True, 'ready': False,
+            status = {'boot': boot, 'acs': True, 'ready': False,
                       'current': current, 'allowed': {b: sorted(agreement.CHANNELS[b]) for b in current},
                       'stable': stable and current == configured,
                       'discovery': read_json(self.run / 'manet-rendezvous.json').get('mode') == 'search'}

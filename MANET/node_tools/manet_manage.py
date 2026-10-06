@@ -105,6 +105,22 @@ _measure_status = {
     'done': 0, 'total': 0, 'started_at': None, 'current_started_at': None,
     'current': None, 'last_result': None,
 }
+# Monotonic twins of started_at/current_started_at. Durations come from these,
+# so a time sync stepping the wall clock mid-measurement cannot distort them;
+# the wall values remain for dated records.
+_measure_mono = {'started': None, 'current': None}
+
+
+def measure_status_snapshot():
+    """The status reply, with durations measured on the monotonic clock."""
+    now = time.monotonic()
+    with _measure_lock:
+        status = dict(_measure_status)
+        started, current = _measure_mono['started'], _measure_mono['current']
+    status['elapsed'] = int(now - started) if started is not None and status['started_at'] else None
+    status['current_elapsed'] = (int(now - current)
+                                 if current is not None and status['current_started_at'] else None)
+    return status
 
 
 # Helpers
@@ -695,10 +711,10 @@ def radio_ack_snapshot(version):
     return latest
 
 def wait_radio_acks(version, expected_hosts, timeout=75):
-    deadline = time.time() + timeout
+    deadline = time.monotonic() + timeout
     expected = set(expected_hosts)
     last = {}
-    while time.time() < deadline:
+    while time.monotonic() < deadline:
         last = radio_ack_snapshot(version)
         ok_hosts = {h for h, a in last.items() if a.get('ok') is True}
         bad = {h: a for h, a in last.items() if a.get('ok') is False}
@@ -1138,6 +1154,7 @@ def run_measurement_session(label, pairs, tests, duration, udp_bitrate):
             for test_type in tests:
                 now = int(time.time())
                 with _measure_lock:
+                    _measure_mono['current'] = time.monotonic()
                     _measure_status.update({
                         'progress': f'{src_name}→{dst_name} {test_type} ({done+1}/{total})',
                         'done': done,
@@ -1547,12 +1564,25 @@ const MANAGE_BASE = (() => {
 // text "Not found", causing JSON.parse to fail.
 function U(path) { return MANAGE_BASE + path; }
 
+// Mesh time can differ from this browser's clock (a mesh without GPS or
+// internet keeps its own shared time), so countdowns to mesh times such as
+// activate_at use meshNow(). Every JSON reply carries the mesh clock; between
+// replies it advances on performance.now(), which a correction of this
+// device's own clock cannot move.
+let meshAnchor = null;
+function meshNow() {
+  return meshAnchor ? meshAnchor.mesh + (performance.now() - meshAnchor.perf) / 1000
+                    : Date.now() / 1000;
+}
+
 let manageRetryAt = 0;
 async function manageFetch(url, options) {
-  if (Date.now() < manageRetryAt) throw new Error('Radio busy; retry shortly');
+  if (performance.now() < manageRetryAt) throw new Error('Radio busy; retry shortly');
   const response = await fetch(url, {...options, signal: AbortSignal.timeout(options ? 180000 : 45000)});
+  const meshTime = parseFloat(response.headers.get('X-Mesh-Time'));
+  if (Number.isFinite(meshTime)) meshAnchor = {mesh: meshTime, perf: performance.now()};
   if (response.status === 503) {
-    manageRetryAt = Date.now() + 5000;
+    manageRetryAt = performance.now() + 5000;
     throw new Error('Radio busy; retry shortly');
   }
   if (response.status === 401) {
@@ -1777,7 +1807,7 @@ function confirmRadioDown(nodeIp, iface) {
 }
 
 async function verifyRadioExecution(nodeIp, iface, state, activateAt) {
-  const delayMs = Math.max(0, ((activateAt || 0) - Math.floor(Date.now() / 1000) + 3) * 1000);
+  const delayMs = Math.max(0, ((activateAt || 0) - Math.floor(meshNow()) + 3) * 1000);
   await new Promise(resolve => setTimeout(resolve, delayMs));
 
   showOverlay(`Verifying ${iface} ${state} after coordinated apply...`, 'info');
@@ -1848,12 +1878,12 @@ function lastResultText(r) {
 function renderMeasureStats(d) {
   const el = document.getElementById('progress-stats');
   if (!el) return;
-  const now = Math.floor(Date.now() / 1000);
   const done = d.done || 0;
   const total = d.total || 0;
   const pct = total ? Math.round((done / total) * 100) : 0;
-  const elapsed = d.started_at ? fmtSecs(now - d.started_at) : '0s';
-  const curElapsed = d.current_started_at ? fmtSecs(now - d.current_started_at) : '-';
+  // Durations are measured by the node on its monotonic clock.
+  const elapsed = d.elapsed != null ? fmtSecs(d.elapsed) : '0s';
+  const curElapsed = d.current_elapsed != null ? fmtSecs(d.current_elapsed) : '-';
   const cur = d.current ? `${d.current.src} -> ${d.current.dst} ${d.current.test_type}` : '-';
   el.innerHTML = `
     <div class="stat-chip"><span>completed</span><strong>${done}/${total} (${pct}%)</strong></div>
@@ -1997,7 +2027,7 @@ async function toggleIface(nodeIp, nodeId, iface, state) {
     const d = await r.json();
     if (d.ok) {
       if (d.activate_at) {
-        const wait = Math.max(0, d.activate_at - Math.floor(Date.now() / 1000));
+        const wait = Math.max(0, d.activate_at - Math.floor(meshNow()));
         showOverlay(`${iface} ${state} ACKed by ${d.acked?.length || 0}/${d.expected?.length || 0} nodes. Applying in ${wait}s...`, 'ok');
         showMsg(`${iface} ${state} scheduled through Alfred`, 'ok');
         verifyRadioExecution(nodeIp, iface, state, d.activate_at);
@@ -2044,7 +2074,7 @@ async function toggleAll(iface, state) {
     });
     const d = await r.json();
     if (d.ok) {
-      const wait = d.activate_at ? Math.max(0, d.activate_at - Math.floor(Date.now() / 1000)) : 0;
+      const wait = d.activate_at ? Math.max(0, d.activate_at - Math.floor(meshNow())) : 0;
       showOverlay(`${iface} ${state} ACKed by ${d.acked?.length || 0}/${d.expected?.length || 0} nodes. Applying in ${wait}s...`, 'ok');
       showMsg(`${iface} ${state} scheduled on all nodes through Alfred`, 'ok');
       verifyRadioExecution('all', iface, state, d.activate_at);
@@ -3085,9 +3115,13 @@ def voice_status():
         with open(VOICE_STATE_FILE) as f:
             state = json.load(f)
         # A stale file means the daemon died without cleaning up; do not let it
-        # masquerade as live state.
-        age = time.time() - state.get('updated', 0)
-        if age < 30:
+        # masquerade as live state. The boot-clock stamp survives a time sync
+        # stepping the wall clock; a file from an older daemon has only wall.
+        if isinstance(state.get('updated_boot'), (int, float)):
+            age = time.clock_gettime(time.CLOCK_BOOTTIME) - state['updated_boot']
+        else:
+            age = time.time() - state.get('updated', 0)
+        if 0 <= age < 30:
             out.update(state)
             out['state_age'] = int(age)
         else:
@@ -3458,7 +3492,7 @@ function renderStatus(s) {
 
     const activateAt = pending.activate_at || 0;
     if (activateAt > 0) {
-      const secs = Math.max(0, activateAt - Math.floor(Date.now() / 1000));
+      const secs = Math.max(0, activateAt - Math.floor(meshNow()));
       document.getElementById('action-msg').textContent =
         secs > 0 ? `Applying in ${secs}s...` : 'Applying now...';
     }
@@ -3965,8 +3999,8 @@ class ManageRoutes:
                 self.send_json({'error': str(e)}, 500)
 
         elif path == '/api/measure/status':
-            with _measure_lock:
-                self.send_json(dict(_measure_status))
+            # measure_status_snapshot takes _measure_lock itself.
+            self.send_json(measure_status_snapshot())
 
         elif path == '/api/uplink/wifi':
             self.send_json(STATUS_CACHE.get('uplink', get_usb_wifi_uplink_status))
@@ -4136,6 +4170,8 @@ class ManageRoutes:
                     _measure_status['done']     = 0
                     _measure_status['total']    = len(pairs) * len(tests)
                     _measure_status['started_at'] = int(time.time())
+                    _measure_mono['started'] = time.monotonic()
+                    _measure_mono['current'] = None
                     _measure_status['current_started_at'] = None
                     _measure_status['current'] = None
                     _measure_status['last_result'] = None

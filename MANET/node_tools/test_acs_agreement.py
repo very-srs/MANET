@@ -174,10 +174,15 @@ class RuntimeTests(AcsHarness):
         self.command('alfred', "Path(os.environ['TEST_ROOT'], 'sent-' + sys.argv[-1]).write_text(sys.stdin.read())")
         self.environment = patch.dict(os.environ, self.env)
         self.environment.start(); self.addCleanup(self.environment.stop)
+        self.elapsed = 10000.5
+        for name in ('monotonic', 'clock_gettime'):
+            clock = patch.object(runtime.time, name, side_effect=lambda *args: self.elapsed)
+            clock.start(); self.addCleanup(clock.stop)
         self.runner = runtime.Runtime()
         self.records = {PEER: {'status': status('b')}, THIRD: {'status': status('c')}}
 
     def tick(self, when, records=None):
+        self.elapsed = 10000.5 + when - self.now
         with patch.object(self.runner, 'receive', return_value=self.records if records is None else records), patch.object(runtime.time, 'time', return_value=when):
             self.runner.tick(when)
 
@@ -196,7 +201,7 @@ class RuntimeTests(AcsHarness):
         self.assertIn('frequency=2462', (self.wpa / 'wpa_supplicant-wlan0.conf').read_text())
         self.assertEqual(self.runner.state['protocol']['phase'], 'attempted')
         self.assertFalse(self.runner.status(plan['activate_at'] + 1)['ready'])
-        self.assertEqual(self.runner.state['hold_until'], plan['activate_at'] + p.RECOVERY_SECONDS)
+        self.assertEqual(self.runner.state['hold_until'], self.elapsed + p.RECOVERY_SECONDS)
         self.assertIn('wpa_cli -i wlan0 reconfigure', (self.root / 'commands').read_text())
 
     def test_failed_durable_write_cannot_publish_vote_on_retry(self):
@@ -233,17 +238,21 @@ class RuntimeTests(AcsHarness):
         self.runner.state = {'clock_boot': 'f' * 32, 'protocol': {'round': future // 180, 'phase': 'expired'},
                              'hold_until': future, 'recovered_round': future // 180}
         self.runner.save()
+        self.runner = runtime.Runtime()
+        hold = self.runner.state['hold_until']
         (self.root / 'initial_time_synced').unlink()
         self.tick(future)
-        self.assertEqual(self.runner.state['hold_until'], future)
+        self.assertEqual(self.runner.state['hold_until'], hold)
         (self.root / 'initial_time_synced').touch()
         self.tick(self.now)
-        plan = self.runner.state['protocol']['plan']
-        self.assertEqual(plan['round'], self.now // 180)
-        self.assertNotIn('hold_until', self.runner.state)
+        saved = self.runner.state['protocol']
+        self.assertEqual(saved['round'], self.now // 180)
+        self.assertEqual(hold, 10000.5 + p.RECOVERY_SECONDS)
+        self.assertEqual(self.runner.state['hold_until'], hold)
         self.runner = runtime.Runtime()
         self.tick(self.now + 1)
-        self.assertEqual(self.runner.state['protocol']['plan'], plan)
+        self.assertEqual(self.runner.state['protocol'], saved)
+        self.assertEqual(self.runner.state['hold_until'], hold)
 
     def test_missed_commit_recovered_from_peer_already_on_destination(self):
         v = view()
@@ -313,9 +322,9 @@ class RuntimeTests(AcsHarness):
         self.assertIn('frequency=2437', (self.wpa / 'wpa_supplicant-wlan0.conf').read_text())
 
     def test_external_settling_marker_survives_daemon_polling(self):
-        self.runner.busy_path.write_text(str(self.now + 30))
+        self.runner.write_busy(self.elapsed + 30)
         self.tick(self.now)
-        self.assertTrue(self.runner.busy(self.now))
+        self.assertTrue(self.runner.busy())
         self.assertNotIn('plan', self.runner.state['protocol'])
 
     def test_unchanged_plan_does_not_start_an_eight_minute_hold(self):
