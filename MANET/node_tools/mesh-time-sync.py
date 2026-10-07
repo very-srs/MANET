@@ -26,6 +26,9 @@ ATTEMPT_SECONDS = 90
 RETRY_SECONDS = 300
 REFRESH_SECONDS = 6 * 60 * 60
 REFRESH_JITTER_SECONDS = 10 * 60
+# One source per operator: three remain to vote if one is unreachable.
+# Operators: Cloudflare, Netnod, PTB and SIDN Labs.
+NTS_SERVERS = ('time.cloudflare.com', 'sth1.nts.netnod.se', 'ptbtime1.ptb.de', 'ntppool1.time.nl')
 
 
 def atomic_text(path, text):
@@ -130,6 +133,22 @@ def settled(tracking):
         return False
 
 
+def nts_authenticated(authdata, address):
+    # Join -n authdata to -n sources by the full NTP address (also for IPv6),
+    # not reverse DNS or the potentially different NTS-KE server address.
+    for line in authdata.splitlines():
+        fields = line.split()
+        if len(fields) != 10 or fields[0] != address:
+            continue
+        try:
+            # NTS alone can mean KE is still pending. Require negotiated keys;
+            # KeyID/Last can be 0/- when cookies were restored from disk.
+            return fields[1] == 'NTS' and int(fields[3]) > 0 and int(fields[4]) > 0
+        except ValueError:
+            return False
+    return False
+
+
 def chrony_config(network, gps=False, uplink='', peer='', initial=True):
     lines = ['# Managed by mesh-time-sync.py; role changes replace this file.',
              'driftfile /var/lib/chrony/chrony.drift', 'leapsecmode slew']
@@ -140,7 +159,13 @@ def chrony_config(network, gps=False, uplink='', peer='', initial=True):
     if uplink:
         if not re.fullmatch(r'[A-Za-z0-9_.-]{1,15}', uplink):
             raise ValueError('invalid uplink interface')
-        lines += ['pool pool.ntp.org iburst maxsources 2', 'bindacqdevice ' + uplink]
+        lines += ['server ' + host + ' iburst nts' for host in NTS_SERVERS]
+        # chrony 4.6 binds both NTP (UDP 123) and NTS-KE (TCP 4460) clients.
+        lines += ['bindacqdevice ' + uplink, 'ntsdumpdir /var/lib/chrony']
+        if initial:
+            # Only dates are waived, until the first clock update. Certificate
+            # signatures, hostname and trust chain are still verified.
+            lines.append('nocerttimecheck 1')
     if peer:
         # Prefer settling within one poll interval instead of the default three;
         # the ordinary Linux slew-rate cap still applies to large corrections.
@@ -262,6 +287,9 @@ class TimeService:
             # not jump backwards through ACS rounds or admin replay timestamps.
             self.command(['chronyc', 'makestep', '0.1', '0'])
             profile = self.chrony_conf.read_text().replace('makestep 0.1 3\n', '')
+            # The live daemon has already consumed its first clock update.
+            # Do not reopen the certificate-date exception on its next restart.
+            profile = profile.replace('nocerttimecheck 1\n', '')
             atomic_text(self.chrony_conf, profile)
             self.active_config = profile
             atomic_text(self.marker, source + '\n')
@@ -286,11 +314,13 @@ class TimeService:
             try:
                 self.configure(chrony_config(network, gps, uplink, initial=initial), start=True)
                 source = self.clock_source()
+                internet_ready = bool(source and uplink and source['mode'] == '^'
+                                      and nts_authenticated(self.command(['chronyc', '-n', 'authdata']),
+                                                            source['address']))
             except (OSError, ValueError, subprocess.SubprocessError):
                 self.flags()
                 raise
             gps_ready = bool(source and gps and source['mode'] == '#' and source['address'] == 'GPS')
-            internet_ready = bool(source and uplink and source['mode'] == '^')
             if gps_ready or internet_ready:
                 try:
                     self.complete('GPS' if gps_ready else 'internet')
