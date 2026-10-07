@@ -21,6 +21,16 @@ PEER = '02:00:00:00:00:02'
 THIRD = '02:00:00:00:00:03'
 RADIO = '02:00:00:00:01:02'
 NETWORK = ipaddress.IPv4Network('10.30.2.0/24')
+# Published chronyc 4.6 authdata transcript format, with documentation addresses:
+# https://chrony-project.org/doc/4.6/chronyc.html#authdata
+# IPv6 also exercises untruncated -n output.
+AUTHDATA = '''Name/IP address             Mode KeyID Type KLen Last Atmp  NAK Cook CLen
+=========================================================================
+192.0.2.1                   NTS     1   15  256 135m    0    0    8  100
+192.0.2.2                    SK    30   13  128    -    0    0    0    0
+192.0.2.3                     -     0    0    0    -    0    0    0    0
+2001:db8:1234:5678:abcd::1234 NTS     0   30  128    -    0    0    8  100
+'''
 
 
 def node(mac, ip, aliases='', ntp=True, state='ACTIVE'):
@@ -42,7 +52,11 @@ Leap status     : {leap}
 
 
 def sources(address='10.30.2.7', mode='^', age='1', selected='*', reach='377', poll=6):
-    return f'MS Name/IP address Stratum Poll Reach LastRx Last sample\n{mode}{selected} {address} 1 {poll} {reach} {age} +1us[+1us] +/- 1ms\n'
+    # Same published sources transcript format; vary fields for failure cases.
+    return f'''MS Name/IP address         Stratum Poll Reach LastRx Last sample
+===============================================================================
+{mode}{selected} {address:25s}     1 {poll:3d}   {reach:>3s} {age:>5s}    +18us[  +22us] +/-  538us
+'''
 
 
 class SelectionTests(unittest.TestCase):
@@ -116,6 +130,19 @@ class ClockTests(unittest.TestCase):
         self.assertEqual(time_sync.selected_source(sources('GPS', '#', poll=4))['mode'], '#')
         self.assertIsNone(time_sync.selected_source(sources('GPS', '#', age='60', poll=4)))
 
+    def test_authentication_matches_selected_address_and_requires_nts_keys(self):
+        for address in ('192.0.2.1', '2001:db8:1234:5678:abcd::1234'):
+            selected = time_sync.selected_source(sources(address))
+            self.assertTrue(time_sync.nts_authenticated(AUTHDATA, selected['address']))
+        for address in ('192.0.2.2', '192.0.2.3', '192.0.2.4', 'GPS', 'time.cloudflare.com'):
+            self.assertFalse(time_sync.nts_authenticated(AUTHDATA, address))
+        for report in ('', '200 OK', '192.0.2.1 NTS',
+                       '192.0.2.1 NTS 0 0 0 - 1 0 0 0',
+                       '192.0.2.1 NTS 1 15 0 12 0 0 8 100',
+                       '192.0.2.1 NTS 1 unknown 256 12 0 0 8 100'):
+            with self.subTest(report=report):
+                self.assertFalse(time_sync.nts_authenticated(report, '192.0.2.1'))
+
     def test_source_profiles_use_configured_mesh_and_bind_internet_to_uplink(self):
         network = ipaddress.IPv4Network('10.44.0.0/16')
         gps = time_sync.chrony_config(network, gps=True)
@@ -124,14 +151,28 @@ class ClockTests(unittest.TestCase):
         self.assertNotIn('pool ', gps)
         self.assertNotIn('local stratum', gps)
         internet = time_sync.chrony_config(network, uplink='usb0')
-        self.assertIn('pool pool.ntp.org iburst maxsources 2', internet)
+        servers = [line for line in internet.splitlines() if line.startswith('server ')]
+        self.assertEqual(servers, [
+            'server time.cloudflare.com iburst nts',
+            'server sth1.nts.netnod.se iburst nts',
+            'server ptbtime1.ptb.de iburst nts',
+            'server ntppool1.time.nl iburst nts'])
+        self.assertNotIn('pool ', internet)
         self.assertIn('bindacqdevice usb0', internet)
+        self.assertIn('ntsdumpdir /var/lib/chrony', internet)
+        self.assertIn('nocerttimecheck 1', internet)
+        warm = time_sync.chrony_config(network, gps=True, uplink='usb0', initial=False)
+        self.assertNotIn('nocerttimecheck', warm)
+        self.assertNotIn('makestep', warm)
+        self.assertIn('refclock SHM 0 refid GPS', warm)
         client = time_sync.chrony_config(network, peer='10.44.0.7')
         self.assertIn('server 10.44.0.7 iburst', client)
         self.assertIn('deny all', client)
         self.assertIn('corrtimeratio 1', client)
         self.assertIn('leapsecmode slew', client)
         self.assertNotIn('pool ', client)
+        self.assertNotIn(' nts', client)
+        self.assertNotIn('bindacqdevice', client)
         with self.assertRaises(ValueError):
             time_sync.chrony_config(network, uplink='usb0\nserver malicious')
 
@@ -149,6 +190,7 @@ class RuntimeTests(unittest.TestCase):
         (self.root / 'routes').write_text(json.dumps([route(RADIO, 900), route(THIRD, 432)]))
         (self.root / 'tracking').write_text(tracking(leap='Not synchronised'))
         (self.root / 'sources').write_text(sources(selected='?'))
+        (self.root / 'authdata').write_text('')
         self.env = dict(os.environ, PATH=str(self.bin) + os.pathsep + os.environ['PATH'],
                         MANET_TIME_RUN_DIR=str(self.root), MANET_MESH_CONF=str(self.root / 'mesh.conf'),
                         MANET_CHRONY_CONF=str(self.root / 'chrony.conf'), MANET_SYS_NET=str(self.root / 'net'),
@@ -173,6 +215,8 @@ if sys.argv[1:] == ['makestep', '0.1', '0']:
         sys.exit(1)
     sys.exit(0)
 assert sys.argv[1] == '-n'
+if sys.argv[2] == 'authdata' and (root / 'authdata-fail').exists():
+    sys.exit(1)
 print((root / sys.argv[2]).read_text())
 ''')
         self.command('batctl', '''
@@ -457,9 +501,74 @@ with (root / 'commands').open('a') as out:
         self.assertIn('bindacqdevice usb0', (self.root / 'chrony.conf').read_text())
         self.assertFalse((self.root / 'mesh-ntp.state').exists())
         self.good('192.0.2.1'); self.step(15)
+        self.assertFalse((self.root / 'mesh-ntp.state').exists())
+        self.assertFalse(self.service.marker.exists())
+        (self.root / 'authdata').write_text(AUTHDATA)
+        self.step(15)
         self.assertTrue((self.root / 'mesh-ntp.state').exists())
         self.assertTrue((self.root / 'active').exists())
         self.assertNotIn('batctl', self.history())
+
+    def test_missing_or_wrong_authentication_withdraws_internet_advertisement(self):
+        self.uplink(); self.good('192.0.2.1')
+        for report in ('', '200 OK', AUTHDATA.replace('192.0.2.1', '192.0.2.99'),
+                       AUTHDATA.replace('NTS', 'SK'), AUTHDATA.replace('NTS', '-'),
+                       '192.0.2.1 NTS 0 0 0 - 1 0 0 0'):
+            with self.subTest(report=report):
+                (self.root / 'authdata').write_text(AUTHDATA)
+                self.step(15)
+                self.assertTrue((self.root / 'mesh-ntp.state').exists())
+                (self.root / 'authdata').write_text(report)
+                self.step(15)
+                self.assertFalse((self.root / 'mesh-ntp.state').exists())
+
+    def test_failed_authentication_query_withdraws_internet_advertisement(self):
+        self.uplink(); self.good('192.0.2.1')
+        (self.root / 'authdata').write_text(AUTHDATA)
+        self.step()
+        self.assertTrue((self.root / 'mesh-ntp.state').exists())
+        (self.root / 'authdata-fail').touch()
+        with self.assertRaises(subprocess.CalledProcessError):
+            self.step(15)
+        self.assertFalse((self.root / 'mesh-ntp.state').exists())
+
+    def test_keys_alone_cannot_qualify_an_unsettled_or_unselected_source(self):
+        self.uplink()
+        (self.root / 'authdata').write_text(AUTHDATA)
+        for report, status in ((sources('192.0.2.1', selected='?'), tracking()),
+                               (sources('192.0.2.1', selected='+'), tracking()),
+                               (sources('192.0.2.1', reach='0'), tracking()),
+                               (sources('192.0.2.1', age='5m'), tracking()),
+                               (sources('192.0.2.1'), tracking(correction='1.0')),
+                               (sources('192.0.2.1'), tracking(leap='Not synchronised'))):
+            with self.subTest(report=report, status=status):
+                (self.root / 'sources').write_text(report)
+                (self.root / 'tracking').write_text(status)
+                self.step(15)
+                self.assertFalse((self.root / 'mesh-ntp.state').exists())
+                self.assertFalse(self.service.marker.exists())
+
+    def test_certificate_date_exception_is_not_reopened_by_restarts(self):
+        self.uplink(); self.step()
+        self.assertIn('nocerttimecheck 1', (self.root / 'chrony.conf').read_text())
+        self.good('192.0.2.1')
+        (self.root / 'authdata').write_text(AUTHDATA)
+        self.step(15)
+        self.assertNotIn('nocerttimecheck', (self.root / 'chrony.conf').read_text())
+        self.assertEqual(self.history().count('systemctl restart chrony.service'), 1)
+        self.step(15)
+        self.assertEqual(self.history().count('systemctl restart chrony.service'), 1)
+        self.service = time_sync.TimeService()
+        self.step(15)
+        self.assertNotIn('nocerttimecheck', (self.root / 'chrony.conf').read_text())
+        self.assertIn('ntsdumpdir /var/lib/chrony', (self.root / 'chrony.conf').read_text())
+
+    def test_selected_gps_with_unreachable_nts_does_not_advertise_internet(self):
+        self.uplink(); self.gps(); self.good('GPS', '#'); self.step()
+        self.assertTrue((self.root / 'mesh-ntp-gps.state').exists())
+        self.assertFalse((self.root / 'mesh-ntp.state').exists())
+        self.assertNotIn('chronyc -n authdata', self.history())
+        self.assertNotIn('nocerttimecheck', (self.root / 'chrony.conf').read_text())
 
     def test_uplink_loss_preserves_live_gps_chrony(self):
         self.uplink(); self.gps(); self.good('GPS', '#'); self.step()
