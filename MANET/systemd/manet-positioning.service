@@ -1,0 +1,42 @@
+[Unit]
+Description=MANET ranging positioning and GNSS consistency monitor
+After=network-online.target gps-reader.service alfred.service
+
+[Service]
+Type=simple
+# Fixed public aliases; the daemon itself writes only its owned runtime dir.
+ExecStartPre=+/usr/bin/ln -sfn /run/manet-positioning/position.json /run/manet-position.json
+ExecStartPre=+/usr/bin/ln -sfn /run/manet-positioning/spoof.json /run/manet-spoof.json
+ExecStart=/usr/bin/python3 -B /usr/local/bin/manet-positioning.py
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=10
+DynamicUser=yes
+RuntimeDirectory=manet-positioning
+# Same-boot quarantine survives service restarts/stops. /run clears on reboot.
+RuntimeDirectoryPreserve=yes
+RuntimeDirectoryMode=0755
+UMask=0022
+StandardOutput=journal
+StandardError=journal
+CapabilityBoundingSet=
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+ReadWritePaths=/run/manet-positioning
+LimitNOFILE=64
+MemoryMax=96M
+TasksMax=16
+
+[Install]
+WantedBy=multi-user.target

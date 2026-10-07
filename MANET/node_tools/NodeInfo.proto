@@ -76,6 +76,19 @@ message NodeTelemetry {
     sfixed32 latitude_e7  = 1;
     sfixed32 longitude_e7 = 2;
     sint32   altitude_m   = 3;
+    // Additive R4 fields. Old readers retain 1..3; new readers must not infer
+    // trust, HAE, or freshness from those legacy fields. Alfred is discovery
+    // only: exchanges carry the actual fixes used in a range comparison.
+    enum Source { UNKNOWN = 0; GNSS = 1; RANGED = 2; MANUAL = 3; }
+    Source source = 4;
+    optional float uncertainty_m = 5; // Horizontal 95% circle, not HDOP.
+    optional bool valid = 6;
+    optional float hae_m = 7; // Absent means unknown; altitude_m is legacy MSL.
+    uint32 generation = 8;
+    repeated string used_node_ids = 9; // Transitive ancestry, at most 16.
+    string quality = 10; // good / best_guess (other shapes have no point).
+    optional uint32 age_ms = 11; // Age at publication; not a remote clock.
+    bool anchor_eligible = 12; // RANGED requires good AND solver eligibility.
   }
   GpsLocation location = 23;
   string atak_user     = 24;
