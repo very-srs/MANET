@@ -1,0 +1,46 @@
+[Unit]
+Description=MANET tethered ATAK contact and external position service
+# Ordering only: this service must not start or reconfigure mesh networking.
+After=network-online.target nftables.service gps-reader.service
+# Restart propagation stops us before nftables flushes its ruleset, then runs
+# our ExecStartPre again after nftables starts. This unit owns only manet_atak.
+PartOf=nftables.service
+
+[Service]
+Type=simple
+ExecStartPre=+/usr/bin/python3 /usr/local/bin/manet-atak.py --install-firewall
+ExecStart=/usr/bin/python3 /usr/local/bin/manet-atak.py
+ExecStopPost=+/usr/bin/python3 /usr/local/bin/manet-atak.py --remove-firewall
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=10
+StandardOutput=journal
+StandardError=journal
+RuntimeDirectory=manet-atak
+RuntimeDirectoryMode=0750
+StateDirectory=manet-atak
+StateDirectoryMode=0700
+UMask=0027
+# nft readback requires NET_ADMIN; br0 binding requires NET_RAW. No clock,
+# GPIO or audio capabilities. Only the separate pre/post commands mutate policy.
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_NETLINK AF_UNIX
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+ReadWritePaths=/run/manet-atak /var/lib/manet-atak
+LimitNOFILE=64
+MemoryMax=96M
+TasksMax=16
+
+[Install]
+WantedBy=multi-user.target
