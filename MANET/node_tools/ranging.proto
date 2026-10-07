@@ -1,0 +1,73 @@
+syntax = "proto3";
+package manet.ranging.v1;
+
+// No authority is conveyed by this payload. The transport must authenticate
+// peer identity and authorize ranging separately from SAE mesh membership.
+message Position {
+  enum Source { UNKNOWN = 0; GNSS = 1; RANGED = 2; MANUAL = 3; }
+  Source source = 1;
+  bool valid = 2;
+  sint32 latitude_e7 = 3;
+  sint32 longitude_e7 = 4;
+  optional sint32 altitude_cm = 5; // HAE; absent is unknown, never zero height.
+  optional uint64 fix_time_unix_ms = 6; // Claimed UTC, not a trusted clock.
+  optional uint64 fix_age_ms = 7; // Measured locally at snapshot time.
+  optional uint32 horizontal_uncertainty_cm = 8;
+  optional uint32 vertical_uncertainty_cm = 9;
+  uint32 generation = 10;
+  repeated string used_node_ids = 11; // Full ancestry, <=16 ids, <=32 UTF-8 bytes/id.
+}
+
+message Request {
+  uint32 frames = 1; // 1..64; normally 50.
+  uint32 channel_width_mhz = 2;
+  // Nominal 20..100 ms, normally 50. V1 uses burst_schedule_us(sid, challenge)
+  // for deterministic +/-20% jitter, clipped to 20..100 ms, and lease duration.
+  uint32 interval_ms = 3;
+}
+message Ready { uint32 arm_timeout_ms = 1; }
+message Busy { uint32 retry_ms = 1; }
+message Reject {
+  enum Reason { UNSPECIFIED = 0; UNSUPPORTED = 1; UNAVAILABLE = 2;
+    RADIO_ERROR = 3; NO_SAMPLES = 4; INVALID_REPORT = 5; }
+  Reason reason = 1;
+}
+message Burst { uint32 sequence = 1; bool done = 2; }
+message Report {
+  uint32 part = 1; // Zero based, <=3 parts; all parts required.
+  uint32 parts = 2;
+  uint64 base_arrival = 3; // 48-bit responder hardware clock, 0.25 ns counts.
+  // Equal-length packed columns; <=24 rows. Delta is modulo 2^48.
+  repeated uint32 sequence = 4;
+  repeated uint64 arrival_delta = 5;
+  repeated sint32 turnaround = 6; // Already accumulator-corrected, counts.
+}
+message Cancel {
+  enum Reason { UNSPECIFIED = 0; USER = 1; TIMEOUT = 2; ERROR = 3; }
+  Reason reason = 1;
+}
+// One-way, best-effort claim after a successful estimate; never acknowledged.
+// The initiator's calibration applies. Receipt does not prove the range/fix.
+message Result {
+  optional double range_m = 1; // Signed: preserve negative calibration diagnostics.
+  optional double p25_counts = 2;
+  uint32 pair_count = 3; // Retained pairs after the estimator's outlier filter.
+  Position initiator_position = 4; // Snapshot immediately before sending burst.
+  // Both ends compare this fix against the responder position in Ready.
+}
+message Envelope {
+  uint32 version = 1; // Exactly 1; maximum encoded datagram 1200 bytes.
+  bytes session_id = 2; // Fresh unpredictable 128 bits from the initiator.
+  bytes challenge = 3; // Fresh 128 bits from responder, echoed in burst/report/cancel/result.
+  Position position = 4; // Required on EVERY anchor reply, freshly sampled.
+  oneof body {
+    Request request = 5;
+    Ready ready = 6;
+    Busy busy = 7;
+    Reject reject = 8;
+    Burst burst = 9;
+    Report report = 10;
+    Cancel cancel = 11;
+    Result result = 12;
+  }
+}

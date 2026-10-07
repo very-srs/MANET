@@ -14,6 +14,9 @@ import sys
 import base64
 import argparse
 import json
+import math
+from pathlib import Path
+import time
 
 import NodeInfo_pb2
 from manet_ids import mac_to_bytes, syncthing_id_to_bytes, ipv4_to_int
@@ -71,6 +74,11 @@ def build_telemetry(args):
         t.location.latitude_e7 = int(round(args.latitude * 1e7))
         t.location.longitude_e7 = int(round(args.longitude * 1e7))
         t.location.altitude_m = int(round(args.altitude))
+    # The manager's existing publish cycle/CLI stays unchanged. When opted in,
+    # the service can replace GNSS or explicitly suppress it. Without a usable
+    # verdict, raw GNSS remains visible but cannot serve as an anchor.
+    apply_positioning_location(t, getattr(args, 'position_file', '/run/manet-position.json'),
+                               getattr(args, 'mesh_config', '/etc/mesh.conf'))
     if args.atak_user:
         t.atak_user = args.atak_user
 
@@ -124,6 +132,106 @@ def build_telemetry(args):
 
     _add_interfaces(t, args.interfaces_json)
     return t
+
+
+def apply_positioning_location(telemetry, path, config_path, *, now_boot=None, boot_id=None):
+    """Opt-in local producer; unavailable verdicts retain unchecked raw GNSS.
+
+    No Alfred timestamp is trusted for freshness. This checks this OS boot and
+    the service heartbeat plus solution age. Only a fresh, explicit distrust
+    verdict suppresses GNSS. Disabled operation preserves pre-R4 wire bytes.
+    """
+    try:
+        settings = {}
+        for line in Path(config_path).read_text().splitlines():
+            if '=' in line and not line.lstrip().startswith('#'):
+                key, value = line.split('=', 1)
+                settings[key.strip()] = value.strip().strip('\"\'')
+        enabled = settings.get('positioning', 'n').lower() == 'y'
+    except OSError:
+        enabled = False
+    if not enabled:
+        return
+    old_altitude = telemetry.location.altitude_m if telemetry.HasField('location') else None
+    if telemetry.HasField('location'):
+        raw = telemetry.location
+        # Rebuild from only the manager's raw fields: no ranged provenance or
+        # invented accuracy/age survives. quality is already a protobuf string;
+        # 'unchecked' needs no enum/schema change and is telemetry-only.
+        telemetry.location.CopyFrom(NodeInfo_pb2.NodeTelemetry.GpsLocation(
+            latitude_e7=raw.latitude_e7, longitude_e7=raw.longitude_e7,
+            altitude_m=raw.altitude_m, source=raw.GNSS, valid=False, quality='unchecked'))
+    try:
+        with open(path, 'rb') as stream:
+            raw = stream.read(131073)
+        if len(raw) > 131072:
+            return
+        doc = json.loads(raw, parse_constant=_finite)
+        boot_id = Path('/proc/sys/kernel/random/boot_id').read_text().strip() if boot_id is None else boot_id
+        now_boot = time.clock_gettime(time.CLOCK_BOOTTIME) if now_boot is None else now_boot
+        if (type(doc.get('schema')) is not int or doc['schema'] != 1 or
+                doc.get('boot_id') != boot_id or
+                not 0 <= now_boot - _finite(doc.get('written_boot')) < 5 or
+                doc.get('gnss_state') not in ('NO_FIX', 'UNCHECKED', 'RANGE_CONSISTENT',
+                                             'GNSS_SUSPECTED', 'INCONSISTENT_UNATTRIBUTED')):
+            return
+        # Validate before changing the fallback: malformed geometry/provenance
+        # is not an explicit usable verdict. An aged solution is simply absent;
+        # a current distrust verdict still suppresses GNSS in that case.
+        p = _positioning_point(doc, now_boot - doc['written_boot'], old_altitude)
+        distrusted = doc['gnss_state'] in ('GNSS_SUSPECTED', 'INCONSISTENT_UNATTRIBUTED')
+        if distrusted:
+            telemetry.ClearField('location')
+        if p is not None and not (distrusted and p.source == p.GNSS):
+            telemetry.location.CopyFrom(p)
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, OverflowError):
+        return
+
+
+def _finite(value):
+    if type(value) not in (int, float) or not math.isfinite(value):
+        raise ValueError('finite number required')
+    return value
+
+
+def _positioning_point(doc, heartbeat_age, old_altitude):
+    """Validate a service selection; None is a valid absent/expired point."""
+    source, quality, point = doc['source'], doc['quality'], doc['point']
+    age = _finite(doc['age_s'])
+    if age < 0:
+        raise ValueError('negative position age')
+    age += heartbeat_age
+    if quality in ('candidates', 'ring', 'none'):
+        if point is not None or source not in ('none', 'ranged'):
+            raise ValueError('invalid non-point selection')
+        return None
+    if quality not in ('good', 'best_guess') or source not in ('gnss', 'manual', 'ranged'):
+        raise ValueError('invalid point selection')
+    lat, lon = _finite(point['lat']), _finite(point['lon'])
+    radius = _finite(doc['radius_m'])
+    generation, ancestry = doc['generation'], doc['ancestry']
+    if (not -90 <= lat <= 90 or not -180 <= lon <= 180 or not 0 <= radius <= 100000 or
+            type(generation) is not int or not 0 <= generation <= 3 or
+            not isinstance(ancestry, list) or len(ancestry) > 16 or
+            any(not isinstance(n, str) or not 0 < len(n.encode()) <= 32 for n in ancestry) or
+            len(set(ancestry)) != len(ancestry) or
+            (source == 'ranged' and (not generation or not ancestry)) or
+            (source != 'ranged' and (generation or ancestry))):
+        raise ValueError('invalid geography/uncertainty/provenance')
+    if age >= (5 if source == 'gnss' else 90):
+        return None
+    p = NodeInfo_pb2.NodeTelemetry.GpsLocation(
+        latitude_e7=round(lat * 1e7), longitude_e7=round(lon * 1e7),
+        source={'gnss': 1, 'ranged': 2, 'manual': 3}[source],
+        valid=True, uncertainty_m=radius, quality=quality,
+        age_ms=round(age * 1000), generation=generation, used_node_ids=ancestry,
+        anchor_eligible=doc.get('anchor_eligible') is True and
+                        (source != 'ranged' or quality == 'good' and age < 15))
+    if source == 'gnss' and old_altitude is not None:
+        p.altitude_m = old_altitude  # Legacy MSL, never mislabelled HAE.
+    if point.get('hae') is not None and source != 'ranged':
+        p.hae_m = _finite(point['hae'])
+    return p
 
 
 def _add_interfaces(t, interfaces_json):
@@ -210,6 +318,9 @@ def main():
     p.add_argument('--longitude', type=float, default=0.0)
     p.add_argument('--altitude', type=float, default=0.0)
     p.add_argument('--atak-user', type=str, default='')
+    p.add_argument('--position-file', default='/run/manet-position.json',
+                   help='Local R4 position, used only with positioning=y in mesh.conf.')
+    p.add_argument('--mesh-config', default='/etc/mesh.conf')
 
     p.add_argument('--data-channel-2-4', type=int, default=0, help='MHz')
     p.add_argument('--data-channel-5-0', type=int, default=0, help='MHz')
