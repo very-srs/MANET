@@ -6,6 +6,8 @@ import json
 import os
 from pathlib import Path
 import platform
+import pwd
+import re
 import shutil
 import subprocess
 import tempfile
@@ -21,6 +23,7 @@ libdbus-1-dev gpsd-clients rpi-swap systemd-zram-generator rpi-loop-utils
 rpicam-apps-lite rpicam-apps-core mkvtoolnix cloud-init rpi-update
 rpi-keyboard-config rpi-keyboard-fw-update mesa-vulkan-drivers
 modemmanager bluez udisks2
+pulseaudio pulseaudio-utils rtkit
 '''.split())
 KEEP = set('''
 openssh-server sudo systemd systemd-sysv systemd-resolved networkd-dispatcher
@@ -30,7 +33,12 @@ avahi-daemon libnss-mdns libnss-resolve libnss-myhostname syncthing
 gpsd gpsd-tools python3 python3-cryptography python3-protobuf python3-zeroconf
 python3-gi gir1.2-gstreamer-1.0 python3-smbus python3-smbus2 python3-spidev
 python3-libgpiod python3-rpi-lgpio python3-gpiozero i2c-tools gpiod
-pulseaudio pulseaudio-utils alsa-utils alsa-ucm-conf alsa-topology-conf rtkit dbus-user-session
+alsa-utils alsa-ucm-conf alsa-topology-conf
+# dbus-user-session stays installed: purging it removes gstreamer1.0-plugins-good
+# (via libsoup3, glib-networking, dconf). Its user units are masked instead.
+dbus dbus-user-session dbus-daemon dbus-bin libpam-systemd libnss-systemd polkitd
+openssh-client gnupg gpg gpgv gpg-agent dirmngr keyboxd
+cron man-db e2fsprogs logrotate console-setup console-setup-linux keyboard-configuration
 gstreamer1.0-alsa gstreamer1.0-plugins-base gstreamer1.0-plugins-good
 libnl-3-200 libnl-genl-3-200 libnl-route-3-200 libcap2 libssl3t64
 libavahi-client3 libglib2.0-data libatomic1 libstdc++6
@@ -39,7 +47,139 @@ screen arping bc jq sqlite3 traceroute net-tools wireless-tools mpg123
 initramfs-tools busybox zstd raspi-firmware raspberrypi-sys-mods rpi-eeprom
 '''.split())
 STATE = Path('/var/lib/manet-os-cleanup')
-PROFILE = '1'
+PROFILE = '2'
+
+# Exact units only. Never mask wpa_supplicant@.service, user@.service,
+# system D-Bus, login/SSH, or socket-activated credential agents.
+SYSTEM_UNITS = {
+    'rtkit-daemon.service': 'no PulseAudio consumer; voice uses ALSA directly',
+    'man-db.timer': 'no scheduled manual-page indexing needed; man/mandb retained',
+    'dpkg-db-backup.timer': 'optional periodic duplicate of dpkg metadata',
+    'wpa_supplicant.service': 'unused global D-Bus instance; per-radio instances retained',
+    'keyboard-setup.service': 'headless appliance; console tools retained for recovery',
+    'console-setup.service': 'headless appliance; console tools retained for recovery',
+}
+USER_UNITS = {
+    'pulseaudio.socket': 'voice uses alsasrc/alsasink; no PulseAudio prompts',
+    'pulseaudio.service': 'voice uses alsasrc/alsasink; no PulseAudio prompts',
+    'dbus.socket': 'no MANET user-bus consumers; system D-Bus and user managers retained',
+    'dbus.service': 'no MANET user-bus consumers; system D-Bus and user managers retained',
+}
+
+
+def cron_consumers(root):
+    """Do not disable an operator's cron work when upgrading profile 1.
+
+    Stock run-parts scheduling is redundant only when every executable job
+    explicitly exits under systemd. Unknown jobs/tables conservatively keep cron.
+    """
+    consumers = []
+    spool = root / 'var/spool/cron/crontabs'
+    consumers.extend(str(p) for p in spool.glob('*') if p.is_file() and p.read_text().strip())
+    table = root / 'etc/crontab'
+    if table.exists():
+        for line in table.read_text().splitlines():
+            line = line.strip()
+            if not line or line.startswith('#') or re.match(r'\w+=', line):
+                continue
+            # The distribution's four run-parts entries, with optional anacron.
+            if not re.fullmatch(r'[\d*/\s,\-]+\s+root\s+(?:test -x /usr/sbin/anacron \|\| )?'
+                                r'\(?\s*cd / && run-parts --report /etc/cron\.'
+                                r'(?:hourly|daily|weekly|monthly)\s*\)?', line):
+                consumers.append(str(table))
+                break
+    for directory in ('cron.d', 'cron.hourly', 'cron.daily', 'cron.weekly', 'cron.monthly'):
+        for path in (root / 'etc' / directory).glob('*'):
+            # run-parts/cron ignore dot files, backup extensions and subdirs.
+            if not re.fullmatch(r'[A-Za-z0-9_-]+', path.name) or not path.is_file():
+                continue
+            if directory != 'cron.d' and not os.access(path, os.X_OK):
+                continue
+            body = '\n'.join(line for line in path.read_text().splitlines()
+                             if line.strip() and not line.lstrip().startswith('#'))
+            if not body:
+                continue
+            # Recognize only distribution jobs and their systemd guards. A new
+            # package or locally scheduled command keeps cron for manual review.
+            known = path.name in {'apt-compat', 'dpkg', 'logrotate', 'man-db', 'e2scrub_all'}
+            # Nothing except shell options may run before the early exit.
+            guarded = re.match(r'(?:set -[a-z]+\s+)*if \[ -d /run/systemd/system \]; then\s*exit 0\s*fi', body)
+            if directory == 'cron.d':
+                guarded = all(re.match(r'\w+=', line.strip()) or
+                              re.match(r'[\d*/\s,\-]+\s+root\s+(?:'
+                                       r'\[ ! -d /run/systemd/system \] &&|'
+                                       r'test -e /run/systemd/system \|\|) ', line)
+                              for line in body.splitlines())
+            if not known or not guarded:
+                consumers.append(str(path))
+    return sorted(set(consumers))
+
+
+def runtime_policy(root=Path('/')):
+    system, keep = dict(SYSTEM_UNITS), {}
+    jobs = cron_consumers(root)
+    if jobs:
+        keep['cron.service'] = 'cron consumers require review: ' + ', '.join(jobs)
+    else:
+        system['cron.service'] = 'no cron consumers beyond jobs that exit under systemd'
+    # lvm2 also covers inactive/offline operator volumes, not just mounted ones.
+    lvm = (root / 'usr/sbin/lvm').exists() or any(
+        p.read_text().startswith('LVM-') for p in (root / 'sys/class/block').glob('*/dm/uuid'))
+    for unit in ('e2scrub_all.timer', 'e2scrub_reap.service'):
+        if lvm:
+            keep[unit] = 'LVM tools/volumes present; retain filesystem maintenance'
+        else:
+            system[unit] = 'no LVM volumes or tools; raw ext4 uses normal fsck'
+    return {'mask_system': system, 'mask_user_global': dict(USER_UNITS), 'keep': keep}
+
+
+def live_user_managers(root=Path('/run/user')):
+    return [pwd.getpwuid(int(p.name)).pw_name for p in root.glob('[0-9]*')
+            if p.name.isdecimal() and (p / 'systemd/private').exists()]
+
+
+def unit_inventory(prefix, names):
+    return command(prefix + ['show', *names, '-p', 'Id', '-p', 'LoadState',
+                             '-p', 'ActiveState', '-p', 'UnitFileState'])
+
+
+def user_systemctl(user):
+    # Talk directly to systemd's private socket as its owner. This still works
+    # after removing the user's D-Bus service; never terminate login sessions.
+    uid = pwd.getpwnam(user).pw_uid
+    return ['runuser', '-u', user, '--', 'env', f'XDG_RUNTIME_DIR=/run/user/{uid}',
+            'systemctl', '--user']
+
+
+def apply_runtime(policy, users, record):
+    def execute(args):
+        # Append before execution so interrupted/failed runs remain reviewable.
+        with record.open('a') as log:
+            log.write(json.dumps(args) + '\n')
+        command(args)
+
+    for unit in policy['mask_system']:
+        state = command(['systemctl', 'show', unit, '-p', 'LoadState', '--value'])
+        if state != 'not-found':
+            execute(['systemctl', 'disable', '--now', unit])
+        execute(['systemctl', 'mask', unit])
+    names = list(policy['mask_user_global'])
+    # --global does not stop/reload already running per-user managers.
+    available = {line.split()[0] for line in command(
+        ['systemctl', '--global', 'list-unit-files', '--no-legend', '--no-pager']).splitlines() if line.strip()}
+    existing = [name for name in names if name in available]
+    if existing:
+        execute(['systemctl', '--global', 'disable', *existing])
+    execute(['systemctl', '--global', 'mask', *names])
+    for user in users:
+        prefix = user_systemctl(user)
+        execute(prefix + ['daemon-reload'])
+        # Stop PulseAudio before stopping its session bus. Individual absent
+        # units are skipped, so this is safe after an interrupted purge too.
+        for unit in names:
+            if command(prefix + ['show', unit, '-p', 'LoadState', '--value']) != 'not-found':
+                execute(prefix + ['stop', unit])
+    # Package removal follows; system dbus.service/socket are never targeted.
 
 
 def command(args, **kwargs):
@@ -127,6 +267,14 @@ def run(apply=False, force=False):
     installed = package_inventory()
     targets, protected = choose_packages(installed)
     protected += command(['apt-mark', 'showhold']).splitlines()
+    policy = runtime_policy()
+    users = live_user_managers()
+    units_before = {
+        'enabled': command(['systemctl', 'list-unit-files', '--state=enabled', '--no-legend', '--no-pager']),
+        'system': unit_inventory(['systemctl'], list(policy['mask_system'])),
+        'user_global': command(['systemctl', '--global', 'list-unit-files', '--no-legend', '--no-pager']),
+        'users': {user: unit_inventory(user_systemctl(user), list(USER_UNITS)) for user in users},
+    }
     apt = ['apt-get', '-o', 'DPkg::Lock::Timeout=120', '-o',
            'APT::AutoRemove::RecommendsImportant=false', '--autoremove', 'purge'] + targets
     if not targets:
@@ -148,16 +296,19 @@ def run(apply=False, force=False):
             removed = validate_plan(plan, protected)
     size = sum(installed[n]['size_kib'] for n in installed
                if n.split(':')[0] in {p.split(':')[0] for p in removed})
-    print(json.dumps({'remove': removed, 'package_mib': round(size / 1024, 1),
+    print(json.dumps({'profile': PROFILE, 'runtime': policy, 'units_before': units_before,
+                      'remove': removed, 'package_mib': round(size / 1024, 1),
                       'swap_mib': round(Path('/var/swap').stat().st_blocks / 2048)
                       if Path('/var/swap').exists() else 0}, indent=2), flush=True)
     if not apply:
         return
     STATE.mkdir(parents=True, exist_ok=True)
-    stamp = str(int(time.time()))
+    stamp = str(time.time_ns())
     (STATE / f'{stamp}-packages.json').write_text(json.dumps(installed, indent=2))
     (STATE / f'{stamp}-manual.txt').write_text(command(['apt-mark', 'showmanual']) + '\n')
     (STATE / f'{stamp}-plan.txt').write_text(plan)
+    (STATE / f'{stamp}-runtime.json').write_text(json.dumps(
+        {'profile': PROFILE, 'policy': policy, 'before': units_before}, indent=2))
     command(['apt-mark', 'manual'] + protected)
     for unit in ('rpi-zram-writeback.timer', 'rpi-zram-writeback.service',
                  'rpi-resize-swap-file.service'):
@@ -166,6 +317,8 @@ def run(apply=False, force=False):
     if targets:
         # Validate again against real APT state before executing the transaction.
         validate_plan(command(apt[:1] + ['--simulate'] + apt[1:]), protected)
+    apply_runtime(policy, users, STATE / f'{stamp}-actions.jsonl')
+    if targets:
         subprocess.run(apt[:1] + ['--yes'] + apt[1:], check=True,
                        env=dict(os.environ, LC_ALL='C', DEBIAN_FRONTEND='noninteractive'))
     subprocess.run(['systemctl', 'daemon-reload'], check=True)
@@ -173,6 +326,8 @@ def run(apply=False, force=False):
     subprocess.run(['apt-get', 'clean'], check=True)
     if command(['dpkg', '--audit']):
         raise RuntimeError('dpkg audit failed after cleanup')
+    (STATE / f'{stamp}-units-after.txt').write_text(unit_inventory(
+        ['systemctl'], list(policy['mask_system'])))
     marker.write_text(PROFILE + '\n')
     print('OS cleanup complete', flush=True)
 

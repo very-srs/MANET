@@ -119,15 +119,24 @@ def read_state(path):
 
 
 def save_state(path, state):
+    contents = json.dumps(state) + '\n'
+    try:
+        if path.read_text() == contents:
+            return
+    except FileNotFoundError:
+        pass
     temporary = path.with_suffix('.tmp')
-    temporary.write_text(json.dumps(state) + '\n')
+    temporary.write_text(contents)
     temporary.replace(path)
 
 
 def check(state, registry_path, builder, own_mac_path):
     # Also refresh after bootstrap: ACS used to reuse a snapshot for 180 s,
     # concealing newly published claims and delaying collision resolution.
-    command(builder, timeout=60)
+    if callable(builder):
+        builder()
+    else:
+        command(builder, timeout=60)
     if state.get('complete'):
         return state, True, ''
     if not ipv6_ready(json.loads(command('ip', '-j', '-6', 'addr', 'show', 'dev', 'br0'))):
@@ -148,7 +157,8 @@ def main():
     # bypass this check after reboot; manager restarts within a boot can reuse it.
     state_path = Path(os.environ.get('MESH_IP_STARTUP_STATE', '/var/run/mesh-ip-startup.json'))
     registry_path = Path(os.environ.get('MESH_REGISTRY_FILE', '/var/run/mesh_node_registry'))
-    builder = os.environ.get('MESH_REGISTRY_BUILDER', '/usr/local/bin/mesh-registry-builder.sh')
+    from manet_registry_builder import build
+    builder = os.environ.get('MESH_REGISTRY_BUILDER') or build
     own_mac_path = Path('/sys/class/net/br0/address')
     state = read_state(state_path)
     try:

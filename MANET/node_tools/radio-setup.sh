@@ -1524,11 +1524,11 @@ EOF
 systemctl enable mesh-status
 
 # === mDNS: manet.local ===
-# Advertise this node as manet.local on the AP/EUD interface only. One record,
+# Advertise manet.local at the EUD gateway address. One service,
 # port 80: the management UI lives at /manage on the same server now, so
 # there is no second port to advertise.
-# avahi-daemon is kept but restricted to deny mesh interfaces (bat0, wlan0-2).
-# Clients connected to the EUD AP can reach the admin panel at http://manet.local
+# br0 is allowed only after the bat0 discovery boundary has been verified.
+# Clients on end0 or the EUD AP can reach the admin panel at http://manet.local
 
 if have_package_network; then
     provision_try "apt install failed: avahi-daemon iperf3 traceroute sqlite3 python3-zeroconf python3-cryptography" \
@@ -1538,11 +1538,12 @@ else
 fi
 install -m 644 /etc/avahi/avahi-daemon.conf /etc/avahi/avahi-daemon.conf.bak 2>/dev/null || true
 cp /usr/local/share/manet/avahi-daemon.conf /etc/avahi/avahi-daemon.conf
-# Restrict avahi to the AP-only interface so nodes on the mesh don't conflict on 'manet'
-AVAHI_AP_IF=$(head -1 /var/lib/no_mesh_if 2>/dev/null)
-if [ -n "$AVAHI_AP_IF" ]; then
-    sed -i "s/allow-interfaces=.*/allow-interfaces=$AVAHI_AP_IF/" /etc/avahi/avahi-daemon.conf
-fi
+# The same helper runs from the tools updater and IP manager: AP plus br0
+# when present, with br0 excluded if installing/verifying the drop fails.
+# Disable automatic address publication; the IP manager writes the internal
+# EUD address to Avahi's hosts file alongside dnsmasq's management entry.
+systemctl daemon-reload
+provision_try "EUD mDNS isolation/configuration failed" /usr/local/bin/manet-dhcp-isolation.py ensure
 cp /usr/local/share/manet/manet-http.service /etc/avahi/services/manet-http.service
 # Left over from when the dashboard was its own service on port 8081.
 rm -f /etc/avahi/services/perf-http.service
@@ -1670,6 +1671,10 @@ GPSD_CONF
 # including the configured IPv4 mesh allow range and GPS SHM refclock.
 systemctl enable gps-reader.service
 systemctl restart gps-reader.service 2>/dev/null || true
+
+# Core wired-phone integration; mesh.conf can explicitly opt this node out.
+provision_try "ATAK enable failed" systemctl enable manet-atak.service
+provision_try "ATAK start failed" systemctl --no-block restart manet-atak.service
 
 systemctl enable one-shot-time-sync.service 2>/dev/null || true
 systemctl --no-block restart one-shot-time-sync.service 2>/dev/null || true

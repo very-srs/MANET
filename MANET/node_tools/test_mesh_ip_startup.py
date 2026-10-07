@@ -225,23 +225,27 @@ class StartupTests(unittest.TestCase):
         self.assertEqual(startup.registry_macs(payload), {OWN})
         self.assertFalse(marker.exists())
 
-    def test_pending_discovery_prevents_any_allocator_side_effects(self):
+    def test_pending_discovery_withdraws_name_without_allocating(self):
         # Execute the real main entry point. Reaching any hardware/config
         # command after the guard would leave a marker and fail this test.
         source = (TOOLS / 'mesh-ip-manager.sh').read_text().split('# --- Main Logic ---\n', 1)[1]
         marker = Path(self.scratch.name) / 'hardware-touched'
         helper = Path(self.scratch.name) / 'pending.py'
         helper.write_text('raise SystemExit(1)\n')
+        withdrawn = Path(self.scratch.name) / 'name-withdrawn'
         prefix = ('log() { :; }\n'
+                  'update_avahi_host() { [ -z "$1" ] && touch "$TEST_WITHDRAWN"; }\n'
                   'cat() { touch "$TEST_MARKER"; }\n'
                   'ip() { touch "$TEST_MARKER"; }\n'
                   'cleanup_control_aliases() { touch "$TEST_MARKER"; }\n')
         result = subprocess.run(['bash', '-c', prefix + source], capture_output=True,
                                 text=True, env={'PATH': '/usr/bin:/bin',
                                                 'STARTUP_HELPER': str(helper),
+                                                'TEST_WITHDRAWN': str(withdrawn),
                                                 'TEST_MARKER': str(marker)}, timeout=5)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse(marker.exists())
+        self.assertTrue(withdrawn.exists())
 
 
 if __name__ == '__main__':

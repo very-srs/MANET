@@ -157,22 +157,24 @@ def package_is_dangerous(pkg, mesh_conf="/etc/mesh.conf"):
 
 # Alfred
 
-def latest_config_package():
+def latest_config_package(raw=None):
     """Newest authenticated message on type 70, or None.
 
     Alfred hands back one record per publishing node; the newest issue wins so
     a stale copy from a node that has not refreshed cannot override a newer
     change.
     """
-    try:
-        r = run(["alfred", "-r", str(ALFRED_CONFIG_TYPE)], timeout=5)
-    except Exception as e:
-        log(f"alfred read failed: {e}")
-        return None
-    if r.returncode != 0:
-        return None
+    if raw is None:
+        try:
+            r = run(["alfred", "-r", str(ALFRED_CONFIG_TYPE)], timeout=5)
+        except Exception as e:
+            log(f"alfred read failed: {e}")
+            return None
+        if r.returncode != 0:
+            return None
 
-    messages = ADMIN.messages(ALFRED_CONFIG_TYPE, r.stdout)
+        raw = r.stdout
+    messages = ADMIN.messages(ALFRED_CONFIG_TYPE, raw)
     return messages[-1] if messages else None
 
 
@@ -191,8 +193,8 @@ def clear_staging(reason):
         log(f"Cleared staged config: {reason}")
 
 
-def sync_once():
-    message = latest_config_package()
+def sync_once(raw=None):
+    message = latest_config_package() if raw is None else latest_config_package(raw)
     if not message:
         return 0
     pkg = message.payload
@@ -285,7 +287,7 @@ def main():
         print(f"usage: {os.path.basename(sys.argv[0])} sync", file=sys.stderr)
         return 2
     try:
-        return sync_once()
+        return sync_once(sys.stdin.read() if '--stdin' in sys.argv[2:] else None)
     except Exception as e:
         log(f"sync error: {e}")
         return 1

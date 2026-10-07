@@ -2,6 +2,7 @@
 import argparse
 import json
 import re
+import shlex
 import subprocess
 import sys
 
@@ -88,15 +89,10 @@ def parse_block(lines):
     return data
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument('--iface', default='wlan2')
-    ap.add_argument('--shell', action='store_true')
-    args = ap.parse_args()
-
+def collect(iface):
     try:
         r = subprocess.run(
-            ['/usr/sbin/iw', 'dev', args.iface, 'station', 'dump'],
+            ['/usr/sbin/iw', 'dev', iface, 'station', 'dump'],
             capture_output=True, text=True, timeout=5, check=False
         )
     except Exception:
@@ -111,7 +107,7 @@ def main():
     best = peers[0] if peers else {}
 
     result = {
-        'iface': args.iface,
+        'iface': iface,
         'peer_mac': best.get('peer_mac', ''),
         'tx_mcs': best.get('tx_summary') or best.get('tx_mcs', ''),
         'rx_mcs': best.get('rx_summary') or best.get('rx_mcs', ''),
@@ -120,13 +116,24 @@ def main():
         'peer_count': len(peers),
     }
 
+    return result
+
+
+def shell_output(result):
+    prefix = re.sub(r'[^A-Za-z0-9]+', '_', result['iface']).upper()
+    fields = {'TX_MCS': 'tx_mcs', 'RX_MCS': 'rx_mcs', 'MCS_PEER': 'peer_mac',
+              'MCS_SIGNAL_DBM': 'signal_dbm', 'MCS_PEER_COUNT': 'peer_count'}
+    return '\n'.join(f"{prefix}_{key}={shlex.quote(str(result[field]))}" for key, field in fields.items())
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument('--iface', default='wlan2')
+    ap.add_argument('--shell', action='store_true')
+    args = ap.parse_args()
+    result = collect(args.iface)
     if args.shell:
-        prefix = re.sub(r'[^A-Za-z0-9]+', '_', args.iface).upper()
-        print(f"{prefix}_TX_MCS='{result['tx_mcs']}'")
-        print(f"{prefix}_RX_MCS='{result['rx_mcs']}'")
-        print(f"{prefix}_MCS_PEER='{result['peer_mac']}'")
-        print(f"{prefix}_MCS_SIGNAL_DBM='{result['signal_dbm']}'")
-        print(f"{prefix}_MCS_PEER_COUNT='{result['peer_count']}'")
+        print(shell_output(result))
     else:
         json.dump(result, sys.stdout)
 

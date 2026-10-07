@@ -1403,6 +1403,318 @@ allocation, excluding service VIPs and the EUD alias; a changed source triggers
 route replacement. An existing non-`br0` default route is preserved even before
 the uplink dispatcher writes its gateway marker.
 
+### Local EUD discovery
+
+`manet-dhcp-isolation.py` keeps each node's DHCP pool and EUD discovery local using the native nftables
+bridge table `manet_dhcp` (the established table/service names are retained).
+The original four DHCP rules are unchanged: forwarding in both directions,
+remote requests to the node's server, and local server replies onto the mesh.
+For IPv4 and IPv6, the discovery rules drop UDP source **or** destination ports
+137/138 (NetBIOS name/datagram), 1900 (SSDP/UPnP), 3702 (WS-Discovery),
+5353 (mDNS), and 5355 (LLMNR). TCP 137/5355 also covers the name-service
+fallbacks. They apply to forwarding in both directions, input from `bat0`,
+and output to `bat0`. Port matches include multicast, broadcast and unicast
+queries/replies, including replies to ephemeral client ports. They do not
+match other ports or blanket-drop multicast. Noninitial IP fragments have no
+transport ports to match; this is a chatter boundary, not fragment reassembly.
+Traffic between `br0` and local `end0`/AP clients, and between those local
+clients, remains allowed by this table. Mesh names still come from
+`mesh-hosts-update.sh` and the registry.
+
+The service installs rules before dnsmasq; dnsmasq's start guard and the IP
+manager verify and repair them. Failure prevents DHCP service. `check` is
+read-only; `ensure` preserves healthy rules and counters. Readback accepts
+nft's omitted implied protocol dependencies but requires every effective
+interface, family, transport, port, drop verdict and hook. The fixture's
+original DHCP entries came from CM4 nft 1.1.3; added discovery entries model
+that format and are not a new hardware capture. Only ordinary `iifname` and
+`oifname` metadata is used; node kernels lack `ibrname`/`obrname` support.
+The private table is replaced atomically, leaving NAT and UI policy intact.
+
+After successful live verification, `apply`/`ensure` reconcile Avahi's
+`[server] allow-interfaces` to the AP from `/var/lib/no_mesh_if`, plus `br0`
+when present. Without a verified boundary, the failure path removes `br0`;
+without either interface name the allowlist is `lo`, never empty. The
+responder remains IPv4-only with its reflector disabled. `radio-setup.sh`
+calls the same helper after copying the base config. The tools builder carries
+the scripts, units, drop-ins and support files; the updater reloads systemd
+and calls `ensure`, applying the live configuration. The IP manager reconciles
+it again when `br0` appears later.
+
+**The management name uses the node's internal EUD address.** The CM4
+boundary bench found `manet.local` resolving to `10.30.2.2`, MediaMTX's
+elected VIP, when Avahi automatically published addresses on `br0`. That
+bridge also holds `.146` (the primary mesh identity) and `.147` (the internal
+EUD gateway/DNS address); Mumble's `.3` VIP can appear too. The correct address
+is `.147`, next to the `.148`–`.150` DHCP pool: it is intended for this node's
+own EUDs and stays on the node through service elections. The UI firewall
+accepts only localhost and this node's DHCP pool, so a stale VIP answer after
+an election fails. These are example allocations, not constants in the code.
+
+`mesh-ip-manager.sh` writes `address=/manet.local/<br0_secondary>` for dnsmasq
+and `<br0_secondary> manet.local` in `/etc/avahi/hosts` from the same chunk
+allocation. Both files are replaced atomically. The internal address must be
+a valid IPv4 address immediately before the DHCP pool; a missing or invalid
+address removes the static entry. Pending discovery and releasing a chunk
+also withdraw it. Other static host entries and comments are preserved.
+The normal allocation pass repairs a missing entry even if DNS is unchanged.
+Avahi reloads only after a hosts change, with a pending marker to retry a
+failed reload. An inactive Avahi reads the file when started. There is no
+additional publisher process or polling loop.
+
+The isolation helper fixes the host name to `manet` and keeps
+`publish-addresses=no`, so the primary mesh address and elected VIPs are not
+automatically announced. It owns the guarded interface allowlist; the IP
+manager owns the static address. A single static name needs no alias/PTR
+workaround. The existing HTTP service targets `manet.local` on port 80;
+management and measurements live under `/manage/`. Requests use the same
+routes for every Host header, including a cached old hostname. Once an old
+DNS answer expires, a retired-hostname bookmark must be changed to
+`http://manet.local/manage/`; an HTTP redirect cannot repair a DNS lookup that
+never reaches the server. `mtx.local` and `mumble.local` remain unicast DNS
+service aliases. Client caches must process Avahi's withdrawals/new answers
+or expire when the chunk changes.
+
+The base `nftables.service` flushes the ruleset on restart. The IP manager
+repairs isolation on its next allocation pass; this is not continuous
+protection against an external flush. If repair fails, DHCP stops and Avahi
+is narrowed, then DHCP resumes with existing leases after recovery.
+DHCP runs only while a local EUD port on `br0` has carrier and is forwarding:
+the active AP or a bridged Ethernet client port. A routed uplink and `bat0`
+alone do not qualify. Every service start checks this condition, and the IP
+manager stops DHCP if the last EUD port disappears. Every hostapd start queues
+a DHCP start after the AP is ready. Other EUD port changes are reconciled on
+the next IP-manager pass (normally within about 15 seconds).
+
+#### Discovery boundary: mesh traffic inventory
+
+Audit of the runtime scripts and the services they configure, including ATAK
+EUD defaults. All cross-mesh ports below are disjoint from the UDP
+`{137,138,1900,3702,5353,5355}` and TCP `{137,5355}` sets. The packet-policy
+tests exercise these destinations/ports and both request/reply directions.
+Custom ATAK/video/plugin ports are not fixed by this repository; they remain
+open unless explicitly configured onto one of the blocked discovery ports.
+
+| Sender / dependency | Multicast group or broadcast destination and transport | Effect of discovery rules |
+| --- | --- | --- |
+| `mesh-voice.py` | `239.192.41.1`, UDP RTP `38801 + 2*(channel-1)` for channels 1–32; paired RTCP is RTP+1 (reserved by the code's convention) | Entire 38801–38864 range passes, including optional unicast redundancy |
+| Alfred (`radio-setup.sh`: `alfred -m -i br0 -f -p 10`) | IPv6 `ff02::1`, UDP 16962, plus unicast synchronization | Passes; identity, telemetry, ACS, recovery, config push, elections and shutdown announcements all use Alfred rather than separate IP broadcast ports |
+| Syncthing local discovery | IPv4 subnet broadcast / `255.255.255.255`:21027 and IPv6 `ff12::8384`:21027 UDP | Passes; direct file sync TCP/UDP 22000 also passes |
+| MediaMTX optional multicast RTSP transport | Allocated group in `224.1.0.0/16`, UDP RTP/RTCP 8002/8003; encrypted variants 8006/8007 if enabled | Passes; no fixed single group |
+| ATAK EUD SA, chat, optional sensor input | UDP `239.2.3.1:6969`, `224.10.10.1:17012`, `239.5.5.55:7171` (sensor input disabled by default upstream) | All pass; PRC-152 input UDP 10011 and CoT TCP/UDP 4242 also pass |
+| IPv4 neighbor and multicast control | ARP Ethernet broadcast `ff:ff:ff:ff:ff:ff`; IGMP `224.0.0.1`, `224.0.0.2`, `224.0.0.22` and group-specific reports | Non-TCP/UDP; passes |
+| IPv6 neighbor/router and multicast control, including radvd | ICMPv6 `ff02::1`, `ff02::2`, `ff02::16`, solicited-node `ff02::1:ff00:0/104`, group-specific reports | Non-TCP/UDP; passes |
+| BATMAN V underlay | EtherType `0x4305`, including Ethernet broadcast on mesh radios | Not filtered; underlay runs below `bat0`, not as an IP discovery service |
+| DHCP / dnsmasq | Local IPv4 broadcast UDP 67/68 | Existing DHCP isolation unchanged; local EUD operation retained |
+| Avahi | `224.0.0.251:5353` (IPv6 mDNS group is `ff02::fb`, if responder IPv6 is later enabled) | Intentionally local only; wired/AP `manet.local` remains local |
+
+No further node-tools IP broadcast/multicast destinations were found. NTP /
+chrony uses unicast UDP 123, Mumble TCP/UDP 64738, the UI TCP 80, and the ATAK
+node service unicast UDP 4242/4349. MediaMTX unicast defaults TCP
+8554/8322/1935/1936/8888/8889 and UDP 8000/8001/8004/8005/8189/8890 are also
+outside the sets. No election, registry, service configuration or other
+firewall policy is changed. Syncthing's optional UPnP router search **does**
+use SSDP 1900: the requested block prevents discovering a UPnP gateway across
+`bat0`, while preserving local discovery and mesh file transfers. Setup
+disables global discovery/relays, but does not explicitly disable NAT mapping.
+
+Protocol references: [Alfred sockets](https://raw.githubusercontent.com/open-mesh-mirror/alfred/main/netsock.c)
+and [Alfred protocol analysis](https://downloads.open-mesh.org/batman/papers/Positionsdaten_in_Wireless_Mesh_Networks.pdf),
+[Syncthing discovery](https://docs.syncthing.net/specs/localdisco-v4.html) and
+[configuration](https://docs.syncthing.net/users/config.html),
+[MediaMTX 1.15.3 defaults](https://raw.githubusercontent.com/bluenviron/mediamtx/v1.15.3/mediamtx.yml),
+[ATAK CoT defaults](https://raw.githubusercontent.com/deptofdefense/AndroidTacticalAssaultKit-CIV/main/atak/ATAK/app/src/main/java/com/atakmap/comms/CotService.java)
+and [chat defaults](https://raw.githubusercontent.com/deptofdefense/AndroidTacticalAssaultKit-CIV/main/atak/ATAK/app/src/main/java/com/atakmap/android/chat/ChatManagerMapComponent.java).
+
+#### Mesh traffic census
+
+Run `sudo /usr/local/bin/manet-mesh-census.py --minutes 5 > /tmp/mesh-census.json`
+on the node with a real phone/laptop attached. It passively captures Ethernet
+headers on `bat0`, with no probes, firewall rules, multicast joins, promiscuous
+mode or retained payloads. JSON rows, sorted by bytes, group traffic by
+direction, inferred source bridge port, source MAC, protocol, TCP/UDP source
+and destination ports, destination address/kind (including multicast group
+and broadcast), and visible VLAN IDs. Counts include packets and Ethernet
+bytes; `kernel_drops`, snapshot failures and bounded-row overflow are explicit.
+Ctrl-C prints the partial census. Non-IP, unknown protocols and fragments are
+counted too; transport ports on noninitial fragments cannot be decoded.
+
+`source_port` is `end0(fdb)` / an AP port from bridge learning, `local(mac/ip)`
+from local MAC/IP ownership, `bat0` for ingress, or `unknown` /
+`routed-or-unknown`. This is inference from snapshots every two seconds, not
+physical ingress tracing: MAC spoofing, VLANs, routing, learning lag and port
+moves limit attribution. `sport` is the separate transport source port.
+`in` sees arrival before input/forward filtering, so incoming dropped packets
+still appear. `out` has passed bridge filtering but does not prove reception
+by another mesh node. Nonzero losses/overflow mean detail is incomplete.
+Use the observed output to decide further drops later; no additional discovery
+protocols are filtered speculatively.
+
+#### Verify the management name
+
+Install the updated IP manager, isolation helper and web server, remove the
+retired publisher service and drop-in, and run `manet-dhcp-isolation.py ensure`.
+The complete commands follow below. After the next allocation pass, inspect
+the generated DNS and static mDNS entries:
+
+```bash
+ssh cm4 'set -e
+sudo /usr/local/bin/manet-dhcp-isolation.py check
+grep -E "^(dhcp-range=|dhcp-option=3,|address=/manet\.local/)" /etc/dnsmasq.d/mesh-eud.conf
+cat /etc/avahi/hosts
+grep -E "^(host-name=|host-name-from-machine-id=|publish-addresses=|allow-interfaces=)" /etc/avahi/avahi-daemon.conf
+systemctl is-active avahi-daemon
+ip -4 address show dev br0'
+```
+
+The reported allocation expects DNS and the static mDNS A record to be `.147`,
+with `publish-addresses=no`, regardless of whether `.2`/`.3` VIPs are present.
+On the wired laptop, set `EUD_IF` to its Ethernet interface:
+
+```bash
+sudo resolvectl mdns "$EUD_IF" yes
+sudo resolvectl flush-caches
+resolvectl query -i "$EUD_IF" --protocol=mdns --type=A manet.local
+avahi-resolve -4 -n manet.local
+dig @10.30.2.147 manet.local A +short
+```
+
+For uncached wire evidence, capture on CM4 `end0` while querying from the
+laptop: `sudo timeout 30 tcpdump -Q out -nn -vv -i end0 'udp src port 5353'`.
+Read the A records themselves; the reply's source IP is not the advertised
+address. Expect only `.147` in answers for `manet.local`, never `.146`, `.2`
+or `.3`. Check `/etc/avahi/hosts` and `journalctl -u avahi-daemon -n 30 --no-pager` if absent.
+An Avahi client has its own cache, separate from systemd-resolved; restart
+that laptop's Avahi daemon or wait for expiry if its old VIP answer persists.
+Repeat during an otherwise scheduled service election; do not alter VIPs just
+for this name test. When the allocator changes the EUD gateway, compare the
+new generated DNS and hosts entries with fresh mDNS answers after the
+allocation pass reloads Avahi. Offline tests exercise this change without
+moving a live node's allocation.
+
+#### Apply and verify the discovery boundary
+
+From the checkout on the dev laptop (these are instructions, not an automated
+node operation):
+
+```bash
+ssh cm4 'mkdir -p /tmp/manet-discovery'
+scp MANET/share/manet/dhcp-isolation.nft \
+    MANET/node_tools/manet-dhcp-isolation.py MANET/node_tools/manet-mesh-census.py \
+    MANET/node_tools/radio-setup.sh MANET/node_tools/mesh-ip-manager.sh \
+    MANET/node_tools/mesh-status.py cm4:/tmp/manet-discovery/
+ssh cm4 'set -e
+sudo systemctl stop manet-avahi-publish.service 2>/dev/null || true
+sudo rm -f /usr/local/bin/manet-avahi-publish.py /etc/systemd/system/manet-avahi-publish.service /etc/systemd/system/avahi-daemon.service.d/20-manet-publish.conf
+sudo install -m 0644 /tmp/manet-discovery/dhcp-isolation.nft /usr/local/share/manet/
+sudo install -m 0755 /tmp/manet-discovery/manet-dhcp-isolation.py /tmp/manet-discovery/manet-mesh-census.py /tmp/manet-discovery/radio-setup.sh /tmp/manet-discovery/mesh-ip-manager.sh /tmp/manet-discovery/mesh-status.py /usr/local/bin/
+sudo systemctl daemon-reload
+sudo /usr/local/bin/manet-dhcp-isolation.py apply
+sudo systemctl restart node-manager.service mesh-status.service
+sleep 20
+sudo /usr/local/bin/manet-dhcp-isolation.py check
+sudo nft list table bridge manet_dhcp
+cat /etc/avahi/hosts
+grep -E "^(dhcp-range=|dhcp-option=3,|address=/)" /etc/dnsmasq.d/mesh-eud.conf
+grep -E "^(allow-interfaces=|publish-addresses=)" /etc/avahi/avahi-daemon.conf
+test ! -e /usr/local/bin/manet-avahi-publish.py
+test ! -e /etc/systemd/system/manet-avahi-publish.service
+test ! -e /etc/systemd/system/avahi-daemon.service.d/20-manet-publish.conf
+if systemctl is-active --quiet manet-avahi-publish.service; then exit 1; fi
+systemctl is-active avahi-daemon dnsmasq mesh-status node-manager'
+```
+
+Expect `allow-interfaces=<AP>,br0` (or just `br0` without an AP), passing
+verification and active services with a connected EUD. In a CM4 terminal,
+start this capture, then run the laptop sender below within 40 seconds:
+
+```bash
+sudo timeout 40 tcpdump -Q out -nn -i bat0 \
+  'udp and (port 137 or port 138 or port 1900 or port 3702 or port 5353 or port 5355)'
+```
+
+Expect **zero egress packets** and rising nft `forward`/`oifname bat0`
+discovery counters. Capture on `end0` with the same filter to verify the
+stimulus arrived and local replies work; zero egress without arriving probes
+or increasing counters is inconclusive. Incoming `bat0` captures are before
+the drop and cannot be expected to be zero. To exercise node-originated
+output as well, run the same Python sender on CM4 with `br0` and its primary
+IPv4 address; `output` counters should increase, still with zero egress.
+
+On the wired laptop, substitute its Ethernet interface and assigned IPv4:
+
+```bash
+EUD_IF=enxYOUR_ETHERNET
+EUD_IP=10.30.2.149
+python3 - "$EUD_IF" "$EUD_IP" <<'PY'
+import socket, struct, sys, time
+iface, ip = sys.argv[1:]
+index = socket.if_nametoindex(iface)
+def question(name):
+    labels = b''.join(bytes([len(s)]) + s.encode() for s in name.split('.')) + b'\0'
+    return struct.pack('!6H', 0, 0, 1, 0, 0, 0) + labels + struct.pack('!HH', 1, 1)
+for family, groups in [(socket.AF_INET, ('224.0.0.251', '224.0.0.252', '239.255.255.250')),
+                       (socket.AF_INET6, ('ff02::fb', 'ff02::1:3', 'ff02::c'))]:
+    with socket.socket(family, socket.SOCK_DGRAM) as s:
+        if family == socket.AF_INET:
+            s.bind((ip, 0))
+            s.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton(ip))
+            s.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 255)
+        else:
+            s.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_MULTICAST_IF, index)
+            s.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_MULTICAST_HOPS, 255)
+        for group, port, payload in [(groups[0], 5353, question('manet.local')),
+                                     (groups[1], 5355, question('manet')),
+                                     (groups[2], 1900, ('M-SEARCH * HTTP/1.1\r\nHOST: ' +
+                                      (f'[{groups[2]}]' if family == socket.AF_INET6 else groups[2]) +
+                                      ':1900\r\nMAN: "ssdp:discover"\r\nMX: 1\r\nST: ssdp:all\r\n\r\n').encode())]:
+            for _ in range(3):
+                s.sendto(payload, (group, port) if family == socket.AF_INET else (group, port, 0, index))
+                time.sleep(.1)
+            print('sent', group, port)
+PY
+sudo resolvectl mdns "$EUD_IF" yes
+sudo resolvectl flush-caches
+resolvectl query -i "$EUD_IF" --protocol=mdns --type=A manet.local
+```
+
+Expect only the internal EUD gateway IPv4 address **via mDNS** for `manet.local`;
+unicast `dig` alone does not prove this. The laptop needs IPv6 enabled on the
+link for the IPv6 probes. Repeat from the AP when available.
+
+For an SA positive control, attach an ATAK client to another mesh node and
+enable its SA multicast input (so BATMAN learns a remote listener). On CM4:
+
+```bash
+sudo timeout 40 tcpdump -Q out -nn -i bat0 'udp dst port 6969 and dst host 239.2.3.1'
+```
+
+During that capture, run on the wired laptop (same `EUD_IF`/`EUD_IP`):
+
+```bash
+python3 - "$EUD_IP" <<'PY'
+import datetime as dt, socket, sys, time
+now = dt.datetime.now(dt.timezone.utc)
+def stamp(t): return t.strftime('%Y-%m-%dT%H:%M:%SZ')
+cot = (f'<event version="2.0" uid="manet-s12-probe" type="a-f-G-U-C" how="h-e" '
+       f'time="{stamp(now)}" start="{stamp(now)}" stale="{stamp(now+dt.timedelta(seconds=60))}">'
+       '<point lat="0" lon="0" hae="0" ce="9999999" le="9999999"/>'
+       '<detail><contact callsign="S12 TEST"/></detail></event>').encode()
+with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+    s.bind((sys.argv[1], 0))
+    s.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton(sys.argv[1]))
+    s.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 64)
+    for _ in range(5):
+        s.sendto(cot, ('239.2.3.1', 6969))
+        time.sleep(.2)
+PY
+```
+
+Expect five CoT datagrams leaving `bat0`. Confirm reception on the other
+node with `tcpdump -Q in -nn -i bat0 'udp dst port 6969 and dst host 239.2.3.1'`;
+the test marker is named `S12 TEST`, at 0/0, and expires after 60 seconds.
+Then collect the five-minute census with the real EUD workload.
+
 ### Gateway choice and uplink speed
 
 batman-adv picks a gateway itself (the `*` in `batctl gwl`), but that pick only
@@ -1629,6 +1941,34 @@ survives.
 **mesh-registry-builder.sh**
 
 Central registry builder.
+The shell entry point now execs `manet_registry_builder.py`; IP discovery
+imports the same builder directly. It decodes all records in one interpreter
+and caches decoded payloads beside `observed.tsv`, invalidating that cache when
+the decoder/schema changes. Every pass still reads both Alfred types and ages
+observations, including tombstones and stale-claim removal. Identical claim
+files keep their inode/mtime; registry display ages remain current.
+
+`mesh-ip-manager.sh` requests `manet_ip_runtime.py` work from the existing
+channel-agreement process through `manet-runtime-client.sh`. A worker thread
+sleeps in `select` until requested; the main ACS loop keeps its one-second
+schedule. Root-only FIFOs and a client lock serialize requests, accept only
+allowlisted operations/arguments, and return status plus data. An unavailable
+or busy worker permits a standalone one-shot fallback without queuing; a submitted
+request's failure or timeout never replays a potentially applied operation.
+Operation framing accepts digits (`ipv4`); malformed requests with valid reply
+tokens return an error instead of silently timing out. Data-returning operations
+reject empty success replies, except Syncthing's missing first-boot certificate.
+Allocated identities retry failed/empty address observations without publishing
+an empty IPv4 or advancing the keepalive timer. Discovery, DHCP isolation
+and primary-address selection share the resident interpreter. Before
+skipping the shell allocator it verifies live nft isolation, EUD forwarding,
+addresses/prefixes, dnsmasq state and UI-table existence. It compares config,
+claims, allocation markers, generated DNS/mDNS files, local MACs and helper
+generations with a previously successful, unchanged reconciliation. Contested
+or incomplete claims, missing addresses, pending reloads, failed checks and
+changed files take the normal allocator path. The cache is volatile in `/run`;
+no polling interval, service-election gate or publication deadline changes.
+
 - Reads both Alfred types and joins them on the record key.
 - Decodes each message.
 - Writes `/var/run/mesh_node_registry` with all node state.
@@ -1947,7 +2287,7 @@ MANET kernel is running. The Pi first-boot package list installs runtime librari
 instead of development headers, and setup installs `gpsd-tools` instead of the
 GUI `gpsd-clients` dependency tree. Cleanup explicitly removes unused appliance
 packages and their orphaned dependencies, treating recommendations as optional
-for this transaction. Required recommendations such as ALSA profiles, rtkit,
+for this transaction. Required recommendations such as ALSA profiles,
 rfkill, regulatory data and NSS modules are protected alongside core runtime
 packages and libraries used by the prebuilt radio tools. Kernel images and radio
 firmware are protected too.
@@ -1968,6 +2308,114 @@ AP, DNS, dashboard and internet access; the second rejoined with Ethernet
 unplugged. Native tool dependencies and a Lyra encode/RTP/decode pipeline were
 checked. This verifies existing installations; the revised first-boot package
 list still needs a fresh-image hardware test.
+
+Profile 2 adds runtime cleanup through the same setup/manual entry point. A
+profile 1 marker does not skip it; a successful profile 2 marker preserves later
+operator additions unless `--force` is explicit. Preview reads the enabled system
+and global user unit lists and active user managers without changing them. Apply
+saves inventories, per-unit reasons and each attempted command before execution;
+failures leave the previous marker. Global user masks are followed by reload/stop
+in current user managers through their private systemd sockets, so stopping the
+user bus does not require terminating logins. System D-Bus is never masked.
+
+| Unit/package | Profile 2 verdict and consumer audit |
+| --- | --- |
+| Global user `pulseaudio.service` / `.socket`, `rtkit-daemon.service`; `pulseaudio`, `pulseaudio-utils`, `rtkit` | Stop/mask and purge packages. `mesh-voice.py` explicitly uses `alsasrc`/`alsasink` on the USB ALSA device. `button-monitor.sh` invokes `led-info.sh`, which only drives LEDs. No runtime `pactl`, `paplay` or Pulse sink/source consumer exists. `mpg123` appears only in package policy/templates; retain this useful ALSA-capable field command. |
+| `dbus-user-session`, **user** `dbus.service` / `.socket` | Keep the package; stop/mask global user activation. The CM4 removal preview showed purging it also removes `gstreamer1.0-plugins-good` through libsoup/glib-networking/dconf, so it is protected by KEEP. No MANET service uses a session bus: Syncthing runs as `syncthing@radio.service` under the system manager. Keep system `dbus`/`dbus-daemon`, PAM/logind and user managers. Operators needing session-bus applications can unmask these two user units explicitly. |
+| `cron.service` | Disable/stop/mask only if no user crontabs, custom table entries, or executable jobs without a recognized systemd early-exit guard exist. No repo/provisioning cron consumer exists. Retain `cron` tools; log custom consumers for review. |
+| `man-db.timer`, `dpkg-db-backup.timer` | Disable/stop/mask optional indexing/backup schedules; retain `man`, `mandb` and dpkg. Their commands remain usable manually. |
+| `e2scrub_all.timer`, `e2scrub_reap.service` | Disable/stop/mask on the raw-partition appliance. Preserve both if LVM tools or device-mapper LVM volumes exist. Keep `e2fsprogs` and boot fsck. [Debian's e2scrub manual](https://manpages.debian.org/trixie/e2fsprogs/e2scrub_all.8.en.html) describes the LVM requirement. |
+| Global `wpa_supplicant.service` | Disable/stop/mask its unused D-Bus instance. Keep `wpasupplicant`, `wpa_supplicant@wlanX`, the s1g services and USB-uplink instance management used by radio setup/uplink tools. No wildcard masks. |
+| `polkit.service` / `polkitd` | Keep. Our UI, `networkctl`/`resolvectl`/`hostnamectl` callers run as root, but the OS networkd daemon does not. DHCP uplinks retain default hostname handling; networkd requests transient hostnames and may request the product UUID from hostnamed. The upstream [DHCP path](https://raw.githubusercontent.com/systemd/systemd/v257/src/network/networkd-dhcp4.c) and [hostnamed authorization](https://raw.githubusercontent.com/systemd/systemd/v257/src/hostname/hostnamed.c) make blanket removal inappropriate. No MANET network configuration is changed to avoid this dependency. |
+| User `gpg-agent*`, `dirmngr`, `keyboxd`, `ssh-agent` sockets | Keep unmasked: no recurring polling job, and masking would break normal user signing/decryption, key retrieval or SSH credentials. Protect installed GnuPG/OpenSSH client packages from autoremove. |
+| `keyboard-setup.service`, `console-setup.service` | Disable/stop/mask boot console setup on this headless appliance; retain configuration/tools for manual recovery. No runtime/provisioning consumer requires the boot services. |
+| `iperf3.service` / `iperf3` | Keep enabled/package protected. `manet_manage.py:run_local_iperf3` connects to peer servers on TCP 5201; both templates enable the daemon and `manet-ui-firewall.sh` restricts it to the mesh. |
+
+Other explicitly enabled provisioning services support mesh, voice, identity,
+GPS/battery, LEDs, web UI, Syncthing, DNS, routing and recovery; they remain.
+APT/security refresh, logrotate, fstrim, tmpfiles, journald and SSH are also
+outside the removal policy. Unknown enabled units are inventoried for review,
+never removed by an inverse allowlist. Profile 2 was applied on CM4 after the
+`dbus-user-session` correction; netplan/libnm/python3-yaml left through autoremove
+(provisioning already disables netplan). Fresh-flash verification remains pending.
+
+### ATAK runtime and package defaults
+
+`manet-atak.service` is core and enabled on every node. An absent or empty
+`atak` setting enables it; only `n`, `no`, `0` or `false`, ignoring case and
+surrounding whitespace, disables it. The daemon and its pre-start firewall
+command share that decision. A disabled start removes stale private tables and
+exits successfully; stop/reload-to-disabled also cleans up through `ExecStopPost`.
+Use `atak=n` in `/etc/mesh.conf` followed by a service restart to opt out.
+
+Both provisioning templates enable the unit, and `radio-setup.sh` enables and
+starts it after the GPS setup. All generated mesh.conf variants document
+`atak=y`. The tools, CM4, Rock 3A and RPi5 builders copy both ATAK and positioning
+units, with only ATAK added to `multi-user.target.wants`. The tools updater
+extracts that enable symlink and reloads systemd; newly enabled units start at
+the next boot, or immediately with `systemctl start manet-atak.service`.
+`manet-positioning.service` remains disabled and its configuration default off.
+
+The current ATAK admission path requires a verified wired EUD on `end0`/`br0`,
+a matching local FDB/neighbor mapping and the owned nftables policy. Android
+location services should be off; ATAK receives external GPS CoT on UDP 4349,
+ordinary CoT on UDP 4242, and sends SA to the radio's IPv4 address on UDP 4242.
+SA admits and pins the phone identity. The radio advertises the contact
+`MANET <hostname>` (`atak_callsign` can override it), with its TCP 4242 endpoint
+for Send. Select that contact when sending a manual point. The contact is
+hidden from the map; the separate external-position feed carries location.
+Phone presence, clock and manual-location state are retained under
+`/var/lib/manet-atak`; the service never sets the OS clock.
+
+The ATAK daemon now subscribes to route link/address/neighbor (including bridge
+FDB) and nftables notifications before its first readback. A cached proof avoids
+all four `nft`/`ip`/`bridge` subprocesses on unchanged ticks. Role/generation file
+metadata is the cheap additional invalidator; each new TCP stream or UDP peer
+forces a full snapshot. Events arriving during a snapshot discard it. Overflow,
+truncation or subscription failure closes the service and lets systemd restart
+with fresh subscriptions. SIGHUP also invalidates it. The existing output and
+input cycle intervals are unchanged, with no extra daemon or polling subprocess.
+The kernel firewall remains the packet boundary; asynchronous userspace
+notifications cannot make an arbitrary external ruleset flush atomic with I/O.
+
+With no admitted phone, no CoT is sent. Before the first association, the
+application does not read GPS, select a position, create warnings or checkpoint
+unchanged state. It still checks monitor/jamming file metadata and their
+freshness deadlines, durably remembering producer activation/loss so a failed
+producer cannot later appear unwired. Inputs are parsed only when metadata
+changes or their boot/raw-clock freshness expires. Future timestamps have their
+own retry deadline; neither wall-clock steps nor the cache extend a fix's TTL.
+
+After a pinned phone leaves, changed safety inputs, phone presence expiry and
+warning deadlines still run. A held manual point or warning history retains the
+30-second durable checkpoint to preserve age lower bounds across reboot. Audio
+acknowledgements are checked only with pending audio; audio output is rewritten
+only on changes. Unchanged idle cycles skip selection, serialization and runtime
+JSON writes. `status.json` includes `idle`; its timestamps describe the last
+snapshot, not a service heartbeat. Use systemd for liveness and the observation
+timestamps to advance a displayed manual age. Admission/path changes are handled
+on the existing event cycle, and active output stays at its previous cadence.
+
+Remaining idle work is the existing 0.2-second select wakeup, one-second
+role/generation and input metadata checks, stream expiry and netlink handling.
+These preserve admission and fail-closed safety without polling subprocesses.
+
+`manet-cpu-sample.py` reads cgroup-v2 `cpu.stat` twice around one timed sleep,
+including child-process CPU, and reports CPU seconds per elapsed minute plus
+percent of one core. It also reports aggregate busy system CPU for profile
+comparisons, without double-counting guest time. Restart/counter resets invalidate
+the sample. Use matching phone traffic and uptime conditions for before/after;
+the reported old 575 CPU seconds / 8000 elapsed seconds equals 4.3125 CPU s/min
+(7.1875% of one core). Slice 16's CM4 result reported in
+`review-collab/atak-20261006/claude-017.txt` was about 1.0% of one core
+(0.6 CPU s/min), with `path_ready=true`. Slice 17 has no hardware after-sample:
+node access was excluded. On the next authorized node run, detach the phone and
+use `sudo python3 /usr/local/bin/manet-cpu-sample.py --label slice17-no-phone
+--seconds 60`, then repeat after attaching the phone. Offline tests prove four
+initial commands and zero more over 300 unchanged cycles; the application also
+does no further JSON parsing/writing, durable saves or CoT sends over 300
+unchanged never-associated cycles. Tests cover input expiry, faults before first
+association, reconnect, pending audio and warning deadlines.
 
 Operator scripts run through `manet-user-scripts.sh`. Per-script completion
 markers allow an interrupted run to resume without repeating scripts that finished.

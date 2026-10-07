@@ -128,7 +128,8 @@ if name == 'systemctl' and args == 'is-enabled dnsmasq.service':
     def test_generated_dnsmasq_config_stays_current_after_lease_change(self):
         source = (TOOLS / 'mesh-ip-manager.sh').read_text()
         function = '\n'.join(re.search(r'^' + name + r'\(\) \{\n.*?^\}', source, re.M | re.S)[0]
-                             for name in ('configure_dnsmasq', 'ensure_dnsmasq_running'))
+                             for name in ('ip_to_int', 'int_to_ip', 'valid_eud_gateway',
+                                          'update_avahi_host', 'configure_dnsmasq', 'eud_ready', 'ensure_dnsmasq_running'))
         start = source.index('                # Only reconfigure dnsmasq if the config has changed')
         end = source.index('                # The web UI is restricted', start)
         check = source[start:end]
@@ -176,12 +177,14 @@ cat /var/lib/misc/dnsmasq.leases
 bind-interfaces
 dhcp-range=10.30.0.8,10.30.0.15,4m
 dhcp-option=3,10.30.0.7
+address=/manet.local/10.30.0.7
 resolv-file=/run/systemd/resolve/resolv.conf
 clear-on-reload
 '''))
         body = '''
 log() { :; }
 ensure_dnsmasq_running() { :; }
+update_avahi_host() { :; }
 configure_dnsmasq() { sed -i s/bind-interfaces/bind-dynamic/ "$DNSMASQ_CONF"; echo REBOUND; }
 BR0_PRIMARY=10.30.0.6; BR0_SECONDARY=10.30.0.7
 DHCP_START=10.30.0.8; DHCP_END=10.30.0.15

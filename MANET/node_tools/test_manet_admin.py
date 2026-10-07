@@ -392,12 +392,27 @@ class WebBoundaryTests(unittest.TestCase):
         handler.rfile = io.BytesIO(b'{}')
         handler.read_body = lambda: handler.rfile.read(int(handler.headers.get('Content-Length', 0)))
         status.STATUS_CACHE.invalidate()
-        handler._is_perf_host = Mock(return_value=False)
         handler._perf_cookie_valid = Mock(return_value=authenticated)
         handler.send_json = Mock()
         handler.send_html = Mock()
         handler.send_401_json = Mock()
         return handler
+
+    def test_old_hostname_requests_use_the_normal_ui_routes(self):
+        with patch.object(status, 'load_kv_file', return_value={}), \
+                patch.object(status, 'is_allowed_ip', return_value=True), \
+                patch.object(status, 'render_status_page', return_value='public status'):
+            handler = self.handler('/')
+            handler.headers['Host'] = 'old-dashboard.local'
+            handler.do_GET()
+            handler.send_html.assert_called_once_with('public status')
+            for method in ('GET', 'POST', 'DELETE'):
+                with self.subTest(method=method):
+                    handler = self.handler('/manage/')
+                    handler.headers['Host'] = 'old-dashboard.local'
+                    handler._handle_manage = Mock()
+                    getattr(handler, 'do_' + method)()
+                    self.assertEqual(handler._handle_manage.call_args.args[0].path, '/manage/')
 
     def test_status_remains_public_and_admin_routes_require_login(self):
         with patch.object(status, 'load_kv_file', return_value={'admin_password': 'test'}), \

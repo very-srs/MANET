@@ -83,11 +83,14 @@ echo "iperf3 iperf3/start_daemon boolean true" | debconf-set-selections
 chmod -x /etc/kernel/postinst.d/initramfs-tools
 
 # Install packages for this system
-apt install -y ipcalc-ng nmap lshw tcpdump net-tools nftables wireless-tools iperf3\
+apt install -y --no-install-recommends ipcalc-ng nmap lshw tcpdump net-tools nftables wireless-tools iperf3\
 		radvd bridge-utils firmware-mediatek libnss-mdns syncthing networkd-dispatcher\
-		libgps-dev libcap-dev screen arping bc jq git libssl-dev hostapd dnsmasq pulseaudio\
+		libgps-dev libcap-dev screen arping bc jq git libssl-dev hostapd dnsmasq\
 		python3-protobuf unzip chrony build-essential systemd-resolved dhcping mpg123\
-		libnl-3-dev libnl-genl-3-dev libnl-route-3-dev ebtables libdbus-1-dev gpsd pulseaudio-utils
+		libnl-3-dev libnl-genl-3-dev libnl-route-3-dev ebtables libdbus-1-dev gpsd\
+		alsa-utils alsa-ucm-conf alsa-topology-conf rfkill iw wireless-regdb\
+		libnss-resolve libnss-myhostname netcat-openbsd\
+		gstreamer1.0-alsa gstreamer1.0-plugins-base gstreamer1.0-plugins-good python3-gi gir1.2-gstreamer-1.0
 
 # Unpack the tar file: contains kernel, modules, firmware, and mesh tools
 tar -zxf /root/morse-pi-install.tar.gz -C /
@@ -179,6 +182,12 @@ Bridge=br0
 LinkLocalAddressing=ipv6
 IPv6Token=eui64
 IPv6PrivacyExtensions=no
+
+# br0 snoops IGMP, so unjoined groups such as ATAK SA (239.2.3.1) only reach
+# router ports. bat0 must always be one, or a node that hears no IGMP query
+# on the mesh keeps its EUDs' multicast to itself.
+[Bridge]
+MulticastRouter=permanent
 
 [Link]
 MTUBytes=1500
@@ -558,6 +567,9 @@ echo "lan_ap_ssid=__LAN_AP_SSID__" >> /etc/mesh.conf
 echo "lan_ap_key=__LAN_AP_KEY__" >> /etc/mesh.conf
 echo "ipv4_network=__LAN_CIDR_BLOCK__"  >> /etc/mesh.conf
 echo "mumble=__INSTALL_MUMBLE__" >> /etc/mesh.conf
+# ATAK is core: absent also means on; set atak=n explicitly to opt out.
+echo "atak=y" >> /etc/mesh.conf
+systemctl enable manet-atak.service
 echo "mtx=__INSTALL_MEDIAMTX__" >> /etc/mesh.conf
 # This block rewrites the mesh.conf the flasher already wrote, so the voice
 # keys have to be repeated here or they are lost: same trap as admin_password

@@ -179,6 +179,21 @@ identity metadata is still arriving. The harness is disabled by default and its
 wiring still needs bench validation. Configuration and all patterns are in
 [hardware support](MANET/node_tools/README.md#hardware-support).
 
+## ATAK phones
+
+ATAK integration runs by default on every radio. Connect the phone by Ethernet,
+turn off Android location services, and enable ATAK's external GPS input on UDP
+port **4349**. Configure ATAK to send its position reports (SA) by unicast to the
+radio's IPv4 address on UDP **4242**, and receive ordinary CoT on UDP **4242**.
+The radio then appears in ATAK's contacts as **MANET mesh-XXXX** (its hostname).
+Choose that contact when sending a manually placed point to the radio. The
+contact itself has no map marker; position updates arrive through external GPS.
+
+To turn this off on one radio, set `atak=n` in `/etc/mesh.conf` and run
+`sudo systemctl restart manet-atak.service`. Remove that setting, or set
+`atak=y`, and restart the service to turn it back on. With no admitted phone,
+the service sends no CoT. Ranging-based positioning remains off by default.
+
 ## Web Interface
 
 Each node serves two things on port 80, reachable from a device connected to

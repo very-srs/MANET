@@ -48,6 +48,19 @@ if ! flock -n 200; then
     exit 0
 fi
 
+# Reuse the existing Python process before computing VIPs or spawning the
+# one-shot ranker. It rechecks age, addresses and service state every request.
+. "${MANET_TOOLS_DIR:-$(dirname "${BASH_SOURCE[0]}")}/manet-runtime-client.sh"
+ELECTION_RESULT=""
+RUNTIME_RC=0
+ELECTION_RESULT=$(manet_runtime_call election mediamtx) || RUNTIME_RC=$?
+if [ "$RUNTIME_RC" = 0 ]; then
+    [ "$ELECTION_RESULT" != skip ] || exit 0
+elif [ "$RUNTIME_RC" != 125 ]; then
+    log "Runtime election check failed; retrying next pass"
+    exit "$RUNTIME_RC"
+fi
+
 # --- Check Dependencies ---
 if [ -z "$MY_MAC" ]; then
     log "Cannot determine local MAC address (${CONTROL_IFACE} not up). Exiting."
@@ -85,7 +98,7 @@ IPV4_VIP_WITH_MASK="${MEDIAMTX_IPV4_VIP}/${IPV4_NETWORK#*/}"
 # rules: eligibility (state, observed age, valid metric), one deterministic
 # incumbent with its +10 bias, highest score wins, lowest MAC breaks a tie.
 ELECTION_HELPER="${MANET_TOOLS_DIR:-/usr/local/bin}/mesh-service-election.py"
-if ! ELECTION_RESULT=$(python3 "$ELECTION_HELPER" mediamtx "$REGISTRY_STATE_FILE" 2> >(while IFS= read -r line; do log "$line"; done)); then
+if [ -z "$ELECTION_RESULT" ] && ! ELECTION_RESULT=$(python3 "$ELECTION_HELPER" mediamtx "$REGISTRY_STATE_FILE" 2> >(while IFS= read -r line; do log "$line"; done)); then
     log "Cannot rank candidates; leaving the service as it is"
     exit 1
 fi

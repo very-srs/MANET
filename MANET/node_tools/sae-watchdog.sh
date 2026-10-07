@@ -58,9 +58,11 @@ restart_mesh() {
 # Only restart if bat0 is actually missing mesh interfaces: avoids
 # thrashing on a healthy node that just happens to see a blocked peer.
 bat0_has_all_interfaces() {
+    local members
+    members=$(batctl if 2>/dev/null) || return 1
     for iface in $STANDARD_MESH_INTERFACES; do
         radio_iface_enabled "$iface" || continue
-        batctl if 2>/dev/null | grep -q "^${iface}:" || return 1
+        [[ $'\n'"$members" == *$'\n'"${iface}:"* ]] || return 1
     done
     return 0
 }
@@ -74,7 +76,7 @@ JOURNAL_ARGS=()
 waiting=""
 while :; do
     STANDARD_MESH_INTERFACES=""
-    [ -s "$MESH_IF_FILE" ] && STANDARD_MESH_INTERFACES=$(tr '\n' ' ' < "$MESH_IF_FILE")
+    [ -s "$MESH_IF_FILE" ] && STANDARD_MESH_INTERFACES=$(<"$MESH_IF_FILE")
     JOURNAL_ARGS=()
     for iface in $STANDARD_MESH_INTERFACES; do
         radio_iface_enabled "$iface" || continue
@@ -93,7 +95,7 @@ log "Starting SAE watchdog (monitoring: ${STANDARD_MESH_INTERFACES% })"
 journalctl "${JOURNAL_ARGS[@]}" \
     --output=cat 2>/dev/null | \
 while IFS= read -r line; do
-    if echo "$line" | grep -q "MESH-SAE-AUTH-BLOCKED"; then
+    if [[ "$line" == *MESH-SAE-AUTH-BLOCKED* ]]; then
         log "Detected: $line"
 
         # Only react if bat0 is missing interfaces: if we already have

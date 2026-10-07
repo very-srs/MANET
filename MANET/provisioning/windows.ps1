@@ -2154,6 +2154,8 @@ lan_ap_key=$($Script:LAN_AP_KEY)
 max_euds_per_node=$($Script:MAX_EUDS_PER_NODE)
 mtx=$($Script:INSTALL_MEDIAMTX)
 mumble=$($Script:INSTALL_MUMBLE)
+# ATAK runs by default; set atak=n to opt out on this node.
+atak=y
 voice=$($Script:VOICE_ENABLED)
 # Every node ships on talk group 1; changed from the web UI, not at flash time.
 voice_channel=1

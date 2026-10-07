@@ -97,6 +97,9 @@ class ChunkClaimsTests(unittest.TestCase):
         source = (TOOLS / 'mesh-ip-manager.sh').read_text()
         functions = source.split('# --- Helper Functions ---\n', 1)[1]
         functions = functions.split('# --- Main Logic ---\n', 1)[0]
+        # These tests exercise chunk selection only. Static-host writes have
+        # their own isolated tests and must never reach the machine's /etc.
+        functions += '\nupdate_avahi_host() { :; }\n'
         env = dict(self.env, IPV4_NETWORK=network, CHUNK_SIZE=str(chunk_size),
                    SERVICES_RESERVED='5', CLAIMED_CHUNKS_FILE=str(self.claims))
         return subprocess.run(['bash', '-c', functions + '\n' + command],
@@ -329,11 +332,6 @@ class ChunkClaimsTests(unittest.TestCase):
         allocator.write_text('#!/bin/bash\nprintf "1\\n" > ' +
                              shlex.quote(str(run / 'my_ipv4_chunk')) + '\n')
         allocator.chmod(0o755)
-        # timeout invokes an executable, so a shell function cannot isolate
-        # this lookup from the host's runuser/Syncthing installation.
-        runuser = self.bin / 'runuser'
-        runuser.write_text('#!/bin/bash\nexit 0\n')
-        runuser.chmod(0o755)
         # The managers source manet-common.sh for uptime_now; the boot clock
         # is fixed at 5000 s, so "recent" means published at 5000.
         uptime = self.root / 'uptime'
@@ -341,6 +339,7 @@ class ChunkClaimsTests(unittest.TestCase):
         prefix = (f'. {shlex.quote(str(TOOLS / "manet-common.sh"))}\n'
                   'log() { :; }\nensure_static_channels() { :; }\n'
                   'hostname() { printf "mesh-test\\n"; }\n'
+                  'node_syncthing_id() { :; }\n'
                   'python3() { if [ "$1" = /usr/local/bin/manet_node_ipv4.py ]; then '
                   'printf "%s\\n" "$REVIEW_IPV4"; else command python3 "$@"; fi; }\n'
                   'ip() { printf "    inet %s/28 scope global br0\\n" "$REVIEW_IPV4"; }\n')

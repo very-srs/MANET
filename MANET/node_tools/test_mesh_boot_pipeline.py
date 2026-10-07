@@ -44,11 +44,11 @@ def event(kind, **extra):
         out.write(json.dumps(dict(kind=kind, now=now, **extra)) + '\n')
 if name == 'date':
     print(1000 + now if sys.argv[1:] == ['+%s'] else 'fixture-clock')
-elif name == 'runuser':
+elif name == 'cert-id':
     event('syncthing-id')
     if os.environ['TEST_MISSING_ID'] == '1' and not (root / 'id-retried').exists():
         (root / 'id-retried').touch()
-        sys.exit(1)
+        sys.exit(0)  # A missing certificate is a valid empty first-boot result.
     from manet_ids import bytes_to_syncthing_id
     print(bytes_to_syncthing_id(bytes(range(32))))
 elif name == 'alfred':
@@ -101,7 +101,7 @@ elif name == 'allocate':
         chunk.write_text('0\n')
         event('allocated')
 '''
-            for command in ('date', 'runuser', 'alfred', 'tick', 'allocate', 'throughput'):
+            for command in ('date', 'cert-id', 'alfred', 'tick', 'allocate', 'throughput'):
                 path = root / 'bin' / command
                 path.write_text(tool)
                 path.chmod(0o755)
@@ -126,6 +126,7 @@ hostname() { echo fixture; }
 collect_radio_mcs() { :; }
 collect_interfaces_json() { echo '[]'; }
 collect_ap_ssid() { :; }
+node_syncthing_id() { "$TEST_ROOT/bin/cert-id"; }
 detect_and_update_gateway_state() { :; }
 is_ntp_time_source() { return 1; }
 is_hosting_service() { return 1; }
@@ -169,7 +170,8 @@ sleep() {
                 claim = next(e for e in events if e['kind'] == 'publish' and e.get('address'))
                 self.assertEqual(claim['now'], allocated['now'])
                 self.assertEqual(events[-1]['seconds'], 15)
-                self.assertEqual(sum(e['kind'] == 'syncthing-id' for e in events), 1)
+                self.assertEqual(sum(e['kind'] == 'syncthing-id' for e in events),
+                                 sum(e['kind'] == 'publish' and e.get('record') == '67' for e in events))
                 self.assertEqual(identity.ipv4_chunk, 0)
                 self.assertEqual(int_to_ipv4(identity.ipv4_address), '10.30.0.6')
 
@@ -183,7 +185,9 @@ sleep() {
                     self.assertEqual(checks[1]['since'], 1)
                     allocated = next(e for e in events if e['kind'] == 'allocated')
                     self.assertEqual(allocated['now'], 11)
-                    self.assertEqual(sum(e['kind'] == 'syncthing-id' for e in events), 2)
+                    self.assertEqual(sum(e['kind'] == 'syncthing-id' for e in events),
+                                     sum(e['kind'] in ('publish', 'publish-failed') and e.get('record') == '67'
+                                         for e in events))
                     self.assertEqual(identity.syncthing_id, bytes(range(32)))
 
 
