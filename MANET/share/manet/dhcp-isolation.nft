@@ -1,3 +1,6 @@
+# Node-local DHCP and EUD discovery boundary at bat0.
+# UDP discovery and replies, plus TCP NetBIOS name/LLMNR fallback.
+# Match service ports, including unicast replies, without a multicast blanket drop.
 # Replace only this table, in one transaction; leave gateway/UI rules alone.
 add table bridge manet_dhcp
 delete table bridge manet_dhcp
@@ -6,13 +9,45 @@ table bridge manet_dhcp {
         type filter hook forward priority filter; policy accept;
         iifname "bat0" ether type ip udp dport { 67, 68 } counter drop
         oifname "bat0" ether type ip udp dport { 67, 68 } counter drop
+        iifname "bat0" ether type ip udp dport { 137, 138, 1900, 3702, 5353, 5355 } counter drop
+        oifname "bat0" ether type ip udp dport { 137, 138, 1900, 3702, 5353, 5355 } counter drop
+        iifname "bat0" ether type ip udp sport { 137, 138, 1900, 3702, 5353, 5355 } counter drop
+        oifname "bat0" ether type ip udp sport { 137, 138, 1900, 3702, 5353, 5355 } counter drop
+        iifname "bat0" ether type ip tcp dport { 137, 5355 } counter drop
+        oifname "bat0" ether type ip tcp dport { 137, 5355 } counter drop
+        iifname "bat0" ether type ip tcp sport { 137, 5355 } counter drop
+        oifname "bat0" ether type ip tcp sport { 137, 5355 } counter drop
+        iifname "bat0" ether type ip6 udp dport { 137, 138, 1900, 3702, 5353, 5355 } counter drop
+        oifname "bat0" ether type ip6 udp dport { 137, 138, 1900, 3702, 5353, 5355 } counter drop
+        iifname "bat0" ether type ip6 udp sport { 137, 138, 1900, 3702, 5353, 5355 } counter drop
+        oifname "bat0" ether type ip6 udp sport { 137, 138, 1900, 3702, 5353, 5355 } counter drop
+        iifname "bat0" ether type ip6 tcp dport { 137, 5355 } counter drop
+        oifname "bat0" ether type ip6 tcp dport { 137, 5355 } counter drop
+        iifname "bat0" ether type ip6 tcp sport { 137, 5355 } counter drop
+        oifname "bat0" ether type ip6 tcp sport { 137, 5355 } counter drop
     }
     chain input {
         type filter hook input priority filter; policy accept;
         iifname "bat0" ether type ip udp dport 67 counter drop
+        iifname "bat0" ether type ip udp dport { 137, 138, 1900, 3702, 5353, 5355 } counter drop
+        iifname "bat0" ether type ip udp sport { 137, 138, 1900, 3702, 5353, 5355 } counter drop
+        iifname "bat0" ether type ip tcp dport { 137, 5355 } counter drop
+        iifname "bat0" ether type ip tcp sport { 137, 5355 } counter drop
+        iifname "bat0" ether type ip6 udp dport { 137, 138, 1900, 3702, 5353, 5355 } counter drop
+        iifname "bat0" ether type ip6 udp sport { 137, 138, 1900, 3702, 5353, 5355 } counter drop
+        iifname "bat0" ether type ip6 tcp dport { 137, 5355 } counter drop
+        iifname "bat0" ether type ip6 tcp sport { 137, 5355 } counter drop
     }
     chain output {
         type filter hook output priority filter; policy accept;
         oifname "bat0" ether type ip udp sport 67 counter drop
+        oifname "bat0" ether type ip udp dport { 137, 138, 1900, 3702, 5353, 5355 } counter drop
+        oifname "bat0" ether type ip udp sport { 137, 138, 1900, 3702, 5353, 5355 } counter drop
+        oifname "bat0" ether type ip tcp dport { 137, 5355 } counter drop
+        oifname "bat0" ether type ip tcp sport { 137, 5355 } counter drop
+        oifname "bat0" ether type ip6 udp dport { 137, 138, 1900, 3702, 5353, 5355 } counter drop
+        oifname "bat0" ether type ip6 udp sport { 137, 138, 1900, 3702, 5353, 5355 } counter drop
+        oifname "bat0" ether type ip6 tcp dport { 137, 5355 } counter drop
+        oifname "bat0" ether type ip6 tcp sport { 137, 5355 } counter drop
     }
 }

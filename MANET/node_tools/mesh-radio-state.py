@@ -255,14 +255,16 @@ def publish_ack(version, ok=True, error="", target=False):
     send_alfred(ALFRED_RADIO_ACK_TYPE, payload)
 
 
-def latest_radio_package():
-    try:
-        r = run(["alfred", "-r", str(ALFRED_RADIO_TYPE)], timeout=5)
-    except Exception:
-        return None
-    if r.returncode != 0:
-        return None
-    messages = ADMIN.messages(ALFRED_RADIO_TYPE, r.stdout)
+def latest_radio_package(raw=None):
+    if raw is None:
+        try:
+            r = run(["alfred", "-r", str(ALFRED_RADIO_TYPE)], timeout=5)
+        except Exception:
+            return None
+        if r.returncode != 0:
+            return None
+        raw = r.stdout
+    messages = ADMIN.messages(ALFRED_RADIO_TYPE, raw)
     return messages[-1] if messages else None
 
 
@@ -340,8 +342,8 @@ def record_current_state(pkg):
     write_json(CURRENT_STATE_FILE, data)
 
 
-def sync_once():
-    message = latest_radio_package()
+def sync_once(raw=None):
+    message = latest_radio_package() if raw is None else latest_radio_package(raw)
     pending = read_json(PENDING_FILE)
 
     if not message:
@@ -404,7 +406,7 @@ def sync_once():
 def main():
     cmd = sys.argv[1] if len(sys.argv) > 1 else "sync"
     if cmd == "sync":
-        return sync_once()
+        return sync_once(sys.stdin.read() if '--stdin' in sys.argv[2:] else None)
     if cmd == "apply":
         path = sys.argv[2] if len(sys.argv) > 2 else PENDING_FILE
         pkg = read_json(path)

@@ -3,6 +3,7 @@
 import argparse
 from collections import Counter
 from contextlib import contextmanager
+from copy import deepcopy
 import fcntl
 import json
 import os
@@ -261,13 +262,29 @@ class Runtime:
         self.busy_path.write_text(f'{self.boot} {expiry:.6f}\n')
 
     def aliases(self):
-        return sorted({p.read_text().strip().lower() for p in self.sysnet.glob('*/address')
-                       if protocol.MAC.fullmatch(p.read_text().strip().lower())
-                       and p.read_text().strip() != '00:00:00:00:00:00'})
+        values = {p.read_text().strip().lower() for p in self.sysnet.glob('*/address')}
+        return sorted(mac for mac in values if protocol.MAC.fullmatch(mac) and mac != '00:00:00:00:00:00')
 
     def receive(self, type_id, now):
         raw = command(['alfred', '-r', type_id], timeout=2)
-        return authenticated_records(self.transport, type_id, raw, now)
+        require_clock()
+        info = self.conf.stat()
+        generation = (info.st_dev, info.st_ino, info.st_mtime_ns, info.st_ctime_ns)
+        cached = getattr(self, '_received', {}).get(type_id)
+        if cached and cached[:2] == (raw, generation) and now >= cached[2]:
+            # These exact envelopes already authenticated with this credential
+            # generation. Recheck freshness EVERY tick, including forward clock
+            # steps; time before verification reauthenticates the envelopes.
+            return deepcopy({mac: record for mac, record in cached[3].items()
+                             if now <= record['_fresh_until']})
+        records = authenticated_records(self.transport, type_id, raw, now)
+        # Never cache a rejection: a future-dated or rate-limited envelope may
+        # become acceptable later. Duplicate senders also take the normal path.
+        if len(records) == len(RECORD.findall(raw)):
+            self._received = {type_id: (raw, generation, now, deepcopy(records))}
+        else:
+            self._received = {}
+        return records
 
     def tourguide_exclusions(self, now):
         # Existing status carries this flag; no separate discovery broadcast.
@@ -448,11 +465,11 @@ class Runtime:
     def _tick(self, now):
         if not clock_ready():
             with self.channel_lock():
-                destination = self.bootstrap_select()
+                local = self.status(now)
+                destination = self.bootstrap_select(local)
                 if destination:
                     self.apply(destination, challenged=True)
                 else:
-                    local = self.status(now)
                     if local['acs'] and local['discovery']:
                         peers = command([str(TOOLS / 'mesh-peer-count.sh'), '--batctl', self.batctl, '--list'], timeout=7).split()
                         self.ui_status['reachable'] = len(peers)
@@ -642,11 +659,12 @@ class Runtime:
                 result[mac] = destination
         return result
 
-    def bootstrap_select(self):
+    def bootstrap_select(self, local=None):
         """A cold node can follow a live reachable helper without knowing UTC."""
         with (self.run_dir / '.acs-probe.lock').open('a') as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            local = self.status(int(time.time()))
+            if local is None:
+                local = self.status(int(time.time()))
             if clock_ready() or not local['acs'] or not local['current']:
                 return None
             path = self.run_dir / 'manet-acs-probe.json'
@@ -782,6 +800,8 @@ def main():
     elif args.action == 'run':
         with (runtime.state_dir / '.daemon.lock').open('a') as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            from manet_runtime import start
+            start()  # Blocking request worker in this existing process; no new polling loop.
             last_error = None
             while True:
                 try:

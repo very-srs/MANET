@@ -14,7 +14,7 @@ batman_mainif() {
 restore_halow_primary_if_needed() {
     local halow mainif now last cooldown_file
 
-    halow="$(echo "$HALOW_IFS" | awk 'NF {print $1; exit}')"
+    read -r halow _ <<< "${HALOW_IFS//$'\n'/ }"
     [ -n "$halow" ] || return 0
     radio_iface_enabled "$halow" || return 0
     ip link show "$halow" >/dev/null 2>&1 || return 0
@@ -26,7 +26,8 @@ restore_halow_primary_if_needed() {
 
     cooldown_file="/run/batman-enslave-watch-halow-primary-reset"
     now="$(uptime_now)" || return 0
-    last="$(cat "$cooldown_file" 2>/dev/null)"
+    last=""
+    [ ! -r "$cooldown_file" ] || read -r last < "$cooldown_file"
     # Boot-clock seconds. Missing, malformed, or ahead of the boot clock (a
     # wall time written by an older version) means no cooldown is running.
     [[ "$last" =~ ^[0-9]+$ ]] && [ "$last" -le "$now" ] || last=-1000000
@@ -60,7 +61,8 @@ restart_dead_ap_if_needed() (
     flock -n 9 || return 0
     local ap now last cooldown_file strikes_file strikes
 
-    ap="$(cat /var/lib/ap_interface 2>/dev/null)"
+    ap=""
+    [ ! -r /var/lib/ap_interface ] || read -r ap < /var/lib/ap_interface
     [ -n "$ap" ] || return 0
     systemctl is-active --quiet hostapd.service || return 0
     ip link show "$ap" >/dev/null 2>&1 || return 0
@@ -98,8 +100,11 @@ while true; do
     # before service restarts whose helpers take the same lock.
     exec 8>"${MANET_ACS_LOCK_FILE:-/run/channel-election.lock}"
     flock -n 8 || continue
-    HALOW_IFS="$(cat /var/lib/halow_if 2>/dev/null)"
-    MESH_IFS="$(cat /var/lib/mesh_if 2>/dev/null)"
+    HALOW_IFS=""; MESH_IFS=""
+    [ ! -r /var/lib/halow_if ] || HALOW_IFS=$(</var/lib/halow_if)
+    [ ! -r /var/lib/mesh_if ] || MESH_IFS=$(</var/lib/mesh_if)
+    # One membership snapshot per check, refreshed after a successful add.
+    BAT_MEMBERS=$(batctl bat0 if 2>/dev/null) || BAT_MEMBERS=""
 
     # Enforce mesh_plink_timeout=0 on HaLow interfaces. The inactivity-based
     # plink close triggers a Morse firmware stuck state during key teardown
@@ -122,10 +127,10 @@ while true; do
         radio_iface_enabled "$IFACE" || continue
 
         # Skip if interface doesn't exist
-        ip link show "$IFACE" >/dev/null 2>&1 || continue
+        [ -e "/sys/class/net/$IFACE" ] || continue
 
         # Check if already in bat0
-        if batctl bat0 if 2>/dev/null | grep -q "^${IFACE}:"; then
+        if [[ $'\n'"$BAT_MEMBERS" == *$'\n'"${IFACE}:"* ]]; then
             continue
         fi
 
@@ -137,7 +142,8 @@ while true; do
         for attempt in 1 2 3; do
             if batctl bat0 if add "$IFACE" 2>/dev/null; then
                 sleep 1
-                if batctl bat0 if 2>/dev/null | grep -q "^${IFACE}:"; then
+                BAT_MEMBERS=$(batctl bat0 if 2>/dev/null) || BAT_MEMBERS=""
+                if [[ $'\n'"$BAT_MEMBERS" == *$'\n'"${IFACE}:"* ]]; then
                     log "OK: $IFACE re-enslaved to bat0 (attempt $attempt)"
                     break
                 fi

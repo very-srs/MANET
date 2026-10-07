@@ -25,6 +25,16 @@
 #
 
 # --- Configuration ---
+# Request the existing agreement process; fall back to a one-shot when absent.
+# Both share discovery, registry, isolation and address checks, calling back
+# here only for reconciliation.
+if [ "${MANET_IP_CHECKED:-0}" != 1 ]; then
+    . "${MANET_TOOLS_DIR:-$(dirname "${BASH_SOURCE[0]}")}/manet-runtime-client.sh"
+    _runtime_rc=0
+    manet_runtime_call ip || _runtime_rc=$?
+    [ "$_runtime_rc" = 125 ] || exit "$_runtime_rc"
+    exec python3 "${MANET_TOOLS_DIR:-$(dirname "${BASH_SOURCE[0]}")}/manet_ip_runtime.py"
+fi
 CONTROL_IFACE="br0"
 CLAIMED_CHUNKS_FILE="/tmp/claimed_chunks.txt"
 PERSISTENT_STATE_FILE="/etc/mesh_ipv4_state"
@@ -326,9 +336,9 @@ mac_is_local() {
     [ -n "$mac" ] || return 1
 
     for iface_path in /sys/class/net/*; do
-        iface=$(basename "$iface_path")
+        iface=${iface_path##*/}
         [ -e "/sys/class/net/$iface/address" ] || continue
-        local_mac=$(cat "/sys/class/net/$iface/address" 2>/dev/null)
+        read -r local_mac < "/sys/class/net/$iface/address" || continue
         if [ "$mac" = "$local_mac" ]; then
             return 0
         fi
@@ -338,6 +348,7 @@ mac_is_local() {
 }
 
 release_control_ips() {
+    update_avahi_host "" || return 1
     local prefix="${IPV4_NETWORK#*/}"
     local primary=""
     local secondary=""
@@ -384,17 +395,37 @@ cleanup_control_aliases() {
 # bat0 is the only mesh-facing bridge port. The rule set does not depend on
 # which physical radio currently serves as AP or mesh.
 ensure_dhcp_isolation() {
-    if ! python3 /usr/local/bin/manet-dhcp-isolation.py ensure; then
+    if ! { if [ "${MANET_IP_CHECKED:-0}" = 1 ]; then
+               [ "$MANET_IP_ISOLATED" = 1 ]
+           else python3 /usr/local/bin/manet-dhcp-isolation.py ensure; fi; }; then
         log "ERROR: DHCP isolation failed; stopping dnsmasq to prevent foreign offers"
         systemctl stop dnsmasq.service 2>/dev/null || true
         return 1
     fi
 }
 
+eud_ready() {
+    if [ "${MANET_IP_CHECKED:-0}" = 1 ]; then
+        # Recheck at the point of a DHCP start/restart: a port can disappear
+        # while allocation runs. Sysfs reads need no second interpreter.
+        local sysnet="${MANET_SYS_NET:-/sys/class/net}" port state carrier
+        for port in "$sysnet"/br0/brif/*; do
+            [ "${port##*/}" != bat0 ] || continue
+            state=""; carrier=""
+            [ ! -r "$port/state" ] || read -r state < "$port/state"
+            [ ! -r "$sysnet/${port##*/}/carrier" ] || read -r carrier < "$sysnet/${port##*/}/carrier"
+            [ "$state" != 3 ] || [ "$carrier" != 1 ] || return 0
+        done
+        return 1
+    else
+        python3 /usr/local/bin/manet-dhcp-isolation.py eud-ready
+    fi
+}
+
 # Reuse the validated pool and leases after a temporary isolation failure.
 # Called only after this pass has checked the node's allocation/configuration.
 ensure_dnsmasq_running() {
-    if ! python3 /usr/local/bin/manet-dhcp-isolation.py eud-ready; then
+    if ! eud_ready; then
         if systemctl is-active --quiet dnsmasq.service; then
             systemctl stop dnsmasq.service || return 1
             log "dnsmasq stopped: no forwarding EUD port on br0"
@@ -410,7 +441,58 @@ ensure_dnsmasq_running() {
     fi
 }
 
-# Configure dnsmasq for DHCP on br0
+# The internal address is immediately before this chunk's EUD pool. Do not
+# publish a mesh address, service VIP, malformed address or unknown allocation.
+valid_eud_gateway() {
+    local address="${1:-}" start="${2:-}" address_int start_int
+    address_int=$(ip_to_int "$address") || return 1
+    start_int=$(ip_to_int "$start") || return 1
+    [ "$(int_to_ip "$address_int")" = "$address" ] &&
+        [ "$(int_to_ip "$start_int")" = "$start" ] &&
+        [ "$address_int" -gt 0 ] && [ "$start_int" -lt 3758096384 ] &&
+        [ "$((address_int >> 24))" -ne 127 ] &&
+        [ "$start_int" -eq "$((address_int + 1))" ] &&
+        [ "$address" != "$MTX_VIP" ] && [ "$address" != "$MUMBLE_VIP" ]
+}
+
+update_avahi_host() {
+    local address="${1:-}" start="${2:-}"
+    local hosts=/etc/avahi/hosts pending=/run/manet-avahi-host-reload-needed
+    local source temporary
+    valid_eud_gateway "$address" "$start" || address=""
+    [ -n "$address" ] || [ -f "$hosts" ] || [ -f "$pending" ] || return 0
+    mkdir -p "${hosts%/*}" || return 1
+    temporary=$(mktemp "${hosts}.XXXXXX") || return 1
+    source="$hosts"
+    [ -f "$source" ] || source=/dev/null
+    # Preserve operator entries and comments; replace only our management name.
+    if ! awk -v address="$address" '
+        { name=tolower($2); sub(/\.$/, "", name) }
+        $1 !~ /^#/ && name == "manet.local" { next }
+        { print }
+        END { if (address != "") print address " manet.local" }
+    ' "$source" > "$temporary"; then
+        rm -f "$temporary"
+        return 1
+    fi
+    if cmp -s "$temporary" "$hosts"; then
+        rm -f "$temporary"
+    else
+        if ! chmod 0644 "$temporary" || ! touch "$pending" || ! mv -f "$temporary" "$hosts"; then
+            rm -f "$temporary"
+            return 1
+        fi
+    fi
+    [ -f "$pending" ] || return 0
+    # Inactive Avahi reads the file when started. A failed reload is retried
+    # on the next allocation pass, without rewriting an unchanged hosts file.
+    if systemctl is-active --quiet avahi-daemon.service; then
+        systemctl reload avahi-daemon.service || return 1
+    fi
+    rm -f "$pending"
+}
+
+# Configure DNS and mDNS together from the same allocated internal address.
 configure_dnsmasq() {
     local br0_primary=$1
     local br0_secondary=$2
@@ -420,6 +502,12 @@ configure_dnsmasq() {
     local old_primary=""
     local _MUMBLE_VIP_LINE=""
     local _MTX_VIP_LINE=""
+    local temporary
+    if ! valid_eud_gateway "$br0_secondary" "$dhcp_start"; then
+        update_avahi_host "" || return 1
+        log "ERROR: EUD gateway unknown or inconsistent with the pool; management name withdrawn"
+        return 1
+    fi
     [ -n "$MUMBLE_VIP" ] && _MUMBLE_VIP_LINE="address=/mumble.local/$MUMBLE_VIP"
     [ -n "$MTX_VIP" ]    && _MTX_VIP_LINE="address=/mtx.local/$MTX_VIP"
 
@@ -437,7 +525,8 @@ configure_dnsmasq() {
     # dashboard or downstream clients try stale EUD IPs such as old ATAK peers.
     rm -f /var/lib/misc/dnsmasq.leases /run/dnsmasq.leases /tmp/dnsmasq.leases 2>/dev/null || true
 
-    cat > /etc/dnsmasq.d/mesh-eud.conf <<- EOF
+    temporary=$(mktemp /etc/dnsmasq.d/.mesh-eud.conf.XXXXXX) || return 1
+    if ! cat > "$temporary" <<- EOF
 # Listen only on br0 bridge
 interface=br0
 # br0 and its IPv4 addresses can appear after dnsmasq starts during boot.
@@ -454,9 +543,8 @@ dhcp-option=6,$br0_secondary
 domain=mesh.local
 local=/mesh.local/
 
-# manet.local and perf.local resolve to this node's IP so EUD clients can reach the admin panels
+# The management name uses this node's internal EUD address.
 address=/manet.local/$br0_secondary
-address=/perf.local/$br0_secondary
 
 # Service VIPs: stable across the mesh regardless of which node is leader
 ${_MUMBLE_VIP_LINE}
@@ -470,7 +558,14 @@ clear-on-reload
 # Log for debugging
 log-dhcp
 EOF
-
+    then
+        rm -f "$temporary"
+        return 1
+    fi
+    if ! chmod 0644 "$temporary" || ! mv -f "$temporary" /etc/dnsmasq.d/mesh-eud.conf; then
+        rm -f "$temporary"
+        return 1
+    fi
     # Ensure dnsmasq is unmasked, enabled, and running.
     # unmask triggers a full systemd daemon-reload even when nothing is
     # masked: only call it when the unit is actually masked.
@@ -479,13 +574,14 @@ EOF
     fi
 #    systemctl enable dnsmasq.service 2>/dev/null
 
-    if python3 /usr/local/bin/manet-dhcp-isolation.py eud-ready &&
+    if eud_ready &&
             systemctl is-active --quiet dnsmasq.service; then
         systemctl restart dnsmasq.service
         log "dnsmasq restarted"
     else
         ensure_dnsmasq_running
     fi
+    update_avahi_host "$br0_secondary" "$dhcp_start"
 }
 
 ensure_control_addr() {
@@ -505,14 +601,23 @@ ensure_control_addr() {
 # This refreshes the registry on every pass and returns promptly while boot
 # discovery is pending. Leave node-manager free to publish over IPv6. Run it
 # before restoring even a saved chunk or changing any interface/DHCP state.
-python3 "$STARTUP_HELPER" || exit 0
+if ! { if [ "${MANET_IP_CHECKED:-0}" = 1 ]; then
+           [ "$MANET_IP_STARTUP_READY" = 1 ]
+       else python3 "$STARTUP_HELPER"; fi; }; then
+    update_avahi_host "" || exit 1
+    exit 0
+fi
 
-ensure_dhcp_isolation || exit 1
+if ! ensure_dhcp_isolation; then
+    update_avahi_host ""
+    exit 1
+fi
 
 # Get our MAC address
 MY_MAC=$(cat "/sys/class/net/${CONTROL_IFACE}/address" 2>/dev/null || echo "")
 if [ -z "$MY_MAC" ]; then
     log "ERROR: Cannot read MAC address from $CONTROL_IFACE"
+    update_avahi_host ""
     exit 1
 fi
 
@@ -529,8 +634,17 @@ fi
 cleanup_control_aliases
 
 # Check if we already have an IP configured on br0
-if ! CURRENT_IPV4=$(python3 /usr/local/bin/manet_node_ipv4.py "$CONTROL_IFACE"); then
+read_current_ipv4() {
+    if [ "${MANET_IP_CHECKED:-0}" = 1 ]; then
+        [ "$MANET_IP_ADDRESS_OK" = 1 ] || return 1
+        printf '%s\n' "$MANET_IP_PRIMARY"
+    else
+        python3 /usr/local/bin/manet_node_ipv4.py "$CONTROL_IFACE"
+    fi
+}
+if ! CURRENT_IPV4=$(read_current_ipv4); then
     log "Cannot inspect the assigned node address; deferring allocation"
+    update_avahi_host "" || exit 1
     exit 0
 fi
 if [ -n "$CURRENT_IPV4" ]; then
@@ -545,6 +659,7 @@ load_claims
 # --- State Machine ---
 case $IPV4_STATE in
     "UNCONFIGURED")
+        update_avahi_host "" || exit 1
         PROPOSED_CHUNK=""
 
         if [ "${#INCOMPLETE_CLAIMS[@]}" -gt 0 ]; then
@@ -593,6 +708,10 @@ case $IPV4_STATE in
         # Get chunk IPs
         CHUNK_IPS=$(get_chunk_ips "$PROPOSED_CHUNK")
         IFS=: read -r BR0_PRIMARY BR0_SECONDARY DHCP_START DHCP_END <<< "$CHUNK_IPS"
+        if ! valid_eud_gateway "$BR0_SECONDARY" "$DHCP_START"; then
+            update_avahi_host ""
+            exit 1
+        fi
         
         log "Proposed chunk $PROPOSED_CHUNK: primary=$BR0_PRIMARY, gateway=$BR0_SECONDARY, dhcp=$DHCP_START-$DHCP_END"
 
@@ -610,7 +729,7 @@ case $IPV4_STATE in
             
             
             # Configure dnsmasq
-            configure_dnsmasq "$BR0_PRIMARY" "$BR0_SECONDARY" "$DHCP_START" "$DHCP_END"
+            configure_dnsmasq "$BR0_PRIMARY" "$BR0_SECONDARY" "$DHCP_START" "$DHCP_END" || exit 1
 
             # Save persistent state
             PERSISTENT_IPV4="$BR0_PRIMARY"
@@ -627,6 +746,9 @@ case $IPV4_STATE in
         ;;
 
     "CONFIGURED")
+        if [ -z "$PERSISTENT_CHUNK" ]; then
+            update_avahi_host "" || exit 1
+        fi
         # Check for conflicts: any peer range overlapping our whole block,
         # not only a peer whose primary equals ours.
         CONFLICTING_MAC=""
@@ -643,7 +765,7 @@ case $IPV4_STATE in
                 log "Won tie-breaker. Defending chunk."
             else
                 log "Lost tie-breaker. Releasing chunk and IPs."
-                release_control_ips
+                release_control_ips || exit 1
                 
                 PERSISTENT_IPV4=""
                 PERSISTENT_CHUNK=""
@@ -660,6 +782,10 @@ case $IPV4_STATE in
                 # Get current chunk IPs
                 CHUNK_IPS=$(get_chunk_ips "$PERSISTENT_CHUNK")
                 IFS=: read -r BR0_PRIMARY BR0_SECONDARY DHCP_START DHCP_END <<< "$CHUNK_IPS"
+                if ! valid_eud_gateway "$BR0_SECONDARY" "$DHCP_START"; then
+                    update_avahi_host ""
+                    exit 1
+                fi
 
                 ensure_control_addr "$BR0_PRIMARY"
                 ensure_control_addr "$BR0_SECONDARY"
@@ -673,6 +799,10 @@ case $IPV4_STATE in
                 elif ! grep -q "dhcp-range=$DHCP_START,$DHCP_END" "$DNSMASQ_CONF" 2>/dev/null; then
                     NEEDS_DNSMASQ_UPDATE=true
                 elif ! grep -q "dhcp-option=3,$BR0_SECONDARY" "$DNSMASQ_CONF" 2>/dev/null; then
+                    NEEDS_DNSMASQ_UPDATE=true
+                elif ! grep -Fxq "address=/manet.local/$BR0_SECONDARY" "$DNSMASQ_CONF"; then
+                    NEEDS_DNSMASQ_UPDATE=true
+                elif grep '^address=/' "$DNSMASQ_CONF" | grep -Evq '^address=/(manet|mumble|mtx)\.local/'; then
                     NEEDS_DNSMASQ_UPDATE=true
                 elif ! grep -Fxq 'bind-dynamic' "$DNSMASQ_CONF" || grep -q '^bind-interfaces' "$DNSMASQ_CONF"; then
                     NEEDS_DNSMASQ_UPDATE=true
@@ -692,8 +822,9 @@ case $IPV4_STATE in
 
                 if [ "$NEEDS_DNSMASQ_UPDATE" = true ]; then
                     log "DHCP config changed, reconfiguring..."
-                    configure_dnsmasq "$BR0_PRIMARY" "$BR0_SECONDARY" "$DHCP_START" "$DHCP_END"
+                    configure_dnsmasq "$BR0_PRIMARY" "$BR0_SECONDARY" "$DHCP_START" "$DHCP_END" || exit 1
                 else
+                    update_avahi_host "$BR0_SECONDARY" "$DHCP_START" || exit 1
                     ensure_dnsmasq_running || exit 1
                 fi
 

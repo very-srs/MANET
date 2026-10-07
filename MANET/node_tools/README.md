@@ -61,6 +61,32 @@ the boot/lobby copies. Changes identify a band, so nodes with different radio
 layouts follow the same plan. Manual Wi-Fi controls are disabled while ACS
 owns the channels; the API and receiver enforce the same rule.
 
+Both managers keep their one-second discovery and 15-second steady sleeps.
+Registry decoding is shared within the IP pass and cached by payload; freshness
+still advances on every read. `manet_ip_runtime.py` checks live
+addresses, DHCP isolation, EUD readiness and service state, then skips shell
+reconciliation only after identical inputs previously reconciled successfully.
+Missing files, changed claims, failed checks and pending repairs invalidate that
+shortcut. The existing channel-agreement process hosts these synchronous helper
+requests on a blocking FIFO thread; its ACS loop keeps its own schedule. The
+same worker serves primary-address, MCS, interface telemetry, AP-to-mesh and
+MediaMTX checks. Standalone calls retain one-shot fallbacks when the worker is
+absent or busy, so simultaneous hooks never queue behind a helper job. There is
+no additional daemon or polling timer. Static plan parsing and
+radio-state JSON parsing also reuse unchanged inputs.
+
+Interface publication uses `manet_interfaces.py`, avoiding web-server imports
+and UI-only probes. Syncthing IDs are derived from the radio account's public
+certificate and cached until its metadata changes; an absent cert retries at
+the next identity publish without opening a PAM session. Once a chunk is held,
+failed or empty primary-address lookups defer identity publication and retain
+the previous publication timer for retry. A Syncthing lookup error also defers
+publication; a missing first-boot certificate is still a valid empty result.
+MediaMTX still ranks
+current candidates and checks live VIPs/service state every election pass, but
+skips shell reconciliation when already settled. Measure node-manager and
+channel-agreement CPU together when comparing this path.
+
 **node-manager.sh**
 
 What `node-manager.service` runs: a symlink to whichever orchestrator `acs=`
@@ -640,6 +666,36 @@ removal plan, refuses removals of protected dependencies, and then clears the
 inactive stock swap file and downloaded package cache. See the provisioning
 README for manual use and the saved package inventory.
 
+Profile 2 also stops and masks unused system/user services and timers. It
+removes PulseAudio, rtkit and the unused user D-Bus session package; voice
+continues to use ALSA. It preserves system D-Bus, polkit, per-radio supplicants,
+credential-agent sockets and the iperf3 server used by the measurement UI.
+Custom cron jobs or LVM tools/volumes preserve their maintenance services.
+The preview includes the unit inventory and reasons; apply records each action.
+Profile 1 installations advance to profile 2 on the next explicit apply/setup.
+
+**manet-atak.py** and **manet-cpu-sample.py**
+
+The wired ATAK service runs by default on every node. Set `atak=n` in
+`/etc/mesh.conf` and restart `manet-atak.service` to disable it; only explicit
+`n`, `no`, `0` or `false` (case-insensitive) disables the daemon and its firewall.
+Fresh installs enable and start it; updated packages enable it for the next boot.
+`manet-positioning.service` ships but remains disabled and default off.
+Phone setup is in the [main README](../../README.md#atak-phones).
+
+The service verifies its firewall and EUD path
+at startup, after kernel network/policy notifications or role-generation changes,
+and before admitting a new peer or TCP stream. Unchanged ticks use the cached
+proof; notification loss fails closed. No extra monitoring process is started.
+Without an admitted phone it sends no CoT, caches unchanged inputs and skips
+repeated policy evaluation and status writes. Producer failures and alert
+deadlines still run; an idle `status.json` is a snapshot, not a heartbeat.
+The contact/output cadence is unchanged. Measure service CPU, including its
+children, with `sudo python3 /usr/local/bin/manet-cpu-sample.py --label before`;
+repeat with `--label after` under the same phone/traffic conditions. Each run
+takes two counter snapshots 60 seconds apart and exits, reporting CPU seconds
+per minute and percent of one core. A restart invalidates the sample.
+
 **mesh-ip-manager.sh** and **mesh-ip-startup.py**
 
 Chunk-based IPv4 allocation. Each node claims a chunk of addresses sized
@@ -661,26 +717,19 @@ tie-break. `dnsmasq` is configured for the pool when a node needs it.
 
 **manet-dhcp-isolation.py**
 
-Keeps each node's DHCP pool local using the native nftables bridge table
-`manet_dhcp`. Rules on the `bat0` bridge port block DHCP forwarding in both
-directions, remote requests to the node's own server, and local server replies
-onto the mesh. Other bridge traffic and local EUD DHCP remain available.
-The service installs the rules before dnsmasq; dnsmasq's start guard and the
-IP manager verify and repair them. Failure prevents DHCP service. `check`
-verifies without changing rules; `ensure` preserves healthy rules and counters.
-The private table is replaced atomically, leaving NAT and UI policy intact.
-The base `nftables.service` configuration flushes the ruleset on restart;
-the IP manager repairs isolation on its next allocation pass. If isolation
-temporarily fails, DHCP stops and resumes with its existing leases after
-protection and the node's pool have been validated again.
-DHCP runs only while a local EUD port on `br0` has carrier and is forwarding:
-the active AP or a bridged Ethernet client port. A routed uplink and `bat0`
-alone do not qualify. Every service start checks this condition, and the IP
-manager stops DHCP if the last EUD port disappears.
-Every hostapd start also queues a DHCP start after the AP is ready, including
-boot and recovery, so clients do not wait for the next IP-manager pass.
-If the path bringing an EUD port up does not start DHCP itself, service
-resumes on the next IP-manager pass (normally within about 15 seconds).
+Keeps DHCP and EUD discovery (mDNS, LLMNR, SSDP/UPnP, NetBIOS and
+WS-Discovery) on the local node so phones and laptops do not send that chatter
+across the mesh. Wired and AP clients retain local discovery and resolve
+`manet.local` through DNS or mDNS to their node's internal EUD gateway
+address, which stays with the node when shared services change leaders.
+Management and measurements are at `http://manet.local/manage/`.
+ATAK, mesh voice and other mesh services retain their transports.
+
+**manet-mesh-census.py**
+
+Summarizes traffic observed on the mesh port to help identify other chatter.
+The traffic inventory, implementation details and bench procedures are in
+[Node tools internals](../../docs/node-tools-internals.md#local-eud-discovery).
 
 On each boot, IPv4 allocation waits for usable `br0` link-local IPv6, active
 Alfred, and the node's initial identity/telemetry publication. It then observes
@@ -753,7 +802,7 @@ Node and EUD DNS use the upstream servers learned by systemd-resolved from
 DHCP/IPv6 RA. Public resolvers are fallback servers only when no other DNS
 servers are known. Provisioning and dnsmasq startup run this idempotent helper;
 renewed leases update DNS without restarting dnsmasq or clearing EUD leases.
-`manet.local`, `perf.local`, and service aliases remain local to dnsmasq.
+`manet.local` and service aliases remain local to dnsmasq.
 
 **prepare-ap-iface.sh**
 
@@ -891,8 +940,9 @@ Daemon for an optional u-blox USB GPS receiver. It queries local `gpsd` on
 
 The time service owns chrony across GPS, internet and mesh-client roles. A GPS
 node disciplines its clock locally; a node with a direct internet uplink uses
-public NTP through that interface. Both can serve time to the mesh once chrony
-confirms a recent selected source and a settled clock. A GPS fix or gateway
+authenticated public time (NTS) through that interface, never plain internet
+NTP. Both can serve time to the mesh once chrony confirms a recent selected
+source and a settled clock; an internet source must also be NTS-authenticated. A GPS fix or gateway
 flag alone does not qualify a node as a time server.
 
 The existing `is_ntp_server` field in Alfred telemetry advertises availability

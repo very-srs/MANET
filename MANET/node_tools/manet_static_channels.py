@@ -105,6 +105,9 @@ def main(argv):
             print(load(path)[argv[1]])
         elif len(argv) == 1 and argv[0] == 'show':
             print(json.dumps(load(path), sort_keys=True))
+        elif argv == ['frequencies']:
+            plan = load(path)
+            print(plan['2.4'], plan['5'])
         elif len(argv) == 3 and argv[0] == 'set' and argv[1] in BANDS and argv[2].isdigit():
             print(json.dumps(save(argv[1], int(argv[2]), path), sort_keys=True))
         else:

@@ -1448,6 +1448,8 @@ lan_ap_key=${LAN_AP_KEY}
 max_euds_per_node=${MAX_EUDS_PER_NODE}
 mtx=${INSTALL_MEDIAMTX}
 mumble=${INSTALL_MUMBLE}
+# ATAK runs by default; set atak=n to opt out on this node.
+atak=y
 voice=${VOICE_ENABLED}
 # Every node ships on talk group 1; changed from the web UI, not at flash time.
 voice_channel=1

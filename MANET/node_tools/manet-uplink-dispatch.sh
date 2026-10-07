@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+. "${MANET_TOOLS_DIR:-$(dirname "${BASH_SOURCE[0]}")}/manet-runtime-client.sh"
 
 STATE_FILE=/run/manet-uplink.env
 LEGACY_GATEWAY_STATE=/var/run/mesh-gateway.state
@@ -402,6 +403,17 @@ start_ap_services() {
 # Return the AP candidate radio to the mesh. The helper is idempotent (a radio
 # already meshing on the right channel is left alone) and owns roles, configs,
 # channel choice and locking, so calling it every reconcile doubles as retry.
+ap_mesh_request() {
+    local rc=125
+    # An explicit override belongs to the caller (also used by the test harness).
+    if [ -z "${MANET_AP_MESH_HELPER:-}" ]; then
+        rc=0
+        manet_runtime_call ap-mesh || rc=$?
+        [ "$rc" = 125 ] || return "$rc"
+    fi
+    python3 "$AP_MESH_HELPER" mesh
+}
+
 return_ap_radio_to_mesh() {
     if [ ! -x "$AP_MESH_HELPER" ]; then
         log "Cannot return AP radio to mesh: $AP_MESH_HELPER missing"
@@ -409,7 +421,7 @@ return_ap_radio_to_mesh() {
     fi
     local out err
     err=$(mktemp)
-    if out=$(python3 "$AP_MESH_HELPER" mesh 2>"$err"); then
+    if out=$(ap_mesh_request 2>"$err"); then
         # Quiet when nothing changed and the registry agrees; otherwise the
         # operator needs to see what moved and whether peers disagree.
         if printf '%s' "$out" | grep -Eq '"changed": *true|"registry": *"conflict"'; then

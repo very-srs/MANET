@@ -24,6 +24,7 @@ Rules, the same for every service and on every node:
   wins; a tie goes to the lowest MAC.
 """
 
+from functools import lru_cache
 import math
 import os
 import re
@@ -37,6 +38,7 @@ LINE = re.compile(r"NODE_([0-9a-fA-F]{12})_([A-Z0-9_]+)=(.*)")
 MAC = re.compile(r'(?:[0-9a-f]{2}:){5}[0-9a-f]{2}')
 
 
+@lru_cache(maxsize=1)
 def parse(text):
     nodes = {}
     for line in text.splitlines():

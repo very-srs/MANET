@@ -25,6 +25,14 @@ Calls:
   batctl gwl - Gateway list
 """
 
+# Keep the legacy CLI entry point light; the web server is not telemetry plumbing.
+import sys
+if __name__ == '__main__' and len(sys.argv) > 1 and sys.argv[1] == '--dump-interfaces':
+    import json
+    from manet_interfaces import collect
+    print(json.dumps(collect(), separators=(',', ':')))
+    raise SystemExit(0)
+
 import http.server
 import json
 import subprocess
@@ -1602,8 +1610,8 @@ function isDarkTheme() {
 }
 
 function goPerfDashboard() {
-  // Same origin, so this works from any EUD without depending on perf.local
-  // resolving. The password prompt lives on the other side.
+  // Same origin, so this works with any hostname or address used by the EUD.
+  // The password prompt lives on the other side.
   window.location.href = '/manage/?theme=' + encodeURIComponent(document.documentElement.dataset.theme || 'light');
 }
 
@@ -3100,17 +3108,6 @@ class MeshHandler(RequestLimits, ManageRoutes, http.server.BaseHTTPRequestHandle
         self.send_header('Content-Length', '0')
         self.end_headers()
 
-    def _is_perf_host(self):
-        host = self.headers.get('Host', '').split(':')[0].lower()
-        return host == 'perf.local' or host == 'perf'
-
-    def _perf_host_target(self, parsed):
-        """Fold a perf.local URL into the /manage space on this host."""
-        target = MANAGE_PREFIX + (parsed.path or '/')
-        if parsed.query:
-            target += '?' + parsed.query
-        return target
-
     def _is_manage_path(self, path):
         return path == MANAGE_PREFIX or path.startswith(MANAGE_PREFIX + '/')
 
@@ -3216,11 +3213,6 @@ class MeshHandler(RequestLimits, ManageRoutes, http.server.BaseHTTPRequestHandle
             self.send_403()
             return
 
-        # dnsmasq still points EUDs at perf.local; that name now lands in /manage.
-        if self._is_perf_host():
-            self._send_redirect(self._perf_host_target(parsed))
-            return
-
         if self._is_manage_path(parsed.path) or parsed.path.startswith('/auth/perf-'):
             self._handle_manage(parsed)
             return
@@ -3313,9 +3305,6 @@ class MeshHandler(RequestLimits, ManageRoutes, http.server.BaseHTTPRequestHandle
         if not is_allowed_ip(self.client_address[0], conf):
             self.send_403()
             return
-        if self._is_perf_host():
-            self._send_redirect(self._perf_host_target(parsed))
-            return
         if self._is_manage_path(parsed.path):
             self._handle_manage(parsed)
             return
@@ -3344,10 +3333,6 @@ class MeshHandler(RequestLimits, ManageRoutes, http.server.BaseHTTPRequestHandle
 
         if not is_allowed_ip(client_ip, conf):
             self.send_403()
-            return
-
-        if self._is_perf_host():
-            self._send_redirect(self._perf_host_target(parsed))
             return
 
         if self._is_manage_path(parsed.path) or parsed.path.startswith('/auth/perf-'):
@@ -3534,10 +3519,6 @@ class ThreadedServer(BoundedHTTPServer):
 
 if __name__ == '__main__':
     import sys
-    if len(sys.argv) > 1 and sys.argv[1] == '--dump-interfaces':
-        print(json.dumps(interfaces_for_telemetry(get_interfaces()),
-                         separators=(',', ':')))
-        raise SystemExit(0)
     port = int(sys.argv[1]) if len(sys.argv) > 1 else PORT
     server = ThreadedServer(('0.0.0.0', port), MeshHandler)
     print(f'MANET Status Server listening on port {port}')

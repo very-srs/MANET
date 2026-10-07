@@ -148,26 +148,7 @@ should_perform_action() {
     return 1
 }
 
-collect_radio_mcs() {
-    WLAN0_TX_MCS=""; WLAN0_RX_MCS=""
-    WLAN1_TX_MCS=""; WLAN1_RX_MCS=""
-    WLAN2_TX_MCS=""; WLAN2_RX_MCS=""
-    [ -x "$HALOW_MCS_SUMMARY" ] || return 0
-    for iface in wlan0 wlan1 wlan2; do
-        [ -d "/sys/class/net/$iface" ] || continue
-        eval "$("$HALOW_MCS_SUMMARY" --iface "$iface" --shell 2>/dev/null || true)"
-    done
-}
-
-collect_interfaces_json() {
-    python3 /usr/local/bin/mesh-status.py --dump-interfaces 2>/dev/null || echo '[]'
-}
-
-# The SSID hostapd actually broadcasts (base name plus node suffix), not the
-# base value in mesh.conf.
-collect_ap_ssid() {
-    python3 /usr/local/bin/manet_eud_ap.py current 2>/dev/null || true
-}
+# Shared telemetry collectors: manet-common.sh
 
 # Service elections choose the holder of a shared VIP. Run them only once this
 # node holds an address allocation: until discovery has finished (complete, or
@@ -558,12 +539,12 @@ while true; do
     # === ALFRED RADIO STATE SYNC ===
     # Global radio up/down changes are staged through Alfred and only applied
     # after all nodes have ACKed the same version.
-    [ -x "$RADIO_STATE_SYNC" ] && "$RADIO_STATE_SYNC" sync || true
+    sync_alfred_command "$RADIO_STATE_SYNC" 71 || true
 
     # === ALFRED CONFIG SYNC ===
     # Same shape for mesh configuration: stage what the operator broadcast,
     # publish an ACK, and apply once activate_at passes.
-    [ -x "$CONFIG_SYNC" ] && "$CONFIG_SYNC" sync || true
+    sync_alfred_command "$CONFIG_SYNC" 70 || true
 
     # A dangerous config change can take the mesh down. This is the node
     # deciding, on its own, whether the change worked or has to be undone.
@@ -581,11 +562,15 @@ while true; do
     # Advertise while discovering, and on the first pass after a claim/release.
     # The 270 s interval is only a keepalive for an unchanged allocation.
     MY_CHUNK=$(cat /var/run/my_ipv4_chunk 2>/dev/null || true)
-    IDENT_IPV4=$(python3 /usr/local/bin/manet_node_ipv4.py "$CONTROL_IFACE" 2>/dev/null || true)
-    [ -z "$MY_CHUNK" ] && IDENT_IPV4=""
+    IDENTITY_READY=true
+    IDENT_IPV4=""
+    if [ -n "$MY_CHUNK" ] && ! IDENT_IPV4=$(node_primary_ipv4 2>/dev/null); then
+        IDENTITY_READY=false
+        log "WARN: primary IPv4 unavailable; identity publish deferred until next pass"
+    fi
     IDENTITY_ALLOCATION="${MY_CHUNK}:${IDENT_IPV4}"
-    if [ -z "$MY_CHUNK" ] || [ "$IDENTITY_ALLOCATION" != "$LAST_IDENTITY_ALLOCATION" ] ||
-            [ $((MONO - LAST_IDENTITY_PUBLISH)) -ge $IDENTITY_PUBLISH_INTERVAL ]; then
+    if [ "$IDENTITY_READY" = true ] && { [ -z "$MY_CHUNK" ] || [ "$IDENTITY_ALLOCATION" != "$LAST_IDENTITY_ALLOCATION" ] ||
+            [ $((MONO - LAST_IDENTITY_PUBLISH)) -ge $IDENTITY_PUBLISH_INTERVAL ]; }; then
         # br0's MAC must come first: encoder.py drops it, because Alfred
         # already stamps every record we publish with it.
         IDENT_MACS=("$MY_MAC")
@@ -597,26 +582,28 @@ while true; do
             fi
         done
 
-        if [ -z "$SYNCTHING_ID" ]; then
-            SYNCTHING_ID=$(timeout 3 runuser -u radio -- syncthing --device-id 2>/dev/null || true)
-        fi
-        IDENTITY_ARGS=(
-            "--hostname" "$(hostname)"
-            "--mac-addresses" "${IDENT_MACS[@]}"
-            "--syncthing-id" "$SYNCTHING_ID"
-            "--ipv4-chunk" "${MY_CHUNK:-0}"
-            "--ipv4-chunk-size" "$(cat /var/run/my_ipv4_chunk_size 2>/dev/null || echo 0)"
-        )
-        [ -n "$MY_CHUNK" ] && [ -n "$IDENT_IPV4" ] && IDENTITY_ARGS+=("--ipv4-address" "$IDENT_IPV4")
+        # Cached against the certificate metadata; missing IDs retry next publish.
+        if SYNCTHING_ID=$(node_syncthing_id 2>/dev/null); then
+            IDENTITY_ARGS=(
+                "--hostname" "$(hostname)"
+                "--mac-addresses" "${IDENT_MACS[@]}"
+                "--syncthing-id" "$SYNCTHING_ID"
+                "--ipv4-chunk" "${MY_CHUNK:-0}"
+                "--ipv4-chunk-size" "$(cat /var/run/my_ipv4_chunk_size 2>/dev/null || echo 0)"
+            )
+            [ -n "$MY_CHUNK" ] && [ -n "$IDENT_IPV4" ] && IDENTITY_ARGS+=("--ipv4-address" "$IDENT_IPV4")
 
-        IDENTITY_PAYLOAD=$("$ENCODER_PATH" identity "${IDENTITY_ARGS[@]}" 2>/dev/null)
-        if [ -n "$IDENTITY_PAYLOAD" ]; then
-            if echo -n "$IDENTITY_PAYLOAD" | alfred -s $ALFRED_IDENTITY_TYPE; then
-                LAST_IDENTITY_PUBLISH=$MONO
-                LAST_IDENTITY_ALLOCATION="$IDENTITY_ALLOCATION"
+            IDENTITY_PAYLOAD=$("$ENCODER_PATH" identity "${IDENTITY_ARGS[@]}" 2>/dev/null)
+            if [ -n "$IDENTITY_PAYLOAD" ]; then
+                if echo -n "$IDENTITY_PAYLOAD" | alfred -s $ALFRED_IDENTITY_TYPE; then
+                    LAST_IDENTITY_PUBLISH=$MONO
+                    LAST_IDENTITY_ALLOCATION="$IDENTITY_ALLOCATION"
+                fi
+            else
+                log "WARN: identity encoder produced no payload"
             fi
         else
-            log "WARN: identity encoder produced no payload"
+            log "WARN: Syncthing identity lookup failed; identity publish deferred until next pass"
         fi
     fi
 

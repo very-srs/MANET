@@ -116,7 +116,7 @@ class DispatchHarness(unittest.TestCase):
             source = source.replace(old, new)
         script = self.root / 'dispatch.sh'
         script.write_text(source)
-        env = dict(os.environ, REVIEW_ROOT=root,
+        env = dict(os.environ, REVIEW_ROOT=root, MANET_TOOLS_DIR=str(TOOLS),
                    PATH=os.pathsep.join((str(self.root / 'bin'), os.environ['PATH'])),
                    MANET_ETH_DETECT_LOCK=str(self.eth_lock),
                    MANET_AP_MESH_HELPER=str(self.root / 'bin' / 'manet_ap_mesh.py'),

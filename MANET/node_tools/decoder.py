@@ -33,7 +33,7 @@ def emit_raw(key, value):
     print(f"{key}={value}")
 
 
-def decode_identity(raw, node_mac):
+def decode_identity(raw, node_mac, emit=emit, emit_raw=emit_raw):
     ident = NodeInfo_pb2.NodeIdentity()
     ident.ParseFromString(raw)
 
@@ -50,7 +50,7 @@ def decode_identity(raw, node_mac):
     emit('SYNCTHING_ID', bytes_to_syncthing_id(ident.syncthing_id))
 
 
-def decode_telemetry(raw):
+def decode_telemetry(raw, emit=emit, emit_raw=emit_raw):
     t = NodeInfo_pb2.NodeTelemetry()
     t.ParseFromString(raw)
 

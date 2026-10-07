@@ -595,6 +595,7 @@ It performs:
 - **Per-interface supplicant configs.** Writes `wpa_supplicant` mesh-point / SAE configs for the 2.4 and 5 GHz radios and `wpa_supplicant_s1g` (S1G) configs for the HaLow interface, along with the matching `systemd-networkd` link/network files.
 - **HaLow / Morse setup.** Enables the mesh radio power request (30 dBm on every mesh radio), writes `/etc/modprobe.d/morse.conf` and the `cfg80211` regulatory domain (including EU handling), and ensures the SPI overlay, Morse power/reset GPIOs, and CM4 `pcie-32bit-dma` settings are present in `config.txt`.
 - **Core services.** Enables and starts the mesh stack (`alfred`, BATMAN-adv (`batman-enslave`), `node-manager`, and `radvd`) plus support services for LED/button handling, SSH recovery, cloned-identity reset, the boot lobby channels, and time synchronization. `one-shot-time-sync.service` owns chrony: verified GPS/uplink sources keep it running, while mesh clients stop polling between brief refreshes about every six hours.
+- **ATAK.** Installs, enables and starts `manet-atak.service` on every node. Generated `mesh.conf` files document `atak=y`; an absent setting also means enabled. Set `atak=n` and restart the service to opt out. The positioning unit ships without being enabled. See [phone setup](../../README.md#atak-phones).
 - **Optional services.** Brings up MediaMTX and Mumble when selected. `gpsd` and `gps-reader.service` support an optional GPS; the time service uses chrony `SHM 0` when a current fix is available.
 - **Identity and web UI.** Derives the hostname from the node's MAC (`mesh-XXXX`) and starts the web server (`mesh-status.py`) on port 80: open status page at `/`, password-gated management UI at `/manage`. Also advertises the node as `manet.local` over mDNS on the EUD-facing interface only.
 - **OS footprint.** On Raspberry Pi OS Trixie running the MANET kernel, removes the unused build tools, kernel headers, desktop GPS clients, camera utilities, desktop storage/modem/Bluetooth daemons, and stock swap machinery. GPS uses the command-line `gpsd-tools` package. Runtime libraries, radio firmware, kernel images, audio/video, diagnostics, user files, and logs are retained. The inactive stock `/var/swap` and downloaded APT package cache are removed after the package transaction succeeds.
@@ -615,6 +616,20 @@ directory. To preview an existing node, run
 cleanup. An explicit `--force` reapplies a previously completed cleanup. Active
 swap or a nonempty `dpkg --audit` stops cleanup without removing packages.
 Tools updates carry this helper but do not automatically run it.
+
+The current marker is profile **2**. An existing profile 1 marker allows one
+upgrade on the next setup or explicit `--apply`; no `--force` is required.
+Profile 2 removes PulseAudio/rtkit, stops their active units and the unused
+per-user D-Bus units (including logged-in users), and masks their automatic
+activation. It retains `dbus-user-session` because removing it would also remove
+the GStreamer good plugins through their dependencies. ALSA voice, system D-Bus, normal login/user managers, polkit and
+credential-agent sockets remain available. It masks the global supplicant only,
+retaining the per-radio instances, and disables unused maintenance/console units.
+Cron is retained if local jobs need review; e2scrub is retained with LVM.
+Both templates omit the removed audio packages and explicitly install ALSA.
+The cleanup directory also records the enabled-unit inventory, per-unit reasons,
+and an append-only action log for each attempt. Unknown enabled units are left
+for review. The detailed audit is in `docs/node-tools-internals.md`.
 
 ---
 

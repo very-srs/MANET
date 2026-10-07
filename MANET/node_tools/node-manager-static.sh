@@ -96,31 +96,19 @@ is_ntp_time_source() {
 
 get_current_freq() {
     local conf_file=$1
-    grep -oP 'frequency=\K[0-9]+' "$conf_file" 2>/dev/null | head -1
+    local line
+    [ -r "$conf_file" ] || return 0
+    while IFS= read -r line; do
+        if [[ "$line" =~ frequency=([0-9]+) ]]; then
+            printf '%s\n' "${BASH_REMATCH[1]}"
+            return 0
+        fi
+    done < "$conf_file"
 }
 
 # radio_iface_enabled: manet-common.sh
 
-collect_radio_mcs() {
-    WLAN0_TX_MCS=""; WLAN0_RX_MCS=""
-    WLAN1_TX_MCS=""; WLAN1_RX_MCS=""
-    WLAN2_TX_MCS=""; WLAN2_RX_MCS=""
-    [ -x "$HALOW_MCS_SUMMARY" ] || return 0
-    for iface in wlan0 wlan1 wlan2; do
-        [ -d "/sys/class/net/$iface" ] || continue
-        eval "$("$HALOW_MCS_SUMMARY" --iface "$iface" --shell 2>/dev/null || true)"
-    done
-}
-
-collect_interfaces_json() {
-    python3 /usr/local/bin/mesh-status.py --dump-interfaces 2>/dev/null || echo '[]'
-}
-
-# The SSID hostapd actually broadcasts (base name plus node suffix), not the
-# base value in mesh.conf.
-collect_ap_ssid() {
-    python3 /usr/local/bin/manet_eud_ap.py current 2>/dev/null || true
-}
+# Shared telemetry collectors: manet-common.sh
 
 # Service elections choose the holder of a shared VIP. Run them only once this
 # node holds an address allocation: until discovery has finished (complete, or
@@ -161,8 +149,9 @@ run_service_elections() {
 load_mesh_wpa_confs() {
     local roles="${MANET_IFACE_STATE_DIR:-/var/lib}"
     local configs="${MANET_WPA_DIR:-/etc/wpa_supplicant}"
-    WPA_IFACE_2_4=$(cat "$roles/mesh_24_if" 2>/dev/null || true)
-    WPA_IFACE_5_0=$(cat "$roles/mesh_5_if" 2>/dev/null || true)
+    WPA_IFACE_2_4=""; WPA_IFACE_5_0=""
+    [ ! -r "$roles/mesh_24_if" ] || WPA_IFACE_2_4=$(<"$roles/mesh_24_if")
+    [ ! -r "$roles/mesh_5_if" ] || WPA_IFACE_5_0=$(<"$roles/mesh_5_if")
     WPA_CONF_2_4=""; WPA_CONF_5_0=""
     [ -z "$WPA_IFACE_2_4" ] || WPA_CONF_2_4="$configs/wpa_supplicant-${WPA_IFACE_2_4}.conf"
     [ -z "$WPA_IFACE_5_0" ] || WPA_CONF_5_0="$configs/wpa_supplicant-${WPA_IFACE_5_0}.conf"
@@ -200,13 +189,21 @@ ensure_static_iface_channel() {
 # Read the stored plan. An unreadable or malformed plan is reported and the
 # radios are left alone, not moved to guessed defaults.
 load_static_plan() {
-    local f24 f5
-    if f24=$(python3 "$STATIC_CHANNELS" get 2.4 2>&1) && f5=$(python3 "$STATIC_CHANNELS" get 5 2>&1); then
-        STATIC_FREQ_2_4=$f24
-        STATIC_FREQ_5_0=$f5
+    local path="${MANET_STATIC_CHANNELS:-/etc/manet/static-channels.json}" contents=missing frequencies
+    if [ -e "$path" ]; then
+        [ -r "$path" ] || { log "ERROR: static channel plan unreadable"; return 1; }
+        contents="present:$(<"$path")"
+    fi
+    if [ "${STATIC_PLAN_CACHED:-}" = yes ] && [ "$contents" = "$STATIC_PLAN_CONTENTS" ]; then
         return 0
     fi
-    log "ERROR: static channel plan unusable, not enforcing channels: ${f5:-$f24}"
+    if frequencies=$(python3 "$STATIC_CHANNELS" frequencies 2>&1); then
+        read -r STATIC_FREQ_2_4 STATIC_FREQ_5_0 <<< "$frequencies"
+        STATIC_PLAN_CONTENTS=$contents; STATIC_PLAN_CACHED=yes
+        return 0
+    fi
+    STATIC_PLAN_CACHED=no
+    log "ERROR: static channel plan unusable, not enforcing channels: $frequencies"
     return 1
 }
 
@@ -302,12 +299,12 @@ while true; do
     # === ALFRED RADIO STATE SYNC ===
     # Global radio up/down changes are staged through Alfred and only applied
     # after all nodes have ACKed the same version.
-    [ -x "$RADIO_STATE_SYNC" ] && "$RADIO_STATE_SYNC" sync || true
+    sync_alfred_command "$RADIO_STATE_SYNC" 71 || true
 
     # === ALFRED CONFIG SYNC ===
     # Same shape for mesh configuration: stage what the operator broadcast,
     # publish an ACK, and apply once activate_at passes.
-    [ -x "$CONFIG_SYNC" ] && "$CONFIG_SYNC" sync || true
+    sync_alfred_command "$CONFIG_SYNC" 70 || true
 
     # A dangerous config change can take the mesh down. This is the node
     # deciding, on its own, whether the change worked or has to be undone.
@@ -336,11 +333,15 @@ while true; do
     # Publish during discovery and whenever allocation changes; 270 s is only
     # the keepalive interval once configured. Zero is a valid chunk.
     MY_CHUNK=$(cat /var/run/my_ipv4_chunk 2>/dev/null || true)
-    CURRENT_IPV4=$(python3 /usr/local/bin/manet_node_ipv4.py "$CONTROL_IFACE" 2>/dev/null || true)
-    [ -z "$MY_CHUNK" ] && CURRENT_IPV4=""
+    IDENTITY_READY=true
+    CURRENT_IPV4=""
+    if [ -n "$MY_CHUNK" ] && ! CURRENT_IPV4=$(node_primary_ipv4 2>/dev/null); then
+        IDENTITY_READY=false
+        log "WARN: primary IPv4 unavailable; identity publish deferred until next pass"
+    fi
     IDENTITY_ALLOCATION="${MY_CHUNK}:${CURRENT_IPV4}"
-    if [ -z "$MY_CHUNK" ] || [ "$IDENTITY_ALLOCATION" != "$LAST_IDENTITY_ALLOCATION" ] ||
-            [ $((MONO - LAST_IDENTITY_PUBLISH)) -ge $IDENTITY_PUBLISH_INTERVAL ]; then
+    if [ "$IDENTITY_READY" = true ] && { [ -z "$MY_CHUNK" ] || [ "$IDENTITY_ALLOCATION" != "$LAST_IDENTITY_ALLOCATION" ] ||
+            [ $((MONO - LAST_IDENTITY_PUBLISH)) -ge $IDENTITY_PUBLISH_INTERVAL ]; }; then
         # br0's MAC must come first: encoder.py drops it, because Alfred
         # already stamps every record we publish with it.
         ALL_MACS=("$MY_MAC")
@@ -352,29 +353,28 @@ while true; do
             fi
         done
 
-        # Stable for this manager process. Retry a missing ID, but avoid starting
-        # Syncthing just to read the same ID on every discovery pass.
-        if [ -z "$SYNCTHING_ID" ]; then
-            SYNCTHING_ID=$(timeout 3 runuser -u radio -- syncthing --device-id 2>/dev/null || true)
-        fi
+        # Cached against the certificate metadata; missing IDs retry next publish.
+        if SYNCTHING_ID=$(node_syncthing_id 2>/dev/null); then
+            IDENTITY_ARGS=(
+                "--hostname" "$(hostname)"
+                "--mac-addresses" "${ALL_MACS[@]}"
+                "--syncthing-id" "$SYNCTHING_ID"
+                "--ipv4-chunk" "${MY_CHUNK:-0}"
+                "--ipv4-chunk-size" "$(cat /var/run/my_ipv4_chunk_size 2>/dev/null || echo 0)"
+            )
+            [ -n "$MY_CHUNK" ] && [ -n "$CURRENT_IPV4" ] && IDENTITY_ARGS+=("--ipv4-address" "$CURRENT_IPV4")
 
-        IDENTITY_ARGS=(
-            "--hostname" "$(hostname)"
-            "--mac-addresses" "${ALL_MACS[@]}"
-            "--syncthing-id" "$SYNCTHING_ID"
-            "--ipv4-chunk" "${MY_CHUNK:-0}"
-            "--ipv4-chunk-size" "$(cat /var/run/my_ipv4_chunk_size 2>/dev/null || echo 0)"
-        )
-        [ -n "$MY_CHUNK" ] && [ -n "$CURRENT_IPV4" ] && IDENTITY_ARGS+=("--ipv4-address" "$CURRENT_IPV4")
-
-        IDENTITY_PAYLOAD=$("$ENCODER_PATH" identity "${IDENTITY_ARGS[@]}" 2>/dev/null)
-        if [ -n "$IDENTITY_PAYLOAD" ]; then
-            if echo -n "$IDENTITY_PAYLOAD" | alfred -s $ALFRED_IDENTITY_TYPE; then
-                LAST_IDENTITY_PUBLISH=$MONO
-                LAST_IDENTITY_ALLOCATION="$IDENTITY_ALLOCATION"
+            IDENTITY_PAYLOAD=$("$ENCODER_PATH" identity "${IDENTITY_ARGS[@]}" 2>/dev/null)
+            if [ -n "$IDENTITY_PAYLOAD" ]; then
+                if echo -n "$IDENTITY_PAYLOAD" | alfred -s $ALFRED_IDENTITY_TYPE; then
+                    LAST_IDENTITY_PUBLISH=$MONO
+                    LAST_IDENTITY_ALLOCATION="$IDENTITY_ALLOCATION"
+                fi
+            else
+                log "WARN: identity encoder produced no payload: $("$ENCODER_PATH" identity "${IDENTITY_ARGS[@]}" 2>&1 >/dev/null | tr '\n' ' ')"
             fi
         else
-            log "WARN: identity encoder produced no payload: $("$ENCODER_PATH" identity "${IDENTITY_ARGS[@]}" 2>&1 >/dev/null | tr '\n' ' ')"
+            log "WARN: Syncthing identity lookup failed; identity publish deferred until next pass"
         fi
     fi
 
