@@ -237,6 +237,16 @@ truth.
 
 ---
 
+### 4.3 MT7916 timing controls (CM4)
+
+The [MT7916 patch series](../kernel/patches/mt76-ftm/README.md) adds opt-in
+report capture, marked probe selection and ACK spatial-extension controls.
+It applies to Raspberry Pi kernel commit `95b85bebbedcaedfa7ca79116ed38b7376fba412`.
+`build-cm4.sh` applies it idempotently before configuring/building the kernel;
+partial or conflicting applications fail before source changes. The existing
+txpower and SPI patches remain separate. No debugfs writes leaves timing
+selection and register changes inactive.
+
 ## 5. DTS overlay: `dts-overlays/cm4-morse-spi.dts` (CM4 only)
 
 Compiled to `mm610x-spi.dtbo` by `build-cm4.sh` (`dtc -@`). Wires spi0 to the
