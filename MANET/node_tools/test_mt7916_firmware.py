@@ -11,6 +11,7 @@ import sys
 import tempfile
 import unittest
 from unittest.mock import patch
+from types import SimpleNamespace
 import zlib
 
 SPEC = importlib.util.spec_from_file_location('mt7916_firmware', Path(__file__).with_name('manet-mt7916-firmware.py'))
@@ -49,6 +50,14 @@ class FirmwareTests(unittest.TestCase):
         self.addCleanup(temp.cleanup)
         self.root = Path(temp.name)
         self.tool = fw.Firmware(self.root)
+        gate = patch.object(fw, 'timing_driver', return_value=True)
+        self.gate = gate.start()
+        self.addCleanup(gate.stop)
+        self.boot_file = self.root / 'proc/sys/kernel/random/boot_id'
+        self.boot_file.parent.mkdir(parents=True)
+        self.boot_file.write_text('boot-one\n')
+        self.pci = self.root / 'sys/bus/pci/devices'
+        self.pci.mkdir(parents=True)
         self.blobs, self.manifest, self.expected = fixture()
         unique_hash = patch.object(fw, 'WM_SHA256', fw.digest(self.expected))
         unique_hash.start()
@@ -279,6 +288,224 @@ class FirmwareTests(unittest.TestCase):
         self.assertEqual(len(result.stderr.splitlines()), 1)
         self.assertIn('disabled', result.stderr)
         self.assertFalse(self.tool.updates.exists())
+
+    def test_missing_driver_tag_removes_previous_override(self):
+        self.assertTrue(self.tool.run()[0])
+        self.gate.return_value = False
+        ok, message = self.tool.run('boot')
+        self.assertTrue(ok)
+        self.assertIn('lacks manet_timing=1', message)
+        self.assert_stock()
+        self.assertFalse(self.tool.pending.exists())
+
+    def test_boot_marker_durable_before_preparation(self):
+        # First boot and ready boot both persist the marker before preparation
+        # can publish/retain WM. A ready boot never rewrites the firmware set.
+        for ready in (False, True):
+            with self.subTest(ready=ready):
+                if ready:
+                    self.tool.remove_state(self.tool.pending)
+                before = self.snapshot() if ready else None
+                events = []
+                real_fsync, real_replace, real_prepare = os.fsync, os.replace, self.tool.prepare
+                def fsync(fd):
+                    real_fsync(fd)
+                    events.append(('fsync', os.readlink('/proc/self/fd/' + str(fd))))
+                def replace(source, dest):
+                    real_replace(source, dest)
+                    events.append(('replace', str(dest)))
+                def prepare(enable):
+                    record = self.tool.read_state(self.tool.pending)
+                    self.assertEqual(record['boot_id'], 'boot-one')
+                    self.assertEqual(record['wm_sha256'], fw.WM_SHA256)
+                    renamed = events.index(('replace', str(self.tool.pending)))
+                    self.assertTrue(any(kind == 'fsync' and path.endswith('/mt7916-probe-pending')
+                                        for kind, path in events[:renamed]))
+                    self.assertIn(('fsync', str(self.tool.state)), events[renamed + 1:])
+                    return real_prepare(enable)
+                with patch.object(fw.os, 'fsync', side_effect=fsync), \
+                     patch.object(fw.os, 'replace', side_effect=replace), \
+                     patch.object(self.tool, 'prepare', side_effect=prepare):
+                    self.assertTrue(self.tool.run('boot')[0])
+                if ready:
+                    self.assertEqual(before, self.snapshot())
+
+    def test_marker_sync_failure_removes_existing_patch(self):
+        self.assertTrue(self.tool.run()[0])
+        real_sync = fw.sync_directory
+        def fail_state(directory):
+            if directory == self.tool.state:
+                raise OSError('injected marker directory fsync failure')
+            return real_sync(directory)
+        with patch.object(fw, 'sync_directory', side_effect=fail_state):
+            self.assertFalse(self.tool.run('boot')[0])
+        self.assert_stock()
+
+    def make_pci(self, address, device_id='0x7906', driver='mt7915e', with_phy=True):
+        device = self.pci / address
+        device.mkdir()
+        (device / 'vendor').write_text('0x14c3\n')
+        (device / 'device').write_text(device_id + '\n')
+        if driver:
+            target = self.root / 'sys/bus/pci/drivers' / driver
+            target.mkdir(parents=True, exist_ok=True)
+            (device / 'driver').symlink_to(target)
+            if with_phy:
+                (device / 'ieee80211/phy0').mkdir(parents=True)
+        return device
+
+    def test_survival_requires_multiuser_and_all_primary_functions_bound(self):
+        self.assertTrue(self.tool.run('boot')[0])
+        self.make_pci('0000:01:00.0')
+        with patch.object(fw.subprocess, 'run', return_value=SimpleNamespace(returncode=3)):
+            self.assertIn('retained', self.tool.run('survived')[1])
+        self.assertTrue(self.tool.pending.exists())
+        unbound = self.make_pci('0000:02:00.0', driver=None)
+        with patch.object(fw.subprocess, 'run', return_value=SimpleNamespace(returncode=0)) as command:
+            self.assertIn('retained', self.tool.run('survived')[1])
+            shutil.rmtree(unbound)
+            before = self.snapshot()
+            with patch.object(fw, 'sync_directory', wraps=fw.sync_directory) as sync:
+                self.assertIn('cleared', self.tool.run('survived')[1])
+                sync.assert_called_with(self.tool.state)
+            command.assert_called_with(['systemctl', 'is-active', '--quiet', 'multi-user.target'],
+                                       capture_output=True, timeout=10)
+        self.assertFalse(self.tool.pending.exists())
+        self.assertEqual(before, self.snapshot())
+        self.boot_file.write_text('boot-two')
+        self.assertTrue(self.tool.run('boot')[0])
+        self.assertFalse(self.tool.disabled.exists())
+
+    def test_survival_no_mt7916_present_and_auxiliary_only(self):
+        self.assertTrue(self.tool.run('boot')[0])
+        auxiliary = self.make_pci('0000:01:00.0', '0x790a', 'mt7915e_hif')
+        with patch.object(fw.subprocess, 'run', return_value=SimpleNamespace(returncode=0)):
+            self.assertIn('retained', self.tool.run('survived')[1])
+            shutil.rmtree(auxiliary)
+            self.assertIn('cleared', self.tool.run('survived')[1])
+        self.assertFalse(self.tool.pending.exists())
+
+    def test_survival_driver_link_before_firmware_init_is_not_enough(self):
+        self.assertTrue(self.tool.run('boot')[0])
+        self.make_pci('0000:01:00.0', with_phy=False)
+        with patch.object(fw.subprocess, 'run', return_value=SimpleNamespace(returncode=0)):
+            self.assertIn('retained', self.tool.run('survived')[1])
+        self.assertTrue(self.tool.pending.exists())
+
+    def fail_boot(self):
+        self.assertTrue(self.tool.run('boot')[0])
+        self.boot_file.write_text('boot-two')
+        ok, message = self.tool.run('boot')
+        self.assertTrue(ok)
+        self.assertIn('AUTO-DISABLED after failed boot', message)
+        self.assertIn(fw.WM_SHA256, message)
+        self.assert_stock()
+        self.assertEqual(self.tool.read_state(self.tool.disabled)['boot_id'], 'boot-one')
+        self.assertFalse(self.tool.pending.exists())
+
+    def test_stale_marker_disables_across_boots_and_unrelated_config_edits(self):
+        original = self.config.read_bytes()
+        self.fail_boot()
+        self.assertEqual(self.config.read_bytes(), original)
+        before = self.tool.disabled.stat().st_mtime_ns
+        for boot in ('boot-three', 'boot-four'):
+            self.boot_file.write_text(boot)
+            self.config.write_text('positioning=y\nvoice=n\n')
+            for mode in ('boot', 'apply', 'survived'):
+                self.assertIn('AUTO-DISABLED', self.tool.run(mode)[1])
+                self.assert_stock()
+        self.assertEqual(before, self.tool.disabled.stat().st_mtime_ns)
+
+    def test_observed_positioning_change_rearms_but_does_not_edit_config(self):
+        self.fail_boot()
+        self.config.write_text('positioning=n\n')
+        self.assertTrue(self.tool.run()[0])
+        self.assertFalse(self.tool.disabled.exists())
+        self.assert_stock()
+        self.assertEqual(self.config.read_text(), 'positioning=n\n')
+        self.config.write_text('positioning=y\n')
+        self.assertTrue(self.tool.run()[0])
+        self.assertEqual((self.tool.updates / fw.NAMES[0]).read_bytes(), self.expected)
+
+    def test_explicit_rearm_still_requires_tag_and_retains_current_pending(self):
+        self.fail_boot()
+        self.gate.return_value = False
+        self.assertIn('lacks manet_timing', self.tool.run('rearm')[1])
+        self.assert_stock()
+        self.assertFalse(self.tool.disabled.exists())
+        self.gate.return_value = True
+        self.assertTrue(self.tool.run('boot')[0])
+        before = self.tool.pending.read_bytes()
+        self.assertTrue(self.tool.run('rearm')[0])
+        self.assertEqual(before, self.tool.pending.read_bytes())
+
+    def test_same_boot_apply_and_boot_retry_do_not_consume_pending(self):
+        self.assertTrue(self.tool.run('boot')[0])
+        before = self.tool.pending.stat().st_mtime_ns
+        for mode in ('apply', 'boot'):
+            self.assertIn('already prepared', self.tool.run(mode)[1])
+        self.assertEqual(before, self.tool.pending.stat().st_mtime_ns)
+        self.assertFalse(self.tool.disabled.exists())
+
+    def test_clean_reboot_before_survival_conservatively_disables(self):
+        # No shutdown shortcut clears the marker. Even an orderly early
+        # reboot remains unproven and uses the same conservative recovery.
+        self.fail_boot()
+
+    def test_crash_during_recovery_preserves_latch_and_evidence(self):
+        self.assertTrue(self.tool.run('boot')[0])
+        self.boot_file.write_text('boot-two')
+        with patch.object(self.tool, 'deactivate', side_effect=SystemExit('power loss')):
+            with self.assertRaises(SystemExit):
+                self.tool.run('boot')
+        self.assertTrue(self.tool.disabled.exists())
+        self.assertTrue(self.tool.pending.exists())
+        self.boot_file.write_text('boot-three')
+        self.assertIn('AUTO-DISABLED', self.tool.run('boot')[1])
+        self.assert_stock()
+
+    def test_failed_recovery_record_keeps_pending_and_removes_override(self):
+        self.assertTrue(self.tool.run('boot')[0])
+        self.boot_file.write_text('boot-two')
+        with patch.object(self.tool, 'write_state', side_effect=OSError('cannot persist failure')):
+            self.assertFalse(self.tool.run('boot')[0])
+        self.assertTrue(self.tool.pending.exists())
+        self.assert_stock()
+        self.assertIn('AUTO-DISABLED', self.tool.run('boot')[1])
+
+
+class DriverGateTests(unittest.TestCase):
+    def test_installed_running_kernel_module_tag(self):
+        for code, tag, expected in ((0, '1\n', True), (0, '', False), (1, '1\n', False),
+                                    (0, '0\n', False), (0, '1\n1\n', False)):
+            with self.subTest(code=code, tag=tag), \
+                 patch.object(fw.os, 'uname', return_value=SimpleNamespace(release='test-kernel')), \
+                 patch.object(fw.subprocess, 'run', return_value=SimpleNamespace(
+                     returncode=code, stdout=tag)) as command:
+                self.assertEqual(fw.timing_driver(Path('/offline')), expected)
+                command.assert_called_once_with(
+                    ['modinfo', '-b', '/offline', '-k', 'test-kernel', '-F', 'manet_timing', 'mt7915e'],
+                    capture_output=True, text=True, timeout=10)
+
+    def test_missing_modinfo_and_timeout_fail_closed(self):
+        for error in (FileNotFoundError(), subprocess.TimeoutExpired('modinfo', 10)):
+            with patch.object(fw.subprocess, 'run', side_effect=error):
+                self.assertFalse(fw.timing_driver(Path('/')))
+
+
+class UnitSafetyTests(unittest.TestCase):
+    SYSTEMD = Path(__file__).resolve().parent.parent / 'systemd'
+
+    def test_coldplug_never_requires_the_firmware_tool(self):
+        # A failure here must not stop every other device from loading.
+        self.assertFalse((self.SYSTEMD / 'systemd-udev-trigger.service.d').exists())
+        unit = (self.SYSTEMD / 'manet-mt7916-firmware.service').read_text()
+        self.assertIn('Before=systemd-udev-trigger.service', unit)
+        self.assertNotIn('RequiredBy=', unit)
+
+    def test_survival_check_only_runs_with_a_pending_marker(self):
+        unit = (self.SYSTEMD / 'manet-mt7916-firmware-survived.service').read_text()
+        self.assertIn('ConditionPathExists=/var/lib/manet/mt7916-probe-pending', unit)
 
 
 class CachedFirmwareTests(unittest.TestCase):

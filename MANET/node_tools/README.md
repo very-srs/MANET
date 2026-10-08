@@ -682,7 +682,12 @@ The wired ATAK service runs by default on every node. Set `atak=n` in
 Fresh installs enable and start it; updated packages enable it for the next boot.
 `manet-positioning.service` ships but remains disabled and default off.
 Setting `positioning=y` in `/etc/mesh.conf` selects patched MT7916 firmware at
-next boot; setting it back to `n` restores stock firmware at next boot.
+next boot only with a tagged MANET timing driver installed for the running
+kernel. Setting it back to `n` restores stock firmware at next boot. An
+unconfirmed boot automatically disables the override on the following boot;
+the boot journal reports `AUTO-DISABLED`. After addressing the cause, observe
+a `positioning=n` apply then set `y`, or run
+`sudo manet-mt7916-firmware.py --rearm` to retry on the next boot.
 Phone setup is in the [main README](../../README.md#atak-phones).
 
 The service verifies its firewall and EUD path
