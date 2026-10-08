@@ -179,6 +179,13 @@ class Firmware:
             raise ValueError('missing boot identity')
         return value
 
+    def present(self):
+        # Presence is available before coldplug; no bound driver is required.
+        # The auxiliary 0x790a function alone cannot load this firmware.
+        return any((device / 'vendor').read_text().strip() == '0x14c3' and
+                   (device / 'device').read_text().strip() == '0x7906'
+                   for device in (self.root / 'sys/bus/pci/devices').glob('*'))
+
     def survived(self):
         # Also check the target here so a premature manual invocation cannot
         # erase the marker. The unit orders this once, without polling.
@@ -241,6 +248,8 @@ class Firmware:
                     '; change positioning or run --rearm; ' + self.prepare(False))
         if value != 'y':
             return self.prepare(False)
+        if not self.present():
+            return 'no MT7916 primary PCI function (14c3:7906); ' + self.prepare(False)
         if not timing_driver(self.root):
             return 'installed mt7915e lacks manet_timing=1 for running kernel; ' + self.prepare(False)
         if mode == 'boot' and not pending:

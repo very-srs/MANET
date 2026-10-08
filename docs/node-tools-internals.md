@@ -2628,7 +2628,11 @@ that is 1 on some class devices and 255 on others.
 
 `manet-mt7916-firmware.py` uses the positioning service's literal config parser:
 only `positioning=y` (case-insensitive, optional quotes) requests it; missing
-config is off. `modinfo` must also resolve `manet_timing=1` on the installed
+config is off. The tool first requires a 14c3:7906 primary PCI function in
+`/sys/bus/pci/devices`, read under `--root` for offline tests. Without it,
+including a lone 14c3:790a secondary function, the tool removes owned overrides
+and creates no pending marker. This check uses file reads, with no subprocess.
+`modinfo` must also resolve `manet_timing=1` on the installed
 mt7915e module for the running kernel. Missing tags or lookup failures remove
 owned overrides and log the reason. Packages carry the unmodified WM/WA/ROM set and license from
 linux-firmware `20250613`, commit `47e03ef409e07315f2b5c1d0fc08383da2e1bde9`.
@@ -2693,5 +2697,6 @@ unconfirmed boot. There is no shutdown shortcut that could clear evidence
 without a completed probe. The journal and persistent JSON expose the state;
 the existing login provisioning banner could also display it in future.
 Recovery depends on writable persistent storage and userspace coldplug ordering.
-The tag and recovery mechanism do not establish the cause of the reported
-stock-driver early-boot hang or prove early-boot stability of the timing driver.
+The reported boot failures were traced to the local-fs/coldplug ordering cycle
+above. After its correction, patched warm and power-on boots on CM4 with
+driver b623a361 and WM 18a2e1d0 completed, and survival cleared the marker.
