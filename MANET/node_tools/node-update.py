@@ -80,6 +80,7 @@ REQUIRED = MARKERS | {
     "usr/local/share/manet/firmware/mt7916/mt7916_rom_patch.bin",
     "usr/local/share/manet/firmware/mt7916/LICENCE.mediatek",
     "etc/systemd/system/manet-mt7916-firmware.service",
+    "etc/systemd/system/manet-mt7916-firmware-survived.service",
     "etc/systemd/system/manet-mt7916-firmware-apply.service",
     "etc/systemd/system/manet-mt7916-firmware.path",
 }

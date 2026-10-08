@@ -16,6 +16,13 @@ fails without changing source files. Existing unrelated changes are retained.
 `series` records patch order; the CM4 build script invokes this helper before
 configuring the kernel. Each prefix can be built independently.
 
+The final patch adds `MODULE_INFO(manet_timing, "1")`. The firmware selector
+checks `modinfo -k "$(uname -r)" -F manet_timing mt7915e` against the installed
+module before preparing patched firmware. This tag identifies the timing
+build; it does not certify early-boot firmware stability. When extending an
+already applied older series, apply the new suffix explicitly before using
+the helper; partial-series rejection remains intentional.
+
 The root-only MT7916 debugfs controls are `tmr_registers` (band identity and
 readback), `tmr_ctrl` (timing enable/role/filter), `tmr_peer` (peer or `off`),
 `tmr_mark` (optional skb mark), `tmr_spe` (probe SPE index or `off`), `tmr_rate`

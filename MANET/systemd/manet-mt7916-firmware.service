@@ -6,7 +6,7 @@ Before=systemd-udev-trigger.service
 
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/python3 /usr/local/bin/manet-mt7916-firmware.py
+ExecStart=/usr/bin/python3 /usr/local/bin/manet-mt7916-firmware.py --boot
 RemainAfterExit=yes
 
 [Install]

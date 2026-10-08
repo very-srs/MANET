@@ -1,0 +1,16 @@
+From: MANET <manet@localhost>
+Subject: [PATCH 4/4] mt76: mt7915: identify the timing build for firmware selection
+
+Expose a capability tag for the installed-module firmware gate. This is not
+a claim that patched firmware has survived early boot on hardware.
+
+---
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/pci.c b/drivers/net/wireless/mediatek/mt76/mt7915/pci.c
+--- a/drivers/net/wireless/mediatek/mt76/mt7915/pci.c
++++ b/drivers/net/wireless/mediatek/mt76/mt7915/pci.c
+@@ -240,3 +240,5 @@
+ MODULE_FIRMWARE(MT7916_FIRMWARE_WA);
+ MODULE_FIRMWARE(MT7916_FIRMWARE_WM);
+ MODULE_FIRMWARE(MT7916_ROM_PATCH);
++
++MODULE_INFO(manet_timing, "1");

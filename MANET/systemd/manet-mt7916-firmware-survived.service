@@ -1,0 +1,17 @@
+[Unit]
+Description=Record a surviving MT7916 firmware boot
+# Avoid the target's automatic Before=multi-user.target ordering for services
+# it wants. This check must run after the target has been reached.
+DefaultDependencies=no
+After=multi-user.target manet-mt7916-firmware.service
+Conflicts=shutdown.target
+Before=shutdown.target
+# Nothing to confirm unless this boot left patched firmware in place.
+ConditionPathExists=/var/lib/manet/mt7916-probe-pending
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /usr/local/bin/manet-mt7916-firmware.py --survived
+
+[Install]
+WantedBy=multi-user.target

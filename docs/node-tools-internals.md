@@ -2627,8 +2627,10 @@ that is 1 on some class devices and 255 on others.
 ## MT7916 firmware selection
 
 `manet-mt7916-firmware.py` uses the positioning service's literal config parser:
-only `positioning=y` (case-insensitive, optional quotes) enables it; missing
-config is off. Packages carry the unmodified WM/WA/ROM set and license from
+only `positioning=y` (case-insensitive, optional quotes) requests it; missing
+config is off. `modinfo` must also resolve `manet_timing=1` on the installed
+mt7915e module for the running kernel. Missing tags or lookup failures remove
+owned overrides and log the reason. Packages carry the unmodified WM/WA/ROM set and license from
 linux-firmware `20250613`, commit `47e03ef409e07315f2b5c1d0fc08383da2e1bde9`.
 Builders verify downloads and cache entries before staging. The cache is
 `kernel-work/cache/linux-firmware/47e03ef409e07315f2b5c1d0fc08383da2e1bde9/`,
@@ -2638,8 +2640,9 @@ The JSON intent holds our replacement bytes and exact input/output hashes.
 The stdlib sealer applies the PDA recurrence and outer CRC. The node persists
 patched WM and matched stock WA/ROM as real files in
 `/lib/firmware/updates/mediatek/`, using temporary files, fsync and rename;
-WM is published last. A ready check hashes only the installed set and writes
-nothing. Correct files are retained when repairing a missing companion.
+WM is published last. A ready firmware check hashes only the installed set
+and rewrites no firmware or ownership metadata. Correct files are retained
+when repairing a missing companion.
 
 The unique patched hash identifies our WM. `.manet-mt7916` records hashes and
 inode/mtime identities for companions we wrote, before their publication.
@@ -2648,11 +2651,45 @@ removes only owned overrides; failed removal is reported and retried at next
 boot. Distribution firmware is untouched. A directory lock serializes preparers
 without a lock file or any involvement in driver probing.
 
-The boot oneshot runs after `local-fs.target` and before
-`systemd-udev-trigger.service`, covering CM4's PCI coldplug. The CM4 kernel
+The boot oneshot runs with `--boot` after `local-fs.target` and before
+`systemd-udev-trigger.service`, covering CM4's PCI coldplug. It is ordered
+before coldplug but never required by it: a failure in this tool must not stop
+every other device from loading. If the pending marker cannot be written, the
+tool removes the patched set, so the probe falls through to stock firmware. The CM4 kernel
 builds the PCIe host in and mt7915e as a module; its stock-kernel initramfs images
 are not used for this radio. There is no probe wrapper or initramfs work.
 Setup/update prepares files once. The `.path` unit is the sole config-change
 trigger: `PathChanged=/etc/mesh.conf` covers atomic replacement via inode events
 in [systemd's path implementation](https://github.com/systemd/systemd/blob/v257/src/core/path.c).
 No tool loads or reloads the driver; a running radio changes firmware next boot.
+
+Before leaving patched firmware available at boot, the tool durably writes
+`/var/lib/manet/mt7916-probe-pending` with boot ID, WM hash and positioning
+value. File and directory fsync precede firmware preparation, including a ready
+set. This small marker write is required each enabled boot; no reseal occurs.
+The survival oneshot runs after `multi-user.target`. It independently checks
+that target is active and every MT7916 primary PCI function (14c3:7906) is
+bound to mt7915e with a registered wiphy, or that no MT7916 is present, then
+unlinks/fsyncs the marker. The driver symlink exists before probe; wiphy
+registration follows synchronous MCU/firmware initialization in this driver.
+An auxiliary 14c3:790a HIF alone cannot prove survival. Missing sysfs or an
+unbound or still-initializing device retains the marker. A late successful
+probe can therefore conservatively disable the next boot. There is no polling
+or resident process.
+
+A marker from a different boot durably latches
+`/var/lib/manet/mt7916-auto-disabled` before cleanup, with the failed boot ID
+and firmware hash. Every subsequent check reports `AUTO-DISABLED after failed
+boot` and removes owned overrides. mesh.conf is untouched. An observed change
+to the parsed positioning value, or `manet-mt7916-firmware.py --rearm`, clears
+the latch; the driver tag is still required. Unrelated config edits, updates
+and repeated `y` writes do not rearm it. A rapid `n` then `y` that the watcher
+never observes requires explicit rearm. Same-boot checks preserve pending.
+
+An orderly reboot before the survival check is conservatively treated as an
+unconfirmed boot. There is no shutdown shortcut that could clear evidence
+without a completed probe. The journal and persistent JSON expose the state;
+the existing login provisioning banner could also display it in future.
+Recovery depends on writable persistent storage and userspace coldplug ordering.
+The tag and recovery mechanism do not establish the cause of the reported
+stock-driver early-boot hang or prove early-boot stability of the timing driver.
