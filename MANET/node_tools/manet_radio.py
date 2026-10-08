@@ -37,7 +37,7 @@ HALOW_CHANNEL_PLANS = {
     # EU 2 MHz (channels 2 and 6, op_class 67) is in the band plan, but the
     # Morse wpa_supplicant_s1g 1.16.4 build refuses every EU 2 MHz mesh
     # config ("Invalid S1G configuration of operating class, country code and
-    # channel"; cm4.2, 2026-10-02). Offer only what the supplicant will join.
+    # channel"). Offer only what the supplicant will join.
     'EU': {
         '1MHz': {1: 863500, 3: 864500, 5: 865500, 7: 866500, 9: 867500},
     },
@@ -62,8 +62,8 @@ HALOW_CHANNEL_PLANS = {
 # rejected config is a silent crashloop, so treat these as load-bearing.
 #
 # VERIFIED on hardware: EU 1 MHz = 66 (the former non-US template), US 8 MHz
-# = 71 (the former US template), US 2 MHz = 69 (cm4.2, 2026-10-02: supplicant
-# up with no restarts, 907 MHz / 2 MHz, peered).
+# = 71 (the former US template), US 2 MHz = 69 (supplicant up with no
+# restarts, 907 MHz / 2 MHz, peered).
 # INFERRED - US 1/4 MHz fill 68/70 around the verified 69/71. EU 2 MHz (67)
 # is left out: the supplicant rejects it (see HALOW_CHANNEL_PLANS).
 # They have not been confirmed against the standard text or on hardware, so

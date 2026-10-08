@@ -15,10 +15,8 @@ Wire choices follow TAK-Product-Center/atak-civ main, inspected 2026-10-06:
 * takkernel/engine/.../maps/coords/GeoPoint.java: CE90/LE90 and altitude bounds.
 * atak/ATAK/app/.../contact/ContactListDetailHandler.java: friendly contact,
   callsign and endpoint; chat/GeoChatService.java: hidden-location chat.
-Full URLs, relevant methods and interoperability limits are recorded in
-review-collab/atak-20261006/codex-001.txt.
-Phone classifications and creator fields follow the Pixel 6a captures in
-review-collab/atak-20261006/samples/; current policy is in codex-006.txt there.
+Phone classifications use the precisionlocation provenance fields; marker
+ownership uses the creator UID and original creation time.
 
 This is TAK transport protocol 0, with CoT schema version 2.0. parse_marker
 accepts exactly one complete XML document, not a TCP read or protobuf frame.
@@ -44,7 +42,7 @@ DEFAULT_MAX_BYTES = 64 * 1024
 MAX_DEPTH = 32
 CHAT_STALE_S = 86400
 CONTACT_REFRESH_S = 30
-CONTACT_STALE_S = 3600         # Mike's Pixel: avoid repeat new-contact notifications
+CONTACT_STALE_S = 3600         # Avoid repeated new-contact notifications on the phone
 EXTERNAL_POSITION_PORT = 4349
 EXTERNAL_POSITION_STALE_S = 10
 EXTERNAL_SOURCE_PREFIX = "MANET:"
@@ -337,8 +335,7 @@ def retire_marker(marker_uid, task_uid, now):
     ATAK CotDeleteImporter.importData reads t-x-d-d, detail/link uid with
     nonempty relation/type, and __forcedelete. Its documented example uses
     relation=none/type=none. Without force it only requests staleness; even
-    force can be refused by remoteDelete=false. Source and Pixel checks:
-    review-collab/atak-20261006/codex-003.txt. A built task is not a receipt.
+    force can be refused by remoteDelete=false. A built task is not a receipt.
     Only target UIDs returned by the selector's retirement list, never
     arbitrary candidates, phone self SA, or the radio's contact UID.
     """

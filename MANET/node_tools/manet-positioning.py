@@ -13,7 +13,7 @@ positioning_interface=wlan1, positioning_node_id=<br0 MAC>,
 positioning_gnss_sigma_m=5, positioning_vertical_sigma_m=8,
 positioning_phone_best_guess=n, positioning_mark_priority=manual|newer.
 The sigmas are explicit modelling assumptions, not conversions of gpsd eph/HDOP.
-The last two switches are proposals for Mike, exported for the ATAK consumer.
+The last two switches configure the policy exported to the ATAK consumer.
 
 Run --simulate 4 for three GNSS anchors and one GPS-less node; any N=4..16
 runs real service objects, wire messages, jittered bursts and timestamp pairing.

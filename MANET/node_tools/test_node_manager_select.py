@@ -65,7 +65,7 @@ class SelectTests(unittest.TestCase):
         self.assertEqual([p.name for p in self.bin.iterdir() if p.name.startswith('.')], [])
 
     def test_concurrent_selections_all_succeed(self):
-        # Codex 052: a shared temporary name made overlapping calls fail.
+        # a shared temporary name made overlapping calls fail.
         self.conf.write_text('acs=y\n')
         env = dict(os.environ, MANET_BIN_DIR=str(self.bin), MANET_MESH_CONF=str(self.conf))
         for attempt in range(3):

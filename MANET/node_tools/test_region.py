@@ -176,7 +176,7 @@ class RegionTests(unittest.TestCase):
         self.assertRegex(s1g, r'(?m)^\s*op_class=66$')
 
     def test_retry_after_partial_failure_still_moves_the_halow_plan(self):
-        # Codex 053: a failure after an early marker write left channel 10 /
+        # a failure after an early marker write left channel 10 /
         # op_class 69 (US) under country EU on retry.
         real_write = region.write
         def failing(path, content):

@@ -38,14 +38,14 @@ class RadioEnabledTests(unittest.TestCase):
                 self.assertTrue(self.enabled('wlan0'))
 
     def test_only_the_exact_string_down_disables(self):
-        # Codex 055: shell capture would strip the newline from "down\n".
+        # shell capture would strip the newline from "down\n".
         for value in ('down\n', ' down', 'DOWN', 'down ', ['down']):
             with self.subTest(value=value):
                 self.state.write_text(json.dumps({'desired': {'wlan0': value}}))
                 self.assertTrue(self.enabled('wlan0'))
 
     def test_down_followed_by_junk_or_more_documents_is_malformed(self):
-        # Codex 056/059: only one whole valid document can disable a radio.
+        # only one whole valid document can disable a radio.
         down = json.dumps({'desired': {'wlan0': 'down'}})
         for text in (down + ' trailing junk', '{}\n' + down, down + '\n' + down, down + '\n{}'):
             with self.subTest(text=text):

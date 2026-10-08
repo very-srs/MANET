@@ -59,7 +59,7 @@ class EligibilityTests(unittest.TestCase):
 
     def test_real_shutdown_tombstone(self):
         # What encoder.py telemetry --node-state SHUTTING_DOWN publishes:
-        # throughput 0, server flags false (Codex 049).
+        # throughput 0, server flags false.
         winner, _, _ = elect(node(A, 0.0, state='SHUTTING_DOWN', server=False), node(B, 0.0))
         self.assertEqual(winner, B)
 
@@ -97,7 +97,7 @@ class EligibilityTests(unittest.TestCase):
 
 class DeterminismTests(unittest.TestCase):
     def test_multiple_incumbents_resolve_the_same_in_any_order(self):
-        # Codex 054: after a partition merge two nodes can both advertise the
+        # after a partition merge two nodes can both advertise the
         # service; first-line-wins differed between nodes.
         nodes = [node(A, 40, server=True), node(B, 40, server=True), node(C, 45)]
         results = set()

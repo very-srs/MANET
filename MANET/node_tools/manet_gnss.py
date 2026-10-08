@@ -15,7 +15,7 @@ report that claims a fix but lacks a position is incomplete, not a lost
 fix. Only a new epoch renews a fix's freshness, so a replayed report does
 not keep an old position looking current.
 
-Cold start is normal (Mike, 2026-10-06). Until a receiver's first fix has
+Cold start is normal. Until a receiver's first fix has
 held for SETTLE_S, signal and clock anomalies are not raised and the clock
 baseline is not set. Jamming evidence is the exception, but stock gpsd 3.25
 on Debian 13 does not report jam, so that path stays quiet there.
@@ -223,7 +223,7 @@ class ReceiverState:
             # advancing; a replay of one or two epochs repeats or alternates.
             # REPLAY_RUN advancing reports are accepted as a discontinuity.
             # A replay of an advancing recording cannot be told apart from a
-            # correction this way (codex-007), so the discontinuity makes the
+            # correction this way, so the discontinuity makes the
             # receiver's time unfit to serve (TIME_DOUBT_S); the position
             # monitor, not this check, guards the position.
             advancing = self.replay_last is None or gtime > self.replay_last

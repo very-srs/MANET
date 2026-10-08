@@ -11,7 +11,6 @@ Hardware identity and a WM change are not mathematical prerequisites: verified
 time association, a known counter origin and capture invalidation could suffice.
 The current interface proves none of those together. Majority STEP repair cannot
 identify a lost prefix (a uniform +k*STEP range bias); a quiet spread is not proof.
-See review-collab/positioning-20261006/r3-loss-eval.py for the loss/alias experiment.
 
 Run this layer in a small privileged helper, not the network protocol process.
 There is no daemon/IPC listener or privilege installation here. The helper must

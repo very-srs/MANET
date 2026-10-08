@@ -80,7 +80,7 @@ class ReadbackTests(unittest.TestCase):
         self.assertEqual(self.verified(30, '24'), ('30', '24'))
 
     def test_reduction_that_does_not_take_fails(self):
-        # Codex 072: requested 5, still 24 used to be reported as success.
+        # requested 5, still 24 used to be reported as success.
         with self.assertRaisesRegex(RuntimeError, 'above the requested 5 dBm'):
             self.verified(5, '24')
 

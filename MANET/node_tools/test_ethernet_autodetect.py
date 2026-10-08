@@ -122,7 +122,7 @@ class AutodetectHarness(unittest.TestCase):
 
 class WiredEudTests(AutodetectHarness):
     def test_same_link_event_does_not_detach_wired_eud(self):
-        # The loop seen on cm4.2 after a reboot: each run's own reconfigure
+        # A reboot loop: each run's own reconfigure
         # re-triggered the detector. Same carrier generation -> no-op.
         self.wired_eud_on_record(3)
         result, calls, journal = self.run_detector()
@@ -164,7 +164,7 @@ class WiredEudTests(AutodetectHarness):
         self.assertNotIn('ip link set end0 nomaster', calls)
 
     def test_link_change_during_detection_is_not_absorbed(self):
-        # Codex's race: the cable is swapped while the 20 s DHCP probe runs.
+        # The cable is swapped while the 20 s DHCP probe runs.
         # The decision is recorded against the generation seen at the start,
         # so the event queued by the swap still re-detects.
         counter = self.root / 'sys/class/net/end0/carrier_changes'

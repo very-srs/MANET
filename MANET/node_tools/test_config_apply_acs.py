@@ -4,7 +4,7 @@
 Runs the real apply script and the real node-manager-select.sh. systemctl is
 a stub standing in for node-manager.service: a restart runs the drop-in's
 ExecStartPre (selector --service-start) and can be made to fail, leaving the
-previous variant running, as in Codex 065.
+previous variant running.
 """
 
 import json
@@ -103,7 +103,7 @@ class AcsApplyTests(unittest.TestCase):
                         log.index('Config apply complete'))
 
     def test_failed_restart_then_same_value_retry_recovers(self):
-        # Codex 065: restart fails, the static variant keeps running.
+        # restart fails, the static variant keeps running.
         self.manager_running('n')
         (self.root / 'restart-fails').touch()
         result, calls, log = self.apply('v1', acs='y')
@@ -123,7 +123,7 @@ class AcsApplyTests(unittest.TestCase):
         self.assertEqual((self.running(), self.applied()), ('node-manager-acs.sh', 'v3'))
 
     def test_mixed_package_finishes_every_step_before_the_restart(self):
-        # Codex 064: the restart used to cut short the rest of the package.
+        # the restart used to cut short the rest of the package.
         self.manager_running('n')
         result, calls, log = self.apply('v1', acs='y', mesh_ssid='new')
         self.assertEqual(result.returncode, 0, log)
