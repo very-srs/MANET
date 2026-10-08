@@ -1,0 +1,52 @@
+.Dd October 8, 2026
+.Dt MANET-CPU-SAMPLE.PY 8
+.Os MANET
+.Sh NAME
+.Nm manet-cpu-sample.py
+.Nd measure service CPU use over one interval
+.Sh SYNOPSIS
+.Nm
+.Op Fl -unit Ar unit
+.Op Fl -seconds Ar duration
+.Op Fl -label Ar label
+.Op Fl h | Fl -help
+.Sh DESCRIPTION
+.Nm
+reads a service's cgroup-v2 CPU counters before and after a timed interval
+and prints JSON.
+The sample includes child processes in the service's cgroup.
+Output includes service CPU seconds per minute, service usage as a percentage
+of one CPU core, and whole-system busy CPU seconds per minute.
+Values may exceed one core's capacity when multiple cores are used.
+.Pp
+The unit must be active with its own cgroup, and its counters must be readable.
+A changed service invocation, changed cgroup or reset counter invalidates
+the sample; repeat it after the service is stable.
+.Bl -tag -width Ds
+.It Fl -unit Ar unit
+Systemd unit to sample; default
+.Li manet-atak.service .
+.It Fl -seconds Ar duration
+Interval in seconds; default 60, range 1 through 3600.
+Fractional values are accepted.
+.It Fl -label Ar label
+Label included in the JSON output; default
+.Li sample .
+.It Fl h , Fl -help
+Print help and exit.
+.El
+.Sh FILES
+.Bl -tag -width Ds
+.It Pa /sys/fs/cgroup/
+Service CPU counters from its cgroup's
+.Pa cpu.stat .
+.It Pa /proc/stat
+Aggregate system CPU counters.
+.El
+.Sh EXIT STATUS
+Exits 0 after a valid sample, 1 for an operating error or invalidated sample,
+and 2 for invalid arguments.
+.Sh EXAMPLES
+.Bd -literal -offset indent
+manet-cpu-sample.py --unit mesh-status.service --seconds 60
+.Ed

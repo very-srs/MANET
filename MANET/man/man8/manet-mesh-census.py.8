@@ -1,0 +1,47 @@
+.Dd October 8, 2026
+.Dt MANET-MESH-CENSUS.PY 8
+.Os MANET
+.Sh NAME
+.Nm manet-mesh-census.py
+.Nd summarize traffic observed on the BATMAN mesh port
+.Sh SYNOPSIS
+.Nm
+.Op Fl -minutes Ar duration
+.Op Fl -max-rows Ar count
+.Op Fl h | Fl -help
+.Sh DESCRIPTION
+.Nm
+passively observes Ethernet frames on Linux
+.Li bat0
+and prints a JSON summary at the end of the capture.
+It requires root or
+.Dv CAP_NET_RAW .
+It sends no probes, changes no firewall rules and saves no packet payloads.
+Pressing Ctrl-C during capture prints a partial summary.
+.Pp
+Rows group packets and Ethernet bytes by direction, inferred source bridge
+port, source MAC, protocol, transport ports, destination and visible VLANs.
+Incoming packets are observed before bridge filtering.
+Outgoing packets have passed bridge filtering but do not prove remote delivery.
+Source attribution is inferred from periodic local snapshots.
+Kernel drops, snapshot failures and row overflow are reported explicitly.
+.Bl -tag -width Ds
+.It Fl -minutes Ar duration
+Capture duration in minutes; default 5.
+Must be finite, greater than zero and no greater than 1440.
+.It Fl -max-rows Ar count
+Maximum distinct detail rows; default 20000, range 1 through 100000.
+Excess traffic still contributes to totals and overflow counts.
+.It Fl h , Fl -help
+Print help and exit.
+.El
+.Sh EXIT STATUS
+Exits 0 after printing a report, including a partial capture stopped by Ctrl-C.
+Exits 1 for an operating error and 2 for invalid arguments.
+A zero status does not imply a lossless capture; check the reported counters.
+.Sh EXAMPLES
+.Bd -literal -offset indent
+sudo manet-mesh-census.py --minutes 5 > /tmp/mesh-census.json
+.Ed
+.Sh SEE ALSO
+.Xr verify-bridge.sh 8

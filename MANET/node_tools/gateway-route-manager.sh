@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 set -euo pipefail
 
 POLL_INTERVAL=10
@@ -29,7 +29,7 @@ flock -n 200 || exit 0
 # twice and forked an extra process per line. Run by hand, stderr goes to the
 # terminal, which is what you want there.
 log() {
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] - GW-ROUTE-MGR: $*" >&2
+    printf '%s\n' "GW-ROUTE-MGR: $*" >&2
 }
 
 poll_wait() {
@@ -79,7 +79,7 @@ reachable() {
 uptime_now() {
     local up unused
     read -r up unused < /proc/uptime
-    echo "${up%.*}"
+    printf '%s\n' "${up%.*}"
 }
 
 log "Starting Gateway Route Manager (pending startup ${STARTUP_POLL_INTERVAL}s, steady ${POLL_INTERVAL}s)"

@@ -1,0 +1,33 @@
+.Dd October 8, 2026
+.Dt MAC-TO-IP.SH 8
+.Os MANET
+.Sh NAME
+.Nm mac-to-ip.sh
+.Nd find a node's IPv4 address in the mesh registry
+.Sh SYNOPSIS
+.Nm
+.Ar mac-address
+.Sh DESCRIPTION
+.Nm
+prints the IPv4 address associated with a MAC address in the local mesh
+registry.
+The address must contain six hexadecimal octets separated by colons;
+letters are case-insensitive.
+.Pp
+Primary node MAC addresses are checked first, then per-interface MAC lists.
+The command reads existing registry data and does not probe the peer.
+It accepts no options.
+.Sh FILES
+.Bl -tag -width Ds
+.It Pa /var/run/mesh_node_registry
+Node identities, interface MAC lists and IPv4 addresses.
+.El
+.Sh EXIT STATUS
+Exits 0 when an IPv4 address is printed.
+Exits 1 for invalid arguments, a missing registry or no matching address.
+.Sh EXAMPLES
+.Bd -literal -offset indent
+mac-to-ip.sh 02:00:00:00:00:01
+.Ed
+.Sh SEE ALSO
+.Xr mesh-neighbor-count.py 8

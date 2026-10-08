@@ -1,0 +1,64 @@
+.Dd October 8, 2026
+.Dt NODE-UPDATE.SH 8
+.Os MANET
+.Sh NAME
+.Nm node-update.sh
+.Nd verify and install a MANET tools update
+.Sh SYNOPSIS
+.Nm
+.Op Fl -routine
+.Op Fl -development
+.Op Fl -allow-downgrade
+.Nm
+.Fl h | Fl -help
+.Sh DESCRIPTION
+.Nm
+selects the stable GitHub release marked Latest and installs the board's
+tools archive if its version is newer.
+Run it as root.
+The archive digest, paths and embedded versions are checked before staging.
+Tools updates replace runtime files and restart services; they do not
+replace the kernel.
+.Pp
+An interrupted installation is retried on the next run, even when the
+installed version already matches.
+Individual files are replaced atomically, but the whole update has no
+automatic rollback.
+Errors are logged under the journal identifier
+.Li manet-update .
+.Bl -tag -width Ds
+.It Fl -routine
+Suppress console output and skip release checks for 24 hours after a
+successful check or installation.
+An interrupted installation bypasses this delay.
+.It Fl -development
+Select the most recently published build, including prereleases,
+for this invocation.
+.It Fl -allow-downgrade
+Allow the selected release to replace a newer installed version.
+.It Fl h , Fl -help
+Print help and exit.
+.El
+.Sh FILES
+.Bl -tag -width Ds
+.It Pa /etc/manet_version.txt , /usr/local/bin/version.txt
+Installed version markers.
+.It Pa /var/lib/manet-update/
+Staging data; an
+.Pa in-progress
+marker records unfinished installation.
+.It Pa /run/manet-update.lock
+Lock excluding concurrent updates.
+.El
+.Sh EXIT STATUS
+Exits 0 after an update succeeds, or when no work is needed,
+including when another updater holds the lock.
+Exits 1 on an operating error and 2 for invalid arguments.
+.Sh EXAMPLES
+Select the newest published build:
+.Bd -literal -offset indent
+sudo node-update.sh --development
+.Ed
+.Sh SEE ALSO
+.Xr journalctl 1 ,
+.Xr manet-provision-status.sh 8

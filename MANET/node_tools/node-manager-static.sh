@@ -61,7 +61,7 @@ CLOCK_READY_SEEN=false
 IDENTITY_PUBLISH_INTERVAL=270
 
 log() {
-    echo "[$(date +'%Y-%m-%d %H:%M:%S')] - NODE-MGR-STATIC: $1" >&2
+    manet_log NODE-MGR-STATIC "$*"
 }
 
 
@@ -247,7 +247,8 @@ is_hosting_service() {
         [ -z "$IPV4_NETWORK" ] && return 1
 
         local CALC_OUTPUT=$(manet-ipcalc.sh "$IPV4_NETWORK" 2>/dev/null)
-        local FIRST_IP=$(echo "$CALC_OUTPUT" | awk '/HostMin/ {print $2}')
+        local FIRST_IP=$(printf '%s\n' "$CALC_OUTPUT" |
+            awk '/HostMin/ {print $2}')
         local MEDIAMTX_IPV4_VIP="${FIRST_IP%.*}.$((${FIRST_IP##*.} + 1))"
         ip addr show dev "$CONTROL_IFACE" | grep -q "inet $MEDIAMTX_IPV4_VIP/" && return 0
     fi
@@ -270,7 +271,7 @@ is_hosting_mumble_service() {
         local CALC_OUTPUT
         CALC_OUTPUT=$(manet-ipcalc.sh "$IPV4_NETWORK" 2>/dev/null)
         local FIRST_IP
-        FIRST_IP=$(echo "$CALC_OUTPUT" | awk '/HostMin/ {print $2}')
+        FIRST_IP=$(printf '%s\n' "$CALC_OUTPUT" | awk '/HostMin/ {print $2}')
         local MUMBLE_IPV4_VIP="${FIRST_IP%.*}.$((${FIRST_IP##*.} + 2))"
         ip addr show dev "$CONTROL_IFACE" | grep -q "inet $MUMBLE_IPV4_VIP/" && return 0
     fi
@@ -366,7 +367,8 @@ while true; do
 
             IDENTITY_PAYLOAD=$("$ENCODER_PATH" identity "${IDENTITY_ARGS[@]}" 2>/dev/null)
             if [ -n "$IDENTITY_PAYLOAD" ]; then
-                if echo -n "$IDENTITY_PAYLOAD" | alfred -s $ALFRED_IDENTITY_TYPE; then
+                if printf '%s' "$IDENTITY_PAYLOAD" |
+                    alfred -s $ALFRED_IDENTITY_TYPE; then
                     LAST_IDENTITY_PUBLISH=$MONO
                     LAST_IDENTITY_ALLOCATION="$IDENTITY_ALLOCATION"
                 fi
@@ -452,7 +454,7 @@ while true; do
         fi
         
         if [ -n "$CURRENT_PAYLOAD" ]; then
-            echo -n "$CURRENT_PAYLOAD" | alfred -s $ALFRED_DATA_TYPE
+            printf '%s' "$CURRENT_PAYLOAD" | alfred -s $ALFRED_DATA_TYPE
             LAST_PUBLISHED_PAYLOAD="$CURRENT_PAYLOAD"
             LAST_PUBLISH_TIME=$MONO
         fi

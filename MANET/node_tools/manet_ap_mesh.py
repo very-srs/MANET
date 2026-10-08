@@ -463,5 +463,5 @@ if __name__ == '__main__':
     try:
         main()
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
-        print(error, file=sys.stderr)
+        print(f'manet_ap_mesh.py: {error}', file=sys.stderr)
         sys.exit(1)

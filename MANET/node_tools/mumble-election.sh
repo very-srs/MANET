@@ -28,7 +28,7 @@ MY_MAC=$(cat "/sys/class/net/${CONTROL_IFACE}/address" 2>/dev/null || true)
 LOCK_FILE="/var/run/mumble-election.lock"
 
 log() {
-    echo "[$(date +'%Y-%m-%d %H:%M:%S')] - MUMBLE-ELECTION: $1" | systemd-cat -t mumble-election
+    printf '%s\n' "MUMBLE-ELECTION: $1" | systemd-cat -t mumble-election
 }
 
 # --- Dependency Checks ---
@@ -55,7 +55,7 @@ get_mumble_ipv4_vip() {
     fi
     
     # Get first usable IP (HostMin)
-    local FIRST_IP=$(echo "$CALC_OUTPUT" | awk '/HostMin/ {print $2}')
+    local FIRST_IP=$(printf '%s\n' "$CALC_OUTPUT" | awk '/HostMin/ {print $2}')
     
     # Service IP allocation:
     # HostMin + 0 (.1): Reserved/available
@@ -64,7 +64,7 @@ get_mumble_ipv4_vip() {
     # HostMin + 3-4 (.4-.5): Reserved for future services
     # HostMin + 5+ (.6+): Chunk-based allocation starts
     
-    echo "${FIRST_IP%.*}.$((${FIRST_IP##*.} + 2))"
+    printf '%s\n' "${FIRST_IP%.*}.$((${FIRST_IP##*.} + 2))"
 }
 
 # --- Database Sync Functions ---
@@ -376,7 +376,7 @@ MUMBLE_IPV6_VIP_WITH_MASK=$(/usr/local/bin/mumble-ip.sh)
 MUMBLE_IPV6_VIP=${MUMBLE_IPV6_VIP_WITH_MASK%/*}
 
 # Normalize IPv6 to compressed form (remove :0000: before ::)
-MUMBLE_IPV6_VIP=$(echo "$MUMBLE_IPV6_VIP" | sed 's/:0000::/::/g')
+MUMBLE_IPV6_VIP=$(printf '%s\n' "$MUMBLE_IPV6_VIP" | sed 's/:0000::/::/g')
 MUMBLE_IPV6_VIP_WITH_MASK="${MUMBLE_IPV6_VIP}/128"
 
 if [ -z "$MUMBLE_IPV4_VIP" ] || [ -z "$MUMBLE_IPV6_VIP" ]; then

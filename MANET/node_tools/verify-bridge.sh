@@ -12,16 +12,16 @@ ERRORS=0
 WARNINGS=0
 
 log_pass() {
-    echo -e "${GREEN}✓${NC} $1"
+    printf '%b✓%b %s\n' "$GREEN" "$NC" "$1"
 }
 
 log_fail() {
-    echo -e "${RED}✗${NC} $1"
+    printf '%b✗%b %s\n' "$RED" "$NC" "$1" >&2
     ((ERRORS++))
 }
 
 log_warn() {
-    echo -e "${YELLOW}⚠${NC} $1"
+    printf '%b⚠%b %s\n' "$YELLOW" "$NC" "$1" >&2
     ((WARNINGS++))
 }
 
@@ -45,14 +45,14 @@ else
     # Get members
     BR0_MEMBERS=$(bridge link | grep "master br0" | awk '{print $2}' | cut -d: -f1)
     
-    if echo "$BR0_MEMBERS" | grep -q "bat0"; then
+    if printf '%s\n' "$BR0_MEMBERS" | grep -q "bat0"; then
         log_pass "bat0 is enslaved to br0"
     else
         log_fail "bat0 is NOT enslaved to br0"
     fi
     
     # Check for EUD interfaces
-    if echo "$BR0_MEMBERS" | grep -q "end0"; then
+    if printf '%s\n' "$BR0_MEMBERS" | grep -q "end0"; then
         log_pass "end0 is bridged (wired EUD mode)"
     else
         log_warn "end0 is not bridged (normal if no wired EUD)"
@@ -60,7 +60,7 @@ else
     
     # Check AP interface - should be in br0 and not bat0.
     if [ -n "$AP_INTERFACE" ]; then
-        if echo "$BR0_MEMBERS" | grep -q "^${AP_INTERFACE}$"; then
+        if printf '%s\n' "$BR0_MEMBERS" | grep -q "^${AP_INTERFACE}$"; then
             log_pass "$AP_INTERFACE is in br0 (AP mode, as configured)"
         else
             log_warn "$AP_INTERFACE should be in br0 when configured as AP"
@@ -86,7 +86,7 @@ else
     
     for iface in "${MESH_INTERFACES[@]}"; do
         [ -z "$iface" ] && continue
-        if echo "$BAT0_MEMBERS" | grep -qx "$iface"; then
+        if printf '%s\n' "$BAT0_MEMBERS" | grep -qx "$iface"; then
             log_pass "$iface is in bat0 (mesh)"
         else
             log_fail "$iface is NOT in bat0 (mesh)"
@@ -95,7 +95,7 @@ else
 
     for iface in "${HALOW_INTERFACES[@]}"; do
         [ -z "$iface" ] && continue
-        if echo "$BAT0_MEMBERS" | grep -qx "$iface"; then
+        if printf '%s\n' "$BAT0_MEMBERS" | grep -qx "$iface"; then
             log_pass "$iface is in bat0 (HaLow)"
         else
             log_warn "$iface is NOT in bat0 (HaLow may still be initializing)"
@@ -114,11 +114,12 @@ IP_COUNT=$(printf '%s\n' "$BR0_IPS" | grep -c .)
 if [ "$IP_COUNT" -ge 2 ]; then
     log_pass "br0 has multiple IPs (expected for chunk allocation)"
     PRIMARY_IP=$(python3 /usr/local/bin/manet_node_ipv4.py br0 2>/dev/null || true)
-    echo "    Node primary: ${PRIMARY_IP:-not allocated}"
-    echo "    All bridge addresses: $(echo "$BR0_IPS" | paste -sd ', ' -)"
+    printf '%s\n' "    Node primary: ${PRIMARY_IP:-not allocated}"
+    printf '%s\n' "    All bridge addresses: $(printf '%s\n' "$BR0_IPS" |
+        paste -sd ', ' -)"
 elif [ "$IP_COUNT" -eq 1 ]; then
     log_warn "br0 has only one IP (chunk allocation may not be complete)"
-    echo "    IP: $(echo "$BR0_IPS" | head -1)"
+    printf '%s\n' "    IP: $(printf '%s\n' "$BR0_IPS" | head -1)"
 else
     log_fail "br0 has no IPv4 address"
 fi
@@ -221,11 +222,12 @@ echo ""
 echo "=== Configuration Summary ==="
 
 EUD_MODE=$(grep "^eud=" /etc/mesh.conf 2>/dev/null | cut -d'=' -f2)
-echo "EUD Mode: ${EUD_MODE:-unknown}"
+printf '%s\n' "EUD Mode: ${EUD_MODE:-unknown}"
 
 if [ -n "$AP_INTERFACE" ]; then
-    echo "AP Interface: $AP_INTERFACE"
-    echo "  -> $AP_INTERFACE should be: in br0, NOT in bat0, DHCP allowed"
+    printf '%s\n' "AP Interface: $AP_INTERFACE"
+    printf '%s\n' \
+        "  -> $AP_INTERFACE should be: in br0, NOT in bat0, DHCP allowed"
 else
     echo "AP Interface: none configured"
 fi
@@ -238,7 +240,7 @@ fi
 
 if [ -f /var/run/ethernet_detection_state ]; then
     source /var/run/ethernet_detection_state
-    echo "Ethernet State: $ETH_MODE"
+    printf '%s\n' "Ethernet State: $ETH_MODE"
 fi
 
 echo ""
@@ -246,11 +248,12 @@ echo ""
 # --- Summary ---
 echo "========================================"
 if [ $ERRORS -eq 0 ] && [ $WARNINGS -eq 0 ]; then
-    echo -e "${GREEN}All checks passed!${NC}"
+    printf '%bAll checks passed!%b\n' "$GREEN" "$NC"
 elif [ $ERRORS -eq 0 ]; then
-    echo -e "${YELLOW}Passed with $WARNINGS warnings${NC}"
+    printf '%bPassed with %s warnings%b\n' "$YELLOW" "$WARNINGS" "$NC"
 else
-    echo -e "${RED}Failed with $ERRORS errors and $WARNINGS warnings${NC}"
+    printf '%bFailed with %s errors and %s warnings%b\n' \
+        "$RED" "$ERRORS" "$WARNINGS" "$NC" >&2
 fi
 echo "========================================"
 

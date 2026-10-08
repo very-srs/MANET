@@ -17,7 +17,7 @@ if ! led_hardware_ready; then
     exit 0
 fi
 
-echo "button-monitor: watching ${GPIO_CHIP} line ${BTN_LINE}"
+printf '%s\n' "button-monitor: watching ${GPIO_CHIP} line ${BTN_LINE}"
 
 while true; do
     # Block here until a falling edge (button press, active-low)
@@ -29,7 +29,9 @@ while true; do
         --debounce-period "${DEBOUNCE_MS}ms" \
         --quiet \
         "$BTN_LINE"; then
-        echo "button-monitor: gpiomon failed on ${GPIO_CHIP} line ${BTN_LINE}; exiting"
+        printf '%s%s\n' \
+            "button-monitor: gpiomon failed on ${GPIO_CHIP} line " \
+            "${BTN_LINE}; exiting"
         exit 0
     fi
 

@@ -1,0 +1,42 @@
+.Dd October 8, 2026
+.Dt MANET-PROVISION-STATUS.SH 8
+.Os MANET
+.Sh NAME
+.Nm manet-provision-status.sh
+.Nd display provisioning progress and operator-script results
+.Sh SYNOPSIS
+.Nm
+.Sh DESCRIPTION
+.Nm
+prints the recorded provisioning state: running, incomplete or complete.
+Incomplete runs include failed steps and retry instructions.
+Completed runs show the installed version and time since completion.
+Staged operator-script results are shown alongside the verdict when available.
+.Pp
+The command takes no options and is also run by the SSH login banner.
+If neither recorded state nor a completion marker exists, it prints nothing.
+It reports recorded setup results; it does not test current mesh connectivity.
+.Sh FILES
+.Bl -tag -width Ds
+.It Pa /var/lib/manet-provision.state
+Provisioning state and timing.
+.It Pa /var/lib/manet-provision.failures
+Failed setup steps; at most eight are displayed.
+.It Pa /var/lib/radio-setup.done
+Completion marker, whose modification time supplies the completion time.
+.It Pa /etc/manet_version.txt
+Installed version.
+.It Pa /var/lib/manet-user-scripts/
+Staged operator scripts.
+.It Pa /var/lib/manet-user-scripts.state , /var/lib/manet-user-scripts.done
+Recorded operator-script results and completion marker.
+.It Pa /var/log/radio-setup.log , /var/log/manet-user-scripts.log
+Detailed logs named by the status output.
+.El
+.Sh EXIT STATUS
+Exits 0 regardless of the recorded provisioning verdict.
+Read the output to determine whether setup completed.
+.Sh SEE ALSO
+.Xr manet-user-scripts.sh 8 ,
+.Xr radio-setup.sh 8 ,
+.Xr verify-bridge.sh 8

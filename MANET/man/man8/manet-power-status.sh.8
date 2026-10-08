@@ -1,0 +1,37 @@
+.Dd October 8, 2026
+.Dt MANET-POWER-STATUS.SH 8
+.Os MANET
+.Sh NAME
+.Nm manet-power-status.sh
+.Nd report Raspberry Pi under-voltage and throttling
+.Sh SYNOPSIS
+.Nm
+.Op Fl -json
+.Sh DESCRIPTION
+.Nm
+reads
+.Li vcgencmd get_throttled
+and reports current and since-boot under-voltage, CPU frequency capping,
+throttling and soft temperature-limit flags.
+The default output is a human-readable summary, also used at SSH login.
+State labels are
+.Li ok , notice , warning
+and
+.Li critical .
+.Pp
+If the mailbox command is absent or unavailable, human-readable output
+is empty.
+This does not establish that the power supply is healthy.
+.Bl -tag -width Ds
+.It Fl -json
+Print JSON with availability, raw bitmask, state and individual flags.
+Unavailable hardware produces
+.Li {"available": false} .
+.El
+.Sh EXIT STATUS
+Exits 0 for a status report, including under-voltage or unavailable hardware.
+Invalid arguments return 1.
+.Sh EXAMPLES
+.Bd -literal -offset indent
+manet-power-status.sh --json
+.Ed

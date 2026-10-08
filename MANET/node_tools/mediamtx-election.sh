@@ -18,7 +18,7 @@ MTX_IPV6_SCRIPT="/usr/local/bin/mtx-ip.sh"
 # Prevents service migration due to normal TQ fluctuation.
 
 log() {
-    echo "[$(date +'%Y-%m-%d %H:%M:%S')] - MEDIAMTX-ELECTION: $1" | systemd-cat -t mediamtx-election
+    printf '%s\n' "MEDIAMTX-ELECTION: $1" | systemd-cat -t mediamtx-election
 }
 
 # Function to get the second usable IP address from the CIDR (our reserved VIP)
@@ -32,10 +32,10 @@ get_mediamtx_ipv4_vip() {
     fi
 
     # Get the first usable IP (HostMin)
-    local FIRST_IP=$(echo "$CALC_OUTPUT" | awk '/HostMin/ {print $2}')
+    local FIRST_IP=$(printf '%s\n' "$CALC_OUTPUT" | awk '/HostMin/ {print $2}')
 
     # Increment the last octet to get the second IP
-    echo "${FIRST_IP%.*}.$((${FIRST_IP##*.} + 1))"
+    printf '%s\n' "${FIRST_IP%.*}.$((${FIRST_IP##*.} + 1))"
 }
 
 # --- Single run at a time ---
@@ -83,7 +83,7 @@ MEDIAMTX_IPV6_VIP_WITH_MASK=$("$MTX_IPV6_SCRIPT") # e.g., fd5a:..::64/128
 MEDIAMTX_IPV6_VIP=${MEDIAMTX_IPV6_VIP_WITH_MASK%/*} # Just the address part
 
 #Normalize IPv6 to compressed form (remove :0000: before ::) ***
-MEDIAMTX_IPV6_VIP=$(echo "$MEDIAMTX_IPV6_VIP" | sed 's/:0000::/::/g')
+MEDIAMTX_IPV6_VIP=$(printf '%s\n' "$MEDIAMTX_IPV6_VIP" | sed 's/:0000::/::/g')
 MEDIAMTX_IPV6_VIP_WITH_MASK="${MEDIAMTX_IPV6_VIP}/128"
 
 

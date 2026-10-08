@@ -4,6 +4,20 @@ After=local-fs.target
 ConditionPathExistsGlob=/sys/class/leds/*
 
 [Service]
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+LockPersonality=yes
+RestrictRealtime=yes
+SystemCallArchitectures=native
+# LED class links point into board-specific sysfs device trees.
+# ProtectKernelTunables would make their trigger/brightness files read-only.
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX
+PrivateDevices=yes
 Type=oneshot
 ExecStart=/usr/local/bin/manet-led-status.sh
 RemainAfterExit=no

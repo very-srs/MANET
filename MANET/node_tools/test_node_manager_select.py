@@ -97,7 +97,9 @@ class SelectTests(unittest.TestCase):
         for _ in range(2):  # changed link, then already-right link
             subprocess.run(['bash', str(SELECT), '--service-start'], env=env, check=True, timeout=10)
             self.assertEqual((run_dir / 'node-manager.running').read_text(), 'node-manager-acs.sh\n')
-        self.assertEqual(subprocess.run(['bash', str(SELECT), '--bogus'], env=env, timeout=10).returncode, 2)
+        result = subprocess.run(['bash', str(SELECT), '--bogus'],
+                                env=env, timeout=10)
+        self.assertEqual(result.returncode, 1)
 
     def test_service_runs_the_selector_before_every_start(self):
         dropin = (TOOLS.parent / 'systemd/node-manager.service.d/select.conf').read_text()

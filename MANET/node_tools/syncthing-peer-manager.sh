@@ -17,7 +17,7 @@ LOOP_INTERVAL=60 # Check every minute
 
 log() {
     # Add script name for clarity
-    echo "[$(date +'%Y-%m-%d %H:%M:%S')] - SYNC-MGR: $1"
+    printf '%s\n' "SYNC-MGR: $1" >&2
 }
 
 # Gets the local Syncthing Device ID (needed for filtering)
@@ -44,7 +44,7 @@ is_peer_configured() {
 add_peer_to_config() {
     local peer_id=$1
     # Generate a simple name based on the first few chars of the ID
-    local peer_name="mesh-peer-$(echo "$peer_id" | cut -c 1-7)"
+    local peer_name="mesh-peer-$(printf '%s\n' "$peer_id" | cut -c 1-7)"
 
     log "Adding new peer ${peer_name} (${peer_id}) to config..."
 
@@ -113,7 +113,7 @@ while true; do
             peer_id="${!varname}"
             # Exclude our own ID and any potentially empty entries
             if [[ -n "$peer_id" && "$peer_id" != "$LOCAL_ID" ]]; then
-                echo "$peer_id"
+                printf '%s\n' "$peer_id"
             fi
         done
     ) | sort -u ) # Sort and get unique IDs
@@ -121,7 +121,7 @@ while true; do
     NEEDS_RESTART=false
     if [ -n "$PEER_IDS" ]; then
         log "Found potential peers:"
-        echo "$PEER_IDS" # Log the list for debugging
+        printf '%s\n' "$PEER_IDS" # Log the list for debugging
 
         # Loop through unique peer IDs found in the registry
         while IFS= read -r PEER_ID; do

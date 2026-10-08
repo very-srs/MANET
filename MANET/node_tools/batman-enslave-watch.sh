@@ -3,7 +3,9 @@
 # Runs continuously after batman-enslave.service. Safe to restart.
 . "${MANET_TOOLS_DIR:-$(dirname "${BASH_SOURCE[0]}")}/manet-common.sh" || exit 1
 
-log() { echo "[$(date +'%Y-%m-%d %H:%M:%S')] ENSLAVE-WATCH: $*" | systemd-cat -t batman-enslave-watch; }
+log() {
+    manet_journal batman-enslave-watch "ENSLAVE-WATCH: $*"
+}
 
 # radio_iface_enabled: manet-common.sh
 
@@ -34,7 +36,7 @@ restore_halow_primary_if_needed() {
     if [ $((now - last)) -lt 60 ]; then
         return 0
     fi
-    echo "$now" > "$cooldown_file"
+    printf '%s\n' "$now" > "$cooldown_file"
 
     log "WARNING: bat0 MainIF is $mainif, expected HaLow $halow; rebuilding bat0 membership"
     /usr/local/bin/batman-if-setup.sh stop 2>/dev/null || true
@@ -75,7 +77,7 @@ restart_dead_ap_if_needed() (
 
     # Two consecutive cycles, so a restart in progress is not counted as dead.
     strikes=$(( $(cat "$strikes_file" 2>/dev/null || echo 0) + 1 ))
-    echo "$strikes" > "$strikes_file"
+    printf '%s\n' "$strikes" > "$strikes_file"
     [ "$strikes" -ge 2 ] || return 0
 
     cooldown_file="/run/batman-enslave-watch-ap-restart"
@@ -87,7 +89,7 @@ restart_dead_ap_if_needed() (
     if [ $((now - last)) -lt 60 ]; then
         return 0
     fi
-    echo "$now" > "$cooldown_file"
+    printf '%s\n' "$now" > "$cooldown_file"
 
     log "WARNING: hostapd is active but $ap is not serving; restarting hostapd"
     systemctl restart hostapd.service 2>/dev/null || true

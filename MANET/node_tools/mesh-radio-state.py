@@ -411,7 +411,7 @@ def main():
         path = sys.argv[2] if len(sys.argv) > 2 else PENDING_FILE
         pkg = read_json(path)
         if not pkg:
-            print(f"No radio package at {path}", file=sys.stderr)
+            print(f"mesh-radio-state.py: no package at {path}", file=sys.stderr)
             return 1
         apply_package(pkg)
         return 0
@@ -420,4 +420,9 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except (OSError, ValueError, RuntimeError,
+            subprocess.SubprocessError) as error:
+        print(f'mesh-radio-state.py: {error}', file=sys.stderr)
+        sys.exit(1)

@@ -14,16 +14,23 @@
 BIN_DIR="${MANET_BIN_DIR:-/usr/local/bin}"
 MESH_CONF="${MANET_MESH_CONF:-/etc/mesh.conf}"
 RUN_DIR="${MANET_RUN_DIR:-/run}"
+usage() {
+    printf '%s\n' \
+        'usage: node-manager-select.sh [--service-start]' >&2
+}
+
+[ $# -le 1 ] || { usage; exit 1; }
+
 service_start=false
 case "${1:-}" in
     --service-start) service_start=true ;;
     "") ;;
-    *) echo "usage: node-manager-select.sh [--service-start]" >&2; exit 2 ;;
+    *) usage; exit 1 ;;
 esac
 
 record_running() {
     [ "$service_start" = true ] || return 0
-    echo "$target" > "$RUN_DIR/node-manager.running.new" &&
+    printf '%s\n' "$target" > "$RUN_DIR/node-manager.running.new" &&
         mv -f "$RUN_DIR/node-manager.running.new" "$RUN_DIR/node-manager.running"
 }
 
@@ -36,7 +43,7 @@ else
 fi
 
 if [ ! -x "$BIN_DIR/$target" ]; then
-    echo "Cannot select $target: $BIN_DIR/$target is missing" >&2
+    printf '%s\n' "Cannot select $target: $BIN_DIR/$target is missing" >&2
     exit 1
 fi
 
@@ -48,14 +55,14 @@ fi
 # A private scratch directory per call: concurrent selections (setup, config
 # apply and a service start can overlap) must not share a temporary name.
 scratch=$(mktemp -d "$BIN_DIR/.node-manager-select.XXXXXX") || {
-    echo "Cannot create a scratch directory in $BIN_DIR" >&2
+    printf '%s\n' "Cannot create a scratch directory in $BIN_DIR" >&2
     exit 1
 }
 trap 'rm -rf "$scratch"' EXIT
 if ! ln -s "$target" "$scratch/node-manager.sh" ||
         ! mv -Tf "$scratch/node-manager.sh" "$BIN_DIR/node-manager.sh"; then
-    echo "Cannot point node-manager.sh at $target" >&2
+    printf '%s\n' "Cannot point node-manager.sh at $target" >&2
     exit 1
 fi
-echo "node-manager.sh -> $target"
+printf '%s\n' "node-manager.sh -> $target"
 record_running

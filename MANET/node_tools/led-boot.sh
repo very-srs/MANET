@@ -44,7 +44,7 @@ while true; do
     if (( tick % POLL_TICKS == 0 )); then
         if count=$(get_peer_count); then
             unknown=0
-            echo "led-boot: peer poll = ${count}"
+            printf '%s\n' "led-boot: peer poll = ${count}"
             (( count > 0 )) && break
         else
             result=$?

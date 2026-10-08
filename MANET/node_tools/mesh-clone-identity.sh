@@ -7,7 +7,7 @@ set -u
 STATE_FILE="/var/lib/mesh_identity"
 
 log() {
-    echo "[$(date +'%Y-%m-%d %H:%M:%S')] - CLONE-ID: $1"
+    printf '%s\n' "CLONE-ID: $1" >&2
 }
 
 primary_mac() {
@@ -22,7 +22,8 @@ primary_mac() {
 }
 
 mac_suffix() {
-    echo "$1" | awk -F: '{print $(NF-1) $NF}' | tr '[:upper:]' '[:lower:]'
+    printf '%s\n' "$1" |
+        awk -F: '{print $(NF-1) $NF}' | tr '[:upper:]' '[:lower:]'
 }
 
 CURRENT_MAC="$(primary_mac)"

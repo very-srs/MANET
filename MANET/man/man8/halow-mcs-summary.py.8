@@ -1,0 +1,45 @@
+.Dd October 8, 2026
+.Dt HALOW-MCS-SUMMARY.PY 8
+.Os MANET
+.Sh NAME
+.Nm halow-mcs-summary.py
+.Nd summarize a HaLow peer's modulation and coding rates
+.Sh SYNOPSIS
+.Nm
+.Op Fl -iface Ar interface
+.Op Fl -shell
+.Op Fl h | Fl -help
+.Sh DESCRIPTION
+.Nm
+reads
+.Li iw dev interface station dump
+and selects a peer with transmit or receive MCS data.
+The most recently active peer is preferred, with signal strength breaking ties.
+Run with permission to query wireless station information.
+.Pp
+Default output is JSON containing the interface, selected peer MAC,
+transmit and receive rate summaries, signal, inactivity and peer count.
+The count includes only peers with MCS data.
+No usable station data produces empty rate fields and a zero count.
+.Bl -tag -width Ds
+.It Fl -iface Ar interface
+Wireless interface; default
+.Li wlan2 .
+.It Fl -shell
+Print quoted shell assignments instead of JSON.
+Variable names start with the uppercased interface name, with punctuation
+replaced by underscores, and end in
+.Li TX_MCS , RX_MCS , MCS_PEER , MCS_SIGNAL_DBM
+or
+.Li MCS_PEER_COUNT .
+.It Fl h , Fl -help
+Print help and exit.
+.El
+.Sh EXIT STATUS
+Exits 0 after producing output, including when station data is unavailable.
+Invalid arguments return 2.
+Empty fields do not establish that the interface is healthy or idle.
+.Sh EXAMPLES
+.Bd -literal -offset indent
+sudo halow-mcs-summary.py --iface wlan2
+.Ed

@@ -22,7 +22,7 @@ PEER_COUNTER="${MANET_TOOLS_DIR:-$(dirname "${BASH_SOURCE[0]}")}/mesh-peer-count
 ELECTION_OUTPUT_FILE="/var/run/mesh_channel_election"
 
 log() {
-    echo "[$(date +'%Y-%m-%d %H:%M:%S')] - TOURGUIDE: $1" | systemd-cat -t tourguide-manager
+    manet_journal tourguide-manager "TOURGUIDE: $*"
 }
 
 elect_tourguide() {
@@ -54,7 +54,7 @@ select_tourguide_radio() {
     # Skip an unavailable band; substituting another band would break the
     # global rendezvous schedule for mixed single/dual-band partitions.
     radio_iface_enabled "$iface" || return 1
-    echo "$iface"
+    printf '%s\n' "$iface"
 }
 
 hop_to_lobby_frequency() {
@@ -111,7 +111,7 @@ get_partition_size() {
     # Own partition size = unique batman originators + self
     local peers
     peers=$("$PEER_COUNTER" --batctl "$BATCTL_PATH") || return 1
-    echo $((peers + 1))
+    printf '%s\n' "$((peers + 1))"
 }
 
 analyze_partition_data() {

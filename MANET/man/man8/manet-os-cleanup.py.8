@@ -1,0 +1,60 @@
+.Dd October 8, 2026
+.Dt MANET-OS-CLEANUP.PY 8
+.Os MANET
+.Sh NAME
+.Nm manet-os-cleanup.py
+.Nd preview or apply the Raspberry Pi OS appliance cleanup
+.Sh SYNOPSIS
+.Nm
+.Op Fl -apply
+.Op Fl -force
+.Op Fl h | Fl -help
+.Sh DESCRIPTION
+.Nm
+previews removal of unused build and desktop packages and disabling of
+unused services on Raspberry Pi OS Trixie running a MANET kernel.
+Run as root, including for a preview.
+Without
+.Fl -apply ,
+it prints a JSON plan without changing packages or service policy.
+.Pp
+The removal plan protects MANET runtime dependencies and held packages.
+Active swap, a dpkg audit error or proposed removal of a protected package
+stops cleanup.
+An applied cleanup also deletes the inactive stock swap file and downloaded
+package cache.
+It preserves operator cron jobs and required LVM maintenance.
+.Bl -tag -width Ds
+.It Fl -apply
+Save inventories and the plan, stop and mask unused units, purge selected
+packages and record successful completion.
+A previously completed cleanup of the current profile is skipped.
+.It Fl -force
+With
+.Fl -apply ,
+repeat cleanup even if the current profile was completed previously.
+.It Fl h , Fl -help
+Print help and exit.
+.El
+.Sh FILES
+.Bl -tag -width Ds
+.It Pa /var/lib/manet-os-cleanup/
+Saved package inventories, removal plans, unit state and action logs.
+.It Pa /var/lib/manet-os-cleanup/complete
+Successfully applied cleanup profile.
+.It Pa /var/swap
+Stock swap file, removed only when unused and recognized as swap.
+.It Pa /run/lock/manet-os-cleanup.lock
+Lock serializing cleanup runs.
+.El
+.Sh EXIT STATUS
+Exits 0 after a successful preview, apply or skip.
+Exits 1 on an operating error or failed safety check, and 2 for invalid
+arguments.
+.Sh EXAMPLES
+Preview the plan:
+.Bd -literal -offset indent
+sudo manet-os-cleanup.py
+.Ed
+.Sh SEE ALSO
+.Xr radio-setup.sh 8

@@ -10,8 +10,8 @@ ACTION="${1:-$ACTION}"
 IFACE="${2:-$INTERFACE}"
 
 log() {
-    echo "[$(date +'%Y-%m-%d %H:%M:%S')] - USB-ETH: $1" | systemd-cat -t usb-ethernet-watch
-    echo "[$(date +'%Y-%m-%d %H:%M:%S')] - USB-ETH: $1"
+    printf '%s\n' "USB-ETH: $1" | systemd-cat -t usb-ethernet-watch
+    printf '%s\n' "[$(date +'%Y-%m-%d %H:%M:%S')] - USB-ETH: $1"
 }
 
 if [ -z "$IFACE" ]; then

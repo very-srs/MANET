@@ -87,7 +87,7 @@ LIMP_STATE_FILE="/var/run/mesh_limp_mode.state"
 declare -A LAST_ACTION_WINDOW
 
 log() {
-    echo "[$(date +'%Y-%m-%d %H:%M:%S')] - NODE-MGR: $1" >&2
+    manet_log NODE-MGR "$*"
 }
 
 
@@ -295,26 +295,29 @@ phy_usable_freqs() {
     local phyname info usable="" freq
 
     phyname="$(iface_phy "$iface")"
-    [ -z "$phyname" ] && { echo "$wanted"; return; }
+    [ -z "$phyname" ] && { printf '%s\n' "$wanted"; return; }
 
     info="$(iw phy "$phyname" info 2>/dev/null)"
-    [ -z "$info" ] && { echo "$wanted"; return; }
+    [ -z "$info" ] && { printf '%s\n' "$wanted"; return; }
 
     for freq in $wanted; do
         # iw prints "* 5220.0 MHz [44] (30.0 dBm)"; an unusable channel carries a
         # trailing (disabled) / (no IR) / (radar detection) tag. All three mean
         # we cannot bring a mesh point up there, so contribute no data for it.
-        if echo "$info" | grep -qE "[[:space:]]${freq}\.0 MHz.*\((disabled|no IR|radar detection|passive scan)"; then
+        local pattern="[[:space:]]${freq}\.0 MHz.*"
+        pattern+='\((disabled|no IR|radar detection|passive scan)'
+        if printf '%s\n' "$info" | grep -qE "$pattern"; then
             continue
         fi
-        echo "$info" | grep -q "[[:space:]]${freq}\.0 MHz" && usable+="$freq "
+        printf '%s\n' "$info" |
+            grep -q "[[:space:]]${freq}\.0 MHz" && usable+="$freq "
     done
 
     if [ -z "$usable" ]; then
         log "WARNING: no candidate frequency usable on $iface ($phyname). Scanning unfiltered."
-        echo "$wanted"
+        printf '%s\n' "$wanted"
     else
-        echo "${usable% }"
+        printf '%s\n' "${usable% }"
     fi
 }
 
@@ -394,7 +397,8 @@ perform_scan() {
             # find_best_channel holds the current channel when a band has no
             # measurements at all.
             [ "$noise" = "-" ] && continue
-            local bss_count=$(echo "$scan_data" | grep -c "freq: ${freq}\." )
+            local bss_count=$(printf '%s\n' "$scan_data" |
+                grep -c "freq: ${freq}\." )
 
             # Occupancy: the share of the visit the channel was busy with
             # something that was not our own transmission. Unlike the noise
@@ -435,7 +439,7 @@ perform_scan() {
     done
 
     json_out+=']}'
-    echo "$json_out"
+    printf '%s\n' "$json_out"
 }
 
 is_hosting_service() {
@@ -456,7 +460,8 @@ is_hosting_service() {
         [ -z "$IPV4_NETWORK" ] && return 1
 
         local CALC_OUTPUT=$(manet-ipcalc.sh "$IPV4_NETWORK" 2>/dev/null)
-        local FIRST_IP=$(echo "$CALC_OUTPUT" | awk '/HostMin/ {print $2}')
+        local FIRST_IP=$(printf '%s\n' "$CALC_OUTPUT" |
+            awk '/HostMin/ {print $2}')
         local MEDIAMTX_IPV4_VIP="${FIRST_IP%.*}.$((${FIRST_IP##*.} + 1))"
         ip addr show dev "$CONTROL_IFACE" | grep -q "inet $MEDIAMTX_IPV4_VIP/" && return 0
     fi
@@ -479,7 +484,7 @@ is_hosting_mumble_service() {
         local CALC_OUTPUT
         CALC_OUTPUT=$(manet-ipcalc.sh "$IPV4_NETWORK" 2>/dev/null)
         local FIRST_IP
-        FIRST_IP=$(echo "$CALC_OUTPUT" | awk '/HostMin/ {print $2}')
+        FIRST_IP=$(printf '%s\n' "$CALC_OUTPUT" | awk '/HostMin/ {print $2}')
         local MUMBLE_IPV4_VIP="${FIRST_IP%.*}.$((${FIRST_IP##*.} + 2))"
         ip addr show dev "$CONTROL_IFACE" | grep -q "inet $MUMBLE_IPV4_VIP/" && return 0
     fi
@@ -595,7 +600,8 @@ while true; do
 
             IDENTITY_PAYLOAD=$("$ENCODER_PATH" identity "${IDENTITY_ARGS[@]}" 2>/dev/null)
             if [ -n "$IDENTITY_PAYLOAD" ]; then
-                if echo -n "$IDENTITY_PAYLOAD" | alfred -s $ALFRED_IDENTITY_TYPE; then
+                if printf '%s' "$IDENTITY_PAYLOAD" |
+                    alfred -s $ALFRED_IDENTITY_TYPE; then
                     LAST_IDENTITY_PUBLISH=$MONO
                     LAST_IDENTITY_ALLOCATION="$IDENTITY_ALLOCATION"
                 fi
@@ -630,7 +636,7 @@ while true; do
 
         # === BOOTSTRAP STAGE 1: RF SCAN (every 3 min at :10) ===
         if [ "$BOOTSTRAPPING" = true ] && ! acs_agreement_busy && should_perform_action "SCAN" 180 10; then
-            log "=== LOBBY BOOTSTRAP SCAN ($(date +'%H:%M:%S')) ==="
+            log "=== LOBBY BOOTSTRAP SCAN ==="
             CACHED_SCAN_REPORT_JSON=$(perform_scan)
             LAST_SCAN_COMPLETE_TIME=$NOW
         fi
@@ -651,7 +657,7 @@ while true; do
         # scan/publish window to make their presence visible to other joiners.
         [ ! -s /var/run/my_ipv4_chunk ] && DO_LOBBY_PUBLISH=true
         if [ "$DO_LOBBY_PUBLISH" = true ]; then
-            log "=== LOBBY PUBLISH ($(date +'%H:%M:%S')) ==="
+            log "=== LOBBY PUBLISH ==="
             
         # Not a positional field: `batctl o` shifts columns on the starred
         # (selected) route, so $3 is the last-seen timestamp there. See
@@ -723,7 +729,7 @@ while true; do
             fi
 
             if [ -n "$CURRENT_PAYLOAD" ]; then
-                echo -n "$CURRENT_PAYLOAD" | alfred -s $ALFRED_DATA_TYPE
+                printf '%s' "$CURRENT_PAYLOAD" | alfred -s $ALFRED_DATA_TYPE
                 LAST_PUBLISHED_PAYLOAD="$CURRENT_PAYLOAD"
                 LAST_PUBLISH_TIME=$MONO
             fi
@@ -765,7 +771,7 @@ while true; do
         if [ "$BOOTSTRAPPING" = true ] && [ "$HELPER_MIGRATED" = false ] && \
            [ $((NOW / 180)) -gt "$BOOTSTRAP_START_WINDOW" ] && \
            should_perform_action "ELECTION" 180 25; then
-            log "=== LOBBY BOOTSTRAP ELECTION ($(date +'%H:%M:%S')) ==="
+            log "=== LOBBY BOOTSTRAP ELECTION ==="
             [ -x "$CHANNEL_ELECTION" ] && "$CHANNEL_ELECTION"
             if [ "$(is_in_lobby)" = "false" ]; then
                 log "Bootstrap election picked data channels; leaving lobby."
@@ -782,7 +788,7 @@ while true; do
 
         # === STAGE 1: RF SCAN (every 3 min at :10) ===
         if ! acs_agreement_busy && should_perform_action "SCAN" 180 10; then
-            log "=== SCAN ($(date +'%H:%M:%S')) ==="
+            log "=== SCAN ==="
             SCAN_REPORT_JSON=$(perform_scan)
             LAST_SCAN_COMPLETE_TIME=$NOW
             SCAN_DATA_AVAILABLE=true
@@ -794,7 +800,7 @@ while true; do
 
         # === STAGE 2: PUBLISH (every 3 min at :15) ===
         if [ ! -s /var/run/my_ipv4_chunk ] || should_perform_action "PUBLISH" 180 15; then
-            log "=== PUBLISH ($(date +'%H:%M:%S')) ==="
+            log "=== PUBLISH ==="
 
         # Not a positional field: `batctl o` shifts columns on the starred
         # (selected) route, so $3 is the last-seen timestamp there. See
@@ -873,7 +879,7 @@ while true; do
             fi
 
             if [ -n "$CURRENT_PAYLOAD" ]; then
-                echo -n "$CURRENT_PAYLOAD" | alfred -s $ALFRED_DATA_TYPE
+                printf '%s' "$CURRENT_PAYLOAD" | alfred -s $ALFRED_DATA_TYPE
                 LAST_PUBLISHED_PAYLOAD="$CURRENT_PAYLOAD"
                 LAST_PUBLISH_TIME=$MONO
             fi
@@ -888,7 +894,7 @@ while true; do
 
         # === STAGE 4: CHANNEL ELECTION (every 3 min at :25) ===
         if should_perform_action "ELECTION" 180 25; then
-            log "=== CHANNEL ELECTION ($(date +'%H:%M:%S')) ==="
+            log "=== CHANNEL ELECTION ==="
             [ -x "$CHANNEL_ELECTION" ] && "$CHANNEL_ELECTION"
         fi
 
@@ -931,7 +937,7 @@ while true; do
         # The runner checks live HaLow readiness before election and departure;
         # an available S1G recovery radio keeps both Wi-Fi radios on data.
         if ! acs_agreement_busy && should_perform_tourguide; then
-            log "=== TOURGUIDE WINDOW ($(date +'%H:%M:%S')) ==="
+            log "=== TOURGUIDE WINDOW ==="
             [ -x "$TOURGUIDE_MANAGER" ] && "$TOURGUIDE_MANAGER" &
         fi
 

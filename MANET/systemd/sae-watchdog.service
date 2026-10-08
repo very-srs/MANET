@@ -4,6 +4,20 @@ After=batman-enslave.service wpa_supplicant@wlan0.service wpa_supplicant@wlan1.s
 Wants=batman-enslave.service
 
 [Service]
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+LockPersonality=yes
+RestrictRealtime=yes
+SystemCallArchitectures=native
+# Root D-Bus requests restart other units outside this sandbox.
+CapabilityBoundingSet=CAP_NET_ADMIN
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+PrivateDevices=yes
 Type=simple
 ExecStart=/usr/local/bin/sae-watchdog.sh
 Restart=always

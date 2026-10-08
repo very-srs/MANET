@@ -1,4 +1,29 @@
 #!/bin/bash
+usage() {
+    printf '%s\n' \
+        'usage: ethernet-autodetect.sh [--hotplug] [--iface IFACE]' \
+        '       [--mode {gateway|wired-eud}]' >&2
+}
+validate_args() {
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --hotplug) shift ;;
+            --iface)
+                [ $# -ge 2 ] && [ -n "$2" ] || { usage; return 1; }
+                [[ "$2" != -* ]] || { usage; return 1; }
+                shift 2
+                ;;
+            --mode)
+                [ $# -ge 2 ] || { usage; return 1; }
+                case "$2" in gateway|wired-eud) ;; *) usage; return 1 ;; esac
+                shift 2
+                ;;
+            *) usage; return 1 ;;
+        esac
+    done
+}
+validate_args "$@" || exit 1
+
 # Ethernet Auto-Detection Script
 # Detects ethernet role and configures bridging appropriately
 #
@@ -77,7 +102,7 @@ start_hostapd_checked() {
 resolve_eth_iface() {
     # Explicit override from caller
     if [ -n "${FORCE_IFACE:-}" ]; then
-        echo "$FORCE_IFACE"
+        printf '%s\n' "$FORCE_IFACE"
         return
     fi
     # Saved upstream from previous detection
@@ -85,7 +110,7 @@ resolve_eth_iface() {
         local saved
         saved=$(cat /var/run/upstream_iface)
         if ip link show "$saved" &>/dev/null; then
-            echo "$saved"
+            printf '%s\n' "$saved"
             return
         fi
     fi
@@ -99,7 +124,7 @@ resolve_eth_iface() {
         local bus
         bus=$(readlink /sys/class/net/$iface/device/subsystem 2>/dev/null | grep -o 'usb' || true)
         if [ "$bus" = "usb" ] && [[ "$iface" != wlan* ]] && [[ "$iface" != bat* ]] && [[ "$iface" != br* ]]; then
-            echo "$iface"
+            printf '%s\n' "$iface"
             return
         fi
     done
@@ -131,7 +156,7 @@ GATEWAY_CONFIG="${NETWORKD_DIR}/20-end0-gateway.network.off"
 ACTIVE_CONFIG="${NETWORKD_DIR}/20-${ETH_IFACE}.network"
 
 log() {
-    echo "[$(date +'%Y-%m-%d %H:%M:%S')] - ETH-DETECT: $1" | systemd-cat -t ethernet-autodetect
+    printf '%s\n' "ETH-DETECT: $1" | systemd-cat -t ethernet-autodetect
 }
 
 carrier_generation() {
@@ -149,7 +174,7 @@ record_carrier_generation() {
     now=$(carrier_generation)
     generation=${DETECT_GENERATION:-$now}
     if [[ "$generation" =~ ^[0-9]+$ ]]; then
-        echo "$ETH_IFACE $1 $generation" > "$CARRIER_GEN_STATE"
+        printf '%s\n' "$ETH_IFACE $1 $generation" > "$CARRIER_GEN_STATE"
         [ "$generation" = "$now" ] ||
             log "Link changed on $ETH_IFACE during detection; the pending event will re-detect"
     else
@@ -423,7 +448,7 @@ detect_hotplug_mode() {
 
         log "DHCP succeeded but internet test failed; leaving as mesh client"
         read -r up_now _ < "${MESH_UPTIME_FILE:-/proc/uptime}"
-        echo "$ETH_IFACE $ip ${up_now%.*}" > "$NO_INET_STATE"
+        printf '%s\n' "$ETH_IFACE $ip ${up_now%.*}" > "$NO_INET_STATE"
         run_no_carrier_cleanup "Internet test failed on $ETH_IFACE" 1
         exit 0
     fi
@@ -479,7 +504,7 @@ fi
 rm -f "$NO_INET_STATE"
 
 # Save which interface we're managing so other scripts know
-echo "$ETH_IFACE" > /var/run/upstream_iface
+printf '%s\n' "$ETH_IFACE" > /var/run/upstream_iface
 
 # Check if interface exists
 if ! ip link show "$ETH_IFACE" &>/dev/null; then

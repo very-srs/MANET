@@ -26,9 +26,10 @@ import time
 
 from manet_gnss import GnssReader
 
-GPS_STATUS_PATH = "/run/gps_status.json"
-GPS_HISTORY_PATH = "/run/gps_history.json"
-GPS_FIRST_FIX_PATH = "/run/gps_first_fix.json"
+RUNTIME_DIR = os.environ.get("MANET_GPS_RUNTIME_DIR", "/run")
+GPS_STATUS_PATH = os.path.join(RUNTIME_DIR, "gps_status.json")
+GPS_HISTORY_PATH = os.path.join(RUNTIME_DIR, "gps_history.json")
+GPS_FIRST_FIX_PATH = os.path.join(RUNTIME_DIR, "gps_first_fix.json")
 GPSD_HOST = "127.0.0.1"
 GPSD_PORT = 2947
 WRITE_INTERVAL = 1     # seconds between status writes

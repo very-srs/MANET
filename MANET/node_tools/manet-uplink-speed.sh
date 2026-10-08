@@ -38,7 +38,7 @@ SYS_NET="${MANET_SYS_NET:-/sys/class/net}"
 UPTIME_FILE="${MANET_UPTIME_FILE:-/proc/uptime}"
 
 log() {
-    echo "uplink-speed: $*" >&2
+    printf '%s\n' "uplink-speed: $*" >&2
 }
 
 # Drivers of phone tethers and cellular modems: metered, never tested.
@@ -60,7 +60,7 @@ uplink_key() {
     local iface="$1" ip gw
     ip=$(ip -4 -o addr show dev "$iface" 2>/dev/null | awk '{split($4, a, "/"); print a[1]; exit}')
     gw=$(ip -4 route show default dev "$iface" 2>/dev/null | awk '{print $3; exit}')
-    echo "$iface ${ip:-none} ${gw:-none}"
+    printf '%s\n' "$iface ${ip:-none} ${gw:-none}"
 }
 
 field() {
@@ -110,7 +110,7 @@ measure() {
     printf 'KEY=%s\nDOWN_MBPS=%s\nMEASURED_AT=%s\n' "$key" "$mbps" "$now" > "$RESULT_FILE.tmp" &&
         mv -f "$RESULT_FILE.tmp" "$RESULT_FILE"
     log "$iface downloads at $mbps Mbit/s"
-    echo "$mbps"
+    printf '%s\n' "$mbps"
 }
 
 # batctl takes whole numbers; a bare "server" would keep the last value.
@@ -123,30 +123,37 @@ bandwidth_arg() {
             up = int(down / 5); if (up < 100) up = 100
             printf "%dkbit/%dkbit\n", down, up }'
     else
-        echo "$DEFAULT_BANDWIDTH"
+        printf '%s\n' "$DEFAULT_BANDWIDTH"
     fi
+}
+
+usage() {
+    printf '%s\n' \
+        'usage: manet-uplink-speed.sh {measure|announce|is-ethernet} IFACE' \
+        '       manet-uplink-speed.sh forget' >&2
 }
 
 case "${1:-}" in
     measure)
-        [ $# -eq 2 ] || { echo "usage: $0 measure IFACE" >&2; exit 2; }
+        [ $# -eq 2 ] || { usage; exit 1; }
         measure "$2"
         ;;
     announce)
-        [ $# -eq 2 ] || { echo "usage: $0 announce IFACE" >&2; exit 2; }
+        [ $# -eq 2 ] || { usage; exit 1; }
         batctl gw_mode server "$(bandwidth_arg "$2")"
         ;;
     forget)
+        [ $# -eq 1 ] || { usage; exit 1; }
         # The failure record stays: it is keyed to its uplink, and clearing it
         # on every pass without an uplink would retest each time.
         rm -f "$RESULT_FILE"
         ;;
     is-ethernet)
-        [ $# -eq 2 ] || exit 2
+        [ $# -eq 2 ] || { usage; exit 1; }
         is_ethernet "$2"
         ;;
     *)
-        echo "usage: $0 {measure IFACE|announce IFACE|forget|is-ethernet IFACE}" >&2
-        exit 2
+        usage
+        exit 1
         ;;
 esac

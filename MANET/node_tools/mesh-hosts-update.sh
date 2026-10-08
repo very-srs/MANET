@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 # Mesh Hosts Updater
 # Reads /var/run/mesh_node_registry and populates /etc/hosts with
 # hostname -> IP mappings for all mesh nodes.
@@ -9,7 +9,7 @@ BEGIN_MARKER="# === BEGIN MESH HOSTS ==="
 END_MARKER="# === END MESH HOSTS ==="
 
 log() {
-    echo "[$(date +'%Y-%m-%d %H:%M:%S')] - MESH-HOSTS: $1"
+    printf '%s\n' "MESH-HOSTS: $1" >&2
 }
 
 if [ ! -s "$REGISTRY_FILE" ]; then
@@ -55,7 +55,7 @@ if grep -q "$BEGIN_MARKER" "$HOSTS_FILE" 2>/dev/null; then
 else
     # Append new block
     echo "" >> "$HOSTS_FILE"
-    echo "$MESH_BLOCK" >> "$HOSTS_FILE"
+    printf '%s\n' "$MESH_BLOCK" >> "$HOSTS_FILE"
 fi
 
 chmod 644 /etc/hosts

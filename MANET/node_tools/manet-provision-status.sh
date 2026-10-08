@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 # Provisioning status
 # Answers one question, on login and on demand: is this node finished setting
 # itself up, or not?
@@ -61,9 +61,10 @@ human_delta() {
     now=$(date +%s)
     secs=$(( now - from ))
     [ "$secs" -lt 0 ] && secs=0
-    if   [ "$secs" -lt 60 ]   ; then echo "${secs}s"
-    elif [ "$secs" -lt 3600 ] ; then echo "$((secs / 60))m $((secs % 60))s"
-    else echo "$((secs / 3600))h $(((secs % 3600) / 60))m"
+    if   [ "$secs" -lt 60 ]   ; then printf '%s\n' "${secs}s"
+    elif [ "$secs" -lt 3600 ] ; then
+        printf '%s\n' "$((secs / 60))m $((secs % 60))s"
+    else printf '%s\n' "$((secs / 3600))h $(((secs % 3600) / 60))m"
     fi
 }
 

@@ -3518,9 +3518,17 @@ class ThreadedServer(BoundedHTTPServer):
     pass
 
 if __name__ == '__main__':
-    import sys
-    port = int(sys.argv[1]) if len(sys.argv) > 1 else PORT
-    server = ThreadedServer(('0.0.0.0', port), MeshHandler)
+    import argparse
+    parser = argparse.ArgumentParser(description='MANET status web server')
+    parser.add_argument('port', nargs='?', type=int, default=PORT)
+    args = parser.parse_args()
+    port = args.port
+    if not 1 <= port <= 65535:
+        parser.error('port must be between 1 and 65535')
+    try:
+        server = ThreadedServer(('0.0.0.0', port), MeshHandler)
+    except OSError as error:
+        parser.exit(1, f'{parser.prog}: {error}\n')
     print(f'MANET Status Server listening on port {port}')
     print(f'  Status:  http://localhost:{port}/          (no password)')
     print(f'  Manage:  http://localhost:{port}{MANAGE_PREFIX}/    (admin_password from /etc/mesh.conf)')

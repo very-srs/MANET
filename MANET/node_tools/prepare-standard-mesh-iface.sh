@@ -32,5 +32,7 @@ iw dev "$IFACE" set type mp 2>/dev/null || true
 sleep 1
 
 if ! iw dev "$IFACE" info 2>/dev/null | grep -q 'type mesh point'; then
-    echo "Warning: $IFACE did not enter mesh point mode before wpa_supplicant" >&2
+    printf '%s%s\n' \
+        "Warning: $IFACE did not enter mesh point mode before " \
+        "wpa_supplicant" >&2
 fi

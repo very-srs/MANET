@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 set -euo pipefail
 . "${MANET_TOOLS_DIR:-$(dirname "${BASH_SOURCE[0]}")}/manet-runtime-client.sh"
 
@@ -16,6 +16,19 @@ NETWORKD_DIR=/etc/systemd/network
 EVENT="${1:-${STATE:-reconcile}}"
 IFACE="${2:-${IFACE:-${INTERFACE:-}}}"
 
+usage() {
+    printf '%s\n' \
+        'usage: manet-uplink-dispatch.sh [EVENT [IFACE]]' \
+        'events: carrier routable configured online add reconcile --hotplug' \
+        '        off no-carrier degraded remove offline' >&2
+}
+[ $# -le 2 ] || { usage; exit 1; }
+case "$EVENT" in
+    carrier|routable|configured|online|add|reconcile|--hotplug) ;;
+    off|no-carrier|degraded|remove|offline) ;;
+    *) usage; exit 1 ;;
+esac
+
 exec 200>"$LOCK_FILE"
 flock -n 200 || exit 0
 
@@ -30,9 +43,9 @@ if ! flock -n 201; then
 fi
 
 log() {
-    local msg="[$(date '+%Y-%m-%d %H:%M:%S')] - MANET-UPLINK: $*"
-    echo "$msg" >&2
-    echo "$msg" | systemd-cat -t manet-uplink
+    local msg="MANET-UPLINK: $*"
+    printf '%s\n' "$msg" >&2
+    printf '%s\n' "$msg" | systemd-cat -t manet-uplink
 }
 
 iface_driver() {
@@ -41,7 +54,7 @@ iface_driver() {
     if [ -z "$driver" ] || [ "$driver" = "." ]; then
         driver="$(ethtool -i "$iface" 2>/dev/null | awk -F': ' '$1 == "driver" {print $2; exit}')"
     fi
-    echo "$driver"
+    printf '%s\n' "$driver"
 }
 
 is_usb_wifi_uplink_iface() {
@@ -203,7 +216,7 @@ wait_for_ipv4() {
     for _ in $(seq 1 "$max_wait"); do
         ip=$(iface_ip "$iface")
         if [ -n "$ip" ]; then
-            echo "$ip"
+            printf '%s\n' "$ip"
             return 0
         fi
         sleep 1
@@ -248,7 +261,7 @@ internet_probe() {
 candidate_ifaces() {
     {
         if [ -n "$IFACE" ] && is_upstream_iface "$IFACE"; then
-            echo "$IFACE"
+            printf '%s\n' "$IFACE"
         fi
 
         ip route get 1.1.1.1 2>/dev/null | awk '
@@ -279,7 +292,7 @@ candidate_ifaces() {
         for path in /sys/class/net/*; do
             local iface
             iface=$(basename "$path")
-            is_upstream_iface "$iface" && echo "$iface"
+            is_upstream_iface "$iface" && printf '%s\n' "$iface"
         done
     } | awk '!seen[$0]++'
 }
@@ -317,7 +330,7 @@ find_working_uplink() {
             local speed_rc=0
             "$UPLINK_SPEED" measure "$iface" >/dev/null || speed_rc=$?
             if [ "$speed_rc" -eq 0 ] || [ "$speed_rc" -eq 2 ]; then
-                echo "$iface"
+                printf '%s\n' "$iface"
                 return 0
             fi
             # 3: a recent failure stands and was not retested; already logged.
@@ -496,7 +509,7 @@ promote_gateway() {
     configure_firewall "$iface"
 
     touch "$LEGACY_GATEWAY_STATE"
-    echo "$iface" > "$UPSTREAM_IFACE_FILE"
+    printf '%s\n' "$iface" > "$UPSTREAM_IFACE_FILE"
     cat > "$STATE_FILE" <<EOF
 UPLINK_MODE=gateway
 UPLINK_IFACE=$iface
@@ -577,7 +590,7 @@ current_uplink_iface() {
     if [ -n "$iface" ] && is_wired_eud_port "$iface"; then
         iface=""
     fi
-    echo "$iface"
+    printf '%s\n' "$iface"
 }
 
 reconcile() {
@@ -608,7 +621,7 @@ case "$EVENT" in
         fi
         ;;
     *)
-        log "Unknown event '$EVENT'; running reconcile"
-        reconcile
+        usage
+        exit 1
         ;;
 esac

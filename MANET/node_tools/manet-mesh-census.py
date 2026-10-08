@@ -216,7 +216,8 @@ def main():
     try:
         print(json.dumps(capture(args.minutes, args.max_rows), indent=2))
     except (OSError, ValueError) as error:
-        parser.exit(1, f'census: {error} (requires Linux bat0 and CAP_NET_RAW/root)\n')
+        parser.exit(1, f'{parser.prog}: {error} '
+                    '(requires Linux bat0 and CAP_NET_RAW/root)\n')
 
 
 if __name__ == '__main__':

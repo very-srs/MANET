@@ -10,6 +10,7 @@ import pwd
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 
@@ -338,6 +339,13 @@ if __name__ == '__main__':
     parser.add_argument('--apply', action='store_true', help='apply the plan; default is dry-run')
     parser.add_argument('--force', action='store_true', help='reapply after a previous successful cleanup')
     args = parser.parse_args()
-    with open('/run/lock/manet-os-cleanup.lock', 'w') as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        run(args.apply, args.force)
+    try:
+        if os.geteuid() != 0:
+            raise PermissionError('run as root, including for a dry run')
+        with open('/run/lock/manet-os-cleanup.lock', 'w') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            run(args.apply, args.force)
+    except (OSError, ValueError, RuntimeError,
+            subprocess.SubprocessError) as error:
+        print(f'manet-os-cleanup.py: {error}', file=sys.stderr)
+        sys.exit(1)

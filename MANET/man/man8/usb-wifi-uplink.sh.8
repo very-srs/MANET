@@ -1,0 +1,75 @@
+.Dd October 8, 2026
+.Dt USB-WIFI-UPLINK.SH 8
+.Os MANET
+.Sh NAME
+.Nm usb-wifi-uplink.sh
+.Nd configure a USB Wi-Fi internet uplink
+.Sh SYNOPSIS
+.Nm
+.Op Ar action Op Ar interface
+.Nm
+.Cm set
+.Op Ar ssid Op Ar password Op Ar enabled
+.Sh DESCRIPTION
+.Nm
+configures a spare USB Wi-Fi adapter as a routed client using stored
+credentials, wpa_supplicant and systemd-networkd.
+Run as root, including for status: a missing configuration is created
+with defaults.
+The default action is
+.Cm reconcile .
+.Pp
+An eligible adapter has a wlan name outside wlan0 through wlan3,
+uses USB, and is not assigned a mesh, HaLow or non-mesh radio role.
+Morse and brcmfmac drivers are excluded.
+The optional interface is preferred if eligible; otherwise an eligible
+adapter is selected automatically.
+.Pp
+Actions are:
+.Bl -tag -width Ds
+.It Cm add , online , reconcile , connect
+Write client configuration, restart the client service and request DHCP.
+.It Cm remove , offline , disconnect
+Stop the client and remove its generated Wi-Fi and network configuration.
+.It Cm status-json , status
+Print JSON describing adapter presence, association, address and service state.
+.It Cm set Op Ar ssid Op Ar password Op Ar enabled
+Save credentials and attempt a connection.
+Omitted or empty values default to SSID
+.Li hotspot ,
+password
+.Li raspberry
+and enabled value
+.Li 1 .
+Use
+.Li 0
+to disable future connection attempts; use
+.Cm disconnect
+to stop an existing client.
+.El
+.Sh FILES
+.Bl -tag -width Ds
+.It Pa /etc/manet/usb-wifi-uplink.conf
+Stored enabled flag, SSID and password; mode 0600.
+.It Pa /etc/wpa_supplicant/wpa_supplicant-*-uplink.conf
+Generated client credentials.
+.It Pa /etc/systemd/network/20-*-usb-wifi-uplink.network
+Generated DHCP client configuration.
+.It Pa /etc/systemd/system/usb-wifi-client@.service
+Client service template.
+.El
+.Sh EXIT STATUS
+Exits 0 when the action completes.
+Connection actions return nonzero for a missing adapter, disabled uplink
+or operating error; invalid arguments return 1.
+The
+.Cm set
+action may save settings, print status JSON and return 0 even when
+connection fails.
+Use status output to check association and address assignment.
+.Sh EXAMPLES
+.Bd -literal -offset indent
+sudo usb-wifi-uplink.sh status
+.Ed
+.Sh SEE ALSO
+.Xr ethernet-autodetect.sh 8

@@ -33,7 +33,10 @@ reported_power() {
     sed -n 's/^[[:space:]]*txpower \(-\{0,1\}[0-9][0-9.]*\) dBm.*/\1/p' <<< "$1" | head -n 1
 }
 
-exec 9>>"$LOCK_FILE" || { echo "ERROR: mesh radio power: cannot open $LOCK_FILE" >&2; exit 1; }
+exec 9>>"$LOCK_FILE" || {
+    printf '%s\n' "ERROR: mesh radio power: cannot open $LOCK_FILE" >&2
+    exit 1
+}
 flock -w "$LOCK_WAIT" 9 || { echo "ERROR: mesh radio power: radio transition busy" >&2; exit 1; }
 
 ifaces=()
@@ -41,7 +44,8 @@ for role in mesh_if halow_if; do
     [ -f "$ROLES_DIR/$role" ] || continue
     for iface in $(cat "$ROLES_DIR/$role"); do
         if ! [[ "$iface" =~ ^[A-Za-z0-9_.-]{1,15}$ ]]; then
-            echo "ERROR: mesh radio power: invalid interface name in $role" >&2
+            printf '%s\n' \
+                "ERROR: mesh radio power: invalid interface name in $role" >&2
             exit 1
         fi
         [[ " ${ifaces[*]} " == *" $iface "* ]] || ifaces+=("$iface")
@@ -58,7 +62,7 @@ for iface in "${ifaces[@]}"; do
         continue
     fi
     if grep -qE '^[[:space:]]*type AP[[:space:]]*$' <<< "$info"; then
-        echo "$iface: serving as the EUD AP; leaving its power alone"
+        printf '%s\n' "$iface: serving as the EUD AP; leaving its power alone"
         continue
     fi
     phy=$(cat "$SYS_NET/$iface/phy80211/name" 2>/dev/null)
@@ -96,6 +100,6 @@ for iface in "${ifaces[@]}"; do
 done
 
 if [ ${#failures[@]} -gt 0 ]; then
-    (IFS=';'; echo "ERROR: mesh radio power: ${failures[*]}" >&2)
+    (IFS=';'; printf '%s\n' "ERROR: mesh radio power: ${failures[*]}" >&2)
     exit 1
 fi

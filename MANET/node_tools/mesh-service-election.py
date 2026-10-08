@@ -114,13 +114,13 @@ def main(argv):
         with open(os.environ.get('MESH_UPTIME_FILE', '/proc/uptime')) as uptime:
             uptime_now = float(uptime.read().split()[0])
     except (OSError, ValueError, IndexError) as error:
-        print(f'Cannot read election inputs: {error}', file=sys.stderr)
+        print(f'mesh-service-election.py: {error}', file=sys.stderr)
         return 1
     try:
         winner, best, incumbent = elect(argv[0], text, uptime_now,
                                         lambda message: print(message, file=sys.stderr))
     except ValueError as error:
-        print(f'Cannot read election inputs: {error}', file=sys.stderr)
+        print(f'mesh-service-election.py: {error}', file=sys.stderr)
         return 1
     print(f'{winner or "-"} {"-" if best is None else f"{best:g}"} {incumbent or "-"}')
     return 0

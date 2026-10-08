@@ -1,3 +1,4 @@
+#!/bin/bash
 # Synchronous root-only requests to the EXISTING channel-agreement process.
 # 125 means unavailable/busy, no request sent: use the one-shot fallback.
 # After submitting, failures/timeouts never replay a possibly applied action.

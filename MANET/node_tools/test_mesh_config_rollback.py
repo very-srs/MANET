@@ -183,7 +183,7 @@ class RollbackScriptTests(RollbackHarness):
         self.deadline()
         result = self.call('check')
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn('no peers before the change', result.stdout)
+        self.assertIn('no peers before the change', result.stderr)
         self.assertNotEqual(self.conf.read_text(), self.old_config)
         self.assertFalse(self.state.exists())
 
@@ -210,7 +210,7 @@ class RollbackScriptTests(RollbackHarness):
                 self.deadline()
                 result = self.call('check')
                 self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertIn('Cannot verify peer recovery', result.stdout)
+                self.assertIn('Cannot verify peer recovery', result.stderr)
                 self.assertEqual(self.conf.read_text(), self.old_config)
                 self.assertFalse(self.state.exists())
 

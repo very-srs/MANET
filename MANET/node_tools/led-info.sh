@@ -27,7 +27,7 @@ elif (( count == 0 )); then
     led_set 1 0 0
     led_sleep "$STATUS_SOLID"
 else
-    echo "led-info: peer count = ${count}"
+    printf '%s\n' "led-info: peer count = ${count}"
     led_off
     led_sleep 0.3
     for (( i = 0; i < count; i++ )); do

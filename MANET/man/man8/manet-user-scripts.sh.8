@@ -1,0 +1,65 @@
+.Dd October 8, 2026
+.Dt MANET-USER-SCRIPTS.SH 8
+.Os MANET
+.Sh NAME
+.Nm manet-user-scripts.sh
+.Nd run or inspect staged operator setup scripts
+.Sh SYNOPSIS
+.Nm
+.Op Fl -force
+.Op Fl -list
+.Op Fl h | Fl -help
+.Sh DESCRIPTION
+.Nm
+runs staged scripts in C-locale filename order after provisioning.
+Run as root to execute scripts.
+Each script runs through its shebang interpreter with working directory
+.Pa /
+and standard input from
+.Pa /dev/null .
+The default timeout is 300 seconds per script.
+.Pp
+Completed scripts, including failures, are skipped on subsequent runs.
+A script interrupted before its result was recorded runs again.
+Dotfiles, backup suffixes
+.Li .disabled , .bak , .orig , ~ ,
+subdirectories and files without a shebang are skipped.
+.Bl -tag -width Ds
+.It Fl -force
+Clear recorded results and run all eligible scripts again.
+.It Fl -list
+List staged filenames and their recorded exit status without running them.
+Takes precedence over
+.Fl -force .
+.It Fl h , Fl -help
+Print help and exit.
+.El
+.Sh FILES
+.Bl -tag -width Ds
+.It Pa /var/lib/manet-user-scripts/
+Staged scripts, normally embedded during flashing.
+.It Pa /var/lib/manet-user-scripts.state
+Completed script names, exit codes and completion times, separated by tabs.
+.It Pa /var/lib/manet-user-scripts.done
+Marker that suppresses later automatic service runs.
+.It Pa /var/log/manet-user-scripts.log
+Appended runner and script output.
+.It Pa /etc/mesh.conf
+The positive integer
+.Li user_script_timeout
+overrides the per-script timeout in seconds.
+.El
+.Sh EXIT STATUS
+Exits 0 after listing or running scripts, even when an individual script
+fails or times out.
+Failures are advisory and do not change the provisioning verdict.
+Inspect recorded results or the log.
+Unknown arguments return 1.
+.Sh EXAMPLES
+Repeat the whole script set:
+.Bd -literal -offset indent
+sudo manet-user-scripts.sh --force
+.Ed
+.Sh SEE ALSO
+.Xr manet-provision-status.sh 8 ,
+.Xr radio-setup.sh 8

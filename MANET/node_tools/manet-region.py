@@ -157,7 +157,7 @@ def main(argv):
     try:
         country, halow, family_changed, changed = apply()
     except (OSError, ValueError) as error:
-        print(f'ERROR: region: {error}', file=sys.stderr)
+        print(f'manet-region.py: {error}', file=sys.stderr)
         return 1
     print(f'Region {country} (HaLow {halow}) written to {len(changed)} file(s); '
           'radios use it from the next boot'

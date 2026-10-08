@@ -114,8 +114,8 @@ def main(argv):
             print('usage: manet_static_channels.py {get 2.4|5 | set 2.4|5 FREQ_MHZ | show}',
                   file=sys.stderr)
             return 2
-    except StaticChannelError as error:
-        print(error, file=sys.stderr)
+    except (StaticChannelError, OSError) as error:
+        print(f'manet_static_channels.py: {error}', file=sys.stderr)
         return 1
     return 0
 
