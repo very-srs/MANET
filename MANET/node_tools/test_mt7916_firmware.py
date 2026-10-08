@@ -503,6 +503,16 @@ class UnitSafetyTests(unittest.TestCase):
         self.assertIn('Before=systemd-udev-trigger.service', unit)
         self.assertNotIn('RequiredBy=', unit)
 
+    def test_boot_check_does_not_wait_for_coldplug_created_mounts(self):
+        # local-fs.target includes /boot/firmware, whose by-partuuid device
+        # only appears after coldplug: waiting for it here deadlocks the boot
+        # into emergency mode.
+        unit = (self.SYSTEMD / 'manet-mt7916-firmware.service').read_text()
+        after = ' '.join(line.split('=', 1)[1] for line in unit.splitlines()
+                         if line.startswith('After='))
+        self.assertNotIn('local-fs.target', after)
+        self.assertIn('systemd-remount-fs.service', after)
+
     def test_survival_check_only_runs_with_a_pending_marker(self):
         unit = (self.SYSTEMD / 'manet-mt7916-firmware-survived.service').read_text()
         self.assertIn('ConditionPathExists=/var/lib/manet/mt7916-probe-pending', unit)
