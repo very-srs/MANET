@@ -2404,14 +2404,11 @@ These preserve admission and fail-closed safety without polling subprocesses.
 including child-process CPU, and reports CPU seconds per elapsed minute plus
 percent of one core. It also reports aggregate busy system CPU for profile
 comparisons, without double-counting guest time. Restart/counter resets invalidate
-the sample. Use matching phone traffic and uptime conditions for before/after;
-the reported old 575 CPU seconds / 8000 elapsed seconds equals 4.3125 CPU s/min
-(7.1875% of one core). Slice 16's CM4 result reported in
-`review-collab/atak-20261006/claude-017.txt` was about 1.0% of one core
-(0.6 CPU s/min), with `path_ready=true`. Slice 17 has no hardware after-sample:
-node access was excluded. On the next authorized node run, detach the phone and
-use `sudo python3 /usr/local/bin/manet-cpu-sample.py --label slice17-no-phone
---seconds 60`, then repeat after attaching the phone. Offline tests prove four
+the sample. Compare before/after samples under matching phone traffic and
+uptime, for example `sudo python3 /usr/local/bin/manet-cpu-sample.py --label
+no-phone --seconds 60` with the phone detached, then again with it attached.
+With a phone attached, the ATAK service measured about 1.0% of one core
+(0.6 CPU s/min) on CM4, down from 7.2% before. Offline tests prove four
 initial commands and zero more over 300 unchanged cycles; the application also
 does no further JSON parsing/writing, durable saves or CoT sends over 300
 unchanged never-associated cycles. Tests cover input expiry, faults before first

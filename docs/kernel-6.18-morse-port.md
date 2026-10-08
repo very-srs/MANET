@@ -480,4 +480,4 @@ empty scans. Recovery requires a full power cycle; reloading the module leaves
 CMD63 failing. Runtime mitigations (`mesh_plink_timeout=0`
 enforced by batman-enslave-watch, `group_rekey=0`) prevent the trigger; a driver
 hardening fix (tolerate disable_key ENODEV without wedging) remains on the
-wishlist. Details in `handoff`.
+wishlist.
