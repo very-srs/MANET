@@ -1,0 +1,42 @@
+{
+  "schema": 1,
+  "linux_firmware": {
+    "tag": "20250613",
+    "commit": "47e03ef409e07315f2b5c1d0fc08383da2e1bde9",
+    "base_url": "https://gitlab.com/kernel-firmware/linux-firmware/-/raw/47e03ef409e07315f2b5c1d0fc08383da2e1bde9/",
+    "files": {
+      "mt7916_wm.bin": {
+        "sha256": "64d86cfa4f00f9452b4706389d648d4ce0e563ddd512cc9845ba4e4442e99cb0",
+        "path": "mediatek/mt7916_wm.bin"
+      },
+      "mt7916_wa.bin": {
+        "sha256": "abeeb31611d3faed6178357988fc54858ddf7f7a5eb742d41fb55e9bb6da3fdc",
+        "path": "mediatek/mt7916_wa.bin"
+      },
+      "mt7916_rom_patch.bin": {
+        "sha256": "d74eda13fc1dbd49f5bbe46738f5a24fbfb270c97f76623a0b21e8a08a883fd4",
+        "path": "mediatek/mt7916_rom_patch.bin"
+      },
+      "LICENCE.mediatek": {
+        "sha256": "a90d3f66704d85889945fec5525ea77622549da83aced1aac99828383f8f1805",
+        "path": "LICENCE.mediatek"
+      }
+    }
+  },
+  "wm_patch": {
+    "input_sha256": "64d86cfa4f00f9452b4706389d648d4ce0e563ddd512cc9845ba4e4442e99cb0",
+    "output_sha256": "18a2e1d03f17913ef0450a905536d5defcdf78ee1d98a1232649c31a70a63e1e",
+    "size": 1767568,
+    "data_end": 1767072,
+    "replacements": [
+      {
+        "offset": 491886,
+        "hex": "d5"
+      },
+      {
+        "offset": 488706,
+        "hex": "b43f463830a558318bd040318680b403f082a019f083d507"
+      }
+    ]
+  }
+}

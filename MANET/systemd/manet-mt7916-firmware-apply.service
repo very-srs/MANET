@@ -1,0 +1,7 @@
+[Unit]
+Description=Refresh the MT7916 firmware choice for the next probe
+After=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /usr/local/bin/manet-mt7916-firmware.py

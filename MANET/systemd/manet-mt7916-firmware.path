@@ -1,0 +1,9 @@
+[Unit]
+Description=Watch the node positioning firmware setting
+
+[Path]
+PathChanged=/etc/mesh.conf
+Unit=manet-mt7916-firmware-apply.service
+
+[Install]
+WantedBy=multi-user.target

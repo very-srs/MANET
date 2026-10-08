@@ -681,6 +681,8 @@ The wired ATAK service runs by default on every node. Set `atak=n` in
 `n`, `no`, `0` or `false` (case-insensitive) disables the daemon and its firewall.
 Fresh installs enable and start it; updated packages enable it for the next boot.
 `manet-positioning.service` ships but remains disabled and default off.
+Setting `positioning=y` in `/etc/mesh.conf` selects patched MT7916 firmware at
+next boot; setting it back to `n` restores stock firmware at next boot.
 Phone setup is in the [main README](../../README.md#atak-phones).
 
 The service verifies its firewall and EUD path

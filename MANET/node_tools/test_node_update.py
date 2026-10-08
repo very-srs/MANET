@@ -150,6 +150,30 @@ if os.environ.get('TEST_SYSTEMCTL_FAIL') == args:
         self.assertFalse(list(self.updater.state.glob('download-*')))
         self.updater.log.assert_called_with('Node tools updated to version 0.550')
 
+    def test_firmware_setup_runs_after_install_and_before_version(self):
+        name = 'usr/local/bin/manet-mt7916-setup.sh'
+        self.members[name] = (
+            b'#!/bin/sh\n'
+            b'test -f "$TEST_ROOT/usr/local/share/manet/mt7916-firmware.json" || exit 2\n'
+            b'echo firmware-setup >> "$TEST_EVENTS"\n'
+            b'echo "manet-mt7916-firmware: test stock fallback"\n', 0o755)
+        self.make_archive()
+        self.updater.update()
+        history = self.history()
+        self.assertLess(history.index('systemctl daemon-reload'), history.index('firmware-setup'))
+        self.assertLess(history.index('firmware-setup'), history.index('restart node-manager.service'))
+        self.updater.log.assert_any_call('manet-mt7916-firmware: test stock fallback')
+        self.assertNotIn('modprobe', history)
+
+    def test_firmware_setup_failure_leaves_update_pending(self):
+        self.members['usr/local/bin/manet-mt7916-setup.sh'] = (b'#!/bin/sh\nexit 1\n', 0o755)
+        self.make_archive()
+        with self.assertRaises(update.UpdateError):
+            self.updater.update()
+        self.assertTrue(self.updater.pending.exists())
+        self.assertEqual(self.updater.marker.read_text(), self.old_version)
+        self.assertNotIn('restart node-manager.service', self.history())
+
     def test_static_selection(self):
         (self.root / 'etc/mesh.conf').write_text('acs=n\n')
         self.updater.update()

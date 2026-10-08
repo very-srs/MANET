@@ -1,0 +1,13 @@
+[Unit]
+Description=Check the persistent MT7916 firmware selection
+DefaultDependencies=no
+After=local-fs.target
+Before=systemd-udev-trigger.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /usr/local/bin/manet-mt7916-firmware.py
+RemainAfterExit=yes
+
+[Install]
+WantedBy=sysinit.target

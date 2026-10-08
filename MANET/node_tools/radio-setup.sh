@@ -1794,6 +1794,11 @@ networkctl
 iw dev
 ip -br a
 
+# Apply the opt-in firmware selection without reloading the radio.
+if [ -x /usr/local/bin/manet-mt7916-setup.sh ]; then
+    provision_try "MT7916 firmware setup failed" /usr/local/bin/manet-mt7916-setup.sh
+fi
+
 if [ -f /var/lib/radio-setup-reboot-pending ]; then
     rm -f /var/lib/radio-setup-reboot-pending
     echo ""
