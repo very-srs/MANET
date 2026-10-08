@@ -58,6 +58,7 @@ class FirmwareTests(unittest.TestCase):
         self.boot_file.write_text('boot-one\n')
         self.pci = self.root / 'sys/bus/pci/devices'
         self.pci.mkdir(parents=True)
+        self.primary = self.make_pci('0000:01:00.0')
         self.blobs, self.manifest, self.expected = fixture()
         unique_hash = patch.object(fw, 'WM_SHA256', fw.digest(self.expected))
         unique_hash.start()
@@ -298,6 +299,56 @@ class FirmwareTests(unittest.TestCase):
         self.assert_stock()
         self.assertFalse(self.tool.pending.exists())
 
+    def test_absent_primary_skips_preparation_and_boot_marker(self):
+        shutil.rmtree(self.primary)
+        for mode in ('apply', 'boot', 'rearm'):
+            with self.subTest(mode=mode), \
+                 patch.object(fw, 'patch_wm', side_effect=AssertionError('must not seal')), \
+                 patch.object(self.tool, 'write_state', side_effect=AssertionError('must not arm')):
+                ok, message = self.tool.run(mode)
+                self.assertTrue(ok)
+                self.assertIn('no MT7916 primary PCI function', message)
+                self.assert_stock()
+                self.assertFalse(self.tool.pending.exists())
+                self.assertFalse(self.tool.owner.exists())
+        self.gate.assert_not_called()
+
+    def test_secondary_only_and_wrong_vendor_count_as_absent(self):
+        shutil.rmtree(self.primary)
+        auxiliary = self.make_pci('0000:01:00.0', '0x790a', 'mt7915e_hif')
+        wrong_vendor = self.make_pci('0000:02:00.0')
+        (wrong_vendor / 'vendor').write_text('0x1234\n')
+        self.assertIn('no MT7916 primary PCI function', self.tool.run('boot')[1])
+        self.assert_stock()
+        self.assertFalse(self.tool.pending.exists())
+        self.assertTrue(auxiliary.exists())
+
+    def test_absent_primary_removes_prepared_owned_overrides(self):
+        self.assertTrue(self.tool.run()[0])
+        shutil.rmtree(self.primary)
+        self.assertIn('no MT7916 primary PCI function', self.tool.run('boot')[1])
+        self.assert_stock()
+        self.assertFalse(self.tool.owner.exists())
+        self.assertFalse(self.tool.pending.exists())
+
+    def test_present_unbound_primary_prepares_before_coldplug(self):
+        (self.primary / 'driver').unlink()
+        shutil.rmtree(self.primary / 'ieee80211')
+        self.assertTrue(self.tool.run('boot')[0])
+        self.assertEqual((self.tool.updates / fw.NAMES[0]).read_bytes(), self.expected)
+        self.assertTrue(self.tool.pending.exists())
+        self.gate.assert_called_once_with(self.root)
+
+    def test_absent_primary_cli_logs_one_line(self):
+        shutil.rmtree(self.primary)
+        result = subprocess.run([sys.executable, str(Path(fw.__file__)), '--root',
+                                 str(self.root), '--boot'], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(result.stderr.splitlines()), 1)
+        self.assertIn('no MT7916 primary PCI function', result.stderr)
+        self.assert_stock()
+        self.assertFalse(self.tool.pending.exists())
+
     def test_boot_marker_durable_before_preparation(self):
         # First boot and ready boot both persist the marker before preparation
         # can publish/retain WM. A ready boot never rewrites the firmware set.
@@ -356,7 +407,6 @@ class FirmwareTests(unittest.TestCase):
 
     def test_survival_requires_multiuser_and_all_primary_functions_bound(self):
         self.assertTrue(self.tool.run('boot')[0])
-        self.make_pci('0000:01:00.0')
         with patch.object(fw.subprocess, 'run', return_value=SimpleNamespace(returncode=3)):
             self.assertIn('retained', self.tool.run('survived')[1])
         self.assertTrue(self.tool.pending.exists())
@@ -378,6 +428,7 @@ class FirmwareTests(unittest.TestCase):
 
     def test_survival_no_mt7916_present_and_auxiliary_only(self):
         self.assertTrue(self.tool.run('boot')[0])
+        shutil.rmtree(self.primary)
         auxiliary = self.make_pci('0000:01:00.0', '0x790a', 'mt7915e_hif')
         with patch.object(fw.subprocess, 'run', return_value=SimpleNamespace(returncode=0)):
             self.assertIn('retained', self.tool.run('survived')[1])
@@ -387,7 +438,7 @@ class FirmwareTests(unittest.TestCase):
 
     def test_survival_driver_link_before_firmware_init_is_not_enough(self):
         self.assertTrue(self.tool.run('boot')[0])
-        self.make_pci('0000:01:00.0', with_phy=False)
+        shutil.rmtree(self.primary / 'ieee80211')
         with patch.object(fw.subprocess, 'run', return_value=SimpleNamespace(returncode=0)):
             self.assertIn('retained', self.tool.run('survived')[1])
         self.assertTrue(self.tool.pending.exists())
