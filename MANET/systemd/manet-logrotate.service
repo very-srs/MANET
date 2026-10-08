@@ -1,0 +1,14 @@
+[Unit]
+Description=Rotate MANET standalone logs
+
+[Service]
+Type=oneshot
+Environment=MANET_LOGROTATE_CONFIG=/usr/local/share/manet/logrotate.conf
+ExecStart=/usr/sbin/logrotate --state /var/lib/manet-logrotate/status ${MANET_LOGROTATE_CONFIG}
+StateDirectory=manet-logrotate
+StateDirectoryMode=0700
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/log

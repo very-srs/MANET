@@ -387,14 +387,171 @@ if os.environ.get('TEST_SYSTEMCTL_FAIL') == args:
         self.assertEqual((self.root / 'etc/systemd/system').stat().st_mode & 0o777, 0o755)
 
     def test_incomplete_update_retries_even_when_version_matches(self):
+        with patch.dict(os.environ, TEST_SYSTEMCTL_FAIL='daemon-reload'):
+            with self.assertRaises(update.UpdateError):
+                self.updater.update()
         for name in update.MARKERS:
             (self.root / name).write_text(self.new_version)
-        self.updater.state.mkdir(parents=True)
-        self.updater.pending.write_text('interrupted after version commit\n')
         self.updater.routine = True
         self.updater.update()
         self.assertIn('systemctl restart node-manager.service', self.history())
         self.assertFalse(self.updater.pending.exists())
+
+    def interrupt_install(self):
+        with patch.dict(os.environ, TEST_SYSTEMCTL_FAIL='daemon-reload'):
+            with self.assertRaises(update.UpdateError):
+                self.updater.update()
+        self.events.write_text('')
+
+    def test_offline_recovery_uses_pinned_release_without_apt(self):
+        self.interrupt_install()
+        shutil.rmtree(self.server)
+        self.updater.development = True
+        with patch.dict(os.environ, TEST_DEPENDENCY_FAIL='1'):
+            self.updater.update()
+        self.assertNotIn('curl', self.history())
+        self.assertNotIn('dependency', self.history())
+        self.assertEqual(self.updater.marker.read_text(), self.new_version)
+        self.assertFalse(self.updater.recovery.exists())
+
+    def test_early_recovery_restores_files_without_starting_services(self):
+        self.interrupt_install()
+        target = self.root / 'usr/local/bin/mesh-status.py'
+        target.write_text('incomplete release')
+        self.updater.update(files_only=True)
+        self.assertEqual(target.read_bytes(), self.members[
+            'usr/local/bin/mesh-status.py'][0])
+        self.assertEqual(self.history(), '')
+        self.assertEqual(self.updater.marker.read_text(), self.old_version)
+        self.assertTrue(self.updater.pending.exists())
+        self.updater.update(recover_only=True)
+        self.assertFalse(self.updater.pending.exists())
+        self.assertIn('restart node-manager.service', self.history())
+
+    def test_recovery_without_pending_does_not_download_or_activate(self):
+        self.updater.update(recover_only=True)
+        self.updater.update(files_only=True)
+        self.assertEqual(self.history(), '')
+
+    def test_missing_recovery_fails_without_downloading_a_different_release(self):
+        self.updater.state.mkdir(parents=True)
+        self.updater.pending.write_text('incomplete')
+        with self.assertRaisesRegex(update.UpdateError, 'missing'):
+            self.updater.update()
+        self.assertTrue(self.updater.pending.exists())
+        self.assertEqual(self.history(), '')
+
+    def test_corrupt_recovery_is_not_installed_or_discarded(self):
+        self.interrupt_install()
+        package = self.updater.recovery / 'package.tar.gz'
+        package.write_bytes(b'corrupt')
+        with self.assertRaisesRegex(update.UpdateError, 'SHA-256'):
+            self.updater.update(recover_only=True)
+        self.assertEqual(self.history(), '')
+        self.assertEqual(self.updater.marker.read_text(), self.old_version)
+        self.assertTrue(self.updater.pending.exists())
+        self.assertTrue(package.exists())
+
+    def test_boot_recovery_is_armed_before_first_payload_replacement(self):
+        original = update.atomic_file
+        def check(destination, *args, **kwargs):
+            if destination == self.updater.pending:
+                for name, target in update.RECOVERY_UNITS.items():
+                    link = self.root / 'etc/systemd/system' / target / name
+                    self.assertTrue(link.is_symlink())
+                    self.assertTrue(link.exists())
+                for name in ('package.tar.gz', 'package.sha256',
+                             'node-update.py', 'manet_release.py',
+                             'release.json'):
+                    path = self.updater.recovery / name
+                    self.assertTrue(path.is_file())
+                    self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+                self.assertEqual(self.old_manager.read_text(), 'old manager\n')
+            return original(destination, *args, **kwargs)
+        with patch.object(update, 'atomic_file', side_effect=check):
+            self.updater.update()
+
+    def test_stale_scratch_cleanup_preserves_unrelated_files_and_link_target(self):
+        self.updater.state.mkdir(parents=True)
+        stale = self.updater.state / 'download-abcdefgh'
+        stale.mkdir()
+        (stale / 'partial').write_text('partial')
+        link = self.updater.state / 'download-12345678'
+        link.symlink_to(self.server, target_is_directory=True)
+        keep = self.updater.state / 'operator-notes'
+        keep.write_text('keep')
+        self.updater.routine = True
+        self.updater.update()
+        self.assertFalse(stale.exists())
+        self.assertFalse(link.is_symlink())
+        self.assertTrue(self.package.exists())
+        self.assertEqual(keep.read_text(), 'keep')
+
+    def test_recovery_removes_abandoned_payload_siblings_only(self):
+        self.interrupt_install()
+        directory = self.root / 'usr/local/bin'
+        stale = directory / '.manet-update-abcdefgh'
+        stale.write_text('interrupted copy')
+        link = directory / '.manet-link-abcdefgh'
+        link.mkdir()
+        (link / 'link').symlink_to(self.server, target_is_directory=True)
+        keep = directory / '.operator-cache'
+        keep.write_text('keep')
+        self.updater.update(recover_only=True)
+        self.assertFalse(stale.exists())
+        self.assertFalse(link.exists())
+        self.assertTrue(self.server.exists())
+        self.assertEqual(keep.read_text(), 'keep')
+
+    def test_process_death_recovers_using_saved_updater_and_preserves_user_files(self):
+        user_file = self.root / 'usr/local/bin/operator-service.py'
+        user_file.write_text('operator service')
+        # Exit inside a payload replacement: no finally blocks or temp-dir
+        # cleanup run. This exercises a real second process and orphan staging.
+        script = '''
+import importlib.util, os, sys
+from pathlib import Path
+sys.path.insert(0, str(Path(sys.argv[1]).parent))
+spec = importlib.util.spec_from_file_location('updater', sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+original = module.os.replace
+def replace(source, destination):
+    original(source, destination)
+    if str(destination).endswith('/usr/local/bin/node-manager-acs.sh'):
+        os._exit(73)
+module.os.replace = replace
+module.Updater(Path(sys.argv[2])).update()
+'''
+        result = subprocess.run([sys.executable, '-c', script,
+                                 str(Path(update.__file__)), str(self.root)],
+                                capture_output=True, timeout=30)
+        self.assertEqual(result.returncode, 73, result.stderr.decode())
+        self.assertTrue(self.updater.pending.exists())
+        self.assertTrue(list(self.updater.state.glob('download-*')))
+        shutil.rmtree(self.server)
+        self.events.write_text('')
+        # Installed modules can be from different releases; use the saved pair.
+        recovery_script = '''
+import importlib.util, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+spec = importlib.util.spec_from_file_location(
+    'updater', Path(sys.argv[1]) / 'node-update.py')
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+module.Updater(Path(sys.argv[2])).update(recover_only=True)
+'''
+        result = subprocess.run([sys.executable, '-c', recovery_script,
+                                 str(self.updater.recovery), str(self.root)],
+                                capture_output=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+        self.assertNotIn('curl', self.history())
+        self.assertEqual(self.updater.marker.read_text(), self.new_version)
+        self.assertEqual(user_file.read_text(), 'operator service')
+        self.assertEqual((self.root / 'etc/mesh.conf').read_text(), 'acs=y\n')
+        self.assertFalse(self.updater.recovery.exists())
+        self.assertFalse(list(self.updater.state.glob('download-*')))
 
     def test_staging_write_failure_does_not_touch_live_files(self):
         with patch.object(update.shutil, 'copyfileobj', side_effect=OSError('staging write failed')):

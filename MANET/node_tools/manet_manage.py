@@ -52,6 +52,7 @@ from manet_web_limits import STATUS_CACHE, Busy
 from manet_recovery_status import recovery_status, RECOVERY_JS
 from manet_peer_radios import peer_radio_interfaces
 from manet_registry import node_state
+from manet_measurement_storage import check_capacity, save_result
 from manet_admin import AdminTransport, new_version
 from manet_radio import (HALOW_POWER_FIXED, is_halow_iface,
                         halow_bandwidth_for_channel, halow_channel_for_frequency,
@@ -1140,6 +1141,7 @@ def run_measurement_session(label, pairs, tests, duration, udp_bitrate):
     try:
         ensure_sessions_dir()
         session_dir = session_path(label)
+        check_capacity(SESSIONS_DIR, session_dir)
         os.makedirs(session_dir, exist_ok=True)
         topo = snapshot_topology()
 
@@ -1152,6 +1154,7 @@ def run_measurement_session(label, pairs, tests, duration, udp_bitrate):
             dst_name = pair['dst_name']
 
             for test_type in tests:
+                check_capacity(SESSIONS_DIR, session_path(label))
                 now = int(time.time())
                 with _measure_lock:
                     _measure_mono['current'] = time.monotonic()
@@ -1213,8 +1216,8 @@ def run_measurement_session(label, pairs, tests, duration, udp_bitrate):
                         result_record['error'] = str(e)
 
                 # Save result
-                with open(session_path(label) / fname, 'x') as f:
-                    json.dump(result_record, f, indent=2)
+                save_result(SESSIONS_DIR, session_path(label) / fname,
+                            result_record)
 
                 done += 1
                 with _measure_lock:
@@ -4145,7 +4148,7 @@ class ManageRoutes:
                 try:
                     req    = json.loads(body)
                     label  = req.get('label', '')
-                    session_path(label)
+                    check_capacity(SESSIONS_DIR, session_path(label))
                     pairs  = req.get('pairs', [])
                     tests  = req.get('tests', [])
                     dur    = int(req.get('duration', 30))

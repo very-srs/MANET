@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Verify and stage tools updates before modifying a running node.
 
-Individual files are replaced atomically. This is not a filesystem-wide
-transaction: interrupted installation leaves a persistent retry marker.
+Individual files are replaced atomically. Interrupted installations resume
+from a verified local archive, using a saved copy of this updater.
 """
 
 import argparse
@@ -10,6 +10,7 @@ from collections import defaultdict
 import fcntl
 import gzip
 import hashlib
+import json
 import os
 from pathlib import Path, PurePosixPath
 import posixpath
@@ -30,7 +31,11 @@ from manet_release import asset_url, select_release, verify_asset
 MIB = 1024 * 1024
 MAX_DOWNLOAD = 64 * MIB
 MAX_EXPANDED = 512 * MIB
-RESERVE = 16 * MIB
+RESERVE = 128 * MIB
+RECOVERY_UNITS = {
+    'manet-update-recover.service': 'sysinit.target.wants',
+    'manet-update-finish.service': 'multi-user.target.wants',
+}
 MARKERS = {"etc/manet_version.txt", "usr/local/bin/version.txt"}
 REQUIRED = MARKERS | {
     "usr/local/bin/node-update.sh", "usr/local/bin/node-update.py",
@@ -83,6 +88,11 @@ REQUIRED = MARKERS | {
     "etc/systemd/system/manet-mt7916-firmware-survived.service",
     "etc/systemd/system/manet-mt7916-firmware-apply.service",
     "etc/systemd/system/manet-mt7916-firmware.path",
+    "usr/local/bin/manet_measurement_storage.py",
+    "usr/local/share/manet/logrotate.conf",
+    "etc/systemd/system/manet-logrotate.service",
+    "etc/systemd/system/manet-logrotate.timer",
+    *("etc/systemd/system/" + name for name in RECOVERY_UNITS),
 }
 VERSION_PATTERN = re.compile(r"[0-9]+(?:\.[0-9]+)+")
 
@@ -178,6 +188,7 @@ class Updater:
         self.marker = self.root / "etc/manet_version.txt"
         self.state = self.root / "var/lib/manet-update"
         self.pending = self.state / "in-progress"
+        self.recovery = self.state / "recovery"
 
     def log(self, message, error=False):
         syslog.syslog(syslog.LOG_ERR if error else syslog.LOG_INFO, message)
@@ -335,21 +346,108 @@ class Updater:
                         raise UpdateError(f"Incomplete staged file: {name}")
                     target.chmod(member.mode & 0o777)
 
-    def install(self, directory, members):
+    def clean_scratch(self):
+        # The update lock excludes live downloads. Never follow a leftover
+        # symlink or clean anything outside this updater's private namespace.
+        for path in self.state.glob('download-*'):
+            if re.fullmatch(r'download-[a-z0-9_]{8}', path.name):
+                if path.is_symlink():
+                    path.unlink()
+                elif path.is_dir():
+                    shutil.rmtree(path)
+        if not self.pending.exists() and self.recovery.exists():
+            if self.recovery.is_symlink():
+                raise UpdateError('Unsafe recovery directory')
+            shutil.rmtree(self.recovery)
+            sync_directory(self.state)
+
+    def clean_payload_scratch(self, members):
+        # A hard stop can also leave a temporary sibling of a live file.
+        # Restrict cleanup to our exact temporary names in validated parents.
+        parents = {self.destination(name).parent for name in members}
+        for parent in parents:
+            if not parent.is_dir():
+                continue
+            for path in parent.iterdir():
+                if re.fullmatch(r'\.manet-update-[a-z0-9_]{8}', path.name):
+                    if path.is_symlink() or path.is_file():
+                        path.unlink()
+                elif re.fullmatch(r'\.manet-link-[a-z0-9_]{8}', path.name):
+                    if path.is_symlink():
+                        path.unlink()
+                    elif path.is_dir():
+                        shutil.rmtree(path)
+
+    def arm_recovery(self, package, checksum, filename, expected, staged):
+        """Publish a durable offline recovery source before live replacements."""
+        self.space([(self.state, package.stat().st_size + MIB)])
+        self.recovery.mkdir(mode=0o700)
+        for name, source in (
+                ('package.tar.gz', package), ('package.sha256', checksum),
+                ('node-update.py', Path(__file__)),
+                ('manet_release.py',
+                 Path(__file__).with_name('manet_release.py'))):
+            atomic_file(self.recovery / name, source=source, mode=0o600)
+        info = {'version': expected, 'filename': filename}
+        atomic_file(self.recovery / 'release.json',
+                    data=json.dumps(info).encode(), mode=0o600)
+        sync_directory(self.state)
+        # Arm boot recovery even on the first update using this mechanism.
+        # No daemon reload or service start is needed to persist enable links.
+        for name, target in RECOVERY_UNITS.items():
+            relative = 'etc/systemd/system/' + name
+            destination = self.destination(relative)
+            self.make_directory(destination.parent)
+            atomic_file(destination, source=staged / relative)
+            link = self.destination('etc/systemd/system/' + target + '/' + name)
+            self.make_directory(link.parent)
+            self.install_link(link, '../' + name)
+        atomic_file(self.pending, data=b'Offline recovery required\n',
+                    mode=0o600)
+
+    def recover(self, files_only=False):
+        if self.recovery.is_symlink() or not self.recovery.is_dir():
+            raise UpdateError('Recovery archive is missing; keep in-progress '
+                              'and repair the installation locally')
+        descriptor = self.recovery / 'release.json'
+        if descriptor.stat().st_size > 1024:
+            raise UpdateError('Invalid recovery descriptor')
+        info = json.loads(descriptor.read_text())
+        filename = self.board() + '-tools.tar.gz'
+        if (not isinstance(info, dict) or info.get('filename') != filename
+                or not isinstance(info.get('version'), str)):
+            raise UpdateError('Recovery archive does not match this board')
+        expected = version(info['version'])
+        package = self.recovery / 'package.tar.gz'
+        checksum = self.recovery / 'package.sha256'
+        if (package.stat().st_size > MAX_DOWNLOAD
+                or checksum.stat().st_size > 1024):
+            raise UpdateError('Recovery archive exceeds size limit')
+        members = self.validate(package, checksum, filename, expected)
+        self.clean_payload_scratch(members)
+        self.log(f'Resuming release {expected} from local recovery archive')
+        with tempfile.TemporaryDirectory(prefix='download-',
+                                         dir=self.state) as scratch:
+            staged = Path(scratch) / 'stage'
+            self.stage(package, members, staged)
+            if files_only:
+                self.install_payload(staged, members)
+            else:
+                self.install(staged, members)
+        if not files_only:
+            self.clean_scratch()
+            self.log(f'Node tools recovered to version {expected}')
+
+    def install_payload(self, directory, members):
         # Read local choices before any payload is installed.
         config = (self.root / "etc/mesh.conf").read_text()
         acs = re.search(r"^acs=(y|yes|1|true)[ \t]*$", config, re.I | re.M)
         selected = "node-manager-acs.sh" if acs else "node-manager-static.sh"
         motd = self.destination("etc/update-motd.d/50-manet-provision").parent
         self.destination("usr/local/bin/node-manager.sh")
-        # Resolve dependencies before replacing the running software.
-        run_command([directory / "usr/local/bin/manet-admin-setup.sh"], timeout=600)
-        # Dependency installation may have consumed space since staging.
+        # Space is checked again on every retry, including early boot recovery.
         self.space([(self.destination(name).parent, ((member.size + 4095) // 4096 + 1) * 4096)
                     for name, member in members.items()])
-        self.state.mkdir(parents=True, exist_ok=True, mode=0o700)
-        sync_directory(self.state.parent)
-        atomic_file(self.pending, data=b"Installation incomplete; retry required\n", mode=0o600)
         for name, member in sorted(members.items(), key=lambda pair: (pair[0].count("/"), pair[0])):
             if name in MARKERS:
                 continue
@@ -368,6 +466,9 @@ class Updater:
         for label, script in (("50-manet-provision", "manet-provision-status.sh"),
                               ("55-manet-power", "manet-power-status.sh")):
             self.install_link(motd / label, f"/usr/local/bin/{script}")
+
+    def install(self, directory, members):
+        self.install_payload(directory, members)
         self.retire_route_fix()
         self.retire_network_boot_units()
         run_command(["systemctl", "daemon-reload"])
@@ -385,6 +486,7 @@ class Updater:
             run_command(["systemctl", "stop", "dnsmasq.service"])
             raise
         run_command(["systemctl", "enable", "--now", "manet-mesh-power.service"])
+        run_command(["systemctl", "enable", "--now", "manet-logrotate.timer"])
         for service in ("mesh-status.service", "node-manager.service"):
             run_command(["systemctl", "restart", service])
         for service in ("mesh-status.service", "node-manager.service", "mesh-channel-agreement.service", "one-shot-time-sync.service"):
@@ -432,7 +534,7 @@ class Updater:
         self.destination('usr/local/bin/manet-halow-power.py').unlink(missing_ok=True)
         self.destination('etc/ebtables.rules').unlink(missing_ok=True)
 
-    def update(self):
+    def update(self, recover_only=False, files_only=False):
         run = self.root / "run"
         run.mkdir(exist_ok=True)
         with (run / "manet-update.lock").open("a") as lock:
@@ -442,6 +544,14 @@ class Updater:
                 self.log("Another tools update is already running")
                 return
             pending = self.pending.exists()
+            self.destination('var/lib/manet-update/placeholder')
+            self.make_directory(self.state, mode=0o700)
+            self.clean_scratch()
+            if pending:
+                self.recover(files_only=files_only)
+                return
+            if recover_only or files_only:
+                return
             try:
                 local = version(self.marker.read_text())
                 other = self.root / "usr/local/bin/version.txt"
@@ -474,10 +584,17 @@ class Updater:
                 self.download(url, package, MAX_DOWNLOAD)
                 verify_asset(package, release["assets"][filename])
                 members = self.validate(package, checksum, filename, expected)
+                self.clean_payload_scratch(members)
                 staged = work / "stage"
                 self.stage(package, members, staged)
+                # APT is allowed only before arming the transaction. Boot
+                # recovery never depends on network access or package installs.
+                run_command([staged / 'usr/local/bin/manet-admin-setup.sh'],
+                            timeout=600)
+                self.arm_recovery(package, checksum, filename, expected, staged)
                 self.install(staged, members)
                 self.log(f"Node tools updated to version {expected}")
+            self.clean_scratch()
 
 
 def interrupted(signum, frame):
@@ -489,6 +606,11 @@ def main():
     parser.add_argument("--routine", action="store_true", help="quiet daily check; errors go to the journal")
     parser.add_argument("--development", action="store_true", help="use the newest published build, including prereleases")
     parser.add_argument("--allow-downgrade", action="store_true", help="allow replacement by an older selected release")
+    recovery = parser.add_mutually_exclusive_group()
+    recovery.add_argument('--recover-only', action='store_true',
+                          help='finish a pending update without networking')
+    recovery.add_argument('--recover-files', action='store_true',
+                          help='restore pending payload before service startup')
     args = parser.parse_args()
     syslog.openlog("manet-update", syslog.LOG_PID, syslog.LOG_DAEMON)
     updater = Updater(routine=args.routine, development=args.development,
@@ -498,7 +620,8 @@ def main():
             raise UpdateError("Run node-update.sh as root")
         signal.signal(signal.SIGTERM, interrupted)
         signal.signal(signal.SIGINT, interrupted)
-        updater.update()
+        updater.update(recover_only=args.recover_only,
+                       files_only=args.recover_files)
     except (UpdateError, OSError, ValueError, EOFError, tarfile.TarError, zlib.error,
             subprocess.SubprocessError) as error:
         updater.log(f"node-update.sh: Tools update failed: {error}",

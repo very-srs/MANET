@@ -1,0 +1,17 @@
+[Unit]
+Description=Finish an interrupted MANET tools update without downloading
+# Activation restarts services. Run after the boot target is reached so those
+# restart jobs cannot wait on a target which is itself waiting for this unit.
+DefaultDependencies=no
+After=multi-user.target manet-update-recover.service
+Conflicts=shutdown.target
+Before=shutdown.target
+ConditionPathExists=/var/lib/manet-update/in-progress
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /var/lib/manet-update/recovery/node-update.py --recover-only
+TimeoutStartSec=20min
+
+[Install]
+WantedBy=multi-user.target
