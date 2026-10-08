@@ -72,6 +72,16 @@ REQUIRED = MARKERS | {
     "usr/local/bin/mesh-service-election.py",
     "usr/local/bin/manet-common.sh",
     "usr/local/bin/mesh-peer-count.sh",
+    "usr/local/bin/manet-mt7916-firmware.py",
+    "usr/local/bin/manet-mt7916-setup.sh",
+    "usr/local/share/manet/mt7916-firmware.json",
+    "usr/local/share/manet/firmware/mt7916/mt7916_wm.bin",
+    "usr/local/share/manet/firmware/mt7916/mt7916_wa.bin",
+    "usr/local/share/manet/firmware/mt7916/mt7916_rom_patch.bin",
+    "usr/local/share/manet/firmware/mt7916/LICENCE.mediatek",
+    "etc/systemd/system/manet-mt7916-firmware.service",
+    "etc/systemd/system/manet-mt7916-firmware-apply.service",
+    "etc/systemd/system/manet-mt7916-firmware.path",
 }
 VERSION_PATTERN = re.compile(r"[0-9]+(?:\.[0-9]+)+")
 
@@ -111,6 +121,7 @@ def run_command(args, timeout=120):
         if process.returncode:
             detail = output.decode("utf-8", errors="replace")[-2000:].strip()
             raise UpdateError(f"{Path(args[0]).name} failed ({process.returncode}): {detail}")
+        return output
 
 
 def sync_directory(path):
@@ -359,6 +370,11 @@ class Updater:
         self.retire_route_fix()
         self.retire_network_boot_units()
         run_command(["systemctl", "daemon-reload"])
+        firmware_setup = self.destination('usr/local/bin/manet-mt7916-setup.sh')
+        output = run_command([str(firmware_setup)], timeout=600)
+        for line in output.decode('utf-8', errors='replace').splitlines():
+            if line.startswith('manet-mt7916-firmware:'):
+                self.log(line)
         try:
             run_command(["systemctl", "enable", "--now", "manet-dhcp-isolation.service"])
             run_command([str(self.destination('usr/local/bin/manet-dhcp-isolation.py')), 'ensure'])

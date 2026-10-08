@@ -2623,3 +2623,36 @@ Solid and off both clear the trigger to `none` before writing `brightness`,
 because whatever the kernel had driving the LED will otherwise overwrite the
 value immediately. Brightness comes from the LED's own `max_brightness`, since
 that is 1 on some class devices and 255 on others.
+
+## MT7916 firmware selection
+
+`manet-mt7916-firmware.py` uses the positioning service's literal config parser:
+only `positioning=y` (case-insensitive, optional quotes) enables it; missing
+config is off. Packages carry the unmodified WM/WA/ROM set and license from
+linux-firmware `20250613`, commit `47e03ef409e07315f2b5c1d0fc08383da2e1bde9`.
+Builders verify downloads and cache entries before staging. The cache is
+`kernel-work/cache/linux-firmware/47e03ef409e07315f2b5c1d0fc08383da2e1bde9/`,
+overridable with `MANET_FIRMWARE_CACHE` for builders and offline tests.
+
+The JSON intent holds our replacement bytes and exact input/output hashes.
+The stdlib sealer applies the PDA recurrence and outer CRC. The node persists
+patched WM and matched stock WA/ROM as real files in
+`/lib/firmware/updates/mediatek/`, using temporary files, fsync and rename;
+WM is published last. A ready check hashes only the installed set and writes
+nothing. Correct files are retained when repairing a missing companion.
+
+The unique patched hash identifies our WM. `.manet-mt7916` records hashes and
+inode/mtime identities for companions we wrote, before their publication.
+Identical foreign copies are never adopted. Disable or preparation failure
+removes only owned overrides; failed removal is reported and retried at next
+boot. Distribution firmware is untouched. A directory lock serializes preparers
+without a lock file or any involvement in driver probing.
+
+The boot oneshot runs after `local-fs.target` and before
+`systemd-udev-trigger.service`, covering CM4's PCI coldplug. The CM4 kernel
+builds the PCIe host in and mt7915e as a module; its stock-kernel initramfs images
+are not used for this radio. There is no probe wrapper or initramfs work.
+Setup/update prepares files once. The `.path` unit is the sole config-change
+trigger: `PathChanged=/etc/mesh.conf` covers atomic replacement via inode events
+in [systemd's path implementation](https://github.com/systemd/systemd/blob/v257/src/core/path.c).
+No tool loads or reloads the driver; a running radio changes firmware next boot.
