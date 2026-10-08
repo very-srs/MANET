@@ -95,7 +95,8 @@ class CleanupTests(unittest.TestCase):
             job.chmod(0o755)
             table = root / 'etc/crontab'
             table.write_text('SHELL=/bin/sh\n17 *\t* * *\troot cd / && run-parts --report /etc/cron.hourly\n'
-                             '25 6 * * * root test -x /usr/sbin/anacron || ( cd / && run-parts --report /etc/cron.daily )\n')
+                             '25 6 * * * root test -x /usr/sbin/anacron || ( cd / && run-parts --report /etc/cron.daily )\n'
+                             '47 6 * * 7 root test -x /usr/sbin/anacron || { cd / && run-parts --report /etc/cron.weekly; }\n')
             scrub = root / 'etc/cron.d/e2scrub_all'
             scrub.parent.mkdir()
             scrub.write_text('30 3 * * 0 root test -e /run/systemd/system || SERVICE_MODE=1 /usr/lib/e2scrub_all_cron\n')

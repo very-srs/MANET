@@ -83,9 +83,10 @@ def cron_consumers(root):
             if not line or line.startswith('#') or re.match(r'\w+=', line):
                 continue
             # The distribution's four run-parts entries, with optional anacron.
+            # Trixie groups them with braces, older releases with a subshell.
             if not re.fullmatch(r'[\d*/\s,\-]+\s+root\s+(?:test -x /usr/sbin/anacron \|\| )?'
-                                r'\(?\s*cd / && run-parts --report /etc/cron\.'
-                                r'(?:hourly|daily|weekly|monthly)\s*\)?', line):
+                                r'(?:\(\s*|\{\s*)?cd / && run-parts --report /etc/cron\.'
+                                r'(?:hourly|daily|weekly|monthly)\s*(?:\)|;\s*\})?', line):
                 consumers.append(str(table))
                 break
     for directory in ('cron.d', 'cron.hourly', 'cron.daily', 'cron.weekly', 'cron.monthly'):
