@@ -1,7 +1,10 @@
 [Unit]
 Description=Check the persistent MT7916 firmware selection
 DefaultDependencies=no
-After=local-fs.target
+# Not local-fs.target: /boot/firmware waits for a by-partuuid device that only
+# coldplug creates, so ordering before the trigger would deadlock the boot.
+After=systemd-remount-fs.service
+RequiresMountsFor=/etc /usr/local /lib/firmware /var/lib
 Before=systemd-udev-trigger.service
 
 [Service]

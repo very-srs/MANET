@@ -2651,8 +2651,10 @@ removes only owned overrides; failed removal is reported and retried at next
 boot. Distribution firmware is untouched. A directory lock serializes preparers
 without a lock file or any involvement in driver probing.
 
-The boot oneshot runs with `--boot` after `local-fs.target` and before
-`systemd-udev-trigger.service`, covering CM4's PCI coldplug. It is ordered
+The boot oneshot runs with `--boot` after `systemd-remount-fs.service` and
+before `systemd-udev-trigger.service`, covering CM4's PCI coldplug. It must not
+wait for `local-fs.target`: `/boot/firmware` needs a by-partuuid device that
+only coldplug creates, so that ordering deadlocks into emergency mode. It is ordered
 before coldplug but never required by it: a failure in this tool must not stop
 every other device from loading. If the pending marker cannot be written, the
 tool removes the patched set, so the probe falls through to stock firmware. The CM4 kernel
