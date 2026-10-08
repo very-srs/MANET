@@ -5,6 +5,22 @@ Wants=alfred.service
 PartOf=node-manager.service
 
 [Service]
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+LockPersonality=yes
+RestrictRealtime=yes
+SystemCallArchitectures=native
+# The resident worker also reconciles IP, AP and service configuration.
+# Atomic replacement needs writable parent directories, including /etc.
+ReadWritePaths=/etc /var/lib /run
+# Syncthing identity reads the radio account's public certificate.
+ProtectHome=read-only
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
+CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER
 Type=simple
 ExecStart=/usr/local/bin/mesh-channel-agreement.py run
 Restart=always

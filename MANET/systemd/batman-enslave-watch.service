@@ -4,6 +4,21 @@ After=batman-enslave.service
 Requires=batman-enslave.service
 
 [Service]
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+LockPersonality=yes
+RestrictRealtime=yes
+SystemCallArchitectures=native
+# batman-if-setup repairs link files; bandwidth checks use HTTPS.
+ReadWritePaths=/run /etc/systemd/network
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
+PrivateDevices=yes
 Type=simple
 Restart=always
 RestartSec=10

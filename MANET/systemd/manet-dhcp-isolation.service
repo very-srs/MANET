@@ -6,6 +6,20 @@ After=nftables.service
 Before=dnsmasq.service batman-enslave.service
 
 [Service]
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+LockPersonality=yes
+RestrictRealtime=yes
+SystemCallArchitectures=native
+ReadWritePaths=/run /etc/avahi
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_CHOWN CAP_FOWNER
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+PrivateDevices=yes
 Type=oneshot
 ExecStart=/usr/local/bin/manet-dhcp-isolation.py apply
 RemainAfterExit=yes

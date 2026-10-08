@@ -6,6 +6,30 @@ After=gpsd.service gpsd.socket
 Wants=gpsd.service
 
 [Service]
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+LockPersonality=yes
+RestrictRealtime=yes
+SystemCallArchitectures=native
+DynamicUser=yes
+User=manet-gps
+RuntimeDirectory=manet-gps
+RuntimeDirectoryMode=0755
+# Keep the first fix through service stops; /run is cleared at reboot.
+RuntimeDirectoryPreserve=yes
+Environment=MANET_GPS_RUNTIME_DIR=/run/manet-gps
+# Publish the existing read paths before dropping privileges.
+ExecStartPre=+/usr/bin/systemd-tmpfiles --create \
+    /usr/local/share/manet/gps-reader.conf
+ReadWritePaths=/run/manet-gps
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX AF_INET
+PrivateDevices=yes
 Type=simple
 ExecStart=/usr/bin/python3 /usr/local/bin/gps-reader.py
 Restart=always

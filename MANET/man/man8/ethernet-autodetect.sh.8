@@ -1,0 +1,65 @@
+.Dd October 8, 2026
+.Dt ETHERNET-AUTODETECT.SH 8
+.Os MANET
+.Sh NAME
+.Nm ethernet-autodetect.sh
+.Nd detect and configure an Ethernet uplink or wired user device
+.Sh SYNOPSIS
+.Nm
+.Op Fl -hotplug
+.Op Fl -iface Ar interface
+.Op Fl -mode Cm gateway | wired-eud
+.Sh DESCRIPTION
+.Nm
+examines carrier, DHCP and link traffic to select an Ethernet role.
+An uplink with verified internet access stays routed and provides a mesh
+gateway; a wired end-user device is bridged to
+.Li br0 .
+The access-point role follows the
+.Li eud
+setting in the node configuration.
+Run as root; detection can change addresses, routes, bridge membership,
+firewall rules and running network services.
+.Pp
+Without an interface override, the saved upstream interface is preferred,
+then native
+.Li end0 ,
+then an available USB Ethernet interface.
+An existing decision may be reused while the physical connection is unchanged.
+.Bl -tag -width Ds
+.It Fl -hotplug
+Accept a hot-plug invocation; automatic detection is also the default.
+.It Fl -iface Ar interface
+Use the named interface.
+.It Fl -mode Cm gateway | wired-eud
+Request a role directly instead of automatic role detection.
+Normal carrier and configuration checks still apply.
+.El
+.Sh FILES
+.Bl -tag -width Ds
+.It Pa /etc/mesh.conf
+Node configuration, including the end-user-device mode.
+.It Pa /var/run/upstream_iface
+Selected upstream interface.
+.It Pa /var/run/ethernet_detection_state
+Recorded Ethernet role.
+.It Pa /etc/systemd/network/
+Interface configuration updated for the selected role.
+.It Pa /var/log/ethernet-detect.log
+Output from the latest run.
+.It Pa /etc/eth-detect-debug
+Its presence enables shell tracing and copies output to the caller.
+.El
+.Sh EXIT STATUS
+Exits 0 when handling completes, including when no role change is needed
+or internet access is unavailable.
+Exits nonzero for invalid arguments, lock timeout or a detected operating error.
+A zero status does not prove internet connectivity.
+.Sh EXAMPLES
+Request a wired user-device connection on the native port:
+.Bd -literal -offset indent
+sudo ethernet-autodetect.sh --iface end0 --mode wired-eud
+.Ed
+.Sh SEE ALSO
+.Xr usb-wifi-uplink.sh 8 ,
+.Xr verify-bridge.sh 8

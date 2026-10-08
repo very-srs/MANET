@@ -10,7 +10,7 @@
 set -u
 LOG="/var/log/manet-voice-setup.log"
 exec >>"$LOG" 2>&1
-echo "=== manet-voice-setup $(date) ==="
+printf '%s\n' "=== manet-voice-setup $(date) ==="
 
 PKGS="gstreamer1.0-alsa gstreamer1.0-plugins-base gstreamer1.0-plugins-good python3-gi gir1.2-gstreamer-1.0"
 
@@ -27,7 +27,7 @@ if [ -n "$missing" ]; then
         echo "no uplink; leaving setup enabled to retry next boot"
         exit 0
     fi
-    echo "installing:$missing"
+    printf '%s\n' "installing:$missing"
     export DEBIAN_FRONTEND=noninteractive
     if ! apt-get install -y --no-install-recommends $missing; then
         apt-get update -y || true

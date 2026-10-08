@@ -69,7 +69,8 @@ def main():
     try:
         neighbors = neighbor_addresses(args.batctl)
     except (OSError, subprocess.SubprocessError, ValueError) as exc:
-        print(f'Cannot read BATMAN neighbors: {exc}', file=sys.stderr)
+        print(f'{parser.prog}: cannot read BATMAN neighbors: {exc}',
+              file=sys.stderr)
         return 1
     try:
         registry = args.registry.read_text() if len(neighbors) > 1 else ''
@@ -77,7 +78,8 @@ def main():
     except (OSError, ValueError):
         count = None
     if count is None:
-        print('Direct neighbors present; node identities not yet resolved', file=sys.stderr)
+        print(f'{parser.prog}: direct neighbors present; '
+              'node identities not yet resolved', file=sys.stderr)
         return 3
     print(count)
     return 0

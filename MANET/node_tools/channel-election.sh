@@ -6,10 +6,20 @@
 
 set -eo pipefail
 
+usage() {
+    printf '%s\n' \
+        'usage: channel-election.sh [--score]' >&2
+}
+
+if [ $# -gt 1 ] || { [ $# -eq 1 ] && [ "$1" != --score ]; }; then
+    usage
+    exit 1
+fi
+
 # Scoring never changes a radio. Normal calls make this round eligible for the
 # agreement service, which owns proposal, ACK, activation and recovery.
 if [ "${1:-}" != "--score" ]; then
-    [ "$#" -eq 0 ] || exit 2
+    [ "$#" -eq 0 ] || { usage; exit 1; }
     exec python3 "${MANET_TOOLS_DIR:-$(dirname "${BASH_SOURCE[0]}")}/mesh-channel-agreement.py" request
 fi
 
@@ -83,7 +93,7 @@ CHANNELS_5_0="${ACS_CHANNELS_5_0-5200 5220 5240 5745 5765 5785 5805 5825}"
 
 # --- Helper Functions ---
 log() {
-    echo "[$(date +'%Y-%m-%d %H:%M:%S')] - CHAN-ELECTION: $1" | systemd-cat -t channel-election
+    manet_journal channel-election "CHAN-ELECTION: $*"
 }
 
 # Get the currently configured frequency for an interface

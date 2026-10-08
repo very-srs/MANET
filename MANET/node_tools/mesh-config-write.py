@@ -18,5 +18,5 @@ if __name__ == '__main__':
             raise ValueError('usage: mesh-config-write.py PATH KEY VALUE [--quoted]')
         write_key(*sys.argv[1:4], quoted=len(sys.argv) == 5)
     except (OSError, ValueError) as error:
-        print(f'Config write failed: {error}', file=sys.stderr)
+        print(f'mesh-config-write.py: {error}', file=sys.stderr)
         sys.exit(1)

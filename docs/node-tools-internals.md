@@ -11,6 +11,51 @@ documentation.
 
 ---
 
+## Coding conventions
+
+Node shell scripts use `#!/bin/bash`. Use `#!/bin/sh` only for POSIX shell
+code that passes `dash -n`, and `checkbashisms` when available. Laptop
+provisioning scripts keep their own interpreter choices. Keep existing shell
+error and tracing options; changing them requires a separate behavior review.
+
+Use `printf` with a literal format for variable messages and data. Diagnostics
+include the program name and go to stderr; reserve stdout for command output.
+Let the journal add timestamps, and retain timestamps in standalone log files.
+Share identical log helpers where the existing common helper is already loaded.
+Shell commands reject bad arguments with `usage: name ...` on stderr and exit
+1. Existing `-h` help prints to stdout and exits 0. Python CLIs use argparse
+for argument errors and report expected operating errors as `prog: message`
+without a traceback. Check subprocess results before recording success;
+optional probes may fail only when the result still represents unavailable data.
+
+Keep new and rewritten lines within 80 columns. Preserve indentation and leave
+unrelated long lines alone. Do not apply C formatting rules to shell or Python.
+
+Operator command manuals use mdoc in `MANET/man/man8/<command>.8`, including
+the command's literal `.sh` or `.py` suffix. Keep options, files and exit status
+in step with the CLI. Lint with `mandoc -T lint`, or `groff -mandoc -ww -z`
+when mandoc is unavailable. `test_coding_conventions.py` checks the required
+command set and parses every section 8 page with an available formatter.
+
+Service restrictions follow actual files, devices, socket families and child
+commands. Prefer a dedicated service user where possible. Use
+`NoNewPrivileges=yes` and `ProtectSystem=strict` with explicit writable paths,
+then narrow capabilities, home access, devices and process features as the
+service permits. Account for atomic file replacement, hardware hot-plug and
+helpers that control other units. Document necessary exceptions beside the
+settings. Static tests guard the baseline; service restarts and functional
+checks on the target hardware are required before deployment.
+
+The GPS reader uses a dynamic `manet-gps` user and `/run/manet-gps`. Its
+privileged startup command publishes the existing `/run/gps_*.json` names as
+symlinks using the shipped tmpfiles configuration. The runtime directory is
+preserved through service stops so the first fix survives a restart; reboot
+clears it. Other services retain root where they need device access, protected
+configuration or systemd control. A restricted service that asks systemd to
+start another service does not transfer its restrictions to that service.
+
+---
+
 ## Packaging and install
 Everything here is installed to `/usr/local/bin/` on the node. The current
 version is in `version.txt`; `MANET/etc/manet_version.txt` must always match it,
@@ -20,6 +65,11 @@ Install tarballs are root-relative (`boot/`, `etc/`, `usr/`, `root/`) and packed
 with numeric owner/group `0/0`. Keep the shipped binaries marked as binary in
 `.gitattributes` (`morse_cli`, `chronyc`, `alfred`, `batctl`, `wpa_cli_s1g`,
 `wpa_supplicant_s1g`), or line-ending normalization corrupts them.
+
+All four archive builders source `MANET/packaging/lib-man.sh` and call
+`stage_man_pages` to install `MANET/man/man8/*.8` as mode 0644 under
+`/usr/local/share/man/man8`. The tools updater accepts these paths through its
+existing archive validation. On a node, use `man 8 radio-setup.sh`, for example.
 
 ### Tools update failure handling
 

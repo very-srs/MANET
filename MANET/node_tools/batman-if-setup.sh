@@ -10,6 +10,13 @@
 #    - DO NOT set type mesh (will fail / interrupt the S1G driver)
 #    - Just wait for interface UP, then add to bat0
 #
+usage() {
+    printf '%s\n' 'usage: batman-if-setup.sh {start|stop}' >&2
+}
+
+[ $# -eq 1 ] || { usage; exit 1; }
+case "$1" in start|stop) ;; *) usage; exit 1 ;; esac
+
 . "${MANET_TOOLS_DIR:-$(dirname "${BASH_SOURCE[0]}")}/manet-common.sh" || exit 1
 
 set -e
@@ -31,7 +38,7 @@ iface_driver() {
         driver="$(ethtool -i "$iface" 2>/dev/null | awk -F': ' '$1 == "driver" {print $2; exit}')"
     fi
 
-    echo "$driver"
+    printf '%s\n' "$driver"
 }
 
 iface_phy() {
@@ -82,7 +89,10 @@ refresh_interfaces() {
         for WLAN in $all_ifaces; do
             for i in $(seq 1 20); do
                 [ -d "/sys/class/net/$WLAN" ] && break
-                [ "$i" -eq 20 ] && echo "Warning: $WLAN did not appear in sysfs after 20s, continuing" >&2
+                [ "$i" -eq 20 ] &&
+                    printf '%s%s\n' \
+                        "Warning: $WLAN did not appear in sysfs after 20s, " \
+                        "continuing" >&2
                 sleep 1
             done
         done
@@ -98,9 +108,9 @@ refresh_interfaces() {
         done
 
         echo "Role-file wireless classification:"
-        echo "  Standard mesh: $STANDARD_MESH_INTERFACES"
-        echo "  HaLow: $HALOW_INTERFACES"
-        echo "  Non-mesh/AP: $NONMESH_INTERFACES"
+        printf '%s\n' "  Standard mesh: $STANDARD_MESH_INTERFACES"
+        printf '%s\n' "  HaLow: $HALOW_INTERFACES"
+        printf '%s\n' "  Non-mesh/AP: $NONMESH_INTERFACES"
         return
     fi
 
@@ -121,9 +131,9 @@ refresh_interfaces() {
     done
 
     echo "Runtime wireless classification:"
-    echo "  Standard mesh: $STANDARD_MESH_INTERFACES"
-    echo "  HaLow: $HALOW_INTERFACES"
-    echo "  Non-mesh/AP: $NONMESH_INTERFACES"
+    printf '%s\n' "  Standard mesh: $STANDARD_MESH_INTERFACES"
+    printf '%s\n' "  HaLow: $HALOW_INTERFACES"
+    printf '%s\n' "  Non-mesh/AP: $NONMESH_INTERFACES"
 }
 
 start() {
@@ -138,29 +148,32 @@ start() {
     # -------------------------------------------------------------------------
     for WLAN in $STANDARD_MESH_INTERFACES; do
         if ! radio_iface_enabled "$WLAN"; then
-            echo "Skipping wpa_supplicant for $WLAN (radio-state says down)"
+            printf '%s\n' \
+                "Skipping wpa_supplicant for $WLAN (radio-state says down)"
             systemctl stop "wpa_supplicant@${WLAN}.service" 2>/dev/null || true
             ip link set "$WLAN" down 2>/dev/null || true
             continue
         fi
         if ! systemctl is-active "wpa_supplicant@${WLAN}.service" >/dev/null 2>&1; then
-            echo "Starting wpa_supplicant for $WLAN..."
+            printf '%s\n' "Starting wpa_supplicant for $WLAN..."
             systemctl start "wpa_supplicant@${WLAN}.service" 2>/dev/null || \
-                echo "Warning: could not start wpa_supplicant for $WLAN (config may be missing)" >&2
+                printf '%s%s\n' \
+                    "Warning: could not start wpa_supplicant for $WLAN " \
+                    "(config may be missing)" >&2
         fi
     done
     for WLAN in $HALOW_INTERFACES; do
         local svc="wpa_supplicant-s1g-${WLAN}.service"
         if ! radio_iface_enabled "$WLAN"; then
-            echo "Skipping $svc for $WLAN (radio-state says down)"
+            printf '%s\n' "Skipping $svc for $WLAN (radio-state says down)"
             systemctl stop "$svc" 2>/dev/null || true
             ip link set "$WLAN" down 2>/dev/null || true
             continue
         fi
         if ! systemctl is-active "$svc" >/dev/null 2>&1; then
-            echo "Starting wpa_supplicant_s1g for $WLAN..."
+            printf '%s\n' "Starting wpa_supplicant_s1g for $WLAN..."
             systemctl start "$svc" 2>/dev/null || \
-                echo "Warning: could not start $svc" >&2
+                printf '%s\n' "Warning: could not start $svc" >&2
         fi
     done
 
@@ -180,11 +193,13 @@ start() {
                 # A lexically earlier .link for the current name would take
                 # precedence and prevent the intended rename.
                 if grep -qi "MACAddress=$mac" /etc/systemd/network/10-wlan*.link 2>/dev/null; then
-                    echo "Skipping $link_file: MAC $mac already pinned by radio-setup"
+                    printf '%s%s\n' \
+                        "Skipping $link_file: MAC $mac already pinned by " \
+                        "radio-setup"
                     continue
                 fi
                 printf '[Match]\nMACAddress=%s\n\n[Link]\nName=%s\n' "$mac" "$WLAN" > "$link_file"
-                echo "Wrote $link_file (MAC=$mac)"
+                printf '%s\n' "Wrote $link_file (MAC=$mac)"
                 wrote_links=true
             fi
         fi
@@ -223,22 +238,25 @@ start() {
     # -------------------------------------------------------------------------
     for WLAN in $HALOW_INTERFACES; do
         if ! radio_iface_enabled "$WLAN"; then
-            echo "--> Skipping HaLow interface: $WLAN (radio-state says down)"
+            printf '%s%s\n' \
+                "--> Skipping HaLow interface: $WLAN (radio-state says " \
+                "down)"
             systemctl stop "wpa_supplicant-s1g-${WLAN}.service" 2>/dev/null || true
             ip link set "$WLAN" down 2>/dev/null || true
             continue
         fi
-        echo "--> Configuring HaLow interface: $WLAN (primary)"
+        printf '%s\n' "--> Configuring HaLow interface: $WLAN (primary)"
 
-        echo "Waiting for $WLAN netdev (managed by wpa_supplicant_s1g)..."
+        printf '%s\n' \
+            "Waiting for $WLAN netdev (managed by wpa_supplicant_s1g)..."
         for i in {1..30}; do
             if ip link show "$WLAN" >/dev/null 2>&1; then
                 ip link set "$WLAN" up 2>/dev/null || true
-                echo "$WLAN exists."
+                printf '%s\n' "$WLAN exists."
                 break
             fi
             if [ $i -eq 30 ]; then
-                echo "!! Timed out waiting for $WLAN. Skipping." >&2
+                printf '%s\n' "!! Timed out waiting for $WLAN. Skipping." >&2
                 continue 2
             fi
             sleep 1
@@ -246,27 +264,33 @@ start() {
 
         ip link set "$WLAN" mtu 1532 2>/dev/null || true
 
-        echo "Adding HaLow $WLAN to bat0..."
+        printf '%s\n' "Adding HaLow $WLAN to bat0..."
 
         ADDED=false
         for attempt in {1..5}; do
             if batctl bat0 if add "$WLAN" 2>&1; then
                 sleep 0.5
                 if batctl bat0 if | grep -q "$WLAN"; then
-                    echo "$WLAN successfully added to bat0 (primary interface)"
+                    printf '%s%s\n' \
+                        "$WLAN successfully added to bat0 (primary " \
+                        "interface)"
                     ADDED=true
                     break
                 else
-                    echo "Attempt $attempt: $WLAN not showing in batctl, retrying..."
+                    printf '%s%s\n' \
+                        "Attempt $attempt: $WLAN not showing in batctl, " \
+                        "retrying..."
                 fi
             else
-                echo "Attempt $attempt: batctl add failed, retrying..."
+                printf '%s\n' "Attempt $attempt: batctl add failed, retrying..."
             fi
             sleep 1
         done
 
         if [ "$ADDED" = false ]; then
-            echo "!! ERROR: Failed to add HaLow $WLAN to bat0 after 5 attempts" >&2
+            printf '%s%s\n' \
+                "!! ERROR: Failed to add HaLow $WLAN to bat0 after 5 " \
+                "attempts" >&2
             echo "!! This interface will not participate in the mesh" >&2
         fi
     done
@@ -276,21 +300,27 @@ start() {
     # -------------------------------------------------------------------------
     for WLAN in $STANDARD_MESH_INTERFACES; do
         if ! radio_iface_enabled "$WLAN"; then
-            echo "--> Skipping standard mesh interface: $WLAN (radio-state says down)"
+            printf '%s%s\n' \
+                "--> Skipping standard mesh interface: $WLAN (radio-state " \
+                "says down)"
             systemctl stop "wpa_supplicant@${WLAN}.service" 2>/dev/null || true
             ip link set "$WLAN" down 2>/dev/null || true
             continue
         fi
-        echo "--> Configuring standard mesh interface: $WLAN"
+        printf '%s\n' "--> Configuring standard mesh interface: $WLAN"
 
-        echo "Waiting for $WLAN to be in mesh point mode (managed by wpa_supplicant)..."
+        printf '%s%s\n' \
+            "Waiting for $WLAN to be in mesh point mode (managed by " \
+            "wpa_supplicant)..."
         for i in {1..30}; do
             if iw dev "$WLAN" info 2>/dev/null | grep -q "type mesh point"; then
-                echo "$WLAN is in mesh point mode."
+                printf '%s\n' "$WLAN is in mesh point mode."
                 break
             fi
             if [ $i -eq 30 ]; then
-                echo "!! Timed out waiting for $WLAN to enter mesh point mode. Skipping." >&2
+                printf '%s%s\n' \
+                    "!! Timed out waiting for $WLAN to enter mesh point " \
+                    "mode. Skipping." >&2
                 continue 2
             fi
             sleep 1
@@ -300,27 +330,30 @@ start() {
 
         ip link set "$WLAN" mtu 1532 2>/dev/null || true
 
-        echo "Adding $WLAN to bat0..."
+        printf '%s\n' "Adding $WLAN to bat0..."
 
         ADDED=false
         for attempt in {1..5}; do
             if batctl bat0 if add "$WLAN" 2>&1; then
                 sleep 0.5
                 if batctl bat0 if | grep -q "$WLAN"; then
-                    echo "$WLAN successfully added to bat0"
+                    printf '%s\n' "$WLAN successfully added to bat0"
                     ADDED=true
                     break
                 else
-                    echo "Attempt $attempt: $WLAN not showing in batctl, retrying..."
+                    printf '%s%s\n' \
+                        "Attempt $attempt: $WLAN not showing in batctl, " \
+                        "retrying..."
                 fi
             else
-                echo "Attempt $attempt: batctl add failed, retrying..."
+                printf '%s\n' "Attempt $attempt: batctl add failed, retrying..."
             fi
             sleep 1
         done
 
         if [ "$ADDED" = false ]; then
-            echo "!! ERROR: Failed to add $WLAN to bat0 after 5 attempts" >&2
+            printf '%s\n' \
+                "!! ERROR: Failed to add $WLAN to bat0 after 5 attempts" >&2
             echo "!! This interface will not participate in the mesh" >&2
         fi
     done
@@ -355,7 +388,7 @@ case "$1" in
         "$1"
         ;;
     *)
-        echo "Usage: $0 {start|stop}"
+        usage
         exit 1
         ;;
 esac

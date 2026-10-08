@@ -77,5 +77,5 @@ if __name__ == '__main__':
             raise ValueError('usage: manet_supplicant.py restart')
         restart_configured()
     except (OSError, ValueError, RuntimeError) as error:
-        print(error, file=sys.stderr)
+        print(f'manet_supplicant.py: {error}', file=sys.stderr)
         sys.exit(1)

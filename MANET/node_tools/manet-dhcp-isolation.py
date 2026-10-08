@@ -252,5 +252,5 @@ if __name__ == '__main__':
         main()
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
         detail = getattr(error, 'stderr', '') or str(error)
-        print('ERROR: DHCP isolation: ' + detail.strip(), file=sys.stderr)
+        print('manet-dhcp-isolation.py: ' + detail.strip(), file=sys.stderr)
         sys.exit(1)

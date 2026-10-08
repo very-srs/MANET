@@ -22,7 +22,7 @@ while [ $# -gt 0 ]; do
 done
 
 fail() {
-    echo "Cannot read BATMAN peers: $1" >&2
+    printf '%s\n' "Cannot read BATMAN peers: $1" >&2
     exit 1
 }
 

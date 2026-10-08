@@ -1,0 +1,38 @@
+.Dd October 8, 2026
+.Dt VERIFY-BRIDGE.SH 8
+.Os MANET
+.Sh NAME
+.Nm verify-bridge.sh
+.Nd check the node's bridged end-user-device configuration
+.Sh SYNOPSIS
+.Nm
+.Sh DESCRIPTION
+.Nm
+checks bridge and BATMAN membership, bridge IPv4 addresses, DHCP isolation,
+dnsmasq configuration, multicast settings and recorded interface roles.
+Run as root so BATMAN and firewall checks can read their state.
+The command takes no options and does not repair configuration.
+.Pp
+Results and the summary use colored terminal output.
+Errors and warnings go to standard error.
+Warnings can be normal, such as an absent wired user device or a HaLow
+interface still initializing.
+.Sh FILES
+.Bl -tag -width Ds
+.It Pa /var/lib/ap_interface , /var/lib/mesh_if , /var/lib/halow_if
+Configured access-point and mesh interfaces.
+.It Pa /etc/dnsmasq.d/mesh-eud.conf
+Bridge DHCP configuration.
+.It Pa /var/run/ethernet_detection_state
+Recorded Ethernet role.
+.El
+.Sh EXIT STATUS
+Returns the number of failed checks as its exit status.
+Warnings alone return 0.
+.Sh EXAMPLES
+.Bd -literal -offset indent
+sudo verify-bridge.sh
+.Ed
+.Sh SEE ALSO
+.Xr ethernet-autodetect.sh 8 ,
+.Xr radio-setup.sh 8

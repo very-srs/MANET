@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 # Config rollback safety net
 # Changing mesh_ssid, mesh_key or ipv4_network drops the mesh while every node
 # reconnects. A bad setting can prevent remote correction, so each node must
@@ -25,6 +25,17 @@
 # commits: that is the solo bench case, where "the mesh did not come back"
 # cannot be distinguished from "there was never anyone there".
 
+usage() {
+    printf '%s\n' \
+        'usage: mesh-config-rollback.sh {arm VERSION|check|commit|status}' >&2
+}
+
+case "${1:-check}" in
+    arm) [ $# -eq 2 ] && [ -n "$2" ] || { usage; exit 1; } ;;
+    check|commit|status) [ $# -le 1 ] || { usage; exit 1; } ;;
+    *) usage; exit 1 ;;
+esac
+
 STATE_DIR="${MANET_ROLLBACK_DIR:-/var/lib/manet-config-rollback}"
 STATE_FILE="$STATE_DIR/state"
 MESH_CONF="${MANET_MESH_CONF:-/etc/mesh.conf}"
@@ -46,18 +57,18 @@ uptime_now() {
     read -r up _ < "$UPTIME_FILE" || return 1
     up=${up%.*}
     [[ "$up" =~ ^[0-9]+$ ]] || return 1
-    echo "$up"
+    printf '%s\n' "$up"
 }
 
 boot_id() {
     local id
     read -r id < "$BOOT_ID_FILE" || return 1
     [[ "$id" =~ ^[0-9a-f-]+$ ]] || return 1
-    echo "$id"
+    printf '%s\n' "$id"
 }
 
 log() {
-    echo "[$(date +'%Y-%m-%d %H:%M:%S')] - $LOG_TAG: $1"
+    printf '%s\n' "$LOG_TAG: $1" >&2
 }
 
 peer_count() {
@@ -95,10 +106,10 @@ do_arm() (
     done
 
     {
-        echo "VERSION='$version'"
-        echo "PEERS_BEFORE=$peers"
-        echo "BOOT_ID='$boot'"
-        echo "DEADLINE=$deadline"
+        printf '%s\n' "VERSION='$version'"
+        printf '%s\n' "PEERS_BEFORE=$peers"
+        printf '%s\n' "BOOT_ID='$boot'"
+        printf '%s\n' "DEADLINE=$deadline"
         echo "REARMED=0"
     } > "$snapshot/state" || { log "ERROR: cannot write rollback state"; return 1; }
     rm -rf "$STATE_DIR" || return 1
@@ -148,10 +159,10 @@ rearm() {
     [[ "$GRACE_SECONDS" =~ ^[0-9]+$ ]] || return 1
     tmp=$(mktemp "$STATE_DIR/state.XXXXXX") || return 1
     {
-        echo "VERSION='$VERSION'"
-        echo "PEERS_BEFORE=$PEERS_BEFORE"
-        echo "BOOT_ID='$boot'"
-        echo "DEADLINE=$(( now + 10#$GRACE_SECONDS ))"
+        printf '%s\n' "VERSION='$VERSION'"
+        printf '%s\n' "PEERS_BEFORE=$PEERS_BEFORE"
+        printf '%s\n' "BOOT_ID='$boot'"
+        printf '%s\n' "DEADLINE=$(( now + 10#$GRACE_SECONDS ))"
         echo "REARMED=1"
     } > "$tmp" && mv -f "$tmp" "$STATE_FILE" || { rm -f "$tmp"; return 1; }
 }
@@ -218,7 +229,7 @@ case "${1:-check}" in
         fi
         ;;
     *)
-        echo "usage: $(basename "$0") {arm <version>|check|commit|status}" >&2
-        exit 2
+        usage
+        exit 1
         ;;
 esac

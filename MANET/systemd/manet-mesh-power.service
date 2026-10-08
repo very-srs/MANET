@@ -5,6 +5,20 @@ Description=Request 30 dBm on mesh radios, with no MANET power ceiling
 After=batman-enslave.service
 
 [Service]
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+LockPersonality=yes
+RestrictRealtime=yes
+SystemCallArchitectures=native
+ReadWritePaths=/run
+CapabilityBoundingSet=CAP_NET_ADMIN
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+PrivateDevices=yes
 Type=oneshot
 ExecStart=/usr/local/bin/manet-mesh-power.sh
 RemainAfterExit=yes

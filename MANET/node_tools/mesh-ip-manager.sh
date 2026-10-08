@@ -63,7 +63,7 @@ MUMBLE_VIP=""
 _calc_service_vips() {
     local calc host_min
     calc=$(manet-ipcalc.sh "$IPV4_NETWORK" 2>/dev/null) || return 0
-    host_min=$(echo "$calc" | awk '/HostMin/ {print $2}')
+    host_min=$(printf '%s\n' "$calc" | awk '/HostMin/ {print $2}')
     [ -n "$host_min" ] || return 0
     MTX_VIP="${host_min%.*}.$((${host_min##*.} + 1))"
     MUMBLE_VIP="${host_min%.*}.$((${host_min##*.} + 2))"
@@ -93,7 +93,7 @@ PERSISTENT_NETWORK=""
 
 # --- Helper Functions ---
 log() {
-    echo "[$(date +'%Y-%m-%d %H:%M:%S')] - IP-MGR: $1" >&2
+    printf '%s\n' "IP-MGR: $1" >&2
 }
 
 # Converts an IP string to a 32-bit integer
@@ -104,13 +104,15 @@ ip_to_int() {
     fi
     local a b c d
     IFS=. read -r a b c d <<<"$ip"
-    echo "$(( (a << 24) + (b << 16) + (c << 8) + d ))"
+    printf '%s\n' "$(( (a << 24) + (b << 16) + (c << 8) + d ))"
 }
 
 # Converts a 32-bit integer to an IP string
 int_to_ip() {
     local ip_int=$1
-    echo "$(( (ip_int >> 24) & 255 )).$(( (ip_int >> 16) & 255 )).$(( (ip_int >> 8) & 255 )).$(( ip_int & 255 ))"
+    printf '%d.%d.%d.%d\n' \
+        "$(( (ip_int >> 24) & 255 ))" "$(( (ip_int >> 16) & 255 ))" \
+        "$(( (ip_int >> 8) & 255 ))" "$(( ip_int & 255 ))"
 }
 
 # Calculate chunk IPs given a chunk number
@@ -122,7 +124,7 @@ get_chunk_ips() {
         return 1
     fi
 
-    local HOST_MIN=$(echo "$CALC_OUTPUT" | awk '/HostMin/ {print $2}')
+    local HOST_MIN=$(printf '%s\n' "$CALC_OUTPUT" | awk '/HostMin/ {print $2}')
     local MIN_INT=$(ip_to_int "$HOST_MIN")
 
     # First chunk starts after services reservation
@@ -138,7 +140,7 @@ get_chunk_ips() {
     local DHCP_START=$(int_to_ip $((CHUNK_START_INT + 2)))
     local DHCP_END=$(int_to_ip $((CHUNK_START_INT + CHUNK_SIZE - 1)))
 
-    echo "${BR0_PRIMARY}:${BR0_SECONDARY}:${DHCP_START}:${DHCP_END}"
+    printf '%s\n' "${BR0_PRIMARY}:${BR0_SECONDARY}:${DHCP_START}:${DHCP_END}"
 }
 
 # Check if an IP is in the usable range
@@ -155,8 +157,8 @@ ip_in_cidr() {
         return 1
     fi
 
-    local HOST_MIN=$(echo "$CALC_OUTPUT" | awk '/HostMin/ {print $2}')
-    local HOST_MAX=$(echo "$CALC_OUTPUT" | awk '/HostMax/ {print $2}')
+    local HOST_MIN=$(printf '%s\n' "$CALC_OUTPUT" | awk '/HostMin/ {print $2}')
+    local HOST_MAX=$(printf '%s\n' "$CALC_OUTPUT" | awk '/HostMax/ {print $2}')
 
     if [ -z "$HOST_MIN" ] || [ -z "$HOST_MAX" ]; then
         return 1
@@ -184,7 +186,7 @@ is_service_reserved_ip() {
     CALC_OUTPUT=$(manet-ipcalc.sh "$IPV4_NETWORK" 2>/dev/null)
     [ -n "$CALC_OUTPUT" ] || return 1
 
-    HOST_MIN=$(echo "$CALC_OUTPUT" | awk '/HostMin/ {print $2}')
+    HOST_MIN=$(printf '%s\n' "$CALC_OUTPUT" | awk '/HostMin/ {print $2}')
     MIN_INT=$(ip_to_int "$HOST_MIN")
     IP_INT=$(ip_to_int "$ip")
     [ -n "$MIN_INT" ] && [ -n "$IP_INT" ] || return 1
@@ -235,7 +237,7 @@ chunk_range() {
     local ips primary
     ips=$(get_chunk_ips "$1") || return 1
     primary=$(ip_to_int "${ips%%:*}") || return 1
-    echo "$primary $((primary + CHUNK_SIZE - 1))"
+    printf '%s\n' "$primary $((primary + CHUNK_SIZE - 1))"
 }
 
 # Print the MAC of a peer whose claim overlaps [start, end]; succeed if found.
@@ -245,7 +247,7 @@ range_claimed_by_peer() {
     [ -n "${CLAIMS_LOADED:-}" ] || load_claims
     for i in "${!CLAIM_STARTS[@]}"; do
         if [ "${CLAIM_STARTS[$i]}" -le "$end" ] && [ "${CLAIM_ENDS[$i]}" -ge "$start" ]; then
-            echo "${CLAIM_MACS[$i]}"
+            printf '%s\n' "${CLAIM_MACS[$i]}"
             return 0
         fi
     done
@@ -269,8 +271,8 @@ get_random_chunk() {
         return 1
     fi
 
-    local HOST_MIN=$(echo "$CALC_OUTPUT" | awk '/HostMin/ {print $2}')
-    local HOST_MAX=$(echo "$CALC_OUTPUT" | awk '/HostMax/ {print $2}')
+    local HOST_MIN=$(printf '%s\n' "$CALC_OUTPUT" | awk '/HostMin/ {print $2}')
+    local HOST_MAX=$(printf '%s\n' "$CALC_OUTPUT" | awk '/HostMax/ {print $2}')
     local MIN_INT=$(ip_to_int "$HOST_MIN")
     local MAX_INT=$(ip_to_int "$HOST_MAX")
 
@@ -312,7 +314,7 @@ get_random_chunk() {
     
     # Select random available chunk
     local random_index=$((RANDOM % ${#available_chunks[@]}))
-    echo "${available_chunks[$random_index]}"
+    printf '%s\n' "${available_chunks[$random_index]}"
 }
 
 # Save persistent state
@@ -740,8 +742,8 @@ case $IPV4_STATE in
             log "Successfully claimed chunk ${PROPOSED_CHUNK}"
             
             # Write chunk and block size for the identity publisher to pick up
-            echo "$CHUNK_SIZE" > /var/run/my_ipv4_chunk_size
-            echo "$PROPOSED_CHUNK" > /var/run/my_ipv4_chunk
+            printf '%s\n' "$CHUNK_SIZE" > /var/run/my_ipv4_chunk_size
+            printf '%s\n' "$PROPOSED_CHUNK" > /var/run/my_ipv4_chunk
         fi
         ;;
 
@@ -776,8 +778,8 @@ case $IPV4_STATE in
         else
             # No conflict, only reconfigure if something actually changed
             if [ -n "$PERSISTENT_CHUNK" ]; then
-                echo "$CHUNK_SIZE" > /var/run/my_ipv4_chunk_size
-                echo "$PERSISTENT_CHUNK" > /var/run/my_ipv4_chunk
+                printf '%s\n' "$CHUNK_SIZE" > /var/run/my_ipv4_chunk_size
+                printf '%s\n' "$PERSISTENT_CHUNK" > /var/run/my_ipv4_chunk
 
                 # Get current chunk IPs
                 CHUNK_IPS=$(get_chunk_ips "$PERSISTENT_CHUNK")

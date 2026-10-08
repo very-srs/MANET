@@ -600,11 +600,17 @@ def apply_halow_channel(channel, bw='2MHz', dbm=None):
     # supplicant accepts the new class, and a class it rejects is a silent
     # crashloop that would otherwise surface at the next reboot.
     if result.returncode != 0 or op_class_changed:
-        subprocess.run(['systemctl', 'restart', S1G_SERVICE], timeout=15)
-        if not _s1g_supplicant_healthy():
+        restart = subprocess.run(
+            ['systemctl', 'restart', S1G_SERVICE], timeout=15)
+        if restart.returncode != 0 or not _s1g_supplicant_healthy():
             with open(HALOW_WPA_CONF, 'w') as f:
                 f.write(previous)
-            subprocess.run(['systemctl', 'restart', S1G_SERVICE], timeout=15)
+            restored = subprocess.run(
+                ['systemctl', 'restart', S1G_SERVICE], timeout=15)
+            if restored.returncode != 0:
+                return {'ok': False, 'error': (
+                    'HaLow change failed; config restored, but the '
+                    'supplicant restart also failed')}
             return {'ok': False, 'error': (
                 f'{region} {bw} (channel {s1g_channel}, op_class {op_class}) '
                 f'was refused by wpa_supplicant_s1g - config restored')}

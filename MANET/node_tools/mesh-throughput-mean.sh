@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 # Mean mesh throughput to peers
 # Prints the mean of BATMAN_V's metric across this node's originators, in
 # Mbit/s, to two decimals. Service elections use it to pick the best-connected

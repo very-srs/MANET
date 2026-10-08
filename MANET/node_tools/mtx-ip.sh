@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 # mtx-ip.sh
 # Deterministically derive a MediaMTX IPv6 VIP within the first /64
 # subnet of a given ULA prefix (e.g., /48 or /64).
@@ -7,7 +7,8 @@ set -euo pipefail
 
 # Input: Find the first IPv6 prefix line in radvd config
 PREFIX_LINE=$(grep -m 1 '^[[:space:]]*prefix[[:space:]]\+fd[0-9a-fA-F:]\+/[0-9]\+' /etc/radvd-mesh.conf || echo "")
-PREFIX_CIDR=$(echo "$PREFIX_LINE" | awk '{print $2}') # e.g., fd01:ed20:ecb4::/48
+PREFIX_CIDR=$(printf '%s\n' "$PREFIX_LINE" |
+    awk '{print $2}') # e.g., fd01:ed20:ecb4::/48
 
 if [ -z "$PREFIX_CIDR" ]; then
     echo "Error: No valid IPv6 ULA prefix found in /etc/radvd-mesh.conf." >&2
@@ -16,11 +17,14 @@ fi
 
 # Normalize prefix: strip CIDR length, ensure we have the first 4 hextets.
 PREFIX=${PREFIX_CIDR%/*} # Remove /XX suffix
-PREFIX=$(echo "$PREFIX" | sed 's/::$//; s/:$//') # Remove trailing :: or :
+PREFIX=$(printf '%s\n' "$PREFIX" |
+    sed 's/::$//; s/:$//') # Remove trailing :: or :
 
 # Basic validation: must contain colons and start with 'fd' (ULA)
 if ! [[ "$PREFIX" =~ ^fd && "$PREFIX" =~ : ]]; then
-    echo "Error: '$PREFIX_CIDR' does not contain a valid IPv6 ULA prefix starting with 'fd'." >&2
+    printf '%s%s\n' \
+        "Error: '$PREFIX_CIDR' does not contain a valid IPv6 ULA prefix " \
+        "starting with 'fd'." >&2
     exit 1
 fi
 
@@ -54,21 +58,24 @@ while [[ ${#EXPANDED_PREFIX_ARRAY[@]} -lt 4 ]]; do
 done
 
 # Join the first 4 hextets back into a string
-EXPANDED_PREFIX=$(IFS=: ; echo "${EXPANDED_PREFIX_ARRAY[*]}")
+EXPANDED_PREFIX=$(IFS=: ; printf '%s\n' "${EXPANDED_PREFIX_ARRAY[*]}")
 
 
 # Final Validation: Check the resulting /64 prefix structure
 if ! [[ "$EXPANDED_PREFIX" =~ ^fd[0-9a-fA-F]{2}:[0-9a-fA-F]{4}:[0-9a-fA-F]{4}:[0-9a-fA-F]{4}$ ]]; then
-    echo "Error: Failed to normalize '$PREFIX_CIDR' into a valid /64 ULA prefix. Result: '$EXPANDED_PREFIX'." >&2
+    printf '%s%s\n' \
+        "Error: Failed to normalize '$PREFIX_CIDR' into a valid /64 ULA " \
+        "prefix. Result: '$EXPANDED_PREFIX'." >&2
     exit 1
 fi
 
 # --- Suffix Generation (remains the same) ---
 # Hash the normalized /64 prefix to derive a deterministic suffix
 if command -v md5sum >/dev/null; then
-    HASH_BYTE=$(echo -n "${EXPANDED_PREFIX}-mediamtx" | md5sum | cut -c1-2)
+    HASH_BYTE=$(printf '%s' "${EXPANDED_PREFIX}-mediamtx" | md5sum | cut -c1-2)
 elif command -v sha256sum >/dev/null; then
-    HASH_BYTE=$(echo -n "${EXPANDED_PREFIX}-mediamtx" | sha256sum | cut -c1-2)
+    HASH_BYTE=$(printf '%s' "${EXPANDED_PREFIX}-mediamtx" |
+        sha256sum | cut -c1-2)
 else
     echo "Error: Neither md5sum nor sha256sum found. Please install one." >&2
     exit 1
@@ -82,4 +89,4 @@ VIP="${EXPANDED_PREFIX}::$(printf "%x" "$OFFSET")"
 
 
 # Output the final address with /128 mask for assignment
-echo "$VIP/128"
+printf '%s\n' "$VIP/128"

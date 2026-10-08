@@ -58,8 +58,9 @@ class SaeWatchdogTests(unittest.TestCase):
         result, calls, sleeps = self.run_watchdog()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(sleeps, 2)
-        self.assertEqual(result.stdout.count('No enabled mesh interfaces yet; waiting'), 1)
-        self.assertIn('monitoring: wlan0', result.stdout)
+        self.assertEqual(
+            result.stderr.count('No enabled mesh interfaces yet; waiting'), 1)
+        self.assertIn('monitoring: wlan0', result.stderr)
         self.assertEqual(calls, ['journalctl -fu wpa_supplicant@wlan0.service --output=cat'])
 
     def test_radio_turned_off_keeps_it_waiting_not_exiting(self):

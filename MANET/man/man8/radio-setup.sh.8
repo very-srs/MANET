@@ -1,0 +1,53 @@
+.Dd October 8, 2026
+.Dt RADIO-SETUP.SH 8
+.Os MANET
+.Sh NAME
+.Nm radio-setup.sh
+.Nd configure a MANET node after first boot or a configuration change
+.Sh SYNOPSIS
+.Nm
+.Sh DESCRIPTION
+.Nm
+reads the node configuration, assigns radio roles, writes network and
+service configuration, installs required packages and starts runtime services.
+Run it as root with power and an internet uplink connected.
+It may reboot the node to apply interface names or boot configuration.
+The first-boot service repeats setup after a required reboot.
+.Pp
+The command takes no options.
+It can be run again after editing
+.Pa /etc/mesh.conf
+or to retry incomplete provisioning.
+Only one setup run proceeds at a time.
+Failed steps are recorded; a run with recorded failures leaves the node
+marked incomplete.
+After successful setup, staged operator scripts run in a separate service.
+.Sh FILES
+.Bl -tag -width Ds
+.It Pa /etc/mesh.conf
+Node and mesh settings.
+.It Pa /var/log/radio-setup.log
+Appended setup output and shell trace.
+.It Pa /var/lib/manet-provision.state
+Provisioning phase and result.
+.It Pa /var/lib/manet-provision.failures
+Failed setup steps.
+.It Pa /var/lib/radio-setup.done
+Successful completion marker.
+.It Pa /var/lib/mesh_if , /var/lib/halow_if , /var/lib/ap_interface
+Assigned radio roles.
+.El
+.Sh EXIT STATUS
+Exits 0 after success, when another setup run holds the lock, or when a
+required reboot has been requested.
+A nonzero status indicates a setup error.
+Use the provisioning status command to confirm completion after a reboot.
+.Sh EXAMPLES
+Retry setup after restoring the internet uplink:
+.Bd -literal -offset indent
+sudo radio-setup.sh
+.Ed
+.Sh SEE ALSO
+.Xr manet-provision-status.sh 8 ,
+.Xr manet-user-scripts.sh 8 ,
+.Xr verify-bridge.sh 8

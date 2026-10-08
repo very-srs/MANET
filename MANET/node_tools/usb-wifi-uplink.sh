@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 set -euo pipefail
 
 CONFIG_FILE=/etc/manet/usb-wifi-uplink.conf
@@ -6,13 +6,28 @@ WPA_DIR=/etc/wpa_supplicant
 NETWORKD_DIR=/etc/systemd/network
 CLIENT_SERVICE=/etc/systemd/system/usb-wifi-client@.service
 
+usage() {
+    printf '%s\n' \
+        'usage: usb-wifi-uplink.sh [ACTION [IFACE]]' \
+        '       usb-wifi-uplink.sh set [SSID [PASSWORD [ENABLED]]]' \
+        'actions: add online reconcile connect remove offline disconnect' \
+        '         status-json status' >&2
+}
+case "${1:-reconcile}" in
+    set) [ $# -le 4 ] || { usage; exit 1; } ;;
+    add|online|reconcile|connect|remove|offline|disconnect|status-json|status)
+        [ $# -le 2 ] || { usage; exit 1; }
+        ;;
+    *) usage; exit 1 ;;
+esac
+
 ACTION="${1:-reconcile}"
 IFACE="${2:-}"
 
 log() {
-    local msg="[$(date '+%Y-%m-%d %H:%M:%S')] - USB-WIFI-UPLINK: $*"
-    echo "$msg" >&2
-    echo "$msg" | systemd-cat -t usb-wifi-uplink
+    local msg="USB-WIFI-UPLINK: $*"
+    printf '%s\n' "$msg" >&2
+    printf '%s\n' "$msg" | systemd-cat -t usb-wifi-uplink
 }
 
 ensure_default_config() {
@@ -59,7 +74,7 @@ iface_driver() {
     if [ -z "$driver" ] || [ "$driver" = "." ]; then
         driver="$(ethtool -i "$iface" 2>/dev/null | awk -F': ' '$1 == "driver" {print $2; exit}')"
     fi
-    echo "$driver"
+    printf '%s\n' "$driver"
 }
 
 is_usb_wifi_uplink_iface() {
@@ -87,7 +102,7 @@ is_usb_wifi_uplink_iface() {
 
 candidate_iface() {
     if [ -n "$IFACE" ] && is_usb_wifi_uplink_iface "$IFACE"; then
-        echo "$IFACE"
+        printf '%s\n' "$IFACE"
         return 0
     fi
     for path in /sys/class/net/wlan*; do
@@ -95,7 +110,7 @@ candidate_iface() {
         local iface
         iface="$(basename "$path")"
         if is_usb_wifi_uplink_iface "$iface"; then
-            echo "$iface"
+            printf '%s\n' "$iface"
             return 0
         fi
     done

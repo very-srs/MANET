@@ -21,6 +21,16 @@
 # blocks below. acs and regulatory_domain were validated and staged but never
 # written, so a change to either ACKed, reported applied, and did nothing.
 
+usage() {
+    printf '%s\n' \
+        'usage: mesh-config-apply.sh [--force]' >&2
+}
+
+if [ $# -gt 1 ] || { [ $# -eq 1 ] && [ "$1" != --force ]; }; then
+    usage
+    exit 1
+fi
+
 RUN_DIR="${MANET_RUN_DIR:-/var/run}"
 WPA_DIR="${MANET_WPA_DIR:-/etc/wpa_supplicant}"
 PENDING_CONFIG="$RUN_DIR/mesh_pending_config.json"
@@ -34,7 +44,9 @@ NODE_MANAGER_SELECT="${NODE_MANAGER_SELECT:-$(dirname "$0")/node-manager-select.
 NODE_MANAGER_LINK="${MANET_BIN_DIR:-$(dirname "$0")}/node-manager.sh"
 
 log() {
-    echo "[$(date +'%Y-%m-%d %H:%M:%S')] - CONFIG-APPLY: $1" | tee -a "$APPLY_LOG" | systemd-cat -t mesh-config-apply
+    printf '%s\n' "[$(date +'%Y-%m-%d %H:%M:%S')] - CONFIG-APPLY: $1" \
+        >> "$APPLY_LOG"
+    printf '%s\n' "CONFIG-APPLY: $1" | systemd-cat -t mesh-config-apply
 }
 
 die() {
@@ -256,7 +268,7 @@ if [ "${RESTART_NODE_MANAGER:-false}" = true ]; then
 fi
 
 # Record which version was applied
-echo "$VERSION" > "$APPLIED_VERSION_FILE"
+printf '%s\n' "$VERSION" > "$APPLIED_VERSION_FILE"
 
 # Clear the pending config: it's been applied
 rm -f "$PENDING_CONFIG"

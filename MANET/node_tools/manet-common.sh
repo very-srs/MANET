@@ -1,5 +1,20 @@
+#!/bin/bash
 # Shared shell helpers for MANET node tools. Source it; do not run it.
 . "${MANET_TOOLS_DIR:-$(dirname "${BASH_SOURCE[0]}")}/manet-runtime-client.sh"
+
+# Keep command data on stdout; systemd timestamps diagnostics on stderr.
+manet_log() {
+    local program="$1"
+    shift
+    printf '%s: %s\n' "$program" "$*" >&2
+}
+
+# Keep explicit journal routing when a caller captures helper diagnostics.
+manet_journal() {
+    local program="$1"
+    shift
+    printf '%s\n' "$*" | systemd-cat -t "$program"
+}
 
 node_primary_ipv4() {
     local rc=0 address
@@ -104,7 +119,7 @@ uptime_now() {
     read -r up _ < "${MESH_UPTIME_FILE:-/proc/uptime}" || return 1
     [[ "$up" =~ ^[0-9]+(\.[0-9]+)?$ ]] || return 1
     up=${up%.*}
-    echo "$((10#$up))"
+    printf '%s\n' "$((10#$up))"
 }
 
 # An empty local Alfred cache has no command to authenticate or activate.

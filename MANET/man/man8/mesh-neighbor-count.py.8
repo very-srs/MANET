@@ -1,0 +1,56 @@
+.Dd October 8, 2026
+.Dt MESH-NEIGHBOR-COUNT.PY 8
+.Os MANET
+.Sh NAME
+.Nm mesh-neighbor-count.py
+.Nd count distinct directly connected BATMAN neighbor nodes
+.Sh SYNOPSIS
+.Nm
+.Op Fl -batctl Ar path
+.Op Fl -registry Ar path
+.Op Fl h | Fl -help
+.Sh DESCRIPTION
+.Nm
+queries BATMAN neighbors on
+.Li bat0
+and prints an integer count of distinct peer nodes.
+Run with permission to query BATMAN, normally as root.
+Radio addresses are merged using the mesh registry so a peer connected
+over several radios is counted once.
+This counts direct neighbors, not all nodes reachable through the mesh.
+.Pp
+Zero or one neighbor address can be counted without the registry.
+When several addresses are visible but their node identities are missing
+or ambiguous, no integer is printed.
+.Bl -tag -width Ds
+.It Fl -batctl Ar path
+BATMAN control executable; default
+.Pa /usr/sbin/batctl .
+.It Fl -registry Ar path
+Registry to read; default
+.Pa /var/run/mesh_node_registry .
+.It Fl h , Fl -help
+Print help and exit.
+.El
+.Sh FILES
+.Bl -tag -width Ds
+.It Pa /var/run/mesh_node_registry
+Primary node MAC addresses and per-interface address lists.
+.El
+.Sh EXIT STATUS
+.Bl -tag -width Ds
+.It 0
+An exact count was printed, including zero.
+.It 1
+The BATMAN neighbor query failed or returned invalid data.
+.It 2
+Invalid arguments.
+.It 3
+Neighbors are present but their node identities cannot yet be resolved.
+.El
+.Sh EXAMPLES
+.Bd -literal -offset indent
+sudo mesh-neighbor-count.py
+.Ed
+.Sh SEE ALSO
+.Xr mac-to-ip.sh 8

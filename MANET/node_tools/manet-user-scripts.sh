@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 # Operator setup scripts: one-time post-provisioning hook
 # Runs whatever the operator put in provisioning/additional-scripts/ at flash
 # time. Those files are baked into firstrun.sh as heredocs and written out to
@@ -41,6 +41,11 @@ MESH_CONF="${MANET_MESH_CONF:-/etc/mesh.conf}"
 # `user_script_timeout=` in /etc/mesh.conf.
 DEFAULT_TIMEOUT=300
 
+usage() {
+    printf '%s\n' \
+        'usage: manet-user-scripts.sh [--force] [--list] [-h|--help]' >&2
+}
+
 FORCE=0
 LIST_ONLY=0
 for arg in "$@"; do
@@ -48,12 +53,13 @@ for arg in "$@"; do
         --force) FORCE=1 ;;
         --list)  LIST_ONLY=1 ;;
         -h|--help)
-            sed -n '2,32p' "$0" | sed 's/^# \?//'
+            usage 2>&1
             exit 0
             ;;
         *)
-            echo "unknown option: $arg" >&2
-            exit 2
+            printf '%s\n' "manet-user-scripts.sh: unknown option: $arg" >&2
+            usage
+            exit 1
             ;;
     esac
 done
@@ -111,7 +117,8 @@ if [ "$LIST_ONLY" -eq 1 ]; then
             printf '  %-40s pending\n' "$name"
         fi
     done < <(list_scripts)
-    [ "$found" -eq 0 ] && echo "  no operator scripts staged in $SCRIPT_DIR"
+    [ "$found" -eq 0 ] &&
+        printf '%s\n' "  no operator scripts staged in $SCRIPT_DIR"
     exit 0
 fi
 
@@ -124,11 +131,12 @@ mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || true
 exec > >(tee -a "$LOG_FILE") 2>&1
 
 echo "=============================================================="
-echo " manet-user-scripts starting: $(date -Is)"
+printf '%s\n' " manet-user-scripts starting: $(date -Is)"
 echo "=============================================================="
 
 if [ ! -d "$SCRIPT_DIR" ]; then
-    echo " > no $SCRIPT_DIR: nothing staged at flash time, nothing to do"
+    printf '%s\n' \
+        " > no $SCRIPT_DIR: nothing staged at flash time, nothing to do"
     touch "$DONE_FILE"
     exit 0
 fi
@@ -151,7 +159,7 @@ while IFS= read -r name; do
     TOTAL=$((TOTAL + 1))
 
     if already_ran "$name"; then
-        echo " -- $name: already ran, skipping (use --force to repeat)"
+        printf '%s\n' " -- $name: already ran, skipping (use --force to repeat)"
         SKIPPED=$((SKIPPED + 1))
         continue
     fi
@@ -164,7 +172,7 @@ while IFS= read -r name; do
     # dropped-in config file whose lines happen to parse as shell would run,
     # and report success.
     if ! head -c 2 "$path" 2>/dev/null | grep -q '^#!'; then
-        echo " -- $name: no #! on line 1, not a script: skipping"
+        printf '%s\n' " -- $name: no #! on line 1, not a script: skipping"
         NOTSCRIPT=$((NOTSCRIPT + 1))
         continue
     fi
@@ -176,7 +184,7 @@ while IFS= read -r name; do
 
     echo ""
     echo "--------------------------------------------------------------"
-    echo " >> $name  (timeout ${TIMEOUT}s)"
+    printf '%s\n' " >> $name  (timeout ${TIMEOUT}s)"
     echo "--------------------------------------------------------------"
     started=$(date +%s)
 
@@ -195,10 +203,10 @@ while IFS= read -r name; do
     record_result "$name" "$rc"
 
     if [ "$rc" -eq 0 ]; then
-        echo " << $name: OK (${elapsed}s)"
+        printf '%s\n' " << $name: OK (${elapsed}s)"
         RAN=$((RAN + 1))
     elif [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
-        echo " << $name: TIMED OUT after ${TIMEOUT}s (exit $rc)"
+        printf '%s\n' " << $name: TIMED OUT after ${TIMEOUT}s (exit $rc)"
         FAILED=$((FAILED + 1))
     elif [ "$rc" -eq 126 ] || [ "$rc" -eq 127 ]; then
         # The usual cause is a shebang naming an interpreter this node does not
@@ -207,13 +215,15 @@ while IFS= read -r name; do
         interp=$(head -1 "$path" | sed 's|^#!||' | awk '{ if ($1 ~ /\/env$/) print $2; else print $1 }')
         if [ -n "$interp" ] && ! command -v "$interp" >/dev/null 2>&1 \
            && [ ! -x "$interp" ]; then
-            echo " << $name: FAILED (exit $rc): interpreter '$interp' is not installed"
+            printf '%s%s\n' \
+                " << $name: FAILED (exit $rc): interpreter '$interp' is not" \
+                " installed"
         else
-            echo " << $name: FAILED (exit $rc, could not be executed)"
+            printf '%s\n' " << $name: FAILED (exit $rc, could not be executed)"
         fi
         FAILED=$((FAILED + 1))
     else
-        echo " << $name: FAILED (exit $rc, ${elapsed}s)"
+        printf '%s\n' " << $name: FAILED (exit $rc, ${elapsed}s)"
         FAILED=$((FAILED + 1))
     fi
 done < <(list_scripts)
@@ -231,10 +241,10 @@ else
     summary=" operator scripts: $RAN ok, $FAILED failed"
     [ "$SKIPPED"   -gt 0 ] && summary="$summary, $SKIPPED already run"
     [ "$NOTSCRIPT" -gt 0 ] && summary="$summary, $NOTSCRIPT not a script"
-    echo "$summary (of $TOTAL)"
+    printf '%s\n' "$summary (of $TOTAL)"
     [ "$FAILED" -gt 0 ] && echo " failures are advisory: the node is still provisioned"
 fi
-echo " finished: $(date -Is)"
+printf '%s\n' " finished: $(date -Is)"
 echo "=============================================================="
 
 # Always 0. A non-zero exit would mark the unit failed, which is a louder

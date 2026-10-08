@@ -20,7 +20,7 @@ exec >> >(tee -a /var/log/radio-setup.log) 2>&1
 set -x
 
 echo "=============================================================="
-echo " radio-setup starting: $(date -Is)"
+printf '%s\n' " radio-setup starting: $(date -Is)"
 echo "=============================================================="
 
 # manet-led-status.sh sets the LEDs from the recorded provisioning result.
@@ -36,19 +36,19 @@ PROVISION_STARTED=$(date +%s)
 provision_state() {
     mkdir -p /var/lib
     {
-        echo "STATE=$1"
+        printf '%s\n' "STATE=$1"
         echo "PHASE=radio-setup"
-        echo "STARTED=$PROVISION_STARTED"
-        echo "UPDATED=$(date +%s)"
-        [ -n "$2" ] && echo "FINISHED=$2"
+        printf '%s\n' "STARTED=$PROVISION_STARTED"
+        printf '%s\n' "UPDATED=$(date +%s)"
+        [ -n "$2" ] && printf '%s\n' "FINISHED=$2"
     } > "$PROVISION_STATE_FILE"
 }
 
 # Record failed steps and continue with the remaining setup. The node may be
 # usable, but it will not be marked fully provisioned until all steps succeed.
 provision_fail() {
-    echo "$1" >> "$PROVISION_FAIL_FILE"
-    echo " !! PROVISION FAILURE: $1"
+    printf '%s\n' "$1" >> "$PROVISION_FAIL_FILE"
+    printf '%s\n' " !! PROVISION FAILURE: $1"
 }
 
 # Run a command, recording a failure if it does not succeed.
@@ -95,13 +95,13 @@ while IFS= read -r line; do
     key="${line%%=*}"
     value="${line#*=}"
 
-    sanitized_key=$(echo "$key" | sed 's/-/_/g' | tr -cd '[:alnum:]_')
+    sanitized_key=$(printf '%s\n' "$key" | sed 's/-/_/g' | tr -cd '[:alnum:]_')
 
     # Check if the key is not empty after sanitization
     if [[ -n "$sanitized_key" ]]; then
         # Export the sanitized key as an environment variable with its value.
         export "$sanitized_key=$value"
-        echo "Checking config: $sanitized_key"
+        printf '%s\n' "Checking config: $sanitized_key"
     fi
 done < <(cat /etc/mesh.conf)
 set -x
@@ -112,7 +112,8 @@ phys_iface() {
     local logical="$1"
     local phys
     phys=$(grep "^${logical}:" /var/lib/iface_map 2>/dev/null | cut -d: -f2)
-    echo "${phys:-$logical}"   # fall back to logical name if no mapping (post-reboot)
+    # fall back to logical name if no mapping (post-reboot)
+    printf '%s\n' "${phys:-$logical}"
 }
 
 set_mesh_hostname() {
@@ -123,11 +124,11 @@ set_mesh_hostname() {
         return 0
     fi
 
-    echo "$new_hostname" > /etc/hostname 2>/dev/null || true
+    printf '%s\n' "$new_hostname" > /etc/hostname 2>/dev/null || true
     if grep -q '^127\.0\.1\.1' /etc/hosts 2>/dev/null; then
         sed -i "s/^127\\.0\\.1\\.1.*/127.0.1.1\t${new_hostname}/" /etc/hosts
     else
-        echo "127.0.1.1	${new_hostname}" >> /etc/hosts
+        printf '%s\n' "127.0.1.1	${new_hostname}" >> /etc/hosts
     fi
     hostname "$new_hostname" 2>/dev/null || hostnamectl --transient set-hostname "$new_hostname" 2>/dev/null || true
 }
@@ -138,7 +139,8 @@ has_usb_morse_device() {
     for dev in /sys/bus/usb/devices/*; do
         [ -d "$dev" ] || continue
         text="$(cat "$dev/product" "$dev/manufacturer" 2>/dev/null | tr '[:upper:]' '[:lower:]')"
-        echo "$text" | grep -Eq 'morse|mm81|halow|802\.11ah' && return 0
+        printf '%s\n' "$text" |
+            grep -Eq 'morse|mm81|halow|802\.11ah' && return 0
     done
 
     return 1
@@ -191,7 +193,9 @@ case "$EARLY_REGULATORY_DOMAIN" in
         ;;
 esac
 
-echo "options cfg80211 ieee80211_regdom=$EARLY_REGULATORY_DOMAIN" > /etc/modprobe.d/cfg80211.conf
+printf '%s\n' \
+    "options cfg80211 ieee80211_regdom=$EARLY_REGULATORY_DOMAIN" \
+    > /etc/modprobe.d/cfg80211.conf
 EARLY_MORSE_BCF=""
 EARLY_MORSE_SPI_CLOCK=""
 if [ -f /etc/modprobe.d/morse.conf ] && ! has_usb_morse_device; then
@@ -199,9 +203,15 @@ if [ -f /etc/modprobe.d/morse.conf ] && ! has_usb_morse_device; then
     EARLY_MORSE_SPI_CLOCK=$(grep -oP '(?<=spi_clock_speed=)\S+' /etc/modprobe.d/morse.conf | head -1)
 fi
 echo "options morse enable_mcast_whitelist=0 enable_mcast_rate_control=1" > /etc/modprobe.d/morse.conf
-echo "options morse country=$EARLY_HALOW_REGULATORY_DOMAIN" >> /etc/modprobe.d/morse.conf
-[[ -n "$EARLY_MORSE_BCF" ]] && echo "options morse bcf=$EARLY_MORSE_BCF" >> /etc/modprobe.d/morse.conf
-[[ -n "$EARLY_MORSE_SPI_CLOCK" ]] && echo "options morse spi_clock_speed=$EARLY_MORSE_SPI_CLOCK" >> /etc/modprobe.d/morse.conf
+printf '%s\n' \
+    "options morse country=$EARLY_HALOW_REGULATORY_DOMAIN" \
+    >> /etc/modprobe.d/morse.conf
+[[ -n "$EARLY_MORSE_BCF" ]] &&
+    printf '%s\n' "options morse bcf=$EARLY_MORSE_BCF" \
+        >> /etc/modprobe.d/morse.conf
+[[ -n "$EARLY_MORSE_SPI_CLOCK" ]] &&
+    printf '%s\n' "options morse spi_clock_speed=$EARLY_MORSE_SPI_CLOCK" \
+        >> /etc/modprobe.d/morse.conf
 if [[ "$EARLY_HALOW_REGULATORY_DOMAIN" == "EU" ]]; then
     echo "options morse enable_auto_duty_cycle=0 enable_auto_mpsw=0" >> /etc/modprobe.d/morse.conf
 fi
@@ -226,25 +236,25 @@ if [[ -n "$mesh_key" ]]; then
 fi
 
 if [[ -n "$mesh_ssid" ]]; then
-    echo " > Setting mesh SSID to: $mesh_ssid"
+    printf '%s\n' " > Setting mesh SSID to: $mesh_ssid"
     MESH_NAME=$mesh_ssid
     sleep 0.5
 fi
 
 if [[ -n "$new_root_password" ]]; then
     echo " > Setting root password..."
-    echo "root:$new_root_password" | chpasswd
+    printf '%s\n' "root:$new_root_password" | chpasswd
 fi
 
 if [[ -n "$new_user_password" ]]; then
     echo " > Setting password for user 'radio'..."
-    echo "radio:$new_user_password" | chpasswd
+    printf '%s\n' "radio:$new_user_password" | chpasswd
 fi
 
 if [[ -n "$ssh_public_key" ]]; then
     echo " > Updating authorized_keys for user 'radio'..."
     mkdir -p /home/radio/.ssh
-    echo "$ssh_public_key" >> /home/radio/.ssh/authorized_keys
+    printf '%s\n' "$ssh_public_key" >> /home/radio/.ssh/authorized_keys
     awk '!seen[$0]++' /home/radio/.ssh/authorized_keys > /tmp/t
     mv /tmp/t /home/radio/.ssh/authorized_keys
 fi
@@ -253,9 +263,9 @@ echo " > Ensuring SSH password access for user 'radio'..."
 id -u radio >/dev/null 2>&1 || useradd -m -s /bin/bash -G sudo,adm,dialout,cdrom,audio,video,plugdev,games,users,input,netdev,gpio,i2c,spi radio
 usermod -aG sudo,adm,dialout,cdrom,audio,video,plugdev,games,users,input,netdev,gpio,i2c,spi radio 2>/dev/null || true
 if [[ -n "$new_user_password" ]]; then
-    echo "radio:$new_user_password" | chpasswd
+    printf '%s\n' "radio:$new_user_password" | chpasswd
 elif [[ -n "$radio_password" ]]; then
-    echo "radio:$radio_password" | chpasswd
+    printf '%s\n' "radio:$radio_password" | chpasswd
 fi
 set -x
 passwd -u radio 2>/dev/null || true
@@ -275,7 +285,7 @@ systemctl restart ssh 2>/dev/null || true
 sleep 0.5
 echo "testing acs variable"
 if [[ -n "$acs" ]]; then
-    echo "acs defined as $acs"
+    printf '%s\n' "acs defined as $acs"
     sleep 0.5
     # y/n is what every writer produces: both flashers normalise the answer to
     # lowercase, the web UI writes 'y':'n', and mesh-config-sync.py validates
@@ -363,7 +373,7 @@ HALOW_REGULATORY_DOMAIN=$(grep "^halow_regulatory_domain=" /etc/mesh.conf 2>/dev
 HALOW_REGULATORY_DOMAIN=${HALOW_REGULATORY_DOMAIN:-$REGULATORY_DOMAIN}
 REG=$REGULATORY_DOMAIN
 
-echo REGDOMAIN=$REGULATORY_DOMAIN > /etc/default/crda
+printf '%s\n' "REGDOMAIN=$REGULATORY_DOMAIN" > /etc/default/crda
 
 uses_eu_halow_region() {
     local domain="$1"
@@ -414,7 +424,7 @@ iface_driver() {
         driver="$(ethtool -i "$iface" 2>/dev/null | awk -F': ' '$1 == "driver" {print $2; exit}')"
     fi
 
-    echo "$driver"
+    printf '%s\n' "$driver"
 }
 
 is_halow_iface() {
@@ -555,30 +565,30 @@ mkdir -p /var/lib
 # before udev has renamed anything can make HaLow and non-mesh devices appear
 # swapped. Keep iface_map as an identity map for phys_iface() callers.
 for iface in "${mesh_ifaces[@]}"; do
-    echo "$iface" >> /var/lib/mesh_if
-    echo "$iface:$iface" >> /var/lib/iface_map
-    echo " > Mapped $iface (mesh)"
+    printf '%s\n' "$iface" >> /var/lib/mesh_if
+    printf '%s\n' "$iface:$iface" >> /var/lib/iface_map
+    printf '%s\n' " > Mapped $iface (mesh)"
 done
-[ -z "$mesh_24" ] || echo "$mesh_24" > /var/lib/mesh_24_if
-[ -z "$mesh_5" ] || echo "$mesh_5" > /var/lib/mesh_5_if
+[ -z "$mesh_24" ] || printf '%s\n' "$mesh_24" > /var/lib/mesh_24_if
+[ -z "$mesh_5" ] || printf '%s\n' "$mesh_5" > /var/lib/mesh_5_if
 for iface in "${halow_ifaces[@]}"; do
-    echo "$iface" >> /var/lib/halow_if
-    echo "$iface:$iface" >> /var/lib/iface_map
-    echo " > Mapped $iface (HaLow)"
+    printf '%s\n' "$iface" >> /var/lib/halow_if
+    printf '%s\n' "$iface:$iface" >> /var/lib/iface_map
+    printf '%s\n' " > Mapped $iface (HaLow)"
 done
 for iface in "${nonmesh_ifaces[@]}"; do
-    echo "$iface" >> /var/lib/no_mesh_if
-    echo "$iface:$iface" >> /var/lib/iface_map
-    echo " > Mapped $iface (non-mesh)"
+    printf '%s\n' "$iface" >> /var/lib/no_mesh_if
+    printf '%s\n' "$iface:$iface" >> /var/lib/iface_map
+    printf '%s\n' " > Mapped $iface (non-mesh)"
 done
 
 # Log what we found
 echo "Interface detection complete:"
-echo "  Mesh-capable: ${#mesh_ifaces[@]} (${mesh_ifaces[*]})"
-echo "  Mesh 2.4 role: $(cat /var/lib/mesh_24_if 2>/dev/null || true)"
-echo "  Mesh 5.0 role: $(cat /var/lib/mesh_5_if 2>/dev/null || true)"
-echo "  HaLow: ${#halow_ifaces[@]} (${halow_ifaces[*]})"
-echo "  Non-mesh: ${#nonmesh_ifaces[@]} (${nonmesh_ifaces[*]})"
+printf '%s\n' "  Mesh-capable: ${#mesh_ifaces[@]} (${mesh_ifaces[*]})"
+printf '%s\n' "  Mesh 2.4 role: $(cat /var/lib/mesh_24_if 2>/dev/null || true)"
+printf '%s\n' "  Mesh 5.0 role: $(cat /var/lib/mesh_5_if 2>/dev/null || true)"
+printf '%s\n' "  HaLow: ${#halow_ifaces[@]} (${halow_ifaces[*]})"
+printf '%s\n' "  Non-mesh: ${#nonmesh_ifaces[@]} (${nonmesh_ifaces[*]})"
 echo "  Logical mapping:"
 cat /var/lib/iface_map
 
@@ -589,12 +599,12 @@ AP_INTERFACE=""
 > /var/lib/ap_mesh_band
 
 if [[ "$eud" == "wireless" ]] || [[ "$eud" == "auto" ]]; then
-    echo "EUD mode is $eud - selecting AP interface..."
+    printf '%s\n' "EUD mode is $eud - selecting AP interface..."
 
     # Priority 1: Use non-mesh interface if available (RPi 5 onboard)
     if [ -s /var/lib/no_mesh_if ]; then
         AP_INTERFACE=$(head -1 /var/lib/no_mesh_if)
-        echo " > Using non-mesh interface for AP: $AP_INTERFACE"
+        printf '%s\n' " > Using non-mesh interface for AP: $AP_INTERFACE"
 
     # Priority 2: Find 5GHz-capable interface from mesh interfaces
     elif [ -s /var/lib/mesh_if ]; then
@@ -603,7 +613,7 @@ if [[ "$eud" == "wireless" ]] || [[ "$eud" == "auto" ]]; then
             PHY=$(iw dev "$iface" info | grep wiphy | awk '{print "phy" $2}')
             if iw phy "$PHY" info 2>/dev/null | grep " 5[0-9][0-9][0-9]" >/dev/null; then
                 AP_INTERFACE="$iface"
-                echo " > Found 5GHz-capable interface: $AP_INTERFACE"
+                printf '%s\n' " > Found 5GHz-capable interface: $AP_INTERFACE"
                 break
             fi
         done
@@ -620,8 +630,8 @@ if [[ "$eud" == "wireless" ]] || [[ "$eud" == "auto" ]]; then
     # Save AP interface selection and remove it from mesh_if so batman-enslave
     # doesn't try to enslave it (which would make it unavailable for hostapd).
     if [ -n "$AP_INTERFACE" ]; then
-        echo "$AP_INTERFACE" > /var/lib/ap_interface
-        echo "AP interface selected: $AP_INTERFACE"
+        printf '%s\n' "$AP_INTERFACE" > /var/lib/ap_interface
+        printf '%s\n' "AP interface selected: $AP_INTERFACE"
         sed -i "/^${AP_INTERFACE}$/d" /var/lib/mesh_if
         if [ "$(cat /var/lib/mesh_24_if 2>/dev/null)" = "$AP_INTERFACE" ]; then
             echo 2.4 > /var/lib/ap_mesh_band
@@ -631,7 +641,7 @@ if [[ "$eud" == "wireless" ]] || [[ "$eud" == "auto" ]]; then
             echo 5 > /var/lib/ap_mesh_band
             > /var/lib/mesh_5_if
         fi
-        echo " > Removed $AP_INTERFACE from mesh_if (reserved for AP)"
+        printf '%s\n' " > Removed $AP_INTERFACE from mesh_if (reserved for AP)"
     fi
 fi
 
@@ -656,11 +666,14 @@ cleanup_iface_service() {
         [ -L "$link" ] || continue
         svc="$(basename "$link")"
 
-        iface="$(echo "$svc" | sed -E 's/.*[@-](wlan[0-9]+)\.service$/\1/')"
+        iface="$(printf '%s\n' "$svc" |
+            sed -E 's/.*[@-](wlan[0-9]+)\.service$/\1/')"
         [[ "$iface" == "$svc" ]] && continue
 
-        if ! echo " $valid_list " | grep -q " $iface "; then
-            echo " > Disabling stale service: $svc (iface $iface no longer in role)"
+        if ! printf '%s\n' " $valid_list " | grep -q " $iface "; then
+            printf '%s%s\n' \
+                " > Disabling stale service: $svc (iface $iface no longer " \
+                "in role)"
             systemctl disable --now "$svc" 2>/dev/null || true
             systemctl reset-failed "$svc" 2>/dev/null || true
         fi
@@ -670,11 +683,12 @@ cleanup_iface_service() {
     # (e.g. started manually, or left over after their wants symlink was removed
     # but the runtime instance kept lingering).
     for svc in $(systemctl list-units --all --no-legend --state=failed,loaded "$svc_pattern" 2>/dev/null | awk '{print $1}'); do
-        iface="$(echo "$svc" | sed -E 's/.*[@-](wlan[0-9]+)\.service$/\1/')"
+        iface="$(printf '%s\n' "$svc" |
+            sed -E 's/.*[@-](wlan[0-9]+)\.service$/\1/')"
         [[ "$iface" == "$svc" ]] && continue
 
-        if ! echo " $valid_list " | grep -q " $iface "; then
-            echo " > Cleaning up stale runtime instance: $svc"
+        if ! printf '%s\n' " $valid_list " | grep -q " $iface "; then
+            printf '%s\n' " > Cleaning up stale runtime instance: $svc"
             systemctl stop "$svc" 2>/dev/null || true
             systemctl reset-failed "$svc" 2>/dev/null || true
         fi
@@ -692,8 +706,8 @@ all_wireless_roles="$current_mesh $current_halow"
 for conf in /etc/wpa_supplicant/wpa_supplicant-wlan*.conf; do
     [ -e "$conf" ] || continue
     iface="$(basename "$conf" | sed -E 's/^wpa_supplicant-(wlan[0-9]+).*/\1/')"
-    if ! echo " $all_wireless_roles " | grep -q " $iface "; then
-        echo " > Removing stale wpa_supplicant config: $conf"
+    if ! printf '%s\n' " $all_wireless_roles " | grep -q " $iface "; then
+        printf '%s\n' " > Removing stale wpa_supplicant config: $conf"
         rm -f "$conf"
     fi
 done
@@ -729,7 +743,7 @@ Type=wlan
 [Link]
 Name=$target_name
 EOF
-    echo " > Pinning $target_name to MAC $mac"
+    printf '%s\n' " > Pinning $target_name to MAC $mac"
 }
 
 # Mesh interfaces are already ordered: [0]=2.4GHz, [1]=5GHz
@@ -737,7 +751,7 @@ EOF
 [ "${#mesh_ifaces[@]}" -gt 1 ] && write_link_file wlan1 "$(iface_mac "${mesh_ifaces[1]}")"
 [ "${#halow_ifaces[@]}" -gt 0 ] && write_link_file wlan2 "$(iface_mac "${halow_ifaces[0]}")"
 [ "${#nonmesh_ifaces[@]}" -gt 0 ] && write_link_file wlan3 "$(iface_mac "${nonmesh_ifaces[0]}")"
-echo "MESH_NAME=\"$MESH_NAME\"" > /etc/default/mesh
+printf '%s\n' "MESH_NAME=\"$MESH_NAME\"" > /etc/default/mesh
 
 
 # Detect if the .link files we just wrote disagree with current runtime names.
@@ -749,7 +763,7 @@ check_rename() {
     local current="$2"
     [[ -z "$current" ]] && return
     [[ "$target" == "$current" ]] && return
-    echo " > Rename pending: $current -> $target (next boot)"
+    printf '%s\n' " > Rename pending: $current -> $target (next boot)"
     needs_rerun=1
 }
 
@@ -812,23 +826,25 @@ for WLAN in $(cat /var/lib/mesh_if); do
     # names. Skip config writes; the post-reboot re-run will write them with
     # the correct names.
     if [ "$needs_rerun" -eq 1 ]; then
-        echo " > Rename pending: deferring wpa config for $WLAN to post-reboot re-run"
+        printf '%s%s\n' \
+            " > Rename pending: deferring wpa config for $WLAN to " \
+            "post-reboot re-run"
         continue
     fi
 
     # Skip this interface if it's the AP interface
     if [[ -n "$AP_INTERFACE" ]] && [[ "$WLAN" == "$AP_INTERFACE" ]]; then
-        echo " > Skipping $WLAN (will be used as AP)"
+        printf '%s\n' " > Skipping $WLAN (will be used as AP)"
         continue
     fi
 
     FREQ=$(iface_mesh_freq "$WLAN")
     if [[ -z "$FREQ" ]]; then
-        echo " > WARNING: Cannot determine band for $WLAN, skipping"
+        printf '%s\n' " > WARNING: Cannot determine band for $WLAN, skipping"
         continue
     fi
 
-    echo " > Setting SAE key/SSID for $WLAN (${FREQ} MHz) ..."
+    printf '%s\n' " > Setting SAE key/SSID for $WLAN (${FREQ} MHz) ..."
     write_mesh_wpa_conf "$WLAN" "$FREQ" || {
         provision_fail "Cannot write mesh supplicant configuration for $WLAN"
         provision_state incomplete "$(date +%s)"
@@ -847,7 +863,7 @@ RequiredForOnline=no
 MTUBytes=1532
 EOF
 
-    echo " > Enabling $WLAN for mesh use ..."
+    printf '%s\n' " > Enabling $WLAN for mesh use ..."
     systemctl enable wpa_supplicant@$WLAN.service
 done
 
@@ -874,7 +890,7 @@ HOST_MAC=$(python3 /usr/local/bin/manet_eud_ap.py suffix) || {
 if [[ -n "$AP_INTERFACE" ]] && [ "$needs_rerun" -eq 1 ]; then
     echo " > Rename pending - deferring AP config to post-reboot re-run"
 elif [[ -n "$AP_INTERFACE" ]]; then
-    echo "Configuring $AP_INTERFACE as access point..."
+    printf '%s\n' "Configuring $AP_INTERFACE as access point..."
 
     # The AP radio also needs a mesh config on disk: in wired-EUD mode
     # ethernet-autodetect hands it back to the mesh and restarts
@@ -882,10 +898,14 @@ elif [[ -n "$AP_INTERFACE" ]]; then
     # path starts it.
     AP_MESH_FREQ=$(iface_mesh_freq "$AP_INTERFACE")
     if [[ -n "$AP_MESH_FREQ" ]]; then
-        echo " > Writing mesh config for $AP_INTERFACE (${AP_MESH_FREQ} MHz, service left disabled)"
+        printf '%s%s\n' \
+            " > Writing mesh config for $AP_INTERFACE (${AP_MESH_FREQ} MHz," \
+            " service left disabled)"
         write_mesh_wpa_conf "$AP_INTERFACE" "$AP_MESH_FREQ"
     else
-        echo " > WARNING: cannot determine mesh band for $AP_INTERFACE, no mesh config written"
+        printf '%s%s\n' \
+            " > WARNING: cannot determine mesh band for $AP_INTERFACE, no " \
+            "mesh config written"
     fi
 
     # Create networkd config for AP interface (unmanaged, hostapd will control it)
@@ -915,12 +935,12 @@ EOF
 
     # Calculate DHCP pool based on max EUDs
     CALC_OUTPUT=$(manet-ipcalc.sh "$IPV4_NETWORK" 2>/dev/null)
-    FIRST_IP=$(echo "$CALC_OUTPUT" | awk '/HostMin/ {print $2}')
+    FIRST_IP=$(printf '%s\n' "$CALC_OUTPUT" | awk '/HostMin/ {print $2}')
 
     # Start pool at IP 6
     DHCP_START="${FIRST_IP%.*}.$((${FIRST_IP##*.} + 5))"
 
-    PREFIX=$(echo "$IPV4_NETWORK" | cut -d'/' -f2)
+    PREFIX=$(printf '%s\n' "$IPV4_NETWORK" | cut -d'/' -f2)
     HOST_BITS=$((32 - PREFIX))
     TOTAL_IPS=$((2**HOST_BITS - 2))
     MAX_NODES=$((TOTAL_IPS / (1 + MAX_EUDS)))
@@ -929,7 +949,9 @@ EOF
     POOL_END_OFFSET=$((5 + POOL_SIZE - 1))
     DHCP_END="${FIRST_IP%.*}.$((${FIRST_IP##*.} + POOL_END_OFFSET))"
 
-    echo " > DHCP pool: $DHCP_START - $DHCP_END (${POOL_SIZE} IPs for ${MAX_EUDS} EUDs × ${MAX_NODES} nodes)"
+    printf '%s%s\n' \
+        " > DHCP pool: $DHCP_START - $DHCP_END (${POOL_SIZE} IPs for " \
+        "${MAX_EUDS} EUDs × ${MAX_NODES} nodes)"
 
     # Detect 5 GHz capability to pick the right hw_mode and default channel
     if iface_supports_freq "$AP_INTERFACE" 5180; then
@@ -1005,12 +1027,12 @@ EOF
         # already up; whether the AP runs at all in auto mode stays
         # ethernet-autodetect's decision.
         if systemctl is-active --quiet hostapd.service; then
-            echo " > Restarting running hostapd onto $AP_INTERFACE"
+            printf '%s\n' " > Restarting running hostapd onto $AP_INTERFACE"
             systemctl restart hostapd.service 2>/dev/null || true
         fi
     fi
 
-    echo "AP configuration complete for $AP_INTERFACE"
+    printf '%s\n' "AP configuration complete for $AP_INTERFACE"
 fi
 
 # === CONFIGURE CLIENT AP (if exists and not used for mesh AP) ===
@@ -1021,7 +1043,7 @@ for WLAN in $(cat /var/lib/no_mesh_if | head -n 1); do
         continue
     fi
 
-    echo " > Setting up $WLAN as a client AP ..."
+    printf '%s\n' " > Setting up $WLAN as a client AP ..."
     echo "   > creating networkd file ..."
 
 cat <<- EOF > /etc/systemd/network/30-$WLAN.network
@@ -1040,11 +1062,13 @@ done
 
 for WLAN in $(cat /var/lib/halow_if | head -n 1); do
     if [ "$needs_rerun" -eq 1 ]; then
-        echo " > Rename pending: deferring HaLow wpa config for $WLAN to post-reboot re-run"
+        printf '%s%s\n' \
+            " > Rename pending: deferring HaLow wpa config for $WLAN to " \
+            "post-reboot re-run"
         continue
     fi
 
-    echo " > Setting up $WLAN for HaLow use ..."
+    printf '%s\n' " > Setting up $WLAN for HaLow use ..."
 
     # Create the network interface config
 cat <<-EOF > /etc/systemd/network/30-$WLAN.network
@@ -1169,7 +1193,9 @@ rm -f /etc/systemd/system/manet-halow-power.service \
 systemctl enable manet-mesh-power.service
 
 # === MORSE / HALOW MODULE OPTIONS ===
-echo "options cfg80211 ieee80211_regdom=$CFG80211_REGDOM" > /etc/modprobe.d/cfg80211.conf
+printf '%s\n' \
+    "options cfg80211 ieee80211_regdom=$CFG80211_REGDOM" \
+    > /etc/modprobe.d/cfg80211.conf
 
 # Preserve hardware-specific SPI modprobe options that were written by firstrun.
 # USB MM81xx adapters auto-select BCF by board type; forcing SPI BCF breaks probe.
@@ -1181,10 +1207,15 @@ if [ -f /etc/modprobe.d/morse.conf ] && ! has_usb_morse_device; then
 fi
 
 echo "options morse enable_mcast_whitelist=0 enable_mcast_rate_control=1" > /etc/modprobe.d/morse.conf
-echo "options morse country=$HALOW_REGULATORY_DOMAIN" >> /etc/modprobe.d/morse.conf
+printf '%s\n' \
+    "options morse country=$HALOW_REGULATORY_DOMAIN" \
+    >> /etc/modprobe.d/morse.conf
 
-[[ -n "$MORSE_BCF" ]]       && echo "options morse bcf=$MORSE_BCF" >> /etc/modprobe.d/morse.conf
-[[ -n "$MORSE_SPI_CLOCK" ]] && echo "options morse spi_clock_speed=$MORSE_SPI_CLOCK" >> /etc/modprobe.d/morse.conf
+[[ -n "$MORSE_BCF" ]]       &&
+    printf '%s\n' "options morse bcf=$MORSE_BCF" >> /etc/modprobe.d/morse.conf
+[[ -n "$MORSE_SPI_CLOCK" ]] &&
+    printf '%s\n' "options morse spi_clock_speed=$MORSE_SPI_CLOCK" \
+        >> /etc/modprobe.d/morse.conf
 
 
 if [[ "$HALOW_REGULATORY_DOMAIN" == "EU" ]]; then
@@ -1514,8 +1545,7 @@ ExecStart=/usr/bin/python3 /usr/local/bin/mesh-status.py 80
 Restart=on-failure
 RestartSec=5
 User=root
-# Allows reading /etc/mesh.conf (contains credentials) and calling batctl
-AmbientCapabilities=CAP_NET_RAW CAP_NET_ADMIN
+# Access limits are supplied by mesh-status.service.d/20-hardening.conf.
 
 [Install]
 WantedBy=multi-user.target
@@ -1566,7 +1596,7 @@ for _cfg in /boot/firmware/config.txt /boot/config.txt; do
         # Remove any existing i2c_arm line then append the correct one
         sed -i '/^dtparam=i2c_arm/d' "$_cfg"
         echo "dtparam=i2c_arm=on" >> "$_cfg"
-        echo " > I2C enabled in $_cfg"
+        printf '%s\n' " > I2C enabled in $_cfg"
     fi
 done
 
@@ -1592,21 +1622,21 @@ for _cfg in /boot/firmware/config.txt /boot/config.txt; do
     if [ "$_halow_on_spi" -eq 1 ]; then
         if ! grep -q 'dtparam=spi=on' "$_cfg"; then
             echo "dtparam=spi=on" >> "$_cfg"
-            echo " > SPI enabled in $_cfg"
+            printf '%s\n' " > SPI enabled in $_cfg"
             _config_txt_changed=1
         fi
         if ! grep -q 'mm610x-spi' "$_cfg"; then
             echo "dtoverlay=mm610x-spi.dtbo" >> "$_cfg"
-            echo " > mm610x-spi HaLow overlay added to $_cfg"
+            printf '%s\n' " > mm610x-spi HaLow overlay added to $_cfg"
             _config_txt_changed=1
         fi
         for _gpio_line in "gpio=3=op,dh" "gpio=7=op,dh" "gpio=17=op,dh"; do
             if ! grep -qF "$_gpio_line" "$_cfg"; then
-                echo "$_gpio_line" >> "$_cfg"
+                printf '%s\n' "$_gpio_line" >> "$_cfg"
                 _config_txt_changed=1
             fi
         done
-        echo " > Morse GPIO power/reset pins set in $_cfg"
+        printf '%s\n' " > Morse GPIO power/reset pins set in $_cfg"
     fi
 
     # CM4 only: PCIe WiFi cards (mt7916) need 32-bit DMA: the BCM2711 PCIe
@@ -1614,7 +1644,7 @@ for _cfg in /boot/firmware/config.txt /boot/config.txt; do
     if grep -q 'Compute Module 4' /proc/device-tree/model 2>/dev/null; then
         if ! grep -q 'pcie-32bit-dma' "$_cfg"; then
             printf '\n[cm4]\ndtoverlay=pcie-32bit-dma\n' >> "$_cfg"
-            echo " > pcie-32bit-dma added to $_cfg for CM4 PCIe WiFi"
+            printf '%s\n' " > pcie-32bit-dma added to $_cfg for CM4 PCIe WiFi"
             _config_txt_changed=1
         fi
     fi
@@ -1837,12 +1867,12 @@ if [ "$PROVISION_FAILURES" -gt 0 ]; then
     provision_state incomplete "$(date +%s)"
     echo ""
     echo "=================================================="
-    echo " PROVISIONING INCOMPLETE: $PROVISION_FAILURES step(s) failed"
+    printf '%s\n' " PROVISIONING INCOMPLETE: $PROVISION_FAILURES step(s) failed"
     sed 's/^/   - /' "$PROVISION_FAIL_FILE"
     echo ""
     echo " This node has NOT been marked provisioned."
     echo " Reconnect Ethernet and reboot, or re-run this script."
-    echo " Failures: $PROVISION_FAIL_FILE"
+    printf '%s\n' " Failures: $PROVISION_FAIL_FILE"
     echo "=================================================="
     echo ""
     # Leave radio-setup-run-once.service enabled: the next boot retries.
@@ -1883,4 +1913,4 @@ if [ -x /usr/local/bin/manet-user-scripts.sh ] && [ -d /var/lib/manet-user-scrip
     fi
 fi
 
-echo " >> Provisioning complete: $(date -Is)"
+printf '%s\n' " >> Provisioning complete: $(date -Is)"

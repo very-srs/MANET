@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 # Web UI / iperf firewall
 # Kernel-enforced answer to "who can reach the pages on this node".
 #
@@ -25,7 +25,7 @@ NFT="${NFT:-nft}"
 LOCK_FILE="${MANET_UI_FW_LOCK:-${STATE_FILE}.lock}"
 
 log() {
-    echo "[$(date +'%Y-%m-%d %H:%M:%S')] - UI-FIREWALL: $1"
+    printf '%s\n' "UI-FIREWALL: $1" >&2
 }
 
 # The DHCP pool dnsmasq is currently handing out.
@@ -44,17 +44,23 @@ apply_rules() {
     # nft applies the whole input as one transaction. An invalid rule leaves
     # the previous table intact. Adding first also covers the initial boot.
     {
-        echo "add table inet $TABLE"
-        echo "delete table inet $TABLE"
-        echo "add table inet $TABLE"
-        echo "add chain inet $TABLE input { type filter hook input priority -10; policy accept; }"
-        echo "add rule inet $TABLE input iifname lo accept"
-        echo "add rule inet $TABLE input tcp dport 80 ip saddr ${start}-${end} accept"
-        echo "add rule inet $TABLE input tcp dport 80 drop"
+        printf '%s\n' "add table inet $TABLE"
+        printf '%s\n' "delete table inet $TABLE"
+        printf '%s\n' "add table inet $TABLE"
+        printf '%s%s\n' \
+            "add chain inet $TABLE input { type filter hook input priority " \
+            "-10; policy accept; }"
+        printf '%s\n' "add rule inet $TABLE input iifname lo accept"
+        printf '%s%s\n' \
+            "add rule inet $TABLE input tcp dport 80 ip saddr ${start}" \
+            "-${end} accept"
+        printf '%s\n' "add rule inet $TABLE input tcp dport 80 drop"
         if [ -n "$mesh_net" ]; then
-            echo "add rule inet $TABLE input tcp dport 5201 ip saddr $mesh_net accept"
+            printf '%s%s\n' \
+                "add rule inet $TABLE input tcp dport 5201 ip saddr " \
+                "$mesh_net accept"
         fi
-        echo "add rule inet $TABLE input tcp dport 5201 drop"
+        printf '%s\n' "add rule inet $TABLE input tcp dport 5201 drop"
     } | "$NFT" -f -
 }
 
@@ -81,7 +87,7 @@ if [ "$(cat "$STATE_FILE" 2>/dev/null)" = "$DESIRED" ] &&
 fi
 
 if apply_rules "$DHCP_START" "$DHCP_END" "$MESH_NET"; then
-    if ! echo "$DESIRED" > "${STATE_FILE}.tmp" ||
+    if ! printf '%s\n' "$DESIRED" > "${STATE_FILE}.tmp" ||
        ! mv -f -- "${STATE_FILE}.tmp" "$STATE_FILE"; then
         log "ERROR: rules installed but firewall state could not be saved"
         exit 1

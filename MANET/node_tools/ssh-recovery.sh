@@ -4,7 +4,7 @@
 set -u
 
 log() {
-    echo "[$(date +'%Y-%m-%d %H:%M:%S')] - SSH-RECOVERY: $1"
+    printf '%s\n' "SSH-RECOVERY: $1" >&2
 }
 
 RADIO_PASSWORD=""
@@ -20,7 +20,7 @@ else
 fi
 
 if [ -n "$RADIO_PASSWORD" ]; then
-    echo "radio:$RADIO_PASSWORD" | chpasswd
+    printf '%s\n' "radio:$RADIO_PASSWORD" | chpasswd
 fi
 passwd -u radio 2>/dev/null || true
 

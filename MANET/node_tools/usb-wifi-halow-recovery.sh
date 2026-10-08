@@ -9,7 +9,8 @@ HALOW_SVC="wpa_supplicant-s1g-wlan2.service"
 DELAY=8
 
 log() {
-    echo "[usb-wifi-halow-recovery] $*" | systemd-cat -t usb-wifi-halow-recovery
+    printf '%s\n' "[usb-wifi-halow-recovery] $*" |
+        systemd-cat -t usb-wifi-halow-recovery
 }
 
 # Ignore Morse adapter itself and non-wlan interfaces

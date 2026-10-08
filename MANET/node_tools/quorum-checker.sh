@@ -10,7 +10,7 @@ STALE_NODE_THRESHOLD=600
 QUORUM_THRESHOLD=0.5
 
 log() {
-    echo "[$(date +'%Y-%m-%d %H:%M:%S')] - QUORUM: $1" | systemd-cat -t quorum-checker
+    printf '%s\n' "QUORUM: $1" | systemd-cat -t quorum-checker
 }
 
 [ ! -f "$REGISTRY_STATE_FILE" ] && exit 0
@@ -56,7 +56,8 @@ fi
 EXPECTED_ACTIVE=$((ACTIVE_ALFRED_COUNT - SHUTTING_DOWN_COUNT))
 
 if [ "$EXPECTED_ACTIVE" -gt 3 ]; then
-    QUORUM_MIN=$(echo "$EXPECTED_ACTIVE * $QUORUM_THRESHOLD" | bc | cut -d'.' -f1)
+    QUORUM_MIN=$(printf '%s\n' "$EXPECTED_ACTIVE * $QUORUM_THRESHOLD" |
+        bc | cut -d'.' -f1)
 
     if [ "$UNIQUE_BATMAN_ORIGINATORS" -lt "$QUORUM_MIN" ]; then
         if [ "$UNIQUE_BATMAN_ORIGINATORS" -ge 2 ]; then

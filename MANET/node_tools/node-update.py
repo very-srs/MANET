@@ -501,7 +501,8 @@ def main():
         updater.update()
     except (UpdateError, OSError, ValueError, EOFError, tarfile.TarError, zlib.error,
             subprocess.SubprocessError) as error:
-        updater.log(f"ERROR: Tools update failed: {error}", error=True)
+        updater.log(f"node-update.sh: Tools update failed: {error}",
+                    error=True)
         return 1
     return 0
 

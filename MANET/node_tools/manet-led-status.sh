@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 # Provisioning status on the onboard LEDs
 # The verdict manet-provision-status.sh prints on login, shown on the board's
 # two LEDs, so a node can be read across a bench without a terminal:
@@ -26,7 +26,7 @@ find_led() {
     local name
     for name in $1; do
         if [ -d "$LED_DIR/$name" ] && [ -w "$LED_DIR/$name/trigger" ]; then
-            echo "$LED_DIR/$name"
+            printf '%s\n' "$LED_DIR/$name"
             return 0
         fi
     done
@@ -50,7 +50,7 @@ set_led() {
     case "$max" in ''|*[!0-9]*) max=1 ;; esac
 
     if [ "$mode" = on ]; then
-        echo "$max" > "$path/brightness" 2>/dev/null || true
+        printf '%s\n' "$max" > "$path/brightness" 2>/dev/null || true
     else
         echo 0 > "$path/brightness" 2>/dev/null || true
     fi

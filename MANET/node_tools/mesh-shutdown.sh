@@ -9,7 +9,7 @@ ALFRED_DATA_TYPE=68
 CONTROL_IFACE="br0"
 
 log() {
-    echo "[$(date +'%Y-%m-%d %H:%M:%S')] - MESH-SHUTDOWN: $1" | systemd-cat -t mesh-shutdown
+    printf '%s\n' "MESH-SHUTDOWN: $1" | systemd-cat -t mesh-shutdown
 }
 
 log "=== GRACEFUL MESH SHUTDOWN INITIATED ==="
@@ -33,13 +33,13 @@ TOMBSTONE_PAYLOAD=$("$ENCODER_PATH" telemetry \
 
 if [ -n "$TOMBSTONE_PAYLOAD" ]; then
     log "Broadcasting tombstone announcement..."
-    echo -n "$TOMBSTONE_PAYLOAD" | alfred -s $ALFRED_DATA_TYPE
+    printf '%s' "$TOMBSTONE_PAYLOAD" | alfred -s $ALFRED_DATA_TYPE
 
     # Broadcast 3 times over 5 seconds for reliability
     sleep 2
-    echo -n "$TOMBSTONE_PAYLOAD" | alfred -s $ALFRED_DATA_TYPE
+    printf '%s' "$TOMBSTONE_PAYLOAD" | alfred -s $ALFRED_DATA_TYPE
     sleep 2
-    echo -n "$TOMBSTONE_PAYLOAD" | alfred -s $ALFRED_DATA_TYPE
+    printf '%s' "$TOMBSTONE_PAYLOAD" | alfred -s $ALFRED_DATA_TYPE
 
     log "Tombstone announced. Mesh will ignore our absence."
 else

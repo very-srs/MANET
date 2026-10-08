@@ -11,6 +11,19 @@ Description=Mesh push-to-talk voice: Lyra/RTP over multicast
 After=network-online.target batman-enslave.service
 
 [Service]
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+# Keep ALSA and hot-plug HID access; GStreamer may use RT scheduling.
+ReadWritePaths=/run
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_SYS_NICE
 Type=simple
 ExecStart=/usr/bin/python3 /usr/local/bin/mesh-voice.py
 # voice=n in /etc/mesh.conf makes the daemon exit 0 immediately, so an

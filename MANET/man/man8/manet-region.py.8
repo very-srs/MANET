@@ -1,0 +1,58 @@
+.Dd October 8, 2026
+.Dt MANET-REGION.PY 8
+.Os MANET
+.Sh NAME
+.Nm manet-region.py
+.Nd write the configured regulatory domain to radio configuration files
+.Sh SYNOPSIS
+.Nm
+.Cm apply
+.Sh DESCRIPTION
+.Nm
+reads
+.Li regulatory_domain
+from the node configuration and writes it to Wi-Fi, HaLow and
+access-point configuration files.
+Run as root after setting the country in
+.Pa /etc/mesh.conf .
+A missing or empty setting defaults to
+.Li US .
+The command accepts only the
+.Cm apply
+argument.
+.Pp
+Countries using the EU HaLow plan are mapped to the HaLow
+.Li EU
+domain.
+Moving between US and non-US HaLow plans resets the HaLow channel fields
+to the new plan's defaults.
+The derived
+.Li halow_regulatory_domain
+is saved in the node configuration after the radio files are updated.
+.Pp
+Changed filenames are printed.
+The command does not restart radios or reboot; radios use the configuration
+from the next boot.
+.Sh FILES
+.Bl -tag -width Ds
+.It Pa /etc/mesh.conf
+Configured country and derived HaLow domain.
+.It Pa /etc/modprobe.d/cfg80211.conf , /etc/modprobe.d/morse.conf
+Kernel module regulatory settings.
+.It Pa /etc/default/crda
+Userspace regulatory-domain setting.
+.It Pa /etc/hostapd/hostapd.conf
+Access-point country code, updated if the file exists.
+.It Pa /etc/wpa_supplicant/wpa_supplicant-*.conf
+Existing Wi-Fi and HaLow supplicant country and channel settings.
+.El
+.Sh EXIT STATUS
+Exits 0 after applying settings, 1 for a configuration or file error,
+and 2 for invalid arguments.
+.Sh EXAMPLES
+Apply the country already selected in the node configuration:
+.Bd -literal -offset indent
+sudo manet-region.py apply
+.Ed
+.Sh SEE ALSO
+.Xr radio-setup.sh 8

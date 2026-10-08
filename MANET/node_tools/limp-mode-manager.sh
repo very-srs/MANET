@@ -9,7 +9,7 @@ LIMP_MODE_CONSENSUS=0.5
 STALE_NODE_THRESHOLD=600
 
 log() {
-    echo "[$(date +'%Y-%m-%d %H:%M:%S')] - LIMP-MODE: $1" | systemd-cat -t limp-mode-manager
+    printf '%s\n' "LIMP-MODE: $1" | systemd-cat -t limp-mode-manager
 }
 
 exec 8>"${MANET_ACS_LOCK_FILE:-/run/channel-election.lock}"
@@ -34,7 +34,8 @@ ACTIVE_ALFRED_COUNT=$(awk -F"['=]" -v now="$UPTIME_NOW" -v stale="$STALE_NODE_TH
 # Count nodes reporting limp mode
 LIMP_NODE_COUNT=$(grep -c "IS_IN_LIMP_MODE='true'" "$REGISTRY_STATE_FILE" 2>/dev/null)
 
-LIMP_RATIO=$(echo "scale=2; $LIMP_NODE_COUNT / $ACTIVE_ALFRED_COUNT" | bc)
+LIMP_RATIO=$(printf '%s\n' "scale=2; $LIMP_NODE_COUNT / $ACTIVE_ALFRED_COUNT" |
+    bc)
 
 log "Limp mode consensus: $LIMP_NODE_COUNT/$ACTIVE_ALFRED_COUNT ($LIMP_RATIO)"
 
@@ -47,7 +48,7 @@ if [ -f "$LIMP_STATE_FILE" ]; then
     LIMP_MODE_ENTRY_TIME=$(cat "$LIMP_STATE_FILE")
     if ! [[ "$LIMP_MODE_ENTRY_TIME" =~ ^[0-9]+$ ]] || [ "$LIMP_MODE_ENTRY_TIME" -gt "$UPTIME_NOW" ]; then
         LIMP_MODE_ENTRY_TIME=$UPTIME_NOW
-        echo "$UPTIME_NOW" > "$LIMP_STATE_FILE"
+        printf '%s\n' "$UPTIME_NOW" > "$LIMP_STATE_FILE"
     fi
 else
     CURRENT_LIMP_STATE="false"
@@ -55,13 +56,13 @@ else
 fi
 
 # Determine action
-if (( $(echo "$LIMP_RATIO > $LIMP_MODE_CONSENSUS" | bc -l) )); then
+if (( $(printf '%s\n' "$LIMP_RATIO > $LIMP_MODE_CONSENSUS" | bc -l) )); then
     # Should be in limp mode
     if [ "$CURRENT_LIMP_STATE" == "false" ]; then
         log "ENTERING LIMP MODE (consensus: $LIMP_RATIO)"
         [ -n "$mesh_iface_24" ] && iw dev "$mesh_iface_24" set bitrates legacy-2.4 1 2 5.5 11
         [ -n "$mesh_iface_5" ] && iw dev "$mesh_iface_5" set bitrates legacy-5 6 9 12 18
-        echo "$UPTIME_NOW" > "$LIMP_STATE_FILE"
+        printf '%s\n' "$UPTIME_NOW" > "$LIMP_STATE_FILE"
     fi
 else
     # Should exit limp mode

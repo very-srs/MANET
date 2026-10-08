@@ -5,7 +5,7 @@ NTP_STATE_FILE="/var/run/mesh-ntp.state"
 ETHERNET_STATE_FILE="/var/run/ethernet_detection_state"
 
 log() {
-    echo "[$(date +'%Y-%m-%d %H:%M:%S')] - ETH-OFF: $1" | systemd-cat -t ethernet-off
+    printf '%s\n' "ETH-OFF: $1" | systemd-cat -t ethernet-off
 }
 
 # systemctl unmask always triggers a full daemon-reload, and enable on units

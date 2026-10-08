@@ -16,7 +16,7 @@ WAIT_SECS="${SAE_WATCHDOG_WAIT_SECS:-15}"
 STANDARD_MESH_INTERFACES=""
 
 log() {
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] - SAE-WATCHDOG: $*"
+    manet_log SAE-WATCHDOG "$*"
 }
 
 # radio_iface_enabled: manet-common.sh
@@ -24,10 +24,10 @@ log() {
 service_unit_for_iface() {
     local iface="$1"
     if [ -s /var/lib/halow_if ] && grep -qx "$iface" /var/lib/halow_if 2>/dev/null; then
-        echo "wpa_supplicant-s1g-${iface}.service"
+        printf '%s\n' "wpa_supplicant-s1g-${iface}.service"
         return 0
     fi
-    echo "wpa_supplicant@${iface}.service"
+    printf '%s\n' "wpa_supplicant@${iface}.service"
 }
 
 restart_mesh() {

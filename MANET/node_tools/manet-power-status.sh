@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 # Power / throttling status
 # Answers one question, on login and on demand: is this board getting enough
 # power?
@@ -19,6 +19,15 @@
 # Never fails: a motd hook that errors breaks the login banner, and the status
 # page must render on hardware that has no throttling interface at all.
 
+usage() {
+    printf '%s\n' 'usage: manet-power-status.sh [--json]' >&2
+}
+
+if [ $# -gt 1 ] || { [ $# -eq 1 ] && [ "$1" != --json ]; }; then
+    usage
+    exit 1
+fi
+
 # vcgencmd reports a bitmask. Low bits are live state, bits 16+ are sticky
 # "has happened since boot" flags - which are the useful ones, because the
 # event that killed a radio is over by the time anyone logs in to look.
@@ -36,7 +45,7 @@ read_throttled() {
     command -v vcgencmd >/dev/null 2>&1 || return 1
     out="$(vcgencmd get_throttled 2>/dev/null)" || return 1
     case "$out" in
-        throttled=0x*) echo "${out#throttled=}" ;;
+        throttled=0x*) printf '%s\n' "${out#throttled=}" ;;
         *) return 1 ;;
     esac
 }

@@ -145,9 +145,15 @@ def main():
                 low_cells = [v for v in data["cell_mv"] if 0 < v < CELL_LOW_MV]
                 if low_cells:
                     log.critical("Cell voltage critical %s mV: initiating graceful shutdown", low_cells)
-                    shutdown_triggered = True
-                    subprocess.run(["systemctl", "poweroff"], check=False)
+                    result = subprocess.run(
+                        ["systemctl", "poweroff"], check=False, timeout=15)
+                    shutdown_triggered = result.returncode == 0
+                    if not shutdown_triggered:
+                        log.error("Poweroff request failed (exit %d); retrying",
+                                  result.returncode)
 
+        except subprocess.SubprocessError as e:
+            log.error("Poweroff request failed; retrying: %s", e)
         except OSError as e:
             consecutive_errors += 1
             log.error("I2C read error (%d consecutive): %s", consecutive_errors, e)
