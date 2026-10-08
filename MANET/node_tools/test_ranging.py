@@ -310,7 +310,7 @@ class PairingTests(unittest.TestCase):
 
     def test_consecutive_losses_with_measured_drift_and_crystal_margin(self):
         # Trace medians reach 8.4 ppm; largest apparent slope is 29.7 ppm.
-        # Also check the review's 20 ppm example and the 40 ppm design margin.
+        # Also check 20 ppm clock drift and the 40 ppm design margin.
         lost_frames, lost_acks = tuple(range(5, 13)), tuple(range(21, 28))
         for ppm in (8.4, 20, 29.7, 40):
             for interval_ms in (20, 50, 100):

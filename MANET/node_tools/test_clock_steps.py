@@ -58,7 +58,7 @@ class UptimeNowTests(ClockHarness):
         self.assertEqual(self.read('0.00 0\n'), (0, '0'))
 
     def test_malformed_clock_fails_instead_of_reading_as_zero(self):
-        # codex-003 #5: a bad read must not become an arithmetic zero.
+        # a bad read must not become an arithmetic zero.
         for text in ('\n', '', 'not-a-clock 0\n', '1.2.3 0\n', '-5 0\n'):
             self.assertEqual(self.read(text), (1, ''), repr(text))
 
@@ -182,7 +182,7 @@ class EnslaveWatchCooldownTests(ClockHarness):
         self.assertTrue(self.repairs(12))
 
     def test_wall_time_from_an_older_version_does_not_block_repair(self):
-        # codex-003 #1: a same-boot tools update leaves an epoch stamp behind.
+        # a same-boot tools update leaves an epoch stamp behind.
         self.assertTrue(self.repairs(5000, stamp=1791288000))
 
 

@@ -1,4 +1,4 @@
-"""ATAK service integration with fake sockets/time and the captured Pixel packets."""
+"""ATAK service integration with fake sockets/time and synthetic phone packets."""
 import copy
 import configparser
 from datetime import datetime, timedelta, timezone
@@ -30,7 +30,9 @@ def module(name, path):
 
 
 atak = module('manet_atak_service', Path(__file__).with_name('manet-atak.py'))
-sim = module('atak_phone_sim', ROOT / 'review-collab/atak-20261006/sim/phone.py')
+FIXTURES = Path(__file__).with_name('testdata') / 'atak'
+sim = module('atak_phone_packets', FIXTURES / 'packets.py')
+scenario = module('atak_scenario', FIXTURES / 'scenario.py')
 BASE = datetime(2026, 10, 7, tzinfo=timezone.utc)
 IP, LOCAL, MAC = '192.0.2.2', '192.0.2.1', '02:00:00:00:00:02'
 
@@ -250,9 +252,9 @@ class IdleApplicationTests(Harness):
         self.assertEqual(status['inputs']['jamming_input'], 'GPIO input unavailable after activation')
 
 
-class PixelFlowTests(Harness):
-    def test_run1_resend_step_and_user_sa_keep_original_marker_age(self):
-        self.clock.wall_offset = -464354.5  # radio clock about 5.4 days slow
+class PhoneFlowTests(Harness):
+    def test_resend_step_and_user_sa_keep_original_marker_age(self):
+        self.clock.wall_offset = -432000  # radio clock five days slow
         self.sa()
         self.tick()
         original = None
@@ -577,19 +579,14 @@ class PersistenceTests(Harness):
 
 
 class FirewallReadbackTests(unittest.TestCase):
-    """Real `nft -j list table` output from cm4 (nftables 1.1, kernel 6.18)."""
-    READBACK = (Path(__file__).resolve().parents[2]
-                / 'review-collab/atak-20261006/samples/nft-readback-cm4.json')
+    """nftables 1.1 JSON with redundant protocol matches omitted."""
+    READBACK = FIXTURES / 'nft-readback.json'
 
-    def test_cm4_readback_omits_implied_matches_and_still_validates(self):
-        if not self.READBACK.exists():
-            self.skipTest('cm4 readback capture not in this checkout')
+    def test_readback_omits_implied_matches_and_still_validates(self):
         data = json.loads(self.READBACK.read_text())
         self.assertTrue(atak.valid_firewall(data))
 
     def test_dropping_a_real_match_still_fails(self):
-        if not self.READBACK.exists():
-            self.skipTest('cm4 readback capture not in this checkout')
         data = json.loads(self.READBACK.read_text())
         rule = next(i['rule'] for i in data['nftables']
                     if 'rule' in i and i['rule']['chain'] == 'input'
@@ -715,7 +712,10 @@ class FirewallLifecycleTests(unittest.TestCase):
 
     def test_unit_orders_root_hooks_and_runs_them_on_each_start_stop(self):
         unit = configparser.ConfigParser(interpolation=None)
-        unit.read(ROOT / 'MANET/systemd/manet-atak.service')
+        unit_path = ROOT / 'MANET/systemd/manet-atak.service'
+        if not unit_path.is_file():
+            unit_path = ROOT.parent / 'etc/systemd/system/manet-atak.service'
+        self.assertEqual(unit.read(unit_path), [str(unit_path)])
         self.assertIn('nftables.service', unit['Unit']['After'].split())
         self.assertIn('nftables.service', unit['Unit']['PartOf'].split())
         service = unit['Service']
@@ -1369,12 +1369,8 @@ class SimulatorTests(unittest.TestCase):
             self.assertEqual(receipt.destination_uid, 'radio-1')
 
 
-class LaptopPlanTests(unittest.TestCase):
+class ScenarioPlanTests(unittest.TestCase):
     def make_plan(self):
-        source = (ROOT / 'review-collab/atak-20261006/sim/cm4-plan.sh').read_text()
-        source = source.split("<<'PY'\n", 1)[1].rsplit('\nPY', 1)[0]
-        namespace = {'__name__': 'atak_laptop_plan_test'}
-        exec(compile(source, 'cm4-plan.sh (embedded Python)', 'exec'), namespace)
         h = Harness()
         h.setUp()
 
@@ -1387,9 +1383,9 @@ class LaptopPlanTests(unittest.TestCase):
                                 now.boot + self.boot_shift, now.utc)
 
         h.clock = RadioClock()
-        h.clock.wall_offset = -464354.5
+        h.clock.wall_offset = -432000
 
-        class FakeLaptop(namespace['Plan']):
+        class FakeScenario(scenario.Plan):
             def __init__(self):
                 super().__init__(h.packets)
                 self.token = 'offline'
@@ -1445,9 +1441,9 @@ class LaptopPlanTests(unittest.TestCase):
             def capture_stop(self, label):
                 self.captures.append(label)
 
-        return FakeLaptop(), namespace['CheckFailure']
+        return FakeScenario(), scenario.CheckFailure
 
-    def test_laptop_plan_against_real_service_with_fake_time_io_and_reboot(self):
+    def test_scenario_against_real_service_with_fake_time_io_and_reboot(self):
         plan, _ = self.make_plan()
         with patch('sys.stdout', io.StringIO()):
             plan.run()

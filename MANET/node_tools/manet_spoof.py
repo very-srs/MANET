@@ -15,11 +15,11 @@ fails it only when an earlier test of the same pair also disagreed, or when
 one end also disagrees with a different partner.
 
 A failed pair does not say which receiver is wrong, or whether the range
-is, so both ends are distrusted for time (Mike, 2026-10-06: safety first)
+is, so both ends are distrusted for time
 and stay distrusted for QUARANTINE_S after their last failure, whatever
 passes they collect. Passes cannot clear a node: a spoofed fix reflected
 across its partners passes them, and receivers captured together keep
-their shared geometry and pass among themselves (codex-007). A captured
+their shared geometry and pass among themselves. A captured
 radio keeps failing audits, so it keeps renewing its own quarantine. If
 nothing can be measured any more, the quarantine still ends: losing the
 means to check is reported as UNCHECKED, never as a pass.
@@ -40,7 +40,7 @@ States, per node:
   INCONSISTENT_UNATTRIBUTED  failed within QUARANTINE_S, not attributed
   GNSS_SUSPECTED             in a live failed pair, and failures point at it
 
-Groups closer than SCOPE_M are out of scope (Mike, 2026-10-06): ranging
+Groups closer than SCOPE_M are out of scope: ranging
 cannot separate them from a spoof that moves them together. Scope is judged
 by the measured range, never by GNSS distance, because a spoofer that puts
 separated receivers on one point is exactly what makes them look close.

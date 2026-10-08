@@ -18,7 +18,7 @@ from manet_cot import (
 NOW = datetime(2026, 10, 6, 18, 23, 45, 123456, tzinfo=timezone.utc)
 FIX = Fix(39.75, -104.99, "gnss", 1610.5,
           ErrorEstimate(8, 0.90), ErrorEstimate(12, 0.90))
-SAMPLES = Path(__file__).resolve().parents[2] / "review-collab/atak-20261006/samples"
+SAMPLES = Path(__file__).with_name("testdata") / "atak/samples"
 
 
 def marker():
@@ -276,7 +276,7 @@ class ExternalPositionTests(unittest.TestCase):
 
 
 def receipt_wire(status="r"):
-    # Independent malformed-input fixture; real Pixel captures are tested below.
+    # Independent malformed-input fixture; synthetic wire samples are tested below.
     return f'''<event version="2.0" uid="message.42" type="b-t-f-{status}" how="m-g"
  time="2026-10-06T18:23:45.123Z" start="2026-10-06T18:23:45.123Z"
  stale="2026-10-07T18:23:45.123Z"><point lat="0" lon="0" hae="9999999" ce="9999999" le="9999999"/>
@@ -541,26 +541,26 @@ class ParserTests(unittest.TestCase):
 
 
 class DeviceSampleTests(unittest.TestCase):
-    def test_captured_gps_self_sa(self):
+    def test_sample_gps_self_sa(self):
         sa = parse_self_sa((SAMPLES / "self-sa-gps.xml").read_bytes())
         self.assertIsInstance(sa, PhoneSA)
-        self.assertEqual((sa.uid, sa.callsign), ("ANDROID-0123456789abcdef", "USER1"))
+        self.assertEqual((sa.uid, sa.callsign), ("ANDROID-test-0001", "TEST-PHONE-1"))
         self.assertEqual((sa.lat, sa.lon, sa.hae, sa.ce, sa.le),
-                         (39.7401234, -104.9912345, 1673.984, 4.6, None))
+                         (0.25, -30.25, 10.0, 5.0, None))
         self.assertEqual((sa.source, sa.geopointsrc, sa.altsrc), ("gps", "GPS", "GPS"))
         self.assertEqual(sa.endpoint, "tcpsrcreply:4242:srctcp")
-        self.assertEqual(sa.time.isoformat(), "2026-10-06T23:31:56.125000+00:00")
+        self.assertEqual(sa.time.isoformat(), "2000-01-01T00:00:00+00:00")
         self.assertEqual(sa.stale - sa.start, timedelta(seconds=75))
 
-    def test_captured_manual_self_sa(self):
+    def test_sample_manual_self_sa(self):
         sa = parse_self_sa((SAMPLES / "self-sa-manual.xml").read_bytes())
         self.assertIsInstance(sa, PhoneSA)
         self.assertEqual((sa.source, sa.how, sa.geopointsrc, sa.altsrc),
                          ("manual", "h-e", None, "SRTM1"))
         self.assertEqual((sa.lat, sa.lon, sa.hae, sa.ce, sa.le),
-                         (39.7401234, -104.9902345, 1661.03, None, None))
+                         (0.25, -30.249, 11.0, None, None))
 
-    def test_captured_cold_start_and_user_selection(self):
+    def test_sample_cold_start_and_user_selection(self):
         empty = parse_self_sa((SAMPLES / "self-sa-no-location.xml").read_bytes())
         selected = parse_self_sa((SAMPLES / "self-sa-user-selected.xml").read_bytes())
         self.assertIsInstance(empty, PhoneSA)
@@ -570,33 +570,33 @@ class DeviceSampleTests(unittest.TestCase):
         self.assertEqual((selected.source, selected.how, selected.geopointsrc, selected.altsrc),
                          ("manual", "m-g", "USER", "SRTM1"))
         self.assertEqual((selected.lat, selected.lon, selected.hae, selected.ce, selected.le),
-                         (39.7421234, -105.0212345, 1606.18, None, None))
+                         (0.252, -30.28, 12.0, None, None))
         self.assertEqual(selected.stale - selected.start, timedelta(seconds=75))
         for source in ("GPS", "USER", "MANET:manual"):
             root = ET.fromstring((SAMPLES / "self-sa-no-location.xml").read_bytes())
             ET.SubElement(root.find("detail"), "precisionlocation", {"geopointsrc": source})
             self.assertEqual(parse_self_sa(ET.tostring(root)).source, "unknown")
 
-    def test_captured_delivered_and_read_receipts(self):
-        for name, status, stamp in (("delivered", "delivered", "03:05:26.289000"),
-                                    ("read", "read", "03:05:43.181000")):
+    def test_sample_delivered_and_read_receipts(self):
+        for name, status, stamp in (("delivered", "delivered", "03:33:30.164000"),
+                                    ("read", "read", "03:33:47.056000")):
             receipt = parse_chat_receipt((SAMPLES / f"chat-receipt-{name}.xml").read_bytes())
             self.assertIsInstance(receipt, ChatReceipt)
             self.assertEqual((receipt.message_id, receipt.sender_uid, receipt.destination_uid, receipt.status),
-                             ("5edabef44ad046d8a1a6d08e64d56907", "ANDROID-0123456789abcdef",
-                              "MANET-RADIO-cm4", status))
-            self.assertEqual(receipt.time.isoformat(), f"2026-10-07T{stamp}+00:00")
+                             ("receipt-test-0001", "ANDROID-test-0001",
+                              "MANET-RADIO-test-0001", status))
+            self.assertEqual(receipt.time.isoformat(), f"2000-01-01T{stamp}+00:00")
             self.assertEqual(receipt.start, receipt.time)
             self.assertEqual(receipt.stale - receipt.time, timedelta(days=1))
 
-    def test_captured_phone_chat(self):
+    def test_sample_phone_chat(self):
         chat = parse_phone_chat((SAMPLES / "chat-from-phone.xml").read_bytes())
         self.assertIsInstance(chat, PhoneChat)
         self.assertEqual((chat.sender_uid, chat.destination_uid, chat.conversation_id, chat.callsign),
-                         ("ANDROID-0123456789abcdef", "MANET-RADIO-cm4", "MANET-RADIO-cm4", "USER1"))
-        self.assertEqual(chat.message_id, "a7280ceb-c48e-4644-8b18-ddd0bba742cf")
+                         ("ANDROID-test-0001", "MANET-RADIO-test-0001", "MANET-RADIO-test-0001", "TEST-PHONE-1"))
+        self.assertEqual(chat.message_id, "chat-test-0001")
         self.assertEqual(chat.text, "opened")
-        self.assertEqual(chat.time.isoformat(), "2026-10-07T03:05:49.822000+00:00")
+        self.assertEqual(chat.time.isoformat(), "2000-01-01T03:33:53.697000+00:00")
         self.assertEqual(chat.remarks_time, chat.time)
         self.assertEqual(chat.stale - chat.start, timedelta(days=1))
 
@@ -613,14 +613,14 @@ class DeviceSampleTests(unittest.TestCase):
         framer.finish()
         self.assertEqual(frames, documents)
 
-    def test_captured_sent_point_and_range_bearing_line(self):
+    def test_sample_sent_point_and_range_bearing_line(self):
         point = (SAMPLES / "sent-point.xml").read_bytes()
         mark = parse_marker(point)
         self.assertIsInstance(mark, MarkCandidate)
-        self.assertEqual((mark.type, mark.how, mark.callsign), ("a-u-G", "h-g-i-g-o", "U.6.174044"))
+        self.assertEqual((mark.type, mark.how, mark.callsign), ("a-u-G", "h-g-i-g-o", "TEST-POINT-1"))
         self.assertTrue(mark.human_placed)
-        self.assertEqual(mark.creator_uid, "ANDROID-0123456789abcdef")
-        self.assertEqual(mark.creator_time.isoformat(), "2026-10-06T23:40:44.538000+00:00")
+        self.assertEqual(mark.creator_uid, "ANDROID-test-0001")
+        self.assertEqual(mark.creator_time.isoformat(), "2000-01-01T00:08:48.413000+00:00")
         self.assertLess(mark.creator_time, mark.time)
         self.assertIsInstance(parse_self_sa(point), str)
         line = (SAMPLES / "sent-rb-line.xml").read_bytes()
@@ -668,7 +668,7 @@ class DeviceSampleTests(unittest.TestCase):
     def test_sa_reuses_safe_parser_and_rejects_ambiguous_source(self):
         self.assertIsInstance(parse_self_sa(marker()), str)  # Equipment, not phone self SA.
         for data in (b"<!DOCTYPE event><event/>", b"<event", b"\xbf\x01\xbf",
-                     (SAMPLES / "self-sa-gps.xml").read_bytes().replace(b'ce="4.6"', b'ce="NaN"')):
+                     (SAMPLES / "self-sa-gps.xml").read_bytes().replace(b'ce="5.0"', b'ce="NaN"')):
             self.assertIsInstance(parse_self_sa(data), str)
         data = (SAMPLES / "self-sa-gps.xml").read_bytes()
         self.assertIn("byte limit", parse_self_sa(data, max_bytes=len(data)-1))

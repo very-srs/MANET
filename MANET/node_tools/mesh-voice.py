@@ -511,7 +511,7 @@ class Config:
                                     HIGHPASS_MAX_HZ)
         # Upper edge. 0 leaves the path high-pass only, which is the default:
         # narrowing to a walkie-talkie band makes speech pop on some headsets
-        # and sound thin on others, so it is Mike's field call, not a default.
+        # and sound thin on others, so it remains an operator choice.
         # Setting this turns the stage into a band-pass, which also changes the
         # element and the pole count. Try 4000 with highpass 100.
         self.lowpass_hz = conf_int(conf, "voice_lowpass_hz", 0, 0, 8000)

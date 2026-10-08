@@ -12,7 +12,7 @@ from manet_cot import (Fix, PhoneSA, parse_marker, parse_self_sa, hidden_contact
 from manet_phone import PhonePosition, RadioGPS, PHONE_SA_HISTORY
 
 
-SAMPLES = Path(__file__).resolve().parents[2] / "review-collab/atak-20261006/samples"
+SAMPLES = Path(__file__).with_name("testdata") / "atak/samples"
 GPS = parse_self_sa((SAMPLES / "self-sa-gps.xml").read_bytes())
 MANUAL = parse_self_sa((SAMPLES / "self-sa-manual.xml").read_bytes())
 USER_SELECTED = parse_self_sa((SAMPLES / "self-sa-user-selected.xml").read_bytes())
@@ -168,10 +168,10 @@ class LocationSelectionTests(unittest.TestCase):
     def selection(self, position, seconds=0, **kwargs):
         return position.select(100 + seconds, utc(seconds), **kwargs)
 
-    def test_real_sent_point_is_accepted_by_pinned_creator_and_held(self):
+    def test_sample_sent_point_is_accepted_by_pinned_creator_and_held(self):
         position = PhonePosition(radio_uid="radio-1")
         position.feed(GPS, 100, GPS.time, from_ethernet=True)
-        # Preserve the elapsed phone time between these separately captured packets.
+        # Preserve the elapsed phone time between these sample packets.
         sent_mono = 100 + (SENT.time - GPS.time).total_seconds()
         outcome = position.feed_marker(SENT, sent_mono, SENT.time, from_ethernet=True)
         self.assertEqual(outcome.status, "accepted")
@@ -694,7 +694,7 @@ class FeedbackTests(SelectorTestCase):
         self.selected(position, radio_gps=self.gps(state="GNSS_SUSPECTED"))
         return position
 
-    def test_real_receipts_acknowledge_only_on_read(self):
+    def test_sample_receipts_acknowledge_only_on_read(self):
         delivered = parse_chat_receipt((SAMPLES / "chat-receipt-delivered.xml").read_bytes())
         read = parse_chat_receipt((SAMPLES / "chat-receipt-read.xml").read_bytes())
         position = PhonePosition(radio_uid=delivered.destination_uid, warning_read_timeout_s=10)

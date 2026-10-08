@@ -140,7 +140,7 @@ class PeerCountTests(PeerHarness):
         self.assertEqual(result.stdout, '')
 
     def test_more_than_one_json_document_is_refused(self):
-        # Codex 055: streaming documents one by one would count 2 or 0 here.
+        # streaming documents one by one would count 2 or 0 here.
         one = json.dumps([{'orig_address': PEER}])
         for text in (one + one, '[]\n[]', one + '\n[]'):
             with self.subTest(text=text):
@@ -149,7 +149,7 @@ class PeerCountTests(PeerHarness):
                 self.assertEqual((result.returncode, result.stdout), (1, ''))
 
     def test_mac_with_trailing_newline_is_refused(self):
-        # Codex 056: jq's $ also matches before a final newline.
+        # jq's $ also matches before a final newline.
         self.peers([{'orig_address': PEER + '\n'}])
         result = self.count()
         self.assertEqual((result.returncode, result.stdout), (1, ''))

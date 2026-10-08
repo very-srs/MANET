@@ -183,7 +183,6 @@ class EpochTests(unittest.TestCase):
         self.assertFalse(reader_mod.build_status(r, 1.5, 'b')['has_fix'])
 
     def test_omitted_identity_resolves_to_the_only_receiver(self):
-        # codex-006 optional_device_fields.
         r = GnssReader()
         r.feed({'class': 'DEVICES', 'devices': [{'path': DEV}]}, 1.0)
         r.feed({'class': 'TPV', 'mode': 3, 'time': iso(T0), 'lat': LAT, 'lon': LON}, 2.0)
@@ -192,7 +191,6 @@ class EpochTests(unittest.TestCase):
         self.assertFalse(reader_mod.build_status(r, 3.0, 'b')['has_fix'])
 
     def test_anonymous_receiver_is_removed_with_the_only_device(self):
-        # codex-007 anonymous_deactivation.
         r = GnssReader()
         r.feed({'class': 'TPV', 'mode': 3, 'time': iso(T0), 'lat': LAT, 'lon': LON}, 100.0)
         reader_mod.build_status(r, 100.0, 'b')
@@ -245,7 +243,7 @@ class AnomalyTests(unittest.TestCase):
         self.assertEqual(kinds(r), [])
 
     def test_persistent_clock_step(self):
-        # codex-007 clock_step_rearmed: one step, counted once, no drift.
+        # Clock step rearmed: one step, counted once, no drift.
         r, mono, t = settled_reader()
         steady(r, t, int(mg.STEP_HOLD_S) + 60, mono0=mono, offset=4.0)
         self.assertEqual(kinds(r), ['clock_step'])
@@ -272,7 +270,7 @@ class AnomalyTests(unittest.TestCase):
         self.assertEqual(kinds(r), ['time_discontinuity'])
 
     def test_backward_utc_correction_keeps_the_fix(self):
-        # codex-006 backwards_utc: UTC 18 s ahead, then corrected.
+        # UTC starts 18 s ahead, then is corrected backwards.
         r = GnssReader()
         for i in range(40):
             r.feed(tpv(T0 + 18 + i), 100.0 + i)
@@ -283,7 +281,6 @@ class AnomalyTests(unittest.TestCase):
         self.assertIn('time_discontinuity', kinds(r))
 
     def test_no_fix_with_a_repeated_time_is_still_a_loss(self):
-        # codex-006 same_epoch_loss_dropped.
         r = GnssReader()
         r.feed(tpv(T0), 1.0)
         r.feed({'class': 'TPV', 'device': DEV, 'mode': 1, 'time': iso(T0)}, 1.5)
@@ -297,7 +294,6 @@ class AnomalyTests(unittest.TestCase):
         self.assertFalse(reader_mod.build_status(r, mono, 'b')['settled'])
 
     def test_gap_before_a_report_ends_the_previous_fix(self):
-        # codex-006 silent_gap_settles.
         r = GnssReader()
         r.feed(tpv(T0), 100.0)
         r.feed(tpv(T0 + 40), 140.0)
@@ -496,7 +492,7 @@ class FakeGpsdTests(unittest.TestCase):
         self.assertEqual(len(history['samples']), 1)
 
     def test_suffix_of_an_oversized_line_is_not_parsed(self):
-        # codex-005 stream_check: no boundary precedes the JSON-looking tail.
+        # Stream check: no boundary precedes the JSON-looking tail.
         line = json.dumps(tpv(T0)).encode()
         chunks = [b'x' * (len(line) + 100), line + b'\n',
                   json.dumps(tpv(T0 + 1)).encode() + b'\n']

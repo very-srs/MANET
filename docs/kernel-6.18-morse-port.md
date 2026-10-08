@@ -416,8 +416,8 @@ patch wraps the table macro in `MANET_S1G_POWER()`, raising anything below
 requests 30 to 36 dBm and the MM8108 firmware answers with its own
 per-bandwidth limit. These are firmware/driver reports, not RF measurements,
 and they do not show whether a PA protection circuit or the firmware is the
-limiting stage. Measured on cm4.2 (bench MM8108, `bcf_boardtype_0807`),
-2026-10-02: 24.00 dBm at 2 MHz, 22.25 at 4 MHz, 22.00 at 8 MHz. The firmware
+limiting stage. Measured on CM4 with an MM8108 (`bcf_boardtype_0807`):
+24.00 dBm at 2 MHz, 22.25 at 4 MHz, 22.00 at 8 MHz. The firmware
 reports 24.75 dBm as its maximum. `iw dev wlan2 set txpower` does not reach
 the firmware on this driver; the power is fixed at each channel set.
 A likely cause (source reading, not yet instrumented): on 6.18, mac80211

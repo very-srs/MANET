@@ -112,7 +112,7 @@ class MeshPowerTests(unittest.TestCase):
         self.assertFalse([c for c in calls if c.startswith('iw dev wlan1 set')])
 
     def test_holds_the_channel_lock_used_by_ap_transitions(self):
-        # Codex 054: the role check and the request happen under the lock, so
+        # the role check and the request happen under the lock, so
         # a transition holding it cannot interleave. While it is held, wait
         # and give up rather than act on a stale check.
         self.radio('wlan1', 'phy1')
@@ -146,7 +146,7 @@ class MeshPowerTests(unittest.TestCase):
         self.assertIn('iw dev wlan0 set txpower fixed 3000', calls)
 
     def test_hung_iw_fails_bounded_and_releases_the_lock(self):
-        # Codex 060: unbounded iw calls held the channel lock indefinitely.
+        # unbounded iw calls held the channel lock indefinitely.
         for hang, writes in (('info', 0), ('set', 1)):
             with self.subTest(hang=hang):
                 self.calls_file.unlink(missing_ok=True)

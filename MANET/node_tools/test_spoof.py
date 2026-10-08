@@ -135,7 +135,7 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(b.state("B"), ms.RANGE_CONSISTENT)
 
     def test_colluding_partners_cannot_clear_each_other(self):
-        # codex-007 colluding_clearance: five receivers shifted together.
+        # Colluding clearance: five receivers shifted together.
         true = {"A": (0, 0), "B": (60, 0), "C": (0, 60), "D": (-60, 0),
                 "E": (60, 60), "F": (-60, 60)}
         b = Bench(true)
@@ -152,7 +152,6 @@ class MonitorTests(unittest.TestCase):
         self.assertIn(b.state("B"), ms.DISTRUSTED)
 
     def test_one_same_pair_pass_does_not_erase_a_failure(self):
-        # codex-007 single_pass_replaces_failure.
         b = Bench({"A": (0, 0), "B": (60, 0)})
         b.tick(3)
         b.reported["A"] = (200, 0)
@@ -164,7 +163,6 @@ class MonitorTests(unittest.TestCase):
         self.assertIn(b.state("A"), ms.DISTRUSTED)
 
     def test_revision_recomputes_a_stored_result(self):
-        # codex-007 revision_after_range.
         m = ms.Monitor()
         m.add_gnss("A", fix(0, 0, 1.0, up=0.0))
         m.add_gnss("B", fix(60, 0, 1.0, up=160.0))
@@ -174,7 +172,6 @@ class MonitorTests(unittest.TestCase):
         self.assertFalse(m.edges[frozenset("AB")]["disagrees"])
 
     def test_range_is_not_matched_across_a_no_fix_report(self):
-        # codex-007 no_fix_interval.
         m = ms.Monitor()
         m.add_gnss("A", fix(0, 0, 1.0))
         m.add_gnss("B", fix(60, 0, 0.0))
@@ -182,7 +179,7 @@ class MonitorTests(unittest.TestCase):
         self.assertIsNone(m.add_range(rng("A", "B", 60.0, 1.0)))
 
     def test_blame_never_clears_captured_receivers(self):
-        # codex-006 star_exoneration: B, C, D captured onto honest A's spot.
+        # Star exoneration: B, C, D captured onto honest A's spot.
         b = Bench({"A": (0, 0), "B": (60, 0), "C": (0, 60), "D": (-60, 0)})
         b.tick(3)
         for n in "BCD":
@@ -194,7 +191,6 @@ class MonitorTests(unittest.TestCase):
             self.assertIn(b.state(n), ms.DISTRUSTED)
 
     def test_peer_losing_its_fix_clears_nothing(self):
-        # codex-006 peer_loss_clears.
         b = Bench(SQUARE)
         b.tick(3)
         b.reported["A"] = (-60, 0)
@@ -207,7 +203,6 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(b.state("B"), ms.NO_FIX)
 
     def test_reader_revision_of_an_epoch_replaces_the_sample(self):
-        # codex-006 merged_sample_dropped.
         m = ms.Monitor()
         m.add_gnss("A", {"mono": 1.0, "mode": 2, "lat": LAT0, "lon": LON0, "alt_hae": None})
         m.add_gnss("A", {"mono": 1.0, "mode": 3, "lat": LAT0, "lon": LON0, "alt_hae": 1680.0})
@@ -227,7 +222,7 @@ class MonitorTests(unittest.TestCase):
             self.assertEqual(b.state(n), ms.INCONSISTENT)
 
     def test_capture_onto_an_honest_spot_blames_the_captured(self):
-        # codex-005 collapse_at_honest: B and C are put on A's true position.
+        # Collapse at honest: B and C are put on A's true position.
         b = Bench({"A": (0, 0), "B": (60, 0), "C": (0, 60)})
         b.tick(3)
         b.reported["B"] = b.reported["C"] = (0, 0)
@@ -240,7 +235,7 @@ class MonitorTests(unittest.TestCase):
         self.assertIn(b.state("C"), ms.DISTRUSTED)
 
     def test_reflection_across_partners_is_not_exonerated(self):
-        # codex-005 pass_penalty_flip: X reflected across the A-B-C line.
+        # Pass penalty flip: X reflected across the A-B-C line.
         b = Bench({"X": (0, 40), "D": (0, 80), "A": (-60, 0), "B": (0, 0), "C": (60, 0)})
         b.tick(3)
         b.reported["X"] = (0, -40)
@@ -253,7 +248,7 @@ class MonitorTests(unittest.TestCase):
         self.assertIn(b.state("X"), ms.DISTRUSTED)
 
     def test_slant_range_uses_heights(self):
-        # codex-005 height_false_positive: A 80 m up a hill.
+        # Height false positive: A 80 m up a hill.
         b = Bench({"A": (0, 0, 80), "B": (30, 0, 0), "C": (-30, 0, 0)})
         b.tick(3)
         for a, c in (("A", "B"), ("A", "C"), ("B", "C")):
@@ -262,14 +257,14 @@ class MonitorTests(unittest.TestCase):
             self.assertEqual(b.state(n), ms.RANGE_CONSISTENT)
 
     def test_unknown_height_only_short_ranges_count(self):
-        # codex-006 unknown_height: a long range could be height.
+        # Unknown height: a long range could be height.
         a = fix(0, 0, 1.0)
         c = fix(30, 0, 1.0)
         self.assertEqual(ms.range_residual(a, c, 85.4)[0], 0.0)
         self.assertAlmostEqual(ms.range_residual(fix(0, 0, 1.0), fix(90, 0, 1.0), 40.0)[0], 50.0, 1)
 
     def test_common_range_bias_at_one_radio_is_not_blamed(self):
-        # codex-005 correlated_range_bias: A's two ranges both read 25 m long.
+        # Correlated range bias: A's two ranges both read 25 m long.
         b = Bench({"A": (0, 0), "B": (60, 0), "C": (0, 60)})
         b.tick(3)
         b.measure("A", "B", extra=25.0)
@@ -278,7 +273,6 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(b.state("A"), ms.INCONSISTENT)
 
     def test_duplicate_range_is_not_confirmation(self):
-        # codex-005 duplicate_confirmation.
         b = Bench(SQUARE)
         b.tick(3)
         first = b.measure("A", "B", extra=25.0)
@@ -361,7 +355,6 @@ class SchedulerTests(unittest.TestCase):
         self.assertIsNone(ms.Scheduler(b.m).next_pair(b.t, ["A", "B"], self.all))
 
     def test_close_pair_is_rechecked_after_its_measurement_expires(self):
-        # codex-005 close_then_separate.
         b = Bench({"A": (0, 0), "B": (10, 0)})
         b.tick(3)
         b.measure("A", "B")
@@ -369,7 +362,7 @@ class SchedulerTests(unittest.TestCase):
         self.assertEqual(set(ms.Scheduler(b.m).next_pair(b.t, ["A", "B"], self.all)), {"A", "B"})
 
     def test_audits_rotate_partners(self):
-        # codex-006 audit_partner_lock: one baseline must not be reused forever.
+        # Audit partner lock: one baseline must not be reused forever.
         b = Bench({"A": (0, 0), "B": (60, 0), "C": (0, 80), "D": (60, 80)})
         s = ms.Scheduler(b.m)
         seen = set()
@@ -382,7 +375,6 @@ class SchedulerTests(unittest.TestCase):
         self.assertGreaterEqual(len(seen), 5)
 
     def test_failed_acquisition_does_not_starve_others(self):
-        # codex-005 failed_attempt_starvation.
         s = ms.Scheduler(self.b.m)
         first = s.next_pair(self.b.t, list(SQUARE), self.all)
         s.failed(*first, self.b.t)

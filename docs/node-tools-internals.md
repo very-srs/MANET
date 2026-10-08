@@ -201,7 +201,7 @@ defines a channel of that width and the Morse supplicant will join it. **US
 reaches 8 MHz.** **EU is 1 MHz only**: the 863–868 MHz allocation has no room
 for 4 or 8 MHz, and `wpa_supplicant_s1g` 1.16.4 rejects every EU 2 MHz mesh
 config ("Invalid S1G configuration of operating class, country code and
-channel", channels 2 and 6, op_class 67 and 7, tested on cm4.2 2026-10-02).
+channel", channels 2 and 6, op_class 67 and 7).
 `halow_channel_options()` builds the menu the Radio config tab renders, so an
 EU node is never offered a width it cannot use. Channel numbers and center
 frequencies are both unique within a region, so either resolves the other:
@@ -226,8 +226,8 @@ before the reboot that loads them. A US/EU plan change also rewrites the
 HaLow supplicant to that region's template channel (`HALOW_DEFAULT_CHANNEL`,
 checked against `radio-setup.sh` by `test_region.py`, as is the EU country
 list). Within one plan the operator's HaLow channel is kept. Verified on
-cm4/cm4.2 2026-10-02: DE to US through the apply step, reboot, both nodes up
-on 907 MHz / 2 MHz.
+two CM4 nodes: DE to US through the apply step, reboot, both nodes up on
+907 MHz / 2 MHz.
 
 An unknown region falls back to the EU plan, the narrower of the two, so a
 misconfigured node cannot be offered channels its region may not permit.
