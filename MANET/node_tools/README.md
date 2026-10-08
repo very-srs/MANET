@@ -1227,15 +1227,60 @@ The installed version is recorded only after file installation, manager
 selection, systemd reload, and the status/node-manager restarts and active-state
 checks succeed. Failures return a nonzero exit status and are logged under
 `manet-update`; inspect them with `journalctl -t manet-update`. An interrupted
-installation leaves `/var/lib/manet-update/in-progress`, which makes the next
-attempt retry even when the version matches or the daily check would be skipped.
-Individual files are replaced atomically, but the complete update has no automatic
-rollback; a power loss can leave a mixture of releases until a successful retry.
+installation leaves `/var/lib/manet-update/in-progress` and a durable recovery
+archive under `/var/lib/manet-update/recovery`. Every subsequent attempt first
+resumes that exact release locally, even without Ethernet or internet access.
+The archive is checked again before use. A saved updater and release helper
+allow recovery even if the installed tools contain files from different releases.
 
-The networkd-dispatcher carrier hook is the only thing that calls it. There is
-no cron job and no timer, so a node checks for a new release when Ethernet gets
+At boot, `manet-update-recover.service` restores the pending payload before
+radio coldplug and firmware preparation. `manet-update-finish.service` then
+runs activation and service checks once normal service startup is available.
+Dependencies are installed before an update is armed; recovery does not run APT.
+To retry manually, use `sudo node-update.sh --recover-only`. It does nothing
+when no update is pending. A missing or corrupt recovery archive fails with an
+error and retains the pending marker for repair; it is never silently replaced
+with a different release.
+
+This completes an interrupted update; it does not roll back a defective release
+or provide an operating-system snapshot. The protection applies to installations
+started by the new updater. Configuration and operator software outside the
+tools payload are preserved. Recovery storage is removed after success, and
+abandoned download directories are cleaned under the update lock. Space checks
+leave 128 MiB free in addition to the estimated installation requirements.
+
+The networkd-dispatcher carrier hook starts checks for new releases. There is
+no periodic download timer, so a node checks for a new release when Ethernet gets
 carrier and `auto_update=` is set to a true value in `/etc/mesh.conf`. See
 [networkd-dispatcher/README.md](../networkd-dispatcher/README.md).
+
+**Storage limits**
+
+The persistent journal retains its existing 200 MiB budget and ten-second
+sync interval. `manet-logrotate.timer` checks MANET's standalone logs five
+minutes after boot and every fifteen minutes afterwards. The policy in
+`/usr/local/share/manet/logrotate.conf` rotates each named log above 5 MiB,
+keeps three archives, and compresses older archives. These are periodic rotation
+thresholds: a fast writer can exceed 5 MiB between checks. Open shell log
+descriptors stay usable through copy-and-truncate rotation; a few diagnostic
+lines can be lost during the copy. Application logs and Syncthing data are
+outside this policy.
+
+Saved measurements default to 256 MiB, 4096 result files, and 128 sessions,
+with a 1 MiB limit per result and 128 MiB free-space reserve. Capacity is checked
+before starting work and before each result is saved. When full, recording
+stops with an error; existing results remain available for export and deletion
+in the Sessions tab. They are never automatically pruned. A failed write does
+not publish partial JSON. Temporary result files left by a power cut count
+toward the budget and are removed when their session is deleted.
+
+Operators can adjust measurement limits through a `mesh-status.service`
+environment drop-in. The positive-integer variables are
+`MANET_MEASUREMENTS_MAX_BYTES`, `MANET_MEASUREMENTS_MAX_FILES`,
+`MANET_MEASUREMENTS_MAX_SESSIONS`, `MANET_MEASUREMENTS_MAX_RESULT_BYTES`, and
+`MANET_MEASUREMENTS_MIN_FREE_BYTES`. For a custom logging policy, set
+`MANET_LOGROTATE_CONFIG` in a `manet-logrotate.service` environment drop-in
+to a root-owned configuration file outside the shipped policy path.
 
 ---
 

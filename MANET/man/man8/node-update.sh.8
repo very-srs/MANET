@@ -9,6 +9,7 @@
 .Op Fl -routine
 .Op Fl -development
 .Op Fl -allow-downgrade
+.Op Fl -recover-only | Fl -recover-files
 .Nm
 .Fl h | Fl -help
 .Sh DESCRIPTION
@@ -20,8 +21,8 @@ The archive digest, paths and embedded versions are checked before staging.
 Tools updates replace runtime files and restart services; they do not
 replace the kernel.
 .Pp
-An interrupted installation is retried on the next run, even when the
-installed version already matches.
+A pending installation resumes from its saved archive before checking
+for a new release.
 Individual files are replaced atomically, but the whole update has no
 automatic rollback.
 Errors are logged under the journal identifier
@@ -30,12 +31,21 @@ Errors are logged under the journal identifier
 .It Fl -routine
 Suppress console output and skip release checks for 24 hours after a
 successful check or installation.
-An interrupted installation bypasses this delay.
+Pending recovery bypasses this delay.
 .It Fl -development
 Select the most recently published build, including prereleases,
 for this invocation.
 .It Fl -allow-downgrade
 Allow the selected release to replace a newer installed version.
+.It Fl -recover-only
+Finish a pending update from local recovery files without networking.
+Do nothing if no update is pending.
+.It Fl -recover-files
+Restore a pending payload before service startup, leaving final service
+checks and completion to the later recovery pass.
+Do nothing if no update is pending.
+Cannot be combined with
+.Fl -recover-only .
 .It Fl h , Fl -help
 Print help and exit.
 .El
@@ -44,14 +54,14 @@ Print help and exit.
 .It Pa /etc/manet_version.txt , /usr/local/bin/version.txt
 Installed version markers.
 .It Pa /var/lib/manet-update/
-Staging data; an
+Staging and saved recovery data; an
 .Pa in-progress
 marker records unfinished installation.
 .It Pa /run/manet-update.lock
 Lock excluding concurrent updates.
 .El
 .Sh EXIT STATUS
-Exits 0 after an update succeeds, or when no work is needed,
+Exits 0 after an update or recovery succeeds, or when no work is needed,
 including when another updater holds the lock.
 Exits 1 on an operating error and 2 for invalid arguments.
 .Sh EXAMPLES

@@ -1,0 +1,19 @@
+[Unit]
+Description=Restore an interrupted MANET tools payload from local storage
+DefaultDependencies=no
+After=systemd-remount-fs.service
+RequiresMountsFor=/etc /usr/local /var/lib
+# Match firmware preparation's early ordering; local-fs.target can wait for
+# coldplug of the boot partition and must not be ordered before that trigger.
+Before=manet-mt7916-firmware.service systemd-udev-trigger.service
+ConditionPathExists=/var/lib/manet-update/in-progress
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /var/lib/manet-update/recovery/node-update.py --recover-files
+ExecStartPost=/usr/bin/systemctl daemon-reload
+TimeoutStartSec=5min
+RemainAfterExit=yes
+
+[Install]
+WantedBy=sysinit.target

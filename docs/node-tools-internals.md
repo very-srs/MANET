@@ -76,8 +76,12 @@ existing archive validation. On a node, use `man 8 radio-setup.sh`, for example.
 `node-update.sh` executes `node-update.py`. Loading the Python program before
 installation allows it to replace its own installed sources safely. A nonblocking
 `flock` on `/run/manet-update.lock` covers the entire update. Each attempt has a
-private directory under `/var/lib/manet-update`, removed on ordinary success or
-failure. Killed processes may leave a staging directory for manual cleanup.
+private `download-*` directory under `/var/lib/manet-update`, removed on ordinary
+success or failure. The next invocation removes abandoned staging directories
+under the lock, without following symlinks or touching unrelated state files.
+After archive validation, it also removes exact updater temporary-file/link
+names in the payload's destination directories, bounding leftovers from hard
+stops during live replacement.
 
 Downloads use HTTPS, bounded curl retries/timeouts, and limits of 4 MiB for
 release metadata, 1 KiB for checksum files and 64 MiB for tools archives. Builders emit a single-line
@@ -95,9 +99,13 @@ Both embedded version files must match each other and the advertised release.
 Required updater, manager, status, dependency, agreement, time-service and MOTD
 files must be present, including the node-manager service drop-ins.
 The updater estimates staging plus installation space per filesystem, leaving
-16 MiB headroom. It stages regular files, resolves the admin dependency, checks
-installation space again, then creates a durable `in-progress` marker before
-replacing payload files. Files are copied to temporary siblings, fsynced and
+128 MiB headroom. It stages regular files and resolves the admin dependency.
+Before replacing payload files, it durably stores the verified compressed
+archive, checksum, release identity, and the running updater and release helper
+in a private `recovery` directory. Boot recovery units and their enable links
+are persisted before the `in-progress` marker is created. Installation space is
+checked again after retaining the recovery copy. Files are copied to temporary
+siblings, fsynced and
 renamed; the version files are withheld until the end. Required commands have
 checked exit status and timeouts; timeout/interruption terminates their process
 groups so child installers cannot continue after the updater exits.
@@ -110,9 +118,52 @@ Only then are the version files
 replaced and the retry marker removed. This fixes false success after extraction,
 copy, dependency or service failure. It does not provide whole-update rollback
 or guarantee that radio functionality is healthy just because services are active.
-After interruption, the durable marker bypasses version equality and the routine
-24-hour throttle on the next attempt. Error details go to the journal even in
-routine mode. Ethernet carrier remains the only automatic update trigger.
+
+After interruption, recovery precedes release selection, version equality and
+the routine throttle. It revalidates the local archive, restages it and retries
+the same release without downloads or APT. The shell entry point uses the saved
+updater when a marker exists. Boot recovery invokes that saved updater directly:
+the early unit only replaces payload files and generated manager/MOTD links,
+then reloads systemd; the later unit runs the normal activation and version
+commit after `multi-user.target`, avoiding a restart job waiting on the same
+boot target as its caller. Early ordering follows MT7916 firmware preparation's
+mount dependencies and runs before coldplug, avoiding a
+`local-fs.target`/boot-partition cycle.
+Missing/corrupt recovery data remains available for diagnosis and fails closed.
+The recovery directory is deleted only after durable removal of the pending
+marker. This mechanism repairs interrupted payload installation, not partial
+APT operations before arming or a release with defective application behavior.
+Error details go to the journal even in routine mode. Ethernet carrier still
+triggers discovery of new releases; boot recovery never discovers a new release.
+
+### Bounded logs and measurements
+
+The dedicated logrotate timer uses its own state file and an explicit list of
+MANET logs, avoiding changes to application log policies or the global rotation
+schedule. A 5 MiB threshold, three archives and delayed compression retain useful
+history. Checks run every fifteen minutes; the threshold is not a hard quota.
+`copytruncate` preserves long-lived append descriptors but can lose lines during
+the copy. The persistent journal configuration is unchanged.
+
+`manet_measurement_storage.py` checks allocated/logical bytes, regular-file
+count, session count, individual result size and filesystem free space. One
+measurement worker is admitted by the web handler's existing lock. Capacity is
+checked before admitting a batch, before each test and again at each save;
+result JSON is published using the existing durable atomic-write helper.
+Admission reserves room for one maximum-size result. Existing sessions are
+never pruned; exhaustion is reported through the normal measurement error UI.
+Operator overrides live in service environment drop-ins so tools updates do not
+overwrite their choices. Limits apply only to MANET measurements, not other
+services or synchronized files; they are not filesystem-wide quotas.
+
+Validation (2026-10-08): local and CM4 temporary-root tests cover abrupt process
+death during replacement, offline recovery with the original updater, corrupt
+recovery data, activation retries, retained user files, storage exhaustion and
+real log rotation with an open append descriptor. The full local suite's socket
+and PowerShell cases passed when rerun outside the restricted sandbox. CM4
+tools/install archives were rebuilt and their recovery/rotation entries checked.
+No live updater installation or physical power-cut boot test was performed;
+those remain necessary before deploying this recovery path to field radios.
 
 ---
 
