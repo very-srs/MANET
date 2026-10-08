@@ -5,8 +5,6 @@ HaLow driver (morse_driver 1.16.4) on all three hardware targets. The build
 workspace (`kernel-work/`) is not in git, so the changes are documented here.
 
 Companion documents:
-- [MT7916 FTM investigation](mt7916-ftm-investigation.md): source references,
-  isolated timing-report capture patch, and the hardware validation milestones.
 - `kernel-work/real_work/PORTING-MORSE-DRIVER.md`: deep diagnostic guide for the
   CM4 SPI debugging (symptom → cause tables, wire-level analysis). Read it before
   re-porting to a newer kernel.
