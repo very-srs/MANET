@@ -79,8 +79,8 @@ else
     exit 1
 fi
 
-# One hash byte gives decimal offsets 200-455 after adding the service base.
-OFFSET=$(( 0x$HASH_BYTE % 412 + 200 ))
+# One hash byte gives offsets 400-655, clear of mtx-ip.sh's 100-355.
+OFFSET=$(( 0x$HASH_BYTE + 400 ))
 
 # Form the VIP: normalized prefix + :: + offset (in hex)
 VIP="${EXPANDED_PREFIX}::$(printf "%x" "$OFFSET")"

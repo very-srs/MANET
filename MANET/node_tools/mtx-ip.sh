@@ -80,8 +80,8 @@ else
     exit 1
 fi
 
-# One hash byte gives decimal offsets 100-355 after adding the service base.
-OFFSET=$(( 0x$HASH_BYTE % 412 + 100 ))
+# One hash byte gives offsets 100-355. mumble-ip.sh uses 400-655.
+OFFSET=$(( 0x$HASH_BYTE + 100 ))
 
 # Form the VIP: normalized prefix + :: + offset (in hex)
 VIP="${EXPANDED_PREFIX}::$(printf "%x" "$OFFSET")"
