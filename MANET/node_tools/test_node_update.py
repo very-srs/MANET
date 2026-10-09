@@ -578,7 +578,8 @@ module.Updater(Path(sys.argv[2])).update(recover_only=True)
         self.assertGreater(self.updater.marker.stat().st_mtime, old)
 
     def test_all_board_urls(self):
-        for model, board in (('ROCK3 Model A', 'r3a'), ('Raspberry Pi 5 Model B', 'rpi5')):
+        for model, board in (('ROCK3 Model A', 'r3a'), ('Radxa ROCK 3A', 'r3a'),
+                            ('Raspberry Pi 5 Model B', 'rpi5')):
             with self.subTest(board=board):
                 (self.root / 'proc/device-tree/model').write_text(model)
                 self.assertEqual(self.updater.board(), board)

@@ -250,7 +250,8 @@ class Updater:
 
     def board(self):
         model = (self.root / "proc/device-tree/model").read_text().rstrip("\0")
-        if "ROCK3" in model:
+        # "ROCK3 Model A" on older kernels, "Radxa ROCK 3A" on 6.18.
+        if "ROCK3" in model.replace(" ", ""):
             return "r3a"
         if "Raspberry Pi 5" in model:
             return "rpi5"
