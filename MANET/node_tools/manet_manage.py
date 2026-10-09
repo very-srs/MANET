@@ -2817,6 +2817,11 @@ async function voiceSetChannel(ch) {
 // which is exactly why the packet counters cannot be used for this.
 function voicePaintHealth(d, running) {
   if (!running) { vDot('voice-health-dot', ''); vTxt('voice-health', '--'); return; }
+  if (d.tx_blocked) {
+    vDot('voice-health-dot', 'warn');
+    vTxt('voice-health', 'TX blocked: ' + d.tx_blocked);
+    return;
+  }
   if (d.watchdog === false) { vDot('voice-health-dot', ''); vTxt('voice-health', 'Not watched'); return; }
   // The daemon owns the threshold (voice_watchdog_sec), so take it from the
   // state file rather than keeping a second copy here that can disagree.

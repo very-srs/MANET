@@ -86,7 +86,7 @@ try:
     import gi
 
     gi.require_version("Gst", "1.0")
-    from gi.repository import GLib, Gst  # noqa: E402
+    from gi.repository import Gio, GLib, Gst  # noqa: E402
     GST_IMPORT_ERROR = None
 except (ImportError, ValueError) as _exc:      # ValueError: gi typelib missing
     GST_IMPORT_ERROR = _exc
@@ -724,9 +724,7 @@ def read_registry(exclude_ips):
 def iface_ipv4(name):
     """First IPv4 address on an interface, or None if it has none yet.
 
-    Used as multiudpsink's bind-address: binding the send socket to the
-    interface address is what guarantees outbound multicast egresses the mesh
-    interface rather than whatever the route table would otherwise pick. br0
+    Used as multiudpsink's bind-address alongside multicast-iface. br0
     carries two addresses (the node's mesh address and the EUD DHCP gateway);
     either is on the right interface, so the first is fine.
     """
@@ -875,6 +873,11 @@ class MeshVoice:
         # ssrc prefix -> peer name, rebuilt from the registry each poll.
         self.talker_names = {}
         self._known_peer_ips = set()
+        self._beacon_pending = None
+        self._beacon_end = None
+        self._bind_ip = None
+        self._tx_blocked = "waiting for IPv4 on %s" % cfg.iface
+        self._tx_blocked_logged = False
 
         # Adaptive packing state. `packing` mirrors the payloader property so
         # the state file and the web UI can report it without querying GStreamer
@@ -1156,9 +1159,9 @@ class MeshVoice:
         # auto-multicast=false: this socket only ever sends. Letting it join the
         # group collides with our own udpsrc, which already holds it.
         bind_ip = iface_ipv4(self.cfg.iface)
+        self._bind_ip = None
         if not bind_ip:
-            log("warning: %s has no IPv4 address yet: multicast egress will "
-                "follow the route table" % self.cfg.iface)
+            log("TX: waiting for IPv4 on %s" % self.cfg.iface)
 
         (enc_desc, pay_desc, depay_desc, dec_desc, encoding, packet_ms,
          raw_rate, clock_rate) = self._codec_stages()
@@ -1188,13 +1191,14 @@ class MeshVoice:
             "volume name=vol ! "
             "valve name=ptt drop=true ! "
             "{enc} ! {pay} ! "
-            "multiudpsink name=sink clients={group}:{port} "
+            "multiudpsink name=sink clients=\"{clients}\" "
             "  qos-dscp={dscp} ttl-mc={ttl} loop=false auto-multicast=false "
-            "  {bind} sync=false async=false"
+            "  multicast-iface={iface} {bind} sync=false async=false"
         ).format(src=src_desc, rate=raw_rate, hpf=self._shaping_stage(raw_rate),
                  enc=enc_desc, pay=pay_desc,
-                 group=TALK_GROUP_ADDR, port=self.cfg.port, dscp=self.cfg.dscp,
-                 ttl=self.cfg.ttl,
+                 clients=("%s:%d" % (TALK_GROUP_ADDR, self.cfg.port)
+                          if bind_ip else ""), dscp=self.cfg.dscp,
+                 ttl=self.cfg.ttl, iface=self.cfg.iface,
                  bind=("bind-address=%s" % bind_ip) if bind_ip else "")
 
         # Conference receive: rtpbin demultiplexes by SSRC and gives each talker
@@ -1278,7 +1282,7 @@ class MeshVoice:
         # this run. The prefix lets any receiver name us from the registry; the
         # generation stops a restart from colliding with the source a receiver
         # is still holding. See node_ssrc().
-        ssrc = node_ssrc(iface_ipv4(self.cfg.iface))
+        ssrc = node_ssrc(bind_ip)
         if ssrc is not None and self.payloader is not None:
             self.payloader.set_property("ssrc", ssrc)
             self.my_ssrc = ssrc
@@ -1330,11 +1334,13 @@ class MeshVoice:
         if play is not None:
             play.get_static_pad("sink").add_probe(
                 Gst.PadProbeType.BUFFER, self._on_playback_buffer)
+        self._bind_ip = bind_ip
 
     def start(self):
         self._play("rx")
         self._play("tx")
         self._suppress_multicast_loopback()
+        self._tx_ready()
         log("listening on %s:%d (channel %d) via %s"
             % (TALK_GROUP_ADDR, self.cfg.port, self.cfg.channel, self.cfg.iface))
 
@@ -1348,19 +1354,19 @@ class MeshVoice:
         else:
             log("PTT: mode %r: receive only" % self.cfg.ptt_mode)
 
-        self.refresh_peers()
-        GLib.timeout_add_seconds(REGISTRY_POLL_SEC, self._tick_peers)
-        if self.cfg.codec == "lyra":
-            GLib.timeout_add_seconds(PACKING_TICK_SEC, self._tick_packing)
         if self.cfg.beacon_sec:
             # Announce this run immediately: any receiver still holding our
             # previous generation needs to see the new SSRC, and anyone already
             # listening should have us warm before the first press of the PTT.
-            GLib.timeout_add(1500, self._tick_beacon)
+            self._schedule_beacon(1500)
             GLib.timeout_add_seconds(self.cfg.beacon_sec, self._tick_beacon)
             log("beacon: ssrc 0x%08x, on start-up and on new peers "
                 "(safety net every %ds)"
                 % (self.my_ssrc or 0, self.cfg.beacon_sec))
+        self.refresh_peers()
+        GLib.timeout_add_seconds(REGISTRY_POLL_SEC, self._tick_peers)
+        if self.cfg.codec == "lyra":
+            GLib.timeout_add_seconds(PACKING_TICK_SEC, self._tick_packing)
         GLib.timeout_add_seconds(STATE_WRITE_SEC, self._tick_state)
         GLib.timeout_add(100, self._tick_rx_decay)
         GLib.timeout_add_seconds(HEALTH_TICK_SEC, self._tick_health)
@@ -1385,9 +1391,8 @@ class MeshVoice:
         headset one jitter-buffer late, and the UI shows RX during every
         transmission.
 
-        The socket is reached through `used-socket`. PyGObject hands it back as
-        an untyped GSocket without the Gio.Socket methods bound, so this goes
-        through the GObject property rather than set_multicast_loopback().
+        The socket is reached through `used-socket`; loopback is set through
+        its GObject property.
 
         And it is retried, because multiudpsink has no socket until it has
         started and a GStreamer state change is asynchronous: asking too early
@@ -1519,8 +1524,8 @@ class MeshVoice:
             # The rebuilt valve defaults to closed. If the operator was holding
             # PTT across the change, honour it rather than silently dropping
             # their transmission.
-            if was_transmitting and self.valve:
-                self.valve.set_property("drop", False)
+            if was_transmitting:
+                self._set_tx(True)
 
             # Loss history describes the old group's traffic; keep the packing
             # level but restart the measurement rather than judge the new group
@@ -1545,6 +1550,8 @@ class MeshVoice:
         for key, value in shape_was.items():
             setattr(self.cfg, key, value)
         if self._retune(old_channel, talk_group_port(old_channel)):
+            if was_transmitting:
+                self._set_tx(True)
             log("reload: back on talk group %d" % old_channel)
             self.write_state()
             return False
@@ -1580,6 +1587,7 @@ class MeshVoice:
         if not self._play("rx") or not self._play("tx"):
             return False
         self._suppress_multicast_loopback()
+        self._tx_ready()
         # These pipelines are new objects, so a fault recorded against the ones
         # they replaced is not theirs. Leaving it would keep the watchdog off
         # the rx pipeline indefinitely, since the entry is only cleared by a
@@ -1619,6 +1627,13 @@ class MeshVoice:
         pointing into a pipeline that has been torn down is exactly the
         half-built state _retune exists to prevent.
         """
+        self._set_tx(False)
+        self._bind_ip = None
+        for timer in ("_beacon_pending", "_beacon_end"):
+            source = getattr(self, timer)
+            if source is not None:
+                GLib.source_remove(source)
+                setattr(self, timer, None)
         self._remove_bus_watches()
         for pipeline in (self.tx, self.rx):
             if pipeline:
@@ -1750,6 +1765,9 @@ class MeshVoice:
 
     def _restart(self, which):
         pipeline = self.tx if which == "tx" else self.rx
+        was_transmitting = self.transmitting
+        if which == "tx":
+            self._set_tx(False)
         # Only announce the restart while the error is still being logged;
         # during a suppressed streak this would just be more of the same noise.
         state = self._pipeline_fault.get(which)
@@ -1762,6 +1780,8 @@ class MeshVoice:
         # judges the new pipeline on the old one's silence and restarts it
         # again immediately, burning the escalation budget in fifteen seconds.
         self._mark_playing(which)
+        if which == "tx" and was_transmitting:
+            self._set_tx(True)
         return False  # one-shot
 
     def _on_tx_buffer(self, _pad, _info):
@@ -2018,6 +2038,16 @@ class MeshVoice:
         log("rx: talker branch up (%d active)" % len(self.rx_branches))
         return True
 
+    def _schedule_beacon(self, delay_ms):
+        if self._beacon_pending is None:
+            self._beacon_pending = GLib.timeout_add(
+                delay_ms, self._beacon_once)
+
+    def _beacon_once(self):
+        self._beacon_pending = None
+        self._tick_beacon()
+        return False
+
     def _tick_beacon(self):
         """Announce ourselves so receivers establish our source before we talk.
 
@@ -2041,14 +2071,16 @@ class MeshVoice:
         """
         if self.transmitting or self.ptt_pressed:
             return True                      # never interrupt a transmission
-        if not self.valve or not self.volume:
+        if (not self.valve or not self.volume or self._beacon_end is not None
+                or not self._tx_ready()):
             return True
         self.volume.set_property("volume", 0.0)
         self.valve.set_property("drop", False)
-        GLib.timeout_add(BEACON_MS, self._end_beacon)
+        self._beacon_end = GLib.timeout_add(BEACON_MS, self._end_beacon)
         return True
 
     def _end_beacon(self):
+        self._beacon_end = None
         # _set_tx already restores volume if PTT beat us to it, so only close
         # the valve when we are not actually transmitting.
         if not self.transmitting and self.valve:
@@ -2338,21 +2370,71 @@ class MeshVoice:
             self._pk_clean_since = now
         return True
 
+    def _tx_ready(self):
+        """Require both the configured address and a device-bound socket."""
+        reason = "waiting for IPv4 on %s" % self.cfg.iface
+        if self._bind_ip:
+            reason = "send socket is not bound to %s" % self.cfg.iface
+            try:
+                sock = self.sink.get_property("used-socket")
+                if sock is not None:
+                    # GStreamer only warns if SO_BINDTODEVICE fails.
+                    with socket.fromfd(Gio.Socket.get_fd(sock), socket.AF_INET,
+                                       socket.SOCK_DGRAM) as fd:
+                        addr = fd.getsockname()[0]
+                        device = fd.getsockopt(socket.SOL_SOCKET,
+                                               socket.SO_BINDTODEVICE, 16)
+                    if (addr == self._bind_ip
+                            and device.rstrip(b"\0") == self.cfg.iface.encode()):
+                        reason = None
+            except (AttributeError, OSError, GLib.Error):
+                pass
+        self._tx_blocked = reason
+        if reason is None:
+            self._tx_blocked_logged = False
+        return reason is None
+
     def _set_tx(self, on):
-        if on == self.transmitting:
+        if on and not self._tx_ready():
+            self._set_tx(False)
+            if not self._tx_blocked_logged:
+                log("TX: blocked: %s" % self._tx_blocked)
+                self._tx_blocked_logged = True
+            self.write_state()
             return
+        changed = on != self.transmitting
         self.transmitting = on
         if on and self.volume:
             # A beacon may have muted us moments ago; never key up silent.
             self.volume.set_property("volume", 1.0)
         if self.valve:
             self.valve.set_property("drop", not on)
-        log("TX: %s" % ("start" if on else "stop"))
+        if changed:
+            log("TX: %s" % ("start" if on else "stop"))
 
     # -- peers --
 
     def _tick_peers(self):
+        resume = self._tx_blocked is not None
+        bind_ip = iface_ipv4(self.cfg.iface)
+        if bind_ip != self._bind_ip:
+            resume = True
+            self._set_tx(False)
+            self._bind_ip = None
+            if bind_ip:
+                log("TX: rebinding to %s on %s" % (bind_ip, self.cfg.iface))
+                if not self._retune(self.cfg.channel, self.cfg.port):
+                    self._panic("voice interface rebind failed")
+                    return False
+                self.local_ips = local_ipv4_addresses()
+                if self.cfg.beacon_sec:
+                    self._schedule_beacon(500)
+        if not self._tx_ready():
+            self._set_tx(False)
+        elif resume and self.ptt_pressed and not self.transmitting:
+            self.on_ptt(True)
         self.refresh_peers()
+        self.write_state()
         return True
 
     def refresh_peers(self):
@@ -2392,7 +2474,7 @@ class MeshVoice:
         new_ips = {ip for ip, _ in registry} - self._known_peer_ips
         if new_ips and self.cfg.beacon_sec:
             log("beacon: %d new node(s) in registry: announcing" % len(new_ips))
-            GLib.timeout_add(500, self._tick_beacon)
+            self._schedule_beacon(500)
         self._known_peer_ips = {ip for ip, _ in registry}
 
         if peers != self.peers:
@@ -2401,7 +2483,8 @@ class MeshVoice:
                 (": " + ", ".join(h or ip for ip, h in peers)) if peers else ""))
         self.peers = peers
         if self.sink:
-            self.sink.set_property("clients", ",".join(clients))
+            self.sink.set_property("clients", ",".join(clients)
+                                   if self._bind_ip else "")
 
     # -- state --
 
@@ -2443,6 +2526,8 @@ class MeshVoice:
             "ptt_active": self.ptt_pressed,
             "ptt_device": self.ptt.device if self.ptt else None,
             "tx": self.transmitting,
+            "tx_blocked": self._tx_blocked,
+            "bind_address": self._bind_ip,
             "rx": self.rx_active,
             "channel": self.cfg.channel,
             "group": TALK_GROUP_ADDR,

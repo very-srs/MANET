@@ -376,6 +376,12 @@ that reset under the CM108B causes this, as does a lost multicast membership.
 `playback_idle` (both `null` when the flow has never run at all, which means a
 missing audio device), `igmp_joined`, `stalls` and `watchdog_sec`.
 
+Transmit stays blocked until the send socket is bound to `voice_iface` and
+its IPv4 address. The existing peer poll checks every 30 seconds and rebuilds
+the pipelines when that address appears or changes. `tx_blocked` gives the
+reason in the state file and the Audio path row; `bind_address` records the
+selected address. A held PTT resumes after binding, subject to half duplex.
+
 ### Config keys
 
 Config keys in `/etc/mesh.conf`:
