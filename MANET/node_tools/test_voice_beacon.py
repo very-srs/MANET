@@ -269,12 +269,50 @@ class VoiceBeaconTests(unittest.TestCase):
                 self.assertTrue(daemon.valve.props["drop"])
                 self.assertFalse(daemon.transmitting)
                 self.assertIsNotNone(daemon._tx_blocked)
+                if sock is not None:
+                    self.assertEqual(daemon._tx_blocked, 'send socket is not bound to br0')
         with patch.object(voice.socket, "fromfd",
                           side_effect=OSError("closed")):
             daemon.sink.props["used-socket"] = SendSocket("10.0.0.1", "br0")
             daemon.on_ptt(True)
         self.assertFalse(daemon.transmitting)
         self.assertTrue(daemon.valve.props["drop"])
+
+    def test_missing_capture_reports_pipeline_error_and_recovers_after_replug(self):
+        daemon = self.daemon
+        daemon.cfg.test_tone = False
+        with patch.object(voice, 'find_openvlm_card', return_value=None):
+            daemon.build()
+        with patch.object(daemon.tx, 'set_state', return_value='FAILURE'):
+            daemon.start()
+        self.assertIsNone(daemon.sink.get_property('used-socket'))
+        self.assertIsNone(daemon._idle('tx'))
+        error = 'Could not open audio device for recording.'
+        self.gst.MessageType = SimpleNamespace(ERROR='ERROR')
+        message = SimpleNamespace(type='ERROR', parse_error=lambda: (
+            SimpleNamespace(message=error), 'alsasrc cap: No such device'))
+        daemon._on_bus_message(None, message, 'tx')
+        self.assertIn(error, self.state()['tx_blocked'])
+        self.assertNotIn('not bound', self.state()['tx_blocked'])
+        daemon.on_ptt(True)
+        daemon._tick_beacon()
+        self.assertFalse(daemon.transmitting)
+        self.assertTrue(daemon.valve.props['drop'])
+        self.assertIn(error, self.state()['tx_blocked'])
+        daemon._restart('tx')
+        daemon._tick_peers()
+        self.assertTrue(daemon.transmitting)
+        self.assertIsNone(self.state()['tx_blocked'])
+
+    def test_socket_startup_without_pipeline_error_does_not_claim_binding_failure(self):
+        self.start()
+        daemon = self.daemon
+        daemon.sink.props['used-socket'] = None
+        daemon.on_ptt(True)
+        self.assertEqual(self.state()['tx_blocked'], 'waiting for transmit pipeline')
+        daemon._note_pipeline_error('rx', 'Could not open audio device for playback.', '')
+        daemon.on_ptt(True)
+        self.assertEqual(self.state()['tx_blocked'], 'waiting for transmit pipeline')
 
     def test_recovery_respects_release_and_half_duplex(self):
         self.ip.return_value = None
