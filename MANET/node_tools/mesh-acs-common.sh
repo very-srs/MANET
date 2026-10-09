@@ -46,7 +46,7 @@ acs_discovery_state() {
 
 acs_channels_usable() {
     local freq24="$1" freq5="$2"
-    # Missing remote bands are allowed; at least one usable band must overlap.
+    # Allow missing remote bands if at least one usable band overlaps.
     [[ -z "$freq24" || "$freq24" =~ ^24[0-9]{2}$ ]] || return 1
     [[ -z "$freq5" || "$freq5" =~ ^5[0-9]{3}$ ]] || return 1
     { [ -n "$freq24" ] && radio_iface_enabled "$WPA_IFACE_2_4"; } ||

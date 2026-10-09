@@ -34,7 +34,7 @@ def limits():
 
 
 def check_capacity(root, session, incoming=None):
-    """Check again before each write; an application can consume free space."""
+    """Recheck capacity before writes because other apps can consume space."""
     root, session = Path(root), Path(session)
     policy = limits()
     needed = policy['MAX_RESULT_BYTES'] if incoming is None else incoming
@@ -77,7 +77,7 @@ def save_result(root, destination, record):
     payload = json.dumps(record, indent=2, allow_nan=False).encode('utf-8')
     check_capacity(root, destination.parent, len(payload))
     # Names are random and the measurement worker is serialized. Refuse a
-    # collision rather than overwrite any existing result or symlink.
+    # collision to protect any existing result or symlink.
     if destination.exists() or destination.is_symlink():
         raise ValueError('Measurement result already exists')
     atomic_write(destination, payload)

@@ -32,11 +32,9 @@ esac
 exec 200>"$LOCK_FILE"
 flock -n 200 || exit 0
 
-# ethernet-autodetect owns end0's role (gateway or wired EUD) while it runs:
-# DHCP probing and bridging there must not interleave with ours. Never wait on
-# it (autodetect waits on us instead), just skip this pass; node-manager
-# reconciles again within a minute. Autodetect never calls this script, so
-# this order cannot deadlock.
+# ethernet-autodetect owns end0 during DHCP probing and bridging. Skip a
+# busy lock because autodetect waits on this script. It never calls this
+# script, avoiding deadlock. node-manager retries within a minute.
 exec 201>"$ETH_DETECT_LOCK"
 if ! flock -n 201; then
     exit 0
@@ -78,10 +76,9 @@ is_usb_wifi_uplink_iface() {
     return 0
 }
 
-# systemctl unmask/enable are NOT cheap no-ops: unmask always triggers a full
-# daemon-reload, and enable on units with sysv shims (dnsmasq, hostapd) spawns
-# update-rc.d which triggers more reloads. This script runs every node-manager
-# cycle, so guard them behind state checks.
+# Guard unmask/enable with state checks on each node-manager cycle.
+# Unmask reloads systemd. Enabling SysV-backed units such as dnsmasq and
+# hostapd also reloads through update-rc.d.
 unmask_if_masked() {
     [ "$(systemctl is-enabled "$1" 2>/dev/null)" = "masked" ] && \
         systemctl unmask "$1" 2>/dev/null || true
@@ -97,8 +94,7 @@ start_if_inactive() {
         systemctl start "$1" 2>/dev/null || true
 }
 
-# Restart radvd only when its config actually changes; otherwise just make
-# sure it is running.
+# Restart radvd when its config changes. Otherwise ensure it is running.
 apply_radvd_conf() {
     local src="$1"
     [ -f "$src" ] || return 0
@@ -138,9 +134,9 @@ has_carrier() {
     [ "$(cat "/sys/class/net/$iface/carrier" 2>/dev/null || echo 0)" = "1" ]
 }
 
-# A wired-EUD port: an Ethernet-class interface with carrier that
-# ethernet-autodetect has bridged into br0. An uplink is never a br0 port, so
-# membership is the ground truth; no state file has to agree.
+# A wired EUD is an Ethernet-class port with carrier bridged into br0 by
+# ethernet-autodetect. Uplinks are never br0 ports, so membership decides
+# the role independently of state files.
 is_wired_eud_port() {
     local iface="$1" master
     is_upstream_iface "$iface" || return 1
@@ -169,10 +165,8 @@ write_networkd_dhcp_config() {
     local iface="$1"
     local conf="${NETWORKD_DIR}/20-${iface}.network"
 
-    # Only write the file if it does not already exist. Overwriting it with
-    # identical content still fires an inotify event that causes networkd to
-    # reconfigure the interface, briefly drops the DHCP lease, and re-triggers
-    # this dispatch loop.
+    # Write only missing configs. Even identical writes trigger networkd
+    # inotify reconfiguration, dropping DHCP and repeating dispatch.
     if [ ! -f "$conf" ]; then
         cat > "$conf" <<EOF
 [Match]
@@ -225,12 +219,9 @@ wait_for_ipv4() {
     return 1
 }
 
-# Is there real internet behind $1? ICMP echo alone is not a usable test: many
-# LANs drop or rate-limit echo to public addresses while passing TCP and UDP
-# normally, which makes a ping-only probe flap the uplink. Fall back to the
-# standard 204 captive-portal endpoints (a portal answers 200/302, not 204, so
-# it correctly counts as "no internet"), then to a bare TCP connect for images
-# without curl. Keep this in sync with ethernet-autodetect.sh.
+# Check $1 with ICMP, then HTTP 204 endpoints, or TCP when curl is absent.
+# Some LANs filter ICMP but pass TCP/UDP. Reject HTTP 200/302 portal replies.
+# Keep this in sync with ethernet-autodetect.sh.
 internet_probe() {
     local iface="$1"
     local url code ip
@@ -308,10 +299,9 @@ find_working_uplink() {
 
         ip link set "$iface" nomaster 2>/dev/null || true
 
-        # Skip reconfiguring if the interface already has an IP and a default
-        # route: rewriting the networkd config triggers inotify, briefly drops
-        # the DHCP lease, and causes the internet probe to fail on the route
-        # re-installation race, which creates a demote→carrier→loop cycle.
+        # Keep an interface with an IP and default route configured. Rewriting
+        # its networkd config drops the lease through inotify, so a probe can
+        # race route restoration and repeatedly demote the uplink.
         ip=$(iface_ip "$iface")
         gw=$(iface_default_gw "$iface" || true)
         if [ -z "$ip" ] || [ -z "$gw" ]; then
@@ -323,17 +313,16 @@ find_working_uplink() {
         iface_default_gw "$iface" >/dev/null || true
 
         if internet_probe "$iface"; then
-            # An Ethernet uplink must also complete the speed test, which
-            # measures what this gateway will announce. A captive portal or a
-            # filtered network fails it, and then this is not a gateway yet.
-            # Other uplinks are metered and not tested (exit 2).
+            # Ethernet must pass the speed test before announcing bandwidth.
+            # Captive portals and filtered networks fail it. Other uplinks are
+            # metered and untested (exit 2).
             local speed_rc=0
             "$UPLINK_SPEED" measure "$iface" >/dev/null || speed_rc=$?
             if [ "$speed_rc" -eq 0 ] || [ "$speed_rc" -eq 2 ]; then
                 printf '%s\n' "$iface"
                 return 0
             fi
-            # 3: a recent failure stands and was not retested; already logged.
+            # 3: cached failure, already logged and not retested.
             [ "$speed_rc" -eq 3 ] ||
                 log "$iface passes the internet probe but not the speed test; not a gateway yet"
             continue
@@ -359,10 +348,8 @@ configure_firewall() {
 
     nft add rule inet filter input ct state established,related accept
     nft add rule inet filter input ct state invalid drop
-    # These accepts are deliberately broad. Access to the web UI (80) and the
-    # iperf3 daemon (5201) is decided in the manet_ui table, which runs at an
-    # earlier hook priority: see manet-ui-firewall.sh. Do not try to encode
-    # that policy here as well.
+    # The earlier manet_ui table enforces access to ports 80 and 5201.
+    # Keep these accepts broad. See manet-ui-firewall.sh.
     nft add rule inet filter input iifname "lo" accept
     nft add rule inet filter input iifname "br0" accept
     nft add rule inet filter input iifname "bat0" accept
@@ -418,7 +405,7 @@ start_ap_services() {
 # channel choice and locking, so calling it every reconcile doubles as retry.
 ap_mesh_request() {
     local rc=125
-    # An explicit override belongs to the caller (also used by the test harness).
+    # Use the caller's explicit override when provided.
     if [ -z "${MANET_AP_MESH_HELPER:-}" ]; then
         rc=0
         manet_runtime_call ap-mesh || rc=$?
@@ -435,8 +422,7 @@ return_ap_radio_to_mesh() {
     local out err
     err=$(mktemp)
     if out=$(ap_mesh_request 2>"$err"); then
-        # Quiet when nothing changed and the registry agrees; otherwise the
-        # operator needs to see what moved and whether peers disagree.
+        # Log role changes and registry disagreement. Stay quiet when unchanged.
         if printf '%s' "$out" | grep -Eq '"changed": *true|"registry": *"conflict"'; then
             log "AP radio mesh transition: $out"
         fi
@@ -489,9 +475,9 @@ promote_gateway() {
     # Announce the measured bandwidth (Ethernet) or batman's default.
     "$UPLINK_SPEED" announce "$iface" >/dev/null 2>&1 || true
 
-    # Steady state: reconcile runs every node-manager cycle; if this exact
-    # uplink is already promoted, skip the reconfiguration below (firewall
-    # rewrite, radvd/gateway-route-manager restarts, mesh-ip-manager rerun).
+    # Skip firewall rewrites, radvd/gateway-route-manager restarts and
+    # mesh-ip-manager when this exact uplink is already promoted.
+    # Reconciliation runs every node-manager cycle.
     local prev_mode="" prev_iface="" prev_ip="" prev_gw=""
     if [ -f "$STATE_FILE" ]; then
         prev_mode=$(awk -F= '$1 == "UPLINK_MODE" {print $2}' "$STATE_FILE" 2>/dev/null)
@@ -517,7 +503,7 @@ UPLINK_IP=$ip
 UPLINK_GW=${gw:-}
 UPDATED_AT=$(date +%s)
 EOF
-    # A USB uplink can serve while end0 carries a wired EUD; keep that record.
+    # Keep the wired-EUD record on end0 while a USB uplink serves as gateway.
     grep -qx 'ETH_MODE=WIRED_EUD' "$LEGACY_ETH_STATE" 2>/dev/null && wired_eud_active || \
     cat > "$LEGACY_ETH_STATE" <<EOF
 ETH_MODE=GATEWAY

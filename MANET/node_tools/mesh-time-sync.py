@@ -21,7 +21,7 @@ import time
 
 MAC = re.compile(r'(?:[0-9a-f]{2}:){5}[0-9a-f]{2}')
 FIELD = re.compile(r'NODE_([0-9a-fA-F]{12})_(MAC_ADDRESSES|IPV4_ADDRESS|IS_NTP_SERVER|NODE_STATE)=(.*)')
-MAX_CORRECTION = 0.1  # Remaining system-clock correction, not an absolute accuracy claim.
+MAX_CORRECTION = 0.1  # Remaining correction in seconds, not accuracy.
 ATTEMPT_SECONDS = 90
 RETRY_SECONDS = 300
 REFRESH_SECONDS = 6 * 60 * 60
@@ -70,7 +70,7 @@ def candidates(registry, rows, own, network):
         except ipaddress.AddressValueError:
             continue
         if addr in owners:
-            owners[addr] = None  # Conflicting allocations cannot be used as an NTP identity.
+            owners[addr] = None  # Conflicting NTP identity.
         else:
             owners[addr] = mac
     routes = {}
@@ -96,14 +96,14 @@ def candidates(registry, rows, own, network):
             continue
         if addr not in network or addr in (network.network_address, network.broadcast_address) or owners.get(addr) != mac:
             continue
-        # Registry timestamps/STALE use the clock we are trying to fix. Current
-        # kernel route age and fresh NTP measurements provide bootstrap liveness.
+        # Kernel route age and fresh NTP measurements establish bootstrap
+        # liveness even when registry telemetry is marked STALE.
         result.append({'mac': mac, 'address': str(addr), 'metric': metric})
     return sorted(result, key=lambda item: (-item['metric'], item['mac']))
 
 
 def selected_source(sources):
-    # -n sources: mode+selection, numeric address/refid, stratum, poll, reach, LastRx.
+    # -n sources: mode+selection, address/refid, stratum, poll, reach, LastRx.
     for line in sources.splitlines():
         match = re.fullmatch(r'([\^=#])\*\s+(\S+)\s+\d+\s+(-?\d+)\s+([0-7]+)\s+(\d+)([mhd]?)\s+.*', line.strip())
         if not match:
@@ -141,7 +141,7 @@ def nts_authenticated(authdata, address):
         if len(fields) != 10 or fields[0] != address:
             continue
         try:
-            # NTS alone can mean KE is still pending. Require negotiated keys;
+            # NTS alone can mean KE is still pending. Require negotiated keys.
             # KeyID/Last can be 0/- when cookies were restored from disk.
             return fields[1] == 'NTS' and int(fields[3]) > 0 and int(fields[4]) > 0
         except ValueError:
@@ -167,14 +167,14 @@ def chrony_config(network, gps=False, uplink='', peer='', initial=True):
             # signatures, hostname and trust chain are still verified.
             lines.append('nocerttimecheck 1')
     if peer:
-        # Prefer settling within one poll interval instead of the default three;
-        # the ordinary Linux slew-rate cap still applies to large corrections.
+        # Settle within one poll interval instead of the default three.
+        # The Linux slew-rate cap still applies to large corrections.
         lines += ['server ' + str(ipaddress.IPv4Address(peer)) + ' iburst', 'corrtimeratio 1']
     if gps or uplink:
         lines += ['allow ' + str(network), 'allow fd01:ed20:ecb4::/64']
     else:
         lines.append('deny all')
-    # No local stratum fallback: an unqualified clock must not masquerade as a source.
+    # No local stratum fallback: only a qualified clock may serve time.
     return '\n'.join(lines) + '\n'
 
 
@@ -341,7 +341,7 @@ class TimeService:
             if self.state.pop('pending', None):
                 self.save()
             self.log('Clock refresh is not due; mesh NTP polling is stopped.')
-            return 15  # Local role checks only: GPS or an uplink can appear later.
+            return 15  # Recheck for GPS or an uplink appearing later.
 
         pending = self.state.get('pending')
         if pending:

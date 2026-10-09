@@ -1,21 +1,14 @@
 #!/usr/bin/env python3
-"""
-Read GPS fixes from gpsd and write /run/gps_status.json.
+"""Read gpsd fixes and publish /run/gps_status.json.
 
-Holds one gpsd watch open and passes every message to manet_gnss.GnssReader.
-Writes the status file once a second and the primary receiver's recent
-history every HISTORY_INTERVAL seconds, and both again when the gpsd
-session ends. Writes has_fix=false while gpsd is unavailable or the
-primary receiver has no live fix.
-
-The original status keys (has_fix, latitude, longitude, altitude, hdop,
-timestamp) are kept for existing readers. altitude is altMSL, else gpsd's
-older alt, else 0. timestamp is the wall time of the fix's arrival,
-derived from its raw age so a wall clock correction cannot make a fresh
-fix look old.
-
-The first fix of this OS boot is recorded in /run/gps_first_fix.json.
-/run is emptied at boot, so a reader restart still knows a fix was had.
+Keep one watch open and feed every message to manet_gnss.GnssReader. Write
+status each second and primary receiver history every HISTORY_INTERVAL.
+Write both when the connection ends. Missing gpsd/live fix means has_fix=false.
+Preserve has_fix, latitude, longitude, altitude, hdop and timestamp fields.
+altitude is altMSL, else gpsd alt, else 0. timestamp is fix arrival wall time
+derived from raw age, so clock corrections cannot make a fresh fix look old.
+Record this boot's first fix in /run/gps_first_fix.json. It survives reader
+restarts and is cleared at boot.
 """
 
 import json
@@ -35,7 +28,7 @@ GPSD_PORT = 2947
 WRITE_INTERVAL = 1     # seconds between status writes
 HISTORY_INTERVAL = 5   # seconds between history writes
 RECONNECT_S = 5
-MAX_PENDING = 65536    # bytes without a newline before the stream is resynchronised
+MAX_PENDING = 65536    # Bytes without newline before resync
 BOOT_ID_PATH = "/proc/sys/kernel/random/boot_id"
 
 
@@ -79,7 +72,7 @@ def load_first_fix(boot_id: str) -> float | None:
 def build_status(reader: GnssReader, now_mono: float, boot_id: str,
                  connected: bool = True, now_wall: float | None = None,
                  now_boot: float | None = None) -> dict:
-    """The status document. Pure apart from the clock, so tests can drive it."""
+    """Build the status document with optional clock inputs."""
     now_wall = time.time() if now_wall is None else now_wall
     now_boot = time.clock_gettime(time.CLOCK_BOOTTIME) if now_boot is None else now_boot
     rx = reader.tick(now_mono)
@@ -99,9 +92,8 @@ def build_status(reader: GnssReader, now_mono: float, boot_id: str,
         "hdop": round(hdop, 2) if hdop is not None else 99.9,
         "timestamp": int(now_wall - (now_mono - fix["mono"])) if fresh else int(now_wall),
         "schema": 2,
-        # When this file was written, on the boot clock (/proc/uptime). Other
-        # processes judge its age with this, not with timestamp, so a time
-        # sync stepping the wall clock cannot make a live fix look stale.
+        # Publication time on /proc/uptime. Consumers use this boot-clock age
+        # so wall-clock steps cannot make a live fix look stale.
         "written_boot": round(now_boot, 3),
         "clock": "monotonic_raw",
         "boot_id": boot_id,
@@ -151,7 +143,7 @@ def watch(reader: GnssReader, pub: Publisher) -> None:
             sock.settimeout(WRITE_INTERVAL)
             sock.sendall(b'?WATCH={"enable":true,"json":true}\n')
             buf = b""
-            discarding = False  # inside an oversized line: drop through its newline
+            discarding = False  # Drop oversized line through newline
             while True:
                 try:
                     chunk = sock.recv(65536)

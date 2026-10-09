@@ -1,15 +1,10 @@
 #!/usr/bin/env python3
-"""
-MANET Management UI
--------------------
-Not a server. This is the route set behind /manage on mesh-status.py's port
-80, mixed into its request handler: there is no second listening port, and
-nothing here is reachable without the admin password.
+"""Provide authenticated management routes for mesh-status.py.
 
-Peers are never queried directly: node state comes from the Alfred-built
-registry, and changes that affect other nodes are staged over Alfred.
-Measurement runs from this node outward toward a peer's always-listening
-iperf3 daemon.
+The /manage routes share mesh-status.py's listener and require the admin
+password. Node state comes from the Alfred-built registry. Changes affecting
+peers are staged over Alfred. Measurements run local clients against each
+peer's listening iperf3 daemon.
 
 Routes (relative to /manage):
   GET  /                        - Management UI HTML
@@ -66,12 +61,10 @@ CONTROL_PORT    = 80  # mesh-status.py port on each node
 ALFRED_RADIO_TYPE = 71
 ALFRED_RADIO_ACK_TYPE = 72
 ADMIN = AdminTransport()
-# The hexagon badge is line art with no fill, so it needs two inks: near-black
-# strokes on light themes, white strokes on dark. Same artwork, same geometry.
+# The unfilled hexagon uses dark strokes on light themes and white on dark.
 FER_LOGO_DARK_INK_FILE  = '/usr/local/share/manet/fer-logo-black.png'
 FER_LOGO_LIGHT_INK_FILE = '/usr/local/share/manet/fer-logo-white.png'
-# Served under /assets/<name>, extension optional, so swapping a logo between
-# svg and png only means changing the paths above.
+# /assets/<name> accepts an optional extension for either SVG or PNG.
 FER_LOGO_ASSETS = {
     'fer-logo':       FER_LOGO_DARK_INK_FILE,
     'fer-logo-black': FER_LOGO_DARK_INK_FILE,
@@ -80,12 +73,7 @@ FER_LOGO_ASSETS = {
 
 
 def logo_asset_token():
-    """Cache-busting token for logo URLs.
-
-    Logo assets are served with a one-hour cache. Without a token in the URL,
-    replacing a logo leaves browsers showing the previous artwork from cache
-    until it expires, because the URL never changes.
-    """
+    """Return a logo URL token that invalidates the one-hour cache."""
     parts = []
     for path in (FER_LOGO_DARK_INK_FILE, FER_LOGO_LIGHT_INK_FILE):
         try:
@@ -106,9 +94,8 @@ _measure_status = {
     'done': 0, 'total': 0, 'started_at': None, 'current_started_at': None,
     'current': None, 'last_result': None,
 }
-# Monotonic twins of started_at/current_started_at. Durations come from these,
-# so a time sync stepping the wall clock mid-measurement cannot distort them;
-# the wall values remain for dated records.
+# Monotonic copies of started_at/current_started_at prevent clock steps
+# from distorting durations. Wall-clock values date the records.
 _measure_mono = {'started': None, 'current': None}
 
 
@@ -242,11 +229,7 @@ def apply_usb_wifi_uplink(ssid, password, enabled=True):
 
 
 def apply_usb_wifi_uplink_all(ssid, password, enabled=True):
-    """Push uplink credentials to every node via Alfred.
-
-    Stage credentials as a mesh-wide radio change. Each node applies them at
-    the agreed activate_at time.
-    """
+    """Stage uplink credentials over Alfred for all nodes at activate_at."""
     result = coordinate_radio_change({'uplink_wifi': {
         'ssid': ssid, 'password': password, 'enabled': bool(enabled),
     }})
@@ -402,7 +385,7 @@ def _parse_morse_channel_output(text):
     return info
 
 def get_halow_driver_info(iface='wlan2'):
-    """Read HaLow runtime channel data from Morse tooling; config is only fallback."""
+    """Read HaLow runtime data from Morse tooling, falling back to config."""
     binaries = ['/usr/local/bin/morse_cli', 'morse_cli']
     variants = [
         lambda b: [b, '-i', iface, 'channel', '-j'],
@@ -448,9 +431,8 @@ def get_halow_driver_info(iface='wlan2'):
         m = re.search(r'op_class\s*=\s*(\d+)', txt)
         if m:
             info['op_class'] = m.group(1)
-        # s1g_prim_chwidth is the *primary* width (2 MHz for every operating
-        # width above 1 MHz), so the channel number is what says how wide the
-        # operating channel actually is.
+        # s1g_prim_chwidth describes the primary: 2 MHz above 1 MHz operation.
+        # The channel number identifies the operating width.
         bw = halow_bandwidth_for_channel(info.get('channel'))
         if bw:
             info['halow_bw'] = bw
@@ -479,10 +461,7 @@ def fmt_uptime(seconds):
 
 
 def get_session_hop_count(src_ip, dst_ip):
-    """Hops from this node to dst, straight out of batman's own table.
-
-    Measurements originate here, so use the local routing table.
-    """
+    """Return hops to dst from the local BATMAN table used by measurements."""
     if not dst_ip:
         return None, 'missing'
     try:
@@ -503,8 +482,7 @@ def get_session_hop_count(src_ip, dst_ip):
         if len(parts) < 4:
             continue
         if parts[0].lower().rstrip('*') in dst_macs:
-            # A direct originator entry is one hop; anything reached via a
-            # different nexthop is at least two.
+            # A direct originator is one hop. Other nexthops need at least two.
             nexthop = parts[3].strip('[]').lower()
             return (1 if nexthop in dst_macs else 2), 'batctl'
     return None, 'unknown'
@@ -745,11 +723,9 @@ def coordinate_radio_toggle(node_ip, iface, state):
 
 
 def coordinate_radio_change(actions, node_ip='all'):
-    """Stage a radio change over Alfred and apply it once everyone has ACKed.
+    """Stage a radio change over Alfred and activate after all expected ACKs.
 
-    This is the only way a change reaches another node. Targeting one node
-    still goes through Alfred: the difference is the `targets` list, not the
-    transport, so there is no second code path that talks to peers directly.
+    Single-node changes use the same transport with a restricted `targets` list.
     """
     targets = 'all'
     if node_ip != 'all':
@@ -841,7 +817,7 @@ def get_iw_info(iface):
     else:
         info['txpower_options_dbm'] = []
 
-    # HaLow (morse_usb): iw can report a regular Wi-Fi channel; Morse driver is the runtime source.
+    # HaLow uses Morse runtime data because iw may report a Wi-Fi channel.
     if iface == 'wlan2':
         info.update(get_halow_driver_info(iface))
 
@@ -897,8 +873,8 @@ def build_topology():
                 'wlan2': {'active': 'wlan2' in active_ifaces, **iw_wlan2, **mcs_map['wlan2']},
             }
         else:
-            # Registry first: INTERFACES_JSON when a peer actually published
-            # it, otherwise MCS + DATA_CHANNEL_* so chips are not all OFF.
+            # Use peer INTERFACES_JSON when published, else MCS + DATA_CHANNEL_*
+            # to retain channel state in the display.
             node_info['interfaces'] = peer_radio_interfaces(nd)
 
         nodes.append(node_info)
@@ -1199,9 +1175,8 @@ def run_measurement_session(label, pairs, tests, duration, udp_bitrate):
                     if not result_record['ok']:
                         result_record['error'] = 'ping failed'
                 else:
-                    # iperf3 runs as a daemon on every node, so there is no
-                    # server to start or stop remotely: just point a local
-                    # client at the peer that is already listening.
+                    # Connect the local client to the peer's persistent iperf3
+                    # daemon.
                     try:
                         ok, payload, err = run_local_iperf3(
                             dst_ip, test_type, duration, udp_bitrate,
@@ -2470,13 +2445,8 @@ document.addEventListener('visibilitychange', () => {
 
 # NODE CONFIG tab
 
-# Was the standalone /admin page on port 80 with no authentication at all,
-# handing out the mesh SAE key in a text field. Same staging/ACK/apply flow,
-# now a tab in here behind the admin password.
-#
-# Held as plain strings and substituted into the dashboard template, rather
-# than written inline: the template is an f-string, and CSS/JS braces would
-# have to be doubled throughout if this lived inside it.
+# Keep CSS/JS in plain strings substituted into the dashboard f-string
+# so their braces need no escaping.
 
 VOICE_TAB_CSS = r"""
 .voice-wrap { padding: 20px 24px; display: grid; gap: 18px;
@@ -2978,24 +2948,17 @@ VOICE_STATE_FILE = '/run/mesh-voice.json'
 
 
 VOICE_CHANNEL_MAX = 32
-# Lyra is the default; opus stays selectable for anyone who wants stock
-# elements. They do not interoperate -- see set_voice_codec_all().
+# Lyra is the default. Opus uses stock elements and cannot interoperate
+# with Lyra. See set_voice_codec_all().
 VOICE_CODECS = ('lyra', 'opus')
 
 
 def set_voice_channel(channel):
-    """Move this node to a talk group.
+    """Set this radio's talk group without a mesh-wide change.
 
-    Local only, and deliberately so: a talk group is a per-radio setting like
-    the channel knob on a handheld, not a fleet-wide one. This is why it does
-    not go through coordinate_radio_change() the way the HaLow and Wi-Fi
-    channel changes do: every operator picks their own group.
-
-    mesh.conf holds mesh_key and admin_password, so the rewrite is careful:
-    only the one key is touched, every other line is passed through byte for
-    byte, the mode and ownership of the original are carried over, and the
-    replacement is put in place with an atomic rename so a crash mid-write
-    cannot leave a node with a truncated config and no way back in.
+    Rewrite only voice_channel in mesh.conf, preserving other lines byte for
+    byte, file mode and ownership. Atomic replacement protects mesh_key and
+    admin_password from a truncated config after a crash.
     """
     try:
         channel = int(channel)
@@ -3016,7 +2979,7 @@ def set_voice_channel(channel):
             if not replaced:
                 out.append('voice_channel=%d\n' % channel)
                 replaced = True
-            continue          # drop any duplicate keys rather than stack them
+            continue          # Collapse duplicate keys.
         out.append(line)
     if not replaced:
         if out and not out[-1].endswith('\n'):
@@ -3034,7 +2997,7 @@ def set_voice_channel(channel):
         try:
             os.chown(tmp, st.st_uid, st.st_gid)
         except PermissionError:
-            pass              # not root: mode still carried, ownership stays ours
+            pass              # Non-root: preserve mode, keep writer ownership.
         os.replace(tmp, MESH_CONF_FILE)
     except OSError as e:
         try:
@@ -3043,9 +3006,8 @@ def set_voice_channel(channel):
             pass
         return {'ok': False, 'error': 'Cannot write %s: %s' % (MESH_CONF_FILE, e)}
 
-    # reload, not restart: mesh-voice retunes in place on SIGHUP, which keeps
-    # the audio path up. Not fatal if it fails: the config is already correct,
-    # so the change takes effect at the next start either way.
+    # SIGHUP retunes mesh-voice without interrupting audio. Reload failure
+    # is nonfatal because the saved config takes effect at the next start.
     reloaded = False
     try:
         rc = subprocess.run(['systemctl', 'reload', 'mesh-voice'],
@@ -3058,21 +3020,12 @@ def set_voice_channel(channel):
 
 
 def set_voice_codec_all(codec):
-    """Change the voice codec on every node at once.
+    """Stage a voice codec change over Alfred for every node.
 
-    The opposite of set_voice_channel() above, and for a concrete reason: talk
-    groups are per-radio because two operators on different groups simply do
-    not hear each other, which is the intent. Two operators on different
-    *codecs* also do not hear each other, which is never the intent -- the
-    payload type and RTP clock rate both come from this setting, and a receiver
-    decodes with its own configured codec rather than with whatever arrived.
-    A split fleet is a silently broken fleet.
-
-    So this goes through coordinate_radio_change() exactly like a HaLow channel
-    or a WPA key: staged over Alfred, ACKed by every node, then activated on a
-    common wall clock. If any node fails to ACK the change is cancelled and
-    nothing moves, which is the behaviour we want -- better to stay wholly on
-    the old codec than to split the mesh in half.
+    Codecs determine RTP payload type, clock rate and receiver decoding.
+    Different codecs cannot interoperate. coordinate_radio_change() requires
+    all expected ACKs before a shared activation time and cancels on a missing
+    ACK. Talk groups remain per-radio settings in set_voice_channel().
     """
     codec = (codec or '').strip().lower()
     if codec not in VOICE_CODECS:
@@ -3085,18 +3038,14 @@ def set_voice_codec_all(codec):
 
 
 def voice_status():
-    """Voice state for the VOICE tab.
+    """Return voice state from mesh-voice.py's local file and systemd unit.
 
-    Everything comes from the state file mesh-voice.py publishes plus the unit
-    state: this node never asks a peer anything, and the daemon is the only
-    thing that touches the audio path.
+    Only the daemon touches the audio path.
     """
     out = {'service': 'stopped', 'enabled': False, 'state_age': None}
 
-    # Talk group comes from mesh.conf first so the picker still shows the
-    # configured group when the daemon is not running: with voice=n there is
-    # no state file at all, and a picker stuck on "--" would look broken.
-    # A running daemon overwrites this below with what it actually tuned.
+    # Use mesh.conf when the daemon is stopped, including voice=n with no
+    # state file. A running daemon's tuned group overrides it below.
     conf = load_kv_file(MESH_CONF_FILE)
     out['voice_configured'] = conf.get('voice', 'n').strip().lower() in (
         'y', 'yes', 'true', '1', 'on')
@@ -3122,9 +3071,9 @@ def voice_status():
     try:
         with open(VOICE_STATE_FILE) as f:
             state = json.load(f)
-        # A stale file means the daemon died without cleaning up; do not let it
-        # masquerade as live state. The boot-clock stamp survives a time sync
-        # stepping the wall clock; a file from an older daemon has only wall.
+        # Reject stale daemon state. Prefer the boot-clock stamp across
+        # wall-clock steps, falling back to wall time for files without a boot
+        # stamp.
         if isinstance(state.get('updated_boot'), (int, float)):
             age = time.clock_gettime(time.CLOCK_BOOTTIME) - state['updated_boot']
         else:
@@ -3960,17 +3909,17 @@ def asset_content_type(path):
     return ASSET_CONTENT_TYPES.get(ext, 'application/octet-stream')
 
 def logo_asset_file(url_path):
-    """Map /assets/fer-logo-white[.png|.svg] to the file we actually ship."""
+    """Map /assets/fer-logo-white[.png|.svg] to the installed file."""
     if not url_path.startswith('/assets/'):
         return None
     name = os.path.splitext(url_path[len('/assets/'):])[0]
     return FER_LOGO_ASSETS.get(name)
 
 class ManageRoutes:
-    """Mixed into mesh-status.py's handler; relies on its send_json/send_html.
+    """Provide routes for mesh-status.py using its send_json/send_html methods.
 
-    Route methods are prefixed so they never shadow the real do_* dispatch.
-    mesh-status calls them only after the password cookie checks out.
+    Prefixed methods avoid shadowing do_* dispatch. mesh-status checks the
+    password cookie before calling them.
     """
     def log_message(self, fmt, *args):
         pass  # suppress access logs
@@ -4113,10 +4062,8 @@ class ManageRoutes:
                 self.send_json({'ok': False, 'error': str(e)})
 
         elif path == '/api/halow/channel':
-            # Every node has to land on the new channel together: when HaLow is
-            # the only active mesh interface, the mesh is down between the first
-            # node moving and the last. Alfred stages the change and applies it
-            # at a common activate_at, which is why this can be done at all.
+            # A HaLow-only mesh loses connectivity while nodes change channels.
+            # Alfred stages all nodes for the same activate_at time.
             try:
                 req = json.loads(body)
                 if not int(req.get('channel', 0)):

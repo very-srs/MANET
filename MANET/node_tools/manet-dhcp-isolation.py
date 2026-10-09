@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Keep DHCP and EUD discovery local; enable wired mDNS only after verification."""
+"""Keep DHCP and EUD discovery local.
+
+Enable wired mDNS only after verification.
+"""
 
 import fcntl
 import json
@@ -28,7 +31,7 @@ def match(left, right):
 def _canonical_expr(expr):
     """Normalize protocol dependencies omitted by nft's JSON listings.
 
-    A transport payload implies l4proto; an ip/ip6 payload implies the matching
+    A transport payload implies l4proto. An ip/ip6 payload implies the matching
     EtherType. Keep all actual address, port, interface and verdict checks.
     """
     later, kept = set(), []
@@ -50,7 +53,7 @@ def _canonical_expr(expr):
 
 
 def valid_rules(data):
-    """Check active table, hooks and normalized matches; ignore counters/handles."""
+    """Check active table, hooks and matches, ignoring counters/handles."""
     chains, rules, tables = {}, {}, 0
     for item in data.get('nftables', []):
         table = item.get('table')
@@ -146,9 +149,9 @@ def atomic_write(path, contents):
 
 
 def configure_avahi(protected, root=Path('/')):
-    """Reconcile the installed config, also on tools updates and later br0 creation.
+    """Reconcile config on tools updates and later br0 creation.
 
-    The caller holds our lock and has verified the complete policy. Never infer
+    The caller holds the lock and has verified the complete policy. Never infer
     protection from a file on disk. A missing AP/bridge falls back to loopback,
     since an empty allow-interfaces would allow every interface.
     """

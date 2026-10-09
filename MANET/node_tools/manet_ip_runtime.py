@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """One-shot IP preflight and reconciliation, with a content-based no-op path.
 
-This replaces the interpreter tree below mesh-ip-manager, not its schedule.
-Kernel policy, IPv4 addresses, EUD readiness and dnsmasq state are checked on
-every pass. A cache hit only skips the shell allocator after an identical,
-successful reconciliation; errors, missing outputs and pending work retry.
+Called on mesh-ip-manager's schedule. Check kernel policy, IPv4 addresses,
+EUD readiness and dnsmasq every pass. Skip the shell allocator only after
+an identical successful reconciliation. Retry errors, missing outputs and
+pending work.
 """
 
 import fcntl

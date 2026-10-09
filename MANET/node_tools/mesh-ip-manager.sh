@@ -1,32 +1,16 @@
 #!/bin/bash
-# Mesh IP Manager - Chunk-Based Allocation with Bridged EUD Architecture
-# This script manages IPv4 address claiming using a chunk-based approach where
-# each node claims a contiguous block of IPs for itself and its EUDs.
-#
-# Subnet IP Allocation Scheme:
-#   IPs 1-5:    Reserved for mesh services (MediaMTX, Mumble, NTP, etc.)
-#   IPs 6+:     Allocated in chunks
-#
-# Chunk Structure (example with max_euds=5):
-#   Chunk size = max_euds + 2
-#   - First IP in chunk: br0 primary (mesh interface)
-#   - Second IP in chunk: br0 secondary (DHCP gateway for EUDs)
-#   - Remaining IPs in chunk: DHCP pool for EUDs
-#
-# Bridged Architecture:
-#   - All EUD interfaces (wlan1 when AP, end0 when wired) are bridged to br0
-#   - nftables isolates DHCP at bat0, the mesh-facing br0 port
-#   - dnsmasq listens on br0 for DHCP requests from EUDs
-#   - Multicast works at L2 (bridge), no routing needed
-#
-# wlan1 Dual Purpose:
-#   - When AP: wlan1 enslaved to br0 (not in bat0), DHCP allowed
-#   - When mesh: wlan1 enslaved to bat0, DHCP blocked
-#
+# Claim a contiguous IPv4 block for the node and its EUDs.
+# IPs 1-5 are reserved for services. Chunks start at IP 6, sized max_euds + 2:
+#   first: br0 primary for mesh traffic
+#   second: br0 secondary for the EUD gateway
+#   remainder: EUD DHCP pool
+# AP/wired EUD interfaces bridge to br0. dnsmasq serves br0 while nftables
+# blocks DHCP on bat0. Multicast stays at Layer 2. wlan1 in mesh mode joins
+# bat0 with DHCP blocked, while AP mode joins br0 with DHCP allowed.
 
 # --- Configuration ---
-# Request the existing agreement process; fall back to a one-shot when absent.
-# Both share discovery, registry, isolation and address checks, calling back
+# Request the existing agreement process with a one-shot fallback. Both
+# share discovery, registry, isolation and address checks, calling back
 # here only for reconciliation.
 if [ "${MANET_IP_CHECKED:-0}" != 1 ]; then
     . "${MANET_TOOLS_DIR:-$(dirname "${BASH_SOURCE[0]}")}/manet-runtime-client.sh"
@@ -71,7 +55,7 @@ _calc_service_vips() {
 }
 _calc_service_vips
 
-# If any EUD mode is active, we need at least 1 EUD IP
+# Active EUD modes require at least one EUD address.
 if [[ "$EUD_MODE" != "none" && "$MAX_EUDS" -lt 1 ]]; then
 #    log "EUD mode is '$EUD_MODE' but max_euds=$MAX_EUDS. Forcing max_euds=1."
     MAX_EUDS=1
@@ -196,14 +180,11 @@ is_service_reserved_ip() {
     [ "$offset" -ge 0 ] && [ "$offset" -lt "$SERVICES_RESERVED" ]
 }
 
-# Peer claims as absolute address ranges. Block sizes are provisioned per node,
-# so a peer's chunk NUMBER means nothing here: only its advertised address and
-# size do. Claims file lines are chunk,mac,start_int,size.
-#
-# A claim without a size cannot be placed. Guessing our own size would recreate
-# the mixed-size overlap this format exists to prevent, so such a claim marks
-# the snapshot incomplete: new allocation waits for a complete identity, while
-# its known primary address still counts for conflict checks.
+# Peer claims use absolute ranges because nodes can provision different
+# block sizes. Claims file fields: chunk,mac,start_int,size.
+# A missing size makes the snapshot incomplete and defers allocation. The
+# known primary still participates in conflict checks. Guessing a local
+# size could overlap a larger peer block.
 MAX_PEER_CHUNK_SIZE=255   # max_euds_per_node is at most 253
 load_claims() {
     local chunk mac start size
@@ -222,7 +203,7 @@ load_claims() {
             INCOMPLETE_CLAIMS+=("$mac")
             size=1
         elif [ "$size" -gt "$MAX_PEER_CHUNK_SIZE" ]; then
-            # Implausible, so unusable as a range; never allocate over it.
+            # Reject implausible ranges to avoid allocating over them.
             log "Implausible claim from $mac: $size addresses"
             INCOMPLETE_CLAIMS+=("$mac")
             size=1
@@ -233,7 +214,7 @@ load_claims() {
     done < "$CLAIMED_CHUNKS_FILE"
 }
 
-# Absolute first and last address (as integers) of one of OUR chunks.
+# Return the absolute first/last integer addresses of a local chunk.
 chunk_range() {
     local ips primary
     ips=$(get_chunk_ips "$1") || return 1
@@ -241,8 +222,8 @@ chunk_range() {
     printf '%s\n' "$primary $((primary + CHUNK_SIZE - 1))"
 }
 
-# Print the MAC of a peer whose claim overlaps [start, end]; succeed if found.
-# Our own identity cached elsewhere in the mesh is not a peer.
+# Print the peer MAC overlapping [start, end] and succeed if found.
+# Exclude this node's identity cached elsewhere in the mesh.
 range_claimed_by_peer() {
     local start="$1" end="$2" i
     [ -n "${CLAIMS_LOADED:-}" ] || load_claims
@@ -468,7 +449,7 @@ update_avahi_host() {
     temporary=$(mktemp "${hosts}.XXXXXX") || return 1
     source="$hosts"
     [ -f "$source" ] || source=/dev/null
-    # Preserve operator entries and comments; replace only our management name.
+    # Preserve operator entries and comments. Replace only the management name.
     if ! awk -v address="$address" '
         { name=tolower($2); sub(/\.$/, "", name) }
         $1 !~ /^#/ && name == "manet.local" { next }
@@ -569,9 +550,7 @@ EOF
         rm -f "$temporary"
         return 1
     fi
-    # Ensure dnsmasq is unmasked, enabled, and running.
-    # unmask triggers a full systemd daemon-reload even when nothing is
-    # masked: only call it when the unit is actually masked.
+    # Unmask dnsmasq only when masked. Each unmask reloads systemd.
     if [ "$(systemctl is-enabled dnsmasq.service 2>/dev/null)" = "masked" ]; then
         systemctl unmask dnsmasq.service 2>/dev/null
     fi
@@ -616,7 +595,7 @@ if ! ensure_dhcp_isolation; then
     exit 1
 fi
 
-# Get our MAC address
+# Read the local MAC address.
 MY_MAC=$(cat "/sys/class/net/${CONTROL_IFACE}/address" 2>/dev/null || echo "")
 if [ -z "$MY_MAC" ]; then
     log "ERROR: Cannot read MAC address from $CONTROL_IFACE"
@@ -752,8 +731,8 @@ case $IPV4_STATE in
         if [ -z "$PERSISTENT_CHUNK" ]; then
             update_avahi_host "" || exit 1
         fi
-        # Check for conflicts: any peer range overlapping our whole block,
-        # not only a peer whose primary equals ours.
+        # Check for peer overlap with the whole block, even with different
+        # primary addresses.
         CONFLICTING_MAC=""
         MY_START=$(ip_to_int "$CURRENT_IPV4")
         if [ -n "$MY_START" ]; then

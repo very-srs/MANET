@@ -1,32 +1,12 @@
 #!/bin/bash
-# Operator setup scripts: one-time post-provisioning hook
-# Runs whatever the operator put in provisioning/additional-scripts/ at flash
-# time. Those files are baked into firstrun.sh as heredocs and written out to
-# SCRIPT_DIR on the very first boot; this runner is what executes them, once,
-# after radio-setup has finished and the node is a working mesh node.
-#
-# Why a separate runner rather than a few lines at the end of radio-setup:
-#
-#   * radio-setup must not be at the mercy of operator code. It is the script
-#     that decides whether a node is provisioned at all, and it re-runs on a
-#     config change. A user script that hangs, reboots, or exits non-zero
-#     inside it would take provisioning with it.
-#   * These run ONCE per node, not on every radio-setup. radio-setup is
-#     explicitly re-runnable ("This script can be re-run to set new network
-#     settings"); a site hook that adds a route or installs a package is not.
-#   * A one-shot unit survives a power pull. If the board loses power part-way
-#     through, the completion marker was never written and the next boot picks
-#     up where it stopped.
-#
-# Failures are ADVISORY. A broken operator script must never make a working
-# mesh node report itself unprovisioned, so nothing here touches
-# /var/lib/manet-provision.{state,failures}. What it does instead is record
-# every exit code and let manet-provision-status.sh say so on the login banner.
-#
-# Usage:
-#   manet-user-scripts.sh            # normal one-time run (what the unit does)
-#   manet-user-scripts.sh --force    # re-run everything, ignoring past state
-#   manet-user-scripts.sh --list     # show what is staged and what has run
+# Run operator setup scripts once after radio-setup finishes. The flasher
+# embeds provisioning/additional-scripts/ in firstrun.sh heredocs, which
+# write SCRIPT_DIR on first boot. A separate unit isolates provisioning
+# from operator failures and avoids rerunning hooks on config changes.
+# Record each completed exit code so power loss retries only unfinished work.
+# Failures are advisory in manet-provision-status.sh. Never change
+# /var/lib/manet-provision.{state,failures}.
+# Options: --force reruns all scripts, --list shows staged and completed work.
 
 SCRIPT_DIR="${MANET_USER_SCRIPT_DIR:-/var/lib/manet-user-scripts}"
 STATE_FILE="${MANET_USER_SCRIPT_STATE:-/var/lib/manet-user-scripts.state}"
@@ -34,11 +14,9 @@ DONE_FILE="${MANET_USER_SCRIPT_DONE:-/var/lib/manet-user-scripts.done}"
 LOG_FILE="${MANET_USER_SCRIPT_LOG:-/var/log/manet-user-scripts.log}"
 MESH_CONF="${MANET_MESH_CONF:-/etc/mesh.conf}"
 
-# Per-script wall-clock limit. An operator script that waits forever on a
-# prompt, a dead mirror, or a link that never comes up would otherwise hold the
-# unit open until systemd's TimeoutStartSec kills the whole run and the scripts
-# after it never get their turn. Overridable per node with
-# `user_script_timeout=` in /etc/mesh.conf.
+# Per-script wall-clock limit prevents a hung script from consuming the
+# unit's TimeoutStartSec and skipping later scripts. Override with
+# user_script_timeout= in /etc/mesh.conf.
 DEFAULT_TIMEOUT=300
 
 usage() {
@@ -64,9 +42,8 @@ for arg in "$@"; do
     esac
 done
 
-# Per-script timeout from mesh.conf
-# Read by hand rather than sourced: mesh.conf is operator-editable and a stray
-# line must not execute as shell here.
+# Parse user_script_timeout without sourcing mesh.conf so stray lines
+# in this operator-editable file cannot execute as shell.
 TIMEOUT="$DEFAULT_TIMEOUT"
 if [ -r "$MESH_CONF" ]; then
     conf_timeout=$(sed -n 's/^user_script_timeout=\([0-9]\{1,\}\)[[:space:]]*$/\1/p' \
@@ -74,11 +51,8 @@ if [ -r "$MESH_CONF" ]; then
     [ -n "$conf_timeout" ] && [ "$conf_timeout" -gt 0 ] 2>/dev/null && TIMEOUT="$conf_timeout"
 fi
 
-# State
-# One TAB-separated line per completed script: name, exit code, epoch. Written
-# as each script finishes rather than in one batch at the end, so an
-# interrupted run resumes instead of restarting: the script that was cut off
-# mid-way has no line, and runs again; the ones before it do not.
+# Completed scripts: TAB-separated name, exit code, epoch. Write each result
+# immediately so interrupted runs repeat only the script without a record.
 mkdir -p "$(dirname "$STATE_FILE")" 2>/dev/null || true
 
 already_ran() {
@@ -90,13 +64,9 @@ record_result() {
     printf '%s\t%s\t%s\n' "$1" "$2" "$(date +%s)" >> "$STATE_FILE"
 }
 
-# Which files are candidates
-# The flasher already validated everything it embedded, so this is a second
-# line of defence rather than the real gate: it also covers files an operator
-# dropped in by hand on a live node, which is the only path that reaches here
-# unvalidated. Lexical order, C collation, so the 10-/20-/30- convention means
-# what it looks like it means. The shebang test that pairs with this lives in
-# the run loop, where it can report the skip.
+# Revalidate candidates, including files copied directly onto a live node.
+# Use lexical C order for the 10-/20-/30- convention. The run loop checks
+# shebangs separately so skipped files can be reported.
 list_scripts() {
     [ -d "$SCRIPT_DIR" ] || return 0
     find "$SCRIPT_DIR" -maxdepth 1 -type f -printf '%f\n' 2>/dev/null \
@@ -122,11 +92,8 @@ if [ "$LIST_ONLY" -eq 1 ]; then
     exit 0
 fi
 
-# Run
-# Everything from here is teed to the log. Append, never truncate, for the same
-# reason radio-setup.sh appends: this can run more than once (a --force, a
-# resumed run after a power pull) and the run that went wrong is the one you
-# want to still be able to read.
+# Append output to the log, preserving failed runs across --force and
+# resumed execution after power loss.
 mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || true
 exec > >(tee -a "$LOG_FILE") 2>&1
 
@@ -164,22 +131,16 @@ while IFS= read -r name; do
         continue
     fi
 
-    # Same rule the flasher applies: no shebang, not a script. The flasher
-    # never embeds such a file, so this only bites on the other path into this
-    # directory: an operator copying something onto a live node. It matters
-    # there, because exec'ing a file with no shebang does not fail: the kernel
-    # refuses it and bash falls back to interpreting it as a shell script. A
-    # dropped-in config file whose lines happen to parse as shell would run,
-    # and report success.
+    # Require a shebang, including for files copied directly onto a live node.
+    # Bash falls back to interpreting files the kernel rejects without one,
+    # which could execute a config file that happens to parse as shell.
     if ! head -c 2 "$path" 2>/dev/null | grep -q '^#!'; then
         printf '%s\n' " -- $name: no #! on line 1, not a script: skipping"
         NOTSCRIPT=$((NOTSCRIPT + 1))
         continue
     fi
 
-    # Written by a heredoc in firstrun.sh, so the executable bit depends on
-    # that block having chmod'd it. Repair rather than refuse: an operator who
-    # copied a script onto a live node by hand should not have to know.
+    # Repair the executable bit for heredoc-written or manually copied scripts.
     [ -x "$path" ] || chmod +x "$path" 2>/dev/null || true
 
     echo ""
@@ -188,9 +149,8 @@ while IFS= read -r name; do
     echo "--------------------------------------------------------------"
     started=$(date +%s)
 
-    # cwd / and stdin from /dev/null: these run from a systemd oneshot with no
-    # terminal, and a script that blocks on read would otherwise sit there
-    # until the timeout instead of failing immediately.
+    # Use cwd / and stdin /dev/null for the systemd oneshot without a terminal.
+    # Reads then fail immediately instead of waiting for the timeout.
     if command -v timeout >/dev/null 2>&1; then
         ( cd / && timeout --kill-after=30 "$TIMEOUT" "$path" ) < /dev/null
         rc=$?
@@ -209,9 +169,8 @@ while IFS= read -r name; do
         printf '%s\n' " << $name: TIMED OUT after ${TIMEOUT}s (exit $rc)"
         FAILED=$((FAILED + 1))
     elif [ "$rc" -eq 126 ] || [ "$rc" -eq 127 ]; then
-        # The usual cause is a shebang naming an interpreter this node does not
-        # have. Any interpreter is allowed, but only what is installed can run,
-        # and a bare "exit 127" does not say that.
+        # Exit 127 often means the shebang interpreter is missing. Report that
+        # possibility explicitly. Any installed interpreter is allowed.
         interp=$(head -1 "$path" | sed 's|^#!||' | awk '{ if ($1 ~ /\/env$/) print $2; else print $1 }')
         if [ -n "$interp" ] && ! command -v "$interp" >/dev/null 2>&1 \
            && [ ! -x "$interp" ]; then
@@ -228,9 +187,8 @@ while IFS= read -r name; do
     fi
 done < <(list_scripts)
 
-# The marker goes down even when scripts failed. The policy is advisory: a
-# script that exits non-zero has had its turn and is reported, it does not earn
-# a retry on every subsequent boot. `--force` is the way back.
+# Mark completion even after advisory failures. A nonzero script exit
+# does not retry on every boot. --force permits another attempt.
 touch "$DONE_FILE"
 
 echo ""
@@ -247,6 +205,5 @@ fi
 printf '%s\n' " finished: $(date -Is)"
 echo "=============================================================="
 
-# Always 0. A non-zero exit would mark the unit failed, which is a louder
-# signal than an operator script deserves: the banner and the log carry it.
+# Exit 0: the banner and log report script failures without failing the unit.
 exit 0

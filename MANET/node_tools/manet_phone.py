@@ -1,9 +1,9 @@
 """Pure selection and feedback for a radio-fed, tethered ATAK phone.
 
 Only end0-proven, pinned-phone user gestures supply manual locations. Sent
-points use creator time; hand-set self SA uses changes while no feed is live.
+points use creator time. Hand-set self SA uses changes while no feed is live.
 MANET echoes and internal phone GPS never become independent observations.
-Manual positions persist. Position distrust latches until a NEW nearby user
+Manual positions persist. Position distrust latches until a new nearby user
 mark confirms fresh, unjammed receiver coordinates. This never clears the
 spoof monitor or its time quarantine. No function performs I/O or reads time.
 Phone dates are estimated from admitted SA on radio monotonic time. Radio
@@ -34,7 +34,7 @@ _TRUSTED = {"UNCHECKED", "RANGE_CONSISTENT"}  # usable, not authenticated
 
 @dataclass(frozen=True)
 class PhoneClockDiagnostic:
-    """Observed phone-clock discontinuity; NEVER a time-authority grant."""
+    """Observed phone-clock discontinuity, not time authority."""
     generation: int
     delta_s: float
     observed_mono: float
@@ -62,7 +62,7 @@ class PhoneFix:
     fix: Fix
     phone_uid: str
     source: str                  # marker or self_manual
-    observation_time: datetime   # original PHONE creator/SA time; see clock_generation
+    observation_time: datetime   # Phone creator/SA time (clock_generation)
     observation_mono: float
     received_mono: float
     stale: datetime | None       # None: manual locations do not expire
@@ -76,15 +76,15 @@ class PhoneFix:
 class RadioGPS:
     """Own receiver observation in this boot's monotonic clock domain.
 
-    fix=None means no receiver fix (including no hardware); it NEVER enables
-    phone GPS ingestion. state comes from the spoof monitor; jammed comes
+    fix=None means no receiver fix (including no hardware), never permission
+    to ingest phone GPS. state comes from the spoof monitor. jammed comes
     from the LC76G pin. Neither may be inferred from the selected output.
     """
     fix: Fix | None
     observed_mono: float
     state: str = "UNCHECKED"
     jammed: bool = False
-    # Increase for EVERY new failed range check/jam incident, including repeated
+    # Increase for every new failed range check/jam incident, including repeated
     # failures under the same monitor state. It can only revoke position trust.
     fault_epoch: int = 0
     # Fresh ranging/GPS agreement, even while the monitor remains quarantined.
@@ -97,7 +97,7 @@ class OutboundEvent:
 
     The service supplies a unique GeoChat messageId when acknowledging actual
     transmission. Audio/web acknowledgements mean durable local handoff.
-    Event IDs are instance-local; persist state or namespace across restarts.
+    Event IDs are instance-local. Persist state or namespace across restarts.
     """
     event_id: int
     kind: str                   # geochat, audio, web_ui
@@ -119,15 +119,15 @@ class _Warning:
     deadline: float | None = None
     delivered: bool = False
     read: bool = False
-    acknowledged: bool = False  # read receipt OR an admitted user gesture
+    acknowledged: bool = False  # read receipt or an admitted user gesture
 
 
 @dataclass(frozen=True)
 class LocationSelection:
-    location: PhoneFix | None    # selected manual provenance; None when GPS wins
+    location: PhoneFix | None    # manual provenance, None when GPS wins
     retire_marker_uids: tuple[str, ...]
     own_gnss_selected: bool
-    fix: Fix | None              # the one chosen position for BOTH phone and radio
+    fix: Fix | None              # selected position for phone and radio
     phone_present: bool
     gps_state: str
     gps_overridden: bool
@@ -157,7 +157,7 @@ class PhonePosition:
 
     from_ethernet is bridge-port proof, never an IP/UID guess. Association
     changes require a new instance. Call position_sent only after successful
-    external-position transport; its timeout guards self-drag adoption.
+    external-position transport. Its timeout guards self-drag adoption.
     Retain/persist association, manual choice, distrust and pending actions.
     """
 
@@ -195,8 +195,8 @@ class PhonePosition:
         self._phone_ref = None
         self._phone_mono_ref = None
         self._phone_generation = 0
-        self._seen_sa_times = {}  # bounded replay history retained through clock steps
-        self.clock_diagnostic = None  # latest only; also returned on the rebasing PhoneUpdate
+        self._seen_sa_times = {}  # Bounded replay history across clock steps
+        self.clock_diagnostic = None  # Latest, also in rebasing PhoneUpdate
         self._presence = None
         self._manual = None
         self._manual_retired = False
@@ -231,7 +231,7 @@ class PhonePosition:
 
         Unit-rate extrapolation on radio monotonic time, with a maximum phase
         estimate within the step tolerance (least one-way delay). Historical
-        mono values are projected into the CURRENT phone-clock generation,
+        mono values are projected into the current phone-clock generation,
         useful for comparing a new receipt with an earlier local send.
         This observation is for the phone path only, never clock discipline.
         """
@@ -241,7 +241,7 @@ class PhonePosition:
         return self._phone_ref + timedelta(seconds=mono - self._phone_mono_ref)
 
     def outbound_time(self, mono, radio_utc):
-        """The service's timestamp for ALL CoT sent to this phone.
+        """The service's timestamp for all CoT sent to this phone.
 
         Pass this as now to external_position, hidden_contact, geochat_report
         and retire_marker. Before a phone clock exists, use aware radio UTC.
@@ -265,7 +265,7 @@ class PhonePosition:
         the current phone is live. Remember recent accepted timestamps across
         generations so known replays cannot masquerade as either step. This
         cannot distinguish an unseen/evicted replay or a large transport delay
-        from a clock step; first admission has the same offset ambiguity.
+        from a clock step. First admission has the same offset ambiguity.
         """
         if sa.time in self._seen_sa_times:
             return "replayed_or_out_of_order", None, None
@@ -298,7 +298,7 @@ class PhonePosition:
         """Compare phone dates within a generation, monotonic epochs across steps.
 
         Keep the original manual date and monotonic age unchanged on rebase.
-        Cross-step, an old point's generation is not on the wire; current-clock
+        Cross-step, an old point's generation is not on the wire. Current-clock
         projection is conservative for forward steps but cannot authenticate
         arbitrary unseen points. Prefer a new point made after recovery.
         """
@@ -323,7 +323,7 @@ class PhonePosition:
         return True
 
     def _retire_confirming_marker(self):
-        """Reserve deletion before confirmation; retry if the backlog is full.
+        """Reserve deletion before confirmation and retry a full backlog.
 
         Retain the manual geography/UID as fallback provenance, but remember
         that its map item is already retiring so later replacement cannot
@@ -376,7 +376,7 @@ class PhonePosition:
         if sa.source == "manual" and (user_selected or dragged) and (sa.lat, sa.lon) != (0, 0):
             point = (sa.lat, sa.lon)
             # Explicit USER can select even the last fed point. A transition
-            # into USER is an action; its periodic unchanged SA is not.
+            # into USER is an action. Its periodic unchanged SA is not.
             if user_selected:
                 changed = point != self._last_user_sa_point or self._last_sa_geopointsrc != "USER"
             else:
@@ -401,9 +401,9 @@ class PhonePosition:
         return PhoneUpdate(status, self.pinned_uid, sa.uid, reappeared, diagnostic)
 
     def feed_marker(self, marker, receipt_mono, receipt_utc, *, from_ethernet):
-        """Auto-accept eligible Sent points; leave others as plain candidates.
+        """Accept eligible Sent points and leave others as candidates.
 
-        Creator time orders persistent locations; event time/stale do not
+        Creator time orders persistent locations. Event time/stale do not
         refresh or expire them. Distinct points tied at the current epoch
         stay candidates. Repeated identical UID/epoch/geography is duplicate.
         A newer edit of the same UID does not retire that UID. No candidate
@@ -478,7 +478,7 @@ class PhonePosition:
 
         Once sends stop, wait feed_timeout_s (device observed ~10 s) before
         accepting a drag. Suppress a held copy of the last fed lat/lon even
-        after expiry; an altitude-only change does not establish a new drag.
+        after expiry. An altitude-only change does not establish a new drag.
         """
         if not _usable(fix) or (fix.phone_uid is not None and fix.source != "manual"):
             raise ValueError("position_sent needs a usable chosen fix")
@@ -579,7 +579,7 @@ class PhonePosition:
 
         No commands, alert acknowledgements, location evidence or SA refresh.
         The service owns a bounded display history/deduplication by sender and
-        message ID; no history or output queue is allocated here.
+        message ID. No history or output queue is allocated here.
         """
         if not isinstance(chat, PhoneChat) or type(from_ethernet) is not bool:
             raise ValueError("parsed PhoneChat and boolean ingress required")
@@ -593,7 +593,7 @@ class PhonePosition:
         return chat
 
     def feed_receipt(self, receipt, receipt_mono, receipt_utc, *, from_ethernet):
-        """Consume direct delivered/read status; neither pins nor refreshes SA."""
+        """Read delivered/read status without pinning or refreshing SA."""
         if not isinstance(receipt, ChatReceipt) or type(from_ethernet) is not bool:
             raise ValueError("parsed ChatReceipt and boolean ingress required")
         mono, _ = self._now(receipt_mono, receipt_utc)
@@ -629,12 +629,12 @@ class PhonePosition:
         """Apply freshness, distrust, user conflict/confirmation and reminders.
 
         fault_epoch only revokes trust. A new mark within restore_margin_m of
-        fresh, unjammed GPS restores POSITION trust, even if the raw monitor
+        fresh, unjammed GPS restores position trust, even if the raw monitor
         is still quarantined. An old held mark or clean ranging never does.
         A later fault invalidates this confirmation. A confirming Sent marker
         is queued for retirement before returning to GPS (backpressure defers
-        confirmation); its geography remains the fallback landmark. gps_state
-        stays raw; no time-service permission is produced here.
+        confirmation). Its geography remains the fallback landmark. gps_state
+        stays raw. No time-service permission is produced here.
         """
         mono = _number(now_mono, "monotonic time")
         fresh = False
@@ -699,7 +699,7 @@ class PhonePosition:
                         self._distrusted = self._overridden = False
                         self._position_confirmed = True
                     else:
-                        checked = False  # retry confirmation once deletion capacity frees
+                        checked = False  # Retry when deletion space frees
                 if checked:
                     self._checked_manual_epoch = epoch
         usable = fresh and state != "NO_FIX" and not jammed and (
@@ -733,14 +733,14 @@ class PhonePosition:
                                  self.outbound_events)
 
     def get_fix(self, now_mono, now_utc, **kwargs):
-        """Return the selected Fix; phone presence gates transport separately."""
+        """Return the selected Fix. Transport requires phone presence."""
         return self.select(now_mono, now_utc, **kwargs).fix
 
     def ack_retired(self, marker_uids):
         """Service has durably taken responsibility for these delete requests.
 
         This is not proof of removal in ATAK. The service owns bounded retry
-        and delivery verification after acknowledging; unsent requests must
+        and delivery verification after acknowledging. Unsent requests must
         remain pending. Unknown/already acknowledged UIDs are harmless.
         """
         if isinstance(marker_uids, str):

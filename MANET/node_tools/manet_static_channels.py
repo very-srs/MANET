@@ -1,16 +1,10 @@
 #!/usr/bin/env python3
-"""Stored Wi-Fi mesh channel plan for static (non-ACS) mode.
+"""Store the fixed Wi-Fi mesh channel plan for non-ACS mode.
 
-Static mode keeps each Wi-Fi mesh band on one fixed channel. The plan lives
-here rather than as constants in the node manager so an operator's channel
-change survives the manager's periodic enforcement and a reboot. It is not in
-mesh.conf: config apply and rollback have nothing to do with it.
-
-Missing file: the historic defaults (the lobby channels). Malformed file: an
-error, never a silent fallback, since falling back could strand this radio on
-a different channel from the rest of the mesh.
-
-No imports beyond the standard library, so the radio code can import this.
+The separate plan persists through manager enforcement and reboot. It is
+outside mesh.conf, so config apply/rollback does not change it. A missing
+file uses lobby defaults. A malformed file raises an error to avoid
+stranding the radio on a fallback channel. Uses only the standard library.
 """
 
 import json
@@ -71,7 +65,7 @@ def load(path=PATH):
 
 
 def save(band, freq, path=PATH):
-    """Store one band's frequency atomically; return the complete new plan."""
+    """Store one band's frequency atomically and return the new plan."""
     if not valid(band, freq):
         raise StaticChannelError(f'Invalid {band} GHz static frequency {freq!r}')
     path = Path(path)

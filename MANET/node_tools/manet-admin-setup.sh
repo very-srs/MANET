@@ -1,6 +1,6 @@
 #!/bin/bash
 # Install the admin transport dependency on nodes receiving a tools update.
-# Failure leaves admin control disabled; the public status page still works.
+# Failure disables admin control while the public status page remains usable.
 set -e
 
 if python3 -c 'from cryptography.hazmat.primitives.ciphers.aead import AESGCM; from cryptography.hazmat.primitives.kdf.scrypt import Scrypt' 2>/dev/null; then

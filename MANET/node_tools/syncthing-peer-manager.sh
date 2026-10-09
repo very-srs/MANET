@@ -1,10 +1,5 @@
 #!/bin/bash
-#
-#  Syncthing Peer Manager for a B.A.T.M.A.N. Mesh
-#
-# This script runs as a daemon to automatically discover and configure Syncthing
-# peers by reading the central mesh node registry file.
-#
+# Discover and configure Syncthing peers from the mesh node registry.
 
 # Configuration
 SYNCTHING_USER="radio"
@@ -16,7 +11,6 @@ REGISTRY_STATE_FILE="/var/run/mesh_node_registry" # Central registry file
 LOOP_INTERVAL=60 # Check every minute
 
 log() {
-    # Add script name for clarity
     printf '%s\n' "SYNC-MGR: $1" >&2
 }
 
@@ -34,9 +28,9 @@ is_peer_configured() {
     fi
     # Use -F for fixed string and -q for quiet mode
     if grep -Fq "<device id=\"${peer_id}\"" "$SYNCTHING_CONFIG_FILE"; then
-        return 0 # Peer IS configured
+        return 0 # Peer is configured.
     else
-        return 1 # Peer is NOT configured
+        return 1 # Peer is not configured.
     fi
 }
 
@@ -66,7 +60,7 @@ share_default_folder_with_peer() {
     local share_xml
     share_xml=$(printf '\n        <device id="%s" introducedBy=""></device>' "$peer_id")
 
-    # Insert the <device> share line within the default folder's definition using awk
+    # Insert the device share inside the default folder with awk.
     awk -v share_xml="$share_xml" '/<folder id="default"/ { in_folder=1 } in_folder && /<\/folder>/ { print share_xml; in_folder=0 } { print }' "$SYNCTHING_CONFIG_FILE" > "$SYNCTHING_CONFIG_FILE.tmp" && \
     mv "$SYNCTHING_CONFIG_FILE.tmp" "$SYNCTHING_CONFIG_FILE"
 
@@ -111,7 +105,7 @@ while true; do
         # List all variables starting with NODE_ and ending with _SYNCTHING_ID
         compgen -A variable | grep '^NODE_.*_SYNCTHING_ID$' | while read varname; do
             peer_id="${!varname}"
-            # Exclude our own ID and any potentially empty entries
+            # Exclude the local ID and empty entries.
             if [[ -n "$peer_id" && "$peer_id" != "$LOCAL_ID" ]]; then
                 printf '%s\n' "$peer_id"
             fi
@@ -135,11 +129,10 @@ while true; do
         log "No other peers found in the mesh registry."
     fi
 
-    # If we added new peers, restart Syncthing to apply the changes
+    # Restart Syncthing to apply new peers.
     if [ "$NEEDS_RESTART" = true ]; then
         log "New peers were added. Restarting Syncthing to apply changes."
-        # Use runuser to ensure config file permissions are correct if Syncthing touches them on reload
-        # Although systemctl restart should handle the user context correctly.
+        # Restart the instantiated service for the configured Syncthing user.
         systemctl restart "syncthing@${SYNCTHING_USER}.service"
     fi
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prepare the opt-in MT7916 firmware override; never load or reload a driver."""
+"""Prepare the opt-in MT7916 override without loading or reloading drivers."""
 import argparse
 from contextlib import contextmanager
 import fcntl
@@ -42,8 +42,8 @@ def enabled(path):
 
 
 def timing_driver(root):
-    # Inspect the installed module selected for this kernel, not a module left
-    # loaded from an older installation. modinfo never loads anything.
+    # Inspect the installed module selected for this kernel with modinfo.
+    # A loaded module may predate installation. modinfo loads no modules.
     try:
         result = subprocess.run(['modinfo', '-b', str(root), '-k', os.uname().release,
                                  '-F', 'manet_timing', 'mt7915e'],
@@ -97,8 +97,8 @@ def sync_directory(path):
 
 @contextmanager
 def locked(directory):
-    # Serialize preparers only. A directory lock needs no lock-file writes and
-    # has no involvement in probing/loading the radio.
+    # Serialize preparers with a directory lock, without lock-file writes or
+    # radio probing.
     fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
@@ -180,7 +180,7 @@ class Firmware:
         return value
 
     def present(self):
-        # Presence is available before coldplug; no bound driver is required.
+        # Detect presence before coldplug without a bound driver.
         # The auxiliary 0x790a function alone cannot load this firmware.
         return any((device / 'vendor').read_text().strip() == '0x14c3' and
                    (device / 'device').read_text().strip() == '0x7906'
@@ -213,8 +213,8 @@ class Firmware:
                 # in mt7915_register_device(), so also require that evidence.
                 if not any(p.is_dir() for p in (device / 'ieee80211').glob('phy*')):
                     return False
-        # 0x7906 is MT7916's primary function; 0x790a is its auxiliary HIF.
-        # Binding only the auxiliary function does not prove firmware probed.
+        # 0x7906 is MT7916's primary function, 0x790a its auxiliary HIF.
+        # Auxiliary binding alone does not prove firmware probed.
         return primary or not secondary
 
     def select(self, mode):
@@ -237,8 +237,8 @@ class Firmware:
                 return 'boot survived; pending marker cleared'
             if not disabled:
                 return 'pending marker retained; survival unconfirmed' if pending else 'no pending boot'
-        # An observed value change rearms the choice; unrelated config edits
-        # and repeated writes of the same value do not. --rearm is explicit.
+        # A changed value or explicit --rearm rearms the choice.
+        # Unrelated edits and repeated writes of the same value do not.
         if disabled and mode != 'survived':
             if mode == 'rearm' or (not stale and value != disabled['positioning']):
                 self.remove_state(self.disabled)
@@ -276,9 +276,8 @@ class Firmware:
                 and identity(path) == record.get('identity'))
 
     def deactivate(self):
-        # The unique patched WM hash remains recognizable without either JSON
-        # file. Remove it first; preserve the owner record if cleanup fails so
-        # the next boot can retry WA/ROM removal.
+        # Remove the unique patched WM hash first, recognizable without JSON.
+        # On failure, keep the owner record to retry WA/ROM removal next boot.
         wm = self.updates / NAMES[0]
         if self.owned(NAMES[0], {}):
             wm.unlink()

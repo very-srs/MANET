@@ -1,13 +1,9 @@
 #!/usr/bin/env python3
-"""Radio control primitives, shared by the two things that drive the radios.
+"""Provide local radio controls for Alfred-staged changes.
 
-mesh-status.py calls these for local, immediate changes from the management
-UI. mesh-radio-state.py calls the apply_* functions when an Alfred-staged
-package activates. Keeping one implementation is the point: a channel change
-must mean the same thing whichever path asked for it.
-
-Nothing here talks to another node. Anything mesh-wide is staged over Alfred
-by the caller.
+mesh-radio-state.py calls apply_* when a package activates. The management
+UI stages changes through coordinate_radio_change() and uses shared radio
+queries for display. Callers coordinate mesh-wide changes over Alfred.
 """
 
 import json
@@ -22,17 +18,11 @@ import time
 from manet_config_io import atomic_write, rewrite_keys
 import manet_static_channels as static_channels
 
-# S1G channel plans, transcribed from the Morse driver's own tables in
-# dot11ah/s1g_channels_rules.c ({eu,us}_s1g_channels).  Keys are the S1G
-# channel number the supplicant config wants; values the centre frequency in
-# kHz.  A bandwidth appears for a region only where the driver defines a
-# channel of that width. EU stops at 2 MHz because its 863-868 MHz allocation
-# has no suitable channel placement for 4 or 8 MHz.
-#
-# Only EU and US are listed because radio-setup.sh generates exactly two
-# supplicant templates: US, and everything else on the EU plan
-# (radio-setup.sh:1132).  Offering a third region's channels here would write
-# a config no template backs.
+# S1G plans from dot11ah/s1g_channels_rules.c ({eu,us}_s1g_channels).
+# Keys are supplicant S1G channel numbers, values are centre frequencies in
+# kHz. Include only widths defined by the driver. EU's 863-868 MHz allocation
+# has no channel placement for 4 or 8 MHz.
+# radio-setup.sh generates US and EU templates, using EU for non-US regions.
 HALOW_CHANNEL_PLANS = {
     # EU 2 MHz (channels 2 and 6, op_class 67) is in the band plan, but the
     # Morse wpa_supplicant_s1g 1.16.4 build refuses every EU 2 MHz mesh
@@ -57,18 +47,12 @@ HALOW_CHANNEL_PLANS = {
     },
 }
 
-# S1G global operating class per region and bandwidth.  The supplicant
-# rejects a class that disagrees with the country or the channel, and a
-# rejected config is a silent crashloop, so treat these as load-bearing.
-#
-# VERIFIED on hardware: EU 1 MHz = 66 (the former non-US template), US 8 MHz
-# = 71 (the former US template), US 2 MHz = 69 (supplicant up with no
-# restarts, 907 MHz / 2 MHz, peered).
-# INFERRED - US 1/4 MHz fill 68/70 around the verified 69/71. EU 2 MHz (67)
-# is left out: the supplicant rejects it (see HALOW_CHANNEL_PLANS).
-# They have not been confirmed against the standard text or on hardware, so
-# apply_halow_channel() restarts the supplicant and rolls the config back if
-# it will not come up on a class it has not used before.
+# S1G global operating classes must match country/channel to avoid crashloops.
+# Hardware verified: EU 1 MHz = 66, US 8 MHz = 71, US 2 MHz = 69
+# (peered at 907 MHz / 2 MHz without restarts).
+# US 1/4 MHz = 68/70 are inferred, unverified on hardware or in the standard.
+# EU 2 MHz = 67 is rejected (see HALOW_CHANNEL_PLANS).
+# apply_halow_channel() restarts on class changes and rolls back on failure.
 HALOW_OP_CLASS = {
     ('EU', '1MHz'): 66,
     ('US', '1MHz'): 68, ('US', '2MHz'): 69,
@@ -82,9 +66,10 @@ USB_WIFI_UPLINK_SCRIPT = '/usr/local/bin/usb-wifi-uplink.sh'
 
 
 def halow_region():
-    """'US' or 'EU': mirrors radio-setup.sh:1132, which is the only place a
-    HaLow supplicant config is generated: US gets its own template, every
-    other region gets the EU one."""
+    """Return US or EU to match radio-setup.sh's supplicant templates.
+
+    Every non-US region uses the EU template.
+    """
     domain = ''
     try:
         with open('/etc/mesh.conf') as f:
@@ -267,7 +252,7 @@ def _parse_morse_channel_output(text):
 
 
 def get_halow_driver_info(iface='wlan2'):
-    """Read HaLow runtime channel data from Morse tooling; config is only fallback."""
+    """Read HaLow runtime data from Morse tooling, falling back to config."""
     binaries = ['/usr/local/bin/morse_cli', 'morse_cli']
     variants = [
         lambda b: [b, '-i', iface, 'channel', '-j'],
@@ -310,10 +295,8 @@ def get_halow_driver_info(iface='wlan2'):
         m = re.search(r'channel\s*=\s*(\d+)', txt)
         if m:
             info['channel'] = m.group(1)
-        # Not from s1g_prim_chwidth: that is the *primary* channel width, which
-        # is 2 MHz for every operating width above 1 MHz, so reading it as the
-        # operating width reports a 4 or 8 MHz channel as 2 MHz. The channel
-        # number identifies the width on its own.
+        # s1g_prim_chwidth describes the primary: 2 MHz above 1 MHz operation.
+        # Use the channel number to distinguish 2, 4 and 8 MHz channels.
         bw = halow_bandwidth_for_channel(info.get('channel'))
         if bw:
             info['halow_bw'] = bw
@@ -330,7 +313,7 @@ def wifi_channel_to_freq(iface, channel):
     if iface == 'wlan0' and 1 <= ch <= 13:
         return 2407 + ch * 5
     if iface == 'wlan1':
-        # Common 5 GHz channels; enough for manual dashboard control.
+        # Common 5 GHz channels for manual dashboard control.
         if ch == 14:
             return 2484
         if 32 <= ch <= 177:
@@ -425,9 +408,11 @@ HALOW_POWER_FIXED = ('HaLow transmit power is set when the radio starts and cann
 
 
 def is_halow_iface(iface):
-    """A HaLow radio by role or by driver. Its power cannot change live: the
-    Morse driver applies power only when it sets a channel, and reloading the
-    driver can wedge the USB card."""
+    """Identify HaLow by role or driver.
+
+    Morse applies power only on channel changes. Reloading the driver can
+    wedge the USB card, so live power changes are unavailable.
+    """
     roles = Path(os.environ.get('MANET_IFACE_STATE_DIR', '/var/lib'))
     try:
         if iface in (roles / 'halow_if').read_text().split():
@@ -455,10 +440,8 @@ def read_iface_txpower_dbm(iface):
 def set_iface_txpower_verified(iface, dbm, retries=6, delay=0.25):
     """Request PHY power and return (requested, reported).
 
-    MANET does not cap the radios. The driver or the card itself may report
-    less than was asked for; that is accepted and returned. A radio that
-    reports no power, or more than was requested (a reduction that did not
-    take), is an error.
+    MANET applies no cap. Lower driver/card readback is accepted. Missing
+    readback or power above the request is an error.
     """
     requested = _fmt_dbm(dbm)
     sysnet = Path(os.environ.get('MANET_SYS_NET', '/sys/class/net'))
@@ -510,8 +493,8 @@ def set_iface_txpower_verified(iface, dbm, retries=6, delay=0.25):
 
 # Apply operations
 
-# Each returns a result dict and raises only on genuine failure. They act on
-# this node alone; mesh-wide application is Alfred's job, not theirs.
+# Apply operations return result dicts or raise on failure.
+# They affect this node only. Alfred coordinates mesh-wide application.
 
 def apply_txpower(iface, dbm):
     if not iface or dbm is None:
@@ -538,11 +521,10 @@ S1G_SERVICE = 'wpa_supplicant-s1g-wlan2.service'
 
 
 def _s1g_supplicant_healthy(settle=6):
-    """True if the s1g supplicant is up and not crashlooping on its config.
+    """Check that the S1G supplicant stays active without config crashloops.
 
-    A rejected field is fatal to this build and shows up as a restart loop,
-    not as a running daemon with a complaint, so watch the restart counter
-    rather than a single is-active.
+    Rejected fields cause restarts. Check the restart counter as well as
+    is-active.
     """
     def counter():
         r = subprocess.run(['systemctl', 'show', '-p', 'NRestarts', '--value',
@@ -597,10 +579,8 @@ def apply_halow_channel(channel, bw='2MHz', dbm=None):
     m = re.search(r'op_class\s*=\s*(\d+)', previous)
     op_class_changed = not m or int(m.group(1)) != op_class
 
-    # s1g_prim_1mhz_chan_index addresses a 1 MHz slice of the operating
-    # channel, so it must be 0..bw-1. Narrowing the channel without clamping
-    # it leaves an out-of-range index behind and the supplicant refuses the
-    # whole config.
+    # s1g_prim_1mhz_chan_index selects a 1 MHz slice and must be 0..bw-1.
+    # Clamp it when narrowing the channel to avoid config rejection.
     def _clamp_prim_index(text):
         idx = re.search(r's1g_prim_1mhz_chan_index\s*=\s*(\d+)', text)
         if not idx:
@@ -621,10 +601,8 @@ def apply_halow_channel(channel, bw='2MHz', dbm=None):
          '-c', str(freq_khz), '-o', str(bw_mhz), '-p', str(bw_mhz)],
         capture_output=True, text=True, timeout=10)
 
-    # Restart when the live change failed (the config above then carries it),
-    # and also whenever the operating class changed: only a restart proves the
-    # supplicant accepts the new class, and a class it rejects is a silent
-    # crashloop that would otherwise surface at the next reboot.
+    # Restart after a failed live change or any operating-class change.
+    # Verify class acceptance now to avoid a crashloop at the next reboot.
     if result.returncode != 0 or op_class_changed:
         restart = subprocess.run(
             ['systemctl', 'restart', S1G_SERVICE], timeout=15)
@@ -763,20 +741,17 @@ def apply_uplink_wifi(ssid, password, enabled=True):
     return {'ok': True, 'ssid': ssid, 'enabled': bool(enabled)}
 
 
-# --- voice codec -------------------------------------------------------------
+# Voice codec
 
 VOICE_CODECS = ('lyra', 'opus')
 MESH_CONF_FILE = '/etc/mesh.conf'
 
 
 def set_mesh_conf_key(key, value, conf_file=MESH_CONF_FILE):
-    """Replace one key in mesh.conf, leaving every other line byte for byte.
+    """Replace one mesh.conf key, preserving all other lines byte for byte.
 
-    mesh.conf holds mesh_key and admin_password, so this is deliberately
-    conservative: only the named key is touched, duplicates are collapsed
-    rather than stacked, the original mode and ownership are carried over, and
-    the replacement lands by atomic rename. A crash mid-write cannot leave a
-    node with a truncated config and no way back in.
+    Collapse duplicates and preserve mode and ownership. Atomic replacement
+    protects mesh_key and admin_password from a truncated config after a crash.
     """
     with open(conf_file) as f:
         lines = f.readlines()
@@ -805,7 +780,7 @@ def set_mesh_conf_key(key, value, conf_file=MESH_CONF_FILE):
         try:
             os.chown(tmp, st.st_uid, st.st_gid)
         except PermissionError:
-            pass          # not root: mode still carried, ownership stays ours
+            pass          # Non-root: preserve mode, keep writer ownership.
         os.replace(tmp, conf_file)
     except OSError:
         try:
@@ -816,17 +791,13 @@ def set_mesh_conf_key(key, value, conf_file=MESH_CONF_FILE):
 
 
 def apply_voice_codec(codec):
-    """Switch this node's voice codec.
+    """Switch this node's voice codec and restart mesh-voice.
 
-    Restart, not reload: mesh-voice's SIGHUP path retunes the talk group only.
-    A codec change swaps the encoder, payloader, RTP clock rate and the raw
-    caps either side of it, which means rebuilding both pipelines.
-
-    This is staged mesh-wide through Alfred rather than applied node by node
-    because the two codecs cannot hear each other. Sender and receiver both
-    derive their RTP payload type and clock rate from this one setting, so a
-    node left on the other codec is mutually inaudible -- it is not degraded
-    audio, it is silence. See the codec note in node_tools/README.md.
+    SIGHUP only retunes the talk group. Codec changes rebuild both pipelines:
+    encoder, payloader, RTP clock rate and raw caps.
+    Callers stage changes mesh-wide over Alfred because different codecs
+    cannot interoperate. Both ends derive RTP payload type and clock rate
+    from this setting. See the codec note in node_tools/README.md.
     """
     codec = (codec or '').strip().lower()
     if codec not in VOICE_CODECS:

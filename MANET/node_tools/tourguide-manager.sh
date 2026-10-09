@@ -34,25 +34,16 @@ elect_tourguide() {
 }
 
 select_tourguide_radio() {
-    # Alternate on the GLOBAL tourguide window index, never on this node's own
-    # history. Two split partitions can only discover each other if their
-    # tourguides hop to the same band in the same window. The previous
-    # implementation read this node's LAST_TOURGUIDE_RADIO from the registry,
-    # which goes permanently out of phase the moment one side misses a window
-    # (elected tourguide was excluded for hosting a service, a restart, a failed
-    # hop) -- after that the two partitions hop to opposite bands every window
-    # and never meet, silently disabling partition healing. That is the only
-    # recovery path a 2-node mesh has: quorum-checker.sh cannot rescue an
-    # isolated node below 3 remembered peers.
-    #
-    # 120 matches should_perform_tourguide's window in node-manager-acs.sh
-    # (every even minute). This inherits the wall-clock alignment the rest of
-    # the ACS pipeline already depends on; it adds no new time-sync requirement.
+    # Alternate bands using the shared 120 s tourguide window index, matching
+    # should_perform_tourguide in node-manager-acs.sh (every even minute).
+    # Local history drifts after missed turns and prevents rendezvous.
+    # A two-node mesh depends on this: quorum-checker cannot rescue isolation
+    # below three remembered peers. Use the existing ACS wall-clock alignment.
     local NOW=$(date +%s)
     local iface="$WPA_IFACE_5_0"
     [ $(( (NOW / 120) % 2 )) -ne 0 ] || iface="$WPA_IFACE_2_4"
-    # Skip an unavailable band; substituting another band would break the
-    # global rendezvous schedule for mixed single/dual-band partitions.
+    # Skip unavailable bands. Substitution would break the shared rendezvous
+    # schedule for mixed single/dual-band partitions.
     radio_iface_enabled "$iface" || return 1
     printf '%s\n' "$iface"
 }
@@ -212,7 +203,7 @@ HELPER_PAYLOAD=$("$ENCODER_PATH" telemetry "${HELPER_ARGS[@]}" \
     2>/dev/null) || exit 1
 [ -n "$HELPER_PAYLOAD" ] || exit 1
 
-# Select the config; the shared absolute schedule already selected the frequency.
+# Select the config for the frequency chosen by the shared absolute schedule.
 if [ "$TOURGUIDE_RADIO" == "$WPA_IFACE_2_4" ]; then
     TOURGUIDE_CONF=$WPA_CONF_2_4
 else
@@ -237,9 +228,8 @@ restore_data() {
 trap restore_data EXIT
 trap 'exit 1' HUP INT TERM
 log "Hopping $TOURGUIDE_RADIO to lobby ($LOBBY_FREQ)..."
-# The hard cap on time away from the data channel runs on the boot clock.
-# Bash's SECONDS follows the wall clock, so a time sync stepping it back
-# could hold the radio in the lobby (and the channel lock) for that long.
+# Use boot-clock time to bound the hop. Bash SECONDS follows wall time, so
+# a backward time step could extend the lobby dwell and channel-lock hold.
 TOURGUIDE_DEADLINE=$(( $(uptime_now) + 55 ))
 if [ "$DATA_FREQ" != "$LOBBY_FREQ" ]; then
     hop_to_lobby_frequency "$TOURGUIDE_RADIO" "$LOBBY_FREQ" "$TOURGUIDE_CONF" || exit 1

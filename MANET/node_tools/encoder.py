@@ -30,10 +30,8 @@ def build_identity(args):
     ident = NodeInfo_pb2.NodeIdentity()
     ident.hostname = args.hostname
 
-    # The first MAC is br0's, which is also the key Alfred stamps on every
-    # record this node publishes (it runs `-i br0`). Publishing it again would
-    # just be paying twice for the same six bytes, so it is dropped here and
-    # put back by decoder.py from the record key.
+    # Alfred's `-i br0` record key carries the first MAC. Omit its six bytes
+    # here and restore them from the record key in decoder.py.
     for mac in args.mac_addresses[1:]:
         raw = mac_to_bytes(mac)
         if raw:
@@ -69,14 +67,13 @@ def build_telemetry(args):
     t.battery_percentage = args.battery_percentage
     t.cpu_load_average = args.cpu_load_average
 
-    # Only set with an actual fix; gps-reader reports 0/0 when it has none.
+    # Only set with an actual fix. gps-reader reports 0/0 when it has none.
     if args.latitude != 0.0 or args.longitude != 0.0:
         t.location.latitude_e7 = int(round(args.latitude * 1e7))
         t.location.longitude_e7 = int(round(args.longitude * 1e7))
         t.location.altitude_m = int(round(args.altitude))
-    # The manager's existing publish cycle/CLI stays unchanged. When opted in,
-    # the service can replace GNSS or explicitly suppress it. Without a usable
-    # verdict, raw GNSS remains visible but cannot serve as an anchor.
+    # When opted in, the service can replace or suppress GNSS. Without a
+    # usable verdict, raw GNSS remains visible but cannot serve as an anchor.
     apply_positioning_location(t, getattr(args, 'position_file', '/run/manet-position.json'),
                                getattr(args, 'mesh_config', '/etc/mesh.conf'))
     if args.atak_user:
@@ -135,11 +132,11 @@ def build_telemetry(args):
 
 
 def apply_positioning_location(telemetry, path, config_path, *, now_boot=None, boot_id=None):
-    """Opt-in local producer; unavailable verdicts retain unchecked raw GNSS.
+    """Read an opt-in verdict, retaining unchecked raw GNSS when unavailable.
 
-    No Alfred timestamp is trusted for freshness. This checks this OS boot and
-    the service heartbeat plus solution age. Only a fresh, explicit distrust
-    verdict suppresses GNSS. Disabled operation preserves pre-R4 wire bytes.
+    Check this OS boot, service heartbeat and solution age, never Alfred time.
+    Only fresh explicit distrust suppresses GNSS. Disabled operation leaves
+    wire bytes unchanged.
     """
     try:
         settings = {}
@@ -156,7 +153,7 @@ def apply_positioning_location(telemetry, path, config_path, *, now_boot=None, b
     if telemetry.HasField('location'):
         raw = telemetry.location
         # Rebuild from only the manager's raw fields: no ranged provenance or
-        # invented accuracy/age survives. quality is already a protobuf string;
+        # invented accuracy/age survives. quality is a protobuf string.
         # 'unchecked' needs no enum/schema change and is telemetry-only.
         telemetry.location.CopyFrom(NodeInfo_pb2.NodeTelemetry.GpsLocation(
             latitude_e7=raw.latitude_e7, longitude_e7=raw.longitude_e7,
@@ -176,8 +173,8 @@ def apply_positioning_location(telemetry, path, config_path, *, now_boot=None, b
                                              'GNSS_SUSPECTED', 'INCONSISTENT_UNATTRIBUTED')):
             return
         # Validate before changing the fallback: malformed geometry/provenance
-        # is not an explicit usable verdict. An aged solution is simply absent;
-        # a current distrust verdict still suppresses GNSS in that case.
+        # is not an explicit usable verdict. An aged solution is absent.
+        # A current distrust verdict still suppresses GNSS in that case.
         p = _positioning_point(doc, now_boot - doc['written_boot'], old_altitude)
         distrusted = doc['gnss_state'] in ('GNSS_SUSPECTED', 'INCONSISTENT_UNATTRIBUTED')
         if distrusted:
@@ -195,7 +192,7 @@ def _finite(value):
 
 
 def _positioning_point(doc, heartbeat_age, old_altitude):
-    """Validate a service selection; None is a valid absent/expired point."""
+    """Validate a service selection. None is a valid absent/expired point."""
     source, quality, point = doc['source'], doc['quality'], doc['point']
     age = _finite(doc['age_s'])
     if age < 0:
@@ -235,11 +232,10 @@ def _positioning_point(doc, heartbeat_age, old_altitude):
 
 
 def _add_interfaces(t, interfaces_json):
-    """Populate the interface list so peers render from the registry.
+    """Populate interface telemetry for peers to render from the registry.
 
-    Health and fault text are deliberately not published: the viewer derives
-    them from role and state, rather than every node shipping prose on every
-    cycle.
+    Viewers derive health/fault text from role and state, saving per-cycle
+    transmission of that text.
     """
     roles = {
         'bat': NodeInfo_pb2.NodeTelemetry.ROLE_BAT,

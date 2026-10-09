@@ -1,8 +1,8 @@
 #!/bin/bash
-# Shared shell helpers for MANET node tools. Source it; do not run it.
+# Shared shell helpers for MANET node tools. Source this file.
 . "${MANET_TOOLS_DIR:-$(dirname "${BASH_SOURCE[0]}")}/manet-runtime-client.sh"
 
-# Keep command data on stdout; systemd timestamps diagnostics on stderr.
+# Keep data on stdout. systemd timestamps diagnostics on stderr.
 manet_log() {
     local program="$1"
     shift
@@ -79,14 +79,13 @@ collect_ap_ssid() {
     done < /etc/hostapd/hostapd.conf
 }
 
-# Whether a radio is allowed up. mesh-radio-state.py records operator choices
-# in "desired"; anything but an explicit "down", including a missing or
-# unreadable state file, means enabled.
+# mesh-radio-state.py records operator choices in "desired". Only an explicit
+# "down" disables a radio. Missing or unreadable state leaves it enabled.
 radio_iface_enabled() {
     [ -n "$1" ] || return 1
-    # A watchdog checks several interfaces against the same small document.
-    # Reuse one strict jq parse until its CONTENT changes (including deletion
-    # or malformed input); no mtime race or delayed radio-down decision.
+    # Reuse one strict jq parse across watchdog interface checks until the
+    # content changes, including deletion or malformed input. This avoids
+    # mtime races and delayed radio-down decisions.
     local path="${MANET_RADIO_STATE_FILE:-/var/lib/mesh_radio_state.json}" contents=missing
     [ ! -r "$path" ] || contents="present:$(<"$path")"
     if [ "${RADIO_STATE_CONTENTS:-}" != "$contents" ]; then
@@ -100,8 +99,8 @@ radio_iface_enabled() {
             RADIO_DOWN_IFACES=""; RADIO_STATE_CONTENTS=""  # Retry a failed parser.
         fi
     fi
-    # Only a single valid document whose value is exactly "down" disables. Missing,
-    # empty, malformed, wrong-shape or multi-document input leaves it enabled.
+    # Only a single valid document with the interface value "down" disables it.
+    # Missing, empty, malformed, wrong-shape or multiple documents allow it.
     local iface
     while IFS= read -r iface; do
         [ "$iface" != "$1" ] || return 1
@@ -109,11 +108,9 @@ radio_iface_enabled() {
     return 0
 }
 
-# Whole seconds on the boot clock (/proc/uptime). Local timers and cooldowns
-# use it, never the wall clock: a time sync can step the wall clock by any
-# amount in either direction. Not comparable between nodes or across boots.
-# Fails, printing nothing, unless the first field is a plain decimal number,
-# so a bad read cannot become an arithmetic zero in a caller.
+# Return whole boot-clock seconds from /proc/uptime for local timers.
+# Wall-clock steps do not affect this value. Do not compare across boots or
+# nodes. Invalid decimal input fails without output, avoiding arithmetic zero.
 uptime_now() {
     local up _
     read -r up _ < "${MESH_UPTIME_FILE:-/proc/uptime}" || return 1

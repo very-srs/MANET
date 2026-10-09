@@ -1,8 +1,8 @@
 """Split per-node EUD/AP settings from mesh-wide config packages.
 
 Alfred type 70 is for settings every radio must share (mesh SSID, SAE key,
-CIDR, services). The EUD AP on a node is that node's own Wi-Fi for clients;
-pushing it over Alfred renamed every AP on the mesh.
+CIDR, services). EUD AP settings stay local to avoid renaming other nodes'
+client access points.
 """
 
 import ipaddress
@@ -96,8 +96,8 @@ def validate_config(config, current=None, local=False):
 def submitted_changes(config, current):
     """Keep changed form fields and unknown keys (which validation must reject).
 
-    Existing provisioned values need not pass today's rules to edit an unrelated
-    setting. Empty editable fields mean leave the value alone.
+    Existing values need not pass current rules when editing an unrelated
+    setting. Empty editable fields leave the value alone.
     """
     return {key: value for key, value in config.items()
             if key not in MESH_KEYS | LOCAL_KEYS

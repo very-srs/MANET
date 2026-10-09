@@ -1,45 +1,32 @@
-"""
-GNSS samples from gpsd JSON, and the anomaly hints that start spoof checks.
+"""Read per-device gpsd samples and produce anomaly hints for range checks.
 
-gps-reader.py feeds every gpsd message through GnssReader. Each receiver
-(gpsd device) has its own ReceiverState, so two receivers never share a
-fix, signal summary or clock baseline. Times called mono are arrival times
-on CLOCK_MONOTONIC_RAW: chrony slews CLOCK_MONOTONIC toward the time it
-serves, which may come from this same receiver, so only the raw clock is
-independent of it. Raw time does not count suspend; these nodes do not
-suspend.
-
-gpsd may send several TPV reports for one measurement epoch, some without
-every field. Reports with the same GNSS time are merged into one sample. A
-report that claims a fix but lacks a position is incomplete, not a lost
-fix. Only a new epoch renews a fix's freshness, so a replayed report does
-not keep an old position looking current.
-
-Cold start is normal. Until a receiver's first fix has
-held for SETTLE_S, signal and clock anomalies are not raised and the clock
-baseline is not set. Jamming evidence is the exception, but stock gpsd 3.25
-on Debian 13 does not report jam, so that path stays quiet there.
-
-Anomalies are hints, never a verdict. They trigger range checks and are
-compared across nodes: a spoofer or jammer hits every receiver in its
-footprint at once, local multipath hits one.
+gps-reader.py feeds each message to GnssReader. Each ReceiverState owns its
+fix, signal summary and clock baseline. Arrival mono times use
+CLOCK_MONOTONIC_RAW. CLOCK_MONOTONIC follows chrony's potentially GNSS-derived
+slews, so it cannot independently check receiver time. Raw time excludes
+suspend, which these nodes do not use.
+TPV reports with the same GNSS epoch merge. Missing positions are incomplete
+reports. Only a new epoch refreshes a fix, so replays cannot keep it live.
+The first fix must hold SETTLE_S before signal/clock checks or a baseline.
+Jamming bypasses settling, but Debian 13 gpsd 3.25 does not report jam.
+Anomalies trigger checks, not verdicts. Shared anomalies suggest a common
+spoofer/jammer footprint, while local multipath affects one receiver.
 """
 
 from collections import deque
 from datetime import datetime, timedelta
 import math
 
-# Clock: GNSS time minus raw arrival time ("offset") should hold steady. A
-# step is a jump of more than CLOCK_STEP_S between consecutive samples that
-# then holds for STEP_HOLD_S. A delivery stall or backlog shifts arrivals
-# and then recovers, so it cancels instead.
+# Offset is GNSS time minus raw arrival time. A step exceeds CLOCK_STEP_S
+# and holds for STEP_HOLD_S. Arrival shifts from stalls/backlogs cancel
+# when the offset recovers.
 CLOCK_STEP_S = 1.0
 STEP_HOLD_S = 10.0
 # Drift compares the median offset over DRIFT_WINDOW_S, so a few late
 # samples cannot move it.
 DRIFT_WINDOW_S = 30.0
 # Slow drift of the offset since the settled baseline, beyond what was
-# reported as steps. A CM4 crystal is within about 50 ppm; 200 leaves room.
+# reported as steps. A CM4 crystal is within about 50 ppm. The limit is 200 ppm.
 CLOCK_DRIFT_PPM = 200.0
 SETTLE_S = 30.0            # a first fix must hold this long before anomalies
 FIX_STALE_S = 5.0          # no new epoch for this long ends the fix
@@ -53,16 +40,15 @@ SS_STEP_DB = 6.0
 # strengths. A heuristic until baseline recordings exist.
 SS_UNIFORM_SD_DB = 1.0
 SS_MIN_SATS = 6
-# gpsd's jam is 0 (none) to 255 (severe); -1 or absent means unknown.
+# gpsd's jam is 0 (none) to 255 (severe). -1 or absent means unknown.
 # Uncalibrated: needs receiver evidence.
 JAM_HIGH = 128
 HISTORY_S = 600.0
-# After a clock step, drift or discontinuity, this receiver's time is not
-# fit to serve for this long, whatever its position does.
+# Seconds to withhold receiver time after a step, drift or discontinuity,
+# independent of position.
 TIME_DOUBT_S = 600.0
 TIME_EVENTS = ("clock_step", "clock_drift", "time_discontinuity")
-# Consecutive position reports with already-seen epochs before they are
-# taken as a receiver clock going back rather than a replay.
+# Advancing reports with already-seen epochs indicating a discontinuity.
 REPLAY_RUN = 3
 
 EARTH_RADIUS_M = 6371008.8
@@ -95,7 +81,7 @@ def _num(value):
 
 
 def distance_m(lat1, lon1, lat2, lon2):
-    """Great-circle distance; plenty for jump detection."""
+    """Great-circle distance in metres for jump detection."""
     p1, p2 = math.radians(lat1), math.radians(lat2)
     dp, dl = p2 - p1, math.radians(lon2 - lon1)
     a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
@@ -186,7 +172,7 @@ class ReceiverState:
                         summary["sats_used"])
 
     def on_tpv(self, msg, mono):
-        """Merge one TPV report. Returns the sample it produced or updated, or None."""
+        """Merge a TPV report and return its sample, or None."""
         mode = msg.get("mode") if isinstance(msg.get("mode"), int) else 0
         gtime = parse_gnss_time(msg.get("time"))
         lat, lon = _num(msg.get("lat")), _num(msg.get("lon"))
@@ -218,14 +204,9 @@ class ReceiverState:
         if not has_pos:
             return None  # incomplete report, and no epoch to merge it into
         if gtime is not None and gtime in self.recent_epochs:
-            # An epoch already seen: a replay, or the receiver's clock went
-            # back. After a clock correction the old-looking times keep
-            # advancing; a replay of one or two epochs repeats or alternates.
-            # REPLAY_RUN advancing reports are accepted as a discontinuity.
-            # A replay of an advancing recording cannot be told apart from a
-            # correction this way, so the discontinuity makes the
-            # receiver's time unfit to serve (TIME_DOUBT_S); the position
-            # monitor, not this check, guards the position.
+            # REPLAY_RUN advancing old epochs indicate a clock discontinuity.
+            # A recording replay can look the same, so quarantine time for
+            # TIME_DOUBT_S and leave position checks to the position monitor.
             advancing = self.replay_last is None or gtime > self.replay_last
             self.replay_run = self.replay_run + 1 if advancing else 0
             self.replay_last = gtime
@@ -379,10 +360,10 @@ class ReceiverState:
 
 
 class GnssReader:
-    """All receivers on one gpsd, and the choice of which one is primary.
+    """Track gpsd receivers and choose a primary.
 
-    The primary is the receiver with a live fix, preferring the current
-    primary; with no live fix, the most recent receiver to have had one.
+    Prefer the current primary with a live fix, then another live fix. With no
+    live fix, choose the receiver whose fix is most recent.
     """
 
     def __init__(self, first_fix_mono=None, events_len=50):
@@ -411,7 +392,7 @@ class GnssReader:
                 if path and path not in self.devices:
                     rx.lose(mono, "device removed")
         elif cls == "DEVICE" and self._resolve(msg.get("path") if isinstance(msg.get("path"), str) else ""):
-            # DEVICE names its receiver in path (omitted with one receiver);
+            # DEVICE names its receiver in path (omitted with one receiver).
             # TPV and SKY use device.
             path = self._resolve(msg.get("path") if isinstance(msg.get("path"), str) else "")
             self.devices_known = True

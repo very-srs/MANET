@@ -1,18 +1,11 @@
 #!/bin/bash
-# Request 30 dBm on every mesh radio, Wi-Fi and HaLow.
-#
-# MANET sets no transmit power ceiling of its own on mesh radios. Each one is
-# asked for 30 dBm; the card's firmware and hardware apply their own limits.
-# The value read back is what the driver/firmware reports, logged as such (a
-# report, not a measurement of RF output); a lower report is not an error. The EUD access point is not a mesh radio and keeps
-# its own low power.
-#
-# Holds the channel lock that manet_ap_mesh.py takes for AP <-> mesh moves,
-# and reads roles and interface type under it, so a radio cannot become the
-# AP between the check and the request. Like manet_ap_mesh's PHY power
-# writer, it refuses a radio whose PHY also carries another active interface.
-#
-# Never reloads a driver: a live reload can wedge the USB HaLow card.
+# Request 30 dBm on Wi-Fi and HaLow mesh radios. Firmware and hardware apply
+# their own limits. Driver readback is not an RF measurement, and a lower
+# reported value is not an error. The EUD AP keeps its own low power.
+# Hold the manet_ap_mesh.py channel lock while reading roles and types so
+# the radio cannot become an AP before the request. Reject PHYs with another
+# active interface, matching manet_ap_mesh's PHY power writer.
+# Never reload drivers: live reload can wedge the USB HaLow card.
 
 ROLES_DIR="${MANET_IFACE_STATE_DIR:-/var/lib}"
 SYS_NET="${MANET_SYS_NET:-/sys/class/net}"

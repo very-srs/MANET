@@ -65,7 +65,7 @@ def registry_macs(registry):
     """Only count nodes with both telemetry and a decoded/cached identity.
 
     The registry is built by joining those records. A telemetry-only entry has
-    its Alfred MAC but no hostname; it cannot tell us whether a chunk is taken.
+    its Alfred MAC but no hostname, so it cannot identify a claimed chunk.
     Never source these network-derived assignments into a shell.
     """
     nodes = {}
@@ -86,7 +86,7 @@ def registry_macs(registry):
 
 
 def advance(state, now, peers, covered):
-    """One bounded observation window; membership changes never restart it."""
+    """Observe one bounded window. Membership changes never restart it."""
     peers = sorted(peers)
     start = state.get('since', now)
     if not isinstance(start, (int, float)) or start > now:
@@ -131,8 +131,7 @@ def save_state(path, state):
 
 
 def check(state, registry_path, builder, own_mac_path):
-    # Also refresh after bootstrap: ACS used to reuse a snapshot for 180 s,
-    # concealing newly published claims and delaying collision resolution.
+    # Refresh after bootstrap so new claims reach collision resolution.
     if callable(builder):
         builder()
     else:
@@ -154,7 +153,7 @@ def check(state, registry_path, builder, own_mac_path):
 
 def main():
     # All discovery state is volatile. Saved IPv4 preferences in /etc do not
-    # bypass this check after reboot; manager restarts within a boot can reuse it.
+    # bypass a reboot check. Manager restarts within a boot can reuse it.
     state_path = Path(os.environ.get('MESH_IP_STARTUP_STATE', '/var/run/mesh-ip-startup.json'))
     registry_path = Path(os.environ.get('MESH_REGISTRY_FILE', '/var/run/mesh_node_registry'))
     from manet_registry_builder import build

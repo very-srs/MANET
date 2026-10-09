@@ -1,27 +1,17 @@
 #!/usr/bin/env python3
-"""Rank the nodes that may host a mesh service (MediaMTX, Mumble).
+"""Rank eligible mesh service hosts for MediaMTX and Mumble.
 
-    mesh-service-election.py SERVICE REGISTRY
-
-Reads one snapshot of the node registry as data and prints one line:
-
-    WINNER SCORE INCUMBENT
-
-with "-" for an empty field (no eligible node, or no incumbent). Exits 1,
-printing nothing, when the registry cannot be read, so a caller never takes
-"could not decide" for "nobody is eligible".
-
-Rules, the same for every service and on every node:
-- A node is eligible only with a valid MAC, a finite non-negative
-  MEAN_THROUGHPUT_MBPS, a NODE_STATE that is not SHUTTING_DOWN or STALE, and
-  an OBSERVED_AT_UPTIME (this node's boot clock) at most 300 s old and not in
-  the future. The age check is independent of NODE_STATE, so a registry that
-  stopped being rebuilt cannot keep a departed node eligible.
-- The incumbent is the eligible node advertising IS_<SERVICE>_SERVER='true'.
-  When several do (partitions merging), the best metric, then the lowest MAC,
-  is the incumbent; registry order never matters.
-- Score is the metric, plus INCUMBENT_BIAS for the incumbent. Highest score
-  wins; a tie goes to the lowest MAC.
+mesh-service-election.py SERVICE REGISTRY prints WINNER SCORE INCUMBENT,
+using "-" for empty fields. An unreadable registry exits 1 without output,
+so callers can distinguish failure from an empty eligible set.
+Eligibility requires a valid MAC, finite non-negative MEAN_THROUGHPUT_MBPS,
+NODE_STATE other than SHUTTING_DOWN/STALE and OBSERVED_AT_UPTIME at most
+300 s old and not in the future. This boot-clock age check also excludes
+stale entries when registry rebuilding stops.
+The incumbent advertises IS_<SERVICE>_SERVER='true'. Among multiple eligible
+incumbents, prefer the best metric then lowest MAC, independent of row order.
+Score adds INCUMBENT_BIAS for the incumbent. Highest score wins, with ties
+going to the lowest MAC.
 """
 
 from functools import lru_cache

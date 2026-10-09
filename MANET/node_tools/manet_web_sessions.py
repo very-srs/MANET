@@ -59,7 +59,7 @@ class SessionStore:
         with self._lock:
             expected, now = self._refresh()
             # All HTTP aliases share this budget. Bound memory by the global
-            # failure limit; arbitrary client addresses cannot grow a map.
+            # failure limit so arbitrary client addresses cannot grow a map.
             self._login_failures = [(when, ip) for when, ip in self._login_failures
                                     if when + LOGIN_WINDOW > now]
             own = [when for when, ip in self._login_failures if ip == client]

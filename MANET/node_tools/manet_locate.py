@@ -1,61 +1,58 @@
-"""Small, pure ranging position solver (R1); standard library only.
+"""Pure ranging position solver (R1), using only the standard library.
 
-Public inputs are the frozen Anchor, Observation, Previous and Mark records.
-``solve(node_id, observations, ...)`` returns a dict; ``choose_anchors``
-returns Anchor records. ``relative_layout`` and ``distance_view`` accept
-pair dicts {a, b, range_m, mono, spread_m=1, frames=50}.
+Inputs are frozen Anchor, Observation, Previous and Mark records.
+solve(node_id, observations, ...) returns a dict. choose_anchors returns
+Anchor records. relative_layout and distance_view accept pair dicts:
+{a, b, range_m, mono, spread_m=1, frames=50}. Callers supply acquisition-time
+positions and monotonic timestamps in one clock domain. No clocks, files
+or devices are read here.
 
-All distances/uncertainties are metres. Anchor h_sigma_m is a per-axis
-horizontal standard uncertainty, v_sigma_m a vertical one (NOT CE90/HDOP).
+All distances and uncertainties are metres. Anchor h_sigma_m is per-axis
+horizontal standard uncertainty, v_sigma_m vertical, neither CE90 nor HDOP.
 spread_m describes a completed range window, not independent frame errors.
-There is a 1 m range-noise floor at 50 frames; fewer frames inflate that
-uncertainty by sqrt(50/n), while more frames never shrink the floor.
-At least 8 frames are required. A radio's boot offset is shared across its
-links: the default model uses a zero-mean Uniform(+/-2.7 m) moment prior,
-not a new independent 3 m margin for each use. Inputs must describe positions
-at range acquisition, with monotonic times already in ONE clock domain.
-The caller supplies time; nothing here reads clocks, files, or devices.
+Range noise has a 1 m floor at 50 frames, inflated by sqrt(50/n) below 50
+and never reduced above 50. At least 8 frames are required. Each radio's
+boot offset is shared across links, with a zero-mean Uniform(+/-2.7 m)
+moment prior, not an independent 3 m margin per link.
 
-Missing target height is normal. Use the median of reported anchor heights
-as a prior mean, with sigma = sqrt(anchor height variance + terrain_sigma_m**2).
-Jointly fit height, horizontal position and a common range-offset nuisance.
-The default 5 m terrain allowance is an explicit local-ground assumption;
-callers on cliffs/floors must enlarge it. A supplied target height still
-carries target_v_sigma_m; only an explicitly exact height fixes it. Missing
-anchor heights use a labelled 20 m vertical-spread assumption. We never
-publish inferred height as a GNSS fix. Free common-bias fitting requires at
-least five retained anchors; otherwise the boot-offset prior remains active.
+Without target height, use the median anchor height as prior mean and
+sigma = sqrt(anchor height variance + terrain_sigma_m**2). Jointly fit
+height, horizontal position and common range offset. The default 5 m
+terrain allowance assumes local ground. Enlarge it for cliffs/floors.
+Supplied height retains target_v_sigma_m unless explicitly exact. Missing
+anchor heights assume a labelled 20 m vertical spread. Inferred height is
+never a GNSS fix. Free common-bias fitting needs at least five retained anchors.
+Otherwise the boot-offset prior stays active.
 
 Local WGS84 meridional/prime-vertical radii at the first anchor define EN.
-Limit: all anchors and solutions within 1 km of that origin, |lat| <= 80
- degrees. No geodesic/global/polar solver.
+All anchors and solutions must be within 1 km of that origin, |lat| <= 80
+degrees. No global, geodesic or polar solving is supported.
 
-uncertainty_m is a model-based 95% horizontal circle, conditional on these
+uncertainty_m is a model-based 95% horizontal circle conditional on these
 noise/terrain assumptions. It propagates independent anchor error once,
 shared target bias/height through nuisance covariance, and model disagreement.
-shared_anchor_sigma_m optionally adds an explicitly known common horizontal
-error, separate from the anchors' independent h_sigma_m. The long-only
-contamination model uses a declared 20%/30 m exponential stress prior; neither
-frequency nor tail length has been measured. Compatible leave-two-out modes
-remain as a profile safeguard even when that prior assigns them little mass.
+shared_anchor_sigma_m optionally adds known common horizontal error apart from
+independent h_sigma_m. Long-only contamination uses a declared 20%/30 m
+exponential stress prior, with neither frequency nor tail length measured.
+Compatible leave-two-out modes remain a profile safeguard at low prior mass.
 Arbitrary/coherent false anchors and more than two bad ranges are not covered.
-quality/flags must accompany the radius. solve() returns good, best_guess,
-candidates, ring, or none. Its reason field preserves the estimator diagnostic.
-The default 40 m limit selects a point versus candidates/area; None disables
-that display limit. Competing modes get an enclosing circle and best_guess
-when small enough. Near-collinear layouts retain labelled mirror branches;
-unfittable but usable ranges retain their disks. Only no usable range gives
-none. Display-only guesses have anchor_eligible=False and cannot be reused.
-Previous estimates only select between two close, plausible intersections;
-they are never additional independent anchors or hidden WLS priors.
 
-Ranged anchors MUST carry transitive used_ids and their propagated radius
-(convert with anchor_from_result). Output ancestry is the union, preventing
-feedback through arbitrarily long chains. No more than 3 ranging generations.
-Manual anchors retain source='manual'; callers own mark authorization/age.
-Relative layouts assume coplanarity unless node heights are supplied. Gauge
-fixes are arbitrary; no geography is returned until orientation AND mirror
-are resolved. Three marks cannot fix a flexible or non-unique range graph.
+quality/flags must accompany the radius. solve returns good, best_guess,
+candidates, ring or none, with an estimator diagnostic in reason. The default
+40 m point limit selects a point or candidates/area. None disables the limit.
+Competing modes get an enclosing circle and best_guess when small enough.
+Near-collinear layouts retain labelled mirror branches. Unfittable usable
+ranges retain disks. Only no usable range gives none. Display-only guesses
+have anchor_eligible=False. Previous estimates only select between two close,
+plausible intersections, never adding independent anchors or hidden WLS priors.
+
+Ranged anchors require transitive used_ids and propagated radius via
+anchor_from_result. Union ancestry prevents feedback through chains, with
+at most 3 ranging generations. Manual anchors retain source='manual', with
+caller-owned mark authorization/age. Relative layouts assume coplanarity
+unless heights are supplied. Gauge fixes are arbitrary. Geography requires
+resolved orientation and reflection. Three marks cannot resolve a flexible
+or non-unique range graph.
 """
 from dataclasses import dataclass
 from itertools import combinations
@@ -154,7 +151,7 @@ def _anchor_reason(a, node_id):
 
 
 class LocalFrame:
-    """WGS84 local EN projection; height remains HAE, not relative U."""
+    """Project to WGS84 local EN, retaining height as HAE, not relative U."""
     def __init__(self, lat, lon):
         if not _position_ok(lat, lon):
             raise ValueError("origin outside local frame latitude/longitude limits")
@@ -178,7 +175,7 @@ class LocalFrame:
 
 
 def _linear(a, b):
-    """Pivoted tiny dense linear solve; None for singular information."""
+    """Solve a small dense system with pivoting, returning None if singular."""
     n = len(b)
     m = [list(row) + [v] for row, v in zip(a, b)]
     scale = max((abs(v) for row in a for v in row), default=0)
@@ -348,8 +345,8 @@ def _covariance(h):
 
 
 def _circular95(cov):
-    # Integrate the radial Gaussian tail over angle; unlike a circumscribed
-    # confidence ellipse, this is a 95% circle even with anisotropic geometry.
+    # Integrate the radial Gaussian tail over angle for a 95% circle,
+    # including anisotropic geometry.
     xx,yy,xy = cov[0][0],cov[1][1],cov[0][1]
     major = (xx+yy+math.hypot(xx-yy,2*xy))/2
     minor = max(1e-12,xx+yy-major)
@@ -379,9 +376,9 @@ def _radius(rows, point, cost, h, bias):
     # Motion is bounded displacement, not another independent measurement.
     radius += max(r["motion"] for r in rows)
     for r in rows:
-        # Fresh absolute roots outside this parent's ancestry provide genuinely
-        # new information. A chain made only of that ancestry cannot average
-        # its parent uncertainty away, so it retains the hop-growth floor.
+        # Fresh absolute roots outside this parent's ancestry add information.
+        # Chains with only that ancestry retain the hop-growth floor to avoid
+        # averaging away parent uncertainty.
         independent_root=any(other["anchor"].source in ("gnss","manual")
                              and other["anchor"].id not in r["anchor"].used_ids
                              for other in rows if other is not r)
@@ -391,9 +388,9 @@ def _radius(rows, point, cost, h, bias):
 
 
 def _model_score(rows, kept, point, cost, info):
-    # Explicit mixture: Gaussian LOS; a long-only exponential reflection.
+    # Mixture: Gaussian LOS and long-only exponential reflection.
     # 20%/30 m are declared stress priors, not measured occurrence statistics.
-    # A tiny short-contamination branch preserves detection of gross bad data.
+    # A tiny short-contamination branch detects gross bad data.
     score = cost
     for i,r in enumerate(rows):
         if i in kept:
@@ -433,10 +430,10 @@ def _mixture_radius(models, point):
 
 
 def _radius_budget(rows, model):
-    """Component circles for diagnosis; covariances add, circle radii do not."""
+    """Return diagnostic component circles, adding covariances, not radii."""
     cov=model["cov"]
-    # model covariance includes any caller-declared common horizontal error;
-    # it does not belong in gains from the independent observations.
+    # Model covariance includes caller-declared common horizontal error.
+    # Exclude that error from gains due to independent observations.
     cov=[list(c) for c in cov]
     cov[0][0]-=rows[0]["shared_sigma"]**2
     cov[1][1]-=rows[0]["shared_sigma"]**2
@@ -494,16 +491,15 @@ def _solve(node_id, observations, *, previous=None, target_hae=None,
           target_v_sigma_m=0.0, estimate_bias=False, at_mono=None,
           max_age_s=15.0, max_speed_mps=1.5, max_point_radius_m=40.0,
           shared_anchor_sigma_m=0.0, terrain_sigma_m=TERRAIN_SIGMA_M):
-    """Horizontal estimate with height/bias nuisances; see module contract.
+    """Estimate horizontal position with height/bias nuisance parameters.
 
-    Observation times are compared to at_mono (default newest input epoch).
-    Inputs older than max_age_s or from the future are rejected. The motion
-    allowance bounds target displacement to at_mono, not anchor motion:
-    anchor position MUST already be contemporaneous with its own range.
-    Duplicate IDs retain only their newest observation; they add no votes.
-    Equal timestamps use quality and canonical content, independent of order.
-    Invalid individual observations return reasons; invalid caller options
-    raise ValueError. At most 16 distinct anchors participate.
+    See the module contract. Compare observation times to at_mono, defaulting
+    to the newest input epoch. Reject ages above max_age_s and future times.
+    Motion allowance bounds target displacement to at_mono. Anchor positions
+    must match their range acquisition times. Keep only the newest report per
+    ID, breaking ties by quality and canonical content independently of order.
+    Invalid observations return reasons. Invalid options raise ValueError.
+    At most 16 distinct anchors participate.
     """
     if not isinstance(node_id,str) or not node_id:
         raise ValueError("node_id must be nonempty")
@@ -591,9 +587,8 @@ def _solve(node_id, observations, *, previous=None, target_hae=None,
     if _geometry_bad(rows):
         out["quality"] = "poor_geometry"
         return out
-    # Each leave-out set is a possible contamination model. Keep separate
-    # branches for a near-collinear trio, but never give every subset equal
-    # credibility merely because it can fit its own three observations.
+    # Each leave-out set is a contamination model. Keep near-collinear trio
+    # branches separate without giving all fitted subsets equal weight.
     models = []
     for drop_count in range(min(2,len(rows)-2 if len(rows)>=4 else 0)+1):
         for dropped in combinations(range(len(rows)),drop_count):
@@ -646,17 +641,15 @@ def _solve(node_id, observations, *, previous=None, target_hae=None,
     out["candidates"]=[{"position":frame.position(*m["p"][:2],target_hae),
                         "uncertainty_m":m["radius"],"probability":m["weight"]/total} for m in models]
     mixture=_mixture_radius([m for m in models if m["score"]-best["score"]<18],p)
-    # A contamination frequency prior cannot certify away a second reflection:
-    # retain statistically compatible long-only explanations as a profile set.
-    # This matters especially for two honest circles among four observations.
+    # Keep compatible long-only explanations as a profile set despite low
+    # contamination prior mass, especially for two honest circles among four.
     profile=[m for m in models if all(m["residuals"][i]<=2*rows[i]["sigma"] for i in range(len(rows)) if i not in m["kept"])
              and m["cost"]<=max(3.84,3.84*(len(m["kept"])-2))]
     out["_plausible"]=[{"position":frame.position(*m["p"][:2],target_hae),
                         "uncertainty_m":m["radius"],"probability":m["weight"]/total}
                        for m in models if m is best or any(m is alt for alt in profile)]
-    # A subset's unbounded weak-axis covariance ignores the upper bounds
-    # supplied by its excluded ranges. Use the spread of compatible modes;
-    # within-mode uncertainty is integrated separately above.
+    # A subset's weak-axis covariance omits excluded ranges' upper bounds.
+    # Use compatible modes' spread. Within-mode uncertainty is integrated above.
     motion=max(r["motion"] for r in kept)
     profile_radius=max((math.hypot(math.dist(p[:2],m["p"][:2]),radius-motion)+motion for m in profile),default=radius)
     out["uncertainty_m"]=max(radius,mixture+motion,profile_radius)
@@ -704,12 +697,12 @@ def _range_rings(rows, frame, hae, *, inconsistent=False):
 
 
 def _line_candidates(rows, frame, hae):
-    """Fit along-line position and squared cross-line distance, preserving mirrors.
+    """Fit along-line position and squared cross-line distance with mirrors.
 
-    Covariance in distance squared stays finite at the line itself, where the
-    ordinary XY Jacobian is singular. The returned circles enclose the 95%
-    marginal box after converting back to distance, including its curved edge.
-    This is a labelled local line approximation, never a reusable anchor.
+    Squared-distance covariance stays finite where the XY Jacobian is
+    singular. Circles enclose the 95% marginal box after conversion to
+    distance, including its curved edge. This local line approximation
+    is labelled and cannot be reused as an anchor.
     """
     weights=[1/r["sigma"]**2 for r in rows]
     total=sum(weights)
@@ -854,15 +847,14 @@ def solve(node_id, observations, *, previous=None, target_hae=None,
           target_v_sigma_m=0.0, estimate_bias=False, at_mono=None,
           max_age_s=15.0, max_speed_mps=1.5, max_point_radius_m=40.0,
           shared_anchor_sigma_m=0.0, terrain_sigma_m=TERRAIN_SIGMA_M):
-    """Return a drawable result with quality good/best_guess/candidates/ring/none.
+    """Return drawable geometry and good/best_guess/candidates/ring/none.
 
-    A point with competing solutions encloses every plausible candidate circle.
-    Above max_point_radius_m, candidates and an enclosing area remain available.
-    Near-collinear anchors preserve both mirror branches. Inconsistent ranges
-    retain per-anchor disks; none means no usable range survived validation.
-    reason carries the estimator diagnostic, independently of display quality.
-    anchor_eligible distinguishes reusable estimates from display-only guesses.
-    Relative-layout geometry statuses are a separate API and are unchanged.
+    Points enclose all plausible candidate circles. Above max_point_radius_m,
+    retain candidates and an enclosing area. Near-collinear anchors retain
+    mirror branches. Inconsistent ranges retain per-anchor disks. none means
+    no usable range survived validation. reason carries the estimator diagnostic
+    independently of display quality. anchor_eligible permits estimate reuse.
+    Relative-layout geometry statuses use a separate API.
     """
     out=_solve(node_id,observations,previous=previous,target_hae=target_hae,
                target_v_sigma_m=target_v_sigma_m,estimate_bias=estimate_bias,
@@ -905,8 +897,8 @@ def _few_anchors(out,rows,frame,hae,previous):
     height = math.sqrt(max(0,h2))
     x,y = a["x"]+along*dx/d,a["y"]+along*dy/d
     points = [(x-height*dy/d,y+height*dx/d),(x+height*dy/d,y-height*dx/d)]
-    # Include the same height/common-offset nuisances as the >=3-anchor fit.
-    # The nominal circle branch has zero residual; only its covariance changes.
+    # Include height/common-offset nuisances as in the >=3-anchor fit.
+    # The nominal circle branch has zero residual. Only covariance changes.
     nominal,cost,h = _fit(rows,points[0])
     uncertainty = _radius(rows,nominal,cost,h,False)
     if uncertainty is None:
@@ -943,11 +935,11 @@ def anchor_from_result(node_id, result, signal_dbm=None):
 
 
 def choose_anchors(node_id, candidates, *, previous=None, max_anchors=5):
-    """Choose up to 3..5 usable anchors; bearing diversity competes with quality.
+    """Choose up to 3..5 anchors, balancing bearing diversity and quality.
 
-    On cold start, use the observable anchor centroid for angular diversity.
-    With a previous position, use that origin instead. Source weights
-    prefer GNSS, then manual, then ranged; they do not certify authenticity.
+    Use the previous position or, on cold start, the observable anchor centroid
+    as the angular origin. Source weights prefer GNSS, manual, then ranged,
+    without certifying authenticity.
     """
     if max_anchors not in (3,4,5):
         raise ValueError("max_anchors must be 3, 4 or 5")
@@ -1037,7 +1029,7 @@ def _pair_rows(ranges, at_mono, max_age_s, heights):
 
 
 def distance_view(node_id, ranges, *, at_mono=None, max_age_s=15):
-    """Direct observed distances only; never graph-path distances or positions."""
+    """Return direct observed distances without graph paths or positions."""
     rows,_,now = _pair_rows(ranges,at_mono,max_age_s,{})
     return [{"id":r["b"] if r["a"]==node_id else r["a"],
              "range_m":r["slant_m"],"age_s":now-r["mono"],
@@ -1107,8 +1099,8 @@ def _embed(ids, edges):
     h,_=_normal(jac,res,w)
     eigen,_=_eigen(h)
     rank=sum(v>max(1e-7,eigen[0]*1e-7) for v in eigen)
-    # A global uniqueness certificate for a deliberately conservative subset
-    # of graphs: grow a non-collinear trilateration graph from a triangle.
+    # Certify global uniqueness for graphs that grow from a triangle
+    # by non-collinear trilateration.
     connected={tuple(sorted((r["a"],r["b"]))) for r in edges}
     by_id=dict(zip(ids,xy))
     def triangle_good(tri):
@@ -1152,7 +1144,7 @@ def _embed(ids, edges):
 
 
 def _mark_transform(xy, marks, frame, mirror):
-    # Rigid 2D alignment, with NO scale fit. Marks must agree with ranges.
+    # Fit rigid 2D alignment without scaling. Marks must agree with ranges.
     source=[(xy[m.id][0],(-1 if mirror else 1)*xy[m.id][1]) for m in marks]
     target=[frame.xy(m.lat,m.lon) for m in marks]
     weights=[1/max(1,m.h_sigma_m)**2 for m in marks]
@@ -1224,8 +1216,8 @@ def _placed_layout(xy, edges, marks, frame, boot_sigma):
     inv=_covariance(h)
     if inv is None:
         return None,None
-    # Gain from each independent observation to every coordinate. The sum
-    # over links incident on one radio is the gain of its *single* boot error.
+    # Sum independent observation gains for all links incident on a radio
+    # to obtain the gain of its shared boot error.
     gain=[[sum(inv[i][k]*row[k] for k in range(len(p)))*weight for row,weight in zip(jac,w)] for i in range(len(p))]
     bg=[[sum(gain[i][j] for j,end in enumerate(ends) if node in end) for node in range(len(ids))] for i in range(len(p))]
     def covariance(i,k):
@@ -1240,20 +1232,19 @@ def _placed_layout(xy, edges, marks, frame, boot_sigma):
 
 def relative_layout(ranges, marks=(), *, at_mono=None, max_age_s=15, heights=None,
                     boot_sigma_m=BOOT_SIGMA_M):
-    """Relative planar group layout, optionally placed using manual marks.
+    """Fit a relative planar layout, optionally placed with manual marks.
 
-    Returned positions are arbitrary local (x,y) metres. `absolute` remains
-    None with zero/one/two marks or unresolved geometry. Two marks return
-    both geographic_candidates, related by reflection about their baseline.
-    Three well-separated non-collinear, mutually consistent marks resolve
-    it. marks are snapshot constraints; mono/age is reported, never renewed.
-    Caller must decide whether an old manual location still describes a
-    moving group. Optional heights maps node IDs to known HAE in metres.
-    Relative fitting currently reports inconsistent edges, not robustly
-    removing them: a sparse graph cannot safely identify a bad range. The
-    default boot_sigma_m propagates one shared offset per radio through all
-    incident ranges. Zero is for explicitly calibrated/no-offset inputs.
-    Placed layouts include uncertainty_by_id_m; uncertainty_m is their maximum.
+    Return arbitrary local (x,y) metres. absolute stays None with fewer than
+    three marks or unresolved geometry. Two marks give geographic_candidates
+    reflected about their baseline. Three well-separated, non-collinear,
+    consistent marks resolve the reflection. Marks are snapshot constraints:
+    report mono/age without renewal. Callers decide if old marks fit a moving
+    group. Optional heights maps node IDs to known HAE in metres.
+    Report inconsistent edges without removing them because sparse graphs
+    cannot safely identify bad ranges. boot_sigma_m propagates one shared
+    radio offset through all incident links. Zero requires calibrated/no-offset
+    inputs. Placed layouts return uncertainty_by_id_m and its maximum,
+    uncertainty_m.
     """
     heights={} if heights is None else dict(heights)
     if any(not _finite(v) for v in heights.values()) or not _nonnegative(boot_sigma_m):
@@ -1367,12 +1358,11 @@ def relative_layout(ranges, marks=(), *, at_mono=None, max_age_s=15, heights=Non
 
 
 def anchors_from_layout(result):
-    """Export only a fully placed layout, preserving shared group ancestry.
+    """Export a fully placed layout with shared group ancestry.
 
-    Every derived anchor depends on the whole group: members cannot feed
-    these coordinates back as independent anchors into their own solution.
-    Heights, when supplied to relative_layout, are assumed known exactly;
-    absent heights remain unknown. Use solve for uncertain-height anchors.
+    Every anchor depends on the whole group and cannot feed back as an
+    independent anchor for its members. Supplied heights in relative_layout
+    are exact, absent heights unknown. Use solve for uncertain-height anchors.
     """
     if result.get("quality")!="anchored" or not result.get("absolute"):
         raise ValueError("layout orientation and mirror must be resolved")

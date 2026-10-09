@@ -61,7 +61,7 @@ def rename_plan(pins, links):
 
 
 def reconcile(pins, links, run=subprocess.run):
-    moves = rename_plan(pins, links)  # Validate the entire exchange before changing anything.
+    moves = rename_plan(pins, links)  # Validate before any rename.
     for source, temporary, _ in moves:
         run(['ip', 'link', 'set', 'dev', source, 'name', temporary], check=True, timeout=10)
     for source, temporary, target in moves:

@@ -1,21 +1,12 @@
 #!/usr/bin/env python3
-"""Alfred-coordinated mesh configuration changes: the receiving half.
+"""Receive authenticated mesh configuration changes over Alfred type 70.
 
-sync:
-  - reads the newest config package from Alfred type 70
-  - validates it, stages it to /var/run/mesh_pending_config.json, and publishes
-    an ACK by writing /var/run/mesh_config_ack_version (the node managers carry
-    that into telemetry, which is what fills the ACK table in the UI)
-  - runs mesh-config-apply.sh once activate_at has passed
-
-The operator drives the other half from the management UI: Stage broadcasts a
-package with activate_at=0, the ACK table fills as nodes acknowledge, then Apply
-sets activate_at and every node applies at the same moment.
-
-Everything in a package arrives from the network and ends up in /etc/mesh.conf
-and in wpa_supplicant configs, so it is validated here rather than trusted.
-EUD/AP settings (eud, lan_ap_ssid, lan_ap_key, max_euds_per_node) are stripped
-and never applied from Alfred: those stay on the node that staged them.
+Validate packages before staging /var/run/mesh_pending_config.json. Publish
+an authenticated ACK for the UI gate. /var/run/mesh_config_ack_version feeds
+informational telemetry only. Stage uses activate_at=0, then Apply sets the
+shared activation time for mesh-config-apply.sh.
+Validate values destined for /etc/mesh.conf and wpa_supplicant configs.
+Strip per-node eud, lan_ap_ssid, lan_ap_key and max_euds_per_node settings.
 """
 
 import json
@@ -34,12 +25,10 @@ PENDING_FILE = "/var/run/mesh_pending_config.json"
 ACK_VERSION_FILE = "/var/run/mesh_config_ack_version"
 APPLIED_VERSION_FILE = "/var/run/mesh_applied_config_version"
 APPLY_SCRIPT = "/usr/local/bin/mesh-config-apply.sh"
-# The apply runs as its own transient unit: this process lives in
-# node-manager.service, which an acs change restarts. In its own cgroup the
-# apply survives that restart, finishes the whole package and verifies the
-# restart before recording success. The fixed unit name refuses an overlap.
-# TimeoutStartSec bounds the job itself: once the manager restart kills this
-# process, nothing else would, and a hung apply would hold the unit name.
+# A separate transient unit survives an acs restart of node-manager.service,
+# applies the full package and verifies the restart before recording success.
+# The fixed name prevents overlap. TimeoutStartSec releases it after a hung
+# apply even if the manager restart has killed this caller.
 APPLY_COMMAND = ["systemd-run", "--unit=mesh-config-apply", "--wait", "--collect",
                  "--quiet", "--service-type=oneshot", "--property=TimeoutStartSec=180",
                  APPLY_SCRIPT]
@@ -47,8 +36,7 @@ ROLLBACK_SCRIPT = "/usr/local/bin/mesh-config-rollback.sh"
 LOG_FILE = "/var/log/mesh-config-sync.log"
 ADMIN = AdminTransport()
 
-# Only these may be carried in a package. EUD/AP settings are per-node and are
-# stripped even if an older publisher still includes them.
+# Only mesh-wide keys may be carried. Strip per-node EUD/AP settings.
 ALLOWED_KEYS = tuple(MESH_KEYS)
 
 
@@ -131,13 +119,10 @@ def validate_package(pkg):
 
 
 def package_is_dangerous(pkg, mesh_conf="/etc/mesh.conf"):
-    """Would this package actually change a mesh-breaking setting *here*?
+    """Check whether this node's mesh-breaking settings would change.
 
-    Presence of the key is not enough: re-broadcasting the current SSID is a
-    no-op and should not put the node into a five-minute trial window. The
-    comparison is per node, because two nodes can hold different current
-    values: the one that really is changing arms, the one already on the new
-    value does not.
+    Compare local values so rebroadcasting the current SSID does not arm the
+    five-minute rollback trial.
     """
     config = pkg.get("config", {})
     current = {}
@@ -149,7 +134,7 @@ def package_is_dangerous(pkg, mesh_conf="/etc/mesh.conf"):
                     k, v = line.split("=", 1)
                     current[k.strip()] = v.strip().strip("\"'")
     except Exception:
-        # Cannot tell what would change, so assume the worst and arm.
+        # An unreadable config requires rollback for any dangerous key.
         return any(k in config for k in DANGEROUS_KEYS)
     return any(k in config and config[k] != current.get(k, "") for k in DANGEROUS_KEYS)
 
@@ -158,11 +143,10 @@ def package_is_dangerous(pkg, mesh_conf="/etc/mesh.conf"):
 # Alfred
 
 def latest_config_package(raw=None):
-    """Newest authenticated message on type 70, or None.
+    """Return the newest authenticated type 70 message, or None.
 
-    Alfred hands back one record per publishing node; the newest issue wins so
-    a stale copy from a node that has not refreshed cannot override a newer
-    change.
+    Alfred returns one record per publisher. Choose the newest issue so stale
+    copies cannot override a later change.
     """
     if raw is None:
         try:
@@ -199,9 +183,8 @@ def sync_once(raw=None):
         return 0
     pkg = message.payload
 
-    # A cancel has no config block, so it is handled before validation. Without
-    # this the operator's cancel would be undone on the next cycle: the
-    # original package is still resident in Alfred, and we would re-stage it.
+    # Handle config-free cancels before validation. Record consumption so
+    # the original package still in Alfred cannot be staged again.
     if pkg.get("kind") == "mesh_config_cancel":
         if ADMIN.accept(ALFRED_CONFIG_TYPE, message):
             clear_staging('cancelled by authenticated administrator')
@@ -224,8 +207,7 @@ def sync_once(raw=None):
 
     version = pkg["version"]
     if read_file(APPLIED_VERSION_FILE) == version:
-        # Already applied. Drop any leftover staging state so a re-broadcast of
-        # the same version does not make us apply it twice.
+        # Drop staging so a rebroadcast cannot apply this version twice.
         clear_staging(f"version {version} already applied")
         ADMIN.complete(ALFRED_CONFIG_TYPE, message)
         return 0
@@ -257,8 +239,7 @@ def sync_once(raw=None):
 
     log(f"Activating config version {version}")
 
-    # Arm the safety net before touching anything, so a change that takes the
-    # mesh down can still be undone by this node on its own.
+    # Arm rollback before a change can sever the mesh connection.
     if package_is_dangerous(pkg) and not pkg.get("no_rollback"):
         try:
             armed = run([ROLLBACK_SCRIPT, "arm", version], timeout=30)
@@ -270,7 +251,7 @@ def sync_once(raw=None):
                 f"{(armed.stderr or armed.stdout).strip()}")
             return 1
 
-    # Applying acs can restart this very service. Consume the command before
+    # Applying acs can restart this service. Consume the command before
     # invoking anything disruptive so a kill/reboot cannot make a recorded
     # activation execute again. A failed attempt needs a freshly staged edit.
     ADMIN.complete(ALFRED_CONFIG_TYPE, message)

@@ -1,29 +1,12 @@
 #!/bin/bash
-# Config rollback safety net
-# Changing mesh_ssid, mesh_key or ipv4_network drops the mesh while every node
-# reconnects. A bad setting can prevent remote correction, so each node must
-# be able to restore its previous configuration without network access.
-#
-#   arm <version>   snapshot the files a dangerous apply rewrites, record how
-#                   many batman peers we had, and set a deadline
-#   check           called every node-manager cycle; a no-op until the deadline
-#                   passes, then either commits or restores
-#   commit          clear the armed state, keeping the new config
-#   status          print the armed state as shell assignments
-#
-# State lives in /var/lib, not /var/run: a dangerous apply can end in a reboot,
-# and the node still has to honour the deadline afterwards.
-#
-# The deadline runs on the boot clock (/proc/uptime), never the wall clock:
-# a time sync that steps the wall clock must not end or extend the trial.
-# The boot clock restarts at a reboot, so the deadline is tied to a boot ID.
-# The first new boot during a trial gets the full grace again, because the
-# mesh has to re-form after the reboot; any later boot checks at once, so a
-# node that keeps rebooting cannot postpone its rollback.
-#
-# A node with no peers before the change has nothing to compare against and
-# commits: that is the solo bench case, where "the mesh did not come back"
-# cannot be distinguished from "there was never anyone there".
+# Restore configuration locally if mesh_ssid, mesh_key or ipv4_network
+# changes prevent reconnection. State persists in /var/lib across reboots.
+# Commands: arm <version> snapshots files, peer count and deadline, check
+# commits or restores after expiry, commit clears state, status prints it.
+# Use boot-clock deadlines tied to boot ID, unaffected by wall-clock steps.
+# The first reboot grants full grace to re-form the mesh. Later boots check
+# immediately so repeated reboots cannot indefinitely postpone rollback.
+# A node with no prior peers commits because it has no reconnection baseline.
 
 usage() {
     printf '%s\n' \
@@ -45,8 +28,7 @@ RUN_DIR="${MANET_RUN_DIR:-/var/run}"
 IFACE_STATE_DIR="${MANET_IFACE_STATE_DIR:-/var/lib}"
 SUPPLICANT_HELPER="${MANET_SUPPLICANT_HELPER:-$(dirname "$0")/manet_supplicant.py}"
 LOG_TAG="CONFIG-ROLLBACK"
-# How long the mesh gets to re-form before we give up on the change. Supplicant
-# restart, SAE, and batman re-discovery all have to fit inside it.
+# Grace seconds for supplicant restart, SAE and batman re-discovery.
 GRACE_SECONDS="${MANET_ROLLBACK_GRACE:-300}"
 UPTIME_FILE="${MESH_UPTIME_FILE:-/proc/uptime}"
 BOOT_ID_FILE="${MANET_BOOT_ID_FILE:-/proc/sys/kernel/random/boot_id}"
@@ -77,7 +59,7 @@ peer_count() {
     "${MANET_TOOLS_DIR:-$(dirname "${BASH_SOURCE[0]}")}/mesh-peer-count.sh" --batctl "$BATCTL"
 }
 
-# ------------------------------------------------------------------ arm ------
+# Arm rollback
 do_arm() (
     local version="$1"
     [[ "$version" =~ ^[0-9a-f]{6,64}$ ]] || { log "ERROR: arm needs a valid version"; return 1; }
@@ -118,7 +100,7 @@ do_arm() (
     log "Armed for version $version: $peers peer(s) before, deadline in ${GRACE_SECONDS}s"
 )
 
-# --------------------------------------------------------------- restore -----
+# Restore configuration
 do_restore() {
     log "Mesh did not re-form: restoring the previous configuration"
     # Once restoration starts, finish it even if a partial restore brings a
@@ -134,8 +116,7 @@ do_restore() {
             log "ERROR: cannot restore $f; keeping snapshot for retry"; return 1; }
     done
 
-    # The chunk is derived from ipv4_network, so it has to be recalculated
-    # against the restored value rather than kept.
+    # Recalculate the chunk from the restored ipv4_network.
     rm -f "$RUN_DIR/my_ipv4_chunk" "$RUN_DIR/my_ipv4_chunk_size" "$RUN_DIR/mesh_ipv4_state" 2>/dev/null
 
     local restart_failed=0
@@ -167,12 +148,12 @@ rearm() {
     } > "$tmp" && mv -f "$tmp" "$STATE_FILE" || { rm -f "$tmp"; return 1; }
 }
 
-# -------------------------------------------------------------- check --------
+# Check trial outcome
 do_check() {
     [ -f "$STATE_FILE" ] || return 0
 
     VERSION=''; PEERS_BEFORE=''; DEADLINE=''; BOOT_ID=''; REARMED=''
-    # Our own file, written by do_arm: safe to source.
+    # Source the state file written by do_arm.
     . "$STATE_FILE" || return 1
     if [[ ! "$PEERS_BEFORE" =~ ^[0-9]+$ || ! "$DEADLINE" =~ ^[0-9]+$ ]]; then
         log "ERROR: incomplete rollback state; keeping snapshot"
@@ -186,8 +167,8 @@ do_check() {
     local now boot
     now=$(uptime_now) && boot=$(boot_id) || { log "ERROR: cannot read the boot clock"; return 1; }
     if [ "$BOOT_ID" != "$boot" ]; then
-        # A deadline from another boot means nothing on this boot's clock.
-        # A state file without BOOT_ID predates the boot clock (wall seconds).
+        # A deadline from another boot is invalid. Missing BOOT_ID means
+        # the deadline uses wall seconds and also needs replacement.
         if [ "${REARMED:-0}" = 0 ]; then
             rearm "$now" "$boot" || return 1
             log "Rebooted during the trial for $VERSION: deadline in ${GRACE_SECONDS}s"

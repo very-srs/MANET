@@ -1,17 +1,9 @@
 #!/bin/bash
-# Provisioning status
-# Answers one question, on login and on demand: is this node finished setting
-# itself up, or not?
-#
-# A node provisions across several reboots and can take ten minutes. Pulling
-# the Ethernet cable or the power part-way through leaves it half-configured,
-# and until now nothing said so: the node looked identical to a finished one.
-# That is how a node ended up in the field with none of its packages installed.
-#
-# Installed as /etc/update-motd.d/50-manet-provision, so it prints on every SSH
-# login, and runnable directly as `manet-provision-status.sh`.
-#
-# Never fails: a motd hook that errors breaks the login banner.
+# Report provisioning completion on demand and at SSH login.
+# Provisioning can take ten minutes across several reboots. Losing Ethernet
+# or power mid-run leaves an incomplete configuration.
+# Installed as /etc/update-motd.d/50-manet-provision and runnable directly.
+# Always succeed so an incomplete setup cannot break the login banner.
 
 STATE_FILE="${MANET_PROVISION_STATE:-/var/lib/manet-provision.state}"
 FAIL_FILE="${MANET_PROVISION_FAILURES:-/var/lib/manet-provision.failures}"
@@ -25,7 +17,7 @@ USER_SCRIPT_LOG="${MANET_USER_SCRIPT_LOG:-/var/log/manet-user-scripts.log}"
 
 STATE=""; PHASE=""; STARTED=""; FINISHED=""; UPDATED=""
 if [ -r "$STATE_FILE" ]; then
-    # Our own file, written as plain key=value by radio-setup.
+    # Read the key=value state file written by radio-setup.
     while IFS='=' read -r k v; do
         case "$k" in
             STATE) STATE="$v" ;; PHASE) PHASE="$v" ;;
@@ -35,21 +27,17 @@ if [ -r "$STATE_FILE" ]; then
     done < "$STATE_FILE"
 fi
 
-# A node provisioned before this reporting existed has no state file, but it
-# does have the marker radio-setup touches on success. Treat that as the record
-# of completion rather than saying nothing.
+# Without a state file, use radio-setup's success marker as completion proof.
 if [ -z "$STATE" ] && [ -f "$DONE_FILE" ]; then
     STATE=complete
     PHASE=radio-setup
 fi
 
-# Still nothing: provisioning has not started, or this is not a MANET node.
-# Say nothing rather than guess.
+# No state or marker means no provisioning verdict to report.
 [ -z "$STATE" ] && exit 0
 
-# The completion time comes from the marker's mtime, not from whatever the
-# state file claims. The filesystem records when radio-setup actually finished;
-# the state file is just a copy of that, and a copy can be wrong.
+# Use the completion marker mtime. The state file only holds a copy,
+# which may disagree with when radio-setup finished.
 if [ "$STATE" = complete ] && [ -f "$DONE_FILE" ]; then
     marker_time=$(stat -c %Y "$DONE_FILE" 2>/dev/null)
     [ -n "$marker_time" ] && FINISHED="$marker_time"
@@ -70,10 +58,9 @@ human_delta() {
 
 rule() { printf '  %s\n' '────────────────────────────────────────────────────────────'; }
 
-# Operator setup scripts (provisioning/additional-scripts/, run once by
-# manet-user-scripts.service). Advisory: these never change the provisioning
-# verdict, so this prints alongside it rather than inside it. Silent on a node
-# where the operator staged nothing, which is the common case.
+# Report operator scripts from provisioning/additional-scripts/, run once by
+# manet-user-scripts.service. Their advisory status does not change the
+# provisioning verdict. Print nothing when no scripts are staged.
 user_scripts_line() {
     [ -d "$USER_SCRIPT_DIR" ] || return 0
 
@@ -96,8 +83,7 @@ user_scripts_line() {
     if [ "$failed" -gt 0 ]; then
         printf '  Setup scripts  : %s of %s ran, %s FAILED\n' \
             "$ok" "$((ok + failed))" "$failed"
-        # Name them. "Something failed" with no name sends people to the log
-        # for information the banner could have given them.
+        # Name failed scripts so the banner identifies the relevant logs.
         awk -F'\t' '$2 != 0 && NF >= 2 { printf "     ! %-30s exit %s\n", $1, $2 }' \
             "$USER_SCRIPT_STATE" 2>/dev/null | head -5
         printf '     log: %s\n' "$USER_SCRIPT_LOG"
@@ -129,8 +115,7 @@ incomplete)
     [ -n "$FINISHED" ] && printf '  When       : %s ago\n' "$(human_delta "$FINISHED")"
     if [ -s "$FAIL_FILE" ]; then
         printf '  Failures   :\n'
-        # Cap it: the interesting failures are the first few, and a login
-        # banner should not scroll a terminal off the screen.
+        # Bound the failure list so the login banner fits on a terminal.
         head -8 "$FAIL_FILE" | sed 's/^/    - /'
         total=$(wc -l < "$FAIL_FILE")
         [ "$total" -gt 8 ] && printf '    ... and %s more\n' "$((total - 8))"

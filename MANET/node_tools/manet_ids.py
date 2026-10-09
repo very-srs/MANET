@@ -1,13 +1,9 @@
 #!/usr/bin/env python3
-"""Wire/display conversions for identifiers carried in Alfred payloads.
+"""Convert Alfred wire identifiers to and from display forms.
 
-MACs and syncthing device IDs are published as raw bytes rather than in their
-printed spellings: a MAC is 6 bytes but 17 characters, and a syncthing ID is
-32 bytes but 63. Alfred replicates these to every node on a timer, so the
-printed forms cost real airtime. Everything here converts between the two.
-
-Shared by encoder.py and decoder.py, which both live in the same directory as
-this file on the node (/usr/local/bin).
+Raw MACs use 6 bytes versus 17 characters. Syncthing IDs use 32 bytes versus
+63 characters. Binary encoding saves airtime on every Alfred replication.
+Shared by encoder.py and decoder.py in /usr/local/bin.
 """
 
 # Syncthing device IDs are base32 over this alphabet with Luhn check
@@ -16,7 +12,7 @@ _B32_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
 
 
 def mac_to_bytes(mac):
-    """'0c:bf:74:00:2b:e6' -> b'\\x0c\\xbft\\x00+\\xe6'. Returns b'' if unparseable."""
+    """Convert a colon-separated MAC to six bytes, or b'' if unparseable."""
     try:
         raw = bytes.fromhex(str(mac).replace(':', '').replace('-', '').strip())
     except ValueError:
@@ -25,7 +21,7 @@ def mac_to_bytes(mac):
 
 
 def bytes_to_mac(raw):
-    """b'\\x0c\\xbft\\x00+\\xe6' -> '0c:bf:74:00:2b:e6'. Returns '' if not 6 bytes."""
+    """Convert six bytes to a colon-separated MAC, or '' for invalid length."""
     if not raw or len(raw) != 6:
         return ''
     return ':'.join(f'{b:02x}' for b in raw)

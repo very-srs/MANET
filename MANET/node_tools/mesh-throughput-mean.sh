@@ -11,8 +11,8 @@
 #    * 0c:bf:74:00:2b:f1    0.372s (       43.2)  0c:bf:74:00:2b:f1 [     wlan2]
 #      0c:bf:74:00:2b:f1    0.372s (        4.2)  00:0a:52:09:60:fe [     wlan0]
 #
-# $3 is "0.372s" on the starred row and "(" on the others. Parse the
-# parenthesised value; a fixed column can average timestamps as throughput.
+# $3 is "0.372s" on starred rows and "(" on others. Parse the parenthesized
+# metric to avoid averaging timestamps as throughput.
 #
 # One peer reachable over two radios is still one peer: keep the best path per
 # originator, then average those, so a second radio cannot drag the mean down.

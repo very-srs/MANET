@@ -1,23 +1,24 @@
 #!/usr/bin/env python3
-"""R4 positioning service and socket-free, paced multi-node simulation.
+"""Run the R4 positioning service or a paced simulation without sockets.
 
-One event-loop thread owns Ranging, Monitor, Scheduler and the solver. Linux
-discovery is asynchronous and read-only. No privileged radio implementation or
-network listener lives here: HelperRadio is the deliberately unavailable R3
-helper boundary. Switching positioning_radio=radio_adapter selects that boundary,
-NOT diagnostic_only. Production requires the helper's authorization, mesh-port
-ingress proof, scoped probes, watchdog and verified capture capabilities first.
+One event-loop thread owns Ranging, Monitor, Scheduler and the solver.
+Linux discovery is asynchronous and read-only. HelperRadio is the unavailable
+R3 helper boundary, selected by positioning_radio=radio_adapter. It does not
+select diagnostic_only or provide privileged radio access or a listener.
+Production requires helper authorization, mesh-port ingress proof, scoped
+probes, a watchdog and verified capture capabilities.
 
-mesh.conf (all optional): positioning=n, positioning_radio=radio_adapter,
-positioning_interface=wlan1, positioning_node_id=<br0 MAC>,
-positioning_gnss_sigma_m=5, positioning_vertical_sigma_m=8,
-positioning_phone_best_guess=n, positioning_mark_priority=manual|newer.
-The sigmas are explicit modelling assumptions, not conversions of gpsd eph/HDOP.
-The last two switches configure the policy exported to the ATAK consumer.
+Optional mesh.conf settings:
+  positioning=n, positioning_radio=radio_adapter
+  positioning_interface=wlan1, positioning_node_id=<br0 MAC>
+  positioning_gnss_sigma_m=5, positioning_vertical_sigma_m=8
+  positioning_phone_best_guess=n, positioning_mark_priority=manual|newer
+Sigmas are modelling assumptions, not conversions of gpsd eph/HDOP.
+The last two switches set the policy exported to the ATAK consumer.
 
-Run --simulate 4 for three GNSS anchors and one GPS-less node; any N=4..16
-runs real service objects, wire messages, jittered bursts and timestamp pairing.
-No sockets, device access, wall-clock sleeps or /run writes in simulation.
+--simulate 4 uses three GNSS anchors and one GPS-less node. N=4..16 runs
+real service objects, wire messages, jittered bursts and timestamp pairing
+without sockets, devices, wall-clock sleeps or /run writes.
 """
 
 import argparse
@@ -75,7 +76,7 @@ def atomic_json(path, value):
     data = json.dumps(value, allow_nan=False, separators=(',', ':')).encode()
     if len(data) > MAX_JSON:
         raise ValueError('oversized output')
-    # Single writer holds the runtime lock; no caller-selected temp paths.
+    # The single writer holds the runtime lock and uses fixed temp paths.
     temporary = path.with_name(path.name + '.tmp')
     with temporary.open('wb') as stream:
         stream.write(data)
@@ -155,7 +156,7 @@ class Receiver:
 
 
 def receiver_document(doc, now, boot_id, jammed=False):
-    """Map raw-clock receiver epochs to this loop; never use remote/wall time."""
+    """Map raw-clock receiver epochs locally without remote or wall time."""
     if (doc.get('schema') != 2 or doc.get('boot_id') != boot_id or
             doc.get('clock') != 'monotonic_raw' or
             not 0 <= now.boot - number(doc.get('written_boot')) < INPUT_TTL):
@@ -194,7 +195,10 @@ class Neighbour:
 
 @dataclass(frozen=True)
 class Inbound:
-    """Helper-authenticated datagram; direct means verified 5 GHz probe ingress."""
+    """Represent a helper-authenticated datagram.
+
+    Direct means verified 5 GHz probe ingress.
+    """
     peer: ranging.Peer
     data: bytes
     direct: bool = False
@@ -215,11 +219,11 @@ def alfred_records(text, message_type):
 
 
 class Discovery:
-    """Type 68 is a candidate hint, NEVER a Monitor sample or range fix.
+    """Read type 68 candidate hints, never Monitor samples or range fixes.
 
-    Type 67 maps the Alfred primary MAC to the station's secondary MAC. These
-    advertisements do not authorize peers; the helper must authenticate that map.
-    An unchanged payload ages locally even when it is read again.
+    Type 67 maps Alfred primary MACs to station secondary MACs. The helper
+    must authenticate the map because advertisements do not authorize peers.
+    Unchanged payloads age locally even on repeated reads.
     """
     def __init__(self, config):
         self.config, self.seen = config, {}
@@ -282,13 +286,13 @@ class Discovery:
 
 
 class HelperRadio:
-    """Fixed-operation helper contract; currently NO IPC and NO radio access.
+    """Define the fixed-operation helper contract without IPC or radio access.
 
-    A future implementation delegates Radio's six fixed operations plus poll,
-    authenticated control send/receive and authorization to a separate helper.
-    It must check SO_PEERCRED, bound messages, reject caller paths/commands,
-    verify ingress on bat0 vs EUD and direct 5 GHz probes, and clean up on client
-    disconnect/lease expiry. Never instantiate a privileged RadioAdapter here.
+    The helper must support Radio's six operations, poll, authenticated control
+    send/receive and authorization. It must check SO_PEERCRED, bound messages,
+    reject caller paths/commands, verify bat0 vs EUD and direct 5 GHz ingress,
+    and clean up on disconnect/lease expiry. Do not instantiate privileged
+    RadioAdapter here.
     """
     can_range = False
     reason = 'R3 helper unavailable: ' + radio_api.ASSOCIATION_GAP
@@ -338,8 +342,8 @@ class Service:
         self.core = ranging.Ranging(radio, lambda: clock().mono, self.position_snapshot,
             ranging.Calibration.measured_20mhz(6500), authorize=radio.authorize,
             eligible=self.eligible, nonce=nonce)
-        # 6500 is ONLY the simulated intercept. Hardware stays unavailable until
-        # its helper supplies an explicitly validated per-node calibration.
+        # 6500 is the simulated intercept only. Hardware requires
+        # helper-supplied, validated per-node calibration.
         if checkpoint is not None:
             self.restore(checkpoint)
 
@@ -404,11 +408,10 @@ class Service:
 
     def position_snapshot(self):
         now = self.clock().mono
-        # Retain fresh raw GNSS for audits even when quarantined, but make it
-        # invalid for positioning immediately (Alfred may lag by three minutes).
-        # R4 convention: GNSS + fix_age carries a raw receiver observation;
-        # valid additionally permits anchor use. Absent/stale fixes use UNKNOWN
-        # without an age, as do R2's position-provider error responses.
+        # Retain fresh raw GNSS for audits, invalidating quarantined fixes for
+        # positioning immediately. Alfred may lag three minutes. R4 GNSS +
+        # fix_age means raw receiver data, valid permits anchors. Absent/stale
+        # fixes use UNKNOWN without age, as do R2 position-provider errors.
         if self.fresh_receiver():
             fix = self.receiver.fix
             p = pb.Position(source=pb.Position.GNSS, valid=self.trusted(),
@@ -459,10 +462,10 @@ class Service:
         sb = self.gnss_sample(result.responder_position, epoch)
         if sa is None or sb is None:
             return None
-        # Compare precisely the two canonical exchange snapshots, not an Alfred
-        # fix or a newer moving receiver sample. Monitor owns failures/scheduling;
-        # its small sample map is scoped to this comparison, then the latest
-        # snapshots are retained for state/attribution. No sample is re-dated.
+        # Compare the two canonical exchange snapshots without re-dating
+        # samples. Monitor owns failures/scheduling. Scope its sample map to
+        # this comparison, then retain the latest snapshots for
+        # state/attribution.
         saved = self.monitor.samples
         temporary = dict(saved)
         temporary[initiator], temporary[responder] = deque([sa]), deque([sb])
@@ -473,8 +476,8 @@ class Service:
             if n not in saved or not saved[n] or saved[n][-1]['mono'] < sample['mono']:
                 saved[n] = deque([sample])
         self.monitor.samples = saved
-        # Claims may add conservative failure evidence; passes never shorten
-        # quarantine. They are labelled separately and never become observations.
+        # Claims add labelled failure evidence without becoming observations.
+        # Passing claims never shorten quarantine.
         if edge:
             edge['peer_claim'] = result.status == 'peer_claim'
             self.monitor_states(force=True)
@@ -553,8 +556,7 @@ class Service:
                 return
             self.next_solve = now + self.backoff
             self.backoff = min(self.config.max_backoff_s, 2 * self.backoff)
-        # Keep auditing a suspect raw receiver too; otherwise distrust would
-        # remove exactly the nodes that need confirmation. No GNSS invention.
+        # Audit suspect raw receivers too. Never invent GNSS.
         if not self.fresh_receiver() or now < self.next_audit:
             return
         ids = [self.config.node_id] + [n.peer.node_id for n in peers if n.gnss]
@@ -699,8 +701,8 @@ class Service:
 
 
 async def command(args):
-    # Popen + nonblocking pipe keeps even child reaping on this one loop;
-    # asyncio's default Unix child watcher otherwise creates a reaper thread.
+    # Popen with a nonblocking pipe keeps child reaping on this loop.
+    # The default asyncio Unix watcher creates a reaper thread.
     process = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                                bufsize=0)
     os.set_blocking(process.stdout.fileno(), False)
@@ -825,7 +827,7 @@ async def run_linux(config, run=Path('/run')):
                 await asyncio.gather(discovery, return_exceptions=True)
             service.close()
             atomic_json(runtime / 'state.json', service.checkpoint())
-            # Leave publications to expire; never publish a healthy shutdown.
+            # Let publications expire without publishing a healthy shutdown.
 
 
 class SimRadio:
@@ -916,8 +918,8 @@ class Simulation:
             radio = make_radio(cfg, SimRadio(self, node_id))
             clock = lambda node_id=node_id: self.node_clock(node_id)
             service = Service(cfg, radio, clock, 'simulation-boot', nonce=self.nonce)
-            # Stable phase staggering avoids symmetric start/busy lockstep;
-            # R2 still arbitrates contention and both roles share one lease.
+            # Stable phases prevent symmetric start/busy lockstep.
+            # R2 arbitrates contention and both roles share one lease.
             service.next_audit = clock().mono + 12 + i * 3
             self.services[node_id] = service
 
@@ -958,9 +960,9 @@ class Simulation:
         self.inputs()
         for service in self.services.values():
             service.tick()
-        # Control/probe delivery is serialized on the SAME event loop. Replies
-        # leave on the next tick; snapshot clocks intentionally differ by node
-        # in tests, while no remote monotonic epoch crosses the wire.
+        # Serialize control/probe delivery on the same event loop, replying next
+        # tick. Simulated snapshot clocks differ by node. Remote monotonic
+        # epochs never cross the wire.
         while self.messages:
             sender, recipient, data, direct = self.messages.popleft()
             self.services[recipient].receive(self.peers[sender], data, direct=direct)

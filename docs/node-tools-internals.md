@@ -54,6 +54,27 @@ clears it. Other services retain root where they need device access, protected
 configuration or systemd control. A restricted service that asks systemd to
 start another service does not transfer its restrictions to that service.
 
+### Comments
+
+- State what the code does and why when the code alone does not show it.
+  Do not restate the code.
+- Use short sentences or fragments in the present tense. No first person,
+  narrative, rhetoric or capitalized emphasis.
+- Describe current constraints. Leave history such as "old pipeline",
+  "an earlier revision", "used to" and "was the bug" in the Git log.
+- Keep facts that prevent regressions: measured values, units, limits,
+  hardware quirks, ordering constraints and references to functions or files.
+  Compact measurement tables are fine.
+- Limit rejected alternatives to one line, only where a reader might retry
+  them: "Tried: X, Y. No effect."
+- Use one line to name a section, then state its constraints.
+- For variables and constants, explain meaning, units, range and default.
+- Start docstrings with one imperative or descriptive summary line. Add
+  arguments, return values and side effects only when they are not obvious.
+- Keep most comments to one to three lines. Blocks longer than about eight
+  lines need data, such as a table or measured response, to justify their size.
+- Keep lines within 80 columns. Do not use em dashes.
+
 ---
 
 ## Packaging and install

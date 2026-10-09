@@ -69,8 +69,8 @@ def render(hosts, rows):
 
 
 def update(registry, hosts, lock):
-    # /run owns this lock across invocations; replacing /etc/hosts must not
-    # replace the lock inode too. Do not tie it to one service's lifetime.
+    # Keep the lock inode in /run across invocations and service restarts.
+    # Replacing /etc/hosts must not replace the lock inode.
     with lock.open('a') as stream:
         fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
         try:

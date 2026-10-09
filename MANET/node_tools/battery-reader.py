@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-"""
-Waveshare UPS HAT (E) battery reader.
+"""Read battery status from a Waveshare UPS HAT (E).
 
 Hardware: IP2368 power management MCU at I2C bus 1, address 0x2D.
 INA219 at 0x40 is internal to the HAT and not directly accessible.
 
 Writes /run/battery_status.json atomically every READ_INTERVAL seconds.
-Triggers graceful poweroff when any cell drops below CELL_LOW_MV while discharging.
+Power off gracefully for 0 < cell_mv < CELL_LOW_MV when not charging.
 
 JSON schema:
   {

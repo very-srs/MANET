@@ -42,9 +42,8 @@ log "Limp mode consensus: $LIMP_NODE_COUNT/$ACTIVE_ALFRED_COUNT ($LIMP_RATIO)"
 # Check current state
 if [ -f "$LIMP_STATE_FILE" ]; then
     CURRENT_LIMP_STATE="true"
-    # Boot-clock seconds, so a time sync cannot cut short or stretch the
-    # minimum residence. A value ahead of the boot clock (a wall time from an
-    # older version) restarts the residence: the safe direction.
+    # Use boot-clock seconds so wall-clock steps cannot change residence time.
+    # A future timestamp restarts the minimum residence for safety.
     LIMP_MODE_ENTRY_TIME=$(cat "$LIMP_STATE_FILE")
     if ! [[ "$LIMP_MODE_ENTRY_TIME" =~ ^[0-9]+$ ]] || [ "$LIMP_MODE_ENTRY_TIME" -gt "$UPTIME_NOW" ]; then
         LIMP_MODE_ENTRY_TIME=$UPTIME_NOW

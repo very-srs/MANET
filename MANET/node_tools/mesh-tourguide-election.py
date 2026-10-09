@@ -43,7 +43,7 @@ def elect(own, peers, registry, band, excluded=()):
             aliases[alias] = mac
 
     # Interface MACs are not Alfred record keys. Wait for identity discovery
-    # rather than elect a radio address that no node can recognize as itself.
+    # so the elected node can recognize its own address.
     if own not in nodes or not peers.issubset(aliases):
         raise ValueError('reachable peers are missing registry identities')
     candidates = {own} | {aliases[peer] for peer in peers}

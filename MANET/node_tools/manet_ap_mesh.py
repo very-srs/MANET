@@ -275,8 +275,8 @@ class Transition:
                 if (destination and band in destination['plan']['channels']
                         and destination['plan']['channels'][band] in permitted):
                     freq = destination['plan']['channels'][band]
-            # Telemetry can corroborate a committed ACS destination; it cannot
-            # authorize an unagreed channel move. Recovery handles that case.
+            # Telemetry can corroborate a committed ACS destination. An
+            # unagreed channel move requires recovery authorization.
             reason = 'anchor' if freq == rendezvous.ANCHORS[band] else 'acs-agreement'
         if freq not in permitted:
             raise ValueError(f'The AP radio cannot initiate mesh operation at {freq} MHz')
@@ -398,7 +398,7 @@ class Transition:
             except Exception as error:
                 if was_ap:
                     try:
-                        # ExecStartPre acquires channel lock; we have released it.
+                        # ExecStartPre can acquire the released channel lock.
                         self.command(['systemctl', 'start', 'hostapd.service'], timeout=60)
                         self.command(['systemctl', 'start', 'ap-txpower.service'])
                     except Exception as recovery:
@@ -449,7 +449,7 @@ def main():
             result = transition.ap_power()
         except Exception as error:
             # The EUD range cap is a preference, not a prerequisite for AP
-            # availability. Keep hostapd up; the standalone policy action
+            # availability. Keep hostapd up. The standalone policy action
             # still fails visibly and reconciliation retries it.
             print(f'WARNING: AP TX power cap failed: {error}', file=sys.stderr)
             result = {'mode': 'ap-power', 'changed': False, 'warning': str(error)}

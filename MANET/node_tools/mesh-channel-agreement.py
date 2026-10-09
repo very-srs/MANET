@@ -99,7 +99,7 @@ def canonical_members(own, peers, registry, records):
 
 
 def recovery_destination(records, local, now, own, excluded=(), own_size=None):
-    """Choose a fresh helper by size then MAC; delayed cached beacons expire."""
+    """Choose a helper by size then MAC, ignoring expired beacons."""
     choices = []
     for mac, record in records.items():
         channels, size = record.get('channels'), record.get('size')
@@ -153,16 +153,16 @@ class Runtime:
         if self.state and self.state.get('timer_boot') != self.boot:
             try:
                 with self.channel_lock():
-                    # Helpers also construct Runtime; don't overwrite a daemon's
-                    # newer state when reconciling the first reader after reboot.
+                    # Helper calls also construct Runtime. Preserve newer daemon
+                    # state when reconciling the first reader after reboot.
                     self.state = read_json(self.path)
                     self.persisted = json.dumps(self.state, sort_keys=True)
                     self.reset_timers()
                     self.save()
             except BlockingIOError:
-                # A channel operation holds the lock, possibly our own caller
-                # (the tourguide runs members/helper-encode under it). Reconcile
-                # in memory only; the daemon saves it on its next pass.
+                # The lock may belong to the caller: tourguide runs
+                # members/helper-encode under it. Reconcile in memory and let
+                # the daemon save on its next pass.
                 self.reset_timers()
         else:
             self.reset_timers()
@@ -182,7 +182,7 @@ class Runtime:
             for key in LOCAL_TIMERS:
                 self.state.pop(key, None)
             self.state['timer_boot'] = self.boot
-            # Unknown-boot holds restart in full; all other local timers drop.
+            # Unknown-boot holds restart in full. Drop all other local timers.
             if held:
                 self.state['hold_until'] = boot_time() + protocol.RECOVERY_SECONDS
 
@@ -272,9 +272,9 @@ class Runtime:
         generation = (info.st_dev, info.st_ino, info.st_mtime_ns, info.st_ctime_ns)
         cached = getattr(self, '_received', {}).get(type_id)
         if cached and cached[:2] == (raw, generation) and now >= cached[2]:
-            # These exact envelopes already authenticated with this credential
-            # generation. Recheck freshness EVERY tick, including forward clock
-            # steps; time before verification reauthenticates the envelopes.
+            # Cached envelopes match this credential generation. Check freshness
+            # each tick, including forward clock steps. Reauthenticate if the
+            # clock moves before verification time.
             return deepcopy({mac: record for mac, record in cached[3].items()
                              if now <= record['_fresh_until']})
         records = authenticated_records(self.transport, type_id, raw, now)
@@ -287,8 +287,8 @@ class Runtime:
         return records
 
     def tourguide_exclusions(self, now):
-        # Existing status carries this flag; no separate discovery broadcast.
-        # Local health is checked live by the caller, including before the hop.
+        # Existing status carries this flag without a separate broadcast.
+        # The caller checks local health live, including before the hop.
         try:
             records = self.receive(74, now)
         except (OSError, subprocess.SubprocessError):
@@ -477,13 +477,13 @@ class Runtime:
             return  # Never persist rounds or poison the timed sender history.
         with self.channel_lock():
             if self.state.get('clock_boot') != self.boot:
-                # A new boot has a new voting session. Its old wall clock may
-                # have been ahead of GPS; don't inherit future rounds.
+                # A new boot starts a voting session. Drop rounds from its old
+                # clock, which may have been ahead of GPS.
                 previous = self.state.get('destination')
                 timers = {key: self.state[key] for key in LOCAL_TIMERS if key in self.state}
                 self.state = dict(timers, clock_boot=self.boot, timer_boot=self.boot)
-                # Re-attest only a validated plan actually operating after
-                # reboot. Local timers were already reconciled with this boot.
+                # Re-attest only a validated plan operating after boot-timer
+                # reconciliation.
                 if protocol.live_destination(previous, self.status(now), now):
                     self.state['destination'] = previous
                 self.save()
@@ -505,15 +505,15 @@ class Runtime:
                     local['ready'] = False  # A searching solo node never elects itself out of discovery.
             except (OSError, ValueError, subprocess.SubprocessError):
                 view = None
-            now = int(time.time())  # Discovery can time out; never activate using its start time.
+            now = int(time.time())  # Discovery may time out. Refresh time.
             destinations = self.connected_destinations(view, records, local, now)
             destinations = protocol.network_destinations(destinations, view or {})
             conflicting = protocol.conflicting_destinations(destinations.values())
             self.ui_status.update(reachable=len(view) - 1 if view else None, conflicting=conflicting)
             if conflicting and self.state.get('hold_until', 0) > boot_time():
-                # The recollection hold must not keep reunited
-                # groups on different channels. Their next common scan/round
-                # includes RF observations from the whole connected network.
+                # Lift the recollection hold when groups reunite on different
+                # channels. Their next shared scan/round includes the whole
+                # connected network.
                 self.state.pop('hold_until', None)
                 local = self.status(now)
                 view[self.own] = local
@@ -551,9 +551,9 @@ class Runtime:
             elif plan is not None:
                 plan = None  # A compatible static participant ACKs without applying ACS.
             self.save()  # Retry failed writes even if memory already contains the new state.
-            # A live plan remains recoverable after its recollection
-            # hold. Competing working plans require one new common election,
-            # never independent "newest plan wins" decisions on each group.
+            # Keep a live plan recoverable after its recollection hold.
+            # Competing working plans require one common election across the
+            # connected groups.
             if (plan is None and view and local['acs'] and not self.busy()
                     and not conflicting and elapsed >= self.state.get('retry_at', 0)
                     and updated.get('phase') not in ('prepared', 'committed')):
@@ -584,9 +584,9 @@ class Runtime:
                     self.state['destination'] = max(learned, key=lambda c: c[:2])[2]
                     self.save()
                     if local['discovery']:
-                        # Rendezvous can coincide with the operating data
-                        # channel: adopt its authority and stop searching,
-                        # without a needless reconfigure or a later hop away.
+                        # If rendezvous matches the data channel, adopt its
+                        # authority and stop searching without reconfiguring or
+                        # hopping away later.
                         plan = self.state['destination']['plan']
             if plan is None and elapsed <= self.state.get('repair_until', -1) and elapsed >= self.state.get('retry_at', 0):
                 destination = self.state.get('destination')
@@ -612,7 +612,7 @@ class Runtime:
                     and updated.get('phase') not in ('prepared', 'committed')
                     and self.discovery_step(now, local, len(view) > 1)):
                 local = self.status(int(time.time()))
-            # No new gossip stream: current plans ride the existing type 74.
+            # Advertise current plans through the existing type 74 exchange.
             # Readbacks while radios are moving cannot advertise a destination.
             destination = protocol.live_destination(self.state.get('destination'), local, int(time.time()))
             checked = time.monotonic()
@@ -627,10 +627,10 @@ class Runtime:
                                 and records.get(mac, {}).get('_fresh_until', now) >= now
                                 and protocol.live_destination(destination, status, now)):
                             holders.add(mac)
-                    # One full certificate per operating plan; other holders
-                    # advertise only its ID. Stale/unreachable publishers drop
-                    # out automatically. Avoid two 64-member certificates in
-                    # one envelope during the next round's commit.
+                    # Send one full certificate per operating plan. Other
+                    # holders send its ID, dropping stale/unreachable
+                    # publishers. This avoids two 64-member certificates in one
+                    # envelope during the next round's commit.
                     if self.own == min(holders) and 'commit' not in outgoing:
                         payload['destination'] = destination
                 envelope = self.transport.seal(74, payload)
@@ -801,7 +801,7 @@ def main():
         with (runtime.state_dir / '.daemon.lock').open('a') as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             from manet_runtime import start
-            start()  # Blocking request worker in this existing process; no new polling loop.
+            start()  # Blocking worker here, without another polling loop.
             last_error = None
             while True:
                 try:

@@ -1,12 +1,7 @@
-"""Peer radio chips for the manage topology view.
+"""Build peer radio chips for the management topology view.
 
-Alfred telemetry already carries MCS and 2.4/5 GHz data-channel MHz, but
-node-manager historically published INTERFACES_JSON as []. The topology UI
-then had no wlan0/1/2 keys, so every peer rendered as 2.4G/5G/HaLow OFF.
-
-This module fills those keys from the published interface list when present,
-and otherwise from the registry MCS / DATA_CHANNEL_* fields so older nodes
-still show radio values.
+Use published interface entries when present. Otherwise derive wlan0/1/2
+values from registry MCS and DATA_CHANNEL_* telemetry.
 """
 
 import json
@@ -15,7 +10,7 @@ WLAN_IFACES = ('wlan0', 'wlan1', 'wlan2')
 
 
 def parse_json_field(text):
-    """Decode a JSON list carried through the registry; [] on anything odd."""
+    """Decode a registry JSON list, returning [] for invalid input."""
     try:
         value = json.loads(text or '[]')
     except (json.JSONDecodeError, TypeError):

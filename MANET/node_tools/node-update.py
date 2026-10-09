@@ -165,7 +165,7 @@ def atomic_file(destination, source=None, data=None, mode=0o644):
 
 
 def archive_path(name):
-    # GNU tar builders prefix members with ./; no other normalization is safe.
+    # GNU tar builders prefix members with ./. No other normalization is safe.
     while name.startswith("./"):
         name = name[2:]
     name = name.rstrip("/")
@@ -335,8 +335,8 @@ class Updater:
         self.space(requests)
         directory.mkdir()
         with tarfile.open(package, "r:gz") as archive:
-            # Extract regular files only; links are installed later. Never apply
-            # tar's ownership restoration or follow an archive symlink.
+            # Extract regular files only. Install links later, without restoring
+            # tar ownership or following archive symlinks.
             for name, member in members.items():
                 target = directory / name
                 target.parent.mkdir(parents=True, exist_ok=True)
@@ -366,7 +366,7 @@ class Updater:
 
     def clean_payload_scratch(self, members):
         # A hard stop can also leave a temporary sibling of a live file.
-        # Restrict cleanup to our exact temporary names in validated parents.
+        # Match exact updater temporary names only within validated parents.
         parents = {self.destination(name).parent for name in members}
         for parent in parents:
             if not parent.is_dir():
@@ -531,7 +531,7 @@ class Updater:
                 run_command(['systemctl', 'disable', '--now', service])
             self.destination('etc/systemd/system/multi-user.target.wants/' + service).unlink(missing_ok=True)
             # ap-txpower remains an explicit, role-aware policy action. It is
-            # also invoked by hostapd itself; never independently at boot.
+            # also invoked by hostapd itself, never independently at boot.
             if service != 'ap-txpower.service':
                 unit.unlink(missing_ok=True)
         self.destination('usr/local/bin/manet-halow-power.py').unlink(missing_ok=True)
