@@ -381,6 +381,9 @@ its IPv4 address. The existing peer poll checks every 30 seconds and rebuilds
 the pipelines when that address appears or changes. `tx_blocked` gives the
 reason in the state file and the Audio path row; `bind_address` records the
 selected address. A held PTT resumes after binding, subject to half duplex.
+If capture cannot open and no send socket exists, `tx_blocked` reports the
+transmit pipeline's audio-device error. Socket binding is checked once the
+socket exists.
 
 ### Config keys
 
@@ -1338,6 +1341,12 @@ bound drivers, plus an empty udev queue. The total wait is at most sixty seconds
 An unstable or failed query leaves existing role files intact and provisioning
 incomplete. No radios throughout the window permits wired-only setup. This is
 a bounded settling check, not proof that an undetected radio cannot arrive later.
+
+Role files use live names through setup, then switch to the pinned names just
+before a rename reboot. A failed reboot restores the live names. Extra radios
+without a `.link` pin retain their detected names. On the next setup pass,
+failed radio units are cleared after the mesh restart only if their failure
+state has not changed since before setup changed the radio services.
 
 The final setup pass starts the runtime services before recording success;
 the dashboard and BATMAN watchdog do not need another reboot. It also enables

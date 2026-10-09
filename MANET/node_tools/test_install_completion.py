@@ -137,12 +137,14 @@ provision_try() { shift; "$@"; }
 
     def test_rename_reboot_does_not_fall_through_to_completion(self):
         source = (TOOLS / 'radio-setup.sh').read_text()
-        start = source.index('if [ -f /var/lib/radio-setup-reboot-pending ]; then')
+        start = source.index('if [ "$needs_rerun" -eq 1 ] && [ -f /var/lib/radio-setup-reboot-pending ]; then')
         end = source.index('# Start the services enabled above', start)
         with tempfile.TemporaryDirectory() as scratch:
             marker = Path(scratch) / 'reboot-pending'
             marker.touch()
             body = '''
+needs_rerun=1
+stage_rename_roles() { :; }
 sleep() { :; }
 reboot() { echo REBOOT; }
 provision_try() { shift; "$@"; }
