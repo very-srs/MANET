@@ -453,7 +453,7 @@ def read_iface_txpower_dbm(iface):
     return ''
 
 def set_iface_txpower_verified(iface, dbm, retries=6, delay=0.25):
-    """Request a power and return (requested, reported).
+    """Request PHY power and return (requested, reported).
 
     MANET does not cap the radios. The driver or the card itself may report
     less than was asked for; that is accepted and returned. A radio that
@@ -461,8 +461,34 @@ def set_iface_txpower_verified(iface, dbm, retries=6, delay=0.25):
     take), is an error.
     """
     requested = _fmt_dbm(dbm)
+    sysnet = Path(os.environ.get('MANET_SYS_NET', '/sys/class/net'))
+    try:
+        phy = (sysnet / iface / 'phy80211/name').read_text().strip()
+    except OSError as error:
+        raise ValueError(f'Cannot identify radio PHY for {iface}') from error
+    if not re.fullmatch(r'phy[0-9]+', phy):
+        raise ValueError(f'Cannot identify radio PHY for {iface}')
+    # PHY power affects every virtual interface on the radio, including an
+    # AP or uplink with its own power policy. Missing flags count as UP.
+    for other in sysnet.iterdir():
+        if other.name == iface:
+            continue
+        try:
+            other_phy = (other / 'phy80211/name').read_text().strip()
+        except OSError:
+            continue
+        if other_phy != phy:
+            continue
+        try:
+            flags = int((other / 'flags').read_text().strip(), 0)
+        except (OSError, ValueError):
+            flags = 1
+        if flags & 1:
+            raise ValueError(f'Cannot change {iface} power: '
+                             f'{phy} also serves {other.name}')
     subprocess.run(
-        ['iw', 'dev', iface, 'set', 'txpower', 'fixed', str(int(float(requested) * 100))],
+        ['iw', 'phy', phy, 'set', 'txpower', 'fixed',
+         str(int(float(requested) * 100))],
         capture_output=True, text=True, check=True, timeout=5
     )
     actual = ''

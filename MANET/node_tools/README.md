@@ -226,6 +226,11 @@ back and shown. That is the driver's report, not a measurement of RF output,
 and it can be lower than the request when the card limits itself. A requested
 reduction that does not take is reported as a failure.
 
+Wi-Fi power changes apply to the interface's PHY. A change is refused if
+another UP interface shares that PHY or the PHY cannot be identified. UI
+power selections are not saved for radio restarts or reboots; the boot mesh
+power service requests 30 dBm again.
+
 HaLow power is shown but cannot be changed from the UI. The Morse driver sets
 it when the radio starts, and reloading the driver can wedge the USB card, so
 a change needs a reboot. The bench MM8108 firmware reports 24 dBm at 1 and
@@ -829,8 +834,8 @@ AP-only hardware stays out of the mesh; disabled mesh radios remain down.
 AP preparation runs through hostapd, and its post-start helper applies the
 5 dBm cap only to the active AP role. The old independently enabled AP boot
 units and the conventional mesh lab-power unit are retired. Mesh radios request
-30 dBm through `manet-mesh-power.sh`, leaving the limit to the driver and
-firmware; mesh return clears the AP cap. The AP setter verifies the cap
+30 dBm per PHY through `manet-mesh-power.sh`, leaving the limit to the driver
+and firmware; mesh return clears the AP cap. The AP setter verifies the cap
 and refuses a PHY shared with another active interface. Healthy mesh reconciliation preserves operator
 power changes; manual power settings currently do not persist across reboot.
 

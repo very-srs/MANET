@@ -24,6 +24,9 @@ radios = json.loads(state_path.read_text())
 with open(os.environ['TEST_CALLS'], 'a') as log:
     log.write('iw ' + ' '.join(sys.argv[1:]) + '\n')
 iface = sys.argv[2]
+if sys.argv[1] == 'phy':
+    iface = next((name for name, radio in radios.items()
+                  if radio['phy'] == sys.argv[2]), None)
 radio = radios.get(iface)
 if radio is None:
     sys.exit(237)
@@ -31,6 +34,8 @@ if radio.get('hang') in (sys.argv[3], 'all'):
     import time
     time.sleep(60)
 if sys.argv[3:5] == ['set', 'txpower']:
+    if sys.argv[1] != 'phy':
+        sys.exit(238)
     sys.exit(1 if radio.get('refuse') else 0)
 radio['infos'] = radio.get('infos', 0) + 1
 if radio.get('becomes_ap_after') and radio['infos'] > radio['becomes_ap_after']:
@@ -75,7 +80,7 @@ class MeshPowerTests(unittest.TestCase):
         (self.net / name / 'phy80211').mkdir(parents=True)
         (self.net / name / 'phy80211/name').write_text(phy + '\n')
         (self.net / name / 'flags').write_text('0x1003\n' if up else '0x1002\n')
-        self.radios[name] = fields
+        self.radios[name] = dict(fields, phy=phy)
 
     def roles_are(self, mesh='', halow=''):
         (self.roles / 'mesh_if').write_text(mesh + '\n')
@@ -95,8 +100,8 @@ class MeshPowerTests(unittest.TestCase):
         self.roles_are(mesh='wlan0 wlan1', halow='wlan2')
         result, calls = self.run_script()
         self.assertEqual(result.returncode, 0, result.stderr)
-        for iface in ('wlan0', 'wlan1', 'wlan2'):
-            self.assertIn(f'iw dev {iface} set txpower fixed 3000', calls)
+        for phy in ('phy0', 'phy1', 'phy2'):
+            self.assertIn(f'iw phy {phy} set txpower fixed 3000', calls)
         self.assertIn('wlan0: requested 30 dBm; driver reports 30.00 dBm', result.stdout)
         # A lower hardware report is logged, not an error.
         self.assertIn('wlan2: requested 30 dBm; driver reports 24.00 dBm', result.stdout)
@@ -109,7 +114,7 @@ class MeshPowerTests(unittest.TestCase):
         result, calls = self.run_script()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('wlan1: serving as the EUD AP', result.stdout)
-        self.assertFalse([c for c in calls if c.startswith('iw dev wlan1 set')])
+        self.assertFalse([c for c in calls if c.startswith('iw phy phy1 set')])
 
     def test_holds_the_channel_lock_used_by_ap_transitions(self):
         # the role check and the request happen under the lock, so
@@ -143,7 +148,7 @@ class MeshPowerTests(unittest.TestCase):
         self.roles_are(mesh='wlan0')
         result, calls = self.run_script()
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn('iw dev wlan0 set txpower fixed 3000', calls)
+        self.assertIn('iw phy phy0 set txpower fixed 3000', calls)
 
     def test_hung_iw_fails_bounded_and_releases_the_lock(self):
         # unbounded iw calls held the channel lock indefinitely.
@@ -196,7 +201,7 @@ class MeshPowerTests(unittest.TestCase):
         self.radio('wlan0', 'phy0')
         self.roles_are(mesh='wlan0', halow='wlan0')
         _, calls = self.run_script()
-        self.assertEqual(calls.count('iw dev wlan0 set txpower fixed 3000'), 1)
+        self.assertEqual(calls.count('iw phy phy0 set txpower fixed 3000'), 1)
 
     def test_missing_interface_reported_others_still_applied(self):
         self.radio('wlan3', 'phy3')
@@ -204,7 +209,7 @@ class MeshPowerTests(unittest.TestCase):
         result, calls = self.run_script()
         self.assertEqual(result.returncode, 1)
         self.assertIn('wlan2: interface not present', result.stderr)
-        self.assertIn('iw dev wlan3 set txpower fixed 3000', calls)
+        self.assertIn('iw phy phy3 set txpower fixed 3000', calls)
 
     def test_no_roles_is_a_no_op(self):
         result, calls = self.run_script()

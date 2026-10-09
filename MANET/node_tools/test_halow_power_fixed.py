@@ -6,6 +6,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
 from unittest import mock
@@ -22,14 +23,22 @@ class Fixture(unittest.TestCase):
         self.addCleanup(scratch.cleanup)
         self.roles = Path(scratch.name)
         (self.roles / 'halow_if').write_text('wlan2\n')
+        self.net = self.roles / 'net'
+        self.iface('wlan0', 'phy7')
         env = mock.patch.dict(os.environ, MANET_IFACE_STATE_DIR=str(self.roles),
-                              MANET_SYS_NET=str(self.roles / 'net'))
+                              MANET_SYS_NET=str(self.net))
         env.start()
         self.addCleanup(env.stop)
         self.run_cmd = mock.patch.object(radio.subprocess, 'run',
                                          side_effect=AssertionError('no command may run'))
         self.run_cmd.start()
         self.addCleanup(self.run_cmd.stop)
+
+    def iface(self, name, phy, flags='0x1003'):
+        path = self.net / name
+        (path / 'phy80211').mkdir(parents=True)
+        (path / 'phy80211/name').write_text(phy + '\n')
+        (path / 'flags').write_text(flags + '\n')
 
 
 class BackendTests(Fixture):
@@ -69,7 +78,7 @@ class BackendTests(Fixture):
             self.assertIn('needs a reboot', why)
 
 
-class ReadbackTests(unittest.TestCase):
+class ReadbackTests(Fixture):
     def verified(self, requested, reading):
         with mock.patch.object(radio.subprocess, 'run'), \
                 mock.patch.object(radio, 'read_iface_txpower_dbm', return_value=reading), \
@@ -86,6 +95,78 @@ class ReadbackTests(unittest.TestCase):
 
     def test_exact_reading(self):
         self.assertEqual(self.verified(5, '5'), ('5', '5'))
+
+    def test_missing_reading_is_an_error(self):
+        with self.assertRaisesRegex(RuntimeError, 'reports no power'):
+            self.verified(10, '')
+
+    def test_command_failure_is_propagated_without_readback(self):
+        error = subprocess.CalledProcessError(1, ['iw'], stderr='refused')
+        with mock.patch.object(radio.subprocess, 'run', side_effect=error), \
+                mock.patch.object(radio, 'read_iface_txpower_dbm') as read:
+            with self.assertRaises(subprocess.CalledProcessError) as raised:
+                radio.set_iface_txpower_verified('wlan0', 10)
+        self.assertIs(raised.exception, error)
+        read.assert_not_called()
+
+
+class WifiPowerTests(Fixture):
+    def setUp(self):
+        super().setUp()
+        for patcher in (
+            mock.patch.object(radio, 'get_iface_txpower_cap',
+                              return_value='30'),
+            mock.patch.object(radio, 'read_iface_txpower_dbm',
+                              return_value='10'),
+            mock.patch.object(radio.time, 'sleep'),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def test_ui_power_backend_writes_phy_from_sysfs(self):
+        self.iface('wlan1', 'phy3')
+        with mock.patch.object(radio.subprocess, 'run') as command:
+            result = radio.apply_txpower('wlan0', 10)
+        command.assert_called_once_with(
+            ['iw', 'phy', 'phy7', 'set', 'txpower', 'fixed', '1000'],
+            capture_output=True, text=True, check=True, timeout=5)
+        self.assertTrue(result['ok'])
+        self.assertEqual(result['actual_dbm'], '10')
+
+    def test_ui_power_backend_refuses_another_up_interface_on_phy(self):
+        self.iface('ap0', 'phy7')
+        with self.assertRaisesRegex(ValueError, 'phy7 also serves ap0'):
+            radio.apply_txpower('wlan0', 10)
+
+    def test_down_interface_on_phy_does_not_block_power_change(self):
+        self.iface('ap0', 'phy7', flags='0x1002')
+        with mock.patch.object(radio.subprocess, 'run') as command:
+            self.assertTrue(radio.apply_txpower('wlan0', 10)['ok'])
+        command.assert_called_once()
+
+    def test_unreadable_or_invalid_flags_on_shared_phy_refuse_change(self):
+        self.iface('ap0', 'phy7')
+        flags = self.net / 'ap0/flags'
+        for value in (None, '', 'invalid'):
+            with self.subTest(flags=value):
+                if value is None:
+                    flags.unlink()
+                else:
+                    flags.write_text(value)
+                with self.assertRaisesRegex(ValueError, 'phy7 also serves ap0'):
+                    radio.apply_txpower('wlan0', 10)
+
+    def test_missing_or_invalid_phy_refuses_change_without_fallback(self):
+        name = self.net / 'wlan0/phy80211/name'
+        for value in (None, '', 'wlan0'):
+            with self.subTest(phy=value):
+                if value is None:
+                    name.unlink()
+                else:
+                    name.write_text(value)
+                with self.assertRaisesRegex(ValueError,
+                                            'Cannot identify.*wlan0'):
+                    radio.apply_txpower('wlan0', 10)
 
 
 class ManageApiTests(Fixture):
