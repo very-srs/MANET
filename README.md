@@ -65,7 +65,7 @@ All of it sits under `MANET/`.
 | **Compute Module 4 (CM4)** | Functional, primary dev target | Supports 802.11ax + HaLow. |
 | **Raspberry Pi 4B** | Briefly tested, lacks pcie hardware | only useful for halow  |
 | **Raspberry Pi 5** | Functional, out of date, not a focus | Supports 802.11ax + HaLow. |
-| **Radxa Rock 3A** | Functional, not a focus | Supports 802.11ax + HaLow. |
+| **Radxa Rock 3A** | Functional, up-to-date, not a focus | Supports 802.11ax + HaLow. |
 
 The Pi 5 and Rock 3A both work, but they run too hot for a sealed radio
 enclosure. Development and testing now focus on the CM4.
