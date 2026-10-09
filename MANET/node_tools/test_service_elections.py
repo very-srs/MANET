@@ -224,5 +224,32 @@ sync_database_to_shared() { :; }
                               capture_output=True, text=True, timeout=15)
 
 
+class ServiceVipTests(Fixture):
+    # MediaMTX and Mumble VIPs share one /64, so their offsets must not overlap.
+    def vip(self, script, radvd):
+        text = (TOOLS / script).read_text().replace('/etc/radvd-mesh.conf',
+                                                    str(radvd))
+        path = self.root / script
+        path.write_text(text)
+        out = subprocess.run(['bash', str(path)], check=True,
+                             capture_output=True, text=True,
+                             timeout=10).stdout.strip()
+        addr, mask = out.split('/')
+        self.assertEqual(mask, '128')
+        return int(addr.rsplit(':', 1)[1], 16)
+
+    def test_offsets_stay_in_disjoint_ranges(self):
+        radvd = self.root / 'radvd-mesh.conf'
+        for n in range(40):
+            prefix = 'fd%02x:%x:%x::/48' % (n, n * 7919 & 0xffff,
+                                            n * 104729 & 0xffff)
+            radvd.write_text('interface br0 {\n  prefix %s {\n  };\n};\n'
+                             % prefix)
+            mtx = self.vip('mtx-ip.sh', radvd)
+            mumble = self.vip('mumble-ip.sh', radvd)
+            self.assertTrue(100 <= mtx <= 355, mtx)
+            self.assertTrue(400 <= mumble <= 655, mumble)
+
+
 if __name__ == '__main__':
     unittest.main()
