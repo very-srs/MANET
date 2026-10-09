@@ -36,7 +36,8 @@ if [ "${MANET_IP_CHECKED:-0}" != 1 ]; then
     exec python3 "${MANET_TOOLS_DIR:-$(dirname "${BASH_SOURCE[0]}")}/manet_ip_runtime.py"
 fi
 CONTROL_IFACE="br0"
-CLAIMED_CHUNKS_FILE="/tmp/claimed_chunks.txt"
+CLAIMED_CHUNKS_FILE=/run/manet-registry/claimed-chunks.txt
+CLAIMED_CHUNKS_FILE="${MESH_CLAIMED_CHUNKS_FILE:-$CLAIMED_CHUNKS_FILE}"
 PERSISTENT_STATE_FILE="/etc/mesh_ipv4_state"
 STARTUP_HELPER="${MESH_IP_STARTUP_HELPER:-/usr/local/bin/mesh-ip-startup.py}"
 

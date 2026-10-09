@@ -30,6 +30,7 @@ IS_IN_LIMP_MODE LAST_TOURGUIDE_TIMESTAMP LAST_TOURGUIDE_RADIO CONFIG_ACK_VERSION
 HALOW_TX_MCS HALOW_RX_MCS HALOW_MCS_PEER WIFI_24_TX_MCS WIFI_24_RX_MCS
 WIFI_5_TX_MCS WIFI_5_RX_MCS INTERFACES_JSON EUD_MODE AP_SSID EUD_COUNT'''.split()
 RECORD = re.compile(r'^\s*\{\s*"([0-9a-fA-F:]{17})"\s*,\s*"([^"]*)"', re.M)
+CLAIMS_FILE = 'run/manet-registry/claimed-chunks.txt'
 
 
 def atomic_text(path, text, mode=0o644):
@@ -94,9 +95,10 @@ def decode(kind, payload, mac):
 
 def build():
     registry = Path(os.environ.get('MESH_REGISTRY_FILE', '/var/run/mesh_node_registry'))
-    claims = Path(os.environ.get('MESH_CLAIMED_CHUNKS_FILE', '/tmp/claimed_chunks.txt'))
+    claims = Path(os.environ.get('MESH_CLAIMED_CHUNKS_FILE', '/' + CLAIMS_FILE))
     observed = Path(os.environ.get('MESH_REGISTRY_OBSERVED_FILE', '/run/manet-registry/observed.tsv'))
     observed.parent.mkdir(parents=True, exist_ok=True)
+    claims.parent.mkdir(parents=True, exist_ok=True)
     with Path(str(observed) + '.lock').open('a') as lock:
         deadline = time.monotonic() + 10
         while True:

@@ -19,11 +19,11 @@ import sys
 import time
 
 from manet_node_ipv4 import primary_ipv4, read_values
-from manet_registry_builder import atomic_text, read_json
+from manet_registry_builder import CLAIMS_FILE, atomic_text, read_json
 
 TOOLS = Path(__file__).resolve().parent
 # Include outputs as well as inputs: a deleted/edited config must be repaired.
-INPUTS = ('etc/mesh.conf', 'etc/mesh_ipv4_state', 'tmp/claimed_chunks.txt',
+INPUTS = ('etc/mesh.conf', 'etc/mesh_ipv4_state', CLAIMS_FILE,
           'var/run/my_ipv4_chunk', 'var/run/my_ipv4_chunk_size',
           'etc/dnsmasq.d/mesh-eud.conf', 'etc/avahi/hosts',
           'etc/avahi/avahi-daemon.conf', 'var/lib/no_mesh_if',
@@ -41,9 +41,11 @@ def module(name):
 
 def file_inputs(root=Path('/')):
     values = {}
+    override = os.environ.get('MESH_CLAIMED_CHUNKS_FILE')
     for name in INPUTS:
+        path = Path(override) if name == CLAIMS_FILE and override else root / name
         try:
-            values[name] = (root / name).read_text()
+            values[name] = path.read_text()
         except FileNotFoundError:
             values[name] = None
     values['pending'] = [name for name in PENDING if (root / name).exists()]
@@ -86,7 +88,7 @@ def healthy_allocation(files, live, ready, active):
         if not files['etc/dnsmasq.d/mesh-eud.conf']:
             return False
         # A contested or incomplete claim must run the allocator each pass.
-        for line in (files['tmp/claimed_chunks.txt'] or '').splitlines():
+        for line in (files[CLAIMS_FILE] or '').splitlines():
             _, mac, start, width = line.split(',')
             if mac in files['macs'].values():
                 continue

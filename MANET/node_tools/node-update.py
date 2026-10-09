@@ -89,6 +89,8 @@ REQUIRED = MARKERS | {
     "etc/systemd/system/manet-mt7916-firmware-apply.service",
     "etc/systemd/system/manet-mt7916-firmware.path",
     "usr/local/bin/manet_measurement_storage.py",
+    "usr/local/bin/mesh-hosts-update.sh", "usr/local/bin/manet_hosts.py",
+    "usr/local/bin/manet_config_io.py",
     "usr/local/share/manet/logrotate.conf",
     "etc/systemd/system/manet-logrotate.service",
     "etc/systemd/system/manet-logrotate.timer",

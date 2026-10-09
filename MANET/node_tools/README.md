@@ -851,6 +851,13 @@ password. The management UI drives it mesh-wide over Alfred.
 **mesh-hosts-update.sh**
 
 Populates `/etc/hosts` from the registry, so peer hostnames resolve without DNS.
+The two-minute refresh compares mappings in memory and leaves the file untouched
+when they are unchanged. Changed mappings replace only the marked mesh block,
+preserving other entries, ownership and permissions. Publication uses a temporary
+file beside `/etc/hosts`, followed by file/directory syncs and an atomic rename.
+Missing/empty registry snapshots and malformed block markers leave hosts intact.
+The shell entry point runs `manet_hosts.py`, which reads registry assignments as
+data rather than sourcing them as shell commands.
 
 **mac-to-ip.sh**
 
@@ -1255,6 +1262,13 @@ carrier and `auto_update=` is set to a true value in `/etc/mesh.conf`. See
 [networkd-dispatcher/README.md](../networkd-dispatcher/README.md).
 
 **Storage limits**
+
+Peer allocation claims live in `/run/manet-registry/claimed-chunks.txt`, alongside
+the registry's observation and decoding caches. The builder recreates the
+directory on demand after boot. These shared files survive individual service
+restarts and remain visible to services with private `/tmp` directories; reboot
+clears them. The allocator and reconciliation cache use the same path. Saved
+allocation preferences in `/etc/mesh_ipv4_state` remain persistent.
 
 The persistent journal retains its existing 200 MiB budget and ten-second
 sync interval. `manet-logrotate.timer` checks MANET's standalone logs five

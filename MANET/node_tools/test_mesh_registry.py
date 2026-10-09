@@ -30,7 +30,8 @@ class ChunkClaimsTests(unittest.TestCase):
         self.bin = self.root / 'bin'
         self.bin.mkdir()
         self.registry = self.root / 'registry'
-        self.claims = self.root / 'claims'
+        self.claims = self.root / 'run/manet-registry/claimed-chunks.txt'
+        self.claims.parent.mkdir(parents=True)
         self.env = dict(
             os.environ,
             PATH=os.pathsep.join((str(self.bin), str(Path(sys.executable).parent),
@@ -113,6 +114,24 @@ class ChunkClaimsTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(result.stdout, '')
         self.assertIn('No available chunks', result.stderr)
+
+    def test_runtime_directory_is_recreated_after_boot(self):
+        self.claims.parent.rmdir()
+        self.add_node()
+        self.assertEqual(self.build_registry(), [f'0,{MAC},{A6},7'])
+        self.assertTrue(self.claims.parent.is_dir())
+
+    def test_restart_preserves_claims_until_they_expire(self):
+        self.add_node()
+        expected = self.build_registry()
+        previous = self.claims.stat()
+        self.set_uptime(1100)
+        self.assertEqual(self.build_registry(), expected)
+        current = self.claims.stat()
+        self.assertEqual((current.st_ino, current.st_mtime_ns),
+                         (previous.st_ino, previous.st_mtime_ns))
+        self.set_uptime(1301)
+        self.assertEqual(self.build_registry(), [])
 
     def test_chunk_zero_starts_after_reserved_service_addresses(self):
         result = self.allocator('get_chunk_ips 0')
@@ -384,7 +403,7 @@ class ChunkClaimsTests(unittest.TestCase):
 
     def test_allocation_change_publishes_before_keepalive_and_retries_failure(self):
         marker = self.root / 'run/my_ipv4_chunk'
-        marker.parent.mkdir()
+        marker.parent.mkdir(exist_ok=True)
         marker.write_text('0\n')
         for script in ('node-manager-acs.sh', 'node-manager-static.sh'):
             for fail_first in (False, True):
