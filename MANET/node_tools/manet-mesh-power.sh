@@ -82,7 +82,8 @@ for iface in "${ifaces[@]}"; do
         fail "$iface: $phy also serves $shared; not changing its power"
         continue
     fi
-    if ! iw_bounded dev "$iface" set txpower fixed "$REQUEST_MBM" 2>/dev/null; then
+    if ! iw_bounded phy "$phy" set txpower fixed "$REQUEST_MBM" \
+            2>/dev/null; then
         fail "$iface: power request refused"
         continue
     fi

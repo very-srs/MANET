@@ -17,6 +17,9 @@ class WifiChannelApplyTests(unittest.TestCase):
     def setUp(self):
         scratch = tempfile.TemporaryDirectory(); self.addCleanup(scratch.cleanup)
         self.root = Path(scratch.name)
+        net = self.root / 'net'
+        (net / 'wlan0/phy80211').mkdir(parents=True)
+        (net / 'wlan0/phy80211/name').write_text('phy9\n')
         self.conf = self.root / 'mesh.conf'; self.conf.write_text('acs=n\n')
         self.plan = self.root / 'static-channels.json'
         self.lock = self.root / 'channel.lock'
@@ -28,7 +31,8 @@ class WifiChannelApplyTests(unittest.TestCase):
             path.chmod(0o600)
         env = patch.dict(os.environ, MANET_MESH_CONF=str(self.conf), MANET_STATIC_CHANNELS=str(self.plan),
                          MANET_IFACE_STATE_DIR=str(self.root), MANET_WPA_DIR=str(self.root),
-                         MANET_ACS_LOCK_FILE=str(self.lock))
+                         MANET_ACS_LOCK_FILE=str(self.lock),
+                         MANET_SYS_NET=str(net))
         env.start(); self.addCleanup(env.stop)
 
     def test_manual_change_persists_both_configs_and_plan_under_lock(self):
@@ -109,10 +113,14 @@ class WifiChannelApplyTests(unittest.TestCase):
         with patch.object(supplicant, 'restart_configured') as restart, \
                 patch.object(radio, 'read_iface_txpower_dbm', return_value='20'), \
                 patch.object(radio, 'get_iface_txpower_cap', return_value=''), \
-                patch.object(radio, 'set_iface_txpower_verified', side_effect=[RuntimeError('power failed'), ('20', '20')]) as power:
+                patch.object(radio.time, 'sleep'), \
+                patch.object(radio.subprocess, 'run') as power:
             with self.assertRaisesRegex(RuntimeError, 'previous channel restored'):
                 radio.apply_wifi_channel('5', 149, 18)
         self.assertEqual([path.read_bytes() for path in self.paths], before)
         self.assertFalse(self.plan.exists())
         self.assertEqual(restart.call_count, 2)
-        self.assertEqual(power.call_args.args, ('wlan0', '20'))
+        self.assertEqual([call.args[0] for call in power.call_args_list], [
+            ['iw', 'phy', 'phy9', 'set', 'txpower', 'fixed', '1800'],
+            ['iw', 'phy', 'phy9', 'set', 'txpower', 'fixed', '2000'],
+        ])
