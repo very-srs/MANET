@@ -61,6 +61,17 @@ provision_try() {
     return 0
 }
 
+# Finish interrupted installs and keep the conffiles shipped by MANET.
+install_packages() {
+    DEBIAN_FRONTEND=noninteractive dpkg --force-confdef --force-confold --configure -a || return $?
+    if [ "${1:-}" = --update ]; then
+        shift
+        apt-get update -qq || return $?
+    fi
+    DEBIAN_FRONTEND=noninteractive apt-get install -y \
+        -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold "$@"
+}
+
 # Check repository DNS before apt and report a missing connection once.
 have_package_network() {
     getent hosts deb.debian.org >/dev/null 2>&1 || return 1
@@ -1562,7 +1573,7 @@ systemctl enable mesh-status
 
 if have_package_network; then
     provision_try "apt install failed: avahi-daemon iperf3 traceroute sqlite3 python3-zeroconf python3-cryptography" \
-        apt install -y --no-install-recommends avahi-daemon iperf3 traceroute sqlite3 python3-zeroconf python3-cryptography
+        install_packages --no-install-recommends avahi-daemon iperf3 traceroute sqlite3 python3-zeroconf python3-cryptography
 else
     provision_fail "no network: cannot install avahi-daemon iperf3 traceroute sqlite3 python3-zeroconf python3-cryptography"
 fi
@@ -1664,7 +1675,7 @@ fi
 # Install smbus and i2c-tools for battery-reader.py and diagnostics
 if have_package_network; then
     provision_try "apt install failed: python3-smbus i2c-tools" \
-        sh -c 'apt update -qq && apt install -y --no-install-recommends python3-smbus i2c-tools'
+        install_packages --update --no-install-recommends python3-smbus i2c-tools
 else
     provision_fail "no network: cannot install python3-smbus i2c-tools"
 fi
@@ -1682,7 +1693,7 @@ systemctl enable battery-reader.service
 
 if have_package_network; then
     provision_try "apt install failed: gpsd gpsd-tools" \
-        apt-get install -y --no-install-recommends gpsd gpsd-tools
+        install_packages --no-install-recommends gpsd gpsd-tools
 else
     provision_fail "no network: cannot install gpsd gpsd-tools"
 fi

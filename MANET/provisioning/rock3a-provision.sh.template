@@ -476,7 +476,8 @@ rm -Rf /usr/lib/NetworkManager/dispatcher.d/*
 
 # Install optional service selections
 if [ "__INSTALL_MUMBLE__" = "y" ]; then
-		apt install -y sqlite3 mumble-server
+		DEBIAN_FRONTEND=noninteractive apt-get install -y \
+			-o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold sqlite3 mumble-server
 		#make mumble server ini changes
 		sed -i '/ice="tcp -h 127.0.0.1 -p 6502"/s/^#//g' /etc/mumble/mumble-server.ini
 		sed -i 's/icesecretwrite/;icesecretwrite/g' /etc/mumble/mumble-server.ini
