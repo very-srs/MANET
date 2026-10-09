@@ -4,6 +4,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import unittest
+import warnings
 
 MANET = Path(__file__).resolve().parent.parent
 MAN_COMMANDS = (
@@ -54,6 +55,16 @@ class CodingConventionTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 0,
                                  result.stdout + result.stderr)
                 self.assertEqual(result.stderr, '')
+
+    def test_python_compiles_without_warnings(self):
+        # Invalid escapes warn on the nodes' Python 3.13 and will become
+        # errors. Node tools run without -W, so the test enforces it.
+        for path in sorted((MANET / 'node_tools').rglob('*.py')):
+            with self.subTest(path=path.relative_to(MANET)):
+                source = path.read_text(encoding='utf-8')
+                with warnings.catch_warnings():
+                    warnings.simplefilter('error')
+                    compile(source, str(path), 'exec')
 
     def test_node_shell_interpreters(self):
         for directory in ('node_tools', 'networkd-dispatcher', 'udev'):
