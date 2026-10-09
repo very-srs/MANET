@@ -1426,7 +1426,8 @@ the channel lock because its preparation helper takes that lock.
 **Which chunks are taken comes from Alfred, one step removed.** Every node
 publishes its chunk, primary address and provisioned width in its identity
 record (`ipv4_chunk`, `ipv4_address`, `ipv4_chunk_size`, Alfred type 67),
-and `mesh-registry-builder.sh` decodes those into `/tmp/claimed_chunks.txt` as
+and `mesh-registry-builder.sh` decodes those into
+`/run/manet-registry/claimed-chunks.txt` as
 `<chunk>,<mac>,<first-address-integer>,<size>` lines. Allocation and conflict
 detection compare absolute ranges, since chunk numbers depend on local width.
 This script reads that file and never queries Alfred itself. A successful claim
@@ -2049,6 +2050,29 @@ the decoder/schema changes. Every pass still reads both Alfred types and ages
 observations, including tombstones and stale-claim removal. Identical claim
 files keep their inode/mtime; registry display ages remain current.
 
+The claimed-address index shares `/run/manet-registry` with observation and
+decode state. The builder creates its directories on demand, including when
+called by IP discovery instead of the shell entry point. All allocator readers
+use this path; the old `/tmp/claimed_chunks.txt` is never a fallback.
+Services with a private or read-only `/tmp` share the same file. No single
+service owns a `RuntimeDirectory` that could remove shared observation state on
+restart. Reboot clears the cache and normal registry discovery rebuilds it.
+`MESH_CLAIMED_CHUNKS_FILE` overrides the path consistently in the producer,
+allocator and runtime reconciliation, including isolated tests.
+
+`mesh-hosts-update.sh` delegates to `manet_hosts.py`. The timer still runs
+every two minutes, but sorted, deduplicated host/address mappings determine
+whether `/etc/hosts` changes. Peer telemetry timestamps, record order and other
+unrelated fields cannot cause a rewrite. Identical content does not open a
+temporary file, chmod the destination, or log an update. This avoids up to 720
+unnecessary hosts rewrites per day on a node with unchanged peer mappings.
+The helper parses quoted registry assignments without executing shell syntax,
+validates names and IPv4 addresses, and preserves all bytes outside the marked
+block. A `/run` lock serializes refreshes, and the shared configuration writer
+preserves ownership/mode while fsyncing a same-directory replacement and its
+parent directory. Missing/empty snapshots are skipped; malformed markers,
+malformed host assignments and symlink destinations fail without replacing hosts.
+
 `mesh-ip-manager.sh` requests `manet_ip_runtime.py` work from the existing
 channel-agreement process through `manet-runtime-client.sh`. A worker thread
 sleeps in `select` until requested; the main ACS loop keeps its one-second
@@ -2073,7 +2097,7 @@ no polling interval, service-election gate or publication deadline changes.
 - Reads both Alfred types and joins them on the record key.
 - Decodes each message.
 - Writes `/var/run/mesh_node_registry` with all node state.
-- Writes `/tmp/claimed_chunks.txt`, the claimed-chunk index
+- Writes `/run/manet-registry/claimed-chunks.txt`, the claimed-chunk index
   [`mesh-ip-manager.sh`](#network-management) allocates from.
 - Caches identity across cycles: a node whose identity record has not been
   refreshed yet keeps the values from the previous registry rather than
@@ -2590,7 +2614,6 @@ The teardown reloads networkd and reconfigures `end0` only. A full
 `systemctl restart systemd-networkd` would reconfigure `wlan0` and `wlan2` on
 the way past and kick them out of `bat0`, so it is deliberately avoided.
 
-
 ## What actually runs on a node
 
 **Only the contents of `/etc/networkd-dispatcher/<state>.d/` are executed.**
@@ -2608,7 +2631,6 @@ delivered over the air instead of needing a reflash.
 | `carrier` | `/root/networkd-dispatcher/carrier` | no (reference copy) |
 | `off` | `/root/networkd-dispatcher/off` | no (reference copy) |
 | `no-carrier`, `degraded`, `routable` | nothing installs them | **no** |
-
 
 ## Two scripts called `carrier`
 
@@ -2628,7 +2650,6 @@ route manager owns mesh default routes and preserves service VIPs.
 `no-carrier`, `degraded` and `routable` in this directory are three-line wrappers
 around `manet-uplink-dispatch.sh <state>`. Nothing installs them, and their
 states are covered by the `.d/` entries above.
-
 
 ## Adding or changing a hook
 

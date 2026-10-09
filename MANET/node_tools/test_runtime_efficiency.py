@@ -69,6 +69,32 @@ class RegistryCacheTests(unittest.TestCase):
         self.build_registry()
         self.assertEqual(registry.previous_fields(self.registry)[MAC.replace(':', '')]['HOSTNAME'], "mesh-o'neil")
 
+    def test_allocator_and_runtime_read_the_builders_shared_claims(self):
+        self.add_node()
+        expected = self.build_registry()
+        with patch.dict(os.environ, self.env):
+            inputs = runtime.file_inputs(self.root)
+        self.assertEqual(inputs[runtime.CLAIMS_FILE].splitlines(), expected)
+        source = (TOOLS / 'mesh-ip-manager.sh').read_text()
+        assignment = '\n'.join(line for line in source.splitlines()
+                               if line.startswith('CLAIMED_CHUNKS_FILE='))
+        script = assignment + '\ncat "$CLAIMED_CHUNKS_FILE"\n'
+        result = subprocess.run(['bash', '-c', script], env=self.env,
+                                capture_output=True, text=True, timeout=5)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), expected)
+
+    def test_default_runtime_ignores_old_tmp_claims(self):
+        self.add_node()
+        expected = self.build_registry()
+        old = self.root / 'tmp/claimed_chunks.txt'
+        old.parent.mkdir()
+        old.write_text('conflicting old snapshot\n')
+        with patch.dict(os.environ):
+            os.environ.pop('MESH_CLAIMED_CHUNKS_FILE', None)
+            inputs = runtime.file_inputs(self.root)
+        self.assertEqual(inputs[runtime.CLAIMS_FILE].splitlines(), expected)
+
 
 class RuntimeCacheTests(unittest.TestCase):
     def setUp(self):
@@ -179,7 +205,7 @@ class RuntimeCacheTests(unittest.TestCase):
         self.shell_status = 0
         for claim in ('0,02:00:00:00:00:02,169738246,7\n',
                       '0,02:00:00:00:00:02,,0\n'):
-            self.files['tmp/claimed_chunks.txt'] = claim
+            self.files[runtime.CLAIMS_FILE] = claim
             runtime.reconcile()
             self.assertFalse(self.cache.exists())
 
