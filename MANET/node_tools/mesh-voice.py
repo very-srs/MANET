@@ -1748,6 +1748,9 @@ class MeshVoice:
 
         GLib.timeout_add_seconds(state["delay"], self._restart, which)
         state["delay"] = min(state["delay"] * 2, PIPELINE_RETRY_MAX_SEC)
+        if which == "tx":
+            self._tx_ready()
+            self.write_state()
 
     def _flush_pipeline_repeats(self, which, state):
         """Emit the suppressed-repeat tally, if there is one."""
@@ -2373,11 +2376,17 @@ class MeshVoice:
     def _tx_ready(self):
         """Require both the configured address and a device-bound socket."""
         reason = "waiting for IPv4 on %s" % self.cfg.iface
-        if self._bind_ip:
-            reason = "send socket is not bound to %s" % self.cfg.iface
-            try:
-                sock = self.sink.get_property("used-socket")
-                if sock is not None:
+        try:
+            sock = self.sink.get_property("used-socket")
+            if sock is None:
+                fault = self._pipeline_fault.get("tx")
+                if fault and fault["text"]:
+                    reason = "transmit pipeline unavailable: %s" % fault["text"]
+                elif self._bind_ip:
+                    reason = "waiting for transmit pipeline"
+            elif self._bind_ip:
+                reason = "send socket is not bound to %s" % self.cfg.iface
+                try:
                     # GStreamer only warns if SO_BINDTODEVICE fails.
                     with socket.fromfd(Gio.Socket.get_fd(sock), socket.AF_INET,
                                        socket.SOCK_DGRAM) as fd:
@@ -2387,8 +2396,11 @@ class MeshVoice:
                     if (addr == self._bind_ip
                             and device.rstrip(b"\0") == self.cfg.iface.encode()):
                         reason = None
-            except (AttributeError, OSError, GLib.Error):
-                pass
+                except (AttributeError, OSError, GLib.Error):
+                    pass
+        except (AttributeError, OSError, GLib.Error):
+            if self._bind_ip:
+                reason = "transmit pipeline unavailable"
         self._tx_blocked = reason
         if reason is None:
             self._tx_blocked_logged = False
