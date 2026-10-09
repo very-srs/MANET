@@ -87,13 +87,13 @@ refresh_interfaces() {
         local all_ifaces
         all_ifaces="$(cat /var/lib/mesh_if /var/lib/halow_if /var/lib/no_mesh_if 2>/dev/null | tr '\n' ' ')"
         for WLAN in $all_ifaces; do
-            for i in $(seq 1 20); do
+            for i in $(seq 1 10); do
                 [ -d "/sys/class/net/$WLAN" ] && break
-                [ "$i" -eq 20 ] &&
-                    printf '%s%s\n' \
-                        "Warning: $WLAN did not appear in sysfs after 20s, " \
-                        "continuing" >&2
                 sleep 1
+                [ "$i" -eq 10 ] &&
+                    printf '%s%s\n' \
+                        "Warning: $WLAN did not appear in sysfs after 10s, " \
+                        "continuing" >&2
             done
         done
 
@@ -249,17 +249,17 @@ start() {
 
         printf '%s\n' \
             "Waiting for $WLAN netdev (managed by wpa_supplicant_s1g)..."
-        for i in {1..30}; do
+        for i in {1..10}; do
             if ip link show "$WLAN" >/dev/null 2>&1; then
                 ip link set "$WLAN" up 2>/dev/null || true
                 printf '%s\n' "$WLAN exists."
                 break
             fi
-            if [ $i -eq 30 ]; then
-                printf '%s\n' "!! Timed out waiting for $WLAN. Skipping." >&2
+            sleep 1
+            if [ $i -eq 10 ]; then
+                printf '%s\n' "!! Timed out waiting for $WLAN after 10s. Skipping." >&2
                 continue 2
             fi
-            sleep 1
         done
 
         ip link set "$WLAN" mtu 1532 2>/dev/null || true
@@ -312,18 +312,18 @@ start() {
         printf '%s%s\n' \
             "Waiting for $WLAN to be in mesh point mode (managed by " \
             "wpa_supplicant)..."
-        for i in {1..30}; do
+        for i in {1..10}; do
             if iw dev "$WLAN" info 2>/dev/null | grep -q "type mesh point"; then
                 printf '%s\n' "$WLAN is in mesh point mode."
                 break
             fi
-            if [ $i -eq 30 ]; then
+            sleep 1
+            if [ $i -eq 10 ]; then
                 printf '%s%s\n' \
                     "!! Timed out waiting for $WLAN to enter mesh point " \
-                    "mode. Skipping." >&2
+                    "mode after 10s. Skipping." >&2
                 continue 2
             fi
-            sleep 1
         done
 
         sleep 2

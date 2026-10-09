@@ -575,6 +575,7 @@ mkdir -p /var/lib
 # consume these files as live netdev names, so writing desired logical names
 # before udev has renamed anything can make HaLow and non-mesh devices appear
 # swapped. Keep iface_map as an identity map for phys_iface() callers.
+# Target names are saved only immediately before the rename reboot.
 for iface in "${mesh_ifaces[@]}"; do
     printf '%s\n' "$iface" >> /var/lib/mesh_if
     printf '%s\n' "$iface:$iface" >> /var/lib/iface_map
@@ -662,6 +663,32 @@ fi
 # physical card is wlanX). Disable any per-interface service whose target
 # interface isn't currently classified for that role.
 
+# Keep only failures from before radio service changes on the rename boot.
+RADIO_SETUP_BOOT_ID=$(cat /proc/sys/kernel/random/boot_id)
+declare -A rename_failed_units=()
+if [ -s /var/lib/radio-setup-reboot-pending ] &&
+    [ "$(cat /var/lib/radio-setup-reboot-pending)" != "$RADIO_SETUP_BOOT_ID" ]; then
+    while read -r unit rest; do
+        [ -n "$unit" ] || continue
+        rename_failed_units[$unit]=$(systemctl show "$unit" \
+            -p ActiveState -p StateChangeTimestampMonotonic 2>/dev/null)
+    done < <(systemctl list-units --failed --plain --no-legend \
+        'wpa_supplicant@*.service' 'wpa_supplicant-s1g-*.service' \
+        hostapd.service 2>/dev/null)
+fi
+rm -f /var/lib/radio-setup-reboot-pending
+
+reset_rename_failures() {
+    local unit state
+    for unit in "${!rename_failed_units[@]}"; do
+        state=$(systemctl show "$unit" \
+            -p ActiveState -p StateChangeTimestampMonotonic 2>/dev/null) || continue
+        [[ "$state" == *ActiveState=failed* ]] || continue
+        [ "$state" = "${rename_failed_units[$unit]}" ] || continue
+        systemctl reset-failed "$unit" 2>/dev/null || true
+    done
+}
+
 current_mesh="$(cat /var/lib/mesh_if 2>/dev/null | tr '\n' ' ')"
 current_halow="$(cat /var/lib/halow_if 2>/dev/null | tr '\n' ' ')"
 
@@ -741,12 +768,14 @@ iface_mac() {
     cat "/sys/class/net/$1/address" 2>/dev/null
 }
 
+declare -A pinned_names=()
 write_link_file() {
     local target_name="$1"
-    local mac="$2"
+    local iface="$2" mac
+    mac=$(iface_mac "$iface")
     [[ -z "$mac" ]] && return
 
-cat <<-EOF > /etc/systemd/network/10-${target_name}.link
+cat <<-EOF > /etc/systemd/network/10-${target_name}.link || return 1
 [Match]
 MACAddress=$mac
 Type=wlan
@@ -754,14 +783,15 @@ Type=wlan
 [Link]
 Name=$target_name
 EOF
+    pinned_names[$iface]="$target_name"
     printf '%s\n' " > Pinning $target_name to MAC $mac"
 }
 
-# Mesh interfaces are already ordered: [0]=2.4GHz, [1]=5GHz
-[ "${#mesh_ifaces[@]}" -gt 0 ] && write_link_file wlan0 "$(iface_mac "${mesh_ifaces[0]}")"
-[ "${#mesh_ifaces[@]}" -gt 1 ] && write_link_file wlan1 "$(iface_mac "${mesh_ifaces[1]}")"
-[ "${#halow_ifaces[@]}" -gt 0 ] && write_link_file wlan2 "$(iface_mac "${halow_ifaces[0]}")"
-[ "${#nonmesh_ifaces[@]}" -gt 0 ] && write_link_file wlan3 "$(iface_mac "${nonmesh_ifaces[0]}")"
+# Mesh interfaces are ordered by detected band; absent bands have no entry.
+[ "${#mesh_ifaces[@]}" -gt 0 ] && write_link_file wlan0 "${mesh_ifaces[0]}"
+[ "${#mesh_ifaces[@]}" -gt 1 ] && write_link_file wlan1 "${mesh_ifaces[1]}"
+[ "${#halow_ifaces[@]}" -gt 0 ] && write_link_file wlan2 "${halow_ifaces[0]}"
+[ "${#nonmesh_ifaces[@]}" -gt 0 ] && write_link_file wlan3 "${nonmesh_ifaces[0]}"
 printf '%s\n' "MESH_NAME=\"$MESH_NAME\"" > /etc/default/mesh
 
 
@@ -778,10 +808,9 @@ check_rename() {
     needs_rerun=1
 }
 
-[ "${#mesh_ifaces[@]}" -gt 0 ] && check_rename wlan0 "${mesh_ifaces[0]}"
-[ "${#mesh_ifaces[@]}" -gt 1 ] && check_rename wlan1 "${mesh_ifaces[1]}"
-[ "${#halow_ifaces[@]}" -gt 0 ] && check_rename wlan2 "${halow_ifaces[0]}"
-[ "${#nonmesh_ifaces[@]}" -gt 0 ] && check_rename wlan3 "${nonmesh_ifaces[0]}"
+for iface in "${!pinned_names[@]}"; do
+    check_rename "${pinned_names[$iface]}" "$iface"
+done
 
 if [ "$needs_rerun" -eq 1 ]; then
     echo " > Interface renames staged. Scheduling post-reboot re-run."
@@ -790,7 +819,7 @@ if [ "$needs_rerun" -eq 1 ]; then
     # this unit also covers renames requested by a later manual setup run.
     if provision_try "cannot schedule post-rename setup" \
         systemctl enable radio-setup-run-once.service; then
-        touch /var/lib/radio-setup-reboot-pending
+        printf '%s\n' "$RADIO_SETUP_BOOT_ID" > /var/lib/radio-setup-reboot-pending
     fi
 else
     echo " > Interface names already match desired layout, no rename needed"
@@ -1829,6 +1858,7 @@ systemctl restart manet-mesh-power.service || \
 
 echo " > restarting alfred..."
 systemctl restart alfred.service
+reset_rename_failures
 
 sleep 2
 networkctl
@@ -1840,17 +1870,51 @@ if [ -x /usr/local/bin/manet-mt7916-setup.sh ]; then
     provision_try "MT7916 firmware setup failed" /usr/local/bin/manet-mt7916-setup.sh
 fi
 
-if [ -f /var/lib/radio-setup-reboot-pending ]; then
-    rm -f /var/lib/radio-setup-reboot-pending
+declare -A runtime_roles=()
+stage_rename_roles() {
+    local role iface target contents
+    for role in mesh_if mesh_24_if mesh_5_if halow_if no_mesh_if iface_map ap_interface; do
+        contents=$(cat "/var/lib/$role") || return 1
+        runtime_roles[$role]=$contents
+    done
+    for role in "${!runtime_roles[@]}"; do
+        {
+            for iface in ${runtime_roles[$role]}; do
+                iface=${iface%%:*}
+                # Unpinned extra radios keep their runtime names.
+                target=${pinned_names[$iface]:-$iface}
+                if [ "$role" = iface_map ]; then
+                    printf '%s\n' "$target:$target" || return 1
+                else
+                    printf '%s\n' "$target" || return 1
+                fi
+            done
+        } > "/var/lib/$role" || return 1
+    done
+}
+
+restore_runtime_roles() {
+    local role
+    for role in "${!runtime_roles[@]}"; do
+        {
+            [ -z "${runtime_roles[$role]}" ] || printf '%s\n' "${runtime_roles[$role]}"
+        } > "/var/lib/$role"
+    done
+}
+
+if [ "$needs_rerun" -eq 1 ] && [ -f /var/lib/radio-setup-reboot-pending ]; then
     echo ""
     echo "=================================================="
     echo " Interface renames pending - rebooting in 5s"
     echo " radio-setup will re-run automatically after boot"
     echo "=================================================="
     sleep 5
-    if provision_try "reboot failed" reboot; then
+    if provision_try "cannot stage renamed radio roles" stage_rename_roles &&
+        provision_try "reboot failed" reboot; then
         exit 0
     fi
+    restore_runtime_roles
+    rm -f /var/lib/radio-setup-reboot-pending
 fi
 
 # Start the services enabled above on this boot too. A clean final setup run
