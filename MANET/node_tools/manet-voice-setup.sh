@@ -29,9 +29,11 @@ if [ -n "$missing" ]; then
     fi
     printf '%s\n' "installing:$missing"
     export DEBIAN_FRONTEND=noninteractive
-    if ! apt-get install -y --no-install-recommends $missing; then
+    if ! apt-get install -y --no-install-recommends \
+        -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold $missing; then
         apt-get update -y || true
-        if ! apt-get install -y --no-install-recommends $missing; then
+        if ! apt-get install -y --no-install-recommends \
+            -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold $missing; then
             echo "apt failed; leaving setup enabled to retry next boot"
             exit 0
         fi

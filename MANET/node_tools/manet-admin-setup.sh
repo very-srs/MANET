@@ -8,8 +8,10 @@ if python3 -c 'from cryptography.hazmat.primitives.ciphers.aead import AESGCM; f
 fi
 
 export DEBIAN_FRONTEND=noninteractive
-if ! apt-get install -y --no-install-recommends python3-cryptography; then
+if ! apt-get install -y --no-install-recommends \
+    -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold python3-cryptography; then
     apt-get update
-    apt-get install -y --no-install-recommends python3-cryptography
+    apt-get install -y --no-install-recommends \
+        -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold python3-cryptography
 fi
 python3 -c 'from cryptography.hazmat.primitives.ciphers.aead import AESGCM; from cryptography.hazmat.primitives.kdf.scrypt import Scrypt'
