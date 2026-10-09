@@ -92,3 +92,67 @@ deleted before that image first boots, reflash with a retained release.
 The standalone Windows download is named `Flash-a-Radio.cmd` because GitHub
 renames filenames containing spaces. It creates a working copy named
 `Flash a Radio.cmd`, matching the launcher inside the flasher ZIP and checkout.
+
+## One-time CM4 upgrade from 0.541
+
+[`upgrade-0.541-to-0.559.py`](upgrade-0.541-to-0.559.py) is a standalone script
+for a CM4 on the project's Debian/Raspberry Pi OS 13 image. Copy this one file
+to the radio. It targets the existing stable **0.559** release; it does not use
+`main`, select a prerelease, or publish a new release.
+
+With Ethernet internet access and steady power, check the node first:
+
+```bash
+sudo python3 upgrade-0.541-to-0.559.py --check
+```
+
+This downloads the pinned tools archive, checks its SHA-256, checks installed
+paths and space using the matching updater, and checks the DHCP rules against
+the running kernel. It writes only a private download directory under
+`/var/lib/manet-upgrade-0.559`; it does not install packages or activate services.
+
+Run the upgrade under systemd so an SSH disconnection cannot stop it:
+
+```bash
+sudo systemd-run --unit=manet-upgrade-0559 --collect \
+  /usr/bin/python3 "$(realpath upgrade-0.541-to-0.559.py)"
+sudo journalctl -fu manet-upgrade-0559
+```
+
+Wait for **Upgrade complete: 0.559**, then stop following the journal with
+Ctrl-C and run `sudo reboot`. The reboot starts the other newly enabled units.
+After reconnecting, check:
+
+```bash
+head -n 1 /etc/manet_version.txt
+systemctl is-active node-manager mesh-status mesh-channel-agreement one-shot-time-sync
+```
+
+The script obtains the three matching updater files from the verified tools
+archive. The 0.559 updater installs the encryption dependency, retires obsolete
+MANET units, selects the manager from `acs=`, and records success only after its
+service checks pass. Subsequent normal updates use `sudo node-update.sh`.
+
+The script saves a root-only configuration backup at
+`/var/lib/manet-upgrade-0.559/configuration-before-upgrade.tar.gz`. This contains
+passwords and keys; keep it private. It is a configuration backup, not a complete
+rollback image. The first backup is retained on retries. The upgrade preserves
+mesh/AP settings, existing HaLow channels, network definitions and operator data.
+It does not run `radio-setup.sh`, change boot files, or upgrade kernel/modules.
+Preserved HaLow settings must match the intended peers; this update does not
+retune an older radio to the defaults used by a freshly flashed radio.
+
+On failure, retain power and internet access, read the reported error, and rerun
+the same script after correcting it. Do not delete the pending update marker.
+The 0.559 updater requires a manual retry after interruption; it does not contain
+the newer automatic offline recovery work. A different OS version or an update
+already managed by that newer recovery system is refused before installation.
+
+Validation uses the actual published 0.559 archive in an isolated filesystem
+with a 0.541 version, copied manager, old units and preserved configuration. It
+checks installation, backup retention, activation failure and retry. Service and
+APT calls are simulated in that test. The same tests pass on the bench CM4, and
+a check-only run using a temporary cache passed against its real filesystem and
+kernel, with its newer installed version left unchanged. This is not a physical
+0.541 upgrade/reboot test. The on-node `--check` handles several compatibility checks on the recipient's
+actual kernel and filesystem, but cannot prove radio connectivity after reboot.
