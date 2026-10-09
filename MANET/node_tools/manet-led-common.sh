@@ -68,7 +68,7 @@ led_off() {
     led_set 0 0 0
     led_sleep 0.05
     # Releasing a GPIO does not guarantee its subsequent electrical state.
-    # The harness must provide an inactive bias; verify this on the bench.
+    # The harness must provide an inactive bias. Verify this on the bench.
 }
 
 get_peer_count() {

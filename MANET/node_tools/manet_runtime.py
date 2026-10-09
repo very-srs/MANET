@@ -27,8 +27,8 @@ class Helpers:
 
     def syncthing_id(self):
         from manet_ids import bytes_to_syncthing_id
-        # Syncthing prefers the legacy config when it exists; current installs
-        # otherwise use XDG_STATE_HOME. Match the provisioned radio account.
+        # Syncthing prefers an existing legacy config, else XDG_STATE_HOME.
+        # Match the provisioned radio account.
         paths = [Path(os.environ['MANET_SYNCTHING_CERT'])] if 'MANET_SYNCTHING_CERT' in os.environ else [
             Path('/home/radio/.config/syncthing/cert.pem'),
             Path('/home/radio/.local/state/syncthing/cert.pem')]
@@ -40,7 +40,7 @@ class Helpers:
             key = (str(path), info.st_dev, info.st_ino, info.st_mtime_ns, info.st_ctime_ns, info.st_size)
             if self.cert_cache is None or self.cert_cache[0] != key:
                 # https://docs.syncthing.net/dev/device-ids.html : SHA256(DER),
-                # base32 and Luhn check digits; no private key or PAM session.
+                # base32 and Luhn check digits. No private key or PAM session.
                 der = ssl.PEM_cert_to_DER_cert(path.read_text())
                 self.cert_cache = (key, bytes_to_syncthing_id(hashlib.sha256(der).digest()))
             return self.cert_cache[1]
@@ -71,7 +71,7 @@ class Helpers:
 
 
 def serve(directory, helpers, stop=None):
-    """One blocking request loop; also callable with a fake handler in tests."""
+    """Run one blocking request loop with the supplied handler."""
     directory = Path(directory)
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
     info = directory.stat()

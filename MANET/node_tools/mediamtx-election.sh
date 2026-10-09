@@ -1,10 +1,6 @@
 #!/bin/bash
-#
-# mediamtx-election.sh
-# This script runs an election based on mesh centrality (TQ) to determine
-# which node should host the MediaMTX service. It assigns static VIPs
-# (IPv4 and IPv6), updates the config, and manages the service.
-#
+# Elect a MediaMTX server by mean mesh throughput. Assign IPv4/IPv6 VIPs,
+# update configuration and manage the service.
 
 # --- Configuration ---
 REGISTRY_STATE_FILE="/var/run/mesh_node_registry"
@@ -14,14 +10,13 @@ CONTROL_IFACE="br0"
 MY_MAC=$(cat "/sys/class/net/${CONTROL_IFACE}/address" 2>/dev/null || true)
 MTX_IPV6_SCRIPT="/usr/local/bin/mtx-ip.sh"
 
-# Incumbent bias: current leader gets this many TQ points added to their score.
-# Prevents service migration due to normal TQ fluctuation.
+# The shared ranker adds a 10 Mbit/s incumbent bias to reduce service churn.
 
 log() {
     printf '%s\n' "MEDIAMTX-ELECTION: $1" | systemd-cat -t mediamtx-election
 }
 
-# Function to get the second usable IP address from the CIDR (our reserved VIP)
+# Return the second usable CIDR address, reserved for MediaMTX.
 get_mediamtx_ipv4_vip() {
     local CIDR="$1"
     local CALC_OUTPUT
@@ -39,8 +34,7 @@ get_mediamtx_ipv4_vip() {
 }
 
 # --- Single run at a time ---
-# The node manager starts elections in the background; an overlapping run could
-# add and remove the VIP or restart the service underneath this one.
+# Serialize background elections to avoid overlapping VIP and service changes.
 LOCK_FILE="${MEDIAMTX_ELECTION_LOCK:-/var/run/mediamtx-election.lock}"
 exec 200>"$LOCK_FILE"
 if ! flock -n 200; then
@@ -82,7 +76,7 @@ MEDIAMTX_IPV4_VIP=$(get_mediamtx_ipv4_vip "$IPV4_NETWORK")
 MEDIAMTX_IPV6_VIP_WITH_MASK=$("$MTX_IPV6_SCRIPT") # e.g., fd5a:..::64/128
 MEDIAMTX_IPV6_VIP=${MEDIAMTX_IPV6_VIP_WITH_MASK%/*} # Just the address part
 
-#Normalize IPv6 to compressed form (remove :0000: before ::) ***
+# Normalize IPv6 to compressed form (remove :0000: before ::).
 MEDIAMTX_IPV6_VIP=$(printf '%s\n' "$MEDIAMTX_IPV6_VIP" | sed 's/:0000::/::/g')
 MEDIAMTX_IPV6_VIP_WITH_MASK="${MEDIAMTX_IPV6_VIP}/128"
 
@@ -112,7 +106,7 @@ fi
 # --- Decide and Act ---
 if [ -z "$BEST_CANDIDATE_MAC" ]; then
     log "No suitable candidates found in registry."
-    # Ensure service is stopped and VIPs removed if we previously held them
+    # Stop the service and remove any locally held VIPs.
     if ip addr show dev "$CONTROL_IFACE" | grep -q "inet $MEDIAMTX_IPV4_VIP/"; then
         log "Removing IPv4 VIP."
         ip addr del "$IPV4_VIP_WITH_MASK" dev "$CONTROL_IFACE" 2>/dev/null
@@ -128,10 +122,10 @@ if [ -z "$BEST_CANDIDATE_MAC" ]; then
     systemctl reset-failed "$MEDIAMTX_SERVICE_NAME" 2>/dev/null
 
 elif [ "$MY_MAC" == "$BEST_CANDIDATE_MAC" ]; then
-    # --- I AM THE LEADER ---
+    # Local leader
     log "Won election (TQ: $HIGHEST_TQ)."
 
-    # Check if we already have both VIPs assigned
+    # Check whether both VIPs are assigned locally.
     HAS_IPV4_VIP=false
     HAS_IPV6_VIP=false
 
@@ -160,15 +154,14 @@ elif [ "$MY_MAC" == "$BEST_CANDIDATE_MAC" ]; then
          ip addr add "$MEDIAMTX_IPV6_VIP_WITH_MASK" dev "$CONTROL_IFACE" 2>/dev/null || log "IPv6 VIP already exists or failed to add"
     fi
 
-    # Determine if we were already the leader (had both VIPs)
+    # Both VIPs indicate this node already holds leadership.
     if [ "$HAS_IPV4_VIP" = true ] && [ "$HAS_IPV6_VIP" = true ]; then
         WAS_ALREADY_LEADER=true
     else
         WAS_ALREADY_LEADER=false
     fi
 
-    # Update config and start service ONLY if we weren't already the leader
-    # or if the service isn't currently running (covers initial startup)
+    # Update config and start service on leadership gain or if stopped.
     if [ "$WAS_ALREADY_LEADER" = false ] || ! systemctl is-active --quiet "$MEDIAMTX_SERVICE_NAME"; then
         if command -v yq &> /dev/null; then
             log "Updating $MEDIAMTX_CONFIG_FILE listen addresses..."
@@ -184,9 +177,9 @@ elif [ "$MY_MAC" == "$BEST_CANDIDATE_MAC" ]; then
     fi
 
 else
-    # --- I AM NOT THE LEADER ---
+    # Remote leader
     log "Lost election to ${BEST_CANDIDATE_MAC}."
-    # Ensure service is stopped and VIPs removed if we previously held them
+    # Stop the service and remove any locally held VIPs.
     if ip addr show dev "$CONTROL_IFACE" | grep -q "inet $MEDIAMTX_IPV4_VIP/"; then
         log "Removing IPv4 VIP."
         ip addr del "$IPV4_VIP_WITH_MASK" dev "$CONTROL_IFACE" 2>/dev/null

@@ -1,16 +1,11 @@
 #!/usr/bin/env python3
-"""Validate a rejoining radio's channel against the mesh, using the registry.
+"""Validate a rejoining radio's channel against registry observations.
 
-A radio that spent time as the EUD access point (or was off) comes back into
-the mesh on a channel chosen from an authenticated source: the stored static
-plan, or a committed ACS destination (else the anchor). The registry then says
-whether the rest of the connected mesh is actually using that channel: every
-peer publishes its radios' role, state and channel in INTERFACES_JSON.
-
-This module only reports. Telemetry is unauthenticated Alfred data and mesh
-membership alone must not authorize a control change, so nothing here picks
-or persists a channel. A 'conflict' tells the operator to re-apply the channel
-through the authenticated path.
+After AP use or shutdown, select channels through the authenticated path:
+the stored static plan or committed ACS destination, else the anchor.
+Compare fresh peers' INTERFACES_JSON roles, states and channels. Alfred
+telemetry only corroborates, never authorizes a move. This module neither
+picks nor persists channels. A conflict requires authenticated reapplication.
 """
 
 import json
@@ -24,7 +19,7 @@ _ENTRY = re.compile(r"^NODE_([0-9A-Fa-f]+)_([A-Z0-9_]+)='((?:[^']|'\\'')*)'$")
 
 
 def load_registry(path='/var/run/mesh_node_registry'):
-    """Registry file -> {node_id: {FIELD: value}}; an unreadable file is empty."""
+    """Read {node_id: {FIELD: value}} from a registry, or {} if unreadable."""
     nodes = {}
     try:
         with open(path) as source:
@@ -86,7 +81,7 @@ def peer_frequencies(band, nodes, own_macs):
         macs = {m.strip().lower() for m in
                 (node.get('MAC_ADDRESSES', '') + ',' + node.get('MAC_ADDRESS', '')).split(',')
                 if m.strip()}
-        # The registry key is the publisher's primary MAC, so our own record is
+        # The registry key is the publisher's primary MAC. This node's record is
         # recognized even if its alias fields are missing.
         if macs & own or str(key).lower() in own_keys or manet_registry.node_state(node) != 'ACTIVE' or _touring(node):
             continue

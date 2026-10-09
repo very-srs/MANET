@@ -1,12 +1,8 @@
 #!/bin/bash
-# manet-ipcalc.sh
-# Drop-in replacement for the Perl ipcalc as used by the mesh scripts.
-# Prints the fields they parse (awk '/HostMin/ {print $2}' etc.) in the
-# same column layout. The Perl ipcalc costs ~1.5s of CPU per call on a
-# CM4, and mesh-ip-manager + the election scripts call it every
-# node-manager cycle: this script does the same math in a few ms.
-#
-# Usage: manet-ipcalc.sh <a.b.c.d/prefix>   (prefix 1-30)
+# Print the Perl ipcalc fields and column layout used by mesh scripts
+# (e.g. awk '/HostMin/ {print $2}'). On CM4 this takes a few ms per call,
+# compared with about 1.5 s CPU for Perl ipcalc on each node-manager cycle.
+# Usage: manet-ipcalc.sh <a.b.c.d/prefix> (prefix 1-30)
 
 usage() {
     printf '%s\n' 'usage: manet-ipcalc.sh a.b.c.d/prefix' >&2

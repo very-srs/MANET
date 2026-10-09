@@ -1,23 +1,18 @@
 #!/usr/bin/env python3
-"""
-MANET Node Status Web Server
------------------------------
-Serves mesh network status and topology information on port 8080.
+"""Serve mesh status and topology on port 8080 by default.
 
-Access (everything here is restricted to localhost + the EUD/mesh subnet;
-nothing is reachable from the uplink/LAN side):
-  /          - Status page, no password
-  /api/data  - JSON data endpoint, no password
-  /manage/*  - Management UI, requires the provisioned admin password.
-               Routes come from manet_manage.py, mixed into this handler.
-               There is no second listening port.
-  /api/admin/* - Mesh config staging/apply, requires the same password.
-  /admin     - Legacy path, redirects into /manage/
+Access is restricted to localhost and EUD/mesh clients, excluding uplink/LAN:
+  /            - Status page, no password
+  /api/data    - JSON data endpoint, no password
+  /manage/*    - Management UI, requires the provisioned admin password
+                 manet_manage.py supplies routes on the same listening port.
+  /api/admin/* - Mesh config staging/apply, requires the same password
+  /admin       - Redirects to /manage/
 
 Reads:
-  /etc/mesh.conf                - Node configuration
-  /etc/mesh_ipv4_state          - Current IP state
-  /var/run/mesh_node_registry   - Peer registry (built by mesh-registry-builder.sh)
+  /etc/mesh.conf              - Node configuration
+  /etc/mesh_ipv4_state        - Current IP state
+  /var/run/mesh_node_registry - Peers from mesh-registry-builder.sh
 
 Calls:
   batctl o   - Originator throughput table
@@ -25,7 +20,7 @@ Calls:
   batctl gwl - Gateway list
 """
 
-# Keep the legacy CLI entry point light; the web server is not telemetry plumbing.
+# Handle --dump-interfaces before importing the web server dependencies.
 import sys
 if __name__ == '__main__' and len(sys.argv) > 1 and sys.argv[1] == '--dump-interfaces':
     import json
@@ -47,9 +42,8 @@ import hashlib
 import html
 from urllib.parse import urlparse, parse_qs, quote
 
-# Radio state is read here for display only. Every change goes through the
-# management UI and is staged over Alfred, which mesh-radio-state.py applies --
-# this server has no local apply path of its own.
+# Mesh radio changes use the management UI's Alfred staging path.
+# mesh-radio-state.py applies them on each node.
 from manet_manage import ManageRoutes
 from manet_peer_radios import interfaces_for_telemetry, peer_status_panel
 from manet_recovery_status import recovery_status, RECOVERY_JS
@@ -75,22 +69,20 @@ from manet_radio import (
 REGISTRY_FILE   = "/var/run/mesh_node_registry"
 MESH_CONF_FILE  = "/etc/mesh.conf"
 ADMIN = AdminTransport()
-# Seconds before /run/gps_status.json counts as stale. gps-reader polls every 5 s;
-# node-manager uses the same budget so the UI and the mesh agree on the position.
+# GPS freshness budget in seconds, shared with node-manager.
+# gps-reader polls every 5 s.
 GPS_FIX_MAX_AGE = 60
 MESH_STATE_FILE = "/etc/mesh_ipv4_state"
 PORT            = 8080
 REFRESH_MS      = 15000   # Status page polling interval (ms)
 PERF_AUTH_COOKIE = 'manet_perf_auth'
-# The management UI lives behind this prefix on port 80, served in-process by
-# the ManageRoutes mixin. Nothing reaches it without the password cookie.
+# ManageRoutes serves this prefix on the status server's listening port.
+# Management routes require the password cookie.
 MANAGE_PREFIX = '/manage'
-# The hexagon badge is line art with no fill, so it needs two inks: near-black
-# strokes on light themes, white strokes on dark. Same artwork, same geometry.
+# The unfilled hexagon uses dark strokes on light themes and white on dark.
 FER_LOGO_DARK_INK_FILE  = '/usr/local/share/manet/fer-logo-black.png'
 FER_LOGO_LIGHT_INK_FILE = '/usr/local/share/manet/fer-logo-white.png'
-# Served under /assets/<name>, extension optional, so swapping a logo between
-# svg and png only means changing the paths above.
+# /assets/<name> accepts an optional extension for either SVG or PNG.
 FER_LOGO_ASSETS = {
     'fer-logo':       FER_LOGO_DARK_INK_FILE,
     'fer-logo-black': FER_LOGO_DARK_INK_FILE,
@@ -99,12 +91,7 @@ FER_LOGO_ASSETS = {
 
 
 def logo_asset_token():
-    """Cache-busting token for logo URLs.
-
-    Logo assets are served with a one-hour cache. Without a token in the URL,
-    replacing a logo leaves browsers showing the previous artwork from cache
-    until it expires, because the URL never changes.
-    """
+    """Return a logo URL token that invalidates the one-hour cache."""
     parts = []
     for path in (FER_LOGO_DARK_INK_FILE, FER_LOGO_LIGHT_INK_FILE):
         try:
@@ -208,13 +195,13 @@ def norm_mac(mac):
     return mac.lower().replace('-', ':').strip()
 
 def run_batctl_originators():
-    """Parse `batctl o` into two structures:
-      mbps_map: {mac -> best throughput}  (indexes both orig + nexthop MACs)
-      orig_map: {orig_mac -> {mbps, nexthop, iface}}  (best path per originator)
+    """Parse `batctl o` into throughput and best-path maps.
 
-    The mesh runs BATMAN_V, whose metric is throughput in Mbit/s: batctl
-    prints it as `%u.%u` (originators.c), so 43.2 means 43.2 Mbit/s. It is
-    carried through as-is; there is no 0-255 link quality here to scale to.
+      mbps_map: {mac -> best throughput}, indexed by originator and nexthop
+      orig_map: {orig_mac -> {mbps, nexthop, iface}}, best path per originator
+
+    BATMAN_V reports Mbit/s as `%u.%u` (originators.c): 43.2 means 43.2 Mbit/s.
+    Preserve this metric without scaling it to a 0-255 link quality.
     """
     mbps_map = {}
     orig_map = {}  # orig_mac -> {'mbps': float, 'nexthop': str, 'iface': str}
@@ -314,10 +301,11 @@ def get_my_hostname():
 # Local Node Detail Gathering
 
 def get_battery():
-    """Return battery dict from battery-reader.py output, or None.
+    """Return a battery dict from battery-reader.py or sysfs, or None.
 
-    Dict keys: percentage, voltage_v, current_ma, power_w, charging, status, timestamp.
-    Falls back to /sys/class/power_supply capacity (int) for backwards compat.
+    Battery data keys: percentage, voltage_v, current_ma, power_w, charging,
+    status, timestamp. The sysfs fallback reads an integer capacity into
+    percentage from /sys/class/power_supply.
     """
     try:
         with open('/run/battery_status.json') as f:
@@ -326,7 +314,7 @@ def get_battery():
             return data
     except Exception:
         pass
-    # Fallback: kernel power_supply sysfs (only present when I2C driver registers the device)
+    # The kernel power_supply fallback requires a registered I2C device.
     for root, dirs, files in os.walk('/sys/class/power_supply'):
         for d in dirs:
             cap_path  = os.path.join(root, d, 'capacity')
@@ -396,14 +384,13 @@ def resolve_hop_count(node_id, node_by_id, orig_map, mac_to_node_id, visited=Non
     return via_hops + 1
 
 def get_interfaces():
-    """
-    Return list of interface dicts with role, health, and fault details.
+    """Return interface dicts with role, health, and fault details.
 
     Health values:
-      'ok'     : up and doing its job
-      'warn'   : up but something is degraded (e.g. wpa_supplicant stopped)
-      'fault'  : interface is DOWN or not participating when it should be
-      'info'   : informational (bridge, bat0, loopback: no health expectation)
+      'ok'    : up and functioning
+      'warn'  : up but degraded (e.g. wpa_supplicant stopped)
+      'fault' : down or not participating when expected
+      'info'  : bridge, bat0, or loopback, with no health expectation
     """
     ifaces = []
     try:
@@ -502,14 +489,14 @@ def get_interfaces():
                 iname, cap, iw_info[iname].get('txpower_dbm', '')
             )
 
-    # HaLow (morse_usb): iw can report a regular Wi-Fi channel; Morse driver is the runtime source.
+    # HaLow uses Morse runtime data because iw may report a Wi-Fi channel.
     for iname in list(iw_info.keys()):
         if 'morse' in iw_info[iname].get('driver', ''):
             iw_info[iname].update(get_halow_driver_info(iname))
 
     # bat0 slaves (active interfaces per batctl)
     bat0_slaves_active   = set()   # confirmed active in batctl
-    bat0_slaves_inactive = set()   # listed but NOT active
+    bat0_slaves_inactive = set()   # Listed but inactive
     try:
         bat_r = subprocess.run(['batctl', 'if'], capture_output=True, text=True, timeout=5)
         for line in bat_r.stdout.splitlines():
@@ -670,7 +657,7 @@ def get_interfaces():
                 health = 'warn'
                 faults.append(f'Not in bat0 and not an AP: check wpa_supplicant')
 
-        # bat0/br0 report operstate=UNKNOWN (virtual iface); derive from UP flag instead
+        # bat0/br0 report operstate=UNKNOWN. Use their UP flag for health.
         display_state = state
         if state == 'UNKNOWN' and name in ('bat0', 'br0'):
             display_state = 'UP' if 'UP' in flags else 'DOWN'
@@ -700,9 +687,7 @@ def get_interfaces():
     return ifaces
 
 def get_connected_euds():
-    """
-    Return list of active {mac, ip, hostname} from dnsmasq leases.
-    """
+    """Return active {mac, ip, hostname} entries from dnsmasq leases."""
     euds = []
     now = int(time.time())
     lease_paths = [
@@ -735,9 +720,7 @@ def get_connected_euds():
     return euds
 
 def get_running_services():
-    """
-    Return dict of service_name -> bool for elected/running mesh services.
-    """
+    """Return service_name -> bool for elected/running mesh services."""
     checks = {
         'mumble':   ['mumble-server', 'murmur', 'mumble'],
         'mediamtx': ['mediamtx', 'rtsp-server'],
@@ -801,11 +784,10 @@ def enrich_interfaces_with_registry_mcs(ifaces, node_data):
 _POWER_CACHE = {'at': float('-inf'), 'data': {'available': False}}
 
 def get_power_status():
-    """Throttling / under-voltage state, from manet-power-status.sh --json.
+    """Return cached throttling/under-voltage state from manet-power-status.sh.
 
-    The decoding lives in the shell script because the motd banner needs it
-    too, and one reading of the bitmask is enough for the whole node. Cached
-    briefly: every open dashboard polls this, and the answer changes slowly.
+    The shell script also supplies the MOTD bitmask decoding. Cache briefly
+    because every dashboard polls and power state changes slowly.
     """
     now = time.monotonic()
     if now - _POWER_CACHE['at'] < 10:
@@ -846,10 +828,8 @@ def assemble_local_data():
 
     ifaces = enrich_interfaces_with_registry_mcs(ifaces, my_node)
 
-    # GPS: read directly from gps-reader output for freshness; fall back to registry.
-    # gps-reader stamps every write, so a frozen timestamp means it died or hung
-    # while still holding a fix. Presenting that position as current is worse than
-    # showing none, so a stale file is treated the same as no fix.
+    # Read GPS directly from gps-reader, falling back to the registry.
+    # Each write updates its timestamp. Treat a stale file as no fix.
     gps = {'available': False, 'lat': '', 'lon': '', 'alt': ''}
     try:
         with open('/run/gps_status.json') as _gf:
@@ -1155,7 +1135,7 @@ def assemble_status_data():
                 continue
 
             nexthop = best_entry['nexthop']
-            # Is nexthop one of this node's own MACs? -> direct
+            # A nexthop matching this node's MAC is a direct link.
             if nexthop in node_all_macs or node['is_direct']:
                 edges.append({
                     'source': self_node['id'],
@@ -1175,8 +1155,7 @@ def assemble_status_data():
                     'mbps':   node['mbps'],
                 })
 
-        # Also add edges between non-self nodes where we can infer adjacency:
-        # if node A routes to node C via node B, we know B->C exists
+        # Infer B->C adjacency when A routes to C through B.
         inferred = set()
         for edge in list(edges):
             if edge['type'] == 'multihop' and edge['via']:
@@ -2661,14 +2640,12 @@ def authenticated_config_acks():
 
 
 def read_rollback_state():
-    """Whether this node has a config rollback armed, and until when.
+    """Return whether config rollback is armed and its deadline.
 
-    Written by mesh-config-rollback.sh as shell assignments; read rather than
-    sourced, because it is only ever consumed here for display.
-
-    The deadline is on the boot clock of the boot named by BOOT_ID, matching
-    the controller: after a first reboot it re-arms the full grace on its
-    next check, after a second it decides at once.
+    Parse mesh-config-rollback.sh assignments as display data without sourcing.
+    The deadline uses the boot clock identified by BOOT_ID. The controller
+    re-arms the full grace at its next check after one reboot and decides
+    immediately after a second reboot.
     """
     state = load_kv_file(ROLLBACK_STATE_FILE)
     if not state:
@@ -2758,7 +2735,7 @@ def asset_content_type(path):
     return ASSET_CONTENT_TYPES.get(ext, 'application/octet-stream')
 
 def logo_asset_file(url_path):
-    """Map /assets/fer-logo-white[.png|.svg] to the file we actually ship."""
+    """Map /assets/fer-logo-white[.png|.svg] to the installed file."""
     if not url_path.startswith('/assets/'):
         return None
     name = os.path.splitext(url_path[len('/assets/'):])[0]
@@ -2783,8 +2760,7 @@ def send_file_response(handler, path, content_type):
 def render_perf_auth_page(next_path='/', error=''):
     safe_next = html.escape(next_path, quote=True)
     logo_v = logo_asset_token()
-    # A node that came through provisioning always has admin_password. If one
-    # somehow doesn't, say so instead of rejecting every password silently.
+    # Report a missing provisioned admin_password before accepting a login.
     if not get_provisioned_manage_password():
         intro = ('No management password is set on this node. Add '
                  '<code>admin_password=&lt;password&gt;</code> to /etc/mesh.conf '
@@ -2998,8 +2974,7 @@ class MeshHandler(RequestLimits, ManageRoutes, http.server.BaseHTTPRequestHandle
         self.wfile.write(b'Forbidden')
 
     def send_401_json(self, error='Management password required'):
-        """Unauthenticated XHR from the management UI: the page turns this
-        into a bounce back to the login form rather than a silent failure."""
+        """Return an XHR response that redirects the UI to the login form."""
         body = json.dumps({'ok': False, 'auth_required': True, 'error': error}).encode('utf-8')
         self.send_response(401)
         self.send_header('Content-Type', 'application/json')
@@ -3144,8 +3119,7 @@ class MeshHandler(RequestLimits, ManageRoutes, http.server.BaseHTTPRequestHandle
             self._send_perf_auth_required(next_path=next_path)
             return
 
-        # Everything else under /manage is the UI itself. This is the gate:
-        # without a valid cookie the request never reaches a management route.
+        # Require a valid password cookie before dispatching management routes.
         if not self._perf_cookie_valid():
             if path.startswith(MANAGE_PREFIX + '/api/'):
                 self.send_401_json()
@@ -3159,10 +3133,9 @@ class MeshHandler(RequestLimits, ManageRoutes, http.server.BaseHTTPRequestHandle
         self._dispatch_manage()
 
     def _dispatch_manage(self):
-        """Hand a /manage request to the mixin with the prefix stripped.
+        """Dispatch a /manage request with the prefix stripped.
 
-        The routes were written as if they owned the site root, so the prefix
-        is removed here rather than threaded through every one of them.
+        The mixin routes expect paths relative to the site root.
         """
         original = self.path
         stripped = original[len(MANAGE_PREFIX):] or '/'
@@ -3207,8 +3180,7 @@ class MeshHandler(RequestLimits, ManageRoutes, http.server.BaseHTTPRequestHandle
         conf       = load_kv_file(MESH_CONF_FILE)
         client_ip  = self.client_address[0]
 
-        # Nothing this server offers is meant for the uplink/LAN side: only
-        # localhost and clients holding a DHCP lease from the mesh.
+        # Allow only localhost and clients holding a mesh DHCP lease.
         if not is_allowed_ip(client_ip, conf):
             self.send_403()
             return
@@ -3219,7 +3191,7 @@ class MeshHandler(RequestLimits, ManageRoutes, http.server.BaseHTTPRequestHandle
 
         path = parsed.path.rstrip('/') or '/'
 
-        # The config form moved into the management UI as its NODE CONFIG tab.
+        # Redirect the config form to the management UI Node config tab.
         if path == '/admin':
             self._send_redirect(MANAGE_PREFIX + '/#config')
             return
@@ -3360,8 +3332,7 @@ class MeshHandler(RequestLimits, ManageRoutes, http.server.BaseHTTPRequestHandle
                 self.send_401_json('Wrong management password')
             return
 
-        # Reprovisioning the mesh (SAE key, SSID, IP range) is the most
-        # destructive thing this UI can do: never without the password.
+        # Mesh SAE key, SSID and IP range changes require the admin password.
         if path.startswith('/api/admin/') and not self._perf_cookie_valid():
             self.send_401_json()
             return
@@ -3442,8 +3413,7 @@ class MeshHandler(RequestLimits, ManageRoutes, http.server.BaseHTTPRequestHandle
                 require_clock()
                 req   = json.loads(body)
                 force = req.get('force', False)
-                # Carried in the package rather than decided per node, so the
-                # whole mesh applies under the same terms.
+                # Package apply terms for every node.
                 no_rollback = bool(req.get('no_rollback', False))
                 pkg   = get_pending_config()
                 if not pkg:
@@ -3483,10 +3453,9 @@ class MeshHandler(RequestLimits, ManageRoutes, http.server.BaseHTTPRequestHandle
         elif path == '/api/admin/cancel':
             try:
                 require_clock()
-                # Clearing our own files is not enough: the package is still
-                # resident in Alfred, so every node (including this one) would
-                # re-stage it on the next sync. Broadcast a cancel the way the
-                # radio path does.
+                # Broadcast cancellation as the radio path does. Deleting local
+                # files leaves the Alfred package available for every node to
+                # stage again.
                 pending = get_pending_config() or {}
                 sent = broadcast_config_package({
                     'kind':      'mesh_config_cancel',

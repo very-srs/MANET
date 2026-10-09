@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Tethered ATAK service; IPv4 protocol-0 CoT, no multicast or clock authority.
+"""Serve tethered ATAK over IPv4 protocol-0 CoT without multicast.
 
-Reads mesh.conf (enabled unless atak=n/no/0/false), gps_status.json and optional monitor/jam
-interfaces. The unit installs the policy shown by --print-firewall before
-starting and removes it after stopping. The daemon only verifies that policy.
-Like mesh-voice.py, logs go to the journal and atomic /run JSON serves the UI.
-The versioned persistence adapter below intentionally owns the selector's
-private state; changing that selector layout requires a schema review.
+Read mesh.conf (enabled unless atak=n/no/0/false), gps_status.json and
+optional monitor/jam interfaces without supplying clock authority. The unit
+installs --print-firewall policy before start and removes it after stop.
+The daemon verifies policy, logs to the journal and writes atomic /run JSON
+for the UI, as mesh-voice.py does. The versioned persistence adapter owns
+selector private state, whose layout changes require a schema review.
 """
 
 import argparse
@@ -54,7 +54,7 @@ class PersistenceError(RuntimeError):
 
 
 def state_digest(data):
-    """Detect damaged checkpoints; not authentication against a privileged editor."""
+    """Detect damaged checkpoints without authenticating privileged edits."""
     return hashlib.sha256(json.dumps(data, sort_keys=True, separators=(',', ':'), allow_nan=False).encode()).hexdigest()
 
 
@@ -177,14 +177,14 @@ def payload(protocol, field):
 
 
 def firewall_objects():
-    """Canonical nft JSON; counters/handles are the only ignored runtime data.
+    """Return canonical nft JSON, ignoring only runtime counters and handles.
 
-    Bridge input covers local delivery, output covers unknown-unicast flooding.
+    Bridge input covers local delivery, output unknown-unicast flooding.
     Inet input excludes routed/loopback ingress and IPv6. Before bridge/IP
     defragmentation, reject first IPv4 fragments addressed to TCP/UDP 4242 on
-    any bridge, including forwarded traffic. Without an offset-zero fragment those
-    packets cannot reassemble, even when later fragments arrive on other ports.
-    Other destination ports/protocols and noninitial fragments are unaffected.
+    any bridge, including forwarded traffic. Without an offset-zero fragment,
+    packets cannot reassemble even if later fragments arrive on other ports.
+    Other ports/protocols and noninitial fragments are unaffected.
     """
     objects = []
     for family, hooks in (('bridge', ('prerouting', 'input', 'output')), ('inet', ('input',))):
@@ -217,7 +217,7 @@ def firewall_objects():
 
 
 def firewall_transaction(*, install=True):
-    """One atomic batch; add/delete also handles missing or partly present tables."""
+    """Build an atomic batch, tolerating missing or partly present tables."""
     commands = []
     for family in ('bridge', 'inet'):
         table = {'table': {'family': family, 'name': TABLE}}
@@ -228,7 +228,7 @@ def firewall_transaction(*, install=True):
 
 
 def apply_firewall(*, install):
-    """Unit pre/post hook only; never called by the running daemon."""
+    """Run only as a unit pre/post hook, never inside the daemon."""
     try:
         subprocess.run(['nft', '-j', '-f', '-'],
                        input=json.dumps(firewall_transaction(install=install)),
@@ -240,11 +240,10 @@ def apply_firewall(*, install):
 
 
 def _canonical_expr(expr):
-    """Drop matches nft re-derives from later payloads, as its dumps do.
+    """Drop implicit nft matches omitted from readback.
 
-    nft adds 'meta l4proto X' for a later X payload and 'ether type ip'
-    for a later ip payload when loading, and omits them when listing, so a
-    readback never repeats them. Same packet semantics either way.
+    Loading a payload adds 'meta l4proto X' for X or 'ether type ip' for ip.
+    Listing omits these redundant matches without changing packet semantics.
     """
     later = set()
     kept = []
@@ -286,7 +285,7 @@ def valid_firewall(data):
         for kind, obj in item.items():
             if kind not in ('table', 'chain', 'rule', 'metainfo') and isinstance(obj, dict) and obj.get('table') == TABLE:
                 return False
-    # Kernel dumps tables grouped by family; retain rule order per chain.
+    # Kernel dumps group tables by family. Preserve rule order per chain.
     def grouped(items):
         result = {}
         for entry in items:
@@ -349,7 +348,7 @@ class NetworkEvents:
     def changed(self):
         changed = False
         for sock in self.sockets:
-            # Bound work under churn; exhausting the queue budget fails closed.
+            # Fail closed if notification churn exhausts the queue budget.
             for _ in range(256):
                 try:
                     data, _, flags, sender = sock.recvmsg(65536)
@@ -364,9 +363,9 @@ class NetworkEvents:
                     length, kind, _, _, _ = struct.unpack_from('=IHHII', data, offset)
                     if length < 16 or offset + length > len(data) or kind in (2, 4):
                         raise OSError('lost or invalid network notification')
-                    # NOOP/DONE carry no change; every other multicast message
-                    # invalidates the proof. Include all bridge ports: duplicate
-                    # learning on bat0 must revoke an end0 peer too.
+                    # NOOP/DONE indicate no change. Other multicast messages
+                    # invalidate proof, including duplicate MAC learning on bat0
+                    # for an end0 peer.
                     changed |= kind not in (1, 3)
                     offset += (length + 3) & ~3
             else:
@@ -418,15 +417,14 @@ class LinuxGuard:
             if self.dirty:
                 self.signature = signature
                 proof = self.inspect()
-                # A snapshot spanning a change cannot admit anyone. Retry on
-                # the next existing loop cycle; never spin on a changing path.
+                # A snapshot spanning a change cannot admit peers. Retry next
+                # cycle.
                 if self.events.changed() or self.file_signature() != signature:
                     self.invalidate()
                     self.reason = 'network changed during verification'
                 else:
-                    # Retry a failed readback at the existing cycle cadence;
-                    # a transient command failure must not park us forever
-                    # waiting for an unrelated kernel event.
+                    # Retry failed readback next cycle without waiting for a
+                    # kernel event.
                     self.cached, self.dirty = proof, self.retry
             return self.cached
         except OSError as exc:
@@ -598,8 +596,8 @@ def rebase_selector(position, saved, now, new_boot):
         if now.mono < saved:
             raise ValueError('monotonic clock regressed in same boot')
     else:
-        # Downtime cannot be inferred from an untrusted/restepped wall clock.
-        # Retain elapsed age at checkpoint + current uptime as a LOWER BOUND.
+        # An untrusted or stepped wall clock cannot establish downtime.
+        # Checkpoint age + current uptime is a lower bound.
         shift = now.mono - saved - now.boot
         for name in ('_distrust_since', '_last_sent_mono'):
             if getattr(position, name) is not None:
@@ -613,7 +611,7 @@ def rebase_selector(position, saved, now, new_boot):
             if warning.sent_mono is not None:
                 warning.sent_mono += shift
             if warning.deadline is not None:
-                warning.deadline = now.mono  # one reminder; never a catch-up burst
+                warning.deadline = now.mono  # One reminder, no catch-up burst.
         position._phone_ref = position._phone_mono_ref = position._latest_time = None
         position._phone_generation += 1
         position.clock_diagnostic = None
@@ -625,12 +623,12 @@ def rebase_selector(position, saved, now, new_boot):
 
 
 class Inputs:
-    """Own receiver only. Optional producer files are local, versioned interfaces.
+    """Read the local receiver and optional versioned producer files.
 
-    Monitor: schema=1, boot_id, written_boot, producer_id, fault_epoch,
-    state (RadioGPS vocabulary), ranges_agree. Jam: same envelope + asserted
-    (bool). Missing from the outset means unwired/unknown; loss after a valid
-    producer fails closed. GPIO numbers and GPS time permissions are not guessed.
+    Monitor fields: schema=1, boot_id, written_boot, producer_id, fault_epoch,
+    state (RadioGPS vocabulary), ranges_agree. Jam uses that envelope plus
+    asserted (bool). Initially missing means unwired/unknown. Loss after valid
+    producer data fails closed. GPIO and GPS time permissions stay explicit.
     """
     def __init__(self, boot_id, run='/run'):
         self.boot_id, self.run = boot_id, Path(run)
@@ -742,7 +740,10 @@ class Inputs:
 
 
 class Service:
-    """Serialized application core. Transport.send returns successful local UDP handoff."""
+    """Serialize application work.
+
+    Transport.send reports successful local UDP handoff.
+    """
     def __init__(self, config, boot_id, store, transport, now):
         self.config, self.boot_id, self.store, self.transport = config, boot_id, store, transport
         self.revision = 0
@@ -1231,7 +1232,7 @@ class Stream:
 
 
 class Network:
-    """Nonblocking IPv4 sockets; fake socket factory/readiness supplied by tests."""
+    """Provide nonblocking IPv4 sockets with injectable factory/readiness."""
     def __init__(self, factory=socket.socket, verify=None):
         self.factory = factory
         self.verify = verify
@@ -1392,7 +1393,7 @@ def main(argv=None):
         apply_firewall(install=False)  # cleanup must work even with a missing/broken config
         return
     if args.install_firewall:
-        # A disabled start also removes stale tables; no rules become active.
+        # A disabled start removes stale tables without activating rules.
         apply_firewall(install=atak_enabled(read_kv(args.config)))
         return
     config = Config.load(args.config)

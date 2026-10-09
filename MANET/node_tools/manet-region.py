@@ -1,20 +1,16 @@
 #!/usr/bin/env python3
-"""Write the regulatory domain from mesh.conf into every radio's own config.
+"""Write mesh.conf's regulatory domain to each radio config.
 
-radio-setup.sh writes the region into these files once, at provisioning. A
-later change from the web UI only reached mesh.conf, so the reboot that was
-supposed to apply it changed nothing on the radios. This writes the same
-files radio-setup.sh does. The radios pick them up when their modules and
-supplicants next start, which in practice means the next boot.
-
-  /etc/modprobe.d/cfg80211.conf   Wi-Fi regulatory domain (real ISO code)
-  /etc/modprobe.d/morse.conf      HaLow country (EU for every EU country)
-  /etc/default/crda               regdomain for userspace tools
-  /etc/hostapd/hostapd.conf       EUD access point country_code
-  wpa_supplicant-wlan*.conf       Wi-Fi mesh supplicant country
-  wpa_supplicant-*-s1g.conf       HaLow supplicant country, and the region's
-                                  default channel when US <-> non-US changes,
-                                  because the two plans share no channels
+Update the same files as radio-setup.sh. Modules and supplicants read them
+on next start, normally at boot.
+  /etc/modprobe.d/cfg80211.conf  Wi-Fi country (ISO code)
+  /etc/modprobe.d/morse.conf     HaLow country (EU for every EU country)
+  /etc/default/crda              userspace regdomain
+  /etc/hostapd/hostapd.conf      EUD country_code
+  wpa_supplicant-wlan*.conf      Wi-Fi mesh country
+  wpa_supplicant-*-s1g.conf      HaLow country and regional default channel
+US and non-US HaLow plans share no channels. Switching plans also selects
+the regional default channel.
 
 Usage: manet-region.py apply
 """
@@ -37,7 +33,7 @@ HALOW_DEFAULT_CHANNEL = {
     'other': ('1', '66', '0', '0'),     # 863.5 MHz, 1 MHz (EU 2 MHz is refused)
 }
 EU_MORSE_OPTIONS = 'options morse enable_auto_duty_cycle=0 enable_auto_mpsw=0'
-# Global S1G operating classes of the US plan; anything else is the EU plan.
+# Global S1G operating classes identify the US plan. Other classes mean EU.
 US_OP_CLASSES = {'68', '69', '70', '71'}
 COUNTRY_LINE = re.compile(r'^(\s*)country=("?)[A-Za-z0-9]{2}\2[ \t]*$', re.M)
 
@@ -100,9 +96,11 @@ def s1g_on_us_plan(text):
 
 
 def s1g_config(text, halow):
-    """Country lines only (never SSID/key text), and the region's default
-    channel when this file is on the other plan. The plan is read from the
-    file itself, so a retry after a partial failure still moves it."""
+    """Update country, changing channel only when switching HaLow plans.
+
+    Leave SSID/key text unchanged. Read the plan from this file so retries after
+    partial failure still move it.
+    """
     text = COUNTRY_LINE.sub(lambda m: f'{m[1]}country="{halow}"', text)
     family_changed = s1g_on_us_plan(text) != (halow == 'US')
     if family_changed:

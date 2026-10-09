@@ -1,4 +1,4 @@
-"""MediaMTX fixed-point check; freshness and live service state are never cached."""
+"""Check MediaMTX's fixed point without caching freshness or live state."""
 from functools import lru_cache
 import ipaddress
 import json
@@ -12,7 +12,7 @@ from manet_node_ipv4 import read_values
 @lru_cache(maxsize=1)
 def ipv6_vip(config, helper_generation):
     # Reuse the deployed derivation, including its prefix normalization. Its
-    # only input is radvd-mesh.conf; a config/helper change invalidates this.
+    # only input is radvd-mesh.conf. A config/helper change invalidates this.
     value = subprocess.run(['bash', str(TOOLS / 'mtx-ip.sh')], check=True,
                            capture_output=True, text=True, timeout=5).stdout.strip()
     return str(ipaddress.IPv6Interface(value).ip)

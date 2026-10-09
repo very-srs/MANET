@@ -1,18 +1,15 @@
 #!/bin/bash
-# button-monitor.sh
-# Persistent service. Blocks on button GPIO interrupt, launches led-info.sh
-# on each press. Near-zero CPU when idle.
-# Managed by button-monitor.service
-# Requires libgpiod v2 tools (gpiomon --chip <chip> <line>).
+# Wait for button GPIO interrupts and launch led-info.sh on each press.
+# button-monitor.service requires libgpiod v2 tools
+# (gpiomon --chip <chip> <line>). Blocking on interrupts keeps idle CPU low.
 
 source "$(dirname "${BASH_SOURCE[0]}")/manet-led-common.sh"
 
 LED_INFO_SCRIPT="$LED_TOOLS_DIR/led-info.sh"
 DEBOUNCE_MS=50      # gpiomon debounce in milliseconds
 
-# Exit 0 (not failure) when the hardware isn't there: the unit uses
-# Restart=on-failure, so a clean exit stops the service instead of
-# spinning the relaunch loop on nodes without button/LED wiring.
+# Exit successfully when hardware is absent. Restart=on-failure would
+# otherwise repeatedly launch the service on nodes without button wiring.
 if ! led_hardware_ready; then
     exit 0
 fi

@@ -1,63 +1,38 @@
-"""
-GPS consistency monitor: compare GNSS fixes with measured radio ranges.
+"""Compare GNSS fixes with measured radio ranges and quarantine failed pairs.
 
-Each range between two radios is compared with the distance between their
-GNSS fixes at the moment the range was measured. When both fixes carry a
-height the comparison is in 3D, because a range is a slant distance. When
-a height is missing, a range longer than the horizontal distance could be
-height and proves nothing; a range shorter than it still counts. A pair whose two numbers disagree by more than THRESHOLD_M disagrees.
-The threshold is sized to errors a person would notice on a map, not to
-ranging precision: a range that reads a few metres long off a reflection
-must pass.
-
-A disagreement more than SEVERE_M fails the pair at once. A smaller one
-fails it only when an earlier test of the same pair also disagreed, or when
-one end also disagrees with a different partner.
-
-A failed pair does not say which receiver is wrong, or whether the range
-is, so both ends are distrusted for time
-and stay distrusted for QUARANTINE_S after their last failure, whatever
-passes they collect. Passes cannot clear a node: a spoofed fix reflected
-across its partners passes them, and receivers captured together keep
-their shared geometry and pass among themselves. A captured
-radio keeps failing audits, so it keeps renewing its own quarantine. If
-nothing can be measured any more, the quarantine still ends: losing the
-means to check is reported as UNCHECKED, never as a pass.
-
-Attribution only labels the map. It asks which sets of bad receivers would
-explain every failed pair, with no member it could do without, and keeps
-every such set no more than COVER_MARGIN receivers larger than the
-smallest. A receiver in all of them is suspected. Preferring fewer bad
-receivers is an assumption, not evidence, so it never clears anyone.
-Attribution does not count passed pairs in anyone's favour either: a
-spoofed fix can agree with honest partners, for example when it is
-reflected across the line they stand on.
-
-States, per node:
-  NO_FIX                     no current fix
-  UNCHECKED                  no recent pair test that could catch an error
-  RANGE_CONSISTENT           recent tests passed, no recent failure; never "authentic"
-  INCONSISTENT_UNATTRIBUTED  failed within QUARANTINE_S, not attributed
-  GNSS_SUSPECTED             in a live failed pair, and failures point at it
-
-Groups closer than SCOPE_M are out of scope: ranging
-cannot separate them from a spoof that moves them together. Scope is judged
-by the measured range, never by GNSS distance, because a spoofer that puts
-separated receivers on one point is exactly what makes them look close.
-
-Pure logic: no I/O, no clocks. Times are the caller's monotonic seconds,
-in one clock domain: the caller maps each radio's clock into it. Inputs
-must arrive in time order per node and per pair; repeats and older inputs
-are ignored. A GNSS sample with the same time as the last one is the
-reader revising that epoch: it replaces the sample, and range results that
-used it are recomputed.
+Use fixes at the range epoch. With both heights, compare the 3D slant
+range. With missing height, only a range shorter than horizontal distance
+can disagree. Residuals above THRESHOLD_M disagree, allowing metre-scale
+reflection errors.
+Disagreement above SEVERE_M fails immediately. Smaller disagreements need
+an earlier disagreement for that pair or another partner at either end.
+Both ends lose time trust for QUARANTINE_S after the last failure. Passes
+cannot clear quarantine: reflected fixes and jointly spoofed receivers can
+preserve geometry. Failed audits renew quarantine. Without new measurements,
+quarantine expires into UNCHECKED.
+Attribution labels the map only. Find irredundant covers of failed pairs
+within COVER_MARGIN receivers of the smallest. Suspect nodes in every cover.
+Fewer bad receivers is an assumption, not evidence. Passes do not exonerate.
+States per node:
+  NO_FIX                    no current fix
+  UNCHECKED                 no recent test that could detect an error
+  RANGE_CONSISTENT          recent passes, no recent failure, not authenticity
+  INCONSISTENT_UNATTRIBUTED failed within QUARANTINE_S, not attributed
+  GNSS_SUSPECTED            live failed pair with attribution
+Measured ranges below SCOPE_M are out of scope: shared spoofed displacement
+cannot be distinguished at that separation. GNSS distance cannot define scope
+because a spoofer can collapse separated receivers onto one position.
+Pure logic with caller-supplied monotonic seconds in one clock domain. The
+caller maps radio clocks into it. Inputs are ordered per node/pair. Ignore
+repeats and older inputs, except equal-time GNSS revisions replace samples
+and recompute affected ranges.
 """
 
 from collections import deque
 from itertools import combinations
 import math
 
-THRESHOLD_M = 20.0       # |expected - measured range| that counts as a disagreement
+THRESHOLD_M = 20.0       # Disagreement in |expected - measured range|, m
 SEVERE_M = 40.0          # a disagreement this large fails the pair at once
 COVER_MARGIN = 1         # explanations this many receivers larger also count
 SCOPE_M = 20.0           # pairs measured closer than this cannot test anything
@@ -70,8 +45,8 @@ HISTORY_S = 30.0         # GNSS samples kept per node for alignment
 # for a CM4. All of them are then inconsistent and none is attributed.
 MAX_COVER_NODES = 12
 AUDIT_S = 30.0           # target: each node gets a pair test this often
-CONFIRM_PARTNERS = 2     # fresh partners tested after a node's first disagreement
-QUARANTINE_S = 300.0     # a node stays distrusted this long after its last failure
+CONFIRM_PARTNERS = 2     # Fresh partners after first disagreement
+QUARANTINE_S = 300.0     # Seconds of distrust after the last failure
 FAIL_COOLDOWN_S = 60.0   # a pair whose ranging failed is not retried sooner
 EARTH_RADIUS_M = 6371008.8
 
@@ -124,7 +99,7 @@ class Monitor:
         if hist and sample["mono"] < hist[-1]["mono"]:
             return
         if hist and sample["mono"] == hist[-1]["mono"]:
-            hist[-1] = sample  # the reader revised this epoch; not new evidence
+            hist[-1] = sample  # Epoch revision, not new evidence
             self._recompute(node, sample["mono"])
             return
         hist.append(sample)
@@ -260,11 +235,10 @@ class Monitor:
 
 
 def _near_minimum_covers(edges):
-    """Irredundant node sets touching every edge, up to COVER_MARGIN larger
-    than the smallest. Irredundant: no member can be dropped.
+    """Find irredundant covers within COVER_MARGIN nodes of the smallest.
 
-    Returns (covers, exact). exact is False when the graph was too large to
-    search; the result then implicates every node and attributes none.
+    No member of a cover can be dropped. Return (covers, exact). Oversized
+    graphs return exact=False, implicating every node and attributing none.
     """
     if not edges:
         return [], True
@@ -290,16 +264,13 @@ def _irredundant(cover, edges):
 
 
 class Scheduler:
-    """Picks the next pair to range. One burst at a time per channel.
+    """Schedule one range burst per channel.
 
-    First, every node in a recent disagreement is tested against
-    CONFIRM_PARTNERS fresh partners, preferring partners whose own checks
-    pass. Then the node whose last useful test is oldest is audited once
-    AUDIT_S has passed. AUDIT_S is a target: a node with many partners and
-    a busy channel can wait longer. A pair measured closer than SCOPE_M is
-    skipped until that measurement expires, so a group that starts together
-    is checked again once it spreads out. A pair whose ranging failed waits
-    FAIL_COOLDOWN_S (report it with failed()).
+    First test nodes in recent disagreements against CONFIRM_PARTNERS fresh
+    partners, preferring those with passing checks. Then audit the node whose
+    last useful test is oldest after AUDIT_S. Busy channels or many partners
+    can delay that target. Skip ranges below SCOPE_M until their measurement
+    expires. failed() defers unusable pairs for FAIL_COOLDOWN_S.
     """
 
     def __init__(self, monitor):
@@ -349,9 +320,8 @@ class Scheduler:
         for u in due:
             candidates = [p for p in nodes if p != u and useful(u, p)]
             if candidates:
-                # The least recently measured pair first, so one baseline is
-                # never reused while others go untested; a due partner only
-                # breaks ties.
+                # Use the least recently measured pair to avoid reusing one
+                # baseline while others go untested. A due partner breaks ties.
                 candidates.sort(key=lambda p: (-edge_age(u, p), p not in due))
                 return u, candidates[0]
         return None

@@ -1,21 +1,12 @@
 #!/bin/bash
-# Web UI / iperf firewall
-# Kernel-enforced answer to "who can reach the pages on this node".
-#
-#   port 80    localhost, and addresses in this node's DHCP pool.
-#   port 5201  the mesh subnet (peers run iperf3 clients against this node's
-#              daemon). Not the uplink.
-#
-# Why source address and not interface: br0 bridges bat0, so a packet from a
-# remote node arrives on br0 exactly like one from a locally attached EUD.
-# Pool-based access is intentional for this trusted-team network.
-#
-# Lives in its own table at a priority ahead of the main filter chain, so it
-# is independent of manet-uplink-dispatch.sh's gateway rules: a drop here is
-# final, and everything else falls through untouched.
-#
-# Re-run whenever the DHCP range moves (mesh-ip-manager calls it after
-# rewriting the dnsmasq config). Idempotent, and a no-op when nothing changed.
+# Web UI and iperf source-address policy:
+#   port 80: localhost and this node's DHCP pool
+#   port 5201: mesh subnet for peer iperf3 clients, excluding uplinks
+# br0 carries both bat0 traffic and local EUDs, so interface checks cannot
+# distinguish them. Pool-based access assumes a trusted-team network.
+# The separate table runs before manet-uplink-dispatch.sh filters. Drops here
+# are final. Other traffic falls through. mesh-ip-manager reruns this when
+# the DHCP pool moves. Unchanged policy is a no-op.
 
 TABLE="manet_ui"
 DNSMASQ_CONF="${MANET_DNSMASQ_CONF:-/etc/dnsmasq.d/mesh-eud.conf}"
@@ -70,9 +61,8 @@ flock -w 10 9 || { log "ERROR: firewall update already running"; exit 1; }
 
 RANGE=$(read_dhcp_range)
 if [ -z "$RANGE" ]; then
-    # No pool yet means no chunk claimed yet. Installing a rule now would lock
-    # out the EUDs we cannot yet name, so leave things alone; mesh-ip-manager
-    # calls back once it has an allocation.
+    # Without a claimed chunk, the EUD pool is unknown. Leave rules unchanged
+    # until mesh-ip-manager calls back with an allocation.
     log "No dhcp-range in $DNSMASQ_CONF yet; leaving port 80 rules alone"
     exit 0
 fi

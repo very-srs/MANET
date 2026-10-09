@@ -16,11 +16,9 @@ STARTUP_MONITOR_INTERVAL=1
 LOBBY_FREQ_2_4=2412
 LOBBY_FREQ_5_0=5180
 
-# Cold-start bootstrap: a fresh mesh is all-lobby, so no data-state node exists
-# to send helper beacons and nothing would ever pick initial data channels.
-# After this many seconds in the lobby without being rescued (several missed
-# tourguide windows: an established mesh gets to rescue us first), run the
-# scan/publish/election pipeline from the lobby to elect data channels.
+# Lobby dwell seconds before joint bootstrap scans and elects data channels.
+# Allow several missed tourguide windows first so an established mesh can
+# rescue new nodes before they choose initial data channels.
 LOBBY_BOOTSTRAP_DWELL=300
 
 # Radio Config. radio-setup writes runtime interface role files because wlanX
@@ -30,14 +28,13 @@ WPA_IFACE_5_0=""
 WPA_CONF_2_4=""
 WPA_CONF_5_0=""
 
-# Scan frequencies (must match the candidate lists in channel-election.sh;
-# lobby frequencies are excluded: they are reserved as the rendezvous point)
+# Scan frequencies match channel-election.sh candidates. Exclude the lobby
+# frequencies reserved for rendezvous.
 SCAN_FREQS_2_4="2437 2462"
 SCAN_FREQS_5_0="5200 5220 5240 5745 5765 5785 5805 5825"
 
-# A channel whose survey shows less than this much dwell during the scan gets
-# no occupancy figure. Busy time is counted in whole milliseconds, so on a
-# 10 ms visit the ratio moves in 10% steps and means nothing.
+# Minimum scan dwell for occupancy data. Busy time has millisecond
+# resolution, so a 10 ms visit yields only 10% steps.
 SURVEY_MIN_DWELL_MS=25
 
 # Helper scripts
@@ -59,17 +56,14 @@ HALOW_MCS_SUMMARY="/usr/local/bin/halow-mcs-summary.py"
 
 # --- State Variables ---
 LAST_PUBLISHED_PAYLOAD=""
-# Local timers run on the boot clock (MONO, from uptime_now) so a wall-clock
-# step from a time sync cannot fire them early or stall them. NEVER is "not
-# yet": far enough back that the first check is always due.
+# Use boot-clock MONO from uptime_now for local timers, unaffected by time
+# sync steps. NEVER places an unset timer far enough back to be due at once.
 NEVER=-1000000
 LAST_PUBLISH_TIME=$NEVER
 
-# Identity has a slow keepalive; startup and allocation changes publish sooner.
-# Alfred purges any record it has not seen for ALFRED_DATA_TIMEOUT = 600 s, so
-# at 270 s a publish can fail once and the record still survives. This runs on
-# its own timer rather than inside a pipeline stage, so it keeps ticking in
-# both lobby and data state.
+# Publish identity at startup and allocation changes, then every 270 s.
+# Alfred expires records at ALFRED_DATA_TIMEOUT = 600 s, allowing one missed
+# keepalive. The separate timer runs in both lobby and data state.
 LAST_IDENTITY_PUBLISH=$NEVER
 LAST_IDENTITY_ALLOCATION=""
 LAST_ACK_PUBLISHED=""
@@ -121,11 +115,8 @@ is_ntp_time_source() {
     [ -f "$run_dir/mesh-ntp.state" ] || [ -f "$run_dir/mesh-ntp-gps.state" ]
 }
 
-# --- Clock-synchronized action checker ---
-# Fires once per interval, at the first loop wakeup at-or-after the offset.
-# (The old ±2 s match missed windows routinely: with a 15 s sleep a wakeup
-# only landed inside a given 5 s window about a third of the time, so stages
-# silently skipped intervals and peers aged out of each other's elections.)
+# Run each clock-aligned action once per interval at the first wakeup at or
+# after its offset. A narrow +/-2 s window can be skipped by the 15 s sleep.
 should_perform_action() {
     local action_name=$1
     local interval_seconds=$2
@@ -150,13 +141,10 @@ should_perform_action() {
 
 # Shared telemetry collectors: manet-common.sh
 
-# Service elections choose the holder of a shared VIP. Run them only once this
-# node holds an address allocation: until discovery has finished (complete, or
-# at its bounded deadline) the registry may contain only this node, which then
-# always wins and takes a VIP a peer still holds. Also run them at most once per
-# steady interval, not on every one-second startup pass. Local locks and this
-# gate reduce churn; they cannot guarantee a single holder across a partition,
-# which the elections resolve once the registries converge.
+# Run service elections after address allocation, once per steady interval.
+# Before discovery completes or times out, a self-only registry could take
+# a peer's VIP. Local locks and this gate reduce churn but cannot prevent
+# duplicate holders across partitions until registries converge.
 ELECTION_INTERVAL=15
 LAST_ELECTION_RUN=""
 run_service_elections() {
@@ -182,10 +170,9 @@ run_service_elections() {
     done
 }
 
-# Leaving the lobby for data channels: clear any legacy bitrate masks (set by
-# tourguide lobby hops or limp-mode entry: they persist on the netdev across
-# supplicant restarts) and drop the limp-mode state file. limp-mode-manager
-# only runs in data state, so without this a lobby fallback never resets them.
+# Clear legacy bitrate masks and limp state when leaving the lobby. Masks
+# from tourguide hops or limp entry survive supplicant restarts, while
+# limp-mode-manager runs only in data state.
 leave_lobby_cleanup() (
     exec 8>"${MANET_ACS_LOCK_FILE:-/run/channel-election.lock}"
     flock -n 8 || return 1
@@ -212,15 +199,13 @@ is_in_lobby() {
         return
     fi
 
-    # Search channels overlap real data channels. Frequency is only a startup
-    # hint; authenticated adoption and explicit return-to-lobby set the mode.
+    # Search and data frequencies overlap. Frequency is only a startup hint.
+    # Authenticated adoption and explicit return-to-lobby set the mode.
     acs_discovery_state || echo "true"
 }
 
-# How many other nodes are meshed with us right now, by batman-adv's data-plane
-# view. Counts a peer found over ANY batman interface, HaLow
-# included -- what the lobby bootstrap needs is somebody to run a joint
-# deterministic election with, and it does not matter which radio found them.
+# Count distinct batman-adv peers across all interfaces, including HaLow.
+# Any radio contact supplies the peer needed for joint lobby bootstrap.
 mesh_peer_count() {
     "$PEER_COUNTER" --batctl "$BATCTL_PATH"
 }
@@ -276,19 +261,12 @@ iface_phy() {
     iw dev "$1" info 2>/dev/null | awk '/wiphy/ {print "phy"$2; exit}'
 }
 
-# Filter a candidate frequency list down to what this interface's phy actually
-# offers. This is not a regulatory mechanism and on a fully provisioned node it
-# is a no-op. It exists for two failure cases:
-#   1. "iw scan freq" rejects the WHOLE request if any single frequency is not
-#      permitted on the phy, so one bad entry silently kills the scan for every
-#      channel on that radio -- and perform_scan discards the exit status, so the
-#      only symptom is an empty survey.
-#   2. A node that boots before /root/regulatory.db has been copied into place
-#      runs the stock database, where the UNII-3 candidates (5745-5825) can be
-#      absent, gated behind (no IR), or DFS.
-# Fails OPEN: if the phy cannot be read, or nothing parses, hand back the input
-# list untouched. Filtering to an empty set is far worse than not filtering --
-# it would take a whole band off the air on every node at once.
+# Filter frequencies to those the PHY supports. One unsupported frequency
+# rejects the entire iw scan request, whose exit status perform_scan ignores.
+# Before /root/regulatory.db is installed, UNII-3 candidates 5745-5825 MHz
+# can be absent or tagged no IR/DFS. This filter does not set regulatory policy.
+# If the PHY cannot be read or parsed, return the full input list to avoid
+# disabling a whole band.
 phy_usable_freqs() {
     local iface="$1"
     local wanted="$2"
@@ -301,9 +279,8 @@ phy_usable_freqs() {
     [ -z "$info" ] && { printf '%s\n' "$wanted"; return; }
 
     for freq in $wanted; do
-        # iw prints "* 5220.0 MHz [44] (30.0 dBm)"; an unusable channel carries a
-        # trailing (disabled) / (no IR) / (radar detection) tag. All three mean
-        # we cannot bring a mesh point up there, so contribute no data for it.
+        # iw prints "* 5220.0 MHz [44] (30.0 dBm)". Exclude disabled, no IR and
+        # radar detection entries because mesh points cannot start on them.
         local pattern="[[:space:]]${freq}\.0 MHz.*"
         pattern+='\((disabled|no IR|radar detection|passive scan)'
         if printf '%s\n' "$info" | grep -qE "$pattern"; then
@@ -342,9 +319,8 @@ parse_survey() {
 perform_scan() {
     local json_out='{"results": ['
     local first_entry=true
-    # Survey counters bracketing the scan. Keyed by frequency; frequencies do
-    # not repeat between the two bands, but they are cleared per interface
-    # anyway so a stale entry can never leak into the next radio's deltas.
+    # Clear per-frequency survey snapshots for each interface to prevent
+    # stale counters from entering the next radio's deltas.
     local -A pre_act pre_busy pre_tx post_act post_busy post_tx post_noise
     local f n a b t
 
@@ -360,11 +336,8 @@ perform_scan() {
         pre_act=(); pre_busy=(); pre_tx=()
         post_act=(); post_busy=(); post_tx=(); post_noise=()
 
-        # Snapshot before and after so every candidate is measured over the
-        # same event -- this scan -- rather than over its lifetime. Without
-        # the bracket the home channel reports a running average since boot
-        # while the other candidates report only the milliseconds the radio
-        # spent visiting them, and the two are not comparable.
+        # Bracket each scan with snapshots. Lifetime counters otherwise compare
+        # the home channel's average since boot with brief visits to candidates.
         while read -r f n a b t; do
             [ -z "$f" ] && continue
             pre_act[$f]=$a; pre_busy[$f]=$b; pre_tx[$f]=$t
@@ -388,25 +361,17 @@ perform_scan() {
 
         for freq in $freqs_to_scan; do
             local noise="${post_noise[$freq]:--}"
-            # No survey entry means the radio never actually visited this
-            # frequency (scan request rejected, channel unavailable, driver
-            # hiccup). Report nothing for it rather than a synthetic floor:
-            # -100 dBm beats every real measurement, so a defaulted value wins
-            # channel-election.sh outright and parks the mesh on a channel
-            # nobody can hear. Missing data is handled correctly downstream --
-            # find_best_channel holds the current channel when a band has no
-            # measurements at all.
+            # Omit unvisited channels after scan failure or unavailability.
+            # A synthetic -100 dBm floor would outrank real measurements.
+            # find_best_channel holds the current channel if a band has no data.
             [ "$noise" = "-" ] && continue
             local bss_count=$(printf '%s\n' "$scan_data" |
                 grep -c "freq: ${freq}\." )
 
-            # Occupancy: the share of the visit the channel was busy with
-            # something that was not our own transmission. Unlike the noise
-            # floor this is a ratio of two counters from the same driver, so
-            # it is comparable between nodes and between chip revisions
-            # without any calibration. Our own receive time is still counted
-            # against the home channel; the election's hysteresis covers the
-            # few percent of duty cycle a healthy mesh adds.
+            # Occupancy excludes local transmit time. Same-driver counter ratios
+            # compare across nodes and chip revisions without calibration.
+            # Local receive time still counts on the home channel. Hysteresis
+            # covers the few percent of airtime used by a healthy mesh.
             local occupancy_field=""
             local ca="${post_act[$freq]:--}" cb="${post_busy[$freq]:--}"
             local ct="${post_tx[$freq]:-0}"
@@ -418,10 +383,8 @@ perform_scan() {
                 [ "$pb" = "-" ] && pb=0
                 [ "$pt" = "-" ] && pt=0
                 local d_act=$((ca - pa)) d_busy=$((cb - pb)) d_tx=$((ct - pt))
-                # Negative means the counters were reset under us (supplicant
-                # restart, netdev bounce) and the pre-snapshot belongs to a
-                # dead epoch. Fall back to the post values, which are then
-                # already the counts since that reset.
+                # Negative deltas mean counters reset during the scan after a
+                # supplicant restart or netdev reset. Use post-reset counts.
                 if [ "$d_act" -lt 0 ] || [ "$d_busy" -lt 0 ] || [ "$d_tx" -lt 0 ]; then
                     d_act=$ca; d_busy=$cb; d_tx=$ct
                 fi
@@ -533,8 +496,8 @@ while true; do
     fi
 
     # Tourguide temporarily rewrites a config to the lobby. Do not interpret
-    # that as our operating state, scan it, or run quorum/elections over the
-    # hop's temporary loss of data peers. The child holds the channel lock.
+    # that as operating state or run scans, quorum checks or elections
+    # during temporary peer loss. The child holds the channel lock.
     ACS_LOCK_FILE="${MANET_ACS_LOCK_FILE:-/var/run/channel-election.lock}"
     if [ -e "$ACS_LOCK_FILE" ] && ! flock -n "$ACS_LOCK_FILE" true; then
         sleep "$STARTUP_MONITOR_INTERVAL"
@@ -551,8 +514,7 @@ while true; do
     # publish an ACK, and apply once activate_at passes.
     sync_alfred_command "$CONFIG_SYNC" 70 || true
 
-    # A dangerous config change can take the mesh down. This is the node
-    # deciding, on its own, whether the change worked or has to be undone.
+    # Check locally whether a disruptive config change needs rollback.
     [ -x "$CONFIG_ROLLBACK" ] && "$CONFIG_ROLLBACK" check || true
 
     # An ACK is only useful if peers see it promptly, so a change here brings
@@ -576,8 +538,8 @@ while true; do
     IDENTITY_ALLOCATION="${MY_CHUNK}:${IDENT_IPV4}"
     if [ "$IDENTITY_READY" = true ] && { [ -z "$MY_CHUNK" ] || [ "$IDENTITY_ALLOCATION" != "$LAST_IDENTITY_ALLOCATION" ] ||
             [ $((MONO - LAST_IDENTITY_PUBLISH)) -ge $IDENTITY_PUBLISH_INTERVAL ]; }; then
-        # br0's MAC must come first: encoder.py drops it, because Alfred
-        # already stamps every record we publish with it.
+        # Put br0's MAC first. encoder.py drops it because Alfred stamps records
+        # with that MAC.
         IDENT_MACS=("$MY_MAC")
         for iface in /sys/class/net/wlan* /sys/class/net/bat0 /sys/class/net/end0; do
             iface=$(basename "$iface")
@@ -587,7 +549,7 @@ while true; do
             fi
         done
 
-        # Cached against the certificate metadata; missing IDs retry next publish.
+        # Cache by certificate metadata. Missing IDs retry next publish.
         if SYNCTHING_ID=$(node_syncthing_id 2>/dev/null); then
             IDENTITY_ARGS=(
                 "--hostname" "$(hostname)"
@@ -642,10 +604,8 @@ while true; do
         fi
 
         # === PUBLISH STATUS (so other nodes can see us) ===
-        # Bootstrapping nodes publish on the same clock-synchronized :15
-        # window as data state so every lobby node's scan report lands in
-        # peers' registries before the shared :25 election; otherwise the
-        # free-running 3-minute timer is fine.
+        # Bootstrap status uses the data-state :15 window so peer scan reports
+        # arrive before the :25 election. Otherwise use the 3-minute timer.
         DO_LOBBY_PUBLISH=false
         if [ "$BOOTSTRAPPING" = true ]; then
             should_perform_action "PUBLISH" 180 15 && DO_LOBBY_PUBLISH=true
@@ -653,8 +613,8 @@ while true; do
             time_since_publish=$((MONO - LAST_PUBLISH_TIME))
             [ $time_since_publish -ge 180 ] && DO_LOBBY_PUBLISH=true
         fi
-        # Cold nodes must advertise before allocation; do not wait for an ACS
-        # scan/publish window to make their presence visible to other joiners.
+        # Advertise cold nodes before allocation without waiting for ACS windows
+        # so other joiners can discover them.
         [ ! -s /var/run/my_ipv4_chunk ] && DO_LOBBY_PUBLISH=true
         if [ "$DO_LOBBY_PUBLISH" = true ]; then
             log "=== LOBBY PUBLISH ==="
@@ -708,8 +668,8 @@ while true; do
             [ -n "$CPU_LOAD" ] && ENCODER_ARGS+=("--cpu-load-average" "$CPU_LOAD")
 
             # --- GPS Location ---
-            # Reject stale files as well as missing fixes. If gps-reader stops updating
-            # its timestamp, the last recorded position is no longer safe to publish.
+            # Reject stale files and missing fixes. If gps-reader stops,
+            # its last position is unsafe to publish.
             GPS_LAT=""; GPS_LON=""; GPS_ALT=""
             if [ -f "$GPS_STATUS_FILE" ]; then
                 read -r GPS_LAT GPS_LON GPS_ALT < <(jq -r --argjson max "$GPS_FIX_MAX_AGE" --argjson up "$(uptime_now)" '
@@ -760,14 +720,11 @@ while true; do
         fi
 
         # === BOOTSTRAP STAGE 2: CHANNEL ELECTION (every 3 min at :25) ===
-        # Request this round after a full scan/publish window. The agreement
-        # service proposes one plan, gathers a majority and activates it later.
-        # A helper rescue this cycle wins over self-election: joining the
-        # established mesh's channels beats electing our own. The election
-        # also sits out the (partial) window in which bootstrap began so one
-        # full scan->publish->replicate round completes first: otherwise a
-        # dwell expiring mid-window fires all three stages back-to-back and
-        # elects before any peer report can be in the registry.
+        # Wait for a full scan/publish/replicate round before requesting a plan.
+        # The agreement service gathers a majority and activates it later.
+        # A helper rescue takes priority over electing new channels. Skip the
+        # partial window where bootstrap begins to avoid electing before peer
+        # reports arrive.
         if [ "$BOOTSTRAPPING" = true ] && [ "$HELPER_MIGRATED" = false ] && \
            [ $((NOW / 180)) -gt "$BOOTSTRAP_START_WINDOW" ] && \
            should_perform_action "ELECTION" 180 25; then
@@ -858,8 +815,8 @@ while true; do
             [ -n "$LIMP_MODE_FLAG" ] && ENCODER_ARGS+=("$LIMP_MODE_FLAG")
 
             # --- GPS Location ---
-            # Reject stale files as well as missing fixes. If gps-reader stops updating
-            # its timestamp, the last recorded position is no longer safe to publish.
+            # Reject stale files and missing fixes. If gps-reader stops,
+            # its last position is unsafe to publish.
             GPS_LAT=""; GPS_LON=""; GPS_ALT=""
             if [ -f "$GPS_STATUS_FILE" ]; then
                 read -r GPS_LAT GPS_LON GPS_ALT < <(jq -r --argjson max "$GPS_FIX_MAX_AGE" --argjson up "$(uptime_now)" '
@@ -908,11 +865,10 @@ while true; do
         fi
 
         # === STAGE 7.5: PARTITION MERGE ===
-        # tourguide-manager writes PARTITION_MERGE=true when it met a larger
-        # partition in the lobby. Apply its channels here, then drop the file
-        # so the next channel election starts clean. This migrates one node
-        # per tourguide turn; the shrinking remainder either follows the same
-        # way or fails quorum and gets rescued via the lobby.
+        # Apply PARTITION_MERGE channels when tourguide-manager finds a larger
+        # lobby partition, then remove the state file before the next election.
+        # One node migrates per tourguide turn. Remaining nodes follow or lose
+        # quorum and receive lobby rescue.
         if ! acs_agreement_busy && [ -f "$ELECTION_OUTPUT_FILE" ] && grep -q "^PARTITION_MERGE=true" "$ELECTION_OUTPUT_FILE"; then
             MERGE_2_4=$(grep "^WINNER_2_4=" "$ELECTION_OUTPUT_FILE" | cut -d'=' -f2)
             MERGE_5_0=$(grep "^WINNER_5_0=" "$ELECTION_OUTPUT_FILE" | cut -d'=' -f2)
@@ -934,8 +890,8 @@ while true; do
         run_service_elections
 
         # === STAGE 10: TOURGUIDE (every 2 min at :30) ===
-        # The runner checks live HaLow readiness before election and departure;
-        # an available S1G recovery radio keeps both Wi-Fi radios on data.
+        # Check live HaLow readiness before election and departure. An available
+        # S1G recovery radio keeps both Wi-Fi radios on data.
         if ! acs_agreement_busy && should_perform_tourguide; then
             log "=== TOURGUIDE WINDOW ==="
             [ -x "$TOURGUIDE_MANAGER" ] && "$TOURGUIDE_MANAGER" &

@@ -1,5 +1,5 @@
 #!/bin/sh
-# Installation/update integration; no driver load, removal or reload here.
+# Install/update integration without driver loading, removal or reload.
 set -eu
 systemctl enable manet-mt7916-firmware.service
 systemctl enable manet-mt7916-firmware-survived.service

@@ -23,7 +23,7 @@ def snapshot(unit, root=Path('/')):
     fields = (root / 'proc/stat').read_text().splitlines()[0].split()
     if fields[0] != 'cpu' or len(fields) < 9:
         raise ValueError('missing aggregate CPU counters')
-    ticks = list(map(int, fields[1:9]))  # guest fields already included in user/nice
+    ticks = list(map(int, fields[1:9]))  # Guest counted in user/nice
     busy = (sum(ticks) - ticks[3] - ticks[4]) / os.sysconf('SC_CLK_TCK')
     return {'invocation': props['InvocationID'], 'cgroup': group, 'cpu': cpu,
             'system_busy': busy, 'at': time.monotonic()}

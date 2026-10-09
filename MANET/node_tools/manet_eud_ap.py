@@ -95,7 +95,7 @@ def apply_local(changes, mesh_conf, hostapd='/etc/hostapd/hostapd.conf',
             except (OSError, subprocess.SubprocessError):
                 failures.append('hostapd restart')
         detail = '; recovery failed: ' + ', '.join(failures) if failures else '; previous settings restored'
-        # CalledProcessError can contain argv; do not include configuration data.
+        # CalledProcessError may contain argv. Exclude configuration data.
         raise RuntimeError('Cannot activate local AP settings' + detail) from error
 
 

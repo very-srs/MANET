@@ -1,7 +1,6 @@
 #!/bin/bash
-# Mumble Election Script with Database Synchronization
-# Elects Mumble server based on mesh centrality (TQ)
-# Manages database sync via Syncthing to prevent data loss
+# Elect a Mumble server by mean mesh throughput and synchronize its database
+# through Syncthing to preserve data across leadership changes.
 
 # --- Configuration ---
 REGISTRY_STATE_FILE="/var/run/mesh_node_registry"
@@ -20,8 +19,7 @@ BACKUP_DIR="${SHARED_DB_DIR}/backups"
 MUMBLE_IPV4_VIP=""
 MUMBLE_IPV6_VIP=""
 
-# Incumbent bias: current leader gets this many TQ points added to their score.
-# Prevents service migration due to normal TQ fluctuation.
+# The shared ranker adds a 10 Mbit/s incumbent bias to reduce service churn.
 
 # State
 MY_MAC=$(cat "/sys/class/net/${CONTROL_IFACE}/address" 2>/dev/null || true)
@@ -187,7 +185,7 @@ safe_copy_database() {
 create_initial_database() {
     log "No shared database found. Initializing from current installation."
     
-    # If we have a working database, copy it to shared location
+    # Copy a valid local database to the shared directory.
     if [ -f "$WORKING_DB" ]; then
         log "Copying existing working database to Syncthing"
         
@@ -221,7 +219,7 @@ sync_database_from_shared() {
     if ! check_database_integrity "$SHARED_DB" "shared"; then
         log "ERROR: Shared database failed integrity check, will not sync"
         
-        # Check if we have a recent backup
+        # Check for a recent backup.
         local latest_backup=$(ls -t "$BACKUP_DIR"/*.sqlite 2>/dev/null | head -1)
         if [ -n "$latest_backup" ]; then
             log "Attempting to use latest backup: $(basename $latest_backup)"
@@ -405,10 +403,10 @@ fi
 
 # --- Decision and Action ---
 if [ -z "$BEST_CANDIDATE_MAC" ]; then
-    # === NO WINNER ===
+    # No eligible winner
     log "No suitable candidates found"
     
-    # Remove VIPs if we have them
+    # Remove locally held VIPs.
     if ip addr show dev "$CONTROL_IFACE" | grep -q "inet $MUMBLE_IPV4_VIP/"; then
         ip addr del "$IPV4_VIP_WITH_MASK" dev "$CONTROL_IFACE" 2>/dev/null
     fi
@@ -428,10 +426,10 @@ if [ -z "$BEST_CANDIDATE_MAC" ]; then
     rm -f /var/run/mesh-mumble.state
 
 elif [ "$MY_MAC" == "$BEST_CANDIDATE_MAC" ]; then
-    # === I WON ===
+    # Local leader
     log "Won election (TQ: $HIGHEST_TQ)"
     
-    # Check if we already have VIPs
+    # Check whether VIPs are assigned locally.
     HAS_IPV4_VIP=false
     HAS_IPV6_VIP=false
     
@@ -500,10 +498,10 @@ elif [ "$MY_MAC" == "$BEST_CANDIDATE_MAC" ]; then
     touch /var/run/mesh-mumble.state
 
 else
-    # === I LOST ===
+    # Remote leader
     log "Lost election to ${BEST_CANDIDATE_MAC}"
     
-    # Remove VIPs if we have them
+    # Remove locally held VIPs.
     if ip addr show dev "$CONTROL_IFACE" | grep -q "inet $MUMBLE_IPV4_VIP/"; then
         log "Removing IPv4 VIP"
         ip addr del "$IPV4_VIP_WITH_MASK" dev "$CONTROL_IFACE" 2>/dev/null

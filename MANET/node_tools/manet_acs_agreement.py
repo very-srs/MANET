@@ -1,4 +1,4 @@
-"""Bounded majority ACS agreement; authenticated I/O lives in the runner.
+"""Bounded majority ACS agreement with authenticated I/O in the runner.
 
 A coordinator proposes one immutable plan per round. Votes bind the complete
 plan, membership and activation time. This is partition-local agreement, not
@@ -139,7 +139,7 @@ def can_vote(plan, own, view, now):
 
 
 def valid_commit(commit, plan):
-    """Authenticated coordinator attestation; not independent peer signatures."""
+    """Authenticated coordinator proof, not independent peer signatures."""
     if not isinstance(commit, dict) or set(commit) != {'plan', 'approvals', 'issued_at'}:
         return False
     votes = commit['approvals']
@@ -203,10 +203,10 @@ def network_destinations(destinations, members):
 
 
 def advance(saved, own, now, view, records, proposal=None, local=None):
-    """Return (state, outgoing, apply). Persist BEFORE publishing or applying.
+    """Return (state, outgoing, apply). Persist before publishing or applying.
 
     view=None means discovery failed, never an empty mesh. Existing promises
-    survive that failure; their fixed deadline is unchanged. A node votes for
+    survive that failure with their fixed deadline unchanged. A node votes for
     at most one plan per round, including across process restarts.
     """
     state = deepcopy(saved)
@@ -232,9 +232,9 @@ def advance(saved, own, now, view, records, proposal=None, local=None):
     if plan is None:
         return state, {}, None
     # A newly reachable group (over HaLow or any other interface) is part of
-    # the same decision domain. Don't finish an uncommitted island election
-    # after learning that membership has expanded. Already-issued commitments
-    # still execute; reconciliation follows in a later shared round.
+    # the same decision domain. Stop uncommitted island elections when
+    # membership expands. Execute issued commitments, then reconcile in a
+    # shared round.
     if view and set(view) - set(plan['participants']) and 'commit' not in state:
         state['phase'] = 'expired'
         return state, {}, None

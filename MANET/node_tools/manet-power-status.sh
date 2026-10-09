@@ -1,23 +1,10 @@
 #!/bin/bash
-# Power / throttling status
-# Answers one question, on login and on demand: is this board getting enough
-# power?
-#
-# It usually is not, and nothing said so. The carrier boards these run on sit
-# at the edge of their envelope with a HaLow card and a PCIe Wi-Fi card drawing
-# at once, and a sagging supply does not announce itself - it presents as a
-# radio that will not associate, a USB card that stops answering, or a board
-# that resets with no shutdown in the journal. Hours have gone into chasing
-# those as driver bugs. The SoC has known the answer the whole time.
-#
-# Installed as /etc/update-motd.d/55-manet-power so it prints on every SSH
-# login, read by mesh-status.py for the web UI, and runnable directly.
-#
-#   manet-power-status.sh          human summary (the motd form)
-#   manet-power-status.sh --json   machine readable, for the web UI
-#
-# Never fails: a motd hook that errors breaks the login banner, and the status
-# page must render on hardware that has no throttling interface at all.
+# Report board power and throttling status on demand and at SSH login.
+# Supply sag under simultaneous HaLow and PCIe Wi-Fi load can cause failed
+# associations, unresponsive USB radios or resets without shutdown logs.
+# Installed as /etc/update-motd.d/55-manet-power. mesh-status.py reads --json
+# for the web UI, and direct calls print the human summary.
+# Always succeed so MOTD and status work without a throttling interface.
 
 usage() {
     printf '%s\n' 'usage: manet-power-status.sh [--json]' >&2
@@ -28,9 +15,8 @@ if [ $# -gt 1 ] || { [ $# -eq 1 ] && [ "$1" != --json ]; }; then
     exit 1
 fi
 
-# vcgencmd reports a bitmask. Low bits are live state, bits 16+ are sticky
-# "has happened since boot" flags - which are the useful ones, because the
-# event that killed a radio is over by the time anyone logs in to look.
+# vcgencmd low bits report live state. Sticky bits 16+ record events since
+# boot, including faults that end before the operator checks status.
 BIT_UNDERVOLT_NOW=0x1
 BIT_CAPPED_NOW=0x2
 BIT_THROTTLED_NOW=0x4
@@ -52,8 +38,7 @@ read_throttled() {
 
 RAW="$(read_throttled)" || RAW=""
 
-# Rock 3A and anything else without the Broadcom mailbox: say nothing rather
-# than imply the board is fine. There is no measurement to report.
+# Report no measurement on Rock 3A or other boards without a Broadcom mailbox.
 if [ -z "$RAW" ]; then
     if [ "$1" = "--json" ]; then
         echo '{"available": false}'
@@ -73,9 +58,8 @@ CAPPED_EVER=$(has $BIT_CAPPED_EVER)
 THROTTLED_EVER=$(has $BIT_THROTTLED_EVER)
 SOFTTEMP_EVER=$(has $BIT_SOFTTEMP_EVER)
 
-# Under-voltage is the fault worth shouting about: capping and throttling are
-# usually its consequence, and the soft temperature limit is a separate,
-# far less mysterious problem.
+# Prioritize under-voltage, which often causes capping and throttling.
+# The soft temperature limit is a separate condition.
 if   [ "$UNDERVOLT_NOW" = true ];  then STATE=critical
 elif [ "$UNDERVOLT_EVER" = true ]; then STATE=warning
 elif [ "$THROTTLED_NOW" = true ] || [ "$SOFTTEMP_NOW" = true ]; then STATE=warning

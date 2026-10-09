@@ -15,7 +15,7 @@ if [ -z "$PREFIX_CIDR" ]; then
     exit 1
 fi
 
-# Normalize prefix: strip CIDR length, ensure we have the first 4 hextets.
+# Normalize the prefix to its first four hextets without the CIDR length.
 PREFIX=${PREFIX_CIDR%/*} # Remove /XX suffix
 PREFIX=$(printf '%s\n' "$PREFIX" |
     sed 's/::$//; s/:$//') # Remove trailing :: or :
@@ -38,7 +38,7 @@ for hextet in "${HEXTETS[@]}"; do
         # Found the '::' compression
         SEEN_EMPTY=true
         # Calculate how many zero hextets to insert to reach 4 total
-        MISSING=$((4 - ${#HEXTETS[@]} + 1)) # +1 because the empty string counts as one hextet
+        MISSING=$((4 - ${#HEXTETS[@]} + 1)) # The empty hextet counts as one.
         for ((j=0; j<MISSING; j++)); do
             EXPANDED_PREFIX_ARRAY+=("0000")
         done
@@ -46,7 +46,7 @@ for hextet in "${HEXTETS[@]}"; do
         # Add non-empty hextet, padding with leading zeros
         EXPANDED_PREFIX_ARRAY+=("$(printf "%04x" "0x${hextet}")")
     fi
-    # Stop processing if we already have 4 hextets (handles cases like fdXX::/48)
+    # Stop at four hextets, including fdXX::/48 prefixes.
     if [[ ${#EXPANDED_PREFIX_ARRAY[@]} -ge 4 ]]; then
         break
     fi
@@ -69,8 +69,7 @@ if ! [[ "$EXPANDED_PREFIX" =~ ^fd[0-9a-fA-F]{2}:[0-9a-fA-F]{4}:[0-9a-fA-F]{4}:[0
     exit 1
 fi
 
-# --- Suffix Generation (remains the same) ---
-# Hash the normalized /64 prefix to derive a deterministic suffix
+# Hash the normalized /64 prefix into a deterministic suffix.
 if command -v md5sum >/dev/null; then
     HASH_BYTE=$(printf '%s' "${EXPANDED_PREFIX}-mediamtx" | md5sum | cut -c1-2)
 elif command -v sha256sum >/dev/null; then
@@ -81,7 +80,7 @@ else
     exit 1
 fi
 
-# Convert hash byte to decimal offset (100-511)
+# One hash byte gives decimal offsets 100-355 after adding the service base.
 OFFSET=$(( 0x$HASH_BYTE % 412 + 100 ))
 
 # Form the VIP: normalized prefix + :: + offset (in hex)

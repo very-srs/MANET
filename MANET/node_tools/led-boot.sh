@@ -1,5 +1,5 @@
 #!/bin/bash
-# External boot display; the service runs independently of boot completion.
+# External boot display. The service runs independently of boot completion.
 source "$(dirname "${BASH_SOURCE[0]}")/manet-led-common.sh"
 
 BLINK_HALF=0.5
@@ -12,8 +12,8 @@ mesh_ready() {
 }
 
 boot_blink() {
-    # Button displays own the harness for their entire sequence; boot yields
-    # between half-cycles without losing its state or blocking node services.
+    # Button displays own the harness for their full sequence. Boot yields
+    # between half-cycles, preserving state without blocking node services.
     if led_lock; then
         led_set "$@"
         led_sleep "$BLINK_HALF"
@@ -37,7 +37,7 @@ tick=0
 unknown=0
 while true; do
     # Green blink: confirmed zero peers / initial check pending.
-    # Amber blink: query unavailable; never declare mesh formation on failure.
+    # Amber blink: query unavailable. Failure cannot confirm mesh formation.
     boot_blink "$((unknown * toggle))" "$toggle" 0
     toggle=$((1 - toggle))
     tick=$((tick + 1))

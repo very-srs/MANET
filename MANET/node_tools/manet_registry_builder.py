@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Build the Alfred registry in one process; decode only changed payloads.
+"""Build the Alfred registry in one process and decode only changed payloads.
 
-Keep the shell entry point for callers. The IP discovery helper imports build
-directly, so one allocation pass pays for one interpreter and at most one
-protobuf import, irrespective of mesh size. Freshness is NEVER cached.
+The shell entry point serves callers. IP discovery imports build directly,
+using one interpreter and at most one protobuf import per allocation pass,
+independent of mesh size. Never cache freshness.
 """
 
 import base64
@@ -115,7 +115,7 @@ def build():
 def _build(registry, claims, observed):
     snapshots = []
     for type_id in (67, 68):
-        # Read BOTH successfully before touching any published state.
+        # Read both successfully before touching any published state.
         raw = subprocess.run(['alfred', '-r', str(type_id)], check=True,
                              capture_output=True, text=True, timeout=5).stdout
         snapshots.append({mac.lower(): payload for mac, payload in RECORD.findall(raw) if payload})

@@ -1,15 +1,9 @@
 #!/bin/bash
-# Point node-manager.sh at the orchestrator mesh.conf selects: the ACS
-# (automatic channel) variant when acs is on, the static variant otherwise.
-#
-# Runs before every node-manager start (node-manager.service.d/select.conf),
-# so the choice follows mesh.conf at each boot and each restart. A relative
-# symlink, swapped in atomically, so nothing ever sees a missing or
-# half-written node-manager.sh.
-#
-# --service-start (the service's ExecStartPre only) also records which
-# variant this start runs in $RUN_DIR/node-manager.running, so a config apply
-# can tell whether the running manager matches the selection.
+# Point node-manager.sh at the ACS or static variant selected by mesh.conf.
+# node-manager.service.d/select.conf runs this before every start. Swap the
+# relative symlink atomically so callers never see a missing target.
+# --service-start records the running variant in $RUN_DIR/node-manager.running
+# for config apply to compare with the selected variant.
 
 BIN_DIR="${MANET_BIN_DIR:-/usr/local/bin}"
 MESH_CONF="${MANET_MESH_CONF:-/etc/mesh.conf}"
@@ -35,7 +29,7 @@ record_running() {
 }
 
 acs=$(sed -n 's/^acs=//p' "$MESH_CONF" 2>/dev/null | tail -n 1)
-# Every writer produces y/n; stay liberal about a hand-edited mesh.conf.
+# Writers use y/n. Also accept common hand-edited boolean spellings.
 if [[ "$acs" =~ ^([Yy]|[Yy][Ee][Ss]|1|[Tt][Rr][Uu][Ee])[[:space:]]*$ ]]; then
     target=node-manager-acs.sh
 else

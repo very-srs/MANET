@@ -1,14 +1,8 @@
 #!/usr/bin/env python3
-"""
-Alfred-coordinated MANET radio state changes.
+"""Stage and apply Alfred-coordinated radio state changes.
 
-sync:
-  - reads the latest radio-state package from Alfred type 71
-  - stages it locally and publishes an ACK on Alfred type 72
-  - applies it at activate_at after the coordinator has collected ACKs
-
-apply:
-  - applies a staged package from disk
+sync reads type 71, stages locally, ACKs on type 72 and applies at
+activate_at after coordinator ACK collection. apply uses a staged disk file.
 """
 
 import json
@@ -39,9 +33,8 @@ LOG_FILE = "/var/log/mesh-radio-state.log"
 VALID_IFACES = ("wlan0", "wlan1", "wlan2")
 VALID_STATES = ("up", "down")
 ADMIN = AdminTransport()
-# Keys a radio_state package may carry besides "desired". Every one of these
-# is a change that has to land on every node at the same time, which is why
-# they are staged through Alfred rather than pushed node to node.
+# Extra radio_state keys beyond "desired". Stage through Alfred so every
+# node applies these changes at the shared activation time.
 ACTION_KEYS = ("desired", "txpower", "halow_channel", "wifi_channel",
                "uplink_wifi", "voice_codec")
 
@@ -388,8 +381,8 @@ def sync_once(raw=None):
 
     if activate_at > 0 and int(time.time()) >= activate_at and not already_applied:
         try:
-            # Persist consumption before a radio/service change can interrupt
-            # us. Retry failures by staging a new authenticated transaction.
+            # Persist consumption before radio/service changes can interrupt
+            # this process. Retry with a new authenticated transaction.
             ADMIN.complete(ALFRED_RADIO_TYPE, message)
             apply_package(pkg)
             write_text(APPLIED_VERSION_FILE, version)

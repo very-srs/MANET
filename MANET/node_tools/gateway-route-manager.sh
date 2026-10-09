@@ -8,12 +8,10 @@ STARTUP_POLL_INTERVAL=1
 read -r started _ < /proc/uptime
 FAST_POLL_UNTIL=$(( ${started%.*} + 90 ))
 LOCK_FILE=/var/run/gateway-route-manager.lock
-# Switching gateways breaks every open internet connection (the new gateway
-# NATs with a different address), so a node moves only for a noticeable gain:
-# SWITCH_RATIO times the current score and SWITCH_MIN_GAIN Mbit/s more,
-# holding for SWITCH_SUSTAIN seconds, and not within SWITCH_HOLD seconds of
-# the last switch. A gateway that disappears, or stops answering for
-# UNREACHABLE_POLLS polls, is replaced at once.
+# Switching gateways changes the NAT address and breaks open connections.
+# Require SWITCH_RATIO times the score and SWITCH_MIN_GAIN Mbit/s more for
+# SWITCH_SUSTAIN seconds, outside SWITCH_HOLD since the last switch.
+# Replace a missing gateway or one failing UNREACHABLE_POLLS polls at once.
 SWITCH_RATIO=1.5
 SWITCH_MIN_GAIN=2
 SWITCH_SUSTAIN=60
@@ -23,11 +21,8 @@ UNREACHABLE_POLLS=2
 exec 200>"$LOCK_FILE"
 flock -n 200 || exit 0
 
-# The unit runs this with StandardError=journal and
-# SyslogIdentifier=gateway-route-manager, so stderr already lands in the
-# journal under the right tag. Piping to systemd-cat as well logged every line
-# twice and forked an extra process per line. Run by hand, stderr goes to the
-# terminal, which is what you want there.
+# The unit sends stderr to the journal with this program's SyslogIdentifier.
+# Avoid duplicate systemd-cat logging. Manual runs send stderr to the terminal.
 log() {
     printf '%s\n' "GW-ROUTE-MGR: $*" >&2
 }
@@ -42,12 +37,10 @@ poll_wait() {
     fi
 }
 
-# Every gateway batman knows, one "MAC SCORE" line each, best first (ties to
-# the lowest MAC). SCORE is the bottleneck in Mbit/s: the lower of the path
-# throughput to the gateway and the download bandwidth it announces, which an
-# Ethernet gateway measures (manet-uplink-speed.sh). batman also picks a
-# gateway itself ("*"), but that choice never reaches IPv4 routing and has no
-# time gate, so it is ignored here.
+# Emit "MAC SCORE" for each gateway, best first, ties by lowest MAC.
+# SCORE is the smaller of path throughput and advertised download Mbit/s
+# (measured by manet-uplink-speed.sh for Ethernet gateways).
+# Ignore batman's "*" choice: it neither sets IPv4 routes nor applies a timer.
 gateway_scores() {
     batctl gwl -H -n 2>/dev/null | awk '
         {
@@ -65,8 +58,8 @@ gateway_scores() {
         }' | sort -k2,2nr -k1,1
 }
 
-# Is CANDIDATE a noticeable improvement on CURRENT? Both are scores in
-# Mbit/s. Relative and absolute, so it means the same at HaLow and Wi-Fi rates.
+# Require both relative and absolute Mbit/s improvement over CURRENT,
+# so the same comparison applies at HaLow and Wi-Fi rates.
 noticeably_better() {
     awk -v c="$1" -v cur="$2" -v r="$SWITCH_RATIO" -v g="$SWITCH_MIN_GAIN" \
         'BEGIN { exit !(c >= cur * r && c - cur >= g) }'
@@ -136,11 +129,8 @@ while true; do
 
     scores="$(gateway_scores || true)"
     if [ -z "$scores" ]; then
-        # Nobody is announcing a gateway any more. A default route installed on
-        # an earlier pass now points at a node that has stopped NATing, so
-        # traffic black-holes instead of visibly failing: withdraw it. Only
-        # br0 routes are ours; a local uplink route lives on the ethernet iface
-        # and must be left alone.
+        # Withdraw the stale default route when no gateway advertises NAT.
+        # Remove only br0 routes, preserving local Ethernet uplink routes.
         if [[ " $cur " == *" dev br0 "* ]]; then
             ip route del default dev br0 2>/dev/null || true
             log "No mesh gateway announced; removed stale default route ($cur)"

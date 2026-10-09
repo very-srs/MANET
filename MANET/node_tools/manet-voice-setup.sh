@@ -1,11 +1,8 @@
 #!/bin/bash
-# One-shot voice bring-up for a node updated over the air.
-#
-# Tools updates install this script to add the GStreamer runtime through apt.
-# It runs once and removes itself after completing setup.
-#
-# Freshly flashed nodes already have these packages from firstrun.sh and skip
-# installation. The script still removes itself when no changes are needed.
+# Install GStreamer voice dependencies after a tools update. Freshly flashed
+# nodes already receive them from firstrun.sh and skip installation.
+# Disable and remove the setup unit after success, including when no package
+# changes are needed.
 
 set -u
 LOG="/var/log/manet-voice-setup.log"
@@ -20,9 +17,7 @@ for p in $PKGS; do
 done
 
 if [ -n "$missing" ]; then
-    # No uplink means no apt. Leave the unit in place so the next boot retries
-    # rather than marking voice permanently unavailable on a node that was
-    # simply offline at the wrong moment.
+    # Without an uplink, leave the unit installed so the next boot retries apt.
     if ! ping -c 1 -W 3 8.8.8.8 >/dev/null 2>&1; then
         echo "no uplink; leaving setup enabled to retry next boot"
         exit 0
@@ -49,10 +44,8 @@ udevadm trigger --subsystem-match=hidraw 2>/dev/null || true
 
 systemctl daemon-reload 2>/dev/null || true
 
-# Lyra is the default codec and the update carries the plugin, but a board that
-# has not yet taken an update carrying it falls back to opus -- and on a lyra
-# mesh that is not lower quality, it is deaf and mute. Say so in the log rather
-# than leaving it to be discovered on the air.
+# Lyra is the default. A missing plugin forces opus, which cannot talk to
+# Lyra peers. Log the incompatible fallback.
 if grep -qE '^voice_codec=lyra' /etc/mesh.conf 2>/dev/null; then
     if [ -f /usr/lib/aarch64-linux-gnu/gstreamer-1.0/libgstlyra.so ] \
        && [ -d /usr/local/share/lyra/model_coeffs ]; then
@@ -63,8 +56,7 @@ if grep -qE '^voice_codec=lyra' /etc/mesh.conf 2>/dev/null; then
     fi
 fi
 
-# Only start voice if this node is configured for it; the daemon exits 0 on
-# voice=n anyway, but starting it would be noise.
+# Start voice only when enabled, avoiding an immediate exit on voice=n.
 if grep -qE '^voice=(y|yes|true|1|on)$' /etc/mesh.conf 2>/dev/null; then
     echo "voice=y: starting mesh-voice"
     systemctl enable --now mesh-voice.service 2>/dev/null || true

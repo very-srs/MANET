@@ -1,13 +1,9 @@
 #!/bin/bash
-# Count distinct BATMAN originators; an unavailable table is never zero peers.
-#
-#   mesh-peer-count.sh [--batctl PATH] [--list]
-#
-# Prints how many distinct originator MACs batman-adv knows, or with --list
-# the MACs themselves (lowercase, sorted, one per line). Multiple routes and
-# interfaces to one originator count once. A failed, timed-out or malformed
-# query exits 1 with nothing on stdout, so a caller can never mistake "could
-# not ask" for "alone".
+# Count distinct BATMAN originators across interfaces and routes.
+# Usage: mesh-peer-count.sh [--batctl PATH] [--list]
+# --list prints lowercase sorted MACs, one per line. Otherwise print a count.
+# Failed, timed-out or malformed queries exit 1 without output so an
+# unavailable table cannot imply isolation.
 
 batctl=/usr/sbin/batctl
 list=false
@@ -26,13 +22,12 @@ fail() {
     exit 1
 }
 
-# KILL after a grace period: a child ignoring TERM must not hang the caller.
+# Kill after the grace period if a child ignores TERM, bounding the wait.
 table=$(timeout --kill-after=2 5 "$batctl" meshif bat0 originators_json 2>/dev/null) ||
     fail "originator query failed"
 [ -n "$table" ] || fail "empty originator response"
 
-# Slurp, so a response holding more than one JSON document is refused rather
-# than counted document by document.
+# Slurp to reject multiple JSON documents in a response.
 peers=$(jq -rs '
     if length != 1 then error("expected exactly one originator table") else .[0] end
     | if type != "array" then error("originators response is not a list") else . end

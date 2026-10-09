@@ -30,8 +30,7 @@ restore_halow_primary_if_needed() {
     now="$(uptime_now)" || return 0
     last=""
     [ ! -r "$cooldown_file" ] || read -r last < "$cooldown_file"
-    # Boot-clock seconds. Missing, malformed, or ahead of the boot clock (a
-    # wall time written by an older version) means no cooldown is running.
+    # Boot-clock seconds. Missing, malformed or future values disable cooldown.
     [[ "$last" =~ ^[0-9]+$ ]] && [ "$last" -le "$now" ] || last=-1000000
     if [ $((now - last)) -lt 60 ]; then
         return 0
@@ -45,13 +44,9 @@ restore_halow_primary_if_needed() {
 }
 
 # hostapd can be left "active" over a dead BSS: something downed or re-moded
-# the netdev under it - a unit racing the AP at boot, a PCIe reset when the
-# supply sags - and hostapd neither exits nor rebuilds. It logs nothing, so
-# the AP is simply gone until someone restarts it by hand. A live AP has an
-# SSID on the netdev; one that has been deinited keeps "type AP" and loses it.
-# The SSID rather than the carrier, because a DFS channel-availability check
-# has the SSID set with the carrier still down, and restarting through CAC
-# would mean it never finishes.
+# the netdev. PCIe resets can also leave it active without an SSID.
+# Check the SSID because DFS CAC keeps the carrier down while the SSID is
+# set. Restarting during CAC prevents it from completing.
 ap_is_serving() {
     iw dev "$1" info 2>/dev/null | awk '$1 == "type" { t = $2 } $1 == "ssid" { s = 1 }
         END { exit !(t == "AP" && s) }'
@@ -83,8 +78,7 @@ restart_dead_ap_if_needed() (
     cooldown_file="/run/batman-enslave-watch-ap-restart"
     now="$(uptime_now)" || return 0
     last="$(cat "$cooldown_file" 2>/dev/null)"
-    # Boot-clock seconds. Missing, malformed, or ahead of the boot clock (a
-    # wall time written by an older version) means no cooldown is running.
+    # Boot-clock seconds. Missing, malformed or future values disable cooldown.
     [[ "$last" =~ ^[0-9]+$ ]] && [ "$last" -le "$now" ] || last=-1000000
     if [ $((now - last)) -lt 60 ]; then
         return 0
@@ -108,12 +102,10 @@ while true; do
     # One membership snapshot per check, refreshed after a successful add.
     BAT_MEMBERS=$(batctl bat0 if 2>/dev/null) || BAT_MEMBERS=""
 
-    # Enforce mesh_plink_timeout=0 on HaLow interfaces. The inactivity-based
-    # plink close triggers a Morse firmware stuck state during key teardown
-    # (morse_cmd_disable_key ENODEV) that only a hard reboot recovers from.
-    # The param resets to default whenever wpa_supplicant_s1g re-forms the
-    # mesh, so enforce it here rather than once at boot. The get/set only
-    # succeeds after the mesh is joined; failures are silently retried.
+    # Keep mesh_plink_timeout=0 on HaLow. Inactivity-based plink closure can
+    # wedge Morse firmware during key teardown (morse_cmd_disable_key ENODEV)
+    # until a hard reboot. Re-forming the mesh resets the parameter.
+    # Get/set works only after joining the mesh, so retry failures each pass.
     for IFACE in $HALOW_IFS; do
         radio_iface_enabled "$IFACE" || continue
         CUR="$(iw dev "$IFACE" get mesh_param mesh_plink_timeout 2>/dev/null)"

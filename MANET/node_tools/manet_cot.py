@@ -1,31 +1,23 @@
-"""Pure CoT XML builders and an untrusted marker-candidate parser.
+"""Build CoT XML and parse untrusted marker candidates.
 
-Builders return UTF-8 bytes (or None for suppressed geography). ``now`` is
-an aware datetime in the recipient's clock domain; no function reads a clock.
-For the tethered phone, use PhonePosition.outbound_time for every builder,
-including contact refresh, chat and retirement. Fixes must already be current
-and in WGS84, with height above the ellipsoid in metres, not MSL altitude.
-Error estimates specify their confidence as a probability, e.g. 0.90.
-Only 90% estimates become ce/le; other confidences leave ce/le unknown
-rather than being silently converted without an error model.
-
-Wire choices follow TAK-Product-Center/atak-civ main, inspected 2026-10-06:
+Builders return UTF-8 bytes or None for suppressed geography. now is an
+aware datetime in the recipient's clock domain. Use PhonePosition.outbound_time
+for all tethered-phone builders. No function reads a clock. Fixes must be
+current WGS84 with ellipsoid height in metres, not MSL. Only confidence 0.90
+maps to ce/le. Other probabilities require an error model and stay unknown.
+Wire references: TAK-Product-Center/atak-civ main, 2026-10-06:
 * takkernel/shared/.../cot/event/CotPoint.java: UNKNOWN=9999999, ZERO,
-  HAE metres and circular error radius; toGeoPoint preserves ce/le.
-* takkernel/engine/.../maps/coords/GeoPoint.java: CE90/LE90 and altitude bounds.
-* atak/ATAK/app/.../contact/ContactListDetailHandler.java: friendly contact,
-  callsign and endpoint; chat/GeoChatService.java: hidden-location chat.
-Phone classifications use the precisionlocation provenance fields; marker
-ownership uses the creator UID and original creation time.
-
-This is TAK transport protocol 0, with CoT schema version 2.0. parse_marker
-accepts exactly one complete XML document, not a TCP read or protobuf frame.
-The listener must bound its buffer, handle split/coalesced reads, and frame
-complete events. Direct v0 TCP sends normally close after one message;
-streaming v0 uses concatenated XML documents ending in </event>. Do not
-advertise TakControl/protobuf support. A parsed candidate grants no authority:
-manet_phone applies the authorized Ethernet/creator/epoch policy; other
-candidates need an explicit acceptance path.
+  HAE metres, circular error radius and toGeoPoint ce/le preservation.
+* takkernel/engine/.../maps/coords/GeoPoint.java: CE90/LE90, altitude bounds.
+* atak/ATAK/app/.../contact/ContactListDetailHandler.java: friendly contacts,
+  callsign, endpoint. chat/GeoChatService.java: hidden-location chat.
+Phone classification uses precisionlocation. Ownership uses creator UID/time.
+Transport is TAK protocol 0, CoT schema 2.0. parse_marker takes one complete
+XML document. Listeners must bound buffers and frame split/coalesced reads.
+Direct v0 TCP normally closes after one message. Streaming v0 concatenates
+XML ending in </event>. Do not advertise TakControl/protobuf.
+manet_phone applies Ethernet/creator/epoch authorization. Other candidates
+need explicit acceptance.
 """
 
 from dataclasses import dataclass
@@ -42,7 +34,7 @@ DEFAULT_MAX_BYTES = 64 * 1024
 MAX_DEPTH = 32
 CHAT_STALE_S = 86400
 CONTACT_REFRESH_S = 30
-CONTACT_STALE_S = 3600         # Avoid repeated new-contact notifications on the phone
+CONTACT_STALE_S = 3600         # Avoid repeated new-contact alerts
 EXTERNAL_POSITION_PORT = 4349
 EXTERNAL_POSITION_STALE_S = 10
 EXTERNAL_SOURCE_PREFIX = "MANET:"
@@ -75,7 +67,7 @@ class Fix:
     mirror_resolved: bool | None = None
     remarks: str = ""
     # Dependent provenance, never independent position evidence. An accepted
-    # user gesture may feed this phone's external position; an echoed SA may not.
+    # user gesture may feed this phone's external position. An SA echo may not.
     phone_uid: str | None = None
 
 
@@ -112,11 +104,11 @@ class MarkCandidate:
 
 @dataclass(frozen=True)
 class PhoneSA:
-    """Claimed phone self SA; parsing cannot establish Ethernet ingress.
+    """Claimed phone self SA without Ethernet ingress proof.
 
     gps/manual describe the observed ATAK metadata, not GNSS authenticity.
-    Endpoint is preserved verbatim, including tcpsrcreply:4242:srctcp; it is
-    not a resolved address and must not be used to authorize the sender.
+    Preserve Endpoint verbatim, including tcpsrcreply:4242:srctcp. It is not
+    a resolved address and must not authorize the sender.
     """
 
     uid: str
@@ -254,7 +246,7 @@ def hidden_contact(uid, callsign, contact_endpoint, now, stale_s=CONTACT_STALE_S
     """Advertise the radio's reachable contact without asserting a location.
 
     Pixel 6a/ATAK 5.6 accepts CotPoint.ZERO for contacts and Send targets.
-    It may draw an icon at 0,0; this is not the radio's geographic position.
+    Any icon at 0,0 does not represent the radio's geographic position.
     No selected fix, spoof state or warning label belongs in this builder.
     """
     event = _event(uid, RADIO_TYPE, "m-g", now, stale_s)
@@ -273,19 +265,16 @@ def hidden_contact(uid, callsign, contact_endpoint, now, stale_s=CONTACT_STALE_S
 
 
 def external_position(radio_uid, fix, now, stale_s=EXTERNAL_POSITION_STALE_S):
-    """Build selected own-location CoT for unicast UDP 4349, not normal SA.
+    """Build the selected own-location CoT for unicast UDP 4349.
 
-    Pass ONLY the selector's chosen Fix. This builder cannot establish GPS
-    freshness or trust. Phone GPS/SA-derived GNSS is rejected; an accepted
-    user mark is allowed. Use a separate stable UID because ExternalGPSInput
-    hides any existing map item whose UID equals this event's UID.
-
-    ExternalGPSInput uses point/precisionlocation/remarks, not incoming how
-    or stale for location expiry. Refresh about once a second while a chosen
-    position exists; stop when there is none. Never send a ZERO no-fix point.
-    Source tags survive into self SA and identify echoes without a parent link.
-    Hand-set self SA is eligible only after the feed stops. Unknown motion
-    is cleared with an empty track. Contacts and GeoChat use normal CoT.
+    Only pass the selector's Fix. This builder cannot establish GPS freshness
+    or trust. Reject phone GPS/SA-derived GNSS, but allow accepted user marks.
+    ExternalGPSInput hides items with this UID, so use a separate stable UID.
+    It uses point/precisionlocation/remarks, not how/stale, for location expiry.
+    Refresh about once a second while selected, then stop. Never send ZERO for
+    no fix. Source tags identify self-SA echoes without parent links. Hand-set
+    self SA is eligible only after the feed stops. Empty track clears unknown
+    motion. Contacts and GeoChat use normal CoT.
     """
     if not _usable(fix):
         return None
@@ -295,7 +284,7 @@ def external_position(radio_uid, fix, now, stale_s=EXTERNAL_POSITION_STALE_S):
     if radio_uid == fix.phone_uid:
         raise ValueError("radio UID must differ from phone UID")
     event = _event(radio_uid + ".external-position", RADIO_TYPE, _HOW[fix.source], now, stale_s)
-    _point(event, fix)  # Shared coordinate/HAE/error validation and CE90/LE90 conversion.
+    _point(event, fix)  # Validate coordinates/HAE/errors and convert CE90/LE90.
     if float(fix.lat) == 0 and float(fix.lon) == 0:
         raise ValueError("ATAK external position rejects latitude/longitude 0,0")
     source = EXTERNAL_SOURCE_PREFIX + fix.source
@@ -306,17 +295,17 @@ def external_position(radio_uid, fix, now, stale_s=EXTERNAL_POSITION_STALE_S):
     ET.SubElement(detail, "remarks").text = {
         "gnss": "MANET radio GPS", "manual": "MANET user location", "ranged": "MANET ranged location",
     }[fix.source]
-    ET.SubElement(detail, "track")  # ATAK resets absent speed/course to NaN, not invented zero.
+    ET.SubElement(detail, "track")  # Absent speed/course resets to NaN.
     return _serialize(event)
 
 
 def contact_refresh_due(now_mono, last_sent_mono=None, *, changed=False, phone_reappeared=False):
-    """First send immediately, then every 30 s after a SUCCESSFUL send.
+    """Send immediately, then every 30 s after a successful send.
 
     Use CONTACT_STALE_S (3600 s) for each hidden contact event, including
     when no position is available.
     Record last_sent_mono only after successful transport, so failures remain
-    due. The service applies retry backoff; changes/reappearance send at once.
+    due. The service applies retry backoff. Changes/reappearance send at once.
     """
     now_mono = _number(now_mono, "now_mono")
     if type(changed) is not bool or type(phone_reappeared) is not bool:
@@ -334,8 +323,8 @@ def retire_marker(marker_uid, task_uid, now):
 
     ATAK CotDeleteImporter.importData reads t-x-d-d, detail/link uid with
     nonempty relation/type, and __forcedelete. Its documented example uses
-    relation=none/type=none. Without force it only requests staleness; even
-    force can be refused by remoteDelete=false. A built task is not a receipt.
+    relation=none/type=none. Without force it only requests staleness.
+    remoteDelete=false can refuse even forced deletion. A task is not a receipt.
     Only target UIDs returned by the selector's retirement list, never
     arbitrary candidates, phone self SA, or the radio's contact UID.
     """
@@ -455,12 +444,12 @@ def _optional_number(point, name):
 
 
 def parse_marker(data: bytes, max_bytes=DEFAULT_MAX_BYTES):
-    """Return MarkCandidate or a rejection-reason string; never authorize it.
+    """Return an untrusted MarkCandidate or a rejection-reason string.
 
     Accept atom (a-*) and point-marker (b-m-p*) event families. Chat, control,
     routes and shapes are not point observations. Unknown detail extensions
     are ignored, while duplicate known fields are rejected as ambiguous.
-    Built-in XML escapes are decoded; DTDs/custom/external entities are
+    Built-in XML escapes are decoded. DTDs/custom/external entities are
     forbidden. Byte and depth limits apply before a complete tree is built.
     An invalid max_bytes is a caller error (ValueError), not a wire rejection.
     """
@@ -535,13 +524,13 @@ def parse_self_sa(data: bytes, max_bytes=DEFAULT_MAX_BYTES):
     equipment marker. geopointsrc determines GPS, USER (manual), or MANET:
     (external), regardless of how. With no source, h-e is a dragged manual
     point unless a p-s link identifies an echo. ZERO is always presence only.
-    Unknown providers remain unknown; parent links are a fallback echo guard.
+    Unknown providers remain unknown. Parent links are a fallback echo guard.
     This is classification of claims, never authentication or ingress proof.
     """
     _byte_limit(max_bytes)
     try:
         root = _parse_document(data, max_bytes)
-        mark = _marker_from_root(root, allow_zero=True)  # A no-location SA still proves presence.
+        mark = _marker_from_root(root, allow_zero=True)  # Presence, no fix.
         if mark.type != "a-f-G-U-C":
             raise ValueError("event is not phone self SA (expected a-f-G-U-C)")
         detail = _child(root, "detail")
@@ -650,7 +639,7 @@ def parse_chat_receipt(data: bytes, max_bytes=DEFAULT_MAX_BYTES):
 
 @dataclass(frozen=True)
 class PhoneChat:
-    """Untrusted direct chat claims; authorize with PhonePosition.feed_chat.
+    """Untrusted chat claims requiring PhonePosition.feed_chat authorization.
 
     Text/callsign are plain display data, not HTML, commands or an alert ack.
     No endpoint or geography from this packet grants authority.
@@ -726,18 +715,15 @@ class _FrameTarget(_SafeTreeBuilder):
 
 
 class CotStreamFramer:
-    """Bounded protocol-0 XML framing, one instance per TCP connection.
+    """Frame protocol-0 XML with one bounded instance per TCP connection.
 
-    feed(bytes) returns a list of complete documents, each <= max_bytes.
-    Limits apply per document, so a coalesced read may contain many frames.
-    Framing accepts UTF-8/ASCII-compatible XML (not UTF-16). It is XML-aware:
-    comments/CDATA containing </event> cannot split a message. finish()
-    checks EOF; an incomplete frame, DTD,
-    excessive depth, bad XML or oversize raises ValueError and poisons the
-    instance. Close that connection; do not resynchronize hostile input.
-    If feed raises, discard its entire batch (no partial list is returned).
-    Inter-document ASCII whitespace is discarded. Trailing comments belong
-    to the next document and need an event before EOF. No clock/socket I/O.
+    feed(bytes) returns a list of documents, each <= max_bytes. Accept UTF-8
+    or ASCII-compatible XML, not UTF-16. Comments/CDATA with </event> cannot
+    split a frame. DTDs, excessive depth, invalid/oversize XML and incomplete
+    frames at finish() raise ValueError and poison the instance. Discard the
+    whole feed batch on error and close without resynchronizing. Discard ASCII
+    whitespace between documents. Trailing comments require an event before
+    EOF. No clock/socket I/O.
     """
 
     def __init__(self, max_bytes=DEFAULT_MAX_BYTES):

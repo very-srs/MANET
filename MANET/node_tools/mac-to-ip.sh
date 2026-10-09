@@ -35,16 +35,13 @@ if [ -n "$IPV4" ]; then
     exit 0
 fi
 
-# If not found as primary MAC, search in MAC_ADDRESSES list
-# This handles cases where you query with wlan0/wlan1/end0 MAC instead of br0
+# Search MAC_ADDRESSES for interface MACs such as wlan0/wlan1/end0.
 while IFS= read -r line; do
     if [[ $line =~ NODE_([0-9A-Fa-f]+)_MAC_ADDRESSES=\'([^\']+)\' ]]; then
         NODE_ID="${BASH_REMATCH[1]}"
         MAC_LIST="${BASH_REMATCH[2]}"
 
-        # Check if our MAC is in this node's list
         if printf '%s\n' "$MAC_LIST" | grep -qi "$MAC_INPUT"; then
-            # Found it! Get the IPv4 for this node
             IPV4_VAR="NODE_${NODE_ID}_IPV4_ADDRESS"
             IPV4=$(grep "^${IPV4_VAR}=" "$REGISTRY_FILE" 2>/dev/null | cut -d'=' -f2 | tr -d "'")
 

@@ -1,14 +1,8 @@
 #!/bin/bash
-#
-# sae-watchdog.sh: monitors wpa_supplicant for MESH-SAE-AUTH-BLOCKED events
-# and automatically restarts wpa_supplicant + batman-enslave to recover.
-#
-# Background: when SAE handshake fails 4 times, wpa_supplicant blocks the peer
-# for 300 seconds. If this happens at boot before any peers are established,
-# batman-enslave ends up with no slaves and the node never joins the mesh.
-# A restart of wpa_supplicant clears the block state; batman-enslave re-run
-# re-adds the interfaces.
-#
+# Recover missing bat0 interfaces after MESH-SAE-AUTH-BLOCKED events.
+# Four failed SAE handshakes block a peer for 300 s, which can prevent boot
+# attachment. Restart wpa_supplicant to clear the block, then rerun
+# batman-enslave to attach interfaces.
 . "${MANET_TOOLS_DIR:-$(dirname "${BASH_SOURCE[0]}")}/manet-common.sh" || exit 1
 
 MESH_IF_FILE="${MANET_MESH_IF_FILE:-/var/lib/mesh_if}"
@@ -45,7 +39,7 @@ restart_mesh() {
             log "WARNING: failed to restart wpa_supplicant@${iface}.service"
     done
 
-    # Give wpa_supplicant time to re-establish mesh point mode before batman-enslave
+    # Wait for supplicant mesh point mode before batman-enslave.
     sleep 10
 
     log "Restarting batman-enslave to re-add interfaces to bat0..."
@@ -67,11 +61,9 @@ bat0_has_all_interfaces() {
     return 0
 }
 
-# Monitor journald for SAE block events across enabled mesh interfaces.
-# Until there is one (first boot before radio-setup assigns roles, or every
-# mesh radio turned off), wait here. Exiting instead made Restart=always
-# re-run the unit, and each start pulled in batman-enslave, which starts the
-# supplicants before they have a config.
+# Wait for an enabled mesh interface before monitoring SAE events. Exiting
+# would trigger Restart=always and pull in batman-enslave before configs
+# exist, or while every mesh radio is disabled.
 JOURNAL_ARGS=()
 waiting=""
 while :; do
@@ -98,9 +90,8 @@ while IFS= read -r line; do
     if [[ "$line" == *MESH-SAE-AUTH-BLOCKED* ]]; then
         log "Detected: $line"
 
-        # Only react if bat0 is missing interfaces: if we already have
-        # all mesh interfaces in bat0 the block is on a genuinely bad peer
-        # and restarting would cause unnecessary disruption.
+        # Restart only when bat0 lacks mesh interfaces. With all attached, a
+        # blocked peer does not justify disrupting a healthy mesh.
         if bat0_has_all_interfaces; then
             log "bat0 has all expected interfaces: skipping restart (blocked peer may be genuinely unreachable)"
             continue

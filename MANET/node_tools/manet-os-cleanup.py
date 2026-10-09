@@ -69,10 +69,10 @@ USER_UNITS = {
 
 
 def cron_consumers(root):
-    """Do not disable an operator's cron work when upgrading profile 1.
+    """Preserve cron when any job needs it.
 
     Stock run-parts scheduling is redundant only when every executable job
-    explicitly exits under systemd. Unknown jobs/tables conservatively keep cron.
+    exits under systemd. Unknown jobs/tables keep cron enabled.
     """
     consumers = []
     spool = root / 'var/spool/cron/crontabs'
@@ -146,8 +146,8 @@ def unit_inventory(prefix, names):
 
 
 def user_systemctl(user):
-    # Talk directly to systemd's private socket as its owner. This still works
-    # after removing the user's D-Bus service; never terminate login sessions.
+    # Use systemd's private socket as its owner after removing user D-Bus.
+    # Keep login sessions running.
     uid = pwd.getpwnam(user).pw_uid
     return ['runuser', '-u', user, '--', 'env', f'XDG_RUNTIME_DIR=/run/user/{uid}',
             'systemctl', '--user']
@@ -181,7 +181,7 @@ def apply_runtime(policy, users, record):
         for unit in names:
             if command(prefix + ['show', unit, '-p', 'LoadState', '--value']) != 'not-found':
                 execute(prefix + ['stop', unit])
-    # Package removal follows; system dbus.service/socket are never targeted.
+    # Package removal excludes system dbus.service/socket.
 
 
 def command(args, **kwargs):
@@ -280,7 +280,7 @@ def run(apply=False, force=False):
     apt = ['apt-get', '-o', 'DPkg::Lock::Timeout=120', '-o',
            'APT::AutoRemove::RecommendsImportant=false', '--autoremove', 'purge'] + targets
     if not targets:
-        # An interrupted run may have removed packages but not its swap/cache files.
+        # Interruption may leave swap/cache files after package removal.
         plan, removed = '', []
     else:
         # Preview with runtime roots pinned in a private copy of APT's state.

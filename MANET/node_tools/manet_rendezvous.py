@@ -56,8 +56,8 @@ def halow_ready():
             info = command(['iw', 'dev', iface, 'info'])
             if not re.search(r'^\s*type mesh point\s*$', info, re.M):
                 continue
-            # This query succeeds only after joining the local mesh; it does
-            # not require stations to be in range (same check as the watchdog).
+            # Joining the local mesh is sufficient, with no stations in range
+            # required (same check as the watchdog).
             joined = command(['iw', 'dev', iface, 'get', 'mesh_param', 'mesh_plink_timeout'])
             if re.fullmatch(r'\d+', joined.strip()):
                 return True
@@ -88,7 +88,7 @@ def permitted_frequencies(info):
 
 
 class Discovery:
-    """Mode survives daemon restarts; boot/setup reset starts from anchor configs.
+    """Preserve mode across daemon restarts and seed boot/setup from anchors.
 
     Frequencies seed the state once, before any discovery/tourguide hop. Once
     initialized, a channel used for both discovery and data cannot change mode.
@@ -108,7 +108,7 @@ class Discovery:
         with self.locked():
             if not self.path.exists():
                 if not configured:
-                    return 'data'  # No Wi-Fi yet; do not seed mode before role/config discovery.
+                    return 'data'  # Await Wi-Fi role/config discovery.
                 mode = 'search' if all(ANCHORS.get(b) == f for b, f in configured.items()) else 'data'
                 private_json_write(self.path, {'mode': mode})
             state = json.loads(self.path.read_text())

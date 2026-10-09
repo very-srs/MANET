@@ -22,10 +22,8 @@ if [ -z "$MY_MAC" ]; then
     exit 1
 fi
 
-# A tombstone is pure telemetry: it says this node is going away, and peers
-# already hold its identity record. Nothing here needs to repeat the hostname
-# or MACs, and Alfred stamps the record with our MAC so the registry still
-# knows which node it refers to.
+# The shutdown tombstone needs only telemetry. Peers retain the identity
+# record, and Alfred supplies the MAC used to match this node in the registry.
 TOMBSTONE_PAYLOAD=$("$ENCODER_PATH" telemetry \
     "--timestamp" "$(date +%s)" \
     "--node-state" "SHUTTING_DOWN" \
@@ -35,7 +33,7 @@ if [ -n "$TOMBSTONE_PAYLOAD" ]; then
     log "Broadcasting tombstone announcement..."
     printf '%s' "$TOMBSTONE_PAYLOAD" | alfred -s $ALFRED_DATA_TYPE
 
-    # Broadcast 3 times over 5 seconds for reliability
+    # Repeat twice at 2-second intervals for three announcements total.
     sleep 2
     printf '%s' "$TOMBSTONE_PAYLOAD" | alfred -s $ALFRED_DATA_TYPE
     sleep 2

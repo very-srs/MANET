@@ -1,9 +1,6 @@
 #!/bin/bash
-# Mesh Node Manager - Static Channel Mode
-# Simplified version for static channel operation
-# - No RF scanning or channel selection
-# - No tourguide (all nodes on same channels always)
-# - Just publishes status and manages services
+# Publish node status and manage services on static channels.
+# Skip RF scans, channel elections and tourguide hops.
 . "${MANET_TOOLS_DIR:-$(dirname "${BASH_SOURCE[0]}")}/manet-common.sh" || exit 1
 
 # --- Configuration ---
@@ -41,18 +38,17 @@ HALOW_MCS_SUMMARY="/usr/local/bin/halow-mcs-summary.py"
 
 # --- State Variables ---
 LAST_PUBLISHED_PAYLOAD=""
-# Local timers run on the boot clock (MONO, from uptime_now) so a wall-clock
-# step from a time sync cannot fire them early or stall them. NEVER is "not
-# yet": far enough back that the first check is always due.
+# Use boot-clock MONO from uptime_now for local timers, unaffected by time
+# sync steps. NEVER places an unset timer far enough back to be due at once.
 NEVER=-1000000
 
 
 LAST_PUBLISH_TIME=$NEVER
 PUBLISH_INTERVAL=180  # Publish every 3 minutes
 
-# Identity has a slow keepalive; startup and allocation changes publish sooner.
-# Alfred purges any record it has not seen for ALFRED_DATA_TIMEOUT = 600 s, so
-# at 270 s a publish can fail once and the record still survives.
+# Publish identity at startup and allocation changes, then every 270 s.
+# Alfred expires records at ALFRED_DATA_TIMEOUT = 600 s, so one keepalive
+# can fail without expiring the record.
 LAST_IDENTITY_PUBLISH=$NEVER
 LAST_IDENTITY_ALLOCATION=""
 LAST_ACK_PUBLISHED=""
@@ -110,13 +106,10 @@ get_current_freq() {
 
 # Shared telemetry collectors: manet-common.sh
 
-# Service elections choose the holder of a shared VIP. Run them only once this
-# node holds an address allocation: until discovery has finished (complete, or
-# at its bounded deadline) the registry may contain only this node, which then
-# always wins and takes a VIP a peer still holds. Also run them at most once per
-# steady interval, not on every one-second startup pass. Local locks and this
-# gate reduce churn; they cannot guarantee a single holder across a partition,
-# which the elections resolve once the registries converge.
+# Run service elections after address allocation, once per steady interval.
+# Before discovery completes or times out, a self-only registry could take
+# a peer's VIP. Local locks and this gate reduce churn but cannot prevent
+# duplicate holders across partitions until registries converge.
 ELECTION_INTERVAL=15
 LAST_ELECTION_RUN=""
 run_service_elections() {
@@ -208,10 +201,9 @@ load_static_plan() {
 }
 
 ensure_static_channels() {
-    # Take the lock the radio apply path holds across plan save, file writes,
-    # readiness checks and rollback BEFORE reading the plan, and hold it until
-    # enforcement is done, so a half-applied or rolled-back change is never
-    # read or undone. Non-blocking: a change in progress skips this pass.
+    # Hold the radio apply lock from plan read through enforcement, covering
+    # save, writes, readiness checks and rollback. Skip a busy lock to avoid
+    # reading or undoing a partial change.
     exec {lock_fd}>"$CHANNEL_LOCK_FILE"
     if ! flock -n "$lock_fd"; then
         exec {lock_fd}>&-
@@ -284,7 +276,7 @@ load_static_plan && log "Static channels: 2.4G=${STATIC_FREQ_2_4}, 5G=${STATIC_F
 MY_MAC=$(cat "/sys/class/net/${CONTROL_IFACE}/address")
 log "Node MAC: ${MY_MAC}"
 
-# Ensure we're on static channels at startup
+# Apply static channels at startup.
 ensure_static_channels
 
 # === MAIN LOOP ===
@@ -307,8 +299,7 @@ while true; do
     # publish an ACK, and apply once activate_at passes.
     sync_alfred_command "$CONFIG_SYNC" 70 || true
 
-    # A dangerous config change can take the mesh down. This is the node
-    # deciding, on its own, whether the change worked or has to be undone.
+    # Check locally whether a disruptive config change needs rollback.
     [ -x "$CONFIG_ROLLBACK" ] && "$CONFIG_ROLLBACK" check || true
 
     # An ACK is only useful if peers see it promptly, so a change here brings
@@ -320,19 +311,18 @@ while true; do
     fi
 
     # === PERIODIC CHANNEL CHECK ===
-    # Verify we haven't drifted from static channels (safety check)
+    # Check for drift from the static channel plan.
     ensure_static_channels
     
-    # Established nodes check claims before publishing any allocation changes.
-    # Cold nodes first publish below, so discovery can see our own records on
-    # this pass instead of waiting through another complete manager loop.
+    # Established nodes check claims before publishing allocation changes.
+    # Cold nodes publish first so discovery sees the local records this pass.
     if [ -s /var/run/my_ipv4_chunk ]; then
         [ -x "$IP_MANAGER" ] && "$IP_MANAGER"
     fi
     
     # === PUBLISH IDENTITY (Alfred type 67) ===
-    # Publish during discovery and whenever allocation changes; 270 s is only
-    # the keepalive interval once configured. Zero is a valid chunk.
+    # Publish during discovery and allocation changes. Once configured, use
+    # a 270 s keepalive. Zero is a valid chunk.
     MY_CHUNK=$(cat /var/run/my_ipv4_chunk 2>/dev/null || true)
     IDENTITY_READY=true
     CURRENT_IPV4=""
@@ -343,8 +333,8 @@ while true; do
     IDENTITY_ALLOCATION="${MY_CHUNK}:${CURRENT_IPV4}"
     if [ "$IDENTITY_READY" = true ] && { [ -z "$MY_CHUNK" ] || [ "$IDENTITY_ALLOCATION" != "$LAST_IDENTITY_ALLOCATION" ] ||
             [ $((MONO - LAST_IDENTITY_PUBLISH)) -ge $IDENTITY_PUBLISH_INTERVAL ]; }; then
-        # br0's MAC must come first: encoder.py drops it, because Alfred
-        # already stamps every record we publish with it.
+        # Put br0's MAC first. encoder.py drops it because Alfred stamps records
+        # with that MAC.
         ALL_MACS=("$MY_MAC")
         for iface in /sys/class/net/wlan* /sys/class/net/bat0 /sys/class/net/end0; do
             iface=$(basename "$iface")
@@ -354,7 +344,7 @@ while true; do
             fi
         done
 
-        # Cached against the certificate metadata; missing IDs retry next publish.
+        # Cache by certificate metadata. Missing IDs retry next publish.
         if SYNCTHING_ID=$(node_syncthing_id 2>/dev/null); then
             IDENTITY_ARGS=(
                 "--hostname" "$(hostname)"
@@ -433,8 +423,8 @@ while true; do
         [ -n "$CPU_LOAD" ] && ENCODER_ARGS+=("--cpu-load-average" "$CPU_LOAD")
 
         # --- GPS Location ---
-        # Reject stale files as well as missing fixes. If gps-reader stops updating
-        # its timestamp, the last recorded position is no longer safe to publish.
+        # Reject stale files and missing fixes. If gps-reader stops, its last
+        # position is unsafe to publish.
         GPS_LAT=""; GPS_LON=""; GPS_ALT=""
         if [ -f "$GPS_STATUS_FILE" ]; then
             read -r GPS_LAT GPS_LON GPS_ALT < <(jq -r --argjson max "$GPS_FIX_MAX_AGE" --argjson up "$(uptime_now)" '

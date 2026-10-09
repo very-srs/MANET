@@ -1,67 +1,54 @@
 #!/usr/bin/env python3
 """Mesh push-to-talk voice over multicast RTP.
 
-GStreamer handles encoding, decoding, RTP, jitter buffers, and packet fanout.
-Python reads the PTT button, updates the unicast peer list, adapts packet
-packing to measured loss, and publishes state for the web UI.
+GStreamer handles codecs, RTP, jitter buffers and packet fanout. Python reads
+PTT, updates peers, adapts packing to loss and writes web UI state.
 
     TX  alsasrc -> level -> valve -> <enc> -> <pay> -> multiudpsink
     RX  udpsrc  -> rtpbin -+-> <depay> -> <dec> -\
                            +-> <depay> -> <dec> --+-> audiomixer -> alsasink
                                     (one branch per talker)
 
-rtpbin separates speakers by SSRC, gives each a jitter buffer, and passes their
-audio to audiomixer. Sharing one jitter buffer would interleave independent
-sequence numbers and corrupt the output. Transmit opens only while PTT is
-pressed. Speakers may overlap; voice_half_duplex=y blocks transmit while
-receiving.
+rtpbin gives each SSRC a jitter buffer to keep sequence numbers separate.
+audiomixer combines the decoded audio. PTT gates transmit.
+voice_half_duplex=y blocks transmit while receiving.
 
-voice_codec selects lyra (the default, using libgstlyra.so and model weights)
-or opus (stock elements). Both use the same transport. Receivers build decode
-branches for their configured codec, so all nodes must use the same one.
-Changes are staged across the mesh through Alfred radio_state. Missing Lyra
-plugins or model weights trigger a logged fallback to Opus, leaving the node
-unable to exchange voice with Lyra peers.
+voice_codec defaults to Lyra, using libgstlyra.so and model weights. Opus uses
+stock elements. All nodes must use the same codec. Alfred radio_state stages
+mesh-wide changes. Missing Lyra plugins or weights cause a logged fallback
+to Opus, which cannot exchange voice with Lyra peers.
 
-Lyra frames-per-packet adapts to receive loss; see _tick_packing. Headers
-dominate airtime at these bitrates. Smaller packets cost more airtime but
-keep lost audio intervals short enough to conceal.
+Lyra packing adapts to receive loss. Smaller packets use more airtime but
+shorten lost audio intervals for concealment. See _tick_packing.
 
-Addressing follows OpenMANET's scheme: every talk group shares one multicast
-group and differs only by port, so switching channels never causes an IGMP
-leave/join. Channel n uses port 38801 + (n-1)*2: the stride is 2 because
-port+1 is that channel's RTCP, per the RTP port-pairing convention.
+Addressing follows OpenMANET: one multicast group, port 38801 + (n-1)*2 for
+channel n. Port+1 is reserved for RTCP. Channel changes need no IGMP rejoin.
 
 Transport constraints:
+  * Set ttl-mc explicitly. The default TTL of 1 prevents multihop delivery.
+  * DSCP 48 (CS6) gives UP 6 / WMM AC_VO through batman-adv. In
+    net/batman-adv/main.c, batadv_interface_tx() calls
+    batadv_skb_set_priority(), setting skb->priority to 256 + (TOS >> 5).
+    mac80211 uses that priority before DSCP, bypassing Linux 6.12+ RFC 8325
+    mapping in cfg80211_classify8021d(). EF (46) gets UP 5 / AC_VI on this
+    path. Confirm on-air priority when changing it.
 
-  * Set `ttl-mc` explicitly; the default TTL of 1 prevents multihop delivery.
-  * DSCP 48 (CS6) maps to WMM AC_VO through batman-adv. In net/batman-adv/main.c,
-    batadv_interface_tx() calls batadv_skb_set_priority(), which sets
-    skb->priority to 256 + (TOS >> 5). mac80211 uses that 802.1d priority before
-    checking DSCP. This bypasses the Linux 6.12+ RFC 8325 mapping in
-    cfg80211_classify8021d(): EF (46) gets UP 5 / AC_VI, while CS6 gets
-    UP 6 / AC_VO. Confirm the priority on-air when changing this path.
+Unicast redundancy defaults off. With multicast_forceflood disabled and at
+most multicast_fanout listeners (default 16), batadv_mcast_forw_mode_by_count()
+returns BATADV_FORW_UCASTS: one unicast frame per listener, with 802.11 ACKs
+and retries. Bench result on wlan2: 200 multicast packets, 200 unicast frames
+to the peer, no broadcast frames above baseline. Userspace copies duplicate
+this traffic. They remain useful above multicast_fanout or with
+multicast_forceflood enabled, when batman-adv selects BATADV_FORW_BCAST.
+The Alfred registry supplies peers, including those that never transmit.
 
-Unicast redundancy defaults off. With multicast_forceflood disabled and no
-more than multicast_fanout listeners (default 16), batadv_mcast_forw_mode_by_count()
-returns BATADV_FORW_UCASTS and sends a unicast frame per listener, with 802.11
-ACKs and retries. On the bench, 200 multicast packets produced 200 unicast
-frames to the peer on wlan2, with no broadcast frames above baseline.
-Additional userspace copies would duplicate this traffic. The option remains
-useful above multicast_fanout, where batman-adv selects BATADV_FORW_BCAST, or
-when multicast_forceflood is enabled. The Alfred registry supplies peers,
-including receivers that have never transmitted.
+Without listeners, batadv_mcast_forw_mode() returns BATADV_FORW_NONE and
+drops multicast at the sender. udpsrc joins with auto-multicast=true.
+Startup traffic may pause until joins propagate.
 
-With no listeners, batadv_mcast_forw_mode() returns BATADV_FORW_NONE and drops
-multicast at the sender. udpsrc joins the group with auto-multicast=true;
-traffic may pause at startup until the joins propagate.
-
-_note_pipeline_error backs off GStreamer bus errors. The stall watchdog also
-checks for pipelines that stay PLAYING without moving audio, as can happen
-after a USB audio reset or lost multicast membership. The constants below
-explain which flows it counts and why tx_packets/rx_packets are insufficient.
-
-Reads /etc/mesh.conf, writes /run/mesh-voice.json.
+_note_pipeline_error backs off bus errors. The stall watchdog checks idle
+audio flows and multicast membership. See the watchdog constants below.
+Reads /etc/mesh.conf and writes /run/mesh-voice.json.
 """
 
 import errno
@@ -95,7 +82,7 @@ MESH_CONF = os.environ.get("MANET_MESH_CONF", "/etc/mesh.conf")
 REGISTRY_FILE = os.environ.get("MESH_REGISTRY_FILE", "/var/run/mesh_node_registry")
 STATE_FILE = os.environ.get("MESH_VOICE_STATE", "/run/mesh-voice.json")
 
-# One multicast group for every talk group; the port selects the channel.
+# One multicast group for every talk group. The port selects the channel.
 TALK_GROUP_ADDR = "239.192.41.1"
 TALK_GROUP_BASE_PORT = 38801
 TALK_GROUP_PORT_STRIDE = 2
@@ -106,8 +93,8 @@ TALK_GROUP_MAX = 32
 # coordinated across the mesh. See apply_voice_codec() in manet_radio.py.
 RTP_PAYLOAD_TYPE = 111
 SAMPLE_RATE = 48000
-# Opus pins its RTP clock at 48 kHz whatever the input rate; Lyra is a 16 kHz
-# codec and its elements accept nothing else.
+# Opus uses a 48 kHz RTP clock at any input rate. Lyra requires 16 kHz input and
+# a 16 kHz RTP clock.
 OPUS_CLOCK_RATE = 48000
 LYRA_RATE = 16000
 FRAME_MS = 20
@@ -117,7 +104,7 @@ FRAME_MS = 20
 LYRA_FRAME_BYTES = {3200: 8, 6000: 15, 9200: 23}
 
 # --- adaptive packing --------------------------------------------------------
-# Thresholds for the frames-per-packet controller; see _tick_packing.
+# Thresholds for the frames-per-packet controller. See _tick_packing.
 BATCTL = "/usr/sbin/batctl"
 PACKING_MIN = 1                  # 20 ms packets: most robust, most airtime
 PACKING_MAX = 3                  # 60 ms packets: cheapest, audibly bursty
@@ -139,130 +126,91 @@ HID_GPIO1_MASK = 0x01  # IR1 bit 0: OpenVLM identity strap
 # CM108B datasheet 7.4: IR1[3:0] only reflects live GPIO when IR0[7:6] == 0.
 HID_IR0_VALID_MASK = 0xC0
 
-# Size the warm decode-branch table from the node registry. Each Lyra branch
-# uses about 5.3 MB; the hard limit of 64 caps that at roughly 340 MB on a
-# 3.7 GB node. HEADROOM allows new nodes to join without immediate eviction.
+# Size the warm decode-branch table from the registry. Each Lyra branch uses
+# about 5.3 MB. The cap of 64 uses roughly 340 MB on a 3.7 GB node.
+# VOICE_TALKER_HEADROOM reserves room for new nodes before eviction.
 VOICE_MAX_TALKERS_HARD = 64
 VOICE_TALKER_HEADROOM = 2
 
-# Presence beacon. A very short muted transmission whose only job is to make
-# every receiver establish our RTP source before we say anything real.
+# Muted presence beacon duration in ms. Establishes the RTP source at receivers
+# before speech begins.
 BEACON_MS = 140
 
 PTT_DEBOUNCE_MS = 150
 HALF_DUPLEX_HOLD_MS = 500
 RX_IDLE_MS = 500
 
-# Back off pipeline restarts when audio hardware is missing or unavailable.
-# A fixed 5s retry produced about 73 journal lines/minute (105k/day), wearing
-# the card and displacing useful history in the persistent journal.
+# Back off retries for missing or unavailable audio hardware. Measured with 5 s
+# retries: about 73 journal lines/minute (105k/day), adding card writes and
+# displacing other persistent logs.
 PIPELINE_RETRY_BASE_SEC = 5
 PIPELINE_RETRY_MAX_SEC = 300
-# An error arriving this long after the previous one is a fresh fault, not a
-# continuation, so it starts from the base delay again rather than inheriting a
-# five-minute backoff from something that healed hours ago.
+# Seconds without another error before the retry delay resets to its base.
 PIPELINE_RETRY_RESET_SEC = 900
 REGISTRY_POLL_SEC = 30
 STATE_WRITE_SEC = 2
 
 # --- stall watchdog ----------------------------------------------------------
-# A pipeline can stop moving audio without posting a single bus error. A USB
-# audio device that resets under the CM108B comes back as a device that accepts
-# state changes and delivers nothing, and a multicast membership dropped when
-# br0 is rebuilt leaves udpsrc bound, PLAYING and deaf. _on_bus_message never
-# hears about either, so both have to be watched from outside the pipeline.
-#
-# The counters that make that possible are NOT tx_packets and rx_packets. In a
-# push-to-talk system those are flat almost all the time by design: the valve is
-# shut until somebody keys up, and nothing is received until somebody else does.
-# A watchdog driven off them would either restart a healthy quiet node or need a
-# timeout so long it never fires. Two other flows do not stop while the
-# pipelines are healthy, and those are what is counted:
-#
-#   tx  capture buffers arriving at the valve. They keep coming with the PTT
-#       released, because the valve drops them downstream of the probe.
-#   rx  buffers reaching the playback sink, fed continuously by the permanent
-#       silent mixer input the pipeline already carries for its own reasons.
-#
-# Both run at roughly one buffer per 20 ms, so a few seconds of silence on
-# either is unambiguous.
+# Catches audio stalls without bus errors: a CM108B USB audio reset or a
+# multicast membership lost when br0 is rebuilt. Counts flows that run while
+# idle. tx_packets and rx_packets stay flat between PTT key-ups, so they cannot
+# detect these stalls.
+#   tx  capture buffers at the valve, upstream of the drop
+#   rx  playback buffers, fed by the silent mixer input
+# Both run at about one buffer per 20 ms. A few seconds idle means a stall.
 HEALTH_TICK_SEC = 5
-# How long a flow may be stopped before it counts as a stall. Generous against
-# a loaded CM4; a real stall does not recover on its own, so nothing is lost by
-# waiting.
+# Seconds without flow before a stall. Allows scheduling delays on a busy CM4.
 VOICE_STALL_SEC = 15
 # Grace after a pipeline is told to play, before its flow is judged at all.
 VOICE_STALL_GRACE_SEC = 20
-# Restarting one pipeline fixes a wedged element. If that many restarts inside
-# the window have not fixed it, the fault is not in one pipeline and the whole
-# process is rebuilt instead: fresh ALSA handles, fresh sockets, a fresh
-# multicast join and, with lyra, freshly loaded TFLite models.
+# Stall threshold within the window below. Repeated stalls trigger a process
+# restart for fresh ALSA handles, sockets, multicast membership and Lyra models.
 VOICE_STALL_MAX_RESTARTS = 3
 VOICE_STALL_WINDOW_SEC = 600
-# The multicast membership is checked directly rather than inferred, because
-# there is no dataflow to miss: a receiver that nobody is talking to looks
-# exactly like one that has fallen out of the group.
+# Check membership directly. Receive traffic cannot distinguish a lost join from
+# a quiet talk group.
 IGMP_PROC = "/proc/net/igmp"
 
-# Multicast loopback suppression. multiudpsink does not create its socket until
-# it starts, and GStreamer state changes are asynchronous, so the socket can
-# legitimately not exist yet at the moment we reach for it. Retry rather than
-# warn once and give up: what an operator hears when this silently fails is
-# their own voice back in the headset one jitter buffer late.
+# Loopback suppression retry interval in ms. multiudpsink creates its socket
+# during asynchronous startup. Retry until it exists to prevent delayed playback
+# of this node's own voice.
 LOOPBACK_SUPPRESS_MS = 200
 LOOPBACK_SUPPRESS_TRIES = 25          # 5 seconds' worth
 
 # --- transmit high-pass ------------------------------------------------------
-# Nothing a headset picks up below ~80 Hz is speech: it is mains hum, wind,
-# handling rumble, and a boom mic rubbing on a face. Opus rolls some of it off
-# inside the encoder, but removing it first is cleaner, and with lyra there is
-# no equivalent to rely on. audiocheblimit ships in gstreamer1.0-plugins-good,
-# which every voice node already installs, so this costs no new dependency.
-#
-# Both of these are fixed rather than configurable, because both were measured
-# and only one setting works:
-#
-#   poles=4  8 poles is stable at 16 kHz (-66 dB at 20 Hz) and DEGENERATES at
-#            48 kHz, where 80 Hz is a normalised frequency of 0.0017 and the
-#            coefficients lose their precision: measured as a flat +4.9 dB of
-#            gain at every frequency from 20 Hz to 3 kHz, no filtering at all.
-#   type=1   Type 2 puts the ripple in the stopband and its cutoff means the
-#            stopband edge, so at the same setting it does essentially nothing:
-#            measured -0.3 dB at 60 Hz against type 1's -9.6 dB.
-#
-# Measured response of the shipping setting, identical at 16 and 48 kHz:
-#
+# Remove hum, wind and handling noise below about 80 Hz before encoding. Opus
+# filters some of this internally. Lyra has no equivalent. audiocheblimit is in
+# the installed gstreamer1.0-plugins-good package. Keep poles=4 and type=1 for
+# stability and the required stopband response:
+#   8 poles: stable at 16 kHz (-66 dB at 20 Hz). At 48 kHz, the 80 Hz
+#            normalized frequency is 0.0017 and coefficients lose precision:
+#            flat +4.9 dB gain from 20 Hz to 3 kHz, with no filtering.
+#   type 2: cutoff is the stopband edge, with ripple in the stopband.
+#           At 60 Hz, measures -0.3 dB against type 1's -9.6 dB.
+# Measured response at 80 Hz, identical at 16 and 48 kHz:
 #   20 Hz -53.2 dB | 50 Hz -17.9 dB | 80 Hz  0.0 dB | 300 Hz +0.2 dB
 #   40 Hz -27.2 dB | 60 Hz  -9.6 dB | 120 Hz 0.0 dB | 3 kHz   0.0 dB
-#
-# Cost is 0.03% of realtime at 16 kHz on a dev box, so under 1% of one CM4
-# core even allowing 20x.
+# Measured CPU cost: 0.03% of realtime at 16 kHz on a dev box. At 20 times that
+# cost, the estimate remains below 1% of one CM4 core.
 HIGHPASS_POLES = 4
 HIGHPASS_TYPE = 1
 HIGHPASS_MAX_HZ = 400
 
-# Band-pass, when voice_lowpass_hz is also set. This is a different element
-# (audiochebband, same plugin) and it wants a different pole count, which is
-# why the two are not shared: audiochebband splits its poles between the two
-# edges, so 4 gives a limp -3.5 dB at 60 Hz, and unlike audiocheblimit it is
-# still stable at 8 at 48 kHz. Measured at 8 poles, 100-4000 Hz, near enough
-# identical at 16 and 48 kHz:
-#
+# --- transmit band-pass ------------------------------------------------------
+# voice_lowpass_hz selects audiochebband from the same plugin. It splits its
+# poles between both edges: 4 poles give only -3.5 dB at 60 Hz. Unlike
+# audiocheblimit, 8 poles remain stable at 48 kHz. Measured at 8 poles, 100-4000
+# Hz, nearly identical at 16 and 48 kHz:
 #   40 Hz -36.9 dB | 100 Hz -0.2 dB | 1 kHz -0.1 dB | 5 kHz  -7.8 dB
 #   60 Hz -20.6 dB | 300 Hz -0.0 dB | 4 kHz -0.2 dB | 6 kHz -17.2 dB
-#
-# Narrowing to a voice band is a taste decision, not a correctness one, so it
-# is off by default and wants a field comparison across headsets.
+# Off by default. Compare speech quality across headsets before enabling.
 BANDPASS_POLES = 8
 
-# equalizer-3bands: fixed centres at 100 Hz, 1100 Hz and 11 kHz. Gains are in
-# dB, -24 to +12, and every one of them is live-settable.
-#
-# 11 kHz is above Nyquist at lyra's 16 kHz, and the band does not politely do
-# nothing there, it degenerates into broadband gain: measured at 16 kHz,
-# band2=+6 lifted a 1 kHz tone by 2.6 dB and clipped 4608 samples, and
-# band2=-12 cut the same tone by 6 dB. So the high band is forced to 0
-# whenever the raw rate cannot carry it.
+# equalizer-3bands centres: 100 Hz, 1100 Hz and 11 kHz. Gains are live-settable
+# from -24 to +12 dB. Force the high band to 0 below EQ_HIGH_MIN_RATE. At Lyra's
+# 16 kHz, 11 kHz exceeds Nyquist and causes broadband gain:
+#   band2=+6   1 kHz tone rises 2.6 dB, with 4608 clipped samples
+#   band2=-12  1 kHz tone falls 6 dB
 EQ_HIGH_MIN_RATE = 24000              # 11 kHz band needs headroom above 22 kHz
 EQ_BAND_HZ = (100, 1100, 11000)
 EQ_MIN_DB = -24.0
@@ -282,12 +230,10 @@ def now_ms():
 
 
 def sd_notify(msg):
-    """Send one systemd notification, if there is a systemd to send it to.
+    """Send a systemd notification when NOTIFY_SOCKET is set.
 
-    Written out by hand rather than pulled in from python3-systemd: it is one
-    datagram on a unix socket, and the package is not installed on a node.
-    Silently does nothing when NOTIFY_SOCKET is unset, which is the case
-    whenever the daemon is run from a shell.
+    Use one Unix datagram because nodes do not install python3-systemd.
+    Do nothing when NOTIFY_SOCKET is unset, including shell invocations.
     """
     addr = os.environ.get("NOTIFY_SOCKET")
     if not addr:
@@ -305,11 +251,10 @@ def sd_notify(msg):
 
 
 def group_hex_forms(addr):
-    """Both byte orders of a dotted-quad, as upper-case hex.
+    """Return both byte orders of a dotted-quad as uppercase hex.
 
-    /proc/net/igmp prints the group as a native-endian u32, so 239.192.41.1
-    reads 0129C0EF on a little-endian node and EFC02901 on a big-endian one.
-    Matching against both is cheaper than caring which we are on.
+    /proc/net/igmp prints a native-endian u32. For 239.192.41.1, match
+    0129C0EF on little-endian nodes and EFC02901 on big-endian nodes.
     """
     packed = socket.inet_aton(addr)
     return {packed.hex().upper(), packed[::-1].hex().upper()}
@@ -319,12 +264,10 @@ TALK_GROUP_HEX = group_hex_forms(TALK_GROUP_ADDR)
 
 
 def igmp_groups(iface):
-    """Multicast groups joined on an interface, or None if that is unknowable.
+    """Return joined multicast groups, or None when membership is unknown.
 
-    None means the file could not be read or the interface was not in it, and
-    callers must treat that as "unknown" rather than "not joined". The check
-    exists to catch a membership that went away, not to invent a fault out of a
-    proc file that moved or an interface that has not appeared yet.
+    An unreadable proc file or an absent interface returns None. Callers must
+    not treat either as a lost membership.
     """
     groups = None
     current = None
@@ -378,21 +321,12 @@ def conf_int(conf, key, default, low=None, high=None):
     return val
 
 
-# Config values that get interpolated into a Gst.parse_launch() description
-# or a command line, and the characters each is allowed to use.
-#
-# parse_launch takes a pipeline *description*, not an argument list. A space,
-# a "!" or an "=" inside one of these does not fail cleanly: the parser reads
-# the rest of the description as further elements and properties, and the error
-# names an element nobody wrote. voice_iface was additionally interpolated into
-# a shell command by the old iface_ipv4().
-#
-# None of these can arrive from another node. voice_codec is the only voice key
-# staged over Alfred, and mesh-radio-state checks it against a two-item list
-# before writing it, so what is being guarded here is a hand-edited
-# /etc/mesh.conf rather than a remote input. It is still worth doing: the
-# daemon runs as root, and a typo should cost a log line rather than a pipeline
-# that fails in a way nothing explains.
+# Allowed characters for config values interpolated into Gst.parse_launch().
+# Spaces, "!" and property separators can be parsed as pipeline syntax. Restrict
+# each value to its interface, ALSA device or path syntax. These keys are local
+# to /etc/mesh.conf. Only voice_codec is staged over Alfred, with a two-value
+# check in mesh-radio-state. Validate local edits to keep typos from producing
+# misleading pipeline errors in the root daemon.
 IFACE_RE = re.compile(r"^[A-Za-z0-9_.-]{1,15}$")
 # plughw:1,0 / default / hw:CARD=Device,DEV=0
 ALSA_DEV_RE = re.compile(r"^[A-Za-z0-9_.,:=-]{1,64}$")
@@ -446,10 +380,8 @@ class Config:
         self.channel = conf_int(conf, "voice_channel", 1, 1, TALK_GROUP_MAX)
         # 48 = CS6, not 46/EF: see the module docstring for why.
         self.dscp = conf_int(conf, "voice_dscp", 48, 0, 63)
-        # "opus" or "lyra". Opus stays the default because it is in the stock
-        # gst-plugins-base every node already has, whereas lyra needs
-        # libgstlyra.so and the model weights installed. Asking for lyra on a
-        # node without them falls back rather than failing to come up.
+        # Lyra is the default and needs libgstlyra.so plus model weights.
+        # Missing Lyra components fall back to stock Opus in _codec_stages().
         self.codec = conf.get("voice_codec", "lyra").strip().lower()
         if self.codec not in ("opus", "lyra"):
             self.codec = "opus"
@@ -466,12 +398,11 @@ class Config:
         self.lyra_model = conf_str(conf, "voice_lyra_model",
                                    "/usr/local/share/lyra/model_coeffs",
                                    MODEL_PATH_RE)
-        # Packet headers dominate the on-air cost at these bitrates: 12 B RTP +
-        # 8 UDP + 20 IP + 14 Ethernet is 42-54 B per packet against a 32-132 B
-        # payload. Fewer, larger frames is therefore a bigger lever than a
-        # lower bitrate: measured, 16 kbps at 60 ms costs less on the wire
-        # than 6 kbps at 20 ms. Costs latency and makes each lost packet take
-        # a longer chunk of audio with it. Opus permits 2.5/5/10/20/40/60.
+        # Headers cost 42-54 bytes per packet: RTP 12, UDP 8, IP 20, Ethernet
+        # 14. Payloads are 32-132 bytes. Measured wire cost: 16 kbps at 60 ms is
+        # below 6 kbps at 20 ms, at the cost of latency and longer audio gaps on
+        # loss. Opus permits 2.5/5/10/20/40/60 ms. This setting accepts
+        # 10/20/40/60 ms.
         self.frame_ms = conf_int(conf, "voice_frame_ms", FRAME_MS)
         if self.frame_ms not in (10, 20, 40, 60):
             self.frame_ms = FRAME_MS
@@ -481,44 +412,29 @@ class Config:
         # Off by default: batman-adv already fans multicast out as unicast.
         self.unicast = conf_bool(conf, "voice_unicast", False)
         self.max_peers = conf_int(conf, "voice_unicast_max_peers", 16, 0, 128)
-        # Off by default: the receiver mixes talkers now, so talking over
-        # someone degrades gracefully instead of corrupting the stream.
-        # Etiquette is left to the operators, like any conference bridge.
+        # Off by default. Separate receive branches allow overlapping talkers.
         self.half_duplex = conf_bool(conf, "voice_half_duplex", False)
-        # Decode branches kept warm. ~5.3 MB each with lyra (measured on a
-        # CM4), so 8 is ~40 MB. Raise it if a talk group routinely has more
-        # than 8 active speakers and you want them all warm.
+        # Warm decode-branch floor, default 8. Lyra costs about 5.3 MB per
+        # branch on a CM4, roughly 40 MB for 8. _size_talker_table raises it for
+        # peers.
         self.max_talkers = conf_int(conf, "voice_max_talkers", 8, 1,
                                    VOICE_MAX_TALKERS_HARD)
-        # Safety net only. Beacons are normally event driven -- at start-up and
-        # whenever a node appears in the registry -- because a receiver never
-        # forgets a source (autoremove=false), so there is nothing to refresh.
-        # This interval only covers a peer whose arrival we somehow missed.
-        # 0 disables the periodic one entirely. See _tick_beacon.
+        # Periodic beacon interval in seconds, default 600. Covers missed peer
+        # arrivals. Beacons also run at startup and when peers appear. Sources
+        # persist with autoremove=false. 0 disables beacons.
         self.beacon_sec = conf_int(conf, "voice_beacon_sec", 600, 0, 3600)
-        # Stall watchdog. On by default, because everything it catches is
-        # silent: the node stays up, the unit stays active, the web UI still
-        # says running, and the first anyone knows is an operator keying up
-        # into a radio that is not there. n disables the stall judgement only;
-        # the systemd keep-alive is independent of it.
-        # Transmit high-pass corner. 0 disables the filter entirely, which
-        # gives back a byte-identical transmit pipeline to the one before it
-        # existed. 80 is the usual voice value: it keeps a male fundamental
-        # (~85 Hz and up) and takes out everything below. Raise it towards 120
-        # if 60 Hz mains hum is the actual complaint, since 60 Hz only sees
-        # -9.6 dB at a corner of 80.
+        # High-pass cutoff in Hz, default 80. 0 disables the high-pass filter.
+        # 80 Hz preserves male fundamentals around 85 Hz and above. Raise toward
+        # 120 Hz for mains hum: 60 Hz sees only -9.6 dB at 80 Hz.
         self.highpass_hz = conf_int(conf, "voice_highpass_hz", 80, 0,
                                     HIGHPASS_MAX_HZ)
-        # Upper edge. 0 leaves the path high-pass only, which is the default:
-        # narrowing to a walkie-talkie band makes speech pop on some headsets
-        # and sound thin on others, so it remains an operator choice.
-        # Setting this turns the stage into a band-pass, which also changes the
-        # element and the pole count. Try 4000 with highpass 100.
+        # Low-pass cutoff in Hz. 0 leaves high-pass only, the default. Both
+        # edges select a band-pass element with its own pole count. Compare
+        # 100-4000 Hz across headsets for clarity and thinness.
         self.lowpass_hz = conf_int(conf, "voice_lowpass_hz", 0, 0, 8000)
-        # Three-band EQ for a formant/presence lift. Off by default: this is a
-        # taste control and an audio stage nobody has listened to yet has no
-        # business in every node's transmit path. Turn it on to A/B it; the
-        # gains then retune live on SIGHUP with no gap in the audio.
+        # Three-band EQ, off by default. Compare the formant/presence lift
+        # across headsets. Enabled EQ gains retune live on SIGHUP without an
+        # audio gap.
         self.eq = conf_bool(conf, "voice_eq", False)
         self.eq_low = conf_float(conf, "voice_eq_low", 0.0,
                                  EQ_MIN_DB, EQ_MAX_DB)
@@ -526,6 +442,8 @@ class Config:
                                  EQ_MIN_DB, EQ_MAX_DB)
         self.eq_high = conf_float(conf, "voice_eq_high", 0.0,
                                   EQ_MIN_DB, EQ_MAX_DB)
+        # Stall watchdog defaults on to catch silent audio failures.
+        # voice_watchdog=n disables stall checks but keeps systemd keep-alives.
         self.watchdog = conf_bool(conf, "voice_watchdog", True)
         self.watchdog_sec = conf_int(conf, "voice_watchdog_sec",
                                      VOICE_STALL_SEC, 5, 300)
@@ -543,10 +461,9 @@ class Config:
 # --- OpenVLM PTT -------------------------------------------------------------
 
 def hidraw_candidates():
-    """Every /dev/hidraw* whose parent USB device is a CM108-family chip.
+    """Return CM108-family /dev/hidraw* devices as (path, is_openvlm) pairs.
 
-    Returns (path, is_openvlm) with the GPIO1 strap probed where possible, so a
-    genuine OpenVLM is preferred over a generic dongle plugged in alongside.
+    Probe GPIO1 where possible and sort strapped OpenVLM devices first.
     """
     want = "%04X:%04X" % (OPENVLM_VID, OPENVLM_PID)
     found = []
@@ -605,10 +522,9 @@ def parse_hid_report(data):
 
 
 class OpenVLMPTT(threading.Thread):
-    """Blocking hidraw reader. Calls on_change(pressed) on the GLib main loop.
+    """Read hidraw and call on_change(pressed) on the GLib main loop.
 
-    Handles hot-plug by reopening: the board may enumerate after we start, and
-    a USB reset must not take voice down permanently.
+    Reopen after hot-plug or USB reset, including enumeration after startup.
     """
 
     daemon = True
@@ -691,11 +607,10 @@ REGISTRY_LINE = re.compile(
 
 
 def read_registry(exclude_ips):
-    """Active peers from the Alfred-built registry, as [(ip, hostname), ...].
+    """Return active registry peers as [(ip, hostname), ...].
 
-    The registry is a shell-sourceable file of NODE_<id>_<KEY>='value' lines;
-    it is parsed rather than sourced. Only ACTIVE nodes are returned: a STALE
-    node has stopped publishing telemetry and unicasting to it is wasted air.
+    Parse NODE_<id>_<KEY>='value' lines without sourcing the shell file.
+    Skip STALE nodes, which no longer publish telemetry, to avoid wasted air.
     """
     nodes = {}
     try:
@@ -722,16 +637,13 @@ def read_registry(exclude_ips):
 
 
 def iface_ipv4(name):
-    """First IPv4 address on an interface, or None if it has none yet.
+    """Return the first IPv4 address on an interface, or None if absent.
 
-    Used as multiudpsink's bind-address alongside multicast-iface. br0
-    carries two addresses (the node's mesh address and the EUD DHCP gateway);
-    either is on the right interface, so the first is fine.
+    Used with multicast-iface for multiudpsink's bind-address. br0 carries
+    mesh and EUD DHCP gateway addresses. Either belongs to the interface.
     """
-    # argv, not a shell string: the interface name comes from mesh.conf, and
-    # os.popen ran it through /bin/sh. A timeout as well, because this is called
-    # from build(), build() is called from a SIGHUP retune, and a retune runs on
-    # the GLib main loop that everything else in this daemon depends on.
+    # Pass the mesh.conf interface name as an argument to avoid shell parsing.
+    # Bound the wait: build() calls this during retunes on the GLib main loop.
     try:
         out = subprocess.run(["ip", "-4", "-o", "addr", "show", "dev", name],
                              capture_output=True, text=True, timeout=5)
@@ -747,12 +659,10 @@ def iface_ipv4(name):
 
 
 def ssrc_prefix_for_ip(addr):
-    """Top 24 bits of the SSRC a node with this address will use, or None.
+    """Return the node's 24-bit SSRC prefix, or None for an invalid address.
 
-    The SSRC is split: 24 bits identifying the node, 8 bits identifying this
-    particular run of the daemon. The high half is a hash of the mesh address,
-    so any receiver can build address -> prefix for every node in the registry
-    and name a talker without a back channel.
+    Hash the mesh address so receivers can map registry addresses to talker
+    names without a back channel. The low 8 SSRC bits identify a daemon run.
     """
     if not addr:
         return None
@@ -767,19 +677,14 @@ def ssrc_prefix_for_ip(addr):
 
 
 def node_ssrc(addr):
-    """Our SSRC: node prefix in the high 24 bits, run generation in the low 8.
+    """Return an SSRC with a 24-bit node prefix and an 8-bit run generation.
 
-    The generation is what stops a restart from being silent, and it is not
-    cosmetic. With autoremove=false a receiver keeps our source for the life of
-    its daemon. If we restarted and reused the same SSRC, our payloader's fresh
-    sequence-number base would not match the source the receiver is still
-    holding, the jitter buffer would resync, and every word would be discarded
-    -- measured, a three second transmission arrived as nothing at all, and no
-    beacon or jitter-buffer tuning rescued it.
-
-    A new generation makes the restarted node a new source, which is clean.
-    The abandoned source is silent from then on, so the LRU in
-    _prune_branches() evicts it ahead of anything live.
+    With autoremove=false, receivers retain sources across sender restarts.
+    Reusing an SSRC gives its jitter buffer a new sequence-number base.
+    Measured result: a 3 s transmission is discarded during resync.
+    Tried: beacons, jitter-buffer tuning. No effect.
+    A new generation establishes a new source. _prune_branches evicts the
+    silent abandoned source before active talkers.
     """
     prefix = ssrc_prefix_for_ip(addr)
     if prefix is None:
@@ -788,7 +693,7 @@ def node_ssrc(addr):
 
 
 def local_ipv4_addresses():
-    """Our own addresses, so we never unicast a copy back to ourselves."""
+    """Return local addresses to exclude from unicast targets."""
     addrs = set()
     try:
         for info in socket.getaddrinfo(socket.gethostname(), None,
@@ -831,8 +736,7 @@ def alsa_device(explicit, card):
     if explicit:
         return explicit
     if card is not None:
-        # plughw rather than hw: let ALSA convert if the card disagrees about
-        # format, instead of failing the pipeline outright.
+        # plughw allows ALSA to convert formats unsupported by the card.
         return "plughw:%d" % card
     return "default"
 
@@ -863,8 +767,8 @@ class MeshVoice:
         self.shaper = None
         self.equalizer = None
         self.txhead = None
-        # Transmit level, trimmed below 1.0 only to make room for an eq boost.
-        # Everything that opens the mic uses this rather than a literal 1.0.
+        # Transmit gain, at most 1.0. Applied before EQ to reserve boost
+        # headroom.
         self._tx_gain = 1.0
         self._shape_sig = None
         self._raw_rate = SAMPLE_RATE
@@ -895,9 +799,9 @@ class MeshVoice:
         self.rx_active = False
         self.rx_packets = 0
         self.tx_packets = 0
-        # Own packets dropped on receive. Non-zero means multicast loopback was
-        # not suppressed on the send socket; the audio is still correct, but it
-        # is worth seeing in the state file rather than only in the journal.
+        # Own packets dropped on receive. Nonzero indicates failed socket
+        # loopback suppression. The receive probe still prevents local audio
+        # playback.
         self.rx_loopback = 0
         # Per-pipeline restart state, keyed "tx"/"rx". See _note_pipeline_error.
         self._pipeline_fault = {}
@@ -906,13 +810,11 @@ class MeshVoice:
         self.ptt = None
         self.started_at = time.monotonic()
 
-        # Stall watchdog state, keyed "tx"/"rx". _flow_count and _flow_ts are
-        # written from the streaming threads by the two pad probes; everything
-        # else is only touched on the main loop. _ever_flowed gates the whole
-        # thing: a pipeline that has never produced a buffer has not regressed,
-        # it was never working, and restarting the process on a node whose
-        # OpenVLM is simply not fitted would turn a quiet backed-off fault into
-        # a ten-second restart loop.
+        # Watchdog state keyed by "tx"/"rx". Probes write _flow_count, _flow_ts
+        # and _ever_flowed from streaming threads. Other state belongs to the
+        # main loop. Judge only flows that have run. Missing OpenVLM hardware
+        # must stay on the bus-error backoff path instead of causing a 10 s
+        # process restart loop.
         self._flow_count = {"tx": 0, "rx": 0}
         self._flow_ts = {"tx": 0.0, "rx": 0.0}
         self._ever_flowed = {"tx": False, "rx": False}
@@ -931,17 +833,12 @@ class MeshVoice:
     # -- pipelines --
 
     def _codec_stages(self):
-        """Encoder/payloader/depayloader/decoder for the configured codec.
+        """Return pipeline stages and rates for the configured codec.
 
         Returns (enc, pay, depay, dec, encoding_name, packet_ms, raw_rate,
-        clock_rate). Everything around these stages is identical either way,
-        which is the point: the transport was measured with Opus and only the
-        codec swaps out.
-
-        The rates cannot be shared, though. Opus always runs its RTP clock at
-        48 kHz regardless of input; Lyra is a 16 kHz codec and its elements
-        accept nothing else, so both the raw caps ahead of the encoder and the
-        RTP clock-rate have to follow the codec.
+        clock_rate). Transport is shared and measured with Opus.
+        Opus uses a 48 kHz RTP clock at any input rate. Lyra requires 16 kHz
+        for both raw caps and RTP. Missing Lyra components fall back to Opus.
         """
         if self.cfg.codec == "lyra":
             missing = [n for n in ("lyraenc", "lyradec", "rtplyrapay",
@@ -955,16 +852,11 @@ class MeshVoice:
                 log("voice_codec=lyra but model dir %s is missing: falling "
                     "back to opus" % self.cfg.lyra_model)
             else:
-                # Packing is link state, not configuration. build() runs again
-                # on every SIGHUP retune, so taking this from cfg would put an
-                # adapted node silently back to the configured default while
-                # self.packing -- and the web UI reading it -- still reported
-                # the adapted value, and _set_packing's equality short-circuit
-                # would stop the controller correcting the disagreement until
-                # loss happened to move it somewhere else again. On a lossy
-                # link that resets 1 frame/packet to 2 and doubles the length
-                # of every loss, at exactly the moment it was measured
-                # audible. The talk group moved; the radio link did not.
+                # Preserve adapted packing across SIGHUP rebuilds. Reading cfg
+                # here would disagree with self.packing and the UI, and
+                # _set_packing's equality check would prevent correction until
+                # the next adaptation. Resetting 1 frame to 2 doubles each loss
+                # from 20 to 40 ms.
                 fpp = self.packing
                 packet_ms = fpp * 20
                 log("codec: lyra %d bps, %d frame(s)/packet (%d ms)"
@@ -1003,12 +895,10 @@ class MeshVoice:
         return self.cfg.eq_low, self.cfg.eq_mid, high
 
     def _shape_signature(self, raw_rate):
-        """What the shaping chain is *made of*, as opposed to how it is tuned.
+        """Return shaping elements and raw rate for the pipeline layout.
 
-        Two configurations with the same signature differ only in element
-        properties, and every one of those is controllable, so a reload can
-        apply them to the running pipeline. A different signature needs the
-        pipeline rebuilding.
+        Matching signatures allow live property changes. A changed signature
+        requires rebuilding the pipeline.
         """
         if not self.cfg.highpass_hz and not self.cfg.lowpass_hz:
             filt = None
@@ -1019,18 +909,10 @@ class MeshVoice:
         return (filt, bool(self.cfg.eq), raw_rate)
 
     def _shaping_stage(self, raw_rate):
-        """Transmit shaping, as a pipeline fragment ending in a bang.
+        """Return a shaping fragment ending in "!", or "" when disabled.
 
-        Returns "" when nothing is enabled, so the transmit pipeline is then
-        byte for byte the one that existed before any of this, which is the
-        point of building it as a self-contained block: if it misbehaves in the
-        field, voice_highpass_hz=0 with voice_eq=n gets the old pipeline back
-        without a code change.
-
-        The conversions on either side are not avoidable. These elements take
-        F32 and F64 only and the encoders are fed S16LE, so the block converts
-        up and back rather than moving the whole pipeline to float, which would
-        change what reaches lyraenc.
+        Set both cutoff frequencies to 0 and voice_eq=n to bypass shaping.
+        Filters and EQ require F32/F64. Convert back to S16LE for the encoders.
         """
         filt, eq, _ = self._shape_signature(raw_rate)
         parts = []
@@ -1054,9 +936,8 @@ class MeshVoice:
                     "so no transmit high-pass. Install "
                     "gstreamer1.0-plugins-good." % self.cfg.highpass_hz)
             else:
-                # Only one edge is ever set here: a low-pass with no high-pass
-                # is not a thing anyone has asked for, but it costs nothing to
-                # honour it if it is the only edge configured.
+                # A single configured edge uses the matching low-pass or
+                # high-pass mode.
                 mode, cut = (("high-pass", self.cfg.highpass_hz)
                              if self.cfg.highpass_hz
                              else ("low-pass", self.cfg.lowpass_hz))
@@ -1072,13 +953,9 @@ class MeshVoice:
                     "Install gstreamer1.0-plugins-good.")
             else:
                 low, mid, high = self._eq_gains(raw_rate)
-                # Headroom goes FIRST, ahead of everything that can boost.
-                # The block converts back to S16LE at its end, so a boost
-                # clips there and no amount of attenuation downstream can undo
-                # it: trim first, boost second, and the peak comes out where it
-                # went in. Its own element rather than the existing `vol`,
-                # which lives past that conversion and is owned by the PTT and
-                # beacon paths.
+                # Attenuate before EQ to prevent clipping at the S16LE
+                # conversion. Use a separate element: vol is downstream of that
+                # conversion and belongs to PTT and beacon control.
                 parts.insert(0, "volume name=txhead volume=1.0")
                 parts.append("equalizer-3bands name=eq band0=%.2f band1=%.2f "
                              "band2=%.2f" % (low, mid, high))
@@ -1091,13 +968,10 @@ class MeshVoice:
                 + " ! audioconvert ! audio/x-raw,format=S16LE ! ")
 
     def _apply_shaping(self, raw_rate):
-        """Push the configured cutoffs and gains onto the running elements.
+        """Apply configured cutoffs and gains to the running elements.
 
-        Every property these elements expose is marked controllable, so this
-        needs no rebuild and makes no gap in the audio, which is the whole
-        point: choosing a voice band and a formant lift is a listening test
-        across headsets, and a listening test is useless if every change costs
-        a restart and a TFLite model reload.
+        These properties are controllable while PLAYING, so tuning needs no
+        audio gap or TFLite model reload.
         """
         changed = False
         if self.shaper is not None:
@@ -1118,21 +992,17 @@ class MeshVoice:
                     self.equalizer.set_property(prop, value)
                     changed = True
         if changed:
-            # Applied even mid-transmission. It steps the level, which is the
-            # lesser evil: the alternative is transmitting the rest of the word
-            # clipped.
+            # Adjust headroom during transmission to prevent EQ clipping. The
+            # gain change can step the level.
             self._apply_tx_gain(raw_rate)
         return changed
 
     def _apply_tx_gain(self, raw_rate):
-        """Trim the transmit level by whatever the EQ is boosting.
+        """Attenuate before EQ by the largest positive band gain.
 
-        An EQ boost raises peaks, and the block converts back to S16LE, so a
-        boost on an already hot mic clips rather than sounding louder: measured
-        at 48 kHz, band1=+3 on a 0.8 full-scale tone clipped 12157 samples in a
-        second. Taking the same amount back out on the volume element makes a
-        boost a change of tone rather than a change of level, which is what it
-        is for. Costs level, not headroom, and playback has 20 dB spare.
+        The shaping block converts back to S16LE. At 48 kHz, band1=+3 on a
+        0.8 full-scale tone clips 12157 samples in one second without headroom.
+        Attenuation preserves peaks at reduced level. Playback has 20 dB spare.
         """
         boost = max([0.0] + [g for g in self._eq_gains(raw_rate) if g > 0])
         self._tx_gain = 10.0 ** (-boost / 20.0)
@@ -1156,8 +1026,8 @@ class MeshVoice:
             log("audio: capture=%s playback=%s (openvlm card %s)"
                 % (dev_in, dev_out, card if card is not None else "not found"))
 
-        # auto-multicast=false: this socket only ever sends. Letting it join the
-        # group collides with our own udpsrc, which already holds it.
+        # auto-multicast=false avoids a sender join conflicting with udpsrc's
+        # join.
         bind_ip = iface_ipv4(self.cfg.iface)
         self._bind_ip = None
         if not bind_ip:
@@ -1166,20 +1036,13 @@ class MeshVoice:
         (enc_desc, pay_desc, depay_desc, dec_desc, encoding, packet_ms,
          raw_rate, clock_rate) = self._codec_stages()
 
-        # What we actually built with, which is not always what was asked for:
-        # a missing lyra plugin or model dir falls back to opus. The UI paints
-        # its codec picker from this, so reporting the *configured* value here
-        # would show a node as Lyra while it was really transmitting Opus --
-        # and since the two do not interoperate, that is precisely the node
-        # that is silently deaf to the rest of the mesh.
+        # Report the effective codec to the UI. Missing Lyra components fall
+        # back to Opus, which cannot exchange voice with Lyra peers.
         self.effective_codec = encoding.lower()
 
-        # sync=false on the sink: alsasrc is the clock for a live capture, and
-        # making the sink wait on running time would only add latency.
-        # Shaping goes ahead of `level`, not after it, so the mic dB the web UI
-        # shows is the level of what is actually transmitted. With it
-        # downstream, rumble and hum would drive the meter on a node that was
-        # sending none of it, which is the opposite of what the meter is for.
+        # sync=false avoids sink latency because alsasrc clocks live capture.
+        # Put shaping before level so the UI measures transmitted audio after
+        # hum and rumble removal.
         self._shape_sig = self._shape_signature(raw_rate)
         self._raw_rate = raw_rate
         tx_desc = (
@@ -1201,51 +1064,32 @@ class MeshVoice:
                  ttl=self.cfg.ttl, iface=self.cfg.iface,
                  bind=("bind-address=%s" % bind_ip) if bind_ip else "")
 
-        # Conference receive: rtpbin demultiplexes by SSRC and gives each talker
-        # its own jitter buffer, and audiomixer sums them. A single
-        # rtpjitterbuffer cannot do this: two senders' sequence numbers
-        # interleave in one buffer and the output is garbage, which is why the
-        # old pipeline needed a half-duplex lockout to be usable at all.
-        #
-        # The silent source is not decoration. audiomixer only produces output
-        # while it has an input, so with nobody talking the sink would be
-        # starved, and every transmission would start with the DAC spinning up.
-        # A permanent silent input keeps the mixer and alsasink running so
-        # speech starts cleanly.
-        #
-        # autoremove=false is deliberate and load-bearing (it is also rtpbin's
-        # own default; an earlier revision set it true and that was the bug).
-        # Reaping an idle talker means the next thing they say rebuilds the
-        # branch, and a rebuilt branch loses the head of the transmission.
-        # Measured on a CM4 with lyra, 3.00 s bursts:
-        #
-        #     branch rebuilt on demand   2.82 s arrived  (180 ms lost)
-        #     branch pre-built, attached 2.92 s arrived  ( 80 ms lost)
-        #     talker already established 3.04 s arrived  (nothing lost)
-        #
-        # Only a source rtpbin has seen before costs nothing, so the branches
-        # stay. Blocking the pad, lowering probation and raising the mixer's
-        # min-upstream-latency were all tried and none of them helped; the
-        # residual is rtpbin establishing a new source, not our linking.
-        #
-        # ignore-inactive-pads is then required rather than optional: branches
-        # that are kept are silent between transmissions, and without it the
-        # mixer would sit waiting on them.
+        # Conference receive.
+        # rtpbin gives each SSRC a jitter buffer. audiomixer sums decoded audio.
+        # A shared jitter buffer interleaves independent sequence numbers. The
+        # silent source keeps audiomixer and alsasink running between talkers,
+        # so each transmission starts without a DAC startup delay.
+        # autoremove=false retains established sources and avoids first-contact
+        # loss. Measured on a CM4 with Lyra, for 3.00 s bursts:
+        #   branch rebuilt on demand   2.82 s arrived  (180 ms lost)
+        #   branch pre-built, attached 2.92 s arrived  ( 80 ms lost)
+        #   talker already established 3.04 s arrived  (nothing lost)
+        # Tried: pad block, probation down, min-upstream-latency up. No effect.
+        # The remaining delay is source establishment in rtpbin.
+        # ignore-inactive-pads keeps the mixer from waiting on retained idle
+        # branches.
         self.rx_branches = {}
         self.jitterbuffers = {}
         self.branch_seen = {}
         self.rx_parked = {}
         self._reviving = set()
-        # Loss is read as a delta against the previous window, and a rebuild
-        # destroys every jitter buffer, so the cumulative counters restart at
-        # zero. Without this the first window after a retune is a large
-        # negative delta and gets discarded. _pk_clean_since is deliberately
-        # left alone: it tracks how long the link has been clean, and the link
-        # is not what changed.
+        # Rebuilt jitter buffers reset cumulative loss counters. Reset the
+        # sampling baseline to avoid a negative first delta. Keep
+        # _pk_clean_since here: rebuilding does not change link quality.
         self._pk_last_pushed = 0
         self._pk_last_lost = 0
         self.my_ssrc = None
-        # ssrc -> peer name, for the UI. Filled from the registry.
+        # 24-bit SSRC prefix -> peer name for the UI, filled from the registry.
         self.talker_names = {}
         self._known_peer_ips = set()
         rx_desc = (
@@ -1278,10 +1122,9 @@ class MeshVoice:
         # Now that txhead exists, set the headroom the configured boost needs.
         self._apply_tx_gain(raw_rate)
 
-        # SSRC = 24-bit hash of our mesh address, plus an 8-bit generation for
-        # this run. The prefix lets any receiver name us from the registry; the
-        # generation stops a restart from colliding with the source a receiver
-        # is still holding. See node_ssrc().
+        # SSRC combines a 24-bit mesh-address hash with an 8-bit run generation.
+        # The prefix identifies talkers from the registry. The generation avoids
+        # reusing a receiver's retained source after restart. See node_ssrc().
         ssrc = node_ssrc(bind_ip)
         if ssrc is not None and self.payloader is not None:
             self.payloader.set_property("ssrc", ssrc)
@@ -1289,22 +1132,18 @@ class MeshVoice:
         self.mixer = self.rx.get_by_name("mix")
         self.rtpbin = self.rx.get_by_name("rtpbin")
 
-        # Branches appear and disappear as people key up and drop. Remember the
-        # codec stages so the handler can build one per talker.
+        # Save codec stages for the per-talker branch handler.
         self._rx_depay_desc = depay_desc
         self._rx_dec_desc = dec_desc
         self._rx_raw_rate = raw_rate
         self.rtpbin.connect("pad-added", self._on_rtp_pad_added)
         self.rtpbin.connect("pad-removed", self._on_rtp_pad_removed)
-        # Loss is measured per talker now, so collect the jitter buffers as
-        # rtpbin creates them; _tick_packing sums across them.
+        # Collect per-talker jitter buffers for _tick_packing's aggregate loss.
         self.rtpbin.connect("new-jitterbuffer", self._on_new_jitterbuffer)
 
-        # Keep the bus and the handler id. A retune replaces both pipelines,
-        # and a watch that is never removed keeps its bus alive for the life of
-        # the process; see _remove_bus_watches for what that costs. Taking the
-        # old ones down here as well as in _release_pipelines means build()
-        # cannot orphan a watch by being called twice.
+        # Retain buses and handler IDs for teardown. Remove watches here as well
+        # as in _release_pipelines so repeated build() calls cannot orphan them.
+        # See _remove_bus_watches for descriptor costs.
         self._remove_bus_watches()
         for pipeline, name in ((self.tx, "tx"), (self.rx, "rx")):
             bus = pipeline.get_bus()
@@ -1318,16 +1157,14 @@ class MeshVoice:
         src = self.rx.get_by_name("src")
         src.get_static_pad("src").add_probe(Gst.PadProbeType.BUFFER,
                                             self._on_rx_buffer)
-        # Counting at the sink pad proves packets really left, which is the
-        # difference between "the valve is open" and "audio is on the air".
+        # Count RTP buffers reaching the send sink after encoding and
+        # packetization.
         self.sink.get_static_pad("sink").add_probe(Gst.PadProbeType.BUFFER,
                                                    self._on_tx_buffer)
 
-        # Stall watchdog. The valve's SINK pad, not its source: buffers arrive
-        # there and are dropped inside the valve, so this counts capture even
-        # with the PTT released, which is exactly the point. Playback is
-        # counted at the sink because the mixer's permanent silent input keeps
-        # it fed whether or not anyone is talking. See the constants block.
+        # Watch capture upstream of the valve's drop, including idle PTT. Watch
+        # playback at the sink, fed continuously by the silent mixer input. See
+        # the watchdog constants.
         self.valve.get_static_pad("sink").add_probe(
             Gst.PadProbeType.BUFFER, self._on_capture_buffer)
         play = self.rx.get_by_name("play")
@@ -1355,9 +1192,8 @@ class MeshVoice:
             log("PTT: mode %r: receive only" % self.cfg.ptt_mode)
 
         if self.cfg.beacon_sec:
-            # Announce this run immediately: any receiver still holding our
-            # previous generation needs to see the new SSRC, and anyone already
-            # listening should have us warm before the first press of the PTT.
+            # Announce the new SSRC before the first PTT press so receivers can
+            # establish a source for this run.
             self._schedule_beacon(1500)
             GLib.timeout_add_seconds(self.cfg.beacon_sec, self._tick_beacon)
             log("beacon: ssrc 0x%08x, on start-up and on new peers "
@@ -1382,32 +1218,16 @@ class MeshVoice:
         sd_notify("READY=1")
 
     def _suppress_multicast_loopback(self, attempt=0, sink=None):
-        """Stop our own multicast coming straight back into our receiver.
+        """Disable local multicast playback through the send socket.
 
-        multiudpsink's `loop` property is only applied on the code path that
-        also joins the group, so with auto-multicast=false it is silently
-        ignored (`ttl-mc` and `qos-dscp` are applied regardless: both verified
-        on the wire). Without this the operator hears themselves through the
-        headset one jitter-buffer late, and the UI shows RX during every
-        transmission.
-
-        The socket is reached through `used-socket`; loopback is set through
-        its GObject property.
-
-        And it is retried, because multiudpsink has no socket until it has
-        started and a GStreamer state change is asynchronous: asking too early
-        gets None back, and the original code took that as its answer and never
-        asked again. The pipeline then ran for its whole life with loopback on,
-        which is not a degraded mode, it is the operator being fed their own
-        transmission at headset volume one jitter buffer late.
-
-        Failing here still does not fail a retune. It does not need to: the
-        own-SSRC drop in _on_rx_buffer is the actual guarantee, and this is the
-        tidier of the two, keeping our packets out of rtpbin rather than
-        throwing them away after they arrive.
+        With auto-multicast=false, multiudpsink ignores loop. ttl-mc and
+        qos-dscp work on the wire. Set multicast-loopback on used-socket,
+        retrying until asynchronous startup creates it. Failure can echo
+        voice one jitter buffer late and falsely mark RX active.
+        _on_rx_buffer drops own-SSRC packets if this fails, so retunes proceed.
         """
         if sink is not None and sink is not self.sink:
-            return False              # a retune replaced the pipeline under us
+            return False              # pipeline replaced by retune
         sink = self.sink
         if sink is None:
             return False
@@ -1444,10 +1264,9 @@ class MeshVoice:
         if self.ptt:
             self.ptt.stop()
         self._release_pipelines()
-        # _panic keeps the state file so the fault it just wrote survives the
-        # ten seconds until systemd has us back. A clean shutdown removes it,
-        # because a node with voice stopped should not look like one whose
-        # daemon merely went quiet.
+        # Keep fault state through systemd's 10 s restart delay after _panic.
+        # Remove it on clean shutdown so stopped voice has no stale running
+        # state.
         if not keep_state:
             try:
                 os.unlink(STATE_FILE)
@@ -1460,8 +1279,8 @@ class MeshVoice:
     def _on_bus_message(self, _bus, message, which):
         if message.type == Gst.MessageType.ERROR:
             err, debug = message.parse_error()
-            # An audio device can vanish on USB reset; keep the process alive so
-            # systemd's restart backoff is not the recovery path for a replug.
+            # USB resets can remove audio devices. Keep the process alive and
+            # use pipeline backoff until the device returns.
             self._note_pipeline_error(which, err.message, debug)
         elif message.type == Gst.MessageType.ELEMENT:
             struct = message.get_structure()
@@ -1469,29 +1288,13 @@ class MeshVoice:
                 self._mic_db = (struct.get_value("rms") or [-90.0])[0]
 
     def reload(self):
-        """Re-read mesh.conf and retune if the talk group moved. SIGHUP entry.
+        """Apply talk-group and transmit-shaping changes on SIGHUP.
 
-        Talk group is a per-radio setting, like the channel knob on a handheld:
-        the operator changes it from the web UI (and, later, the rotary switch
-        on the enclosure). Both write voice_channel to mesh.conf and send
-        SIGHUP, so there is one mechanism rather than one per input.
-
-        Retuning in-process rather than restarting the unit matters for the
-        rotary switch, where clicking through groups would otherwise mean a
-        systemd restart per detent: several seconds each, and with lyra a
-        TFLite model reload on top.
-
-        Only the channel is applied. Codec, bitrate and device settings are
-        read once at start-up on purpose: changing those means rebuilding the
-        audio path, and doing it under an operator's thumb on the PTT is a good
-        way to lose a transmission mid-word.
-
-        A retune tears both pipelines down before it builds anything, so there
-        is a window where a failure leaves no working audio path at all. The
-        ladder out of that is: rebuild on the new group, and if that fails,
-        rebuild on the old one, and if that fails too, hand the whole process
-        to systemd. Limping on is not an option here, because every way this
-        can fail leaves the daemon alive and reporting itself healthy.
+        Retune cutoffs and gains live. Rebuild for a changed group or shaping
+        layout. Codec, bitrate and devices remain startup settings.
+        If rebuilding fails, restore the working group and shaping. If that
+        also fails, exit for a systemd restart. In-process retunes avoid a
+        service restart and Lyra model reload for each channel selection.
         """
         new = Config()
         was_transmitting = self.transmitting
@@ -1521,15 +1324,13 @@ class MeshVoice:
             log("reload: transmit shaping changed shape, rebuilding")
 
         if self._retune(new.channel, new.port):
-            # The rebuilt valve defaults to closed. If the operator was holding
-            # PTT across the change, honour it rather than silently dropping
-            # their transmission.
+            # The rebuilt valve starts closed. Restore transmission if PTT
+            # remains held.
             if was_transmitting:
                 self._set_tx(True)
 
-            # Loss history describes the old group's traffic; keep the packing
-            # level but restart the measurement rather than judge the new group
-            # on the old one's numbers.
+            # Keep adapted packing but reset loss measurements for the selected
+            # group.
             self._pk_last_pushed = 0
             self._pk_last_lost = 0
             self._pk_clean_since = time.monotonic()
@@ -1543,8 +1344,7 @@ class MeshVoice:
             self.write_state()
             return False
 
-        # Do not leave the node deaf because a retune failed. Go back to the
-        # group and the shaping that were working.
+        # Restore the working group and shaping after a failed retune.
         log("reload: rebuild on talk group %d failed, reverting to the "
             "previous settings" % new.channel)
         for key, value in shape_was.items():
@@ -1556,29 +1356,24 @@ class MeshVoice:
             self.write_state()
             return False
 
-        # Both builds failed, so this is not something about the new group and
-        # there is nothing left in process to fall back to. mesh.conf already
-        # holds the operator's choice, so the restarted daemon comes up on the
-        # group they asked for.
+        # Both builds failed, leaving no audio path. Restart from mesh.conf,
+        # which contains the operator's requested group.
         self._panic("reload to talk group %d failed and reverting to %d "
                     "failed too" % (new.channel, old_channel))
         return False
 
     def _retune(self, channel, port):
-        """Rebuild both pipelines on one talk group. True only if both play.
+        """Rebuild both pipelines on a talk group and check startup success.
 
-        Catch all build failures, including AttributeError from missing
-        elements. PyGObject swallows exceptions from signal handlers, which
-        could otherwise leave SIGHUP with mismatched pipelines and a state
-        file that still reports "running".
+        Return False on build or state-change failure. _play accepts a pending
+        asynchronous start. Catch all build errors, including AttributeError
+        from missing elements: PyGObject swallows signal-handler exceptions.
         """
         self.cfg.channel = channel
         self.cfg.port = port
         self._release_pipelines()
-        # build() re-creates both pipelines, their bus watches and pad probes
-        # against the new port. It deliberately does not touch the PTT reader
-        # or the GLib timers, which are installed by start() and must not be
-        # duplicated.
+        # Rebuild pipelines, bus watches and probes for the new port. Keep the
+        # PTT reader and GLib timers installed by start() without duplicates.
         try:
             self.build()
         except Exception as exc:
@@ -1588,27 +1383,21 @@ class MeshVoice:
             return False
         self._suppress_multicast_loopback()
         self._tx_ready()
-        # These pipelines are new objects, so a fault recorded against the ones
-        # they replaced is not theirs. Leaving it would keep the watchdog off
-        # the rx pipeline indefinitely, since the entry is only cleared by a
-        # buffer arriving and on a quiet talk group none ever does.
+        # Clear faults from replaced pipelines so the watchdog can check new
+        # ones. An RX fault otherwise persists until traffic arrives on a quiet
+        # group.
         self._pipeline_fault.clear()
         self._igmp_lost_since = 0.0
         return True
 
     def _remove_bus_watches(self):
-        """Drop the bus watches, which is the part that is easy to miss.
+        """Remove signal watches and disconnect handlers before releasing buses.
 
-        gst_bus_add_signal_watch() attaches a GSource holding a reference to
-        the bus, so a bus whose watch is never removed is never finalised, and
-        every GstBus carries a GstPoll control pipe. A retune builds two new
-        pipelines, so a talk group change that only set the old ones to NULL
-        leaked four file descriptors and two live GSources every time.
-        Measured on the bench: 4 fds per retune, dead flat once the watch is
-        removed. An operator clicking a rotary switch through the groups would
-        reach the default 1024-descriptor limit inside a single operation, and
-        the daemon would then fail to open the very sockets and ALSA devices
-        that voice needs.
+        gst_bus_add_signal_watch() creates a GSource retaining the bus and its
+        GstPoll control pipe. Setting pipelines to NULL does not remove watches.
+        Measured per retune without removal: 4 leaked fds and 2 live GSources.
+        With removal, fd use stays flat. Sweeping a rotary switch through the
+        groups would exhaust the default 1024-descriptor limit.
         """
         for name, (bus, handler) in self._bus_watch.items():
             try:
@@ -1620,12 +1409,10 @@ class MeshVoice:
         self._bus_watch = {}
 
     def _release_pipelines(self):
-        """Take both pipelines to NULL and drop everything holding them up.
+        """Stop both pipelines and release watches, timers and element handles.
 
-        The element handles go too. build() reassigns all of them, but it does
-        so one at a time and can raise part way through, and a stale self.valve
-        pointing into a pipeline that has been torn down is exactly the
-        half-built state _retune exists to prevent.
+        Clear handles because build() can fail between assignments. A stale
+        valve must not refer to a pipeline already torn down by _retune.
         """
         self._set_tx(False)
         self._bind_ip = None
@@ -1649,18 +1436,12 @@ class MeshVoice:
         self._reviving = set()
 
     def _play(self, which):
-        """Take one pipeline to PLAYING, and prove that it got there.
+        """Request PLAYING and report explicit startup failures.
 
-        set_state() not returning FAILURE is not proof. A port already bound or
-        an ALSA device held by something else fails during the state change,
-        not during parse_launch(), and the old retune path treated a successful
-        parse as a working pipeline. get_state() is what actually waits for the
-        answer.
-
-        ASYNC after the timeout is reported but not treated as a failure: a
-        live pipeline can still be settling, the bus watch already owns real
-        errors, and turning a slow start into a teardown would be a worse bug
-        than the one being fixed here.
+        Port conflicts and busy ALSA devices can fail after parse_launch().
+        Wait with get_state() to detect state-change failures. Accept ASYNC
+        after 5 s because live pipelines may still be settling. Bus watches
+        handle errors that arrive later.
         """
         pipeline = self.tx if which == "tx" else self.rx
         if pipeline is None:
@@ -1680,26 +1461,21 @@ class MeshVoice:
         return True
 
     def _mark_playing(self, which):
-        """Restart the watchdog's clocks for a pipeline that was just started.
+        """Reset watchdog grace and last-flow clocks on pipeline startup.
 
-        Both clocks, and both matter. _playing_since gives the pipeline its
-        grace period; _flow_ts stops the first tick after a restart judging the
-        new pipeline on how long the old one had been silent.
+        _playing_since grants startup grace. _flow_ts prevents the first check
+        from counting the replaced pipeline's idle time.
         """
         now = time.monotonic()
         self._playing_since[which] = now
         self._flow_ts[which] = now
 
     def _panic(self, reason):
-        """Give up in process and let systemd rebuild the whole voice stack.
+        """Save the fault and exit for a systemd restart after 10 seconds.
 
-        Exiting IS the restart. `systemctl restart mesh-voice` from inside
-        mesh-voice is the obvious alternative and it is worse: the job blocks
-        on the very unit issuing it, and the --no-block form races the process
-        it is killing. Restart=on-failure with RestartSec=10 already does this
-        properly, and a fresh process is the whole point: new ALSA handles, new
-        sockets, a new multicast join, mesh.conf read again and, with lyra,
-        freshly loaded TFLite models.
+        Restart=on-failure with RestartSec=10 reloads mesh.conf, ALSA handles,
+        sockets, multicast membership and Lyra models in a fresh process.
+        Self-restart via systemctl blocks on this unit or races shutdown.
         """
         log("voice stack restart: %s" % reason)
         self._fault = reason
@@ -1711,13 +1487,11 @@ class MeshVoice:
         self.stop(keep_state=True)
 
     def _note_pipeline_error(self, which, text, debug):
-        """Log a pipeline error and schedule a restart, backing off if it repeats.
+        """Log a pipeline error and schedule a restart with retry backoff.
 
-        The first occurrence of a given error is logged in full, along with when
-        the retry will happen. Identical errors after that are counted, not
-        logged: a missing sound card produces the same two lines for ever, and
-        printing them every few seconds buries everything else in the journal.
-        The tally is emitted once, on recovery or when the error changes.
+        Log each changed error in full with its retry delay. Count identical
+        errors to limit journal traffic from missing hardware. Emit the tally
+        on recovery or when the error changes.
         """
         state = self._pipeline_fault.get(which)
         now = time.monotonic()
@@ -1730,9 +1504,7 @@ class MeshVoice:
 
         if text == state["text"]:
             state["repeats"] += 1
-            # Say something once when the backoff tops out, so a permanently
-            # broken pipeline is still visible in the log rather than going
-            # completely silent, then stay quiet.
+            # Log once at maximum backoff so persistent failure remains visible.
             if state["delay"] >= PIPELINE_RETRY_MAX_SEC and not state["capped"]:
                 state["capped"] = True
                 log("%s pipeline: still failing after %d attempt(s): retrying "
@@ -1760,7 +1532,7 @@ class MeshVoice:
             state["repeats"] = 0
 
     def _note_pipeline_ok(self, which):
-        """A buffer flowed, so whatever was wrong with this pipeline is over."""
+        """Clear a pipeline fault when a buffer flows and log recovery."""
         state = self._pipeline_fault.pop(which, None)
         if state and state["text"] is not None:
             self._flush_pipeline_repeats(which, state)
@@ -1771,17 +1543,14 @@ class MeshVoice:
         was_transmitting = self.transmitting
         if which == "tx":
             self._set_tx(False)
-        # Only announce the restart while the error is still being logged;
-        # during a suppressed streak this would just be more of the same noise.
+        # Suppress restart messages along with repeated identical errors.
         state = self._pipeline_fault.get(which)
         if not state or not state["repeats"]:
             log("%s pipeline restarting" % which)
         pipeline.set_state(Gst.State.NULL)
         pipeline.set_state(Gst.State.PLAYING)
-        # The watchdog measures flow from the moment a pipeline was last asked
-        # to play, so a restart has to move that mark. Without it the next tick
-        # judges the new pipeline on the old one's silence and restarts it
-        # again immediately, burning the escalation budget in fifteen seconds.
+        # Reset watchdog clocks so replaced-flow idle time cannot trigger
+        # another restart on the next tick and exhaust escalation within 15 s.
         self._mark_playing(which)
         if which == "tx" and was_transmitting:
             self._set_tx(True)
@@ -1789,26 +1558,18 @@ class MeshVoice:
 
     def _on_tx_buffer(self, _pad, _info):
         self.tx_packets += 1
-        # Data flowing is the only honest evidence a pipeline came back. The
-        # dict is empty in the normal case, so this costs a truth test per
-        # buffer and nothing else.
+        # Use flowing data as recovery evidence. Skip fault handling in normal
+        # flow.
         if self._pipeline_fault:
             self._note_pipeline_ok("tx")
         return Gst.PadProbeReturn.OK
 
     def _on_rx_buffer(self, _pad, info):
-        # Our own transmission, if the socket-level suppression did not take.
-        # This is the guarantee, not the optimisation. _suppress_multicast_
-        # loopback reaches for a socket that may not exist yet and swallows
-        # every failure, so it can silently leave loopback on, and what that
-        # sounds like is the operator's own voice in their headset one jitter
-        # buffer late. Dropping here also keeps rx_active honest: without it a
-        # half-duplex node reads its own audio as a remote talker and refuses
-        # to key.
-        #
-        # Safe to key off the SSRC because it is a hash of our own mesh address
-        # plus a per-run generation byte (see node_ssrc), so no peer can
-        # collide with it without already sharing our IP.
+        # Drop own-SSRC packets if socket loopback suppression fails or is
+        # pending. This prevents delayed local playback and false rx_active,
+        # which would block half-duplex PTT. node_ssrc combines a mesh-address
+        # hash and a per-run generation byte to distinguish this node's
+        # transmission.
         if self.my_ssrc is not None:
             buf = info.get_buffer()
             # RTP fixed header is 12 bytes, SSRC a big-endian u32 at offset 8.
@@ -1826,14 +1587,14 @@ class MeshVoice:
         return Gst.PadProbeReturn.OK
 
     def _on_capture_buffer(self, _pad, _info):
-        """Capture reached the valve. Runs whether or not the PTT is pressed."""
+        """Count capture at the valve, including when PTT is released."""
         self._flow_count["tx"] += 1
         self._flow_ts["tx"] = time.monotonic()
         self._ever_flowed["tx"] = True
         return Gst.PadProbeReturn.OK
 
     def _on_playback_buffer(self, _pad, _info):
-        """Audio reached the speaker, if only the mixer's silence."""
+        """Count playback buffers, including the mixer's silent input."""
         self._flow_count["rx"] += 1
         self._flow_ts["rx"] = time.monotonic()
         self._ever_flowed["rx"] = True
@@ -1842,19 +1603,13 @@ class MeshVoice:
     # -- stall watchdog --
 
     def _tick_health(self):
-        """Watch for a pipeline that stopped moving audio without saying so.
+        """Detect audio flows that stall without a bus error.
 
-        Deliberately separate from the bus-error path, and it defers to it: a
-        pipeline with a live entry in _pipeline_fault is skipped entirely,
-        because _note_pipeline_error's backoff already owns it. That includes
-        the node provisioned with voice=y before its OpenVLM board was fitted,
-        which would otherwise be restarted every fifteen seconds for ever. This
-        one only judges silence.
+        Skip _pipeline_fault entries owned by _note_pipeline_error's backoff.
+        Also skip flows that never ran, including missing OpenVLM hardware.
         """
-        # Unconditional, and independent of voice_watchdog: its only job is to
-        # prove the GLib main loop is still turning, which is the one failure
-        # everything below is structurally unable to catch, since everything
-        # below runs on that loop.
+        # Notify systemd independently of voice_watchdog. Only systemd can
+        # detect a blocked GLib loop because local checks run on that loop.
         sd_notify("WATCHDOG=1")
         if not self.cfg.watchdog:
             return True
@@ -1879,18 +1634,12 @@ class MeshVoice:
         return True
 
     def _check_igmp(self, now):
-        """Catch a receiver that is bound, PLAYING and no longer in the group.
+        """Check for multicast membership lost while the receiver stays PLAYING.
 
-        udpsrc joins the multicast group once, at start. If the membership goes
-        away underneath it (br0 rebuilt, or the mesh interface dropped from the
-        bridge and re-added) nothing is torn down and nothing is logged: the
-        socket stays bound, the pipeline stays PLAYING, and it simply never
-        receives again. No dataflow check can see that, because a receiver
-        nobody is talking to looks exactly the same.
-
-        Losing the join also stops us being heard, not merely from hearing:
-        batman-adv drops multicast to a group with no listeners, so on a
-        two-node mesh a dropped membership takes out both directions.
+        udpsrc joins once at startup. Rebuilding br0 or removing and re-adding
+        its mesh interface can lose the join without a bus error. Quiet-group
+        traffic cannot reveal this. On a two-node mesh, losing the join can
+        break both directions because batman-adv drops groups with no listeners.
         """
         if "rx" in self._pipeline_fault:
             return
@@ -1911,12 +1660,10 @@ class MeshVoice:
                            % (TALK_GROUP_ADDR, self.cfg.iface))
 
     def _on_stall(self, which, why):
-        """One pipeline stalled silently: restart it, or the process.
+        """Restart a stalled pipeline or escalate repeated stalls to systemd.
 
-        Restarting the pipeline is nearly free and fixes a wedged element. When
-        it does not, restarting it again will not either, so the escalation is
-        deliberately shallow: three goes inside ten minutes and the whole stack
-        is handed to systemd.
+        The third stall within ten minutes triggers a process restart for
+        faults that in-process pipeline restarts do not clear.
         """
         self._stalls[which] += 1
         now = time.monotonic()
@@ -1962,34 +1709,28 @@ class MeshVoice:
     # -- conference receive --
 
     def _on_new_jitterbuffer(self, _rtpbin, jitterbuffer, session, ssrc):
-        """rtpbin made a jitter buffer for a new talker; keep it for stats.
+        """Retain a new talker's jitter buffer for loss statistics.
 
-        Loss is per talker now. The packing controller sums across these, which
-        is the right aggregate: it is asking "how lossy is this radio link",
-        not "how lossy is any one speaker".
+        _tick_packing sums receive loss across talkers to estimate link loss.
         """
         self.jitterbuffers[ssrc] = jitterbuffer
-        # SSRC is the sender's mesh address, so this names the talker outright
-        # rather than printing an opaque 32-bit number.
+        # Map the 24-bit SSRC address hash to a registry name.
         who = self.talker_names.get(ssrc >> 8) or ("ssrc 0x%08x" % ssrc)
         log("rx: new talker %s (ssrc 0x%08x)" % (who, ssrc))
 
     def _on_rtp_pad_added(self, _rtpbin, pad):
-        """rtpbin made a receive pad for a talker. Give it a decode branch.
+        """Attach a decode branch to a new talker's receive pad.
 
-        Fires once per source for the life of the daemon, because
-        autoremove=false means rtpbin never lets a source go. That is the whole
-        reason _park_branch exists: an evicted talker will never get a second
-        pad-added to rebuild them.
+        autoremove=false retains each source, so pad-added fires only once per
+        source. _park_branch handles later revival of evicted talkers.
         """
         name = pad.get_name()
         if not name.startswith("recv_rtp_src_"):
             return
         if name in self.rx_branches or name in self.rx_parked:
             return
-        # Park on failure rather than walk away: an unlinked rtpbin pad is the
-        # bug _park_branch exists to prevent, and a branch that could not be
-        # built is no different from one that was evicted.
+        # Park failed branches too. An unlinked rtpbin pad would raise bus
+        # errors.
         if not self._attach_branch(pad):
             self._park_branch(name, pad)
             return
@@ -1999,10 +1740,10 @@ class MeshVoice:
         """Build one talker's decode branch and feed it into the mixer."""
         name = pad.get_name()
         try:
-            # An explicit capsfilter, not bare caps: as the last item in a bin
-            # description the parser reads "audio/x-raw,..." as an element name
-            # and fails with 'no element "audio"'. Every talker must arrive at
-            # the mixer in the same format, so this cannot simply be dropped.
+            # Use an explicit capsfilter at the end of a bin description. Bare
+            # "audio/x-raw,..." is parsed as an element and fails with "no
+            # element audio". Every branch must reach the mixer in the same
+            # format.
             depay = Gst.parse_bin_from_description(
                 "%s ! %s ! audioconvert ! audioresample ! capsfilter "
                 "caps=\"audio/x-raw, rate=(int)%d, channels=(int)1, "
@@ -2029,7 +1770,7 @@ class MeshVoice:
             return False
 
         depay.sync_state_with_parent()
-        # Retain the rtpbin pad so eviction can park it and revival can re-link it.
+        # Retain the rtpbin pad for parking and revival.
         self.rx_branches[name] = (pad, depay, mixpad)
         self.branch_seen[name] = time.monotonic()
         # Touch on every decoded buffer so the LRU below evicts the talker who
@@ -2052,25 +1793,13 @@ class MeshVoice:
         return False
 
     def _tick_beacon(self):
-        """Announce ourselves so receivers establish our source before we talk.
+        """Send muted RTP so receivers establish this source before speech.
 
-        This is the only thing that actually pre-establishes a talker, and the
-        alternative was measured and rejected. Synthesising a source locally
-        from a peer's registry address does create the slot -- but our invented
-        sequence numbers and timestamps become the source's base, the real
-        sender's do not match, and the jitter buffer resyncs and discards the
-        transmission. Measured end to end: the peer talked for three seconds
-        and the output was digital silence, peak amplitude zero. A receive
-        source can only be established by the node that owns the SSRC.
-
-        So we do it from the sending side: mute, open the valve for one packet
-        or two, close, unmute. That is real RTP from the real payloader with
-        the real sequence numbers, which is exactly what makes the next
-        transmission arrive whole.
-
-        It costs about 4 packets a minute at the default interval. batman-adv
-        drops multicast that nobody has joined, so beacons only occupy air when
-        somebody is actually listening.
+        Tried: injecting a peer SSRC locally. A 3 s burst yields zero amplitude.
+        Invented sequence numbers and timestamps cause jitter-buffer resync.
+        Use the sender's payloader: mute, open for BEACON_MS, close, unmute.
+        At default 600 s and 40 ms packets, periodic traffic is about 21
+        packets/hour. batman-adv drops it without listeners.
         """
         if self.transmitting or self.ptt_pressed:
             return True                      # never interrupt a transmission
@@ -2084,8 +1813,8 @@ class MeshVoice:
 
     def _end_beacon(self):
         self._beacon_end = None
-        # _set_tx already restores volume if PTT beat us to it, so only close
-        # the valve when we are not actually transmitting.
+        # _set_tx restores volume on PTT. Keep the valve open if transmission
+        # starts.
         if not self.transmitting and self.valve:
             self.valve.set_property("drop", True)
         if self.volume:
@@ -2093,12 +1822,10 @@ class MeshVoice:
         return False                          # one-shot
 
     def _size_talker_table(self, peer_count):
-        """Keep the branch table comfortably above the number of known nodes.
+        """Grow the warm branch table to cover known peers plus headroom.
 
-        Every node on the talk group is a potential talker, and an evicted
-        talker pays the first-contact penalty again next time they speak. So
-        the table tracks the registry rather than a guess: known nodes plus
-        headroom, never below the configured value, never above the hard cap.
+        Keep at least the configured floor and at most VOICE_MAX_TALKERS_HARD.
+        Retaining potential talkers avoids first-contact loss after eviction.
         """
         want = min(peer_count + VOICE_TALKER_HEADROOM, VOICE_MAX_TALKERS_HARD)
         if want > self.cfg.max_talkers:
@@ -2113,17 +1840,13 @@ class MeshVoice:
                 % (peer_count, VOICE_MAX_TALKERS_HARD))
 
     def _prune_branches(self):
-        """Keep at most VOICE_MAX_TALKERS branches, dropping the quietest.
+        """Evict the quietest branches until the configured talker cap is met.
 
-        Branches are never reaped on idle (see the pipeline comment), so the
-        only bound is this one. Each costs about 5.3 MB with lyra, measured, so
-        the default cap is roughly 40 MB against 3.4 GB free: the cap exists to
-        stop unbounded growth when nodes churn SSRCs across restarts and
-        retunes, not because the memory is scarce.
-
-        Evicting a talker only costs them the head of their next transmission,
-        and only if they were the least recently heard. That is true only
-        because the pad is parked rather than abandoned; see _park_branch.
+        autoremove=false retains idle sources. The cap bounds growth across
+        sender restarts and retunes. Measured Lyra cost: 5.3 MB per branch,
+        roughly 40 MB for the default floor of 8 against 3.4 GB free on a CM4.
+        Park evicted pads for revival, with first-contact loss on next speech.
+        See _park_branch and the conference receive measurements.
         """
         while len(self.rx_branches) > self.cfg.max_talkers:
             oldest = min(self.branch_seen, key=self.branch_seen.get)
@@ -2140,20 +1863,11 @@ class MeshVoice:
                 % self.cfg.max_talkers)
 
     def _park_branch(self, name, pad):
-        """Hold an evicted talker's rtpbin pad on a fakesink, and watch it.
+        """Park an evicted talker's pad on a fakesink with a buffer probe.
 
-        Tearing the decode branch down leaves rtpbin's receive pad unlinked,
-        and rtpbin never takes that pad back: autoremove=false keeps the source
-        for the life of the daemon, so no second pad-added will ever arrive to
-        rebuild the branch. An evicted talker was therefore inaudible for good,
-        which is not what "least recently heard" is supposed to cost, and it is
-        silent on both ends: they hear the acknowledgement, we simply never
-        hear them again.
-
-        Parking fixes both halves of that. The fakesink keeps the pad linked,
-        so pushing to it returns OK instead of NOT_LINKED, and the buffer probe
-        is what tells us they have started talking again, which is the signal
-        pad-added would have given us if rtpbin still emitted one.
+        autoremove=false retains the source and prevents another pad-added.
+        The fakesink avoids NOT_LINKED bus errors. Its buffer probe schedules
+        branch revival when the talker returns, restoring a receive path.
         """
         sink = Gst.ElementFactory.make("fakesink", None)
         if sink is None:
@@ -2173,12 +1887,11 @@ class MeshVoice:
         self.rx_parked[name] = (pad, sink, probe)
 
     def _on_parked_buffer(self, _pad, _info, name):
-        """A parked talker started speaking again. Rebuild them.
+        """Schedule decoder revival when a parked talker sends a buffer.
 
-        Runs on a streaming thread, so it only schedules: relinking pads and
-        adding elements is main-loop work. The buffer that triggered this goes
-        to the fakesink, which is the measured 180 ms head loss that eviction
-        has always been documented to cost.
+        The streaming thread sends this buffer to the fakesink. Relinking and
+        element creation run on the main loop. Rebuilding costs about 180 ms
+        of initial audio, per the conference receive measurements.
         """
         if name not in self._reviving:
             self._reviving.add(name)
@@ -2214,11 +1927,10 @@ class MeshVoice:
             return default
 
     def _on_rtp_pad_removed(self, _rtpbin, pad):
-        """Tear the branch down when rtpbin times the talker out.
+        """Release a talker's branch when rtpbin removes its receive pad.
 
-        Without this the pipeline accumulates a decoder per talker per session
-        for the life of the daemon: on a busy net that is a slow leak of both
-        memory and CPU, and with lyra each one holds a TFLite interpreter.
+        Release decoder memory and CPU resources, including Lyra's TFLite
+        interpreter, so repeated sessions cannot accumulate them.
         """
         name = pad.get_name()
         self._reviving.discard(name)
@@ -2259,10 +1971,10 @@ class MeshVoice:
     # -- adaptive packing --
 
     def _link_mbps(self):
-        """batman-adv's throughput estimate for the worst neighbour, in Mbit/s.
+        """Return batman-adv's lowest neighbour throughput estimate in Mbit/s.
 
-        Returns None when it cannot be read (batctl absent, not privileged,
-        mesh down). Callers treat None as "unknown", not as "bad".
+        Return None for unavailable batctl, insufficient privilege or no mesh.
+        Callers treat None as unknown capacity.
         """
         try:
             out = subprocess.run([BATCTL, "meshif", "bat0", "n"],
@@ -2296,39 +2008,24 @@ class MeshVoice:
                 self.cfg.lyra_bitrate, 15)), why))
 
     def _tick_packing(self):
-        """Adapt frames-per-packet to measured receive loss.
+        """Adapt frames per packet to receive loss at fixed codec bitrate.
 
-        Direction is deliberately the opposite of the usual codec-downgrade
-        reflex, and the measurements are why. On this link one 20 ms frame
-        costs 101 bytes on air, 86 of which is header, so packing frames is a
-        far bigger lever than codec bitrate: 1 -> 2 frames/packet takes 43 %
-        off the wire, while 6000 -> 3200 bps takes 12 % off and is plainly
-        audible. So bitrate stays fixed and packing moves.
-
-        Under loss we packetise SMALLER. A lost packet takes frames_per_packet
-        frames with it, and a listening test at 10 % loss put the audibility
-        knee exactly in this range: 20 ms losses inaudible, 40 ms barely
-        audible, 60 ms clearly audible, 80 ms unpleasant. Spending airtime to
-        keep each loss short enough for Lyra's concealment to hide is the whole
-        trade.
-
-        That is only safe while loss means fades rather than congestion: on a
-        saturated link, offering more packets makes it worse. Hence the floor
-        from batman-adv's throughput estimate.
-
-        The signal is our own receive loss, not the far end's -- plain
-        multicast RTP has no back channel. It is a decent proxy because it
-        measures the same radio link in the other direction, but it is only a
-        proxy, and an asymmetric link will fool it. Summed across talkers,
-        since the question is how lossy the link is, not who is speaking.
+        A 20 ms frame costs 101 bytes on air, including 86 bytes of headers.
+        Packing 2 frames instead of 1 saves 43%. Reducing 6000 to 3200 bps saves
+        12% with audible quality loss. Smaller packets shorten each audio gap.
+        Listening test at 10% loss:
+          20 ms  inaudible       40 ms  barely audible
+          60 ms  clearly audible 80 ms  unpleasant
+        Use smaller packets under loss unless the throughput floor indicates
+        congestion, where extra packets can worsen loss. Receive loss summed
+        across talkers is a proxy for transmit loss: multicast RTP has no back
+        channel, and asymmetric links can invalidate the estimate.
         """
         if self.cfg.codec != "lyra":
-            return False        # nothing to adapt; stop the timer
+            return False        # no adaptation for this codec
         if self.transmitting:
-            # Our own transmission crowds the air and we are not listening to
-            # it, so a window that overlaps TX says nothing useful about the
-            # link. Skipping is not about duplex policy -- it is about not
-            # measuring during the one period we cannot measure.
+            # Skip while transmitting: local traffic consumes airtime, and its
+            # packets are excluded from receive statistics.
             return True
 
         pushed, lost = self._rx_loss_stats()
@@ -2367,9 +2064,8 @@ class MeshVoice:
                                       % (now - self._pk_clean_since, loss_pct))
                 self._pk_clean_since = now
         else:
-            # Between the thresholds: hold position and restart the clean
-            # timer, so recovery needs a genuinely quiet stretch rather than an
-            # average that happens to land in the middle.
+            # Reset the clean timer between thresholds. Recovery requires
+            # sustained loss below the low threshold.
             self._pk_clean_since = now
         return True
 
@@ -2417,7 +2113,7 @@ class MeshVoice:
         changed = on != self.transmitting
         self.transmitting = on
         if on and self.volume:
-            # A beacon may have muted us moments ago; never key up silent.
+            # Restore volume after a beacon before opening PTT.
             self.volume.set_property("volume", 1.0)
         if self.valve:
             self.valve.set_property("drop", not on)
@@ -2450,19 +2146,15 @@ class MeshVoice:
         return True
 
     def refresh_peers(self):
-        """Point multiudpsink at the multicast group plus every active peer.
+        """Set multicast and optional unicast destinations from active peers.
 
-        `clients` is writable while the pipeline is PLAYING, so the destination
-        set follows the mesh without restarting anything.
+        The clients property is writable while PLAYING. Always read the registry
+        for talker names, branch sizing and new-peer beacons.
         """
         clients = ["%s:%d" % (TALK_GROUP_ADDR, self.cfg.port)]
 
-        # The registry is read unconditionally. It drives naming, warm-branch
-        # sizing and the new-node beacon, none of which have anything to do
-        # with unicast -- an earlier revision read it only when
-        # voice_unicast=y, which meant that on the default configuration
-        # talkers showed as raw SSRC hex, the talker table never grew past its
-        # floor, and a node joining mid-operation was never announced to.
+        # Read the registry even with unicast disabled for names, sizing and
+        # beacons.
         registry = read_registry(self.local_ips)
 
         peers = []
@@ -2481,8 +2173,7 @@ class MeshVoice:
             if prefix is not None:
                 self.talker_names[prefix] = host or ip
 
-        # A node we have not seen before cannot have heard us either, so
-        # announce ourselves rather than waiting for the periodic beacon.
+        # Announce to new peers before waiting for the periodic beacon.
         new_ips = {ip for ip, _ in registry} - self._known_peer_ips
         if new_ips and self.cfg.beacon_sec:
             log("beacon: %d new node(s) in registry: announcing" % len(new_ips))
@@ -2511,8 +2202,7 @@ class MeshVoice:
         return True
 
     def write_state(self):
-        # Totals across every talker's jitter buffer. Late and duplicate are
-        # summed the same way; per-talker detail is not worth the UI space.
+        # Aggregate late, duplicate, lost and pushed packets for the UI.
         stats = {}
         late = dups = 0
         for jb in list(self.jitterbuffers.values()):
@@ -2527,9 +2217,8 @@ class MeshVoice:
                  "num-pushed": pushed}
 
         state = {
-            # "restarting" only ever appears in the ten seconds between _panic
-            # writing this and systemd having the daemon back, and it exists so
-            # the VOICE tab can say why rather than going blank.
+            # Preserve the fault in the VOICE tab through systemd's 10 s restart
+            # delay.
             "service": "restarting" if self._fault else "running",
             "fault": self._fault,
             "uptime": int(time.monotonic() - self.started_at),
@@ -2571,29 +2260,27 @@ class MeshVoice:
             "rx_late": stats.get("num-late", 0),
             "rx_duplicates": stats.get("num-duplicates", 0),
             "rx_loopback": self.rx_loopback,
-            # Watchdog view. capture/playback are the flows the stall detector
-            # actually judges; tx_packets and rx_packets above are traffic, and
-            # are flat on a quiet talk group by design.
             "highpass_hz": self.cfg.highpass_hz,
             "lowpass_hz": self.cfg.lowpass_hz,
             "eq": ([round(g, 2) for g in self._eq_gains(self._raw_rate)]
                    if self.cfg.eq else None),
             "tx_gain_db": round(20.0 * math.log10(self._tx_gain), 1),
+            # Watchdog capture/playback flows run while idle. Packet counters
+            # stay flat between transmissions.
             "watchdog": self.cfg.watchdog,
             "watchdog_sec": self.cfg.watchdog_sec,
             "capture_buffers": self._flow_count["tx"],
             "playback_buffers": self._flow_count["rx"],
-            # null, not a very large number, when the flow has never run at
-            # all: a node whose OpenVLM was never fitted has no audio device,
-            # which is a different thing from one whose audio device stopped,
-            # and the watchdog treats them differently too.
+            # None means the flow has never run, including absent OpenVLM
+            # hardware. The watchdog checks only flows that have previously
+            # produced audio.
             "capture_idle": self._idle("tx"),
             "playback_idle": self._idle("rx"),
             "stalls": self._stalls["tx"] + self._stalls["rx"],
             "igmp_joined": self._igmp_ok,
             "updated": int(time.time()),
-            # Boot-clock stamp for freshness checks in other processes; the
-            # wall time above is for display and can be stepped by time sync.
+            # Boot-clock stamp for cross-process freshness checks. Wall time is
+            # for display and can step during time sync.
             "updated_boot": time.clock_gettime(time.CLOCK_BOOTTIME),
         }
         tmp = STATE_FILE + ".tmp"
@@ -2629,9 +2316,8 @@ def main():
     for sig in (signal.SIGINT, signal.SIGTERM):
         GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, sig,
                              lambda *_: (voice.stop(), False)[1])
-    # SIGHUP = re-read mesh.conf and change talk group. Returns True so the
-    # handler stays installed for the next one; the web UI and, later, the
-    # enclosure rotary switch both drive channel changes through this.
+    # SIGHUP applies mesh.conf changes from the web UI. Return True to retain
+    # the handler for subsequent reloads and future rotary-switch input.
     GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGHUP,
                          lambda *_: (voice.reload(), True)[1])
 
@@ -2640,8 +2326,7 @@ def main():
         voice.loop.run()
     except KeyboardInterrupt:
         voice.stop()
-    # Non-zero when _panic decided the stack needed rebuilding, which is what
-    # turns Restart=on-failure into the recovery path.
+    # _panic sets a nonzero exit status to trigger Restart=on-failure.
     return voice.exit_code
 
 

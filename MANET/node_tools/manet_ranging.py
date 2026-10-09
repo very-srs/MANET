@@ -1,7 +1,7 @@
 """Socket-free, event-driven MT7916 data/ACK ranging (not 802.11mc FTM).
 
 Call start(), receive(), tick(), burst_finished(), cancel() and radio_error()
-on ONE event-loop thread; drain outbox and results after each event. Radio
+on one event-loop thread. Drain outbox and results after each event. Radio
 methods must be nonblocking. tick() must run regularly even with no traffic.
 An adapter must authenticate/authorize Peer identities, verify direct 5 GHz
 neighbours and mesh mode, scope probes to that interface, and associate UDP
@@ -41,9 +41,9 @@ def burst_schedule_us(session_id, challenge, frames, interval_ms):
 
     SHA-256(domain || sid || challenge || gap_index_be16), first u32 BE,
     modulo the inclusive gap range. Nominal interval +/-20%, clipped to
-    20..100 ms (50 means 40..60 ms). Both roles derive the same schedule;
-    no platform PRNG or secret clock is involved. This reduces periodic
-    time-pairing aliases; it does not prove radio association or counter origin.
+    20..100 ms (50 means 40..60 ms). Both roles derive the same schedule
+    without a platform PRNG or secret clock. This reduces periodic pairing
+    aliases but does not prove radio association or counter origin.
     """
     if (any(not isinstance(n, bytes) or len(n) != 16 or not any(n)
             for n in (session_id, challenge)) or
@@ -134,7 +134,7 @@ class Calibration:
 
     @classmethod
     def measured_20mhz(cls, constant_counts):
-        """Measured slope; caller supplies this node's calibrated intercept."""
+        """Measured slope with this node's supplied calibrated intercept."""
         return cls(20, 26.69, constant_counts, 2454)
 
 
@@ -165,13 +165,13 @@ class RemoteStamp:
 class Estimate:
     range_m: float
     percentile_counts: float
-    differences: tuple  # (sequence, corrected RTT minus turnaround), after filtering.
+    differences: tuple  # Filtered (sequence, corrected RTT minus turnaround).
     matched: int
     rejected: int
 
 
 def _unique(rows):
-    """Identical duplicates are harmless; ambiguous retransmissions are excluded."""
+    """Exclude ambiguous retransmissions and allow identical duplicates."""
     unique, conflicts = {}, set()
     for row in rows:
         if row.sequence in unique and unique[row.sequence] != row:
@@ -206,11 +206,11 @@ def pair_timestamps(initiator, responder, calibration, min_pairs=10,
     walk. The offset allowance is tolerance_counts + elapsed hardware counts
     * max_drift_ppm / 1e6 since the last match. This handles lost frames and
     actual probe pacing without assuming a channel width. Recorded medians
-    were 8.2-8.4 ppm, peaking at 29.7 ppm; 40 ppm is a configurable margin,
+    are 8.2-8.4 ppm, peaking at 29.7 ppm. 40 ppm is a configurable margin,
     not a hardware guarantee. As in estimators.py, discard
     |D - median(D)| >= 1500 counts and
     take sorted(D)[floor(.25*N)], with no interpolation. The measured slope
-    already converts ROUND-TRIP counts to metres; do not divide by two again.
+    already converts round-trip counts to metres. Do not divide by two again.
     Negative calibrated ranges are retained for callers to diagnose.
     """
     if (min_pairs < 1 or tolerance_counts <= 0 or outlier_counts <= 0 or
@@ -256,9 +256,9 @@ def pair_timestamps(initiator, responder, calibration, min_pairs=10,
 
 
 class Radio(Protocol):
-    """One adapter per radio; all methods may raise on failure.
+    """One adapter per radio. All methods may raise on failure.
 
-    arm_responder saves ACK settings BEFORE changing them, resets hardware
+    arm_responder saves ACK settings before changing them, resets hardware
     counters and selects this peer's MAC. send_burst resets initiator capture,
     sends only the supplied marked datagrams at burst_schedule_us() offsets
     derived from their sid/challenge and nominal interval_ms, on the direct
@@ -282,7 +282,7 @@ class Config:
     frames: int = 50
     interval_ms: int = 50
     ready_timeout_s: float = 1.0
-    arm_grace_s: float = 1.5  # Includes default helper's 1 s off/on preparation and drain.
+    arm_grace_s: float = 1.5  # Default helper: 1 s off/on prep plus drain.
     report_timeout_s: float = 1.0
     settle_s: float = 0.1
     peer_cooldown_s: float = 5.0
@@ -309,7 +309,7 @@ class Config:
 @dataclass(frozen=True)
 class Outbound:
     peer: Peer
-    data: bytes  # Control traffic may use any mesh path; bursts go through Radio.
+    data: bytes  # Any mesh path for control. Bursts use Radio.
 
 
 @dataclass(frozen=True)
@@ -321,7 +321,7 @@ class PositionSnapshot:
 
 @dataclass(frozen=True)
 class PeerClaim:
-    """Unverified peer-reported values; never a locally computed Estimate."""
+    """Unverified peer-reported values, not a locally computed Estimate."""
     range_m: float
     p25_counts: float
     pair_count: int
@@ -335,7 +335,7 @@ class Result:
     estimate: Optional[Estimate] = None
     positions: tuple = ()  # Ready + each report's fresh snapshot, no Alfred data.
     retry_ms: int = 0
-    # Fixed orientation on BOTH roles: initiator at burst start, responder at
+    # Fixed orientation on both roles: initiator at burst start, responder at
     # Ready. Later report snapshots remain in positions for freshness context.
     initiator_position: Optional[pb.Position] = None
     responder_position: Optional[pb.Position] = None
@@ -373,8 +373,8 @@ class Ranging:
     """Both roles share one radio lock. Authorization defaults to deny.
 
     eligible(peer) must check the current 5 GHz mesh role, width and direct
-    adjacency. position() returns a NEW current Position, with age from a local
-    monotonic clock; absent UTC/height/uncertainty stays absent. Unknown/invalid
+    adjacency. position() returns a new current Position, with age from a local
+    monotonic clock. Absent UTC/height/uncertainty stays absent. Unknown/invalid
     positions are allowed for relative ranging. No configuration or trust state
     is changed by an exchange. Call close() in the event loop's finally block.
     Successful initiators send one Result claim, without waiting for a reply.
@@ -398,8 +398,8 @@ class Ranging:
         self.last_error = None
         self.closed = False
         self._peers = {}  # peer -> (next request response, next admitted session)
-        self._seen = {}   # (peer, session) -> expiry; bounded replay cache.
-        self._served = {} # (peer, session) -> short-lived result acceptance slot.
+        self._seen = {}   # (peer, session) -> expiry, bounded replay cache.
+        self._served = {}  # (peer, session) -> brief result acceptance slot.
         self._nonces = deque(maxlen=256)
         self._last_now = -math.inf
 
@@ -498,7 +498,7 @@ class Ranging:
                        if max(limits) > now or (self.active and peer == self.active.peer)}
 
     def start(self, peers):
-        """Queue one pass over anchors. Busy results expose retry_ms; no spin retry."""
+        """Queue anchors once. Busy results expose retry_ms without spinning."""
         if self.closed or self.faulted or self.active or self.queue:
             raise RuntimeError("ranging unavailable or already active")
         peers = tuple(peers)
@@ -566,7 +566,7 @@ class Ranging:
         try:
             if kind == "result":
                 self._accept_result(peer, message)
-                return  # A completed session's claim never touches an active radio.
+                return  # Completed claims cannot touch the active radio.
             if kind == "request":
                 self._request(peer, message)
                 return
@@ -635,7 +635,7 @@ class Ranging:
         if message.challenge:
             return
         if (peer, message.session_id) in self._seen:
-            return  # Duplicate request cannot renew arming or elicit a fresh ready.
+            return  # Duplicates cannot renew arming or ready.
         limits = self._peers.get(peer)
         if limits is None:
             if len(self._peers) >= self.config.max_peers:
@@ -662,7 +662,7 @@ class Ranging:
         lease = schedule[-1] / 1e6 + self.config.arm_grace_s
         session = _Session(peer, message.session_id, "responder", now + lease, request,
                            challenge, "armed", responder_position=position, schedule_us=schedule)
-        self.active = session  # Partial arm failures still execute both cleanup steps.
+        self.active = session  # Partial arm failures need both cleanup steps.
         self._peers[peer] = (now + self.config.request_gap_s,
                              now + lease + self.config.peer_cooldown_s)
         if len(self._seen) >= 256:
@@ -694,7 +694,7 @@ class Ranging:
                                    turnaround=[row.turnaround for row in chunk])
                 messages.append(self._message(session.session_id, "report", report,
                                               session.challenge, self._position()))
-        # Encode before releasing so serialization errors take the same cleanup path.
+        # Encode before release so serialization errors also trigger cleanup.
         payloads = [encode(message) for message in messages]
         self._terminal("reported")
         if not self.faulted:
@@ -726,7 +726,7 @@ class Ranging:
             validate_position(claim.initiator_position)
         except ValueError:
             return
-        del self._served[key]  # Consume once; duplicates cannot repeat evidence.
+        del self._served[key]  # Consume once to reject duplicate evidence.
         self.results.append(Result(
             peer, message.session_id, "peer_claim",
             initiator_position=claim.initiator_position,

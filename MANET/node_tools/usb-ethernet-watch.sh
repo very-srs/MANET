@@ -68,7 +68,7 @@ EOF
             sleep 3
         fi
 
-        # If end0 is already the active gateway, don't take over: just ensure IP is assigned
+        # Keep end0 as gateway when active, leaving this interface addressed.
         if [ -f /var/run/upstream_iface ] && [ "$(cat /var/run/upstream_iface)" = "end0" ] && \
            [ -f /var/run/mesh-gateway.state ] && \
            ip route show dev end0 2>/dev/null | grep -q '^default'; then

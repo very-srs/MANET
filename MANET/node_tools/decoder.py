@@ -65,9 +65,8 @@ def decode_telemetry(raw, emit=emit, emit_raw=emit_raw):
     emit_raw('IS_MEDIAMTX_SERVER', str(t.is_mediamtx_server).lower())
 
     emit_raw('UPTIME_SECONDS', t.uptime_seconds)
-    # proto3 cannot tell 0 from unset for a scalar, and these boards have no
-    # battery reader yet: publishing 0 would paint every node with a red
-    # critical-battery badge. Absent means unknown, which renders as "—".
+    # proto3 cannot distinguish zero from an unset scalar. Emit an empty
+    # value for zero to avoid a false critical-battery badge.
     emit_raw('BATTERY_PERCENTAGE', t.battery_percentage or '')
     emit_raw('CPU_LOAD_AVERAGE', f'{t.cpu_load_average:.2f}')
 
@@ -107,8 +106,8 @@ def decode_telemetry(raw, emit=emit, emit_raw=emit_raw):
     emit_raw('EUD_COUNT', t.eud_count)
 
     emit('CHANNEL_REPORT_JSON', json.dumps({'results': [
-        # busy_pct is omitted rather than zero-filled when the sender did not
-        # measure it, so channel-election.sh can tell the two apart.
+        # Omit unmeasured busy_pct so channel-election.sh can distinguish it
+        # from a measured zero.
         dict({'channel': r.channel, 'noise_floor': r.noise_floor,
               'bss_count': r.bss_count},
              **({'busy_pct': r.busy_pct} if r.HasField('busy_pct') else {}))

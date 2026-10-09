@@ -15,7 +15,7 @@ if [ -z "$PREFIX_CIDR" ]; then
     exit 1
 fi
 
-# Normalize prefix: strip CIDR length, ensure we have the first 4 hextets.
+# Normalize the prefix to its first four hextets without the CIDR length.
 PREFIX=${PREFIX_CIDR%/*} # Remove /XX suffix
 PREFIX=$(printf '%s\n' "$PREFIX" |
     sed 's/::$//; s/:$//') # Remove trailing :: or :
@@ -38,7 +38,7 @@ for hextet in "${HEXTETS[@]}"; do
         # Found the '::' compression
         SEEN_EMPTY=true
         # Calculate how many zero hextets to insert to reach 4 total
-        MISSING=$((4 - ${#HEXTETS[@]} + 1)) # +1 because the empty string counts as one hextet
+        MISSING=$((4 - ${#HEXTETS[@]} + 1)) # The empty hextet counts as one.
         for ((j=0; j<MISSING; j++)); do
             EXPANDED_PREFIX_ARRAY+=("0000")
         done
@@ -46,7 +46,7 @@ for hextet in "${HEXTETS[@]}"; do
         # Add non-empty hextet, padding with leading zeros
         EXPANDED_PREFIX_ARRAY+=("$(printf "%04x" "0x${hextet}")")
     fi
-    # Stop processing if we already have 4 hextets (handles cases like fdXX::/48)
+    # Stop at four hextets, including fdXX::/48 prefixes.
     if [[ ${#EXPANDED_PREFIX_ARRAY[@]} -ge 4 ]]; then
         break
     fi
@@ -79,7 +79,7 @@ else
     exit 1
 fi
 
-# Convert hash byte to decimal offset (200-611, different range than MediaMTX)
+# One hash byte gives decimal offsets 200-455 after adding the service base.
 OFFSET=$(( 0x$HASH_BYTE % 412 + 200 ))
 
 # Form the VIP: normalized prefix + :: + offset (in hex)

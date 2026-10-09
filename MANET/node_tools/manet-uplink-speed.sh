@@ -1,27 +1,12 @@
 #!/bin/bash
-#
-# manet-uplink-speed.sh: measure an Ethernet uplink's internet download speed
-# and announce it as this node's BATMAN gateway bandwidth.
-#
-#   manet-uplink-speed.sh measure IFACE    exit 0 when IFACE reaches the internet
-#                                          (Mbit/s on stdout), 1 when it does not,
-#                                          2 when IFACE is not measured (metered),
-#                                          3 when a recent failure stands (no retest)
-#   manet-uplink-speed.sh announce IFACE   batctl gw_mode server with IFACE's
-#                                          measured bandwidth, or the default
-#   manet-uplink-speed.sh forget           drop the measurement (uplink gone)
-#   manet-uplink-speed.sh is-ethernet IFACE
-#
-# Only Ethernet uplinks are measured. A phone tether or cellular modem pays for
-# the data, so those keep batman's default 10/2 Mbit/s and the caller's normal
-# internet probe. For Ethernet the test doubles as the internet check: a
-# captive portal or a filtered network cannot complete the HTTPS download, and
-# such a node must not announce itself as a gateway.
-#
-# The test downloads 5 MB at most, once per uplink: the result is kept while
-# the interface keeps the same address and router, and dropped on demotion.
-# Only download is measured; upload is announced as a fifth of it, batman's
-# usual ratio, and nothing selects on it.
+# Measure Ethernet internet download speed and announce BATMAN bandwidth.
+# Commands: measure IFACE, announce IFACE, forget, is-ethernet IFACE.
+# measure exits: 0 = Mbit/s on stdout, 1 = failed, 2 = metered/untested,
+# 3 = cached failure without retest. announce uses measured or default speed.
+# Tethers and cellular keep batman's default 10/2 Mbit/s and the normal
+# internet probe. Ethernet must complete the HTTPS test to become a gateway.
+# Download at most 5 MB per interface/address/router tuple until demotion.
+# Advertise upload as one-fifth of download. Only download affects selection.
 
 set -u
 
@@ -31,7 +16,7 @@ FAIL_FILE="$RUN_DIR/manet-uplink-speed.failed"
 LOCK_FILE="$RUN_DIR/manet-uplink-speed.lock"
 TEST_BYTES=5000000
 TEST_TIMEOUT="${MANET_SPEED_TIMEOUT:-15}"
-# A failed test is not repeated for this long; each reconcile pass asks.
+# Failure cooldown in seconds. Reconciliation asks on every pass.
 RETRY_SECS="${MANET_SPEED_RETRY_SECS:-60}"
 DEFAULT_BANDWIDTH=10000kbit/2000kbit
 SYS_NET="${MANET_SYS_NET:-/sys/class/net}"
@@ -113,7 +98,7 @@ measure() {
     printf '%s\n' "$mbps"
 }
 
-# batctl takes whole numbers; a bare "server" would keep the last value.
+# batctl requires whole numbers. Bare "server" retains the last value.
 bandwidth_arg() {
     local iface="$1" mbps
     if [ -n "$iface" ] && [ "$(field "$RESULT_FILE" KEY)" = "$(uplink_key "$iface")" ]; then

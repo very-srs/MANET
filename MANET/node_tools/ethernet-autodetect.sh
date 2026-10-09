@@ -24,23 +24,14 @@ validate_args() {
 }
 validate_args "$@" || exit 1
 
-# Ethernet Auto-Detection Script
-# Detects ethernet role and configures bridging appropriately
-#
-# Modes:
-#   gateway: end0 has internet (DHCP from ISP) - stays routed, NAT enabled
-#   wired-eud: end0 connected to EUD device - bridge to br0
-#
-# wlan1 handling:
-#   - In wireless/auto mode with no cable: wlan1 is AP (br0, not bat0)
-#   - In wired mode or auto with wired EUD: wlan1 returns to mesh (bat0)
-#   - In gateway mode: wlan1 behavior depends on EUD config
-#	-  - EUD wired: wlan1 into mesh
-#   -  - Wireless:  wlan1 AP
-#   -  - Auto:  wlan1 into mesh
+# Detect Ethernet role and configure bridging.
+# Gateway: keep end0 routed with NAT when it has internet.
+# Wired EUD: bridge end0 to br0.
+# wlan1 serves the AP in wireless/auto mode without a cable.
+# Wired mode or auto with a wired EUD returns wlan1 to mesh.
+# As a gateway, wlan1 serves the AP only in wireless EUD mode.
 
-# Full xtrace + tee-to-journal only when debugging: set -x sends every traced
-# line to journald via the dispatcher, which is real load when events loop.
+# Enable xtrace and tee-to-journal only for debugging to limit dispatcher load.
 if [ -f /etc/eth-detect-debug ]; then
     exec > >(tee /var/log/ethernet-detect.log) 2>&1
     set -x
@@ -48,9 +39,8 @@ else
     exec > /var/log/ethernet-detect.log 2>&1
 fi
 
-# systemctl unmask always triggers a full daemon-reload, and enable on units
-# with sysv shims (dnsmasq, hostapd) spawns update-rc.d which reloads again.
-# Guard them so repeated runs of this script don't churn PID 1.
+# Guard unmask and enable calls. Unmask reloads systemd, and enabling
+# SysV-backed units such as dnsmasq or hostapd also reloads via update-rc.d.
 unmask_if_masked() {
     [ "$(systemctl is-enabled "$1" 2>/dev/null)" = "masked" ] && \
         systemctl unmask "$1" 2>/dev/null
@@ -63,17 +53,11 @@ enable_if_disabled() {
     return 0
 }
 
-# hostapd binds the interface named in its config at start time, and
-# "systemctl start" is a no-op against a unit that is already active. If the
-# radio names moved under it - radio-setup renames interfaces on first boot and
-# reboots - the running daemon keeps whatever it grabbed then. On both bench
-# CM4s that was the HaLow radio, which left the S1G mesh dead and the real AP
-# radio idle. An interface hostapd has released, or had deinited under it,
-# keeps "type AP" but loses its SSID, so test the interface the config names
-# rather than looking for whichever interface is type AP. The SSID is the
-# discriminator rather than the carrier: during a DFS channel-availability
-# check the SSID is set while the carrier is still down, and restarting there
-# would mean CAC never completes.
+# hostapd binds its configured interface at startup. Starting an active unit
+# does not rebind it after radio-setup renames interfaces.
+# Check the configured interface SSID. A deinitialized AP retains its type
+# but loses the SSID. DFS CAC retains the SSID with carrier down, so testing
+# carrier would cause restarts that prevent CAC from completing.
 hostapd_serving() {
     iw dev "$1" info 2>/dev/null | awk '$1 == "type" { t = $2 } $1 == "ssid" { s = 1 }
         END { exit !(t == "AP" && s) }'
@@ -140,14 +124,10 @@ NO_INET_STATE="/var/run/eth-no-internet.state"
 UPLINK_SPEED="${MANET_UPLINK_SPEED:-/usr/local/bin/manet-uplink-speed.sh}"
 NO_INET_RECHECK_SECS=600
 
-# Which physical link a decision was made on: "<iface> <mode> <carrier_changes>".
-# Bridging, flushing or reconfiguring end0 makes networkd report "Gained
-# carrier" again, and networkd-dispatcher then runs this script once more. The
-# kernel's carrier_changes counter moves only on real link transitions (cable
-# pulled, swapped, or the far end power-cycled), so an unchanged count means
-# the same cable and the same peer: the earlier decision still holds. Without
-# this, each wired-EUD run triggered the next and the port was detached for
-# ~20 s of every ~30 s.
+# Physical link decision: "<iface> <mode> <carrier_changes>".
+# The kernel counter changes on cable or peer power transitions. Unchanged
+# counts suppress re-detection after local bridge/flush/reconfigure events,
+# which otherwise detach the port for about 20 s of every 30 s.
 CARRIER_GEN_STATE="/var/run/eth-carrier-generation"
 
 # Networkd config paths
@@ -163,10 +143,8 @@ carrier_generation() {
     cat "/sys/class/net/$ETH_IFACE/carrier_changes" 2>/dev/null
 }
 
-# Detection takes ~20 s (DHCP probe). The decision describes the link as it
-# was when detection STARTED, so record that generation. If the cable was
-# swapped mid-probe, the recorded count is already stale and the event queued
-# by that swap re-detects instead of being suppressed by this result.
+# Record the carrier count before the roughly 20 s DHCP probe. A cable swap
+# during the probe makes that count stale so the queued event re-detects.
 DETECT_GENERATION=""
 
 record_carrier_generation() {
@@ -182,7 +160,7 @@ record_carrier_generation() {
     fi
 }
 
-# Was the current decision of mode $1 made on this exact physical link?
+# Check whether mode $1 was decided on this physical link.
 same_carrier_generation() {
     local iface mode generation now
     [ -f "$CARRIER_GEN_STATE" ] || return 1
@@ -192,17 +170,11 @@ same_carrier_generation() {
         [ "$mode" = "$1" ] && [ "$generation" = "$now" ]
 }
 
-# Is there real internet behind $1?
-#
-# ICMP echo alone is not a usable test. Plenty of LANs (the bench LAN included)
-# drop or heavily rate-limit echo to public addresses while passing TCP and UDP
-# normally: measured 95-100% echo loss to 8.8.8.8/1.1.1.1 there while DNS,
-# HTTP and traceroute all worked. A ping-only probe made this node flap in and
-# out of gateway mode, so try progressively less-filtered methods:
-#   1. ICMP : cheapest, answers in milliseconds on a normal LAN
-#   2. HTTP : the standard 204 captive-portal endpoints; a portal answers
-#              200/302 rather than 204, which correctly counts as "no internet"
-#   3. TCP  : bare connect to public DNS, for images without curl
+# Check internet reachability through $1. The bench LAN shows 95-100% ICMP
+# loss to 8.8.8.8/1.1.1.1 while DNS, HTTP and traceroute work. Probe in order:
+# 1. ICMP: cheapest when replies arrive.
+# 2. HTTP: require 204 from captive-portal endpoints, rejecting 200/302.
+# 3. TCP: connect to public DNS when curl is absent.
 internet_probe() {
     local iface="$1"
     local url code ip
@@ -231,11 +203,9 @@ internet_probe() {
     return 1
 }
 
-# Tearing down a working gateway is expensive: it drops NAT and batman gw_mode
-# here, and every mesh client is left holding a default route to this node that
-# now black-holes (gateway-route-manager withdraws it, but only on its next
-# poll). So confirm a failure before acting on it, and try harder when we are
-# currently the gateway.
+# Confirm failures before removing NAT and batman gateway mode. Mesh clients
+# retain a default route here until gateway-route-manager next polls.
+# Use extra confirmation attempts while this node is the gateway.
 internet_probe_confirmed() {
     local iface="$1"
     local attempts=2 i
@@ -269,14 +239,12 @@ run_no_carrier_cleanup() {
     fi
 }
 
-# What is on the other end of the cable, judged from frames it sends while we
-# wait for DHCP. Absence of a DHCP reply alone does not mean a single user
-# device: a static-addressed LAN, a slow DHCP server, or a switch port still
-# coming up stays silent too, and bridging such a network would make this node
-# a rogue DHCP server on it. Prints one of:
-#   network <reason>   a router, switch or several devices are attached
-#   eud                exactly one device, and it is asking for an address
-#   unknown            nothing conclusive (old rule: treat as a user device)
+# Classify incoming frames while waiting for DHCP. A silent static LAN, slow
+# server or starting switch must not become a bridged DHCP-serving port.
+# Outputs:
+#   network <reason>   router, switch or multiple devices detected
+#   eud                exactly one device requesting an address
+#   unknown            inconclusive
 LINK_CAPTURE=""
 LINK_CAPTURE_PID=""
 EUD_DECISION_SECS=5
@@ -287,11 +255,10 @@ start_link_capture() {
     trap stop_link_capture EXIT
     trap 'exit 130' INT
     trap 'exit 143' TERM
-    # Inbound only: our own DHCP requests and solicitations are not evidence.
-    # Limit the capture to at most 2 MiB (1 MiB in POSIX mode). The classifier
-    # treats 1 MiB as network evidence before scanning it; a busy link must
-    # not fill /run or turn a truncated capture into a confident EUD decision.
-    # The capture must not inherit this detector's Ethernet policy lock.
+    # Capture inbound frames only, excluding local DHCP and solicitations.
+    # Bound capture to 2 MiB (1 MiB in POSIX mode). The classifier treats 1 MiB
+    # as network evidence to reject truncated captures and limit /run usage.
+    # The capture must not inherit the Ethernet policy lock.
     ( ulimit -f 2048 || exit 1
       exec timeout --kill-after=2 30 tcpdump -i "$ETH_IFACE" -Q in -nn -e -l -s 256
     ) 200>&- > "$LINK_CAPTURE" 2>/dev/null &
@@ -354,13 +321,10 @@ detect_hotplug_mode() {
         exit 0
     fi
 
-    # Hotplug events can be emitted repeatedly after networkd restarts. If this
-    # node is already a working gateway, do not flush end0 or restart networkd;
-    # that creates a loop which interrupts dnsmasq and EUD DHCP. A recorded
-    # decision from an earlier link (a fast cable swap whose unplug event was
-    # coalesced) must not pass for healthy: the old lease and route outlive it.
-    # Without a record (a gateway promoted by the uplink dispatcher) the
-    # address/route check alone applies, as before.
+    # Repeated hotplug events must not flush a working gateway or restart
+    # networkd and EUD DHCP. Require a decision for this physical link because
+    # a fast cable swap can leave the old lease and route intact. Without a
+    # decision record, use the address/route check for dispatcher promotion.
     ip=$(ip -4 addr show dev "$ETH_IFACE" | grep -oP 'inet \K[\d.]+' | head -1)
     if [ -f /var/run/mesh-gateway.state ] && [ -n "$ip" ] && \
        { [ ! -f "$CARRIER_GEN_STATE" ] || same_carrier_generation gateway; } && \
@@ -372,15 +336,10 @@ detect_hotplug_mode() {
         exit 0
     fi
 
-    # Same idea for the DHCP-but-no-internet outcome: the cleanup below ends
-    # with a networkctl reconfigure, which fires another dispatcher event and
-    # would otherwise repeat the flush/DHCP/ping/cleanup cycle every 1-2 min
-    # forever on LANs without internet. If we already concluded "no internet"
-    # for this iface+IP recently, leave everything alone. The timestamp lets
-    # a periodic re-check notice if internet comes back on the same lease.
-    # The timestamp is boot-clock seconds, so a time sync stepping the wall
-    # clock cannot end or extend it. One ahead of the boot clock (a wall time
-    # written by an older version) counts as expired.
+    # Cache the DHCP-but-no-internet verdict for this iface+IP. Cleanup calls
+    # networkctl reconfigure, which otherwise repeats detection every 1-2 min.
+    # The boot-clock timestamp permits periodic rechecks without wall-clock
+    # steps changing the interval. Future timestamps count as expired.
     if [ -f "$NO_INET_STATE" ] && [ -n "$ip" ]; then
         read -r prev_iface prev_ip prev_ts < "$NO_INET_STATE" || true
         read -r up_now _ < "${MESH_UPTIME_FILE:-/proc/uptime}"
@@ -393,8 +352,8 @@ detect_hotplug_mode() {
         fi
     fi
 
-    # A network without DHCP was already found on this physical connection.
-    # Our own flush/reconfigure re-triggers this script; do not probe again.
+    # A DHCP-less network is already recorded for this physical connection.
+    # Skip probes triggered by local flush/reconfigure events.
     if same_carrier_generation network; then
         log "Network without DHCP already detected on $ETH_IFACE (no carrier change); not bridging"
         exit 0
@@ -416,8 +375,8 @@ detect_hotplug_mode() {
     start_link_capture
     networkctl reconfigure "$ETH_IFACE" 2>/dev/null || true
 
-    # A lease means an uplink. A lone device asking for an address is a user
-    # device, decided after EUD_DECISION_SECS rather than the full 20 s.
+    # A lease identifies an uplink. Decide a lone DHCP-requesting EUD after
+    # EUD_DECISION_SECS without waiting the full 20 s.
     ip=""
     verdict=unknown
     for ((waited = 0; waited < 20; waited++)); do
@@ -432,10 +391,9 @@ detect_hotplug_mode() {
 
     if [ -n "$ip" ]; then
         log "IP acquired on $ETH_IFACE: $ip"
-        # The speed test is also the internet check that matters: a captive
-        # portal or a filtered network cannot complete it, and such a node
-        # must not announce itself as a gateway. Its result is what the
-        # gateway announces. Not an Ethernet port (exit 2): not tested.
+        # Require a completed speed test before announcing gateway bandwidth.
+        # Captive portals and filtered networks cannot pass it. Exit 2 means the
+        # interface is not Ethernet and is untested.
         speed_rc=1
         if internet_probe_confirmed "$ETH_IFACE"; then
             speed_rc=0
@@ -454,10 +412,9 @@ detect_hotplug_mode() {
     fi
 
     if [ "${verdict%% *}" = network ]; then
-        # Never serve DHCP onto someone else's network. Leave end0 routed;
-        # networkd keeps asking for a lease, and if one arrives later the
-        # uplink dispatcher promotes it as usual. Force a wired EUD with
-        # `ethernet-autodetect.sh --mode wired-eud` if this is wrong.
+        # Keep end0 routed to avoid serving DHCP onto an attached network.
+        # networkd keeps requesting a lease for later gateway promotion.
+        # Override with `ethernet-autodetect.sh --mode wired-eud` when needed.
         log "Not bridging $ETH_IFACE: a network is attached (${verdict#network }) but gave no DHCP lease"
         record_carrier_generation network
         exit 0
@@ -499,8 +456,8 @@ if [ -z "$DETECTED_MODE" ]; then
     log "Hotplug detected mode: $DETECTED_MODE"
 fi
 
-# Reaching here means a definite mode (gateway/wired-eud) was chosen;
-# the no-internet paths above all exit before this point.
+# A definite gateway/wired-eud mode is selected here.
+# The no-internet paths exit before this point.
 rm -f "$NO_INET_STATE"
 
 # Save which interface we're managing so other scripts know
@@ -512,9 +469,7 @@ if ! ip link show "$ETH_IFACE" &>/dev/null; then
     exit 1
 fi
 
-# Check carrier (cable connected)
-# Should not be needed, this script is called by networkd-dispatcher
-# But this is a double check
+# Recheck carrier in case the link changes after the dispatcher event.
 CARRIER=$(cat /sys/class/net/$ETH_IFACE/carrier 2>/dev/null || echo 0)
 if [ "$CARRIER" != "1" ]; then
     log "No carrier on $ETH_IFACE - cable unplugged"
@@ -526,7 +481,7 @@ if [ "$CARRIER" != "1" ]; then
     rm -f /var/run/ethernet_detection_state
     rm -f "$NO_INET_STATE"
 
-    # In AUTO mode with no ethernet, ensure AP is enabled (if configured)
+    # Enable the configured AP in auto mode without Ethernet.
     EUD_MODE=$(grep "^eud=" /etc/mesh.conf 2>/dev/null | cut -d'=' -f2)
     if [ "$EUD_MODE" == "auto" ] && [ -f /var/lib/ap_interface ]; then
         AP_INTERFACE=$(cat /var/lib/ap_interface)
@@ -582,10 +537,10 @@ fi
 # Get existing IP if any
 EXISTING_IP=$(ip -4 addr show dev "$ETH_IFACE" | grep -oP 'inet \K[\d.]+' | head -1)
 
-# CONFIGURE BASED ON DETECTED MODE
+# Configure the detected mode
 
 if [ "$DETECTED_MODE" == "gateway" ]; then
-    # GATEWAY MODE - Has internet
+    # Gateway mode: internet uplink
     log "Configuring as gateway/uplink..."
 
     if [ -z "$EXISTING_IP" ]; then
@@ -595,10 +550,9 @@ if [ "$DETECTED_MODE" == "gateway" ]; then
 
     ETH_IP="$EXISTING_IP"
 
-    # Do not rewrite $ACTIVE_CONFIG here: it was already written (if needed)
-    # during detect_hotplug_mode, and rewriting it triggers an inotify event
-    # that causes networkd to reconfigure end0, briefly drops the DHCP lease,
-    # and restarts this loop. networkd uses 10-end0.network regardless.
+    # Keep $ACTIVE_CONFIG from detect_hotplug_mode. Rewriting it triggers a
+    # networkd inotify reconfigure, dropping the lease and repeating detection.
+    # networkd uses 10-end0.network regardless.
     touch /var/run/mesh-gateway.state
 
     # Configure NAT
@@ -681,7 +635,7 @@ EOF
 
 
 
-    # WIRED EUD MODE - Bridge to mesh
+    # Wired EUD mode: bridge to mesh
 elif [ "$DETECTED_MODE" == "wired-eud" ]; then
     log "Configuring as wired EUD (bridged mode)..."
 

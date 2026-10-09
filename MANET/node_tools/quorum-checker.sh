@@ -39,20 +39,20 @@ fi
 
 log "Health: Originators=$UNIQUE_BATMAN_ORIGINATORS, Active=$ACTIVE_ALFRED_COUNT, Shutdown=$SHUTTING_DOWN_COUNT"
 
-# Scenario 1: SOLO ISOLATION (critical)
+# Solo isolation
 if [ "$UNIQUE_BATMAN_ORIGINATORS" -eq 0 ] && [ "$ACTIVE_ALFRED_COUNT" -gt 2 ]; then
     log "!!! SOLO ISOLATION: Zero originators but $ACTIVE_ALFRED_COUNT active nodes"
     exit 1  # Return to lobby
 fi
 
-# Scenario 2: SMALL FUNCTIONAL ISLAND (stay operational)
+# Small functional island: remain operational
 if [ "$UNIQUE_BATMAN_ORIGINATORS" -ge 2 ] && [ "$UNIQUE_BATMAN_ORIGINATORS" -lt "$((ACTIVE_ALFRED_COUNT / 3))" ]; then
     log "Small island: $UNIQUE_BATMAN_ORIGINATORS originators vs $ACTIVE_ALFRED_COUNT total"
     log "Remaining operational. Partition healing via tourguide."
     exit 0  # Stay put
 fi
 
-# Scenario 3: BARELY CONNECTED (risky)
+# Low connectivity: compare against expected active nodes
 EXPECTED_ACTIVE=$((ACTIVE_ALFRED_COUNT - SHUTTING_DOWN_COUNT))
 
 if [ "$EXPECTED_ACTIVE" -gt 3 ]; then

@@ -1,24 +1,17 @@
 #!/bin/bash
-# Provisioning status on the onboard LEDs
-# The verdict manet-provision-status.sh prints on login, shown on the board's
-# two LEDs, so a node can be read across a bench without a terminal:
-#
+# Show manet-provision-status.sh verdicts on the onboard LEDs.
 #   provisioned          green heartbeat, red off
 #   did not complete     red heartbeat, green solid
-#   still provisioning   left alone, so the board keeps the look it boots with
-#
-# Run by manet-led-status.service on every boot, and again by radio-setup.sh
-# when the verdict is written. The state it reads lives in /var/lib, so the
-# LEDs survive a reboot and only change when the status does.
-#
-# Always exits successfully, including on boards without these LEDs.
+#   still provisioning   retain the boot LED state
+# manet-led-status.service runs at boot. radio-setup.sh reruns it when writing
+# the verdict. State in /var/lib persists across reboots.
+# Always exit successfully, including on boards without these LEDs.
 
 STATE_FILE="${MANET_PROVISION_STATE:-/var/lib/manet-provision.state}"
 DONE_FILE="${MANET_PROVISION_DONE:-/var/lib/radio-setup.done}"
 LED_DIR="${MANET_LED_DIR:-/sys/class/leds}"
 
-# Raspberry Pi and CM4 call them PWR and ACT. Other boards use their own names,
-# so each is looked up in turn rather than assumed.
+# Try board-specific LED names, including Raspberry Pi and CM4 PWR/ACT.
 RED_NAMES="PWR led1 red:power power"
 GREEN_NAMES="ACT led0 green:status status"
 
@@ -43,8 +36,7 @@ set_led() {
         return 0
     fi
 
-    # Solid on and off both need the trigger out of the way first, or whatever
-    # the kernel had driving the LED simply overwrites the brightness again.
+    # Disable the trigger before setting brightness so it cannot overwrite it.
     echo none > "$path/trigger" 2>/dev/null || true
     [ -r "$path/max_brightness" ] && max=$(cat "$path/max_brightness" 2>/dev/null)
     case "$max" in ''|*[!0-9]*) max=1 ;; esac
@@ -57,10 +49,8 @@ set_led() {
     return 0
 }
 
-# The same read, with the same fallback, that manet-provision-status.sh uses.
-# A node provisioned before the state file existed still has the marker
-# radio-setup touches on success, and the LED must not disagree with the
-# banner about that.
+# Match manet-provision-status.sh: fall back to radio-setup's success marker
+# when the state file has no verdict, keeping LEDs and the banner consistent.
 read_state() {
     local k v state=""
     if [ -r "$STATE_FILE" ]; then
@@ -86,8 +76,7 @@ case "$STATE" in
         set_led "$GREEN" on
         ;;
     *)
-        # running, or nothing recorded at all. Nothing is known, so nothing is
-        # claimed.
+        # Leave LEDs unchanged when provisioning is running or has no verdict.
         ;;
 esac
 

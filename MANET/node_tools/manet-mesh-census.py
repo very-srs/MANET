@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Passive bat0 header census. No probes, rules, promiscuous mode or saved payloads."""
+"""Census bat0 headers without probes, promiscuity, rules or saved payloads."""
 
 import argparse
 from collections import Counter, defaultdict
@@ -19,7 +19,7 @@ SOL_PACKET, PACKET_STATISTICS = 263, 6
 
 
 def decode(frame):
-    """Decode headers only; unknown/truncated/fragmented traffic stays visible."""
+    """Decode headers, keeping unknown/truncated/fragmented traffic visible."""
     result = dict(source_mac='?', source_ip=None, protocol='truncated', sport=None,
                   dport=None, destination_kind='unknown', destination='?', vlan='')
     if len(frame) < 14:
@@ -47,7 +47,7 @@ def decode(frame):
         if ihl < 20 or total < ihl or len(frame) < offset + ihl:
             result['protocol'] = 'IPv4/malformed'
             return result
-        frame = frame[:offset + total]  # Ethernet padding is not a transport header.
+        frame = frame[:offset + total]  # Exclude Ethernet padding.
         proto = frame[offset + 9]
         result['source_ip'] = str(ipaddress.ip_address(frame[offset + 12:offset + 16]))
         destination = ipaddress.ip_address(frame[offset + 16:offset + 20])
@@ -104,7 +104,7 @@ def read_json(*command):
 
 
 def source_snapshot():
-    """Read bridge learning and local addresses; never modify the network."""
+    """Read bridge learning and local addresses without network changes."""
     ports = {p.name for p in Path('/sys/class/net/br0/brif').iterdir()}
     local_macs, local_ips, fdb = set(), set(), defaultdict(set)
     for interface in read_json('ip', '-j', 'address', 'show'):

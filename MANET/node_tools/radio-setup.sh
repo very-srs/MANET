@@ -1,13 +1,10 @@
 #!/bin/bash
-#  A script to finalize the setup of a radio after imaging and a first boot
-# 
-#  This script can be re-run to set new network settings
-#  if the mesh config file is updated
-#
+# Finalize radio setup after imaging and first boot.
+# Rerun after mesh.conf changes to apply new network settings.
 
-# Serialize every entry point before touching logs or provisioning state.
-# flock owns the lock; --close keeps subprocesses from retaining it after setup.
-# A duplicate caller leaves the active run in charge, including its failure state.
+# Lock every entry point before touching logs or provisioning state.
+# flock --close prevents children from retaining the lock. Duplicate calls
+# leave the active run and its failure state unchanged.
 if [[ "${MANET_RADIO_SETUP_LOCKED:-}" != 1 ]]; then
     exec flock --nonblock --conflict-exit-code 0 --close \
         /run/lock/manet-radio-setup.lock \
@@ -81,9 +78,8 @@ have_package_network() {
 : > "$PROVISION_FAIL_FILE"
 provision_state running
 
-# Show provisioning state on every SSH login. Installed before any of the work
-# below, so a node that is still setting itself up says so to anyone who logs
-# in to check on it.
+# Install the SSH provisioning banner before setup so logins show
+# incomplete work while this script runs.
 if [ -x /usr/local/bin/manet-provision-status.sh ]; then
     mkdir -p /etc/update-motd.d
     ln -sf /usr/local/bin/manet-provision-status.sh /etc/update-motd.d/50-manet-provision
@@ -102,7 +98,7 @@ while IFS= read -r line; do
         continue
     fi
 
-    # Split the line into a key and a value at the first ": "
+    # Split key and value at the first "=".
     key="${line%%=*}"
     value="${line#*=}"
 
@@ -298,11 +294,8 @@ echo "testing acs variable"
 if [[ -n "$acs" ]]; then
     printf '%s\n' "acs defined as $acs"
     sleep 0.5
-    # y/n is what every writer produces: both flashers normalise the answer to
-    # lowercase, the web UI writes 'y':'n', and mesh-config-sync.py validates
-    # the key as exactly y or n. This tested for "Y" alone, so acs=y selected
-    # the static orchestrator on every node and ACS never ran. Liberal about a
-    # hand-edited conf; cannot match n/no/0/false.
+    # Flashers, web UI and mesh-config-sync.py write lowercase y/n.
+    # Also accept common hand-edited true values without matching n/no/0/false.
     if [[ "$acs" =~ ^([Yy]|[Yy][Ee][Ss]|1|[Tt][Rr][Uu][Ee])$ ]]; then
         echo " > This mesh will channel hop ..."
     else
@@ -315,9 +308,7 @@ fi
 
 sleep 2
 
-#
-# Finish setting up network devices (wireless)
-#
+# Finish wireless network setup
 
 cat << 'EOF' > /usr/local/bin/unblock-wifi-rfkill.sh
 #!/bin/sh
@@ -403,11 +394,10 @@ if [ -z "$HALOW_REGULATORY_DOMAIN" ] || uses_eu_halow_region "$REGULATORY_DOMAIN
     HALOW_REGULATORY_DOMAIN="EU"
 fi
 
-# cfg80211 regdomain for the 2.4/5 GHz (mt7915) radios: use the real ISO
-# country code (e.g. HR). The Morse HaLow phy is self-managed and applies
-# HALOW_REGULATORY_DOMAIN (EU) on its own via the morse module param, so
-# cfg80211 must NOT be forced to "EU": that is a synthetic DFS-invalid regdb
-# entry that cfg80211 rejects, leaving the global regdom stuck at WORLD/00.
+# Use an ISO country code such as HR for cfg80211 on 2.4/5 GHz mt7915 radios.
+# Morse manages its own PHY with HALOW_REGULATORY_DOMAIN (EU) via modprobe.
+# Do not force cfg80211 to synthetic "EU": it fails DFS regdb validation and
+# leaves the global domain at WORLD/00.
 CFG80211_REGDOM="$REGULATORY_DOMAIN"
 
 
@@ -569,13 +559,11 @@ mkdir -p /var/lib
 > /var/lib/mesh_5_if
 > /var/lib/halow_if
 > /var/lib/no_mesh_if
-> /var/lib/iface_map   # runtime_name:physical_name (for MAC lookups during provisioning)
+> /var/lib/iface_map   # runtime_name:physical_name for provisioning MAC lookups
 
-# Persist the runtime interface names. The rest of the setup and boot scripts
-# consume these files as live netdev names, so writing desired logical names
-# before udev has renamed anything can make HaLow and non-mesh devices appear
-# swapped. Keep iface_map as an identity map for phys_iface() callers.
-# Target names are saved only immediately before the rename reboot.
+# Persist live netdev names until udev renames them. Premature logical names
+# can swap HaLow and non-mesh roles. iface_map stays an identity map for
+# phys_iface(). Save target names only immediately before the rename reboot.
 for iface in "${mesh_ifaces[@]}"; do
     printf '%s\n' "$iface" >> /var/lib/mesh_if
     printf '%s\n' "$iface:$iface" >> /var/lib/iface_map
@@ -658,10 +646,8 @@ if [[ "$eud" == "wireless" ]] || [[ "$eud" == "auto" ]]; then
 fi
 
 # === CLEANUP STALE PER-INTERFACE SERVICES AND CONFIGS ===
-# Previous runs may have enabled wpa_supplicant or s1g services for interfaces
-# that no longer hold those roles (e.g. after a .link rename swapped which
-# physical card is wlanX). Disable any per-interface service whose target
-# interface isn't currently classified for that role.
+# Disable per-interface supplicant services whose targets no longer hold
+# their assigned roles, including after .link renames.
 
 # Keep only failures from before radio service changes on the rename boot.
 RADIO_SETUP_BOOT_ID=$(cat /proc/sys/kernel/random/boot_id)
@@ -694,7 +680,7 @@ current_halow="$(cat /var/lib/halow_if 2>/dev/null | tr '\n' ' ')"
 
 cleanup_iface_service() {
     local svc_pattern="$1"   # e.g. "wpa_supplicant@wlan*.service"
-    local valid_list="$2"    # space-separated interface names that should keep this service
+    local valid_list="$2"    # Space-separated interfaces to keep.
     local svc iface link
 
     # Find enabled units by looking at symlinks in target wants directories.
@@ -717,9 +703,8 @@ cleanup_iface_service() {
         fi
     done
 
-    # Also catch units that are loaded/failed but never had an enable symlink
-    # (e.g. started manually, or left over after their wants symlink was removed
-    # but the runtime instance kept lingering).
+    # Also find loaded/failed units without enable symlinks, including
+    # manually started or disabled instances still held by systemd.
     for svc in $(systemctl list-units --all --no-legend --state=failed,loaded "$svc_pattern" 2>/dev/null | awk '{print $1}'); do
         iface="$(printf '%s\n' "$svc" |
             sed -E 's/.*[@-](wlan[0-9]+)\.service$/\1/')"
@@ -737,9 +722,9 @@ cleanup_iface_service 'wpa_supplicant@wlan*.service' "$current_mesh"
 cleanup_iface_service 'wpa_supplicant-s1g-wlan*.service' "$current_halow"
 cleanup_iface_service 'halow-txpower-wlan*.service' "$current_halow"
 
-# Remove stale per-interface wpa_supplicant config files for interfaces that
-# don't currently hold a wireless role. mesh-boot-lobby.service blindly copies
-# every *-lobby.conf at boot, so leftovers will resurrect dead configs.
+# Remove supplicant configs for interfaces without a wireless role.
+# mesh-boot-lobby.service copies every *-lobby.conf at boot, so leftover
+# files would recreate unused configs.
 all_wireless_roles="$current_mesh $current_halow"
 for conf in /etc/wpa_supplicant/wpa_supplicant-wlan*.conf; do
     [ -e "$conf" ] || continue
@@ -752,14 +737,10 @@ done
 
 # === CONFIGURE MESH INTERFACES (excluding AP if needed) ===
 
-# Pin wlanX names by MAC so role assignments survive reboot in a predictable
-# order: wlan0=2.4GHz mesh, wlan1=5GHz mesh, wlan2=HaLow, wlan3=non-mesh AP.
-# The classification above already determined which physical phy plays which
-# role; we now bind that role to a stable MAC-keyed name via systemd .link.
-# These take effect at next boot: current run uses kernel-assigned names from
-# the role files.
-# udev alone cannot swap occupied wlan names. The early boot helper resolves
-# exchanges before networkd and the radio services can bring interfaces up.
+# Pin roles by MAC using .link files: wlan0=2.4 GHz, wlan1=5 GHz, wlan2=HaLow,
+# wlan3=non-mesh AP. Current setup uses live names until the next boot.
+# The early boot helper resolves occupied-name swaps before networkd and
+# radio services start because udev cannot swap them alone.
 provision_try "cannot enable radio name reconciliation" \
     systemctl enable manet-radio-names.service
 rm -f /etc/systemd/network/10-wlan*.link
@@ -787,7 +768,7 @@ EOF
     printf '%s\n' " > Pinning $target_name to MAC $mac"
 }
 
-# Mesh interfaces are ordered by detected band; absent bands have no entry.
+# Order mesh interfaces by detected band. Omit absent bands.
 [ "${#mesh_ifaces[@]}" -gt 0 ] && write_link_file wlan0 "${mesh_ifaces[0]}"
 [ "${#mesh_ifaces[@]}" -gt 1 ] && write_link_file wlan1 "${mesh_ifaces[1]}"
 [ "${#halow_ifaces[@]}" -gt 0 ] && write_link_file wlan2 "${halow_ifaces[0]}"
@@ -795,9 +776,8 @@ EOF
 printf '%s\n' "MESH_NAME=\"$MESH_NAME\"" > /etc/default/mesh
 
 
-# Detect if the .link files we just wrote disagree with current runtime names.
-# If they do, the next boot will rename interfaces and the role files we wrote
-# this run will be stale. Schedule a post-reboot re-run to refresh them.
+# If .link target names differ from live names, schedule setup after the
+# rename reboot to refresh stale role files.
 needs_rerun=0
 check_rename() {
     local target="$1"
@@ -826,10 +806,9 @@ else
 fi
 
 # Mesh (SAE) supplicant config for one interface. Used for the mesh interfaces
-# below, and for the AP interface, which needs a config on disk even though its
-# service stays disabled - ethernet-autodetect restarts wpa_supplicant@<ap
-# iface> when a wired EUD returns that radio to the mesh, and without this file
-# that service just fails.
+# below and the AP candidate. Wired-EUD transitions restart its supplicant
+# through ethernet-autodetect, so it needs a config even while the service
+# is disabled.
 write_mesh_wpa_conf() {
     local iface="$1" freq="$2"
     if [[ ! "$acs" =~ ^([Yy]|[Yy][Ee][Ss]|1|[Tt][Rr][Uu][Ee])$ ]]; then
@@ -862,9 +841,8 @@ EOF
 }
 
 for WLAN in $(cat /var/lib/mesh_if); do
-    # If interface renames are pending the names we have now are the pre-rename
-    # names. Skip config writes; the post-reboot re-run will write them with
-    # the correct names.
+    # Defer config writes while renames are pending. The post-reboot run
+    # writes them under the final names.
     if [ "$needs_rerun" -eq 1 ]; then
         printf '%s%s\n' \
             " > Rename pending: deferring wpa config for $WLAN to " \
@@ -932,10 +910,9 @@ if [[ -n "$AP_INTERFACE" ]] && [ "$needs_rerun" -eq 1 ]; then
 elif [[ -n "$AP_INTERFACE" ]]; then
     printf '%s\n' "Configuring $AP_INTERFACE as access point..."
 
-    # The AP radio also needs a mesh config on disk: in wired-EUD mode
-    # ethernet-autodetect hands it back to the mesh and restarts
-    # wpa_supplicant@$AP_INTERFACE. The service stays disabled - only that
-    # path starts it.
+    # Keep a mesh config for the AP candidate. Wired-EUD transitions use
+    # ethernet-autodetect to start wpa_supplicant@$AP_INTERFACE on demand
+    # while leaving the service disabled.
     AP_MESH_FREQ=$(iface_mesh_freq "$AP_INTERFACE")
     if [[ -n "$AP_MESH_FREQ" ]]; then
         printf '%s%s\n' \
@@ -1060,12 +1037,9 @@ EOF
         systemctl unmask hostapd.service
         echo " > Auto mode: AP services staged (ethernet-autodetect will manage)"
         systemctl disable hostapd.service
-        # A hostapd started before this run holds the interface its old config
-        # named. After the first-boot rename that name can belong to a
-        # different radio - on the bench CM4s it was the HaLow one - and
-        # nothing here would ever move it. Only restart a daemon that is
-        # already up; whether the AP runs at all in auto mode stays
-        # ethernet-autodetect's decision.
+        # Restart active hostapd to bind the interface in its current config.
+        # After rename, its previous name can identify another radio, including
+        # HaLow. ethernet-autodetect still decides whether auto mode starts AP.
         if systemctl is-active --quiet hostapd.service; then
             printf '%s\n' " > Restarting running hostapd onto $AP_INTERFACE"
             systemctl restart hostapd.service 2>/dev/null || true
@@ -1217,15 +1191,15 @@ EOF
 
 done
 
-# One role-aware power action (every mesh radio at 30 dBm) replaces the old
-# per-interface fixed ceilings.
+# Remove per-interface power units. manet-mesh-power requests 30 dBm on
+# every mesh radio, including Wi-Fi and HaLow.
 for old_power_unit in /etc/systemd/system/halow-txpower-wlan*.service; do
     [ -f "$old_power_unit" ] || continue
     old_power_name=$(basename "$old_power_unit")
     systemctl disable --now "$old_power_name" 2>/dev/null || true
     rm -f "$old_power_unit" "/etc/systemd/system/multi-user.target.wants/$old_power_name"
 done
-# Replaced by manet-mesh-power, which covers Wi-Fi mesh radios too.
+# Remove the superseded HaLow-only power service.
 systemctl disable --now manet-halow-power.service 2>/dev/null || true
 rm -f /etc/systemd/system/manet-halow-power.service \
     /etc/systemd/system/multi-user.target.wants/manet-halow-power.service \
@@ -1238,7 +1212,7 @@ printf '%s\n' \
     > /etc/modprobe.d/cfg80211.conf
 
 # Preserve hardware-specific SPI modprobe options that were written by firstrun.
-# USB MM81xx adapters auto-select BCF by board type; forcing SPI BCF breaks probe.
+# USB MM81xx selects BCF by board type. Forcing SPI BCF breaks probe.
 MORSE_BCF=""
 MORSE_SPI_CLOCK=""
 if [ -f /etc/modprobe.d/morse.conf ] && ! has_usb_morse_device; then
@@ -1432,7 +1406,7 @@ systemctl enable --now nftables.service
 systemctl disable --now ebtables-restore.service 2>/dev/null || true
 rm -f /etc/systemd/system/ebtables-restore.service /etc/ebtables.rules
 rm -f /etc/systemd/system/multi-user.target.wants/ebtables-restore.service
-# Conventional mesh radios use automatic power. HaLow's own unit remains.
+# Remove manet-txpower. manet-mesh-power owns Wi-Fi and HaLow mesh power.
 systemctl disable --now manet-txpower.service 2>/dev/null || true
 rm -f /etc/systemd/system/manet-txpower.service
 rm -f /etc/systemd/system/multi-user.target.wants/manet-txpower.service
@@ -1594,11 +1568,9 @@ EOF
 systemctl enable mesh-status
 
 # === mDNS: manet.local ===
-# Advertise manet.local at the EUD gateway address. One service,
-# port 80: the management UI lives at /manage on the same server now, so
-# there is no second port to advertise.
-# br0 is allowed only after the bat0 discovery boundary has been verified.
-# Clients on end0 or the EUD AP can reach the admin panel at http://manet.local
+# Advertise the management UI at http://manet.local/manage on port 80, using
+# the EUD gateway address. Allow br0 only after verifying the bat0 discovery
+# boundary. Clients connect through end0 or the EUD AP.
 
 if have_package_network; then
     provision_try "apt install failed: avahi-daemon iperf3 traceroute sqlite3 python3-zeroconf python3-cryptography" \
@@ -1608,14 +1580,14 @@ else
 fi
 install -m 644 /etc/avahi/avahi-daemon.conf /etc/avahi/avahi-daemon.conf.bak 2>/dev/null || true
 cp /usr/local/share/manet/avahi-daemon.conf /etc/avahi/avahi-daemon.conf
-# The same helper runs from the tools updater and IP manager: AP plus br0
-# when present, with br0 excluded if installing/verifying the drop fails.
-# Disable automatic address publication; the IP manager writes the internal
-# EUD address to Avahi's hosts file alongside dnsmasq's management entry.
+# The updater and IP manager also enable AP/br0 discovery through this
+# helper, excluding br0 if the drop rule cannot be installed or verified.
+# Disable automatic address publication. The IP manager writes the internal
+# EUD address to Avahi hosts and dnsmasq's management entry.
 systemctl daemon-reload
 provision_try "EUD mDNS isolation/configuration failed" /usr/local/bin/manet-dhcp-isolation.py ensure
 cp /usr/local/share/manet/manet-http.service /etc/avahi/services/manet-http.service
-# Left over from when the dashboard was its own service on port 8081.
+# Remove the separate port-8081 dashboard advertisement.
 rm -f /etc/avahi/services/perf-http.service
 if systemctl list-unit-files perf-dashboard.service >/dev/null 2>&1; then
     systemctl disable --now perf-dashboard.service 2>/dev/null || true
@@ -1629,7 +1601,7 @@ systemctl restart avahi-daemon || true
 # === UPS HAT (E) BATTERY MONITOR ===
 
 # Enable I2C for battery fuel gauge (Waveshare UPS HAT E: IP2368 MCU at 0x2D)
-# Bookworm+: /boot/firmware/config.txt; older images: /boot/config.txt
+# Check /boot/firmware/config.txt and /boot/config.txt when present.
 for _cfg in /boot/firmware/config.txt /boot/config.txt; do
     [ -f "$_cfg" ] || continue
     if ! grep -q '^dtparam=i2c_arm=on$' "$_cfg"; then
@@ -1641,14 +1613,11 @@ for _cfg in /boot/firmware/config.txt /boot/config.txt; do
 done
 
 # === RPi config.txt: SPI, Morse HaLow overlay, CM4 PCIe 32-bit DMA ===
-# The Morse mm610x HaLow chip uses SPI on CM4 and RPi5 (Seeed-style SPI hat):
-# config.txt must load the DT overlay, enable SPI, and drive GPIO 3/7/17 HIGH at
-# boot (Morse power/reset pins). Boards carrying a USB MM81xx card instead need
-# none of that: the card enumerates on USB and the SPI overlay only creates a
-# phantom spi0.0 that fails probe every boot ("morse_spi_probe failed"), while
-# gpio=3=op,dh fights dtparam=i2c_arm=on for the same pin. CM4 nodes with a PCIe
-# mt7916 WiFi card also need pcie-32bit-dma: the BCM2711 PCIe outbound window
-# sits above 4GB and the card fails probe with -ENOMEM without 32-bit DMA.
+# Morse mm610x SPI hats on CM4/RPi5 need the DT overlay, SPI and high
+# GPIO 3/7/17 at boot for power/reset. USB MM81xx cards need none of these.
+# The SPI overlay creates a failing phantom spi0.0 probe on USB boards, and
+# gpio=3=op,dh conflicts with i2c_arm. CM4 PCIe mt7916 needs pcie-32bit-dma:
+# the BCM2711 outbound window is above 4 GB, causing -ENOMEM without it.
 _config_txt_changed=0
 if has_usb_morse_device; then
     _halow_on_spi=0
@@ -1712,13 +1681,11 @@ fi
 systemctl enable battery-reader.service
 
 # === GPS: u-blox USB dongle + chrony SHM NTP ===
-# Supports optional u-blox 7 (USB VID 1546:01a7) GPS receivers.
-# Nodes without a dongle still run gps-reader.service safely: it writes
-# has_fix=false when gpsd is unreachable or has no fix.
-#
-# mesh-time-sync owns chrony. GPS and directly connected internet nodes serve
-# time after source validation; other nodes stop polling between brief refreshes.
-# Existing Alfred telemetry carries is_ntp_server; no separate announcements.
+# Optional u-blox 7 GPS: USB VID:PID 1546:01a7. gps-reader.service reports
+# has_fix=false if gpsd is unreachable or has no fix, including absent dongles.
+# mesh-time-sync owns chrony. GPS/uplink nodes serve time after validation.
+# Other nodes stop polling between brief refreshes. Alfred telemetry carries
+# is_ntp_server without separate announcements.
 
 if have_package_network; then
     provision_try "apt install failed: gpsd gpsd-tools" \
@@ -1742,7 +1709,7 @@ GPSD_CONF
 systemctl enable gps-reader.service
 systemctl restart gps-reader.service 2>/dev/null || true
 
-# Core wired-phone integration; mesh.conf can explicitly opt this node out.
+# Core wired-phone integration, with a per-node mesh.conf opt-out.
 provision_try "ATAK enable failed" systemctl enable manet-atak.service
 provision_try "ATAK start failed" systemctl --no-block restart manet-atak.service
 
@@ -1755,9 +1722,8 @@ provision_try "OS cleanup failed" python3 /usr/local/bin/manet-os-cleanup.py --a
 
 # === FIRST RUN vs RE-RUN ===
 
-# Determine if this script is being run by the first-boot systemd unit. When
-# interface renames are staged, keep the unit enabled until the post-reboot run
-# finishes; disabling before that leaves provisioning half-complete.
+# Keep the first-boot unit enabled through pending interface renames.
+# Provisioning completes only after the post-reboot setup run.
 FIRST_BOOT_UNIT_ENABLED=0
 if systemctl is-enabled radio-setup-run-once.service >/dev/null 2>&1; then
     FIRST_BOOT_UNIT_ENABLED=1
@@ -1771,8 +1737,8 @@ if [[ "$FIRST_BOOT_UNIT_ENABLED" -eq 1 && ! -f "$FIRST_BOOT_STAGE_MARKER" ]]; th
 
     echo " >> Doing initial Syncthing config..."
     install -d -o radio -g radio -m 700 /home/radio/.local/state/syncthing
-    # syncthing's apt post-install may have already created .local as radio:root;
-    # install -d skips chown on pre-existing directories, so fix it explicitly.
+    # Syncthing apt setup can create .local as radio:root. Correct ownership
+    # explicitly because install -d does not chown existing directories.
     chown radio:radio /home/radio/.local
     sudo -u radio syncthing -generate="/home/radio/.config/syncthing"
     sleep 5
@@ -1789,21 +1755,13 @@ if [[ "$FIRST_BOOT_UNIT_ENABLED" -eq 1 && ! -f "$FIRST_BOOT_STAGE_MARKER" ]]; th
     touch "$FIRST_BOOT_STAGE_MARKER"
 fi
 
-# networkd-dispatcher hardening (two stock-default issues, both bite Rock 3A).
-#
-# 1) The stock unit has no ordering dependency, so at boot it can start before
-#    systemd-networkd and dbus. Its constructor runs `networkctl list`; with no
-#    networkd to answer that can wedge. Pin the ordering via a drop-in.
-# 2) The Debian default /etc/default/networkd-dispatcher passes
-#    `--run-startup-triggers`, which makes the daemon run every interface's state
-#    hooks BEFORE signalling readiness. Hook evaluation shells out to
-#    `iw <iface> link` / `networkctl status <iface>` with no timeout; on the USB
-#    Morse HaLow card (wlan2) that call blocks while the firmware is still coming
-#    up at boot, so the service never reaches READY and systemd kills it on the
-#    start timeout. The hooks still fire on real carrier/routable state changes
-#    (and MANET drives uplink/gateway detection independently via
-#    ethernet-autodetect), so the boot-time pre-trigger is not needed. CM4 (SPI
-#    Morse) tolerates it but we disable it everywhere for uniform behaviour.
+# Order networkd-dispatcher after systemd-networkd and dbus. Its constructor
+# calls networkctl list, which can hang before networkd is ready.
+# Disable --run-startup-triggers: it runs hooks before readiness, including
+# unbounded iw/networkctl calls that can block on USB Morse firmware startup
+# on Rock 3A. Real carrier/routable events and ethernet-autodetect still
+# handle gateway detection. Disable startup triggers on all boards, including
+# CM4 SPI Morse, for consistent behavior.
 DISPATCHER_DROPIN_DIR=/etc/systemd/system/networkd-dispatcher.service.d
 if [ ! -f "$DISPATCHER_DROPIN_DIR/10-manet-ordering.conf" ]; then
     mkdir -p "$DISPATCHER_DROPIN_DIR"
@@ -1837,8 +1795,8 @@ for WLAN in $(cat /var/lib/mesh_if 2>/dev/null); do
     systemctl reset-failed wpa_supplicant@$WLAN.service 2>/dev/null || true
     systemctl restart wpa_supplicant@$WLAN.service 2>/dev/null || true
 done
-# The AP runs hostapd, not a supplicant. A supplicant started for it before
-# roles were assigned leaves a stale failed unit; clear that record.
+# Clear failed AP supplicant records left before roles were assigned.
+# hostapd owns the AP.
 if [[ -n "$AP_INTERFACE" ]]; then
     systemctl reset-failed "wpa_supplicant@$AP_INTERFACE.service" 2>/dev/null || true
 fi
@@ -1850,8 +1808,8 @@ sleep 6 # wait for wpa_supplicant to catch up
 echo " > resetting BATMAN-ADV bond..."
 systemctl restart batman-enslave.service
 
-# On the first boot manet-mesh-power ran before this script assigned roles,
-# so it had nothing to set. Power requests apply at once; no reboot needed.
+# Reapply mesh power after first-boot role assignment. Earlier requests
+# had no roles to target. Power applies immediately without reboot.
 echo " > requesting mesh radio power..."
 systemctl restart manet-mesh-power.service || \
     echo " > WARNING: mesh radio power not fully applied; see journalctl -u manet-mesh-power"
@@ -1918,9 +1876,8 @@ if [ "$needs_rerun" -eq 1 ] && [ -f /var/lib/radio-setup-reboot-pending ]; then
 fi
 
 # Start the services enabled above on this boot too. A clean final setup run
-# does not reboot; enabling alone leaves the UI, watchdog and other runtime
-# services idle until the operator happens to restart the node. Boot-only
-# identity/lobby/shutdown units deliberately stay outside this list.
+# does not reboot, so enabling alone leaves runtime services idle.
+# Keep boot-only identity/lobby/shutdown units outside this list.
 provision_try "systemd reload failed" systemctl daemon-reload
 for unit in mesh-status.service batman-enslave-watch.service \
     gateway-route-manager.service syncthing@radio.service \
@@ -1931,10 +1888,9 @@ for unit in mesh-status.service batman-enslave-watch.service \
 done
 
 # === DID THIS ACTUALLY WORK? ===
-# Everything above continues past failures on purpose: a node with no GPS
-# tooling still meshes. What is not acceptable is calling such a node finished.
-# If anything was recorded as failed, leave the first-boot unit enabled so the
-# next boot retries, and leave the node visibly unprovisioned.
+# Continue recoverable setup steps, but retain an incomplete verdict for
+# any recorded failure, including missing GPS tooling. Keep the first-boot
+# unit enabled so the next boot retries.
 PROVISION_FAILURES=0
 [ -s "$PROVISION_FAIL_FILE" ] && PROVISION_FAILURES=$(wc -l < "$PROVISION_FAIL_FILE")
 
@@ -1966,18 +1922,12 @@ if [[ "$FIRST_BOOT_UNIT_ENABLED" -eq 1 ]]; then
 fi
 
 # === OPERATOR SETUP SCRIPTS ===
-# Last thing, and only on a run that got this far: past the failure gate above
-# and past the rename-reboot branch, so the node is a working mesh node before
-# anybody else's code touches it.
-#
-# --now starts it immediately instead of waiting for a reboot that a clean run
-# never performs. --no-block means operator code cannot hold radio-setup open:
-# systemd owns the run from here, and the unit's own conditions make it
-# one-time (see manet-user-scripts.service). Safe to reach on a re-run: the
-# completion marker makes systemd skip the unit.
-#
-# Failures in there are advisory by design and are reported on the login
-# banner; they must not affect the provisioning verdict already reached above.
+# Start operator scripts only after the failure gate and rename-reboot
+# branch confirm a working mesh node. --now starts immediately because a
+# clean setup does not reboot. --no-block leaves systemd to own the run
+# without holding setup open. manet-user-scripts.service conditions and its
+# completion marker prevent repeats. Failures are advisory on the login
+# banner and cannot change the provisioning verdict.
 if [ -x /usr/local/bin/manet-user-scripts.sh ] && [ -d /var/lib/manet-user-scripts ]; then
     if [ -f /var/lib/manet-user-scripts.done ]; then
         echo " >> Operator setup scripts already ran (see /var/log/manet-user-scripts.log)"

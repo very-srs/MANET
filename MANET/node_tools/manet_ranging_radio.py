@@ -1,23 +1,20 @@
-"""MT7916 debugfs/UDP/trace adapter, with a deliberate production capability gate.
+"""Gate MT7916 debugfs/UDP/trace controls on capture association evidence.
 
-The current capture cannot establish an absolute accumulator origin or exclude
-loss or misassociation of background responder reports. Jittered pacing helps
-association but does not itself bound the initial clock offset or certify a
-complete capture. RadioAdapter refuses normal sessions BEFORE
-changing anything. diagnostic_only=True enables controls, paced marked probes
-and read_raw_reports(); normalized readers still raise AssociationUnavailable.
-
-Hardware identity and a WM change are not mathematical prerequisites: verified
-time association, a known counter origin and capture invalidation could suffice.
-The current interface proves none of those together. Majority STEP repair cannot
-identify a lost prefix (a uniform +k*STEP range bias); a quiet spread is not proof.
-
-Run this layer in a small privileged helper, not the network protocol process.
-There is no daemon/IPC listener or privilege installation here. The helper must
-validate its caller, own this device exclusively, call poll() regularly, forward
-its events to Ranging, and close() on disconnect/exit. A netlink radio-role or
-channel change must call abort(). The existing driver has no crash-safe lease.
-All external I/O is injected for offline testing; importing does no I/O.
+Normal sessions fail before writes: capture cannot prove the absolute
+accumulator origin or exclude lost/misassociated background responder rows.
+Jitter alone cannot bound clock offset or certify completeness. Majority
+STEP repair misses a lost prefix's uniform +k*STEP range bias. Low spread
+does not prove a valid association.
+Verified time association, counter origin and capture invalidation could
+suffice without hardware identity or a WM change. The interface does not
+prove these together. diagnostic_only=True permits controls, paced marked
+probes and read_raw_reports().
+Normalized readers still raise AssociationUnavailable.
+Run in a privileged helper separate from the network protocol process. It
+must validate callers, own the device exclusively, poll regularly, forward
+events to Ranging, close on disconnect/exit and abort on netlink role/channel
+changes. The driver has no crash-safe lease. No daemon, IPC or privilege
+installation is provided. I/O is injected and imports perform none.
 """
 
 from collections import deque
@@ -77,17 +74,17 @@ class FileIO:
             os.close(fd)
 
     def mkdir_instance(self, path):
-        path.mkdir()  # Fails on an existing instance; never commandeer another user.
+        path.mkdir()  # Refuse an existing instance.
 
     def remove_instance(self, path):
-        path.rmdir()  # tracefs removes its virtual children; no recursive deletion.
+        path.rmdir()  # tracefs removes virtual children.
 
     def stats_paths(self, instance):
         return sorted((instance / "per_cpu").glob("cpu[0-9]*/stats"))
 
 
 class DeviceLock:
-    """The driver stores mark/peer/SPE/rate per DEVICE, shared by both PHYs."""
+    """The driver stores mark/peer/SPE/rate per device, shared by both PHYs."""
     def __init__(self, path):
         self.path, self.fd = Path(path), None
 
@@ -113,7 +110,7 @@ class Config:
     interface: str
     phy: str
     device: str  # PCI BDF, as printed by mt7915_rx_tmr's dev= field.
-    port: int   # Deployment selects the service port; no port is installed here.
+    port: int   # Deployment-selected port, not installed here.
     mark: int = 0x77
     debug_root: Path = Path("/sys/kernel/debug/ieee80211")
     trace_root: Path = Path("/sys/kernel/tracing")
@@ -157,7 +154,7 @@ def _command(args):
 
 
 class LinuxLinkProbe:
-    """Resolve already-known neighbours; never guess EUI-64 or use a routed IP.
+    """Resolve known neighbours without guessing EUI-64 or using routed IPs.
 
     endpoint(peer) is the helper's trusted neighbour mapping, not a free-form
     command from a mesh packet. No neighbour discovery or interface changes are
@@ -204,7 +201,7 @@ class LinuxLinkProbe:
 
 @dataclass(frozen=True)
 class RawReport:
-    """Diagnostic timestamps only. record_number is NOT a WM report_index.
+    """Diagnostic timestamps only. record_number is not a WM report_index.
 
     DW3 high half is a likely 802.11 sequence-control field on RESPONDER
     records, not the UDP sequence. Processed DW4 overwrote four peer MAC bytes.
@@ -245,11 +242,11 @@ class ClockOffsetBound:
 
 def time_pair_reports(initiator, responder, *, initial_offset, min_pairs=10,
                       tolerance_counts=4000, max_drift_ppm=40.0):
-    """Diagnostic time join returning indices into the COMPLETE input streams.
+    """Diagnostic time join returning indices into the complete input streams.
 
     Requires an independent offset bound and rejects competing supported joins.
     Compatible suffix walks are not competitors. This establishes neither UDP
-    sequence identity nor WM ordinals; the normal Radio readers remain refused.
+    sequence identity nor WM ordinals. Normal Radio readers remain refused.
     Background rows may be skipped in pairing, but never renumbered beforehand.
     """
     if not isinstance(initial_offset, ClockOffsetBound):
@@ -323,7 +320,7 @@ def decode_wm_accumulator(payload):
     """Decode the measured 0x57 reply for the fixed 64-byte block at e00f20c0.
 
     Pure offline decoder, not an MCU command sender or a capture fence. The
-    caller must correlate the reply; a valid payload alone does not prove epoch.
+    caller must correlate the reply. A valid payload alone does not prove epoch.
     """
     if (not isinstance(payload, bytes) or len(payload) != 104 or
             struct.unpack_from("<I", payload)[0] != 0x38000068 or
@@ -337,8 +334,8 @@ def accumulator_report_count(before, after, width_mhz):
 
     Preconditions: correction enabled, no reset, no mixed-band/width updates,
     <= MAX_RAW_REPORTS calls. A modulo-32 subtraction handles the word wrapping.
-    Both enable and disable through tmr_ctrl reset S; read BEFORE disarming.
-    S changes BEFORE report export; this count alone cannot certify the fence,
+    Both enable and disable through tmr_ctrl reset S. Read before disarming.
+    S changes before report export. This count alone cannot certify the fence,
     locate a missing row, detect duplicates, or establish the absolute baseline.
     """
     if (any(type(v) is not int or not 0 <= v < 1 << 32 for v in (before, after)) or
@@ -385,7 +382,7 @@ def parse_trace(text, device):
 
 
 class TraceCapture:
-    """Use a private tracefs instance; never change global tracing settings."""
+    """Use a private tracefs instance, preserving global tracing settings."""
     def __init__(self, config, io):
         self.config, self.io = config, io
         self.instance = None
@@ -406,7 +403,7 @@ class TraceCapture:
         self.io.write(instance / "trace_clock", "mono\n")
         self.io.write(instance / "buffer_size_kb", "64\n")
         self.io.write(event / "enable", "0\n")
-        # The trace FIELD is 'device', even though TP_printk prints 'dev='.
+        # The trace field is 'device', even though TP_printk prints 'dev='.
         self.io.write(event / "filter", f'device == "{self.config.device}"\n')
         self.io.write(instance / "trace", "")
         self.io.write(event / "enable", "1\n")
@@ -449,7 +446,7 @@ class TraceCapture:
 
 @dataclass(frozen=True)
 class Event:
-    kind: str  # burst_finished or radio_error; forward AFTER poll() returns.
+    kind: str  # Forward burst_finished/radio_error after poll() returns.
     session_id: bytes
     detail: str = ""
 
@@ -459,10 +456,10 @@ class RadioAdapter:
 
     diagnostic_only=True is an explicit bench mode, never a production enable
     switch: neither normalized timestamp reader can return guessed associations.
-    Sends require poll(); there are no sleeping loops, worker callbacks or shell
+    Sends require poll(). There are no sleeping loops, worker callbacks or shell
     commands in the scheduler. First TX waits prepare_s after each off/on phase
-    (bench uses 0.5 s each). Diagnostic pacing is independent of the R2 lease;
-    it is NOT a proof that current asynchronous MCU control satisfies Ready.
+    (bench uses 0.5 s each). Diagnostic pacing is independent of the R2 lease.
+    It does not prove that asynchronous MCU control satisfies Ready.
     """
     can_range = False
 
@@ -545,7 +542,7 @@ class RadioAdapter:
             self._write("tmr_spe", "0")
             self._write("tmr_rate", "0")
             if role == "responder":
-                # Fixed, reviewed register only: normal WM report routing.
+                # Fixed register only: normal WM report routing.
                 self.saved["regidx"] = self._read("regidx")
                 self._write("regidx", hex(NORMAL_ROUTE))
                 self.saved["route"] = self._read("regval")
@@ -603,7 +600,7 @@ class RadioAdapter:
             raise
 
     def poll(self):
-        """Drive diagnostics; helper must keep polling even if its client vanishes."""
+        """Drive diagnostics. Keep polling even if the client vanishes."""
         if self.role is not None:
             try:
                 now = self._time()

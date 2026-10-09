@@ -64,7 +64,7 @@ def password_from_conf(path=MESH_CONF):
 
 
 def private_json_write(path, value):
-    """Atomic, owner-only staging and security state; never log the contents."""
+    """Write atomic, owner-only staging/security state. Never log contents."""
     path = Path(path)
     fd, temporary = tempfile.mkstemp(prefix='.' + path.name + '-', dir=path.parent)
     try:
@@ -112,7 +112,7 @@ _KEY_LOCK = threading.RLock()
 
 
 def _derive_key(password, salt, guard=nullcontext):
-    # 32 MiB; salts are random per publishing node, reused with fresh nonces.
+    # 32 MiB. Salts are random per publisher and reused with fresh nonces.
     # Cache only in process memory. Receivers never persist derived keys.
     from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
     with _KEY_LOCK:
@@ -176,7 +176,7 @@ class AdminTransport:
         return self._encrypt(type_id, payload, password, salt, sent_ns)
 
     def seal_challenge(self, type_id, payload):
-        """Clock-independent ACS discovery only; the caller must bind a nonce.
+        """Clock-independent ACS discovery requiring a caller-bound nonce.
 
         This has separate salt state and never advances timed sender/replay
         history. No administrative command can use this transport.
@@ -263,8 +263,8 @@ class AdminTransport:
         """Authenticate before comparing versions/timestamps or inspecting actions."""
         from cryptography.exceptions import InvalidTag
         messages = []
-        # Our wire envelope is printable ASCII. Alfred escapes quotes and
-        # backslashes; decode only its quoted payload, not network text as code.
+        # The wire envelope is printable ASCII. Alfred escapes quotes and
+        # backslashes. Decode quoted payload only, never network text as code.
         for match in re.finditer(r'\{\s*"[0-9a-fA-F:]{17}"\s*,\s*("(?:\\.|[^"\\])*")\s*\}', raw):
             try:
                 envelope = json.loads(json.loads(match.group(1)))
