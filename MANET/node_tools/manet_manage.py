@@ -1531,7 +1531,7 @@ let _autoRefreshBusy = false;
 // prefix. Worked out from the URL rather than baked in, so the page still
 // functions if the prefix ever moves.
 const MANAGE_BASE = (() => {
-  const m = window.location.pathname.match(/^(\/[^/]*manage)(\/|$)/);
+  const m = window.location.pathname.match(/^(\\/[^/]*manage)(\\/|$)/);
   return m ? m[1] : '';
 })();
 // U() is for routes this page owns. /api/admin/* is served at the site root by
