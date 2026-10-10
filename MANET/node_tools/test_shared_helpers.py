@@ -651,5 +651,89 @@ class HalowDetectionHelperTests(unittest.TestCase):
             run.assert_called_once_with(['ethtool', '-i', 'wlan0'], timeout=3)
 
 
+class WriterContractTests(unittest.TestCase):
+    """Document writer differences that prevent safe consolidation."""
+
+    def test_text_writer_modes_and_durability(self):
+        """Pin replacement, unchanged files, modes and fsync differences."""
+        import manet_registry_builder as registry
+        clock = load_script('mesh-time-sync')
+        for module, mode, syncs in ((registry, 0o644, 0), (clock, 0o600, 1)):
+            with tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / 'state'
+                with patch('os.fsync') as fsync:
+                    module.atomic_text(path, 'new\n')
+                    self.assertEqual(path.read_bytes(), b'new\n')
+                    self.assertEqual(path.stat().st_mode & 0o7777, mode)
+                    self.assertEqual(fsync.call_count, syncs)
+                    path.chmod(0o640)
+                    inode = path.stat().st_ino
+                    fsync.reset_mock()
+                    module.atomic_text(path, 'new\n')
+                    self.assertEqual(path.read_bytes(), b'new\n')
+                    self.assertEqual(path.stat().st_mode & 0o7777,
+                                     0o640 if module is registry else mode)
+                    self.assertEqual(path.stat().st_ino == inode,
+                                     module is registry)
+                    self.assertEqual(fsync.call_count, syncs)
+                self.assertEqual(list(Path(directory).iterdir()), [path])
+
+    def test_config_writer_metadata_and_creation(self):
+        """Pin metadata, parent durability and missing-file behavior."""
+        import manet_config_io as config
+        isolation = load_script('manet-dhcp-isolation')
+        for module, mode, syncs in ((config, 0o6754, 2),
+                                   (isolation, 0o754, 1)):
+            with tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / 'config'
+                if module is isolation:
+                    with self.assertRaises(FileNotFoundError):
+                        module.atomic_write(path, 'new')
+                else:
+                    module.atomic_write(path, 'created')
+                    self.assertEqual(path.read_bytes(), b'created')
+                    self.assertEqual(path.stat().st_mode & 0o7777, 0o600)
+                path.write_text('old')
+                path.chmod(0o6754)
+                metadata = path.stat()
+                with patch('os.fsync') as fsync, \
+                        patch('os.fchown') as chown, \
+                        patch('os.fchmod', wraps=os.fchmod) as chmod:
+                    module.atomic_write(path, 'new')
+                    self.assertEqual(path.read_bytes(), b'new')
+                    # Writing after chmod clears set-ID bits as a non-root user.
+                    actual = mode if os.geteuid() == 0 else 0o754
+                    self.assertEqual(path.stat().st_mode & 0o7777, actual)
+                    self.assertEqual(chmod.call_args.args[1], mode)
+                    self.assertEqual(fsync.call_count, syncs)
+                    if module is isolation or os.geteuid() == 0:
+                        self.assertEqual(chown.call_count, 1)
+                        self.assertEqual(chown.call_args.args[1:],
+                                         (metadata.st_uid, metadata.st_gid))
+                    else:
+                        chown.assert_not_called()
+                self.assertEqual(list(Path(directory).iterdir()), [path])
+
+    def test_writer_failures_leave_original_and_no_temporary(self):
+        """Keep replacement failures observable and clean temporary files."""
+        import manet_config_io as config
+        import manet_registry_builder as registry
+        for module, name in ((config, 'atomic_write'),
+                             (load_script('manet-dhcp-isolation'),
+                              'atomic_write'),
+                             (registry, 'atomic_text'),
+                             (load_script('mesh-time-sync'), 'atomic_text')):
+            with tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / 'state'
+                path.write_text('old')
+                path.chmod(0o640)
+                with patch('os.replace', side_effect=OSError('injected')):
+                    with self.assertRaisesRegex(OSError, 'injected'):
+                        getattr(module, name)(path, 'new')
+                self.assertEqual(path.read_bytes(), b'old')
+                self.assertEqual(path.stat().st_mode & 0o7777, 0o640)
+                self.assertEqual(list(Path(directory).iterdir()), [path])
+
+
 if __name__ == '__main__':
     unittest.main()
