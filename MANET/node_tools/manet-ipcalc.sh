@@ -1,4 +1,5 @@
 #!/bin/bash
+. "${MANET_TOOLS_DIR:-$(dirname "${BASH_SOURCE[0]}")}/manet-common.sh" || exit 1
 # Print the Perl ipcalc fields and column layout used by mesh scripts
 # (e.g. awk '/HostMin/ {print $2}'). On CM4 this takes a few ms per call,
 # compared with about 1.5 s CPU for Perl ipcalc on each node-manager cycle.
@@ -30,11 +31,7 @@ fi
 
 a=$((10#$a)); b=$((10#$b)); c=$((10#$c)); d=$((10#$d))
 
-int_to_ip() {
-    printf '%d.%d.%d.%d\n' \
-        "$(( ($1 >> 24) & 255 ))" "$(( ($1 >> 16) & 255 ))" \
-        "$(( ($1 >> 8) & 255 ))" "$(( $1 & 255 ))"
-}
+
 
 ip_int=$(( (a << 24) + (b << 16) + (c << 8) + d ))
 mask=$(( (0xFFFFFFFF << (32 - prefix)) & 0xFFFFFFFF ))

@@ -141,3 +141,10 @@ is_ntp_time_source() {
     local run_dir="${MANET_TIME_RUN_DIR:-/run}"
     [ -f "$run_dir/mesh-ntp.state" ] || [ -f "$run_dir/mesh-ntp-gps.state" ]
 }
+
+# Print the low 32 bits as an IPv4 dotted quad.
+int_to_ip() {
+    printf '%d.%d.%d.%d\n' \
+        "$(( ($1 >> 24) & 255 ))" "$(( ($1 >> 16) & 255 ))" \
+        "$(( ($1 >> 8) & 255 ))" "$(( $1 & 255 ))"
+}
