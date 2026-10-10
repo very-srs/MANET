@@ -1,6 +1,8 @@
 """Pin shared helper contracts at their runtime callers."""
 
 import importlib.util
+import os
+import re
 from pathlib import Path
 import subprocess
 import tempfile
@@ -229,6 +231,122 @@ class NodeInfoHelperTests(unittest.TestCase):
             with patch('builtins.open', side_effect=OSError()):
                 self.assertEqual(
                     module.get_local_uptime(compact=module is manage), '')
+
+
+def shell_functions(caller, names):
+    """Read helper bodies through the caller's actual sourced libraries."""
+    sources = {}
+
+    def read(name):
+        """Follow node library source paths without executing startup code."""
+        if name in sources:
+            return
+        source = (TOOLS / name).read_text()
+        sources[name] = source
+        for library in re.findall(
+                r'^\. .*?/(\w[\w-]*\.sh)"', source, re.M):
+            if (TOOLS / library).is_file():
+                read(library)
+
+    read(caller)
+    result = []
+    for name in names:
+        for source in sources.values():
+            match = re.search(r'^' + re.escape(name) +
+                              r'\(\) \{.*?^\}', source, re.M | re.S)
+            if match:
+                result.append(match[0])
+                break
+        else:
+            raise AssertionError(f'{caller} does not define/source {name}')
+    return '\n\n'.join(result) + '\n'
+
+
+class ManagerHelperTests(unittest.TestCase):
+    """Pin manager probes, scheduling globals and service subprocesses."""
+
+    def test_manager_helpers(self):
+        """Run both callers' helpers against an isolated node filesystem."""
+        for caller in ('node-manager-acs.sh', 'node-manager-static.sh'):
+            with self.subTest(caller=caller), \
+                    tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                (root / 'mesh.conf').write_text(
+                    'ipv4_network=10.30.0.0/24\nmtx=y\nmumble=y\n')
+                (root / 'chunk').write_text('1\n')
+                (root / 'gateway').touch()
+                (root / 'mesh-ntp.state').touch()
+                (root / 'uptime').write_text('100.50 9\n')
+                dispatch = root / 'dispatch'
+                dispatch.write_text('#!/bin/bash\n'
+                                    'printf "dispatch %s\\n" "$*"\n')
+                dispatch.chmod(0o755)
+                elections = root / 'elections'
+                elections.mkdir()
+                for service in ('channel', 'mediamtx', 'mumble', 'time'):
+                    script = elections / (service + '-election.sh')
+                    script.write_text('#!/bin/bash\n'
+                                      'echo run >> "' + str(root / service) +
+                                      '"\n')
+                    script.chmod(0o755)
+                names = ('detect_and_update_gateway_state',
+                         'is_ntp_time_source', 'run_service_elections',
+                         'is_hosting_service', 'is_hosting_mumble_service')
+                source = shell_functions(caller, names)
+                source = source.replace('/etc/mesh.conf',
+                                        str(root / 'mesh.conf'))
+                source = source.replace('/var/run/my_ipv4_chunk',
+                                        str(root / 'chunk'))
+                source = source.replace('/usr/local/bin/'
+                                        'manet-uplink-dispatch.sh',
+                                        str(dispatch))
+                body = '''
+CONTROL_IFACE=br0
+LAST_GW_CHECK=90
+GW_CHECK_INTERVAL=60
+ELECTION_INTERVAL=15
+LAST_ELECTION_RUN=''
+uptime_now() { echo 100; }
+systemctl() { printf 'systemctl %s\\n' "$*" >&2; }
+manet-ipcalc.sh() { printf 'HostMin: 10.30.0.1\\n'; }
+ip() {
+    printf 'ip %s\\n' "$*" >&2
+    printf 'inet 10.30.0.2/24\\ninet 10.30.0.3/24\\n'
+}
+detect_and_update_gateway_state
+printf 'gateway=%s\\n' "$LAST_GW_CHECK"
+LAST_GW_CHECK=0
+detect_and_update_gateway_state
+printf 'gateway=%s\\n' "$LAST_GW_CHECK"
+is_ntp_time_source; printf 'ntp=%s\\n' "$?"
+is_hosting_service; printf 'mtx=%s\\n' "$?"
+is_hosting_mumble_service; printf 'mumble=%s\\n' "$?"
+run_service_elections
+wait
+run_service_elections
+wait
+printf 'election=%s\\n' "$LAST_ELECTION_RUN"
+'''
+                env = dict(os.environ, MANET_TIME_RUN_DIR=str(root),
+                           MESH_UPTIME_FILE=str(root / 'uptime'),
+                           GATEWAY_STATE_FILE=str(root / 'gateway'),
+                           ELECTION_DIR=str(elections))
+                result = subprocess.run(['bash', '-c', source + body],
+                                        env=env, text=True,
+                                        capture_output=True, timeout=5)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout,
+                                 'gateway=90\ngateway=100\nntp=0\nmtx=0\n'
+                                 'mumble=0\nelection=100\n')
+                self.assertEqual(result.stderr,
+                                 'systemctl is-active --quiet '
+                                 'mediamtx.service\nip addr show dev br0\n'
+                                 'systemctl is-active --quiet '
+                                 'mumble-server.service\n'
+                                 'ip addr show dev br0\n')
+                self.assertFalse((root / 'channel').exists())
+                for service in ('mediamtx', 'mumble', 'time'):
+                    self.assertEqual((root / service).read_text(), 'run\n')
 
 
 if __name__ == '__main__':

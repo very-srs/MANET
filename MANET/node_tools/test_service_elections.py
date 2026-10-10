@@ -51,10 +51,15 @@ class ElectionGateTests(Fixture):
         self.uptime = self.root / 'uptime'
 
     def function(self, script):
+        """Load each manager's schedule and its shared election helper."""
         source = (TOOLS / script).read_text()
-        body = re.search(r'^ELECTION_INTERVAL=.*?^run_service_elections\(\) \{\n.*?^\}\n',
-                         source, re.M | re.S)[0]
-        return body.replace('/var/run/', str(self.run_dir) + '/')
+        schedule = re.search(
+            r'^ELECTION_INTERVAL=.*?^LAST_ELECTION_RUN=.*?\n',
+            source, re.M | re.S)[0]
+        shared = (TOOLS / 'manet-manager-common.sh').read_text()
+        body = re.search(r'^run_service_elections\(\) \{\n.*?^\}\n',
+                         shared, re.M | re.S)[0]
+        return (schedule + body).replace('/var/run/', str(self.run_dir) + '/')
 
     def passes(self, script, uptimes):
         calls = ''.join(f'echo "{u}.40 1.0" > "$MESH_UPTIME_FILE"\nrun_service_elections\n'
