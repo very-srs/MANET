@@ -1,4 +1,5 @@
 #!/bin/bash
+. "${MANET_TOOLS_DIR:-$(dirname "${BASH_SOURCE[0]}")}/manet-common.sh" || exit 1
 set -euo pipefail
 
 POLL_INTERVAL=10
@@ -69,11 +70,6 @@ reachable() {
     ping -c 1 -W 1 "$1" >/dev/null 2>&1
 }
 
-uptime_now() {
-    local up unused
-    read -r up unused < /proc/uptime
-    printf '%s\n' "${up%.*}"
-}
 
 log "Starting Gateway Route Manager (pending startup ${STARTUP_POLL_INTERVAL}s, steady ${POLL_INTERVAL}s)"
 

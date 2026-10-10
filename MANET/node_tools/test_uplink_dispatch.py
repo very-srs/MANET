@@ -51,6 +51,7 @@ exit 0
 
 
 class DispatchHarness(unittest.TestCase):
+    """Run uplink events against an isolated node filesystem."""
     def setUp(self):
         scratch = tempfile.TemporaryDirectory()
         self.addCleanup(scratch.cleanup)
@@ -102,9 +103,12 @@ class DispatchHarness(unittest.TestCase):
             f'ETH_MODE={mode}\nETH_BRIDGE=br0\n')
 
     def dispatch(self, event='reconcile', iface=''):
+        """Run one isolated uplink event with its shared shell libraries."""
         source = (TOOLS / 'manet-uplink-dispatch.sh').read_text()
+        common = (TOOLS / 'manet-common.sh').read_text()
         root = str(self.root)
         source = source.replace('/var/run/', '/run/')
+        common = common.replace('/var/run/', '/run/')
         for old, new in (('/sys/class/net', root + '/net'), ('/run/', root + '/run/'),
                          ('/etc/mesh.conf', root + '/mesh.conf'),
                          ('/var/lib/ap_interface', root + '/ap_interface'),
@@ -114,9 +118,13 @@ class DispatchHarness(unittest.TestCase):
                          ('/etc/radvd.conf', root + '/radvd.conf'),
                          ('/usr/local/bin/mesh-ip-manager.sh', root + '/bin/mesh-ip-manager')):
             source = source.replace(old, new)
+            common = common.replace(old, new)
+        (self.root / 'manet-common.sh').write_text(common)
+        (self.root / 'manet-runtime-client.sh').write_text(
+            (TOOLS / 'manet-runtime-client.sh').read_text())
         script = self.root / 'dispatch.sh'
         script.write_text(source)
-        env = dict(os.environ, REVIEW_ROOT=root, MANET_TOOLS_DIR=str(TOOLS),
+        env = dict(os.environ, REVIEW_ROOT=root, MANET_TOOLS_DIR=root,
                    PATH=os.pathsep.join((str(self.root / 'bin'), os.environ['PATH'])),
                    MANET_ETH_DETECT_LOCK=str(self.eth_lock),
                    MANET_AP_MESH_HELPER=str(self.root / 'bin' / 'manet_ap_mesh.py'),

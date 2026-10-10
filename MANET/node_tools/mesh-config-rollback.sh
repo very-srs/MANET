@@ -1,4 +1,5 @@
 #!/bin/bash
+. "${MANET_TOOLS_DIR:-$(dirname "${BASH_SOURCE[0]}")}/manet-common.sh" || exit 1
 # Restore configuration locally if mesh_ssid, mesh_key or ipv4_network
 # changes prevent reconnection. State persists in /var/lib across reboots.
 # Commands: arm <version> snapshots files, peer count and deadline, check
@@ -29,17 +30,10 @@ SUPPLICANT_HELPER="${MANET_SUPPLICANT_HELPER:-$(dirname "$0")/manet_supplicant.p
 LOG_TAG="CONFIG-ROLLBACK"
 # Grace seconds for supplicant restart, SAE and batman re-discovery.
 GRACE_SECONDS="${MANET_ROLLBACK_GRACE:-300}"
-UPTIME_FILE="${MESH_UPTIME_FILE:-/proc/uptime}"
 BOOT_ID_FILE="${MANET_BOOT_ID_FILE:-/proc/sys/kernel/random/boot_id}"
 
 # Whole seconds on the boot clock, and this boot's ID.
-uptime_now() {
-    local up _
-    read -r up _ < "$UPTIME_FILE" || return 1
-    up=${up%.*}
-    [[ "$up" =~ ^[0-9]+$ ]] || return 1
-    printf '%s\n' "$up"
-}
+
 
 boot_id() {
     local id

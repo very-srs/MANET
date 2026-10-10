@@ -407,21 +407,32 @@ HALOW_POWER_FIXED = ('HaLow transmit power is set when the radio starts and cann
                      'changed live; changing it needs a reboot')
 
 
-def is_halow_iface(iface):
+def is_halow_iface(iface, *, halow_ifaces=None, driver_query=None):
     """Identify HaLow by role or driver.
 
     Morse applies power only on channel changes. Reloading the driver can
     wedge the USB card, so live power changes are unavailable.
     """
-    roles = Path(os.environ.get('MANET_IFACE_STATE_DIR', '/var/lib'))
-    try:
-        if iface in (roles / 'halow_if').read_text().split():
-            return True
-    except OSError:
-        pass
+    if halow_ifaces is None:
+        roles = Path(os.environ.get('MANET_IFACE_STATE_DIR', '/var/lib'))
+        try:
+            halow_ifaces = (roles / 'halow_if').read_text().split()
+        except OSError:
+            halow_ifaces = ()
+    if iface in halow_ifaces:
+        return True
+    # The command receiver uses ethtool; local UI probes use sysfs only.
+    if driver_query is not None:
+        try:
+            result = driver_query(['ethtool', '-i', iface], timeout=3)
+            return any(line.startswith('driver:') and 'morse' in line.lower()
+                       for line in result.stdout.splitlines())
+        except Exception:
+            return False
     sysnet = Path(os.environ.get('MANET_SYS_NET', '/sys/class/net'))
     try:
-        return (sysnet / iface / 'device/driver').resolve(strict=True).name.startswith('morse')
+        driver = (sysnet / iface / 'device/driver').resolve(strict=True)
+        return driver.name.startswith('morse')
     except OSError:
         return False
 

@@ -42,6 +42,7 @@ class Fixture(unittest.TestCase):
 
 
 class BackendTests(Fixture):
+    """Check HaLow power restrictions at the radio command receiver."""
     def test_halow_detection_by_role_and_by_driver(self):
         self.assertTrue(radio.is_halow_iface('wlan2'))
         self.assertFalse(radio.is_halow_iface('wlan0'))
@@ -63,10 +64,13 @@ class BackendTests(Fixture):
         self.assertIn('needs a reboot', result['error'])
 
     def test_receiver_refuses_halow_power_before_ack(self):
+        """Refuse a live HaLow power change before acknowledging it."""
         spec = importlib.util.spec_from_file_location('radio_receiver_power', TOOLS / 'mesh-radio-state.py')
         receiver = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(receiver)
-        with mock.patch.object(receiver, 'is_halow_iface', side_effect=lambda i: i == 'wlan2'), \
+        with mock.patch.object(
+                receiver, 'is_halow_iface',
+                side_effect=lambda i, **kwargs: i == 'wlan2'), \
                 mock.patch.object(receiver, 'target_matches', return_value=True):
             ok, why = receiver.validate_pkg({'kind': 'radio_state', 'version': 'v',
                                             'txpower': {'wlan2': 20}})

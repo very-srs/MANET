@@ -21,38 +21,11 @@ else
     exit 1
 fi
 
-iface_driver() {
-    local iface="$1"
-    local driver
-
-    driver="$(basename "$(readlink -f /sys/class/net/$iface/device/driver 2>/dev/null)")"
-    if [[ -z "$driver" || "$driver" == "." ]]; then
-        driver="$(ethtool -i "$iface" 2>/dev/null | awk -F': ' '$1 == "driver" {print $2; exit}')"
-    fi
-
-    printf '%s\n' "$driver"
-}
-
-iface_phy() {
-    local iface="$1"
-    iw dev "$iface" info 2>/dev/null | awk '/wiphy/ {print "phy"$2; exit}'
-}
-
-iface_supports_mesh() {
-    local iface="$1"
-    local phyname
-
-    phyname="$(iface_phy "$iface")"
-    [[ -n "$phyname" ]] && iw phy "$phyname" info 2>/dev/null | grep -q "mesh point"
-}
 
 is_halow() {
     [[ "$(iface_driver "$1")" == morse* ]]
 }
 
-is_nonmesh_wifi() {
-    [[ "$(iface_driver "$1")" == brcmfmac ]]
-}
 
 # radio_iface_enabled: manet-common.sh
 

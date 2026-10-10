@@ -391,5 +391,265 @@ class AddressHelperTests(unittest.TestCase):
         self.assertEqual(result.stderr, '')
 
 
+class RadioShellHelperTests(unittest.TestCase):
+    """Pin radio detection, service operations and bounded uplink probes."""
+
+    def test_driver_and_phy_probes(self):
+        """Pin complete driver and PHY command sequences at every caller."""
+        for caller in ('batman-if-setup.sh', 'radio-setup.sh',
+                       'manet-uplink-dispatch.sh', 'usb-wifi-uplink.sh'):
+            source = shell_functions(caller, ('iface_driver',))
+            for sysfs in (False, True):
+                with tempfile.TemporaryDirectory() as directory:
+                    trace = Path(directory) / 'trace'
+                    body = '''
+readlink() {
+    printf 'readlink %s\\n' "$*" >> "$TRACE"
+    [ "$SYSFS" = yes ] || return 1
+    echo /sys/bus/usb/drivers/morse_usb
+}
+ethtool() {
+    printf 'ethtool %s\\n' "$*" >> "$TRACE"
+    printf 'driver: morse_usb\\nversion: 1\\n'
+}
+iface_driver wlan5
+'''
+                    result = subprocess.run(
+                        ['bash', '-c', source + body], capture_output=True,
+                        text=True, timeout=5,
+                        env=dict(os.environ, TRACE=str(trace),
+                                 SYSFS='yes' if sysfs else 'no'))
+                    self.assertEqual(
+                        (result.returncode, result.stdout, result.stderr),
+                        (0, 'morse_usb\n', ''))
+                    self.assertEqual(
+                        trace.read_text(),
+                        'readlink -f /sys/class/net/wlan5/device/driver\n' +
+                        ('' if sysfs else 'ethtool -i wlan5\n'))
+        for caller in ('batman-if-setup.sh', 'radio-setup.sh',
+                       'node-manager-acs.sh'):
+            source = shell_functions(caller, ('iface_phy',))
+            with tempfile.TemporaryDirectory() as directory:
+                trace = Path(directory) / 'trace'
+                body = '''
+iw() {
+    printf 'iw %s\\n' "$*" >> "$TRACE"
+    printf 'wiphy 3\\nwiphy 8\\n'
+}
+iface_phy wlan5
+'''
+                result = subprocess.run(
+                    ['bash', '-c', source + body], capture_output=True,
+                    text=True, timeout=5,
+                    env=dict(os.environ, TRACE=str(trace)))
+                self.assertEqual(
+                    (result.returncode, result.stdout, result.stderr),
+                    (0, 'phy3\n', ''))
+                self.assertEqual(trace.read_text(), 'iw dev wlan5 info\n')
+
+    def test_mesh_capability_and_reserved_ap(self):
+        """Keep mesh support and the brcmfmac AP exclusion independent."""
+        for caller in ('batman-if-setup.sh', 'radio-setup.sh'):
+            source = shell_functions(caller, ('iface_supports_mesh',
+                                              'is_nonmesh_wifi'))
+            result = subprocess.run(['bash', '-c', source + '''
+iface_phy() { echo phy1; }
+iw() { printf 'Supported interface modes:\\n * mesh point\\n'; }
+iface_driver() { echo brcmfmac; }
+iface_supports_mesh wlan0; printf 'mesh=%s\\n' "$?"
+is_nonmesh_wifi wlan0; printf 'ap=%s\\n' "$?"
+iface_phy() { :; }
+iface_driver() { echo mt7915e; }
+iface_supports_mesh wlan1; printf 'mesh=%s\\n' "$?"
+is_nonmesh_wifi wlan1; printf 'ap=%s\\n' "$?"
+'''], capture_output=True, text=True, timeout=5)
+            self.assertEqual((result.returncode, result.stdout, result.stderr),
+                             (0, 'mesh=0\nap=0\nmesh=1\nap=1\n', ''))
+
+    def test_service_failure_under_errexit(self):
+        """Characterize best-effort service helpers under both shell modes."""
+        for caller in ('ethernet-autodetect.sh', 'manet-uplink-dispatch.sh'):
+            for name in ('enable_if_disabled', 'unmask_if_masked'):
+                for strict in (False, True):
+                    source = shell_functions(caller, (name,))
+                    body = '''
+systemctl() {
+    printf '%s\\n' "$*" >> "$TRACE"
+    [ "$*" != "is-enabled sample.service" ] || printf 'masked\\n'
+    return 1
+}
+''' + name + ' sample.service\nprintf "survived\\n"\n'
+                    with tempfile.TemporaryDirectory() as directory:
+                        trace = Path(directory) / 'trace'
+                        result = subprocess.run(
+                            ['bash', '-c', ('set -e\n' if strict else '') +
+                             source + body], capture_output=True, text=True,
+                            env=dict(os.environ, TRACE=str(trace)), timeout=5)
+                        fatal = False
+                        self.assertEqual(result.returncode, int(fatal))
+                        self.assertEqual(result.stdout,
+                                         '' if fatal else 'survived\n')
+                        self.assertEqual(result.stderr, '')
+                        operation = ('enable' if name == 'enable_if_disabled'
+                                     else 'unmask')
+                        query = ('is-enabled --quiet' if operation == 'enable'
+                                 else 'is-enabled')
+                        self.assertEqual(trace.read_text(),
+                                         query + ' sample.service\n' +
+                                         operation + ' sample.service\n')
+
+    def test_usb_candidate_exclusions(self):
+        """Pin assigned roles, driver exclusions and missing netdevs."""
+        for caller in ('manet-uplink-dispatch.sh', 'usb-wifi-uplink.sh'):
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                (root / 'net/wlan5').mkdir(parents=True)
+                (root / 'mesh_if').write_text('wlan6\n')
+                source = shell_functions(caller, ('is_usb_wifi_uplink_iface',))
+                source = source.replace('/sys/class/net', str(root / 'net'))
+                source = source.replace('/var/lib/', str(root) + '/')
+                result = subprocess.run(['bash', '-c', source + '''
+readlink() { echo /sys/bus/usb; }
+iface_driver() { echo mt76x2u; }
+for iface in wlan0 wlan3 eth0 wlan5 wlan6 wlan7; do
+    is_usb_wifi_uplink_iface "$iface"; printf '%s:%s\\n' "$iface" "$?"
+done
+iface_driver() { echo morse_usb; }
+is_usb_wifi_uplink_iface wlan5; printf 'morse:%s\\n' "$?"
+iface_driver() { echo brcmfmac; }
+is_usb_wifi_uplink_iface wlan5; printf 'brcm:%s\\n' "$?"
+'''], capture_output=True, text=True, timeout=5)
+                missing = '1'
+                self.assertEqual(result.stdout,
+                                 'wlan0:1\nwlan3:1\neth0:1\nwlan5:0\n'
+                                 'wlan6:1\nwlan7:' + missing +
+                                 '\nmorse:1\nbrcm:1\n')
+                self.assertEqual((result.returncode, result.stderr), (0, ''))
+
+    def test_internet_probe_commands(self):
+        """Pin the full timeout/argv sequence for curl and TCP fallbacks."""
+        for caller in ('ethernet-autodetect.sh', 'manet-uplink-dispatch.sh'):
+            names = ('internet_probe',)
+            names += ('iface_ip',)
+            source = shell_functions(caller, names)
+            for curl in (True, False):
+                with tempfile.TemporaryDirectory() as directory:
+                    trace = Path(directory) / 'trace'
+                    body = '''
+ping() { printf 'ping %s\\n' "$*" >> "$TRACE"; return 1; }
+curl() { printf 'curl %s\\n' "$*" >> "$TRACE"; echo 204; }
+ip() {
+    printf 'ip %s\\n' "$*" >> "$TRACE"
+    printf '2: eth0 inet 192.0.2.5/24 scope global eth0\\n'
+}
+nc() { printf 'nc %s\\n' "$*" >> "$TRACE"; return 0; }
+command() {
+    if [ "$*" = '-v curl' ] && [ "$NO_CURL" = yes ]; then return 1; fi
+    builtin command "$@"
+}
+internet_probe eth0
+'''
+                    env = dict(os.environ, TRACE=str(trace),
+                               NO_CURL='no' if curl else 'yes')
+                    result = subprocess.run(['bash', '-c', source + body],
+                                            capture_output=True, text=True,
+                                            env=env, timeout=5)
+                    self.assertEqual(
+                        (result.returncode, result.stdout, result.stderr),
+                        (0, '', ''))
+                    expected = ('ping -c 1 -W 2 -I eth0 1.1.1.1\n'
+                                'ping -c 1 -W 2 -I eth0 8.8.8.8\n')
+                    if curl:
+                        expected += ('curl --interface eth0 -s -m 3 '
+                                     '-o /dev/null -w %{http_code} '
+                                     'http://connectivitycheck.gstatic.com/'
+                                     'generate_204\n')
+                    else:
+                        flag = ' -o'
+                        expected += ('ip -4' + flag + ' addr show dev eth0\n'
+                                     'nc -z -w 3 -s 192.0.2.5 1.1.1.1 53\n')
+                    self.assertEqual(trace.read_text(), expected)
+
+    def test_frequency_config(self):
+        """Pin the first match, absent file and unterminated final line."""
+        for caller in ('mesh-acs-common.sh', 'node-manager-static.sh'):
+            for raw in ('frequency=2412\nfrequency=5180\n', 'frequency=2462'):
+                with tempfile.TemporaryDirectory() as directory:
+                    path = Path(directory) / 'wpa'
+                    path.write_text(raw)
+                    result = subprocess.run(
+                        ['bash', '-c', shell_functions(
+                            caller, ('get_current_freq',)) +
+                         '\nget_current_freq "$1"\n', 'test', str(path)],
+                        capture_output=True, text=True, timeout=5)
+                    expected = ('2412\n' if '\n' in raw else
+                                '2462\n')
+                    self.assertEqual(result.stdout, expected)
+                    self.assertEqual(result.stderr, '')
+
+    def test_boot_clock_validation(self):
+        """Pin leading zero and malformed-decimal behavior at each caller."""
+        for caller in ('manet-common.sh', 'gateway-route-manager.sh',
+                       'mesh-config-rollback.sh'):
+            with tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / 'uptime'
+                source = shell_functions(caller, ('uptime_now',))
+                source = source.replace('/proc/uptime', str(path))
+                cases = [('0010.50 2\n', '10\n', '0010\n', '0010\n'),
+                         ('10.bad 2\n', '', '10\n', '10\n'),
+                         ('bad 2\n', '', 'bad\n', '')]
+                index = 1
+                for case in cases:
+                    path.write_text(case[0])
+                    result = subprocess.run(
+                        ['bash', '-c', source + '\nuptime_now\n'],
+                        capture_output=True, text=True, timeout=5,
+                        env=dict(os.environ, UPTIME_FILE=str(path),
+                                 MESH_UPTIME_FILE=str(path)))
+                    self.assertEqual(result.stdout, case[index])
+                    self.assertEqual(result.returncode,
+                                     0 if case[index] else 1)
+                    self.assertEqual(result.stderr, '')
+
+
+class HalowDetectionHelperTests(unittest.TestCase):
+    """Keep role, sysfs and command-query contracts for both radio users."""
+
+    def test_role_and_driver_queries(self):
+        """Keep sysfs probes local and receiver ethtool calls bounded."""
+        from unittest.mock import mock_open
+        import manet_radio as radio
+        receiver = load_script('mesh-radio-state')
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'halow_if').write_text('wlan2\n')
+            driver = root / 'net/wlan5/device/driver'
+            driver.parent.mkdir(parents=True)
+            (root / 'morse_usb').mkdir()
+            driver.symlink_to(root / 'morse_usb')
+            with patch.dict(os.environ, MANET_IFACE_STATE_DIR=str(root),
+                            MANET_SYS_NET=str(root / 'net')):
+                self.assertEqual([radio.is_halow_iface(i)
+                                  for i in ('wlan2', 'wlan5', 'wlan0')],
+                                 [True, True, False])
+        with patch('builtins.open', mock_open(read_data='wlan2\n')), \
+                patch.object(receiver, 'run') as run:
+            self.assertTrue(receiver.is_halow_iface(
+                'wlan2', halow_ifaces=receiver.load_halow_ifaces(),
+                driver_query=receiver.run))
+            run.assert_not_called()
+            run.return_value = SimpleNamespace(stdout='driver: morse_usb\n')
+            self.assertTrue(receiver.is_halow_iface(
+                'wlan5', halow_ifaces=receiver.load_halow_ifaces(),
+                driver_query=receiver.run))
+            run.assert_called_once_with(['ethtool', '-i', 'wlan5'], timeout=3)
+            run.reset_mock()
+            run.side_effect = OSError()
+            self.assertFalse(receiver.is_halow_iface(
+                'wlan0', halow_ifaces=receiver.load_halow_ifaces(),
+                driver_query=receiver.run))
+            run.assert_called_once_with(['ethtool', '-i', 'wlan0'], timeout=3)
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -19,7 +19,7 @@ from manet_admin import AdminTransport, private_json_write
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from manet_radio import (
     apply_txpower, apply_halow_channel, apply_wifi_channel, apply_uplink_wifi,
-    apply_voice_codec,
+    apply_voice_codec, is_halow_iface,
 )
 
 
@@ -97,22 +97,14 @@ def load_halow_ifaces():
     return names
 
 
-def is_halow_iface(iface):
-    if iface in load_halow_ifaces():
-        return True
-    try:
-        r = run(["ethtool", "-i", iface], timeout=3)
-        for line in r.stdout.splitlines():
-            if line.startswith("driver:") and "morse" in line.lower():
-                return True
-    except Exception:
-        pass
-    return False
 
 
 def service_for_iface(iface):
+    """Select the supplicant unit for the detected radio type."""
     from manet_supplicant import service_name
-    return service_name(iface, is_halow_iface(iface))
+    halow = is_halow_iface(iface, halow_ifaces=load_halow_ifaces(),
+                           driver_query=run)
+    return service_name(iface, halow)
 
 
 def active_bat_ifaces():
@@ -175,6 +167,7 @@ def target_matches(pkg):
 
 
 def validate_pkg(pkg):
+    """Validate a radio command before acknowledging or applying it."""
     if not isinstance(pkg, dict):
         return False, "package is not an object"
     if pkg.get("kind") != "radio_state":
@@ -207,7 +200,8 @@ def validate_pkg(pkg):
     for iface in txpower:
         if iface not in VALID_IFACES:
             return False, f"invalid txpower interface {iface}"
-        if target_matches(pkg) and is_halow_iface(iface):
+        if target_matches(pkg) and is_halow_iface(
+                iface, halow_ifaces=load_halow_ifaces(), driver_query=run):
             return False, f"{iface}: HaLow transmit power cannot be changed live; it needs a reboot"
     halow = pkg.get("halow_channel")
     if isinstance(halow, dict) and halow.get("dbm") is not None:

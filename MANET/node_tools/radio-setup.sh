@@ -1,4 +1,5 @@
 #!/bin/bash
+. "${MANET_TOOLS_DIR:-$(dirname "${BASH_SOURCE[0]}")}/manet-common.sh" || exit 1
 # Finalize radio setup after imaging and first boot.
 # Rerun after mesh.conf changes to apply new network settings.
 
@@ -415,17 +416,6 @@ mesh_ifaces=()
 halow_ifaces=()
 nonmesh_ifaces=()
 
-iface_driver() {
-    local iface="$1"
-    local driver
-
-    driver="$(basename "$(readlink -f /sys/class/net/$iface/device/driver 2>/dev/null)")"
-    if [[ -z "$driver" || "$driver" == "." ]]; then
-        driver="$(ethtool -i "$iface" 2>/dev/null | awk -F': ' '$1 == "driver" {print $2; exit}')"
-    fi
-
-    printf '%s\n' "$driver"
-}
 
 is_halow_iface() {
     local iface="$1"
@@ -448,30 +438,6 @@ is_halow_iface() {
     return 1
 }
 
-is_nonmesh_wifi() {
-    local iface="$1"
-    local driver
-
-    driver="$(iface_driver "$iface")"
-
-    # Raspberry Pi onboard Wi-Fi advertises mesh point support in some kernels,
-    # but on this platform it is reserved for the EUD AP/hotspot. Keep it out
-    # of mesh_if so rerunning setup cannot enslave the AP radio to bat0.
-    [[ "$driver" == brcmfmac ]]
-}
-
-iface_phy() {
-    local iface="$1"
-    iw dev "$iface" info 2>/dev/null | awk '/wiphy/ {print "phy"$2; exit}'
-}
-
-iface_supports_mesh() {
-    local iface="$1"
-    local phyname
-
-    phyname="$(iface_phy "$iface")"
-    [[ -n "$phyname" ]] && iw phy "$phyname" info 2>/dev/null | grep -q "mesh point"
-}
 
 iface_supports_freq() {
     local iface="$1"
@@ -1275,7 +1241,6 @@ EOF
 systemctl enable ssh-recovery.service
 
 
-
 # Replace wpa_supplicant with lobby channel files at boot
 cat <<- EOF > /etc/systemd/system/mesh-boot-lobby.service
 [Unit]
@@ -1513,7 +1478,6 @@ ExecStop=/bin/bash -c 'cat /sys/devices/system/cpu/cpufreq/policy0/cpuinfo_max_f
 WantedBy=multi-user.target
 EOF
 systemctl enable cpu-powersave
-
 
 
 cat << EOF > /etc/systemd/system/mesh-hosts-update.service

@@ -148,3 +148,108 @@ int_to_ip() {
         "$(( ($1 >> 24) & 255 ))" "$(( ($1 >> 16) & 255 ))" \
         "$(( ($1 >> 8) & 255 ))" "$(( $1 & 255 ))"
 }
+
+# Read the driver from sysfs, falling back to ethtool.
+iface_driver() {
+    local iface="$1" driver
+    driver="$(basename "$(readlink -f "/sys/class/net/$iface/device/driver" \
+        2>/dev/null)" 2>/dev/null || true)"
+    if [ -z "$driver" ] || [ "$driver" = "." ]; then
+        driver="$(ethtool -i "$iface" 2>/dev/null |
+            awk -F': ' '$1 == "driver" {print $2; exit}')"
+    fi
+    printf '%s\n' "$driver"
+}
+
+# Read the interface PHY name from iw.
+iface_phy() {
+    local iface="$1"
+    iw dev "$iface" info 2>/dev/null | awk '/wiphy/ {print "phy"$2; exit}'
+}
+
+# Check the PHY for mesh point support.
+iface_supports_mesh() {
+    local iface="$1"
+    local phyname
+
+    phyname="$(iface_phy "$iface")"
+    [[ -n "$phyname" ]] &&
+        iw phy "$phyname" info 2>/dev/null | grep -q "mesh point"
+}
+
+# Reserve the onboard brcmfmac radio for the EUD AP.
+is_nonmesh_wifi() {
+    [[ "$(iface_driver "$1")" == brcmfmac ]]
+}
+
+# Accept existing USB Wi-Fi devices outside mesh/AP roles.
+is_usb_wifi_uplink_iface() {
+    local iface="$1" bus driver
+    [ -n "$iface" ] || return 1
+    [ -d "/sys/class/net/$iface" ] || return 1
+
+    case "$iface" in
+        wlan0|wlan1|wlan2|wlan3|lo|br*|bat*) return 1 ;;
+        wlan*) ;;
+        *) return 1 ;;
+    esac
+
+    bus="$(readlink "/sys/class/net/$iface/device/subsystem" 2>/dev/null |
+        grep -o 'usb' || true)"
+    [ "$bus" = "usb" ] || return 1
+
+    driver="$(iface_driver "$iface")"
+    case "$driver" in
+        morse*|brcmfmac) return 1 ;;
+    esac
+
+    grep -qx "$iface" /var/lib/mesh_if /var/lib/halow_if \
+        /var/lib/no_mesh_if 2>/dev/null && return 1
+    return 0
+}
+
+# Try to enable a disabled unit without failing its caller.
+enable_if_disabled() {
+    systemctl is-enabled --quiet "$1" 2>/dev/null || \
+        systemctl enable "$1" 2>/dev/null || true
+}
+
+# Try to unmask a unit without failing its caller.
+unmask_if_masked() {
+    [ "$(systemctl is-enabled "$1" 2>/dev/null)" = "masked" ] && \
+        systemctl unmask "$1" 2>/dev/null || true
+}
+
+# Read the first local IPv4 address on an interface.
+iface_ip() {
+    ip -4 -o addr show dev "$1" 2>/dev/null |
+        awk '{print $4}' | cut -d/ -f1 | head -n1
+}
+
+# Probe internet reachability with bounded ping, HTTP or TCP.
+internet_probe() {
+    local iface="$1"
+    local url code ip
+
+    ping -c 1 -W 2 -I "$iface" 1.1.1.1 >/dev/null 2>&1 && return 0
+    ping -c 1 -W 2 -I "$iface" 8.8.8.8 >/dev/null 2>&1 && return 0
+
+    if command -v curl >/dev/null 2>&1; then
+        for url in http://connectivitycheck.gstatic.com/generate_204 \
+                   http://cp.cloudflare.com/; do
+            code=$(curl --interface "$iface" -s -m 3 -o /dev/null \
+                        -w '%{http_code}' "$url" 2>/dev/null || true)
+            [ "$code" = "204" ] && return 0
+        done
+        return 1
+    fi
+
+    # No curl in this image: bare TCP connect instead.
+    ip=$(iface_ip "$iface")
+    if [ -n "$ip" ] && command -v nc >/dev/null 2>&1; then
+        nc -z -w 3 -s "$ip" 1.1.1.1 53 >/dev/null 2>&1 && return 0
+        nc -z -w 3 -s "$ip" 8.8.8.8 53 >/dev/null 2>&1 && return 0
+    fi
+
+    return 1
+}
