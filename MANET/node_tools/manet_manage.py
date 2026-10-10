@@ -23,6 +23,8 @@ Routes (relative to /manage):
   POST /api/uplink/wifi         - Set USB Wi-Fi uplink credentials (all nodes)
 """
 
+from manet_config_io import load_kv_file
+from manet_node_info import get_my_hostname, get_local_uptime, fmt_uptime
 from manet_registry import parse_registry
 import json
 import subprocess
@@ -112,27 +114,7 @@ def measure_status_snapshot():
 
 # Helpers
 
-def load_kv_file(path):
-    conf = {}
-    try:
-        with open(path) as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith('#'):
-                    continue
-                if '=' in line:
-                    k, v = line.split('=', 1)
-                    conf[k.strip()] = v.strip().strip('"\'')
-    except Exception:
-        pass
-    return conf
 
-def get_my_hostname():
-    try:
-        import socket
-        return socket.gethostname()
-    except Exception:
-        return 'unknown'
 
 def get_my_ip():
     state = load_kv_file(MESH_STATE_FILE)
@@ -158,13 +140,6 @@ def get_local_battery_percentage():
     return ''
 
 
-def get_local_uptime():
-    try:
-        with open('/proc/uptime') as f:
-            secs = float(f.read().split()[0])
-        return fmt_uptime(secs)
-    except Exception:
-        return ''
 
 
 def get_usb_wifi_uplink_status():
@@ -251,23 +226,6 @@ def get_bat0_active_ifaces():
     except Exception:
         return []
 
-def fmt_uptime(seconds):
-    try:
-        s = int(seconds)
-    except (TypeError, ValueError):
-        return ''
-    if s < 60:
-        return f'{s}s'
-    m = s // 60
-    if m < 60:
-        return f'{m}m'
-    h = m // 60
-    rm = m % 60
-    if h < 24:
-        return f'{h}h{rm:02d}m'
-    d = h // 24
-    rh = h % 24
-    return f'{d}d{rh:02d}h'
 
 
 def get_session_hop_count(dst_ip):
@@ -600,14 +558,14 @@ def build_topology():
             'is_gateway': nd.get('IS_GATEWAY', 'false').lower() == 'true',
             'gateway_iface': nd.get('GATEWAY_IFACE', ''),
             'battery':  nd.get('BATTERY_PERCENTAGE', ''),
-            'uptime':   fmt_uptime(nd.get('UPTIME_SECONDS', '')),
+            'uptime':   fmt_uptime(nd.get('UPTIME_SECONDS', ''), compact=True),
         }
 
         if is_me:
             live_battery = get_local_battery_percentage()
             if live_battery:
                 node_info['battery'] = live_battery
-            live_uptime = get_local_uptime()
+            live_uptime = get_local_uptime(compact=True)
             if live_uptime:
                 node_info['uptime'] = live_uptime
             node_info['interfaces'] = {

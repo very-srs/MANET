@@ -21,6 +21,8 @@ Calls:
 """
 
 # Handle --dump-interfaces before importing the web server dependencies.
+from manet_config_io import load_kv_file
+from manet_node_info import get_my_hostname, get_local_uptime, fmt_uptime
 from manet_registry import parse_registry
 import sys
 if __name__ == '__main__' and len(sys.argv) > 1 and sys.argv[1] == '--dump-interfaces':
@@ -79,22 +81,6 @@ PERF_AUTH_COOKIE = 'manet_perf_auth'
 MANAGE_PREFIX = '/manage'
 # Config / State Loaders
 
-def load_kv_file(path):
-    """Parse a key=value or key='value' file into a dict."""
-    conf = {}
-    try:
-        with open(path) as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith('#'):
-                    continue
-                if '=' in line:
-                    # Read assignments as data; never evaluate shell text.
-                    k, v = line.split('=', 1)
-                    conf[k.strip()] = v.strip().strip('"\'')
-    except Exception:
-        pass
-    return conf
 
 def get_provisioned_manage_password(conf=None):
     """Read the admin credential used by local web sessions."""
@@ -273,12 +259,6 @@ def get_my_mac():
     except Exception:
         return None
 
-def get_my_hostname():
-    """Read the local hostname, with a display fallback on failure."""
-    try:
-        return socket.gethostname()
-    except Exception:
-        return 'unknown'
 
 
 # Local Node Detail Gathering
@@ -827,15 +807,6 @@ def get_running_services():
         results[svc_name] = active
     return results
 
-def get_local_uptime():
-    """Format elapsed boot time from procfs for the local detail panel."""
-    try:
-        with open('/proc/uptime') as f:
-            # procfs gives elapsed seconds first, then aggregate idle time.
-            secs = float(f.read().split()[0])
-        return fmt_uptime(secs)
-    except Exception:
-        return ''
 
 
 def enrich_interfaces_with_registry_mcs(ifaces, node_data):
@@ -1018,17 +989,6 @@ def assemble_peer_data(peer_ip):
     return None
 
 
-def fmt_uptime(seconds):
-    """Format seconds as hours/minutes or minutes/seconds when numeric."""
-    try:
-        s = int(float(seconds))
-        h, rem = divmod(s, 3600)
-        m, sec = divmod(rem, 60)
-        if h > 0:
-            return f"{h}h {m}m"
-        return f"{m}m {sec}s"
-    except Exception:
-        return seconds
 
 
 # Access Control

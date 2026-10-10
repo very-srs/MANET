@@ -179,5 +179,57 @@ class RegistryHelperTests(unittest.TestCase):
                 self.assertEqual(module.read_json(Path(directory)), {})
 
 
+class NodeInfoHelperTests(unittest.TestCase):
+    """Pin node facts and both intentionally distinct display formats."""
+
+    def test_key_value_files(self):
+        """Keep quotes, repeated keys, ignored lines and read failures."""
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'config'
+            path.write_text(" # comment\na = 'one'\na=two\n"
+                            'b="x=y"\nignored\nempty=\n')
+            for module in (manage, status):
+                self.assertEqual(module.load_kv_file(path),
+                                 {'a': 'two', 'b': 'x=y', 'empty': ''})
+            path.unlink()
+            for module in (manage, status):
+                self.assertEqual(module.load_kv_file(path), {})
+
+    def test_hostname(self):
+        """Return the kernel hostname or the same failure placeholder."""
+        for module in (manage, status):
+            with patch('socket.gethostname', return_value='cm4') as call:
+                self.assertEqual(module.get_my_hostname(), 'cm4')
+                call.assert_called_once_with()
+            with patch('socket.gethostname', side_effect=OSError()):
+                self.assertEqual(module.get_my_hostname(), 'unknown')
+
+    def test_uptime_formats(self):
+        """Keep management compact and topology spaced, including errors."""
+        values = [0, 59, 60, 3599, 3600, 90061, -1, '61.5', None, 'bad']
+        self.assertEqual([manage.fmt_uptime(v, compact=True) for v in values],
+                         ['0s', '59s', '1m', '59m', '1h00m', '1d01h',
+                          '-1s', '', '', ''])
+        self.assertEqual([status.fmt_uptime(v) for v in values],
+                         ['0m 0s', '0m 59s', '1m 0s', '59m 59s',
+                          '1h 0m', '25h 1m', '59m 59s', '1m 1s', None,
+                          'bad'])
+
+    def test_local_uptime(self):
+        """Read procfs once, keeping every caller's full formatted output."""
+        from unittest.mock import mock_open
+        for module, expected in ((manage, '1h01m'), (status, '1h 1m')):
+            with patch('builtins.open', mock_open(read_data='3661.5 50\n')):
+                self.assertEqual(
+                    module.get_local_uptime(compact=module is manage), expected)
+            for raw in ('', 'bad 2\n'):
+                with patch('builtins.open', mock_open(read_data=raw)):
+                    self.assertEqual(
+                    module.get_local_uptime(compact=module is manage), '')
+            with patch('builtins.open', side_effect=OSError()):
+                self.assertEqual(
+                    module.get_local_uptime(compact=module is manage), '')
+
+
 if __name__ == '__main__':
     unittest.main()

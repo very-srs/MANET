@@ -73,3 +73,21 @@ def read_json(path):
         return value if isinstance(value, dict) else {}
     except (OSError, ValueError):
         return {}
+
+
+def load_kv_file(path):
+    """Parse a key=value or key='value' file into a dict."""
+    conf = {}
+    try:
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith('#'):
+                    continue
+                if '=' in line:
+                    # Read assignments as data; never evaluate shell text.
+                    k, v = line.split('=', 1)
+                    conf[k.strip()] = v.strip().strip('"\'')
+    except Exception:
+        pass
+    return conf
