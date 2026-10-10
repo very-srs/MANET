@@ -420,5 +420,169 @@ if sys.argv[1:] == ['-s', '69']:
                         self.assertIn(f'frequency={freq}', (self.wpa / f'wpa_supplicant-{iface}.conf').read_text())
 
 
+class CadenceTests(unittest.TestCase):
+    """Run the ACS pass scheduler against the real protocol on a fake clock."""
+    BASE = 1000 * agreement.ROUND_SECONDS
+    MACS = (OWN, PEER, THIRD)
+    SCORE_SECONDS = 0.8
+
+    @staticmethod
+    def status(index, ready=True):
+        return {'boot': 'abc'[index] * 32, 'acs': True, 'ready': ready, 'current': {'2.4': 2437},
+                'allowed': {'2.4': sorted(agreement.CHANNELS['2.4'])}}
+
+    def simulate(self, nodes, cost, delay, fail=None, legacy=False,
+                 phases=(0, 0.37, 0.74), requests=(25, 25, 25)):
+        """Return ({mac: apply second}, activate_at, pass count) for one round.
+
+        Like _tick, a pass builds its view from replicated peer status plus
+        live local status, reads records near its start, samples the decision
+        time near its end, adds scoring time when proposing, and republishes
+        on change or after 5 seconds. A node turns ready at its request
+        second, which also wakes the new loop at once. fail=(mac, at) aborts
+        that node's first pass starting at or after at before any state
+        changes, as an early read error does.
+        """
+        macs = self.MACS[:nodes]
+        request = {mac: self.BASE + requests[i] for i, mac in enumerate(macs)}
+        runner = runtime.Runtime.__new__(runtime.Runtime)
+        states = {mac: {} for mac in macs}
+        published = {mac: [] for mac in macs}
+        last = {mac: (None, None) for mac in macs}
+        wake = {mac: self.BASE + phases[i] for i, mac in enumerate(macs)}
+        applied, activate, passes, failed = {}, None, 0, False
+        with patch.object(runtime, 'clock_ready', return_value=True):
+            while min(wake.values()) < self.BASE + agreement.ROUND_SECONDS:
+                mac = min(wake, key=wake.get)
+                start = end = wake[mac]
+                passes += 1
+                if fail and not failed and fail[0] == mac and start >= fail[1]:
+                    failed = True
+                    end += cost
+                else:
+                    local = self.status(macs.index(mac), start >= request[mac])
+                    view, records = {mac: local}, {}
+                    for other in macs:
+                        if other == mac:
+                            continue
+                        seen = [out for visible, out in published[other] if visible <= start + 0.05]
+                        view[other] = seen[-1]['status'] if seen else None
+                        if seen:
+                            records[other] = seen[-1]['protocol']
+                    saved = states[mac]
+                    proposal = None
+                    now = int(start + 0.9 * cost)
+                    if (agreement.coordinator(view) == mac
+                            and agreement.PROPOSE_FROM <= now % agreement.ROUND_SECONDS <= agreement.PROPOSE_UNTIL
+                            and (saved.get('round', -1) < now // agreement.ROUND_SECONDS
+                                 or saved.get('phase') == 'idle')):
+                        now = int(start + 0.9 * cost + self.SCORE_SECONDS)
+                        end += self.SCORE_SECONDS
+                        if agreement.PROPOSE_FROM <= now % agreement.ROUND_SECONDS <= agreement.PROPOSE_UNTIL:
+                            proposal = agreement.make_plan(view, {'2.4': 2462}, False, now, 'e' * 32)
+                            activate = proposal['activate_at']
+                    states[mac], outgoing, plan = agreement.advance(saved, mac, now, view, records,
+                                                                    proposal, local)
+                    if plan is not None:
+                        applied[mac] = now
+                    end += cost
+                    record = {'protocol': outgoing, 'status': local}
+                    # Same predicate as _tick: protocol or status changed, or 5 s.
+                    if record != last[mac][0] or last[mac][1] is None or end - last[mac][1] >= 5:
+                        published[mac].append((end + delay, record))
+                        last[mac] = (record, end)
+                runner.state = {'protocol': states[mac]}
+                wake[mac] = end + (1 if legacy else runner.interval(end))
+                if not legacy and request[mac] > start:
+                    # The request signal ends the sleep, or the next one at once.
+                    wake[mac] = min(wake[mac], max(end, request[mac]))
+        return applied, activate, passes
+
+    def test_every_node_applies_inside_the_supported_budget(self):
+        # Supported: replication up to 15 s (Alfred syncs every 10 s), passes
+        # up to 0.8 s plus scoring, any start phase, one early-aborted pass
+        # anywhere in the plan, and manager requests by :28. Readiness must
+        # reach every peer before :45, so request lateness plus replication
+        # stays under 19 s whatever the pass cadence.
+        checked = 0
+        for nodes, costs in ((2, (0.096, 0.8)), (3, (0.3,))):
+            for cost in costs:
+                for phases in ((0.13, 4.6), (0.79, 0.13), (4.9, 0.0)):
+                    phases += (1.9,)
+                    for requests in ((25, 25, 25), (25, 28, 27), (28, 25, 25)):
+                        for delay in (0.5, 15):
+                            fails = [None] + [(mac, self.BASE + offset) for mac in self.MACS[:2]
+                                              for offset in range(98, 142, 7)]
+                            for fail in fails:
+                                applied, activate, _ = self.simulate(nodes, cost, delay, fail,
+                                                                     phases=phases, requests=requests)
+                                case = (nodes, cost, delay, fail, phases, requests)
+                                self.assertEqual(set(applied), set(self.MACS[:nodes]), case)
+                                for second in applied.values():
+                                    self.assertTrue(activate <= second <= activate + agreement.APPLY_GRACE, case)
+                                checked += 1
+        self.assertGreater(checked, 600)
+
+    def test_request_wake_publishes_readiness_in_time(self):
+        # Without the wake, readiness from :25 can reach the peer after :45
+        # and both nodes propose. Cost 0.096 s, 15 s replication.
+        applied, _, _ = self.simulate(2, 0.096, 15, phases=(4.6, 0.13))
+        self.assertEqual(set(applied), {OWN, PEER})
+
+    def test_request_signals_only_the_run_daemon(self):
+        with tempfile.TemporaryDirectory() as directory:
+            Path(directory, 'manet-acs-agreement.pid').write_text('4242\n')
+            for cmdline, expected in [
+                    (b'python3\0/usr/local/bin/mesh-channel-agreement.py\0run\0', True),
+                    (b'python3\0/usr/local/bin/mesh-channel-agreement.py\0members\0', False),
+                    (b'/usr/sbin/sshd\0', False)]:
+                with patch.object(runtime.Path, 'read_bytes', return_value=cmdline), \
+                        patch.object(runtime.os, 'pidfd_open', return_value=99), \
+                        patch.object(runtime.os, 'close') as close, \
+                        patch.object(runtime.signal, 'pidfd_send_signal') as kill:
+                    runtime.wake_daemon(directory)
+                close.assert_called_once_with(99)
+                self.assertEqual(kill.called, expected, cmdline)
+                if expected:
+                    kill.assert_called_once_with(99, runtime.signal.SIGUSR1)
+            # A process that exited before pidfd_open is never signalled.
+            with patch.object(runtime.os, 'pidfd_open', side_effect=ProcessLookupError), \
+                    patch.object(runtime.signal, 'pidfd_send_signal') as kill:
+                runtime.wake_daemon(directory)
+            kill.assert_not_called()
+            Path(directory, 'manet-acs-agreement.pid').unlink()
+            with patch.object(runtime.signal, 'pidfd_send_signal') as kill:
+                runtime.wake_daemon(directory)
+            kill.assert_not_called()
+
+    def test_passes_per_round(self):
+        _, _, legacy = self.simulate(2, 0.1, 3, legacy=True)
+        _, _, new = self.simulate(2, 0.1, 3)
+        # Two nodes, one live plan: about half the one-second loop.
+        self.assertLess(new, legacy * 0.6)
+
+    def test_stale_phase_uses_default_spacing(self):
+        # A phase surviving a reboot or backward clock step names an old round.
+        runner = runtime.Runtime.__new__(runtime.Runtime)
+        plan = {'deadline': self.BASE + 110, 'activate_at': self.BASE + 140}
+        runner.state = {'protocol': {'round': self.BASE // agreement.ROUND_SECONDS - 1,
+                                     'phase': 'committed', 'plan': plan}}
+        with patch.object(runtime, 'clock_ready', return_value=True):
+            self.assertEqual(runner.interval(self.BASE + 120.2), runtime.IDLE_INTERVAL)
+            runner.state['protocol']['round'] += 1
+            self.assertEqual(runner.interval(self.BASE + 120.2), runtime.ACTIVE_INTERVAL)
+
+    def test_clockless_node_uses_default_spacing(self):
+        runner = runtime.Runtime.__new__(runtime.Runtime)
+        runner.state = {}
+        with patch.object(runtime, 'clock_ready', return_value=False):
+            self.assertEqual(runner.interval(self.BASE + 50), runtime.IDLE_INTERVAL)
+
+    def test_sleep_never_crosses_a_window_start(self):
+        runner = runtime.Runtime.__new__(runtime.Runtime)
+        runner.state = {}
+        with patch.object(runtime, 'clock_ready', return_value=True):
+            self.assertAlmostEqual(runner.interval(self.BASE + 43), 2 + runtime.WAKE_MARGIN)
+
 if __name__ == '__main__':
     unittest.main()

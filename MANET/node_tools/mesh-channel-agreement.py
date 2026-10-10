@@ -10,7 +10,9 @@ import os
 from pathlib import Path
 import re
 import secrets
+import select
 import shlex
+import signal
 import subprocess
 import sys
 import tempfile
@@ -21,19 +23,33 @@ import manet_acs_agreement as protocol
 import manet_rendezvous as rendezvous
 
 TOOLS = Path(__file__).resolve().parent
+# Maximum age in wall-clock seconds for authenticated type 74/75 records.
 FRESH_SECONDS = 45
 PROBE_LIFETIME = 60  # Request/reply replication plus a 15-second manager wakeup.
+# Minimum monotonic seconds between new clockless recovery probes.
 PROBE_INTERVAL = 60
+# Pass spacing in seconds. Default passes match the 5-second publish
+# cadence. One-second passes, as in a fixed one-second loop, cover the
+# proposal window and a live plan from GUARD_SECONDS before its vote deadline
+# through its apply window: last votes, commit, commit pickup and apply.
+IDLE_INTERVAL = 5
+ACTIVE_INTERVAL = 1
+GUARD_SECONDS = 5
+WAKE_MARGIN = 0.05  # Lands a pass after a whole-second boundary, not before.
+# Boot-clock deadlines and their plan identity survive same-boot restarts.
 LOCAL_TIMERS = ('hold_until', 'repair_until', 'retry_at', 'settle_until', 'busy_until', 'busy_plan')
+# Alfred rows pair a sender MAC with a quoted, escaped JSON payload.
 RECORD = re.compile(r'\{\s*"([0-9a-fA-F:]{17})"\s*,\s*("(?:\\.|[^"\\])*")\s*\}')
 
 
 def command(args, timeout=5, input=None):
+    """Return command stdout, raising on failure or timeout in seconds."""
     return subprocess.run([str(a) for a in args], input=input, capture_output=True,
                           text=True, check=True, timeout=timeout).stdout
 
 
 def read_json(path, default=None):
+    """Read JSON, using the default or an empty dict only for missing files."""
     try:
         return json.loads(Path(path).read_text())
     except FileNotFoundError:
@@ -41,13 +57,17 @@ def read_json(path, default=None):
 
 
 def authenticated_records(transport, type_id, raw, now):
+    """Authenticate fresh Alfred records and keep the newest per sender."""
     from cryptography.exceptions import InvalidTag
     result, orders = {}, {}
     for match in RECORD.finditer(raw):
         mac = match[1].lower()
         try:
+            # Unquote Alfred's string, then decode the encrypted envelope.
             message = transport.open(type_id, json.loads(json.loads(match[2])))
             payload = message.payload
+            # Bind the payload to its Alfred sender. Allow 5 s of future skew
+            # and order duplicates by nanosecond timestamp, then message ID.
             if (payload.get('node') != mac or not -5 <= now - message.sent_ns / 1e9 <= FRESH_SECONDS
                     or message.order <= orders.get(mac, [0, ''])):
                 continue
@@ -65,6 +85,8 @@ def challenge_records(transport, type_id, raw):
     for match in RECORD.finditer(raw):
         mac = match[1].lower()
         try:
+            # Decode the same Alfred string wrapper as timed records. The
+            # caller checks the outstanding nonce or bounds reply traffic.
             payload = transport.open_challenge(type_id, json.loads(json.loads(match[2]))).payload
             if (payload.get('node') == mac and isinstance(payload.get('boot'), str)
                     and protocol.TOKEN.fullmatch(payload['boot'])):
@@ -75,12 +97,15 @@ def challenge_records(transport, type_id, raw):
 
 
 def canonical_members(own, peers, registry, records):
+    """Map reachable radio MACs to unique node identities, rejecting gaps."""
     aliases = {own: own}
     def add(alias, mac):
+        """Bind a valid alias to one canonical node or reject ambiguity."""
         if not protocol.MAC.fullmatch(alias) or aliases.get(alias, mac) != mac:
             raise ValueError('ambiguous participant identity')
         aliases[alias] = mac
     for line in registry.splitlines():
+        # Registry keys omit MAC colons. Shell quoting wraps one comma list.
         match = re.fullmatch(r'NODE_([0-9a-f]{12})_MAC_ADDRESSES=(.*)', line)
         if match:
             mac = ':'.join(match[1][i:i + 2] for i in range(0, 12, 2))
@@ -91,6 +116,7 @@ def canonical_members(own, peers, registry, records):
                 if alias:
                     add(alias, mac)
     for mac, record in records.items():
+        # Authenticated status supplies aliases before the registry catches up.
         for alias in [mac, *record.get('aliases', [])]:
             add(alias, mac)
     if any(peer not in aliases for peer in peers):
@@ -100,6 +126,7 @@ def canonical_members(own, peers, registry, records):
 
 def recovery_destination(records, local, own, excluded=(), own_size=None):
     """Choose a helper by size then MAC, ignoring expired beacons."""
+    # Callers establish freshness through timed authentication or a live nonce.
     choices = []
     for mac, record in records.items():
         channels, size = record.get('channels'), record.get('size')
@@ -111,21 +138,51 @@ def recovery_destination(records, local, own, excluded=(), own_size=None):
                 or not protocol.compatible(channels, local)
                 or not set(channels).intersection(local['current'])):
             continue
+        # A tourguide compares its pre-hop partition. Equal sizes move only
+        # toward the lower MAC so both partitions cannot swap channels.
         if own_size is not None and (size < own_size or (size == own_size and mac >= own)):
             continue
+        # Matching channels still let a searcher adopt the helper's data mode.
         if (not local.get('discovery', False)
                 and all(local['current'].get(b) == f for b, f in channels.items() if b in local['current'])):
             continue
         choices.append((-size, mac, channels))
+    # Negative size puts the largest partition first, then the lowest MAC.
     return min(choices)[2] if choices else None
 
 
+def wake_daemon(directory):
+    """Ask the run loop for an immediate pass so readiness publishes at once.
+
+    A missing, stale or reused PID is ignored. The next timed pass then
+    reads the request instead.
+    """
+    try:
+        pid = int((Path(directory) / 'manet-acs-agreement.pid').read_text())
+        # The pidfd pins the checked process: if it exits, the signal fails
+        # rather than reaching a process that reused the PID.
+        handle = os.pidfd_open(pid)
+    except (OSError, ValueError):
+        return
+    try:
+        # Signal only the run daemon. SIGUSR1 would end any other process.
+        if Path(f'/proc/{pid}/cmdline').read_bytes().endswith(b'/mesh-channel-agreement.py\0run\0'):
+            signal.pidfd_send_signal(handle, signal.SIGUSR1)
+    except OSError:
+        pass
+    finally:
+        os.close(handle)
+
+
 def boot_time():
+    """Return elapsed boot seconds, including suspend, for local deadlines."""
     return time.clock_gettime(time.CLOCK_BOOTTIME)
 
 
 class Runtime:
+    """Connect ACS agreement and recovery to radios, Alfred and local state."""
     def __init__(self):
+        """Load paths and identity, reconcile boot timers and start caches."""
         self.run_dir = Path(os.environ.get('MANET_ACS_RUN_DIR', '/run'))
         self.state_dir = Path(os.environ.get('MANET_ACS_STATE_DIR', '/var/lib/manet-acs'))
         self.roles = Path(os.environ.get('MANET_IFACE_STATE_DIR', '/var/lib'))
@@ -137,6 +194,8 @@ class Runtime:
         self.lock_path = Path(os.environ.get('MANET_ACS_LOCK_FILE', '/run/channel-election.lock'))
         self.batctl = os.environ.get('BATCTL_PATH', '/usr/sbin/batctl')
         self.transport = AdminTransport(str(self.conf), os.environ.get('MANET_ADMIN_STATE_DIR', '/var/lib/manet-admin'))
+        # The bridge MAC identifies the node across radios. The boot UUID is
+        # a 32-hex token on the wire and distinguishes local timer epochs.
         self.own = (self.sysnet / 'br0/address').read_text().strip().lower()
         self.boot = Path(os.environ.get('MANET_BOOT_ID_FILE', '/proc/sys/kernel/random/boot_id')).read_text().strip().replace('-', '')
         if not protocol.MAC.fullmatch(self.own) or not protocol.TOKEN.fullmatch(self.boot):
@@ -168,6 +227,7 @@ class Runtime:
             self.reset_timers()
         self.capabilities = {}
         self.last_publish = None
+        self.last_status = None
         self.last_probe_check = None
         self.discovery = rendezvous.Discovery(self.run_dir)
         self.rendezvous_allowed = {}
@@ -175,6 +235,7 @@ class Runtime:
         self.ui_status = {}
 
     def reset_timers(self):
+        """Discard deadlines from another boot, restarting any recovery hold."""
         if not isinstance(self.state, dict):
             raise ValueError('invalid persisted agreement state')
         if self.state.get('timer_boot') != self.boot:
@@ -188,11 +249,13 @@ class Runtime:
 
     @contextmanager
     def channel_lock(self):
+        """Hold the shared radio-operation lock or raise immediately if busy."""
         with self.lock_path.open('a') as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             yield
 
     def interfaces(self):
+        """Return enabled Wi-Fi roles with config paths and configured MHz."""
         desired = read_json(self.radio_state).get('desired', {})
         result = {}
         for band, role in [('2.4', 'mesh_24_if'), ('5', 'mesh_5_if')]:
@@ -202,9 +265,11 @@ class Runtime:
                 continue
             if not iface or desired.get(iface) == 'down':
                 continue
+            # Limit the role to a Linux interface name before using it in paths.
             if not re.fullmatch(r'[A-Za-z0-9_.-]{1,15}', iface):
                 raise ValueError('invalid mesh interface')
             path = self.wpa / f'wpa_supplicant-{iface}.conf'
+            # Read a complete numeric frequency assignment, allowing whitespace.
             match = re.search(r'^\s*frequency=(\d+)\s*$', path.read_text(), re.M)
             if not match:
                 raise ValueError('missing mesh frequency')
@@ -214,10 +279,14 @@ class Runtime:
         return result
 
     def status(self, now):
+        """Collect radio MHz, capabilities and readiness at wall time now."""
+        # Accept quoted or bare y/Y. Requests authorize only their own round.
         acs = bool(re.search(r'^acs=["\']?[yY]["\']?\s*$', self.conf.read_text(), re.M))
         requested = read_json(self.request_path).get('round') == now // protocol.ROUND_SECONDS
         current, configured_channels, allowed, stable = {}, {}, {}, True
         for band, (iface, path, configured) in self.interfaces().items():
+            # Bound iw queries to 2 s. The channel line carries actual MHz,
+            # while wiphy identifies the physical radio for capability lookup.
             info = command(['iw', 'dev', iface, 'info'], timeout=2)
             actual = re.search(r'channel.*\((\d+) MHz\)', info)
             phy = re.search(r'\bwiphy (\d+)', info)
@@ -229,18 +298,25 @@ class Runtime:
             key = (iface, band, phy[1])
             cached = self.capabilities.get(key)
             checked = time.monotonic()
+            # Refresh PHY capabilities once per monotonic minute. Live tuning
+            # is still read each pass so a pending retune cannot look stable.
             if cached is None or checked - cached[0] >= 60:
                 data = command(['iw', 'phy', 'phy' + phy[1], 'info'], timeout=2)
                 cached = (checked, sorted(rendezvous.permitted_frequencies(data)))
                 self.capabilities[key] = cached
+            # Election candidates and rendezvous channels use different sets.
             allowed[band] = [f for f in cached[1] if f in protocol.CHANNELS[band]]
             self.rendezvous_allowed[band] = [f for f in cached[1] if f in rendezvous.CHANNELS[band]]
         cooling = boot_time() < self.state.get('hold_until', 0)
+        # A plan's own busy marker must not withdraw readiness mid-agreement.
         if self.state.get('protocol', {}).get('phase') not in ('prepared', 'committed'):
             cooling |= self.busy()
         checked = time.monotonic()
+        # Cache HaLow liveness for 15 monotonic seconds between probes.
         if self.halow_health is None or checked - self.halow_health[0] >= rendezvous.HALOW_HEALTH_SECONDS:
             self.halow_health = (checked, rendezvous.halow_ready())
+        # Static and Wi-Fi-free nodes can vote without a manager request.
+        # Every voter still needs time sync and stable radio readback.
         status = {'boot': self.boot, 'acs': acs, 'ready': bool(clock_ready() and stable and (not acs or not current or (requested and not cooling))),
                   'current': current, 'allowed': allowed, 'stable': stable,
                   'halow_ready': self.halow_health[1],
@@ -252,22 +328,28 @@ class Runtime:
         return status
 
     def busy(self):
+        """Check the shared busy marker's boot and bounded expiry."""
         try:
             boot, expiry = self.busy_path.read_text().split()
+            # Match mesh-acs-common.sh: at most 125 boot seconds may remain.
             return boot == self.boot and 0 <= float(expiry) - boot_time() <= 125
         except (OSError, ValueError):
             return False
 
     def write_busy(self, expiry):
+        """Publish a boot ID and boot-clock deadline for other radio workers."""
         self.busy_path.write_text(f'{self.boot} {expiry:.6f}\n')
 
     def aliases(self):
+        """Return unique nonzero local MACs for identity mapping."""
         values = {p.read_text().strip().lower() for p in self.sysnet.glob('*/address')}
         return sorted(mac for mac in values if protocol.MAC.fullmatch(mac) and mac != '00:00:00:00:00:00')
 
     def receive(self, type_id, now):
+        """Read timed Alfred records, reusing unchanged verified content."""
         raw = command(['alfred', '-r', type_id], timeout=2)
         require_clock()
+        # Invalidate cached authentication on credential replacement or edits.
         info = self.conf.stat()
         generation = (info.st_dev, info.st_ino, info.st_mtime_ns, info.st_ctime_ns)
         cached = getattr(self, '_received', {}).get(type_id)
@@ -287,6 +369,7 @@ class Runtime:
         return records
 
     def tourguide_exclusions(self, now):
+        """List fresh peers reporting healthy HaLow for tourguide exclusion."""
         # Existing status carries this flag without a separate broadcast.
         # The caller checks local health live, including before the hop.
         try:
@@ -298,6 +381,9 @@ class Runtime:
                       and record['status'].get('halow_ready') is True)
 
     def members(self, records):
+        """Discover canonical participants across every BATMAN radio path."""
+        # Multiple routes can share an originator. Validate before deduplication
+        # so a failed or malformed query cannot imply a solo component.
         rows = json.loads(command([self.batctl, 'meshif', 'bat0', 'originators_json']))
         if not isinstance(rows, list) or any(not isinstance(r, dict) or
                 not isinstance(r.get('orig_address'), str) or
@@ -310,12 +396,15 @@ class Runtime:
         return canonical_members(self.own, peers, registry, records)
 
     def score(self, view):
+        """Score the connected view and return per-band MHz plus limp mode."""
         # One coordinator freezes the score result. Receivers never re-score it.
         env = dict(os.environ)
         # Registry RF observations include every reachable node, regardless of
         # which radio carries Alfred. Exclude cached records of departed groups.
         env['ACS_MEMBERS'] = ' '.join('NODE_' + mac.replace(':', '') for mac in view)
         for band, suffix in [('2.4', '2_4'), ('5', '5_0')]:
+            # Candidate support is the union from ready nodes. The common
+            # incumbent is the most reported MHz, breaking ties by lower MHz.
             supported = sorted({f for s in view.values() if s and s['ready'] for f in s['allowed'].get(band, [])})
             incumbents = Counter(s['current'][band] for s in view.values() if s and band in s['current'])
             incumbent = min(incumbents, key=lambda f: (-incumbents[f], f)) if incumbents else ''
@@ -324,6 +413,8 @@ class Runtime:
         fd, path = tempfile.mkstemp(dir=self.run_dir, prefix='.acs-score-')
         os.close(fd)
         try:
+            # --score writes WINNER_2_4, WINNER_5_0 and LIMP_MODE assignments
+            # to this private output path. Bound the scoring process to 15 s.
             env['OUTPUT_FILE'] = path
             subprocess.run(['bash', str(TOOLS / 'channel-election.sh'), '--score'], env=env,
                            check=True, capture_output=True, text=True, timeout=15)
@@ -340,12 +431,14 @@ class Runtime:
             Path(path).unlink(missing_ok=True)
 
     def save(self):
+        """Atomically save changed state and remember successful writes."""
         serialized = json.dumps(self.state, sort_keys=True)
         if serialized != self.persisted:
             private_json_write(self.path, self.state)
             self.persisted = serialized
 
     def apply(self, channels, limp=False, *, challenged=False, discovering=False, reason='Agreed channel plan'):
+        """Apply compatible Wi-Fi MHz, verify landing and publish the result."""
         # Clockless callers may follow a consumed nonce reply or park a
         # disconnected searcher at fixed anchors, never run a timed election.
         if not challenged and not discovering:
@@ -365,6 +458,8 @@ class Runtime:
                 continue
             iface, path, configured = interfaces[band]
             if configured != freq:
+                # Require exactly one frequency assignment. Replace the config
+                # atomically from a flushed temporary file beside it.
                 body, count = re.subn(r'(?m)^(\s*frequency=)\d+\s*$', lambda m: m[1] + str(freq), path.read_text())
                 if count != 1:
                     raise ValueError('ambiguous WPA frequency')
@@ -381,8 +476,11 @@ class Runtime:
                 changes.append((iface, freq))
         # Write every config, then start every reconfigure before polling.
         for iface, freq in changes:
+            # Clear bitrate restrictions before reconfiguration.
             command(['iw', 'dev', iface, 'set', 'bitrates'], timeout=2)
             try:
+                # A rejected or timed-out reconfigure triggers a restart,
+                # bounded to 15 s by the fallback command below.
                 answer = command(['wpa_cli', '-i', iface, 'reconfigure'], timeout=2)
                 if 'FAIL' in answer:
                     raise ValueError('supplicant rejected reconfigure')
@@ -390,7 +488,10 @@ class Runtime:
                 command(['systemctl', 'restart', f'wpa_supplicant@{iface}.service'], timeout=15)
         for iface, freq in changes:
             def landed():
+                """Match the target MHz in this interface's iw readback."""
                 return bool(re.search(r'channel.*\(' + str(freq) + r' MHz\)', command(['iw', 'dev', iface, 'info'], timeout=2)))
+            # Allow 20 reads with 0.5 s sleeps, then restart and repeat once.
+            # Command time adds to the 10 s sleep budget of each attempt set.
             for attempt in range(20):
                 if landed():
                     break
@@ -416,13 +517,16 @@ class Runtime:
         if discovering:
             print('ACS discovery channels ' + json.dumps(channels), flush=True)
             return
+        # Publish the shell consumers' election format after verified landing.
         output = Path(os.environ.get('OUTPUT_FILE', str(self.run_dir / 'mesh_channel_election')))
         output.write_text(f"WINNER_2_4={channels.get('2.4', '')}\nWINNER_5_0={channels.get('5', '')}\nLIMP_MODE={str(limp).lower()}\n")
         if changes:
+            # Retuning clears bitrate restrictions, invalidating this state.
             (self.run_dir / 'mesh_limp_mode.state').unlink(missing_ok=True)
         print('ACS applied channels ' + json.dumps(channels), flush=True)
 
     def discovery_step(self, now, local, connected):
+        """Move an isolated searcher to its permitted lobby slot when due."""
         # Any surviving BATMAN path, including HaLow, takes precedence. Hold
         # still while peers exchange a plan or bootstrap a new connected mesh.
         if not local['acs'] or not local['discovery'] or connected or self.busy():
@@ -435,11 +539,13 @@ class Runtime:
         retry = read_json(retry_path)
         if retry.get('boot') == self.boot and time.monotonic() < retry.get('after', 0):
             return False
+        # Persist a 30 s retry delay before touching radios, including failures.
         private_json_write(retry_path, {'boot': self.boot, 'after': time.monotonic() + 30})
         self.apply(targets, discovering=True)
         return True
 
     def tick(self, now):
+        """Run one pass and publish a UI snapshot even when radio work fails."""
         self.ui_status = {'clock_ready': clock_ready()}
         try:
             self._tick(now)
@@ -463,6 +569,7 @@ class Runtime:
                 pass
 
     def _tick(self, now):
+        """Advance recovery or timed agreement under the channel lock."""
         if not clock_ready():
             with self.channel_lock():
                 local = self.status(now)
@@ -493,6 +600,7 @@ class Runtime:
             try:
                 records = self.receive(74, now)
             except (OSError, subprocess.SubprocessError):
+                # Peer discovery still determines membership without status.
                 records = {}
             try:
                 members = self.members(records)
@@ -504,6 +612,7 @@ class Runtime:
                 if local['discovery'] and len(view) == 1:
                     local['ready'] = False  # A searching solo node never elects itself out of discovery.
             except (OSError, ValueError, subprocess.SubprocessError):
+                # Unknown membership defers new proposals, never implies solo.
                 view = None
             now = int(time.time())  # Discovery may time out. Refresh time.
             destinations = self.connected_destinations(view, records, local, now)
@@ -528,6 +637,7 @@ class Runtime:
                     # The proposal window is validated again after slow scoring.
                     proposal = protocol.make_plan(view, *scored, now, secrets.token_hex(16))
             fields = {mac: r.get('protocol', {}) for mac, r in records.items() if isinstance(r.get('protocol', {}), dict)}
+            # The protocol returns state to persist, wire fields and a due plan.
             updated, outgoing, plan = protocol.advance(saved, self.own, now, view, fields, proposal, local)
             self.state['protocol'] = updated
             elapsed = boot_time()
@@ -547,6 +657,7 @@ class Runtime:
                 self.state['recovered_round'] = plan['round']
                 if plan['moving']:
                     self.state['hold_until'] = elapsed + protocol.RECOVERY_SECONDS
+                # Keep a 120 s repair window if application fails after saving.
                 self.state['repair_until'] = elapsed + 120
             elif plan is not None:
                 plan = None  # A compatible static participant ACKs without applying ACS.
@@ -567,12 +678,15 @@ class Runtime:
                             or not set(p['channels']).intersection(local['current'])):
                         continue
                     entry = (p['round'], protocol.digest(p), destination)
+                    # Matching channels need only the certificate. Mismatches
+                    # need a retune before this node can advertise the plan.
                     if all(local['current'].get(b) == f for b, f in p['channels'].items() if b in local['current']):
                         learned.append(entry)
                     else:
                         candidates.append(entry)
                 if candidates:
                     apply_reason = 'Returning to the connected mesh channel plan'
+                    # Prefer the latest round, with the digest breaking ties.
                     destination = max(candidates, key=lambda c: c[:2])[2]
                     plan = destination['plan']
                     self.state.update(destination=destination, recovered_round=plan['round'],
@@ -588,6 +702,8 @@ class Runtime:
                         # authority and stop searching without reconfiguring or
                         # hopping away later.
                         plan = self.state['destination']['plan']
+            # Repair a radio still behind its saved target, only while that
+            # target remains configured and the bounded repair window is open.
             if plan is None and elapsed <= self.state.get('repair_until', -1) and elapsed >= self.state.get('retry_at', 0):
                 destination = self.state.get('destination')
                 if destination:
@@ -597,6 +713,7 @@ class Runtime:
                             and any(local['current'].get(b) != f for b, f in target.items() if b in local['current'])):
                         plan = destination['plan']
             if plan is not None:
+                # Save a 30 boot-second retry delay before any radio mutation.
                 self.state['retry_at'] = boot_time() + 30
                 self.save()
                 moved = any(local['current'].get(b, f) != f for b, f in plan['channels'].items())
@@ -604,9 +721,11 @@ class Runtime:
                 self.state.pop('repair_until', None)
                 local = self.status(int(time.time()))
                 if moved:
+                    # Suppress other channel work for 30 s while links reform.
                     self.state['settle_until'] = boot_time() + 30
                     self.write_busy(self.state['settle_until'])
                 self.save()
+                # This pass publishes post-apply status without pre-apply votes.
                 outgoing = {}
             if (plan is None and view and not self.busy()
                     and updated.get('phase') not in ('prepared', 'committed')
@@ -616,7 +735,10 @@ class Runtime:
             # Readbacks while radios are moving cannot advertise a destination.
             destination = protocol.live_destination(self.state.get('destination'), local, int(time.time()))
             checked = time.monotonic()
-            if outgoing != self.state.get('last_outgoing') or self.last_publish is None or checked - self.last_publish >= 5:
+            # A status change, such as readiness after a request wake,
+            # publishes at once instead of waiting out the 5-second refresh.
+            if (outgoing != self.state.get('last_outgoing') or local != self.last_status
+                    or self.last_publish is None or checked - self.last_publish >= 5):
                 payload = {'kind': 'acs_state', 'node': self.own, 'aliases': self.aliases(), 'status': local, 'protocol': outgoing}
                 if destination:
                     plan_id = protocol.digest(destination['plan'])
@@ -636,6 +758,7 @@ class Runtime:
                 envelope = self.transport.seal(74, payload)
                 command(['alfred', '-s', 74], input=json.dumps(envelope), timeout=2)
                 self.state['last_outgoing'] = outgoing
+                self.last_status = local
                 self.last_publish = checked
             # Recovery requests arriving over HaLow need no physical tourguide
             # visit. One reachable, compatible source replies for each request.
@@ -646,7 +769,32 @@ class Runtime:
                 destinations[self.own] = destination
                 self.answer_probes(destination['plan']['channels'], len(view), destinations)
 
+    def interval(self, now):
+        """Return seconds until the next pass from the round and plan windows.
+
+        Only a timed plan of the current round adds windows. A stale phase left
+        by a reboot or a clock step falls back to the default spacing.
+        """
+        if not clock_ready():
+            return IDLE_INTERVAL
+        start = now - now % protocol.ROUND_SECONDS
+        windows = [(begin + protocol.PROPOSE_FROM, begin + protocol.PROPOSE_UNTIL + 1)
+                   for begin in (start, start + protocol.ROUND_SECONDS)]
+        saved = self.state.get('protocol', {})
+        plan = saved.get('plan')
+        if (saved.get('phase') in ('prepared', 'committed') and isinstance(plan, dict)
+                and saved.get('round') == now // protocol.ROUND_SECONDS):
+            try:
+                deadline, activate = int(plan['deadline']), int(plan['activate_at'])
+            except (KeyError, TypeError, ValueError):
+                return IDLE_INTERVAL
+            windows.append((deadline - GUARD_SECONDS, activate + protocol.APPLY_GRACE + 1))
+        if any(begin <= now < end for begin, end in windows):
+            return ACTIVE_INTERVAL
+        return min([IDLE_INTERVAL] + [begin + WAKE_MARGIN - now for begin, _ in windows if begin > now])
+
     def connected_destinations(self, view, records, local, now):
+        """Collect validated live plans from this node and reachable peers."""
         if view is None:
             return {}
         result = {}
@@ -661,6 +809,8 @@ class Runtime:
 
     def bootstrap_select(self, local=None):
         """A cold node can follow a live reachable helper without knowing UTC."""
+        # The daemon and manager helper share one outstanding probe. Serialize
+        # nonce creation and consumption without waiting behind another caller.
         with (self.run_dir / '.acs-probe.lock').open('a') as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             if local is None:
@@ -670,16 +820,19 @@ class Runtime:
             path = self.run_dir / 'manet-acs-probe.json'
             probe = read_json(path)
             now = time.monotonic()
+            # Monotonic probe deadlines and nonces belong to one boot only.
             if probe.get('boot') != self.boot:
                 probe = {}
             if (probe.get('nonce') and not probe.get('used')
                     and 0 <= now - probe['started'] < PROBE_LIFETIME):
                 raw = command(['alfred', '-r', 77], timeout=2)
                 records = challenge_records(self.transport, 77, raw)
+                # The reply must name this node, its boot and its live nonce.
                 expected = {'boot': self.boot, 'nonce': probe['nonce']}
                 records = {mac: r for mac, r in records.items()
                            if isinstance(r.get('answers'), dict) and r['answers'].get(self.own) == expected}
                 destination = recovery_destination(records, local, self.own)
+                # Recheck after I/O so slow reads cannot extend nonce validity.
                 if destination and time.monotonic() < probe['started'] + PROBE_LIFETIME:
                     probe['used'] = True
                     private_json_write(path, probe)  # Consume before returning an actionable destination.
@@ -691,11 +844,13 @@ class Runtime:
             if not peers:
                 return None
             now = time.monotonic()
+            # Type 76 asks for a type 77 reply without updating timed history.
             probe = {'boot': self.boot, 'nonce': secrets.token_hex(16), 'started': now,
                      'next_probe': now + PROBE_INTERVAL, 'used': False}
             envelope = self.transport.seal_challenge(76, {'kind': 'acs_probe', 'node': self.own,
                 'boot': self.boot, 'nonce': probe['nonce'], 'aliases': self.aliases(),
                 'current': local['current'], 'discovery': local['discovery']})
+            # Save before sending so a reply always has a persisted challenge.
             private_json_write(path, probe)
             command(['alfred', '-s', 76], input=json.dumps(envelope), timeout=2)
             return None
@@ -713,10 +868,14 @@ class Runtime:
             return
         peers = set(command([str(TOOLS / 'mesh-peer-count.sh'), '--batctl', self.batctl, '--list'], timeout=7).split())
         previous = saved.get('answered', {}) if saved.get('boot') == self.boot else {}
+        # Keep ten monotonic minutes of answered probes from this boot.
         answered = {key: stamp for key, stamp in previous.items() if 0 <= now - stamp < 600}
         answers = {}
+        # MAC order determines selection when the reply reaches its cap.
         for mac, record in sorted(records.items()):
             nonce, aliases = record.get('nonce'), record.get('aliases')
+            # Require a live BATMAN route to the sender or one of at most 32
+            # authenticated aliases. Cached unreachable probes get no reply.
             if (mac == self.own or not isinstance(nonce, str) or not protocol.TOKEN.fullmatch(nonce)
                     or not isinstance(aliases, list) or len(aliases) > 32
                     or any(not isinstance(a, str) or not protocol.MAC.fullmatch(a) for a in aliases)
@@ -726,11 +885,14 @@ class Runtime:
                 current = record.get('current')
                 if not isinstance(current, dict) or not current:
                     continue
+                # Among plan holders sharing a band needing recovery, only the
+                # lowest MAC replies. Searchers also need matching-channel help.
                 eligible = [source for source, target in sources.items()
                             if any(b in current and (current[b] != f or record.get('discovery') is True)
                                    for b, f in target['plan']['channels'].items())]
                 if not eligible or self.own != min(eligible):
                     continue
+            # Deduplicate by requester, boot and nonce, across daemon restarts.
             key = mac + '/' + record['boot'] + '/' + nonce
             if key in answered:
                 continue
@@ -743,12 +905,15 @@ class Runtime:
         envelope = self.transport.seal_challenge(77, {'kind': 'acs_probe_reply', 'node': self.own,
             'boot': self.boot, 'channels': channels, 'size': size, 'answers': answers})
         # Bound replay-triggered traffic and saved state. A probe has no command.
+        # Keep the newest 640 entries and reserve the 5 s reply interval before
+        # publishing, so send failures still consume this batch's reply budget.
         answered = dict(sorted(answered.items(), key=lambda item: item[1], reverse=True)[:640])
         private_json_write(path, {'boot': self.boot, 'answered': answered, 'next_reply': now + 5})
         command(['alfred', '-s', 77], input=json.dumps(envelope), timeout=2)
 
 
 def main():
+    """Dispatch manager and tourguide helpers or run the agreement daemon."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action', choices=('run', 'request', 'members', 'helper-encode', 'helper-select', 'tourguide-exclusions'))
     parser.add_argument('--channels', default='{}', type=json.loads)
@@ -759,10 +924,12 @@ def main():
     args = parser.parse_args()
     if args.action == 'request':
         directory = Path(os.environ.get('MANET_ACS_RUN_DIR', '/run'))
+        # A request made before initial sync cannot authorize a timed round.
         if not clock_ready():
             (directory / 'manet-acs-request.json').unlink(missing_ok=True)
             return 0
         private_json_write(directory / 'manet-acs-request.json', {'round': int(time.time()) // protocol.ROUND_SECONDS})
+        wake_daemon(directory)
         return 0
     runtime = Runtime()
     now = int(time.time())
@@ -777,6 +944,8 @@ def main():
                 or any(b not in protocol.CHANNELS or f not in protocol.CHANNELS[b] for b, f in args.channels.items())):
             raise ValueError('invalid helper destination')
         payload = {'kind': 'acs_helper', 'node': runtime.own, 'channels': args.channels, 'size': args.size}
+        # The tourguide publishes the type 75 envelope from stdout. Clockless
+        # probe replies are a separate best-effort action during the same visit.
         print(json.dumps(runtime.transport.seal(75, payload)))
         try:
             runtime.answer_probes(args.channels, args.size)
@@ -784,6 +953,8 @@ def main():
             print('ACS bootstrap reply deferred: ' + str(exc), file=sys.stderr)
     elif args.action == 'helper-select':
         if not clock_ready():
+            # Only ordinary recovery uses a nonce before sync. A tourguide's
+            # supplied records or pre-hop channels cannot bypass timed checks.
             destination = runtime.bootstrap_select() if args.current is None and not args.stdin else None
             if destination:
                 print(str(destination.get('2.4', '')) + '|' + str(destination.get('5', '')))
@@ -796,25 +967,44 @@ def main():
         destination = recovery_destination(records, local,
                                            runtime.own, args.exclude.split(), args.size)
         if destination:
+            # Shell callers split the 2.4 GHz and 5 GHz MHz values on a pipe.
             print(str(destination.get('2.4', '')) + '|' + str(destination.get('5', '')))
     elif args.action == 'run':
+        # One daemon owns the worker and signal pipe for this state directory.
         with (runtime.state_dir / '.daemon.lock').open('a') as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             from manet_runtime import start
             start()  # Blocking worker here, without another polling loop.
+            # SIGUSR1 from the request action cuts the current sleep short. The
+            # wakeup pipe carries it to select, so the handler takes no locks.
+            wake_read, wake_write = os.pipe()
+            for descriptor in (wake_read, wake_write):
+                os.set_blocking(descriptor, False)
+            signal.signal(signal.SIGUSR1, lambda *_: None)
+            signal.set_wakeup_fd(wake_write)
+            (runtime.run_dir / 'manet-acs-agreement.pid').write_text(f'{os.getpid()}\n')
             last_error = None
             while True:
+                delay = None
                 try:
                     runtime.tick(int(time.time()))
                     last_error = None
                 except BlockingIOError:
-                    pass  # Tourguide or another local radio operation owns the lock.
+                    # Tourguide or another local radio operation owns the lock.
+                    # Retry in a second so a drained wake is not lost to it.
+                    delay = ACTIVE_INTERVAL
                 except (OSError, ValueError, TypeError, KeyError, subprocess.SubprocessError) as exc:
                     message = str(exc)
                     if message != last_error:
                         print('ACS deferred: ' + message, file=sys.stderr, flush=True)
                     last_error = message
-                time.sleep(1)
+                if delay is None:
+                    delay = runtime.interval(time.time())
+                if select.select([wake_read], [], [], delay)[0]:
+                    try:
+                        os.read(wake_read, 512)
+                    except BlockingIOError:
+                        pass
     return 0
 
 

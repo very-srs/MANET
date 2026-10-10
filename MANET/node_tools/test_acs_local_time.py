@@ -55,6 +55,20 @@ class LocalTimeTests(AcsHarness):
         with patch.object(protocol, 'advance', return_value=result):
             self.runner.tick(self.wall)
 
+    def test_readiness_change_publishes_without_waiting_for_refresh(self):
+        self.tick()
+        self.assertEqual(self.publisher.call_count, 1)
+        self.wall += 1
+        self.monotonic += 1
+        self.tick()
+        self.assertEqual(self.publisher.call_count, 1)  # Unchanged status waits.
+        self.assertTrue(self.ready())
+        self.wall += 1
+        self.monotonic += 1
+        self.tick()
+        self.assertEqual(self.publisher.call_count, 2)
+        self.assertIs(self.publisher.call_args[0][1]['status']['ready'], True)
+
     def plan(self, frequency=2462):
         plan = protocol.make_plan({OWN: status()}, {'2.4': frequency}, False,
                                   1800000045 - 7200, 'e' * 32)
