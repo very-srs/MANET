@@ -129,3 +129,9 @@ sync_alfred_command() {
     [[ "$records" == *[![:space:]]* ]] || return 0
     "$helper" sync --stdin <<< "$records"
 }
+
+# Print the separator used by login status banners.
+rule() {
+    printf '  %s\n' \
+        '────────────────────────────────────────────────────────────'
+}

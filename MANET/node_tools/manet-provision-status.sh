@@ -5,6 +5,8 @@
 # Installed as /etc/update-motd.d/50-manet-provision and runnable directly.
 # Always succeed so an incomplete setup cannot break the login banner.
 
+. "${MANET_TOOLS_DIR:-$(dirname "$(readlink -f "$0")")}/manet-common.sh"
+
 STATE_FILE="${MANET_PROVISION_STATE:-/var/lib/manet-provision.state}"
 FAIL_FILE="${MANET_PROVISION_FAILURES:-/var/lib/manet-provision.failures}"
 DONE_FILE="${MANET_PROVISION_DONE:-/var/lib/radio-setup.done}"
@@ -55,7 +57,6 @@ human_delta() {
     fi
 }
 
-rule() { printf '  %s\n' '────────────────────────────────────────────────────────────'; }
 
 # Report operator scripts from provisioning/additional-scripts/, run once by
 # manet-user-scripts.service. Their advisory status does not change the

@@ -3657,6 +3657,7 @@ ASSET_CONTENT_TYPES = {
 }
 
 def asset_content_type(path):
+    """Choose a MIME type by suffix, falling back to binary content."""
     ext = os.path.splitext(path)[1].lower()
     return ASSET_CONTENT_TYPES.get(ext, 'application/octet-stream')
 
