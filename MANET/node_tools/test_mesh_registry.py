@@ -21,6 +21,7 @@ A6 = (10 << 24) + (30 << 16) + 6   # 10.30.0.6 as an integer
 
 
 class ChunkClaimsTests(unittest.TestCase):
+    """Check registry claims and allocation against isolated node state."""
     def setUp(self):
         self.scratch = tempfile.TemporaryDirectory()
         self.addCleanup(self.scratch.cleanup)
@@ -93,11 +94,13 @@ class ChunkClaimsTests(unittest.TestCase):
         return self.claims.read_text().splitlines()
 
     def allocator(self, command, network='10.30.0.0/28', chunk_size=7):
+        """Exercise chunk selection with the shared address converter."""
         # Load only the existing function definitions, avoiding live interface
         # configuration. Exercise allocation against the registry's real output.
         source = (TOOLS / 'mesh-ip-manager.sh').read_text()
         functions = source.split('# --- Helper Functions ---\n', 1)[1]
         functions = functions.split('# --- Main Logic ---\n', 1)[0]
+        functions = f'. "{TOOLS}/manet-common.sh"\n' + functions
         # These tests exercise chunk selection only. Static-host writes have
         # their own isolated tests and must never reach the machine's /etc.
         functions += '\nupdate_avahi_host() { :; }\n'

@@ -13,6 +13,7 @@ SYSTEMD = TOOLS.parent / 'systemd'
 
 
 class PreparationTests(unittest.TestCase):
+    """Check local bridge, address and DNS preparation."""
     def setUp(self):
         scratch = tempfile.TemporaryDirectory(prefix='manet-network-prep-')
         self.addCleanup(scratch.cleanup)
@@ -126,7 +127,9 @@ if name == 'systemctl' and args == 'is-enabled dnsmasq.service':
         self.assertNotEqual(self.run_script('manet-dns-setup.sh').returncode, 0)
 
     def test_generated_dnsmasq_config_stays_current_after_lease_change(self):
+        """Refresh static DNS bindings after the local allocation changes."""
         source = (TOOLS / 'mesh-ip-manager.sh').read_text()
+        source += (TOOLS / 'manet-common.sh').read_text()
         function = '\n'.join(re.search(r'^' + name + r'\(\) \{\n.*?^\}', source, re.M | re.S)[0]
                              for name in ('ip_to_int', 'int_to_ip', 'valid_eud_gateway',
                                           'update_avahi_host', 'configure_dnsmasq', 'eud_ready', 'ensure_dnsmasq_running'))
@@ -168,7 +171,9 @@ cat /var/lib/misc/dnsmasq.leases
                     self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_existing_static_dns_binding_is_reconfigured_once(self):
+        """Reconcile a changed static DNS binding once."""
         source = (TOOLS / 'mesh-ip-manager.sh').read_text()
+        source += (TOOLS / 'manet-common.sh').read_text()
         start = source.index('                # Only reconfigure dnsmasq if the config has changed')
         end = source.index('                # The web UI is restricted', start)
         check = source[start:end]

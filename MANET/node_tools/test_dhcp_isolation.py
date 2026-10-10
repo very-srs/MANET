@@ -413,7 +413,9 @@ class AvahiTests(unittest.TestCase):
 
 
 class StaticAvahiTests(unittest.TestCase):
+    """Check generated DNS and mDNS files against isolated node state."""
     def setUp(self):
+        """Prepare isolated networking files and command fixtures."""
         scratch = tempfile.TemporaryDirectory()
         self.addCleanup(scratch.cleanup)
         self.root = Path(scratch.name)
@@ -424,6 +426,7 @@ class StaticAvahiTests(unittest.TestCase):
         self.events = self.root / 'events'
         self.pending = self.root / 'run/manet-avahi-host-reload-needed'
         source = (TOOLS / 'mesh-ip-manager.sh').read_text()
+        source += (TOOLS / 'manet-common.sh').read_text()
         self.source = source
         names = ('ip_to_int', 'int_to_ip', 'valid_eud_gateway', 'update_avahi_host',
                  'configure_dnsmasq', 'release_control_ips')
@@ -646,8 +649,11 @@ class CensusTests(unittest.TestCase):
 
 
 class ManagerRecoveryTests(unittest.TestCase):
+    """Check DHCP isolation failure and subsequent reconciliation."""
     def test_failed_isolation_stops_dhcp_and_successful_retry_reuses_pool_and_leases(self):
+        """Keep the pool and leases across a failed isolation attempt."""
         source = (TOOLS / 'mesh-ip-manager.sh').read_text()
+        source += (TOOLS / 'manet-common.sh').read_text()
         definitions = '\n'.join(re.search(r'^' + name + r'\(\) \{.*?^\}', source, re.M | re.S)[0]
                                 for name in ('ensure_dhcp_isolation', 'eud_ready', 'ensure_dnsmasq_running'))
         # Execute the real steady-state branch after its pool comparison,

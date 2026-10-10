@@ -1,4 +1,5 @@
 #!/bin/bash
+. "${MANET_TOOLS_DIR:-$(dirname "${BASH_SOURCE[0]}")}/manet-common.sh" || exit 1
 # Claim a contiguous IPv4 block for the node and its EUDs.
 # IPs 1-5 are reserved for services. Chunks start at IP 6, sized max_euds + 2:
 #   first: br0 primary for mesh traffic
@@ -92,12 +93,7 @@ ip_to_int() {
 }
 
 # Converts a 32-bit integer to an IP string
-int_to_ip() {
-    local ip_int=$1
-    printf '%d.%d.%d.%d\n' \
-        "$(( (ip_int >> 24) & 255 ))" "$(( (ip_int >> 16) & 255 ))" \
-        "$(( (ip_int >> 8) & 255 ))" "$(( ip_int & 255 ))"
-}
+
 
 # Calculate chunk IPs given a chunk number
 get_chunk_ips() {

@@ -349,5 +349,47 @@ printf 'election=%s\\n' "$LAST_ELECTION_RUN"
                     self.assertEqual((root / service).read_text(), 'run\n')
 
 
+class AddressHelperTests(unittest.TestCase):
+    """Pin conversion output at both shell consumers."""
+
+    def test_integer_addresses(self):
+        """Keep octet boundaries, signed input and arithmetic expressions."""
+        for caller in ('manet-ipcalc.sh', 'mesh-ip-manager.sh'):
+            result = subprocess.run(
+                ['bash', '-c', shell_functions(caller, ('int_to_ip',)) +
+                 '\nfor n in 0 1 255 256 167772161 4294967295 -1; do\n'
+                 'int_to_ip "$n"\ndone\nint_to_ip "1+256"\n'],
+                capture_output=True, text=True, timeout=5)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout,
+                             '0.0.0.0\n0.0.0.1\n0.0.0.255\n0.0.1.0\n'
+                             '10.0.0.1\n255.255.255.255\n255.255.255.255\n'
+                             '0.0.1.1\n')
+            self.assertEqual(result.stderr, '')
+
+    def test_arithmetic_alias(self):
+        """Pin the symbolic alias affected by a caller-local variable name."""
+        for caller in ('manet-ipcalc.sh', 'mesh-ip-manager.sh'):
+            result = subprocess.run(
+                ['bash', '-c', shell_functions(caller, ('int_to_ip',)) +
+                 '\nip_int=16909060\nint_to_ip ip_int\n'],
+                capture_output=True, text=True, timeout=5)
+            self.assertEqual((result.returncode, result.stdout, result.stderr),
+                             (0, '1.2.3.4\n', ''))
+
+    def test_ipcalc_full_output(self):
+        """Keep the complete field layout parsed by service elections."""
+        result = subprocess.run(
+            ['bash', str(TOOLS / 'manet-ipcalc.sh'), '10.30.0.7/24'],
+            capture_output=True, text=True, timeout=5)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout,
+                         'Address:   10.30.0.7\nNetmask:   255.255.255.0 = 24\n'
+                         'Network:   10.30.0.0/24\nHostMin:   10.30.0.1\n'
+                         'HostMax:   10.30.0.254\nBroadcast: 10.30.0.255\n'
+                         'Hosts/Net: 254\n')
+        self.assertEqual(result.stderr, '')
+
+
 if __name__ == '__main__':
     unittest.main()
