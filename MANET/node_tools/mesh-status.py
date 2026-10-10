@@ -68,6 +68,7 @@ from manet_radio import (
 
 REGISTRY_FILE   = "/var/run/mesh_node_registry"
 MESH_CONF_FILE  = "/etc/mesh.conf"
+# Shared transport authenticates Alfred control packages and ACKs.
 ADMIN = AdminTransport()
 # GPS freshness budget in seconds, shared with node-manager.
 # gps-reader polls every 5 s.
@@ -75,6 +76,7 @@ GPS_FIX_MAX_AGE = 60
 MESH_STATE_FILE = "/etc/mesh_ipv4_state"
 PORT            = 8080
 REFRESH_MS      = 15000   # Status page polling interval (ms)
+# Status and management routes share one node-local session cookie.
 PERF_AUTH_COOKIE = 'manet_perf_auth'
 # ManageRoutes serves this prefix on the status server's listening port.
 # Management routes require the password cookie.
@@ -96,9 +98,11 @@ def logo_asset_token():
     for path in (FER_LOGO_DARK_INK_FILE, FER_LOGO_LIGHT_INK_FILE):
         try:
             st = os.stat(path)
+            # Both theme assets contribute metadata to the cache key.
             parts.append(f'{st.st_mtime_ns}:{st.st_size}')
         except OSError:
             parts.append('missing')
+    # Eight hex digits keep asset URLs short; this is not an auth token.
     return hashlib.sha1('|'.join(parts).encode()).hexdigest()[:8]
 
 # Config / State Loaders
@@ -113,6 +117,7 @@ def load_kv_file(path):
                 if not line or line.startswith('#'):
                     continue
                 if '=' in line:
+                    # Read assignments as data; never evaluate shell text.
                     k, v = line.split('=', 1)
                     conf[k.strip()] = v.strip().strip('"\'')
     except Exception:
@@ -120,14 +125,18 @@ def load_kv_file(path):
     return conf
 
 def get_provisioned_manage_password(conf=None):
+    """Read the admin credential used by local web sessions."""
     if conf is None:
         conf = load_kv_file(MESH_CONF_FILE)
     return conf.get('admin_password', '').strip()
 
 
+# SessionStore locks credential refresh, expiry, and login throttling.
+# Password changes invalidate sessions at the next login or validation.
 WEB_SESSIONS = SessionStore(get_provisioned_manage_password)
 
 def parse_cookie_header(header):
+    """Split cookie pairs while preserving equals signs in their values."""
     cookies = {}
     if not header:
         return cookies
@@ -139,11 +148,14 @@ def parse_cookie_header(header):
     return cookies
 
 def normalize_local_redirect(target):
+    """Keep redirects on this origin and reject unsafe header characters."""
     target = str(target or '/').strip()
+    # Reject control bytes, DEL, and backslashes before emitting Location.
     if re.search(r'[\x00-\x1f\x7f\\]', target):
         return '/'
     if not target.startswith('/'):
         return '/'
+    # A scheme-relative URL would let a browser leave this node.
     if target.startswith('//'):
         return '/'
     return target
@@ -178,6 +190,8 @@ def parse_registry():
     try:
         with open(REGISTRY_FILE) as f:
             content = f.read()
+        # Match hex node IDs, uppercase field names, and quoted values.
+        # Registry shell assignments remain data, never sourced code.
         pattern = re.compile(r"NODE_([A-Fa-f0-9]+)_([A-Z0-9_]+)='([^']*)'")
         for m in pattern.finditer(content):
             nid, field, value = m.groups()
@@ -192,6 +206,7 @@ def parse_registry():
 # batctl Wrappers
 
 def norm_mac(mac):
+    """Normalize MAC case and separators for cross-source lookups."""
     return mac.lower().replace('-', ':').strip()
 
 def run_batctl_originators():
@@ -207,14 +222,18 @@ def run_batctl_originators():
     orig_map = {}  # orig_mac -> {'mbps': float, 'nexthop': str, 'iface': str}
 
     def _set_mbps(mac, mbps):
+        """Keep the largest observed throughput for each MAC."""
         if mac and (mac not in mbps_map or mbps > mbps_map[mac]):
             mbps_map[mac] = mbps
 
     try:
+        # Numeric MACs avoid name lookups; cap each BATMAN probe at 5 s.
         r = subprocess.run(['batctl', 'o', '-n'],
                            capture_output=True, text=True, timeout=5)
         orig_best = {}  # orig_mac -> (best_mbps, nexthop_mac, outgoing_iface)
         for line in r.stdout.splitlines():
+            # Match optional best-route marker, MAC, age, rate, next hop,
+            # and optional bracketed interface; ignore table headers.
             m = re.match(
                 r'[\s*]+([0-9a-f:]{17})\s+[\d.]+(?:ms|s)\s+\(\s*([\d.]+)\)\s+([0-9a-f:]{17})(?:\s+\[\s*(\S+)\s*\])?',
                 line)
@@ -223,12 +242,14 @@ def run_batctl_originators():
                 mbps    = float(m.group(2))
                 nexthop = norm_mac(m.group(3))
                 iface   = (m.group(4) or '').strip()
+                # Multiple radios may reach one originator; keep its max.
                 prev = orig_best.get(orig)
                 if prev is None or mbps > prev[0]:
                     orig_best[orig] = (mbps, nexthop, iface)
 
         for orig, (mbps, nexthop, iface) in orig_best.items():
             _set_mbps(orig, mbps)
+            # Also index the path rate by the forwarding neighbor MAC.
             if nexthop != orig:
                 _set_mbps(nexthop, mbps)
             orig_map[orig] = {'mbps': mbps, 'nexthop': nexthop, 'iface': iface}
@@ -240,6 +261,7 @@ def run_batctl_neighbors():
     """Return list of {iface, mac, mbps} from `batctl n`."""
     neighbors = []
     try:
+        # A 5 s limit bounds collection when batman-adv is unresponsive.
         r = subprocess.run(['batctl', 'n', '-n'],
                            capture_output=True, text=True, timeout=5)
         for line in r.stdout.splitlines():
@@ -259,19 +281,22 @@ def run_batctl_gateways():
     """Return list of {mac, mbps, selected} from `batctl gwl`.
 
     Format: => <gw_mac>  <age>s (  <Mbit/s>)  <nexthop_mac> [<if>]
-    Header lines and the self-node are skipped.
+    Header lines and lines without a MAC are skipped.
     """
     gateways = []
     try:
+        # Numeric output keeps gateway MACs comparable; allow up to 5 s.
         r = subprocess.run(['batctl', 'gwl', '-n'],
                            capture_output=True, text=True, timeout=5)
         for line in r.stdout.splitlines():
             # Skip header / blank lines
             if not line.strip() or line.startswith('[') or line.strip().startswith('Router'):
                 continue
+            # The arrow marks BATMAN's currently selected gateway.
             selected = line.lstrip().startswith('=>')
             # Extract first MAC on the line (the gateway's originator MAC)
             mac_m = re.search(r'([0-9a-f]{2}(?::[0-9a-f]{2}){5})', line)
+            # Parentheses hold route throughput; absence displays as zero.
             mbps_m = re.search(r'\(\s*([\d.]+)\s*\)', line)
             if mac_m:
                 gateways.append({
@@ -284,7 +309,9 @@ def run_batctl_gateways():
     return gateways
 
 def get_my_mac():
+    """Read the local bat0 MAC for registry and route matching."""
     try:
+        # Limit the sysfs subprocess to 3 s if the interface is wedged.
         r = subprocess.run(['cat', '/sys/class/net/bat0/address'],
                            capture_output=True, text=True, timeout=3)
         return norm_mac(r.stdout.strip())
@@ -292,6 +319,7 @@ def get_my_mac():
         return None
 
 def get_my_hostname():
+    """Read the local hostname, with a display fallback on failure."""
     try:
         return socket.gethostname()
     except Exception:
@@ -314,7 +342,7 @@ def get_battery():
             return data
     except Exception:
         pass
-    # The kernel power_supply fallback requires a registered I2C device.
+    # Fall back to a registered kernel battery when reader data lacks capacity.
     for root, dirs, files in os.walk('/sys/class/power_supply'):
         for d in dirs:
             cap_path  = os.path.join(root, d, 'capacity')
@@ -332,8 +360,10 @@ def get_battery():
     return None
 
 def best_orig_entry_for_node(node, orig_map):
+    """Find the highest-throughput route across a node's MAC addresses."""
     if not isinstance(node, dict):
         return None
+    # Route originators can use the primary MAC or another radio MAC.
     node_all_macs = set(node.get('all_macs', []))
     raw_mac = norm_mac(node.get('mac', ''))
     if raw_mac:
@@ -347,8 +377,10 @@ def best_orig_entry_for_node(node, orig_map):
 
 
 def resolve_hop_count(node_id, node_by_id, orig_map, mac_to_node_id, visited=None):
+    """Infer hops through known next-hop nodes, or return None."""
     if visited is None:
         visited = set()
+    # Inconsistent route snapshots can loop; stop before recursing again.
     if node_id in visited:
         return None
     visited.add(node_id)
@@ -371,6 +403,7 @@ def resolve_hop_count(node_id, node_by_id, orig_map, mac_to_node_id, visited=Non
     nexthop = norm_mac(best_entry.get('nexthop', ''))
     if not nexthop:
         return None
+    # Any MAC owned by the destination identifies a direct path.
     if nexthop in node_all_macs:
         return 1
 
@@ -378,6 +411,7 @@ def resolve_hop_count(node_id, node_by_id, orig_map, mac_to_node_id, visited=Non
     if not via_id or via_id == node_id:
         return None
 
+    # Unknown intermediate nodes leave the hop count unknown.
     via_hops = resolve_hop_count(via_id, node_by_id, orig_map, mac_to_node_id, visited)
     if via_hops is None:
         return None
@@ -388,29 +422,37 @@ def _iw_dev_info():
     # iw dev info
     iw_info = {}
     try:
+        # Bound the device dump to 5 s; missing output leaves partial data.
         r2 = subprocess.run(['iw', 'dev'], capture_output=True, text=True,
                             timeout=5)
         cur_iface = None
         for line in r2.stdout.splitlines():
+            # Interface headers start a block; following fields belong to it.
             m = re.match(r'\s+Interface (\S+)', line)
             if m:
                 cur_iface = m.group(1)
                 iw_info[cur_iface] = {}
             if cur_iface:
+                # Capture the first type word and the full SSID remainder.
                 tm = re.search(r'type (\S+)', line)
                 if tm: iw_info[cur_iface]['type'] = tm.group(1)
                 sm = re.search(r'ssid (.+)', line)
                 if sm: iw_info[cur_iface]['ssid'] = sm.group(1).strip()
+                # Parse the channel number and parenthesized MHz value.
                 fm = re.search(r'channel (\d+) \((\d+) MHz\)', line)
                 if fm:
                     iw_info[cur_iface]['channel'] = fm.group(1)
                     iw_info[cur_iface]['freq_mhz'] = fm.group(2)
+                # Preserve decimal dBm and any explicit GHz frequency.
                 pm = re.search(r'txpower ([\d.]+) dBm', line)
                 if pm: iw_info[cur_iface]['txpower_dbm'] = pm.group(1)
                 freqm = re.search(r'([\d.]+) GHz', line)
                 if freqm: iw_info[cur_iface]['freq'] = freqm.group(1)
+                # The decimal wiphy index selects the PHY capability map.
                 wm = re.search(r'wiphy (\d+)', line)
                 if wm: iw_info[cur_iface]['wiphy'] = wm.group(1)
+                # A hexadecimal wdev ID also carries the PHY in its high
+                # 32 bits, so dumps without a wiphy line still map to it.
                 dm = re.search(r'wdev (0x[0-9a-fA-F]+)', line)
                 if dm:
                     iw_info[cur_iface]['wiphy'] = str(
@@ -428,11 +470,13 @@ def _phy_bands():
     phy_band = {}  # wiphy_num_str -> '2.4 GHz' | '5 GHz'
     phy_txpower_options = {}
     try:
+        # A stalled capability query gets at most 5 s of collection time.
         r3 = subprocess.run(['iw', 'phy'], capture_output=True, text=True,
                             timeout=5)
         phy_txpower_options = parse_phy_txpower_options(r3.stdout)
         cur_phy = None
         for line in r3.stdout.splitlines():
+            # Wiphy headers scope the indented Band sections below them.
             pm = re.match(r'Wiphy phy(\d+)', line)
             if pm:
                 cur_phy = pm.group(1)
@@ -458,6 +502,7 @@ def _add_drivers_and_bands(iw_info, phy_band):
     for iname in list(iw_info.keys()):
         driver = ''
         try:
+            # Bound each driver query to 3 s; only driver: is needed.
             et = subprocess.run(['ethtool', '-i', iname], capture_output=True,
                                 text=True, timeout=3)
             for line in et.stdout.splitlines():
@@ -474,6 +519,7 @@ def _add_drivers_and_bands(iw_info, phy_band):
             freq_str = iw_info[iname].get('freq', '')
             try:
                 freq_f = float(freq_str)
+                # GHz cutoffs separate sub-GHz HaLow, 2.4 GHz, and 5 GHz.
                 if freq_f < 2.0:
                     iw_info[iname]['band_label'] = 'HaLow'
                 elif freq_f < 3.0:
@@ -483,6 +529,8 @@ def _add_drivers_and_bands(iw_info, phy_band):
             except ValueError:
                 wiphy_num = iw_info[iname].get('wiphy', '')
                 iw_info[iname]['band_label'] = phy_band.get(wiphy_num, '')
+        # Shared radio helpers keep displayed power limits and UI choices
+        # consistent with the limits enforced when applying changes.
         cap = get_iface_txpower_cap(iname)
         if cap:
             iw_info[iname]['txpower_cap_dbm'] = cap
@@ -505,9 +553,11 @@ def _bat0_slaves():
     bat0_slaves_active   = set()   # confirmed active in batctl
     bat0_slaves_inactive = set()   # Listed but inactive
     try:
+        # Bound membership collection to 5 s during mesh reconfiguration.
         bat_r = subprocess.run(['batctl', 'if'], capture_output=True,
                                text=True, timeout=5)
         for line in bat_r.stdout.splitlines():
+            # Parse name: active/inactive, not the link operstate from ip.
             m_act = re.match(r'(\S+):\s+active', line)
             m_ina = re.match(r'(\S+):\s+inactive', line)
             if m_act: bat0_slaves_active.add(m_act.group(1))
@@ -523,6 +573,7 @@ def _running_supplicants():
     # which wpa_supplicant units are running
     wpa_running = set()
     try:
+        # Limit unit enumeration to 5 s; absent matches imply no supplicant.
         sp = subprocess.run(
             ['systemctl', 'list-units', '--state=active', '--no-legend',
              'wpa_supplicant*', 'wpa_supplicant-s1g*'],
@@ -565,6 +616,8 @@ def _interface_rows(raw, iw_info, bat0_slaves_active,
         if name == 'lo':
             continue
 
+        # ip -j stores addresses per interface; omit fe80 link-local text
+        # from the panel while retaining IPv4 and other IPv6 addresses.
         addrs = [a['local'] for a in iface_data.get('addr_info', [])
                  if a.get('family') in ('inet', 'inet6')
                  and not a['local'].startswith('fe80')]
@@ -597,10 +650,14 @@ def _interface_rows(raw, iw_info, bat0_slaves_active,
                 health = 'warn'
                 faults.append('No IP assigned')
 
+        # Classify BATMAN members first, then eligible wlan candidates.
+        # Nonmembers marked AP or excluded for EUD use skip mesh checks.
         elif name in bat0_all_slaves or (
             name.startswith('wlan') and
             name not in no_mesh_ifaces and
             iw.get('type') != 'AP' and
+            # An ip master without batctl membership falls through to the
+            # other-wireless warning below instead of a mesh health row.
             name not in [d.get('ifname') for d in raw
                          if d.get('master') == 'bat0']
         ):
@@ -618,6 +675,7 @@ def _interface_rows(raw, iw_info, bat0_slaves_active,
             if iw.get('ssid'):
                 detail += f" [{iw['ssid']}]"
 
+            # Link-down outranks inactive membership, then missing bat0.
             if is_down:
                 health = 'fault'
                 faults.append(f'{name} is DOWN')
@@ -648,6 +706,7 @@ def _interface_rows(raw, iw_info, bat0_slaves_active,
         elif name.startswith(('end', 'eth', 'enp', 'ens')):
             has_gw = False
             try:
+                # A default route marks an uplink; cap each lookup at 3 s.
                 rout = subprocess.run(['ip', 'route', 'show', 'dev', name],
                                       capture_output=True, text=True, timeout=3)
                 has_gw = 'default' in rout.stdout
@@ -731,16 +790,21 @@ def get_interfaces():
     """
     ifaces = []
     try:
+        # ip JSON supplies row identity and addresses; without it there
+        # are no rows to enrich. Bound the initial dump to 5 s.
         r = subprocess.run(['ip', '-j', 'addr'], capture_output=True,
                            text=True, timeout=5)
         raw = json.loads(r.stdout)
     except Exception:
         return ifaces
 
+    # Identify drivers before Morse overrides; generic iw channels may
+    # describe the Morse compatibility mapping instead of RF channels.
     iw_info = _iw_dev_info()
     phy_band = _phy_bands()
     _add_drivers_and_bands(iw_info, phy_band)
     _add_halow_runtime(iw_info)
+    # Gather membership and exclusions before assigning interface roles.
     active, inactive, all_slaves = _bat0_slaves()
     wpa_running = _running_supplicants()
     conf = load_kv_file(MESH_CONF_FILE)
@@ -754,6 +818,7 @@ def get_connected_euds():
     """Return active {mac, ip, hostname} entries from dnsmasq leases."""
     euds = []
     now = int(time.time())
+    # dnsmasq lease locations vary; use the first readable file only.
     lease_paths = [
         '/var/lib/misc/dnsmasq.leases',
         '/tmp/dnsmasq.leases',
@@ -770,8 +835,11 @@ def get_connected_euds():
                             expiry = int(parts[0])
                         except Exception:
                             expiry = 0
+                        # Zero or malformed expiry is kept as unknown;
+                        # only a known timestamp can expire this entry.
                         if expiry and expiry < now:
                             continue
+                        # dnsmasq uses * when no hostname is available.
                         euds.append({
                             'mac':      parts[1],
                             'ip':       parts[2],
@@ -785,6 +853,7 @@ def get_connected_euds():
 
 def get_running_services():
     """Return service_name -> bool for elected/running mesh services."""
+    # Unit aliases cover differing service package names on the nodes.
     checks = {
         'mumble':   ['mumble-server', 'murmur', 'mumble'],
         'mediamtx': ['mediamtx', 'rtsp-server'],
@@ -797,6 +866,8 @@ def get_running_services():
         active = False
         for unit in unit_names:
             try:
+                # Quiet mode reports activity via exit status; allow 2 s
+                # per alias so an unavailable systemd cannot stall polls.
                 r = subprocess.run(
                     ['systemctl', 'is-active', '--quiet', unit],
                     timeout=2
@@ -810,8 +881,10 @@ def get_running_services():
     return results
 
 def get_local_uptime():
+    """Format elapsed boot time from procfs for the local detail panel."""
     try:
         with open('/proc/uptime') as f:
+            # procfs gives elapsed seconds first, then aggregate idle time.
             secs = float(f.read().split()[0])
         return fmt_uptime(secs)
     except Exception:
@@ -819,9 +892,11 @@ def get_local_uptime():
 
 
 def enrich_interfaces_with_registry_mcs(ifaces, node_data):
+    """Attach published TX/RX MCS telemetry to local interface rows."""
     if not ifaces or not isinstance(node_data, dict):
         return ifaces
 
+    # Registry fields follow the fixed wlan0/1/2 radio assignments.
     mcs_by_iface = {
         'wlan0': {
             'tx_mcs': node_data.get('WIFI_24_TX_MCS', ''),
@@ -845,6 +920,8 @@ def enrich_interfaces_with_registry_mcs(ifaces, node_data):
         iface['rx_mcs'] = extra.get('rx_mcs', '')
     return ifaces
 
+# Negative infinity forces the first power probe. HTTP callers serialize
+# local collection through STATUS_CACHE; this cache has no separate lock.
 _POWER_CACHE = {'at': float('-inf'), 'data': {'available': False}}
 
 def get_power_status():
@@ -854,10 +931,12 @@ def get_power_status():
     because every dashboard polls and power state changes slowly.
     """
     now = time.monotonic()
+    # Reuse power data for 10 s on a monotonic clock despite wall-clock sync.
     if now - _POWER_CACHE['at'] < 10:
         return _POWER_CACHE['data']
     data = {'available': False}
     try:
+        # The helper emits JSON; a 5 s timeout leaves availability false.
         out = subprocess.run(
             ['/usr/local/bin/manet-power-status.sh', '--json'],
             capture_output=True, text=True, timeout=5,
@@ -871,6 +950,7 @@ def get_power_status():
     return data
 
 def assemble_local_data():
+    """Combine live probes and registry telemetry for the local panel."""
     conf     = load_kv_file(MESH_CONF_FILE)
     state    = load_kv_file(MESH_STATE_FILE)
     hostname = get_my_hostname()
@@ -904,6 +984,7 @@ def assemble_local_data():
             _age = time.clock_gettime(time.CLOCK_BOOTTIME) - _gd['written_boot']
         else:
             _age = time.time() - _gd.get('timestamp', 0)
+        # Accept at most 5 s into the future and 60 s of fix age.
         if _gd.get('has_fix') and -5 <= _age <= GPS_FIX_MAX_AGE:
             gps = {
                 'available': True,
@@ -923,6 +1004,7 @@ def assemble_local_data():
 
     return {
         'hostname':  hostname,
+        # Require the remembered allocation on br0; omit service VIPs.
         'ip':        primary_ipv4(state, conf, next(
             (iface['addrs'] for iface in ifaces if iface['name'] == 'br0'), [])),
         'mac':       my_mac or '',
@@ -958,6 +1040,7 @@ def assemble_peer_data(peer_ip):
             except ValueError:
                 battery = None
 
+        # A published count still works when peer lease details are absent.
         try:
             eud_count = int(ndata.get('EUD_COUNT') or 0)
         except (TypeError, ValueError):
@@ -989,6 +1072,7 @@ def assemble_peer_data(peer_ip):
 
 
 def fmt_uptime(seconds):
+    """Format seconds as hours/minutes or minutes/seconds when numeric."""
     try:
         s = int(float(seconds))
         h, rem = divmod(s, 3600)
@@ -1003,9 +1087,12 @@ def fmt_uptime(seconds):
 # Access Control
 
 def is_allowed_ip(client_ip, conf):
+    """Allow loopback and the configured mesh subnet; deny invalid input."""
     if client_ip in ('127.0.0.1', '::1'):
         return True
     try:
+        # Use the configured CIDR, or the default mesh /24. Mask host bits
+        # in configuration before testing membership; no lease lookup.
         network = ipaddress.ip_network(conf.get('ipv4_network', '10.30.2.0/24'), strict=False)
         if ipaddress.ip_address(client_ip) in network:
             return True
@@ -1017,6 +1104,7 @@ def is_allowed_ip(client_ip, conf):
 # Data Assembly
 
 def assemble_debug_data():
+    """Collect route samples and registry MACs for topology diagnostics."""
     _, orig_map = run_batctl_originators()
     neighbors  = run_batctl_neighbors()
     gateways   = run_batctl_gateways()
@@ -1024,6 +1112,7 @@ def assemble_debug_data():
     debug = {
         'gateways':  gateways,
         'neighbors': neighbors,
+        # Limit the route diagnostic sample to five entries.
         'orig_map_sample': {k: v for k, v in list(orig_map.items())[:5]},
         'node_macs': {
             nid: {
@@ -1038,6 +1127,7 @@ def assemble_debug_data():
 
 
 def assemble_status_data():
+    """Combine registry nodes and BATMAN routes into the topology view."""
     conf       = load_kv_file(MESH_CONF_FILE)
     state      = load_kv_file(MESH_STATE_FILE)
     nodes_raw  = parse_registry()
@@ -1061,6 +1151,7 @@ def assemble_status_data():
     if not gateways and registry_gw_nodes:
         # Use the registry gateway with the best throughput as "selected"
         def _node_mbps(nid):
+            """Score a gateway by its first MAC with known throughput."""
             nd = nodes_raw[nid]
             for m in nd.get('MAC_ADDRESSES', '').split(','):
                 t = orig_mbps.get(norm_mac(m.strip()))
@@ -1089,6 +1180,7 @@ def assemble_status_data():
                     mbps = orig_mbps[alt]
                     break
 
+        # Hostname also identifies self while bat0 is unavailable.
         is_me = (my_mac and node_mac == my_mac) or (hostname == my_host)
         if is_me:
             mbps = None
@@ -1098,6 +1190,7 @@ def assemble_status_data():
         if is_me and local_battery and local_battery.get('percentage') is not None:
             battery = local_battery
 
+        # Neighbor and originator tables may identify different radio MACs.
         all_node_macs = [norm_mac(m) for m in ndata.get('MAC_ADDRESSES', '').split(',') if m.strip()]
         is_direct = any(m in neighbor_macs for m in all_node_macs) or node_mac in neighbor_macs
         gw_info   = gw_mac_map.get(node_mac)
@@ -1138,6 +1231,7 @@ def assemble_status_data():
             'all_macs':     [norm_mac(m) for m in ndata.get('MAC_ADDRESSES', '').split(',') if m.strip()],
             'best_link':    best_link,
             'hop_count':    None,
+            # Convert observation age to epoch seconds for the browser.
             'last_seen':    int(time.time() - observed_age(ndata)) if observed_age(ndata) is not None else 0,
         })
 
@@ -1156,6 +1250,7 @@ def assemble_status_data():
             'hop_count': None, 'last_seen': str(int(time.time())),
         })
 
+    # Self first, then descending throughput; unknown rates sort last.
     node_list.sort(key=lambda n: (not n['is_me'], -(n['mbps'] if n['mbps'] is not None else -1)))
 
     # Build topology edges from batctl o nexthop data
@@ -1223,6 +1318,7 @@ def assemble_status_data():
         inferred = set()
         for edge in list(edges):
             if edge['type'] == 'multihop' and edge['via']:
+                # Canonical endpoint order deduplicates undirected edges.
                 pair = tuple(sorted([edge['via'], edge['target']]))
                 if pair not in inferred:
                     inferred.add(pair)
@@ -1253,6 +1349,7 @@ def assemble_status_data():
 
 # HTML Pages
 
+# Shared status styles are injected once by render_status_page.
 CSS = """
 :root {
   --bg:       #ebeae8;
@@ -1540,6 +1637,13 @@ body {
 }
 """
 
+# Raw HTML keeps JavaScript escapes intact; rendering replaces tokens.
+# Polls skip hidden tabs and overlapping requests, abort at 45 s, and
+# back off 5 s after HTTP 503. Peer details refresh when opened.
+
+# Canvas coordinates include device pixel ratio, pan, and pinch zoom.
+# Each topology refresh restarts a 4 s layout; later redraws follow UI events.
+# Shared recovery code supplies the detail panel.
 STATUS_HTML = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -2647,6 +2751,7 @@ function renderPeerDrawer(d, hostname) {
 
 import hashlib
 
+# Type 70 carries encrypted config control; ACKs use CONFIG_ACK_TYPE.
 ALFRED_CONFIG_TYPE = 70
 PENDING_CONFIG_FILE = '/var/run/mesh_pending_config.json'
 ROLLBACK_STATE_FILE = '/var/lib/manet-config-rollback/state'
@@ -2656,6 +2761,8 @@ ROLLBACK_GRACE_SECONDS = 300  # mesh-config-rollback.sh GRACE_SECONDS default
 def broadcast_config_package(pkg):
     """Write an authenticated, encrypted config package to Alfred type 70."""
     try:
+        # Seal before writing to Alfred stdin; a 5 s failure is reported
+        # to the caller so staging or activation cannot report success.
         payload = json.dumps(ADMIN.seal(ALFRED_CONFIG_TYPE, pkg), separators=(',', ':'))
         r = subprocess.run(
             ['alfred', '-s', str(ALFRED_CONFIG_TYPE)],
@@ -2673,6 +2780,7 @@ def get_pending_config():
         return None
 
 def save_pending_config(pkg):
+    """Persist a staged package atomically with owner-only permissions."""
     try:
         private_json_write(PENDING_CONFIG_FILE, pkg)
         return True
@@ -2680,6 +2788,7 @@ def save_pending_config(pkg):
         return False
 
 def clear_pending_config():
+    """Remove local staging state, tolerating an absent file."""
     try:
         os.remove(PENDING_CONFIG_FILE)
     except Exception:
@@ -2691,11 +2800,15 @@ def make_config_version(config_dict):
 
 
 def authenticated_config_acks():
+    """Map hostnames to their newest authenticated config ACK versions."""
     try:
+        # Bound the ACK read to 5 s; failure means no verified ACKs.
         result = subprocess.run(['alfred', '-r', str(CONFIG_ACK_TYPE)],
                                 capture_output=True, text=True, timeout=5)
         if result.returncode != 0:
             return {}
+        # The transport decodes Alfred quoting and verifies envelopes.
+        # Messages arrive oldest first, so each hostname keeps its newest.
         return {message.payload.get('hostname'): message.payload.get('version')
                 for message in ADMIN.messages(CONFIG_ACK_TYPE, result.stdout)
                 if message.payload.get('kind') == 'config_ack'}
@@ -2723,6 +2836,7 @@ def read_rollback_state():
             boot = f.read().strip()
     except OSError:
         boot = ''
+    # Boot-relative deadlines are comparable only within the same boot.
     if boot and state.get('BOOT_ID') == boot:
         left = deadline - time.clock_gettime(time.CLOCK_BOOTTIME)
     elif state.get('REARMED') != '1':
@@ -2753,8 +2867,10 @@ def assemble_admin_status():
             'last_seen':  nd.get('LAST_SEEN_TIMESTAMP', '0'),
             'node_state': node_state(nd),
         })
+    # Stable hostname order keeps ACK rows from moving between polls.
     node_status.sort(key=lambda n: n['hostname'])
 
+    # This response includes credentials; callers must authenticate first.
     return {
         'current_config': {
             'eud':              conf.get('eud', 'wired'),
@@ -2779,7 +2895,9 @@ def assemble_admin_status():
     }
 
 def render_status_page():
+    """Fill the status template with shared scripts and runtime tokens."""
     html = STATUS_HTML
+    # Insert shared recovery helpers before substituting page settings.
     html = html.replace('__RECOVERY_JS__', RECOVERY_JS)
     html = html.replace('__CSS__',     CSS)
     html = html.replace('__REFRESH__', str(REFRESH_MS))
@@ -2795,6 +2913,7 @@ ASSET_CONTENT_TYPES = {
 }
 
 def asset_content_type(path):
+    """Choose a MIME type by suffix, falling back to binary content."""
     ext = os.path.splitext(path)[1].lower()
     return ASSET_CONTENT_TYPES.get(ext, 'application/octet-stream')
 
@@ -2802,10 +2921,12 @@ def logo_asset_file(url_path):
     """Map /assets/fer-logo-white[.png|.svg] to the installed file."""
     if not url_path.startswith('/assets/'):
         return None
+    # Resolve an allowlisted basename, never a client-supplied disk path.
     name = os.path.splitext(url_path[len('/assets/'):])[0]
     return FER_LOGO_ASSETS.get(name)
 
 def send_file_response(handler, path, content_type):
+    """Serve an installed asset with a one-hour cache, or return 404."""
     try:
         with open(path, 'rb') as f:
             body = f.read()
@@ -2817,11 +2938,14 @@ def send_file_response(handler, path, content_type):
     handler.send_response(200)
     handler.send_header('Content-Type', content_type)
     handler.send_header('Content-Length', str(len(body)))
+    # Logo URL metadata tokens invalidate this one-hour browser cache.
     handler.send_header('Cache-Control', 'public, max-age=3600')
     handler.end_headers()
     handler.wfile.write(body)
 
 def render_perf_auth_page(next_path='/', error=''):
+    """Render the management login form and escaped return path/error."""
+    # The return path is an attribute value; escape its quotes as well.
     safe_next = html.escape(next_path, quote=True)
     logo_v = logo_asset_token()
     # Report a missing provisioned admin_password before accepting a login.
@@ -2833,6 +2957,8 @@ def render_perf_auth_page(next_path='/', error=''):
     else:
         intro = 'Enter the provisioned management password to continue.'
     safe_error = html.escape(error)
+    # Theme selection runs before paint; CSS animation detects password
+    # autofill and submits once on the next animation frame.
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -3025,13 +3151,18 @@ button {{
 
 # HTTP Handler
 
+# RequestLimits validates bodies before routing and supplies bounded reads;
+# ManageRoutes supplies actions dispatched after session authentication.
 class MeshHandler(RequestLimits, ManageRoutes, http.server.BaseHTTPRequestHandler):
 
+    """Serve open status routes and session-gated management requests."""
     def log_message(self, fmt, *args):
-        # Suppress default access logs (use stderr only for errors)
+        """Suppress the base handler's access and error log messages."""
+        # BaseHTTPRequestHandler routes access and error logs here.
         pass
 
     def send_403(self):
+        """Deny a request from outside the allowed client subnet."""
         self.send_response(403)
         self.send_header('Content-Type', 'text/plain')
         self.end_headers()
@@ -3048,6 +3179,7 @@ class MeshHandler(RequestLimits, ManageRoutes, http.server.BaseHTTPRequestHandle
         self.wfile.write(body)
 
     def send_html(self, body):
+        """Send UTF-8 HTML without retaining a browser cache entry."""
         encoded = body.encode('utf-8')
         self.send_response(200)
         self.send_header('Content-Type', 'text/html; charset=utf-8')
@@ -3057,6 +3189,7 @@ class MeshHandler(RequestLimits, ManageRoutes, http.server.BaseHTTPRequestHandle
         self.wfile.write(encoded)
 
     def _send_login_throttled(self, error):
+        """Return the shared login budget's retry delay as HTTP 429."""
         data = json.dumps({'ok': False, 'error': str(error),
                            'retry_after': error.retry_after}).encode()
         self.send_response(429)
@@ -3068,10 +3201,12 @@ class MeshHandler(RequestLimits, ManageRoutes, http.server.BaseHTTPRequestHandle
         self.wfile.write(data)
 
     def send_json(self, obj, status=200):
+        """Send uncached JSON with the node's wall clock for countdowns."""
         body = json.dumps(obj, default=str).encode('utf-8')
         self.send_response(status)
         self.send_header('Content-Type', 'application/json')
         self.send_header('Content-Length', str(len(body)))
+        # Dynamic status and credentials must not persist in browser caches.
         self.send_header('Cache-Control', 'no-store')
         # The mesh's wall clock, which can differ from the browser's: a mesh
         # without GPS or internet keeps its own shared time. Pages count down
@@ -3081,21 +3216,30 @@ class MeshHandler(RequestLimits, ManageRoutes, http.server.BaseHTTPRequestHandle
         self.wfile.write(body)
 
     def read_json_body(self):
+        """Decode a bounded JSON body, treating an empty body as an object."""
+        # RequestLimits caps bodies at 64 KiB with a 10 s total deadline.
         raw = self.read_body() or b'{}'
         return json.loads(raw.decode('utf-8') or '{}')
 
     def read_form_body(self):
+        """Decode a bounded URL-encoded form, preserving empty values."""
         raw = self.read_body()
+        # Keep blank fields so login can distinguish empty form values.
         return parse_qs(raw.decode('utf-8'), keep_blank_values=True)
 
     def _perf_cookie_token(self):
+        """Extract this browser's management session token."""
         cookies = parse_cookie_header(self.headers.get('Cookie', ''))
         return cookies.get(PERF_AUTH_COOKIE, '')
 
     def _perf_cookie_valid(self):
+        """Validate the token against current credentials and session expiry."""
         return WEB_SESSIONS.valid(self._perf_cookie_token())
 
     def _set_perf_cookie(self, token):
+        """Set the shared management cookie for the server session lifetime."""
+        # Root scope shares login across /manage and /api/admin. HttpOnly
+        # hides the cookie from scripts; SameSite limits cross-site use.
         self.send_header(
             'Set-Cookie',
             f'{PERF_AUTH_COOKIE}={token}; Path=/; Max-Age={WEB_SESSIONS.lifetime}; '
@@ -3103,7 +3247,9 @@ class MeshHandler(RequestLimits, ManageRoutes, http.server.BaseHTTPRequestHandle
         )
 
     def _send_perf_cookie_redirect(self, target_path, token):
+        """Set the login cookie and redirect the browser to a local GET."""
         target_path = normalize_local_redirect(target_path)
+        # POST/redirect/GET avoids resubmitting the password on refresh.
         self.send_response(303)
         self.send_header('Location', target_path or MANAGE_PREFIX + '/')
         self.send_header('Cache-Control', 'no-store')
@@ -3112,6 +3258,7 @@ class MeshHandler(RequestLimits, ManageRoutes, http.server.BaseHTTPRequestHandle
         self.end_headers()
 
     def _send_perf_login_json(self, token):
+        """Return the new session token and set its browser cookie."""
         body = json.dumps({'ok': True, 'token': token,
                            'expires_in': WEB_SESSIONS.lifetime}).encode('utf-8')
         self.send_response(200)
@@ -3123,6 +3270,7 @@ class MeshHandler(RequestLimits, ManageRoutes, http.server.BaseHTTPRequestHandle
         self.wfile.write(body)
 
     def _send_perf_auth_required(self, next_path='/', error=''):
+        """Return the login form as HTTP 401 with a local return path."""
         next_path = normalize_local_redirect(next_path)
         body = render_perf_auth_page(next_path=next_path, error=error).encode('utf-8')
         self.send_response(401)
@@ -3133,6 +3281,7 @@ class MeshHandler(RequestLimits, ManageRoutes, http.server.BaseHTTPRequestHandle
         self.wfile.write(body)
 
     def _send_perf_logout_redirect(self):
+        """Revoke this session, clear its cookie, and return to login."""
         WEB_SESSIONS.logout(self._perf_cookie_token())
         self.send_response(303)
         self.send_header('Location', MANAGE_PREFIX + '/login')
@@ -3142,12 +3291,14 @@ class MeshHandler(RequestLimits, ManageRoutes, http.server.BaseHTTPRequestHandle
         self.end_headers()
 
     def _send_redirect(self, location):
+        """Redirect to a caller-supplied location with an empty response."""
         self.send_response(302)
         self.send_header('Location', location)
         self.send_header('Content-Length', '0')
         self.end_headers()
 
     def _is_manage_path(self, path):
+        """Match the management prefix only at a path boundary."""
         return path == MANAGE_PREFIX or path.startswith(MANAGE_PREFIX + '/')
 
     def _handle_manage(self, parsed):
@@ -3159,11 +3310,13 @@ class MeshHandler(RequestLimits, ManageRoutes, http.server.BaseHTTPRequestHandle
         if path in (MANAGE_PREFIX + '/logout', '/auth/perf-logout'):
             self._send_perf_logout_redirect()
             return
+        # Both form-login aliases share session expiry and failure limits.
         if path in (MANAGE_PREFIX + '/login', '/auth/perf-login'):
             if self.command == 'POST':
                 form = self.read_form_body()
                 password = (form.get('password', [''])[0] or '').strip()
                 next_path = normalize_local_redirect((form.get('next', [''])[0] or '').strip())
+                # Login destinations remain within the management UI.
                 if not self._is_manage_path(next_path):
                     next_path = MANAGE_PREFIX + '/'
                 try:
@@ -3215,27 +3368,33 @@ class MeshHandler(RequestLimits, ManageRoutes, http.server.BaseHTTPRequestHandle
                 self.end_headers()
                 return
             handler()
+        # Restore the public path even when a mixin handler raises.
         finally:
             self.path = original
 
     def do_GET(self):
+        """Translate status-collection contention into an HTTP 503 response."""
         try:
             self._do_GET()
         except Busy as exc:
             self.send_busy(exc)
 
     def send_busy(self, error):
+        """Return HTTP 503 with a five-second browser retry delay."""
         body = json.dumps({'error': str(error)}).encode()
         self.send_response(503)
         self.send_header('Content-Type', 'application/json')
         self.send_header('Content-Length', str(len(body)))
         self.send_header('Cache-Control', 'no-store')
+        # Match the browser's 5 s backoff when collection or writes are busy.
         self.send_header('Retry-After', '5')
         self.end_headers()
         self.wfile.write(body)
 
     def _do_GET(self):
+        """Route reads through asset, subnet, and management access gates."""
         parsed = urlparse(self.path)
+        # Allowlisted static logos are served before the subnet gate.
         logo_file = logo_asset_file(parsed.path)
         if logo_file:
             send_file_response(self, logo_file, asset_content_type(logo_file))
@@ -3244,7 +3403,7 @@ class MeshHandler(RequestLimits, ManageRoutes, http.server.BaseHTTPRequestHandle
         conf       = load_kv_file(MESH_CONF_FILE)
         client_ip  = self.client_address[0]
 
-        # Allow only localhost and clients holding a mesh DHCP lease.
+        # Allow loopback and the configured mesh subnet, without lease checks.
         if not is_allowed_ip(client_ip, conf):
             self.send_403()
             return
@@ -3253,6 +3412,8 @@ class MeshHandler(RequestLimits, ManageRoutes, http.server.BaseHTTPRequestHandle
             self._handle_manage(parsed)
             return
 
+        # Status endpoints accept trailing slashes; management uses its
+        # original path so query strings survive login and dispatch.
         path = parsed.path.rstrip('/') or '/'
 
         # Redirect the config form to the management UI Node config tab.
@@ -3265,6 +3426,8 @@ class MeshHandler(RequestLimits, ManageRoutes, http.server.BaseHTTPRequestHandle
 
         elif path == '/api/data':
             try:
+                # Fixed keys share results for 5 s and cap concurrent
+                # collections at two across all requesting clients.
                 data = STATUS_CACHE.get('status', assemble_status_data)
                 self.send_json(data)
             except Busy:
@@ -3287,6 +3450,8 @@ class MeshHandler(RequestLimits, ManageRoutes, http.server.BaseHTTPRequestHandle
                 self.wfile.write(str(e).encode())
 
         elif path.startswith('/api/peer/'):
+            # The IP selects a registry record; it never starts a peer HTTP
+            # request or creates a client-controlled status cache key.
             peer_ip = path[len('/api/peer/'):]
             try:
                 ipaddress.ip_address(peer_ip)
@@ -3320,6 +3485,8 @@ class MeshHandler(RequestLimits, ManageRoutes, http.server.BaseHTTPRequestHandle
                 self.send_401_json()
                 return
             try:
+                # Check auth before cache access; ACK progress uses a 2 s TTL.
+                # Copy before adding request data to the shared cache value.
                 data = dict(STATUS_CACHE.get('admin', assemble_admin_status, ttl=2))
                 data['my_hostname'] = get_my_hostname()
                 self.send_json(data)
@@ -3336,6 +3503,7 @@ class MeshHandler(RequestLimits, ManageRoutes, http.server.BaseHTTPRequestHandle
             self.wfile.write(b'Not found')
 
     def do_DELETE(self):
+        """Route management deletions through subnet and session checks."""
         parsed = urlparse(self.path)
         conf   = load_kv_file(MESH_CONF_FILE)
         if not is_allowed_ip(self.client_address[0], conf):
@@ -3350,8 +3518,10 @@ class MeshHandler(RequestLimits, ManageRoutes, http.server.BaseHTTPRequestHandle
         self.wfile.write(b'Not found')
 
     def do_POST(self):
+        """Serialize management changes and expire cached observations."""
         path = urlparse(self.path).path
         changing = (path.startswith('/manage/api/') or path.startswith('/api/admin/'))
+        # One writer at a time; reject contention without blocking a worker.
         if changing and not MANAGEMENT_WRITE.acquire(blocking=False):
             self.send_busy('Another management change is running; retry when it finishes')
             return
@@ -3359,10 +3529,13 @@ class MeshHandler(RequestLimits, ManageRoutes, http.server.BaseHTTPRequestHandle
             self._do_POST()
         finally:
             if changing:
+                # Even failed changes can apply partially; expire readings
+                # before another writer enters and always release the lock.
                 STATUS_CACHE.invalidate()
                 MANAGEMENT_WRITE.release()
 
     def _do_POST(self):
+        """Handle login and authenticated config transaction requests."""
         conf      = load_kv_file(MESH_CONF_FILE)
         client_ip = self.client_address[0]
         parsed    = urlparse(self.path)
@@ -3376,8 +3549,10 @@ class MeshHandler(RequestLimits, ManageRoutes, http.server.BaseHTTPRequestHandle
             return
 
         path      = parsed.path.rstrip('/') or '/'
+        # Bounded body reads also apply to login and config API requests.
         body = self.read_body() or b'{}'
 
+        # JSON login shares the form-login session store and throttle.
         if path == '/api/perf-auth':
             try:
                 req = json.loads(body)
@@ -3412,11 +3587,15 @@ class MeshHandler(RequestLimits, ManageRoutes, http.server.BaseHTTPRequestHandle
                 if not isinstance(config, dict):
                     self.send_json({'ok': False, 'error': 'Config must be an object'}, 400)
                     return
+                # Validate actual changes; untouched fields need not pass
+                # current validation when editing an unrelated setting.
                 config = submitted_changes(config, conf)
                 ok, why = validate_config(config, current=conf, local=True) if config else (True, '')
                 if not ok:
                     self.send_json({'ok': False, 'error': why}, 400)
                     return
+                # Check mesh clock readiness before any local side effects
+                # when a form also contains changes for the whole mesh.
                 if mesh_changes(config, conf):
                     require_clock()
 
@@ -3424,6 +3603,8 @@ class MeshHandler(RequestLimits, ManageRoutes, http.server.BaseHTTPRequestHandle
                 if applied_local:
                     apply_local_settings(applied_local, MESH_CONF_FILE)
 
+                # AP and EUD settings stay local and apply immediately.
+                # Only mesh settings enter the authenticated Alfred package.
                 mesh_cfg = strip_local_keys(config)
                 if not mesh_changes(config, conf):
                     self.send_json({
@@ -3433,6 +3614,8 @@ class MeshHandler(RequestLimits, ManageRoutes, http.server.BaseHTTPRequestHandle
                     })
                     return
 
+                # SSID, key, or CIDR changes can disconnect peers and need
+                # the rollback policy carried with the staged package.
                 # Detect dangerous fields
                 cur_ssid = conf.get('mesh_ssid', '')
                 cur_key  = conf.get('mesh_key', '')
@@ -3456,6 +3639,8 @@ class MeshHandler(RequestLimits, ManageRoutes, http.server.BaseHTTPRequestHandle
                 if not broadcast_config_package(pkg):
                     self.send_json({'ok': False, 'error': 'Cannot publish an authenticated admin change. Check the admin password and node setup log.'})
                     return
+                # Persist only after publication succeeds; activation reads
+                # this exact version from the local staging file.
                 if not save_pending_config(pkg):
                     self.send_json({'ok': False, 'error': 'Cannot save pending configuration'})
                     return
@@ -3485,6 +3670,8 @@ class MeshHandler(RequestLimits, ManageRoutes, http.server.BaseHTTPRequestHandle
                     return
 
                 # Check all nodes have ACKed (unless force)
+                # Force bypasses missing ACKs, not authentication or clock
+                # readiness. Every registry node participates in this check.
                 if not force:
                     nodes_raw = parse_registry()
                     version   = pkg['version']
@@ -3501,6 +3688,8 @@ class MeshHandler(RequestLimits, ManageRoutes, http.server.BaseHTTPRequestHandle
                         })
                         return
 
+                # Leave a one-minute delivery window for Alfred replication
+                # before nodes apply against their shared mesh clock.
                 # Set activate_at to now + 60 seconds
                 activate_at = int(time.time()) + 60
                 pkg['activate_at'] = activate_at
@@ -3548,6 +3737,7 @@ class MeshHandler(RequestLimits, ManageRoutes, http.server.BaseHTTPRequestHandle
 # Entry Point
 
 class ThreadedServer(BoundedHTTPServer):
+    """Use the shared bounded worker pool for concurrent HTTP clients."""
     pass
 
 if __name__ == '__main__':
@@ -3558,6 +3748,8 @@ if __name__ == '__main__':
     port = args.port
     if not 1 <= port <= 65535:
         parser.error('port must be between 1 and 65535')
+    # Bind IPv4 on all interfaces; route handlers enforce the client subnet.
+    # The shared server permits eight workers with 10 s socket read limits.
     try:
         server = ThreadedServer(('0.0.0.0', port), MeshHandler)
     except OSError as error:
