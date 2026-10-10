@@ -186,9 +186,9 @@ else:
         local = self.runner.status(self.base + 270)
         channels = dict(local['current'])
         records = {PEER: {'channels': channels, 'size': 3}}
-        self.assertEqual(runtime.recovery_destination(records, local, self.base + 270, OWN), channels)
+        self.assertEqual(runtime.recovery_destination(records, local, OWN), channels)
         local['discovery'] = False
-        self.assertIsNone(runtime.recovery_destination(records, local, self.base + 270, OWN))
+        self.assertIsNone(runtime.recovery_destination(records, local, OWN))
 
     def test_searcher_cannot_advertise_old_certificate_while_visiting_its_frequency(self):
         self.tick(270, {})

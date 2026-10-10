@@ -40,7 +40,7 @@ collect_radio_mcs() {
     WLAN0_TX_MCS=""; WLAN0_RX_MCS=""
     WLAN1_TX_MCS=""; WLAN1_RX_MCS=""
     WLAN2_TX_MCS=""; WLAN2_RX_MCS=""
-    WLAN0_MCS_PEER=""; WLAN1_MCS_PEER=""; WLAN2_MCS_PEER=""
+    WLAN2_MCS_PEER=""
     [ -x "$HALOW_MCS_SUMMARY" ] || return 0
     for iface in wlan0 wlan1 wlan2; do
         [ -d "/sys/class/net/$iface" ] || continue

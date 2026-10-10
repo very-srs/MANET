@@ -98,7 +98,7 @@ def canonical_members(own, peers, registry, records):
     return sorted({own, *(aliases[p] for p in peers)})
 
 
-def recovery_destination(records, local, now, own, excluded=(), own_size=None):
+def recovery_destination(records, local, own, excluded=(), own_size=None):
     """Choose a helper by size then MAC, ignoring expired beacons."""
     choices = []
     for mac, record in records.items():
@@ -309,7 +309,7 @@ class Runtime:
         registry = self.registry.read_text() if self.registry.exists() else ''
         return canonical_members(self.own, peers, registry, records)
 
-    def score(self, view, local):
+    def score(self, view):
         # One coordinator freezes the score result. Receivers never re-score it.
         env = dict(os.environ)
         # Registry RF observations include every reachable node, regardless of
@@ -522,7 +522,7 @@ class Runtime:
             if (view and protocol.coordinator(view) == self.own
                     and protocol.PROPOSE_FROM <= now % protocol.ROUND_SECONDS <= protocol.PROPOSE_UNTIL
                     and (saved.get('round', -1) < now // protocol.ROUND_SECONDS or saved.get('phase') == 'idle')):
-                scored = self.score(view, local)
+                scored = self.score(view)
                 if scored:
                     now = int(time.time())
                     # The proposal window is validated again after slow scoring.
@@ -679,7 +679,7 @@ class Runtime:
                 expected = {'boot': self.boot, 'nonce': probe['nonce']}
                 records = {mac: r for mac, r in records.items()
                            if isinstance(r.get('answers'), dict) and r['answers'].get(self.own) == expected}
-                destination = recovery_destination(records, local, 0, self.own)
+                destination = recovery_destination(records, local, self.own)
                 if destination and time.monotonic() < probe['started'] + PROBE_LIFETIME:
                     probe['used'] = True
                     private_json_write(path, probe)  # Consume before returning an actionable destination.
@@ -793,7 +793,7 @@ def main():
         if args.current is not None:
             local['current'] = args.current  # Pre-hop channels, still checked against local capabilities.
             local['discovery'] = False  # Comparing established partitions, not adopting a search channel.
-        destination = recovery_destination(records, local, now,
+        destination = recovery_destination(records, local,
                                            runtime.own, args.exclude.split(), args.size)
         if destination:
             print(str(destination.get('2.4', '')) + '|' + str(destination.get('5', '')))

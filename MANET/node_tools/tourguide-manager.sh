@@ -15,7 +15,6 @@ WPA_IFACE_2_4=""
 WPA_IFACE_5_0=""
 WPA_CONF_2_4=""
 WPA_CONF_5_0=""
-HELPER_STALE_SECONDS=300  # Ignore foreign helper beacons older than this
 ENCODER_PATH="/usr/local/bin/encoder.py"
 BATCTL_PATH="/usr/sbin/batctl"
 PEER_COUNTER="${MANET_TOOLS_DIR:-$(dirname "${BASH_SOURCE[0]}")}/mesh-peer-count.sh"
@@ -157,13 +156,6 @@ IFS='|' read -r SLOT_BAND LOBBY_FREQ <<< "$SLOT"
 if ! python3 "$RENDEZVOUS_TOOL" permitted "$TOURGUIDE_RADIO" "$LOBBY_FREQ"; then
     log "Scheduled rendezvous frequency $LOBBY_FREQ unavailable. Skipping this slot."
     exit 0
-fi
-
-# Read last tourguide state
-LAST_TOURGUIDE_TIME=0
-LAST_TOURGUIDE_RADIO=""
-if [ -f /var/run/tourguide_state ]; then
-    source /var/run/tourguide_state
 fi
 
 ELECTED_TOURGUIDE=$(elect_tourguide "$MY_MAC") || {

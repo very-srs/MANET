@@ -289,14 +289,14 @@ class RuntimeTests(AcsHarness):
         records = {PEER: {'channels': {'2.4': 2462}, 'size': 3},
                    THIRD: {'channels': {'2.4': 2437}, 'size': 5}}
         local = status(current={'2.4': 2412})
-        self.assertEqual(runtime.recovery_destination(records, local, 0, OWN), {'2.4': 2437})
-        self.assertEqual(runtime.recovery_destination(records, local, 0, OWN, [THIRD]), {'2.4': 2462})
-        self.assertIsNone(runtime.recovery_destination(records, local, 0, OWN, [THIRD], 4))
+        self.assertEqual(runtime.recovery_destination(records, local, OWN), {'2.4': 2437})
+        self.assertEqual(runtime.recovery_destination(records, local, OWN, [THIRD]), {'2.4': 2462})
+        self.assertIsNone(runtime.recovery_destination(records, local, OWN, [THIRD], 4))
 
     def test_equal_partition_tie_has_exactly_one_mover(self):
         for own, other, moves in [(OWN, PEER, False), (PEER, OWN, True)]:
             choice = runtime.recovery_destination({other: {'channels': {'2.4': 2462}, 'size': 2}},
-                                                 status(), 0, own, (), 2)
+                                                 status(), own, (), 2)
             self.assertEqual(choice is not None, moves)
 
     def test_failed_peer_query_is_not_a_solo_proposal(self):

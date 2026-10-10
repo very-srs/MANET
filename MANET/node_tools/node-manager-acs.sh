@@ -8,7 +8,6 @@
 CONTROL_IFACE="br0"
 ALFRED_IDENTITY_TYPE=67
 ALFRED_DATA_TYPE=68
-ALFRED_HELPER_TYPE=69
 MONITOR_INTERVAL=15
 STARTUP_MONITOR_INTERVAL=1
 
@@ -44,7 +43,6 @@ TOURGUIDE_MANAGER="/usr/local/bin/tourguide-manager.sh"
 QUORUM_CHECKER="/usr/local/bin/quorum-checker.sh"
 LIMP_MODE_MANAGER="/usr/local/bin/limp-mode-manager.sh"
 ELECTION_OUTPUT_FILE="/var/run/mesh_channel_election"
-REGISTRY_STATE_FILE="/var/run/mesh_node_registry"
 ENCODER_PATH="/usr/local/bin/encoder.py"
 BATCTL_PATH="/usr/sbin/batctl"
 PEER_COUNTER="$(dirname "${BASH_SOURCE[0]}")/mesh-peer-count.sh"
@@ -55,7 +53,6 @@ CONFIG_ROLLBACK="/usr/local/bin/mesh-config-rollback.sh"
 HALOW_MCS_SUMMARY="/usr/local/bin/halow-mcs-summary.py"
 
 # --- State Variables ---
-LAST_PUBLISHED_PAYLOAD=""
 # Use boot-clock MONO from uptime_now for local timers, unaffected by time
 # sync steps. NEVER places an unset timer far enough back to be due at once.
 NEVER=-1000000
@@ -70,7 +67,6 @@ LAST_ACK_PUBLISHED=""
 SYNCTHING_ID=""
 IDENTITY_PUBLISH_INTERVAL=270
 CACHED_SCAN_REPORT_JSON="{}"
-LAST_SCAN_COMPLETE_TIME=0
 LOBBY_ENTERED_TIME=0
 BOOTSTRAP_START_WINDOW=-1
 LOBBY_SOLO_LOGGED=false
@@ -490,7 +486,7 @@ while true; do
         CLOCK_READY_SEEN=true
         LAST_ACTION_WINDOW=()
         LAST_PUBLISH_TIME=$NEVER; LAST_IDENTITY_PUBLISH=$NEVER; LAST_GW_CHECK=$NEVER
-        LAST_SCAN_COMPLETE_TIME=0; CACHED_SCAN_REPORT_JSON="{}"
+        CACHED_SCAN_REPORT_JSON="{}"
         LOBBY_ENTERED_TIME=0; BOOTSTRAP_START_WINDOW=-1
         log "Initial time sync complete; restarting discovery and ACS scheduling."
     fi
@@ -600,7 +596,6 @@ while true; do
         if [ "$BOOTSTRAPPING" = true ] && ! acs_agreement_busy && should_perform_action "SCAN" 180 10; then
             log "=== LOBBY BOOTSTRAP SCAN ==="
             CACHED_SCAN_REPORT_JSON=$(perform_scan)
-            LAST_SCAN_COMPLETE_TIME=$NOW
         fi
 
         # === PUBLISH STATUS (so other nodes can see us) ===
@@ -690,7 +685,6 @@ while true; do
 
             if [ -n "$CURRENT_PAYLOAD" ]; then
                 printf '%s' "$CURRENT_PAYLOAD" | alfred -s $ALFRED_DATA_TYPE
-                LAST_PUBLISHED_PAYLOAD="$CURRENT_PAYLOAD"
                 LAST_PUBLISH_TIME=$MONO
             fi
         fi
@@ -747,11 +741,8 @@ while true; do
         if ! acs_agreement_busy && should_perform_action "SCAN" 180 10; then
             log "=== SCAN ==="
             SCAN_REPORT_JSON=$(perform_scan)
-            LAST_SCAN_COMPLETE_TIME=$NOW
-            SCAN_DATA_AVAILABLE=true
             CACHED_SCAN_REPORT_JSON="$SCAN_REPORT_JSON"
         else
-            SCAN_DATA_AVAILABLE=false
             SCAN_REPORT_JSON="$CACHED_SCAN_REPORT_JSON"
         fi
 
@@ -837,7 +828,6 @@ while true; do
 
             if [ -n "$CURRENT_PAYLOAD" ]; then
                 printf '%s' "$CURRENT_PAYLOAD" | alfred -s $ALFRED_DATA_TYPE
-                LAST_PUBLISHED_PAYLOAD="$CURRENT_PAYLOAD"
                 LAST_PUBLISH_TIME=$MONO
             fi
         fi

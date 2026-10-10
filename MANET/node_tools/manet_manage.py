@@ -23,8 +23,6 @@ Routes (relative to /manage):
   POST /api/uplink/wifi         - Set USB Wi-Fi uplink credentials (all nodes)
 """
 
-import http.server
-import socketserver
 import json
 import subprocess
 import re
@@ -37,10 +35,9 @@ import io
 import shutil
 import hashlib
 import urllib.request
-import ipaddress
 import secrets
 from pathlib import Path
-from datetime import datetime, timezone
+from datetime import datetime
 from urllib.parse import urlparse, unquote
 
 from manet_web_limits import STATUS_CACHE, Busy
@@ -51,13 +48,12 @@ from manet_measurement_storage import check_capacity, save_result
 from manet_admin import AdminTransport, new_version
 from manet_radio import (HALOW_POWER_FIXED, is_halow_iface,
                         halow_bandwidth_for_channel, halow_channel_for_frequency,
-                        halow_channel_options, validate_wifi_channel, acs_enabled)
+                        halow_channel_options, validate_wifi_channel)
 
 MESH_CONF_FILE  = '/etc/mesh.conf'
 MESH_STATE_FILE = '/etc/mesh_ipv4_state'
 REGISTRY_FILE   = '/var/run/mesh_node_registry'
 SESSIONS_DIR    = '/var/log/manet-measurements'
-CONTROL_PORT    = 80  # mesh-status.py port on each node
 ALFRED_RADIO_TYPE = 71
 ALFRED_RADIO_ACK_TYPE = 72
 ADMIN = AdminTransport()
@@ -127,9 +123,6 @@ def load_kv_file(path):
     except Exception:
         pass
     return conf
-
-def norm_mac(mac):
-    return mac.lower().replace('-', ':').strip()
 
 def get_my_hostname():
     try:
@@ -460,7 +453,7 @@ def fmt_uptime(seconds):
     return f'{d}d{rh:02d}h'
 
 
-def get_session_hop_count(src_ip, dst_ip):
+def get_session_hop_count(dst_ip):
     """Return hops to dst from the local BATMAN table used by measurements."""
     if not dst_ip:
         return None, 'missing'
@@ -596,9 +589,6 @@ def txpower_choices_from_cap(cap_dbm):
     return [str(v) for v in range(cap, 0, -1)]
 
 
-def txpower_options_for_iface(iface, cap_dbm, current_dbm=''):
-    return txpower_choices_from_cap(cap_dbm)
-
 def get_iface_txpower_cap(iface):
     try:
         r = subprocess.run(['iw', 'dev', iface, 'info'], capture_output=True, text=True, timeout=5)
@@ -676,7 +666,7 @@ def radio_target_for_node(node_ip):
                 return [host]
     raise ValueError(f'Unknown node IP {node_ip}')
 
-def make_radio_version(pkg):
+def make_radio_version():
     return new_version()
 
 def radio_ack_snapshot(version):
@@ -752,7 +742,7 @@ def coordinate_radio_change(actions, node_ip='all'):
         'targets': targets,
     }
     pkg.update(actions)
-    pkg['version'] = make_radio_version(pkg)
+    pkg['version'] = make_radio_version()
 
     ok, error = send_alfred_object(ALFRED_RADIO_TYPE, pkg)
     if not ok:
@@ -813,7 +803,7 @@ def get_iw_info(iface):
     cap = get_iface_txpower_cap(iface)
     if cap:
         info['txpower_cap_dbm'] = cap
-        info['txpower_options_dbm'] = txpower_options_for_iface(iface, cap, info.get('txpower_dbm', ''))
+        info['txpower_options_dbm'] = txpower_choices_from_cap(cap)
     else:
         info['txpower_options_dbm'] = []
 
@@ -1124,7 +1114,6 @@ def run_measurement_session(label, pairs, tests, duration, udp_bitrate):
         total = len(pairs) * len(tests)
 
         for pair in pairs:
-            src_ip   = pair['src_ip']
             dst_ip   = pair['dst_ip']
             src_name = pair['src_name']
             dst_name = pair['dst_name']
@@ -1165,7 +1154,7 @@ def run_measurement_session(label, pairs, tests, duration, udp_bitrate):
                     'hop_count':        None,
                     'hop_count_source': '',
                 }
-                hop_count, hop_source = get_session_hop_count(src_ip, dst_ip)
+                hop_count, hop_source = get_session_hop_count(dst_ip)
                 result_record['hop_count'] = hop_count
                 result_record['hop_count_source'] = hop_source
 

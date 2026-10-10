@@ -17,7 +17,7 @@ import sys
 import time
 
 from mesh_config import (strip_local_keys, valid_value, validate_config,
-                         SAFE_KEYS, DANGEROUS_KEYS, MESH_KEYS)
+                         DANGEROUS_KEYS)
 from manet_admin import AdminTransport, CONFIG_ACK_TYPE, private_json_write
 
 ALFRED_CONFIG_TYPE = 70
@@ -35,10 +35,6 @@ APPLY_COMMAND = ["systemd-run", "--unit=mesh-config-apply", "--wait", "--collect
 ROLLBACK_SCRIPT = "/usr/local/bin/mesh-config-rollback.sh"
 LOG_FILE = "/var/log/mesh-config-sync.log"
 ADMIN = AdminTransport()
-
-# Only mesh-wide keys may be carried. Strip per-node EUD/AP settings.
-ALLOWED_KEYS = tuple(MESH_KEYS)
-
 
 def log(msg):
     line = f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] CONFIG-SYNC: {msg}"

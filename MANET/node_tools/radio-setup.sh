@@ -373,7 +373,6 @@ REGULATORY_DOMAIN=$(grep "^regulatory_domain=" /etc/mesh.conf 2>/dev/null | cut 
 REGULATORY_DOMAIN=${REGULATORY_DOMAIN:-US}  # Default to US if not found
 HALOW_REGULATORY_DOMAIN=$(grep "^halow_regulatory_domain=" /etc/mesh.conf 2>/dev/null | cut -d'=' -f2)
 HALOW_REGULATORY_DOMAIN=${HALOW_REGULATORY_DOMAIN:-$REGULATORY_DOMAIN}
-REG=$REGULATORY_DOMAIN
 
 printf '%s\n' "REGDOMAIN=$REGULATORY_DOMAIN" > /etc/default/crda
 

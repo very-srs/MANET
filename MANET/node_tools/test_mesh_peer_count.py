@@ -284,7 +284,7 @@ class PartitionTests(PeerHarness):
             with self.subTest(size=foreign_size, mac=mac):
                 selected = runtime.recovery_destination(
                     {mac: {'channels': {'2.4': 2462}, 'size': foreign_size}}, local,
-                    1000, '02:00:00:00:00:03', (), size)
+                    '02:00:00:00:00:03', (), size)
                 self.assertEqual(selected is not None, moves)
 
     def test_size_counts_self_once_and_deduplicates_routes(self):

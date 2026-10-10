@@ -15,14 +15,13 @@ USER_SCRIPT_STATE="${MANET_USER_SCRIPT_STATE:-/var/lib/manet-user-scripts.state}
 USER_SCRIPT_DONE="${MANET_USER_SCRIPT_DONE:-/var/lib/manet-user-scripts.done}"
 USER_SCRIPT_LOG="${MANET_USER_SCRIPT_LOG:-/var/log/manet-user-scripts.log}"
 
-STATE=""; PHASE=""; STARTED=""; FINISHED=""; UPDATED=""
+STATE=""; PHASE=""; STARTED=""; FINISHED=""
 if [ -r "$STATE_FILE" ]; then
     # Read the key=value state file written by radio-setup.
     while IFS='=' read -r k v; do
         case "$k" in
             STATE) STATE="$v" ;; PHASE) PHASE="$v" ;;
             STARTED) STARTED="$v" ;; FINISHED) FINISHED="$v" ;;
-            UPDATED) UPDATED="$v" ;;
         esac
     done < "$STATE_FILE"
 fi

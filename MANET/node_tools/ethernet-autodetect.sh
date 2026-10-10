@@ -132,7 +132,6 @@ CARRIER_GEN_STATE="/var/run/eth-carrier-generation"
 
 # Networkd config paths
 NETWORKD_DIR="/etc/systemd/network"
-GATEWAY_CONFIG="${NETWORKD_DIR}/20-end0-gateway.network.off"
 ACTIVE_CONFIG="${NETWORKD_DIR}/20-${ETH_IFACE}.network"
 
 log() {

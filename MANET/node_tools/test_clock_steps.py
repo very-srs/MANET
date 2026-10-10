@@ -134,7 +134,7 @@ class BrowserClockTests(unittest.TestCase):
     def test_every_json_reply_carries_the_mesh_clock(self):
         server = (TOOLS / 'mesh-status.py').read_text()
         start = server.index('    def send_json(')
-        self.assertIn("'X-Mesh-Time'", server[start:server.index('    def read_json_body(', start)])
+        self.assertIn("'X-Mesh-Time'", server[start:server.index('    def read_form_body(', start)])
 
     def test_retry_holdoffs_use_the_page_monotonic_clock(self):
         for name in ('manet_manage.py', 'mesh-status.py'):

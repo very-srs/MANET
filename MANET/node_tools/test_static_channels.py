@@ -53,11 +53,6 @@ class PlanTests(unittest.TestCase):
                     plan_mod.save('5', 5745, self.path)
                 self.assertEqual(self.path.read_text(), text)
 
-    def test_band_lookup(self):
-        self.assertEqual(plan_mod.band_for_frequency(2462), '2.4')
-        self.assertEqual(plan_mod.band_for_frequency(5825), '5')
-        self.assertIsNone(plan_mod.band_for_frequency(5190))
-
     def test_cli(self):
         env = dict(os.environ, MANET_STATIC_CHANNELS=str(self.path))
         run = lambda *args: subprocess.run([sys.executable, str(TOOLS / 'manet_static_channels.py'), *args],

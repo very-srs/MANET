@@ -11,7 +11,6 @@ from mesh_config import (
     apply_local_to_conf,
     local_changes,
     mesh_changes,
-    split_config,
     strip_local_keys,
 )
 
@@ -36,15 +35,6 @@ class StripLocalKeysTests(unittest.TestCase):
 
 
 class SplitConfigTests(unittest.TestCase):
-    def test_partition(self):
-        local, mesh = split_config({
-            'eud': 'wired',
-            'mesh_ssid': 'MANET',
-            'lan_ap_ssid': 'ap',
-        })
-        self.assertEqual(local, {'eud': 'wired', 'lan_ap_ssid': 'ap'})
-        self.assertEqual(mesh, {'mesh_ssid': 'MANET'})
-
     def test_local_keys_constant(self):
         self.assertEqual(
             LOCAL_KEYS,

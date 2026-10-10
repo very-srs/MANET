@@ -10,7 +10,6 @@ from pathlib import Path
 import socket
 import struct
 import subprocess
-import sys
 import time
 
 FIELDS = ('direction', 'source_port', 'source_mac', 'protocol', 'sport', 'dport',

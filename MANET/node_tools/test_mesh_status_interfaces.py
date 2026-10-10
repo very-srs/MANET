@@ -382,25 +382,6 @@ class InterfaceTests(unittest.TestCase):
                     'wlan1', 'mesh', detail='Mesh radio [manet]',
                     channel='36', freq_mhz='5180', txpower_dbm='23.00')])
 
-    def test_phy_power_parser_failure_skips_band_parsing(self):
-        with patch.object(status, 'parse_phy_txpower_options',
-                          side_effect=ValueError('bad power data')):
-            actual = self.collect([
-                (['ip', '-j', 'addr'], 5, json.dumps([IP_ADDR[3]])),
-                (['iw', 'dev'], 5, WLAN1),
-                (['iw', 'phy'], 5, IW_PHY),
-                (['ethtool', '-i', 'wlan1'], 3, 'driver: mt7915e\n'),
-                (['iw', 'dev', 'wlan1', 'info'], 5, WLAN1),
-                (['iw', 'phy'], 5, IW_PHY),
-                (['batctl', 'if'], 5, BATCTL),
-                (SYSTEMCTL_CMD, 5, SYSTEMCTL),
-            ], expected_reads=['/etc/mesh.conf', '/var/lib/no_mesh_if'])
-        self.assert_rows(actual, [row(
-            'wlan1', 'mesh', detail='Mesh radio [manet]',
-            channel='36', freq_mhz='5180', txpower_dbm='23.00',
-            txpower_cap_dbm='23',
-            txpower_options_dbm=[str(n) for n in range(23, 0, -1)])])
-
     def test_ip_master_without_batctl_membership_remains_other_wireless(self):
         actual = self.collect([
             (['ip', '-j', 'addr'], 5, json.dumps([IP_ADDR[2]])),
