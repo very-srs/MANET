@@ -318,8 +318,6 @@ while true; do
         [ -n "$IS_NTP_FLAG" ] && ENCODER_ARGS+=("$IS_NTP_FLAG")
         [ -n "$IS_MEDIAMTX_FLAG" ] && ENCODER_ARGS+=("$IS_MEDIAMTX_FLAG")
         [ -n "$IS_MUMBLE_FLAG" ] && ENCODER_ARGS+=("$IS_MUMBLE_FLAG")
-        BATT_PCT=$(jq -r '.percentage // empty' /run/battery_status.json 2>/dev/null)
-        [ -n "$BATT_PCT" ] && ENCODER_ARGS+=("--battery-percentage" "$BATT_PCT")
         UPTIME_SECS=$(awk '{print int($1)}' /proc/uptime 2>/dev/null)
         [ -n "$UPTIME_SECS" ] && ENCODER_ARGS+=("--uptime-seconds" "$UPTIME_SECS")
         CPU_LOAD=$(awk '{print $1}' /proc/loadavg 2>/dev/null)

@@ -70,7 +70,7 @@ class PackageSetupTests(unittest.TestCase):
                       'have_package_network')]
         blocks = re.findall(r'^if have_package_network; then\n.*?^fi', source,
                             re.M | re.S)
-        self.assertEqual(len(blocks), 3)
+        self.assertEqual(len(blocks), 2)
         return '\n'.join(functions + blocks) + '\necho continued\n'
 
     def assert_install_options(self, events, recommends=False):
@@ -89,21 +89,18 @@ class PackageSetupTests(unittest.TestCase):
     def test_radio_repairs_before_each_install_and_keeps_conffiles(self):
         events = self.run_shell(self.radio_source())
         self.assertEqual([event[0] for event in events],
-                         ['dpkg', 'apt-get', 'dpkg', 'apt-get', 'apt-get',
-                          'dpkg', 'apt-get'])
-        for event in (events[0], events[2], events[5]):
+                         ['dpkg', 'apt-get', 'dpkg', 'apt-get'])
+        for event in (events[0], events[2]):
             self.assertEqual(event, ['dpkg', 'noninteractive',
                                      '--force-confdef --force-confold --configure -a'])
-        self.assertEqual(events[3][2], 'update -qq')
         installs = self.assert_install_options(events)
-        self.assertEqual(len(installs), 3)
+        self.assertEqual(len(installs), 2)
         self.assertEqual(self.failures.read_text(), '')
 
     def test_radio_failures_are_recorded_and_later_steps_continue(self):
-        for failure, packages, installed in (
-                ('repair', 'avahi-daemon iperf3 traceroute sqlite3 python3-zeroconf python3-cryptography', 2),
-                ('install', 'avahi-daemon iperf3 traceroute sqlite3 python3-zeroconf python3-cryptography', 3),
-                ('update', 'python3-smbus i2c-tools', 2)):
+        packages = ('avahi-daemon iperf3 traceroute sqlite3 python3-zeroconf '
+                    'python3-cryptography')
+        for failure, installed in (('repair', 1), ('install', 2)):
             with self.subTest(failure=failure):
                 events = self.run_shell(self.radio_source(), fail=failure)
                 installs = self.assert_install_options(events)
@@ -119,7 +116,6 @@ class PackageSetupTests(unittest.TestCase):
         self.assertEqual(events, [])
         self.assertEqual(self.failures.read_text().splitlines(), [
             'no network: cannot install avahi-daemon iperf3 traceroute sqlite3 python3-zeroconf python3-cryptography',
-            'no network: cannot install python3-smbus i2c-tools',
             'no network: cannot install gpsd gpsd-tools'])
 
     def test_update_helpers_keep_options_on_retry(self):

@@ -21,7 +21,7 @@ MAN_COMMANDS = (
 HARDENED = (
     'mesh-status.service.d/20-hardening.conf',
     'mesh-voice.service', 'mesh-channel-agreement.service',
-    'gps-reader.service', 'battery-reader.service', 'button-monitor.service',
+    'gps-reader.service', 'button-monitor.service',
     'led-boot.service', 'manet-led-status.service', 'sae-watchdog.service',
     'batman-enslave-watch.service', 'ap-txpower.service',
     'manet-mesh-power.service', 'manet-dhcp-isolation.service',
@@ -228,7 +228,6 @@ DUPLICATE_NAME_ALLOWLIST = {
     }),
     # UNRELATED CLI entry points; firmware/updater also run standalone.
     ('python', 'main'): frozenset({
-            'battery-reader.py',
             'decoder.py',
             'encoder.py',
             'gps-reader.py',

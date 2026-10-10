@@ -570,8 +570,6 @@ while true; do
             # Bootstrap election needs every lobby node's scan report replicated
             [ "$BOOTSTRAPPING" = true ] && [ "$CACHED_SCAN_REPORT_JSON" != "{}" ] && \
                 ENCODER_ARGS+=("--channel-report-json" "$CACHED_SCAN_REPORT_JSON")
-            BATT_PCT=$(jq -r '.percentage // empty' /run/battery_status.json 2>/dev/null)
-            [ -n "$BATT_PCT" ] && ENCODER_ARGS+=("--battery-percentage" "$BATT_PCT")
             UPTIME_SECS=$(awk '{print int($1)}' /proc/uptime 2>/dev/null)
             [ -n "$UPTIME_SECS" ] && ENCODER_ARGS+=("--uptime-seconds" "$UPTIME_SECS")
             CPU_LOAD=$(awk '{print $1}' /proc/loadavg 2>/dev/null)

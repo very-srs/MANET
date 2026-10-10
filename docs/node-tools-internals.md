@@ -2491,7 +2491,7 @@ user bus does not require terminating logins. System D-Bus is never masked.
 | `iperf3.service` / `iperf3` | Keep enabled/package protected. `manet_manage.py:run_local_iperf3` connects to peer servers on TCP 5201; both templates enable the daemon and `manet-ui-firewall.sh` restricts it to the mesh. |
 
 Other explicitly enabled provisioning services support mesh, voice, identity,
-GPS/battery, LEDs, web UI, Syncthing, DNS, routing and recovery; they remain.
+GPS, LEDs, web UI, Syncthing, DNS, routing and recovery; they remain.
 APT/security refresh, logrotate, fstrim, tmpfiles, journald and SSH are also
 outside the removal policy. Unknown enabled units are inventoried for review,
 never removed by an inverse allowlist. Profile 2 was applied on CM4 after the

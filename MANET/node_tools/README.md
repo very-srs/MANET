@@ -1121,12 +1121,6 @@ status does.
 On a Raspberry Pi or CM4 these are the PWR and ACT LEDs. A board that wires
 neither is left alone.
 
-**battery-reader.py**
-
-Reads the UPS HAT battery over I²C and writes `/run/battery_status.json`. The
-node managers publish the percentage and the status page shows it. On boards
-with no battery hardware the percentage is simply not published.
-
 **button-monitor.sh**
 
 Blocks on a GPIO interrupt and runs `led-info.sh` on each press. Near-zero CPU
