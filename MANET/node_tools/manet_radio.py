@@ -135,6 +135,7 @@ def halow_channel_for_frequency(freq_khz, region=None):
 
 
 def _format_halow_bw(value):
+    """Normalize numeric HaLow widths in MHz, kHz or Hz for display."""
     if value in (None, ''):
         return ''
     text = str(value).strip()
@@ -171,6 +172,7 @@ def _first_flat_value(data, keys):
     return None
 
 def _json_from_text(text):
+    """Find the first JSON value after any CLI diagnostic prefix."""
     decoder = json.JSONDecoder()
     for idx, char in enumerate(text):
         if char not in '[{':
@@ -183,6 +185,7 @@ def _json_from_text(text):
     return None
 
 def _channel_from_frequency(freq_value):
+    """Resolve a HaLow frequency in Hz, kHz or MHz to channel and MHz."""
     try:
         m = re.search(r'[0-9.]+', str(freq_value))
         freq = float(m.group(0)) if m else None
@@ -204,6 +207,7 @@ def _channel_from_frequency(freq_value):
 
 
 def _parse_morse_channel_output(text):
+    """Read channel, frequency and operating width from Morse CLI output."""
     info = {}
     data = _json_from_text(text)
     if data is not None:
@@ -222,13 +226,17 @@ def _parse_morse_channel_output(text):
         freq = None
         bw = None
         idx = None
-        for key in ('channel_frequency', 'frequency', 'freq_khz', 'freq_hz', 'op_chan_freq'):
+        for key in ('channel_frequency', 'frequency', 'freq_khz',
+                    'freq_hz', 'op_chan_freq'):
             m = re.search(rf'{key}\s*[:=]\s*"?([0-9.]+)"?', text, re.I)
             if m:
                 freq = m.group(1)
                 break
-        for key in ('channel_op_bw', 'op_bw', 'operating_bw', 'channel_bw', 'bandwidth', 'op_chan_bw'):
-            m = re.search(rf'{key}\s*[:=]\s*"?([0-9.]+\s*(?:[kKmM][hH][zZ])?)"?', text, re.I)
+        for key in ('channel_op_bw', 'op_bw', 'operating_bw', 'channel_bw',
+                    'bandwidth', 'op_chan_bw'):
+            m = re.search(
+                rf'{key}\s*[:=]\s*"?([0-9.]+\s*(?:[kKmM][hH][zZ])?)"?',
+                text, re.I)
             if m:
                 bw = m.group(1)
                 break
@@ -272,7 +280,8 @@ def get_halow_driver_info(iface='wlan2'):
                 continue
             seen.add(key)
             try:
-                r = subprocess.run(cmd, capture_output=True, text=True, timeout=3)
+                r = subprocess.run(cmd, capture_output=True, text=True,
+                                   timeout=3)
             except Exception:
                 continue
             text = (r.stdout or '') + '\n' + (r.stderr or '')
@@ -295,6 +304,9 @@ def get_halow_driver_info(iface='wlan2'):
         m = re.search(r'channel\s*=\s*(\d+)', txt)
         if m:
             info['channel'] = m.group(1)
+        m = re.search(r'op_class\s*=\s*(\d+)', txt)
+        if m:
+            info['op_class'] = m.group(1)
         # s1g_prim_chwidth describes the primary: 2 MHz above 1 MHz operation.
         # Use the channel number to distinguish 2, 4 and 8 MHz channels.
         bw = halow_bandwidth_for_channel(info.get('channel'))
@@ -306,6 +318,7 @@ def get_halow_driver_info(iface='wlan2'):
     return info
 
 def _fmt_dbm(value):
+    """Format power with at most one decimal, or empty for invalid input."""
     try:
         num = float(value)
     except Exception:
@@ -315,6 +328,7 @@ def _fmt_dbm(value):
     return f'{num:.1f}'.rstrip('0').rstrip('.')
 
 def parse_phy_txpower_options(iw_phy_text):
+    """Collect each PHY's distinct advertised channel power limits."""
     options = {}
     cur_phy = None
     for line in (iw_phy_text or '').splitlines():
@@ -336,6 +350,7 @@ def parse_phy_txpower_options(iw_phy_text):
     }
 
 def txpower_choices_from_cap(cap_dbm):
+    """Offer descending whole-dBm choices up to the reported cap."""
     try:
         cap = int(float(cap_dbm))
     except Exception:
@@ -359,8 +374,10 @@ def unsupported_txpower_response(iface, requested, cap_dbm, options=None):
     }
 
 def get_iface_txpower_cap(iface):
+    """Read the PHY power ceiling, falling back to current interface power."""
     try:
-        r = subprocess.run(['iw', 'dev', iface, 'info'], capture_output=True, text=True, timeout=5)
+        r = subprocess.run(['iw', 'dev', iface, 'info'], capture_output=True,
+                           text=True, timeout=5)
         if r.returncode != 0:
             return ''
         phy = ''
@@ -377,7 +394,8 @@ def get_iface_txpower_cap(iface):
                 phy = str(int(m.group(1), 16) >> 32)
         if not phy:
             return current
-        r = subprocess.run(['iw', 'phy'], capture_output=True, text=True, timeout=5)
+        r = subprocess.run(['iw', 'phy'], capture_output=True, text=True,
+                           timeout=5)
         options = parse_phy_txpower_options(r.stdout).get(phy, [])
         if not options:
             return current
