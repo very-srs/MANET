@@ -473,6 +473,7 @@ class Updater:
     def install(self, directory, members):
         self.install_payload(directory, members)
         self.retire_route_fix()
+        self.retire_battery_reader()
         self.retire_network_boot_units()
         run_command(["systemctl", "daemon-reload"])
         firmware_setup = self.destination('usr/local/bin/manet-mt7916-setup.sh')
@@ -518,6 +519,18 @@ class Updater:
                      'usr/local/bin/mesh-default-route-fix.sh'):
             path = self.destination(name)
             path.unlink(missing_ok=True)
+
+    def retire_battery_reader(self):
+        """Stop the retired battery service and remove its files and state."""
+        unit = self.destination('etc/systemd/system/battery-reader.service')
+        if unit.exists():
+            run_command(['systemctl', 'disable', '--now', unit.name])
+        for name in (
+                'etc/systemd/system/multi-user.target.wants/' + unit.name,
+                'etc/systemd/system/battery-reader.service',
+                'usr/local/bin/battery-reader.py',
+                'run/battery_status.json'):
+            self.destination(name).unlink(missing_ok=True)
 
     def retire_network_boot_units(self):
         services = ['ebtables-restore.service', 'ap-interface-setup.service',

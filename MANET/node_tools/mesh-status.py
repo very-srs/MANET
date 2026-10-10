@@ -264,20 +264,12 @@ def get_my_mac():
 # Local Node Detail Gathering
 
 def get_battery():
-    """Return a battery dict from battery-reader.py or sysfs, or None.
+    """Return a kernel power_supply battery dict, or None if unavailable.
 
-    Battery data keys: percentage, voltage_v, current_ma, power_w, charging,
-    status, timestamp. The sysfs fallback reads an integer capacity into
-    percentage from /sys/class/power_supply.
+    Read integer capacity from /sys/class/power_supply into percentage.
+    Status is unknown; voltage, current, power, charging and timestamp are
+    unavailable.
     """
-    try:
-        with open('/run/battery_status.json') as f:
-            data = json.load(f)
-        if data.get('percentage') is not None:
-            return data
-    except Exception:
-        pass
-    # Fall back to a registered kernel battery when reader data lacks capacity.
     for root, dirs, files in os.walk('/sys/class/power_supply'):
         for d in dirs:
             cap_path  = os.path.join(root, d, 'capacity')

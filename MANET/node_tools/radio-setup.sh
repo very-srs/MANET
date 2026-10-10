@@ -1387,6 +1387,7 @@ cp /root/networkd-dispatcher/off /etc/networkd-dispatcher/degraded.d/50-gateway-
 # Canonical carrier/routable hooks are installed by the package builders.
 # Do not replace them with a second implementation during setup.
 systemctl disable --now mesh-default-route-fix.service 2>/dev/null || true
+systemctl disable --now battery-reader.service 2>/dev/null || true
 chmod -R 755 /etc/networkd-dispatcher
 
 cat <<- EOF > /etc/systemd/system/ethernet-autodetect.service
@@ -1561,26 +1562,12 @@ fi
 systemctl enable avahi-daemon
 systemctl restart avahi-daemon || true
 
-# === UPS HAT (E) BATTERY MONITOR ===
-
-# Enable I2C for battery fuel gauge (Waveshare UPS HAT E: IP2368 MCU at 0x2D)
-# Check /boot/firmware/config.txt and /boot/config.txt when present.
-for _cfg in /boot/firmware/config.txt /boot/config.txt; do
-    [ -f "$_cfg" ] || continue
-    if ! grep -q '^dtparam=i2c_arm=on$' "$_cfg"; then
-        # Remove any existing i2c_arm line then append the correct one
-        sed -i '/^dtparam=i2c_arm/d' "$_cfg"
-        echo "dtparam=i2c_arm=on" >> "$_cfg"
-        printf '%s\n' " > I2C enabled in $_cfg"
-    fi
-done
-
 # === RPi config.txt: SPI, Morse HaLow overlay, CM4 PCIe 32-bit DMA ===
 # Morse mm610x SPI hats on CM4/RPi5 need the DT overlay, SPI and high
 # GPIO 3/7/17 at boot for power/reset. USB MM81xx cards need none of these.
-# The SPI overlay creates a failing phantom spi0.0 probe on USB boards, and
-# gpio=3=op,dh conflicts with i2c_arm. CM4 PCIe mt7916 needs pcie-32bit-dma:
-# the BCM2711 outbound window is above 4 GB, causing -ENOMEM without it.
+# The SPI overlay creates a failing phantom spi0.0 probe on USB boards.
+# CM4 PCIe mt7916 needs pcie-32bit-dma: the BCM2711 outbound window is
+# above 4 GB, causing -ENOMEM without it.
 _config_txt_changed=0
 if has_usb_morse_device; then
     _halow_on_spi=0
@@ -1626,22 +1613,6 @@ if [ "$_config_txt_changed" -eq 1 ]; then
     echo " > config.txt modified: a reboot is needed to apply overlay changes"
     echo " > On a standard provision flow this should have been written by provision-mesh.sh"
 fi
-
-# RPi5 uses i2c_designware: i2c-dev module must load at boot for /dev/i2c-1
-if ! grep -q '^i2c-dev$' /etc/modules 2>/dev/null; then
-    echo 'i2c-dev' >> /etc/modules
-    echo " > i2c-dev added to /etc/modules"
-fi
-
-# Install smbus and i2c-tools for battery-reader.py and diagnostics
-if have_package_network; then
-    provision_try "apt install failed: python3-smbus i2c-tools" \
-        install_packages --update --no-install-recommends python3-smbus i2c-tools
-else
-    provision_fail "no network: cannot install python3-smbus i2c-tools"
-fi
-
-systemctl enable battery-reader.service
 
 # === GPS: u-blox USB dongle + chrony SHM NTP ===
 # Optional u-blox 7 GPS: USB VID:PID 1546:01a7. gps-reader.service reports
@@ -1845,7 +1816,7 @@ provision_try "systemd reload failed" systemctl daemon-reload
 for unit in mesh-status.service batman-enslave-watch.service \
     gateway-route-manager.service syncthing@radio.service \
     syncthing-peer-manager.service mesh-hosts-update.timer \
-    ethernet-autodetect.service cpu-powersave.service battery-reader.service \
+    ethernet-autodetect.service cpu-powersave.service \
     button-monitor.service led-boot.service; do
     provision_try "service start failed: $unit" systemctl start "$unit"
 done

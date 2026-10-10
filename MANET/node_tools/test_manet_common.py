@@ -63,7 +63,7 @@ class RadioEnabledTests(unittest.TestCase):
 
 
 class ManagerJsonReadTests(unittest.TestCase):
-    """The GPS and battery reads, extracted unchanged from both managers."""
+    """Exercise the GPS reads extracted from both managers."""
 
     def snippet(self, manager, start, end):
         text = (TOOLS / manager).read_text()
@@ -105,11 +105,6 @@ class ManagerJsonReadTests(unittest.TestCase):
                     self.assertEqual(self.gps(manager, live), '39.7392|-104.9903|1609.3')
                 stale = dict(fix, timestamp=time.time(), written_boot=4900.0)
                 self.assertEqual(self.gps(manager, stale), '||')
-
-    def test_battery_percentage(self):
-        for manager in ('node-manager-static.sh', 'node-manager-acs.sh'):
-            line = next(l for l in (TOOLS / manager).read_text().splitlines() if 'BATT_PCT=$(' in l)
-            self.assertIn("jq -r '.percentage // empty' /run/battery_status.json", line)
 
 
 if __name__ == '__main__':

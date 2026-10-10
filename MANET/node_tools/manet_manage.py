@@ -128,20 +128,6 @@ def has_internet():
     except Exception:
         return False
 
-def get_local_battery_percentage():
-    try:
-        with open('/run/battery_status.json') as f:
-            data = json.load(f)
-        pct = data.get('percentage')
-        if pct is not None:
-            return str(pct)
-    except Exception:
-        pass
-    return ''
-
-
-
-
 def get_usb_wifi_uplink_status():
     if not os.path.exists(USB_WIFI_UPLINK_SCRIPT):
         return {
@@ -562,9 +548,6 @@ def build_topology():
         }
 
         if is_me:
-            live_battery = get_local_battery_percentage()
-            if live_battery:
-                node_info['battery'] = live_battery
             live_uptime = get_local_uptime(compact=True)
             if live_uptime:
                 node_info['uptime'] = live_uptime

@@ -145,11 +145,11 @@ class ManageRadioTests(unittest.TestCase):
         """Build the real route response with stable non-radio observations."""
         values = {
             'parse_registry': {'self': {'HOSTNAME': 'cm4',
-                                       'IPV4_ADDRESS': '10.42.0.1'}},
+                                       'IPV4_ADDRESS': '10.42.0.1',
+                                       'BATTERY_PERCENTAGE': '80'}},
             'get_my_hostname': 'cm4', 'get_my_ip': '10.42.0.1',
             'load_kv_file': {'acs': 'y'},
             'get_bat0_active_ifaces': ['wlan0', 'wlan1', 'wlan2'],
-            'get_local_battery_percentage': '80',
             'get_local_uptime': '1h07m', 'has_internet': True,
             'halow_channel_options': {'region': 'US'},
             'recovery_status': {'state': 'idle'},

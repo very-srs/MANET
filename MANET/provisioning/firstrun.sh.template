@@ -819,7 +819,7 @@ systemctl disable mesh-provision
 #
 # On a USB MM81xx board ($_halow_on_spi=0, detected above) the SPI overlay only
 # creates a phantom spi0.0 that fails probe on every boot ("morse_spi_probe
-# failed"), and gpio=3=op,dh fights dtparam=i2c_arm=on for the same pin.
+# failed").
 for _cfg in /boot/firmware/config.txt /boot/config.txt; do
     [ -f "$_cfg" ] || continue
     if [ "$_halow_on_spi" -eq 1 ]; then
