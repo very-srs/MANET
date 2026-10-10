@@ -56,8 +56,11 @@ start another service does not transfer its restrictions to that service.
 
 ### Comments
 
-- State what the code does and why when the code alone does not show it.
-  Do not restate the code.
+- Give every function, method and class a docstring: what it does and, when
+  it fits in a clause, why.
+- Put a brief comment over any mechanism that is not obvious on first
+  reading: a regex, an ordering dependency, a timeout, a fallback, a parse
+  of tool output, a workaround. Do not restate the code.
 - Use short sentences or fragments in the present tense. No first person,
   narrative, rhetoric or capitalized emphasis.
 - Describe current constraints. Leave history such as "old pipeline",
