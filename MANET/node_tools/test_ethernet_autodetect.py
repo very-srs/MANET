@@ -45,6 +45,7 @@ exit 0
 
 
 class AutodetectHarness(unittest.TestCase):
+    """Run Ethernet discovery with isolated networking commands."""
     def setUp(self):
         scratch = tempfile.TemporaryDirectory()
         self.addCleanup(scratch.cleanup)
@@ -102,6 +103,12 @@ class AutodetectHarness(unittest.TestCase):
         (self.root / 'var/run/eth-carrier-generation').write_text(f'end0 wired-eud {generation}\n')
 
     def run_detector(self):
+        """Run the detector with isolated paths and its shared libraries."""
+        for name in ('manet-common.sh', 'manet-runtime-client.sh'):
+            library = (TOOLS / name).read_text()
+            library = re.sub(r'/(?:etc|var|sys|usr/local/bin|root)/',
+                             lambda m: str(self.root) + m[0], library)
+            (self.root / name).write_text(library)
         source = (TOOLS / 'ethernet-autodetect.sh').read_text()
         source = re.sub(r'/(?:etc|var|sys|usr/local/bin|root)/',
                         lambda m: str(self.root) + m[0], source)
@@ -331,9 +338,16 @@ class GatewayShortcutTests(AutodetectHarness):
 
 
 class CaptureBoundTests(AutodetectHarness):
+    """Check passive capture cleanup when discovery is cancelled."""
     def test_cancelled_detector_stops_capture_and_removes_its_file(self):
+        """Stop packet capture and remove temporary data after cancellation."""
         self.stub('tcpdump', '#!/bin/bash\necho $$ > "$REVIEW_ROOT/capture-pid"\n'
                   'exec /bin/sleep 30\n')
+        for name in ('manet-common.sh', 'manet-runtime-client.sh'):
+            library = (TOOLS / name).read_text()
+            library = re.sub(r'/(?:etc|var|sys|usr/local/bin|root)/',
+                             lambda m: str(self.root) + m[0], library)
+            (self.root / name).write_text(library)
         source = (TOOLS / 'ethernet-autodetect.sh').read_text()
         capture = source[source.index('LINK_CAPTURE=""'):source.index('\ndetect_hotplug_mode()')]
         capture = capture.replace('/var/run/', str(self.root / 'var/run') + '/')

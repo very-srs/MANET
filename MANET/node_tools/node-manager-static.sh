@@ -1,7 +1,8 @@
 #!/bin/bash
 # Publish node status and manage services on static channels.
 # Skip RF scans, channel elections and tourguide hops.
-. "${MANET_TOOLS_DIR:-$(dirname "${BASH_SOURCE[0]}")}/manet-common.sh" || exit 1
+. "${MANET_TOOLS_DIR:-$(dirname "${BASH_SOURCE[0]}")}/mesh-acs-common.sh" ||
+    exit 1
 . "${MANET_TOOLS_DIR:-$(dirname "${BASH_SOURCE[0]}")}/manet-manager-common.sh" \
     || exit 1
 
@@ -68,24 +69,10 @@ LAST_GW_CHECK=$NEVER
 GW_CHECK_INTERVAL=60
 
 
-
 # Time source advertisement (the time service owns chrony and these markers)
 GPS_STATUS_FILE="/run/gps_status.json"
 GPS_FIX_MAX_AGE=60
 
-
-
-get_current_freq() {
-    local conf_file=$1
-    local line
-    [ -r "$conf_file" ] || return 0
-    while IFS= read -r line; do
-        if [[ "$line" =~ frequency=([0-9]+) ]]; then
-            printf '%s\n' "${BASH_REMATCH[1]}"
-            return 0
-        fi
-    done < "$conf_file"
-}
 
 # radio_iface_enabled: manet-common.sh
 
@@ -184,9 +171,6 @@ ensure_static_channels() {
     [ "$STATIC_SETTLE" = true ] && sleep 5
     return 0
 }
-
-
-
 
 
 # === MAIN SETUP ===

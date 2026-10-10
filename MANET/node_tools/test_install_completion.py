@@ -60,7 +60,11 @@ class NodeAddressTests(unittest.TestCase):
 
 
 class CompletionTests(unittest.TestCase):
+    """Check setup locking, completion and first-boot service ordering."""
     def setup_lock_prefix(self, root):
+        """Run the real lock prefix beside its installed shell libraries."""
+        for name in ('manet-common.sh', 'manet-runtime-client.sh'):
+            (root / name).write_text((TOOLS / name).read_text())
         source = (TOOLS / 'radio-setup.sh').read_text()
         return source[:source.index('# Append setup output')].replace(
             '/run/lock/manet-radio-setup.lock', str(root / 'setup.lock'))

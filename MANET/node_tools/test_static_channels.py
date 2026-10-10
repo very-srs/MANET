@@ -70,6 +70,7 @@ class PlanTests(unittest.TestCase):
 
 
 class EnforcementTests(unittest.TestCase):
+    """Check static channel enforcement and service restarts."""
     def setUp(self):
         scratch = tempfile.TemporaryDirectory()
         self.addCleanup(scratch.cleanup)
@@ -87,7 +88,9 @@ class EnforcementTests(unittest.TestCase):
                     f'network={{\n    frequency={freq}\n}}\n')
 
     def enforce(self):
+        """Run static channel enforcement with isolated roles and configs."""
         source = (TOOLS / 'node-manager-static.sh').read_text()
+        source += (TOOLS / 'mesh-acs-common.sh').read_text()
         header = re.search(r'^STATIC_CHANNELS=.*?^CHANNEL_LOCK_FILE=.*?\n', source, re.M | re.S)[0]
         functions = ''.join(re.search(rf'^{name}\(\) \{{\n.*?^\}}\n', source, re.M | re.S)[0]
                             for name in ('get_current_freq', 'load_mesh_wpa_confs',

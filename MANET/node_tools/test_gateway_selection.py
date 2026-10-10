@@ -58,6 +58,7 @@ elif name == 'date':
 
 
 class GatewaySelectionTests(unittest.TestCase):
+    """Check route selection and hysteresis against a virtual clock."""
     def run_manager(self, gateways, until=900, down=None, route=''):
         """gateways: {name: (start, end, path_mbps, announced_down_mbps)}.
         Returns [(time, gateway name)] for every route install."""
@@ -84,6 +85,8 @@ class GatewaySelectionTests(unittest.TestCase):
             source = source.replace('/usr/local/bin/manet_node_ipv4.py', str(root / 'bin/primary.py'))
             (root / 'gateway.sh').write_text(source)
             env = dict(os.environ, TEST_ROOT=str(root),
+                       MANET_TOOLS_DIR=str(TOOLS),
+                       MESH_UPTIME_FILE=str(root / 'uptime'),
                        PATH=str(root / 'bin') + os.pathsep + os.environ['PATH'])
             result = subprocess.run(['bash', str(root / 'gateway.sh')], env=env,
                                     capture_output=True, text=True, timeout=120)

@@ -23,9 +23,6 @@ Routes (relative to /manage):
   POST /api/uplink/wifi         - Set USB Wi-Fi uplink credentials (all nodes)
 """
 
-from manet_config_io import load_kv_file
-from manet_node_info import get_my_hostname, get_local_uptime, fmt_uptime
-from manet_registry import parse_registry
 import json
 import subprocess
 import re
@@ -43,10 +40,13 @@ from pathlib import Path
 from datetime import datetime
 from urllib.parse import urlparse, unquote
 
+from manet_config_io import load_kv_file
+from manet_node_info import get_my_hostname, get_local_uptime, fmt_uptime
+
 from manet_web_limits import STATUS_CACHE, Busy
 from manet_recovery_status import recovery_status, RECOVERY_JS
 from manet_peer_radios import peer_radio_interfaces
-from manet_registry import node_state
+from manet_registry import node_state, parse_registry
 from manet_measurement_storage import check_capacity, save_result
 from manet_admin import AdminTransport, new_version
 from manet_radio import (

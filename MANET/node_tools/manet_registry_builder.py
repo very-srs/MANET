@@ -6,7 +6,6 @@ using one interpreter and at most one protobuf import per allocation pass,
 independent of mesh size. Never cache freshness.
 """
 
-from manet_config_io import read_json
 import base64
 import fcntl
 import hashlib
@@ -20,6 +19,8 @@ import subprocess
 import sys
 import tempfile
 import time
+
+from manet_config_io import read_json
 
 IDENTITY_FIELDS = 'HOSTNAME MAC_ADDRESSES IPV4_ADDRESS IPV4_CHUNK IPV4_CHUNK_SIZE SYNCTHING_ID'.split()
 FIELDS = '''HOSTNAME MAC_ADDRESS MAC_ADDRESSES IPV4_ADDRESS IPV4_CHUNK

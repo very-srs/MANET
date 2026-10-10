@@ -1,10 +1,11 @@
 """Read local recovery observations without contacting another node."""
-from manet_config_io import read_json
 import math
 import os
 from pathlib import Path
 import time
 
+
+from manet_config_io import read_json
 
 
 

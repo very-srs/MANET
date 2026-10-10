@@ -21,9 +21,6 @@ Calls:
 """
 
 # Handle --dump-interfaces before importing the web server dependencies.
-from manet_config_io import load_kv_file
-from manet_node_info import get_my_hostname, get_local_uptime, fmt_uptime
-from manet_registry import parse_registry
 import sys
 if __name__ == '__main__' and len(sys.argv) > 1 and sys.argv[1] == '--dump-interfaces':
     import json
@@ -42,6 +39,9 @@ import time
 import html
 from urllib.parse import urlparse, parse_qs
 
+from manet_config_io import load_kv_file
+from manet_node_info import get_my_hostname, get_local_uptime, fmt_uptime
+
 # Mesh radio changes use the management UI's Alfred staging path.
 # mesh-radio-state.py applies them on each node.
 from manet_manage import (
@@ -50,7 +50,7 @@ from manet_manage import (
 from manet_peer_radios import peer_status_panel
 from manet_recovery_status import recovery_status, RECOVERY_JS
 from manet_node_ipv4 import primary_ipv4
-from manet_registry import node_state, observed_age
+from manet_registry import node_state, observed_age, parse_registry
 from manet_web_sessions import SessionStore, LoginThrottled
 from manet_web_limits import BoundedHTTPServer, RequestLimits, STATUS_CACHE, MANAGEMENT_WRITE, Busy
 from mesh_config import (local_changes, mesh_changes, strip_local_keys,

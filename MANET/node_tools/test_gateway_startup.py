@@ -11,9 +11,11 @@ TOOLS = Path(__file__).resolve().parent
 
 
 class GatewayStartupTests(unittest.TestCase):
+    """Check route startup while addresses and gateways become ready."""
     def run_manager(self, *, ready_at=0, reachable_at=0, gateway=True, registry=True,
                     current='', local_gateway=False, fail_install=False,
                     jump_clock=False, polls=5, address='10.44.0.6'):
+        """Run a route manager against virtual time and network state."""
         with tempfile.TemporaryDirectory(prefix='manet-gateway-startup-') as scratch:
             root = Path(scratch)
             (root / 'bin').mkdir()
@@ -92,7 +94,11 @@ elif name == 'date':
             source = source.replace('/usr/local/bin/manet_node_ipv4.py', str(root / 'bin/primary.py'))
             script = root / 'gateway.sh'
             script.write_text(source)
-            env = dict(os.environ, TEST_ROOT=str(root), PATH=str(root / 'bin') + os.pathsep + os.environ['PATH'])
+            env = dict(os.environ, TEST_ROOT=str(root),
+                       MANET_TOOLS_DIR=str(TOOLS),
+                       MESH_UPTIME_FILE=str(root / 'uptime'),
+                       PATH=str(root / 'bin') + os.pathsep +
+                       os.environ['PATH'])
             result = subprocess.run(['bash', str(script)], env=env, capture_output=True,
                                     text=True, timeout=15)
             self.assertEqual(result.returncode, 77, result.stderr)

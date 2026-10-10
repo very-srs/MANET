@@ -2,7 +2,8 @@
 # Mesh Node Manager - Main Orchestrator
 # Coordinates timing and delegates complex tasks to specialized scripts
 
-. "${MANET_TOOLS_DIR:-$(dirname "${BASH_SOURCE[0]}")}/mesh-acs-common.sh" || exit 1
+. "${MANET_TOOLS_DIR:-$(dirname "${BASH_SOURCE[0]}")}/mesh-acs-common.sh" ||
+    exit 1
 . "${MANET_TOOLS_DIR:-$(dirname "${BASH_SOURCE[0]}")}/manet-manager-common.sh" \
     || exit 1
 
@@ -91,12 +92,9 @@ LAST_GW_CHECK=$NEVER
 GW_CHECK_INTERVAL=60
 
 
-
-
 # Time source advertisement (the time service owns chrony and these markers)
 GPS_STATUS_FILE="/run/gps_status.json"
 GPS_FIX_MAX_AGE=60
-
 
 
 # Run each clock-aligned action once per interval at the first wakeup at or
@@ -220,9 +218,7 @@ return_to_lobby() {
 
 # Return the phy backing an interface (same derivation as radio-setup.sh's
 # iface_phy).
-iface_phy() {
-    iw dev "$1" info 2>/dev/null | awk '/wiphy/ {print "phy"$2; exit}'
-}
+
 
 # Filter frequencies to those the PHY supports. One unsupported frequency
 # rejects the entire iw scan request, whose exit status perform_scan ignores.
@@ -367,9 +363,6 @@ perform_scan() {
     json_out+=']}'
     printf '%s\n' "$json_out"
 }
-
-
-
 
 
 should_perform_tourguide() {
@@ -684,7 +677,6 @@ while true; do
             IS_NTP_FLAG=$(is_ntp_time_source && echo "--is-ntp-server" || echo "")
             IS_MEDIAMTX_FLAG=$(is_hosting_service && echo "--is-mediamtx-server" || echo "")
             IS_MUMBLE_FLAG=$(is_hosting_mumble_service && echo "--is-mumble-server" || echo "")
-
 
 
             # Limp mode flag

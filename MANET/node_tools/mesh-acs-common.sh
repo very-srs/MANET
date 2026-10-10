@@ -16,9 +16,17 @@ load_mesh_roles() {
     return 0
 }
 
+# Read the first configured frequency, including an unterminated line.
 get_current_freq() {
-    [ -f "$1" ] || return 0
-    grep -oP 'frequency=\K[0-9]+' "$1" | head -1
+    local conf_file=$1
+    local line
+    [ -f "$conf_file" ] && [ -r "$conf_file" ] || return 0
+    while IFS= read -r line || [ -n "$line" ]; do
+        if [[ "$line" =~ frequency=([0-9]+) ]]; then
+            printf '%s\n' "${BASH_REMATCH[1]}"
+            return 0
+        fi
+    done < "$conf_file"
 }
 
 . "${MANET_TOOLS_DIR:-$(dirname "${BASH_SOURCE[0]}")}/manet-common.sh" || return 1

@@ -1,4 +1,5 @@
 #!/bin/bash
+. "${MANET_TOOLS_DIR:-$(dirname "${BASH_SOURCE[0]}")}/manet-common.sh" || exit 1
 usage() {
     printf '%s\n' \
         'usage: ethernet-autodetect.sh [--hotplug] [--iface IFACE]' \
@@ -41,17 +42,7 @@ fi
 
 # Guard unmask and enable calls. Unmask reloads systemd, and enabling
 # SysV-backed units such as dnsmasq or hostapd also reloads via update-rc.d.
-unmask_if_masked() {
-    [ "$(systemctl is-enabled "$1" 2>/dev/null)" = "masked" ] && \
-        systemctl unmask "$1" 2>/dev/null
-    return 0
-}
 
-enable_if_disabled() {
-    systemctl is-enabled --quiet "$1" 2>/dev/null || \
-        systemctl enable "$1" 2>/dev/null
-    return 0
-}
 
 # hostapd binds its configured interface at startup. Starting an active unit
 # does not rebind it after radio-setup renames interfaces.
@@ -174,33 +165,7 @@ same_carrier_generation() {
 # 1. ICMP: cheapest when replies arrive.
 # 2. HTTP: require 204 from captive-portal endpoints, rejecting 200/302.
 # 3. TCP: connect to public DNS when curl is absent.
-internet_probe() {
-    local iface="$1"
-    local url code ip
 
-    ping -c 1 -W 2 -I "$iface" 1.1.1.1 >/dev/null 2>&1 && return 0
-    ping -c 1 -W 2 -I "$iface" 8.8.8.8 >/dev/null 2>&1 && return 0
-
-    if command -v curl >/dev/null 2>&1; then
-        for url in http://connectivitycheck.gstatic.com/generate_204 \
-                   http://cp.cloudflare.com/; do
-            code=$(curl --interface "$iface" -s -m 3 -o /dev/null \
-                        -w '%{http_code}' "$url" 2>/dev/null || true)
-            [ "$code" = "204" ] && return 0
-        done
-        return 1
-    fi
-
-    # No curl in this image: bare TCP connect instead. Every leg has a timeout
-    # because this runs inside the dispatcher's flock.
-    ip=$(ip -4 addr show dev "$iface" | grep -oP 'inet \K[\d.]+' | head -1)
-    if [ -n "$ip" ] && command -v nc >/dev/null 2>&1; then
-        nc -z -w 3 -s "$ip" 1.1.1.1 53 >/dev/null 2>&1 && return 0
-        nc -z -w 3 -s "$ip" 8.8.8.8 53 >/dev/null 2>&1 && return 0
-    fi
-
-    return 1
-}
 
 # Confirm failures before removing NAT and batman gateway mode. Mesh clients
 # retain a default route here until gateway-route-manager next polls.
@@ -500,7 +465,6 @@ if [ "$CARRIER" != "1" ]; then
         /usr/local/bin/mesh-ip-manager.sh
 
 
-
     fi
     exit 0
 fi
@@ -631,7 +595,6 @@ EOF
 
     record_carrier_generation gateway
     log "Gateway configuration complete"
-
 
 
     # Wired EUD mode: bridge to mesh
