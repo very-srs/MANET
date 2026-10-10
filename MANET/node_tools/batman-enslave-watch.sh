@@ -3,16 +3,20 @@
 # Runs continuously after batman-enslave.service. Safe to restart.
 . "${MANET_TOOLS_DIR:-$(dirname "${BASH_SOURCE[0]}")}/manet-common.sh" || exit 1
 
+# Send watchdog diagnostics to the journal.
 log() {
     manet_journal batman-enslave-watch "ENSLAVE-WATCH: $*"
 }
 
 # radio_iface_enabled: manet-common.sh
 
+# Print the MainIF name before the slash in the originator table header.
 batman_mainif() {
     batctl bat0 o 2>/dev/null | sed -n '1s/.*MainIF\/MAC: \([^/]*\)\/.*/\1/p'
 }
 
+# Use the first HALOW_IFS entry as primary and rebuild membership if needed.
+# Skip absent or disabled HaLow and throttle rebuilds to once per 60 s.
 restore_halow_primary_if_needed() {
     local halow mainif now last cooldown_file
 
@@ -39,6 +43,7 @@ restore_halow_primary_if_needed() {
 
     log "WARNING: bat0 MainIF is $mainif, expected HaLow $halow; rebuilding bat0 membership"
     /usr/local/bin/batman-if-setup.sh stop 2>/dev/null || true
+    # Leave a 2 s gap between tearing down bat0 and recreating it.
     sleep 2
     /usr/local/bin/batman-if-setup.sh start 2>/dev/null || true
 }
@@ -52,6 +57,8 @@ ap_is_serving() {
         END { exit !(t == "AP" && s) }'
 }
 
+# Restart an active AP after repeated missing-SSID checks under the AP lock.
+# Limit restart attempts to one per 60 boot-clock seconds.
 restart_dead_ap_if_needed() (
     # Keep the active check and restart together against mesh-return policy.
     exec 9>"${MANET_AP_ROLE_LOCK:-/run/manet-ap-role.lock}"
@@ -89,6 +96,7 @@ restart_dead_ap_if_needed() (
     systemctl restart hostapd.service 2>/dev/null || true
 )
 
+# Wait 8 s between passes, in addition to time spent checking or repairing.
 while true; do
     sleep 8
 
@@ -109,6 +117,7 @@ while true; do
     for IFACE in $HALOW_IFS; do
         radio_iface_enabled "$IFACE" || continue
         CUR="$(iw dev "$IFACE" get mesh_param mesh_plink_timeout 2>/dev/null)"
+        # The first space-delimited field holds the current timeout value.
         if [ -n "$CUR" ] && [ "${CUR%% *}" != "0" ]; then
             if iw dev "$IFACE" set mesh_param mesh_plink_timeout 0 2>/dev/null; then
                 log "Set mesh_plink_timeout=0 on $IFACE (was: $CUR)"
@@ -124,6 +133,7 @@ while true; do
         [ -e "/sys/class/net/$IFACE" ] || continue
 
         # Check if already in bat0
+        # Match the interface at a line start followed by batctl's colon.
         if [[ $'\n'"$BAT_MEMBERS" == *$'\n'"${IFACE}:"* ]]; then
             continue
         fi
@@ -131,8 +141,10 @@ while true; do
         # Interface should be in bat0 but isn't: re-enslave
         log "WARNING: $IFACE not in bat0, re-enslaving..."
         ip link set "$IFACE" up 2>/dev/null || true
+        # Match the 1532-byte mesh MTU used during initial attachment.
         ip link set "$IFACE" mtu 1532 2>/dev/null || true
 
+        # Retry three times, checking 1 s after add and pausing 2 s on failure.
         for attempt in 1 2 3; do
             if batctl bat0 if add "$IFACE" 2>/dev/null; then
                 sleep 1

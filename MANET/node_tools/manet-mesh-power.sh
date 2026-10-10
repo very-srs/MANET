@@ -11,17 +11,21 @@ ROLES_DIR="${MANET_IFACE_STATE_DIR:-/var/lib}"
 SYS_NET="${MANET_SYS_NET:-/sys/class/net}"
 LOCK_FILE="${MANET_ACS_LOCK_FILE:-/run/channel-election.lock}"
 LOCK_WAIT="${MANET_LOCK_WAIT:-10}"
+# iw accepts hundredths of dBm, so 3000 requests 30 dBm.
 REQUEST_MBM=3000
 READBACK_ATTEMPTS=10
 
+# Bound iw to 10 seconds by default, then force termination after 2 more.
 IW_TIMEOUT="${MANET_IW_TIMEOUT:-10}"
 
 failures=()
+# Append one diagnostic to the failures array for the final error report.
 fail() { failures+=("$1"); }
 
 # Every iw call is bounded: a wedged one must not hold the channel lock.
 iw_bounded() { timeout --kill-after=2 "$IW_TIMEOUT" iw "$@"; }
 
+# Extract the first signed txpower value in dBm from supplied iw output.
 reported_power() {
     sed -n 's/^[[:space:]]*txpower \(-\{0,1\}[0-9][0-9.]*\) dBm.*/\1/p' <<< "$1" | head -n 1
 }
@@ -68,6 +72,7 @@ for iface in "${ifaces[@]}"; do
         name=${other##*/}
         [ "$name" != "$iface" ] || continue
         [ "$(cat "$other/phy80211/name" 2>/dev/null)" = "$phy" ] || continue
+        # IFF_UP is bit 0. Unreadable flags count as up, blocking the write.
         flags=$(cat "$other/flags" 2>/dev/null || echo 0x1)
         (( flags & 1 )) && shared=$name && break
     done
@@ -81,6 +86,7 @@ for iface in "${ifaces[@]}"; do
         continue
     fi
     power=""
+    # Allow ten readbacks with one-second pauses for a delayed driver report.
     for ((attempt = 1; attempt <= READBACK_ATTEMPTS; attempt++)); do
         power=$(reported_power "$(iw_bounded dev "$iface" info 2>/dev/null)")
         [ -n "$power" ] && break

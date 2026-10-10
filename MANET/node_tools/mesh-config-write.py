@@ -7,6 +7,7 @@ from manet_config_io import atomic_write, rewrite_keys
 
 
 def write_key(path, key, value, quoted=False):
+    """Replace one key atomically, with optional supplicant quoting."""
     path = Path(path)
     text = rewrite_keys(path.read_text(), {key: value}, {key} if quoted else ())
     atomic_write(path, text)

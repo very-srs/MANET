@@ -221,11 +221,13 @@ SHAPE_KEYS = ("highpass_hz", "lowpass_hz", "eq", "eq_low", "eq_mid", "eq_high")
 
 
 def log(msg):
+    """Print a timestamped voice message and flush it immediately."""
     print("[%s] - VOICE: %s" % (time.strftime("%Y-%m-%d %H:%M:%S"), msg),
           flush=True)
 
 
 def now_ms():
+    """Return monotonic milliseconds for PTT and receive timing."""
     return int(time.monotonic() * 1000)
 
 
@@ -310,6 +312,7 @@ def read_kv_file(path):
 
 
 def conf_int(conf, key, default, low=None, high=None):
+    """Read an integer setting, defaulting on invalid or out-of-range input."""
     try:
         val = int(conf.get(key, "").strip())
     except (ValueError, AttributeError):
@@ -346,6 +349,7 @@ def conf_str(conf, key, default, pattern):
 
 
 def conf_float(conf, key, default, low=None, high=None):
+    """Read a float setting, defaulting on parse or bound-check failure."""
     try:
         val = float(conf.get(key, "").strip())
     except (ValueError, AttributeError):
@@ -358,6 +362,7 @@ def conf_float(conf, key, default, low=None, high=None):
 
 
 def conf_bool(conf, key, default):
+    """Read a common yes/no spelling, defaulting on unrecognized input."""
     val = conf.get(key, "").strip().lower()
     if val in ("y", "yes", "true", "1", "on"):
         return True
@@ -367,13 +372,16 @@ def conf_bool(conf, key, default):
 
 
 def talk_group_port(channel):
+    """Map a talk group to its RTP port, defaulting invalid groups to one."""
     if channel < 1 or channel > TALK_GROUP_MAX:
         channel = 1
     return TALK_GROUP_BASE_PORT + (channel - 1) * TALK_GROUP_PORT_STRIDE
 
 
 class Config:
+    """Load voice settings and apply their defaults and validation rules."""
     def __init__(self):
+        """Read local configuration for transport, codec, audio and PTT."""
         conf = read_kv_file(MESH_CONF)
         self.enabled = conf_bool(conf, "voice", False)
         self.iface = conf_str(conf, "voice_iface", "br0", IFACE_RE)
@@ -530,6 +538,7 @@ class OpenVLMPTT(threading.Thread):
     daemon = True
 
     def __init__(self, on_change, on_presence):
+        """Set main-loop callbacks and initialize the HID reader state."""
         super().__init__(name="openvlm-ptt")
         self._on_change = on_change
         self._on_presence = on_presence
@@ -538,9 +547,12 @@ class OpenVLMPTT(threading.Thread):
         self.device = None
 
     def stop(self):
+        """Request termination when the reader next checks its stop event."""
         self._stop.set()
 
     def run(self):
+        """Open preferred PTT hardware and retry discovery after disconnects."""
+        # Failed discovery or open waits two seconds, interruptible by stop().
         while not self._stop.is_set():
             devices = hidraw_candidates()
             if not devices:
@@ -569,6 +581,7 @@ class OpenVLMPTT(threading.Thread):
                 log("PTT: OpenVLM disconnected, waiting for reconnect")
 
     def _read_loop(self, fd):
+        """Read GPIO3 edges, debounce them and queue main-loop callbacks."""
         pressed = False
         last_edge = 0
         while not self._stop.is_set():
@@ -586,6 +599,7 @@ class OpenVLMPTT(threading.Thread):
             if state == pressed:
                 continue
             stamp = now_ms()
+            # Ignore edges less than 150 ms after the last accepted change.
             if stamp - last_edge < PTT_DEBOUNCE_MS:
                 continue
             last_edge = stamp
@@ -593,6 +607,7 @@ class OpenVLMPTT(threading.Thread):
             GLib.idle_add(self._on_change, pressed)
 
     def _set_presence(self, connected, path):
+        """Publish hardware presence changes on the GLib main loop."""
         if connected == self.connected and path == self.device:
             return
         self.connected = connected
@@ -602,6 +617,7 @@ class OpenVLMPTT(threading.Thread):
 
 # --- peers -------------------------------------------------------------------
 
+# Read only address, name and activity assignments for hex registry node IDs.
 REGISTRY_LINE = re.compile(
     r"^NODE_([0-9A-Fa-f]+)_(IPV4_ADDRESS|HOSTNAME|NODE_STATE)='(.*)'$")
 
@@ -632,6 +648,7 @@ def read_registry(exclude_ips):
         if fields.get("NODE_STATE", "ACTIVE") != "ACTIVE":
             continue
         peers.append((ip, fields.get("HOSTNAME", "").strip()))
+    # Stable lexical address/name order also determines capped unicast targets.
     peers.sort()
     return peers
 
@@ -726,6 +743,7 @@ def find_openvlm_card():
                     continue
         except OSError:
             continue
+        # The matched proc directory supplies the numeric ALSA card index.
         match = re.search(r"card(\d+)", path)
         if match:
             return int(match.group(1))
@@ -733,6 +751,7 @@ def find_openvlm_card():
 
 
 def alsa_device(explicit, card):
+    """Choose an override, detected card or ALSA default device."""
     if explicit:
         return explicit
     if card is not None:
@@ -744,7 +763,9 @@ def alsa_device(explicit, card):
 # --- the daemon --------------------------------------------------------------
 
 class MeshVoice:
+    """Manage PTT, RTP pipelines, peer state and audio health on the node."""
     def __init__(self, cfg):
+        """Initialize pipelines, counters, peers and watchdog clocks."""
         self.cfg = cfg
         self.loop = GLib.MainLoop()
         self.tx = None
@@ -982,12 +1003,14 @@ class MeshVoice:
                 want = (("cutoff",
                          float(self.cfg.highpass_hz or self.cfg.lowpass_hz)),)
             for prop, value in want:
+                # Ignore changes within 0.01 Hz when retuning filter properties.
                 if abs(self.shaper.get_property(prop) - value) > 0.01:
                     self.shaper.set_property(prop, value)
                     changed = True
         if self.equalizer is not None:
             for band, value in enumerate(self._eq_gains(raw_rate)):
                 prop = "band%d" % band
+                # Ignore gain differences within 0.01 dB.
                 if abs(self.equalizer.get_property(prop) - value) > 0.01:
                     self.equalizer.set_property(prop, value)
                     changed = True
@@ -1005,6 +1028,7 @@ class MeshVoice:
         Attenuation preserves peaks at reduced level. Playback has 20 dB spare.
         """
         boost = max([0.0] + [g for g in self._eq_gains(raw_rate) if g > 0])
+        # Convert dB attenuation to a linear audio amplitude multiplier.
         self._tx_gain = 10.0 ** (-boost / 20.0)
         if self.txhead is not None:
             self.txhead.set_property("volume", self._tx_gain)
@@ -1013,6 +1037,7 @@ class MeshVoice:
                 % (self._tx_gain, boost))
 
     def build(self):
+        """Construct audio pipelines with transport and health probes."""
         if self.cfg.test_tone:
             src_desc = ("audiotestsrc name=cap is-live=true wave=sine freq=440")
             playback_desc = "fakesink name=play sync=false"
@@ -1045,6 +1070,7 @@ class MeshVoice:
         # hum and rumble removal.
         self._shape_sig = self._shape_signature(raw_rate)
         self._raw_rate = raw_rate
+        # The level element publishes RMS every 200,000,000 ns (200 ms).
         tx_desc = (
             "{src} ! "
             "audioconvert ! audioresample ! "
@@ -1092,6 +1118,7 @@ class MeshVoice:
         # 24-bit SSRC prefix -> peer name for the UI, filled from the registry.
         self.talker_names = {}
         self._known_peer_ips = set()
+        # Request one MiB of UDP buffering and at least two packets of jitter.
         rx_desc = (
             "rtpbin name=rtpbin latency={jitter} do-lost=true autoremove=false "
             "udpsrc name=src address={group} port={port} "
@@ -1174,6 +1201,8 @@ class MeshVoice:
         self._bind_ip = bind_ip
 
     def start(self):
+        """Start pipelines, PTT input and periodic main-loop callbacks."""
+        # Start the receiver before transmit so its multicast join can begin.
         self._play("rx")
         self._play("tx")
         self._suppress_multicast_loopback()
@@ -1204,6 +1233,7 @@ class MeshVoice:
         if self.cfg.codec == "lyra":
             GLib.timeout_add_seconds(PACKING_TICK_SEC, self._tick_packing)
         GLib.timeout_add_seconds(STATE_WRITE_SEC, self._tick_state)
+        # Check the 500 ms receive-idle window every 100 ms for the UI/PTT gate.
         GLib.timeout_add(100, self._tick_rx_decay)
         GLib.timeout_add_seconds(HEALTH_TICK_SEC, self._tick_health)
         if self.cfg.watchdog:
@@ -1261,6 +1291,7 @@ class MeshVoice:
         return False
 
     def stop(self, keep_state=False):
+        """Stop PTT and pipelines, optionally retaining UI fault state."""
         if self.ptt:
             self.ptt.stop()
         self._release_pipelines()
@@ -1277,6 +1308,7 @@ class MeshVoice:
     # -- events --
 
     def _on_bus_message(self, _bus, message, which):
+        """Handle pipeline errors and retain the microphone RMS level."""
         if message.type == Gst.MessageType.ERROR:
             err, debug = message.parse_error()
             # USB resets can remove audio devices. Keep the process alive and
@@ -1518,6 +1550,7 @@ class MeshVoice:
             log("%s pipeline error: %s (%s): retrying in %ds"
                 % (which, text, debug, state["delay"]))
 
+        # Double retries from five seconds to five minutes after each error.
         GLib.timeout_add_seconds(state["delay"], self._restart, which)
         state["delay"] = min(state["delay"] * 2, PIPELINE_RETRY_MAX_SEC)
         if which == "tx":
@@ -1539,6 +1572,7 @@ class MeshVoice:
             log("%s pipeline recovered" % which)
 
     def _restart(self, which):
+        """Cycle one pipeline and reset watchdog grace for its next start."""
         pipeline = self.tx if which == "tx" else self.rx
         was_transmitting = self.transmitting
         if which == "tx":
@@ -1557,6 +1591,7 @@ class MeshVoice:
         return False  # one-shot
 
     def _on_tx_buffer(self, _pad, _info):
+        """Count RTP buffers and clear a recovered transmit fault."""
         self.tx_packets += 1
         # Use flowing data as recovery evidence. Skip fault handling in normal
         # flow.
@@ -1565,6 +1600,7 @@ class MeshVoice:
         return Gst.PadProbeReturn.OK
 
     def _on_rx_buffer(self, _pad, info):
+        """Drop own RTP packets and update remote receive activity."""
         # Drop own-SSRC packets if socket loopback suppression fails or is
         # pending. This prevents delayed local playback and false rx_active,
         # which would block half-duplex PTT. node_ssrc combines a mesh-address
@@ -1682,17 +1718,20 @@ class MeshVoice:
         self._restart(which)
 
     def _tick_rx_decay(self):
+        """Clear receive activity after more than 500 ms without packets."""
         if self.rx_active and now_ms() - self.last_rx_ms > RX_IDLE_MS:
             self.rx_active = False
         return True
 
     def on_ptt_presence(self, connected):
+        """Update hardware presence and close transmit on disconnect."""
         self.ptt_connected = connected
         if not connected and self.transmitting:
             self._set_tx(False)
         return False  # idle_add one-shot
 
     def on_ptt(self, pressed):
+        """Apply a PTT edge subject to the half-duplex receive gate."""
         self.ptt_pressed = pressed
         if pressed:
             if self.cfg.half_duplex and self._remote_active():
@@ -1704,6 +1743,7 @@ class MeshVoice:
         return False
 
     def _remote_active(self):
+        """Check for remote receive activity within the half-duplex hold."""
         return self.rx_active and now_ms() - self.last_rx_ms < HALF_DUPLEX_HOLD_MS
 
     # -- conference receive --
@@ -1783,11 +1823,13 @@ class MeshVoice:
         return True
 
     def _schedule_beacon(self, delay_ms):
+        """Queue a beacon after delay_ms if none is pending."""
         if self._beacon_pending is None:
             self._beacon_pending = GLib.timeout_add(
                 delay_ms, self._beacon_once)
 
     def _beacon_once(self):
+        """Clear the pending timer and attempt one presence beacon."""
         self._beacon_pending = None
         self._tick_beacon()
         return False
@@ -1812,6 +1854,7 @@ class MeshVoice:
         return True
 
     def _end_beacon(self):
+        """End a muted beacon while preserving active PTT transmission."""
         self._beacon_end = None
         # _set_tx restores volume on PTT. Keep the valve open if transmission
         # starts.
@@ -1977,6 +2020,7 @@ class MeshVoice:
         Callers treat None as unknown capacity.
         """
         try:
+            # Bound the main-loop throughput probe to three seconds.
             out = subprocess.run([BATCTL, "meshif", "bat0", "n"],
                                  capture_output=True, text=True, timeout=3)
             if out.returncode != 0:
@@ -1986,6 +2030,7 @@ class MeshVoice:
         rates = []
         for line in out.stdout.splitlines():
             # "0c:bf:74:00:2b:f1    0.108s (       43.2) [     wlan2]"
+            # Parenthesized decimal values are BATMAN V rates in Mbit/s.
             m = re.search(r"\(\s*([0-9]+\.?[0-9]*)\s*\)", line)
             if m:
                 try:
@@ -1995,6 +2040,7 @@ class MeshVoice:
         return min(rates) if rates else None
 
     def _set_packing(self, fpp, why):
+        """Request a new Lyra frame count per packet and log the reason."""
         if fpp == self.packing or self.payloader is None:
             return
         self.packing = fpp
@@ -2003,6 +2049,7 @@ class MeshVoice:
         except Exception as exc:
             log("packing: could not set frames-per-packet=%d: %s" % (fpp, exc))
             return
+        # Estimate kbps from 50 frames/s, eight bits/byte and 86 header bytes.
         log("packing: %d frame(s)/packet (%d ms, ~%.1f kbps on air): %s"
             % (fpp, fpp * 20, 0.4 * (86.0 / fpp + LYRA_FRAME_BYTES.get(
                 self.cfg.lyra_bitrate, 15)), why))
@@ -2084,6 +2131,8 @@ class MeshVoice:
                 reason = "send socket is not bound to %s" % self.cfg.iface
                 try:
                     # GStreamer only warns if SO_BINDTODEVICE fails.
+                    # Duplicate the fd so this check leaves GStreamer's socket
+                    # open. Device names occupy a 16-byte socket option buffer.
                     with socket.fromfd(Gio.Socket.get_fd(sock), socket.AF_INET,
                                        socket.SOCK_DGRAM) as fd:
                         addr = fd.getsockname()[0]
@@ -2103,6 +2152,7 @@ class MeshVoice:
         return reason is None
 
     def _set_tx(self, on):
+        """Gate transmit on socket readiness and restore volume for speech."""
         if on and not self._tx_ready():
             self._set_tx(False)
             if not self._tx_blocked_logged:
@@ -2123,6 +2173,7 @@ class MeshVoice:
     # -- peers --
 
     def _tick_peers(self):
+        """Check interface binding, resume held PTT and refresh peer state."""
         resume = self._tx_blocked is not None
         bind_ip = iface_ipv4(self.cfg.iface)
         if bind_ip != self._bind_ip:
@@ -2198,10 +2249,12 @@ class MeshVoice:
         return round(max(0.0, time.monotonic() - self._flow_ts[which]), 1)
 
     def _tick_state(self):
+        """Write UI state and retain the periodic callback."""
         self.write_state()
         return True
 
     def write_state(self):
+        """Atomically publish transport, audio and watchdog state for the UI."""
         # Aggregate late, duplicate, lost and pushed packets for the UI.
         stats = {}
         late = dups = 0
@@ -2283,6 +2336,7 @@ class MeshVoice:
             # for display and can step during time sync.
             "updated_boot": time.clock_gettime(time.CLOCK_BOOTTIME),
         }
+        # Readers see a complete snapshot even when polling during a write.
         tmp = STATE_FILE + ".tmp"
         try:
             with open(tmp, "w") as fh:
@@ -2293,6 +2347,7 @@ class MeshVoice:
 
 
 def main():
+    """Start configured voice and return its shutdown or restart exit status."""
     if GST_IMPORT_ERROR is not None:
         log("GStreamer Python bindings unavailable (%s): voice disabled. "
             "Install python3-gi gir1.2-gstreamer-1.0 gstreamer1.0-plugins-base "

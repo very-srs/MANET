@@ -1,4 +1,5 @@
 #!/bin/bash
+# Reconcile local internet uplinks, gateway state and EUD radio roles.
 . "${MANET_TOOLS_DIR:-$(dirname "${BASH_SOURCE[0]}")}/manet-common.sh" || exit 1
 set -euo pipefail
 . "${MANET_TOOLS_DIR:-$(dirname "${BASH_SOURCE[0]}")}/manet-runtime-client.sh"
@@ -14,9 +15,11 @@ AP_MESH_HELPER=${MANET_AP_MESH_HELPER:-/usr/local/bin/manet_ap_mesh.py}
 UPLINK_SPEED=${MANET_UPLINK_SPEED:-/usr/local/bin/manet-uplink-speed.sh}
 NETWORKD_DIR=/etc/systemd/network
 
+# Explicit arguments override networkd-dispatcher environment fields.
 EVENT="${1:-${STATE:-reconcile}}"
 IFACE="${2:-${IFACE:-${INTERFACE:-}}}"
 
+# Print accepted events and argument syntax to stderr.
 usage() {
     printf '%s\n' \
         'usage: manet-uplink-dispatch.sh [EVENT [IFACE]]' \
@@ -30,17 +33,19 @@ case "$EVENT" in
     *) usage; exit 1 ;;
 esac
 
+# Skip overlapping dispatches so only one process changes uplink policy.
 exec 200>"$LOCK_FILE"
 flock -n 200 || exit 0
 
 # ethernet-autodetect owns end0 during DHCP probing and bridging. Skip a
 # busy lock because autodetect waits on this script. It never calls this
-# script, avoiding deadlock. node-manager retries within a minute.
+# script, avoiding deadlock. Node-manager retries on a later telemetry pass.
 exec 201>"$ETH_DETECT_LOCK"
 if ! flock -n 201; then
     exit 0
 fi
 
+# Send the uplink message to stderr and the manet-uplink journal tag.
 log() {
     local msg="MANET-UPLINK: $*"
     printf '%s\n' "$msg" >&2
@@ -53,6 +58,7 @@ log() {
 # hostapd also reloads through update-rc.d.
 
 
+# Start an inactive unit, treating a start failure as recoverable.
 start_if_inactive() {
     systemctl is-active --quiet "$1" 2>/dev/null || \
         systemctl start "$1" 2>/dev/null || true
@@ -70,6 +76,7 @@ apply_radvd_conf() {
     fi
 }
 
+# Accept end0 and eligible USB devices outside mesh and AP roles.
 is_upstream_iface() {
     local iface="$1"
 
@@ -93,6 +100,7 @@ is_upstream_iface() {
     [ "$bus" = "usb" ]
 }
 
+# Check the named interface for a sysfs carrier value of one.
 has_carrier() {
     local iface="$1"
     [ "$(cat "/sys/class/net/$iface/carrier" 2>/dev/null || echo 0)" = "1" ]
@@ -109,6 +117,7 @@ is_wired_eud_port() {
     [ "$master" = "br0" ]
 }
 
+# Check whether any eligible interface is a carrier-bearing br0 port.
 wired_eud_active() {
     local path
     for path in /sys/class/net/*; do
@@ -118,10 +127,13 @@ wired_eud_active() {
 }
 
 
+# Print the first default route next hop for the named interface.
 iface_default_gw() {
     ip route show default dev "$1" 2>/dev/null | awk '/^default / {print $3; exit}'
 }
 
+# Add missing DHCP configuration under NETWORKD_DIR for the interface.
+# Reload new configuration. Retry DHCP only if no IPv4 address is present.
 write_networkd_dhcp_config() {
     local iface="$1"
     local conf="${NETWORKD_DIR}/20-${iface}.network"
@@ -163,6 +175,8 @@ EOF
     fi
 }
 
+# Print the first IPv4 on $1, polling once per second.
+# Try $2 times, defaulting to 12, and fail if no address appears.
 wait_for_ipv4() {
     local iface="$1"
     local max_wait="${2:-12}"
@@ -180,11 +194,13 @@ wait_for_ipv4() {
     return 1
 }
 
-# Check $1 with ICMP, then HTTP 204 endpoints, or TCP when curl is absent.
+# internet_probe in manet-common.sh checks ICMP, then HTTP 204 endpoints,
+# or TCP when curl is absent. It also serves ethernet-autodetect.sh.
 # Some LANs filter ICMP but pass TCP/UDP. Reject HTTP 200/302 portal replies.
-# Keep this in sync with ethernet-autodetect.sh.
 
 
+# Print event, routed, default-route, end0 and discovered candidates in order.
+# Read global IFACE and remove duplicates without changing their priority.
 candidate_ifaces() {
     {
         if [ -n "$IFACE" ] && is_upstream_iface "$IFACE"; then
@@ -224,6 +240,8 @@ candidate_ifaces() {
     } | awk '!seen[$0]++'
 }
 
+# Print the first eligible uplink passing address and internet checks.
+# Configure missing DHCP and require a passing or exempt speed test.
 find_working_uplink() {
     local iface ip gw
 
@@ -270,6 +288,7 @@ find_working_uplink() {
     return 1
 }
 
+# Rebuild filter, NAT and TCP MSS rules for the uplink interface in $1.
 configure_firewall() {
     local iface="$1"
     local candidate
@@ -305,18 +324,22 @@ configure_firewall() {
     nft add table ip mangle 2>/dev/null || true
     nft add chain ip mangle forward '{ type filter hook forward priority mangle; policy accept; }' 2>/dev/null || true
     nft flush chain ip mangle forward 2>/dev/null || true
+    # Clamp TCP SYN maximum segment size to the route MTU.
     nft add rule ip mangle forward tcp flags syn tcp option maxseg size set rt mtu
 }
 
+# Flush the gateway NAT and MSS chains without changing filter rules.
 clear_firewall() {
     nft flush chain ip nat postrouting 2>/dev/null || true
     nft flush chain ip mangle forward 2>/dev/null || true
 }
 
+# Print the first eud value from mesh.conf without executing its contents.
 eud_mode() {
     awk -F= '$1 == "eud" {print $2; exit}' /etc/mesh.conf 2>/dev/null || true
 }
 
+# Start hostapd before its DHCP and power helpers, with $1 used in errors.
 start_ap_services() {
     local ap_iface="$1"   # for the log only
     unmask_if_masked dnsmasq.service
@@ -345,11 +368,13 @@ ap_mesh_request() {
     if [ -z "${MANET_AP_MESH_HELPER:-}" ]; then
         rc=0
         manet_runtime_call ap-mesh || rc=$?
+        # Only 125 guarantees no request was sent and permits a fallback.
         [ "$rc" = 125 ] || return "$rc"
     fi
     python3 "$AP_MESH_HELPER" mesh
 }
 
+# Run the AP-to-mesh helper and log changes or a deferred transition.
 return_ap_radio_to_mesh() {
     if [ ! -x "$AP_MESH_HELPER" ]; then
         log "Cannot return AP radio to mesh: $AP_MESH_HELPER missing"
@@ -368,6 +393,7 @@ return_ap_radio_to_mesh() {
     rm -f "$err"
 }
 
+# Apply mesh.conf EUD policy using the saved AP candidate and live port roles.
 ensure_eud_services() {
     local mode ap_iface=""
     mode=$(eud_mode)
@@ -393,6 +419,7 @@ ensure_eud_services() {
     esac
 }
 
+# Promote $1 using its IPv4, firewall, announcements and gateway state files.
 promote_gateway() {
     local iface="$1"
     local ip gw
@@ -457,6 +484,8 @@ EOF
     log "Promoted $iface as MANET gateway (${ip}, gw=${gw:-none})"
 }
 
+# Withdraw gateway state and NAT, restoring mesh RA and EUD policy.
+# Optionally flush the former uplink in $1 unless it serves a wired EUD.
 demote_gateway() {
     local old_iface="${1:-}"
     local was_gateway=false
@@ -500,6 +529,8 @@ demote_gateway() {
     fi
 }
 
+# Print the saved uplink from STATE_FILE or UPSTREAM_IFACE_FILE.
+# Reject a saved interface that currently serves a wired EUD.
 current_uplink_iface() {
     local iface=""
     if [ -f "$STATE_FILE" ]; then
@@ -515,6 +546,7 @@ current_uplink_iface() {
     printf '%s\n' "$iface"
 }
 
+# Select a working uplink and promote it, or withdraw the current gateway.
 reconcile() {
     local current working
     current=$(current_uplink_iface)

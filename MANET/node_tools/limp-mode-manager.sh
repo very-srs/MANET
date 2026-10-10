@@ -6,12 +6,15 @@ REGISTRY_STATE_FILE="${MESH_REGISTRY_FILE:-/var/run/mesh_node_registry}"
 LIMP_STATE_FILE="${MANET_LIMP_STATE_FILE:-/var/run/mesh_limp_mode.state}"
 LIMP_MODE_MIN_DURATION=300 #five minutes
 LIMP_MODE_CONSENSUS=0.5
+# Registry observations remain active for 600 boot-clock seconds.
 STALE_NODE_THRESHOLD=600
 
+# Send a prefixed diagnostic to the limp-mode journal tag.
 log() {
     printf '%s\n' "LIMP-MODE: $1" | systemd-cat -t limp-mode-manager
 }
 
+# Skip this pass if a channel or radio-role transition holds the shared lock.
 exec 8>"${MANET_ACS_LOCK_FILE:-/run/channel-election.lock}"
 flock -n 8 || exit 0
 mesh_iface_24="$(cat /var/lib/mesh_24_if 2>/dev/null || true)"
@@ -34,6 +37,7 @@ ACTIVE_ALFRED_COUNT=$(awk -F"['=]" -v now="$UPTIME_NOW" -v stale="$STALE_NODE_TH
 # Count nodes reporting limp mode
 LIMP_NODE_COUNT=$(grep -c "IS_IN_LIMP_MODE='true'" "$REGISTRY_STATE_FILE" 2>/dev/null)
 
+# Truncate the ratio to two decimals before the strict majority comparison.
 LIMP_RATIO=$(printf '%s\n' "scale=2; $LIMP_NODE_COUNT / $ACTIVE_ALFRED_COUNT" |
     bc)
 

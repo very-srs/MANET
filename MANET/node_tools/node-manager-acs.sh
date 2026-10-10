@@ -9,8 +9,10 @@
 
 # --- Configuration ---
 CONTROL_IFACE="br0"
+# Public Alfred records split stable identity (67) from current telemetry (68).
 ALFRED_IDENTITY_TYPE=67
 ALFRED_DATA_TYPE=68
+# Loop sleep durations in seconds after and before the first allocation.
 MONITOR_INTERVAL=15
 STARTUP_MONITOR_INTERVAL=1
 
@@ -79,6 +81,7 @@ LIMP_STATE_FILE="/var/run/mesh_limp_mode.state"
 # Window tracking
 declare -A LAST_ACTION_WINDOW
 
+# Write a prefixed message through the shared logging helper.
 log() {
     manet_log NODE-MGR "$*"
 }
@@ -104,6 +107,8 @@ should_perform_action() {
     local interval_seconds=$2
     local offset_seconds=$3
 
+    # SCAN and ELECTION require synchronization. Update LAST_ACTION_WINDOW
+    # only once the supplied interval's offset in seconds is reached.
     case "$action_name" in SCAN|ELECTION) acs_clock_ready || return 1 ;; esac
 
     local NOW=$(date +%s)
@@ -143,6 +148,7 @@ leave_lobby_cleanup() (
     rm -f "$LIMP_STATE_FILE"
 )
 
+# Apply supplied 2.4/5 GHz MHz values and clear lobby bitrate/limp state.
 adopt_helper_channels() {
     # A live lobby channel may already be the authenticated data destination.
     # Check actual channels and restart only changed radios, under one lock.
@@ -151,6 +157,7 @@ adopt_helper_channels() {
     return 0
 }
 
+# Reload WPA roles and print discovery state, defaulting to true if unavailable.
 is_in_lobby() {
     load_mesh_roles
 
@@ -171,6 +178,8 @@ mesh_peer_count() {
     "$PEER_COUNTER" --batctl "$BATCTL_PATH"
 }
 
+# Set BOOTSTRAPPING from clock readiness and live peers.
+# Use NOW for BOOTSTRAP_START_WINDOW and update LOBBY_SOLO_LOGGED.
 update_lobby_bootstrap() {
     local peers
     if ! acs_clock_ready; then
@@ -199,6 +208,7 @@ update_lobby_bootstrap() {
     fi
 }
 
+# Return failure only for confirmed quorum loss from QUORUM_CHECKER.
 check_mesh_quorum() {
     local status
     "$QUORUM_CHECKER"
@@ -210,6 +220,7 @@ check_mesh_quorum() {
     esac
 }
 
+# Apply LOBBY_FREQ_2_4/5_0 in search mode, then wait five seconds.
 return_to_lobby() {
     log "Returning to lobby channels..."
     acs_write_channels "$LOBBY_FREQ_2_4" "$LOBBY_FREQ_5_0" search all || return 1
@@ -275,6 +286,8 @@ parse_survey() {
         }'
 }
 
+# Scan enabled WPA role bands and print channel, noise, BSS and busy JSON.
+# Use SCAN_FREQS_2_4/5_0 and SURVEY_MIN_DWELL_MS for candidate measurements.
 perform_scan() {
     local json_out='{"results": ['
     local first_entry=true
@@ -305,6 +318,8 @@ perform_scan() {
         (iw dev "$iface" scan freq $freqs_to_scan > /dev/null 2>&1) &
         SCAN_PID=$!
 
+        # Poll scan completion for up to five seconds, then send termination.
+        # Read survey and cached BSS results even if the scan command failed.
         for i in {1..10}; do
             kill -0 $SCAN_PID 2>/dev/null || break
             sleep 0.5
@@ -324,6 +339,8 @@ perform_scan() {
             # A synthetic -100 dBm floor would outrank real measurements.
             # find_best_channel holds the current channel if a band has no data.
             [ "$noise" = "-" ] && continue
+            # Count cached scan entries with this MHz followed by a literal
+            # decimal dot.
             local bss_count=$(printf '%s\n' "$scan_data" |
                 grep -c "freq: ${freq}\." )
 
@@ -347,6 +364,7 @@ perform_scan() {
                 if [ "$d_act" -lt 0 ] || [ "$d_busy" -lt 0 ] || [ "$d_tx" -lt 0 ]; then
                     d_act=$ca; d_busy=$cb; d_tx=$ct
                 fi
+                # Require minimum dwell before clamping occupancy to 0..100%.
                 if [ "$d_act" -ge "$SURVEY_MIN_DWELL_MS" ]; then
                     local occupancy=$(( (d_busy - d_tx) * 100 / d_act ))
                     [ "$occupancy" -lt 0 ] && occupancy=0
@@ -365,6 +383,8 @@ perform_scan() {
 }
 
 
+# Claim one LAST_ACTION_WINDOW entry between seconds 30 and 49 of each
+# even minute, only after initial time synchronization.
 should_perform_tourguide() {
     acs_clock_ready || return 1
     local NOW=$(date +%s)
@@ -397,6 +417,7 @@ while true; do
     NOW=$(date +%s)  # shared clock-aligned windows only
     MONO=$(uptime_now) || { log "WARN: boot clock unreadable; skipping this pass"; sleep 15; continue; }
 
+    # First verified time sync resets timers and scan data before timed ACS.
     if [ "$CLOCK_READY_SEEN" = false ] && acs_clock_ready; then
         CLOCK_READY_SEEN=true
         LAST_ACTION_WINDOW=()
@@ -578,6 +599,8 @@ while true; do
             # --- GPS Location ---
             # Reject stale files and missing fixes. If gps-reader stops,
             # its last position is unsafe to publish.
+            # Prefer boot-clock age (-5..60 s), falling back to wall-clock age
+            # when written_boot is absent. Require numeric location fields.
             GPS_LAT=""; GPS_LON=""; GPS_ALT=""
             if [ -f "$GPS_STATUS_FILE" ]; then
                 read -r GPS_LAT GPS_LON GPS_ALT < <(jq -r --argjson max "$GPS_FIX_MAX_AGE" --argjson up "$(uptime_now)" '
@@ -618,6 +641,8 @@ while true; do
         if ! acs_agreement_busy; then
             HELPER_CHANNELS=$(python3 "${MANET_TOOLS_DIR:-$(dirname "${BASH_SOURCE[0]}")}/mesh-channel-agreement.py" helper-select 2>/dev/null) || HELPER_CHANNELS=""
             if [ -n "$HELPER_CHANNELS" ]; then
+                # Authenticated helper output is 2.4 GHz MHz|5 GHz MHz, with
+                # absent bands empty.
                 IFS='|' read -r DATA_CHANNEL_2_4 DATA_CHANNEL_5_0 <<< "$HELPER_CHANNELS"
                 if adopt_helper_channels "$DATA_CHANNEL_2_4" "$DATA_CHANNEL_5_0"; then
                     log "Fresh authenticated helper. Migrating to 2.4=${DATA_CHANNEL_2_4}, 5=${DATA_CHANNEL_5_0}"
@@ -720,6 +745,8 @@ while true; do
             # --- GPS Location ---
             # Reject stale files and missing fixes. If gps-reader stops,
             # its last position is unsafe to publish.
+            # Prefer boot-clock age (-5..60 s), falling back to wall-clock age
+            # when written_boot is absent. Require numeric location fields.
             GPS_LAT=""; GPS_LON=""; GPS_ALT=""
             if [ -f "$GPS_STATUS_FILE" ]; then
                 read -r GPS_LAT GPS_LON GPS_ALT < <(jq -r --argjson max "$GPS_FIX_MAX_AGE" --argjson up "$(uptime_now)" '

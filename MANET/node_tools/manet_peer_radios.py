@@ -29,6 +29,7 @@ def freq_mhz_to_channel(mhz):
     if mhz_i <= 0:
         return ''
     if 2400 <= mhz_i <= 2500:
+        # Channel 14 is outside the 5 MHz spacing used by channels 1-13.
         if mhz_i == 2484:
             return '14'
         channel = (mhz_i - 2407) // 5
@@ -39,6 +40,7 @@ def freq_mhz_to_channel(mhz):
 
 
 def _mcs_map(nd):
+    """Map per-band registry MCS fields to the provisioned wlan names."""
     return {
         'wlan0': {
             'tx_mcs': nd.get('WIFI_24_TX_MCS', '') or '',
@@ -56,6 +58,7 @@ def _mcs_map(nd):
 
 
 def _blank_radio(mcs):
+    """Build an inactive radio display record with any reported MCS."""
     return {
         'active': False,
         'channel': '',
@@ -89,6 +92,7 @@ def peer_radio_interfaces(nd):
         mcs = mcs_map[name]
         pub = published.get(name)
         info = _blank_radio(mcs)
+        # Published role/state decides activity, with per-band field fallbacks.
         if pub:
             info['active'] = pub.get('state') == 'UP' and pub.get('role') == 'mesh'
             info['channel'] = str(pub.get('channel') or '') or freq_mhz_to_channel(band_freq[name])
@@ -97,6 +101,7 @@ def peer_radio_interfaces(nd):
             info['halow_bw'] = str(pub.get('halow_bw') or '')
             info['tx_mcs'] = str(pub.get('tx_mcs') or '') or mcs['tx_mcs']
             info['rx_mcs'] = str(pub.get('rx_mcs') or '') or mcs['rx_mcs']
+        # Without interface publication, infer only 2.4 GHz or HaLow activity.
         else:
             info['channel'] = freq_mhz_to_channel(band_freq[name])
             info['freq_mhz'] = band_freq[name]
@@ -133,10 +138,12 @@ def interfaces_for_telemetry(ifaces):
 
 
 def _truthy(nd, key):
+    """Recognize the registry boolean string true, ignoring case."""
     return str(nd.get(key, '')).lower() == 'true'
 
 
 def _peer_iface_health(role, state):
+    """Derive display severity and faults from published role/state."""
     if state == 'DOWN' and role in ('mesh', 'bat', 'bridge', 'gateway', 'ap'):
         return 'fault', [f'{role} is down']
     if state == 'UNKNOWN':
@@ -147,6 +154,7 @@ def _peer_iface_health(role, state):
 
 
 def _peer_iface_detail(iface, nd):
+    """Describe a published interface using its role and radio band."""
     role = iface.get('role', '')
     name = iface.get('name', '')
     channel = str(iface.get('channel') or '')
@@ -171,6 +179,7 @@ def _peer_iface_detail(iface, nd):
 
 
 def _mcs_for_name(nd, name):
+    """Return registry TX/RX MCS values for one provisioned radio."""
     return {
         'wlan0': (nd.get('WIFI_24_TX_MCS', '') or '', nd.get('WIFI_24_RX_MCS', '') or ''),
         'wlan1': (nd.get('WIFI_5_TX_MCS', '') or '', nd.get('WIFI_5_RX_MCS', '') or ''),
@@ -179,6 +188,7 @@ def _mcs_for_name(nd, name):
 
 
 def _decorate_published_iface(iface, nd):
+    """Add display health, detail and MCS fallbacks to a peer interface."""
     name = iface['name']
     role = iface.get('role', '') or 'other'
     state = iface.get('state', '') or 'UNKNOWN'
@@ -202,6 +212,7 @@ def _decorate_published_iface(iface, nd):
 
 
 def _synthetic_iface(name, role, state, nd, addrs=None):
+    """Build a display interface from inferred role and state."""
     fake = {'name': name, 'role': role, 'state': state, 'channel': ''}
     row = _decorate_published_iface(fake, nd)
     if addrs is not None:
@@ -220,6 +231,7 @@ def peer_status_panel(nd):
         names.add(row['name'])
         interfaces.append(row)
 
+    # Reconstruct unreported bridge/gateway rows from mesh and address evidence.
     mesh_up = any(i['role'] == 'mesh' and i['state'] == 'UP' for i in interfaces)
     if 'bat0' not in names and mesh_up:
         interfaces.append(_synthetic_iface('bat0', 'bat', 'UP', nd))
@@ -231,6 +243,7 @@ def peer_status_panel(nd):
         interfaces.append(_synthetic_iface(
             'br0', 'bridge', 'UP', nd, addrs=[mesh_ip]))
 
+    # Group by role first, then interface name. Unknown roles sort last.
     order = {'bat': 0, 'mesh': 1, 'ap': 2, 'gateway': 3, 'eud-bridge': 4, 'bridge': 5}
     interfaces.sort(key=lambda i: (order.get(i['role'], 9), i['name']))
 

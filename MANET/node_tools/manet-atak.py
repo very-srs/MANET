@@ -32,19 +32,23 @@ import uuid
 import manet_cot as cot
 import manet_phone as phone
 
+# Bound XML/state bytes and per-stream work before application dispatch.
 MAX_XML = 65536
 MAX_STATE = 512 * 1024
 MAX_CONNECTIONS = 8
 MAX_PER_PEER = 4
 MAX_STREAM_BYTES = 256 * 1024
 MAX_STREAM_EVENTS = 256
+# TCP deadlines in monotonic seconds: inactivity, partial frame and lifetime.
 IDLE_S = 45
 PARTIAL_S = 5
 LIFETIME_S = 300
+# Producer envelopes expire five BOOTTIME seconds after their write timestamp.
 INPUT_TTL = 5
 MAX_RETIRE = 128
 CODES = {'gps_untrusted', 'gps_override', 'confirm_position', 'phone_gps'}
 KINDS = {'geochat', 'audio', 'web_ui'}
+# Require exactly six lowercase hexadecimal octets separated by colons.
 MAC = re.compile(r'(?:[0-9a-f]{2}:){5}[0-9a-f]{2}\Z')
 TABLE = 'manet_atak'
 
@@ -59,22 +63,26 @@ def state_digest(data):
 
 
 def log(message):
+    """Write a tagged, flushed journal message."""
     print('[manet-atak] ' + str(message), flush=True)
 
 
 def number(value):
+    """Require a finite numeric value, excluding booleans."""
     if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
         raise ValueError('expected finite number')
     return float(value)
 
 
 def bounded_text(value, maximum=128):
+    """Require nonempty text within the character limit."""
     if not isinstance(value, str) or not value or len(value) > maximum:
         raise ValueError('invalid or oversized text')
     return value
 
 
 def ipv4(value):
+    """Validate and normalize an IPv4 endpoint address."""
     address = ipaddress.IPv4Address(value)
     if address.is_multicast or address.is_unspecified or address.is_loopback or int(address) == 0xffffffff:
         raise ValueError('unicast IPv4 required')
@@ -82,14 +90,17 @@ def ipv4(value):
 
 
 def read_json(path, limit=MAX_STATE):
+    """Read bounded JSON and reject nonfinite numeric constants."""
     with open(path, 'rb') as stream:
         data = stream.read(limit + 1)
     if len(data) > limit:
         raise ValueError('JSON exceeds size limit')
+    # Python's decoder otherwise accepts NaN and Infinity as JSON numbers.
     return json.loads(data, parse_constant=lambda value: (_ for _ in ()).throw(ValueError(value)))
 
 
 def atomic_json(path, data, *, durable=False):
+    """Replace bounded JSON atomically, optionally syncing it to disk."""
     data = json.dumps(data, separators=(',', ':'), allow_nan=False).encode()
     if len(data) > MAX_STATE:
         raise ValueError('state exceeds size limit')
@@ -102,6 +113,7 @@ def atomic_json(path, data, *, durable=False):
             os.fsync(stream.fileno())
     os.replace(tmp, path)
     if durable:
+        # Sync the directory entry as well as file contents across power loss.
         fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
         try:
             os.fsync(fd)
@@ -110,6 +122,7 @@ def atomic_json(path, data, *, durable=False):
 
 
 def read_kv(path):
+    """Read quoted key/value assignments without evaluating shell syntax."""
     result = {}
     for line in Path(path).read_text().splitlines():
         line = line.strip()
@@ -120,10 +133,12 @@ def read_kv(path):
 
 
 def atak_enabled(conf):
+    """Enable ATAK unless configuration explicitly disables it."""
     return conf.get('atak', '').strip().lower() not in {'n', 'no', '0', 'false'}
 
 
 def file_stamp(path):
+    """Return file identity and change metadata, or None when absent."""
     try:
         s = Path(path).stat()
         return s.st_dev, s.st_ino, s.st_size, s.st_mtime_ns, s.st_ctime_ns
@@ -133,6 +148,7 @@ def file_stamp(path):
 
 @dataclass(frozen=True)
 class Config:
+    """Hold the radio identity, contact label and listener settings."""
     uid: str
     callsign: str = 'MANET RADIO'
     enabled: bool = True
@@ -140,8 +156,10 @@ class Config:
 
     @classmethod
     def load(cls, path='/etc/mesh.conf'):
+        """Read ATAK settings and derive the UID from machine-id."""
         conf = read_kv(path)
         machine = Path('/etc/machine-id').read_text().strip()
+        # A stable 32-digit hexadecimal machine ID namespaces the radio UID.
         if not re.fullmatch('[0-9a-f]{32}', machine):
             raise ValueError('machine-id unavailable')
         return cls('MANET-' + machine,
@@ -152,6 +170,7 @@ class Config:
 
 @dataclass(frozen=True)
 class Now:
+    """Carry monotonic, raw and boot seconds alongside aware radio UTC."""
     mono: float
     raw: float
     boot: float
@@ -159,20 +178,25 @@ class Now:
 
 
 class Clock:
+    """Sample the clock domains used by deadlines and producer freshness."""
     def now(self):
+        """Read local clocks into one application sample."""
         return Now(time.monotonic(), time.clock_gettime(time.CLOCK_MONOTONIC_RAW),
                    time.clock_gettime(time.CLOCK_BOOTTIME), datetime.now(timezone.utc))
 
 
 def match(left, right, op='=='):
+    """Build an nft JSON comparison expression."""
     return {'match': {'op': op, 'left': left, 'right': right}}
 
 
 def meta(key):
+    """Build an nft JSON packet-metadata reference."""
     return {'meta': {'key': key}}
 
 
 def payload(protocol, field):
+    """Build an nft JSON protocol-field reference."""
     return {'payload': {'protocol': protocol, 'field': field}}
 
 
@@ -190,14 +214,17 @@ def firewall_objects():
     for family, hooks in (('bridge', ('prerouting', 'input', 'output')), ('inet', ('input',))):
         objects.append({'table': {'family': family, 'name': TABLE}})
         for hook in hooks:
+            # Priority -450 checks fragment headers before defragmentation.
             objects.append({'chain': {'family': family, 'table': TABLE, 'name': hook,
                                      'type': 'filter', 'hook': hook,
                                      'prio': -450 if hook == 'prerouting' else 0, 'policy': 'accept'}})
     def rule(family, chain, expr):
+        """Append a rule dropping packets matched by the expressions."""
         objects.append({'rule': {'family': family, 'table': TABLE, 'chain': chain, 'expr': expr + [{'drop': None}]}})
     for protocol in ('tcp', 'udp'):
         # No ibrname match: node kernels lack CONFIG_NFT_BRIDGE_META, and a
         # first fragment to 4242 has no legitimate use on any bridge.
+        # Mask offset and MF bits: offset zero with more fragments set.
         rule('bridge', 'prerouting', [match(payload('ether', 'type'), 'ip'),
                                      match({'&': [payload('ip', 'frag-off'), 0x3fff]}, 0x2000),
                                      match(meta('l4proto'), protocol),
@@ -221,6 +248,7 @@ def firewall_transaction(*, install=True):
     commands = []
     for family in ('bridge', 'inet'):
         table = {'table': {'family': family, 'name': TABLE}}
+        # nft add permits an existing table, so delete always has a target.
         commands += [{'add': table}, {'delete': table}]
     if install:
         commands.extend({'add': entry} for entry in firewall_objects())
@@ -230,6 +258,7 @@ def firewall_transaction(*, install=True):
 def apply_firewall(*, install):
     """Run only as a unit pre/post hook, never inside the daemon."""
     try:
+        # Bound privileged unit hooks to five seconds per transaction.
         subprocess.run(['nft', '-j', '-f', '-'],
                        input=json.dumps(firewall_transaction(install=install)),
                        check=True, capture_output=True, text=True, timeout=5)
@@ -265,6 +294,7 @@ def _canonical_expr(expr):
 
 
 def valid_firewall(data):
+    """Compare owned nft policy with the required tables and rules."""
     actual = []
     for item in data.get('nftables', []):
         for kind, keys in (('table', ('family', 'name')),
@@ -287,6 +317,7 @@ def valid_firewall(data):
                 return False
     # Kernel dumps group tables by family. Preserve rule order per chain.
     def grouped(items):
+        """Group nft objects while retaining rule order within each chain."""
         result = {}
         for entry in items:
             kind, obj = next(iter(entry.items()))
@@ -294,6 +325,7 @@ def valid_firewall(data):
             result.setdefault(key, []).append(obj)
         return result
     def canonical(items):
+        """Normalize implicit matches before policy comparison."""
         result = []
         for entry in items:
             if 'rule' in entry:
@@ -307,15 +339,18 @@ def valid_firewall(data):
 
 @dataclass(frozen=True)
 class Proof:
+    """Record the verified local address, wired peers and role generation."""
     local_ip: str
     peers: dict  # IP -> current dynamic MAC learned on end0
     generation: str
 
     def peer(self, address):
+        """Return the verified Ethernet MAC for a peer address."""
         return self.peers.get(address)
 
 
 class GuardFailure(RuntimeError):
+    """Terminate service when network notifications cannot be trusted."""
     pass
 
 
@@ -326,6 +361,7 @@ class NetworkEvents:
     the unit restarts with new subscriptions and no previously admitted peers.
     """
     def __init__(self, factory=socket.socket):
+        """Subscribe to route and nftables changes with nonblocking sockets."""
         self.sockets = []
         try:
             # NETLINK_ROUTE: LINK, NEIGH (including bridge FDB), IPv4_IFADDR.
@@ -341,11 +377,13 @@ class NetworkEvents:
             raise
 
     def close(self):
+        """Close every notification subscription."""
         for sock in self.sockets:
             sock.close()
         self.sockets.clear()
 
     def changed(self):
+        """Drain bounded netlink queues and report proof-invalidating events."""
         changed = False
         for sock in self.sockets:
             # Fail closed if notification churn exhausts the queue budget.
@@ -367,6 +405,7 @@ class NetworkEvents:
                     # invalidate proof, including duplicate MAC learning on bat0
                     # for an end0 peer.
                     changed |= kind not in (1, 3)
+                    # Each netlink message occupies a four-byte aligned slot.
                     offset += (length + 3) & ~3
             else:
                 raise OSError('network notification backlog exceeded')
@@ -382,6 +421,7 @@ class LinuxGuard:
     changes. The kernel firewall remains the packet-level enforcement boundary.
     """
     def __init__(self, config, runner=subprocess.run, sysnet='/sys/class/net', run='/run'):
+        """Start with no verified path and injectable snapshot commands."""
         self.config, self.runner = config, runner
         self.sysnet, self.run = Path(sysnet), Path(run)
         self.reason = 'not checked'
@@ -391,23 +431,29 @@ class LinuxGuard:
         self.signature = None
 
     def start(self):
+        """Subscribe before taking any network snapshot."""
         self.events = NetworkEvents()
 
     def close(self):
+        """Close active network notification subscriptions."""
         if self.events is not None:
             self.events.close()
 
     def readers(self):
+        """Return notification sockets for the shared select loop."""
         return self.events.sockets if self.events is not None else []
 
     def invalidate(self):
+        """Discard cached proof and require another inspection."""
         self.cached, self.dirty = None, True
 
     def file_signature(self):
+        """Track Ethernet role and carrier-generation file changes."""
         return tuple(file_stamp(self.run / name)
                      for name in ('ethernet_detection_state', 'eth-carrier-generation'))
 
     def current(self, force=False):
+        """Reuse stable proof or inspect again after invalidation."""
         if self.events is None:
             raise OSError('network subscriptions unavailable')
         try:
@@ -434,12 +480,15 @@ class LinuxGuard:
             raise GuardFailure(str(exc)) from exc
 
     def command(self, *args):
+        """Run a network probe with a one-second timeout and parse its JSON."""
         result = self.runner(args, check=True, capture_output=True, text=True, timeout=1)
+        # Refuse oversized readback before allocating the parsed JSON tree.
         if len(result.stdout) > 2 * 1024 * 1024:
             raise ValueError('network snapshot too large')
         return json.loads(result.stdout)
 
     def inspect(self):
+        """Verify wired EUD policy and map IPv4 peers to learned end0 MACs."""
         self.retry = False
         try:
             if not self.config.enabled:
@@ -449,14 +498,17 @@ class LinuxGuard:
                 raise ValueError('end0 is not a wired EUD')
             if (self.sysnet / 'end0/master').resolve().name != 'br0':
                 raise ValueError('end0 is not enslaved to br0')
+            # Bridge port state 3 is forwarding. Carrier alone is insufficient.
             if (self.sysnet / 'end0/carrier').read_text().strip() != '1' or (self.sysnet / 'br0/brif/end0/state').read_text().strip() != '3':
                 raise ValueError('end0 is not forwarding with carrier')
             generation = (self.run / 'eth-carrier-generation').read_text().strip()
+            # Match the wired-EUD role plus its non-whitespace generation token.
             if not re.fullmatch(r'end0 wired-eud \S+', generation):
                 raise ValueError('wired EUD generation unavailable')
             if not valid_firewall(self.command('nft', '-j', 'list', 'ruleset')):
                 raise ValueError('ATAK firewall missing or changed')
             links = self.command('ip', '-j', '-4', 'address', 'show', 'dev', 'br0')
+            # Bind only a primary global br0 IPv4 address from the kernel dump.
             addresses = [ipv4(a['local']) for link in links for a in link.get('addr_info', [])
                          if a.get('family') == 'inet' and a.get('scope') == 'global' and not a.get('secondary', False)]
             local = self.config.bind_ip or (addresses[0] if addresses else None)
@@ -466,6 +518,7 @@ class LinuxGuard:
             ports = {}
             for entry in fdb:
                 mac = entry.get('mac', '').lower()
+                # Static and self entries do not prove a learned ingress port.
                 if entry.get('state') in ('permanent', 'static') or 'self' in entry.get('flags', []):
                     continue
                 ports.setdefault(mac, set()).add(entry.get('ifname', entry.get('dev')))
@@ -475,6 +528,8 @@ class LinuxGuard:
                 states = entry.get('state', [])
                 if isinstance(states, str):
                     states = [states]
+                # Admit resolved neighbors learned exclusively through end0.
+                # A MAC also learned on a mesh port fails this test.
                 if (MAC.fullmatch(mac) and ports.get(mac) == {'end0'}
                         and set(states) & {'REACHABLE', 'STALE', 'DELAY', 'PROBE'}):
                     address = ipv4(entry['dst'])
@@ -497,6 +552,7 @@ CLASSES = {c.__name__: c for c in (cot.Fix, cot.ErrorEstimate, phone.PhoneFix,
 
 
 def encode(value):
+    """Tag dates, dataclasses and compound keys for JSON persistence."""
     if isinstance(value, datetime):
         return {'date': value.isoformat()}
     if is_dataclass(value):
@@ -504,6 +560,7 @@ def encode(value):
     if isinstance(value, tuple):
         return {'tuple': [encode(v) for v in value]}
     if isinstance(value, dict):
+        # Pair arrays retain tuple keys used by selector event queues.
         return {'dict': [[encode(k), encode(v)] for k, v in value.items()]}
     if isinstance(value, list):
         return [encode(v) for v in value]
@@ -511,6 +568,7 @@ def encode(value):
 
 
 def decode(value, depth=0):
+    """Restore bounded tagged state using the fixed class allowlist."""
     if depth > 20:
         raise ValueError('state nesting exceeds limit')
     sub = lambda v: decode(v, depth + 1)
@@ -527,6 +585,7 @@ def decode(value, depth=0):
             return result
         if set(value) == {'class', 'fields'} and value['class'] in CLASSES:
             cls = CLASSES[value['class']]
+            # Require an exact layout before restoring private selector state.
             if set(value['fields']) != {f.name for f in fields(cls)}:
                 raise ValueError('state class fields changed')
             return cls(**{k: sub(v) for k, v in value['fields'].items()})
@@ -543,6 +602,7 @@ def decode(value, depth=0):
 
 
 def validate_selector(position, config):
+    """Reject incompatible selector state, identity and bounded queues."""
     defaults = phone.PhonePosition(radio_uid=config.uid).__dict__
     state = vars(position)
     if set(state) != set(defaults) or position.radio_uid != config.uid:
@@ -578,20 +638,25 @@ def validate_selector(position, config):
 
 
 class Store:
+    """Load and durably replace the service checkpoint."""
     def __init__(self, path):
+        """Record the checkpoint path."""
         self.path = Path(path)
 
     def load(self):
+        """Read saved JSON, treating an absent checkpoint as initial state."""
         try:
             return read_json(self.path)
         except FileNotFoundError:
             return None
 
     def save(self, data):
+        """Write and sync a replacement checkpoint."""
         atomic_json(self.path, data, durable=True)
 
 
 def rebase_selector(position, saved, now, new_boot):
+    """Preserve age lower bounds and reset boot-dependent phone timing."""
     if not new_boot:
         if now.mono < saved:
             raise ValueError('monotonic clock regressed in same boot')
@@ -631,12 +696,14 @@ class Inputs:
     producer data fails closed. GPIO and GPS time permissions stay explicit.
     """
     def __init__(self, boot_id, run='/run'):
+        """Initialize producer-file caching for the current boot."""
         self.boot_id, self.run = boot_id, Path(run)
         self.cached = self.signature = None
         self.expiries = []
         self.revision = 0
 
     def cached_read(self, now, memory, *, receiver=True):
+        """Reuse inputs until metadata changes or freshness expires."""
         names = ('manet-spoof.json', 'manet-lc76g-jam.json')
         if receiver:
             names += ('gps_status.json',)
@@ -652,11 +719,13 @@ class Inputs:
         return self.cached
 
     def document(self, name, now, schema):
+        """Require the expected schema, boot and five-second write freshness."""
         data = read_json(self.run / name, 65536)
         if data.get('schema') != schema or data.get('boot_id') != self.boot_id:
             raise ValueError('stale or wrong-boot ' + name)
         written = number(data.get('written_boot'))
         if written > now.boot:
+            # Retry future-dated input when its claimed write time arrives.
             self.expiries.append(('boot', written))
         if not 0 <= now.boot - written < INPUT_TTL:
             raise ValueError('stale or wrong-boot ' + name)
@@ -664,6 +733,7 @@ class Inputs:
         return data
 
     def read(self, now, memory, *, receiver=True):
+        """Validate local inputs and retain producer fault history."""
         self.expiries = []
         fix, observed, gps_reason = None, now.mono, 'GPS unavailable'
         try:
@@ -687,6 +757,7 @@ class Inputs:
             # altMSL/legacy altitude and eph/epv with unspecified confidence
             # cannot be relabelled as HAE or CE90/LE90.
             fix = cot.Fix(lat, lon, 'gnss', hae=hae)
+            # Transfer raw-clock sample age into selector monotonic time.
             observed, gps_reason = now.mono - age, 'fresh receiver fix'
         except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
             gps_reason = str(exc)
@@ -704,6 +775,7 @@ class Inputs:
             old = memory.get('monitor_token')
             if old and producer == old[0] and epoch < old[1]:
                 raise ValueError('monitor epoch regressed')
+            # Producer changes and later epochs advance a durable local counter.
             if old != token:
                 if old is not None or epoch > 0:
                     memory['fault_epoch'] += 1
@@ -730,6 +802,7 @@ class Inputs:
         except (OSError, ValueError, KeyError, TypeError, AttributeError):
             memory['jam_seen'] = True
             jam_reason = 'invalid or stale GPIO input'
+        # Unknown GPIO blocks trust after producer activation, including loss.
         jam_gate = jam is True or (jam is None and memory.get('jam_seen', False))
         evidence = [state in ('GNSS_SUSPECTED', 'INCONSISTENT_UNATTRIBUTED'), jam_gate, monitor]
         if evidence != memory.get('evidence') and (evidence[0] or evidence[1]):
@@ -745,6 +818,7 @@ class Service:
     Transport.send reports successful local UDP handoff.
     """
     def __init__(self, config, boot_id, store, transport, now):
+        """Restore or initialize phone state and checkpoint before use."""
         self.config, self.boot_id, self.store, self.transport = config, boot_id, store, transport
         self.revision = 0
         self.position = phone.PhonePosition(radio_uid=config.uid)
@@ -772,6 +846,7 @@ class Service:
         self.commit(now)
 
     def restore(self, saved, now):
+        """Validate persisted service state and rebase timing after reboot."""
         payload = {key: value for key, value in saved.items() if key != 'sha256'}
         if saved.get('sha256') != state_digest(payload):
             raise ValueError('state checksum mismatch; refusing implicit reassociation')
@@ -815,6 +890,7 @@ class Service:
             for item in self.retire.values():
                 item['due'] = now.mono
                 if item['done_until'] is not None:
+                    # Keep completed retirement UIDs blocked for a fresh 120 s.
                     item['done_until'] = now.mono + 120
             for item in self.messages.values():
                 item['due'] = now.mono
@@ -823,6 +899,7 @@ class Service:
 
     @staticmethod
     def validate_job(item, retirement=False):
+        """Validate the persisted retry schedule and delivery progress."""
         keys = {'id', 'attempts', 'due'} | ({'successes', 'done_until'} if retirement else {'sent_mono'})
         if not isinstance(item, dict) or set(item) != keys:
             raise ValueError('invalid persisted transport job')
@@ -838,6 +915,7 @@ class Service:
             number(item['done_until'])
 
     def commit(self, now):
+        """Checkpoint policy and queues, failing fatally on write loss."""
         state = {'selector': vars(self.position), 'peer': self.peer, 'session': self.session,
                  'retire': self.retire, 'messages': self.messages, 'audio': self.audio,
                  'banners': self.banners, 'chats': self.chats, 'input_memory': self.input_memory,
@@ -853,23 +931,27 @@ class Service:
         self.revision += 1
 
     def reject(self, reason):
+        """Record a bounded rejection reason and saturating counter."""
         self.last_rejection = str(reason)[:200]
         self.rejected = min(self.rejected + 1, 2 ** 31 - 1)
         return self.last_rejection
 
     def phone_ready(self, now, proof):
+        """Require live phone presence, clock and the pinned wired MAC path."""
         return (self.config.enabled and proof is not None and self.peer is not None
                 and self.position._presence is not None and now.mono < self.position._presence
                 and proof.peer(self.peer['ip']) == self.peer['mac']
                 and self.position.phone_now(now.mono) is not None)
 
     def retry_parked(self):
+        """Restart exhausted jobs that have no completed-retirement hold."""
         for item in list(self.messages.values()) + list(self.retire.values()):
             if item['attempts'] >= 5 and item.get('done_until') is None:
                 item['attempts'] = 0
                 item['due'] = 0
 
     def ingest(self, packet, address, proof, now):
+        """Admit proven phone CoT and checkpoint changes before output."""
         if not self.config.enabled:
             return self.reject('ATAK disabled')
         mac = None if proof is None else proof.peer(address)
@@ -886,6 +968,7 @@ class Service:
                 if element.text is not None and len(element.text) > 2048:
                     raise ValueError('oversized CoT text')
             kind = root.get('type')
+            # A creator-tagged person marker is a Sent point, not self SA.
             is_sa = kind == 'a-f-G-U-C' and root.find('detail/creator') is None
             if not is_sa and (self.peer is None or self.peer['ip'] != address or self.position.phone_now(now.mono) is None):
                 return self.reject('admitted SA required before dependent traffic')
@@ -916,6 +999,7 @@ class Service:
                 bounded_text(parsed.message_id)
                 result = self.position.feed_chat(parsed, now.mono, now.utc, from_ethernet=True)
                 if isinstance(result, cot.PhoneChat):
+                    # Deduplicate within the bounded 32-message display history.
                     if not any(c['sender_uid'] == result.sender_uid and c['message_id'] == result.message_id for c in self.chats):
                         self.chats.append({'sender_uid': result.sender_uid, 'message_id': result.message_id,
                                            'callsign': result.callsign, 'text': result.text,
@@ -941,6 +1025,7 @@ class Service:
             return self.reject(str(exc))
 
     def reconcile_audio(self):
+        """Drop cleared warnings and acknowledged repeating audio jobs."""
         for code, item in list(self.audio.items()):
             warning = self.position._warnings.get(code)
             if warning is None or (warning.acknowledged and not item['one_shot']):
@@ -972,6 +1057,7 @@ class Service:
             return
 
     def audio_ack(self, data, now):
+        """Remove acknowledged audio IDs from this session and checkpoint."""
         if not isinstance(data, dict) or data.get('schema') != 1 or data.get('session') != self.session:
             return
         ids = data.get('ids')
@@ -983,6 +1069,7 @@ class Service:
             self.commit(now)
 
     def local_actions(self, now):
+        """Persist audio and banner handoffs before acknowledging events."""
         self.reconcile_audio()
         for event in self.position.outbound_events:
             if event.kind == 'web_ui':
@@ -1001,6 +1088,7 @@ class Service:
             self.commit(now)
 
     def send(self, data, port, now):
+        """Attempt UDP handoff and retain a bounded transport failure reason."""
         try:
             if not self.transport.send(data, (self.peer['ip'], port)):
                 raise OSError('short UDP send')
@@ -1011,6 +1099,7 @@ class Service:
             return False
 
     def tick(self, now, proof, gps, input_status):
+        """Select location, persist actions and send due phone output."""
         if encode(self.input_memory) != self.saved_input_memory:
             self.commit(now)  # never forget that a formerly unwired producer became active
         # Capture policy transitions separately from 1 Hz feed/deadline timestamps.
@@ -1043,11 +1132,14 @@ class Service:
                      selected.gps_overridden, selected.position_trusted, tuple(sorted(self.banners.items())), self.config.callsign,
                      None if proof is None else (proof.local_ip, proof.generation), self.peer)
         if ready:
+            # Contacts refresh every 30 s, with a one-second attempt backoff.
+            # Changes can trigger an earlier refresh after that backoff.
             if ((self.contact_attempt is None or now.mono - self.contact_attempt >= 1)
                     and (self.contact_changed or signature != self.contact_signature or cot.contact_refresh_due(now.mono, self.last_contact))):
                 self.contact_attempt = now.mono
                 if self.send(cot.hidden_contact(self.config.uid, self.config.callsign, (proof.local_ip, 4242), stamp), 4242, now):
                     self.last_contact, self.contact_signature, self.contact_changed = now.mono, signature, False
+            # Feed selected geometry at most once per second while present.
             if fix is not None and (self.feed_attempt is None or now.mono - self.feed_attempt >= 1):
                 self.feed_attempt = now.mono
                 packet = cot.external_position(self.config.uid, fix, stamp)
@@ -1056,6 +1148,7 @@ class Service:
                     self.last_feed = now.mono
             pending = {str(e.event_id): e for e in self.position.outbound_events if e.kind == 'geochat'}
             self.messages = {key: item for key, item in self.messages.items() if key in pending}
+            # Attempt one due chat per tick. Five attempts park unfinished work.
             for key, event in pending.items():
                 item = self.messages.get(key)
                 if item is None:
@@ -1064,6 +1157,7 @@ class Service:
                 if item['attempts'] >= 5 or now.mono < item['due']:
                     continue
                 item['attempts'] += 1
+                # Retry delays are 2, 4, 8, 16 and 30 monotonic seconds.
                 item['due'] = now.mono + min(30, 2 ** item['attempts'])
                 if item['sent_mono'] is None:
                     item['sent_mono'] = now.mono
@@ -1074,6 +1168,7 @@ class Service:
                     del self.messages[key]
                     self.commit(now)  # before any fast receipt is dispatched
                 break
+            # Retire one due marker per tick with the same five-attempt backoff.
             for uid, item in list(self.retire.items()):
                 if item['done_until'] is not None:
                     if now.mono >= item['done_until']:
@@ -1088,6 +1183,7 @@ class Service:
                 if self.send(cot.retire_marker(uid, item['id'], stamp), 4242, now):
                     item['successes'] += 1
                     if item['successes'] >= 3:
+                        # Three handoffs start a 120 s replay hold, not an ACK.
                         item['done_until'] = now.mono + 120
                 self.commit(now)
                 break
@@ -1096,6 +1192,7 @@ class Service:
         return self.status(now, proof, selected, input_status)
 
     def status(self, now, proof, selected=None, input_status=None):
+        """Build the runtime snapshot from current policy and path state."""
         # An unassociated node has no phone policy to evaluate or announce.
         # Keep the same status schema without manufacturing a warning/audio job.
         clock = self.position.phone_now(now.mono)
@@ -1127,11 +1224,13 @@ class Service:
 class Application:
     """Skip idle application work, retaining event and safety deadline handling."""
     def __init__(self, service, inputs, runtime):
+        """Track inputs, acknowledgements and the last runtime publication."""
         self.service, self.inputs, self.runtime = service, inputs, Path(runtime)
         self.last_key = self.last_audio = self.ack_stamp = None
         self.input_revision = None
 
     def update(self, now, proof, reason):
+        """Process changed inputs or due work and publish runtime snapshots."""
         service = self.service
         if service.audio:
             path = self.runtime / 'audio-ack.json'
@@ -1154,6 +1253,7 @@ class Application:
             gps.fix, gps.observed_mono if gps.fix is not None else None,
             gps.state, gps.jammed, gps.fault_epoch, gps.ranges_agree)
         def key():
+            """Capture state changes that require an idle snapshot refresh."""
             return (service.revision, service.rejected, service.last_rejection,
                     service.config, proof, reason, gps_key, input_status, present)
         deadline = any(not w.acknowledged and w.deadline is not None and now.mono >= w.deadline
@@ -1180,12 +1280,17 @@ class Application:
 
 
 class Budget:
+    """Share replenishing byte, event and connection limits across peers."""
     def __init__(self, now):
+        """Initialize full byte, event and admission buckets."""
         self.at, self.bytes, self.events, self.accepts = now, 128 * 1024, 64, 16
 
     def take(self, now, *, size=0, events=0, accepts=0):
+        """Refill by elapsed seconds and debit only if every limit permits."""
         elapsed = max(0, now - self.at)
         self.at = now
+        # Refill 64 KiB, 32 events and 8 admissions per second. Each bucket
+        # holds two seconds of work and is shared across TCP and UDP input.
         self.bytes = min(128 * 1024, self.bytes + elapsed * 65536)
         self.events = min(64, self.events + elapsed * 32)
         self.accepts = min(16, self.accepts + elapsed * 8)
@@ -1198,7 +1303,9 @@ class Budget:
 
 
 class Stream:
+    """Track one TCP peer, XML frame and cumulative stream limits."""
     def __init__(self, sock, address, mac, now):
+        """Start a bounded framer and timeout history for an admitted peer."""
         self.sock, self.address, self.mac = sock, address, mac
         self.created = self.last_read = now
         self.partial_since = None
@@ -1206,10 +1313,12 @@ class Stream:
         self.framer = cot.CotStreamFramer(MAX_XML)
 
     def expired(self, now):
+        """Check idle, total-lifetime and incomplete-frame timeouts."""
         return (now - self.last_read >= IDLE_S or now - self.created >= LIFETIME_S
                 or (self.partial_since is not None and now - self.partial_since >= PARTIAL_S))
 
     def receive(self, data, now, budget):
+        """Frame bytes within stream/global limits, returning None at EOF."""
         if self.expired(now):
             raise ValueError('stream timeout')
         if not data:
@@ -1224,6 +1333,7 @@ class Stream:
             raise ValueError('stream event budget exceeded')
         self.last_read = now
         if self.framer.buffered_bytes:
+            # Partial-frame age starts anew only after a complete document.
             if self.partial_since is None or documents:
                 self.partial_since = now
         else:
@@ -1234,6 +1344,7 @@ class Stream:
 class Network:
     """Provide nonblocking IPv4 sockets with injectable factory/readiness."""
     def __init__(self, factory=socket.socket, verify=None):
+        """Initialize transport state and a budget shared by all sockets."""
         self.factory = factory
         self.verify = verify
         self.listener = self.udp = self.sender = None
@@ -1243,10 +1354,12 @@ class Network:
         self.budget = Budget(0)
 
     def close_stream(self, sock):
+        """Forget and close one TCP connection."""
         self.streams.pop(sock, None)
         sock.close()
 
     def close(self):
+        """Close all transport sockets and discard admitted network paths."""
         for sock in list(self.streams):
             self.close_stream(sock)
         for name in ('listener', 'udp', 'sender'):
@@ -1258,6 +1371,7 @@ class Network:
         self.datagram_peers.clear()
 
     def configure(self, proof):
+        """Rebind changed local paths and evict peers absent from new proof."""
         old = None if self.proof is None else (self.proof.local_ip, self.proof.generation)
         new = None if proof is None else (proof.local_ip, proof.generation)
         if old != new:
@@ -1271,6 +1385,7 @@ class Network:
                 # Linux IP_MTU_DISCOVER=10 / IP_PMTUDISC_DO=2. Never fragment an
                 # output packet around the bridge's port-based egress filter.
                 self.sender.setsockopt(socket.IPPROTO_IP, 10, 2)
+                # One IP hop confines output to the directly attached network.
                 self.sender.setsockopt(socket.IPPROTO_IP, socket.IP_TTL, 1)
             except OSError:
                 self.close()
@@ -1283,6 +1398,7 @@ class Network:
                 self.close_stream(sock)
 
     def make(self, kind, ip, port):
+        """Create a nonblocking IPv4 socket restricted to br0."""
         sock = self.factory(socket.AF_INET, kind)
         try:
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -1296,15 +1412,18 @@ class Network:
             raise
 
     def send(self, packet, destination):
+        """Recheck the path and send one bounded UDP packet to a proven peer."""
         if self.verify is not None:
             self.configure(self.verify())
         if self.sender is None or self.proof is None or not self.proof.peer(destination[0]):
             raise OSError('local phone path unavailable')
+        # IPv4's 65535-byte maximum leaves 65507 bytes after IP/UDP headers.
         if len(packet) > 65507:
             raise OSError('CoT exceeds UDP limit')
         return self.sender.sendto(packet, destination) == len(packet)
 
     def readers(self):
+        """Return listeners and admitted streams for the select loop."""
         return ([self.listener, self.udp] if self.listener is not None else []) + list(self.streams)
 
     def admit(self, address):
@@ -1318,6 +1437,7 @@ class Network:
         return self.proof.peer(address)
 
     def handle(self, readable, now, service):
+        """Expire streams and dispatch ready input within shared budgets."""
         for sock, stream in list(self.streams.items()):
             if stream.expired(now.mono):
                 self.close_stream(sock)
@@ -1359,6 +1479,7 @@ class Network:
                         if not mac:
                             continue
                         if len(self.datagram_peers) >= MAX_STREAM_EVENTS:
+                            # Evicted peers need fresh proof on return.
                             self.datagram_peers.pop(next(iter(self.datagram_peers)))
                         self.datagram_peers[endpoint[0]] = mac
                     service.ingest(documents[0], endpoint[0], self.proof, now)
@@ -1379,6 +1500,7 @@ class Network:
 
 
 def main(argv=None):
+    """Run firewall unit hooks or the single-process ATAK event loop."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config', default='/etc/mesh.conf')
     action = parser.add_mutually_exclusive_group()
@@ -1406,6 +1528,7 @@ def main(argv=None):
         log('disabled by mesh.conf (atak=n)')
         return
     with (state_dir / 'lock').open('a') as lock:
+        # One process owns the durable queues and the fixed JSON temp paths.
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         boot_id = Path('/proc/sys/kernel/random/boot_id').read_text().strip()
         bounded_text(boot_id)
@@ -1421,6 +1544,7 @@ def main(argv=None):
         log('starting; IPv4 TCP/UDP 4242; waiting for verified wired EUD policy')
         next_tick, next_cycle, last_reason = 0, 0, None
         try:
+            # Subscribe before the first proof to catch intervening changes.
             guard.start()
             while not flags['stop']:
                 if flags['reload']:

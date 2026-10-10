@@ -25,6 +25,7 @@ def shell_quote(value):
 
 
 def emit(key, value):
+    """Print a quoted shell assignment."""
     print(f"{key}='{shell_quote(value)}'")
 
 
@@ -34,6 +35,7 @@ def emit_raw(key, value):
 
 
 def decode_identity(raw, node_mac, emit=emit, emit_raw=emit_raw):
+    """Decode identity bytes, restoring the primary MAC from Alfred."""
     ident = NodeInfo_pb2.NodeIdentity()
     ident.ParseFromString(raw)
 
@@ -51,6 +53,7 @@ def decode_identity(raw, node_mac, emit=emit, emit_raw=emit_raw):
 
 
 def decode_telemetry(raw, emit=emit, emit_raw=emit_raw):
+    """Decode telemetry bytes into registry fields via emit callbacks."""
     t = NodeInfo_pb2.NodeTelemetry()
     t.ParseFromString(raw)
 
@@ -70,6 +73,7 @@ def decode_telemetry(raw, emit=emit, emit_raw=emit_raw):
     emit_raw('BATTERY_PERCENTAGE', t.battery_percentage or '')
     emit_raw('CPU_LOAD_AVERAGE', f'{t.cpu_load_average:.2f}')
 
+    # Latitude and longitude carry degrees scaled by ten million.
     if t.HasField('location'):
         emit('GPS_LATITUDE', f'{t.location.latitude_e7 / 1e7:.7f}'.rstrip('0').rstrip('.'))
         emit('GPS_LONGITUDE', f'{t.location.longitude_e7 / 1e7:.7f}'.rstrip('0').rstrip('.'))
@@ -114,6 +118,7 @@ def decode_telemetry(raw, emit=emit, emit_raw=emit_raw):
         for r in t.channel_report.results
     ]}))
 
+    # Wire enum values map to the role/state labels in interface JSON.
     role_names = {0: 'other', 1: 'bat', 2: 'mesh', 3: 'ap',
                   4: 'gateway', 5: 'eud-bridge', 6: 'bridge'}
     state_names = {0: 'UNKNOWN', 1: 'UP', 2: 'DOWN'}
@@ -135,6 +140,7 @@ def decode_telemetry(raw, emit=emit, emit_raw=emit_raw):
 
 
 def main():
+    """Decode the selected base64 payload and report failures on stderr."""
     parser = argparse.ArgumentParser(description='Decode an Alfred payload.')
     parser.add_argument('kind', choices=['identity', 'telemetry'])
     parser.add_argument('b64_string')

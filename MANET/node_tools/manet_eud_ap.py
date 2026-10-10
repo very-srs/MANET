@@ -10,6 +10,7 @@ from mesh_config import apply_local_to_conf, validate_config
 
 
 def ap_suffix():
+    """Derive four hex digits from end0, falling back to the mesh hostname."""
     # end0 is the provisioned Ethernet identity, independent of current uplink.
     try:
         mac = Path('/sys/class/net/end0/address').read_text().strip()
@@ -17,6 +18,7 @@ def ap_suffix():
             return mac.replace(':', '')[-4:]
     except FileNotFoundError:
         pass
+    # The provisioned hostname preserves the suffix if end0 is absent.
     match = re.fullmatch(r'mesh-([0-9a-f]{4})', socket.gethostname())
     if match:
         return match[1]
@@ -24,6 +26,7 @@ def ap_suffix():
 
 
 def broadcast_ssid(base):
+    """Append the node suffix and enforce the 32-byte SSID limit."""
     result = base + '-' + ap_suffix()
     if not 1 <= len(result.encode('utf-8')) <= 32:
         raise ValueError('Broadcast SSID exceeds 32 UTF-8 bytes')
@@ -31,6 +34,7 @@ def broadcast_ssid(base):
 
 
 def configured_ssid(path='/etc/hostapd/hostapd.conf'):
+    """Read the literal hostapd SSID, returning empty when unavailable."""
     try:
         for line in Path(path).read_text().splitlines():
             if line.startswith('ssid='):
@@ -41,6 +45,7 @@ def configured_ssid(path='/etc/hostapd/hostapd.conf'):
 
 
 def restart_hostapd():
+    """Restart only a running AP while serializing radio ownership."""
     from manet_ap_mesh import Transition, locked
     with locked(Transition().role_lock):
         # Saving AP credentials while its radio is serving mesh must not reclaim
@@ -49,6 +54,7 @@ def restart_hostapd():
                                  capture_output=True, timeout=5).returncode == 0
         if not running:
             return
+        # Allow 90 seconds for restart, then verify activity within five.
         subprocess.run(['systemctl', 'try-restart', 'hostapd.service'], check=True,
                        capture_output=True, timeout=90)
         subprocess.run(['systemctl', 'is-active', '--quiet', 'hostapd.service'],
@@ -57,6 +63,7 @@ def restart_hostapd():
 
 def apply_local(changes, mesh_conf, hostapd='/etc/hostapd/hostapd.conf',
                 ap_role='/var/lib/ap_interface'):
+    """Validate and activate local settings, restoring files on failure."""
     ok, why = validate_config(changes, local=True)
     if not ok:
         raise ValueError(why)
@@ -84,6 +91,7 @@ def apply_local(changes, mesh_conf, hostapd='/etc/hostapd/hostapd.conf',
             restart_hostapd()
     except Exception as error:
         failures = []
+        # Restore the last attempted write first, including failed writes.
         for path, content in reversed(changed):
             try:
                 atomic_write(path, content)

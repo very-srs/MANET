@@ -44,6 +44,7 @@ if [ "$STATE" = complete ] && [ -f "$DONE_FILE" ]; then
     [ -n "$marker_time" ] && FINISHED="$marker_time"
 fi
 
+# Print elapsed wall-clock time from epoch seconds, clamped at zero.
 human_delta() {
     local from="$1" now secs
     [ -z "$from" ] && { echo "unknown"; return; }
@@ -65,6 +66,7 @@ user_scripts_line() {
     [ -d "$USER_SCRIPT_DIR" ] || return 0
 
     local staged ok failed
+    # Match the runner exclusions for hidden, disabled and backup files.
     staged=$(find "$USER_SCRIPT_DIR" -maxdepth 1 -type f 2>/dev/null \
         | grep -c -v -e '/\.' -e '\.disabled$' -e '\.bak$' -e '\.orig$' -e '~$')
     [ "${staged:-0}" -gt 0 ] || return 0
@@ -76,6 +78,7 @@ user_scripts_line() {
 
     ok=0; failed=0
     if [ -r "$USER_SCRIPT_STATE" ]; then
+        # The runner records name, exit status and epoch in tabbed columns.
         ok=$(awk -F'\t' '$2 == 0' "$USER_SCRIPT_STATE" 2>/dev/null | wc -l)
         failed=$(awk -F'\t' '$2 != 0 && NF >= 2' "$USER_SCRIPT_STATE" 2>/dev/null | wc -l)
     fi

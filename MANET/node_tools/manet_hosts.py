@@ -15,11 +15,14 @@ from manet_config_io import atomic_write
 
 BEGIN = '# === BEGIN MESH HOSTS ==='
 END = '# === END MESH HOSTS ==='
+# Only hostnames and IPv4 fields with a 12-hex node ID enter this map.
 FIELD = re.compile(r'NODE_([0-9a-fA-F]{12})_(HOSTNAME|IPV4_ADDRESS)=(.*)')
+# DNS labels allow 1-63 alphanumeric/hyphen characters, no edge hyphens.
 LABEL = re.compile(r'[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?')
 
 
 def entries(registry):
+    """Return sorted, unique valid hostname/IPv4 pairs from the registry."""
     nodes = {}
     for line in registry.splitlines():
         match = FIELD.fullmatch(line)
@@ -41,10 +44,12 @@ def entries(registry):
         except ValueError:
             continue
         result.add((name, str(address)))
+    # Stable hostname/address order avoids writes caused by registry ordering.
     return sorted(result)
 
 
 def render(hosts, rows):
+    """Replace the marked hosts block while retaining surrounding bytes."""
     block = [BEGIN]
     for name, address in rows:
         aliases = name
@@ -69,6 +74,7 @@ def render(hosts, rows):
 
 
 def update(registry, hosts, lock):
+    """Lock, validate and atomically refresh hosts only when mappings change."""
     # Keep the lock inode in /run across invocations and service restarts.
     # Replacing /etc/hosts must not replace the lock inode.
     with lock.open('a') as stream:
@@ -84,6 +90,7 @@ def update(registry, hosts, lock):
         original = hosts.read_bytes()
         metadata = hosts.stat()
         rows = entries(snapshot)
+        # Preserve undecodable bytes in operator-owned lines outside the block.
         text = original.decode('utf-8', errors='surrogateescape')
         rendered = render(text, rows)
         contents = rendered.encode('utf-8', errors='surrogateescape')
@@ -98,6 +105,7 @@ def update(registry, hosts, lock):
 
 
 def main():
+    """Run a hosts refresh, treating a competing lock holder as success."""
     argparse.ArgumentParser(description=__doc__).parse_args()
     try:
         update(

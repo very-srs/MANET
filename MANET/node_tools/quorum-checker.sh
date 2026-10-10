@@ -6,9 +6,12 @@
 REGISTRY_STATE_FILE="${REGISTRY_STATE_FILE:-/var/run/mesh_node_registry}"
 BATCTL_PATH="${BATCTL_PATH:-/usr/sbin/batctl}"
 PEER_COUNTER="$(dirname "${BASH_SOURCE[0]}")/mesh-peer-count.sh"
+# Registry observations expire after 600 boot-clock seconds.
+# The quorum fraction is applied only when EXPECTED_ACTIVE exceeds three.
 STALE_NODE_THRESHOLD=600
 QUORUM_THRESHOLD=0.5
 
+# Send a quorum diagnostic to the journal.
 log() {
     printf '%s\n' "QUORUM: $1" | systemd-cat -t quorum-checker
 }
@@ -54,6 +57,7 @@ fi
 EXPECTED_ACTIVE=$((ACTIVE_ALFRED_COUNT - SHUTTING_DOWN_COUNT))
 
 if [ "$EXPECTED_ACTIVE" -gt 3 ]; then
+    # Truncate half the expected count to an integer peer threshold.
     QUORUM_MIN=$(printf '%s\n' "$EXPECTED_ACTIVE * $QUORUM_THRESHOLD" |
         bc | cut -d'.' -f1)
 

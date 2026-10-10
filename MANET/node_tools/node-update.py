@@ -29,6 +29,7 @@ from manet_release import asset_url, select_release, verify_asset
 
 
 MIB = 1024 * 1024
+# Bound compressed and expanded bytes, retaining 128 MiB free per filesystem.
 MAX_DOWNLOAD = 64 * MIB
 MAX_EXPANDED = 512 * MIB
 RESERVE = 128 * MIB
@@ -96,14 +97,17 @@ REQUIRED = MARKERS | {
     "etc/systemd/system/manet-logrotate.timer",
     *("etc/systemd/system/" + name for name in RECOVERY_UNITS),
 }
+# Match at least two decimal components without a tag prefix or suffix.
 VERSION_PATTERN = re.compile(r"[0-9]+(?:\.[0-9]+)+")
 
 
 class UpdateError(Exception):
+    """Report a rejected update or a failed installation command."""
     pass
 
 
 def version(text):
+    """Validate and return the dotted version on the first line."""
     first = text.splitlines()[0] if text else ""
     if not VERSION_PATTERN.fullmatch(first):
         raise UpdateError("Invalid release version")
@@ -111,6 +115,7 @@ def version(text):
 
 
 def stop_process(process):
+    """Terminate a command group, escalating to SIGKILL after five seconds."""
     # Stop the complete command, including apt/dpkg children, before giving up.
     try:
         os.killpg(process.pid, signal.SIGTERM)
@@ -124,6 +129,8 @@ def stop_process(process):
 
 
 def run_command(args, timeout=120):
+    """Run a bounded command and stop its process group on interruption."""
+    # A new session gives timeout cleanup its own process group to terminate.
     with subprocess.Popen([str(arg) for arg in args], stdout=subprocess.PIPE,
                           stderr=subprocess.STDOUT, start_new_session=True) as process:
         try:
@@ -138,6 +145,7 @@ def run_command(args, timeout=120):
 
 
 def sync_directory(path):
+    """Persist directory entry changes with fsync."""
     fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
     try:
         os.fsync(fd)
@@ -146,6 +154,7 @@ def sync_directory(path):
 
 
 def atomic_file(destination, source=None, data=None, mode=0o644):
+    """Flush and atomically replace a file with explicit permissions."""
     fd, scratch = tempfile.mkstemp(prefix=".manet-update-", dir=destination.parent)
     try:
         with os.fdopen(fd, "wb") as output:
@@ -157,6 +166,7 @@ def atomic_file(destination, source=None, data=None, mode=0o644):
             os.fchmod(output.fileno(), mode)
             output.flush()
             os.fsync(output.fileno())
+        # A sibling temporary keeps replacement atomic on this filesystem.
         os.replace(scratch, destination)
         sync_directory(destination.parent)
     finally:
@@ -165,6 +175,7 @@ def atomic_file(destination, source=None, data=None, mode=0o644):
 
 
 def archive_path(name):
+    """Validate a tools member path and reject protected destinations."""
     # GNU tar builders prefix members with ./. No other normalization is safe.
     while name.startswith("./"):
         name = name[2:]
@@ -182,7 +193,9 @@ def archive_path(name):
 
 
 class Updater:
+    """Stage verified tools and retain offline recovery until activation."""
     def __init__(self, root=Path("/"), routine=False, development=False, allow_downgrade=False):
+        """Set the target root, release policy and transaction paths."""
         self.root = Path(root)
         self.routine = routine
         self.development = development
@@ -193,11 +206,13 @@ class Updater:
         self.recovery = self.state / "recovery"
 
     def log(self, message, error=False):
+        """Send messages to syslog and also print outside routine mode."""
         syslog.syslog(syslog.LOG_ERR if error else syslog.LOG_INFO, message)
         if not self.routine:
             print(message, file=sys.stderr if error else sys.stdout, flush=True)
 
     def destination(self, name):
+        """Resolve a payload destination without traversing symlink parents."""
         target = self.root / name
         for parent in target.parents:
             if parent == self.root:
@@ -207,6 +222,7 @@ class Updater:
         return target
 
     def make_directory(self, target, mode=0o755):
+        """Create missing parents with explicit modes and durable entries."""
         # Explicit modes also cover implicit archive parents under a permissive
         # inherited umask. Existing directories keep their original modes.
         missing = []
@@ -226,6 +242,7 @@ class Updater:
         for path, size in requests:
             while not path.exists():
                 path = path.parent
+            # Staging and destination paths can share free space on one device.
             device = path.stat().st_dev
             totals[device] += size
             representatives[device] = path
@@ -235,7 +252,10 @@ class Updater:
                 raise UpdateError(f"Insufficient disk space on {path}: need {size + RESERVE} bytes free")
 
     def download(self, url, target, limit):
+        """Reserve space and fetch a bounded HTTPS asset with retries."""
         self.space([(target.parent, limit)])
+        # Bound each attempt to 120 s and the entire curl process to 260 s.
+        # Reject non-HTTPS redirects and recheck size after curl returns.
         run_command([
             "curl", "--fail", "--silent", "--show-error", "--location",
             "--proto", "=https", "--proto-redir", "=https",
@@ -249,6 +269,7 @@ class Updater:
             raise UpdateError("Download exceeds size limit")
 
     def board(self):
+        """Map the device-tree model to a supported package board name."""
         model = (self.root / "proc/device-tree/model").read_text().rstrip("\0")
         # "ROCK3 Model A" on older kernels, "Radxa ROCK 3A" on 6.18.
         if "ROCK3" in model.replace(" ", ""):
@@ -260,6 +281,8 @@ class Updater:
         raise UpdateError(f"Unknown board: {model}")
 
     def validate(self, package, checksum, filename, expected):
+        """Verify archive contents, checksum and release version."""
+        # Accept one sha256sum line with its text/binary marker and exact name.
         match = re.fullmatch(r"([a-fA-F0-9]{64}) [ *]([^\r\n]+)\n?",
                              checksum.read_text(encoding="ascii"))
         if not match or match[2] != filename:
@@ -281,16 +304,19 @@ class Updater:
         with tarfile.open(package, "r:gz") as archive:
             for member in archive:
                 name = archive_path(member.name)
+                # Bound metadata growth as well as decompressed archive bytes.
                 if name in members or len(members) >= 20000:
                     raise UpdateError("Duplicate archive path or too many members")
                 if not (member.isdir() or member.isfile() or member.issym()):
                     raise UpdateError(f"Unsupported archive entry: {name}")
+                # Refuse special mode bits and group/world-writable directories.
                 if (member.uid != 0 or member.gid != 0 or member.mode & 0o7000
                         or (member.isdir() and member.mode & 0o022)):
                     raise UpdateError(f"Unsafe archive ownership or permissions: {name}")
                 if member.size < 0 or member.size > MAX_EXPANDED or member.issparse():
                     raise UpdateError(f"Unsupported archive size or sparse file: {name}")
                 members[name] = member
+            # Check the complete member map before resolving parents and links.
             for name, member in members.items():
                 for parent in PurePosixPath(name).parents:
                     entry = members.get(str(parent))
@@ -299,6 +325,7 @@ class Updater:
                 if member.issym():
                     link = member.linkname
                     target = posixpath.normpath(posixpath.join(posixpath.dirname(name), link))
+                    # A relative link must resolve to a regular payload file.
                     if (link.startswith("/") or target not in members
                             or not members[target].isfile()):
                         raise UpdateError(f"Invalid archive symlink: {name}")
@@ -327,6 +354,9 @@ class Updater:
         return members
 
     def stage(self, package, members, directory):
+        """Reserve space and unpack regular files into private staging."""
+        # Round up to 4 KiB blocks and reserve one extra block per member.
+        # Account for both staged files and their live replacements.
         allocations = {name: ((member.size + 4095) // 4096 + 1) * 4096
                        for name, member in members.items()}
         requests = [(directory, sum(allocations.values()))]
@@ -350,9 +380,11 @@ class Updater:
                     target.chmod(member.mode & 0o777)
 
     def clean_scratch(self):
+        """Remove abandoned download trees and completed recovery state."""
         # The update lock excludes live downloads. Never follow a leftover
         # symlink or clean anything outside this updater's private namespace.
         for path in self.state.glob('download-*'):
+            # tempfile adds an eight-character lowercase/digit/underscore tail.
             if re.fullmatch(r'download-[a-z0-9_]{8}', path.name):
                 if path.is_symlink():
                     path.unlink()
@@ -365,6 +397,7 @@ class Updater:
             sync_directory(self.state)
 
     def clean_payload_scratch(self, members):
+        """Remove updater temporaries from validated payload parents."""
         # A hard stop can also leave a temporary sibling of a live file.
         # Match exact updater temporary names only within validated parents.
         parents = {self.destination(name).parent for name in members}
@@ -405,10 +438,12 @@ class Updater:
             link = self.destination('etc/systemd/system/' + target + '/' + name)
             self.make_directory(link.parent)
             self.install_link(link, '../' + name)
+        # The marker must become durable after all recovery inputs and units.
         atomic_file(self.pending, data=b'Offline recovery required\n',
                     mode=0o600)
 
     def recover(self, files_only=False):
+        """Revalidate and reinstall a saved transaction offline."""
         if self.recovery.is_symlink() or not self.recovery.is_dir():
             raise UpdateError('Recovery archive is missing; keep in-progress '
                               'and repair the installation locally')
@@ -433,6 +468,7 @@ class Updater:
                                          dir=self.state) as scratch:
             staged = Path(scratch) / 'stage'
             self.stage(package, members, staged)
+            # Early boot restores files without activation or version commits.
             if files_only:
                 self.install_payload(staged, members)
             else:
@@ -442,8 +478,10 @@ class Updater:
             self.log(f'Node tools recovered to version {expected}')
 
     def install_payload(self, directory, members):
+        """Replace payload and generated links while withholding versions."""
         # Read local choices before any payload is installed.
         config = (self.root / "etc/mesh.conf").read_text()
+        # Match an unquoted true acs assignment at the start of a config line.
         acs = re.search(r"^acs=(y|yes|1|true)[ \t]*$", config, re.I | re.M)
         selected = "node-manager-acs.sh" if acs else "node-manager-static.sh"
         motd = self.destination("etc/update-motd.d/50-manet-provision").parent
@@ -451,6 +489,7 @@ class Updater:
         # Space is checked again on every retry, including early boot recovery.
         self.space([(self.destination(name).parent, ((member.size + 4095) // 4096 + 1) * 4096)
                     for name, member in members.items()])
+        # Install shallow paths first, with lexical order at each depth.
         for name, member in sorted(members.items(), key=lambda pair: (pair[0].count("/"), pair[0])):
             if name in MARKERS:
                 continue
@@ -471,12 +510,14 @@ class Updater:
             self.install_link(motd / label, f"/usr/local/bin/{script}")
 
     def install(self, directory, members):
+        """Install files, activate services and commit versions after checks."""
         self.install_payload(directory, members)
         self.retire_route_fix()
         self.retire_battery_reader()
         self.retire_network_boot_units()
         run_command(["systemctl", "daemon-reload"])
         firmware_setup = self.destination('usr/local/bin/manet-mt7916-setup.sh')
+        # Bound firmware setup and service integration to ten minutes.
         output = run_command([str(firmware_setup)], timeout=600)
         for line in output.decode('utf-8', errors='replace').splitlines():
             if line.startswith('manet-mt7916-firmware:'):
@@ -504,6 +545,7 @@ class Updater:
 
     @staticmethod
     def install_link(target, link):
+        """Replace a symlink atomically and persist its directory entry."""
         with tempfile.TemporaryDirectory(prefix=".manet-link-", dir=target.parent) as scratch:
             temporary = Path(scratch) / "link"
             temporary.symlink_to(link)
@@ -511,6 +553,7 @@ class Updater:
             sync_directory(target.parent)
 
     def retire_route_fix(self):
+        """Disable and remove the route-fix unit and script."""
         unit = self.destination('etc/systemd/system/mesh-default-route-fix.service')
         if unit.exists():
             run_command(['systemctl', 'disable', '--now', 'mesh-default-route-fix.service'])
@@ -533,6 +576,7 @@ class Updater:
             self.destination(name).unlink(missing_ok=True)
 
     def retire_network_boot_units(self):
+        """Disable listed boot units and retain the AP power unit file."""
         services = ['ebtables-restore.service', 'ap-interface-setup.service',
                     'ap-txpower.service', 'manet-txpower.service',
                     'manet-halow-power.service']
@@ -551,6 +595,7 @@ class Updater:
         self.destination('etc/ebtables.rules').unlink(missing_ok=True)
 
     def update(self, recover_only=False, files_only=False):
+        """Serialize recovery or release selection, verification and install."""
         run = self.root / "run"
         run.mkdir(exist_ok=True)
         with (run / "manet-update.lock").open("a") as lock:
@@ -559,6 +604,7 @@ class Updater:
             except BlockingIOError:
                 self.log("Another tools update is already running")
                 return
+            # Pending recovery takes precedence over selection and throttling.
             pending = self.pending.exists()
             self.destination('var/lib/manet-update/placeholder')
             self.make_directory(self.state, mode=0o700)
@@ -575,6 +621,8 @@ class Updater:
                     local = "unknown"
             except (FileNotFoundError, ValueError, UpdateError):
                 local = "unknown"
+            # Routine checks use marker mtime as a one-day wall-clock throttle.
+            # A backward clock step does not count as a recent successful check.
             if (self.routine and not pending and local != "unknown"
                     and 0 <= time.time() - self.marker.stat().st_mtime < 86400):
                 return
@@ -584,6 +632,7 @@ class Updater:
                 work = Path(scratch)
                 release = select_release(self.development, self.download, work)
                 expected = release["version"]
+                # Compare decimal components so 0.10 sorts after 0.9.
                 if (local != "unknown" and not pending and not self.allow_downgrade
                         and tuple(map(int, local.split("."))) > tuple(map(int, expected.split(".")))):
                     self.marker.touch()
@@ -614,10 +663,12 @@ class Updater:
 
 
 def interrupted(signum, frame):
+    """Turn a termination signal into an update failure."""
     raise UpdateError(f"Update interrupted by signal {signum}")
 
 
 def main():
+    """Parse update mode, require root and report installation failures."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--routine", action="store_true", help="quiet daily check; errors go to the journal")
     parser.add_argument("--development", action="store_true", help="use the newest published build, including prereleases")

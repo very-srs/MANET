@@ -15,6 +15,7 @@ import manet_registry
 import manet_static_channels as static_channels
 
 
+# Quoted registry values may contain the shell escape sequence for apostrophes.
 _ENTRY = re.compile(r"^NODE_([0-9A-Fa-f]+)_([A-Z0-9_]+)='((?:[^']|'\\'')*)'$")
 
 
@@ -47,6 +48,7 @@ def _frequency(entry):
     channel = _integer(entry.get('channel'))
     if channel is None:
         return None
+    # Convert conventional channel numbers to MHz using 5 MHz spacing.
     if 1 <= channel <= 13:
         return 2407 + 5 * channel
     if 32 <= channel <= 177:
@@ -91,6 +93,7 @@ def peer_frequencies(band, nodes, own_macs):
             continue
         if not isinstance(interfaces, list):
             continue
+        # Several radios on the same frequency still count as one peer.
         seen = set()
         for entry in interfaces:
             if (not isinstance(entry, dict) or entry.get('role') != 'mesh'
@@ -117,6 +120,7 @@ def check_frequency(band, freq, nodes, own_macs):
         return 'unknown', 0, None
     on_plan = counts.get(freq, 0)
     others = {f: n for f, n in counts.items() if f != freq}
+    # Most peers wins, with the lower MHz value breaking equal-count ties.
     best_other = min(others, key=lambda f: (-others[f], f)) if others else None
     if best_other is not None and others[best_other] > on_plan:
         return 'conflict', on_plan, best_other

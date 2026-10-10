@@ -12,6 +12,7 @@ MTX_IPV6_SCRIPT="/usr/local/bin/mtx-ip.sh"
 
 # The shared ranker adds a 10 Mbit/s incumbent bias to reduce service churn.
 
+# Send a prefixed diagnostic to the MediaMTX election journal tag.
 log() {
     printf '%s\n' "MEDIAMTX-ELECTION: $1" | systemd-cat -t mediamtx-election
 }
@@ -96,6 +97,8 @@ if [ -z "$ELECTION_RESULT" ] && ! ELECTION_RESULT=$(python3 "$ELECTION_HELPER" m
     log "Cannot rank candidates; leaving the service as it is"
     exit 1
 fi
+# Ranker fields are winner MAC, biased Mbit/s score and incumbent MAC.
+# A dash represents a missing MAC.
 read -r BEST_CANDIDATE_MAC HIGHEST_TQ CURRENT_LEADER_MAC <<< "$ELECTION_RESULT"
 [ "$BEST_CANDIDATE_MAC" = - ] && BEST_CANDIDATE_MAC=""
 [ "$CURRENT_LEADER_MAC" = - ] && CURRENT_LEADER_MAC=""

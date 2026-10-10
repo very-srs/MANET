@@ -43,6 +43,7 @@ class PhoneClockDiagnostic:
 
 @dataclass(frozen=True)
 class PhoneUpdate:
+    """Report SA admission, presence recovery and any phone clock step."""
     status: str
     pinned_uid: str | None
     received_uid: str
@@ -52,6 +53,7 @@ class PhoneUpdate:
 
 @dataclass(frozen=True)
 class MarkerUpdate:
+    """Report marker acceptance or the reason it remains a candidate."""
     status: str                  # accepted, duplicate, or candidate
     reason: str
     candidate: MarkCandidate
@@ -59,6 +61,7 @@ class MarkerUpdate:
 
 @dataclass(frozen=True)
 class PhoneFix:
+    """Retain a manual point with phone identity and observation timing."""
     fix: Fix
     phone_uid: str
     source: str                  # marker or self_manual
@@ -109,6 +112,7 @@ class OutboundEvent:
 
 @dataclass
 class _Warning:
+    """Track pending chat, receipt state and monotonic reminder timing."""
     text: str
     audio: str
     phone_uid: str | None
@@ -124,6 +128,7 @@ class _Warning:
 
 @dataclass(frozen=True)
 class LocationSelection:
+    """Return selected geometry, trust state and pending service actions."""
     location: PhoneFix | None    # manual provenance, None when GPS wins
     retire_marker_uids: tuple[str, ...]
     own_gnss_selected: bool
@@ -142,10 +147,12 @@ def _distance_m(a, b):
     dlat = lat2 - lat1
     dlon = math.radians(b[1] - a[1])
     h = math.sin(dlat / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2) ** 2
+    # Mean Earth radius in metres. Clamp roundoff before the inverse sine.
     return 2 * 6371008.8 * math.asin(math.sqrt(min(1.0, max(0.0, h))))
 
 
 def _fix(point, source, phone_uid, note):
+    """Convert a phone point to manual geometry with CE90/LE90 provenance."""
     return Fix(point.lat, point.lon, "manual", hae=point.hae,
                horizontal_error=None if point.ce is None else ErrorEstimate(point.ce, 0.90),
                vertical_error=None if point.le is None else ErrorEstimate(point.le, 0.90),
@@ -169,6 +176,7 @@ class PhonePosition:
                  warning_read_timeout_s=WARNING_READ_TIMEOUT_S,
                  feed_timeout_s=EXTERNAL_POSITION_STALE_S,
                  phone_clock_step_tolerance_s=PHONE_CLOCK_STEP_TOLERANCE_S):
+        """Validate policy bounds and initialize unassociated selector state."""
         for name, value in (("receipt_max_age_s", receipt_max_age_s),
                             ("alert_threshold_m", alert_threshold_m),
                             ("gps_max_age_s", gps_max_age_s),
@@ -219,6 +227,7 @@ class PhonePosition:
         self._retirements = {}
 
     def _now(self, mono, utc):
+        """Validate caller clocks and reject backwards monotonic time."""
         mono = _number(mono, "monotonic time")
         utc = _utc(utc)
         if self._clock is not None and mono < self._clock:
@@ -252,6 +261,7 @@ class PhonePosition:
         return radio_utc if phone_time is None else phone_time
 
     def _present(self, mono):
+        """Expire the monotonic presence lease and return whether it remains."""
         if self._presence is not None and mono >= self._presence:
             self._presence = None
         return self._presence is not None
@@ -290,6 +300,7 @@ class PhonePosition:
             self._phone_ref, self._phone_mono_ref = sa.time, mono
         self._latest_time = sa.time
         self._seen_sa_times[sa.time] = None
+        # Evict by admission order, independent of phone timestamp order.
         if len(self._seen_sa_times) > PHONE_SA_HISTORY:
             del self._seen_sa_times[next(iter(self._seen_sa_times))]
         return None, phone_time, diagnostic
@@ -311,9 +322,11 @@ class PhonePosition:
         return (a > b) - (a < b)
 
     def _replace_manual(self, location):
+        """Reserve any displaced marker deletion before replacing the point."""
         previous_uid = None if self._manual is None else self._manual.marker_uid
         retiring = (previous_uid is not None and not self._manual_retired
                     and previous_uid != location.marker_uid)
+        # A full deletion queue leaves the current point intact for retry.
         if retiring and previous_uid not in self._retirements:
             if len(self._retirements) >= self.max_pending_retirements:
                 return False
@@ -348,6 +361,7 @@ class PhonePosition:
         mono, _ = self._now(receipt_mono, receipt_utc)
 
         def result(status):
+            """Report rejected SA without changing the pinned identity."""
             return PhoneUpdate(status, self.pinned_uid, sa.uid)
 
         if not from_ethernet:
@@ -361,6 +375,7 @@ class PhonePosition:
         if rejection is not None:
             return result(rejection)
         age = max(0.0, (phone_time - sa.time).total_seconds())
+        # Presence ends at either packet staleness or the receipt-age limit.
         self._presence = mono + min((sa.stale - phone_time).total_seconds(), self.receipt_max_age_s - age)
         self.pinned_uid = sa.uid
         feeding = self._feeding(mono)
@@ -381,6 +396,8 @@ class PhonePosition:
                 changed = point != self._last_user_sa_point or self._last_sa_geopointsrc != "USER"
             else:
                 changed = point != self._last_manual_sa_point
+            # Accept only actions after the last send and newer than the held
+            # mark. Feed expiry alone cannot make an echoed point a new drag.
             if (not feeding and changed and (user_selected or point != self._last_sent_point)
                     and (self._last_sent_mono is None or mono - age > self._last_sent_mono)
                     and self._manual_order(sa.time, mono - age) > 0):
@@ -419,6 +436,7 @@ class PhonePosition:
         mono, _ = self._now(receipt_mono, receipt_utc)
 
         def candidate(reason):
+            """Return the marker for review with its rejection reason."""
             return MarkerUpdate("candidate", reason, marker)
 
         if not from_ethernet:
@@ -430,6 +448,7 @@ class PhonePosition:
         if not (marker.type.startswith("a-") or marker.type == "b-m-p"
                 or marker.type.startswith("b-m-p-")):
             return candidate("not_point")
+        # Manual marker replacement must never retire the phone or radio feeds.
         external_uid = None if self.radio_uid is None else self.radio_uid + ".external-position"
         if marker.uid in (self.pinned_uid, self.radio_uid, external_uid):
             return candidate("reserved_uid")
@@ -471,6 +490,7 @@ class PhonePosition:
         return MarkerUpdate("accepted", "newest_location", marker)
 
     def _feeding(self, mono):
+        """Report whether the external-position echo guard is still active."""
         return self._feed_until is not None and mono < self._feed_until
 
     def position_sent(self, fix, sent_mono, sent_utc):
@@ -493,15 +513,18 @@ class PhonePosition:
 
     @property
     def outbound_events(self):
+        """Return pending actions in event creation order."""
         return tuple(sorted(self._events.values(), key=lambda event: event.event_id))
 
     def _emit(self, code, kind, text, *, active=True):
+        """Replace the pending action for this code/kind with a new event ID."""
         event = OutboundEvent(self._next_event_id, kind, code, text, self.pinned_uid, active)
         self._next_event_id += 1
         self._events[code, kind] = event
         return event.event_id
 
     def _warn(self, code, text, audio, *, initial_audio=True, web=False, acknowledged=False):
+        """Raise a warning once and queue chat when a phone is pinned."""
         warning = self._warnings.get(code)
         if warning is None:
             warning = self._warnings[code] = _Warning(
@@ -521,11 +544,13 @@ class PhonePosition:
         self._events.pop((code, "audio"), None)
 
     def _ack_gesture(self, action_mono):
+        """Silence warnings raised no later than the admitted user action."""
         for code, warning in self._warnings.items():
             if action_mono >= warning.raised_mono:
                 self._ack_warning(code, warning)
 
     def _clear_warning(self, code, *, web=False):
+        """Remove a warning and queue an optional web-banner clear."""
         if self._warnings.pop(code, None) is None:
             return
         for kind in ("geochat", "audio", "web_ui"):
@@ -562,6 +587,7 @@ class PhonePosition:
         return True
 
     def _message_rejection(self, message, phone_time, from_ethernet):
+        """Check wired ingress, pinned identities and phone-clock freshness."""
         if not from_ethernet:
             return "wrong_ingress"
         if self.pinned_uid is None or message.sender_uid != self.pinned_uid:
@@ -608,6 +634,7 @@ class PhonePosition:
         if item is None:
             return "unknown_message"
         code, warning = item
+        # Reproject the send epoch through the current phone-clock generation.
         if (self.phone_now(warning.sent_mono) - receipt.time).total_seconds() > self.future_tolerance_s:
             return "predates_message"
         if warning.read or (warning.delivered and receipt.status == "delivered"):
@@ -619,6 +646,7 @@ class PhonePosition:
         return receipt.status
 
     def _remind(self, mono):
+        """Queue due unacknowledged audio reminders without duplicating jobs."""
         for code, warning in self._warnings.items():
             if not warning.acknowledged and warning.deadline is not None and mono >= warning.deadline:
                 if (code, "audio") not in self._events:
@@ -663,6 +691,7 @@ class PhonePosition:
             jammed = radio_gps.jammed
             condition = (radio_gps.state, jammed)
             bad = radio_gps.state in (_GPS_STATES - _TRUSTED - {"NO_FIX"}) or jammed
+            # New producer epochs revoke trust even if the bad state repeats.
             fault = (radio_gps.fault_epoch > self._fault_epoch
                      or (bad and condition != self._fault_condition))
             agrees = fresh and not jammed and state != "NO_FIX" and (
@@ -681,6 +710,7 @@ class PhonePosition:
             mark = self._manual
             distance = _distance_m((gps_fix.lat, gps_fix.lon), (mark.fix.lat, mark.fix.lon))
             epoch = (mark.clock_generation, mark.observation_time)
+            # Evaluate each manual observation once unless retirement is full.
             if self._checked_manual_epoch != epoch:
                 checked = True
                 if distance > self.alert_threshold_m:

@@ -33,6 +33,7 @@ PENDING = ('run/manet-avahi-restart-needed', 'run/manet-avahi-host-reload-needed
 
 @lru_cache(maxsize=16)
 def module(name):
+    """Load and cache a sibling Python helper by its script name."""
     spec = importlib.util.spec_from_file_location(name.replace('-', '_'), TOOLS / (name + '.py'))
     result = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(result)
@@ -40,6 +41,7 @@ def module(name):
 
 
 def file_inputs(root=Path('/')):
+    """Snapshot reconciliation files, pending work, MACs and helper metadata."""
     values = {}
     override = os.environ.get('MESH_CLAIMED_CHUNKS_FILE')
     for name in INPUTS:
@@ -51,6 +53,7 @@ def file_inputs(root=Path('/')):
     values['pending'] = [name for name in PENDING if (root / name).exists()]
     values['macs'] = {p.parent.name: p.read_text().strip()
                       for p in sorted((root / 'sys/class/net').glob('*/address'))}
+    # Changes to allocator helpers invalidate an otherwise identical snapshot.
     values['tools'] = [(name, (TOOLS / name).stat().st_mtime_ns, (TOOLS / name).stat().st_size)
                        for name in ('manet_ip_runtime.py', 'manet_node_ipv4.py', 'mesh-ip-manager.sh',
                                     'manet-ui-firewall.sh', 'manet-ipcalc.sh')]
@@ -58,8 +61,10 @@ def file_inputs(root=Path('/')):
 
 
 def addresses():
+    """Return sorted IPv4 address/prefix pairs currently assigned to br0."""
     raw = subprocess.run(['ip', '-j', '-4', 'addr', 'show', 'dev', 'br0'],
                          check=True, capture_output=True, text=True, timeout=3).stdout
+    # Normalize ip JSON order before comparing or caching address snapshots.
     return sorted((a['local'], a['prefixlen']) for link in json.loads(raw)
                   for a in link.get('addr_info', []) if a.get('family') == 'inet')
 
@@ -76,6 +81,7 @@ def healthy_allocation(files, live, ready, active):
         size = int(files['var/run/my_ipv4_chunk_size'])
         if chunk < 0 or not 2 <= size <= 255:
             return False
+        # Allocation starts after the network address and five reserved hosts.
         first = int(network.network_address) + 6 + chunk * size
         if first + size - 1 >= int(network.broadcast_address):
             return False
@@ -101,6 +107,7 @@ def healthy_allocation(files, live, ready, active):
 
 
 def reconcile():
+    """Run live IP preflight and skip only a verified unchanged allocation."""
     env = dict(os.environ, MANET_IP_CHECKED='1')
     cache_path = Path('/run/manet-ip-runtime.json')
     startup = module('mesh-ip-startup')
@@ -125,10 +132,12 @@ def reconcile():
     if startup_ready and isolated and address_ok:
         try:
             files = file_inputs()
+            # Live service/firewall probes each have a five-second budget.
             service = subprocess.run(['systemctl', 'is-active', 'dnsmasq.service'],
                                      capture_output=True, text=True, timeout=5)
             ui = subprocess.run(['nft', 'list', 'table', 'inet', 'manet_ui'],
                                 capture_output=True, text=True, timeout=5)
+            # Status 3 means not active, still a usable service observation.
             eligible = (bool(primary) and service.returncode in (0, 3) and ui.returncode == 0
                         and healthy_allocation(files, live, ready, service.returncode == 0))
             before = json.dumps([files, live, ready, service.stdout], sort_keys=True)
@@ -146,6 +155,7 @@ def reconcile():
 
 
 def main():
+    """Serialize one IP reconciliation with a ten-second lock deadline."""
     with Path('/run/manet-ip-runtime.lock').open('a') as lock:
         # Bound concurrent dispatcher waits just as the registry builder does.
         deadline = time.monotonic() + 10
@@ -156,6 +166,7 @@ def main():
             except BlockingIOError:
                 if time.monotonic() >= deadline:
                     raise TimeoutError('IP reconciliation busy')
+                # Retry nonblocking acquisition every 50 ms.
                 time.sleep(.05)
         return reconcile()
 

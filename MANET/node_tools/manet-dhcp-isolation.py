@@ -17,14 +17,17 @@ TABLE = 'manet_dhcp'
 RULES = Path(os.environ.get('MANET_DHCP_RULES', '/usr/local/share/manet/dhcp-isolation.nft'))
 NFT = os.environ.get('NFT', 'nft')
 LOCK = Path(os.environ.get('MANET_DHCP_LOCK', '/run/manet-dhcp-isolation.lock'))
+# NetBIOS, SSDP, WS-Discovery, mDNS and LLMNR stay on the local EUD link.
 DISCOVERY_PORTS = {'udp': [137, 138, 1900, 3702, 5353, 5355], 'tcp': [137, 5355]}
 
 
 def run(*args):
+    """Run nft with a ten-second timeout and return checked stdout."""
     return subprocess.run([NFT, *args], check=True, capture_output=True, text=True, timeout=10).stdout
 
 
 def match(left, right):
+    """Build an nft JSON equality expression."""
     return {'match': {'op': '==', 'left': left, 'right': right}}
 
 
@@ -34,6 +37,7 @@ def _canonical_expr(expr):
     A transport payload implies l4proto. An ip/ip6 payload implies the matching
     EtherType. Keep all actual address, port, interface and verdict checks.
     """
+    # Walk backward so a later payload read can imply an earlier dependency.
     later, kept = set(), []
     for entry in reversed(expr):
         m = entry.get('match')
@@ -74,6 +78,7 @@ def valid_rules(data):
             if (kind not in ('table', 'chain', 'rule', 'metainfo') and isinstance(obj, dict)
                     and obj.get('family') == 'bridge' and obj.get('table') == TABLE):
                 return False
+    # Compare ordered rules, not just membership in an unordered rule set.
     expected = {}
     for chain, direction, field, ports in (
             ('forward', 'iifname', 'dport', {'set': [67, 68]}),
@@ -86,6 +91,7 @@ def valid_rules(data):
             match({'payload': {'protocol': 'udp', 'field': field}}, ports),
             {'drop': None},
         ])
+    # Block discovery in both directions for IPv4 and IPv6 on bat0.
     for family in ('ip', 'ip6'):
         for protocol, ports in DISCOVERY_PORTS.items():
             for field in ('dport', 'sport'):
@@ -104,6 +110,7 @@ def valid_rules(data):
 
 
 def check():
+    """Verify the live bridge policy, returning False on observation errors."""
     try:
         return valid_rules(json.loads(run('-j', 'list', 'table', 'bridge', TABLE)))
     except (subprocess.SubprocessError, OSError, ValueError, KeyError, TypeError, AttributeError):
@@ -132,6 +139,7 @@ def eud_ready(sysnet=None):
 
 
 def atomic_write(path, contents):
+    """Replace an existing file, retaining ownership and permission bits."""
     info = path.stat()
     temporary = None
     try:
@@ -142,6 +150,7 @@ def atomic_write(path, contents):
             os.fchmod(stream.fileno(), info.st_mode & 0o777)
             os.fchown(stream.fileno(), info.st_uid, info.st_gid)
             os.fsync(stream.fileno())
+        # Publish only a complete, flushed file on the same filesystem.
         os.replace(temporary, path)
     finally:
         if temporary and os.path.exists(temporary):
@@ -163,6 +172,7 @@ def configure_avahi(protected, root=Path('/')):
         ap = (root / 'var/lib/no_mesh_if').read_text().splitlines()[0].strip()
     except (OSError, IndexError):
         ap = ''
+    # Accept a bounded interface name before adding it to Avahi policy.
     if re.fullmatch(r'[a-zA-Z0-9_.:-]{1,15}', ap) and ap not in ('br0', 'bat0'):
         allowed.append(ap)
     if protected and (root / 'sys/class/net/br0').exists():
@@ -195,6 +205,7 @@ def configure_avahi(protected, root=Path('/')):
     if not updates and not pending.exists():
         return
     pending.parent.mkdir(parents=True, exist_ok=True)
+    # Write the retry marker before changing config or invoking systemd.
     pending.touch()
     for path, contents in updates.items():
         atomic_write(path, contents)
@@ -217,6 +228,7 @@ def ensure(apply=False):
     LOCK.parent.mkdir(parents=True, exist_ok=True)
     with LOCK.open('a') as lock:
         import time
+        # Allow 15 seconds for the policy lock, polling every 100 ms.
         deadline = time.monotonic() + 15
         while True:
             try:
@@ -238,6 +250,7 @@ def ensure(apply=False):
 
 
 def main():
+    """Check, install or reconcile isolation, or return EUD readiness status."""
     mode = sys.argv[1:]
     if mode == ['eud-ready']:
         sys.exit(0 if eud_ready() else 1)

@@ -12,16 +12,21 @@ REPOSITORY = "very-srs/MANET"
 API = f"https://api.github.com/repos/{REPOSITORY}"
 DOWNLOADS = f"https://github.com/{REPOSITORY}/releases/download"
 STABLE_MANIFEST = f"https://github.com/{REPOSITORY}/releases/latest/download/manet-release.json"
+# Release tags contain a v prefix and at least two decimal version components.
 TAG_PATTERN = re.compile(r"v([0-9]+(?:\.[0-9]+)+)")
 BOARDS = ("cm4", "r3a", "rpi5")
 PACKAGES = tuple(f"{board}-{kind}.tar.gz" for board in BOARDS for kind in ("tools", "install"))
 
 
 class ReleaseError(ValueError):
+    """Report invalid release metadata or an unsuccessful download."""
     pass
 
 
 def download(url, destination, limit):
+    """Fetch an HTTPS asset with bounded size, retries and timeouts."""
+    # HTTPS applies to redirects too. Each attempt has a 120 s limit and a
+    # 10 s connection limit, with two retries inside a 380 s process deadline.
     result = subprocess.run([
         "curl", "--fail", "--silent", "--show-error", "--location",
         "--proto", "=https", "--proto-redir", "=https",
@@ -36,7 +41,9 @@ def download(url, destination, limit):
 
 
 def release_list(fetch_json):
+    """Read all release pages, rejecting an incomplete bounded listing."""
     releases = []
+    # Stop only at a short page so selection never uses a partial release list.
     for page in range(1, 101):
         batch = fetch_json(f"{API}/releases?per_page=100&page={page}")
         if not isinstance(batch, list):
@@ -48,26 +55,31 @@ def release_list(fetch_json):
 
 
 def newest_release(releases):
+    """Select the latest published MANET build, including prereleases."""
     eligible = [r for r in releases if not r.get("draft")
                 and TAG_PATTERN.fullmatch(r.get("tag_name", ""))
                 and r.get("published_at")
                 and any(a.get("name") == "manet-release.json" for a in r.get("assets", []))]
     if not eligible:
         raise ReleaseError("No published MANET release is available")
+    # Publication time chooses the build, with the release ID breaking ties.
     return max(eligible, key=lambda r: (r["published_at"], r["id"]))
 
 
 def validate_manifest(value, tag=None):
+    """Check schema, version and asset metadata before downloading."""
     if not isinstance(value, dict) or value.get("schema") != 1:
         raise ReleaseError("Unsupported MANET release manifest")
     match = TAG_PATTERN.fullmatch(value.get("tag", ""))
     if not match or match[1] != value.get("version") or (tag and tag != value["tag"]):
         raise ReleaseError("Release tag and version disagree")
+    # Source commits use full lowercase SHA-1 object IDs.
     if not re.fullmatch(r"[0-9a-f]{40}", value.get("commit", "")):
         raise ReleaseError("Invalid source commit")
     assets = value.get("assets", {})
     if not isinstance(assets, dict) or not all(name in assets for name in PACKAGES):
         raise ReleaseError("Release does not contain packages for all boards")
+    # Restrict asset names to flat filenames and require SHA-256 hex digests.
     for name, asset in assets.items():
         if (not re.fullmatch(r"[A-Za-z0-9_. -]+", name)
                 or not isinstance(asset, dict)
@@ -78,13 +90,17 @@ def validate_manifest(value, tag=None):
 
 
 def select_release(development=False, fetch=download, directory=None):
+    """Fetch the stable manifest or the newest development manifest."""
     with tempfile.TemporaryDirectory(prefix="manet-release-", dir=directory) as scratch:
         target = Path(scratch) / "metadata.json"
 
         def fetch_json(url):
+            """Download and decode metadata with a four-MiB size limit."""
             fetch(url, target, 4 * 1024 * 1024)
             return json.loads(target.read_text(encoding="utf-8"))
 
+        # Stable follows GitHub's Latest pointer. Development scans publication
+        # times and also accepts prereleases.
         tag = None
         url = STABLE_MANIFEST
         if development:
@@ -94,17 +110,20 @@ def select_release(development=False, fetch=download, directory=None):
 
 
 def asset_url(manifest, name):
+    """Build a tagged download URL for a declared manifest asset."""
     if name not in manifest["assets"]:
         raise ReleaseError(f"Release is missing {name}")
     return f"{DOWNLOADS}/{manifest['tag']}/{quote(name)}"
 
 
 def verify_asset(path, asset):
+    """Check the downloaded file against its declared size and digest."""
     path = Path(path)
     if path.stat().st_size != asset["size"]:
         raise ReleaseError(f"Wrong size for {path.name}")
     digest = hashlib.sha256()
     with path.open("rb") as stream:
+        # Hash in one-MiB chunks without loading a package into memory.
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
     if digest.hexdigest() != asset["sha256"]:

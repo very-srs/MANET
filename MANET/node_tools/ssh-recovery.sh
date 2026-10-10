@@ -3,12 +3,14 @@
 
 set -u
 
+# Print the SSH recovery message to stderr.
 log() {
     printf '%s\n' "SSH-RECOVERY: $1" >&2
 }
 
 RADIO_PASSWORD=""
 if [ -f /etc/mesh.conf ]; then
+    # Preserve any equals signs within the stored password value.
     RADIO_PASSWORD=$(awk -F= '$1 == "radio_password" {print substr($0, index($0, "=") + 1); exit}' /etc/mesh.conf)
 fi
 
@@ -28,6 +30,7 @@ mkdir -p /home/radio/.ssh /etc/ssh/sshd_config.d
 chmod 700 /home/radio/.ssh
 chown -R radio:radio /home/radio/.ssh
 
+# Enable password/public-key authentication and prohibit root passwords.
 cat << EOF > /etc/ssh/sshd_config.d/10-manet.conf
 PasswordAuthentication yes
 KbdInteractiveAuthentication no
@@ -36,11 +39,13 @@ UsePAM yes
 PermitRootLogin prohibit-password
 EOF
 
+# Generate missing host keys before enabling and restarting the daemon.
 ssh-keygen -A 2>/dev/null || true
 systemctl unmask ssh.service 2>/dev/null || true
 systemctl enable ssh.service 2>/dev/null || systemctl enable ssh 2>/dev/null || true
 systemctl restart ssh.service 2>/dev/null || systemctl restart ssh 2>/dev/null || true
 
+# ss column four is the local endpoint, ending in :22 for either family.
 if ss -ltn 2>/dev/null | awk '{print $4}' | grep -Eq '(^|:)22$'; then
     log "SSH is listening on port 22"
 else

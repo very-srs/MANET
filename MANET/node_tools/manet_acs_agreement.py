@@ -10,6 +10,7 @@ import json
 import re
 from manet_rendezvous import RECOVERY_SECONDS
 
+# Round offsets, vote deadlines and activation margins are in seconds.
 ROUND_SECONDS = 180
 PROPOSE_FROM = 45  # Allow the :25 readiness requests to replicate first.
 PROPOSE_UNTIL = 60
@@ -18,25 +19,31 @@ ACTIVATION_LEAD = 30
 COMMIT_CUTOFF = 5
 APPLY_GRACE = 5
 MAX_MEMBERS = 64
+# Candidate frequencies are MHz, keyed by conventional Wi-Fi band.
 CHANNELS = {'2.4': {2437, 2462}, '5': {5200, 5220, 5240, 5745, 5765, 5785, 5805, 5825}}
+# Membership uses lowercase MACs and 32-hex boot/nonce tokens.
 MAC = re.compile(r'(?:[0-9a-f]{2}:){5}[0-9a-f]{2}')
 TOKEN = re.compile(r'[0-9a-f]{32}')
 
 
 class AgreementError(ValueError):
+    """Reject an invalid participant view or channel proposal."""
     pass
 
 
 def digest(plan):
+    """Hash canonical proposal JSON so votes bind the complete plan."""
     return hashlib.sha256(json.dumps(plan, sort_keys=True, separators=(',', ':'),
                                     allow_nan=False).encode()).hexdigest()
 
 
 def snapshot(status):
+    """Capture the boot and current channels used to guard a promise."""
     return {'boot': status['boot'], 'current': status['current']}
 
 
 def valid_status(status):
+    """Check the boot token, readiness flags and per-band frequencies."""
     if not isinstance(status, dict):
         return False
     if not isinstance(status.get('boot'), str) or not TOKEN.fullmatch(status['boot']):
@@ -56,6 +63,7 @@ def valid_status(status):
 
 
 def validate_view(view):
+    """Reject malformed membership, status records or oversized views."""
     if (not isinstance(view, dict) or not 1 <= len(view) <= MAX_MEMBERS
             or any(not isinstance(mac, str) or not MAC.fullmatch(mac)
                    or (status is not None and not valid_status(status)) for mac, status in view.items())):
@@ -63,19 +71,23 @@ def validate_view(view):
 
 
 def coordinator(view):
+    """Choose the lowest ready ACS MAC with a current Wi-Fi band."""
     candidates = [mac for mac, s in view.items() if s and s['acs'] and s['ready'] and s['current']]
     return min(candidates) if candidates else None
 
 
 def majority(plan):
+    """Return the strict majority threshold for proposal membership."""
     return len(plan['participants']) // 2 + 1
 
 
 def make_plan(view, channels, limp, now, nonce):
+    """Build and validate a fixed-deadline proposal from the current view."""
     validate_view(view)
     leader = coordinator(view)
     if leader is None:
         raise AgreementError('no ready ACS coordinator')
+    # Unknown status keeps membership but leaves the boot token unbound.
     plan = {'round': now // ROUND_SECONDS, 'created': now,
             'deadline': now + VOTE_TIMEOUT, 'activate_at': now + VOTE_TIMEOUT + ACTIVATION_LEAD,
             'nonce': nonce, 'leader': leader, 'channels': channels, 'limp': limp,
@@ -87,11 +99,13 @@ def make_plan(view, channels, limp, now, nonce):
 
 
 def validate_plan(plan):
+    """Validate exact fields, timing, membership and target frequencies."""
     keys = {'round', 'created', 'deadline', 'activate_at', 'nonce', 'leader', 'channels', 'limp', 'moving', 'participants'}
     if not isinstance(plan, dict) or set(plan) != keys:
         raise AgreementError('invalid proposal fields')
     if any(type(plan[k]) is not int or plan[k] < 0 for k in ('round', 'created', 'deadline', 'activate_at')):
         raise AgreementError('invalid proposal times')
+    # Creation is limited to seconds 45 through 60 of a 180-second round.
     if (not PROPOSE_FROM <= plan['created'] % ROUND_SECONDS <= PROPOSE_UNTIL
             or plan['created'] // ROUND_SECONDS != plan['round']
             or plan['deadline'] != plan['created'] + VOTE_TIMEOUT
@@ -117,8 +131,10 @@ def validate_plan(plan):
 
 
 def compatible(channels, status):
+    """Check target support on bands present in the supplied status."""
     if not valid_status(status):
         return False
+    # A missing local band imposes no constraint on the shared plan.
     for band, freq in channels.items():
         if band in status['current']:
             if freq not in status['allowed'][band] or (not status['acs'] and freq != status['current'][band]):
@@ -127,6 +143,7 @@ def compatible(channels, status):
 
 
 def can_vote(plan, own, view, now):
+    """Require matching membership, coordinator, boot and a live deadline."""
     validate_plan(plan)
     validate_view(view)
     status = view.get(own)
@@ -211,6 +228,7 @@ def advance(saved, own, now, view, records, proposal=None, local=None):
     """
     state = deepcopy(saved)
     current_round = now // ROUND_SECONDS
+    # A backward clock step cannot reopen a completed or promised round.
     if current_round < state.get('round', -1):
         return state, {}, None
     if current_round > state.get('round', -1):
@@ -238,6 +256,7 @@ def advance(saved, own, now, view, records, proposal=None, local=None):
     if view and set(view) - set(plan['participants']) and 'commit' not in state:
         state['phase'] = 'expired'
         return state, {}, None
+    # Reboot or a channel change invalidates the local promise.
     if not local or snapshot(local) != state['local']:
         state['phase'] = 'expired'
         return state, {}, None
@@ -250,6 +269,7 @@ def advance(saved, own, now, view, records, proposal=None, local=None):
                         and vote['plan'] == plan_id and isinstance(vote['boot'], str)
                         and TOKEN.fullmatch(vote['boot']) and boot in (None, vote['boot'])):
                     state['votes'][mac] = vote['boot']
+        # Commit after voting closes, with at least five seconds to activate.
         elif now < plan['activate_at'] - COMMIT_CUTOFF:
             if len(state['votes']) >= majority(plan):
                 state['commit'] = {'plan': plan_id, 'approvals': deepcopy(state['votes']), 'issued_at': now}
@@ -266,6 +286,7 @@ def advance(saved, own, now, view, records, proposal=None, local=None):
     outgoing['vote'] = {'plan': plan_id, 'boot': local['boot']}
     if 'commit' in state:
         outgoing['commit'] = state['commit']
+    # Apply once, no later than five seconds after the agreed activation.
     if now >= plan['activate_at']:
         if 'commit' in state and now <= plan['activate_at'] + APPLY_GRACE:
             state['phase'] = 'attempted'

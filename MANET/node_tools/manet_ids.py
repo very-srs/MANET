@@ -36,6 +36,7 @@ def _luhn32(chars):
         codepoint = _B32_ALPHABET.index(ch)
         addend = factor * codepoint
         factor = 1 if factor == 2 else 2
+        # Sum the two base-32 digits of each weighted character.
         addend = (addend // n) + (addend % n)
         total += addend
     return _B32_ALPHABET[(n - (total % n)) % n]
@@ -46,6 +47,7 @@ def _unluhnify(s):
     if len(s) != 56:
         raise ValueError(f'expected 56 characters, got {len(s)}')
     out = []
+    # Each group has 13 payload characters followed by one check character.
     for i in range(4):
         chunk = s[i * 14:(i + 1) * 14]
         if _luhn32(chunk[:13]) != chunk[13]:
@@ -73,6 +75,7 @@ def syncthing_id_to_bytes(device_id):
             s = _unluhnify(s)
         if len(s) != 52:
             return b''
+        # Restore four padding characters to decode the 52-character payload.
         return base64.b32decode(s + '====')
     except Exception:
         return b''
@@ -92,7 +95,7 @@ def bytes_to_syncthing_id(raw):
 
 
 def ipv4_to_int(addr):
-    """'10.30.2.243' -> 169738483. 0 if unparseable."""
+    """'10.30.2.243' -> 169738995. 0 if unparseable."""
     parts = str(addr or '').strip().split('.')
     if len(parts) != 4:
         return 0
@@ -102,11 +105,12 @@ def ipv4_to_int(addr):
         return 0
     if any(o < 0 or o > 255 for o in octets):
         return 0
+    # Pack the first dotted octet into the most significant byte.
     return int.from_bytes(bytes(octets), 'big')
 
 
 def int_to_ipv4(value):
-    """169738483 -> '10.30.2.243'. '' if zero/unset."""
+    """169738995 -> '10.30.2.243'. '' if zero/unset."""
     try:
         value = int(value)
     except (TypeError, ValueError):

@@ -46,25 +46,31 @@ import manet_ranging_radio as radio_api
 import manet_spoof as spoof
 import ranging_pb2 as pb
 
+# Freshness limits in seconds for status files, fixes and Alfred hints.
 INPUT_TTL = 6.0
 GPS_TTL = 5.0
 HINT_TTL = 240.0
+# Bound each JSON input and publication to 128 KiB.
 MAX_JSON = 131072
+# Match six colon-separated hexadecimal MAC octets.
 MAC = r'(?:[0-9a-f]{2}:){5}[0-9a-f]{2}'
 QUALITIES = {'good', 'best_guess', 'candidates', 'ring', 'none'}
 
 
 def number(value):
+    """Require a finite numeric value, excluding booleans."""
     if type(value) not in (int, float) or not math.isfinite(value):
         raise ValueError('finite number required')
     return float(value)
 
 
 def read_json(path):
+    """Read a bounded JSON object and reject nonfinite constants."""
     with open(path, 'rb') as stream:
         data = stream.read(MAX_JSON + 1)
     if len(data) > MAX_JSON:
         raise ValueError('oversized JSON')
+    # Reject JSON NaN/Infinity tokens through the numeric validator.
     doc = json.loads(data, parse_constant=lambda x: number(x))
     if not isinstance(doc, dict):
         raise ValueError('object required')
@@ -72,6 +78,7 @@ def read_json(path):
 
 
 def atomic_json(path, value):
+    """Replace a JSON publication without exposing a partial write."""
     path = Path(path)
     data = json.dumps(value, allow_nan=False, separators=(',', ':')).encode()
     if len(data) > MAX_JSON:
@@ -84,6 +91,7 @@ def atomic_json(path, value):
 
 
 def read_config(path):
+    """Read literal mesh.conf assignments without shell evaluation."""
     result = {}
     for line in Path(path).read_text().splitlines():
         line = line.strip()
@@ -95,6 +103,7 @@ def read_config(path):
 
 @dataclass(frozen=True)
 class Config:
+    """Hold positioning policy, uncertainty assumptions and solve limits."""
     node_id: str
     enabled: bool = False
     radio: str = 'radio_adapter'
@@ -108,6 +117,8 @@ class Config:
     result_ttl_s: float = 90.0
 
     def __post_init__(self):
+        """Validate identifiers, policy values and positive numeric limits."""
+        # Interface names allow 15 safe characters with no leading dot.
         if (not isinstance(self.node_id, str) or not 0 < len(self.node_id.encode()) <= 32
                 or self.radio not in ('radio_adapter', 'simulated')
                 or not re.fullmatch(r'[A-Za-z0-9_-][A-Za-z0-9_.-]{0,14}', self.interface)
@@ -119,9 +130,11 @@ class Config:
 
     @classmethod
     def load(cls, path='/etc/mesh.conf'):
+        """Load opt-in positioning settings and the local node identity."""
         c = read_config(path)
         enabled = c.get('positioning', 'n').lower() == 'y'
         node_id = c.get('positioning_node_id')
+        # A disabled service needs no live bridge identity.
         if not node_id:
             node_id = Path('/sys/class/net/br0/address').read_text().strip() if enabled else 'disabled'
         return cls(node_id, enabled, c.get('positioning_radio', 'radio_adapter'),
@@ -134,18 +147,21 @@ class Config:
 
 @dataclass(frozen=True)
 class Now:
+    """Carry monotonic, raw and suspend-aware boot times in seconds."""
     mono: float
     raw: float
     boot: float
 
     @classmethod
     def read(cls):
+        """Read the three local clocks used for freshness and scheduling."""
         return cls(time.monotonic(), time.clock_gettime(time.CLOCK_MONOTONIC_RAW),
                    time.clock_gettime(time.CLOCK_BOOTTIME))
 
 
 @dataclass(frozen=True)
 class Receiver:
+    """Carry a local GNSS fix, its monotonic epoch and trust inputs."""
     fix: dict | None = None
     observed: float = 0.0
     devices: bool | None = None
@@ -157,6 +173,7 @@ class Receiver:
 
 def receiver_document(doc, now, boot_id, jammed=False):
     """Map raw-clock receiver epochs locally without remote or wall time."""
+    # BOOTTIME bounds file age across suspend, within the current boot.
     if (doc.get('schema') != 2 or doc.get('boot_id') != boot_id or
             doc.get('clock') != 'monotonic_raw' or
             not 0 <= now.boot - number(doc.get('written_boot')) < INPUT_TTL):
@@ -167,6 +184,7 @@ def receiver_document(doc, now, boot_id, jammed=False):
     sample = doc.get('sample')
     fix, observed = None, now.mono
     if doc.get('has_fix') is True and isinstance(sample, dict):
+        # Translate only the sample's age between the two local clocks.
         age = now.raw - number(sample.get('mono'))
         if sample.get('mode', 0) >= 2 and 0 <= age < GPS_TTL:
             lat, lon = number(sample.get('lat')), number(sample.get('lon'))
@@ -178,6 +196,7 @@ def receiver_document(doc, now, boot_id, jammed=False):
     events = doc.get('events', [])
     if not isinstance(events, list):
         raise ValueError('invalid event list')
+    # Mark events within 60 s as suspect input for audit scheduling.
     suspect = any(isinstance(e, dict) and type(e.get('mono')) in (int, float)
                   and 0 <= now.raw - e['mono'] < 60 for e in events)
     return Receiver(fix, observed, None if devices is None else bool(devices),
@@ -187,6 +206,7 @@ def receiver_document(doc, now, boot_id, jammed=False):
 
 @dataclass(frozen=True)
 class Neighbour:
+    """Pair a discovered radio peer with optional anchor metadata."""
     peer: ranging.Peer
     anchor: locate.Anchor | None
     gnss: bool = False
@@ -205,8 +225,11 @@ class Inbound:
 
 
 def alfred_records(text, message_type):
+    """Decode bounded Alfred MAC/base64 records into protobuf messages."""
     records = {}
+    # Alfred emits brace-delimited MAC and base64 strings.
     for mac, payload in re.findall(r'\{\s*"(' + MAC + r')"\s*,\s*"([A-Za-z0-9+/=]+)"\s*\}', text, re.I):
+        # Keep at most 64 records, each with at most 16 KiB of base64.
         if len(records) >= 64 or len(payload) > 16384:
             continue
         try:
@@ -226,16 +249,20 @@ class Discovery:
     Unchanged payloads age locally even on repeated reads.
     """
     def __init__(self, config):
+        """Start a local payload-age cache for the configured interface."""
         self.config, self.seen = config, {}
 
     def parse(self, identities, telemetry, neighbours, stations, now):
+        """Join telemetry hints with direct BATMAN and iw station evidence."""
         identities = alfred_records(identities, node_pb.NodeIdentity)
         telemetry = alfred_records(telemetry, node_pb.NodeTelemetry)
         direct = set()
+        # BATMAN brackets the outgoing interface in direct-neighbour rows.
         for line in neighbours.lower().splitlines():
             if self.config.interface.lower() in line.replace('[', ' ').replace(']', ' ').split():
                 direct.update(re.findall(MAC, line))
         signals, current = {}, None
+        # iw groups signal values in dBm under each Station MAC header.
         for line in stations.lower().splitlines():
             m = re.match(r'station (' + MAC + r')\b', line)
             if m:
@@ -244,7 +271,9 @@ class Discovery:
             if m and current:
                 signals[current] = float(m[1])
         output, retained = {}, {}
+        # Stable node order determines which peers fit the 15-peer budget.
         for node_id, (t, payload) in sorted(telemetry.items()):
+            # Repeated unchanged advertisements retain their first local age.
             digest = hashlib.sha256(payload.encode()).digest()
             old = self.seen.get(node_id)
             first = old[1] if old and old[0] == digest else now
@@ -254,6 +283,7 @@ class Discovery:
             macs = {node_id}
             if node_id in identities:
                 macs.update(m.hex(':') for m in identities[node_id][0].mac_addresses if len(m) == 6)
+            # Require one station MAC shared by node aliases and both probes.
             links = sorted(macs & direct & signals.keys())
             if len(links) != 1 or len(output) >= 15:
                 continue
@@ -298,12 +328,15 @@ class HelperRadio:
     reason = 'R3 helper unavailable: ' + radio_api.ASSOCIATION_GAP
 
     def authorize(self, peer):
+        """Deny peers while the authenticated helper is unavailable."""
         return False
 
     def poll(self):
+        """Return no events from the unavailable helper."""
         return ()
 
     def arm_responder(self, *args):
+        """Reject operations that require an available radio helper."""
         raise radio_api.AssociationUnavailable(self.reason)
 
     send_burst = arm_responder
@@ -312,17 +345,22 @@ class HelperRadio:
     send_control = arm_responder
 
     def disarm(self):
+        """Leave the placeholder's unowned radio state untouched."""
         pass
 
     def restore_ack(self):
+        """Leave ACK settings untouched because none are acquired."""
         pass
 
     def close(self):
+        """Finish the placeholder with no helper resources to release."""
         pass
 
 
 class Service:
+    """Coordinate ranging, GNSS audits, fallback solves and publications."""
     def __init__(self, config, radio, clock, boot_id, *, checkpoint=None, nonce=None):
+        """Create service state and optionally restore same-boot quarantine."""
         self.config, self.radio, self.clock, self.boot_id = config, radio, clock, boot_id
         self.monitor = spoof.Monitor()
         self.scheduler = spoof.Scheduler(self.monitor)
@@ -335,6 +373,7 @@ class Service:
         self.previous = None
         self.job, self.observations, self.sessions = None, [], {}
         self.next_solve, self.next_audit = 0.0, 0.0
+        # Spread initial audits over 5..14.99 s using a stable node hash.
         self.next_audit = clock().mono + 5 + int.from_bytes(
             hashlib.sha256(config.node_id.encode()).digest()[:2], 'big') % 1000 / 100
         self.backoff = config.solve_interval_s
@@ -348,14 +387,17 @@ class Service:
             self.restore(checkpoint)
 
     def eligible(self, peer):
+        """Require enabled ranging and a matching current mesh neighbour."""
         n = self.neighbours.get(peer.node_id)
         return bool(self.config.enabled and self.radio.can_range and self.mesh and
                     n is not None and n.peer == peer)
 
     def update(self, receiver, neighbours=None, *, mesh=None):
+        """Refresh receiver, neighbour and mesh-role inputs."""
         self.receiver = receiver
         self.had_fix |= receiver.had_fix or receiver.fix is not None
         if neighbours is not None:
+            # Retain at most 15 peers in node-ID order.
             self.neighbours = dict(sorted(neighbours.items())[:15])
         if mesh is not None:
             self.mesh = mesh
@@ -371,11 +413,13 @@ class Service:
         self.neighbours_since = (self.neighbours_since if self.neighbours_since is not None else now) if has_neighbour else None
 
     def fresh_receiver(self):
+        """Check the local fix against the five-second freshness budget."""
         return self.receiver.fix is not None and 0 <= self.clock().mono - self.receiver.observed < GPS_TTL
 
     def monitor_states(self, *, force=False):
         # Attribution can enumerate subsets. Refresh on evidence immediately,
         # otherwise at 4 Hz, not on every probe, poll and publication call.
+        """Cache attribution results between evidence or timed refreshes."""
         now = self.clock().mono
         if force or self._states_cache is None or now >= self._states_due:
             self._states_cache = self.monitor.states(now)
@@ -383,6 +427,7 @@ class Service:
         return self._states_cache
 
     def state(self):
+        """Combine local fix freshness, quarantine and range evidence."""
         now = self.clock().mono
         state = self.monitor_states().get(self.config.node_id, (spoof.UNCHECKED, {}))[0]
         last = self.monitor.last_failure.get(self.config.node_id)
@@ -390,6 +435,7 @@ class Service:
             return spoof.SUSPECTED if state == spoof.SUSPECTED else spoof.INCONSISTENT
         if not self.fresh_receiver():
             return spoof.NO_FIX
+        # A passing peer claim alone cannot establish local consistency.
         if state == spoof.RANGE_CONSISTENT and not any(
                 self.config.node_id in (e['a'], e['b']) and not e.get('peer_claim') and
                 e['in_scope'] and not e['disagrees'] and now - e['mono'] <= spoof.EDGE_TTL_S
@@ -398,15 +444,20 @@ class Service:
         return state if state != spoof.NO_FIX else spoof.UNCHECKED
 
     def trusted(self):
+        """Require a fresh unjammed fix with no distrusted monitor state."""
         return self.fresh_receiver() and not self.receiver.jammed and self.state() not in spoof.DISTRUSTED
 
     def fallback_due(self):
+        """Check whether receiver history permits a fallback solve."""
         now = self.clock()
+        # Cold receivers get 180 s from boot or 60 s with GNSS neighbours.
+        # Missing devices, fix history and jamming permit earlier fallback.
         return (self.receiver.devices is False or self.had_fix or self.receiver.jammed or
                 now.boot >= 180 or self.neighbours_since is not None and
                 now.mono - self.neighbours_since >= 60)
 
     def position_snapshot(self):
+        """Build a ranging position with age and explicit anchor validity."""
         now = self.clock().mono
         # Retain fresh raw GNSS for audits, invalidating quarantined fixes for
         # positioning immediately. Alfred may lag three minutes. R4 GNSS +
@@ -435,27 +486,33 @@ class Service:
         return pb.Position(valid=False)
 
     def receive(self, peer, data, *, direct=False):
+        """Feed authenticated input to the core and remember its session."""
         self.core.receive(peer, data, direct=direct)
         self.remember_session()
 
     def remember_session(self):
+        """Retain session role and local epoch for result attribution."""
         s = self.core.active
         if s and s.session_id not in self.sessions and s.responder_position is not None:
             self.sessions[s.session_id] = (self.clock().mono, s.role)
         now = self.clock().mono
+        # Unfinished exchange context expires after 15 s.
         self.sessions = {k: v for k, v in self.sessions.items() if now - v[0] < 15}
 
     @staticmethod
     def gnss_sample(p, epoch):
+        """Convert an exchange GNSS snapshot to the local sample format."""
         if (p is None or p.source != pb.Position.GNSS or
                 not p.HasField('fix_age_ms') or p.fix_age_ms / 1000 > spoof.ALIGN_S):
             return None
+        # Wire coordinates are degrees times 1e7, height cm and age ms.
         return {'mode': 3 if p.HasField('altitude_cm') else 2,
                 'lat': p.latitude_e7 / 1e7, 'lon': p.longitude_e7 / 1e7,
                 'alt_hae': p.altitude_cm / 100 if p.HasField('altitude_cm') else None,
                 'mono': epoch - p.fix_age_ms / 1000}
 
     def feed_monitor(self, result, epoch, measured):
+        """Compare canonical GNSS snapshots with a range or peer claim."""
         initiator = self.config.node_id if result.status == 'ok' else result.peer.node_id
         responder = result.peer.node_id if result.status == 'ok' else self.config.node_id
         sa = self.gnss_sample(result.initiator_position, epoch)
@@ -484,6 +541,7 @@ class Service:
         return edge
 
     def handle_result(self, result):
+        """Record range evidence and collect eligible solve observations."""
         now = self.clock().mono
         record = self.sessions.pop(result.session_id, None)
         self.events.append({'peer': result.peer.node_id, 'status': result.status, 'mono': now})
@@ -507,6 +565,7 @@ class Service:
             return
         age = p.fix_age_ms / 1000
         last_failure = self.monitor.last_failure.get(result.peer.node_id)
+        # Ranged anchors expire at 15 s, other fixes at GPS_TTL.
         if (age >= (15 if p.source == pb.Position.RANGED else GPS_TTL) or
                 last_failure is not None and now - last_failure <= spoof.QUARANTINE_S):
             return
@@ -520,17 +579,21 @@ class Service:
             source, p.generation, tuple(p.used_node_ids), n.anchor.signal_dbm if n.anchor else None)
         diffs = [d for _, d in result.estimate.differences]
         center = statistics.median(diffs)
+        # Scale median absolute count deviation to sigma, then metres.
+        # The estimator slope is 26.69 counts/m, with a 1 m sigma floor.
         spread = max(1.0, 1.4826 * statistics.median(abs(d - center) for d in diffs) / 26.69)
         # Motion since the Ready fix is an additional anchor uncertainty.
         anchor = replace(anchor, h_sigma_m=anchor.h_sigma_m + 1.5 * age)
         self.observations.append(locate.Observation(anchor, measured, epoch, spread, len(diffs)))
 
     def finish_job(self):
+        """Solve collected observations and update the retry interval."""
         now = self.clock().mono
         if self.job == 'solve':
             result = locate.solve(self.config.node_id, self.observations, at_mono=now,
                                   previous=self.previous)
             point = result.get('position')
+            # Less than 5 m motion, or no point, doubles the solve delay.
             stable = point and self.previous and spoof.horizontal_m(point, vars(self.previous)) < 5
             self.backoff = min(self.config.max_backoff_s, self.backoff * 2) if stable or not point else self.config.solve_interval_s
             self.result, self.result_at = result, now
@@ -540,6 +603,7 @@ class Service:
         self.job, self.observations = None, []
 
     def schedule(self):
+        """Choose a fallback solve or a due GNSS consistency audit."""
         now = self.clock().mono
         if not (self.config.enabled and self.mesh and self.radio.can_range) or self.core.faulted:
             return
@@ -565,6 +629,7 @@ class Service:
             candidates = [n for n in peers if n.gnss and self.scheduler.cooldown.get(
                           frozenset((self.config.node_id, n.peer.node_id)), 0) <= now]
             if candidates:
+                # Audit the oldest edge first, breaking ties by node ID.
                 n = min(candidates, key=lambda n: (self.monitor.edges.get(frozenset(
                     (self.config.node_id, n.peer.node_id)), {}).get('mono', -math.inf), n.peer.node_id))
                 pair = self.config.node_id, n.peer.node_id
@@ -572,9 +637,11 @@ class Service:
             partner = pair[1] if pair[0] == self.config.node_id else pair[0]
             self.job = 'audit'
             self.core.start([self.neighbours[partner].peer])
+            # Suspect or distrusted receivers get a five-second audit gap.
             self.next_audit = now + (5 if self.receiver.suspect or self.state() in spoof.DISTRUSTED else spoof.AUDIT_S)
 
     def tick(self):
+        """Process radio events, results and scheduling on the owning loop."""
         for event in self.radio.poll():
             if isinstance(event, Inbound):
                 self.receive(event.peer, event.data, direct=event.direct)
@@ -595,6 +662,7 @@ class Service:
         self.spoof_document()  # Record failure epochs even between publications.
 
     def spoof_document(self):
+        """Build trust output and advance the fault epoch for new failures."""
         now = self.clock()
         state = self.state()
         last = self.monitor.last_failure.get(self.config.node_id)
@@ -603,6 +671,7 @@ class Service:
             self.previous_failure = last
         edges = [e for e in self.monitor.edges.values() if self.config.node_id in (e['a'], e['b'])
                  and now.mono - e['mono'] <= spoof.EDGE_TTL_S and e['in_scope']]
+        # Agreement needs a local passing range and no fresh disagreement.
         agrees = (any(not e.get('peer_claim') and not e['disagrees'] for e in edges)
                   and all(not e['disagrees'] for e in edges))
         remaining = max(0, spoof.QUARANTINE_S - (now.mono - last)) if last is not None else 0
@@ -620,6 +689,7 @@ class Service:
                                    v[0] not in spoof.DISTRUSTED else v[0]) for n, v in peers.items()}}
 
     def position_document(self):
+        """Build consumer geometry with source, age and trust policy."""
         now = self.clock()
         base = {'schema': 1, 'boot_id': self.boot_id, 'written_boot': now.boot,
                 'producer_id': self.producer_id, 'quality': 'none', 'point': None,
@@ -643,6 +713,7 @@ class Service:
                         uncertainty_model='configured GNSS sigma; not gpsd accuracy')
         elif self.result and 0 <= now.mono - self.result_at < self.config.result_ttl_s:
             r, age = self.result, now.mono - self.result_at
+            # Expand published uncertainty for motion at 1.5 m/s.
             growth = 1.5 * age
             base.update(quality=r['quality'], point=r['position'],
                         radius_m=r['uncertainty_m'] + growth if r['uncertainty_m'] is not None else None,
@@ -664,8 +735,10 @@ class Service:
         return base
 
     def checkpoint(self):
+        """Save quarantine as boot-clock failure epochs for restart."""
         now = self.clock()
         self.spoof_document()
+        # Restore ages these epochs with BOOTTIME, which includes suspend.
         return {'schema': 1, 'boot_id': self.boot_id, 'node_id': self.config.node_id,
                 'producer_id': self.producer_id, 'fault_epoch': self.fault_epoch,
                 'last_failures_boot': {n: now.boot - (now.mono - t)
@@ -673,11 +746,13 @@ class Service:
                                       if now.mono - t <= spoof.QUARANTINE_S}}
 
     def restore(self, doc):
+        """Restore validated quarantine state from this node and boot."""
         if doc.get('boot_id') != self.boot_id:
             return
         if doc.get('schema') != 1 or doc.get('node_id') != self.config.node_id:
             raise ValueError('invalid positioning checkpoint')
         now = self.clock()
+        # Producer IDs are 32 lowercase hex digits from uuid4().hex.
         if (not re.fullmatch('[0-9a-f]{32}', doc.get('producer_id', '')) or
                 type(doc.get('fault_epoch')) is not int or doc['fault_epoch'] < 0):
             raise ValueError('invalid producer checkpoint')
@@ -694,6 +769,7 @@ class Service:
         self.previous_failure = self.monitor.last_failure.get(self.config.node_id)
 
     def close(self):
+        """Close protocol state and release the radio even on failure."""
         try:
             self.core.close()
         finally:
@@ -703,9 +779,11 @@ class Service:
 async def command(args):
     # Popen with a nonblocking pipe keeps child reaping on this loop.
     # The default asyncio Unix watcher creates a reaper thread.
+    """Collect bounded command output while yielding to the event loop."""
     process = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                                bufsize=0)
     os.set_blocking(process.stdout.fileno(), False)
+    # Cap discovery at two seconds and 256 KiB while polling every 10 ms.
     deadline, data, eof = time.monotonic() + 2, bytearray(), False
     try:
         while not eof or process.poll() is None:
@@ -731,13 +809,16 @@ async def command(args):
 
 
 class LinuxInputs:
+    """Read local receiver status and mesh discovery inputs."""
     def __init__(self, config, boot_id, run='/run', sysnet='/sys/class/net'):
+        """Set input paths and initialize discovery and jamming history."""
         self.config, self.boot_id = config, boot_id
         self.run, self.sysnet = Path(run), Path(sysnet)
         self.discovery = Discovery(config)
         self.jam_seen = False
 
     def receiver(self, now):
+        """Validate receiver and jamming files against this boot and age."""
         jammed = False
         try:
             jam = read_json(self.run / 'manet-lc76g-jam.json')
@@ -747,6 +828,7 @@ class LinuxInputs:
                 raise ValueError('invalid jamming input')
             self.jam_seen, jammed = True, jam['asserted']
         except FileNotFoundError:
+            # Once present, a missing jamming report loses its clear verdict.
             jammed = self.jam_seen
         except (OSError, ValueError, TypeError):
             self.jam_seen, jammed = True, True
@@ -756,6 +838,7 @@ class LinuxInputs:
             return Receiver(jammed=jammed)
 
     async def neighbours(self):
+        """Discover peers only on the configured 20 MHz 5 GHz mesh link."""
         iface = self.config.interface
         try:
             if (self.sysnet / iface / 'master').resolve(strict=True).name != 'bat0':
@@ -764,6 +847,7 @@ class LinuxInputs:
                 command(['iw', 'dev', iface, 'info']), command(['alfred', '-r', '67']),
                 command(['alfred', '-r', '68']), command(['batctl', 'meshif', 'bat0', 'n']),
                 command(['iw', 'dev', iface, 'station', 'dump']))
+            # iw reports primary frequency and width on the channel line.
             ch = re.search(r'channel\s+\d+\s+\((\d+) MHz\), width:\s*(\d+) MHz', info)
             mesh = bool(re.search(r'^\s*type mesh point\s*$', info, re.M) and ch and
                         5000 <= int(ch[1]) < 5900 and int(ch[2]) == 20)
@@ -774,6 +858,7 @@ class LinuxInputs:
 
 
 def make_radio(config, simulated=None):
+    """Select the helper placeholder or an explicitly supplied simulator."""
     if config.radio == 'simulated':
         if simulated is None:
             raise ValueError('simulated radio requires --simulate; never publish synthetic live-node fixes')
@@ -782,12 +867,14 @@ def make_radio(config, simulated=None):
 
 
 async def run_linux(config, run=Path('/run')):
+    """Own the runtime lock and drive discovery, ranging and publication."""
     import fcntl
     runtime = run / 'manet-positioning'
     runtime.mkdir(exist_ok=True, mode=0o750)
     # Public filenames are stable symlinks created by the unit's fixed pre-start
     # operation. The unprivileged service writes only its own runtime directory.
     with (runtime / 'lock').open('w') as lock:
+        # Fixed publication temp paths require one writer per runtime dir.
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         boot_id = Path('/proc/sys/kernel/random/boot_id').read_text().strip()
         inputs = LinuxInputs(config, boot_id, run)
@@ -809,17 +896,21 @@ async def run_linux(config, run=Path('/run')):
                     neighbours, mesh = discovery.result()
                     service.update(service.receiver, neighbours, mesh=mesh)
                     discovery = None
+                # One in-flight discovery task, scheduled every five seconds.
                 if discovery is None and now.mono >= next_discovery:
                     discovery = asyncio.create_task(inputs.neighbours())
                     next_discovery = now.mono + 5
                 service.update(inputs.receiver(now))
                 service.tick()
+                # Publish twice per second, or immediately on a new fault.
                 if now.mono >= next_publish or service.fault_epoch != saved_fault:
+                    # Persist quarantine before publishing its trust verdict.
                     atomic_json(runtime / 'state.json', service.checkpoint())
                     saved_fault = service.fault_epoch
                     atomic_json(runtime / 'spoof.json', service.spoof_document())
                     atomic_json(runtime / 'position.json', service.position_document())
                     next_publish = now.mono + .5
+                # Yield between 20 ms service ticks without delaying discovery.
                 await asyncio.sleep(.02)
         finally:
             if discovery:
@@ -831,32 +922,40 @@ async def run_linux(config, run=Path('/run')):
 
 
 class SimRadio:
+    """Supply paced synthetic timestamps and wire events without sockets."""
     can_range = True
     reason = 'simulated timestamps; no hardware validation'
 
     def __init__(self, network, node_id):
+        """Initialize simulated radio queues, captures and ACK state."""
         self.network, self.node_id = network, node_id
         self.frames, self.local, self.remote, self.events = deque(), {}, {}, deque()
         self.armed, self.ack = False, 'original'
 
     def authorize(self, peer):
+        """Match the peer against the simulation's identity map."""
         return self.network.peers.get(peer.node_id) == peer
 
     def arm_responder(self, peer, sid, width):
+        """Open a synthetic responder capture and change simulated ACKs."""
         self.armed, self.ack = True, 'chain2'
         self.remote = {sid: []}
 
     def disarm(self):
+        """Stop synthetic reception and discard pending burst frames."""
         self.armed = False
         self.frames.clear()
 
     def restore_ack(self):
+        """Restore the simulated ACK setting."""
         self.ack = 'original'
 
     def send_control(self, peer, data):
+        """Queue a control datagram for the simulated recipient."""
         self.network.messages.append((self.node_id, peer.node_id, data, False))
 
     def send_burst(self, peer, frames, width, interval_ms):
+        """Queue probe frames at the protocol's deterministic offsets."""
         first = ranging.decode(frames[0])
         sid = first.session_id
         schedule = ranging.burst_schedule_us(sid, first.challenge, len(frames), interval_ms)
@@ -866,15 +965,19 @@ class SimRadio:
             self.frames.append((start + offset / 1e6, peer.node_id, sid, seq, frame, seq == len(frames) - 1))
 
     def poll(self):
+        """Emit due probes and synthetic reports for armed responders."""
         while self.frames and self.frames[0][0] <= self.network.now:
             due, peer, sid, seq, frame, last = self.frames.popleft()
             other = self.network.services[peer].radio
             if other.armed and sid in other.remote:
                 truth_a, truth_b = self.network.truth[self.node_id], self.network.truth[peer]
                 distance = math.dist(truth_a, truth_b)
+                # Invert the synthetic calibration to create round-trip counts.
                 difference = round(6500 + distance * 26.69)
+                # Model a 4 GHz 48-bit clock plus offset and sequence drift.
                 departure = round(due * 4e9) % ranging.CLOCK_MODULUS
                 arrival = (departure + 999999 + seq * 20) % ranging.CLOCK_MODULUS
+                # Accumulator correction follows each role's report ordinal.
                 ii, ri = len(self.local[sid]) + 1, len(other.remote[sid]) + 1
                 self.local[sid].append(ranging.InitiatorStamp(seq, departure,
                     (departure + 60000 + difference + 2454 * ii) % ranging.CLOCK_MODULUS, ii))
@@ -888,18 +991,23 @@ class SimRadio:
         return events
 
     def read_responder_report(self, sid):
+        """Return the synthetic responder capture for a session."""
         return self.remote.get(sid, [])
 
     def read_initiator_timestamps(self, sid):
+        """Return the synthetic initiator capture for a session."""
         return self.local.get(sid, [])
 
     def close(self):
+        """Disarm the simulated radio and restore its ACK state."""
         self.disarm()
         self.restore_ack()
 
 
 class Simulation:
+    """Run service instances on a shared synthetic radio network."""
     def __init__(self, count=4, clock_offsets=None):
+        """Create a GPS-less center node and a ring of GNSS anchors."""
         if not 4 <= count <= 16:
             raise ValueError('simulation needs 4..16 nodes')
         self.now, self.messages, self.services, self.peers = 200.0, deque(), {}, {}
@@ -911,6 +1019,7 @@ class Simulation:
         for i, node_id in enumerate(self.ids):
             self.peers[node_id] = ranging.Peer(node_id, bytes([2, 0, 0, 0, 0, i + 1]))
             if node_id != 'P':
+                # Anchors lie on a 60 m circle at the center node's height.
                 angle = 2 * math.pi * (i - 1) / (count - 1)
                 self.truth[node_id] = (60 * math.cos(angle), 60 * math.sin(angle), 1600)
                 self.claimed[node_id] = self.truth[node_id]
@@ -924,17 +1033,21 @@ class Simulation:
             self.services[node_id] = service
 
     def clock(self):
+        """Return the shared simulation clocks in seconds."""
         return Now(self.now, self.now + 321, self.now + 100)
 
     def node_clock(self, node_id):
+        """Apply the node's configured offset to all three clocks."""
         offset = self.clock_offsets.get(node_id, 0)
         return Now(self.now + offset, self.now + 321 + offset, self.now + 100 + offset)
 
     def nonce(self):
+        """Return a deterministic nonzero session or challenge value."""
         self.counter += 1
         return self.counter.to_bytes(16, 'big')
 
     def inputs(self):
+        """Refresh synthetic fixes and neighbour advertisements."""
         for node_id, service in self.services.items():
             xyz = self.claimed.get(node_id)
             fix = self.frame.position(*xyz[:2], xyz[2]) if xyz else None
@@ -956,6 +1069,7 @@ class Simulation:
             service.update(service.receiver, ns, mesh=True)
 
     def step(self, seconds=.02):
+        """Advance time, tick every service and deliver queued datagrams."""
         self.now += seconds
         self.inputs()
         for service in self.services.values():
@@ -968,10 +1082,12 @@ class Simulation:
             self.services[recipient].receive(self.peers[sender], data, direct=direct)
 
     def advance(self, seconds):
+        """Advance in 20 ms steps, rounding the duration upward."""
         for _ in range(math.ceil(seconds / .02)):
             self.step()
 
     def summary(self):
+        """Summarize the GPS-less solution and each node's trust state."""
         p = self.services['P'].position_document()
         xy = self.frame.xy(p['point']['lat'], p['point']['lon']) if p['point'] else None
         return {'nodes': len(self.services), 'elapsed_s': round(self.now - 200, 2),
@@ -984,11 +1100,13 @@ class Simulation:
                                        for e in s.events if e['status'] == 'peer_claim' and e.get('failed')]}
 
     def close(self):
+        """Release all simulated service resources."""
         for service in self.services.values():
             service.close()
 
 
 def simulate(count):
+    """Run benign ranging followed by a displaced anchor GNSS claim."""
     sim = Simulation(count)
     try:
         sim.advance(12 if count == 4 else 18)
@@ -997,6 +1115,7 @@ def simulate(count):
         benign = sim.summary()
         victim = 'A0'
         x, y, z = sim.truth[victim]
+        # Shift the GNSS claim 120 m east while radio geometry stays fixed.
         sim.claimed[victim] = (x + 120, y, z)
         onset = sim.now
         detected = None
@@ -1011,6 +1130,7 @@ def simulate(count):
 
 
 def main():
+    """Run the requested simulation or an enabled Linux service."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config', default='/etc/mesh.conf')
     parser.add_argument('--simulate', type=int, metavar='N')

@@ -1,10 +1,12 @@
 #!/bin/bash
+# Calculate IPv4 network fields consumed by the mesh allocation scripts.
 . "${MANET_TOOLS_DIR:-$(dirname "${BASH_SOURCE[0]}")}/manet-common.sh" || exit 1
 # Print the Perl ipcalc fields and column layout used by mesh scripts
 # (e.g. awk '/HostMin/ {print $2}'). On CM4 this takes a few ms per call,
 # compared with about 1.5 s CPU for Perl ipcalc on each node-manager cycle.
 # Usage: manet-ipcalc.sh <a.b.c.d/prefix> (prefix 1-30)
 
+# Print the required CIDR argument to stderr.
 usage() {
     printf '%s\n' 'usage: manet-ipcalc.sh a.b.c.d/prefix' >&2
 }
@@ -14,11 +16,13 @@ cidr="$1"
 ip=${cidr%/*}
 prefix=${cidr#*/}
 
+# Check four decimal octets here and their numeric range below.
 if ! [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
     usage
     exit 1
 fi
 [[ "$prefix" =~ ^[0-9]{1,2}$ ]] || { usage; exit 1; }
+# Force decimal arithmetic even when the prefix has a leading zero.
 prefix=$((10#$prefix))
 [ "$prefix" -ge 1 ] && [ "$prefix" -le 30 ] || { usage; exit 1; }
 
@@ -33,6 +37,8 @@ a=$((10#$a)); b=$((10#$b)); c=$((10#$c)); d=$((10#$d))
 
 
 
+# Pack octets in network order and constrain mask operations to 32 bits.
+# The host range excludes the network and broadcast addresses.
 ip_int=$(( (a << 24) + (b << 16) + (c << 8) + d ))
 mask=$(( (0xFFFFFFFF << (32 - prefix)) & 0xFFFFFFFF ))
 net=$(( ip_int & mask ))

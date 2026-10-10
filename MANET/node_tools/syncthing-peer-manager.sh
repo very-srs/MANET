@@ -10,6 +10,7 @@ REGISTRY_STATE_FILE="/var/run/mesh_node_registry" # Central registry file
 # How often to check the registry for new peers (in seconds)
 LOOP_INTERVAL=60 # Check every minute
 
+# Print the peer-manager message to stderr.
 log() {
     printf '%s\n' "SYNC-MGR: $1" >&2
 }
@@ -77,6 +78,8 @@ fi
 # Give Syncthing and node-manager a moment on fresh boot
 sleep 30
 
+# Missing config, registry or local identity retries after 30 s.
+# A completed pass waits LOOP_INTERVAL seconds.
 while true; do
     # Check if Syncthing config and registry exist
     if [ ! -f "$SYNCTHING_CONFIG_FILE" ]; then
@@ -112,6 +115,7 @@ while true; do
         done
     ) | sort -u ) # Sort and get unique IDs
 
+    # Batch all new devices and folder shares into one service restart.
     NEEDS_RESTART=false
     if [ -n "$PEER_IDS" ]; then
         log "Found potential peers:"

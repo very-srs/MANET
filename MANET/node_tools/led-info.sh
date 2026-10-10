@@ -3,6 +3,7 @@
 # Count directly connected nodes across BATMAN radios, excluding multihop peers.
 source "$(dirname "${BASH_SOURCE[0]}")/manet-led-common.sh"
 
+# Pattern durations are in seconds.
 BLINK_ON=0.3
 BLINK_OFF=0.4
 STATUS_SOLID=3

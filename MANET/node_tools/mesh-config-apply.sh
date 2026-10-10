@@ -1,12 +1,13 @@
 #!/bin/bash
-# Apply /var/run/mesh_pending_config.json to mesh.conf and services when
-# activate_at arrives, or immediately with --force.
+# Apply mesh_pending_config.json to mesh.conf and services on invocation.
+# mesh-config-sync.py checks activate_at before invoking this script.
 # Immediate settings: admin_password, mtx, mumble, auto_update.
 # Deferred radio settings: acs, regulatory_domain.
 # Coordinated mesh cutover: mesh_ssid, mesh_key, ipv4_network.
 # EUD mode, AP SSID/key and max_euds_per_node stay local.
 # Handle every mesh-config-sync.py accepted key in the three blocks below.
 
+# Print the optional force argument to stderr.
 usage() {
     printf '%s\n' \
         'usage: mesh-config-apply.sh [--force]' >&2
@@ -29,12 +30,14 @@ REGION_HELPER="${MANET_REGION_HELPER:-$(dirname "$0")/manet-region.py}"
 NODE_MANAGER_SELECT="${NODE_MANAGER_SELECT:-$(dirname "$0")/node-manager-select.sh}"
 NODE_MANAGER_LINK="${MANET_BIN_DIR:-$(dirname "$0")}/node-manager.sh"
 
+# Write to APPLY_LOG with a timestamp and to the config-apply journal tag.
 log() {
     printf '%s\n' "[$(date +'%Y-%m-%d %H:%M:%S')] - CONFIG-APPLY: $1" \
         >> "$APPLY_LOG"
     printf '%s\n' "CONFIG-APPLY: $1" | systemd-cat -t mesh-config-apply
 }
 
+# Log an error and terminate the apply attempt.
 die() {
     log "ERROR: $1"
     exit 1
@@ -222,6 +225,8 @@ apply_dangerous_settings() {
 # Main
 log "=== Config apply starting (version: $VERSION) ==="
 
+# Apply local files before verifying any orchestrator restart and saving
+# the completed version. The caller owns activation timing and rollback.
 apply_safe_settings
 apply_deferred_settings
 apply_dangerous_settings

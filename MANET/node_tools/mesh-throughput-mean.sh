@@ -19,6 +19,7 @@
 
 BATCTL="${BATCTL:-/usr/sbin/batctl}"
 
+# Print 0.00 when no originator metrics are available.
 "$BATCTL" o 2>/dev/null | awk '
     # Data rows carry a MAC and a parenthesised metric; headers do not.
     match($0, /[0-9a-f]{2}(:[0-9a-f]{2}){5}/) {

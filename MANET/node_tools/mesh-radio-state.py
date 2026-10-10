@@ -40,6 +40,7 @@ ACTION_KEYS = ("desired", "txpower", "halow_channel", "wifi_channel",
 
 
 def log(msg):
+    """Append a timestamped radio message and send it to the journal."""
     line = f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] RADIO-STATE: {msg}"
     try:
         with open(LOG_FILE, "a") as f:
@@ -54,15 +55,18 @@ def log(msg):
 
 
 def run(cmd, timeout=10, check=False):
+    """Run a command with captured output and a seconds timeout."""
     return subprocess.run(cmd, capture_output=True, text=True,
                           timeout=timeout, check=check)
 
 
 def hostname():
+    """Return this node's hostname for targeting and acknowledgements."""
     return socket.gethostname()
 
 
 def read_text(path):
+    """Read stripped text, returning empty on failure."""
     try:
         with open(path) as f:
             return f.read().strip()
@@ -71,11 +75,13 @@ def read_text(path):
 
 
 def write_text(path, value):
+    """Write a value as text."""
     with open(path, "w") as f:
         f.write(str(value))
 
 
 def read_json(path):
+    """Read JSON, returning None on file or parse failure."""
     try:
         with open(path) as f:
             return json.load(f)
@@ -84,10 +90,12 @@ def read_json(path):
 
 
 def write_json(path, value):
+    """Persist state through the private JSON writer."""
     private_json_write(path, value)
 
 
 def load_halow_ifaces():
+    """Read the provisioned HaLow interface names."""
     names = set()
     for path in ("/var/lib/halow_if",):
         txt = read_text(path)
@@ -108,12 +116,14 @@ def service_for_iface(iface):
 
 
 def active_bat_ifaces():
+    """Return batctl interfaces explicitly marked active."""
     try:
         r = run(["batctl", "if"], timeout=5)
     except Exception:
         return set()
     active = set()
     for line in r.stdout.splitlines():
+        # batctl if rows identify active attachments by name before the colon.
         m = re.match(r"^\s*([^:\s]+):\s+active\b", line)
         if m:
             active.add(m.group(1))
@@ -121,18 +131,22 @@ def active_bat_ifaces():
 
 
 def bat_has_iface(iface):
+    """Check whether batctl lists the requested interface."""
     try:
         r = run(["batctl", "if"], timeout=5)
     except Exception:
         return False
+    # Escape interface punctuation and match the complete name field.
     return any(re.match(rf"^\s*{re.escape(iface)}:\s+", line)
                for line in r.stdout.splitlines())
 
 
 def apply_iface(iface, state):
+    """Start or stop a mesh interface and its selected supplicant."""
     svc = service_for_iface(iface)
     log(f"Applying {iface}={state} using {svc}")
 
+    # Detach from BATMAN before stopping supplicant and lowering the link.
     if state == "down":
         run(["batctl", "if", "del", iface], timeout=10)
         r = run(["systemctl", "stop", svc], timeout=20)
@@ -149,6 +163,7 @@ def apply_iface(iface, state):
     r = run(["systemctl", "start", svc], timeout=25)
     if r.returncode != 0:
         raise RuntimeError(f"systemctl start {svc}: {r.stderr.strip() or r.stdout.strip()}")
+    # Allow two seconds after supplicant start before checking attachment.
     time.sleep(2)
     if not bat_has_iface(iface):
         r = run(["batctl", "if", "add", iface], timeout=10)
@@ -157,6 +172,7 @@ def apply_iface(iface, state):
 
 
 def target_matches(pkg):
+    """Match all nodes or this hostname against package targets."""
     targets = pkg.get("targets", "all")
     if targets == "all":
         return True
@@ -207,6 +223,7 @@ def validate_pkg(pkg):
     if isinstance(halow, dict) and halow.get("dbm") is not None:
         return False, "HaLow transmit power cannot be changed live; it needs a reboot"
 
+    # Reject a requested final state that would remove every active mesh radio.
     if desired and target_matches(pkg):
         post = active_bat_ifaces()
         for iface, state in desired.items():
@@ -220,6 +237,7 @@ def validate_pkg(pkg):
 
 
 def send_alfred(type_id, payload):
+    """Seal and publish a control payload, returning send success."""
     try:
         body = json.dumps(ADMIN.seal(type_id, payload), separators=(",", ":"))
         r = subprocess.run(["alfred", "-s", str(type_id)], input=body,
@@ -230,6 +248,7 @@ def send_alfred(type_id, payload):
 
 
 def publish_ack(version, ok=True, error="", target=False):
+    """Publish version, target and result details in an authenticated ACK."""
     payload = {
         "kind": "radio_ack",
         "version": version,
@@ -243,6 +262,7 @@ def publish_ack(version, ok=True, error="", target=False):
 
 
 def latest_radio_package(raw=None):
+    """Return the newest authenticated radio message, or None."""
     if raw is None:
         try:
             r = run(["alfred", "-r", str(ALFRED_RADIO_TYPE)], timeout=5)
@@ -251,11 +271,13 @@ def latest_radio_package(raw=None):
         if r.returncode != 0:
             return None
         raw = r.stdout
+    # Transport verifies envelopes and sorts accepted messages by issue order.
     messages = ADMIN.messages(ALFRED_RADIO_TYPE, raw)
     return messages[-1] if messages else None
 
 
 def clear_pending(version=None):
+    """Remove staged state, optionally only for the supplied version."""
     pending = read_json(PENDING_FILE)
     if version and pending and pending.get("version") != version:
         return
@@ -269,6 +291,7 @@ def clear_pending(version=None):
 
 
 def apply_package(pkg):
+    """Validate and apply targeted actions, then record desired radio state."""
     if not target_matches(pkg):
         log(f"Version {pkg.get('version')} is not targeted at this node; no-op apply")
         return
@@ -276,6 +299,7 @@ def apply_package(pkg):
     if not ok:
         raise RuntimeError(error)
 
+    # Apply link state before power/channel actions and save state last.
     for iface, state in (pkg.get("desired") or {}).items():
         apply_iface(iface, state)
 
@@ -318,6 +342,7 @@ def apply_package(pkg):
 
 
 def record_current_state(pkg):
+    """Merge desired up/down choices and record the applied version/time."""
     desired = pkg.get("desired") or {}
     data = read_json(CURRENT_STATE_FILE) or {"desired": {}}
     if not isinstance(data.get("desired"), dict):
@@ -330,6 +355,7 @@ def record_current_state(pkg):
 
 
 def sync_once(raw=None):
+    """Process authenticated cancellation, staging and due activation."""
     message = latest_radio_package() if raw is None else latest_radio_package(raw)
     pending = read_json(PENDING_FILE)
 
@@ -358,6 +384,7 @@ def sync_once(raw=None):
     if not ADMIN.accept(ALFRED_RADIO_TYPE, message):
         return 0
 
+    # Zero stages only. Positive values schedule activation in Unix seconds.
     activate_at = int(pkg.get("activate_at", 0) or 0)
     already_applied = read_text(APPLIED_VERSION_FILE) == version
     if activate_at > 0 and already_applied:
@@ -391,6 +418,7 @@ def sync_once(raw=None):
 
 
 def main():
+    """Sync Alfred state or apply a staged local package selected by the CLI."""
     cmd = sys.argv[1] if len(sys.argv) > 1 else "sync"
     if cmd == "sync":
         return sync_once(sys.stdin.read() if '--stdin' in sys.argv[2:] else None)

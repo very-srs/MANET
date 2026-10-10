@@ -10,10 +10,12 @@ import sys
 
 
 MAC = re.compile(r'(?:[0-9a-f]{2}:){5}[0-9a-f]{2}')
+# Read only identity, tourguide, service and interface fields from the registry.
 FIELD = re.compile(r'NODE_([0-9a-f]{12})_(MAC_ADDRESSES|LAST_TOURGUIDE_TIMESTAMP|IS_MEDIAMTX_SERVER|IS_MUMBLE_SERVER|INTERFACES_JSON)=(.*)')
 
 
 def elect(own, peers, registry, band, excluded=()):
+    """Choose a reachable node on the scheduled band with service avoidance."""
     own = own.lower()
     peers = {mac.lower() for mac in peers}
     excluded = {mac.lower() for mac in excluded}
@@ -29,7 +31,9 @@ def elect(own, peers, registry, band, excluded=()):
         if not match:
             continue
         key, field, raw = match.groups()
+        # Restore the canonical MAC from the registry's 12-hex publisher key.
         mac = ':'.join(key[i:i + 2] for i in range(0, 12, 2))
+        # Decode quoted data without sourcing network-derived assignments.
         value = shlex.split(raw)
         if len(value) != 1:
             raise ValueError('invalid registry value')
@@ -48,6 +52,7 @@ def elect(own, peers, registry, band, excluded=()):
         raise ValueError('reachable peers are missing registry identities')
     candidates = {own} | {aliases[peer] for peer in peers}
     def can_hop(mac):
+        """Require an UP mesh interface with numeric MHz in this band."""
         interfaces = json.loads(nodes[mac].get('INTERFACES_JSON', '[]'))
         if not isinstance(interfaces, list):
             raise ValueError('invalid interface report')
@@ -63,6 +68,7 @@ def elect(own, peers, registry, band, excluded=()):
     candidates -= excluded
     if not candidates:
         return None  # Every eligible radio is relying on working HaLow.
+    # Prefer a node that does not host MediaMTX or Mumble during the hop.
     eligible = [mac for mac in candidates
                 if not any(nodes[mac].get(flag) == 'true'
                            for flag in ('IS_MEDIAMTX_SERVER', 'IS_MUMBLE_SERVER'))]
@@ -70,6 +76,7 @@ def elect(own, peers, registry, band, excluded=()):
     eligible = eligible or list(candidates)
 
     def rank(mac):
+        """Rank by oldest tourguide timestamp, then lowest canonical MAC."""
         timestamp = nodes[mac].get('LAST_TOURGUIDE_TIMESTAMP', '0')
         if not re.fullmatch(r'[0-9]+', timestamp):
             raise ValueError('invalid tourguide timestamp')
@@ -79,6 +86,7 @@ def elect(own, peers, registry, band, excluded=()):
 
 
 def main():
+    """Read reachable peers and registry state, then print any elected node."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--self', dest='own', required=True)
     parser.add_argument('--peers', required=True)

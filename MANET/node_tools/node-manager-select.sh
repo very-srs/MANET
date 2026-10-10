@@ -8,6 +8,7 @@
 BIN_DIR="${MANET_BIN_DIR:-/usr/local/bin}"
 MESH_CONF="${MANET_MESH_CONF:-/etc/mesh.conf}"
 RUN_DIR="${MANET_RUN_DIR:-/run}"
+# Print accepted arguments to stderr.
 usage() {
     printf '%s\n' \
         'usage: node-manager-select.sh [--service-start]' >&2
@@ -22,12 +23,14 @@ case "${1:-}" in
     *) usage; exit 1 ;;
 esac
 
+# Atomically save target under RUN_DIR only when service_start is true.
 record_running() {
     [ "$service_start" = true ] || return 0
     printf '%s\n' "$target" > "$RUN_DIR/node-manager.running.new" &&
         mv -f "$RUN_DIR/node-manager.running.new" "$RUN_DIR/node-manager.running"
 }
 
+# Use the last unindented acs assignment if the config repeats the key.
 acs=$(sed -n 's/^acs=//p' "$MESH_CONF" 2>/dev/null | tail -n 1)
 # Writers use y/n. Also accept common hand-edited boolean spellings.
 if [[ "$acs" =~ ^([Yy]|[Yy][Ee][Ss]|1|[Tt][Rr][Uu][Ee])[[:space:]]*$ ]]; then

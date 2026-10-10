@@ -10,13 +10,16 @@ import time
 
 
 def snapshot(unit, root=Path('/')):
+    """Read service identity and cumulative service/system CPU seconds."""
     output = subprocess.check_output(
         ['systemctl', 'show', unit, '-p', 'ControlGroup', '-p', 'InvocationID',
          '-p', 'ActiveState'], text=True)
+    # systemctl show emits property=value lines, including a restart identity.
     props = dict(line.split('=', 1) for line in output.splitlines() if '=' in line)
     group = props.get('ControlGroup', '')
     if props.get('ActiveState') != 'active' or not props.get('InvocationID') or not group.startswith('/') or group == '/':
         raise ValueError('service must be active with its own cgroup')
+    # cgroup v2 cpu.stat contains whitespace-separated counter/value pairs.
     counters = dict(line.split() for line in (root / 'sys/fs/cgroup' / group.lstrip('/') / 'cpu.stat').read_text().splitlines())
     # cgroup v2 accounts for nft/ip children as well as the Python process.
     cpu = int(counters['usage_usec']) / 1_000_000
@@ -24,18 +27,21 @@ def snapshot(unit, root=Path('/')):
     if fields[0] != 'cpu' or len(fields) < 9:
         raise ValueError('missing aggregate CPU counters')
     ticks = list(map(int, fields[1:9]))  # Guest counted in user/nice
+    # Remove idle and iowait, then convert kernel clock ticks to seconds.
     busy = (sum(ticks) - ticks[3] - ticks[4]) / os.sysconf('SC_CLK_TCK')
     return {'invocation': props['InvocationID'], 'cgroup': group, 'cpu': cpu,
             'system_busy': busy, 'at': time.monotonic()}
 
 
 def result(before, after, label):
+    """Normalize counter deltas by elapsed time, rejecting restarted samples."""
     elapsed = after['at'] - before['at']
     delta = after['cpu'] - before['cpu']
     busy = after['system_busy'] - before['system_busy']
     if (elapsed <= 0 or delta < 0 or busy < 0 or
             any(before[k] != after[k] for k in ('invocation', 'cgroup'))):
         raise ValueError('service restarted or CPU counters reset; repeat the sample')
+    # Normalize across elapsed wall time, without dividing by CPU count.
     return {'label': label, 'elapsed_s': round(elapsed, 3),
             'service_cpu_s_per_min': round(delta * 60 / elapsed, 4),
             'service_percent_one_core': round(delta * 100 / elapsed, 3),
@@ -43,6 +49,7 @@ def result(before, after, label):
 
 
 def main():
+    """Measure one bounded interval and print the CPU rates as JSON."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--unit', default='manet-atak.service')
     parser.add_argument('--seconds', type=float, default=60)

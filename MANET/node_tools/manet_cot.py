@@ -28,6 +28,7 @@ import re
 import xml.etree.ElementTree as ET
 
 
+# CoT's sentinel for unavailable HAE and 90 percent error estimates.
 UNKNOWN = 9999999
 RADIO_TYPE = "a-f-G-E"
 DEFAULT_MAX_BYTES = 64 * 1024
@@ -39,8 +40,11 @@ EXTERNAL_POSITION_PORT = 4349
 EXTERNAL_POSITION_STALE_S = 10
 EXTERNAL_SOURCE_PREFIX = "MANET:"
 RETIRE_STALE_S = 60
+# Map the selected source to CoT's location-method code.
 _HOW = {"gnss": "m-g", "ranged": "m-f", "manual": "h-e"}
+# CoT type/how components are alphanumeric tokens separated by hyphens.
 _TOKEN = re.compile(r"[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*\Z")
+# Require UTC Z. Optional fractional seconds use one to six digits.
 _UTC_TIME = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:"
                        r"[0-9]{2}(?:\.[0-9]{1,6})?Z\Z")
 
@@ -55,6 +59,7 @@ class ErrorEstimate:
 
 @dataclass(frozen=True)
 class Fix:
+    """Carry selected WGS84 geometry, uncertainty and source provenance."""
     lat: float
     lon: float
     source: str                    # gnss, ranged (including fused), or manual
@@ -130,6 +135,7 @@ class PhoneSA:
 
 
 def _number(value, name):
+    """Convert a finite number while rejecting booleans."""
     if isinstance(value, bool):
         raise ValueError(f"{name} must be a finite number")
     try:
@@ -142,6 +148,7 @@ def _number(value, name):
 
 
 def _bounded(value, name, low, high):
+    """Convert a number and enforce inclusive bounds."""
     number = _number(value, name)
     if not low <= number <= high:
         raise ValueError(f"{name} out of range")
@@ -149,6 +156,7 @@ def _bounded(value, name, low, high):
 
 
 def _text(value, name, *, empty=False):
+    """Require text containing only characters allowed in XML."""
     if not isinstance(value, str) or (not empty and not value.strip()):
         raise ValueError(f"{name} must be text" + ("" if empty else " and nonempty"))
     # ElementTree escapes markup, but does not reject invalid XML characters.
@@ -160,18 +168,22 @@ def _text(value, name, *, empty=False):
 
 
 def _utc(value):
+    """Normalize an aware datetime to UTC."""
     if not isinstance(value, datetime) or value.utcoffset() is None:
         raise ValueError("now must be an aware datetime")
     return value.astimezone(timezone.utc)
 
 
 def _stamp(value):
+    """Format a timestamp with millisecond precision and a UTC Z suffix."""
     return value.isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
 def _event(uid, event_type, how, now, stale_s):
+    """Create a CoT 2.0 envelope with start and stale times in UTC."""
     now = _utc(now)
     stale_s = _number(stale_s, "stale_s")
+    # Millisecond serialization must leave stale later than start.
     if stale_s < 0.001:
         raise ValueError("stale_s must be at least one millisecond")
     try:
@@ -186,6 +198,7 @@ def _event(uid, event_type, how, now, stale_s):
 
 
 def _usable(fix):
+    """Check fix source and require resolved ranged geometry."""
     if fix is None:
         return False
     if not isinstance(fix, Fix):
@@ -202,6 +215,7 @@ def _usable(fix):
 
 
 def _error(estimate, name):
+    """Encode CE90/LE90 only for a 90 percent confidence estimate."""
     if estimate is None:
         return UNKNOWN, f"{name} error unknown"
     if not isinstance(estimate, ErrorEstimate):
@@ -217,6 +231,7 @@ def _error(estimate, name):
 
 
 def _point(event, fix):
+    """Append validated geometry and return uncertainty/provenance remarks."""
     lat = _bounded(fix.lat, "lat", -90, 90)
     lon = _bounded(fix.lon, "lon", -180, 180)
     # GeoPoint.isAltitudeValid's actual constants, not its stale Javadoc.
@@ -224,6 +239,7 @@ def _point(event, fix):
     ce, h_note = _error(fix.horizontal_error, "horizontal")
     le, v_note = _error(fix.vertical_error, "vertical")
     if fix.hae is None:
+        # An altitude error cannot describe a missing altitude.
         le = UNKNOWN
         v_note += "; altitude unknown"
     ET.SubElement(event, "point", {
@@ -239,6 +255,7 @@ def _point(event, fix):
 
 
 def _serialize(event):
+    """Serialize an event as UTF-8 XML with a declaration."""
     return ET.tostring(event, encoding="utf-8", xml_declaration=True)
 
 
@@ -343,6 +360,7 @@ def retire_marker(marker_uid, task_uid, now):
 
 
 def _contact_endpoint(endpoint):
+    """Validate a unicast IPv4/port pair and format a TCP contact endpoint."""
     if not isinstance(endpoint, (tuple, list)) or len(endpoint) != 2:
         raise ValueError("contact_endpoint must be (IPv4, port)")
     endpoint_ip, port = endpoint
@@ -396,26 +414,31 @@ class _SafeTreeBuilder(ET.TreeBuilder):
     """Abort during parsing, before DTD declarations or excessive depth."""
 
     def __init__(self):
+        """Initialize the parser nesting counter."""
         super().__init__()
         self.depth = 0
 
     def doctype(self, name, pubid, system):
+        """Reject every DTD declaration reported by the XML parser."""
         # Parser callback, not a byte search: UTF-16 cannot bypass this check.
         raise ValueError("DOCTYPE is forbidden")
 
     def start(self, tag, attrs):
+        """Reject excessive nesting before constructing the next element."""
         self.depth += 1
         if self.depth > MAX_DEPTH:
             raise ValueError("XML nesting exceeds depth limit")
         return super().start(tag, attrs)
 
     def end(self, tag):
+        """Close an element and decrement the nesting counter."""
         result = super().end(tag)
         self.depth -= 1
         return result
 
 
 def _child(parent, name, *, required=False):
+    """Select one direct child, rejecting missing required or duplicate tags."""
     children = [] if parent is None else parent.findall(name)
     if len(children) > 1 or (required and not children):
         raise ValueError(f"expected {'one' if required else 'at most one'} {name}")
@@ -423,6 +446,7 @@ def _child(parent, name, *, required=False):
 
 
 def _parse_time(value, name):
+    """Parse a Z-suffixed ISO UTC timestamp with optional fractional seconds."""
     if not isinstance(value, str) or not _UTC_TIME.fullmatch(value):
         raise ValueError(f"invalid {name}: expected ISO 8601 UTC")
     try:
@@ -432,6 +456,7 @@ def _parse_time(value, name):
 
 
 def _optional_number(point, name):
+    """Decode bounded HAE/error values, mapping absent or unknown to None."""
     value = point.get(name)
     if value is None:
         return None
@@ -463,11 +488,13 @@ def parse_marker(data: bytes, max_bytes=DEFAULT_MAX_BYTES):
 
 
 def _byte_limit(max_bytes):
+    """Validate the caller-supplied XML byte limit."""
     if type(max_bytes) is not int or max_bytes <= 0:
         raise ValueError("max_bytes must be a positive integer")
 
 
 def _parse_document(data, max_bytes):
+    """Parse bounded bytes with DTD and nesting protections."""
     if not isinstance(data, bytes):
         raise ValueError("data must be bytes")
     if len(data) > max_bytes:
@@ -476,6 +503,7 @@ def _parse_document(data, max_bytes):
 
 
 def _marker_from_root(root, *, allow_zero=False):
+    """Validate a point event and extract unauthenticated marker claims."""
     if root.tag != "event" or root.get("version") != "2.0":
         raise ValueError("expected a CoT 2.0 event in protocol-0 XML")
     uid = _text(root.get("uid"), "uid")
@@ -576,6 +604,7 @@ class ChatReceipt:
 
 
 def _chat_envelope(root):
+    """Validate shared CoT chat geometry, timing and required detail."""
     if root.tag != "event" or root.get("version") != "2.0":
         raise ValueError("expected a CoT 2.0 event in protocol-0 XML")
     uid = _text(root.get("uid"), "event UID")
@@ -595,6 +624,7 @@ def _chat_envelope(root):
 
 
 def _direct_chat(detail, tag):
+    """Extract two-party chat identities and require a matching sender link."""
     chat = _child(detail, tag, required=True)
     other = "__chat" if tag == "__chatreceipt" else "__chatreceipt"
     if _child(detail, other) is not None:
@@ -603,6 +633,7 @@ def _direct_chat(detail, tag):
     group = _child(chat, "chatgrp", required=True)
     sender = _text(group.get("uid0"), "chat sender")
     destination = _text(group.get("uid1"), "chat destination")
+    # Direct chats use uid0/uid1 and must not claim group ownership.
     if (sender == destination or chat.get("groupOwner", "false") != "false"
             or any(k.startswith("uid") and k not in ("uid0", "uid1") for k in group.keys())):
         raise ValueError("chat must be direct")
@@ -699,16 +730,20 @@ def parse_phone_chat(data: bytes, max_bytes=DEFAULT_MAX_BYTES):
 
 
 class _FrameTarget(_SafeTreeBuilder):
+    """Track completion of a single event root with safe XML parsing."""
     def __init__(self):
+        """Start with no completed event root."""
         super().__init__()
         self.complete = False
 
     def start(self, tag, attrs):
+        """Require event as the document root before tracking nesting."""
         if self.depth == 0 and tag != "event":
             raise ValueError("expected event root")
         return super().start(tag, attrs)
 
     def end(self, tag):
+        """Mark completion when the outer event element closes."""
         result = super().end(tag)
         self.complete = self.depth == 0
         return result
@@ -727,12 +762,14 @@ class CotStreamFramer:
     """
 
     def __init__(self, max_bytes=DEFAULT_MAX_BYTES):
+        """Validate the frame limit and initialize an open stream parser."""
         _byte_limit(max_bytes)
         self.max_bytes = max_bytes
         self._closed = False
         self._reset()
 
     def _reset(self):
+        """Discard frame state and prepare to parse the next document."""
         self._buffer = bytearray()
         self._target = _FrameTarget()
         self._parser = ET.XMLParser(target=self._target)
@@ -743,9 +780,11 @@ class CotStreamFramer:
 
     @property
     def buffered_bytes(self):
+        """Return the size of the incomplete document buffer."""
         return len(self._buffer)
 
     def feed(self, data):
+        """Return complete documents and permanently close on invalid input."""
         if self._closed:
             raise ValueError("framer is closed")
         if not isinstance(data, bytes):
@@ -778,6 +817,7 @@ class CotStreamFramer:
         return documents
 
     def _lexical_end(self, byte):
+        """Find complete tags, declarations, comments and CDATA sections."""
         if self._mode == "text":
             if byte == ord("<"):
                 self._mode = "tag"
@@ -791,6 +831,7 @@ class CotStreamFramer:
                 if byte == ord("?"):
                     self._mode = "pi"
                     return False
+            # A greater-than sign inside an attribute does not end the tag.
             if self._quote is not None:
                 if byte == self._quote:
                     self._quote = None
@@ -809,6 +850,7 @@ class CotStreamFramer:
             elif not any(p.startswith(prefix) for p in (b"<!--", b"<![CDATA[")):
                 raise ValueError("DOCTYPE and other declarations are forbidden")
             return False
+        # Embedded closing-event text stays inside its current lexical unit.
         ending = {"pi": b"?>", "comment": b"-->", "cdata": b"]]>"}[self._mode]
         if self._buffer.endswith(ending):
             self._mode = "text"
@@ -816,6 +858,7 @@ class CotStreamFramer:
         return False
 
     def finish(self):
+        """Close the framer, rejecting any incomplete document at EOF."""
         if self._closed:
             raise ValueError("framer is closed")
         self._closed = True

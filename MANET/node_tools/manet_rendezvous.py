@@ -21,6 +21,7 @@ WINDOW_SECONDS = 120
 CYCLE_SECONDS = 2 * WINDOW_SECONDS * 3
 # Two visits to even the sole usable entry, plus a complete exchange window.
 RECOVERY_SECONDS = 2 * CYCLE_SECONDS + WINDOW_SECONDS
+# HaLow readiness refresh interval used by the agreement runner.
 HALOW_HEALTH_SECONDS = 15
 
 
@@ -35,16 +36,19 @@ def halow_ready():
     state = Path(os.environ.get('MANET_RADIO_STATE_FILE', '/var/lib/mesh_radio_state.json'))
 
     def command(args):
+        """Run a checked readiness probe with a two-second timeout."""
         return subprocess.run(args, capture_output=True, text=True, check=True, timeout=2).stdout
 
     try:
         names = (roles / 'halow_if').read_text().split()
         desired = json.loads(state.read_text()).get('desired', {}) if state.exists() else {}
+        # Validate role names and exclude explicitly disabled interfaces.
         candidates = [name for name in names if re.fullmatch(r'[A-Za-z0-9_.-]{1,15}', name)
                       and desired.get(name) != 'down']
         if not candidates:
             return False
         attached = command([os.environ.get('BATCTL_PATH', '/usr/sbin/batctl'), 'if'])
+        # Only batctl rows explicitly marked active count as usable attachment.
         active = set(re.findall(r'^\s*([^:\s]+):\s+active\b', attached, re.M))
     except (OSError, ValueError, TypeError, AttributeError, subprocess.SubprocessError):
         return False
@@ -67,20 +71,25 @@ def halow_ready():
 
 
 def search_channels(now, synchronized=True):
+    """Return this clock slot's channels, or anchors without time sync."""
     if not synchronized:
         return dict(ANCHORS)
+    # Each frequency pair lasts 240 seconds while 120-second slots swap bands.
     cycle = int(now) // (2 * WINDOW_SECONDS)
     return {band: channels[cycle % len(channels)] for band, channels in CHANNELS.items()}
 
 
 def slot(now):
+    """Return the scheduled band and its current rendezvous frequency."""
     band = '2.4' if int(now) // WINDOW_SECONDS % 2 == 0 else '5'
     return band, search_channels(now)[band]
 
 
 def permitted_frequencies(info):
+    """Read iw MHz entries that permit initiating a non-DFS mesh."""
     result = set()
     for line in info.splitlines():
+        # PHY frequency rows begin with * and label the center in MHz.
         match = re.search(r'\* (\d+)(?:\.\d+)? MHz', line)
         if match and not re.search(r'disabled|no IR|radar detection|passive scan', line):
             result.add(int(match[1]))
@@ -94,17 +103,20 @@ class Discovery:
     initialized, a channel used for both discovery and data cannot change mode.
     """
     def __init__(self, directory=None):
+        """Resolve the volatile discovery state directory and JSON path."""
         self.directory = Path(directory or os.environ.get('MANET_ACS_RUN_DIR', '/run'))
         self.path = self.directory / 'manet-rendezvous.json'
 
     @contextmanager
     def locked(self):
+        """Serialize discovery state access with a separate blocking lock."""
         self.directory.mkdir(parents=True, exist_ok=True)
         with (self.directory / '.rendezvous-state.lock').open('a') as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
             yield
 
     def mode(self, configured):
+        """Read stored mode, seeding it from configured channels once."""
         with self.locked():
             if not self.path.exists():
                 if not configured:
@@ -117,6 +129,7 @@ class Discovery:
             return state['mode']
 
     def set_mode(self, mode):
+        """Persist a validated discovery mode only when it changes."""
         if mode not in ('search', 'data'):
             raise ValueError('invalid rendezvous mode')
         with self.locked():
@@ -126,6 +139,7 @@ class Discovery:
 
 
 def main():
+    """Expose schedule, discovery mode and radio readiness operations."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action', choices=('slot', 'state', 'set-mode', 'permitted', 'halow-ready'))
     parser.add_argument('values', nargs='*')
@@ -142,6 +156,7 @@ def main():
         Discovery().set_mode(args.values[0])
     else:
         iface, freq = args.values
+        # Resolve the decimal wiphy index, then probe its initiating channels.
         info = subprocess.run(['iw', 'dev', iface, 'info'], capture_output=True, text=True, check=True, timeout=2).stdout
         phy = re.search(r'\bwiphy (\d+)', info)
         if not phy:

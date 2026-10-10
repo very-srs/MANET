@@ -15,6 +15,7 @@ STATE_FILE="${MANET_UI_FW_STATE:-/var/run/manet-ui-firewall.state}"
 NFT="${NFT:-nft}"
 LOCK_FILE="${MANET_UI_FW_LOCK:-${STATE_FILE}.lock}"
 
+# Write a prefixed diagnostic to stderr.
 log() {
     printf '%s\n' "UI-FIREWALL: $1" >&2
 }
@@ -25,10 +26,12 @@ read_dhcp_range() {
     awk -F'[=,]' '/^dhcp-range=/ {print $2, $3; exit}' "$DNSMASQ_CONF"
 }
 
+# Print the first ipv4_network assignment in MESH_CONF.
 read_mesh_network() {
     awk -F= '$1 == "ipv4_network" {print $2; exit}' "$MESH_CONF" 2>/dev/null
 }
 
+# Replace TABLE using DHCP start/end addresses and the mesh CIDR arguments.
 apply_rules() {
     local start="$1" end="$2" mesh_net="$3"
 
@@ -57,6 +60,7 @@ apply_rules() {
 
 # Serialize pool changes and their success marker.
 exec 9>"$LOCK_FILE" || exit 1
+# Wait at most ten seconds for the preceding firewall transaction.
 flock -w 10 9 || { log "ERROR: firewall update already running"; exit 1; }
 
 RANGE=$(read_dhcp_range)
@@ -71,6 +75,7 @@ read -r DHCP_START DHCP_END <<< "$RANGE"
 MESH_NET=$(read_mesh_network)
 DESIRED="${DHCP_START}-${DHCP_END}|${MESH_NET}"
 
+# Reuse the saved pool/CIDR only while the nft table still exists.
 if [ "$(cat "$STATE_FILE" 2>/dev/null)" = "$DESIRED" ] &&
    "$NFT" list table inet "$TABLE" >/dev/null 2>&1; then
     exit 0

@@ -8,6 +8,7 @@ if python3 -c 'from cryptography.hazmat.primitives.ciphers.aead import AESGCM; f
 fi
 
 export DEBIAN_FRONTEND=noninteractive
+# Try cached package indexes first, then refresh them for one install retry.
 if ! apt-get install -y --no-install-recommends \
     -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold python3-cryptography; then
     apt-get update

@@ -6,6 +6,7 @@
 . "${MANET_TOOLS_DIR:-$(dirname "${BASH_SOURCE[0]}")}/mesh-acs-common.sh" || exit 1
 
 CONTROL_IFACE="br0"
+# Type 69 carries public telemetry. Type 75 carries authenticated helpers.
 ALFRED_HELPER_TYPE=69
 ALFRED_AUTH_HELPER_TYPE=75
 AGREEMENT_TOOL="${MANET_TOOLS_DIR:-$(dirname "${BASH_SOURCE[0]}")}/mesh-channel-agreement.py"
@@ -20,10 +21,13 @@ BATCTL_PATH="/usr/sbin/batctl"
 PEER_COUNTER="${MANET_TOOLS_DIR:-$(dirname "${BASH_SOURCE[0]}")}/mesh-peer-count.sh"
 ELECTION_OUTPUT_FILE="/var/run/mesh_channel_election"
 
+# Write a prefixed message to the tourguide journal tag.
 log() {
     manet_journal tourguide-manager "TOURGUIDE: $*"
 }
 
+# Print the elected MAC for self $1 and TOURGUIDE_BAND from current peers.
+# Apply authenticated exclusions and REGISTRY_STATE_FILE eligibility.
 elect_tourguide() {
     local peers excluded
     peers=$("$PEER_COUNTER" --batctl "$BATCTL_PATH" --list) || return 1
@@ -32,6 +36,7 @@ elect_tourguide() {
         --self "$1" --peers "$peers" --registry "$REGISTRY_STATE_FILE" --band "$TOURGUIDE_BAND" --exclude "$excluded"
 }
 
+# Print the enabled WPA role interface for the current scheduled band.
 select_tourguide_radio() {
     # Alternate bands using the shared 120 s tourguide window index, matching
     # should_perform_tourguide in node-manager-acs.sh (every even minute).
@@ -47,6 +52,8 @@ select_tourguide_radio() {
     printf '%s\n' "$iface"
 }
 
+# Set interface $1 to MHz $2 via config $3 and update CURRENT_FREQ.
+# Try 20 readbacks, each capped at 2 s, with 0.5 s between failed checks.
 hop_to_lobby_frequency() {
     local iface=$1
     local freq=$2
@@ -55,6 +62,7 @@ hop_to_lobby_frequency() {
     sed -i "s/frequency=.*/frequency=${freq}/" "$conf"
     timeout 3 wpa_cli -i "$iface" reconfigure >/dev/null 2>&1 || return 1
 
+    # Extract MHz from iw's parenthesized channel frequency.
     for i in {1..20}; do
         CURRENT_FREQ=$(timeout 2 iw dev "$iface" info 2>/dev/null | grep -oP 'channel.*\((\K[0-9]+)' || echo "0")
         if [ "$CURRENT_FREQ" == "$freq" ]; then
@@ -73,11 +81,14 @@ hop_to_lobby_frequency() {
     fi
 }
 
+# Restore interface $1 to MHz $2 via config $3 and clear bitrate limits.
+# Try reconfigure first, then a 15 s restart if readback still differs.
 hop_to_data_frequency() {
     local iface=$1
     local freq=$2
     local conf=$3
 
+    # Both return attempts allow 20 probes at 2 s each and 0.5 s pauses.
     local landed i
     sed -i "s/frequency=.*/frequency=${freq}/" "$conf" || return 1
     timeout 2 iw dev "$iface" set bitrates
@@ -97,6 +108,7 @@ hop_to_data_frequency() {
     return 1
 }
 
+# Print the distinct BATMAN peer count plus this node using BATCTL_PATH.
 get_partition_size() {
     # Own partition size = unique batman originators + self
     local peers
@@ -104,6 +116,8 @@ get_partition_size() {
     printf '%s\n' "$((peers + 1))"
 }
 
+# Select from helper payloads using pre-hop 2.4/5 GHz MHz and size arguments.
+# Write a merge request to ELECTION_OUTPUT_FILE if an authenticated plan wins.
 analyze_partition_data() {
     local payloads="$1" original24="$2" original5="$3" original_size="$4"
     local selected new_2_4 new_5_0
@@ -151,6 +165,7 @@ TOURGUIDE_RADIO=$(select_tourguide_radio) || {
 TOURGUIDE_BAND=5
 [ "$TOURGUIDE_RADIO" != "$WPA_IFACE_2_4" ] || TOURGUIDE_BAND=2.4
 SLOT=$(python3 "$RENDEZVOUS_TOOL" slot "$NOW") || exit 1
+# The rendezvous helper emits band|MHz for the shared absolute slot.
 IFS='|' read -r SLOT_BAND LOBBY_FREQ <<< "$SLOT"
 [ "$SLOT_BAND" = "$TOURGUIDE_BAND" ] || exit 1
 if ! python3 "$RENDEZVOUS_TOOL" permitted "$TOURGUIDE_RADIO" "$LOBBY_FREQ"; then
@@ -170,6 +185,7 @@ fi
 
 # Refuse a late start: every partition must overlap the same lobby dwell.
 [ "$((NOW % 120))" -ge 30 ] && [ "$((NOW % 120))" -lt 50 ] || exit 0
+# Finish the common dwell at second 75 of this 120-second window.
 RENDEZVOUS_END=$(( (NOW / 120) * 120 + 75 ))
 log "=== I AM TOURGUIDE ==="
 
@@ -214,6 +230,7 @@ AUTH_HELPER=$(python3 "$AGREEMENT_TOOL" helper-encode --channels "$CHANNELS_JSON
 python3 "$RENDEZVOUS_TOOL" halow-ready && exit 0
 LIVE_NOW=$(date +%s)
 [ "$((LIVE_NOW / 120))" -eq "$((NOW / 120))" ] && [ "$((LIVE_NOW % 120))" -lt 50 ] || exit 0
+# Restore TOURGUIDE_RADIO from TOURGUIDE_CONF unless DATA_FREQ is the lobby.
 restore_data() {
     [ "$DATA_FREQ" = "$LOBBY_FREQ" ] || hop_to_data_frequency "$TOURGUIDE_RADIO" "$DATA_FREQ" "$TOURGUIDE_CONF"
 }

@@ -1,4 +1,5 @@
 #!/bin/bash
+# Reconcile the node IPv4 block, local EUD pool and management names.
 . "${MANET_TOOLS_DIR:-$(dirname "${BASH_SOURCE[0]}")}/manet-common.sh" || exit 1
 # Claim a contiguous IPv4 block for the node and its EUDs.
 # IPs 1-5 are reserved for services. Chunks start at IP 6, sized max_euds + 2:
@@ -46,6 +47,7 @@ EUD_MODE=${EUD_MODE:-"none"}
 # MTX VIP = HostMin+1, Mumble VIP = HostMin+2
 MTX_VIP=""
 MUMBLE_VIP=""
+# Set MTX_VIP and MUMBLE_VIP from IPV4_NETWORK when ipcalc succeeds.
 _calc_service_vips() {
     local calc host_min
     calc=$(manet-ipcalc.sh "$IPV4_NETWORK" 2>/dev/null) || return 0
@@ -77,6 +79,7 @@ PERSISTENT_CHUNK=""
 PERSISTENT_NETWORK=""
 
 # --- Helper Functions ---
+# Write a prefixed diagnostic to stderr.
 log() {
     printf '%s\n' "IP-MGR: $1" >&2
 }
@@ -97,6 +100,8 @@ ip_to_int() {
 
 # Calculate chunk IPs given a chunk number
 get_chunk_ips() {
+    # Zero-based chunks use IPV4_NETWORK, SERVICES_RESERVED and CHUNK_SIZE.
+    # Output fields are primary:gateway:pool_start:pool_end.
     local chunk_num=$1
     local CALC_OUTPUT=$(manet-ipcalc.sh "$IPV4_NETWORK" 2>/dev/null)
 
@@ -159,6 +164,7 @@ ip_in_cidr() {
     fi
 }
 
+# Test whether an IP falls in IPV4_NETWORK's first SERVICES_RESERVED hosts.
 is_service_reserved_ip() {
     local ip="$1"
     local CALC_OUTPUT HOST_MIN MIN_INT IP_INT offset
@@ -181,6 +187,8 @@ is_service_reserved_ip() {
 # known primary still participates in conflict checks. Guessing a local
 # size could overlap a larger peer block.
 MAX_PEER_CHUNK_SIZE=255   # max_euds_per_node is at most 253
+# Load peer ranges into CLAIM_STARTS/ENDS/MACS and INCOMPLETE_CLAIMS.
+# Read CLAIMED_CHUNKS_FILE once and mark CLAIMS_LOADED for later checks.
 load_claims() {
     local chunk mac start size
     CLAIM_STARTS=(); CLAIM_ENDS=(); CLAIM_MACS=(); INCOMPLETE_CLAIMS=()
@@ -190,6 +198,7 @@ load_claims() {
         [[ "$chunk" =~ ^[0-9]+$ && -n "$mac" ]] || continue
         mac_is_local "$mac" && continue
         [[ "$size" =~ ^[0-9]+$ ]] || size=0
+        # IPv4 integer addresses fit in 32 bits, up to 4294967295.
         if ! [[ "$start" =~ ^[0-9]{1,10}$ ]] || [ "$start" -gt 4294967295 ]; then
             INCOMPLETE_CLAIMS+=("$mac")
             continue
@@ -306,6 +315,7 @@ EOF
     chmod 644 "$PERSISTENT_STATE_FILE"
 }
 
+# Compare the supplied MAC with every local sysfs interface address.
 mac_is_local() {
     local mac="$1"
     local local_mac
@@ -326,6 +336,8 @@ mac_is_local() {
     return 1
 }
 
+# Withdraw the management name and remove the saved chunk from CONTROL_IFACE.
+# Use CURRENT_IPV4 alone when PERSISTENT_CHUNK is unavailable.
 release_control_ips() {
     update_avahi_host "" || return 1
     local prefix="${IPV4_NETWORK#*/}"
@@ -345,6 +357,8 @@ release_control_ips() {
     fi
 }
 
+# Remove other nonservice CONTROL_IFACE addresses within IPV4_NETWORK.
+# Preserve the primary and EUD gateway derived from PERSISTENT_CHUNK.
 cleanup_control_aliases() {
     local prefix="${IPV4_NETWORK#*/}"
     local primary=""
@@ -383,6 +397,7 @@ ensure_dhcp_isolation() {
     fi
 }
 
+# Test for a live forwarding br0 port other than bat0 before serving DHCP.
 eud_ready() {
     if [ "${MANET_IP_CHECKED:-0}" = 1 ]; then
         # Recheck at the point of a DHCP start/restart: a port can disappear
@@ -393,6 +408,7 @@ eud_ready() {
             state=""; carrier=""
             [ ! -r "$port/state" ] || read -r state < "$port/state"
             [ ! -r "$sysnet/${port##*/}/carrier" ] || read -r carrier < "$sysnet/${port##*/}/carrier"
+            # Bridge state 3 is forwarding, and carrier 1 confirms a live port.
             [ "$state" != 3 ] || [ "$carrier" != 1 ] || return 0
         done
         return 1
@@ -426,6 +442,8 @@ valid_eud_gateway() {
     local address="${1:-}" start="${2:-}" address_int start_int
     address_int=$(ip_to_int "$address") || return 1
     start_int=$(ip_to_int "$start") || return 1
+    # Require canonical dotted decimal, adjacent gateway/pool addresses,
+    # nonloopback gateway and a pool below 224.0.0.0 (3758096384).
     [ "$(int_to_ip "$address_int")" = "$address" ] &&
         [ "$(int_to_ip "$start_int")" = "$start" ] &&
         [ "$address_int" -gt 0 ] && [ "$start_int" -lt 3758096384 ] &&
@@ -434,6 +452,8 @@ valid_eud_gateway() {
         [ "$address" != "$MTX_VIP" ] && [ "$address" != "$MUMBLE_VIP" ]
 }
 
+# Publish gateway $1 for pool start $2 as manet.local, or withdraw it.
+# Retain a failed reload's marker for the next pass while Avahi is active.
 update_avahi_host() {
     local address="${1:-}" start="${2:-}"
     local hosts=/etc/avahi/hosts pending=/run/manet-avahi-host-reload-needed
@@ -473,6 +493,8 @@ update_avahi_host() {
 
 # Configure DNS and mDNS together from the same allocated internal address.
 configure_dnsmasq() {
+    # Arguments are primary, EUD gateway, DHCP start and DHCP end.
+    # The generated pool uses four-minute leases and the node's upstream DNS.
     local br0_primary=$1
     local br0_secondary=$2
     local dhcp_start=$3
@@ -561,6 +583,7 @@ EOF
     update_avahi_host "$br0_secondary" "$dhcp_start"
 }
 
+# Restore the supplied address on CONTROL_IFACE using IPV4_NETWORK's prefix.
 ensure_control_addr() {
     local ip="$1"
     local prefix="${IPV4_NETWORK#*/}"
@@ -771,6 +794,8 @@ case $IPV4_STATE in
                 DNSMASQ_CONF="/etc/dnsmasq.d/mesh-eud.conf"
                 NEEDS_DNSMASQ_UPDATE=false
 
+                # Rebuild on pool/name mismatches, extra address overrides,
+                # fixed binding or DNS settings that bypass resolved.
                 if [ ! -f "$DNSMASQ_CONF" ]; then
                     NEEDS_DNSMASQ_UPDATE=true
                 elif ! grep -q "dhcp-range=$DHCP_START,$DHCP_END" "$DNSMASQ_CONF" 2>/dev/null; then
@@ -807,6 +832,7 @@ case $IPV4_STATE in
 
                 # The web UI is restricted to whoever holds a lease from this
                 # node, so the rule has to follow the pool whenever it moves.
+                # Rules accept pool source addresses without checking leases.
                 [ -x /usr/local/bin/manet-ui-firewall.sh ] && \
                     /usr/local/bin/manet-ui-firewall.sh >/dev/null 2>&1 || true
             fi

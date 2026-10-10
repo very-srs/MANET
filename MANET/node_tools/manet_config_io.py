@@ -9,14 +9,17 @@ import tempfile
 
 
 def supplicant_string(value):
+    """Render a literal UTF-8 value for wpa_supplicant."""
     # Ordinary wpa_supplicant quotes are literal, not C/Python string quotes.
     # Hex handles embedded quotes without relying on version-specific escapes.
     return value.encode('utf-8').hex() if '"' in value else '"' + value + '"'
 
 
 def rewrite_keys(text, values, quoted_keys=()):
+    """Replace matching assignments and append missing validated keys."""
     replacements = {}
     for key, value in values.items():
+        # Accept lowercase configuration names only, never arbitrary syntax.
         if not re.fullmatch('[a-z][a-z0-9_]*', key):
             raise ValueError('Invalid configuration key')
         if not isinstance(value, str) or any(c in value for c in '\n\r\0'):
@@ -40,12 +43,14 @@ def rewrite_keys(text, values, quoted_keys=()):
 
 
 def atomic_write(path, contents, metadata=None):
+    """Replace a file durably with its mode and, as root, ownership."""
     path = Path(path)
     if metadata is None:
         try:
             metadata = path.stat()
         except FileNotFoundError:
             pass
+    # A same-directory temporary keeps replacement on one filesystem.
     fd, temporary = tempfile.mkstemp(prefix='.' + path.name + '-', dir=path.parent)
     try:
         with os.fdopen(fd, 'wb') as target:
@@ -56,6 +61,7 @@ def atomic_write(path, contents, metadata=None):
             target.flush()
             os.fsync(target.fileno())
         os.replace(temporary, path)
+        # Persist the directory entry after persisting file contents.
         directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
         try:
             os.fsync(directory)

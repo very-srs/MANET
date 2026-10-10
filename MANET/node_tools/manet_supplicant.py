@@ -11,12 +11,15 @@ import time
 
 
 def service_name(iface, halow=False):
+    """Validate an interface name and select its conventional or S1G unit."""
+    # Restrict names before constructing systemd units and control arguments.
     if not re.fullmatch(r'[A-Za-z0-9_.-]{1,15}', iface):
         raise ValueError('Invalid mesh interface')
     return f'wpa_supplicant-s1g-{iface}.service' if halow else f'wpa_supplicant@{iface}.service'
 
 
 def configured(roles):
+    """Read mesh roles and classify HaLow from roles or the Morse driver."""
     result = {}
     for filename, halow in [('mesh_if', False), ('halow_if', True)]:
         try:
@@ -26,11 +29,13 @@ def configured(roles):
         for iface in names:
             service_name(iface, halow)
             driver = (Path('/sys/class/net') / iface / 'device/driver').resolve().name
+            # Keep HaLow classification across duplicate generic mesh entries.
             result[iface] = result.get(iface, False) or halow or driver.startswith('morse')
     return result
 
 
 def restart_configured(roles=None, only=None):
+    """Restart selected enabled mesh radios and verify active PONG replies."""
     roles = Path(roles or os.environ.get('MANET_IFACE_STATE_DIR', '/var/lib'))
     try:
         state = json.loads((roles / 'mesh_radio_state.json').read_text())
@@ -50,11 +55,13 @@ def restart_configured(roles=None, only=None):
             continue
         service = service_name(iface, halow)
         try:
+            # Allow 30 seconds to restart, then ten seconds for readiness.
             subprocess.run(['systemctl', 'restart', service], check=True,
                            capture_output=True, timeout=30)
             cli = 'wpa_cli_s1g' if halow else 'wpa_cli'
             control = '/var/run/wpa_supplicant_s1g' if halow else '/var/run/wpa_supplicant'
             deadline = time.monotonic() + 10
+            # Each activity/ping probe is bounded to three seconds.
             while True:
                 active = subprocess.run(['systemctl', 'is-active', '--quiet', service],
                                         capture_output=True, timeout=3)
@@ -64,6 +71,7 @@ def restart_configured(roles=None, only=None):
                     break
                 if time.monotonic() >= deadline:
                     raise RuntimeError(f'{service} did not become ready')
+                # Retry after 250 ms until service and socket both respond.
                 time.sleep(0.25)
         except (OSError, subprocess.SubprocessError, RuntimeError) as error:
             errors.append(f'{service}: {type(error).__name__}')

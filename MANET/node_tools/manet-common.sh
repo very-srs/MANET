@@ -16,9 +16,11 @@ manet_journal() {
     printf '%s\n' "$*" | systemd-cat -t "$program"
 }
 
+# Print the allocated primary IPv4, failing if it is unavailable.
 node_primary_ipv4() {
     local rc=0 address
     address=$(manet_runtime_call ipv4) || rc=$?
+    # 125 means no runtime request was sent, so a standalone call is safe.
     if [ "$rc" = 125 ]; then
         address=$(python3 /usr/local/bin/manet_node_ipv4.py br0) || return $?
     elif [ "$rc" != 0 ]; then
@@ -30,12 +32,16 @@ node_primary_ipv4() {
     printf '%s\n' "$address"
 }
 
+# Print the local certificate-derived Syncthing ID, or an empty result.
+# Retry standalone only when the resident helper accepted no request.
 node_syncthing_id() {
     local rc=0
     manet_runtime_call syncthing || rc=$?
     if [ "$rc" = 125 ]; then python3 "${MANET_TOOLS_DIR:-/usr/local/bin}/manet-syncthing-id.py"; else return "$rc"; fi
 }
 
+# Set WLAN0/1/2 TX/RX MCS globals and WLAN2_MCS_PEER for telemetry.
+# Read HALOW_MCS_SUMMARY for the standalone collector path.
 collect_radio_mcs() {
     WLAN0_TX_MCS=""; WLAN0_RX_MCS=""
     WLAN1_TX_MCS=""; WLAN1_RX_MCS=""
@@ -52,13 +58,16 @@ collect_radio_mcs() {
             # Optional telemetry: omit unavailable rates, never eval an error.
             values=""
         fi
+        # The local collector emits shell assignments for the MCS globals.
         eval "$values"
     done
 }
 
+# Print interface telemetry JSON, using [] when collection fails.
 collect_interfaces_json() {
     local rc=0 value
     value=$(manet_runtime_call interfaces 2>/dev/null) || rc=$?
+    # 125 means no runtime request was sent, so a standalone call is safe.
     if [ "$rc" = 125 ]; then
         python3 /usr/local/bin/manet_interfaces.py 2>/dev/null || echo '[]'
     elif [ "$rc" != 0 ]; then
@@ -125,6 +134,7 @@ uptime_now() {
 sync_alfred_command() {
     local helper="$1" type="$2" records
     [ -x "$helper" ] || return 0
+    # Limit the cache read to 5 s before handing records to the receiver.
     records=$(timeout 5 alfred -r "$type" 2>/dev/null) || return 1
     [[ "$records" == *[![:space:]]* ]] || return 0
     "$helper" sync --stdin <<< "$records"
@@ -154,6 +164,7 @@ iface_driver() {
     local iface="$1" driver
     driver="$(basename "$(readlink -f "/sys/class/net/$iface/device/driver" \
         2>/dev/null)" 2>/dev/null || true)"
+    # ethtool reports the driver as a "driver: name" record.
     if [ -z "$driver" ] || [ "$driver" = "." ]; then
         driver="$(ethtool -i "$iface" 2>/dev/null |
             awk -F': ' '$1 == "driver" {print $2; exit}')"
@@ -164,6 +175,7 @@ iface_driver() {
 # Read the interface PHY name from iw.
 iface_phy() {
     local iface="$1"
+    # iw prints a numeric wiphy index, which phy queries need as phyN.
     iw dev "$iface" info 2>/dev/null | awk '/wiphy/ {print "phy"$2; exit}'
 }
 
@@ -231,10 +243,12 @@ internet_probe() {
     local iface="$1"
     local url code ip
 
+    # Each ICMP target has a 2 s reply wait.
     ping -c 1 -W 2 -I "$iface" 1.1.1.1 >/dev/null 2>&1 && return 0
     ping -c 1 -W 2 -I "$iface" 8.8.8.8 >/dev/null 2>&1 && return 0
 
     if command -v curl >/dev/null 2>&1; then
+        # Allow 3 s per HTTP request and accept only a 204 response.
         for url in http://connectivitycheck.gstatic.com/generate_204 \
                    http://cp.cloudflare.com/; do
             code=$(curl --interface "$iface" -s -m 3 -o /dev/null \
@@ -247,6 +261,7 @@ internet_probe() {
     # No curl in this image: bare TCP connect instead.
     ip=$(iface_ip "$iface")
     if [ -n "$ip" ] && command -v nc >/dev/null 2>&1; then
+        # Bind the probe to this interface address, with a 3 s timeout.
         nc -z -w 3 -s "$ip" 1.1.1.1 53 >/dev/null 2>&1 && return 0
         nc -z -w 3 -s "$ip" 8.8.8.8 53 >/dev/null 2>&1 && return 0
     fi

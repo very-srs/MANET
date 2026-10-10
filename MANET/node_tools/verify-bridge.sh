@@ -11,15 +11,18 @@ NC='\033[0m' # No Color
 ERRORS=0
 WARNINGS=0
 
+# Print a passing check using the configured display colors.
 log_pass() {
     printf '%b✓%b %s\n' "$GREEN" "$NC" "$1"
 }
 
+# Print a failed check to stderr and increment ERRORS.
 log_fail() {
     printf '%b✗%b %s\n' "$RED" "$NC" "$1" >&2
     ((ERRORS++))
 }
 
+# Print a warning to stderr and increment WARNINGS.
 log_warn() {
     printf '%b⚠%b %s\n' "$YELLOW" "$NC" "$1" >&2
     ((WARNINGS++))
@@ -43,6 +46,7 @@ else
     log_pass "br0 interface exists"
     
     # Get members
+    # bridge link lists "interface:" in column two for each br0 port.
     BR0_MEMBERS=$(bridge link | grep "master br0" | awk '{print $2}' | cut -d: -f1)
     
     if printf '%s\n' "$BR0_MEMBERS" | grep -q "bat0"; then
@@ -82,6 +86,7 @@ echo "=== bat0 (BATMAN-adv) Membership ==="
 if ! batctl if &>/dev/null; then
     log_fail "batctl not working or bat0 not configured"
 else
+    # batctl lists hard interfaces as "interface:" in its first column.
     BAT0_MEMBERS=$(batctl if | awk '{print $1}' | cut -d: -f1)
     
     for iface in "${MESH_INTERFACES[@]}"; do
@@ -108,6 +113,7 @@ echo ""
 # --- 3. Check IP Configuration ---
 echo "=== IP Configuration on br0 ==="
 
+# Extract IPv4 text following inet, excluding prefixes and IPv6 records.
 BR0_IPS=$(ip addr show dev br0 | grep -oP 'inet \K[\d.]+')
 IP_COUNT=$(printf '%s\n' "$BR0_IPS" | grep -c .)
 
@@ -168,6 +174,7 @@ echo ""
 # --- 6. Check Multicast Settings ---
 echo "=== Multicast Configuration ==="
 
+# Check IPv4 multicast forwarding for $1, incrementing WARNINGS if off.
 check_mc_forward() {
     local iface=$1
     local value=$(sysctl -n net.ipv4.conf.$iface.mc_forwarding 2>/dev/null)
@@ -196,6 +203,7 @@ echo ""
 # --- 7. Check Service State ---
 echo "=== Service States ==="
 
+# Check the supplied unit, incrementing WARNINGS if inactive.
 check_service() {
     local service=$1
     if systemctl is-active --quiet "$service"; then

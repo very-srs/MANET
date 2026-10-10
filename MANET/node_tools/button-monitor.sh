@@ -33,5 +33,6 @@ while true; do
     fi
 
     echo "button-monitor: button pressed, launching led-info"
+    # Wait for the display to finish before arming the next button event.
     bash "$LED_INFO_SCRIPT"
 done

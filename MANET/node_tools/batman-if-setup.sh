@@ -2,6 +2,7 @@
 # Attach mesh interfaces to bat0.
 # Standard Wi-Fi needs mesh point mode confirmed by iw before attachment.
 # wpa_supplicant_s1g owns HaLow mode. Changing its type interrupts the driver.
+# Print the required start or stop argument to stderr.
 usage() {
     printf '%s\n' 'usage: batman-if-setup.sh {start|stop}' >&2
 }
@@ -22,6 +23,7 @@ else
 fi
 
 
+# Check whether the interface driver belongs to the Morse family.
 is_halow() {
     [[ "$(iface_driver "$1")" == morse* ]]
 }
@@ -29,6 +31,8 @@ is_halow() {
 
 # radio_iface_enabled: manet-common.sh
 
+# Set STANDARD_MESH_INTERFACES, HALOW_INTERFACES and NONMESH_INTERFACES.
+# Prefer saved roles, falling back to live driver and PHY capabilities.
 refresh_interfaces() {
     STANDARD_MESH_INTERFACES=""
     HALOW_INTERFACES=""
@@ -75,6 +79,7 @@ refresh_interfaces() {
         return
     fi
 
+    # iw groups interfaces by PHY. Keep only Interface records.
     WLAN_INTERFACES="$(iw dev 2>/dev/null | awk '$1 == "Interface" {print $2}' | tr '\n' ' ')"
 
     for WLAN in $WLAN_INTERFACES; do
@@ -97,6 +102,8 @@ refresh_interfaces() {
     printf '%s\n' "  Non-mesh/AP: $NONMESH_INTERFACES"
 }
 
+# Start enabled mesh radios, attach HaLow first and bring bat0 up.
+# Read operator radio state and refresh the interface-list globals.
 start() {
     echo "Starting BATMAN-ADV setup..."
     refresh_interfaces
@@ -160,6 +167,7 @@ start() {
     [ "$wrote_links" = true ] && networkctl reload 2>/dev/null || true
 
     # Change to batman V routing algorithm
+    # Select the algorithm before creating a new batadv interface.
     batctl ra BATMAN_V
 
     # Create bat0 interface if it doesn't exist
@@ -207,10 +215,13 @@ start() {
             fi
         done
 
+        # Give mesh hard interfaces room above a 1500-byte payload.
         ip link set "$WLAN" mtu 1532 2>/dev/null || true
 
         printf '%s\n' "Adding HaLow $WLAN to bat0..."
 
+        # Try five attachments, checking membership 0.5 s after each add.
+        # An unsuccessful check or add waits 1 s before the next attempt.
         ADDED=false
         for attempt in {1..5}; do
             if batctl bat0 if add "$WLAN" 2>&1; then
@@ -269,12 +280,16 @@ start() {
             fi
         done
 
+        # Leave a 2 s settling interval after mesh point mode appears.
         sleep 2
 
+        # Give mesh hard interfaces room above a 1500-byte payload.
         ip link set "$WLAN" mtu 1532 2>/dev/null || true
 
         printf '%s\n' "Adding $WLAN to bat0..."
 
+        # Try five attachments, checking membership 0.5 s after each add.
+        # An unsuccessful check or add waits 1 s before the next attempt.
         ADDED=false
         for attempt in {1..5}; do
             if batctl bat0 if add "$WLAN" 2>&1; then
@@ -327,6 +342,7 @@ case "$1" in
     start|stop)
         # Role changes and ACS must not race a cached interface list.
         exec 8>"${MANET_ACS_LOCK_FILE:-/run/channel-election.lock}"
+        # Fail the requested transition if the lock stays busy for 10 s.
         flock -w 10 8 || exit 1
         "$1"
         ;;

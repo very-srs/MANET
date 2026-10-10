@@ -19,10 +19,12 @@ WM_SHA256 = '18a2e1d03f17913ef0450a905536d5defcdf78ee1d98a1232649c31a70a63e1e'
 
 
 def digest(data):
+    """Return the SHA-256 hex digest of firmware bytes."""
     return hashlib.sha256(data).hexdigest()
 
 
 def positioning(path):
+    """Read the literal positioning choice, defaulting to n if absent."""
     # Keep the positioning service's literal key/value parsing, including quotes.
     result = {}
     try:
@@ -38,13 +40,17 @@ def positioning(path):
 
 
 def enabled(path):
+    """Return whether the config explicitly requests positioning=y."""
     return positioning(path) == 'y'
 
 
 def timing_driver(root):
+    """Check the installed mt7915e timing tag without loading the driver."""
     # Inspect the installed module selected for this kernel with modinfo.
     # A loaded module may predate installation. modinfo loads no modules.
     try:
+        # A missing or stalled lookup cannot qualify the module for patching.
+        # Give modinfo at most 10 s to report the single timing flag.
         result = subprocess.run(['modinfo', '-b', str(root), '-k', os.uname().release,
                                  '-F', 'manet_timing', 'mt7915e'],
                                 capture_output=True, text=True, timeout=10)
@@ -54,14 +60,18 @@ def timing_driver(root):
 
 
 def patch_wm(stock, spec):
+    """Apply bounded WM replacements and reseal the expected output image."""
     if len(stock) != spec['size'] or digest(stock) != spec['input_sha256']:
         raise ValueError('stock WM hash mismatch')
     output = bytearray(stock)
+    # The final 36 bytes hold the trailer. Byte 2 counts 40-byte descriptors
+    # immediately before it, each describing a consecutive data region.
     trailer = len(stock) - 36
     count = stock[trailer + 2]
     regions, offset = [], 0
     for i in range(count):
         desc = trailer - (count - i) * 40
+        # Region lengths are little-endian bytes and include a checksum word.
         length, = struct.unpack_from('<I', stock, desc + 20)
         if stock[desc + 24] not in (0, 0x20) or length < 4 or length % 4:
             raise ValueError('unsupported WM region')
@@ -71,6 +81,7 @@ def patch_wm(stock, spec):
         raise ValueError('invalid WM layout')
     for edit in spec['replacements']:
         start, data = edit['offset'], bytes.fromhex(edit['hex'])
+        # Keep replacements inside one region and clear of its checksum tail.
         if not any(o <= start and start + len(data) <= o + n - 4 for o, n in regions):
             raise ValueError('patch outside WM payload')
         output[start:start + len(data)] = data
@@ -81,6 +92,7 @@ def patch_wm(stock, spec):
             state = (state >> 1) ^ (((state & 0x10921111).bit_count() & 1) << 31) ^ word
         tail = start + length - 4
         struct.pack_into('<I', output, tail, struct.unpack_from('<I', output, tail)[0] ^ state)
+    # Seal the whole image after updating the individual region checksums.
     struct.pack_into('<I', output, len(output) - 4, zlib.crc32(output[:-4]))
     if digest(output) != spec['output_sha256']:
         raise ValueError('sealed WM hash mismatch')
@@ -88,6 +100,7 @@ def patch_wm(stock, spec):
 
 
 def sync_directory(path):
+    """Persist directory entry changes through a directory descriptor."""
     fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
     try:
         os.fsync(fd)
@@ -97,6 +110,7 @@ def sync_directory(path):
 
 @contextmanager
 def locked(directory):
+    """Hold an exclusive directory lock until the caller leaves the context."""
     # Serialize preparers with a directory lock, without lock-file writes or
     # radio probing.
     fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
@@ -108,6 +122,7 @@ def locked(directory):
 
 
 def file_hash(path):
+    """Hash a present file, leaving missing files and symlinks unowned."""
     if path.is_symlink():
         return None
     try:
@@ -117,11 +132,13 @@ def file_hash(path):
 
 
 def identity(path):
+    """Return device, inode and nanosecond mtime for ownership checks."""
     info = path.stat()
     return [info.st_dev, info.st_ino, info.st_mtime_ns]
 
 
 def staged_file(path, data):
+    """Create and fsync a new 0644 file before its atomic publication."""
     # The temporary directory is on the destination filesystem. Publish only
     # after a complete write and fsync, preserving this inode's identity.
     with path.open('xb') as stream:
@@ -132,7 +149,10 @@ def staged_file(path, data):
 
 
 class Firmware:
+    """Select owned overrides and retain evidence of unconfirmed boots."""
+
     def __init__(self, root=Path('/')):
+        """Locate assets, overrides and recovery state beneath the root."""
         self.root = Path(root)
         self.assets = self.root / 'usr/local/share/manet'
         self.updates = self.root / 'lib/firmware/updates/mediatek'
@@ -142,6 +162,7 @@ class Firmware:
         self.disabled = self.state / 'mt7916-auto-disabled'
 
     def read_state(self, path):
+        """Load a recovery record and validate its schema and identities."""
         try:
             record = json.loads(path.read_text())
         except FileNotFoundError:
@@ -153,6 +174,7 @@ class Firmware:
         return record
 
     def write_state(self, path, record):
+        """Atomically persist a recovery record and its directory entries."""
         # Make newly created parent directories durable too, including the
         # first install where /var/lib/manet does not exist yet.
         missing, parent = [], self.state
@@ -169,17 +191,20 @@ class Firmware:
             sync_directory(self.state)
 
     def remove_state(self, path):
+        """Remove a present recovery record and persist the deletion."""
         if path.exists():
             path.unlink()
             sync_directory(self.state)
 
     def boot_id(self):
+        """Read a nonempty boot ID for pending-probe comparisons."""
         value = (self.root / 'proc/sys/kernel/random/boot_id').read_text().strip()
         if not value:
             raise ValueError('missing boot identity')
         return value
 
     def present(self):
+        """Detect a primary MT7916 PCI function from its vendor/device IDs."""
         # Detect presence before coldplug without a bound driver.
         # The auxiliary 0x790a function alone cannot load this firmware.
         return any((device / 'vendor').read_text().strip() == '0x14c3' and
@@ -187,8 +212,10 @@ class Firmware:
                    for device in (self.root / 'sys/bus/pci/devices').glob('*'))
 
     def survived(self):
+        """Check multi-user readiness and completed primary-radio binding."""
         # Also check the target here so a premature manual invocation cannot
         # erase the marker. The unit orders this once, without polling.
+        # Query target readiness once, with a 10 s command deadline.
         result = subprocess.run(['systemctl', 'is-active', '--quiet', 'multi-user.target'],
                                 capture_output=True, timeout=10)
         if result.returncode:
@@ -218,6 +245,7 @@ class Firmware:
         return primary or not secondary
 
     def select(self, mode):
+        """Reconcile boot recovery, opt-in config and firmware preparation."""
         value = positioning(self.root / 'etc/mesh.conf')
         pending = self.read_state(self.pending)
         disabled = self.read_state(self.disabled)
@@ -253,11 +281,13 @@ class Firmware:
         if not timing_driver(self.root):
             return 'installed mt7915e lacks manet_timing=1 for running kernel; ' + self.prepare(False)
         if mode == 'boot' and not pending:
+            # Persist probe intent before leaving the patched image available.
             self.write_state(self.pending, {'schema': 1, 'boot_id': current,
                                            'wm_sha256': WM_SHA256, 'positioning': value})
         return self.prepare(True)
 
     def owners(self):
+        """Load companion ownership records, or an empty mapping if absent."""
         try:
             record = json.loads(self.owner.read_text())
         except FileNotFoundError:
@@ -267,6 +297,7 @@ class Firmware:
         return record['files']
 
     def owned(self, name, owners):
+        """Match WM by its unique hash and companions by hash plus identity."""
         path = self.updates / name
         value = file_hash(path)
         if name == NAMES[0]:
@@ -276,6 +307,7 @@ class Firmware:
                 and identity(path) == record.get('identity'))
 
     def deactivate(self):
+        """Remove recognized overrides and their ownership manifest."""
         # Remove the unique patched WM hash first, recognizable without JSON.
         # On failure, keep the owner record to retry WA/ROM removal next boot.
         wm = self.updates / NAMES[0]
@@ -292,6 +324,7 @@ class Firmware:
             sync_directory(self.updates)
 
     def prepare(self, enable):
+        """Remove owned overrides or stage the verified firmware set."""
         if not enable:
             self.deactivate()
             if any(os.path.lexists(self.updates / n) for n in NAMES):
@@ -310,6 +343,7 @@ class Firmware:
             return 'enabled; firmware already prepared'
         owners = self.owners()
         for name in changed:
+            # lexists also sees dangling symlinks, which must not be replaced.
             if os.path.lexists(self.updates / name) and not self.owned(name, owners):
                 raise ValueError(f'unowned firmware override: {name}')
         stock = {}
@@ -341,6 +375,7 @@ class Firmware:
         return 'enabled; firmware prepared for next boot'
 
     def run(self, mode='apply'):
+        """Serialize selection and return success plus a diagnostic message."""
         try:
             if not self.updates.exists():
                 if (not self.state.exists() and not enabled(self.root / 'etc/mesh.conf')
@@ -351,6 +386,8 @@ class Firmware:
                 try:
                     return True, self.select(mode)
                 except Exception as error:
+                    # A failed preparation must try to restore stock selection.
+                    # Keep both errors visible if owned-file cleanup also fails.
                     try:
                         self.deactivate()
                         recovery = 'owned overrides removed; other firmware left untouched'
@@ -362,6 +399,7 @@ class Firmware:
 
 
 def main():
+    """Apply the requested firmware mode and return its process exit status."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--root', type=Path, default=Path('/'), help='offline root for testing')
     modes = parser.add_mutually_exclusive_group()

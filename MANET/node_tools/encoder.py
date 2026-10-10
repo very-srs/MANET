@@ -23,10 +23,12 @@ from manet_ids import mac_to_bytes, syncthing_id_to_bytes, ipv4_to_int
 
 
 def emit(message):
+    """Print protobuf bytes as base64 without a trailing newline."""
     print(base64.b64encode(message.SerializeToString()).decode('utf-8'), end='')
 
 
 def build_identity(args):
+    """Build the stable identity record from command-line fields."""
     ident = NodeInfo_pb2.NodeIdentity()
     ident.hostname = args.hostname
 
@@ -52,6 +54,7 @@ def build_identity(args):
 
 
 def build_telemetry(args):
+    """Build telemetry, including optional position and radio reports."""
     t = NodeInfo_pb2.NodeTelemetry()
 
     t.mean_throughput_mbps = args.mean_throughput_mbps
@@ -159,6 +162,7 @@ def apply_positioning_location(telemetry, path, config_path, *, now_boot=None, b
             latitude_e7=raw.latitude_e7, longitude_e7=raw.longitude_e7,
             altitude_m=raw.altitude_m, source=raw.GNSS, valid=False, quality='unchecked'))
     try:
+        # Read one byte beyond the 128 KiB limit to detect oversized JSON.
         with open(path, 'rb') as stream:
             raw = stream.read(131073)
         if len(raw) > 131072:
@@ -166,6 +170,7 @@ def apply_positioning_location(telemetry, path, config_path, *, now_boot=None, b
         doc = json.loads(raw, parse_constant=_finite)
         boot_id = Path('/proc/sys/kernel/random/boot_id').read_text().strip() if boot_id is None else boot_id
         now_boot = time.clock_gettime(time.CLOCK_BOOTTIME) if now_boot is None else now_boot
+        # Accept only this boot and a heartbeat less than five seconds old.
         if (type(doc.get('schema')) is not int or doc['schema'] != 1 or
                 doc.get('boot_id') != boot_id or
                 not 0 <= now_boot - _finite(doc.get('written_boot')) < 5 or
@@ -186,6 +191,7 @@ def apply_positioning_location(telemetry, path, config_path, *, now_boot=None, b
 
 
 def _finite(value):
+    """Require a finite int or float, excluding booleans."""
     if type(value) not in (int, float) or not math.isfinite(value):
         raise ValueError('finite number required')
     return value
@@ -197,6 +203,7 @@ def _positioning_point(doc, heartbeat_age, old_altitude):
     age = _finite(doc['age_s'])
     if age < 0:
         raise ValueError('negative position age')
+    # Account for time elapsed since the service wrote its solution age.
     age += heartbeat_age
     if quality in ('candidates', 'ring', 'none'):
         if point is not None or source not in ('none', 'ranged'):
@@ -207,6 +214,7 @@ def _positioning_point(doc, heartbeat_age, old_altitude):
     lat, lon = _finite(point['lat']), _finite(point['lon'])
     radius = _finite(doc['radius_m'])
     generation, ancestry = doc['generation'], doc['ancestry']
+    # Bound radius to 100 km and ancestry to 16 distinct IDs, depth at most 3.
     if (not -90 <= lat <= 90 or not -180 <= lon <= 180 or not 0 <= radius <= 100000 or
             type(generation) is not int or not 0 <= generation <= 3 or
             not isinstance(ancestry, list) or len(ancestry) > 16 or
@@ -215,13 +223,16 @@ def _positioning_point(doc, heartbeat_age, old_altitude):
             (source == 'ranged' and (not generation or not ancestry)) or
             (source != 'ranged' and (generation or ancestry))):
         raise ValueError('invalid geography/uncertainty/provenance')
+    # GNSS expires at 5 s, manual and ranged selections at 90 s.
     if age >= (5 if source == 'gnss' else 90):
         return None
+    # Wire coordinates use 1e-7 degrees and age uses milliseconds.
     p = NodeInfo_pb2.NodeTelemetry.GpsLocation(
         latitude_e7=round(lat * 1e7), longitude_e7=round(lon * 1e7),
         source={'gnss': 1, 'ranged': 2, 'manual': 3}[source],
         valid=True, uncertainty_m=radius, quality=quality,
         age_ms=round(age * 1000), generation=generation, used_node_ids=ancestry,
+        # Ranged anchors also need good quality and age below 15 seconds.
         anchor_eligible=doc.get('anchor_eligible') is True and
                         (source != 'ranged' or quality == 'good' and age < 15))
     if source == 'gnss' and old_altitude is not None:
@@ -277,6 +288,7 @@ def _add_interfaces(t, interfaces_json):
 
 
 def main():
+    """Parse identity or telemetry fields and emit the encoded record."""
     parser = argparse.ArgumentParser(description='Encode an Alfred payload.')
     sub = parser.add_subparsers(dest='kind', required=True)
 

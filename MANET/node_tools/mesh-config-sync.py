@@ -37,6 +37,7 @@ LOG_FILE = "/var/log/mesh-config-sync.log"
 ADMIN = AdminTransport()
 
 def log(msg):
+    """Append a timestamped config message and also emit it on stderr."""
     line = f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] CONFIG-SYNC: {msg}"
     try:
         with open(LOG_FILE, "a") as f:
@@ -47,10 +48,12 @@ def log(msg):
 
 
 def run(cmd, **kw):
+    """Run a command with captured text output and caller-supplied options."""
     return subprocess.run(cmd, capture_output=True, text=True, **kw)
 
 
 def read_file(path):
+    """Read stripped file contents, returning empty on failure."""
     try:
         with open(path) as f:
             return f.read().strip()
@@ -59,6 +62,7 @@ def read_file(path):
 
 
 def write_file(path, text):
+    """Write text, returning success and logging any failure."""
     try:
         with open(path, "w") as f:
             f.write(text)
@@ -69,10 +73,12 @@ def write_file(path, text):
 
 
 def publish_ack(version):
+    """Seal and publish this node's configuration acknowledgement."""
     import socket
     envelope = ADMIN.seal(CONFIG_ACK_TYPE, {
         'kind': 'config_ack', 'version': version, 'hostname': socket.gethostname(),
     })
+    # Bound ACK publication to five seconds. A failed send blocks activation.
     result = run(['alfred', '-s', str(CONFIG_ACK_TYPE)],
                  input=json.dumps(envelope, separators=(',', ':')), timeout=5)
     return result.returncode == 0
@@ -82,11 +88,13 @@ def publish_ack(version):
 # Shared validation is also used before local changes or broadcasting.
 
 def validate_package(pkg):
+    """Validate version, mesh settings, activation time and rollback flag."""
     if not isinstance(pkg, dict):
         return False, "package is not an object"
     if pkg.get("kind") not in (None, "mesh_config"):
         return False, "not a mesh_config package"
     version = pkg.get("version")
+    # Version IDs are lowercase hexadecimal strings of 6-64 characters.
     if not isinstance(version, str) or not re.fullmatch(r"[0-9a-f]{6,64}", version):
         return False, "missing or malformed version"
     config = strip_local_keys(pkg.get("config"))
@@ -106,6 +114,7 @@ def validate_package(pkg):
     if not ok:
         return False, why
 
+    # Zero stages only. Positive activation times use Unix seconds.
     activate_at = pkg.get("activate_at", 0)
     if not isinstance(activate_at, int) or activate_at < 0:
         return False, "malformed activate_at"
@@ -162,6 +171,7 @@ def latest_config_package(raw=None):
 # Sync
 
 def clear_staging(reason):
+    """Remove the pending package and informational ACK version."""
     removed = False
     for path in (PENDING_FILE, ACK_VERSION_FILE):
         try:
@@ -174,6 +184,7 @@ def clear_staging(reason):
 
 
 def sync_once(raw=None):
+    """Authenticate, stage and acknowledge a package, applying when due."""
     message = latest_config_package() if raw is None else latest_config_package(raw)
     if not message:
         return 0
@@ -198,6 +209,7 @@ def sync_once(raw=None):
         log("Ignoring config package: only per-node settings")
         return 0
 
+    # Enforce transport transaction ordering before writing local staging.
     if not ADMIN.accept(ALFRED_CONFIG_TYPE, message):
         return 0
 
@@ -251,6 +263,7 @@ def sync_once(raw=None):
     # invoking anything disruptive so a kill/reboot cannot make a recorded
     # activation execute again. A failed attempt needs a freshly staged edit.
     ADMIN.complete(ALFRED_CONFIG_TYPE, message)
+    # Bound the caller as well as the transient unit to 180 seconds.
     r = run(APPLY_COMMAND, timeout=180)
     if r.returncode != 0:
         log(f"apply failed: {(r.stderr or r.stdout).strip()}")
@@ -259,6 +272,7 @@ def sync_once(raw=None):
 
 
 def main():
+    """Run one sync pass from Alfred or supplied stdin and report errors."""
     action = sys.argv[1] if len(sys.argv) > 1 else "sync"
     if action != "sync":
         print(f"usage: {os.path.basename(sys.argv[0])} sync", file=sys.stderr)

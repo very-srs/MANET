@@ -24,10 +24,13 @@ from typing import Callable, Optional, Protocol, Sequence
 from google.protobuf.message import DecodeError
 import ranging_pb2 as pb
 
+# V1 caps UDP payloads at 1200 bytes and each exchange at 64 probes.
 VERSION = 1
 MAX_DATAGRAM = 1200
 MAX_FRAMES = 64
+# Packed report parts carry at most 24 rows of hardware-count deltas.
 REPORT_ROWS = 24
+# The report clock wraps after 48 bits, with 0.25 ns per count.
 CLOCK_MODULUS = 1 << 48
 
 
@@ -60,19 +63,23 @@ def burst_schedule_us(session_id, challenge, frames, interval_ms):
 
 
 def _node_id(value):
+    """Check the protocol's one-to-32-byte UTF-8 node identifier."""
     return isinstance(value, str) and 0 < len(value.encode("utf-8")) <= 32
 
 
 def validate_position(position):
+    """Reject invalid source, coordinates, age presence or ancestry."""
     if position.source not in (pb.Position.UNKNOWN, pb.Position.GNSS,
                                 pb.Position.RANGED, pb.Position.MANUAL):
         raise ValueError("unknown position source")
+    # Coordinates use signed degrees scaled by 1e7.
     if not (-900000000 <= position.latitude_e7 <= 900000000 and
             -1800000000 <= position.longitude_e7 <= 1800000000):
         raise ValueError("position out of bounds")
     if position.valid and (position.source == pb.Position.UNKNOWN or
                            not position.HasField("fix_age_ms")):
         raise ValueError("valid position needs source and local fix age")
+    # Bounded unique ancestry makes ranged-anchor dependencies explicit.
     ids = position.used_node_ids
     if len(ids) > 16 or len(set(ids)) != len(ids) or not all(map(_node_id, ids)):
         raise ValueError("invalid position ancestry")
@@ -84,6 +91,7 @@ def validate_position(position):
 
 
 def encode(message):
+    """Serialize a deterministic protobuf within the datagram limit."""
     data = message.SerializeToString(deterministic=True)
     if len(data) > MAX_DATAGRAM:
         raise ValueError("ranging datagram too large")
@@ -91,6 +99,7 @@ def encode(message):
 
 
 def decode(data):
+    """Parse a bounded envelope and validate its position when present."""
     if not isinstance(data, bytes) or not 0 < len(data) <= MAX_DATAGRAM:
         raise ValueError("invalid ranging datagram size")
     message = pb.Envelope()
@@ -109,10 +118,12 @@ def decode(data):
 
 @dataclass(frozen=True)
 class Peer:
+    """Identify a node and its candidate 5 GHz unicast MAC."""
     node_id: str
     mac: bytes
 
     def __post_init__(self):
+        """Reject invalid node IDs and zero or multicast MAC addresses."""
         if not _node_id(self.node_id) or not isinstance(self.mac, bytes) or (
                 len(self.mac) != 6 or self.mac[0] & 1 or not any(self.mac)):
             raise ValueError("peer needs a node id and unicast 5 GHz MAC")
@@ -120,12 +131,14 @@ class Peer:
 
 @dataclass(frozen=True)
 class Calibration:
+    """Carry channel width, count-to-metre slope and counter correction."""
     channel_width_mhz: int
     counts_per_metre: float
     constant_counts: float
     accumulator_step: int
 
     def __post_init__(self):
+        """Validate the calibration width, finite terms and counter step."""
         if (self.channel_width_mhz not in (20, 40, 80, 160) or
                 not math.isfinite(self.counts_per_metre) or self.counts_per_metre <= 0 or
                 not math.isfinite(self.constant_counts) or
@@ -140,6 +153,7 @@ class Calibration:
 
 @dataclass(frozen=True)
 class InitiatorStamp:
+    """Carry probe departure and ACK arrival counts with report ordinal."""
     sequence: int
     departure: int
     ack_arrival: Optional[int]  # None when the ACK was lost.
@@ -148,6 +162,7 @@ class InitiatorStamp:
 
 @dataclass(frozen=True)
 class ResponderStamp:
+    """Carry probe arrival and ACK departure counts with report ordinal."""
     sequence: int
     arrival: int
     ack_departure: int
@@ -156,6 +171,7 @@ class ResponderStamp:
 
 @dataclass(frozen=True)
 class RemoteStamp:
+    """Carry a sequence, arrival count and corrected turnaround count."""
     sequence: int
     arrival: int
     turnaround: int
@@ -163,6 +179,7 @@ class RemoteStamp:
 
 @dataclass(frozen=True)
 class Estimate:
+    """Hold calibrated range and diagnostics from retained timestamp pairs."""
     range_m: float
     percentile_counts: float
     differences: tuple  # Filtered (sequence, corrected RTT minus turnaround).
@@ -181,15 +198,18 @@ def _unique(rows):
 
 
 def _timestamp(value):
+    """Check an unsigned 48-bit hardware timestamp."""
     return isinstance(value, int) and 0 <= value < CLOCK_MODULUS
 
 
 def corrected_responder(rows, calibration):
+    """Correct turnaround by report ordinal and sort by UDP sequence."""
     result = []
     for row in _unique(rows).values():
         if (not 0 <= row.sequence < MAX_FRAMES or not _timestamp(row.arrival) or
                 not _timestamp(row.ack_departure) or not 1 <= row.report_index <= 65535):
             raise ValueError("invalid responder timestamp")
+        # Each original WM report ordinal contributes one accumulator step.
         turn = (clock_delta(row.ack_departure, row.arrival) +
                 calibration.accumulator_step * row.report_index)
         if not 0 <= turn < (1 << 31):
@@ -228,6 +248,7 @@ def pair_timestamps(initiator, responder, calibration, min_pairs=10,
             continue
         if not _timestamp(a.ack_arrival):
             raise ValueError("invalid ACK timestamp")
+        # Initiator accumulation has the opposite sign to turnaround.
         rtt = clock_delta(a.ack_arrival, a.departure) - calibration.accumulator_step * a.report_index
         if not 0 <= rtt < (1 << 31):
             continue
@@ -268,32 +289,44 @@ class Radio(Protocol):
     responder state. restore_ack restores every saved response context. Both
     cleanup methods are idempotent, including after partially failed setup.
     """
+    # Save ACK state and arm a bounded responder capture for this peer.
     def arm_responder(self, peer: Peer, session_id: bytes, width_mhz: int): ...
+    # Cancel pending TX and clear probe marking and responder state.
     def disarm(self): ...
+    # Restore every saved response context, including after partial setup.
     def restore_ack(self): ...
+    # Send supplied datagrams at the shared jitter schedule without blocking.
     def send_burst(self, peer: Peer, frames: Sequence[bytes], width_mhz: int,
                    interval_ms: int): ...
+    # Return this session's responder stamps with original report indices.
     def read_responder_report(self, session_id: bytes) -> Sequence[ResponderStamp]: ...
+    # Return this session's initiator stamps with original report indices.
     def read_initiator_timestamps(self, session_id: bytes) -> Sequence[InitiatorStamp]: ...
 
 
 @dataclass(frozen=True)
 class Config:
+    """Bound exchange pacing, leases, retries, caches and pairing."""
     frames: int = 50
     interval_ms: int = 50
+    # Ready and final reports each get a one-second default response budget.
     ready_timeout_s: float = 1.0
     arm_grace_s: float = 1.5  # Default helper: 1 s off/on prep plus drain.
     report_timeout_s: float = 1.0
+    # Allow 100 ms for reports to settle after receiving the final probe.
     settle_s: float = 0.1
+    # Separate session admission cooldown from request-response throttling.
     peer_cooldown_s: float = 5.0
     request_gap_s: float = 1.0
     replay_ttl_s: float = 60.0
+    # Accept one peer claim for two seconds after releasing its responder.
     result_window_s: float = 2.0
     max_drift_ppm: float = 40.0
     min_pairs: int = 10
     max_peers: int = 64
 
     def __post_init__(self):
+        """Reject unsupported timing, burst, peer and estimator limits."""
         times = (self.ready_timeout_s, self.arm_grace_s, self.report_timeout_s,
                  self.settle_s, self.peer_cooldown_s, self.request_gap_s, self.replay_ttl_s,
                  self.result_window_s)
@@ -308,12 +341,14 @@ class Config:
 
 @dataclass(frozen=True)
 class Outbound:
+    """Carry an encoded control message for delivery to one peer."""
     peer: Peer
     data: bytes  # Any mesh path for control. Bursts use Radio.
 
 
 @dataclass(frozen=True)
 class PositionSnapshot:
+    """Record a received position with message kind and local time."""
     received_mono: float
     message_kind: str
     position: pb.Position
@@ -329,6 +364,7 @@ class PeerClaim:
 
 @dataclass(frozen=True)
 class Result:
+    """Expose a terminal exchange outcome and canonical position snapshots."""
     peer: Peer
     session_id: bytes
     status: str
@@ -344,6 +380,7 @@ class Result:
 
 @dataclass(frozen=True)
 class _ServedSession:
+    """Keep a short acceptance slot for one responder-side range claim."""
     challenge: bytes
     expires: float
     responder_position: pb.Position
@@ -352,6 +389,7 @@ class _ServedSession:
 
 @dataclass
 class _Session:
+    """Track one initiator or responder exchange and its bounded captures."""
     peer: Peer
     session_id: bytes
     role: str
@@ -386,6 +424,7 @@ class Ranging:
     def __init__(self, radio: Radio, clock: Callable[[], float], position,
                  calibration: Calibration, *, authorize=lambda peer: False,
                  eligible=lambda peer: False, config=Config(), nonce=None):
+        """Initialize single-radio state, injected policy and bounded queues."""
         self.radio, self.clock, self.position = radio, clock, position
         self.calibration, self.config = calibration, config
         self.authorize, self.eligible = authorize, eligible
@@ -404,6 +443,7 @@ class Ranging:
         self._last_now = -math.inf
 
     def _now(self):
+        """Read monotonic time and release radio work if the clock fails."""
         now = self.clock()
         if not math.isfinite(now) or now < self._last_now:
             # A broken clock must not leave the responder armed.
@@ -417,6 +457,7 @@ class Ranging:
         return now
 
     def _nonce(self):
+        """Require a nonzero 128-bit value absent from recent nonces."""
         value = self.nonce()
         if (not isinstance(value, bytes) or len(value) != 16 or not any(value) or
                 value in self._nonces):
@@ -425,12 +466,14 @@ class Ranging:
         return value
 
     def _position(self):
+        """Copy and validate the provider's current position snapshot."""
         position = pb.Position()
         position.CopyFrom(self.position())
         validate_position(position)
         return position
 
     def _message(self, sid, kind, body, challenge=b"", position=None):
+        """Build a versioned envelope with its selected body and context."""
         message = pb.Envelope(version=VERSION, session_id=sid, challenge=challenge)
         getattr(message, kind).CopyFrom(body)
         if position is not None:
@@ -438,13 +481,17 @@ class Ranging:
         return message
 
     def _send(self, peer, message):
+        """Encode a control message into the bounded outbound queue."""
         self.outbox.append(Outbound(peer, encode(message)))
 
     def _reply(self, peer, sid, kind, body, challenge=b""):
+        """Queue a reply with a fresh local position snapshot."""
         self._send(peer, self._message(sid, kind, body, challenge, self._position()))
 
     def _cleanup(self):
+        """Attempt disarm and ACK restoration, latching any cleanup fault."""
         errors = []
+        # Attempt ACK restoration even if disarming fails.
         for action in (self.radio.disarm, self.radio.restore_ack):
             try:
                 action()
@@ -456,11 +503,13 @@ class Ranging:
         return not errors
 
     def _terminal(self, status, *, estimate=None, retry_ms=0, cancel_reason=None):
+        """Release the active exchange and publish its terminal outcome."""
         session = self.active
         if session is None:
             return
         clean = self._cleanup()
         self.active = None
+        # Failed restoration suppresses estimates and stops queued radio work.
         if not clean:
             status, estimate, cancel_reason = "cleanup_failed", None, pb.Cancel.ERROR
         if cancel_reason is not None:
@@ -492,6 +541,7 @@ class Ranging:
         return not self.faulted
 
     def _prune(self, now):
+        """Expire replay, result-acceptance and inactive peer-rate entries."""
         self._seen = {key: expiry for key, expiry in self._seen.items() if expiry > now}
         self._served = {key: served for key, served in self._served.items() if served.expires > now}
         self._peers = {peer: limits for peer, limits in self._peers.items()
@@ -508,6 +558,7 @@ class Ranging:
         self.tick()
 
     def _next(self, now):
+        """Admit the next authorized eligible peer within rate limits."""
         while self.queue and not self.active and not self.faulted:
             peer = self.queue.popleft()
             if not self.authorize(peer) or not self.eligible(peer):
@@ -528,6 +579,7 @@ class Ranging:
             self._send(peer, self._message(sid, "request", request))
 
     def tick(self):
+        """Expire sessions, emit due reports and start queued work."""
         now = self._now()
         self._prune(now)
         session = self.active
@@ -582,6 +634,7 @@ class Ranging:
                             frame.done != (frame.sequence == session.request.frames - 1)):
                         return
                     session.observed.add(frame.sequence)
+                    # Only the final probe starts the report drain delay.
                     if frame.done and session.report_due is None:
                         session.report_due = self._last_now + self.config.settle_s
                 return
@@ -592,6 +645,7 @@ class Ranging:
                     schedule = burst_schedule_us(session.session_id, message.challenge,
                                                  session.request.frames, session.request.interval_ms)
                     duration_ms = math.ceil(schedule[-1] / 1000)
+                    # Bound advertised arming slack to 100..3000 ms.
                     max_arm_ms, min_arm_ms = duration_ms + 3000, duration_ms + 100
                     if not min_arm_ms <= message.ready.arm_timeout_ms <= max_arm_ms:
                         self._terminal("invalid_ready", cancel_reason=pb.Cancel.ERROR)
@@ -611,6 +665,7 @@ class Ranging:
                                           session.request.interval_ms)
                 elif kind in ("busy", "reject", "cancel") and not message.challenge:
                     session.positions.append(PositionSnapshot(self._last_now, kind, message.position))
+                    # Clamp remote retry requests to 1 ms..60 s.
                     retry_ms = min(max(message.busy.retry_ms, 1), 60000) if kind == "busy" else 0
                     if retry_ms:
                         gap, limit = self._peers[peer]
@@ -631,6 +686,7 @@ class Ranging:
                 self._terminal("radio_error", cancel_reason=pb.Cancel.ERROR)
 
     def _request(self, peer, message):
+        """Validate and rate-limit a request before arming the responder."""
         now, request = self._last_now, message.request
         if message.challenge:
             return
@@ -643,6 +699,7 @@ class Ranging:
             limits = (0, 0)
         if now < limits[0]:
             return
+        # Throttle replies before checking busy or unsupported requests.
         self._peers[peer] = (now + self.config.request_gap_s, limits[1])
         if self.active or now < limits[1]:
             delay = max(0.001, limits[1] - now,
@@ -665,6 +722,7 @@ class Ranging:
         self.active = session  # Partial arm failures need both cleanup steps.
         self._peers[peer] = (now + self.config.request_gap_s,
                              now + lease + self.config.peer_cooldown_s)
+        # Insertion order evicts the oldest admitted replay-cache entry.
         if len(self._seen) >= 256:
             del self._seen[next(iter(self._seen))]
         self._seen[(peer, message.session_id)] = now + lease + self.config.replay_ttl_s
@@ -673,10 +731,12 @@ class Ranging:
                    pb.Ready(arm_timeout_ms=math.ceil(lease * 1000)), session.challenge, position))
 
     def _report(self):
+        """Send observed corrected timestamps after releasing the radio."""
         session = self.active
         rows = self.radio.read_responder_report(session.session_id)
         if len(rows) > MAX_FRAMES:
             raise ValueError("oversized radio report")
+        # Correct original report ordinals before filtering to received probes.
         rows = [row for row in corrected_responder(rows, self.calibration)
                 if row.sequence in session.observed]
         messages = []
@@ -687,6 +747,7 @@ class Ranging:
             parts = math.ceil(len(rows) / REPORT_ROWS)
             for part in range(parts):
                 chunk = rows[part * REPORT_ROWS:(part + 1) * REPORT_ROWS]
+                # Delta encoding preserves 48-bit wrap within each report part.
                 base = chunk[0].arrival
                 report = pb.Report(part=part, parts=parts, base_arrival=base,
                                    sequence=[row.sequence for row in chunk],
@@ -711,6 +772,7 @@ class Ranging:
             self.outbox.extend(Outbound(session.peer, data) for data in payloads)
 
     def _accept_result(self, peer, message):
+        """Accept one bounded claim matching a recently served challenge."""
         key = (peer, message.session_id)
         served = self._served.get(key)
         if served is None or message.challenge != served.challenge:
@@ -734,6 +796,7 @@ class Ranging:
             peer_claim=PeerClaim(claim.range_m, claim.p25_counts, claim.pair_count)))
 
     def _accept_report(self, message):
+        """Validate and accumulate nonconflicting timestamp report parts."""
         session, report = self.active, message.report
         count = len(report.sequence)
         if (not 1 <= report.parts <= math.ceil(session.request.frames / REPORT_ROWS) or
@@ -746,10 +809,12 @@ class Ranging:
                 len(set(report.sequence)) != count):
             self._terminal("invalid_report", cancel_reason=pb.Cancel.ERROR)
             return
+        # Identical retransmissions are harmless, conflicting parts are not.
         if report.part in session.reports:
             if session.reports[report.part] != report:
                 self._terminal("invalid_report", cancel_reason=pb.Cancel.ERROR)
             return
+        # Every part agrees on total count and owns disjoint sequences.
         for previous in session.reports.values():
             if previous.parts != report.parts or set(previous.sequence) & set(report.sequence):
                 self._terminal("invalid_report", cancel_reason=pb.Cancel.ERROR)
@@ -759,9 +824,11 @@ class Ranging:
         self._estimate()
 
     def _estimate(self):
+        """Pair complete captures and publish a local estimate and claim."""
         session = self.active
         if not session.burst_done or not session.reports:
             return
+        # Burst completion and all parts are required before reading capture.
         parts = next(iter(session.reports.values())).parts
         if len(session.reports) != parts:
             return
@@ -784,11 +851,13 @@ class Ranging:
             self._terminal("invalid_estimate", cancel_reason=pb.Cancel.ERROR)
             return
         payload = encode(self._message(session.session_id, "result", claim, session.challenge))
+        # Release successfully before sending the best-effort peer claim.
         self._terminal("ok", estimate=estimate)
         if not self.faulted:
             self.outbox.append(Outbound(session.peer, payload))
 
     def burst_finished(self, session_id):
+        """Mark a matching initiator burst complete and attempt pairing."""
         self.tick()
         session = self.active
         if (not session or session.role != "initiator" or session.state != "waiting_report" or
@@ -802,6 +871,7 @@ class Ranging:
             self._terminal("radio_error", cancel_reason=pb.Cancel.ERROR)
 
     def radio_error(self, session_id, error):
+        """Terminate only the active session named by the radio failure."""
         if self.active and self.active.session_id == session_id:
             self.last_error = str(error)
             self._terminal("radio_error", cancel_reason=pb.Cancel.ERROR)
@@ -812,6 +882,7 @@ class Ranging:
         self._terminal("cancelled", cancel_reason=pb.Cancel.USER)
 
     def close(self):
+        """Stop new work, discard claim slots and release radio state."""
         self.closed = True
         self._served.clear()
         had_session = self.active is not None
