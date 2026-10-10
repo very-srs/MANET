@@ -6,6 +6,8 @@
 # for the web UI, and direct calls print the human summary.
 # Always succeed so MOTD and status work without a throttling interface.
 
+. "${MANET_TOOLS_DIR:-$(dirname "$(readlink -f "$0")")}/manet-common.sh"
+
 usage() {
     printf '%s\n' 'usage: manet-power-status.sh [--json]' >&2
 }
@@ -76,7 +78,6 @@ if [ "$1" = "--json" ]; then
     exit 0
 fi
 
-rule() { printf '  %s\n' '────────────────────────────────────────────────────────────'; }
 
 case "$STATE" in
 ok)

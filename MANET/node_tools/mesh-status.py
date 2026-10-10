@@ -36,13 +36,14 @@ import os
 import ipaddress
 import socket
 import time
-import hashlib
 import html
 from urllib.parse import urlparse, parse_qs
 
 # Mesh radio changes use the management UI's Alfred staging path.
 # mesh-radio-state.py applies them on each node.
-from manet_manage import ManageRoutes
+from manet_manage import (
+    ManageRoutes, asset_content_type, logo_asset_file, logo_asset_token,
+)
 from manet_peer_radios import peer_status_panel
 from manet_recovery_status import recovery_status, RECOVERY_JS
 from manet_node_ipv4 import primary_ipv4
@@ -75,30 +76,6 @@ PERF_AUTH_COOKIE = 'manet_perf_auth'
 # ManageRoutes serves this prefix on the status server's listening port.
 # Management routes require the password cookie.
 MANAGE_PREFIX = '/manage'
-# The unfilled hexagon uses dark strokes on light themes and white on dark.
-FER_LOGO_DARK_INK_FILE  = '/usr/local/share/manet/fer-logo-black.png'
-FER_LOGO_LIGHT_INK_FILE = '/usr/local/share/manet/fer-logo-white.png'
-# /assets/<name> accepts an optional extension for either SVG or PNG.
-FER_LOGO_ASSETS = {
-    'fer-logo':       FER_LOGO_DARK_INK_FILE,
-    'fer-logo-black': FER_LOGO_DARK_INK_FILE,
-    'fer-logo-white': FER_LOGO_LIGHT_INK_FILE,
-}
-
-
-def logo_asset_token():
-    """Return a logo URL token that invalidates the one-hour cache."""
-    parts = []
-    for path in (FER_LOGO_DARK_INK_FILE, FER_LOGO_LIGHT_INK_FILE):
-        try:
-            st = os.stat(path)
-            # Both theme assets contribute metadata to the cache key.
-            parts.append(f'{st.st_mtime_ns}:{st.st_size}')
-        except OSError:
-            parts.append('missing')
-    # Eight hex digits keep asset URLs short; this is not an auth token.
-    return hashlib.sha1('|'.join(parts).encode()).hexdigest()[:8]
-
 # Config / State Loaders
 
 def load_kv_file(path):
@@ -2888,26 +2865,7 @@ def render_status_page():
     html = html.replace('__LOGO_V__',  logo_asset_token())
     return html
 
-ASSET_CONTENT_TYPES = {
-    '.svg':  'image/svg+xml',
-    '.png':  'image/png',
-    '.jpg':  'image/jpeg',
-    '.jpeg': 'image/jpeg',
-    '.webp': 'image/webp',
-}
 
-def asset_content_type(path):
-    """Choose a MIME type by suffix, falling back to binary content."""
-    ext = os.path.splitext(path)[1].lower()
-    return ASSET_CONTENT_TYPES.get(ext, 'application/octet-stream')
-
-def logo_asset_file(url_path):
-    """Map /assets/fer-logo-white[.png|.svg] to the installed file."""
-    if not url_path.startswith('/assets/'):
-        return None
-    # Resolve an allowlisted basename, never a client-supplied disk path.
-    name = os.path.splitext(url_path[len('/assets/'):])[0]
-    return FER_LOGO_ASSETS.get(name)
 
 def send_file_response(handler, path, content_type):
     """Serve an installed asset with a one-hour cache, or return 404."""
