@@ -383,26 +383,13 @@ def resolve_hop_count(node_id, node_by_id, orig_map, mac_to_node_id, visited=Non
         return None
     return via_hops + 1
 
-def get_interfaces():
-    """Return interface dicts with role, health, and fault details.
-
-    Health values:
-      'ok'    : up and functioning
-      'warn'  : up but degraded (e.g. wpa_supplicant stopped)
-      'fault' : down or not participating when expected
-      'info'  : bridge, bat0, or loopback, with no health expectation
-    """
-    ifaces = []
-    try:
-        r = subprocess.run(['ip', '-j', 'addr'], capture_output=True, text=True, timeout=5)
-        raw = json.loads(r.stdout)
-    except Exception:
-        return ifaces
-
+def _iw_dev_info():
+    """Read wireless interface details from iw."""
     # iw dev info
     iw_info = {}
     try:
-        r2 = subprocess.run(['iw', 'dev'], capture_output=True, text=True, timeout=5)
+        r2 = subprocess.run(['iw', 'dev'], capture_output=True, text=True,
+                            timeout=5)
         cur_iface = None
         for line in r2.stdout.splitlines():
             m = re.match(r'\s+Interface (\S+)', line)
@@ -425,16 +412,24 @@ def get_interfaces():
                 wm = re.search(r'wiphy (\d+)', line)
                 if wm: iw_info[cur_iface]['wiphy'] = wm.group(1)
                 dm = re.search(r'wdev (0x[0-9a-fA-F]+)', line)
-                if dm: iw_info[cur_iface]['wiphy'] = str(int(dm.group(1), 16) >> 32)
+                if dm:
+                    iw_info[cur_iface]['wiphy'] = str(
+                        int(dm.group(1), 16) >> 32)
     except Exception:
         pass
+    return iw_info
 
-    # Build phy→band map: Band 1 = 2.4 GHz, Band 2 = 5 GHz (IEEE 802.11 convention)
+
+def _phy_bands():
+    """Read each phy band, preferring 2.4 GHz on dual-band radios."""
+    # Build phy→band map: Band 1 = 2.4 GHz, Band 2 = 5 GHz
+    # (IEEE 802.11 convention)
     # A phy with both bands → 2.4 GHz takes precedence (dual-band chip)
     phy_band = {}  # wiphy_num_str -> '2.4 GHz' | '5 GHz'
     phy_txpower_options = {}
     try:
-        r3 = subprocess.run(['iw', 'phy'], capture_output=True, text=True, timeout=5)
+        r3 = subprocess.run(['iw', 'phy'], capture_output=True, text=True,
+                            timeout=5)
         phy_txpower_options = parse_phy_txpower_options(r3.stdout)
         cur_phy = None
         for line in r3.stdout.splitlines():
@@ -450,15 +445,21 @@ def get_interfaces():
                 if band_num == 1:
                     phy_band[cur_phy] = '2.4 GHz'  # Band 1 always 2.4 GHz
                 elif band_num == 2 and cur_phy not in phy_band:
-                    phy_band[cur_phy] = '5 GHz'    # Band 2 = 5 GHz, only if no Band 1
+                    # Band 2 = 5 GHz, only if no Band 1
+                    phy_band[cur_phy] = '5 GHz'
     except Exception:
         pass
+    return phy_band
 
+
+def _add_drivers_and_bands(iw_info, phy_band):
+    """Add driver, band, and transmit power details to wireless interfaces."""
     # Read driver via ethtool and assign band_label
     for iname in list(iw_info.keys()):
         driver = ''
         try:
-            et = subprocess.run(['ethtool', '-i', iname], capture_output=True, text=True, timeout=3)
+            et = subprocess.run(['ethtool', '-i', iname], capture_output=True,
+                                text=True, timeout=3)
             for line in et.stdout.splitlines():
                 if line.startswith('driver:'):
                     driver = line.split(':', 1)[1].strip()
@@ -489,16 +490,23 @@ def get_interfaces():
                 iname, cap, iw_info[iname].get('txpower_dbm', '')
             )
 
+
+def _add_halow_runtime(iw_info):
+    """Replace HaLow channel details with Morse runtime data."""
     # HaLow uses Morse runtime data because iw may report a Wi-Fi channel.
     for iname in list(iw_info.keys()):
         if 'morse' in iw_info[iname].get('driver', ''):
             iw_info[iname].update(get_halow_driver_info(iname))
 
+
+def _bat0_slaves():
+    """Read active and inactive bat0 interface membership."""
     # bat0 slaves (active interfaces per batctl)
     bat0_slaves_active   = set()   # confirmed active in batctl
     bat0_slaves_inactive = set()   # Listed but inactive
     try:
-        bat_r = subprocess.run(['batctl', 'if'], capture_output=True, text=True, timeout=5)
+        bat_r = subprocess.run(['batctl', 'if'], capture_output=True,
+                               text=True, timeout=5)
         for line in bat_r.stdout.splitlines():
             m_act = re.match(r'(\S+):\s+active', line)
             m_ina = re.match(r'(\S+):\s+inactive', line)
@@ -507,7 +515,11 @@ def get_interfaces():
     except Exception:
         pass
     bat0_all_slaves = bat0_slaves_active | bat0_slaves_inactive
+    return bat0_slaves_active, bat0_slaves_inactive, bat0_all_slaves
 
+
+def _running_supplicants():
+    """Read interfaces with active supplicant units."""
     # which wpa_supplicant units are running
     wpa_running = set()
     try:
@@ -521,10 +533,11 @@ def get_interfaces():
             if m: wpa_running.add(m.group(1))
     except Exception:
         pass
+    return wpa_running
 
-    conf     = load_kv_file(MESH_CONF_FILE)
-    eud_mode = conf.get('eud', 'wired')
 
+def _no_mesh_ifaces():
+    """Read interfaces excluded from mesh health checks."""
     # Non-mesh interfaces (EUD AP): must not be checked for bat0/wpa_supplicant
     no_mesh_ifaces = set()
     try:
@@ -532,7 +545,14 @@ def get_interfaces():
             no_mesh_ifaces = {l.strip() for l in f if l.strip()}
     except Exception:
         pass
+    return no_mesh_ifaces
 
+
+def _interface_rows(raw, iw_info, bat0_slaves_active,
+                    bat0_slaves_inactive, bat0_all_slaves,
+                    wpa_running, eud_mode, no_mesh_ifaces):
+    """Build interface rows with roles, health, and fault details."""
+    ifaces = []
     # Build a set of all iface names present for cross-referencing
     all_names = {d.get('ifname', '') for d in raw}
 
@@ -546,7 +566,8 @@ def get_interfaces():
             continue
 
         addrs = [a['local'] for a in iface_data.get('addr_info', [])
-                 if a.get('family') in ('inet', 'inet6') and not a['local'].startswith('fe80')]
+                 if a.get('family') in ('inet', 'inet6')
+                 and not a['local'].startswith('fe80')]
 
         is_up   = state == 'UP'
         is_down = state == 'DOWN'
@@ -580,7 +601,8 @@ def get_interfaces():
             name.startswith('wlan') and
             name not in no_mesh_ifaces and
             iw.get('type') != 'AP' and
-            name not in [d.get('ifname') for d in raw if d.get('master') == 'bat0']
+            name not in [d.get('ifname') for d in raw
+                         if d.get('master') == 'bat0']
         ):
             # Mesh radio
             role = 'mesh'
@@ -641,12 +663,16 @@ def get_interfaces():
             else:
                 role   = 'other'
                 detail = 'Ethernet'
-            # Ethernet DOWN is usually fine (cable unplugged): just informational
+            # Ethernet DOWN is usually fine (cable unplugged):
+            # just informational
             if is_down:
                 health = 'info'
                 detail += ' (no cable)' if not detail.endswith(')') else ''
 
-        elif (name.startswith('wlan') or name.startswith(('halow', 'mlan'))) and name not in no_mesh_ifaces and name not in bat0_all_slaves:
+        elif (
+            (name.startswith('wlan') or name.startswith(('halow', 'mlan')))
+            and name not in no_mesh_ifaces and name not in bat0_all_slaves
+        ):
             # wlan not in bat0 and not AP: unexpected
             freq = iw.get('freq', '')
             detail = f"Wireless {freq}GHz" if freq else 'Wireless'
@@ -655,7 +681,8 @@ def get_interfaces():
                 faults.append(f'{name} is DOWN: not participating in mesh')
             elif name not in bat0_all_slaves and iw.get('type') != 'AP':
                 health = 'warn'
-                faults.append(f'Not in bat0 and not an AP: check wpa_supplicant')
+                faults.append(
+                    f'Not in bat0 and not an AP: check wpa_supplicant')
 
         # bat0/br0 report operstate=UNKNOWN. Use their UP flag for health.
         display_state = state
@@ -678,13 +705,50 @@ def get_interfaces():
             'halow_bw': iw.get('halow_bw', ''),
             'halow_source': iw.get('halow_source', ''),
         })
+    return ifaces
 
+
+def _sort_interfaces(ifaces):
+    """Sort interface rows by role and fault severity."""
     # Sort: bat0, mesh, ap, gateway, eud-bridge, bridge, other
     # Within each role, faulted interfaces sort first (most visible)
     health_order = {'fault': 0, 'warn': 1, 'ok': 2, 'info': 3}
-    role_order   = {'bat': 0, 'mesh': 1, 'ap': 2, 'gateway': 3, 'eud-bridge': 4, 'bridge': 5, 'other': 6}
-    ifaces.sort(key=lambda x: (role_order.get(x['role'], 9), health_order.get(x['health'], 9)))
+    role_order   = {'bat': 0, 'mesh': 1, 'ap': 2, 'gateway': 3,
+                    'eud-bridge': 4, 'bridge': 5, 'other': 6}
+    ifaces.sort(key=lambda x: (role_order.get(x['role'], 9),
+                              health_order.get(x['health'], 9)))
     return ifaces
+
+
+def get_interfaces():
+    """Return interface dicts with role, health, and fault details.
+
+    Health values:
+      'ok'    : up and functioning
+      'warn'  : up but degraded (e.g. wpa_supplicant stopped)
+      'fault' : down or not participating when expected
+      'info'  : bridge, bat0, or loopback, with no health expectation
+    """
+    ifaces = []
+    try:
+        r = subprocess.run(['ip', '-j', 'addr'], capture_output=True,
+                           text=True, timeout=5)
+        raw = json.loads(r.stdout)
+    except Exception:
+        return ifaces
+
+    iw_info = _iw_dev_info()
+    phy_band = _phy_bands()
+    _add_drivers_and_bands(iw_info, phy_band)
+    _add_halow_runtime(iw_info)
+    active, inactive, all_slaves = _bat0_slaves()
+    wpa_running = _running_supplicants()
+    conf = load_kv_file(MESH_CONF_FILE)
+    eud_mode = conf.get('eud', 'wired')
+    no_mesh_ifaces = _no_mesh_ifaces()
+    ifaces = _interface_rows(raw, iw_info, active, inactive, all_slaves,
+                            wpa_running, eud_mode, no_mesh_ifaces)
+    return _sort_interfaces(ifaces)
 
 def get_connected_euds():
     """Return active {mac, ip, hostname} entries from dnsmasq leases."""
