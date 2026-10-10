@@ -135,3 +135,9 @@ rule() {
     printf '  %s\n' \
         '────────────────────────────────────────────────────────────'
 }
+
+# Check markers owned by the time service.
+is_ntp_time_source() {
+    local run_dir="${MANET_TIME_RUN_DIR:-/run}"
+    [ -f "$run_dir/mesh-ntp.state" ] || [ -f "$run_dir/mesh-ntp-gps.state" ]
+}

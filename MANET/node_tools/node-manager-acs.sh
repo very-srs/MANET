@@ -3,6 +3,8 @@
 # Coordinates timing and delegates complex tasks to specialized scripts
 
 . "${MANET_TOOLS_DIR:-$(dirname "${BASH_SOURCE[0]}")}/mesh-acs-common.sh" || exit 1
+. "${MANET_TOOLS_DIR:-$(dirname "${BASH_SOURCE[0]}")}/manet-manager-common.sh" \
+    || exit 1
 
 # --- Configuration ---
 CONTROL_IFACE="br0"
@@ -89,27 +91,13 @@ LAST_GW_CHECK=$NEVER
 GW_CHECK_INTERVAL=60
 
 
-detect_and_update_gateway_state() {
-    local mono
-    mono=$(uptime_now) || return
 
-    local time_since_check=$(( mono - LAST_GW_CHECK ))
-    if [ "$time_since_check" -lt "$GW_CHECK_INTERVAL" ] && [ -f "$GATEWAY_STATE_FILE" ]; then
-        return
-    fi
-
-    LAST_GW_CHECK=$mono
-    [ -x /usr/local/bin/manet-uplink-dispatch.sh ] && /usr/local/bin/manet-uplink-dispatch.sh reconcile >/dev/null 2>&1 || true
-}
 
 # Time source advertisement (the time service owns chrony and these markers)
 GPS_STATUS_FILE="/run/gps_status.json"
 GPS_FIX_MAX_AGE=60
 
-is_ntp_time_source() {
-    local run_dir="${MANET_TIME_RUN_DIR:-/run}"
-    [ -f "$run_dir/mesh-ntp.state" ] || [ -f "$run_dir/mesh-ntp-gps.state" ]
-}
+
 
 # Run each clock-aligned action once per interval at the first wakeup at or
 # after its offset. A narrow +/-2 s window can be skipped by the 15 s sleep.
@@ -143,28 +131,7 @@ should_perform_action() {
 # duplicate holders across partitions until registries converge.
 ELECTION_INTERVAL=15
 LAST_ELECTION_RUN=""
-run_service_elections() {
-    local now election_script
-    [ -s /var/run/my_ipv4_chunk ] || return 0
-    read -r now _ < "${MESH_UPTIME_FILE:-/proc/uptime}"
-    now=${now%.*}
-    if [ -n "$LAST_ELECTION_RUN" ] && [ $((now - LAST_ELECTION_RUN)) -lt "$ELECTION_INTERVAL" ]; then
-        return 0
-    fi
-    LAST_ELECTION_RUN=$now
-    for election_script in "${ELECTION_DIR:-/usr/local/bin}"/*-election.sh; do
-        [[ -f "$election_script" && -x "$election_script" ]] || continue
-        # Channel election has its own schedule (ACS) or does not apply (static)
-        [[ "$election_script" =~ channel-election ]] && continue
-        if [[ "$election_script" =~ mediamtx-election ]]; then
-            [[ "$(grep "^mtx=" /etc/mesh.conf 2>/dev/null | cut -d'=' -f2)" == "y" ]] || continue
-        fi
-        if [[ "$election_script" =~ mumble-election ]]; then
-            [[ "$(grep "^mumble=" /etc/mesh.conf 2>/dev/null | cut -d'=' -f2)" == "y" ]] || continue
-        fi
-        "$election_script" &
-    done
-}
+
 
 # Clear legacy bitrate masks and limp state when leaving the lobby. Masks
 # from tourguide hops or limp entry survive supplicant restarts, while
@@ -401,54 +368,9 @@ perform_scan() {
     printf '%s\n' "$json_out"
 }
 
-is_hosting_service() {
-	if systemctl is-active --quiet mediamtx.service; then
-        local IPV4_NETWORK=""
-	# Source the network configuration
-	if [ -f /etc/mesh.conf ]; then
-	    # Parse the config file
-	    while IFS='=' read -r key value; do
-	        [[ -z "$key" || "$key" =~ ^[[:space:]]*# ]] && continue
-	        case "$key" in
-	            ipv4_network)
-	                IPV4_NETWORK="$value"
-	                ;;
-	        esac
-	    done < /etc/mesh.conf
-	fi
-        [ -z "$IPV4_NETWORK" ] && return 1
 
-        local CALC_OUTPUT=$(manet-ipcalc.sh "$IPV4_NETWORK" 2>/dev/null)
-        local FIRST_IP=$(printf '%s\n' "$CALC_OUTPUT" |
-            awk '/HostMin/ {print $2}')
-        local MEDIAMTX_IPV4_VIP="${FIRST_IP%.*}.$((${FIRST_IP##*.} + 1))"
-        ip addr show dev "$CONTROL_IFACE" | grep -q "inet $MEDIAMTX_IPV4_VIP/" && return 0
-    fi
-    return 1
-}
 
-is_hosting_mumble_service() {
-    if systemctl is-active --quiet mumble-server.service; then
-        if [ -f /etc/mesh.conf ]; then
-            while IFS='=' read -r key value; do
-                [[ -z "$key" || "$key" =~ ^[[:space:]]*# ]] && continue
-                case "$key" in
-                    ipv4_network)
-                        IPV4_NETWORK="$value"
-                        ;;
-                esac
-            done < /etc/mesh.conf
-        fi
 
-        local CALC_OUTPUT
-        CALC_OUTPUT=$(manet-ipcalc.sh "$IPV4_NETWORK" 2>/dev/null)
-        local FIRST_IP
-        FIRST_IP=$(printf '%s\n' "$CALC_OUTPUT" | awk '/HostMin/ {print $2}')
-        local MUMBLE_IPV4_VIP="${FIRST_IP%.*}.$((${FIRST_IP##*.} + 2))"
-        ip addr show dev "$CONTROL_IFACE" | grep -q "inet $MUMBLE_IPV4_VIP/" && return 0
-    fi
-    return 1
-}
 
 should_perform_tourguide() {
     acs_clock_ready || return 1
