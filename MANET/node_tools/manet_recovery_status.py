@@ -10,6 +10,7 @@ from manet_config_io import read_json
 
 
 def age(value, now):
+    """Return finite, nonnegative elapsed seconds, or None if unknown."""
     try:
         seconds = now - float(value)
         return seconds if math.isfinite(seconds) and seconds >= 0 else None
@@ -18,6 +19,7 @@ def age(value, now):
 
 
 def duration(seconds):
+    """Format an observation age in seconds, minutes or hours."""
     if seconds is None:
         return 'unknown age'
     if seconds < 60:
@@ -28,6 +30,7 @@ def duration(seconds):
 
 
 def channels(values):
+    """Format known Wi-Fi band frequencies in MHz for display."""
     if not isinstance(values, dict):
         return 'Not yet known'
     return ', '.join(f'{band} GHz: {freq} MHz' for band, freq in values.items()
@@ -35,16 +38,21 @@ def channels(values):
 
 
 def recovery_status(conf, registry, hostname):
+    """Assemble recovery and freshness rows from local observations."""
     run = Path(os.environ.get('MANET_ACS_RUN_DIR', '/run'))
     time_run = Path(os.environ.get('MANET_TIME_RUN_DIR', '/run'))
     roles = Path(os.environ.get('MANET_IFACE_STATE_DIR', '/var/lib'))
+    # Scheduled activations use wall time. Local observations use monotonic
+    # time, while registry freshness uses the boot clock including suspend.
     now, elapsed = time.time(), time.monotonic()
     boot_now = time.clock_gettime(time.CLOCK_BOOTTIME)
     acs = read_json(run / 'manet-acs-status.json')
     observation_age = age(acs.get('monotonic'), elapsed)
+    # Suppress current-channel claims after 45 seconds without an observation.
     fresh = observation_age is not None and observation_age <= 45
     details = []
     def row(label, value):
+        """Append one labelled detail to the recovery panel."""
         details.append({'label': label, 'value': value})
     enabled = str(conf.get('acs', '')).lower() in ('y', 'yes', 'true', '1')
     row('Channel control', 'Automatic' if enabled else 'Static')
@@ -60,6 +68,7 @@ def recovery_status(conf, registry, hostname):
             except OSError:
                 halow = set()
             routes = set(acs.get('route_interfaces', []))
+            # Label HaLow only when every reported route interface is HaLow.
             if routes and routes <= halow:
                 summary += ' via HaLow'
             row('Mesh', 'All reachable radios share one channel decision')
@@ -81,6 +90,7 @@ def recovery_status(conf, registry, hostname):
         elif phase == 'prepared':
             waiting = f"Collecting channel acknowledgements ({acs.get('votes', 0)}/{acs.get('participants', 0)})"
         elif phase == 'committed':
+            # Reverse the age arguments to count down to the wall-time deadline.
             left = age(now, acs.get('activate_at', now))
             waiting = 'Channel switch scheduled' + (f' in {int(left)} seconds' if left is not None else '')
         elif acs.get('searching'):
@@ -117,6 +127,7 @@ def recovery_status(conf, registry, hostname):
         if seconds is None or not math.isfinite(seconds) or seconds < 0:
             counts['unknown'] += 1
         else:
+            # Peer freshness lasts five minutes from the observed record change.
             counts['fresh' if seconds <= 300 else 'stale'] += 1
     row('Peer metadata', f"{counts['fresh']} fresh, {counts['stale']} stale, {counts['unknown']} age unknown")
     event = read_json(run / 'manet-last-channel-change.json')
@@ -128,6 +139,7 @@ def recovery_status(conf, registry, hostname):
     return {'summary': summary, 'details': details, 'fresh': fresh}
 
 
+# Shared panel markup escapes observation text before inserting it as HTML.
 RECOVERY_JS = r"""
 function recoveryEscape(value) {
   return String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));

@@ -8,6 +8,7 @@
 
 . "${MANET_TOOLS_DIR:-$(dirname "$(readlink -f "$0")")}/manet-common.sh"
 
+# Print the supported output option to stderr.
 usage() {
     printf '%s\n' 'usage: manet-power-status.sh [--json]' >&2
 }
@@ -28,6 +29,7 @@ BIT_CAPPED_EVER=0x20000
 BIT_THROTTLED_EVER=0x40000
 BIT_SOFTTEMP_EVER=0x80000
 
+# Print the hexadecimal mask from vcgencmd, failing if unavailable.
 read_throttled() {
     local out
     command -v vcgencmd >/dev/null 2>&1 || return 1
@@ -49,6 +51,7 @@ if [ -z "$RAW" ]; then
 fi
 
 VAL=$(( RAW ))
+# Print a JSON boolean for the supplied bit mask in global VAL.
 has() { [ $(( VAL & $1 )) -ne 0 ] && echo true || echo false; }
 
 UNDERVOLT_NOW=$(has $BIT_UNDERVOLT_NOW)

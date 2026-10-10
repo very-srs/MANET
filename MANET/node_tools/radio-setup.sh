@@ -1,4 +1,5 @@
 #!/bin/bash
+# Configure radio roles, networking and services from the stored mesh setup.
 . "${MANET_TOOLS_DIR:-$(dirname "${BASH_SOURCE[0]}")}/manet-common.sh" || exit 1
 # Finalize radio setup after imaging and first boot.
 # Rerun after mesh.conf changes to apply new network settings.
@@ -31,6 +32,8 @@ PROVISION_STATE_FILE="/var/lib/manet-provision.state"
 PROVISION_FAIL_FILE="/var/lib/manet-provision.failures"
 PROVISION_STARTED=$(date +%s)
 
+# Write verdict $1 and optional finish epoch $2 to PROVISION_STATE_FILE.
+# Include PROVISION_STARTED and the current update time in epoch seconds.
 provision_state() {
     mkdir -p /var/lib
     {
@@ -103,6 +106,7 @@ while IFS= read -r line; do
     key="${line%%=*}"
     value="${line#*=}"
 
+    # Map hyphens to underscores and discard non-name characters.
     sanitized_key=$(printf '%s\n' "$key" | sed 's/-/_/g' | tr -cd '[:alnum:]_')
 
     # Check if the key is not empty after sanitization
@@ -124,6 +128,7 @@ phys_iface() {
     printf '%s\n' "${phys:-$logical}"
 }
 
+# Set a nonempty hostname, falling back to hostname and hosts files.
 set_mesh_hostname() {
     local new_hostname="$1"
     [ -n "$new_hostname" ] || return 0
@@ -132,6 +137,7 @@ set_mesh_hostname() {
         return 0
     fi
 
+    # Persist the fallback and update the local 127.0.1.1 hosts entry.
     printf '%s\n' "$new_hostname" > /etc/hostname 2>/dev/null || true
     if grep -q '^127\.0\.1\.1' /etc/hosts 2>/dev/null; then
         sed -i "s/^127\\.0\\.1\\.1.*/127.0.1.1\t${new_hostname}/" /etc/hosts
@@ -141,11 +147,13 @@ set_mesh_hostname() {
     hostname "$new_hostname" 2>/dev/null || hostnamectl --transient set-hostname "$new_hostname" 2>/dev/null || true
 }
 
+# Check USB product/manufacturer text for Morse or HaLow identifiers.
 has_usb_morse_device() {
     local dev text
 
     for dev in /sys/bus/usb/devices/*; do
         [ -d "$dev" ] || continue
+        # Match case-insensitive product hints, including mm81 and 802.11ah.
         text="$(cat "$dev/product" "$dev/manufacturer" 2>/dev/null | tr '[:upper:]' '[:lower:]')"
         printf '%s\n' "$text" |
             grep -Eq 'morse|mm81|halow|802\.11ah' && return 0
@@ -154,6 +162,7 @@ has_usb_morse_device() {
     return 1
 }
 
+# Check whether any network device is bound to a morse-prefixed driver.
 has_morse_netdev() {
     local iface driver
 
@@ -207,6 +216,7 @@ printf '%s\n' \
 EARLY_MORSE_BCF=""
 EARLY_MORSE_SPI_CLOCK=""
 if [ -f /etc/modprobe.d/morse.conf ] && ! has_usb_morse_device; then
+    # Capture the first non-whitespace value after each module option key.
     EARLY_MORSE_BCF=$(grep -oP '(?<=bcf=)\S+' /etc/modprobe.d/morse.conf | head -1)
     EARLY_MORSE_SPI_CLOCK=$(grep -oP '(?<=spi_clock_speed=)\S+' /etc/modprobe.d/morse.conf | head -1)
 fi
@@ -224,6 +234,7 @@ if [[ "$EARLY_HALOW_REGULATORY_DOMAIN" == "EU" ]]; then
     echo "options morse enable_auto_duty_cycle=0 enable_auto_mpsw=0" >> /etc/modprobe.d/morse.conf
 fi
 
+# Reprobe a present USB card without a netdev using the options above.
 if has_usb_morse_device && ! has_morse_netdev; then
     modprobe -r morse 2>/dev/null || true
     modprobe -r dot11ah 2>/dev/null || true
@@ -263,6 +274,7 @@ if [[ -n "$ssh_public_key" ]]; then
     echo " > Updating authorized_keys for user 'radio'..."
     mkdir -p /home/radio/.ssh
     printf '%s\n' "$ssh_public_key" >> /home/radio/.ssh/authorized_keys
+    # Keep the first occurrence of each authorized key across setup reruns.
     awk '!seen[$0]++' /home/radio/.ssh/authorized_keys > /tmp/t
     mv /tmp/t /home/radio/.ssh/authorized_keys
 fi
@@ -311,6 +323,7 @@ sleep 2
 
 # Finish wireless network setup
 
+# Unblock software Wi-Fi switches before units attempt to bring radios up.
 cat << 'EOF' > /usr/local/bin/unblock-wifi-rfkill.sh
 #!/bin/sh
 for rfkill in /sys/class/rfkill/rfkill*; do
@@ -377,6 +390,7 @@ HALOW_REGULATORY_DOMAIN=${HALOW_REGULATORY_DOMAIN:-$REGULATORY_DOMAIN}
 
 printf '%s\n' "REGDOMAIN=$REGULATORY_DOMAIN" > /etc/default/crda
 
+# Check whether the supplied country code selects the EU HaLow plan.
 uses_eu_halow_region() {
     local domain="$1"
 
@@ -417,6 +431,7 @@ halow_ifaces=()
 nonmesh_ifaces=()
 
 
+# Classify an interface by Morse driver or missing Wi-Fi anchor frequencies.
 is_halow_iface() {
     local iface="$1"
     local driver phyname
@@ -439,6 +454,7 @@ is_halow_iface() {
 }
 
 
+# Check whether the interface PHY lists the supplied frequency in MHz.
 iface_supports_freq() {
     local iface="$1"
     local freq="$2"
@@ -447,6 +463,8 @@ iface_supports_freq() {
     [[ -n "$phyname" ]] && iw phy "$phyname" info 2>/dev/null | grep -q "${freq}\\.0 MHz"
 }
 
+# Print the mesh startup frequency in MHz, or empty if no band is found.
+# Honor the saved 5 GHz role before probing the two Wi-Fi anchors.
 iface_mesh_freq() {
     local iface="$1"
     local phyname
@@ -467,6 +485,7 @@ iface_mesh_freq() {
     fi
 }
 
+# iw lists PHY headings and netdevs. Extract only Interface records.
 for iface in $(iw dev | awk '$1 == "Interface" {print $2}'); do
     if is_halow_iface "$iface"; then
         halow_ifaces+=("$iface")
@@ -575,6 +594,7 @@ if [[ "$eud" == "wireless" ]] || [[ "$eud" == "auto" ]]; then
     elif [ -s /var/lib/mesh_if ]; then
         echo " > Searching for 5GHz-capable mesh interface..."
         for iface in $(cat /var/lib/mesh_if); do
+            # Convert wiphy number to phyN and look for a 5xxx MHz entry.
             PHY=$(iw dev "$iface" info | grep wiphy | awk '{print "phy" $2}')
             if iw phy "$PHY" info 2>/dev/null | grep " 5[0-9][0-9][0-9]" >/dev/null; then
                 AP_INTERFACE="$iface"
@@ -629,6 +649,7 @@ if [ -s /var/lib/radio-setup-reboot-pending ] &&
 fi
 rm -f /var/lib/radio-setup-reboot-pending
 
+# Clear only unchanged failures captured in rename_failed_units before setup.
 reset_rename_failures() {
     local unit state
     for unit in "${!rename_failed_units[@]}"; do
@@ -643,6 +664,7 @@ reset_rename_failures() {
 current_mesh="$(cat /var/lib/mesh_if 2>/dev/null | tr '\n' ' ')"
 current_halow="$(cat /var/lib/halow_if 2>/dev/null | tr '\n' ' ')"
 
+# Disable stale units matching $1, retaining interfaces in the $2 word list.
 cleanup_iface_service() {
     local svc_pattern="$1"   # e.g. "wpa_supplicant@wlan*.service"
     local valid_list="$2"    # Space-separated interfaces to keep.
@@ -655,6 +677,7 @@ cleanup_iface_service() {
         [ -L "$link" ] || continue
         svc="$(basename "$link")"
 
+        # Extract wlanN from either @wlanN or -wlanN service suffixes.
         iface="$(printf '%s\n' "$svc" |
             sed -E 's/.*[@-](wlan[0-9]+)\.service$/\1/')"
         [[ "$iface" == "$svc" ]] && continue
@@ -671,6 +694,7 @@ cleanup_iface_service() {
     # Also find loaded/failed units without enable symlinks, including
     # manually started or disabled instances still held by systemd.
     for svc in $(systemctl list-units --all --no-legend --state=failed,loaded "$svc_pattern" 2>/dev/null | awk '{print $1}'); do
+        # Extract wlanN from either @wlanN or -wlanN service suffixes.
         iface="$(printf '%s\n' "$svc" |
             sed -E 's/.*[@-](wlan[0-9]+)\.service$/\1/')"
         [[ "$iface" == "$svc" ]] && continue
@@ -693,6 +717,7 @@ cleanup_iface_service 'halow-txpower-wlan*.service' "$current_halow"
 all_wireless_roles="$current_mesh $current_halow"
 for conf in /etc/wpa_supplicant/wpa_supplicant-wlan*.conf; do
     [ -e "$conf" ] || continue
+    # Strip live/lobby suffixes to compare the wlanN name with saved roles.
     iface="$(basename "$conf" | sed -E 's/^wpa_supplicant-(wlan[0-9]+).*/\1/')"
     if ! printf '%s\n' " $all_wireless_roles " | grep -q " $iface "; then
         printf '%s\n' " > Removing stale wpa_supplicant config: $conf"
@@ -702,19 +727,22 @@ done
 
 # === CONFIGURE MESH INTERFACES (excluding AP if needed) ===
 
-# Pin roles by MAC using .link files: wlan0=2.4 GHz, wlan1=5 GHz, wlan2=HaLow,
-# wlan3=non-mesh AP. Current setup uses live names until the next boot.
+# Pin the first two band-ordered mesh radios to wlan0/1, HaLow to wlan2,
+# and non-mesh AP to wlan3. Setup uses live names until the next boot.
 # The early boot helper resolves occupied-name swaps before networkd and
 # radio services start because udev cannot swap them alone.
 provision_try "cannot enable radio name reconciliation" \
     systemctl enable manet-radio-names.service
 rm -f /etc/systemd/network/10-wlan*.link
 
+# Print the named interface MAC from sysfs.
 iface_mac() {
     cat "/sys/class/net/$1/address" 2>/dev/null
 }
 
 declare -A pinned_names=()
+# Pin the target name in $1 to the live interface in $2 by MAC.
+# Record successful writes in pinned_names for role staging before reboot.
 write_link_file() {
     local target_name="$1"
     local iface="$2" mac
@@ -744,6 +772,7 @@ printf '%s\n' "MESH_NAME=\"$MESH_NAME\"" > /etc/default/mesh
 # If .link target names differ from live names, schedule setup after the
 # rename reboot to refresh stale role files.
 needs_rerun=0
+# Set needs_rerun when target $1 differs from a nonempty live name in $2.
 check_rename() {
     local target="$1"
     local current="$2"
@@ -776,6 +805,7 @@ fi
 # is disabled.
 write_mesh_wpa_conf() {
     local iface="$1" freq="$2"
+    # With ACS off, replace the anchor MHz value with the saved band plan.
     if [[ ! "$acs" =~ ^([Yy]|[Yy][Ee][Ss]|1|[Tt][Rr][Uu][Ee])$ ]]; then
         local band="2.4"
         [ "$freq" -lt 5000 ] || band="5"
@@ -784,6 +814,8 @@ write_mesh_wpa_conf() {
             return 1
         }
     fi
+# SAE protects mesh admission. BATMAN handles forwarding above the radio.
+# Keep both live and boot copies on the same chosen frequency.
 cat <<-EOF > /etc/wpa_supplicant/wpa_supplicant-$iface-lobby.conf
 ctrl_interface=/var/run/wpa_supplicant
 country=$CFG80211_REGDOM
@@ -834,6 +866,8 @@ for WLAN in $(cat /var/lib/mesh_if); do
         exit 1
     }
 
+    # Match the MAC from ip a for the live name returned by phys_iface.
+    # The 1532-byte hard-interface MTU leaves space above the IP payload.
     # Create the network interface config
 cat <<-EOF > /etc/systemd/network/30-$WLAN.network
 [Match]
@@ -916,6 +950,7 @@ EOF
     set -x
 
     # Calculate DHCP pool based on max EUDs
+    # HostMin is the first usable IPv4 in the configured mesh subnet.
     CALC_OUTPUT=$(manet-ipcalc.sh "$IPV4_NETWORK" 2>/dev/null)
     FIRST_IP=$(printf '%s\n' "$CALC_OUTPUT" | awk '/HostMin/ {print $2}')
 
@@ -1049,6 +1084,8 @@ for WLAN in $(cat /var/lib/halow_if | head -n 1); do
 
     printf '%s\n' " > Setting up $WLAN for HaLow use ..."
 
+    # Match the MAC from ip a for the live name returned by phys_iface.
+    # The 1532-byte hard-interface MTU leaves space above the IP payload.
     # Create the network interface config
 cat <<-EOF > /etc/systemd/network/30-$WLAN.network
 [Match]
@@ -1063,6 +1100,8 @@ EOF
 
     rm -f /etc/wpa_supplicant/*${WLAN}* 2>/dev/null
 
+    # US starts on channel 10 at 907 MHz, 2 MHz wide, operating class 69.
+    # Other regions use channel 1/class 66 from the EU 1 MHz template.
     if [[ "$HALOW_REGULATORY_DOMAIN" == "US" ]]; then
 cat << EOF > /etc/wpa_supplicant/wpa_supplicant-$WLAN-s1g.conf
 country="US"
@@ -1133,6 +1172,7 @@ network={
 EOF
     fi
 
+# Give HaLow 3 s before supplicant start, retrying service failures after 5 s.
 cat << EOF > /etc/systemd/system/wpa_supplicant-s1g-$WLAN.service
 [Unit]
 Description=WPA supplicant (S1G/HaLow) for $WLAN
@@ -1181,6 +1221,7 @@ printf '%s\n' \
 MORSE_BCF=""
 MORSE_SPI_CLOCK=""
 if [ -f /etc/modprobe.d/morse.conf ] && ! has_usb_morse_device; then
+    # Preserve the first whitespace-delimited BCF and SPI clock values.
     MORSE_BCF=$(grep -oP '(?<=bcf=)\S+' /etc/modprobe.d/morse.conf | head -1)
     MORSE_SPI_CLOCK=$(grep -oP '(?<=spi_clock_speed=)\S+' /etc/modprobe.d/morse.conf | head -1)
 fi
@@ -1210,6 +1251,7 @@ systemctl enable manet-led-status.service
 systemctl enable wifi-rfkill-unblock.service
 systemctl enable button-monitor.service
 
+# Reset cloned identity before address, service election and AP consumers.
 cat << EOF > /etc/systemd/system/mesh-clone-identity.service
 [Unit]
 Description=Reset cloned mesh node identity when hardware MAC changes
@@ -1258,7 +1300,7 @@ WantedBy=multi-user.target
 EOF
 systemctl enable mesh-boot-lobby.service
 
-# Get bat0 a link local address for alfred
+# Enable IPv6 on bat0/br0 and accept router advertisements on br0.
 cat <<- EOF > /etc/sysctl.d/99-batman.conf
 # Enable IPv6 address generation on batman-adv interfaces
 net.ipv6.conf.bat0.disable_ipv6 = 0
@@ -1308,6 +1350,8 @@ systemctl enable batman-enslave.service
 systemctl enable batman-enslave-watch.service
 
 # Alfred master listener for mesh data messages
+# Wait up to twenty 1 s sleeps for br0 link-local IPv6 to leave DAD.
+# Alfred synchronizes every 10 s and restarts 10 s after exit.
 cat <<- EOF > /etc/systemd/system/alfred.service
 [Unit]
 Description=B.A.T.M.A.N. Advanced Layer 2 Forwarding Daemon
@@ -1329,6 +1373,7 @@ EOF
 systemctl enable alfred.service
 
 # Node manager: IPv4 addressing and status gossip via alfred
+# Start after Alfred and retry manager failures after 15 s.
 cat <<- EOF > /etc/systemd/system/node-manager.service
 [Unit]
 Description=Mesh Node Status Manager and IPv4 Coordinator
@@ -1346,6 +1391,7 @@ WantedBy=multi-user.target
 EOF
 systemctl enable node-manager.service
 
+# Order peer setup after Syncthing and Alfred, retrying failures after 30 s.
 cat <<- EOF > /etc/systemd/system/syncthing-peer-manager.service
 [Unit]
 Description=Syncthing Peer Manager
@@ -1390,6 +1436,7 @@ systemctl disable --now mesh-default-route-fix.service 2>/dev/null || true
 systemctl disable --now battery-reader.service 2>/dev/null || true
 chmod -R 755 /etc/networkd-dispatcher
 
+# Bound the boot detector oneshot to 240 s, after networkd and bat0 setup.
 cat <<- EOF > /etc/systemd/system/ethernet-autodetect.service
 [Unit]
 Description=MANET Ethernet Hotplug Auto Detection
@@ -1409,6 +1456,7 @@ systemctl enable ethernet-autodetect.service
 
 cp /root/regulatory.db /lib/firmware/
 
+# Start route selection after the manager and restart exits after 10 s.
 cat <<- EOF > /etc/systemd/system/gateway-route-manager.service
 [Unit]
 Description=Mesh Gateway Route Manager
@@ -1432,6 +1480,7 @@ WantedBy=multi-user.target
 EOF
 systemctl enable gateway-route-manager
 
+# Let tombstone publication run before poweroff with a 10 s start budget.
 cat <<- EOF > /etc/systemd/system/mesh-shutdown.service
 [Unit]
 Description=Mesh Network Graceful Shutdown
@@ -1452,6 +1501,7 @@ systemctl enable mesh-shutdown.service
 
 
 # Power saving
+# scaling_max_freq uses kHz: 1008000 limits the policy to 1.008 GHz.
 cat << EOF > /etc/systemd/system/cpu-powersave.service
 [Unit]
 Description=Set CPU to powersave mode
@@ -1491,6 +1541,7 @@ Type=oneshot
 ExecStart=/usr/local/bin/mesh-hosts-update.sh
 EOF
 
+# Refresh hosts 60 s after boot, then 120 s after each service activation.
 cat << EOF > /etc/systemd/system/mesh-hosts-update.timer
 [Unit]
 Description=Refresh mesh hosts periodically
@@ -1683,6 +1734,8 @@ if [[ "$FIRST_BOOT_UNIT_ENABLED" -eq 1 && ! -f "$FIRST_BOOT_STAGE_MARKER" ]]; th
 
     SYNCTHING_CONFIG="/home/radio/.config/syncthing/config.xml"
     echo " >> Hardening Syncthing for local-only operation..."
+    # Insert discovery/relay options at the options element.
+    # The GUI replacement matches an opening and closing tag on one line.
     sed -i '/<options>/a <globalAnnounceEnabled>false</globalAnnounceEnabled>\n<relaysEnabled>false</relaysEnabled>' "$SYNCTHING_CONFIG"
     sed -i 's|<gui enabled="true" tls="false" debugging="false">.*</gui>|<gui enabled="true" tls="false" debugging="false">\n        <address>127.0.0.1:8384</address>\n    </gui>|' "$SYNCTHING_CONFIG"
     echo " -- CONFIGURED -- " >> /etc/issue
@@ -1763,6 +1816,8 @@ if [ -x /usr/local/bin/manet-mt7916-setup.sh ]; then
 fi
 
 declare -A runtime_roles=()
+# Save live role contents in runtime_roles and write names from pinned_names.
+# Fail on a role read or write error so the caller can restore live roles.
 stage_rename_roles() {
     local role iface target contents
     for role in mesh_if mesh_24_if mesh_5_if halow_if no_mesh_if iface_map ap_interface; do
@@ -1785,6 +1840,7 @@ stage_rename_roles() {
     done
 }
 
+# Restore role files from runtime_roles after staging or reboot fails.
 restore_runtime_roles() {
     local role
     for role in "${!runtime_roles[@]}"; do

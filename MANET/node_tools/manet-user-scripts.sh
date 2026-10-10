@@ -19,6 +19,7 @@ MESH_CONF="${MANET_MESH_CONF:-/etc/mesh.conf}"
 # user_script_timeout= in /etc/mesh.conf.
 DEFAULT_TIMEOUT=300
 
+# Print the accepted command-line options to stderr.
 usage() {
     printf '%s\n' \
         'usage: manet-user-scripts.sh [--force] [--list] [-h|--help]' >&2
@@ -46,6 +47,7 @@ done
 # in this operator-editable file cannot execute as shell.
 TIMEOUT="$DEFAULT_TIMEOUT"
 if [ -r "$MESH_CONF" ]; then
+    # Accept the last digits-only assignment, with optional trailing space.
     conf_timeout=$(sed -n 's/^user_script_timeout=\([0-9]\{1,\}\)[[:space:]]*$/\1/p' \
         "$MESH_CONF" | tail -1)
     [ -n "$conf_timeout" ] && [ "$conf_timeout" -gt 0 ] 2>/dev/null && TIMEOUT="$conf_timeout"
@@ -55,11 +57,13 @@ fi
 # immediately so interrupted runs repeat only the script without a record.
 mkdir -p "$(dirname "$STATE_FILE")" 2>/dev/null || true
 
+# Check STATE_FILE for a completed script name, including failed exits.
 already_ran() {
     [ -r "$STATE_FILE" ] || return 1
     cut -f1 "$STATE_FILE" 2>/dev/null | grep -qxF "$1"
 }
 
+# Append script name, exit status and epoch seconds to STATE_FILE.
 record_result() {
     printf '%s\t%s\t%s\n' "$1" "$2" "$(date +%s)" >> "$STATE_FILE"
 }
@@ -152,6 +156,7 @@ while IFS= read -r name; do
     # Use cwd / and stdin /dev/null for the systemd oneshot without a terminal.
     # Reads then fail immediately instead of waiting for the timeout.
     if command -v timeout >/dev/null 2>&1; then
+        # Send KILL 30 s after TERM if the script does not stop.
         ( cd / && timeout --kill-after=30 "$TIMEOUT" "$path" ) < /dev/null
         rc=$?
     else

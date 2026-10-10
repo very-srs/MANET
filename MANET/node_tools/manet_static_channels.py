@@ -28,15 +28,18 @@ _FREQUENCIES = {
 
 
 class StaticChannelError(ValueError):
+    """Reject an unreadable or invalid fixed channel plan."""
     pass
 
 
 def valid(band, freq):
+    """Check that a band supports the supplied integer center frequency."""
     return (band in _FREQUENCIES and type(freq) is int
             and freq in _FREQUENCIES[band])
 
 
 def load(path=PATH):
+    """Load both bands, using defaults only when the file is absent."""
     path = Path(path)
     try:
         text = path.read_text()
@@ -65,6 +68,7 @@ def save(band, freq, path=PATH):
     plan = load(path)
     plan[band] = freq
     path.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
+    # A same-directory temporary makes the final replacement atomic.
     fd, temporary = tempfile.mkstemp(prefix='.' + path.name + '-', dir=path.parent)
     try:
         with os.fdopen(fd, 'w') as target:
@@ -74,6 +78,7 @@ def save(band, freq, path=PATH):
             target.flush()
             os.fsync(target.fileno())
         os.replace(temporary, path)
+        # Sync the renamed directory entry as well as the file contents.
         directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
         try:
             os.fsync(directory)
@@ -86,6 +91,7 @@ def save(band, freq, path=PATH):
 
 
 def main(argv):
+    """Read or update the persistent plan using the requested CLI operation."""
     path = Path(os.environ.get('MANET_STATIC_CHANNELS', PATH))
     try:
         if len(argv) == 2 and argv[0] == 'get' and argv[1] in BANDS:

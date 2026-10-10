@@ -6,6 +6,7 @@ ROLES="${MANET_IFACE_STATE_DIR:-/var/lib}"
 [ -n "$IFACE" ] || exit 0
 AP_IFACE="$(cat "$ROLES/ap_interface" 2>/dev/null || true)"
 [ "$IFACE" = "$AP_IFACE" ] || exit 0
+# Require an exact role-file line, so another interface cannot match.
 if ! grep -Fxq "$IFACE" "$ROLES/mesh_if" 2>/dev/null; then
     printf '%s%s\n' \
         "manet-ap-guard: $IFACE is reserved for AP; skipping mesh " \

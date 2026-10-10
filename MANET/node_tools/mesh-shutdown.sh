@@ -8,6 +8,7 @@ ENCODER_PATH="/usr/local/bin/encoder.py"
 ALFRED_DATA_TYPE=68
 CONTROL_IFACE="br0"
 
+# Send the shutdown message to the journal.
 log() {
     printf '%s\n' "MESH-SHUTDOWN: $1" | systemd-cat -t mesh-shutdown
 }

@@ -33,10 +33,12 @@ BOOT_ID_PATH = "/proc/sys/kernel/random/boot_id"
 
 
 def raw_mono() -> float:
+    """Read elapsed seconds without clock discipline affecting fix ages."""
     return time.clock_gettime(time.CLOCK_MONOTONIC_RAW)
 
 
 def read_boot_id() -> str:
+    """Read the boot identity, or return an empty string on read failure."""
     try:
         with open(BOOT_ID_PATH) as f:
             return f.read().strip()
@@ -45,10 +47,12 @@ def read_boot_id() -> str:
 
 
 def write_json(path: str, data: dict) -> bool:
+    """Replace a JSON snapshot and report whether the write succeeds."""
     tmp = path + ".tmp"
     try:
         with open(tmp, "w") as f:
             f.write(json.dumps(data, separators=(",", ":")))
+        # Readers see a complete document when the sibling replaces it.
         os.rename(tmp, path)
         return True
     except OSError as e:
@@ -65,6 +69,7 @@ def load_first_fix(boot_id: str) -> float | None:
         return None
     if not isinstance(data, dict) or data.get("boot_id") != boot_id:
         return None
+    # Raw monotonic timestamps are comparable only within the same boot.
     mono = data.get("mono")
     return float(mono) if isinstance(mono, (int, float)) else None
 
@@ -78,9 +83,11 @@ def build_status(reader: GnssReader, now_mono: float, boot_id: str,
     rx = reader.tick(now_mono)
     fix = rx.last_fix if rx is not None else None
     fresh = connected and rx is not None and rx.fix_live and fix is not None
+    # Keep diagnostic sample fields after loss without publishing a live fix.
     sample = fix if fresh else (rx.last if rx is not None else None)
     alt = None
     if fresh:
+        # Prefer mean sea level altitude, then gpsd's legacy altitude field.
         alt = fix.get("alt_msl") if fix.get("alt_msl") is not None else fix.get("alt_legacy")
     hdop = sample.get("hdop") if sample else None
     first = reader.boot_first_fix
@@ -90,6 +97,7 @@ def build_status(reader: GnssReader, now_mono: float, boot_id: str,
         "longitude": round(fix["lon"], 7) if fresh else 0.0,
         "altitude": round(alt, 2) if alt is not None else 0.0,
         "hdop": round(hdop, 2) if hdop is not None else 99.9,
+        # Rebase fix age onto the current wall clock after clock corrections.
         "timestamp": int(now_wall - (now_mono - fix["mono"])) if fresh else int(now_wall),
         "schema": 2,
         # Publication time on /proc/uptime. Consumers use this boot-clock age
@@ -110,19 +118,24 @@ def build_status(reader: GnssReader, now_mono: float, boot_id: str,
 
 
 def build_history(reader: GnssReader, now_mono: float, boot_id: str) -> dict:
+    """Return the primary receiver's samples with their boot and clock basis."""
     rx = reader.receivers.get(reader.primary)
     return {"boot_id": boot_id, "clock": "monotonic_raw", "now_mono": round(now_mono, 3),
             "device": reader.primary, "samples": list(rx.history) if rx else []}
 
 
 class Publisher:
+    """Rate-limit snapshots and retain the first fix across reader restarts."""
+
     def __init__(self, reader: GnssReader, boot_id: str, first_fix_saved: bool = False):
+        """Bind the reader and allow both snapshots on the first write pass."""
         self.reader = reader
         self.boot_id = boot_id
         self.last_write = self.last_history = -1e18
         self.first_fix_saved = first_fix_saved
 
     def maybe_write(self, now: float, connected: bool = True, force: bool = False) -> None:
+        """Publish due snapshots and retry the first-fix record until saved."""
         if not self.first_fix_saved and self.reader.boot_first_fix is not None:
             self.first_fix_saved = write_json(GPS_FIRST_FIX_PATH, {
                 "boot_id": self.boot_id, "mono": self.reader.boot_first_fix})
@@ -136,11 +149,14 @@ class Publisher:
 
 def watch(reader: GnssReader, pub: Publisher) -> None:
     """Run one gpsd session until it fails, then publish its final state."""
+    # Bound connection setup to 5 s before the outer reconnect loop retries.
     sock = socket.create_connection((GPSD_HOST, GPSD_PORT), timeout=5)
     reader.new_session()
     try:
         with sock:
+            # Wake each second to expire fixes even when gpsd sends no data.
             sock.settimeout(WRITE_INTERVAL)
+            # Request newline-delimited JSON reports on this connection.
             sock.sendall(b'?WATCH={"enable":true,"json":true}\n')
             buf = b""
             discarding = False  # Drop oversized line through newline
@@ -152,9 +168,11 @@ def watch(reader: GnssReader, pub: Publisher) -> None:
                     buf += chunk
                 except socket.timeout:
                     pass
+                # TCP chunks can end mid-report. Retain the unfinished line.
                 lines = buf.split(b"\n")
                 buf = lines.pop()
                 if discarding and lines:
+                    # An oversized report's suffix is not a new JSON document.
                     lines.pop(0)
                     discarding = False
                 if len(buf) > MAX_PENDING:
@@ -172,12 +190,14 @@ def watch(reader: GnssReader, pub: Publisher) -> None:
                         reader.feed(msg, raw_mono())
                 pub.maybe_write(raw_mono())
     finally:
+        # Withdraw the live fix immediately when the watch connection ends.
         now = raw_mono()
         reader.lose_all(now, "gpsd session ended")
         pub.maybe_write(now, connected=False, force=True)
 
 
 def main() -> None:
+    """Restore this boot's first fix and reconnect to gpsd indefinitely."""
     print("[gps-reader] Starting GPS reader daemon.", flush=True)
     boot_id = read_boot_id()
     first_fix = load_first_fix(boot_id)
@@ -189,6 +209,7 @@ def main() -> None:
         except Exception as e:
             print(f"[gps-reader] gpsd session ended: {e}", file=sys.stderr, flush=True)
             pub.maybe_write(raw_mono(), connected=False, force=True)
+        # Space failed or closed connections by 5 s to bound retry traffic.
         time.sleep(RECONNECT_S)
 
 

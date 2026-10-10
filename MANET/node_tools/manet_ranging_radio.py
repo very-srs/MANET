@@ -33,9 +33,12 @@ import time
 
 import manet_ranging as ranging
 
+# Bound textual trace reads to 1 MiB and decoded captures to 4096 rows.
 MAX_TRACE_BYTES = 1024 * 1024
 MAX_RAW_REPORTS = 4096
+# Fixed band-1 register selects normal WM report routing.
 NORMAL_ROUTE = 0x820F701C
+# tmr_ctrl profiles follow the enable flag in the driver debugfs command.
 CTRL_INIT = "0 2 0 3 3 3 3"
 CTRL_RESP = "1 2 0 0x22 2 3 3 8 10"
 ASSOCIATION_GAP = ("capture cannot establish initial time association/WM report origin "
@@ -43,20 +46,24 @@ ASSOCIATION_GAP = ("capture cannot establish initial time association/WM report 
 
 
 class RadioError(RuntimeError):
+    """Signal a radio setup, operation or cleanup failure."""
     pass
 
 
 class AssociationUnavailable(RadioError):
+    """Signal that capture evidence cannot support normalized samples."""
     pass
 
 
 class CaptureInvalid(RadioError):
+    """Signal an incomplete, malformed or ambiguous timestamp capture."""
     pass
 
 
 class FileIO:
     """Only existing pseudo-files are written. No shell, mounts or chmods."""
     def read(self, path, limit=8192):
+        """Read bounded ASCII content without following the final symlink."""
         fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
         with os.fdopen(fd, "rb") as stream:
             data = stream.read(limit + 1)
@@ -65,6 +72,7 @@ class FileIO:
         return data.decode("ascii", errors="strict")
 
     def write(self, path, value):
+        """Write ASCII to an existing path and reject a partial write."""
         data = value.encode("ascii")
         fd = os.open(path, os.O_WRONLY | os.O_TRUNC | os.O_CLOEXEC | os.O_NOFOLLOW)
         try:
@@ -74,21 +82,26 @@ class FileIO:
             os.close(fd)
 
     def mkdir_instance(self, path):
+        """Create a trace instance, refusing an existing owner."""
         path.mkdir()  # Refuse an existing instance.
 
     def remove_instance(self, path):
+        """Remove the owned tracefs instance and its virtual children."""
         path.rmdir()  # tracefs removes virtual children.
 
     def stats_paths(self, instance):
+        """Return per-CPU trace loss-counter paths in stable order."""
         return sorted((instance / "per_cpu").glob("cpu[0-9]*/stats"))
 
 
 class DeviceLock:
     """The driver stores mark/peer/SPE/rate per device, shared by both PHYs."""
     def __init__(self, path):
+        """Store the device lock path without acquiring it."""
         self.path, self.fd = Path(path), None
 
     def acquire(self):
+        """Acquire the device lock without waiting for another owner."""
         if self.fd is not None:
             raise RadioError("device already owned by this adapter")
         fd = os.open(self.path, os.O_CREAT | os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
@@ -100,6 +113,7 @@ class DeviceLock:
         self.fd = fd
 
     def release(self):
+        """Close the lock descriptor to release device ownership."""
         if self.fd is not None:
             os.close(self.fd)
             self.fd = None
@@ -107,6 +121,7 @@ class DeviceLock:
 
 @dataclass(frozen=True)
 class Config:
+    """Hold radio identifiers, paths and diagnostic pacing limits."""
     interface: str
     phy: str
     device: str  # PCI BDF, as printed by mt7915_rx_tmr's dev= field.
@@ -115,11 +130,15 @@ class Config:
     debug_root: Path = Path("/sys/kernel/debug/ieee80211")
     trace_root: Path = Path("/sys/kernel/tracing")
     lock_root: Path = Path("/run/lock")
+    # Lease defaults to its 10 s maximum. Prep phases default to 0.5 s each.
     lease_s: float = 10.0
     prepare_s: float = 0.5
+    # Default pacing tolerates 1 ms lateness, configurable up to 2 ms.
     max_send_lateness_s: float = 0.001
 
     def __post_init__(self):
+        """Validate device identifiers, socket values and bounded timings."""
+        # Restrict path components to interface, phyN and PCI BDF syntax.
         if (not re.fullmatch(r"[A-Za-z0-9_.-]{1,15}", self.interface) or
                 self.interface in (".", "..") or not re.fullmatch(r"phy[0-9]+", self.phy) or
                 not re.fullmatch(r"[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]", self.device) or
@@ -133,6 +152,7 @@ class Config:
 
 @dataclass(frozen=True)
 class Link:
+    """Carry verified link-local endpoints, peer MAC and channel width."""
     ifindex: int
     local_address: str
     peer_address: str
@@ -141,6 +161,7 @@ class Link:
 
 
 def _link_local(address):
+    """Validate an unscoped unicast IPv6 link-local address."""
     if "%" in address:
         raise RadioError("scope is supplied separately, not inside the address")
     parsed = ipaddress.IPv6Address(address)
@@ -150,6 +171,7 @@ def _link_local(address):
 
 
 def _command(args):
+    """Run a read-only discovery command with a two-second limit."""
     return subprocess.run(args, check=True, capture_output=True, text=True, timeout=2).stdout
 
 
@@ -161,10 +183,12 @@ class LinuxLinkProbe:
     performed here. Later role/channel changes must be delivered via abort().
     """
     def __init__(self, config, endpoint, *, sys_root=Path("/sys/class/net"), run=_command):
+        """Bind link discovery to trusted endpoint and command providers."""
         self.config, self.endpoint = config, endpoint
         self.sys_root, self.run = Path(sys_root), run
 
     def __call__(self, peer):
+        """Verify mesh role, direct station and link-local address mapping."""
         cfg = self.config
         iface = self.sys_root / cfg.interface
         phy = (iface / "phy80211").resolve(strict=True)
@@ -172,6 +196,7 @@ class LinuxLinkProbe:
                 (phy / "device").resolve(strict=True).name != cfg.device):
             raise RadioError("interface is not this device's bat0 mesh PHY")
         info = self.run(["iw", "dev", cfg.interface, "info"])
+        # iw reports primary channel frequency and width in MHz.
         channel = re.search(r"channel\s+\d+\s+\((\d+) MHz\), width:\s*(\d+) MHz", info)
         if (not re.search(r"^\s*type mesh point\s*$", info, re.M) or not channel or
                 not 5000 <= int(channel[1]) < 5900):
@@ -179,17 +204,20 @@ class LinuxLinkProbe:
         ifindex = int((iface / "ifindex").read_text().strip())
         mac = peer.mac.hex(":")
         station = self.run(["iw", "dev", cfg.interface, "station", "get", mac])
+        # Match the requested MAC at the start of an iw Station record.
         if not re.search(rf"^Station {re.escape(mac)}\b", station, re.M | re.I):
             raise RadioError("peer is not a direct 5 GHz station")
         remote = _link_local(self.endpoint(peer))
         neighbours = json.loads(self.run(["ip", "-j", "-6", "neigh", "show", "to", remote,
                                           "dev", cfg.interface]))
+        # ip JSON must map the trusted endpoint to this MAC in a usable state.
         if not any(row.get("dst") == remote and row.get("lladdr", "").lower() == mac and
                    set(row.get("state", [])) & {"REACHABLE", "STALE", "DELAY", "PROBE", "PERMANENT"}
                    for row in neighbours):
             raise RadioError("link-local neighbour does not resolve to the authorized peer MAC")
         addresses = json.loads(self.run(["ip", "-j", "-6", "addr", "show", "dev", cfg.interface,
                                          "scope", "link"]))
+        # ip can expose DAD failures as boolean fields or flag names.
         local = [a["local"] for dev in addresses for a in dev.get("addr_info", [])
                  if a.get("scope") == "link" and a.get("family") == "inet6" and
                  not a.get("tentative") and not a.get("dadfailed") and
@@ -228,6 +256,7 @@ class ClockOffsetBound:
     uncertainty: int
 
     def __post_init__(self):
+        """Validate the reference timestamp, signed offset and uncertainty."""
         half = ranging.CLOCK_MODULUS // 2
         if (type(self.reference_departure) is not int or
                 not 0 <= self.reference_departure < ranging.CLOCK_MODULUS or
@@ -236,6 +265,7 @@ class ClockOffsetBound:
             raise ValueError("invalid independent clock-offset bound")
 
     def permits(self, departure, offset, ppm):
+        """Check an offset against uncertainty plus elapsed clock drift."""
         elapsed = abs(ranging.clock_delta(departure, self.reference_departure))
         return abs(ranging.clock_delta(offset, self.offset)) <= self.uncertainty + elapsed * ppm / 1e6
 
@@ -264,6 +294,7 @@ def time_pair_reports(initiator, responder, *, initial_offset, min_pairs=10,
                 any(ranging.clock_delta(y, x) <= 0 for x, y in zip(values, values[1:]))):
             raise CaptureInvalid("unordered or invalid hardware timestamps")
     total_elapsed = ranging.clock_delta(a[-1].departure, a[0].departure)
+    # Nonoverlapping initiator time gates prevent two probes sharing a row.
     largest_gate = tolerance_counts + total_elapsed * max_drift_ppm / 1e6
     if any(ranging.clock_delta(y.departure, x.departure) <= 2 * largest_gate
            for x, y in zip(a, a[1:])):
@@ -276,6 +307,7 @@ def time_pair_reports(initiator, responder, *, initial_offset, min_pairs=10,
             if not initial_offset.permits(a[i0].departure, offset, max_drift_ppm):
                 continue
             seeds += 1
+            # Bound candidate-search work even with a broad offset bound.
             if seeds > 100:
                 raise CaptureInvalid("too many candidate time seeds")
             previous, j, pairs = a[i0].departure, j0 + 1, [(i0, j0)]
@@ -283,6 +315,7 @@ def time_pair_reports(initiator, responder, *, initial_offset, min_pairs=10,
                 elapsed = ranging.clock_delta(a[i].departure, previous)
                 allowance = tolerance_counts + elapsed * max_drift_ppm / 1e6
                 matches = []
+                # Skip responder rows before this probe's tracked time gate.
                 while j < len(b):
                     current = ranging.clock_delta(b[j].arrival, a[i].departure)
                     residual = ranging.clock_delta(current, offset)
@@ -308,6 +341,7 @@ def time_pair_reports(initiator, responder, *, initial_offset, min_pairs=10,
                 candidates.append(tuple(pairs))
     if not candidates:
         raise CaptureInvalid("too few pairs inside independent offset bound")
+    # Keep the longest join only if other supported joins agree on matches.
     best = max(candidates, key=len)
     forward, reverse = dict(best), {j: i for i, j in best}
     if any((i in forward and forward[i] != j) or (j in reverse and reverse[j] != i)
@@ -326,6 +360,7 @@ def decode_wm_accumulator(payload):
             struct.unpack_from("<I", payload)[0] != 0x38000068 or
             struct.unpack_from("<II", payload, 32) != (0x57, 0xE00F20C0)):
         raise CaptureInvalid("unsupported WM accumulator dump")
+    # The accumulator is at offset 0x1c within the block after a 40-byte header.
     return struct.unpack_from("<I", payload, 40 + 0x1C)[0]
 
 
@@ -341,6 +376,7 @@ def accumulator_report_count(before, after, width_mhz):
     if (any(type(v) is not int or not 0 <= v < 1 << 32 for v in (before, after)) or
             width_mhz not in (20, 40, 80)):
         raise ValueError("invalid accumulator snapshot/profile")
+    # Each width has its own measured decrement per correction call.
     step = {20: 2454, 40: 1254, 80: 750}[width_mhz]
     count, remainder = divmod((before - after) & 0xFFFFFFFF, step)
     if remainder or count > MAX_RAW_REPORTS:
@@ -348,11 +384,13 @@ def accumulator_report_count(before, after, width_mhz):
     return count
 
 
+# Match trace time, PCI device, queue, lengths, copy status and hex payload.
 _TRACE = re.compile(r"\s([0-9]+\.[0-9]+):\s+mt7915_rx_tmr:\s+"
                     r"dev=(\S+) queue=(-?\d+) len=(\d+) captured=(\d+) copy_error=(-?\d+) data=(.*)$")
 
 
 def parse_trace(text, device):
+    """Decode complete type-4 TMR records for the selected PCI device."""
     reports = []
     for line in text.splitlines():
         if "mt7915_rx_tmr:" not in line:
@@ -370,9 +408,11 @@ def parse_trace(text, device):
         if (int(error) or int(length) != 40 or int(captured) != 40 or len(raw) != 40 or
                 int(queue) < 0):
             raise CaptureInvalid("incomplete/unsupported TMR report")
+        # Ten little-endian words carry the measured 40-byte type-4 format.
         words = struct.unpack("<10I", raw)
         if (words[0] & 0xFFFF) != 40 or (words[0] >> 27) != 4:
             raise CaptureInvalid("not the measured MT7916 type-4 report format")
+        # DW6 bits 0..15 extend DW4 and bits 16..31 extend DW5 to 48 bits.
         reports.append(RawReport(len(reports) + 1, float(stamp), int(queue),
                                  ((words[6] & 0xFFFF) << 32) | words[4],
                                  ((words[6] >> 16) << 32) | words[5], words))
@@ -384,11 +424,13 @@ def parse_trace(text, device):
 class TraceCapture:
     """Use a private tracefs instance, preserving global tracing settings."""
     def __init__(self, config, io):
+        """Initialize an unowned trace instance and empty snapshot cache."""
         self.config, self.io = config, io
         self.instance = None
         self.cached = None
 
     def start(self, sid):
+        """Create and enable a session-specific device-filtered trace."""
         if self.instance is not None:
             raise RadioError("trace instance already owned")
         instance = self.config.trace_root / "instances" / ("manet-ranging-" + sid.hex())
@@ -397,6 +439,7 @@ class TraceCapture:
         event = instance / "events/mt7915/mt7915_rx_tmr"
         self.io.write(instance / "tracing_on", "0\n")
         self.io.write(instance / "current_tracer", "nop\n")
+        # tracefs brackets the selected clock in its space-separated list.
         clocks = self.io.read(instance / "trace_clock").replace("[", "").replace("]", "").split()
         if "mono" not in clocks:
             raise RadioError("tracefs mono clock unavailable")
@@ -405,20 +448,24 @@ class TraceCapture:
         self.io.write(event / "enable", "0\n")
         # The trace field is 'device', even though TP_printk prints 'dev='.
         self.io.write(event / "filter", f'device == "{self.config.device}"\n')
+        # Clear the device-filtered buffer before enabling capture.
         self.io.write(instance / "trace", "")
         self.io.write(event / "enable", "1\n")
         self.io.write(instance / "tracing_on", "1\n")
 
     def read(self):
+        """Freeze capture and cache parsed reports after checking loss."""
         if self.cached is not None:
             return self.cached
         if self.instance is None:
             raise CaptureInvalid("no trace capture")
+        # Stop recording before reading loss counters and the frozen buffer.
         self.io.write(self.instance / "tracing_on", "0\n")
         stats = self.io.stats_paths(self.instance)
         if not stats:
             raise CaptureInvalid("trace loss counters unavailable")
         for path in stats:
+            # Every CPU must expose all three counters, each equal to zero.
             fields = dict(re.findall(r"^(overrun|commit overrun|dropped events):\s*(\d+)\s*$",
                                      self.io.read(path), re.M))
             if len(fields) != 3 or any(int(v) for v in fields.values()):
@@ -427,6 +474,7 @@ class TraceCapture:
         return self.cached
 
     def close(self):
+        """Attempt to disable tracing and remove the private instance."""
         if self.instance is None:
             return
         errors = []
@@ -446,6 +494,7 @@ class TraceCapture:
 
 @dataclass(frozen=True)
 class Event:
+    """Carry a deferred completion or failure event to the owning loop."""
     kind: str  # Forward burst_finished/radio_error after poll() returns.
     session_id: bytes
     detail: str = ""
@@ -465,6 +514,7 @@ class RadioAdapter:
 
     def __init__(self, config, link_probe, *, diagnostic_only=False, io=None,
                  clock=time.monotonic, socket_factory=socket.socket, lock=None):
+        """Bind injected I/O and initialize unowned diagnostic state."""
         self.config, self.link_probe = config, link_probe
         self.diagnostic_only, self.io, self.clock = diagnostic_only, io or FileIO(), clock
         self.socket_factory = socket_factory
@@ -485,12 +535,15 @@ class RadioAdapter:
         self._last_now = -math.inf
 
     def _read(self, name):
+        """Read a stripped value from the configured mt76 debugfs path."""
         return self.io.read(self.root / name).strip()
 
     def _write(self, name, value):
+        """Write a newline-terminated value to an mt76 control."""
         self.io.write(self.root / name, str(value) + "\n")
 
     def _time(self):
+        """Require finite monotonic time for lease and pacing deadlines."""
         now = self.clock()
         if not math.isfinite(now) or now < self._last_now:
             raise RadioError("monotonic clock failed")
@@ -498,9 +551,12 @@ class RadioAdapter:
         return now
 
     def _ctrl(self, enable):
+        """Apply the fixed TMR control profile for the current role."""
         self._write("tmr_ctrl", f"{int(enable)} {CTRL_RESP if self.role == 'responder' else CTRL_INIT}")
 
     def _begin(self, peer, sid, width, role):
+        """Validate and snapshot diagnostic state before enabling capture."""
+        # Association must be proven before production can touch controls.
         if not self.diagnostic_only:
             raise AssociationUnavailable(ASSOCIATION_GAP)
         if self.owned or self.role is not None:
@@ -524,10 +580,12 @@ class RadioAdapter:
             if not self._read("tmr_peer").startswith("off "):
                 raise RadioError("another TMR user has enabled peer marking")
             ack = self._read("tmr_ack_spe")
+            # Readback needs the default marker and four response SPE values.
             if not re.fullmatch(r"default(?: \d+){4}", ack):
                 raise RadioError("another user owns the saved ACK settings")
             spe = int(self._read("tmr_spe"), 0)
             mark, rate = int(self._read("tmr_mark"), 0), int(self._read("tmr_rate"), 0)
+            # Match the driver's SPE range and permitted tmr_rate bit mask.
             if not -1 <= spe <= 31 or not 0 <= mark <= 0xFFFFFFFF or rate & ~0xFFFFFC0F:
                 raise RadioError("unexpected driver settings")
             # No cleanup writes until this snapshot proves baseline ownership.
@@ -539,6 +597,7 @@ class RadioAdapter:
             self._write("tmr_peer", "off")
             self._ctrl(False)
             self._write("tmr_mark", hex(self.config.mark))
+            # SPE 0 and rate 0 select the driver's fixed 20 MHz probe profile.
             self._write("tmr_spe", "0")
             self._write("tmr_rate", "0")
             if role == "responder":
@@ -549,6 +608,7 @@ class RadioAdapter:
                 self._write("regval", "0xc003")
                 self._write("regidx", self.saved["regidx"])
                 self._write("tmr_ack_spe", "0")
+            # Capture starts before responder enable or initiator preparation.
             self.capture.start(sid)
             if role == "responder":
                 self._ctrl(True)
@@ -563,9 +623,11 @@ class RadioAdapter:
         # tmr_peer is TX-only. CTRL_RESP sets category=0, filters 0x22/2:
         # QoS Data/Data, not a peer or a probe. TIMING_MEASURE is a local TXD
         # bit, not an over-air marker this responder can filter on.
+        """Start responder diagnostics with the fixed capture profile."""
         self._begin(peer, session_id, width_mhz, "responder")
 
     def send_burst(self, peer, frames, width_mhz, interval_ms):
+        """Validate and queue marked IPv6 probes within the helper lease."""
         frames = tuple(frames)
         if not 1 <= len(frames) <= ranging.MAX_FRAMES or not 20 <= interval_ms <= 100:
             raise ValueError("invalid burst bounds")
@@ -579,6 +641,7 @@ class RadioAdapter:
                     message.burst.done != (seq == len(frames) - 1)):
                 raise ValueError("inconsistent burst")
         schedule = ranging.burst_schedule_us(sid, challenge, len(frames), interval_ms)
+        # Both off/on settling periods and the last-send margin fit the lease.
         if (2 * self.config.prepare_s + schedule[-1] / 1e6 +
                 self.config.max_send_lateness_s >= self.config.lease_s):
             raise ValueError("burst exceeds helper lease")
@@ -586,8 +649,10 @@ class RadioAdapter:
         try:
             self.socket = self.socket_factory(socket.AF_INET6, socket.SOCK_DGRAM, 0)
             self.socket.setblocking(False)
+            # Interface binding, link scope and hop limit constrain egress.
             self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE,
                                    self.config.interface.encode("ascii") + b"\0")
+            # skb mark and peer MAC select TX timing in the patched driver.
             self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_MARK, self.config.mark)
             self.socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
             self.socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_UNICAST_HOPS, 1)
@@ -640,18 +705,21 @@ class RadioAdapter:
         return self.capture.read()
 
     def read_initiator_timestamps(self, session_id):
+        """Freeze initiator diagnostics and refuse unproven associations."""
         if self.role != "initiator":
             raise CaptureInvalid("not an initiator session")
         self.read_raw_reports(session_id)
         raise AssociationUnavailable(ASSOCIATION_GAP)
 
     def read_responder_report(self, session_id):
+        """Freeze responder diagnostics and refuse unproven associations."""
         if self.role != "responder":
             raise CaptureInvalid("not a responder session")
         self.read_raw_reports(session_id)
         raise AssociationUnavailable(ASSOCIATION_GAP)
 
     def disarm(self):
+        """Cancel probes, restore saved controls and close trace capture."""
         self.pending.clear()
         self.schedule_us, self.sent_count = (), 0
         self.phase = None
@@ -663,6 +731,7 @@ class RadioAdapter:
             except Exception as exc:
                 errors.append(str(exc))
         if self.saved:
+            # Clear peer marking and disable TMR before restoring TX settings.
             actions = [("tmr_peer", "off"), ("tmr_ctrl", f"0 {CTRL_RESP if self.role == 'responder' else CTRL_INIT}")]
             actions.extend((key, self.saved[key]) for key in ("tmr_mark", "tmr_spe", "tmr_rate"))
             for name, value in actions:
@@ -693,6 +762,7 @@ class RadioAdapter:
             raise RadioError("disarm: " + "; ".join(errors))
 
     def restore_ack(self):
+        """Verify restored ACK state before releasing a clean device."""
         if not self.owned:
             return
         if self.saved:
@@ -700,6 +770,7 @@ class RadioAdapter:
             if self._read("tmr_ack_spe") != self.saved["ack"]:
                 self.cleanup_failed = True
                 raise RadioError("ACK restoration readback mismatch")
+        # Retain ownership after any failure so another session cannot start.
         if self._disarmed and not self.cleanup_failed:
             self.saved.clear()
             self.role = None
@@ -707,6 +778,7 @@ class RadioAdapter:
             self.lock.release()
 
     def _cleanup_after_error(self):
+        """Try both cleanup stages and collect their error messages."""
         failures = []
         for operation in (self.disarm, self.restore_ack):
             try:
@@ -716,12 +788,14 @@ class RadioAdapter:
         return failures
 
     def abort(self, detail):
+        """Attempt cleanup and queue a failure for the current session."""
         sid = self.session_id
         failures = self._cleanup_after_error()
         if sid is not None:
             self.events.append(Event("radio_error", sid, "; ".join([detail] + failures)))
 
     def close(self):
+        """Attempt both cleanup stages and report any remaining failures."""
         failures = self._cleanup_after_error()
         if failures:
             raise RadioError("; ".join(failures))

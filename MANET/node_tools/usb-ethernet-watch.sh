@@ -9,6 +9,7 @@ set -x
 ACTION="${1:-$ACTION}"
 IFACE="${2:-$INTERFACE}"
 
+# Write a prefixed journal message and a timestamped standalone log line.
 log() {
     printf '%s\n' "USB-ETH: $1" | systemd-cat -t usb-ethernet-watch
     printf '%s\n' "[$(date +'%Y-%m-%d %H:%M:%S')] - USB-ETH: $1"
@@ -65,6 +66,7 @@ UseGateway=yes
 EOF
             networkctl reload 2>/dev/null || true
             networkctl reconfigure "$IFACE" 2>/dev/null || true
+            # Give networkd three seconds after requesting DHCP reconfiguration.
             sleep 3
         fi
 

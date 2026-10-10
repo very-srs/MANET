@@ -24,12 +24,14 @@ import manet_rejoin_channel as rejoin
 import manet_static_channels as static
 
 ROLE_FILES = {'2.4': 'mesh_24_if', '5': 'mesh_5_if'}
+# Lock acquisition and readiness deadlines use monotonic seconds.
 LOCK_TIMEOUT = 10
 READY_TIMEOUT = 10
 
 
 @contextmanager
 def locked(path):
+    """Hold an exclusive file lock, allowing ten seconds to acquire it."""
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open('a') as lock:
         deadline = time.monotonic() + LOCK_TIMEOUT
@@ -40,11 +42,13 @@ def locked(path):
             except BlockingIOError as error:
                 if time.monotonic() >= deadline:
                     raise RuntimeError('Radio transition busy; retry shortly') from error
+                # Retry lock acquisition every 50 ms without blocking flock.
                 time.sleep(.05)
         yield
 
 
 def text(path, default=''):
+    """Read stripped file contents, using a default when absent."""
     try:
         return path.read_text().strip()
     except FileNotFoundError:
@@ -52,6 +56,7 @@ def text(path, default=''):
 
 
 def read_json(path):
+    """Read object state, treating a missing or empty file as empty."""
     raw = text(path)
     result = json.loads(raw) if raw else {}
     if not isinstance(result, dict):
@@ -60,7 +65,9 @@ def read_json(path):
 
 
 class Transition:
+    """Reconcile AP and mesh roles, radio state and supplicant files."""
     def __init__(self):
+        """Resolve runtime paths and initialize channel selection details."""
         self.roles = Path(os.environ.get('MANET_IFACE_STATE_DIR', '/var/lib'))
         self.wpa = Path(os.environ.get('MANET_WPA_DIR', '/etc/wpa_supplicant'))
         self.run = Path(os.environ.get('MANET_ACS_RUN_DIR', '/run'))
@@ -76,10 +83,12 @@ class Transition:
         self.selection = {}
 
     def command(self, args, timeout=10):
+        """Run a checked command with a seconds timeout and return stdout."""
         return subprocess.run(args, check=True, capture_output=True, text=True,
                               timeout=timeout).stdout
 
     def active(self, service):
+        """Check systemd activity with a three-second timeout."""
         try:
             self.command(['systemctl', 'is-active', '--quiet', service], timeout=3)
             return True
@@ -87,14 +96,17 @@ class Transition:
             return False
 
     def radio_info(self, iface):
+        """Read iw interface details with a three-second timeout."""
         return self.command(['iw', 'dev', iface, 'info'], timeout=3)
 
     def settings(self):
+        """Read mesh.conf assignments as literal values."""
         return {key.strip(): value.strip().strip('\"\'')
                 for key, value in (line.split('=', 1) for line in self.conf.read_text().splitlines()
                                    if '=' in line and not line.lstrip().startswith('#'))}
 
     def identity(self):
+        """Return the AP interface and its provisioned mesh band."""
         iface = self.ap_identity()
         band = text(self.roles / 'ap_mesh_band', default='missing')
         if band not in ('', '2.4', '5'):
@@ -104,7 +116,9 @@ class Transition:
         return iface, band
 
     def ap_identity(self):
+        """Validate the provisioned AP name and exclude HaLow hardware."""
         iface = text(self.roles / 'ap_interface')
+        # Limit interface names to 15 safe characters for commands and paths.
         if not re.fullmatch(r'[A-Za-z0-9_.-]{1,15}', iface):
             raise ValueError('Invalid or missing AP interface')
         driver = (self.sysnet / iface / 'device/driver').resolve().name
@@ -113,6 +127,8 @@ class Transition:
         return iface
 
     def phy_power(self, iface, value):
+        """Set power on an unshared PHY and verify a fixed cap."""
+        # iw reports a decimal wiphy index used by the PHY power command.
         phy = re.search(r'\bwiphy (\d+)', self.radio_info(iface))
         if not phy:
             raise ValueError('Cannot identify radio PHY')
@@ -125,9 +141,11 @@ class Transition:
                 raise ValueError(f'Cannot change {iface} power: {name} also serves {other.name}')
         self.command(['iw', 'phy', name, 'set', 'txpower', *value])
         if value[0] == 'fixed':
+            # iw fixed power takes mBm, while its readback uses dBm.
             ceiling = int(value[1]) / 100
             # A regulatory/driver ceiling below the request is valid. A
             # successful iw exit alone does not prove the requested cap stuck.
+            # Try five readbacks, 100 ms apart, with 0.01 dBm tolerance.
             for attempt in range(5):
                 actual = re.search(r'^\s*txpower (-?\d+(?:\.\d+)?) dBm', self.radio_info(iface), re.M)
                 if actual and float(actual[1]) <= ceiling + .01:
@@ -137,6 +155,7 @@ class Transition:
             raise RuntimeError(f'TX power on {iface} did not settle at or below {ceiling:g} dBm')
 
     def ap_power(self):
+        """Apply the 5 dBm cap only while the radio serves the AP."""
         # Called by hostapd ExecStartPost and by policy reconciliation. A
         # queued old AP job must not cap a radio which has since joined mesh.
         with locked(self.channel_lock):
@@ -154,21 +173,28 @@ class Transition:
             return {'mode': 'ap-power', 'changed': True}
 
     def disabled(self, iface):
+        """Check whether persistent desired state disables this radio."""
         desired = read_json(self.radio_state).get('desired', {})
         if not isinstance(desired, dict):
             raise ValueError('Invalid desired radio state')
         return desired.get(iface) == 'down'
 
     def attached(self, iface):
+        """Check whether batctl lists this interface as attached."""
+        # Match the interface field before the colon in batctl if output.
         return bool(re.search(r'^\s*' + re.escape(iface) + r':',
                               self.command(['batctl', 'if']), re.M))
 
     def link_down(self, iface):
+        """Read the administrative link state from sysfs flags."""
+        # IFF_UP is bit zero, independent of carrier or BATMAN attachment.
         flags = text(self.sysnet / iface / 'flags')
         return bool(flags) and not (int(flags, 0) & 1)
 
     def healthy(self, iface, freq):
+        """Verify supplicant response, service, mesh type and frequency."""
         try:
+            # Require a full PONG line plus mesh type and parenthesized MHz.
             pong = self.command(['wpa_cli', '-p', '/var/run/wpa_supplicant', '-i', iface, 'ping'], timeout=3)
             info = self.radio_info(iface)
             return ('PONG' in pong.splitlines() and self.active(f'wpa_supplicant@{iface}.service')
@@ -178,6 +204,7 @@ class Transition:
             return False
 
     def set_roles(self, iface, band=''):
+        """Update band and mesh role files without replacing another owner."""
         for candidate, filename in ROLE_FILES.items():
             old = text(self.roles / filename)
             new = iface if band == candidate else ('' if old == iface else old)
@@ -193,9 +220,11 @@ class Transition:
             atomic_write(self.roles / 'mesh_if', updated)
 
     def snapshot(self, paths):
+        """Save file bytes and metadata, recording absent paths as None."""
         return {path: (path.read_bytes(), path.stat()) if path.exists() else None for path in paths}
 
     def restore(self, before):
+        """Restore saved files and remove paths absent from the snapshot."""
         failures = []
         for path, saved in before.items():
             try:
@@ -209,16 +238,20 @@ class Transition:
             raise RuntimeError('Cannot restore ' + ', '.join(failures))
 
     def role_paths(self):
+        """Return the mesh membership and band role paths."""
         return [self.roles / name for name in ('mesh_if', *ROLE_FILES.values())]
 
     def render_config(self, config, freq):
+        """Render a validated SAE mesh configuration at the given MHz."""
         ssid, key = config.get('mesh_ssid', ''), config.get('mesh_key', '')
+        # SSID/key bounds are UTF-8 bytes. Control characters are forbidden.
         if (not 1 <= len(ssid.encode()) <= 32 or not 8 <= len(key.encode()) <= 63
                 or any(ord(c) < 32 or ord(c) == 127 for c in ssid + key)):
             raise ValueError('Invalid mesh SSID or SAE key')
         country = config.get('regulatory_domain', 'US')
         if not re.fullmatch(r'[A-Z]{2}|00', country):
             raise ValueError('Invalid regulatory domain')
+        # SAE with required protected management frames and no mesh forwarding.
         return (f'ctrl_interface=/var/run/wpa_supplicant\ncountry={country}\n'
                 'update_config=1\nsae_pwe=1\nap_scan=2\nnetwork={\n'
                 f'    ssid={supplicant_string(ssid)}\n    mode=5\n    frequency={freq}\n'
@@ -226,7 +259,9 @@ class Transition:
                 '    ieee80211w=2\n    mesh_fwding=0\n    group_rekey=0\n}\n')
 
     def select_frequency(self, iface, band, acs):
+        """Choose a permitted static or ACS frequency and record evidence."""
         info = self.radio_info(iface)
+        # Resolve the PHY index before reading mesh and frequency capabilities.
         phy = re.search(r'\bwiphy (\d+)', info)
         if not phy:
             raise ValueError('Cannot identify the AP radio PHY')
@@ -244,6 +279,8 @@ class Transition:
             now = int(time.time())
             boot = text(self.boot_id).replace('-', '')
             try:
+                # The busy marker must belong to this boot and expire within
+                # 125 boottime seconds. Stale or malformed markers do not block.
                 busy_boot, expiry = text(self.run / 'manet-acs-busy').split()
                 busy = busy_boot == boot and 0 <= float(expiry) - time.clock_gettime(time.CLOCK_BOOTTIME) <= 125
             except ValueError:
@@ -257,6 +294,7 @@ class Transition:
                 name = text(self.roles / filename)
                 if not name or name == iface or self.disabled(name):
                     continue
+                # Compare live MHz with the saved supplicant frequency.
                 actual = re.search(r'channel.*\((\d+) MHz\)', self.radio_info(name))
                 saved = re.search(r'^\s*frequency=(\d+)\s*$',
                                   text(self.wpa / f'wpa_supplicant-{name}.conf'), re.M)
@@ -265,6 +303,7 @@ class Transition:
                 else:
                     stable = False
             searching = not current
+            # Without a usable commitment, join the fixed recovery anchor.
             freq = rendezvous.ANCHORS[band]
             status = {'boot': boot, 'acs': True, 'ready': False,
                       'current': current, 'allowed': {b: sorted(agreement.CHANNELS[b]) for b in current},
@@ -286,18 +325,22 @@ class Transition:
         return freq, searching
 
     def ready(self, iface, freq):
+        """Poll mesh health until ready or the ten-second deadline expires."""
         deadline = time.monotonic() + READY_TIMEOUT
         while True:
             if self.healthy(iface, freq):
                 return
             if time.monotonic() >= deadline:
                 raise RuntimeError('Mesh supplicant did not reach the requested channel')
+            # Recheck health every 250 ms between bounded driver queries.
             time.sleep(.25)
 
     def start_mesh(self, iface, freq):
+        """Configure mesh mode and attach after supplicant readiness."""
         self.command(['ip', 'link', 'set', iface, 'down'])
         self.command(['ip', 'link', 'set', iface, 'nomaster'])
         self.command(['iw', 'dev', iface, 'set', 'type', 'mp'])
+        # Leave space for BATMAN encapsulation on the mesh interface.
         self.command(['ip', 'link', 'set', iface, 'mtu', '1532'])
         self.command(['ip', 'link', 'set', iface, 'up'])
         # AP operation sets a PHY-wide 5 dBm cap. Stopping its oneshot does
@@ -312,6 +355,7 @@ class Transition:
             raise RuntimeError('Radio did not attach to bat0')
 
     def to_mesh(self):
+        """Move the AP radio into its mesh role with recovery on failure."""
         with locked(self.role_lock):
             iface, band = self.identity()
             service = f'wpa_supplicant@{iface}.service'
@@ -373,6 +417,7 @@ class Transition:
                         self.command(['systemctl', 'disable', 'hostapd.service'])
                         return {'mode': ('mesh-disabled' if down else 'mesh') if band else 'off',
                                 'iface': iface, 'band': band, 'changed': True, **self.selection}
+                    # Roll back files before trying to recover the prior mesh.
                     except Exception as error:
                         failures = []
                         try:
@@ -406,6 +451,7 @@ class Transition:
                 raise RuntimeError(f'Cannot return AP radio to mesh: {error}') from error
 
     def prepare_ap(self):
+        """Withdraw mesh ownership and prepare the radio for hostapd."""
         with locked(self.channel_lock):
             iface = self.ap_identity()
             before = self.snapshot(self.role_paths())
@@ -437,6 +483,7 @@ class Transition:
 
 
 def main():
+    """Run the requested role or power action and print change details."""
     transition = Transition()
     if sys.argv[1:] == ['mesh']:
         result = transition.to_mesh()

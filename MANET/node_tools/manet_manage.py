@@ -61,6 +61,7 @@ REGISTRY_FILE   = '/var/run/mesh_node_registry'
 SESSIONS_DIR    = '/var/log/manet-measurements'
 ALFRED_RADIO_TYPE = 71
 ALFRED_RADIO_ACK_TYPE = 72
+# Radio commands and ACKs share the password-authenticated Alfred transport.
 ADMIN = AdminTransport()
 # The unfilled hexagon uses dark strokes on light themes and white on dark.
 FER_LOGO_DARK_INK_FILE  = '/usr/local/share/manet/fer-logo-black.png'
@@ -82,6 +83,7 @@ def logo_asset_token():
             parts.append(f'{st.st_mtime_ns}:{st.st_size}')
         except OSError:
             parts.append('missing')
+    # Eight hex digits identify both theme assets for browser cache refresh.
     return hashlib.sha1('|'.join(parts).encode()).hexdigest()[:8]
 USB_WIFI_UPLINK_SCRIPT = '/usr/local/bin/usb-wifi-uplink.sh'
 
@@ -117,11 +119,13 @@ def measure_status_snapshot():
 
 
 def get_my_ip():
+    """Read this node's current or persistent mesh IPv4 address."""
     state = load_kv_file(MESH_STATE_FILE)
     # mesh-ip-manager.sh only ever writes PERSISTENT_IPV4 to this file
     return state.get('CURRENT_IPV4') or state.get('PERSISTENT_IPV4', '')
 
 def has_internet():
+    """Check HTTPS reachability to GitHub with a three-second timeout."""
     try:
         urllib.request.urlopen('https://github.com', timeout=3)
         return True
@@ -129,6 +133,7 @@ def has_internet():
         return False
 
 def get_usb_wifi_uplink_status():
+    """Read local uplink status with defaults for missing observations."""
     if not os.path.exists(USB_WIFI_UPLINK_SCRIPT):
         return {
             'enabled': True,
@@ -140,10 +145,12 @@ def get_usb_wifi_uplink_status():
             'service': '',
         }
     try:
+        # Allow eight seconds for the uplink helper's JSON status collection.
         r = subprocess.run(
             [USB_WIFI_UPLINK_SCRIPT, 'status-json'],
             capture_output=True, text=True, timeout=8
         )
+        # Empty helper output leaves display fields at their unknown defaults.
         data = json.loads((r.stdout or '{}').strip() or '{}')
         data.setdefault('ssid', 'hotspot')
         data.setdefault('iface', '')
@@ -167,6 +174,7 @@ def get_usb_wifi_uplink_status():
 
 
 def apply_usb_wifi_uplink(ssid, password, enabled=True):
+    """Set local uplink credentials and return the resulting status."""
     ssid = (ssid or 'hotspot').strip()
     password = password if password is not None else 'raspberry'
     if not ssid:
@@ -175,6 +183,7 @@ def apply_usb_wifi_uplink(ssid, password, enabled=True):
         raise ValueError('Password is required')
     if not os.path.exists(USB_WIFI_UPLINK_SCRIPT):
         raise RuntimeError(f'Missing {USB_WIFI_UPLINK_SCRIPT}')
+    # Credential application can restart networking, with a 45 s process limit.
     r = subprocess.run(
         [USB_WIFI_UPLINK_SCRIPT, 'set', ssid, password, '1' if enabled else '0'],
         capture_output=True, text=True, timeout=45
@@ -201,7 +210,9 @@ def apply_usb_wifi_uplink_all(ssid, password, enabled=True):
 
 
 def get_bat0_active_ifaces():
+    """List interfaces reported active by batctl, or empty on failure."""
     try:
+        # Match only "interface: active" rows, with a five-second probe limit.
         r = subprocess.run(['batctl', 'if'], capture_output=True, text=True, timeout=5)
         return [
             m.group(1)
@@ -219,6 +230,7 @@ def get_session_hop_count(dst_ip):
     if not dst_ip:
         return None, 'missing'
     try:
+        # Limit route collection to five seconds per measurement.
         r = subprocess.run(['batctl', 'o'], capture_output=True, text=True, timeout=5)
     except Exception:
         return None, 'error'
@@ -243,6 +255,7 @@ def get_session_hop_count(dst_ip):
 
 
 def extract_iperf3_metrics(iperf):
+    """Extract throughput, jitter and loss from iperf3 result variants."""
     metrics = {
         'tcp_mbps': None,
         'udp_mbps': None,
@@ -255,6 +268,7 @@ def extract_iperf3_metrics(iperf):
     end = iperf.get('end', {}) or {}
 
     def _mbps(section):
+        """Convert a result section's bits per second to decimal Mbit/s."""
         try:
             bps = section.get('bits_per_second')
             if bps is None:
@@ -263,6 +277,7 @@ def extract_iperf3_metrics(iperf):
         except Exception:
             return None
 
+    # Prefer received TCP totals to sent totals. UDP summaries use end.sum.
     for key in ('sum_received', 'sum_sent', 'sum'):
         section = end.get(key)
         if isinstance(section, dict):
@@ -286,6 +301,7 @@ def extract_iperf3_metrics(iperf):
         except Exception:
             pass
 
+    # Some iperf3 results expose only per-stream receiver/sender totals.
     streams = end.get('streams')
     if metrics['tcp_mbps'] is None and isinstance(streams, list):
         received_vals = []
@@ -311,7 +327,9 @@ def extract_iperf3_metrics(iperf):
     return metrics
 
 def read_alfred_objects(type_id, kind):
+    """Return authenticated payloads matching an Alfred type and kind."""
     try:
+        # Bound the local Alfred read to five seconds before authenticating.
         r = subprocess.run(['alfred', '-r', str(type_id)],
                            capture_output=True, text=True, timeout=5)
         if r.returncode != 0:
@@ -322,7 +340,10 @@ def read_alfred_objects(type_id, kind):
         return []
 
 def send_alfred_object(type_id, obj):
+    """Encrypt and publish an Alfred payload, returning success and detail."""
     try:
+        # Seal before publication so plaintext control never enters Alfred.
+        # The five-second subprocess limit bounds the local write only.
         payload = json.dumps(ADMIN.seal(type_id, obj), separators=(',', ':'))
         r = subprocess.run(['alfred', '-s', str(type_id)],
                            input=payload, capture_output=True, text=True, timeout=5)
@@ -333,6 +354,7 @@ def send_alfred_object(type_id, obj):
 def radio_expected_hosts():
     """List active peers expected to acknowledge a radio command."""
     try:
+        # Try an eight-second refresh, then use the available registry on error.
         subprocess.run(['/usr/local/bin/mesh-registry-builder.sh'],
                        capture_output=True, text=True, timeout=8)
     except Exception:
@@ -363,10 +385,13 @@ def radio_target_for_node(node_ip):
     raise ValueError(f'Unknown node IP {node_ip}')
 
 def make_radio_version():
+    """Create a fresh radio transaction ID for ACK matching."""
     return new_version()
 
 def radio_ack_snapshot(version):
+    """Keep each host's latest authenticated ACK for this transaction."""
     latest = {}
+    # Authenticated messages arrive in timestamp/ID order, newest last.
     for ack in read_alfred_objects(ALFRED_RADIO_ACK_TYPE, 'radio_ack'):
         if ack.get('version') != version:
             continue
@@ -376,6 +401,9 @@ def radio_ack_snapshot(version):
     return latest
 
 def wait_radio_acks(version, expected_hosts, timeout=75):
+    """Poll expected ACKs until completion, rejection or timeout."""
+    # Poll every two seconds within the default 75 s monotonic wait window.
+    # Each Alfred read can run up to its own five-second timeout.
     deadline = time.monotonic() + timeout
     expected = set(expected_hosts)
     last = {}
@@ -394,6 +422,7 @@ def wait_radio_acks(version, expected_hosts, timeout=75):
     return {'ok': False, 'acks': last, 'missing': missing, 'bad': bad}
 
 def cancel_radio_version(version):
+    """Publish a cancellation for the named radio transaction."""
     cancel = {
         'kind': 'radio_cancel',
         'version': version,
@@ -403,6 +432,7 @@ def cancel_radio_version(version):
     send_alfred_object(ALFRED_RADIO_TYPE, cancel)
 
 def coordinate_radio_toggle(node_ip, iface, state):
+    """Validate an interface toggle and stage it for the selected nodes."""
     if iface not in ('wlan0', 'wlan1', 'wlan2') or state not in ('up', 'down'):
         return {'ok': False, 'error': 'Invalid iface or state'}
     return coordinate_radio_change({'desired': {iface: state}}, node_ip)
@@ -430,6 +460,7 @@ def coordinate_radio_change(actions, node_ip='all'):
             'expected': expected,
         }
 
+    # Zero activation time asks receivers to validate and ACK without applying.
     pkg = {
         'kind': 'radio_state',
         'issued_by': get_my_hostname(),
@@ -464,6 +495,7 @@ def coordinate_radio_change(actions, node_ip='all'):
             'bad': bad,
         }
 
+    # Give staged peers 20 wall-clock seconds to receive the activation message.
     activate_at = int(time.time()) + 20
     pkg['activate_at'] = activate_at
     pkg['issued_at'] = int(time.time())
@@ -485,6 +517,7 @@ def get_iw_info(iface):
     """Get current channel/freq/txpower for an interface."""
     info = {}
     try:
+        # Bound iw to five seconds and parse its channel, MHz and dBm fields.
         r = subprocess.run(['iw', 'dev', iface, 'info'],
                            capture_output=True, text=True, timeout=5)
         m = re.search(r'channel (\d+).*?(\d+) MHz', r.stdout)
@@ -581,11 +614,14 @@ def build_topology():
 # Measurements
 
 def ensure_sessions_dir():
+    """Create the measurement storage directory if missing."""
     os.makedirs(SESSIONS_DIR, exist_ok=True)
 
 
 def session_path(label):
     """Only direct, real children of the measurements directory are sessions."""
+    # The label becomes a directory and download filename. Reject separators
+    # and the two special dot names before resolving it under the storage root.
     if (not isinstance(label, str) or not re.fullmatch(r'[A-Za-z0-9._-]{1,64}', label)
             or label in ('.', '..')):
         raise ValueError('Invalid session label: use 1-64 letters, digits, dots, underscores or hyphens')
@@ -597,8 +633,10 @@ def session_path(label):
 
 
 def list_sessions():
+    """List valid session directories with result counts and summaries."""
     ensure_sessions_dir()
     sessions = []
+    # Descending labels put newer timestamp-based names before older ones.
     for name in sorted(os.listdir(SESSIONS_DIR), reverse=True):
         try:
             d = session_path(name)
@@ -615,10 +653,12 @@ def list_sessions():
     return sessions
 
 def get_session_results(label):
+    """Read a session's JSON files, skipping symlinks and unreadable results."""
     d = session_path(label)
     results = []
     if not os.path.isdir(d):
         return results
+    # Result filenames begin with timestamps, so lexical order groups captures.
     for fname in sorted(os.listdir(d)):
         if fname.endswith('.json') and not (d / fname).is_symlink():
             try:
@@ -629,6 +669,7 @@ def get_session_results(label):
     return results
 
 def delete_session(label):
+    """Remove a validated session directory, returning success and detail."""
     try:
         d = session_path(label)
     except ValueError as error:
@@ -639,6 +680,7 @@ def delete_session(label):
     return True, ''
 
 def session_to_csv(label):
+    """Export session measurements with throughput, latency and loss columns."""
     results = get_session_results(label)
     output = io.StringIO()
     writer = csv.writer(output)
@@ -678,6 +720,7 @@ def session_to_csv(label):
     return output.getvalue()
 
 def _stats(values):
+    """Summarize nonmissing values with mean, extrema and sample count."""
     nums = [float(v) for v in values if v is not None]
     if not nums:
         return None
@@ -689,6 +732,7 @@ def _stats(values):
     }
 
 def summarize_session_results(results):
+    """Count outcomes and aggregate available measurement metrics."""
     metrics = {
         'tcp_mbps': [], 'udp_mbps': [], 'jitter_ms': [],
         'loss_pct': [], 'rtt_avg': [],
@@ -726,6 +770,7 @@ def snapshot_topology():
     }
 
 def summarize_measurement_result(record):
+    """Build the compact result shown in progress and session summaries."""
     summary = {
         'test_type': record.get('test_type', ''),
         'src': record.get('source_node', ''),
@@ -754,11 +799,13 @@ def run_local_ping(target, count=100, interval=0.2):
     if not target:
         return None
     try:
+        # Allow the nominal send schedule plus ten seconds for completion.
         r = subprocess.run(['ping', '-c', str(count), '-i', str(interval), target],
                            capture_output=True, text=True,
                            timeout=count * interval + 10)
     except Exception:
         return None
+    # Match four iputils RTT values in ms and an integer packet-loss percentage.
     rtt = re.search(r'rtt min/avg/max/mdev = ([\d.]+)/([\d.]+)/([\d.]+)/([\d.]+)', r.stdout)
     loss = re.search(r'(\d+)% packet loss', r.stdout)
     return {
@@ -784,6 +831,7 @@ def run_local_iperf3(server_ip, test_type, duration, bitrate,
         cmd += ['-P', str(parallel)]
     if reverse:
         cmd += ['-R']
+    # Allow 25 seconds beyond the traffic duration for client overhead.
     r = subprocess.run(cmd, capture_output=True, text=True, timeout=duration + 25)
     try:
         payload = json.loads(r.stdout)
@@ -803,6 +851,7 @@ def run_measurement_session(label, pairs, tests, duration, udp_bitrate):
         session_dir = session_path(label)
         check_capacity(SESSIONS_DIR, session_dir)
         os.makedirs(session_dir, exist_ok=True)
+        # A single topology snapshot annotates every result in the batch.
         topo = snapshot_topology()
 
         total = len(pairs) * len(tests)
@@ -832,6 +881,7 @@ def run_measurement_session(label, pairs, tests, duration, udp_bitrate):
                     })
 
                 ts    = datetime.now().strftime('%Y%m%dT%H%M%S')
+                # Random suffixes avoid same-second and clock-step collisions.
                 fname = f'{ts}_{secrets.token_hex(12)}.json'
                 result_record = {
                     'session_label':    label,
@@ -905,6 +955,7 @@ def run_measurement_session(label, pairs, tests, duration, udp_bitrate):
 
 # HTML
 
+# Shared page styling is combined with the voice and config tab styles below.
 CSS = """
 :root {
   --bg:      #ebeae8;
@@ -1202,6 +1253,7 @@ tr:hover td{background:rgba(236,176,0,.08)}
 }
 """
 
+# Browser polling and radio/measurement controls call the management routes.
 JS = """
 let _topo = null;
 let _tab  = 'topology';
@@ -2302,6 +2354,7 @@ VOICE_TAB_HTML = r"""
 </div>
 """
 
+# Voice polls local daemon state. Talk groups stay local and codecs are staged.
 VOICE_TAB_JS = r"""
 // ── VOICE tab ───────────────────────────────────────────────────────────────
 // Read-only. Voice is carried by mesh-voice.py over multicast RTP with a
@@ -2705,7 +2758,7 @@ def set_voice_channel(channel):
 def set_voice_codec_all(codec):
     """Stage a voice codec change over Alfred for every node.
 
-    Codecs determine RTP payload type, clock rate and receiver decoding.
+    Codecs determine RTP clock rate and receiver decoding.
     Different codecs cannot interoperate. coordinate_radio_change() requires
     all expected ACKs before a shared activation time and cancels on a missing
     ACK. Talk groups remain per-radio settings in set_voice_channel().
@@ -2738,6 +2791,7 @@ def voice_status():
     except (TypeError, ValueError):
         out['channel'] = 1
 
+    # Probe activity and enablement independently, with three seconds per call.
     try:
         rc = subprocess.run(['systemctl', 'is-active', '--quiet', 'mesh-voice'],
                             timeout=3, stderr=subprocess.DEVNULL)
@@ -2761,6 +2815,7 @@ def voice_status():
             age = time.clock_gettime(time.CLOCK_BOOTTIME) - state['updated_boot']
         else:
             age = time.time() - state.get('updated', 0)
+        # State older than 30 seconds cannot claim the daemon is running.
         if 0 <= age < 30:
             out.update(state)
             out['state_age'] = int(age)
@@ -3013,6 +3068,7 @@ CONFIG_TAB_HTML = r"""
   <div id="cfg-toast"></div>
 """
 
+# Config controls use the status server's authenticated staging and ACK APIs.
 CONFIG_TAB_JS = r"""
 
 const POLL_MS = 5000;
@@ -3311,6 +3367,7 @@ function toast(msg, cls) {
 
 
 def render_dashboard():
+    """Assemble the management page with local identity and tab assets."""
     hostname = get_my_hostname()
     ip       = get_my_ip()
     logo_v   = logo_asset_token()
@@ -3606,9 +3663,12 @@ class ManageRoutes:
     password cookie before calling them.
     """
     def log_message(self, fmt, *args):
+        """Suppress HTTP access log output."""
         pass  # suppress access logs
 
     def manage_do_GET(self):
+        """Serve management assets, status and saved measurement results."""
+        # mesh-status strips /manage and verifies the session before dispatch.
         parsed = urlparse(self.path)
         path   = parsed.path.rstrip('/') or '/'
 
@@ -3620,6 +3680,7 @@ class ManageRoutes:
                 self.send_response(200)
                 self.send_header('Content-Type', asset_content_type(logo_file))
                 self.send_header('Content-Length', str(len(body)))
+                # Logo URLs use a metadata token and allow one hour of caching.
                 self.send_header('Cache-Control', 'public, max-age=3600')
                 self.end_headers()
                 self.wfile.write(body)
@@ -3648,6 +3709,8 @@ class ManageRoutes:
 
         elif path == '/api/voice':
             try:
+                # Voice follows its two-second state cadence. Other probes use
+                # the shared cache's default five-second lifetime.
                 self.send_json(STATUS_CACHE.get('voice', voice_status, ttl=2))
             except Busy:
                 raise
@@ -3659,6 +3722,7 @@ class ManageRoutes:
 
         elif path.startswith('/api/sessions/'):
             parts = path[len('/api/sessions/'):].split('/')
+            # Decode before validation so escaped separators cannot bypass it.
             label = unquote(parts[0])
             try:
                 session_path(label)
@@ -3683,6 +3747,7 @@ class ManageRoutes:
             self.wfile.write(b'Not found')
 
     def manage_do_DELETE(self):
+        """Delete a session after authentication by the outer handler."""
         parsed = urlparse(self.path)
         path   = parsed.path.rstrip('/') or '/'
 
@@ -3701,9 +3766,11 @@ class ManageRoutes:
             self.wfile.write(b'Not found')
 
     def manage_do_POST(self):
+        """Dispatch authenticated changes and start bounded measurement work."""
         global _measure_status
         parsed = urlparse(self.path)
         path   = parsed.path.rstrip('/') or '/'
+        # The outer handler serializes writes and supplies bounded body reads.
         body = self.read_body() or b'{}'
 
         if path == '/api/interface/toggle':
@@ -3777,6 +3844,7 @@ class ManageRoutes:
                 self.send_json({'ok': False, 'error': str(e)})
 
         elif path == '/api/measure/start':
+            # Reserve running state under the same lock used by worker updates.
             with _measure_lock:
                 if _measure_status['running']:
                     self.send_json({'ok': False, 'error': 'Measurement already running'})
@@ -3798,6 +3866,8 @@ class ManageRoutes:
                         self.send_json({'ok': False, 'error':
                             'Choose 1-64 pairs, 1-7 test types, and a duration of 5-300 seconds'}, 400)
                         return
+                    # Budget command deadlines: 30 s per ping, duration + 25 s
+                    # per iperf3 invocation, at most 3600 s for the batch.
                     if len(pairs) * sum(30 if t == 'icmp_ping' else dur + 25 for t in tests) > 3600:
                         self.send_json({'ok': False, 'error':
                             'A measurement batch must fit within one hour; choose fewer pairs or shorter tests'}, 400)

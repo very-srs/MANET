@@ -6,15 +6,18 @@
 . "${MANET_TOOLS_DIR:-$(dirname "${BASH_SOURCE[0]}")}/manet-common.sh" || exit 1
 
 MESH_IF_FILE="${MANET_MESH_IF_FILE:-/var/lib/mesh_if}"
+# Poll role readiness every 15 seconds unless overridden.
 WAIT_SECS="${SAE_WATCHDOG_WAIT_SECS:-15}"
 STANDARD_MESH_INTERFACES=""
 
+# Write a prefixed message through the shared logging helper.
 log() {
     manet_log SAE-WATCHDOG "$*"
 }
 
 # radio_iface_enabled: manet-common.sh
 
+# Print the S1G or conventional supplicant unit for the interface argument.
 service_unit_for_iface() {
     local iface="$1"
     if [ -s /var/lib/halow_if ] && grep -qx "$iface" /var/lib/halow_if 2>/dev/null; then
@@ -24,6 +27,7 @@ service_unit_for_iface() {
     printf '%s\n' "wpa_supplicant@${iface}.service"
 }
 
+# Log the reason, restart enabled STANDARD_MESH_INTERFACES, then reattach.
 restart_mesh() {
     local reason="$1"
     log "Triggered by: $reason"
@@ -48,11 +52,12 @@ restart_mesh() {
         log "WARNING: failed to restart batman-enslave"
 }
 
-# Track which interfaces already have all bat0 slaves active.
+# Check that every enabled interface appears in the bat0 member list.
 # Only restart if bat0 is actually missing mesh interfaces: avoids
 # thrashing on a healthy node that just happens to see a blocked peer.
 bat0_has_all_interfaces() {
     local members
+    # Match interface-name prefixes in batctl if output, ignoring status text.
     members=$(batctl if 2>/dev/null) || return 1
     for iface in $STANDARD_MESH_INTERFACES; do
         radio_iface_enabled "$iface" || continue

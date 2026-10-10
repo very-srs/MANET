@@ -21,15 +21,18 @@ import re
 import shlex
 import sys
 
+# Add ten Mbit/s to the chosen incumbent's throughput score.
 INCUMBENT_BIAS = 10
 MAX_OBSERVED_AGE = 300
 SERVER_FIELD = {'mediamtx': 'IS_MEDIAMTX_SERVER', 'mumble': 'IS_MUMBLE_SERVER'}
+# Registry lines carry 12-hex node IDs, uppercase fields and shell values.
 LINE = re.compile(r"NODE_([0-9a-fA-F]{12})_([A-Z0-9_]+)=(.*)")
 MAC = re.compile(r'(?:[0-9a-f]{2}:){5}[0-9a-f]{2}')
 
 
 @lru_cache(maxsize=1)
 def parse(text):
+    """Cache parsed registry assignments by the complete source text."""
     nodes = {}
     for line in text.splitlines():
         match = LINE.fullmatch(line.strip())
@@ -46,6 +49,7 @@ def parse(text):
 
 
 def number(value):
+    """Convert a value to a finite float, returning None on invalid input."""
     try:
         result = float(value)
     except (TypeError, ValueError):
@@ -54,6 +58,7 @@ def number(value):
 
 
 def eligible(node, uptime_now):
+    """Return a valid fresh MAC/throughput pair, or an exclusion reason."""
     mac = node.get('MAC_ADDRESS', '').lower()
     metric = number(node.get('MEAN_THROUGHPUT_MBPS'))
     observed = number(node.get('OBSERVED_AT_UPTIME'))
@@ -71,11 +76,13 @@ def eligible(node, uptime_now):
 
 
 def elect(service, text, uptime_now, report=lambda message: None):
+    """Rank fresh candidates with incumbent bias and deterministic MAC ties."""
     if not (isinstance(uptime_now, (int, float)) and math.isfinite(uptime_now) and uptime_now >= 0):
         raise ValueError(f'invalid local uptime {uptime_now!r}')
     field = SERVER_FIELD[service]
     candidates = {}
     servers = set()
+    # Recheck age on every election even when parsed fields are cached.
     for key, node in sorted(parse(text).items()):
         entry, reason = eligible(node, uptime_now)
         if entry is None:
@@ -87,14 +94,17 @@ def elect(service, text, uptime_now, report=lambda message: None):
             servers.add(mac)
     if not candidates:
         return None, None, None
+    # Prefer highest metric, then lowest MAC, among advertising servers.
     incumbent = min(servers, key=lambda mac: (-candidates[mac], mac)) if servers else None
     score = {mac: metric + (INCUMBENT_BIAS if mac == incumbent else 0)
              for mac, metric in candidates.items()}
+    # Apply the same MAC tie break after adding incumbent bias.
     winner = min(score, key=lambda mac: (-score[mac], mac))
     return winner, score[winner], incumbent
 
 
 def main(argv):
+    """Print winner, score and incumbent for the selected mesh service."""
     if len(argv) != 2 or argv[0] not in SERVER_FIELD:
         print('usage: mesh-service-election.py {mediamtx|mumble} REGISTRY', file=sys.stderr)
         return 2

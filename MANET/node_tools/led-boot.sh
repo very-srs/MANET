@@ -2,15 +2,19 @@
 # External boot display. The service runs independently of boot completion.
 source "$(dirname "${BASH_SOURCE[0]}")/manet-led-common.sh"
 
+# Ten half-second ticks put peer queries about 5 s apart, plus probe time.
+# Hold solid green for 10 s after a peer connection is confirmed.
 BLINK_HALF=0.5
 POLL_TICKS=10
 MESH_SOLID_SECS=10
 
+# Require an active node manager and bat0 before polling for peers.
 mesh_ready() {
     systemctl is-active --quiet node-manager.service || return 1
     ip link show bat0 >/dev/null 2>&1
 }
 
+# Display one RGB half-cycle using BLINK_HALF seconds and the harness lock.
 boot_blink() {
     # Button displays own the harness for their full sequence. Boot yields
     # between half-cycles, preserving state without blocking node services.
@@ -48,6 +52,7 @@ while true; do
             (( count > 0 )) && break
         else
             result=$?
+            # The counter uses 3 for a direct link without resolved identity.
             if (( result == 3 )); then
                 echo "led-boot: direct connection confirmed; identities pending"
                 break

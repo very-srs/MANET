@@ -59,10 +59,13 @@ from itertools import combinations
 import math
 from statistics import median
 
+# Local distances are metres. Generations bound transitive anchor reuse.
 MAX_LOCAL_M = 1000.0
 MAX_GENERATION = 3
 MAX_NODES = 16
+# Circular 95% factor for an isotropic Gaussian with unit axis variance.
 CE95 = 2.448
+# Metre allowances for ring widths and dependent ranging generations.
 BIAS_ALLOWANCE_M = 3.0
 HOP_GROWTH_M = 3.0
 BOOT_SIGMA_M = 2.7 / math.sqrt(3)  # Uniform per-radio offset, shared by its links.
@@ -71,6 +74,7 @@ TERRAIN_SIGMA_M = 5.0
 
 @dataclass(frozen=True)
 class Anchor:
+    """An anchor position with uncertainty, source and transitive ancestry."""
     id: str
     lat: float
     lon: float
@@ -85,6 +89,7 @@ class Anchor:
 
 @dataclass(frozen=True)
 class Observation:
+    """A range window and its acquisition-time anchor position."""
     anchor: Anchor
     range_m: float
     mono: float
@@ -94,6 +99,7 @@ class Observation:
 
 @dataclass(frozen=True)
 class Previous:
+    """A prior point and radius for distinguishing circle branches."""
     lat: float
     lon: float
     uncertainty_m: float
@@ -102,6 +108,7 @@ class Previous:
 
 @dataclass(frozen=True)
 class Mark:
+    """A caller-authorized manual position at a monotonic epoch."""
     id: str
     lat: float
     lon: float
@@ -110,18 +117,22 @@ class Mark:
 
 
 def _finite(x):
+    """Test for a finite real number, excluding booleans."""
     return isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x)
 
 
 def _nonnegative(x):
+    """Test for a finite nonnegative number."""
     return _finite(x) and x >= 0
 
 
 def _position_ok(lat, lon):
+    """Check coordinates against the local solver latitude limits."""
     return _finite(lat) and _finite(lon) and abs(lat) <= 80 and abs(lon) <= 180
 
 
 def _anchor_reason(a, node_id):
+    """Return a rejection reason for invalid or dependent anchors."""
     if not isinstance(a, Anchor) or not isinstance(a.id, str) or not a.id:
         return "invalid_anchor"
     if not _position_ok(a.lat, a.lon) or not _nonnegative(a.h_sigma_m):
@@ -153,22 +164,27 @@ def _anchor_reason(a, node_id):
 class LocalFrame:
     """Project to WGS84 local EN, retaining height as HAE, not relative U."""
     def __init__(self, lat, lon):
+        """Set local WGS84 scales at the supplied degree coordinates."""
         if not _position_ok(lat, lon):
             raise ValueError("origin outside local frame latitude/longitude limits")
         self.lat, self.lon = lat, lon
         p = math.radians(lat)
+        # WGS84 eccentricity squared and equatorial radius set local scales.
         e2 = 6.69437999014e-3
         w = math.sqrt(1 - e2 * math.sin(p) ** 2)
         self.north = 6378137.0 * (1 - e2) / w ** 3
         self.east = 6378137.0 / w * math.cos(p)
 
     def xy(self, lat, lon):
+        """Project degree coordinates to east and north metres."""
         if not _position_ok(lat, lon):
             raise ValueError("position outside frame limits")
+        # Wrap the longitude difference across the date line.
         dl = (lon - self.lon + 180) % 360 - 180
         return math.radians(dl) * self.east, math.radians(lat - self.lat) * self.north
 
     def position(self, x, y, hae=None):
+        """Convert local metres to coordinates with the supplied HAE."""
         return {"lat": self.lat + math.degrees(y / self.north),
                 "lon": (self.lon + math.degrees(x / self.east) + 180) % 360 - 180,
                 "hae": hae}
@@ -180,6 +196,7 @@ def _linear(a, b):
     m = [list(row) + [v] for row, v in zip(a, b)]
     scale = max((abs(v) for row in a for v in row), default=0)
     for i in range(n):
+        # Largest-magnitude pivot limits division by a nearly zero entry.
         k = max(range(i, n), key=lambda j: abs(m[j][i]))
         if abs(m[k][i]) <= max(1e-12, scale * 1e-10):
             return None
@@ -200,6 +217,7 @@ def _eigen(a):
     n = len(a)
     a = [list(row) for row in a]
     v = [[float(i == j) for j in range(n)] for i in range(n)]
+    # Bound Jacobi sweeps and stop when off-diagonal terms are below 1e-10.
     for _ in range(40):
         changed = False
         for p in range(n):
@@ -223,11 +241,13 @@ def _eigen(a):
                     v[k][p], v[k][q] = c*vkp-s*vkq, s*vkp+c*vkq
         if not changed:
             break
+    # Largest eigenvalues first select the dominant embedding directions.
     order = sorted(range(n), key=lambda i: a[i][i], reverse=True)
     return [a[i][i] for i in order], [[v[k][i] for k in range(n)] for i in order]
 
 
 def _normal(jac, residual, weights):
+    """Build the weighted normal matrix and residual gradient."""
     n = len(jac[0])
     h = [[sum(w * row[i] * row[j] for row, w in zip(jac, weights))
           for j in range(n)] for i in range(n)]
@@ -236,7 +256,9 @@ def _normal(jac, residual, weights):
 
 
 def _predict(p, row, bias=False):
+    """Return slant range with nuisance offsets and its Jacobian."""
     dx, dy = p[0] - row["x"], p[1] - row["y"]
+    # Parameters are east, north, optional height correction, then bias.
     height = bool(row.get("z_sigma", 0) and len(p)>2)
     dz = row["dz"] + (p[2] if height else 0)
     bi = 3 if height else 2
@@ -247,6 +269,7 @@ def _predict(p, row, bias=False):
 
 
 def _priors(rows, bias):
+    """Select target height and boot-offset priors for the fit."""
     priors = []
     if rows[0].get("z_sigma", 0):
         priors.append((2, rows[0]["z_sigma"]))
@@ -258,12 +281,15 @@ def _priors(rows, bias):
 def _fit(rows, seed, bias=False):
     # Target height and its common boot offset are nuisance parameters. The
     # latter has a measured-scale prior unless explicitly fitting a free bias.
+    """Fit a position and nuisance offsets, returning cost and information."""
     p = list(seed[:2]) + ([0.0] if rows[0].get("z_sigma", 0) else []) + [0.0]
     priors = _priors(rows, bias)
     weights = [1 / r["sigma"]**2 for r in rows]
     def cost(point):
+        """Sum weighted range residuals and nuisance-prior penalties."""
         return (sum(w * (_predict(point, r, bias)[0] - r["r"])**2 for r, w in zip(rows, weights))
                 + sum((point[i]/s)**2 for i,s in priors))
+    # Cap refinement at 50 steps, with backtracking on increasing cost.
     for _ in range(50):
         pred = [_predict(p, r, bias) for r in rows]
         h, g = _normal([x[1] for x in pred], [x[0]-r["r"] for x,r in zip(pred, rows)], weights)
@@ -278,6 +304,7 @@ def _fit(rows, seed, bias=False):
             break
         old = cost(p)
         gain = 1.0
+        # Try at most 12 step sizes. Free bias is limited to +/-6 metres.
         for _ in range(12):
             trial = [a + gain*b for a,b in zip(p,step)]
             if bias:
@@ -299,6 +326,7 @@ def _fit(rows, seed, bias=False):
 
 def _seed(rows):
     # Squared-range differences supply an initialization, never the final fit.
+    """Initialize from range differences or the anchor centroid."""
     r0 = rows[0]
     a, b = [], []
     for r in rows[1:]:
@@ -310,6 +338,7 @@ def _seed(rows):
 
 
 def _geometry_bad(rows):
+    """Detect coincident or nearly collinear anchor coordinates."""
     x = sum(r["x"] for r in rows)/len(rows)
     y = sum(r["y"] for r in rows)/len(rows)
     xx = sum((r["x"]-x)**2 for r in rows)
@@ -317,11 +346,13 @@ def _geometry_bad(rows):
     xy = sum((r["x"]-x)*(r["y"]-y) for r in rows)
     tr = xx+yy
     lo = (tr-math.hypot(xx-yy,2*xy))/2
+    # Reject squared spread below 1 m^2 or a weak axis below 0.25% of it.
     return tr < 1 or lo/max(tr,1e-12) < 0.0025
 
 
 def _circle_seeds(rows):
     """Both branches, especially when a retained trio is almost collinear."""
+    # The widest baseline defines the two horizontal circle branches.
     a,b = max(combinations(rows,2),key=lambda pair:math.hypot(pair[0]["x"]-pair[1]["x"],pair[0]["y"]-pair[1]["y"]))
     dx,dy = b["x"]-a["x"],b["y"]-a["y"]
     d = math.hypot(dx,dy)
@@ -338,6 +369,7 @@ def _circle_seeds(rows):
 
 
 def _covariance(h):
+    """Invert an information matrix, returning None if singular."""
     cols = [_linear(h, [float(i==j) for i in range(len(h))]) for j in range(len(h))]
     if any(c is None for c in cols):
         return None
@@ -347,11 +379,13 @@ def _covariance(h):
 def _circular95(cov):
     # Integrate the radial Gaussian tail over angle for a 95% circle,
     # including anisotropic geometry.
+    """Approximate a Gaussian horizontal 95% containment radius."""
     xx,yy,xy = cov[0][0],cov[1][1],cov[0][1]
     major = (xx+yy+math.hypot(xx-yy,2*xy))/2
     minor = max(1e-12,xx+yy-major)
     if major<=0 or not math.isfinite(major):
         return None
+    # Sample 32 angular midpoints and bisect the 5% tail for 25 steps.
     v = [major*math.cos(math.pi*(i+.5)/32)**2 + minor*math.sin(math.pi*(i+.5)/32)**2 for i in range(32)]
     lo,hi = 0.0,CE95*math.sqrt(major)
     for _ in range(25):
@@ -364,6 +398,7 @@ def _circular95(cov):
 
 
 def _radius(rows, point, cost, h, bias):
+    """Combine fitted uncertainty, shared error and displacement bounds."""
     cov = _covariance(h)
     if cov is None:
         return None
@@ -391,6 +426,7 @@ def _model_score(rows, kept, point, cost, info):
     # Mixture: Gaussian LOS and long-only exponential reflection.
     # 20%/30 m are declared stress priors, not measured occurrence statistics.
     # A tiny short-contamination branch detects gross bad data.
+    """Score a retained subset against a range-contamination mixture."""
     score = cost
     for i,r in enumerate(rows):
         if i in kept:
@@ -407,8 +443,10 @@ def _model_score(rows, kept, point, cost, info):
 def _mixture_radius(models, point):
     # Deterministic polar quadrature of the Gaussian mixture, including model
     # disagreement. No maximum over all leave-out fits (most are improbable).
+    """Find a 95% radius around a point across weighted fit modes."""
     weighted = []
     total = sum(m["weight"] for m in models)
+    # Use 24 radial quantiles and 32 angles per Gaussian component.
     for m in models:
         cov=m["cov"]
         a=math.sqrt(max(1e-12,cov[0][0]))
@@ -422,6 +460,7 @@ def _mixture_radius(models, point):
                 d=math.hypot(m["p"][0]+a*u-point[0],m["p"][1]+b*u+c*v-point[1])
                 weighted.append((d,m["weight"]/total/(24*32)))
     cumulative=0.0
+    # Accumulate mass by distance from the chosen display point.
     for distance,w in sorted(weighted):
         cumulative+=w
         if cumulative>=.95:
@@ -453,6 +492,7 @@ def _radius_budget(rows, model):
 
 
 def _base_result(mono, rejected):
+    """Build the empty estimator result with rejection details."""
     return {"position": None, "uncertainty_m": None, "confidence": None,
             "quality": "unavailable", "used": [], "rejected": rejected,
             "sources": {}, "generation": None, "used_ids": [], "mono": mono,
@@ -461,16 +501,20 @@ def _base_result(mono, rejected):
 
 def _anchor_key(a):
     # Canonical tie break for duplicate reports, including optional fields.
+    """Order duplicate anchors by quality and canonical content."""
     return (a.h_sigma_m, a.generation, a.source, a.lat, a.lon,
             repr((a.hae,a.v_sigma_m,tuple(sorted(a.used_ids)),a.signal_dbm)))
 
 
 def _observation_key(o):
+    """Order duplicate observations by recency, quality and content."""
+    # Newest epoch wins, then the window variance per frame and content.
     return (-o.mono, max(1.0,o.spread_m)**2/max(1,o.frames),
             _anchor_key(o.anchor), o.range_m, o.frames, o.spread_m)
 
 
 def _provenance(out, rows):
+    """Attach retained sources and their transitive dependency union."""
     out["used"] = sorted(r["anchor"].id for r in rows)
     out["sources"] = {r["anchor"].id:r["anchor"].source for r in rows}
     out["generation"] = 1 + max(r["anchor"].generation for r in rows)
@@ -478,6 +522,7 @@ def _provenance(out, rows):
 
 
 def _previous(previous, frame, mono, max_age, speed):
+    """Project a fresh previous point and expand its motion bound."""
     if not isinstance(previous, Previous) or not _position_ok(previous.lat,previous.lon) \
             or not _nonnegative(previous.uncertainty_m) or not _finite(previous.mono):
         return None
@@ -539,6 +584,7 @@ def _solve(node_id, observations, *, previous=None, target_hae=None,
         return out
     if len(unique) > MAX_NODES:
         raise ValueError("at most 16 distinct anchors; use choose_anchors first")
+    # Canonical ID order fixes the origin and floating-point traversal order.
     obs = sorted(unique.values(),key=lambda o:o.anchor.id)
     frame = LocalFrame(obs[0].anchor.lat,obs[0].anchor.lon)
     heights = [o.anchor.hae for o in obs if o.anchor.hae is not None
@@ -559,9 +605,13 @@ def _solve(node_id, observations, *, previous=None, target_hae=None,
         unknown = a.hae is None or a.v_sigma_m is None
         dz = 0.0 if unknown else height_mean-a.hae
         motion = max_speed_mps*(at_mono-o.mono)
+        # Window noise has a 1 m floor and gains no precision past 50 frames.
         range_sigma = max(1.0,o.spread_m)*math.sqrt(max(1.0,50/o.frames))
+        # Unknown anchor heights contribute at least 20 m standard error.
         vertical_var = max(20.0,height_sigma)**2 if unknown else a.v_sigma_m**2
         vertical_projection = min(1.0,abs(dz)/max(o.range_m,1))
+        # Independent anchor errors enter range variance. Target height and
+        # common target bias remain shared fit parameters.
         variance_parts={"window_noise":range_sigma**2,"peer_boot":BOOT_SIGMA_M**2,
                         "anchor_horizontal":a.h_sigma_m**2,"anchor_vertical":vertical_projection**2*vertical_var,
                         "height_curvature":(vertical_var+height_sigma**2)**2/(2*max(o.range_m,1)**2)}
@@ -594,6 +644,7 @@ def _solve(node_id, observations, *, previous=None, target_hae=None,
         for dropped in combinations(range(len(rows)),drop_count):
             indices = [i for i in range(len(rows)) if i not in dropped]
             subset = [rows[i] for i in indices]
+            # A free common bias needs five retained anchors.
             use_bias = bool(estimate_bias and len(subset)>=5)
             seeds = [_seed(subset)] + (_circle_seeds(subset) if len(subset)<=3 else [])
             branches = []
@@ -606,11 +657,13 @@ def _solve(node_id, observations, *, previous=None, target_hae=None,
                 if cov is None or radius is None:
                     continue
                 residuals = [_predict(point,r)[0]-r["r"] for r in rows]
+                # Retained ranges allow the larger of 6 m and four sigma.
                 if any(abs(residuals[i])>max(6,4*rows[i]["sigma"]) for i in indices):
                     continue
                 score = _model_score(rows,indices,point,cost,info)
                 model = dict(p=point,cost=cost,score=score,cov=cov,radius=radius,
                              kept=indices,bias=use_bias,residuals=residuals)
+                # Seeds converging within 1 m represent the same local mode.
                 near = next((j for j,m in enumerate(branches) if math.dist(m["p"][:2],point[:2])<1),None)
                 if near is None:
                     branches.append(model)
@@ -623,8 +676,10 @@ def _solve(node_id, observations, *, previous=None, target_hae=None,
     if not models:
         out["quality"] = "inconsistent"
         return out
+    # Score ranks models, with retained indices and parameters breaking ties.
     models.sort(key=lambda m:(m["score"],tuple(m["kept"]),tuple(m["p"])))
     best=models[0]
+    # Relative likelihoods avoid exponentiating the full absolute score.
     for model in models:
         model["weight"]=math.exp(-.5*(model["score"]-best["score"]))
         model["cov"][0][0] += shared_anchor_sigma_m**2
@@ -640,6 +695,7 @@ def _solve(node_id, observations, *, previous=None, target_hae=None,
                              "residual_m":residuals[i]})
     out["candidates"]=[{"position":frame.position(*m["p"][:2],target_hae),
                         "uncertainty_m":m["radius"],"probability":m["weight"]/total} for m in models]
+    # Integrate modes within 18 score units of the best fit.
     mixture=_mixture_radius([m for m in models if m["score"]-best["score"]<18],p)
     # Keep compatible long-only explanations as a profile set despite low
     # contamination prior mass, especially for two honest circles among four.
@@ -681,6 +737,7 @@ def _solve(node_id, observations, *, previous=None, target_hae=None,
 
 
 def _range_rings(rows, frame, hae, *, inconsistent=False):
+    """Project usable slant ranges into horizontal rings or disks."""
     rings=[]
     for row in rows:
         margin=CE95*row["sigma"]+BIAS_ALLOWANCE_M+row["motion"]
@@ -713,6 +770,7 @@ def _line_candidates(rows, frame, hae):
     if vals[0]<1e-6:
         return []
     ux,uy=vectors[0]
+    # Fix eigenvector sign so the two side labels remain deterministic.
     if ux<0 or (ux==0 and uy<0):ux,uy=-ux,-uy
     nx,ny=-uy,ux
     projected=[]
@@ -728,6 +786,7 @@ def _line_candidates(rows, frame, hae):
             kept=[i for i in range(len(rows)) if i not in dropped]
             subset=[projected[i] for i in kept]
             seeds=_circle_seeds(subset)
+            # Start off the anchor line when nominal circles do not meet.
             if not seeds:
                 height=max(5.0,sum(r["r"] for r in subset)/len(subset)/4)
                 seed=_seed(subset)
@@ -743,6 +802,8 @@ def _line_candidates(rows, frame, hae):
             for row in subset:
                 pred,j=_predict(point,row)
                 distance=max(1e-8,pred-point[-1])
+                # Differentiate by along-line position and squared cross-line
+                # distance to retain information at a tangent.
                 jac.append([j[0]*ux+j[1]*uy,1/(2*distance)]+j[2:])
             h,_=_normal(jac,[0]*len(jac),[1/r["sigma"]**2 for r in subset])
             for i,sigma in _priors(subset,False):h[i][i]+=1/sigma**2
@@ -773,10 +834,12 @@ def _line_candidates(rows, frame, hae):
 
 
 def _compact_candidates(candidates, frame):
+    """Merge coincident candidate points using the largest radius."""
     result=[]
     for candidate in candidates:
         pos=candidate["position"]
         xy=frame.xy(pos["lat"],pos["lon"])
+        # Merge points within one centimetre without shrinking their radius.
         near=next((c for c in result if math.dist(xy,frame.xy(c["position"]["lat"],c["position"]["lon"]))<.01),None)
         if near is None:
             result.append(dict(candidate))
@@ -789,10 +852,12 @@ def _compact_candidates(candidates, frame):
 
 
 def _display_result(out, limit, hae):
+    """Convert estimator diagnostics into drawable points and areas."""
     rows=out.pop("_rows",[])
     frame=out.pop("_frame",None)
     plausible=out.pop("_plausible",out["candidates"])
     reason=out["quality"]
+    # Canonical rejection order keeps output stable under input permutations.
     out["rejected"].sort(key=lambda r:(str(r.get("id","")),r["reason"],repr(r.get("residual_m"))))
     out["reason"]=reason
     out["anchor_eligible"]=bool(out["position"] and reason not in ("horizontal_only","poor_geometry","ambiguous"))
@@ -827,6 +892,7 @@ def _display_result(out, limit, hae):
         return out
     best=candidates[0]["position"]
     origin=frame.xy(best["lat"],best["lon"])
+    # Each candidate contributes its distance from the best point plus radius.
     enclosing=max(math.dist(origin,frame.xy(c["position"]["lat"],c["position"]["lon"]))+c["uncertainty_m"] for c in candidates)
     enclosing=max(enclosing,out["uncertainty_m"] or 0)
     out["candidates"]=candidates
@@ -865,6 +931,7 @@ def solve(node_id, observations, *, previous=None, target_hae=None,
 
 
 def _point_limit(out, limit):
+    """Withhold a point whose radius exceeds the display limit."""
     if out["position"] is not None and limit is not None and out["uncertainty_m"]>limit:
         out["position"]=None
         out["quality"]="coarse"
@@ -872,6 +939,7 @@ def _point_limit(out, limit):
 
 
 def _few_anchors(out,rows,frame,hae,previous):
+    """Build a ring or circle intersections from one or two anchors."""
     radii = [math.sqrt(max(0,r["r"]**2-r["dz"]**2)) for r in rows]
     if len(rows)==1:
         r = rows[0]
@@ -890,6 +958,7 @@ def _few_anchors(out,rows,frame,hae,previous):
         out["quality"] = "poor_geometry"
         return
     along = (radii[0]**2-radii[1]**2+d*d)/(2*d)
+    # Negative squared cross-baseline distance means the circles do not meet.
     h2 = radii[0]**2-along**2
     if h2 < -1e-6:
         out["quality"] = "inconsistent"
@@ -906,6 +975,7 @@ def _few_anchors(out,rows,frame,hae,previous):
         out["flags"].append("tangent_circles")
         out["candidates"] = [{"position":frame.position(*p,hae),"uncertainty_m":None} for p in points]
         return
+    # Half the mirror separation below the radius is near-tangent geometry.
     if height<uncertainty:
         out["quality"] = "poor_geometry"
         out["flags"].append("near_tangent_circles")
@@ -918,6 +988,7 @@ def _few_anchors(out,rows,frame,hae,previous):
         distances = [math.dist(p,previous[:2]) for p in points]
         near = min(range(2),key=distances.__getitem__)
         reach = previous[2]+uncertainty
+        # A previous point selects only a reachable, well-separated branch.
         if distances[near]<=reach and abs(distances[0]-distances[1])>2*reach:
             out.update(position=frame.position(*points[near],hae),uncertainty_m=uncertainty,
                        confidence=0.95,quality="previous_disambiguated")
@@ -951,7 +1022,9 @@ def choose_anchors(node_id, candidates, *, previous=None, max_anchors=5):
     if len(pool)>MAX_NODES:
         raise ValueError("at most 16 candidate anchors")
     def weight(a):
+        """Combine source, signal and horizontal uncertainty weights."""
         source = {"gnss":1.0,"manual":0.65,"ranged":0.35}[a.source]
+        # Signal weight spans 0.1 to 1, saturating at -70 dBm.
         signal = 1 if a.signal_dbm is None else max(0.1,min(1.0,(a.signal_dbm+100)/30))
         return source*signal/(1+a.h_sigma_m**2)
     remaining = sorted(pool.values(),key=lambda a:(-weight(a),a.id))
@@ -965,6 +1038,7 @@ def choose_anchors(node_id, candidates, *, previous=None, max_anchors=5):
     h = [[0.0,0.0],[0.0,0.0]]
     while remaining and len(selected)<max_anchors:
         def score(a):
+            """Score the information added by a candidate bearing."""
             if frame is None or not selected:
                 return weight(a)
             x,y = frame.xy(a.lat,a.lon)
@@ -972,6 +1046,8 @@ def choose_anchors(node_id, candidates, *, previous=None, max_anchors=5):
             x,y = x/norm,y/norm
             w = weight(a)
             xx,yy,xy = h[0][0]+w*x*x,h[1][1]+w*y*y,h[0][1]+w*x*y
+            # Determinant rewards bearing diversity. Trace also rewards
+            # information while the selected bearings are still collinear.
             return xx*yy-xy*xy + 0.01*(xx+yy)
         a = max(remaining,key=score)
         remaining.remove(a)
@@ -987,6 +1063,7 @@ def choose_anchors(node_id, candidates, *, previous=None, max_anchors=5):
 
 
 def _pair_rows(ranges, at_mono, max_age_s, heights):
+    """Validate, project and deduplicate pair ranges at one epoch."""
     ranges = list(ranges)
     if at_mono is None:
         at_mono = max((r.get("mono",0) for r in ranges if isinstance(r,dict) and _finite(r.get("mono"))),default=0)
@@ -1010,6 +1087,7 @@ def _pair_rows(ranges, at_mono, max_age_s, heights):
         if reason:
             rejected.append({"pair":[a,b],"reason":reason})
             continue
+        # Reciprocal measurements share one undirected pair key.
         key = tuple(sorted((a,b)))
         distance = r["range_m"]
         if a in heights and b in heights:
@@ -1017,11 +1095,13 @@ def _pair_rows(ranges, at_mono, max_age_s, heights):
             if abs(dh)>distance:
                 rejected.append({"pair":list(key),"reason":"range_shorter_than_height"})
                 continue
+            # Known endpoint heights convert slant to horizontal distance.
             distance = math.sqrt(max(0,distance**2-dh**2))
         row = {"a":key[0],"b":key[1],"d":distance,"slant_m":r["range_m"],
                "sigma":max(1.0,r.get("spread_m",1))*math.sqrt(max(1.0,50/r.get("frames",50))),"mono":r["mono"]}
         if key in unique:
             rejected.append({"pair":list(key),"reason":"duplicate_pair"})
+            # Newest pair wins, then lower uncertainty and distance.
             if (-unique[key]["mono"],unique[key]["sigma"],unique[key]["d"])<=(-row["mono"],row["sigma"],row["d"]):
                 continue
         unique[key]=row
@@ -1045,10 +1125,12 @@ def _embed(ids, edges):
     for r in edges:
         i,j=ix[r["a"]],ix[r["b"]]
         d[i][j]=d[j][i]=r["d"]
+    # Complete missing distances with shortest paths for initialization.
     for k in range(n):
         for i in range(n):
             for j in range(n):
                 d[i][j]=min(d[i][j],d[i][k]+d[k][j])
+    # Double-center squared distances and keep the two dominant axes.
     means=[sum(x*x for x in row)/n for row in d]
     total=sum(means)/n
     gram=[[-0.5*(d[i][j]**2-means[i]-means[j]+total) for j in range(n)] for i in range(n)]
@@ -1061,8 +1143,10 @@ def _embed(ids, edges):
     angle=math.atan2(xy[second][1],xy[second][0])
     c,s=math.cos(angle),math.sin(angle)
     xy=[[c*x+s*y,-s*x+c*y] for x,y in xy]
+    # Remove two translations and one rotation from the fit variables.
     variables=[(i,k) for i in range(1,n) for k in range(2) if not(i==second and k==1)]
     def evaluate(points):
+        """Build measured-edge residuals and derivatives for free axes."""
         residual,jac,weights=[],[],[]
         for r in edges:
             i,j=ix[r["a"]],ix[r["b"]]
@@ -1072,6 +1156,7 @@ def _embed(ids, edges):
             jac.append([((dx,dy)[k]/length)*(1 if v==i else -1 if v==j else 0) for v,k in variables])
             weights.append(1/r["sigma"]**2)
         return residual,jac,weights
+    # Limit refinement to 60 iterations with at most 12 backtracking trials.
     for _ in range(60):
         res,jac,w=evaluate(xy)
         h,g=_normal(jac,res,w)
@@ -1098,15 +1183,18 @@ def _embed(ids, edges):
     res,jac,w=evaluate(xy)
     h,_=_normal(jac,res,w)
     eigen,_=_eigen(h)
+    # Undamped information rank tests local rigidity after gauge removal.
     rank=sum(v>max(1e-7,eigen[0]*1e-7) for v in eigen)
     # Certify global uniqueness for graphs that grow from a triangle
     # by non-collinear trilateration.
     connected={tuple(sorted((r["a"],r["b"]))) for r in edges}
     by_id=dict(zip(ids,xy))
     def triangle_good(tri):
+        """Check baseline length and normalized triangle area."""
         a,b,c=(by_id[t] for t in tri)
         area=abs((b[0]-a[0])*(c[1]-a[1])-(b[1]-a[1])*(c[0]-a[0]))
         span=max(math.dist(a,b),math.dist(b,c),math.dist(a,c))
+        # Require a baseline above 1 m and twice-area/span squared above 2%.
         return span>1 and area/span**2>0.02
     globally_rigid=False
     for tri in combinations(ids,3):
@@ -1136,6 +1224,7 @@ def _embed(ids, edges):
         blocks=[]
         for node in range(n):
             def entry(k,l):
+                """Read one node covariance entry, with zero for fixed axes."""
                 i,j=lookup.get((node,k)),lookup.get((node,l))
                 return cov[i][j] if i is not None and j is not None else 0.0
             blocks.append(_circular95([[entry(0,0),entry(0,1)],[entry(1,0),entry(1,1)]]) or 0)
@@ -1145,6 +1234,7 @@ def _embed(ids, edges):
 
 def _mark_transform(xy, marks, frame, mirror):
     # Fit rigid 2D alignment without scaling. Marks must agree with ranges.
+    """Fit a weighted rigid mark alignment for one reflection."""
     source=[(xy[m.id][0],(-1 if mirror else 1)*xy[m.id][1]) for m in marks]
     target=[frame.xy(m.lat,m.lon) for m in marks]
     weights=[1/max(1,m.h_sigma_m)**2 for m in marks]
@@ -1175,6 +1265,7 @@ def _placed_layout(xy, edges, marks, frame, boot_sigma):
     p=[v for node in ids for v in xy[node]]
     targets={m.id:frame.xy(m.lat,m.lon) for m in marks}
     def evaluate(p):
+        """Build range and mark residuals with radio endpoint IDs."""
         jac,res,variances,ends=[],[],[],[]
         for e in edges:
             a,b=ix[e["a"]],ix[e["b"]]
@@ -1190,8 +1281,10 @@ def _placed_layout(xy, edges, marks, frame, boot_sigma):
                 row=[0.0]*len(p);row[j]=1.0
                 jac.append(row);res.append(p[j]-targets[m.id][k])
                 variances.append(max(.01,m.h_sigma_m**2));ends.append(())
+        # Each range has two radio offsets. Manual mark rows have none.
         weights=[1/(v+len(end)*boot_sigma**2) for v,end in zip(variances,ends)]
         return jac,res,variances,ends,weights
+    # Cap joint refinement at 20 iterations and backtrack increasing cost.
     for _ in range(20):
         jac,res,variances,ends,w=evaluate(p)
         h,g=_normal(jac,res,w)
@@ -1221,6 +1314,7 @@ def _placed_layout(xy, edges, marks, frame, boot_sigma):
     gain=[[sum(inv[i][k]*row[k] for k in range(len(p)))*weight for row,weight in zip(jac,w)] for i in range(len(p))]
     bg=[[sum(gain[i][j] for j,end in enumerate(ends) if node in end) for node in range(len(ids))] for i in range(len(p))]
     def covariance(i,k):
+        """Combine independent noise and shared radio-offset gains."""
         return (sum(a*b*v for a,b,v in zip(gain[i],gain[k],variances))
                 + boot_sigma**2*sum(a*b for a,b in zip(bg[i],bg[k])))
     radii={}
@@ -1264,6 +1358,7 @@ def relative_layout(ranges, marks=(), *, at_mono=None, max_age_s=15, heights=Non
     for e in edges:
         neighbors[e["a"]].add(e["b"])
         neighbors[e["b"]].add(e["a"])
+    # Disconnected components have no shared relative placement.
     seen={ids[0]}
     pending=[ids[0]]
     while pending:
@@ -1287,6 +1382,8 @@ def relative_layout(ranges, marks=(), *, at_mono=None, max_age_s=15, heights=Non
     if not global_ok:
         out["quality"]="ambiguous_geometry"
         return out
+    # Flag residuals above the larger of 4 m and three sigma, including
+    # both radio offsets in the variance.
     bad=[e for e,r in zip(edges,res) if abs(r)>max(4,3*math.sqrt(e["sigma"]**2+2*boot_sigma_m**2))]
     if bad:
         out["quality"]="inconsistent"
@@ -1301,6 +1398,7 @@ def relative_layout(ranges, marks=(), *, at_mono=None, max_age_s=15, heights=Non
         if not isinstance(m,Mark) or m.id not in xy or not _position_ok(m.lat,m.lon) or not _nonnegative(m.h_sigma_m) or not _finite(m.mono) or m.mono>now:
             out["rejected"].append({"mark":getattr(m,"id",None),"reason":"invalid_mark"})
             continue
+        # Newest mark wins, then lower uncertainty and coordinate order.
         if m.id not in unique or (-m.mono,m.h_sigma_m,m.lat,m.lon)<(-unique[m.id].mono,unique[m.id].h_sigma_m,unique[m.id].lat,unique[m.id].lon):
             unique[m.id]=m
     marks=sorted(unique.values(),key=lambda m:m.id)
@@ -1323,6 +1421,7 @@ def relative_layout(ranges, marks=(), *, at_mono=None, max_age_s=15, heights=Non
         out["quality"]="marks_poor_geometry"
         return out
     transforms=[_mark_transform(xy,marks,frame,mirror) for mirror in (False,True)]
+    # Rank the two reflections by weighted mark-alignment RMS.
     transforms.sort(key=lambda t:t[1])
     best,other=transforms
     tolerance=radius+CE95*mark_sigma
@@ -1336,6 +1435,7 @@ def relative_layout(ranges, marks=(), *, at_mono=None, max_age_s=15, heights=Non
     for tri in combinations(targets,3):
         a,b,c=tri
         spread.append(abs((b[0]-a[0])*(c[1]-a[1])-(b[1]-a[1])*(c[0]-a[0]))/span**2)
+    # Resolve reflection only with spread marks and a clear fit margin.
     if len(marks)<3 or max(spread,default=0)<0.02 or other[1]-best[1]<=2*tolerance:
         out["quality"]="mirror_ambiguous"
         return out

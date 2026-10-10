@@ -2,6 +2,7 @@
 # Shared by provisioning and dnsmasq startup, including tools updates.
 set -euo pipefail
 
+# Serialize provisioning and dnsmasq starts, waiting up to 10 s.
 exec 9>/run/manet-dns-setup.lock
 flock -w 10 9
 mkdir -p /etc/systemd/resolved.conf.d
@@ -15,6 +16,7 @@ DNS=
 FallbackDNS=1.1.1.1 8.8.8.8
 EOF
 changed=0
+# Replace the config atomically only when its bytes differ.
 if ! cmp -s "$scratch" "$config"; then
     chmod 644 "$scratch"
     mv "$scratch" "$config"

@@ -14,6 +14,7 @@ import time
 
 FIELDS = ('direction', 'source_port', 'source_mac', 'protocol', 'sport', 'dport',
           'destination_kind', 'destination', 'vlan')
+# Linux packet socket option level and packet/drop statistics selector.
 SOL_PACKET, PACKET_STATISTICS = 263, 6
 
 
@@ -21,6 +22,7 @@ def decode(frame):
     """Decode headers, keeping unknown/truncated/fragmented traffic visible."""
     result = dict(source_mac='?', source_ip=None, protocol='truncated', sport=None,
                   dport=None, destination_kind='unknown', destination='?', vlan='')
+    # Ethernet uses 6-byte destination/source MACs and a 2-byte EtherType.
     if len(frame) < 14:
         return result
     result['source_mac'] = frame[6:12].hex(':')
@@ -29,6 +31,7 @@ def decode(frame):
                                   'multicast' if frame[0] & 1 else 'unicast')
     ethertype = int.from_bytes(frame[12:14], 'big')
     offset, vlans = 14, []
+    # Walk 802.1Q/802.1ad tags, retaining each 12-bit VLAN identifier.
     while ethertype in (0x8100, 0x88a8):
         if len(frame) < offset + 4:
             return result
@@ -41,6 +44,7 @@ def decode(frame):
         if len(frame) < offset + 20 or frame[offset] >> 4 != 4:
             result['protocol'] = 'IPv4/truncated'
             return result
+        # IPv4 IHL counts 32-bit words, including any options.
         ihl = (frame[offset] & 15) * 4
         total = int.from_bytes(frame[offset + 2:offset + 4], 'big')
         if ihl < 20 or total < ihl or len(frame) < offset + ihl:
@@ -50,6 +54,7 @@ def decode(frame):
         proto = frame[offset + 9]
         result['source_ip'] = str(ipaddress.ip_address(frame[offset + 12:offset + 16]))
         destination = ipaddress.ip_address(frame[offset + 16:offset + 20])
+        # Only nonzero fragment offsets suppress transport header decoding.
         fragment = int.from_bytes(frame[offset + 6:offset + 8], 'big') & 0x1fff
         offset += ihl
         family = 'IPv4'
@@ -65,6 +70,7 @@ def decode(frame):
         offset += 40
         fragment, family = False, 'IPv6'
         # Hop-by-hop, routing, destination options, fragment, authentication.
+        # Bound extension traversal even for an excessive or malformed chain.
         for _ in range(16):
             if proto not in (0, 43, 60, 44, 51):
                 break
@@ -76,6 +82,8 @@ def decode(frame):
                 fragment = bool(int.from_bytes(frame[offset + 2:offset + 4], 'big') & 0xfff8)
                 length = 8
             else:
+                # AH lengths use 4-byte words minus two, others 8-byte units
+                # minus one. The fragment header has a fixed 8-byte size.
                 length = (frame[offset + 1] + (2 if proto == 51 else 1)) * (4 if proto == 51 else 8)
             offset += length
             proto = next_proto
@@ -98,6 +106,7 @@ def decode(frame):
 
 
 def read_json(*command):
+    """Run a checked JSON command with a one-second timeout."""
     return json.loads(subprocess.run(command, check=True, capture_output=True,
                                      text=True, timeout=1).stdout)
 
@@ -117,6 +126,7 @@ def source_snapshot():
 
 
 def source_port(packet, direction, snapshot):
+    """Infer local bridge ingress from packet direction and a snapshot."""
     if direction == 'in':
         return 'bat0'
     macs, ips, fdb = snapshot
@@ -124,6 +134,7 @@ def source_port(packet, direction, snapshot):
         if packet['source_ip'] is None or packet['source_ip'] in ips:
             return 'local(mac/ip)'
         return 'routed-or-unknown'
+    # Attribute only one learned non-mesh port and no VLAN ambiguity.
     ports = fdb.get(packet['source_mac'], set())
     if len(ports) == 1 and 'bat0' not in ports and not packet['vlan']:
         return next(iter(ports)) + '(fdb)'
@@ -131,12 +142,15 @@ def source_port(packet, direction, snapshot):
 
 
 class Census:
+    """Accumulate bounded header groups and full packet/byte totals."""
     def __init__(self, max_rows=20000):
+        """Initialize row storage and counters with a configurable row cap."""
         self.rows = {}
         self.max_rows = max_rows
         self.totals = Counter(packets=0, bytes=0, overflow_packets=0, overflow_bytes=0)
 
     def add(self, frame, size, direction, snapshot):
+        """Count a frame, retaining totals when new detail rows overflow."""
         packet = decode(frame)
         packet.update(direction=direction, source_port=source_port(packet, direction, snapshot))
         key = tuple(packet[field] for field in FIELDS)
@@ -151,11 +165,13 @@ class Census:
         counts[1] += size
 
     def report(self):
+        """Return header groups ordered by descending byte count."""
         return [dict(zip(FIELDS, key), packets=value[0], bytes=value[1])
                 for key, value in sorted(self.rows.items(), key=lambda item: -item[1][1])]
 
 
 def capture(minutes, max_rows):
+    """Collect bat0 headers for a bounded duration and report capture loss."""
     census = Census(max_rows)
     snapshot, refresh = (set(), set(), {}), 0
     start = time.monotonic()
@@ -163,9 +179,11 @@ def capture(minutes, max_rows):
     interrupted, snapshot_errors = False, 0
     # Binding AF_PACKET observes only bat0. No promiscuity, membership joins,
     # pcap payload file, rule changes or active network probes.
+    # ETH_P_ALL=3 admits all Ethernet protocol types on this interface.
     with socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(3)) as sock:
         sock.bind(('bat0', 0))
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4 * 1024 * 1024)
+        # Read at most 2048 bytes per packet. Only decoded headers enter rows.
         buffer = bytearray(2048)
         try:
             while time.monotonic() < deadline:
@@ -175,12 +193,15 @@ def capture(minutes, max_rows):
                         snapshot = source_snapshot()
                     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
                         snapshot, snapshot_errors = (set(), set(), {}), snapshot_errors + 1
+                    # Refresh attribution every two seconds, including failures.
                     refresh = time.monotonic() + 2
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     break
+                # Limit each receive wait to 500 ms or the remaining time.
                 sock.settimeout(min(.5, remaining))
                 try:
+                    # MSG_TRUNC reports full length even if the buffer fills.
                     size, _, _, address = sock.recvmsg_into([buffer], 0, socket.MSG_TRUNC)
                 except socket.timeout:
                     continue
@@ -192,6 +213,7 @@ def capture(minutes, max_rows):
                            'out' if address[2] == 4 else 'in', snapshot)
         except KeyboardInterrupt:
             interrupted = True
+        # Packet statistics return two native unsigned 32-bit counters.
         received, dropped = struct.unpack('II', sock.getsockopt(SOL_PACKET, PACKET_STATISTICS, 8))
     return dict(interface='bat0', seconds=round(time.monotonic() - start, 3),
                 interrupted=interrupted, packet_socket_received=received, kernel_drops=dropped,
@@ -204,6 +226,7 @@ def capture(minutes, max_rows):
 
 
 def main():
+    """Validate capture limits and print the census as JSON."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--minutes', type=float, default=5, help='capture duration (0 < N <= 1440)')
     parser.add_argument('--max-rows', type=int, default=20000, help='bounded detail rows; excess still counted')

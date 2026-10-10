@@ -17,6 +17,7 @@ while [ $# -gt 0 ]; do
     esac
 done
 
+# Report an unavailable peer count on stderr and exit 1.
 fail() {
     printf '%s\n' "Cannot read BATMAN peers: $1" >&2
     exit 1
@@ -28,6 +29,8 @@ table=$(timeout --kill-after=2 5 "$batctl" meshif bat0 originators_json 2>/dev/n
 [ -n "$table" ] || fail "empty originator response"
 
 # Slurp to reject multiple JSON documents in a response.
+# Validate six colon-separated hex octets, lowercase and deduplicate.
+# jq unique also sorts MACs for --list output.
 peers=$(jq -rs '
     if length != 1 then error("expected exactly one originator table") else .[0] end
     | if type != "array" then error("originators response is not a list") else . end

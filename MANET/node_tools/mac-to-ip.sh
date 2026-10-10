@@ -5,12 +5,14 @@
 
 REGISTRY_FILE="/var/run/mesh_node_registry"
 
+# Print the required MAC argument to stderr.
 usage() {
     printf '%s\n' 'usage: mac-to-ip.sh MAC_ADDRESS' >&2
 }
 
 [ $# -eq 1 ] || { usage; exit 1; }
 MAC_INPUT="$1"
+# Require six colon-separated hex octets before using the MAC in patterns.
 if ! [[ "$MAC_INPUT" =~ ^([[:xdigit:]]{2}:){5}[[:xdigit:]]{2}$ ]]; then
     usage
     exit 1
@@ -37,6 +39,7 @@ fi
 
 # Search MAC_ADDRESSES for interface MACs such as wlan0/wlan1/end0.
 while IFS= read -r line; do
+    # Capture the node ID and its quoted interface MAC list from registry data.
     if [[ $line =~ NODE_([0-9A-Fa-f]+)_MAC_ADDRESSES=\'([^\']+)\' ]]; then
         NODE_ID="${BASH_REMATCH[1]}"
         MAC_LIST="${BASH_REMATCH[2]}"

@@ -13,6 +13,7 @@ from manet_peer_radios import WLAN_IFACES, interfaces_for_telemetry
 
 
 def command(*args):
+    """Return command stdout within five seconds, or empty on failure."""
     try:
         return subprocess.run(args, capture_output=True, text=True, timeout=5,
                               check=True).stdout
@@ -21,17 +22,21 @@ def command(*args):
 
 
 def collect(sysnet=Path('/sys/class/net'), no_mesh=Path('/var/lib/no_mesh_if')):
+    """Combine live address, iw and BATMAN data into Alfred radio fields."""
     try:
+        # ip JSON supplies operstate, master and structured address families.
         raw = json.loads(command('ip', '-j', 'addr'))
     except ValueError:
         return []
     wireless, current = {}, None
     for line in command('iw', 'dev').splitlines():
+        # Interface headers scope the following iw fields to one device.
         match = re.match(r'\s+Interface (\S+)', line)
         if match:
             current = wireless.setdefault(match[1], {})
         if current is None:
             continue
+        # Capture iw type, channel, MHz and dBm in their display units.
         for field, pattern in [('type', r'type (\S+)'),
                                ('channel', r'channel (\d+) \('),
                                ('freq_mhz', r'channel \d+ \((\d+) MHz\)'),
@@ -39,6 +44,7 @@ def collect(sysnet=Path('/sys/class/net'), no_mesh=Path('/var/lib/no_mesh_if')):
             match = re.search(pattern, line)
             if match:
                 current[field] = match[1]
+    # Both active and inactive batctl entries count as attached interfaces.
     bat = set(re.findall(r'^(\S+):\s+(?:active|inactive)', command('batctl', 'if'), re.M))
     try:
         excluded = set(no_mesh.read_text().split())
@@ -53,9 +59,11 @@ def collect(sysnet=Path('/sys/class/net'), no_mesh=Path('/var/lib/no_mesh_if')):
         iw = wireless.get(name, {}).copy()
         driver_path = sysnet / name / 'device/driver'
         driver = driver_path.resolve().name if driver_path.exists() else ''
+        # Fall back to ethtool when sysfs lacks the wireless driver link.
         if not driver and name in wireless:
             match = re.search(r'^driver:\s*(.+)', command('ethtool', '-i', name), re.M)
             driver = match[1] if match else ''
+        # Morse readback supplies HaLow-specific frequency and bandwidth.
         if 'morse' in driver:
             from manet_radio import get_halow_driver_info
             iw.update(get_halow_driver_info(name))

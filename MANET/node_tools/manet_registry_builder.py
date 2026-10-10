@@ -31,6 +31,7 @@ DATA_CHANNEL_2_4 DATA_CHANNEL_5_0 CHANNEL_REPORT_JSON LAST_SEEN_TIMESTAMP
 IS_IN_LIMP_MODE LAST_TOURGUIDE_TIMESTAMP LAST_TOURGUIDE_RADIO CONFIG_ACK_VERSION
 HALOW_TX_MCS HALOW_RX_MCS HALOW_MCS_PEER WIFI_24_TX_MCS WIFI_24_RX_MCS
 WIFI_5_TX_MCS WIFI_5_RX_MCS INTERFACES_JSON EUD_MODE AP_SSID EUD_COUNT'''.split()
+# Alfred -r records start with a quoted MAC and quoted base64 payload.
 RECORD = re.compile(r'^\s*\{\s*"([0-9a-fA-F:]{17})"\s*,\s*"([^"]*)"', re.M)
 CLAIMS_FILE = 'run/manet-registry/claimed-chunks.txt'
 
@@ -57,12 +58,14 @@ def atomic_text(path, text, mode=0o644):
 
 
 def previous_fields(path):
+    """Read quoted registry assignments, skipping malformed values."""
     nodes = {}
     try:
         lines = path.read_text().splitlines()
     except FileNotFoundError:
         return nodes
     for line in lines:
+        # Accept lowercase 12-hex node IDs and uppercase registry field names.
         match = re.fullmatch(r'NODE_([0-9a-f]{12})_([A-Z0-9_]+)=(.*)', line)
         if match:
             node, key, value = match.groups()
@@ -76,10 +79,12 @@ def previous_fields(path):
 
 
 def decode(kind, payload, mac):
+    """Decode a base64 identity or telemetry record into string fields."""
     # Lazy: steady, identical reads do not even import protobuf.
     import decoder
     fields = {}
     def emit(key, value):
+        """Collect one decoded field as text."""
         fields[key] = str(value)
     raw = base64.b64decode(payload)
     if kind == 'identity':
@@ -90,12 +95,14 @@ def decode(kind, payload, mac):
 
 
 def build():
+    """Serialize registry refreshes and prepare the state directories."""
     registry = Path(os.environ.get('MESH_REGISTRY_FILE', '/var/run/mesh_node_registry'))
     claims = Path(os.environ.get('MESH_CLAIMED_CHUNKS_FILE', '/' + CLAIMS_FILE))
     observed = Path(os.environ.get('MESH_REGISTRY_OBSERVED_FILE', '/run/manet-registry/observed.tsv'))
     observed.parent.mkdir(parents=True, exist_ok=True)
     claims.parent.mkdir(parents=True, exist_ok=True)
     with Path(str(observed) + '.lock').open('a') as lock:
+        # Wait at most ten seconds, retrying the exclusive lock every 50 ms.
         deadline = time.monotonic() + 10
         while True:
             try:
@@ -109,6 +116,7 @@ def build():
 
 
 def _build(registry, claims, observed):
+    """Merge Alfred snapshots, track local age and publish registry files."""
     snapshots = []
     for type_id in (67, 68):
         # Read both successfully before touching any published state.
@@ -118,6 +126,7 @@ def _build(registry, claims, observed):
     identities, telemetry = snapshots
     now = int(time.time())
     uptime = int(float(Path(os.environ.get('MESH_UPTIME_FILE', '/proc/uptime')).read_text().split()[0]))
+    # Age limits use local uptime seconds, independent of peer wall clocks.
     stale = int(os.environ.get('MESH_REGISTRY_STALE_AFTER', '300'))
     tombstone = int(os.environ.get('MESH_REGISTRY_TOMBSTONE_SECONDS', '900'))
     observations = {}
@@ -142,6 +151,7 @@ def _build(registry, claims, observed):
     decoded = {}
 
     def fields(kind, mac, payload):
+        """Reuse decoding only when the payload and cached field types match."""
         key = kind + '/' + mac
         entry = old.get(key, {})
         if (not isinstance(entry, dict) or entry.get('payload') != payload
@@ -165,11 +175,13 @@ def _build(registry, claims, observed):
                 data.update(fields('identity', mac, identities[mac]))
             except Exception as error:
                 print(f'REGISTRY: identity decode failed for {mac}: {type(error).__name__}', file=sys.stderr)
+        # Retain known identity when the slower identity record is absent.
         if not data.get('HOSTNAME'):
             saved = previous.get(mac.replace(':', ''), {})
             data.update({key: saved.get(key, '') for key in IDENTITY_FIELDS})
         data['MAC_ADDRESS'] = mac
         data['MAC_ADDRESSES'] = data.get('MAC_ADDRESSES') or mac
+        # Only a changed telemetry payload refreshes the local observation age.
         digest = hashlib.sha256(payload.encode()).hexdigest()
         old_hash, seen, _ = observations.get(mac, ('', uptime, uptime))
         if old_hash != digest:
@@ -187,6 +199,7 @@ def _build(registry, claims, observed):
             output.append(f"{prefix}_{key}='{value}'")
         output.append('')
         chunk, address = data.get('IPV4_CHUNK', ''), data.get('IPV4_ADDRESS', '')
+        # Active claims carry decimal chunk, integer IPv4 start and block size.
         if data['NODE_STATE'] == 'ACTIVE' and re.fullmatch(r'[0-9]+', chunk) and address:
             try:
                 start = str(int(ipaddress.IPv4Address(address)))
@@ -196,6 +209,7 @@ def _build(registry, claims, observed):
             if not re.fullmatch(r'[0-9]{1,6}', size):
                 size = '0'
             claimed.append(f'{chunk},{mac},{start},{size}')
+    # Keep vanished peers briefly so an unchanged reappearance retains its age.
     retained = [f'{mac} {digest} {seen} {present}\n'
                 for mac, (digest, seen, present) in sorted(observations.items())
                 if uptime - present <= tombstone]

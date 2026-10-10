@@ -1,4 +1,5 @@
 #!/bin/sh
+# Prepare a supplied conventional Wi-Fi interface before its supplicant.
 set -u
 
 IFACE="${1:-}"
@@ -8,10 +9,12 @@ IFACE="${1:-}"
 /usr/local/bin/unblock-wifi-rfkill.sh 2>/dev/null || true
 
 driver="$(basename "$(readlink -f "/sys/class/net/$IFACE/device/driver" 2>/dev/null)")"
+# Use the driver field from ethtool when sysfs yields no driver name.
 if [ -z "$driver" ] || [ "$driver" = "." ]; then
     driver="$(ethtool -i "$IFACE" 2>/dev/null | awk -F': ' '$1 == "driver" {print $2; exit}')"
 fi
 
+# Leave Broadcom and Morse interfaces to their separate setup paths.
 case "$driver" in
     brcmfmac|morse*)
         exit 0
@@ -26,6 +29,8 @@ fi
 
 iw dev "$IFACE" info 2>/dev/null | grep -q 'type mesh point' && exit 0
 
+# Lower the interface before changing type, with a one-second pause on
+# either side of the type request before checking mesh-point mode.
 ip link set "$IFACE" down 2>/dev/null || true
 sleep 1
 iw dev "$IFACE" set type mp 2>/dev/null || true

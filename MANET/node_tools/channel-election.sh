@@ -5,6 +5,7 @@
 
 set -eo pipefail
 
+# Print the optional scoring argument to stderr.
 usage() {
     printf '%s\n' \
         'usage: channel-election.sh [--score]' >&2
@@ -72,6 +73,7 @@ CHANNELS_2_4="${ACS_CHANNELS_2_4-2437 2462}"
 CHANNELS_5_0="${ACS_CHANNELS_5_0-5200 5220 5240 5745 5765 5785 5805 5825}"
 
 # --- Helper Functions ---
+# Write a prefixed message to the channel-election journal tag.
 log() {
     manet_journal channel-election "CHAN-ELECTION: $*"
 }
@@ -139,6 +141,8 @@ log() {
         local chans_json
         chans_json=$(printf '%s\n' "$1" | jq -Rc 'split(" ") | map(select(length > 0) | tonumber)')
 
+        # Use median noise/busy values and mean BSS count per candidate MHz.
+        # Missing noise/busy adds no penalty. Round scores to two decimals.
         printf '%s' "$ALL_REPORTS_JSON" | jq -r \
             --argjson chans "$chans_json" \
             --argjson noise_dq "$NOISE_DISQUALIFY_THRESHOLD_DBM" \
@@ -203,6 +207,8 @@ log() {
         local band_channels="$1"
         local current_channel="$2"
         local band_name="$3"
+        # The fourth argument names the caller's output variable. Poor scores
+        # also set LIMP_MODE_NEEDED for the final proposal.
         local -n _winner=$4
         local lines chan status rest best_ok best_any
         local pick_chan pick_eff pick_raw

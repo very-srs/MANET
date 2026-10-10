@@ -22,10 +22,13 @@ from manet_registry_builder import atomic_text
 
 
 class Helpers:
+    """Dispatch allowlisted runtime work and cache the Syncthing public ID."""
     def __init__(self):
+        """Start with no cached Syncthing certificate identity."""
         self.cert_cache = None
 
     def syncthing_id(self):
+        """Derive the device ID, reusing it only while cert metadata matches."""
         from manet_ids import bytes_to_syncthing_id
         # Syncthing prefers an existing legacy config, else XDG_STATE_HOME.
         # Match the provisioned radio account.
@@ -48,6 +51,7 @@ class Helpers:
         return ''  # First boot: retry on the next identity publication.
 
     def dispatch(self, action, argument='-'):
+        """Run one allowed operation and return its status code and output."""
         if action == 'ip' and argument == '-':
             return reconcile_ip(), ''
         if action == 'ipv4' and argument == '-':
@@ -58,6 +62,7 @@ class Helpers:
         if action == 'interfaces' and argument == '-':
             from manet_interfaces import collect
             return 0, json.dumps(collect(), separators=(',', ':'))
+        # MCS accepts only a bounded interface name, never shell syntax.
         if action == 'mcs' and re.fullmatch(r'[A-Za-z0-9_.:-]{1,15}', argument):
             helper = module('halow-mcs-summary')
             return 0, helper.shell_output(helper.collect(argument))
@@ -75,6 +80,7 @@ def serve(directory, helpers, stop=None):
     directory = Path(directory)
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
     info = directory.stat()
+    # Only this account may access request, reply and result files.
     if info.st_uid != os.geteuid() or info.st_mode & 0o077 or directory.is_symlink():
         raise PermissionError('runtime directory must be private and owned by this process')
     ready = directory / 'ready'
@@ -85,24 +91,30 @@ def serve(directory, helpers, stop=None):
             path = directory / name
             path.unlink(missing_ok=True)
             os.mkfifo(path, 0o600)
+            # Opening both ends avoids FIFO open blocking without a client.
             descriptors.append(os.open(path, os.O_RDWR | os.O_NONBLOCK | os.O_CLOEXEC))
         request, reply = descriptors
+        # Clients bind requests to this worker generation, not just its PID.
         generation = f'{os.getpid()} {time.monotonic_ns()}\n'
         atomic_text(ready, generation, 0o600)
         pending = b''
         while stop is None or not stop.is_set():
+            # Wake every 100 ms with a stop event, else wait for a request.
             if not select.select([request], [], [], .1 if stop else None)[0]:
                 continue
             pending += os.read(request, 4096)
+            # Discard oversized buffered framing above 8 KiB.
             if len(pending) > 8192:
                 pending = b''
                 continue
             while b'\n' in pending:
                 line, pending = pending.split(b'\n', 1)
+                # Reply tokens allow at most 80 digits or underscores.
                 match = re.fullmatch(rb'([0-9_]{1,80}) (.*)', line)
                 if not match:
                     continue
                 token = match[1].decode()
+                # Bound action/argument fields before dispatching any operation.
                 request_fields = re.fullmatch(rb'([a-z][a-z0-9-]{0,31}) ([A-Za-z0-9_.:-]{1,32})', match[2])
                 # Withdraw availability while working, including if the client
                 # times out. Another caller must not queue behind this job.
@@ -133,6 +145,7 @@ def serve(directory, helpers, stop=None):
 
 
 def start():
+    """Start the daemon FIFO thread with its own persistent helper cache."""
     thread = threading.Thread(target=serve, name='runtime-requests', daemon=True,
                               args=(os.environ.get('MANET_RUNTIME_DIR', '/run/manet-runtime'), Helpers()))
     thread.start()

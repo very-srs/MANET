@@ -26,6 +26,7 @@ if [ -n "$missing" ]; then
     export DEBIAN_FRONTEND=noninteractive
     if ! apt-get install -y --no-install-recommends \
         -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold $missing; then
+        # Refresh package indexes after the first failure, then retry once.
         apt-get update -y || true
         if ! apt-get install -y --no-install-recommends \
             -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold $missing; then

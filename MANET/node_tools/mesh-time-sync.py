@@ -19,11 +19,15 @@ import sys
 import tempfile
 import time
 
+# Canonical MACs use six lowercase hex octets separated by colons.
 MAC = re.compile(r'(?:[0-9a-f]{2}:){5}[0-9a-f]{2}')
+# Read only the four registry fields used for peer eligibility and identity.
 FIELD = re.compile(r'NODE_([0-9a-fA-F]{12})_(MAC_ADDRESSES|IPV4_ADDRESS|IS_NTP_SERVER|NODE_STATE)=(.*)')
 MAX_CORRECTION = 0.1  # Remaining correction in seconds, not accuracy.
+# Peer attempts expire after 90 s, followed by a 5-minute per-peer exclusion.
 ATTEMPT_SECONDS = 90
 RETRY_SECONDS = 300
+# Verified sync defers peer polling for six hours plus up to ten minutes.
 REFRESH_SECONDS = 6 * 60 * 60
 REFRESH_JITTER_SECONDS = 10 * 60
 # One source per operator: three remain to vote if one is unreachable.
@@ -32,6 +36,7 @@ NTS_SERVERS = ('time.cloudflare.com', 'sth1.nts.netnod.se', 'ptbtime1.ptb.de', '
 
 
 def atomic_text(path, text):
+    """Write and fsync a sibling file before replacing the destination."""
     fd, temporary = tempfile.mkstemp(dir=path.parent, prefix='.' + path.name)
     try:
         with os.fdopen(fd, 'w') as out:
@@ -54,11 +59,13 @@ def candidates(registry, rows, own, network):
             continue
         key, field, raw = match.groups()
         mac = ':'.join(key[i:i + 2] for i in range(0, 12, 2)).lower()
+        # Decode shell quoting as data without executing registry assignments.
         values = shlex.split(raw)
         if len(values) != 1:
             raise ValueError('invalid registry assignment')
         nodes.setdefault(mac, {})[field] = values[0]
     for mac, fields in nodes.items():
+        # Radio MAC aliases map route rows back to the advertised node.
         for alias in [mac, *fields.get('MAC_ADDRESSES', '').lower().split(',')]:
             if not alias:
                 continue
@@ -80,10 +87,12 @@ def candidates(registry, rows, own, network):
         if row.get('best') is not True:
             continue
         metric, age = row.get('throughput'), row.get('last_seen_msecs')
+        # Only positive selected-route metrics seen within 30 s can rank.
         if type(metric) is not int or metric <= 0 or type(age) is not int or not 0 <= age <= 30000:
             continue
         mac = aliases.get(row['orig_address'].lower())
         if mac:
+            # Several radio routes can belong to one node. Keep its best rate.
             routes[mac] = max(routes.get(mac, 0), metric)
     result = []
     for mac, metric in routes.items():
@@ -94,17 +103,22 @@ def candidates(registry, rows, own, network):
             addr = ipaddress.IPv4Address(fields.get('IPV4_ADDRESS', ''))
         except ipaddress.AddressValueError:
             continue
+        # Reject non-host addresses and allocations claimed by several nodes.
         if addr not in network or addr in (network.network_address, network.broadcast_address) or owners.get(addr) != mac:
             continue
         # Kernel route age and fresh NTP measurements establish bootstrap
         # liveness even when registry telemetry is marked STALE.
         result.append({'mac': mac, 'address': str(addr), 'metric': metric})
+    # Highest route throughput wins, with a stable canonical-MAC tie break.
     return sorted(result, key=lambda item: (-item['metric'], item['mac']))
 
 
 def selected_source(sources):
+    """Parse a recent selected chrony source with nonzero reachability."""
     # -n sources: mode+selection, address/refid, stratum, poll, reach, LastRx.
     for line in sources.splitlines():
+        # The asterisk marks selection. Reach is octal and LastRx has an
+        # optional minute, hour or day suffix. Headers cannot match.
         match = re.fullmatch(r'([\^=#])\*\s+(\S+)\s+\d+\s+(-?\d+)\s+([0-7]+)\s+(\d+)([mhd]?)\s+.*', line.strip())
         if not match:
             continue
@@ -113,6 +127,8 @@ def selected_source(sources):
         if not -7 <= poll <= 24 or int(reach, 8) == 0:
             return None
         age = int(age) * {'': 1, 'm': 60, 'h': 3600, 'd': 86400}[unit]
+        # Poll is a base-two seconds exponent. Allow two intervals plus 10 s,
+        # with a 30 s floor for short polls.
         if age > max(30, 2 * 2 ** poll + 10):
             return None
         return {'mode': mode, 'address': address, 'age': age}
@@ -120,12 +136,14 @@ def selected_source(sources):
 
 
 def settled(tracking):
+    """Validate chrony's reference, stratum, leap state and correction size."""
     fields = dict(line.split(':', 1) for line in tracking.splitlines() if ':' in line)
     fields = {k.strip(): v.strip() for k, v in fields.items()}
     try:
         refid = fields['Reference ID'].split()[0].upper()
         correction = float(fields['System time'].split()[0])
         stratum = int(fields['Stratum'])
+        # Reject zero and local-reference IDs even with a small correction.
         return (bool(re.fullmatch('[0-9A-F]{8}', refid)) and refid not in ('00000000', '7F7F0101')
                 and 1 <= stratum <= 15 and math.isfinite(correction) and abs(correction) <= MAX_CORRECTION
                 and fields['Leap status'] in ('Normal', 'Insert second', 'Delete second'))
@@ -134,6 +152,7 @@ def settled(tracking):
 
 
 def nts_authenticated(authdata, address):
+    """Require a matching NTS source with negotiated key type and length."""
     # Join -n authdata to -n sources by the full NTP address (also for IPv6),
     # not reverse DNS or the potentially different NTS-KE server address.
     for line in authdata.splitlines():
@@ -150,13 +169,16 @@ def nts_authenticated(authdata, address):
 
 
 def chrony_config(network, gps=False, uplink='', peer='', initial=True):
+    """Build a chrony profile for local sources, a peer attempt or idle mode."""
     lines = ['# Managed by mesh-time-sync.py; role changes replace this file.',
              'driftfile /var/lib/chrony/chrony.drift', 'leapsecmode slew']
     if initial:
+        # Permit corrections over 0.1 s to step only on the first three updates.
         lines.append('makestep 0.1 3')
     if gps:
         lines.append('refclock SHM 0 refid GPS precision 1e-1 delay 0.2 poll 4 offset 0.0')
     if uplink:
+        # Restrict interface text before placing it in a configuration line.
         if not re.fullmatch(r'[A-Za-z0-9_.-]{1,15}', uplink):
             raise ValueError('invalid uplink interface')
         lines += ['server ' + host + ' iburst nts' for host in NTS_SERVERS]
@@ -179,7 +201,10 @@ def chrony_config(network, gps=False, uplink='', peer='', initial=True):
 
 
 class TimeService:
+    """Reconcile chrony roles, verified source flags and peer-sync deadlines."""
+
     def __init__(self):
+        """Locate node state and restore this boot's saved client deadlines."""
         self.run = Path(os.environ.get('MANET_TIME_RUN_DIR', '/run'))
         self.run.mkdir(parents=True, exist_ok=True)
         self.conf = Path(os.environ.get('MANET_MESH_CONF', '/etc/mesh.conf'))
@@ -199,18 +224,22 @@ class TimeService:
             raise ValueError('invalid time service state')
 
     def command(self, args, timeout=5):
+        """Run a checked command in the C locale, with a default 5 s limit."""
         return subprocess.run(args, capture_output=True, text=True, check=True, timeout=timeout,
                               env=dict(os.environ, LC_ALL='C')).stdout
 
     def log(self, message):
+        """Print a status message only when it differs from the last one."""
         if message != self.last_message:
             print('TIME-SYNC: ' + message, flush=True)
             self.last_message = message
 
     def save(self):
+        """Persist client deadlines and peer backoffs for service restarts."""
         atomic_text(self.state_path, json.dumps(self.state))
 
     def network(self):
+        """Read the configured IPv4 mesh, falling back to the default /16."""
         for line in self.conf.read_text().splitlines():
             key, sep, value = line.partition('=')
             if sep and key.strip() == 'ipv4_network':
@@ -218,6 +247,7 @@ class TimeService:
         return ipaddress.IPv4Network('10.43.1.0/16', strict=False)
 
     def roles(self):
+        """Detect usable GPS time and a directly connected gateway uplink."""
         gps = False
         try:
             data = json.loads((self.run / 'gps_status.json').read_text())
@@ -226,6 +256,7 @@ class TimeService:
             # says the receiver's time is fit to serve (time_ok: settled, no
             # recent clock step, drift or discontinuity).
             age = time.clock_gettime(time.CLOCK_BOOTTIME) - float(data['written_boot'])
+            # Accept status up to 60 s old or 5 s ahead on the boot clock.
             gps = (data.get('has_fix') is True and data.get('time_ok') is True
                    and math.isfinite(age) and -5 <= age <= 60)
         except (OSError, ValueError, TypeError, AttributeError, KeyError):
@@ -242,6 +273,7 @@ class TimeService:
         return gps, uplink
 
     def flags(self, gps=False, internet=False):
+        """Set the source markers consumed by node-manager's NTP telemetry."""
         for name, enabled in [('mesh-ntp-gps.state', gps), ('mesh-ntp.state', internet)]:
             path = self.run / name
             if enabled:
@@ -250,6 +282,7 @@ class TimeService:
                 path.unlink(missing_ok=True)
 
     def running(self):
+        """Return whether systemd reports chrony.service active."""
         try:
             self.command(['systemctl', 'is-active', '--quiet', 'chrony.service'])
             return True
@@ -257,11 +290,13 @@ class TimeService:
             return False
 
     def configure(self, text, start):
+        """Install a role profile and reconcile chrony's requested state."""
         changed = not self.chrony_conf.exists() or self.chrony_conf.read_text() != text
         if changed:
             self.flags()
             atomic_text(self.chrony_conf, text)
         if start:
+            # Service operations get 15 s, longer than ordinary status probes.
             # Remember what this process successfully activated. If restart
             # fails after writing the file, the next pass retries the restart.
             if changed or self.active_config != text:
@@ -274,12 +309,14 @@ class TimeService:
             self.active_config = None
 
     def clock_source(self):
+        """Return a recent selected source only after tracking has settled."""
         tracking = self.command(['chronyc', '-n', 'tracking'])
         if not settled(tracking):
             return None
         return selected_source(self.command(['chronyc', '-n', 'sources']))
 
     def complete(self, source):
+        """Record verified sync, disable initial stepping and defer refresh."""
         initial = not self.marker.exists()
         if initial:
             # Disarm remaining startup steps in the live daemon as well as its
@@ -294,6 +331,7 @@ class TimeService:
             self.active_config = profile
             atomic_text(self.marker, source + '\n')
         now = time.monotonic()
+        # Persist one jitter value per boot so restarts do not postpone refresh.
         if 'refresh_jitter' not in self.state:
             self.state['refresh_jitter'] = secrets.randbelow(REFRESH_JITTER_SECONDS + 1)
         self.state['last_sync'] = now
@@ -304,11 +342,13 @@ class TimeService:
             self.log('Clock settled from ' + source + '.')
 
     def step(self):
+        """Reconcile one role or peer attempt and return the next delay in s."""
         now = time.monotonic()
         gps, uplink = self.roles()
         network = self.network()
         initial = not self.marker.exists()
         if gps or uplink:
+            # Local source roles supersede any in-progress mesh peer attempt.
             if self.state.pop('pending', None):
                 self.save()
             try:
@@ -350,6 +390,8 @@ class TimeService:
                     self.configure(chrony_config(network, peer=pending['address'], initial=initial), start=True)
                     source = self.clock_source()
                     now = time.monotonic()
+                    # Require the chosen peer and a sample from this attempt.
+                    # LastRx rounds to seconds, so allow a one-second margin.
                     if (now < pending['deadline'] and source and source['mode'] == '^'
                             and source['address'] == pending['address']
                             and source['age'] <= now - pending['started'] + 1):
@@ -364,20 +406,24 @@ class TimeService:
                     pass
             now = time.monotonic()
             if now < pending['deadline']:
+                # Recheck settling every 2 s within the saved attempt window.
                 return 2
             self.configure(idle, start=False)
             self.state.pop('pending')
+            # A failed peer is excluded for 5 minutes while discovery retries.
             self.state.setdefault('retry_after', {})[pending['mac']] = now + RETRY_SECONDS
             self.save()
             self.log('Peer sync timed out; retrying discovery without continuous polling.')
             return 30
 
         self.configure(idle, start=False)
+        # Discovery uses BATMAN JSON field names, independent of table layout.
         try:
             own = (self.sysnet / 'br0/address').read_text().strip().lower()
             rows = json.loads(self.command([self.batctl, 'meshif', 'bat0', 'originators_json']))
             peers = candidates(self.registry.read_text(), rows, own, network)
         except (OSError, ValueError, subprocess.SubprocessError) as exc:
+            # Missing registry or kernel data is retried after 30 s.
             self.log('Discovery unavailable; will retry: ' + str(exc))
             return 30
         peers = [p for p in peers if now >= self.state.get('retry_after', {}).get(p['mac'], 0)]
@@ -393,12 +439,14 @@ class TimeService:
 
 
 def main():
+    """Run the sole chrony controller once or continuously under a file lock."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--once', action='store_true', help='perform one nonblocking reconciliation')
     args = parser.parse_args()
     service = TimeService()
     with (service.run / 'mesh-time-sync.lock').open('a') as lock:
         try:
+            # A duplicate owner exits immediately without touching chrony.
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             return 0

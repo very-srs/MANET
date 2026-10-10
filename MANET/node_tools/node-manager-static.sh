@@ -8,8 +8,10 @@
 
 # --- Configuration ---
 CONTROL_IFACE="br0"
+# Alfred types separate stable identity fields from changing telemetry.
 ALFRED_IDENTITY_TYPE=67
 ALFRED_DATA_TYPE=68
+# Loop sleeps in seconds, shortened until the first address allocation.
 MONITOR_INTERVAL=15
 STARTUP_MONITOR_INTERVAL=1
 
@@ -56,6 +58,7 @@ SYNCTHING_ID=""
 CLOCK_READY_SEEN=false
 IDENTITY_PUBLISH_INTERVAL=270
 
+# Send manager diagnostics to stderr with the static-manager tag.
 log() {
     manet_log NODE-MGR-STATIC "$*"
 }
@@ -101,6 +104,8 @@ load_mesh_wpa_confs() {
     [ -z "$WPA_IFACE_5_0" ] || WPA_CONF_5_0="$configs/wpa_supplicant-${WPA_IFACE_5_0}.conf"
 }
 
+# Enforce one interface/config/frequency/band tuple, with MHz frequency.
+# Update its lobby copy and set STATIC_SETTLE if restarting the radio.
 ensure_static_iface_channel() {
     local iface=$1 conf=$2 static_freq=$3 band=$4
     local lobby="${conf%.conf}-lobby.conf"
@@ -138,6 +143,7 @@ load_static_plan() {
         [ -r "$path" ] || { log "ERROR: static channel plan unreadable"; return 1; }
         contents="present:$(<"$path")"
     fi
+    # Cache by file contents so rewrites and deletion invalidate the plan.
     if [ "${STATIC_PLAN_CACHED:-}" = yes ] && [ "$contents" = "$STATIC_PLAN_CONTENTS" ]; then
         return 0
     fi
@@ -151,6 +157,7 @@ load_static_plan() {
     return 1
 }
 
+# Reconcile both band roles under CHANNEL_LOCK_FILE using the saved plan.
 ensure_static_channels() {
     # Hold the radio apply lock from plan read through enforcement, covering
     # save, writes, readiness checks and rollback. Skip a busy lock to avoid
@@ -187,6 +194,7 @@ while true; do
     NOW=$(date +%s)  # telemetry timestamp only
     MONO=$(uptime_now) || { log "WARN: boot clock unreadable; skipping this pass"; sleep 15; continue; }
 
+    # Republish with synchronized timestamps as soon as time becomes ready.
     if [ "$CLOCK_READY_SEEN" = false ] && [ -f "${MANET_TIME_RUN_DIR:-/run}/initial_time_synced" ]; then
         CLOCK_READY_SEEN=true
         LAST_PUBLISH_TIME=$NEVER; LAST_IDENTITY_PUBLISH=$NEVER; LAST_GW_CHECK=$NEVER
@@ -320,6 +328,7 @@ while true; do
         [ -n "$IS_MUMBLE_FLAG" ] && ENCODER_ARGS+=("$IS_MUMBLE_FLAG")
         UPTIME_SECS=$(awk '{print int($1)}' /proc/uptime 2>/dev/null)
         [ -n "$UPTIME_SECS" ] && ENCODER_ARGS+=("--uptime-seconds" "$UPTIME_SECS")
+        # The first loadavg field is the one-minute load, not CPU percent.
         CPU_LOAD=$(awk '{print $1}' /proc/loadavg 2>/dev/null)
         [ -n "$CPU_LOAD" ] && ENCODER_ARGS+=("--cpu-load-average" "$CPU_LOAD")
 
@@ -327,6 +336,8 @@ while true; do
         # Reject stale files and missing fixes. If gps-reader stops, its last
         # position is unsafe to publish.
         GPS_LAT=""; GPS_LON=""; GPS_ALT=""
+        # Prefer boot-clock age: accept up to 60 s old or 5 s ahead.
+        # Without written_boot, use the wall-clock timestamp age.
         if [ -f "$GPS_STATUS_FILE" ]; then
             read -r GPS_LAT GPS_LON GPS_ALT < <(jq -r --argjson max "$GPS_FIX_MAX_AGE" --argjson up "$(uptime_now)" '
                 select(.has_fix and ((.timestamp // 0) | type) == "number"

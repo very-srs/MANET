@@ -13,12 +13,14 @@ import sys
 
 
 def read_pins(directory=Path('/etc/systemd/network')):
+    """Read validated, unique MAC-to-wlan mappings from systemd link files."""
     pins = {}
     for path in sorted(directory.glob('10-wlan*.link')):
         config = configparser.ConfigParser(interpolation=None)
         config.read(path)
         name = config.get('Link', 'Name')
         mac = config.get('Match', 'MACAddress').lower()
+        # Require a matching pin filename, decimal wlan suffix and full MAC.
         if (not re.fullmatch(r'wlan[0-9]+', name)
                 or path.name != f'10-{name}.link'
                 or not re.fullmatch(r'(?:[0-9a-f]{2}:){5}[0-9a-f]{2}', mac)
@@ -31,6 +33,7 @@ def read_pins(directory=Path('/etc/systemd/network')):
 
 
 def rename_plan(pins, links):
+    """Plan temporary and final names, rejecting active or occupied targets."""
     by_name = {link['ifname']: link for link in links}
     by_mac = {}
     for link in links:
@@ -49,6 +52,7 @@ def rename_plan(pins, links):
         if source != target:
             if 'UP' in link.get('flags', []) or link.get('master'):
                 raise ValueError(f'Refusing to rename active radio {source}')
+            # Interface indices provide temporary names limited to 15 bytes.
             temporary = f'mnr{link["ifindex"]}'
             if temporary in by_name or len(temporary) > 15:
                 raise ValueError(f'Temporary radio name unavailable: {temporary}')
@@ -61,7 +65,9 @@ def rename_plan(pins, links):
 
 
 def reconcile(pins, links, run=subprocess.run):
+    """Perform both rename phases and retrigger udev after names settle."""
     moves = rename_plan(pins, links)  # Validate before any rename.
+    # Free every final name before assigning any target, allowing name swaps.
     for source, temporary, _ in moves:
         run(['ip', 'link', 'set', 'dev', source, 'name', temporary], check=True, timeout=10)
     for source, temporary, target in moves:
@@ -72,10 +78,12 @@ def reconcile(pins, links, run=subprocess.run):
         # Names are now correct, so a fresh add event can finish successfully.
         run(['udevadm', 'trigger', '--action=add'] +
             [f'/sys/class/net/{target}' for _, _, target in moves], check=True, timeout=10)
+        # Give udev 20 seconds to settle and the subprocess five more to exit.
         run(['udevadm', 'settle', '--timeout=20'], check=True, timeout=25)
 
 
 def main():
+    """Read pin files and live ip JSON, then reconcile radio names."""
     pins = read_pins()
     if pins:
         links = json.loads(subprocess.check_output(['ip', '-j', 'link', 'show'], timeout=10))

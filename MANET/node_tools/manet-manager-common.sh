@@ -6,6 +6,7 @@ detect_and_update_gateway_state() {
     local mono
     mono=$(uptime_now) || return
 
+    # LAST_GW_CHECK and GW_CHECK_INTERVAL use boot-clock seconds.
     local time_since_check=$(( mono - LAST_GW_CHECK ))
     if [ "$time_since_check" -lt "$GW_CHECK_INTERVAL" ] &&
             [ -f "$GATEWAY_STATE_FILE" ]; then
@@ -28,6 +29,7 @@ run_service_elections() {
             [ $((now - LAST_ELECTION_RUN)) -lt "$ELECTION_INTERVAL" ]; then
         return 0
     fi
+    # Record launch time before starting the independent election jobs.
     LAST_ELECTION_RUN=$now
     for election_script in "${ELECTION_DIR:-/usr/local/bin}"/*-election.sh; do
         [[ -f "$election_script" && -x "$election_script" ]] || continue
@@ -64,6 +66,7 @@ is_hosting_service() {
         local CALC_OUTPUT=$(manet-ipcalc.sh "$IPV4_NETWORK" 2>/dev/null)
         local FIRST_IP=$(printf '%s\n' "$CALC_OUTPUT" |
             awk '/HostMin/ {print $2}')
+        # MediaMTX reserves the second usable address in the mesh subnet.
         local MEDIAMTX_IPV4_VIP="${FIRST_IP%.*}.$((${FIRST_IP##*.} + 1))"
         ip addr show dev "$CONTROL_IFACE" |
             grep -q "inet $MEDIAMTX_IPV4_VIP/" && return 0
@@ -90,6 +93,7 @@ is_hosting_mumble_service() {
         local FIRST_IP
         FIRST_IP=$(printf '%s\n' "$CALC_OUTPUT" |
             awk '/HostMin/ {print $2}')
+        # Mumble reserves the third usable address in the mesh subnet.
         local MUMBLE_IPV4_VIP="${FIRST_IP%.*}.$((${FIRST_IP##*.} + 2))"
         ip addr show dev "$CONTROL_IFACE" |
             grep -q "inet $MUMBLE_IPV4_VIP/" && return 0

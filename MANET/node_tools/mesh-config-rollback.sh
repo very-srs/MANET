@@ -1,4 +1,5 @@
 #!/bin/bash
+# Snapshot and restore mesh settings across a protected configuration trial.
 . "${MANET_TOOLS_DIR:-$(dirname "${BASH_SOURCE[0]}")}/manet-common.sh" || exit 1
 # Restore configuration locally if mesh_ssid, mesh_key or ipv4_network
 # changes prevent reconnection. State persists in /var/lib across reboots.
@@ -9,6 +10,7 @@
 # immediately so repeated reboots cannot indefinitely postpone rollback.
 # A node with no prior peers commits because it has no reconnection baseline.
 
+# Print the accepted rollback operations to stderr.
 usage() {
     printf '%s\n' \
         'usage: mesh-config-rollback.sh {arm VERSION|check|commit|status}' >&2
@@ -35,6 +37,7 @@ BOOT_ID_FILE="${MANET_BOOT_ID_FILE:-/proc/sys/kernel/random/boot_id}"
 # Whole seconds on the boot clock, and this boot's ID.
 
 
+# Print BOOT_ID_FILE only when it contains lowercase hex and hyphens.
 boot_id() {
     local id
     read -r id < "$BOOT_ID_FILE" || return 1
@@ -42,10 +45,12 @@ boot_id() {
     printf '%s\n' "$id"
 }
 
+# Write a LOG_TAG-prefixed diagnostic to stderr.
 log() {
     printf '%s\n' "$LOG_TAG: $1" >&2
 }
 
+# Print distinct BATMAN peers using BATCTL and fail on an unavailable query.
 peer_count() {
     # Multiple routes to one originator count once, and a failed query must
     # never mean "solo node": mesh-peer-count.sh exits non-zero instead.
@@ -55,6 +60,7 @@ peer_count() {
 # Arm rollback
 do_arm() (
     local version="$1"
+    # Version names must contain 6 to 64 lowercase hex digits.
     [[ "$version" =~ ^[0-9a-f]{6,64}$ ]] || { log "ERROR: arm needs a valid version"; return 1; }
     [[ "$GRACE_SECONDS" =~ ^[0-9]+$ ]] || { log "ERROR: invalid rollback grace period"; return 1; }
     [ ! -f "$STATE_FILE" ] || { log "ERROR: a rollback trial is already armed"; return 1; }
@@ -73,6 +79,7 @@ do_arm() (
     mkdir "$snapshot/wpa" || return 1
     cp -aL "$MESH_CONF" "$snapshot/mesh.conf" 2>/dev/null || {
         log "ERROR: cannot snapshot $MESH_CONF"; return 1; }
+    # Snapshot WLAN supplicant configs while excluding internet-client files.
     for f in "$WPA_DIR"/wpa_supplicant-wlan*.conf; do
         [[ "$f" == *-uplink.conf ]] && continue
         [ -e "$f" ] || [ -L "$f" ] || continue

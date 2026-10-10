@@ -6,8 +6,10 @@ set -u
 ACTION="${1:-}"
 IFACE="${2:-}"
 HALOW_SVC="wpa_supplicant-s1g-wlan2.service"
+# Delay the recovery probe eight seconds after the USB event.
 DELAY=8
 
+# Send all recovery arguments as one journal message.
 log() {
     printf '%s\n' "[usb-wifi-halow-recovery] $*" |
         systemd-cat -t usb-wifi-halow-recovery

@@ -21,6 +21,7 @@ def snapshot(remaining):
     ready = True
     for line in output.splitlines():
         line = line.strip()
+        # iw groups Interface lines under a decimal phy# header.
         if re.fullmatch(r'phy#\d+', line):
             phy = line
             phys.add(phy)
@@ -46,10 +47,13 @@ def snapshot(remaining):
         raise TimeoutError('radio query exceeded enumeration deadline')
     settled = subprocess.run(['udevadm', 'settle', '--timeout=1'],
                              capture_output=True, timeout=min(2, remaining))
+    # Sort identities so output ordering alone cannot restart the quiet period.
     return (tuple(sorted(phys)), tuple(sorted(rows))), ready and settled.returncode == 0
 
 
 def wait_for_radios(timeout=60, minimum=10, quiet=5):
+    """Wait for stable bound radios, or an empty full enumeration window."""
+    # Defaults allow 60 seconds total, at least 10 elapsed and 5 unchanged.
     start = time.monotonic()
     deadline = start + timeout
     previous = None
@@ -78,12 +82,14 @@ def wait_for_radios(timeout=60, minimum=10, quiet=5):
         remaining = deadline - time.monotonic()
         if remaining > 0:
             time.sleep(min(1, remaining))
+    # A wired-only result requires the full wait with no radio ever observed.
     if last_empty and not seen_radio:
         return ()
     raise TimeoutError(detail)
 
 
 def main():
+    """Report boot enumeration and retain prior roles if readiness times out."""
     print('Waiting up to 60 seconds for wireless enumeration (10-second minimum, 5-second quiet period)...', flush=True)
     try:
         interfaces = wait_for_radios()

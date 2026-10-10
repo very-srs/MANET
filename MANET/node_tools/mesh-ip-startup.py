@@ -26,11 +26,13 @@ MAC_RE = re.compile(r"(?:[0-9a-f]{2}:){5}[0-9a-f]{2}")
 
 
 def command(*args, timeout=5):
+    """Run a checked command with a seconds timeout and return text stdout."""
     return subprocess.run(args, check=True, capture_output=True, text=True,
                           timeout=timeout).stdout
 
 
 def ipv6_ready(addresses):
+    """Require link-local IPv6 without tentative or DAD failure flags."""
     for interface in addresses:
         for address in interface.get('addr_info', []):
             flags = address.get('flags', [])
@@ -43,12 +45,15 @@ def ipv6_ready(addresses):
 
 
 def alfred_ready(status):
+    """Require Alfred primary mode and an active br0 status block."""
+    # Alfred -S lists interface status on the indented line after its name.
     return ('- mode: primary' in status
             and re.search(r'^- interface: br0\n\s+- status: active$',
                           status, re.MULTILINE) is not None)
 
 
 def originators(rows):
+    """Read and deduplicate validated originator MACs from batctl JSON."""
     # JSON avoids the shifting '*' column in batctl's human-readable output.
     if not isinstance(rows, list):
         raise ValueError('invalid BATMAN originator response')
@@ -70,6 +75,7 @@ def registry_macs(registry):
     """
     nodes = {}
     for line in registry.splitlines():
+        # Match identity fields only, then decode quoting without execution.
         match = re.fullmatch(r'NODE_([0-9a-f]{12})_(HOSTNAME|MAC_ADDRESSES)=(.*)', line)
         if match:
             key, field, value = match.groups()
@@ -88,6 +94,7 @@ def registry_macs(registry):
 def advance(state, now, peers, covered):
     """Observe one bounded window. Membership changes never restart it."""
     peers = sorted(peers)
+    # Reuse the monotonic start time even if peer membership changes.
     start = state.get('since', now)
     if not isinstance(start, (int, float)) or start > now:
         start = now
@@ -97,6 +104,7 @@ def advance(state, now, peers, covered):
     remaining = SETTLE_SECONDS - elapsed
     if remaining > 0:
         return next_state, False, f'waiting for Alfred propagation ({remaining:.0f}s remaining)'
+    # Missing identities extend the initial 10-second wait to at most 20.
     if missing:
         remaining = DISCOVERY_LIMIT_SECONDS - elapsed
         peer_list = ', '.join(sorted(missing))
@@ -111,6 +119,7 @@ def advance(state, now, peers, covered):
 
 
 def read_state(path):
+    """Read object state, returning empty on file or JSON errors."""
     try:
         state = json.loads(path.read_text())
         return state if isinstance(state, dict) else {}
@@ -119,6 +128,7 @@ def read_state(path):
 
 
 def save_state(path, state):
+    """Replace changed discovery state through a sibling temporary file."""
     contents = json.dumps(state) + '\n'
     try:
         if path.read_text() == contents:
@@ -131,11 +141,13 @@ def save_state(path, state):
 
 
 def check(state, registry_path, builder, own_mac_path):
+    """Refresh the registry and evaluate local and peer startup readiness."""
     # Refresh after bootstrap so new claims reach collision resolution.
     if callable(builder):
         builder()
     else:
         command(builder, timeout=60)
+    # Completion skips startup waits, but never skips the fresh registry build.
     if state.get('complete'):
         return state, True, ''
     if not ipv6_ready(json.loads(command('ip', '-j', '-6', 'addr', 'show', 'dev', 'br0'))):
@@ -152,6 +164,7 @@ def check(state, registry_path, builder, own_mac_path):
 
 
 def main():
+    """Persist one discovery check and return readiness as an exit status."""
     # All discovery state is volatile. Saved IPv4 preferences in /etc do not
     # bypass a reboot check. Manager restarts within a boot can reuse it.
     state_path = Path(os.environ.get('MESH_IP_STARTUP_STATE', '/var/run/mesh-ip-startup.json'))

@@ -26,6 +26,7 @@ from manet_admin_limits import ReceiveLimits
 MESH_CONF = '/etc/mesh.conf'
 STATE_DIR = '/var/lib/manet-admin'
 CONFIG_ACK_TYPE = 73
+# Alfred type IDs restrict each authenticated payload to its protocol role.
 KINDS = {70: {'mesh_config', 'mesh_config_cancel'},
          71: {'radio_state', 'radio_cancel'},
          72: {'radio_ack'}, 73: {'config_ack'},
@@ -38,20 +39,24 @@ ENVELOPE_KIND = 'manet_admin_v1'
 
 
 class AdminError(ValueError):
+    """Reject unavailable credentials or invalid admin control state."""
     pass
 
 
 def clock_ready():
+    """Check the local marker for initial verified time synchronization."""
     directory = os.environ.get('MANET_TIME_RUN_DIR', os.environ.get('MANET_ACS_RUN_DIR', '/run'))
     return (Path(directory) / 'initial_time_synced').is_file()
 
 
 def require_clock():
+    """Refuse timed control until the local clock is marked ready."""
     if not clock_ready():
         raise AdminError('Waiting for initial GPS/NTP synchronization before timed mesh control')
 
 
 def password_from_conf(path=MESH_CONF):
+    """Read the admin password and reject missing credentials."""
     password = ''
     with open(path) as source:
         for line in source:
@@ -72,6 +77,7 @@ def private_json_write(path, value):
             json.dump(value, target, separators=(',', ':'), allow_nan=False)
             target.flush()
             os.fsync(target.fileno())
+        # Flush contents before replacement and persist the directory entry.
         os.replace(temporary, path)
         directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
         try:
@@ -84,6 +90,7 @@ def private_json_write(path, value):
 
 
 def _read_json(path):
+    """Read persistent object state, returning empty state if absent."""
     try:
         with open(path) as source:
             value = json.load(source)
@@ -95,10 +102,12 @@ def _read_json(path):
 
 
 def _b64(data):
+    """Encode bytes as printable base64 for the Alfred envelope."""
     return base64.b64encode(data).decode('ascii')
 
 
 def _unb64(text, length=None):
+    """Decode a bounded base64 field and enforce its optional byte length."""
     if not isinstance(text, str) or len(text) > MAX_MESSAGE_BYTES * 2:
         raise AdminError('Invalid encrypted message field')
     data = base64.b64decode(text, validate=True)
@@ -112,6 +121,7 @@ _KEY_LOCK = threading.RLock()
 
 
 def _derive_key(password, salt, guard=nullcontext):
+    """Derive or reuse a password key, guarding only cache misses."""
     # 32 MiB. Salts are random per publisher and reused with fresh nonces.
     # Cache only in process memory. Receivers never persist derived keys.
     from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
@@ -124,6 +134,7 @@ def _derive_key(password, salt, guard=nullcontext):
             key = Scrypt(salt=b'MANET admin v1\0' + salt, length=32,
                          n=2**15, r=8, p=1).derive(password.encode('utf-8'))
         _KEYS[cache_key] = key
+        # Access order evicts the least recently accessed key at capacity.
         while len(_KEYS) > 64:
             _KEYS.popitem(last=False)
         return key
@@ -131,17 +142,21 @@ def _derive_key(password, salt, guard=nullcontext):
 
 @dataclass(frozen=True)
 class Message:
+    """Hold an authenticated payload with its timestamp and message ID."""
     payload: dict
     sent_ns: int
     message_id: str
 
     @property
     def order(self):
+        """Return the timestamp and ID pair used to order control messages."""
         return [self.sent_ns, self.message_id]
 
 
 class AdminTransport:
+    """Encrypt Alfred control messages and persist receive progress."""
     def __init__(self, conf=MESH_CONF, state_dir=STATE_DIR):
+        """Select credential, persistent state and receive-limit paths."""
         self.conf = conf
         self.state_dir = Path(state_dir)
         directory = (Path('/run/manet-admin-receive') if self.state_dir == Path(STATE_DIR)
@@ -150,6 +165,7 @@ class AdminTransport:
 
     @contextmanager
     def _locked(self):
+        """Serialize persistent sender and receiver updates across processes."""
         self.state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.state_dir.chmod(0o700)
         fd = os.open(self.state_dir / '.lock', os.O_CREAT | os.O_RDWR, 0o600)
@@ -158,6 +174,7 @@ class AdminTransport:
             yield
 
     def seal(self, type_id, payload):
+        """Encrypt a timed payload after reserving its persistent timestamp."""
         require_clock()
         if payload.get('kind') not in KINDS.get(type_id, set()):
             raise AdminError('Wrong admin message kind for Alfred type')
@@ -168,6 +185,8 @@ class AdminTransport:
             salt = _unb64(sender['salt'], 16) if sender else os.urandom(16)
             received = _read_json(self.state_dir / f'received-{type_id}.json')
             now = time.time_ns()
+            # Nanosecond timestamps advance beyond both local send history and
+            # the latest accepted command, even after a small backward step.
             sent_ns = max(now, int(sender.get('sent_ns', 0)) + 1,
                           int(received.get('order', [0])[0]) + 1)
             if sent_ns > now + FUTURE_SKEW_SECONDS * 10**9:
@@ -194,12 +213,15 @@ class AdminTransport:
 
     @staticmethod
     def _encrypt(type_id, payload, password, salt, sent_ns):
+        """Bind an encrypted payload to its Alfred channel with fresh IDs."""
         from cryptography.hazmat.primitives.ciphers.aead import AESGCM
         body = json.dumps({'payload': payload, 'sent_ns': sent_ns,
                            'message_id': secrets.token_hex(16)},
                           separators=(',', ':'), allow_nan=False).encode()
         if len(body) > MAX_MESSAGE_BYTES:
             raise AdminError('Admin message too large')
+        # A fresh 96-bit GCM nonce permits reuse of the publisher's salt/key.
+        # Authenticated channel text prevents moving ciphertext between types.
         nonce = os.urandom(12)
         ciphertext = AESGCM(_derive_key(password, salt)).encrypt(
             nonce, body, f'MANET admin v1 Alfred {type_id}'.encode())
@@ -207,8 +229,10 @@ class AdminTransport:
                 'nonce': _b64(nonce), 'ciphertext': _b64(ciphertext)}
 
     def open(self, type_id, envelope):
+        """Authenticate a timed message and enforce its clock window."""
         require_clock()
         message = self._decrypt(type_id, envelope, KINDS)
+        # Accept at most 15 minutes of age or 60 seconds of future clock skew.
         age = (time.time_ns() - message.sent_ns) / 10**9
         if not -FUTURE_SKEW_SECONDS <= age <= MAX_AGE_SECONDS:
             raise AdminError('Expired admin message or clocks out of sync')
@@ -222,6 +246,7 @@ class AdminTransport:
         return message
 
     def _decrypt(self, type_id, envelope, kinds):
+        """Validate and authenticate an envelope within receive limits."""
         from cryptography.exceptions import InvalidTag
         from cryptography.hazmat.primitives.ciphers.aead import AESGCM
         if not isinstance(envelope, dict) or envelope.get('kind') != ENVELOPE_KIND:
@@ -231,6 +256,7 @@ class AdminTransport:
         salt = _unb64(envelope.get('salt'), 16)
         nonce = _unb64(envelope.get('nonce'), 12)
         ciphertext = _unb64(envelope.get('ciphertext'))
+        # GCM appends a 16-byte authentication tag to the bounded plaintext.
         if not 16 <= len(ciphertext) <= MAX_MESSAGE_BYTES + 16:
             raise AdminError('Invalid admin ciphertext length')
         password = password_from_conf(self.conf)
@@ -252,6 +278,7 @@ class AdminTransport:
             raise
         body = json.loads(plaintext)
         payload, sent_ns, message_id = body['payload'], body['sent_ns'], body['message_id']
+        # Message IDs are 16 random bytes encoded as 32 lowercase hex digits.
         if (not isinstance(payload, dict) or payload.get('kind') not in kinds[type_id]
                 or type(sent_ns) is not int or not isinstance(message_id, str)
                 or not re.fullmatch('[0-9a-f]{32}', message_id)):
@@ -293,6 +320,7 @@ class AdminTransport:
         return True
 
     def complete(self, type_id, message):
+        """Mark the matching pending message consumed in persistent state."""
         with self._locked():
             path = self.state_dir / f'received-{type_id}.json'
             state = _read_json(path)
@@ -302,5 +330,6 @@ class AdminTransport:
 
 
 def new_version():
+    """Create a fresh transaction identifier for control and ACK matching."""
     # A fresh transaction ID prevents old ACKs authorizing an identical edit.
     return secrets.token_hex(16)

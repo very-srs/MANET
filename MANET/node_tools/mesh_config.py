@@ -28,10 +28,12 @@ LOCAL_APPLY_KEYS = LOCAL_KEYS - {'max_euds_per_node'}
 
 
 def valid_value(key, value):
+    """Validate one known setting's text, byte limits and allowed values."""
     if key not in MESH_KEYS | LOCAL_KEYS:
         return False, 'unknown setting'
     if not isinstance(value, str):
         return False, 'not a string'
+    # Reject quote delimiters, C0 controls and DEL before rendering config.
     if re.search(r'["\'\x00-\x1f\x7f]', value):
         return False, 'contains a quote or control character'
     try:
@@ -71,6 +73,7 @@ def valid_value(key, value):
 
 
 def validate_config(config, current=None, local=False):
+    """Check allowed settings and room for the provisioned node allocation."""
     if not isinstance(config, dict) or not config:
         return False, 'No configuration provided'
     allowed = MESH_KEYS | LOCAL_KEYS if local else MESH_KEYS
@@ -88,6 +91,7 @@ def validate_config(config, current=None, local=False):
             max_euds = int((current or {}).get('max_euds_per_node', '1'))
         except (ValueError, TypeError):
             return False, 'Invalid provisioned allocation size'
+        # Reserve network/broadcast, five service hosts and two node addresses.
         if network.num_addresses - 2 - 5 < max(max_euds, 1) + 2:
             return False, 'IPv4 network is too small for this node allocation and reserved services'
     return True, ''

@@ -1,10 +1,12 @@
 #!/bin/bash
 # Shared role/config handling for ACS. Empty role files mean an absent band.
 
+# Test the initial-sync marker in the configured time/ACS run directory.
 acs_clock_ready() {
     [ -f "${MANET_TIME_RUN_DIR:-${MANET_ACS_RUN_DIR:-/run}}/initial_time_synced" ]
 }
 
+# Load WPA_IFACE_2_4/5_0 and their WPA_CONF paths from local role files.
 load_mesh_roles() {
     local roles="${MANET_IFACE_STATE_DIR:-/var/lib}"
     local configs="${MANET_WPA_DIR:-/etc/wpa_supplicant}"
@@ -22,6 +24,7 @@ get_current_freq() {
     local line
     [ -f "$conf_file" ] && [ -r "$conf_file" ] || return 0
     while IFS= read -r line || [ -n "$line" ]; do
+        # Match frequency=digits anywhere in the line and keep the first match.
         if [[ "$line" =~ frequency=([0-9]+) ]]; then
             printf '%s\n' "${BASH_REMATCH[1]}"
             return 0
@@ -32,6 +35,7 @@ get_current_freq() {
 . "${MANET_TOOLS_DIR:-$(dirname "${BASH_SOURCE[0]}")}/manet-common.sh" || return 1
 # radio_iface_enabled: manet-common.sh
 
+# Require a four-digit MHz value for every enabled WPA role and one band.
 acs_configs_ready() {
     local band iface conf seen=0
     # One physical radio cannot serve both bands at once.
@@ -46,12 +50,14 @@ acs_configs_ready() {
     [ "$seen" -eq 1 ]
 }
 
+# Print rendezvous discovery state using enabled WPA role frequencies.
 acs_discovery_state() {
     python3 "${MANET_TOOLS_DIR:-$(dirname "${BASH_SOURCE[0]}")}/manet_rendezvous.py" state \
         "$(radio_iface_enabled "$WPA_IFACE_2_4" && get_current_freq "$WPA_CONF_2_4")" \
         "$(radio_iface_enabled "$WPA_IFACE_5_0" && get_current_freq "$WPA_CONF_5_0")"
 }
 
+# Check 2.4/5 GHz MHz arguments for valid shape and an enabled local band.
 acs_channels_usable() {
     local freq24="$1" freq5="$2"
     # Allow missing remote bands if at least one usable band overlaps.
@@ -61,6 +67,9 @@ acs_channels_usable() {
         { [ -n "$freq5" ] && radio_iface_enabled "$WPA_IFACE_5_0"; }
 }
 
+# Write frequency arguments under the channel lock using fresh WPA roles.
+# Mode is data/search. Activation none skips restarts, all restarts each
+# selected radio, and changed restarts radios with different live MHz.
 acs_write_channels() (
     exec 8>"${MANET_ACS_LOCK_FILE:-/var/run/channel-election.lock}"
     flock -n 8 || return 1
@@ -79,6 +88,7 @@ acs_write_channels() (
             iface=${!iface_var}
             target="$freq24"; [ "$band" != 5_0 ] || target="$freq5"
             [ -n "$target" ] && radio_iface_enabled "$iface" || continue
+            # Read parenthesized channel MHz from iw within two seconds.
             actual=$(timeout 2 iw dev "$iface" info 2>/dev/null | grep -oP 'channel.*\((\K[0-9]+)' || true)
             if [ "$activation" = all ] || [ "$actual" != "$target" ]; then
                 changed+=("$iface")
@@ -94,6 +104,7 @@ acs_write_channels() (
     python3 "${MANET_TOOLS_DIR:-$(dirname "${BASH_SOURCE[0]}")}/manet_rendezvous.py" set-mode "$mode" || return 1
     acs_mark_busy || return 1
     for iface in "${changed[@]}"; do
+        # Bound each supplicant restart to 30 seconds while holding the lock.
         timeout 30 systemctl restart "wpa_supplicant@${iface}.service" || return 1
     done
     return 0
@@ -106,6 +117,7 @@ acs_mark_busy() {
     boot=${boot//-/}
     read -r now rest < "${MESH_UPTIME_FILE:-/proc/uptime}" || return 1
     [[ "$boot" =~ ^[a-f0-9]{32}$ && "$now" =~ ^[0-9]+([.][0-9]+)?$ ]] || return 1
+    # Publish this boot ID and a busy deadline 30 boot-clock seconds ahead.
     LC_ALL=C awk -v boot="$boot" -v now="$now" 'BEGIN { printf "%s %.2f\n", boot, now + 30 }' > "${MANET_ACS_RUN_DIR:-/run}/manet-acs-busy"
 }
 
@@ -118,5 +130,6 @@ acs_agreement_busy() {
     [ "$boot" = "${own//-/}" ] || return 1
     read -r now rest < "${MESH_UPTIME_FILE:-/proc/uptime}" || return 1
     [[ "$now" =~ ^[0-9]+([.][0-9]+)?$ ]] || return 1
+    # Accept only a deadline within 125 seconds on the current boot clock.
     LC_ALL=C awk -v expiry="$expiry" -v now="$now" 'BEGIN { exit !(0 <= expiry - now && expiry - now <= 125) }'
 }

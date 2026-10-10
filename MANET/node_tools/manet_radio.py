@@ -92,6 +92,7 @@ def halow_channel_options(region=None):
     """The channel/bandwidth menu the UI renders, for this node's region."""
     region = region or halow_region()
     plan = halow_plan(region)
+    # Sort bandwidth labels by numeric MHz, not their text representation.
     order = sorted(plan, key=lambda bw: int(bw[:-3]))
     return {
         'region': region,
@@ -129,6 +130,7 @@ def halow_channel_for_frequency(freq_khz, region=None):
     plan = halow_plan(region)
     for bw, channels in plan.items():
         for ch, khz in channels.items():
+            # Accept frequency readback less than 100 kHz from the plan center.
             if abs(freq_khz - khz) < 100:
                 return str(ch), bw
     return '', ''
@@ -187,12 +189,14 @@ def _json_from_text(text):
 def _channel_from_frequency(freq_value):
     """Resolve a HaLow frequency in Hz, kHz or MHz to channel and MHz."""
     try:
+        # Extract the numeric part before inferring units by magnitude.
         m = re.search(r'[0-9.]+', str(freq_value))
         freq = float(m.group(0)) if m else None
     except Exception:
         return '', ''
     if freq is None:
         return '', ''
+    # HaLow magnitudes distinguish Hz, kHz and MHz without a unit suffix.
     if freq > 1000000:
         freq_khz = freq / 1000.0
         freq_mhz = freq / 1000000.0
@@ -226,6 +230,7 @@ def _parse_morse_channel_output(text):
         freq = None
         bw = None
         idx = None
+        # Text output accepts key:value or key=value with optional quotes.
         for key in ('channel_frequency', 'frequency', 'freq_khz',
                     'freq_hz', 'op_chan_freq'):
             m = re.search(rf'{key}\s*[:=]\s*"?([0-9.]+)"?', text, re.I)
@@ -262,6 +267,7 @@ def _parse_morse_channel_output(text):
 def get_halow_driver_info(iface='wlan2'):
     """Read HaLow runtime data from Morse tooling, falling back to config."""
     binaries = ['/usr/local/bin/morse_cli', 'morse_cli']
+    # Try alternate Morse CLI argument layouts, preferring JSON.
     variants = [
         lambda b: [b, '-i', iface, 'channel', '-j'],
         lambda b: [b, '-i', iface, 'channel', '--json'],
@@ -280,6 +286,7 @@ def get_halow_driver_info(iface='wlan2'):
                 continue
             seen.add(key)
             try:
+                # Bound each CLI attempt to three seconds before trying another.
                 r = subprocess.run(cmd, capture_output=True, text=True,
                                    timeout=3)
             except Exception:
@@ -292,6 +299,7 @@ def get_halow_driver_info(iface='wlan2'):
                 return parsed
 
     info = {}
+    # When runtime readback fails, expose the configured S1G channel instead.
     for conf_path in (
         '/etc/wpa_supplicant/wpa_supplicant-wlan2-s1g.conf',
         '/etc/wpa_supplicant/wpa_supplicant_s1g-wlan2.conf',
@@ -301,6 +309,7 @@ def get_halow_driver_info(iface='wlan2'):
                 txt = f.read()
         except Exception:
             continue
+        # Supplicant assignments supply decimal channel and operating class.
         m = re.search(r'channel\s*=\s*(\d+)', txt)
         if m:
             info['channel'] = m.group(1)
@@ -332,6 +341,7 @@ def parse_phy_txpower_options(iw_phy_text):
     options = {}
     cur_phy = None
     for line in (iw_phy_text or '').splitlines():
+        # Wiphy headers scope parenthesized channel dBm limits to one PHY.
         pm = re.match(r'Wiphy phy(\d+)', line)
         if pm:
             cur_phy = pm.group(1)
@@ -360,12 +370,14 @@ def txpower_choices_from_cap(cap_dbm):
     return [str(v) for v in range(cap, 0, -1)]
 
 def txpower_request_allowed(requested, cap_dbm):
+    """Accept power at or below a known cap, or any value without a cap."""
     try:
         return not cap_dbm or float(requested) <= float(cap_dbm)
     except Exception:
         return False
 
 def unsupported_txpower_response(iface, requested, cap_dbm, options=None):
+    """Build the UI error and choices for a request above the PHY cap."""
     opts = options if options is not None else txpower_choices_from_cap(cap_dbm)
     return {
         'ok': False,
@@ -389,6 +401,7 @@ def get_iface_txpower_cap(iface):
         if m:
             phy = m.group(1)
         else:
+            # iw encodes the PHY index in the upper 32 bits of wdev.
             m = re.search(r'wdev (0x[0-9a-fA-F]+)', r.stdout)
             if m:
                 phy = str(int(m.group(1), 16) >> 32)
@@ -399,6 +412,7 @@ def get_iface_txpower_cap(iface):
         options = parse_phy_txpower_options(r.stdout).get(phy, [])
         if not options:
             return current
+        # Compare numeric powers to select the highest advertised limit.
         return _fmt_dbm(max(options, key=lambda v: float(v)))
     except Exception:
         return ''
@@ -438,6 +452,7 @@ def is_halow_iface(iface, *, halow_ifaces=None, driver_query=None):
 
 
 def read_iface_txpower_dbm(iface):
+    """Read current iw power in dBm, returning empty when unavailable."""
     try:
         r = subprocess.run(['iw', 'dev', iface, 'info'],
                            capture_output=True, text=True, timeout=5)
@@ -480,12 +495,14 @@ def set_iface_txpower_verified(iface, dbm, retries=6, delay=0.25):
         if flags & 1:
             raise ValueError(f'Cannot change {iface} power: '
                              f'{phy} also serves {other.name}')
+    # iw accepts fixed power in hundredths of a dBm, with a five-second limit.
     subprocess.run(
         ['iw', 'phy', phy, 'set', 'txpower', 'fixed',
          str(int(float(requested) * 100))],
         capture_output=True, text=True, check=True, timeout=5
     )
     actual = ''
+    # Default: six readbacks, each after 250 ms, with 0.05 dBm tolerance.
     for _ in range(retries):
         time.sleep(delay)
         actual = read_iface_txpower_dbm(iface)
@@ -508,6 +525,7 @@ def set_iface_txpower_verified(iface, dbm, retries=6, delay=0.25):
 # They affect this node only. Alfred coordinates mesh-wide application.
 
 def apply_txpower(iface, dbm):
+    """Validate and apply local Wi-Fi power, returning verified readback."""
     if not iface or dbm is None:
         raise ValueError('Missing iface or dbm')
     if is_halow_iface(iface):
@@ -538,6 +556,7 @@ def _s1g_supplicant_healthy(settle=6):
     is-active.
     """
     def counter():
+        """Read the restart count, using zero when its output is not numeric."""
         r = subprocess.run(['systemctl', 'show', '-p', 'NRestarts', '--value',
                             S1G_SERVICE], capture_output=True, text=True, timeout=10)
         try:
@@ -545,6 +564,7 @@ def _s1g_supplicant_healthy(settle=6):
         except ValueError:
             return 0
 
+    # Default settling time is six seconds between restart-count samples.
     before = counter()
     time.sleep(settle)
     active = subprocess.run(['systemctl', 'is-active', '--quiet', S1G_SERVICE],
@@ -553,6 +573,7 @@ def _s1g_supplicant_healthy(settle=6):
 
 
 def apply_halow_channel(channel, bw='2MHz', dbm=None):
+    """Persist and apply a regional HaLow channel with restart recovery."""
     if dbm is not None:
         return {'ok': False, 'error': HALOW_POWER_FIXED}
     if not channel:
@@ -593,6 +614,7 @@ def apply_halow_channel(channel, bw='2MHz', dbm=None):
     # s1g_prim_1mhz_chan_index selects a 1 MHz slice and must be 0..bw-1.
     # Clamp it when narrowing the channel to avoid config rejection.
     def _clamp_prim_index(text):
+        """Clamp the primary 1 MHz slice index to the channel width."""
         idx = re.search(r's1g_prim_1mhz_chan_index\s*=\s*(\d+)', text)
         if not idx:
             return text
@@ -600,6 +622,7 @@ def apply_halow_channel(channel, bw='2MHz', dbm=None):
         return re.sub(r'(s1g_prim_1mhz_chan_index\s*=\s*)\d+',
                       rf'\g<1>{wanted}', text)
 
+    # Replace numeric S1G fields while preserving their assignment prefixes.
     content = re.sub(r'(channel\s*=\s*)\d+', rf'\g<1>{s1g_channel}', previous)
     content = re.sub(r'(op_class\s*=\s*)\d+', rf'\g<1>{op_class}', content)
     content = re.sub(r'(s1g_prim_chwidth\s*=\s*)\d+', rf'\g<1>{chwidth}', content)
@@ -607,6 +630,7 @@ def apply_halow_channel(channel, bw='2MHz', dbm=None):
     with open(HALOW_WPA_CONF, 'w') as f:
         f.write(content)
 
+    # Morse takes center frequency in kHz and operating/primary width in MHz.
     result = subprocess.run(
         ['morse_cli', '-i', 'wlan2', 'channel',
          '-c', str(freq_khz), '-o', str(bw_mhz), '-p', str(bw_mhz)],
@@ -636,11 +660,14 @@ def apply_halow_channel(channel, bw='2MHz', dbm=None):
 
 
 def acs_enabled():
+    """Recognize an enabled acs assignment in the local mesh config."""
     conf = Path(os.environ.get('MANET_MESH_CONF', '/etc/mesh.conf')).read_text()
+    # Match a complete assignment, ignoring case and trailing whitespace.
     return bool(re.search(r'^acs=(y|yes|1|true)\s*$', conf, re.I | re.M))
 
 
 def validate_wifi_channel(band, channel):
+    """Require static mode and return the local role plus target MHz."""
     if acs_enabled():
         raise ValueError('Wi-Fi channels are managed by ACS; select static mode before changing them')
     if band not in ('2.4', '5'):
@@ -654,6 +681,7 @@ def validate_wifi_channel(band, channel):
         raise ValueError('Invalid Wi-Fi mesh role on this node')
     if type(channel) is bool or not str(channel).isdigit():
         raise ValueError('Invalid Wi-Fi channel')
+    # Conventional channel numbers use 5 MHz steps from each band base.
     freq = (2407 if band == '2.4' else 5000) + 5 * int(channel)
     if not static_channels.valid(band, freq):
         raise ValueError('Invalid channel for this Wi-Fi band')
@@ -665,6 +693,7 @@ CHANNEL_LOCK_TIMEOUT = 10
 
 @contextmanager
 def channel_lock(path):
+    """Serialize channel writes with a ten-second acquisition deadline."""
     with path.open('a') as lock:
         deadline = time.monotonic() + CHANNEL_LOCK_TIMEOUT
         while True:
@@ -674,16 +703,19 @@ def channel_lock(path):
             except BlockingIOError as error:
                 if time.monotonic() >= deadline:
                     raise RuntimeError('Another channel change is in progress; retry shortly') from error
+                # Poll nonblocking flock every 50 ms until the deadline.
                 time.sleep(0.05)
         yield
 
 
 def apply_wifi_channel(band, channel, dbm=None):
+    """Apply a static band plan, restoring files and radio state on error."""
     iface, freq = validate_wifi_channel(band, channel)
     wpa = Path(os.environ.get('MANET_WPA_DIR', '/etc/wpa_supplicant'))
     plan = Path(os.environ.get('MANET_STATIC_CHANNELS', static_channels.PATH))
     lock_path = Path(os.environ.get('MANET_ACS_LOCK_FILE', '/run/channel-election.lock'))
     requested = actual = ''
+    # Revalidate policy and role after acquiring the shared channel lock.
     with channel_lock(lock_path):
         iface, freq = validate_wifi_channel(band, channel)
         # A node lacking this band still persists and ACKs the mesh's plan.
@@ -738,11 +770,13 @@ def apply_wifi_channel(band, channel, dbm=None):
 
 
 def apply_uplink_wifi(ssid, password, enabled=True):
+    """Configure USB Wi-Fi uplink credentials through the local helper."""
     ssid = (ssid or '').strip()
     if not ssid:
         raise ValueError('SSID is required')
     if not password:
         raise ValueError('Password is required')
+    # Allow 45 seconds for credential activation and uplink reconfiguration.
     r = subprocess.run(
         [USB_WIFI_UPLINK_SCRIPT, 'set', ssid, password, '1' if enabled else '0'],
         capture_output=True, text=True, timeout=45)

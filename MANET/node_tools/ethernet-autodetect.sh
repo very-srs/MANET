@@ -1,10 +1,13 @@
 #!/bin/bash
+# Detect a wired uplink or EUD and reconcile bridge, AP and gateway state.
 . "${MANET_TOOLS_DIR:-$(dirname "${BASH_SOURCE[0]}")}/manet-common.sh" || exit 1
+# Print the accepted detection arguments to stderr.
 usage() {
     printf '%s\n' \
         'usage: ethernet-autodetect.sh [--hotplug] [--iface IFACE]' \
         '       [--mode {gateway|wired-eud}]' >&2
 }
+# Reject malformed options before opening logs or changing network state.
 validate_args() {
     while [ $# -gt 0 ]; do
         case "$1" in
@@ -30,7 +33,7 @@ validate_args "$@" || exit 1
 # Wired EUD: bridge end0 to br0.
 # wlan1 serves the AP in wireless/auto mode without a cable.
 # Wired mode or auto with a wired EUD returns wlan1 to mesh.
-# As a gateway, wlan1 serves the AP only in wireless EUD mode.
+# As a gateway, the configured AP runs in wireless or auto EUD mode.
 
 # Enable xtrace and tee-to-journal only for debugging to limit dispatcher load.
 if [ -f /etc/eth-detect-debug ]; then
@@ -54,6 +57,7 @@ hostapd_serving() {
         END { exit !(t == "AP" && s) }'
 }
 
+# Start hostapd, checking a running unit's AP twice with a 2 s pause.
 start_hostapd_checked() {
     local want
     want=$(grep -E '^[[:space:]]*interface=' /etc/hostapd/hostapd.conf 2>/dev/null \
@@ -113,6 +117,7 @@ LOCK_FILE="/var/run/ethernet-autodetect.lock"
 # events on the same iface+IP don't rerun the cleanup/reconfigure cycle.
 NO_INET_STATE="/var/run/eth-no-internet.state"
 UPLINK_SPEED="${MANET_UPLINK_SPEED:-/usr/local/bin/manet-uplink-speed.sh}"
+# Retry a cached no-internet verdict after 600 boot-clock seconds.
 NO_INET_RECHECK_SECS=600
 
 # Physical link decision: "<iface> <mode> <carrier_changes>".
@@ -125,10 +130,12 @@ CARRIER_GEN_STATE="/var/run/eth-carrier-generation"
 NETWORKD_DIR="/etc/systemd/network"
 ACTIVE_CONFIG="${NETWORKD_DIR}/20-${ETH_IFACE}.network"
 
+# Send a prefixed diagnostic to the Ethernet detection journal tag.
 log() {
     printf '%s\n' "ETH-DETECT: $1" | systemd-cat -t ethernet-autodetect
 }
 
+# Print the kernel carrier-change counter for ETH_IFACE.
 carrier_generation() {
     cat "/sys/class/net/$ETH_IFACE/carrier_changes" 2>/dev/null
 }
@@ -137,6 +144,7 @@ carrier_generation() {
 # during the probe makes that count stale so the queued event re-detects.
 DETECT_GENERATION=""
 
+# Save mode $1 and DETECT_GENERATION, or the live count, in CARRIER_GEN_STATE.
 record_carrier_generation() {
     local generation now
     now=$(carrier_generation)
@@ -176,6 +184,7 @@ internet_probe_confirmed() {
 
     [ -f /var/run/mesh-gateway.state ] && attempts=3
 
+    # Use two probes, or three for an active gateway, with 3 s between failures.
     for i in $(seq 1 "$attempts"); do
         internet_probe "$iface" && return 0
         [ "$i" -lt "$attempts" ] && sleep 3
@@ -184,6 +193,8 @@ internet_probe_confirmed() {
     return 1
 }
 
+# Run the unplug hook for ETH_IFACE with optional reason and force arguments.
+# Reuse the held Ethernet lock and fall back to local cleanup if no hook exists.
 run_no_carrier_cleanup() {
     log "${1:-No carrier on $ETH_IFACE} - running unplug cleanup"
 
@@ -203,8 +214,8 @@ run_no_carrier_cleanup() {
     fi
 }
 
-# Classify incoming frames while waiting for DHCP. A silent static LAN, slow
-# server or starting switch must not become a bridged DHCP-serving port.
+# Classify incoming frames while waiting for DHCP. Network evidence keeps
+# the port routed. Inconclusive captures use the wired-EUD fallback.
 # Outputs:
 #   network <reason>   router, switch or multiple devices detected
 #   eud                exactly one device requesting an address
@@ -213,6 +224,7 @@ LINK_CAPTURE=""
 LINK_CAPTURE_PID=""
 EUD_DECISION_SECS=5
 
+# Set LINK_CAPTURE and LINK_CAPTURE_PID for ETH_IFACE and install cleanup traps.
 start_link_capture() {
     command -v tcpdump >/dev/null 2>&1 || return 0
     LINK_CAPTURE=$(mktemp /var/run/eth-detect-capture.XXXXXX) || return 0
@@ -229,6 +241,7 @@ start_link_capture() {
     LINK_CAPTURE_PID=$!
 }
 
+# Stop LINK_CAPTURE_PID, remove LINK_CAPTURE and clear both globals.
 stop_link_capture() {
     [ -n "$LINK_CAPTURE_PID" ] && kill "$LINK_CAPTURE_PID" 2>/dev/null
     [ -n "$LINK_CAPTURE_PID" ] && wait "$LINK_CAPTURE_PID" 2>/dev/null
@@ -237,6 +250,7 @@ stop_link_capture() {
     LINK_CAPTURE=""
 }
 
+# Print network/reason, eud or unknown from LINK_CAPTURE for ETH_IFACE.
 classify_link() {
     local own size
     [ -n "$LINK_CAPTURE" ] && [ -f "$LINK_CAPTURE" ] || { echo unknown; return; }
@@ -246,6 +260,9 @@ classify_link() {
         return
     fi
     own=$(cat "/sys/class/net/$ETH_IFACE/address" 2>/dev/null)
+    # tcpdump -nn -e places source MAC in field 2 and destination in field 4.
+    # Router, switch-protocol or DHCP-server evidence outweighs client requests.
+    # Switch evidence includes link-local/Cisco multicast or STP/LLDP/CDP/LACP.
     awk -v own="${own,,}" '
         { src = tolower($2); dst = tolower($4); sub(/,$/, "", dst) }
         /router advertisement/ { network = network ? network : "router-advertisement" }
@@ -265,6 +282,8 @@ classify_link() {
         }' "$LINK_CAPTURE"
 }
 
+# Set DETECTED_MODE after checking ETH_IFACE, or exit on cleanup/cached state.
+# Use carrier-generation and no-internet state to skip repeated probing.
 detect_hotplug_mode() {
     local carrier ip verdict waited
 
@@ -390,6 +409,7 @@ detect_hotplug_mode() {
 
 # Ensure only one instance runs
 exec 200>"$LOCK_FILE"
+# Wait at most 90 seconds for another local Ethernet policy operation.
 flock -w 90 200 || { log "Ethernet policy busy; carrier detection deferred"; exit 1; }
 
 # Parse CLI argument
@@ -498,6 +518,7 @@ if [ -f /var/lib/ap_interface ]; then
 fi
 
 # Get existing IP if any
+# Extract the first dotted IPv4 after inet, leaving off the CIDR mask.
 EXISTING_IP=$(ip -4 addr show dev "$ETH_IFACE" | grep -oP 'inet \K[\d.]+' | head -1)
 
 # Configure the detected mode
@@ -533,6 +554,7 @@ if [ "$DETECTED_MODE" == "gateway" ]; then
 
     sysctl -q net.ipv4.ip_forward=1
 
+    # The third field of a default-via route is the router IPv4 address.
     DEFAULT_GW=$(ip route show dev "$ETH_IFACE" | grep default | awk '{print $3}')
     log "Default gateway: ${DEFAULT_GW:-none}"
 

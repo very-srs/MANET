@@ -83,18 +83,22 @@ def range_residual(a, b, measured):
 
 
 def has_fix(sample):
+    """Test whether a sample reports a horizontal fix."""
     return sample is not None and sample.get("mode", 0) >= 2 \
         and sample.get("lat") is not None and sample.get("lon") is not None
 
 
 class Monitor:
+    """Track range consistency, receiver quarantine and attribution."""
     def __init__(self):
+        """Initialize GNSS history, pair results and failure epochs."""
         self.samples = {}       # node -> deque of samples, oldest first
         self.edges = {}         # frozenset(a, b) -> latest test result
         self.log = deque()      # every test result within EDGE_TTL_S, oldest first
         self.last_failure = {}  # node -> epoch of its latest failed pair
 
     def add_gnss(self, node, sample):
+        """Retain ordered fixes and recompute equal-epoch revisions."""
         hist = self.samples.setdefault(node, deque())
         if hist and sample["mono"] < hist[-1]["mono"]:
             return
@@ -147,6 +151,7 @@ class Monitor:
 
     @staticmethod
     def _evaluate(result, sa, sb):
+        """Update a pair result from its aligned GNSS samples."""
         r = result["range_m"]
         residual, h = range_residual(sa, sb, r)
         in_scope = r >= SCOPE_M
@@ -175,6 +180,7 @@ class Monitor:
                 self.last_failure[n] = max(self.last_failure.get(n, e["mono"]), e["mono"])
 
     def live_edge(self, a, b, now):
+        """Return a pair result within the evidence lifetime."""
         e = self.edges.get(frozenset((a, b)))
         return e if e is not None and now - e["mono"] <= EDGE_TTL_S else None
 
@@ -188,6 +194,7 @@ class Monitor:
         return out
 
     def current_fix(self, node, now):
+        """Test whether the latest sample still supplies a live fix."""
         hist = self.samples.get(node)
         return bool(hist) and has_fix(hist[-1]) and now - hist[-1]["mono"] <= FIX_TTL_S
 
@@ -201,11 +208,13 @@ class Monitor:
         for e in disagree:
             partners.setdefault(e["a"], set()).add(e["b"])
             partners.setdefault(e["b"], set()).add(e["a"])
+        # Two disagreeing partners confirm a marginal failure at either end.
         failed = [e for e in disagree if e["failed"]
                   or len(partners[e["a"]]) >= 2 or len(partners[e["b"]]) >= 2]
         for e in failed:
             self._note_failure(dict(e, failed=True))
         covers, exact = _near_minimum_covers([(e["a"], e["b"]) for e in failed])
+        # Attribution requires membership in every retained explanation.
         suspected = set.intersection(*covers) if covers else set()
 
         out = {}
@@ -220,6 +229,7 @@ class Monitor:
                 "last_failure": last,
                 "attributed": exact,
             }
+            # A missing fix takes display precedence over retained quarantine.
             if n not in fixed:
                 state = NO_FIX
             elif n in suspected:
@@ -243,6 +253,7 @@ def _near_minimum_covers(edges):
     if not edges:
         return [], True
     nodes = sorted({n for e in edges for n in e})
+    # Including an empty explanation prevents attribution above the limit.
     if len(nodes) > MAX_COVER_NODES:
         return [set(nodes), set()], False
     found, smallest = [], None
@@ -274,6 +285,7 @@ class Scheduler:
     """
 
     def __init__(self, monitor):
+        """Share monitor evidence and initialize acquisition cooldowns."""
         self.m = monitor
         self.cooldown = {}  # frozenset(a, b) -> mono before which it is not tried
 
@@ -289,15 +301,18 @@ class Scheduler:
         log = [e for e in self.m.log if now - e["mono"] <= EDGE_TTL_S]
 
         def useful(a, b):
+            """Reject cooling, unreachable or recently short pairs."""
             if self.cooldown.get(frozenset((a, b)), 0) > now or not reachable(a, b):
                 return False
             e = self.m.live_edge(a, b, now)
             return e is None or e["range_m"] >= SCOPE_M
 
         def edge_age(a, b):
+            """Return pair age, treating unmeasured pairs as oldest."""
             e = self.m.edges.get(frozenset((a, b)))
             return now - e["mono"] if e else float("inf")
 
+        # Prioritize reported disagreement onsets before routine audits.
         for u in sorted((n for n in onsets if n in nodes), key=onsets.get):
             since = onsets[u]
             tested = {e["b"] if e["a"] == u else e["a"] for e in log
@@ -306,6 +321,8 @@ class Scheduler:
                 continue
             candidates = [p for p in nodes if p != u and p not in tested and useful(u, p)]
             if candidates:
+                # Prefer passing partners, then no disagreement, then oldest
+                # pair age. Node order breaks remaining ties.
                 candidates.sort(key=lambda p: (states.get(p, (UNCHECKED,))[0] != RANGE_CONSISTENT,
                                                p in onsets, -edge_age(u, p)))
                 return u, candidates[0]
@@ -315,6 +332,7 @@ class Scheduler:
             if e["in_scope"]:
                 for n in (e["a"], e["b"]):
                     last_test[n] = e["mono"]
+        # Untested nodes sort before those with an expired audit interval.
         due = sorted((n for n in nodes if now - last_test.get(n, -math.inf) >= AUDIT_S),
                      key=lambda n: last_test.get(n, -math.inf))
         for u in due:

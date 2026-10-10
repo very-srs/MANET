@@ -15,6 +15,7 @@ LED_DIR="${MANET_LED_DIR:-/sys/class/leds}"
 RED_NAMES="PWR led1 red:power power"
 GREEN_NAMES="ACT led0 green:status status"
 
+# Print the first writable LED path in LED_DIR from a space-separated list.
 find_led() {
     local name
     for name in $1; do
@@ -26,6 +27,7 @@ find_led() {
     return 1
 }
 
+# Apply a trigger or brightness to the LED path in $1.
 # mode: heartbeat | on | off
 set_led() {
     local path="$1" mode="$2" max=1
@@ -39,6 +41,7 @@ set_led() {
     # Disable the trigger before setting brightness so it cannot overwrite it.
     echo none > "$path/trigger" 2>/dev/null || true
     [ -r "$path/max_brightness" ] && max=$(cat "$path/max_brightness" 2>/dev/null)
+    # Use binary brightness if the kernel limit is empty or nonnumeric.
     case "$max" in ''|*[!0-9]*) max=1 ;; esac
 
     if [ "$mode" = on ]; then

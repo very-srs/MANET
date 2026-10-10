@@ -35,10 +35,12 @@ HALOW_DEFAULT_CHANNEL = {
 EU_MORSE_OPTIONS = 'options morse enable_auto_duty_cycle=0 enable_auto_mpsw=0'
 # Global S1G operating classes identify the US plan. Other classes mean EU.
 US_OP_CLASSES = {'68', '69', '70', '71'}
+# Match a two-character country with optional paired quotes and indentation.
 COUNTRY_LINE = re.compile(r'^(\s*)country=("?)[A-Za-z0-9]{2}\2[ \t]*$', re.M)
 
 
 def paths():
+    """Resolve the regulatory configuration paths under the selected root."""
     root = Path(os.environ.get('MANET_REGION_ROOT', '/'))
     return {
         'mesh': root / 'etc/mesh.conf',
@@ -66,21 +68,26 @@ def write(path, content):
 
 
 def conf_value(text, key):
+    """Read one unindented assignment and strip optional double quotes."""
     match = re.search(rf'^{re.escape(key)}=(.*)$', text, re.M)
     return match[1].strip().strip('"') if match else ''
 
 
 def set_conf(text, key, value):
+    """Replace all unindented copies of a key or append it when absent."""
     if re.search(rf'^{re.escape(key)}=', text, re.M):
         return re.sub(rf'^{re.escape(key)}=.*$', f'{key}={value}', text, flags=re.M)
     return text + ('' if text.endswith('\n') or not text else '\n') + f'{key}={value}\n'
 
 
 def halow_region(country):
+    """Map the listed European countries to the Morse EU region."""
     return 'EU' if country in EU_HALOW_COUNTRIES else country
 
 
 def morse_options(text, halow):
+    """Replace the Morse country and reconcile EU-specific options."""
+    # Retain unrelated module options while replacing managed country lines.
     lines = [line for line in text.splitlines()
              if not re.match(r'options morse country=', line)
              and line.strip() != EU_MORSE_OPTIONS]
@@ -91,6 +98,7 @@ def morse_options(text, halow):
 
 
 def s1g_on_us_plan(text):
+    """Identify a US channel plan from its numeric operating class."""
     match = re.search(r'^\s*op_class=(\d+)', text, re.M)
     return bool(match) and match[1] in US_OP_CLASSES
 
@@ -106,6 +114,7 @@ def s1g_config(text, halow):
     if family_changed:
         channel, op_class, chwidth, index = HALOW_DEFAULT_CHANNEL[
             'US' if halow == 'US' else 'other']
+        # Preserve indentation while replacing each plan-dependent field.
         for key, value in (('channel', channel), ('op_class', op_class),
                            ('s1g_prim_chwidth', chwidth),
                            ('s1g_prim_1mhz_chan_index', index)):
@@ -114,6 +123,7 @@ def s1g_config(text, halow):
 
 
 def apply():
+    """Update radio country files and finally record the HaLow region."""
     p = paths()
     mesh = p['mesh'].read_text()
     country = conf_value(mesh, 'regulatory_domain').upper() or 'US'
@@ -124,6 +134,7 @@ def apply():
     changed = []
 
     def update(path, content):
+        """Write and record changed or absent files."""
         if not path.exists() or path.read_text() != content:
             write(path, content)
             changed.append(str(path))
@@ -149,6 +160,7 @@ def apply():
 
 
 def main(argv):
+    """Apply regulatory configuration and report changed paths or errors."""
     if argv != ['apply']:
         print(__doc__.strip().splitlines()[-1], file=sys.stderr)
         return 2

@@ -1,7 +1,9 @@
 #!/bin/bash
+# Select a reachable mesh gateway and maintain its IPv4 default route.
 . "${MANET_TOOLS_DIR:-$(dirname "${BASH_SOURCE[0]}")}/manet-common.sh" || exit 1
 set -euo pipefail
 
+# Pending setup sleeps 1 s during the first 90 s, then 10 s between polls.
 POLL_INTERVAL=10
 STARTUP_POLL_INTERVAL=1
 # Bound the extra polling when no gateway exists. /proc/uptime is unaffected
@@ -19,6 +21,7 @@ SWITCH_SUSTAIN=60
 SWITCH_HOLD=300
 UNREACHABLE_POLLS=2
 
+# Keep one route manager active for the lifetime of this process.
 exec 200>"$LOCK_FILE"
 flock -n 200 || exit 0
 
@@ -28,6 +31,8 @@ log() {
     printf '%s\n' "GW-ROUTE-MGR: $*" >&2
 }
 
+# Sleep using FAST_POLL_UNTIL and the poll intervals.
+# A ready argument skips the faster startup polling.
 poll_wait() {
     local uptime unused
     read -r uptime unused < /proc/uptime
@@ -43,6 +48,8 @@ poll_wait() {
 # (measured by manet-uplink-speed.sh for Ethernet gateways).
 # Ignore batman's "*" choice: it neither sets IPv4 routes nor applies a timer.
 gateway_scores() {
+    # Read the first MAC, the parenthesized rate and optional ]: down/up.
+    # Keep numeric MACs and omit headers for stable parsing.
     batctl gwl -H -n 2>/dev/null | awk '
         {
             mac = ""
@@ -66,6 +73,7 @@ noticeably_better() {
         'BEGIN { exit !(c >= cur * r && c - cur >= g) }'
 }
 
+# Require one ping reply from the supplied gateway IP within 1 s.
 reachable() {
     ping -c 1 -W 1 "$1" >/dev/null 2>&1
 }
@@ -73,6 +81,8 @@ reachable() {
 
 log "Starting Gateway Route Manager (pending startup ${STARTUP_POLL_INTERVAL}s, steady ${POLL_INTERVAL}s)"
 
+# Print the registry IPv4 address associated with a gateway MAC.
+# Match its MAC list, then read the following address for that node.
 lookup_gateway_ip_by_mac() {
     local gw_mac="$1"
     local reg="/var/run/mesh_node_registry"
@@ -104,10 +114,11 @@ lookup_gateway_ip_by_mac() {
 cur_mac="" pending_mac="" pending_since=0 unreachable=0
 last_switch=$(( $(uptime_now) - SWITCH_HOLD ))
 while true; do
+    # Inspect the first default route to preserve a local uplink route.
     cur="$(ip route show default | head -n1 || true)"
     if [ -f /var/run/mesh-gateway.state ]; then
         # Only log when actually removing a route: this branch runs every
-        # poll cycle while in gateway mode, and log() forks date.
+        # poll cycle while in gateway mode.
         if [[ " $cur " == *" dev br0 "* ]]; then
             ip route del default dev br0 2>/dev/null || true
             log "Local gateway mode active; removed mesh-managed default route"

@@ -6,6 +6,7 @@
 set -euo pipefail
 
 # Input: Find the first IPv6 prefix line in radvd config
+# Match a prefix directive starting with fd and read its CIDR field.
 PREFIX_LINE=$(grep -m 1 '^[[:space:]]*prefix[[:space:]]\+fd[0-9a-fA-F:]\+/[0-9]\+' /etc/radvd-mesh.conf || echo "")
 PREFIX_CIDR=$(printf '%s\n' "$PREFIX_LINE" |
     awk '{print $2}') # e.g., fd01:ed20:ecb4::/48
@@ -70,6 +71,8 @@ if ! [[ "$EXPANDED_PREFIX" =~ ^fd[0-9a-fA-F]{2}:[0-9a-fA-F]{4}:[0-9a-fA-F]{4}:[0
 fi
 
 # Hash the normalized /64 prefix into a deterministic suffix.
+# This hash selects an address, not an authentication value.
+# The SHA-256 fallback can produce a different suffix than MD5.
 if command -v md5sum >/dev/null; then
     HASH_BYTE=$(printf '%s' "${EXPANDED_PREFIX}-mediamtx" | md5sum | cut -c1-2)
 elif command -v sha256sum >/dev/null; then

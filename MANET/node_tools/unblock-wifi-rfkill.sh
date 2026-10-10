@@ -1,4 +1,5 @@
 #!/bin/sh
+# Clear software Wi-Fi blocks while leaving hardware-blocked radios alone.
 for rfkill in /sys/class/rfkill/rfkill*; do
     [ -e "$rfkill/type" ] || continue
     [ "$(cat "$rfkill/type" 2>/dev/null)" = "wlan" ] || continue

@@ -6,10 +6,12 @@ set -u
 
 STATE_FILE="/var/lib/mesh_identity"
 
+# Write a prefixed diagnostic to stderr.
 log() {
     printf '%s\n' "CLONE-ID: $1" >&2
 }
 
+# Print the first available MAC in wired-first interface order.
 primary_mac() {
     for iface in end0 eth0 wlan0 wlan1 wlan2; do
         if [ -r "/sys/class/net/$iface/address" ]; then
@@ -18,9 +20,11 @@ primary_mac() {
         fi
     done
 
+    # Fall back to the first link/ether address in one-line ip output.
     ip -o link show | awk -F'link/ether ' '/link\/ether/ {print $2; exit}' | awk '{print $1}'
 }
 
+# Print the last two MAC octets as lowercase hex for the hostname suffix.
 mac_suffix() {
     printf '%s\n' "$1" |
         awk -F: '{print $(NF-1) $NF}' | tr '[:upper:]' '[:lower:]'
@@ -41,6 +45,7 @@ if [ "${PRIMARY_MAC:-}" = "$CURRENT_MAC" ]; then
     exit 0
 fi
 
+# A missing saved MAC records first boot without resetting existing keys.
 if [ -n "${PRIMARY_MAC:-}" ]; then
     log "Hardware MAC changed from $PRIMARY_MAC to $CURRENT_MAC; resetting cloned identity"
 

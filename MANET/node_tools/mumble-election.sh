@@ -25,6 +25,7 @@ MUMBLE_IPV6_VIP=""
 MY_MAC=$(cat "/sys/class/net/${CONTROL_IFACE}/address" 2>/dev/null || true)
 LOCK_FILE="/var/run/mumble-election.lock"
 
+# Send a prefixed diagnostic to the Mumble election journal tag.
 log() {
     printf '%s\n' "MUMBLE-ELECTION: $1" | systemd-cat -t mumble-election
 }
@@ -45,6 +46,7 @@ if ! command -v bc &>/dev/null; then
 fi
 
 # --- VIP Calculation Functions ---
+# Print the third usable address in the supplied CIDR, reserved for Mumble.
 get_mumble_ipv4_vip() {
     local CIDR="$1"
     local CALC_OUTPUT=$(manet-ipcalc.sh "$CIDR" 2>/dev/null)
@@ -66,6 +68,7 @@ get_mumble_ipv4_vip() {
 }
 
 # --- Database Sync Functions ---
+# Create SHARED_DB_DIR and BACKUP_DIR as radio when the shared dir is absent.
 ensure_shared_directory() {
     if [ ! -d "$SHARED_DB_DIR" ]; then
         log "Creating shared Mumble directory in Syncthing"
@@ -74,6 +77,7 @@ ensure_shared_directory() {
     fi
 }
 
+# Check database path $1 with SQLite integrity_check and log it as name $2.
 check_database_integrity() {
     local db_path=$1
     local db_name=$2
@@ -95,6 +99,7 @@ check_database_integrity() {
     return 0
 }
 
+# Request a WAL checkpoint for the supplied database and warn on remaining WAL.
 checkpoint_database() {
     local db_path=$1
     
@@ -116,6 +121,8 @@ checkpoint_database() {
     fi
 }
 
+# Copy source $1 through a temporary destination $2.tmp and check integrity.
+# Prefer SQLite backup, falling back to checkpoint + copy if backup fails.
 safe_copy_database() {
     local source=$1
     local dest=$2
@@ -182,6 +189,7 @@ safe_copy_database() {
     fi
 }
 
+# Seed SHARED_DB from WORKING_DB or create an empty placeholder as radio.
 create_initial_database() {
     log "No shared database found. Initializing from current installation."
     
@@ -204,6 +212,8 @@ create_initial_database() {
     fi
 }
 
+# Recover SHARED_DB from backup if needed, stop MUMBLE_SERVICE_NAME and
+# replace WORKING_DB with a checked copy owned by MUMBLE_USER.
 sync_database_from_shared() {
     log "Syncing database FROM Syncthing to working location"
     
@@ -220,6 +230,7 @@ sync_database_from_shared() {
         log "ERROR: Shared database failed integrity check, will not sync"
         
         # Check for a recent backup.
+        # Select only the newest .sqlite by modification time for recovery.
         local latest_backup=$(ls -t "$BACKUP_DIR"/*.sqlite 2>/dev/null | head -1)
         if [ -n "$latest_backup" ]; then
             log "Attempting to use latest backup: $(basename $latest_backup)"
@@ -256,6 +267,7 @@ sync_database_from_shared() {
                 sudo chown radio:radio "${BACKUP_DIR}/${BACKUP_NAME}"
                 
                 # Keep only last 10 backups
+                # Sort by modification time before dropping all but ten backups.
                 cd "$BACKUP_DIR" && ls -t *.sqlite 2>/dev/null | tail -n +11 | xargs -r rm --
             fi
         fi
@@ -282,6 +294,7 @@ sync_database_from_shared() {
     fi
 }
 
+# Back up SHARED_DB and publish a checked WORKING_DB copy for Syncthing.
 sync_database_to_shared() {
     log "Syncing database TO Syncthing from working location"
     
@@ -308,6 +321,7 @@ sync_database_to_shared() {
         fi
         
         # Keep only last 10 backups
+        # Sort by modification time before dropping all but ten backups.
         cd "$BACKUP_DIR" && ls -t *.sqlite 2>/dev/null | tail -n +11 | xargs -r rm --
     fi
     
@@ -394,6 +408,8 @@ if ! ELECTION_RESULT=$(python3 "$ELECTION_HELPER" mumble "$REGISTRY_STATE_FILE" 
     log "Cannot rank candidates; leaving the service as it is"
     exit 1
 fi
+# Ranker fields are winner MAC, biased Mbit/s score and incumbent MAC.
+# A dash represents a missing MAC.
 read -r BEST_CANDIDATE_MAC HIGHEST_TQ CURRENT_LEADER_MAC <<< "$ELECTION_RESULT"
 [ "$BEST_CANDIDATE_MAC" = - ] && BEST_CANDIDATE_MAC=""
 [ "$CURRENT_LEADER_MAC" = - ] && CURRENT_LEADER_MAC=""
@@ -445,6 +461,7 @@ elif [ "$MY_MAC" == "$BEST_CANDIDATE_MAC" ]; then
         log "Assigning IPv4 VIP: $MUMBLE_IPV4_VIP"
         ip addr add "$IPV4_VIP_WITH_MASK" dev "$CONTROL_IFACE"
         
+        # Announce the moved IPv4 VIP with one unsolicited ARP reply.
         if command -v arping &> /dev/null; then
             arping -c 1 -A -I "$CONTROL_IFACE" "$MUMBLE_IPV4_VIP" 2>/dev/null
         fi
@@ -481,6 +498,7 @@ elif [ "$MY_MAC" == "$BEST_CANDIDATE_MAC" ]; then
         
         # Start service
         log "Starting Mumble service"
+        # Allow two seconds after starting Mumble before checking active state.
         systemctl start "$MUMBLE_SERVICE_NAME"
         sleep 2
         

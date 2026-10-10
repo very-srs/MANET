@@ -118,6 +118,7 @@ def cron_consumers(root):
 
 
 def runtime_policy(root=Path('/')):
+    """Choose units to mask while retaining cron and LVM consumers."""
     system, keep = dict(SYSTEM_UNITS), {}
     jobs = cron_consumers(root)
     if jobs:
@@ -136,16 +137,19 @@ def runtime_policy(root=Path('/')):
 
 
 def live_user_managers(root=Path('/run/user')):
+    """Find account names with running systemd user-manager sockets."""
     return [pwd.getpwuid(int(p.name)).pw_name for p in root.glob('[0-9]*')
             if p.name.isdecimal() and (p / 'systemd/private').exists()]
 
 
 def unit_inventory(prefix, names):
+    """Capture unit identity, load, activity and enablement properties."""
     return command(prefix + ['show', *names, '-p', 'Id', '-p', 'LoadState',
                              '-p', 'ActiveState', '-p', 'UnitFileState'])
 
 
 def user_systemctl(user):
+    """Build a command that reaches the user manager as its owner."""
     # Use systemd's private socket as its owner after removing user D-Bus.
     # Keep login sessions running.
     uid = pwd.getpwnam(user).pw_uid
@@ -154,7 +158,9 @@ def user_systemctl(user):
 
 
 def apply_runtime(policy, users, record):
+    """Record and apply system and user unit masks and stops."""
     def execute(args):
+        """Record a command before running it with failure checking."""
         # Append before execution so interrupted/failed runs remain reviewable.
         with record.open('a') as log:
             log.write(json.dumps(args) + '\n')
@@ -185,14 +191,17 @@ def apply_runtime(policy, users, record):
 
 
 def command(args, **kwargs):
+    """Return stripped command output with stable default locale."""
     # APT plan tags must have a stable language for validation.
     kwargs.setdefault('env', dict(os.environ, LC_ALL='C'))
     return subprocess.check_output(args, text=True, **kwargs).strip()
 
 
 def package_inventory():
+    """Read installed package sizes, essential flags and versions."""
     fmt = '${binary:Package}\t${db:Status-Status}\t${Installed-Size}\t${Essential}\t${Version}\n'
     result = {}
+    # dpkg-query emits tab-separated fields with Installed-Size in KiB.
     for line in command(['dpkg-query', '-W', '-f', fmt]).splitlines():
         name, status, size, essential, version = line.split('\t')
         if status == 'installed':
@@ -202,8 +211,10 @@ def package_inventory():
 
 
 def choose_packages(installed):
+    """Select removal targets and protected runtime package roots."""
     targets, protected = set(), set()
     for name, info in installed.items():
+        # Match policy names without dpkg's optional architecture suffix.
         base = name.split(':')[0]
         if base in REMOVE or base.startswith(('linux-headers-', 'linux-kbuild-')):
             targets.add(name)
@@ -219,7 +230,9 @@ def choose_packages(installed):
 
 
 def validate_plan(output, protected):
+    """Reject package additions and removals of protected packages."""
     removed = []
+    # APT simulation prefixes actions with Inst, Conf, Remv or Purg.
     for line in output.splitlines():
         fields = line.split()
         if fields and fields[0] in ('Inst', 'Conf'):
@@ -233,12 +246,14 @@ def validate_plan(output, protected):
 
 
 def swap_is_unused(path, swaps, loops):
+    """Check for a regular file with no active swap or loop attachment."""
     # Do not unlink a swap file or a backing file still referenced by the kernel.
     return (path.is_file() and not path.is_symlink() and
             not swaps.splitlines()[1:] and not loops.strip())
 
 
 def cleanup_swap():
+    """Remove /var/swap only after checking use and the swap signature."""
     path = Path('/var/swap')
     if not path.exists():
         return
@@ -251,6 +266,7 @@ def cleanup_swap():
 
 
 def run(apply=False, force=False):
+    """Preview or apply the appliance cleanup policy with audit records."""
     model = Path('/proc/device-tree/model').read_text().rstrip('\0')
     os_release = Path('/etc/os-release').read_text()
     if 'Raspberry Pi' not in model or 'VERSION_CODENAME=trixie' not in os_release:
@@ -277,6 +293,8 @@ def run(apply=False, force=False):
         'user_global': command(['systemctl', '--global', 'list-unit-files', '--no-legend', '--no-pager']),
         'users': {user: unit_inventory(user_systemctl(user), list(USER_UNITS)) for user in users},
     }
+    # Allow two minutes for the package lock. Recommended packages alone do
+    # not retain an automatic dependency once protected roots are pinned.
     apt = ['apt-get', '-o', 'DPkg::Lock::Timeout=120', '-o',
            'APT::AutoRemove::RecommendsImportant=false', '--autoremove', 'purge'] + targets
     if not targets:
@@ -298,6 +316,7 @@ def run(apply=False, force=False):
             removed = validate_plan(plan, protected)
     size = sum(installed[n]['size_kib'] for n in installed
                if n.split(':')[0] in {p.split(':')[0] for p in removed})
+    # Package sizes are KiB. st_blocks counts allocated 512-byte blocks.
     print(json.dumps({'profile': PROFILE, 'runtime': policy, 'units_before': units_before,
                       'remove': removed, 'package_mib': round(size / 1024, 1),
                       'swap_mib': round(Path('/var/swap').stat().st_blocks / 2048)
@@ -342,6 +361,7 @@ if __name__ == '__main__':
     try:
         if os.geteuid() != 0:
             raise PermissionError('run as root, including for a dry run')
+        # Serialize previews and applies so package and unit plans stay ordered.
         with open('/run/lock/manet-os-cleanup.lock', 'w') as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
             run(args.apply, args.force)

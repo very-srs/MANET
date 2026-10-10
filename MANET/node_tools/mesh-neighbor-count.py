@@ -15,14 +15,17 @@ import sys
 
 
 MAC = re.compile(r'(?:[0-9a-f]{2}:){5}[0-9a-f]{2}')
+# Registry publisher keys are 12 hex digits with quoted radio MAC lists.
 IDENTITY = re.compile(r'NODE_([0-9a-fA-F]{12})_MAC_ADDRESSES=(.*)')
 
 
 def neighbor_addresses(batctl, timeout=5):
+    """Read distinct validated neighbor MACs from bounded batctl JSON."""
     result = subprocess.run(
         [batctl, 'meshif', 'bat0', 'neighbors_json'], check=True,
         capture_output=True, text=True, timeout=timeout,
     )
+    # neighbors_json exposes neigh_address without human table columns.
     rows = json.loads(result.stdout)
     if not isinstance(rows, list):
         raise ValueError('neighbors response is not a list')
@@ -36,6 +39,7 @@ def neighbor_addresses(batctl, timeout=5):
 
 
 def count_nodes(neighbors, registry):
+    """Count unique owners, returning None for unresolved identities."""
     # One radio address is unambiguously one neighbor even during cold discovery.
     if len(neighbors) <= 1:
         return len(neighbors)
@@ -46,6 +50,7 @@ def count_nodes(neighbors, registry):
             continue
         key = match[1].lower()
         node = ':'.join(key[i:i + 2] for i in range(0, 12, 2))
+        # Interpret shell quoting as data without evaluating the assignment.
         values = shlex.split(match[2])
         if len(values) != 1:
             raise ValueError('invalid registry identity')
@@ -62,6 +67,7 @@ def count_nodes(neighbors, registry):
 
 
 def main():
+    """Print the count or distinguish unavailable and ambiguous results."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--batctl', default='/usr/sbin/batctl')
     parser.add_argument('--registry', type=Path, default=Path('/var/run/mesh_node_registry'))

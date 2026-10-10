@@ -1,4 +1,5 @@
 #!/bin/bash
+# Configure and report a USB Wi-Fi internet client from saved credentials.
 . "${MANET_TOOLS_DIR:-$(dirname "${BASH_SOURCE[0]}")}/manet-common.sh" || exit 1
 set -euo pipefail
 
@@ -7,6 +8,7 @@ WPA_DIR=/etc/wpa_supplicant
 NETWORKD_DIR=/etc/systemd/network
 CLIENT_SERVICE=/etc/systemd/system/usb-wifi-client@.service
 
+# Print accepted actions and arguments to stderr.
 usage() {
     printf '%s\n' \
         'usage: usb-wifi-uplink.sh [ACTION [IFACE]]' \
@@ -25,12 +27,14 @@ esac
 ACTION="${1:-reconcile}"
 IFACE="${2:-}"
 
+# Write a prefixed message to stderr and the USB Wi-Fi journal tag.
 log() {
     local msg="USB-WIFI-UPLINK: $*"
     printf '%s\n' "$msg" >&2
     printf '%s\n' "$msg" | systemd-cat -t usb-wifi-uplink
 }
 
+# Create CONFIG_FILE with default credentials only when it is missing.
 ensure_default_config() {
     mkdir -p "$(dirname "$CONFIG_FILE")"
     if [ ! -f "$CONFIG_FILE" ]; then
@@ -43,8 +47,10 @@ EOF
     fi
 }
 
+# Print the first CONFIG_FILE value for a key, using $2 when absent or empty.
 cfg_get() {
     local key="$1" default="${2:-}"
+    # Keep equals signs after the first separator as part of the credential.
     awk -F= -v k="$key" '$1 == k {print substr($0, index($0, "=") + 1); found=1; exit} END {if (!found) print ""}' "$CONFIG_FILE" 2>/dev/null | {
         read -r value || true
         if [ -n "${value:-}" ]; then
@@ -55,6 +61,7 @@ cfg_get() {
     }
 }
 
+# Save SSID, password and optional enabled flag to private CONFIG_FILE.
 write_config() {
     local ssid="$1" password="$2" enabled="${3:-1}"
     mkdir -p "$(dirname "$CONFIG_FILE")"
@@ -70,6 +77,7 @@ EOF
 }
 
 
+# Print an eligible IFACE or the first eligible wlan interface in sysfs.
 candidate_iface() {
     if [ -n "$IFACE" ] && is_usb_wifi_uplink_iface "$IFACE"; then
         printf '%s\n' "$IFACE"
@@ -87,6 +95,7 @@ candidate_iface() {
     return 1
 }
 
+# Write CLIENT_SERVICE and reload systemd before starting client instances.
 ensure_client_service() {
     cat > "$CLIENT_SERVICE" <<'EOF'
 [Unit]
@@ -110,10 +119,13 @@ EOF
     systemctl daemon-reload 2>/dev/null || true
 }
 
+# Write a private WPA_DIR config for the interface, SSID and password.
 write_wpa_config() {
     local iface="$1" ssid="$2" password="$3" conf="${WPA_DIR}/wpa_supplicant-${iface}-uplink.conf"
     mkdir -p "$WPA_DIR"
 
+    # Remove the plaintext password comment from wpa_passphrase output.
+    # Without that command, put the password directly in the private file.
     if command -v wpa_passphrase >/dev/null 2>&1; then
         wpa_passphrase "$ssid" "$password" | sed '/^[[:space:]]*#psk=/d' > "$conf"
     else
@@ -127,6 +139,7 @@ EOF
     chmod 600 "$conf"
 }
 
+# Write and reload NETWORKD_DIR DHCP settings for the supplied interface.
 write_networkd_config() {
     local iface="$1" conf="${NETWORKD_DIR}/20-${iface}-usb-wifi-uplink.network"
     cat > "$conf" <<EOF
@@ -156,6 +169,7 @@ EOF
     networkctl reload 2>/dev/null || true
 }
 
+# Configure the selected IFACE from CONFIG_FILE and dispatch gateway setup.
 connect_iface() {
     ensure_default_config
     ensure_client_service
@@ -180,14 +194,17 @@ connect_iface() {
         return 1
     fi
 
+    # Detach bridge membership before using this radio as an internet client.
     ip link set "$iface" nomaster 2>/dev/null || true
     ip link set "$iface" up 2>/dev/null || true
     write_wpa_config "$iface" "$ssid" "$password"
     write_networkd_config "$iface"
 
+    # Stop the mesh instance before the dedicated client takes the interface.
     systemctl stop "wpa_supplicant@${iface}.service" 2>/dev/null || true
     systemctl enable "usb-wifi-client@${iface}.service" 2>/dev/null || true
     systemctl restart "usb-wifi-client@${iface}.service"
+    # Wait three seconds after client startup before reconfiguring networkd.
     sleep 3
     networkctl reconfigure "$iface" 2>/dev/null || true
 
@@ -195,6 +212,7 @@ connect_iface() {
     /usr/local/bin/manet-uplink-dispatch.sh add "$iface" || true
 }
 
+# Stop the supplied client interface and remove its configs and gateway role.
 remove_iface() {
     local iface="$1"
     [ -n "$iface" ] || iface="$(candidate_iface || true)"
@@ -206,6 +224,7 @@ remove_iface() {
     /usr/local/bin/manet-uplink-dispatch.sh remove "$iface" || true
 }
 
+# Print selected interface, saved SSID, link and service state as JSON.
 status_json() {
     ensure_default_config
     local iface ssid enabled state ip connected service
@@ -217,8 +236,10 @@ status_json() {
     connected=false
     service=""
     if [ -n "$iface" ]; then
+        # The first address comes from ip's CIDR column with the mask removed.
         ip="$(ip -4 -o addr show dev "$iface" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n1)"
         service="$(systemctl is-active "usb-wifi-client@${iface}.service" 2>/dev/null || true)"
+        # An iw association marks connected even if DHCP has no address yet.
         if iw dev "$iface" link 2>/dev/null | grep -q '^Connected to '; then
             connected=true
             state="connected"

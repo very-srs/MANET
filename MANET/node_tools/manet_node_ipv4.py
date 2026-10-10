@@ -9,6 +9,7 @@ import sys
 
 
 def read_values(path):
+    """Read literal assignments, returning empty for a missing file."""
     values = {}
     try:
         for line in Path(path).read_text().splitlines():
@@ -38,8 +39,10 @@ def primary_ipv4(state, config, addresses):
 
 
 def current_ipv4(iface='br0'):
+    """Match persisted node identity to the interface's live IPv4 addresses."""
     state = read_values('/etc/mesh_ipv4_state')
     config = read_values('/etc/mesh.conf')
+    # Bound the JSON address probe to three seconds and reject command errors.
     result = subprocess.run(['ip', '-j', '-4', 'addr', 'show', 'dev', iface],
                             check=True, capture_output=True, text=True, timeout=3)
     addresses = [item['local'] for link in json.loads(result.stdout)
