@@ -21,6 +21,7 @@ Calls:
 """
 
 # Handle --dump-interfaces before importing the web server dependencies.
+from manet_registry import parse_registry
 import sys
 if __name__ == '__main__' and len(sys.argv) > 1 and sys.argv[1] == '--dump-interfaces':
     import json
@@ -155,23 +156,6 @@ def normalize_local_redirect(target):
 
 
 
-def parse_registry():
-    """Parse /var/run/mesh_node_registry into a dict of node dicts."""
-    nodes = {}
-    try:
-        with open(REGISTRY_FILE) as f:
-            content = f.read()
-        # Match hex node IDs, uppercase field names, and quoted values.
-        # Registry shell assignments remain data, never sourced code.
-        pattern = re.compile(r"NODE_([A-Fa-f0-9]+)_([A-Z0-9_]+)='([^']*)'")
-        for m in pattern.finditer(content):
-            nid, field, value = m.groups()
-            if nid not in nodes:
-                nodes[nid] = {'id': nid}
-            nodes[nid][field] = value
-    except Exception:
-        pass
-    return nodes
 
 
 # batctl Wrappers
@@ -925,7 +909,7 @@ def assemble_local_data():
     power    = get_power_status()
 
     # Pull self entry from registry for extra fields
-    nodes_raw = parse_registry()
+    nodes_raw = parse_registry(REGISTRY_FILE)
     my_mac    = get_my_mac()
     my_node   = {}
     for nid, ndata in nodes_raw.items():
@@ -990,7 +974,7 @@ def assemble_peer_data(peer_ip):
     Alfred replicates the detail data, so briefly unreachable peers can still
     be shown without waiting for an HTTP request to time out.
     """
-    for ndata in parse_registry().values():
+    for ndata in parse_registry(REGISTRY_FILE).values():
         if ndata.get('IPV4_ADDRESS') != peer_ip:
             continue
 
@@ -1071,7 +1055,7 @@ def assemble_debug_data():
     _, orig_map = run_batctl_originators()
     neighbors  = run_batctl_neighbors()
     gateways   = run_batctl_gateways()
-    nodes_raw  = parse_registry()
+    nodes_raw  = parse_registry(REGISTRY_FILE)
     debug = {
         'gateways':  gateways,
         'neighbors': neighbors,
@@ -1093,7 +1077,7 @@ def assemble_status_data():
     """Combine registry nodes and BATMAN routes into the topology view."""
     conf       = load_kv_file(MESH_CONF_FILE)
     state      = load_kv_file(MESH_STATE_FILE)
-    nodes_raw  = parse_registry()
+    nodes_raw  = parse_registry(REGISTRY_FILE)
     local_battery = get_battery()
     orig_mbps, orig_map = run_batctl_originators()
     neighbors  = run_batctl_neighbors()
@@ -2815,7 +2799,7 @@ def read_rollback_state():
 def assemble_admin_status():
     """Return current config, pending config, and per-node ACK status."""
     conf       = load_kv_file(MESH_CONF_FILE)
-    nodes_raw  = parse_registry()
+    nodes_raw  = parse_registry(REGISTRY_FILE)
     pending    = get_pending_config()
     acks       = authenticated_config_acks()
 
@@ -3609,7 +3593,7 @@ class MeshHandler(RequestLimits, ManageRoutes, http.server.BaseHTTPRequestHandle
                 # Force bypasses missing ACKs, not authentication or clock
                 # readiness. Every registry node participates in this check.
                 if not force:
-                    nodes_raw = parse_registry()
+                    nodes_raw = parse_registry(REGISTRY_FILE)
                     version   = pkg['version']
                     acks      = authenticated_config_acks()
                     not_acked = [

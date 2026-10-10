@@ -1,6 +1,7 @@
 """Literal configuration rendering and durable, permission-preserving writes."""
 
 import os
+import json
 from pathlib import Path
 import re
 import stat
@@ -63,3 +64,12 @@ def atomic_write(path, contents, metadata=None):
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)
+
+
+def read_json(path):
+    """Read a JSON object, or return empty state on read/parse failure."""
+    try:
+        value = json.loads(path.read_text())
+        return value if isinstance(value, dict) else {}
+    except (OSError, ValueError):
+        return {}

@@ -6,6 +6,7 @@ using one interpreter and at most one protobuf import per allocation pass,
 independent of mesh size. Never cache freshness.
 """
 
+from manet_config_io import read_json
 import base64
 import fcntl
 import hashlib
@@ -52,12 +53,6 @@ def atomic_text(path, text, mode=0o644):
             os.unlink(temporary)
 
 
-def read_json(path):
-    try:
-        value = json.loads(path.read_text())
-        return value if isinstance(value, dict) else {}
-    except (OSError, ValueError):
-        return {}
 
 
 def previous_fields(path):

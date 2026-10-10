@@ -132,5 +132,52 @@ class MotdHelperTests(unittest.TestCase):
                              'suspecting the software.\n' + rule + '\n')
 
 
+class RegistryHelperTests(unittest.TestCase):
+    """Pin web registry parsing and tolerant JSON state readers."""
+
+    def test_registry_at_both_callers(self):
+        """Keep casing, duplicate assignment and quoted-value behavior."""
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'registry'
+            path.write_text(
+                "NODE_Aa12_HOSTNAME='first'\n"
+                "NODE_Aa12_HOSTNAME='last'\n"
+                "NODE_Aa12_DATA='a=b'\nNODE_ff00_EMPTY=''\n"
+                "NODE_badZ_NAME='ignored'\nNODE_Aa12_lower='ignored'\n"
+                "NODE_1234_NAME='can'\\''t'\n")
+            expected = {
+                'Aa12': {'id': 'Aa12', 'HOSTNAME': 'last', 'DATA': 'a=b'},
+                'ff00': {'id': 'ff00', 'EMPTY': ''},
+                '1234': {'id': '1234', 'NAME': 'can'},
+            }
+            for module in (manage, status):
+                with patch.object(module, 'REGISTRY_FILE', str(path)):
+                    self.assertEqual(
+                        module.parse_registry(module.REGISTRY_FILE), expected)
+            path.unlink()
+            for module in (manage, status):
+                with patch.object(module, 'REGISTRY_FILE', str(path)):
+                    self.assertEqual(
+                        module.parse_registry(module.REGISTRY_FILE), {})
+
+    def test_dict_json_readers(self):
+        """Keep every JSON shape and read failure at both users."""
+        import manet_recovery_status as recovery
+        import manet_registry_builder as builder
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'state'
+            for module in (recovery, builder):
+                for raw, expected in (
+                        ('{"x": [1, null], "ok": true}',
+                         {'x': [1, None], 'ok': True}),
+                        ('[]', {}), ('null', {}), ('1', {}),
+                        ('"text"', {}), ('invalid', {}), ('', {})):
+                    path.write_text(raw)
+                    self.assertEqual(module.read_json(path), expected)
+                path.unlink()
+                self.assertEqual(module.read_json(path), {})
+                self.assertEqual(module.read_json(Path(directory)), {})
+
+
 if __name__ == '__main__':
     unittest.main()
