@@ -2109,10 +2109,15 @@ malformed host assignments and symlink destinations fail without replacing hosts
 
 `mesh-ip-manager.sh` requests `manet_ip_runtime.py` work from the existing
 channel-agreement process through `manet-runtime-client.sh`. A worker thread
-sleeps in `select` until requested; the main ACS loop keeps its one-second
-schedule. Root-only FIFOs and a client lock serialize requests, accept only
-allowlisted operations/arguments, and return status plus data. An unavailable
-or busy worker permits a standalone one-shot fallback without queuing; a submitted
+sleeps in `select` until requested; the main ACS loop sleeps 5 seconds
+between passes, or 1 second through the proposal window and from 5 seconds
+before a live plan's vote deadline to the end of its apply window. The
+round's readiness request signals the loop (SIGUSR1) so readiness publishes
+at once. Agreement assumes a node's request plus Alfred replication reaches
+every peer before :45, which the tests check for requests by :28 and up to
+15 seconds of replication. Root-only FIFOs and a client lock serialize
+requests, accept only allowlisted operations/arguments, and return status
+plus data. An unavailable or busy worker permits a standalone one-shot fallback without queuing; a submitted
 request's failure or timeout never replays a potentially applied operation.
 Operation framing accepts digits (`ipv4`); malformed requests with valid reply
 tokens return an error instead of silently timing out. Data-returning operations
