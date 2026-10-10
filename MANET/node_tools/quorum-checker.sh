@@ -15,8 +15,6 @@ log() {
 
 [ ! -f "$REGISTRY_STATE_FILE" ] && exit 0
 
-NOW=$(date +%s)
-
 # Count active nodes
 # Freshness is this node's own observation on its boot clock,
 # never the peer's timestamp: a peer's clock can be far off and still alive.

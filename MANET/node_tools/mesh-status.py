@@ -35,32 +35,26 @@ import re
 import os
 import ipaddress
 import socket
-import threading
 import time
-import urllib.request
 import hashlib
 import html
-from urllib.parse import urlparse, parse_qs, quote
+from urllib.parse import urlparse, parse_qs
 
 # Mesh radio changes use the management UI's Alfred staging path.
 # mesh-radio-state.py applies them on each node.
 from manet_manage import ManageRoutes
-from manet_peer_radios import interfaces_for_telemetry, peer_status_panel
+from manet_peer_radios import peer_status_panel
 from manet_recovery_status import recovery_status, RECOVERY_JS
 from manet_node_ipv4 import primary_ipv4
 from manet_registry import node_state, observed_age
 from manet_web_sessions import SessionStore, LoginThrottled
 from manet_web_limits import BoundedHTTPServer, RequestLimits, STATUS_CACHE, MANAGEMENT_WRITE, Busy
 from mesh_config import (local_changes, mesh_changes, strip_local_keys,
-                         validate_config, submitted_changes, LOCAL_APPLY_KEYS, MESH_KEYS)
+                         validate_config, submitted_changes)
 from manet_eud_ap import apply_local as apply_local_settings, configured_ssid
 from manet_admin import AdminTransport, CONFIG_ACK_TYPE, new_version, private_json_write, require_clock
 from manet_radio import (
-    halow_channel_options,
-    _format_halow_bw, get_halow_driver_info, wifi_channel_to_freq, _fmt_dbm,
-    parse_phy_txpower_options, txpower_choices_from_cap, txpower_options_for_iface,
-    txpower_request_allowed, unsupported_txpower_response,
-    get_iface_txpower_cap, read_iface_txpower_dbm, set_iface_txpower_verified,
+    get_halow_driver_info, txpower_choices_from_cap, get_iface_txpower_cap,
 )
 
 
@@ -468,12 +462,10 @@ def _phy_bands():
     # (IEEE 802.11 convention)
     # A phy with both bands → 2.4 GHz takes precedence (dual-band chip)
     phy_band = {}  # wiphy_num_str -> '2.4 GHz' | '5 GHz'
-    phy_txpower_options = {}
     try:
         # A stalled capability query gets at most 5 s of collection time.
         r3 = subprocess.run(['iw', 'phy'], capture_output=True, text=True,
                             timeout=5)
-        phy_txpower_options = parse_phy_txpower_options(r3.stdout)
         cur_phy = None
         for line in r3.stdout.splitlines():
             # Wiphy headers scope the indented Band sections below them.
@@ -534,9 +526,7 @@ def _add_drivers_and_bands(iw_info, phy_band):
         cap = get_iface_txpower_cap(iname)
         if cap:
             iw_info[iname]['txpower_cap_dbm'] = cap
-            iw_info[iname]['txpower_options_dbm'] = txpower_options_for_iface(
-                iname, cap, iw_info[iname].get('txpower_dbm', '')
-            )
+            iw_info[iname]['txpower_options_dbm'] = txpower_choices_from_cap(cap)
 
 
 def _add_halow_runtime(iw_info):
@@ -604,14 +594,10 @@ def _interface_rows(raw, iw_info, bat0_slaves_active,
                     wpa_running, eud_mode, no_mesh_ifaces):
     """Build interface rows with roles, health, and fault details."""
     ifaces = []
-    # Build a set of all iface names present for cross-referencing
-    all_names = {d.get('ifname', '') for d in raw}
-
     for iface_data in raw:
         name   = iface_data.get('ifname', '')
         state  = iface_data.get('operstate', 'UNKNOWN')   # UP / DOWN / UNKNOWN
         flags  = iface_data.get('flags', [])
-        link_type = iface_data.get('link_type', '')
 
         if name == 'lo':
             continue
@@ -1139,7 +1125,6 @@ def assemble_status_data():
     my_host    = get_my_hostname()
 
     neighbor_macs = {n['mac'] for n in neighbors}
-    gw_mac_map    = {g['mac']: g for g in gateways}
     selected_gw   = next((g['mac'] for g in gateways if g['selected']), None)
 
     # If batctl gwl has no gateways, fall back to registry IS_GATEWAY flags.
@@ -1193,7 +1178,6 @@ def assemble_status_data():
         # Neighbor and originator tables may identify different radio MACs.
         all_node_macs = [norm_mac(m) for m in ndata.get('MAC_ADDRESSES', '').split(',') if m.strip()]
         is_direct = any(m in neighbor_macs for m in all_node_macs) or node_mac in neighbor_macs
-        gw_info   = gw_mac_map.get(node_mac)
         best_link = {}
         if not is_me:
             for omac, odata in orig_map.items():
@@ -2794,7 +2778,7 @@ def clear_pending_config():
     except Exception:
         pass
 
-def make_config_version(config_dict):
+def make_config_version():
     """Fresh transaction ID: old ACKs cannot approve a repeated edit."""
     return new_version()
 
@@ -3215,12 +3199,6 @@ class MeshHandler(RequestLimits, ManageRoutes, http.server.BaseHTTPRequestHandle
         self.end_headers()
         self.wfile.write(body)
 
-    def read_json_body(self):
-        """Decode a bounded JSON body, treating an empty body as an object."""
-        # RequestLimits caps bodies at 64 KiB with a 10 s total deadline.
-        raw = self.read_body() or b'{}'
-        return json.loads(raw.decode('utf-8') or '{}')
-
     def read_form_body(self):
         """Decode a bounded URL-encoded form, preserving empty values."""
         raw = self.read_body()
@@ -3626,7 +3604,7 @@ class MeshHandler(RequestLimits, ManageRoutes, http.server.BaseHTTPRequestHandle
                     (mesh_cfg.get('ipv4_network', cur_cidr) != cur_cidr)
                 )
 
-                version = make_config_version(mesh_cfg)
+                version = make_config_version()
                 pkg = {
                     'kind':       'mesh_config',
                     'version':    version,

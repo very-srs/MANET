@@ -334,10 +334,10 @@ class AdminTests(unittest.TestCase):
             self.assertFalse(manet_manage.send_alfred_object(71, cancel)[0])
 
     def test_identical_edits_have_different_ack_transaction_ids(self):
-        self.assertNotEqual(status.make_config_version(self.payload),
-                            status.make_config_version(self.payload))
-        self.assertNotEqual(manet_manage.make_radio_version(self.payload),
-                            manet_manage.make_radio_version(self.payload))
+        self.assertNotEqual(status.make_config_version(),
+                            status.make_config_version())
+        self.assertNotEqual(manet_manage.make_radio_version(),
+                            manet_manage.make_radio_version())
 
 
 class LiteralConfigTests(unittest.TestCase):

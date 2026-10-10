@@ -305,21 +305,6 @@ def get_halow_driver_info(iface='wlan2'):
             return info
     return info
 
-def wifi_channel_to_freq(iface, channel):
-    try:
-        ch = int(channel)
-    except Exception:
-        return None
-    if iface == 'wlan0' and 1 <= ch <= 13:
-        return 2407 + ch * 5
-    if iface == 'wlan1':
-        # Common 5 GHz channels for manual dashboard control.
-        if ch == 14:
-            return 2484
-        if 32 <= ch <= 177:
-            return 5000 + ch * 5
-    return None
-
 def _fmt_dbm(value):
     try:
         num = float(value)
@@ -359,17 +344,14 @@ def txpower_choices_from_cap(cap_dbm):
         return []
     return [str(v) for v in range(cap, 0, -1)]
 
-def txpower_options_for_iface(iface, cap_dbm, current_dbm=''):
-    return txpower_choices_from_cap(cap_dbm)
-
-def txpower_request_allowed(iface, requested, cap_dbm, options=None):
+def txpower_request_allowed(requested, cap_dbm):
     try:
         return not cap_dbm or float(requested) <= float(cap_dbm)
     except Exception:
         return False
 
 def unsupported_txpower_response(iface, requested, cap_dbm, options=None):
-    opts = options if options is not None else txpower_options_for_iface(iface, cap_dbm)
+    opts = options if options is not None else txpower_choices_from_cap(cap_dbm)
     return {
         'ok': False,
         'error': f'Unsupported txpower {requested} dBm for {iface} (max {cap_dbm} dBm)',
@@ -503,8 +485,8 @@ def apply_txpower(iface, dbm):
         return {'ok': False, 'error': HALOW_POWER_FIXED}
     requested = _fmt_dbm(dbm)
     cap = get_iface_txpower_cap(iface)
-    options = txpower_options_for_iface(iface, cap, read_iface_txpower_dbm(iface))
-    if cap and not txpower_request_allowed(iface, requested, cap, options):
+    options = txpower_choices_from_cap(cap)
+    if cap and not txpower_request_allowed(requested, cap):
         return unsupported_txpower_response(iface, requested, cap, options)
     requested, actual = set_iface_txpower_verified(iface, dbm)
     return {
@@ -513,7 +495,7 @@ def apply_txpower(iface, dbm):
         'dbm': requested,
         'actual_dbm': actual,
         'cap': cap,
-        'options': txpower_options_for_iface(iface, cap, actual) if cap else [],
+        'options': txpower_choices_from_cap(cap) if cap else [],
     }
 
 
@@ -690,8 +672,8 @@ def apply_wifi_channel(band, channel, dbm=None):
                 raise ValueError('Cannot read current Wi-Fi power for rollback')
             requested = _fmt_dbm(dbm)
             cap = get_iface_txpower_cap(iface)
-            options = txpower_options_for_iface(iface, cap, old_power)
-            if cap and not txpower_request_allowed(iface, requested, cap, options):
+            options = txpower_choices_from_cap(cap)
+            if cap and not txpower_request_allowed(requested, cap):
                 return unsupported_txpower_response(iface, requested, cap, options)
         try:
             static_channels.save(band, freq, plan)

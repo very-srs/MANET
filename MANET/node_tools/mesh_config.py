@@ -112,15 +112,6 @@ def strip_local_keys(config):
     return {k: v for k, v in config.items() if k not in LOCAL_KEYS}
 
 
-def split_config(config):
-    """Partition a form payload into (local, mesh) dicts."""
-    if not isinstance(config, dict):
-        return {}, {}
-    local = {k: v for k, v in config.items() if k in LOCAL_KEYS}
-    mesh = {k: v for k, v in config.items() if k not in LOCAL_KEYS}
-    return local, mesh
-
-
 def local_changes(config, current):
     """Local keys in `config` whose non-empty value differs from mesh.conf."""
     if not isinstance(config, dict):

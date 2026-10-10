@@ -36,13 +36,6 @@ def valid(band, freq):
             and freq in _FREQUENCIES[band])
 
 
-def band_for_frequency(freq):
-    for band in BANDS:
-        if valid(band, freq):
-            return band
-    return None
-
-
 def load(path=PATH):
     path = Path(path)
     try:

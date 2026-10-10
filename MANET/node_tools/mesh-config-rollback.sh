@@ -25,7 +25,6 @@ MESH_CONF="${MANET_MESH_CONF:-/etc/mesh.conf}"
 WPA_DIR="${MANET_WPA_DIR:-/etc/wpa_supplicant}"
 BATCTL="${BATCTL:-/usr/sbin/batctl}"
 RUN_DIR="${MANET_RUN_DIR:-/var/run}"
-IFACE_STATE_DIR="${MANET_IFACE_STATE_DIR:-/var/lib}"
 SUPPLICANT_HELPER="${MANET_SUPPLICANT_HELPER:-$(dirname "$0")/manet_supplicant.py}"
 LOG_TAG="CONFIG-ROLLBACK"
 # Grace seconds for supplicant restart, SAE and batman re-discovery.

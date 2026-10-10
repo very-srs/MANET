@@ -27,9 +27,7 @@ WPA_IFACE_5_0=""
 
 # Helper scripts
 IP_MANAGER="/usr/local/bin/mesh-ip-manager.sh"
-REGISTRY_STATE_FILE="/var/run/mesh_node_registry"
 ENCODER_PATH="/usr/local/bin/encoder.py"
-BATCTL_PATH="/usr/sbin/batctl"
 THROUGHPUT_MEAN="/usr/local/bin/mesh-throughput-mean.sh"
 RADIO_STATE_SYNC="/usr/local/bin/mesh-radio-state.py"
 CONFIG_SYNC="/usr/local/bin/mesh-config-sync.py"
@@ -37,7 +35,6 @@ CONFIG_ROLLBACK="/usr/local/bin/mesh-config-rollback.sh"
 HALOW_MCS_SUMMARY="/usr/local/bin/halow-mcs-summary.py"
 
 # --- State Variables ---
-LAST_PUBLISHED_PAYLOAD=""
 # Use boot-clock MONO from uptime_now for local timers, unaffected by time
 # sync steps. NEVER places an unset timer far enough back to be due at once.
 NEVER=-1000000
@@ -445,7 +442,6 @@ while true; do
         
         if [ -n "$CURRENT_PAYLOAD" ]; then
             printf '%s' "$CURRENT_PAYLOAD" | alfred -s $ALFRED_DATA_TYPE
-            LAST_PUBLISHED_PAYLOAD="$CURRENT_PAYLOAD"
             LAST_PUBLISH_TIME=$MONO
         fi
     fi
