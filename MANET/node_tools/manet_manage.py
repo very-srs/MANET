@@ -23,6 +23,7 @@ Routes (relative to /manage):
   POST /api/uplink/wifi         - Set USB Wi-Fi uplink credentials (all nodes)
 """
 
+from manet_registry import parse_registry
 import json
 import subprocess
 import re
@@ -237,20 +238,6 @@ def apply_usb_wifi_uplink_all(ssid, password, enabled=True):
     return status
 
 
-def parse_registry():
-    nodes = {}
-    try:
-        with open(REGISTRY_FILE) as f:
-            content = f.read()
-        pattern = re.compile(r"NODE_([A-Fa-f0-9]+)_([A-Z0-9_]+)='([^']*)'")
-        for m in pattern.finditer(content):
-            nid, field, value = m.groups()
-            if nid not in nodes:
-                nodes[nid] = {'id': nid}
-            nodes[nid][field] = value
-    except Exception:
-        pass
-    return nodes
 
 def get_bat0_active_ifaces():
     try:
@@ -291,7 +278,7 @@ def get_session_hop_count(dst_ip):
         r = subprocess.run(['batctl', 'o'], capture_output=True, text=True, timeout=5)
     except Exception:
         return None, 'error'
-    nodes = parse_registry()
+    nodes = parse_registry(REGISTRY_FILE)
     dst_macs = set()
     for nd in nodes.values():
         if nd.get('IPV4_ADDRESS') == dst_ip:
@@ -400,12 +387,13 @@ def send_alfred_object(type_id, obj):
         return False, str(e)
 
 def radio_expected_hosts():
+    """List active peers expected to acknowledge a radio command."""
     try:
         subprocess.run(['/usr/local/bin/mesh-registry-builder.sh'],
                        capture_output=True, text=True, timeout=8)
     except Exception:
         pass
-    nodes = parse_registry()
+    nodes = parse_registry(REGISTRY_FILE)
     hosts = []
     for nd in nodes.values():
         host = nd.get('HOSTNAME', '')
@@ -420,9 +408,10 @@ def radio_expected_hosts():
     return sorted(set(hosts))
 
 def radio_target_for_node(node_ip):
+    """Resolve a node identifier to its published radio target."""
     if node_ip == 'all':
         return 'all'
-    for nd in parse_registry().values():
+    for nd in parse_registry(REGISTRY_FILE).values():
         if nd.get('IPV4_ADDRESS', '') == node_ip:
             host = nd.get('HOSTNAME', '')
             if host:
@@ -580,7 +569,8 @@ def get_iw_info(iface):
 # Topology
 
 def build_topology():
-    nodes_raw = parse_registry()
+    """Build the management topology from local and peer observations."""
+    nodes_raw = parse_registry(REGISTRY_FILE)
     my_host   = get_my_hostname()
     my_ip     = get_my_ip()
     conf      = load_kv_file(MESH_CONF_FILE)

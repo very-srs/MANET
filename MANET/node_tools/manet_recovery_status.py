@@ -1,17 +1,11 @@
 """Read local recovery observations without contacting another node."""
-import json
+from manet_config_io import read_json
 import math
 import os
 from pathlib import Path
 import time
 
 
-def read_json(path):
-    try:
-        value = json.loads(path.read_text())
-        return value if isinstance(value, dict) else {}
-    except (OSError, ValueError):
-        return {}
 
 
 def age(value, now):
