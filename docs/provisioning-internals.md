@@ -89,6 +89,25 @@ imaging and first boot. Deleted prereleases require reflashing old test images.
 
 ## First boot without a trusted clock
 
+### Kernel package protection
+
+After verifying the install archive's checksum and version, both templates
+extract only `etc/apt/preferences.d/00-manet-kernel` and
+`usr/local/bin/manet-kernel-protect.py`, then run the helper before the first
+APT command. Missing files or a failed helper abort provisioning. The full
+archive is still extracted after package setup. Rock 3A's initial
+`apt upgrade -y` therefore runs with the pins, holds and hook guards installed.
+The helper waits for APT's frontend lock while it changes hooks, so it does
+not replace an entry point underneath an existing package transaction.
+
+The policy and helper are required inputs to every install/tools builder.
+`stage_kernel_protection` runs after the SBC overlay is staged, so an older
+overlay cannot replace the current policy. No new flasher token is needed.
+The existing hardware token selects Pi or Rock 3A hook protection. See
+[kernel ownership and recovery](kernel-6.18-morse-port.md#81-apt-owns-userland-manet-releases-own-the-kernel).
+
+### Download verification
+
 The install archive's URL, version and SHA-256 come from the selected release
 manifest through the existing `__INSTALL_*__` and `__RELEASE_VERSION__`
 tokens. Both templates also carry identical `YQ_VERSION`, `YQ_SHA256`,

@@ -35,7 +35,10 @@ apt-get() {
 apt() { record apt "$@"; return 1; }
 getent() { return "${NETWORK_RC:-0}"; }
 ping() { return 0; }
-python3() { [ "$installs" -gt 0 ]; }
+python3() {
+    [[ "$1" = */manet-kernel-protect.py ]] && return 0
+    [ "$installs" -gt 0 ]
+}
 sed() { :; }
 service() { :; }
 grep() { :; }

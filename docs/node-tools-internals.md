@@ -2391,6 +2391,32 @@ query; an unreadable or incomplete state cannot select the solo-node branch.
 
 ## Updates
 
+`manet-kernel-protect.py` installs the shipped APT preference policy and
+neutralizes distribution boot writers before the updater installs any APT
+dependencies. The updater requires both payload files and reapplies protection
+in its install step, including offline recovery. File-only early boot recovery
+restores the payload; the later finish step applies holds and hook guards before
+service activation and version commits. Protection failure leaves the update
+failed or pending for retry, with the previous version marker retained.
+
+`manet-admin-setup.sh` also invokes the helper from its own directory before
+checking cryptography. This makes the first update through an older updater
+apply the newly staged policy even when no dependency installation is needed.
+The helper resolves its policy relative to the archive staging root, or `/`
+when installed. It takes APT's POSIX frontend lock, writes complete policy and
+configuration files, registers local dpkg diversions and holds only installed
+boot packages not already held. It never installs or removes packages.
+Headers are pinned against installation/upgrade but not held, allowing the
+existing OS cleanup to remove them. No broad `linux-*` pin is used.
+
+Userland-triggered `update-initramfs` calls return success without touching
+boot files; package upgrades update its `.manet-distrib` copy. Pi firmware
+configuration disables kernel/initramfs copying, and the firmware package is
+pinned because its own postinst also copies boot firmware. Rock 3A's `99-uboot`
+hook is diverted, while `flash-kernel` is disabled by its machine setting.
+See [kernel ownership](kernel-6.18-morse-port.md#81-apt-owns-userland-manet-releases-own-the-kernel)
+for the package scope and recovery procedure.
+
 `auto_update=` set to a true value. See
 [networkd-dispatcher/README.md](../MANET/networkd-dispatcher/README.md).
 

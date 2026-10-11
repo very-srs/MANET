@@ -3,6 +3,10 @@
 # Failure disables admin control while the public status page remains usable.
 set -e
 
+# Also runs from a verified staging directory on the first tools update.
+# Apply before the dependency check, even when cryptography is already present.
+python3 "$(dirname "$(readlink -f "$0")")/manet-kernel-protect.py"
+
 if python3 -c 'from cryptography.hazmat.primitives.ciphers.aead import AESGCM; from cryptography.hazmat.primitives.kdf.scrypt import Scrypt' 2>/dev/null; then
     exit 0
 fi

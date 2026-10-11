@@ -215,15 +215,21 @@ fi
 #
 
 
+# Install kernel protection from the verified archive.
+# Extract only these files before any APT transaction touches the base image.
+tar -zxf /root/morse-pi-install.tar.gz --no-overwrite-dir -C / \
+    ./etc/apt/preferences.d/00-manet-kernel \
+    ./usr/local/bin/manet-kernel-protect.py || exit 1
+python3 /usr/local/bin/manet-kernel-protect.py \
+    --board __HARDWARE_MODEL__ || exit 1
+# End kernel protection.
+
 # get the sources up to date and install packages
 echo -n "Updating system packages..."
 apt update > /dev/null 2>&1
 
 # Remove the question about the iperf daemon during apt install
 echo "iperf3 iperf3/start_daemon boolean true" | debconf-set-selections
-
-# This isn't needed for the manet kernel and causes errors
-chmod -x /etc/kernel/postinst.d/initramfs-tools
 
 # Install packages for this system
 apt install -y --no-install-recommends ipcalc nmap lshw tcpdump net-tools nftables wireless-tools iperf3\
