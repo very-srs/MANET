@@ -1234,6 +1234,17 @@ channel with under 25 ms of dwell in the window reports no occupancy at all,
 because busy time counts in whole milliseconds and the ratio would move in 10%
 steps.
 
+Each measuring node publishes the median of its last three valid occupancy
+samples for that interface and frequency, all within ten minutes of boot-clock
+time. The first two samples remain unknown. A short dwell stays unknown for
+that scan even when history exists. This rejects a single short-visit burst;
+two sustained congested scans replace a quiet median. History lives in the
+manager's existing `CACHED_SCAN_REPORT_JSON`; the encoder sends only the public
+fields. Restart, expired history or an interface reassignment starts a new
+warmup. The median across reporting nodes and the ten-point incumbent bias
+still apply. Scoring has no local history, so identical registry snapshots and
+shared incumbents produce identical plans.
+
 The score was `avg_noise + total_bss * 0.1` until 0.548, which decided every
 election on `survey dump`'s noise field. A BSS was worth 0.1 dB, so ten
 co-channel networks equalled 1 dB of noise floor, and the elections turned
@@ -1312,11 +1323,16 @@ explicit presence. A channel measured at 0% busy and a channel the radio could
 not measure are different answers, and a proto3 scalar default cannot tell them
 apart. The election filters absent values out of the median instead of counting
 them as zero, so a node on an older build still contributes its noise and BSS
-counts without making every channel it reports look empty. A rolling update
-can also make nodes disagree: a node still running the old scoring reads the
-same reports and can pick a different channel, so update the whole mesh in one
-pass. All participants need the agreement service; an older independently switching
-node is not a participant in this protocol.
+counts without making every channel it reports look empty. When every reporter
+lacks occupancy for a candidate, its score uses the shared incumbent's measured
+median occupancy. If the incumbent is also unmeasured, the highest measured
+candidate median in that band supplies the fallback; if none exists, only noise
+and BSS contribute. The log still shows `-` for unknown busy. This comparison
+fallback cannot cast a congestion veto, but does count toward limp mode.
+A rolling update can also make nodes disagree: a node still running the old
+scoring reads the same reports and can pick a different channel, so update the
+whole mesh in one pass. All participants need the agreement service; an older
+independently switching node is not a participant in this protocol.
 
 ### Tourguide election and partition comparison
 
