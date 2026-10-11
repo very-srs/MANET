@@ -28,6 +28,7 @@ repeats and older inputs, except equal-time GNSS revisions replace samples
 and recompute affected ranges.
 """
 
+from bisect import insort
 from collections import deque
 from itertools import combinations
 import math
@@ -144,8 +145,8 @@ class Monitor:
         self._evaluate(result, sa, sb)
         self._note_failure(result)
         self.edges[key] = result
-        self.log.append(result)
-        while self.log and mono - self.log[0]["mono"] > EDGE_TTL_S:
+        insort(self.log, result, key=lambda e: e["mono"])
+        while self.log and self.log[-1]["mono"] - self.log[0]["mono"] > EDGE_TTL_S:
             self.log.popleft()
         return result
 

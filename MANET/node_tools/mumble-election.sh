@@ -68,11 +68,13 @@ get_mumble_ipv4_vip() {
 }
 
 # --- Database Sync Functions ---
-# Create SHARED_DB_DIR and BACKUP_DIR as radio when the shared dir is absent.
+# Create SHARED_DB_DIR and BACKUP_DIR as radio whenever either is absent.
 ensure_shared_directory() {
     if [ ! -d "$SHARED_DB_DIR" ]; then
         log "Creating shared Mumble directory in Syncthing"
         sudo -u radio mkdir -p "$SHARED_DB_DIR"
+    fi
+    if [ ! -d "$BACKUP_DIR" ]; then
         sudo -u radio mkdir -p "$BACKUP_DIR"
     fi
 }
@@ -136,19 +138,19 @@ safe_copy_database() {
     log "Safe copy: $source -> $dest"
     
     # Method 1: Use SQLite's own backup mechanism (preferred)
-    if sqlite3 "$source" ".backup '$temp_dest'" 2>&1 | logger -t mumble-election; then
+    sqlite3 "$source" ".backup '$temp_dest'" 2>&1 | logger -t mumble-election
+    if [ "${PIPESTATUS[0]}" -eq 0 ]; then
         log "SQLite backup completed successfully"
         
         # Verify the backup
         if check_database_integrity "$temp_dest" "backup"; then
             # Atomically move into place
-            mv "$temp_dest" "$dest"
+            mv "$temp_dest" "$dest" || return 1
             log "Database copied successfully using SQLite backup"
             return 0
         else
             log "ERROR: Backup integrity check failed"
             rm -f "$temp_dest"
-            return 1
         fi
     fi
     
@@ -159,27 +161,31 @@ safe_copy_database() {
     checkpoint_database "$source"
     
     # Copy main database file
-    cp "$source" "$temp_dest"
+    cp "$source" "$temp_dest" || return 1
     
     # Check if WAL/SHM files exist and are non-empty
     if [ -f "${source}-wal" ]; then
         local wal_size=$(stat -c%s "${source}-wal" 2>/dev/null || stat -f%z "${source}-wal" 2>/dev/null)
         if [ "$wal_size" -gt 0 ]; then
             log "WARNING: Copying non-empty WAL file"
-            cp "${source}-wal" "${temp_dest}-wal"
+            cp "${source}-wal" "${temp_dest}-wal" || return 1
         fi
     fi
     
     if [ -f "${source}-shm" ]; then
-        cp "${source}-shm" "${temp_dest}-shm"
+        cp "${source}-shm" "${temp_dest}-shm" || return 1
     fi
     
     # Verify integrity
     if check_database_integrity "$temp_dest" "copy"; then
-        mv "$temp_dest" "$dest"
+        mv "$temp_dest" "$dest" || return 1
         # Clean up WAL/SHM if they exist
-        [ -f "${temp_dest}-wal" ] && mv "${temp_dest}-wal" "${dest}-wal"
-        [ -f "${temp_dest}-shm" ] && mv "${temp_dest}-shm" "${dest}-shm"
+        if [ -f "${temp_dest}-wal" ]; then
+            mv "${temp_dest}-wal" "${dest}-wal" || return 1
+        fi
+        if [ -f "${temp_dest}-shm" ]; then
+            mv "${temp_dest}-shm" "${dest}-shm" || return 1
+        fi
         log "Database copied successfully using checkpoint method"
         return 0
     else
@@ -336,7 +342,11 @@ sync_database_to_shared() {
         sudo chmod 644 "$TEMP_SHARED"
         
         # Atomic move into place
-        sudo -u radio mv "$TEMP_SHARED" "$SHARED_DB"
+        if ! sudo -u radio mv "$TEMP_SHARED" "$SHARED_DB"; then
+            log "ERROR: Failed to replace shared database"
+            rm -f "$TEMP_SHARED"
+            return 1
+        fi
         
         local db_size=$(stat -c%s "$SHARED_DB" 2>/dev/null || stat -f%z "$SHARED_DB")
         log "Database synced to Syncthing (${db_size} bytes)"
@@ -476,7 +486,7 @@ elif [ "$MY_MAC" == "$BEST_CANDIDATE_MAC" ]; then
     if [ "$HAS_IPV4_VIP" = true ] && [ "$HAS_IPV6_VIP" = true ]; then
         WAS_ALREADY_LEADER=true
     fi
-    
+
     # Update Mumble config to bind to VIPs
     if [ -f "$MUMBLE_CONFIG" ]; then
         # Update host binding (ini format)
@@ -494,7 +504,19 @@ elif [ "$MY_MAC" == "$BEST_CANDIDATE_MAC" ]; then
         fi
         
         # Sync database from Syncthing
-        sync_database_from_shared
+        if ! sync_database_from_shared; then
+            log "WARNING: Shared database sync failed; using local state"
+            # Sync can fail before stopping the old server. Reload its binding.
+            if systemctl is-active --quiet "$MUMBLE_SERVICE_NAME"; then
+                systemctl stop "$MUMBLE_SERVICE_NAME"
+                sleep 2
+            fi
+            if [ -f "$WORKING_DB" ] &&
+                ! check_database_integrity "$WORKING_DB" "working"; then
+                log "ERROR: Local database is corrupt; cannot start Mumble"
+                exit 1
+            fi
+        fi
         
         # Start service
         log "Starting Mumble service"

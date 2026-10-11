@@ -150,7 +150,7 @@ class RegistryHelperTests(unittest.TestCase):
             expected = {
                 'Aa12': {'id': 'Aa12', 'HOSTNAME': 'last', 'DATA': 'a=b'},
                 'ff00': {'id': 'ff00', 'EMPTY': ''},
-                '1234': {'id': '1234', 'NAME': 'can'},
+                '1234': {'id': '1234', 'NAME': "can't"},
             }
             for module in (manage, status):
                 with patch.object(module, 'REGISTRY_FILE', str(path)):

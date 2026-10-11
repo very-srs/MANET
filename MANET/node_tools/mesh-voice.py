@@ -66,6 +66,8 @@ import threading
 import time
 import zlib
 
+from manet_registry import parse_registry
+
 # mesh-voice.service is enabled on every node. Exit successfully if the
 # GStreamer runtime is missing, so systemd's Restart=on-failure does not retry
 # the failed import every ten seconds. Voice remains unavailable on that node.
@@ -617,28 +619,13 @@ class OpenVLMPTT(threading.Thread):
 
 # --- peers -------------------------------------------------------------------
 
-# Read only address, name and activity assignments for hex registry node IDs.
-REGISTRY_LINE = re.compile(
-    r"^NODE_([0-9A-Fa-f]+)_(IPV4_ADDRESS|HOSTNAME|NODE_STATE)='(.*)'$")
-
-
 def read_registry(exclude_ips):
     """Return active registry peers as [(ip, hostname), ...].
 
     Parse NODE_<id>_<KEY>='value' lines without sourcing the shell file.
     Skip STALE nodes, which no longer publish telemetry, to avoid wasted air.
     """
-    nodes = {}
-    try:
-        with open(REGISTRY_FILE, "r") as fh:
-            for line in fh:
-                match = REGISTRY_LINE.match(line.strip())
-                if not match:
-                    continue
-                node_id, key, value = match.groups()
-                nodes.setdefault(node_id, {})[key] = value
-    except OSError:
-        return []
+    nodes = parse_registry(REGISTRY_FILE)
 
     peers = []
     for fields in nodes.values():
@@ -1231,6 +1218,7 @@ class MeshVoice:
         self.refresh_peers()
         GLib.timeout_add_seconds(REGISTRY_POLL_SEC, self._tick_peers)
         if self.cfg.codec == "lyra":
+            # Keep the callback through fallback; a rebuild may restore Lyra.
             GLib.timeout_add_seconds(PACKING_TICK_SEC, self._tick_packing)
         GLib.timeout_add_seconds(STATE_WRITE_SEC, self._tick_state)
         # Check the 500 ms receive-idle window every 100 ms for the UI/PTT gate.
@@ -2070,9 +2058,13 @@ class MeshVoice:
         """
         if self.cfg.codec != "lyra":
             return False        # no adaptation for this codec
+        if getattr(self, "effective_codec", self.cfg.codec) != "lyra":
+            self._pk_clean_since = time.monotonic()
+            return True         # fallback payloader has no Lyra packing
         if self.transmitting:
             # Skip while transmitting: local traffic consumes airtime, and its
             # packets are excluded from receive statistics.
+            self._pk_clean_since = time.monotonic()
             return True
 
         pushed, lost = self._rx_loss_stats()
@@ -2084,6 +2076,7 @@ class MeshVoice:
         if total < PACKING_MIN_SAMPLE:
             # Too little traffic in this window to judge. Hold, and do not let
             # silence count as "clean" toward reclaiming airtime.
+            self._pk_clean_since = time.monotonic()
             return True
 
         loss_pct = 100.0 * d_lost / total
@@ -2268,6 +2261,7 @@ class MeshVoice:
         pushed, lost = self._rx_loss_stats()
         stats = {"num-lost": lost, "num-late": late, "num-duplicates": dups,
                  "num-pushed": pushed}
+        codec = getattr(self, "effective_codec", self.cfg.codec)
 
         state = {
             # Preserve the fault in the VOICE tab through systemd's 10 s restart
@@ -2288,15 +2282,14 @@ class MeshVoice:
             "port": self.cfg.port,
             "interface": self.cfg.iface,
             "dscp": self.cfg.dscp,
-            "codec": getattr(self, "effective_codec", self.cfg.codec),
+            "codec": codec,
             "codec_configured": self.cfg.codec,
-            "codec_fallback": (getattr(self, "effective_codec", self.cfg.codec)
-                               != self.cfg.codec),
-            "bitrate": (self.cfg.lyra_bitrate if self.cfg.codec == "lyra"
+            "codec_fallback": codec != self.cfg.codec,
+            "bitrate": (self.cfg.lyra_bitrate if codec == "lyra"
                         else self.cfg.bitrate),
-            "frame_ms": (self.packing * 20 if self.cfg.codec == "lyra"
+            "frame_ms": (self.packing * 20 if codec == "lyra"
                          else self.cfg.frame_ms),
-            "frames_per_packet": (self.packing if self.cfg.codec == "lyra"
+            "frames_per_packet": (self.packing if codec == "lyra"
                                   else None),
             "rx_loss_pct": round(self.rx_loss_pct, 1),
             "unicast": self.cfg.unicast,

@@ -1735,9 +1735,16 @@ if [[ "$FIRST_BOOT_UNIT_ENABLED" -eq 1 && ! -f "$FIRST_BOOT_STAGE_MARKER" ]]; th
     SYNCTHING_CONFIG="/home/radio/.config/syncthing/config.xml"
     echo " >> Hardening Syncthing for local-only operation..."
     # Insert discovery/relay options at the options element.
-    # The GUI replacement matches an opening and closing tag on one line.
     sed -i '/<options>/a <globalAnnounceEnabled>false</globalAnnounceEnabled>\n<relaysEnabled>false</relaysEnabled>' "$SYNCTHING_CONFIG"
-    sed -i 's|<gui enabled="true" tls="false" debugging="false">.*</gui>|<gui enabled="true" tls="false" debugging="false">\n        <address>127.0.0.1:8384</address>\n    </gui>|' "$SYNCTHING_CONFIG"
+    # Gather the GUI block before editing its address, preserving other fields.
+    sed -i '/<gui[[:space:]>]/ {
+        :gui
+        /<\/gui>/! {
+            N
+            b gui
+        }
+        s|<address>[^<]*</address>|<address>127.0.0.1:8384</address>|
+    }' "$SYNCTHING_CONFIG"
     echo " -- CONFIGURED -- " >> /etc/issue
     touch "$FIRST_BOOT_STAGE_MARKER"
 fi

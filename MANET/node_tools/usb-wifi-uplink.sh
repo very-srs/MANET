@@ -184,6 +184,7 @@ connect_iface() {
     enabled="$(cfg_get enabled 1)"
     if [ "$enabled" != "1" ]; then
         log "USB Wi-Fi uplink disabled in $CONFIG_FILE"
+        remove_iface "$iface"
         return 1
     fi
 

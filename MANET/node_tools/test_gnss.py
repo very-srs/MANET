@@ -250,6 +250,53 @@ class AnomalyTests(unittest.TestCase):
         self.assertAlmostEqual(r.events[0]['value'], 4.0, places=1)
         self.assertFalse(reader_mod.build_status(r, mono + 40, 'b')['time_ok'])
 
+    def test_clock_step_time_doubt_survives_signal_event_eviction(self):
+        r, mono, t = settled_reader()
+        seconds = int(mg.STEP_HOLD_S) + 1
+        mono = steady(r, t, seconds, mono0=mono, offset=4.0)
+        step = next(e for e in r.events if e['kind'] == 'clock_step')
+        for i in range(r.events.maxlen):
+            r.feed(sky([v + (10 if i % 2 == 0 else 0) for v in SKY_OK]), mono + i)
+            r.feed(tpv(t + seconds + 4 + i), mono + i)
+        now = mono + r.events.maxlen - 1
+        self.assertNotIn('clock_step', kinds(r))
+        self.assertLess(now - step['mono'], mg.TIME_DOUBT_S)
+        self.assertFalse(reader_mod.build_status(r, now, 'b')['time_ok'])
+
+    def test_time_doubt_survives_shared_event_eviction_until_latest_event_expires(self):
+        for kind in mg.TIME_EVENTS:
+            with self.subTest(kind=kind):
+                r, mono, _ = settled_reader()
+                other = '/dev/other'
+                for i in range(int(mg.SETTLE_S) + 1):
+                    r.feed(tpv(T0 + i, device=other), 100.0 + i)
+                rx = r.receivers[DEV]
+                rx._event(kind, mono)
+                rx._event(kind, mono + 10)
+                for i in range(r.events.maxlen):
+                    r.receivers[other]._event('ss_step', mono + 11 + i)
+                self.assertNotIn(kind, kinds(r))
+                self.assertFalse(rx.time_ok(mono + mg.TIME_DOUBT_S + 10))
+                self.assertTrue(rx.time_ok(mono + mg.TIME_DOUBT_S + 11))
+                self.assertTrue(r.receivers[other].time_ok(mono + 61))
+
+    def test_time_doubt_survives_anonymous_receiver_adoption(self):
+        r = GnssReader()
+        for i in range(int(mg.SETTLE_S) + 5):
+            r.feed(tpv(T0 + i, device=''), 100.0 + i)
+        r.receivers['']._event('clock_step', 135.0)
+        r.feed({'class': 'DEVICES', 'devices': [{'path': DEV}]}, 135.0)
+        self.assertFalse(reader_mod.build_status(r, 135.0, 'b')['time_ok'])
+
+    def test_time_doubt_survives_gpsd_reconnect(self):
+        r, mono, t = settled_reader()
+        r.receivers[DEV]._event('clock_step', mono)
+        r.new_session()
+        now = steady(r, t, int(mg.SETTLE_S) + 5, mono0=mono) - 1
+        status = reader_mod.build_status(r, now, 'b')
+        self.assertTrue(status['settled'])
+        self.assertFalse(status['time_ok'])
+
     def test_time_ok_when_steady(self):
         r, mono, t = settled_reader()
         self.assertTrue(reader_mod.build_status(r, mono - 1, 'b')['time_ok'])

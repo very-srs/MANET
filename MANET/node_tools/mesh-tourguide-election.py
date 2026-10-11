@@ -57,10 +57,18 @@ def elect(own, peers, registry, band, excluded=()):
         if not isinstance(interfaces, list):
             raise ValueError('invalid interface report')
         low, high = (2400, 2500) if band == '2.4' else (5000, 5900)
-        return any(isinstance(iface, dict) and iface.get('role') == 'mesh'
-                   and iface.get('state') == 'UP'
-                   and isinstance(iface.get('freq_mhz'), (int, float))
-                   and low <= iface['freq_mhz'] < high for iface in interfaces)
+        for iface in interfaces:
+            if (not isinstance(iface, dict) or iface.get('role') != 'mesh'
+                    or iface.get('state') != 'UP'):
+                continue
+            # NodeTelemetry carries MHz as text, including fractional values.
+            try:
+                frequency = float(iface.get('freq_mhz'))
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if low <= frequency < high:
+                return True
+        return False
 
     candidates = {mac for mac in candidates if can_hop(mac)}
     if not candidates:

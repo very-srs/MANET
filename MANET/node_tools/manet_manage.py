@@ -91,6 +91,11 @@ USB_WIFI_UPLINK_SCRIPT = '/usr/local/bin/usb-wifi-uplink.sh'
 # UI, the Alfred applier and mesh-status all offer the same channels.
 
 # Active measurement state
+MEASURE_BUDGET_SEC = 3600
+MEASURE_SETUP_SEC = 70  # Radio snapshot command timeouts plus local setup.
+MEASURE_PAUSE_SEC = 2
+MEASURE_ROUTE_SEC = 5
+MEASURE_LOCAL_SEC = 5  # Per-test registry, capacity checks and result storage.
 _measure_lock   = threading.Lock()
 _measure_status = {
     'running': False, 'label': '', 'progress': '', 'error': '',
@@ -231,7 +236,8 @@ def get_session_hop_count(dst_ip):
         return None, 'missing'
     try:
         # Limit route collection to five seconds per measurement.
-        r = subprocess.run(['batctl', 'o'], capture_output=True, text=True, timeout=5)
+        r = subprocess.run(['batctl', 'o', '-n'], capture_output=True, text=True,
+                           timeout=MEASURE_ROUTE_SEC)
     except Exception:
         return None, 'error'
     nodes = parse_registry(REGISTRY_FILE)
@@ -243,15 +249,22 @@ def get_session_hop_count(dst_ip):
             break
     if not dst_macs:
         return None, 'unknown'
+    fallback = None, 'unknown'
     for line in r.stdout.splitlines():
-        parts = line.split()
-        if len(parts) < 4:
-            continue
-        if parts[0].lower().rstrip('*') in dst_macs:
+        # The route marker and padding inside the metric shift token columns.
+        row = re.match(
+            r'^\s*(\*)?\s*([0-9a-f:]{17})\s+[\d.]+(?:ms|s)\s+'
+            r'\(\s*[\d.]+\s*\)\s+([0-9a-f:]{17})(?:\s|$)',
+            line, re.I)
+        if row and row.group(2).lower() in dst_macs:
             # A direct originator is one hop. Other nexthops need at least two.
-            nexthop = parts[3].strip('[]').lower()
-            return (1 if nexthop in dst_macs else 2), 'batctl'
-    return None, 'unknown'
+            nexthop = row.group(3).lower()
+            hops = (1 if nexthop in dst_macs else 2), 'batctl'
+            if row.group(1):
+                return hops
+            if fallback[0] is None:
+                fallback = hops
+    return fallback
 
 
 def extract_iperf3_metrics(iperf):
@@ -842,10 +855,23 @@ def run_local_iperf3(server_ip, test_type, duration, bitrate,
     return r.returncode == 0, payload, r.stderr.strip()
 
 
+def measurement_test_budget(test_type, duration):
+    """Reserve command, route, local work and pause time per pair/test."""
+    command = 30 if test_type == 'icmp_ping' else duration + 25
+    return command + MEASURE_ROUTE_SEC + MEASURE_LOCAL_SEC + MEASURE_PAUSE_SEC
+
+
 def run_measurement_session(label, pairs, tests, duration, udp_bitrate):
     """Run all test combinations. Blocking: call in thread."""
     global _measure_status
     done = 0
+    deadline = time.monotonic() + MEASURE_BUDGET_SEC
+
+    def require_time(seconds=0):
+        """Stop between blocking operations if the remaining work cannot fit."""
+        if deadline - time.monotonic() < seconds:
+            raise TimeoutError('Measurement batch reached its one-hour budget')
+
     try:
         ensure_sessions_dir()
         session_dir = session_path(label)
@@ -862,6 +888,8 @@ def run_measurement_session(label, pairs, tests, duration, udp_bitrate):
             dst_name = pair['dst_name']
 
             for test_type in tests:
+                test_budget = measurement_test_budget(test_type, duration)
+                require_time(test_budget)
                 check_capacity(SESSIONS_DIR, session_path(label))
                 now = int(time.time())
                 with _measure_lock:
@@ -901,6 +929,9 @@ def run_measurement_session(label, pairs, tests, duration, udp_bitrate):
                 hop_count, hop_source = get_session_hop_count(dst_ip)
                 result_record['hop_count'] = hop_count
                 result_record['hop_count_source'] = hop_source
+                # Recheck after local work; keep the full command timeout and
+                # room to save its result within the remaining batch budget.
+                require_time(test_budget - MEASURE_ROUTE_SEC)
 
                 if test_type == 'icmp_ping':
                     result_record['ping_result'] = run_local_ping(dst_ip)
@@ -934,7 +965,9 @@ def run_measurement_session(label, pairs, tests, duration, udp_bitrate):
                         'total': total,
                         'last_result': summarize_measurement_result(result_record),
                     })
-                time.sleep(2)  # brief pause between tests
+                require_time(MEASURE_PAUSE_SEC)
+                time.sleep(MEASURE_PAUSE_SEC)  # brief pause between tests
+                require_time()
 
         with _measure_lock:
             _measure_status['running']  = False
@@ -950,6 +983,8 @@ def run_measurement_session(label, pairs, tests, duration, udp_bitrate):
             _measure_status['progress'] = f'Failed after {done} test(s)'
             _measure_status['error']    = str(e)
             _measure_status['done']     = done
+            _measure_status['current']  = None
+            _measure_status['current_started_at'] = None
 
 
 
@@ -3868,7 +3903,11 @@ class ManageRoutes:
                         return
                     # Budget command deadlines: 30 s per ping, duration + 25 s
                     # per iperf3 invocation, at most 3600 s for the batch.
-                    if len(pairs) * sum(30 if t == 'icmp_ping' else dur + 25 for t in tests) > 3600:
+                    # Include setup and every pair/test's route, storage and
+                    # pause. The worker rechecks time if local work runs slow.
+                    budget = MEASURE_SETUP_SEC + len(pairs) * sum(
+                        measurement_test_budget(t, dur) for t in tests)
+                    if budget > MEASURE_BUDGET_SEC:
                         self.send_json({'ok': False, 'error':
                             'A measurement batch must fit within one hour; choose fewer pairs or shorter tests'}, 400)
                         return

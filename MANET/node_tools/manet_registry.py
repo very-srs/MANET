@@ -29,14 +29,17 @@ def parse_registry(path):
     try:
         with open(path) as f:
             content = f.read()
-        # Match hex node IDs, uppercase field names, and quoted values.
+        # Match hex node IDs, uppercase fields and shell-quoted values,
+        # including the apostrophe quote breaks emitted by registry writers.
         # Registry shell assignments remain data, never sourced code.
-        pattern = re.compile(r"NODE_([A-Fa-f0-9]+)_([A-Z0-9_]+)='([^']*)'")
+        pattern = re.compile(
+            r"^NODE_([A-Fa-f0-9]+)_([A-Z0-9_]+)='((?:[^']|'\\'')*)'$",
+            re.MULTILINE)
         for m in pattern.finditer(content):
             nid, field, value = m.groups()
             if nid not in nodes:
                 nodes[nid] = {'id': nid}
-            nodes[nid][field] = value
+            nodes[nid][field] = value.replace("'\\''", "'")
     except Exception:
         pass
     return nodes

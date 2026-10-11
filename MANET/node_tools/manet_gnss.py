@@ -132,15 +132,15 @@ class ReceiverState:
         self.clock_base = None        # (offset, mono) once settled
         self.clock_steps = 0.0
         self.clock_drifting = False
+        self.last_time_event = None  # retained independently of the bounded log
         self.jam_high = False
         self.seq = 0
         self.history = deque()
 
     def time_ok(self, mono):
         """Settled, and no clock step, drift or discontinuity for TIME_DOUBT_S."""
-        return self.settled(mono) and not any(
-            e["device"] == self.device and e["kind"] in TIME_EVENTS
-            and mono - e["mono"] <= TIME_DOUBT_S for e in self.events)
+        return self.settled(mono) and (self.last_time_event is None
+                                     or mono - self.last_time_event > TIME_DOUBT_S)
 
     def settled(self, mono):
         """A fix has held without a break for SETTLE_S at some point."""
@@ -151,6 +151,8 @@ class ReceiverState:
 
     def _event(self, kind, mono, detail="", value=None):
         """Append a device-tagged anomaly using raw monotonic seconds."""
+        if kind in TIME_EVENTS:
+            self.last_time_event = round(mono, 3)
         self.events.append({"device": self.device, "kind": kind, "mono": round(mono, 3),
                             "value": value, "detail": detail})
 
