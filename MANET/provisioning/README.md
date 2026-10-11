@@ -16,6 +16,13 @@ Then you put the card in the node, connect Ethernet and power it on. A service
 embedded in the image runs as soon as the network is up, downloads what it
 needs, configures the radio interfaces, and reboots into a working mesh node.
 
+After provisioning, `apt upgrade` is safe for userland updates. MANET pins
+distribution kernel and boot packages and disables their boot-copy hooks, so
+APT keeps the MANET kernel, DTBs and boot initramfs. Existing nodes receive
+this protection through a tools update. Kernel changes and kernel security
+fixes come through a MANET install release, not APT; see
+[kernel updates and recovery](../../docs/kernel-6.18-morse-port.md#81-apt-owns-userland-manet-releases-own-the-kernel).
+
 ---
 
 ## Prerequisites

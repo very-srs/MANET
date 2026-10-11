@@ -1,0 +1,17 @@
+# MANET releases own the boot kernel, DTBs and initramfs on every board.
+# Keep linux-libc-dev and generic linux-base available for userland packages.
+Package: linux-image-* linux-headers-* linux-base-* linux-dtb-* linux-u-boot-*
+Pin: version *
+Pin-Priority: -1
+
+# raspi-firmware runs kernel-copy hooks on its own upgrade too.
+Package: raspi-firmware raspberrypi-kernel* raspberrypi-bootloader armbian-bsp-*
+Pin: version *
+Pin-Priority: -1
+
+# Prevent installing alternate boot writers. initramfs-tools remains usable
+# as a dependency, with update-initramfs diverted by manet-kernel-protect.py.
+# dracut-install is a userland dependency of initramfs-tools-core: allow it.
+Package: flash-kernel u-boot-menu dracut dracut-core dracut-config-*
+Pin: version *
+Pin-Priority: -1

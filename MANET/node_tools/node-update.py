@@ -39,6 +39,8 @@ RECOVERY_UNITS = {
 }
 MARKERS = {"etc/manet_version.txt", "usr/local/bin/version.txt"}
 REQUIRED = MARKERS | {
+    "etc/apt/preferences.d/00-manet-kernel",
+    "usr/local/bin/manet-kernel-protect.py",
     "usr/local/bin/manet-mesh-supplicant.py",
     "etc/systemd/system/wpa_supplicant@.service.d/20-manet-binary.conf",
     "usr/local/bin/node-update.sh", "usr/local/bin/node-update.py",
@@ -521,6 +523,7 @@ class Updater:
     def install(self, directory, members):
         """Install files, activate services and commit versions after checks."""
         self.install_payload(directory, members)
+        self.protect_kernel(directory)
         mesh_setup = self.destination('usr/local/bin/manet-mesh-supplicant.py')
         # Serialize the one-time rewrite with ACS and AP role transitions.
         output = run_command([
@@ -563,6 +566,13 @@ class Updater:
             atomic_file(self.destination(name), source=directory / name)
         self.pending.unlink()
         sync_directory(self.state)
+
+    def protect_kernel(self, directory):
+        """Protect boot files before package setup and on installation retries."""
+        run_command([str(directory / 'usr/local/bin/manet-kernel-protect.py'),
+                     '--root', str(self.root), '--board', self.board(),
+                     '--policy', str(directory / 'etc/apt/preferences.d/00-manet-kernel')],
+                    timeout=600)
 
     @staticmethod
     def install_link(target, link):
@@ -675,6 +685,7 @@ class Updater:
                 self.stage(package, members, staged)
                 # APT is allowed only before arming the transaction. Boot
                 # recovery never depends on network access or package installs.
+                self.protect_kernel(staged)
                 run_command([staged / 'usr/local/bin/manet-admin-setup.sh'],
                             timeout=600)
                 self.arm_recovery(package, checksum, filename, expected, staged)

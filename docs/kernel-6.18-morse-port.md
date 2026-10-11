@@ -461,9 +461,12 @@ FGH100M-AA-MD, US frequency plan); Rock 3A uses `mm8108*.bin` + `bcf_mf15457.bin
 right one is missing.
 
 Never extract a kernel tarball onto a live CM4's mounted FAT32 boot partition.
-Power down and mount the eMMC on the dev machine. Usual first-boot path is an
-install tarball from `MANET/packaging/` (overlay already includes Morse
-firmware). For a kernel-only tarball onto mounted partitions:
+For maintenance or recovery, power down and mount the eMMC on the dev machine.
+First-boot provisioning is a separate, existing path: both templates extract
+the verified install archive onto the live, newly imaged system, then reboot
+into MANET. That initial setup is not an atomic boot-partition update and must
+not be interrupted. It does not make live extraction safe for an established
+node. For a kernel-only tarball onto offline mounted partitions:
 
 ```bash
 # $BOOTFS = FAT boot partition, $ROOTFS = ext4 root, $KVER e.g. 6.18.33-manet
@@ -487,6 +490,87 @@ dmesg | grep -E 'morse|wlan2'
 
 If it breaks, work through the symptom table in `PORTING-MORSE-DRIVER.md`
 ("Diagnostic guide: what to check if it breaks again").
+
+### 8.1 APT owns userland; MANET releases own the kernel
+
+Only the kernel, DTBs, overlays and modules from the board's MANET install
+archive belong in its boot path. `/etc/apt/preferences.d/00-manet-kernel`
+assigns priority -1 to distribution kernel images, headers, per-flavour base
+packages, DTBs, Armbian U-Boot/BSP packages and alternate boot writers.
+`raspi-firmware` is also pinned: its own upgrade invokes the kernel-copy hook.
+The helper `manet-kernel-protect.py` holds installed boot packages to prevent
+automatic removal as well as upgrades. Headers stay removable for OS cleanup.
+Pins also cover future versioned package names, which holds alone cannot do.
+
+Pins do not stop already installed hooks. The helper sets `KERNEL=none` and
+`INITRAMFS=none` in `/etc/default/raspi-firmware` on Pi boards, disables
+`flash-kernel` with `/etc/flash-kernel/machine`, and uses local dpkg diversions
+to replace `update-initramfs` and Rock 3A's `99-uboot` initramfs hook with
+successful no-ops. Original package files remain at `.manet-distrib` paths.
+This prevents userland triggers from regenerating a stock initramfs or
+retargeting `/boot/uInitrd`. A chmod on one kernel postinst hook is insufficient.
+The initramfs tools can still receive updates as userland dependencies.
+
+Both templates apply protection before their first APT transaction. Install
+and tools archives carry the policy and helper; tools updates apply protection
+before dependency installation and reapply it during installation/recovery.
+APT transactions already running must finish before the helper changes hooks.
+
+`apt upgrade` and ordinary tool installs remain available. In particular,
+`build-essential` needs `libc6-dev`, which needs `linux-libc-dev`; those are
+userland headers, not `linux-headers-*`, and remain unpinned. `libssl-dev` does
+not require a kernel image. EEPROM updates (`rpi-eeprom`) and device firmware
+(`armbian-firmware`, `firmware-mediatek`) remain available because they do not
+replace these boot kernel files. A package requiring a new stock kernel is
+intentionally unsatisfiable; select a compatible userland package or update
+through a MANET release instead of overriding the policy.
+
+To update a kernel deliberately, use the matching board's install archive
+from a verified MANET release and the offline procedure above, or reflash
+through provisioning. A tools update does not contain a kernel. Leave the
+APT protections enabled when installing a MANET kernel. Kernel security fixes
+therefore require a new MANET kernel release as well as ordinary userland
+security updates.
+
+The package behavior is documented in the upstream
+[Pi kernel-copy hook](https://github.com/RPi-Distro/firmware/blob/pios/trixie/debian/kernel/postinst.d/z50-raspi-firmware),
+[firmware postinst](https://github.com/RPi-Distro/firmware/blob/pios/trixie/debian/raspi-firmware.postinst),
+[Armbian initramfs hook](https://github.com/armbian/build/blob/main/packages/bsp/common/etc/initramfs/post-update.d/99-uboot),
+and Debian's [APT preferences](https://manpages.debian.org/trixie/apt/apt_preferences.5.en.html)
+and [flash-kernel](https://manpages.debian.org/trixie/flash-kernel/flash-kernel.8.en.html)
+manuals. Verify installed package owners and hooks when changing base images.
+
+### 8.2 Recovering a node overwritten by APT
+
+Installing protection prevents another overwrite; it does not restore the
+running kernel or boot files. If `uname -r` reports a stock `rpt-rpi` kernel
+and the MANET radios disappeared, obtain the matching board and MANET
+release's install archive and verify its release checksum. Preserve mesh
+configuration. For a CM4, power down, expose the eMMC using rpiboot and mount
+its FAT boot and ext4 root partitions on the dev machine. Follow the offline
+partition layout in section 8, using that install archive as the source:
+
+```bash
+# Inspect the archive first and select its exact module version, not uname -r.
+tar tzf cm4-install.tar.gz | less
+sudo tar xzf cm4-install.tar.gz -C "$BOOTFS" --strip-components=2 \
+    ./boot/firmware/
+sudo tar xzf cm4-install.tar.gz -C "$ROOTFS" \
+    ./usr/lib/modules/ ./usr/lib/firmware/morse/
+sudo depmod -b "$ROOTFS" "$KVER"
+sync
+```
+
+Use the matching release's boot configuration; preserve any required local
+boot settings when reviewing the restored files. Unmount both partitions
+cleanly before powering on. RPi5 and Rock 3A likewise need their own matching
+boot files, DTBs, modules and firmware; Rock 3A uses `/boot/Image` and
+`/boot/dtb/rockchip/` on its root filesystem. Do not apply Pi paths to Rock 3A.
+Install the protection from the corrected release before another APT action.
+After boot, verify `uname -r`, the matching `/usr/lib/modules` directory,
+Morse/MT7916 driver loading, radio enumeration and mesh peers. Do not purge
+stock kernels as a recovery step: their removal hooks can also change boot
+files.
 
 ---
 

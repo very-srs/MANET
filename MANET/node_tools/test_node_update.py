@@ -88,6 +88,9 @@ if os.environ.get('TEST_SYSTEMCTL_FAIL') == args:
                 body = self.new_version.encode()
             elif name.endswith('manet-admin-setup.sh'):
                 body = b'#!/bin/sh\necho dependency >> "$TEST_EVENTS"\nexit "$TEST_DEPENDENCY_FAIL"\n'
+            elif name.endswith('manet-kernel-protect.py'):
+                body = (b'#!/bin/sh\necho kernel-protection >> "$TEST_EVENTS"\n'
+                        b'exit "${TEST_KERNEL_PROTECTION_FAIL:-0}"\n')
             elif name.endswith('manet-dhcp-isolation.py'):
                 body = b'#!/bin/sh\necho isolation >> "$TEST_EVENTS"\nexit "${TEST_ISOLATION_FAIL:-0}"\n'
             else:
@@ -397,6 +400,29 @@ if os.environ.get('TEST_SYSTEMCTL_FAIL') == args:
             real_space(requests)
         with patch.object(self.updater, 'space', side_effect=space):
             self.assert_rejected_before_install()
+
+    def test_kernel_protection_before_dependencies_and_during_install(self):
+        self.updater.update()
+        events = self.events.read_text().splitlines()
+        protects = [i for i, event in enumerate(events)
+                    if event == 'kernel-protection']
+        self.assertEqual(len(protects), 2)
+        self.assertLess(protects[0], events.index('dependency'))
+        self.assertGreater(protects[1], events.index('dependency'))
+        self.assertLess(protects[1], events.index('systemctl daemon-reload'))
+
+    def test_kernel_protection_failure_stops_before_apt(self):
+        with patch.dict(os.environ, TEST_KERNEL_PROTECTION_FAIL='1'):
+            with self.assertRaises(update.UpdateError):
+                self.updater.update()
+        self.assertNotIn('dependency', self.events.read_text())
+        self.assertEqual(self.updater.marker.read_text(), self.old_version)
+
+    def test_kernel_policy_and_helper_are_required(self):
+        for name in ('etc/apt/preferences.d/00-manet-kernel',
+                     'usr/local/bin/manet-kernel-protect.py'):
+            with self.subTest(name=name):
+                self.assertIn(name, update.REQUIRED)
 
     def test_dependency_failure_does_not_install_payload(self):
         with patch.dict(os.environ, TEST_DEPENDENCY_FAIL='1'):
