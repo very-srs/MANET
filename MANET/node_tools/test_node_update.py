@@ -32,6 +32,7 @@ class UpdateTests(unittest.TestCase):
         self.root = self.work / 'root'
         for directory in ('etc', 'usr/local/bin', 'proc/device-tree', 'run'):
             (self.root / directory).mkdir(parents=True)
+        (self.root / 'run/initial_time_synced').touch()
         (self.root / 'proc/device-tree/model').write_bytes(b'Raspberry Pi Compute Module 4\0')
         self.old_version = '0.549\n09/2026\n'
         self.new_version = '0.550\n09/2026\n'
@@ -77,6 +78,7 @@ if os.environ.get('TEST_SYSTEMCTL_FAIL') == args:
             'TEST_EVENTS': str(self.events), 'TEST_SERVER': str(self.server),
             'TEST_ROOT': str(self.root), 'TEST_SYSTEMCTL_FAIL': '',
             'TEST_DOWNLOAD_FAIL': '', 'TEST_DEPENDENCY_FAIL': '0',
+            'MANET_TIME_RUN_DIR': str(self.root / 'run'),
         })
         self.environment.start()
         self.addCleanup(self.environment.stop)
@@ -600,6 +602,40 @@ module.Updater(Path(sys.argv[2])).update(recover_only=True)
         self.assertIn('curl ' + STABLE_MANIFEST, self.history())
         self.assertNotIn('tools.tar.gz', self.history())
         self.assertGreater(self.updater.marker.stat().st_mtime, old)
+
+    def test_unsynced_manual_update_reports_clock_before_any_download(self):
+        (self.root / 'run/initial_time_synced').unlink()
+        for development in (False, True):
+            with self.subTest(development=development):
+                self.updater.development = development
+                with patch.object(update, 'Updater', return_value=self.updater), \
+                        patch.object(update.os, 'geteuid', return_value=0), \
+                        patch.object(update.signal, 'signal'), \
+                        patch.object(sys, 'argv', ['node-update.py']):
+                    self.assertEqual(update.main(), 1)
+                self.assertIn('Clock not synced', self.updater.log.call_args.args[0])
+                self.assertEqual(self.history(), '')
+
+    def test_unsynced_local_recovery_does_not_need_a_clock(self):
+        with patch.dict(os.environ, TEST_SYSTEMCTL_FAIL='daemon-reload'):
+            with self.assertRaises(update.UpdateError):
+                self.updater.update()
+        (self.root / 'run/initial_time_synced').unlink()
+        self.events.unlink()
+        self.updater.update(files_only=True)
+        self.assertEqual(self.history(), '')
+        self.updater.update(recover_only=True)
+        self.assertNotIn('curl ', self.history())
+        self.assertEqual(self.updater.marker.read_text(), self.new_version)
+
+    def test_update_requires_clock_trigger_payload_and_activates_it(self):
+        for name in ('manet-auto-update.path', 'manet-auto-update-clock.service',
+                     'manet-auto-update.service'):
+            with self.subTest(unit=name):
+                self.assertIn('etc/systemd/system/' + name, update.REQUIRED)
+        self.assertIn('usr/local/bin/manet-auto-update.sh', update.REQUIRED)
+        self.updater.update()
+        self.assertIn('systemctl enable --now manet-auto-update.path', self.history())
 
     def test_all_board_urls(self):
         for model, board in (('ROCK3 Model A', 'r3a'), ('Radxa ROCK 3A', 'r3a'),

@@ -51,7 +51,14 @@ After reconciliation, an opted-in node queues `manet-auto-update.service`
 without waiting for it. This oneshot rechecks `auto_update` and the selected
 uplink's IPv4 default route before running the updater. It excludes mesh
 bridges and does not require ICMP access. Systemd serializes concurrent starts.
-There is no cron job or timer; routable events trigger automatic checks.
+Without `/run/initial_time_synced`, it logs that the check is deferred and exits
+successfully. The time service creates this marker after verified GPS, NTS or
+qualified peer synchronization. `manet-auto-update.path` watches for it and
+queues another check once per boot, including if the marker already exists
+when the path unit starts. The clock trigger also checks opt-in and the uplink;
+if no uplink exists yet, a later routable event checks again.
+There is no cron job or timer; routable and initial clock-sync events trigger
+automatic checks.
 The opt-in accepts `y`, `yes`, `1` or `true`, case-insensitively.
 
 The time service observes the selected uplink and starts internet time

@@ -17,6 +17,10 @@
 selects the stable GitHub release marked Latest and installs the board's
 tools archive if its version is newer.
 Run it as root.
+Downloads require qualified clock synchronization, recorded in
+.Pa /run/initial_time_synced .
+Without that marker, the command reports that the clock is not synced.
+Local archive recovery does not require clock synchronization.
 The archive digest, paths and embedded versions are checked before staging.
 Tools updates replace runtime files and restart services; they do not
 replace the kernel.

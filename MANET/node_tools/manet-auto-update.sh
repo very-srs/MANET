@@ -15,4 +15,8 @@ case "$iface" in lo|br*|bat*) exit 0 ;; esac
 # Gateway reconciliation has already checked connectivity. Let the updater's
 # bounded HTTPS downloads establish reachability instead of requiring ICMP.
 ip -4 route show default dev "$iface" | grep -q '^default ' || exit 0
+if [ ! -f "${MANET_TIME_RUN_DIR:-/run}/initial_time_synced" ]; then
+    echo "MANET routine update check deferred until clock sync"
+    exit 0
+fi
 exec "$UPDATER" --routine

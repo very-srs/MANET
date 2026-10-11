@@ -1,0 +1,10 @@
+[Unit]
+Description=Queue a MANET update check after initial clock sync
+# Finish any pre-sync routable check before queuing the clock-ready check.
+After=manet-auto-update.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/systemctl start --no-block manet-auto-update.service
+# Latch only the clock event. Routable checks must remain repeatable.
+RemainAfterExit=yes
