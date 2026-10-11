@@ -142,9 +142,11 @@ log() {
         chans_json=$(printf '%s\n' "$1" | jq -Rc 'split(" ") | map(select(length > 0) | tonumber)')
 
         # Use median noise/busy values and mean BSS count per candidate MHz.
-        # Missing noise/busy adds no penalty. Round scores to two decimals.
+        # Unknown busy uses the incumbent's median, or the highest measured
+        # candidate median when it is unmeasured. Round scores to two decimals.
         printf '%s' "$ALL_REPORTS_JSON" | jq -r \
             --argjson chans "$chans_json" \
+            --arg current "$2" \
             --argjson noise_dq "$NOISE_DISQUALIFY_THRESHOLD_DBM" \
             --argjson busy_dq "$OCCUPANCY_DISQUALIFY_PCT" \
             --argjson quorum "$DISQUALIFY_QUORUM" \
@@ -160,6 +162,12 @@ log() {
             def round2: (. * 100 | round) / 100;
 
             [ .[]? | .results? // [] | .[]? | select(type == "object") ] as $all
+            | ([ $all[] | select(.channel == ($current | tonumber?))
+                 | .busy_pct | numbers ] | median) as $home_busy
+            | ($home_busy // ([ $chans[] as $candidate
+                 | [ $all[] | select(.channel == $candidate)
+                     | .busy_pct | numbers ] | median
+                 | numbers ] | max) // 0) as $unknown_busy
             | $chans[] as $c
             | [ $all[] | select(.channel == $c) ] as $s
             | if ($s | length) == 0 then "\($c) nodata"
@@ -180,7 +188,7 @@ log() {
                 | ((if ($noise // -100) > $noise_ref
                     then (($noise // -100) - $noise_ref) else 0 end) * $noise_w
                    + ($bss * $bss_w)
-                   + ($busy // 0)) as $score
+                   + ($busy // $unknown_busy)) as $score
                 | "\($c) \(if $bad >= $need then "dq" else "ok" end) \($score | round2) \($n) \($noise // "-") \($busy // "-") \($bss | round2) \($bad)/\($need)"
               end
             '
@@ -213,7 +221,7 @@ log() {
         local lines chan status rest best_ok best_any
         local pick_chan pick_eff pick_raw
 
-        lines=$(score_band "$band_channels")
+        lines=$(score_band "$band_channels" "$current_channel")
 
         while read -r chan status rest; do
             [ -z "$chan" ] && continue

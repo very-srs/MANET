@@ -41,6 +41,11 @@ SCAN_FREQS_5_0="5200 5220 5240 5745 5765 5785 5805 5825"
 # resolution, so a 10 ms visit yields only 10% steps.
 SURVEY_MIN_DWELL_MS=25
 
+# Publish the median of three valid visits within ten minutes. A single
+# short off-channel visit is too variable to justify a migration.
+SURVEY_BUSY_SAMPLES=3
+SURVEY_BUSY_MAX_AGE=600
+
 # Helper scripts
 IP_MANAGER="/usr/local/bin/mesh-ip-manager.sh"
 CHANNEL_ELECTION="/usr/local/bin/channel-election.sh"
@@ -286,6 +291,48 @@ parse_survey() {
         }'
 }
 
+# Keep bounded local history in the existing scan cache. The encoder sends
+# only the public fields, so peers score the same published median.
+smooth_scan_report() {
+    local report now smoothed
+    report=$(cat)
+    if now=$(uptime_now) && smoothed=$(jq -ce \
+        --arg previous "$CACHED_SCAN_REPORT_JSON" \
+        --argjson now "$now" --argjson count "$SURVEY_BUSY_SAMPLES" \
+        --argjson max_age "$SURVEY_BUSY_MAX_AGE" '
+        ($previous | try fromjson catch {}
+         | if type == "object" then . else {} end) as $previous
+        |
+        .results |= map(
+            . as $sample
+            | ([ $previous.results[]?
+                 | select(.channel == $sample.channel
+                          and ._survey_iface == $sample._survey_iface)
+                 | ._busy_samples[]?
+                 | select(.[0] <= $now and $now - .[0] <= $max_age) ]
+               + (if (.busy_pct | type) == "number"
+                  then [[$now, .busy_pct]] else [] end))[-$count:]
+              as $history
+            | ._busy_samples = $history
+            | if (.busy_pct | type) == "number"
+                 and ($history | length) == $count
+              then .busy_pct = ($history | map(.[1]) | sort
+                               | .[($count / 2 | floor)])
+              else del(.busy_pct) end)
+        ' <<< "$report"); then
+        printf '%s\n' "$smoothed"
+    else
+        # Keep the scan usable without trusting one unsmoothed busy sample.
+        # This fallback must also work when jq itself is unavailable.
+        printf '%s\n' "$report" | python3 -c '
+import json, sys
+report = json.load(sys.stdin)
+for sample in report["results"]:
+    sample.pop("busy_pct", None)
+print(json.dumps(report, separators=(",", ":")))'
+    fi
+}
+
 # Scan enabled WPA role bands and print channel, noise, BSS and busy JSON.
 # Use SCAN_FREQS_2_4/5_0 and SURVEY_MIN_DWELL_MS for candidate measurements.
 perform_scan() {
@@ -374,12 +421,14 @@ perform_scan() {
             fi
 
             [ "$first_entry" = true ] && first_entry=false || json_out+=","
-            json_out+="{\"channel\": ${freq}, \"noise_floor\": ${noise}, \"bss_count\": ${bss_count}${occupancy_field}}"
+            json_out+="{\"channel\": ${freq}, \"noise_floor\": ${noise},"
+            json_out+="\"_survey_iface\": \"${iface}\","
+            json_out+="\"bss_count\": ${bss_count}${occupancy_field}}"
         done
     done
 
     json_out+=']}'
-    printf '%s\n' "$json_out"
+    printf '%s\n' "$json_out" | smooth_scan_report
 }
 
 
@@ -620,8 +669,10 @@ while true; do
             fi
 
             if [ -n "$CURRENT_PAYLOAD" ]; then
-                printf '%s' "$CURRENT_PAYLOAD" | alfred -s $ALFRED_DATA_TYPE
-                LAST_PUBLISH_TIME=$MONO
+                if printf '%s' "$CURRENT_PAYLOAD" |
+                    alfred -s $ALFRED_DATA_TYPE; then
+                    LAST_PUBLISH_TIME=$MONO
+                fi
             fi
         fi
 
@@ -766,8 +817,10 @@ while true; do
             fi
 
             if [ -n "$CURRENT_PAYLOAD" ]; then
-                printf '%s' "$CURRENT_PAYLOAD" | alfred -s $ALFRED_DATA_TYPE
-                LAST_PUBLISH_TIME=$MONO
+                if printf '%s' "$CURRENT_PAYLOAD" |
+                    alfred -s $ALFRED_DATA_TYPE; then
+                    LAST_PUBLISH_TIME=$MONO
+                fi
             fi
         fi
 
