@@ -247,6 +247,23 @@ partial or conflicting applications fail before source changes. The existing
 txpower and SPI patches remain separate. No debugfs writes leaves timing
 selection and register changes inactive.
 
+### 4.4 Rock 3A PCIe slot power delay
+
+`kernel/patches/r3a-pcie/0001-rock-3a-pcie-startup-delay.patch` adds
+`startup-delay-us = <50000>` to `vcc3v3_pcie` in `rk3568-rock-3a.dts`.
+`pcie-dw-rockchip.c` enables that rail and initializes the PCIe3 PHY at once,
+and `phy-rockchip-snps-pcie3.c` gives `SRAM_INIT_DONE` only 500 us. Without
+the delay the poll intermittently times out (`lock failed 0x..., check
+input refclk and power supply` in dmesg) and the M.2 Wi-Fi card on the PCIe3
+slot never appears. The DT is the same in 6.6 through 6.19, so the failure
+is not tied to a kernel version. `build-r3a.sh` applies the patch with
+`git apply` and skips it when it is already applied.
+
+A board running an older DTB can get the same fix from an Armbian user
+overlay: compile a fragment targeting `/regulator-vcc3v3-pcie` with
+`dtc -@` into `/boot/overlay-user/pcie-delay.dtbo` and add
+`user_overlays=pcie-delay` to `/boot/armbianEnv.txt`.
+
 ## 5. DTS overlay: `dts-overlays/cm4-morse-spi.dts` (CM4 only)
 
 Compiled to `mm610x-spi.dtbo` by `build-cm4.sh` (`dtc -@`). Wires spi0 to the
@@ -315,6 +332,7 @@ xz-compress all modules. Per-target notes:
 - **Rock 3A**: the mainline tree uses arm64 `defconfig` because
   **`rockchip_defconfig` no longer exists in 6.18**.
   Driver flag `CONFIG_MORSE_USB=y` instead of SPI.
+  Applies the PCIe slot power patch (§4.4) before building.
   This replaces the entire old Armbian headers/podman/GCC-13 workflow: the kernel
   is now built from source, so the driver compiles in the same environment with
   the same toolchain and `KBUILD_MODPOST_WARN` hacks are unnecessary.
