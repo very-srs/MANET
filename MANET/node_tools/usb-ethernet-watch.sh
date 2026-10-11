@@ -25,8 +25,8 @@ case "$IFACE" in
     bat*|br*|wlan*|lo) exit 0 ;;
 esac
 
-# Confirm it's USB-backed
-BUS=$(readlink /sys/class/net/$IFACE/device/subsystem 2>/dev/null | grep -o 'usb' || true)
+# Confirm it's USB-backed; udev retains ID_BUS after sysfs is removed.
+BUS="${ID_BUS:-$(readlink "/sys/class/net/$IFACE/device/subsystem" 2>/dev/null | grep -o 'usb' || true)}"
 if [ "$BUS" != "usb" ]; then
     log "$IFACE is not USB-backed, skipping"
     exit 0

@@ -48,6 +48,8 @@ add_peer_to_config() {
     device_xml=$(printf '\n    <device id="%s" name="%s" compression="metadata" introducer="false" skipIntroductionRemovals="false" introducedBy="">\n        <address>dynamic</address>\n    </device>' "$peer_id" "$peer_name")
 
     # Insert the device block before the closing configuration tag.
+    cp --preserve=mode,ownership "$SYNCTHING_CONFIG_FILE" \
+        "$SYNCTHING_CONFIG_FILE.tmp" &&
     awk -v device_xml="$device_xml" '/<\/configuration>/ { print device_xml } { print }' "$SYNCTHING_CONFIG_FILE" > "$SYNCTHING_CONFIG_FILE.tmp" && \
     mv "$SYNCTHING_CONFIG_FILE.tmp" "$SYNCTHING_CONFIG_FILE"
 }
@@ -62,6 +64,8 @@ share_default_folder_with_peer() {
     share_xml=$(printf '\n        <device id="%s" introducedBy=""></device>' "$peer_id")
 
     # Insert the device share inside the default folder with awk.
+    cp --preserve=mode,ownership "$SYNCTHING_CONFIG_FILE" \
+        "$SYNCTHING_CONFIG_FILE.tmp" &&
     awk -v share_xml="$share_xml" '/<folder id="default"/ { in_folder=1 } in_folder && /<\/folder>/ { print share_xml; in_folder=0 } { print }' "$SYNCTHING_CONFIG_FILE" > "$SYNCTHING_CONFIG_FILE.tmp" && \
     mv "$SYNCTHING_CONFIG_FILE.tmp" "$SYNCTHING_CONFIG_FILE"
 

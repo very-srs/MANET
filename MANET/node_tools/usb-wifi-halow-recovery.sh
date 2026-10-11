@@ -15,9 +15,17 @@ log() {
         systemd-cat -t usb-wifi-halow-recovery
 }
 
-# Ignore Morse adapter itself and non-wlan interfaces
+# Ignore Morse adapter itself and non-wireless interfaces.
 case "$IFACE" in
-    wlan2) exit 0 ;;
+    ""|wlan2) exit 0 ;;
+esac
+[ "${DEVTYPE:-}" = "wlan" ] || [ -d "/sys/class/net/$IFACE/wireless" ] || exit 0
+
+# Use udev properties when a removed adapter no longer has a sysfs entry.
+BUS="${ID_BUS:-$(readlink "/sys/class/net/$IFACE/device/subsystem" 2>/dev/null | grep -o 'usb' || true)}"
+[ "$BUS" = "usb" ] || exit 0
+case "${ID_NET_DRIVER:-$(readlink "/sys/class/net/$IFACE/device/driver" 2>/dev/null)}" in
+    morse*|*/morse*) exit 0 ;;
 esac
 
 # Only act if wlan2 exists

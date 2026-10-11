@@ -646,9 +646,12 @@ class Store:
     def load(self):
         """Read saved JSON, treating an absent checkpoint as initial state."""
         try:
-            return read_json(self.path)
+            saved = read_json(self.path)
         except FileNotFoundError:
             return None
+        if not isinstance(saved, dict):
+            raise ValueError('invalid state object; refusing implicit reassociation')
+        return saved
 
     def save(self, data):
         """Write and sync a replacement checkpoint."""

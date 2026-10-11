@@ -356,8 +356,10 @@ while true; do
         fi
         
         if [ -n "$CURRENT_PAYLOAD" ]; then
-            printf '%s' "$CURRENT_PAYLOAD" | alfred -s $ALFRED_DATA_TYPE
-            LAST_PUBLISH_TIME=$MONO
+            if printf '%s' "$CURRENT_PAYLOAD" |
+                alfred -s $ALFRED_DATA_TYPE; then
+                LAST_PUBLISH_TIME=$MONO
+            fi
         fi
     fi
 

@@ -1,5 +1,6 @@
 """GPS consistency monitor and pair scheduler, on synthetic fixes and ranges."""
 import math
+from itertools import permutations
 import unittest
 
 import manet_spoof as ms
@@ -307,6 +308,27 @@ class MonitorTests(unittest.TestCase):
         b.tick(int(ms.QUARANTINE_S - ms.EDGE_TTL_S))
         self.assertEqual(b.state("A"), ms.UNCHECKED)
 
+    def test_disagreement_onsets_use_earliest_epoch_across_pairs(self):
+        for order in permutations((("C", 10), ("B", 20), ("D", 25))):
+            with self.subTest(order=order):
+                b = Bench(SQUARE)
+                b.tick(25)
+                for partner, mono in order:
+                    b.m.add_range(rng("A", partner, 200, mono))
+                self.assertEqual(b.m.onsets(25), {"A": 10, "C": 10, "B": 20, "D": 25})
+                self.assertEqual(b.m.onsets(131), {"A": 20, "B": 20, "D": 25})
+                self.assertEqual(b.m.last_failure["A"], 25)
+
+    def test_log_expires_old_results_across_pair_arrival_orders(self):
+        for order in permutations((("A", "B", 10), ("C", "D", 20), ("E", "F", 131))):
+            with self.subTest(order=order):
+                m = ms.Monitor()
+                for a, b, mono in order:
+                    m.add_gnss(a, fix(0, 0, mono))
+                    m.add_gnss(b, fix(60, 0, mono))
+                    m.add_range(rng(a, b, 60, mono))
+                self.assertEqual([e["mono"] for e in m.log], [20, 131])
+
     def test_range_without_a_fix_near_its_epoch_is_untestable(self):
         b = Bench(SQUARE)
         b.tick(3)
@@ -334,6 +356,16 @@ class SchedulerTests(unittest.TestCase):
         self.b.measure("A", "B")
         self.b.measure("C", "D")
         self.assertIsNone(self.s.next_pair(self.b.t, list(SQUARE), self.all))
+
+    def test_audit_uses_latest_epoch_across_pairs(self):
+        for order in permutations((("A", "B", 30), ("C", "D", 30), ("A", "C", 1))):
+            with self.subTest(order=order):
+                b = Bench(SQUARE)
+                b.tick(31)
+                for a, c, mono in order:
+                    measured = math.dist(SQUARE[a], SQUARE[c])
+                    b.m.add_range(rng(a, c, measured, mono))
+                self.assertIsNone(ms.Scheduler(b.m).next_pair(31, list(SQUARE), self.all))
 
     def test_disagreement_triggers_fresh_partners(self):
         self.b.measure("C", "D")

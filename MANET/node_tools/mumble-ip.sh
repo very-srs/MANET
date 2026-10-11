@@ -72,15 +72,12 @@ fi
 # --- Suffix Generation ---
 # Hash the normalized /64 prefix to derive a deterministic suffix
 # This hash selects an address, not an authentication value.
-# The SHA-256 fallback can produce a different suffix than MD5.
-if command -v md5sum >/dev/null; then
-    HASH_BYTE=$(printf '%s' "${EXPANDED_PREFIX}-mumble" | md5sum | cut -c1-2)
-elif command -v sha256sum >/dev/null; then
-    HASH_BYTE=$(printf '%s' "${EXPANDED_PREFIX}-mumble" | sha256sum | cut -c1-2)
-else
-    echo "Error: Neither md5sum nor sha256sum found. Please install one." >&2
+# Debian's essential coreutils provides MD5 on every node.
+if ! command -v md5sum >/dev/null; then
+    echo "Error: md5sum not found. Please install coreutils." >&2
     exit 1
 fi
+HASH_BYTE=$(printf '%s' "${EXPANDED_PREFIX}-mumble" | md5sum | cut -c1-2)
 
 # One hash byte gives offsets 400-655, clear of mtx-ip.sh's 100-355.
 OFFSET=$(( 0x$HASH_BYTE + 400 ))

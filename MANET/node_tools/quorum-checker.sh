@@ -25,12 +25,28 @@ read -r UPTIME_NOW _ < "${MESH_UPTIME_FILE:-/proc/uptime}"
 UPTIME_NOW=${UPTIME_NOW%.*}
 # Age from the boot-clock observation time, so a registry that could not be
 # rebuilt keeps aging instead of freezing its peers as fresh.
-ACTIVE_ALFRED_COUNT=$(awk -F"['=]" -v now="$UPTIME_NOW" -v stale="$STALE_NODE_THRESHOLD" \
-    '/_OBSERVED_AT_UPTIME=/ { if ($3 ~ /^[0-9]+$/ && now - $3 < stale) count++ } END { print count+0 }' \
-    "$REGISTRY_STATE_FILE")
-
-# Count shutting down nodes
-SHUTTING_DOWN_COUNT=$(grep -c "NODE_STATE='SHUTTING_DOWN'" "$REGISTRY_STATE_FILE" 2>/dev/null)
+read -r ACTIVE_ALFRED_COUNT SHUTTING_DOWN_COUNT < <(
+    awk -F"['=]" -v now="$UPTIME_NOW" -v stale="$STALE_NODE_THRESHOLD" '
+        /_OBSERVED_AT_UPTIME=/ {
+            node = $1
+            sub(/_OBSERVED_AT_UPTIME$/, "", node)
+            fresh[node] = ($3 ~ /^[0-9]+$/ && now - $3 < stale)
+        }
+        /_NODE_STATE=/ {
+            node = $1
+            sub(/_NODE_STATE$/, "", node)
+            shutdown[node] = ($3 == "SHUTTING_DOWN")
+        }
+        END {
+            for (node in fresh) {
+                if (fresh[node]) {
+                    active++
+                    shutting_down += shutdown[node]
+                }
+            }
+            print active+0, shutting_down+0
+        }' "$REGISTRY_STATE_FILE"
+)
 
 # Count reachable mesh nodes (originators)
 if ! UNIQUE_BATMAN_ORIGINATORS=$("$PEER_COUNTER" --batctl "$BATCTL_PATH"); then

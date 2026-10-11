@@ -62,18 +62,18 @@ else
         log_warn "end0 is not bridged (normal if no wired EUD)"
     fi
     
-    # Check AP interface - should be in br0 and not bat0.
+    # The AP candidate may be in mesh; only simultaneous membership is invalid.
     if [ -n "$AP_INTERFACE" ]; then
-        if printf '%s\n' "$BR0_MEMBERS" | grep -q "^${AP_INTERFACE}$"; then
+        if printf '%s\n' "$BR0_MEMBERS" | grep -Fxq "$AP_INTERFACE"; then
             log_pass "$AP_INTERFACE is in br0 (AP mode, as configured)"
+            if batctl if | awk '{print $1}' | cut -d: -f1 |
+                grep -Fxq "$AP_INTERFACE"; then
+                log_fail "$AP_INTERFACE is in BOTH br0 and bat0 (invalid!)"
+            else
+                log_pass "$AP_INTERFACE is NOT in bat0 (correct for AP mode)"
+            fi
         else
             log_warn "$AP_INTERFACE should be in br0 when configured as AP"
-        fi
-        
-        if batctl if | awk '{print $1}' | cut -d: -f1 | grep -qx "$AP_INTERFACE"; then
-            log_fail "$AP_INTERFACE is in BOTH br0 and bat0 (invalid configuration!)"
-        else
-            log_pass "$AP_INTERFACE is NOT in bat0 (correct for AP mode)"
         fi
     fi
 fi

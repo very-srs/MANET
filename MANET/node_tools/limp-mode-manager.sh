@@ -22,20 +22,36 @@ mesh_iface_5="$(cat /var/lib/mesh_5_if 2>/dev/null || true)"
 
 [ ! -f "$REGISTRY_STATE_FILE" ] && exit 0
 
-# Count active nodes
+# Count active nodes and their limp votes from the same registry snapshot.
 # Freshness is this node's own observation, not the peer's clock.
 read -r UPTIME_NOW _ < "${MESH_UPTIME_FILE:-/proc/uptime}"
 UPTIME_NOW=${UPTIME_NOW%.*}
 # Age from the boot-clock observation time, so a registry that could not be
 # rebuilt keeps aging instead of freezing its peers as fresh.
-ACTIVE_ALFRED_COUNT=$(awk -F"['=]" -v now="$UPTIME_NOW" -v stale="$STALE_NODE_THRESHOLD" \
-    '/_OBSERVED_AT_UPTIME=/ { if ($3 ~ /^[0-9]+$/ && now - $3 < stale) count++ } END { print count+0 }' \
-    "$REGISTRY_STATE_FILE")
+read -r ACTIVE_ALFRED_COUNT LIMP_NODE_COUNT < <(
+    awk -F"['=]" -v now="$UPTIME_NOW" -v stale="$STALE_NODE_THRESHOLD" '
+        /_OBSERVED_AT_UPTIME=/ {
+            node = $1
+            sub(/_OBSERVED_AT_UPTIME$/, "", node)
+            fresh[node] = ($3 ~ /^[0-9]+$/ && now - $3 < stale)
+        }
+        /_IS_IN_LIMP_MODE=/ {
+            node = $1
+            sub(/_IS_IN_LIMP_MODE$/, "", node)
+            limp[node] = ($3 == "true")
+        }
+        END {
+            for (node in fresh) {
+                if (fresh[node]) {
+                    active++
+                    votes += limp[node]
+                }
+            }
+            print active+0, votes+0
+        }' "$REGISTRY_STATE_FILE"
+)
 
 [ "$ACTIVE_ALFRED_COUNT" -eq 0 ] && exit 0
-
-# Count nodes reporting limp mode
-LIMP_NODE_COUNT=$(grep -c "IS_IN_LIMP_MODE='true'" "$REGISTRY_STATE_FILE" 2>/dev/null)
 
 # Truncate the ratio to two decimals before the strict majority comparison.
 LIMP_RATIO=$(printf '%s\n' "scale=2; $LIMP_NODE_COUNT / $ACTIVE_ALFRED_COUNT" |

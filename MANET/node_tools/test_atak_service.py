@@ -566,6 +566,26 @@ class PersistenceTests(Harness):
             with self.assertRaises((ValueError, KeyError, TypeError)):
                 self.restart()
 
+    def test_null_checkpoint_refuses_startup_without_replacement(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'state.json'
+            path.write_text('null\n')
+            with self.assertRaises(ValueError):
+                atak.Service(self.config, 'boot-1', atak.Store(path), self.tx,
+                             self.clock.now())
+            self.assertEqual(path.read_text(), 'null\n')
+            self.assertEqual(self.tx.sent, [])
+
+    def test_absent_checkpoint_initializes_unpinned_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = atak.Store(Path(directory) / 'state.json')
+            service = atak.Service(self.config, 'boot-1', store, self.tx,
+                                   self.clock.now())
+            self.assertIsNone(service.position.pinned_uid)
+            self.assertEqual(store.load()['sha256'],
+                             atak.state_digest({k: v for k, v in store.load().items()
+                                                if k != 'sha256'}))
+
     def test_real_store_atomic_roundtrip_and_size_bound(self):
         with tempfile.TemporaryDirectory() as directory:
             store = atak.Store(Path(directory) / 'state.json')
