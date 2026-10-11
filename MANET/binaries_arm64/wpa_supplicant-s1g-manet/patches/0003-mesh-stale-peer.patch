@@ -1,0 +1,32 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+Subject: [PATCH] mesh: replace peer state when the kernel station is absent
+
+---
+diff --git a/wpa_supplicant/mesh_mpm.c b/wpa_supplicant/mesh_mpm.c
+--- a/wpa_supplicant/mesh_mpm.c
++++ b/wpa_supplicant/mesh_mpm.c
+@@ -16,6 +16,7 @@
+ #include "common/ocv.h"
+ #include "ap/hostapd.h"
+ #include "ap/sta_info.h"
++#include "ap/ap_drv_ops.h"
+ #include "ap/ieee802_11.h"
+ #include "ap/beacon.h"
+ #include "ap/wpa_auth.h"
+@@ -742,8 +743,14 @@
+ 	}
+ 
+ 	sta = ap_get_sta(data, addr);
+-	if (sta)
+-		return NULL;
++	if (sta) {
++		/* Only ENOENT proves the kernel entry is missing. */
++		if (hostapd_drv_get_inact_sec(data, addr) != -ENOENT)
++			return NULL;
++		wpa_msg(wpa_s, MSG_INFO, "MESH-PEER-STALE addr=" MACSTR
++			" action=readd", MAC2STR(addr));
++		ap_free_sta(data, sta);
++	}
+ 
+ 	sta = ap_sta_add(data, addr);
+ 	if (!sta)

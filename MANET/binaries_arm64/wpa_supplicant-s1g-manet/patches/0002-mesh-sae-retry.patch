@@ -1,0 +1,84 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+Subject: [PATCH] mesh: free unsuccessful SAE attempts after a bounded exchange
+
+---
+diff --git a/wpa_supplicant/mesh_rsn.c b/wpa_supplicant/mesh_rsn.c
+--- a/wpa_supplicant/mesh_rsn.c
++++ b/wpa_supplicant/mesh_rsn.c
+@@ -25,42 +25,22 @@
+ #include "mesh_mpm.h"
+ #include "mesh_rsn.h"
+ 
+-#define MESH_AUTH_TIMEOUT 10
+-#define MESH_AUTH_RETRY 3
++#define MESH_AUTH_TIMEOUT 3
+ #define MESH_RSN_FRAME_MIC_OFFSET 6
+ 
+ void mesh_auth_timer(void *eloop_ctx, void *user_data)
+ {
+ 	struct wpa_supplicant *wpa_s = eloop_ctx;
+ 	struct sta_info *sta = user_data;
+-	struct hostapd_data *hapd;
+-
+-	if (sta->sae->state != SAE_ACCEPTED) {
+-		wpa_printf(MSG_DEBUG, "AUTH: Re-authenticate with " MACSTR
+-			   " (attempt %d) ",
+-			   MAC2STR(sta->addr), sta->sae_auth_retry);
+-		wpa_msg(wpa_s, MSG_INFO, MESH_SAE_AUTH_FAILURE "addr=" MACSTR,
+-			MAC2STR(sta->addr));
+-		if (sta->sae_auth_retry < MESH_AUTH_RETRY) {
+-			mesh_rsn_auth_sae_sta(wpa_s, sta);
+-		} else {
+-			hapd = wpa_s->ifmsh->bss[0];
+-
+-			if (sta->sae_auth_retry > MESH_AUTH_RETRY) {
+-				ap_free_sta(hapd, sta);
+-				return;
+-			}
+-
+-			/* block the STA if exceeded the number of attempts */
+-			wpa_mesh_set_plink_state(wpa_s, sta, PLINK_BLOCKED);
+-			sta->sae->state = SAE_NOTHING;
+-			wpa_msg(wpa_s, MSG_INFO, MESH_SAE_AUTH_BLOCKED "addr="
+-				MACSTR " duration=%d",
+-				MAC2STR(sta->addr),
+-				hapd->conf->ap_max_inactivity);
+-		}
+-		sta->sae_auth_retry++;
+-	}
++
++	if (sta->sae && sta->sae->state == SAE_ACCEPTED)
++		return;
++
++	wpa_msg(wpa_s, MSG_INFO, MESH_SAE_AUTH_FAILURE "addr=" MACSTR
++		" step=exchange-timeout state=%d action=free",
++		MAC2STR(sta->addr), sta->sae ? (int) sta->sae->state : -1);
++	/* The next peer candidate can initiate a fresh SAE exchange. */
++	ap_free_sta(wpa_s->ifmsh->bss[0], sta);
+ }
+ 
+ 
+@@ -377,6 +357,12 @@
+ 	unsigned int rnd;
+ 	int ret;
+ 
++	/* Bound every attempt, including local setup and transmit failures. */
++	eloop_cancel_timeout(mesh_auth_timer, wpa_s, sta);
++	rnd = os_random() % 2;
++	eloop_register_timeout(MESH_AUTH_TIMEOUT + rnd, 0, mesh_auth_timer,
++			       wpa_s, sta);
++
+ 	if (!ssid) {
+ 		wpa_msg(wpa_s, MSG_DEBUG,
+ 			"AUTH: No current_ssid known to initiate new SAE");
+@@ -424,10 +410,6 @@
+ 	if (ret)
+ 		return ret;
+ 
+-	eloop_cancel_timeout(mesh_auth_timer, wpa_s, sta);
+-	rnd = rand() % MESH_AUTH_TIMEOUT;
+-	eloop_register_timeout(MESH_AUTH_TIMEOUT + rnd, 0, mesh_auth_timer,
+-			       wpa_s, sta);
+ 	return 0;
+ }
+ 

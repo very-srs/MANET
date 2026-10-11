@@ -1,0 +1,228 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+Subject: [PATCH] mesh: report SAE steps and status at INFO
+
+---
+diff --git a/wpa_supplicant/mesh_rsn.c b/wpa_supplicant/mesh_rsn.c
+--- a/wpa_supplicant/mesh_rsn.c
++++ b/wpa_supplicant/mesh_rsn.c
+@@ -326,12 +326,12 @@
+ 	if (!password)
+ 		password = ssid->passphrase;
+ 	if (!password) {
+-		wpa_msg(wpa_s, MSG_DEBUG, "SAE: No password available");
++		wpa_msg(wpa_s, MSG_INFO, "SAE: No password available");
+ 		return -1;
+ 	}
+ 
+ 	if (mesh_rsn_sae_group(wpa_s, sta->sae) < 0) {
+-		wpa_msg(wpa_s, MSG_DEBUG, "SAE: Failed to select group");
++		wpa_msg(wpa_s, MSG_INFO, "SAE: Failed to select group");
+ 		return -1;
+ 	}
+ 
+@@ -398,16 +398,25 @@
+ 	}
+ 	sta->mesh_sae_pmksa_caching = 0;
+ 
+-	if (mesh_rsn_build_sae_commit(wpa_s, ssid, sta))
+-		return -1;
++	ret = mesh_rsn_build_sae_commit(wpa_s, ssid, sta);
++	if (ret) {
++		wpa_msg(wpa_s, MSG_INFO, "MESH-SAE-FAIL addr=" MACSTR
++			" step=prepare-commit result=%d",
++			MAC2STR(sta->addr), ret);
++		return ret;
++	}
+ 
+ 	wpa_msg(wpa_s, MSG_DEBUG,
+ 		"AUTH: started authentication with SAE peer: " MACSTR,
+ 		MAC2STR(sta->addr));
+ 
+ 	ret = auth_sae_init_committed(hapd, sta);
+-	if (ret)
++	if (ret) {
++		wpa_msg(wpa_s, MSG_INFO, "MESH-SAE-FAIL addr=" MACSTR
++			" step=init-commit state=%d result=%d",
++			MAC2STR(sta->addr), sta->sae->state, ret);
+ 		return ret;
++	}
+ 
+ 	return 0;
+ }
+diff --git a/src/ap/ieee802_11.c b/src/ap/ieee802_11.c
+--- a/src/ap/ieee802_11.c
++++ b/src/ap/ieee802_11.c
+@@ -703,6 +703,17 @@
+ }
+ 
+ 
++static void mesh_sae_log(struct hostapd_data *hapd, struct sta_info *sta,
++			 const char *step, int status, int result)
++{
++	if (hapd->conf->mesh & MESH_ENABLED)
++		wpa_msg(hapd->msg_ctx, MSG_INFO, "MESH-SAE addr=" MACSTR
++			" step=%s state=%d status=%d result=%d",
++			MAC2STR(sta->addr), step,
++			sta->sae ? (int) sta->sae->state : -1, status, result);
++}
++
++
+ static int auth_sae_send_commit(struct hostapd_data *hapd,
+ 				struct sta_info *sta,
+ 				int update, int status_code)
+@@ -712,10 +723,16 @@
+ 	u16 status;
+ 
+ 	data = auth_build_sae_commit(hapd, sta, update, status_code);
+-	if (!data && sta->sae->tmp && sta->sae->tmp->pw_id)
++	if (!data && sta->sae->tmp && sta->sae->tmp->pw_id) {
++		mesh_sae_log(hapd, sta, "build-commit", -1,
++			     WLAN_STATUS_UNKNOWN_PASSWORD_IDENTIFIER);
+ 		return WLAN_STATUS_UNKNOWN_PASSWORD_IDENTIFIER;
+-	if (data == NULL)
++	}
++	if (data == NULL) {
++		mesh_sae_log(hapd, sta, "build-commit", -1,
++			     WLAN_STATUS_UNSPECIFIED_FAILURE);
+ 		return WLAN_STATUS_UNSPECIFIED_FAILURE;
++	}
+ 
+ 	if (sta->sae->tmp && sta->sae->pk)
+ 		status = WLAN_STATUS_SAE_PK;
+@@ -739,6 +756,9 @@
+ 
+ 	wpabuf_free(data);
+ 
++	if (reply_res)
++		mesh_sae_log(hapd, sta, "tx-commit",
++			     status, reply_res);
+ 	return reply_res;
+ }
+ 
+@@ -750,8 +770,11 @@
+ 	int reply_res;
+ 
+ 	data = auth_build_sae_confirm(hapd, sta);
+-	if (data == NULL)
++	if (data == NULL) {
++		mesh_sae_log(hapd, sta, "build-confirm", -1,
++			     WLAN_STATUS_UNSPECIFIED_FAILURE);
+ 		return WLAN_STATUS_UNSPECIFIED_FAILURE;
++	}
+ 
+ 	reply_res = send_auth_reply(hapd, sta, sta->addr,
+ 				    WLAN_AUTH_SAE, 2,
+@@ -760,6 +783,9 @@
+ 
+ 	wpabuf_free(data);
+ 
++	if (reply_res)
++		mesh_sae_log(hapd, sta, "tx-confirm",
++			     WLAN_STATUS_SUCCESS, reply_res);
+ 	return reply_res;
+ }
+ 
+@@ -811,6 +837,7 @@
+ static int sae_check_big_sync(struct hostapd_data *hapd, struct sta_info *sta)
+ {
+ 	if (sta->sae->sync > hapd->conf->sae_sync) {
++		mesh_sae_log(hapd, sta, "sync-limit", -1, sta->sae->sync);
+ 		sae_set_state(sta, SAE_NOTHING, "Sync > dot11RSNASAESync");
+ 		sta->sae->sync = 0;
+ 		if (sta->sae->tmp) {
+@@ -1015,8 +1042,12 @@
+ 				return ret;
+ 			sae_set_state(sta, SAE_COMMITTED, "Sent Commit");
+ 
+-			if (sae_process_commit(sta->sae) < 0)
++			if (sae_process_commit(sta->sae) < 0) {
++				mesh_sae_log(hapd, sta, "process-commit",
++					     status_code,
++					     WLAN_STATUS_UNSPECIFIED_FAILURE);
+ 				return WLAN_STATUS_UNSPECIFIED_FAILURE;
++			}
+ 
+ 			/*
+ 			 * In mesh case, both Commit and Confirm are sent
+@@ -1062,8 +1093,12 @@
+ 	case SAE_COMMITTED:
+ 		sae_clear_retransmit_timer(hapd, sta);
+ 		if (auth_transaction == 1) {
+-			if (sae_process_commit(sta->sae) < 0)
++			if (sae_process_commit(sta->sae) < 0) {
++				mesh_sae_log(hapd, sta, "process-commit",
++					     status_code,
++					     WLAN_STATUS_UNSPECIFIED_FAILURE);
+ 				return WLAN_STATUS_UNSPECIFIED_FAILURE;
++			}
+ 
+ 			ret = auth_sae_send_confirm(hapd, sta);
+ 			if (ret)
+@@ -1117,8 +1152,12 @@
+ 			if (ret)
+ 				return ret;
+ 
+-			if (sae_process_commit(sta->sae) < 0)
++			if (sae_process_commit(sta->sae) < 0) {
++				mesh_sae_log(hapd, sta, "process-commit",
++					     status_code,
++					     WLAN_STATUS_UNSPECIFIED_FAILURE);
+ 				return WLAN_STATUS_UNSPECIFIED_FAILURE;
++			}
+ 
+ 			ret = auth_sae_send_confirm(hapd, sta);
+ 			if (ret)
+@@ -1146,8 +1185,12 @@
+ 				return ret;
+ 			sae_set_state(sta, SAE_COMMITTED, "Sent Commit");
+ 
+-			if (sae_process_commit(sta->sae) < 0)
++			if (sae_process_commit(sta->sae) < 0) {
++				mesh_sae_log(hapd, sta, "process-commit",
++					     status_code,
++					     WLAN_STATUS_UNSPECIFIED_FAILURE);
+ 				return WLAN_STATUS_UNSPECIFIED_FAILURE;
++			}
+ 			sta->sae->sync = 0;
+ 			sae_set_retransmit_timer(hapd, sta);
+ 		} else {
+@@ -1314,6 +1357,11 @@
+ 	const u8 *pos, *end;
+ 	int sta_removed = 0;
+ 	bool success_status;
++
++	mesh_sae_log(hapd, sta,
++		     auth_transaction == 1 ? "rx-commit" :
++		     auth_transaction == 2 ? "rx-confirm" : "rx-unexpected",
++		     status_code, 0);
+ 
+ 	if (!groups)
+ 		groups = default_groups;
+@@ -1479,6 +1527,9 @@
+ 					WLAN_STATUS_SAE_HASH_TO_ELEMENT ||
+ 					status_code == WLAN_STATUS_SAE_PK,
+ 					NULL);
++		if (resp != WLAN_STATUS_SUCCESS)
++			mesh_sae_log(hapd, sta, "parse-commit",
++				     status_code, resp);
+ 		if (resp == SAE_SILENTLY_DISCARD) {
+ 			wpa_printf(MSG_DEBUG,
+ 				   "SAE: Drop commit message from " MACSTR " due to reflection attack",
+@@ -1580,6 +1631,8 @@
+ 
+ 			if (sae_check_confirm(sta->sae, var, var_len,
+ 					      NULL) < 0) {
++				mesh_sae_log(hapd, sta, "check-confirm",
++					     status_code, WLAN_STATUS_CHALLENGE_FAIL);
+ 				resp = WLAN_STATUS_CHALLENGE_FAIL;
+ 				goto reply;
+ 			}
+@@ -1626,6 +1679,8 @@
+ 	}
+ 
+ remove_sta:
++	if (!sta_removed && resp != WLAN_STATUS_SUCCESS)
++		mesh_sae_log(hapd, sta, "rx-result", status_code, resp);
+ 	if (auth_transaction == 1)
+ 		success_status = sae_status_success(hapd, status_code);
+ 	else

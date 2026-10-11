@@ -47,3 +47,5 @@ MANET/binaries_arm64/wpa_cli_s1g binary
 MANET/binaries_arm64/wpa_supplicant_s1g binary
 MANET/install_packages/*.tar.gz binary
 *.svg text eol=lf
+MANET/binaries_arm64/wpa_supplicant_manet binary
+MANET/binaries_arm64/wpa_cli_manet binary
