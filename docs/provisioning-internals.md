@@ -87,6 +87,59 @@ imaging and first boot. Deleted prereleases require reflashing old test images.
 
 ---
 
+## First boot without a trusted clock
+
+The install archive's URL, version and SHA-256 come from the selected release
+manifest through the existing `__INSTALL_*__` and `__RELEASE_VERSION__`
+tokens. Both templates also carry identical `YQ_VERSION`, `YQ_SHA256`,
+`MEDIAMTX_VERSION` and `MEDIAMTX_SHA256` constants. These constants are baked
+into the image with the template. `test_first_boot_downloads.py` asserts the
+pins and download/verification blocks agree between templates, and exercises
+the actual Linux rendering commands. The Windows rendering test checks that
+all four constants survive substitution too.
+
+No new flasher tokens or release bundle inputs are needed. To update yq or
+MediaMTX, obtain the new artifact's SHA-256 from that project's published
+release checksums, then change both its version and digest in both templates.
+Update the expected pins in `test_first_boot_downloads.py` and run the
+provisioning tests. yq uses `yq_linux_arm64`; MediaMTX uses
+`mediamtx_<version>_linux_arm64.tar.gz`. The current pins are yq v4.54.1 and
+MediaMTX v1.15.3.
+
+Only these three artifact downloads use `curl --insecure`. Each restricts
+both the original URL and redirects to HTTPS, and checks SHA-256 before use.
+yq downloads to a temporary file before `install`; MediaMTX downloads and
+extracts inside a private temporary directory. A failed fetch or hash check
+exits immediately. There are no curl/wget configuration files or exported
+settings that could weaken verification for operator scripts or later tools.
+
+The test's unverified artifact allowlist is empty. Two other network fetch
+categories are explicitly accounted for: APT's changing repository metadata
+and packages use repository signatures and package hashes, while the HTTP
+HEAD request to `http://google.com` supplies only a logging timestamp. Neither
+uses a hash baked into the image. Pinning the Date response would prevent it
+from providing the current time; pinning all APT responses would require a
+separate frozen repository and dependency manifest. The Date request has a
+timeout, and a missing or rejected response does not stop provisioning.
+
+Each provisioning process writes `/etc/apt/apt.conf.d/99no-time-checks.conf`
+with `Acquire::Check-Date "false";` before its first APT command. Raspberry Pi
+has two processes: the imager's wrapper and its generated post-network
+script. Each installs its own exit/signal cleanup and recreates the override
+on retries. Explicit cleanup happens before disabling the provisioning
+service, staging operator scripts or rebooting, as appropriate to the phase.
+An uncatchable termination or power loss can leave the file until the next
+provisioning attempt; that attempt recreates and later removes it.
+
+`Acquire::Check-Date` disables release metadata date and expiry checks. It
+does not disable package signature checks or HTTPS certificate validation
+for an APT source using HTTPS. The image's APT sources must remain usable
+without a trusted clock; custom HTTPS repositories may require a correct
+clock. See Debian 13's
+[apt.conf(5), Acquire group](https://manpages.debian.org/trixie/apt/apt.conf.5.en.html#THE_ACQUIRE_GROUP).
+Once provisioning completes, normal date and certificate validation applies
+again, including to operator setup scripts, node updates and manual installs.
+
 ## CM4 disk enumeration
 
 The Linux CM4 path takes a disk inventory before `rpiboot` and polls afterward

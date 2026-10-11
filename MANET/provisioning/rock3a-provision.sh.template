@@ -9,6 +9,16 @@ exec > >(tee -a /var/log/mesh-provision.log) 2>&1
 set -x
 echo "=== Rock 3A provisioning starting at $(date) ==="
 
+# Temporarily allow APT metadata from a system without a trusted clock.
+# This runs in each provisioning phase, including retries. Signatures stay on.
+cleanup_apt_clock_override() {
+    rm -f /etc/apt/apt.conf.d/99no-time-checks.conf
+}
+trap 'cleanup_apt_clock_override || exit 1' EXIT
+trap 'exit 1' HUP INT TERM
+printf '%s\n' 'Acquire::Check-Date "false";' > /etc/apt/apt.conf.d/99no-time-checks.conf || exit 1
+# End temporary APT clock setup.
+
 # This is where the wifi regulatory country is set
 REG="__REGULATORY_DOMAIN__"
 
@@ -38,8 +48,15 @@ if [ $ELAPSED -ge $TIMEOUT ]; then
 	exit 1
 fi
 
-# A basic method to set the system time
-date -s "$(curl -sI google.com | grep -i ^Date: | cut -d' ' -f2-)"
+# Best-effort HTTP Date for readable logs; downloads do not trust this clock.
+http_date=$(curl --fail --silent --show-error --head --proto '=http' \
+    --connect-timeout 5 --max-time 10 http://google.com | \
+    grep -i '^Date:' | cut -d' ' -f2-)
+if [ -n "$http_date" ]; then
+    date -s "$http_date" || echo "Could not set the logging clock; continuing"
+else
+    echo "No HTTP Date available; continuing without setting the logging clock"
+fi
 
 cd /root
 
@@ -55,7 +72,7 @@ case "$MANET_INSTALL_URL" in
     *) echo "ERROR: Missing or invalid MANET release selection"; exit 1 ;;
 esac
 echo "Downloading MANET $MANET_INSTALL_VERSION install package..."
-curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
+curl --fail --silent --show-error --location --insecure --proto '=https' --proto-redir '=https' \
     --connect-timeout 15 --max-time 600 --retry 3 \
     "$MANET_INSTALL_URL" -o /root/morse-pi-install.tar.gz || exit 1
 printf '%s  %s\n' "$MANET_INSTALL_SHA256" /root/morse-pi-install.tar.gz | sha256sum -c - || exit 1
@@ -110,9 +127,19 @@ echo "Done"
 # probably not installed, but the debian package is old
 apt remove -y avahi yq > /dev/null 2>&1
 
-# Download and install Go yq, this has better features
-wget -q https://github.com/mikefarah/yq/releases/latest/download/yq_linux_arm64 -O /usr/bin/yq
-chmod +x /usr/bin/yq
+# Download and verify Go yq before installing it.
+# Keep these pins identical in both templates; provisioning tests enforce this.
+YQ_VERSION='v4.54.1'
+YQ_SHA256='189088da0c6429ec5178dfaab1a114805f6cab0b61b165ab236efedf1d57a71b'
+YQ_DOWNLOAD=$(mktemp) || exit 1
+curl --fail --silent --show-error --location --insecure --proto '=https' --proto-redir '=https' \
+    --connect-timeout 15 --max-time 600 --retry 3 \
+    "https://github.com/mikefarah/yq/releases/download/$YQ_VERSION/yq_linux_arm64" \
+    -o "$YQ_DOWNLOAD" || exit 1
+printf '%s  %s\n' "$YQ_SHA256" "$YQ_DOWNLOAD" | sha256sum -c - || exit 1
+install -m 0755 "$YQ_DOWNLOAD" /usr/bin/yq || exit 1
+rm -f "$YQ_DOWNLOAD"
+# End pinned yq install.
 
 # These add network traffic, disable them
 echo "Disabling APT timers for automatic updates"
@@ -488,15 +515,22 @@ fi
 # install mediaMTX server
 if [ "__INSTALL_MEDIAMTX__" = "y" ]; then
 	echo "Installing MediaMTX"
-		cd /tmp
-		wget -q https://github.com/bluenviron/mediamtx/releases/download/v1.15.3/mediamtx_v1.15.3_linux_arm64.tar.gz || {
-	        echo "ERROR: Failed to download MediaMTX"
-	        exit 1
-	    }
-	    tar -xzf mediamtx_v1.15.3_linux_arm64.tar.gz || {
-	        echo "ERROR: Failed to extract MediaMTX"
-	        exit 1
-	    }
+    # Download and verify MediaMTX before extracting it.
+    # Keep these pins identical in both templates; provisioning tests enforce this.
+    MEDIAMTX_VERSION='v1.15.3'
+    MEDIAMTX_SHA256='5f3cb84ef42952a82b1ff5764fd06dc13697d21b06eb179d83663ec55d15ed0c'
+    MEDIAMTX_DIR=$(mktemp -d) || exit 1
+    cd "$MEDIAMTX_DIR" || exit 1
+    curl --fail --silent --show-error --location --insecure --proto '=https' --proto-redir '=https' \
+        --connect-timeout 15 --max-time 600 --retry 3 \
+        "https://github.com/bluenviron/mediamtx/releases/download/$MEDIAMTX_VERSION/mediamtx_${MEDIAMTX_VERSION}_linux_arm64.tar.gz" \
+        -o mediamtx.tar.gz || exit 1
+    printf '%s  %s\n' "$MEDIAMTX_SHA256" mediamtx.tar.gz | sha256sum -c - || exit 1
+    tar -xzf mediamtx.tar.gz || {
+        echo "ERROR: Failed to extract MediaMTX"
+        exit 1
+    }
+    # End pinned MediaMTX extraction.
 
 		groupadd --system mediamtx
 		useradd --system -g mediamtx -d /opt/mediamtx -s /sbin/nologin mediamtx
@@ -505,6 +539,8 @@ if [ "__INSTALL_MEDIAMTX__" = "y" ]; then
 		cp mediamtx /opt/mediamtx/
 		chmod +x /opt/mediamtx/mediamtx
 		cp mediamtx.yml /etc/mediamtx/
+        cd /root || exit 1
+        rm -rf "$MEDIAMTX_DIR"
 
 cat << EOF > /etc/systemd/system/mediamtx.service
 [Unit]
@@ -599,6 +635,10 @@ set -x
 # node-manager.sh is a symlink to the orchestrator acs= selects; the service
 # re-runs this selector before every start, so later acs changes follow.
 /usr/local/bin/node-manager-select.sh
+
+# Restore normal APT date checks before completing this phase.
+cleanup_apt_clock_override || exit 1
+trap - EXIT HUP INT TERM
 
 # Disable the current script so it won't run again at next boot
 systemctl disable mesh-provision

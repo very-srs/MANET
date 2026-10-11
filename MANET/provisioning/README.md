@@ -141,6 +141,18 @@ supplies both the setup scripts and board package, so an upload during imaging
 cannot mix versions. First boot checks the package SHA-256 and embedded version
 before extracting it. It installs the release selected when the image was made.
 
+First boot can download these files even when the node's clock is wrong.
+The MANET archive, yq and optional MediaMTX have fixed SHA-256 hashes baked
+into the image. First boot disables certificate checks only for those
+individual downloads and verifies each hash before installing or extracting
+anything. A failed download or hash mismatch stops provisioning.
+
+APT continues to verify repository signatures and package hashes. Its date
+checks are temporarily disabled during each provisioning phase and restored
+before the phase completes. Operator setup scripts, later updates and manual
+installs use normal certificate and date checks. The optional HTTP Date clock
+adjustment helps make logs readable; download verification does not rely on it.
+
 To test the most recently published build, including prereleases:
 
 ```bash
