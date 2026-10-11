@@ -1264,9 +1264,12 @@ tools payload are preserved. Recovery storage is removed after success, and
 abandoned download directories are cleaned under the update lock. Space checks
 leave 128 MiB free in addition to the estimated installation requirements.
 
-The networkd-dispatcher carrier hook starts checks for new releases. There is
-no periodic download timer, so a node checks for a new release when Ethernet gets
-carrier and `auto_update=` is set to a true value in `/etc/mesh.conf`. See
+The networkd-dispatcher routable hook and initial qualified clock sync trigger
+checks when `auto_update=` is true and the selected uplink has a default route.
+Checks defer until `/run/initial_time_synced` exists; a path unit queues a check
+when it appears. Manual downloads also require this marker and report a clear
+clock error when it is absent. Local recovery remains available without clock
+sync. There is no periodic download timer. See
 [networkd-dispatcher/README.md](../networkd-dispatcher/README.md).
 
 **Storage limits**

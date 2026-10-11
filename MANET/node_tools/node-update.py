@@ -41,6 +41,10 @@ MARKERS = {"etc/manet_version.txt", "usr/local/bin/version.txt"}
 REQUIRED = MARKERS | {
     "usr/local/bin/node-update.sh", "usr/local/bin/node-update.py",
     "usr/local/bin/manet_release.py",
+    "usr/local/bin/manet-auto-update.sh",
+    "etc/systemd/system/manet-auto-update.service",
+    "etc/systemd/system/manet-auto-update.path",
+    "etc/systemd/system/manet-auto-update-clock.service",
     "usr/local/bin/node-manager-static.sh", "usr/local/bin/node-manager-acs.sh",
     "usr/local/bin/manet-admin-setup.sh", "usr/local/bin/mesh-status.py",
     "usr/local/bin/manet_manage.py", "usr/local/bin/manet_web_sessions.py",
@@ -253,6 +257,9 @@ class Updater:
 
     def download(self, url, target, limit):
         """Reserve space and fetch a bounded HTTPS asset with retries."""
+        run = Path(os.environ.get('MANET_TIME_RUN_DIR', self.root / 'run'))
+        if not (run / 'initial_time_synced').is_file():
+            raise UpdateError('Clock not synced; wait for mesh time sync before downloading updates')
         self.space([(target.parent, limit)])
         # Bound each attempt to 120 s and the entire curl process to 260 s.
         # Reject non-HTTPS redirects and recheck size after curl returns.
@@ -532,6 +539,7 @@ class Updater:
             raise
         run_command(["systemctl", "enable", "--now", "manet-mesh-power.service"])
         run_command(["systemctl", "enable", "--now", "manet-logrotate.timer"])
+        run_command(["systemctl", "enable", "--now", "manet-auto-update.path"])
         for service in ("mesh-status.service", "node-manager.service"):
             run_command(["systemctl", "restart", service])
         for service in ("mesh-status.service", "node-manager.service", "mesh-channel-agreement.service", "one-shot-time-sync.service"):

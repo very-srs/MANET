@@ -1,0 +1,9 @@
+[Unit]
+Description=Check for MANET updates once the clock is synced
+
+[Path]
+PathExists=/run/initial_time_synced
+Unit=manet-auto-update-clock.service
+
+[Install]
+WantedBy=multi-user.target

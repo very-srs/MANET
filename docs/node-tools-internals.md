@@ -2697,8 +2697,23 @@ use the same hotplug command. `off` is the same file in both places.
 
 The routable hook queues `manet-auto-update.service` with `--no-block` after
 uplink reconciliation. Its wrapper rechecks opt-in and a selected non-mesh
-uplink with a default route, then runs the routine updater. No ICMP probe gates
-downloads and no download holds up a dispatcher event. The obsolete
+uplink with a default route, then requires `/run/initial_time_synced` before
+running the routine updater. An absent marker logs one deferred-check line and
+returns success. `manet-auto-update.path` uses `PathExists` to notice initial
+qualified clock sync, including a marker already present when the path starts.
+It activates `manet-auto-update-clock.service`, a oneshot that queues the same
+routine service and remains active for the rest of the boot. This prevents a
+persistent marker from repeatedly triggering the path. Only this clock relay
+uses `RemainAfterExit`; the routine service stays repeatable for later routable
+events, including when the clock arrived before an uplink. The relay orders
+after any in-progress routine check so a pre-sync check cannot consume its
+start request. It queues without blocking to avoid waiting on that ordering.
+The enabled path ships in every systemd payload and is enabled and started by
+the updater and radio setup. Opt-in and route checks apply to both triggers.
+No ICMP probe gates downloads and no download holds up a dispatcher event.
+Manual stable/development downloads reject an absent clock marker with a
+clear error; local archive recovery does not require a clock.
+The obsolete
 `mesh-default-route-fix.service` is disabled and removed by updates; the gateway
 route manager owns mesh default routes and preserves service VIPs.
 
