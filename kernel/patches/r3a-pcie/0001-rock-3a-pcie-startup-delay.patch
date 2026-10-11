@@ -1,0 +1,23 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: MANET <manet@localhost>
+Date: Sun, 11 Oct 2026 12:00:00 -0600
+Subject: [PATCH] arm64: dts: rockchip: rock-3a: delay PCIe slot power
+
+The PCIe3 PHY polls SRAM_INIT_DONE for 500 us right after the slot rail
+is enabled. With no startup delay on vcc3v3_pcie the poll can time out
+and the M.2 card on pcie3x2 never probes. Give the rail 50 ms to settle.
+
+---
+diff --git a/arch/arm64/boot/dts/rockchip/rk3568-rock-3a.dts b/arch/arm64/boot/dts/rockchip/rk3568-rock-3a.dts
+index 44cfdfeed..f4cedfcdb 100644
+--- a/arch/arm64/boot/dts/rockchip/rk3568-rock-3a.dts
++++ b/arch/arm64/boot/dts/rockchip/rk3568-rock-3a.dts
+@@ -127,6 +127,8 @@ vcc3v3_pcie: regulator-vcc3v3-pcie {
+ 		regulator-min-microvolt = <3300000>;
+ 		regulator-max-microvolt = <3300000>;
+ 		vin-supply = <&vcc5v0_sys>;
++		/* the PCIe3 PHY SRAM needs the slot rail settled before its 500 us init poll */
++		startup-delay-us = <50000>;
+ 	};
+ 
+ 	vcc3v3_sys: regulator-vcc3v3-sys {
