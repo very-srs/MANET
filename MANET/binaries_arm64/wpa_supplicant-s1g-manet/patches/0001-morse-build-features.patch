@@ -1,0 +1,138 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+Subject: [PATCH] build: carry Morse OpenWrt feature indication
+
+---
+diff --git a/hostapd/main.c b/hostapd/main.c
+--- a/hostapd/main.c
++++ b/hostapd/main.c
+@@ -32,6 +32,7 @@
+ #include "config_file.h"
+ #include "eap_register.h"
+ #include "ctrl_iface.h"
++#include "build_features.h"
+ 
+ 
+ struct hapd_global {
+@@ -823,7 +824,7 @@
+ #endif /* CONFIG_DPP */
+ 
+ 	for (;;) {
+-		c = getopt(argc, argv, "b:Bde:f:hi:KP:sSTtu:vg:G:q");
++		c = getopt(argc, argv, "b:Bde:f:hi:KP:sSTtu:g:G:qv::");
+ 		if (c < 0)
+ 			break;
+ 		switch (c) {
+@@ -860,6 +861,8 @@
+ 			break;
+ #endif /* CONFIG_DEBUG_LINUX_TRACING */
+ 		case 'v':
++			if (optarg)
++				exit(!has_feature(optarg));
+ 			show_version();
+ 			exit(1);
+ 		case 'g':
+diff --git a/wpa_supplicant/main.c b/wpa_supplicant/main.c
+--- a/wpa_supplicant/main.c
++++ b/wpa_supplicant/main.c
+@@ -12,6 +12,7 @@
+ #endif /* __linux__ */
+ 
+ #include "common.h"
++#include "build_features.h"
+ #include "crypto/crypto.h"
+ #include "fst/fst.h"
+ #include "wpa_supplicant_i.h"
+@@ -202,7 +203,7 @@
+ 
+ 	for (;;) {
+ 		c = getopt(argc, argv,
+-			   "b:Bc:C:D:de:f:g:G:hi:I:KLMm:No:O:p:P:qsTtuvW");
++			   "b:Bc:C:D:de:f:g:G:hi:I:KLMm:No:O:p:P:qsTtuv::W");
+ 		if (c < 0)
+ 			break;
+ 		switch (c) {
+@@ -302,8 +303,12 @@
+ 			break;
+ #endif /* CONFIG_CTRL_IFACE_DBUS_NEW */
+ 		case 'v':
+-			printf("%s\n", wpa_supplicant_version);
+-			exitcode = 0;
++			if (optarg) {
++				exitcode = !has_feature(optarg);
++			} else {
++				printf("%s\n", wpa_supplicant_version);
++				exitcode = 0;
++			}
+ 			goto out;
+ 		case 'W':
+ 			params.wait_for_monitor++;
+diff --git a/src/utils/build_features.h b/src/utils/build_features.h
+new file mode 100644
+--- /dev/null
++++ b/src/utils/build_features.h
+@@ -0,0 +1,65 @@
++#ifndef BUILD_FEATURES_H
++#define BUILD_FEATURES_H
++
++static inline int has_feature(const char *feat)
++{
++#if defined(IEEE8021X_EAPOL) || (defined(HOSTAPD) && !defined(CONFIG_NO_RADIUS))
++	if (!strcmp(feat, "eap"))
++		return 1;
++#endif
++#ifdef CONFIG_IEEE80211AC
++	if (!strcmp(feat, "11ac"))
++		return 1;
++#endif
++#ifdef CONFIG_IEEE80211AX
++	if (!strcmp(feat, "11ax"))
++		return 1;
++#endif
++#ifdef CONFIG_IEEE80211R
++	if (!strcmp(feat, "11r"))
++		return 1;
++#endif
++#ifdef CONFIG_ACS
++	if (!strcmp(feat, "acs"))
++		return 1;
++#endif
++#ifdef CONFIG_SAE
++	if (!strcmp(feat, "sae"))
++		return 1;
++#endif
++#ifdef CONFIG_OWE
++	if (!strcmp(feat, "owe"))
++		return 1;
++#endif
++#ifdef CONFIG_SUITEB192
++	if (!strcmp(feat, "suiteb192"))
++		return 1;
++#endif
++#ifdef CONFIG_WEP
++	if (!strcmp(feat, "wep"))
++		return 1;
++#endif
++#ifdef CONFIG_HS20
++	if (!strcmp(feat, "hs20"))
++		return 1;
++#endif
++#ifdef CONFIG_WPS
++	if (!strcmp(feat, "wps"))
++		return 1;
++#endif
++#ifdef CONFIG_FILS
++	if (!strcmp(feat, "fils"))
++		return 1;
++#endif
++#ifdef CONFIG_OCV
++	if (!strcmp(feat, "ocv"))
++		return 1;
++#endif
++#ifdef CONFIG_MESH
++	if (!strcmp(feat, "mesh"))
++		return 1;
++#endif
++	return 0;
++}
++
++#endif /* BUILD_FEATURES_H */

@@ -176,6 +176,70 @@ if os.environ.get('TEST_SYSTEMCTL_FAIL') == args:
         self.assertEqual(self.updater.marker.read_text(), self.old_version)
         self.assertNotIn('restart node-manager.service', self.history())
 
+    def test_mesh_update_installs_binary_and_prepares_before_restart(self):
+        tools = Path(__file__).parent
+        helper = (tools / 'manet-mesh-supplicant.py').read_text().replace(
+            "WPA_DIR = Path('/etc/wpa_supplicant')",
+            "WPA_DIR = Path(os.environ['TEST_ROOT']) / 'etc/wpa_supplicant'")
+        self.members['usr/local/bin/manet-mesh-supplicant.py'] = (
+            helper.encode(), 0o755)
+        self.members['usr/local/bin/manet_config_io.py'] = (
+            (tools / 'manet_config_io.py').read_bytes(), 0o755)
+        binary = 'usr/sbin/wpa_supplicant_manet'
+        self.members[binary] = (b'new mesh binary', 0o755)
+        configs = self.root / 'etc/wpa_supplicant'
+        configs.mkdir()
+        live = configs / 'wpa_supplicant-wlan0.conf'
+        live.write_text('network={\n    mode=5\n}\n')
+        self.make_archive()
+        original = update.run_command
+
+        def command(args, **kwargs):
+            if args[:2] == ['systemctl', 'try-restart']:
+                self.assertEqual((self.root / binary).read_bytes(),
+                                 b'new mesh binary')
+                self.assertTrue(live.read_text().startswith(
+                    'mesh_max_inactivity=10\n'))
+                self.assertEqual(self.updater.marker.read_text(),
+                                 self.old_version)
+            return original(args, **kwargs)
+
+        with patch.object(update, 'run_command', side_effect=command):
+            self.updater.update()
+        self.assertEqual((self.root / binary).stat().st_mode & 0o777, 0o755)
+        self.assertIn('systemctl try-restart wpa_supplicant@*.service',
+                      self.history())
+        self.assertNotIn('try-restart wpa_supplicant-s1g', self.history())
+
+    def test_mesh_preparation_failure_keeps_update_pending(self):
+        self.members['usr/local/bin/manet-mesh-supplicant.py'] = (
+            b'#!/bin/sh\nexit 1\n', 0o755)
+        self.make_archive()
+        with self.assertRaises(update.UpdateError):
+            self.updater.update()
+        self.assertTrue(self.updater.pending.exists())
+        self.assertEqual(self.updater.marker.read_text(), self.old_version)
+        self.assertNotIn('try-restart wpa_supplicant', self.history())
+
+    def test_mesh_preparation_respects_channel_change_lock(self):
+        original = update.run_command
+
+        def command(args, **kwargs):
+            if args[0] == 'flock':
+                self.assertEqual(args[1:4], ['--exclusive', '--timeout', '10'])
+                args = list(args)
+                args[3] = '0'
+            return original(args, **kwargs)
+
+        with (self.root / 'run/channel-election.lock').open('a') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with patch.object(update, 'run_command', side_effect=command):
+                with self.assertRaises(update.UpdateError):
+                    self.updater.update()
+        self.assertTrue(self.updater.pending.exists())
+        self.assertEqual(self.updater.marker.read_text(), self.old_version)
+        self.assertNotIn('try-restart wpa_supplicant', self.history())
+
     def test_static_selection(self):
         (self.root / 'etc/mesh.conf').write_text('acs=n\n')
         self.updater.update()

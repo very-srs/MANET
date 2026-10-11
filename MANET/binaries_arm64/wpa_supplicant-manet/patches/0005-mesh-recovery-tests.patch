@@ -1,0 +1,103 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+Subject: [PATCH] tests: exercise bounded mesh recovery
+
+---
+diff --git a/tests/hwsim/test_mesh_manet.py b/tests/hwsim/test_mesh_manet.py
+new file mode 100644
+--- /dev/null
++++ b/tests/hwsim/test_mesh_manet.py
+@@ -0,0 +1,94 @@
++# Mesh recovery regressions for the MANET hostap patches.
++# This software may be distributed under the terms of the BSD license.
++
++import time
++
++import hwsim_utils
++from hwsim_utils import set_group_map
++from test_wpas_mesh import (add_mesh_secure_net, check_mesh_support,
++                           check_mesh_joined2, check_mesh_connected2)
++from utils import alloc_fail, wait_fail_trigger
++
++
++def start_pair(dev, inactivity=10, wrong_password=False):
++    for sta in dev[:2]:
++        check_mesh_support(sta, secure=True)
++        sta.request('LOG_LEVEL INFO')
++        sta.request('SET mesh_max_inactivity ' + str(inactivity))
++        sta.request('SET sae_groups 19')
++    ids = [add_mesh_secure_net(sta, sae_password=True) for sta in dev[:2]]
++    if wrong_password:
++        dev[1].set_network_quoted(ids[1], 'sae_password', 'wrong-passphrase')
++    for sta, net in zip(dev[:2], ids):
++        sta.mesh_group_add(net)
++    check_mesh_joined2(dev)
++    return ids
++
++
++def test_mesh_manet_beacons_and_dead_peer(dev, apdev):
++    """Beacons retain an idle link; RF silence removes it within 11 seconds."""
++    start_pair(dev)
++    check_mesh_connected2(dev)
++    if dev[0].wait_event(['MESH-PEER-DISCONNECTED'], timeout=12):
++        raise Exception('Beacon-only mesh peer was removed')
++    try:
++        set_group_map(dev[1], 2)
++        started = time.monotonic()
++        ev = dev[0].wait_event(['MESH-PEER-INACTIVE'], timeout=11)
++        if ev is None or time.monotonic() - started > 11:
++            raise Exception('Silent peer was not removed at its deadline')
++        if not dev[0].wait_event(['MESH-PEER-DISCONNECTED'], timeout=1):
++            raise Exception('Inactivity did not free the peer')
++    finally:
++        set_group_map(dev[1], 1)
++
++
++def test_mesh_manet_sae_retries_without_blocking(dev, apdev):
++    """Wrong-key exchanges retry promptly and recover after key correction."""
++    ids = start_pair(dev, inactivity=300, wrong_password=True)
++    for attempt in range(3):
++        ev = dev[0].wait_event(['MESH-SAE-AUTH-FAILURE',
++                                'MESH-SAE-AUTH-BLOCKED'], timeout=6)
++        if ev is None or 'BLOCKED' in ev or 'action=free' not in ev:
++            raise Exception('SAE failed to retry within its bounded window')
++    dev[1].set_network_quoted(ids[1], 'sae_password', 'thisismypassphrase!')
++    check_mesh_connected2(dev, timeout0=10)
++    hwsim_utils.test_connectivity(dev[0], dev[1])
++
++
++def test_mesh_manet_local_sae_failure_recovers(dev, apdev):
++    """A local commit allocation failure keeps the cleanup timer armed."""
++    for sta in dev[:2]:
++        check_mesh_support(sta, secure=True)
++        sta.request('SET mesh_max_inactivity 300')
++        sta.request('SET sae_groups 19')
++    dev[0].request('SET ext_mgmt_frame_handling 1')
++    try:
++        with alloc_fail(dev[0], 1, 'mesh_rsn_build_sae_commit'):
++            for sta in dev[:2]:
++                sta.mesh_group_add(add_mesh_secure_net(sta))
++            check_mesh_joined2(dev)
++            wait_fail_trigger(dev[0], 'GET_ALLOC_FAIL')
++        ev = dev[0].wait_event(['MESH-SAE-AUTH-FAILURE'], timeout=5)
++        if ev is None or 'action=free' not in ev:
++            raise Exception('Local SAE failure left no cleanup timer')
++    finally:
++        dev[0].request('SET ext_mgmt_frame_handling 0')
++    check_mesh_connected2(dev, timeout0=10)
++
++
++def test_mesh_manet_kernel_station_loss_recovers(dev, apdev):
++    """A candidate repairs stale userspace state before inactivity expires."""
++    start_pair(dev, inactivity=300)
++    check_mesh_connected2(dev)
++    for sta in dev[:2]:
++        sta.dump_monitor()
++    result, output = dev[0].cmd_execute([
++        'iw', 'dev', dev[0].ifname, 'station', 'del', dev[1].own_addr()])
++    if result:
++        raise Exception('Station deletion failed: ' + str(output))
++    if not dev[0].wait_event(['MESH-PEER-STALE'], timeout=3):
++        raise Exception('Next candidate did not replace stale peer state')
++    if not dev[0].wait_event(['MESH-PEER-CONNECTED'], timeout=10):
++        raise Exception('Peer did not reconnect after station deletion')
++    hwsim_utils.test_connectivity(dev[0], dev[1])

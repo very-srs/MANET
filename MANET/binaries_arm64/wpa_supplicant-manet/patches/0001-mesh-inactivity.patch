@@ -1,0 +1,40 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+Subject: [PATCH] mesh: remove silent established peers at the configured deadline
+
+---
+diff --git a/src/ap/sta_info.c b/src/ap/sta_info.c
+--- a/src/ap/sta_info.c
++++ b/src/ap/sta_info.c
+@@ -545,6 +545,32 @@
+ 		ap_free_sta(hapd, sta);
+ 		return;
+ 	}
++
++#ifdef CONFIG_MESH
++	if ((hapd->conf->mesh & MESH_ENABLED) &&
++	    sta->plink_state == PLINK_ESTAB) {
++		int inactive_sec = hostapd_drv_get_inact_sec(hapd, sta->addr);
++
++		/* Mesh beacons refresh the driver's last-RX time. */
++		if (inactive_sec == -ENOENT || inactive_sec >= max_inactivity) {
++			wpa_msg(hapd->msg_ctx, MSG_INFO,
++				"MESH-PEER-INACTIVE addr=" MACSTR
++				" inactive=%d limit=%d",
++				MAC2STR(sta->addr), inactive_sec,
++				max_inactivity);
++			ap_free_sta(hapd, sta);
++			return;
++		}
++
++		/* An unavailable measurement must not evict a live peer. */
++		next_time = max_inactivity;
++		if (inactive_sec >= 0)
++			next_time -= inactive_sec;
++		eloop_register_timeout(next_time, 0, ap_handle_timer,
++				       hapd, sta);
++		return;
++	}
++#endif /* CONFIG_MESH */
+ 
+ 	if (sta->max_idle_period)
+ 		max_inactivity = (sta->max_idle_period * 1024 + 999) / 1000;

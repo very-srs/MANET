@@ -39,6 +39,8 @@ RECOVERY_UNITS = {
 }
 MARKERS = {"etc/manet_version.txt", "usr/local/bin/version.txt"}
 REQUIRED = MARKERS | {
+    "usr/local/bin/manet-mesh-supplicant.py",
+    "etc/systemd/system/wpa_supplicant@.service.d/20-manet-binary.conf",
     "usr/local/bin/node-update.sh", "usr/local/bin/node-update.py",
     "usr/local/bin/manet_release.py",
     "usr/local/bin/manet-auto-update.sh",
@@ -519,6 +521,14 @@ class Updater:
     def install(self, directory, members):
         """Install files, activate services and commit versions after checks."""
         self.install_payload(directory, members)
+        mesh_setup = self.destination('usr/local/bin/manet-mesh-supplicant.py')
+        # Serialize the one-time rewrite with ACS and AP role transitions.
+        output = run_command([
+            'flock', '--exclusive', '--timeout', '10',
+            str(self.root / 'run/channel-election.lock'),
+            str(mesh_setup), '--update-configs'])
+        for line in output.decode('utf-8', errors='replace').splitlines():
+            self.log(line)
         self.retire_route_fix()
         self.retire_battery_reader()
         self.retire_network_boot_units()
@@ -540,6 +550,9 @@ class Updater:
         run_command(["systemctl", "enable", "--now", "manet-mesh-power.service"])
         run_command(["systemctl", "enable", "--now", "manet-logrotate.timer"])
         run_command(["systemctl", "enable", "--now", "manet-auto-update.path"])
+        # Only running Wi-Fi mesh instances adopt the new binary now.
+        # HaLow candidates require separate bench approval and activation.
+        run_command(["systemctl", "try-restart", "wpa_supplicant@*.service"])
         for service in ("mesh-status.service", "node-manager.service"):
             run_command(["systemctl", "restart", service])
         for service in ("mesh-status.service", "node-manager.service", "mesh-channel-agreement.service", "one-shot-time-sync.service"):

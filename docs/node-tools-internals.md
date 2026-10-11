@@ -88,7 +88,8 @@ because `node-update.sh` compares the two to decide whether a node is current.
 Install tarballs are root-relative (`boot/`, `etc/`, `usr/`, `root/`) and packed
 with numeric owner/group `0/0`. Keep the shipped binaries marked as binary in
 `.gitattributes` (`morse_cli`, `chronyc`, `alfred`, `batctl`, `wpa_cli_s1g`,
-`wpa_supplicant_s1g`), or line-ending normalization corrupts them.
+`wpa_supplicant_s1g`, `wpa_supplicant_manet`, `wpa_cli_manet`), or line-ending
+normalization corrupts them.
 
 All four archive builders source `MANET/packaging/lib-man.sh` and call
 `stage_man_pages` to install `MANET/man/man8/*.8` as mode 0644 under
@@ -2411,6 +2412,55 @@ See [release tooling](../MANET/releases/README.md).
 ---
 
 ## Provisioning
+
+**Mesh supplicant selection and recovery**
+
+`wpa_supplicant@.service.d/20-manet-binary.conf` resets ExecStart to
+`manet-mesh-supplicant.py`. It executes `/usr/sbin/wpa_supplicant_manet` or
+logs a WARNING and falls back to Debian's `/usr/sbin/wpa_supplicant` when the
+MANET binary is absent. The AP guard and interface preparation still apply.
+All standard mesh start paths share this template: radio setup,
+`manet_supplicant.py`, channel changes from `manet_radio.py`, BATMAN setup,
+ACS, lobby/tourguide changes, node-manager and Ethernet AP transitions.
+USB client uplinks use their own unit and keep Debian's binary.
+
+The Wi-Fi build enables HE and patches mesh peer lifecycle handling. An
+established peer is freed at ten seconds of kernel inactivity, without
+random fuzz or AP polling delays. A beacon refreshes kernel activity;
+a driver query failure alone does not establish silence. ENOENT proves a
+missing station and also permits immediate replacement on a peer candidate.
+Failed SAE attempts have a three or four second cleanup deadline armed
+before local setup. Cleanup frees the station and its timers instead of
+setting PLINK_BLOCKED. A new beacon can then initiate SAE. INFO logs expose
+exchange steps and status without secrets.
+
+`mesh_max_inactivity` is a global supplicant setting. Fresh Wi-Fi configs
+and AP-to-mesh rendering write ten seconds. The start wrapper adds missing
+settings to live and lobby configs; frequency and credential edits preserve
+existing settings. The updater invokes `--update-configs` after installing
+its payload and before service restarts. A ten-second `flock` acquisition
+on `/run/channel-election.lock` serializes this rewrite with ACS and AP
+transitions. Contention leaves the update pending for retry. It adds missing
+settings to all mesh configs, including lobby copies, preserving tuning.
+The updater uses `try-restart wpa_supplicant@*.service` after daemon-reload,
+so running Wi-Fi mesh instances adopt a delivered binary immediately.
+Disabled instances remain stopped. Updates still commit version markers
+only after their service checks succeed.
+
+All archive builders stage `wpa_supplicant_manet` and `wpa_cli_manet` into
+`/usr/sbin` when available. They warn if either is missing; the runtime
+wrapper provides the missing-supplicant fallback. The existing SAE watchdog
+continues to support Debian fallback installs that can emit AUTH-BLOCKED.
+
+HaLow retains an explicit 300 second inactivity setting and the kernel
+`mesh_plink_timeout=0` guard. Its candidate build includes SAE recovery and
+stale-station patches but no accelerated established-peer expiry. Candidate
+names are excluded from packaging and service selection pending bench
+verification. Key teardown can wedge Morse firmware; failed SAE cleanup
+therefore requires separate testing even at the conservative idle timeout.
+Build inputs and hardware validation notes are in
+[binaries_arm64/README.md](../MANET/binaries_arm64/README.md).
+
 
 **manet-ap-guard.sh**
 

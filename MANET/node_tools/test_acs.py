@@ -133,7 +133,8 @@ elif sys.argv[1] == 'phy':
             (self.roles / role).write_text(iface if freq else '')
             conf = self.wpa / f'wpa_supplicant-{iface}.conf'
             if freq:
-                conf.write_text(f'network={{\nfrequency={freq}\n}}\n')
+                conf.write_text('mesh_max_inactivity=10\n'
+                                f'network={{\nfrequency={freq}\n}}\n')
             else:
                 conf.unlink(missing_ok=True)
         (self.roles / 'mesh_if').write_text(''.join(
@@ -210,6 +211,9 @@ is_in_lobby
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('frequency=2462', (self.wpa / 'wpa_supplicant-wlan0.conf').read_text())
         self.assertIn('frequency=5180', (self.wpa / 'wpa_supplicant-wlan1.conf').read_text())
+        for iface in ('wlan0', 'wlan1'):
+            content = (self.wpa / f'wpa_supplicant-{iface}.conf').read_text()
+            self.assertTrue(content.startswith('mesh_max_inactivity=10\n'))
         self.configure(None, 5180)
         result = self.shell(self.definitions('node-manager-acs.sh') + '\nacs_write_channels 2462 ""\n')
         self.assertNotEqual(result.returncode, 0)

@@ -253,7 +253,8 @@ class Transition:
             raise ValueError('Invalid regulatory domain')
         # SAE with required protected management frames and no mesh forwarding.
         return (f'ctrl_interface=/var/run/wpa_supplicant\ncountry={country}\n'
-                'update_config=1\nsae_pwe=1\nap_scan=2\nnetwork={\n'
+                'update_config=1\nsae_pwe=1\nap_scan=2\n'
+                'mesh_max_inactivity=10\nnetwork={\n'
                 f'    ssid={supplicant_string(ssid)}\n    mode=5\n    frequency={freq}\n'
                 f'    key_mgmt=SAE\n    sae_password={supplicant_string(key)}\n'
                 '    ieee80211w=2\n    mesh_fwding=0\n    group_rekey=0\n}\n')
