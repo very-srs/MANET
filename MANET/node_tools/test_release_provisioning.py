@@ -3,6 +3,7 @@ import hashlib
 import io
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -216,6 +217,11 @@ Expand-ProvisioningTokens (Get-Content $env:TEST_TEMPLATE -Raw)
                 self.assertIn(DOWNLOADS + f'/v0.551/{package_board}-install.tar.gz', result.stdout)
                 self.assertNotIn('__INSTALL_', result.stdout)
                 self.assertNotIn('__RELEASE_', result.stdout)
+                pins = re.findall(r"^\s*((?:YQ|MEDIAMTX)_(?:VERSION|SHA256)='[^']+')$",
+                                  (PROVISIONING / template).read_text(), re.M)
+                self.assertEqual(len(pins), 4)
+                for pin in pins:
+                    self.assertIn(pin, result.stdout)
                 parsed = subprocess.run(['bash', '-n'], input=result.stdout, text=True, capture_output=True)
                 self.assertEqual(parsed.returncode, 0, parsed.stderr)
 
