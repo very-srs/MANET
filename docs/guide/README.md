@@ -38,6 +38,17 @@ Keep public documentation factual. Do not copy private handoffs, session
 diaries, bench credentials, or collaboration transcripts into it. The builder
 publishes only the topics, the listed references, and the assets they use.
 
+## Marine typography
+
+On Marine topic pages, all text uses Comic Sans, including navigation, headings,
+and inline code. User, Developer, and full reference pages keep their standard
+fonts. The Marine section also keeps this font when JavaScript is disabled.
+
+Devices without Comic Sans use the bundled Comic Neue regular and bold fonts
+from [Google Fonts](https://github.com/google/fonts/tree/main/ofl/comicneue).
+Keep `assets/fonts/OFL.txt` with these font files; the builder includes them so
+the fallback works offline without a font service.
+
 ## Drawing style
 
 Use image generation for wax-crayon drawings that look made by a second grader.
