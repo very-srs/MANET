@@ -1,25 +1,227 @@
 {
   "topics": [
-    {"id": "index", "source": "overview.md", "title": "Meet the mesh", "description": "MANET hardware, connections, and setup.", "group": "Start here"},
-    {"id": "flash", "source": "flash.md", "title": "Flash a radio", "description": "Put MANET on your radio, from Windows or Linux.", "group": "Start here"},
-    {"id": "first-boot", "source": "first-boot.md", "title": "The first boot", "description": "Plug in. Let setup finish. Know when it is ready.", "group": "Start here"},
-    {"id": "connect", "source": "connect.md", "title": "Connect your device", "description": "Get your phone or computer onto the mesh.", "group": "Use the mesh"},
-    {"id": "dashboard", "source": "dashboard.md", "title": "Read the dashboard", "description": "See your radios, inspect their links, and measure a path.", "group": "Use the mesh"},
-    {"id": "mesh", "source": "mesh.md", "title": "How the mesh works", "description": "Radios find peers, choose paths, and recover connections.", "group": "Use the mesh"},
-    {"id": "voice", "source": "voice.md", "title": "Push to talk", "description": "Pick a talk group. Press to speak. Release to listen.", "group": "Use the mesh"},
-    {"id": "settings", "source": "settings.md", "title": "Change settings", "description": "Know what changes locally and what changes across the mesh.", "group": "Maintain the radios"},
-    {"id": "updates", "source": "updates.md", "title": "Update a radio", "description": "Install a tools release and recover an interrupted update.", "group": "Maintain the radios"},
-    {"id": "troubleshooting", "source": "troubleshooting.md", "title": "When something is wrong", "description": "Start with the symptom and collect useful evidence.", "group": "Maintain the radios"}
+    {
+      "id": "index",
+      "source": "overview.md",
+      "title": "Meet the mesh",
+      "description": "MANET hardware, connections, and setup.",
+      "group": "Start here"
+    },
+    {
+      "id": "hardware",
+      "source": "hardware.md",
+      "title": "Hardware and accessories",
+      "description": "Supported boards, radio hardware, power and peripherals.",
+      "group": "Start here"
+    },
+    {
+      "id": "flash",
+      "source": "flash.md",
+      "title": "Flash a radio",
+      "description": "Put MANET on your radio, from Windows or Linux.",
+      "group": "Start here"
+    },
+    {
+      "id": "first-boot",
+      "source": "first-boot.md",
+      "title": "The first boot",
+      "description": "Plug in. Let setup finish. Know when it is ready.",
+      "group": "Start here"
+    },
+    {
+      "id": "connect",
+      "source": "connect.md",
+      "title": "Connect your device",
+      "description": "Get your phone or computer onto the mesh.",
+      "group": "Use the mesh"
+    },
+    {
+      "id": "dashboard",
+      "source": "dashboard.md",
+      "title": "Read the dashboard",
+      "description": "See your radios, inspect their links, and measure a path.",
+      "group": "Use the mesh"
+    },
+    {
+      "id": "voice",
+      "source": "voice.md",
+      "title": "Push to talk",
+      "description": "Pick a talk group. Press to speak. Release to listen.",
+      "group": "Use the mesh"
+    },
+    {
+      "id": "internet",
+      "source": "internet.md",
+      "title": "Share an internet connection",
+      "description": "Provide an uplink and understand gateway changes.",
+      "group": "Use the mesh"
+    },
+    {
+      "id": "location",
+      "source": "location.md",
+      "title": "Location and ATAK",
+      "description": "Connect an ATAK phone and understand position sources.",
+      "group": "Use the mesh"
+    },
+    {
+      "id": "services",
+      "source": "services.md",
+      "title": "Shared services",
+      "description": "Media streams, Mumble and synchronized files.",
+      "group": "Use the mesh"
+    },
+    {
+      "id": "measurements",
+      "source": "measurements.md",
+      "title": "Measure a connection",
+      "description": "Run tests and interpret saved results.",
+      "group": "Use the mesh"
+    },
+    {
+      "id": "mesh",
+      "source": "mesh.md",
+      "title": "How the mesh works",
+      "description": "Radios find peers, choose paths, and recover connections.",
+      "group": "Understand the radio"
+    },
+    {
+      "id": "addresses",
+      "source": "addresses.md",
+      "title": "Addresses and names",
+      "description": "How radios and attached devices get their addresses.",
+      "group": "Understand the radio"
+    },
+    {
+      "id": "time",
+      "source": "time.md",
+      "title": "Time and GPS clocks",
+      "description": "Where time comes from and why the radios need it.",
+      "group": "Understand the radio"
+    },
+    {
+      "id": "radios",
+      "source": "radios.md",
+      "title": "Radio controls",
+      "description": "Channels, transmit power and interface ownership.",
+      "group": "Understand the radio"
+    },
+    {
+      "id": "automation",
+      "source": "automation.md",
+      "title": "What runs automatically",
+      "description": "Understand background jobs through their visible results.",
+      "group": "Understand the radio"
+    },
+    {
+      "id": "settings",
+      "source": "settings.md",
+      "title": "Change settings",
+      "description": "Know what changes locally and what changes across the mesh.",
+      "group": "Maintain the radios"
+    },
+    {
+      "id": "power",
+      "source": "power.md",
+      "title": "Power and shutdown",
+      "description": "Read indicators, check power and shut down a radio.",
+      "group": "Maintain the radios"
+    },
+    {
+      "id": "storage",
+      "source": "storage.md",
+      "title": "Storage and logs",
+      "description": "Saved state, measurement limits and diagnostic retention.",
+      "group": "Maintain the radios"
+    },
+    {
+      "id": "updates",
+      "source": "updates.md",
+      "title": "Update a radio",
+      "description": "Install a tools release and recover an interrupted update.",
+      "group": "Maintain the radios"
+    },
+    {
+      "id": "troubleshooting",
+      "source": "troubleshooting.md",
+      "title": "When something is wrong",
+      "description": "Start with the symptom and collect useful evidence.",
+      "group": "Maintain the radios"
+    },
+    {
+      "id": "customization",
+      "source": "customization.md",
+      "title": "Add your own setup",
+      "description": "Run operator scripts after normal provisioning.",
+      "group": "Build and customize"
+    },
+    {
+      "id": "development",
+      "source": "development.md",
+      "title": "Develop and release MANET",
+      "description": "Source ownership, validation, builds and publication.",
+      "group": "Build and customize"
+    }
   ],
   "references": [
-    {"id": "project", "path": "README.md", "title": "Project reference"},
-    {"id": "runtime", "path": "MANET/node_tools/README.md", "title": "Runtime reference"},
-    {"id": "provisioning", "path": "MANET/provisioning/README.md", "title": "Provisioning reference"},
-    {"id": "internals", "path": "docs/node-tools-internals.md", "title": "Runtime internals"},
-    {"id": "flasher-internals", "path": "docs/provisioning-internals.md", "title": "Flasher internals"},
-    {"id": "kernel", "path": "docs/kernel-6.18-morse-port.md", "title": "Kernel and drivers"},
-    {"id": "releases", "path": "MANET/releases/README.md", "title": "Release management"},
-    {"id": "ethernet", "path": "MANET/networkd-dispatcher/README.md", "title": "Ethernet role changes"},
-    {"id": "scripts", "path": "MANET/provisioning/additional-scripts/README.md", "title": "Additional setup scripts"}
+    {
+      "id": "project",
+      "path": "README.md",
+      "title": "Project reference"
+    },
+    {
+      "id": "runtime",
+      "path": "MANET/node_tools/README.md",
+      "title": "Runtime reference"
+    },
+    {
+      "id": "provisioning",
+      "path": "MANET/provisioning/README.md",
+      "title": "Provisioning reference"
+    },
+    {
+      "id": "internals",
+      "path": "docs/node-tools-internals.md",
+      "title": "Runtime internals"
+    },
+    {
+      "id": "flasher-internals",
+      "path": "docs/provisioning-internals.md",
+      "title": "Flasher internals"
+    },
+    {
+      "id": "kernel",
+      "path": "docs/kernel-6.18-morse-port.md",
+      "title": "Kernel and drivers"
+    },
+    {
+      "id": "releases",
+      "path": "MANET/releases/README.md",
+      "title": "Release management"
+    },
+    {
+      "id": "ethernet",
+      "path": "MANET/networkd-dispatcher/README.md",
+      "title": "Ethernet role changes"
+    },
+    {
+      "id": "scripts",
+      "path": "MANET/provisioning/additional-scripts/README.md",
+      "title": "Additional setup scripts"
+    },
+    {
+      "id": "tools",
+      "path": "docs/node-tools-map.md",
+      "title": "Node-tool map"
+    },
+    {
+      "id": "packages",
+      "path": "MANET/install_packages/README.md",
+      "title": "Package contents"
+    },
+    {
+      "id": "lyra",
+      "path": "MANET/lyra_arm64/README.md",
+      "title": "Lyra codec artifacts"
+    }
   ]
 }

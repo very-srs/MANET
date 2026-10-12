@@ -54,11 +54,21 @@ For an actual performance check, use **Measure**, select the endpoints, directio
 
 Your login lasts up to 48 hours on this radio. A reboot, web-service restart, or admin-password change requires a new login. An expired login does not mean the mesh has failed.
 
+For test selection and interpretation, continue to
+[measure a connection](measurements.md). The [radio controls](radios.md),
+[internet](internet.md), [services](services.md) and [power](power.md)
+chapters explain the corresponding status and management results.
+
 ## Developer
 
 ### One server, local observations
 
-`mesh-status.py` serves port 80 and includes the management handlers from `manet_manage.py`. Public read-only routes include `/api/data`, `/api/local`, `/api/peer/<ip>`, and `/api/debug`. Management and `/api/admin/*` require a session. Both application checks and `manet-ui-firewall.sh` restrict access to the local-client boundary described in the [connection guide](connect.md).
+`mesh-status.py` serves port 80 and includes the management handlers from
+`manet_manage.py`. Public read-only routes include `/api/data`, `/api/local`,
+`/api/peer/<ip>`, and `/api/debug`. Management and `/api/admin/*` require a
+session. Application checks admit localhost and the mesh/EUD subnet;
+`manet-ui-firewall.sh` narrows this to localhost and this node's client pool,
+as described in the [connection guide](connect.md).
 
 The server combines live BATMAN originator, neighbor, and gateway queries with `/var/run/mesh_node_registry`, `/etc/mesh.conf`, and allocation state. Peer details come from Alfred-derived records, even when the route is named `/api/peer/<ip>`; it does not fetch a remote node's HTTP page. `manet_peer_radios.py` reconstructs compatible interface displays when older records lack structured interface telemetry.
 

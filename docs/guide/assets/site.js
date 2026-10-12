@@ -5,6 +5,18 @@
   const storageKey = "manet-guide-tier";
   const panels = [...document.querySelectorAll("[data-tier]")];
   const choices = [...document.querySelectorAll("[data-tier-choice]")];
+  const contents = document.querySelector(".contents-toggle");
+
+  // Collapse the longer chapter list on phones; no-JS keeps plain links.
+  if (contents) {
+    contents.hidden = false;
+    document.documentElement.classList.add("has-topic-menu");
+    contents.addEventListener("click", () => {
+      const expanded = contents.getAttribute("aria-expanded") !== "true";
+      contents.setAttribute("aria-expanded", String(expanded));
+      contents.closest(".sidebar").classList.toggle("expanded", expanded);
+    });
+  }
 
   // Private browsing and file:// may deny storage; links still carry the choice.
   function rememberedTier() {

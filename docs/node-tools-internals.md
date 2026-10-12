@@ -933,10 +933,16 @@ same peer helper supplies originator MACs for tourguide election.
 
 ### Service elections
 
-All service elections share the same algorithm: the best-connected node wins,
+MediaMTX and Mumble share an election algorithm: the best-connected node wins,
 measured by `MEAN_THROUGHPUT_MBPS` in the registry, the mean of BATMAN_V's
-metric across that node's originators, in Mbit/s. Stale nodes (not seen within
-10 minutes) are excluded. Ties are broken deterministically by MAC address.
+metric across that node's originators, in Mbit/s. Eligibility requires a valid
+MAC, finite nonnegative metric, a state other than SHUTTING_DOWN/STALE, and a
+valid local boot-clock observation no more than 300 seconds old. Future
+observation times are rejected. Of eligible advertised incumbents, the highest
+metric wins incumbent status, with lowest MAC breaking ties. That incumbent
+receives a 10 Mbit/s bonus; highest final score wins, again with lowest MAC on
+ties. Registry read failure is distinct from an empty eligible set. Time
+serving uses its own [source qualification](#time-synchronization).
 
 This field used to be called `TQ_AVERAGE`, which was wrong: BATMAN_V's metric is
 throughput, not a 0-255 link quality. The behavior never changed (highest
@@ -2154,7 +2160,7 @@ The active uplink dispatcher already records `mesh-gateway.state` and
 both the active dispatcher and the legacy detector can trigger internet sync.
 
 Local roles are checked every 15 seconds. A recent `gps_status.json` fix enables
-the GPS SHM refclock. A direct uplink enables the public pool, with
+the GPS SHM refclock. A direct uplink enables configured public NTS servers, with
 `bindacqdevice` restricting NTP acquisition to that interface. Source profiles
 allow the configured IPv4 mesh CIDR and the existing IPv6 mesh prefix. Client
 and idle profiles deny serving; no profile has a `local stratum` fallback or
@@ -2167,6 +2173,8 @@ and bounded command timeouts. Qualification requires a real reference, stratum
 correction, and a recent selected source with nonzero reachability. This is a
 completion criterion, **not a bound on absolute UTC error**. GPS and internet
 markers require a selected GPS refclock or an uplink NTP source respectively.
+The internet source must also have negotiated NTS authentication, checked
+through `chronyc authdata`; an NTS entry still awaiting keys does not qualify.
 Invalid queries or loss of qualification withdraw those markers. The existing
 manager publish path ORs `/run/mesh-ntp-gps.state` and `/run/mesh-ntp.state` into
 type-68 `is_ntp_server`; cadence is unchanged and no separate announcement is

@@ -423,7 +423,7 @@ Config keys in `/etc/mesh.conf`:
 
 ## Service Elections
 
-Every service election uses the same rule, applied by one shared helper,
+MediaMTX and Mumble use the same election rule, applied by one shared helper,
 `mesh-service-election.py`. The best-connected node wins, measured by
 `MEAN_THROUGHPUT_MBPS` in the registry, which is the mean of BATMAN_V's metric
 across that node's originators in Mbit/s. A node that announced its shutdown,
@@ -1210,8 +1210,10 @@ it, two nodes would claim the same IP chunk and the same hostname.
 **mesh-shutdown.sh**
 
 Graceful shutdown. Broadcasts a tombstone announcement carrying
-`NODE_STATE=SHUTTING_DOWN` three times over 5 seconds, so other nodes treat the
-absence as deliberate.
+`NODE_STATE=SHUTTING_DOWN` three times at two-second intervals, then waits
+three seconds for propagation before returning to systemd's shutdown sequence.
+Peers can treat the absence as deliberate. Running the helper alone does not
+power off the node.
 
 ---
 

@@ -37,6 +37,9 @@ decide which radio must choose again. That can briefly interrupt a connected
 device; its connection may need to renew before traffic resumes. A short
 startup wait gives radios time to hear one another before choosing.
 
+See [addresses and names](addresses.md) for client capacity, local names
+and what to do after an address changes.
+
 ### Start with a CM4
 
 The Compute Module 4 is the primary verification target. Raspberry Pi 5 and Rock 3A are supported, with different hardware and thermal considerations. Check the [hardware table](../../../README.md#supported-hardware) and [radio hardware requirements](../../../MANET/provisioning/README.md#radio-hardware) before buying or assembling a node.
@@ -48,9 +51,17 @@ The Compute Module 4 is the primary verification target. Raspberry Pi 5 and Rock
 ### Once the radios are running
 
 - [Read the dashboard](dashboard.md) to inspect peers and measure a path.
+- [Use voice](voice.md), [connect ATAK](location.md), or use [shared services](services.md).
+- [Share internet](internet.md) and understand [time sources](time.md).
+- [Measure a connection](measurements.md) and manage [saved results and logs](storage.md).
 - [Change settings](settings.md) with the local and mesh scopes in mind.
+- [Read power indications and shut down](power.md).
 - [Update a radio](updates.md) when a tools release is ready.
 - [Troubleshoot a problem](troubleshooting.md) from the symptom you can see.
+
+[What runs automatically](automation.md) connects the background jobs to
+these results. Builders can also read [hardware](hardware.md),
+[custom setup](customization.md) and [development](development.md).
 
 ### What is still developing
 
@@ -202,6 +213,9 @@ Kernel builds and package builders are maintained outside the tracked source lay
 
 ### Detailed references
 
+- [Runtime ownership and background work](automation.md)
+- [Node-tool map by responsibility](../../node-tools-map.md)
+- [Build and release workflow](development.md)
 - [Runtime and configuration reference](../../../MANET/node_tools/README.md)
 - [Runtime internals](../../../docs/node-tools-internals.md)
 - [Kernel, Morse driver, and build chain](../../../docs/kernel-6.18-morse-port.md)
