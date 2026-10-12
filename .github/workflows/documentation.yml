@@ -7,11 +7,13 @@ on:
     paths:
       - 'docs/**'
       - '**/README.md'
+      - 'MANET/share/manet/fer-logo-black.png'
       - '.github/workflows/documentation.yml'
   pull_request:
     paths:
       - 'docs/**'
       - '**/README.md'
+      - 'MANET/share/manet/fer-logo-black.png'
       - '.github/workflows/documentation.yml'
 
 permissions:
