@@ -62,6 +62,25 @@ Your login lasts up to 48 hours on this radio. A reboot, web-service restart, or
 
 The server combines live BATMAN originator, neighbor, and gateway queries with `/var/run/mesh_node_registry`, `/etc/mesh.conf`, and allocation state. Peer details come from Alfred-derived records, even when the route is named `/api/peer/<ip>`; it does not fetch a remote node's HTTP page. `manet_peer_radios.py` reconstructs compatible interface displays when older records lack structured interface telemetry.
 
+This is a local observer of a distributed system, so the displayed fields do
+not all describe one instant:
+
+| Observation | What it establishes | What it does not establish |
+|---|---|---|
+| Live BATMAN originator/neighbor query | The local forwarding view and available next-hop information | That every other node sees the same topology |
+| A peer's Alfred telemetry | The last reported radio, service, and operating state | The peer's current settings between publications |
+| Local allocation and configuration | Which addresses/settings this node owns or intends to use | Successful remote application of a shared change |
+| A measurement result | Observed traffic performance between its endpoints during that test | Permanent capacity or a guaranteed radio path |
+
+Identity and telemetry join on the Alfred publisher MAC. To avoid making a
+cached record look alive forever, the registry refreshes a peer's observation
+age only when its telemetry payload changes. Local boot time measures that
+age even before clocks synchronize. After 300 seconds without a change the
+registry marks it stale and removes its address claim. The dashboard's
+short HTTP cache sits on top of this longer publication/freshness process;
+refreshing the browser cannot force a peer to publish new measurements.
+See [registry freshness](../../../docs/node-tools-internals.md#data-management).
+
 ### Freshness, load, and sessions
 
 Status collections share a five-second cache, with two seconds for voice and configuration. At most eight HTTP connections and two status collections run concurrently. A busy server can return 503 with a retry delay. Background tabs stop polling. These bounds protect radio work from dashboard load.
@@ -69,6 +88,20 @@ Status collections share a five-second cache, with two seconds for voice and con
 `manet_recovery_status.py` combines local ACS, last-channel-change, and time-client state with the registry. Observations older than 45 seconds are not treated as current recovery evidence. Display failures must not stop control or recovery.
 
 `manet_web_sessions.py` keeps token digests and monotonic 48-hour deadlines in memory. Sessions are per node, with no sliding idle extension or peer replication. Tests or tooling that restart the server must sign in again.
+
+Concurrent viewers share fixed cache keys, so opening more tabs does not
+create an independent radio-query workload for every request. Management
+writes are serialized and invalidate cached observations when they finish;
+authentication is checked before cached management data is served. A 503
+therefore can mean that the observation budget is busy, not that the mesh
+has lost all peers.
+
+A session uses a random token whose digest and absolute deadline stay in
+the web process. Monotonic timing prevents an NTP/GPS correction from
+extending the login. Restarting the process loses the session store, while
+an observed admin-password change invalidates existing sessions. This is
+separate from persistent replay protection for commands sent between radios:
+being logged into the UI does not itself prove a peer accepted an action.
 
 ### Measurements and evidence
 

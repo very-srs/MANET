@@ -43,9 +43,53 @@ Voice defaults to Lyra using the packaged GStreamer elements and model weights. 
 
 Talk groups share multicast address `239.192.41.1`; group *n* uses RTP port `38801 + (n - 1) * 2`, with RTCP at the next port. The receive path demultiplexes SSRCs, gives talkers their own decode/jitter paths, and mixes them. Optional half-duplex behavior refuses local PTT while a remote source is transmitting.
 
+The transmit path captures audio through ALSA, measures its level, gates it
+with the PTT valve, encodes it, and places the encoded frames into RTP
+packets. On receive, RTP identifies the sender's stream, a jitter buffer
+reorders and schedules packets, and the matching decoder produces PCM audio
+for the mixer. GStreamer handles the audio path; the Python daemon supervises
+state and devices rather than processing each audio sample.
+
+Each sender has its own RTP sequence numbers and timing. Feeding several
+senders into one jitter buffer would mix unrelated sequence spaces and
+discard or misorder valid packets. Separate receive branches preserve those
+timelines, then the mixer combines their decoded audio. A permanent silent
+input keeps the playback device running while nobody speaks, avoiding a
+device startup at every PTT press.
+
+### Establishing a speaker before speech starts
+
+The RTP synchronization-source identifier, or SSRC, identifies one sender
+instance. MANET combines a prefix derived from its mesh address with a
+per-run generation byte. Reusing the same source identity after a restart
+could pair new sequence numbers with a receiver's old state. Changing the
+generation lets receivers establish the restarted stream separately.
+
+Receivers keep established sources through silence so the next transmission
+does not pay the full branch-creation cost. A sender also emits a short
+muted presence transmission at startup and when newly observed peers need
+to learn it. The beacon uses the sender's actual RTP sequence/timestamp
+space; a receiver inventing packets on another sender's behalf would create
+the wrong state. These choices reduce clipped beginnings without continuous
+audio transmission. The [voice internals](../../../docs/node-tools-internals.md#voice)
+describe branch limits, cleanup, and the fallback beacon interval.
+
+Local multicast loopback is disabled on the transmitting socket, and the
+receive path also discards packets carrying its own SSRC. Otherwise a radio
+could play its microphone back a jitter-buffer delay later and, in optional
+half-duplex mode, mistake itself for a remote speaker.
+
 ### Multicast, scheduling and packet size
 
 BATMAN's multicast optimization already fans out to unicast where applicable. Receivers must join the multicast group; additional userspace unicast redundancy is off by default. Voice uses DSCP CS6 (48) to reach the desired queue through BATMAN's priority mapping.
+
+Group membership is functional, not merely a receiver preference. BATMAN
+can suppress a multicast transmission when it knows of no listeners. With
+eligible listener counts, it forwards separate radio unicast frames to the
+listeners, obtaining the underlying link's ACK/retry behavior. Adding another
+application-level unicast copy would then spend airtime on the same audio
+twice. That is why multicast reception and membership propagation should be
+checked before interpreting silence as an encoder fault.
 
 Lyra adapts frames per packet while keeping bitrate fixed. Under loss it reduces packet duration, subject to the low-throughput floor, to limit the speech lost with each packet. Buffer sizing and branch lifetime matter independently of codec speed. Do not describe estimated pipeline delay as measured mouth-to-ear latency.
 
