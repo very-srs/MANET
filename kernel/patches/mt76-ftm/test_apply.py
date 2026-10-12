@@ -81,7 +81,9 @@ class ApplyCases:
             self.assertEqual(snapshot(tree), before)
 
     def test_partial_series_rejected_without_changes(self):
-        for subset in [PATCHES[:n] for n in range(1, len(PATCHES))] + [PATCHES[-1:]]:
+        # The module-tag patch also applies alone; the probe-status patch
+        # depends on earlier timing additions.
+        for subset in [PATCHES[:n] for n in range(1, len(PATCHES))] + [PATCHES[3:4]]:
             with self.subTest(patches=[p.name for p in subset]), self.tree() as tree:
                 for patch in subset:
                     run(tree, 'git', 'apply', str(patch))
@@ -90,6 +92,59 @@ class ApplyCases:
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn('partial or conflicting series', result.stderr)
                 self.assertEqual(snapshot(tree), before)
+
+    def test_explicit_suffix_upgrades_four_patch_tree(self):
+        with self.tree() as tree:
+            for patch in PATCHES[:4]:
+                run(tree, 'git', 'apply', str(patch))
+            before = snapshot(tree)
+            result = self.helper(tree)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(snapshot(tree), before)
+            run(tree, 'git', 'apply', '--check', *map(str, PATCHES[4:]))
+            run(tree, 'git', 'apply', *map(str, PATCHES[4:]))
+            result = self.helper(tree)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn('complete series already applied', result.stdout)
+
+    def test_suffix_conflict_leaves_four_patch_tree_untouched(self):
+        with self.tree() as tree:
+            for patch in PATCHES[:4]:
+                run(tree, 'git', 'apply', str(patch))
+            path = tree / DRIVER / 'mac.c'
+            path.write_text(path.read_text().replace(
+                'mt76_connac2_mac_add_txs_skb(&dev->mt76, wcid, pid, txs_data);',
+                'local_txs_handler(&dev->mt76, wcid, pid, txs_data);'))
+            before = snapshot(tree)
+            result = self.helper(tree)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(snapshot(tree), before)
+            result = run(tree, 'git', 'apply', '--check', *map(str, PATCHES[4:]),
+                         check=False)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(snapshot(tree), before)
+
+    def test_probe_status_behavior(self):
+        # Execute the patched C helper with status/lifecycle stubs. These
+        # cannot verify firmware behavior or real DMA ordering on hardware.
+        compiler = shutil.which('cc')
+        if compiler is None:
+            self.skipTest('C compiler unavailable')
+        with self.tree() as tree:
+            result = self.helper(tree)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            mac = (tree / DRIVER / 'mac.c').read_text()
+            start = mac.index('static void mt7915_mac_add_txs_skb(')
+            status = mac[start:mac.index('\nstatic void mt7915_mac_add_txs(', start)]
+            flag = next(line for line in mac.splitlines()
+                        if line.startswith('#define MT7915_TX_CB_TMR '))
+            harness = (SERIES / 'timing_test.c').read_text().replace(
+                '/* DRIVER_HELPERS */', flag + '\n' + status)
+            source = tree / 'timing_test.c'
+            source.write_text(harness)
+            run(tree, compiler, '-std=gnu11', '-Wall', '-Werror',
+                '-Wno-unused-parameter', '-o', 'timing_test', str(source))
+            run(tree, str(tree / 'timing_test'))
 
     def test_conflict_rejected_without_changes(self):
         with self.tree() as tree:
