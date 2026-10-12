@@ -302,5 +302,55 @@ class SpeedGateTests(DispatchHarness):
         self.assertEqual((self.root / 'run' / 'upstream_iface').read_text().strip(), 'usb0')
 
 
+class AcsAutoModeTests(SpeedGateTests):
+    """With ACS in auto mode, only a gateway serves the AP."""
+    def setUp(self):
+        super().setUp()
+        with (self.root / 'mesh.conf').open('a') as conf:
+            conf.write('acs=y\n')
+
+    def test_gateway_serves_the_ap(self):
+        self.uplink('end0')
+        calls = self.dispatch()
+        self.assertTrue((self.root / 'run' / 'mesh-gateway.state').exists())
+        self.assertIn('systemctl start hostapd.service', calls)
+        self.assertNotIn('ap-mesh-helper mesh', calls)
+
+    def test_node_without_uplink_returns_ap_radio_to_mesh(self):
+        self.iface('end0', carrier=False)
+        calls = self.dispatch()
+        self.assertIn('ap-mesh-helper mesh', calls)
+        self.assertFalse([c for c in calls if 'hostapd' in c and 'start' in c])
+
+    def test_losing_the_uplink_returns_ap_radio_to_mesh(self):
+        self.uplink('end0')
+        self.dispatch()
+        (self.root / 'internet' / 'end0').unlink()
+        (self.root / 'speed-rc' / 'end0').write_text('1')
+        self.calls.unlink()
+        calls = self.dispatch()
+        self.assertFalse((self.root / 'run' / 'mesh-gateway.state').exists())
+        self.assertIn('ap-mesh-helper mesh', calls)
+
+    def test_gateway_with_wired_eud_keeps_radio_in_mesh(self):
+        self.uplink('usb0', usb=True)
+        self.iface('end0', bridged=True)
+        self.eth_state('WIRED_EUD')
+        calls = self.dispatch()
+        self.assertIn('ap-mesh-helper mesh', calls)
+        self.assertFalse([c for c in calls if 'hostapd' in c and 'start' in c])
+
+    def test_static_channels_keep_the_ap_without_uplink(self):
+        self.mode('auto')
+        self.iface('end0', carrier=False)
+        calls = self.dispatch()
+        self.assertIn('systemctl start hostapd.service', calls)
+
+
+for _name in [n for n in dir(SpeedGateTests) if n.startswith('test_')]:
+    setattr(AcsAutoModeTests, _name, None)
+del _name
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -465,9 +465,13 @@ if [ "$CARRIER" != "1" ]; then
     rm -f /var/run/ethernet_detection_state
     rm -f "$NO_INET_STATE"
 
-    # Enable the configured AP in auto mode without Ethernet.
+    # Without Ethernet, auto mode serves the AP unless ACS keeps it in mesh.
     EUD_MODE=$(grep "^eud=" /etc/mesh.conf 2>/dev/null | cut -d'=' -f2)
-    if [ "$EUD_MODE" == "auto" ] && [ -f /var/lib/ap_interface ]; then
+    if [ "$EUD_MODE" == "auto" ] && [ -f /var/lib/ap_interface ] && ! auto_eud_ap_wanted; then
+        log "Auto mode with ACS: No ethernet, returning AP radio to mesh"
+        python3 /usr/local/bin/manet_ap_mesh.py mesh ||
+            log "AP-to-mesh transition deferred; reconcile will retry"
+    elif [ "$EUD_MODE" == "auto" ] && [ -f /var/lib/ap_interface ]; then
         AP_INTERFACE=$(cat /var/lib/ap_interface)
         log "Auto mode: No ethernet, ensuring AP on $AP_INTERFACE"
 

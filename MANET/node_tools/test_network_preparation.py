@@ -46,12 +46,14 @@ if name == 'systemctl' and args == 'is-enabled dnsmasq.service':
 ''')
             target.chmod(0o755)
         (self.root / 'var/lib/ap_interface').write_text('wlan3\n')
+        (self.root / 'etc/mesh.conf').write_text('eud=auto\nacs=n\n')
         (self.root / 'var/lib/mesh_if').write_text('')
         helper = self.root / 'usr/local/bin/manet_ap_mesh.py'
         helper.write_text(self.isolated((TOOLS / 'manet_ap_mesh.py').read_text()))
         self.env.update(PYTHONPATH=str(TOOLS),
                         MANET_IFACE_STATE_DIR=str(self.root / 'var/lib'),
-                        MANET_ACS_LOCK_FILE=str(self.root / 'run/channel-election.lock'))
+                        MANET_ACS_LOCK_FILE=str(self.root / 'run/channel-election.lock'),
+                        MANET_MESH_CONF=str(self.root / 'etc/mesh.conf'))
 
     def isolated(self, text):
         # Only file paths are redirected. The real shell logic is unchanged.

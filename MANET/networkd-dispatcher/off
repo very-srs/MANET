@@ -40,6 +40,16 @@ fi
 
 log "Cable unplugged from $IFACE - cleaning up all ethernet configurations..."
 
+# Another live uplink, such as USB, keeps this node a gateway. Then only
+# end0's own configuration is cleaned up; gateway state, NAT and the AP stay.
+OTHER_UPLINK=""
+UPSTREAM=$(cat /var/run/upstream_iface 2>/dev/null || true)
+if [ -n "$UPSTREAM" ] && [ "$UPSTREAM" != "$IFACE" ] &&
+        [ "$(cat "/sys/class/net/$UPSTREAM/carrier" 2>/dev/null)" = "1" ]; then
+    OTHER_UPLINK="$UPSTREAM"
+    log "Uplink $OTHER_UPLINK remains; keeping gateway state"
+fi
+
 # Stop all ethernet-related services
 systemctl stop dnsmasq.service 2>/dev/null
 
@@ -66,8 +76,8 @@ networkctl reconfigure "$IFACE" 2>/dev/null || true
 # Remove dnsmasq wired-eud config
 rm -f /etc/dnsmasq.d/mesh-wired-eud.conf 2>/dev/null
 
-# If we were a gateway, revert that too
-if [ -f "$GATEWAY_STATE_FILE" ]; then
+# If we were a gateway through this port, revert that too
+if [ -z "$OTHER_UPLINK" ] && [ -f "$GATEWAY_STATE_FILE" ]; then
     log "Was gateway - reverting gateway-specific settings..."
 
     # The time service observes gateway loss and removes internet sources.
@@ -85,8 +95,10 @@ if [ -f "$GATEWAY_STATE_FILE" ]; then
 fi
 
 # Remove all state files
-rm -f "$GATEWAY_STATE_FILE"
-rm -f "$NTP_STATE_FILE"
+if [ -z "$OTHER_UPLINK" ]; then
+    rm -f "$GATEWAY_STATE_FILE"
+    rm -f "$NTP_STATE_FILE"
+fi
 rm -f "$ETHERNET_STATE_FILE"
 
 AP_INTERFACE=""
@@ -94,9 +106,32 @@ if [ -f /var/lib/ap_interface ]; then
     AP_INTERFACE=$(cat /var/lib/ap_interface)
 fi
 
-# With no ethernet, keep wireless EUD service alive. AUTO also falls back to AP.
+# With no ethernet, keep wireless EUD service alive. AUTO also falls back to
+# AP, except with ACS: only a gateway serves the AP, and this node no longer is.
 EUD_MODE=$(grep "^eud=" /etc/mesh.conf 2>/dev/null | cut -d'=' -f2)
-if { [ "$EUD_MODE" == "auto" ] || [ "$EUD_MODE" == "wireless" ]; } && [ -f /var/lib/ap_interface ]; then
+ACS_ON=n
+grep -Eq '^acs=["'\'']?[yY]["'\'']?[[:space:]]*$' /etc/mesh.conf 2>/dev/null && ACS_ON=y
+# A wired EUD on another port, such as a USB adapter bridged into br0, still
+# takes priority over the AP in auto mode.
+OTHER_WIRED_EUD=""
+for port in /sys/class/net/*; do
+    port=${port##*/}
+    case "$port" in lo|br*|bat*|wlan*|"$IFACE") continue ;; esac
+    if [ "$(basename "$(readlink "/sys/class/net/$port/master" 2>/dev/null)" 2>/dev/null)" = br0 ] &&
+            [ "$(cat "/sys/class/net/$port/carrier" 2>/dev/null)" = "1" ]; then
+        OTHER_WIRED_EUD="$port"
+        break
+    fi
+done
+
+# A surviving uplink keeps the node a gateway, so it serves the AP as usual
+# unless another wired EUD remains.
+if [ "$EUD_MODE" == "auto" ] && [ "$ACS_ON" = y ] && [ -f /var/lib/ap_interface ] &&
+        { [ -z "$OTHER_UPLINK" ] || [ -n "$OTHER_WIRED_EUD" ]; }; then
+    log "auto mode with ACS: no uplink or a wired EUD remains, AP radio stays in mesh"
+    python3 /usr/local/bin/manet_ap_mesh.py mesh ||
+        log "AP-to-mesh transition deferred; reconcile will retry"
+elif { [ "$EUD_MODE" == "auto" ] || [ "$EUD_MODE" == "wireless" ]; } && [ -f /var/lib/ap_interface ]; then
     log "$EUD_MODE mode: No ethernet, ensuring AP/DHCP stays enabled"
     unmask_if_masked dnsmasq.service
     enable_if_disabled hostapd.service
@@ -107,11 +142,13 @@ if { [ "$EUD_MODE" == "auto" ] || [ "$EUD_MODE" == "wireless" ]; } && [ -f /var/
 
 fi
 
-batctl gw_mode client 2>/dev/null || true
-# The uplink is gone; a new one is measured again before it is announced.
-/usr/local/bin/manet-uplink-speed.sh forget 2>/dev/null || true
-nft flush chain ip nat postrouting 2>/dev/null || true
+if [ -z "$OTHER_UPLINK" ]; then
+    batctl gw_mode client 2>/dev/null || true
+    # The uplink is gone; a new one is measured again before it is announced.
+    /usr/local/bin/manet-uplink-speed.sh forget 2>/dev/null || true
+    nft flush chain ip nat postrouting 2>/dev/null || true
+fi
 /usr/local/bin/mesh-ip-manager.sh 2>/dev/null || true
-systemctl restart gateway-route-manager.service 2>/dev/null || true
+[ -n "$OTHER_UPLINK" ] || systemctl restart gateway-route-manager.service 2>/dev/null || true
 
 log "Cleanup complete"

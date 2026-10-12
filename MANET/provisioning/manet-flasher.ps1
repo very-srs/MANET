@@ -1312,10 +1312,11 @@ function Update-ConfigEnablement {
     $wireless = ([string]$Script:CmbEud.SelectedItem) -in @('Wireless', 'Auto')
     foreach ($c in @($Script:TxtApSsid, $Script:TxtApKey, $Script:NumEuds)) { $c.Enabled = $wireless }
 
-    # Automatic channel selection and a client AP cannot both have the radio,
-    # which is why the console flow forces it off and says so rather than
-    # letting the answer be given and quietly ignored.
-    if ($wireless) {
+    # Automatic channel selection and an always-on client AP cannot both have
+    # the radio, which is why the console flow forces it off and says so rather
+    # than letting the answer be given and quietly ignored. Auto mode allows
+    # it: with ACS, only a gateway serves the AP.
+    if (([string]$Script:CmbEud.SelectedItem) -eq 'Wireless') {
         # Hidden rather than greyed out. A control that can never be used in
         # this mode is only something else to read.
         $Script:ChkAcs.Checked = $false
@@ -1458,7 +1459,7 @@ function Copy-PageToEngine {
     $Script:INSTALL_MUMBLE   = if ($Script:ChkMumble.Checked) { 'y' } else { 'n' }
     $Script:VOICE_ENABLED    = if ($Script:ChkVoice.Checked)  { 'y' } else { 'n' }
     $Script:AUTO_UPDATE      = if ($Script:ChkUpdate.Checked) { 'y' } else { 'n' }
-    $Script:AUTO_CHANNEL     = if ($Script:ChkAcs.Checked -and -not $wireless) { 'y' } else { 'n' }
+    $Script:AUTO_CHANNEL     = if ($Script:ChkAcs.Checked -and $Script:EUD_CONNECTION -ne 'wireless') { 'y' } else { 'n' }
 
     $Script:MESH_SSID    = $Script:TxtMeshSsid.Text.Trim()
     $Script:MESH_SAE_KEY = $Script:TxtMeshKey.Text

@@ -406,8 +406,9 @@ ensure_eud_services() {
             ;;
         auto)
             # A wired EUD takes over the EUD role: the radio belongs in the
-            # mesh, and starting hostapd here would pull it back out.
-            if wired_eud_active; then
+            # mesh, and starting hostapd here would pull it back out. With
+            # ACS, only a gateway serves the AP.
+            if wired_eud_active || ! auto_eud_ap_wanted; then
                 return_ap_radio_to_mesh
             else
                 start_ap_services "$ap_iface" || true

@@ -1394,6 +1394,49 @@ channel once both sides are talking again.
 
 ---
 
+### Gateways in auto EUD mode
+
+With `acs=y` and `eud=auto`, the AP depends on `/var/run/mesh-gateway.state`.
+Reconciliation decides through `auto_eud_ap_wanted` in `manet-common.sh`.
+`prepare_ap`, hostapd's `ExecStartPre`, refuses every other start, so an AP
+left enabled by a former gateway cannot come up at boot. It checks after
+taking the channel lock, so a demotion during its lock wait still counts.
+
+Reconciliation runs with status publication, normally every 180 seconds, so
+unplug handling cannot wait for it. When end0 goes away, the off hook returns
+the radio to the mesh at once, unless the recorded upstream is another
+interface with carrier, such as USB. That uplink keeps the node a gateway, so
+the hook then keeps gateway state, NAT and BATMAN gateway mode, cleans up only
+end0, and serves the AP. That also covers a wired EUD leaving end0 while USB
+stays up. One exception remains: if end0 loses carrier in the middle of
+detection, the detector has already recorded end0 as the upstream, so it
+returns the radio to the mesh and the next reconciliation restores a USB
+gateway's AP. Without ACS, auto mode keeps its older rule, AP on unless
+a wired EUD is attached.
+
+While the AP holds the radio, its band role file is empty, so the agreement
+daemon's `interfaces()` omits the band and never retunes it. `parked()` finds
+that radio from `ap_interface` and `ap_mesh_band`, and `sync_parked` rewrites
+only the frequency line of its supplicant config. It runs after `apply()` and,
+once the clock is ready, after every tick that holds a destination, because
+recovery can adopt one without retuning a radio. Clockless ticks skip the
+second sync: a nonce-bound recovery reply is applied directly and is newer
+than the saved timed destination. Discovery rotations never write it, because lobby
+anchors are not the data channel.
+
+The parked file is a record, not authority. On return, `select_frequency`
+uses only the authenticated destination or the anchor and discovery. Registry
+telemetry is unsigned, so a saved frequency that peers appear to confirm
+still cannot choose the channel.
+
+Gateways never tourguide. Election drops candidates whose registry record has
+`IS_GATEWAY='true'`. `tourguide-manager.sh` exits when local gateway state
+exists, both before election and immediately before departure, which covers a
+registry that has not caught up and a promotion during preparation. A gateway
+promoted during the lobby dwell still returns at the window's end. A
+component made only of gateways has no tourguide. Agreement over connected
+paths, including HaLow, still reconciles channels.
+
 ## Network management
 
 `manet-dns-setup.sh` makes `/etc/resolv.conf` point to
@@ -2526,7 +2569,8 @@ now. Installed as an `ExecCondition` on `wpa_supplicant@.service` through
 `/etc/systemd/system/wpa_supplicant@.service.d/10-manet-ap-guard.conf`, so it
 applies to every caller that starts or restarts a mesh supplicant.
 
-The AP candidate may serve mesh when a wired EUD takes priority in auto mode.
+The AP candidate may serve mesh when a wired EUD takes priority in auto mode,
+or, with ACS, whenever the node is not a gateway.
 The transition helper publishes its active mesh role before starting the
 supplicant. This guard requires that membership and an inactive hostapd; a
 missing mesh role refuses startup even while hostapd is still preparing.

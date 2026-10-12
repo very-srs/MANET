@@ -1979,9 +1979,9 @@ function Ask-Questions {
 
     Ask-LanCidr -maxEuds $Script:MAX_EUDS_PER_NODE
 
-    if ($Script:EUD_CONNECTION -eq "wireless" -or $Script:EUD_CONNECTION -eq "auto") {
+    if ($Script:EUD_CONNECTION -eq "wireless") {
         $Script:AUTO_CHANNEL = "n"
-        Write-Host "Automatic WiFi Channel Selection disabled (not compatible with Wireless/Auto EUD mode)"
+        Write-Host "Automatic WiFi Channel Selection disabled (not compatible with Wireless EUD mode)"
     } else {
         $r = Read-Host "Use Automatic WiFi Channel Selection? (Y/n)"
         $Script:AUTO_CHANNEL = if ([string]::IsNullOrWhiteSpace($r) -or $r -match "^[Yy]") { "y" } else { "n" }
