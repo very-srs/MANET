@@ -210,8 +210,6 @@ frequency its phy supports. Reserving an interface for AP use clears either
 mesh role that referred to it, but preserves the original band in
 `/var/lib/ap_mesh_band`. An empty saved band denotes AP-only hardware.
 
-- Limp mode management
-
 Scan frequencies are filtered against the interface's phy before the request
 goes out (`phy_usable_freqs`). `iw scan freq` refuses the **whole** request if
 any single frequency is not permitted on that phy, so one bad entry takes out
@@ -228,26 +226,20 @@ discovery, including when the visited channel already is the data channel.
 The explicit mode survives daemon restarts; a frequency match alone cannot
 identify whether a node is searching or operating a data plan.
 
-editing the publish path.
+**`node-manager.sh` is a selected symlink.** Packages carry the two real
+variants and `node-manager-select.sh`, not a copied `node-manager.sh` source.
+The selector atomically points the symlink at the ACS or static variant from
+`acs=` in `/etc/mesh.conf`, accepting `y`/`yes`/`1`/`true` case-insensitively.
+The service's `ExecStartPre` runs it before every start. Provisioning, setup,
+and configuration application also invoke the selector when needed. The
+updater installs the matching symlink directly using the same configuration
+choice.
 
-**The tools tarball does not carry this file.** Only the two variants ship over
-the air, and `node-update.sh` re-publishes whichever one `acs=` selects after
-extracting, restarting `node-manager` if the file changed. The committed copy is
-the static variant, so an update that shipped it would return every ACS node to
-the static orchestrator on each routine update, silently, with nothing in the
-log to say why. Leaving it out entirely would be the opposite failure: both
-variants arrive, but the node keeps running the previous release's orchestrator
-until `radio-setup.sh` happens to run again. A mesh config change to `acs` also
-re-publishes it (see [Mesh Configuration Push](#mesh-configuration-push)).
-
-The install tarball still carries it, since a node being provisioned needs
-something at that path before `radio-setup.sh` has chosen a variant.
-
-The `acs=` test accepts `y`/`yes`/`1`/`true` case-insensitively. It compared
-against `"Y"` alone until 2026-08-31, and every writer produces lowercase: both
-flashers normalize the answer, the web UI writes `'y':'n'`, and
-`mesh-config-sync.py` validates the key as exactly `y` or `n`. So `acs=y`
-selected the static variant on every node and the ACS orchestrator never ran.
+The `--service-start` path records the running target in
+`/run/node-manager.running`. Configuration application uses that record to
+compare the running and selected variants before restarting the manager.
+This keeps the entry point tied to configuration across both updates and
+reboots. See [Mesh Configuration Push](#mesh-configuration-push).
 
 ---
 
@@ -999,6 +991,27 @@ uses a bounded restart fallback with a second frequency check. Failed landing
 is reported, with bounded repair retries; systemd active state alone is not
 radio success.
 
+The same daemon also repairs sustained local frequency drift outside a recent
+plan's bounded repair window. It already owns the channel lock and observes
+agreement, discovery and actual MHz on each pass. For an enabled conventional
+mesh radio, 60 seconds of idle mismatch against the same configured frequency
+permits one `wpa_cli reconfigure`, with a two-second command timeout. It never
+rewrites the target config or selects a channel. This works for both ACS and
+static nodes, including before clock synchronization, because it only restores
+the local configured setting.
+
+Each attempt logs the interface, actual and configured MHz, and persists a
+five-minute per-interface backoff in `agreement.json` before issuing the
+command. Failed, rejected and timed-out commands use the same backoff; there is
+no restart fallback or polling loop in this repair path. Normal status reads
+check landing. A 30-second busy interval gives links time to reform. Backoff
+uses the boot clock and survives same-boot daemon restarts; a new boot discards
+it. The mismatch grace starts fresh after daemon restart, a matching read,
+target/role change, failed observation or blocked channel lock. Discovery,
+prepared/committed agreement, the busy marker and ongoing plan repair/settling
+also clear that grace. The longer recollection hold does not prevent restoring
+the configured data channel.
+
 After a moving plan, participants suppress further election votes for 1560
 seconds (26 minutes), allowing two twelve-minute rendezvous cycles and an
 exchange window even when a band has only one usable entry.
@@ -1091,8 +1104,14 @@ which provisioning populates for either USB or SPI devices. It requires an
 enabled interface with the administrative UP flag, an active entry in `batctl if`,
 an active `wpa_supplicant-s1g-<iface>.service`, `iw` mesh-point mode and a successful
 `mesh_plink_timeout` query (the same joined-mesh query used by the watchdog).
-Each command has a two-second timeout. It does not infer S1G from an `iw` frequency
-or a fixed interface name: Morse can expose an ordinary Wi-Fi frequency there.
+The readiness probe and watchdog accept both a bare integer and an integer
+followed by `seconds`, including the `0 seconds` output from iw 6.9. Malformed
+or failed queries do not establish readiness or trigger a watchdog parameter
+write. A nonzero timeout still proves joining; the watchdog enforces zero to
+avoid Morse key-teardown failures on inactive plinks.
+Each readiness command has a two-second timeout. The probe does not infer S1G
+from an `iw` frequency or a fixed interface name: Morse can expose an ordinary
+Wi-Fi frequency there.
 No current peer is required. The policy assumes a working HaLow radio reaches at
 least as far as Wi-Fi; this is a local readiness check, not an RF range test.
 
@@ -1367,6 +1386,10 @@ Tourguide holds `channel-election.lock` for its whole run. Agreement activation
 uses the same lock; the orchestrator waits while it is held and launches
 tourguide only after its other data-state work. This prevents local ACS work
 from interpreting a single-radio hop as a genuine channel or topology change.
+The daemon's defensive drift repair uses that lock too. A blocked pass clears
+its mismatch grace, so neither a lobby visit nor its temporary config can
+trigger a repair. Discovery mode separately suppresses repairs throughout
+search rotations, including when live MHz lags the newly written slot config.
 
 **Which radio hops is derived from the clock, never from this node's own
 history**: `(epoch / 120) % 2`, the same window index `should_perform_tourguide`
@@ -1393,6 +1416,49 @@ channel it fled. Identity is neutral, and the next election re-optimizes the
 channel once both sides are talking again.
 
 ---
+
+### Gateways in auto EUD mode
+
+With `acs=y` and `eud=auto`, the AP depends on `/var/run/mesh-gateway.state`.
+Reconciliation decides through `auto_eud_ap_wanted` in `manet-common.sh`.
+`prepare_ap`, hostapd's `ExecStartPre`, refuses every other start, so an AP
+left enabled by a former gateway cannot come up at boot. It checks after
+taking the channel lock, so a demotion during its lock wait still counts.
+
+Reconciliation runs with status publication, normally every 180 seconds, so
+unplug handling cannot wait for it. When end0 goes away, the off hook returns
+the radio to the mesh at once, unless the recorded upstream is another
+interface with carrier, such as USB. That uplink keeps the node a gateway, so
+the hook then keeps gateway state, NAT and BATMAN gateway mode, cleans up only
+end0, and serves the AP. That also covers a wired EUD leaving end0 while USB
+stays up. One exception remains: if end0 loses carrier in the middle of
+detection, the detector has already recorded end0 as the upstream, so it
+returns the radio to the mesh and the next reconciliation restores a USB
+gateway's AP. Without ACS, auto mode keeps its older rule, AP on unless
+a wired EUD is attached.
+
+While the AP holds the radio, its band role file is empty, so the agreement
+daemon's `interfaces()` omits the band and never retunes it. `parked()` finds
+that radio from `ap_interface` and `ap_mesh_band`, and `sync_parked` rewrites
+only the frequency line of its supplicant config. It runs after `apply()` and,
+once the clock is ready, after every tick that holds a destination, because
+recovery can adopt one without retuning a radio. Clockless ticks skip the
+second sync: a nonce-bound recovery reply is applied directly and is newer
+than the saved timed destination. Discovery rotations never write it, because lobby
+anchors are not the data channel.
+
+The parked file is a record, not authority. On return, `select_frequency`
+uses only the authenticated destination or the anchor and discovery. Registry
+telemetry is unsigned, so a saved frequency that peers appear to confirm
+still cannot choose the channel.
+
+Gateways never tourguide. Election drops candidates whose registry record has
+`IS_GATEWAY='true'`. `tourguide-manager.sh` exits when local gateway state
+exists, both before election and immediately before departure, which covers a
+registry that has not caught up and a promotion during preparation. A gateway
+promoted during the lobby dwell still returns at the window's end. A
+component made only of gateways has no tourguide. Agreement over connected
+paths, including HaLow, still reconciles channels.
 
 ## Network management
 
@@ -2526,7 +2592,8 @@ now. Installed as an `ExecCondition` on `wpa_supplicant@.service` through
 `/etc/systemd/system/wpa_supplicant@.service.d/10-manet-ap-guard.conf`, so it
 applies to every caller that starts or restarts a mesh supplicant.
 
-The AP candidate may serve mesh when a wired EUD takes priority in auto mode.
+The AP candidate may serve mesh when a wired EUD takes priority in auto mode,
+or, with ACS, whenever the node is not a gateway.
 The transition helper publishes its active mesh role before starting the
 supplicant. This guard requires that membership and an inactive hostapd; a
 missing mesh role refuses startup even while hostapd is still preparing.
