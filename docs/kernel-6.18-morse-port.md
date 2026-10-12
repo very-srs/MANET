@@ -231,21 +231,35 @@ At runtime `manet-mesh-power.service` requests 30 dBm on every mesh radio, so
 regulatory (30 dBm in every country in MANET's `regulatory.db`) and the
 card's own hardware are the only limits.
 
-**When porting:** both patches are uncommitted working-tree diffs in the kernel
-trees. Re-apply after any tree update; `git diff` in each tree is the source of
-truth.
+The change is recorded in
+`kernel/patches/mt76-txpower/0001-mt7915-channel-power.patch`.
+`build-r3a.sh` applies it with `git apply` after the PCIe patch and skips it
+when the reverse check succeeds. CM4 already carries the identical edit;
+`build-cm4.sh` still relies on that working-tree change and does not apply it
+automatically. A clean CM4 tree needs this patch to retain the same power
+policy. Re-apply the txpower patch and the separate SPI changes after a tree
+update as needed.
 
 ---
 
-### 4.3 MT7916 timing controls (CM4)
+### 4.3 MT7916 timing controls (CM4 and Rock 3A)
 
 The [MT7916 patch series](../kernel/patches/mt76-ftm/README.md) adds opt-in
 report capture, marked probe selection and ACK spatial-extension controls.
-It applies to Raspberry Pi kernel commit `95b85bebbedcaedfa7ca79116ed38b7376fba412`.
-`build-cm4.sh` applies it idempotently before configuring/building the kernel;
-partial or conflicting applications fail before source changes. The existing
-txpower and SPI patches remain separate. No debugfs writes leaves timing
-selection and register changes inactive.
+The same patches apply to Raspberry Pi kernel commit
+`95b85bebbedcaedfa7ca79116ed38b7376fba412` and mainline Rock 3A commit
+`7d0a66e4bb9081d75c82ec4957c50034cb0ea449`. The helper selects by exact HEAD
+and rejects other bases. `build-cm4.sh` and `build-r3a.sh` apply the series
+idempotently before configuring/building the kernel; partial or conflicting
+applications fail before timing source changes. The existing txpower and SPI
+patches remain separate. No debugfs writes leaves timing selection and register
+changes inactive. Both builds carry `MODULE_INFO(manet_timing, "1")` for the
+positioning firmware selector; this tag is not a hardware validation result.
+The Rock 3A fragment enables `CONFIG_FTRACE=y` and
+`CONFIG_ENABLE_DEFAULT_TRACERS=y` for the same trace event format as CM4.
+Install the rebuilt Image and complete matching module tree together;
+the unchanged `6.18.0-manet` release string does not imply module compatibility
+with the earlier kernel that lacked tracing. Hardware validation is pending.
 
 ### 4.4 Rock 3A PCIe slot power delay
 
@@ -332,13 +346,43 @@ xz-compress all modules. Per-target notes:
 - **Rock 3A**: the mainline tree uses arm64 `defconfig` because
   **`rockchip_defconfig` no longer exists in 6.18**.
   Driver flag `CONFIG_MORSE_USB=y` instead of SPI.
-  Applies the PCIe slot power patch (§4.4) before building.
+  Before configuration, applies the PCIe slot power patch (§4.4), the recorded
+  txpower patch (§4.2), then the timing series via
+  `python3 "$KWORK/../kernel/patches/mt76-ftm/apply.py" "$KDIR"` (§4.3).
+  `manet-r3a.config` enables `CONFIG_FTRACE=y` (the tracing menu) and
+  `CONFIG_ENABLE_DEFAULT_TRACERS=y` (static events without function tracing).
+  Kconfig selects `TRACING`, `EVENT_TRACING`, `TRACEPOINTS`, `RING_BUFFER` and
+  `NOP_TRACER`, which provide tracefs instances, event enable/filter files,
+  `trace`, `trace_pipe`, `set_event`, clocks and per-CPU loss statistics.
+  The fragment disables `UPROBE_EVENTS`, `EPROBE_EVENTS` and
+  `IWLWIFI_DEVICE_TRACING`, which otherwise default on with tracing but are
+  unnecessary for MT7916 capture. `FUNCTION_TRACER`, `STACK_TRACER`,
+  `SCHED_TRACER` and `FTRACE_SYSCALLS` remain unset. Context-switch event
+  support is selected by `EVENT_TRACING`, with recording opt-in.
+  CM4's fragment and defconfig are unchanged.
   This replaces the entire old Armbian headers/podman/GCC-13 workflow: the kernel
   is now built from source, so the driver compiles in the same environment with
   the same toolchain and `KBUILD_MODPOST_WARN` hacks are unnecessary.
 
 All targets cross-compile with `aarch64-linux-gnu-`. All Morse builds pass
 `KERNEL_SRC="$BUILD"` and `MORSE_TRACE_PATH="$(pwd)"`.
+
+Build and stage the Rock 3A overlay from the repository root:
+
+```sh
+bash kernel-work/real_work/build-r3a.sh
+bash kernel-work/real_work/build-r3a-sbc-overlay.sh
+```
+
+The first script builds `6.18.0-manet` and installs modules under
+`kernel-work/real_work/build-r3a/staging/lib/modules/`. The second copies them
+into `kernel-work/packages/r3a-sbc-overlay/usr/lib/modules/`, with the kernel
+Image, RK3568 DTBs and Morse firmware, and regenerates module dependencies.
+Check the staged `mt7915e.ko.xz` with `modinfo -F manet_timing` (expect `1`)
+and `modinfo -F vermagic` (expect `6.18.0-manet SMP preempt mod_unload aarch64`).
+Hardware validation of the Rock 3A timing build is still pending.
+Also check `__tracepoint_mt7915_rx_tmr` and the `_ftrace_events` section in
+the built `mt7915e.ko`. A module tag by itself does not prove tracing was built.
 
 ### 6.1 USB HaLow cards on CM4 (added 2026-08-11)
 
@@ -571,6 +615,56 @@ After boot, verify `uname -r`, the matching `/usr/lib/modules` directory,
 Morse/MT7916 driver loading, radio enumeration and mesh peers. Do not purge
 stock kernels as a recovery step: their removal hooks can also change boot
 files.
+
+### 8.3 Rock 3A tracing kernel replacement
+
+This build keeps `6.18.0-manet` while adding kernel tracing. Replace the Image
+and **all** modules together, including Morse; mixing modules from the two
+configurations is not supported even when vermagic matches. Compare the board's
+active DTB with the overlay and replace it if different. Preserve user overlays
+and boot arguments. If the boot path loads an initramfs, rebuild it against the
+new module tree. The overlay builder does not produce an initramfs.
+
+Confirm the node's actual boot path before changing it. The expected paths are
+`/boot/Image`, `/boot/dtb/rockchip/` and `/usr/lib/modules/6.18.0-manet/`, with
+`/boot` on the ext4 root filesystem. The local Armbian Rockchip boot-script
+sources load `Image`, `uInitrd` and `dtb/${fdtfile}` after importing
+`armbianEnv.txt`. This does not prove the installed node uses that script:
+inspect the loaded `boot.scr`, any `extlinux/extlinux.conf`, symlink targets,
+`/proc/cmdline`, mounts and the installed U-Boot configuration. The presence of
+both files does not establish which one U-Boot selects.
+
+Before a live replacement, save the entire boot directory, a detached copy of
+the old Image and initramfs, and the complete old module tree. Stage and verify
+the new files before replacing active paths. Use temporary files on the same
+filesystem and rename them into place; this avoids partial individual files
+but does not make the whole update atomic. With no serial console, arrange
+tested recovery media or offline access to the root filesystem before reboot.
+Do not reload modules from the new tree into the old running kernel.
+
+Leave the APT protection diversions enabled. For an intentional update, use
+`mkinitramfs` with the exact release and new module tree, and explicitly wrap
+the result with `mkimage` if the verified boot script loads a U-Boot `uInitrd`.
+Use the installed boot path's architecture, compression and filenames. Calling
+the diverted `update-initramfs` or `99-uboot` hook will not do this work.
+
+An extlinux entry can name a saved Image and initramfs, but an old kernel also
+needs its old root module tree. A second entry pointing at the newly replaced
+root is not a complete fallback with this shared release string. Use a tested
+separate recovery root, or restore the old module tree before selecting the
+saved Image. A menu entry cannot recover a hung kernel by itself; unattended
+recovery needs verified boot-count support, an alternate boot command and a
+way to reset the board. Do not assume those are enabled on an installed node.
+See the U-Boot [extlinux documentation](https://docs.u-boot.org/en/latest/develop/bootstd/extlinux.html)
+and [boot-count requirements](https://docs.u-boot.org/en/latest/api/bootcount.html).
+
+After boot, verify the Image identity as well as `uname -r`, module loading,
+Ethernet and mesh access, and `modinfo -F manet_timing mt7915e`. Mount tracefs
+at `/sys/kernel/tracing` if needed and check
+`events/mt7915/mt7915_rx_tmr/{enable,filter,format}`. Exercise a temporary
+tracefs instance using the `nop` tracer and `mono` clock, then disable its
+event and remove it. Seeing the event proves registration, not ranging or
+stock-equivalent radio behavior; those still require hardware checks.
 
 ---
 

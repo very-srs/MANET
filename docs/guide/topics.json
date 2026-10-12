@@ -1,0 +1,21 @@
+{
+  "topics": [
+    {"id": "index", "source": "overview.md", "title": "Meet the mesh", "description": "A few radios. One connected team.", "group": "Start here"},
+    {"id": "flash", "source": "flash.md", "title": "Flash a radio", "description": "Put MANET on your radio, from Windows or Linux.", "group": "Start here"},
+    {"id": "first-boot", "source": "first-boot.md", "title": "The first boot", "description": "Plug in. Let setup finish. Know when it is ready.", "group": "Start here"},
+    {"id": "connect", "source": "connect.md", "title": "Connect your device", "description": "Get your phone or computer onto the mesh.", "group": "Use the mesh"},
+    {"id": "mesh", "source": "mesh.md", "title": "How the mesh works", "description": "Radios find peers, choose paths, and recover connections.", "group": "Use the mesh"},
+    {"id": "voice", "source": "voice.md", "title": "Push to talk", "description": "Pick a talk group. Press to speak. Release to listen.", "group": "Use the mesh"}
+  ],
+  "references": [
+    {"id": "project", "path": "README.md", "title": "Project reference"},
+    {"id": "runtime", "path": "MANET/node_tools/README.md", "title": "Runtime reference"},
+    {"id": "provisioning", "path": "MANET/provisioning/README.md", "title": "Provisioning reference"},
+    {"id": "internals", "path": "docs/node-tools-internals.md", "title": "Runtime internals"},
+    {"id": "flasher-internals", "path": "docs/provisioning-internals.md", "title": "Flasher internals"},
+    {"id": "kernel", "path": "docs/kernel-6.18-morse-port.md", "title": "Kernel and drivers"},
+    {"id": "releases", "path": "MANET/releases/README.md", "title": "Release management"},
+    {"id": "ethernet", "path": "MANET/networkd-dispatcher/README.md", "title": "Ethernet role changes"},
+    {"id": "scripts", "path": "MANET/provisioning/additional-scripts/README.md", "title": "Additional setup scripts"}
+  ]
+}

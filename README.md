@@ -246,10 +246,14 @@ handles them three ways:
   as a gateway when the cable leads to the internet instead of an EUD.
 * **Wireless.** The node runs a 5 GHz access point, separate from the mesh
   backhaul, for clients to join.
-* **Auto.** The default. Wireless until an EUD is plugged in, then wired
-  takes priority and the wireless access point turns off and that interface rejoins the mesh.
+* **Auto.** The default. A wired EUD takes priority over the access point.
+  An Ethernet internet uplink makes the node a gateway and allows it to serve
+  an AP. With automatic channels enabled, the AP candidate otherwise participates
+  in the mesh; with static channels, wireless EUD access is available without
+  an uplink. See [Ethernet role selection](MANET/node_tools/README.md#discovery--partition-healing).
 
 ## Documentation
+* [Three-level field guide](docs/guide/content/overview.md) · [Build and preview](docs/guide/README.md)
 * [Provisioning Guide](MANET/provisioning/README.md)
 * [Additional setup scripts](MANET/provisioning/additional-scripts/README.md)
 * [Node Tools Documentation](MANET/node_tools/README.md)

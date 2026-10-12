@@ -23,3 +23,7 @@ MANET/packaging/
 manet-flasher/
 MANET Flasher/
 .release-*/
+
+# Generated documentation previews and optional local build environment
+docs/guide/_site/
+docs/guide/.venv/
