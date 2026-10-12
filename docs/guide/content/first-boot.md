@@ -4,12 +4,12 @@
 
 ![Four crayon drawings: connect the radio to an internet router with Ethernet, connect wall power, wait through restarts with both cables connected, then check for the green heartbeat and red light off.](../assets/first-boot-crayon.png)
 
-1. **Internet cable in.** Connect the radio to an internet router with Ethernet.
-2. **Power in.** Leave both cables connected.
-3. **Wait about ten minutes.** The radio restarts itself during setup.
-4. **Green heartbeat, red off.** On a CM4, setup is complete.
+1. **Internet cable in.** Connect the radio to an internet router with Ethernet, using your blue internet hose.
+2. **Power in.** Leave both power and network cables connected.
+3. **Wait about ten minutes.** The radio restarts itself a few times during setup.
+4. **Green heartbeat, red off.** On a CM4 these little blinking lights tell you when setup is complete.
 
-**Red heartbeat and green solid?** Setup did not finish. Check the internet cable and power, then reboot to retry.
+**Red heartbeat and green solid?** Setup did not finish. This is bad, but sometimes even friends make mistakes. Check the internet cable and power, then reboot and it will try again.
 
 The green heartbeat reports setup completion. Check the dashboard to see whether other radios are connected.
 

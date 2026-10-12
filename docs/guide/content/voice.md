@@ -11,7 +11,7 @@
 3. **Hold the button.** Speak into the headset microphone.
 4. **Release.** Your microphone stops transmitting.
 
-You can hear other speakers while your button is released. The web page does not use your phone's microphone.
+You can hear other speakers while your button is released.
 
 ## User
 

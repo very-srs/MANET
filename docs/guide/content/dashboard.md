@@ -4,7 +4,7 @@
 
 ![Crayon drawing of a phone showing connected radios, with a magnifying glass enlarging one radio and its links.](../assets/dashboard-crayon.png)
 
-### Look. Tap. Look closer.
+### Look. Tap. Look closer and then think.
 
 1. **Connect to your radio.** Use its cable or Wi-Fi access point.
 2. **Open [the status page](http://manet.local/).** Look for the radios you expect.

@@ -7,8 +7,8 @@
 ### Put the software on the radio
 
 1. **Get the flasher.** [Windows](https://github.com/very-srs/MANET/releases/latest/download/Flash-a-Radio.cmd) or [Linux](https://github.com/very-srs/MANET/releases/latest/download/flash-a-radio.sh).
-2. **Pick your board.** Enter the settings for your mesh.
-3. **Check the drive.** Flashing erases the selected storage.
+2. **Pick your board.** Enter the settings for your mesh.  You can ask a friend to read the words if you get confused.
+3. **Check the drive.** Flashing erases the selected storage. Look at it twice to make sure it is the right thing being deleted.
 4. **Let it finish.** Then follow [first boot](first-boot.md).
 
 A CM4 with built-in eMMC uses USB boot access instead of a removable card. Follow the flasher's hardware instructions.

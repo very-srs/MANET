@@ -7,7 +7,7 @@
 ### Every radio needs a place to get mail
 
 Your radio picks some addresses. It keeps one for itself and gives one to
-your phone. Other radios pick their own.
+your phone. Other radios pick their own addresses.
 
 If two radios pick the same space, one picks again. A phone may need to
 reconnect while that happens.

@@ -6,14 +6,15 @@
 
 ### Update. Keep the cables in.
 
+If you selected automatic updates at install time, your radio will check whenever it gets an ethernet connection.
+
+To update manually:
+
 1. **Power and internet.** Leave both connected.
 2. **Update this radio.** Over SSH, run `sudo node-update.sh`.
 3. **Wait.** Let it finish, then check that your radios can still talk.
 
 The updater waits for the radio's clock to synchronize. Automatic updates happen only when enabled.
-
-An update installs what that release carries. Publishing a documentation page
-does not update your radios.
 
 ## User
 

@@ -6,12 +6,12 @@
 
 ### Phone meets radio
 
-- **Cable:** connect your phone or computer to the radio's Ethernet port.
-- **Wi-Fi:** join the radio's access point, if it is enabled.
+- **Cable:** connect your phone or computer to the radio's Ethernet port with a blue hose.
+- **Wi-Fi:** join the radio's wireless access point, if it is enabled.
 - **Open:** [http://manet.local/](http://manet.local/) to see status.
-- **Change settings:** open [Manage](http://manet.local/manage/) and enter the admin password.
+- **Change settings:** open [Manage](http://manet.local/manage/) and enter the admin password, which you won't have because it can break things.
 
-Wi-Fi access depends on how this radio was configured. If it is not serving an access point, use Ethernet.
+Wi-Fi access depends on how this radio was configured by some nerd. If it is not serving an access point, use Ethernet.
 
 ## User
 

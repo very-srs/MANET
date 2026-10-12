@@ -6,7 +6,7 @@
 
 ### Keep the things you need
 
-The radio saves settings and test results. Its storage can fill up.
+The radio saves settings and test results. Its storage is big but can fill up.
 
 Download test results you want to keep. Then delete old sessions you no
 longer need. If something broke, save its logs before they roll away.
