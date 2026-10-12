@@ -1223,6 +1223,15 @@ coordinating.
 
 **node-update.sh**
 
+The update archive can carry any component required by a release, including
+kernels, modules, firmware, and configuration migrations. The `tools` name
+does not restrict payload scope. Fielded radios may be sealed, so maintenance
+must be designed around updates in place. Current packages include runtime
+software and managed MT7916 firmware; a complete board-specific kernel update
+and boot-recovery procedure still needs implementation and validation before
+a kernel payload is shipped. See the
+[field update policy](../../docs/node-tools-internals.md#field-update-policy).
+
 Updates node tools to the stable GitHub release marked Latest. It compares
 the local and selected versions and installs the board's tools archive when a
 newer release is available. The shell entry point runs `node-update.py` (Python standard

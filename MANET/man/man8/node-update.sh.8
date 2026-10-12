@@ -1,4 +1,4 @@
-.Dd October 8, 2026
+.Dd October 12, 2026
 .Dt NODE-UPDATE.SH 8
 .Os MANET
 .Sh NAME
@@ -22,8 +22,12 @@ Downloads require qualified clock synchronization, recorded in
 Without that marker, the command reports that the clock is not synced.
 Local archive recovery does not require clock synchronization.
 The archive digest, paths and embedded versions are checked before staging.
-Tools updates replace runtime files and restart services; they do not
-replace the kernel.
+The tools archive may carry any component selected for the release,
+including kernels, modules, firmware and configuration migrations.
+Current packages update runtime files and managed radio firmware.
+Kernel-specific installation, activation and boot recovery still require
+implementation and validation before a kernel payload is shipped.
+Follow the selected release's activation and reboot instructions.
 .Pp
 A pending installation resumes from its saved archive before checking
 for a new release.
