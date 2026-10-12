@@ -25,6 +25,7 @@ HARDENED = (
     'led-boot.service', 'manet-led-status.service', 'sae-watchdog.service',
     'batman-enslave-watch.service', 'ap-txpower.service',
     'manet-mesh-power.service', 'manet-dhcp-isolation.service',
+    'manet-cpu-policy.service',
 )
 
 
@@ -370,6 +371,7 @@ DUPLICATE_NAME_ALLOWLIST = {
             'channel-election.sh',
             'ethernet-autodetect.sh',
             'mac-to-ip.sh',
+            'manet-cpu-policy.sh',
             'manet-ipcalc.sh',
             'manet-power-status.sh',
             'manet-uplink-dispatch.sh',

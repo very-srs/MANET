@@ -1347,8 +1347,10 @@ state has not changed since before setup changed the radio services.
 
 The final setup pass starts the runtime services before recording success;
 the dashboard and BATMAN watchdog do not need another reboot. It also enables
-the onboard LED verdict for later boots. CPU powersave tolerates kernels without
-CPU hotplug controls and restores the board's reported maximum frequency on stop.
+the onboard LED verdict for later boots. CPU policy keeps every CPU online and
+uses schedutil, falling back to ondemand or the kernel default if unavailable.
+CM4 is capped at 800 MHz (or the next lower supported frequency); other boards
+are uncapped. Kernels without CPU hotplug or frequency controls are supported.
 
 Provisioning takes several reboots and about ten minutes. Every `apt` call
 continues on failure, so a missing optional package does not abort the run, but
