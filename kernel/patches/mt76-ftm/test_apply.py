@@ -15,7 +15,7 @@ import unittest
 SERIES = Path(__file__).resolve().parent
 ROOT = SERIES.parents[2]
 DRIVER = 'drivers/net/wireless/mediatek/mt76/mt7915/'
-FILES = ('Makefile', 'debugfs.c', 'init.c', 'mac.c', 'mt7915.h', 'pci.c')
+FILES = ('Makefile', 'debugfs.c', 'init.c', 'mac.c', 'main.c', 'mt7915.h', 'pci.c')
 PATCHES = [SERIES / name for name in (SERIES / 'series').read_text().splitlines()]
 TXPOWER = SERIES.parent / 'mt76-txpower/0001-mt7915-channel-power.patch'
 DTS = 'arch/arm64/boot/dts/rockchip/rk3568-rock-3a.dts'
@@ -93,19 +93,22 @@ class ApplyCases:
                 self.assertIn('partial or conflicting series', result.stderr)
                 self.assertEqual(snapshot(tree), before)
 
-    def test_explicit_suffix_upgrades_four_patch_tree(self):
-        with self.tree() as tree:
-            for patch in PATCHES[:4]:
-                run(tree, 'git', 'apply', str(patch))
-            before = snapshot(tree)
-            result = self.helper(tree)
-            self.assertNotEqual(result.returncode, 0)
-            self.assertEqual(snapshot(tree), before)
-            run(tree, 'git', 'apply', '--check', *map(str, PATCHES[4:]))
-            run(tree, 'git', 'apply', *map(str, PATCHES[4:]))
-            result = self.helper(tree)
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn('complete series already applied', result.stdout)
+    def test_explicit_suffix_upgrades_older_trees(self):
+        for prefix in (4, 5):
+            with self.subTest(prefix=prefix), self.tree() as tree:
+                for patch in PATCHES[:prefix]:
+                    run(tree, 'git', 'apply', str(patch))
+                before = snapshot(tree)
+                result = self.helper(tree)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(snapshot(tree), before)
+                # Check each dependent suffix against its preceding result.
+                for patch in PATCHES[prefix:]:
+                    run(tree, 'git', 'apply', '--check', str(patch))
+                    run(tree, 'git', 'apply', str(patch))
+                result = self.helper(tree)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn('complete series already applied', result.stdout)
 
     def test_suffix_conflict_leaves_four_patch_tree_untouched(self):
         with self.tree() as tree:
@@ -124,6 +127,19 @@ class ApplyCases:
             self.assertNotEqual(result.returncode, 0)
             self.assertEqual(snapshot(tree), before)
 
+    def test_null_suffix_conflict_leaves_five_patch_tree_untouched(self):
+        with self.tree() as tree:
+            for patch in PATCHES[:5]:
+                run(tree, 'git', 'apply', str(patch))
+            path = tree / DRIVER / 'mac.c'
+            path.write_text(path.read_text().replace(
+                '\tbool tmr;', '\tbool local_timing;'))
+            before = snapshot(tree)
+            self.assertNotEqual(self.helper(tree).returncode, 0)
+            self.assertNotEqual(run(tree, 'git', 'apply', '--check',
+                                    str(PATCHES[5]), check=False).returncode, 0)
+            self.assertEqual(snapshot(tree), before)
+
     def test_probe_status_behavior(self):
         # Execute the patched C helper with status/lifecycle stubs. These
         # cannot verify firmware behavior or real DMA ordering on hardware.
@@ -138,8 +154,16 @@ class ApplyCases:
             status = mac[start:mac.index('\nstatic void mt7915_mac_add_txs(', start)]
             flag = next(line for line in mac.splitlines()
                         if line.startswith('#define MT7915_TX_CB_TMR '))
+            start = mac.index('static bool mt7915_tmr_selected(')
+            txwi = mac[start:mac.index('\nint mt7915_tx_prepare_skb(', start)]
+            probe = (tree / DRIVER / 'tmr.c').read_text()
+            start = probe.index('#define MT7915_TMR_PROBE_SKIPPED ')
+            helpers = probe[start:probe.index('\nstruct mt7915_tmr_lookup', start)]
+            start = probe.index('static ssize_t mt7915_tmr_probe_write(')
+            io = probe[start:probe.index('\nconst struct file_operations', start)]
             harness = (SERIES / 'timing_test.c').read_text().replace(
-                '/* DRIVER_HELPERS */', flag + '\n' + status)
+                '/* DRIVER_HELPERS */', flag + '\n' + status).replace(
+                '/* PROBE_HELPERS */', txwi + helpers + io)
             source = tree / 'timing_test.c'
             source.write_text(harness)
             run(tree, compiler, '-std=gnu11', '-Wall', '-Werror',

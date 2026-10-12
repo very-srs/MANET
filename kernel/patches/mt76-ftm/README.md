@@ -1,7 +1,7 @@
 # MT7916 timing support
 
 These patches provide opt-in timing reports, marked probes and ACK spatial
-extension controls for MANET ranging. The same five patches target both:
+extension controls for MANET ranging. The same six patches target both:
 
 - Raspberry Pi CM4: `linux-rpi-6.18` at
   `95b85bebbedcaedfa7ca79116ed38b7376fba412` (6.18.33).
@@ -47,20 +47,21 @@ build; it does not certify early-boot firmware stability. When extending an
 already applied older series, apply the new suffix explicitly before using
 the helper; partial-series rejection remains intentional.
 
-For a tree that already has exactly patches 0001 through 0004:
+For a tree that already has exactly patches 0001 through 0005:
 
 ```sh
 # Run from the kernel tree; use the absolute path to the new patch.
-git apply --check /path/to/0005-probe-tx-status.patch
-git apply /path/to/0005-probe-tx-status.patch
+git apply --check /path/to/0006-qos-null-probes.patch
+git apply /path/to/0006-qos-null-probes.patch
 ```
 
+For a four-patch tree, first check and apply 0005 separately, then 0006.
 Then run `apply.py` to verify the complete series is present. Do not remove
 earlier patches or bypass the base check.
 
 The root-only MT7916 debugfs controls are `tmr_registers` (band identity and
 readback), `tmr_ctrl` (timing enable/role/filter), `tmr_peer` (peer or `off`),
-`tmr_mark` (optional skb mark), `tmr_spe` (probe SPE index or `off`), `tmr_rate`
+`tmr_mark` (optional skb mark), `tmr_probe` (QoS Null burst), `tmr_spe` (probe SPE index or `off`), `tmr_rate`
 (optional fixed rate/width), and `tmr_ack_spe` (response SPE index or `restore`).
 The `mt7915:mt7915_rx_tmr` tracepoint supplies opaque report bytes. ACK control
 covers all four BSSID response contexts on the selected band; it is not
@@ -101,32 +102,108 @@ The driver advertises `HAS_RATE_CONTROL`; rate selection is firmware-owned.
 The patch leaves airtime, retry/failure and byte counters intact. It changes
 host reporting, without claiming to change firmware rate-control internals.
 
-## Known limitation: responder capture under load
+## Dedicated QoS Null probes
 
-Responder diagnostics capture matching data frames from every peer, so busy
-links can overwhelm probe pairing. The processed report retains only two
-transmitter MAC bytes and has no verified station identifier for a full peer
-match. Firmware advances its correction accumulator before host delivery,
-including for frames a host filter would discard. Dropping those reports and
-using `STEP * report index` would therefore bias the corrected timestamps.
-Keep all reports in their original order for current diagnostics; this still
-does not recover reports lost before host delivery.
+Patch 0006 adds root-only `tmr_probe` on each MT7916 PHY. Write
+`COUNT INTERVAL_US` to schedule COUNT transmission slots to the configured
+`tmr_peer` on that PHY's mesh interface. The write is synchronous: it returns
+when the burst finishes or fails. A second file descriptor can write `0` to
+request cancellation; a new burst returns `EBUSY` until the first writer
+exits. Reads show
+`running=0|1|2 sent=N skipped=N error=ERRNO`, where 2 means cancellation is
+pending. A zero write while idle succeeds without changing the previous result.
 
-A safe restriction needs one of two firmware changes:
+Limits are 1..4096 slots, 10000..1000000 microseconds between slots,
+and `COUNT * INTERVAL_US <= 120000000`. Sleep pacing is approximate and can
+run late under load; there is no catch-up burst. Cancellation and signals are
+checked between submissions and at most 20 ms apart during sleeps. An
+already queued/on-air frame cannot be recalled. `sent` counts accepted DMA
+submissions, not ACKs or timing reports. `skipped` counts failed RTNL trylocks
+and slots that find the radio scanning. A skip consumes one slot and uses the
+normal delay before the next slot, without retrying or transmitting a
+replacement. Completed bursts have
+`sent + skipped = COUNT` and `error=0`, including when every slot was skipped.
+Both counters reset when a new burst is accepted. Partial failure returns an
+error and retains both counters for inspection; never retry the whole write
+without first draining and starting a new capture epoch.
 
-- Filter the full transmitter address before correction and accumulator
-  advancement, with an acknowledged control, defined reset/drain boundaries
-  and correct timing-lock release for rejected frames.
-- Export full peer identity, role/band, reset epoch and the exact accumulator
-  value used for each report. Update the decoders and pairing to use that
-  value before filtering, so missing or discarded reports do not shift later
-  corrections.
+The station must be on exactly one active mesh interface on the selected
+PHY. Each submission queries the public station API for an ESTAB link with
+both local and peer power modes active, then looks up the station by MAC
+under RCU. Nonmesh, missing, ambiguous, sleeping and non-ESTAB peers are
+refused. The link query bypasses the driver's optional firmware statistics
+read only in the calling task; normal station statistics remain unchanged.
+RTNL is acquired with trylock for one submission. Contention skips that slot.
+Under the driver mutex, scanning also skips the slot after cancellation,
+running, reset and testmode checks. A stopped radio, reset or testmode stays
+fatal even if scanning is also set. All submission errors, including `EBUSY`
+and `ENETDOWN`, still abort the burst. Scanning is checked once without
+waiting for it to finish. There is no bounded retry: one immediate attempt
+preserves slot pacing without extra RTNL attempts during configuration or
+teardown. No station or interface
+pointer survives a sleep. Interface removal, radio stop and firmware reset
+request cancellation. There is no background worker to outlive debugfs.
 
-Peer filtering still admits ordinary traffic from the selected peer. Probe
-filtering also needs a verified over-air identifier or classifier; the local
-`TIMING_MEASURE` descriptor bit is not transmitted. Diagnostic responder
-sessions remain available; the production ranging capability gate stays
-closed until capture association and correction accounting are verified.
+The frame is a 32-byte four-address mesh QoS Null, TID 7 / AC VO, normal ACK,
+PM=0, EOSP=1 and RSPI=0. It carries no mesh control or payload and uses no
+key or Protected bit. This matches the layout of mac80211's mesh power
+management frames. The active-mode admission check avoids changing a
+sleeping link's power mode. Direct mt76 DMA queue submission bypasses the
+BE software queue and mac80211 aggregation. TXD BA_DISABLE and cleared
+HW_AMSDU prohibit aggregation independently of `tmr_spe`; REM_TX_COUNT=1
+requests one attempt. The usual optional `tmr_spe` / `tmr_rate` override and
+patch 0005's saved completion flag apply. Ordinary skb-mark selection is
+suppressed during the burst, then resumes with its previous settings.
+Peer, mark, rate, SPE and timing-control writes return `EBUSY` during a burst.
+
+To admit only QoS Null on the responder, the existing `tmr_ctrl` already
+accepts this command, with no ABI change:
+
+```sh
+printf '1 1 2 0 0x32 3 3 3 8 10\n' > tmr_ctrl
+```
+
+The type/subtype byte is `(subtype << 2) | type`: QoS Data 0x22, Data 0x02,
+QoS Null 0x32, Null 0x12 and Action 0x34. The vendor uses reserved type 3 for
+unused slots. RMAC TMR_PA packs four six-bit match slots in bits 0..23,
+with separate category checks in bits 24..27. They are alternative matches,
+not a mask on one combined value. Category=0 avoids parsing a nonexistent
+category/action body in the Null frame. The firmware programs the selected
+band; filter readback is available in `tmr_registers`.
+
+## Capture limits and hardware validation
+
+The subtype filter rejects ordinary Data/QoS Data before timing processing,
+including data from the same peer. It does not select a full transmitter MAC.
+QoS Null is also used for real mesh power management and may arrive from
+other peers. Keep all responder rows in their original order. The processed
+report still has only two transmitter MAC bytes and firmware still advances
+its correction accumulator before host delivery. Host filtering or compacting
+indices remains unsafe; tracefs loss=0 does not establish lossless firmware
+report delivery. The production capability gate remains closed.
+
+Firmware and vendor register evidence establish a per-band timing lock and
+one shared software correction context. They support capture contention
+under bulk traffic. The inspected report builder does not iterate over
+A-MPDU subframes or export independent timestamps for them. The exact
+subframe chosen by hardware and the extent of bulk-traffic starvation must
+still be measured. Existing marked probes with SPE enabled already request
+BA_DISABLE, so aggregation of those probes is not an established cause.
+
+For idle, same-peer bulk and other-peer bulk runs, test both the narrow and
+wide fixed-rate profiles. Require `sent=N`, `marked=N`, initiator reports=N,
+no trace loss, ACK success and stable ordinary station rates/BATMAN routes.
+Inspect an over-air capture for subtype, four addresses, no Protected bit,
+normal ACK, no retries and no aggregation. Test SAE/PMF mesh links as well as
+open links. mac80211 consumes valid mesh Null frames before ordinary data
+unencrypted checks and without counting them as dropped packets. Hardware
+ACK/report behavior on a secured peer still needs bench confirmation.
+Exercise cancellation, overlapping writes, peer removal, interface stop,
+firmware recovery and module unload while a burst is active.
+
+The standalone bench tools support `PROBE=null`; their default remains ping.
+Pairing uses the same report ABI and needs no subtype-specific decoder change.
+It remains a diagnostic estimator with the same loss/accumulator assumptions.
 
 ## Module-only rebuild compatibility
 
