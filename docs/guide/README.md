@@ -3,10 +3,11 @@
 Read this when changing the documentation or any behavior it describes. It is
 the shared maintenance guide for human contributors and coding agents.
 
-The guide covers the overview, flashing, first boot, device connections,
-dashboard, mesh behavior, voice, settings, tools updates, and troubleshooting.
-Full existing references are included without manual copying. Further topics
-can be added to `content/` and `topics.json` together.
+Organize the guide around what the radio does and what people can observe.
+The [coverage map](coverage.md) connects project areas to their chapters and
+canonical sources, including implementation and hardware limits. Full
+references are included without manual copying. Add topics to `content/` and
+`topics.json` together.
 
 ## Where to edit
 
@@ -16,6 +17,8 @@ can be added to `content/` and `topics.json` together.
   reference documents included in the site.
 - `assets/`: illustrations, saved image prompts, CSS, and reading-level logic.
 - `template.html` and `build.py`: shared presentation and Markdown build.
+- `../node-tools-map.md`: developer file index, grouped by responsibility.
+- `coverage.md`: maintenance map for the whole project, including known gaps.
 - `_site/`: generated preview only. Never edit or commit it.
 
 For small wording changes, edit the relevant `content/*.md` file locally and
@@ -38,7 +41,8 @@ afterward; do not include unrelated commits just to refresh the site.
    they are not proof of current behavior. Distinguish source behavior from a
    published release and hardware-verified behavior.
 2. Update the existing canonical README or internals document for the area.
-   Find matching guide topics using `rg` in `content/` and their source links.
+   Use `coverage.md`, then find matching topics with `rg` in `content/`.
+   For a new, renamed or removed production node tool, update its map row.
 3. Update every affected tier. Marine explains the action with drawings and
    very short captions. User gives steps, expected results, and recovery.
    Developer explains mechanisms, files, invariants, and failure cases, with
@@ -54,6 +58,22 @@ diaries, bench credentials, or collaboration transcripts into it. The builder
 publishes only the topics, the listed references, and the assets they use.
 
 ## Reading levels and developer depth
+
+Node tools belong in two complementary places. Outcome chapters explain
+their collective behavior in all three tiers. The separate technical
+[tool map](../node-tools-map.md) gives each production file one concise role
+and source link, within a group linked back to the relevant chapter. Keep
+filenames out of User/Marine unless the person must use that file or command.
+Do not replace a Developer mechanism explanation with an inventory table.
+
+The builder compares map rows to top-level production files in
+`MANET/node_tools`, excluding `README.md` and `test_*` files. It includes
+executables, libraries, generated schemas and version metadata. Test fixture
+directories are outside that inventory. Missing, duplicate and stale entries
+fail the build; `node-manager.sh` is rejected as generated state. The CI
+workflow runs on node-tool changes as well as documentation changes. This
+checks coverage, not the truth of each description: review prose whenever
+behavior changes, even if no filename changes.
 
 **Developer** is the explanation a technical person or coding agent would
 want to read to understand how the mesh works. Explain the engineering in
@@ -154,6 +174,10 @@ python3 docs/guide/build.py --check
 python3 docs/guide/build.py
 ```
 
+If changing the builder's inventory rules, also run
+`python3 -m unittest discover -s docs/guide`. These checks exercise additions,
+removals, duplicate rows and the generated-manager boundary.
+
 Open `docs/guide/_site/index.html` in a browser. No server or internet is needed
 for the generated documentation and illustrations. Source links, downloads,
 and the radio dashboard links still need their respective destinations.
@@ -174,6 +198,11 @@ The `Documentation` workflow checks pull requests and publishes documentation
 changes pushed to `main`. Manual runs on `main` also publish. Its deploy job
 publishes only `docs/guide/_site`, not the repository. GitHub Pages must use
 **GitHub Actions** as its source in Settings → Pages.
+
+On phones, **Browse chapters** opens the grouped contents menu. Without
+JavaScript, chapter links remain directly available in a horizontal list.
+On desktop, the longer contents list scrolls independently alongside the
+page. Include these paths when reviewing navigation changes.
 See [GitHub's workflow documentation](https://docs.github.com/en/pages/getting-started-with-github-pages/using-custom-workflows-with-github-pages).
 
 The site address is `https://very-srs.github.io/MANET/`. After a push, check

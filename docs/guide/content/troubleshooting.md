@@ -31,6 +31,10 @@ Check power, cables, and whether this radio completed setup. Then separate your 
 | No peers, or fewer peers than expected | Check that the other radios are powered, within usable range, and configured for the same mesh. Inspect **Mesh recovery** before changing channels. |
 | Settings are waiting for time | Let a verified GPS or network time source become available. Shared timed changes wait for the first synchronization. |
 | No voice audio | Check voice enablement, audio hardware, the Voice tab, and matching talk group and codec. See [push to talk](voice.md). |
+| Mesh works, but internet does not | Check for a qualified uplink and selected gateway; see [internet sharing](internet.md). |
+| ATAK has no radio position | Check wired admission, ATAK inputs/output and GPS freshness; see [location](location.md). |
+| Measurements cannot start or save | Check for an active job and the storage budget; see [measurements](measurements.md) and [storage](storage.md). |
+| A shared stream or Mumble session stopped | Check the current host and reconnect after a service move; see [services](services.md). |
 | An update failed | Record the message and inspect updater logs. Use [update recovery](updates.md) for an interrupted installation. |
 
 ### Missing Wi-Fi does not always mean a broken mesh

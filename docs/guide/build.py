@@ -4,6 +4,7 @@
 import argparse
 import html
 from html.parser import HTMLParser
+from collections import Counter
 import json
 import os
 from pathlib import Path
@@ -137,6 +138,37 @@ def read_tiers(source):
     return tiers
 
 
+def check_tool_map(tools_dir=None, map_path=None):
+    """Require one catalog row for every top-level production node tool."""
+    tools_dir = tools_dir or ROOT / "MANET/node_tools"
+    map_path = map_path or ROOT / "docs/node-tools-map.md"
+    actual = {
+        path.name for path in tools_dir.iterdir()
+        if path.is_file() and path.name != "README.md"
+        and not path.name.startswith("test_")
+    }
+    if "node-manager.sh" in actual:
+        raise ValueError("node-manager.sh is generated, not a source tool")
+    rows = re.findall(
+        r"^\| \[([^\]]+)\]\(\.\./MANET/node_tools/([^/)]+)\) \|",
+        map_path.read_text(), re.M,
+    )
+    counts = Counter(target for label, target in rows)
+    problems = []
+    for label, target in rows:
+        if label != target:
+            problems.append(f"row label must match filename: {target}")
+    for label, names in (
+        ("missing", actual - counts.keys()),
+        ("removed or excluded", counts.keys() - actual),
+        ("duplicate", {name for name, count in counts.items() if count > 1}),
+    ):
+        if names:
+            problems.append(f"{label}: {', '.join(sorted(names))}")
+    if problems:
+        raise ValueError("Node-tool map: " + "; ".join(problems))
+
+
 class PageLinks(HTMLParser):
     """Collect generated HTML destinations for offline link validation."""
 
@@ -178,6 +210,7 @@ def check_site(directory):
 
 def build(destination):
     """Assemble only listed documents and assets into a disposable site directory."""
+    check_tool_map()
     manifest = json.loads((GUIDE / "topics.json").read_text())
     topics, references = manifest["topics"], manifest["references"]
     destinations = {(GUIDE / "content" / topic["source"]).resolve(): Path(topic["id"] + ".html") for topic in topics}

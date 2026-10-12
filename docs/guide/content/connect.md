@@ -39,7 +39,7 @@ The dashboard is for this radio's own clients. A device on the upstream internet
 
 ### ATAK phones
 
-The current ATAK integration uses a wired phone connection and additional ATAK settings. Follow the [ATAK phone instructions](../../../README.md#atak-phones). Joining the radio's Wi-Fi is not a substitute for the wired admission path.
+The current ATAK integration uses a wired phone connection and additional ATAK settings. Follow [location and ATAK](location.md). Joining the radio's Wi-Fi is not a substitute for the wired admission path.
 
 ## Developer
 
@@ -80,7 +80,10 @@ with the client-facing mesh bridge.
 
 ### Management and discovery boundaries
 
-`mesh-status.py` serves the public status routes and mixes in `manet_manage.py` for authenticated management on port 80. Both application checks and nftables policy enforce local-client access. Authentication alone does not bypass that network boundary.
+`mesh-status.py` serves public status and authenticated management on port 80.
+The application admits localhost and the configured mesh/EUD subnet.
+Nftables narrows this to localhost and this node's DHCP pool. Authentication
+does not bypass that network boundary.
 
 `manet-dhcp-isolation.py` keeps DHCP and local discovery protocols from spreading over the mesh. `manet.local` resolves to the local EUD gateway address, independently of elected service VIPs. Discovery confinement must preserve intentional mesh transports such as voice and ATAK.
 
@@ -97,7 +100,7 @@ HTTP access is also checked independently of name resolution. Both local
 and remote packets can arrive on `br0`, so accepting every request on that
 interface would expose management to other radios' clients. The firewall
 instead permits localhost and source addresses in this node's DHCP pool;
-application checks enforce the same local-client boundary. This is an
+application checks also require localhost or the mesh/EUD subnet. This is an
 address-pool rule, not proof of a particular lease or a cryptographic client
 identity. Authentication then decides whether an admitted client may use
 management actions. Changing the allocation therefore also requires updating

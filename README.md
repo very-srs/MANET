@@ -11,8 +11,9 @@ at lower speed.
 
 ## What the nodes do on their own
 
-Each node claims a block of IPv4 addresses for its own clients without
-colliding with any other node, and IPv6 comes up over SLAAC. In automatic channel
+Each node claims a block of IPv4 addresses for its own clients, avoiding known
+claims and resolving overlaps when simultaneous starts or partition merges
+produce a collision. IPv6 comes up over SLAAC. In automatic channel
 selection (ACS) mode, nodes scan the 2.4 and 5 GHz bands and share their observations.
 A coordinator proposes one channel plan for the connected mesh and waits up to
 60 seconds for a majority to acknowledge it, with activation 30 seconds later.

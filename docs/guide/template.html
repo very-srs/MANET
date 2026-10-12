@@ -16,7 +16,9 @@
   </header>
   <div class="layout">
     <aside class="sidebar">
-      <nav aria-label="Guide topics"><ul>$nav</ul></nav>
+      <button class="contents-toggle" type="button" hidden
+        aria-expanded="false" aria-controls="guide-topics">Browse chapters</button>
+      <nav id="guide-topics" aria-label="Guide topics"><ul>$nav</ul></nav>
     </aside>
     <main id="main" tabindex="-1">
       $reading_controls
