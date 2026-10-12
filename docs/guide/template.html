@@ -11,22 +11,20 @@
 <body data-page-kind="$page_kind">
   <a class="skip-link" href="#main">Skip to content</a>
   <header class="masthead">
-    <a class="brand" data-topic href="$home"><span class="brand-mark" aria-hidden="true">m<span>↗</span></span><span>MANET<small>FIELD GUIDE</small></span></a>
-    <div class="masthead-note"><span class="status-dot"></span> An evolving project</div>
+    <a class="brand" data-topic href="$home"><img class="brand-logo" src="$logo" alt="FER" width="441" height="512"><span>MANET<small>FIELD GUIDE</small></span></a>
     <a class="repository-link" href="$repository">Source on GitHub <span aria-hidden="true">↗</span></a>
   </header>
   <div class="layout">
     <aside class="sidebar">
       <nav aria-label="Guide topics"><ul>$nav</ul></nav>
-      <div class="sidebar-note"><span class="note-line"></span><p>Same radio.<br>Three ways to understand it.</p><small>Choose your reading level on any topic.</small></div>
     </aside>
     <main id="main" tabindex="-1">
-      <div class="reading-bar"><span class="eyebrow">$eyebrow</span>$tiers</div>
+      $reading_controls
       <div class="page-heading"><h1>$title</h1><p>$description</p></div>
       <noscript><p class="notice">JavaScript is off. All three reading levels appear below, in order: Marine, User, Developer.</p></noscript>
       <div id="reading-content">$body</div>
       $next_link
-      <footer><span>Built for radios in the real world.</span><a href="$source">$source_label <span aria-hidden="true">↗</span></a></footer>
+      <footer><a href="$source">$source_label <span aria-hidden="true">↗</span></a></footer>
     </main>
   </div>
   <p class="sr-only" id="tier-announcement" role="status" aria-live="polite"></p>

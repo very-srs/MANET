@@ -195,18 +195,20 @@ def build(destination):
                 nav.append(f'<li class="nav-group">{html.escape(group)}</li>')
             selected = ' aria-current="page"' if topic["id"] == current else ""
             nav.append(f'<li><a data-topic href="{relative(Path(topic["id"] + ".html"), output)}"{selected}><span>{index:02}</span>{html.escape(topic["title"])}</a></li>')
-        tier_links = "" if reference else '<div class="tier-switch" aria-label="Reading level">' + "".join(
+        reading_controls = '<div class="reference-label">Technical reference</div>' if reference else (
+            '<div class="reading-bar"><span id="reading-level-label" class="reading-label">Reading level</span>'
+            '<nav class="tier-switch" aria-labelledby="reading-level-label">' + "".join(
             f'<a href="?tier={tier}" data-tier-choice="{tier}" aria-controls="tier-{tier}">{label}</a>'
-            for tier, label in (("marine", "Marine"), ("user", "User"), ("developer", "Developer"))) + '</div>'
+            for tier, label in (("marine", "Marine"), ("user", "User"), ("developer", "Developer"))) + '</nav></div>')
         next_link = ""
         if following:
             next_link = f'<a class="next-topic" data-topic href="{relative(Path(following["id"] + ".html"), output)}"><span>Up next</span><strong>{html.escape(following["title"])} <span aria-hidden="true">↗</span></strong></a>'
         document = template.substitute(
             title=html.escape(title), description=html.escape(description),
             stylesheet=relative(Path("assets/style.css"), output), script=relative(Path("assets/site.js"), output),
-            home=relative(Path("index.html"), output), nav="".join(nav), tiers=tier_links,
+            home=relative(Path("index.html"), output), nav="".join(nav), reading_controls=reading_controls,
+            logo=relative(Path("assets/fer-logo-black.png"), output),
             body=body, next_link=next_link, page_kind="reference" if reference else "topic",
-            eyebrow="Technical reference" if reference else "MANET field guide",
             source=f"{REPOSITORY}/blob/main/{source.relative_to(ROOT).as_posix()}",
             source_label="View Markdown", repository=REPOSITORY)
         target = destination / output
@@ -233,6 +235,7 @@ def build(destination):
     for name in ("style.css", "site.js"):
         (destination / "assets").mkdir(exist_ok=True)
         shutil.copyfile(GUIDE / "assets" / name, destination / "assets" / name)
+    shutil.copyfile(ROOT / "MANET/share/manet/fer-logo-black.png", destination / "assets/fer-logo-black.png")
     for name in ("ComicNeue-Regular.ttf", "ComicNeue-Bold.ttf", "OFL.txt"):
         (destination / "assets/fonts").mkdir(exist_ok=True)
         shutil.copyfile(GUIDE / "assets/fonts" / name, destination / "assets/fonts" / name)
