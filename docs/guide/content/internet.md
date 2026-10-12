@@ -8,10 +8,10 @@
 
 1. Give one radio a working internet connection.
 2. Let the radios connect to each other.
-3. The others can use that way out.
+3. Your friends can all download internet pictures through this shared connection.
 
 No internet? The radios can still talk to each other. If the way out changes,
-you may have to start your download or call again.
+you may have to start your RedTube download again.
 
 ## User
 

@@ -6,11 +6,10 @@
 
 ### One radio takes a job
 
-A radio can run a shared video or chat service for the group. If the group
-chooses another radio, that radio takes the job.
+A radio can run little jobs, like a shared video stream or chats with the boys. If all the radios
+chooses another radio for this job, that radio takes over and the job continues.
 
-You may need to reconnect when the job moves. A broken radio cannot finish
-your call just because another one takes over.
+You may need to reconnect when the job moves or you move to far away from your friends.
 
 ## User
 

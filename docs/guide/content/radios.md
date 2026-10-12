@@ -9,7 +9,7 @@
 Radios need matching settings to hear each other. Usually they choose their
 Wi-Fi channels together.
 
-Changing a channel or turning a radio off can break a path. Read the result
+Manually changing a channel or turning a radio off can break a path. Read the result
 on the screen before changing something else.
 
 ## User

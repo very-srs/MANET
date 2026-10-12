@@ -7,7 +7,7 @@
 ### Try sending some stuff
 
 1. Open **Manage → Measure**.
-2. Pick another radio and a test.
+2. Pick another friend's radio and a test.
 3. Keep the radios still while it runs.
 4. Save the result from **Sessions**.
 

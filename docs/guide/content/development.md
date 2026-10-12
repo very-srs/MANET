@@ -7,10 +7,11 @@
 ### Change it. Check it. Share it.
 
 The builders change the software and check what it does. Then they make
-a package for the radios.
+a little package for the radios. Your radio will try to find and install
+these updates for you.
 
-A change on GitHub does not put new software on your radio. Follow
-[updates](updates.md) when a package is ready.
+Normally, your radio will only update when a big boy package is ready and
+not for little updates.  Read [updates](updates.md) for more info.
 
 ## User
 

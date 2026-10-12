@@ -6,11 +6,11 @@
 
 ### Radios talk to radios
 
-Your phone connects to a nearby radio. That radio carries traffic through other radios in the mesh.
+Your phone connects to your radio. Your radio finds other radios and passes along traffic for other friends in the mesh. Radios do not taste good.
 
-- **Same mesh settings.** Set the radios up for the same mesh.
+- **Same mesh settings.** Set all the radios up with the same settings.
 - **Power them on.** Nearby radios find each other.
-- **Internet is extra.** The mesh can work without it. A radio with internet can share it.
+- **Internet is extra.** The mesh can work without it. A radio with internet can share it with other friends.
 
 New radio? Start with [flashing](flash.md).
 

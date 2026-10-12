@@ -6,14 +6,14 @@
 
 ### Pick. Wait. Apply.
 
-1. **Open [Manage](http://manet.local/manage/).** Use the admin password.
+1. **Open [Manage](http://manet.local/manage/).** Ask an adult to enter the admin password.
 2. **Pick your change in Node config.** Check whether it affects one radio or everyone.
 3. **Stage the shared change.** Wait for every expected radio to say yes.
 4. **Apply.** Wait for the countdown and for the radios to reconnect.
 
-Leave **Skip the safety net** unchecked. If a radio is missing, bring it back before changing the group's settings.
+Leave **Skip the safety net** unchecked. If a radio is missing, bring it back to the group before changing the group's settings.
 
-Your radio's phone Wi-Fi settings stay on your radio and apply when you press **Stage Changes**.
+Your radio's phone Wi-Fi settings stay only on your radio and apply when you press **Stage Changes**.
 
 ## User
 

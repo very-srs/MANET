@@ -13,7 +13,7 @@
 
 On a CM4, **red heartbeat with green solid** means setup did not finish. Reconnect internet Ethernet and reboot to retry.
 
-Still stuck? Save the error message and which radio has the problem.
+Still stuck? Save the error message and which radio has the problem, and then ask an adult for help.
 
 ## User
 

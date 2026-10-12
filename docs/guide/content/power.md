@@ -6,11 +6,11 @@
 
 ### Let it finish before pulling the plug
 
-Ask the radio to shut down. Wait for it to finish. Then unplug its power.
-Ask the person managing the radio if you do not know the shutdown command.
+Your radio's volume knob is also a power switch.  Don't accidentally your radio
+or you will not be able to talk to your friends until it is turned back on.
 
-The board's green heartbeat means setup finished. It does not mean another
-radio is nearby.
+If your radio is just a cm4 on a bench, you can see the green heartbeat to know it is done
+being set up.  Then you can unplug it.
 
 ## User
 
