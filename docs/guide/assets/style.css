@@ -1,5 +1,7 @@
 @charset "UTF-8";
-:root { color-scheme: light; --paper:#f7f6f0; --ink:#25372f; --muted:#64736a; --line:#dcded4; --green:#315f48; --orange:#c45c31; }
+@font-face { font-family:"Comic Neue"; src:url("fonts/ComicNeue-Regular.ttf") format("truetype"); font-style:normal; font-weight:400; font-display:swap; }
+@font-face { font-family:"Comic Neue"; src:url("fonts/ComicNeue-Bold.ttf") format("truetype"); font-style:normal; font-weight:700; font-display:swap; }
+:root { color-scheme: light; --paper:#f7f6f0; --ink:#25372f; --muted:#64736a; --line:#dcded4; --green:#315f48; --orange:#c45c31; --marine-font:"Comic Sans MS","Comic Sans","Comic Neue",cursive; }
 * { box-sizing:border-box; }
 body { margin:0; background:var(--paper); color:var(--ink); font:16px/1.7 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
 a { color:var(--green); text-underline-offset:4px; }
@@ -62,7 +64,10 @@ hr { border:0; border-top:1px solid var(--line); margin:32px 0; }
 footer { display:flex; justify-content:space-between; gap:16px; margin-top:33px; color:var(--muted); font-size:10px; }
 footer a { color:var(--muted); }
 [data-tier="marine"] { font-size:18px; }
-[data-tier="marine"] h3 { font:600 25px/1.35 "Comic Sans MS","Chalkboard SE",cursive; color:#9e482a; }
+[data-tier="marine"] h3 { font-size:25px; font-weight:600; line-height:1.35; color:#9e482a; }
+[data-reading-tier="marine"] body[data-page-kind="topic"],
+[data-reading-tier="marine"] body[data-page-kind="topic"] *,
+[data-tier="marine"], [data-tier="marine"] * { font-family:var(--marine-font); }
 [data-tier="marine"] img { border:1px solid #e5e1d6; background:#fffdf7; }
 [data-tier="marine"] ol { padding-left:31px; }
 [data-tier="marine"] li { padding-left:9px; margin:14px 0; }
