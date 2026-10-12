@@ -47,13 +47,61 @@ The current ATAK integration uses a wired phone connection and additional ATAK s
 
 Each node claims an IPv4 block sized `max_euds_per_node + 2`. Its first address is the primary mesh address on `br0`, its second is the local EUD gateway address, and the remaining addresses form its DHCP pool. `br0` bridges `bat0`; separate address roles do not by themselves isolate clients.
 
+These are allocations within one shared IPv4 subnet, not a separate routed
+subnet per radio. The [address-selection explanation](overview.md#developer-addresses-selecting-a-block-and-resolving-collisions)
+covers how a radio chooses the block and what happens after an overlap.
+Client capacity is provisioned per radio, so the allocator compares absolute
+address ranges rather than assuming that every radio's blocks have the same
+width.
+
 `ethernet-autodetect.sh` classifies Ethernet as an uplink when DHCP answers, or an EUD path otherwise. Dispatcher hooks and the AP/mesh role helpers reconcile bridge membership, addressing, gateway advertisement, and access-point ownership. The AP's candidate mesh role is preserved for its return to mesh operation.
+
+### From a client connection to a mesh packet
+
+When Ethernet is serving an EUD, or the AP is active, that client-facing
+interface joins `br0`. The local DHCP server leases an address from this
+radio's block and supplies the block's second address as the client gateway.
+Bridge filtering keeps the request and reply off `bat0`, so another radio's
+DHCP server cannot answer the same local request.
+
+Traffic addressed to another device in the shared subnet crosses the bridge
+and BATMAN path. Internet traffic instead follows the client's default
+gateway to the radio, then the radio's selected uplink or mesh gateway
+route. These are different decisions: working local DHCP does not prove
+a peer path exists, and a working peer path does not prove that any node
+has internet access.
+
+An upstream DHCP offer classifies Ethernet as an uplink, but that is not
+proof of usable internet. Uplink reconciliation checks connectivity and
+updates routing/NAT and gateway advertisement. When the cable's role changes,
+the node must reconcile those together with bridge membership and AP
+ownership; leaving an old role's policy in place would mix the upstream LAN
+with the client-facing mesh bridge.
 
 ### Management and discovery boundaries
 
 `mesh-status.py` serves the public status routes and mixes in `manet_manage.py` for authenticated management on port 80. Both application checks and nftables policy enforce local-client access. Authentication alone does not bypass that network boundary.
 
 `manet-dhcp-isolation.py` keeps DHCP and local discovery protocols from spreading over the mesh. `manet.local` resolves to the local EUD gateway address, independently of elected service VIPs. Discovery confinement must preserve intentional mesh transports such as voice and ATAK.
+
+The management name illustrates why this boundary exists. Each node serves
+the same name, `manet.local`, but answers with **its own** client-gateway
+address through local DNS and mDNS. Discovery packets are blocked at the
+mesh port in both directions, including traffic to and from the node itself.
+The filter selects discovery protocols, rather than dropping all multicast;
+voice and ATAK still need their mesh transports. A released or invalid
+allocation withdraws the management-name announcement until a valid local
+gateway exists again.
+
+HTTP access is also checked independently of name resolution. Both local
+and remote packets can arrive on `br0`, so accepting every request on that
+interface would expose management to other radios' clients. The firewall
+instead permits localhost and source addresses in this node's DHCP pool;
+application checks enforce the same local-client boundary. This is an
+address-pool rule, not proof of a particular lease or a cryptographic client
+identity. Authentication then decides whether an admitted client may use
+management actions. Changing the allocation therefore also requires updating
+the web firewall and name records.
 
 ### AP ownership during ACS
 

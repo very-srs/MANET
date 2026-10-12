@@ -1565,9 +1565,45 @@ cleanup and uplink reconciliation also serialize their policy decisions; the
 radio helper never calls those policy scripts. Hostapd starts happen outside
 the channel lock because its preparation helper takes that lock.
 
-- First 5 IPs network-wide are reserved for services.
-- Handles conflicts via MAC tie-breaker.
-- Configures `dnsmasq` DHCP when needed.
+### IPv4 allocation and collision recovery
+
+`mesh-ip-manager.sh` allocates a contiguous block within `ipv4_network` for
+each node. There is no central address allocator. The node observes peer
+claims, avoids their occupied ranges, and resolves overlaps discovered later.
+Discovery and random choice reduce collisions; they cannot prevent every
+simultaneous claim or a collision between previously separated partitions.
+
+#### Block layout and capacity
+
+Let `H` be the first usable host address as an integer, `U` the number of
+usable host addresses, and `E` the node's effective `max_euds_per_node`.
+An active EUD mode enforces at least one EUD address. The block width is
+`W = E + 2`; its zero-based chunk index `k` maps to:
+
+```text
+capacity = floor((U - 5) / W)
+start(k) = H + 5 + k * W       0 <= k < capacity
+primary  = start(k)           assigned to br0
+gateway  = start(k) + 1       also assigned to br0
+DHCP     = [start(k) + 2, start(k) + W - 1]
+```
+
+The five reserved addresses are the first five **usable hosts**, not the
+network address. A chunk is an allocation within the shared subnet, not its
+own routed subnet; both bridge addresses use `ipv4_network`'s prefix.
+The division discards a trailing fragment too small for a whole local block.
+With no EUD capacity, only the two bridge addresses remain and no client
+pool is available.
+The width is fixed for each node at provisioning; `mesh_config.py` rejects
+changes through management. There is no supported manual chunk override:
+bypassing claim observation and conflict handling would create an allocation
+that the distributed mechanism cannot repair.
+
+For `10.30.0.0/24` and one EUD, `W=3` and capacity is
+`floor((254 - 5) / 3) = 83`. Chunk zero owns `.6` through `.8`:
+`.6` is the mesh primary, `.7` the client gateway, and `.8` the DHCP pool.
+Chunk one owns `.9` through `.11`. Service VIPs use the reserved space;
+MediaMTX uses `.2` and Mumble `.3` in this example.
 
 **Which chunks are taken comes from Alfred, one step removed.** Every node
 publishes its chunk, primary address and provisioned width in its identity
@@ -1640,6 +1676,75 @@ a loop can delay it, so 20 seconds is a limit on the deliberate peer-data wait,
 not a guarantee of IPv4 within 20 seconds of boot. Progress is recorded in
 `/var/run/mesh-ip-startup.json` only for this boot. No registry is required from
 a prior boot.
+
+#### Choosing and defending a claim
+
+Once discovery permits allocation, `load_claims()` reads the refreshed claim
+snapshot, excludes our own interface MACs, and converts each peer's primary
+and width into an inclusive address range. A missing or implausible width
+defers a new allocation; the known primary still participates in conflict
+checks for an already configured node. Guessing the peer's width from our
+own setting could allocate over its client pool.
+
+`UNCONFIGURED` first tries the saved chunk from `/etc/mesh_ipv4_state` if the
+network still matches, the saved primary is in the network, and no peer range
+overlaps it. This is a preference, not a reservation. Otherwise
+`get_random_chunk()` marks every local candidate touched by a peer range,
+collects the remaining indices, and chooses `RANDOM % available_count`.
+No remaining candidate is an allocation error; the manager can try again on
+a later pass. There is no ARP probe or distributed reservation/ACK round in
+this allocation algorithm.
+
+Widths can differ between nodes, so comparing chunk numbers is insufficient.
+With the `/24` above, a width-five peer's chunk zero occupies `.6` through
+`.10`. It blocks both width-three candidates zero (`.6`–`.8`) and one
+(`.9`–`.11`); candidate two (`.12`–`.14`) is available if no other peer
+claims it. Overlap is the inclusive test `peer_start <= local_end` and
+`peer_end >= local_start`, including client addresses, not just primaries.
+
+The allocator rechecks the selected candidate against the loaded snapshot,
+adds both bridge addresses, configures dnsmasq, saves the allocation, and
+writes `/run/my_ipv4_chunk` and `/run/my_ipv4_chunk_size`. That second check
+does not reserve the range globally or obtain a newer peer snapshot. The
+manager immediately starts another pass after first allocation to publish
+the claim through type 67; it does not wait for the normal identity keepalive.
+
+`CONFIGURED` compares the live primary plus local width against peer ranges
+on subsequent passes. On an overlap, the lexicographically higher MAC wins
+(fixed-width MAC strings preserve numeric ordering, assuming distinct node
+identities). The lower-MAC node
+withdraws its management-name advertisement and allocated bridge addresses,
+clears its persistent preference and runtime claim markers, and chooses a
+free block on a later pass. With several overlaps this repeats as each
+conflict is observed. Existing client leases/connections may need renewal;
+this is convergence after a collision, not uninterrupted address ownership.
+
+Freshness is based on changes to a peer's telemetry observed with our boot
+clock, not on its wall-clock timestamp or repeated reads of Alfred's cache.
+The registry marks telemetry older than 300 seconds `STALE` and omits its
+claim. A returning node may therefore discover that another node now holds
+its previous block. Failed Alfred reads retain the last complete snapshot
+and defer reconciliation instead of making every address appear free.
+Replicated claim/observation state is under `/run`; reboot rebuilds it through
+discovery. See [data management](#data-management) for identity caching and
+the 900-second observation tombstones.
+
+`manet_ip_runtime.py` checks discovery, live DHCP isolation, addresses,
+dnsmasq and the UI firewall before permitting its content-based no-op path.
+Only an unchanged, previously successful, uncontested reconciliation can
+skip the shell allocator. Changed claims, incomplete widths, deleted output
+files or failed live checks force another pass. A local lock serializes
+reconciliation on one node; it cannot serialize claims across the mesh.
+
+The implementation is in [the allocator](../MANET/node_tools/mesh-ip-manager.sh),
+[startup discovery](../MANET/node_tools/mesh-ip-startup.py),
+[registry construction](../MANET/node_tools/manet_registry_builder.py), and
+[runtime reconciliation](../MANET/node_tools/manet_ip_runtime.py).
+[Registry/allocation tests](../MANET/node_tools/test_mesh_registry.py) exercise
+claim exchange, range comparisons, saved allocations, and publication.
+[Startup tests](../MANET/node_tools/test_mesh_ip_startup.py) cover readiness
+and the observation deadline. Their simulated commands do not establish a
+maximum convergence time under RF loss.
 
 The gateway route manager similarly sleeps one second between pending-route
 checks during its first 90 seconds, using `/proc/uptime` so an NTP clock step
@@ -2007,29 +2112,6 @@ keep the probe and announce 10/2. `batctl gw_mode server` takes whole kbit
 values and keeps the previous bandwidth when given none, so every announce
 passes an explicit `down/up`. Upload is not measured; it is announced as a
 fifth of download, batman's usual ratio, and nothing selects on it.
-
-Four properties of the claimed-chunk file matter:
-
-- Only nodes the registry marks **ACTIVE** appear. One unheard from for 300 s
-  goes STALE and its chunk returns to the pool.
-- A free chunk is chosen at **random**, reducing but not eliminating the
-  chance that nodes booting together pick the same one.
-- The file lives in `/tmp` and is rebuilt at boot. Its absence cannot bypass
-  discovery or a successful registry refresh.
-- A saved chunk in `/etc/mesh_ipv4_state` is a preference. After discovery,
-  reuse it only if no other node claims it; otherwise choose a free chunk.
-  Ignore our own cached advertisement when checking the saved chunk. Later
-  collisions are resolved by the MAC tie-break using Alfred's claim list.
-
-Chunk size is `max(max_euds_per_node, 1) + 2`, fixed for each node at provisioning.
-Mixed sizes are supported; unknown or implausible advertised widths block new
-allocations until complete identities arrive. Existing allocations still check
-the known primary address for conflict. `mesh_config.py` rejects attempts to
-change the provisioned width through the UI. There is no manual allocation
-override: pinning a node's chunk by hand
-skips the registry check and the MAC tie-break, so two pinned nodes, or a pinned
-chunk that a peer later claims, collide with nothing left to resolve them. An
-`/etc/manet/mesh-ip-force.conf` mechanism that did this was removed.
 
 Mean of BATMAN_V's metric across this node's originators, in Mbit/s, published
 as `MEAN_THROUGHPUT_MBPS` and used by the service elections.

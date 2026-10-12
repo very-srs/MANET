@@ -53,6 +53,57 @@ Keep public documentation factual. Do not copy private handoffs, session
 diaries, bench credentials, or collaboration transcripts into it. The builder
 publishes only the topics, the listed references, and the assets they use.
 
+## Reading levels and developer depth
+
+**Developer** is the explanation a technical person or coding agent would
+want to read to understand how the mesh works. Explain the engineering in
+connected technical prose. Naming a subsystem or saying that it handles
+collisions, recovery, or authentication is insufficient. The implementation
+lives in the repository; do not reproduce source code or turn the page into
+an inventory of scripts. Use calculations, examples, tables, or diagrams
+where they make the mechanism easier to follow.
+
+**User** assumes no computer or networking background. Explain what happens,
+why it happens, what the person needs to do, and how to recognize the result.
+Define necessary terms and describe visible consequences of automatic
+behavior. It needs enough context to understand the system, not just steps.
+
+**Marine** explains the same idea as if to a child, using the established
+crayon illustrations and short, concrete captions. Keep the mechanism honest
+while simplifying the language. Do not introduce facts that contradict the
+other tiers.
+
+In Developer, describe each major mechanism's inputs and source of truth, the
+algorithm or state transitions, how information moves between nodes, and
+what causes a retry, rejection, or recovery. Include relevant formulas, timing,
+tie-breakers, persistence boundaries, and a worked example when they clarify
+behavior. Explain why the design makes those choices. Distinguish intended
+properties from guarantees the implementation actually provides.
+
+For example, IPv4 allocation needs the block-size/address calculation, how
+Alfred claims become an occupied-range snapshot, startup discovery, candidate
+selection, and what happens when simultaneous claims or partition merges
+produce an overlap. "Distributed allocation with collision handling" does not
+answer those questions.
+
+Keep the central explanation on the topic page. Longer mechanisms may live in
+a dedicated topic or canonical reference, but link directly to the relevant
+section from the paragraph that introduces them. Add focused source or test
+links where they help readers investigate further. A broad link to the entire
+runtime README at the bottom is not a substitute for the missing explanation.
+Do not defer essential detail to an unwritten future page.
+
+Topic headings receive a reading-level prefix in the built site. For a link
+to another topic's Developer section, use the generated fragment, such as
+`mesh.md#developer-one-connected-component-one-channel-decision`.
+Reference headings retain their normal fragments. The build checks both.
+
+Review technical statements against the implementation being documented,
+including failure paths. When publication excludes local runtime commits,
+avoid presenting those unpublished changes as part of the published source.
+Documentation-only edits need build/link checks and appropriate browser
+review; run behavior tests when needed to resolve a factual uncertainty.
+
 ## Copy and layout
 
 Use plain, factual documentation. Do not add marketing copy, taglines, slogans,
