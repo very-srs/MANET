@@ -114,7 +114,38 @@ A nonblocking `/run/manet-update.lock` serializes attempts. Before arming an ins
 
 Files are staged and atomically replaced individually. The two version markers are committed only after manager selection, systemd reload, required service restarts, and active-state checks. That is not a whole-filesystem transaction or proof of working RF links.
 
+The durable boundary is the pending marker. The archive, its checksum,
+release descriptor, recovery program, and boot-recovery units must be saved
+before that marker is made durable. Once it exists, an attempt finishes that
+release before considering a newer one. This prevents a failed installation
+from being abandoned midway simply because GitHub now offers another version.
+Dependencies are prepared before arming the transaction so the retained
+recovery path can run without internet or a functioning package repository.
+
+For each ordinary payload file, installation writes a temporary sibling,
+flushes it, then renames it over the destination and flushes the directory.
+A reader should therefore see the old or new complete file rather than a
+partially written file. Across many files, however, an interruption can leave
+a mixture of versions. Reinstalling the entire retained payload repairs that
+mixture; the updater does not keep an old filesystem image to roll back to.
+
+| Interruption point | Meaning on the next attempt |
+|---|---|
+| Before the transaction is armed | No pending payload transaction exists; selection and preparation can run again. Dependency setup may already have changed the system. |
+| During file replacement | The pending marker directs recovery to the retained release, including files already copied on the previous attempt. |
+| During service activation | Files can be current while services failed; activation is retried rather than treating file presence as success. |
+| During final version-marker writes | Pending recovery still wins, even if one or both markers already show the new version. |
+| After the pending marker is durably removed | The installation has passed its completion checks; an application defect needs diagnosis or a later release, not interrupted-install recovery. |
+
 `manet-update-recover.service` restores the pending files early in boot; `manet-update-finish.service` performs activation once normal startup is available. Recovery revalidates the retained package and retries the same release without downloading or running APT. Failed or corrupt recovery remains pending for diagnosis.
+
+Separating file restoration from activation lets early boot repair the
+runtime before depending on its normal services. The later phase can then
+restart and inspect those services. Neither phase proves that a new kernel
+can boot: a kernel payload will require its own boot-set installation and
+recovery design under the general update policy. The
+[failure-handling reference](../../../docs/node-tools-internals.md#tools-update-failure-handling)
+describes retained state, validation limits, and recovery entry points.
 
 ### Automatic triggering and kernel ownership
 

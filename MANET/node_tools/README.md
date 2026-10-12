@@ -735,13 +735,16 @@ Chunk-based IPv4 allocation. Each node claims a chunk of addresses sized
   wired or wireless.
 - **IPs 2 and up.** The DHCP pool for EUDs.
 
-Both addresses sit on `br0` in the same `/24`, and `br0` bridges `bat0`, so the
-mesh and the EUDs are one flat broadcast domain. The split is bookkeeping and
-not isolation. `manet-ui-firewall.sh` is what separates them.
+Both addresses sit on `br0` in the configured subnet, and `br0` bridges
+`bat0`, so the mesh and the EUDs are one flat broadcast domain. The split is
+bookkeeping and not isolation. `manet-ui-firewall.sh` is what separates them.
 
 The first five addresses network-wide are reserved for services. A chunk is
 claimed from those peers have not taken, and a collision is resolved by a MAC
 tie-break. `dnsmasq` is configured for the pool when a node needs it.
+The [allocation and collision-recovery explanation](../../docs/node-tools-internals.md#ipv4-allocation-and-collision-recovery)
+covers the address calculation, occupied-range selection, mixed block widths,
+startup window, and why simultaneous claims still require later repair.
 
 **manet-dhcp-isolation.py**
 

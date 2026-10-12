@@ -49,11 +49,49 @@ On Raspberry Pi targets, the image's `firstrun.sh` creates the radio account, en
 
 The release URL, SHA-256 and expected version are selected at flash time and baked into the provisioning script. First boot validates that selection before extracting its archive. The kernel-protection helper runs before provisioning's APT operations. The certificate/date handling needed for a cold clock is deliberately limited to the provisioning path; see [download verification and kernel protection](../../../docs/provisioning-internals.md#first-boot-without-a-trusted-clock).
 
+These stages cross reboot boundaries because they have different hardware
+prerequisites. The initial image can create accounts and arrange network
+provisioning, but final radio-role assignment needs the MANET drivers loaded
+and the physical interfaces present. The installed run-once service supplies
+that continuation. Seeing the machine boot or accept SSH therefore does not
+mean its radio configuration is complete.
+
+| Stage | Main responsibility | Evidence that matters |
+|---|---|---|
+| Image bootstrap | Establish the account and arrange network provisioning | The next provisioning stage is installed/enabled |
+| Network provisioning | Fetch the pinned board package, verify it, protect kernel ownership, and install dependencies/payload | Package identity checks and provisioning logs |
+| Final radio setup | Discover hardware, assign roles, generate configuration, and start services | Recorded setup failures, pending renames, and the final provisioning verdict |
+| Operator scripts | Run the separately embedded customization scripts | Their own completion records and log |
+
+A fresh radio may have no trusted date, which would make normal certificate
+and package-metadata date checks fail. The provisioning path limits its
+exception to pinned artifact downloads whose bytes must match the digests
+baked into the image. APT retains signature/hash verification while metadata
+date checks are temporarily relaxed for the provisioning process. These
+exceptions are removed at phase completion; they do not become the runtime
+updater's trust policy.
+
 ### Final radio setup
 
 `radio-setup.sh` serializes setup with a process lock, classifies PHY capabilities into radio roles, writes MAC-pinned interface names, generates supplicant and networkd configuration, and enables the runtime services. If names need to settle across a reboot, it retains the run-once unit for retry. Later boots use `manet-radio-names.service` to resolve naming collisions before network services start.
 
 The orchestrator entry point is a **symlink**, selected by `node-manager-select.sh` from `acs=`. It points to `node-manager-acs.sh` or `node-manager-static.sh`; there is no independently maintained `node-manager.sh` source file.
+
+Radio roles follow capability and identity rather than the order in which
+drivers happened to create interfaces. Setup probes the PHYs, assigns the
+available bands and AP role, and pins names by MAC. If two devices currently
+occupy one another's desired names, a later boot's naming service moves them
+aside before assigning the final names. Keeping the run-once service enabled
+through a required rename reboot lets configuration resume against stable
+names instead of marking a half-configured layout complete.
+
+The setup lock prevents two invocations from rewriting those roles and the
+provisioning verdict concurrently. Recoverable step failures are recorded;
+the final success verdict depends on reaching completion without recorded
+failures. Rerunning setup can regenerate live configuration, which is why
+the failed phase should be identified before using a rerun as a remedy.
+The [final-setup reference](../../../MANET/provisioning/README.md#final-setup-radio-setupsh)
+describes the generated network and service configuration.
 
 Successful final setup records completion and disables the run-once service. Additional operator scripts run separately after successful provisioning, with their own per-script completion records. Their failure is advisory and does not rewrite the radio's provisioning verdict.
 

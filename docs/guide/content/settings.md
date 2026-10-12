@@ -73,11 +73,51 @@ Configuration staging uses authenticated, encrypted Alfred type 70; configuratio
 
 Each stage has a fresh transaction identity. Normal control waits for `/run/initial_time_synced`, validates message age, and retains replay history in `/var/lib/manet-admin`. Activation is consumed before the apply attempt, so an interrupted attempt requires a fresh request. Clock-independent recovery messages cannot authorize configuration edits.
 
+The configuration workflow separates receipt from activation because a
+change can remove the very link that carries its instructions:
+
+1. **Stage and validate.** The sender creates a transaction with no active
+   activation time. Each receiver authenticates it, validates the allowed
+   settings, stores the pending values, and sends an authenticated ACK for
+   that transaction. An ACK means the proposal was accepted for staging,
+   not that the new settings already work.
+2. **Authorize activation.** Normal Apply waits for the UI's full ACK table;
+   Force Apply explicitly bypasses that gate. Activation is rebroadcast for
+   60 seconds in the future, giving receivers time to learn the deadline
+   before changing their links. This administrative gate differs from ACS's
+   automatic strict-majority channel vote.
+3. **Prepare and apply locally.** At the deadline, a node whose changed
+   settings threaten connectivity prepares its rollback state. If that
+   fails, it defers the protected change. Once ready, it records the command
+   as consumed before attempting the change, so a restart cannot apply an
+   old activation again.
+4. **Judge the trial.** Each node checks its own connectivity at its rollback
+   deadline. Nodes can reach different outcomes; this is not a distributed
+   transaction that either changes every radio or changes none.
+
+The encrypted envelope binds the message to its Alfred control type using
+AES-256-GCM authenticated data. It carries a random message identity and send
+time; password-derived keys and fresh nonces protect message contents and
+integrity. Ordinary envelopes expire after 900 seconds and tolerate at most
+60 seconds of future clock skew. Persistent replay state adds protection
+across service restarts, beyond the timestamp check. The
+[control transport reference](../../../docs/node-tools-internals.md#mesh-configuration-push)
+explains the key derivation, receive limits, and replay ordering.
+
 ### Rollback is local and conditional
 
 `mesh-config-rollback.sh` counts distinct BATMAN originators, snapshots configuration and supplicant files, and records a persistent trial deadline. Dangerous apply requires successful preparation unless the request explicitly disables it. An unreadable peer baseline is an error, not proof of a solo node.
 
 At the deadline, a previously connected node keeps the change if at least one peer is visible; no peers or a failed query cause restoration. A verified empty baseline permits a solo node to keep the change. Failed restoration retains the snapshot and retries, including across reboot. An already armed trial cannot have its original snapshot or deadline replaced.
+
+For example, a wrong mesh key can isolate a node immediately after it applies
+the change. Waiting for a remote "undo" would not work because that command
+would need the lost connection. The local snapshot and default five-minute
+trial let it restore without receiving anything else. Conversely, observing
+one peer at the deadline only proves some mesh contact survived; it does
+not prove all original peers returned or that voice and internet work.
+That limited success criterion is why the operator should inspect the
+result even after a protected change is retained.
 
 UI radio-power requests have a different persistence contract: they are applied and read back, but are not saved for restart. Avoid describing all radio controls as permanent configuration.
 

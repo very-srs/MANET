@@ -79,6 +79,37 @@ For an update problem, also collect `sudo journalctl -t manet-update -n 60 --no-
 
 The public `/api/debug` route exposes raw BATMAN observations and identity mapping within the same local-client access boundary. Registry presence can outlast a usable link; a ready HaLow interface is also distinct from a reachable originator. Compare evidence from the same time window.
 
+### Explain the discrepancy before changing state
+
+Start with a specific observation and identify which subsystem could produce
+it. "The radio is offline" conflates local client access, mesh forwarding,
+cached telemetry, and internet routing. Separating those paths produces
+smaller, testable explanations:
+
+| Observation | Mechanism to check | Evidence that distinguishes the cases |
+|---|---|---|
+| BATMAN sees a peer, but this node has no IPv4 allocation | Address discovery may still be waiting for joined identity/telemetry, or a peer claim may have an unknown width | Startup state, the current claim snapshot, and allocator diagnostics; an empty address list alone does not identify the reason |
+| A peer stays in the dashboard after a link disappears | The registry is a replicated observation that ages separately from live forwarding | Originator query beside local telemetry age; browser refresh does not renew peer data |
+| Client receives an address, but `manet.local` fails | DHCP, DNS/mDNS publication, and HTTP admission are separate steps | Allocated pool and gateway, returned name address, then web-policy admission |
+| Wi-Fi peers disappear but HaLow still carries traffic | RF connectivity changed without splitting the overall decision domain | Reachable originators across all radios, actual frequencies, and the committed channel plan |
+| An update's files look new but its version remains old | Activation or completion checks may have failed after copying | Pending marker, retained release identity, and the specific failed service check |
+| A staged setting has ACKs but never takes effect | Staging is distinct from scheduled activation and successful local apply | Transaction identity, activation deadline, clock readiness, and rollback/apply records |
+
+For addressing, distinguish a pending 10–20-second observation window from
+a failed local query: the deadline permits incomplete **peer** data, but
+does not bypass a broken local registry read. After a block moves, client
+leases and name caches can temporarily describe the old allocation even
+when the node itself has corrected the conflict. The
+[allocation state machine](../../../docs/node-tools-internals.md#ipv4-allocation-and-collision-recovery)
+explains the conditions for each transition.
+
+Record both intended and observed radio settings. An interface can be up
+while on the wrong frequency; a running supplicant can exist without a
+usable peer link. Similarly, a gateway advertisement describes a candidate,
+while the installed IP route identifies the gateway this node actually
+uses. A useful investigation follows the packet or state transition until
+the observed result first differs from the expected one.
+
 ### Preserve the evidence needed for recovery
 
 `/run` observations disappear at reboot. Administrative replay records and configuration rollback snapshots persist because receiver restarts and reboots must not authorize old commands or lose a pending restore. Do not clear these directories as a routine troubleshooting step.
