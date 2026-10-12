@@ -233,6 +233,9 @@ def build(destination):
     for name in ("style.css", "site.js"):
         (destination / "assets").mkdir(exist_ok=True)
         shutil.copyfile(GUIDE / "assets" / name, destination / "assets" / name)
+    for name in ("ComicNeue-Regular.ttf", "ComicNeue-Bold.ttf", "OFL.txt"):
+        (destination / "assets/fonts").mkdir(exist_ok=True)
+        shutil.copyfile(GUIDE / "assets/fonts" / name, destination / "assets/fonts" / name)
     (destination / ".nojekyll").touch()
     check_site(destination)
 
