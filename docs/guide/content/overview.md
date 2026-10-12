@@ -32,6 +32,13 @@ The Compute Module 4 is the primary verification target. Raspberry Pi 5 and Rock
 2. [Complete first boot](first-boot.md) using Ethernet internet access.
 3. [Connect your device](connect.md) and open the local dashboard.
 
+### Once the radios are running
+
+- [Read the dashboard](dashboard.md) to inspect peers and measure a path.
+- [Change settings](settings.md) with the local and mesh scopes in mind.
+- [Update a radio](updates.md) when a tools release is ready.
+- [Troubleshoot a problem](troubleshooting.md) from the symptom you can see.
+
 ### What is still developing
 
 This guide describes the current source tree. Normal installation selects the stable release marked **Latest**, which can lag behind source changes. Use `--development` explicitly when testing newer published builds.
