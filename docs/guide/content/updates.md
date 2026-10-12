@@ -4,7 +4,7 @@
 
 ![Crayon drawing of a software toolbox downloading into a powered radio connected to a router, followed by the radio beside a clock with both cables still connected.](../assets/updates-crayon.png)
 
-### New tools. Keep the cables in.
+### Update. Keep the cables in.
 
 1. **Power and internet.** Leave both connected.
 2. **Update this radio.** Over SSH, run `sudo node-update.sh`.
@@ -12,7 +12,8 @@
 
 The updater waits for the radio's clock to synchronize. Automatic updates happen only when enabled.
 
-This updates the radio's tools. Publishing a documentation page does not update your radios.
+An update installs what that release carries. Publishing a documentation page
+does not update your radios.
 
 ## User
 
@@ -20,7 +21,14 @@ This updates the radio's tools. Publishing a documentation page does not update 
 
 MANET's tools updater uses the GitHub release marked **Latest**, which is the stable release. It checks the downloaded package before installing it. Changes pushed to the source repository or this guide do not by themselves announce a radio update.
 
-The tools package updates MANET software and services. A kernel or complete system upgrade has a separate procedure; follow the instructions for that release instead of treating a tools update as a complete reflash.
+The update archive can carry any component a release needs, including kernels,
+drivers, firmware, and configuration changes. The name **tools** does not limit
+its contents. Radios may be sealed in enclosures, so updates are intended to
+maintain them in place rather than make reflashing a routine requirement.
+
+Current packages update runtime software and some radio firmware. Full kernel
+updating is still under development. Follow the selected release's instructions
+for any required restart or reboot.
 
 ### Update one radio manually
 
@@ -78,11 +86,27 @@ Local recovery works without internet or clock synchronization. If the recovery 
 
 ## Developer
 
-### Release identity and package boundary
+### Update scope and release identity
+
+Treat the archive as the general field-update mechanism. Any required component
+may be included in a release; match its installation, activation, and recovery
+procedure to that payload. Preserve operator configuration and identity unless
+the release includes a deliberate migration. See the
+[field update policy](../../../docs/node-tools-internals.md#field-update-policy).
 
 `node-update.sh` delegates to `node-update.py`. `manet_release.py` selects stable metadata from Latest, or explicitly selects the newest published MANET release for `--development`. Fixed tag URLs bind `manet-release.json`, the board's tools archive, and its checksum to one release. Both embedded version files must agree with the selected release.
 
-Tools archives cannot carry kernels, firmware, networkd interface definitions, or `/etc/mesh.conf`. The updater validates paths, ownership, file types, archive limits, required files, available space, the manifest digest, and the checksum sidecar before live replacement. Downloading requires `/run/initial_time_synced`; local recovery does not.
+The updater validates paths, ownership, file types, archive limits, required
+files, available space, the manifest digest, and the checksum sidecar before
+live replacement. There is no kernel, firmware, or network-configuration
+category ban. Downloading requires `/run/initial_time_synced`; local recovery
+does not.
+
+The current builder includes the managed MT7916 firmware payload but not a
+board-specific kernel overlay. Accepting boot files in an archive does not
+implement a complete kernel upgrade: boot-filesystem handling, a matched
+kernel/modules/device-tree set, module dependency generation, reboot sequencing,
+size limits, and boot-failure recovery need validation before that release ships.
 
 ### Installation and recovery
 
@@ -96,7 +120,10 @@ Files are staged and atomically replaced individually. The two version markers a
 
 The dispatcher queues `manet-auto-update.service` after uplink reconciliation. `manet-auto-update.path` and the clock-triggered service retry after initial verified time sync. Each path checks opt-in and the selected uplink; no timer polls for new releases.
 
-`manet-kernel-protect.py` applies MANET's boot-package policy before updater dependency work. Distribution userland updates must not replace the MANET kernel and radio drivers. Package publication and kernel replacement remain governed by their separate maintenance procedures.
+`manet-kernel-protect.py` applies MANET's boot-package policy before updater
+dependency work. It prevents distribution packages from replacing the MANET
+kernel and radio drivers. It does not prohibit a deliberate MANET kernel
+update delivered through the release's update archive.
 
 - [Updater behavior and recovery commands](../../../MANET/node_tools/README.md#utilities)
 - [Installation and failure handling](../../../docs/node-tools-internals.md#tools-update-failure-handling)

@@ -8,11 +8,18 @@ results here, preserving older packages before replacement and updating any
 matching entries in `SHA256SUMS`. Local placement does not publish a release.
 
 `*-tools.tar.gz` updates a node that is already running. `node-update.sh`
-fetches one and extracts it. It carries the node scripts, systemd units and
-supporting files, and no kernel.
+verifies, stages, and installs it. The archive can carry any component a
+release needs, including kernels, modules, firmware, and configuration
+migrations. End-user radios may be sealed; routine updates must not assume
+physical access for reflashing. The current builder carries runtime software
+and managed MT7916 firmware, with kernel-update activation and boot recovery
+still to be implemented and validated. See the
+[field update policy](../../docs/node-tools-internals.md#field-update-policy).
 
-`*-install.tar.gz` sets up a new node. It carries everything the tools archive
-does, plus the kernel, device trees, modules and radio firmware for that board.
+`*-install.tar.gz` sets up a new node. Current install packages combine the
+runtime payload with the kernel, device trees, modules and radio firmware for
+that board. This initial-provisioning role does not reserve those components
+exclusively for install archives.
 First-boot provisioning downloads it by exact filename, so these are not
 renamed.
 

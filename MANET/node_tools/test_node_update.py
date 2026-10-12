@@ -248,6 +248,60 @@ if os.environ.get('TEST_SYSTEMCTL_FAIL') == args:
         self.updater.update()
         self.assertEqual(self.old_manager.readlink(), Path('node-manager-static.sh'))
 
+    def test_release_payload_can_install_system_components(self):
+        """Install representative files in a fake root, without booting them."""
+        payload = {
+            'boot/firmware/kernel8.img': b'test kernel image',
+            'boot/firmware/overlays/test.dtbo': b'test device tree',
+            'usr/lib/modules/test/kernel/test.ko': b'test module',
+            'usr/lib/firmware/morse/test.bin': b'test firmware',
+            'etc/systemd/network/test.network': b'[Match]\nName=test0\n',
+            'etc/mesh.conf': b'acs=n\n',
+            'opt/manet/example': b'additional software',
+            'var/lib/manet-example/schema': b'2\n',
+        }
+        for name, body in payload.items():
+            self.members[name] = (body, 0o644)
+        self.make_archive()
+        self.updater.update()
+        for name, body in payload.items():
+            self.assertEqual((self.root / name).read_bytes(), body)
+        self.assertEqual(self.old_manager.readlink(),
+                         Path('node-manager-static.sh'))
+        self.assertEqual(self.updater.marker.read_text(), self.new_version)
+
+    def test_extended_payload_recovers_from_retained_archive(self):
+        """Retry additional payload paths offline after activation fails."""
+        payload = {
+            'boot/firmware/kernel8.img': b'test kernel image',
+            'usr/lib/modules/test/kernel/test.ko': b'test module',
+            'usr/lib/firmware/morse/test.bin': b'test firmware',
+            'etc/systemd/network/test.network': b'[Match]\nName=test0\n',
+            'etc/mesh.conf': b'acs=n\n',
+        }
+        for name, body in payload.items():
+            self.members[name] = (body, 0o644)
+        self.make_archive()
+        with patch.dict(os.environ, {
+                'TEST_SYSTEMCTL_FAIL': 'restart mesh-status.service'}):
+            with self.assertRaises(update.UpdateError):
+                self.updater.update()
+        self.assertTrue(self.updater.pending.exists())
+        self.assertEqual(self.updater.marker.read_text(), self.old_version)
+        for name in payload:
+            (self.root / name).unlink()
+        self.server.rename(self.work / 'offline')
+        (self.root / 'run/initial_time_synced').unlink()
+        self.events.write_text('')
+        self.updater.update(recover_only=True)
+        for name, body in payload.items():
+            self.assertEqual((self.root / name).read_bytes(), body)
+        self.assertEqual(self.old_manager.readlink(),
+                         Path('node-manager-static.sh'))
+        self.assertNotIn('curl', self.history())
+        self.assertFalse(self.updater.pending.exists())
+        self.assertEqual(self.updater.marker.read_text(), self.new_version)
+
     def test_update_retires_vip_deleting_route_service(self):
         unit = self.root / 'etc/systemd/system/mesh-default-route-fix.service'
         unit.parent.mkdir(parents=True)
@@ -390,14 +444,23 @@ if os.environ.get('TEST_SYSTEMCTL_FAIL') == args:
         self.hash_archive()
         self.assert_rejected_before_install()
 
-    def test_unsafe_paths_and_excluded_payloads(self):
+    def test_unsafe_paths(self):
         for name in ('/', './', '/etc/unwanted', '../unwanted', 'usr/../unwanted',
-                     'etc/mesh.conf', 'etc/systemd/network/test.network',
-                     'usr/lib/modules/test.ko', 'usr/local/bin/node-manager.sh'):
+                     '/boot/kernel.img', 'boot/../etc/unwanted',
+                     'var//lib/unwanted', 'boot/kernel\n.img',
+                     'boot/kernel\x7f.img'):
             with self.subTest(name=name):
                 member = tarfile.TarInfo(name)
                 self.make_archive([(member, b'')])
                 self.assert_rejected_before_install()
+
+    def test_boot_parent_symlink_cannot_redirect_install(self):
+        """Broader payload scope must not permit installed symlink escapes."""
+        (self.root / 'boot').symlink_to(self.server, target_is_directory=True)
+        self.members['boot/kernel.img'] = (b'test kernel image', 0o644)
+        self.make_archive()
+        self.assert_rejected_before_install()
+        self.assertFalse((self.server / 'kernel.img').exists())
 
     def test_links_devices_and_duplicate_paths(self):
         for kind, name, target in (
