@@ -151,6 +151,24 @@ def recovery_destination(records, local, own, excluded=(), own_size=None):
     return min(choices)[2] if choices else None
 
 
+def write_frequency(path, freq):
+    """Atomically replace the one frequency assignment in a WPA config."""
+    # Require exactly one frequency assignment. Replace the config
+    # atomically from a flushed temporary file beside it.
+    body, count = re.subn(r'(?m)^(\s*frequency=)\d+\s*$', lambda m: m[1] + str(freq), path.read_text())
+    if count != 1:
+        raise ValueError('ambiguous WPA frequency')
+    fd, temporary = tempfile.mkstemp(dir=path.parent, prefix='.' + path.name)
+    try:
+        with os.fdopen(fd, 'w') as out:
+            out.write(body)
+            out.flush()
+            os.fsync(out.fileno())
+        os.replace(temporary, path)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+
+
 def wake_daemon(directory):
     """Ask the run loop for an immediate pass so readiness publishes at once.
 
@@ -277,6 +295,52 @@ class Runtime:
         if len({v[0] for v in result.values()}) != len(result):
             raise ValueError('one radio assigned to two bands')
         return result
+
+    def parked(self):
+        """Return (band, config) for an AP radio withheld from its mesh band.
+
+        In auto EUD mode a gateway serves the AP on a radio provisioned for a
+        mesh band. Its supplicant config follows agreed plans while parked,
+        so the radio rejoins on the current channel when it returns.
+        """
+        try:
+            iface = (self.roles / 'ap_interface').read_text().strip()
+            band = (self.roles / 'ap_mesh_band').read_text().strip()
+        except FileNotFoundError:
+            return None
+        role = {'2.4': 'mesh_24_if', '5': 'mesh_5_if'}.get(band)
+        if not role or not re.fullmatch(r'[A-Za-z0-9_.-]{1,15}', iface):
+            return None
+        try:
+            owner = (self.roles / role).read_text().strip()
+        except FileNotFoundError:
+            owner = ''
+        path = self.wpa / f'wpa_supplicant-{iface}.conf'
+        # A radio holding its mesh role is updated by the normal apply path.
+        if owner or not path.exists():
+            return None
+        return band, path
+
+    def sync_parked(self, channels):
+        """Write an agreed band frequency into a parked AP radio's config.
+
+        Callers hold the channel lock and pass authenticated plan channels.
+        The radio itself is not touched. Its return still selects from the
+        authenticated destination, so this file is a record, not authority.
+        """
+        if not isinstance(channels, dict):
+            return
+        parked = self.parked()
+        if not parked or parked[0] not in channels:
+            return
+        band, path = parked
+        freq = channels[band]
+        if type(freq) is not int or freq not in protocol.CHANNELS[band]:
+            return
+        saved = re.search(r'^\s*frequency=(\d+)\s*$', path.read_text(), re.M)
+        if not saved or int(saved[1]) != freq:
+            write_frequency(path, freq)
+            print(f'ACS updated parked {band} GHz config to {freq} MHz', flush=True)
 
     def status(self, now):
         """Collect radio MHz, capabilities and readiness at wall time now."""
@@ -458,20 +522,7 @@ class Runtime:
                 continue
             iface, path, configured = interfaces[band]
             if configured != freq:
-                # Require exactly one frequency assignment. Replace the config
-                # atomically from a flushed temporary file beside it.
-                body, count = re.subn(r'(?m)^(\s*frequency=)\d+\s*$', lambda m: m[1] + str(freq), path.read_text())
-                if count != 1:
-                    raise ValueError('ambiguous WPA frequency')
-                fd, temporary = tempfile.mkstemp(dir=path.parent, prefix='.' + path.name)
-                try:
-                    with os.fdopen(fd, 'w') as out:
-                        out.write(body)
-                        out.flush()
-                        os.fsync(out.fileno())
-                    os.replace(temporary, path)
-                finally:
-                    Path(temporary).unlink(missing_ok=True)
+                write_frequency(path, freq)
             if configured != freq or local['current'][band] != freq:
                 changes.append((iface, freq))
         # Write every config, then start every reconfigure before polling.
@@ -504,6 +555,9 @@ class Runtime:
                     time.sleep(.5)
                 else:
                     raise ValueError(f'{iface} did not reach {freq}')
+        # Discovery anchors are not the mesh's data channel: never park them.
+        if not discovering:
+            self.sync_parked(channels)
         self.discovery.set_mode('search' if discovering else 'data')
         if changes:
             event = {'at': int(time.time()), 'monotonic': time.monotonic(), 'channels': channels,
@@ -546,9 +600,23 @@ class Runtime:
 
     def tick(self, now):
         """Run one pass and publish a UI snapshot even when radio work fails."""
-        self.ui_status = {'clock_ready': clock_ready()}
+        # A tick that started clockless may have applied a recovery reply
+        # that is newer than the saved timed destination.
+        timed = clock_ready()
+        self.ui_status = {'clock_ready': timed}
         try:
             self._tick(now)
+            # Recovery can adopt a destination without retuning any radio.
+            # Clockless recovery applies its own reply; the saved timed
+            # destination may be older than that and must not overwrite it.
+            destination = self.state.get('destination')
+            if (timed and clock_ready() and isinstance(destination, dict)
+                    and isinstance(destination.get('plan'), dict)):
+                try:
+                    with self.channel_lock():
+                        self.sync_parked(destination['plan'].get('channels', {}))
+                except BlockingIOError:
+                    pass  # A radio operation holds the lock; retry next tick.
         except Exception:
             self.ui_status['error'] = 'Channel recovery could not read or apply radio state'
             raise

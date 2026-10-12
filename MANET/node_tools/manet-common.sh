@@ -232,6 +232,14 @@ unmask_if_masked() {
         systemctl unmask "$1" 2>/dev/null || true
 }
 
+# Succeed when auto EUD mode should serve the AP without a wired EUD.
+# Without ACS the AP serves whenever no wired EUD is attached. With ACS only
+# a gateway serves it; other nodes keep the radio in the mesh.
+auto_eud_ap_wanted() {
+    grep -Eq '^acs=["'\'']?[yY]["'\'']?[[:space:]]*$' "${MANET_MESH_CONF:-/etc/mesh.conf}" 2>/dev/null || return 0
+    [ -f "${MANET_GATEWAY_STATE:-/var/run/mesh-gateway.state}" ]
+}
+
 # Read the first local IPv4 address on an interface.
 iface_ip() {
     ip -4 -o addr show dev "$1" 2>/dev/null |

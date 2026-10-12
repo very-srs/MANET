@@ -80,6 +80,7 @@ class Transition:
         self.boot_id = Path(os.environ.get('MANET_BOOT_ID_FILE', '/proc/sys/kernel/random/boot_id'))
         self.static_plan = Path(os.environ.get('MANET_STATIC_CHANNELS', str(static.PATH)))
         self.registry = Path(os.environ.get('REGISTRY_FILE', '/var/run/mesh_node_registry'))
+        self.gateway = Path(os.environ.get('MANET_GATEWAY_STATE', '/var/run/mesh-gateway.state'))
         self.selection = {}
 
     def command(self, args, timeout=10):
@@ -454,6 +455,13 @@ class Transition:
     def prepare_ap(self):
         """Withdraw mesh ownership and prepare the radio for hostapd."""
         with locked(self.channel_lock):
+            # Check after the lock wait: demotion may have happened meanwhile.
+            config = self.settings()
+            # With ACS in auto EUD mode only a gateway serves the AP. Refuse
+            # every other start, including a boot start left by a gateway.
+            if (config.get('eud') == 'auto' and config.get('acs', '').lower() in ('y', 'yes', '1', 'true')
+                    and not self.gateway.exists()):
+                raise ValueError('With ACS in auto mode, only a gateway serves the AP')
             iface = self.ap_identity()
             before = self.snapshot(self.role_paths())
             had_mesh = iface in text(self.roles / 'mesh_if').split()

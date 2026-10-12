@@ -935,10 +935,11 @@ ask_questions() {
         # CIDR selection
         ask_lan_cidr "$MAX_EUDS_PER_NODE"
 
-        # Auto Channel Selection (skip if wireless or auto)
-        if [ "$EUD_CONNECTION" = "wireless" ] || [ "$EUD_CONNECTION" = "auto" ]; then
+        # Auto Channel Selection (skip if wireless). In auto mode with ACS,
+        # the AP serves wireless EUDs only while this radio is a gateway.
+        if [ "$EUD_CONNECTION" = "wireless" ]; then
                 AUTO_CHANNEL="n"
-                echo "Automatic WiFi Channel Selection disabled (not compatible with Wireless/Auto EUD mode)"
+                echo "Automatic WiFi Channel Selection disabled (not compatible with Wireless EUD mode)"
         else
                 read -p "Use Automatic WiFi Channel Selection? (Y/n): " AUTO_CHANNEL
                 AUTO_CHANNEL=${AUTO_CHANNEL:-y}

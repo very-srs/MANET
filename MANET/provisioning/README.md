@@ -461,7 +461,7 @@ How EUDs connect to this mesh node:
 
 - **Wired.** EUDs connect via Ethernet (or Ethernet-to-USB adapter). No Wi-Fi AP is broadcast. Both 2.4 and 5 GHz radios join the MANET mesh. Connecting the node to an internet-enabled network makes it a mesh gateway.
 - **Wireless.** The node broadcasts a 5 GHz 802.11ax access point at low power (5 dBm) for EUDs to join. Connecting to an upstream network enables gateway mode. Wired EUDs also work.
-- **Auto.** Behaves as Wireless until a wired EUD is detected, then stops broadcasting the AP.
+- **Auto.** Behaves as Wireless until a wired EUD is detected, then stops broadcasting the AP. With Auto Channel Selection enabled, only a gateway broadcasts the AP. Without an internet uplink, the AP radio (normally 5 GHz) stays in the mesh.
 
 ### 2. Install MediaMTX Server?
 
@@ -513,7 +513,7 @@ Your country code for Wi-Fi regulatory compliance (e.g. `US`, `GB`, `AU`). A mat
 
 ### 10. Auto Channel Selection
 
-If enabled, nodes negotiate channel selection automatically. If disabled, a fixed channel is used.
+If enabled, nodes negotiate channel selection automatically. If disabled, a fixed channel is used. Wireless EUD mode always uses fixed channels. Auto EUD mode supports it: the AP runs only while the node is a gateway.
 
 ### 11. Passwords
 

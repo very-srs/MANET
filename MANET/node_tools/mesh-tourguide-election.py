@@ -10,8 +10,8 @@ import sys
 
 
 MAC = re.compile(r'(?:[0-9a-f]{2}:){5}[0-9a-f]{2}')
-# Read only identity, tourguide, service and interface fields from the registry.
-FIELD = re.compile(r'NODE_([0-9a-f]{12})_(MAC_ADDRESSES|LAST_TOURGUIDE_TIMESTAMP|IS_MEDIAMTX_SERVER|IS_MUMBLE_SERVER|INTERFACES_JSON)=(.*)')
+# Read only identity, tourguide, service, gateway and interface fields.
+FIELD = re.compile(r'NODE_([0-9a-f]{12})_(MAC_ADDRESSES|LAST_TOURGUIDE_TIMESTAMP|IS_MEDIAMTX_SERVER|IS_MUMBLE_SERVER|IS_GATEWAY|INTERFACES_JSON)=(.*)')
 
 
 def elect(own, peers, registry, band, excluded=()):
@@ -74,8 +74,11 @@ def elect(own, peers, registry, band, excluded=()):
     if not candidates:
         raise ValueError('no reachable candidate advertises the scheduled band')
     candidates -= excluded
+    # A gateway never tourguides: a hop would take its remaining Wi-Fi mesh
+    # radio off the data channel while it carries the uplink.
+    candidates = {mac for mac in candidates if nodes[mac].get('IS_GATEWAY') != 'true'}
     if not candidates:
-        return None  # Every eligible radio is relying on working HaLow.
+        return None  # Every eligible radio relies on HaLow or is a gateway.
     # Prefer a node that does not host MediaMTX or Mumble during the hop.
     eligible = [mac for mac in candidates
                 if not any(nodes[mac].get(flag) == 'true'

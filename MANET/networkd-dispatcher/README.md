@@ -79,7 +79,12 @@ not run the wired teardown.
 
 ## AP and wired-EUD transitions
 
-In auto mode, a wired EUD takes priority over the wireless AP. The detector
+In auto mode, a wired EUD takes priority over the wireless AP. With
+`acs=y`, the AP also requires gateway state. hostapd's start check refuses
+the AP on a node without it. The off hook returns the radio to the mesh when
+end0 was the last uplink. A USB uplink that is still live keeps the node a
+gateway: the hook then keeps gateway state and NAT, cleans up only end0, and
+serves the AP. The detector
 and periodic uplink reconciliation call `manet_ap_mesh.py mesh`, which restores
 a mesh-capable AP candidate's original band and current mesh configuration.
 AP-only hardware is stopped instead. Returning to AP uses hostapd's preparation

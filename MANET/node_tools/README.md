@@ -587,8 +587,8 @@ the rotation. Fully disconnected searchers retain the discovery behavior above;
 any surviving BATMAN path holds them still for recovery or joint bootstrap.
 
 1. Elects a tourguide from reachable BATMAN originators mapped to Alfred node
-   identities. Candidates need an active radio on the scheduled band and must
-   not advertise working HaLow; the
+   identities. Candidates need an active radio on the scheduled band, must
+   not advertise working HaLow, and must not be internet gateways. The
    oldest helper timestamp wins, then lowest MAC. Service hosts are excluded
    when another eligible node is available.
 2. Visits the scheduled band/frequency, staying put if it is already its data channel.
@@ -660,6 +660,12 @@ Works out what a connected Ethernet cable means:
 In auto mode, an Ethernet gateway takes a dual role as gateway and AP, an
 Ethernet EUD disables the AP because wired takes priority, and a wireless EUD
 enables the AP.
+
+With automatic channels (`acs=y`), auto mode serves the AP only on a gateway.
+The AP radio is normally the 5 GHz mesh radio. While it serves the AP, the
+gateway meshes on its other radios and HaLow, follows agreed channel moves, and
+keeps the AP radio's mesh configuration on the agreed channel. When the last
+uplink is unplugged, the radio returns to the mesh on the agreed channel. Gateways never act as tourguide.
 
 ---
 
