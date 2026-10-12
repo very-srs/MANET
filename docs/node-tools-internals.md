@@ -999,6 +999,27 @@ uses a bounded restart fallback with a second frequency check. Failed landing
 is reported, with bounded repair retries; systemd active state alone is not
 radio success.
 
+The same daemon also repairs sustained local frequency drift outside a recent
+plan's bounded repair window. It already owns the channel lock and observes
+agreement, discovery and actual MHz on each pass. For an enabled conventional
+mesh radio, 60 seconds of idle mismatch against the same configured frequency
+permits one `wpa_cli reconfigure`, with a two-second command timeout. It never
+rewrites the target config or selects a channel. This works for both ACS and
+static nodes, including before clock synchronization, because it only restores
+the local configured setting.
+
+Each attempt logs the interface, actual and configured MHz, and persists a
+five-minute per-interface backoff in `agreement.json` before issuing the
+command. Failed, rejected and timed-out commands use the same backoff; there is
+no restart fallback or polling loop in this repair path. Normal status reads
+check landing. A 30-second busy interval gives links time to reform. Backoff
+uses the boot clock and survives same-boot daemon restarts; a new boot discards
+it. The mismatch grace starts fresh after daemon restart, a matching read,
+target/role change, failed observation or blocked channel lock. Discovery,
+prepared/committed agreement, the busy marker and ongoing plan repair/settling
+also clear that grace. The longer recollection hold does not prevent restoring
+the configured data channel.
+
 After a moving plan, participants suppress further election votes for 1560
 seconds (26 minutes), allowing two twelve-minute rendezvous cycles and an
 exchange window even when a band has only one usable entry.
@@ -1091,8 +1112,14 @@ which provisioning populates for either USB or SPI devices. It requires an
 enabled interface with the administrative UP flag, an active entry in `batctl if`,
 an active `wpa_supplicant-s1g-<iface>.service`, `iw` mesh-point mode and a successful
 `mesh_plink_timeout` query (the same joined-mesh query used by the watchdog).
-Each command has a two-second timeout. It does not infer S1G from an `iw` frequency
-or a fixed interface name: Morse can expose an ordinary Wi-Fi frequency there.
+The readiness probe and watchdog accept both a bare integer and an integer
+followed by `seconds`, including the `0 seconds` output from iw 6.9. Malformed
+or failed queries do not establish readiness or trigger a watchdog parameter
+write. A nonzero timeout still proves joining; the watchdog enforces zero to
+avoid Morse key-teardown failures on inactive plinks.
+Each readiness command has a two-second timeout. The probe does not infer S1G
+from an `iw` frequency or a fixed interface name: Morse can expose an ordinary
+Wi-Fi frequency there.
 No current peer is required. The policy assumes a working HaLow radio reaches at
 least as far as Wi-Fi; this is a local readiness check, not an RF range test.
 
@@ -1367,6 +1394,10 @@ Tourguide holds `channel-election.lock` for its whole run. Agreement activation
 uses the same lock; the orchestrator waits while it is held and launches
 tourguide only after its other data-state work. This prevents local ACS work
 from interpreting a single-radio hop as a genuine channel or topology change.
+The daemon's defensive drift repair uses that lock too. A blocked pass clears
+its mismatch grace, so neither a lobby visit nor its temporary config can
+trigger a repair. Discovery mode separately suppresses repairs throughout
+search rotations, including when live MHz lags the newly written slot config.
 
 **Which radio hops is derived from the clock, never from this node's own
 history**: `(epoch / 120) % 2`, the same window index `should_perform_tourguide`

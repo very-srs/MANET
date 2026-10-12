@@ -96,6 +96,20 @@ restart_dead_ap_if_needed() (
     systemctl restart hostapd.service 2>/dev/null || true
 )
 
+# Keep joined HaLow meshes from closing idle plinks during key teardown.
+enforce_halow_plink_timeout() {
+    local iface="$1" current pattern
+    current=$(iw dev "$iface" get mesh_param mesh_plink_timeout 2>/dev/null) \
+        || return 0
+    # Match the readiness probe: bare integer or '<value> seconds'.
+    pattern='^[[:space:]]*([0-9]+)([[:space:]]+seconds)?[[:space:]]*$'
+    [[ "$current" =~ $pattern ]] || return 0
+    [[ "${BASH_REMATCH[1]}" =~ ^0+$ ]] && return 0
+    if iw dev "$iface" set mesh_param mesh_plink_timeout 0 2>/dev/null; then
+        log "Set mesh_plink_timeout=0 on $iface (was: $current)"
+    fi
+}
+
 # Wait 8 s between passes, in addition to time spent checking or repairing.
 while true; do
     sleep 8
@@ -116,13 +130,7 @@ while true; do
     # Get/set works only after joining the mesh, so retry failures each pass.
     for IFACE in $HALOW_IFS; do
         radio_iface_enabled "$IFACE" || continue
-        CUR="$(iw dev "$IFACE" get mesh_param mesh_plink_timeout 2>/dev/null)"
-        # The first space-delimited field holds the current timeout value.
-        if [ -n "$CUR" ] && [ "${CUR%% *}" != "0" ]; then
-            if iw dev "$IFACE" set mesh_param mesh_plink_timeout 0 2>/dev/null; then
-                log "Set mesh_plink_timeout=0 on $IFACE (was: $CUR)"
-            fi
-        fi
+        enforce_halow_plink_timeout "$IFACE"
     done
 
     for IFACE in $HALOW_IFS $MESH_IFS; do

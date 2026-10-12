@@ -62,8 +62,10 @@ def halow_ready():
                 continue
             # Joining the local mesh is sufficient, with no stations in range
             # required (same check as the watchdog).
-            joined = command(['iw', 'dev', iface, 'get', 'mesh_param', 'mesh_plink_timeout'])
-            if re.fullmatch(r'\d+', joined.strip()):
+            joined = command(['iw', 'dev', iface, 'get', 'mesh_param',
+                              'mesh_plink_timeout'])
+            # iw versions print either a bare integer or '<value> seconds'.
+            if re.fullmatch(r'[0-9]+(?:\s+seconds)?', joined.strip()):
                 return True
         except (OSError, ValueError, subprocess.SubprocessError):
             continue
