@@ -58,7 +58,7 @@ if sys.argv[1:3] == ['dev', 'wlan2']:
         # Morse can expose an ordinary frequency through iw; the role identifies S1G.
         print('wiphy 2\\ntype ' + os.environ.get('TEST_HALOW_MODE', 'mesh point') + '\\nchannel 1 (2412 MHz)')
     elif sys.argv[3:] == ['get', 'mesh_param', 'mesh_plink_timeout']:
-        print(os.environ.get('TEST_HALOW_JOINED', '0'))
+        print(os.environ.get('TEST_HALOW_JOINED', '0 seconds'))
     else:
         sys.exit(99)
     sys.exit(0)
@@ -138,6 +138,44 @@ else:
             self.assertFalse(rendezvous.halow_ready())
         (self.halow / 'flags').unlink()
         self.assertFalse(rendezvous.halow_ready())
+
+    def test_mesh_timeout_accepts_bare_and_unit_forms(self):
+        """Joined meshes need no peers and may report a nonzero timeout."""
+        for value in ('0', '0 seconds', '30', '30 seconds', '\t0\tseconds '):
+            with self.subTest(value=value), patch.dict(
+                    os.environ, TEST_HALOW_JOINED=value):
+                self.assertTrue(rendezvous.halow_ready())
+        for value in ('seconds', '0 garbage', '-1 seconds', '0.5 seconds',
+                      '0 seconds extra', 'not joined\n0 seconds'):
+            with self.subTest(value=value), patch.dict(
+                    os.environ, TEST_HALOW_JOINED=value):
+                self.assertFalse(rendezvous.halow_ready())
+
+    def test_watchdog_validates_units_before_enforcing_zero(self):
+        """The watchdog accepts both forms and ignores failed/bad queries."""
+        self.command('iw', '''
+if sys.argv[3] == 'get':
+    print(os.environ['TEST_TIMEOUT'])
+    sys.exit(int(os.environ.get('TEST_QUERY_RC', '0')))
+print(' '.join(sys.argv[1:]))
+''')
+        source = (TOOLS / 'batman-enslave-watch.sh').read_text()
+        body = source.split('while true; do', 1)[0]
+        body += '\nenforce_halow_plink_timeout wlan2\n'
+        for value, repair in [('0', False), ('0 seconds', False),
+                              ('30', True), ('30 seconds', True),
+                              ('\t30\tseconds ', True), ('00 seconds', False),
+                              ('', False), ('not joined', False),
+                              ('0 garbage', False), ('-1 seconds', False),
+                              ('0.5 seconds', False),
+                              ('0 seconds extra', False)]:
+            with self.subTest(value=value):
+                self.env['TEST_TIMEOUT'] = value
+                result = self.shell(body)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual('set mesh_param' in result.stdout, repair)
+        self.env.update(TEST_TIMEOUT='30 seconds', TEST_QUERY_RC='1')
+        self.assertEqual(self.shell(body).stdout, '')
 
     def test_disabled_or_missing_halow_does_not_suppress_fallback(self):
         (self.root / 'radio-state').write_text(json.dumps({'desired': {'wlan2': 'down'}}))

@@ -36,8 +36,12 @@ IDLE_INTERVAL = 5
 ACTIVE_INTERVAL = 1
 GUARD_SECONDS = 5
 WAKE_MARGIN = 0.05  # Lands a pass after a whole-second boundary, not before.
+# Local drift needs sustained idle observations; attempts use boot seconds.
+DRIFT_GRACE = 60
+DRIFT_BACKOFF = 300
 # Boot-clock deadlines and their plan identity survive same-boot restarts.
-LOCAL_TIMERS = ('hold_until', 'repair_until', 'retry_at', 'settle_until', 'busy_until', 'busy_plan')
+LOCAL_TIMERS = ('hold_until', 'repair_until', 'retry_at', 'settle_until',
+                'busy_until', 'busy_plan', 'drift_retry_at')
 # Alfred rows pair a sender MAC with a quoted, escaped JSON payload.
 RECORD = re.compile(r'\{\s*"([0-9a-fA-F:]{17})"\s*,\s*("(?:\\.|[^"\\])*")\s*\}')
 
@@ -251,6 +255,7 @@ class Runtime:
         self.rendezvous_allowed = {}
         self.halow_health = None
         self.ui_status = {}
+        self.drift_since = {}
 
     def reset_timers(self):
         """Discard deadlines from another boot, restarting any recovery hold."""
@@ -598,6 +603,60 @@ class Runtime:
         self.apply(targets, discovering=True)
         return True
 
+    def repair_drift(self, local):
+        """Reconfigure sustained idle drift once per radio backoff interval.
+
+        The caller holds the channel lock, including against tourguide visits.
+        Configured MHz remains the target; this does not select a new plan.
+        """
+        elapsed = boot_time()
+        phase = self.state.get('protocol', {}).get('phase')
+        if (local['discovery'] or self.busy()
+                or phase in ('prepared', 'committed')
+                or elapsed <= self.state.get('repair_until', -1)
+                or elapsed < self.state.get('settle_until', 0)):
+            self.drift_since.clear()
+            return False
+        drift = {}
+        for band, (iface, path, target) in self.interfaces().items():
+            actual = local['current'].get(band)
+            if actual is None or actual == target:
+                continue
+            previous, since = self.drift_since.get(iface, (target, elapsed))
+            drift[iface] = (target, since if previous == target else elapsed)
+        self.drift_since = drift
+        for iface, (target, since) in list(drift.items()):
+            retry = self.state.get('drift_retry_at', {}).get(iface, 0)
+            if elapsed - since < DRIFT_GRACE or elapsed < retry:
+                continue
+            # Recheck live MHz after potentially slow peer/protocol work.
+            info = command(['iw', 'dev', iface, 'info'], timeout=2)
+            actual = re.search(r'channel.*\((\d+) MHz\)', info)
+            if not actual or int(actual[1]) == target:
+                self.drift_since.pop(iface, None)
+                continue
+            # Persist before the command, including failed/timed-out attempts.
+            self.state.setdefault('drift_retry_at', {})[iface] = (
+                boot_time() + DRIFT_BACKOFF)
+            self.state['settle_until'] = boot_time() + 30
+            self.save()
+            self.write_busy(self.state['settle_until'])
+            print(f'ACS drift repair: {iface} at {actual[1]} MHz, '
+                  f'configured {target} MHz; reconfigure, '
+                  f'backoff {DRIFT_BACKOFF}s', file=sys.stderr, flush=True)
+            try:
+                answer = command(['wpa_cli', '-i', iface, 'reconfigure'],
+                                 timeout=2)
+                if 'OK' not in answer.splitlines():
+                    raise ValueError('supplicant rejected reconfigure')
+            except (OSError, ValueError, subprocess.SubprocessError) as exc:
+                print(f'ACS drift repair: {iface} failed: {exc}',
+                      file=sys.stderr, flush=True)
+            # Normal status reads verify landing; never loop or restart here.
+            self.drift_since.clear()
+            return True
+        return False
+
     def tick(self, now):
         """Run one pass and publish a UI snapshot even when radio work fails."""
         # A tick that started clockless may have applied a recovery reply
@@ -618,6 +677,8 @@ class Runtime:
                 except BlockingIOError:
                     pass  # A radio operation holds the lock; retry next tick.
         except Exception:
+            # A lock holder or failed observation breaks the idle grace period.
+            self.drift_since.clear()
             self.ui_status['error'] = 'Channel recovery could not read or apply radio state'
             raise
         finally:
@@ -643,12 +704,14 @@ class Runtime:
                 local = self.status(now)
                 destination = self.bootstrap_select(local)
                 if destination:
+                    self.drift_since.clear()
                     self.apply(destination, challenged=True)
                 else:
                     if local['acs'] and local['discovery']:
                         peers = command([str(TOOLS / 'mesh-peer-count.sh'), '--batctl', self.batctl, '--list'], timeout=7).split()
                         self.ui_status['reachable'] = len(peers)
                         self.discovery_step(now, local, bool(peers))
+                    self.repair_drift(local)
             return  # Never persist rounds or poison the timed sender history.
         with self.channel_lock():
             if self.state.get('clock_boot') != self.boot:
@@ -781,6 +844,7 @@ class Runtime:
                             and any(local['current'].get(b) != f for b, f in target.items() if b in local['current'])):
                         plan = destination['plan']
             if plan is not None:
+                self.drift_since.clear()
                 # Save a 30 boot-second retry delay before any radio mutation.
                 self.state['retry_at'] = boot_time() + 30
                 self.save()
@@ -799,6 +863,9 @@ class Runtime:
                     and updated.get('phase') not in ('prepared', 'committed')
                     and self.discovery_step(now, local, len(view) > 1)):
                 local = self.status(int(time.time()))
+            if plan is None and self.repair_drift(local):
+                local = self.status(int(time.time()))
+                outgoing = {}
             # Advertise current plans through the existing type 74 exchange.
             # Readbacks while radios are moving cannot advertise a destination.
             destination = protocol.live_destination(self.state.get('destination'), local, int(time.time()))
