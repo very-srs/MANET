@@ -3,3 +3,4 @@
 0003-mesh-stale-peer.patch
 0004-mesh-sae-logging.patch
 0005-mesh-recovery-tests.patch
+0006-mesh-keep-primary.patch

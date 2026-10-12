@@ -1,0 +1,236 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+Subject: [PATCH] mesh: retain configured primary and HT40 offset
+
+Mesh peers can hear different foreign BSSes. Applying local OBSS decisions
+can swap only one peer's primary, splitting an otherwise connected mesh.
+Disable OBSS adjustment for mesh frequency setup, matching the intent of
+mesh.c's no_pri_sec_switch on the later hostapd path. Guarding only case 2
+would still let an unavailable scan remove HT40 and prevent 80 MHz setup.
+IBSS retains its current scan, swap and fallback behavior.
+
+Channel availability and capability checks still apply. With primary 5805,
+the HT40 offset stays -1 and the existing 80 MHz selector chooses the block
+starting at 5745, giving center 5775, independent of foreign beacons.
+
+Run the C regression in a patched source tree with:
+  sh tests/unit/test_mesh_freq.sh
+It compiles the real frequency setup and common channel helpers; only the
+scan provider is replaced. No hwsim environment or radio is required.
+
+---
+diff --git a/wpa_supplicant/wpa_supplicant.c b/wpa_supplicant/wpa_supplicant.c
+--- a/wpa_supplicant/wpa_supplicant.c
++++ b/wpa_supplicant/wpa_supplicant.c
+@@ -3194,7 +3194,9 @@
+ 	int ieee80211_mode = wpas_mode_to_ieee80211_mode(ssid->mode);
+ 	enum hostapd_hw_mode hw_mode;
+ 	struct hostapd_hw_modes *mode = NULL;
+-	int obss_scan = 1;
++	/* Mesh peers must keep the same primary and HT40 offset regardless
++	 * of local OBSS beacons or scan availability. */
++	int obss_scan = ssid->mode != WPAS_MODE_MESH;
+ 	u8 channel;
+ 	bool is_6ghz, is_24ghz;
+ 
+diff --git a/tests/unit/test_mesh_freq.c b/tests/unit/test_mesh_freq.c
+new file mode 100644
+--- /dev/null
++++ b/tests/unit/test_mesh_freq.c
+@@ -0,0 +1,175 @@
++/* Mesh frequency selection with asymmetric OBSS observations.
++ * This software may be distributed under the terms of the BSD license.
++ */
++#include "includes.h"
++#include <assert.h>
++
++#include "common.h"
++#include "config.h"
++#include "wpa_supplicant_i.h"
++#include "bss.h"
++#include "scan.h"
++#include "common/ieee802_11_defs.h"
++#include "common/hw_features_common.h"
++
++static struct wpa_scan_results scans;
++static unsigned int scan_calls;
++static int scan_unavailable;
++
++/* Only the scan provider is replaced; channel selection uses production C. */
++struct wpa_scan_results *
++wpa_supplicant_get_scan_results(struct wpa_supplicant *wpa_s,
++                               struct scan_info *info, int new_scan,
++                               const u8 *bssid)
++{
++	struct wpa_scan_results *copy;
++	size_t i;
++
++	scan_calls++;
++	if (scan_unavailable)
++		return NULL;
++	copy = calloc(1, sizeof(*copy));
++	assert(copy);
++	copy->res = calloc(scans.num + 1, sizeof(*copy->res));
++	assert(copy->res);
++	copy->num = scans.num;
++	for (i = 0; i < scans.num; i++) {
++		copy->res[i] = malloc(sizeof(*copy->res[i]));
++		assert(copy->res[i]);
++		*copy->res[i] = *scans.res[i];
++	}
++	return copy;
++}
++
++static void check_freq(const char *name, struct wpa_supplicant *wpa_s,
++                       struct wpa_ssid *ssid, int primary, int offset,
++                       int width, int center, unsigned int calls)
++{
++	struct hostapd_freq_params freq = { 0 };
++
++	scan_calls = 0;
++	ibss_mesh_setup_freq(wpa_s, ssid, &freq);
++	printf("%s: primary=%d offset=%d width=%d center=%d scans=%u\n",
++	       name, freq.freq, freq.sec_channel_offset, freq.bandwidth,
++	       freq.center_freq1, scan_calls);
++	fflush(stdout);
++	assert(freq.freq == primary);
++	assert(freq.channel == (primary - 5000) / 5);
++	assert(freq.sec_channel_offset == offset);
++	assert(freq.bandwidth == width);
++	assert(freq.center_freq1 == center);
++	assert(freq.center_freq2 == 0);
++	assert(scan_calls == calls);
++}
++
++int main(void)
++{
++	struct hostapd_channel_data channels[] = {
++		{ .chan = 149, .freq = 5745, .flag = HOSTAPD_CHAN_HT40PLUS },
++		{ .chan = 153, .freq = 5765, .flag = HOSTAPD_CHAN_HT40MINUS },
++		{ .chan = 157, .freq = 5785, .flag = HOSTAPD_CHAN_HT40PLUS },
++		{ .chan = 161, .freq = 5805, .flag = HOSTAPD_CHAN_HT40MINUS }
++	};
++	struct hostapd_hw_modes mode = {
++		.mode = HOSTAPD_MODE_IEEE80211A,
++		.num_channels = ARRAY_SIZE(channels),
++		.channels = channels,
++		.ht_capab = HT_CAP_INFO_SUPP_CHANNEL_WIDTH_SET,
++		.vht_capab = VHT_CAP_MAX_MPDU_LENGTH_7991
++	};
++	struct wpa_supplicant wpa_s = { 0 };
++	struct wpa_ssid ssid = {
++		.ssid = (u8 *) "mesh",
++		.ssid_len = 4,
++		.mode = WPAS_MODE_MESH,
++		.frequency = 5805,
++		.max_oper_chwidth = CONF_OPER_CHWIDTH_80MHZ
++	};
++	struct wpa_scan_res bss[12] = { 0 };
++	struct wpa_scan_res *results[ARRAY_SIZE(bss)];
++	struct wpa_bss peer = {
++		.freq = 5805, .caps = IEEE80211_CAP_IBSS,
++		.ssid = "mesh", .ssid_len = 4
++	};
++	struct wpa_bss *peers[] = { &peer };
++	size_t i;
++
++	wpa_s.hw.modes = &mode;
++	wpa_s.hw.num_modes = 1;
++	wpa_s.drv_flags = WPA_DRIVER_FLAGS_HT_IBSS |
++		WPA_DRIVER_FLAGS_VHT_IBSS;
++	for (i = 0; i < ARRAY_SIZE(bss); i++) {
++		bss[i].freq = 5785;
++		results[i] = &bss[i];
++	}
++	scans.res = results;
++	scans.num = ARRAY_SIZE(results);
++
++	/* Prove the fixture triggers the actual upstream swap decision. */
++	assert(check_40mhz_5g(&scans, &channels[3], &channels[2]) == 2);
++	check_freq("mesh, foreign BSSes on 157", &wpa_s, &ssid,
++	           5805, -1, 80, 5775, 0);
++
++	mode.he_capab[IEEE80211_MODE_MESH].he_supported = 1;
++	mode.he_capab[IEEE80211_MODE_MESH].phy_cap[
++		HE_PHYCAP_CHANNEL_WIDTH_SET_IDX] =
++		HE_PHYCAP_CHANNEL_WIDTH_SET_40MHZ_80MHZ_IN_5G;
++	check_freq("mesh, HE enabled", &wpa_s, &ssid,
++	           5805, -1, 80, 5775, 0);
++
++	/* A peer with no visible OBSS must choose the same channel definition. */
++	scans.num = 0;
++	check_freq("mesh, empty scan", &wpa_s, &ssid,
++	           5805, -1, 80, 5775, 0);
++	scan_unavailable = 1;
++	check_freq("mesh, unavailable scan", &wpa_s, &ssid,
++	           5805, -1, 80, 5775, 0);
++	scan_unavailable = 0;
++	scans.num = ARRAY_SIZE(results);
++
++	/* Repeat joins, including the other primary in the same HT40 pair. */
++	check_freq("mesh, rejoin", &wpa_s, &ssid, 5805, -1, 80, 5775, 0);
++	ssid.frequency = 5785;
++	for (i = 0; i < ARRAY_SIZE(bss); i++)
++		bss[i].freq = 5805;
++	check_freq("mesh, HT40+ primary", &wpa_s, &ssid,
++	           5785, 1, 80, 5775, 0);
++	ssid.frequency = 5805;
++	for (i = 0; i < ARRAY_SIZE(bss); i++)
++		bss[i].freq = 5785;
++
++	/* Preserve explicit width limits and regulatory restrictions. */
++	ssid.disable_ht40 = 1;
++	check_freq("mesh, HT40 disabled", &wpa_s, &ssid,
++	           5805, 0, 20, 5805, 0);
++	ssid.disable_ht40 = 0;
++	channels[2].flag |= HOSTAPD_CHAN_DISABLED;
++	check_freq("mesh, secondary disabled", &wpa_s, &ssid,
++	           5805, 0, 20, 5805, 0);
++	channels[2].flag &= ~HOSTAPD_CHAN_DISABLED;
++	channels[0].flag |= HOSTAPD_CHAN_NO_IR;
++	check_freq("mesh, 80 MHz block unavailable", &wpa_s, &ssid,
++	           5805, -1, 40, 5795, 0);
++	channels[0].flag &= ~HOSTAPD_CHAN_NO_IR;
++
++	/* IBSS keeps both OBSS swapping and the unavailable-scan fallback. */
++	ssid.mode = WPAS_MODE_IBSS;
++	ssid.fixed_freq = 1;
++	check_freq("IBSS, foreign BSSes on 157", &wpa_s, &ssid,
++	           5785, 1, 80, 5775, 1);
++	scans.num = 0;
++	check_freq("IBSS, empty scan", &wpa_s, &ssid,
++	           5805, -1, 80, 5775, 1);
++	scan_unavailable = 1;
++	check_freq("IBSS, unavailable scan", &wpa_s, &ssid,
++	           5805, 0, 20, 5805, 1);
++
++	/* An existing IBSS still suppresses OBSS adjustment as before. */
++	ssid.fixed_freq = 0;
++	wpa_s.last_scan_res = peers;
++	wpa_s.last_scan_res_used = ARRAY_SIZE(peers);
++	check_freq("IBSS, existing peer", &wpa_s, &ssid,
++	           5805, -1, 80, 5775, 0);
++	puts("mesh frequency regression: PASS");
++	return 0;
++}
+diff --git a/tests/unit/test_mesh_freq.sh b/tests/unit/test_mesh_freq.sh
+new file mode 100644
+--- /dev/null
++++ b/tests/unit/test_mesh_freq.sh
+@@ -0,0 +1,17 @@
++#!/bin/sh
++# Run from any directory in a patched release tree; no radio or hwsim needed.
++set -eu
++TREE=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
++BUILD=$(mktemp -d)
++trap 'rm -rf "$BUILD"' EXIT
++cd "$TREE"
++${CC:-cc} -O2 -g -ffunction-sections -fdata-sections \
++    -DCONFIG_MESH -DCONFIG_IEEE80211N -DCONFIG_IEEE80211AC \
++    -DCONFIG_IEEE80211AX -DCONFIG_HT_OVERRIDES \
++    -DCONFIG_NO_STDOUT_DEBUG \
++    -Isrc -Isrc/utils -Iwpa_supplicant \
++    tests/unit/test_mesh_freq.c wpa_supplicant/wpa_supplicant.c \
++    src/common/hw_features_common.c src/common/ieee802_11_common.c \
++    src/drivers/driver_common.c \
++    -Wl,--gc-sections -o "$BUILD/test_mesh_freq"
++"$BUILD/test_mesh_freq"
