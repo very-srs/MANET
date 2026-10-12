@@ -210,8 +210,6 @@ frequency its phy supports. Reserving an interface for AP use clears either
 mesh role that referred to it, but preserves the original band in
 `/var/lib/ap_mesh_band`. An empty saved band denotes AP-only hardware.
 
-- Limp mode management
-
 Scan frequencies are filtered against the interface's phy before the request
 goes out (`phy_usable_freqs`). `iw scan freq` refuses the **whole** request if
 any single frequency is not permitted on that phy, so one bad entry takes out
@@ -228,26 +226,20 @@ discovery, including when the visited channel already is the data channel.
 The explicit mode survives daemon restarts; a frequency match alone cannot
 identify whether a node is searching or operating a data plan.
 
-editing the publish path.
+**`node-manager.sh` is a selected symlink.** Packages carry the two real
+variants and `node-manager-select.sh`, not a copied `node-manager.sh` source.
+The selector atomically points the symlink at the ACS or static variant from
+`acs=` in `/etc/mesh.conf`, accepting `y`/`yes`/`1`/`true` case-insensitively.
+The service's `ExecStartPre` runs it before every start. Provisioning, setup,
+and configuration application also invoke the selector when needed. The
+updater installs the matching symlink directly using the same configuration
+choice.
 
-**The tools tarball does not carry this file.** Only the two variants ship over
-the air, and `node-update.sh` re-publishes whichever one `acs=` selects after
-extracting, restarting `node-manager` if the file changed. The committed copy is
-the static variant, so an update that shipped it would return every ACS node to
-the static orchestrator on each routine update, silently, with nothing in the
-log to say why. Leaving it out entirely would be the opposite failure: both
-variants arrive, but the node keeps running the previous release's orchestrator
-until `radio-setup.sh` happens to run again. A mesh config change to `acs` also
-re-publishes it (see [Mesh Configuration Push](#mesh-configuration-push)).
-
-The install tarball still carries it, since a node being provisioned needs
-something at that path before `radio-setup.sh` has chosen a variant.
-
-The `acs=` test accepts `y`/`yes`/`1`/`true` case-insensitively. It compared
-against `"Y"` alone until 2026-08-31, and every writer produces lowercase: both
-flashers normalize the answer, the web UI writes `'y':'n'`, and
-`mesh-config-sync.py` validates the key as exactly `y` or `n`. So `acs=y`
-selected the static variant on every node and the ACS orchestrator never ran.
+The `--service-start` path records the running target in
+`/run/node-manager.running`. Configuration application uses that record to
+compare the running and selected variants before restarting the manager.
+This keeps the entry point tied to configuration across both updates and
+reboots. See [Mesh Configuration Push](#mesh-configuration-push).
 
 ---
 
