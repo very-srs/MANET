@@ -53,6 +53,18 @@ Keep public documentation factual. Do not copy private handoffs, session
 diaries, bench credentials, or collaboration transcripts into it. The builder
 publishes only the topics, the listed references, and the assets they use.
 
+## Copy and layout
+
+Use plain, factual documentation. Do not add marketing copy, taglines, slogans,
+or decorative prose to make the pages sound more exciting. Descriptions should
+explain what a page covers; labels should identify controls or destinations.
+Keep **Reading level** directly above the three selectors.
+
+Use the existing FER logo from `MANET/share/manet/fer-logo-black.png`, as the
+status and management pages do. The builder copies that canonical asset into
+the site; do not create a separate documentation logo or maintain a duplicate
+source image. Logo changes also trigger the documentation workflow.
+
 ## Marine typography
 
 On Marine topic pages, all text uses Comic Sans, including navigation, headings,

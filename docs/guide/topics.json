@@ -1,6 +1,6 @@
 {
   "topics": [
-    {"id": "index", "source": "overview.md", "title": "Meet the mesh", "description": "A few radios. One connected team.", "group": "Start here"},
+    {"id": "index", "source": "overview.md", "title": "Meet the mesh", "description": "MANET hardware, connections, and setup.", "group": "Start here"},
     {"id": "flash", "source": "flash.md", "title": "Flash a radio", "description": "Put MANET on your radio, from Windows or Linux.", "group": "Start here"},
     {"id": "first-boot", "source": "first-boot.md", "title": "The first boot", "description": "Plug in. Let setup finish. Know when it is ready.", "group": "Start here"},
     {"id": "connect", "source": "connect.md", "title": "Connect your device", "description": "Get your phone or computer onto the mesh.", "group": "Use the mesh"},
