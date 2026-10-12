@@ -33,6 +33,8 @@ From a device connected to this radio, visit **[http://manet.local/](http://mane
 
 **[http://manet.local/manage/](http://manet.local/manage/)** opens management. Sign in with the admin password chosen during flashing. Management includes radio controls, measurements, configuration, and voice status.
 
+The [dashboard guide](dashboard.md) explains the displays and tabs. See [changing settings](settings.md) for the staging and apply process.
+
 The dashboard is for this radio's own clients. A device on the upstream internet router or attached to another radio is not automatically allowed to open it.
 
 ### ATAK phones
