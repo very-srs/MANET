@@ -504,8 +504,13 @@ FGH100M-AA-MD, US frequency plan); Rock 3A uses `mm8108*.bin` + `bcf_mf15457.bin
 (Gateworks GW16167). The driver logs the BCF filename it wants in dmesg if the
 right one is missing.
 
-Never extract a kernel tarball onto a live CM4's mounted FAT32 boot partition.
-For maintenance or recovery, power down and mount the eMMC on the dev machine.
+Do not use manual tar extraction onto a live CM4's mounted FAT32 boot
+partition. The offline procedure below is for bench work and physical
+recovery: power down and mount the eMMC on the dev machine. Fielded radios
+may be sealed, so normal kernel maintenance needs a validated in-place update
+path. Kernel payloads are permitted in update archives; follow the
+[field update policy](node-tools-internals.md#field-update-policy) when
+implementing their activation and boot recovery.
 First-boot provisioning is a separate, existing path: both templates extract
 the verified install archive onto the live, newly imaged system, then reboot
 into MANET. That initial setup is not an atomic boot-partition update and must
@@ -537,8 +542,9 @@ If it breaks, work through the symptom table in `PORTING-MORSE-DRIVER.md`
 
 ### 8.1 APT owns userland; MANET releases own the kernel
 
-Only the kernel, DTBs, overlays and modules from the board's MANET install
-archive belong in its boot path. `/etc/apt/preferences.d/00-manet-kernel`
+Only a matched kernel, DTBs, overlays and modules from the board's MANET
+release belong in its boot path, whether delivered by provisioning or a
+validated field-update procedure. `/etc/apt/preferences.d/00-manet-kernel`
 assigns priority -1 to distribution kernel images, headers, per-flavour base
 packages, DTBs, Armbian U-Boot/BSP packages and alternate boot writers.
 `raspi-firmware` is also pinned: its own upgrade invokes the kernel-copy hook.
@@ -569,12 +575,14 @@ replace these boot kernel files. A package requiring a new stock kernel is
 intentionally unsatisfiable; select a compatible userland package or update
 through a MANET release instead of overriding the policy.
 
-To update a kernel deliberately, use the matching board's install archive
-from a verified MANET release and the offline procedure above, or reflash
-through provisioning. A tools update does not contain a kernel. Leave the
-APT protections enabled when installing a MANET kernel. Kernel security fixes
-therefore require a new MANET kernel release as well as ordinary userland
-security updates.
+Current kernel replacement procedures cover provisioning and offline bench
+maintenance. The tools archive is also allowed to carry the matching board's
+kernel payload; its field installation and boot-recovery procedure still
+needs implementation and validation before shipping. Physical access or
+reflashing must not become the normal update requirement for sealed radios.
+Leave the APT protections enabled when installing a MANET kernel. Kernel
+security fixes require a new MANET kernel release as well as ordinary
+userland security updates.
 
 The package behavior is documented in the upstream
 [Pi kernel-copy hook](https://github.com/RPi-Distro/firmware/blob/pios/trixie/debian/kernel/postinst.d/z50-raspi-firmware),
