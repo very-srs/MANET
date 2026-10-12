@@ -3,6 +3,13 @@
 GitHub Releases holds the install and tools packages. Archives stay outside Git
 history. The local copies remain in `MANET/install_packages/`.
 
+The update archive may carry any component required by a release. Sealed
+radios need maintenance in place, including future kernel and firmware
+updates. Document the payload's activation and recovery procedure in the
+release instructions; archive acceptance alone does not establish that a
+kernel update is ready to deploy. See the
+[field update policy](../../docs/node-tools-internals.md#field-update-policy).
+
 Normal imaging, setup and `node-update.sh` use the full release marked **Latest**.
 We use that designation for the recommended stable build. Development builds are
 prereleases; they do not move Latest. `--development` selects the most recently

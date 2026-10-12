@@ -185,20 +185,15 @@ def atomic_file(destination, source=None, data=None, mode=0o644):
 
 
 def archive_path(name):
-    """Validate a tools member path and reject protected destinations."""
+    """Validate a root-relative update member without limiting payload scope."""
     # GNU tar builders prefix members with ./. No other normalization is safe.
     while name.startswith("./"):
         name = name[2:]
     name = name.rstrip("/")
     parts = name.split("/")
     if (not name or any(part in ("", ".", "..") for part in parts)
-            or any(ord(char) < 32 or ord(char) == 127 for char in name)
-            or parts[0] not in ("etc", "usr", "root")):
+            or any(ord(char) < 32 or ord(char) == 127 for char in name)):
         raise UpdateError(f"Unsafe archive path: {name!r}")
-    for forbidden in ("etc/mesh.conf", "etc/systemd/network", "usr/lib/modules",
-                      "usr/lib/firmware", "usr/local/bin/node-manager.sh"):
-        if name == forbidden or name.startswith(forbidden + "/"):
-            raise UpdateError(f"Tools archive contains excluded path: {name}")
     return name
 
 
@@ -492,11 +487,6 @@ class Updater:
 
     def install_payload(self, directory, members):
         """Replace payload and generated links while withholding versions."""
-        # Read local choices before any payload is installed.
-        config = (self.root / "etc/mesh.conf").read_text()
-        # Match an unquoted true acs assignment at the start of a config line.
-        acs = re.search(r"^acs=(y|yes|1|true)[ \t]*$", config, re.I | re.M)
-        selected = "node-manager-acs.sh" if acs else "node-manager-static.sh"
         motd = self.destination("etc/update-motd.d/50-manet-provision").parent
         self.destination("usr/local/bin/node-manager.sh")
         # Space is checked again on every retry, including early boot recovery.
@@ -515,7 +505,11 @@ class Updater:
                 atomic_file(target, source=directory / name, mode=member.mode & 0o777)
             else:
                 self.install_link(target, member.linkname)
-        # Same choice node-manager-select.sh makes before every service start.
+        # Use the installed config, including any deliberate payload change.
+        config = (self.root / "etc/mesh.conf").read_text()
+        # Match an unquoted true acs assignment at the start of a config line.
+        acs = re.search(r"^acs=(y|yes|1|true)[ \t]*$", config, re.I | re.M)
+        selected = "node-manager-acs.sh" if acs else "node-manager-static.sh"
         self.install_link(self.destination("usr/local/bin/node-manager.sh"), selected)
         self.make_directory(motd)
         for label, script in (("50-manet-provision", "manet-provision-status.sh"),

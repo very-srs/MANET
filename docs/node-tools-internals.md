@@ -96,6 +96,35 @@ All four archive builders source `MANET/packaging/lib-man.sh` and call
 `/usr/local/share/man/man8`. The tools updater accepts these paths through its
 existing archive validation. On a node, use `man 8 radio-setup.sh`, for example.
 
+### Field update policy
+
+End users may seal radios in enclosures. Routine maintenance must not assume
+access to the storage device or require opening the enclosure to reflash it.
+The `*-tools.tar.gz` name identifies the update archive; it does not limit
+the kinds of files a release may deliver. Updates may carry any required
+component, including kernels, device trees, modules, firmware, binaries,
+services, interface definitions, and configuration migrations.
+
+The builder chooses the payload for each release. The updater validates
+archive structure, integrity, ownership, paths, and available space rather
+than excluding components by category. Operator settings and identity must
+be preserved unless a release deliberately migrates them. A generic copy of
+`mesh.conf` is not a substitute for such a migration. `node-manager.sh`
+remains a generated selector symlink and is regenerated from the installed
+configuration after payload installation.
+
+The current tools builder includes a managed MT7916 firmware set under
+`usr/local/share/manet/firmware/mt7916`; firmware delivery is already part of
+the update path. It does not yet include board-specific kernel overlays.
+Before shipping a kernel update, the release needs a matched board/kernel,
+modules, device trees and firmware set, boot-filesystem handling, module
+dependency generation, activation/reboot sequencing, and tested recovery
+from interruption or a failed boot. Existing per-file replacement and
+service checks do not establish those guarantees. The current archive size
+limits and early recovery mount ordering also need review for that payload.
+These are implementation requirements for field updates, not reasons to
+make reflashing the normal maintenance procedure.
+
 ### Tools update failure handling
 
 `node-update.sh` executes `node-update.py`. Loading the Python program before
@@ -115,10 +144,10 @@ match, reads gzip through its footer (with a 512 MiB expanded limit), and reject
 unsafe paths, duplicate names, hardlinks/devices/sparse files, non-root ownership,
 special mode bits, writable directories, and symlink traversal. Relative symlinks
 must target regular files included in the archive. Existing directory modes are
-preserved, and installation cannot traverse existing directory symlinks. Tools
-archives cannot carry kernel modules/firmware, networkd interface definitions,
-`mesh.conf`, or `node-manager.sh` (a node-local symlink the updater points at
-the selected orchestrator, as `node-manager-select.sh` does at every start).
+preserved, and installation cannot traverse existing directory symlinks.
+Members may target any root-relative system path that passes these structural
+checks, including boot files, modules, firmware, and interface definitions.
+Payload selection and activation follow the [field update policy](#field-update-policy).
 
 Both embedded version files must match each other and the advertised release.
 Required updater, manager, status, dependency, agreement, time-service and MOTD
