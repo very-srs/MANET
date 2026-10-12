@@ -1,0 +1,20 @@
+From: MANET <manet@localhost>
+Subject: [PATCH] mt76: mt7915: use regulatory channel power limit
+
+Record the existing local change shared by the CM4 and Rock 3A trees.
+Leave orig_mpwr at the EEPROM target power.
+
+---
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/init.c b/drivers/net/wireless/mediatek/mt76/mt7915/init.c
+--- a/drivers/net/wireless/mediatek/mt76/mt7915/init.c
++++ b/drivers/net/wireless/mediatek/mt76/mt7915/init.c
+@@ -307,8 +307,7 @@ static void __mt7915_init_txpower(struct mt7915_phy *phy,
+ 							  target_power);
+ 		target_power += path_delta;
+ 		target_power = DIV_ROUND_UP(target_power, 2);
+-		chan->max_power = min_t(int, chan->max_reg_power,
+-					target_power);
++		chan->max_power = chan->max_reg_power; /* mt7916 txpower patch */
+ 		chan->orig_mpwr = target_power;
+ 	}
+ }

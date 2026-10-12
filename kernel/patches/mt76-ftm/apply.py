@@ -8,10 +8,19 @@ import re
 import subprocess
 import tempfile
 
-BASE = '95b85bebbedcaedfa7ca79116ed38b7376fba412'
+# Exact kernel HEAD -> patch directory relative to this helper. Both trees
+# accept the same series, including when the separate txpower patch is present.
+BASES = {
+    '95b85bebbedcaedfa7ca79116ed38b7376fba412': '.',  # linux-rpi-6.18
+    '7d0a66e4bb9081d75c82ec4957c50034cb0ea449': '.',  # linux-6.18
+}
 
 
 def apply(tree, series):
+    head = subprocess.check_output(['git', '-C', str(tree), 'rev-parse', 'HEAD'], text=True).strip()
+    if head not in BASES:
+        raise ValueError(f'mt76-ftm requires kernel HEAD in {", ".join(BASES)}, found {head}')
+    series = series / BASES[head]
     patches = [series / line for line in (series / 'series').read_text().splitlines()
                if line and not line.startswith('#')]
     paths = sorted({match for patch in patches for match in
@@ -19,9 +28,6 @@ def apply(tree, series):
     if not paths or any(not p.startswith('drivers/net/wireless/mediatek/mt76/mt7915/')
                         or '..' in Path(p).parts for p in paths):
         raise ValueError('unexpected path in mt76-ftm series')
-    head = subprocess.check_output(['git', '-C', str(tree), 'rev-parse', 'HEAD'], text=True).strip()
-    if head != BASE:
-        raise ValueError(f'mt76-ftm requires kernel HEAD {BASE}, found {head}')
     original = {p: (tree / p).read_bytes() if (tree / p).exists() else None for p in paths}
 
     def trial(reverse=False):
