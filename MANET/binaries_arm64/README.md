@@ -59,6 +59,9 @@ The build enables `CONFIG_IEEE80211AX` alongside mesh, SAE, 802.11n and
 capability exchange during mesh peering. The patches remove random extra
 inactivity delay for established mesh peers, bound unsuccessful SAE attempts,
 repair missing kernel stations, and report SAE steps and status at INFO.
+Patch 0006 keeps the mesh on its configured primary channel. Upstream moves
+a joining node's primary when other networks share its 40 or 80 MHz block,
+which leaves that node unable to peer with the rest of the mesh.
 
 Mesh configs use the global setting `mesh_max_inactivity=10`. The patched
 Wi-Fi build frees an established peer when kernel inactivity reaches ten
