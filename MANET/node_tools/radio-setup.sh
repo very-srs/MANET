@@ -1503,35 +1503,18 @@ EOF
 systemctl enable mesh-shutdown.service
 
 
-# Power saving
-# scaling_max_freq uses kHz: 1008000 limits the policy to 1.008 GHz.
-cat << EOF > /etc/systemd/system/cpu-powersave.service
-[Unit]
-Description=Set CPU to powersave mode
-After=multi-user.target
-
-[Service]
-Type=oneshot
-RemainAfterExit=yes
-
-# Set governor
-ExecStart=/bin/bash -c 'echo powersave > /sys/devices/system/cpu/cpufreq/policy0/scaling_governor'
-# Cap max frequency to 1.0 GHz
-ExecStart=/bin/bash -c 'echo 1008000 > /sys/devices/system/cpu/cpufreq/policy0/scaling_max_freq'
-# Some kernels expose no CPU hotplug controls. Keep frequency scaling usable.
-ExecStart=/bin/bash -c 'if [ -e /sys/devices/system/cpu/cpu2/online ]; then echo 0 > /sys/devices/system/cpu/cpu2/online; fi'
-ExecStart=/bin/bash -c 'if [ -e /sys/devices/system/cpu/cpu3/online ]; then echo 0 > /sys/devices/system/cpu/cpu3/online; fi'
-
-# Restore on stop (or when election scripts call systemctl stop cpu-powersave)
-ExecStop=/bin/bash -c 'if [ -e /sys/devices/system/cpu/cpu2/online ]; then echo 1 > /sys/devices/system/cpu/cpu2/online; fi'
-ExecStop=/bin/bash -c 'if [ -e /sys/devices/system/cpu/cpu3/online ]; then echo 1 > /sys/devices/system/cpu/cpu3/online; fi'
-ExecStop=/bin/bash -c 'echo ondemand > /sys/devices/system/cpu/cpufreq/policy0/scaling_governor'
-ExecStop=/bin/bash -c 'cat /sys/devices/system/cpu/cpufreq/policy0/cpuinfo_max_freq > /sys/devices/system/cpu/cpufreq/policy0/scaling_max_freq'
-
-[Install]
-WantedBy=multi-user.target
-EOF
-systemctl enable cpu-powersave
+# Replace the old CPU policy before starting the board-aware policy. Its
+# ExecStop restores CPUs and frequency limits, so it must finish first.
+if [ -f /etc/systemd/system/cpu-powersave.service ]; then
+    if provision_try "cannot stop old CPU policy" \
+            systemctl disable --now cpu-powersave.service; then
+        rm -f /etc/systemd/system/cpu-powersave.service
+    fi
+fi
+rm -f /etc/systemd/system/multi-user.target.wants/cpu-powersave.service
+provision_try "CPU policy reload failed" systemctl daemon-reload
+provision_try "CPU policy start failed" \
+    systemctl enable --now manet-cpu-policy.service
 
 
 cat << EOF > /etc/systemd/system/mesh-hosts-update.service
@@ -1883,7 +1866,7 @@ provision_try "automatic update clock trigger failed" systemctl enable --now man
 for unit in mesh-status.service batman-enslave-watch.service \
     gateway-route-manager.service syncthing@radio.service \
     syncthing-peer-manager.service mesh-hosts-update.timer \
-    ethernet-autodetect.service cpu-powersave.service \
+    ethernet-autodetect.service manet-cpu-policy.service \
     button-monitor.service led-boot.service; do
     provision_try "service start failed: $unit" systemctl start "$unit"
 done

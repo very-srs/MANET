@@ -287,6 +287,36 @@ if os.environ.get('TEST_SYSTEMCTL_FAIL') == args:
         self.updater.retire_battery_reader()
         self.assertEqual(self.history(), history)
 
+    def test_update_retires_old_cpu_unit_before_enabling_new_policy(self):
+        unit = self.root / 'etc/systemd/system/cpu-powersave.service'
+        unit.parent.mkdir(parents=True)
+        unit.write_text('old unit')
+        link = unit.parent / 'multi-user.target.wants' / unit.name
+        link.parent.mkdir()
+        link.symlink_to('../' + unit.name)
+        self.updater.update()
+        self.assertFalse(unit.exists())
+        self.assertFalse(link.is_symlink())
+        self.assertTrue((unit.parent / 'manet-cpu-policy.service').is_file())
+        self.assertTrue((self.root / 'usr/local/bin/manet-cpu-policy.sh').is_file())
+        history = self.history()
+        self.assertLess(history.index('systemctl disable --now ' + unit.name),
+                        history.index('systemctl daemon-reload'))
+        self.assertLess(history.index('systemctl daemon-reload'),
+                        history.index('enable --now manet-cpu-policy.service'))
+        self.assertLess(history.index('enable --now manet-cpu-policy.service'),
+                        history.index('restart node-manager.service'))
+        self.updater.retire_cpu_powersave()
+        self.assertEqual(self.history(), history)
+
+    def test_cpu_retirement_removes_a_stale_wants_link(self):
+        link = self.root / 'etc/systemd/system/multi-user.target.wants/cpu-powersave.service'
+        link.parent.mkdir(parents=True)
+        link.symlink_to('../cpu-powersave.service')
+        self.updater.retire_cpu_powersave()
+        self.assertFalse(link.is_symlink())
+        self.assertNotIn('systemctl', self.history())
+
     def test_missing_malformed_wrong_filename_and_mismatched_checksum(self):
         valid = self.checksum.read_text()
         for content in (None, '', 'garbage', valid.replace('cm4-', 'r3a-'), '0' * 64 + '  cm4-tools.tar.gz\n', valid + valid):
@@ -434,6 +464,7 @@ if os.environ.get('TEST_SYSTEMCTL_FAIL') == args:
 
     def test_service_failures_preserve_marker_and_retry_in_routine_mode(self):
         for failure in ('daemon-reload', 'enable --now manet-dhcp-isolation.service',
+                        'enable --now manet-cpu-policy.service',
                         'enable --now manet-mesh-power.service', 'restart mesh-status.service',
                         'restart node-manager.service', 'is-active --quiet node-manager.service'):
             with self.subTest(failure=failure):

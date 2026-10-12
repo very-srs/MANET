@@ -81,6 +81,8 @@ REQUIRED = MARKERS | {
     "etc/systemd/system/ap-txpower.service",
     "etc/systemd/system/manet-mesh-power.service",
     "usr/local/bin/manet-mesh-power.sh",
+    "etc/systemd/system/manet-cpu-policy.service",
+    "usr/local/bin/manet-cpu-policy.sh",
     "usr/local/bin/manet-uplink-speed.sh",
     "usr/local/bin/manet-region.py",
     "usr/local/bin/mesh-service-election.py",
@@ -535,6 +537,7 @@ class Updater:
         self.retire_route_fix()
         self.retire_battery_reader()
         self.retire_network_boot_units()
+        self.retire_cpu_powersave()
         run_command(["systemctl", "daemon-reload"])
         firmware_setup = self.destination('usr/local/bin/manet-mt7916-setup.sh')
         # Bound firmware setup and service integration to ten minutes.
@@ -551,6 +554,7 @@ class Updater:
             run_command(["systemctl", "stop", "dnsmasq.service"])
             raise
         run_command(["systemctl", "enable", "--now", "manet-mesh-power.service"])
+        run_command(["systemctl", "enable", "--now", "manet-cpu-policy.service"])
         run_command(["systemctl", "enable", "--now", "manet-logrotate.timer"])
         run_command(["systemctl", "enable", "--now", "manet-auto-update.path"])
         # Only running Wi-Fi mesh instances adopt the new binary now.
@@ -605,6 +609,14 @@ class Updater:
                 'usr/local/bin/battery-reader.py',
                 'run/battery_status.json'):
             self.destination(name).unlink(missing_ok=True)
+
+    def retire_cpu_powersave(self):
+        """Stop the old CPU policy before applying the board-aware policy."""
+        unit = self.destination('etc/systemd/system/cpu-powersave.service')
+        if unit.exists():
+            run_command(['systemctl', 'disable', '--now', unit.name])
+        self.destination('etc/systemd/system/multi-user.target.wants/' + unit.name).unlink(missing_ok=True)
+        unit.unlink(missing_ok=True)
 
     def retire_network_boot_units(self):
         """Disable listed boot units and retain the AP power unit file."""

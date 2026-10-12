@@ -2,7 +2,6 @@
 import json
 import os
 from pathlib import Path
-import shlex
 import subprocess
 import tempfile
 import time
@@ -171,34 +170,179 @@ provision_try() { local what="$1"; shift; "$@" || echo "FAIL:$what"; }
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('FAIL:service start failed: mesh-status.service', result.stdout)
         self.assertIn('start batman-enslave-watch.service', result.stdout)
+        self.assertIn('start manet-cpu-policy.service', result.stdout)
         for unit in ('mesh-clone-identity', 'mesh-boot-lobby', 'mesh-shutdown'):
             self.assertNotIn('start ' + unit, result.stdout)
 
-    def test_cpu_frequency_control_works_without_hotplug_and_restores_board_maximum(self):
+    def test_setup_retires_old_cpu_unit_before_applying_new_policy(self):
         source = (TOOLS / 'radio-setup.sh').read_text()
-        unit = source.split('cat << EOF > /etc/systemd/system/cpu-powersave.service\n', 1)[1].split('\nEOF', 1)[0]
+        begin = source.index('# Replace the old CPU policy')
+        end = source.index('cat << EOF', begin)
         with tempfile.TemporaryDirectory() as scratch:
             root = Path(scratch)
-            policy = root / 'cpufreq/policy0'
-            policy.mkdir(parents=True)
-            (policy / 'cpuinfo_max_freq').write_text('1500000\n')
-            for present in (False, True):
-                with self.subTest(hotplug=present):
-                    if present:
-                        for cpu in (2, 3):
-                            (root / f'cpu{cpu}').mkdir()
-                            (root / f'cpu{cpu}/online').write_text('1\n')
-                    for directive, governor, maximum in [('ExecStart', 'powersave', '1008000'),
-                                                          ('ExecStop', 'ondemand', '1500000')]:
-                        for line in unit.splitlines():
-                            if line.startswith(directive + '='):
-                                args = shlex.split(line.split('=', 1)[1].replace('/sys/devices/system/cpu', str(root)))
-                                result = subprocess.run(args, capture_output=True, text=True)
-                                self.assertEqual(result.returncode, 0, result.stderr)
-                        self.assertEqual((policy / 'scaling_governor').read_text().strip(), governor)
-                        self.assertEqual((policy / 'scaling_max_freq').read_text().strip(), maximum)
-                    if present:
-                        self.assertEqual((root / 'cpu2/online').read_text().strip(), '1')
+            unit = root / 'cpu-powersave.service'
+            unit.write_text('old unit')
+            link = root / 'multi-user.target.wants' / unit.name
+            link.parent.mkdir()
+            link.symlink_to('../' + unit.name)
+            body = '''
+systemctl() { echo "$*"; }
+provision_try() { shift; "$@"; }
+''' + source[begin:end].replace('/etc/systemd/system', str(root))
+            result = subprocess.run(['bash', '-c', body], capture_output=True,
+                                    text=True, timeout=5)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse(unit.exists())
+            self.assertFalse(link.is_symlink())
+            self.assertLess(result.stdout.index('disable --now cpu-powersave.service'),
+                            result.stdout.index('daemon-reload'))
+            self.assertLess(result.stdout.index('daemon-reload'),
+                            result.stdout.index('enable --now manet-cpu-policy.service'))
+
+
+class CpuPolicyTests(unittest.TestCase):
+    """Apply the installed script to temporary CPU and device-tree files."""
+
+    def setUp(self):
+        scratch = tempfile.TemporaryDirectory(prefix='manet-cpu-policy-')
+        self.addCleanup(scratch.cleanup)
+        self.root = Path(scratch.name)
+        self.cpu = self.root / 'cpu'
+        self.cpu.mkdir()
+        self.model = self.root / 'model'
+        self.model.write_bytes(b'Raspberry Pi Compute Module 4 Rev 1.0\0')
+
+    def make_policy(self, name='policy0', minimum=600000, maximum=1500000,
+                    frequencies='1500000 600000 800000 1000000',
+                    governors='conservative ondemand powersave schedutil'):
+        policy = self.cpu / 'cpufreq' / name
+        policy.mkdir(parents=True)
+        values = {'cpuinfo_min_freq': minimum, 'cpuinfo_max_freq': maximum,
+                  'scaling_max_freq': minimum, 'scaling_governor': 'powersave',
+                  'scaling_available_governors': governors}
+        if frequencies is not None:
+            values['scaling_available_frequencies'] = frequencies
+        for filename, value in values.items():
+            (policy / filename).write_text(str(value) + '\n')
+        return policy
+
+    def run_policy(self, *args):
+        env = dict(os.environ, MANET_SYS_CPU=str(self.cpu),
+                   MANET_CPU_MODEL_FILE=str(self.model))
+        return subprocess.run(['bash', str(TOOLS / 'manet-cpu-policy.sh'), *args],
+                              env=env, capture_output=True, text=True, timeout=5)
+
+    def assert_policy(self, policy, governor, cap):
+        self.assertEqual((policy / 'scaling_governor').read_text().strip(), governor)
+        self.assertEqual((policy / 'scaling_max_freq').read_text().strip(), str(cap))
+
+    def test_cm4_uses_schedutil_and_800mhz_on_every_policy(self):
+        policies = [self.make_policy(name) for name in ('policy0', 'policy4')]
+        result = self.run_policy()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, '')
+        for policy in policies:
+            self.assert_policy(policy, 'schedutil', 800000)
+            self.assertIn('board="Raspberry Pi Compute Module 4 Rev 1.0" '
+                          f'{policy.name} governor=schedutil cap=800000 kHz',
+                          result.stdout)
+
+    def test_cm4_uses_highest_available_frequency_below_ceiling(self):
+        policy = self.make_policy(frequencies='1000000 600000 900000 750000')
+        result = self.run_policy()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_policy(policy, 'schedutil', 750000)
+
+    def test_cm4_never_caps_below_cpuinfo_minimum(self):
+        policy = self.make_policy(minimum=900000, frequencies='600000 900000 1500000')
+        result = self.run_policy()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_policy(policy, 'schedutil', 900000)
+
+    def test_cm4_without_frequency_table_uses_ceiling(self):
+        policy = self.make_policy(frequencies=None)
+        result = self.run_policy()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_policy(policy, 'schedutil', 800000)
+
+    def test_other_boards_restore_their_reported_maximum(self):
+        policies = [self.make_policy('policy0', minimum=408000, maximum=1800000),
+                    self.make_policy('policy4', minimum=600000, maximum=2400000)]
+        for model in ('Radxa ROCK 3A', 'Raspberry Pi 5 Model B Rev 1.0',
+                      'Another board', None):
+            with self.subTest(model=model):
+                if model is None:
+                    self.model.unlink()
+                else:
+                    self.model.write_bytes(model.encode() + b'\0')
+                for policy in policies:
+                    (policy / 'scaling_max_freq').write_text('816000\n')
+                    (policy / 'scaling_governor').write_text('powersave\n')
+                result = self.run_policy()
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stderr, '')
+                self.assert_policy(policies[0], 'schedutil', 1800000)
+                self.assert_policy(policies[1], 'schedutil', 2400000)
+
+    def test_offline_cpus_come_online_even_without_cpufreq(self):
+        for cpu in range(4):
+            path = self.cpu / f'cpu{cpu}'
+            path.mkdir()
+            (path / 'online').write_text('1\n' if cpu < 2 else '0\n')
+        for cpufreq in (False, True):
+            with self.subTest(cpufreq=cpufreq):
+                if cpufreq:
+                    self.make_policy()
+                for cpu in (2, 3):
+                    (self.cpu / f'cpu{cpu}/online').write_text('0\n')
+                result = self.run_policy()
+                self.assertEqual(result.returncode, 0, result.stderr)
+                for cpu in range(4):
+                    self.assertEqual((self.cpu / f'cpu{cpu}/online').read_text(), '1\n')
+
+    def test_missing_hotplug_controls_and_cpufreq_are_supported(self):
+        for cpufreq in (False, True):
+            with self.subTest(cpufreq=cpufreq):
+                if cpufreq:
+                    policy = self.make_policy()
+                result = self.run_policy()
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn('no CPU hotplug controls', result.stdout)
+                if cpufreq:
+                    self.assert_policy(policy, 'schedutil', 800000)
+                else:
+                    self.assertIn('no cpufreq policies', result.stdout)
+
+    def test_missing_schedutil_falls_back_to_ondemand_then_kernel_choice(self):
+        policy = self.make_policy()
+        for governors, expected in [('powersave ondemand', 'ondemand'),
+                                    ('powersave performance', 'powersave'),
+                                    ('powersave schedutil-other', 'powersave')]:
+            with self.subTest(governors=governors):
+                (policy / 'scaling_available_governors').write_text(governors + '\n')
+                (policy / 'scaling_governor').write_text('powersave\n')
+                result = self.run_policy()
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assert_policy(policy, expected, 800000)
+
+    def test_failed_write_is_reported_and_other_policies_still_apply(self):
+        broken = self.make_policy()
+        maximum = broken / 'scaling_max_freq'
+        maximum.unlink()
+        maximum.mkdir()
+        working = self.make_policy('policy4')
+        result = self.run_policy()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('ERROR: CPU policy: policy0: cannot set frequency ceiling',
+                      result.stderr)
+        self.assert_policy(working, 'schedutil', 800000)
+
+    def test_unexpected_arguments_do_not_change_policy(self):
+        policy = self.make_policy()
+        result = self.run_policy('--unknown')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('usage: manet-cpu-policy.sh', result.stderr)
+        self.assert_policy(policy, 'powersave', 600000)
 
 
 

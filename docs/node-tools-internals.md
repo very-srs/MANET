@@ -2439,6 +2439,37 @@ See [release tooling](../MANET/releases/README.md).
 
 ## Provisioning
 
+**CPU frequency policy**
+
+`manet-cpu-policy.service` runs before node-manager and mesh voice. It brings
+every CPU with a hotplug control online, then applies schedutil to every
+cpufreq policy, falling back to ondemand or retaining the kernel governor.
+Only a device-tree model containing `Compute Module 4` receives a ceiling:
+`CM4_MAX_FREQ_KHZ` in `manet-cpu-policy.sh` is 800000 kHz. If the frequency
+table omits that value, the highest supported value below it is used, never
+below `cpuinfo_min_freq`. Rock 3A, Raspberry Pi 5 and other boards use their
+reported `cpuinfo_max_freq`. No mesh.conf setting controls this policy.
+
+The previous powersave governor held CM4 at 600 MHz and Rock 3A at 408 MHz
+on two cores. Its 1008000 kHz ceiling could not help because powersave stays
+at the minimum; Rock 3A also lacks that operating point and rounded the
+ceiling down to 816 MHz. A CM4 to Rock 3A Wi-Fi iperf3 link reached about
+100 Mbit/s under that policy and 400 to 480 Mbit/s after it was stopped.
+With schedutil and normal mesh traffic, CM4 spent 87% of its time at 600 MHz,
+supporting demand scaling for idle heat control. The 800 MHz CM4 ceiling
+limits enclosure heat while allowing bursts above idle. Rock 3A is used as
+an open-air bench board. These measurements do not establish throughput
+or enclosure temperature under the new ceiling.
+
+Setup and updates stop and remove the old unit before applying the new
+policy. Stopping the new oneshot does not undo the policy. The service keeps
+`ProtectKernelTunables=yes` and opens only `/sys/devices/system/cpu` with
+`ReadWritePaths`, so CPU attributes remain writable inside its otherwise
+protected sysfs tree. It needs root ownership access but no capabilities.
+The script logs missing hotplug or cpufreq support and succeeds on those
+kernels; failed writes return an error. Tests redirect `MANET_SYS_CPU` and
+`MANET_CPU_MODEL_FILE` to temporary files without root.
+
 **Mesh supplicant selection and recovery**
 
 `wpa_supplicant@.service.d/20-manet-binary.conf` resets ExecStart to

@@ -1,0 +1,27 @@
+[Unit]
+Description=Apply board CPU frequency policy and keep all CPUs online
+Before=node-manager.service mesh-voice.service
+
+[Service]
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+# Keep kernel tunables read-only except the CPU controls this unit manages.
+ProtectKernelTunables=yes
+ReadWritePaths=-/sys/devices/system/cpu
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+LockPersonality=yes
+RestrictRealtime=yes
+SystemCallArchitectures=native
+# Root owns the sysfs attributes; no extra capabilities are needed.
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX
+PrivateDevices=yes
+Type=oneshot
+ExecStart=/usr/local/bin/manet-cpu-policy.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
