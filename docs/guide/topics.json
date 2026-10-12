@@ -4,8 +4,12 @@
     {"id": "flash", "source": "flash.md", "title": "Flash a radio", "description": "Put MANET on your radio, from Windows or Linux.", "group": "Start here"},
     {"id": "first-boot", "source": "first-boot.md", "title": "The first boot", "description": "Plug in. Let setup finish. Know when it is ready.", "group": "Start here"},
     {"id": "connect", "source": "connect.md", "title": "Connect your device", "description": "Get your phone or computer onto the mesh.", "group": "Use the mesh"},
+    {"id": "dashboard", "source": "dashboard.md", "title": "Read the dashboard", "description": "See your radios, inspect their links, and measure a path.", "group": "Use the mesh"},
     {"id": "mesh", "source": "mesh.md", "title": "How the mesh works", "description": "Radios find peers, choose paths, and recover connections.", "group": "Use the mesh"},
-    {"id": "voice", "source": "voice.md", "title": "Push to talk", "description": "Pick a talk group. Press to speak. Release to listen.", "group": "Use the mesh"}
+    {"id": "voice", "source": "voice.md", "title": "Push to talk", "description": "Pick a talk group. Press to speak. Release to listen.", "group": "Use the mesh"},
+    {"id": "settings", "source": "settings.md", "title": "Change settings", "description": "Know what changes locally and what changes across the mesh.", "group": "Maintain the radios"},
+    {"id": "updates", "source": "updates.md", "title": "Update a radio", "description": "Install a tools release and recover an interrupted update.", "group": "Maintain the radios"},
+    {"id": "troubleshooting", "source": "troubleshooting.md", "title": "When something is wrong", "description": "Start with the symptom and collect useful evidence.", "group": "Maintain the radios"}
   ],
   "references": [
     {"id": "project", "path": "README.md", "title": "Project reference"},

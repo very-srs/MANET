@@ -3,9 +3,10 @@
 Read this when changing the documentation or any behavior it describes. It is
 the shared maintenance guide for human contributors and coding agents.
 
-The first set covers the overview, flashing, first boot, device connections,
-mesh behavior, and voice. Full existing references are included without manual
-copying. Further topics can be added to `content/` and `topics.json` together.
+The guide covers the overview, flashing, first boot, device connections,
+dashboard, mesh behavior, voice, settings, tools updates, and troubleshooting.
+Full existing references are included without manual copying. Further topics
+can be added to `content/` and `topics.json` together.
 
 ## Where to edit
 
@@ -16,6 +17,20 @@ copying. Further topics can be added to `content/` and `topics.json` together.
 - `assets/`: illustrations, saved image prompts, CSS, and reading-level logic.
 - `template.html` and `build.py`: shared presentation and Markdown build.
 - `_site/`: generated preview only. Never edit or commit it.
+
+For small wording changes, edit the relevant `content/*.md` file locally and
+ask a contributor or coding agent to review, build, and push those edits. Every
+topic keeps all three tiers together; change the matching tier, and check the
+other two if the meaning changes. Text on full reference pages comes from the
+original files listed in `topics.json`, so edit those originals. The **View
+Markdown** link at the bottom of a page identifies its source.
+
+Local edits become visible on GitHub Pages only after they are committed,
+pushed to `main`, and the documentation deployment succeeds. A documentation
+publication does not require a radio package release. If the local branch also
+contains unpublished runtime work, publish only the intended documentation
+changes from a checkout based on `origin/main` and reconcile the local branch
+afterward; do not include unrelated commits just to refresh the site.
 
 ## When behavior changes
 
