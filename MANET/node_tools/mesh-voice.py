@@ -128,6 +128,31 @@ HID_GPIO1_MASK = 0x01  # IR1 bit 0: OpenVLM identity strap
 # CM108B datasheet 7.4: IR1[3:0] only reflects live GPIO when IR0[7:6] == 0.
 HID_IR0_VALID_MASK = 0xC0
 
+# The CM108B playback mixer powers up at -20 dB of a 0 dB maximum, and no
+# restore covers a USB card that enumerates late, so receive is quiet unless
+# the daemon sets it. Generic CM108 dongles call the control Speaker.
+PLAYBACK_CONTROLS = ("PCM", "Speaker")
+AMIXER = "amixer"
+AMIXER_TIMEOUT_SEC = 3
+
+# --- receive gain --------------------------------------------------------------
+# The card's 0 dB playback maximum leaves headset speech quiet, so each talker
+# branch can add software gain ahead of the mixer. A hard-knee limiter follows
+# it in float, linear below THRESHOLD (-6 dBFS) and squashing above it by
+# RATIO. Measured on a 1 kHz tone at 16 kHz, peak dBFS out:
+#   gain   -30 dBFS in   -3 dBFS in
+#   +12    -18.0         -4.2
+#   +18    -12.0         -2.4
+#   +24     -6.0          0.0 (clips)
+# Tried: soft-knee. Ratio has no effect on samples above full scale, so a
+# boosted -3 dBFS input clipped at every ratio.
+RX_GAIN_DB_DEFAULT = 18.0
+RX_GAIN_DB_MAX = 24.0
+RX_LIMIT_THRESHOLD = 0.5
+RX_LIMIT_RATIO = 0.05
+# Lowest reported level. The level element reports digital silence as -700 dB.
+LEVEL_FLOOR_DB = -90.0
+
 # Size the warm decode-branch table from the registry. Each Lyra branch uses
 # about 5.3 MB. The cap of 64 uses roughly 340 MB on a 3.7 GB node.
 # VOICE_TALKER_HEADROOM reserves room for new nodes before eviction.
@@ -137,6 +162,14 @@ VOICE_TALKER_HEADROOM = 2
 # Muted presence beacon duration in ms. Establishes the RTP source at receivers
 # before speech begins.
 BEACON_MS = 140
+
+# PTT feedback tones as (Hz, ms) steps, 0 Hz being a gap. Mixed into the local
+# speaker only, never the transmit path. Roger falls in pitch so release is
+# distinguishable from key-up without looking. A refused press gets a long low
+# tone: without it, a half-duplex or unbound node looks like a dead link.
+PTT_BEEP_KEY = ((1000, 60),)
+PTT_BEEP_ROGER = ((1200, 50), (900, 70))
+PTT_BEEP_BLOCKED = ((400, 250),)
 
 PTT_DEBOUNCE_MS = 150
 HALF_DUPLEX_HOLD_MS = 500
@@ -461,6 +494,15 @@ class Config:
         # Empty means autodetect the OpenVLM card.
         self.alsa_in = conf_str(conf, "voice_alsa_in", "", ALSA_DEV_RE)
         self.alsa_out = conf_str(conf, "voice_alsa_out", "", ALSA_DEV_RE)
+        # Playback mixer level set on the autodetected card, default 100 (its
+        # 0 dB maximum). Not applied when voice_alsa_out overrides the device.
+        self.playback_pct = conf_int(conf, "voice_playback_pct", 100, 0, 100)
+        # PTT key/roger tone level as a percent of full scale, default 20.
+        # 0 disables the tones and leaves their source out of the pipeline.
+        self.ptt_beep_pct = conf_int(conf, "voice_ptt_beep_pct", 20, 0, 100)
+        # Software gain on each talker before the mixer, limited. 0 bypasses.
+        self.rx_gain_db = conf_float(conf, "voice_rx_gain_db",
+                                     RX_GAIN_DB_DEFAULT, 0.0, RX_GAIN_DB_MAX)
         # Bench mode: a 440 Hz tone in place of the mic and a null sink in
         # place of the speaker, so the transport can be proven on a node that
         # has no audio hardware fitted yet.
@@ -737,6 +779,43 @@ def find_openvlm_card():
     return None
 
 
+def openvlm_card_id():
+    """Return (card index, USB bus/device) for the OpenVLM, or None.
+
+    The USB device number changes on every replug, e.g. "001/004" becomes
+    "001/005", so a replug on the same card index is still a new card whose
+    mixer has reset to its power-up level.
+    """
+    card = find_openvlm_card()
+    if card is None:
+        return None
+    try:
+        with open("/proc/asound/card%d/usbbus" % card) as fh:
+            return card, fh.read().strip()
+    except OSError:
+        return card, None
+
+
+def set_playback_level(card, pct):
+    """Set the card's playback mixer to pct percent and unmute it.
+
+    Return the control that took the level, or None when the card has no
+    usable control or amixer is unavailable. argv and a timeout, as in
+    iface_ipv4, because build() runs on the GLib main loop.
+    """
+    for control in PLAYBACK_CONTROLS:
+        try:
+            out = subprocess.run([AMIXER, "-q", "-c", str(card), "sset",
+                                  control, "%d%%" % pct, "unmute"],
+                                 capture_output=True, text=True,
+                                 timeout=AMIXER_TIMEOUT_SEC)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if out.returncode == 0:
+            return control
+    return None
+
+
 def alsa_device(explicit, card):
     """Choose an override, detected card or ALSA default device."""
     if explicit:
@@ -787,6 +866,10 @@ class MeshVoice:
         self._known_peer_ips = set()
         self._beacon_pending = None
         self._beacon_end = None
+        # PTT tone source in the receive mixer and its pending (Hz, ms) steps.
+        self.beeper = None
+        self._beep_timer = None
+        self._beep_steps = []
         self._bind_ip = None
         self._tx_blocked = "waiting for IPv4 on %s" % cfg.iface
         self._tx_blocked_logged = False
@@ -816,6 +899,13 @@ class MeshVoice:
         self.peers = []
         self.local_ips = local_ipv4_addresses()
         self.ptt = None
+        # openvlm_card_id() the pipelines were built on. None means they use
+        # an override, the test tone or the ALSA default.
+        self.audio_card = None
+        # Playback percent the daemon set on that card, None if it did not.
+        self.playback_level = None
+        # Loudest RMS dBFS per level element since the last state write.
+        self._level_max = {"lvl": None, "rxlvl": None}
         self.started_at = time.monotonic()
 
         # Watchdog state keyed by "tx"/"rx". Probes write _flow_count, _flow_ts
@@ -1023,14 +1113,36 @@ class MeshVoice:
             log("transmit headroom: %.3f (-%.1f dB) ahead of the eq boost"
                 % (self._tx_gain, boost))
 
+    def _set_playback_level(self):
+        """Apply voice_playback_pct to the autodetected card's mixer.
+
+        Call after both pipelines are told to play. A mixer write just ahead
+        of the PCM open failed it as busy in 1 of 3 restarts on a CM4, where
+        the stock daemon, which writes no mixer, failed 0 of 3.
+        """
+        self.playback_level = None
+        card = self.audio_card[0] if self.audio_card else None
+        if card is None or self.cfg.alsa_out:
+            return
+        control = set_playback_level(card, self.cfg.playback_pct)
+        if control is None:
+            log("audio: could not set playback level on card %d; it stays at "
+                "the card's own level" % card)
+            return
+        self.playback_level = self.cfg.playback_pct
+        log("audio: playback %s set to %d%% on card %d"
+            % (control, self.cfg.playback_pct, card))
+
     def build(self):
         """Construct audio pipelines with transport and health probes."""
+        self.audio_card = None
         if self.cfg.test_tone:
             src_desc = ("audiotestsrc name=cap is-live=true wave=sine freq=440")
             playback_desc = "fakesink name=play sync=false"
             log("audio: BENCH MODE: 440 Hz tone in, null sink out")
         else:
-            card = find_openvlm_card()
+            self.audio_card = openvlm_card_id()
+            card = self.audio_card[0] if self.audio_card else None
             dev_in = alsa_device(self.cfg.alsa_in, card)
             dev_out = alsa_device(self.cfg.alsa_out, card)
             src_desc = "alsasrc device=%s name=cap" % dev_in
@@ -1105,6 +1217,13 @@ class MeshVoice:
         # 24-bit SSRC prefix -> peer name for the UI, filled from the registry.
         self.talker_names = {}
         self._known_peer_ips = set()
+        # PTT tones: a second live source on the mixer, silent until pulsed.
+        # Kept running so a tone starts without waiting for caps negotiation.
+        beep_desc = ""
+        if self.cfg.ptt_beep_pct:
+            beep_desc = ("audiotestsrc name=beep wave=sine volume=0 "
+                         "is-live=true ! audio/x-raw,rate=%d,channels=1,"
+                         "format=S16LE ! mix. " % raw_rate)
         # Request one MiB of UDP buffering and at least two packets of jitter.
         rx_desc = (
             "rtpbin name=rtpbin latency={jitter} do-lost=true autoremove=false "
@@ -1114,10 +1233,12 @@ class MeshVoice:
             "clock-rate=(int){rate},encoding-name=(string){encoding},"
             "payload=(int){pt}\" ! rtpbin.recv_rtp_sink_0 "
             "audiomixer name=mix ignore-inactive-pads=true ! "
-            "  audioconvert ! audioresample ! {play} "
+            "  audioconvert ! audioresample ! "
+            "  level name=rxlvl interval=200000000 ! {play} "
             "audiotestsrc name=silence wave=silence is-live=true ! "
             "  audio/x-raw,rate={arate},channels=1,format=S16LE ! mix. "
-        ).format(group=TALK_GROUP_ADDR, port=self.cfg.port,
+            "{beep}"
+        ).format(group=TALK_GROUP_ADDR, port=self.cfg.port, beep=beep_desc,
                  iface=self.cfg.iface, rate=clock_rate, encoding=encoding,
                  pt=RTP_PAYLOAD_TYPE, arate=raw_rate,
                  jitter=max(self.cfg.jitter_ms, packet_ms * 2),
@@ -1145,6 +1266,9 @@ class MeshVoice:
             self.my_ssrc = ssrc
         self.mixer = self.rx.get_by_name("mix")
         self.rtpbin = self.rx.get_by_name("rtpbin")
+        self.beeper = self.rx.get_by_name("beep")
+        if self.beeper is not None:
+            self.beeper.set_property("volume", 0.0)
 
         # Save codec stages for the per-talker branch handler.
         self._rx_depay_desc = depay_desc
@@ -1192,13 +1316,14 @@ class MeshVoice:
         # Start the receiver before transmit so its multicast join can begin.
         self._play("rx")
         self._play("tx")
+        self._set_playback_level()
         self._suppress_multicast_loopback()
         self._tx_ready()
         log("listening on %s:%d (channel %d) via %s"
             % (TALK_GROUP_ADDR, self.cfg.port, self.cfg.channel, self.cfg.iface))
 
         if self.cfg.ptt_mode == "openvlm":
-            self.ptt = OpenVLMPTT(self.on_ptt, self.on_ptt_presence)
+            self.ptt = OpenVLMPTT(self._on_ptt_edge, self.on_ptt_presence)
             self.ptt.start()
         elif self.cfg.ptt_mode == "always":
             log("PTT: always-on (open mic)")
@@ -1305,7 +1430,22 @@ class MeshVoice:
         elif message.type == Gst.MessageType.ELEMENT:
             struct = message.get_structure()
             if struct and struct.get_name() == "level":
-                self._mic_db = (struct.get_value("rms") or [-90.0])[0]
+                self._note_level(message.src.get_name(),
+                                 (struct.get_value("rms") or [-90.0])[0])
+
+    def _note_level(self, element, rms_db):
+        """Keep the loudest 200 ms RMS per meter until the next state write.
+
+        lvl measures transmitted audio, rxlvl the speaker feed including the
+        PTT tones. A window maximum shows how loud speech is, where the latest
+        reading would mostly catch pauses between words.
+        """
+        if element not in self._level_max:
+            return
+        rms_db = max(rms_db, LEVEL_FLOOR_DB)
+        best = self._level_max[element]
+        if best is None or rms_db > best:
+            self._level_max[element] = rms_db
 
     def reload(self):
         """Apply talk-group and transmit-shaping changes on SIGHUP.
@@ -1401,6 +1541,7 @@ class MeshVoice:
             return False
         if not self._play("rx") or not self._play("tx"):
             return False
+        self._set_playback_level()
         self._suppress_multicast_loopback()
         self._tx_ready()
         # Clear faults from replaced pipelines so the watchdog can check new
@@ -1436,11 +1577,13 @@ class MeshVoice:
         """
         self._set_tx(False)
         self._bind_ip = None
-        for timer in ("_beacon_pending", "_beacon_end"):
+        for timer in ("_beacon_pending", "_beacon_end", "_beep_timer"):
             source = getattr(self, timer)
             if source is not None:
                 GLib.source_remove(source)
                 setattr(self, timer, None)
+        self._beep_steps = []
+        self.beeper = None
         self._remove_bus_watches()
         for pipeline in (self.tx, self.rx):
             if pipeline:
@@ -1635,6 +1778,8 @@ class MeshVoice:
         # Notify systemd independently of voice_watchdog. Only systemd can
         # detect a blocked GLib loop because local checks run on that loop.
         sd_notify("WATCHDOG=1")
+        if self._check_audio_card():
+            return False                    # _panic stopped the loop
         if not self.cfg.watchdog:
             return True
 
@@ -1656,6 +1801,36 @@ class MeshVoice:
 
         self._check_igmp(now)
         return True
+
+    def _check_audio_card(self):
+        """Rebuild onto an OpenVLM card that appeared or was replugged.
+
+        The PTT reader follows hot-plug, but build() picks the audio device
+        once. A board fitted after start-up left voice on the ALSA default
+        (HDMI on a CM4), failing on the error backoff with the PTT working and
+        no audio. A lost card is left to that backoff. Return True when the
+        rebuild failed and the process is restarting.
+        """
+        if self.cfg.test_tone or (self.cfg.alsa_in and self.cfg.alsa_out):
+            return False
+        card = openvlm_card_id()
+        if card is None or card == self.audio_card:
+            return False
+
+        log("audio: OpenVLM card %d (usb %s) appeared: moving audio onto it"
+            % (card[0], card[1] or "unknown"))
+        was_transmitting = self.transmitting
+        if not self._retune(self.cfg.channel, self.cfg.port):
+            self._panic("rebuild onto OpenVLM card %d failed" % card[0])
+            return True
+
+        # Same recovery as a rebind: restore a held PTT, announce the new SSRC.
+        if was_transmitting:
+            self._set_tx(True)
+        if self.cfg.beacon_sec:
+            self._schedule_beacon(500)
+        self.write_state()
+        return False
 
     def _check_igmp(self, now):
         """Check for multicast membership lost while the receiver stays PLAYING.
@@ -1730,6 +1905,47 @@ class MeshVoice:
             self._set_tx(False)
         return False
 
+    def _on_ptt_edge(self, pressed):
+        """Apply an operator PTT edge, then sound its feedback tone.
+
+        Only button edges beep. Retunes, rebinds and resumes of a held PTT go
+        through on_ptt and _set_tx directly and stay silent.
+        """
+        was_transmitting = self.transmitting
+        self.on_ptt(pressed)
+        if pressed:
+            self._beep(PTT_BEEP_KEY if self.transmitting else PTT_BEEP_BLOCKED)
+        elif was_transmitting:
+            self._beep(PTT_BEEP_ROGER)
+        return False  # idle_add one-shot
+
+    def _beep(self, steps):
+        """Start a tone sequence on the local speaker, replacing any playing."""
+        if self.beeper is None:
+            return
+        if self._beep_timer is not None:
+            GLib.source_remove(self._beep_timer)
+            self._beep_timer = None
+        self._beep_steps = list(steps)
+        self._beep_next()
+
+    def _beep_next(self):
+        """Play the next tone step, or silence the source when none remain."""
+        self._beep_timer = None
+        if self.beeper is None:
+            return False
+        if not self._beep_steps:
+            self.beeper.set_property("volume", 0.0)
+            return False
+        hz, ms = self._beep_steps.pop(0)
+        if hz:
+            self.beeper.set_property("freq", float(hz))
+            self.beeper.set_property("volume", self.cfg.ptt_beep_pct / 100.0)
+        else:
+            self.beeper.set_property("volume", 0.0)
+        self._beep_timer = GLib.timeout_add(ms, self._beep_next)
+        return False  # one-shot; the next step has its own timer
+
     def _remote_active(self):
         """Check for remote receive activity within the half-duplex hold."""
         return self.rx_active and now_ms() - self.last_rx_ms < HALF_DUPLEX_HOLD_MS
@@ -1764,6 +1980,21 @@ class MeshVoice:
             return
         self._prune_branches()
 
+    def _rx_gain_stage(self):
+        """Return the talker gain and limiter fragment, or "" at 0 dB.
+
+        Float, so the boosted signal survives until the limiter folds it
+        back under full scale. Per talker, so the PTT tones keep their level.
+        """
+        if not self.cfg.rx_gain_db:
+            return ""
+        return ("audioconvert ! capsfilter caps=\"audio/x-raw,format=F32LE\" ! "
+                "audioamplify amplification=%.4f clipping-method=none ! "
+                "audiodynamic mode=compressor characteristics=hard-knee "
+                "threshold=%.2f ratio=%.2f ! "
+                % (10.0 ** (self.cfg.rx_gain_db / 20.0), RX_LIMIT_THRESHOLD,
+                   RX_LIMIT_RATIO))
+
     def _attach_branch(self, pad):
         """Build one talker's decode branch and feed it into the mixer."""
         name = pad.get_name()
@@ -1773,10 +2004,11 @@ class MeshVoice:
             # element audio". Every branch must reach the mixer in the same
             # format.
             depay = Gst.parse_bin_from_description(
-                "%s ! %s ! audioconvert ! audioresample ! capsfilter "
+                "%s ! %s ! %saudioconvert ! audioresample ! capsfilter "
                 "caps=\"audio/x-raw, rate=(int)%d, channels=(int)1, "
                 "format=(string)S16LE\""
-                % (self._rx_depay_desc, self._rx_dec_desc, self._rx_raw_rate),
+                % (self._rx_depay_desc, self._rx_dec_desc,
+                   self._rx_gain_stage(), self._rx_raw_rate),
                 True)
         except GLib.Error as exc:
             log("rx: cannot build branch for %s: %s" % (name, exc))
@@ -2185,9 +2417,25 @@ class MeshVoice:
             self._set_tx(False)
         elif resume and self.ptt_pressed and not self.transmitting:
             self.on_ptt(True)
+        self._hold_playback_level()
         self.refresh_peers()
         self.write_state()
         return True
+
+    def _hold_playback_level(self):
+        """Reapply the playback level so nothing else can leave it lowered.
+
+        A boot-time alsactl restore or a hand-run mixer can change it after
+        build(). Re-setting an unchanged level is silent, so this runs blind.
+        """
+        card = self.audio_card[0] if self.audio_card else None
+        if card is None or self.cfg.alsa_out:
+            return
+        held = set_playback_level(card, self.cfg.playback_pct) is not None
+        if held != (self.playback_level is not None):
+            log("audio: playback level on card %d %s"
+                % (card, "restored" if held else "could not be reapplied"))
+        self.playback_level = self.cfg.playback_pct if held else None
 
     def refresh_peers(self):
         """Set multicast and optional unicast destinations from active peers.
@@ -2240,6 +2488,12 @@ class MeshVoice:
         if not self._ever_flowed[which]:
             return None
         return round(max(0.0, time.monotonic() - self._flow_ts[which]), 1)
+
+    def _window_db(self, element):
+        """Return and clear one meter's loudest reading, rounded."""
+        best = self._level_max[element]
+        self._level_max[element] = None
+        return None if best is None else round(best, 1)
 
     def _tick_state(self):
         """Write UI state and retain the periodic callback."""
@@ -2311,6 +2565,13 @@ class MeshVoice:
             "eq": ([round(g, 2) for g in self._eq_gains(self._raw_rate)]
                    if self.cfg.eq else None),
             "tx_gain_db": round(20.0 * math.log10(self._tx_gain), 1),
+            "audio_card": self.audio_card[0] if self.audio_card else None,
+            "playback_level_pct": self.playback_level,
+            "rx_gain_db": self.cfg.rx_gain_db,
+            # Loudest 200 ms RMS in dBFS since the previous write, None when
+            # the meter reported nothing. Speech near -20 is a good level.
+            "mic_db": self._window_db("lvl"),
+            "rx_db": self._window_db("rxlvl"),
             # Watchdog capture/playback flows run while idle. Packet counters
             # stay flat between transmissions.
             "watchdog": self.cfg.watchdog,

@@ -310,7 +310,32 @@ The PTT switch is USB, not GPIO. The OpenVLM board is a C-Media CM108B and the
 switch is read from USB HID input reports on `/dev/hidraw*`. A generic CM108
 dongle also works, and a strapped OpenVLM board is preferred when both are
 present. Hot-plug is handled by reopening, so the daemon runs with no board
-fitted and picks one up when it appears.
+fitted and picks one up when it appears. The audio path follows too: the
+health tick checks for the card every 5 seconds and rebuilds the pipelines onto
+it when it appears or is replugged, keeping a held PTT.
+
+The CM108B playback mixer powers up at -20 dB, which is quiet in a headset. On
+the autodetected card the daemon sets it to `voice_playback_pct` (default 100,
+the card's 0 dB maximum) at start-up and after every replug, and reapplies it
+every 30 seconds so a mixer restore or a hand-run `alsamixer` cannot leave it
+lowered. Change the level through the key, not the mixer. The capture mixer is
+left alone. `playback_level_pct` in the state file is the level it set, or
+`null` when it could not set one.
+
+The card's maximum is still quiet for headset speech, so each talker also gets
+`voice_rx_gain_db` of software gain (default +18 dB) ahead of the mixer. A
+limiter behind it folds peaks above -6 dBFS back under full scale, so loud
+talkers flatten rather than clip; +18 dB is the most that stays under full
+scale on a -3 dBFS input. The PTT tones are not boosted. `mic_db` and `rx_db`
+in the state file are the loudest 200 ms RMS, in dBFS, of the transmitted audio
+and of the speaker feed since the previous write. Speech around -20 is a good
+level.
+
+Pressing PTT plays a short tone in the local earpiece, and releasing it plays a
+falling two-tone roger. A press that cannot transmit, because of half duplex or
+an unbound send socket, gets a long low tone instead. The tones are mixed into
+playback only and are never transmitted. `voice_ptt_beep_pct` sets their level;
+0 turns them off.
 
 The mic input expects an electret. The CM108B biases `MIC+` through its own
 network, which suits the electret capsule in a commercial headset. A dynamic
@@ -417,6 +442,9 @@ Config keys in `/etc/mesh.conf`:
 | `voice_loss_pct` | `20` | Opus in-band FEC expected-loss level |
 | `voice_ttl` | `32` | Multicast TTL |
 | `voice_alsa_in` / `voice_alsa_out` | auto | Override the ALSA devices. Empty autodetects the OpenVLM card |
+| `voice_playback_pct` | `100` | Playback mixer level held on the autodetected card, 0-100. Not applied with `voice_alsa_out` set |
+| `voice_rx_gain_db` | `18` | Software receive gain per talker, limited, 0-24. 0 bypasses it. Above 18 loud talkers can clip |
+| `voice_ptt_beep_pct` | `20` | PTT key/roger tone level in the earpiece, 0-100. 0 disables |
 | `voice_test_tone` | `n` | Bench mode: 440 Hz tone in, null sink out, so the transport can be proven with no audio hardware fitted |
 
 ---
