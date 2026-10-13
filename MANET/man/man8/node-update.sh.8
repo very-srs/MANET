@@ -1,4 +1,4 @@
-.Dd October 12, 2026
+.Dd October 13, 2026
 .Dt NODE-UPDATE.SH 8
 .Os MANET
 .Sh NAME
@@ -35,6 +35,23 @@ Individual files are replaced atomically, but the whole update has no
 automatic rollback.
 Errors are logged under the journal identifier
 .Li manet-update .
+.Pp
+With
+.Li auto_update=y
+in
+.Pa /etc/mesh.conf ,
+automatic stable checks are queued after direct-uplink readiness, acquisition
+of a mesh-gateway default route, initial clock synchronization, and daily.
+The daily timer adds up to two hours of random delay and catches missed
+calendar events after downtime.
+Every check requires a direct uplink default route or a next-hop default on
+.Li br0 ,
+plus the clock marker.
+Mesh checks wait a random 0 to 900 seconds before invoking the updater;
+direct-uplink checks do not add that delay.
+Route refreshes and gateway switches do not queue extra checks.
+All automatic checks retain the routine 24-hour throttle.
+Disabling automatic updates makes these triggers exit without checking.
 .Bl -tag -width Ds
 .It Fl -routine
 Suppress console output and skip release checks for 24 hours after a

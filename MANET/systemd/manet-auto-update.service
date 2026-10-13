@@ -5,4 +5,4 @@ After=network-online.target
 [Service]
 Type=oneshot
 ExecStart=/usr/local/bin/manet-auto-update.sh
-TimeoutStartSec=20min
+TimeoutStartSec=45min

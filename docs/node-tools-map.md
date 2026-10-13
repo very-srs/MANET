@@ -217,7 +217,7 @@ Read [first boot](guide/content/first-boot.md), [updates](guide/content/updates.
 | [manet_release.py](../MANET/node_tools/manet_release.py) | Select a published stable/development release and validate its manifest. |
 | [node-update.sh](../MANET/node_tools/node-update.sh) | Enter the Python updater or resume using the retained recovery copy. |
 | [node-update.py](../MANET/node_tools/node-update.py) | Verify, stage, replace and activate an update with durable recovery state. |
-| [manet-auto-update.sh](../MANET/node_tools/manet-auto-update.sh) | Run the configured routine update when a direct uplink is available. |
+| [manet-auto-update.sh](../MANET/node_tools/manet-auto-update.sh) | Gate routine updates on opt-in, clock sync and a direct or mesh-gateway route; spread mesh checks with a bounded delay. |
 | [version.txt](../MANET/node_tools/version.txt) | Runtime package version; must match the paired source version when publishing packages. |
 
 ## Power, indicators and recovery

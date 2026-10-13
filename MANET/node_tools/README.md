@@ -1284,12 +1284,21 @@ tools payload are preserved. Recovery storage is removed after success, and
 abandoned download directories are cleaned under the update lock. Space checks
 leave 128 MiB free in addition to the estimated installation requirements.
 
-The networkd-dispatcher routable hook and initial qualified clock sync trigger
-checks when `auto_update=` is true and the selected uplink has a default route.
+Automatic updates remain opt-in through `auto_update=`. The routable hook,
+acquisition of a mesh-gateway default route, and initial qualified clock sync
+queue checks. A daily timer also queues a check with up to two hours of random
+delay and catches missed calendar events after downtime. Checks accept either
+the selected direct uplink's IPv4 default or a next-hop default on `br0`;
+mesh-only nodes need no saved upstream interface. Mesh checks add a random
+0–15 minute delay before the updater, then recheck opt-in and route availability.
+Direct-uplink checks do not add that delay. Gateway switches and route
+refreshes do not queue extra checks. The updater's 24-hour marker throttle
+remains the real limiter, and its lock prevents overlapping updates.
+
 Checks defer until `/run/initial_time_synced` exists; a path unit queues a check
 when it appears. Manual downloads also require this marker and report a clear
 clock error when it is absent. Local recovery remains available without clock
-sync. There is no periodic download timer. See
+sync. Disabled automatic updates exit successfully even with the timer enabled. See
 [networkd-dispatcher/README.md](../networkd-dispatcher/README.md).
 
 **Storage limits**

@@ -92,6 +92,14 @@ These choices apply to that invocation. Automatic updates continue to select
 stable. They leave a newer installed development version alone; returning to an
 older stable version requires `sudo node-update.sh --allow-downgrade`.
 
+Automatic updates remain opt-in. They check after a direct uplink becomes
+ready, after gaining a mesh-gateway default route, after initial clock sync,
+and on a daily timer with up to two hours of random delay. The timer catches
+missed calendar events after downtime. All checks require a usable default
+route and initial clock sync. Mesh checks add a random 0–15 minute wait to
+spread downloads through the gateway; direct-uplink checks do not. The updater
+retains its 24-hour throttle after a successful check or installation.
+
 The flashers pin the selected release into the generated first-boot script.
 Later uploads cannot change its download target. If an old prerelease was
 deleted before that image first boots, reflash with a retained release.

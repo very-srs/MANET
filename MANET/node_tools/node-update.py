@@ -48,6 +48,7 @@ REQUIRED = MARKERS | {
     "usr/local/bin/manet-auto-update.sh",
     "etc/systemd/system/manet-auto-update.service",
     "etc/systemd/system/manet-auto-update.path",
+    "etc/systemd/system/manet-auto-update.timer",
     "etc/systemd/system/manet-auto-update-clock.service",
     "usr/local/bin/node-manager-static.sh", "usr/local/bin/node-manager-acs.sh",
     "usr/local/bin/manet-admin-setup.sh", "usr/local/bin/mesh-status.py",
@@ -551,6 +552,7 @@ class Updater:
         run_command(["systemctl", "enable", "--now", "manet-cpu-policy.service"])
         run_command(["systemctl", "enable", "--now", "manet-logrotate.timer"])
         run_command(["systemctl", "enable", "--now", "manet-auto-update.path"])
+        run_command(["systemctl", "enable", "--now", "manet-auto-update.timer"])
         # Only running Wi-Fi mesh instances adopt the new binary now.
         # HaLow candidates require separate bench approval and activation.
         run_command(["systemctl", "try-restart", "wpa_supplicant@*.service"])
