@@ -1864,6 +1864,7 @@ fi
 # Keep boot-only identity/lobby/shutdown units outside this list.
 provision_try "systemd reload failed" systemctl daemon-reload
 provision_try "automatic update clock trigger failed" systemctl enable --now manet-auto-update.path
+provision_try "automatic update daily trigger failed" systemctl enable --now manet-auto-update.timer
 for unit in mesh-status.service batman-enslave-watch.service \
     gateway-route-manager.service syncthing@radio.service \
     syncthing-peer-manager.service mesh-hosts-update.timer \

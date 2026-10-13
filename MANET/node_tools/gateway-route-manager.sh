@@ -230,6 +230,10 @@ while true; do
             fi
             log "Gateway detected: $gw_mac at $gw_ip"
             log "Default route updated: via $gw_ip src $local_ip"
+            # Queue once on gaining a route, not on refreshes or gateway swaps.
+            if [ -z "$cur" ] && grep -qiE '^auto_update=(y|yes|1|true)[[:space:]]*$' /etc/mesh.conf 2>/dev/null; then
+                systemctl start --no-block manet-auto-update.service || log "Could not queue automatic update check"
+            fi
         else
             log "Route installation failed; retrying"
             continue

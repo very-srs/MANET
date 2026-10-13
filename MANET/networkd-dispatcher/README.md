@@ -48,17 +48,28 @@ status, at most 3 minutes later. Phone tethers, cellular modems and Wi-Fi
 uplinks are not tested and announce the default 10/2 Mbit/s.
 
 After reconciliation, an opted-in node queues `manet-auto-update.service`
-without waiting for it. This oneshot rechecks `auto_update` and the selected
-uplink's IPv4 default route before running the updater. It excludes mesh
-bridges and does not require ICMP access. Systemd serializes concurrent starts.
+without waiting for it. This oneshot rechecks `auto_update` and accepts either
+the selected uplink's IPv4 default route or a next-hop default on `br0` from
+the mesh gateway route manager. It still excludes loopback, BATMAN devices and
+other bridges, and does not require ICMP access. Systemd serializes concurrent
+starts, and the updater's flock excludes concurrent manual updates too.
 Without `/run/initial_time_synced`, it logs that the check is deferred and exits
 successfully. The time service creates this marker after verified GPS, NTS or
 qualified peer synchronization. `manet-auto-update.path` watches for it and
 queues another check once per boot, including if the marker already exists
-when the path unit starts. The clock trigger also checks opt-in and the uplink;
-if no uplink exists yet, a later routable event checks again.
-There is no cron job or timer; routable and initial clock-sync events trigger
-automatic checks.
+when the path unit starts. The clock trigger also checks opt-in and the route;
+if no route exists yet, a later routable event or mesh route acquisition checks
+again. The gateway route manager queues a check only after successfully gaining
+a default route where none existed, not on route refreshes or gateway switches.
+Mesh-path checks wait a random 0–900 seconds, then recheck opt-in and route
+availability. Direct-uplink checks do not add this delay.
+
+`manet-auto-update.timer` also queues the same service daily with up to two hours
+of random delay. It catches missed calendar events after downtime. The updater
+still skips routine checks within 24 hours of a successful check or installation;
+the timer does not override that limit. Path and timer ship enabled and are
+started by setup and updates. With automatic updates disabled, the wrapper exits
+successfully before looking up routes or waiting.
 The opt-in accepts `y`, `yes`, `1` or `true`, case-insensitively.
 
 The time service observes the selected uplink and starts internet time

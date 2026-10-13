@@ -6,7 +6,9 @@
 
 ### Update. Keep the cables in.
 
-If you selected automatic updates at install time, your radio will check whenever it gets an ethernet connection.
+With automatic updates on, your radio checks when internet becomes available,
+including through another radio. It also tries each day. Sharing another
+radio's internet can add up to 15 minutes of waiting before a check.
 
 To update manually:
 
@@ -55,9 +57,24 @@ Run the update on each radio you intend to update. Updating one node does not in
 
 ### Automatic updates
 
-Enable **automatic updates** through [Node config](settings.md). An opted-in radio queues a stable check when its selected uplink becomes routable and when its clock first synchronizes. It rechecks that an uplink route is available before downloading.
+Enable **automatic updates** through [Node config](settings.md). An opted-in
+radio queues a stable check when its own internet connection becomes ready,
+when it first gains an internet route through a mesh gateway (another radio
+sharing internet), and when its clock first synchronizes. It needs a route
+and a synchronized clock before checking. Changing from one mesh gateway to
+another does not trigger an extra check.
 
-These are event-triggered checks. There is no periodic download timer. Routine checks normally skip another check for 24 hours after a successful check or installation. An explicit manual run does not use that routine throttle.
+A daily timer also queues a check, with a random delay of up to two hours,
+and catches a missed scheduled check after the radio powers back on. Checks
+through a mesh gateway wait another random 0–15 minutes to spread downloads
+among radios sharing that connection. A radio with its own internet uplink
+does not add that mesh delay. Turning automatic updates off prevents these
+checks even though the timer remains enabled.
+
+Routine checks normally skip another check for 24 hours after a successful
+check or installation. The daily schedule can therefore skip a day if its
+check falls inside that window. An explicit manual run does not use that
+routine throttle.
 
 ### Trying a development build
 
@@ -150,7 +167,26 @@ describes retained state, validation limits, and recovery entry points.
 
 ### Automatic triggering and kernel ownership
 
-The dispatcher queues `manet-auto-update.service` after uplink reconciliation. `manet-auto-update.path` and the clock-triggered service retry after initial verified time sync. Each path checks opt-in and the selected uplink; no timer polls for new releases.
+The dispatcher queues `manet-auto-update.service` after uplink reconciliation.
+The gateway route manager queues the same service only after successfully
+installing a mesh default where none existed; route refreshes and gateway
+switches do not queue it. `manet-auto-update.path` and the latched clock relay
+retry after initial verified time sync. `manet-auto-update.timer` adds a daily
+calendar event with `RandomizedDelaySec=2h` and `Persistent=true`, so a missed
+event is caught after downtime.
+
+Every trigger checks opt-in and the clock marker. The wrapper accepts either
+the selected direct uplink's IPv4 default or `default via <IPv4> dev br0`,
+which only the gateway route manager installs. Mesh clients need no saved
+upstream interface. Only mesh checks sleep a random 0–900 seconds;
+`MANET_AUTO_UPDATE_DELAY` provides a bounded test override. The
+45-minute service timeout covers sleep and update together, leaving
+30 minutes at maximum jitter. Route and opt-in are rechecked after the sleep.
+Systemd coalesces starts of this oneshot while it is activating, and the
+updater's flock excludes overlapping manual updates. The version-marker mtime
+still enforces the actual 24-hour routine throttle. The timer and path are
+shipped enabled and activated by setup and updates; disabled opt-in exits
+before any network check.
 
 `manet-kernel-protect.py` applies MANET's boot-package policy before updater
 dependency work. It prevents distribution packages from replacing the MANET

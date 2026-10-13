@@ -2602,7 +2602,9 @@ hook is diverted, while `flash-kernel` is disabled by its machine setting.
 See [kernel ownership](kernel-6.18-morse-port.md#81-apt-owns-userland-manet-releases-own-the-kernel)
 for the package scope and recovery procedure.
 
-`auto_update=` set to a true value. See
+Automatic updates require `auto_update=` set to a true value, a direct uplink
+or mesh-gateway default route, and initial qualified clock sync. Checks are
+queued on route readiness, initial clock sync, and daily. See
 [networkd-dispatcher/README.md](../MANET/networkd-dispatcher/README.md).
 
 GitHub Releases now supplies metadata and packages together. Stable selection
@@ -2989,10 +2991,25 @@ delegates to it, and setup no longer overwrites it. The hook retains
 use the same hotplug command. `off` is the same file in both places.
 
 The routable hook queues `manet-auto-update.service` with `--no-block` after
-uplink reconciliation. Its wrapper rechecks opt-in and a selected non-mesh
-uplink with a default route, then requires `/run/initial_time_synced` before
-running the routine updater. An absent marker logs one deferred-check line and
-returns success. `manet-auto-update.path` uses `PathExists` to notice initial
+uplink reconciliation. `gateway-route-manager.sh` also queues it after a
+successful transition from no default route to a mesh gateway, only with
+`auto_update` enabled. Refreshing a route or switching gateways does not queue
+another check. The wrapper accepts the selected non-mesh uplink with its IPv4
+default route, or a `default via <IPv4> dev br0` route. The latter does not
+require a saved upstream interface: the route manager is the sole writer of
+`br0` defaults in the node tools, and the uplink dispatcher excludes bridges,
+BATMAN devices and loopback. Link-only bridge defaults do not qualify.
+
+The wrapper retains the opt-in and `/run/initial_time_synced` gates. An absent
+clock marker logs one deferred-check line and returns success. Mesh checks
+then sleep a random 0–900 seconds to spread downloads through a shared gateway;
+direct-uplink checks do not sleep. `MANET_AUTO_UPDATE_DELAY` overrides the delay
+with an integer in that range for tests. This uses the existing oneshot, with
+no resident scheduler. Its 45-minute start timeout bounds both sleep and the
+update attempt, leaving 30 minutes after the longest delay. Opt-in
+and route availability are checked again after sleeping.
+
+`manet-auto-update.path` uses `PathExists` to notice initial
 qualified clock sync, including a marker already present when the path starts.
 It activates `manet-auto-update-clock.service`, a oneshot that queues the same
 routine service and remains active for the rest of the boot. This prevents a
@@ -3001,8 +3018,18 @@ uses `RemainAfterExit`; the routine service stays repeatable for later routable
 events, including when the clock arrived before an uplink. The relay orders
 after any in-progress routine check so a pre-sync check cannot consume its
 start request. It queues without blocking to avoid waiting on that ordering.
-The enabled path ships in every systemd payload and is enabled and started by
-the updater and radio setup. Opt-in and route checks apply to both triggers.
+`manet-auto-update.timer` adds `OnCalendar=daily` with up to two hours of random
+delay. `Persistent=true` catches a missed calendar event after downtime; the
+clock and route gates still apply. Both path and timer ship enabled in every
+systemd payload and are enabled and started by the updater and radio setup.
+The updater's version-marker mtime remains the actual 24-hour throttle after a
+successful routine check or installation. A daily event that falls within
+that window skips release lookup, so downloads are not promised every day.
+All triggers use the same oneshot service: systemd coalesces concurrent starts
+while it is activating. The updater also holds an exclusive nonblocking
+`/run/manet-update.lock` flock across checking and installation, serializing
+manual and automatic invocations. Disabled automatic updates exit successfully
+before route lookups or delays.
 No ICMP probe gates downloads and no download holds up a dispatcher event.
 Manual stable/development downloads reject an absent clock marker with a
 clear error; local archive recovery does not require a clock.

@@ -1,0 +1,11 @@
+[Unit]
+Description=Check for MANET updates daily when enabled
+
+[Timer]
+OnCalendar=daily
+RandomizedDelaySec=2h
+Persistent=true
+Unit=manet-auto-update.service
+
+[Install]
+WantedBy=timers.target
