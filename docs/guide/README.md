@@ -128,7 +128,9 @@ review; run behavior tests when needed to resolve a factual uncertainty.
 
 Use plain, factual documentation. Do not add marketing copy, taglines, slogans,
 or decorative prose to make the pages sound more exciting. Descriptions should
-explain what a page covers; labels should identify controls or destinations.
+explain what a page covers. Labels should identify controls or destinations.
+Do not use semicolons in guide prose. Write two sentences, or reword the
+sentence so it does not need one. Code, commands and file contents are exempt.
 Keep **Reading level** directly above the three selectors.
 
 Use the existing FER logo from `MANET/share/manet/fer-logo-black.png`, as the

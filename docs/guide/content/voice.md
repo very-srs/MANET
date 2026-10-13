@@ -17,21 +17,21 @@ You can hear other speakers while your button is released.
 
 ### Voice comes from the radio's headset
 
-Mesh PTT uses an audio device and physical push-to-talk button attached to the radio. Enable mesh voice during setup. The web interface shows status and lets you choose a talk group; it is not a browser microphone.
+Mesh PTT uses an audio device and physical push-to-talk button attached to the radio. Enable mesh voice during setup. The web interface shows status and lets you choose a talk group. It is not a browser microphone.
 
-The supported USB path uses a CM108-family audio device, including OpenVLM hardware. Headset wiring and microphone level matter: a military dynamic microphone needs suitable amplification before the CM108B input. Check the [audio hardware reference](../../../MANET/node_tools/README.md#audio-hardware) before connecting a headset.
+The supported USB path uses a CM108-family audio device and is intended for OpenVLM hardware. Headset wiring and microphone level matter: a military dynamic microphone needs suitable amplification before the CM108B input. Check the [audio hardware reference](../../../MANET/node_tools/README.md#audio-hardware) before connecting a headset. An electret mic needs no amplification on a bare OpenVLM.
 
 ### Select the same talk group
 
-Open the management UI's Voice tab. Radios start on group 1 and can select groups 1 through 32. Set each participating radio to the group you want; changing your group does not move everybody else.
+Open the management UI's Voice tab. Radios start on group 1 and can select groups 1 through 32. Set each participating radio to the group you want. Changing your radio's group does not move anybody else.
 
 Hold the physical PTT button to transmit. Release it to stop transmitting. Receivers can mix simultaneous speakers, so two people talking at once are both heard.
 
 ### When there is no audio
 
-Confirm voice is enabled, the mesh has a working path, the talk groups match, and the Voice tab reports a healthy audio path. Then check the audio hardware and microphone wiring.
+Confirm voice is enabled, the mesh is connected, the talk groups match, and the Voice tab reports a healthy audio path. Then check the audio hardware and microphone wiring.
 
-The default codec is **Lyra**. Lyra and Opus do not interoperate. A radio that missed a mesh-wide codec change while powered off must be brought into the same codec setting; reissue the change with it online.
+The default codec is **Lyra**. It transfers good-quality audio with less bandwidth than Opus, but lacks compatibility with other tools that would expect Opus. Lyra and Opus do not interoperate. A radio that missed a mesh-wide codec change while powered off must be set to the same codec. Reissue the change with it online.
 
 ## Developer
 
@@ -69,7 +69,7 @@ Receivers keep established sources through silence so the next transmission
 does not pay the full branch-creation cost. A sender also emits a short
 muted presence transmission at startup and when newly observed peers need
 to learn it. The beacon uses the sender's actual RTP sequence/timestamp
-space; a receiver inventing packets on another sender's behalf would create
+space, as a receiver inventing packets on another sender's behalf would create
 the wrong state. These choices reduce clipped beginnings without continuous
 audio transmission. The [voice internals](../../../docs/node-tools-internals.md#voice)
 describe branch limits, cleanup, and the fallback beacon interval.
