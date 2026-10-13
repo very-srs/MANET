@@ -1178,5 +1178,56 @@ class PhoneClockTests(unittest.TestCase):
         self.assertEqual(len(position._seen_sa_times), PHONE_SA_HISTORY)
 
 
+class ControllerTransitionTests(unittest.TestCase):
+    def test_switch_preserves_radio_location_distrust_and_retirement_owner(self):
+        position = PhonePosition(radio_uid='radio')
+        feed(position)
+        send(position, mark('old', 1), seconds=1)
+        position.select(101, utc(1), radio_gps=RadioGPS(Fix(0.1, 0.1, 'gnss'), 101, 'GNSS_SUSPECTED', fault_epoch=1))
+        held = position._manual
+        other = PhonePosition(radio_uid='radio')
+        # The new controller's clock is a day behind, but its new observation
+        # is ordered in radio monotonic time against the old controller's mark.
+        guest_sa = sa(seconds=-86400, uid='other')
+        other.feed(guest_sa, 102, utc(2), from_ethernet=True, allow_location=False)
+        position.follow_phone(other, changed=True)
+        self.assertEqual(position._manual, held)
+        self.assertTrue(position._distrusted)
+        self.assertEqual(position._fault_epoch, 1)
+        incoming = mark('new', -86399, creator_uid='other')
+        self.assertEqual(position.feed_marker(incoming, 103, utc(3), from_ethernet=True).status, 'accepted')
+        self.assertEqual(position._retirements['old'], GPS.uid)
+
+    def test_guest_user_selection_is_not_a_gesture_when_later_chosen(self):
+        position = PhonePosition(radio_uid='radio')
+        feed(position)
+        position.select(100, utc())
+        guest = PhonePosition(radio_uid='radio')
+        chosen = replace(USER_SELECTED, uid='other', time=utc(1), start=utc(1), stale=utc(76))
+        self.assertEqual(guest.feed(chosen, 101, utc(1), from_ethernet=True, allow_location=False).status, 'accepted_presence')
+        self.assertIsNone(guest._manual)
+        position.follow_phone(guest, changed=True)
+        periodic = replace(chosen, time=utc(2), start=utc(2), stale=utc(77))
+        self.assertEqual(position.feed(periodic, 102, utc(2), from_ethernet=True).status, 'accepted_presence')
+        self.assertIsNone(position._manual)
+        self.assertFalse(position._warnings['gps_untrusted'].acknowledged)
+        # A changed USER selection is now the controller's own fresh gesture.
+        changed = replace(periodic, lat=periodic.lat + .01, time=utc(3), start=utc(3), stale=utc(78))
+        self.assertEqual(position.feed(changed, 103, utc(3), from_ethernet=True).status, 'accepted_manual')
+        self.assertTrue(position._warnings['gps_untrusted'].acknowledged)
+
+    def test_switch_keeps_new_controllers_successful_feed_echo_guard(self):
+        position = PhonePosition(radio_uid='radio')
+        feed(position)
+        guest = PhonePosition(radio_uid='radio')
+        guest.feed(sa(uid='other'), 100, utc(), from_ethernet=True, allow_location=False)
+        fix = Fix(40, -105, 'gnss')
+        guest.position_sent(fix, 101, utc(1))
+        position.follow_phone(guest, changed=True)
+        manual = sa('manual', 2, uid='other', lat=41, lon=-105, geopointsrc='USER')
+        self.assertEqual(position.feed(manual, 102, utc(2), from_ethernet=True).status, 'accepted_presence')
+        self.assertIsNone(position._manual)
+
+
 if __name__ == "__main__":
     unittest.main()

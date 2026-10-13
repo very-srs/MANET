@@ -1,6 +1,6 @@
 """Pure selection and feedback for a radio-fed, tethered ATAK phone.
 
-Only end0-proven, pinned-phone user gestures supply manual locations. Sent
+Only local-EUD-proven controller gestures supply manual locations. Sent
 points use creator time. Hand-set self SA uses changes while no feed is live.
 MANET echoes and internal phone GPS never become independent observations.
 Manual positions persist. Position distrust latches until a new nearby user
@@ -162,8 +162,8 @@ def _fix(point, source, phone_uid, note):
 class PhonePosition:
     """Select GPS or the newest manual gesture and produce service actions.
 
-    from_ethernet is bridge-port proof, never an IP/UID guess. Association
-    changes require a new instance. Call position_sent only after successful
+    from_ethernet is local EUD bridge-port proof (wired or AP), never an
+    IP/UID guess. follow_phone changes the controller without losing radio state. Call position_sent only after successful
     external-position transport. Its timeout guards self-drag adoption.
     Retain/persist association, manual choice, distrust and pending actions.
     """
@@ -197,6 +197,7 @@ class PhonePosition:
             raise ValueError("max_pending_retirements must be a positive integer")
         self.max_pending_retirements = max_pending_retirements
         self.radio_uid = None if radio_uid is None else _text(radio_uid, "radio_uid")
+        self.sa_history_limit = PHONE_SA_HISTORY
         self.pinned_uid = None
         self._clock = None
         self._latest_time = None
@@ -301,7 +302,7 @@ class PhonePosition:
         self._latest_time = sa.time
         self._seen_sa_times[sa.time] = None
         # Evict by admission order, independent of phone timestamp order.
-        if len(self._seen_sa_times) > PHONE_SA_HISTORY:
+        if len(self._seen_sa_times) > self.sa_history_limit:
             del self._seen_sa_times[next(iter(self._seen_sa_times))]
         return None, phone_time, diagnostic
 
@@ -315,7 +316,7 @@ class PhonePosition:
         """
         if self._manual is None:
             return 1
-        if self._manual.clock_generation == self._phone_generation:
+        if self._manual.phone_uid == self.pinned_uid and self._manual.clock_generation == self._phone_generation:
             a, b = stamp, self._manual.observation_time
         else:
             a, b = observed_mono, self._manual.observation_mono
@@ -330,7 +331,7 @@ class PhonePosition:
         if retiring and previous_uid not in self._retirements:
             if len(self._retirements) >= self.max_pending_retirements:
                 return False
-            self._retirements[previous_uid] = None
+            self._retirements[previous_uid] = self._manual.phone_uid
         self._manual = location
         self._manual_retired = False
         return True
@@ -348,11 +349,11 @@ class PhonePosition:
         if uid not in self._retirements:
             if len(self._retirements) >= self.max_pending_retirements:
                 return False
-            self._retirements[uid] = None
+            self._retirements[uid] = self._manual.phone_uid
         self._manual_retired = True
         return True
 
-    def feed(self, sa, receipt_mono, receipt_utc, *, from_ethernet):
+    def feed(self, sa, receipt_mono, receipt_utc, *, from_ethernet, allow_location=True):
         """Accept presence, diagnose phone GPS, and adopt drags/USER selections."""
         if not isinstance(sa, PhoneSA):
             raise ValueError("sa must be a parsed PhoneSA")
@@ -378,6 +379,35 @@ class PhonePosition:
         # Presence ends at either packet staleness or the receipt-age limit.
         self._presence = mono + min((sa.stale - phone_time).total_seconds(), self.receipt_max_age_s - age)
         self.pinned_uid = sa.uid
+        return self.admitted_sa(sa, mono, phone_time, reappeared, diagnostic, allow_location=allow_location)
+
+    def follow_phone(self, source, *, changed=False):
+        """Copy admitted controller timing; retain radio geography and trust.
+
+        Per-phone observers own replay histories. Controller changes reset gesture
+        baselines to that phone's last SA, so choosing a guest is not itself a
+        location gesture. The service passes a new SA separately when automatic
+        choice coincides with first admission.
+        """
+        names = ('pinned_uid', '_clock', '_latest_time', '_phone_ref', '_phone_mono_ref',
+                 '_phone_generation', '_seen_sa_times', 'clock_diagnostic', '_presence')
+        for name in names:
+            value = getattr(source, name)
+            setattr(self, name, dict(value) if isinstance(value, dict) else value)
+        if changed:
+            for name in ('_feed_until', '_last_sent_mono', '_last_sent_point',
+                         '_last_manual_sa_point', '_last_user_sa_point', '_last_sa_geopointsrc'):
+                setattr(self, name, getattr(source, name))
+            for code, warning in self._warnings.items():
+                warning.phone_uid = self.pinned_uid
+                warning.message_id = warning.sent_mono = warning.deadline = None
+                warning.delivered = warning.read = False
+                self._events.pop((code, 'geochat'), None)
+                warning.chat_event_id = self._emit(code, 'geochat', warning.text)
+
+    def admitted_sa(self, sa, mono, phone_time, reappeared=False, diagnostic=None, *, allow_location=True):
+        """Apply gestures only after the caller has admitted this phone's SA."""
+        age = max(0.0, (phone_time - sa.time).total_seconds())
         feeding = self._feeding(mono)
         if feeding and sa.geopointsrc == "GPS" and sa.source == "gps":
             self._warn("phone_gps", "Phone location services are on. Turn Android location "
@@ -398,7 +428,7 @@ class PhonePosition:
                 changed = point != self._last_manual_sa_point
             # Accept only actions after the last send and newer than the held
             # mark. Feed expiry alone cannot make an echoed point a new drag.
-            if (not feeding and changed and (user_selected or point != self._last_sent_point)
+            if (allow_location and not feeding and changed and (user_selected or point != self._last_sent_point)
                     and (self._last_sent_mono is None or mono - age > self._last_sent_mono)
                     and self._manual_order(sa.time, mono - age) > 0):
                 note = "user-selected own location" if user_selected else "hand-set own dot"
@@ -709,7 +739,7 @@ class PhonePosition:
         if self._manual is not None and fresh and state != "NO_FIX":
             mark = self._manual
             distance = _distance_m((gps_fix.lat, gps_fix.lon), (mark.fix.lat, mark.fix.lon))
-            epoch = (mark.clock_generation, mark.observation_time)
+            epoch = (mark.phone_uid, mark.clock_generation, mark.observation_time)
             # Evaluate each manual observation once unless retirement is full.
             if self._checked_manual_epoch != epoch:
                 checked = True

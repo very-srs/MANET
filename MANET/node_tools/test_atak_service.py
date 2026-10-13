@@ -561,7 +561,7 @@ class PersistenceTests(Harness):
 
     def test_corrupt_unknown_schema_and_wrong_identity_refuse_startup(self):
         baseline = copy.deepcopy(self.store.data)
-        for change in ({'schema': 2}, {'uid': 'other'}, {'state': {'class': '__import__', 'fields': {}}}):
+        for change in ({'schema': 99}, {'uid': 'other'}, {'state': {'class': '__import__', 'fields': {}}}):
             self.store.data = dict(baseline, **change)
             with self.assertRaises((ValueError, KeyError, TypeError)):
                 self.restart()
@@ -604,6 +604,12 @@ class FirewallReadbackTests(unittest.TestCase):
 
     def test_readback_omits_implied_matches_and_still_validates(self):
         data = json.loads(self.READBACK.read_text())
+        self.assertFalse(atak.valid_firewall(data))  # obsolete 4242-only policy
+        for item in data['nftables']:
+            for expression in item.get('rule', {}).get('expr', []):
+                match = expression.get('match', {})
+                if match.get('left', {}).get('payload', {}).get('field') == 'dport' and match.get('right') == 4242:
+                    match['right'] = {'set': [4242, 4349]}
         self.assertTrue(atak.valid_firewall(data))
 
     def test_dropping_a_real_match_still_fails(self):
@@ -761,6 +767,8 @@ class FragmentPolicyTests(unittest.TestCase):
         def value(expr):
             if not isinstance(expr, dict):
                 return expr
+            if 'set' in expr:
+                return set(expr['set'])
             if '&' in expr:
                 return value(expr['&'][0]) & value(expr['&'][1])
             if 'meta' in expr:
@@ -781,7 +789,8 @@ class FragmentPolicyTests(unittest.TestCase):
             matches = []
             for expr in rule['expr'][:-1]:
                 m = expr['match']
-                same = value(m['left']) == value(m['right'])
+                left, right = value(m['left']), value(m['right'])
+                same = left in right if isinstance(right, set) else left == right
                 matches.append(same if m['op'] == '==' else not same)
             if all(matches):
                 self.assertEqual(rule['expr'][-1], {'drop': None})
@@ -1369,6 +1378,192 @@ class NetworkTests(Harness):
             self.network.handle([sock], self.clock.now(), self.service)
 
 
+class LazyNetworkTests(Harness):
+    def setUp(self):
+        super().setUp()
+        self.fixture = GuardTests()
+        self.fixture.setUp()
+        self.addCleanup(self.fixture.doCleanups)
+        self.guard = self.fixture.cached_guard()
+        self.network = atak.Network(FakeSocket, self.guard.current)
+        self.addCleanup(self.network.close)
+
+    def idle(self):
+        proof = self.guard.current(refresh=self.service.has_live_lease(self.clock.now()))
+        self.assertIsNone(proof)
+        self.network.idle(LOCAL)
+
+    def arrive(self, tcp=False):
+        packet = self.packets.sa('none', self.phone_time())
+        if tcp:
+            sock = FakeSocket()
+            self.network.listener.accepted.append((sock, (IP, 12000)))
+            self.network.handle([self.network.listener], self.clock.now(), self.service)
+            if not sock.closed:
+                sock.incoming.append(packet)
+                self.network.handle([sock], self.clock.now(), self.service)
+            return sock
+        self.network.udp.incoming.append((packet, (IP, 12000)))
+        self.network.handle([self.network.udp], self.clock.now(), self.service)
+
+    def test_idle_neighbor_churn_discards_proof_without_commands(self):
+        for previously_verified in (False, True):
+            if previously_verified:
+                self.assertIsNotNone(self.guard.current())
+            self.guard.runner.reset_mock()
+            sock = Mock()
+            events = atak.NetworkEvents(Mock(return_value=sock))
+            self.guard.events = events
+            for _ in range(300):
+                # RTM_DELNEIGH is the continuous bat0 churn observed on CM4.
+                sock.recvmsg.side_effect = [
+                    (NotificationTests.packet(29), [], 0, (0, 1)),
+                    BlockingIOError(), BlockingIOError()]
+                self.idle()
+            self.guard.runner.assert_not_called()
+            self.assertIsNone(self.guard.cached)
+            self.assertTrue(self.guard.dirty)
+            status = self.service.status(self.clock.now(), self.network.proof)
+            self.assertFalse(status['path_ready'])
+            self.assertIsNone(self.network.sender)
+            self.assertEqual(self.network.listener.bound, (LOCAL, 4242))
+            self.guard.events = Mock(sockets=[], changed=Mock(return_value=False))
+            events.close()
+
+    def test_tcp_and_udp_arrival_from_idle_force_full_proof(self):
+        for tcp in (False, True):
+            with self.subTest(tcp=tcp):
+                self.guard.invalidate()
+                self.idle()
+                self.guard.runner.reset_mock()
+                self.arrive(tcp)
+                self.assertEqual(self.guard.runner.call_count, 4)
+                self.assertTrue(self.service.phone_ready(self.clock.now(), self.network.proof))
+                self.clock.advance(100)  # allow the previous SA lease to expire
+
+    def test_new_phone_rejected_if_idle_firewall_was_changed(self):
+        self.assertIsNotNone(self.guard.current())
+        self.guard.invalidate()
+        self.fixture.rules = {'nftables': []}
+        self.idle()
+        self.guard.runner.reset_mock()
+        sock = self.arrive(tcp=True)
+        self.assertTrue(sock.closed)
+        self.assertEqual(self.guard.runner.call_count, 1)
+        self.assertIn('firewall', self.guard.reason)
+        self.assertFalse(self.service.phones)
+        self.assertIsNone(self.network.sender)
+
+    def test_firewall_change_between_active_tick_and_send_fails_closed(self):
+        self.idle()
+        self.arrive()
+        sender = self.network.sender
+        self.fixture.rules = {'nftables': []}
+        self.guard.events.changed.side_effect = [True, False]
+        with self.assertRaisesRegex(OSError, 'path unavailable'):
+            self.network.send(b'blocked', (IP, 4349))
+        self.assertEqual(sender.sent, [])
+        self.assertTrue(sender.closed)
+        self.assertIsNone(self.guard.cached)
+
+    def test_present_phone_keeps_event_readback_and_transient_retry(self):
+        self.idle()
+        self.arrive()
+        self.guard.events.changed.side_effect = [True, False]
+        self.fixture.fdb.append({'mac': MAC, 'ifname': 'bat0'})
+        proof = self.guard.current(refresh=self.service.has_live_lease(self.clock.now()))
+        self.assertIsNone(proof.peer(IP))
+        self.assertFalse(self.service.phone_ready(self.clock.now(), proof))
+        self.assertTrue(self.service.has_live_lease(self.clock.now()))
+        self.guard.events.changed.side_effect = None
+        self.fixture.fdb.pop()
+        self.guard.invalidate()
+        self.guard.runner.side_effect = subprocess.TimeoutExpired('nft', 1)
+        self.assertIsNone(self.guard.current(refresh=self.service.has_live_lease(self.clock.now())))
+        self.guard.runner.side_effect = self.fixture.runner
+        self.assertEqual(self.guard.current(refresh=self.service.has_live_lease(self.clock.now())).peer(IP), MAC)
+
+    def test_idle_forgets_udp_cache_and_unassociated_streams(self):
+        self.idle()
+        self.arrive()
+        self.assertIn(IP, self.network.datagram_peers)
+        client = self.arrive(tcp=True)
+        self.clock.advance(100)
+        self.guard.invalidate()
+        self.idle()
+        self.assertTrue(client.closed)
+        self.assertFalse(self.network.datagram_peers)
+        self.guard.runner.reset_mock()
+        self.arrive()
+        self.assertEqual(self.guard.runner.call_count, 4)
+
+    def test_address_discovery_is_cheap_and_late_address_can_receive(self):
+        self.network.idle(None)
+        self.assertFalse(self.network.readers())
+        probe = Mock()
+        reply = b'\0' * 20 + socket.inet_aton(LOCAL) + b'\0' * 232
+        with patch.object(atak.socket, 'socket') as factory, patch.object(atak.fcntl, 'ioctl') as ioctl:
+            factory.return_value.__enter__.return_value = probe
+            ioctl.side_effect = [OSError('no address'), reply]
+            self.assertIsNone(self.guard.listen_address())
+            self.network.idle(self.guard.listen_address())
+        self.guard.runner.assert_not_called()
+        self.arrive()
+        self.assertTrue(self.service.phone_ready(self.clock.now(), self.network.proof))
+        previous = self.network.listener
+        self.fixture.addresses[0]['addr_info'][0]['local'] = '192.0.2.10'
+        self.guard.invalidate()
+        self.network.idle('192.0.2.10')
+        self.assertTrue(previous.closed)
+        self.assertEqual(self.network.listener.bound, ('192.0.2.10', 4242))
+        self.arrive()
+        self.assertEqual(self.network.proof.local_ip, '192.0.2.10')
+
+    def test_idle_notification_loss_still_fails_closed(self):
+        self.idle()
+        self.guard.events.changed.side_effect = OSError('ENOBUFS')
+        with self.assertRaises(atak.GuardFailure):
+            self.guard.current(refresh=False)
+        self.guard.runner.assert_not_called()
+
+    def test_main_loop_defers_snapshots_for_idle_events(self):
+        handlers = {}
+        event_socket = object()
+        self.guard.events.sockets = [event_socket]
+        self.guard.events.changed.return_value = True
+        cycles = 0
+
+        def ready(*args):
+            nonlocal cycles
+            cycles += 1
+            self.clock.advance(1)
+            if cycles == 300:
+                handlers[atak.signal.SIGTERM]()
+            return [event_socket], [], []
+
+        def local_path(name):
+            if name in ('/run/manet-atak', '/var/lib/manet-atak'):
+                return Path(self.fixture.temp.name) / name.rsplit('/', 1)[-1]
+            return Path(name)
+
+        with patch.object(atak, 'Path', side_effect=local_path), \
+                patch.object(atak.Config, 'load', return_value=self.config), \
+                patch.object(atak, 'Clock', return_value=self.clock), \
+                patch.object(atak, 'Network', return_value=self.network), \
+                patch.object(atak, 'Service', return_value=self.service), \
+                patch.object(atak, 'LinuxGuard', return_value=self.guard), \
+                patch.object(atak, 'Application') as application, \
+                patch.object(self.guard, 'start'), \
+                patch.object(self.guard, 'listen_address', return_value=LOCAL), \
+                patch.object(atak.select, 'select', side_effect=ready), \
+                patch.object(atak.signal, 'signal', side_effect=lambda kind, fn: handlers.update({kind: fn})), \
+                patch.object(atak, 'log'):
+            atak.main([])
+        self.assertEqual(cycles, 300)
+        self.guard.runner.assert_not_called()
+        self.assertTrue(all(call.args[1] is None for call in application.return_value.update.call_args_list))
+
+
 class SimulatorTests(unittest.TestCase):
     def test_all_sample_modes_and_direct_messages_parse(self):
         packets = sim.Packets()
@@ -1430,7 +1625,11 @@ class ScenarioPlanTests(unittest.TestCase):
                 while self.output_cursor < len(h.tx.sent):
                     root, destination = h.tx.sent[self.output_cursor]
                     self.output_cursor += 1
-                    self.receive(destination[1], ET.tostring(root))
+                    # This legacy GPS scenario acknowledges its first chat;
+                    # group notices are separately exercised by multi-phone tests.
+                    remarks = root.find('detail/remarks')
+                    if remarks is None or 'ATAK phones are connected' not in (remarks.text or ''):
+                        self.receive(destination[1], ET.tostring(root))
                 return dict(result, _radio_wall=h.clock.now().utc.timestamp())
 
             def wait(self, seconds):
@@ -1501,7 +1700,7 @@ class CrashAndCadenceTests(Harness):
     def test_receipt_recovers_send_interrupted_before_durable_ack(self):
         self.sa()
         def crash_after_send(data, destination):
-            if ET.fromstring(data).get('type') == 'b-t-f':
+            if b'Radio GPS is unavailable or untrusted' in data:
                 self.store.fail = True
         self.tx.before_send = crash_after_send
         with self.assertRaises(atak.PersistenceError):
@@ -1517,7 +1716,8 @@ class CrashAndCadenceTests(Harness):
         self.assertEqual(self.service.messages, {})
         self.assertEqual(self.service.audio, {})
         self.tick()
-        self.assertEqual(len(self.of_type('b-t-f')), 1)
+        warnings = [r for r in self.of_type('b-t-f') if 'Radio GPS is unavailable' in ET.tostring(r).decode()]
+        self.assertEqual(len(warnings), 1)
 
     def test_new_monitor_activation_is_durable_without_a_position_fault(self):
         self.service.input_memory.update(monitor_seen=True, monitor_token=['producer-1', 0])
@@ -1532,7 +1732,7 @@ class CrashAndCadenceTests(Harness):
     def test_failed_heartbeat_attempts_are_limited_to_one_per_second(self):
         self.sa()
         attempted = []
-        self.tx.before_send = lambda data, destination: attempted.append(destination)
+        self.tx.before_send = lambda data, destination: attempted.append(destination) if ET.fromstring(data).get('type') != 'b-t-f' else None
         self.tx.fail_ports = {4242, 4349}
         self.tick(cot.Fix(40, -105, 'gnss'))
         self.assertEqual(len(attempted), 2)
@@ -1553,6 +1753,432 @@ class CrashAndCadenceTests(Harness):
         contacts = [r for r, d in self.tx.sent if r.find('detail/contact') is not None]
         self.assertEqual(len(contacts), 2)
         self.assertEqual(contacts[-1].find('detail/contact').get('endpoint'), '192.0.2.10:4242:tcp')
+
+
+class APAdmissionTests(unittest.TestCase):
+    runner = GuardTests.runner
+    cached_guard = GuardTests.cached_guard
+
+    def setUp(self):
+        GuardTests.setUp(self)
+        base = Path(self.temp.name)
+        self.role = base / 'ap_interface'
+        self.conf = base / 'hostapd.conf'
+        self.proc = base / 'proc'
+        self.role.write_text('wlan7\n')
+        self.conf.write_text('interface=wlan7\nbridge=br0\n')
+        (self.proc / '123').mkdir(parents=True)
+        (self.proc / '123/stat').write_text('123 (hostapd) S ' + '0 ' * 18 + '12345\n')
+        (self.proc / '123/cgroup').write_text('0::/system.slice/hostapd.service\n')
+        (self.run / 'hostapd.pid').write_text('123\n')
+        (self.net / 'wlan7').mkdir()
+        (self.net / 'wlan7/master').symlink_to('../br0')
+        (self.net / 'wlan7/carrier').write_text('1')
+        (self.net / 'br0/brif/wlan7').mkdir()
+        (self.net / 'br0/brif/wlan7/state').write_text('3')
+        self.guard = atak.LinuxGuard(atak.Config('radio-1'), self.runner, self.net, self.run,
+                                     self.role, self.conf, self.proc)
+        self.rules = {'nftables': atak.firewall_objects(('end0', 'wlan7'))}
+
+    # The parent methods describe wired-only fixtures; run those in GuardTests.
+    def test_ap_only_with_routed_end0_and_missing_ethernet_state(self):
+        (self.net / 'end0/master').unlink()
+        for name in ('ethernet_detection_state', 'eth-carrier-generation'):
+            (self.run / name).unlink()
+        self.fdb[0]['ifname'] = 'wlan7'
+        proof = self.guard.inspect()
+        self.assertEqual(proof.peer(IP), MAC)
+        self.assertEqual(proof.port(IP), 'wifi')
+        for name in ('carrier',):
+            (self.net / 'wlan7' / name).write_text('0')
+        self.assertIsNone(self.guard.inspect())
+
+    def test_both_ports_independent_and_mesh_mac_never_admitted(self):
+        wifi_ip, wifi_mac = '192.0.2.3', '02:00:00:00:00:03'
+        self.fdb.append({'mac': wifi_mac, 'ifname': 'wlan7'})
+        self.neigh.append({'dst': wifi_ip, 'lladdr': wifi_mac, 'state': ['REACHABLE']})
+        proof = self.guard.inspect()
+        self.assertEqual(proof.ports, {IP: 'wired', wifi_ip: 'wifi'})
+        self.fdb.append({'mac': wifi_mac, 'ifname': 'bat0'})
+        self.assertIsNone(self.guard.inspect().peer(wifi_ip))
+        self.fdb.pop()
+        (self.net / 'end0/carrier').write_text('0')
+        proof = self.guard.inspect()
+        self.assertIsNone(proof.peer(IP))
+        self.assertEqual(proof.peer(wifi_ip), wifi_mac)
+
+    def test_hostapd_stop_stale_pid_and_wrong_config_revoke_only_ap(self):
+        self.fdb[0]['ifname'] = 'wlan7'
+        guard = self.cached_guard()
+        self.assertEqual(guard.current().peer(IP), MAC)
+        commands = guard.runner.call_count
+        for _ in range(300):
+            self.assertEqual(guard.current().peer(IP), MAC)
+        self.assertEqual(guard.runner.call_count, commands)
+        (self.proc / '123/stat').unlink()
+        self.assertIsNone(guard.current().peer(IP))
+        self.fdb[0]['ifname'] = 'end0'
+        self.assertEqual(guard.current(force=True).peer(IP), MAC)
+        (self.proc / '123/stat').write_text('123 (other) S ' + '0 ' * 18 + '12345\n')
+        self.assertIsNone(guard.hostapd_identity())
+        (self.proc / '123/stat').write_text('123 (hostapd) S ' + '0 ' * 18 + '12345\n')
+        self.conf.write_text('interface=wlan8\nbridge=br0\n')
+        self.fdb[0]['ifname'] = 'wlan7'
+        self.assertIsNone(guard.current().peer(IP))
+
+    def test_ap_rename_requires_firewall_restart_and_unknown_ports_fail(self):
+        self.role.write_text('wlan8\n')
+        self.assertIsNone(self.guard.inspect())
+        self.assertIn('restart', self.guard.reason)
+        self.assertTrue(atak.valid_firewall(self.rules, ('end0', 'wlan7')))
+        self.assertFalse(atak.valid_firewall(self.rules, ('end0', 'wlan8')))
+        self.assertFalse(atak.valid_firewall(self.rules))
+        reordered = copy.deepcopy(self.rules)
+        for obj in reordered['nftables']:
+            for expr in obj.get('rule', {}).get('expr', []):
+                right = expr.get('match', {}).get('right')
+                if isinstance(right, dict) and 'set' in right:
+                    right['set'].reverse()
+        self.assertTrue(atak.valid_firewall(reordered, ('end0', 'wlan7')))
+        for value in ('bat0', 'br0', 'wlan*', '../wlan7', 'wlan7 wlan8'):
+            self.role.write_text(value)
+            with self.assertRaises(ValueError):
+                atak.atak_ap_interface(self.role)
+
+
+class MultiPhoneTests(Harness):
+    def setUp(self):
+        super().setUp()
+        self.other = sim.Packets()
+        self.other.uid, self.other.callsign, self.other.radio_uid = 'guest-phone', 'GUEST', 'radio-1'
+        self.other_ip, self.other_mac = '192.0.2.3', '02:00:00:00:00:03'
+        self.proof = atak.Proof(LOCAL, {IP: MAC, self.other_ip: self.other_mac}, 'both',
+                                {IP: 'wifi', self.other_ip: 'wifi'})
+
+    def other_sa(self, mode='none', point=None):
+        return self.service.ingest(self.other.sa(mode, self.phone_time(), point), self.other_ip,
+                                   self.proof, self.clock.now())
+
+    def chats_to(self, address, contains):
+        return [r for r, dest in self.tx.sent if dest[0] == address and r.get('type') == 'b-t-f'
+                and contains in ET.tostring(r).decode()]
+
+    def drain(self, fix=None):
+        for _ in range(6):
+            self.tick(fix)
+            self.clock.advance(1)
+
+    def test_feeds_contacts_and_warnings_reach_both_in_their_own_clock(self):
+        self.sa()
+        other_time = self.phone_time() + timedelta(days=2)
+        self.service.ingest(self.other.sa('none', other_time), self.other_ip, self.proof, self.clock.now())
+        gps = cot.Fix(40, -105, 'gnss')
+        self.tick(gps)
+        for address in (IP, self.other_ip):
+            self.assertTrue(any(dest == (address, 4349) for _, dest in self.tx.sent))
+            self.assertTrue(any(dest[0] == address and root.find('detail/contact') is not None for root, dest in self.tx.sent))
+        other_feed = next(root for root, dest in self.tx.sent if dest == (self.other_ip, 4349))
+        self.assertEqual(other_feed.get('time'), sim.stamp(other_time))
+        self.clock.advance(1)
+        self.tick(gps, 'GNSS_SUSPECTED', epoch=1)
+        before = sum(dest[1] == 4349 for _, dest in self.tx.sent)
+        self.drain()
+        self.assertEqual(sum(dest[1] == 4349 for _, dest in self.tx.sent), before)
+        self.assertTrue(self.chats_to(IP, 'Radio GPS is unavailable'))
+        self.assertTrue(self.chats_to(self.other_ip, 'Radio GPS is unavailable'))
+
+    def test_guest_marker_drag_user_and_receipt_cannot_adopt_or_ack(self):
+        self.sa()
+        self.other_sa()
+        self.drain()
+        controller = self.service.position.pinned_uid
+        for _ in range(3):
+            packet = self.other.point(self.phone_time(), (42, -107))
+            self.assertIn('guest marker', self.service.ingest(packet, self.other_ip, self.proof, self.clock.now()))
+            self.clock.advance(1)
+        self.assertEqual(self.other_sa('user', (42, -107)), 'accepted_presence')
+        self.clock.advance(1)
+        self.assertEqual(self.other_sa('drag', (43, -108)), 'accepted_presence')
+        self.drain()
+        self.assertIsNone(self.service.position._manual)
+        notices = self.chats_to(self.other_ip, ' follows ')
+        self.assertEqual(len(notices), 1)
+        self.assertIn('To change it, open manet.local.', ET.tostring(notices[0]).decode())
+        warning = self.service.position._warnings['gps_untrusted']
+        receipt = self.other.receipt(self.phone_time(), warning.message_id, True)
+        self.assertEqual(self.service.ingest(receipt, self.other_ip, self.proof, self.clock.now()), 'guest_receipt')
+        self.assertFalse(warning.acknowledged)
+        self.assertEqual(self.service.position.pinned_uid, controller)
+
+    def test_notice_once_per_growth_or_controller_change_and_random_stable(self):
+        with patch.object(atak.secrets, 'choice', side_effect=lambda peers: peers[0]) as pick:
+            self.sa()
+            self.other_sa()
+            self.drain(cot.Fix(40, -105, 'gnss'))
+            chosen = self.service.position.pinned_uid
+            count = len(self.of_type('b-t-f'))
+            self.drain(cot.Fix(40, -105, 'gnss'))
+            self.restart()
+            self.drain(cot.Fix(40, -105, 'gnss'))
+            self.assertEqual(pick.call_count, 1)
+            self.assertEqual(self.service.position.pinned_uid, chosen)
+            self.assertEqual(len(self.of_type('b-t-f')), count)
+            for ip in (IP, self.other_ip):
+                self.assertEqual(len(self.chats_to(ip, '2 ATAK phones are connected')), 1)
+            self.service.choose_controller(self.clock.now(), self.proof, self.other.uid)
+            self.drain(cot.Fix(40, -105, 'gnss'))
+            for ip in (IP, self.other_ip):
+                self.assertEqual(len(self.chats_to(ip, '2 ATAK phones are connected')), 2)
+
+    def test_lone_phone_gets_no_group_notice_until_a_second_arrives(self):
+        self.sa()
+        self.drain(cot.Fix(40, -105, 'gnss'))
+        self.assertEqual(self.service.position.pinned_uid, self.packets.uid)
+        self.assertEqual(self.chats_to(IP, 'ATAK phones are connected'), [])
+        self.other_sa()
+        self.drain(cot.Fix(40, -105, 'gnss'))
+        for ip in (IP, self.other_ip):
+            self.assertEqual(len(self.chats_to(ip, '2 ATAK phones are connected')), 1)
+
+    def test_only_wired_preferred_then_manual_wins_and_recovers_after_absence(self):
+        self.sa()
+        self.proof = atak.Proof(LOCAL, self.proof.peers, 'both', {IP: 'wifi', self.other_ip: 'wired'})
+        self.other_sa()
+        self.assertEqual(self.service.position.pinned_uid, self.other.uid)
+        self.service.choose_controller(self.clock.now(), self.proof, self.packets.uid)
+        self.assertEqual(self.service.position.pinned_uid, self.packets.uid)
+        self.send_point(uid='held')
+        held = self.service.position._manual
+        self.restart()
+        self.assertEqual(self.service.manual_uid, self.packets.uid)
+        self.clock.advance(76)
+        self.other_sa()
+        self.assertEqual(self.service.position.pinned_uid, self.other.uid)
+        self.assertEqual(self.service.position._manual, held)
+        self.assertEqual(self.service.manual_uid, self.packets.uid)
+        self.restart()
+        self.clock.advance(1)
+        self.sa()
+        self.assertEqual(self.service.position.pinned_uid, self.packets.uid)
+        self.assertEqual(self.service.position._manual, held)
+
+    def test_replacement_phone_takes_over_after_presence_expiry(self):
+        self.sa()
+        self.send_point(uid='held')
+        self.clock.advance(76)
+        self.other_sa()
+        self.assertEqual(self.service.position.pinned_uid, self.other.uid)
+        self.assertEqual(self.service.position._manual.marker_uid, 'held')
+        # Different phone wall clocks cannot prevent a new controller's new mark.
+        self.clock.advance(1)
+        packet = self.other.point(self.phone_time(), (41, -106), 'replacement')
+        self.assertEqual(self.service.ingest(packet, self.other_ip, self.proof, self.clock.now()), 'accepted:newest_location')
+        self.tick()
+        self.assertEqual(self.service.retire['held']['phone_uid'], self.packets.uid)
+        self.assertEqual(self.service.retire['held']['attempts'], 0)
+
+    def test_manual_choice_survives_reboot_and_requires_fresh_presence(self):
+        self.sa()
+        self.other_sa()
+        self.service.choose_controller(self.clock.now(), self.proof, self.other.uid)
+        self.send_point(uid='ignored')  # now a guest: cannot become the held location
+        self.restart('boot-2', atak.Now(5, 7, 5, BASE))
+        self.assertEqual(self.service.manual_uid, self.other.uid)
+        self.assertEqual(self.service.present_phones(atak.Now(5, 7, 5, BASE), self.proof), {})
+        self.assertEqual(self.service.position.pinned_uid, self.other.uid)
+        self.assertIsNone(self.service.position._manual)
+
+    def test_capacity_rejects_live_overflow_but_replaces_expired_and_bad_sa_cannot_evict(self):
+        self.service.config = atak.replace(self.config, max_phones=1)
+        self.sa()
+        self.assertEqual(self.other_sa(), 'phone table full')
+        self.assertEqual(list(self.service.phones), [self.packets.uid])
+        self.clock.advance(76)
+        invalid = self.other.sa('none', self.phone_time()).replace(b'guest-phone', b'radio-1')
+        self.service.ingest(invalid, self.other_ip, self.proof, self.clock.now())
+        self.assertEqual(list(self.service.phones), [self.packets.uid])
+        self.assertEqual(self.other_sa(), 'accepted_presence')
+        self.assertEqual(list(self.service.phones), [self.other.uid])
+        self.restart()
+        self.assertEqual(self.service.position.pinned_uid, self.other.uid)
+
+    def test_disabled_or_wrong_port_has_no_feed_or_controller_mutation(self):
+        self.sa()
+        self.other_sa()
+        self.tx.sent.clear()
+        moved = atak.Proof(LOCAL, {IP: MAC}, 'wifi', {IP: 'wired'})
+        self.assertEqual(self.service.present_phones(self.clock.now(), moved), {})
+        self.service.tick(self.clock.now(), moved, phone.RadioGPS(cot.Fix(40, -105, 'gnss'), self.clock.now().mono), {})
+        self.assertEqual(self.tx.sent, [])
+
+    def test_absent_controller_random_choice_between_guests_is_stable(self):
+        self.sa()
+        self.clock.advance(40)
+        self.other_sa()
+        third = sim.Packets()
+        third.uid, third.callsign, third.radio_uid = 'third-phone', 'THIRD', self.config.uid
+        ip, mac = '192.0.2.4', '02:00:00:00:00:04'
+        self.proof = atak.Proof(LOCAL, dict(self.proof.peers, **{ip: mac}), 'both',
+                                dict(self.proof.ports, **{ip: 'wifi'}))
+        self.service.ingest(third.sa('none', self.phone_time()), ip, self.proof, self.clock.now())
+        self.clock.advance(36)
+        with patch.object(atak.secrets, 'choice', return_value=third.uid) as pick:
+            self.tick(cot.Fix(40, -105, 'gnss'))
+            self.assertEqual(set(pick.call_args.args[0]), {self.other.uid, third.uid})
+            self.assertEqual(self.service.position.pinned_uid, third.uid)
+            self.restart()
+            self.clock.advance(1)
+            self.tick(cot.Fix(40, -105, 'gnss'))
+            self.assertEqual(self.service.position.pinned_uid, third.uid)
+            self.assertEqual(pick.call_count, 1)
+
+    def test_provisioned_limit_above_eight_admits_ninth_phone(self):
+        self.service.config = atak.replace(self.config, max_phones=20)
+        self.sa()
+        for index in range(8):
+            peer = sim.Packets()
+            peer.uid, peer.callsign, peer.radio_uid = f'phone-{index}', f'P{index}', self.config.uid
+            ip, mac = f'192.0.2.{index + 10}', f'02:00:00:00:01:{index:02x}'
+            self.proof = atak.Proof(LOCAL, dict(self.proof.peers, **{ip: mac}), 'wifi',
+                                    dict(self.proof.ports, **{ip: 'wifi'}))
+            result = self.service.ingest(peer.sa('none', self.phone_time()), ip, self.proof, self.clock.now())
+            self.assertEqual(result, 'accepted_presence')
+        self.assertEqual(len(self.service.present_phones(self.clock.now(), self.proof)), 9)
+        self.restart()
+        self.assertEqual(len(self.service.phones), 9)
+
+    def test_changed_controller_allows_one_new_guest_notice_and_keeps_held_mark(self):
+        self.sa()
+        self.other_sa()
+        self.send_point(uid='held')
+        packet = self.other.point(self.phone_time(), (42, -107))
+        self.service.ingest(packet, self.other_ip, self.proof, self.clock.now())
+        self.drain()
+        self.service.choose_controller(self.clock.now(), self.proof, self.other.uid)
+        self.service.choose_controller(self.clock.now(), self.proof, self.packets.uid)
+        self.service.ingest(packet, self.other_ip, self.proof, self.clock.now())
+        self.drain()
+        self.assertEqual(len(self.chats_to(self.other_ip, ' follows ')), 2)
+        self.assertEqual(self.service.position._manual.marker_uid, 'held')
+
+
+class CapacityConfigTests(unittest.TestCase):
+    def test_provisioned_range_zero_wired_and_logged_fallback(self):
+        for raw, limit in [('0', 1), ('1', 1), ('20', 20), ('253', 253), ('8', 8),
+                           ('254', 8), ('-1', 8), ('1.5', 8), ('', 8), ('٢', 8)]:
+            with self.subTest(raw=raw), patch.object(atak, 'read_kv', return_value={'max_euds_per_node': raw}), \
+                    patch.object(atak.Path, 'read_text', return_value='a' * 32), patch.object(atak, 'log') as logger:
+                self.assertEqual(atak.Config.load().max_phones, limit)
+                self.assertEqual(logger.called, raw in {'254', '-1', '1.5', '', '٢'})
+
+    def test_schema_one_is_explicitly_discarded(self):
+        h = Harness(); h.setUp()
+        h.sa()
+        data = h.store.data
+        data['schema'] = 1
+        data['sha256'] = atak.state_digest({k: v for k, v in data.items() if k != 'sha256'})
+        h.restart()
+        self.assertEqual(h.service.phones, {})
+        self.assertIsNone(h.service.position.pinned_uid)
+        self.assertEqual(h.store.data['schema'], 2)
+
+
+class AtakOverviewTests(Harness):
+    @classmethod
+    def setUpClass(cls):
+        cls.web = module('atak_overview_status', Path(__file__).with_name('mesh-status.py'))
+
+    def setUp(self):
+        super().setUp()
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.runtime = Path(temp.name)
+        self.conf = self.runtime / 'mesh.conf'
+        self.conf.write_text('ipv4_network=192.0.2.0/24\natak=y\n')
+        self.dhcp = self.runtime / 'dhcp.conf'
+        self.dhcp.write_text('dhcp-range=192.0.2.2,192.0.2.8,255.255.255.0,12h\n')
+        self.boot = self.runtime / 'boot-id'; self.boot.write_text('boot-1')
+        for name, value in [('ATAK_RUNTIME', self.runtime), ('ATAK_DHCP_CONF', self.dhcp),
+                            ('ATAK_BOOT_ID', self.boot), ('MESH_CONF_FILE', str(self.conf))]:
+            patcher = patch.object(self.web, name, value)
+            patcher.start(); self.addCleanup(patcher.stop)
+        self.sa()
+        self.app = atak.Application(self.service, atak.Inputs('boot-1', self.runtime), self.runtime)
+        self.app.update(self.clock.now(), self.proof, 'verified')
+
+    def post(self, origin='http://manet.local', client=IP, content_type='application/json', uid=None):
+        from email.message import Message
+        handler = object.__new__(self.web.MeshHandler)
+        handler.path = '/api/atak/controller'
+        handler.client_address = (client, 12345)
+        handler.headers = Message()
+        for name, value in [('Host', 'manet.local'), ('Content-Type', content_type), ('Origin', origin)]:
+            handler.headers[name] = value
+        handler._body = json.dumps({'uid': uid or self.packets.uid}).encode()
+        handler._body_length = len(handler._body)
+        handler.send_json = Mock()
+        handler.send_403 = Mock()
+        with patch.object(self.web.time, 'monotonic', return_value=self.clock.now().mono), \
+                patch.object(self.web.time, 'clock_gettime', return_value=self.clock.now().boot):
+            handler._do_POST()
+        return handler
+
+    def test_local_eud_password_free_post_is_consumed_on_existing_cycle(self):
+        handler = self.post()
+        self.assertEqual(handler.send_json.call_args.kwargs['status'], 202)
+        self.assertIsNone(self.service.manual_uid)
+        self.app.update(self.clock.now(), self.proof, 'verified')
+        self.assertEqual(self.service.manual_uid, self.packets.uid)
+        revision = self.service.revision
+        self.app.update(self.clock.now(), self.proof, 'verified')
+        self.assertEqual(self.service.revision, revision)
+        self.restart()
+        self.assertEqual(self.service.manual_uid, self.packets.uid)
+
+    def test_local_panel_exposes_only_public_fields_and_post_keeps_session(self):
+        # Exercise /api/local's assembler with unrelated node probes stubbed.
+        with patch.multiple(self.web, get_my_hostname=Mock(return_value='radio-1'),
+                            get_battery=Mock(return_value={}), get_interfaces=Mock(return_value=[]),
+                            get_connected_euds=Mock(return_value=[]), get_running_services=Mock(return_value=[]),
+                            get_local_uptime=Mock(return_value='1h'), get_power_status=Mock(return_value={}),
+                            parse_registry=Mock(return_value={}), get_my_mac=Mock(return_value=MAC),
+                            get_manet_version=Mock(return_value='test'), configured_ssid=Mock(return_value='ap'),
+                            recovery_status=Mock(return_value={})), \
+                patch.object(self.web.time, 'monotonic', return_value=self.clock.now().mono):
+            panel = self.web.assemble_local_data()['atak']
+        self.assertEqual(panel, {'enabled': True, 'running': True, 'phones': [
+            {'uid': self.packets.uid, 'callsign': self.service.phones[self.packets.uid]['callsign'],
+             'port': 'wired', 'controller': True}]})
+        self.assertEqual(self.post().send_json.call_args.kwargs['status'], 202)
+        request = atak.read_json(self.runtime / 'controller.json')
+        self.assertEqual(request['session'], self.service.session)
+        self.assertEqual(request['boot_id'], 'boot-1')
+
+    def test_public_panel_still_expires_leases_and_handles_missing_status(self):
+        with patch.object(self.web.time, 'monotonic', return_value=self.clock.advance(100).mono):
+            self.assertEqual(self.web.atak_overview({}), {'enabled': True, 'running': True, 'phones': []})
+        (self.runtime / 'status.json').unlink()
+        self.assertEqual(self.web.atak_overview({}), {'enabled': True, 'running': False, 'phones': []})
+
+    def test_foreign_origin_nonlocal_eud_nonjson_and_absent_phone_rejected(self):
+        for options, expected in [({'origin': 'http://evil.example'}, 403),
+                                  ({'origin': 'null'}, 403), ({'origin': 'http://['}, 403),
+                                  ({'origin': 'https://manet.local'}, 403), ({'client': '192.0.2.25'}, 403),
+                                  ({'content_type': 'text/plain'}, 415), ({'uid': 'absent'}, 409)]:
+            with self.subTest(options=options):
+                handler = self.post(**options)
+                self.assertEqual(handler.send_json.call_args.kwargs['status'], expected)
+                self.assertFalse((self.runtime / 'controller.json').exists())
+
+    def test_disabled_panel_stale_choice_wrong_session_and_path_loss(self):
+        self.assertIsNone(self.web.atak_overview({'atak': 'n'}))
+        self.post()
+        data = atak.read_json(self.runtime / 'controller.json')
+        for modified, proof in [(dict(data, session='other'), self.proof),
+                                (dict(data, written_boot=data['written_boot'] - 6), self.proof),
+                                (data, None)]:
+            self.assertFalse(self.service.controller_request(modified, self.clock.now(), proof))
+        self.assertIsNone(self.service.manual_uid)
 
 
 if __name__ == '__main__':

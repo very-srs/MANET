@@ -696,7 +696,8 @@ Profile 1 installations advance to profile 2 on the next explicit apply/setup.
 
 **manet-atak.py** and **manet-cpu-sample.py**
 
-The wired ATAK service runs by default on every node. Set `atak=n` in
+The ATAK service runs by default on every node for wired phones and phones on
+its enabled Wi-Fi access point. Set `atak=n` in
 `/etc/mesh.conf` and restart `manet-atak.service` to disable it; only explicit
 `n`, `no`, `0` or `false` (case-insensitive) disables the daemon and its firewall.
 Fresh installs enable and start it; updated packages enable it for the next boot.
@@ -709,12 +710,41 @@ override on the following boot;
 the boot journal reports `AUTO-DISABLED`. After addressing the cause, observe
 a `positioning=n` apply then set `y`, or run
 `sudo manet-mt7916-firmware.py --rearm` to retry on the next boot.
-Phone setup is in the [main README](../../README.md#atak-phones).
+Connect by Ethernet or join this radio's own Wi-Fi network. Keep Wi-Fi phones
+near their radio: every attached ATAK phone receives the same radio position.
+Turn Android location services off and configure ATAK's external GPS input on
+UDP 4349, ordinary CoT input on UDP 4242, and SA output to the radio on UDP 4242.
+Phone setup is in the [location guide](../../docs/guide/content/location.md).
 
-The service verifies its firewall and EUD path
-at startup, after kernel network/policy notifications or role-generation changes,
-and before admitting a new peer or TCP stream. Unchanged ticks use the cached
-proof; notification loss fails closed. No extra monitoring process is started.
+One controlling phone sets the radio's manual location. A saved choice on the
+status page wins while that phone is present. Otherwise, the only wired phone
+wins; if there is no sole wired phone, the present controller stays selected.
+If none remains, the radio picks a present phone at random and keeps that choice.
+Replacement phones therefore work without deleting state. Phone presence ends
+when its SA expires, at most 75 seconds after the latest admitted report.
+
+Open **http://manet.local/**, expand this radio and find **ATAK PHONES**. It lists
+callsigns, **Wired** or **Wi-Fi**, and **Controls location**. Use **Set location
+from this phone** beside another phone to choose it. No admin password is needed.
+The choice survives reboot and absence; while it is absent the automatic rules
+supply a controller, and the saved choice takes over when it returns. A held
+manual point belongs to the radio and survives a controller change. Only the
+controller's sent points, drags, USER selections and alert receipts affect the
+radio's location or acknowledge alerts. Other phones still receive its position
+and GPS warnings; a rejected guest point gets a chat explaining who controls.
+
+When another phone joins or the controller changes, ATAK chat tells everyone
+which callsign sets the group's location. Coordinate before changing it. The
+phone table uses the provisioned `max_euds_per_node` capacity (zero reserves one
+wired phone; missing or invalid values log a warning and use eight).
+
+The service verifies its firewall and EUD path before admitting a new peer or
+TCP stream, and after network/policy or role-generation changes while an admitted
+SA lease remains live. With no live lease, events only discard proof; the next
+arrival triggers verification. Passive br0 listeners use a cheap address ioctl,
+so late address setup needs no timer-driven snapshot. `path_ready` is false
+while verification is pending. Unchanged ticks use the cached proof;
+notification loss fails closed. No extra monitoring process is started.
 Without an admitted phone it sends no CoT, caches unchanged inputs and skips
 repeated policy evaluation and status writes. Producer failures and alert
 deadlines still run; an idle `status.json` is a snapshot, not a heartbeat.

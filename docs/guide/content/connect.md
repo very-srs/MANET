@@ -11,6 +11,9 @@
 - **Open:** [http://manet.local/](http://manet.local/) to see status.
 - **Change settings:** open [Manage](http://manet.local/manage/) and ask a grown up to help you enter the admin password.
 
+ATAK can use the cable or this radio's Wi-Fi. Pick the phone that sets the
+group's location on [status](http://manet.local/); no admin password is needed.
+
 Wi-Fi access depends on how this radio was configured by some nerd. If it is not serving an access point, use Ethernet.
 
 ## User
@@ -39,7 +42,11 @@ The dashboard is for this radio's own clients. A device on the upstream internet
 
 ### ATAK phones
 
-The current ATAK integration uses a wired phone connection and additional ATAK settings. Follow [location and ATAK](location.md). Joining the radio's Wi-Fi is not a substitute for the wired admission path.
+ATAK works over the client Ethernet connection or this radio's enabled Wi-Fi
+access point. Keep phones near their radio: every attached phone receives its
+position. One phone controls the group's manual location; choose it in **ATAK
+PHONES** on the status page without the admin password. Follow
+[location and ATAK](location.md) for phone settings and automatic selection.
 
 ## Developer
 
@@ -108,7 +115,15 @@ With `acs=y` and Auto EUD mode, an Ethernet gateway can serve the AP while its o
 
 ### ATAK boundary
 
-`manet-atak.service` is enabled by default; `atak=n` explicitly opts out. Admission requires the verified wired EUD path, a matching FDB/neighbor mapping, and the owned firewall policy. No admitted phone means no CoT output. `manet-positioning.service` is a separate, disabled-by-default service.
+`manet-atak.service` is enabled by default; `atak=n` explicitly opts out. Admission independently verifies wired `end0` or the active AP's forwarding
+br0 path. A MAC must be learned exclusively on that local EUD port and resolved
+on br0; simultaneous bat0 learning fails. The explicit firewall allow-list uses
+`end0` and the AP role name, requiring an ATAK restart after AP renaming. SA
+leases form a bounded per-phone table with one controller. Controller choice
+uses present manual preference, sole wired phone, present current controller,
+then stable random selection. The password-free controller POST checks the local
+DHCP source pool and JSON/origin boundary, then hands off through a producer
+file for daemon-side presence validation. No admitted phone means no CoT output. `manet-positioning.service` is a separate, disabled-by-default service.
 
 - [Networking and EUD reference](../../../MANET/node_tools/README.md#network-management)
 - [Discovery boundary internals](../../../docs/node-tools-internals.md#local-eud-discovery)
