@@ -35,6 +35,7 @@ cat << EOF > /etc/ssh/sshd_config.d/10-manet.conf
 PasswordAuthentication yes
 KbdInteractiveAuthentication no
 PubkeyAuthentication yes
+MaxAuthTries 10
 UsePAM yes
 PermitRootLogin prohibit-password
 EOF

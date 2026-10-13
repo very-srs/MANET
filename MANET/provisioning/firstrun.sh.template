@@ -62,6 +62,12 @@ if ! id -u radio > /dev/null 2>&1; then
 	echo "User 'radio' created successfully"
 fi
 
+# Allow several client keys before password login during provisioning.
+# radio-setup.sh rewrites this drop-in with the full SSH policy.
+mkdir -p /etc/ssh/sshd_config.d
+printf '%s\n' 'MaxAuthTries 10' > /etc/ssh/sshd_config.d/10-manet.conf
+systemctl reload ssh 2>/dev/null || true
+
 # Enable SSH service
 systemctl enable --now ssh
 echo "User setup complete - proceeding with provisioning..."
@@ -955,8 +961,8 @@ apt remove -y iptables
 apt autoremove -y
 
 
-# There is an annoying banner message in here, get rid of it
-rm /etc/ssh/sshd_config.d/*
+# Remove the image's banner drop-in; keep the MANET one.
+find /etc/ssh/sshd_config.d -type f ! -name 10-manet.conf -delete
 # Restore normal APT date checks before completing this phase.
 cleanup_apt_clock_override || exit 1
 trap - EXIT HUP INT TERM

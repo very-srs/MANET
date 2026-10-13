@@ -9,6 +9,12 @@ exec > >(tee -a /var/log/mesh-provision.log) 2>&1
 set -x
 echo "=== Rock 3A provisioning starting at $(date) ==="
 
+# Allow several client keys before password login during provisioning.
+# radio-setup.sh rewrites this drop-in with the full SSH policy.
+mkdir -p /etc/ssh/sshd_config.d
+printf '%s\n' 'MaxAuthTries 10' > /etc/ssh/sshd_config.d/10-manet.conf
+systemctl reload ssh 2>/dev/null || true
+
 # Temporarily allow APT metadata from a system without a trusted clock.
 # This runs in each provisioning phase, including retries. Signatures stay on.
 cleanup_apt_clock_override() {
