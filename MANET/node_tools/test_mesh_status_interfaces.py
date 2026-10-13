@@ -444,5 +444,15 @@ class InterfaceTests(unittest.TestCase):
         ])
 
 
+class VersionTests(unittest.TestCase):
+    def test_reads_release_from_first_line(self):
+        with patch('builtins.open', return_value=io.StringIO('0.571\n10/2026\n')):
+            self.assertEqual(status.get_manet_version(), '0.571')
+
+    def test_missing_file_reads_empty(self):
+        with patch('builtins.open', side_effect=FileNotFoundError):
+            self.assertEqual(status.get_manet_version(), '')
+
+
 if __name__ == '__main__':
     unittest.main()
