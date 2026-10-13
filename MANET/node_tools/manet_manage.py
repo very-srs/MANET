@@ -3646,13 +3646,13 @@ def render_dashboard():
       </div>
     </div>
   </div>
+  <!-- ── VOICE ── -->
+  <div id="tab-voice" class="tab-pane" style="display:none">{VOICE_TAB_HTML}</div>
+
   <!-- ── NODE CONFIG ── -->
   <!-- The old /admin page. Same staging/ACK/apply flow, now behind the same
        password as everything else here rather than open on port 80. -->
   <div id="tab-config" class="tab-pane" style="display:none">
-<!-- ── VOICE ── -->
-  <div id="tab-voice" class="tab-pane" style="display:none">{VOICE_TAB_HTML}</div>
-
 {CONFIG_TAB_HTML}
   </div>
 
