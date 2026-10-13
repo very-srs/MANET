@@ -2088,6 +2088,16 @@ class AtakOverviewTests(Harness):
     def setUpClass(cls):
         cls.web = module('atak_overview_status', Path(__file__).with_name('mesh-status.py'))
 
+    def test_panel_renders_only_in_the_local_radio_panel(self):
+        # The button posts to this radio, so another radio's drawer must not
+        # show it, and the local panel must.
+        source = Path(__file__).with_name('mesh-status.py').read_text()
+        def body(name):
+            start = source.index('function ' + name + '(')
+            return source[start:source.index('\n}\n', start)]
+        self.assertIn('atakPanel(d.atak)', body('renderLocalPanel'))
+        self.assertNotIn('atak', body('renderPeerDrawer').lower())
+
     def setUp(self):
         super().setUp()
         temp = tempfile.TemporaryDirectory()

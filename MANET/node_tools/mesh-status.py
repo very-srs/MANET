@@ -2395,6 +2395,24 @@ async function setAtakController(button) {
   }
 }
 
+// This radio's own ATAK phones. Local panel only: the button posts to this radio.
+function atakPanel(atak) {
+  if (!atak || !atak.enabled) return '';
+  let html = '';
+  html += '<div class="section-hdr" style="font-size:9px;position:static">ATAK PHONES</div>';
+  const peers = atak.phones || [];
+  html += '<div style="padding:5px 10px;font-size:11px">One phone sets this radio’s location. All connected ATAK phones receive its position.</div>';
+  peers.forEach(p => {
+    html += `<div class="eud-row"><span>${atakText(p.callsign)}</span> · ${p.port === 'wired' ? 'Wired' : 'Wi-Fi'}`;
+    if (p.controller) html += ' · <strong>Controls location</strong>';
+    else html += `<br><button type="button" data-atak-uid="${atakText(p.uid)}" onclick="setAtakController(this)">Set location from this phone</button>`;
+    html += '</div>';
+  });
+  if (!peers.length) html += '<div class="eud-row">No ATAK phones present.</div>';
+  html += '<div id="atak-choice-result" class="eud-row" role="status"></div>';
+  return html;
+}
+
 function renderLocalPanel(d) {
   // ── Identity rows ──
   let html = '<details><summary style="padding:10px;cursor:pointer">Mesh recovery</summary>' + recoveryPanel(d.recovery) + '</details>';
@@ -2495,6 +2513,7 @@ function renderLocalPanel(d) {
   }
 
   // ── Connected EUDs ──
+  html += atakPanel(d.atak);
   html += `<div class="section-hdr" style="font-size:9px;position:static">CONNECTED EUDS (${d.euds ? d.euds.length : 0})</div>`;
   if (d.euds && d.euds.length) {
     html += d.euds.map(e =>
@@ -2704,20 +2723,6 @@ function renderPeerDrawer(d, hostname) {
         ${addrs}${mcs}${faultLines}
       </div>`;
     }).join('');
-  }
-
-  if (d.atak && d.atak.enabled) {
-    html += '<div class="section-hdr" style="font-size:9px;position:static">ATAK PHONES</div>';
-    const peers = d.atak.phones || [];
-    html += '<div style="padding:5px 10px;font-size:11px">One phone sets this radio’s location. All connected ATAK phones receive its position.</div>';
-    peers.forEach(p => {
-      html += `<div class="eud-row"><span>${atakText(p.callsign)}</span> · ${p.port === 'wired' ? 'Wired' : 'Wi-Fi'}`;
-      if (p.controller) html += ' · <strong>Controls location</strong>';
-      else html += `<br><button type="button" data-atak-uid="${atakText(p.uid)}" onclick="setAtakController(this)">Set location from this phone</button>`;
-      html += '</div>';
-    });
-    if (!peers.length) html += '<div class="eud-row">No ATAK phones present.</div>';
-    html += '<div id="atak-choice-result" class="eud-row" role="status"></div>';
   }
 
   // Connected EUDs
