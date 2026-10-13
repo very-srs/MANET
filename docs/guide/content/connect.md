@@ -9,7 +9,7 @@
 - **Cable:** connect your phone or computer to the radio's Ethernet port with a blue hose.
 - **Wi-Fi:** join the radio's wireless access point, if it is enabled.
 - **Open:** [http://manet.local/](http://manet.local/) to see status.
-- **Change settings:** open [Manage](http://manet.local/manage/) and enter the admin password, which you won't have because it can break things.
+- **Change settings:** open [Manage](http://manet.local/manage/) and ask a grown up to help you enter the admin password.
 
 Wi-Fi access depends on how this radio was configured by some nerd. If it is not serving an access point, use Ethernet.
 
@@ -17,25 +17,25 @@ Wi-Fi access depends on how this radio was configured by some nerd. If it is not
 
 ### Choose an available connection
 
-An end-user device, or **EUD**, is the phone or computer attached to a radio. Use its Ethernet connection or its configured Wi-Fi access point. A phone may need a compatible Ethernet adapter.
+An end-user device, or **EUD**, is the phone or computer attached to a radio. To connect, use the radio's Ethernet connection or its configured Wi-Fi access point. A phone may need a compatible Ethernet adapter.
 
 | Mode | Behavior |
 |---|---|
 | Wired | Ethernet connects a client, or becomes an uplink if connected to an internet router. |
 | Wireless | A local access point serves phones and computers. |
-| Auto | The role depends on Ethernet detection and channel mode. A wired client takes priority over the AP. |
+| Auto | The role depends on Ethernet detection. A wired EUD disables the WiFi AP and that 5ghz interface rejoins the mesh.
 
-With automatic channels enabled, Auto serves an AP when the radio is a gateway; otherwise the AP candidate radio participates in the mesh. If you need a dedicated wireless client connection, select the appropriate EUD mode when configuring the radio.
+With automatic channel selection enabled, Auto serves an AP when the radio is a gateway.  If you need a dedicated wireless client connection, select wireless EUD mode when configuring the radio. Wired is needed to get the full benefit of the radio's features.
 
 ### Open the local dashboard
 
 From a device connected to this radio, visit **[http://manet.local/](http://manet.local/)**. You can also use the radio's local address. The status page shows topology, node details, and link information without a password.
 
-**[http://manet.local/manage/](http://manet.local/manage/)** opens management. Sign in with the admin password chosen during flashing. Management includes radio controls, measurements, configuration, and voice status.
+**[http://manet.local/manage/](http://manet.local/manage/)** opens the management page. Sign in with the admin password chosen during flashing. Management includes radio controls, measurements, configuration, and voice status. This page is password protected because it can make mesh wide changes.
 
 The [dashboard guide](dashboard.md) explains the displays and tabs. See [changing settings](settings.md) for the staging and apply process.
 
-The dashboard is for this radio's own clients. A device on the upstream internet router or attached to another radio is not automatically allowed to open it.
+The dashboard is for this radio's own clients. A device on the upstream internet router or attached to another radio is not allowed to open it.
 
 ### ATAK phones
 
@@ -45,38 +45,34 @@ The current ATAK integration uses a wired phone connection and additional ATAK s
 
 ### Layer 2 topology and address ownership
 
-Each node claims an IPv4 block sized `max_euds_per_node + 2`. Its first address is the primary mesh address on `br0`, its second is the local EUD gateway address, and the remaining addresses form its DHCP pool. `br0` bridges `bat0`; separate address roles do not by themselves isolate clients.
+Each node claims an IPv4 block sized `max_euds_per_node + 2`. Its first address is the primary mesh address on `br0`, its second is the local EUD gateway address, and the remaining addresses form its DHCP pool. `br0` bridges `bat0` (which contans one or more wlan devices, depending on EUD mode). 
 
 These are allocations within one shared IPv4 subnet, not a separate routed
 subnet per radio. The [address-selection explanation](overview.md#developer-addresses-selecting-a-block-and-resolving-collisions)
 covers how a radio chooses the block and what happens after an overlap.
-Client capacity is provisioned per radio, so the allocator compares absolute
-address ranges rather than assuming that every radio's blocks have the same
-width.
 
-`ethernet-autodetect.sh` classifies Ethernet as an uplink when DHCP answers, or an EUD path otherwise. Dispatcher hooks and the AP/mesh role helpers reconcile bridge membership, addressing, gateway advertisement, and access-point ownership. The AP's candidate mesh role is preserved for its return to mesh operation.
+`ethernet-autodetect.sh` classifies Ethernet as an uplink when DHCP traffic, switch traffic, or external RAs are heard.  The absense of
+such traffic determines that this is an EUD. Dispatcher hooks and the AP/mesh role helpers reconcile bridge membership, addressing, gateway advertisement, and access-point ownership. The AP's mesh role is preserved in configs for its possible return to mesh operation.
 
 ### From a client connection to a mesh packet
 
 When Ethernet is serving an EUD, or the AP is active, that client-facing
 interface joins `br0`. The local DHCP server leases an address from this
-radio's block and supplies the block's second address as the client gateway.
-Bridge filtering keeps the request and reply off `bat0`, so another radio's
+radio's block and supplies the radio's second address as the client gateway.
+Bridge filtering keeps the DHCP request and reply off `bat0`, so another radio's
 DHCP server cannot answer the same local request.
 
 Traffic addressed to another device in the shared subnet crosses the bridge
 and BATMAN path. Internet traffic instead follows the client's default
 gateway to the radio, then the radio's selected uplink or mesh gateway
-route. These are different decisions: working local DHCP does not prove
-a peer path exists, and a working peer path does not prove that any node
+route. A working local DHCP does not prove a peer path exists, and a working peer path does not prove that any node
 has internet access.
 
 An upstream DHCP offer classifies Ethernet as an uplink, but that is not
 proof of usable internet. Uplink reconciliation checks connectivity and
 updates routing/NAT and gateway advertisement. When the cable's role changes,
 the node must reconcile those together with bridge membership and AP
-ownership; leaving an old role's policy in place would mix the upstream LAN
-with the client-facing mesh bridge.
+ownership.
 
 ### Management and discovery boundaries
 
@@ -103,14 +99,12 @@ instead permits localhost and source addresses in this node's DHCP pool;
 application checks also require localhost or the mesh/EUD subnet. This is an
 address-pool rule, not proof of a particular lease or a cryptographic client
 identity. Authentication then decides whether an admitted client may use
-management actions. Changing the allocation therefore also requires updating
-the web firewall and name records.
+management actions. 
 
 ### AP ownership during ACS
 
-With `acs=y` and Auto EUD mode, an Ethernet gateway can serve the AP while its other radios keep mesh connectivity. The AP candidate's stored mesh configuration follows the agreed channel plan. When the last uplink is removed, it returns to mesh operation on that plan. Gateways do not perform tourguide excursions.
+With `acs=y` and Auto EUD mode, an Ethernet gateway can serve the AP while its other radios keep mesh connectivity. The AP candidate's stored mesh configuration follows the agreed channel plan. When the uplink is removed, it returns to mesh operation. Gateways do not perform Wi-Fi tourguide excursions.
 
-The source and role-state contract are more specific than the shorthand “Auto means wireless until a cable appears.” Check the ACS and gateway conditions whenever changing these instructions.
 
 ### ATAK boundary
 

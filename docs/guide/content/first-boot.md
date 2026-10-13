@@ -17,17 +17,17 @@ The green heartbeat reports setup completion. Check the dashboard to see whether
 
 ### Connect, then let it finish
 
-After [flashing](flash.md), insert the storage if it is removable. Connect Ethernet to a router with internet access, then connect a reliable power supply. Keep both connected while setup runs.
+After [flashing](flash.md), insert the storage if it is removable (an eMMC enabled CM4 is the intended hardware). Connect the Ethernet port to a router with internet access, then connect a reliable power supply. Keep both connected while setup runs.
 
 The radio downloads the selected MANET release, installs its software, configures the radios, and restarts several times. Allow about ten minutes; download speed and hardware affect the time needed.
 
 ### Read the result
 
-The CM4's onboard LEDs report the provisioning result:
+When using a Waveshare IO-BASE-A carrier board, the onboard LEDs report the provisioning result:
 
 | LEDs | Meaning | Next step |
 |---|---|---|
-| Green heartbeat, red off | Setup completed | [Connect your phone or computer](connect.md). |
+| Green heartbeat, red off | Setup completed | [Connect your phone or computer](connect.md). Radio is ready to use. |
 | Red heartbeat, green solid | Setup did not complete | Restore Ethernet internet access and steady power, then reboot to retry. |
 | No final pattern yet | No completed result is shown | Leave power and Ethernet connected while setup continues. |
 
@@ -35,9 +35,9 @@ The status pattern is restored at each boot. It reports setup completion, not th
 
 ### If setup needs attention
 
-The SSH login banner names an incomplete stage. The detailed setup log is `/var/log/radio-setup.log`.
+The SSH login banner clearly describes the status of the radio, from initial setup to completion. Detailed setup log is `/var/log/radio-setup.log`.
 
-Additional setup scripts have their own result and log, `/var/log/manet-user-scripts.log`. A failed additional script does not turn a successfully provisioned radio into a failed installation.
+Additional, user added setup scripts have their own result and log, `/var/log/manet-user-scripts.log`. A failed additional script does not turn a successfully provisioned radio into a failed installation.
 
 [Full provisioning reference](../../../MANET/provisioning/README.md#first-boot)
 
@@ -45,16 +45,16 @@ Additional setup scripts have their own result and log, `/var/log/manet-user-scr
 
 ### Provisioning has distinct stages
 
-On Raspberry Pi targets, the image's `firstrun.sh` creates the radio account, enables SSH, and installs the next provisioning stage. Rock 3A image preparation embeds the provisioning service and configuration directly in the Armbian image. Both paths ultimately schedule `radio-setup-run-once.service` after the wireless interfaces exist.
+On Raspberry Pi targets, the image's `firstrun.sh` creates the radio user account, enables SSH, and installs the next provisioning stage's script. Rock 3A image preparation embeds the provisioning service and configuration directly in the Armbian image. Both paths ultimately schedule `radio-setup-run-once.service` after the wireless interfaces exist.
 
-The release URL, SHA-256 and expected version are selected at flash time and baked into the provisioning script. First boot validates that selection before extracting its archive. The kernel-protection helper runs before provisioning's APT operations. The certificate/date handling needed for a cold clock is deliberately limited to the provisioning path; see [download verification and kernel protection](../../../docs/provisioning-internals.md#first-boot-without-a-trusted-clock).
+The release URL, SHA-256, and expected version are baked into the provisioning script at flash time. First boot validates that selection before extracting its archive. The kernel-protection helper runs before provisioning's APT operations. The certificate/date handling needed for a cold clock is deliberately limited to the provisioning path; see [download verification and kernel protection](../../../docs/provisioning-internals.md#first-boot-without-a-trusted-clock).
 
 These stages cross reboot boundaries because they have different hardware
 prerequisites. The initial image can create accounts and arrange network
-provisioning, but final radio-role assignment needs the MANET drivers loaded
-and the physical interfaces present. The installed run-once service supplies
+provisioning, but final radio-role assignment needs the MANET drivers, which exist in the downloaded kernel, 
+and the interfaces present in order to set them up. The installed run-once service supplies
 that continuation. Seeing the machine boot or accept SSH therefore does not
-mean its radio configuration is complete.
+mean its radio configuration is complete.  Completed setup is displayed as an SSH banner and heartbeat blinks on the Waveshare IO-BASE-A.
 
 | Stage | Main responsibility | Evidence that matters |
 |---|---|---|
@@ -64,8 +64,8 @@ mean its radio configuration is complete.
 | Operator scripts | Run the separately embedded customization scripts | Their own completion records and log |
 
 A fresh radio may have no trusted date, which would make normal certificate
-and package-metadata date checks fail. The provisioning path limits its
-exception to pinned artifact downloads whose bytes must match the digests
+and package-metadata date checks fail. The provisioning path removes CA checks for some initial downloads but limits its
+exception to pinned downloads whose bytes must match the digests
 baked into the image. APT retains signature/hash verification while metadata
 date checks are temporarily relaxed for the provisioning process. These
 exceptions are removed at phase completion; they do not become the runtime
@@ -73,7 +73,7 @@ updater's trust policy.
 
 ### Final radio setup
 
-`radio-setup.sh` serializes setup with a process lock, classifies PHY capabilities into radio roles, writes MAC-pinned interface names, generates supplicant and networkd configuration, and enables the runtime services. If names need to settle across a reboot, it retains the run-once unit for retry. Later boots use `manet-radio-names.service` to resolve naming collisions before network services start.
+`radio-setup.sh` serializes setup with a process lock, classifies PHY capabilities into radio roles and expected wlan numbers, writes MAC-pinned interface names, generates supplicant and networkd configuration, and enables the runtime services. If names need to settle across a reboot, it retains the run-once unit for retry. Later boots use `manet-radio-names.service` to resolve naming collisions before network services start.
 
 The orchestrator entry point is a **symlink**, selected by `node-manager-select.sh` from `acs=`. It points to `node-manager-acs.sh` or `node-manager-static.sh`; there is no independently maintained `node-manager.sh` source file.
 
@@ -88,7 +88,7 @@ names instead of marking a half-configured layout complete.
 The setup lock prevents two invocations from rewriting those roles and the
 provisioning verdict concurrently. Recoverable step failures are recorded;
 the final success verdict depends on reaching completion without recorded
-failures. Rerunning setup can regenerate live configuration, which is why
+failures. Rerunning setup can regenerate the live configuration, which is why
 the failed phase should be identified before using a rerun as a remedy.
 The [final-setup reference](../../../MANET/provisioning/README.md#final-setup-radio-setupsh)
 describes the generated network and service configuration.
