@@ -12,6 +12,9 @@
 
 A radio being on does not mean it can hear the others. A line on the map does not promise a particular download speed.
 
+ATAK phones share this radio's position. Under **ATAK PHONES**, choose which
+phone sets the group's location. You do not need the admin password.
+
 Need to change something? Open [Manage](http://manet.local/manage/) and use the admin password.
 
 ## User
@@ -23,6 +26,16 @@ Connect your phone or computer to the radio you want to inspect, then open **[ht
 The topology shows the mesh as seen by this radio. Expand a node to inspect its addresses, uptime, radio interfaces, attached devices, and hosted services. GPS and battery information appear when available. This radio's own panel also shows its installed MANET version; include it when reporting a problem. Check which interface carries a route: a peer may still be reachable through HaLow even when its Wi-Fi link is absent.
 
 ![The MANET status dashboard showing mesh topology and the node list.](../../images/webui/status-topology.png)
+
+### Choose the ATAK controlling phone
+
+When ATAK is enabled, this radio's expanded panel includes **ATAK PHONES**. It
+lists present callsigns, **Wired** or **Wi-Fi**, and **Controls location**. Tap
+**Set location from this phone** beside another phone to choose it without an
+admin login. Wait for the panel to refresh. Everyone still receives the radio's
+position; only the controller can supply a manual point or acknowledge its GPS
+alerts. The choice persists across reboot and takes priority while that phone
+is present. See [location and ATAK](location.md) for replacement-phone behavior.
 
 ### Understand what the numbers mean
 
@@ -92,6 +105,18 @@ registry marks it stale and removes its address claim. The dashboard's
 short HTTP cache sits on top of this longer publication/freshness process;
 refreshing the browser cannot force a peer to publish new measurements.
 See [registry freshness](../../../docs/node-tools-internals.md#data-management).
+
+### ATAK controller handoff
+
+The local panel reads `/run/manet-atak/status.json` and removes expired phone
+leases using monotonic time and the current boot ID. `POST /api/atak/controller`
+requires a local DHCP-pool source, JSON and a same-origin Origin/Referer when
+provided. No admin cookie is needed. A bounded atomic `controller.json` producer
+file carries the selected UID, request ID, session, boot and BOOTTIME timestamp.
+The existing ATAK event cycle rechecks presence/path and the five-second envelope
+before persisting the choice. HTTP 202 reports a queued request; the next status
+snapshot shows the actual controller. Normal status refresh/caching remains in
+place, with no new polling loop.
 
 ### Freshness, load, and sessions
 

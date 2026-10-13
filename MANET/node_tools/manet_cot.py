@@ -16,7 +16,7 @@ Transport is TAK protocol 0, CoT schema 2.0. parse_marker takes one complete
 XML document. Listeners must bound buffers and frame split/coalesced reads.
 Direct v0 TCP normally closes after one message. Streaming v0 concatenates
 XML ending in </event>. Do not advertise TakControl/protobuf.
-manet_phone applies Ethernet/creator/epoch authorization. Other candidates
+manet_phone applies local-EUD/controller/creator/epoch authorization. Other candidates
 need explicit acceptance.
 """
 

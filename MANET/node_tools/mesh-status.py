@@ -7,6 +7,7 @@ Access is restricted to localhost and EUD/mesh clients, excluding uplink/LAN:
   /manage/*    - Management UI, requires the provisioned admin password
                  manet_manage.py supplies routes on the same listening port.
   /api/admin/* - Mesh config staging/apply, requires the same password
+  /api/atak/controller - Local EUD controller choice, JSON POST, no password
   /admin       - Redirects to /manage/
 
 Reads:
@@ -37,6 +38,8 @@ import ipaddress
 import socket
 import time
 import html
+import uuid
+from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 
 from manet_config_io import load_kv_file
@@ -75,6 +78,9 @@ MESH_STATE_FILE = "/etc/mesh_ipv4_state"
 # First line is the installed MANET release; updates rewrite it.
 VERSION_FILE    = "/etc/manet_version.txt"
 PORT            = 8080
+ATAK_RUNTIME = Path('/run/manet-atak')
+ATAK_DHCP_CONF = Path('/etc/dnsmasq.d/mesh-eud.conf')
+ATAK_BOOT_ID = Path('/proc/sys/kernel/random/boot_id')
 REFRESH_MS      = 15000   # Status page polling interval (ms)
 # Status and management routes share one node-local session cookie.
 PERF_AUTH_COOKIE = 'manet_perf_auth'
@@ -82,6 +88,60 @@ PERF_AUTH_COOKIE = 'manet_perf_auth'
 # Management routes require the password cookie.
 MANAGE_PREFIX = '/manage'
 # Config / State Loaders
+
+
+def atak_snapshot(conf):
+    """Read the bounded local phone snapshot, expiring leases on monotonic time."""
+    if conf.get('atak', '').strip().lower() in {'n', 'no', '0', 'false'}:
+        return None
+    empty = {'enabled': True, 'running': False, 'phones': []}
+    try:
+        with (ATAK_RUNTIME / 'status.json').open('rb') as stream:
+            raw = stream.read(256 * 1024 + 1)
+        if len(raw) > 256 * 1024:
+            return empty
+        data = json.loads(raw)
+        if (not data.get('running') or not data.get('enabled')
+                or data.get('boot_id') != ATAK_BOOT_ID.read_text().strip()):
+            return empty
+        mono = time.monotonic()
+        peers = data.get('phones', [])
+        if not isinstance(peers, list) or len(peers) > 253:
+            return empty
+        peers = [p for p in peers if isinstance(p, dict)
+                 and isinstance(p.get('presence_deadline'), (int, float))
+                 and mono < p['presence_deadline']]
+        return dict(data, phones=peers)
+    except (OSError, ValueError, TypeError, AttributeError):
+        return empty
+
+
+def atak_overview(conf):
+    """Expose only the fields used by the local phone/controller panel."""
+    snapshot = atak_snapshot(conf)
+    if snapshot is None:
+        return None
+    return {'enabled': snapshot['enabled'], 'running': snapshot['running'],
+            'phones': [{key: peer.get(key) for key in ('uid', 'callsign', 'port', 'controller')}
+                       for peer in snapshot['phones']]}
+
+
+def atak_local_eud(client_ip):
+    """Mirror manet_ui's local DHCP pool boundary for this password-free write.
+
+    The firewall allows loopback for local tools; this browser action requires
+    an EUD address from this radio's pool. This is source-address admission on
+    the trusted team network, not proof against a peer spoofing that address.
+    """
+    try:
+        address = ipaddress.IPv4Address(client_ip)
+        for line in ATAK_DHCP_CONF.read_text().splitlines():
+            if line.startswith('dhcp-range='):
+                parts = line.split('=', 1)[1].split(',')
+                return ipaddress.IPv4Address(parts[0]) <= address <= ipaddress.IPv4Address(parts[1])
+    except (OSError, ValueError, IndexError):
+        pass
+    return False
 
 
 def get_provisioned_manage_password(conf=None):
@@ -940,6 +1000,7 @@ def assemble_local_data():
         'ap_ssid':   configured_ssid(),
         'mesh_ssid': conf.get('mesh_ssid', ''),
         'recovery': recovery_status(conf, nodes_raw, hostname),
+        'atak': atak_overview(conf),
     }
 
 def assemble_peer_data(peer_ip):
@@ -2314,6 +2375,26 @@ function battColor(pct) {
   return '#ef4444';
 }
 
+function atakText(value) {
+  return String(value || '').replace(/[&<>"']/g, c => ({'&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'}[c]));
+}
+async function setAtakController(button) {
+  button.disabled = true;
+  const result = document.getElementById('atak-choice-result');
+  try {
+    const response = await fetch('/api/atak/controller', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({uid: button.dataset.atakUid})
+    });
+    const data = await response.json();
+    result.textContent = response.ok ? 'Choice sent. The phone list will update shortly.' : data.error;
+  } catch (error) {
+    result.textContent = 'Unable to send choice. Check the connection and try again.';
+  } finally {
+    button.disabled = false;
+  }
+}
+
 function renderLocalPanel(d) {
   // ── Identity rows ──
   let html = '<details><summary style="padding:10px;cursor:pointer">Mesh recovery</summary>' + recoveryPanel(d.recovery) + '</details>';
@@ -2623,6 +2704,20 @@ function renderPeerDrawer(d, hostname) {
         ${addrs}${mcs}${faultLines}
       </div>`;
     }).join('');
+  }
+
+  if (d.atak && d.atak.enabled) {
+    html += '<div class="section-hdr" style="font-size:9px;position:static">ATAK PHONES</div>';
+    const peers = d.atak.phones || [];
+    html += '<div style="padding:5px 10px;font-size:11px">One phone sets this radio’s location. All connected ATAK phones receive its position.</div>';
+    peers.forEach(p => {
+      html += `<div class="eud-row"><span>${atakText(p.callsign)}</span> · ${p.port === 'wired' ? 'Wired' : 'Wi-Fi'}`;
+      if (p.controller) html += ' · <strong>Controls location</strong>';
+      else html += `<br><button type="button" data-atak-uid="${atakText(p.uid)}" onclick="setAtakController(this)">Set location from this phone</button>`;
+      html += '</div>';
+    });
+    if (!peers.length) html += '<div class="eud-row">No ATAK phones present.</div>';
+    html += '<div id="atak-choice-result" class="eud-row" role="status"></div>';
   }
 
   // Connected EUDs
@@ -3404,7 +3499,8 @@ class MeshHandler(RequestLimits, ManageRoutes, http.server.BaseHTTPRequestHandle
     def do_POST(self):
         """Serialize management changes and expire cached observations."""
         path = urlparse(self.path).path
-        changing = (path.startswith('/manage/api/') or path.startswith('/api/admin/'))
+        changing = (path.startswith('/manage/api/') or path.startswith('/api/admin/')
+                    or path.rstrip('/') == '/api/atak/controller')
         # One writer at a time; reject contention without blocking a worker.
         if changing and not MANAGEMENT_WRITE.acquire(blocking=False):
             self.send_busy('Another management change is running; retry when it finishes')
@@ -3417,6 +3513,54 @@ class MeshHandler(RequestLimits, ManageRoutes, http.server.BaseHTTPRequestHandle
                 # before another writer enters and always release the lock.
                 STATUS_CACHE.invalidate()
                 MANAGEMENT_WRITE.release()
+
+    def post_atak_controller(self, conf):
+        """Stage a bounded same-origin local EUD choice without an admin cookie."""
+        if not atak_local_eud(self.client_address[0]):
+            self.send_json({'error': 'Connect to this radio as an EUD'}, status=403)
+            return
+        # JSON requires a browser preflight across origins; no CORS permission
+        # is offered here. Also reject explicit foreign Origin/Referer headers.
+        if self.headers.get('Content-Type', '').split(';')[0].strip().lower() != 'application/json':
+            self.send_json({'error': 'JSON body required'}, status=415)
+            return
+        host = self.headers.get('Host', '').lower()
+        for name in ('Origin', 'Referer'):
+            value = self.headers.get(name)
+            if value is not None:
+                try:
+                    origin = urlparse(value)
+                except ValueError:
+                    self.send_json({'error': 'Same-origin request required'}, status=403)
+                    return
+                if (origin.scheme != 'http' or origin.netloc.lower() != host
+                        or origin.username is not None or origin.password is not None):
+                    self.send_json({'error': 'Same-origin request required'}, status=403)
+                    return
+        if self._body_length > 2048:
+            self.send_json({'error': 'Choice exceeds size limit'}, status=413)
+            return
+        try:
+            request = json.loads(self.read_body())
+            uid = request.get('uid') if isinstance(request, dict) else None
+            if not isinstance(uid, str) or not 1 <= len(uid) <= 128:
+                raise ValueError('Choose a present phone')
+            snapshot = atak_snapshot(conf)
+            if not snapshot or not snapshot.get('running'):
+                self.send_json({'error': 'ATAK is unavailable'}, status=409)
+                return
+            if not any(p.get('uid') == uid for p in snapshot['phones']):
+                self.send_json({'error': 'Phone is no longer present'}, status=409)
+                return
+            private_json_write(ATAK_RUNTIME / 'controller.json', {
+                'schema': 1, 'id': str(uuid.uuid4()), 'uid': uid,
+                'session': snapshot['session'], 'boot_id': snapshot['boot_id'],
+                'written_boot': time.clock_gettime(time.CLOCK_BOOTTIME)})
+            self.send_json({'queued': True}, status=202)
+        except (ValueError, TypeError, KeyError):
+            self.send_json({'error': 'Choose a present phone'}, status=400)
+        except OSError:
+            self.send_json({'error': 'ATAK choice could not be saved'}, status=503)
 
     def _do_POST(self):
         """Handle login and authenticated config transaction requests."""
@@ -3433,6 +3577,9 @@ class MeshHandler(RequestLimits, ManageRoutes, http.server.BaseHTTPRequestHandle
             return
 
         path      = parsed.path.rstrip('/') or '/'
+        if path == '/api/atak/controller':
+            self.post_atak_controller(conf)
+            return
         # Bounded body reads also apply to login and config API requests.
         body = self.read_body() or b'{}'
 

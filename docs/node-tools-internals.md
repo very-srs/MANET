@@ -2831,27 +2831,116 @@ extracts that enable symlink and reloads systemd; newly enabled units start at
 the next boot, or immediately with `systemctl start manet-atak.service`.
 `manet-positioning.service` remains disabled and its configuration default off.
 
-The current ATAK admission path requires a verified wired EUD on `end0`/`br0`,
-a matching local FDB/neighbor mapping and the owned nftables policy. Android
+ATAK admission independently verifies two possible local EUD ports. `end0`
+retains its WIRED_EUD/br0 role, wired carrier-generation token, carrier and
+forwarding checks. The AP name comes from `/var/lib/ap_interface`, must match
+`interface=` with `bridge=br0` in `/etc/hostapd/hostapd.conf`, and requires a live
+hostapd process plus carrier and forwarding br0 membership. Hostapd liveness is
+read from `/run/hostapd.pid` and `/proc/<pid>/{stat,cgroup}`: name, non-zombie
+state, process start time and the `hostapd.service` cgroup identify this lifetime.
+This adds no subprocess. Either path works alone, including an AP with `end0`
+routing a LAN uplink. A resolved br0 neighbor must map to a MAC dynamically
+learned on exactly one admitted port; any simultaneous bat0/other-port learning
+rejects it. Each peer records Wired or Wi-Fi.
+
+The owned firewall uses an explicit allow-list of `end0` and the configured AP
+name, computed by `--print-firewall` and the pre-start installer. A deny-list of
+known mesh ports could expose a new/unknown interface. Bridge input/output
+filtering and inet input confinement cover 4242/4349; first fragments to either
+port are dropped before bridge defragmentation. Strict readback checks every
+owned chain/rule and permits only implicit protocol matches, counters/handles
+and unordered anonymous-set membership to differ. Changing the AP interface
+name requires `systemctl restart manet-atak.service` to install a new list;
+until then the daemon fails closed on the policy mismatch. Ordinary AP stop/start
+with the same name needs no firewall replacement.
+
+Android
 location services should be off; ATAK receives external GPS CoT on UDP 4349,
 ordinary CoT on UDP 4242, and sends SA to the radio's IPv4 address on UDP 4242.
-SA admits and pins the phone identity. The radio advertises the contact
+SA admits a UID into the bounded phone table and refreshes its presence lease
+(the earlier of packet staleness and the 75-second receipt-age budget). Each
+phone retains IP, MAC, attachment type, callsign, clock/replay state and deadline.
+`max_euds_per_node` follows mesh-config validation: ASCII integer 0–253; flashers
+normally offer 1–20 for Wi-Fi and use zero for wired-only provisioning. Zero
+therefore admits one wired-primary phone. Missing/invalid values log and use a
+bounded default of eight. A full live table rejects a new UID; absent entries
+can be evicted. Replay history per phone is limited to
+`min(256, max(8, 2048 // capacity))` SA timestamps, bounding aggregate memory.
+A live UID cannot silently move to another MAC. A replacement after absence
+can be admitted without deleting state. The radio advertises the contact
 `MANET <hostname>` (`atak_callsign` can override it), with its TCP 4242 endpoint
 for Send. Select that contact when sending a manual point. The contact is
 hidden from the map; the separate external-position feed carries location.
-Phone presence, clock and manual-location state are retained under
-`/var/lib/manet-atak`; the service never sets the OS clock.
+Every present phone gets a contact, external position and GPS warnings using
+its own SA-derived clock. Per-phone sends retain the 30-second contact refresh
+and at-most-1-Hz position feed, subject to the existing GPS trust and echo gates.
+
+Controller order is: saved manual choice if present; the only wired phone;
+present current controller; otherwise a random present phone. Random selection
+persists across unchanged ticks and same-boot restarts. A manual preference
+persists across reboot/absence, regaining control on return. No present group
+is left without a controller. Only that controller's markers, drags, USER
+selections and read receipts can change location or acknowledge GPS alerts.
+The held manual point and distrust belong to the radio. Cross-controller manual
+ordering uses radio monotonic observation time, and retirement jobs retain the
+original phone owner. A guest point receives one explanation per retained guest
+and controller change. Membership growth or controller change queues one group
+notice per present phone; unchanged membership/controller does not repeat it.
+Per-recipient notice slots coalesce superseded changes, use stable message IDs,
+and park after five failures. Evicting an absent guest also forgets its notice
+history; this keeps the bound tied to provisioned capacity.
+
+The unauthenticated `/` overview adds the ATAK phone list and controller buttons
+only while ATAK is enabled. Its `/api/local` ATAK object exposes only `enabled`,
+`running` and each phone's `uid`, `callsign`, `port` and `controller`. The full
+runtime snapshot, including session/boot identity, positions and input state,
+stays server-side for the controller POST check. `manet-ui-firewall.sh` installs
+port-80 input rules at priority -10: loopback and this radio's DHCP source-address range are allowed,
+then all remaining port-80 traffic is dropped. The web application's ordinary
+subnet check is broader. The controller POST additionally checks the local DHCP
+pool itself, requires a bounded JSON body, and rejects foreign Origin/Referer;
+it needs no management cookie. These source-address checks assume the trusted
+team network and are not cryptographic or ingress-port proof for HTTP.
+The web process atomically writes `/run/manet-atak/controller.json`; the existing
+application cycle notices file metadata changes. It rechecks current phone/path
+presence and a boot/session-bound, five-second BOOTTIME envelope, then checkpoints
+the choice. HTTP 202 means queued, with the resulting controller shown by the
+next overview refresh. There is no extra daemon or polling loop.
+
+Persistence schema 2 owns the selector, phone table, manual controller preference,
+notice state and delivery ownership under `/var/lib/manet-atak`. Schema 1's old
+single-pin checkpoint is explicitly discarded, including its held manual point,
+on first start of this code; unknown schemas or damaged checksums still refuse
+startup. Reboot retains choice and radio manual-location age lower bounds but
+requires new SA before any phone becomes present. The service never sets the
+OS clock.
 
 The ATAK daemon now subscribes to route link/address/neighbor (including bridge
 FDB) and nftables notifications before its first readback. A cached proof avoids
 all four `nft`/`ip`/`bridge` subprocesses on unchanged ticks. Role/generation file
-metadata is the cheap additional invalidator; each new TCP stream or UDP peer
-forces a full snapshot. Events arriving during a snapshot discard it. Overflow,
-truncation or subscription failure closes the service and lets systemd restart
+metadata, AP role/config metadata and hostapd process identity are additional
+invalidators. With no live admitted SA lease, these events only discard proof;
+they never launch a snapshot. Each new TCP stream or UDP peer forces a full
+snapshot before application admission. While a lease remains live, event-driven
+verification and transient-readback retries continue even if its path temporarily
+fails, so it can recover without waiting for another SA. Output checks pending
+invalidations before sending. Events arriving during a snapshot discard it.
+Overflow, truncation or subscription failure closes the service and lets systemd restart
 with fresh subscriptions. SIGHUP also invalidates it. The existing output and
 input cycle intervals are unchanged, with no extra daemon or polling subprocess.
 The kernel firewall remains the packet boundary; asynchronous userspace
 notifications cannot make an arbitrary external ruleset flush atomic with I/O.
+
+Without current proof, idle TCP/UDP listeners bind to the primary br0 IPv4
+address obtained by `SIOCGIFADDR` (or the configured bind address). This ioctl
+starts no subprocess and grants no admission; the full address, firewall,
+neighbor and FDB checks still precede application dispatch. It permits first
+arrival after boot or address changes without a timer-driven snapshot. Idle
+invalidation closes streams and the sender and forgets UDP peer admissions,
+leaving only passive listeners. `path_ready` is false until readback succeeds;
+`path_reason` says verification awaits phone traffic after invalidation, or gives
+the last verification failure. A valid, unchanged cached proof can remain ready
+after the last lease expires.
 
 With no admitted phone, no CoT is sent. Before the first association, the
 application does not read GPS, select a position, create warnings or checkpoint
@@ -2861,7 +2950,7 @@ producer cannot later appear unwired. Inputs are parsed only when metadata
 changes or their boot/raw-clock freshness expires. Future timestamps have their
 own retry deadline; neither wall-clock steps nor the cache extend a fix's TTL.
 
-After a pinned phone leaves, changed safety inputs, phone presence expiry and
+After the last present phone leaves, changed safety inputs, phone presence expiry and
 warning deadlines still run. A held manual point or warning history retains the
 30-second durable checkpoint to preserve age lower bounds across reboot. Audio
 acknowledgements are checked only with pending audio; audio output is rewritten
@@ -2872,8 +2961,11 @@ timestamps to advance a displayed manual age. Admission/path changes are handled
 on the existing event cycle, and active output stays at its previous cadence.
 
 Remaining idle work is the existing 0.2-second select wakeup, one-second
-role/generation and input metadata checks, stream expiry and netlink handling.
-These preserve admission and fail-closed safety without polling subprocesses.
+role/generation, AP/hostapd identity, producer-file and input metadata checks,
+stream expiry and netlink handling, plus the cheap br0 address ioctl while proof
+is unavailable. Readable events can advance these checks within the existing
+five-cycle-per-second bound. Repeated bat0 neighbor/FDB notifications invalidate
+proof without running `nft`, `ip` or `bridge`; there is no idle readback timer.
 
 `manet-cpu-sample.py` reads cgroup-v2 `cpu.stat` twice around one timed sleep,
 including child-process CPU, and reports CPU seconds per elapsed minute plus
@@ -2882,10 +2974,17 @@ comparisons, without double-counting guest time. Restart/counter resets invalida
 the sample. Compare before/after samples under matching phone traffic and
 uptime, for example `sudo python3 /usr/local/bin/manet-cpu-sample.py --label
 no-phone --seconds 60` with the phone detached, then again with it attached.
-With a phone attached, the ATAK service measured about 1.0% of one core
-(0.6 CPU s/min) on CM4, down from 7.2% before. Offline tests prove four
-initial commands and zero more over 300 unchanged cycles; the application also
-does no further JSON parsing/writing, durable saves or CoT sends over 300
+Before the multiple-phone/AP change, with a wired phone attached, the ATAK
+service measured about 1.0% of one core
+(0.6 CPU s/min) on CM4, down from 7.2% before. The AP-only implementation before
+deferred readback measured 0.581 CPU s/min with no phone: bat0 neighbor churn
+triggered four-command snapshots about every 15 seconds. Offline tests now
+prove zero snapshot commands over 300 idle neighbor-event cycles, including
+the main loop, and fresh four-command proof on subsequent TCP/UDP arrival.
+With deferred readback, the same AP-only CM4 measured 0.254 CPU s/min (0.42% of
+one core) with no phone and started no snapshot commands over 60 seconds of
+that churn. The application
+also does no further JSON parsing/writing, durable saves or CoT sends over 300
 unchanged never-associated cycles. Tests cover input expiry, faults before first
 association, reconnect, pending audio and warning deadlines.
 

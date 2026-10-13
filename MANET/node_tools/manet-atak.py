@@ -7,10 +7,16 @@ installs --print-firewall policy before start and removes it after stop.
 The daemon verifies policy, logs to the journal and writes atomic /run JSON
 for the UI, as mesh-voice.py does. The versioned persistence adapter owns
 selector private state, whose layout changes require a schema review.
+
+Persistence schema 2 adds a bounded phone table with independent SA clocks,
+controller mode, per-recipient notices and retirement ownership. Schema 1 is
+explicitly discarded (test installations); unknown schemas and damaged state
+still fail closed. The radio's manual location and GPS distrust belong to the
+single selector, never to a controller's lifetime.
 """
 
 import argparse
-from dataclasses import asdict, dataclass, fields, is_dataclass, replace
+from dataclasses import asdict, dataclass, field, fields, is_dataclass, replace
 from datetime import datetime, timezone
 import fcntl
 import hashlib
@@ -21,6 +27,7 @@ import os
 from pathlib import Path
 import re
 import select
+import secrets
 import signal
 import socket
 import struct
@@ -34,7 +41,7 @@ import manet_phone as phone
 
 # Bound XML/state bytes and per-stream work before application dispatch.
 MAX_XML = 65536
-MAX_STATE = 512 * 1024
+MAX_STATE = 8 * 1024 * 1024
 MAX_CONNECTIONS = 8
 MAX_PER_PEER = 4
 MAX_STREAM_BYTES = 256 * 1024
@@ -51,6 +58,10 @@ KINDS = {'geochat', 'audio', 'web_ui'}
 # Require exactly six lowercase hexadecimal octets separated by colons.
 MAC = re.compile(r'(?:[0-9a-f]{2}:){5}[0-9a-f]{2}\Z')
 TABLE = 'manet_atak'
+DEFAULT_PHONE_LIMIT = 8
+MAX_PHONE_LIMIT = 253
+AP_ROLE = '/var/lib/ap_interface'
+HOSTAPD_CONF = '/etc/hostapd/hostapd.conf'
 
 
 class PersistenceError(RuntimeError):
@@ -153,6 +164,7 @@ class Config:
     callsign: str = 'MANET RADIO'
     enabled: bool = True
     bind_ip: str | None = None
+    max_phones: int = DEFAULT_PHONE_LIMIT
 
     @classmethod
     def load(cls, path='/etc/mesh.conf'):
@@ -162,10 +174,18 @@ class Config:
         # A stable 32-digit hexadecimal machine ID namespaces the radio UID.
         if not re.fullmatch('[0-9a-f]{32}', machine):
             raise ValueError('machine-id unavailable')
+        capacity = conf.get('max_euds_per_node', '')
+        if (not capacity.isascii() or not capacity.isdigit() or len(capacity) > 3
+                or int(capacity) > MAX_PHONE_LIMIT):
+            log('max_euds_per_node absent or invalid; using bounded default ' + str(DEFAULT_PHONE_LIMIT))
+            limit = DEFAULT_PHONE_LIMIT
+        else:
+            # Wired provisioning stores zero Wi-Fi EUDs; retain its primary phone.
+            limit = max(1, int(capacity))
         return cls('MANET-' + machine,
                    bounded_text(conf.get('atak_callsign', 'MANET ' + socket.gethostname()), 64),
                    atak_enabled(conf),
-                   ipv4(conf['atak_bind_ip']) if conf.get('atak_bind_ip') else None)
+                   ipv4(conf['atak_bind_ip']) if conf.get('atak_bind_ip') else None, limit)
 
 
 @dataclass(frozen=True)
@@ -200,16 +220,36 @@ def payload(protocol, field):
     return {'payload': {'protocol': protocol, 'field': field}}
 
 
-def firewall_objects():
-    """Return canonical nft JSON, ignoring only runtime counters and handles.
+def atak_ap_interface(path=AP_ROLE):
+    """Read the shared AP role, accepting only a literal Linux interface name."""
+    try:
+        name = Path(path).read_text().strip()
+    except FileNotFoundError:
+        return None
+    if not name:
+        return None
+    if not re.fullmatch(r'[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,14}', name) or name in {'end0', 'br0', 'bat0', 'lo'}:
+        raise ValueError('invalid AP interface role')
+    return name
+
+
+def atak_eud_ports(ap=None):
+    """Return the explicit policy allow-list; runtime verifies each port's role."""
+    return ('end0',) if ap is None else ('end0', ap)
+
+
+def firewall_objects(ports=('end0',)):
+    """Return canonical nft JSON for explicit local EUD interface names.
 
     Bridge input covers local delivery, output unknown-unicast flooding.
     Inet input excludes routed/loopback ingress and IPv6. Before bridge/IP
-    defragmentation, reject first IPv4 fragments addressed to TCP/UDP 4242 on
+    defragmentation, reject first IPv4 fragments addressed to TCP/UDP 4242/4349 on
     any bridge, including forwarded traffic. Without an offset-zero fragment,
     packets cannot reassemble even if later fragments arrive on other ports.
     Other ports/protocols and noninitial fragments are unaffected.
     """
+    allowed = ports[0] if len(ports) == 1 else {'set': list(ports)}
+    service_ports = {'set': [4242, 4349]}
     objects = []
     for family, hooks in (('bridge', ('prerouting', 'input', 'output')), ('inet', ('input',))):
         objects.append({'table': {'family': family, 'name': TABLE}})
@@ -223,27 +263,27 @@ def firewall_objects():
         objects.append({'rule': {'family': family, 'table': TABLE, 'chain': chain, 'expr': expr + [{'drop': None}]}})
     for protocol in ('tcp', 'udp'):
         # No ibrname match: node kernels lack CONFIG_NFT_BRIDGE_META, and a
-        # first fragment to 4242 has no legitimate use on any bridge.
+        # first fragment to either ATAK port has no legitimate use on any bridge.
         # Mask offset and MF bits: offset zero with more fragments set.
         rule('bridge', 'prerouting', [match(payload('ether', 'type'), 'ip'),
                                      match({'&': [payload('ip', 'frag-off'), 0x3fff]}, 0x2000),
                                      match(meta('l4proto'), protocol),
-                                     match(payload(protocol, 'dport'), 4242)])
-        rule('bridge', 'input', [match(meta('iifname'), 'end0', '!='),
+                                     match(payload(protocol, 'dport'), service_ports)])
+        rule('bridge', 'input', [match(meta('iifname'), allowed, '!='),
                                 match(payload('ether', 'type'), 'ip'),
                                 match(meta('l4proto'), protocol),
-                                match(payload(protocol, 'dport'), 4242)])
+                                match(payload(protocol, 'dport'), service_ports)])
         for field, ports in (('dport', {'set': [4242, 4349]}), ('sport', 4242)):
-            rule('bridge', 'output', [match(meta('oifname'), 'end0', '!='),
+            rule('bridge', 'output', [match(meta('oifname'), allowed, '!='),
                                      match(payload('ether', 'type'), 'ip'),
                                      match(meta('l4proto'), protocol),
                                      match(payload(protocol, field), ports)])
-        rule('inet', 'input', [match(meta('nfproto'), 'ipv6'), match(meta('l4proto'), protocol), match(payload(protocol, 'dport'), 4242)])
-        rule('inet', 'input', [match(meta('iifname'), 'br0', '!='), match(meta('l4proto'), protocol), match(payload(protocol, 'dport'), 4242)])
+        rule('inet', 'input', [match(meta('nfproto'), 'ipv6'), match(meta('l4proto'), protocol), match(payload(protocol, 'dport'), service_ports)])
+        rule('inet', 'input', [match(meta('iifname'), 'br0', '!='), match(meta('l4proto'), protocol), match(payload(protocol, 'dport'), service_ports)])
     return objects
 
 
-def firewall_transaction(*, install=True):
+def firewall_transaction(*, install=True, ports=None):
     """Build an atomic batch, tolerating missing or partly present tables."""
     commands = []
     for family in ('bridge', 'inet'):
@@ -251,7 +291,8 @@ def firewall_transaction(*, install=True):
         # nft add permits an existing table, so delete always has a target.
         commands += [{'add': table}, {'delete': table}]
     if install:
-        commands.extend({'add': entry} for entry in firewall_objects())
+        commands.extend({'add': entry} for entry in firewall_objects(
+            atak_eud_ports(atak_ap_interface()) if ports is None else ports))
     return {'nftables': commands}
 
 
@@ -289,11 +330,17 @@ def _canonical_expr(expr):
             protocol = inner.get('payload', {}).get('protocol') if isinstance(inner, dict) else None
             if protocol:
                 later.add(protocol)
+        if m and isinstance(m.get('right'), dict) and set(m['right']) == {'set'}:
+            # nft may reorder anonymous set members on readback; membership is
+            # unordered, but duplicate members or other expressions stay strict.
+            values = m['right']['set']
+            if isinstance(values, list) and all(type(v) in (int, str) for v in values):
+                entry = {'match': dict(m, right={'set': sorted(values, key=lambda v: (type(v).__name__, v))})}
         kept.append(entry)
     return list(reversed(kept))
 
 
-def valid_firewall(data):
+def valid_firewall(data, ports=('end0',)):
     """Compare owned nft policy with the required tables and rules."""
     actual = []
     for item in data.get('nftables', []):
@@ -334,15 +381,20 @@ def valid_firewall(data):
                 entry = {'rule': rule}
             result.append(entry)
         return result
-    return grouped(canonical(actual)) == grouped(canonical(firewall_objects()))
+    return grouped(canonical(actual)) == grouped(canonical(firewall_objects(ports)))
 
 
 @dataclass(frozen=True)
 class Proof:
-    """Record the verified local address, wired peers and role generation."""
+    """Record the verified address, local EUD peers and role generation."""
     local_ip: str
-    peers: dict  # IP -> current dynamic MAC learned on end0
+    peers: dict  # IP -> current dynamic MAC learned exclusively on a local EUD port
     generation: str
+    ports: dict = field(default_factory=dict)  # IP -> wired or wifi
+
+    def port(self, address):
+        """Return the proven local attachment type (legacy fixtures are wired)."""
+        return self.ports.get(address, 'wired') if address in self.peers else None
 
     def peer(self, address):
         """Return the verified Ethernet MAC for a peer address."""
@@ -420,10 +472,12 @@ class LinuxGuard:
     Netlink invalidates the cached snapshot on policy/link/address/FDB/ARP
     changes. The kernel firewall remains the packet-level enforcement boundary.
     """
-    def __init__(self, config, runner=subprocess.run, sysnet='/sys/class/net', run='/run'):
+    def __init__(self, config, runner=subprocess.run, sysnet='/sys/class/net', run='/run',
+                 ap_role=AP_ROLE, hostapd_conf=HOSTAPD_CONF, proc='/proc'):
         """Start with no verified path and injectable snapshot commands."""
         self.config, self.runner = config, runner
         self.sysnet, self.run = Path(sysnet), Path(run)
+        self.ap_role, self.hostapd_conf, self.proc = Path(ap_role), Path(hostapd_conf), Path(proc)
         self.reason = 'not checked'
         self.events = None
         self.cached = None
@@ -446,22 +500,68 @@ class LinuxGuard:
     def invalidate(self):
         """Discard cached proof and require another inspection."""
         self.cached, self.dirty = None, True
+        self.reason = 'path unverified; waiting for phone traffic'
+
+    def listen_address(self):
+        """Find a br0 listener address without treating it as admission proof."""
+        if self.config.bind_ip:
+            return self.config.bind_ip
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+                # SIOCGIFADDR returns the primary IPv4 address; the full dump
+                # still verifies its scope and br0 ownership before admission.
+                result = fcntl.ioctl(probe.fileno(), 0x8915, struct.pack('256s', b'br0'))
+            return socket.inet_ntoa(result[20:24])
+        except OSError:
+            return None
+
+    def hostapd_identity(self):
+        """Identify the live hostapd unit process without a polling subprocess.
+
+        Debian's hostapd PID file plus proc identity/start time handles stop,
+        restart and stale/reused PIDs. Link notifications verify port readiness.
+        """
+        try:
+            pid = (self.run / 'hostapd.pid').read_text().strip()
+            if not pid.isdecimal():
+                return None
+            base = self.proc / pid
+            stat = (base / 'stat').read_text()
+            name, rest = stat.split(' (', 1)[1].rsplit(') ', 1)
+            parts = rest.split()
+            if name != 'hostapd' or parts[0] in {'Z', 'X'}:
+                return None
+            if not any(line.rstrip().endswith('/hostapd.service') for line in (base / 'cgroup').read_text().splitlines()):
+                return None
+            return pid, parts[19]  # field 22: process start time, not CPU usage
+        except (OSError, ValueError, IndexError):
+            return None
 
     def file_signature(self):
-        """Track Ethernet role and carrier-generation file changes."""
-        return tuple(file_stamp(self.run / name)
-                     for name in ('ethernet_detection_state', 'eth-carrier-generation'))
+        """Track role/config changes and hostapd lifetime without child processes."""
+        return (tuple(file_stamp(self.run / name) for name in
+                      ('ethernet_detection_state', 'eth-carrier-generation')),
+                file_stamp(self.ap_role), file_stamp(self.hostapd_conf), self.hostapd_identity())
 
-    def current(self, force=False):
-        """Reuse stable proof or inspect again after invalidation."""
+    def forwarding(self, iface):
+        """Require br0 membership, carrier and bridge forwarding independently."""
+        try:
+            return ((self.sysnet / iface / 'master').resolve().name == 'br0'
+                    and (self.sysnet / iface / 'carrier').read_text().strip() == '1'
+                    and (self.sysnet / 'br0/brif' / iface / 'state').read_text().strip() == '3')
+        except OSError:
+            return False
+
+    def current(self, force=False, refresh=True):
+        """Consume invalidations, deferring readback while no phone needs it."""
         if self.events is None:
             raise OSError('network subscriptions unavailable')
         try:
             signature = self.file_signature()
             if self.events.changed() or signature != self.signature or force:
                 self.invalidate()
-            if self.dirty:
-                self.signature = signature
+            self.signature = signature
+            if self.dirty and (refresh or force):
                 proof = self.inspect()
                 # A snapshot spanning a change cannot admit peers. Retry next
                 # cycle.
@@ -488,25 +588,36 @@ class LinuxGuard:
         return json.loads(result.stdout)
 
     def inspect(self):
-        """Verify wired EUD policy and map IPv4 peers to learned end0 MACs."""
+        """Verify each local EUD port and admit exclusively learned IPv4 peers."""
         self.retry = False
         try:
             if not self.config.enabled:
                 raise ValueError('atak is disabled in mesh.conf')
-            role = read_kv(self.run / 'ethernet_detection_state')
-            if role.get('ETH_MODE') != 'WIRED_EUD' or role.get('ETH_BRIDGE') != 'br0':
-                raise ValueError('end0 is not a wired EUD')
-            if (self.sysnet / 'end0/master').resolve().name != 'br0':
-                raise ValueError('end0 is not enslaved to br0')
-            # Bridge port state 3 is forwarding. Carrier alone is insufficient.
-            if (self.sysnet / 'end0/carrier').read_text().strip() != '1' or (self.sysnet / 'br0/brif/end0/state').read_text().strip() != '3':
-                raise ValueError('end0 is not forwarding with carrier')
-            generation = (self.run / 'eth-carrier-generation').read_text().strip()
-            # Match the wired-EUD role plus its non-whitespace generation token.
-            if not re.fullmatch(r'end0 wired-eud \S+', generation):
-                raise ValueError('wired EUD generation unavailable')
-            if not valid_firewall(self.command('nft', '-j', 'list', 'ruleset')):
-                raise ValueError('ATAK firewall missing or changed')
+            local_ports = {}
+            generation = ''
+            try:
+                role = read_kv(self.run / 'ethernet_detection_state')
+                token = (self.run / 'eth-carrier-generation').read_text().strip()
+                if (role.get('ETH_MODE') == 'WIRED_EUD' and role.get('ETH_BRIDGE') == 'br0'
+                        and self.forwarding('end0') and re.fullmatch(r'end0 wired-eud \S+', token)):
+                    local_ports['end0'] = 'wired'
+                    generation = token
+            except OSError:
+                pass  # Missing or uplink Ethernet must not revoke a valid AP.
+            ap = atak_ap_interface(self.ap_role)
+            hostapd = self.hostapd_identity()
+            if ap and hostapd and self.forwarding(ap):
+                try:
+                    conf = read_kv(self.hostapd_conf)
+                    if conf.get('interface') == ap and conf.get('bridge') == 'br0':
+                        local_ports[ap] = 'wifi'
+                        generation += ' ap ' + ap + ' ' + ':'.join(hostapd)
+                except OSError:
+                    pass
+            if not local_ports:
+                raise ValueError('no forwarding local EUD port')
+            if not valid_firewall(self.command('nft', '-j', 'list', 'ruleset'), atak_eud_ports(ap)):
+                raise ValueError('ATAK firewall missing or changed; restart service after AP role changes')
             links = self.command('ip', '-j', '-4', 'address', 'show', 'dev', 'br0')
             # Bind only a primary global br0 IPv4 address from the kernel dump.
             addresses = [ipv4(a['local']) for link in links for a in link.get('addr_info', [])
@@ -522,21 +633,23 @@ class LinuxGuard:
                 if entry.get('state') in ('permanent', 'static') or 'self' in entry.get('flags', []):
                     continue
                 ports.setdefault(mac, set()).add(entry.get('ifname', entry.get('dev')))
-            peers = {}
+            peers, peer_ports = {}, {}
             for entry in self.command('ip', '-j', '-4', 'neigh', 'show', 'dev', 'br0'):
                 mac = entry.get('lladdr', '').lower()
                 states = entry.get('state', [])
                 if isinstance(states, str):
                     states = [states]
-                # Admit resolved neighbors learned exclusively through end0.
+                # Admit resolved neighbors learned on exactly one local EUD port.
                 # A MAC also learned on a mesh port fails this test.
-                if (MAC.fullmatch(mac) and ports.get(mac) == {'end0'}
+                if (MAC.fullmatch(mac) and len(ports.get(mac, ())) == 1
+                        and next(iter(ports[mac])) in local_ports
                         and set(states) & {'REACHABLE', 'STALE', 'DELAY', 'PROBE'}):
                     address = ipv4(entry['dst'])
                     if address != local:
                         peers[address] = mac
-            self.reason = 'end0 firewall and EUD path verified'
-            return Proof(local, peers, generation)
+                        peer_ports[address] = local_ports[next(iter(ports[mac]))]
+            self.reason = 'local EUD firewall and paths verified: ' + ', '.join(local_ports)
+            return Proof(local, peers, generation, peer_ports)
         except (OSError, subprocess.SubprocessError) as exc:
             self.retry = True
             self.reason = str(exc)
@@ -615,7 +728,9 @@ def validate_selector(position, config):
         bounded_text(position.pinned_uid)
         if position.pinned_uid == config.uid:
             raise ValueError('radio cannot be pinned')
-    if len(position._seen_sa_times) > phone.PHONE_SA_HISTORY or len(position._retirements) > MAX_RETIRE:
+    if not 1 <= position.sa_history_limit <= phone.PHONE_SA_HISTORY:
+        raise ValueError('invalid SA history bound')
+    if len(position._seen_sa_times) > position.sa_history_limit or len(position._retirements) > MAX_RETIRE:
         raise ValueError('selector history exceeds bound')
     if set(position._warnings) - CODES or len(position._events) > len(CODES) * len(KINDS):
         raise ValueError('invalid selector events')
@@ -825,7 +940,13 @@ class Service:
         self.config, self.boot_id, self.store, self.transport = config, boot_id, store, transport
         self.revision = 0
         self.position = phone.PhonePosition(radio_uid=config.uid)
-        self.peer = None
+        self.peer = None  # controller path; guest paths live in phones
+        self.phones = {}
+        self.manual_uid = None
+        self.noticed_present = ()
+        self.noticed_controller = None
+        self.delivery = {}  # transient per-guest contact/feed cadence
+        self.choice_request = None
         self.session = str(uuid.uuid4())
         self.retire = {}
         self.messages = {}
@@ -853,10 +974,14 @@ class Service:
         payload = {key: value for key, value in saved.items() if key != 'sha256'}
         if saved.get('sha256') != state_digest(payload):
             raise ValueError('state checksum mismatch; refusing implicit reassociation')
-        if saved.get('schema') != 1 or saved.get('uid') != self.config.uid:
+        if saved.get('schema') == 1 and saved.get('uid') == self.config.uid:
+            log('discarding obsolete single-pin ATAK state (schema 1)')
+            return
+        if saved.get('schema') != 2 or saved.get('uid') != self.config.uid:
             raise ValueError('state schema/identity mismatch; refusing implicit reassociation')
         state = decode(saved['state'])
-        required = {'selector', 'peer', 'session', 'retire', 'messages', 'audio', 'banners', 'chats', 'input_memory', 'age_lower_bound'}
+        required = {'selector', 'peer', 'session', 'retire', 'messages', 'audio', 'banners', 'chats', 'input_memory', 'age_lower_bound',
+                    'phones', 'manual_uid', 'noticed_present', 'noticed_controller', 'choice_request'}
         if not isinstance(state, dict) or set(state) != required:
             raise ValueError('invalid service state')
         self.position.__dict__ = state.pop('selector')
@@ -864,12 +989,46 @@ class Service:
         for key, value in state.items():
             setattr(self, key, value)
         bounded_text(self.session)
-        if (self.peer is None) != (self.position.pinned_uid is None):
-            raise ValueError('pin/path persistence inconsistent')
-        if self.peer is not None:
-            if set(self.peer) != {'ip', 'mac'} or not MAC.fullmatch(self.peer['mac']):
-                raise ValueError('invalid saved peer')
-            ipv4(self.peer['ip'])
+        if not isinstance(self.phones, dict) or len(self.phones) > MAX_PHONE_LIMIT:
+            raise ValueError('invalid saved phone table')
+        for uid, item in self.phones.items():
+            bounded_text(uid)
+            if set(item) != {'ip', 'mac', 'port', 'callsign', 'clock', 'outbox', 'warned', 'guest_notified'}:
+                raise ValueError('invalid saved phone fields')
+            ipv4(item['ip'])
+            if not MAC.fullmatch(item['mac']) or item['port'] not in {'wired', 'wifi'}:
+                raise ValueError('invalid saved phone path')
+            bounded_text(item['callsign'], 128)
+            clock = phone.PhonePosition(radio_uid=self.config.uid)
+            clock.__dict__ = item['clock']
+            validate_selector(clock, self.config)
+            if clock.pinned_uid != uid:
+                raise ValueError('phone table identity mismatch')
+            item['clock'] = clock
+            if not isinstance(item['guest_notified'], bool) or set(item['warned']) - CODES:
+                raise ValueError('invalid saved phone notice state')
+            if not isinstance(item['outbox'], dict) or set(item['outbox']) - (CODES | {'group', 'guest'}):
+                raise ValueError('invalid phone outbox')
+            for job in item['outbox'].values():
+                if set(job) != {'id', 'text', 'attempts', 'due'}:
+                    raise ValueError('invalid phone notice')
+                bounded_text(job['id'])
+                bounded_text(job['text'], 2048)
+                number(job['due'])
+                if type(job['attempts']) is not int or not 0 <= job['attempts'] <= 5:
+                    raise ValueError('invalid phone notice attempts')
+        for uid in (self.manual_uid, self.noticed_controller):
+            if uid is not None:
+                bounded_text(uid)
+        if not isinstance(self.noticed_present, tuple) or len(self.noticed_present) > MAX_PHONE_LIMIT:
+            raise ValueError('invalid notice membership')
+        for uid in self.noticed_present:
+            bounded_text(uid)
+        if self.choice_request is not None:
+            bounded_text(self.choice_request)
+        controller = self.phones.get(self.position.pinned_uid)
+        if self.peer != (None if controller is None else {k: controller[k] for k in ('ip', 'mac')}):
+            raise ValueError('controller path persistence inconsistent')
         for mapping, bound in ((self.retire, MAX_RETIRE), (self.messages, 4), (self.audio, 4), (self.banners, 4)):
             if not isinstance(mapping, dict) or len(mapping) > bound:
                 raise ValueError('invalid service queue')
@@ -888,6 +1047,11 @@ class Service:
             raise ValueError('invalid evidence generation')
         new_boot = saved['boot_id'] != self.boot_id
         rebase_selector(self.position, number(saved['saved_mono']), now, new_boot)
+        for item in self.phones.values():
+            rebase_selector(item['clock'], number(saved['saved_mono']), now, new_boot)
+            if new_boot:
+                for job in item['outbox'].values():
+                    job['due'] = now.mono
         if new_boot:
             self.age_lower_bound = True
             for item in self.retire.values():
@@ -903,10 +1067,12 @@ class Service:
     @staticmethod
     def validate_job(item, retirement=False):
         """Validate the persisted retry schedule and delivery progress."""
-        keys = {'id', 'attempts', 'due'} | ({'successes', 'done_until'} if retirement else {'sent_mono'})
+        keys = {'id', 'attempts', 'due'} | ({'successes', 'done_until', 'phone_uid'} if retirement else {'sent_mono'})
         if not isinstance(item, dict) or set(item) != keys:
             raise ValueError('invalid persisted transport job')
         bounded_text(item['id'])
+        if retirement:
+            bounded_text(item['phone_uid'])
         if type(item['attempts']) is not int or not 0 <= item['attempts'] <= 5:
             raise ValueError('invalid retry count')
         number(item['due'])
@@ -922,9 +1088,12 @@ class Service:
         state = {'selector': vars(self.position), 'peer': self.peer, 'session': self.session,
                  'retire': self.retire, 'messages': self.messages, 'audio': self.audio,
                  'banners': self.banners, 'chats': self.chats, 'input_memory': self.input_memory,
-                 'age_lower_bound': self.age_lower_bound}
+                 'age_lower_bound': self.age_lower_bound,
+                 'phones': {uid: dict(item, clock=vars(item['clock'])) for uid, item in self.phones.items()},
+                 'manual_uid': self.manual_uid, 'noticed_present': self.noticed_present,
+                 'noticed_controller': self.noticed_controller, 'choice_request': self.choice_request}
         try:
-            payload = {'schema': 1, 'uid': self.config.uid, 'boot_id': self.boot_id,
+            payload = {'schema': 2, 'uid': self.config.uid, 'boot_id': self.boot_id,
                        'saved_mono': now.mono, 'state': encode(state)}
             self.store.save(dict(payload, sha256=state_digest(payload)))
         except (OSError, ValueError, TypeError) as exc:
@@ -939,12 +1108,95 @@ class Service:
         self.rejected = min(self.rejected + 1, 2 ** 31 - 1)
         return self.last_rejection
 
+    def present_phones(self, now, proof):
+        """Return admitted live leases whose MAC and local port are still proven."""
+        if not self.config.enabled or proof is None:
+            return {}
+        return {uid: item for uid, item in self.phones.items()
+                if item['clock']._presence is not None and now.mono < item['clock']._presence
+                and item['clock'].phone_now(now.mono) is not None
+                and proof.peer(item['ip']) == item['mac'] and proof.port(item['ip']) == item['port']}
+
+    def has_live_lease(self, now):
+        """Keep active readback/recovery until all admitted SA leases expire."""
+        return self.config.enabled and any(
+            item['clock']._presence is not None and now.mono < item['clock']._presence
+            and item['clock'].phone_now(now.mono) is not None for item in self.phones.values())
+
     def phone_ready(self, now, proof):
-        """Require live phone presence, clock and the pinned wired MAC path."""
-        return (self.config.enabled and proof is not None and self.peer is not None
-                and self.position._presence is not None and now.mono < self.position._presence
-                and proof.peer(self.peer['ip']) == self.peer['mac']
-                and self.position.phone_now(now.mono) is not None)
+        """Require at least one present local phone before any phone output."""
+        return bool(self.present_phones(now, proof))
+
+    def queue_notice(self, item, code, text, now):
+        """Coalesce each kind of per-phone notice into a bounded durable slot."""
+        item['outbox'][code] = {'id': str(uuid.uuid4()), 'text': text,
+                                'attempts': 0, 'due': now.mono}
+
+    def choose_controller(self, now, proof, manual_uid=None):
+        """Apply manual, sole wired, current, then stable random preference."""
+        present = self.present_phones(now, proof)
+        if manual_uid is not None:
+            if manual_uid not in present:
+                return False
+            self.manual_uid = manual_uid
+        current = self.position.pinned_uid
+        wired = [uid for uid, item in present.items() if item['port'] == 'wired']
+        if self.manual_uid in present:
+            chosen = self.manual_uid
+        elif len(wired) == 1:
+            chosen = wired[0]
+        elif current in present:
+            chosen = current
+        elif present:
+            chosen = secrets.choice(sorted(present))
+        else:
+            chosen = current  # retain preference and held radio state while idle
+        if chosen != current:
+            self.position.follow_phone(present[chosen]['clock'], changed=True)
+            self.messages.clear()  # old controller receipts cannot acknowledge new chat
+            for item in self.phones.values():
+                item['guest_notified'] = False
+                item['outbox'].pop('guest', None)
+            self.contact_changed = True
+            self.retry_parked()
+        item = self.phones.get(chosen)
+        self.peer = None if item is None else {k: item[k] for k in ('ip', 'mac')}
+        # Notices follow membership growth (also replacements), or a new controller,
+        # and only with company: a lone phone needs no group explanation.
+        members = tuple(sorted(present))
+        grew = len(members) > 1 and bool(set(members) - set(self.noticed_present))
+        changed = chosen != self.noticed_controller
+        if members != self.noticed_present or changed:
+            for peer in self.phones.values():
+                peer['outbox'].pop('group', None)
+        if len(present) > 1 and (grew or changed):
+            callsign = present[chosen]['callsign']
+            text = (f'{len(present)} ATAK phones are connected to {self.config.callsign}. '
+                    f'{callsign} sets this radio\'s location. Change it at manet.local.')
+            for peer in present.values():
+                self.queue_notice(peer, 'group', text, now)
+        if members != self.noticed_present or chosen != self.noticed_controller or manual_uid is not None:
+            self.noticed_present, self.noticed_controller = members, chosen
+            self.commit(now)
+        return True
+
+    def controller_request(self, data, now, proof):
+        """Consume a boot/session-bound local UI choice once, without clock authority."""
+        if (not isinstance(data, dict) or data.get('schema') != 1
+                or data.get('session') != self.session or data.get('boot_id') != self.boot_id):
+            return False
+        try:
+            request = bounded_text(data.get('id'))
+            uid = bounded_text(data.get('uid'))
+            age = now.boot - number(data.get('written_boot'))
+            if not 0 <= age <= 5 or request == self.choice_request:
+                return False
+            self.choice_request = request
+            accepted = self.choose_controller(now, proof, manual_uid=uid)
+            self.commit(now)
+            return accepted
+        except (ValueError, TypeError):
+            return False
 
     def retry_parked(self):
         """Restart exhausted jobs that have no completed-retirement hold."""
@@ -960,8 +1212,6 @@ class Service:
         mac = None if proof is None else proof.peer(address)
         if not mac:
             return self.reject('ingress/path unproven')
-        if self.peer is not None and mac != self.peer['mac']:
-            return self.reject('pinned MAC mismatch; explicit reassociation required')
         try:
             root = cot._parse_document(packet, MAX_XML)
             bounded_text(root.get('uid'), 512)
@@ -973,26 +1223,69 @@ class Service:
             kind = root.get('type')
             # A creator-tagged person marker is a Sent point, not self SA.
             is_sa = kind == 'a-f-G-U-C' and root.find('detail/creator') is None
-            if not is_sa and (self.peer is None or self.peer['ip'] != address or self.position.phone_now(now.mono) is None):
+            present = self.present_phones(now, proof)
+            sender = next((uid for uid, item in present.items() if item['ip'] == address and item['mac'] == mac), None)
+            if not is_sa and sender is None:
                 return self.reject('admitted SA required before dependent traffic')
             if is_sa:
                 parsed = cot.parse_self_sa(packet)
                 if isinstance(parsed, str):
                     return self.reject(parsed)
                 bounded_text(parsed.uid)
-                update = self.position.feed(parsed, now.mono, now.utc, from_ethernet=True)
-                if update.status not in ('accepted_presence', 'accepted_manual', 'retirement_queue_full'):
+                callsign = bounded_text(parsed.callsign or parsed.uid)
+                item = self.phones.get(parsed.uid)
+                if item is not None and item['mac'] != mac and item['clock']._presence is not None and now.mono < item['clock']._presence:
+                    return self.reject('pinned MAC mismatch while phone is present')
+                if any(uid != parsed.uid and peer['ip'] == address for uid, peer in present.items()):
+                    return self.reject('endpoint already has a present phone identity')
+                if item is None:
+                    clock = phone.PhonePosition(radio_uid=self.config.uid)
+                    # Bound aggregate replay memory even at the configuration's 253 maximum.
+                    clock.sa_history_limit = min(phone.PHONE_SA_HISTORY, max(8, 2048 // self.config.max_phones))
+                    item = {'ip': address, 'mac': mac, 'port': proof.port(address),
+                            'callsign': callsign, 'clock': clock,
+                            'outbox': {}, 'warned': {}, 'guest_notified': False}
+                clock = item['clock']
+                baseline = {name: getattr(clock, name) for name in
+                            ('_last_manual_sa_point', '_last_user_sa_point', '_last_sa_geopointsrc')}
+                update = clock.feed(parsed, now.mono, now.utc, from_ethernet=True, allow_location=False)
+                if update.status != 'accepted_presence':
                     return self.reject(update.status)
-                changed = self.peer != {'ip': address, 'mac': mac}
-                self.peer = {'ip': address, 'mac': mac}
+                if parsed.uid not in self.phones:
+                    if len(self.phones) >= self.config.max_phones:
+                        expired = [uid for uid in self.phones if uid not in present]
+                        if not expired:
+                            return self.reject('phone table full')
+                        evict = min(expired, key=lambda uid: self.phones[uid]['clock']._presence or 0)
+                        del self.phones[evict]
+                        self.delivery.pop(evict, None)
+                changed = item['ip'] != address or item['port'] != proof.port(address)
+                item.update(ip=address, mac=mac, port=proof.port(address), callsign=callsign)
+                self.phones[parsed.uid] = item
+                previous = self.position.pinned_uid
+                self.choose_controller(now, proof)
+                result = update.status
+                if parsed.uid == self.position.pinned_uid:
+                    self.position.follow_phone(clock)
+                    if previous != parsed.uid:
+                        for name, value in baseline.items():
+                            setattr(self.position, name, value)
+                    update = self.position.admitted_sa(parsed, now.mono, clock.phone_now(now.mono),
+                                                        update.reappeared, update.clock_diagnostic)
+                    result = update.status
+                    self.peer = {'ip': address, 'mac': mac}
+                    self.contact_changed |= changed or update.reappeared or result == 'accepted_manual'
                 if update.reappeared:
                     self.retry_parked()
-                self.contact_changed |= changed or update.reappeared or update.status == 'accepted_manual'
-                result = update.status
+                    self.delivery.pop(parsed.uid, None)
+                    for job in item['outbox'].values():
+                        job['attempts'], job['due'] = 0, now.mono
             elif kind in ('b-t-f-d', 'b-t-f-r'):
                 parsed = cot.parse_chat_receipt(packet)
                 if isinstance(parsed, str):
                     return self.reject(parsed)
+                if sender != self.position.pinned_uid:
+                    return 'guest_receipt'
                 self.reconcile_uncertain_chat(parsed, now)
                 result = self.position.feed_receipt(parsed, now.mono, now.utc, from_ethernet=True)
             elif kind == 'b-t-f':
@@ -1000,7 +1293,7 @@ class Service:
                 if isinstance(parsed, str):
                     return self.reject(parsed)
                 bounded_text(parsed.message_id)
-                result = self.position.feed_chat(parsed, now.mono, now.utc, from_ethernet=True)
+                result = self.phones[sender]['clock'].feed_chat(parsed, now.mono, now.utc, from_ethernet=True)
                 if isinstance(result, cot.PhoneChat):
                     # Deduplicate within the bounded 32-message display history.
                     if not any(c['sender_uid'] == result.sender_uid and c['message_id'] == result.message_id for c in self.chats):
@@ -1014,13 +1307,26 @@ class Service:
                 if isinstance(parsed, str):
                     return self.reject(parsed)
                 bounded_text(parsed.uid)
+                if sender != self.position.pinned_uid:
+                    item = self.phones[sender]
+                    if not item['guest_notified']:
+                        controller = self.phones.get(self.position.pinned_uid)
+                        if controller is not None:
+                            self.queue_notice(item, 'guest',
+                                f"{self.config.callsign} follows {controller['callsign']} for its location. "
+                                "To change it, open manet.local.", now)
+                            item['guest_notified'] = True
+                            self.commit(now)
+                    return self.reject('guest marker; only controller can set location')
+                if parsed.uid in self.phones:
+                    return self.reject('reserved phone UID')
                 if parsed.uid in self.retire:
                     return self.reject('retirement in flight')
                 update = self.position.feed_marker(parsed, now.mono, now.utc, from_ethernet=True)
                 result = update.status + ':' + update.reason
                 self.contact_changed |= update.status == 'accepted'
             self.reconcile_audio()
-            self.commit(now)  # A persistent choice/pin precedes any output derived from it.
+            self.commit(now)  # A persistent controller choice precedes derived output.
             return result
         except (ValueError, KeyError, TypeError, cot.ET.ParseError) as exc:
             # commit wraps write failures as fatal PersistenceError, which
@@ -1090,10 +1396,10 @@ class Service:
             self.position.ack_event(event.event_id, now.mono, now.utc)
             self.commit(now)
 
-    def send(self, data, port, now):
+    def send(self, data, port, now, peer=None):
         """Attempt UDP handoff and retain a bounded transport failure reason."""
         try:
-            if not self.transport.send(data, (self.peer['ip'], port)):
+            if not self.transport.send(data, ((peer or self.peer)['ip'], port)):
                 raise OSError('short UDP send')
             self.send_error = None
             return True
@@ -1103,6 +1409,7 @@ class Service:
 
     def tick(self, now, proof, gps, input_status):
         """Select location, persist actions and send due phone output."""
+        self.choose_controller(now, proof)
         if encode(self.input_memory) != self.saved_input_memory:
             self.commit(now)  # never forget that a formerly unwired producer became active
         # Capture policy transitions separately from 1 Hz feed/deadline timestamps.
@@ -1123,12 +1430,14 @@ class Service:
                 if len(self.retire) >= MAX_RETIRE:
                     break
                 self.retire[uid] = {'id': str(uuid.uuid4()), 'attempts': 0, 'successes': 0,
-                                    'due': now.mono, 'done_until': None}
+                                    'due': now.mono, 'done_until': None,
+                                    'phone_uid': self.position._retirements[uid]}
                 self.commit(now)
             self.position.ack_retired((uid,))
             self.commit(now)
-        ready = (self.config.enabled and proof is not None and self.peer is not None and selected.phone_present
-                 and proof.peer(self.peer['ip']) == self.peer['mac'] and self.position.phone_now(now.mono) is not None)
+        present = self.present_phones(now, proof)
+        ready = self.position.pinned_uid in present
+        self.send_attached(now, proof, selected, present)
         stamp = self.position.outbound_time(now.mono, now.utc)
         fix = selected.fix
         signature = (None if fix is None else (fix.lat, fix.lon, fix.hae, fix.source),
@@ -1148,6 +1457,7 @@ class Service:
                 packet = cot.external_position(self.config.uid, fix, stamp)
                 if packet is not None and self.send(packet, 4349, now):
                     self.position.position_sent(fix, now.mono, now.utc)
+                    present[self.position.pinned_uid]['clock'].position_sent(fix, now.mono, now.utc)
                     self.last_feed = now.mono
             pending = {str(e.event_id): e for e in self.position.outbound_events if e.kind == 'geochat'}
             self.messages = {key: item for key, item in self.messages.items() if key in pending}
@@ -1171,28 +1481,86 @@ class Service:
                     del self.messages[key]
                     self.commit(now)  # before any fast receipt is dispatched
                 break
-            # Retire one due marker per tick with the same five-attempt backoff.
-            for uid, item in list(self.retire.items()):
-                if item['done_until'] is not None:
-                    if now.mono >= item['done_until']:
-                        del self.retire[uid]
-                        self.commit(now)
-                    continue
-                if item['attempts'] >= 5 or now.mono < item['due']:
-                    continue
-                item['attempts'] += 1
-                item['due'] = now.mono + min(30, 2 ** item['attempts'])
-                self.commit(now)
-                if self.send(cot.retire_marker(uid, item['id'], stamp), 4242, now):
-                    item['successes'] += 1
-                    if item['successes'] >= 3:
-                        # Three handoffs start a 120 s replay hold, not an ACK.
-                        item['done_until'] = now.mono + 120
-                self.commit(now)
-                break
+        # Retire one due marker per tick with the same five-attempt backoff.
+        for uid, item in list(self.retire.items()):
+            if item['done_until'] is not None:
+                if now.mono >= item['done_until']:
+                    del self.retire[uid]
+                    self.commit(now)
+                continue
+            if item['attempts'] >= 5 or now.mono < item['due']:
+                continue
+            owner = present.get(item['phone_uid'])
+            if owner is None:
+                continue
+            item['attempts'] += 1
+            item['due'] = now.mono + min(30, 2 ** item['attempts'])
+            self.commit(now)
+            owner_stamp = owner['clock'].outbound_time(now.mono, now.utc)
+            if self.send(cot.retire_marker(uid, item['id'], owner_stamp), 4242, now, owner):
+                item['successes'] += 1
+                if item['successes'] >= 3:
+                    # Three handoffs start a 120 s replay hold, not an ACK.
+                    item['done_until'] = now.mono + 120
+            self.commit(now)
+            break
         if now.mono - self.last_checkpoint >= 30:
             self.commit(now)
         return self.status(now, proof, selected, input_status)
+
+    def send_attached(self, now, proof, selected, present):
+        """Feed every guest, fan out GPS warnings, and send bounded notices."""
+        for uid, item in present.items():
+            clock = item['clock']
+            stamp = clock.outbound_time(now.mono, now.utc)
+            controller = uid == self.position.pinned_uid
+            if not controller:
+                delivery = self.delivery.setdefault(uid, {})
+                fix = selected.fix
+                geometry = None if fix is None else (fix.lat, fix.lon, fix.hae, fix.source)
+                signature = (proof.local_ip, proof.generation, item['ip'], geometry,
+                             selected.position_trusted, tuple(sorted(self.banners.items())), self.config.callsign)
+                if (now.mono - delivery.get('contact_attempt', -math.inf) >= 1
+                        and (signature != delivery.get('signature') or
+                             cot.contact_refresh_due(now.mono, delivery.get('contact')))):
+                    delivery['contact_attempt'] = now.mono
+                    if self.send(cot.hidden_contact(self.config.uid, self.config.callsign,
+                                                   (proof.local_ip, 4242), stamp), 4242, now, item):
+                        delivery.update(contact=now.mono, signature=signature)
+                if selected.fix is not None and now.mono - delivery.get('feed_attempt', -math.inf) >= 1:
+                    delivery['feed_attempt'] = now.mono
+                    packet = cot.external_position(self.config.uid, selected.fix, stamp)
+                    if packet is not None and self.send(packet, 4349, now, item):
+                        clock.position_sent(selected.fix, now.mono, now.utc)
+            warnings = {code: warning for code, warning in self.position._warnings.items() if code != 'phone_gps'}
+            # Phone GPS configuration is specific to its recipient.
+            if 'phone_gps' in clock._warnings:
+                warnings['phone_gps'] = clock._warnings['phone_gps']
+            for code in list(item['warned']):
+                if code not in warnings:
+                    del item['warned'][code]
+                    item['outbox'].pop(code, None)
+            for code, warning in warnings.items():
+                signature = (warning.raised_mono, warning.text)
+                if controller:
+                    item['outbox'].pop(code, None)
+                if item['warned'].get(code) != signature:
+                    if not controller:
+                        self.queue_notice(item, code, warning.text, now)
+                    item['warned'][code] = signature
+                    self.commit(now)
+            for code, job in list(item['outbox'].items()):
+                if job['attempts'] >= 5 or now.mono < job['due']:
+                    continue
+                job['attempts'] += 1
+                job['due'] = now.mono + min(30, 2 ** job['attempts'])
+                self.commit(now)
+                if self.send(cot.geochat_report(self.config.uid, self.config.callsign, uid,
+                                                job['text'], job['id'], stamp), 4242, now, item):
+                    del item['outbox'][code]
+                    self.commit(now)
+                # At most one notice per recipient per cycle; latest change coalesces.
+                break
 
     def status(self, now, proof, selected=None, input_status=None):
         """Build the runtime snapshot from current policy and path state."""
@@ -1205,7 +1573,13 @@ class Service:
                 'written_mono': now.mono,
                 'enabled': self.config.enabled, 'path_ready': proof is not None,
                 'phone_present': bool(self.phone_ready(now, proof)), 'phone_uid': self.position.pinned_uid,
-                'peer': self.peer, 'selected': None if fix is None else asdict(fix),
+                'peer': self.peer, 'session': self.session, 'controller_uid': self.position.pinned_uid,
+                'manual_controller_uid': self.manual_uid, 'phone_limit': self.config.max_phones,
+                'phones': [dict(uid=uid, callsign=item['callsign'], ip=item['ip'], mac=item['mac'],
+                                port=item['port'], presence_deadline=item['clock']._presence,
+                                controller=uid == self.position.pinned_uid)
+                           for uid, item in self.present_phones(now, proof).items()],
+                'selected': None if fix is None else asdict(fix),
                 'manual_age_s': None if location is None else location.age_s,
                 'manual_observation_mono': None if location is None else location.observation_mono,
                 'manual_received_mono': None if location is None else location.received_mono,
@@ -1231,10 +1605,19 @@ class Application:
         self.service, self.inputs, self.runtime = service, inputs, Path(runtime)
         self.last_key = self.last_audio = self.ack_stamp = None
         self.input_revision = None
+        self.controller_stamp = None
 
     def update(self, now, proof, reason):
         """Process changed inputs or due work and publish runtime snapshots."""
         service = self.service
+        path = self.runtime / 'controller.json'
+        stamp = file_stamp(path)
+        if stamp is not None and stamp != self.controller_stamp:
+            self.controller_stamp = stamp
+            try:
+                service.controller_request(read_json(path, 2048), now, proof)
+            except (FileNotFoundError, ValueError):
+                pass
         if service.audio:
             path = self.runtime / 'audio-ack.json'
             stamp = file_stamp(path)
@@ -1244,15 +1627,15 @@ class Application:
                     self.ack_stamp = stamp
                 except (FileNotFoundError, ValueError):
                     pass
-        gps, input_status = self.inputs.cached_read(now, service.input_memory, receiver=service.peer is not None)
+        gps, input_status = self.inputs.cached_read(now, service.input_memory, receiver=bool(service.phones))
         if self.input_revision != self.inputs.revision:
             # Observe producer activation/loss even before the first phone, so
             # an absent formerly-active monitor cannot later look "unwired".
             if encode(service.input_memory) != service.saved_input_memory:
                 service.commit(now)
             self.input_revision = self.inputs.revision
-        present = service.position._presence is not None and now.mono < service.position._presence
-        gps_key = None if service.peer is None else (
+        present = tuple(sorted(service.present_phones(now, proof)))
+        gps_key = None if not service.phones else (
             gps.fix, gps.observed_mono if gps.fix is not None else None,
             gps.state, gps.jammed, gps.fault_epoch, gps.ranges_agree)
         def key():
@@ -1263,13 +1646,13 @@ class Application:
                        for w in service.position._warnings.values())
         # These timestamps preserve manual-age lower bounds and warning history
         # across reboot. A never-associated node needs no periodic checkpoint.
-        checkpoint = (service.peer is not None and
+        checkpoint = (bool(service.phones) and
                       (service.position._manual is not None or service.position._warnings) and
                       now.mono - service.last_checkpoint >= 30)
         if (not service.phone_ready(now, proof) and self.last_key == key()
                 and not deadline and not checkpoint):
             return False
-        status = (service.status(now, proof, input_status=input_status) if service.peer is None else
+        status = (service.status(now, proof, input_status=input_status) if not service.phones else
                   service.tick(now, proof, gps, input_status))
         status['path_reason'] = reason
         status['idle'] = not status['phone_present']
@@ -1351,6 +1734,7 @@ class Network:
         self.factory = factory
         self.verify = verify
         self.listener = self.udp = self.sender = None
+        self.local_ip = None
         self.proof = None
         self.streams = {}
         self.datagram_peers = {}
@@ -1371,25 +1755,48 @@ class Network:
                 sock.close()
                 setattr(self, name, None)
         self.proof = None
+        self.local_ip = None
         self.datagram_peers.clear()
+
+    def listen(self, address):
+        """Open only br0 input listeners; these do not authorize phone I/O."""
+        if address != self.local_ip:
+            self.close()
+        if address is not None and self.listener is None:
+            try:
+                self.listener = self.make(socket.SOCK_STREAM, address, 4242)
+                self.listener.listen(MAX_CONNECTIONS)
+                self.udp = self.make(socket.SOCK_DGRAM, address, 4242)
+                self.local_ip = address
+            except OSError:
+                self.close()
+                raise
+
+    def idle(self, address):
+        """Retain only listeners while invalid proof awaits incoming traffic."""
+        for sock in list(self.streams):
+            self.close_stream(sock)
+        if self.sender is not None:
+            self.sender.close()
+            self.sender = None
+        self.proof = None
+        self.datagram_peers.clear()
+        self.listen(address)
 
     def configure(self, proof):
         """Rebind changed local paths and evict peers absent from new proof."""
-        old = None if self.proof is None else (self.proof.local_ip, self.proof.generation)
-        new = None if proof is None else (proof.local_ip, proof.generation)
-        if old != new:
+        if (proof is None or self.local_ip != proof.local_ip
+                or self.proof is not None and self.proof.generation != proof.generation):
             self.close()
-        if proof is not None and self.listener is None:
+        if proof is not None:
             try:
-                self.listener = self.make(socket.SOCK_STREAM, proof.local_ip, 4242)
-                self.listener.listen(MAX_CONNECTIONS)
-                self.udp = self.make(socket.SOCK_DGRAM, proof.local_ip, 4242)
-                self.sender = self.make(socket.SOCK_DGRAM, proof.local_ip, 0)
-                # Linux IP_MTU_DISCOVER=10 / IP_PMTUDISC_DO=2. Never fragment an
-                # output packet around the bridge's port-based egress filter.
-                self.sender.setsockopt(socket.IPPROTO_IP, 10, 2)
-                # One IP hop confines output to the directly attached network.
-                self.sender.setsockopt(socket.IPPROTO_IP, socket.IP_TTL, 1)
+                self.listen(proof.local_ip)
+                if self.sender is None:
+                    self.sender = self.make(socket.SOCK_DGRAM, proof.local_ip, 0)
+                    # Linux IP_MTU_DISCOVER=10 / IP_PMTUDISC_DO=2. Never fragment
+                    # around the bridge's port-based egress filter.
+                    self.sender.setsockopt(socket.IPPROTO_IP, 10, 2)
+                    self.sender.setsockopt(socket.IPPROTO_IP, socket.IP_TTL, 1)
             except OSError:
                 self.close()
                 raise
@@ -1432,10 +1839,11 @@ class Network:
     def admit(self, address):
         """Every new TCP stream / UDP peer gets a fresh, stable snapshot."""
         old = self.proof
+        address_before = self.local_ip
         if self.verify is not None:
             self.configure(self.verify(force=True))
-        if (old is None or self.proof is None or
-                (old.local_ip, old.generation) != (self.proof.local_ip, self.proof.generation)):
+        if (self.proof is None or address_before != self.proof.local_ip
+                or old is not None and old.generation != self.proof.generation):
             return None
         return self.proof.peer(address)
 
@@ -1444,8 +1852,6 @@ class Network:
         for sock, stream in list(self.streams.items()):
             if stream.expired(now.mono):
                 self.close_stream(sock)
-        if self.proof is None:
-            return
         for sock in readable:
             try:
                 if sock is self.listener:
@@ -1544,7 +1950,7 @@ def main(argv=None):
         signal.signal(signal.SIGTERM, lambda *_: flags.update(stop=True))
         signal.signal(signal.SIGINT, lambda *_: flags.update(stop=True))
         signal.signal(signal.SIGHUP, lambda *_: flags.update(reload=True))
-        log('starting; IPv4 TCP/UDP 4242; waiting for verified wired EUD policy')
+        log('starting; IPv4 TCP/UDP 4242; waiting for verified local EUD policy')
         next_tick, next_cycle, last_reason = 0, 0, None
         try:
             # Subscribe before the first proof to catch intervening changes.
@@ -1572,11 +1978,15 @@ def main(argv=None):
                     time.sleep(min(.2, next_cycle - now.mono))
                     continue
                 if ready or now.mono >= next_tick:
-                    # Cached between kernel events / role-generation changes.
-                    # New admissions force a full readback inside handle().
-                    proof = guard.current()
+                    # Idle mesh churn only invalidates proof. Passive listeners
+                    # use a cheap address ioctl; admission performs readback.
+                    active = service.has_live_lease(now)
+                    proof = guard.current(refresh=active)
                     try:
-                        network.configure(proof)
+                        if proof is None and not active:
+                            network.idle(guard.listen_address())
+                        else:
+                            network.configure(proof)
                     except OSError as exc:
                         proof = None
                         guard.reason = 'socket setup failed: ' + str(exc)

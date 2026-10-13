@@ -13,6 +13,9 @@
 
 On a CM4, **red heartbeat with green solid** means setup did not finish. Reconnect internet Ethernet and reboot to retry.
 
+ATAK location will not change? Open [status](http://manet.local/) and check
+which phone controls it. You can choose another without the admin password.
+
 Still stuck? Save the error message and which radio has the problem, and then ask an adult for help.
 
 ## User
@@ -32,7 +35,7 @@ Check power, cables, and whether this radio completed setup. Then separate your 
 | Settings are waiting for time | Let a verified GPS or network time source become available. Shared timed changes wait for the first synchronization. |
 | No voice audio | Check voice enablement, audio hardware, the Voice tab, and matching talk group and codec. See [push to talk](voice.md). |
 | Mesh works, but internet does not | Check for a qualified uplink and selected gateway; see [internet sharing](internet.md). |
-| ATAK has no radio position | Check wired admission, ATAK inputs/output and GPS freshness; see [location](location.md). |
+| ATAK has no radio position | Check the local cable or AP connection, ATAK inputs/output, controlling phone and GPS freshness; see [location](location.md). |
 | Measurements cannot start or save | Check for an active job and the storage budget; see [measurements](measurements.md) and [storage](storage.md). |
 | A shared stream or Mumble session stopped | Check the current host and reconnect after a service move; see [services](services.md). |
 | An update failed | Record the message and inspect updater logs. Use [update recovery](updates.md) for an interrupted installation. |
@@ -82,6 +85,14 @@ For an update problem, also collect `sudo journalctl -t manet-update -n 60 --no-
 | Voice and updates | Voice health and codec agreement; updater journal and pending recovery state. Use the corresponding topic for interpretation. |
 
 The public `/api/debug` route exposes raw BATMAN observations and identity mapping within the same local-client access boundary. Registry presence can outlast a usable link; a ready HaLow interface is also distinct from a reachable originator. Compare evidence from the same time window.
+
+For ATAK, inspect `/run/manet-atak/status.json` for admitted phones, controller,
+attachment type and path reason. An AP can work while Ethernet is a routed
+uplink; either local path must independently pass its proof. After an AP
+interface-name change, restart `manet-atak.service` to replace its firewall
+allow-list. A guest point is deliberately not adopted: choose the controller on
+the local overview. Do not delete persistence to replace a phone; SA expiry and
+automatic controller selection handle replacement.
 
 ### Explain the discrepancy before changing state
 
