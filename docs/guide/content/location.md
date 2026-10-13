@@ -7,13 +7,16 @@
 ### Show the phone where you are
 
 Plug your ATAK phone into the radio with its Ethernet adapter, or join that
-radio's Wi-Fi. Stay near the radio. Give its GPS receiver a chance to find you.
+radio's Wi-Fi. Stay near the radio. Count to twenty, or, if you can't do that, just
+be patient. The signal has to come from outer space.
 
-Several phones? One sets the group's location. Open [manet.local](http://manet.local/)
-and look under **ATAK PHONES**. Choose a phone there; no admin password is needed.
+Several phones? (Several means more than one.) Only one of them can set the group's
+location. Open [manet.local](http://manet.local/)
+and look under **ATAK PHONES**. Choose a phone there to be in charge.
 
 The phone needs the right ATAK settings to use the radio's position.
-No good position? A dot on an old map is not proof of where you are now.
+No good position? You should drag your location marker so that it matches where you
+are on the map anyway.
 
 ## User
 
@@ -21,19 +24,20 @@ No good position? A dot on an old map is not proof of where you are now.
 
 ATAK is a mapping application that can receive information from the radio.
 Use a **wired Ethernet connection** or this radio's enabled **Wi-Fi access point**.
-Several nearby phones can use one radio. They all receive the same radio position,
-so stay near the radio and coordinate who sets the group's location.
+Several nearby phones can use one radio, although one EUD per radio is recommended.
+All the EUDs connected to a radio will receive the same GPS position,
+so stay near the radio and coordinate who sets the group's location if needed.
 
 1. Connect the phone through a compatible Ethernet adapter to the radio's
-   client Ethernet connection, or join this radio's own Wi-Fi network.
+   Ethernet connection, or join the radio's own Wi-Fi network.
 2. Turn off Android location services for this setup.
 3. Configure ATAK to receive external GPS CoT on **UDP 4349** and ordinary
    CoT on **UDP 4242**. CoT is the message format ATAK uses for these events.
 4. Configure ATAK's situational-awareness output to the radio's IPv4 address
    on **UDP 4242**. That traffic lets the radio associate the attached phone.
 5. Look for the contact **MANET mesh-XXXX**, using the radio's actual hostname.
-   To send a manual point to the radio, select this contact with ATAK's Send
-   action. Its Send endpoint uses **TCP 4242**.
+   If there is a GPS problem, mark a point on the map and send it to this
+   contact with ATAK's Send action. Other ATAK users then see you at that point.
 
 The contact itself is hidden from the map. A separate external-position
 feed supplies location, so absence of a contact marker does not prove that
@@ -41,20 +45,21 @@ the contact is missing. A custom `atak_callsign` can change its name.
 
 ### Choose who sets the group's location
 
-Open **[manet.local](http://manet.local/)** and expand this radio. The **ATAK PHONES**
+When more than one EUD is sharing a radio, open **[manet.local](http://manet.local/)**
+and expand the entry for your radio. The **ATAK PHONES**
 panel shows each present phone's callsign, **Wired** or **Wi-Fi**, and which one
 **Controls location**. Tap **Set location from this phone** beside another phone
-if you want it to control. No admin password is required. Wait for the list to
+if you want it to be in control. No admin password is required. Wait for the list to
 refresh and show the new controller.
 
 Your saved choice wins while that phone is present. Otherwise, the only wired
-phone wins. If there is no sole wired phone, the current controller keeps control
-while present; if it has left, the radio randomly chooses a present phone and
-keeps it. A phone can remain present for up to 75 seconds after its last position
+phone wins. If there is no wired phone and the currently chosen controller has
+left, the radio randomly chooses a present phone and
+keeps it until changed. A phone can remain present for up to 75 seconds after its last position
 report. Your saved preference survives a reboot or departure and takes priority
 when that phone returns.
 
-Only the controller's sent points, drags and manual location selections can set
+Only the controller's sent points, position drags, and manual location selections can set
 the radio's location. Switching controllers does not erase a held manual point.
 Other phones receive the position and GPS warnings. Sending a point from a guest
 phone produces a chat naming the controller and explaining how to change it.
@@ -63,9 +68,9 @@ naming the controller. Agree with the group before changing it.
 
 ### Understand the position you are using
 
-A connected GPS receiver still needs a fresh fix. Indoors, blocked sky or
+A connected GPS receiver still needs a fresh fix. Indoors, blocked sky, or
 receiver trouble can leave it without one. A manual point is a supplied
-location, not a fresh satellite measurement; check its age and the displayed
+location, not a fresh satellite measurement. Check its age and the displayed
 source before treating it as your current position.
 
 The radio sends no CoT until a phone is admitted. If nothing appears, check

@@ -7,7 +7,7 @@
 ### Look. Tap. Look closer and then think.
 
 1. **Connect to your radio.** Use its cable or Wi-Fi access point.
-2. **Open [the status page](http://manet.local/).** Look for the radios you expect.
+2. **Open [the status page](http://manet.local/).** Look for your friends' radios there.
 3. **Tap a radio.** See its connections and details.
 
 A radio being on does not mean it can hear the others. A line on the map does not promise a particular download speed.
@@ -15,15 +15,15 @@ A radio being on does not mean it can hear the others. A line on the map does no
 ATAK phones share this radio's position. Under **ATAK PHONES**, choose which
 phone sets the group's location. You do not need the admin password.
 
-Need to change something? Open [Manage](http://manet.local/manage/) and use the admin password.
+Need to change radio settings? Open [Manage](http://manet.local/manage/) and ask an adult for help with the admin password.
 
 ## User
 
 ### Start with the status page
 
-Connect your phone or computer to the radio you want to inspect, then open **[http://manet.local/](http://manet.local/)**. The status page needs no password and refreshes about every 15 seconds while visible. If the name does not resolve, use that radio's local IP address. See [device connections](connect.md) if you cannot reach it.
+Connect your phone or computer to the radio you want to inspect, then open **[http://manet.local/](http://manet.local/)**. The status page needs no password and refreshes about every 15 seconds while visible. If the name does not resolve, use that radio's local IP address (your device's default gateway). See [device connections](connect.md) if you cannot reach it.
 
-The topology shows the mesh as seen by this radio. Expand a node to inspect its addresses, uptime, radio interfaces, attached devices, and hosted services. GPS and battery information appear when available. This radio's own panel also shows its installed MANET version; include it when reporting a problem. Check which interface carries a route: a peer may still be reachable through HaLow even when its Wi-Fi link is absent.
+The topology shows the mesh as seen by this radio. The links are logical connections. They do not indicate physical distance or direction. Expand a node to inspect its addresses, uptime, radio interfaces, attached devices, and hosted services. GPS and battery information appear when available. This radio's own panel also shows its installed MANET version. Include it when reporting a problem. Check which interface carries a route: a peer may still be reachable through HaLow even when its Wi-Fi link is absent.
 
 ![The MANET status dashboard showing mesh topology and the node list.](../../images/webui/status-topology.png)
 
@@ -41,17 +41,17 @@ is present. See [location and ATAK](location.md) for replacement-phone behavior.
 
 Link values in Mbit/s are BATMAN's estimate of throughput for choosing paths. They are not the result of a file transfer or a speed test. A high radio connection rate also does not guarantee that an application will achieve that speed across several hops.
 
-Peer information is shared over the mesh and can arrive later than a local change. Pay attention to stale or missing observations. Setup LEDs tell you whether provisioning finished; they do not prove that another radio is reachable.
+Peer information is shared over the mesh and can arrive later than a local change. Pay attention to stale or missing observations.
 
 ### Find the right management tab
 
-Open **[Manage](http://manet.local/manage/)** and sign in with the admin password chosen at flashing time. The Wi-Fi password and the management password serve different purposes.
+Open **[Manage](http://manet.local/manage/)** and sign in with the admin password chosen at flashing time. The Wi-Fi AP password, radio user password, and the management password serve different purposes.
 
 | Tab | Use it for |
 |---|---|
 | Topology | Inspect nodes and their interfaces. |
-| Radio config | Radio on/off, supported channel controls, and Wi-Fi transmit power. |
-| Measure | Run throughput or ping measurements. |
+| Radio config | Radio interfaces on/off, supported channel controls, and Wi-Fi transmit power. |
+| Measure | Run iperf throughput or ping measurements. |
 | Sessions | Review and download saved measurement results. |
 | Uplink | Configure USB Wi-Fi internet uplink credentials. |
 | Voice | Check audio health, choose a talk group, or coordinate a codec change. |
@@ -74,18 +74,18 @@ chapters explain the corresponding status and management results.
 
 ## Developer
 
-### One server, local observations
+### Local radio status page
 
 `mesh-status.py` serves port 80 and includes the management handlers from
 `manet_manage.py`. Public read-only routes include `/api/data`, `/api/local`,
 `/api/peer/<ip>`, and `/api/debug`. `/api/local` reports the installed
-release from the first line of `/etc/manet_version.txt`; peers do not yet
+release from the first line of `/etc/manet_version.txt`. Peers do not yet
 publish theirs. Management and `/api/admin/*` require a
-session. Application checks admit localhost and the mesh/EUD subnet;
+session. Application checks admit localhost and the mesh/EUD subnet, while
 `manet-ui-firewall.sh` narrows this to localhost and this node's client pool,
 as described in the [connection guide](connect.md).
 
-The server combines live BATMAN originator, neighbor, and gateway queries with `/var/run/mesh_node_registry`, `/etc/mesh.conf`, and allocation state. Peer details come from Alfred-derived records, even when the route is named `/api/peer/<ip>`; it does not fetch a remote node's HTTP page. `manet_peer_radios.py` reconstructs compatible interface displays when older records lack structured interface telemetry.
+No network bandwidth is used for this display. The server combines live BATMAN originator, neighbor, and gateway queries with `/var/run/mesh_node_registry`, `/etc/mesh.conf`, and allocation state. Peer details come from Alfred-derived records. Even though the route is named `/api/peer/<ip>`, it does not fetch a remote node's HTTP page. `manet_peer_radios.py` constructs the interface displays from locally saved data.
 
 This is a local observer of a distributed system, so the displayed fields do
 not all describe one instant:
@@ -102,8 +102,8 @@ cached record look alive forever, the registry refreshes a peer's observation
 age only when its telemetry payload changes. Local boot time measures that
 age even before clocks synchronize. After 300 seconds without a change the
 registry marks it stale and removes its address claim. The dashboard's
-short HTTP cache sits on top of this longer publication/freshness process;
-refreshing the browser cannot force a peer to publish new measurements.
+short HTTP cache sits on top of this longer publication/freshness process.
+Refreshing the browser cannot force a peer to publish new measurements.
 See [registry freshness](../../../docs/node-tools-internals.md#data-management).
 
 ### ATAK controller handoff
@@ -122,14 +122,14 @@ place, with no new polling loop.
 
 Status collections share a five-second cache, with two seconds for voice and configuration. At most eight HTTP connections and two status collections run concurrently. A busy server can return 503 with a retry delay. Background tabs stop polling. These bounds protect radio work from dashboard load.
 
-`manet_recovery_status.py` combines local ACS, last-channel-change, and time-client state with the registry. Observations older than 45 seconds are not treated as current recovery evidence. Display failures must not stop control or recovery.
+`manet_recovery_status.py` combines local ACS, last-channel-change, and time with the local registry. Observations older than 45 seconds are not treated as current recovery evidence. Display failures must not stop control or recovery.
 
-`manet_web_sessions.py` keeps token digests and monotonic 48-hour deadlines in memory. Sessions are per node, with no sliding idle extension or peer replication. Tests or tooling that restart the server must sign in again.
+`manet_web_sessions.py` keeps token digests and monotonic 48-hour login deadlines in memory. Sessions are per node. Tests or tooling that restart the server must sign in again.
 
 Concurrent viewers share fixed cache keys, so opening more tabs does not
 create an independent radio-query workload for every request. Management
-writes are serialized and invalidate cached observations when they finish;
-authentication is checked before cached management data is served. A 503
+writes are serialized and invalidate cached observations when they finish.
+Authentication is checked before cached management data is served. A 503
 therefore can mean that the observation budget is busy, not that the mesh
 has lost all peers.
 
@@ -137,12 +137,11 @@ A session uses a random token whose digest and absolute deadline stay in
 the web process. Monotonic timing prevents an NTP/GPS correction from
 extending the login. Restarting the process loses the session store, while
 an observed admin-password change invalidates existing sessions. This is
-separate from persistent replay protection for commands sent between radios:
-being logged into the UI does not itself prove a peer accepted an action.
+separate from persistent replay protection for commands sent between radios.
 
 ### Measurements and evidence
 
-Measurements run `iperf3` or `ping` against the selected peer. They do not use the encrypted configuration transaction path. Record endpoints, direction, selected route, radio settings, and physical conditions when interpreting results; a dashboard estimate cannot establish the actual packet path or end-to-end throughput.
+Measurements run `iperf3` or `ping` against the selected peer. They do not use the encrypted configuration transaction path. Record endpoints, direction, selected route, radio settings, and physical conditions when interpreting results. A dashboard estimate cannot establish the actual packet path or end-to-end throughput.
 
 - [Web routes, limits, and management reference](../../../MANET/node_tools/README.md#web-interface)
 - [Web implementation and recovery display internals](../../../docs/node-tools-internals.md#web-interface)
