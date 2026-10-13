@@ -316,6 +316,10 @@ fi
 systemctl stop dnsmasq
 systemctl disable dnsmasq
 systemctl mask dnsmasq
+# If dnsmasq started first and held 127.0.0.53, resolved came up without
+# its stub listener (and possibly without its D-Bus name, when its user was
+# created during the same apt run). Restart it so the downloads below resolve.
+systemctl restart systemd-resolved
 echo "Done"
 
 
