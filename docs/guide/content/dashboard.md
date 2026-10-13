@@ -20,7 +20,7 @@ Need to change something? Open [Manage](http://manet.local/manage/) and use the 
 
 Connect your phone or computer to the radio you want to inspect, then open **[http://manet.local/](http://manet.local/)**. The status page needs no password and refreshes about every 15 seconds while visible. If the name does not resolve, use that radio's local IP address. See [device connections](connect.md) if you cannot reach it.
 
-The topology shows the mesh as seen by this radio. Expand a node to inspect its addresses, uptime, radio interfaces, attached devices, and hosted services. GPS and battery information appear when available. Check which interface carries a route: a peer may still be reachable through HaLow even when its Wi-Fi link is absent.
+The topology shows the mesh as seen by this radio. Expand a node to inspect its addresses, uptime, radio interfaces, attached devices, and hosted services. GPS and battery information appear when available. This radio's own panel also shows its installed MANET version; include it when reporting a problem. Check which interface carries a route: a peer may still be reachable through HaLow even when its Wi-Fi link is absent.
 
 ![The MANET status dashboard showing mesh topology and the node list.](../../images/webui/status-topology.png)
 
@@ -65,7 +65,9 @@ chapters explain the corresponding status and management results.
 
 `mesh-status.py` serves port 80 and includes the management handlers from
 `manet_manage.py`. Public read-only routes include `/api/data`, `/api/local`,
-`/api/peer/<ip>`, and `/api/debug`. Management and `/api/admin/*` require a
+`/api/peer/<ip>`, and `/api/debug`. `/api/local` reports the installed
+release from the first line of `/etc/manet_version.txt`; peers do not yet
+publish theirs. Management and `/api/admin/*` require a
 session. Application checks admit localhost and the mesh/EUD subnet;
 `manet-ui-firewall.sh` narrows this to localhost and this node's client pool,
 as described in the [connection guide](connect.md).

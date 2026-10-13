@@ -72,6 +72,8 @@ ADMIN = AdminTransport()
 # gps-reader polls every 5 s.
 GPS_FIX_MAX_AGE = 60
 MESH_STATE_FILE = "/etc/mesh_ipv4_state"
+# First line is the installed MANET release; updates rewrite it.
+VERSION_FILE    = "/etc/manet_version.txt"
 PORT            = 8080
 REFRESH_MS      = 15000   # Status page polling interval (ms)
 # Status and management routes share one node-local session cookie.
@@ -830,6 +832,14 @@ def enrich_interfaces_with_registry_mcs(ifaces, node_data):
         iface['rx_mcs'] = extra.get('rx_mcs', '')
     return ifaces
 
+def get_manet_version():
+    """Return the installed MANET release, or '' when the file is unreadable."""
+    try:
+        with open(VERSION_FILE) as f:
+            return f.readline().strip()
+    except OSError:
+        return ''
+
 # Negative infinity forces the first power probe. HTTP callers serialize
 # local collection through STATUS_CACHE; this cache has no separate lock.
 _POWER_CACHE = {'at': float('-inf'), 'data': {'available': False}}
@@ -914,6 +924,7 @@ def assemble_local_data():
 
     return {
         'hostname':  hostname,
+        'version':   get_manet_version(),
         # Require the remembered allocation on br0; omit service VIPs.
         'ip':        primary_ipv4(state, conf, next(
             (iface['addrs'] for iface in ifaces if iface['name'] == 'br0'), [])),
@@ -2340,6 +2351,7 @@ function renderLocalPanel(d) {
     ['Hostname', d.hostname || '—'],
     ['Mesh IP',  d.ip       || '—'],
     ['Uptime',   d.uptime   || '—'],
+    ['Version',  d.version  || '—'],
     ['Battery',  battHtml],
     ['GPS',      gpsHtml],
     ['EUD Mode', d.eud_mode || '—'],

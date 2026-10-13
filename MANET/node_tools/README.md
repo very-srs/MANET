@@ -112,8 +112,8 @@ Open routes, no password:
 - `/api/data`: full mesh topology, node list, gateway status and per-node
   throughput, as JSON. Drives the status page, and available for external
   tooling.
-- `/api/local`: this node's own state, meaning interfaces, services, IP state
-  and channel info.
+- `/api/local`: this node's own state, meaning the installed MANET version,
+  interfaces, services, IP state and channel info.
 - `/api/peer/<ip>`: one peer's detail panel, fetched when you expand a node.
 - `/api/debug`: raw `batctl` originator, neighbor and gateway output alongside
   the registry's MAC to hostname mapping. A diagnostic dump. Nothing in the UI
