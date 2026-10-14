@@ -24,7 +24,8 @@ StateDirectoryMode=0700
 UMask=0027
 # nft readback requires NET_ADMIN; br0 binding and passive EUD packet sockets
 # require NET_RAW. No multicast membership, promiscuity, clock,
-# GPIO or audio capabilities. Only the separate pre/post commands mutate policy.
+# GPIO or audio capabilities. The daemon only refreshes expiring rewrite-set
+# elements through its existing netlink socket. Pre/post hooks own static rules.
 CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
 NoNewPrivileges=yes
 ProtectSystem=strict

@@ -712,24 +712,124 @@ the boot journal reports `AUTO-DISABLED`. After addressing the cause, observe
 a `positioning=n` apply then set `y`, or run
 `sudo manet-mt7916-firmware.py --rearm` to retry on the next boot.
 
-Connect by Ethernet or join this radio's own Wi-Fi network. Keep Wi-Fi phones
-near their radio: every attached ATAK phone receives the same radio position.
-Turn Android location services off and configure ATAK's external GPS input on
-UDP 4349 once. Leave the stock CoT input and **Default Mesh SA** output enabled.
-The radio discovers attached phones automatically; no output entry or radio IP
-address is needed when moving between radios. Existing unicast XML output to
+Connect by Ethernet or join this radio's own Wi-Fi network. For a radio with GPS,
+turn **Android location OFF**, enable **ATAK external GPS input on UDP 4349**, and
+leave **Default Mesh SA ON**. ATAK then uses the radio position on its own map and
+all outputs, including mesh, unicast and TLS to a TAK server. Keep phones near
+their radio. If the radio has no GPS hardware, keep **Android location ON** so the
+controlling phone supplies the team's GPS. Leave stock CoT input enabled. No
+per-radio output entry is needed. Existing unicast XML output to
 UDP 4242 still works, including on the radio's secondary client-gateway address.
 Phone setup is in the [location guide](../../docs/guide/content/location.md).
 
+No GPS receiver means no missing-GPS prompt. When neither trusted radio GPS nor
+a held manual point is usable, the controlling phone's admitted GPS supplies the
+status position, labelled `phone GPS (<callsign>)`. It never supplies receiver
+trust, clock authority or external input on 4349. It expires with its SA, at most
+75 seconds after receipt. If the phone's path disappears first, a radio beacon
+can use only that remaining fresh interval. A present receiver without a fix
+still warns after three seconds, with unread spoken reminders every 60 seconds
+and an explicit 30-second minimum.
+
+Without a trusted own fix, a held manual point uses the controller's fresh phone
+GPS at acceptance as its movement anchor, or the first fresh fix afterward.
+Within 30 m of that anchor it holds indefinitely. Distinct fresh reports more
+than 30 m away for 15 seconds release it, as does any fresh report more than
+200 m from the held point. These operating thresholds allow phone GPS noise and
+small manual corrections while limiting obsolete geometry. Stale GPS, loss of
+the controller's path or a trusted own fix resets the movement interval.
+The anchor survives restart, while the interval does not. A new controller gets
+a new anchor. No phone GPS means the point holds. On GPS-less radios this is a
+phone-track decision, without a spoof monitor. Trusted-own-GPS confirmation and
+override rules retain their existing behavior.
+
+The controller can also tap **Use phone GPS again** beside the held point in the
+local **ATAK PHONES** panel, without an admin password. The POST checks its source
+address against the current controller, and the daemon rechecks the point,
+controller path, session and five-second request age. Guests cannot release.
+Either release queues normal marker retirement to its original owner, clears
+rewrite authority and makes one quiet best-effort GeoChat and journal entry,
+without a release audio alert. Existing receiver warnings remain independent.
+Deleting a marker inside ATAK does not release it on the radio. A Pixel test
+observed no phone-to-radio CoT traffic after local deletion.
+
+Each newly accepted held point gets one quiet explanation chat, including
+USER/drag selections. It tells the controller to open manet.local in a browser
+and tap **Use phone GPS again**, or move on with fresh phone GPS. No chat repeats
+on restart, reanchoring or marker refresh. For a Send-created point, the daemon
+retains its exact bounded XML and quietly replays that marker to the present
+controller every five minutes. The UID, content and timestamps stay unchanged.
+Retirement always takes priority, including GPS confirmation, replacement and
+release. Failed sends wait for the next five-minute interval. USER/drag selections
+have no separate marker to replay. Older checkpoints without original XML need
+a new Send before refresh can work. Reappearance after the original stale time
+and one-minute refresh behavior still need Pixel validation.
+
+As a safety net for forgotten settings on multicast-only networks, the daemon
+rewrites only default mesh SA toward bat0, using trusted radio GPS or
+the held manual point under untrusted GPS. Position and precision source fields
+change, while other phone fields and Ethernet/IP sender identity are preserved.
+Per-interface/MAC/IP nft set elements expire after three seconds unless renewed
+by the existing daemon cycle. Stop cleanup removes the table too. Unadmitted
+devices and local EUD-to-EUD reports pass natively, as do TAK-server and unicast
+outputs. Unsupported or malformed bounded reports from blocked senders are
+forwarded unchanged. There is no new process or polling loop.
+
+The kernel records local EUD TCP traffic to ports 8089 and 8087 in the dynamic
+`tak_phones` MAC set. Each packet refreshes a ten-minute timeout without waking
+userspace. IPv4 and IPv6 use the same rule, including a server on the EUD side
+when its traffic crosses the radio. While the MAC is present, the kernel skips
+its native mesh-SA block even if the daemon is paused. Admitted phones appear
+as **TAK server** after a bounded netlink read on the existing event cycle. Packet
+sockets capture mesh SA only. TLS remains unchanged, so correct phone settings
+still provide one position on every output.
+
+Userspace reads membership before replacing mesh SA and on meaningful status changes,
+reusing a complete snapshot for up to five seconds. Idle timer cycles issue no
+reads, even with a present phone. A blocked SA needing a new read waits in a
+bounded slot, one frame per EUD port, with that port's capture reader paused
+until the reply. The two-second read timeout stops the service on failure.
+New membership requires fresh data. Existing leases may renew using the kernel's
+native TAK exemption, but replacement always needs a fresh snapshot. A frame
+captured around a new kernel insertion may
+still be rewritten using the preceding snapshot. After membership is learned,
+possibly intercepted frames are forwarded unchanged until the old lease window
+ends and the queue drains, which can duplicate native originals. This transition
+is not an atomic handoff. Capture loss now suspends rewriting for three seconds,
+without affecting kernel TAK detection. Nonstandard ports and traffic the radio
+cannot see remain outside detection. Restarting the unit recreates both sets.
+
+CM4 testing with a Pixel's Android location on verified XML phone-GPS replacement
+toward bat0 and one quiet disagreement GeoChat, journal entry and panel note.
+The phone sent XML, so TAK v1 replacement remains covered by tests rather than
+hardware evidence. Before on-demand membership reads, the service used 1.20 CPU
+seconds per minute with one phone and four child executions per minute, compared
+with about 0.80 before kernel detection. Remeasure on CM4 to assess the read change.
+
+Inspect membership with `sudo nft -j list set bridge manet_atak rewrite_phones`
+and `sudo nft -j list set bridge manet_atak tak_phones`. Use JSON output. On the
+CM4, plain-text listing omitted populated concatenated rewrite-set elements.
+
+When an admitted phone reports fresh own GPS and the radio has a trusted own
+fix, separation over 50 m creates a local status note, one journal line and one
+quiet GeoChat handoff per episode. No audio, retry or trust change follows.
+The threshold assumes 10 m error per GPS plus 30 m phone-to-radio separation.
+Fresh agreement within 35 m for 30 seconds rearms notification. Missing fixes
+interrupt that timer. Agreement never restores trust or clears distrust. Phones
+with location off supply no GPS observation to compare. Episode state is ephemeral.
+
 With no phone present, a radio with a usable position appears on the team's
 maps under its hostname or `atak_callsign`, using a radio/signal symbol.
-It shares trusted GPS or its held manual fallback, never a suspect GPS fix or
+It shares trusted GPS, its held manual fallback, or the fresh phone GPS described
+above, never a suspect GPS fix or
 0,0. A distinct beacon UID keeps the hidden phone-facing contact unchanged.
 The beacon has no chat or Send endpoint. It sends XML to `239.2.3.1:6969`
 through br0 and bat0 about every 30 seconds, or after five metres of movement
-with a five-second minimum interval, and has 90-second staleness. A local phone's
+with a five-second minimum interval, and has 90-second staleness, shortened to
+the remaining report lifetime for phone GPS. A local phone's
 arrival stops it and requests deletion of its marker. It resumes after the last
-phone's presence expires. The owned firewall confines these local announcements
+phone's presence expires when radio GPS or a manual point remains. Phone GPS
+uses the earlier path-loss interval described above. The owned firewall confines these local announcements
 to bat0, excluding this radio's EUD ports. No extra setting is needed, and
 `atak=n` disables all of it. Pixel rendering and multicast handoff still need
 hardware validation.
@@ -742,13 +842,16 @@ Replacement phones therefore work without deleting state. Phone presence ends
 when its SA expires, at most 75 seconds after the latest admitted report.
 
 Open **http://manet.local/**, expand this radio and find **ATAK PHONES**. It lists
-callsigns, **Wired** or **Wi-Fi**, and **Controls location**. Use **Set location
+callsigns, **Wired** or **Wi-Fi**, **Controls location**, selected position/source,
+**TAK server**, and **radio and phone GPS disagree by N m** when applicable.
+Use **Set location
 from this phone** beside another phone to choose it. No admin password is needed.
 The choice survives reboot and absence; while it is absent the automatic rules
 supply a controller, and the saved choice takes over when it returns. A held
 manual point belongs to the radio and survives a controller change. Only the
-controller's sent points, drags, USER selections and alert receipts affect the
-radio's location or acknowledge alerts. Other phones still receive its position
+controller's sent points, drags, USER selections and alert receipts set manual
+location or acknowledge alerts. Its admitted GPS is the automatic fallback.
+Other phones still receive radio-selected external position
 and GPS warnings; a rejected guest point gets a chat explaining who controls.
 
 When another phone joins or the controller changes, ATAK chat tells everyone
@@ -764,7 +867,8 @@ a forwarding bat0 path, even when no local EUD port is ready.
 Passive br0 listeners use a cheap address ioctl, and
 packet sockets follow local port changes on the existing event cycle. Their
 kernel filter admits only default mesh SA, without a multicast group join or
-userspace wakeups for other traffic. Late address setup needs no timer-driven
+TCP packet wakeups. TAK-server detection and timeout refresh run in the bridge
+firewall. Late address setup needs no timer-driven
 snapshot. `path_ready` is false
 while verification is pending. Unchanged ticks use the cached proof, and
 notification loss fails closed. No extra monitoring process is started.

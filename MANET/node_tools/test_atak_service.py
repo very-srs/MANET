@@ -633,13 +633,13 @@ class PhoneFlowTests(Harness):
         self.tick()
         self.assertEqual(self.service.audio, {})
 
-    def test_internal_phone_gps_warning_and_echo_clear(self):
+    def test_internal_phone_gps_is_supported_without_configuration_warning(self):
         self.sa()
         self.tick(cot.Fix(40, -105, 'gnss'))
         self.clock.advance(1)
         self.sa('gps')
         self.tick(cot.Fix(40, -105, 'gnss'))
-        self.assertIn('phone_gps', self.service.banners)
+        self.assertNotIn('phone_gps', self.service.banners)
         self.clock.advance(1)
         self.sa('echo')
         self.tick()
@@ -878,9 +878,17 @@ class FirewallReadbackTests(unittest.TestCase):
                     match['right'] = {'set': [4242, 4349]}
         # The historical capture predates relay SA. Add its new rule in the
         # same normalized form, without relabelling synthetic JSON as a capture.
-        beacon = copy.deepcopy(atak.firewall_objects()[-1])
-        beacon['rule']['expr'] = atak._canonical_expr(beacon['rule']['expr'])
-        data['nftables'].append(beacon)
+        for item in copy.deepcopy(atak.firewall_objects()):
+            if ('set' in item or item.get('chain', {}).get('hook') == 'forward' or
+                    item.get('rule', {}).get('chain') == 'forward' or item == atak.firewall_objects()[-2]):
+                if 'rule' in item:
+                    item['rule']['expr'] = atak._canonical_expr(item['rule']['expr'])
+                data['nftables'].append(item)
+        dynamic = [copy.deepcopy(item) for item in atak.firewall_objects()
+                   if any('set' in expr for expr in item.get('rule', {}).get('expr', []))]
+        for item in dynamic:
+            item['rule']['expr'] = atak._canonical_expr(item['rule']['expr'])
+        data['nftables'] = dynamic + data['nftables']
         self.assertTrue(atak.valid_firewall(data))
 
     def test_dropping_a_real_match_still_fails(self):
@@ -1416,6 +1424,13 @@ class FakeSocket:
     def setsockopt(self, *args):
         self.options.append(args)
 
+    def getsockopt(self, level, option, size):
+        if (level, option, size) != (263, 6, 8):
+            raise AssertionError('unexpected fake socket option')
+        dropped = getattr(self, 'dropped', 0)
+        self.dropped = 0
+        return struct.pack('=II', 1, dropped)
+
     def setblocking(self, value):
         self.blocking = value
 
@@ -1447,6 +1462,8 @@ class FakeSocket:
         return data, [(socket.IPPROTO_IP, 8, info)], 0, endpoint
 
     def getsockname(self):
+        if self.family == socket.AF_NETLINK:
+            return 32000 + self.protocol, self.bound[1]
         return getattr(self, 'destination', LOCAL), 4242
 
     def sendto(self, packet, destination):
@@ -1822,11 +1839,10 @@ class BeaconTransportTests(unittest.TestCase):
         with self.assertRaisesRegex(OSError, 'budget'):
             self.network.send_beacon(b'x' * 1201)
 
-    def test_local_beacon_egress_is_only_bat0_but_forwarded_sa_is_unchanged(self):
+    def test_local_beacon_egress_is_only_bat0(self):
         objects = atak.firewall_objects(('end0', 'wlan7'))
-        rule = objects[-1]['rule']
+        rule = objects[-2]['rule']
         self.assertEqual((rule['family'], rule['chain']), ('bridge', 'output'))
-        self.assertFalse(any(o.get('chain', {}).get('hook') == 'forward' for o in objects))
         for port in ('bat0', 'end0', 'wlan7', 'unexpected-port'):
             for destination in ('239.2.3.1', '239.2.3.2'):
                 for dport in (6969, 4242):
@@ -2265,6 +2281,12 @@ def run_mesh_bpf(frame, packet_type=2):
             accumulator = len(frame)
         elif code == 0x54:
             accumulator &= value
+        elif code == 0x87:
+            accumulator = index
+        elif code == 0x04:
+            accumulator += value
+        elif code == 0x16:
+            return accumulator
         elif code in (0x15, 0x25, 0x35, 0x45):
             matches = {0x15: accumulator == value, 0x25: accumulator > value,
                        0x35: accumulator >= value, 0x45: bool(accumulator & value)}[code]
@@ -2858,7 +2880,7 @@ class MultiPhoneTests(Harness):
         self.assertIsNone(self.service.position._manual)
         notices = self.chats_to(self.other_ip, ' follows ')
         self.assertEqual(len(notices), 1)
-        self.assertIn('To change it, open manet.local.', ET.tostring(notices[0]).decode())
+        self.assertIn('To change it, open manet.local in your browser.', ET.tostring(notices[0]).decode())
         warning = self.service.position._warnings['gps_untrusted']
         receipt = self.other.receipt(self.phone_time(), warning.message_id, True)
         self.assertEqual(self.service.ingest(receipt, self.other_ip, self.proof, self.clock.now()), 'guest_receipt')
@@ -3071,15 +3093,17 @@ class AtakOverviewTests(Harness):
         self.app = atak.Application(self.service, atak.Inputs('boot-1', self.runtime), self.runtime)
         self.app.update(self.clock.now(), self.proof, 'verified')
 
-    def post(self, origin='http://manet.local', client=IP, content_type='application/json', uid=None):
+    def post(self, origin='http://manet.local', client=IP, content_type='application/json', uid=None,
+             release=False, manual_id=None):
         from email.message import Message
         handler = object.__new__(self.web.MeshHandler)
-        handler.path = '/api/atak/controller'
+        handler.path = '/api/atak/release' if release else '/api/atak/controller'
         handler.client_address = (client, 12345)
         handler.headers = Message()
         for name, value in [('Host', 'manet.local'), ('Content-Type', content_type), ('Origin', origin)]:
             handler.headers[name] = value
-        handler._body = json.dumps({'uid': uid or self.packets.uid}).encode()
+        handler._body = json.dumps({'uid': uid or self.packets.uid,
+                                   'manual_id': manual_id or self.service.manual_id()}).encode()
         handler._body_length = len(handler._body)
         handler.send_json = Mock()
         handler.send_403 = Mock()
@@ -3111,9 +3135,9 @@ class AtakOverviewTests(Harness):
                             recovery_status=Mock(return_value={})), \
                 patch.object(self.web.time, 'monotonic', return_value=self.clock.now().mono):
             panel = self.web.assemble_local_data()['atak']
-        self.assertEqual(panel, {'enabled': True, 'running': True, 'phones': [
+        self.assertEqual(panel, {'enabled': True, 'running': True, 'manual': None, 'position': None, 'phones': [
             {'uid': self.packets.uid, 'callsign': self.service.phones[self.packets.uid]['callsign'],
-             'port': 'wired', 'controller': True}]})
+             'port': 'wired', 'controller': True, 'tak_server': False, 'gps_disagreement_m': None}]})
         self.assertEqual(self.post().send_json.call_args.kwargs['status'], 202)
         request = atak.read_json(self.runtime / 'controller.json')
         self.assertEqual(request['session'], self.service.session)
@@ -3121,9 +3145,102 @@ class AtakOverviewTests(Harness):
 
     def test_public_panel_still_expires_leases_and_handles_missing_status(self):
         with patch.object(self.web.time, 'monotonic', return_value=self.clock.advance(100).mono):
-            self.assertEqual(self.web.atak_overview({}), {'enabled': True, 'running': True, 'phones': []})
+            self.assertEqual(self.web.atak_overview({}), {'enabled': True, 'running': True, 'manual': None, 'position': None, 'phones': []})
         (self.runtime / 'status.json').unlink()
-        self.assertEqual(self.web.atak_overview({}), {'enabled': True, 'running': False, 'phones': []})
+        self.assertEqual(self.web.atak_overview({}), {'enabled': True, 'running': False, 'manual': None, 'position': None, 'phones': []})
+
+    def hold_for_release(self):
+        self.clock.advance(1)
+        self.send_point(uid='held')
+        self.app.update(self.clock.now(), self.proof, 'verified')
+
+    def test_controller_release_post_is_consumed_and_retires_marker(self):
+        self.hold_for_release()
+        with patch.object(self.web.time, 'monotonic', return_value=self.clock.now().mono):
+            public = self.web.atak_overview({})
+        self.assertEqual(public['manual'], {'id': self.service.manual_id(), 'uid': self.packets.uid})
+        self.assertEqual(self.post(release=True).send_json.call_args.kwargs['status'], 202)
+        self.app.update(self.clock.now(), self.proof, 'verified')
+        self.assertIsNone(self.service.position._manual)
+        self.assertIn('held', self.service.retire)
+        self.assertFalse(self.service.audio)
+        messages = [e for e in self.of_type('b-t-f') if 'Held point released' in e.find('detail/remarks').text]
+        self.assertEqual(len(messages), 1)
+        self.app.update(self.clock.now(), self.proof, 'verified')
+        self.restart()
+        self.assertIsNone(self.service.position._manual)
+
+    def test_status_demand_ignores_tick_and_receiver_receipt_timestamps(self):
+        update = Mock()
+        self.app.tak_update = update
+        fix = cot.Fix(40, -105, 'gnss')
+        with patch.object(self.app.inputs, 'cached_read', side_effect=lambda now, *args, **kwargs:
+                          (phone.RadioGPS(fix, now.mono), {})):
+            for _ in range(60):
+                self.app.update(self.clock.now(), self.proof, 'verified')
+                self.clock.advance(1)
+        self.assertEqual([call.kwargs['request'] for call in update.call_args_list], [True] + [False] * 59)
+
+    def test_guest_foreign_origin_and_obsolete_point_cannot_post_release(self):
+        self.hold_for_release()
+        for options, expected in (({'client': '192.0.2.3'}, 403),
+                                  ({'origin': 'http://evil.example'}, 403),
+                                  ({'uid': 'guest'}, 409), ({'manual_id': 'obsolete'}, 409)):
+            with self.subTest(options=options):
+                self.assertEqual(self.post(release=True, **options).send_json.call_args.kwargs['status'], expected)
+                self.assertFalse((self.runtime / 'release.json').exists())
+        self.assertIsNotNone(self.service.position._manual)
+
+    def test_release_service_rechecks_point_controller_session_age_and_proof(self):
+        self.hold_for_release()
+        self.post(release=True)
+        data = atak.read_json(self.runtime / 'release.json')
+        for change, proof in (({'manual_id': 'obsolete'}, self.proof), ({'uid': 'guest'}, self.proof),
+                              ({'session': 'old'}, self.proof), ({'boot_id': 'old'}, self.proof),
+                              ({'written_boot': self.clock.now().boot - 6}, self.proof),
+                              ({'ip': '192.0.2.3'}, self.proof), ({'mac': '02:00:00:00:00:03'}, self.proof),
+                              ({}, None)):
+            with self.subTest(change=change, proof=proof):
+                self.assertFalse(self.service.release_request(dict(data, **change), self.clock.now(), proof))
+                self.assertIsNotNone(self.service.position._manual)
+
+    def test_trusted_own_fix_keeps_existing_confirmation_even_with_staged_release(self):
+        self.hold_for_release()
+        self.post(release=True)
+        data = atak.read_json(self.runtime / 'release.json')
+        now = self.clock.now()
+        self.service.tick(now, self.proof, phone.RadioGPS(cot.Fix(40, -105, 'gnss'), now.mono), {},
+                          release_request=data)
+        self.assertIsNotNone(self.service.position._manual)
+
+    def test_public_server_and_disagreement_evidence_expire_independently(self):
+        status = atak.read_json(self.runtime / 'status.json')
+        status['phones'][0].update(tak_server=True, tak_server_deadline=110,
+                                   gps_disagreement_m=123, gps_disagreement_deadline=102)
+        atak.atomic_json(self.runtime / 'status.json', status)
+        for mono, expected in ((100, (True, 123)), (103, (True, None)), (111, (False, None))):
+            with patch.object(self.web.time, 'monotonic', return_value=mono):
+                peer = self.web.atak_overview({})['phones'][0]
+                self.assertEqual((peer['tak_server'], peer['gps_disagreement_m']), expected)
+                self.assertNotIn('mac', peer)
+                self.assertNotIn('tak_server_deadline', peer)
+        status['phones'][0].update(tak_server_deadline='invalid', gps_disagreement_deadline=None)
+        atak.atomic_json(self.runtime / 'status.json', status)
+        with patch.object(self.web.time, 'monotonic', return_value=100):
+            peer = self.web.atak_overview({})['phones'][0]
+            self.assertFalse(peer['tak_server'])
+            self.assertIsNone(peer['gps_disagreement_m'])
+
+    def test_phone_gps_public_position_expires_even_if_daemon_stops_writing(self):
+        self.clock.advance(1)
+        self.sa('gps')
+        self.app.update(self.clock.now(), self.proof, 'verified')
+        with patch.object(self.web.time, 'monotonic', return_value=self.clock.now().mono):
+            position = self.web.atak_overview({})['position']
+        self.assertTrue(position['source'].startswith('phone GPS ('))
+        self.assertEqual(set(position), {'lat', 'lon', 'hae', 'source'})
+        with patch.object(self.web.time, 'monotonic', return_value=self.clock.advance(75).mono):
+            self.assertIsNone(self.web.atak_overview({})['position'])
 
     def test_foreign_origin_nonlocal_eud_nonjson_and_absent_phone_rejected(self):
         for options, expected in [({'origin': 'http://evil.example'}, 403),

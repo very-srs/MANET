@@ -12,7 +12,9 @@ The caller must prove physical ingress, MAC/neighbor ownership and policy first.
 """
 
 from datetime import datetime, timedelta, timezone
+import re
 import struct
+import xml.parsers.expat as expat
 import xml.etree.ElementTree as ET
 
 import manet_cot as cot
@@ -160,3 +162,165 @@ def decode_mesh_sa(data):
         # Never persist/log packet bytes, contact phone attributes or decoder
         # exceptions that might include untrusted values.
         return 'malformed or unsupported mesh SA'
+
+
+def _wire_varint(value):
+    """Encode a bounded nonnegative field tag or length."""
+    result = bytearray()
+    while value >= 128:
+        result.append((value & 127) | 128)
+        value >>= 7
+    return bytes(result + bytes([value]))
+
+
+def _wire_edit(data, changes, budget):
+    """Replace specified protobuf values while retaining other encoded bytes."""
+    offset, result, seen = 0, bytearray(), set()
+    while offset < len(data):
+        budget[0] -= 1
+        if budget[0] < 0:
+            raise ValueError('too many rewrite fields')
+        start = offset
+        tag, offset = _tak_varint(data, offset)
+        number, wire = tag >> 3, tag & 7
+        tag_end = offset
+        if not 1 <= number < 1 << 29:
+            raise ValueError('invalid rewrite tag')
+        if wire == 0:
+            _, offset = _tak_varint(data, offset)
+            value = data[tag_end:offset]
+        else:
+            if wire == 2:
+                size, offset = _tak_varint(data, offset)
+            elif wire in (1, 5):
+                size = 8 if wire == 1 else 4
+            else:
+                raise ValueError('unsupported rewrite wire type')
+            if size > len(data) - offset:
+                raise ValueError('truncated rewrite value')
+            value = data[offset:offset + size]
+            offset += size
+        if number not in changes:
+            result.extend(data[start:offset])
+            continue
+        expected, replacement = changes[number]
+        if number in seen or wire != expected:
+            raise ValueError('ambiguous rewrite value')
+        seen.add(number)
+        value = replacement(value) if callable(replacement) else replacement
+        result.extend(data[start:tag_end])
+        result.extend((_wire_varint(len(value)) if wire == 2 else b'') + value)
+    for number, (wire, replacement) in changes.items():
+        if number not in seen:
+            value = replacement(b'') if callable(replacement) else replacement
+            result.extend(_wire_varint(number << 3 | wire))
+            result.extend((_wire_varint(len(value)) if wire == 2 else b'') + value)
+    return bytes(result)
+
+
+def _xml_position(data, point, source, *, detail_only=False):
+    """Edit only start-tag attribute values, preserving all other XML bytes."""
+    data.decode('utf-8')
+    declaration = re.match(rb'\s*<\?xml\b[^?]*\?>', data)
+    if declaration:
+        encoding = re.search(rb'encoding\s*=\s*["\x27]([^"\x27]+)', declaration[0])
+        if encoding and encoding[1].lower() not in (b'utf-8', b'utf8', b'us-ascii'):
+            raise ValueError('unsupported rewrite encoding')
+    prefix = b'<detail>' if detail_only else b''
+    document = prefix + data + (b'</detail>' if detail_only else b'')
+    cot._parse_document(document, MAX_SA_BYTES + 17)
+    parser = expat.ParserCreate()
+    stack, edits = [], []
+    precision_seen = False
+    # Validated XML supplies uniqueness and rejects entities/DTDs. Restrict the
+    # lexical editor to ordinary UTF-8 attribute names and quote-delimited tags.
+    tag_pattern = re.compile(rb'<(?:[^<>"\x27\x00]|"[^"\x00]*"|\x27[^\x27\x00]*\x27)*>')
+    attr_pattern = re.compile(rb'([^\s=<>"\x27/]+)(\s*=\s*)(["\x27])(.*?)\3', re.DOTALL)
+    escaped = source.replace('&', '&amp;').replace('<', '&lt;').replace('"', '&quot;').replace("'", '&apos;').encode()
+
+    def start(name, attrs):
+        """Collect byte spans for the two direct location elements."""
+        nonlocal precision_seen
+        stack.append(name)
+        path = tuple(stack)
+        precision_path = ('detail', 'precisionlocation') if detail_only else ('event', 'detail', 'precisionlocation')
+        values = point if not detail_only and path == ('event', 'point') else (
+            {'geopointsrc': escaped, 'altsrc': escaped} if path == precision_path else None)
+        if values is None:
+            return
+        precision_seen |= path == precision_path
+        offset = parser.CurrentByteIndex
+        match = tag_pattern.match(document, offset)
+        if match is None:
+            raise ValueError('unsupported XML start tag')
+        tag = match[0]
+        found = set()
+
+        def attribute(item):
+            """Keep each unrelated attribute and its original quoting."""
+            key = item[1].decode('utf-8')
+            if key not in values:
+                return item[0]
+            found.add(key)
+            value = values[key]
+            return item[1] + item[2] + item[3] + (value if isinstance(value, bytes) else str(value).encode()) + item[3]
+
+        tag = attr_pattern.sub(attribute, tag)
+        extra = b''.join(b' ' + key.encode() + b'="' + (value if isinstance(value, bytes) else str(value).encode()) + b'"'
+                         for key, value in values.items() if key not in found)
+        end = -2 if tag.endswith(b'/>') else -1
+        edits.append((offset, match.end(), tag[:end] + extra + tag[end:]))
+
+    def end(name):
+        """Add missing precision metadata only to a full CoT event."""
+        if not detail_only and tuple(stack) == ('event', 'detail') and not precision_seen:
+            offset = parser.CurrentByteIndex
+            edits.append((offset, offset, b'<precisionlocation geopointsrc="' + escaped + b'" altsrc="' + escaped + b'"/>'))
+        stack.pop()
+
+    parser.StartElementHandler, parser.EndElementHandler = start, end
+    parser.Parse(document, True)
+    for start, end, value in sorted(edits, reverse=True):
+        document = document[:start] + value + document[end:]
+    return document[len(prefix):-9] if detail_only else document
+
+
+def rewrite_mesh_sa(data, fix, source):
+    """Replace only SA geography/precision, returning original bytes on doubt."""
+    try:
+        if not isinstance(decode_mesh_sa(data), cot.PhoneSA) or not cot._usable(fix):
+            return data
+        if fix.source == 'gnss' and fix.phone_uid is not None:
+            return data
+        cot._text(source, 'rewrite source')
+        if not source.startswith(cot.EXTERNAL_SOURCE_PREFIX) or len(source.encode()) > MAX_TAK_TEXT:
+            return data
+        root = ET.Element('event')
+        cot._point(root, fix)
+        point = root.find('point').attrib
+        if data.lstrip().startswith(b'<'):
+            result = _xml_position(data, point, source)
+        else:
+            budget = [MAX_TAK_FIELDS]
+            def precision(value):
+                """Retain unknown precision fields."""
+                return _wire_edit(value, {1: (2, source.encode()), 2: (2, source.encode())}, budget)
+            def detail(value):
+                """Update typed precision and any overriding XML precision."""
+                fields = _tak_fields(value, {1: 2}, [MAX_TAK_FIELDS])
+                changes = {4: (2, precision)}
+                if 1 in fields:
+                    changes[1] = (2, lambda raw: _xml_position(raw, point, source, detail_only=True))
+                return _wire_edit(value, changes, budget)
+            def event(value):
+                """Rebuild location fields without touching the SA envelope."""
+                changes = {key: (1, struct.pack('<d', float(point[name]))) for key, name in
+                           ((10, 'lat'), (11, 'lon'), (12, 'hae'), (13, 'ce'), (14, 'le'))}
+                changes[15] = (2, detail)
+                return _wire_edit(value, changes, budget)
+            result = data[:3] + _wire_edit(data[3:], {2: (2, event)}, budget)
+        if len(result) > MAX_SA_BYTES or not isinstance(decode_mesh_sa(result), cot.PhoneSA):
+            return data
+        return result
+    except (ValueError, ET.ParseError, expat.ExpatError, LookupError, OverflowError, struct.error):
+        return data
