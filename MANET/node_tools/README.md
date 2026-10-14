@@ -527,6 +527,16 @@ Wi-Fi channel plans. Cached reports from unreachable groups are excluded.
 Peers ACK that exact plan instead of independently choosing channels from
 potentially different reports.
 
+The current channel receives a ten-point score preference. To avoid moves from
+brief load swings, the coordinator also requires another channel to beat it in
+three consecutive three-minute rounds before proposing a preference move.
+Each band counts independently, and different challengers can win those rounds.
+An incumbent that is disqualified, unmeasured, outside the candidate list,
+absent, or above the limp-mode score threshold bypasses this hold-down when
+there is a measured winner. A same-boot service restart keeps the streak.
+A new coordinator or boot starts fresh. Peers still follow the frozen proposal
+without re-scoring.
+
 Scheduled scans, elections and tourguide duty wait for the node's first
 verified GPS/NTP sync. Static and HaLow-only nodes also wait before voting.
 Discovery, IP allocation and normal mesh traffic continue while waiting; a
