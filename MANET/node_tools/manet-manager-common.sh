@@ -1,6 +1,8 @@
 #!/bin/bash
 # Helpers using node-manager scheduling and interface globals.
 
+. "${MANET_TOOLS_DIR:-$(dirname "${BASH_SOURCE[0]}")}/manet-service-common.sh"
+
 # Throttle uplink reconciliation using manager-owned gateway state.
 detect_and_update_gateway_state() {
     local mono
@@ -47,56 +49,12 @@ run_service_elections() {
     done
 }
 
-# Check the active MediaMTX service and its local virtual address.
+# Check MediaMTX listeners and its local VIP for serving telemetry.
 is_hosting_service() {
-    if systemctl is-active --quiet mediamtx.service; then
-        local IPV4_NETWORK=""
-        if [ -f /etc/mesh.conf ]; then
-            while IFS='=' read -r key value; do
-                [[ -z "$key" || "$key" =~ ^[[:space:]]*# ]] && continue
-                case "$key" in
-                    ipv4_network)
-                        IPV4_NETWORK="$value"
-                        ;;
-                esac
-            done < /etc/mesh.conf
-        fi
-        [ -z "$IPV4_NETWORK" ] && return 1
-
-        local CALC_OUTPUT=$(manet-ipcalc.sh "$IPV4_NETWORK" 2>/dev/null)
-        local FIRST_IP=$(printf '%s\n' "$CALC_OUTPUT" |
-            awk '/HostMin/ {print $2}')
-        # MediaMTX reserves the second usable address in the mesh subnet.
-        local MEDIAMTX_IPV4_VIP="${FIRST_IP%.*}.$((${FIRST_IP##*.} + 1))"
-        ip addr show dev "$CONTROL_IFACE" |
-            grep -q "inet $MEDIAMTX_IPV4_VIP/" && return 0
-    fi
-    return 1
+    service_election_hosting mediamtx
 }
 
-# Check the active Mumble service and its local virtual address.
+# Check Mumble listeners and its local VIP for serving telemetry.
 is_hosting_mumble_service() {
-    if systemctl is-active --quiet mumble-server.service; then
-        if [ -f /etc/mesh.conf ]; then
-            while IFS='=' read -r key value; do
-                [[ -z "$key" || "$key" =~ ^[[:space:]]*# ]] && continue
-                case "$key" in
-                    ipv4_network)
-                        IPV4_NETWORK="$value"
-                        ;;
-                esac
-            done < /etc/mesh.conf
-        fi
-
-        local CALC_OUTPUT
-        CALC_OUTPUT=$(manet-ipcalc.sh "$IPV4_NETWORK" 2>/dev/null)
-        local FIRST_IP
-        FIRST_IP=$(printf '%s\n' "$CALC_OUTPUT" |
-            awk '/HostMin/ {print $2}')
-        # Mumble reserves the third usable address in the mesh subnet.
-        local MUMBLE_IPV4_VIP="${FIRST_IP%.*}.$((${FIRST_IP##*.} + 2))"
-        ip addr show dev "$CONTROL_IFACE" |
-            grep -q "inet $MUMBLE_IPV4_VIP/" && return 0
-    fi
-    return 1
+    service_election_hosting mumble
 }

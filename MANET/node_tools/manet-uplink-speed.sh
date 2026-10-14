@@ -2,9 +2,9 @@
 # Measure Ethernet internet download speed and announce BATMAN bandwidth.
 # Commands: measure IFACE, announce IFACE, forget, is-ethernet IFACE.
 # measure exits: 0 = Mbit/s on stdout, 1 = failed, 2 = metered/untested,
-# 3 = cached failure without retest. announce uses measured or default speed.
+# 3 = cached failure without retest. announce uses measured or fallback speed.
 # Tethers and cellular keep batman's default 10/2 Mbit/s and the normal
-# internet probe. Ethernet must complete the HTTPS test to become a gateway.
+# internet probe. Ethernet qualifies separately through an HTTP 204 probe.
 # Download at most 5 MB per interface/address/router tuple until demotion.
 # Advertise upload as one-fifth of download. Only download affects selection.
 
@@ -15,17 +15,23 @@ RESULT_FILE="$RUN_DIR/manet-uplink-speed"
 FAIL_FILE="$RUN_DIR/manet-uplink-speed.failed"
 LOCK_FILE="$RUN_DIR/manet-uplink-speed.lock"
 TEST_BYTES=5000000
+# Ignore tiny responses that cannot give a useful transfer-rate sample.
+MIN_TEST_BYTES=250000
 # Each download may take up to 15 seconds unless overridden.
 TEST_TIMEOUT="${MANET_SPEED_TIMEOUT:-15}"
 # Failure cooldown in seconds. Reconciliation asks on every pass.
 RETRY_SECS="${MANET_SPEED_RETRY_SECS:-60}"
 DEFAULT_BANDWIDTH=10000kbit/2000kbit
+# Unknown Ethernet scores below the untested 10/2 Mbit/s metered default.
+UNKNOWN_BANDWIDTH=1000kbit/200kbit
 SYS_NET="${MANET_SYS_NET:-/sys/class/net}"
 UPTIME_FILE="${MANET_UPTIME_FILE:-/proc/uptime}"
 
-# Write a prefixed diagnostic to stderr.
+# Log transitions even when periodic reconciliation discards stderr.
 log() {
-    printf '%s\n' "uplink-speed: $*" >&2
+    local msg="uplink-speed: $*"
+    printf '%s\n' "$msg" | systemd-cat -t manet-uplink-speed 2>/dev/null ||
+        printf '%s\n' "$msg" >&2
 }
 
 # Drivers of phone tethers and cellular modems: metered, never tested.
@@ -58,17 +64,22 @@ field() {
 }
 
 # One download, at most TEST_BYTES. Prints Mbit/s over the transfer itself
-# (DNS, TCP and TLS setup excluded) when every byte arrived.
+# (DNS, TCP and TLS setup excluded), including useful deadline samples.
 download() {
     # Arguments are interface, URL, expected HTTP status and extra curl options.
-    local iface="$1" url="$2" expect="$3" out code size start total
+    local iface="$1" url="$2" expect="$3" out code size start total rc=0
     shift 3
-    out=$(curl --interface "$iface" -s -o /dev/null -m "$TEST_TIMEOUT" "$@" \
+    out=$(curl -4 --noproxy '*' --interface "$iface" \
+               -s -o /dev/null -m "$TEST_TIMEOUT" "$@" \
                -w '%{http_code} %{size_download} %{time_starttransfer} %{time_total}' \
-               "$url" 2>/dev/null) || return 1
+               "$url" 2>/dev/null) || rc=$?
+    # A timeout can still provide a sample. TLS and other errors cannot.
+    [ "$rc" -eq 0 ] || [ "$rc" -eq 28 ] || return 1
     # Curl emits HTTP status, bytes, time to first byte and total seconds.
     read -r code size start total <<< "$out"
-    [ "$code" = "$expect" ] && [ "$size" = "$TEST_BYTES" ] || return 1
+    [ "$code" = "$expect" ] && [[ "$size" =~ ^[0-9]+$ ]] || return 1
+    [ "$size" -ge "$MIN_TEST_BYTES" ] &&
+        [ "$size" -le "$TEST_BYTES" ] || return 1
     [[ "$start" =~ ^[0-9]+(\.[0-9]+)?$ && "$total" =~ ^[0-9]+(\.[0-9]+)?$ ]] || return 1
     # Clamp transfer duration to 1 ms before converting bytes/second to Mbit/s.
     awk -v b="$size" -v s="$start" -v t="$total" \
@@ -79,7 +90,7 @@ download() {
 # Update RESULT_FILE or FAIL_FILE under LOCK_FILE and preserve exit codes.
 measure() {
     local iface="$1" key now mbps
-    is_ethernet "$iface" || { log "$iface is not an Ethernet uplink; not measured"; return 2; }
+    is_ethernet "$iface" || return 2
     exec 8>>"$LOCK_FILE"
     # Allow two download deadlines plus five seconds for the lock holder.
     flock -w $((TEST_TIMEOUT * 2 + 5)) 8 || return 1
@@ -98,9 +109,12 @@ measure() {
         mbps=$(download "$iface" https://proof.ovh.net/files/10Mb.dat 206 \
                         -r "0-$((TEST_BYTES - 1))") || mbps=""
     if [ -z "$mbps" ]; then
+        # Retries of the same unknown estimate stay quiet.
+        if [ "$(field "$FAIL_FILE" KEY)" != "$key" ]; then
+            log "$iface bandwidth unknown; announcing $UNKNOWN_BANDWIDTH"
+        fi
         printf 'KEY=%s\nAT=%s\n' "$key" "$now" > "$FAIL_FILE"
         rm -f "$RESULT_FILE"
-        log "$iface ($key) could not download the speed test; no internet through it"
         return 1
     fi
     rm -f "$FAIL_FILE"
@@ -120,6 +134,8 @@ bandwidth_arg() {
             down = int(m * 1000); if (down < 100) down = 100
             up = int(down / 5); if (up < 100) up = 100
             printf "%dkbit/%dkbit\n", down, up }'
+    elif [ -n "$iface" ] && is_ethernet "$iface"; then
+        printf '%s\n' "$UNKNOWN_BANDWIDTH"
     else
         printf '%s\n' "$DEFAULT_BANDWIDTH"
     fi

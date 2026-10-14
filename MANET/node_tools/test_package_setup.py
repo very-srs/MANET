@@ -33,7 +33,15 @@ apt-get() {
     return 0
 }
 apt() { record apt "$@"; return 1; }
-getent() { return "${NETWORK_RC:-0}"; }
+getent() {
+    [ "${BOOTSTRAPPED:-0}" = 1 ] && return 0
+    return "${NETWORK_RC:-0}"
+}
+timeout() {
+    printf '%s\\n' "$*" >> "$DISPATCH_CALLS"
+    [ "${BOOTSTRAP_RC:-1}" = 0 ] || return "${BOOTSTRAP_RC:-1}"
+    BOOTSTRAPPED=1
+}
 ping() { return 0; }
 python3() {
     [[ "$1" = */manet-kernel-protect.py ]] && return 0
@@ -52,12 +60,16 @@ class PackageSetupTests(unittest.TestCase):
         self.root = Path(scratch.name)
         self.events = self.root / 'events'
         self.failures = self.root / 'failures'
+        self.dispatch_calls = self.root / 'dispatch-calls'
 
-    def run_shell(self, source, fail='', network=0):
+    def run_shell(self, source, fail='', network=0, bootstrap=1):
         self.events.write_text('')
         self.failures.write_text('')
+        self.dispatch_calls.write_text('')
         env = dict(os.environ, EVENTS=str(self.events),
                    PROVISION_FAIL_FILE=str(self.failures), FAIL_STEP=fail,
+                   DISPATCH_CALLS=str(self.dispatch_calls),
+                   BOOTSTRAP_RC=str(bootstrap),
                    NETWORK_RC=str(network), DEBIAN_FRONTEND='dialog')
         result = subprocess.run(['bash', '-c', STUBS + source], env=env,
                                 stdin=subprocess.DEVNULL, capture_output=True,
@@ -99,6 +111,50 @@ class PackageSetupTests(unittest.TestCase):
         installs = self.assert_install_options(events)
         self.assertEqual(len(installs), 2)
         self.assertEqual(self.failures.read_text(), '')
+        self.assertEqual(self.dispatch_calls.read_text(), '')
+
+    def test_radio_bootstraps_once_then_installs_both_package_groups(self):
+        """Failed fallback DNS triggers qualification before either install."""
+        events = self.run_shell(self.radio_source(), network=1, bootstrap=0)
+        self.assertEqual(len(self.assert_install_options(events)), 2)
+        self.assertEqual(self.failures.read_text(), '')
+        self.assertEqual(self.dispatch_calls.read_text().splitlines(), [
+            '--kill-after=5 180 '
+            '/usr/local/bin/manet-uplink-dispatch.sh provision'])
+
+    def test_radio_failed_or_timed_out_bootstrap_still_requires_dns(self):
+        """A dispatcher result never substitutes for working repository DNS."""
+        for status in (1, 124):
+            with self.subTest(status=status):
+                events = self.run_shell(self.radio_source(), network=1,
+                                        bootstrap=status)
+                self.assertEqual(events, [])
+                self.assertEqual(len(self.failures.read_text().splitlines()), 2)
+                self.assertEqual(len(
+                    self.dispatch_calls.read_text().splitlines()), 1)
+
+    def test_radio_noop_dispatch_does_not_count_as_working_dns(self):
+        """A busy-lock skip or failed DNS activation may still return zero."""
+        source = 'timeout() { return 0; }\n' + self.radio_source()
+        self.assertEqual(self.run_shell(source, network=1), [])
+        self.assertEqual(len(self.failures.read_text().splitlines()), 2)
+
+    def test_templates_fetch_before_networkd_takes_over(self):
+        """CM4's generated second phase and Rock fetch on the image network."""
+        for name in ('firstrun.sh.template', 'rock3a-provision.sh.template'):
+            with self.subTest(template=name):
+                source = (PROVISIONING / name).read_text()
+                if name == 'firstrun.sh.template':
+                    source = source.split("<< 'PROVISIONEOF'", 1)[1]
+                    source = source.split('\nPROVISIONEOF', 1)[0]
+                before, after = source.split('systemctl stop dhcpcd', 1)
+                self.assertIn('mumble-server', before)
+                self.assertIn('mediamtx.tar.gz', before)
+                self.assertIn('manet-uplink-dns.py install', after)
+                self.assertNotRegex(
+                    after, r'(?m)^\s*(?:curl|wget|'
+                    r'apt(?:-get)?\s+(?:update|upgrade|install)|'
+                    r'git\s+(?:clone|pull)|pip\d*\s+install)\b')
 
     def test_radio_failures_are_recorded_and_later_steps_continue(self):
         packages = ('avahi-daemon iperf3 traceroute sqlite3 python3-zeroconf '

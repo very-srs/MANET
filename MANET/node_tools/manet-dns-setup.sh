@@ -11,7 +11,7 @@ scratch=$(mktemp "${config}.XXXXXX")
 trap 'rm -f "$scratch"' EXIT
 cat > "$scratch" <<'EOF'
 [Resolve]
-# DHCP/RA servers take precedence. Never race them against public resolvers.
+# Qualified DHCP DNS is published by manet-uplink-dns.py; otherwise fallback.
 DNS=
 FallbackDNS=1.1.1.1 8.8.8.8
 EOF

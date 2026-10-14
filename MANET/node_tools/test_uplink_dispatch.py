@@ -7,6 +7,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 
 
@@ -16,6 +17,9 @@ SPEED_STUB = r'''#!/bin/bash
 # measure: exit with $T/speed-rc/IFACE if present; metered names exit 2.
 T="$REVIEW_ROOT"
 echo "uplink-speed $*" >> "$T/calls"
+if [ "$1" = is-ethernet ]; then
+  case "$2" in usb*) exit 1 ;; esac
+fi
 if [ "$1" = measure ]; then
   [ -f "$T/speed-rc/$2" ] && exit "$(cat "$T/speed-rc/$2")"
   case "$2" in usb*) exit 2 ;; esac
@@ -43,7 +47,15 @@ case "$(basename "$0")" in
       is-enabled) echo enabled ;;
     esac ;;
   ping) for a in "$@"; do [ -f "$T/internet/$a" ] && exit 0; done; exit 1 ;;
-  curl|nc) exit 1 ;;
+  curl)
+    while [ $# -gt 0 ]; do
+      if [ "$1" = --interface ]; then iface="$2"; break; fi
+      shift
+    done
+    [ -f "$T/http-code/$iface" ] && cat "$T/http-code/$iface" && exit 0
+    [ -f "$T/internet/$iface" ] && printf 204 && exit 0
+    exit 1 ;;
+  nc) exit 1 ;;
   systemd-cat) cat >> "$T/journal" ;;
 esac
 exit 0
@@ -56,7 +68,8 @@ class DispatchHarness(unittest.TestCase):
         scratch = tempfile.TemporaryDirectory()
         self.addCleanup(scratch.cleanup)
         self.root = Path(scratch.name)
-        for name in ('bin', 'net', 'run', 'addr', 'gw', 'active', 'internet', 'networkd', 'bus/usb'):
+        for name in ('bin', 'net', 'run', 'addr', 'gw', 'active', 'internet',
+                     'networkd', 'bus/usb', 'http-code'):
             (self.root / name).mkdir(parents=True)
         for tool in ('ip', 'systemctl', 'batctl', 'networkctl', 'nft', 'ping', 'curl', 'nc',
                      'systemd-cat', 'mesh-ip-manager'):
@@ -102,7 +115,7 @@ class DispatchHarness(unittest.TestCase):
         (self.root / 'run' / 'ethernet_detection_state').write_text(
             f'ETH_MODE={mode}\nETH_BRIDGE=br0\n')
 
-    def dispatch(self, event='reconcile', iface=''):
+    def dispatch(self, event='reconcile', iface='', extra_env=None):
         """Run one isolated uplink event with its shared shell libraries."""
         source = (TOOLS / 'manet-uplink-dispatch.sh').read_text()
         common = (TOOLS / 'manet-common.sh').read_text()
@@ -129,6 +142,7 @@ class DispatchHarness(unittest.TestCase):
                    MANET_ETH_DETECT_LOCK=str(self.eth_lock),
                    MANET_AP_MESH_HELPER=str(self.root / 'bin' / 'manet_ap_mesh.py'),
                    MANET_UPLINK_SPEED=str(self.root / 'bin' / 'uplink-speed'))
+        env.update(extra_env or {})
         result = subprocess.run(['bash', str(script), event, iface], env=env,
                                 capture_output=True, text=True, timeout=60)
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -256,6 +270,148 @@ class WiredEudTests(DispatchHarness):
         calls = self.dispatch()
         self.assertFalse([c for c in calls if 'hostapd' in c and 'start' in c])
 
+    def test_empty_helper_failure_reports_exit_status(self):
+        """Do not turn an unreported failure into a guessed lock diagnosis."""
+        _, failed = self.helper_log('1|')
+        self.assertIn('helper exited 1 without a diagnostic', failed)
+        self.assertNotIn('Radio transition busy', failed)
+
+
+
+class ProvisioningUplinkTests(DispatchHarness):
+    """Bootstrap qualified DNS without starting unfinished radio services."""
+
+    def setUp(self):
+        """Connect end0 and publish DNS through the actual selection helper."""
+        super().setUp()
+        self.iface('end0')
+        (self.root / 'addr/end0').write_text('192.168.1.20')
+        (self.root / 'gw/end0').write_text('192.168.1.1')
+        (self.root / 'internet/end0').touch()
+        (self.root / 'net/end0/ifindex').write_text('2')
+        (self.root / 'sys/class').mkdir(parents=True)
+        (self.root / 'sys/class/net').symlink_to(self.root / 'net')
+        leases = self.root / 'run/systemd/netif/leases'
+        leases.mkdir(parents=True)
+        (leases / '2').write_text('ADDRESS=192.168.1.20\nDNS=192.168.1.1\n')
+        self.dns = (self.root /
+                    'run/systemd/resolved.conf.d/80-manet-uplink.conf')
+        systemctl = self.root / 'bin/systemctl'
+        systemctl.write_text(STUB.replace('  systemctl)\n', '''  systemctl)
+    if [ "$*" = 'start manet-uplink-dns.service' ]; then
+      exec "$TEST_PYTHON" "$TEST_DNS" --root "$T" reconcile
+    fi
+'''))
+        self.env = {'TEST_PYTHON': sys.executable,
+                    'TEST_DNS': str(TOOLS / 'manet-uplink-dns.py')}
+
+    def assert_no_radio_actions(self, calls):
+        """NAT and DNS may change, but radio and manager startup must wait."""
+        self.assertFalse(any('hostapd' in c or 'ap-mesh-helper' in c or
+                             'mesh-ip-manager' in c or 'radvd' in c or
+                             'gateway-route-manager' in c for c in calls))
+        self.assertNotIn('uplink-speed measure end0', calls)
+        self.assertNotIn('uplink-speed announce end0', calls)
+
+    def test_restricted_dns_bootstrap_then_normal_reconcile_finishes(self):
+        """Candidate lookup qualifies HTTP before DHCP DNS becomes global."""
+        curl = self.root / 'bin/curl'
+        curl.write_text(STUB.replace('  curl)\n', '''  curl)
+    if [[ "$*" != *--resolve* ]] &&
+        [ ! -f "$T/run/systemd/resolved.conf.d/80-manet-uplink.conf" ]; then
+      exit 6
+    fi
+'''))
+        lookup = self.root / 'bin/candidate-dns'
+        lookup.write_text('''#!/bin/bash
+echo "candidate-dns $*" >> "$REVIEW_ROOT/calls"
+printf '%s\\n' 198.51.100.10
+''')
+        lookup.chmod(0o755)
+        self.env['MANET_UPLINK_DNS'] = str(lookup)
+        calls = self.dispatch('provision', extra_env=self.env)
+        self.assertIn('DNS=192.168.1.1\n', self.dns.read_text())
+        lookup_index = next(i for i, c in enumerate(calls)
+                            if c.startswith('candidate-dns resolve end0'))
+        resolved_probe = next(i for i, c in enumerate(calls)
+                              if c.startswith('curl ') and '--resolve' in c)
+        publish = calls.index('systemctl start manet-uplink-dns.service')
+        self.assertLess(lookup_index, resolved_probe)
+        self.assertLess(resolved_probe, publish)
+        self.assertIn('--interface end0', calls[resolved_probe])
+        self.assertIn('nft add rule ip nat postrouting '
+                      'oifname end0 masquerade', calls)
+        self.assertIn('metric 100', '\n'.join(calls))
+        self.assertIn('UPLINK_MODE=provisioning',
+                      (self.root / 'run/manet-uplink.env').read_text())
+        self.assert_no_radio_actions(calls)
+        self.calls.unlink()
+        calls = self.dispatch(extra_env=self.env)
+        self.assertIn('systemctl start hostapd.service', calls)
+        self.assertIn('systemctl restart gateway-route-manager.service', calls)
+        self.assertIn('uplink-speed measure end0', calls)
+        self.assertIn('UPLINK_MODE=gateway',
+                      (self.root / 'run/manet-uplink.env').read_text())
+
+    def test_setup_keeps_full_promotion_without_repeating_radio_actions(self):
+        """A setup retry repairs DNS even when the runtime promoted already."""
+        self.dispatch(extra_env=self.env)
+        self.calls.unlink()
+        calls = self.dispatch('provision', extra_env=self.env)
+        self.assert_no_radio_actions(calls)
+        self.assertNotIn('nft flush chain inet filter input', calls)
+        self.assertIn('systemctl start manet-uplink-dns.service', calls)
+        self.assertIn('UPLINK_MODE=gateway',
+                      (self.root / 'run/manet-uplink.env').read_text())
+
+    def test_setup_ignores_unfinished_ap_roles_in_every_eud_mode(self):
+        """Rename boots may retain live or pinned AP names without configs."""
+        for mode in ('auto', 'wired', 'wireless'):
+            for ap in ('wlan1', 'wlx_pending_rename', ''):
+                with self.subTest(mode=mode, ap=ap):
+                    self.mode(mode)
+                    (self.root / 'ap_interface').write_text(ap)
+                    calls = self.dispatch('provision', extra_env=self.env)
+                    self.assert_no_radio_actions(calls)
+
+    def test_setup_failure_withdraws_dns_without_starting_radios(self):
+        """Portal or dead uplink revokes an earlier setup qualification."""
+        for code in ('200', '302', ''):
+            with self.subTest(code=code):
+                (self.root / 'http-code/end0').unlink(missing_ok=True)
+                self.dispatch('provision', extra_env=self.env)
+                self.calls.unlink()
+                (self.root / 'http-code/end0').write_text(code)
+                calls = self.dispatch('provision', extra_env=self.env)
+                self.assert_no_radio_actions(calls)
+                marker = self.root / 'run/mesh-gateway.state'
+                self.assertFalse(marker.exists())
+                self.assertNotIn('DNS=192.168.1.1', self.dns.read_text())
+
+    def test_setup_does_not_probe_a_wired_eud(self):
+        """A connected EUD must keep its bridge and never supply setup DNS."""
+        (self.root / 'net/end0/master').symlink_to('../br0')
+        self.eth_state('WIRED_EUD')
+        calls = self.dispatch('provision', extra_env=self.env)
+        self.assert_eud_port_untouched(calls)
+        self.assert_no_radio_actions(calls)
+        self.assertFalse(self.dns.exists())
+
+    def test_setup_waits_for_active_dispatch_or_ethernet_detection(self):
+        """Unlike runtime events, setup waits for the serialized owner."""
+        for path in (self.eth_lock,
+                     self.root / 'run/manet-uplink-dispatch.lock'):
+            with self.subTest(lock=path.name), path.open('w') as held:
+                fcntl.flock(held, fcntl.LOCK_EX)
+                timer = threading.Timer(0.5, fcntl.flock,
+                                        args=(held, fcntl.LOCK_UN))
+                timer.start()
+                try:
+                    self.dispatch('provision', extra_env=self.env)
+                finally:
+                    timer.join()
+                self.assertIn('DNS=192.168.1.1\n', self.dns.read_text())
+                self.dns.unlink()
 
 
 class SpeedGateTests(DispatchHarness):
@@ -273,27 +429,45 @@ class SpeedGateTests(DispatchHarness):
         self.assertNotIn('batctl gw_mode server', calls)
         self.assertEqual((self.root / 'run' / 'upstream_iface').read_text().strip(), 'end0')
 
-    def test_ethernet_without_the_speed_test_is_not_a_gateway(self):
-        # Captive portal or filtered network: the probe passes, the test fails.
+    def test_unknown_speed_is_promoted_and_retried_without_duplicate_logs(self):
+        """TLS failure and its cooldown do not demote a connected Ethernet."""
         self.uplink('end0')
-        (self.root / 'speed-rc' / 'end0').write_text('1')
-        calls = self.dispatch()
-        self.assertFalse((self.root / 'run' / 'upstream_iface').exists())
-        self.assertNotIn('uplink-speed announce end0', calls)
-        self.assertIn('batctl gw_mode client', calls)
-        self.assertIn('uplink-speed forget', calls)
+        for rc in ('1', '3', '0'):
+            (self.root / 'speed-rc' / 'end0').write_text(rc)
+            calls = self.dispatch()
+            self.assertTrue((self.root / 'run/mesh-gateway.state').exists())
+            self.assertIn('uplink-speed announce end0', calls)
+        journal = (self.root / 'journal').read_text()
+        self.assertEqual(journal.count('Promoted end0'), 1)
+        self.assertNotIn('Demoted', journal)
 
-    def test_a_standing_failure_is_not_logged_again(self):
+    def test_captive_portal_cannot_qualify_with_icmp(self):
+        """An ICMP reply and HTTP 200/302 are insufficient for Ethernet."""
         self.uplink('end0')
-        journal = self.root / 'journal'
-        for rc, logged in (('1', True), ('3', False)):
-            with self.subTest(rc=rc):
-                journal.unlink(missing_ok=True)
-                (self.root / 'speed-rc' / 'end0').write_text(rc)
-                self.dispatch()
-                text = journal.read_text() if journal.exists() else ''
-                self.assertEqual('not the speed test' in text, logged)
-                self.assertFalse((self.root / 'run' / 'upstream_iface').exists())
+        for code in ('200', '302'):
+            (self.root / 'http-code/end0').write_text(code)
+            calls = self.dispatch()
+            self.assertFalse((self.root / 'run/mesh-gateway.state').exists())
+            self.assertNotIn('uplink-speed measure end0', calls)
+            self.assertFalse(any(c.startswith('ping ') for c in calls))
+            probes = [c for c in calls if c.startswith('curl ')]
+            self.assertTrue(probes)
+            self.assertTrue(all('--interface end0' in c for c in probes))
+
+    def test_demotion_withdraws_direct_route_and_restarts_mesh_selection(self):
+        """Losing the 204 path withdraws metric 100 and restores a client."""
+        self.uplink('end0')
+        self.dispatch()
+        (self.root / 'internet/end0').unlink()
+        self.calls.unlink()
+        calls = self.dispatch()
+        self.assertFalse((self.root / 'run/mesh-gateway.state').exists())
+        self.assertIn('ip route del default dev end0 metric 100', calls)
+        self.assertIn('systemctl restart gateway-route-manager.service', calls)
+        self.assertIn('batctl gw_mode client', calls)
+        self.dispatch()
+        journal = (self.root / 'journal').read_text()
+        self.assertEqual(journal.count('Demoted MANET gateway'), 1)
 
     def test_metered_uplink_is_promoted_untested(self):
         self.uplink('usb0', usb=True)

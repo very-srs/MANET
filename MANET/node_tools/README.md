@@ -69,9 +69,11 @@ reconciliation only after identical inputs previously reconciled successfully.
 Missing files, changed claims, failed checks and pending repairs invalidate that
 shortcut. The existing channel-agreement process hosts these synchronous helper
 requests on a blocking FIFO thread; its ACS loop keeps its own schedule. The
-same worker serves primary-address, MCS, interface telemetry, AP-to-mesh and
-MediaMTX checks. Standalone calls retain one-shot fallbacks when the worker is
-absent or busy, so simultaneous hooks never queue behind a helper job. There is
+same worker serves primary-address, MCS, interface telemetry, AP-to-mesh,
+MediaMTX/Mumble elections and serving flags. Service observations allow a
+one-second client-lock wait so concurrently launched elections can both reuse
+the worker. Other callers remain nonblocking. Standalone calls retain one-shot
+fallbacks when the worker is absent or still busy after that bound. There is
 no additional daemon or polling timer. Static plan parsing and
 radio-state JSON parsing also reuse unchanged inputs.
 
@@ -82,10 +84,14 @@ the next identity publish without opening a PAM session. Once a chunk is held,
 failed or empty primary-address lookups defer identity publication and retain
 the previous publication timer for retry. A Syncthing lookup error also defers
 publication; a missing first-boot certificate is still a valid empty result.
-MediaMTX still ranks
-current candidates and checks live VIPs/service state every election pass, but
-skips shell reconciliation when already settled. Measure node-manager and
-channel-agreement CPU together when comparing this path.
+MediaMTX and Mumble rank current candidates and check live VIPs, unit state
+and required wildcard listeners every election pass. Settled owners and
+non-owners skip shell reconciliation without starting Python. Waiting
+incumbents and pending announcements/publications always reconcile. Listener
+checks read proc socket tables, and IPv6 VIP normalization is cached until its
+configuration or derivation helper changes. Mumble database checks remain on
+transitions. Measure node-manager and channel-agreement CPU together when
+comparing this path.
 
 **node-manager.sh**
 
@@ -439,17 +445,40 @@ partitions may each elect a server; they converge after connectivity returns.
 
 **mediamtx-election.sh**
 
-Elects the node that hosts the MediaMTX streaming server. The winner takes
-static IPv4 and IPv6 VIPs and runs the service. Both are released when it loses
-the election.
+Elects the node that hosts the MediaMTX streaming server. The winner starts
+the service and checks its listeners before taking static IPv4 and IPv6 VIPs.
+It sends three unsolicited ARPs and an IPv6 Neighbor Advertisement. A losing
+host keeps serving until it hears the winner claim the IPv4 VIP by ARP or
+the IPv6 VIP by an unsolicited NA, or receives a new registry observation
+showing the winner serving. The release log names the signal. NA supports
+handover when batman-adv DAT absorbs gratuitous ARP. At the start of each wait,
+the incumbent also sends an IPv6 Neighbor Solicitation to each winner MAC
+alias, using its own link-local source address. A solicited reply confirms a
+claim that preceded the wait, logged as `via NS probe`. A failed or disabled
+successor never causes the incumbent to withdraw merely because it lost rank.
+Failed candidates are stopped and reset after the readiness deadline so
+unit restarts cannot continue between election passes. The next election
+retries. Enable each elected service on every node in the mesh.
 
 **mumble-election.sh**
 
 Elects the node that hosts the Mumble server, by the same rule and with the
-same kind of VIPs. The winner syncs the Mumble database from the shared
-Syncthing folder before starting the service, and syncs it back when it loses,
-so user accounts and channel configuration survive a change of host.
-Integrity-checked backups are taken before each sync.
+same kind of VIPs. The winner imports the Mumble database from the shared
+Syncthing folder before starting the service. While serving, it exports changed
+working data at election cadence. The resident runtime checks DB and WAL file
+metadata, so unchanged data adds no process starts or SQLite queries.
+Successful cadence exports log one summary line. Failures retain full details.
+Integrity-checked backups are taken before each sync. On release, the stopped
+owner exports its final data to a unique file under `Sync/mumble/retired/`,
+leaving the winner's canonical snapshot alone. Failed final exports retry on
+the next election. After a successful final export, pruning keeps at most
+three snapshots for that owner and removes those older than 30 days, always
+protecting the snapshot just written. Mumble uses the same confirmed handover
+as MediaMTX, with a valid working database and listening
+TCP/UDP ports required before claiming its VIPs. Syncthing remains asynchronous:
+changes since the last delivered cadence export may be absent on the new host.
+Late snapshots and Syncthing conflict copies are not automatically re-imported
+or merged. The retired snapshots preserve final data for manual recovery.
 
 ---
 
@@ -511,6 +540,14 @@ this radio did not send. It is a ratio of two counters from one driver, so it
 compares directly between nodes and between radio chips. The noise floor does
 not: it is uncalibrated in absolute terms and varies with the chip, which is
 why it contributes a capped penalty instead of deciding the election.
+
+A channel report carries only what the radio measured in its latest scan. A
+scan that fails or times out discards that band's report and logs `Scan failed
+on <radio>` once, then `Scan recovered on <radio>` when scans work again.
+A channel the radio visited for less than 25 ms is left out of that report.
+Occupancy needs three readings before it is reported, so a radio that has just
+started reports noise and network counts first. Observations older than three
+minutes are left out of telemetry.
 
 A channel is disqualified when enough of the nodes reporting on it call it bad,
 either too noisy or too congested. Once three or more nodes report, a single
@@ -966,18 +1003,26 @@ available. While a mesh route is pending, sleeps 1 second between checks during 
 90 seconds, measured with monotonic uptime. Once ready, or after that startup
 period, sleeps 10 seconds. Failed reachability checks and route installs retry.
 Uses the node's assigned primary address as the route source, excluding service
-VIPs and the EUD gateway alias, and preserves an existing local uplink route.
+VIPs and the EUD gateway alias. The mesh default uses metric 500, between a
+promoted direct uplink at 100 and networkd's unqualified DHCP default at 1024.
+A DHCP lease alone does not block mesh selection. Local gateway state removes
+the mesh default. Before that marker is written, a metric-100 default on the
+saved upstream interface also preserves direct routing.
 
 **manet-uplink-speed.sh**
 
 Measures an Ethernet uplink's internet download speed and announces it as the
 gateway's bandwidth (`batctl gw_mode server`). The test downloads at most 5 MB
 over HTTPS from Cloudflare's speed endpoint, or OVH as a fallback, once per
-uplink address and router. It is also the gateway's internet check: an
-Ethernet uplink that cannot complete it (a captive portal or filtered network)
-is not promoted, and the test is retried at most once a minute. Phone tethers,
-cellular modems and Wi-Fi uplinks are metered or wireless; they are never
-tested and announce batman's default 10/2 Mbit/s.
+uplink address and router. HTTP 200/206 samples of at least 250 kB count even
+when the 15-second transfer deadline expires. The rate excludes DNS/TCP/TLS
+setup. A slow sample receives a low score and still qualifies as connected.
+A failed download, including TLS failure before clock synchronization, means
+unknown bandwidth: Ethernet announces a conservative 1/0.2 Mbit/s and retries
+at most once a minute on subsequent reconciliation. A successful estimate is
+cached until its interface/address/router changes or the node is demoted.
+Phone tethers, cellular modems and Wi-Fi uplinks are never download-tested and
+announce batman's default 10/2 Mbit/s.
 
 **manet-uplink-dispatch.sh**
 
@@ -987,13 +1032,43 @@ uplink or a wired EUD port, and on promotion configures NAT, the firewall,
 the networkd-dispatcher hooks and reconciled once a cycle by the node manager.
 Both paths return early when nothing has changed.
 
+Ethernet promotion requires an interface-bound IPv4 HTTP 204 response from
+one of two connectivity endpoints. ICMP alone and HTTP 200/302 portal replies
+cannot qualify it. This probe needs no TLS clock, and speed-test failure does
+not block promotion. Ethernet auto-detection uses the same policy. Metered
+and wireless uplinks retain their ICMP/HTTP probe and TCP fallback.
+Demotion explicitly removes the promoted metric-100 route and restarts mesh
+route selection. DNS resolution may use another working link, but the HTTP
+connection itself must work through the candidate interface. If normal name
+resolution fails, the probe queries the candidate's DHCP resolver through a
+device-bound socket and gives curl the answer with `--resolve`. A lone node
+can therefore qualify even when only its LAN's resolver is allowed.
+
 **manet-dns-setup.sh**
 
-Node and EUD DNS use the upstream servers learned by systemd-resolved from
-DHCP/IPv6 RA. Public resolvers are fallback servers only when no other DNS
-servers are known. Provisioning and dnsmasq startup run this idempotent helper;
-renewed leases update DNS without restarting dnsmasq or clearing EUD leases.
+Sets the shared resolved upstream file and public fallback servers.
+Provisioning, updates and dnsmasq startup run this idempotent helper.
 `manet.local` and service aliases remain local to dnsmasq.
+
+**manet-uplink-dns.py**
+
+Publishes DHCPv4 DNS and search domains only for the promoted direct uplink.
+Networkd's managed DHCP files permanently disable automatic DNS, domains and
+resolver host routes. An isolated LAN therefore cannot hide fallback DNS or
+pin its traffic away from the mesh route. A path-triggered oneshot follows
+gateway state and lease changes, updating a resolved runtime drop-in only
+when the selection changes. Renewal does not reload networkd or restart
+dnsmasq. Resolver addresses are plain IPv4: on-link LAN DNS uses its connected
+route, and public DNS uses the promoted metric-100 default. The path unit
+watches the gateway marker, selected-interface file and lease directory.
+Routine networkd link-state rewrites do not trigger it.
+With no qualified resolver, public fallback DNS follows the best
+default route. The helper also performs the bound candidate lookup above.
+
+First boot and the updater run `install` to preserve existing MAC matches
+while migrating active DHCP files, saved defaults and inactive templates.
+The first migration can briefly interrupt DHCP while networkd reloads.
+Promotion, demotion and renewal never toggle that persistent policy.
 
 **prepare-ap-iface.sh**
 
@@ -1561,6 +1636,13 @@ the next boot retries, and `manet-provision-status.sh` reports it at login.
 
 Network reachability is checked before each apt phase, so a node with no
 network records that once before attempting package downloads.
+If repository DNS fails, setup makes one bounded
+`manet-uplink-dispatch.sh provision` attempt per run, then checks DNS again.
+This qualifies the direct uplink and publishes its DHCP resolver even when
+the LAN blocks public DNS and node-manager has not started. It defers radio
+role changes, bandwidth measurement, announcements and manager startup until
+normal reconciliation, so rename reboots and unfinished AP configuration
+are safe. Working mesh or public DNS needs no extra dispatch.
 
 **manet-provision-status.sh**
 

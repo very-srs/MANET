@@ -14,7 +14,8 @@ class GatewayStartupTests(unittest.TestCase):
     """Check route startup while addresses and gateways become ready."""
     def run_manager(self, *, ready_at=0, reachable_at=0, gateway=True, registry=True,
                     current='', local_gateway=False, fail_install=False,
-                    jump_clock=False, polls=5, address='10.44.0.6'):
+                    jump_clock=False, polls=5, address='10.44.0.6',
+                    upstream='end0'):
         """Run a route manager against virtual time and network state."""
         with tempfile.TemporaryDirectory(prefix='manet-gateway-startup-') as scratch:
             root = Path(scratch)
@@ -23,6 +24,7 @@ class GatewayStartupTests(unittest.TestCase):
             (root / 'clock').write_text('0')
             (root / 'uptime').write_text('100.0 0.0\n')
             (root / 'route').write_text(current)
+            (root / 'run/upstream_iface').write_text(upstream)
             if local_gateway:
                 (root / 'run/mesh-gateway.state').touch()
             if registry:
@@ -44,6 +46,9 @@ name = Path(sys.argv[0]).name
 def event(kind, **extra):
     with (root / 'events').open('a') as out:
         out.write(json.dumps(dict(kind=kind, now=now, **extra)) + '\n')
+def route_metric(route):
+    fields = route.split()
+    return fields[fields.index('metric') + 1] if 'metric' in fields else '0'
 if name == 'batctl':
     assert args == ['gwl', '-H', '-n'], args
     if case['gateway']:
@@ -58,10 +63,19 @@ elif name == 'ip':
         if case['fail_install'] and not (root / 'retried').exists():
             (root / 'retried').touch()
             sys.exit(2)
-        (root / 'route').write_text(' '.join(args[2:]))
-    elif args == ['route', 'del', 'default', 'dev', 'br0']:
+        # Like Linux, replace matches the metric, not every default route.
+        routes = (root / 'route').read_text().splitlines()
+        metric = args[args.index('metric') + 1]
+        routes = [r for r in routes if route_metric(r) != metric]
+        routes.append(' '.join(args[2:]))
+        (root / 'route').write_text('\n'.join(routes))
+    elif args[:5] == ['route', 'del', 'default', 'dev', 'br0']:
         event('delete')
-        (root / 'route').write_text('')
+        routes = (root / 'route').read_text().splitlines()
+        metric = args[6] if len(args) > 5 else None
+        routes = [r for r in routes if ' dev br0' not in r or
+                  (metric is not None and route_metric(r) != metric)]
+        (root / 'route').write_text('\n'.join(routes))
     else:
         raise AssertionError(args)
 elif name == 'primary.py':
@@ -110,7 +124,8 @@ elif name == 'date':
         install = next(e for e in events if e['kind'] == 'replace')
         self.assertEqual(install['now'], 3)
         self.assertEqual(install['args'], ['route', 'replace', 'default', 'via',
-                                          '10.44.0.11', 'dev', 'br0', 'src', '10.44.0.6'])
+                                          '10.44.0.11', 'dev', 'br0', 'src',
+                                          '10.44.0.6', 'metric', '500'])
         self.assertEqual([e['seconds'] for e in events if e['kind'] == 'sleep'], [1, 1, 1, 10, 10])
         self.assertEqual(sum(e['kind'] == 'replace' for e in events), 1)
 
@@ -136,10 +151,51 @@ elif name == 'date':
     def test_local_uplink_is_preserved_even_before_its_gateway_marker(self):
         for marker in (False, True):
             with self.subTest(marker=marker):
-                original = 'default via 192.168.69.1 dev end0 src 192.168.69.51'
+                original = ('default via 192.168.69.1 dev end0 '
+                            'src 192.168.69.51 metric 100')
                 events, route = self.run_manager(current=original, local_gateway=marker, polls=2)
                 self.assertEqual(route, original)
                 self.assertTrue(all(e['kind'] == 'sleep' and e['seconds'] == 10 for e in events))
+
+    def test_unqualified_dhcp_keeps_its_route_but_does_not_block_mesh(self):
+        """An isolated DHCP LAN loses to a usable metric-500 mesh route."""
+        dhcp = 'default via 192.168.69.1 dev end0 metric 1024'
+        events, route = self.run_manager(current=dhcp, polls=2)
+        self.assertIn(dhcp, route.splitlines())
+        self.assertIn('default via 10.44.0.11 dev br0 src 10.44.0.6 metric 500',
+                      route.splitlines())
+        self.assertEqual(sum(e['kind'] == 'replace' for e in events), 1)
+
+    def test_gateway_mode_removes_mesh_even_with_direct_route_first(self):
+        """The first default no longer hides the mesh route during cleanup."""
+        direct = 'default via 192.168.69.1 dev end0 metric 100'
+        mesh = 'default via 10.44.0.11 dev br0 src 10.44.0.6 metric 500'
+        events, route = self.run_manager(current=direct + '\n' + mesh,
+                                         local_gateway=True, polls=2)
+        self.assertEqual(route, direct)
+        self.assertEqual(sum(e['kind'] == 'delete' for e in events), 1)
+
+    def test_metric_100_requires_the_saved_upstream_interface(self):
+        """An unrelated route cannot impersonate a promoted uplink."""
+        direct = 'default via 192.168.69.1 dev end0 metric 100'
+        events, route = self.run_manager(current=direct, upstream='usb0',
+                                         polls=2)
+        self.assertIn('dev br0 src 10.44.0.6 metric 500', route)
+        self.assertIn(direct, route)
+
+    def test_demoted_node_restores_mesh_alongside_dhcp(self):
+        """Once marker and metric 100 are withdrawn, select the mesh route."""
+        dhcp = 'default via 192.168.69.1 dev end0 metric 1024'
+        events, route = self.run_manager(current=dhcp, upstream='', polls=2)
+        self.assertIn('dev br0 src 10.44.0.6 metric 500', route)
+        self.assertIn(dhcp, route)
+
+    def test_existing_metric_zero_route_is_replaced_without_deleting_dhcp(self):
+        """Changing a route metric must remove the previous Linux route too."""
+        dhcp = 'default via 192.168.69.1 dev end0 metric 1024'
+        mesh = 'default via 10.44.0.11 dev br0 src 10.44.0.6'
+        events, route = self.run_manager(current=dhcp + '\n' + mesh, polls=2)
+        self.assertEqual(route.splitlines(), [dhcp, mesh + ' metric 500'])
 
     def test_stale_mesh_route_is_removed_without_a_gateway(self):
         events, route = self.run_manager(gateway=False, current='default via 10.44.0.11 dev br0', polls=2)
@@ -151,7 +207,7 @@ elif name == 'date':
             with self.subTest(old_source=old):
                 events, route = self.run_manager(current=f'default via 10.44.0.11 dev br0 src {old}', polls=2)
                 self.assertEqual(sum(e['kind'] == 'replace' for e in events), 1)
-                self.assertTrue(route.endswith('src 10.44.0.6'))
+                self.assertTrue(route.endswith('src 10.44.0.6 metric 500'))
 
 
 if __name__ == '__main__':

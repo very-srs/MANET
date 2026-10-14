@@ -103,7 +103,8 @@ and [dispatcher ownership](../MANET/networkd-dispatcher/README.md).
 |---|---|
 | [ethernet-autodetect.sh](../MANET/node_tools/ethernet-autodetect.sh) | Classify Ethernet and reconcile its uplink/client role. |
 | [manet-uplink-dispatch.sh](../MANET/node_tools/manet-uplink-dispatch.sh) | Reconcile direct uplinks, gateway publication and dependent EUD radio roles. |
-| [manet-uplink-speed.sh](../MANET/node_tools/manet-uplink-speed.sh) | Qualify/measure eligible uplinks and advertise download/upload estimates. |
+| [manet-uplink-speed.sh](../MANET/node_tools/manet-uplink-speed.sh) | Estimate Ethernet bandwidth and advertise measured or fallback capacity. |
+| [manet-uplink-dns.py](../MANET/node_tools/manet-uplink-dns.py) | Select qualified DHCP DNS, migrate networkd policy and resolve candidate probes. |
 | [gateway-route-manager.sh](../MANET/node_tools/gateway-route-manager.sh) | Select a reachable gateway and maintain the Linux mesh default route with hysteresis. |
 | [usb-ethernet-watch.sh](../MANET/node_tools/usb-ethernet-watch.sh) | Pass USB Ethernet/tether hotplug into role detection. |
 | [usb-wifi-uplink.sh](../MANET/node_tools/usb-wifi-uplink.sh) | Configure an external Wi-Fi client from saved uplink credentials. |
@@ -141,7 +142,9 @@ Read [shared services](guide/content/services.md).
 |---|---|
 | [mesh-throughput-mean.sh](../MANET/node_tools/mesh-throughput-mean.sh) | Aggregate best BATMAN throughput paths into the election metric. |
 | [mesh-service-election.py](../MANET/node_tools/mesh-service-election.py) | Rank fresh eligible hosts with incumbent bias and deterministic ties. |
-| [manet_election_runtime.py](../MANET/node_tools/manet_election_runtime.py) | Skip settled MediaMTX work only after checking current winner, service and VIPs. |
+| [manet_election_runtime.py](../MANET/node_tools/manet_election_runtime.py) | Skip settled MediaMTX and Mumble passes after checking winner, unit, listeners and VIPs. |
+| [manet-service-common.sh](../MANET/node_tools/manet-service-common.sh) | Shared election flow: prepare the service, claim and announce VIPs, wait for a successor. |
+| [manet_service_handover.py](../MANET/node_tools/manet_service_handover.py) | Announce VIP claims, wait for the winner's claim and republish the serving flag. |
 | [mediamtx-election.sh](../MANET/node_tools/mediamtx-election.sh) | Acquire/release MediaMTX service and virtual addresses. |
 | [mumble-election.sh](../MANET/node_tools/mumble-election.sh) | Acquire/release Mumble and synchronize its database around ownership changes. |
 | [mtx-ip.sh](../MANET/node_tools/mtx-ip.sh) | Derive the stable MediaMTX IPv6 service address. |

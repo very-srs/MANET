@@ -2,6 +2,14 @@
 # Elect a Mumble server by mean mesh throughput and synchronize its database
 # through Syncthing to preserve data across leadership changes.
 
+. "${MANET_TOOLS_DIR:-${BASH_SOURCE[0]%/*}}/manet-service-common.sh"
+service_election_preflight mumble
+case $? in
+    0) exit 0 ;;
+    125) ;;  # Unsettled, or no request submitted to an available worker.
+    *) exit 1 ;;
+esac
+
 # --- Configuration ---
 REGISTRY_STATE_FILE="/var/run/mesh_node_registry"
 MUMBLE_SERVICE_NAME="mumble-server.service"
@@ -23,10 +31,14 @@ MUMBLE_IPV6_VIP=""
 
 # State
 MY_MAC=$(cat "/sys/class/net/${CONTROL_IFACE}/address" 2>/dev/null || true)
-LOCK_FILE="/var/run/mumble-election.lock"
+LOCK_FILE="${MUMBLE_ELECTION_LOCK:-/var/run/mumble-election.lock}"
 
 # Send a prefixed diagnostic to the Mumble election journal tag.
 log() {
+    if [ "${MUMBLE_CAPTURE_LOG:-}" = true ]; then
+        printf '%s\n' "MUMBLE-ELECTION: $1" >&2
+        return
+    fi
     printf '%s\n' "MUMBLE-ELECTION: $1" | systemd-cat -t mumble-election
 }
 
@@ -103,7 +115,7 @@ check_database_integrity() {
 
 # Request a WAL checkpoint for the supplied database and warn on remaining WAL.
 checkpoint_database() {
-    local db_path=$1
+    local db_path=$1 checkpoint_error
     
     if [ ! -f "$db_path" ]; then
         return 0
@@ -111,8 +123,11 @@ checkpoint_database() {
     
     log "Checkpointing WAL for database: $db_path"
     
-    # Force WAL checkpoint to merge everything into main database file
-    sqlite3 "$db_path" "PRAGMA wal_checkpoint(TRUNCATE);" 2>&1 | logger -t mumble-election
+    # Discard the numeric result row, retaining SQLite's error diagnostics.
+    if ! checkpoint_error=$(sqlite3 "$db_path" \
+            "PRAGMA wal_checkpoint(TRUNCATE);" 2>&1 >/dev/null); then
+        log "WARNING: WAL checkpoint failed: $checkpoint_error"
+    fi
     
     # Verify WAL files are gone or empty
     if [ -f "${db_path}-wal" ]; then
@@ -129,6 +144,8 @@ safe_copy_database() {
     local source=$1
     local dest=$2
     local temp_dest="${dest}.tmp"
+    local mode=${3:-stopped}
+    local backup_output backup_status
     
     if [ ! -f "$source" ]; then
         log "ERROR: Source database not found: $source"
@@ -138,8 +155,10 @@ safe_copy_database() {
     log "Safe copy: $source -> $dest"
     
     # Method 1: Use SQLite's own backup mechanism (preferred)
-    sqlite3 "$source" ".backup '$temp_dest'" 2>&1 | logger -t mumble-election
-    if [ "${PIPESTATUS[0]}" -eq 0 ]; then
+    backup_output=$(sqlite3 "$source" ".backup '$temp_dest'" 2>&1)
+    backup_status=$?
+    [ -z "$backup_output" ] || log "$backup_output"
+    if [ "$backup_status" -eq 0 ]; then
         log "SQLite backup completed successfully"
         
         # Verify the backup
@@ -154,6 +173,13 @@ safe_copy_database() {
         fi
     fi
     
+    # A live WAL cannot safely be copied as separate changing files.
+    if [ "$mode" = live ]; then
+        log 'Live SQLite backup failed, retrying at the next election'
+        rm -f "$temp_dest" "${temp_dest}-wal" "${temp_dest}-shm"
+        return 1
+    fi
+
     # Method 2: Fallback to checkpoint + copy if backup fails
     log "SQLite backup failed, falling back to checkpoint method"
     
@@ -302,6 +328,8 @@ sync_database_from_shared() {
 
 # Back up SHARED_DB and publish a checked WORKING_DB copy for Syncthing.
 sync_database_to_shared() {
+    local mode=${1:-stopped} stamp=${2:-} signature result
+    local helper="${MANET_TOOLS_DIR:-/usr/local/bin}/manet_service_handover.py"
     log "Syncing database TO Syncthing from working location"
     
     if [ ! -f "$WORKING_DB" ]; then
@@ -333,19 +361,41 @@ sync_database_to_shared() {
     
     # Checkpoint working database before copying
     checkpoint_database "$WORKING_DB"
+
+    # Record the version before copying. Writes during backup or publication
+    # stay dirty and are exported again on the next cadence pass.
+    if [ -n "$stamp" ]; then
+        signature=$(python3 "$helper" db-signature "$WORKING_DB") || return 1
+    fi
     
     # Copy to Syncthing directory using safe method
     local TEMP_SHARED="${SHARED_DB}.uploading"
     
-    if safe_copy_database "$WORKING_DB" "$TEMP_SHARED"; then
-        sudo chown radio:radio "$TEMP_SHARED"
-        sudo chmod 644 "$TEMP_SHARED"
+    if safe_copy_database "$WORKING_DB" "$TEMP_SHARED" "$mode"; then
+        sudo chown radio:radio "$TEMP_SHARED" || return 1
+        sudo chmod 644 "$TEMP_SHARED" || return 1
+
+        if [ "$mode" = live ]; then
+            # Backup may take time. A retiring owner must not publish over
+            # the current winner's canonical snapshot.
+            result=$(python3 "$helper" rank mumble \
+                "$REGISTRY_STATE_FILE") || return 1
+            if [ "${result%% *}" != "$MY_MAC" ]; then
+                log 'Winner changed before Mumble database publication'
+                rm -f "$TEMP_SHARED"
+                return 1
+            fi
+        fi
         
         # Atomic move into place
         if ! sudo -u radio mv "$TEMP_SHARED" "$SHARED_DB"; then
             log "ERROR: Failed to replace shared database"
             rm -f "$TEMP_SHARED"
             return 1
+        fi
+        if [ -n "$stamp" ]; then
+            printf '%s\n' "$signature" > "$stamp.tmp" || return 1
+            mv "$stamp.tmp" "$stamp" || return 1
         fi
         
         local db_size=$(stat -c%s "$SHARED_DB" 2>/dev/null || stat -f%z "$SHARED_DB")
@@ -361,14 +411,93 @@ sync_database_to_shared() {
     fi
 }
 
-# --- Main Election Logic ---
+# Prepare DB and wildcard bindings while no VIP has yet been claimed.
+prepare_mumble_service() {
+    if [ -f "$MUMBLE_CONFIG" ]; then
+        if grep -q '^host=' "$MUMBLE_CONFIG"; then
+            sed -i 's/^host=.*/host=/' "$MUMBLE_CONFIG" || return 1
+        else
+            printf '\nhost=\n' >> "$MUMBLE_CONFIG" || return 1
+        fi
+    else
+        log "Mumble config missing"
+        return 1
+    fi
+    ensure_shared_directory || return 1
+    # Initialize shared DB if it doesn't exist
+    if [ ! -f "$SHARED_DB" ] || [ ! -s "$SHARED_DB" ]; then
+        create_initial_database
+    fi
 
-# Use flock to prevent concurrent election runs
-exec 200>"$LOCK_FILE"
-if ! flock -n 200; then
-    log "Election already in progress, exiting"
-    exit 0
-fi
+    # Sync database from Syncthing
+    if ! sync_database_from_shared; then
+        log "WARNING: Shared database sync failed; using local state"
+        # Sync can fail before stopping the old server. Reload its binding.
+        if systemctl is-active --quiet "$MUMBLE_SERVICE_NAME"; then
+            systemctl stop "$MUMBLE_SERVICE_NAME"
+            sleep 2
+        fi
+        if [ -f "$WORKING_DB" ] &&
+            ! check_database_integrity "$WORKING_DB" "working"; then
+            log "ERROR: Local database is corrupt; cannot start Mumble"
+            return 1
+        fi
+    fi
+
+    systemctl start "$MUMBLE_SERVICE_NAME"
+}
+
+# A listening Mumble server must also have a valid working database.
+verify_mumble_database() {
+    check_database_integrity "$WORKING_DB" "working"
+}
+
+# Export changed live data only from the locally elected, serving winner.
+export_mumble_changes() {
+    local signature previous="" details rc db_size line
+    local helper="${MANET_TOOLS_DIR:-/usr/local/bin}/manet_service_handover.py"
+    signature=$(python3 "$helper" db-signature "$WORKING_DB") || return 1
+    if [ -f "$LOCK_FILE.db-export" ]; then
+        read -r previous < "$LOCK_FILE.db-export"
+    fi
+    [ "$signature" != "$previous" ] || return 0
+    # Buffer this pass only. Failed exports replay all captured diagnostics.
+    details=$(
+        MUMBLE_CAPTURE_LOG=true
+        {
+            ensure_shared_directory &&
+                sync_database_to_shared live "$LOCK_FILE.db-export"
+        } 2>&1
+    )
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+        log 'Mumble DB export failed, retrying next election'
+        while IFS= read -r line; do
+            [ -z "$line" ] || log "${line#MUMBLE-ELECTION: }"
+        done <<< "$details"
+        return "$rc"
+    fi
+    db_size=$(stat -c%s "$SHARED_DB") || return 1
+    log "Exported Mumble DB ($db_size bytes)"
+}
+
+# Preserve final data without racing the winner's canonical shared snapshot.
+release_mumble_database() {
+    local directory="$SHARED_DB_DIR/retired/${MY_MAC//:/}" generation
+    local helper="${MANET_TOOLS_DIR:-/usr/local/bin}/manet_service_handover.py"
+    read -r generation < /proc/sys/kernel/random/uuid || return 1
+    sudo -u radio mkdir -p "$directory" || return 1
+    local SHARED_DB="$directory/$generation.sqlite"
+    log "Preserving retired owner's final database at $SHARED_DB"
+    sync_database_to_shared || return 1
+    if ! python3 "$helper" prune-retired "$SHARED_DB"; then
+        # Publication succeeded. Do not create more snapshots just to retry
+        # cleanup. The next final export retries this owner's pruning.
+        log 'WARNING: Failed to prune retired Mumble snapshots'
+    fi
+}
+
+# --- Main Election Logic ---
 
 # Check if Mumble is enabled
 MUMBLE_ENABLED=$(grep "^mumble=" /etc/mesh.conf 2>/dev/null | cut -d'=' -f2)
@@ -383,9 +512,6 @@ if [ ! -f "$REGISTRY_STATE_FILE" ]; then
     exit 1
 fi
 
-# Ensure Syncthing shared directory exists
-ensure_shared_directory
-
 # Calculate VIPs
 IPV4_NETWORK=$(grep "^ipv4_network=" /etc/mesh.conf 2>/dev/null | cut -d'=' -f2)
 if [ -z "$IPV4_NETWORK" ]; then
@@ -394,12 +520,9 @@ if [ -z "$IPV4_NETWORK" ]; then
 fi
 
 MUMBLE_IPV4_VIP=$(get_mumble_ipv4_vip "$IPV4_NETWORK")
-MUMBLE_IPV6_VIP_WITH_MASK=$(/usr/local/bin/mumble-ip.sh)
+MUMBLE_IPV6_VIP_WITH_MASK=$(service_election_ipv6 mumble \
+    /usr/local/bin/mumble-ip.sh) || exit 1
 MUMBLE_IPV6_VIP=${MUMBLE_IPV6_VIP_WITH_MASK%/*}
-
-# Normalize IPv6 to compressed form (remove :0000: before ::)
-MUMBLE_IPV6_VIP=$(printf '%s\n' "$MUMBLE_IPV6_VIP" | sed 's/:0000::/::/g')
-MUMBLE_IPV6_VIP_WITH_MASK="${MUMBLE_IPV6_VIP}/128"
 
 if [ -z "$MUMBLE_IPV4_VIP" ] || [ -z "$MUMBLE_IPV6_VIP" ]; then
     log "ERROR: Failed to calculate VIPs"
@@ -407,161 +530,15 @@ if [ -z "$MUMBLE_IPV4_VIP" ] || [ -z "$MUMBLE_IPV6_VIP" ]; then
 fi
 
 IPV4_VIP_WITH_MASK="${MUMBLE_IPV4_VIP}/${IPV4_NETWORK#*/}"
-log "Mumble VIPs: IPv4=$MUMBLE_IPV4_VIP, IPv6=$MUMBLE_IPV6_VIP"
 
-# --- Rank candidates ---
-# mesh-service-election.py reads one registry snapshot and applies the shared
-# rules: eligibility (state, observed age, valid metric), one deterministic
-# incumbent with its +10 bias, highest score wins, lowest MAC breaks a tie.
-ELECTION_HELPER="${MANET_TOOLS_DIR:-/usr/local/bin}/mesh-service-election.py"
-if ! ELECTION_RESULT=$(python3 "$ELECTION_HELPER" mumble "$REGISTRY_STATE_FILE" 2> >(while IFS= read -r line; do log "$line"; done)); then
-    log "Cannot rank candidates; leaving the service as it is"
-    exit 1
-fi
-# Ranker fields are winner MAC, biased Mbit/s score and incumbent MAC.
-# A dash represents a missing MAC.
-read -r BEST_CANDIDATE_MAC HIGHEST_TQ CURRENT_LEADER_MAC <<< "$ELECTION_RESULT"
-[ "$BEST_CANDIDATE_MAC" = - ] && BEST_CANDIDATE_MAC=""
-[ "$CURRENT_LEADER_MAC" = - ] && CURRENT_LEADER_MAC=""
-if [ -n "$CURRENT_LEADER_MAC" ]; then
-    log "Current incumbent: $CURRENT_LEADER_MAC (incumbent bias applied)"
-fi
 
-# --- Decision and Action ---
-if [ -z "$BEST_CANDIDATE_MAC" ]; then
-    # No eligible winner
-    log "No suitable candidates found"
-    
-    # Remove locally held VIPs.
-    if ip addr show dev "$CONTROL_IFACE" | grep -q "inet $MUMBLE_IPV4_VIP/"; then
-        ip addr del "$IPV4_VIP_WITH_MASK" dev "$CONTROL_IFACE" 2>/dev/null
-    fi
-    if ip -6 addr show dev "$CONTROL_IFACE" | grep -q "$MUMBLE_IPV6_VIP/"; then
-        ip addr del "$MUMBLE_IPV6_VIP_WITH_MASK" dev "$CONTROL_IFACE" 2>/dev/null
-    fi
-    
-    # Stop service and sync database back
-    if systemctl is-active --quiet "$MUMBLE_SERVICE_NAME"; then
-        log "Stopping Mumble service"
-        systemctl stop "$MUMBLE_SERVICE_NAME"
-        sleep 2
-        sync_database_to_shared
-    fi
-    systemctl reset-failed "$MUMBLE_SERVICE_NAME" 2>/dev/null
-    
-    rm -f /var/run/mesh-mumble.state
-
-elif [ "$MY_MAC" == "$BEST_CANDIDATE_MAC" ]; then
-    # Local leader
-    log "Won election (TQ: $HIGHEST_TQ)"
-    
-    # Check whether VIPs are assigned locally.
-    HAS_IPV4_VIP=false
-    HAS_IPV6_VIP=false
-    
-    if ip addr show dev "$CONTROL_IFACE" | grep -q "inet $MUMBLE_IPV4_VIP/"; then
-        HAS_IPV4_VIP=true
-    fi
-    if ip addr show dev "$CONTROL_IFACE" | grep -q "inet6 $MUMBLE_IPV6_VIP/"; then
-        HAS_IPV6_VIP=true
-    fi
-    
-    # Assign VIPs if needed
-    if [ "$HAS_IPV4_VIP" = false ]; then
-        log "Assigning IPv4 VIP: $MUMBLE_IPV4_VIP"
-        ip addr add "$IPV4_VIP_WITH_MASK" dev "$CONTROL_IFACE"
-        
-        # Announce the moved IPv4 VIP with one unsolicited ARP reply.
-        if command -v arping &> /dev/null; then
-            arping -c 1 -A -I "$CONTROL_IFACE" "$MUMBLE_IPV4_VIP" 2>/dev/null
-        fi
-    fi
-    
-    if [ "$HAS_IPV6_VIP" = false ]; then
-        log "Assigning IPv6 VIP: $MUMBLE_IPV6_VIP"
-        ip addr add "$MUMBLE_IPV6_VIP_WITH_MASK" dev "$CONTROL_IFACE" 2>/dev/null
-    fi
-    
-    WAS_ALREADY_LEADER=false
-    if [ "$HAS_IPV4_VIP" = true ] && [ "$HAS_IPV6_VIP" = true ]; then
-        WAS_ALREADY_LEADER=true
-    fi
-
-    # Update Mumble config to bind to VIPs
-    if [ -f "$MUMBLE_CONFIG" ]; then
-        # Update host binding (ini format)
-        sed -i "s/^host=.*/host=$MUMBLE_IPV4_VIP/" "$MUMBLE_CONFIG"
-        log "Updated Mumble config to bind to $MUMBLE_IPV4_VIP"
-    fi
-    
-    # Sync database and start service if needed
-    if [ "$WAS_ALREADY_LEADER" = false ] || ! systemctl is-active --quiet "$MUMBLE_SERVICE_NAME"; then
-        log "Taking over Mumble service..."
-        
-        # Initialize shared DB if it doesn't exist
-        if [ ! -f "$SHARED_DB" ] || [ ! -s "$SHARED_DB" ]; then
-            create_initial_database
-        fi
-        
-        # Sync database from Syncthing
-        if ! sync_database_from_shared; then
-            log "WARNING: Shared database sync failed; using local state"
-            # Sync can fail before stopping the old server. Reload its binding.
-            if systemctl is-active --quiet "$MUMBLE_SERVICE_NAME"; then
-                systemctl stop "$MUMBLE_SERVICE_NAME"
-                sleep 2
-            fi
-            if [ -f "$WORKING_DB" ] &&
-                ! check_database_integrity "$WORKING_DB" "working"; then
-                log "ERROR: Local database is corrupt; cannot start Mumble"
-                exit 1
-            fi
-        fi
-        
-        # Start service
-        log "Starting Mumble service"
-        # Allow two seconds after starting Mumble before checking active state.
-        systemctl start "$MUMBLE_SERVICE_NAME"
-        sleep 2
-        
-        # Verify it started
-        if systemctl is-active --quiet "$MUMBLE_SERVICE_NAME"; then
-            log "Mumble service started successfully"
-        else
-            log "ERROR: Mumble service failed to start"
-            systemctl status "$MUMBLE_SERVICE_NAME" --no-pager | logger -t mumble-election
-        fi
-    else
-        log "Already leader and service running. No action needed."
-    fi
-    
-    touch /var/run/mesh-mumble.state
-
-else
-    # Remote leader
-    log "Lost election to ${BEST_CANDIDATE_MAC}"
-    
-    # Remove locally held VIPs.
-    if ip addr show dev "$CONTROL_IFACE" | grep -q "inet $MUMBLE_IPV4_VIP/"; then
-        log "Removing IPv4 VIP"
-        ip addr del "$IPV4_VIP_WITH_MASK" dev "$CONTROL_IFACE" 2>/dev/null
-    fi
-    if ip -6 addr show dev "$CONTROL_IFACE" | grep -q "inet6 $MUMBLE_IPV6_VIP/"; then
-        log "Removing IPv6 VIP"
-        ip addr del "$MUMBLE_IPV6_VIP_WITH_MASK" dev "$CONTROL_IFACE" 2>/dev/null
-    fi
-    
-    # Stop service and sync database back
-    if systemctl is-active --quiet "$MUMBLE_SERVICE_NAME"; then
-        log "Stopping Mumble service"
-        systemctl stop "$MUMBLE_SERVICE_NAME"
-        sleep 2
-        sync_database_to_shared
-    fi
-    systemctl reset-failed "$MUMBLE_SERVICE_NAME" 2>/dev/null
-    
-    rm -f /var/run/mesh-mumble.state
-fi
-
-log "Election complete"
-exit 0
+SERVICE_KIND=mumble
+SERVICE_UNIT="$MUMBLE_SERVICE_NAME"
+SERVICE_TCP_PORTS=64738
+SERVICE_UDP_PORTS=64738
+SERVICE_IPV6_VIP_WITH_MASK="$MUMBLE_IPV6_VIP_WITH_MASK"
+SERVICE_PREPARE_HOOK=prepare_mumble_service
+SERVICE_VERIFY_HOOK=verify_mumble_database
+SERVICE_RELEASE_HOOK=release_mumble_database
+SERVICE_SERVING_HOOK=export_mumble_changes
+service_election_run

@@ -96,6 +96,9 @@ if sys.argv[1] == 'show':
                         b'exit "${TEST_KERNEL_PROTECTION_FAIL:-0}"\n')
             elif name.endswith('manet-dhcp-isolation.py'):
                 body = b'#!/bin/sh\necho isolation >> "$TEST_EVENTS"\nexit "${TEST_ISOLATION_FAIL:-0}"\n'
+            elif name.endswith('manet-uplink-dns.py'):
+                body = (b'#!/bin/sh\necho qualified-dns >> "$TEST_EVENTS"\n'
+                        b'exit "${TEST_UPLINK_DNS_FAIL:-0}"\n')
             else:
                 body = ('#!/bin/sh\n# ' + name + '\n').encode()
             self.members[name] = (body, 0o755 if name.endswith(('.sh', '.py')) else 0o644)
@@ -157,6 +160,30 @@ if sys.argv[1] == 'show':
         self.assertFalse(self.updater.pending.exists())
         self.assertFalse(list(self.updater.state.glob('download-*')))
         self.updater.log.assert_called_with('Node tools updated to version 0.550')
+
+    def test_dns_migration_precedes_runtime_activation_and_version_commit(self):
+        """Activate the installed DNS policy before restarting the manager."""
+        self.updater.update()
+        history = self.history()
+        enable = ('systemctl enable --now manet-uplink-dns.path '
+                  'manet-uplink-dns.service')
+        self.assertLess(history.index('qualified-dns'), history.index(enable))
+        self.assertLess(history.index(enable),
+                        history.index('systemctl restart node-manager.service'))
+        self.assertNotIn('marker 0.550', history)
+
+    def test_failed_dns_migration_keeps_update_pending_and_recovers(self):
+        """A DNS activation failure must not publish the new version."""
+        with patch.dict(os.environ, {'TEST_UPLINK_DNS_FAIL': '1'}):
+            with self.assertRaises(update.UpdateError):
+                self.updater.update()
+        self.assertTrue(self.updater.pending.exists())
+        self.assertEqual(self.updater.marker.read_text(), self.old_version)
+        self.assertNotIn('systemctl restart node-manager.service', self.history())
+        self.updater.update(recover_only=True)
+        self.assertFalse(self.updater.pending.exists())
+        self.assertEqual(self.updater.marker.read_text(), self.new_version)
+        self.assertEqual(self.history().count('qualified-dns'), 2)
 
     def test_runtime_daemons_restart_and_only_active_ones_are_checked(self):
         with patch.dict(os.environ, {'TEST_ACTIVE_SERVICES': 'manet-atak.service,gps-reader.service'}):

@@ -965,7 +965,154 @@ Managers wait for `/run/my_ipv4_chunk` before running service elections and
 limit them to one pass per fifteen seconds of boot uptime, including discovery
 loops. MediaMTX and Mumble serialize their own local runs. These locks cannot
 prevent one winner in each disconnected partition; the existing deterministic
-election releases a losing node's service and VIP after the partitions merge.
+election releases a losing node's service and VIP after the partitions merge
+and the successor confirms that it is serving.
+
+Before loading transition inputs, both shell elections ask the resident
+runtime to check their fixed point. A settled owner is the current winner,
+with an active unit, all required wildcard listeners and both local VIPs.
+Its completed `leader` state and absence of pending publications confirm
+there is no remaining announcement, claim publication or final DB export.
+A settled non-owner has neither VIP, an inactive unit and no wait or pending
+publication. Waiting
+incumbents always take the bounded handover path. A shared, nonblocking
+observation lock prevents skipping an in-progress local transition. Mumble
+also stats its working DB and `-wal`, comparing mtime, size, ctime and inode
+with the last successful export stamp. A missing stamp or changed file sends
+the pass to the shell. This check performs no SQLite queries or process starts.
+Integrity checks run on transitions and changed-data exports, never on an
+unchanged settled pass.
+
+The resident worker reads fresh `/proc/net/tcp`, `tcp6`, `udp` and `udp6`
+tables instead of starting `ss`. It caches each normalized IPv6 VIP by service,
+radvd config bytes and derivation-helper metadata. Transition requests reuse
+that cache too. Serving telemetry uses the same live readiness observations,
+avoiding socket-tool starts on every publication, including the roughly
+one-second startup publications and normal three-minute publications. The
+shell retains its one-shot fallback when the worker is unavailable. Concurrent
+service observations can wait up to one second for the FIFO client lock so
+simultaneously launched elections do not routinely fall back to Python.
+Other runtime callers keep their nonblocking behavior. No new timer or daemon
+is involved.
+
+The shell elections share `manet-service-common.sh`. A winner prepares its
+configuration and starts the unit before claiming either VIP. MediaMTX uses
+wildcard TCP listeners on 8554 and 8889, and Mumble uses wildcard TCP and UDP
+listeners on 64738. Unit activity alone is insufficient. The manager applies
+the same listener checks when publishing serving flags. Each handover also
+immediately republishes the local Alfred telemetry with the changed service
+flag, preserving its other fields, so the fallback does not wait for the
+ordinary three-minute telemetry period. Failed publications retry at the
+normal election interval. Mumble also checks its
+working SQLite database before claiming. Its existing checked copies, backups,
+local fallback and final publication after stopping remain in place. A
+preparation/start failure or exhausted readiness check stops the unit,
+resets its failed state and clears the preparation marker. This cancels
+systemd's automatic restart loop between election passes. The next election
+retries preparation, while repeated failures retain a single transition log.
+This cleanup does not publish a failed candidate's Mumble DB. A ready service
+whose VIP installation fails is still reused without another DB copy/start.
+
+The serving Mumble winner exports changed working data at election cadence
+using a WAL checkpoint, SQLite backup, integrity check and atomic publication.
+It rechecks its local election winner immediately before publishing the
+canonical shared database. Live exports never fall back to copying changing
+DB/WAL files separately. The successful-export stamp records the source stat
+signature before the backup, so a concurrent write remains dirty for the next
+pass. A failed publication does not advance the stamp. Unchanged data needs
+no export, including when the shell fallback is used.
+Cadence diagnostics are buffered for the duration of the export. Success logs
+only `Exported Mumble DB (<size> bytes)`. Failure replays the full diagnostics.
+Transition-time logging remains detailed. Numeric WAL checkpoint result rows
+are discarded on every path, while SQLite error diagnostics are retained.
+
+After stopping, the retiring owner preserves its final checked DB under
+`Sync/mumble/retired/<owner-MAC-without-colons>/<random-UUID>.sqlite`.
+It never writes that final snapshot over the winner's canonical shared DB.
+The owner namespace and unique filename make final exports independent of
+the successor's cadence exports. A release-pending marker survives export
+failure and requires a retry even after the unit and VIPs are gone. Final
+snapshots are separate from the ten ordinary backups. After each successful
+final export, its owner's directory is pruned to three snapshots, including
+the one just written. Other snapshots older than 30 days are removed even
+when fewer than three remain. Age and ordering use file mtimes and the local
+wall clock, but the new snapshot is always protected, including after a clock
+step. Pruning only unlinks direct regular UUID-named `.sqlite` files in that
+owner directory. It leaves symlinks, conflict copies, incomplete uploads and
+other owners alone. Syncthing propagates the deletions. Cleanup errors are
+logged without retrying an already successful final copy, and pruning is
+attempted again at the next final export. There is no separate cleanup timer.
+
+Automatic late re-import is not implemented. The canonical shared file and
+Syncthing conflict copies carry no ordered ownership generation identifying
+the previous owner's state for this exact handover. Filesystem time alone
+cannot establish which snapshot supersedes the import. Retired UUIDs identify
+distinct files but do not establish that ordering either. A late replacement
+could restore an older branch, even if the new working DB has not changed.
+The remaining active-state loss window is changes newer than the last cadence
+export delivered before import, including the election/export delay and
+Syncthing latency. Final snapshots retain those changes for manual recovery.
+Conflict copies are not selected or merged automatically. Fresh-install,
+delayed-delivery and independent-partition conflicts can still occur because
+the local winner check is not distributed fencing.
+
+IPv6 VIP installation uses `nodad` because the incumbent deliberately still
+owns the address during transfer. The internal `manet_service_handover.py`
+helper sends an unsolicited overriding Neighbor Advertisement to `ff02::1`
+with hop limit 255, using Python's raw ICMPv6 socket support. It also sends
+three `arping -U` announcements one second apart. Both Debian arping variants
+are supported. No new package, service unit or operator command is required.
+
+On losing rank, an incumbent retains both VIPs and its service indefinitely
+until the successor claims. It sends no unsolicited announcements while
+waiting. A short-lived AF_PACKET listener on br0 has a locked classic-BPF
+filter for ARP requests/replies whose sender IP equals the IPv4 VIP, or a
+direct ICMPv6 Neighbor Advertisement for the IPv6 VIP. Both use one socket.
+The NA path works when batman-adv DAT absorbs the gratuitous ARP. Userspace
+validates Ethernet/ARP sender agreement. For NA it checks IPv6, hop limit
+255, type 136/code 0, source and target equal to the service VIP6, destination
+ff02::1 and its Ethernet multicast address, Solicited=0, payload bounds,
+checksum and option lengths. A target link-layer option must agree with the
+Ethernet source. The filter accepts the direct ICMPv6 form emitted by the
+announcer, without extension headers or fragmentation. Both paths require
+the Ethernet source to belong to the freshly ranked winner's registry
+identities. Other senders are ignored, with one diagnostic per wait
+transition. The single release line reports ARP, NA, NS probe or registry as the
+signal. The listener blocks on packet input and a private election wake
+socket, without periodic polling.
+It closes on a claim, an election wake, an error or a twelve-second deadline.
+An overlapping election wakes the locked owner to re-rank, so a ranking flip
+can retain ownership without a stop/start gap. Timeouts keep serving and the
+normal fifteen-second election schedule starts the next bounded wait.
+
+The winner sends its NA before the three-ARP burst, then republishes its
+serving flag. If the registry fallback is not already satisfied, each wait
+opens its listener and sends one unicast NS per winner MAC alias. Its source
+is a usable br0 link-local address read from `/proc/net/if_inet6`. AF_PACKET
+sends directly to the remote MAC, bypassing the local route to the VIP that
+the incumbent still owns. The local MAC is excluded. The NS targets VIP6,
+uses hop limit 255 and includes the incumbent's source link-layer option.
+Sends are nonblocking and there is no timed retry within the wait.
+
+A solicited NA must have Solicited=1, destination equal to the probe's
+link-local IP and local Ethernet MAC, and an Ethernet source among the freshly
+ranked winner's aliases. The existing target, source, hop-limit, checksum and
+option checks still apply. It reports `via NS probe`. This handles a winner
+that claimed before the listener opened, without ARP probes or DAT changes.
+If link-local/probe setup fails, passive claims and registry fallback remain
+available, with one probe-error diagnostic per wait transition. Packet loss
+can still require the next wait or fresh post-claim registry observation.
+
+The registry fallback requires a fresh serving observation made after the
+local node's latest claim, preventing an earlier host's flag from being reused
+during flapping. This still accepts a successor that claims between two local
+election cycles, before the incumbent enters its wait. A missing winner also
+retains existing ownership. Transition state
+under the election lock suppresses repeated journal messages. Packet loss can
+delay withdrawal until the next election with a new serving observation.
+Brief overlap is part of this handover, and independent partitions still have
+independent owners. This is not a distributed lease or a guarantee of lossless
+Mumble writes during Syncthing lag.
 
 Manual Wi-Fi changes use the band (`2.4` or `5`) as their Alfred identity,
 then resolve each receiver's `mesh_24_if` or `mesh_5_if`. Static plans live in
@@ -1298,9 +1445,21 @@ before the scan request and one after. That bracket is what makes the numbers
 comparable: the counters are cumulative since the interface came up, so without
 it the home channel reports a running average over its whole uptime while the
 other candidates report only the milliseconds the radio spent visiting them. A
-channel with under 25 ms of dwell in the window reports no occupancy at all,
+channel with under 25 ms of dwell in the window is left out of the report,
 because busy time counts in whole milliseconds and the ratio would move in 10%
-steps.
+steps. An unchanged active count is no evidence of a visit, so it cannot pass.
+
+mt7915e is the exception. `__mt76_set_channel` clears the survey state of a
+non-home channel on every visit, so two equally long healthy visits leave equal
+counters. For that driver, when the channel is not in use before or after the
+scan, the post-scan counters are the visit itself. This is only safe because
+the scan's own result is checked first: `perform_scan` captures the `iw scan
+... flush` output and exit status under a timeout, and a failed, timed-out or
+aborted scan discards that band's report instead of publishing old counters as
+new. The failure and the later recovery are each logged once per radio.
+Producer-side expiry drops any observation older than `SCAN_REPORT_MAX_AGE`
+(180 s, one publish period) from telemetry. Receivers still cannot tell the age
+of a record on the wire beyond the registry's own observation time.
 
 Each measuring node publishes the median of its last three valid occupancy
 samples for that interface and frequency, all within ten minutes of boot-clock
@@ -1514,16 +1673,96 @@ paths, including HaLow, still reconciles channels.
 `/run/systemd/resolve/resolv.conf`. A managed resolved drop-in clears static
 global DNS and supplies `1.1.1.1`/`8.8.8.8` as `FallbackDNS`, used only when no
 other servers are known, not when a DHCP server returns an unwanted answer.
-dnsmasq reads that same upstream file with `clear-on-reload`, so DHCP renewal
-changes its upstreams and invalidates stale cached answers without restarting
-DHCP. No localhost forwarding chain is involved. This follows local uplink
-DNS; it does not distribute a gateway's private DNS servers over the mesh.
+dnsmasq reads that same upstream file with `clear-on-reload`, so a resolver
+change invalidates stale cached answers without restarting DHCP. No localhost
+forwarding chain is involved. This follows qualified local uplink DNS. It
+does not distribute a gateway's private DNS servers over the mesh.
 
 Both first-boot templates invoke the helper, and a dnsmasq `ExecStartPre`
 invokes it on service startup. Unchanged configuration does not restart
 resolved. The IP manager recognizes this resolver configuration as current
 and checks service aliases only when their VIPs are available, avoiding a
 repeated DHCP restart when no optional service VIP is configured.
+
+`manet-uplink-dns.py` owns qualified DHCPv4 resolver selection. All generated
+uplink DHCP files, including provisioning's MAC-matched `10-end*.network`,
+set `UseDNS=no`, `UseDomains=no` and `RoutesToDNS=no`. DHCPv6 and RA DNS and
+domains are also disabled on these candidates. This prevents an unqualified
+lease from suppressing fallback DNS or installing a resolver /32 route that
+beats the mesh default. The policy remains fixed through role changes and
+renewals. Runtime per-link `resolvectl` settings are not used as ownership
+state, because networkd can republish its own settings on reconfiguration.
+
+The helper reads networkd's DHCPv4 lease for the carrier-bearing, unbridged
+`upstream_iface` only while `mesh-gateway.state` exists. It publishes up to
+three plain IPv4 resolvers and sanitized search domains in
+`/run/systemd/resolved.conf.d/80-manet-uplink.conf`. Interface suffixes in
+global `DNS=` were silently ignored by Debian 13's systemd 257.13 on the
+bench, despite the upstream manual's advertised syntax. Resolver traffic
+uses the main routing table: on-link LAN DNS uses its connected route, and
+public DNS follows the promoted metric-100 default. No selected resolver
+means empty global DNS/domains and the existing public fallback. The parser
+uses systemd 257's internal lease format, so a future systemd upgrade must
+check that format. Missing or invalid leases withdraw the selected DNS.
+
+`manet-uplink-dns.path` watches gateway state, the selected-interface file,
+and networkd's lease directory. It does not watch networkd's link directory:
+routine link-state rewrites otherwise launch Python for unchanged DNS.
+Carrier loss is covered by gateway demotion and lease removal. Its oneshot
+service compares the desired configuration with the last successfully applied
+bytes before reloading resolved. Systemd 257 supports configuration reload
+without a restart.
+Networkd renewal cannot overwrite this global drop-in. Unchanged events do
+not reload resolved or emit helper logs. Failed activation remains retryable.
+Promotion and demotion also invoke the service before dependent EUD services.
+
+Candidate HTTP checks first try normal resolution. If that fails or the
+endpoint does not qualify, the helper queries the candidate's DHCP resolvers
+over IPv4 with `SO_BINDTODEVICE`, validating the reply ID, question and answer
+chain. Truncated replies retry over TCP on the same device. Each lookup has
+a four-second total budget. Curl receives the first answer with `--resolve`
+and still binds its HTTP request to the candidate. Only a completed 204
+qualifies Ethernet. This supports a lone node on a LAN that blocks public
+DNS, without c-ares, a fixed endpoint IP, or globally publishing candidate DNS.
+
+During `radio-setup.sh`, a failed repository DNS check triggers one
+`manet-uplink-dispatch.sh provision` attempt per setup run. This uses the same
+candidate selection and bound qualification, waits up to 30 seconds for each
+dispatcher/detector lock, and has an overall 180-second timeout plus a
+five-second kill grace. Setup checks repository DNS again before apt. A skipped
+dispatch, failed activation or timeout cannot stand in for working DNS.
+Working mesh or fallback DNS avoids the extra qualification pass.
+
+The provisioning event installs the metric-100 route, NAT/filter/MSS rules,
+qualified gateway markers and DHCP DNS. It skips bandwidth measurement and
+announcement, radvd changes, AP/EUD transitions, mesh IP allocation and route
+manager startup. In particular, restarting the route manager would pull in
+node-manager before setup has finished, and AP names may still await a rename
+reboot. `UPLINK_MODE=provisioning` records that a normal reconcile must finish
+those deferred actions, even when the address and router have not changed.
+An already fully promoted uplink keeps its `gateway` mode and refreshes DNS
+without touching radios. Qualification failure withdraws gateway/DNS state
+without starting radio services. These are qualified runtime settings, not a
+temporary unqualified resolver. Reboot clears the `/run` state and the next
+setup pass can qualify again. The permanent no-DNS networkd policy stays intact.
+
+Both first-boot templates finish their built-in archive, apt, Mumble and
+MediaMTX downloads before stopping the image's network manager and enabling
+networkd. CM4's outer firstrun writes a separate `provision-mesh.sh`. Its
+textually later outer commands run before that service's network takeover.
+Neither template runs git clone or pip installs. The additional-script hook
+only stages files. Operator scripts execute after radio setup succeeds.
+
+The tools archive carries the helper, path/service units and updated config
+writers. The updater requires them, runs the installed `install` command,
+and enables the units before restarting the node manager or committing
+version markers. Migration appends the managed policy to existing MANET DHCP
+files, their `.dhcp-default` backups and `.off` templates, preserving MAC
+matches and other settings. A persistent marker records the required
+`networkctl reload` before each file replacement, and recovery retries it
+after interruption. This one-time reconfiguration can briefly drop a DHCP lease.
+Later installs with identical files do not reload networkd. Both provisioning
+templates apply the same policy and enable the same units.
 
 The generated bridge configuration uses `bind-dynamic`: br0 and its IPv4
 addresses can appear after dnsmasq starts. Static `bind-interfaces` could leave
@@ -1772,8 +2011,11 @@ startup period returns it to ten-second sleeps. Missing registry data, a
 missing primary address, failed pings and failed route installation all retry.
 `manet_node_ipv4.py` chooses the route's source address from the current
 allocation, excluding service VIPs and the EUD alias; a changed source triggers
-route replacement. An existing non-`br0` default route is preserved even before
-the uplink dispatcher writes its gateway marker.
+route replacement. Only a metric-100 default on the saved `upstream_iface`
+preserves direct routing before the uplink dispatcher writes its gateway
+marker. A DHCP default at metric 1024 does not prevent installing a mesh
+default at metric 500. The manager inspects mesh defaults separately from
+direct defaults, including when removing a mesh route in local gateway mode.
 
 ### Local EUD discovery
 
@@ -2113,25 +2355,58 @@ seconds at the steady poll), is replaced at once, best remaining first. After
 a restart the gateway the existing `br0` route points at is current, so
 restarting the service does not move the node.
 
-Gateways announce a measured download speed. `manet-uplink-speed.sh` downloads
-5 MB over HTTPS (Cloudflare's speed endpoint, or a 5 MB range of an OVH test
-file) and divides by the time after the first byte, excluding DNS, TCP and TLS
-setup. 5 MB keeps it cheap but under-reads fast links, since TCP is still
-ramping. That matters little because the mesh path, not the uplink, is the
-bottleneck above roughly 100 Mbit/s. A result is reused while the interface
-keeps the same address and router, and dropped on demotion, so a replug or a
-new network measures again. The download doubles as the internet check for
-Ethernet uplinks: the earlier ICMP or 204 probe passes through a captive portal
-that allows them, but a portal cannot complete HTTPS to the test host. A
-failure is retried at most once a minute (exit 3 until then, so the dispatcher
-does not log every pass). In practice the next attempt comes from the node
-manager's status publish, every 3 minutes. Only Ethernet is tested: a phone
-tether or cellular modem (by driver: `rndis_host`, `ipheth`, `cdc_ether`,
-`cdc_ncm`, `qmi_wwan` and similar) and Wi-Fi uplinks pay for the data, so they
-keep the probe and announce 10/2. `batctl gw_mode server` takes whole kbit
-values and keeps the previous bandwidth when given none, so every announce
-passes an explicit `down/up`. Upload is not measured; it is announced as a
-fifth of download, batman's usual ratio, and nothing selects on it.
+Ethernet qualification requires HTTP 204 from connectivitycheck.gstatic.com
+or cp.cloudflare.com over plain HTTP. The shared `internet_probe` takes an
+`http-only` mode so the dispatcher and Ethernet detector cannot qualify a
+portal just because ICMP works. A 200 or redirect fails. Missing curl fails
+this stricter mode too. The probe is clock-independent, so a stored clock
+months behind cannot block promotion and the ensuing NTS bootstrap.
+An endpoint whitelist or forged 204 can still pass this limited check. It
+does not prove that every internet application is reachable.
+
+`manet-uplink-speed.sh` separately estimates download bandwidth over HTTPS
+from Cloudflare's speed endpoint, falling back to a byte range from OVH.
+Each request asks for at most 5 MB with a 15-second deadline. HTTP 200 from
+Cloudflare or 206 from OVH, with at least 250,000 bytes, supplies an estimate
+even if curl exits 28 at the deadline. Other errors remain unknown. The rate
+is bytes divided by transfer time after the first byte, excluding DNS, TCP
+and TLS setup. Small samples under-read fast links during TCP startup, but
+also let a 1 Mbit/s link announce a measured low score without completing 5 MB.
+
+No usable sample means unknown bandwidth, not failed connectivity. Unknown
+Ethernet advertises 1/0.2 Mbit/s, below the metered default of 10/2. This is a
+ranking fallback, not a measurement or lower bound. The 250 kB minimum filters
+tiny error responses and unstable short samples. A successful estimate is
+reused for the same interface/address/router tuple until demotion. Failed
+estimates retain the 60-second boot-clock cooldown and retry on subsequent
+reconciliation, normally the node manager's three-minute status publish.
+This lets HTTPS measurement recover after NTS fixes a cold clock. Repeated
+unknown results and cached successes stay quiet. Estimate changes and actual
+gateway promotions/demotions are logged once per transition.
+
+Phone tethers and cellular modems (drivers `rndis_host`, `ipheth`, `cdc_ether`,
+`cdc_ncm`, `qmi_wwan` and similar) and Wi-Fi uplinks avoid the download test.
+They retain the ICMP/HTTP probe with TCP fallback and announce 10/2 Mbit/s.
+Every `batctl gw_mode server` supplies explicit whole-kbit `down/up` values
+because a bare `server` retains previous bandwidth. Upload is an assumed
+fifth of download, with a 100 kbit/s minimum in either direction. Selection
+uses only download.
+
+Direct promotion installs metric 100, the mesh manager installs metric 500,
+and networkd's candidate DHCP default remains at 1024. Demotion removes the
+promoted route and restarts mesh selection. A failed candidate can still be
+probed over its own DHCP default while ordinary traffic uses the mesh.
+Both curl requests use IPv4, disable proxy use and bind the candidate device.
+Linux route lookup rejects nexthops on other devices when the socket uses
+`SO_BINDTODEVICE`, so the lower-metric mesh default cannot carry that request.
+The existing ICMP path uses `ping -I`. Name resolution is separate and may
+use resolved over a mesh path or its cache. This does not make a dead direct
+HTTP path pass, but it does mean qualification is not a test of that uplink's
+DNS service. If normal HTTP attempts fail, a device-bound lookup through the
+candidate's DHCP DNS supplies curl's `--resolve` address. A lone node can
+therefore qualify before publishing DHCP DNS globally. Qualification still
+fails if neither resolution path provides an endpoint that returns a bound
+HTTP 204. The qualified DNS policy is described under Network management.
 
 Mean of BATMAN_V's metric across this node's originators, in Mbit/s, published
 as `MEAN_THROUGHPUT_MBPS` and used by the service elections.
@@ -2172,6 +2447,16 @@ attempt or departing Ethernet link from stopping a newly available GPS source.
 The active uplink dispatcher already records `mesh-gateway.state` and
 `upstream_iface`; the controller observes those files as well as carrier, so
 both the active dispatcher and the legacy detector can trigger internet sync.
+
+Ethernet promotion now depends on plain HTTP connectivity, so HTTPS bandwidth
+measurement can fail with a cold clock without preventing this role. During
+initial acquisition, `chrony_config` emits `nocerttimecheck 1` and
+`makestep 0.1 3`. Certificate activation/expiration dates are waived until the
+first clock update, with signature, hostname and trust-chain checks retained.
+There is no months-behind limit in this profile. Verified completion removes
+both startup directives and disarms further live clock steps. An artificial
+clock rollback after `/run/initial_time_synced` exists does not re-enable the
+bootstrap exception and is not equivalent to a cold boot.
 
 Local roles are checked every 15 seconds. A recent `gps_status.json` fix enables
 the GPS SHM refclock. A direct uplink enables configured public NTS servers, with
@@ -2340,8 +2625,10 @@ at once. Agreement assumes a node's request plus Alfred replication reaches
 every peer before :45, which the tests check for requests by :28 and up to
 15 seconds of replication. Root-only FIFOs and a client lock serialize
 requests, accept only allowlisted operations/arguments, and return status
-plus data. An unavailable or busy worker permits a standalone one-shot fallback without queuing; a submitted
-request's failure or timeout never replays a potentially applied operation.
+plus data. An unavailable or busy worker permits a standalone one-shot
+fallback. Service observations allow a bounded one-second client-lock wait
+before falling back, while other callers never queue. A submitted request's
+failure or timeout never replays a potentially applied operation.
 Operation framing accepts digits (`ipv4`); malformed requests with valid reply
 tokens return an error instead of silently timing out. Data-returning operations
 reject empty success replies, except Syncthing's missing first-boot certificate.
@@ -3569,8 +3856,8 @@ use the same hotplug command. `off` is the same file in both places.
 
 The routable hook queues `manet-auto-update.service` with `--no-block` after
 uplink reconciliation. `gateway-route-manager.sh` also queues it after a
-successful transition from no default route to a mesh gateway, only with
-`auto_update` enabled. Refreshing a route or switching gateways does not queue
+successfully acquiring a mesh default, even with an unqualified DHCP default
+present, only with `auto_update` enabled. Refreshes and gateway switches do not queue
 another check. The wrapper accepts the selected non-mesh uplink with its IPv4
 default route, or a `default via <IPv4> dev br0` route. The latter does not
 require a saved upstream interface: the route manager is the sole writer of

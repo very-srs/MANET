@@ -40,12 +40,31 @@ Once DHCP has finished and a route exists, gateway and NAT state are
 reconciled. Carrier alone does not mean the interface can reach anything, which
 is why this is a separate step.
 
-An Ethernet uplink becomes a gateway only after it downloads a speed test of
-at most 5 MB over HTTPS, and the measured download speed is what it announces
-to the mesh. A captive portal or a network that blocks the test leaves the node
-a mesh client; it is rechecked when the node manager next publishes its
-status, at most 3 minutes later. Phone tethers, cellular modems and Wi-Fi
-uplinks are not tested and announce the default 10/2 Mbit/s.
+An Ethernet uplink becomes a gateway after an interface-bound HTTP 204 check.
+An ICMP reply alone or a portal's HTTP 200/302 response cannot qualify it.
+The separate HTTPS download estimates bandwidth from up to 5 MB, including
+partial samples of at least 250 kB at the 15-second deadline. Failed estimates
+keep the gateway connected with an assumed 1/0.2 Mbit/s and retry after a
+60-second cooldown on subsequent reconciliation, normally the next status
+publish within 3 minutes. Phone tethers, cellular modems and Wi-Fi uplinks
+retain their connectivity probes, skip the download and announce 10/2 Mbit/s.
+Promoted direct routes use metric 100, mesh routes 500, and unqualified DHCP
+defaults 1024, so an isolated DHCP LAN cannot suppress a working mesh path.
+
+DNS follows that qualification too. Networkd does not publish candidate DHCP
+DNS or install resolver host routes. `manet-uplink-dns.py` selects only the
+promoted lease's resolvers. Demotion restores public fallback through the mesh
+default. Lease changes trigger its oneshot without reloading networkd.
+If normal resolution fails before promotion, a device-bound query to the
+candidate's DHCP resolver supplies curl's `--resolve` address. The HTTP request
+remains bound to that candidate, including when a mesh route is available.
+
+Radio setup can call the `provision` event when repository DNS is unavailable.
+It qualifies and publishes DNS without starting AP/mesh/manager services while
+their configuration may be unfinished. It records deferred work for the next
+normal reconcile, which performs bandwidth and radio/service actions. This
+event waits briefly for existing dispatch/detection locks. Ordinary events
+still skip a busy lock and retry on a later cycle.
 
 After reconciliation, an opted-in node queues `manet-auto-update.service`
 without waiting for it. This oneshot rechecks `auto_update` and accepts either
@@ -59,8 +78,9 @@ qualified peer synchronization. `manet-auto-update.path` watches for it and
 queues another check once per boot, including if the marker already exists
 when the path unit starts. The clock trigger also checks opt-in and the route;
 if no route exists yet, a later routable event or mesh route acquisition checks
-again. The gateway route manager queues a check only after successfully gaining
-a default route where none existed, not on route refreshes or gateway switches.
+again. The gateway route manager queues a check after successfully gaining a
+mesh default, including when an unqualified DHCP default already exists.
+Route refreshes and gateway switches do not queue another check.
 Mesh-path checks wait a random 0–900 seconds, then recheck opt-in and route
 availability. Direct-uplink checks do not add this delay.
 

@@ -18,7 +18,7 @@ Bridge=
 # Use MAC address as client identifier
 ClientIdentifier=mac
 # Request specific options
-UseDNS=yes
+UseDNS=no
 UseNTP=yes
 UseRoutes=yes
 # Shorter timeout for faster detection
@@ -28,3 +28,19 @@ Timeout=10
 # Use the DHCP server's routes
 UseRoutes=yes
 UseGateway=yes
+
+# BEGIN MANET qualified DNS
+[DHCPv4]
+UseDNS=no
+UseDomains=no
+RoutesToDNS=no
+RequestOptions=6 15 119
+
+[DHCPv6]
+UseDNS=no
+UseDomains=no
+
+[IPv6AcceptRA]
+UseDNS=no
+UseDomains=no
+# END MANET qualified DNS

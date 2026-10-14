@@ -291,7 +291,8 @@ class ManagerHelperTests(unittest.TestCase):
                     script.chmod(0o755)
                 names = ('detect_and_update_gateway_state',
                          'is_ntp_time_source', 'run_service_elections',
-                         'is_hosting_service', 'is_hosting_mumble_service')
+                         'is_hosting_service', 'is_hosting_mumble_service',
+                         'service_election_hosting')
                 source = shell_functions(caller, names)
                 source = source.replace('/etc/mesh.conf',
                                         str(root / 'mesh.conf'))
@@ -307,11 +308,9 @@ GW_CHECK_INTERVAL=60
 ELECTION_INTERVAL=15
 LAST_ELECTION_RUN=''
 uptime_now() { echo 100; }
-systemctl() { printf 'systemctl %s\\n' "$*" >&2; }
-manet-ipcalc.sh() { printf 'HostMin: 10.30.0.1\\n'; }
-ip() {
-    printf 'ip %s\\n' "$*" >&2
-    printf 'inet 10.30.0.2/24\\ninet 10.30.0.3/24\\n'
+manet_runtime_call() {
+    printf 'runtime %s\\n' "$*" >&2
+    printf 'true\\n'
 }
 detect_and_update_gateway_state
 printf 'gateway=%s\\n' "$LAST_GW_CHECK"
@@ -339,11 +338,8 @@ printf 'election=%s\\n' "$LAST_ELECTION_RUN"
                                  'gateway=90\ngateway=100\nntp=0\nmtx=0\n'
                                  'mumble=0\nelection=100\n')
                 self.assertEqual(result.stderr,
-                                 'systemctl is-active --quiet '
-                                 'mediamtx.service\nip addr show dev br0\n'
-                                 'systemctl is-active --quiet '
-                                 'mumble-server.service\n'
-                                 'ip addr show dev br0\n')
+                                 'runtime hosting mediamtx\n'
+                                 'runtime hosting mumble\n')
                 self.assertFalse((root / 'channel').exists())
                 for service in ('mediamtx', 'mumble', 'time'):
                     self.assertEqual((root / service).read_text(), 'run\n')
@@ -560,7 +556,8 @@ internet_probe eth0
                     expected = ('ping -c 1 -W 2 -I eth0 1.1.1.1\n'
                                 'ping -c 1 -W 2 -I eth0 8.8.8.8\n')
                     if curl:
-                        expected += ('curl --interface eth0 -s -m 3 '
+                        expected += ('curl -4 --noproxy * --interface eth0 '
+                                     '-s -m 3 '
                                      '-o /dev/null -w %{http_code} '
                                      'http://connectivitycheck.gstatic.com/'
                                      'generate_204\n')
@@ -569,6 +566,77 @@ internet_probe eth0
                         expected += ('ip -4' + flag + ' addr show dev eth0\n'
                                      'nc -z -w 3 -s 192.0.2.5 1.1.1.1 53\n')
                     self.assertEqual(trace.read_text(), expected)
+
+    def test_http_only_probe_rejects_icmp_tcp_and_incomplete_http(self):
+        """Only a completed HTTP 204 may qualify the Ethernet path."""
+        source = shell_functions('manet-uplink-dispatch.sh',
+                                 ('internet_probe', 'iface_ip'))
+        body = r'''
+# All alternate connectivity shortcuts would pass if incorrectly called.
+ping() { echo unexpected-ping; return 0; }
+nc() { echo unexpected-nc; return 0; }
+command() {
+    if [ "$*" = '-v curl' ] && [ "$NO_CURL" = yes ]; then return 1; fi
+    builtin command "$@"
+}
+curl() { printf '%s' "$HTTP_CODE"; return "$CURL_RC"; }
+internet_probe end0 http-only
+'''
+        for available, code, rc, want in (
+                (False, '204', 0, 1), (True, '200', 0, 1),
+                (True, '302', 0, 1), (True, '204', 28, 1),
+                (True, '204', 0, 0)):
+            with self.subTest(available=available, code=code, rc=rc):
+                env = dict(os.environ, HTTP_CODE=code, CURL_RC=str(rc),
+                           NO_CURL='no' if available else 'yes')
+                result = subprocess.run(['bash', '-c', source + body],
+                                        env=env, capture_output=True,
+                                        text=True, timeout=5)
+                self.assertEqual((result.returncode, result.stdout), (want, ''))
+
+    def test_candidate_dns_bootstraps_http_without_global_resolution(self):
+        """Keep both the private lookup and the final HTTP check on end0."""
+        source = shell_functions('manet-uplink-dispatch.sh',
+                                 ('internet_probe', 'iface_ip'))
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            helper = root / 'dns'
+            helper.write_text('#!/bin/bash\n'
+                              'echo "$*" >> "$DNS_TRACE"\n'
+                              'echo 104.16.132.229\n')
+            helper.chmod(0o755)
+            body = r'''
+ping() { echo unexpected-ping; return 0; }
+curl() {
+    printf '%s\n' "$*" >> "$HTTP_TRACE"
+    case " $* " in
+        *' --resolve '*) echo "$HTTP_CODE"; return "$HTTP_RC" ;;
+        *) return 6 ;; # Normal name lookup has no working resolver.
+    esac
+}
+internet_probe end0 http-only
+'''
+            for code, rc, want in (('204', 0, 0), ('200', 0, 1),
+                                   ('302', 0, 1), ('204', 28, 1)):
+                with self.subTest(code=code, rc=rc):
+                    dns_trace, http_trace = root / 'dns.log', root / 'http.log'
+                    dns_trace.write_text('')
+                    http_trace.write_text('')
+                    env = dict(os.environ, MANET_UPLINK_DNS=str(helper),
+                               DNS_TRACE=str(dns_trace),
+                               HTTP_TRACE=str(http_trace),
+                               HTTP_CODE=code, HTTP_RC=str(rc))
+                    result = subprocess.run(['bash', '-c', source + body],
+                                            env=env, capture_output=True,
+                                            text=True, timeout=5)
+                    self.assertEqual((result.returncode, result.stdout),
+                                     (want, ''))
+                    self.assertIn('resolve end0 connectivitycheck.gstatic.com',
+                                  dns_trace.read_text())
+                    lines = http_trace.read_text().splitlines()
+                    self.assertTrue(all('--interface end0' in line
+                                        for line in lines))
+                    self.assertTrue(any('--resolve ' in l for l in lines))
 
     def test_frequency_config(self):
         """Pin the first match, absent file and unterminated final line."""

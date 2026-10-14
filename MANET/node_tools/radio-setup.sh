@@ -73,10 +73,18 @@ install_packages() {
         -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold "$@"
 }
 
-# Check repository DNS before apt and report a missing connection once.
+# Bootstrap qualified DHCP DNS once if fallback/mesh DNS cannot reach apt.
+# Bound the wait, including dispatcher locks, and verify DNS after activation.
+# The provisioning event does not start AP/mesh/manager services before setup.
 have_package_network() {
-    getent hosts deb.debian.org >/dev/null 2>&1 || return 1
-    return 0
+    getent hosts deb.debian.org >/dev/null 2>&1 && return 0
+    if [ "${PACKAGE_UPLINK_CHECKED:-0}" != 1 ]; then
+        PACKAGE_UPLINK_CHECKED=1
+        timeout --kill-after=5 180 \
+            "${MANET_TOOLS_DIR:-/usr/local/bin}/manet-uplink-dispatch.sh" \
+            provision || true
+    fi
+    getent hosts deb.debian.org >/dev/null 2>&1
 }
 
 : > "$PROVISION_FAIL_FILE"

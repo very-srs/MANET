@@ -24,24 +24,27 @@ usage() {
     printf '%s\n' \
         'usage: manet-uplink-dispatch.sh [EVENT [IFACE]]' \
         'events: carrier routable configured online add reconcile --hotplug' \
-        '        off no-carrier degraded remove offline' >&2
+        '        off no-carrier degraded remove offline provision' >&2
 }
 [ $# -le 2 ] || { usage; exit 1; }
 case "$EVENT" in
-    carrier|routable|configured|online|add|reconcile|--hotplug) ;;
+    carrier|routable|configured|online|add|reconcile|--hotplug|provision) ;;
     off|no-carrier|degraded|remove|offline) ;;
     *) usage; exit 1 ;;
 esac
 
-# Skip overlapping dispatches so only one process changes uplink policy.
+# Setup needs DNS before apt, so allow an existing dispatch/detection to finish.
+# Runtime events still skip overlap and retry on the next manager cycle.
+lock_args=(-n)
+[ "$EVENT" != provision ] || lock_args=(-w 30)
 exec 200>"$LOCK_FILE"
-flock -n 200 || exit 0
+flock "${lock_args[@]}" 200 || exit 0
 
-# ethernet-autodetect owns end0 during DHCP probing and bridging. Skip a
-# busy lock because autodetect waits on this script. It never calls this
-# script, avoiding deadlock. Node-manager retries on a later telemetry pass.
+# ethernet-autodetect owns end0 during DHCP probing and bridging. It does not
+# call this script while locked. Runtime events skip a busy lock and retry
+# on a later telemetry pass; setup waits within its overall timeout.
 exec 201>"$ETH_DETECT_LOCK"
-if ! flock -n 201; then
+if ! flock "${lock_args[@]}" 201; then
     exit 0
 fi
 
@@ -155,7 +158,7 @@ Bridge=
 
 [DHCP]
 ClientIdentifier=mac
-UseDNS=yes
+UseDNS=no
 UseNTP=yes
 UseRoutes=yes
 Timeout=10
@@ -163,6 +166,22 @@ Timeout=10
 [DHCPv4]
 UseRoutes=yes
 UseGateway=yes
+
+# BEGIN MANET qualified DNS
+[DHCPv4]
+UseDNS=no
+UseDomains=no
+RoutesToDNS=no
+RequestOptions=6 15 119
+
+[DHCPv6]
+UseDNS=no
+UseDomains=no
+
+[IPv6AcceptRA]
+UseDNS=no
+UseDomains=no
+# END MANET qualified DNS
 EOF
         networkctl reload 2>/dev/null || true
     fi
@@ -193,11 +212,6 @@ wait_for_ipv4() {
 
     return 1
 }
-
-# internet_probe in manet-common.sh checks ICMP, then HTTP 204 endpoints,
-# or TCP when curl is absent. It also serves ethernet-autodetect.sh.
-# Some LANs filter ICMP but pass TCP/UDP. Reject HTTP 200/302 portal replies.
-
 
 # Print event, routed, default-route, end0 and discovered candidates in order.
 # Read global IFACE and remove duplicates without changing their priority.
@@ -241,9 +255,9 @@ candidate_ifaces() {
 }
 
 # Print the first eligible uplink passing address and internet checks.
-# Configure missing DHCP and require a passing or exempt speed test.
+# Configure missing DHCP. Ethernet requires HTTP 204, never just ICMP.
 find_working_uplink() {
-    local iface ip gw
+    local iface ip gw probe_mode
 
     for iface in $(candidate_ifaces); do
         is_upstream_iface "$iface" || continue
@@ -266,23 +280,16 @@ find_working_uplink() {
         [ -n "$ip" ] || continue
         iface_default_gw "$iface" >/dev/null || true
 
-        if internet_probe "$iface"; then
-            # Ethernet must pass the speed test before announcing bandwidth.
-            # Captive portals and filtered networks fail it. Other uplinks are
-            # metered and untested (exit 2).
-            local speed_rc=0
-            "$UPLINK_SPEED" measure "$iface" >/dev/null || speed_rc=$?
-            if [ "$speed_rc" -eq 0 ] || [ "$speed_rc" -eq 2 ]; then
-                printf '%s\n' "$iface"
-                return 0
+        probe_mode=any
+        "$UPLINK_SPEED" is-ethernet "$iface" && probe_mode=http-only
+        if internet_probe "$iface" "$probe_mode"; then
+            # Measurement failure means unknown bandwidth, not no internet.
+            if [ "$EVENT" != provision ]; then
+                "$UPLINK_SPEED" measure "$iface" >/dev/null || true
             fi
-            # 3: cached failure, already logged and not retested.
-            [ "$speed_rc" -eq 3 ] ||
-                log "$iface passes the internet probe but not the speed test; not a gateway yet"
-            continue
+            printf '%s\n' "$iface"
+            return 0
         fi
-
-        log "$iface has IPv4 ($ip) but no verified internet"
     done
 
     return 1
@@ -380,7 +387,7 @@ return_ap_radio_to_mesh() {
         log "Cannot return AP radio to mesh: $AP_MESH_HELPER missing"
         return 0
     fi
-    local out err
+    local out err rc reason
     err=$(mktemp)
     if out=$(ap_mesh_request 2>"$err"); then
         # Log role changes and registry disagreement. Stay quiet when unchanged.
@@ -388,7 +395,11 @@ return_ap_radio_to_mesh() {
             log "AP radio mesh transition: $out"
         fi
     else
-        log "AP radio mesh return deferred; retrying next reconcile: $(tail -c 400 "$err" | tr '\n' ' ')"
+        rc=$?
+        reason=$(tail -c 400 "$err" | tr '\n' ' ')
+        [[ "$reason" == *[![:space:]]* ]] ||
+            reason="helper exited $rc without a diagnostic"
+        log "AP radio mesh return deferred; retrying next reconcile: $reason"
     fi
     rm -f "$err"
 }
@@ -436,8 +447,10 @@ promote_gateway() {
         ip route replace default via "$gw" dev "$iface" src "$ip" metric 100 2>/dev/null || true
     fi
 
-    # Announce the measured bandwidth (Ethernet) or batman's default.
-    "$UPLINK_SPEED" announce "$iface" >/dev/null 2>&1 || true
+    # Announce measured/unknown Ethernet bandwidth or the metered default.
+    if [ "$EVENT" != provision ]; then
+        "$UPLINK_SPEED" announce "$iface" >/dev/null 2>&1 || true
+    fi
 
     # Skip firewall rewrites, radvd/gateway-route-manager restarts and
     # mesh-ip-manager when this exact uplink is already promoted.
@@ -452,21 +465,34 @@ promote_gateway() {
     if [ "$prev_mode" = "gateway" ] && [ "$prev_iface" = "$iface" ] && \
        [ "$prev_ip" = "$ip" ] && [ "$prev_gw" = "${gw:-}" ] && \
        [ -f "$LEGACY_GATEWAY_STATE" ]; then
-        ensure_eud_services
+        if [ "$EVENT" = provision ]; then
+            systemctl start manet-uplink-dns.service 2>/dev/null || true
+        else
+            ensure_eud_services
+        fi
         return 0
+    fi
+
+    if [ -n "$prev_iface" ] && [ "$prev_iface" != "$iface" ]; then
+        ip route del default dev "$prev_iface" metric 100 2>/dev/null || true
     fi
 
     configure_firewall "$iface"
 
     touch "$LEGACY_GATEWAY_STATE"
     printf '%s\n' "$iface" > "$UPSTREAM_IFACE_FILE"
+    # A normal reconcile must finish radio/service work deferred by setup.
+    local mode=gateway
+    [ "$EVENT" != provision ] || mode=provisioning
     cat > "$STATE_FILE" <<EOF
-UPLINK_MODE=gateway
+UPLINK_MODE=$mode
 UPLINK_IFACE=$iface
 UPLINK_IP=$ip
 UPLINK_GW=${gw:-}
 UPDATED_AT=$(date +%s)
 EOF
+    # Make the qualified DHCP resolver available before dependent services.
+    systemctl start manet-uplink-dns.service 2>/dev/null || true
     # Keep the wired-EUD record on end0 while a USB uplink serves as gateway.
     grep -qx 'ETH_MODE=WIRED_EUD' "$LEGACY_ETH_STATE" 2>/dev/null && wired_eud_active || \
     cat > "$LEGACY_ETH_STATE" <<EOF
@@ -476,6 +502,11 @@ DEFAULT_GW=${gw:-none}
 DETECTED_AT=$(date +%s)
 DETECTION_METHOD=MANET_UPLINK_DISPATCH
 EOF
+
+    if [ "$EVENT" = provision ]; then
+        log "Qualified $iface for setup; deferring radio and manager actions"
+        return 0
+    fi
 
     apply_radvd_conf /etc/radvd-gateway.conf
     ensure_eud_services
@@ -499,9 +530,16 @@ demote_gateway() {
     fi
 
     clear_firewall
+    # Withdraw the promoted route even if the address flush is delayed.
+    if [ -n "$old_iface" ] && ! is_wired_eud_port "$old_iface"; then
+        ip route del default dev "$old_iface" metric 100 2>/dev/null || true
+    fi
     batctl gw_mode client 2>/dev/null || true
     "$UPLINK_SPEED" forget 2>/dev/null || true
     rm -f "$LEGACY_GATEWAY_STATE" "$LEGACY_NTP_STATE" "$STATE_FILE" "$UPSTREAM_IFACE_FILE"
+    if [ "$was_gateway" = true ]; then
+        systemctl start manet-uplink-dns.service 2>/dev/null || true
+    fi
     # ethernet-autodetect's record of an active wired EUD is not ours to clear.
     if ! { grep -qx 'ETH_MODE=WIRED_EUD' "$LEGACY_ETH_STATE" 2>/dev/null && wired_eud_active; }; then
         rm -f "$LEGACY_ETH_STATE"
@@ -517,15 +555,19 @@ demote_gateway() {
         networkctl reconfigure "$old_iface" 2>/dev/null || true
     fi
 
-    apply_radvd_conf /etc/radvd-mesh.conf
-    ensure_eud_services
+    if [ "$EVENT" != provision ]; then
+        apply_radvd_conf /etc/radvd-mesh.conf
+        ensure_eud_services
+    fi
 
     # Steady state: with no uplink, reconcile lands here every node-manager
     # cycle. Only rerun mesh-ip-manager / restart gateway-route-manager when
     # an actual demotion happened.
     if [ "$was_gateway" = true ]; then
-        /usr/local/bin/mesh-ip-manager.sh 2>/dev/null || true
-        systemctl restart gateway-route-manager.service 2>/dev/null || true
+        if [ "$EVENT" != provision ]; then
+            /usr/local/bin/mesh-ip-manager.sh 2>/dev/null || true
+            systemctl restart gateway-route-manager.service 2>/dev/null || true
+        fi
         log "Demoted MANET gateway${old_iface:+ on $old_iface}"
     fi
 }
@@ -562,7 +604,7 @@ reconcile() {
 }
 
 case "$EVENT" in
-    carrier|routable|configured|online|add|reconcile|--hotplug)
+    carrier|routable|configured|online|add|reconcile|--hotplug|provision)
         reconcile
         ;;
     off|no-carrier|degraded|remove|offline)
