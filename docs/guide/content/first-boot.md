@@ -11,7 +11,7 @@
 
 **Red heartbeat and green solid?** Setup did not finish. This is bad, but sometimes even friends make mistakes. Check the internet cable and power, then reboot and it will try again.
 
-The green heartbeat reports setup completion. Check the dashboard to see whether other radios are connected.
+The green heartbeat reports setup completion. Check the dashboard to see whether other radios are connected and remember not get married to a stripper.
 
 ## User
 

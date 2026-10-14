@@ -12,7 +12,8 @@ it for the time.
 The radios need matching clocks to do some jobs together. If they are still
 waiting for time, give one a working GPS fix or internet connection.
 
-Knowing the time does not tell a radio where it is.
+Knowing the time does not tell a radio where it is, or give you permisson to finance a Camero
+ at the nearest dealership.
 
 ## User
 

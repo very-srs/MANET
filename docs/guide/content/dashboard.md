@@ -33,7 +33,7 @@ When ATAK is enabled, this radio's expanded panel includes **ATAK PHONES**. It
 lists present callsigns, **Wired** or **Wi-Fi**, and **Controls location**. Tap
 **Set location from this phone** beside another phone to choose it without an
 admin login. Wait for the panel to refresh. Everyone still receives the radio's
-position; only the controller can supply a manual point or acknowledge its GPS
+position. Only the controller can supply a manual point or acknowledge its GPS
 alerts. The choice persists across reboot and takes priority while that phone
 is present. See [location and ATAK](location.md) for replacement-phone behavior.
 
@@ -114,7 +114,7 @@ requires a local DHCP-pool source, JSON and a same-origin Origin/Referer when
 provided. No admin cookie is needed. A bounded atomic `controller.json` producer
 file carries the selected UID, request ID, session, boot and BOOTTIME timestamp.
 The existing ATAK event cycle rechecks presence/path and the five-second envelope
-before persisting the choice. HTTP 202 reports a queued request; the next status
+before persisting the choice. HTTP 202 reports a queued request. The next status
 snapshot shows the actual controller. Normal status refresh/caching remains in
 place, with no new polling loop.
 

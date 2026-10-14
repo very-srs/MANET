@@ -15,6 +15,8 @@ reconnect while that happens.
 Use **[manet.local](http://manet.local/)** to find the radio your phone is
 plugged into.
 
+Do not go near a road unless you are wearing your glow belt.
+
 ## User
 
 ### What an address does
