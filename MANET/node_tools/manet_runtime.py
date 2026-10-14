@@ -132,8 +132,13 @@ def serve(directory, helpers, stop=None):
                     try:
                         rc, output = helpers.dispatch(action, argument)
                     except Exception as error:
-                        print(f'RUNTIME: {action} failed: {type(error).__name__}', file=sys.stderr, flush=True)
-                        rc, output = 1, ''
+                        # RuntimeError text is written for operators. Other
+                        # exceptions can quote commands, so report only the type.
+                        reason = type(error).__name__
+                        if type(error) is RuntimeError:
+                            reason = ' '.join(str(error).split())[:200] or reason
+                        print(f'RUNTIME: {action} failed: {reason}', file=sys.stderr, flush=True)
+                        rc, output = 1, reason
                 # Expired clients must not leave unbounded files or block ACS.
                 for old in directory.glob('result.*'):
                     old.unlink(missing_ok=True)

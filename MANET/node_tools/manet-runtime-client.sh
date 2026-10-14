@@ -33,8 +33,12 @@ manet_runtime_call() (
         # Reserve 125 for unsubmitted requests, even if a helper returns it.
         [ "$rc" != 125 ] || rc=1
         [ -f "$directory/result.$token" ] || return 1
-        [ "$rc" = 0 ] || return "$rc"
         output=$(<"$directory/result.$token")
+        if [ "$rc" != 0 ]; then
+            # A failed operation's result holds its reason, if any.
+            [ -z "$output" ] || printf '%s\n' "$output" >&2
+            return "$rc"
+        fi
         case "$1" in
             ipv4|mcs|interfaces|ap-mesh|election|hosting|service-vip)
                 [[ "$output" == *[![:space:]]* ]] || return 1 ;;

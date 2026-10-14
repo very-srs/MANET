@@ -46,6 +46,15 @@ helpers that control other units. Document necessary exceptions beside the
 settings. Static tests guard the baseline; service restarts and functional
 checks on the target hardware are required before deployment.
 
+`wpa_cli` and `wpa_cli_s1g` bind a client socket in the host's `/tmp`, and the
+supplicant sends its reply to that path. A service that runs them needs `/tmp`
+in `ReadWritePaths` and must not use `PrivateTmp`, which hides the socket from
+the supplicant. `mesh-channel-agreement.service` runs them for ACS
+reconfiguration, drift repair, supplicant readiness and AP-to-mesh
+transitions. Without `/tmp`, each call failed with a read-only file system, so
+channel moves fell back to supplicant restarts and the AP radio could not
+return to the mesh after a gateway demotion.
+
 The GPS reader uses a dynamic `manet-gps` user and `/run/manet-gps`. Its
 privileged startup command publishes the existing `/run/gps_*.json` names as
 symlinks using the shipped tmpfiles configuration. The runtime directory is

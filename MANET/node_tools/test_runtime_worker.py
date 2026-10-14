@@ -131,6 +131,21 @@ class RequestTests(unittest.TestCase):
         self.assertEqual(self.call().returncode, 1)  # A submitted 125 cannot cause replay.
         self.assertEqual(self.call().stdout, 'recovered')
 
+    def test_operator_reason_reaches_caller_but_other_exception_text_does_not(self):
+        handler = Mock()
+        handler.dispatch.side_effect = [
+            RuntimeError('Radio transition busy;\nretry shortly'),
+            subprocess.CalledProcessError(1, ['wpa_cli', 'set_network', '0', 'psk', 'secret']),
+            RuntimeError(''),
+        ]
+        self.start(handler)
+        busy, command, empty = self.call(), self.call(), self.call()
+        self.assertEqual((busy.returncode, busy.stdout), (1, ''))
+        self.assertEqual(busy.stderr, 'Radio transition busy; retry shortly\n')
+        self.assertEqual(command.stderr, 'CalledProcessError\n')
+        self.assertNotIn('secret', command.stderr)
+        self.assertEqual(empty.stderr, 'RuntimeError\n')
+
     def test_service_observer_waits_only_to_its_lock_deadline(self):
         """Busy reads have a bounded wait and submit no request on expiry."""
         handler = Mock()
