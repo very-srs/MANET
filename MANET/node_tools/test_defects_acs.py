@@ -66,6 +66,55 @@ done
                 self.assertEqual(result.stdout.splitlines(), expected)
                 self.assertEqual((self.root / 'sends').read_text(), '2')
 
+    def test_data_and_bootstrap_publications_expire_each_band_separately(self):
+        self.command('encoder', '''
+import json
+Path(os.environ['TEST_ROOT'], 'encoder-args').write_text(json.dumps(sys.argv[1:]))
+print('telemetry')
+''')
+        self.command('alfred', 'sys.stdin.read()')
+        (self.root / 'my_ipv4_chunk').write_text('0\n')
+        (self.root / 'loadavg').write_text('0.1 0.1 0.1\n')
+        (self.root / 'uptime').write_text('1200.0 1.0\n')
+        source = (TOOLS / 'node-manager-acs.sh').read_text()
+        for branch, start, end in (
+                ('lobby', '# === PUBLISH STATUS (so other nodes can see us) ===',
+                 '# Check discovery after publishing both records'),
+                ('data', '# === STAGE 2: PUBLISH (every 3 min at :15) ===',
+                 '# === STAGE 3: REGISTRY REFRESH AND IP MANAGEMENT')):
+            for fresh in (True, False):
+                with self.subTest(branch=branch, fresh=fresh):
+                    report = {'results': [
+                        {'channel': 2437, 'noise_floor': -81, '_survey_boot': 1000},
+                        {'channel': 5200, 'noise_floor': -81,
+                         '_survey_boot': 1100 if fresh else 1000}]}
+                    block = source.split(start, 1)[1].split(end, 1)[0]
+                    for prefix in ('/var/run/', '/proc/'):
+                        block = block.replace(prefix, str(self.root) + '/')
+                    setup = self.definitions('node-manager-acs.sh') + '''
+log() { :; }
+detect_and_update_gateway_state() { :; }
+is_ntp_time_source() { return 1; }
+is_hosting_service() { return 1; }
+is_hosting_mumble_service() { return 1; }
+collect_radio_mcs() { :; }
+collect_interfaces_json() { printf '[]'; }
+collect_ap_ssid() { :; }
+date() { printf '%s\n' "$MONO"; }
+ENCODER_PATH="$TEST_ROOT/bin/encoder"
+THROUGHPUT_MEAN=true
+GPS_STATUS_FILE="$TEST_ROOT/missing-gps"
+BOOTSTRAPPING=true
+NOW=1200
+MONO=1200
+''' + 'CACHED_SCAN_REPORT_JSON=' + shlex.quote(json.dumps(report)) + '\n'
+                    result = self.shell(setup + block)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    args = json.loads((self.root / 'encoder-args').read_text())
+                    sent = json.loads(args[args.index('--channel-report-json') + 1])
+                    self.assertEqual([r['channel'] for r in sent['results']],
+                                     [5200] if fresh else [])
+
 
 class OccupancyTests(AcsHarness):
     """Exercise real survey collection and scoring with isolated radios."""
@@ -85,7 +134,7 @@ class OccupancyTests(AcsHarness):
         return int(winner), result.stderr, output
 
     def scans(self, samples, cache='{}', fault=''):
-        """Collect scans through the manager's real command substitution."""
+        """Collect scans through the manager's real cache replacement."""
         self.configure(2462, None)
         (self.root / 'samples').write_text(json.dumps(samples))
         (self.root / 'survey-count').write_text('0')
@@ -111,6 +160,7 @@ if args[-2:] == ['survey', 'dump']:
                 '\nCACHED_SCAN_REPORT_JSON=' + shlex.quote(cache) +
                 '\nfault=' + shlex.quote(fault) + '''
 phy_usable_freqs() { printf '%s\n' "$2"; }
+iface_driver() { printf 'test-driver'; }
 sleep() { :; }
 jq() {
     if [ "$round" -eq 0 ] && [[ "$fault" == *jq* ]]; then
@@ -127,7 +177,7 @@ uptime_now() {
 ''') + '''
 for ((round=0; round<''' + str(len(samples)) + '''; round++)); do
     printf '%s 1.0\n' "$((10000 + round * 180))" > "$MESH_UPTIME_FILE"
-    CACHED_SCAN_REPORT_JSON=$(perform_scan) || exit
+    perform_scan
     printf '%s\n' "$CACHED_SCAN_REPORT_JSON" | command jq -c .
 done
 ''')
@@ -155,7 +205,8 @@ done
                 self.assertEqual(len(reports), 4)
                 self.assertEqual(reports[0]['results'], [
                     {'channel': channel, 'noise_floor': -81, 'bss_count': 0,
-                     '_survey_iface': 'wlan0'} for channel in (2437, 2462)])
+                     '_survey_iface': 'wlan0', '_survey_boot': 10000}
+                    for channel in (2437, 2462)])
                 self.assertEqual(len(reports[1]['results']), 2)
                 self.assertEqual([r['busy_pct'] for r in reports[3]['results']],
                                  [10, 20])
@@ -210,10 +261,11 @@ done < "$TEST_ROOT/observations"
     def test_warmup_and_short_dwell_remain_unknown(self):
         """Require three valid samples and keep an unmeasured scan absent."""
         scans = self.scans([(0, 10)] * 3 + [(None, 10), (0, 10)])
-        for index in (0, 1, 3):
+        for index in (0, 1, 4):
             self.assertNotIn('busy_pct', scans[index]['results'][0])
-        for index in (2, 4):
-            self.assertEqual(scans[index]['results'][0]['busy_pct'], 0)
+        self.assertEqual(scans[2]['results'][0]['busy_pct'], 0)
+        self.assertEqual([r['channel'] for r in scans[3]['results']], [2462])
+        self.assertEqual(len(scans[4]['results'][0]['_busy_samples']), 1)
 
     def test_measured_zero_still_beats_a_congested_home(self):
         """A measured idle channel remains distinct from an unknown one."""
@@ -244,6 +296,13 @@ done < "$TEST_ROOT/observations"
                 scans = self.smooth(ready + [(stamp, changed)])
                 self.assertEqual(scans[2]['results'][0]['busy_pct'], 10)
                 self.assertNotIn('busy_pct', scans[3]['results'][0])
+
+    def test_history_keeps_acquisition_time_instead_of_smoothing_time(self):
+        report = {'results': [{'channel': 2462, 'noise_floor': -81,
+                              '_survey_iface': 'wlan0', '_survey_boot': 995,
+                              'busy_pct': 10}]}
+        scans = self.smooth([(1000, report)])
+        self.assertEqual(scans[0]['results'][0]['_busy_samples'], [[995, 10]])
 
     def test_partial_missing_reports_do_not_dilute_measured_median(self):
         """One missing reporter does not discount another reporter's data."""
@@ -276,6 +335,216 @@ done < "$TEST_ROOT/observations"
         winner, _, output = self.score(reports)
         self.assertEqual(winner, 2437)
         self.assertIn('LIMP_MODE=true', output)
+
+
+class ScanAcquisitionTests(AcsHarness):
+    """Failing acquisitions cannot renew an earlier interface's evidence."""
+
+    @staticmethod
+    def survey(freq=2437, active=100, busy=20, tx=0, noise=-81, home=False):
+        lines = [f'frequency: {freq} MHz' + (' [in use]' if home else '')]
+        if noise is not None:
+            lines.append(f'noise: {noise} dBm')
+        for name, value in [('active', active), ('busy', busy), ('transmit', tx)]:
+            if value is not None:
+                lines.append(f'channel {name} time: {value} ms')
+        return '\n'.join(lines) + '\n'
+
+    def sample(self, **changes):
+        row = {'pre': self.survey(active=0, busy=0),
+               'post': self.survey(), 'output': '', 'status': 0}
+        row.update(changes)
+        return row
+
+    def acquire(self, rounds, *, driver='test-driver', two_bands=False,
+                after='', cache=None, real_filter=False):
+        self.configure(2462, 5220 if two_bands else None)
+        for marker in self.root.glob('survey-*'):
+            marker.unlink()
+        (self.root / 'scan-rounds').write_text(json.dumps(rounds))
+        self.command('iw', '''
+import json, signal, time
+root = Path(os.environ['TEST_ROOT'])
+args = sys.argv[1:]
+with (root / 'scan-commands').open('a') as log:
+    log.write(json.dumps(args) + '\\n')
+if args[0] == 'phy':
+    print('* 2412.0 MHz [1] (20.0 dBm)')
+    sys.exit(0)
+if args[2:] == ['info']:
+    print('wiphy 0')
+    sys.exit(0)
+row = json.loads((root / 'scan-rounds').read_text())[int(os.environ['ROUND'])][args[1]]
+if args[2:] == ['survey', 'dump']:
+    marker = root / ('survey-' + args[1] + '-' + os.environ['ROUND'])
+    phase = 'post' if marker.exists() else 'pre'
+    marker.touch()
+    print(row[phase])
+    sys.exit(row.get(phase + '_status', 0))
+if args[2:4] == ['scan', 'dump']:
+    print('BSS 02:00:00:00:00:aa\\n  freq: 2437.0')
+    sys.exit(0)
+if args[2:4] != ['scan', 'freq'] or args[-1] != 'flush':
+    sys.exit(99)
+print(row['output'], flush=True)
+if row.get('hang'):
+    (root / 'scan-child').write_text(str(os.getpid()))
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    time.sleep(30)
+sys.exit(row['status'])
+''')
+        body = self.definitions('node-manager-acs.sh') + ('' if real_filter else '''
+phy_usable_freqs() { printf '%s\n' "$2"; }
+''') + '''
+iface_driver() { printf '%s\n' ''' + shlex.quote(driver) + '''; }
+''' + ('' if cache is None else
+       'CACHED_SCAN_REPORT_JSON=' + shlex.quote(json.dumps(cache)) + '\n') + '''
+for ((round=0; round<''' + str(len(rounds)) + '''; round++)); do
+    export ROUND=$round
+    printf '%s.50 1.0\n' "$((10000 + round * 180))" > "$MESH_UPTIME_FILE"
+    perform_scan
+    printf '%s\n' "$CACHED_SCAN_REPORT_JSON"
+done
+''' + after
+        result = self.shell(body)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return [json.loads(line) for line in result.stdout.splitlines()], result.stderr
+
+    def test_failure_invalidates_warm_cache_and_logs_only_transitions(self):
+        good = self.sample()
+        bad = self.sample(status=16, output='BSS 02:00:00:00:00:aa\n freq: 2437.0')
+        rounds = [{'wlan0': row} for row in [good] * 3 + [bad, bad, good, good]]
+        reports, log = self.acquire(rounds, real_filter=True)
+        self.assertIn('busy_pct', reports[2]['results'][0])
+        self.assertEqual(reports[3]['results'], [])
+        self.assertEqual(reports[4]['results'], [])
+        self.assertNotIn('busy_pct', reports[5]['results'][0])
+        self.assertEqual(len(reports[5]['results'][0]['_busy_samples']), 1)
+        self.assertEqual(log.count('Scan failed on wlan0 (exit 16)'), 1)
+        self.assertEqual(log.count('Scan recovered on wlan0'), 1)
+        self.assertEqual(len(log.splitlines()), 2)
+        commands = (self.root / 'scan-commands').read_text()
+        self.assertNotIn('"scan", "dump"', commands)
+
+    def test_timeout_discards_partial_output_and_reaps_child(self):
+        reports, log = self.acquire([{'wlan0': self.sample(hang=True,
+            output='BSS 02:00:00:00:00:aa\n freq: 2437.0')}],
+            after='jobs -pr > "$TEST_ROOT/children"\n')
+        self.assertEqual(reports[0]['results'], [])
+        self.assertIn('Scan failed on wlan0 (timeout)', log)
+        self.assertEqual((self.root / 'children').read_text(), '')
+        pid = int((self.root / 'scan-child').read_text())
+        self.assertFalse(Path(f'/proc/{pid}').exists())
+
+    def test_zero_exit_scan_abort_is_failure(self):
+        reports, log = self.acquire([{'wlan0': self.sample(output='scan aborted!')}])
+        self.assertEqual(reports[0]['results'], [])
+        self.assertIn('(aborted)', log)
+
+    def test_one_failed_band_leaves_other_band_and_history_healthy(self):
+        good24 = self.sample()
+        good5 = self.sample(pre=self.survey(5200, active=0, busy=0),
+                            post=self.survey(5200))
+        rounds = [{'wlan0': good24, 'wlan1': good5}] * 2 + [
+            {'wlan0': self.sample(status=1), 'wlan1': good5}]
+        reports, _ = self.acquire(rounds, two_bands=True)
+        self.assertEqual([r['channel'] for r in reports[-1]['results']], [5200])
+        self.assertEqual(reports[-1]['results'][0]['busy_pct'], 20)
+        (self.root / 'uptime').write_text('10000.0 1.0\n')
+        self.reports([reports[-1]['results']])
+        result = self.election()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        output = (self.root / 'election').read_text()
+        self.assertIn('WINNER_2_4=2462', output)
+        self.assertIn('WINNER_5_0=5200', output)
+        self.assertIn('LIMP_MODE=false', output)
+
+    def test_unchanged_short_reset_missing_counters_or_noise_omit_channel(self):
+        baseline = self.survey(active=100, busy=20)
+        cases = [self.survey(active=100), self.survey(active=124),
+                 self.survey(active=50), self.survey(active=None),
+                 self.survey(active=200, noise=None)]
+        reports, _ = self.acquire([{'wlan0': self.sample(pre=baseline, post=post)}
+                                   for post in cases])
+        self.assertTrue(all(r['results'] == [] for r in reports))
+
+    def test_failed_survey_does_not_invent_zero_baseline(self):
+        reports, log = self.acquire([
+            {'wlan0': self.sample(pre_status=1)},
+            {'wlan0': self.sample(post_status=1)},
+            {'wlan0': self.sample(pre='')},
+        ])
+        self.assertTrue(all(r['results'] == [] for r in reports))
+        self.assertEqual(log.count('(survey unavailable)'), 1)
+
+    def test_fresh_noise_without_busy_is_distinct_from_failed_scan(self):
+        row = self.sample(post=self.survey(busy=None))
+        reports, log = self.acquire([{'wlan0': row}] * 3)
+        self.assertEqual(log, '')
+        for report in reports:
+            self.assertEqual(report['results'][0]['noise_floor'], -81)
+            self.assertNotIn('busy_pct', report['results'][0])
+        reports, _ = self.acquire([{'wlan0': self.sample(
+            pre=self.survey(active=100, busy=50),
+            post=self.survey(active=200, busy=10))}])
+        self.assertNotIn('busy_pct', reports[0]['results'][0])
+
+    def test_mt7915_repeated_offchannel_visits_and_home_delta(self):
+        row = self.sample(
+            pre=self.survey(active=60, busy=12) +
+                self.survey(2462, active=1000, busy=100, home=True),
+            post=self.survey(active=60, busy=12) +
+                 self.survey(2462, active=1100, busy=140, home=True))
+        reports, _ = self.acquire([{'wlan0': row}] * 3, driver='mt7915e')
+        self.assertEqual([r['busy_pct'] for r in reports[-1]['results']], [20, 40])
+        bad = self.sample(pre=row['post'], post=row['post'], status=1)
+        reports, _ = self.acquire([{'wlan0': bad}], driver='mt7915e')
+        self.assertEqual(reports[0]['results'], [])
+
+    def test_scan_output_counts_fresh_integer_and_decimal_bss_frequencies(self):
+        output = '''BSS 02:00:00:00:00:01(on wlan0)
+    freq: 2437
+BSS 02:00:00:00:00:02(on wlan0)
+    freq: 2437.0
+BSS 02:00:00:00:00:03(on wlan0) -- associated
+    last seen: 9999.0s [boottime]
+    freq: 2437
+BSS 02:00:00:00:00:04(on wlan0) -- associated
+    freq: 2437
+BSS 02:00:00:00:00:05(on wlan0)
+    freq: 24370
+BSS 02:00:00:00:00:06(on wlan0) -- associated
+    last seen: 10000.700s [boottime]
+    freq: 2437
+'''
+        reports, _ = self.acquire([{'wlan0': self.sample(output=output)}])
+        self.assertEqual(reports[0]['results'][0]['bss_count'], 3)
+
+    def test_cache_expires_without_scan_and_publication_does_not_refresh_it(self):
+        reports, _ = self.acquire([{'wlan0': self.sample()}], after='''
+fresh_scan_report
+printf '10180.0 1.0\n' > "$MESH_UPTIME_FILE"
+fresh_scan_report
+printf '10181.0 1.0\n' > "$MESH_UPTIME_FILE"
+fresh_scan_report
+printf '9999.0 1.0\n' > "$MESH_UPTIME_FILE"
+fresh_scan_report
+''')
+        self.assertEqual(reports[0], reports[1])
+        self.assertEqual(reports[1], reports[2])
+        self.assertEqual(reports[3]['results'], [])
+        self.assertEqual(reports[4]['results'], [])
+
+    def test_empty_observation_holds_both_data_and_bootstrap_channels(self):
+        for freq in (2412, 2462):
+            with self.subTest(freq=freq):
+                self.configure(freq, None)
+                self.reports([[]])
+                result = self.election()
+                self.assertEqual(result.returncode, 0, result.stderr)
+                output = (self.root / 'election').read_text()
+                self.assertIn(f'WINNER_2_4={freq}', output)
+                self.assertIn('LIMP_MODE=false', output)
 
 
 def journal_rounds(path):
