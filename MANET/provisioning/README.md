@@ -565,7 +565,7 @@ The `firstrun.sh` script runs on the very first boot (injected by `rpi-imager`).
 
 After a reboot, `provision-mesh.sh` runs once network is available. It:
 
-1. Waits for internet connectivity (up to 5 minutes)
+1. Waits for installation resources over HTTP/HTTPS (up to 5 minutes)
 2. Downloads the kernel and mesh orchestration tools
 3. Sets the Wi-Fi regulatory domain
 4. Calculates a unique hostname from the node's MAC address
@@ -587,6 +587,16 @@ Red means the same thing the login banner does. Reconnect Ethernet and reboot,
 and the node retries on its own. The pattern is set on every boot from the
 recorded result, so it stays put until the status actually changes.
 
+The first network wait uses HTTP requests to Debian and the selected GitHub
+downloads. It works on networks that block ping. While waiting, the power LED
+blinks quickly. If the resources remain unreachable for five minutes, setup
+records `bootstrap-network` as incomplete and shows red heartbeat/green solid
+where those LEDs exist. The SSH banner lists the unreachable resources and
+the log path, even before the MANET archive is installed. Restore access and
+reboot to retry without reflashing, or run
+`sudo systemctl restart mesh-provision.service`. Later radio-setup failures
+retain their existing `sudo radio-setup.sh` retry instruction.
+
 ### Rock 3A
 
 The provisioning script and all configuration are embedded directly into the Armbian image during flashing. No `rpi-imager` first-run injection is involved.
@@ -595,12 +605,14 @@ On first boot, a `mesh-provision` systemd service (triggered by the presence of 
 
 The provisioning script:
 
-1. Waits for internet connectivity
+1. Uses the same bounded HTTP/HTTPS installation-resource wait as Raspberry Pi
 2. Installs required packages
 3. Configures interfaces and mesh settings
 4. Removes the trigger flag file and reboots
 
-After the reboot the node is fully operational.
+After the reboot, radio setup completes the remaining configuration. Keep
+Ethernet and power connected through any interface-rename reboots until the
+completion verdict appears.
 
 ---
 

@@ -172,23 +172,6 @@ ip_in_cidr() {
     fi
 }
 
-# Test whether an IP falls in IPV4_NETWORK's first SERVICES_RESERVED hosts.
-is_service_reserved_ip() {
-    local ip="$1"
-    local CALC_OUTPUT HOST_MIN MIN_INT IP_INT offset
-
-    CALC_OUTPUT=$(manet-ipcalc.sh "$IPV4_NETWORK" 2>/dev/null)
-    [ -n "$CALC_OUTPUT" ] || return 1
-
-    HOST_MIN=$(printf '%s\n' "$CALC_OUTPUT" | awk '/HostMin/ {print $2}')
-    MIN_INT=$(ip_to_int "$HOST_MIN")
-    IP_INT=$(ip_to_int "$ip")
-    [ -n "$MIN_INT" ] && [ -n "$IP_INT" ] || return 1
-
-    offset=$((IP_INT - MIN_INT))
-    [ "$offset" -ge 0 ] && [ "$offset" -lt "$SERVICES_RESERVED" ]
-}
-
 # Peer claims use absolute ranges because nodes can provision different
 # block sizes. Claims file fields: chunk,mac,start_int,size.
 # A missing size makes the snapshot incomplete and defers allocation. The
@@ -311,16 +294,274 @@ get_random_chunk() {
     printf '%s\n' "${available_chunks[$random_index]}"
 }
 
-# Save persistent state
+# Durably replace allocation intent before changing its live addresses.
 save_persistent_state() {
-    cat > "$PERSISTENT_STATE_FILE" <<- EOF
+    local temporary
+    temporary=$(mktemp "${PERSISTENT_STATE_FILE}.XXXXXX") || return 1
+    if ! cat > "$temporary" <<- EOF
 # Persistent IPv4 state for mesh node
 # Last updated: $(date)
 PERSISTENT_IPV4="$PERSISTENT_IPV4"
 PERSISTENT_CHUNK="$PERSISTENT_CHUNK"
 PERSISTENT_NETWORK="$PERSISTENT_NETWORK"
 EOF
-    chmod 644 "$PERSISTENT_STATE_FILE"
+    then
+        rm -f "$temporary"
+        return 1
+    fi
+    chmod 644 "$temporary" && sync -f "$temporary" &&
+        mv -f "$temporary" "$PERSISTENT_STATE_FILE" &&
+        sync -f "${PERSISTENT_STATE_FILE%/*}"
+}
+
+# Restore the saved files and owned addresses before resuming old DHCP.
+# The caller holds the allocator and both service-election locks.
+retirement_restore() {
+    local address live path temporary i failed=0
+    live=$(ip -4 -o addr show dev "$CONTROL_IFACE") || return 1
+    while IFS= read -r address; do
+        if ! printf '%s\n' "$live" | awk '{print $4}' |
+                grep -qxF "$address"; then
+            ip addr add "$address" dev "$CONTROL_IFACE" || failed=1
+        fi
+    done < "$retirement_backup/addresses"
+    for i in "${!retirement_files[@]}"; do
+        [ -f "$retirement_backup/files-changed" ] || break
+        path=${retirement_files[$i]}
+        if [ -f "$retirement_backup/$i" ]; then
+            # A failed unlink may leave the correct file in place. Reuse it
+            # even when its permissions now forbid atomic replacement.
+            cmp -s "$retirement_backup/$i" "$path" && continue
+            temporary=$(mktemp "${path}.XXXXXX") || return 1
+            cp -p "$retirement_backup/$i" "$temporary" &&
+                mv -f "$temporary" "$path" || failed=1
+        else
+            rm -f "$path" || failed=1
+        fi
+    done
+    # Keep the checkpoint if restoration is incomplete. The next pass must
+    # finish it before attempting another retirement, including after SIGKILL.
+    [ "$failed" = 0 ] || return 1
+    if [ -f "$retirement_backup/dnsmasq-active" ]; then
+        systemctl start dnsmasq.service || return 1
+    fi
+    if systemctl is-active --quiet avahi-daemon.service; then
+        systemctl reload avahi-daemon.service ||
+            touch /run/manet-avahi-host-reload-needed
+    fi
+    if [ -f "$retirement_backup/state-temp" ]; then
+        read -r temporary < "$retirement_backup/state-temp"
+        rm -f "$temporary" || return 1
+    fi
+    rm -rf "$retirement_backup"
+}
+
+# Roll back any failed disruptive step, retaining a checkpoint on failure.
+retirement_finish() {
+    local status=$1
+    trap - EXIT HUP INT TERM
+    if [ -f "$retirement_backup/state-temp" ]; then
+        local state_temp
+        read -r state_temp < "$retirement_backup/state-temp"
+        rm -f "$state_temp"
+    fi
+    if [ "$status" != 0 ]; then
+        log "CIDR retirement deferred: $retirement_step"
+        if [ -f "$retirement_backup/armed" ]; then
+            retirement_restore ||
+                log "CIDR retirement recovery pending; old DHCP not restored"
+        else
+            rm -rf "$retirement_backup"
+        fi
+    else
+        rm -rf "$retirement_backup"
+    fi
+    exit "$status"
+}
+
+# Preflight, checkpoint and retire exact MANET addresses in a subshell.
+# No tunable writes: this runs inside mesh-channel-agreement's sandbox.
+retirement_transaction() (
+    local retirement_backup=/run/manet-ip-retirement
+    local retirement_step="election lock busy or inaccessible"
+    local retirement_files=("$PERSISTENT_STATE_FILE"
+        /etc/dnsmasq.d/mesh-eud.conf /var/lib/misc/dnsmasq.leases
+        /run/dnsmasq.leases /tmp/dnsmasq.leases /etc/avahi/hosts
+        /var/run/my_ipv4_chunk /var/run/my_ipv4_chunk_size
+        /run/manet-avahi-host-reload-needed)
+    # Elections never acquire the allocator lock while holding theirs.
+    exec 198>"${MEDIAMTX_ELECTION_LOCK:-/var/run/mediamtx-election.lock}" ||
+        { log "$retirement_step"; exit 1; }
+    flock -n 198 || { log "$retirement_step"; exit 1; }
+    exec 199>"${MUMBLE_ELECTION_LOCK:-/var/run/mumble-election.lock}" ||
+        { log "$retirement_step"; exit 1; }
+    flock -n 199 || { log "$retirement_step"; exit 1; }
+
+    if [ -f "$retirement_backup/armed" ]; then
+        retirement_restore ||
+            { log "CIDR retirement recovery pending"; exit 1; }
+        source "$PERSISTENT_STATE_FILE" || exit 1
+    fi
+    [ -n "$PERSISTENT_NETWORK" ] || exit 0
+    [ "$PERSISTENT_NETWORK" != "$IPV4_NETWORK" ] || exit 0
+    trap 'retirement_finish $?' EXIT
+    trap 'exit 1' HUP INT TERM
+    retirement_step="invalid saved address ownership"
+    local old_prefix="${PERSISTENT_NETWORK#*/}" calc first primary gateway
+    local address live line path temporary caps i active=0 promote all policy
+    local owned=() secondaries=() primaries=() unowned=()
+    calc=$(manet-ipcalc.sh "$PERSISTENT_NETWORK") || exit 1
+    first=$(printf '%s\n' "$calc" | awk '/HostMin/ {print $2}')
+    first=$(ip_to_int "$first") || exit 1
+    primary=$(ip_to_int "$PERSISTENT_IPV4") || exit 1
+    gateway=$(int_to_ip "$((primary + 1))")
+    ip_in_cidr "$PERSISTENT_IPV4" "$PERSISTENT_NETWORK" || exit 1
+    ip_in_cidr "$gateway" "$PERSISTENT_NETWORK" || exit 1
+    [ "$primary" -gt "$((first + 4))" ] || exit 1
+    owned=("$PERSISTENT_IPV4/$old_prefix" "$gateway/$old_prefix"
+           "$(int_to_ip "$((first + 1))")/$old_prefix"
+           "$(int_to_ip "$((first + 2))")/$old_prefix")
+
+    retirement_step="new network has no safely claimable allocation"
+    load_claims
+    [ "${#INCOMPLETE_CLAIMS[@]}" = 0 ] || exit 1
+    get_random_chunk >/dev/null 2>&1 || exit 1
+
+    retirement_step="CAP_NET_ADMIN or live br0 inspection unavailable"
+    caps=$(awk '/^CapEff:/ {print $2}' /proc/self/status)
+    [[ "$caps" =~ ^[0-9a-fA-F]+$ ]] || exit 1
+    (( (16#$caps & 4096) != 0 )) || exit 1
+    live=$(ip -4 -o addr show dev "$CONTROL_IFACE") || exit 1
+    retirement_step="cannot read secondary promotion policy"
+    policy="/proc/sys/net/ipv4/conf/$CONTROL_IFACE/promote_secondaries"
+    read -r promote < "$policy" || exit 1
+    read -r all < /proc/sys/net/ipv4/conf/all/promote_secondaries || exit 1
+    [[ "$promote" =~ ^[01]$ && "$all" =~ ^[01]$ ]] || exit 1
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        address=$(awk '{print $4}' <<< "$line")
+        if printf '%s\n' "${owned[@]}" | grep -qxF "$address"; then
+            if [[ " $line " == *" secondary "* ]]; then
+                secondaries+=("$address")
+            else
+                primaries+=("$address")
+            fi
+        elif [ "${address#*/}" = "$old_prefix" ] &&
+                ip_in_cidr "${address%/*}" "$PERSISTENT_NETWORK"; then
+            unowned+=("$address")
+        fi
+    done <<< "$live"
+    # With promotion off, deleting a primary removes all its secondaries.
+    # Delete owned secondaries first. If an operator alias would be lost,
+    # leave the entire old allocation serving until policy/aliases change.
+    retirement_step="promotion disabled with unowned old-prefix aliases"
+    if [ "$promote" = 0 ] && [ "$all" = 0 ] &&
+            [ "${#primaries[@]}" != 0 ] && [ "${#unowned[@]}" != 0 ]; then
+        exit 1
+    fi
+
+    retirement_step="cannot inspect dnsmasq state"
+    systemctl is-active --quiet dnsmasq.service || active=$?
+    [ "$active" = 0 ] || [ "$active" = 3 ] || exit 1
+    retirement_step="cannot checkpoint retirement files or write their parents"
+    rm -rf "$retirement_backup" || exit 1
+    mkdir -m 700 "$retirement_backup" || exit 1
+    for i in "${!retirement_files[@]}"; do
+        path=${retirement_files[$i]}
+        retirement_step="cannot checkpoint or replace $path"
+        [ ! -L "$path" ] || exit 1
+        if [ -e "$path" ]; then
+            [ -f "$path" ] && [ -r "$path" ] && [ -w "$path" ] || exit 1
+            cp -p "$path" "$retirement_backup/$i" || exit 1
+        fi
+        [ -d "${path%/*}" ] || continue
+        temporary=$(mktemp "${path%/*}/.manet-retirement.XXXXXX") || exit 1
+        chmod 600 "$temporary" && sync -f "$temporary" &&
+            rm -f "$temporary" || exit 1
+    done
+    # Restore the original kernel primary first if any deletion fails.
+    printf '%s\n' "${primaries[@]}" "${secondaries[@]}" |
+        sed '/^$/d' > "$retirement_backup/addresses" || exit 1
+    [ "$active" != 0 ] || touch "$retirement_backup/dnsmasq-active" ||
+        exit 1
+    # Prepare the empty durable state before stopping DHCP. Rename only
+    # after cleanup, and restore its checkpoint if synchronization fails.
+    retirement_step="cannot stage retired allocation"
+    temporary=$(mktemp "${PERSISTENT_STATE_FILE}.XXXXXX") || exit 1
+    printf '%s\n' "$temporary" > "$retirement_backup/state-temp" || exit 1
+    printf 'PERSISTENT_IPV4=""\nPERSISTENT_CHUNK=""\nPERSISTENT_NETWORK=""\n' \
+        > "$temporary" || exit 1
+    chmod 644 "$temporary" && sync -f "$temporary" || exit 1
+    touch "$retirement_backup/armed" || exit 1
+
+    retirement_step="cannot stop old DHCP"
+    systemctl stop dnsmasq.service || exit 1
+    # DHCP may have granted leases during preflight. Refresh their snapshot
+    # after the stop; until withdrawal, rollback leaves these files in place.
+    retirement_step="cannot checkpoint stopped DHCP leases"
+    for i in 2 3 4; do
+        path=${retirement_files[$i]}
+        if [ -f "$path" ]; then
+            cp -p "$path" "$retirement_backup/$i" || exit 1
+        else
+            rm -f "$retirement_backup/$i" || exit 1
+        fi
+    done
+    for address in "${secondaries[@]}" "${primaries[@]}"; do
+        retirement_step="cannot delete owned address $address"
+        ip addr del "$address" dev "$CONTROL_IFACE" || exit 1
+    done
+    retirement_step="cannot withdraw old DHCP files or management name"
+    touch "$retirement_backup/files-changed" || exit 1
+    rm -f /etc/dnsmasq.d/mesh-eud.conf /var/lib/misc/dnsmasq.leases \
+        /run/dnsmasq.leases /tmp/dnsmasq.leases \
+        /var/run/my_ipv4_chunk /var/run/my_ipv4_chunk_size || exit 1
+    update_avahi_host "" || exit 1
+    retirement_step="cannot commit retired allocation"
+    mv -f "$temporary" "$PERSISTENT_STATE_FILE" &&
+        sync -f "${PERSISTENT_STATE_FILE%/*}" || exit 1
+    rm -f "$retirement_backup/armed" || exit 1
+    # Linux owns connected routes. An operator alias retains its route.
+)
+
+# Bound retries even when discovery polls once a second with no chunk marker.
+# Keep one diagnostic per distinct failure for this old/new CIDR pair.
+retire_previous_network() {
+    local retry=/run/manet-ip-retirement.retry now key reason previous=""
+    local saved_key="" deadline=0 temporary
+    if [ ! -f /run/manet-ip-retirement/armed ] &&
+            { [ -z "$PERSISTENT_NETWORK" ] ||
+              [ "$PERSISTENT_NETWORK" = "$IPV4_NETWORK" ]; }; then
+        rm -f "$retry"
+        return 0
+    fi
+    key="$PERSISTENT_NETWORK $PERSISTENT_IPV4 $IPV4_NETWORK"
+    read -r now _ < /proc/uptime || return 1
+    now=${now%%.*}
+    if [ -f "$retry" ]; then
+        { read -r saved_key; read -r deadline; previous=$(cat); } < "$retry"
+        if [ "$saved_key" = "$key" ] && [[ "$deadline" =~ ^[0-9]+$ ]] &&
+                [ "$now" -lt "$deadline" ]; then
+            return 1
+        fi
+    fi
+    if reason=$(retirement_transaction 2>&1); then
+        rm -f "$retry"
+        source "$PERSISTENT_STATE_FILE"
+        return 0
+    fi
+    # Command diagnostics can contain random temporary names. Deduplicate the
+    # stable failed step, not those incidental strings, across fresh attempts.
+    reason=$(sed -n '/^IP-MGR: /p' <<< "$reason")
+    reason=${reason:-"IP-MGR: CIDR retirement interrupted; recovery pending"}
+    if [ "$key" != "$saved_key" ] || [ "$reason" != "$previous" ]; then
+        printf '%s\n' "$reason" >&2
+    fi
+    read -r now _ < /proc/uptime || return 1
+    temporary=$(mktemp "${retry}.XXXXXX") || return 1
+    printf '%s\n' "$key" "$((${now%%.*} + 15))" "$reason" > "$temporary" &&
+        mv -f "$temporary" "$retry"
+    return 1
 }
 
 # Compare the supplied MAC with every local sysfs interface address.
@@ -363,34 +604,6 @@ release_control_ips() {
         ip addr del "${CURRENT_IPV4}/${prefix}" dev "$CONTROL_IFACE" 2>/dev/null || true
         log "Released current br0 IPv4 address: $CURRENT_IPV4"
     fi
-}
-
-# Remove other nonservice CONTROL_IFACE addresses within IPV4_NETWORK.
-# Preserve the primary and EUD gateway derived from PERSISTENT_CHUNK.
-cleanup_control_aliases() {
-    local prefix="${IPV4_NETWORK#*/}"
-    local primary=""
-    local secondary=""
-    local ip=""
-    local keep=""
-    local _dhcp_start=""
-    local _dhcp_end=""
-
-    [ -n "$PERSISTENT_CHUNK" ] || return 0
-
-    IFS=: read -r primary secondary _dhcp_start _dhcp_end <<< "$(get_chunk_ips "$PERSISTENT_CHUNK")"
-    keep=" $primary $secondary "
-
-    while read -r ip; do
-        [ -n "$ip" ] || continue
-        ip_in_cidr "$ip" "$IPV4_NETWORK" || continue
-        is_service_reserved_ip "$ip" && continue
-
-        if [[ "$keep" != *" $ip "* ]]; then
-            ip addr del "${ip}/${prefix}" dev "$CONTROL_IFACE" 2>/dev/null || true
-            log "Removed stale $CONTROL_IFACE IPv4 alias: $ip"
-        fi
-    done < <(ip -4 -o addr show dev "$CONTROL_IFACE" 2>/dev/null | awk '{print $4}' | cut -d/ -f1)
 }
 
 # bat0 is the only mesh-facing bridge port. The rule set does not depend on
@@ -629,17 +842,17 @@ if [ -z "$MY_MAC" ]; then
     exit 1
 fi
 
-log "Chunk-based IP allocation: chunk_size=$CHUNK_SIZE (max_euds=$MAX_EUDS)"
-
 # Load persistent state
 if [ -f "$PERSISTENT_STATE_FILE" ]; then
     source "$PERSISTENT_STATE_FILE" 2>/dev/null
-    if [ -n "$PERSISTENT_IPV4" ] && [ -n "$PERSISTENT_CHUNK" ]; then
-        log "Loaded persistent state: chunk=$PERSISTENT_CHUNK, ip=$PERSISTENT_IPV4"
-    fi
 fi
 
-cleanup_control_aliases
+retire_previous_network || exit 1
+
+log "Chunk-based IP allocation: chunk_size=$CHUNK_SIZE (max_euds=$MAX_EUDS)"
+if [ -n "$PERSISTENT_IPV4" ] && [ -n "$PERSISTENT_CHUNK" ]; then
+    log "Loaded persistent state: chunk=$PERSISTENT_CHUNK, ip=$PERSISTENT_IPV4"
+fi
 
 # Check if we already have an IP configured on br0
 read_current_ipv4() {
@@ -680,10 +893,7 @@ case $IPV4_STATE in
             # Check if network changed
             if [ -n "$PERSISTENT_NETWORK" ] && [ "$PERSISTENT_NETWORK" != "$IPV4_NETWORK" ]; then
                 log "Network changed from ${PERSISTENT_NETWORK} to ${IPV4_NETWORK}. Selecting new chunk."
-                PERSISTENT_IPV4=""
-                PERSISTENT_CHUNK=""
-                PERSISTENT_NETWORK=""
-                save_persistent_state
+                retire_previous_network || exit 1
             else
                 # Verify persistent IP is in current network
                 if ip_in_cidr "$PERSISTENT_IPV4" "$IPV4_NETWORK"; then
@@ -697,7 +907,7 @@ case $IPV4_STATE in
                     log "Persistent IP ${PERSISTENT_IPV4} not in network ${IPV4_NETWORK}. Selecting new chunk."
                     PERSISTENT_IPV4=""
                     PERSISTENT_CHUNK=""
-                    save_persistent_state
+                    save_persistent_state || exit 1
                 fi
             fi
         fi
@@ -729,6 +939,13 @@ case $IPV4_STATE in
             log "Proposed chunk ${PROPOSED_CHUNK} is in use. Will retry next cycle."
         else
             log "Claiming chunk ${PROPOSED_CHUNK} with br0 IPs ${BR0_PRIMARY} and ${BR0_SECONDARY}..."
+
+            # Persist intent first so interruption after either address or
+            # dnsmasq install reuses the same allocation on the next pass.
+            PERSISTENT_IPV4="$BR0_PRIMARY"
+            PERSISTENT_CHUNK="$PROPOSED_CHUNK"
+            PERSISTENT_NETWORK="$IPV4_NETWORK"
+            save_persistent_state || exit 1
             
             # Assign both IPs to br0
             ip addr add "${BR0_PRIMARY}/${IPV4_NETWORK#*/}" dev "$CONTROL_IFACE"
@@ -739,12 +956,6 @@ case $IPV4_STATE in
             # Configure dnsmasq
             configure_dnsmasq "$BR0_PRIMARY" "$BR0_SECONDARY" "$DHCP_START" "$DHCP_END" || exit 1
 
-            # Save persistent state
-            PERSISTENT_IPV4="$BR0_PRIMARY"
-            PERSISTENT_CHUNK="$PROPOSED_CHUNK"
-            PERSISTENT_NETWORK="$IPV4_NETWORK"
-            save_persistent_state
-            
             log "Successfully claimed chunk ${PROPOSED_CHUNK}"
             
             # Write chunk and block size for the identity publisher to pick up
@@ -778,7 +989,7 @@ case $IPV4_STATE in
                 PERSISTENT_IPV4=""
                 PERSISTENT_CHUNK=""
                 PERSISTENT_NETWORK=""
-                save_persistent_state
+                save_persistent_state || exit 1
                 rm -f /var/run/my_ipv4_chunk /var/run/my_ipv4_chunk_size
             fi
         else

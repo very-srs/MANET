@@ -133,6 +133,7 @@ Read [settings transactions](guide/content/settings.md) and
 | [mesh-config-rollback.sh](../MANET/node_tools/mesh-config-rollback.sh) | Snapshot and restore a protected connectivity-changing trial. |
 | [mesh-config-write.py](../MANET/node_tools/mesh-config-write.py) | Write a literal configuration value without treating it as replacement syntax. |
 | [manet_config_io.py](../MANET/node_tools/manet_config_io.py) | Shared literal rendering and durable permission-preserving file replacement. |
+| [manet_config_journal.py](../MANET/node_tools/manet_config_journal.py) | Persist, resume, verify and roll back local configuration jobs. |
 
 ## Shared service hosting
 

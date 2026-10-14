@@ -129,6 +129,14 @@ service_election_run() {
         return 0
     fi
     while true; do
+        # CIDR retirement holds this same lock. Never recreate a VIP computed
+        # before retirement, including after a long successor wait.
+        local current_cidr
+        current_cidr=$(sed -n 's/^ipv4_network=//p' /etc/mesh.conf)
+        if [ "$current_cidr" != "$IPV4_NETWORK" ]; then
+            log 'CIDR changed during election; retrying with current VIPs'
+            return 1
+        fi
         if [ -f "$LOCK_FILE.release-pending" ]; then
             service_election_release || return 1
         fi

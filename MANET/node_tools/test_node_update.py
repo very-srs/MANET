@@ -73,8 +73,16 @@ with open(os.environ['TEST_EVENTS'], 'a') as stream:
     stream.write('marker ' + (marker.read_text().splitlines()[0] if marker.exists() else 'missing') + '\\n')
 if os.environ.get('TEST_SYSTEMCTL_FAIL') == args:
     sys.exit(1)
+stopped = Path(os.environ['TEST_ROOT']) / 'run/test-stopped-services'
+units = set(stopped.read_text().splitlines()) if stopped.exists() else set()
+if sys.argv[1] == 'stop':
+    units.add(sys.argv[-1])
+    stopped.write_text('\\n'.join(sorted(units)))
 if sys.argv[1] == 'show':
-    print('active' if sys.argv[-1] in os.environ.get('TEST_ACTIVE_SERVICES', '').split(',') else 'inactive')
+    active = sys.argv[-1] in os.environ.get('TEST_ACTIVE_SERVICES', '').split(',')
+    print('active' if active and sys.argv[-1] not in units else 'inactive')
+if sys.argv[1] == 'is-active' and sys.argv[-1] == 'mesh-config-apply.service':
+    sys.exit(3)
 ''')
         self.environment = patch.dict(os.environ, {
             'PATH': str(commands) + os.pathsep + os.environ['PATH'],
@@ -85,6 +93,8 @@ if sys.argv[1] == 'show':
         })
         self.environment.start()
         self.addCleanup(self.environment.stop)
+        from test_config_sandbox import isolate_config
+        isolate_config(self, self.root)
         self.members = {}
         for name in update.REQUIRED:
             if name in update.MARKERS:
@@ -99,6 +109,9 @@ if sys.argv[1] == 'show':
             elif name.endswith('manet-uplink-dns.py'):
                 body = (b'#!/bin/sh\necho qualified-dns >> "$TEST_EVENTS"\n'
                         b'exit "${TEST_UPLINK_DNS_FAIL:-0}"\n')
+            elif name.endswith('mesh-config-sync.py'):
+                body = (b'#!/bin/sh\necho config-migration >> "$TEST_EVENTS"\n'
+                        b'exit "${TEST_CONFIG_MIGRATION_FAIL:-0}"\n')
             else:
                 body = ('#!/bin/sh\n# ' + name + '\n').encode()
             self.members[name] = (body, 0o755 if name.endswith(('.sh', '.py')) else 0o644)
@@ -184,6 +197,147 @@ if sys.argv[1] == 'show':
         self.assertFalse(self.updater.pending.exists())
         self.assertEqual(self.updater.marker.read_text(), self.new_version)
         self.assertEqual(self.history().count('qualified-dns'), 2)
+
+    def test_config_migration_failure_stays_pending_until_offline_retry(self):
+        """Migration is an activation gate, before any manager restart."""
+        with patch.dict(os.environ, TEST_CONFIG_MIGRATION_FAIL='1'):
+            with self.assertRaises(update.UpdateError):
+                self.updater.update()
+        self.assertTrue(self.updater.pending.exists())
+        for name in update.MARKERS:
+            self.assertEqual((self.root / name).read_text(), self.old_version)
+        self.assertNotIn('systemctl restart node-manager.service', self.history())
+        self.events.write_text('')
+        self.updater.update(recover_only=True)
+        self.assertFalse(self.updater.pending.exists())
+        self.assertNotIn('curl ', self.history())
+        self.assertNotIn('dependency', self.history())
+        self.assertIn('config-migration', self.history())
+        for service in update.RUNTIME_SERVICES:
+            self.assertIn('systemctl try-restart ' + service, self.history())
+
+    def test_config_units_stop_before_first_payload_replacement(self):
+        """A running worker and manager cannot race installed config files."""
+        original = self.updater.install_payload
+
+        def install(directory, members):
+            """Observe quiescence at the first possible payload write."""
+            for unit in ('node-manager.service', 'mesh-config-apply.service'):
+                self.assertIn('systemctl stop ' + unit, self.history())
+            self.assertTrue(
+                (self.updater.recovery / 'config-staging.json').exists())
+            self.assertNotIn('config-migration', self.history())
+            return original(directory, members)
+
+        with patch.dict(os.environ, TEST_ACTIVE_SERVICES=
+                        'node-manager.service,mesh-config-apply.service'), \
+                patch.object(self.updater, 'install_payload', install):
+            self.updater.update()
+        history = self.history()
+        self.assertLess(history.index('config-migration'),
+                        history.index('systemctl restart node-manager.service'))
+
+    def test_config_stop_failure_does_not_replace_payload(self):
+        """Failure to quiesce must leave the old payload and versions intact."""
+        with patch.dict(os.environ,
+                        TEST_SYSTEMCTL_FAIL='stop node-manager.service'):
+            with self.assertRaises(update.UpdateError):
+                self.updater.update()
+        self.assertEqual(self.old_manager.read_text(), 'old manager\n')
+        self.assertTrue(self.updater.pending.exists())
+        self.assertNotIn('config-migration', self.history())
+        for name in update.MARKERS:
+            self.assertEqual((self.root / name).read_text(), self.old_version)
+
+    def real_config_migration(self):
+        """Ship real import code and prepare a consumed legacy activation."""
+        tools = Path(__file__).resolve().parent
+        for name in ('mesh-config-sync.py', 'manet_config_journal.py',
+                     'manet_admin.py', 'manet_admin_limits.py',
+                     'manet_config_io.py', 'mesh_config.py',
+                     'manet_supplicant.py'):
+            self.members['usr/local/bin/' + name] = (
+                (tools / name).read_bytes(), 0o755)
+        package = {'version': 'abc123', 'activate_at': 1,
+                   'config': {'mtx': 'n'}}
+        pending = self.root / 'run/mesh_pending_config.json'
+        pending.write_text(json.dumps(package))
+        pending.chmod(0o600)
+        (self.root / 'run/mesh_config_ack_version').write_text('abc123')
+        admin = self.root / 'var/lib/manet-admin'
+        admin.mkdir(parents=True)
+        (admin / 'received-70.json').write_text(json.dumps(
+            {'done': True, 'order': [100, 'a' * 32]}))
+        self.make_archive()
+        return package
+
+    def test_interrupted_migration_recovers_after_run_is_lost(self):
+        """Death before the first journal write retains consumed work."""
+        package = self.real_config_migration()
+        with patch.object(self.updater, 'migrate_config',
+                          side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                self.updater.update()
+        saved = self.updater.recovery / 'config-staging.json'
+        self.assertEqual(saved.stat().st_mode & 0o777, 0o600)
+        self.assertTrue(self.updater.pending.exists())
+        for path in (self.root / 'run').iterdir():
+            path.unlink()
+        (self.root / 'proc/sys/kernel/random/boot_id').write_text('new-boot')
+        self.events.write_text('')
+        self.updater.update(recover_only=True, files_only=True)
+        self.assertEqual(self.history(), '')
+        # Normal boot can start the manager before update finishing runs.
+        # Its first sync must see the original package and consumed ACK.
+        pending = self.root / 'run/mesh_pending_config.json'
+        self.assertEqual(json.loads(pending.read_text()), package)
+        self.assertEqual(pending.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(
+            (self.root / 'run/mesh_config_ack_version').read_text(), 'abc123')
+        self.updater.update(recover_only=True)
+        journal = self.root / 'var/lib/manet-config/journal.json'
+        job = json.loads(journal.read_text())['job']
+        self.assertEqual(job['package'], package)
+        self.assertEqual(job['phase'], 'prepared')
+        self.assertTrue(job['consumed'])
+        self.assertTrue(job['acknowledged'])
+        self.assertFalse(self.updater.pending.exists())
+        self.assertNotIn('curl ', self.history())
+        self.assertNotIn('dependency', self.history())
+
+    def test_migration_child_death_after_journal_save_retries_idempotently(self):
+        """A partial import retires the old trial on offline recovery."""
+        self.real_config_migration()
+        legacy = self.root / 'var/lib/manet-config-rollback'
+        legacy.mkdir()
+        (legacy / 'mesh.conf').write_text('mtx=y\n')
+        (legacy / 'state').write_text(
+            'VERSION=abc123\nPEERS_BEFORE=1\nDEADLINE=1234\nBOOT_ID=old\n')
+        name = 'usr/local/bin/manet_config_journal.py'
+        source, mode = self.members[name]
+        source = source.replace(
+            b'        self.save()\n        self.retire_legacy()',
+            b'        self.save()\n'
+            b'        if os.environ.get("TEST_MIGRATION_DIE"):\n'
+            b'            os._exit(73)\n        self.retire_legacy()')
+        self.members[name] = (source, mode)
+        self.make_archive()
+        with patch.dict(os.environ, TEST_MIGRATION_DIE='1'):
+            with self.assertRaisesRegex(update.UpdateError, '73'):
+                self.updater.update()
+        self.assertTrue(self.updater.pending.exists())
+        self.assertTrue((legacy / 'state').exists())
+        journal = self.root / 'var/lib/manet-config/journal.json'
+        before = journal.read_bytes()
+        for name in update.MARKERS:
+            self.assertEqual((self.root / name).read_text(), self.old_version)
+        for path in (self.root / 'run').iterdir():
+            path.unlink()
+        self.updater.update(recover_only=True)
+        self.assertEqual(journal.read_bytes(), before)
+        self.assertFalse((legacy / 'state').exists())
+        self.assertTrue((legacy / 'journal-owned').exists())
+        self.assertFalse(self.updater.pending.exists())
 
     def test_runtime_daemons_restart_and_only_active_ones_are_checked(self):
         with patch.dict(os.environ, {'TEST_ACTIVE_SERVICES': 'manet-atak.service,gps-reader.service'}):

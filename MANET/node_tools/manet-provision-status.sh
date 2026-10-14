@@ -24,6 +24,7 @@ if [ -r "$STATE_FILE" ]; then
         case "$k" in
             STATE) STATE="$v" ;; PHASE) PHASE="$v" ;;
             STARTED) STARTED="$v" ;; FINISHED) FINISHED="$v" ;;
+            LOG) LOG_FILE="$v" ;;
         esac
     done < "$STATE_FILE"
 fi
@@ -127,7 +128,11 @@ incomplete)
     printf '  network during setup: the usual cause is the Ethernet cable\n'
     printf '  being unplugged before provisioning finished.\n\n'
     printf '  To retry: reconnect Ethernet, confirm internet, then run\n'
-    printf '      sudo radio-setup.sh\n'
+    if [ "$PHASE" = bootstrap-network ]; then
+        printf '      sudo systemctl restart mesh-provision.service\n'
+    else
+        printf '      sudo radio-setup.sh\n'
+    fi
     printf '  or simply reboot: it retries automatically.\n'
     printf '  Details : %s\n' "$FAIL_FILE"
     printf '  Full log: %s\n' "$LOG_FILE"

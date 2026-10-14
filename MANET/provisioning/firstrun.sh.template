@@ -100,28 +100,133 @@ REG="__REGULATORY_DOMAIN__"
 HOST_MAC=$(ip a | grep -A1 $(networkctl | grep -v bat | awk '/ether/ {print $2}' | head -1) \
    | awk '/ether/ {print $2}' | cut -d':' -f 5-6 | sed 's/://g')
 
-echo "Waiting for internet connectivity..."
-# Blink POWER LED rapidly while waiting (RPi5: /sys/class/leds/PWR)
-PWR_LED=/sys/class/leds/PWR
-if [ -d "$PWR_LED" ]; then
-    echo timer        > "$PWR_LED/trigger"   2>/dev/null || true
-    echo 100          > "$PWR_LED/delay_on"  2>/dev/null || true
-    echo 100          > "$PWR_LED/delay_off" 2>/dev/null || true
+BOOTSTRAP_LOG=/boot/firmware/provision.log
+# BEGIN bounded provisioning connectivity
+# This runs before the install archive supplies the full status commands.
+mkdir -p /var/lib /usr/local/bin /etc/update-motd.d
+if [ ! -x /usr/local/bin/manet-provision-status.sh ]; then
+    cat > /usr/local/bin/manet-provision-status.sh <<'BOOT_STATUS'
+#!/bin/bash
+# Report early bootstrap status before the full tools are installed.
+STATE= PHASE= LOG=
+while IFS='=' read -r key value; do
+    case "$key" in
+        STATE) STATE="$value" ;; PHASE) PHASE="$value" ;; LOG) LOG="$value" ;;
+    esac
+done < /var/lib/manet-provision.state
+printf '\n  MANET provisioning: %s\n  Stage: %s\n' "$STATE" "$PHASE"
+if [ "$STATE" = incomplete ]; then
+    cat /var/lib/manet-provision.failures
+    echo '  Restore Ethernet internet access, then reboot to retry.'
+    echo '  Or run: sudo systemctl restart mesh-provision.service'
 fi
-
-while true; do
-    if ping -c 1 -W 2 8.8.8.8 > /dev/null 2>&1; then
-        echo "Internet connectivity confirmed!"
-        break
-    fi
-    echo "Waiting for internet..."
-    sleep 5
-done
-
-# Restore LED to solid-on
-if [ -d "$PWR_LED" ]; then
-    echo default-on > "$PWR_LED/trigger" 2>/dev/null || true
+printf '  Log: %s\n\n' "$LOG"
+exit 0
+BOOT_STATUS
+    chmod 755 /usr/local/bin/manet-provision-status.sh
 fi
+ln -sf /usr/local/bin/manet-provision-status.sh \
+    /etc/update-motd.d/50-manet-provision
+
+# Use the same LED names and failure pattern as manet-led-status.sh.
+bootstrap_led() {
+    local mode="$1" names="$2" led max
+    for led in $names; do
+        led="/sys/class/leds/$led"
+        [ -w "$led/trigger" ] || continue
+        case "$mode" in
+            wait)
+                echo timer > "$led/trigger"
+                echo 100 > "$led/delay_on"
+                echo 100 > "$led/delay_off" ;;
+            heartbeat) echo heartbeat > "$led/trigger" ;;
+            on)
+                echo none > "$led/trigger"
+                max=$(cat "$led/max_brightness" 2>/dev/null)
+                case "$max" in ''|*[!0-9]*) max=1 ;; esac
+                printf '%s\n' "$max" > "$led/brightness" ;;
+        esac
+        return 0
+    done
+    return 0
+}
+
+# Record the same verdict schema consumed by the banner and LED service.
+bootstrap_state() {
+    local state="$1" now temporary
+    now=$(date +%s)
+    temporary=$(mktemp /var/lib/.manet-provision.XXXXXX) || return 1
+    printf '%s\n' "STATE=$state" "PHASE=bootstrap-network" \
+        "STARTED=$BOOTSTRAP_STARTED" "UPDATED=$now" \
+        "LOG=$BOOTSTRAP_LOG" > "$temporary"
+    [ "$state" != incomplete ] || echo "FINISHED=$now" >> "$temporary"
+    chmod 644 "$temporary" &&
+        mv -f "$temporary" /var/lib/manet-provision.state &&
+        sync -f /var/lib/manet-provision.state
+}
+
+# HEAD follows the download path without accepting executable data.
+# No certificate-date dependency before the best-effort HTTP clock step.
+bootstrap_probe() {
+    local url="$1" uptime remaining code
+    read -r uptime _ < /proc/uptime
+    remaining=$((BOOTSTRAP_DEADLINE - ${uptime%.*}))
+    [ "$remaining" -gt 0 ] || return 1
+    [ "$remaining" -le 10 ] || remaining=10
+    code=$(curl --fail --silent --show-error --head --location --insecure \
+        --proto '=http,https' --proto-redir '=http,https' \
+        --connect-timeout 3 --max-time "$remaining" \
+        --output /dev/null --write-out '%{http_code}' "$url") || return 1
+    [ "$code" = 200 ]
+}
+
+# Require installation resources, with a five-minute monotonic total budget.
+# HTTP Date remains optional, as in the logging-clock step below.
+bootstrap_wait() {
+    local uptime remaining missing base asset
+    read -r uptime _ < /proc/uptime
+    BOOTSTRAP_DEADLINE=$((${uptime%.*} + 300))
+    bootstrap_probe http://google.com ||
+        echo 'HTTP Date endpoint unavailable; continuing resource checks'
+    while true; do
+        missing=
+        bootstrap_probe http://deb.debian.org/debian/dists/trixie/InRelease ||
+            missing='Debian archive'
+        bootstrap_probe '__INSTALL_URL__' ||
+            missing="${missing:+$missing, }MANET GitHub release"
+        if [ "__INSTALL_MEDIAMTX__" = y ]; then
+            base=https://github.com/bluenviron/mediamtx/releases/download
+            asset="mediamtx_${MEDIAMTX_VERSION}_linux_arm64.tar.gz"
+            bootstrap_probe "$base/$MEDIAMTX_VERSION/$asset" ||
+                missing="${missing:+$missing, }MediaMTX GitHub release"
+        fi
+        [ -n "$missing" ] || return 0
+        read -r uptime _ < /proc/uptime
+        remaining=$((BOOTSTRAP_DEADLINE - ${uptime%.*}))
+        if [ "$remaining" -le 0 ]; then
+            printf '%s\n' "Timed out after 300s waiting for: $missing" \
+                > /var/lib/manet-provision.failures
+            bootstrap_state incomplete || return 1
+            bootstrap_led heartbeat 'PWR led1 red:power power'
+            bootstrap_led on 'ACT led0 green:status status'
+            /usr/local/bin/manet-provision-status.sh
+            return 1
+        fi
+        echo "Waiting for installation resources: $missing (${remaining}s left)"
+        [ "$remaining" -le 5 ] || remaining=5
+        sleep "$remaining"
+    done
+}
+
+MEDIAMTX_VERSION='v1.15.3'
+BOOTSTRAP_STARTED=$(date +%s)
+: > /var/lib/manet-provision.failures
+bootstrap_state running || exit 1
+bootstrap_led wait 'PWR led1 red:power power'
+bootstrap_wait || exit 1
+bootstrap_led on 'PWR led1 red:power power'
+echo 'Installation resources reachable'
+# END bounded provisioning connectivity
 
 # Best-effort HTTP Date for readable logs; downloads do not trust this clock.
 http_date=$(curl --fail --silent --show-error --head --proto '=http' \
@@ -775,7 +880,6 @@ if [ "__INSTALL_MEDIAMTX__" = "y" ]; then
 	echo "Installing MediaMTX"
     # Download and verify MediaMTX before extracting it.
     # Keep these pins identical in both templates; provisioning tests enforce this.
-    MEDIAMTX_VERSION='v1.15.3'
     MEDIAMTX_SHA256='5f3cb84ef42952a82b1ff5764fd06dc13697d21b06eb179d83663ec55d15ed0c'
     MEDIAMTX_DIR=$(mktemp -d) || exit 1
     cd "$MEDIAMTX_DIR" || exit 1

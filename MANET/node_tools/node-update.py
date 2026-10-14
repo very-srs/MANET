@@ -113,6 +113,10 @@ REQUIRED = MARKERS | {
     "usr/local/bin/manet_measurement_storage.py",
     "usr/local/bin/mesh-hosts-update.sh", "usr/local/bin/manet_hosts.py",
     "usr/local/bin/manet_config_io.py",
+    "usr/local/bin/manet_config_journal.py",
+    "usr/local/bin/mesh-config-sync.py", "usr/local/bin/mesh-config-apply.sh",
+    "usr/local/bin/mesh_config.py", "usr/local/bin/manet_admin_limits.py",
+    "usr/local/bin/manet_supplicant.py",
     "usr/local/share/manet/logrotate.conf",
     "etc/systemd/system/manet-logrotate.service",
     "etc/systemd/system/manet-logrotate.timer",
@@ -149,11 +153,12 @@ def stop_process(process):
         process.communicate()
 
 
-def run_command(args, timeout=120):
+def run_command(args, timeout=120, env=None):
     """Run a bounded command and stop its process group on interruption."""
     # A new session gives timeout cleanup its own process group to terminate.
     with subprocess.Popen([str(arg) for arg in args], stdout=subprocess.PIPE,
-                          stderr=subprocess.STDOUT, start_new_session=True) as process:
+                          stderr=subprocess.STDOUT, start_new_session=True,
+                          env=env) as process:
         try:
             output, _ = process.communicate(timeout=timeout)
         except BaseException:
@@ -490,6 +495,10 @@ class Updater:
             # Early boot restores files without activation or version commits.
             if files_only:
                 self.install_payload(staged, members)
+                # Restore pending authority before the manager can start at
+                # boot and accept a replacement from Alfred. No activation
+                # or systemctl calls belong in this early recovery phase.
+                self.restore_config()
             else:
                 self.install(staged, members)
         if not files_only:
@@ -528,6 +537,77 @@ class Updater:
                               ("55-manet-power", "manet-power-status.sh")):
             self.install_link(motd / label, f"/usr/local/bin/{script}")
 
+    def quiesce_config(self):
+        """Stop config producers and wait for an in-flight applier to exit."""
+        manager = 'node-manager.service'
+        worker = 'mesh-config-apply.service'
+        run_command(['systemctl', 'stop', manager])
+        state = run_command(['systemctl', 'show', '--property=ActiveState',
+                             '--value', worker]).strip()
+        if state not in {b'inactive', b'failed'}:
+            run_command(['systemctl', 'stop', worker])
+            # An ACS worker can restart the manager while stopping. Stop it
+            # again after the worker has exited, before touching its inputs.
+            run_command(['systemctl', 'stop', manager])
+        for service in (manager, worker):
+            state = run_command(['systemctl', 'show', '--property=ActiveState',
+                                 '--value', service]).strip()
+            if state not in {b'inactive', b'failed'}:
+                raise UpdateError('Config service did not stop: ' + service)
+
+    def preserve_config(self):
+        """Save volatile legacy inputs once, before replacing any payload."""
+        snapshot = self.recovery / 'config-staging.json'
+        if snapshot.exists():
+            return
+        saved = {}
+        for name in ('mesh_pending_config.json', 'mesh_config_ack_version'):
+            path = self.root / 'run' / name
+            if not path.exists():
+                continue
+            # Do not turn an untrusted staging file into a trusted private
+            # copy. The receiver applies the same check on legacy import.
+            if name == 'mesh_pending_config.json':
+                st = path.stat()
+                if st.st_uid != os.geteuid() or st.st_mode & 0o077:
+                    raise UpdateError('Legacy pending config is not private')
+            saved[name] = path.read_text()
+        atomic_file(snapshot, data=json.dumps(saved).encode(), mode=0o600)
+
+    def restore_config(self):
+        """Restore saved volatile authority before manager startup or import."""
+        snapshot = self.recovery / 'config-staging.json'
+        if not snapshot.exists():
+            return
+        journal = self.root / 'var/lib/manet-config/journal.json'
+        pending = self.root / 'run/mesh_pending_config.json'
+        if not journal.exists() and not pending.exists():
+            saved = json.loads(snapshot.read_text())
+            # Publish ACK first so death during restoration cannot leave a
+            # pending package that conceals its still-missing consumed ACK.
+            for name in ('mesh_config_ack_version', 'mesh_pending_config.json'):
+                if name in saved:
+                    atomic_file(self.root / 'run' / name,
+                                data=saved[name].encode(), mode=0o600)
+
+    def migrate_config(self):
+        """Restore lost volatile inputs and durably import before activation."""
+        self.restore_config()
+        # Rooted paths also let recovery tests execute the real migration.
+        layout = {
+            'MANET_CONFIG_STATE_DIR': 'var/lib/manet-config',
+            'MANET_ADMIN_STATE_DIR': 'var/lib/manet-admin',
+            'MANET_ROLLBACK_DIR': 'var/lib/manet-config-rollback',
+            'MANET_RUN_DIR': 'run', 'MANET_TIME_RUN_DIR': 'run',
+            'MANET_MESH_CONF': 'etc/mesh.conf',
+            'MANET_WPA_DIR': 'etc/wpa_supplicant',
+        }
+        env = dict(os.environ)
+        env.update({key: str(self.root / value)
+                    for key, value in layout.items()})
+        helper = self.destination('usr/local/bin/mesh-config-sync.py')
+        run_command([str(helper), 'migrate'], env=env)
+
     def install(self, directory, members):
         """Install files, activate services and commit versions after checks."""
         active_runtime = []
@@ -549,7 +629,10 @@ class Updater:
                     raise UpdateError('Invalid runtime activation snapshot')
         atomic_file(snapshot, data=json.dumps({'boot': boot, 'services': active_runtime}).encode(),
                     mode=0o600)
+        self.quiesce_config()
+        self.preserve_config()
         self.install_payload(directory, members)
+        self.migrate_config()
         self.protect_kernel(directory)
         mesh_setup = self.destination('usr/local/bin/manet-mesh-supplicant.py')
         # Serialize the one-time rewrite with ACS and AP role transitions.

@@ -60,6 +60,7 @@ from manet_web_limits import BoundedHTTPServer, RequestLimits, STATUS_CACHE, MAN
 from mesh_config import (local_changes, mesh_changes, strip_local_keys,
                          validate_config, submitted_changes)
 from manet_eud_ap import apply_local as apply_local_settings, configured_ssid
+from manet_config_journal import config_application_status
 from manet_admin import AdminTransport, CONFIG_ACK_TYPE, new_version, private_json_write, require_clock
 from manet_radio import (
     get_halow_driver_info, txpower_choices_from_cap, get_iface_txpower_cap,
@@ -2859,9 +2860,13 @@ def authenticated_config_acks():
             return {}
         # The transport decodes Alfred quoting and verifies envelopes.
         # Messages arrive oldest first, so each hostname keeps its newest.
-        return {message.payload.get('hostname'): message.payload.get('version')
-                for message in ADMIN.messages(CONFIG_ACK_TYPE, result.stdout)
-                if message.payload.get('kind') == 'config_ack'}
+        newest = {message.payload.get('hostname'): message.payload
+                  for message in ADMIN.messages(CONFIG_ACK_TYPE, result.stdout)
+                  if message.payload.get('kind') == 'config_ack'}
+        return {hostname: payload.get('version')
+                for hostname, payload in newest.items()
+                if payload.get('application_status')
+                not in {'rolled_back', 'cancelled'}}
     except Exception:
         return {}
 
@@ -2869,11 +2874,14 @@ def authenticated_config_acks():
 def read_rollback_state():
     """Return whether config rollback is armed and its deadline.
 
-    Parse mesh-config-rollback.sh assignments as display data without sourcing.
-    The deadline uses the boot clock identified by BOOT_ID. The controller
-    re-arms the full grace at its next check after one reboot and decides
-    immediately after a second reboot.
+    Journal trials expire immediately when the boot ID changes; unverified
+    or unhealthy changes restore their original snapshot on the next pass.
+    For an unmigrated legacy trial, parse shell assignments as display data.
+    Only that retired controller grants another grace window after one reboot.
     """
+    application = config_application_status()
+    if application is not None:
+        return application['rollback']
     state = load_kv_file(ROLLBACK_STATE_FILE)
     if not state:
         return {'armed': False}
@@ -2937,6 +2945,7 @@ def assemble_admin_status():
             'auto_update':      conf.get('auto_update', 'n'),
             'admin_password':   conf.get('admin_password', ''),
         },
+        'application':  config_application_status(),
         'pending':      pending,
         'rollback':     read_rollback_state(),
         'nodes':        node_status,

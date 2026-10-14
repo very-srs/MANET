@@ -31,6 +31,9 @@ class Timers:
     def timeout_add_seconds(self, delay, callback, *args):
         return self.timeout_add(delay * 1000, callback, *args)
 
+    def idle_add(self, callback, *args):
+        return self.timeout_add(0, callback, *args)
+
     def source_remove(self, source):
         del self.sources[source]
 
@@ -51,6 +54,7 @@ class Element:
         self.writes = []
         self.get_static_pad = Mock(return_value=Mock())
         self.connect = Mock()
+        self.emit = Mock(return_value=Mock())
 
     def set_property(self, name, value):
         self.props[name] = value

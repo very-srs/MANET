@@ -18,9 +18,15 @@ if [ $# -gt 1 ] || { [ $# -eq 1 ] && [ "$1" != --force ]; }; then
     exit 1
 fi
 
+# Only the journal worker may perform writes. Direct invocation resumes the
+# durable job too. The internal environment is set by that locked worker.
+if [ "${MANET_CONFIG_WORKER:-0}" != 1 ]; then
+    exec python3 "$(dirname "$0")/manet_config_journal.py"
+fi
+
 RUN_DIR="${MANET_RUN_DIR:-/var/run}"
 WPA_DIR="${MANET_WPA_DIR:-/etc/wpa_supplicant}"
-PENDING_CONFIG="$RUN_DIR/mesh_pending_config.json"
+PENDING_CONFIG="${MANET_CONFIG_PENDING:-$RUN_DIR/mesh_pending_config.json}"
 MESH_CONF="${MANET_MESH_CONF:-/etc/mesh.conf}"
 APPLY_LOG="${MANET_APPLY_LOG:-/var/log/mesh-config-apply.log}"
 APPLIED_VERSION_FILE="$RUN_DIR/mesh_applied_config_version"
@@ -69,10 +75,18 @@ conf_set() {
     python3 "$CONFIG_WRITER" "$MESH_CONF" "$1" "$2" || die "Cannot update $1"
 }
 
+# Confirm disabled units are inactive or absent, including after a retry.
+config_stop_service() {
+    systemctl stop "$1" 2>/dev/null || true
+    systemctl is-active --quiet "$1"
+    case $? in
+        3|4) return 0 ;;
+        *) die "Cannot verify stopped service $1" ;;
+    esac
+}
+
 # Apply safe settings (no mesh disruption)
 apply_safe_settings() {
-    local changed=false
-
     for key in admin_password mtx mumble auto_update; do
         local val
         val=$(cfg_get "$key")
@@ -88,24 +102,22 @@ apply_safe_settings() {
                 log "  $key: '$current' → '$val'"
             fi
             conf_set "$key" "$val"
-            changed=true
         fi
     done
 
-    if [ "$changed" = "true" ]; then
-        # Handle service toggles
-        local mtx_val mumble_val
-        mtx_val=$(cfg_get "mtx")
-        mumble_val=$(cfg_get "mumble")
+    # Reconcile disabled services even after a partial file-only apply.
+    # Enabled services remain subject to the normal elections.
+    local mtx_val mumble_val
+    mtx_val=$(cfg_get "mtx")
+    mumble_val=$(cfg_get "mumble")
 
-        if [ "$mtx_val" = "n" ]; then
-            systemctl stop mediamtx 2>/dev/null || true
-            log "  MediaMTX stopped"
-        fi
-        if [ "$mumble_val" = "n" ]; then
-            systemctl stop mumble-server 2>/dev/null || true
-            log "  Mumble stopped"
-        fi
+    if [ "$mtx_val" = "n" ]; then
+        config_stop_service mediamtx
+        log "  MediaMTX stopped"
+    fi
+    if [ "$mumble_val" = "n" ]; then
+        config_stop_service mumble-server
+        log "  Mumble stopped"
     fi
 }
 
@@ -176,6 +188,9 @@ apply_dangerous_settings() {
     new_key=$(cfg_get "mesh_key")
     new_cidr=$(cfg_get "ipv4_network")
     [ -n "$new_ssid$new_key$new_cidr" ] || return
+    # The durable worker repeats an interrupted activation even if the
+    # files match. Successful restart verifies active services and PONG.
+    [ -n "${MANET_CONFIG_PENDING:-}" ] && any_dangerous=true
 
     local cur_ssid cur_key cur_cidr
     cur_ssid=$(grep "^mesh_ssid=" "$MESH_CONF" 2>/dev/null | cut -d'=' -f2-)
@@ -191,9 +206,7 @@ apply_dangerous_settings() {
     # failed write or restart is still work on a newly staged retry.
     local conf changed key val
     if [ -n "$new_ssid$new_key" ] || [ "$any_dangerous" = true ]; then
-        # This boot-local flag also covers a failed restart while repairing
-        # files whose intended values already match mesh.conf. Boot itself
-        # starts supplicants from disk, so no persistent apply journal here.
+        # Retain the legacy standalone restart hint as well as the journal.
         touch "$RESTART_PENDING" || die "Cannot record pending supplicant restart"
     fi
     for conf in "$WPA_DIR"/wpa_supplicant-wlan*.conf; do
@@ -240,7 +253,7 @@ apply_dangerous_settings
 # Verify the node-manager restart before recording a changed orchestrator
 # version. mesh-config-sync.py invokes this in a separate transient unit so
 # restarting the manager and its sync process cannot interrupt apply.
-# Failure leaves the version unrecorded for a newly staged retry.
+# Failure leaves the durable job available for the next manager cycle.
 if [ "${RESTART_NODE_MANAGER:-false}" = true ]; then
     log "  Restarting node-manager for the orchestrator change"
     systemctl restart node-manager.service ||
@@ -250,7 +263,13 @@ if [ "${RESTART_NODE_MANAGER:-false}" = true ]; then
     log "  node-manager running $(cat "$RUN_DIR/node-manager.running")"
 fi
 
-# Record which version was applied
+# The locked worker verifies files and records durable success first.
+if [ -n "${MANET_CONFIG_PENDING:-}" ]; then
+    log "=== Config reconciliation complete ==="
+    exit 0
+fi
+
+# Record completion for an explicitly selected standalone worker input.
 printf '%s\n' "$VERSION" > "$APPLIED_VERSION_FILE"
 
 # Clear the pending config: it's been applied

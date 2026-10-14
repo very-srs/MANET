@@ -64,7 +64,6 @@ import subprocess
 import sys
 import threading
 import time
-import zlib
 
 from manet_registry import parse_registry
 
@@ -75,7 +74,8 @@ try:
     import gi
 
     gi.require_version("Gst", "1.0")
-    from gi.repository import Gio, GLib, Gst  # noqa: E402
+    gi.require_version("GstNet", "1.0")
+    from gi.repository import Gio, GLib, Gst, GstNet  # noqa: E402
     GST_IMPORT_ERROR = None
 except (ImportError, ValueError) as _exc:      # ValueError: gi typelib missing
     GST_IMPORT_ERROR = _exc
@@ -133,6 +133,21 @@ HID_IR0_VALID_MASK = 0xC0
 # VOICE_TALKER_HEADROOM reserves room for new nodes before eviction.
 VOICE_MAX_TALKERS_HARD = 64
 VOICE_TALKER_HEADROOM = 2
+
+# Admission happens before rtpbin, whose max-streams only bounds its demux,
+# not RTPSession's source records. Keep slots until native source removal.
+VOICE_MAX_SOURCES = 128
+VOICE_MAX_PARKED = 64
+VOICE_SOURCES_PER_IP = 4
+VOICE_ADMISSION_BURST = 64
+VOICE_ADMISSION_PER_SEC = 1.0
+VOICE_IP_BURST = 2
+VOICE_IP_ADMISSION_SEC = 30
+# GStreamer removes inactive sources after five deterministic RTCP intervals,
+# at its next maintenance pass. Fifteen minutes preserves conversation gaps
+# and the default ten-minute beacon. Fix bandwidth so source count cannot
+# stretch that interval. No RTCP output is connected or transmitted here.
+VOICE_RTCP_INTERVAL_SEC = 180
 
 # Muted presence beacon duration in ms. Establishes the RTP source at receivers
 # before speech begins.
@@ -430,8 +445,8 @@ class Config:
         self.max_talkers = conf_int(conf, "voice_max_talkers", 8, 1,
                                    VOICE_MAX_TALKERS_HARD)
         # Periodic beacon interval in seconds, default 600. Covers missed peer
-        # arrivals. Beacons also run at startup and when peers appear. Sources
-        # persist with autoremove=false. 0 disables beacons.
+        # arrivals and refreshes retained sources before native idle expiry.
+        # Beacons also run at startup and when peers appear. 0 disables them.
         self.beacon_sec = conf_int(conf, "voice_beacon_sec", 600, 0, 3600)
         # High-pass cutoff in Hz, default 80. 0 disables the high-pass filter.
         # 80 Hz preserves male fundamentals around 85 Hz and above. Raise toward
@@ -662,38 +677,98 @@ def iface_ipv4(name):
     return None
 
 
-def ssrc_prefix_for_ip(addr):
-    """Return the node's 24-bit SSRC prefix, or None for an invalid address.
+def node_ssrc(addr):
+    """Use all 32 SSRC bits for each run, naming talkers by their UDP address.
 
-    Hash the mesh address so receivers can map registry addresses to talker
-    names without a back channel. The low 8 SSRC bits identify a daemon run.
+    A reused source with reset sequence numbers can discard a whole first
+    transmission. An eight-bit generation was too small even with expiry.
     """
     if not addr:
         return None
-    try:
-        parts = [int(p) for p in addr.split(".")]
-    except ValueError:
-        return None
-    if len(parts) != 4 or any(p < 0 or p > 255 for p in parts):
-        return None
-    packed = (parts[0] << 24) | (parts[1] << 16) | (parts[2] << 8) | parts[3]
-    return (zlib.crc32(b"manet-voice:%d" % packed) & 0xFFFFFF)
+    # GstRTPBasePayload reserves UINT32_MAX to request its own random SSRC.
+    # Keep my_ssrc identical to the wire identity for loopback suppression.
+    ssrc = random.getrandbits(32)
+    while ssrc == 0xffffffff:
+        ssrc = random.getrandbits(32)
+    return ssrc
 
 
-def node_ssrc(addr):
-    """Return an SSRC with a 24-bit node prefix and an 8-bit run generation.
+class RtpSources:
+    """Bound ingress records and admission work without delaying accepted RTP.
 
-    With autoremove=false, receivers retain sources across sender restarts.
-    Reusing an SSRC gives its jitter buffer a new sequence-number base.
-    Measured result: a 3 s transmission is discarded during resync.
-    Tried: beacons, jitter-buffer tuning. No effect.
-    A new generation establishes a new source. _prune_branches evicts the
-    silent abandoned source before active talkers.
+    Called by the UDP streaming thread and native timeout callbacks. Rejected
+    identities allocate no record or GLib work item. Retired slots remain
+    charged until RTPSession actually forgets them, not just clear-ssrc.
     """
-    prefix = ssrc_prefix_for_ip(addr)
-    if prefix is None:
-        return None
-    return (prefix << 8) | random.randint(0, 255)
+
+    def __init__(self):
+        """Initialize bounded source records and full admission buckets."""
+        self.lock = threading.RLock()
+        self.sources = {}
+        self.senders = {}
+        self.tokens = float(VOICE_ADMISSION_BURST)
+        self.updated = time.monotonic()
+        self.dropped = 0
+
+    def admit(self, ssrc, ip, now, port=0):
+        """Pass known sources or spend global and per-IP new-source tokens."""
+        with self.lock:
+            source = self.sources.get(ssrc)
+            if source is not None:
+                if (source['ip'] == ip and source['port'] == port
+                        and not source['retired'] and not source['expired']):
+                    return True
+                self.dropped += 1
+                return False
+            refill = max(0, now - self.updated) * VOICE_ADMISSION_PER_SEC
+            self.tokens = min(VOICE_ADMISSION_BURST, self.tokens + refill)
+            self.updated = now
+            sender = self.senders.get(ip)
+            tokens = (min(VOICE_IP_BURST, sender['tokens'] +
+                          max(0, now - sender['updated']) / VOICE_IP_ADMISSION_SEC)
+                      if sender else VOICE_IP_BURST)
+            if (len(self.sources) >= VOICE_MAX_SOURCES or self.tokens < 1
+                    or tokens < 1
+                    or (sender and len(sender['sources']) >= VOICE_SOURCES_PER_IP)):
+                self.dropped += 1
+                return False
+            if sender is None:
+                sender = {'sources': set()}
+                self.senders[ip] = sender
+            sender.update(tokens=tokens - 1, updated=now)
+            sender['sources'].add(ssrc)
+            self.tokens -= 1
+            self.sources[ssrc] = dict(ip=ip, port=port, retired=False,
+                                      expired=False, cleared=False)
+            return True
+
+    def get(self, ssrc):
+        """Return a stable snapshot, without keeping the lock during Gst calls."""
+        with self.lock:
+            source = self.sources.get(ssrc)
+            return dict(source) if source is not None else None
+
+    def mark(self, ssrc, **flags):
+        """Mark only admitted slots, including streams without a receive pad."""
+        with self.lock:
+            if ssrc in self.sources:
+                self.sources[ssrc].update(flags)
+
+    def pending(self):
+        """Snapshot bounded cleanup work for the existing state timer."""
+        with self.lock:
+            return [(ssrc, dict(s)) for ssrc, s in self.sources.items()
+                    if s['expired'] or (s['retired'] and not s['cleared'])]
+
+    def forget(self, ssrc):
+        """Release the sender budget once its final native source is gone."""
+        with self.lock:
+            source = self.sources.pop(ssrc, None)
+            if source is not None:
+                sender = self.senders[source['ip']]
+                sender['sources'].discard(ssrc)
+                if not sender['sources']:
+                    del self.senders[source['ip']]
 
 
 def local_ipv4_addresses():
@@ -762,6 +837,9 @@ class MeshVoice:
         self.payloader = None
         self.mixer = None
         self.rtpbin = None
+        self.rtp_session = None
+        self.sources = RtpSources()
+        self._discarded_pads = {}
         # One decode branch and one jitter buffer per talker, keyed by
         # rtpbin pad name and SSRC respectively.
         self.rx_branches = {}
@@ -770,7 +848,8 @@ class MeshVoice:
         # Talkers evicted by the cap: pad name -> (rtpbin pad, fakesink, probe).
         # See _park_branch.
         self.rx_parked = {}
-        self._reviving = set()
+        self._parking = set()
+        self._reviving = {}
         self.volume = None
         self.shaper = None
         self.equalizer = None
@@ -782,7 +861,7 @@ class MeshVoice:
         self._raw_rate = SAMPLE_RATE
         self._eq_high_warned = None
         self.my_ssrc = None
-        # ssrc prefix -> peer name, rebuilt from the registry each poll.
+        # Sender IP -> peer name, rebuilt from the registry each poll.
         self.talker_names = {}
         self._known_peer_ips = set()
         self._beacon_pending = None
@@ -1082,8 +1161,8 @@ class MeshVoice:
         # A shared jitter buffer interleaves independent sequence numbers. The
         # silent source keeps audiomixer and alsasink running between talkers,
         # so each transmission starts without a DAC startup delay.
-        # autoremove=false retains established sources and avoids first-contact
-        # loss. Measured on a CM4 with Lyra, for 3.00 s bursts:
+        # Retain sources across conversation gaps, then let the native session
+        # expire them. Measured on a CM4 with Lyra, for 3.00 s bursts:
         #   branch rebuilt on demand   2.82 s arrived  (180 ms lost)
         #   branch pre-built, attached 2.92 s arrived  ( 80 ms lost)
         #   talker already established 3.04 s arrived  (nothing lost)
@@ -1095,21 +1174,26 @@ class MeshVoice:
         self.jitterbuffers = {}
         self.branch_seen = {}
         self.rx_parked = {}
-        self._reviving = set()
+        self._parking = set()
+        self._reviving = {}
+        self.sources = RtpSources()
+        self._discarded_pads = {}
         # Rebuilt jitter buffers reset cumulative loss counters. Reset the
         # sampling baseline to avoid a negative first delta. Keep
         # _pk_clean_since here: rebuilding does not change link quality.
         self._pk_last_pushed = 0
         self._pk_last_lost = 0
         self.my_ssrc = None
-        # 24-bit SSRC prefix -> peer name for the UI, filled from the registry.
+        # Sender IP -> peer name for the UI, filled from the registry.
         self.talker_names = {}
         self._known_peer_ips = set()
         # Request one MiB of UDP buffering and at least two packets of jitter.
         rx_desc = (
-            "rtpbin name=rtpbin latency={jitter} do-lost=true autoremove=false "
+            "rtpbin name=rtpbin latency={jitter} do-lost=true autoremove=true "
+            "  max-streams={sources} "
             "udpsrc name=src address={group} port={port} "
             "  multicast-iface={iface} auto-multicast=true buffer-size=1048576 "
+            "  retrieve-sender-address=true "
             "  caps=\"application/x-rtp,media=(string)audio,"
             "clock-rate=(int){rate},encoding-name=(string){encoding},"
             "payload=(int){pt}\" ! rtpbin.recv_rtp_sink_0 "
@@ -1121,7 +1205,7 @@ class MeshVoice:
                  iface=self.cfg.iface, rate=clock_rate, encoding=encoding,
                  pt=RTP_PAYLOAD_TYPE, arate=raw_rate,
                  jitter=max(self.cfg.jitter_ms, packet_ms * 2),
-                 play=playback_desc)
+                 play=playback_desc, sources=VOICE_MAX_SOURCES)
 
         self.tx = Gst.parse_launch(tx_desc)
         self.rx = Gst.parse_launch(rx_desc)
@@ -1136,15 +1220,14 @@ class MeshVoice:
         # Now that txhead exists, set the headroom the configured boost needs.
         self._apply_tx_gain(raw_rate)
 
-        # SSRC combines a 24-bit mesh-address hash with an 8-bit run generation.
-        # The prefix identifies talkers from the registry. The generation avoids
-        # reusing a receiver's retained source after restart. See node_ssrc().
+        # Use all 32 bits for restart identity. Names come from UDP metadata.
         ssrc = node_ssrc(bind_ip)
         if ssrc is not None and self.payloader is not None:
             self.payloader.set_property("ssrc", ssrc)
             self.my_ssrc = ssrc
         self.mixer = self.rx.get_by_name("mix")
         self.rtpbin = self.rx.get_by_name("rtpbin")
+        self._configure_rtp_session()
 
         # Save codec stages for the per-talker branch handler.
         self._rx_depay_desc = depay_desc
@@ -1154,6 +1237,8 @@ class MeshVoice:
         self.rtpbin.connect("pad-removed", self._on_rtp_pad_removed)
         # Collect per-talker jitter buffers for _tick_packing's aggregate loss.
         self.rtpbin.connect("new-jitterbuffer", self._on_new_jitterbuffer)
+        self.rtpbin.connect("on-timeout", self._on_source_timeout)
+        self.rtpbin.connect("on-bye-timeout", self._on_source_timeout)
 
         # Retain buses and handler IDs for teardown. Remove watches here as well
         # as in _release_pipelines so repeated build() calls cannot orphan them.
@@ -1445,6 +1530,12 @@ class MeshVoice:
         for pipeline in (self.tx, self.rx):
             if pipeline:
                 pipeline.set_state(Gst.State.NULL)
+        for name in list(self.rx_branches) + list(self.rx_parked):
+            self._remove_branch(name)
+        for source in self._reviving.values():
+            GLib.source_remove(source)
+        for pad, probe in self._discarded_pads.values():
+            pad.remove_probe(probe)
         self.tx = self.rx = None
         self.valve = self.sink = self.payloader = None
         self.volume = self.mixer = self.rtpbin = None
@@ -1453,7 +1544,11 @@ class MeshVoice:
         self.jitterbuffers = {}
         self.branch_seen = {}
         self.rx_parked = {}
-        self._reviving = set()
+        self._parking = set()
+        self._reviving = {}
+        self._discarded_pads = {}
+        self.rtp_session = None
+        self.sources = RtpSources()
 
     def _play(self, which):
         """Request PLAYING and report explicit startup failures.
@@ -1588,20 +1683,41 @@ class MeshVoice:
         return Gst.PadProbeReturn.OK
 
     def _on_rx_buffer(self, _pad, info):
-        """Drop own RTP packets and update remote receive activity."""
-        # Drop own-SSRC packets if socket loopback suppression fails or is
-        # pending. This prevents delayed local playback and false rx_active,
-        # which would block half-duplex PTT. node_ssrc combines a mesh-address
-        # hash and a per-run generation byte to distinguish this node's
-        # transmission.
-        if self.my_ssrc is not None:
-            buf = info.get_buffer()
-            # RTP fixed header is 12 bytes, SSRC a big-endian u32 at offset 8.
-            if buf is not None and buf.get_size() >= 12:
-                if int.from_bytes(buf.extract_dup(8, 4), "big") == self.my_ssrc:
-                    self.rx_loopback += 1
-                    return Gst.PadProbeReturn.DROP
-
+        """Admit RTP before rtpbin allocates native session or stream objects."""
+        buf = info.get_buffer()
+        if buf is None or buf.get_size() <= 12:
+            return Gst.PadProbeReturn.DROP
+        header = buf.extract_dup(0, 12)
+        # Our payloaders send RTP v2 without CSRCs. Refuse CSRC lists because
+        # RTPSession would create extra source records outside our SSRC budget.
+        if (header[0] >> 6 != 2 or header[0] & 15
+                or header[1] & 127 != RTP_PAYLOAD_TYPE):
+            return Gst.PadProbeReturn.DROP
+        size = buf.get_size()
+        offset = 12
+        if header[0] & 16:               # optional RTP header extension
+            if size < 16:
+                return Gst.PadProbeReturn.DROP
+            offset = 16 + 4 * int.from_bytes(buf.extract_dup(14, 2), "big")
+        if header[0] & 32:               # optional trailing padding
+            padding = buf.extract_dup(size - 1, 1)[0]
+            if not padding:
+                return Gst.PadProbeReturn.DROP
+            size -= padding
+        if offset >= size:
+            return Gst.PadProbeReturn.DROP
+        ssrc = int.from_bytes(header[8:12], "big")
+        if ssrc == self.my_ssrc:
+            self.rx_loopback += 1
+            return Gst.PadProbeReturn.DROP
+        meta = GstNet.buffer_get_net_address_meta(buf)
+        if meta is None or not isinstance(meta.addr, Gio.InetSocketAddress):
+            return Gst.PadProbeReturn.DROP
+        ip = meta.addr.get_address().to_string()
+        # Pin the endpoint as well as the IP budget. Changing the UDP port for
+        # an existing SSRC would otherwise grow native collision-address state.
+        if not self.sources.admit(ssrc, ip, time.monotonic(), meta.addr.get_port()):
+            return Gst.PadProbeReturn.DROP
         self.rx_packets += 1
         self.last_rx_ms = now_ms()
         if self._pipeline_fault:
@@ -1736,24 +1852,87 @@ class MeshVoice:
 
     # -- conference receive --
 
+    def _configure_rtp_session(self):
+        """Use native inactivity expiry, with a PTT-sized retention interval.
+
+        GStreamer 1.26 RTPSession expires at five deterministic RTCP intervals.
+        Fix bandwidth high enough that the participant count cannot extend the
+        180-second minimum. No RTCP packets are transmitted by this pipeline.
+        The native RTCP timer also runs on receive-only sessions without an
+        RTCP sink. See docs/node-tools-internals.md for the tagged sources.
+        """
+        self.rtp_session = self.rtpbin.emit("get-internal-session", 0)
+        self.rtp_session.set_property("rtcp-min-interval",
+                                      VOICE_RTCP_INTERVAL_SEC * Gst.SECOND)
+        self.rtp_session.set_property("bandwidth", 1000000.0)
+        # Explicit since 1.24. Older bench GStreamer always expires inactivity.
+        if self.rtp_session.find_property("timeout-inactive-sources"):
+            self.rtp_session.set_property("timeout-inactive-sources", True)
+
+    def _talker_name(self, ssrc):
+        """Resolve a source using the UDP sender address and mesh registry."""
+        source = self.sources.get(ssrc)
+        ip = source["ip"] if source else None
+        return self.talker_names.get(ip) or ip or ("0x%08x" % ssrc)
+
+    def _on_source_timeout(self, rtpbin, _session, ssrc):
+        """Mark expiry, keeping its slot until the native table removes it."""
+        if rtpbin == self.rtpbin:
+            self.sources.mark(ssrc, expired=True)
+
+    def _reap_sources(self):
+        """Reconcile native expiry and retire overflow on the existing timer.
+
+        clear-ssrc removes the demux stream, including its jitterbuffer, but
+        does NOT remove the RTPSession source record. Retired sources keep an
+        admission slot and reject packets until native inactivity removes that
+        record. on-timeout is emitted BEFORE the native hash table removal.
+        """
+        if self.rtp_session is None:
+            return
+        for ssrc, source in self.sources.pending():
+            if source["expired"]:
+                if self.rtp_session.emit("get-source-by-ssrc", ssrc) is not None:
+                    continue
+            self.rtpbin.emit("clear-ssrc", 0, ssrc)
+            # A source still in probation may never have had a receive pad.
+            self.jitterbuffers.pop(ssrc, None)
+            names = (list(self.rx_branches) + list(self.rx_parked)
+                     + list(self._discarded_pads))
+            for name in names:
+                if self._ssrc_of(name) == ssrc:
+                    self._remove_branch(name)
+            self.sources.mark(ssrc, cleared=True)
+            if source["expired"]:
+                self.sources.forget(ssrc)
+
     def _on_new_jitterbuffer(self, _rtpbin, jitterbuffer, session, ssrc):
         """Retain a new talker's jitter buffer for loss statistics.
 
         _tick_packing sums receive loss across talkers to estimate link loss.
         """
-        self.jitterbuffers[ssrc] = jitterbuffer
-        # Map the 24-bit SSRC address hash to a registry name.
-        who = self.talker_names.get(ssrc >> 8) or ("ssrc 0x%08x" % ssrc)
+        with self.sources.lock:
+            source = self.sources.get(ssrc)
+            if (_rtpbin != self.rtpbin or source is None
+                    or source["expired"] or source["retired"]):
+                return
+            self.jitterbuffers[ssrc] = jitterbuffer
+        who = self._talker_name(ssrc)
         log("rx: new talker %s (ssrc 0x%08x)" % (who, ssrc))
 
     def _on_rtp_pad_added(self, _rtpbin, pad):
         """Attach a decode branch to a new talker's receive pad.
 
-        autoremove=false retains each source, so pad-added fires only once per
-        source. _park_branch handles later revival of evicted talkers.
+        _park_branch handles later revival of evicted talkers.
         """
         name = pad.get_name()
         if not name.startswith("recv_rtp_src_"):
+            return
+        source = self.sources.get(self._ssrc_of(name))
+        if _rtpbin != self.rtpbin or source is None:
+            return
+        if source["retired"] or source["expired"]:
+            self._discard_pad(name, pad)
             return
         if name in self.rx_branches or name in self.rx_parked:
             return
@@ -1799,16 +1978,29 @@ class MeshVoice:
 
         depay.sync_state_with_parent()
         # Retain the rtpbin pad for parking and revival.
-        self.rx_branches[name] = (pad, depay, mixpad)
         self.branch_seen[name] = time.monotonic()
         # Touch on every decoded buffer so the LRU below evicts the talker who
         # has been quiet longest, not whoever happened to arrive first.
-        depay.get_static_pad("src").add_probe(
-            Gst.PadProbeType.BUFFER,
-            lambda _p, _i, n=name: (self.branch_seen.__setitem__(n, time.monotonic()),
-                                    Gst.PadProbeReturn.OK)[1])
+        probe = depay.get_static_pad("src").add_probe(
+            Gst.PadProbeType.BUFFER, self._on_decoded_buffer, name)
+        entry = (pad, depay, mixpad, probe)
+        with self.sources.lock:
+            source = self.sources.get(self._ssrc_of(name))
+            alive = source and not source['retired'] and not source['expired']
+            if alive:
+                self.rx_branches[name] = entry
+        if not alive:
+            self.branch_seen.pop(name, None)
+            self._destroy_decoder(entry)
+            return False
         log("rx: talker branch up (%d active)" % len(self.rx_branches))
         return True
+
+    def _on_decoded_buffer(self, _pad, _info, name):
+        """Touch an existing decoder without resurrecting removed records."""
+        if name in self.rx_branches:
+            self.branch_seen[name] = time.monotonic()
+        return Gst.PadProbeReturn.OK
 
     def _schedule_beacon(self, delay_ms):
         """Queue a beacon after delay_ms if none is pending."""
@@ -1873,22 +2065,24 @@ class MeshVoice:
     def _prune_branches(self):
         """Evict the quietest branches until the configured talker cap is met.
 
-        autoremove=false retains idle sources. The cap bounds growth across
-        sender restarts and retunes. Measured Lyra cost: 5.3 MB per branch,
+        Measured Lyra cost: 5.3 MB per branch,
         roughly 40 MB for the default floor of 8 against 3.4 GB free on a CM4.
         Park evicted pads for revival, with first-contact loss on next speech.
         See _park_branch and the conference receive measurements.
         """
         while len(self.rx_branches) > self.cfg.max_talkers:
-            oldest = min(self.branch_seen, key=self.branch_seen.get)
-            entry = self.rx_branches.pop(oldest, None)
-            self.branch_seen.pop(oldest, None)
+            with self.sources.lock:
+                if len(self.rx_branches) <= self.cfg.max_talkers:
+                    break
+                oldest = min(self.rx_branches,
+                             key=lambda name: self.branch_seen.get(name, 0),
+                             default=None)
+                entry = self.rx_branches.pop(oldest, None)
+                self.branch_seen.pop(oldest, None)
             if entry is None:
                 continue
-            pad, branch, mixpad = entry
-            branch.set_state(Gst.State.NULL)
-            self.rx.remove(branch)
-            self.mixer.release_request_pad(mixpad)
+            pad = entry[0]
+            self._destroy_decoder(entry)
             self._park_branch(oldest, pad)
             log("rx: evicted least-recent talker branch (cap %d)"
                 % self.cfg.max_talkers)
@@ -1896,14 +2090,33 @@ class MeshVoice:
     def _park_branch(self, name, pad):
         """Park an evicted talker's pad on a fakesink with a buffer probe.
 
-        autoremove=false retains the source and prevents another pad-added.
         The fakesink avoids NOT_LINKED bus errors. Its buffer probe schedules
         branch revival when the talker returns, restoring a receive path.
         """
+        # Different jitterbuffer threads can create pads concurrently. Reserve
+        # capacity before calling Gst, which releases the Python GIL.
+        with self.sources.lock:
+            if name in self._parking or name in self.rx_parked:
+                return
+            source = self.sources.get(self._ssrc_of(name))
+            room = (source and not source['retired'] and not source['expired']
+                    and len(self.rx_parked) + len(self._parking) < VOICE_MAX_PARKED)
+            if room:
+                self._parking.add(name)
+        if not room:
+            self._discard_pad(name, pad)
+            return
+        try:
+            self._make_parked_sink(name, pad)
+        finally:
+            with self.sources.lock:
+                self._parking.discard(name)
+
+    def _make_parked_sink(self, name, pad):
+        """Build a sink for a reserved parking slot, outside the state lock."""
         sink = Gst.ElementFactory.make("fakesink", None)
         if sink is None:
-            log("rx: no fakesink to park %s on; that talker is lost until "
-                "they restart" % name)
+            self._discard_pad(name, pad)
             return
         sink.set_property("sync", False)
         sink.set_property("async", False)
@@ -1911,11 +2124,31 @@ class MeshVoice:
         if pad.link(sink.get_static_pad("sink")) != Gst.PadLinkReturn.OK:
             log("rx: could not park %s" % name)
             self.rx.remove(sink)
+            self._discard_pad(name, pad)
             return
         sink.sync_state_with_parent()
         probe = pad.add_probe(Gst.PadProbeType.BUFFER, self._on_parked_buffer,
                               name)
-        self.rx_parked[name] = (pad, sink, probe)
+        with self.sources.lock:
+            source = self.sources.get(self._ssrc_of(name))
+            alive = source and not source['retired'] and not source['expired']
+            if alive:
+                self._parking.discard(name)
+                self.rx_parked[name] = (pad, sink, probe)
+        if not alive:
+            pad.remove_probe(probe)
+            pad.unlink(sink.get_static_pad("sink"))
+            sink.set_state(Gst.State.NULL)
+            self.rx.remove(sink)
+
+    def _discard_pad(self, name, pad):
+        """Drop overflow until the main loop can remove its native stream."""
+        with self.sources.lock:
+            self.sources.mark(self._ssrc_of(name), retired=True)
+            if name not in self._discarded_pads:
+                probe = pad.add_probe(Gst.PadProbeType.BUFFER,
+                                      lambda _p, _i: Gst.PadProbeReturn.DROP)
+                self._discarded_pads[name] = (pad, probe)
 
     def _on_parked_buffer(self, _pad, _info, name):
         """Schedule decoder revival when a parked talker sends a buffer.
@@ -1924,15 +2157,16 @@ class MeshVoice:
         element creation run on the main loop. Rebuilding costs about 180 ms
         of initial audio, per the conference receive measurements.
         """
-        if name not in self._reviving:
-            self._reviving.add(name)
-            GLib.idle_add(self._revive_branch, name)
+        with self.sources.lock:
+            if name in self.rx_parked and name not in self._reviving:
+                self._reviving[name] = GLib.idle_add(self._revive_branch, name)
         return Gst.PadProbeReturn.OK
 
     def _revive_branch(self, name):
         """Take a talker off the fakesink and give them a decoder again."""
-        self._reviving.discard(name)
-        entry = self.rx_parked.pop(name, None)
+        with self.sources.lock:
+            self._reviving.pop(name, None)
+            entry = self.rx_parked.pop(name, None)
         if entry is None:
             return False
         pad, sink, probe = entry
@@ -1941,7 +2175,7 @@ class MeshVoice:
         pad.unlink(sink.get_static_pad("sink"))
         sink.set_state(Gst.State.NULL)
         self.rx.remove(sink)
-        who = self.talker_names.get(self._ssrc_of(name, 0) >> 8) or name
+        who = self._talker_name(self._ssrc_of(name))
         log("rx: parked talker %s is back, rebuilding their branch" % who)
         if not self._attach_branch(pad):
             self._park_branch(name, pad)      # keep the pad linked and watched
@@ -1963,29 +2197,46 @@ class MeshVoice:
         Release decoder memory and CPU resources, including Lyra's TFLite
         interpreter, so repeated sessions cannot accumulate them.
         """
-        name = pad.get_name()
-        self._reviving.discard(name)
-        parked = self.rx_parked.pop(name, None)
-        if parked is not None:
-            _pad, sink, probe = parked
-            if probe:
-                pad.remove_probe(probe)
-            sink.set_state(Gst.State.NULL)
-            self.rx.remove(sink)
-        entry = self.rx_branches.pop(name, None)
-        self.branch_seen.pop(name, None)
-        if entry is None:
+        if _rtpbin != self.rtpbin:
             return
-        _pad, branch, mixpad = entry
+        name = pad.get_name()
+        if not name.startswith("recv_rtp_src_"):
+            return
+        self._remove_branch(name)
+        self.jitterbuffers.pop(self._ssrc_of(name), None)
+
+    def _destroy_decoder(self, entry):
+        """Release the decoded-buffer probe, links, bin and mixer request pad."""
+        pad, branch, mixpad, probe = entry
+        branch.get_static_pad("src").remove_probe(probe)
+        pad.unlink(branch.get_static_pad("sink"))
+        branch.get_static_pad("src").unlink(mixpad)
         branch.set_state(Gst.State.NULL)
         self.rx.remove(branch)
         self.mixer.release_request_pad(mixpad)
-        # Drop jitter buffers whose element has left the pipeline, so the stats
-        # dict does not grow without bound either.
-        for ssrc in [s for s, jb in self.jitterbuffers.items()
-                     if jb.get_parent() is None]:
-            del self.jitterbuffers[ssrc]
-        log("rx: talker branch down (%d active)" % len(self.rx_branches))
+
+    def _remove_branch(self, name):
+        """Release all Python-owned objects for a removed or retired pad."""
+        with self.sources.lock:
+            revival = self._reviving.pop(name, None)
+            parked = self.rx_parked.pop(name, None)
+            entry = self.rx_branches.pop(name, None)
+            self.branch_seen.pop(name, None)
+            discarded = self._discarded_pads.pop(name, None)
+        if revival is not None:
+            GLib.source_remove(revival)
+        if discarded is not None:
+            pad, probe = discarded
+            pad.remove_probe(probe)
+        if parked is not None:
+            pad, sink, probe = parked
+            if probe:
+                pad.remove_probe(probe)
+            pad.unlink(sink.get_static_pad("sink"))
+            sink.set_state(Gst.State.NULL)
+            self.rx.remove(sink)
+        if entry is not None:
+            self._destroy_decoder(entry)
 
     def _rx_loss_stats(self):
         """(pushed, lost) summed over every current talker's jitter buffer."""
@@ -2211,11 +2462,7 @@ class MeshVoice:
         # Every known node is a potential talker, so the warm-branch table and
         # the ssrc->name map are both driven from the registry.
         self._size_talker_table(len(registry))
-        self.talker_names = {}
-        for ip, host in registry:
-            prefix = ssrc_prefix_for_ip(ip)
-            if prefix is not None:
-                self.talker_names[prefix] = host or ip
+        self.talker_names = {ip: host or ip for ip, host in registry}
 
         # Announce to new peers before waiting for the periodic beacon.
         new_ips = {ip for ip, _ in registry} - self._known_peer_ips
@@ -2243,6 +2490,7 @@ class MeshVoice:
 
     def _tick_state(self):
         """Write UI state and retain the periodic callback."""
+        self._reap_sources()
         self.write_state()
         return True
 
@@ -2296,9 +2544,13 @@ class MeshVoice:
             "talkers": len(self.rx_branches),
             "talkers_parked": len(self.rx_parked),
             "talker_names": sorted(
-                self.talker_names.get(sr >> 8) or ("0x%08x" % sr)
-                for sr in self.jitterbuffers),
+                self._talker_name(sr)
+                for sr in list(self.jitterbuffers)),
             "max_talkers": self.cfg.max_talkers,
+            "rtp_sources": len(self.sources.sources),
+            "rtp_source_limit": VOICE_MAX_SOURCES,
+            "rtp_admission_drops": self.sources.dropped,
+            "parked_limit": VOICE_MAX_PARKED,
             "peers": [{"ip": ip, "hostname": host} for ip, host in self.peers],
             "tx_packets": self.tx_packets,
             "rx_packets": self.rx_packets,
