@@ -37,6 +37,13 @@ RECOVERY_UNITS = {
     'manet-update-recover.service': 'sysinit.target.wants',
     'manet-update-finish.service': 'multi-user.target.wants',
 }
+# Resident node_tools processes from MANET/systemd. Manager PartOf children
+# restart below with node-manager. Boot/setup oneshots must not be replayed.
+RUNTIME_SERVICES = (
+    'gps-reader.service', 'manet-positioning.service', 'manet-atak.service',
+    'mesh-voice.service', 'button-monitor.service', 'sae-watchdog.service',
+    'batman-enslave-watch.service', 'led-boot.service',
+)
 MARKERS = {"etc/manet_version.txt", "usr/local/bin/version.txt"}
 REQUIRED = MARKERS | {
     "etc/apt/preferences.d/00-manet-kernel",
@@ -509,7 +516,8 @@ class Updater:
         # Use the installed config, including any deliberate payload change.
         config = (self.root / "etc/mesh.conf").read_text()
         # Match an unquoted true acs assignment at the start of a config line.
-        acs = re.search(r"^acs=(y|yes|1|true)[ \t]*$", config, re.I | re.M)
+        values = re.findall(r'^acs=(.*)$', config, re.M)
+        acs = values and values[-1].rstrip().lower() in ('y', 'yes', '1', 'true')
         selected = "node-manager-acs.sh" if acs else "node-manager-static.sh"
         self.install_link(self.destination("usr/local/bin/node-manager.sh"), selected)
         self.make_directory(motd)
@@ -519,6 +527,25 @@ class Updater:
 
     def install(self, directory, members):
         """Install files, activate services and commit versions after checks."""
+        active_runtime = []
+        for service in RUNTIME_SERVICES:
+            state = run_command(['systemctl', 'show', '--property=ActiveState',
+                                 '--value', service]).strip()
+            if state == b'active':
+                active_runtime.append(service)
+        # A failed restart must not turn an active daemon into an optional
+        # stopped daemon on the next attempt. Preserve that obligation for
+        # this boot, while respecting normal configured startup after reboot.
+        boot = (self.root / 'proc/sys/kernel/random/boot_id').read_text().strip()
+        snapshot = self.recovery / 'runtime-active.json'
+        if snapshot.exists():
+            previous = json.loads(snapshot.read_text())
+            if previous.get('boot') == boot:
+                active_runtime = sorted(set(active_runtime) | set(previous['services']))
+                if not set(active_runtime) <= set(RUNTIME_SERVICES):
+                    raise UpdateError('Invalid runtime activation snapshot')
+        atomic_file(snapshot, data=json.dumps({'boot': boot, 'services': active_runtime}).encode(),
+                    mode=0o600)
         self.install_payload(directory, members)
         self.protect_kernel(directory)
         mesh_setup = self.destination('usr/local/bin/manet-mesh-supplicant.py')
@@ -560,11 +587,18 @@ class Updater:
             run_command(["systemctl", "restart", service])
         for service in ("mesh-status.service", "node-manager.service", "mesh-channel-agreement.service", "one-shot-time-sync.service"):
             run_command(["systemctl", "is-active", "--quiet", service])
+        for service in RUNTIME_SERVICES:
+            run_command(['systemctl', 'try-restart', service])
+        for service in active_runtime:
+            run_command(['systemctl', 'is-active', '--quiet', service])
         # Restart on every attempt, including retries after a previous copy
         # succeeded but its service restart failed. Commit version markers last.
         for name in ("usr/local/bin/version.txt", "etc/manet_version.txt"):
             atomic_file(self.destination(name), source=directory / name)
         self.pending.unlink()
+        # The obligation ends with this install. A later same-boot update must
+        # not require a service the operator has since stopped.
+        snapshot.unlink(missing_ok=True)
         sync_directory(self.state)
 
     def protect_kernel(self, directory):

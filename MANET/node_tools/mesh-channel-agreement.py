@@ -19,6 +19,7 @@ import tempfile
 import time
 
 from manet_admin import AdminTransport, clock_ready, private_json_write, require_clock
+from manet_radio import acs_enabled
 import manet_acs_agreement as protocol
 import manet_rendezvous as rendezvous
 
@@ -349,8 +350,7 @@ class Runtime:
 
     def status(self, now):
         """Collect radio MHz, capabilities and readiness at wall time now."""
-        # Accept quoted or bare y/Y. Requests authorize only their own round.
-        acs = bool(re.search(r'^acs=["\']?[yY]["\']?\s*$', self.conf.read_text(), re.M))
+        acs = acs_enabled(self.conf)
         requested = read_json(self.request_path).get('round') == now // protocol.ROUND_SECONDS
         current, configured_channels, allowed, stable = {}, {}, {}, True
         for band, (iface, path, configured) in self.interfaces().items():

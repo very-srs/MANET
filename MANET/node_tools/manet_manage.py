@@ -24,6 +24,8 @@ Routes (relative to /manage):
 """
 
 import json
+import html
+import ipaddress
 import subprocess
 import re
 import stat
@@ -699,7 +701,7 @@ def session_to_csv(label):
     writer = csv.writer(output)
     writer.writerow([
         'timestamp', 'session_label', 'test_type',
-        'src_node', 'dst_node',
+        'src_node', 'dst_node', 'executing_node', 'executing_ip', 'destination_ip',
         'active_interfaces', 'halow_channel', 'halow_bw',
         'hop_count', 'hop_count_source',
         'tcp_mbps', 'udp_mbps', 'jitter_ms', 'loss_pct',
@@ -717,6 +719,9 @@ def session_to_csv(label):
             r.get('test_type', ''),
             r.get('source_node', ''),
             r.get('destination_node', ''),
+            r.get('executing_node', ''),
+            r.get('executing_ip', ''),
+            r.get('destination_ip', ''),
             ','.join(r.get('active_interfaces', [])),
             r.get('halow_channel', ''),
             r.get('halow_bw', ''),
@@ -818,16 +823,18 @@ def run_local_ping(target, count=100, interval=0.2):
                            timeout=count * interval + 10)
     except Exception:
         return None
-    # Match four iputils RTT values in ms and an integer packet-loss percentage.
+    # Match four iputils RTT values in ms and a packet-loss percentage and received-packet count.
     rtt = re.search(r'rtt min/avg/max/mdev = ([\d.]+)/([\d.]+)/([\d.]+)/([\d.]+)', r.stdout)
-    loss = re.search(r'(\d+)% packet loss', r.stdout)
+    loss = re.search(r'([\d.]+)% packet loss', r.stdout)
+    received = re.search(r'(\d+) (?:packets )?received', r.stdout)
     return {
         'output':   r.stdout,
         'rtt_min':  float(rtt.group(1)) if rtt else None,
         'rtt_avg':  float(rtt.group(2)) if rtt else None,
         'rtt_max':  float(rtt.group(3)) if rtt else None,
         'rtt_mdev': float(rtt.group(4)) if rtt else None,
-        'loss_pct': int(loss.group(1)) if loss else None,
+        'loss_pct': float(loss.group(1)) if loss else None,
+        'received': int(received.group(1)) if received else 0,
     }
 
 
@@ -880,11 +887,12 @@ def run_measurement_session(label, pairs, tests, duration, udp_bitrate):
         # A single topology snapshot annotates every result in the batch.
         topo = snapshot_topology()
 
+        executor_name, executor_ip = get_my_hostname(), get_my_ip()
         total = len(pairs) * len(tests)
 
         for pair in pairs:
             dst_ip   = pair['dst_ip']
-            src_name = pair['src_name']
+            src_name = executor_name
             dst_name = pair['dst_name']
 
             for test_type in tests:
@@ -916,6 +924,9 @@ def run_measurement_session(label, pairs, tests, duration, udp_bitrate):
                     'timestamp':        datetime.now().isoformat(),
                     'test_type':        test_type,
                     'source_node':      src_name,
+                    'executing_node':   executor_name,
+                    'executing_ip':     executor_ip,
+                    'destination_ip':   dst_ip,
                     'destination_node': dst_name,
                     'active_interfaces': topo['active_interfaces'],
                     'halow_channel':    topo['halow_channel'],
@@ -935,9 +946,10 @@ def run_measurement_session(label, pairs, tests, duration, udp_bitrate):
 
                 if test_type == 'icmp_ping':
                     result_record['ping_result'] = run_local_ping(dst_ip)
-                    result_record['ok'] = result_record['ping_result'] is not None
+                    result_record['ok'] = bool(result_record['ping_result'] and
+                                               result_record['ping_result'].get('received', 0) > 0)
                     if not result_record['ok']:
-                        result_record['error'] = 'ping failed'
+                        result_record['error'] = 'ping received no replies'
                 else:
                     # Connect the local client to the peer's persistent iperf3
                     # daemon.
@@ -1478,10 +1490,10 @@ function renderTxPowerSelect(id, info) {
   const opts = txPowerOptions(info);
   if (!opts.length) {
     const cur = normalizeDbm(info?.txpower_dbm) || '';
-    return `<input id="${id}" type="number" min="1" max="30" step="1" value="${cur}" style="width:60px" placeholder="dBm">`;
+    return `<input id="${esc(id)}" type="number" min="1" max="30" step="1" value="${esc(cur)}" style="width:60px" placeholder="dBm">`;
   }
   const current = normalizeDbm(info?.txpower_dbm) || opts[opts.length - 1];
-  return `<select id="${id}">` +
+  return `<select id="${esc(id)}">` +
     opts.map(v => `<option value="${v}"${v === current ? ' selected' : ''}>${v} dBm</option>`).join('') +
     `</select>`;
 }
@@ -1634,11 +1646,11 @@ function renderMeasureStats(d) {
   const curElapsed = d.current_elapsed != null ? fmtSecs(d.current_elapsed) : '-';
   const cur = d.current ? `${d.current.src} -> ${d.current.dst} ${d.current.test_type}` : '-';
   el.innerHTML = `
-    <div class="stat-chip"><span>completed</span><strong>${done}/${total} (${pct}%)</strong></div>
-    <div class="stat-chip"><span>elapsed</span><strong>${elapsed}</strong></div>
-    <div class="stat-chip"><span>current</span><strong>${cur}</strong></div>
-    <div class="stat-chip"><span>current time</span><strong>${curElapsed}</strong></div>
-    <div class="stat-chip ${d.last_result && d.last_result.ok ? 'good' : ''}" style="grid-column:1/-1"><span>last result</span><strong>${lastResultText(d.last_result)}</strong></div>`;
+    <div class="stat-chip"><span>completed</span><strong>${esc(done)}/${esc(total)} (${pct}%)</strong></div>
+    <div class="stat-chip"><span>elapsed</span><strong>${esc(elapsed)}</strong></div>
+    <div class="stat-chip"><span>current</span><strong>${esc(cur)}</strong></div>
+    <div class="stat-chip"><span>current time</span><strong>${esc(curElapsed)}</strong></div>
+    <div class="stat-chip ${d.last_result && d.last_result.ok ? 'good' : ''}" style="grid-column:1/-1"><span>last result</span><strong>${esc(lastResultText(d.last_result))}</strong></div>`;
 }
 
 function getInitialTab() {
@@ -1690,18 +1702,18 @@ function renderTopology() {
       const band = i === 'wlan0' ? '2.4G' : i === 'wlan1' ? '5G' : 'HaLow';
       const ch = info.channel ? ` ch${info.channel}` : (info.freq_mhz ? ` ${Math.round(info.freq_mhz)}MHz` : '');
       const mcs = on && (info.tx_mcs || info.rx_mcs) ? ` · ${info.tx_mcs || '-'} / ${info.rx_mcs || '-'}` : '';
-      return `<span class="iface-chip ${on ? 'iface-on' : 'iface-off'}">${band}${on ? ch : ' OFF'}${mcs}</span>`;
+      return `<span class="iface-chip ${on ? 'iface-on' : 'iface-off'}">${band}${esc(on ? ch : ' OFF')}${esc(mcs)}</span>`;
     }).join('');
-    const bat = node.battery ? `<div class="node-battery">BAT ${node.battery}%</div>` : '';
+    const bat = node.battery ? `<div class="node-battery">BAT ${esc(node.battery)}%</div>` : '';
     const tags = [
       node.is_me ? '<span class="badge b-me" style="font-size:9px">ME</span>' : '',
-      node.is_gateway ? `<span class="badge b-gw" style="font-size:9px">GW${node.gateway_iface ? '·' + node.gateway_iface : ''}</span>` : '',
+      node.is_gateway ? `<span class="badge b-gw" style="font-size:9px">GW${esc(node.gateway_iface ? '·' + node.gateway_iface : '')}</span>` : '',
     ].filter(Boolean).join('');
     const cls = [node.is_me ? 'is-me' : '', node.is_gateway ? 'is-gw' : ''].join(' ');
     grid.innerHTML += `<div class="node-card ${cls}">
       <div class="node-tags">${tags}</div>
-      <div class="node-name">${node.hostname}</div>
-      <div class="node-ip">${node.ip}</div>
+      <div class="node-name">${esc(node.hostname)}</div>
+      <div class="node-ip">${esc(node.ip)}</div>
       <div class="node-ifaces">${chips}</div>
       ${bat}
     </div>`;
@@ -1722,7 +1734,7 @@ function buildIfaceControl() {
     const card = document.createElement('div');
     card.className = 'card';
     const BANDS = {wlan0: '2.4 GHz', wlan1: '5 GHz', wlan2: 'HaLow'};
-    let html = `<div class="card-title">${node.hostname} &nbsp;<span style="color:var(--muted);font-size:10px">${node.ip}${node.is_me ? ' &bull; THIS NODE' : ''}</span></div>`;
+    let html = `<div class="card-title">${esc(node.hostname)} &nbsp;<span style="color:var(--muted);font-size:10px">${esc(node.ip)}${node.is_me ? ' &bull; THIS NODE' : ''}</span></div>`;
     for (const iface of ['wlan0','wlan1','wlan2']) {
       const info = ifaces[iface] || {};
       const on = info.active === true;
@@ -1730,25 +1742,25 @@ function buildIfaceControl() {
         <div class="iface-header">
           <span class="iface-name">${iface}</span>
           <span class="iface-band">${BANDS[iface]}</span>
-          <span class="badge ${on ? 'b-on' : 'b-off'}" id="ibadge-${node.id}-${iface}">${on ? 'ACTIVE' : 'DOWN'}</span>
+          <span class="badge ${on ? 'b-on' : 'b-off'}" id="ibadge-${esc(node.id)}-${iface}">${on ? 'ACTIVE' : 'DOWN'}</span>
           <div class="iface-controls">
             ${on
-              ? `<button class="btn btn-red" onclick="toggleIface('${node.ip}','${node.id}','${iface}','down')">DISABLE</button>`
-              : `<button class="btn btn-green" onclick="toggleIface('${node.ip}','${node.id}','${iface}','up')">ENABLE</button>`
+              ? `<button class="btn btn-red" data-ip="${esc(node.ip)}" data-id="${esc(node.id)}" data-iface="${iface}" onclick="toggleIface(this.dataset.ip,this.dataset.id,this.dataset.iface,'down')">DISABLE</button>`
+              : `<button class="btn btn-green" data-ip="${esc(node.ip)}" data-id="${esc(node.id)}" data-iface="${iface}" onclick="toggleIface(this.dataset.ip,this.dataset.id,this.dataset.iface,'up')">ENABLE</button>`
             }
           </div>
         </div>
         <div class="txpwr-row">
           LINK RATE
-          <strong>${info.tx_mcs || '-'}</strong>
+          <strong>${esc(info.tx_mcs || '-')}</strong>
           /
-          <strong>${info.rx_mcs || '-'}</strong>
+          <strong>${esc(info.rx_mcs || '-')}</strong>
           <span style="color:var(--muted)">TX / RX</span>
         </div>
         <div class="txpwr-row">
           TX POWER
           ${isHalowIface(iface, info) ? renderHalowPower(info) : `${renderTxPowerSelect(`txpwr-${node.id}-${iface}`, info)}
-          <button class="btn" style="padding:4px 10px;font-size:10px" onclick="setTxPower('${node.ip}','${node.id}','${iface}')">SET</button>`}
+          <button class="btn" style="padding:4px 10px;font-size:10px" data-ip="${esc(node.ip)}" data-id="${esc(node.id)}" data-iface="${iface}" onclick="setTxPower(this.dataset.ip,this.dataset.id,this.dataset.iface)">SET</button>`}
         </div>
       </div>`;
     }
@@ -1852,7 +1864,7 @@ function renderHalowBandwidths(preferred) {
   const want = plan.bandwidths.includes(preferred) ? preferred
              : (plan.bandwidths.includes(select.value) ? select.value : plan.bandwidths[0]);
   select.innerHTML = plan.bandwidths
-    .map(bw => `<option value="${bw}"${bw === want ? ' selected' : ''}>${parseInt(bw)} MHz</option>`)
+    .map(bw => `<option value="${esc(bw)}"${bw === want ? ' selected' : ''}>${parseInt(bw)} MHz</option>`)
     .join('');
   select.value = want;
   return want;
@@ -1869,8 +1881,8 @@ function renderHalowChannels(bw, preferred) {
   const want = String(preferred || select.value || '');
   const match = list.some(c => String(c.channel) === want) ? want : String(list[0].channel);
   select.innerHTML = list
-    .map(c => `<option value="${c.channel}"${String(c.channel) === match ? ' selected' : ''}>` +
-              `ch ${c.channel} (${c.mhz} MHz)</option>`)
+    .map(c => `<option value="${esc(c.channel)}"${String(c.channel) === match ? ' selected' : ''}>` +
+              `ch ${esc(c.channel)} (${esc(c.mhz)} MHz)</option>`)
     .join('');
   select.value = match;
 }
@@ -2041,18 +2053,17 @@ function updatePairs() {
   if (!_topo) return;
   const wrap = document.getElementById('pairs-grid');
   wrap.innerHTML = '';
-  const nodes = _topo.nodes;
-  for (let i = 0; i < nodes.length; i++) {
-    for (let j = 0; j < nodes.length; j++) {
-      if (i === j) continue;
-      const src = nodes[i], dst = nodes[j];
-      const key = `${src.id}-${dst.id}`;
-      wrap.innerHTML += `
-        <div class="pair-row">
-          <input type="checkbox" id="pair-${key}" value="${key}" data-src="${src.ip}" data-dst="${dst.ip}" data-src-name="${src.hostname}" data-dst-name="${dst.hostname}">
-          <label for="pair-${key}" style="flex:none;font-size:12px">${src.hostname} → ${dst.hostname}</label>
-        </div>`;
-    }
+  // The source comes from local state, independent of peer identity claims.
+  const src = {ip: _topo.my_ip, hostname: _topo.my_hostname};
+  if (!src.ip) return;
+  for (const dst of _topo.nodes) {
+    if (dst.ip === src.ip) continue;
+    const key = `local-${dst.id}`;
+    wrap.innerHTML += `
+      <div class="pair-row">
+        <input type="checkbox" id="pair-${esc(key)}" value="${esc(key)}" data-src="${esc(src.ip)}" data-dst="${esc(dst.ip)}" data-src-name="${esc(src.hostname)}" data-dst-name="${esc(dst.hostname)}">
+        <label for="pair-${esc(key)}" style="flex:none;font-size:12px">${esc(src.hostname)} → ${esc(dst.hostname)}</label>
+      </div>`;
   }
 }
 
@@ -2156,14 +2167,14 @@ async function loadSessions() {
   }
   list.innerHTML = d.map(s => `
     <div class="session-row">
-      <div class="session-label">${s.label}</div>
-      <div class="session-count">${s.tests} test${s.tests !== 1 ? 's' : ''} · ${s.summary?.ok || 0} ok / ${s.summary?.fail || 0} fail</div>
+      <div class="session-label">${esc(s.label)}</div>
+      <div class="session-count">${esc(s.tests)} test${s.tests !== 1 ? 's' : ''} · ${esc(s.summary?.ok || 0)} ok / ${esc(s.summary?.fail || 0)} fail</div>
       <div class="session-actions">
-        <a href="${U(`/api/sessions/${encodeURIComponent(s.label)}/csv`)}" download="${s.label}.csv"
+        <a href="${esc(U(`/api/sessions/${encodeURIComponent(s.label)}/csv`))}" download="${esc(s.label)}.csv"
            class="btn" style="text-decoration:none;font-size:10px">CSV</a>
-        <a href="${U(`/api/sessions/${encodeURIComponent(s.label)}`)}" target="_blank"
+        <a href="${esc(U(`/api/sessions/${encodeURIComponent(s.label)}`))}" target="_blank"
            class="btn" style="text-decoration:none;font-size:10px">JSON</a>
-        <button class="btn btn-red" style="font-size:10px" onclick="deleteSession('${encodeURIComponent(s.label)}')">DELETE</button>
+        <button class="btn btn-red" style="font-size:10px" data-label="${esc(encodeURIComponent(s.label))}" onclick="deleteSession(this.dataset.label)">DELETE</button>
       </div>
       <div class="session-summary">
         ${sessionMetric('TCP', s.summary?.tcp_mbps, ' Mbps')}
@@ -2177,7 +2188,7 @@ async function loadSessions() {
 
 function sessionMetric(label, stats, unit) {
   const txt = metricText(stats, unit);
-  return `<div class="metric-mini">${label}<strong>${txt || '-'}</strong></div>`;
+  return `<div class="metric-mini">${label}<strong>${esc(txt || '-')}</strong></div>`;
 }
 
 async function deleteSession(encodedLabel) {
@@ -2974,7 +2985,7 @@ CONFIG_TAB_HTML = r"""
         </div>
         <div class="cfg-row">
           <label>Max EUDs per Node<span class="hint">Set at flash; not changed from here</span></label>
-          <span id="f-max-euds" class="cfg-readonly">—</span>
+          <span id="f-max-euds" class="cfg-readonly">-</span>
         </div>
       </div>
 
@@ -3056,7 +3067,7 @@ CONFIG_TAB_HTML = r"""
       </div>
 
       <!-- Node ACK table -->
-      <div class="admin-col-hdr" style="margin-top:14px">Nodes (<span id="node-count">—</span>)</div>
+      <div class="admin-col-hdr" style="margin-top:14px">Nodes (<span id="node-count">-</span>)</div>
       <table class="ack-table" id="ack-table">
         <thead><tr><th>Node</th><th>IP</th><th>ACK</th></tr></thead>
         <tbody id="ack-tbody"></tbody>
@@ -3142,7 +3153,7 @@ function populateForm(cfg) {
   setVal('f-eud',              cfg.eud              || 'wired');
   setVal('f-lan-ap-ssid',      cfg.lan_ap_ssid      || '');
   setVal('f-lan-ap-key',       cfg.lan_ap_key        || '');
-  setText('f-max-euds',        cfg.max_euds_per_node || '—');
+  setText('f-max-euds',        cfg.max_euds_per_node || '-');
   setVal('f-mesh-ssid',        cfg.mesh_ssid         || '');
   setVal('f-mesh-key',         cfg.mesh_key          || '');
   setVal('f-ipv4-network',     cfg.ipv4_network      || '');
@@ -3207,7 +3218,7 @@ function renderStatus(s) {
     const pct   = total > 0 ? Math.round(acked / total * 100) : 0;
 
     pStat.style.display = '';
-    pStat.innerHTML = `<span>${acked}/${total}</span> nodes ACKed &nbsp; <span>${pct}%</span>`;
+    pStat.innerHTML = `<span>${esc(acked)}/${esc(total)}</span> nodes ACKed &nbsp; <span>${pct}%</span>`;
     pWrap.style.display = '';
     ackBar.style.width = pct + '%';
     ackBar.style.background = acked === total ? 'var(--good)' : 'var(--warn)';
@@ -3249,7 +3260,7 @@ function renderStatus(s) {
     let dotCls, ackLabel;
     if (!pendingVer) {
       dotCls   = 'ack-dot-self';
-      ackLabel = '—';
+      ackLabel = '-';
     } else if (isSelf && isAcked) {
       dotCls   = 'ack-dot-self';
       ackLabel = 'Self ✓';
@@ -3263,8 +3274,8 @@ function renderStatus(s) {
     const stale = n.node_state !== 'ACTIVE';
     const nameStyle = stale ? 'color:var(--muted)' : '';
     return `<tr>
-      <td style="${nameStyle}">${n.hostname}</td>
-      <td style="color:var(--muted);font-size:10px">${n.ip}</td>
+      <td style="${nameStyle}">${esc(n.hostname)}</td>
+      <td style="color:var(--muted);font-size:10px">${esc(n.ip)}</td>
       <td><span class="ack-dot ${dotCls}"></span>${ackLabel}</td>
     </tr>`;
   }).join('');
@@ -3403,8 +3414,8 @@ function toast(msg, cls) {
 
 def render_dashboard():
     """Assemble the management page with local identity and tab assets."""
-    hostname = get_my_hostname()
-    ip       = get_my_ip()
+    hostname = html.escape(get_my_hostname())
+    ip       = html.escape(get_my_ip())
     logo_v   = logo_asset_token()
     return f"""<!DOCTYPE html>
 <html lang="en"><head>
@@ -3911,6 +3922,15 @@ class ManageRoutes:
                         self.send_json({'ok': False, 'error':
                             'A measurement batch must fit within one hour; choose fewer pairs or shorter tests'}, 400)
                         return
+                    local_ip = get_my_ip()
+                    for pair in pairs:
+                        if (not isinstance(pair, dict) or not local_ip
+                                or pair.get('src_ip') != local_ip):
+                            raise ValueError('Measurements must run from this node')
+                        pair['dst_ip'] = str(ipaddress.IPv4Address(pair.get('dst_ip', '')))
+                        if not isinstance(pair.get('dst_name'), str):
+                            raise ValueError('Destination name must be text')
+                        pair['src_name'] = get_my_hostname()
                     _measure_status['running']  = True
                     _measure_status['label']    = label
                     _measure_status['progress'] = 'Starting...'

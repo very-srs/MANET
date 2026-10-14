@@ -57,8 +57,10 @@ def valid_value(key, value):
     elif key == 'ipv4_network':
         try:
             network = ipaddress.IPv4Network(value, strict=True)
-            if not 8 <= network.prefixlen <= 28:
-                return False, 'network must have room for reserved services and a node allocation'
+            # /16 is the largest mesh: chunk selection enumerates every
+            # free chunk and draws from bash $RANDOM (0-32767).
+            if not 16 <= network.prefixlen <= 28:
+                return False, 'network must be /16 to /28 with room for reserved services and a node allocation'
         except ValueError:
             return False, 'not a canonical IPv4 CIDR block'
     elif key == 'eud' and value not in ('wired', 'wireless', 'auto'):

@@ -141,14 +141,14 @@ def recovery_status(conf, registry, hostname):
 
 # Shared panel markup escapes observation text before inserting it as HTML.
 RECOVERY_JS = r"""
-function recoveryEscape(value) {
+function esc(value) {
   return String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
 function recoveryPanel(status) {
   if (!status) return '';
-  return '<div style="padding:12px;line-height:1.6"><strong>' + recoveryEscape(status.summary) +
+  return '<div style="padding:12px;line-height:1.6"><strong>' + esc(status.summary) +
     '</strong><dl style="margin:8px 0">' + status.details.map(row =>
-      '<dt style="font-weight:600">' + recoveryEscape(row.label) + '</dt><dd style="margin:0 0 6px">' +
-      recoveryEscape(row.value) + '</dd>').join('') + '</dl></div>';
+      '<dt style="font-weight:600">' + esc(row.label) + '</dt><dd style="margin:0 0 6px">' +
+      esc(row.value) + '</dd>').join('') + '</dl></div>';
 }
 """

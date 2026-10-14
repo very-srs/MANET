@@ -168,8 +168,13 @@ The selected static/ACS manager is regenerated, MOTD links refreshed, and system
 reloaded. Both mesh-status and node-manager are restarted on every installation
 attempt, including retries. They and the agreement/time services are checked
 active; the latter follow node-manager through their drop-ins and `PartOf=`.
-Only then are the version files
-replaced and the retry marker removed. This fixes false success after extraction,
+Other node_tools processes use try-restart: gps-reader, manet-positioning,
+manet-atak, mesh-voice, button-monitor, sae-watchdog, batman-enslave-watch and
+led-boot. Setup oneshots are excluded. Only services active before installation
+have an additional active-state check. Their names are saved with the boot ID
+in recovery/runtime-active.json, so a failed restart still blocks completion on
+a retry in the same boot. A failed stopped service may need an explicit start
+before try-restart can recover it. Only then are the version files replaced and the retry marker removed. This fixes false success after extraction,
 copy, dependency or service failure. It does not provide whole-update rollback
 or guarantee that radio functionality is healthy just because services are active.
 
@@ -307,6 +312,14 @@ Login failures share a monotonic sixty-second window across all login aliases:
 five failures per client address, thirty per node. The bounded list is updated
 under the session lock. HTTP 429 includes `Retry-After`; throttling does not
 revoke established sessions or grow memory with attacker-selected addresses.
+
+Both pages treat registry values as display text. The shared esc() helper
+encodes HTML text and quoted attributes. Dynamic control arguments use DOM
+data attributes instead of interpolated JavaScript strings. The voice peer
+table uses textContent. Registry parsing bounds display names without
+restricting them to DNS labels. DNS publication has its own stricter policy.
+Measurements admit only a local source, record the actual executing hostname
+and IP, and require a received packet for ping success.
 
 **Web resource limits and recovery status**
 
@@ -2297,6 +2310,13 @@ restart. Reboot clears the cache and normal registry discovery rebuilds it.
 `MESH_CLAIMED_CHUNKS_FILE` overrides the path consistently in the producer,
 allocator and runtime reconciliation, including isolated tests.
 
+`manet_hosts.py` accepts only single-label DNS names and usable addresses
+inside ipv4_network. It reserves localhost and unmanaged /etc/hosts aliases,
+comparing names without case. The node's own row stays, so its name maps to
+its br0 address. A peer claiming the same name makes a conflict. Conflicting addresses for a
+name are omitted. Identical claims collapse to one row. Invalid network config
+leaves the hosts file intact and reports failure.
+
 `mesh-hosts-update.sh` delegates to `manet_hosts.py`. The timer still runs
 every two minutes, but sorted, deduplicated host/address mappings determine
 whether `/etc/hosts` changes. Peer telemetry timestamps, record order and other
@@ -2507,6 +2527,13 @@ replacement, preserving ownership and permissions. The old interpolated sed
 replacement interpreted delimiters, ampersands, and executable sed commands
 inside accepted values. Regression tests cover those strings, backslashes,
 quoted SSIDs, and rejected newlines.
+
+Dangerous apply reconciles every explicitly named SSID/key in every mesh
+supplicant file, even if mesh.conf already matches. It restarts the supplicants
+before committing the dangerous mesh.conf values. A volatile restart-needed
+flag covers a failed restart during repair. A fresh activation can retry it,
+while boot starts the files normally. The transport still consumes the original
+command before apply, so this is not a durable application journal.
 
 Ordinary supplicant quotes delimit literal bytes, so the writer does not double
 backslashes. Embedded quotes use hexadecimal string encoding. Mesh changes and

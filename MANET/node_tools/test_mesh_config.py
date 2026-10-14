@@ -8,6 +8,7 @@ import tempfile
 
 from mesh_config import (
     LOCAL_KEYS,
+    validate_config,
     apply_local_to_conf,
     local_changes,
     mesh_changes,
@@ -86,6 +87,14 @@ class ValidatePackageTests(unittest.TestCase):
         }
         ok, why = mod.validate_package(pkg)
         self.assertTrue(ok, why)
+
+
+class NetworkSizeTests(unittest.TestCase):
+    def test_mesh_network_is_at_most_a_slash_16(self):
+        self.assertTrue(validate_config({'ipv4_network': '10.30.0.0/16'})[0])
+        for cidr in ('10.0.0.0/8', '10.30.0.0/15'):
+            with self.subTest(cidr=cidr):
+                self.assertFalse(validate_config({'ipv4_network': cidr})[0])
 
 
 class MeshChangesTests(unittest.TestCase):

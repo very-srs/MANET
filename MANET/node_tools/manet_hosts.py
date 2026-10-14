@@ -10,7 +10,7 @@ import re
 import shlex
 import sys
 
-from manet_config_io import atomic_write
+from manet_config_io import atomic_write, load_kv_file
 
 
 BEGIN = '# === BEGIN MESH HOSTS ==='
@@ -21,8 +21,8 @@ FIELD = re.compile(r'NODE_([0-9a-fA-F]{12})_(HOSTNAME|IPV4_ADDRESS)=(.*)')
 LABEL = re.compile(r'[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?')
 
 
-def entries(registry):
-    """Return sorted, unique valid hostname/IPv4 pairs from the registry."""
+def entries(registry, network, reserved=()):
+    """Return unambiguous single-label peers inside the configured network."""
     nodes = {}
     for line in registry.splitlines():
         match = FIELD.fullmatch(line)
@@ -33,19 +33,23 @@ def entries(registry):
             if len(parts) != 1:
                 raise ValueError('Malformed registry host assignment')
             nodes.setdefault(node.lower(), {})[key] = parts[0]
-    result = set()
+    result = {}
     for node in nodes.values():
-        name = node.get('HOSTNAME', '')
-        if (not name or len(name) > 253
-                or not all(LABEL.fullmatch(p) for p in name.split('.'))):
+        name = node.get('HOSTNAME', '').lower()
+        if (not LABEL.fullmatch(name) or name in reserved
+                or name + '.local' in reserved):
             continue
         try:
             address = ipaddress.IPv4Address(node.get('IPV4_ADDRESS', ''))
         except ValueError:
             continue
-        result.add((name, str(address)))
-    # Stable hostname/address order avoids writes caused by registry ordering.
-    return sorted(result)
+        if (address not in network or address in
+                (network.network_address, network.broadcast_address)):
+            continue
+        result.setdefault(name, set()).add(str(address))
+    # Conflicting claims have no winner. Identical claims collapse to one row.
+    return sorted((name, next(iter(addresses))) for name, addresses in result.items()
+                  if len(addresses) == 1)
 
 
 def render(hosts, rows):
@@ -73,7 +77,7 @@ def render(hosts, rows):
     return hosts + block
 
 
-def update(registry, hosts, lock):
+def update(registry, hosts, lock, conf=None):
     """Lock, validate and atomically refresh hosts only when mappings change."""
     # Keep the lock inode in /run across invocations and service restarts.
     # Replacing /etc/hosts must not replace the lock inode.
@@ -89,9 +93,19 @@ def update(registry, hosts, lock):
             raise ValueError('Hosts file is a symlink; leaving it intact')
         original = hosts.read_bytes()
         metadata = hosts.stat()
-        rows = entries(snapshot)
         # Preserve undecodable bytes in operator-owned lines outside the block.
         text = original.decode('utf-8', errors='surrogateescape')
+        # Validate the block and inspect only the operator-owned aliases.
+        unmanaged = render(text, [])
+        # The node's own registry row keeps its name on its br0 address. A
+        # peer claiming the same label conflicts and both rows are omitted.
+        reserved = {'localhost', 'localhost.local'}
+        for line in unmanaged.splitlines():
+            fields = line.split('#', 1)[0].split()
+            reserved.update(name.lower().rstrip('.') for name in fields[1:])
+        config = load_kv_file(conf or os.environ.get('MANET_MESH_CONF', '/etc/mesh.conf'))
+        network = ipaddress.IPv4Network(config.get('ipv4_network', ''), strict=False)
+        rows = entries(snapshot, network, reserved)
         rendered = render(text, rows)
         contents = rendered.encode('utf-8', errors='surrogateescape')
         if contents == original:

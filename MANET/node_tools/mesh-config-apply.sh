@@ -24,6 +24,7 @@ PENDING_CONFIG="$RUN_DIR/mesh_pending_config.json"
 MESH_CONF="${MANET_MESH_CONF:-/etc/mesh.conf}"
 APPLY_LOG="${MANET_APPLY_LOG:-/var/log/mesh-config-apply.log}"
 APPLIED_VERSION_FILE="$RUN_DIR/mesh_applied_config_version"
+RESTART_PENDING="$RUN_DIR/mesh_supplicant_restart_needed"
 CONFIG_WRITER="${MANET_CONFIG_WRITER:-/usr/local/bin/mesh-config-write.py}"
 SUPPLICANT_HELPER="${MANET_SUPPLICANT_HELPER:-$(dirname "$0")/manet_supplicant.py}"
 REGION_HELPER="${MANET_REGION_HELPER:-$(dirname "$0")/manet-region.py}"
@@ -168,11 +169,13 @@ apply_deferred_settings() {
 # These require wpa_supplicant restart: the mesh will briefly disconnect
 apply_dangerous_settings() {
     local any_dangerous=false
+    [ -f "$RESTART_PENDING" ] && any_dangerous=true
 
     local new_ssid new_key new_cidr
     new_ssid=$(cfg_get "mesh_ssid")
     new_key=$(cfg_get "mesh_key")
     new_cidr=$(cfg_get "ipv4_network")
+    [ -n "$new_ssid$new_key$new_cidr" ] || return
 
     local cur_ssid cur_key cur_cidr
     cur_ssid=$(grep "^mesh_ssid=" "$MESH_CONF" 2>/dev/null | cut -d'=' -f2-)
@@ -183,41 +186,44 @@ apply_dangerous_settings() {
     [ -n "$new_key"  ] && [ "$new_key"  != "$cur_key"  ] && any_dangerous=true
     [ -n "$new_cidr" ] && [ "$new_cidr" != "$cur_cidr" ] && any_dangerous=true
 
-    [ "$any_dangerous" = "false" ] && return
+    # Reconcile every named radio setting even when mesh.conf already matches.
+    # Commit mesh.conf only after all files and the restart succeed, so a
+    # failed write or restart is still work on a newly staged retry.
+    local conf changed key val
+    if [ -n "$new_ssid$new_key" ] || [ "$any_dangerous" = true ]; then
+        # This boot-local flag also covers a failed restart while repairing
+        # files whose intended values already match mesh.conf. Boot itself
+        # starts supplicants from disk, so no persistent apply journal here.
+        touch "$RESTART_PENDING" || die "Cannot record pending supplicant restart"
+    fi
+    for conf in "$WPA_DIR"/wpa_supplicant-wlan*.conf; do
+        [[ "$conf" == *-uplink.conf ]] && continue
+        [ -f "$conf" ] || continue
+        for key in ssid sae_password; do
+            if [ "$key" = ssid ]; then val=$new_ssid; else val=$new_key; fi
+            [ -n "$val" ] || continue
+            changed=$(python3 "$CONFIG_WRITER" "$conf" "$key" "$val" --quoted --report-change) ||
+                die "Cannot update supplicant $key"
+            [ "$changed" = changed ] && any_dangerous=true
+        done
+    done
 
+    if [ "$any_dangerous" = false ]; then
+        rm -f "$RESTART_PENDING"
+        return
+    fi
     log "Applying dangerous settings (mesh will briefly disconnect)"
-
-    [ -n "$new_ssid" ] && [ "$new_ssid" != "$cur_ssid" ] && {
-        log "  mesh_ssid: '$cur_ssid' → '$new_ssid'"
-        conf_set "mesh_ssid" "$new_ssid"
-        # Update wpa_supplicant configs
-        for conf in "$WPA_DIR"/wpa_supplicant-wlan*.conf; do
-            [[ "$conf" == *-uplink.conf ]] && continue
-            [ -f "$conf" ] || continue
-            python3 "$CONFIG_WRITER" "$conf" ssid "$new_ssid" --quoted || die "Cannot update supplicant SSID"
-        done
-    }
-
-    [ -n "$new_key" ] && [ "$new_key" != "$cur_key" ] && {
-        log "  mesh_key: changed"
-        conf_set "mesh_key" "$new_key"
-        for conf in "$WPA_DIR"/wpa_supplicant-wlan*.conf; do
-            [[ "$conf" == *-uplink.conf ]] && continue
-            [ -f "$conf" ] || continue
-            python3 "$CONFIG_WRITER" "$conf" sae_password "$new_key" --quoted || die "Cannot update supplicant password"
-        done
-    }
-
-    [ -n "$new_cidr" ] && [ "$new_cidr" != "$cur_cidr" ] && {
-        log "  ipv4_network: '$cur_cidr' → '$new_cidr'"
-        conf_set "ipv4_network" "$new_cidr"
-        # IP manager will recalculate chunk on next cycle
-        rm -f "$RUN_DIR/my_ipv4_chunk" "$RUN_DIR/my_ipv4_chunk_size" "$RUN_DIR/mesh_ipv4_state" 2>/dev/null
-    }
-
-    # Restart wpa_supplicant on configured mesh interfaces
     log "  Restarting wpa_supplicant on mesh interfaces..."
     python3 "$SUPPLICANT_HELPER" restart || die "Mesh supplicant restart failed"
+
+    [ -n "$new_ssid" ] && [ "$new_ssid" != "$cur_ssid" ] && conf_set mesh_ssid "$new_ssid"
+    [ -n "$new_key" ] && [ "$new_key" != "$cur_key" ] && conf_set mesh_key "$new_key"
+    if [ -n "$new_cidr" ] && [ "$new_cidr" != "$cur_cidr" ]; then
+        conf_set ipv4_network "$new_cidr"
+        # IP manager will recalculate its chunk on the next cycle.
+        rm -f "$RUN_DIR/my_ipv4_chunk" "$RUN_DIR/my_ipv4_chunk_size" "$RUN_DIR/mesh_ipv4_state" 2>/dev/null
+    fi
+    rm -f "$RESTART_PENDING" || die "Cannot clear pending supplicant restart"
 
     log "  Dangerous settings applied. Mesh reconnecting..."
 }

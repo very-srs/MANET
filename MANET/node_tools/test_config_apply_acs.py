@@ -155,6 +155,62 @@ class AcsApplyTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, log)
         self.assertIn('systemctl restart node-manager.service', calls)
 
+    def test_partial_supplicant_write_failure_then_new_activation_repairs(self):
+        self.manager_running('n')
+        with self.conf.open('a') as stream:
+            stream.write('mesh_key=old-password\n')
+        first = self.wpa / 'wpa_supplicant-wlan0.conf'
+        second = self.wpa / 'wpa_supplicant-wlan1.conf'
+        for path in (first, second):
+            path.write_text('network={\n    sae_password="old-password"\n}\n')
+        writer = self.bin / 'writer.py'
+        writer.write_text(
+            'import os, runpy, sys\n'
+            'from pathlib import Path\n'
+            'if "wlan1" in sys.argv[1] and Path(os.environ["TEST_ROOT"], "write-fails").exists():\n'
+            '    sys.exit(1)\n'
+            f'sys.path.insert(0, {str(TOOLS)!r})\n'
+            f'runpy.run_path({str(TOOLS / "mesh-config-write.py")!r}, run_name="__main__")\n')
+        self.env['MANET_CONFIG_WRITER'] = str(writer)
+        failure = self.root / 'write-fails'
+        failure.touch()
+        result, calls, log = self.apply('v1', mesh_key='new-password')
+        self.assertNotEqual(result.returncode, 0, log)
+        self.assertIn('new-password', first.read_text())
+        self.assertIn('old-password', second.read_text())
+        self.assertIn('mesh_key=old-password', self.conf.read_text())
+        self.assertIsNone(self.applied())
+        failure.unlink()
+        result, calls, log = self.apply('v2', mesh_key='new-password')
+        self.assertEqual(result.returncode, 0, log)
+        self.assertIn('new-password', second.read_text())
+        self.assertIn('supplicant restart', calls)
+        self.assertEqual(self.applied(), 'v2')
+        # Also repair a partial installation left by the earlier writer order.
+        second.write_text('network={\n    sae_password="old-password"\n}\n')
+        result, calls, log = self.apply('v3', mesh_key='new-password')
+        self.assertEqual(result.returncode, 0, log)
+        self.assertIn('new-password', second.read_text())
+        self.assertIn('supplicant restart', calls)
+        result, calls, log = self.apply('v4', mesh_key='new-password')
+        self.assertEqual(result.returncode, 0, log)
+        self.assertNotIn('supplicant restart', calls)
+
+    def test_equal_config_repair_retries_a_failed_supplicant_restart(self):
+        self.manager_running('n')
+        with self.conf.open('a') as stream:
+            stream.write('mesh_key=new-password\n')
+        self.env['MANET_SUPPLICANT_HELPER'] = str(self.bin / 'fail.py')
+        (self.bin / 'fail.py').write_text('raise SystemExit(1)\n')
+        result, calls, log = self.apply('v1', mesh_key='new-password')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIsNone(self.applied())
+        self.env['MANET_SUPPLICANT_HELPER'] = str(self.bin / 'supplicant')
+        result, calls, log = self.apply('v2', mesh_key='new-password')
+        self.assertEqual(result.returncode, 0, log)
+        self.assertIn('supplicant restart', calls)
+        self.assertEqual(self.applied(), 'v2')
+
     def test_sync_runs_the_apply_in_its_own_unit(self):
         source = (TOOLS / 'mesh-config-sync.py').read_text()
         self.assertIn('"systemd-run", "--unit=mesh-config-apply", "--wait"', source)
