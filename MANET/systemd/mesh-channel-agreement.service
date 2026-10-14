@@ -15,7 +15,8 @@ RestrictRealtime=yes
 SystemCallArchitectures=native
 # The resident worker also reconciles IP, AP and service configuration.
 # Atomic replacement needs writable parent directories, including /etc.
-ReadWritePaths=/etc /var/lib /run
+# wpa_cli binds its reply socket in the host's /tmp, so PrivateTmp breaks it.
+ReadWritePaths=/etc /var/lib /run /tmp
 # Syncthing identity reads the radio account's public certificate.
 ProtectHome=read-only
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK

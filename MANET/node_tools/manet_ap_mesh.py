@@ -449,7 +449,8 @@ class Transition:
                         self.command(['systemctl', 'start', 'hostapd.service'], timeout=60)
                         self.command(['systemctl', 'start', 'ap-txpower.service'])
                     except Exception as recovery:
-                        raise RuntimeError('Mesh transition failed; AP recovery also failed') from recovery
+                        raise RuntimeError(f'Mesh transition failed ({error}). '
+                                           f'AP recovery also failed ({recovery})') from recovery
                 raise RuntimeError(f'Cannot return AP radio to mesh: {error}') from error
 
     def prepare_ap(self):

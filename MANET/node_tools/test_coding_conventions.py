@@ -108,6 +108,18 @@ class CodingConventionTests(unittest.TestCase):
                 self.assertEqual(config['Service']['NoNewPrivileges'], 'yes')
                 self.assertEqual(config['Service']['ProtectSystem'], 'strict')
 
+    def test_wpa_cli_callers_can_bind_their_reply_socket(self):
+        # wpa_cli binds a client socket in the host's /tmp and the supplicant
+        # replies there, so a read-only or private /tmp makes every call fail.
+        config = configparser.ConfigParser(strict=False, interpolation=None)
+        with (MANET / 'systemd' / 'mesh-channel-agreement.service').open() as stream:
+            config.read_file(stream)
+        service = config['Service']
+        self.assertIn('/tmp', service['ReadWritePaths'].split())
+        self.assertNotEqual(service.get('PrivateTmp', 'no'), 'yes')
+        for name in ('manet_ap_mesh.py', 'manet_supplicant.py', 'mesh-channel-agreement.py'):
+            self.assertIn('wpa_cli', (MANET / 'node_tools' / name).read_text())
+
 
 # Exceptions are bound to files so a new copy cannot inherit an exemption.
 DUPLICATE_NAME_ALLOWLIST = {
