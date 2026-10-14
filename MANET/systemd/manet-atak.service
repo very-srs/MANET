@@ -22,7 +22,8 @@ RuntimeDirectoryMode=0750
 StateDirectory=manet-atak
 StateDirectoryMode=0700
 UMask=0027
-# nft readback requires NET_ADMIN; br0 binding requires NET_RAW. No clock,
+# nft readback requires NET_ADMIN; br0 binding and passive EUD packet sockets
+# require NET_RAW. No multicast membership, promiscuity, clock,
 # GPIO or audio capabilities. Only the separate pre/post commands mutate policy.
 CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
 NoNewPrivileges=yes
@@ -33,7 +34,7 @@ PrivateDevices=yes
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes
-RestrictAddressFamilies=AF_INET AF_NETLINK AF_UNIX
+RestrictAddressFamilies=AF_INET AF_NETLINK AF_UNIX AF_PACKET
 RestrictSUIDSGID=yes
 LockPersonality=yes
 MemoryDenyWriteExecute=yes

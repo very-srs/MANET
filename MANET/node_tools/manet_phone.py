@@ -683,7 +683,7 @@ class PhonePosition:
                     self._emit(code, "audio", warning.audio)
                 warning.deadline = mono + self.warning_read_timeout_s
 
-    def select(self, now_mono, now_utc, *, radio_gps=None):
+    def select(self, now_mono, now_utc, *, radio_gps=None, defer_unavailable=False):
         """Apply freshness, distrust, user conflict/confirmation and reminders.
 
         fault_epoch only revokes trust. A new mark within restore_margin_m of
@@ -774,7 +774,9 @@ class PhonePosition:
         if not self._distrusted:
             self._clear_warning("gps_override", web=True)
             self._clear_warning("confirm_position")
-        if (self._distrusted or chosen is None) and not self._overridden:
+        # The service debounces receiver availability, never evidence of
+        # distrust. No stale fix becomes usable during that warning delay.
+        if (self._distrusted or chosen is None and not defer_unavailable) and not self._overridden:
             self._warn("gps_untrusted", "Radio GPS is unavailable or untrusted. "
                        "If ATAK shows NO GPS, tap it to select your best known location "
                        "or drag your own dot; "

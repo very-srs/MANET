@@ -12,7 +12,8 @@ Wire references: TAK-Product-Center/atak-civ main, 2026-10-06:
 * atak/ATAK/app/.../contact/ContactListDetailHandler.java: friendly contacts,
   callsign, endpoint. chat/GeoChatService.java: hidden-location chat.
 Phone classification uses precisionlocation. Ownership uses creator UID/time.
-Transport is TAK protocol 0, CoT schema 2.0. parse_marker takes one complete
+Builders use TAK protocol 0, CoT schema 2.0. manet_tak also maps mesh v1 SA
+into PhoneSA through the same classifier. parse_marker takes one complete
 XML document. Listeners must bound buffers and frame split/coalesced reads.
 Direct v0 TCP normally closes after one message. Streaming v0 concatenates
 XML ending in </event>. Do not advertise TakControl/protobuf.
@@ -31,6 +32,9 @@ import xml.etree.ElementTree as ET
 # CoT's sentinel for unavailable HAE and 90 percent error estimates.
 UNKNOWN = 9999999
 RADIO_TYPE = "a-f-G-E"
+# MIL-STD-2525 radio/signal unit (SFGPUUSR-------), not ATAK person self SA.
+BEACON_TYPE = "a-f-G-U-U-S-R"
+BEACON_STALE_S = 90
 DEFAULT_MAX_BYTES = 64 * 1024
 MAX_DEPTH = 32
 CHAT_STALE_S = 86400
@@ -278,6 +282,30 @@ def hidden_contact(uid, callsign, contact_endpoint, now, stale_s=CONTACT_STALE_S
     })
     ET.SubElement(detail, "remarks").text = (
         "Send a point to this contact to set your radio's location.")
+    return _serialize(event)
+
+
+def radio_beacon(radio_uid, callsign, fix, now):
+    """Advertise an unattended radio without a person role or Send endpoint.
+
+    Public ATAK Icon2525cIconAdapter uses type symbology without team metadata.
+    UUSR is the standard radio/signal symbol, also mapped in milsymbol's
+    lettersidc/sidc/ground.js. Pixel rendering still needs hardware verification.
+    The separate UID never moves the hidden phone-facing contact.
+    """
+    if not _usable(fix) or (fix.lat, fix.lon) == (0, 0):
+        return None
+    event = _event(_text(radio_uid, 'radio_uid') + '-beacon', BEACON_TYPE,
+                   _HOW[fix.source], now, BEACON_STALE_S)
+    # A held manual fix's private phone identity is not multicast metadata.
+    public = Fix(fix.lat, fix.lon, fix.source, hae=fix.hae,
+                 horizontal_error=fix.horizontal_error, vertical_error=fix.vertical_error)
+    remarks = _point(event, public)
+    detail = ET.SubElement(event, 'detail')
+    ET.SubElement(detail, 'contact', callsign=_text(callsign, 'callsign'))
+    ET.SubElement(detail, 'precisionlocation', geopointsrc=EXTERNAL_SOURCE_PREFIX + fix.source,
+                  altsrc=EXTERNAL_SOURCE_PREFIX + fix.source)
+    ET.SubElement(detail, 'remarks').text = 'Unattended MANET radio. ' + remarks
     return _serialize(event)
 
 
@@ -558,37 +586,42 @@ def parse_self_sa(data: bytes, max_bytes=DEFAULT_MAX_BYTES):
     _byte_limit(max_bytes)
     try:
         root = _parse_document(data, max_bytes)
-        mark = _marker_from_root(root, allow_zero=True)  # Presence, no fix.
-        if mark.type != "a-f-G-U-C":
-            raise ValueError("event is not phone self SA (expected a-f-G-U-C)")
-        detail = _child(root, "detail")
-        contact = _child(detail, "contact", required=True)
-        callsign = _text(mark.callsign, "callsign")
-        precision = _child(detail, "precisionlocation")
-        geopointsrc = None if precision is None else precision.get("geopointsrc")
-        altsrc = None if precision is None else precision.get("altsrc")
-        parents = tuple(_text(link.get("uid"), "parent uid") for link in detail.findall("link")
-                        if link.get("relation") == "p-s")
-        source = "unknown"
-        if mark.lat == 0 and mark.lon == 0:
-            pass  # ATAK cold start sends SA without a usable location.
-        elif (geopointsrc or "").startswith(EXTERNAL_SOURCE_PREFIX):
-            source = "external"
-        elif geopointsrc == "GPS":
-            source = "gps"
-        elif geopointsrc == "USER":
-            source = "manual"
-        elif parents:
-            source = "external"
-        elif not geopointsrc and mark.how == "h-e":
-            source = "manual"
-        return PhoneSA(mark.uid, callsign, mark.lat, mark.lon, mark.hae, mark.ce,
-                       source, geopointsrc, altsrc, mark.time, mark.start, mark.stale,
-                       contact.get("endpoint"), mark.how, mark.le, parents)
+        return _phone_sa_from_root(root)
     except (ET.ParseError, LookupError):
         return "malformed or unsupported XML"
     except ValueError as exc:
         return str(exc)
+
+
+def _phone_sa_from_root(root):
+    """Classify validated XML or a bounded v1 projection identically."""
+    mark = _marker_from_root(root, allow_zero=True)  # Presence, no fix.
+    if mark.type != "a-f-G-U-C":
+        raise ValueError("event is not phone self SA (expected a-f-G-U-C)")
+    detail = _child(root, "detail")
+    contact = _child(detail, "contact", required=True)
+    callsign = _text(mark.callsign, "callsign")
+    precision = _child(detail, "precisionlocation")
+    geopointsrc = None if precision is None else precision.get("geopointsrc")
+    altsrc = None if precision is None else precision.get("altsrc")
+    parents = tuple(_text(link.get("uid"), "parent uid") for link in detail.findall("link")
+                    if link.get("relation") == "p-s")
+    source = "unknown"
+    if mark.lat == 0 and mark.lon == 0:
+        pass  # ATAK cold start sends SA without a usable location.
+    elif (geopointsrc or "").startswith(EXTERNAL_SOURCE_PREFIX):
+        source = "external"
+    elif geopointsrc == "GPS":
+        source = "gps"
+    elif geopointsrc == "USER":
+        source = "manual"
+    elif parents:
+        source = "external"
+    elif not geopointsrc and mark.how == "h-e":
+        source = "manual"
+    return PhoneSA(mark.uid, callsign, mark.lat, mark.lon, mark.hae, mark.ce,
+                   source, geopointsrc, altsrc, mark.time, mark.start, mark.stale,
+                   contact.get("endpoint"), mark.how, mark.le, parents)
 
 
 @dataclass(frozen=True)
