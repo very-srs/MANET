@@ -11,7 +11,7 @@
 3. **Hold the button.** Speak into the headset microphone.
 4. **Release.** Your microphone stops transmitting.
 
-You can hear other speakers while your button is released.
+You can hear other speakers while your button is released. Speaking louder does not make the signal go farther.
 
 ## User
 
