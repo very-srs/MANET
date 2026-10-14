@@ -13,12 +13,14 @@
 
 ATAK can use the cable or this radio's Wi-Fi. Pick the phone that sets the
 group's location on [status](http://manet.local/). No admin password is needed.
-Set up the [phone's location input](location.md#user-set-up-your-atak-phone)
-once. You do not need to add a new output address for each radio.
+Radio has GPS? Turn **Android location OFF**, turn **ATAK external GPS input ON,
+UDP 4349**, and leave **Default Mesh SA ON**. Radio has no GPS receiver? Keep
+**Android location ON** so the phone supplies the position. Follow the
+[location setup](location.md#user-set-up-your-atak-phone).
 
 Wi-Fi access depends on how this radio was configured by some nerd. If it is not serving an access point, use Ethernet.
 
-Remember to not go to the car lot nearest the base to finance a Camaro as an E3.
+Remember not to go to the dealership nearest the base and finance a Camaro as an E3.
 ## User
 
 ### Choose an available connection
@@ -46,12 +48,18 @@ The dashboard is for this radio's own clients. A device on the upstream internet
 ### ATAK phones
 
 ATAK works over the client Ethernet connection or this radio's enabled Wi-Fi
-access point. Keep phones near their radio: every attached phone receives its
-position. One phone controls the group's manual location. Choose it in **ATAK
-PHONES** on the status page without the admin password. Turn Android location
-services off and enable ATAK's external GPS input on **UDP 4349** once. Leave
-**Default Mesh SA** enabled. No per-radio output entry is needed. Follow
-[location and ATAK](location.md) for phone settings and automatic selection.
+access point. Keep phones near their radio. With a GPS-equipped radio, turn
+**Android location OFF**, enable ATAK external GPS input on **UDP 4349**, and leave
+**Default Mesh SA ON**. ATAK then shares the radio's position over mesh, direct
+connections and TAK servers. With no radio GPS receiver, keep **Android location
+ON** instead. The controlling phone supplies GPS and there is no missing-receiver
+prompt. Choose the controller in **ATAK PHONES** without the admin password.
+
+The multicast rewrite is a safety net if someone forgets those settings.
+A detected TAK-server phone is exempt for ten minutes after its last observed
+TCP traffic on 8089 or 8087. TLS cannot be rewritten. The local panel shows
+**TAK server** and any radio/phone GPS disagreement. Follow
+[location and ATAK](location.md) for setup and detection limits.
 
 ## Developer
 
@@ -128,11 +136,24 @@ leases form a bounded per-phone table with one controller. Controller choice
 uses present manual preference, sole wired phone, present current controller,
 then stable random selection. The password-free controller POST checks the local
 DHCP source pool and JSON/origin boundary, then hands off through a producer
-file for daemon-side presence validation. No admitted phone means no CoT output. `manet-positioning.service` is a separate, disabled-by-default service.
+file for daemon-side presence validation. An unattended radio with a usable fix
+can publish its own beacon. `manet-positioning.service` is a separate, disabled-by-default service.
+
+The documented setup is Android location off and ATAK external GPS input on
+UDP 4349 for GPS-equipped radios, with Default Mesh SA enabled. A radio without
+GPS hardware needs Android location on instead. This selects one position inside
+ATAK for all outputs, including unicast and TLS, which the radio cannot rewrite.
 
 Default Mesh SA (`239.2.3.1:6969`) is captured only on local EUD ingress with
-filtered packet sockets. The daemon neither joins the group nor opens a socket
-on bat0. Outgoing copies forwarded from the mesh are filtered before userspace.
+filtered packet sockets. The same queue retains only headers for TAK-server
+detection on TCP 8087/8089. The daemon neither joins the group nor receives packets
+on bat0. An output-only bat0 socket sends admitted phone SA with radio-selected
+positions, preserving sender identity. Three-second nft set leases block only
+their native EUD-to-bat0 copies while this daemon refreshes them. Marked server
+phones are excluded for 600 seconds since their latest observed traffic. During
+block removal, captured reports pass unchanged, with possible identical duplicates
+until the three-second lease window ends and the capture queue drains. Local copies, unadmitted senders, TAK-server and unicast traffic
+remain native. Outgoing copies forwarded from the mesh are filtered before userspace.
 The existing permanent multicast-router setting on bat0 remains unchanged.
 This receiver adds no multicast listener advertisement. A bounded v1 protobuf
 or legacy XML SA decoder runs only after ingress/MAC/neighbor/firewall proof,
