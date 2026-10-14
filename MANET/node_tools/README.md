@@ -292,8 +292,9 @@ Talk group is per-radio. It is not pushed across the mesh the way a HaLow or
 Wi-Fi channel change is, so each operator picks their own group.
 
 Groups run from 1 to 32. All of them share one multicast group
-(`239.192.41.1`) and differ by port: group *n* uses `38801 + (n-1)*2`, with
-`port+1` carrying that group's RTCP.
+(`239.192.41.1`) and differ by port: group *n* uses `38801 + (n-1)*2`.
+The next port is reserved for RTCP, but the current pipelines send and receive
+RTP only.
 
 ### Codec
 
@@ -393,6 +394,28 @@ If capture cannot open and no send socket exists, `tx_blocked` reports the
 transmit pipeline's audio-device error. Socket binding is checked once the
 socket exists.
 
+Receive state has separate limits: at most 128 admitted RTP sources, 64
+parked sources, and the decoder limit set by `voice_max_talkers`. A sender
+address can retain four source identities. New identities use a burst allowance
+of two per address, replenished by one every 30 seconds, and a shared burst of
+64, replenished by one per second. Established sources pass immediately.
+An ordinary restart and a newly arriving talker need no admission wait.
+Repeated rapid restarts, a full table, or traffic exceeding these allowances
+can prevent a new source from being heard until capacity returns.
+
+Inactive sources expire through GStreamer's native timer after a nominal
+15-minute idle threshold, on its next maintenance pass. This preserves normal
+conversation gaps. The default 10-minute muted beacon refreshes present peers
+before expiry. Disabling beacons or setting them longer than the retention
+interval can bring back the existing first-contact clipping after long silence.
+Parking overflow retires the evicted source until it expires or the sender
+uses a new identity. These limits add no packet queue or PTT holdoff.
+
+`/run/mesh-voice.json` also reports `rtp_sources`, `rtp_source_limit`,
+`rtp_admission_drops`, `talkers_parked`, and `parked_limit`. Source names come
+from UDP sender addresses matched to the registry. Each daemon run uses a
+random 32-bit SSRC so a restart is unlikely to reuse retained sequence state.
+
 ### Config keys
 
 Config keys in `/etc/mesh.conf`:
@@ -413,7 +436,7 @@ Config keys in `/etc/mesh.conf`:
 | `voice_unicast_max_peers` | `16` | Cap on unicast copies |
 | `voice_half_duplex` | `n` | Refuse PTT while a remote node is transmitting |
 | `voice_max_talkers` | `8` | Floor for the number of talkers kept ready to decode. Raised to known nodes + 2, hard cap 64 |
-| `voice_beacon_sec` | `600` | Safety-net presence beacon interval. Beacons are normally sent at start-up and when a new peer appears. 0 disables |
+| `voice_beacon_sec` | `600` | Presence refresh interval, also covers missed peer arrivals. Beacons also run at start-up and on new peers. 0 disables |
 | `voice_dscp` | `48` | DSCP marking. 48 is CS6, which reaches the 802.11 voice access category through batman-adv |
 | `voice_codec` | `lyra` | `lyra` or `opus`. Mesh-wide: change it from the VOICE tab, not by hand |
 | `voice_bitrate` | `32000` | Opus bitrate |
@@ -943,6 +966,23 @@ The [allocation and collision-recovery explanation](../../docs/node-tools-intern
 covers the address calculation, occupied-range selection, mixed block widths,
 startup window, and why simultaneous claims still require later repair.
 
+When `ipv4_network` changes, the allocator retires the saved node address,
+EUD gateway and locally held old MediaMTX/Mumble IPv4 VIPs before claiming a
+new block. It replaces the DHCP pool and management names and clears old
+leases. Exact address ownership comes from the saved allocation, which stays
+durable until retirement succeeds so an interrupted pass can retry. Operator
+aliases, uplink addresses and IPv6 remain intact. Removing the last old-prefix
+address also removes its connected route, unless an operator alias still needs
+that route. The new allocation is saved before its addresses are installed.
+Retirement reads the kernel's secondary-promotion policy without changing it.
+With promotion disabled it removes owned secondary addresses before the
+primary, or defers without stopping DHCP if an operator alias would be lost.
+Locks, ownership, capabilities and file access are checked before disruption.
+A failed retirement restores the old addresses, pool and leases and restarts
+previously active DHCP. Interrupted restoration keeps a checkpoint in `/run`
+for the next attempt. Failures retry at most once every 15 seconds and repeat
+the diagnostic only when the failure changes.
+
 **manet-dhcp-isolation.py**
 
 Keeps DHCP and EUD discovery (mDNS, LLMNR, SSDP/UPnP, NetBIOS and
@@ -1294,9 +1334,20 @@ does not exclude someone who already knows that old password.
    restores itself. **Skip the safety net** tells it to keep the change either
    way.
 
-An activation is recorded before applying it, so restarting a service,
-rebooting, or rolling back cannot execute the same recorded activation again.
-If an apply attempt fails or is interrupted, stage a new change to retry.
+Each node saves a private application journal in `/var/lib/manet-config`
+before consuming the activation. A failed or interrupted apply remains local
+work. It resumes through config sync, including after a restart or password
+rotation, without needing the original encrypted message. Staging still needs
+verified time and activation waits for its scheduled time. Once activation
+begins, local recovery does not depend on the clock-sync marker.
+
+A staged ACK means the node saved the package. It does not mean application
+succeeded. Type-73 acknowledgements carry `application_status` and a separate
+`applied_version`. The pending package in the admin API also carries
+`application_status`. The durable journal distinguishes `prepared`, `applying`,
+`verified`, `committed` and `rolled_back`. Only verified or committed work
+produces the volatile applied-version marker. Rollback is terminal for that
+transaction. A deliberate retry after rollback requires a new staged edit.
 
 ### When each setting takes effect
 
@@ -1328,23 +1379,53 @@ supplicants. A failed peer query at that deadline also triggers restoration.
 `MANET_ROLLBACK_GRACE` changes that window. A successful empty query before
 the change identifies a solo node, which keeps its new settings.
 
-A failed baseline query, incomplete backup, or missing rollback helper blocks
-the dangerous change unless **Skip the safety net** was explicitly selected.
-An existing trial keeps its original backup and deadline; a second protected
-change waits until that trial finishes. Failed preparation can be retried on
-the next manager cycle while the activation message remains valid.
+A failed baseline query or incomplete backup blocks the dangerous change
+unless **Skip the safety net** was explicitly selected. The original backup
+and deadline remain in the journal across retries. All newer config work waits
+while an activation or restoration is unfinished. Failed preparation remains
+local work even after the transport message expires.
+
+The deadline uses the boot clock. If a node reboots during a trial, it checks
+the outcome immediately instead of granting a fresh five-minute window.
+Only an already verified change with healthy files/services and a recovered
+peer (or a successful original solo-node baseline) can commit. Otherwise the
+node restores its original snapshot.
+Rebooting during the trial can undo the change before radios reconnect.
+Leave the node powered until the trial finishes to give the change its full
+safety window.
 
 If restoring a file or restarting a service fails, the snapshot is kept and
 restoration is retried on the next cycle, including after a reboot.
 
-Danger is judged per node against its own current values, so re-broadcasting an
-SSID a node already has does not put it into a trial window.
+Danger is judged against both mesh.conf and every mesh supplicant file.
+Retries reconcile each requested value, restart and verify the relevant
+services, and check their actual files. Equality with mesh.conf alone cannot
+complete a job. A verified trial also checks files and service health before
+committing. Interrupted restoration keeps restoring even if peers return.
 
-A newly staged retry reconciles every named SSID/key against the supplicant
-files even if mesh.conf already matches. Supplicant files and their restart
-finish before mesh.conf is committed. A boot-local pending flag retains a
-failed restart obligation until a new dangerous apply succeeds or the node boots.
-This does not resume an interrupted authenticated command automatically.
+### Updating a node with pending work
+
+The updater stops node-manager and any running `mesh-config-apply` unit before
+replacing files. It saves the pending package and ACK in its private recovery
+directory, installs the receiver, applier and `manet_config_journal.py`, then
+runs `mesh-config-sync.py migrate` before activation. A successful import
+fsyncs the pending package and any legacy rollback snapshot/deadline before
+disabling the legacy checker for that trial. An already consumed legacy
+activation is recognized from its replay history and matching ACK marker.
+Legacy trials whose applier already finished are imported too. No journal is
+needed when there is no pending package or trial. Migration failure leaves
+the update pending with its old version markers and the manager stopped.
+Offline update recovery repeats migration before resuming services, including
+after a reboot clears `/run`.
+
+Config sync also imports legacy state on its first ordinary pass, but that is
+not a substitute for the updater hook before an immediate reboot. Once
+imported, losing `/run` does not lose the job. Keep the existing admin replay
+history and the new journal during updates and rollback.
+
+The manager invokes config sync for local pending work even if Alfred is empty
+or unavailable. The status API reads application and rollback state from the
+journal, falling back to legacy state only when no journal job exists.
 
 Configuration arriving from another node is validated before it is used. Keys
 are whitelisted and values are checked for shape and length, so a peer cannot
@@ -1650,6 +1731,12 @@ Answers one question on every SSH login: has this node finished setting itself
 up? Installed as `/etc/update-motd.d/50-manet-provision`, and runnable
 directly. It also reports the outcome of your own setup scripts when any were
 staged.
+
+The templates record early download-resource timeouts as `bootstrap-network`
+in the same state file. Before the archive is available they install a small
+standalone banner reader. The full status command later reads that state and
+its log path, and recommends restarting `mesh-provision.service` or rebooting
+for that phase. Radio setup keeps its separate retry command.
 
 - **running.** A banner saying not to disconnect, with how long it has been
   going.

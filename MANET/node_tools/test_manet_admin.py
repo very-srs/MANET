@@ -49,6 +49,8 @@ class AdminTests(unittest.TestCase):
         clock_env.start(); self.addCleanup(clock_env.stop)
         self.conf = self.root / 'mesh.conf'
         self.conf.write_text('admin_password=shared-test-password\nmtx=y\n')
+        from test_config_sandbox import isolate_config
+        isolate_config(self, self.root)
         self.sender = AdminTransport(self.conf, self.root / 'sender')
         self.receiver = AdminTransport(self.conf, self.root / 'receiver')
         self.now = 1_800_000_000_000_000_000
@@ -64,9 +66,17 @@ class AdminTests(unittest.TestCase):
 
     def fake_run(self, args, **kwargs):
         self.calls.append((args, kwargs))
+        if args == config_sync.APPLY_COMMAND:
+            with config_sync.local_config_journal().locked() as journal:
+                journal.finish('committed')
+                journal.project()
         return subprocess.CompletedProcess(args, 0, self.raw if args[:2] == ['alfred', '-r'] else '', '')
 
     def receiver_patches(self, module, channel):
+        if module is config_sync:
+            p = patch.object(module, 'JOURNAL_DIR', str(self.root / 'journal'))
+            p.start()
+            self.addCleanup(p.stop)
         for name, value in {
             'ADMIN': self.receiver, 'PENDING_FILE': str(self.root / f'pending-{channel}'),
             'ACK_VERSION_FILE': str(self.root / f'ack-{channel}'),
@@ -302,11 +312,14 @@ class AdminTests(unittest.TestCase):
             self.assertEqual(radio_sync.sync_once(), 0)
             apply.assert_called_once()
 
-    def test_interrupted_config_apply_is_not_replayed(self):
+    def test_interrupted_config_apply_resumes_without_replaying_transport(self):
         self.receiver_patches(config_sync, 70)
         self.raw = frame(self.sender.seal(70, dict(self.payload, activate_at=1)))
+        interrupted_once = False
         def interrupted(args, **kwargs):
-            if args == config_sync.APPLY_COMMAND:
+            nonlocal interrupted_once
+            if args == config_sync.APPLY_COMMAND and not interrupted_once:
+                interrupted_once = True
                 raise SystemExit
             return self.fake_run(args, **kwargs)
         with patch.object(config_sync, 'run', side_effect=interrupted) as run:
@@ -316,7 +329,7 @@ class AdminTests(unittest.TestCase):
                 Path(getattr(config_sync, name)).unlink(missing_ok=True)
             self.assertEqual(config_sync.sync_once(), 0)
             self.assertEqual(sum(call.args[0] == config_sync.APPLY_COMMAND
-                                 for call in run.call_args_list), 1)
+                                 for call in run.call_args_list), 2)
 
     def test_publishers_encrypt_and_report_failures(self):
         with patch.object(status, 'ADMIN', self.sender), \
@@ -338,6 +351,22 @@ class AdminTests(unittest.TestCase):
                             status.make_config_version())
         self.assertNotEqual(manet_manage.make_radio_version(),
                             manet_manage.make_radio_version())
+
+    def test_terminal_ack_supersedes_older_staged_ack(self):
+        """A rolled-back/cancelled report removes even an older valid ACK."""
+        from manet_admin import Message
+        for phase in ('rolled_back', 'cancelled'):
+            messages = [Message({'kind': 'config_ack', 'hostname': 'node-a',
+                                 'version': 'abc123',
+                                 'application_status': state}, order, 'a' * 32)
+                        for order, state in enumerate(('staged', phase))]
+            with self.subTest(phase=phase), \
+                    patch.object(status.ADMIN, 'messages',
+                                 return_value=messages), \
+                    patch.object(status.subprocess, 'run',
+                                 return_value=subprocess.CompletedProcess(
+                                     [], 0, 'records', '')):
+                self.assertEqual(status.authenticated_config_acks(), {})
 
 
 class LiteralConfigTests(unittest.TestCase):
@@ -381,6 +410,8 @@ class WebBoundaryTests(unittest.TestCase):
         self.addCleanup(scratch.cleanup)
         self.clock_marker = Path(scratch.name) / 'initial_time_synced'
         self.clock_marker.touch()
+        from test_config_sandbox import isolate_config
+        isolate_config(self, scratch.name)
         env = patch.dict(os.environ, MANET_TIME_RUN_DIR=scratch.name)
         env.start(); self.addCleanup(env.stop)
 

@@ -303,6 +303,8 @@ echo "$STATIC_FREQ_2_4 $STATIC_FREQ_5_0"
     def test_empty_alfred_skips_parser_nonempty_always_reaches_it_and_failure_is_not_empty(self):
         with tempfile.TemporaryDirectory() as scratch:
             root = Path(scratch)
+            from test_config_sandbox import isolate_config
+            isolate_config(self, root)
             helper = root / 'receiver'
             helper.write_text('#!/bin/bash\ncat >> "$TEST_ROOT/received"\n')
             helper.chmod(0o755)

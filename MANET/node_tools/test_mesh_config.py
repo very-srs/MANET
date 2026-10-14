@@ -70,6 +70,13 @@ class LocalChangesTests(unittest.TestCase):
 
 
 class ValidatePackageTests(unittest.TestCase):
+    def setUp(self):
+        """Validation and future receiver calls must use a temporary node."""
+        from test_config_sandbox import isolate_config
+        scratch = tempfile.TemporaryDirectory()
+        self.addCleanup(scratch.cleanup)
+        isolate_config(self, scratch.name)
+
     def test_mixed_package_is_accepted(self):
         import importlib.util
         from pathlib import Path

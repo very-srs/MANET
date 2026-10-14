@@ -196,6 +196,8 @@ class RollbackStatusTests(unittest.TestCase):
         scratch = tempfile.TemporaryDirectory()
         self.addCleanup(scratch.cleanup)
         self.state = Path(scratch.name) / 'state'
+        from test_config_sandbox import isolate_config
+        isolate_config(self, scratch.name)
         self.boot = Path(scratch.name) / 'boot_id'
         self.boot.write_text('boot-a\n')
         for name, value in (('ROLLBACK_STATE_FILE', str(self.state)), ('BOOT_ID_FILE', str(self.boot))):

@@ -89,6 +89,41 @@ imaging and first boot. Deleted prereleases require reflashing old test images.
 
 ## First boot without a trusted clock
 
+### Bounded resource readiness
+
+Both templates use the same readiness block before the logging-clock fetch,
+archive download and APT transactions. It sends bounded HTTP HEAD requests to
+`deb.debian.org/debian/dists/trixie/InRelease`, the exact selected MANET release
+asset, and the pinned MediaMTX release asset when selected. Redirects are
+followed through GitHub's download hosting. The HTTP Date endpoint is also
+probed but remains optional, matching the following best-effort clock step.
+There is no ICMP requirement. Success means the required resource endpoints
+returned HTTP 200, not a guarantee that later downloads cannot fail.
+
+HEAD probes discard their responses and ignore TLS certificate validity while
+the clock may be wrong. Actual artifacts still require the pinned SHA-256 and
+version checks below, and APT still authenticates its repositories. The gate
+uses `/proc/uptime` for a five-minute total budget, including requests and
+retry sleeps. Each request gets at most ten seconds, or the remaining budget
+if smaller, with a three-second connection timeout. Clock corrections cannot
+extend the wait.
+
+Before waiting, the templates create the standard provisioning state and an
+early standalone status reader if the archive has not supplied the full one.
+The MOTD symlink therefore works on the base image. Timeout records
+`STATE=incomplete`, `PHASE=bootstrap-network`, timestamps and the platform's
+log path, plus a failure list naming resources. PWR/its board alias uses a
+100 ms on/off timer while waiting. Timeout uses the existing red heartbeat
+and green solid failure pattern, with missing LEDs tolerated.
+
+Failure exits before disabling `mesh-provision.service`. On Rock, the
+success-only `ExecStartPost` also leaves `.mesh-not-provisioned` in place.
+Restoring access and rebooting retries the same stage, or an operator can
+restart that service directly. The banner recommends this early-stage retry
+instead of invoking the not-yet-installed radio setup. A successful retry
+clears the old failure list and records running status until later setup
+records its final verdict.
+
 ### Kernel package protection
 
 After verifying the install archive's checksum and version, both templates
@@ -125,12 +160,14 @@ provisioning tests. yq uses `yq_linux_arm64`; MediaMTX uses
 `mediamtx_<version>_linux_arm64.tar.gz`. The current pins are yq v4.54.1 and
 MediaMTX v1.15.3.
 
-Only these three artifact downloads use `curl --insecure`. Each restricts
+These three artifact downloads use `curl --insecure`. Each restricts
 both the original URL and redirects to HTTPS, and checks SHA-256 before use.
 yq downloads to a temporary file before `install`; MediaMTX downloads and
 extracts inside a private temporary directory. A failed fetch or hash check
 exits immediately. There are no curl/wget configuration files or exported
 settings that could weaken verification for operator scripts or later tools.
+The readiness HEAD probes above also ignore certificate validity but discard
+all data and never install their responses.
 
 The test's unverified artifact allowlist is empty. Two other network fetch
 categories are explicitly accounted for: APT's changing repository metadata

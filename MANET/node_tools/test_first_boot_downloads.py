@@ -144,6 +144,13 @@ shutil.copyfile(os.environ['TEST_PAYLOAD'], destination)
             with self.subTest(template=name):
                 blocks = artifact_blocks(content)
                 remaining = content
+                # Reviewed HEAD-only readiness probes consume no artifact.
+                readiness = '# BEGIN bounded provisioning connectivity'
+                end_readiness = '# END bounded provisioning connectivity'
+                probe = block(content, readiness, end_readiness)
+                self.assertIn('--head --location --insecure', probe)
+                self.assertIn('--output /dev/null', probe)
+                remaining = remaining.replace(probe, '')
                 for source in blocks.values():
                     remaining = remaining.replace(source, '')
                     self.assertEqual(len(re.findall(r'\bcurl\s', source)), 1)
@@ -198,8 +205,10 @@ shutil.copyfile(os.environ['TEST_PAYLOAD'], destination)
                         script = script.replace(PINS[f'{artifact}_SHA256'], checksum)
                     script = script.replace('/root/morse-pi-install.tar.gz', str(self.work / 'install.tar.gz'))
                     script = script.replace('/usr/bin/yq', str(self.work / 'yq'))
-                    result = self.run_shell(script + '\necho COMPLETE\n',
-                                            TEST_DOWNLOAD_FAIL='1' if mode == 'failed' else '')
+                    result = self.run_shell(
+                        script + '\necho COMPLETE\n',
+                        MEDIAMTX_VERSION=PINS['MEDIAMTX_VERSION'],
+                        TEST_DOWNLOAD_FAIL='1' if mode == 'failed' else '')
                     events = self.events.read_text().splitlines()
                     if mode == 'valid':
                         self.assertEqual(result.returncode, 0, result.stderr)
@@ -258,6 +267,168 @@ shutil.copyfile(os.environ['TEST_PAYLOAD'], destination)
                         self.assertIn('Acquire::Check-Date "false";', result.stdout)
                         self.assertIn("CHECK='false'", result.stdout)
                         self.assertFalse(path.exists())
+
+
+    def readiness_source(self, template, media='y'):
+        """Extract the identical early gate and isolate all of its writes."""
+        content = (PROVISIONING / template).read_text()
+        source = block(content, '# BEGIN bounded provisioning connectivity',
+                       '# END bounded provisioning connectivity')
+        source = source.replace('__INSTALL_MEDIAMTX__', media).replace(
+            '__INSTALL_URL__',
+            'https://github.com/very-srs/MANET/releases/download/'
+            'v0.551/cm4-install.tar.gz')
+        return re.sub(r'/(?:var/lib|usr/local/bin|etc|sys|proc)(?=/|\s|$)',
+                      lambda m: str(self.work / 'image') + m[0], source)
+
+    def readiness_fixture(self):
+        """Model monotonic time, resource replies and base-image LEDs."""
+        root = self.work / 'image'
+        for name in ('proc', 'sys/class/leds/PWR', 'sys/class/leds/ACT'):
+            (root / name).mkdir(parents=True, exist_ok=True)
+        (root / 'proc/uptime').write_text('0.00 0\n')
+        for led in ('PWR', 'ACT'):
+            for name, value in (('trigger', 'default-on'),
+                                ('max_brightness', '1'), ('brightness', '0')):
+                (root / 'sys/class/leds' / led / name).write_text(value)
+        self.env.update(TEST_IMAGE=str(root),
+                        BOOTSTRAP_LOG='/boot/firmware/provision.log')
+        self.command('date', '#!/bin/bash\necho 1700000000\n')
+        self.command('ping',
+                     '#!/bin/bash\necho PING >> "$TEST_EVENTS"\nexit 1\n')
+        self.command('sleep', f'#!{sys.executable}\n' + '''
+import os, sys
+from pathlib import Path
+p = Path(os.environ['TEST_IMAGE']) / 'proc/uptime'
+p.write_text(str(int(p.read_text().split()[0]) + int(sys.argv[1])) + ' 0')
+''')
+        self.command('curl', f'#!{sys.executable}\n' + '''
+import json, os, sys
+from pathlib import Path
+root = Path(os.environ['TEST_IMAGE'])
+args = sys.argv[1:]
+with open(os.environ['TEST_EVENTS'], 'a') as out:
+    out.write(json.dumps(args) + '\\n')
+assert (root / 'sys/class/leds/PWR/trigger').read_text().strip() == 'timer'
+assert (root / 'sys/class/leds/PWR/delay_on').read_text().strip() == '100'
+assert '--head' in args and '--insecure' in args
+assert args[args.index('--output') + 1] == '/dev/null'
+budget = int(args[args.index('--max-time') + 1])
+p = root / 'proc/uptime'
+now = int(float(p.read_text().split()[0]))
+p.write_text(str(now + min(3, budget)) + ' 0')
+if os.environ.get('TEST_RESOURCE_FAIL', 'NOT_A_URL') in args[-1]:
+    sys.exit(22)
+print('200', end='')
+''')
+        return root
+
+    def test_bootstrap_gate_allows_icmp_filtered_cold_clock(self):
+        """HTTP resources, not ping or certificate time, admit provisioning."""
+        sources = [self.readiness_source(name) for name in TEMPLATES]
+        self.assertEqual(sources[0], sources[1])
+        for name in TEMPLATES:
+            with self.subTest(template=name):
+                root = self.readiness_fixture()
+                self.events.write_text('')
+                result = self.run_shell(self.readiness_source(name))
+                self.assertEqual(result.returncode, 0, result.stderr)
+                calls = [json.loads(row) for row in
+                         self.events.read_text().splitlines()]
+                urls = [args[-1] for args in calls]
+                self.assertTrue(any('/trixie/InRelease' in u for u in urls))
+                self.assertTrue(any('cm4-install.tar.gz' in u for u in urls))
+                self.assertTrue(any('mediamtx_v1.15.3_linux_arm64.tar.gz'
+                                    in u for u in urls))
+                self.assertIn('http://google.com', urls)
+                state = root / 'var/lib/manet-provision.state'
+                self.assertIn('STATE=running', state.read_text())
+
+    def test_bootstrap_timeout_records_failure_leds_and_reboot_retry(self):
+        """Each required resource failure stops at 300s and permits retry."""
+        for name in TEMPLATES:
+            for missing in ('deb.debian.org', '/very-srs/', '/mediamtx/'):
+                with self.subTest(template=name, missing=missing):
+                    root = self.readiness_fixture()
+                    result = self.run_shell(self.readiness_source(name),
+                                            TEST_RESOURCE_FAIL=missing)
+                    self.assertNotEqual(result.returncode, 0)
+                    state = root / 'var/lib/manet-provision.state'
+                    self.assertIn('STATE=incomplete', state.read_text())
+                    self.assertIn('PHASE=bootstrap-network', state.read_text())
+                    self.assertEqual(int((root / 'proc/uptime').read_text()
+                                         .split()[0]), 300)
+                    self.assertIn('Timed out after 300s', result.stdout)
+                    self.assertIn('reboot to retry', result.stdout)
+                    self.assertIn('restart mesh-provision.service',
+                                  result.stdout)
+                    red = root / 'sys/class/leds/PWR/trigger'
+                    green = root / 'sys/class/leds/ACT/brightness'
+                    self.assertEqual(red.read_text().strip(), 'heartbeat')
+                    self.assertEqual(green.read_text().strip(), '1')
+                    banner = root / 'etc/update-motd.d/50-manet-provision'
+                    self.assertTrue(banner.is_symlink())
+                    # A later invocation is the enabled service's reboot retry.
+                    self.readiness_fixture()
+                    result = self.run_shell(self.readiness_source(name))
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertIn('STATE=running', state.read_text())
+                    failures = root / 'var/lib/manet-provision.failures'
+                    self.assertEqual(failures.read_text(), '')
+
+    def test_date_failure_and_unselected_mediamtx_do_not_block_bootstrap(self):
+        """The logging clock and unselected downloads are optional."""
+        for missing, media in (('google.com', 'y'), ('/mediamtx/', 'n')):
+            self.readiness_fixture()
+            result = self.run_shell(self.readiness_source(TEMPLATES[0], media),
+                                    TEST_RESOURCE_FAIL=missing)
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_bootstrap_failure_uses_full_status_and_existing_led_scheme(self):
+        """Installed readers understand the early state without migration."""
+        root = self.readiness_fixture()
+        result = self.run_shell(self.readiness_source(TEMPLATES[0]),
+                                TEST_RESOURCE_FAIL='deb.debian.org')
+        self.assertNotEqual(result.returncode, 0)
+        tools = PROVISIONING.parent / 'node_tools'
+        state = root / 'var/lib/manet-provision.state'
+        failures = root / 'var/lib/manet-provision.failures'
+        env = dict(self.env,
+                   MANET_PROVISION_STATE=str(state),
+                   MANET_PROVISION_FAILURES=str(failures),
+                   MANET_PROVISION_DONE=str(root / 'absent'),
+                   MANET_LED_DIR=str(root / 'sys/class/leds'))
+        status = tools / 'manet-provision-status.sh'
+        result = subprocess.run(['bash', str(status)],
+                                env=env, capture_output=True, text=True)
+        self.assertIn('PROVISIONING DID NOT COMPLETE', result.stdout)
+        self.assertIn('bootstrap-network', result.stdout)
+        self.assertIn('/boot/firmware/provision.log', result.stdout)
+        self.assertIn('restart mesh-provision.service', result.stdout)
+        self.assertNotIn('sudo radio-setup.sh', result.stdout)
+        subprocess.run(['bash', str(tools / 'manet-led-status.sh')],
+                       env=env, check=True)
+        self.assertEqual((root / 'sys/class/leds/PWR/trigger')
+                         .read_text().strip(), 'heartbeat')
+        self.assertEqual((root / 'sys/class/leds/ACT/brightness')
+                         .read_text().strip(), '1')
+
+    def test_bootstrap_failure_leaves_next_boot_service_enabled(self):
+        """Neither platform reaches its success-only disable/flag removal."""
+        for name, content in self.templates():
+            begin = content.index('# BEGIN bounded provisioning connectivity')
+            finish = content.index('# END bounded provisioning connectivity')
+            self.assertIn('bootstrap_wait || exit 1', content[begin:finish])
+            disable = content.index('systemctl disable mesh-provision')
+            self.assertLess(finish, disable)
+        for name in ('linux-flasher.sh', 'windows.ps1'):
+            source = (PROVISIONING / name).read_text()
+            self.assertIn(
+                'ExecStartPost=/bin/rm -f /root/.mesh-not-provisioned',
+                          source)
+            self.assertNotIn(
+                'ExecStopPost=/bin/rm -f /root/.mesh-not-provisioned',
+                             source)
 
 
 if __name__ == '__main__':

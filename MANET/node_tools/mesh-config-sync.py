@@ -16,25 +16,28 @@ import subprocess
 import sys
 import time
 
-from mesh_config import (strip_local_keys, valid_value, validate_config,
-                         DANGEROUS_KEYS)
-from manet_admin import AdminTransport, CONFIG_ACK_TYPE, private_json_write
+from mesh_config import strip_local_keys, valid_value, validate_config
+from manet_admin import AdminTransport, CONFIG_ACK_TYPE, clock_ready
+from manet_config_journal import ConfigJournal
 
 ALFRED_CONFIG_TYPE = 70
-PENDING_FILE = "/var/run/mesh_pending_config.json"
-ACK_VERSION_FILE = "/var/run/mesh_config_ack_version"
-APPLIED_VERSION_FILE = "/var/run/mesh_applied_config_version"
+# None lets ConfigJournal resolve environment defaults at each invocation.
+PENDING_FILE = None
+ACK_VERSION_FILE = None
+APPLIED_VERSION_FILE = None
 APPLY_SCRIPT = "/usr/local/bin/mesh-config-apply.sh"
 # A separate transient unit survives an acs restart of node-manager.service,
 # applies the full package and verifies the restart before recording success.
 # The fixed name prevents overlap. TimeoutStartSec releases it after a hung
 # apply even if the manager restart has killed this caller.
-APPLY_COMMAND = ["systemd-run", "--unit=mesh-config-apply", "--wait", "--collect",
-                 "--quiet", "--service-type=oneshot", "--property=TimeoutStartSec=180",
-                 APPLY_SCRIPT]
-ROLLBACK_SCRIPT = "/usr/local/bin/mesh-config-rollback.sh"
-LOG_FILE = "/var/log/mesh-config-sync.log"
-ADMIN = AdminTransport()
+APPLY_COMMAND = ["systemd-run", "--unit=mesh-config-apply", "--wait",
+                 "--collect", "--quiet", "--service-type=oneshot",
+                 "--property=TimeoutStartSec=180", APPLY_SCRIPT]
+LOG_FILE = os.environ.get('MANET_CONFIG_LOG', '/var/log/mesh-config-sync.log')
+ADMIN = AdminTransport(
+    os.environ.get('MANET_MESH_CONF', '/etc/mesh.conf'),
+    os.environ.get('MANET_ADMIN_STATE_DIR', '/var/lib/manet-admin'))
+JOURNAL_DIR = None
 
 def log(msg):
     """Append a timestamped config message and also emit it on stderr."""
@@ -52,31 +55,14 @@ def run(cmd, **kw):
     return subprocess.run(cmd, capture_output=True, text=True, **kw)
 
 
-def read_file(path):
-    """Read stripped file contents, returning empty on failure."""
-    try:
-        with open(path) as f:
-            return f.read().strip()
-    except Exception:
-        return ""
-
-
-def write_file(path, text):
-    """Write text, returning success and logging any failure."""
-    try:
-        with open(path, "w") as f:
-            f.write(text)
-        return True
-    except Exception as e:
-        log(f"cannot write {path}: {e}")
-        return False
-
-
-def publish_ack(version):
+def publish_ack(version, status="staged"):
     """Seal and publish this node's configuration acknowledgement."""
     import socket
     envelope = ADMIN.seal(CONFIG_ACK_TYPE, {
-        'kind': 'config_ack', 'version': version, 'hostname': socket.gethostname(),
+        'kind': 'config_ack', 'version': version,
+        'hostname': socket.gethostname(), 'application_status': status,
+        'applied_version': version if status in
+        {'verified', 'committed'} else None,
     })
     # Bound ACK publication to five seconds. A failed send blocks activation.
     result = run(['alfred', '-s', str(CONFIG_ACK_TYPE)],
@@ -95,7 +81,8 @@ def validate_package(pkg):
         return False, "not a mesh_config package"
     version = pkg.get("version")
     # Version IDs are lowercase hexadecimal strings of 6-64 characters.
-    if not isinstance(version, str) or not re.fullmatch(r"[0-9a-f]{6,64}", version):
+    if (not isinstance(version, str)
+            or not re.fullmatch(r"[0-9a-f]{6,64}", version)):
         return False, "missing or malformed version"
     config = strip_local_keys(pkg.get("config"))
     if not isinstance(config, dict) or not config:
@@ -103,7 +90,7 @@ def validate_package(pkg):
 
     current = {}
     try:
-        with open('/etc/mesh.conf') as source:
+        with open(os.environ.get('MANET_MESH_CONF', '/etc/mesh.conf')) as source:
             for line in source:
                 key, sep, value = line.strip().partition('=')
                 if sep:
@@ -121,28 +108,6 @@ def validate_package(pkg):
     if not isinstance(pkg.get("no_rollback", False), bool):
         return False, "no_rollback must be a boolean"
     return True, ""
-
-
-def package_is_dangerous(pkg, mesh_conf="/etc/mesh.conf"):
-    """Check whether this node's mesh-breaking settings would change.
-
-    Compare local values so rebroadcasting the current SSID does not arm the
-    five-minute rollback trial.
-    """
-    config = pkg.get("config", {})
-    current = {}
-    try:
-        with open(mesh_conf) as f:
-            for line in f:
-                line = line.strip()
-                if line and not line.startswith("#") and "=" in line:
-                    k, v = line.split("=", 1)
-                    current[k.strip()] = v.strip().strip("\"'")
-    except Exception:
-        # An unreadable config requires rollback for any dangerous key.
-        return any(k in config for k in DANGEROUS_KEYS)
-    return any(k in config and config[k] != current.get(k, "") for k in DANGEROUS_KEYS)
-
 
 
 # Alfred
@@ -170,115 +135,99 @@ def latest_config_package(raw=None):
 
 # Sync
 
-def clear_staging(reason):
-    """Remove the pending package and informational ACK version."""
-    removed = False
-    for path in (PENDING_FILE, ACK_VERSION_FILE):
+def local_config_journal():
+    """Use the same durable state for manager and transient worker passes."""
+    return ConfigJournal(JOURNAL_DIR, PENDING_FILE, ACK_VERSION_FILE,
+                         APPLIED_VERSION_FILE)
+
+
+def advance_config_job(journal):
+    """ACK staging, then authorize local work without reauthenticating it."""
+    job = journal.job
+    if not job:
+        return False
+    if (job['phase'] != 'staged'
+            and job.get('reported_phase') != job['phase'] and clock_ready()):
         try:
-            os.remove(path)
-            removed = True
-        except FileNotFoundError:
-            pass
-    if removed:
-        log(f"Cleared staged config: {reason}")
-
-
-def sync_once(raw=None):
-    """Authenticate, stage and acknowledge a package, applying when due."""
-    message = latest_config_package() if raw is None else latest_config_package(raw)
-    if not message:
-        return 0
-    pkg = message.payload
-
-    # Handle config-free cancels before validation. Record consumption so
-    # the original package still in Alfred cannot be staged again.
-    if pkg.get("kind") == "mesh_config_cancel":
-        if ADMIN.accept(ALFRED_CONFIG_TYPE, message):
-            clear_staging('cancelled by authenticated administrator')
-            ADMIN.complete(ALFRED_CONFIG_TYPE, message)
-        return 0
-
-    ok, why = validate_package(pkg)
-    if not ok:
-        log(f"Ignoring config package: {why}")
-        return 0
-
-    pkg = dict(pkg)
-    pkg["config"] = strip_local_keys(pkg.get("config") or {})
-    if not pkg["config"]:
-        log("Ignoring config package: only per-node settings")
-        return 0
-
-    # Enforce transport transaction ordering before writing local staging.
-    if not ADMIN.accept(ALFRED_CONFIG_TYPE, message):
-        return 0
-
-    version = pkg["version"]
-    if read_file(APPLIED_VERSION_FILE) == version:
-        # Drop staging so a rebroadcast cannot apply this version twice.
-        clear_staging(f"version {version} already applied")
-        ADMIN.complete(ALFRED_CONFIG_TYPE, message)
-        return 0
-
-    staged = ""
-    try:
-        with open(PENDING_FILE) as f:
-            staged = json.load(f)
-    except Exception:
-        pass
-
-    if staged != pkg or read_file(ACK_VERSION_FILE) != version:
-        private_json_write(PENDING_FILE, pkg)
-        write_file(ACK_VERSION_FILE, version)
-        log(f"Staged config version {version}"
-            f"{' (dangerous)' if package_is_dangerous(pkg) else ''}; ACK published")
-
-    # The telemetry field remains informational. Only this authenticated ACK
-    # can satisfy the management UI's activation gate.
-    if not publish_ack(version):
-        log('Failed to publish authenticated config ACK')
-        return 1
-
-    activate_at = int(pkg.get("activate_at", 0) or 0)
-    if activate_at <= 0:
-        return 0
-    if time.time() < activate_at:
-        return 0
-
-    log(f"Activating config version {version}")
-
-    # Arm rollback before a change can sever the mesh connection.
-    if package_is_dangerous(pkg) and not pkg.get("no_rollback"):
+            reported = publish_ack(job['package']['version'], job['phase'])
+        except Exception:
+            reported = False
+        if reported:
+            job['reported_phase'] = job['phase']
+            journal.save()
+    if job['phase'] == 'staged' and clock_ready():
         try:
-            armed = run([ROLLBACK_SCRIPT, "arm", version], timeout=30)
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            log(f"Cannot prepare rollback; config not applied: {exc}")
-            return 1
-        if armed.returncode != 0:
-            log(f"Cannot prepare rollback; config not applied: "
-                f"{(armed.stderr or armed.stdout).strip()}")
-            return 1
+            acknowledged = publish_ack(job['package']['version'])
+        except Exception:
+            acknowledged = False
+        if acknowledged:
+            journal.acknowledge()
+    ready = journal.authorize(ADMIN)
+    journal.project()
+    return ready
 
-    # Applying acs can restart this service. Consume the command before
-    # invoking anything disruptive so a kill/reboot cannot make a recorded
-    # activation execute again. A failed attempt needs a freshly staged edit.
-    ADMIN.complete(ALFRED_CONFIG_TYPE, message)
-    # Bound the caller as well as the transient unit to 180 seconds.
+
+def launch_config_job():
+    """Let the existing independent unit own restarts and trial recovery."""
     r = run(APPLY_COMMAND, timeout=180)
-    if r.returncode != 0:
-        log(f"apply failed: {(r.stderr or r.stdout).strip()}")
+    if r.returncode:
+        log('Local config job remains pending after an apply failure')
         return 1
     return 0
 
 
+def sync_once(raw=None):
+    """Resume local work first, then consider a fresh authenticated order."""
+    journal = local_config_journal()
+    try:
+        with journal.locked():
+            journal.import_pending(validate_package, ADMIN)
+            journal.retire_legacy()
+            resume = (advance_config_job(journal) if journal.job
+                      and journal.job['phase'] != 'staged' else False)
+        if resume:
+            # Ciphertext expiry, password rotation and missing time sync do
+            # not revoke an activation that already entered the journal.
+            return launch_config_job()
+        message = (latest_config_package() if raw is None
+                   else latest_config_package(raw))
+        with journal.locked():
+            if message:
+                package = message.payload
+                if package.get('kind') == 'mesh_config_cancel':
+                    journal.cancel(message, ADMIN)
+                    return 0
+                ok, why = validate_package(package)
+                if ok:
+                    package = dict(package, config=strip_local_keys(
+                        package['config']))
+                    journal.stage(package, message, ADMIN)
+                else:
+                    log(f'Ignoring config package: {why}')
+            # Consider a newer cancel/replacement before activating staging.
+            ready = advance_config_job(journal)
+        return launch_config_job() if ready else 0
+    except BlockingIOError:
+        # The transient worker owns the job. A later manager cycle resumes.
+        return 0
+
+
 def main():
-    """Run one sync pass from Alfred or supplied stdin and report errors."""
+    """Run a sync pass or import legacy state before an update reboot."""
     action = sys.argv[1] if len(sys.argv) > 1 else "sync"
-    if action != "sync":
-        print(f"usage: {os.path.basename(sys.argv[0])} sync", file=sys.stderr)
+    if action not in {"sync", "migrate"}:
+        print(f"usage: {os.path.basename(sys.argv[0])} {{sync|migrate}}",
+              file=sys.stderr)
         return 2
     try:
-        return sync_once(sys.stdin.read() if '--stdin' in sys.argv[2:] else None)
+        if action == "migrate":
+            journal = local_config_journal()
+            with journal.locked():
+                journal.import_pending(validate_package, ADMIN, strict=True)
+                journal.retire_legacy()
+            return 0
+        raw = sys.stdin.read() if '--stdin' in sys.argv[2:] else None
+        return sync_once(raw)
     except Exception as e:
         log(f"sync error: {e}")
         return 1

@@ -128,15 +128,27 @@ uptime_now() {
     printf '%s\n' "$((10#$up))"
 }
 
-# An empty local Alfred cache has no command to authenticate or activate.
-# Nonempty records always reach the receiver, even if byte-identical: ACKs,
-# activation deadlines and replay checks must still run at the usual cadence.
+# Local config recovery must run even when Alfred has lost its ciphertext.
+# Unchanged nonempty records still reach both receivers at normal cadence.
 sync_alfred_command() {
-    local helper="$1" type="$2" records
+    local helper="$1" type="$2" records resume=false
     [ -x "$helper" ] || return 0
-    # Limit the cache read to 5 s before handing records to the receiver.
-    records=$(timeout 5 alfred -r "$type" 2>/dev/null) || return 1
-    [[ "$records" == *[![:space:]]* ]] || return 0
+    local journal_dir="${MANET_CONFIG_STATE_DIR:-/var/lib/manet-config}"
+    local run_dir="${MANET_RUN_DIR:-/var/run}" rollback_dir
+    rollback_dir="${MANET_ROLLBACK_DIR:-/var/lib/manet-config-rollback}"
+    if [ "$type" = 70 ]; then
+        if [ -f "$journal_dir/journal.json" ] ||
+           [ -f "$run_dir/mesh_pending_config.json" ] ||
+           [ -f "$rollback_dir/state" ]; then
+            resume=true
+        fi
+    fi
+    # A five-second read failure cannot prevent durable local recovery.
+    if ! records=$(timeout 5 alfred -r "$type" 2>/dev/null); then
+        [ "$resume" = true ] || return 1
+        records=""
+    fi
+    [[ "$records" == *[![:space:]]* ]] || [ "$resume" = true ] || return 0
     "$helper" sync --stdin <<< "$records"
 }
 

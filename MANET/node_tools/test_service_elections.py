@@ -117,7 +117,9 @@ class MediaMtxElectionTests(Fixture):
         for path in TOOLS.iterdir():
             if path.name not in ('manet_service_handover.py', 'manet-service-common.sh'):
                 (self.tools / path.name).symlink_to(path)
-        (self.tools / 'manet-service-common.sh').write_text((TOOLS / 'manet-service-common.sh').read_text())
+        (self.tools / 'manet-service-common.sh').write_text(
+            (TOOLS / 'manet-service-common.sh').read_text().replace(
+                '/etc/mesh.conf', str(self.root / 'mesh.conf')))
         # Real ranking and registry-fallback checks. Packet I/O is covered
         # separately below, without requiring raw-socket privileges.
         (self.tools / 'manet_service_handover.py').write_text(f"""
@@ -200,6 +202,17 @@ esac
 
     def holds_vip(self):
         return self.VIP in self.addresses.read_text().split()
+
+    def test_cidr_change_after_vip_calculation_cannot_claim_stale_vip(self):
+        """The lock guard rejects an election's obsolete CIDR snapshot."""
+        self.registry.write_text(self.node(SELF, 50))
+        self.stub('manet-ipcalc.sh',
+                  f'"{TOOLS}/manet-ipcalc.sh" "$@"\n'
+                  f'echo ipv4_network=10.45.0.0/16 > "{self.root}/mesh.conf"\n')
+        result = self.elect()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(self.holds_vip())
+        self.assertIn('CIDR changed during election', self.journal.read_text())
 
     def test_overlapping_run_exits_without_touching_state(self):
         lock = self.root / 'held.lock'

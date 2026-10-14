@@ -46,11 +46,14 @@ class ConfigSafetyTests(unittest.TestCase):
             helper = root / 'restart.py'; helper.write_text('pass\n')
             commands = root / 'bin'; commands.mkdir()
             cat = commands / 'systemd-cat'; cat.write_text('#!/bin/sh\ncat >/dev/null\n'); cat.chmod(0o755)
-            env = dict(os.environ, MANET_RUN_DIR=scratch, MANET_MESH_CONF=str(conf),
+            env = dict(os.environ, MANET_CONFIG_WORKER="1",
+                       MANET_RUN_DIR=scratch, MANET_MESH_CONF=str(conf),
                        MANET_WPA_DIR=str(wpa), MANET_APPLY_LOG=str(root / 'apply.log'),
                        MANET_CONFIG_WRITER=str(TOOLS / 'mesh-config-write.py'),
                        MANET_SUPPLICANT_HELPER=str(helper),
                        PATH=str(commands) + ':' + str(Path(sys.executable).parent) + ':' + os.environ['PATH'])
+            from test_config_sandbox import isolate_config
+            isolate_config(self, root, env)
             result = subprocess.run(['bash', str(TOOLS / 'mesh-config-apply.sh')], env=env,
                                     capture_output=True, text=True, timeout=10)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

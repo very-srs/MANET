@@ -66,6 +66,8 @@ class RollbackHarness(unittest.TestCase):
             TEST_WALL='1791288000',
         )
         self.uptime.write_text(self.env['TEST_NOW'] + '.42 1234.00\n')
+        from test_config_sandbox import isolate_config
+        isolate_config(self, self.root, self.env)
         self.command('batctl', '''
 if sys.argv[1:] != ['meshif', 'bat0', 'originators_json']:
     sys.exit(99)
@@ -318,22 +320,35 @@ class RollbackScriptTests(RollbackHarness):
 
 
 class ReceiverRollbackTests(RollbackHarness):
+    """The receiver consumes durable work, then the worker prepares safety."""
+
     def setUp(self):
         super().setUp()
+        from manet_admin import Message
+        from manet_config_journal import ConfigJournal
+        self.journal_class = ConfigJournal
         self.admin = Mock()
-        self.payload = {'kind': 'mesh_config', 'version': VERSION, 'activate_at': 1,
+        self.payload = {'kind': 'mesh_config', 'version': VERSION,
+                        'activate_at': 1,
                         'config': {'mesh_key': 'replacement-key'}}
         self.calls = []
-        danger_check = config_sync.package_is_dangerous
+        self.env['MANET_CONFIG_STATE_DIR'] = str(self.root / 'journal')
+        from test_config_sandbox import isolate_config
+        isolate_config(self, self.root, self.env)
+        self.env['MANET_TIME_RUN_DIR'] = str(self.runtime)
+        (self.runtime / 'initial_time_synced').touch()
+        environment = patch.dict(os.environ, self.env)
+        environment.start()
+        self.addCleanup(environment.stop)
         patches = {
             'ADMIN': self.admin,
+            'JOURNAL_DIR': str(self.root / 'journal'),
             'PENDING_FILE': str(self.runtime / 'mesh_pending_config.json'),
             'ACK_VERSION_FILE': str(self.runtime / 'mesh_config_ack_version'),
-            'APPLIED_VERSION_FILE': str(self.runtime / 'mesh_applied_config_version'),
-            'ROLLBACK_SCRIPT': str(SCRIPT),
-            'latest_config_package': lambda: SimpleNamespace(payload=self.payload),
+            'APPLIED_VERSION_FILE': str(self.runtime /
+                                        'mesh_applied_config_version'),
+            'latest_config_package': lambda: Message(self.payload, 1, 'a'*32),
             'publish_ack': Mock(return_value=True), 'log': Mock(),
-            'package_is_dangerous': lambda pkg: danger_check(pkg, str(self.conf)),
             'run': self.receiver_run,
         }
         for name, value in patches.items():
@@ -342,57 +357,62 @@ class ReceiverRollbackTests(RollbackHarness):
             self.addCleanup(p.stop)
 
     def receiver_run(self, args, **kwargs):
+        """Model the unit but inspect its real durable safety preparation."""
         self.calls.append(args)
-        if args == config_sync.APPLY_COMMAND:
-            self.admin.complete.assert_called_once()
-            self.changed()  # The real apply touches live interfaces; simulate it.
-            return subprocess.CompletedProcess(args, 0, '', '')
-        return subprocess.run(args, env=self.env, capture_output=True, text=True, **kwargs)
+        self.assertEqual(args, config_sync.APPLY_COMMAND)
+        self.admin.complete.assert_called_once()
+        try:
+            with self.journal_class().locked() as journal:
+                journal.prepare_backup()
+                self.changed()
+        except (OSError, RuntimeError, subprocess.SubprocessError):
+            return subprocess.CompletedProcess(args, 1, '', '')
+        return subprocess.CompletedProcess(args, 0, '', '')
 
     def assert_not_applied(self):
-        self.assertNotIn(config_sync.APPLY_COMMAND, self.calls)
+        """Consumed transport remains recoverable without changing files."""
         self.assertEqual(self.conf.read_text(), self.old_config)
-        self.admin.complete.assert_not_called()
+        with self.journal_class().locked() as journal:
+            self.assertEqual(journal.job['phase'], 'prepared')
+            self.assertTrue(journal.job['consumed'])
 
     def test_dangerous_change_arms_before_applying(self):
         self.assertEqual(config_sync.sync_once(), 0)
-        self.assertEqual(self.calls, [[str(SCRIPT), 'arm', VERSION], config_sync.APPLY_COMMAND])
-        self.assertEqual((self.state / 'mesh.conf').read_text(), self.old_config)
+        with self.journal_class().locked() as journal:
+            backup = journal.job['backup']
+            self.assertEqual(backup['files'][0]['contents'], self.old_config)
+            self.assertEqual(backup['peers'], 1)
 
-    def test_failed_baseline_blocks_apply_and_can_retry_after_query_recovers(self):
-        self.env['TEST_BATCTL_RC'] = '1'
-        self.assertEqual(config_sync.sync_once(), 1)
+    def test_failed_baseline_blocks_apply_and_local_retry_recovers(self):
+        with patch.dict(os.environ, TEST_BATCTL_RC='1'):
+            self.assertEqual(config_sync.sync_once(), 1)
         self.assert_not_applied()
-        self.env['TEST_BATCTL_RC'] = '0'
         self.assertEqual(config_sync.sync_once(), 0)
-        self.assertTrue(self.state.exists())
-        self.assertEqual(self.calls.count(config_sync.APPLY_COMMAND), 1)
+        self.assertEqual(self.calls.count(config_sync.APPLY_COMMAND), 2)
 
     def test_failed_snapshot_blocks_apply(self):
-        self.env['TEST_COPY_FAIL'] = str(self.supplicant)
-        self.assertEqual(config_sync.sync_once(), 1)
+        with patch.object(self.journal_class, 'capture', side_effect=OSError):
+            self.assertEqual(config_sync.sync_once(), 1)
         self.assert_not_applied()
 
-    def test_missing_or_nonexecutable_rollback_blocks_apply(self):
-        missing = self.root / 'missing-rollback'
-        nonexecutable = self.root / 'nonexecutable-rollback'
-        nonexecutable.write_text('#!/bin/sh\nexit 0\n')
-        for path in (missing, nonexecutable):
-            with self.subTest(path=path), patch.object(config_sync, 'ROLLBACK_SCRIPT', str(path)):
-                self.assertEqual(config_sync.sync_once(), 1)
-                self.assert_not_applied()
+    def test_missing_peer_helper_blocks_apply(self):
+        with patch.object(self.journal_class, 'peers',
+                          side_effect=FileNotFoundError):
+            self.assertEqual(config_sync.sync_once(), 1)
+        self.assert_not_applied()
 
-    def test_rollback_timeout_blocks_apply(self):
-        with patch.object(config_sync, 'run', side_effect=subprocess.TimeoutExpired('rollback', 30)):
+    def test_baseline_timeout_blocks_apply(self):
+        with patch.object(self.journal_class, 'peers',
+                          side_effect=subprocess.TimeoutExpired('peers', 5)):
             self.assertEqual(config_sync.sync_once(), 1)
         self.assert_not_applied()
 
     def test_explicit_override_allows_apply_without_rollback(self):
         self.payload['no_rollback'] = True
-        self.env['TEST_BATCTL_RC'] = '1'
-        self.assertEqual(config_sync.sync_once(), 0)
-        self.assertEqual(self.calls, [config_sync.APPLY_COMMAND])
-        self.assertFalse(self.state.exists())
+        with patch.dict(os.environ, TEST_BATCTL_RC='1'):
+            self.assertEqual(config_sync.sync_once(), 0)
+        with self.journal_class().locked() as journal:
+            self.assertIsNone(journal.job['backup'])
 
     def test_override_must_be_a_boolean(self):
         for value in ('false', 'true', 1, 0, None):
@@ -400,14 +420,14 @@ class ReceiverRollbackTests(RollbackHarness):
                 self.payload['no_rollback'] = value
                 self.assertFalse(config_sync.validate_package(self.payload)[0])
                 self.assertEqual(config_sync.sync_once(), 0)
-                self.assert_not_applied()
+        self.admin.complete.assert_not_called()
 
     def test_safe_change_does_not_require_batman_or_rollback(self):
         self.payload['config'] = {'mtx': 'n'}
-        self.env['TEST_BATCTL_RC'] = '1'
-        self.assertEqual(config_sync.sync_once(), 0)
-        self.assertEqual(self.calls, [config_sync.APPLY_COMMAND])
-        self.assertFalse(self.state.exists())
+        with patch.dict(os.environ, TEST_BATCTL_RC='1'):
+            self.assertEqual(config_sync.sync_once(), 0)
+        with self.journal_class().locked() as journal:
+            self.assertIsNone(journal.job['backup'])
 
 
 if __name__ == '__main__':

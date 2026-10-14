@@ -133,11 +133,14 @@ class RegionTests(unittest.TestCase):
         for name in ('systemd-cat', 'systemctl'):
             (stubs / name).write_text('#!/bin/sh\ncat >/dev/null 2>&1; exit 0\n')
             (stubs / name).chmod(0o755)
-        env = dict(os.environ, PATH=f'{stubs}:{os.environ["PATH"]}',
+        env = dict(os.environ, MANET_CONFIG_WORKER="1",
+                   PATH=f'{stubs}:{os.environ["PATH"]}',
                    MANET_RUN_DIR=str(run), MANET_MESH_CONF=str(self.root / 'etc/mesh.conf'),
                    MANET_WPA_DIR=str(self.root / 'etc/wpa_supplicant'),
                    MANET_APPLY_LOG=str(self.root / 'apply.log'),
                    MANET_CONFIG_WRITER=str(TOOLS / 'mesh-config-write.py'))
+        from test_config_sandbox import isolate_config
+        isolate_config(self, self.root, env)
         result = subprocess.run(['bash', str(TOOLS / 'mesh-config-apply.sh')], env=env,
                                 capture_output=True, text=True, timeout=30)
         return result, (self.root / 'apply.log').read_text()

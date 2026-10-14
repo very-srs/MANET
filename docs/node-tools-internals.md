@@ -440,8 +440,8 @@ retry. Missing pool data continues to leave existing rules alone.
 
 ## Voice
 
-The audio path is entirely GStreamer, so no Python code runs on the audio
-thread:
+GStreamer handles encoding, decoding, buffering and mixing. Python buffer
+probes handle source admission, activity counters and decoder revival:
 
 ```
 TX  alsasrc -> level -> valve -> <enc> -> <pay> -> multiudpsink
@@ -455,8 +455,8 @@ and receive decoders; mismatched nodes cannot exchange voice. Codec changes
 are staged across the mesh over Alfred (see below). Missing Lyra plugins cause
 a logged fallback to Opus, so check for that message after installation.
 
-The daemon only supervises: it reads the PTT button, keeps the unicast peer
-list current, and publishes `/run/mesh-voice.json` for the UI.
+The daemon also reads the PTT button, keeps the unicast peer list current,
+and publishes `/run/mesh-voice.json` for the UI.
 
 **Unicast redundancy defaults off.** With
 `multicast_forceflood` disabled, as this node configures it, and listeners at or below
@@ -494,9 +494,9 @@ the operator hears then is their own voice back in the headset one jitter
 buffer late.
 
 Any packet arriving with this node's own
-SSRC is dropped at the `udpsrc` probe, before `rtpbin` sees it. That is safe to
-key on because the SSRC is a hash of the node's own mesh address plus a per-run
-generation byte, so no peer can collide without already sharing its IP. It also
+SSRC is dropped at the `udpsrc` probe, before `rtpbin` sees it. Each run chooses
+a random 32-bit SSRC. A collision remains possible, with probability about 1 in
+2^32 for a particular pair of runs. It also
 keeps `rx_active` honest, which matters with `voice_half_duplex=y`: without it
 a node reads its own transmission as a remote talker and refuses to key.
 `rx_loopback` in `/run/mesh-voice.json` counts these; anything other than 0
@@ -522,9 +522,10 @@ built on `pad-added` and torn down on `pad-removed`, so a decoder is not leaked
 per talker; measured, two idle talkers were reaped and the count returned to 0.
 
 **Keeping decode branches avoids clipping the next transmission.**
-`rtpbin autoremove=false` (its own default) means a talker's
-branch survives their silence, so the next thing they say plays from the first
-frame. Measured on a CM4 with lyra, 3.00 s bursts:
+The receiver retains a talker's branch across normal conversation gaps, then
+expires inactive sources using `rtpbin autoremove=true` and a longer native
+session timeout. Keeping an established source avoids the first-contact cost.
+Measured on a CM4 with lyra, 3.00 s bursts:
 
 | receiver state when the talker keys up | audio arrived | lost |
 |---|---|---|
@@ -542,34 +543,33 @@ fix is to ensure the source is not new.
 `rtpbin` is keyed by **SSRC, not by IP**, and it exists only once a packet
 carrying that SSRC arrives. Two pieces close that gap.
 
-First, the SSRC is split: **24 bits identifying the node** (a hash of its mesh
-address) and **8 bits identifying the run** of the daemon. The prefix lets any
-receiver build address → prefix for every node in the registry and name a
-talker with no back channel; verified collision-free across a full /24.
+First, all **32 SSRC bits identify the run**, chosen randomly on pipeline
+construction. The former eight-bit generation could collide with retained
+restart state too easily. Talker names now use the UDP sender address matched
+to the registry, independent of the SSRC. This does not require a back channel.
 
 A node that reuses its SSRC after restarting has a fresh sequence-number base
 that no longer matches the receiver's stored source. In testing, an entire
 three-second transmission was lost; neither a beacon nor
-`max-misorder-time`/`max-dropout-time` tuning recovered it. A new generation
+`max-misorder-time`/`max-dropout-time` tuning recovered it. A new SSRC
 lets the receiver establish a new source:
 
 | after a sender restart | speech arrived of 3.00 s |
 |---|---|
 | same SSRC reused | **never arrived** |
-| new generation | 2.96 s |
-| new generation + beacon | **3.00 s** |
+| new SSRC | 2.96 s |
+| new SSRC + beacon | **3.00 s** |
 
 Second, each node sends a **presence beacon**: a ~140 ms muted transmission
 (`volume` to 0, valve open, valve shut, volume back) through the normal RTP
 payloader, so receivers establish the source before speech begins.
 
-Beacons are **event driven, not a heartbeat**. There is nothing to refresh
-(`autoremove=false` means a source is never forgotten), so one is sent at
-start-up (announcing this run's generation) and whenever a node appears in the
-registry that cannot yet have heard this node. `voice_beacon_sec` (default 600) is
-only a safety net for a peer whose arrival was somehow missed, and 0 disables
-it. That is about **21 packets an hour, ~5 bps averaged**, against 420/hour at
-the 30 s heartbeat this replaced.
+Beacons run at start-up and whenever a new node appears in the registry.
+`voice_beacon_sec` (default 600) also refreshes retained sources and covers
+missed peer arrivals. Zero disables beacons. The default interval is shorter
+than the 15-minute idle threshold, so a connected, quiet peer keeps its
+established source. That is about **21 packets an hour, ~5 bps averaged**,
+against 420/hour at the former 30-second interval.
 
 **Locally injected RTP cannot establish a peer's source.** Injecting a packet
 with a peer's SSRC creates a slot with sequence numbers and timestamps that do
@@ -584,15 +584,9 @@ talker, and an evicted one pays the first-contact penalty again, so
 registry poll the table is raised to known nodes + 2 headroom. It never
 shrinks below the configured value and never exceeds the hard cap of 64.
 
-**Evicted talkers retain a receive pad.** Dropping the decode branch
-leaves rtpbin's receive pad for that talker with nothing on the end of it, and
-rtpbin never takes the pad back, because `autoremove=false` keeps every source
-for the life of the daemon. So no second `pad-added` ever arrives to rebuild
-the branch. Before this was fixed, an evicted talker was inaudible **for good**,
-and silently so at both ends: they hear the mesh fine and have no idea nobody
-can hear them. It was also noisy, because pushing to the unlinked pad returned
-`not-linked`, which posted a bus error and restarted the whole receive
-pipeline, dropping everyone else's audio with it.
+**Evicted talkers retain a receive pad until expiry.** Removing a decoder does
+not remove its native RTP source. An unlinked pad would produce `not-linked`
+bus errors, and an existing source does not emit another `pad-added` on speech.
 
 Eviction now links the pad to a `fakesink` and puts a buffer probe on it. The
 probe is what `pad-added` would have been: it fires when that talker next
@@ -601,15 +595,59 @@ head loss that eviction was always documented to cost, rather than permanent
 silence. `talkers_parked` in `/run/mesh-voice.json` says how many are in this
 state.
 
+**Source admission and parking have separate budgets.** Before `rtpbin` sees
+a packet, the UDP probe checks its RTP header and sender metadata. It accepts
+only the configured payload type and rejects CSRC lists, which could create
+additional native source records. There is no RTCP receive input. There are
+at most 128 admitted remote sources and 64 parked sinks, independent of the
+decoder cap. Reservations prevent concurrent pad callbacks from exceeding
+the parking budget. At parking capacity, the evicted stream is retired and
+cleared on the existing two-second state timer. Its admission slot remains
+charged until native expiry, and further packets for it are dropped.
+
+Each sender IP can retain four identities. Admission uses token buckets with
+a per-address burst of two and refill of one every 30 seconds, plus a global
+burst of 64 and refill of one per second. Rejected identities create no source
+record, sink, decoder, or GLib callback. Existing accepted sources consume no
+new tokens. One ordinary restart fits the per-address burst and a new talker
+has its own allowance. A full table or repeated rapid restarts can still reject
+a new source. These are resource bounds, not authentication of mesh peers.
+An admitted SSRC stays bound to its original IP and UDP port, preventing port
+rotation from creating native collision-address records for that identity.
+
+**Native expiry releases the complete source.** The internal RTPSession uses
+`rtcp-min-interval=180s`, fixed `bandwidth=1000000` bytes/s, and
+`timeout-inactive-sources=true`. The fixed bandwidth prevents participant
+count from stretching the interval. GStreamer 1.26 removes inactive sources
+after five deterministic intervals, at its next maintenance pass. The nominal
+15-minute threshold preserves conversation gaps and exceeds the default
+10-minute beacon interval. The timeout signal precedes native table removal,
+so the state timer releases admission only after `get-source-by-ssrc` returns
+no source. See [GStreamer 1.26 RTPSession](https://raw.githubusercontent.com/GStreamer/gstreamer/1.26.0/subprojects/gst-plugins-good/gst/rtpmanager/rtpsession.c).
+
+`rtpbin autoremove=true` removes the demux stream on native timeout.
+`max-streams=128` also bounds the demux, but does not bound RTPSession's source
+table. Likewise, `clear-ssrc` removes stream objects without forgetting the
+session record. This is why retired slots remain charged. Pad removal releases
+the decoder, mixer request pad, parked sink, probes and pending revival, and
+drops the Python jitterbuffer reference. Sources still in probation are
+reconciled even if they never produced a receive pad. See
+[GStreamer 1.26 rtpbin](https://raw.githubusercontent.com/GStreamer/gstreamer/1.26.0/subprojects/gst-plugins-good/gst/rtpmanager/gstrtpbin.c).
+
+The native RTCP maintenance thread starts from received RTP even without an
+RTCP output pad. No additional polling loop or RTCP network traffic is needed.
+See [GStreamer 1.26 rtpsession element](https://raw.githubusercontent.com/GStreamer/gstreamer/1.26.0/subprojects/gst-plugins-good/gst/rtpmanager/gstrtpsession.c).
+`udpsrc retrieve-sender-address=true` supplies the sender metadata used for
+admission and naming. See [GStreamer 1.26 udpsrc](https://raw.githubusercontent.com/GStreamer/gstreamer/1.26.0/subprojects/gst-plugins-good/gst/udp/gstudpsrc.c).
+
 **The ceiling is RAM.** A warm branch costs about **5.3 MB with lyra** and
 **0.6 MB with opus**, measured on a CM4. So the hard cap of 64 is roughly
 340 MB of lyra decoders against the 3.4 GB a node has free. That is comfortable, but
 it is the reason a cap exists at all rather than tracking the registry without
 limit. A mesh larger than 62 nodes on one talk group will log that it is
 capped, and the least recently heard talkers will be evicted and pay the
-first-contact delay when they next speak. If that ever matters, raising
-`VOICE_MAX_TALKERS_HARD` is safe until roughly 600 lyra branches on a 3.7 GB
-node, at which point the decoders, not the audio, are the constraint.
+first-contact delay when they next speak. Raising the decoder cap also requires
+reviewing the separate admission and parking budgets and measuring CPU and RAM.
 
 `ignore-inactive-pads` on the mixer is required rather than optional once
 branches are kept: they are silent between transmissions and the mixer would
@@ -654,7 +692,7 @@ receiver's buffer has to suit what the *senders* are transmitting, which this
 node cannot know and which the formula has never tracked. If the floor is ever
 wanted at its stated value, raise `voice_jitter_ms` to 120 rather than
 resizing at runtime; a jitter buffer that resyncs mid-stream discards the
-transmission outright, which is the same failure the SSRC generation byte
+transmission outright, which is the same failure the random per-run SSRC
 exists to prevent.
 
 `do-lost=true` makes `rtpbin` emit a gap event for every lost packet so the
@@ -1970,7 +2008,8 @@ claims it. Overlap is the inclusive test `peer_start <= local_end` and
 `peer_end >= local_start`, including client addresses, not just primaries.
 
 The allocator rechecks the selected candidate against the loaded snapshot,
-adds both bridge addresses, configures dnsmasq, saves the allocation, and
+durably saves its allocation intent, adds both bridge addresses, configures
+dnsmasq, and
 writes `/run/my_ipv4_chunk` and `/run/my_ipv4_chunk_size`. That second check
 does not reserve the range globally or obtain a newer peer snapshot. The
 manager immediately starts another pass after first allocation to publish
@@ -1995,6 +2034,67 @@ and defer reconciliation instead of making every address appear free.
 Replicated claim/observation state is under `/run`; reboot rebuilds it through
 discovery. See [data management](#data-management) for identity caching and
 the 900-second observation tombstones.
+
+#### Retiring a changed IPv4 network
+
+Before reading the current allocation, `mesh-ip-manager.sh` compares the
+persisted CIDR with `ipv4_network`. A change retires the old primary from
+`/etc/mesh_ipv4_state`, its immediately following EUD gateway, and the old
+network's two reserved service VIPs if present on `br0`. Each deletion matches
+the exact address and old prefix. The allocator no longer sweeps arbitrary
+aliases merely because they fall inside the current network. It never deletes
+addresses on `end0` or other uplinks.
+
+Retirement takes both service-election locks without waiting. A running
+handover defers cleanup to a later allocation pass. Before stopping DHCP it
+validates the saved addresses, checks that a new block is available, verifies
+`CAP_NET_ADMIN`, reads live address flags and secondary-promotion policy, and
+checks file access by staging snapshots and temporary replacements. The
+resident runtime's unit has `ProtectKernelTunables=yes`, so retirement never
+writes sysctls. Promotion is effective when either `all` or `br0` has
+`promote_secondaries=1`. Otherwise it deletes owned secondary addresses before
+the kernel primary. If removing an owned primary would also remove an unowned
+old-prefix alias, retirement defers with the old DHCP service intact. An
+operator must resolve that alias or arrange promotion outside this sandbox
+before that transition can proceed. No boot-time sysctl change is required
+for a prefix containing only MANET addresses.
+
+Under the locks, retirement checkpoints files and owned addresses under
+`/run/manet-ip-retirement`, stops dnsmasq, refreshes the lease snapshot, deletes
+owned addresses, removes the old pool and leases, withdraws `manet.local` and
+clears runtime chunk markers. A failed operation restores deleted addresses
+and changed files, then restarts previously active dnsmasq with its old pool.
+If address restoration or service startup also fails, the checkpoint remains
+for retry. A caught termination uses the same rollback. SIGKILL cannot run
+rollback immediately, but the next attempt restores an armed checkpoint
+before proceeding, even if the requested CIDR has been reverted. The last
+old-prefix address removes its kernel connected route. An unowned alias keeps
+its connected route.
+
+The old persistent allocation remains until retirement succeeds. State
+replacement uses a staged file, filesystem synchronization and atomic rename.
+The next allocation is persisted before adding either address, so a crash
+during installation resumes that same pair and rebuilds DHCP and names.
+
+Both managers poll every second when their chunk marker is missing, and the
+resident runtime deliberately never caches failed reconciliation. Config apply
+clears that marker, so an unbounded failure used to repeat every one or two
+seconds. Retirement now records a monotonic 15-second retry deadline in
+`/run/manet-ip-retirement.retry`, under the existing allocator lock. The shell
+returns failure quietly before that deadline, including to one-shot callers.
+The old/new CIDRs and saved address identify the attempt. A changed request
+bypasses the old delay, and a successful transition clears it. Stable failure
+messages are printed once per changed failure, avoiding repeated DHCP stops
+and journal flooding during discovery.
+
+The election scripts reread `mesh.conf` on each invocation, but only know that
+invocation's calculated VIPs. Their shared locked loop now rejects a changed
+CIDR before acting, including after a successor wait. This prevents an old
+invocation from recreating a retired VIP. Normal elections claim the new
+IPv4 VIPs without changing the independent IPv6 VIPs or wildcard listeners.
+The ULA prefix comes from `radvd-mesh.conf`, provisioned as
+`fd01:ed20:ecb4:0::/64`, not from `ipv4_network`. The ULA, link-local addresses
+and IPv6 service VIPs are therefore unchanged by an IPv4 CIDR change.
 
 `manet_ip_runtime.py` checks discovery, live DHCP isolation, addresses,
 dnsmasq and the UI firewall before permitting its content-based no-op path.
@@ -2777,11 +2877,13 @@ Replay history lives in `/var/lib/manet-admin`, with directory mode 0700 and
 atomic, fsynced 0600 files. Each control channel remembers its newest accepted
 message and whether it was consumed. Repeated delivery of a pending stage is
 allowed. Older messages and consumed activations/cancellations are rejected,
-including after loss of `/run` or a rollback. The receiver records consumption
-**before** applying: an ACS change can kill its own node manager, and a radio
-change can interrupt the process. This gives at most one apply attempt per
-message; an interrupted/failed attempt requires a fresh administrator request.
-Do not erase this history during rollback. Corrupt history fails closed.
+including after loss of `/run` or a rollback. The config receiver first saves
+a durable local job and then records transport consumption. An ACS change can
+kill its own node manager, so the independent transient unit owns application.
+Transport consumption prevents replay, while the journal permits local retries
+of unfinished work. Radio-state control retains its separate existing consume
+semantics. Do not erase admin history during rollback. Corrupt history fails
+closed.
 
 Normal authenticated envelopes expire after 900 seconds and may be at most 60 seconds
 ahead of the receiver's clock. Newly provisioned nodes lack replay history,
@@ -2826,10 +2928,10 @@ quoted SSIDs, and rejected newlines.
 
 Dangerous apply reconciles every explicitly named SSID/key in every mesh
 supplicant file, even if mesh.conf already matches. It restarts the supplicants
-before committing the dangerous mesh.conf values. A volatile restart-needed
-flag covers a failed restart during repair. A fresh activation can retry it,
-while boot starts the files normally. The transport still consumes the original
-command before apply, so this is not a durable application journal.
+before committing the dangerous mesh.conf values. The journal retains the
+activation obligation across a crash or failed restart. Disabled MediaMTX and
+Mumble services are reconciled even when their mesh.conf values already match.
+Enabled services remain governed by the normal elections.
 
 Ordinary supplicant quotes delimit literal bytes, so the writer does not double
 backslashes. Embedded quotes use hexadecimal string encoding. Mesh changes and
@@ -2863,38 +2965,96 @@ the actual configured broadcast SSID. Measurement session paths use a bounded
 label alphabet, reject dot/parent and symlink paths, and generate random result
 filenames; peer display names remain JSON data.
 
-**mesh-config-rollback.sh**
+**manet_config_journal.py: local apply and rollback**
 
-The safety net for dangerous changes. A wrong mesh key takes the mesh down, and
-with it the only way to push a correction, so each node has to be able to undo
-the change on its own, with no help from the network.
+`/var/lib/manet-config/journal.json` has schema version 1. The directory is
+0700 and journal files are 0600. One nonblocking flock excludes receivers,
+migration and workers. Each transition uses atomic replacement with file and
+directory fsync. The directory's parent is fsynced on creation too.
 
-`arm` counts distinct `orig_address` values from
-`batctl meshif bat0 originators_json`, snapshots `/etc/mesh.conf` and the
-supplicant configs, and sets a deadline (default 300 s, `MANET_ROLLBACK_GRACE`).
-The JSON query has a five-second timeout. Selected routes count, duplicate
-paths count once, and command/JSON failures are errors rather than zero peers.
-The snapshot is built in a private temporary directory and published only
-after every copy and the state write succeeds. An already armed trial cannot
-be overwritten or have its deadline reset by another `arm`.
+A job records authenticated message order and payload digest, literal desired
+settings, phase, consumption state, original backup and deadline, and the
+last error class. Errors omit subprocess output because it may contain secrets.
+Terminal transaction versions retain tombstones. A duplicate or reissued
+terminal version cannot create another job. New work is blocked while an
+activation or restoration owns the journal. An unactivated stage may be
+replaced or cancelled by a newer authenticated order.
 
-The config receiver requires a successful `arm` before a dangerous apply.
-A missing helper, timeout or nonzero exit leaves the settings untouched and
-the activation unconsumed, so a later manager cycle can retry while the
-message is valid. Only an explicit boolean `no_rollback: true` bypasses this
-gate; safe changes and unchanged dangerous settings do not need it.
+The receiver saves staging before publishing an ACK. When the verified clock
+and scheduled activation allow it, it saves `prepared` before consuming the
+transport order. A crash between these operations is harmless: local recovery
+finishes consumption from saved message metadata, without decrypting again.
+`mesh-config-apply.sh` delegates to the locked journal worker. The existing
+`mesh-config-apply` transient systemd unit remains outside node-manager's
+restart scope and retains its 180-second timeout.
 
-`check` runs every node-manager cycle and is a no-op until the deadline passes,
-then commits if at least one peer is visible or restores and restarts the
-supplicants if none is visible or the query fails. State lives in `/var/lib`
-because a dangerous apply can end in a reboot. A persistent `restoring` marker
-ensures an incomplete restore is retried even if a peer becomes visible in
-the meantime. Failed file restores or service restarts retain the snapshot.
+Before a protected change, the worker obtains a bounded BATMAN peer count and
+captures mesh.conf and mesh supplicant contents plus ownership/mode. It saves
+that snapshot and the original boot-clock deadline with `applying`, before
+any live write. `*-uplink.conf` files are excluded. A failed peer query or
+snapshot cannot be treated as a solo-node baseline. Explicit boolean
+`no_rollback: true` bypasses the trial, not durable application tracking.
 
-A node that had no peers before the change commits rather than rolling back:
-on a solo bench node "the mesh did not come back" cannot be told apart from
-"there was never anyone there". This requires a successful empty baseline
-query; an unreadable or incomplete state cannot select the solo-node branch.
+An interrupted `applying` phase reconciles files and repeats required service
+activation. Successful shell reconciliation checks service restarts and PONG,
+then the controller independently compares requested assignments and probes
+service health. It persists `verified` before publishing the applied marker.
+Deferred region outputs are fsynced too. Their saved fingerprints track region
+assignments without treating later ACS channel changes as drift. A CIDR change
+also waits for `/etc/mesh_ipv4_state` to name the requested network and for its
+assigned address/prefix to appear on br0. The IP manager retains ownership of
+address reconciliation, including during rollback. Its durable allocation file
+is never removed by config apply.
+Safe changes commit immediately. Protected changes keep their original trial
+and backup. A verified trial with drift returns to reconciliation without
+extending the deadline.
+
+At the deadline, a verified job commits only if its files/services still match
+and a peer returned, or its original baseline was successfully empty. Failed
+peer queries cause restoration. A changed boot ID expires the trial immediately:
+there is no reboot grace extension. An unfinished apply at expiry also restores.
+The worker saves `rolling_back` before restoring any file. Every restore uses
+atomic fsynced writes and retained metadata. Failed service restarts keep that
+phase and backup for another cycle, even if peers return meanwhile. Only a
+completed restore becomes `rolled_back`, which is terminal.
+
+Config sync processes local work before reading Alfred. It needs neither the
+original ciphertext nor its expiry window nor the old password after rotation.
+Only first activation needs the initial clock marker. Volatile pending/ACK and
+applied markers are projections of journal state. Type-73 payloads distinguish
+`application_status` from their staged transaction version, and set
+`applied_version` only for verified or committed work. The existing pending
+admin API exposes the application phase without adding a UI flow.
+
+`sync_alfred_command()` calls type-70 config sync when a local journal, pending
+package or trial exists, even if the Alfred read is empty or fails. The status
+API reads the credential-free `config_application_status()` projection for
+application and rollback status. Legacy rollback state remains a fallback
+when no journal job exists.
+
+**Upgrade migration and the legacy rollback helper**
+
+`mesh-config-rollback.sh` remains available for older trials. Migration copies
+its snapshot and deadline into the journal before renaming its `state` file to
+`journal-owned`. The next legacy `check` is then a no-op. A crash in that gap
+is repaired by completing the retirement before the new worker starts. The
+old backup remains available on disk.
+
+`mesh-config-sync.py migrate` imports a private pending `/run` package and
+any armed trial, including a trial whose old applier already cleared pending.
+A pending activation with matching ACK and consumed replay history becomes
+local prepared work. An unactivated stage retains its scheduling/ACK gates.
+The import refuses an active old applier. The updater stops the manager and
+worker before replacing payload files, saves private legacy pending/ACK
+inputs in `recovery/config-staging.json`, installs the receiver, applier and
+journal together, and runs migration before any activation. The saved inputs
+restore an interrupted import after `/run` disappears. Early boot payload
+recovery restores those inputs before the manager starts. It runs no services.
+A persisted journal takes precedence over that copy. Migration failure keeps
+the update pending, withholds both version markers and leaves the manager
+stopped. Offline recovery repeats migration before service restarts. Ordinary sync also
+imports, but updates do not depend on its first pass. Preserve both admin
+replay history and the apply journal in future updates.
 
 ---
 

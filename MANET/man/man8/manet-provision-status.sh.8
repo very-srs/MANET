@@ -1,4 +1,4 @@
-.Dd October 8, 2026
+.Dd October 14, 2026
 .Dt MANET-PROVISION-STATUS.SH 8
 .Os MANET
 .Sh NAME
@@ -10,6 +10,9 @@
 .Nm
 prints the recorded provisioning state: running, incomplete or complete.
 Incomplete runs include failed steps and retry instructions.
+An early bootstrap-network failure names the unreachable installation
+resources and recommends rebooting or restarting mesh-provision.service.
+Radio setup failures retain the radio-setup.sh retry command.
 Completed runs show the installed version and time since completion.
 Staged operator-script results are shown alongside the verdict when available.
 .Pp
@@ -19,7 +22,7 @@ It reports recorded setup results; it does not test current mesh connectivity.
 .Sh FILES
 .Bl -tag -width Ds
 .It Pa /var/lib/manet-provision.state
-Provisioning state and timing.
+Provisioning state, phase, timing and optional phase-specific log path.
 .It Pa /var/lib/manet-provision.failures
 Failed setup steps; at most eight are displayed.
 .It Pa /var/lib/radio-setup.done

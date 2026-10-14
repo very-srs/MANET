@@ -57,7 +57,8 @@ class AcsApplyTests(unittest.TestCase):
         (self.bin / 'supplicant').write_text('import os, sys\n'
                                              'open(os.environ["TEST_CALLS"], "a").write("supplicant " + " ".join(sys.argv[1:]) + "\\n")\n')
         (self.bin / 'supplicant').chmod(0o755)
-        self.env = dict(os.environ, PATH=f'{self.bin}:{os.environ["PATH"]}',
+        self.env = dict(os.environ, MANET_CONFIG_WORKER="1",
+                        PATH=f'{self.bin}:{os.environ["PATH"]}',
                         MANET_RUN_DIR=str(self.run_dir), MANET_MESH_CONF=str(self.conf),
                         MANET_WPA_DIR=str(self.wpa), MANET_BIN_DIR=str(self.tools),
                         MANET_APPLY_LOG=str(self.root / 'apply.log'),
@@ -66,6 +67,8 @@ class AcsApplyTests(unittest.TestCase):
                         NODE_MANAGER_SELECT=str(TOOLS / 'node-manager-select.sh'),
                         TEST_SELECT=str(TOOLS / 'node-manager-select.sh'),
                         TEST_CALLS=str(self.calls), TEST_ROOT=str(self.root))
+        from test_config_sandbox import isolate_config
+        isolate_config(self, self.root, self.env)
 
     def manager_running(self, acs):
         """Boot state: mesh.conf, link and the running variant all agree."""
