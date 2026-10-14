@@ -152,6 +152,14 @@ existing sessions remain usable.
 
 No unauthenticated route changes anything.
 
+Every HTML response, including login and error pages, carries a Content
+Security Policy. Scripts need a fresh response nonce, and controls use event
+listeners instead of inline handlers. Pages use local assets and system fonts,
+with no CDN scripts or map tiles. The policy permits inline styles for the
+existing layouts, blocks embedding and plugins, and limits requests and forms
+to this node. Responses also disable content-type sniffing and send referrers
+only to the same origin.
+
 Access control has two layers:
 
 - **Application.** Every route is restricted to localhost and the mesh/EUD

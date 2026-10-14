@@ -76,6 +76,20 @@ FER_LOGO_ASSETS = {
 }
 
 
+def new_csp_nonce():
+    """Give each HTML response an unpredictable 256-bit script capability."""
+    return secrets.token_urlsafe(32)
+
+
+def content_security_policy(nonce):
+    """Allow only explicitly nonced scripts and the UI's local resources."""
+    return ("default-src 'self'; "
+            f"script-src 'nonce-{nonce}'; script-src-attr 'none'; "
+            "style-src 'self' 'unsafe-inline'; connect-src 'self'; "
+            "img-src 'self' data:; object-src 'none'; base-uri 'none'; "
+            "frame-ancestors 'none'; form-action 'self'")
+
+
 def logo_asset_token():
     """Return a logo URL token that invalidates the one-hour cache."""
     parts = []
@@ -1745,8 +1759,8 @@ function buildIfaceControl() {
           <span class="badge ${on ? 'b-on' : 'b-off'}" id="ibadge-${esc(node.id)}-${iface}">${on ? 'ACTIVE' : 'DOWN'}</span>
           <div class="iface-controls">
             ${on
-              ? `<button class="btn btn-red" data-ip="${esc(node.ip)}" data-id="${esc(node.id)}" data-iface="${iface}" onclick="toggleIface(this.dataset.ip,this.dataset.id,this.dataset.iface,'down')">DISABLE</button>`
-              : `<button class="btn btn-green" data-ip="${esc(node.ip)}" data-id="${esc(node.id)}" data-iface="${iface}" onclick="toggleIface(this.dataset.ip,this.dataset.id,this.dataset.iface,'up')">ENABLE</button>`
+              ? `<button class="btn btn-red" data-ip="${esc(node.ip)}" data-id="${esc(node.id)}" data-iface="${iface}" data-action="toggle-interface" data-state="down">DISABLE</button>`
+              : `<button class="btn btn-green" data-ip="${esc(node.ip)}" data-id="${esc(node.id)}" data-iface="${iface}" data-action="toggle-interface" data-state="up">ENABLE</button>`
             }
           </div>
         </div>
@@ -1760,7 +1774,7 @@ function buildIfaceControl() {
         <div class="txpwr-row">
           TX POWER
           ${isHalowIface(iface, info) ? renderHalowPower(info) : `${renderTxPowerSelect(`txpwr-${node.id}-${iface}`, info)}
-          <button class="btn" style="padding:4px 10px;font-size:10px" data-ip="${esc(node.ip)}" data-id="${esc(node.id)}" data-iface="${iface}" onclick="setTxPower(this.dataset.ip,this.dataset.id,this.dataset.iface)">SET</button>`}
+          <button class="btn" style="padding:4px 10px;font-size:10px" data-ip="${esc(node.ip)}" data-id="${esc(node.id)}" data-iface="${iface}" data-action="set-power">SET</button>`}
         </div>
       </div>`;
     }
@@ -2174,7 +2188,7 @@ async function loadSessions() {
            class="btn" style="text-decoration:none;font-size:10px">CSV</a>
         <a href="${esc(U(`/api/sessions/${encodeURIComponent(s.label)}`))}" target="_blank"
            class="btn" style="text-decoration:none;font-size:10px">JSON</a>
-        <button class="btn btn-red" style="font-size:10px" data-label="${esc(encodeURIComponent(s.label))}" onclick="deleteSession(this.dataset.label)">DELETE</button>
+        <button class="btn btn-red" style="font-size:10px" data-label="${esc(encodeURIComponent(s.label))}" data-action="delete-session">DELETE</button>
       </div>
       <div class="session-summary">
         ${sessionMetric('TCP', s.summary?.tcp_mbps, ' Mbps')}
@@ -2205,7 +2219,43 @@ async function deleteSession(encodedLabel) {
   }
 }
 
-window.onload = async () => {
+// One listener also covers controls rebuilt by innerHTML after each poll.
+function handleManageClick(event) {
+  const control = event.target.closest('[data-action]');
+  if (!control || control.disabled) return;
+  const data = control.dataset;
+  switch (data.action) {
+    case 'hide-overlay': hideOverlay(); break;
+    case 'theme': toggleTheme(); break;
+    case 'overview':
+      window.location.href = '/?theme=' + encodeURIComponent(
+        document.documentElement.dataset.theme || 'light');
+      break;
+    case 'logout': window.location.href = '/manage/logout'; break;
+    case 'show-tab': showTab(data.tab); break;
+    case 'toggle-interface':
+      toggleIface(data.ip, data.id, data.iface, data.state); break;
+    case 'toggle-all': toggleAll(data.iface, data.state); break;
+    case 'set-power': setTxPower(data.ip, data.id, data.iface); break;
+    case 'apply-halow': applyHalow(); break;
+    case 'apply-2g': apply2G(); break;
+    case 'apply-5g': apply5G(); break;
+    case 'start-measurement': startMeasurement(); break;
+    case 'delete-session': deleteSession(data.label); break;
+    case 'apply-uplink': applyUsbWifiUplink(); break;
+    case 'voice-step': voiceStepChannel(Number(data.step)); break;
+    case 'voice-codec': voiceSetCodec(data.codec); break;
+    case 'stage-config': stageChanges(); break;
+    case 'apply-config': applyChanges(false); break;
+    case 'force-config': applyChanges(true); break;
+    case 'show-force': showForceModal(); break;
+    case 'close-force': closeForceModal(); break;
+    case 'cancel-config': cancelPending(); break;
+  }
+}
+document.addEventListener('click', handleManageClick);
+
+window.addEventListener('load', async () => {
   updateChromeCompact();
   showTab(getInitialTab());
   await fetchTopo();
@@ -2214,7 +2264,7 @@ window.onload = async () => {
   const halowBw = document.getElementById('halow-bw');
   if (halowBw) halowBw.addEventListener('change', onHalowBandwidthChange);
   startAutoRefresh();
-};
+});
 
 window.addEventListener('hashchange', () => showTab(getInitialTab(), false));
 window.addEventListener('scroll', updateChromeCompact, {passive: true});
@@ -2342,10 +2392,10 @@ VOICE_TAB_HTML = r"""
     <div class="voice-card-hdr">TALK GROUP</div>
     <div class="voice-card-body">
       <div class="voice-tg-stepper">
-        <button class="voice-tg-step" id="voice-tg-down" onclick="voiceStepChannel(-1)"
+        <button class="voice-tg-step" id="voice-tg-down" data-action="voice-step" data-step="-1"
                 aria-label="Previous talk group">&minus;</button>
         <div class="voice-tg-now"><span id="voice-tg-cur">--</span></div>
-        <button class="voice-tg-step" id="voice-tg-up" onclick="voiceStepChannel(1)"
+        <button class="voice-tg-step" id="voice-tg-up" data-action="voice-step" data-step="1"
                 aria-label="Next talk group">+</button>
       </div>
       <div class="voice-tg-grid" id="voice-tg-grid"></div>
@@ -2359,9 +2409,9 @@ VOICE_TAB_HTML = r"""
     <div class="voice-card-hdr">CODEC</div>
     <div class="voice-card-body">
       <div class="voice-codec-pick">
-        <button class="voice-codec-opt" id="voice-codec-lyra" onclick="voiceSetCodec('lyra')">
+        <button class="voice-codec-opt" id="voice-codec-lyra" data-action="voice-codec" data-codec="lyra">
           <b>Lyra</b><span>6 kbps neural: default</span></button>
-        <button class="voice-codec-opt" id="voice-codec-opus" onclick="voiceSetCodec('opus')">
+        <button class="voice-codec-opt" id="voice-codec-opus" data-action="voice-codec" data-codec="opus">
           <b>Opus</b><span>32 kbps, stock elements</span></button>
       </div>
       <div class="voice-tg-msg" id="voice-codec-msg"></div>
@@ -2445,7 +2495,7 @@ function voiceTgBuildGrid() {
     b.className = 'voice-tg-cell';
     b.textContent = n;
     b.dataset.ch = n;
-    b.onclick = () => voiceSetChannel(n);
+    b.addEventListener('click', () => voiceSetChannel(n));
     g.appendChild(b);
   }
 }
@@ -3044,10 +3094,10 @@ CONFIG_TAB_HTML = r"""
       </div>
 
       <div class="admin-actions">
-        <button class="cfg-btn cfg-btn-stage"  id="btn-stage"  onclick="stageChanges()">Stage Changes</button>
-        <button class="cfg-btn cfg-btn-apply"  id="btn-apply"  onclick="applyChanges(false)" disabled>Apply Now</button>
-        <button class="cfg-btn cfg-btn-force"  id="btn-force"  onclick="showForceModal()" style="display:none">Force Apply</button>
-        <button class="cfg-btn cfg-btn-cancel" id="btn-cancel" onclick="cancelPending()" style="display:none">Cancel</button>
+        <button class="cfg-btn cfg-btn-stage"  id="btn-stage"  data-action="stage-config">Stage Changes</button>
+        <button class="cfg-btn cfg-btn-apply"  id="btn-apply"  data-action="apply-config" disabled>Apply Now</button>
+        <button class="cfg-btn cfg-btn-force"  id="btn-force"  data-action="show-force" style="display:none">Force Apply</button>
+        <button class="cfg-btn cfg-btn-cancel" id="btn-cancel" data-action="cancel-config" style="display:none">Cancel</button>
       </div>
       <div id="action-msg" style="font-size:10px;color:var(--muted);margin-top:8px;min-height:14px;"></div>
     </div>
@@ -3105,8 +3155,8 @@ CONFIG_TAB_HTML = r"""
         will remain on the old config and may need manual intervention.
       </div>
       <div class="modal-actions">
-        <button class="cfg-btn cfg-btn-cancel" onclick="closeForceModal()">Cancel</button>
-        <button class="cfg-btn cfg-btn-force"  onclick="applyChanges(true)">Force Apply</button>
+        <button class="cfg-btn cfg-btn-cancel" data-action="close-force">Cancel</button>
+        <button class="cfg-btn cfg-btn-force"  data-action="force-config">Force Apply</button>
       </div>
     </div>
   </div>
@@ -3412,8 +3462,9 @@ function toast(msg, cls) {
 """
 
 
-def render_dashboard():
+def render_dashboard(nonce=None):
     """Assemble the management page with local identity and tab assets."""
+    nonce = nonce or new_csp_nonce()
     hostname = html.escape(get_my_hostname())
     ip       = html.escape(get_my_ip())
     logo_v   = logo_asset_token()
@@ -3429,7 +3480,7 @@ def render_dashboard():
 <div id="overlay" class="info">
   <div class="overlay-body">
     <div id="overlay-text"></div>
-    <button id="overlay-close" onclick="hideOverlay()" aria-label="Close">&times;</button>
+    <button id="overlay-close" data-action="hide-overlay" aria-label="Close">&times;</button>
   </div>
 </div>
 
@@ -3442,20 +3493,20 @@ def render_dashboard():
   <div id="hdr-right">
     <span id="hdr-inet" class="no">○ NO INET</span>
     <span id="hdr-clock"></span>
-    <button id="overview-link" class="overview-link-btn" type="button" onclick="window.location.href='/?theme=' + encodeURIComponent(document.documentElement.dataset.theme || 'light')">OVERVIEW</button>
-    <button id="theme-toggle" class="theme-toggle" type="button" onclick="toggleTheme()">Dark</button>
+    <button id="overview-link" class="overview-link-btn" type="button" data-action="overview">OVERVIEW</button>
+    <button id="theme-toggle" class="theme-toggle" type="button" data-action="theme">Dark</button>
   </div>
 </div>
 
 <div id="page">
 <div id="nav">
-  <div class="tab active" data-tab="topology" onclick="showTab('topology')">TOPOLOGY</div>
-  <div class="tab"        data-tab="radio"    onclick="showTab('radio')">RADIO CONFIG</div>
-  <div class="tab"        data-tab="measure"    onclick="showTab('measure')">MEASURE</div>
-  <div class="tab"        data-tab="sessions"   onclick="showTab('sessions')">SESSIONS</div>
-  <div class="tab"        data-tab="uplink"     onclick="showTab('uplink')">UPLINK</div>
-  <div class="tab"        data-tab="voice"      onclick="showTab('voice')">VOICE</div>
-  <div class="tab"        data-tab="config"     onclick="showTab('config')">NODE CONFIG</div>
+  <div class="tab active" data-tab="topology" data-action="show-tab">TOPOLOGY</div>
+  <div class="tab"        data-tab="radio"    data-action="show-tab">RADIO CONFIG</div>
+  <div class="tab"        data-tab="measure"    data-action="show-tab">MEASURE</div>
+  <div class="tab"        data-tab="sessions"   data-action="show-tab">SESSIONS</div>
+  <div class="tab"        data-tab="uplink"     data-action="show-tab">UPLINK</div>
+  <div class="tab"        data-tab="voice"      data-action="show-tab">VOICE</div>
+  <div class="tab"        data-tab="config"     data-action="show-tab">NODE CONFIG</div>
 </div>
 
 <div id="content">
@@ -3477,12 +3528,12 @@ def render_dashboard():
     <div class="card">
       <div class="card-title">Global Actions</div>
       <div class="global-bar" id="global-bar">
-        <button class="btn btn-green" onclick="toggleAll('wlan0','up')">↑ 2.4G ALL</button>
-        <button class="btn btn-red"   onclick="toggleAll('wlan0','down')">↓ 2.4G ALL</button>
-        <button class="btn btn-green" onclick="toggleAll('wlan1','up')">↑ 5G ALL</button>
-        <button class="btn btn-red"   onclick="toggleAll('wlan1','down')">↓ 5G ALL</button>
-        <button class="btn btn-green" onclick="toggleAll('wlan2','up')">↑ HALOW ALL</button>
-        <button class="btn btn-red"   onclick="toggleAll('wlan2','down')">↓ HALOW ALL</button>
+        <button class="btn btn-green" data-action="toggle-all" data-iface="wlan0" data-state="up">↑ 2.4G ALL</button>
+        <button class="btn btn-red"   data-action="toggle-all" data-iface="wlan0" data-state="down">↓ 2.4G ALL</button>
+        <button class="btn btn-green" data-action="toggle-all" data-iface="wlan1" data-state="up">↑ 5G ALL</button>
+        <button class="btn btn-red"   data-action="toggle-all" data-iface="wlan1" data-state="down">↓ 5G ALL</button>
+        <button class="btn btn-green" data-action="toggle-all" data-iface="wlan2" data-state="up">↑ HALOW ALL</button>
+        <button class="btn btn-red"   data-action="toggle-all" data-iface="wlan2" data-state="down">↓ HALOW ALL</button>
       </div>
     </div>
     <div id="iface-cards"></div>
@@ -3502,7 +3553,7 @@ def render_dashboard():
       </div>
       <div class="row">
         <span class="row-label"></span>
-        <button class="btn btn-green" id="btn-apply-halow" onclick="applyHalow()">APPLY TO ALL NODES</button>
+        <button class="btn btn-green" id="btn-apply-halow" data-action="apply-halow">APPLY TO ALL NODES</button>
       </div>
     </div>
     <div class="card">
@@ -3519,7 +3570,7 @@ def render_dashboard():
       </div>
       <div class="row">
         <span class="row-label"></span>
-        <button class="btn btn-green" id="btn-apply-2g" onclick="apply2G()" disabled>APPLY TO ALL NODES</button>
+        <button class="btn btn-green" id="btn-apply-2g" data-action="apply-2g" disabled>APPLY TO ALL NODES</button>
       </div>
       <div class="acs-channel-note"></div>
     </div>
@@ -3560,7 +3611,7 @@ def render_dashboard():
       </div>
       <div class="row">
         <span class="row-label"></span>
-        <button class="btn btn-green" id="btn-apply-5g" onclick="apply5G()" disabled>APPLY TO ALL NODES</button>
+        <button class="btn btn-green" id="btn-apply-5g" data-action="apply-5g" disabled>APPLY TO ALL NODES</button>
       </div>
       <div class="acs-channel-note"></div>
     </div>
@@ -3613,7 +3664,7 @@ def render_dashboard():
       </div>
     </div>
     <div style="padding:16px 0">
-      <button class="btn btn-run" id="btn-run" onclick="startMeasurement()">&#9654; RUN MEASUREMENTS</button>
+      <button class="btn btn-run" id="btn-run" data-action="start-measurement">&#9654; RUN MEASUREMENTS</button>
     </div>
     <div class="card" id="progress-card" style="display:none">
       <div class="card-title">Progress</div>
@@ -3653,7 +3704,7 @@ def render_dashboard():
       </div>
       <div class="row">
         <span class="row-label"></span>
-        <button class="btn btn-green" id="btn-uplink-wifi-apply" onclick="applyUsbWifiUplink()">APPLY</button>
+        <button class="btn btn-green" id="btn-uplink-wifi-apply" data-action="apply-uplink">APPLY</button>
       </div>
     </div>
   </div>
@@ -3668,12 +3719,12 @@ def render_dashboard():
   </div>
 
   <div class="footer-actions">
-    <button class="logout-link-btn" type="button" onclick="window.location.href='/manage/logout'">LOGOUT</button>
+    <button class="logout-link-btn" type="button" data-action="logout">LOGOUT</button>
   </div>
 </div><!-- #content -->
 </div><!-- #page -->
 
-<script>{RECOVERY_JS}
+<script nonce="{nonce}">{RECOVERY_JS}
 {JS}
 {CONFIG_TAB_JS}
 {VOICE_TAB_JS}</script>
@@ -3736,7 +3787,7 @@ class ManageRoutes:
                 self.wfile.write(b'Not found')
 
         elif path in ('/', '/index.html'):
-            self.send_html(render_dashboard())
+            self.send_html(render_dashboard)
 
         elif path == '/api/topology':
             try:

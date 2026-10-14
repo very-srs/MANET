@@ -113,10 +113,7 @@ const LINK_GREAT_MBPS = 30, LINK_OK_MBPS = 15, LINK_WARN_MBPS = 5, LINK_FULL_SCA
         self.assertNotIn('script', parsed.tags)
         self.assertNotIn('svg', parsed.tags)
         for key, value in parsed.attributes:
-            self.assertNotEqual(key, 'onerror')
-            if key.startswith('on'):
-                self.assertNotIn('alert', value)
-                self.assertNotIn('Mike', value)
+            self.assertFalse(key.startswith('on'), key)
         self.assertIn(PAYLOAD, ''.join(parsed.text) + ''.join(value or '' for _, value in parsed.attributes))
         return parsed
 
