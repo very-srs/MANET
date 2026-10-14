@@ -8,6 +8,7 @@ Access is restricted to localhost and EUD/mesh clients, excluding uplink/LAN:
                  manet_manage.py supplies routes on the same listening port.
   /api/admin/* - Mesh config staging/apply, requires the same password
   /api/atak/controller - Local EUD controller choice, JSON POST, no password
+  /api/atak/release - Controller releases the held point, JSON POST, no password
   /admin       - Redirects to /manage/
 
 Reads:
@@ -121,8 +122,28 @@ def atak_overview(conf):
     snapshot = atak_snapshot(conf)
     if snapshot is None:
         return None
+    mono = time.monotonic()
+    def live(deadline):
+        """Reject malformed or expired public evidence deadlines."""
+        return type(deadline) in (int, float) and mono < deadline
+    position = snapshot.get('selected')
+    deadline = snapshot.get('selected_deadline')
+    if (not isinstance(position, dict) or not snapshot['running'] or
+            position.get('source') != 'manual' and
+            not live(deadline)):
+        position = None
     return {'enabled': snapshot['enabled'], 'running': snapshot['running'],
-            'phones': [{key: peer.get(key) for key in ('uid', 'callsign', 'port', 'controller')}
+            'manual': (dict(id=snapshot['manual_release_id'], uid=snapshot.get('controller_uid'))
+                       if position is not None and position.get('source') == 'manual'
+                       and snapshot.get('manual_release_id') else None),
+            'position': None if position is None else dict(
+                lat=position.get('lat'), lon=position.get('lon'), hae=position.get('hae'),
+                source=snapshot.get('selected_source')),
+            'phones': [dict({key: peer.get(key) for key in ('uid', 'callsign', 'port', 'controller')},
+                            tak_server=bool(peer.get('tak_server')) and
+                            live(peer.get('tak_server_deadline')),
+                            gps_disagreement_m=(peer.get('gps_disagreement_m') if
+                                live(peer.get('gps_disagreement_deadline')) else None))
                        for peer in snapshot['phones']]}
 
 
@@ -2376,7 +2397,7 @@ function battColor(pct) {
 }
 
 function atakText(value) {
-  return String(value || '').replace(/[&<>"']/g, c => ({'&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'}[c]));
+  return String(value == null ? '' : value).replace(/[&<>"']/g, c => ({'&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'}[c]));
 }
 async function setAtakController(button) {
   button.disabled = true;
@@ -2394,6 +2415,22 @@ async function setAtakController(button) {
     button.disabled = false;
   }
 }
+async function releaseAtakPoint(button) {
+  button.disabled = true;
+  const result = document.getElementById('atak-choice-result');
+  try {
+    const response = await fetch('/api/atak/release', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({uid: button.dataset.atakUid, manual_id: button.dataset.manualId})
+    });
+    const data = await response.json();
+    result.textContent = response.ok ? 'Release requested. The position will update shortly.' : data.error;
+  } catch (error) {
+    result.textContent = 'Unable to release the point. Check the connection and try again.';
+  } finally {
+    button.disabled = false;
+  }
+}
 
 // This radio's own ATAK phones. Local panel only: the button posts to this radio.
 function atakPanel(atak) {
@@ -2401,11 +2438,18 @@ function atakPanel(atak) {
   let html = '';
   html += '<div class="section-hdr" style="font-size:9px;position:static">ATAK PHONES</div>';
   const peers = atak.phones || [];
-  html += '<div style="padding:5px 10px;font-size:11px">One phone sets this radio’s location. All connected ATAK phones receive its position.</div>';
+  html += '<div style="padding:5px 10px;font-size:11px">Radio with GPS: turn Android location off and enable ATAK external GPS on UDP 4349. Radio without GPS: keep Android location on. Leave Default Mesh SA on.</div>';
+  if (atak.position) {
+    const p = atak.position;
+    html += `<div class="eud-row">Position: ${atakText(p.lat)}, ${atakText(p.lon)} · ${atakText(p.source)}</div>`;
+    if (atak.manual) html += `<div class="eud-row"><button type="button" data-atak-uid="${atakText(atak.manual.uid)}" data-manual-id="${atakText(atak.manual.id)}" onclick="releaseAtakPoint(this)">Use phone GPS again</button><br>Available from the controlling phone.</div>`;
+  } else html += '<div class="eud-row">Position: unavailable</div>';
   peers.forEach(p => {
     html += `<div class="eud-row"><span>${atakText(p.callsign)}</span> · ${p.port === 'wired' ? 'Wired' : 'Wi-Fi'}`;
     if (p.controller) html += ' · <strong>Controls location</strong>';
     else html += `<br><button type="button" data-atak-uid="${atakText(p.uid)}" onclick="setAtakController(this)">Set location from this phone</button>`;
+    if (p.tak_server) html += ' · TAK server';
+    if (p.gps_disagreement_m != null) html += `<br>radio and phone GPS disagree by ${atakText(p.gps_disagreement_m)} m`;
     html += '</div>';
   });
   if (!peers.length) html += '<div class="eud-row">No ATAK phones present.</div>';
@@ -3505,7 +3549,7 @@ class MeshHandler(RequestLimits, ManageRoutes, http.server.BaseHTTPRequestHandle
         """Serialize management changes and expire cached observations."""
         path = urlparse(self.path).path
         changing = (path.startswith('/manage/api/') or path.startswith('/api/admin/')
-                    or path.rstrip('/') == '/api/atak/controller')
+                    or path.rstrip('/') in ('/api/atak/controller', '/api/atak/release'))
         # One writer at a time; reject contention without blocking a worker.
         if changing and not MANAGEMENT_WRITE.acquire(blocking=False):
             self.send_busy('Another management change is running; retry when it finishes')
@@ -3519,7 +3563,7 @@ class MeshHandler(RequestLimits, ManageRoutes, http.server.BaseHTTPRequestHandle
                 STATUS_CACHE.invalidate()
                 MANAGEMENT_WRITE.release()
 
-    def post_atak_controller(self, conf):
+    def post_atak_controller(self, conf, *, release=False):
         """Stage a bounded same-origin local EUD choice without an admin cookie."""
         if not atak_local_eud(self.client_address[0]):
             self.send_json({'error': 'Connect to this radio as an EUD'}, status=403)
@@ -3557,10 +3601,22 @@ class MeshHandler(RequestLimits, ManageRoutes, http.server.BaseHTTPRequestHandle
             if not any(p.get('uid') == uid for p in snapshot['phones']):
                 self.send_json({'error': 'Phone is no longer present'}, status=409)
                 return
-            private_json_write(ATAK_RUNTIME / 'controller.json', {
+            extra = {}
+            if release:
+                peer = next((p for p in snapshot['phones'] if p.get('controller') and p.get('uid') == uid
+                             and p.get('ip') == self.client_address[0]), None)
+                if peer is None:
+                    self.send_json({'error': 'Only the controlling phone can release the point'}, status=403)
+                    return
+                if (not snapshot.get('manual_release_id')
+                        or request.get('manual_id') != snapshot['manual_release_id']):
+                    self.send_json({'error': 'Held point changed or is no longer available'}, status=409)
+                    return
+                extra = {'ip': peer['ip'], 'mac': peer['mac'], 'manual_id': request['manual_id']}
+            private_json_write(ATAK_RUNTIME / ('release.json' if release else 'controller.json'), {
                 'schema': 1, 'id': str(uuid.uuid4()), 'uid': uid,
                 'session': snapshot['session'], 'boot_id': snapshot['boot_id'],
-                'written_boot': time.clock_gettime(time.CLOCK_BOOTTIME)})
+                'written_boot': time.clock_gettime(time.CLOCK_BOOTTIME), **extra})
             self.send_json({'queued': True}, status=202)
         except (ValueError, TypeError, KeyError):
             self.send_json({'error': 'Choose a present phone'}, status=400)
@@ -3582,8 +3638,8 @@ class MeshHandler(RequestLimits, ManageRoutes, http.server.BaseHTTPRequestHandle
             return
 
         path      = parsed.path.rstrip('/') or '/'
-        if path == '/api/atak/controller':
-            self.post_atak_controller(conf)
+        if path in ('/api/atak/controller', '/api/atak/release'):
+            self.post_atak_controller(conf, release=path == '/api/atak/release')
             return
         # Bounded body reads also apply to login and config API requests.
         body = self.read_body() or b'{}'

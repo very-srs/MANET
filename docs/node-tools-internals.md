@@ -1870,7 +1870,7 @@ open unless explicitly configured onto one of the blocked discovery ports.
 No further node-tools IP broadcast/multicast destinations were found. NTP /
 chrony uses unicast UDP 123, Mumble TCP/UDP 64738, the UI TCP 80, and the ATAK
 node service uses unicast UDP 4242/4349 for phones and UDP `239.2.3.1:6969`
-for unattended-radio SA. MediaMTX unicast defaults TCP
+for unattended-radio SA and admitted phone position rewrites. MediaMTX unicast defaults TCP
 8554/8322/1935/1936/8888/8889 and UDP 8000/8001/8004/8005/8189/8890 are also
 outside the sets. No election, registry, service configuration or other
 firewall policy is changed. Syncthing's optional UPnP router search **does**
@@ -2847,12 +2847,14 @@ rejects it. Each peer records Wired or Wi-Fi.
 Default Mesh SA is received on one `AF_PACKET/SOCK_RAW` socket per ready EUD
 port, never on br0 or bat0. The socket starts with protocol zero, attaches and
 locks a classic BPF filter, then binds `ETH_P_ALL` on that port so it observes
-ingress before the bridge RX handler consumes the frame. BPF admits only
-unfragmented IPv4 UDP to `239.2.3.1:6969`; outgoing/loopback traffic is excluded
+ingress before the bridge RX handler consumes the frame. BPF admits
+only unfragmented IPv4 UDP to `239.2.3.1:6969`. TCP traffic, including TAK-server
+ACKs and data, never enters the userspace capture queue. Outgoing/loopback traffic is excluded
 both by packet type and `PACKET_IGNORE_OUTGOING`. No IP or packet multicast
 membership, promiscuity or all-multicast mode is requested. The existing bat0
-`MulticastRouter=permanent` setting is unchanged: normal phone SA forwarding
-continues, but this service adds no multicast listener advertisement.
+`MulticastRouter=permanent` setting is unchanged. Native SA forwarding continues
+except for the short-lived rewrite memberships below. This service adds no
+multicast listener advertisement.
 
 Packet socket lifecycle follows the existing network/role/hostapd invalidations.
 Cheap port facts include role, forwarding/carrier, hostapd lifetime and ifindex;
@@ -2894,9 +2896,14 @@ name requires `systemctl restart manet-atak.service` to install a new list;
 until then the daemon fails closed on the policy mismatch. Ordinary AP stop/start
 with the same name needs no firewall replacement.
 
-Android location services should be off and ATAK's external GPS input enabled
-on UDP 4349. Stock ordinary CoT input and Default Mesh SA need no per-radio
-output configuration. Unicast XML SA to UDP 4242 remains supported.
+Connect by Ethernet or this radio's Wi-Fi. For radios with GPS, the documented
+setup is Android location OFF, ATAK external GPS input ON at UDP 4349, and Default
+Mesh SA ON. This supplies one position inside ATAK for mesh, unicast and TLS
+outputs. Radio hardware without GPS instead needs Android location ON, with the
+controlling phone's GPS supplying the team position. Stock CoT input stays enabled.
+Unicast XML SA to UDP 4242 remains supported. The multicast rewrite is a safety
+net for forgotten settings, not a substitute for this setup.
+
 SA admits a UID into the bounded phone table and refreshes its presence lease
 (the earlier of packet staleness and the 75-second receipt-age budget). Each
 phone retains IP, MAC, attachment type, callsign, clock/replay state and deadline.
@@ -2911,8 +2918,9 @@ can be admitted without deleting state. The radio advertises the contact
 `MANET <hostname>` (`atak_callsign` can override it), with its TCP 4242 endpoint
 for Send. Select that contact when sending a manual point. The contact is
 hidden from the map; the separate external-position feed carries location.
-Every present phone gets a contact, external position and GPS warnings using
-its own SA-derived clock. Per-phone sends retain the 30-second contact refresh
+Every present phone gets a contact, radio-selected external position and GPS
+warnings using its own SA-derived clock. Phone GPS fallback never enters the
+external feed. Per-phone sends retain the 30-second contact refresh
 and at-most-1-Hz position feed, subject to the existing GPS trust and echo gates.
 
 Controller order is: saved manual choice if present; the only wired phone;
@@ -2932,8 +2940,11 @@ history; this keeps the bound tied to provisioned capacity.
 
 The unauthenticated `/` overview adds the ATAK phone list and controller buttons
 only while ATAK is enabled. Its `/api/local` ATAK object exposes only `enabled`,
-`running` and each phone's `uid`, `callsign`, `port` and `controller`. The full
-runtime snapshot, including session/boot identity, positions and input state,
+`running`, each phone's `uid`, `callsign`, `port`, `controller`, `tak_server` and
+`gps_disagreement_m`, and selected lat/lon/HAE with a source label. The web reader
+independently expires GPS position, server markers and disagreement notes using
+monotonic deadlines and boot identity even if the daemon stops writing.
+The full runtime snapshot, including session identity and input state,
 stays server-side for the controller POST check. `manet-ui-firewall.sh` installs
 port-80 input rules at priority -10: loopback and this radio's DHCP source-address range are allowed,
 then all remaining port-80 traffic is dropped. The web application's ordinary
@@ -2947,6 +2958,15 @@ presence and a boot/session-bound, five-second BOOTTIME envelope, then checkpoin
 the choice. HTTP 202 means queued, with the resulting controller shown by the
 next overview refresh. There is no extra daemon or polling loop.
 
+The local panel also exposes an opaque held-point identity and controller UID
+for **Use phone GPS again**. `/api/atak/release` uses the same JSON, origin and
+DHCP-pool checks without an admin password, then requires the source IP to match
+the current controller. It stages `/run/manet-atak/release.json`. The daemon
+rechecks current controller UID/IP/MAC/path, held-point identity, boot/session
+and a five-second BOOTTIME envelope before releasing a point selected without
+trusted own GPS. Stale requests cannot release a replacement point. Guests
+cannot release. Source-IP checks retain the existing trusted-team HTTP boundary.
+
 Persistence schema 2 owns the selector, phone table, manual controller preference,
 notice state and delivery ownership under `/var/lib/manet-atak`. Schema 1's old
 single-pin checkpoint is explicitly discarded, including its held manual point,
@@ -2954,6 +2974,276 @@ on first start of this code; unknown schemas or damaged checksums still refuse
 startup. Reboot retains choice and radio manual-location age lower bounds but
 requires new SA before any phone becomes present. The service never sets the
 OS clock.
+
+The controller's admitted SA with `geopointsrc=GPS`, no parent echo link and
+usable geometry supplies an ephemeral fallback when the selector has neither
+trusted radio GPS nor a held manual point. Per-phone clock admission, replay
+rejection, SA stale time and receipt-age limits remain unchanged. `phone_gps`
+holds only the fix, deadline and callsign, bounded by the admitted table and
+discarded on restart. Status labels it `phone GPS (<callsign>)` and marks it as
+outside radio position trust. It never enters `RadioGPS`, time policy, 4349
+output or mesh rewriting. Controller changes select that phone's fresh cached
+GPS without erasing a manual point. If proof of attachment disappears before the
+report expires, the beacon can use its remaining freshness, at most 75 seconds
+from receipt. Its stale field is capped at that deadline and its source is
+`MANET:phone-gps`. There is no stale hold extension. When departure is noticed
+only through SA expiry, no fresh phone position remains to advertise.
+
+While no trusted own GPS fix is selected, a held manual point is anchored to the
+controller's fresh own-GPS observation at acceptance. Without one, the first
+fresh controller observation supplies the anchor. Until then the point holds.
+`MANUAL_MOVE_M=30` permits a stationary correction within 30 m indefinitely.
+Distinct fresh observations continuously outside that radius for
+`MANUAL_MOVE_S=15` seconds release the point. A single jump followed only by timer
+ticks cannot release it. Returning inside, stale GPS, lost controller proof or
+trusted own GPS resets the interval. `MANUAL_MAX_OFFSET_M=200` releases immediately
+when any fresh controller GPS is more than 200 m from the held point, including
+the first anchor observation. These are operational allowances for phone GPS
+noise, small corrections and obsolete-point rejection, not accuracy guarantees.
+On GPS-less radios the phone track decides movement without a spoof monitor.
+Trusted-own-GPS mark/override/confirmation rules remain unchanged.
+
+Schema 2 persists the held-point identity, controller UID and optional lat/lon
+anchor. Earlier schema-2 checkpoints get an unanchored held point. This preserves
+the existing radio-owned manual point on upgrade. Controller changes reanchor
+to that phone's first fresh GPS. Restart preserves the anchor but discards phone
+GPS and movement timing, requiring new observations over the full interval.
+Movement checks also run during controller GPS ingestion, clearing rewrite
+authority before forwarding the report that triggers release. The status button
+can release even before fresh phone GPS is available, leaving no selected fix.
+
+Release reserves the same retirement slot as a replaced or confirming marker.
+If the retirement queue is full, geometry stays held. Otherwise it checkpoints
+the release and retirement owner before one journal line and one best-effort
+controller GeoChat. It adds no warning, audio or retry job, and preserves all
+trust state. Existing receiver warnings continue independently. Marker retirement
+still uses the original owner's delivery path and existing bounded retries.
+An already retired or non-marker manual gesture needs no additional marker job.
+The 200 m limit uses journal reason `offset` and explains that the phone GPS is
+far from the held point. Sustained movement uses `movement`, and the status-page
+button uses `request`.
+
+Acceptance records a transient notice intent keyed to the new manual gesture.
+The next selection sends one best-effort controller GeoChat only if that gesture
+is actually held. A point immediately released or retired by GPS confirmation
+does not produce a misleading holding message. The text explains that local ATAK
+deletion does not release the radio, and says to open manet.local in a browser
+and tap **Use phone GPS again**, or move on with fresh phone GPS. It has no link
+markup or audio. USER/drag gestures get the same explanation. Consuming the
+intent before the send prevents retries. It is not restored on restart or
+created by reanchoring, so a crash before handoff can lose this one-time notice.
+
+For a controller Send, `held_marker` retains one accepted XML packet, its manual
+gesture identity and its next refresh deadline in schema 2. Hex chunks fit the
+existing checkpoint string limit and bound the raw packet to `MAX_XML` (65536
+bytes). Restore validates the XML and checks UID, creator and geometry against
+the held gesture. The exact original bytes preserve labels, icon/color, creator
+time, stale time and unknown detail. USER/drag selections have no separate
+marker UID or payload. Older checkpoints retain their geometry but cannot
+reconstruct an original Send, so refresh starts only after a new accepted Send.
+
+`HELD_MARKER_REFRESH_S=60` sets the first deadline one minute after acceptance.
+While the point is selected and a controller is proven present, the existing
+cycle attempts unicast replay on 4242 to that controller. No refresh chat is
+sent. The next deadline is checkpointed before output, including failed sends,
+to avoid fast retries or duplicate bursts after a same-boot restart. Reboot
+starts a new five-minute interval and still requires fresh phone admission.
+An overdue replay waits for current controller proof. Controller changes do
+not create an acceptance notice or change marker content.
+
+Release clears the retained XML before its durable checkpoint. Replacement
+replaces that single record, and a newer accepted edit of the same UID updates
+its bytes and restarts the interval. Before replay, the service checks gesture
+identity, the selector's retired flag, pending selector retirements and the
+delivery retirement queue. It runs after retirement handoff, so retirement wins
+even at a refresh deadline or under queue backpressure. Once suppressed, the
+old record cannot reappear when the retirement replay hold expires. Deletion
+delivery retains its original-owner semantics. Exact replay deliberately does
+not change event timestamps, so Pixel behavior after the original stale time
+still needs checking along with the new refresh cadence.
+
+Receive-driven release from ATAK marker deletion is not implemented. The public
+[RemoveBroadcastReceiver](https://github.com/deptofdefense/AndroidTacticalAssaultKit-CIV/blob/main/atak/ATAK/app/src/main/java/com/atakmap/android/user/RemoveBroadcastReceiver.java)
+removes the map item or invokes its custom delete action. The public
+[CotDeleteImporter](https://github.com/deptofdefense/AndroidTacticalAssaultKit-CIV/blob/main/atak/ATAK/app/src/main/java/com/atakmap/android/cotdelete/CotDeleteImporter.java)
+proves incoming `t-x-d-d` support, which does not prove sending to a marker's prior
+recipients. `CotMapComponent` also registers a `TaskCotReceiver` removal listener,
+whose implementation could not be retrieved during this check. The examined
+sources therefore do not establish outbound propagation for the ordinary Send
+workflow. The subsequent Pixel test described below observed none. Deleting a
+local marker is not a radio release action.
+
+On 2026-10-14, a CM4 with an AP-connected Pixel and the real gps-reader reporting
+no receiver released the 4.7-hour-old held point on the first phone GPS fix
+about 14.5 km away, and the release GeoChat arrived. A new point sent to the
+radio contact stayed selected as manual. **Use phone GPS again** then logged
+`reason=request`, selected `phone GPS (SRS)` and retired the marker from ATAK's
+map. These observations cover the offset rule, button and original-owner
+retirement. They do not yet cover the new acceptance notice or marker replay.
+
+In the same setup, a 15-minute capture of phone-to-radio TCP/UDP 4242 recorded
+the `a-n-G` Send and no subsequent traffic when its marker was deleted locally.
+The radio kept holding it. ATAK GeoChat also displayed both http://manet.local/
+and manet.local as non-tappable text, so chat instructions explicitly say to
+open the address in a browser. The 30 m / 15 s walk-away release could not be
+tested with the desk radio, AP range and rain. Its unit coverage remains, and
+hardware verification needs a carried radio outdoors.
+
+While the radio selector supplies trusted own GPS or a held manual point,
+`rewrite_phones` contains exact EUD interface/MAC/IPv4 concatenations for admitted
+live phones without a detected TAK-server connection. A bridge forward rule drops
+only their unfragmented IPv4 UDP `239.2.3.1:6969` copies going to bat0, within the
+packet capture's size bound. Its source-MAC exclusion against `tak_phones` is
+checked by the kernel for every frame, independently of userspace progress.
+It leaves local EUD copies, unadmitted sources, remote traffic, TAK-server
+outputs and unicast unchanged. Admission's first SA passes natively. Every set
+element has a three-second kernel timeout, refreshed at most once per second.
+An atomic netlink batch flushes and repopulates the set on the existing cycle.
+No refresh occurs without admitted phones and a selected radio position.
+Position/admission loss flushes membership. Process death expires it without
+userspace action, and ExecStopPost deletes both private tables.
+
+The set writer uses the existing subscribed NETLINK_NETFILTER socket and no
+NLM_F_ECHO flag. Own multicast notifications can still arrive. The reader checks
+the kernel sender, multicast group and originating socket port before excluding
+its own rewrite notifications from proof invalidation. Generation notifications
+must match one of the last 32 rewrite-message sequences, which exclude membership
+dump requests. On Linux 6.18, NEWGEN uses the first operation's sequence after
+the batch-begin header is removed. Element notifications use sequence zero and
+must identify the bridge `manet_atak` table's `rewrite_phones` set. Nonzero element
+sequences must match the corresponding recorded operation. Unknown or external
+notifications still invalidate proof. This bounded history is separate from ACK
+tracking so notifications arriving after ACKs remain recognizable. Requested
+sequence-numbered ACKs are drained by the existing reader.
+Errors, lost notifications and an unacknowledged previous transaction stop the
+service. Static policy readback also verifies the set's key types, timeout and
+capacity. No child process or independent polling loop handles renewal.
+
+For blocked senders, an accepted SA can wait for a demand-driven membership
+read in one bounded frame slot per EUD port. That port leaves the select reader
+set until completion, so sparse reports can use the fresh result without an
+unbounded userspace queue or repeated admission. The original SA freshness
+deadline is retained too. Expiry, changed proof or interface identity, lost
+rewrite authority and TAK membership produce original forwarding.
+Teardown attempts to relay retained originals before closing the sender.
+Accepted SA replaces lat, lon, HAE, CE and LE plus precisionlocation
+geopointsrc/altsrc with `MANET:<hostname or configured callsign>`. The protobuf
+editor preserves each unrelated field's encoded bytes, including unknown fields,
+and rebuilds only enclosing lengths and precision messages. XML editing preserves
+other bytes, including quoting, comments and unknown detail. An output-only
+AF_PACKET socket bound to bat0 sends a complete Ethernet frame with the original
+source MAC/IP, destination and UDP ports, recomputing IP/UDP lengths and checksums.
+It never transmits on a local EUD interface. No IP-source behavior assumption
+inside ATAK is needed. Decode ambiguity, rejection or unsupported data relays the
+original unchanged. Rewrite send failure retries the original. Failure of both
+stops renewal by terminating the service. Application budget exhaustion or a
+nonzero packet-socket drop counter relays the current original and suspends
+membership for three seconds. Capture loss can lose an intercepted SA but cannot
+lose TAK-server detection, which now runs entirely in the kernel. The drop
+counter is read only on SA arrival. Size/fragment exclusions pass natively.
+Live CM4 verification still needs the kernel TAK exemption and crash expiry.
+Phone-location-on XML rewriting has been observed as described below.
+
+TAK-server detection is a bridge prerouting rule on the explicit local EUD port
+allow-list. Separate IPv4/IPv6 matches select TCP destination ports 8087 and 8089
+and update the source Ethernet MAC in `tak_phones`. The set has dynamic/timeout
+flags, a 600-second default timeout and capacity 1024. Every visible qualifying
+packet refreshes expiration in the kernel, including established data and ACKs,
+without a packet-socket wakeup or per-packet netlink notification. Its forwarding
+exemption applies immediately even while the daemon is paused or dead. A server
+on the EUD side also qualifies if its traffic crosses this bridge. Encrypted
+tunnels, packets without an inspectable TCP destination, different ports and
+traffic switched elsewhere are outside detection. Unit restart recreates the
+set, while SIGSTOP alone leaves the kernel hold and its renewal intact.
+
+The existing NETLINK_NETFILTER socket reads `tak_phones` with
+`NFT_MSG_GETSETELEM | NLM_F_REQUEST | NLM_F_DUMP` when an admitted frame is about
+to be rewritten or meaningful status changes. It reuses a completed snapshot
+for five seconds and caps requests at one per five seconds. Idle timer ticks
+issue none, including while a phone remains present. Status identity, position,
+trust, controller, warnings and server/disagreement changes create demand,
+while age counters and receipt timestamps do not. Deferred demand waits for
+rewrite ACKs, without losing the event. Multipart replies require the matching
+unicast sequence, bridge family, table and set names. Parsing caps the result at
+1024 unique six-byte MACs and 128 KiB, validates remaining lifetimes, and commits
+only after successful NLMSG_DONE. A partial result is never an authoritative
+empty set. Error, interruption, truncation, malformed data or a pending read
+reaching two seconds stops the daemon and lets rewrite leases expire. External
+policy notifications still invalidate proof, including a multicast notification
+whose sequence happens to match the current read.
+
+A recent completed membership snapshot is shared by status and rewrite selection.
+Its age is measured from the request, with a five-second maximum. Unknown or stale
+snapshots cannot add rewrite members or authorize replacement. Existing leases
+may renew against current proof, presence and radio fix because the kernel TAK
+exemption remains authoritative for native forwarding. Remaining element lifetimes produce receipt-based
+UI deadlines, conservatively extending an exclusion by dump delivery time.
+Membership may have been learned before SA admission, since kernel insertion is
+independent of the userspace phone table. Fresh proof is still required to admit
+or rewrite any phone. Reads wait for previous rewrite ACKs, and rewrite set writes
+wait for a pending dump, avoiding self-induced generation interruption. Static
+firewall verification checks both sets, update rules and the source-MAC exemption,
+including key types, flags, timeouts and capacities.
+
+The packet tap runs before bridge forwarding, and a netlink snapshot is not atomic
+with either the tap or `tak_phones` updates. A frame captured just before its MAC
+enters the set may already have lost its native copy to the block rule. Once a
+snapshot contains the MAC, userspace supplies the captured original. If the native
+copy instead passed after insertion, this produces an identical duplicate. With
+an earlier snapshot, a replacement may still be sent during the read interval,
+even though the kernel already passes the native original. The next SA needing
+replacement or a status change refreshes an expired five-second cache. No atomic all-output
+handoff or absolute no-replacement guarantee is claimed for that transition.
+After detection, the retirement cache relays originals until both the old
+three-second lease window ends and the ingress queue drains. More than 1012
+retiring keys stops the service. Correct phone settings select one position inside
+ATAK for mesh, unicast and TLS regardless of these safety-net races.
+
+CM4 verification on 2026-10-13 used the preceding combined rewrite and header-tap
+build, an AP-only Pixel admitted through Default Mesh SA, and a trusted bench
+fix. JSON showed the phone in `rewrite_phones` and DELSETELEM/NEWSETELEM ACKs
+returned error 0 each second. Inspect with
+`sudo nft -j list set bridge manet_atak rewrite_phones` and
+`sudo nft -j list set bridge manet_atak tak_phones`. Plain-text `nft list set`
+omitted populated ifname/ether_addr/ipv4_addr elements on that CM4. A bat0 capture
+contained `geopointsrc=MANET:gnss` with phone location off and the external feed
+already selected. That earlier capture alone did not prove replacement of phone
+GPS. A subsequent run with Android location on and trusted bench GPS captured
+XML SA about 14.5 km away on AP ingress and every report rewritten to the bench
+fix on bat0 with `geopointsrc=MANET:mesh-5cc2`. Control-only frames passed.
+Disagreement produced one journal line at 14535 m, one delivered quiet GeoChat
+and a panel note, without audio. TAK v1 rewriting remains hardware-unobserved
+because this phone sent XML. With the bench writer stopped and the real reader
+reporting no devices, warnings stayed quiet and disagreement cleared, but a
+4.7-hour-old held point still displaced live phone GPS. The release policy above
+addresses that observed failure. The subsequent offset and button checks above
+verified those release paths, while the walking threshold remains unverified
+on hardware.
+
+A CM4 renewal A/B on that same pre-kernel-detection build measured 0.790 and
+0.803 CPU seconds per minute with one-second renewal and three-second expiry,
+versus 0.762 and 0.806 with five-second renewal and ten-second expiry. The pairs
+overlap and show no measurable improvement in that run. Keep the one-second
+renewal and three-second timeout for faster fail-open behavior. After kernel
+detection and corrected self-notification classification, a later one-phone run
+used four child executions per minute and 1.20 CPU seconds per minute with 1 Hz
+membership dumps. The on-demand reader targets the earlier roughly 0.80 level,
+but no CM4 CPU measurement of this change is available yet. Local event-cycle
+tests verify no timer reads, cache reuse, sparse-report rewriting and unchanged
+self-notification handling, rather than predicting hardware CPU cost.
+
+The fresh per-phone GPS cache also feeds an evidence-only comparison against the
+selector's trusted own GNSS fix. Manual and fallback positions never qualify.
+The fixed 50 m alert threshold is the sum of two assumed 10 m GPS horizontal-error
+allowances and 30 m of local AP separation, not a claimed confidence interval or
+maximum AP range. Above it, status records rounded separation and a deadline
+capped by both fixes. One tagged journal line and one best-effort GeoChat handoff
+identify the episode. There is no retry, warning/audio job or trust mutation.
+Distance within 35 m for 30 continuous seconds of fresh, present, trusted comparison
+rearms the episode. Staleness, lost proof or 35–50 m separation interrupts that
+timer. Agreement cannot clear distrust, including a spoofer moving both fixes.
+Episode memory is bounded by admitted phone slots and resets on restart. With
+Android location off, no own-GPS SA means there is no comparison.
 
 With no live local phone lease, `RadioBeacon` advertises the selector's usable
 fix as protocol-0 XML on `239.2.3.1:6969`. Its stable UID is the machine-id-derived
@@ -2964,6 +3254,7 @@ Type `a-f-G-U-U-S-R` is the MIL-STD-2525 radio/signal unit, SIDC
 omits a contact endpoint. Only geometry, source and uncertainty are published,
 without a held manual point's phone identity. The same selector supplies trusted
 GPS or the held manual fallback, never suspect receiver geometry or a 0,0 SA.
+The fresh phone GPS exception above may also supply geometry after path loss.
 Announcements use the radio's UTC clock, refresh at 30 seconds and expire at
 90 seconds. Movement of five metres horizontally or in known HAE, source or
 name changes can advance output, with a five-second minimum between attempts.
@@ -2974,8 +3265,9 @@ primary/configured IPv4, with multicast interface selection, TTL 1, loopback
 disabled and fragmentation prohibited. Its datagram budget is 1200 bytes.
 The bridge output chain drops local UDP to `239.2.3.1:6969` on every egress
 except bat0. Linux applies that hook to each actual bridge output port, so
-local EUD ports cannot receive this beacon. The forward path for phone SA and
-other radios' announcements is unchanged. Existing bat0 multicast-router
+local EUD ports cannot receive this beacon. Phone SA follows the separate
+conditional rewrite path above. Other radios' announcements are unchanged.
+Existing bat0 multicast-router
 configuration remains in place, without a group join. Strict firewall readback
 and forwarding/carrier/br0 membership for bat0 precede output. A radio with no
 ready local EUD port can establish this mesh proof without admitting any phone.
@@ -2986,7 +3278,9 @@ radio type cannot classify as phone self SA.
 
 On phone arrival or loss of usable geometry, the beacon stops and schedules
 `t-x-d-d` with `__forcedelete` for only its beacon UID. A live phone lease keeps
-it suppressed across temporary proof loss. Cleanup seeks three successful local
+the radio-GPS/manual beacon suppressed across temporary proof loss. Phone-GPS
+fallback instead tests current proven phone presence and its report deadline.
+Cleanup seeks three successful local
 UDP handoffs at two-second spacing, bounded to five attempts, and then stops.
 A restart with a live phone also requests cleanup of a possible old beacon.
 After the final lease expires, new SA replaces any remaining cleanup job.
@@ -3069,7 +3363,13 @@ This delays only the warning, never permits a stale fix, and resets on recovery.
 A held usable manual point needs no unavailable warning. Distrust, jamming and
 producer-loss distrust remain immediate. Each warning raise/clear emits one
 journal line with its code, GPS reason, state, freshness, age and distrust flag.
-The diagnostic omits phone identifiers and packet contents.
+The diagnostic omits phone identifiers and packet contents. A fresh reader
+document explicitly reporting no receiver suppresses and clears `gps_untrusted`,
+its chat jobs and its audio job even after an earlier distrust incident. Missing,
+stale or malformed reader files remain unknown. A hot-plugged receiver resumes
+normal handling. Spoken reminder deadlines use `WARNING_READ_TIMEOUT_S` (60 s)
+with `MIN_SPOKEN_REMINDER_S` (30 s) as a floor even for a shorter configured value.
+Internal phone GPS no longer raises the obsolete phone-settings warning.
 
 After the last present phone leaves, changed safety inputs, phone presence expiry and
 warning and beacon deadlines still run. A held manual point or warning history retains the

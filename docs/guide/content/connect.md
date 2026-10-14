@@ -145,22 +145,34 @@ GPS hardware needs Android location on instead. This selects one position inside
 ATAK for all outputs, including unicast and TLS, which the radio cannot rewrite.
 
 Default Mesh SA (`239.2.3.1:6969`) is captured only on local EUD ingress with
-filtered packet sockets. The same queue retains only headers for TAK-server
-detection on TCP 8087/8089. The daemon neither joins the group nor receives packets
-on bat0. An output-only bat0 socket sends admitted phone SA with radio-selected
-positions, preserving sender identity. Three-second nft set leases block only
-their native EUD-to-bat0 copies while this daemon refreshes them. Marked server
-phones are excluded for 600 seconds since their latest observed traffic. During
-block removal, captured reports pass unchanged, with possible identical duplicates
-until the three-second lease window ends and the capture queue drains. Local copies, unadmitted senders, TAK-server and unicast traffic
-remain native. Outgoing copies forwarded from the mesh are filtered before userspace.
-The existing permanent multicast-router setting on bat0 remains unchanged.
-This receiver adds no multicast listener advertisement. A bounded v1 protobuf
-or legacy XML SA decoder runs only after ingress/MAC/neighbor/firewall proof,
-and requires the contact endpoint to match the proven IPv4 source. Unicast
-4242 input also accepts the secondary br0 gateway address: TCP destinations and
-UDP packet-info destinations must belong to br0's verified global address list.
-The radio advertises its primary address and replies directly to the phone.
+filtered packet sockets. TCP never wakes these sockets. Bridge rules instead
+refresh `tak_phones` source-MAC entries for IPv4/IPv6 TCP 8087/8089, with a
+600-second timeout since the latest packet. The native rewrite block checks
+that set directly, including while userspace is paused. The daemon reads it
+through bounded netlink requests before SA replacement or on meaningful status
+changes, reusing a completed result for five seconds. Idle ticks issue no reads.
+One admitted frame per EUD port can wait for a fresh reply, with that reader
+paused until completion. A pending read still has a two-second failure deadline.
+
+An output-only bat0 socket sends admitted phone SA with radio-selected positions,
+preserving sender identity. Three-second nft leases block their native
+EUD-to-bat0 copies, except for kernel-marked server MACs. A captured frame can
+race a new kernel insertion, so the preceding snapshot may still produce a
+replacement around the transition. After learning the insertion, the daemon
+relays potentially intercepted originals until the lease window ends and the
+queue drains, which can duplicate native reports. The phone setup keeps all
+ATAK outputs consistent independently of this safety net.
+
+The daemon neither joins the multicast group nor receives on bat0. Local copies,
+unadmitted senders, TAK-server and unicast traffic remain native. Outgoing copies
+forwarded from the mesh are filtered before userspace. The existing permanent
+multicast-router setting on bat0 remains unchanged. This receiver adds no
+multicast listener advertisement. A bounded v1 protobuf or legacy XML SA decoder
+runs only after ingress/MAC/neighbor/firewall proof, and requires the contact
+endpoint to match the proven IPv4 source. Unicast 4242 input also accepts the
+secondary br0 gateway address. TCP destinations and UDP packet-info destinations
+must belong to br0's verified global address list. The radio advertises its
+primary address and replies directly to the phone.
 
 - [Networking and EUD reference](../../../MANET/node_tools/README.md#network-management)
 - [Discovery boundary internals](../../../docs/node-tools-internals.md#local-eud-discovery)

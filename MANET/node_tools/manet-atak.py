@@ -61,6 +61,25 @@ KINDS = {'geochat', 'audio', 'web_ui'}
 # Require exactly six lowercase hexadecimal octets separated by colons.
 MAC = re.compile(r'(?:[0-9a-f]{2}:){5}[0-9a-f]{2}\Z')
 TABLE = 'manet_atak'
+REWRITE_SET = 'rewrite_phones'
+REWRITE_TIMEOUT_S = 3
+TAK_SERVER_PORTS = (8087, 8089)
+TAK_SERVER_HOLD_S = 600
+TAK_SET = 'tak_phones'
+MAX_TAK_PHONES = 1024
+TAK_READ_INTERVAL_S = 5
+TAK_READ_MAX_AGE_S = 5
+TAK_READ_TIMEOUT_S = 2
+WAIT_TAK = object()
+# Two assumed 10 m horizontal error budgets plus 30 m local AP separation.
+GPS_DISAGREE_M = 50
+GPS_AGREE_M = 35
+GPS_AGREE_S = 30
+# Operational allowances for phone GPS noise and deliberate small corrections.
+MANUAL_MOVE_M = 30
+MANUAL_MOVE_S = 15
+MANUAL_MAX_OFFSET_M = 200
+HELD_MARKER_REFRESH_S = 60
 DEFAULT_PHONE_LIMIT = 8
 MAX_PHONE_LIMIT = 253
 AP_ROLE = '/var/lib/ap_interface'
@@ -256,13 +275,24 @@ def firewall_objects(ports=('end0',)):
     allowed = ports[0] if len(ports) == 1 else {'set': list(ports)}
     service_ports = {'set': [4242, 4349]}
     objects = []
-    for family, hooks in (('bridge', ('prerouting', 'input', 'output')), ('inet', ('input',))):
+    for family, hooks in (('bridge', ('prerouting', 'input', 'output', 'forward')), ('inet', ('input',))):
         objects.append({'table': {'family': family, 'name': TABLE}})
         for hook in hooks:
             # Priority -450 checks fragment headers before defragmentation.
             objects.append({'chain': {'family': family, 'table': TABLE, 'name': hook,
                                      'type': 'filter', 'hook': hook,
                                      'prio': -450 if hook == 'prerouting' else 0, 'policy': 'accept'}})
+    objects.append({'set': {'family': 'bridge', 'table': TABLE, 'name': REWRITE_SET,
+                            'type': ['ifname', 'ether_addr', 'ipv4_addr'], 'flags': ['timeout'],
+                            'timeout': REWRITE_TIMEOUT_S, 'size': MAX_PHONE_LIMIT}})
+    objects.append({'set': {'family': 'bridge', 'table': TABLE, 'name': TAK_SET,
+                            'type': 'ether_addr', 'flags': ['dynamic', 'timeout'],
+                            'timeout': TAK_SERVER_HOLD_S, 'size': MAX_TAK_PHONES}})
+    for protocol in ('ip', 'ip6'):
+        objects.append({'rule': {'family': 'bridge', 'table': TABLE, 'chain': 'prerouting', 'expr': [
+            match(meta('iifname'), allowed), match(payload('ether', 'type'), protocol),
+            match(meta('l4proto'), 'tcp'), match(payload('tcp', 'dport'), {'set': list(TAK_SERVER_PORTS)}),
+            {'set': {'op': 'update', 'elem': payload('ether', 'saddr'), 'set': '@' + TAK_SET}}]}})
     def rule(family, chain, expr):
         """Append a rule dropping packets matched by the expressions."""
         objects.append({'rule': {'family': family, 'table': TABLE, 'chain': chain, 'expr': expr + [{'drop': None}]}})
@@ -292,6 +322,18 @@ def firewall_objects(ports=('end0',)):
                              match(payload('ip', 'daddr'), tak.MESH_GROUP),
                              match(meta('l4proto'), 'udp'),
                              match(payload('udp', 'dport'), tak.MESH_PORT)])
+    rule('bridge', 'forward', [match(meta('iifname'), allowed), match(meta('oifname'), 'bat0'),
+                              match(payload('ether', 'saddr'), '@' + TAK_SET, '!='),
+                              match(payload('ether', 'type'), 'ip'),
+                              match(payload('ip', 'version'), 4),
+                              match(payload('ip', 'hdrlength'), 5, '>='),
+                              match({'&': [payload('ip', 'frag-off'), 0xbfff]}, 0),
+                              match(payload('ip', 'length'), MAX_MESH_FRAME - 14, '<='),
+                              match(meta('length'), MAX_MESH_FRAME - 14, '<='),
+                              match(payload('ip', 'daddr'), tak.MESH_GROUP),
+                              match(meta('l4proto'), 'udp'), match(payload('udp', 'dport'), tak.MESH_PORT),
+                              match({'concat': [meta('iifname'), payload('ether', 'saddr'), payload('ip', 'saddr')]},
+                                    '@' + REWRITE_SET)])
     return objects
 
 
@@ -358,6 +400,7 @@ def valid_firewall(data, ports=('end0',)):
     for item in data.get('nftables', []):
         for kind, keys in (('table', ('family', 'name')),
                            ('chain', ('family', 'table', 'name', 'type', 'hook', 'prio', 'policy')),
+                           ('set', ('family', 'table', 'name', 'type', 'flags', 'timeout', 'size')),
                            ('rule', ('family', 'table', 'chain', 'expr'))):
             obj = item.get(kind)
             if obj is None or obj.get('family') not in ('bridge', 'inet'):
@@ -366,13 +409,35 @@ def valid_firewall(data, ports=('end0',)):
                 continue
             if kind == 'table' and obj.get('flags'):
                 return False  # in particular, a dormant table provides no proof
+            if kind == 'set':
+                if obj.get('map') is not None:
+                    return False
+                elements = obj.get('elem', [])
+                hold = TAK_SERVER_HOLD_S if obj.get('name') == TAK_SET else REWRITE_TIMEOUT_S
+                capacity = MAX_TAK_PHONES if obj.get('name') == TAK_SET else MAX_PHONE_LIMIT
+                if not isinstance(elements, list) or len(elements) > capacity:
+                    return False
+                for element in elements:
+                    value = element.get('elem') if isinstance(element, dict) else None
+                    if (not isinstance(value, dict) or
+                            any(type(value.get(key, hold)) not in (int, float) or
+                                not math.isfinite(value.get(key, hold)) for key in ('timeout', 'expires')) or
+                            not 0 < value.get('timeout', hold) <= hold or
+                            not 0 <= value.get('expires', hold) <= hold):
+                        return False  # No unbounded or extended block lease.
+                    if obj.get('name') == TAK_SET and (
+                            not isinstance(value.get('val'), str) or not MAC.fullmatch(value['val'])
+                            or value.get('timeout', hold) != hold):
+                        return False
             obj = {key: obj.get(key) for key in keys}
+            if kind == 'set' and isinstance(obj.get('flags'), list):
+                obj['flags'] = sorted(obj['flags'])
             if kind == 'rule':
                 obj['expr'] = [entry for entry in obj['expr'] if 'counter' not in entry]
             actual.append({kind: obj})
         # Reject auxiliary sets/maps/flowtables in this private policy table.
         for kind, obj in item.items():
-            if kind not in ('table', 'chain', 'rule', 'metainfo') and isinstance(obj, dict) and obj.get('table') == TABLE:
+            if kind not in ('table', 'chain', 'rule', 'set', 'metainfo') and isinstance(obj, dict) and obj.get('table') == TABLE:
                 return False
     # Kernel dumps group tables by family. Preserve rule order per chain.
     def grouped(items):
@@ -446,16 +511,58 @@ def fdb_refresh_flags(entry):
     return sum(bits[flag] for flag in flags)
 
 
+def netlink_attr(kind, data):
+    """Encode a four-byte aligned netlink attribute."""
+    return struct.pack('=HH', len(data) + 4, kind) + data + b'\0' * (-len(data) % 4)
+
+
+def netlink_attrs(data):
+    """Decode bounded attributes, preserving repeated nested list members."""
+    result = []
+    while data:
+        if len(data) < 4:
+            raise OSError('short netlink attribute')
+        size, kind = struct.unpack_from('=HH', data)
+        if size < 4 or size > len(data) or (size + 3) & ~3 > len(data):
+            raise OSError('invalid netlink attribute length')
+        result.append((kind & 0x3fff, data[4:size]))
+        data = data[(size + 3) & ~3:]
+    return result
+
+
+def netlink_fields(data):
+    """Require unique attributes, allowing only empty alignment padding."""
+    fields = {}
+    for kind, value in netlink_attrs(data):
+        if kind == 8 and not value:  # NFTA_SET_ELEM_PAD
+            continue
+        if kind in fields:
+            raise OSError('duplicate netlink attribute')
+        fields[kind] = value
+    return fields
+
+
 class NetworkEvents:
     """Kernel notifications in the existing select loop, never a monitor child.
 
     Subscribe before taking a snapshot. Lost/truncated notifications are fatal:
     the unit restarts with new subscriptions and no previously admitted peers.
     """
-    def __init__(self, factory=socket.socket):
+    def __init__(self, factory=socket.socket, monotonic=time.monotonic):
         """Subscribe to route and nftables changes with nonblocking sockets."""
         self.sockets = []
         self.scope = None
+        self.rewrite_sequence = 0
+        self.rewrite_acks = set()
+        self.rewrite_notifications = {}
+        self.nft_portid = None
+        self.monotonic = monotonic
+        self.tak_pending = None
+        self.tak_requested = None
+        self.tak_snapshot = None
+        self.tak_observed = None
+        self.tak_partial = {}
+        self.tak_bytes = 0
         try:
             # NETLINK_ROUTE: LINK, NEIGH (including bridge FDB), IPv4_IFADDR.
             # NETLINK_NETFILTER: NFNLGRP_NFTABLES, including ruleset commits.
@@ -474,6 +581,137 @@ class NetworkEvents:
         for sock in self.sockets:
             sock.close()
         self.sockets.clear()
+
+    def read_tak(self, now):
+        """Request a bounded dump on demand, reusing a five-second snapshot."""
+        if self.tak_pending is not None:
+            if now - self.tak_requested >= TAK_READ_TIMEOUT_S:
+                raise OSError('TAK set read timed out')
+            return
+        if self.rewrite_acks:
+            return  # Do not overlap our ruleset generation change with a dump.
+        if self.tak_requested is not None and now - self.tak_requested < TAK_READ_INTERVAL_S:
+            return
+        self.rewrite_sequence += 1
+        self.tak_pending = self.rewrite_sequence
+        self.tak_requested = now
+        self.tak_partial, self.tak_bytes = {}, 0
+        body = struct.pack('!BBH', socket.AF_BRIDGE, 0, 0)
+        body += netlink_attr(1, TABLE.encode() + b'\0') + netlink_attr(2, TAK_SET.encode() + b'\0')
+        message = struct.pack('=IHHII', 16 + len(body), 0xa0d, 0x301, self.tak_pending, 0) + body
+        if self.sockets[1].sendto(message, (0, 0)) != len(message):
+            raise OSError('short TAK set request')
+
+    def tak_members(self, now):
+        """Return a recent complete kernel snapshot, never partial/unknown empty."""
+        if self.tak_observed is None or not 0 <= now - self.tak_observed < TAK_READ_MAX_AGE_S:
+            return None
+        return {mac: end for mac, end in self.tak_snapshot.items() if now < end}
+
+    def tak_reply(self, kind, flags, body):
+        """Accumulate a bounded multipart GETSETELEM reply without dirtying proof."""
+        self.tak_bytes += len(body)
+        if flags & 0x10 or self.tak_bytes > 128 * 1024:
+            raise OSError('interrupted or oversized TAK set dump')
+        if kind == 3:  # NLMSG_DONE, including a signed dump completion status.
+            if len(body) != 4 or struct.unpack('=i', body)[0] != 0:
+                raise OSError('TAK set dump completion failed')
+            self.tak_snapshot = self.tak_partial
+            self.tak_observed = self.tak_requested
+            self.tak_pending = None
+            self.tak_partial = {}
+            return
+        if kind != 0xa0c or not flags & 2 or len(body) < 4 or body[:2] != b'\x07\0':
+            raise OSError('invalid TAK set reply')
+        fields = netlink_fields(body[4:])
+        if set(fields) != {1, 2, 3} or fields[1] != TABLE.encode() + b'\0' or fields[2] != TAK_SET.encode() + b'\0':
+            raise OSError('wrong TAK set reply identity')
+        for entry, value in netlink_attrs(fields[3]):
+            element = netlink_fields(value)
+            if entry != 1 or set(element) - {1, 4, 5} or 1 not in element or 5 not in element:
+                raise OSError('invalid TAK set element')
+            key = netlink_fields(element[1])
+            if set(key) != {1} or len(key[1]) != 6 or len(element[5]) != 8:
+                raise OSError('invalid TAK MAC or expiration')
+            if 4 in element and (len(element[4]) != 8 or struct.unpack('!Q', element[4])[0] != TAK_SERVER_HOLD_S * 1000):
+                raise OSError('invalid TAK timeout')
+            expires = struct.unpack('!Q', element[5])[0] / 1000
+            mac = key[1].hex(':')
+            if expires > TAK_SERVER_HOLD_S or mac in self.tak_partial or len(self.tak_partial) >= MAX_TAK_PHONES:
+                raise OSError('invalid TAK expiry or capacity')
+            # Receipt-based expiry errs toward longer exclusion during a dump.
+            self.tak_partial[mac] = self.monotonic() + expires
+
+    def rewrite_members(self, members):
+        """Atomically flush/rearm three-second elements using our subscription.
+
+        Own multicast notifications can arrive despite omitting NLM_F_ECHO.
+        Remember their originating port and transaction sequences separately
+        from ACKs, which may be drained first. External changes still invalidate
+        proof, and ACK errors/loss still fail closed.
+        """
+        if self.rewrite_acks:
+            raise OSError('rewrite transaction acknowledgement missing')
+        if len(members) > MAX_PHONE_LIMIT:
+            raise ValueError('too many rewrite peers')
+        if self.nft_portid is None:
+            self.nft_portid = self.sockets[1].getsockname()[0]
+        sent = {}
+        def attr(kind, data):
+            """Pack a native netlink attribute with four-byte alignment."""
+            return struct.pack('=HH', len(data) + 4, kind) + data + b'\0' * (-len(data) % 4)
+        def message(kind, body=b'', flags=1, family=socket.AF_BRIDGE):
+            """Number one batch message, recording only requested ACKs."""
+            self.rewrite_sequence += 1
+            seq = self.rewrite_sequence
+            sent[seq] = kind
+            if flags & 4:
+                self.rewrite_acks.add(seq)
+            body = struct.pack('!BBH', family, 0, 10 if kind in (16, 17) else 0) + body
+            return struct.pack('=IHHII', 16 + len(body), kind, flags, seq, 0) + body
+        names = attr(1, TABLE.encode() + b'\0') + attr(2, REWRITE_SET.encode() + b'\0')
+        batch = message(16, family=0)  # NFNL_MSG_BATCH_BEGIN / NFTABLES subsystem.
+        batch += message(10 << 8 | 14, names, 1 | 4)  # DELSETELEM without list flushes.
+        if members:
+            elements = b''
+            for iface, address, mac in sorted(members):
+                if (not re.fullmatch(r'[A-Za-z0-9_.-]{1,15}', iface) or iface in ('br0', 'bat0', 'lo')
+                        or not MAC.fullmatch(mac)):
+                    raise ValueError('invalid rewrite identity')
+                key = iface.encode().ljust(16, b'\0') + bytes.fromhex(mac.replace(':', '')) + b'\0\0' + socket.inet_aton(address)
+                element = attr(1 | 0x8000, attr(1, key)) + attr(4, struct.pack('!Q', REWRITE_TIMEOUT_S * 1000))
+                elements += attr(1 | 0x8000, element)
+            batch += message(10 << 8 | 12, names + attr(3 | 0x8000, elements), 1 | 4 | 0x400)
+        batch += message(17, family=0)  # NFNL_MSG_BATCH_END, no echo.
+        if self.sockets[1].sendto(batch, (0, 0)) != len(batch):
+            raise OSError('short rewrite netlink transaction')
+        # Bounded history handles notifications drained after ACKs or a later
+        # dump, without including any GETSETELEM sequences in this allowance.
+        self.rewrite_notifications.update(sent)
+        self.rewrite_notifications = dict(list(self.rewrite_notifications.items())[-32:])
+
+    def own_rewrite_notification(self, kind, flags, seq, portid, group, body):
+        """Recognize only kernel multicast from our bounded rewrite operations."""
+        if (group != 1 << 6 or portid != self.nft_portid or not self.rewrite_notifications
+                or flags & 2 or len(body) < 4):
+            return False
+        if kind == 0xa0f:  # NEWGEN uses the first operation's sequence on Linux 6.18.
+            if seq not in self.rewrite_notifications or body[:2] != b'\0\0':
+                return False
+        elif kind in (0xa0c, 0xa0e):
+            # Linux 6.18 sends per-element multicast with sequence zero.
+            if (seq and self.rewrite_notifications.get(seq) != kind) or body[:2] != b'\x07\0':
+                return False
+        else:
+            return False
+        try:
+            fields = netlink_fields(body[4:])
+        except OSError:
+            return False
+        if kind == 0xa0f:
+            return len(fields.get(1, b'')) == 4  # NFTA_GEN_ID
+        return (set(fields) == {1, 2, 3} and fields[1] == TABLE.encode() + b'\0'
+                and fields[2] == REWRITE_SET.encode() + b'\0')
 
     def relevant(self, kind, body):
         """Ignore unrelated events and refreshes that preserve verified proof.
@@ -574,11 +812,26 @@ class NetworkEvents:
                 while offset < len(data):
                     if len(data) - offset < 16:
                         raise OSError('short netlink header')
-                    length, kind, _, _, _ = struct.unpack_from('=IHHII', data, offset)
-                    if length < 16 or offset + length > len(data) or kind in (2, 4):
+                    length, kind, msg_flags, seq, portid = struct.unpack_from('=IHHII', data, offset)
+                    if length < 16 or offset + length > len(data) or kind == 4:
                         raise OSError('lost or invalid network notification')
-                    # Never filter policy notifications. Route notifications
-                    # can be discarded only using a previously verified scope.
+                    if channel == 1 and sender[1] == 0 and self.tak_pending is not None and seq == self.tak_pending:
+                        self.tak_reply(kind, msg_flags, data[offset + 16:offset + length])
+                        offset += (length + 3) & ~3
+                        continue
+                    if kind == 2:
+                        if (channel != 1 or seq not in self.rewrite_acks or length < 36
+                                or struct.unpack_from('=i', data, offset + 16)[0] != 0):
+                            raise OSError('rewrite transaction failed or unexpected netlink error')
+                        self.rewrite_acks.remove(seq)
+                        offset += (length + 3) & ~3
+                        continue
+                    if channel == 1 and self.own_rewrite_notification(
+                            kind, msg_flags, seq, portid, sender[1], data[offset + 16:offset + length]):
+                        offset += (length + 3) & ~3
+                        continue
+                    # External/unknown policy notifications always invalidate.
+                    # Route elision requires a previously verified scope.
                     changed |= kind not in (1, 3) and (
                         channel == 1 or self.relevant(kind, data[offset + 16:offset + length]))
                     # Each netlink message occupies a four-byte aligned slot.
@@ -1029,12 +1282,20 @@ class Inputs:
         """Validate local inputs and retain producer fault history."""
         self.expiries = []
         fix, observed, gps_reason = None, now.mono, 'GPS unavailable'
+        receiver_present = None
         try:
             if not receiver:
                 raise ValueError('waiting for phone')
             data = self.document('gps_status.json', now, 2)
+            devices = data.get('devices')
+            if isinstance(devices, list):
+                receiver_present = bool(devices)
+                if not receiver_present:
+                    raise ValueError('no GPS receiver')
             sample = data['sample']
             if sample is None:
+                if not data.get('devices'):
+                    receiver_present = False
                 raise ValueError('no receiver sample' if data.get('devices') else 'no GPS receiver')
             age = now.raw - number(sample['mono'])
             if age < 0:
@@ -1101,7 +1362,7 @@ class Inputs:
         if evidence != memory.get('evidence') and (evidence[0] or evidence[1]):
             memory['fault_epoch'] += 1
         memory['evidence'] = evidence
-        return phone.RadioGPS(fix, observed, state, jam_gate, memory['fault_epoch'], agrees), {
+        return phone.RadioGPS(fix, observed, state, jam_gate, memory['fault_epoch'], agrees, receiver_present), {
             'gps': gps_reason, 'monitor': monitor, 'jamming_pin': jam, 'jamming_input': jam_reason}
 
 
@@ -1119,12 +1380,13 @@ class RadioBeacon:
         """Use the existing application cycle for refresh/retry deadlines."""
         return self.next_due is not None and now.mono >= self.next_due
 
-    def update(self, config, now, fix, occupied, send):
+    def update(self, config, now, fix, occupied, send, *, expires=None):
         """Refresh at 30 seconds or five metres, with a five-second send bound."""
         if not config.enabled:
             return
         name = config.beacon_name or config.callsign
-        usable = fix is not None and (fix.lat, fix.lon) != (0, 0)
+        usable = (fix is not None and (fix.lat, fix.lon) != (0, 0)
+                  and (expires is None or expires - now.mono >= .001))
         if occupied or not usable:
             if self.retirement is None and (self.active or occupied and self.startup_cleanup):
                 # Force-delete is immediate in ATAK's external CoT importer.
@@ -1153,7 +1415,8 @@ class RadioBeacon:
             if self.last_attempt is not None and now.mono < self.last_attempt + 5:
                 self.next_due = self.last_attempt + 5
                 return
-            packet = cot.radio_beacon(config.uid, name, fix, now.utc)
+            packet = cot.radio_beacon(config.uid, name, fix, now.utc,
+                                       stale_s=cot.BEACON_STALE_S if expires is None else min(cot.BEACON_STALE_S, expires - now.mono))
             self.last_attempt = now.mono
             self.next_due = now.mono + 5
             if packet is not None and send(packet):
@@ -1201,9 +1464,25 @@ class Service:
         self.unavailable_since = None
         self.logged_warnings = set()
         self.beacon = RadioBeacon()
+        self.phone_gps = {}  # Ephemeral admitted observations, never trust/clock evidence.
+        self.manual_anchor = None  # Persisted point identity, controller and GPS anchor.
+        self.manual_motion = None  # Only distinct live observations establish movement.
+        self.held_marker = None  # One accepted Send, retained exactly for quiet refreshes.
+        self.held_notice = None  # Acceptance only, never replayed after restart/re-anchor.
+        self.rewrite_fix = None
+        self.rewrite_deadline = 0
+        self.tak_servers = {}  # Cached kernel MAC membership and expiration, not producer evidence.
+        self.disagreements = {}  # Phone UID -> evidence episode, never trust state.
         saved = store.load()
         if saved is not None:
             self.restore(saved, now)
+        for selector in [self.position] + [item['clock'] for item in self.phones.values()]:
+            selector._clear_warning('phone_gps')
+        self.banners.pop('phone_gps', None)
+        self.audio.pop('phone_gps', None)
+        for item in self.phones.values():
+            item['outbox'].pop('phone_gps', None)
+            item['warned'].pop('phone_gps', None)
         self.commit(now)
 
     def restore(self, saved, now):
@@ -1217,14 +1496,42 @@ class Service:
         if saved.get('schema') != 2 or saved.get('uid') != self.config.uid:
             raise ValueError('state schema/identity mismatch; refusing implicit reassociation')
         state = decode(saved['state'])
+        if isinstance(state, dict):
+            state.setdefault('manual_anchor', None)  # Preserve already-held points on upgrade.
+            state.setdefault('held_marker', None)  # Earlier checkpoints did not retain Send XML.
         required = {'selector', 'peer', 'session', 'retire', 'messages', 'audio', 'banners', 'chats', 'input_memory', 'age_lower_bound',
-                    'phones', 'manual_uid', 'noticed_present', 'noticed_controller', 'choice_request'}
+                    'phones', 'manual_uid', 'noticed_present', 'noticed_controller', 'choice_request', 'manual_anchor',
+                    'held_marker'}
         if not isinstance(state, dict) or set(state) != required:
             raise ValueError('invalid service state')
         self.position.__dict__ = state.pop('selector')
         validate_selector(self.position, self.config)
         for key, value in state.items():
             setattr(self, key, value)
+        if self.manual_anchor is not None:
+            anchor = self.manual_anchor
+            if (not isinstance(anchor, dict) or set(anchor) != {'id', 'uid', 'point'}
+                    or not re.fullmatch('[0-9a-f]{64}', str(anchor['id']))):
+                raise ValueError('invalid manual anchor')
+            bounded_text(anchor['uid'])
+            point = anchor['point']
+            if point is not None and (not isinstance(point, tuple) or len(point) != 2
+                    or not -90 <= number(point[0]) <= 90 or not -180 <= number(point[1]) <= 180):
+                raise ValueError('invalid manual anchor point')
+        if self.held_marker is not None:
+            record = self.held_marker
+            if (not isinstance(record, dict) or set(record) != {'id', 'xml', 'due'}
+                    or not isinstance(record['xml'], list) or not 1 <= len(record['xml']) <= MAX_XML // 2048
+                    or any(not isinstance(chunk, str) or not re.fullmatch('[0-9a-f]{2,4096}', chunk)
+                           or len(chunk) % 2 for chunk in record['xml'])):
+                raise ValueError('invalid held marker record')
+            packet = bytes.fromhex(''.join(record['xml']))
+            mark, parsed = self.position._manual, cot.parse_marker(packet)
+            if (mark is None or isinstance(parsed, str) or record['id'] != self.manual_id()
+                    or parsed.uid != mark.marker_uid or parsed.creator_uid != mark.phone_uid
+                    or (parsed.lat, parsed.lon, parsed.hae) != (mark.fix.lat, mark.fix.lon, mark.fix.hae)):
+                raise ValueError('held marker does not match selected gesture')
+            number(record['due'])
         bounded_text(self.session)
         if not isinstance(self.phones, dict) or len(self.phones) > MAX_PHONE_LIMIT:
             raise ValueError('invalid saved phone table')
@@ -1291,6 +1598,8 @@ class Service:
                     job['due'] = now.mono
         if new_boot:
             self.age_lower_bound = True
+            if self.held_marker is not None:
+                self.held_marker['due'] = now.mono + HELD_MARKER_REFRESH_S
             for item in self.retire.values():
                 item['due'] = now.mono
                 if item['done_until'] is not None:
@@ -1328,7 +1637,8 @@ class Service:
                  'age_lower_bound': self.age_lower_bound,
                  'phones': {uid: dict(item, clock=vars(item['clock'])) for uid, item in self.phones.items()},
                  'manual_uid': self.manual_uid, 'noticed_present': self.noticed_present,
-                 'noticed_controller': self.noticed_controller, 'choice_request': self.choice_request}
+                 'noticed_controller': self.noticed_controller, 'choice_request': self.choice_request,
+                 'manual_anchor': self.manual_anchor, 'held_marker': self.held_marker}
         try:
             payload = {'schema': 2, 'uid': self.config.uid, 'boot_id': self.boot_id,
                        'saved_mono': now.mono, 'state': encode(state)}
@@ -1368,6 +1678,49 @@ class Service:
         """Coalesce each kind of per-phone notice into a bounded durable slot."""
         item['outbox'][code] = {'id': str(uuid.uuid4()), 'text': text,
                                 'attempts': 0, 'due': now.mono}
+
+    def tak_server(self, mac, now):
+        """Retain a detected server connection across SA absence and IP changes."""
+        return now.mono < self.tak_servers.get(mac, -math.inf)
+
+    def compare_phone_gps(self, now, proof, selected):
+        """Record disagreement without feeding the location trust state machine."""
+        self.disagreements = {uid: item for uid, item in self.disagreements.items() if uid in self.phones}
+        present = self.present_phones(now, proof)
+        for uid, item in self.phones.items():
+            episode = self.disagreements.setdefault(uid, {'active': False, 'agree_since': None,
+                                                         'distance': None, 'deadline': 0,
+                                                         'valid_until': 0})
+            observed = self.phone_gps.get(uid)
+            episode['distance'] = None
+            if now.mono >= episode['valid_until']:
+                episode['agree_since'] = None
+            if (uid not in present or observed is None or not selected.own_gnss_selected
+                    or not selected.position_trusted):
+                episode['agree_since'] = None
+                continue
+            episode['valid_until'] = min(observed[1], self.rewrite_deadline)
+            distance = phone._distance_m((selected.fix.lat, selected.fix.lon),
+                                         (observed[0].lat, observed[0].lon))
+            if distance > GPS_DISAGREE_M:
+                episode['distance'] = round(distance)
+                episode['deadline'] = episode['valid_until']
+                episode['agree_since'] = None
+                if not episode['active']:
+                    # One best-effort handoff, without audio or a retry job.
+                    episode['active'] = True
+                    text = f'Radio and phone GPS disagree by {round(distance)} m. Check your position and GPS setup.'
+                    log(f'phone GPS disagreement uid={json.dumps(uid)} distance_m={round(distance)}')
+                    stamp = item['clock'].outbound_time(now.mono, now.utc)
+                    self.send(cot.geochat_report(self.config.uid, self.config.callsign, uid,
+                                                text, str(uuid.uuid4()), stamp), 4242, now, item)
+            elif distance <= GPS_AGREE_M:
+                if episode['agree_since'] is None:
+                    episode['agree_since'] = now.mono
+                if now.mono - episode['agree_since'] >= GPS_AGREE_S:
+                    episode['active'] = False
+            else:
+                episode['agree_since'] = None
 
     def choose_controller(self, now, proof, manual_uid=None):
         """Apply manual, sole wired, current, then stable random preference."""
@@ -1409,7 +1762,7 @@ class Service:
         if len(present) > 1 and (grew or changed):
             callsign = present[chosen]['callsign']
             text = (f'{len(present)} ATAK phones are connected to {self.config.callsign}. '
-                    f'{callsign} sets this radio\'s location. Change it at manet.local.')
+                    f'{callsign} sets this radio\'s location. To change it, open manet.local in your browser.')
             for peer in present.values():
                 self.queue_notice(peer, 'group', text, now)
         if members != self.noticed_present or chosen != self.noticed_controller or manual_uid is not None:
@@ -1434,6 +1787,130 @@ class Service:
             return accepted
         except (ValueError, TypeError):
             return False
+
+    def manual_id(self):
+        """Identify the held gesture across reboot without exposing private provenance."""
+        mark = self.position._manual
+        return None if mark is None else state_digest(encode((
+            mark.phone_uid, mark.source, mark.marker_uid, mark.observation_time, mark.fix)))
+
+    def accepted_manual(self, now, packet=None):
+        """Record one new gesture, keeping only its accepted Send for refresh."""
+        self.held_notice = self.manual_id()
+        # Hex chunks preserve the original XML bytes, including unknown detail,
+        # within the existing checkpoint decoder's per-string limit.
+        self.held_marker = (None if packet is None else {
+            'id': self.held_notice,
+            'xml': [packet[i:i + 2048].hex() for i in range(0, len(packet), 2048)],
+            'due': now.mono + HELD_MARKER_REFRESH_S})
+
+    def held_point_output(self, now, proof, selected):
+        """Explain new held selections once and refresh only unretired Sent markers."""
+        mark, identity = self.position._manual, self.manual_id()
+        record = self.held_marker
+        if record is not None and (record['id'] != identity or self.position._manual_retired
+                or mark.marker_uid in self.position._retirements or mark.marker_uid in self.retire):
+            self.held_marker = record = None
+            self.commit(now)  # Retirement wins even after its replay hold expires.
+        notice, self.held_notice = self.held_notice, None
+        item = self.present_phones(now, proof).get(self.position.pinned_uid)
+        if item is None or selected.location is None:
+            return
+        if notice is not None and notice == identity:
+            text = ("The radio is holding your point. Deleting it in ATAK does not release it on the radio. "
+                    "To release it, open manet.local in your browser and tap \"Use phone GPS again\", "
+                    "or move on with your phone's GPS available.")
+            self.send(cot.geochat_report(self.config.uid, self.config.callsign, self.position.pinned_uid,
+                                        text, str(uuid.uuid4()), item['clock'].outbound_time(now.mono, now.utc)),
+                      4242, now, item)
+        if record is not None and now.mono >= record['due']:
+            record['due'] = now.mono + HELD_MARKER_REFRESH_S
+            self.commit(now)  # Bound attempts, including failed sends and same-boot restarts.
+            self.send(bytes.fromhex(''.join(record['xml'])), 4242, now, item)
+
+    def anchor_manual(self, now, observed=None):
+        """Remember current controller GPS at acceptance, or its first fresh fix."""
+        identity, uid = self.manual_id(), self.position.pinned_uid
+        if identity is None or uid is None:
+            self.manual_anchor = self.manual_motion = None
+            return
+        anchor = self.manual_anchor
+        if anchor is None or (anchor['id'], anchor['uid']) != (identity, uid):
+            anchor = {'id': identity, 'uid': uid, 'point': None}
+            self.manual_motion = None
+        observed = self.phone_gps.get(uid) if observed is None else observed
+        if anchor['point'] is None and observed is not None and now.mono < observed[1]:
+            anchor = dict(anchor, point=(observed[0].lat, observed[0].lon))
+        if anchor != self.manual_anchor:
+            self.manual_anchor = anchor
+            self.commit(now)
+
+    def release_manual(self, now, proof, *, moved, offset=False):
+        """Retire one held point and make one quiet best-effort controller notice."""
+        uid = self.position.pinned_uid
+        item = self.present_phones(now, proof).get(uid)
+        if item is None or not self.position.release_manual():
+            return False
+        self.manual_anchor = self.manual_motion = None
+        self.held_marker = self.held_notice = None
+        self.rewrite_fix = None
+        self.rewrite_deadline = 0
+        self.contact_changed = True
+        self.commit(now)  # Never announce a release which was not saved.
+        if offset:
+            text = "Your phone's GPS is far from the held point, so the radio is using your phone's GPS again."
+        elif moved:
+            text = "You moved, so the radio is using your phone's GPS again."
+        else:
+            text = "Held point released. The radio will use your phone's GPS when available."
+        reason = 'offset' if offset else 'movement' if moved else 'request'
+        log(f'held point released controller={json.dumps(uid)} reason={reason}')
+        self.send(cot.geochat_report(self.config.uid, self.config.callsign, uid, text,
+                                    str(uuid.uuid4()), item['clock'].outbound_time(now.mono, now.utc)),
+                  4242, now, item)
+        return True
+
+    def release_request(self, data, now, proof):
+        """Recheck the staged request's controller path, point, session and age."""
+        if not isinstance(data, dict):
+            return False
+        item = self.present_phones(now, proof).get(self.position.pinned_uid)
+        try:
+            return bool(item is not None and data.get('schema') == 1
+                        and data.get('session') == self.session and data.get('boot_id') == self.boot_id
+                        and data.get('uid') == self.position.pinned_uid
+                        and (data.get('ip'), data.get('mac')) == (item['ip'], item['mac'])
+                        and data.get('manual_id') == self.manual_id()
+                        and 0 <= now.boot - number(data.get('written_boot')) <= 5
+                        and self.release_manual(now, proof, moved=False))
+        except (ValueError, TypeError):
+            return False
+
+    def moved_from_manual(self, now, proof, own_gnss_selected):
+        """Require distinct fresh phone reports across the movement interval."""
+        uid = self.position.pinned_uid
+        observed = self.phone_gps.get(uid)
+        if (self.position._manual is None or own_gnss_selected
+                or uid not in self.present_phones(now, proof) or observed is None or now.mono >= observed[1]):
+            self.manual_motion = None
+            return False
+        self.anchor_manual(now)
+        point = observed[0].lat, observed[0].lon
+        mark = self.position._manual.fix
+        if phone._distance_m(point, (mark.lat, mark.lon)) > MANUAL_MAX_OFFSET_M:
+            return self.release_manual(now, proof, moved=True, offset=True)
+        if phone._distance_m(point, self.manual_anchor['point']) <= MANUAL_MOVE_M:
+            self.manual_motion = None
+            return False
+        sample = self.phones[uid]['clock']._latest_time
+        previous = self.manual_motion
+        if previous is None or now.mono >= previous[2]:
+            self.manual_motion = (sample, now.mono, observed[1])
+        elif sample != previous[0]:
+            self.manual_motion = (sample, previous[1], observed[1])
+            if now.mono - previous[1] >= MANUAL_MOVE_S:
+                return self.release_manual(now, proof, moved=True)
+        return False
 
     def retry_parked(self):
         """Restart exhausted jobs that have no completed-retirement hold."""
@@ -1504,6 +1981,16 @@ class Service:
                 changed = item['ip'] != address or item['port'] != proof.port(address)
                 item.update(ip=address, mac=mac, port=proof.port(address), callsign=callsign)
                 self.phones[parsed.uid] = item
+                self.phone_gps = {uid: value for uid, value in self.phone_gps.items() if uid in self.phones}
+                previous_gps = self.phone_gps.get(parsed.uid)
+                if parsed.source == 'gps' and parsed.geopointsrc == 'GPS' and not parsed.parent_uids:
+                    fix = cot.Fix(parsed.lat, parsed.lon, 'gnss', hae=parsed.hae,
+                                  horizontal_error=None if parsed.ce is None else cot.ErrorEstimate(parsed.ce, .9),
+                                  vertical_error=None if parsed.le is None else cot.ErrorEstimate(parsed.le, .9),
+                                  phone_uid=parsed.uid)
+                    self.phone_gps[parsed.uid] = (fix, clock._presence, callsign)
+                else:
+                    self.phone_gps.pop(parsed.uid, None)
                 previous = self.position.pinned_uid
                 self.choose_controller(now, proof)
                 result = update.status
@@ -1517,6 +2004,15 @@ class Service:
                     result = update.status
                     self.peer = {'ip': address, 'mac': mac}
                     self.contact_changed |= changed or update.reappeared or result == 'accepted_manual'
+                    if result == 'accepted_manual':
+                        self.accepted_manual(now)
+                        self.anchor_manual(now, previous_gps)
+                    elif parsed.source == 'gps' and self.position._manual is not None:
+                        self.anchor_manual(now)
+                        own_gps = (self.rewrite_fix is not None and self.rewrite_fix.source == 'gnss'
+                                   and self.rewrite_fix.phone_uid is None
+                                   and now.mono < self.rewrite_deadline)
+                        self.moved_from_manual(now, proof, own_gps)
                 if update.reappeared:
                     self.retry_parked()
                     self.delivery.pop(parsed.uid, None)
@@ -1556,7 +2052,7 @@ class Service:
                         if controller is not None:
                             self.queue_notice(item, 'guest',
                                 f"{self.config.callsign} follows {controller['callsign']} for its location. "
-                                "To change it, open manet.local.", now)
+                                "To change it, open manet.local in your browser.", now)
                             item['guest_notified'] = True
                             self.commit(now)
                     return self.reject('guest marker; only controller can set location')
@@ -1569,6 +2065,9 @@ class Service:
                 update = self.position.feed_marker(parsed, now.mono, now.utc, from_ethernet=True)
                 result = update.status + ':' + update.reason
                 self.contact_changed |= update.status == 'accepted'
+                if update.status == 'accepted':
+                    self.accepted_manual(now, packet)
+                    self.anchor_manual(now)
             self.reconcile_audio()
             self.commit(now)  # A persistent controller choice precedes derived output.
             return result
@@ -1651,7 +2150,7 @@ class Service:
             self.send_error = str(exc)[:200]
             return False
 
-    def tick(self, now, proof, gps, input_status):
+    def tick(self, now, proof, gps, input_status, release_request=None):
         """Select location, persist actions and send due phone output."""
         self.choose_controller(now, proof)
         if encode(self.input_memory) != self.saved_input_memory:
@@ -1663,14 +2162,27 @@ class Service:
                          self.position._fault_epoch, self.position._retirements))
         age = now.mono - gps.observed_mono if gps.fix is not None else None
         fresh = age is not None and 0 <= age < self.position.gps_max_age_s and gps.state != 'NO_FIX'
-        if fresh:
+        if fresh or gps.receiver_present is False:
             self.unavailable_since = None
         elif self.unavailable_since is None:
             self.unavailable_since = now.mono
-        defer = (not self.phones or not fresh and now.mono - self.unavailable_since < GPS_UNAVAILABLE_DELAY_S
+        defer = (not self.phones or gps.receiver_present is False or not fresh and now.mono - self.unavailable_since < GPS_UNAVAILABLE_DELAY_S
                  and 'gps_untrusted' not in self.position._warnings)
         selected = self.position.select(now.mono, now.utc, radio_gps=gps, defer_unavailable=defer)
-        if selected.fix is not None or not self.phones:
+        if (not selected.own_gnss_selected and self.release_request(release_request, now, proof)
+                or self.moved_from_manual(now, proof, selected.own_gnss_selected)):
+            selected = replace(selected, location=None, fix=None,
+                               retire_marker_uids=tuple(self.position._retirements))
+        self.rewrite_fix = selected.fix  # Only the radio selector can authorize rewriting/4349.
+        self.rewrite_deadline = (gps.observed_mono + self.position.gps_max_age_s
+                                 if selected.own_gnss_selected else now.mono + INPUT_TTL)
+        self.phone_gps = {uid: value for uid, value in self.phone_gps.items() if now.mono < value[1]}
+        self.tak_servers = {mac: end for mac, end in self.tak_servers.items() if now.mono < end}
+        self.compare_phone_gps(now, proof, selected)
+        fallback = self.phone_gps.get(self.position.pinned_uid)
+        if selected.fix is None and fallback is not None:
+            selected = replace(selected, fix=fallback[0], position_trusted=False)
+        if self.rewrite_fix is not None or not self.phones:
             self.unavailable_since = None
         warnings = set(self.position._warnings)
         for code in sorted(warnings ^ self.logged_warnings):
@@ -1689,7 +2201,10 @@ class Service:
         if self.phones:
             self.local_actions(now)
         # A live lease suppresses beacon churn during temporary proof loss.
-        self.beacon.update(self.config, now, selected.fix, self.has_live_lease(now), self.send_beacon)
+        phone_fix = selected.fix is not None and selected.fix.source == 'gnss' and selected.fix.phone_uid is not None
+        occupied = bool(self.present_phones(now, proof)) if phone_fix else self.has_live_lease(now)
+        self.beacon.update(self.config, now, selected.fix, occupied, self.send_beacon,
+                           expires=None if not phone_fix else fallback[1])
         for uid in selected.retire_marker_uids:
             if uid not in self.retire:
                 if len(self.retire) >= MAX_RETIRE:
@@ -1702,6 +2217,7 @@ class Service:
             self.commit(now)
         present = self.present_phones(now, proof)
         ready = self.position.pinned_uid in present
+        self.held_point_output(now, proof, selected)
         self.send_attached(now, proof, selected, present)
         stamp = self.position.outbound_time(now.mono, now.utc)
         fix = selected.fix
@@ -1717,7 +2233,7 @@ class Service:
                 if self.send(cot.hidden_contact(self.config.uid, self.config.callsign, (proof.local_ip, 4242), stamp), 4242, now):
                     self.last_contact, self.contact_signature, self.contact_changed = now.mono, signature, False
             # Feed selected geometry at most once per second while present.
-            if fix is not None and (self.feed_attempt is None or now.mono - self.feed_attempt >= 1):
+            if self.rewrite_fix is not None and (self.feed_attempt is None or now.mono - self.feed_attempt >= 1):
                 self.feed_attempt = now.mono
                 packet = cot.external_position(self.config.uid, fix, stamp)
                 if packet is not None and self.send(packet, 4349, now):
@@ -1799,15 +2315,12 @@ class Service:
                     if self.send(cot.hidden_contact(self.config.uid, self.config.callsign,
                                                    (proof.local_ip, 4242), stamp), 4242, now, item):
                         delivery.update(contact=now.mono, signature=signature)
-                if selected.fix is not None and now.mono - delivery.get('feed_attempt', -math.inf) >= 1:
+                if self.rewrite_fix is not None and now.mono - delivery.get('feed_attempt', -math.inf) >= 1:
                     delivery['feed_attempt'] = now.mono
                     packet = cot.external_position(self.config.uid, selected.fix, stamp)
                     if packet is not None and self.send(packet, 4349, now, item):
                         clock.position_sent(selected.fix, now.mono, now.utc)
             warnings = {code: warning for code, warning in self.position._warnings.items() if code != 'phone_gps'}
-            # Phone GPS configuration is specific to its recipient.
-            if 'phone_gps' in clock._warnings:
-                warnings['phone_gps'] = clock._warnings['phone_gps']
             for code in list(item['warned']):
                 if code not in warnings:
                     del item['warned'][code]
@@ -1849,14 +2362,24 @@ class Service:
                 'manual_controller_uid': self.manual_uid, 'phone_limit': self.config.max_phones,
                 'phones': [dict(uid=uid, callsign=item['callsign'], ip=item['ip'], mac=item['mac'],
                                 port=item['port'], presence_deadline=item['clock']._presence,
+                                tak_server=self.tak_server(item['mac'], now),
+                                tak_server_deadline=self.tak_servers.get(item['mac'], 0),
+                                gps_disagreement_m=self.disagreements.get(uid, {}).get('distance'),
+                                gps_disagreement_deadline=self.disagreements.get(uid, {}).get('deadline', 0),
                                 controller=uid == self.position.pinned_uid)
                            for uid, item in self.present_phones(now, proof).items()],
                 'selected': None if fix is None else asdict(fix),
+                'selected_source': (None if fix is None else
+                    'phone GPS (' + self.phone_gps[fix.phone_uid][2] + ')' if fix.source == 'gnss' and fix.phone_uid else fix.source),
+                'selected_deadline': (self.phone_gps[fix.phone_uid][1] if fix is not None and
+                                      fix.source == 'gnss' and fix.phone_uid else
+                                      self.rewrite_deadline if fix is not None and fix.source == 'gnss' else None),
                 'manual_age_s': None if location is None else location.age_s,
                 'manual_observation_mono': None if location is None else location.observation_mono,
                 'manual_received_mono': None if location is None else location.received_mono,
                 'manual_observation_time': None if location is None else location.observation_time.isoformat(),
                 'manual_marker_uid': None if location is None else location.marker_uid,
+                'manual_release_id': None if location is None else self.manual_id(),
                 'manual_age_is_lower_bound': self.age_lower_bound,
                 'gps_state': 'NO_FIX' if selected is None else selected.gps_state,
                 'position_trusted': False if selected is None else selected.position_trusted,
@@ -1872,16 +2395,27 @@ class Service:
 
 class Application:
     """Skip idle application work, retaining event and safety deadline handling."""
-    def __init__(self, service, inputs, runtime):
+    def __init__(self, service, inputs, runtime, tak_update=None):
         """Track inputs, acknowledgements and the last runtime publication."""
         self.service, self.inputs, self.runtime = service, inputs, Path(runtime)
         self.last_key = self.last_audio = self.ack_stamp = None
         self.input_revision = None
         self.controller_stamp = None
+        self.release_stamp = None
+        self.tak_update, self.tak_status_key = tak_update, None
 
     def update(self, now, proof, reason):
         """Process changed inputs or due work and publish runtime snapshots."""
         service = self.service
+        release_request = None
+        path = self.runtime / 'release.json'
+        stamp = file_stamp(path)
+        if stamp is not None and stamp != self.release_stamp:
+            self.release_stamp = stamp
+            try:
+                release_request = read_json(path, 2048)
+            except (FileNotFoundError, ValueError):
+                pass
         path = self.runtime / 'controller.json'
         stamp = file_stamp(path)
         if stamp is not None and stamp != self.controller_stamp:
@@ -1921,6 +2455,8 @@ class Application:
                      and now.mono >= service.unavailable_since + GPS_UNAVAILABLE_DELAY_S
                      and 'gps_untrusted' not in service.position._warnings)
         deadline |= service.beacon.due(now)
+        deadline |= any(now.mono >= value[1] for value in service.phone_gps.values())
+        deadline |= any(now.mono >= end for end in service.tak_servers.values())
         # These timestamps preserve manual-age lower bounds and warning history
         # across reboot. A never-associated node needs no periodic checkpoint.
         checkpoint = (bool(service.phones) and
@@ -1929,7 +2465,22 @@ class Application:
         if (not service.phone_ready(now, proof) and self.last_key == key()
                 and not deadline and not checkpoint):
             return False
-        status = service.tick(now, proof, gps, input_status)
+        status = service.tick(now, proof, gps, input_status, release_request=release_request)
+        if self.tak_update is not None:
+            # Meaningful status changes create demand. Tick timestamps, lease
+            # deadlines, manual age and producer receipt times do not.
+            selected = status['selected']
+            tak_key = (tuple((p['uid'], p['ip'], p['mac'], p['callsign'], p['port'], p['controller'],
+                              p['tak_server'], p['gps_disagreement_m'])
+                             for p in status['phones']), status['manual_release_id'],
+                       None if selected is None else tuple(selected[k] for k in ('lat', 'lon', 'hae', 'source')),
+                       status['position_trusted'], status['gps_state'], status['gps_overridden'],
+                       status['path_ready'], tuple(sorted(service.banners.items())))
+            self.tak_update(service, now, request=tak_key != self.tak_status_key)
+            self.tak_status_key = tak_key
+            for peer in status['phones']:
+                peer['tak_server'] = service.tak_server(peer['mac'], now)
+                peer['tak_server_deadline'] = service.tak_servers.get(peer['mac'], 0)
         status['path_reason'] = reason
         status['idle'] = not status['phone_present']
         atomic_json(self.runtime / 'status.json', status)
@@ -2067,7 +2618,7 @@ def make_mesh_sa_socket(iface, factory=socket.socket):
         sock.setblocking(False)
         # ETH_P_ALL taps ingress before the bridge RX handler consumes it;
         # an ETH_P_IP socket bound to a bridge slave can miss that traffic.
-        # The already attached BPF still admits only the one IPv4 UDP group.
+        # The locked BPF admits only mesh SA. TAK TCP detection stays in nftables.
         sock.bind((iface, 3))
         return sock
     except BaseException:
@@ -2111,6 +2662,21 @@ def mesh_sa_frame(frame):
     return ipv4(frame[26:30]), frame[6:12].hex(':'), udp[8:]
 
 
+def replace_mesh_payload(frame, packet):
+    """Preserve Ethernet/IP/UDP identity, updating lengths and checksums only."""
+    header = (frame[14] & 15) * 4
+    result = bytearray(frame[:14 + header + 8] + packet)
+    result[16:18] = struct.pack('!H', header + 8 + len(packet))
+    result[24:26] = b'\0\0'
+    result[24:26] = struct.pack('!H', mesh_checksum(bytes(result[14:14 + header])))
+    udp = 14 + header
+    result[udp + 4:udp + 6] = struct.pack('!H', 8 + len(packet))
+    result[udp + 6:udp + 8] = b'\0\0'
+    pseudo = bytes(result[26:34]) + b'\0\x11' + bytes(result[udp + 4:udp + 6])
+    result[udp + 6:udp + 8] = struct.pack('!H', mesh_checksum(pseudo + bytes(result[udp:])) or 0xffff)
+    return bytes(result)
+
+
 class Network:
     """Provide nonblocking IPv4 sockets with injectable factory/readiness."""
     def __init__(self, factory=socket.socket, verify=None):
@@ -2125,7 +2691,16 @@ class Network:
         self.datagram_peers = {}
         self.mesh_sockets = {}  # iface -> (role/lifetime identity, socket)
         self.mesh_peers = set()
+        self.mesh_pending = {}  # One admitted SA frame per EUD port awaiting TAK membership.
         self.budget = Budget(0)
+        self.events = None
+        self.rewrite_members = set()
+        self.rewrite_at = None
+        self.rewrite_retiring = {}
+        self.tak_ready = False
+        self.tak_demand = False
+        self.raw_sender = self.raw_path = None
+        self.rewrite_suspended_until = 0
 
     def close_stream(self, sock):
         """Forget and close one TCP connection."""
@@ -2134,11 +2709,96 @@ class Network:
 
     def close(self):
         """Close all transport sockets and discard admitted network paths."""
+        for iface in list(self.mesh_pending):
+            self.flush_mesh_pending(iface)
         self.close_unicast()
         self.close_beacon()
         for _, sock in self.mesh_sockets.values():
             sock.close()
         self.mesh_sockets.clear()
+        # ExecStopPost removes the table too. A crash or failed flush still
+        # releases every element in three seconds, independently of userspace.
+        if self.rewrite_members and self.events is not None:
+            try:
+                self.events.rewrite_members(set())
+            except OSError:
+                pass
+        self.rewrite_members.clear()
+        self.rewrite_retiring.clear()
+        self.tak_ready = False
+        if self.raw_sender is not None:
+            self.raw_sender.close()
+        self.raw_sender = self.raw_path = None
+
+    def update_tak(self, service, now, *, request=False):
+        """Share demand-driven kernel membership with rewrite selection and status."""
+        self.tak_ready = False
+        if self.events is None:
+            return
+        if not service.has_live_lease(now) and not self.rewrite_members and not self.mesh_pending:
+            return
+        members = self.events.tak_members(now.mono)
+        if members is not None:
+            service.tak_servers = dict(members)
+            self.tak_ready = True
+            self.tak_demand = False
+        else:
+            self.tak_demand |= request or bool(self.mesh_pending)
+        if self.events.tak_pending is not None or self.tak_demand:
+            self.events.read_tak(now.mono)
+
+    def refresh_rewrite(self, service, now):
+        """Renew admitted peers on the existing cycle only with a radio fix."""
+        if self.events is None:
+            return
+        self.update_tak(service, now)
+        if self.events.tak_pending is not None:
+            return  # Let the multipart read finish before changing generation.
+        proof = self.proof
+        members = set()
+        if (proof is not None and proof.mesh_path and service.rewrite_fix is not None
+                and now.mono < service.rewrite_deadline and now.mono >= self.rewrite_suspended_until):
+            for item in service.present_phones(now, proof).values():
+                if service.tak_server(item['mac'], now):
+                    continue
+                iface = proof.interfaces.get(item['ip'])
+                key = iface, item['ip'], item['mac']
+                if (iface in self.mesh_sockets and proof.local_ports.get(iface) == self.mesh_sockets[iface][0]
+                        and (self.tak_ready or key in self.rewrite_members)):
+                    # Existing leases remain safe: the native TAK rule exempts
+                    # members immediately. Every replacement needs a fresh read.
+                    members.add(key)
+        if members and self.raw_path != proof.mesh_path:
+            if self.raw_sender is not None:
+                self.raw_sender.close()
+            self.raw_sender = self.factory(socket.AF_PACKET, socket.SOCK_RAW, 0)
+            self.raw_sender.setblocking(False)
+            self.raw_sender.bind(('bat0', 0))  # Protocol zero: output only, no tap/join.
+            self.raw_path = proof.mesh_path
+        if (members != self.rewrite_members or members and
+                (self.rewrite_at is None or now.mono - self.rewrite_at >= 1)):
+            self.events.rewrite_members(members)
+            # Preserve queued frames caught by the old lease during removal.
+            # Native forwarding may produce an identical duplicate in this window.
+            for key in self.rewrite_members - members:
+                self.rewrite_retiring[key] = now.mono + REWRITE_TIMEOUT_S
+            self.rewrite_retiring = {key: end for key, end in self.rewrite_retiring.items()
+                                     if key not in members}
+            if len(self.rewrite_retiring) > MAX_PHONE_LIMIT * 4:
+                raise GuardFailure('mesh rewrite retirement queue saturated')
+            self.rewrite_members, self.rewrite_at = members, now.mono
+
+    def relay_mesh_frame(self, original, packet=None):
+        """Send only on bat0, falling back to original bytes on rewrite failure."""
+        if self.raw_sender is None:
+            raise OSError('rewrite output unavailable')
+        rewritten = original if packet is None else replace_mesh_payload(original, packet)
+        try:
+            if self.raw_sender.sendto(rewritten, ('bat0', 0)) != len(rewritten):
+                raise OSError('short raw mesh send')
+        except OSError:
+            if rewritten == original or self.raw_sender.sendto(original, ('bat0', 0)) != len(original):
+                raise OSError('raw mesh forwarding failed') from None
 
     def close_beacon(self):
         """Forget a multicast socket whose verified bridge path changed."""
@@ -2164,6 +2824,7 @@ class Network:
         """Apply changed local role/link identities without a lifecycle timer."""
         for iface, (identity, sock) in list(self.mesh_sockets.items()):
             if paths.get(iface) != identity:
+                self.flush_mesh_pending(iface)
                 sock.close()
                 del self.mesh_sockets[iface]
                 self.mesh_peers = {key for key in self.mesh_peers if key[0] != iface}
@@ -2283,7 +2944,32 @@ class Network:
     def readers(self):
         """Return listeners and admitted streams for the select loop."""
         return (([self.listener, self.udp] if self.listener is not None else []) + list(self.streams)
-                + [sock for _, sock in self.mesh_sockets.values()])
+                + [sock for iface, (_, sock) in self.mesh_sockets.items() if iface not in self.mesh_pending])
+
+    def flush_mesh_pending(self, iface):
+        """Best-effort original forwarding when a pending frame loses its path."""
+        pending = self.mesh_pending.pop(iface, None)
+        if pending is not None:
+            try:
+                self.relay_mesh_frame(pending[0])
+            except OSError:
+                pass  # Teardown still opens native forwarding via cleanup/timeout.
+
+    def mesh_replacement(self, data, iface, now, service):
+        """Recheck authority after a bounded asynchronous kernel set read."""
+        address, mac, packet = mesh_sa_frame(data)
+        key = iface, address, mac
+        proof = self.proof
+        if (proof is not None and iface in self.mesh_sockets
+                and proof.peer(address) == mac and proof.interfaces.get(address) == iface
+                and proof.local_ports.get(iface) == self.mesh_sockets[iface][0]
+                and proof.mesh_path == self.raw_path and key in self.rewrite_members
+                and self.tak_ready and not service.tak_server(mac, now)
+                and now.mono >= self.rewrite_suspended_until
+                and service.rewrite_fix is not None and now.mono < service.rewrite_deadline):
+            source = cot.EXTERNAL_SOURCE_PREFIX + (service.config.beacon_name or service.config.callsign)
+            rewritten = tak.rewrite_mesh_sa(packet, service.rewrite_fix, source)
+            return rewritten if rewritten != packet else None
 
     def receive_mesh_sa(self, sock, iface, now, service):
         """Prove physical ingress before invoking either SA payload decoder."""
@@ -2291,7 +2977,41 @@ class Network:
         if (flags & socket.MSG_TRUNC or len(endpoint) < 5 or endpoint[0] != iface
                 or endpoint[1] != 0x0800 or endpoint[2] >= 4 or endpoint[3] != 1):
             return
+        if len(data) < 34:
+            return
+        # SA capture loss still warrants opening native forwarding, but cannot
+        # lose TAK detection now that TCP updates never enter this socket.
+        try:
+            stats = sock.getsockopt(263, 6, 8)
+            if len(stats) != 8:
+                raise OSError('invalid packet statistics')
+            _, dropped = struct.unpack('=II', stats)
+        except OSError as exc:
+            raise GuardFailure('mesh rewrite capture health unavailable') from exc
+        if dropped:
+            self.rewrite_suspended_until = max(self.rewrite_suspended_until, now.mono + REWRITE_TIMEOUT_S)
+        key = (iface, socket.inet_ntoa(data[26:30]), data[6:12].hex(':'))
+        blocked = key in self.rewrite_members or key in self.rewrite_retiring
+        replacement = None
+        try:
+            if dropped:
+                return
+            replacement = self.process_mesh_sa(data, iface, now, service, blocked)
+        finally:
+            if blocked and isinstance(replacement, tuple) and replacement[0] is WAIT_TAK:
+                self.mesh_pending[iface] = (data, self.proof.generation, replacement[1])
+            elif blocked:
+                try:
+                    self.relay_mesh_frame(data, replacement)
+                except OSError as exc:
+                    # Stop refreshing, including when the original also cannot
+                    # be sent. The unit cleanup/three-second timeout opens SA.
+                    raise GuardFailure('mesh rewrite forwarding failed') from exc
+
+    def process_mesh_sa(self, data, iface, now, service, blocked):
+        """Admit presence and return a replacement only for an active member."""
         if not self.budget.take(now.mono, size=len(data), events=1):
+            self.rewrite_suspended_until = max(self.rewrite_suspended_until, now.mono + REWRITE_TIMEOUT_S)
             return
         address, mac, packet = mesh_sa_frame(data)
         key = (iface, address, mac)
@@ -2321,7 +3041,13 @@ class Network:
         if endpoint is None or endpoint[1] != address or not 1 <= int(endpoint[2]) <= 65535:
             service.reject('mesh SA endpoint does not match proven source')
             return
-        service.ingest(parsed, address, proof, now)
+        accepted = service.ingest(parsed, address, proof, now)
+        if (accepted in ('accepted_presence', 'accepted_manual') and blocked and key in self.rewrite_members
+                and service.rewrite_fix is not None and now.mono < service.rewrite_deadline):
+            self.update_tak(service, now, request=True)
+            if self.events is not None and not self.tak_ready:
+                return WAIT_TAK, service.phones[parsed.uid]['clock']._presence
+            return self.mesh_replacement(data, iface, now, service)
 
     def admit(self, address):
         """Every new TCP stream / UDP peer gets a fresh, stable snapshot."""
@@ -2336,6 +3062,24 @@ class Network:
 
     def handle(self, readable, now, service):
         """Expire streams and dispatch ready input within shared budgets."""
+        for iface, (data, generation, deadline) in list(self.mesh_pending.items()):
+            if (not self.tak_ready and now.mono < deadline
+                    and self.proof is not None and self.proof.generation == generation):
+                continue
+            self.mesh_pending.pop(iface)
+            replacement = None
+            try:
+                if now.mono < deadline and self.proof is not None and self.proof.generation == generation:
+                    replacement = self.mesh_replacement(data, iface, now, service)
+                self.relay_mesh_frame(data, replacement)
+            except (OSError, ValueError) as exc:
+                raise GuardFailure('pending mesh forwarding failed') from exc
+        # A busy queue may still contain SA intercepted before set removal.
+        # Forget retiring keys only after lease expiry AND a drained queue.
+        for key, end in list(self.rewrite_retiring.items()):
+            current = self.mesh_sockets.get(key[0])
+            if now.mono >= end and key[0] not in self.mesh_pending and (current is None or current[1] not in readable):
+                del self.rewrite_retiring[key]
         for sock, stream in list(self.streams.items()):
             if stream.expired(now.mono):
                 self.close_stream(sock)
@@ -2443,7 +3187,7 @@ def main(argv=None):
         clock, network = Clock(), Network()
         service = Service(config, boot_id, Store(state_dir / 'state.json'), network, clock.now())
         inputs, guard = Inputs(boot_id), LinuxGuard(config)
-        application = Application(service, inputs, runtime)
+        application = Application(service, inputs, runtime, tak_update=network.update_tak)
         network.verify = guard.current
         flags = {'stop': False, 'reload': False}
         signal.signal(signal.SIGTERM, lambda *_: flags.update(stop=True))
@@ -2454,6 +3198,7 @@ def main(argv=None):
         try:
             # Subscribe before the first proof to catch intervening changes.
             guard.start()
+            network.events = guard.events
             while not flags['stop']:
                 if flags['reload']:
                     config = Config.load(args.config)
@@ -2495,12 +3240,15 @@ def main(argv=None):
                         last_reason = guard.reason
                     now = clock.now()
                     next_cycle = now.mono + .2  # bound expensive path readbacks under a flood
+                    network.update_tak(service, now)
                     network.handle(ready, now, service)
                     proof = network.proof  # admission may have revoked it
                     # Admission may launch bounded readbacks. A producer can
                     # publish during them, so assess inputs against fresh clocks.
                     now = clock.now()
+                    network.update_tak(service, now)
                     application.update(now, proof, guard.reason)
+                    network.refresh_rewrite(service, now)
                     if now.mono >= next_tick:
                         next_tick = now.mono + 1  # incoming traffic never postpones the timer
         finally:

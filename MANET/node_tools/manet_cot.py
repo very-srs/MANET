@@ -285,7 +285,7 @@ def hidden_contact(uid, callsign, contact_endpoint, now, stale_s=CONTACT_STALE_S
     return _serialize(event)
 
 
-def radio_beacon(radio_uid, callsign, fix, now):
+def radio_beacon(radio_uid, callsign, fix, now, *, stale_s=BEACON_STALE_S):
     """Advertise an unattended radio without a person role or Send endpoint.
 
     Public ATAK Icon2525cIconAdapter uses type symbology without team metadata.
@@ -296,15 +296,16 @@ def radio_beacon(radio_uid, callsign, fix, now):
     if not _usable(fix) or (fix.lat, fix.lon) == (0, 0):
         return None
     event = _event(_text(radio_uid, 'radio_uid') + '-beacon', BEACON_TYPE,
-                   _HOW[fix.source], now, BEACON_STALE_S)
+                   _HOW[fix.source], now, stale_s)
     # A held manual fix's private phone identity is not multicast metadata.
     public = Fix(fix.lat, fix.lon, fix.source, hae=fix.hae,
                  horizontal_error=fix.horizontal_error, vertical_error=fix.vertical_error)
     remarks = _point(event, public)
     detail = ET.SubElement(event, 'detail')
     ET.SubElement(detail, 'contact', callsign=_text(callsign, 'callsign'))
-    ET.SubElement(detail, 'precisionlocation', geopointsrc=EXTERNAL_SOURCE_PREFIX + fix.source,
-                  altsrc=EXTERNAL_SOURCE_PREFIX + fix.source)
+    source = 'phone-gps' if fix.source == 'gnss' and fix.phone_uid else fix.source
+    ET.SubElement(detail, 'precisionlocation', geopointsrc=EXTERNAL_SOURCE_PREFIX + source,
+                  altsrc=EXTERNAL_SOURCE_PREFIX + source)
     ET.SubElement(detail, 'remarks').text = 'Unattended MANET radio. ' + remarks
     return _serialize(event)
 

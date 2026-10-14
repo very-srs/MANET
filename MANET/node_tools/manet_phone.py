@@ -25,6 +25,7 @@ FUTURE_TOLERANCE_S = 5.0
 MAX_PENDING_RETIREMENTS = 128
 RESTORE_MARGIN_M = 10.0
 WARNING_READ_TIMEOUT_S = 60.0
+MIN_SPOKEN_REMINDER_S = 30.0
 PHONE_CLOCK_STEP_TOLERANCE_S = 5.0
 PHONE_SA_HISTORY = 256
 _GPS_STATES = {"NO_FIX", "UNCHECKED", "RANGE_CONSISTENT",
@@ -92,6 +93,8 @@ class RadioGPS:
     fault_epoch: int = 0
     # Fresh ranging/GPS agreement, even while the monitor remains quarantined.
     ranges_agree: bool = False
+    # None means unknown/unavailable reader, False is a fresh explicit absence.
+    receiver_present: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -353,8 +356,17 @@ class PhonePosition:
         self._manual_retired = True
         return True
 
+    def release_manual(self):
+        """Release held geometry after reserving marker retirement, preserving trust."""
+        if self._manual is None or not self._retire_confirming_marker():
+            return False
+        self._manual = None
+        self._manual_retired = False
+        self._checked_manual_epoch = None
+        return True
+
     def feed(self, sa, receipt_mono, receipt_utc, *, from_ethernet, allow_location=True):
-        """Accept presence, diagnose phone GPS, and adopt drags/USER selections."""
+        """Accept presence and adopt eligible drags/USER selections."""
         if not isinstance(sa, PhoneSA):
             raise ValueError("sa must be a parsed PhoneSA")
         if type(from_ethernet) is not bool:
@@ -409,12 +421,8 @@ class PhonePosition:
         """Apply gestures only after the caller has admitted this phone's SA."""
         age = max(0.0, (phone_time - sa.time).total_seconds())
         feeding = self._feeding(mono)
-        if feeding and sa.geopointsrc == "GPS" and sa.source == "gps":
-            self._warn("phone_gps", "Phone location services are on. Turn Android location "
-                       "services off so ATAK uses the radio's position.",
-                       "Turn phone location services off", initial_audio=False, web=True)
-        elif sa.source == "external" and (sa.geopointsrc or "").startswith(EXTERNAL_SOURCE_PREFIX):
-            self._clear_warning("phone_gps", web=True)
+        # Mesh position rewriting makes internal GPS a supported configuration.
+        self._clear_warning("phone_gps", web=True)
         status = "accepted_presence"
         user_selected = sa.geopointsrc == "USER"
         dragged = sa.how == "h-e" and not sa.geopointsrc and not sa.parent_uids
@@ -612,7 +620,7 @@ class PhonePosition:
             warning.message_id = message_id
             warning.sent_mono = mono
             if not warning.acknowledged:
-                warning.deadline = mono + self.warning_read_timeout_s
+                warning.deadline = mono + max(MIN_SPOKEN_REMINDER_S, self.warning_read_timeout_s)
         del self._events[event.code, event.kind]
         return True
 
@@ -681,7 +689,7 @@ class PhonePosition:
             if not warning.acknowledged and warning.deadline is not None and mono >= warning.deadline:
                 if (code, "audio") not in self._events:
                     self._emit(code, "audio", warning.audio)
-                warning.deadline = mono + self.warning_read_timeout_s
+                warning.deadline = mono + max(MIN_SPOKEN_REMINDER_S, self.warning_read_timeout_s)
 
     def select(self, now_mono, now_utc, *, radio_gps=None, defer_unavailable=False):
         """Apply freshness, distrust, user conflict/confirmation and reminders.
@@ -776,7 +784,8 @@ class PhonePosition:
             self._clear_warning("confirm_position")
         # The service debounces receiver availability, never evidence of
         # distrust. No stale fix becomes usable during that warning delay.
-        if (self._distrusted or chosen is None and not defer_unavailable) and not self._overridden:
+        absent = radio_gps is not None and radio_gps.receiver_present is False
+        if not absent and (self._distrusted or chosen is None and not defer_unavailable) and not self._overridden:
             self._warn("gps_untrusted", "Radio GPS is unavailable or untrusted. "
                        "If ATAK shows NO GPS, tap it to select your best known location "
                        "or drag your own dot; "
