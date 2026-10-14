@@ -1,5 +1,7 @@
 """Packet-loss, timeout, activation and recovery regressions for ACS."""
 from copy import deepcopy
+from contextlib import redirect_stdout
+from io import StringIO
 import json
 import os
 import time
@@ -203,6 +205,89 @@ class RuntimeTests(AcsHarness):
         self.assertFalse(self.runner.status(plan['activate_at'] + 1)['ready'])
         self.assertEqual(self.runner.state['hold_until'], self.elapsed + p.RECOVERY_SECONDS)
         self.assertIn('wpa_cli -i wlan0 reconfigure', (self.root / 'commands').read_text())
+
+    def test_preference_streak_survives_ticks_and_same_boot_reload(self):
+        """Normal clock setup and idle ticks preserve consecutive rounds."""
+        self.reports([[{'channel': 2437, 'noise_floor': -95, 'busy_pct': 45},
+                       {'channel': 2462, 'noise_floor': -95, 'busy_pct': 10}]],
+                     [OWN])
+        # Use canonical peer identities so the registry only needs RF data.
+        (self.root / 'peers').write_text(json.dumps([
+            {'orig_address': PEER}, {'orig_address': THIRD}]))
+        for offset in range(3):
+            when = self.now + offset * p.ROUND_SECONDS
+            self.runner.request_path.write_text(json.dumps({
+                'round': when // p.ROUND_SECONDS}))
+            self.tick(when)
+            plan = self.runner.state['protocol']['plan']
+            self.assertEqual(plan['channels'],
+                             {'2.4': 2437 if offset < 2 else 2462})
+            self.runner = runtime.Runtime()
+            self.assertEqual(self.runner.state['challenge']['2.4']['count'],
+                             offset + 1)
+            # Peers can still advertise last round's readiness at the boundary.
+            self.tick(when + p.ROUND_SECONDS - 45)
+            self.assertEqual(self.runner.state['challenge']['2.4']['count'],
+                             offset + 1)
+            # No ready coordinator between the previous round and its request.
+            self.records[PEER]['status']['ready'] = False
+            self.records[THIRD]['status']['ready'] = False
+            self.tick(when + p.ROUND_SECONDS - 44)
+            self.assertEqual(self.runner.state['challenge']['2.4']['count'],
+                             offset + 1)
+            self.records[PEER]['status']['ready'] = True
+            self.records[THIRD]['status']['ready'] = True
+
+    def test_coordinator_handoff_discards_local_streak_without_rescoring(self):
+        """A returning coordinator cannot resume its previous tenure."""
+        self.runner.state.update(clock_boot=self.runner.boot, challenge={
+            '2.4': {'incumbent': 2437, 'round': self.now // 180, 'count': 2}})
+        self.runner.request_path.unlink()
+        with patch.object(self.runner, 'score') as score:
+            self.tick(self.now)
+            score.assert_not_called()
+        self.assertNotIn('challenge', self.runner.state)
+        self.runner = runtime.Runtime()
+        self.assertNotIn('challenge', self.runner.state)
+
+    def test_new_clock_session_discards_streak_before_scoring(self):
+        """A boot or missing clock session cannot carry old preference wins."""
+        self.reports([[{'channel': 2437, 'noise_floor': -95, 'busy_pct': 45},
+                       {'channel': 2462, 'noise_floor': -95, 'busy_pct': 10}]],
+                     [OWN])
+        (self.root / 'peers').write_text('[]')
+        self.assertNotIn('challenge', runtime.LOCAL_TIMERS)
+        for clock_boot in (None, 'f' * 32):
+            with self.subTest(clock_boot=clock_boot):
+                self.runner.busy_path.unlink(missing_ok=True)
+                self.runner.state = {
+                    'clock_boot': clock_boot, 'timer_boot': clock_boot,
+                    'challenge': {'2.4': {'incumbent': 2437, 'count': 2,
+                                         'round': self.now // 180 - 1}}}
+                self.runner.save()
+                self.runner = runtime.Runtime()
+                self.tick(self.now, {})
+                self.assertEqual(
+                    self.runner.state['protocol']['plan']['channels'],
+                    {'2.4': 2437})
+                self.assertEqual(
+                    self.runner.state['challenge']['2.4']['count'], 1)
+
+    def test_apply_logs_only_changes_and_always_refreshes_output(self):
+        """Repeated plans stay quiet while still updating shell consumers."""
+        for frequency, limp, changed in ((2437, True, False),
+                                          (2462, False, True),
+                                          (2462, True, False)):
+            journal = StringIO()
+            with redirect_stdout(journal):
+                self.runner.apply({'2.4': frequency}, limp)
+            expected = ('ACS applied channels '
+                        + json.dumps({'2.4': frequency}) + '\n'
+                        if changed else '')
+            self.assertEqual(journal.getvalue(), expected)
+            self.assertEqual((self.root / 'election').read_text(),
+                             f'WINNER_2_4={frequency}\nWINNER_5_0=\n'
+                             f'LIMP_MODE={str(limp).lower()}\n')
 
     def test_failed_durable_write_cannot_publish_vote_on_retry(self):
         with patch.object(runtime, 'private_json_write', side_effect=OSError('disk full')):

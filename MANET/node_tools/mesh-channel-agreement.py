@@ -29,6 +29,9 @@ FRESH_SECONDS = 45
 PROBE_LIFETIME = 60  # Request/reply replication plus a 15-second manager wakeup.
 # Minimum monotonic seconds between new clockless recovery probes.
 PROBE_INTERVAL = 60
+# CHANNEL_BIAS_SCORE in channel-election.sh supplies a ten-point margin.
+# Preference moves also need this many consecutive coordinator rounds.
+CHALLENGE_ROUNDS = 3
 # Pass spacing in seconds. Default passes match the 5-second publish
 # cadence. One-second passes, as in a fixed one-second loop, cover the
 # proposal window and a live plan from GUARD_SECONDS before its vote deadline
@@ -468,6 +471,7 @@ class Runtime:
         """Score the connected view and return per-band MHz plus limp mode."""
         # One coordinator freezes the score result. Receivers never re-score it.
         env = dict(os.environ)
+        incumbents_by_band = {}
         # Registry RF observations include every reachable node, regardless of
         # which radio carries Alfred. Exclude cached records of departed groups.
         env['ACS_MEMBERS'] = ' '.join('NODE_' + mac.replace(':', '') for mac in view)
@@ -477,22 +481,52 @@ class Runtime:
             supported = sorted({f for s in view.values() if s and s['ready'] for f in s['allowed'].get(band, [])})
             incumbents = Counter(s['current'][band] for s in view.values() if s and band in s['current'])
             incumbent = min(incumbents, key=lambda f: (-incumbents[f], f)) if incumbents else ''
+            incumbents_by_band[band] = incumbent
             env['ACS_CHANNELS_' + suffix] = ' '.join(map(str, supported))
             env['ACS_CURRENT_' + suffix] = str(incumbent)
         fd, path = tempfile.mkstemp(dir=self.run_dir, prefix='.acs-score-')
         os.close(fd)
         try:
-            # --score writes WINNER_2_4, WINNER_5_0 and LIMP_MODE assignments
+            # --score writes WINNER_*, URGENT_* and LIMP_MODE assignments
             # to this private output path. Bound the scoring process to 15 s.
             env['OUTPUT_FILE'] = path
             subprocess.run(['bash', str(TOOLS / 'channel-election.sh'), '--score'], env=env,
                            check=True, capture_output=True, text=True, timeout=15)
             values = dict(line.split('=', 1) for line in Path(path).read_text().splitlines())
             channels = {}
+            round_id = int(time.time()) // protocol.ROUND_SECONDS
+            challenge = self.state.setdefault('challenge', {})
             for band, suffix in [('2.4', '2_4'), ('5', '5_0')]:
                 value = values.get('WINNER_' + suffix, '')
                 if value and int(value) in protocol.CHANNELS[band]:
-                    channels[band] = int(value)
+                    winner = int(value)
+                    incumbent = incumbents_by_band[band]
+                    if (winner == incumbent or not incumbent
+                            or values.get('URGENT_' + suffix) == 'true'):
+                        challenge.pop(band, None)
+                    else:
+                        previous = challenge.get(band, {})
+                        last_round = previous.get('round')
+                        count = 1
+                        if previous.get('incumbent') == incumbent:
+                            if last_round == round_id:
+                                count = previous['count']
+                            elif last_round == round_id - 1:
+                                count = previous['count'] + 1
+                        # The challenger may change between rounds. Count any
+                        # preference win against this same incumbent.
+                        challenge[band] = dict(incumbent=incumbent,
+                                               round=round_id, count=count)
+                        if count < CHALLENGE_ROUNDS:
+                            if last_round != round_id:
+                                print(f'ACS holding {band} GHz {incumbent}: '
+                                      f'{winner} preferred '
+                                      f'({count}/{CHALLENGE_ROUNDS})',
+                                      flush=True)
+                            winner = incumbent
+                    channels[band] = winner
+                else:
+                    challenge.pop(band, None)
             if not channels:
                 return None
             return channels, values.get('LIMP_MODE') == 'true'
@@ -582,7 +616,7 @@ class Runtime:
         if changes:
             # Retuning clears bitrate restrictions, invalidating this state.
             (self.run_dir / 'mesh_limp_mode.state').unlink(missing_ok=True)
-        print('ACS applied channels ' + json.dumps(channels), flush=True)
+            print('ACS applied channels ' + json.dumps(channels), flush=True)
 
     def discovery_step(self, now, local, connected):
         """Move an isolated searcher to its permitted lobby slot when due."""
@@ -759,8 +793,14 @@ class Runtime:
                 view[self.own] = local
             saved = self.state.get('protocol', {})
             proposal = None
-            if (view and protocol.coordinator(view) == self.own
-                    and protocol.PROPOSE_FROM <= now % protocol.ROUND_SECONDS <= protocol.PROPOSE_UNTIL
+            leader = protocol.coordinator(view) if view else None
+            proposing = (protocol.PROPOSE_FROM <= now % protocol.ROUND_SECONDS
+                         <= protocol.PROPOSE_UNTIL)
+            if proposing and leader and leader != self.own:
+                # Another coordinator starts its own streak. Readiness resets
+                # between rounds, so only count leadership during proposals.
+                self.state.pop('challenge', None)
+            if (view and leader == self.own and proposing
                     and (saved.get('round', -1) < now // protocol.ROUND_SECONDS or saved.get('phase') == 'idle')):
                 scored = self.score(view)
                 if scored:

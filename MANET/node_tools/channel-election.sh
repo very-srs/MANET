@@ -215,13 +215,24 @@ log() {
         local band_channels="$1"
         local current_channel="$2"
         local band_name="$3"
-        # The fourth argument names the caller's output variable. Poor scores
-        # also set LIMP_MODE_NEEDED for the final proposal.
+        # The last two arguments name the winner and urgency outputs.
+        # Poor scores also set LIMP_MODE_NEEDED for the final proposal.
         local -n _winner=$4
+        local -n _urgent=$5
         local lines chan status rest best_ok best_any
         local pick_chan pick_eff pick_raw
 
         lines=$(score_band "$band_channels" "$current_channel")
+
+        # Only a measured, qualified incumbent at or below the limp threshold
+        # can wait through the coordinator's preference hold-down.
+        _urgent=true
+        if awk -v cur="$current_channel" -v t="$LIMP_MODE_SCORE_THRESHOLD" '
+            $1 == cur && $2 == "ok" && $3 <= t { keep = 1 }
+            END { exit !keep }
+        ' <<< "$lines"; then
+            _urgent=false
+        fi
 
         while read -r chan status rest; do
             [ -z "$chan" ] && continue
@@ -274,13 +285,17 @@ log() {
     log "Current channels: 2.4G=${CURRENT_2_4:-none}, 5.0G=${CURRENT_5_0:-none}"
 
     # --- Run Elections ---
-    find_best_channel "$CHANNELS_2_4" "$CURRENT_2_4" "2.4GHz" WINNER_2_4
-    find_best_channel "$CHANNELS_5_0" "$CURRENT_5_0" "5.0GHz" WINNER_5_0
+    find_best_channel "$CHANNELS_2_4" "$CURRENT_2_4" "2.4GHz" \
+        WINNER_2_4 URGENT_2_4
+    find_best_channel "$CHANNELS_5_0" "$CURRENT_5_0" "5.0GHz" \
+        WINNER_5_0 URGENT_5_0
 
     # --- Write Output File (for node-manager) ---
     cat > "$OUTPUT_FILE" <<- EOF
 		WINNER_2_4=$WINNER_2_4
 		WINNER_5_0=$WINNER_5_0
+		URGENT_2_4=$URGENT_2_4
+		URGENT_5_0=$URGENT_5_0
 		LIMP_MODE=$LIMP_MODE_NEEDED
 	EOF
 

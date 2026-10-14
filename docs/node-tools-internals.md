@@ -1560,8 +1560,39 @@ two sustained congested scans replace a quiet median. History lives in the
 manager's existing `CACHED_SCAN_REPORT_JSON`; the encoder sends only the public
 fields. Restart, expired history or an interface reassignment starts a new
 warmup. The median across reporting nodes and the ten-point incumbent bias
-still apply. Scoring has no local history, so identical registry snapshots and
-shared incumbents produce identical plans.
+still apply. The shell scorer stays stateless, so identical registry snapshots
+and shared incumbents produce identical score results.
+
+The coordinator adds a three-round hold-down for preference moves. Measured
+load swings can still reverse the ranking of two similarly busy channels after
+the occupancy median and ten-point bias. In one replay, the bias alone allowed
+six moves, two consecutive wins allowed two, and three allowed none. Increasing
+the margin relative to the incumbent score did not reduce those moves.
+
+`Runtime.score()` keeps a per-band `challenge` entry in `agreement.json`, with
+the incumbent, last counted round and count. Each round is `now // 180`.
+Any winner that beats the same incumbent counts, even if successive rounds
+prefer different challengers on 5 GHz. A repeated score in the same round
+counts once. A skipped round or changed incumbent restarts the count at one.
+An incumbent win clears it. Until the third consecutive win, the coordinator
+substitutes the incumbent and logs `ACS holding <band> GHz ... (1/3)` or `(2/3)`
+once per held band per round. The third round proposes its current winner.
+
+The scorer also emits `URGENT_2_4` and `URGENT_5_0`. An incumbent is urgent if
+it is disqualified, lacks measurements, is outside the candidate list, is
+absent, or has a raw score above `LIMP_MODE_SCORE_THRESHOLD` (60). An urgent
+result bypasses the preference hold-down and clears that band's streak.
+Missing data for every candidate still holds the channel because there is no
+measured replacement. The scorer's `LIMP_MODE` passes through unchanged.
+
+The streak survives service restarts within one boot. A new coordinator starts
+without another node's history. Observing another coordinator during the
+proposal window clears the local streak. A new `clock_boot` session discards
+it before scoring, while ordinary ticks preserve it. It is not a local deadline
+in `LOCAL_TIMERS`.
+Receivers still ACK the frozen proposal without re-scoring. Applying unchanged
+channels refreshes the shell election output without printing `ACS applied
+channels ...`. That message accompanies actual changes only.
 
 The score was `avg_noise + total_bss * 0.1` until 0.548, which decided every
 election on `survey dump`'s noise field. A BSS was worth 0.1 dB, so ten

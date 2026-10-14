@@ -180,14 +180,22 @@ else:
             out.write(node(OWN) + node(PEER, aliases=RADIO) + node(THIRD))
         self.runner.request_path.write_text(json.dumps({'round': self.now // 180}))
         records[PEER]['status']['ready'] = True
-        self.tick(self.now, records)
+        # Shared RF prefers 2462, but the healthy incumbent needs three rounds.
+        for offset in range(3):
+            when = self.now + offset * p.ROUND_SECONDS
+            self.runner.request_path.write_text(json.dumps({
+                'round': when // p.ROUND_SECONDS}))
+            self.tick(when, records)
+            self.assertEqual(self.runner.state['protocol']['plan']['channels'],
+                             {'2.4': 2437 if offset < 2 else 2462})
         plan = self.runner.state['protocol']['plan']
         self.assertEqual(set(plan['participants']), {OWN, PEER})
         self.assertEqual(plan['channels'], {'2.4': 2462})
-        peer_state, peer_out, _ = p.advance({}, PEER, self.now + 1,
-            {OWN: self.runner.status(self.now), PEER: records[PEER]['status']}, {OWN: {'proposal': plan}})
+        peer_state, peer_out, _ = p.advance({}, PEER, when + 1,
+            {OWN: self.runner.status(when), PEER: records[PEER]['status']},
+            {OWN: {'proposal': plan}})
         records[PEER]['protocol'] = peer_out
-        self.tick(self.now + 5, records)
+        self.tick(when + 5, records)
         self.tick(plan['deadline'], records)
         commit = self.runner.state['protocol']['commit']
         peer_state, _, _ = p.advance(peer_state, PEER, plan['deadline'] + 1, None,
