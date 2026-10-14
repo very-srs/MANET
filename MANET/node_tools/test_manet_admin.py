@@ -436,7 +436,7 @@ class WebBoundaryTests(unittest.TestCase):
             handler = self.handler('/')
             handler.headers['Host'] = 'old-dashboard.local'
             handler.do_GET()
-            handler.send_html.assert_called_once_with('public status')
+            handler.send_html.assert_called_once_with(status.render_status_page)
             for method in ('GET', 'POST', 'DELETE'):
                 with self.subTest(method=method):
                     handler = self.handler('/manage/')
@@ -454,7 +454,7 @@ class WebBoundaryTests(unittest.TestCase):
                 patch.object(status, 'broadcast_config_package') as broadcast:
             handler = self.handler('/')
             handler.do_GET()
-            handler.send_html.assert_called_once_with('public status')
+            handler.send_html.assert_called_once_with(status.render_status_page)
             handler = self.handler('/api/data')
             handler.do_GET()
             handler.send_json.assert_called_once_with({'nodes': []})

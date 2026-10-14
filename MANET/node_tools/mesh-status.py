@@ -50,6 +50,7 @@ from manet_node_info import get_my_hostname, get_local_uptime, fmt_uptime
 # mesh-radio-state.py applies them on each node.
 from manet_manage import (
     ManageRoutes, asset_content_type, logo_asset_file, logo_asset_token,
+    new_csp_nonce, content_security_policy,
 )
 from manet_peer_radios import peer_status_panel
 from manet_recovery_status import recovery_status, RECOVERY_JS
@@ -1668,11 +1669,11 @@ STATUS_HTML = r"""<!DOCTYPE html>
       <div class="spacer"></div>
     </div>
     <div id="hdr-right">
-      <button id="perf-link" class="perf-link-btn" type="button" onclick="goPerfDashboard()">MANAGE</button>
+      <button id="perf-link" class="perf-link-btn" type="button" data-action="manage">MANAGE</button>
       <div class="meta" id="hdr-nodes">-</div>
       <div class="meta" id="hdr-gw-label">-</div>
       <div class="meta" id="hdr-time" style="color:var(--muted);min-width:54px;text-align:right">-</div>
-      <button id="theme-toggle" class="theme-toggle" type="button" onclick="toggleTheme()">Dark</button>
+      <button id="theme-toggle" class="theme-toggle" type="button" data-action="theme">Dark</button>
     </div>
   </div>
   <div id="power-banner" style="display:none"></div>
@@ -1690,6 +1691,18 @@ STATUS_HTML = r"""<!DOCTYPE html>
 </div>
 <script>
 __RECOVERY_JS__
+// Delegation survives replacement of the ATAK detail panels after polling.
+function handleStatusClick(event) {
+  const control = event.target.closest('[data-action]');
+  if (!control || control.disabled) return;
+  switch (control.dataset.action) {
+    case 'manage': goPerfDashboard(); break;
+    case 'theme': toggleTheme(); break;
+    case 'atak-controller': setAtakController(control); break;
+    case 'atak-release': releaseAtakPoint(control); break;
+  }
+}
+document.addEventListener('click', handleStatusClick);
 // ── Data & State ────────────────────────────────────────────────────────────
 let DATA = null;
 let SIM  = { nodes: [], links: [], running: false, raf: null };
@@ -2440,12 +2453,12 @@ function atakPanel(atak) {
   if (atak.position) {
     const p = atak.position;
     html += `<div class="eud-row">Position: ${esc(p.lat)}, ${esc(p.lon)} · ${esc(p.source)}</div>`;
-    if (atak.manual) html += `<div class="eud-row"><button type="button" data-atak-uid="${esc(atak.manual.uid)}" data-manual-id="${esc(atak.manual.id)}" onclick="releaseAtakPoint(this)">Use phone GPS again</button><br>Available from the controlling phone.</div>`;
+    if (atak.manual) html += `<div class="eud-row"><button type="button" data-atak-uid="${esc(atak.manual.uid)}" data-manual-id="${esc(atak.manual.id)}" data-action="atak-release">Use phone GPS again</button><br>Available from the controlling phone.</div>`;
   } else html += '<div class="eud-row">Position: unavailable</div>';
   peers.forEach(p => {
     html += `<div class="eud-row"><span>${esc(p.callsign)}</span> · ${p.port === 'wired' ? 'Wired' : 'Wi-Fi'}`;
     if (p.controller) html += ' · <strong>Controls location</strong>';
-    else html += `<br><button type="button" data-atak-uid="${esc(p.uid)}" onclick="setAtakController(this)">Set location from this phone</button>`;
+    else html += `<br><button type="button" data-atak-uid="${esc(p.uid)}" data-action="atak-controller">Set location from this phone</button>`;
     if (p.tak_server) html += ' · TAK server';
     if (p.gps_disagreement_m != null) html += `<br>radio and phone GPS disagree by ${esc(p.gps_disagreement_m)} m`;
     html += '</div>';
@@ -2953,9 +2966,11 @@ def assemble_admin_status():
         'active_nodes': sum(1 for n in node_status if n['node_state'] == 'ACTIVE'),
     }
 
-def render_status_page():
+def render_status_page(nonce=None):
     """Fill the status template with shared scripts and runtime tokens."""
-    html = STATUS_HTML
+    # Nonce only trusted template tags, before inserting any page data.
+    nonce = nonce or new_csp_nonce()
+    html = STATUS_HTML.replace('<script>', f'<script nonce="{nonce}">')
     # Insert shared recovery helpers before substituting page settings.
     html = html.replace('__RECOVERY_JS__', RECOVERY_JS)
     html = html.replace('__CSS__',     CSS)
@@ -2983,8 +2998,9 @@ def send_file_response(handler, path, content_type):
     handler.end_headers()
     handler.wfile.write(body)
 
-def render_perf_auth_page(next_path='/', error=''):
+def render_perf_auth_page(next_path='/', error='', nonce=None):
     """Render the management login form and escaped return path/error."""
+    nonce = nonce or new_csp_nonce()
     # The return path is an attribute value; escape its quotes as well.
     safe_next = html.escape(next_path, quote=True)
     logo_v = logo_asset_token()
@@ -3005,7 +3021,7 @@ def render_perf_auth_page(next_path='/', error=''):
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>MANET management login</title>
-<script>
+<script nonce="{nonce}">
 (() => {{
   const key = 'manetUiTheme';
   const params = new URLSearchParams(window.location.search);
@@ -3172,7 +3188,7 @@ button {{
       <button type="submit">Login</button>
     </form>
   </div>
-  <script>
+  <script nonce="{nonce}">
     (() => {{
       const form = document.getElementById('perf-login-form');
       const password = document.getElementById('password');
@@ -3218,10 +3234,23 @@ class MeshHandler(RequestLimits, ManageRoutes, http.server.BaseHTTPRequestHandle
         self.end_headers()
         self.wfile.write(body)
 
-    def send_html(self, body):
-        """Send UTF-8 HTML without retaining a browser cache entry."""
+    def end_headers(self):
+        """Protect every response, including BaseHTTPRequestHandler errors."""
+        nonce = getattr(self, '_response_nonce', None) or new_csp_nonce()
+        self._response_nonce = None
+        self.send_header('Content-Security-Policy',
+                         content_security_policy(nonce))
+        self.send_header('X-Content-Type-Options', 'nosniff')
+        self.send_header('Referrer-Policy', 'same-origin')
+        super().end_headers()
+
+    def send_html(self, renderer, status=200, **values):
+        """Render trusted scripts with a fresh nonce and disable HTML caching."""
+        nonce = new_csp_nonce()
+        body = renderer(nonce=nonce, **values) if callable(renderer) else renderer
         encoded = body.encode('utf-8')
-        self.send_response(200)
+        self.send_response(status)
+        self._response_nonce = nonce
         self.send_header('Content-Type', 'text/html; charset=utf-8')
         self.send_header('Content-Length', str(len(encoded)))
         self.send_header('Cache-Control', 'no-store')
@@ -3306,13 +3335,8 @@ class MeshHandler(RequestLimits, ManageRoutes, http.server.BaseHTTPRequestHandle
     def _send_perf_auth_required(self, next_path='/', error=''):
         """Return the login form as HTTP 401 with a local return path."""
         next_path = normalize_local_redirect(next_path)
-        body = render_perf_auth_page(next_path=next_path, error=error).encode('utf-8')
-        self.send_response(401)
-        self.send_header('Content-Type', 'text/html; charset=utf-8')
-        self.send_header('Content-Length', str(len(body)))
-        self.send_header('Cache-Control', 'no-store')
-        self.end_headers()
-        self.wfile.write(body)
+        self.send_html(render_perf_auth_page, status=401,
+                       next_path=next_path, error=error)
 
     def _send_perf_logout_redirect(self):
         """Revoke this session, clear its cookie, and return to login."""
@@ -3456,7 +3480,7 @@ class MeshHandler(RequestLimits, ManageRoutes, http.server.BaseHTTPRequestHandle
             return
 
         if path in ('/', '/index.html'):
-            self.send_html(render_status_page())
+            self.send_html(render_status_page)
 
         elif path == '/api/data':
             try:

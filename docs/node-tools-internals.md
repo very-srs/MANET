@@ -330,6 +330,50 @@ restricting them to DNS labels. DNS publication has its own stricter policy.
 Measurements admit only a local source, record the actual executing hostname
 and IP, and require a received packet for ping success.
 
+**Browser content policy**
+
+`MeshHandler.send_html()` creates a fresh 256-bit random nonce and passes it
+to the status, dashboard or login renderer. Only trusted template script tags
+receive it. Rendered user data is never scanned to authorize additional
+scripts. `end_headers()` applies the same policy to every handler response,
+including standard-library HTTP error pages, and clears the response nonce
+before a persistent connection handles another request:
+
+```text
+default-src 'self'; script-src 'nonce-<response nonce>';
+script-src-attr 'none'; style-src 'self' 'unsafe-inline';
+connect-src 'self'; img-src 'self' data:; object-src 'none';
+base-uri 'none'; frame-ancestors 'none'; form-action 'self'
+```
+
+There is no script `unsafe-inline` or `unsafe-eval` permission. Delegated click
+listeners dispatch fixed action names and pass escaped data attributes as
+literal arguments. They cover radio and session controls rebuilt by polling,
+and ATAK controls inserted into node details. Talk-group buttons attach their
+listeners as they are created. Login theme selection and password autofill
+submission are also nonced scripts. HTML remains `no-store`.
+
+Inline styling remains allowed: the two page modules contain 90 `style=`
+attribute sites (42 status/login, 48 management), and shared recovery markup
+adds four, for 94 source sites. These include JavaScript-generated rows, whose
+counts vary with peers and measurements. Three template `<style>` blocks
+provide the status, login and dashboard styles, one per rendered document.
+The UI also updates element styles for progress, visibility and canvas layout.
+
+No external browser resource needs an exception: logos use local `/assets/`
+URLs, typography uses installed Roobert or system fallback fonts, topology is
+drawn on canvas, and all fetches and forms use this origin. The management
+module's GitHub reachability probe runs on the node, not in the browser.
+`X-Content-Type-Options: nosniff` and `Referrer-Policy: same-origin` accompany
+handler responses. CSP adds no changes to the authenticated admin status JSON,
+including its existing credential fields.
+
+`test_web_csp.py` checks HTML aliases, login failures, HTTP errors, nonce
+freshness across requests and persistent connections, static templates and
+generated markup, and literal event dispatch. Hostile-metadata rendering tests
+continue to verify escaping. Browser click-through remains the check for
+actual CSP enforcement and interactive layout behavior.
+
 **Web resource limits and recovery status**
 
 `manet_web_limits.py` bounds the HTTP worker count at eight and concurrent status
