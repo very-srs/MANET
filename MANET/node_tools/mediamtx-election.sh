@@ -2,6 +2,14 @@
 # Elect a MediaMTX server by mean mesh throughput. Assign IPv4/IPv6 VIPs,
 # update configuration and manage the service.
 
+. "${MANET_TOOLS_DIR:-${BASH_SOURCE[0]%/*}}/manet-service-common.sh"
+service_election_preflight mediamtx
+case $? in
+    0) exit 0 ;;
+    125) ;;  # Unsettled, or no request submitted to an available worker.
+    *) exit 1 ;;
+esac
+
 # --- Configuration ---
 REGISTRY_STATE_FILE="/var/run/mesh_node_registry"
 MEDIAMTX_CONFIG_FILE="/etc/mediamtx/mediamtx.yml"
@@ -34,28 +42,6 @@ get_mediamtx_ipv4_vip() {
     printf '%s\n' "${FIRST_IP%.*}.$((${FIRST_IP##*.} + 1))"
 }
 
-# --- Single run at a time ---
-# Serialize background elections to avoid overlapping VIP and service changes.
-LOCK_FILE="${MEDIAMTX_ELECTION_LOCK:-/var/run/mediamtx-election.lock}"
-exec 200>"$LOCK_FILE"
-if ! flock -n 200; then
-    log "Election already in progress, exiting"
-    exit 0
-fi
-
-# Reuse the existing Python process before computing VIPs or spawning the
-# one-shot ranker. It rechecks age, addresses and service state every request.
-. "${MANET_TOOLS_DIR:-$(dirname "${BASH_SOURCE[0]}")}/manet-runtime-client.sh"
-ELECTION_RESULT=""
-RUNTIME_RC=0
-ELECTION_RESULT=$(manet_runtime_call election mediamtx) || RUNTIME_RC=$?
-if [ "$RUNTIME_RC" = 0 ]; then
-    [ "$ELECTION_RESULT" != skip ] || exit 0
-elif [ "$RUNTIME_RC" != 125 ]; then
-    log "Runtime election check failed; retrying next pass"
-    exit "$RUNTIME_RC"
-fi
-
 # --- Check Dependencies ---
 if [ -z "$MY_MAC" ]; then
     log "Cannot determine local MAC address (${CONTROL_IFACE} not up). Exiting."
@@ -74,12 +60,9 @@ if [ -z "$IPV4_NETWORK" ]; then
     exit 1
 fi
 MEDIAMTX_IPV4_VIP=$(get_mediamtx_ipv4_vip "$IPV4_NETWORK")
-MEDIAMTX_IPV6_VIP_WITH_MASK=$("$MTX_IPV6_SCRIPT") # e.g., fd5a:..::64/128
-MEDIAMTX_IPV6_VIP=${MEDIAMTX_IPV6_VIP_WITH_MASK%/*} # Just the address part
-
-# Normalize IPv6 to compressed form (remove :0000: before ::).
-MEDIAMTX_IPV6_VIP=$(printf '%s\n' "$MEDIAMTX_IPV6_VIP" | sed 's/:0000::/::/g')
-MEDIAMTX_IPV6_VIP_WITH_MASK="${MEDIAMTX_IPV6_VIP}/128"
+MEDIAMTX_IPV6_VIP_WITH_MASK=$(service_election_ipv6 mediamtx \
+    "$MTX_IPV6_SCRIPT") || exit 1
+MEDIAMTX_IPV6_VIP=${MEDIAMTX_IPV6_VIP_WITH_MASK%/*}
 
 
 if [ -z "$MEDIAMTX_IPV4_VIP" ] || [ -z "$MEDIAMTX_IPV6_VIP" ]; then
@@ -88,114 +71,19 @@ if [ -z "$MEDIAMTX_IPV4_VIP" ] || [ -z "$MEDIAMTX_IPV6_VIP" ]; then
 fi
 IPV4_VIP_WITH_MASK="${MEDIAMTX_IPV4_VIP}/${IPV4_NETWORK#*/}"
 
-# --- Rank candidates ---
-# mesh-service-election.py reads one registry snapshot and applies the shared
-# rules: eligibility (state, observed age, valid metric), one deterministic
-# incumbent with its +10 bias, highest score wins, lowest MAC breaks a tie.
-ELECTION_HELPER="${MANET_TOOLS_DIR:-/usr/local/bin}/mesh-service-election.py"
-if [ -z "$ELECTION_RESULT" ] && ! ELECTION_RESULT=$(python3 "$ELECTION_HELPER" mediamtx "$REGISTRY_STATE_FILE" 2> >(while IFS= read -r line; do log "$line"; done)); then
-    log "Cannot rank candidates; leaving the service as it is"
-    exit 1
-fi
-# Ranker fields are winner MAC, biased Mbit/s score and incumbent MAC.
-# A dash represents a missing MAC.
-read -r BEST_CANDIDATE_MAC HIGHEST_TQ CURRENT_LEADER_MAC <<< "$ELECTION_RESULT"
-[ "$BEST_CANDIDATE_MAC" = - ] && BEST_CANDIDATE_MAC=""
-[ "$CURRENT_LEADER_MAC" = - ] && CURRENT_LEADER_MAC=""
-if [ -n "$CURRENT_LEADER_MAC" ]; then
-    log "Current incumbent: $CURRENT_LEADER_MAC (incumbent bias applied)"
-fi
+# Prepare wildcard listeners before either VIP is local. This also serves IPv6.
+prepare_mediamtx_service() {
+    yq -i '.rtspAddress = ":8554" | .webrtcAddress = ":8889"' "$MEDIAMTX_CONFIG_FILE" || return 1
+    systemctl restart "$MEDIAMTX_SERVICE_NAME"
+}
 
-# --- Decide and Act ---
-if [ -z "$BEST_CANDIDATE_MAC" ]; then
-    log "No suitable candidates found in registry."
-    # Stop the service and remove any locally held VIPs.
-    if ip addr show dev "$CONTROL_IFACE" | grep -q "inet $MEDIAMTX_IPV4_VIP/"; then
-        log "Removing IPv4 VIP."
-        ip addr del "$IPV4_VIP_WITH_MASK" dev "$CONTROL_IFACE" 2>/dev/null
-    fi
-    if ip -6 addr show dev "$CONTROL_IFACE" | grep -q "$MEDIAMTX_IPV6_VIP/"; then
-        log "Removing IPv6 VIP."
-        ip addr del "$MEDIAMTX_IPV6_VIP_WITH_MASK" dev "$CONTROL_IFACE" 2>/dev/null
-    fi
-    if systemctl is-active --quiet "$MEDIAMTX_SERVICE_NAME"; then
-        log "Stopping local service as no winner was found."
-        systemctl stop "$MEDIAMTX_SERVICE_NAME"
-    fi
-    systemctl reset-failed "$MEDIAMTX_SERVICE_NAME" 2>/dev/null
-
-elif [ "$MY_MAC" == "$BEST_CANDIDATE_MAC" ]; then
-    # Local leader
-    log "Won election (TQ: $HIGHEST_TQ)."
-
-    # Check whether both VIPs are assigned locally.
-    HAS_IPV4_VIP=false
-    HAS_IPV6_VIP=false
-
-    if ip addr show dev "$CONTROL_IFACE" | grep -q "inet $MEDIAMTX_IPV4_VIP/"; then
-        HAS_IPV4_VIP=true
-    fi
-
-    if ip addr show dev "$CONTROL_IFACE" | grep -q "inet6 $MEDIAMTX_IPV6_VIP/"; then
-        HAS_IPV6_VIP=true
-    fi
-
-    # Assign IPv4 VIP if not already present
-    if [ "$HAS_IPV4_VIP" = false ]; then
-        log "Assigning IPv4 VIP: $MEDIAMTX_IPV4_VIP"
-        ip addr add "$IPV4_VIP_WITH_MASK" dev "$CONTROL_IFACE"
-        # Send Gratuitous ARP
-        if command -v arping &> /dev/null; then
-             log "Sending Gratuitous ARP for $MEDIAMTX_IPV4_VIP"
-             arping -c 1 -A -I "$CONTROL_IFACE" "$MEDIAMTX_IPV4_VIP"
-        fi
-    fi
-
-    # Assign IPv6 VIP if not already present
-    if [ "$HAS_IPV6_VIP" = false ]; then
-         log "Assigning IPv6 VIP: $MEDIAMTX_IPV6_VIP"
-         ip addr add "$MEDIAMTX_IPV6_VIP_WITH_MASK" dev "$CONTROL_IFACE" 2>/dev/null || log "IPv6 VIP already exists or failed to add"
-    fi
-
-    # Both VIPs indicate this node already holds leadership.
-    if [ "$HAS_IPV4_VIP" = true ] && [ "$HAS_IPV6_VIP" = true ]; then
-        WAS_ALREADY_LEADER=true
-    else
-        WAS_ALREADY_LEADER=false
-    fi
-
-    # Update config and start service on leadership gain or if stopped.
-    if [ "$WAS_ALREADY_LEADER" = false ] || ! systemctl is-active --quiet "$MEDIAMTX_SERVICE_NAME"; then
-        if command -v yq &> /dev/null; then
-            log "Updating $MEDIAMTX_CONFIG_FILE listen addresses..."
-            yq -i ".rtspAddress = \"$MEDIAMTX_IPV4_VIP:8554\"" "$MEDIAMTX_CONFIG_FILE"
-            yq -i ".webrtcAddress = \"$MEDIAMTX_IPV4_VIP:8889\"" "$MEDIAMTX_CONFIG_FILE"
-        else
-            log "Warning: 'yq' not found. Cannot update listen addresses in $MEDIAMTX_CONFIG_FILE. Service might bind incorrectly."
-        fi
-        log "Starting/Restarting $MEDIAMTX_SERVICE_NAME..."
-        systemctl restart "$MEDIAMTX_SERVICE_NAME"
-    else
-        log "Already leader and service running. No action needed."
-    fi
-
-else
-    # Remote leader
-    log "Lost election to ${BEST_CANDIDATE_MAC}."
-    # Stop the service and remove any locally held VIPs.
-    if ip addr show dev "$CONTROL_IFACE" | grep -q "inet $MEDIAMTX_IPV4_VIP/"; then
-        log "Removing IPv4 VIP."
-        ip addr del "$IPV4_VIP_WITH_MASK" dev "$CONTROL_IFACE" 2>/dev/null
-    fi
-    if ip addr show dev "$CONTROL_IFACE" | grep -q "inet6 $MEDIAMTX_IPV6_VIP/"; then
-        log "Removing IPv6 VIP."
-        ip addr del "$MEDIAMTX_IPV6_VIP_WITH_MASK" dev "$CONTROL_IFACE" 2>/dev/null
-    fi
-    if systemctl is-active --quiet "$MEDIAMTX_SERVICE_NAME"; then
-        log "Stopping local service."
-        systemctl stop "$MEDIAMTX_SERVICE_NAME"
-    fi
-    systemctl reset-failed "$MEDIAMTX_SERVICE_NAME" 2>/dev/null
-
-fi
-log "Election check complete."
+LOCK_FILE="${MEDIAMTX_ELECTION_LOCK:-/var/run/mediamtx-election.lock}"
+SERVICE_KIND=mediamtx
+SERVICE_UNIT="$MEDIAMTX_SERVICE_NAME"
+SERVICE_TCP_PORTS="8554 8889"
+SERVICE_UDP_PORTS=""
+SERVICE_IPV6_VIP_WITH_MASK="$MEDIAMTX_IPV6_VIP_WITH_MASK"
+SERVICE_PREPARE_HOOK=prepare_mediamtx_service
+SERVICE_VERIFY_HOOK=true
+SERVICE_RELEASE_HOOK=true
+service_election_run

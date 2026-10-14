@@ -168,25 +168,19 @@ same_carrier_generation() {
         [ "$mode" = "$1" ] && [ "$generation" = "$now" ]
 }
 
-# Check internet reachability through $1. The bench LAN shows 95-100% ICMP
-# loss to 8.8.8.8/1.1.1.1 while DNS, HTTP and traceroute work. Probe in order:
-# 1. ICMP: cheapest when replies arrive.
-# 2. HTTP: require 204 from captive-portal endpoints, rejecting 200/302.
-# 3. TCP: connect to public DNS when curl is absent.
-
-
 # Confirm failures before removing NAT and batman gateway mode. Mesh clients
 # retain a default route here until gateway-route-manager next polls.
 # Use extra confirmation attempts while this node is the gateway.
 internet_probe_confirmed() {
     local iface="$1"
-    local attempts=2 i
+    local attempts=2 i probe_mode=any
+    "$UPLINK_SPEED" is-ethernet "$iface" && probe_mode=http-only
 
     [ -f /var/run/mesh-gateway.state ] && attempts=3
 
     # Use two probes, or three for an active gateway, with 3 s between failures.
     for i in $(seq 1 "$attempts"); do
-        internet_probe "$iface" && return 0
+        internet_probe "$iface" "$probe_mode" && return 0
         [ "$i" -lt "$attempts" ] && sleep 3
     done
 
@@ -374,15 +368,9 @@ detect_hotplug_mode() {
 
     if [ -n "$ip" ]; then
         log "IP acquired on $ETH_IFACE: $ip"
-        # Require a completed speed test before announcing gateway bandwidth.
-        # Captive portals and filtered networks cannot pass it. Exit 2 means the
-        # interface is not Ethernet and is untested.
-        speed_rc=1
         if internet_probe_confirmed "$ETH_IFACE"; then
-            speed_rc=0
-            "$UPLINK_SPEED" measure "$ETH_IFACE" >/dev/null || speed_rc=$?
-        fi
-        if [ "$speed_rc" -eq 0 ] || [ "$speed_rc" -eq 2 ]; then
+            # Connectivity qualifies the gateway even without a speed sample.
+            "$UPLINK_SPEED" measure "$ETH_IFACE" >/dev/null || true
             DETECTED_MODE="gateway"
             return 0
         fi
@@ -542,6 +530,7 @@ if [ "$DETECTED_MODE" == "gateway" ]; then
     # networkd inotify reconfigure, dropping the lease and repeating detection.
     # networkd uses 10-end0.network regardless.
     touch /var/run/mesh-gateway.state
+    systemctl start manet-uplink-dns.service 2>/dev/null || true
 
     # Configure NAT
     log "Configuring NAT..."
@@ -559,7 +548,12 @@ if [ "$DETECTED_MODE" == "gateway" ]; then
     sysctl -q net.ipv4.ip_forward=1
 
     # The third field of a default-via route is the router IPv4 address.
-    DEFAULT_GW=$(ip route show dev "$ETH_IFACE" | grep default | awk '{print $3}')
+    DEFAULT_GW=$(ip route show default dev "$ETH_IFACE" |
+        awk '/^default via / {print $3; exit}')
+    if [ -n "$DEFAULT_GW" ]; then
+        ip route replace default via "$DEFAULT_GW" dev "$ETH_IFACE" \
+            src "$ETH_IP" metric 100
+    fi
     log "Default gateway: ${DEFAULT_GW:-none}"
 
     # Enable BATMAN gateway mode

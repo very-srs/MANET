@@ -134,13 +134,13 @@ class GatewaySelectionTests(unittest.TestCase):
         self.assertTrue(150 < installs[1][0] <= 170, installs)
 
     def test_restart_keeps_the_gateway_already_in_use(self):
-        route = 'default via 10.44.0.11 dev br0 src 10.44.0.6'
+        route = 'default via 10.44.0.11 dev br0 src 10.44.0.6 metric 500'
         installs = self.run_manager({'a': (0, 9999, 14.0, 100.0), 'b': (0, 9999, 10.0, 100.0)},
                                     route=route, until=600)
         self.assertEqual(installs, [])
 
     def test_restart_still_switches_for_a_noticeable_gain(self):
-        route = 'default via 10.44.0.11 dev br0 src 10.44.0.6'
+        route = 'default via 10.44.0.11 dev br0 src 10.44.0.6 metric 500'
         installs = self.run_manager({'a': (0, 9999, 40.0, 100.0), 'b': (0, 9999, 10.0, 100.0)},
                                     route=route, until=200)
         self.assertEqual([g for _, g in installs], ['a'])

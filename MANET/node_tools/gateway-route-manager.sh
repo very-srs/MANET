@@ -20,6 +20,8 @@ SWITCH_MIN_GAIN=2
 SWITCH_SUSTAIN=60
 SWITCH_HOLD=300
 UNREACHABLE_POLLS=2
+# Prefer promoted direct (100), then mesh (500), then unqualified DHCP (1024).
+MESH_METRIC=500
 
 # Keep one route manager active for the lifetime of this process.
 exec 200>"$LOCK_FILE"
@@ -114,8 +116,9 @@ lookup_gateway_ip_by_mac() {
 cur_mac="" pending_mac="" pending_since=0 unreachable=0
 last_switch=$(( $(uptime_now) - SWITCH_HOLD ))
 while true; do
-    # Inspect the first default route to preserve a local uplink route.
-    cur="$(ip route show default | head -n1 || true)"
+    # Inspect mesh and direct defaults independently of their display order.
+    defaults="$(ip route show default || true)"
+    cur=$(awk '/ dev br0( |$)/ {print; exit}' <<< "$defaults")
     if [ -f /var/run/mesh-gateway.state ]; then
         # Only log when actually removing a route: this branch runs every
         # poll cycle while in gateway mode.
@@ -127,9 +130,18 @@ while true; do
         continue
     fi
 
-    # A dispatcher may not have written its gateway marker yet. Preserve an
-    # existing local uplink route during that transition too.
-    if [ -n "$cur" ] && [[ " $cur " != *" dev br0 "* ]]; then
+    # The marker can lag the promoted route. DHCP alone never qualifies.
+    upstream=$(cat /var/run/upstream_iface 2>/dev/null || true)
+    if [ -n "$upstream" ] && [ "$upstream" != br0 ] &&
+            awk -v iface="$upstream" '
+                { dev=""; metric=0
+                  for (i=1; i<NF; i++) {
+                      if ($i == "dev") dev=$(i+1)
+                      if ($i == "metric") metric=$(i+1)
+                  }
+                  if (dev == iface && metric == 100) found=1
+                }
+                END {exit !found}' <<< "$defaults"; then
         poll_wait ready
         continue
     fi
@@ -221,10 +233,19 @@ while true; do
             log "Gateway IP $gw_ip not reachable; skipping route install"
             continue
         fi
-        if [[ " $cur " == *" via $gw_ip dev br0 "* && " $cur " == *" src $local_ip "* ]]; then
+        if [[ " $cur " == *" via $gw_ip dev br0 "* &&
+              " $cur " == *" src $local_ip "* &&
+              " $cur " == *" metric $MESH_METRIC "* ]]; then
             route_ready=true
-        elif ip route replace default via "$gw_ip" dev br0 src "$local_ip"; then
+        elif ip route replace default via "$gw_ip" dev br0 \
+                src "$local_ip" metric "$MESH_METRIC"; then
             route_ready=true
+            # A metric change adds a route. Remove the former metric-0
+            # mesh route only after the replacement is installed.
+            if [ -n "$cur" ] && [[ " $cur " != *" metric "* ||
+                                      " $cur " == *" metric 0 "* ]]; then
+                ip route del default dev br0 metric 0 2>/dev/null || true
+            fi
             if [ -n "$cur_mac" ] && [ "$gw_mac" != "$cur_mac" ]; then
                 log "Switching gateway from $cur_mac (${cur_score:-gone} Mbit/s) to $gw_mac: ${urgent:-noticeably better, $best_score Mbit/s}"
             fi

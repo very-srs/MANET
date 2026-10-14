@@ -25,7 +25,7 @@ HARDENED = (
     'led-boot.service', 'manet-led-status.service', 'sae-watchdog.service',
     'batman-enslave-watch.service', 'ap-txpower.service',
     'manet-mesh-power.service', 'manet-dhcp-isolation.service',
-    'manet-cpu-policy.service',
+    'manet-cpu-policy.service', 'manet-uplink-dns.service',
 )
 
 
@@ -242,6 +242,7 @@ DUPLICATE_NAME_ALLOWLIST = {
             'manet-radio-names.py',
             'manet-region.py',
             'manet-wait-radios.py',
+            'manet-uplink-dns.py',
             'manet_ap_mesh.py',
             'manet_hosts.py',
             'manet_ip_runtime.py',

@@ -502,8 +502,21 @@ DHCP=yes
 LinkLocalAddressing=no
 IPv6AcceptRA=no
 
+# BEGIN MANET qualified DNS
 [DHCPv4]
-UseDomains=true
+UseDNS=no
+UseDomains=no
+RoutesToDNS=no
+RequestOptions=6 15 119
+
+[DHCPv6]
+UseDNS=no
+UseDomains=no
+
+[IPv6AcceptRA]
+UseDNS=no
+UseDomains=no
+# END MANET qualified DNS
 EOF
     cat << EOF > /etc/systemd/network/11-end${CT}-rename.link
 [Match]
@@ -512,8 +525,9 @@ MACAddress=$M
 [Link]
 Name=end${CT}
 EOF
+    cp /etc/systemd/network/10-end${CT}.network \
+        /etc/systemd/network/10-end${CT}.network.dhcp-default
     (( CT++ ))
-    cp  /etc/systemd/network/10-end${CT}.network  /etc/systemd/network/10-end${CT}.network.dhcp-default
 done
 echo "Ethernet config added"
 
@@ -528,8 +542,21 @@ DHCP=yes
 LinkLocalAddressing=no
 IPv6AcceptRA=no
 
+# BEGIN MANET qualified DNS
 [DHCPv4]
-UseDomains=true
+UseDNS=no
+UseDomains=no
+RoutesToDNS=no
+RequestOptions=6 15 119
+
+[DHCPv6]
+UseDNS=no
+UseDomains=no
+
+[IPv6AcceptRA]
+UseDNS=no
+UseDomains=no
+# END MANET qualified DNS
 EOF
 
 cat << 'EOF' > /etc/systemd/network/20-end0-eud.network.off
@@ -821,9 +848,10 @@ systemctl mask NetworkManager
 
 echo "Enabling systemd-networkd and systemd-resolved"
 systemctl enable --now systemd-networkd
-# Follow networkd's DHCP DNS on this boot and subsequent boots. Public servers
-# are used only when no DNS servers are supplied by the network.
+# Publish DHCP DNS only after the direct link qualifies for internet access.
 /usr/local/bin/manet-dns-setup.sh || exit 1
+/usr/local/bin/manet-uplink-dns.py install || exit 1
+systemctl enable --now manet-uplink-dns.path manet-uplink-dns.service || exit 1
 
 
 #write out the config selections for future use

@@ -6,15 +6,20 @@
 # The subshell closes FIFO and lock descriptors when the request finishes.
 manet_runtime_call() (
     local directory="${MANET_RUNTIME_DIR:-/run/manet-runtime}" pid generation token reply rc output
-    [ -r "$directory/ready" ] && [ -p "$directory/request" ] && [ -p "$directory/reply" ] || return 125
+    [ -p "$directory/request" ] && [ -p "$directory/reply" ] || return 125
+    [ -r "$directory/ready" ] ||
+        [ -n "${MANET_RUNTIME_LOCK_WAIT:-}" ] || return 125
+    exec 8>"$directory/client.lock" || return 125
+    # Service observations may wait briefly for each other. Mutating callers
+    # retain the nonblocking default and never queue behind another job.
+    if [ -n "${MANET_RUNTIME_LOCK_WAIT:-}" ]; then
+        flock -w "$MANET_RUNTIME_LOCK_WAIT" 8 || return 125
+    else
+        flock -n 8 || return 125
+    fi
+    [ -r "$directory/ready" ] || return 125
     IFS=' ' read -r pid generation < "$directory/ready" || return 125
     [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null || return 125
-    exec 8>"$directory/client.lock" || return 125
-    # Skip a busy helper to preserve dispatcher/election latency.
-    # Existing helper locks still serialize mutations.
-    flock -n 8 || return 125
-    # Check again after taking the lock or a daemon restart.
-    [ "$(<"$directory/ready")" = "$pid $generation" ] || return 125
     # Match this request's token to ignore leftover FIFO replies.
     token="${BASHPID}_${RANDOM}_${RANDOM}"
     exec 6<>"$directory/reply" 7<>"$directory/request" || return 125
@@ -31,7 +36,7 @@ manet_runtime_call() (
         [ "$rc" = 0 ] || return "$rc"
         output=$(<"$directory/result.$token")
         case "$1" in
-            ipv4|mcs|interfaces|ap-mesh|election)
+            ipv4|mcs|interfaces|ap-mesh|election|hosting|service-vip)
                 [[ "$output" == *[![:space:]]* ]] || return 1 ;;
             # IP is status-only. Boot permits a missing Syncthing certificate.
         esac

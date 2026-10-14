@@ -1,9 +1,9 @@
 """On-demand helper work hosted by mesh-channel-agreement, with no timer.
 
 The FIFO worker sleeps in select until a manager/dispatcher requests work.
-ACS keeps its independent one-second decision loop. Busy callers use their
-one-shot fallback instead of queuing. Files are private and operations and
-arguments are allowlisted.
+ACS keeps its independent decision loop. Service observations
+allow a bounded client-lock wait, while other busy callers fall back without
+queuing. Files are private and operations and arguments are allowlisted.
 No shell text or Python received through this channel is evaluated.
 """
 import hashlib
@@ -69,9 +69,14 @@ class Helpers:
         if action == 'ap-mesh' and argument == '-':
             from manet_ap_mesh import Transition
             return 0, json.dumps(Transition().to_mesh())
-        if action == 'election' and argument == 'mediamtx':
-            from manet_election_runtime import check
-            return 0, check(argument)
+        if argument in ('mediamtx', 'mumble'):
+            from manet_election_runtime import check, hosting, service_ipv6
+            if action == 'election':
+                return 0, check(argument)
+            if action == 'hosting':
+                return 0, 'true' if hosting(argument) else 'false'
+            if action == 'service-vip':
+                return 0, service_ipv6(argument) + '/128'
         raise ValueError('unsupported runtime operation')
 
 
@@ -117,7 +122,7 @@ def serve(directory, helpers, stop=None):
                 # Bound action/argument fields before dispatching any operation.
                 request_fields = re.fullmatch(rb'([a-z][a-z0-9-]{0,31}) ([A-Za-z0-9_.:-]{1,32})', match[2])
                 # Withdraw availability while working, including if the client
-                # times out. Another caller must not queue behind this job.
+                # times out. No new request is submitted until it finishes.
                 ready.unlink(missing_ok=True)
                 # A valid reply token always gets an answer, even for malformed
                 # requests. In particular, ipv4 is an operation, not bad framing.
@@ -133,11 +138,13 @@ def serve(directory, helpers, stop=None):
                 for old in directory.glob('result.*'):
                     old.unlink(missing_ok=True)
                 atomic_text(directory / ('result.' + token), output, 0o600)
+                # Publish availability before releasing a waiting client.
+                # Its client lock serializes the next observer's request.
+                atomic_text(ready, generation, 0o600)
                 try:
                     os.write(reply, f'{token} {rc}\n'.encode())
                 except BlockingIOError:
                     pass
-                atomic_text(ready, generation, 0o600)
     finally:
         ready.unlink(missing_ok=True)
         for descriptor in descriptors:

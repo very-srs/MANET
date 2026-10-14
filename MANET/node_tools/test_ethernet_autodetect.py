@@ -22,7 +22,8 @@ T="$REVIEW_ROOT"
 echo "ip $*" >> "$T/calls"
 case "$*" in
   "-4 addr show dev end0") [ -f "$T/addr" ] && echo "    inet $(cat "$T/addr")/24 brd x scope global end0" ;;
-  "route show dev end0") [ -f "$T/route" ] && echo "default via 192.168.69.1 proto dhcp" ;;
+  "route show dev end0"|"route show default dev end0")
+    [ -f "$T/route" ] && echo "default via 192.168.69.1 proto dhcp" ;;
   "link show end0") if [ -L "$T/sys/class/net/end0/master" ]; then echo "2: end0: <UP> master br0"; else echo "2: end0: <UP>"; fi ;;
   "link set end0 nomaster") rm -f "$T/sys/class/net/end0/master" ;;
   "link set end0 master br0") ln -sfn ../br0 "$T/sys/class/net/end0/master" ;;
@@ -395,11 +396,12 @@ class CaptureBoundTests(AutodetectHarness):
 
 
 
-class SpeedGateTests(AutodetectHarness):
+class ConnectivityTests(AutodetectHarness):
     def leased_with_internet(self):
         (self.root / 'addr').write_text('192.168.69.51')
         (self.root / 'route').touch()
-        self.stub('ping', '#!/bin/bash\necho "ping $*" >> "$REVIEW_ROOT/calls"\nexit 0\n')
+        self.stub('ping', '#!/bin/bash\nexit 0\n')
+        self.stub('curl', '#!/bin/bash\nprintf 204\n')
 
     def test_internet_and_speed_test_make_a_gateway(self):
         self.leased_with_internet()
@@ -408,14 +410,23 @@ class SpeedGateTests(AutodetectHarness):
         self.assertIn('Configuring as gateway/uplink', journal)
         self.assertIn('uplink-speed announce end0', calls)
 
-    def test_failed_speed_test_is_not_a_gateway(self):
+    def test_failed_speed_test_still_promotes_a_gateway(self):
         self.leased_with_internet()
         (self.root / 'speed-rc' / 'end0').write_text('1')
         _, calls, journal = self.run_detector()
         self.assertIn('uplink-speed measure end0', calls)
+        self.assertIn('Configuring as gateway/uplink', journal)
+        self.assertIn('uplink-speed announce end0', calls)
+        self.assertIn('ip route replace default via 192.168.69.1 dev end0 '
+                      'src 192.168.69.51 metric 100', calls)
+
+    def test_portal_is_rejected_even_when_ping_works(self):
+        """Automatic Ethernet detection also requires HTTP 204."""
+        self.leased_with_internet()
+        self.stub('curl', '#!/bin/bash\nprintf 200\n')
+        _, calls, journal = self.run_detector()
         self.assertIn('internet test failed; leaving as mesh client', journal)
-        self.assertNotIn('Configuring as gateway/uplink', journal)
-        self.assertNotIn('uplink-speed announce end0', calls)
+        self.assertNotIn('uplink-speed measure end0', calls)
 
 
 if __name__ == '__main__':

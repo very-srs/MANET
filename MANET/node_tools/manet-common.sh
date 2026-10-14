@@ -246,26 +246,52 @@ iface_ip() {
         awk '{print $4}' | cut -d/ -f1 | head -n1
 }
 
-# Probe internet reachability with bounded ping, HTTP or TCP.
+# Probe internet reachability. http-only requires a clock-independent 204.
 internet_probe() {
-    local iface="$1"
-    local url code ip
+    local iface="$1" mode="${2:-any}"
+    local url code ip host answer
+    local dns="${MANET_UPLINK_DNS:-/usr/local/bin/manet-uplink-dns.py}"
 
     # Each ICMP target has a 2 s reply wait.
-    ping -c 1 -W 2 -I "$iface" 1.1.1.1 >/dev/null 2>&1 && return 0
-    ping -c 1 -W 2 -I "$iface" 8.8.8.8 >/dev/null 2>&1 && return 0
+    if [ "$mode" != http-only ]; then
+        ping -c 1 -W 2 -I "$iface" 1.1.1.1 >/dev/null 2>&1 && return 0
+        ping -c 1 -W 2 -I "$iface" 8.8.8.8 >/dev/null 2>&1 && return 0
+    fi
 
     if command -v curl >/dev/null 2>&1; then
         # Allow 3 s per HTTP request and accept only a 204 response.
         for url in http://connectivitycheck.gstatic.com/generate_204 \
                    http://cp.cloudflare.com/; do
-            code=$(curl --interface "$iface" -s -m 3 -o /dev/null \
-                        -w '%{http_code}' "$url" 2>/dev/null || true)
-            [ "$code" = "204" ] && return 0
+            if code=$(curl -4 --noproxy '*' --interface "$iface" \
+                           -s -m 3 -o /dev/null -w '%{http_code}' \
+                           "$url" 2>/dev/null) && [ "$code" = 204 ]; then
+                return 0
+            fi
         done
+        # A lone candidate cannot use global DNS before qualification. Query
+        # its DHCP resolver with SO_BINDTODEVICE, then bypass curl's resolver.
+        # One address per endpoint bounds this fallback to 14 extra seconds.
+        if [ -x "$dns" ]; then
+            for url in http://connectivitycheck.gstatic.com/generate_204 \
+                       http://cp.cloudflare.com/; do
+                host=${url#http://}
+                host=${host%%/*}
+                answer=$("$dns" resolve "$iface" "$host" 2>/dev/null |
+                    head -n1)
+                [ -n "$answer" ] || continue
+                if code=$(curl -4 --noproxy '*' --interface "$iface" \
+                        --resolve "${host}:80:${answer}" \
+                        -s -m 3 -o /dev/null -w '%{http_code}' \
+                        "$url" 2>/dev/null) && [ "$code" = 204 ]; then
+                    return 0
+                fi
+            done
+        fi
         return 1
     fi
 
+    # Ethernet qualification must never fall back to a portal's open port.
+    [ "$mode" = http-only ] && return 1
     # No curl in this image: bare TCP connect instead.
     ip=$(iface_ip "$iface")
     if [ -n "$ip" ] && command -v nc >/dev/null 2>&1; then

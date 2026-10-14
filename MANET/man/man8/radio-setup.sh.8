@@ -1,4 +1,4 @@
-.Dd October 8, 2026
+.Dd October 14, 2026
 .Dt RADIO-SETUP.SH 8
 .Os MANET
 .Sh NAME
@@ -22,6 +22,11 @@ Only one setup run proceeds at a time.
 Failed steps are recorded; a run with recorded failures leaves the node
 marked incomplete.
 After successful setup, staged operator scripts run in a separate service.
+.Pp
+If repository DNS is unavailable, setup makes one bounded uplink qualification
+attempt before retrying DNS and installing packages.
+This supports networks that permit only their DHCP-provided resolver.
+The attempt defers AP and manager actions until normal runtime reconciliation.
 .Sh FILES
 .Bl -tag -width Ds
 .It Pa /etc/mesh.conf

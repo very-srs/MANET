@@ -12,6 +12,8 @@ import tempfile
 import unittest
 import xml.etree.ElementTree as ET
 
+from manet_election_runtime import mumble_database_dirty
+
 
 TOOLS = Path(__file__).resolve().parent
 PEER_EDITS = ('add_peer_to_config', 'share_default_folder_with_peer')
@@ -59,10 +61,18 @@ class MumbleDatabaseTests(ShellFixture):
     def setUp(self):
         """Install a SQLite CLI adapter and harmless node command stubs."""
         super().setUp()
+        (self.root / 'mumble.ini').write_text('host=10.1.0.3\n')
         self.source = self.root / 'source.sqlite'
         self.dest = self.root / 'dest.sqlite'
         self.database(self.source, 'shared')
         self.database(self.dest, 'local')
+        self.env['MANET_TOOLS_DIR'] = str(TOOLS)
+        self.env['MESH_UPTIME_FILE'] = str(self.root / 'uptime')
+        (self.root / 'uptime').write_text('100 0\n')
+        (self.root / 'registry').write_text("\n".join(
+            f"NODE_020000000001_{key}='{value}'" for key, value in
+            dict(MAC_ADDRESS='02:00:00:00:00:01', NODE_STATE='ACTIVE',
+                 MEAN_THROUGHPUT_MBPS='50', OBSERVED_AT_UPTIME='100').items()))
         self.code = functions('mumble-election.sh') + '''
 log() { printf '%s\n' "$*" >&2; }
 WORKING_DB="$TEST_ROOT/dest.sqlite"
@@ -71,6 +81,10 @@ SHARED_DB="$TEST_ROOT/source.sqlite"
 BACKUP_DIR="$SHARED_DB_DIR/backups"
 MUMBLE_SERVICE_NAME=mumble-server.service
 MUMBLE_USER=radio
+MUMBLE_CONFIG="$TEST_ROOT/mumble.ini"
+MY_MAC=02:00:00:00:00:01
+REGISTRY_STATE_FILE="$TEST_ROOT/registry"
+LOCK_FILE="$TEST_ROOT/lock"
 '''
         # The host has no sqlite3 CLI. Use the real Python SQLite engine for
         # its backup/integrity/checkpoint operations and inject CLI failures.
@@ -86,7 +100,9 @@ with open(os.environ['EVENTS'], 'a') as log:
     log.write(sql + '\\n')
 if sql.startswith('.backup'):
     target = shlex.split(sql)[1]
-    if os.environ.get('BACKUP_MODE') == 'fail':
+    if (os.environ.get('BACKUP_MODE') == 'fail' and
+            target.startswith(os.environ.get('BACKUP_TARGET', ''))):
+        print('injected SQLite backup failure', file=sys.stderr)
         sys.exit(1)
     if os.environ.get('BACKUP_MODE') == 'corrupt':
         Path(target).write_text('invalid database')
@@ -94,6 +110,10 @@ if sql.startswith('.backup'):
     with sqlite3.connect(path) as source, sqlite3.connect(target) as dest:
         source.backup(dest)
 else:
+    if 'wal_checkpoint' in sql and os.environ.get('CHECKPOINT_FAIL'):
+        print('0|-1|-1')
+        print('injected checkpoint failure', file=sys.stderr)
+        sys.exit(1)
     try:
         with sqlite3.connect(path) as db:
             for row in db.execute(sql):
@@ -229,18 +249,190 @@ safe_copy_database "$SHARED_DB" "$WORKING_DB"
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue((self.root / 'shared/backups').is_dir())
 
+    def test_live_export_captures_wal_changes_without_stopping_service(self):
+        """A cadence export preserves committed WAL data while voice runs."""
+        with sqlite3.connect(self.dest) as writer:
+            writer.execute('PRAGMA journal_mode=WAL')
+            writer.execute("UPDATE payload SET value='handover-test'")
+            writer.commit()
+            result = self.shell(self.code + '\nexport_mumble_changes')
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(self.payload(self.source), 'handover-test')
+            self.assertNotIn('stop mumble', self.events.read_text())
+            stamp = self.root / 'lock.db-export'
+            self.assertFalse(mumble_database_dirty(str(self.dest), stamp))
+            self.events.write_text('')
+            result = self.shell(self.code + '\nexport_mumble_changes')
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(self.events.read_text(), '')
+
+    def test_write_during_export_remains_dirty_and_is_exported_next_pass(self):
+        """Never mark a post-backup write as already safely published."""
+        self.stub('mv', '''
+if [ "$1" = "$TEST_ROOT/source.sqlite.uploading" ]; then
+    sqlite3 "$TEST_ROOT/dest.sqlite" "UPDATE payload SET value='raced';"
+fi
+exec /bin/mv "$@"
+''')
+        result = self.shell(self.code + '\nexport_mumble_changes')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.payload(self.source), 'local')
+        self.assertEqual(self.payload(self.dest), 'raced')
+        stamp = self.root / 'lock.db-export'
+        self.assertTrue(mumble_database_dirty(str(self.dest), stamp))
+        self.stub('mv', 'exec /bin/mv "$@"\n')
+        result = self.shell(self.code + '\nexport_mumble_changes')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.payload(self.source), 'raced')
+        self.assertFalse(mumble_database_dirty(str(self.dest), stamp))
+
+    def test_live_backup_failure_does_not_copy_changing_files(self):
+        """Live export fails closed instead of racing raw DB/WAL copies."""
+        result = self.shell(self.code + '\nexport_mumble_changes',
+                            BACKUP_MODE='fail',
+                            BACKUP_TARGET=str(self.source) + '.uploading')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('Live SQLite backup failed', result.stderr)
+        self.assertEqual(self.payload(self.source), 'shared')
+        self.assertFalse((self.root / 'lock.db-export').exists())
+
+    def test_live_publication_failure_does_not_mark_database_clean(self):
+        """Failed canonical publication leaves data dirty for a later retry."""
+        result = self.shell(self.code + '\nexport_mumble_changes',
+                            FAIL_MOVE=str(self.source) + '.uploading')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.payload(self.source), 'shared')
+        self.assertFalse((self.root / 'lock.db-export').exists())
+
+    def test_losing_rank_during_backup_cannot_publish_canonical_database(self):
+        """A late rank change discards the prepared export before its rename."""
+        self.stub('mv', '''
+if [ "$1" = "$TEST_ROOT/source.sqlite.uploading.tmp" ]; then
+    : > "$TEST_ROOT/registry"
+fi
+exec /bin/mv "$@"
+''')
+        result = self.shell(self.code + '\nexport_mumble_changes')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.payload(self.source), 'shared')
+        self.assertFalse((self.root / 'lock.db-export').exists())
+        self.assertFalse(Path(str(self.source) + '.uploading').exists())
+
+    def test_final_exports_are_distinct_and_preserve_canonical_snapshot(self):
+        """Retain late data without competing with the winner's snapshot."""
+        for value in ('late marker', 'later marker'):
+            with sqlite3.connect(self.dest) as db:
+                db.execute('UPDATE payload SET value=?', (value,))
+            result = self.shell(self.code + '\nrelease_mumble_database')
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(self.payload(self.source), 'shared')
+        snapshots = list((self.root / 'shared/retired/020000000001').glob(
+            '*.sqlite'))
+        self.assertEqual(len(snapshots), 2)
+        self.assertEqual({self.payload(path) for path in snapshots},
+                         {'late marker', 'later marker'})
+
+    def test_final_export_prunes_only_after_successful_publication(self):
+        """Failed exports cannot consume the previous recovery snapshots."""
+        directory = self.root / 'shared/retired/020000000001'
+        directory.mkdir(parents=True)
+        for number in range(5):
+            name = f'{number:08x}-0000-4000-8000-000000000000.sqlite'
+            self.database(directory / name, f'retired {number}')
+        before = set(directory.glob('*.sqlite'))
+        self.dest.write_bytes(b'corrupt working database')
+        result = self.shell(self.code + '\nrelease_mumble_database')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(set(directory.glob('*.sqlite')), before)
+        self.dest.unlink()
+        self.database(self.dest, 'new final snapshot')
+        result = self.shell(self.code + '\nrelease_mumble_database')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        after = set(directory.glob('*.sqlite'))
+        self.assertEqual(len(after), 3)
+        self.assertEqual(len(after - before), 1)
+        self.assertEqual(self.payload((after - before).pop()),
+                         'new final snapshot')
+
+    def test_prune_failure_does_not_retry_a_successful_final_export(self):
+        """Cleanup errors cannot cause an endless sequence of final copies."""
+        self.stub('python3', 'exit 1\n')
+        result = self.shell(self.code + '\nrelease_mumble_database')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('Failed to prune retired Mumble snapshots',
+                      result.stderr)
+        directory = self.root / 'shared/retired/020000000001'
+        self.assertEqual(len(list(directory.glob('*.sqlite'))), 1)
+
+    def journal_call(self, action, **env):
+        """Exercise production log routing and collect every journal sink."""
+        self.stub('systemd-cat', 'cat >> "$TEST_ROOT/journal"\n')
+        self.stub('logger', 'cat >> "$TEST_ROOT/journal"\n')
+        original = re.search(r'^log\(\) \{\n.*?^\}',
+                             (TOOLS / 'mumble-election.sh').read_text(),
+                             re.M | re.S)[0]
+        return self.shell(self.code + '\n' + original + '\n' + action, **env)
+
+    def test_successful_cadence_export_logs_once_and_unchanged_is_silent(self):
+        """Detailed helpers must not bypass the cadence log buffer."""
+        journal = self.root / 'journal'
+        result = self.journal_call('export_mumble_changes')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout + result.stderr, '')
+        self.assertEqual(journal.read_text().splitlines(), [
+            'MUMBLE-ELECTION: Exported Mumble DB '
+            f'({self.source.stat().st_size} bytes)'])
+        journal.write_text('')
+        result = self.journal_call('export_mumble_changes')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(journal.read_text(), '')
+
+    def test_failed_cadence_export_replays_diagnostics_to_journal(self):
+        """Keep preparation and SQLite errors when a cadence export fails."""
+        target = str(self.source) + '.uploading'
+        result = self.journal_call('export_mumble_changes',
+                                   BACKUP_MODE='fail', BACKUP_TARGET=target)
+        self.assertNotEqual(result.returncode, 0)
+        journal = (self.root / 'journal').read_text()
+        for detail in ('Mumble DB export failed', 'Checking integrity',
+                       'Creating pre-sync backup', 'Safe copy:',
+                       'injected SQLite backup failure',
+                       'Live SQLite backup failed'):
+            self.assertIn(detail, journal)
+        self.assertNotIn('Exported Mumble DB', journal)
+        self.assertNotIn('0|-1|-1', journal)
+        self.assertEqual(result.stdout + result.stderr, '')
+
+    def test_transition_logs_remain_detailed_without_checkpoint_rows(self):
+        """Release still records its checked copy, but no numeric result row."""
+        result = self.journal_call('release_mumble_database')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        journal = (self.root / 'journal').read_text()
+        for detail in ('Preserving retired', 'Checking integrity',
+                       'Checkpointing WAL', 'SQLite backup completed',
+                       'Database synced to Syncthing'):
+            self.assertIn(detail, journal)
+        self.assertNotIn('0|-1|-1', journal)
+        self.assertNotIn('Exported Mumble DB', journal)
+
+    def test_checkpoint_failure_logs_stderr_without_numeric_stdout(self):
+        """Discard checkpoint rows on failure while preserving the reason."""
+        result = self.journal_call('checkpoint_database "$WORKING_DB"',
+                                   CHECKPOINT_FAIL='1')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        journal = (self.root / 'journal').read_text()
+        self.assertIn('injected checkpoint failure', journal)
+        self.assertNotIn('0|-1|-1', journal)
+
     def takeover(self, **env):
         """Run the real takeover block with a failed shared database sync."""
-        source = (TOOLS / 'mumble-election.sh').read_text()
-        start = source.index('    # Sync database and start service if needed')
-        end = source.index('\n    touch /var/run/mesh-mumble.state', start)
         code = self.code + '''
-WAS_ALREADY_LEADER=false
 sync_database_from_shared() {
     printf '%s\n' sync >> "$EVENTS"
     return 1
 }
-''' + source[start:end]
+prepare_mumble_service
+'''
         return self.shell(code, **env)
 
     def test_sync_failure_logs_degraded_local_start(self):
@@ -258,8 +450,8 @@ sync_database_from_shared() {
         self.assertNotEqual(result.returncode, 0, result.stderr)
         self.assertNotIn('start mumble-server.service', self.events.read_text())
 
-    def test_running_voice_restarts_bound_to_new_vip_on_takeover(self):
-        """A live server must reload host= after acquiring a changed VIP."""
+    def test_running_voice_restarts_with_wildcard_binding_before_takeover(self):
+        """A live server must load wildcard host= before acquiring the VIP."""
         self.running_takeover()
 
     def test_running_voice_rebinds_even_when_shared_database_is_corrupt(self):
@@ -288,21 +480,10 @@ case "$1" in
         fi ;;
 esac
 ''')
-        source = (TOOLS / 'mumble-election.sh').read_text()
-        start = source.index('    # Check whether VIPs are assigned locally.')
-        end = source.index('\n    touch /var/run/mesh-mumble.state', start)
-        result = self.shell(self.code + '''
-MUMBLE_CONFIG="$TEST_ROOT/mumble.ini"
-MUMBLE_IPV4_VIP=10.1.0.1
-IPV4_VIP_WITH_MASK=10.1.0.1/24
-MUMBLE_IPV6_VIP=fd00:1::1
-MUMBLE_IPV6_VIP_WITH_MASK=fd00:1::1/64
-CONTROL_IFACE=br0
-ensure_shared_directory
-''' + source[start:end])
+        result = self.shell(self.code + '\nprepare_mumble_service\n')
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(config.read_text(), 'host=10.1.0.1\n')
-        self.assertEqual(bound.read_text(), '10.1.0.1\n')
+        self.assertEqual(config.read_text(), 'host=\n')
+        self.assertEqual(bound.read_text(), '\n')
         self.assertTrue((self.root / 'active').exists())
         events = self.events.read_text().splitlines()
         self.assertLess(events.index('stop mumble-server.service'),

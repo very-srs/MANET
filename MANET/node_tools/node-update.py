@@ -64,6 +64,9 @@ REQUIRED = MARKERS | {
     "usr/local/bin/manet-provision-status.sh", "usr/local/bin/manet-power-status.sh",
     "usr/local/bin/prepare-ap-iface.sh", "usr/local/bin/manet-wait-radios.py",
     "usr/local/bin/manet-dns-setup.sh",
+    "usr/local/bin/manet-uplink-dns.py",
+    "etc/systemd/system/manet-uplink-dns.service",
+    "etc/systemd/system/manet-uplink-dns.path",
     "usr/local/bin/manet_node_ipv4.py",
     "usr/local/bin/manet-radio-names.py",
     "usr/local/bin/manet-os-cleanup.py",
@@ -561,6 +564,14 @@ class Updater:
         self.retire_network_boot_units()
         self.retire_cpu_powersave()
         run_command(["systemctl", "daemon-reload"])
+        # Preserve MAC-matched DHCP files while disabling unqualified DNS.
+        # Fail before version commit; recovery repeats the pending migration.
+        run_command([str(self.destination('usr/local/bin/manet-dns-setup.sh'))])
+        dns_setup = self.destination('usr/local/bin/manet-uplink-dns.py')
+        run_command([str(dns_setup), '--root', str(self.root), 'install'],
+                    timeout=120)
+        run_command(['systemctl', 'enable', '--now', 'manet-uplink-dns.path',
+                     'manet-uplink-dns.service'])
         firmware_setup = self.destination('usr/local/bin/manet-mt7916-setup.sh')
         # Bound firmware setup and service integration to ten minutes.
         output = run_command([str(firmware_setup)], timeout=600)

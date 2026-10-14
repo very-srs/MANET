@@ -156,7 +156,7 @@ Bridge=
 
 [DHCP]
 ClientIdentifier=mac
-UseDNS=yes
+UseDNS=no
 UseNTP=yes
 UseRoutes=yes
 Timeout=15
@@ -164,6 +164,22 @@ Timeout=15
 [DHCPv4]
 UseRoutes=yes
 UseGateway=yes
+
+# BEGIN MANET qualified DNS
+[DHCPv4]
+UseDNS=no
+UseDomains=no
+RoutesToDNS=no
+RequestOptions=6 15 119
+
+[DHCPv6]
+UseDNS=no
+UseDomains=no
+
+[IPv6AcceptRA]
+UseDNS=no
+UseDomains=no
+# END MANET qualified DNS
 EOF
     chmod 644 "$conf"
     networkctl reload 2>/dev/null || true
