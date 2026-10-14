@@ -143,8 +143,11 @@ class ManagementLoadTests(unittest.TestCase):
 
     def test_measurement_limits_are_checked_before_starting_a_worker(self):
         import json
-        base = {'label': 'audit', 'pairs': [{}], 'tests': ['tcp_1stream'], 'duration': 30}
+        base = {'label': 'audit',
+                'pairs': [{'src_ip': '10.0.0.1', 'dst_ip': '10.0.0.2', 'dst_name': 'peer'}],
+                'tests': ['tcp_1stream'], 'duration': 30}
         with patch('manet_manage._measure_status', {'running': False}), \
+                patch('manet_manage.get_my_ip', return_value='10.0.0.1'), \
                 patch('manet_manage.threading.Thread') as worker:
             for extra in ({'duration': 0}, {'duration': 301}, {'pairs': [{}] * 65},
                           {'tests': ['unknown']}, {'pairs': [{}] * 64, 'duration': 300}):

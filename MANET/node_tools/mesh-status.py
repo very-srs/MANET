@@ -1659,18 +1659,18 @@ STATUS_HTML = r"""<!DOCTYPE html>
     <div id="hdr-meta">
       <div id="hdr-health" class="health-loading">
         <div id="hdr-health-dot"></div>
-        <span id="hdr-health-label">—</span>
+        <span id="hdr-health-label">-</span>
       </div>
-      <div class="meta" id="hdr-hostname">—</div>
-      <div class="meta" id="hdr-ip" style="padding-right:10px">—</div>
-      <div class="meta" id="hdr-ssid">—</div>
+      <div class="meta" id="hdr-hostname">-</div>
+      <div class="meta" id="hdr-ip" style="padding-right:10px">-</div>
+      <div class="meta" id="hdr-ssid">-</div>
       <div class="spacer"></div>
     </div>
     <div id="hdr-right">
       <button id="perf-link" class="perf-link-btn" type="button" onclick="goPerfDashboard()">MANAGE</button>
-      <div class="meta" id="hdr-nodes">—</div>
-      <div class="meta" id="hdr-gw-label">—</div>
-      <div class="meta" id="hdr-time" style="color:var(--muted);min-width:54px;text-align:right">—</div>
+      <div class="meta" id="hdr-nodes">-</div>
+      <div class="meta" id="hdr-gw-label">-</div>
+      <div class="meta" id="hdr-time" style="color:var(--muted);min-width:54px;text-align:right">-</div>
       <button id="theme-toggle" class="theme-toggle" type="button" onclick="toggleTheme()">Dark</button>
     </div>
   </div>
@@ -1827,7 +1827,7 @@ function renderNodeList(nodes) {
     if (n.is_direct && !n.is_me) badges.push(`<span class="badge badge-direct">DIRECT</span>`);
     if (n.best_link && n.best_link.iface && !n.is_me) {
       const linkRate = linkLabel(n.best_link.mbps);
-      badges.push(`<span class="badge badge-bestlink" title="BATMAN selected route via ${n.best_link.nexthop || 'unknown'}">BEST ${n.best_link.iface} ${linkRate}</span>`);
+      badges.push(`<span class="badge badge-bestlink" title="BATMAN selected route via ${esc(n.best_link.nexthop || 'unknown')}">BEST ${esc(n.best_link.iface)} ${linkRate}</span>`);
     }
     if (n.mumble)      badges.push(`<span class="badge badge-svc">MUMBLE</span>`);
     if (n.mediamtx)    badges.push(`<span class="badge badge-svc">MTX</span>`);
@@ -1840,14 +1840,14 @@ function renderNodeList(nodes) {
     const nodeStale = !n.is_me && n.state !== 'ACTIVE';
     const rateBadge = (n.is_me || nodeStale) ? '' : `<span class="badge ${linkClass(n.mbps)}">${linkLabel(n.mbps)}</span>`;
     const bar = nodeStale ? '' : `<div class="link-bar-wrap"><div class="link-bar" style="width:${linkPct(n.mbps)}%;background:${linkColor(n.mbps)}"></div></div>`;
-    const meta = (!nodeStale && n.uptime) ? `<span style="color:var(--muted)">up ${n.uptime}</span>` : '';
-    const cpu  = (!nodeStale && n.cpu)    ? `<span style="color:var(--muted)">CPU ${n.cpu}</span>` : '';
+    const meta = (!nodeStale && n.uptime) ? `<span style="color:var(--muted)">up ${esc(n.uptime)}</span>` : '';
+    const cpu  = (!nodeStale && n.cpu)    ? `<span style="color:var(--muted)">CPU ${esc(n.cpu)}</span>` : '';
     let battMeta = '';
     if (!nodeStale && n.battery != null) {
       const pct = n.battery.percentage;
       const col = battColor(pct);
       const icon = (n.battery.charging === true) ? '⚡' : (pct <= 15 ? '⚠' : '');
-      battMeta = `<span style="color:${col};font-size:10px">${icon}${pct}%</span>`;
+      battMeta = `<span style="color:${col};font-size:10px">${icon}${esc(pct)}%</span>`;
     }
     const offlineBadge = nodeStale ? `<span class="badge badge-link-bad" style="opacity:.7">OFFLINE</span><span style="color:var(--muted);font-size:10px">last seen ${fmtAge(n.last_seen)}</span>` : '';
 
@@ -1859,16 +1859,16 @@ function renderNodeList(nodes) {
           : (PEER_DETAIL_CACHE[n.id] || '<div class="peer-loading" style="color:var(--muted)">No details loaded</div>'));
     const detail = expanded ? `<div class="node-inline-detail">
       <div class="inline-detail-head">
-        <span class="inline-detail-title">${n.hostname}${n.ip ? '  ' + n.ip : ''}</span>
+        <span class="inline-detail-title">${esc(n.hostname)}${esc(n.ip ? '  ' + n.ip : '')}</span>
         ${n.is_me ? '<span class="self-node-badge">THIS NODE</span>' : ''}
       </div>
       <div class="inline-detail-body">${detailBody}</div>
     </div>` : '';
 
-    return `<div class="${cls}" data-id="${n.id}">
+    return `<div class="${cls}" data-id="${esc(n.id)}">
       <div class="node-summary">
-        <div class="node-name" style="${nodeStale ? 'color:var(--muted)' : ''}">${n.hostname}${thisNodeLabel}${n.state==='SHUTTING_DOWN'?'<span style="color:var(--bad);font-size:10px;margin-left:4px">OFFLINE</span>':''}</div>
-        <div class="node-ip">${n.ip||'—'} &nbsp; <span style="color:var(--muted)">${n.mac}</span></div>
+        <div class="node-name" style="${nodeStale ? 'color:var(--muted)' : ''}">${esc(n.hostname)}${thisNodeLabel}${n.state==='SHUTTING_DOWN'?'<span style="color:var(--bad);font-size:10px;margin-left:4px">OFFLINE</span>':''}</div>
+        <div class="node-ip">${esc(n.ip||'-')} &nbsp; <span style="color:var(--muted)">${esc(n.mac)}</span></div>
         <div class="node-meta">${nodeStale ? offlineBadge : rateBadge+badges.join('')+meta+cpu+battMeta}</div>
         ${bar}
       </div>
@@ -1885,8 +1885,8 @@ setInterval(tickLocalTime, 1000);
 tickLocalTime();
 
 function updateHeader(d) {
-  document.getElementById('hdr-hostname').textContent = d.my_hostname || '—';
-  document.getElementById('hdr-ip').textContent       = d.my_ip      || '—';
+  document.getElementById('hdr-hostname').textContent = d.my_hostname || '-';
+  document.getElementById('hdr-ip').textContent       = d.my_ip      || '-';
   document.getElementById('hdr-ssid').textContent     = d.mesh_ssid  ? `▶ ${d.mesh_ssid}` : '';
   document.getElementById('hdr-nodes').textContent    = `${d.nodes.length} node${d.nodes.length!==1?'s':''}`;
   // hdr-time is kept live by tickLocalTime(), no need to override here
@@ -1927,8 +1927,8 @@ function updatePowerBanner(localData) {
   const crit = p.state === 'critical';
   el.className = crit ? 'crit' : 'warn';
   el.textContent = crit
-    ? `\u26a0 UNDER-VOLTAGE NOW \u2014 this board is not getting enough power (${p.raw}). Radio faults are expected; check the PSU and cable.`
-    : `\u26a0 Power problem recorded since boot (${p.raw}) \u2014 ${p.undervoltage_ever ? 'under-voltage' : 'throttling'} has occurred. Suspect the PSU before the radios.`;
+    ? `\u26a0 UNDER-VOLTAGE NOW - this board is not getting enough power (${p.raw}). Radio faults are expected; check the PSU and cable.`
+    : `\u26a0 Power problem recorded since boot (${p.raw}) - ${p.undervoltage_ever ? 'under-voltage' : 'throttling'} has occurred. Suspect the PSU before the radios.`;
   el.style.display = 'block';
 }
 
@@ -2396,9 +2396,6 @@ function battColor(pct) {
   return '#ef4444';
 }
 
-function atakText(value) {
-  return String(value == null ? '' : value).replace(/[&<>"']/g, c => ({'&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'}[c]));
-}
 async function setAtakController(button) {
   button.disabled = true;
   const result = document.getElementById('atak-choice-result');
@@ -2441,15 +2438,15 @@ function atakPanel(atak) {
   html += '<div style="padding:5px 10px;font-size:11px">Radio with GPS: turn Android location off and enable ATAK external GPS on UDP 4349. Radio without GPS: keep Android location on. Leave Default Mesh SA on.</div>';
   if (atak.position) {
     const p = atak.position;
-    html += `<div class="eud-row">Position: ${atakText(p.lat)}, ${atakText(p.lon)} · ${atakText(p.source)}</div>`;
-    if (atak.manual) html += `<div class="eud-row"><button type="button" data-atak-uid="${atakText(atak.manual.uid)}" data-manual-id="${atakText(atak.manual.id)}" onclick="releaseAtakPoint(this)">Use phone GPS again</button><br>Available from the controlling phone.</div>`;
+    html += `<div class="eud-row">Position: ${esc(p.lat)}, ${esc(p.lon)} · ${esc(p.source)}</div>`;
+    if (atak.manual) html += `<div class="eud-row"><button type="button" data-atak-uid="${esc(atak.manual.uid)}" data-manual-id="${esc(atak.manual.id)}" onclick="releaseAtakPoint(this)">Use phone GPS again</button><br>Available from the controlling phone.</div>`;
   } else html += '<div class="eud-row">Position: unavailable</div>';
   peers.forEach(p => {
-    html += `<div class="eud-row"><span>${atakText(p.callsign)}</span> · ${p.port === 'wired' ? 'Wired' : 'Wi-Fi'}`;
+    html += `<div class="eud-row"><span>${esc(p.callsign)}</span> · ${p.port === 'wired' ? 'Wired' : 'Wi-Fi'}`;
     if (p.controller) html += ' · <strong>Controls location</strong>';
-    else html += `<br><button type="button" data-atak-uid="${atakText(p.uid)}" onclick="setAtakController(this)">Set location from this phone</button>`;
+    else html += `<br><button type="button" data-atak-uid="${esc(p.uid)}" onclick="setAtakController(this)">Set location from this phone</button>`;
     if (p.tak_server) html += ' · TAK server';
-    if (p.gps_disagreement_m != null) html += `<br>radio and phone GPS disagree by ${atakText(p.gps_disagreement_m)} m`;
+    if (p.gps_disagreement_m != null) html += `<br>radio and phone GPS disagree by ${esc(p.gps_disagreement_m)} m`;
     html += '</div>';
   });
   if (!peers.length) html += '<div class="eud-row">No ATAK phones present.</div>';
@@ -2462,7 +2459,7 @@ function renderLocalPanel(d) {
   let html = '<details><summary style="padding:10px;cursor:pointer">Mesh recovery</summary>' + recoveryPanel(d.recovery) + '</details>';
 
   // Battery
-  let battHtml = '—';
+  let battHtml = '-';
   if (d.battery != null) {
     const b   = d.battery;
     const pct = b.percentage;
@@ -2474,30 +2471,30 @@ function renderLocalPanel(d) {
       const mW  = b.power_w  != null ? b.power_w  : null;
       const st  = b.status || '';
       const stIcon = st === 'charging' ? ' ⚡' : st === 'full' ? ' ✓' : '';
-      const mAstr  = mA != null ? ` &nbsp;${mA > 0 ? '+' : ''}${mA}mA` : '';
-      const mWstr  = mW != null ? ` &nbsp;${mW}W` : '';
+      const mAstr  = mA != null ? ` &nbsp;${mA > 0 ? '+' : ''}${esc(mA)}mA` : '';
+      const mWstr  = mW != null ? ` &nbsp;${esc(mW)}W` : '';
       extra = `<span style="font-size:9px;color:var(--muted)"> ${v}V${mAstr}${mWstr}${stIcon}</span>`;
     }
-    battHtml = `${pct}%<span class="batt-bar-wrap"><span class="batt-bar" style="width:${pct}%;background:${col}"></span></span>${extra}`;
+    battHtml = `${esc(pct)}%<span class="batt-bar-wrap"><span class="batt-bar" style="width:${Math.max(0, Math.min(100, Number(pct) || 0))}%;background:${col}"></span></span>${extra}`;
   }
 
   // GPS
   let gpsHtml;
   if (d.gps && d.gps.available) {
-    gpsHtml = `<span class="gps-dot" style="background:var(--good)"></span>${d.gps.lat}, ${d.gps.lon}` +
-              (d.gps.alt ? ` &nbsp;${d.gps.alt}m` : '');
+    gpsHtml = `<span class="gps-dot" style="background:var(--good)"></span>${esc(d.gps.lat)}, ${esc(d.gps.lon)}` +
+              (d.gps.alt ? ` &nbsp;${esc(d.gps.alt)}m` : '');
   } else {
     gpsHtml = `<span class="gps-dot" style="background:var(--muted)"></span><span style="color:var(--muted)">No fix</span>`;
   }
 
   const rows = [
-    ['Hostname', d.hostname || '—'],
-    ['Mesh IP',  d.ip       || '—'],
-    ['Uptime',   d.uptime   || '—'],
-    ['Version',  d.version  || '—'],
+    ['Hostname', esc(d.hostname || '-')],
+    ['Mesh IP',  esc(d.ip       || '-')],
+    ['Uptime',   esc(d.uptime   || '-')],
+    ['Version',  esc(d.version  || '-')],
     ['Battery',  battHtml],
     ['GPS',      gpsHtml],
-    ['EUD Mode', d.eud_mode || '—'],
+    ['EUD Mode', esc(d.eud_mode || '-')],
   ];
   if (d.power && d.power.available) {
     const ps = d.power.state;
@@ -2507,14 +2504,14 @@ function renderLocalPanel(d) {
               : ps === 'notice'   ? 'throttling since boot'
               : 'OK';
     rows.push(['Power', `<span class="gps-dot" style="background:${col}"></span>${txt}` +
-      (ps === 'ok' ? '' : ` <span style="font-size:9px;color:var(--muted)">${d.power.raw}</span>`)]);
+      (ps === 'ok' ? '' : ` <span style="font-size:9px;color:var(--muted)">${esc(d.power.raw)}</span>`)]);
   }
   if (d.eud_mode !== 'wired' && d.ap_ssid) {
-    rows.push(['AP SSID', d.ap_ssid]);
+    rows.push(['AP SSID', esc(d.ap_ssid)]);
   }
 
   html += rows.map(([label, val]) =>
-    `<div class="local-row"><span class="local-label">${label}</span><span class="local-val">${val}</span></div>`
+    `<div class="local-row"><span class="local-label">${esc(label)}</span><span class="local-val">${val}</span></div>`
   ).join('');
 
   // ── Interfaces ──
@@ -2536,19 +2533,19 @@ function renderLocalPanel(d) {
       const stateCls = iface.state === 'UP' ? 'up' : iface.state === 'DOWN' ? 'down' : 'unknown';
       const stateLabel = iface.state || '?';
       const addrs = iface.addrs && iface.addrs.length
-        ? `<div class="iface-addrs">${iface.addrs.join(' &nbsp; ')}</div>` : '';
+        ? `<div class="iface-addrs">${iface.addrs.map(esc).join(' &nbsp; ')}</div>` : '';
       const mcs = (iface.tx_mcs || iface.rx_mcs)
-        ? `<div class="iface-addrs">TX ${iface.tx_mcs || '—'} &nbsp; RX ${iface.rx_mcs || '—'}</div>` : '';
+        ? `<div class="iface-addrs">TX ${esc(iface.tx_mcs || '-')} &nbsp; RX ${esc(iface.rx_mcs || '-')}</div>` : '';
       const faultLines = (iface.faults || []).map(f =>
-        `<div class="${iface.health === 'fault' ? 'iface-fault' : 'iface-warn'}">${f}</div>`
+        `<div class="${iface.health === 'fault' ? 'iface-fault' : 'iface-warn'}">${esc(f)}</div>`
       ).join('');
-      return `<div class="iface-row health-${iface.health}">
+      return `<div class="iface-row health-${esc(iface.health)}">
         <div class="iface-header">
-          <span class="iface-name">${iface.name}</span>
-          <span class="iface-state iface-state-${stateCls}">${stateLabel}</span>
-          ${label ? `<span class="iface-role role-${iface.role}">${label}</span>` : ''}
+          <span class="iface-name">${esc(iface.name)}</span>
+          <span class="iface-state iface-state-${stateCls}">${esc(stateLabel)}</span>
+          ${label ? `<span class="iface-role role-${esc(iface.role)}">${esc(label)}</span>` : ''}
         </div>
-        ${iface.detail ? `<div class="iface-detail">${iface.detail}</div>` : ''}
+        ${iface.detail ? `<div class="iface-detail">${esc(iface.detail)}</div>` : ''}
         ${addrs}
         ${mcs}
         ${faultLines}
@@ -2562,9 +2559,9 @@ function renderLocalPanel(d) {
   if (d.euds && d.euds.length) {
     html += d.euds.map(e =>
       `<div class="eud-row">
-        <span class="eud-name">${e.hostname || '<i style="color:var(--muted)">unknown</i>'}</span>
-        &nbsp;<span class="eud-ip">${e.ip}</span>
-        <div class="eud-mac">${e.mac}</div>
+        <span class="eud-name">${e.hostname ? esc(e.hostname) : '<i style="color:var(--muted)">unknown</i>'}</span>
+        &nbsp;<span class="eud-ip">${esc(e.ip)}</span>
+        <div class="eud-mac">${esc(e.mac)}</div>
       </div>`
     ).join('');
   } else {
@@ -2579,7 +2576,7 @@ function renderLocalPanel(d) {
   html += `<div class="svc-grid">`;
   for (const [key, label] of Object.entries(svcLabels)) {
     const on = d.services && d.services[key];
-    html += `<span class="svc-pill ${on ? 'svc-on' : 'svc-off'}">${label}</span>`;
+    html += `<span class="svc-pill ${on ? 'svc-on' : 'svc-off'}">${esc(label)}</span>`;
   }
   html += `</div>`;
 
@@ -2598,7 +2595,7 @@ async function fetchLocal() {
     LOCAL_DETAIL_HTML = renderLocalPanel(d);
     if (DATA) renderNodeList(DATA.nodes);
   } catch (err) {
-    LOCAL_DETAIL_HTML = `<div class="peer-loading" style="color:var(--bad)">Error: ${err.message}</div>`;
+    LOCAL_DETAIL_HTML = `<div class="peer-loading" style="color:var(--bad)">Error: ${esc(err.message)}</div>`;
     if (DATA) renderNodeList(DATA.nodes);
   } finally { localBusy = false; }
 }
@@ -2657,7 +2654,7 @@ function openPeerDrawer(node) {
   EXPANDED_NODE_IDS.add(node.id);
   PEER_LOADING_IDS.add(node.id);
   if (DATA) renderNodeList(DATA.nodes);
-  const listRow = document.querySelector(`#node-list .node-row[data-id="${node.id}"]`);
+  const listRow = document.querySelector(`#node-list .node-row[data-id="${CSS.escape(node.id)}"]`);
   if (listRow) listRow.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
   if (!SIM.running) drawTopo();
   if (!node.ip) {
@@ -2675,7 +2672,7 @@ function showLocalInDrawer() {
   EXPANDED_NODE_IDS.add(localId);
   PEER_LOADING_IDS.delete(localId);
   if (DATA) renderNodeList(DATA.nodes);
-  const listRow = document.querySelector(`#node-list .node-row[data-id="${localId}"]`);
+  const listRow = document.querySelector(`#node-list .node-row[data-id="${CSS.escape(localId)}"]`);
   if (listRow) listRow.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
   if (!SIM.running) drawTopo();
   fetchLocal();
@@ -2687,13 +2684,13 @@ async function fetchPeer(ip, hostname) {
     : null;
   const nodeId = node ? node.id : null;
   try {
-    const r = await statusFetch('/api/peer/' + ip);
+    const r = await statusFetch('/api/peer/' + encodeURIComponent(ip));
     const d = await r.json();
     if (!r.ok || d.error) throw new Error(d.error || r.status);
     if (nodeId) PEER_DETAIL_CACHE[nodeId] = renderPeerDrawer(d, hostname);
   } catch (err) {
     if (nodeId) PEER_DETAIL_CACHE[nodeId] =
-      '<div class="peer-loading" style="color:var(--bad)">Error: ' + err.message + '</div>';
+      '<div class="peer-loading" style="color:var(--bad)">Error: ' + esc(err.message) + '</div>';
   } finally {
     PEER_LOADING_IDS.delete(nodeId);
     if (DATA) renderNodeList(DATA.nodes);
@@ -2704,40 +2701,40 @@ function renderPeerDrawer(d, hostname) {
   let html = '';
 
   // Battery
-  let battHtml = '—';
+  let battHtml = '-';
   if (d.battery != null) {
     const b = d.battery, pct = b.percentage, col = battColor(pct);
     const icon = b.charging === true ? ' ⚡' : (pct <= 15 ? ' ⚠' : '');
     let extra = '';
     if (b.voltage_v != null) {
-      const mAstr = b.current_ma != null ? ` ${b.current_ma > 0 ? '+' : ''}${b.current_ma}mA` : '';
-      const mWstr = b.power_w   != null ? ` ${b.power_w}W` : '';
+      const mAstr = b.current_ma != null ? ` ${b.current_ma > 0 ? '+' : ''}${esc(b.current_ma)}mA` : '';
+      const mWstr = b.power_w   != null ? ` ${esc(b.power_w)}W` : '';
       const stIcon = b.status === 'charging' ? ' ⚡' : '';
       extra = `<span style="font-size:9px;color:var(--muted)"> ${b.voltage_v.toFixed(3)}V${mAstr}${mWstr}${stIcon}</span>`;
     }
-    battHtml = `${pct}%<span class="batt-bar-wrap"><span class="batt-bar" style="width:${pct}%;background:${col}"></span></span>${icon}${extra}`;
+    battHtml = `${esc(pct)}%<span class="batt-bar-wrap"><span class="batt-bar" style="width:${Math.max(0, Math.min(100, Number(pct) || 0))}%;background:${col}"></span></span>${icon}${extra}`;
   }
 
   let gpsHtml;
   if (d.gps && d.gps.available) {
-    gpsHtml = `<span class="gps-dot" style="background:var(--good)"></span>${d.gps.lat}, ${d.gps.lon}` +
-              (d.gps.alt ? ` &nbsp;${d.gps.alt}m` : '');
+    gpsHtml = `<span class="gps-dot" style="background:var(--good)"></span>${esc(d.gps.lat)}, ${esc(d.gps.lon)}` +
+              (d.gps.alt ? ` &nbsp;${esc(d.gps.alt)}m` : '');
   } else {
     gpsHtml = `<span class="gps-dot" style="background:var(--muted)"></span><span style="color:var(--muted)">No fix</span>`;
   }
 
   const rows = [
-    ['Hostname', d.hostname || '—'],
-    ['Mesh IP',  d.ip       || '—'],
-    ['Uptime',   d.uptime   || '—'],
+    ['Hostname', esc(d.hostname || '-')],
+    ['Mesh IP',  esc(d.ip       || '-')],
+    ['Uptime',   esc(d.uptime   || '-')],
     ['Battery',  battHtml],
     ['GPS',      gpsHtml],
-    ['EUD Mode', d.eud_mode || '—'],
+    ['EUD Mode', esc(d.eud_mode || '-')],
   ];
-  if (d.ap_ssid) rows.push(['AP SSID', d.ap_ssid]);
+  if (d.ap_ssid) rows.push(['AP SSID', esc(d.ap_ssid)]);
 
   html += rows.map(([label, val]) =>
-    `<div class="local-row"><span class="local-label">${label}</span><span class="local-val">${val}</span></div>`
+    `<div class="local-row"><span class="local-label">${esc(label)}</span><span class="local-val">${val}</span></div>`
   ).join('');
 
   // Interfaces
@@ -2753,17 +2750,17 @@ function renderPeerDrawer(d, hostname) {
     html += d.interfaces.map(iface => {
       const label = roleLabel[iface.role] || iface.role.toUpperCase();
       const sc = iface.state === 'UP' ? 'up' : iface.state === 'DOWN' ? 'down' : 'unknown';
-      const addrs = iface.addrs && iface.addrs.length ? `<div class="iface-addrs">${iface.addrs.join(' &nbsp; ')}</div>` : '';
+      const addrs = iface.addrs && iface.addrs.length ? `<div class="iface-addrs">${iface.addrs.map(esc).join(' &nbsp; ')}</div>` : '';
       const mcs = (iface.tx_mcs || iface.rx_mcs)
-        ? `<div class="iface-addrs">TX ${iface.tx_mcs || '—'} &nbsp; RX ${iface.rx_mcs || '—'}</div>` : '';
-      const faultLines = (iface.faults || []).map(f => `<div class="${iface.health==='fault'?'iface-fault':'iface-warn'}">${f}</div>`).join('');
-      return `<div class="iface-row health-${iface.health}">
+        ? `<div class="iface-addrs">TX ${esc(iface.tx_mcs || '-')} &nbsp; RX ${esc(iface.rx_mcs || '-')}</div>` : '';
+      const faultLines = (iface.faults || []).map(f => `<div class="${iface.health==='fault'?'iface-fault':'iface-warn'}">${esc(f)}</div>`).join('');
+      return `<div class="iface-row health-${esc(iface.health)}">
         <div class="iface-header">
-          <span class="iface-name">${iface.name}</span>
-          <span class="iface-state iface-state-${sc}">${iface.state||'?'}</span>
-          ${label ? `<span class="iface-role role-${iface.role}">${label}</span>` : ''}
+          <span class="iface-name">${esc(iface.name)}</span>
+          <span class="iface-state iface-state-${sc}">${esc(iface.state||'?')}</span>
+          ${label ? `<span class="iface-role role-${esc(iface.role)}">${esc(label)}</span>` : ''}
         </div>
-        ${iface.detail ? `<div class="iface-detail">${iface.detail}</div>` : ''}
+        ${iface.detail ? `<div class="iface-detail">${esc(iface.detail)}</div>` : ''}
         ${addrs}${mcs}${faultLines}
       </div>`;
     }).join('');
@@ -2771,14 +2768,14 @@ function renderPeerDrawer(d, hostname) {
 
   // Connected EUDs
   const eudCount = (d.euds && d.euds.length) ? d.euds.length : (d.eud_count || 0);
-  html += `<div class="section-hdr" style="font-size:9px;position:static">CONNECTED EUDS (${eudCount})</div>`;
+  html += `<div class="section-hdr" style="font-size:9px;position:static">CONNECTED EUDS (${esc(eudCount)})</div>`;
   if (d.euds && d.euds.length) {
     html += d.euds.map(e => `<div class="eud-row">
-      <span class="eud-name">${e.hostname || '<i style="color:var(--muted)">unknown</i>'}</span>
-      &nbsp;<span class="eud-ip">${e.ip}</span>
-      <div class="eud-mac">${e.mac}</div></div>`).join('');
+      <span class="eud-name">${e.hostname ? esc(e.hostname) : '<i style="color:var(--muted)">unknown</i>'}</span>
+      &nbsp;<span class="eud-ip">${esc(e.ip)}</span>
+      <div class="eud-mac">${esc(e.mac)}</div></div>`).join('');
   } else if (eudCount) {
-    html += `<div style="padding:5px 10px;font-size:11px;color:var(--muted)">${eudCount} connected (names not published)</div>`;
+    html += `<div style="padding:5px 10px;font-size:11px;color:var(--muted)">${esc(eudCount)} connected (names not published)</div>`;
   } else {
     html += `<div style="padding:5px 10px;font-size:11px;color:var(--muted)">None</div>`;
   }
@@ -2789,7 +2786,7 @@ function renderPeerDrawer(d, hostname) {
   html += `<div class="svc-grid">`;
   for (const [key, label] of Object.entries(svcLabels)) {
     const on = d.services && d.services[key];
-    html += `<span class="svc-pill ${on?'svc-on':'svc-off'}">${label}</span>`;
+    html += `<span class="svc-pill ${on?'svc-on':'svc-off'}">${esc(label)}</span>`;
   }
   html += `</div>`;
 

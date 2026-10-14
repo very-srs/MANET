@@ -61,6 +61,8 @@ class MeasurementBudgetTests(unittest.TestCase):
         self.status = {'running': False}
         for name, value in (
                 ('SESSIONS_DIR', str(self.root)),
+                ('get_my_ip', Mock(return_value='10.0.0.1')),
+                ('get_my_hostname', Mock(return_value='actual-local')),
                 ('_measure_status', self.status),
                 ('_measure_mono', {'started': None, 'current': None})):
             patcher = patch.object(manage, name, value)
@@ -100,6 +102,31 @@ class MeasurementBudgetTests(unittest.TestCase):
                 response, worker = self.start_batch(pairs, tests, 30)
                 self.assertTrue(response.args[0]['ok'])
                 worker.return_value.start.assert_called_once()
+
+    def test_remote_source_is_rejected_before_worker_starts(self):
+        self.pair['src_ip'] = '10.0.0.3'
+        response, worker = self.start_batch(1, ['icmp_ping'], 5)
+        self.assertEqual(response.args[1:], (400,))
+        self.assertIn('this node', response.args[0]['error'])
+        worker.assert_not_called()
+
+    def test_worker_records_real_executor_and_requires_a_ping_reply(self):
+        topo = {'active_interfaces': [], 'halow_channel': '', 'halow_bw': '', 'ch_2g': ''}
+        for received in (0, 1):
+            with patch.object(manage, 'snapshot_topology', return_value=topo), \
+                    patch.object(manage, 'get_session_hop_count', return_value=(1, 'batctl')), \
+                    patch.object(manage.time, 'sleep'), \
+                    patch.object(manage.subprocess, 'run', return_value=SimpleNamespace(
+                        stdout=f'100 packets transmitted, {received} received, {100-received}% packet loss',
+                        returncode=0 if received else 1)):
+                label = f'replies-{received}'
+                manage.run_measurement_session(label, [self.pair], ['icmp_ping'], 5, '4M')
+                result = manage.get_session_results(label)[0]
+                self.assertEqual(result['ok'], received > 0)
+                self.assertEqual(result['source_node'], 'actual-local')
+                self.assertEqual(result['executing_node'], 'actual-local')
+                self.assertEqual(result['executing_ip'], '10.0.0.1')
+                self.assertEqual(result['destination_ip'], '10.0.0.2')
 
     def run_worker(self, slow_stage):
         clock = [0.0]

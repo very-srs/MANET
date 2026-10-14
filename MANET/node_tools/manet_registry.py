@@ -39,7 +39,13 @@ def parse_registry(path):
             nid, field, value = m.groups()
             if nid not in nodes:
                 nodes[nid] = {'id': nid}
-            nodes[nid][field] = value.replace("'\\''", "'")
+            value = value.replace("'\\''", "'")
+            # A display name can contain spaces, apostrophes and punctuation.
+            # Bound its size and reject control characters, never treat it as HTML.
+            if field == 'HOSTNAME' and (not value.strip() or len(value) > 253
+                                        or not value.isprintable()):
+                value = ''
+            nodes[nid][field] = value
     except Exception:
         pass
     return nodes

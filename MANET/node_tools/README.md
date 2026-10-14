@@ -165,7 +165,9 @@ polling, and visible tabs wait for an outstanding poll before starting another.
 
 Measurement batches allow up to 64 pairs and seven test types, with 5-300 seconds
 per throughput test and a one-hour total execution budget including command
-timeouts. A second measurement cannot start while one is running.
+timeouts. Only this node can be the source. Results record its executing
+hostname and address, including in CSV exports. Ping succeeds only when at
+least one reply arrives. A second measurement cannot start while one is running.
 
 Expand **Mesh recovery** on the management page or in this node's status panel
 for observed and agreed Wi-Fi channels, acknowledgement progress, recovery holds,
@@ -1032,6 +1034,9 @@ password. The management UI drives it mesh-wide over Alfred.
 **mesh-hosts-update.sh**
 
 Populates `/etc/hosts` from the registry, so peer hostnames resolve without DNS.
+Only single-label DNS names with usable IPv4 addresses inside `ipv4_network`
+are accepted. Localhost and aliases outside the managed block are reserved. Names are compared without case. Conflicting addresses
+for one name are omitted, while identical claims collapse to one mapping.
 The two-minute refresh compares mappings in memory and leaves the file untouched
 when they are unchanged. Changed mappings replace only the marked mesh block,
 preserving other entries, ownership and permissions. Publication uses a temporary
@@ -1260,6 +1265,12 @@ restoration is retried on the next cycle, including after a reboot.
 Danger is judged per node against its own current values, so re-broadcasting an
 SSID a node already has does not put it into a trial window.
 
+A newly staged retry reconciles every named SSID/key against the supplicant
+files even if mesh.conf already matches. Supplicant files and their restart
+finish before mesh.conf is committed. A boot-local pending flag retains a
+failed restart obligation until a new dangerous apply succeeds or the node boots.
+This does not resume an interrupted authenticated command automatically.
+
 Configuration arriving from another node is validated before it is used. Keys
 are whitelisted and values are checked for shape and length, so a peer cannot
 use a config broadcast to write arbitrary supplicant configuration.
@@ -1417,8 +1428,11 @@ both embedded version files before staging the payload. It checks free space
 and dependencies before installing files. Concurrent attempts are locked out.
 
 The installed version is recorded only after file installation, manager
-selection, systemd reload, and the status/node-manager restarts and active-state
-checks succeed. Failures return a nonzero exit status and are logged under
+selection, systemd reload, and the required restarts and active-state checks
+succeed. Other shipped runtime daemons use try-restart, keeping stopped voice
+and ATAK services stopped. Previously active daemons must still be active
+before the version is committed. That obligation survives retries in the same
+boot, so a failed daemon cannot silently become optional on retry. Failures return a nonzero exit status and are logged under
 `manet-update`; inspect them with `journalctl -t manet-update`. An interrupted
 installation leaves `/var/lib/manet-update/in-progress` and a durable recovery
 archive under `/var/lib/manet-update/recovery`. Every subsequent attempt first

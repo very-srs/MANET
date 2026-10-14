@@ -30,9 +30,10 @@ class UpdateTests(unittest.TestCase):
         self.addCleanup(scratch.cleanup)
         self.work = Path(scratch.name)
         self.root = self.work / 'root'
-        for directory in ('etc', 'usr/local/bin', 'proc/device-tree', 'run'):
+        for directory in ('etc', 'usr/local/bin', 'proc/device-tree', 'proc/sys/kernel/random', 'run'):
             (self.root / directory).mkdir(parents=True)
         (self.root / 'run/initial_time_synced').touch()
+        (self.root / 'proc/sys/kernel/random/boot_id').write_text('boot-test')
         (self.root / 'proc/device-tree/model').write_bytes(b'Raspberry Pi Compute Module 4\0')
         self.old_version = '0.549\n09/2026\n'
         self.new_version = '0.550\n09/2026\n'
@@ -72,6 +73,8 @@ with open(os.environ['TEST_EVENTS'], 'a') as stream:
     stream.write('marker ' + (marker.read_text().splitlines()[0] if marker.exists() else 'missing') + '\\n')
 if os.environ.get('TEST_SYSTEMCTL_FAIL') == args:
     sys.exit(1)
+if sys.argv[1] == 'show':
+    print('active' if sys.argv[-1] in os.environ.get('TEST_ACTIVE_SERVICES', '').split(',') else 'inactive')
 ''')
         self.environment = patch.dict(os.environ, {
             'PATH': str(commands) + os.pathsep + os.environ['PATH'],
@@ -154,6 +157,59 @@ if os.environ.get('TEST_SYSTEMCTL_FAIL') == args:
         self.assertFalse(self.updater.pending.exists())
         self.assertFalse(list(self.updater.state.glob('download-*')))
         self.updater.log.assert_called_with('Node tools updated to version 0.550')
+
+    def test_runtime_daemons_restart_and_only_active_ones_are_checked(self):
+        with patch.dict(os.environ, {'TEST_ACTIVE_SERVICES': 'manet-atak.service,gps-reader.service'}):
+            self.updater.update()
+        history = self.history()
+        for service in update.RUNTIME_SERVICES:
+            self.assertIn('systemctl try-restart ' + service, history)
+            self.assertNotIn('systemctl restart ' + service, history)
+            check = 'systemctl is-active --quiet ' + service
+            if service in ('manet-atak.service', 'gps-reader.service'):
+                self.assertIn(check, history)
+            else:
+                self.assertNotIn(check, history)
+        self.assertNotIn('marker 0.550', history)
+
+    def test_runtime_restart_or_health_failure_withholds_version(self):
+        for action in ('try-restart', 'is-active --quiet'):
+            with self.subTest(action=action), patch.dict(os.environ, {
+                    'TEST_ACTIVE_SERVICES': 'manet-atak.service',
+                    'TEST_SYSTEMCTL_FAIL': action + ' manet-atak.service'}):
+                with self.assertRaises(update.UpdateError):
+                    self.updater.update()
+                self.assertTrue(self.updater.pending.exists())
+                self.assertEqual(self.updater.marker.read_text(), self.old_version)
+        self.updater.update()
+        self.assertFalse(self.updater.pending.exists())
+
+    def test_failed_runtime_still_requires_health_check_on_same_boot_retry(self):
+        with patch.dict(os.environ, {'TEST_ACTIVE_SERVICES': 'manet-atak.service',
+                                    'TEST_SYSTEMCTL_FAIL': 'try-restart manet-atak.service'}):
+            with self.assertRaises(update.UpdateError):
+                self.updater.update()
+        with patch.dict(os.environ, {'TEST_ACTIVE_SERVICES': '',
+                                    'TEST_SYSTEMCTL_FAIL': 'is-active --quiet manet-atak.service'}):
+            with self.assertRaises(update.UpdateError):
+                self.updater.update()
+        self.assertEqual(self.updater.marker.read_text(), self.old_version)
+        # A real reboot starts services according to their configured state.
+        (self.root / 'proc/sys/kernel/random/boot_id').write_text('next-boot')
+        with patch.dict(os.environ, {'TEST_ACTIVE_SERVICES': '',
+                                    'TEST_SYSTEMCTL_FAIL': 'is-active --quiet manet-atak.service'}):
+            self.updater.update()
+        self.assertFalse(self.updater.pending.exists())
+
+    def test_runtime_list_covers_shipped_resident_units_and_excludes_oneshots(self):
+        units = Path(__file__).parents[1] / 'systemd'
+        residents = set()
+        for unit in units.glob('*.service'):
+            source = unit.read_text()
+            if ('Type=simple' in source and '/usr/local/bin/' in source
+                    and 'PartOf=node-manager.service' not in source):
+                residents.add(unit.name)
+        self.assertEqual(set(update.RUNTIME_SERVICES), residents)
 
     def test_firmware_setup_runs_after_install_and_before_version(self):
         name = 'usr/local/bin/manet-mt7916-setup.sh'
@@ -558,7 +614,8 @@ if os.environ.get('TEST_SYSTEMCTL_FAIL') == args:
         self.assertEqual(target.read_text(), 'old acs\n')
         self.assertEqual(self.updater.marker.read_text(), self.old_version)
         self.assertTrue(self.updater.pending.exists())
-        self.assertNotIn('systemctl', self.history())
+        self.assertNotIn('systemctl daemon-reload', self.history())
+        self.assertNotIn('systemctl restart', self.history())
         self.assertFalse(list(target.parent.glob('.manet-update-*')))
 
     def test_final_version_write_failure_retains_pending_retry(self):

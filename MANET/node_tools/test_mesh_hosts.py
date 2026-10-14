@@ -24,6 +24,8 @@ class HostsTests(unittest.TestCase):
         self.registry = self.root / 'registry'
         self.hosts = self.root / 'hosts'
         self.lock = self.root / 'hosts.lock'
+        self.conf = self.root / 'mesh.conf'
+        self.conf.write_text('ipv4_network=10.30.0.0/16\n')
         self.local = b'127.0.0.1 localhost\n# local comment: \xff\n'
         self.hosts.write_bytes(self.local)
         self.hosts.chmod(0o640)
@@ -36,7 +38,7 @@ class HostsTests(unittest.TestCase):
             f'NODE_020000000001_IPV4_ADDRESS={shlex.quote(address)}\n')
 
     def update(self):
-        return hosts.update(self.registry, self.hosts, self.lock)
+        return hosts.update(self.registry, self.hosts, self.lock, self.conf)
 
     def test_idle_ticks_and_unrelated_telemetry_never_open_a_tempfile(self):
         self.assertTrue(self.update())
@@ -121,6 +123,35 @@ class HostsTests(unittest.TestCase):
         self.update()
         self.assertNotIn(b'.local.local', self.hosts.read_bytes())
 
+    def test_names_cannot_shadow_local_or_operator_owned_aliases(self):
+        self.hosts.write_text('127.0.0.1 localhost\n192.0.2.1 Infra alias.local.\n')
+        for name in ('api.github.com', 'mesh-one.local', 'LOCALHOST', 'infra', 'alias'):
+            with self.subTest(name=name):
+                self.write_registry(name=name)
+                self.update()
+                self.assertNotIn('10.30.', self.hosts.read_text())
+
+    def test_outside_network_and_network_endpoints_are_skipped(self):
+        for address in ('192.0.2.1', '127.0.0.1', '10.30.0.0', '10.30.255.255'):
+            self.write_registry(address=address)
+            self.update()
+            self.assertNotIn(b'mesh-one', self.hosts.read_bytes())
+        self.conf.write_text('ipv4_network=bad\n')
+        before = self.hosts.read_bytes()
+        with self.assertRaises(ValueError):
+            self.update()
+        self.assertEqual(self.hosts.read_bytes(), before)
+
+    def test_conflicting_case_insensitive_claims_are_omitted_in_any_order(self):
+        self.write_registry(name='Mesh-One')
+        self.registry.write_text(self.registry.read_text() +
+            "NODE_020000000002_HOSTNAME='mesh-one'\n"
+            "NODE_020000000002_IPV4_ADDRESS='10.30.0.13'\n")
+        self.update()
+        self.assertNotIn(b'mesh-one', self.hosts.read_bytes())
+        self.registry.write_text('\n'.join(reversed(self.registry.read_text().splitlines())) + '\n')
+        self.assertFalse(self.update())
+
     def test_failed_publication_keeps_original_and_cleans_scratch(self):
         for operation in ('replace', 'fsync'):
             with self.subTest(operation=operation):
@@ -143,7 +174,8 @@ class HostsTests(unittest.TestCase):
     def test_shell_entry_point_serializes_refreshes(self):
         env = dict(os.environ, MESH_REGISTRY_FILE=str(self.registry),
                    MANET_HOSTS_FILE=str(self.hosts),
-                   MANET_HOSTS_LOCK=str(self.lock), MANET_TOOLS_DIR=str(TOOLS))
+                   MANET_HOSTS_LOCK=str(self.lock), MANET_TOOLS_DIR=str(TOOLS),
+                   MANET_MESH_CONF=str(self.conf))
         args = ['bash', str(TOOLS / 'mesh-hosts-update.sh')]
         with self.lock.open('a') as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)

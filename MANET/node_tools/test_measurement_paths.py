@@ -28,7 +28,8 @@ class MeasurementPathTests(unittest.TestCase):
         topo = {'active_interfaces': [], 'halow_channel': '', 'halow_bw': '', 'ch_2g': ''}
         name = '../../untrusted/name'
         pairs = [{'src_ip': '10.0.0.1', 'dst_ip': '10.0.0.2', 'src_name': name, 'dst_name': name}]
-        with patch.object(manage, 'snapshot_topology', return_value=topo), \
+        with patch.object(manage, 'get_my_hostname', return_value=name), \
+                patch.object(manage, 'snapshot_topology', return_value=topo), \
                 patch.object(manage, 'get_session_hop_count', return_value=(1, 'test')), \
                 patch.object(manage, 'run_local_ping', return_value={'loss_pct': 0}), \
                 patch.object(manage.time, 'sleep'):

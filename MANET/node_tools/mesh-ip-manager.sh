@@ -84,6 +84,14 @@ log() {
     printf '%s\n' "IP-MGR: $1" >&2
 }
 
+# Chunk selection enumerates every free chunk and draws from $RANDOM
+# (0-32767), so the mesh is at most a /16. The validator refuses larger
+# networks; this catches a hand-edited mesh.conf.
+if [[ "${IPV4_NETWORK#*/}" =~ ^[0-9]+$ ]] && [ "${IPV4_NETWORK#*/}" -lt 16 ]; then
+    log "ipv4_network $IPV4_NETWORK is larger than a /16; not allocating"
+    exit 1
+fi
+
 # Converts an IP string to a 32-bit integer
 ip_to_int() {
     local ip=$1

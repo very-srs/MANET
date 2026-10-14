@@ -659,11 +659,12 @@ def apply_halow_channel(channel, bw='2MHz', dbm=None):
             'actual_dbm': read_iface_txpower_dbm('wlan2')}
 
 
-def acs_enabled():
+def acs_enabled(path=None):
     """Recognize an enabled acs assignment in the local mesh config."""
-    conf = Path(os.environ.get('MANET_MESH_CONF', '/etc/mesh.conf')).read_text()
-    # Match a complete assignment, ignoring case and trailing whitespace.
-    return bool(re.search(r'^acs=(y|yes|1|true)\s*$', conf, re.I | re.M))
+    conf = Path(path or os.environ.get('MANET_MESH_CONF', '/etc/mesh.conf')).read_text()
+    # The selector uses the last unindented assignment and bare values.
+    values = re.findall(r'^acs=(.*)$', conf, re.M)
+    return bool(values and values[-1].rstrip().lower() in ('y', 'yes', '1', 'true'))
 
 
 def validate_wifi_channel(band, channel):

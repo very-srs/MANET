@@ -55,6 +55,16 @@ class LocalTimeTests(AcsHarness):
         with patch.object(protocol, 'advance', return_value=result):
             self.runner.tick(self.wall)
 
+    def test_acs_status_uses_selector_boolean_spellings(self):
+        for value in ('y', 'Y', 'yes', 'YES', 'true', 'True', '1', 'yes  '):
+            self.runner.conf.write_text('acs=' + value + '\n')
+            self.assertTrue(self.runner.status(self.wall)['acs'], value)
+        for value in ('n', 'false', '0', 'yesterday', '"y"', "'yes'", ' yes'):
+            self.runner.conf.write_text('acs=' + value + '\n')
+            self.assertFalse(self.runner.status(self.wall)['acs'], value)
+        self.runner.conf.write_text('acs=y\nacs=n\n')
+        self.assertFalse(self.runner.status(self.wall)['acs'])
+
     def test_readiness_change_publishes_without_waiting_for_refresh(self):
         self.tick()
         self.assertEqual(self.publisher.call_count, 1)
