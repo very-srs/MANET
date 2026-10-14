@@ -701,6 +701,7 @@ its enabled Wi-Fi access point. Set `atak=n` in
 `/etc/mesh.conf` and restart `manet-atak.service` to disable it; only explicit
 `n`, `no`, `0` or `false` (case-insensitive) disables the daemon and its firewall.
 Fresh installs enable and start it; updated packages enable it for the next boot.
+
 `manet-positioning.service` ships but remains disabled and default off.
 Setting `positioning=y` in `/etc/mesh.conf` selects patched MT7916 firmware at
 next boot only with an MT7916 primary PCI function present and a tagged MANET
@@ -710,11 +711,28 @@ override on the following boot;
 the boot journal reports `AUTO-DISABLED`. After addressing the cause, observe
 a `positioning=n` apply then set `y`, or run
 `sudo manet-mt7916-firmware.py --rearm` to retry on the next boot.
+
 Connect by Ethernet or join this radio's own Wi-Fi network. Keep Wi-Fi phones
 near their radio: every attached ATAK phone receives the same radio position.
 Turn Android location services off and configure ATAK's external GPS input on
-UDP 4349, ordinary CoT input on UDP 4242, and SA output to the radio on UDP 4242.
+UDP 4349 once. Leave the stock CoT input and **Default Mesh SA** output enabled.
+The radio discovers attached phones automatically; no output entry or radio IP
+address is needed when moving between radios. Existing unicast XML output to
+UDP 4242 still works, including on the radio's secondary client-gateway address.
 Phone setup is in the [location guide](../../docs/guide/content/location.md).
+
+With no phone present, a radio with a usable position appears on the team's
+maps under its hostname or `atak_callsign`, using a radio/signal symbol.
+It shares trusted GPS or its held manual fallback, never a suspect GPS fix or
+0,0. A distinct beacon UID keeps the hidden phone-facing contact unchanged.
+The beacon has no chat or Send endpoint. It sends XML to `239.2.3.1:6969`
+through br0 and bat0 about every 30 seconds, or after five metres of movement
+with a five-second minimum interval, and has 90-second staleness. A local phone's
+arrival stops it and requests deletion of its marker. It resumes after the last
+phone's presence expires. The owned firewall confines these local announcements
+to bat0, excluding this radio's EUD ports. No extra setting is needed, and
+`atak=n` disables all of it. Pixel rendering and multicast handoff still need
+hardware validation.
 
 One controlling phone sets the radio's manual location. A saved choice on the
 status page wins while that phone is present. Otherwise, the only wired phone
@@ -740,16 +758,22 @@ wired phone; missing or invalid values log a warning and use eight).
 
 The service verifies its firewall and EUD path before admitting a new peer or
 TCP stream, and after network/policy or role-generation changes while an admitted
-SA lease remains live. With no live lease, events only discard proof; the next
-arrival triggers verification. Passive br0 listeners use a cheap address ioctl,
-so late address setup needs no timer-driven snapshot. `path_ready` is false
-while verification is pending. Unchanged ticks use the cached proof;
+SA lease remains live. With no live lease, events only discard proof. The next
+arrival or due relay beacon triggers verification. Beacon output also requires
+a forwarding bat0 path, even when no local EUD port is ready.
+Passive br0 listeners use a cheap address ioctl, and
+packet sockets follow local port changes on the existing event cycle. Their
+kernel filter admits only default mesh SA, without a multicast group join or
+userspace wakeups for other traffic. Late address setup needs no timer-driven
+snapshot. `path_ready` is false
+while verification is pending. Unchanged ticks use the cached proof, and
 notification loss fails closed. No extra monitoring process is started.
-Without an admitted phone it sends no CoT, caches unchanged inputs and skips
-repeated policy evaluation and status writes. Producer failures and alert
-deadlines still run; an idle `status.json` is a snapshot, not a heartbeat.
-The contact/output cadence is unchanged. Measure service CPU, including its
-children, with `sudo python3 /usr/local/bin/manet-cpu-sample.py --label before`;
+Receiver inputs are read before any phone joins so a relay can advertise its
+position. Unchanged inputs and cycles without due work skip policy evaluation
+and status writes. Producer failures, beacon work and alert deadlines still run.
+An idle `status.json` is a snapshot, not a heartbeat. The phone contact and
+position-feed cadence is unchanged. Measure service CPU, including its
+children, with `sudo python3 /usr/local/bin/manet-cpu-sample.py --label before`, then
 repeat with `--label after` under the same phone/traffic conditions. Each run
 takes two counter snapshots 60 seconds apart and exits, reporting CPU seconds
 per minute and percent of one core. A restart invalidates the sample.

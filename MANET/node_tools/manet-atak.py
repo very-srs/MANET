@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Serve tethered ATAK over IPv4 protocol-0 CoT without multicast.
+"""Serve local ATAK phones with passive mesh SA and unicast protocol-0 CoT.
 
 Read mesh.conf (enabled unless atak=n/no/0/false), gps_status.json and
 optional monitor/jam interfaces without supplying clock authority. The unit
@@ -16,6 +16,7 @@ single selector, never to a controller's lifetime.
 """
 
 import argparse
+import ctypes
 from dataclasses import asdict, dataclass, field, fields, is_dataclass, replace
 from datetime import datetime, timezone
 import fcntl
@@ -38,6 +39,7 @@ import uuid
 
 import manet_cot as cot
 import manet_phone as phone
+import manet_tak as tak
 
 # Bound XML/state bytes and per-stream work before application dispatch.
 MAX_XML = 65536
@@ -52,6 +54,7 @@ PARTIAL_S = 5
 LIFETIME_S = 300
 # Producer envelopes expire five BOOTTIME seconds after their write timestamp.
 INPUT_TTL = 5
+GPS_UNAVAILABLE_DELAY_S = 3
 MAX_RETIRE = 128
 CODES = {'gps_untrusted', 'gps_override', 'confirm_position', 'phone_gps'}
 KINDS = {'geochat', 'audio', 'web_ui'}
@@ -165,6 +168,7 @@ class Config:
     enabled: bool = True
     bind_ip: str | None = None
     max_phones: int = DEFAULT_PHONE_LIMIT
+    beacon_name: str | None = None
 
     @classmethod
     def load(cls, path='/etc/mesh.conf'):
@@ -185,7 +189,8 @@ class Config:
         return cls('MANET-' + machine,
                    bounded_text(conf.get('atak_callsign', 'MANET ' + socket.gethostname()), 64),
                    atak_enabled(conf),
-                   ipv4(conf['atak_bind_ip']) if conf.get('atak_bind_ip') else None, limit)
+                   ipv4(conf['atak_bind_ip']) if conf.get('atak_bind_ip') else None, limit,
+                   bounded_text(conf.get('atak_callsign', socket.gethostname()), 64))
 
 
 @dataclass(frozen=True)
@@ -280,6 +285,13 @@ def firewall_objects(ports=('end0',)):
                                      match(payload(protocol, field), ports)])
         rule('inet', 'input', [match(meta('nfproto'), 'ipv6'), match(meta('l4proto'), protocol), match(payload(protocol, 'dport'), service_ports)])
         rule('inet', 'input', [match(meta('iifname'), 'br0', '!='), match(meta('l4proto'), protocol), match(payload(protocol, 'dport'), service_ports)])
+    # Host-originated radio SA crosses only bat0. This does not affect bridged
+    # phone SA or mesh traffic forwarded to another radio's local EUDs.
+    rule('bridge', 'output', [match(meta('oifname'), 'bat0', '!='),
+                             match(payload('ether', 'type'), 'ip'),
+                             match(payload('ip', 'daddr'), tak.MESH_GROUP),
+                             match(meta('l4proto'), 'udp'),
+                             match(payload('udp', 'dport'), tak.MESH_PORT)])
     return objects
 
 
@@ -391,6 +403,15 @@ class Proof:
     peers: dict  # IP -> current dynamic MAC learned exclusively on a local EUD port
     generation: str
     ports: dict = field(default_factory=dict)  # IP -> wired or wifi
+    interfaces: dict = field(default_factory=dict)  # IP -> exact ingress interface
+    local_ports: dict = field(default_factory=dict)  # interface -> role/lifetime identity
+    local_ips: tuple = ()  # all global br0 IPv4 addresses, including secondary
+    mesh_path: tuple = ()  # verified br0/bat0 ifindices for beacon egress
+    fdb_flags: dict = field(default_factory=dict)  # MAC -> recognized dynamic ndm_flags
+
+    def local_address(self, address):
+        """Require a unicast destination actually assigned globally to br0."""
+        return address in (self.local_ips or (self.local_ip,))
 
     def port(self, address):
         """Return the proven local attachment type (legacy fixtures are wired)."""
@@ -406,6 +427,25 @@ class GuardFailure(RuntimeError):
     pass
 
 
+def fdb_refresh_flags(entry):
+    """Recognize plain dynamic bridge JSON, retaining exact non-static flags.
+
+    iproute2 prints NDA_MASTER separately from its ndm_flags array. VLAN,
+    extended/unknown metadata and ambiguous rows require conservative readback.
+    """
+    bits = {'master': 0x04, 'extern_learn': 0x10, 'offload': 0x20,
+            'sticky': 0x40, 'router': 0x80}
+    flags = entry.get('flags', [])
+    if (set(entry) - {'mac', 'ifname', 'dev', 'master', 'state', 'flags'}
+            or entry.get('master', 'br0') != 'br0'
+            or entry.get('state', '') not in ('', 'stale')
+            or not isinstance(flags, list)
+            or any(not isinstance(flag, str) or flag not in bits for flag in flags)
+            or len(set(flags)) != len(flags)):
+        return None
+    return sum(bits[flag] for flag in flags)
+
+
 class NetworkEvents:
     """Kernel notifications in the existing select loop, never a monitor child.
 
@@ -415,6 +455,7 @@ class NetworkEvents:
     def __init__(self, factory=socket.socket):
         """Subscribe to route and nftables changes with nonblocking sockets."""
         self.sockets = []
+        self.scope = None
         try:
             # NETLINK_ROUTE: LINK, NEIGH (including bridge FDB), IPv4_IFADDR.
             # NETLINK_NETFILTER: NFNLGRP_NFTABLES, including ruleset commits.
@@ -434,10 +475,93 @@ class NetworkEvents:
             sock.close()
         self.sockets.clear()
 
+    def relevant(self, kind, body):
+        """Ignore unrelated events and refreshes that preserve verified proof.
+
+        Every learned peer in the snapshot is protected, including phones and
+        peers already admitted by transport. IP/MAC and MAC/port associations
+        must match, not just membership in identity sets. Unknown/malformed
+        events stay conservative. Notifications never grant new admission.
+        """
+        if self.scope is None:
+            return True
+        indices, bridge, peers, learning, names = self.scope
+        try:
+            if kind in (16, 17):  # ifinfomsg
+                if len(body) < 16:
+                    return True
+                index = struct.unpack_from('=i', body, 4)[0]
+                offset = 16
+            elif kind in (20, 21):  # ifaddrmsg
+                if len(body) < 8:
+                    return True
+                return struct.unpack_from('=I', body, 4)[0] == bridge
+            elif kind in (28, 29):  # ndmsg: IPv4 ARP or bridge FDB
+                if len(body) < 12 or body[0] not in (socket.AF_INET, socket.AF_INET6, socket.AF_BRIDGE):
+                    return True
+                family, pad1, pad2, index, state, flags, ndm_type = struct.unpack_from('=BBHiHBB', body)
+                if pad1 or pad2 or index <= 0:
+                    return True
+                offset = 12
+            else:
+                return True
+            attrs = {}
+            while offset < len(body):
+                if len(body) - offset < 4:
+                    return True
+                size, attr = struct.unpack_from('=HH', body, offset)
+                if size < 4 or offset + ((size + 3) & ~3) > len(body) or attr in attrs:
+                    return True
+                attrs[attr] = body[offset + 4:offset + size]
+                offset += (size + 3) & ~3
+            if kind in (16, 17):
+                name = attrs.get(3, b'').rstrip(b'\0').decode('ascii')  # IFLA_IFNAME
+                return index in indices or name in names
+            # NDA_DST / NDA_LLADDR. Missing identity cannot prove irrelevance.
+            destination, mac = attrs.get(1), attrs.get(2)
+            if destination is None and mac is None:
+                return True
+            if mac is not None and len(mac) != 6:
+                return True
+            if body[0] == socket.AF_INET and destination is not None and len(destination) != 4:
+                return True
+            if body[0] == socket.AF_INET6 and destination is not None and len(destination) != 16:
+                return True
+            # Known ancillary attributes do not change the identity. Unknown
+            # attributes, even well framed, cannot qualify for refresh elision.
+            sizes = {1: 4 if family == socket.AF_INET else 16, 2: 6,
+                     3: 16, 4: 4, 9: 4, 12: 1, 15: 4}
+            if family == socket.AF_BRIDGE:
+                sizes = {2: 6, 3: 16, 9: 4, 15: 4}
+            if any(attr not in sizes or len(value) != sizes[attr] for attr, value in attrs.items()):
+                return True
+            if destination not in peers and mac not in learning:
+                return False
+            # RTM_DELNEIGH, unsupported states/flags, and extended flags always
+            # invalidate protected identities. A batch cannot cancel a delete
+            # by following it with a healthy refresh.
+            if kind != 28 or (15 in attrs and struct.unpack('=I', attrs[15])[0] != 0):
+                return True
+            if 9 in attrs and struct.unpack('=I', attrs[9])[0] != bridge:
+                return True
+            if family == socket.AF_BRIDGE:
+                expected = learning.get(mac)
+                return not (expected == (index, flags) and 9 in attrs
+                            and state in (2, 4) and ndm_type == 0)
+            # Neighbour proof is IPv4-only. A healthy IPv6 refresh of the same
+            # protected MAC on br0 also cannot change it. FDB events still
+            # invalidate a MAC moving to any different physical port.
+            same = peers.get(destination) == mac if family == socket.AF_INET else mac in learning
+            return not (same and destination is not None and mac is not None
+                        and index == bridge and state in (2, 4, 8, 16)
+                        and flags in (0, 0x80) and ndm_type == 1)
+        except (ValueError, UnicodeError, struct.error):
+            return True
+
     def changed(self):
         """Drain bounded netlink queues and report proof-invalidating events."""
         changed = False
-        for sock in self.sockets:
+        for channel, sock in enumerate(self.sockets):
             # Fail closed if notification churn exhausts the queue budget.
             for _ in range(256):
                 try:
@@ -453,10 +577,10 @@ class NetworkEvents:
                     length, kind, _, _, _ = struct.unpack_from('=IHHII', data, offset)
                     if length < 16 or offset + length > len(data) or kind in (2, 4):
                         raise OSError('lost or invalid network notification')
-                    # NOOP/DONE indicate no change. Other multicast messages
-                    # invalidate proof, including duplicate MAC learning on bat0
-                    # for an end0 peer.
-                    changed |= kind not in (1, 3)
+                    # Never filter policy notifications. Route notifications
+                    # can be discarded only using a previously verified scope.
+                    changed |= kind not in (1, 3) and (
+                        channel == 1 or self.relevant(kind, data[offset + 16:offset + length]))
                     # Each netlink message occupies a four-byte aligned slot.
                     offset += (length + 3) & ~3
             else:
@@ -483,6 +607,8 @@ class LinuxGuard:
         self.cached = None
         self.dirty = True
         self.signature = None
+        self.local_ports = {}
+        self.paths_dirty = True
 
     def start(self):
         """Subscribe before taking any network snapshot."""
@@ -500,6 +626,7 @@ class LinuxGuard:
     def invalidate(self):
         """Discard cached proof and require another inspection."""
         self.cached, self.dirty = None, True
+        self.paths_dirty = True
         self.reason = 'path unverified; waiting for phone traffic'
 
     def listen_address(self):
@@ -561,8 +688,13 @@ class LinuxGuard:
             if self.events.changed() or signature != self.signature or force:
                 self.invalidate()
             self.signature = signature
+            if self.paths_dirty:
+                self.local_ports, _ = self.local_paths()
+                self.paths_dirty = False
             if self.dirty and (refresh or force):
                 proof = self.inspect()
+                if proof is not None:
+                    self.events.scope = self.event_scope(proof)
                 # A snapshot spanning a change cannot admit peers. Retry next
                 # cycle.
                 if self.events.changed() or self.file_signature() != signature:
@@ -587,53 +719,60 @@ class LinuxGuard:
             raise ValueError('network snapshot too large')
         return json.loads(result.stdout)
 
+    def event_scope(self, proof):
+        """Cache ifindices and peer identities only when establishing proof."""
+        names = {'br0', 'end0', 'bat0'} | set(proof.local_ports)
+        ap = atak_ap_interface(self.ap_role)
+        if ap:
+            names.add(ap)
+        indices = {}
+        for name in names:
+            try:
+                indices[name] = int((self.sysnet / name / 'ifindex').read_text().strip())
+            except (OSError, ValueError):
+                if name == 'br0' or name in proof.local_ports:
+                    return None  # Cannot classify interfaces safely.
+        peers = {socket.inet_aton(ip): bytes.fromhex(mac.replace(':', ''))
+                 for ip, mac in proof.peers.items()}
+        learning = {peers[socket.inet_aton(ip)]: (indices.get(proof.interfaces.get(ip)), proof.fdb_flags.get(mac))
+                    for ip, mac in proof.peers.items()}
+        return frozenset(indices.values()), indices['br0'], peers, learning, frozenset(names)
+
     def inspect(self):
         """Verify each local EUD port and admit exclusively learned IPv4 peers."""
         self.retry = False
         try:
             if not self.config.enabled:
                 raise ValueError('atak is disabled in mesh.conf')
-            local_ports = {}
-            generation = ''
-            try:
-                role = read_kv(self.run / 'ethernet_detection_state')
-                token = (self.run / 'eth-carrier-generation').read_text().strip()
-                if (role.get('ETH_MODE') == 'WIRED_EUD' and role.get('ETH_BRIDGE') == 'br0'
-                        and self.forwarding('end0') and re.fullmatch(r'end0 wired-eud \S+', token)):
-                    local_ports['end0'] = 'wired'
-                    generation = token
-            except OSError:
-                pass  # Missing or uplink Ethernet must not revoke a valid AP.
+            paths, generation = self.local_paths()
+            local_ports = {iface: identity[0] for iface, identity in paths.items()}
             ap = atak_ap_interface(self.ap_role)
-            hostapd = self.hostapd_identity()
-            if ap and hostapd and self.forwarding(ap):
-                try:
-                    conf = read_kv(self.hostapd_conf)
-                    if conf.get('interface') == ap and conf.get('bridge') == 'br0':
-                        local_ports[ap] = 'wifi'
-                        generation += ' ap ' + ap + ' ' + ':'.join(hostapd)
-                except OSError:
-                    pass
-            if not local_ports:
-                raise ValueError('no forwarding local EUD port')
+            mesh_path = ()
+            if self.forwarding('bat0'):
+                mesh_path = tuple((self.sysnet / name / 'ifindex').read_text().strip()
+                                  for name in ('br0', 'bat0'))
+            if not local_ports and not mesh_path:
+                raise ValueError('no forwarding local EUD or mesh port')
             if not valid_firewall(self.command('nft', '-j', 'list', 'ruleset'), atak_eud_ports(ap)):
                 raise ValueError('ATAK firewall missing or changed; restart service after AP role changes')
             links = self.command('ip', '-j', '-4', 'address', 'show', 'dev', 'br0')
-            # Bind only a primary global br0 IPv4 address from the kernel dump.
-            addresses = [ipv4(a['local']) for link in links for a in link.get('addr_info', [])
-                         if a.get('family') == 'inet' and a.get('scope') == 'global' and not a.get('secondary', False)]
-            local = self.config.bind_ip or (addresses[0] if addresses else None)
-            if local not in addresses:
+            addresses = [a for link in links for a in link.get('addr_info', [])
+                         if a.get('family') == 'inet' and a.get('scope') == 'global']
+            primary = [ipv4(a['local']) for a in addresses if not a.get('secondary', False)]
+            addresses = tuple(ipv4(a['local']) for a in addresses)
+            local = self.config.bind_ip or (primary[0] if primary else None)
+            if local not in primary:
                 raise ValueError('ATAK br0 IPv4 not ready')
             fdb = self.command('bridge', '-j', 'fdb', 'show', 'br', 'br0')
-            ports = {}
+            ports, learning = {}, {}
             for entry in fdb:
                 mac = entry.get('mac', '').lower()
                 # Static and self entries do not prove a learned ingress port.
                 if entry.get('state') in ('permanent', 'static') or 'self' in entry.get('flags', []):
                     continue
                 ports.setdefault(mac, set()).add(entry.get('ifname', entry.get('dev')))
-            peers, peer_ports = {}, {}
+                learning.setdefault(mac, []).append(fdb_refresh_flags(entry))
+            peers, peer_ports, interfaces = {}, {}, {}
             for entry in self.command('ip', '-j', '-4', 'neigh', 'show', 'dev', 'br0'):
                 mac = entry.get('lladdr', '').lower()
                 states = entry.get('state', [])
@@ -645,11 +784,14 @@ class LinuxGuard:
                         and next(iter(ports[mac])) in local_ports
                         and set(states) & {'REACHABLE', 'STALE', 'DELAY', 'PROBE'}):
                     address = ipv4(entry['dst'])
-                    if address != local:
+                    if address not in addresses:
                         peers[address] = mac
-                        peer_ports[address] = local_ports[next(iter(ports[mac]))]
-            self.reason = 'local EUD firewall and paths verified: ' + ', '.join(local_ports)
-            return Proof(local, peers, generation, peer_ports)
+                        interfaces[address] = next(iter(ports[mac]))
+                        peer_ports[address] = local_ports[interfaces[address]]
+            self.reason = 'local EUD firewall and paths verified: ' + ', '.join(local_ports) if local_ports else 'mesh beacon path verified'
+            flags = {mac: learning[mac][0] for mac in set(peers.values())
+                     if len(learning[mac]) == 1 and learning[mac][0] is not None}
+            return Proof(local, peers, generation, peer_ports, interfaces, paths, addresses, mesh_path, flags)
         except (OSError, subprocess.SubprocessError) as exc:
             self.retry = True
             self.reason = str(exc)
@@ -657,6 +799,39 @@ class LinuxGuard:
         except (ValueError, KeyError, TypeError, AttributeError) as exc:
             self.reason = str(exc)
             return None
+
+    def local_paths(self):
+        """Read only local role/link facts when existing invalidators fire."""
+        paths, generation = {}, ''
+        if not self.config.enabled:
+            return paths, generation
+        try:
+            role = read_kv(self.run / 'ethernet_detection_state')
+            token = (self.run / 'eth-carrier-generation').read_text().strip()
+            if (role.get('ETH_MODE') == 'WIRED_EUD' and role.get('ETH_BRIDGE') == 'br0'
+                    and self.forwarding('end0') and re.fullmatch(r'end0 wired-eud \S+', token)):
+                paths['end0'] = ('wired', token)
+                generation = token
+        except OSError:
+            pass
+        ap = atak_ap_interface(self.ap_role)
+        hostapd = self.hostapd_identity()
+        if ap and hostapd and self.forwarding(ap):
+            try:
+                conf = read_kv(self.hostapd_conf)
+                if conf.get('interface') == ap and conf.get('bridge') == 'br0':
+                    token = ' ap ' + ap + ' ' + ':'.join(hostapd)
+                    paths[ap] = ('wifi', token)
+                    generation += token
+            except OSError:
+                pass
+        for iface, identity in paths.items():
+            try:
+                index = (self.sysnet / iface / 'ifindex').read_text().strip()
+            except OSError:
+                index = ''  # The bind still requires a live named interface.
+            paths[iface] = identity + (index,)
+        return paths, generation
 
 
 # JSON tags are a closed allowlist, never pickle, eval or arbitrary imports.
@@ -930,6 +1105,65 @@ class Inputs:
             'gps': gps_reason, 'monitor': monitor, 'jamming_pin': jam, 'jamming_input': jam_reason}
 
 
+class RadioBeacon:
+    """Schedule small mesh announcements and retire only this radio's marker."""
+    def __init__(self):
+        """Start without a location, retaining one startup handoff cleanup."""
+        self.last_sent = self.last_fix = self.last_name = self.next_due = None
+        self.last_attempt = None
+        self.active = False
+        self.startup_cleanup = True
+        self.retirement = None
+
+    def due(self, now):
+        """Use the existing application cycle for refresh/retry deadlines."""
+        return self.next_due is not None and now.mono >= self.next_due
+
+    def update(self, config, now, fix, occupied, send):
+        """Refresh at 30 seconds or five metres, with a five-second send bound."""
+        if not config.enabled:
+            return
+        name = config.beacon_name or config.callsign
+        usable = fix is not None and (fix.lat, fix.lon) != (0, 0)
+        if occupied or not usable:
+            if self.retirement is None and (self.active or occupied and self.startup_cleanup):
+                # Force-delete is immediate in ATAK's external CoT importer.
+                # Staleness alone waits for the receiving app's purge settings.
+                self.retirement = (str(uuid.uuid4()), 0, 0)
+                self.active = self.startup_cleanup = False
+                self.next_due = now.mono
+            if self.retirement is not None and self.due(now):
+                task, attempts, successes = self.retirement
+                packet = cot.retire_marker(config.uid + '-beacon', task, now.utc)
+                attempts += 1
+                successes += bool(send(packet))
+                self.retirement = (task, attempts, successes) if attempts < 5 and successes < 3 else None
+                self.next_due = now.mono + 2 if self.retirement else None
+            elif self.retirement is None:
+                self.next_due = None
+            return
+        self.retirement = None  # A new usable announcement replaces old cleanup.
+        moved = self.last_fix is None or phone._distance_m(
+            (fix.lat, fix.lon), (self.last_fix.lat, self.last_fix.lon)) >= 5
+        changed = (not self.active or moved or name != self.last_name or self.last_fix is not None and
+                   (fix.source != self.last_fix.source or
+                    fix.hae is not None and self.last_fix.hae is not None and abs(fix.hae - self.last_fix.hae) >= 5))
+        elapsed = float('inf') if self.last_sent is None else now.mono - self.last_sent
+        if elapsed >= 30 or changed:
+            if self.last_attempt is not None and now.mono < self.last_attempt + 5:
+                self.next_due = self.last_attempt + 5
+                return
+            packet = cot.radio_beacon(config.uid, name, fix, now.utc)
+            self.last_attempt = now.mono
+            self.next_due = now.mono + 5
+            if packet is not None and send(packet):
+                self.active, self.startup_cleanup = True, False
+                self.last_sent, self.last_fix, self.last_name = now.mono, fix, name
+                self.next_due = now.mono + 30
+        else:
+            self.next_due = self.last_sent + 30
+
+
 class Service:
     """Serialize application work.
 
@@ -964,6 +1198,9 @@ class Service:
         self.last_rejection = None
         self.rejected = 0
         self.send_error = None
+        self.unavailable_since = None
+        self.logged_warnings = set()
+        self.beacon = RadioBeacon()
         saved = store.load()
         if saved is not None:
             self.restore(saved, now)
@@ -1213,25 +1450,30 @@ class Service:
         if not mac:
             return self.reject('ingress/path unproven')
         try:
-            root = cot._parse_document(packet, MAX_XML)
-            bounded_text(root.get('uid'), 512)
-            for element in root.iter():
-                for key, value in element.attrib.items():
-                    bounded_text(value, 2048 if key == 'remarks' else 512)
-                if element.text is not None and len(element.text) > 2048:
-                    raise ValueError('oversized CoT text')
-            kind = root.get('type')
-            # A creator-tagged person marker is a Sent point, not self SA.
-            is_sa = kind == 'a-f-G-U-C' and root.find('detail/creator') is None
+            if isinstance(packet, cot.PhoneSA):
+                kind, is_sa = 'a-f-G-U-C', True
+            else:
+                root = cot._parse_document(packet, MAX_XML)
+                bounded_text(root.get('uid'), 512)
+                for element in root.iter():
+                    for key, value in element.attrib.items():
+                        bounded_text(value, 2048 if key == 'remarks' else 512)
+                    if element.text is not None and len(element.text) > 2048:
+                        raise ValueError('oversized CoT text')
+                kind = root.get('type')
+                # A creator-tagged person marker is a Sent point, not self SA.
+                is_sa = kind == 'a-f-G-U-C' and root.find('detail/creator') is None
             present = self.present_phones(now, proof)
             sender = next((uid for uid, item in present.items() if item['ip'] == address and item['mac'] == mac), None)
             if not is_sa and sender is None:
                 return self.reject('admitted SA required before dependent traffic')
             if is_sa:
-                parsed = cot.parse_self_sa(packet)
+                parsed = packet if isinstance(packet, cot.PhoneSA) else cot.parse_self_sa(packet)
                 if isinstance(parsed, str):
                     return self.reject(parsed)
                 bounded_text(parsed.uid)
+                if parsed.uid == self.config.uid + '-beacon':
+                    return self.reject('reserved radio beacon UID')
                 callsign = bounded_text(parsed.callsign or parsed.uid)
                 item = self.phones.get(parsed.uid)
                 if item is not None and item['mac'] != mac and item['clock']._presence is not None and now.mono < item['clock']._presence:
@@ -1318,6 +1560,8 @@ class Service:
                             item['guest_notified'] = True
                             self.commit(now)
                     return self.reject('guest marker; only controller can set location')
+                if parsed.uid == self.config.uid + '-beacon':
+                    return self.reject('reserved radio beacon UID')
                 if parsed.uid in self.phones:
                     return self.reject('reserved phone UID')
                 if parsed.uid in self.retire:
@@ -1417,14 +1661,35 @@ class Service:
                          self.position._distrusted, self.position._overridden,
                          self.position._position_confirmed, self.position._checked_manual_epoch,
                          self.position._fault_epoch, self.position._retirements))
-        selected = self.position.select(now.mono, now.utc, radio_gps=gps)
+        age = now.mono - gps.observed_mono if gps.fix is not None else None
+        fresh = age is not None and 0 <= age < self.position.gps_max_age_s and gps.state != 'NO_FIX'
+        if fresh:
+            self.unavailable_since = None
+        elif self.unavailable_since is None:
+            self.unavailable_since = now.mono
+        defer = (not self.phones or not fresh and now.mono - self.unavailable_since < GPS_UNAVAILABLE_DELAY_S
+                 and 'gps_untrusted' not in self.position._warnings)
+        selected = self.position.select(now.mono, now.utc, radio_gps=gps, defer_unavailable=defer)
+        if selected.fix is not None or not self.phones:
+            self.unavailable_since = None
+        warnings = set(self.position._warnings)
+        for code in sorted(warnings ^ self.logged_warnings):
+            transition = 'raised' if code in warnings else 'cleared'
+            log(f'warning {transition} code={code} '
+                f'gps_reason={json.dumps(str(input_status.get("gps", "unspecified"))[:200])} '
+                f'state={gps.state} fresh={fresh} age_s={None if age is None else round(age, 3)} '
+                f'distrusted={self.position._distrusted}')
+        self.logged_warnings = warnings
         after = encode((self.position._warnings, self.position._events,
                         self.position._distrusted, self.position._overridden,
                         self.position._position_confirmed, self.position._checked_manual_epoch,
                         self.position._fault_epoch, self.position._retirements))
         if before != after:
             self.commit(now)
-        self.local_actions(now)
+        if self.phones:
+            self.local_actions(now)
+        # A live lease suppresses beacon churn during temporary proof loss.
+        self.beacon.update(self.config, now, selected.fix, self.has_live_lease(now), self.send_beacon)
         for uid in selected.retire_marker_uids:
             if uid not in self.retire:
                 if len(self.retire) >= MAX_RETIRE:
@@ -1504,9 +1769,16 @@ class Service:
                     item['done_until'] = now.mono + 120
             self.commit(now)
             break
-        if now.mono - self.last_checkpoint >= 30:
+        if (self.phones or self.position._manual is not None) and now.mono - self.last_checkpoint >= 30:
             self.commit(now)
         return self.status(now, proof, selected, input_status)
+
+    def send_beacon(self, packet):
+        """Attempt only the separately confined mesh transport."""
+        try:
+            return bool(self.transport.send_beacon(packet))
+        except OSError:
+            return False
 
     def send_attached(self, now, proof, selected, present):
         """Feed every guest, fan out GPS warnings, and send bounded notices."""
@@ -1627,7 +1899,7 @@ class Application:
                     self.ack_stamp = stamp
                 except (FileNotFoundError, ValueError):
                     pass
-        gps, input_status = self.inputs.cached_read(now, service.input_memory, receiver=bool(service.phones))
+        gps, input_status = self.inputs.cached_read(now, service.input_memory, receiver=service.config.enabled)
         if self.input_revision != self.inputs.revision:
             # Observe producer activation/loss even before the first phone, so
             # an absent formerly-active monitor cannot later look "unwired".
@@ -1635,15 +1907,20 @@ class Application:
                 service.commit(now)
             self.input_revision = self.inputs.revision
         present = tuple(sorted(service.present_phones(now, proof)))
-        gps_key = None if not service.phones else (
+        gps_key = (
             gps.fix, gps.observed_mono if gps.fix is not None else None,
             gps.state, gps.jammed, gps.fault_epoch, gps.ranges_agree)
         def key():
             """Capture state changes that require an idle snapshot refresh."""
             return (service.revision, service.rejected, service.last_rejection,
-                    service.config, proof, reason, gps_key, input_status, present)
+                    service.config, proof, reason, gps_key, input_status, present,
+                    service.has_live_lease(now))
         deadline = any(not w.acknowledged and w.deadline is not None and now.mono >= w.deadline
                        for w in service.position._warnings.values())
+        deadline |= (service.unavailable_since is not None
+                     and now.mono >= service.unavailable_since + GPS_UNAVAILABLE_DELAY_S
+                     and 'gps_untrusted' not in service.position._warnings)
+        deadline |= service.beacon.due(now)
         # These timestamps preserve manual-age lower bounds and warning history
         # across reboot. A never-associated node needs no periodic checkpoint.
         checkpoint = (bool(service.phones) and
@@ -1652,8 +1929,7 @@ class Application:
         if (not service.phone_ready(now, proof) and self.last_key == key()
                 and not deadline and not checkpoint):
             return False
-        status = (service.status(now, proof, input_status=input_status) if not service.phones else
-                  service.tick(now, proof, gps, input_status))
+        status = service.tick(now, proof, gps, input_status)
         status['path_reason'] = reason
         status['idle'] = not status['phone_present']
         atomic_json(self.runtime / 'status.json', status)
@@ -1727,6 +2003,114 @@ class Stream:
         return documents
 
 
+MAX_MESH_FRAME = 14 + 60 + 8 + tak.MAX_SA_BYTES
+
+
+def mesh_sa_bpf():
+    """Build classic BPF for local IPv4 UDP mesh SA, excluding egress/fragments."""
+    # Linux ancillary SKF_AD_PKTTYPE prevents remote frames forwarded OUT of
+    # an EUD port from reaching userspace. No multicast membership is needed.
+    program = [
+        (0x20, 0, 0, 0xfffff004),       # LD W ABS: packet type
+        (0x35, 'drop', 0, 4),          # outgoing/loopback or unknown type
+        (0x80, 0, 0, 0),              # LD W LEN
+        (0x25, 'drop', 0, MAX_MESH_FRAME),
+        (0x28, 0, 0, 12),             # Ethernet protocol
+        (0x15, 0, 'drop', 0x0800),
+        (0x30, 0, 0, 14),             # IPv4 version and header length
+        (0x54, 0, 0, 0xf0),
+        (0x15, 0, 'drop', 0x40),
+        (0x30, 0, 0, 14),
+        (0x54, 0, 0, 0x0f),
+        (0x35, 0, 'drop', 5),
+        (0x30, 0, 0, 23),             # IP protocol: UDP
+        (0x15, 0, 'drop', 17),
+        (0x28, 0, 0, 20),             # reject reserved/MF/offset; allow DF
+        (0x45, 'drop', 0, 0xbfff),
+        (0x20, 0, 0, 30),             # IPv4 destination 239.2.3.1
+        (0x15, 0, 'drop', int(ipaddress.IPv4Address(tak.MESH_GROUP))),
+        (0xb1, 0, 0, 14),             # LDX MSH: variable IPv4 header length
+        (0x48, 0, 0, 16),             # LD H IND: UDP destination
+        (0x15, 0, 'drop', tak.MESH_PORT),
+        (0x06, 0, 0, MAX_MESH_FRAME),
+        (0x06, 0, 0, 0),
+    ]
+    return tuple((code, len(program) - i - 2 if jt == 'drop' else jt,
+                  len(program) - i - 2 if jf == 'drop' else jf, value)
+                 for i, (code, jt, jf, value) in enumerate(program))
+
+
+def make_mesh_sa_socket(iface, factory=socket.socket):
+    """Attach and lock a filter before enabling reception on one EUD port."""
+    if iface in ('bat0', 'br0', 'lo') or not re.fullmatch(r'[A-Za-z0-9_.-]{1,15}', iface):
+        raise ValueError('invalid mesh SA ingress interface')
+
+    class MeshFilter(ctypes.Structure):
+        """Native Linux sock_filter instruction layout."""
+        _fields_ = [('code', ctypes.c_ushort), ('jt', ctypes.c_ubyte),
+                    ('jf', ctypes.c_ubyte), ('k', ctypes.c_uint32)]
+
+    class MeshFilterProgram(ctypes.Structure):
+        """Native Linux sock_fprog, with architecture-correct pointer alignment."""
+        _fields_ = [('length', ctypes.c_ushort), ('instructions', ctypes.POINTER(MeshFilter))]
+
+    program = mesh_sa_bpf()
+    instructions = (MeshFilter * len(program))(*(MeshFilter(*row) for row in program))
+    descriptor = MeshFilterProgram(len(program), instructions)
+    # Protocol zero receives nothing until the filtered socket is bound.
+    sock = factory(socket.AF_PACKET, socket.SOCK_RAW, 0)
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, 26, bytes(descriptor))  # SO_ATTACH_FILTER
+        sock.setsockopt(socket.SOL_SOCKET, 44, 1)                 # SO_LOCK_FILTER
+        sock.setsockopt(263, 23, 1)                             # PACKET_IGNORE_OUTGOING
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 65536)
+        sock.setblocking(False)
+        # ETH_P_ALL taps ingress before the bridge RX handler consumes it;
+        # an ETH_P_IP socket bound to a bridge slave can miss that traffic.
+        # The already attached BPF still admits only the one IPv4 UDP group.
+        sock.bind((iface, 3))
+        return sock
+    except BaseException:
+        sock.close()
+        raise
+
+
+def mesh_checksum(data):
+    """Return an Internet checksum for bounded IP/UDP headers and payload."""
+    if len(data) % 2:
+        data += b'\0'
+    total = sum(struct.unpack('!' + 'H' * (len(data) // 2), data))
+    while total >> 16:
+        total = (total & 0xffff) + (total >> 16)
+    return (~total) & 0xffff
+
+
+def mesh_sa_frame(frame):
+    """Validate Ethernet/IPv4/UDP without decoding CoT or retaining raw bytes."""
+    if not 42 <= len(frame) <= MAX_MESH_FRAME or frame[12:14] != b'\x08\x00':
+        raise ValueError('invalid mesh SA Ethernet frame')
+    header = (frame[14] & 15) * 4
+    total = int.from_bytes(frame[16:18], 'big')
+    if (frame[14] >> 4 != 4 or header < 20 or total < header + 8
+            or len(frame) < 14 + total or frame[23] != 17
+            or int.from_bytes(frame[20:22], 'big') & 0xbfff
+            or frame[30:34] != socket.inet_aton(tak.MESH_GROUP)
+            or mesh_checksum(frame[14:14 + header])):
+        raise ValueError('invalid mesh SA IPv4 header')
+    udp = frame[14 + header:14 + total]
+    length = int.from_bytes(udp[4:6], 'big')
+    if (int.from_bytes(udp[2:4], 'big') != tak.MESH_PORT or length != len(udp)
+            or not 0 < length - 8 <= tak.MAX_SA_BYTES):
+        raise ValueError('invalid mesh SA UDP header')
+    if udp[6:8] != b'\0\0':
+        pseudo = frame[26:34] + b'\0\x11' + udp[4:6]
+        if mesh_checksum(pseudo + udp):
+            raise ValueError('invalid mesh SA UDP checksum')
+    if frame[6] & 1 or frame[6:12] == b'\0' * 6:
+        raise ValueError('invalid mesh SA source MAC')
+    return ipv4(frame[26:30]), frame[6:12].hex(':'), udp[8:]
+
+
 class Network:
     """Provide nonblocking IPv4 sockets with injectable factory/readiness."""
     def __init__(self, factory=socket.socket, verify=None):
@@ -1734,10 +2118,13 @@ class Network:
         self.factory = factory
         self.verify = verify
         self.listener = self.udp = self.sender = None
+        self.beacon_sender = self.beacon_path = None
         self.local_ip = None
         self.proof = None
         self.streams = {}
         self.datagram_peers = {}
+        self.mesh_sockets = {}  # iface -> (role/lifetime identity, socket)
+        self.mesh_peers = set()
         self.budget = Budget(0)
 
     def close_stream(self, sock):
@@ -1747,6 +2134,20 @@ class Network:
 
     def close(self):
         """Close all transport sockets and discard admitted network paths."""
+        self.close_unicast()
+        self.close_beacon()
+        for _, sock in self.mesh_sockets.values():
+            sock.close()
+        self.mesh_sockets.clear()
+
+    def close_beacon(self):
+        """Forget a multicast socket whose verified bridge path changed."""
+        if self.beacon_sender is not None:
+            self.beacon_sender.close()
+        self.beacon_sender = self.beacon_path = None
+
+    def close_unicast(self):
+        """Revoke unicast proof without removing passive SA observation."""
         for sock in list(self.streams):
             self.close_stream(sock)
         for name in ('listener', 'udp', 'sender'):
@@ -1757,19 +2158,38 @@ class Network:
         self.proof = None
         self.local_ip = None
         self.datagram_peers.clear()
+        self.mesh_peers.clear()
+
+    def sync_mesh_ports(self, paths):
+        """Apply changed local role/link identities without a lifecycle timer."""
+        for iface, (identity, sock) in list(self.mesh_sockets.items()):
+            if paths.get(iface) != identity:
+                sock.close()
+                del self.mesh_sockets[iface]
+                self.mesh_peers = {key for key in self.mesh_peers if key[0] != iface}
+        for iface, identity in paths.items():
+            if iface not in self.mesh_sockets:
+                try:
+                    self.mesh_sockets[iface] = (identity, make_mesh_sa_socket(iface, self.factory))
+                except OSError as exc:
+                    # Fail closed rather than retrying privileged socket setup
+                    # every timer tick when a filter/bind cannot be installed.
+                    raise GuardFailure('mesh SA socket setup failed') from exc
 
     def listen(self, address):
         """Open only br0 input listeners; these do not authorize phone I/O."""
         if address != self.local_ip:
-            self.close()
+            self.close_unicast()
         if address is not None and self.listener is None:
             try:
-                self.listener = self.make(socket.SOCK_STREAM, address, 4242)
+                self.listener = self.make(socket.SOCK_STREAM, '0.0.0.0', 4242)
                 self.listener.listen(MAX_CONNECTIONS)
-                self.udp = self.make(socket.SOCK_DGRAM, address, 4242)
+                self.udp = self.make(socket.SOCK_DGRAM, '0.0.0.0', 4242)
+                self.udp.setsockopt(socket.IPPROTO_IP, 8, 1)   # IP_PKTINFO
+                self.udp.setsockopt(socket.IPPROTO_IP, 49, 0)  # IP_MULTICAST_ALL
                 self.local_ip = address
             except OSError:
-                self.close()
+                self.close_unicast()
                 raise
 
     def idle(self, address):
@@ -1781,13 +2201,14 @@ class Network:
             self.sender = None
         self.proof = None
         self.datagram_peers.clear()
+        self.mesh_peers.clear()
         self.listen(address)
 
     def configure(self, proof):
         """Rebind changed local paths and evict peers absent from new proof."""
         if (proof is None or self.local_ip != proof.local_ip
                 or self.proof is not None and self.proof.generation != proof.generation):
-            self.close()
+            self.close_unicast()
         if proof is not None:
             try:
                 self.listen(proof.local_ip)
@@ -1798,14 +2219,17 @@ class Network:
                     self.sender.setsockopt(socket.IPPROTO_IP, 10, 2)
                     self.sender.setsockopt(socket.IPPROTO_IP, socket.IP_TTL, 1)
             except OSError:
-                self.close()
+                self.close_unicast()
                 raise
         self.proof = proof
         self.datagram_peers = {ip: mac for ip, mac in self.datagram_peers.items()
                                if proof is not None and proof.peer(ip) == mac}
         for sock, stream in list(self.streams.items()):
-            if proof is None or proof.peer(stream.address) != stream.mac:
+            if (proof is None or proof.peer(stream.address) != stream.mac
+                    or not proof.local_address(sock.getsockname()[0])):
                 self.close_stream(sock)
+        self.mesh_peers = {key for key in self.mesh_peers if proof is not None
+                           and proof.peer(key[1]) == key[2] and proof.interfaces.get(key[1]) == key[0]}
 
     def make(self, kind, ip, port):
         """Create a nonblocking IPv4 socket restricted to br0."""
@@ -1832,9 +2256,72 @@ class Network:
             raise OSError('CoT exceeds UDP limit')
         return self.sender.sendto(packet, destination) == len(packet)
 
+    def send_beacon(self, packet):
+        """Verify policy before sending XML through br0, confined to bat0."""
+        proof = self.verify() if self.verify is not None else self.proof
+        if proof is None or not proof.mesh_path:
+            self.close_beacon()
+            raise OSError('mesh beacon path unavailable')
+        if len(packet) > 1200:
+            raise OSError('radio beacon exceeds datagram budget')
+        identity = proof.local_ip, proof.mesh_path
+        if identity != self.beacon_path:
+            self.close_beacon()
+            try:
+                self.beacon_sender = self.make(socket.SOCK_DGRAM, proof.local_ip, 0)
+                self.beacon_sender.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF,
+                                              socket.inet_aton(proof.local_ip))
+                self.beacon_sender.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 1)
+                self.beacon_sender.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_LOOP, 0)
+                self.beacon_sender.setsockopt(socket.IPPROTO_IP, 10, 2)  # Never fragment.
+                self.beacon_path = identity
+            except OSError:
+                self.close_beacon()
+                raise
+        return self.beacon_sender.sendto(packet, (tak.MESH_GROUP, tak.MESH_PORT)) == len(packet)
+
     def readers(self):
         """Return listeners and admitted streams for the select loop."""
-        return ([self.listener, self.udp] if self.listener is not None else []) + list(self.streams)
+        return (([self.listener, self.udp] if self.listener is not None else []) + list(self.streams)
+                + [sock for _, sock in self.mesh_sockets.values()])
+
+    def receive_mesh_sa(self, sock, iface, now, service):
+        """Prove physical ingress before invoking either SA payload decoder."""
+        data, _, flags, endpoint = sock.recvmsg(MAX_MESH_FRAME, 0)
+        if (flags & socket.MSG_TRUNC or len(endpoint) < 5 or endpoint[0] != iface
+                or endpoint[1] != 0x0800 or endpoint[2] >= 4 or endpoint[3] != 1):
+            return
+        if not self.budget.take(now.mono, size=len(data), events=1):
+            return
+        address, mac, packet = mesh_sa_frame(data)
+        key = (iface, address, mac)
+        fresh = key not in self.mesh_peers
+        if fresh and not self.budget.take(now.mono, accepts=1):
+            return
+        identity = self.mesh_sockets[iface][0]
+        if self.verify is not None:
+            self.configure(self.verify(force=fresh))
+        proof = self.proof
+        if (proof is None or proof.peer(address) != mac or proof.interfaces.get(address) != iface
+                or proof.local_ports.get(iface) != identity):
+            return
+        # Bound admission memory independently of the phone table.
+        if len(self.mesh_peers) >= MAX_STREAM_EVENTS:
+            self.mesh_peers.clear()
+        self.mesh_peers.add(key)
+        parsed = tak.decode_mesh_sa(packet)
+        if parsed is None:
+            return
+        if isinstance(parsed, str):
+            service.reject(parsed)
+            return
+        # A multicast claim must name this source, never a hostname or reply
+        # placeholder. Replies always use the proven IPv4 source, not this text.
+        endpoint = re.fullmatch(r'([0-9.]+):([0-9]{1,5}):(tcp|udp)', parsed.endpoint or '')
+        if endpoint is None or endpoint[1] != address or not 1 <= int(endpoint[2]) <= 65535:
+            service.reject('mesh SA endpoint does not match proven source')
+            return
+        service.ingest(parsed, address, proof, now)
 
     def admit(self, address):
         """Every new TCP stream / UDP peer gets a fresh, stable snapshot."""
@@ -1854,6 +2341,11 @@ class Network:
                 self.close_stream(sock)
         for sock in readable:
             try:
+                iface = next((name for name, (_, packet_sock) in self.mesh_sockets.items()
+                              if packet_sock is sock), None)
+                if iface is not None:
+                    self.receive_mesh_sa(sock, iface, now, service)
+                    continue
                 if sock is self.listener:
                     client, endpoint = sock.accept()
                     address = endpoint[0]
@@ -1864,6 +2356,8 @@ class Network:
                         continue
                     try:
                         mac = self.admit(address)
+                        if mac and not self.proof.local_address(client.getsockname()[0]):
+                            mac = None
                     except BaseException:
                         client.close()
                         raise
@@ -1873,7 +2367,11 @@ class Network:
                     client.setblocking(False)
                     self.streams[client] = Stream(client, address, mac, now.mono)
                 elif sock is self.udp:
-                    data, endpoint = sock.recvfrom(MAX_XML + 1)
+                    data, ancillary, flags, endpoint = sock.recvmsg(MAX_XML + 1, socket.CMSG_SPACE(12))
+                    destinations = [socket.inet_ntoa(value[8:12]) for level, kind, value in ancillary
+                                    if level == socket.IPPROTO_IP and kind == 8 and len(value) == 12]
+                    if flags & (socket.MSG_TRUNC | socket.MSG_CTRUNC) or len(destinations) != 1:
+                        continue
                     if not self.budget.take(now.mono, size=len(data), events=1):
                         continue
                     framer = cot.CotStreamFramer(MAX_XML)
@@ -1891,7 +2389,8 @@ class Network:
                             # Evicted peers need fresh proof on return.
                             self.datagram_peers.pop(next(iter(self.datagram_peers)))
                         self.datagram_peers[endpoint[0]] = mac
-                    service.ingest(documents[0], endpoint[0], self.proof, now)
+                    if self.proof is not None and self.proof.local_address(destinations[0]):
+                        service.ingest(documents[0], endpoint[0], self.proof, now)
                 elif sock in self.streams:
                     stream = self.streams[sock]
                     documents = stream.receive(sock.recv(16384), now.mono, self.budget)
@@ -1982,6 +2481,7 @@ def main(argv=None):
                     # use a cheap address ioctl; admission performs readback.
                     active = service.has_live_lease(now)
                     proof = guard.current(refresh=active)
+                    network.sync_mesh_ports(guard.local_ports)
                     try:
                         if proof is None and not active:
                             network.idle(guard.listen_address())
@@ -1997,6 +2497,9 @@ def main(argv=None):
                     next_cycle = now.mono + .2  # bound expensive path readbacks under a flood
                     network.handle(ready, now, service)
                     proof = network.proof  # admission may have revoked it
+                    # Admission may launch bounded readbacks. A producer can
+                    # publish during them, so assess inputs against fresh clocks.
+                    now = clock.now()
                     application.update(now, proof, guard.reason)
                     if now.mono >= next_tick:
                         next_tick = now.mono + 1  # incoming traffic never postpones the timer

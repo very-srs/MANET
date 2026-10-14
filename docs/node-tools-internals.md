@@ -1869,7 +1869,8 @@ open unless explicitly configured onto one of the blocked discovery ports.
 
 No further node-tools IP broadcast/multicast destinations were found. NTP /
 chrony uses unicast UDP 123, Mumble TCP/UDP 64738, the UI TCP 80, and the ATAK
-node service unicast UDP 4242/4349. MediaMTX unicast defaults TCP
+node service uses unicast UDP 4242/4349 for phones and UDP `239.2.3.1:6969`
+for unattended-radio SA. MediaMTX unicast defaults TCP
 8554/8322/1935/1936/8888/8889 and UDP 8000/8001/8004/8005/8189/8890 are also
 outside the sets. No election, registry, service configuration or other
 firewall policy is changed. Syncthing's optional UPnP router search **does**
@@ -2843,6 +2844,45 @@ routing a LAN uplink. A resolved br0 neighbor must map to a MAC dynamically
 learned on exactly one admitted port; any simultaneous bat0/other-port learning
 rejects it. Each peer records Wired or Wi-Fi.
 
+Default Mesh SA is received on one `AF_PACKET/SOCK_RAW` socket per ready EUD
+port, never on br0 or bat0. The socket starts with protocol zero, attaches and
+locks a classic BPF filter, then binds `ETH_P_ALL` on that port so it observes
+ingress before the bridge RX handler consumes the frame. BPF admits only
+unfragmented IPv4 UDP to `239.2.3.1:6969`; outgoing/loopback traffic is excluded
+both by packet type and `PACKET_IGNORE_OUTGOING`. No IP or packet multicast
+membership, promiscuity or all-multicast mode is requested. The existing bat0
+`MulticastRouter=permanent` setting is unchanged: normal phone SA forwarding
+continues, but this service adds no multicast listener advertisement.
+
+Packet socket lifecycle follows the existing network/role/hostapd invalidations.
+Cheap port facts include role, forwarding/carrier, hostapd lifetime and ifindex;
+unchanged facts preserve sockets, removed ports close them, and a new lifetime
+opens a new filtered socket. These facts permit observation only. Before SA
+decoding, strict firewall readback and a resolved br0 neighbor must agree with
+the Ethernet source MAC learned exclusively on the actual ingress port. Packet
+sockets bypass the ordinary input firewall, so this explicit gate is required.
+The contact endpoint must contain the proven source IPv4; it cannot redirect
+replies. Kernel filter/bind failure closes the socket and fails the service.
+
+`manet_tak.py` accepts mesh protocol 0 XML and the v1 `bf 01 bf` envelope. Its
+small protobuf wire reader retains only the SA fields from the public TAK
+definitions and applies the same `PhoneSA` classifier as XML. It preserves
+`how`, `geopointsrc`, `altsrc` and parent-link echo evidence. Whole XML detail
+elements take precedence over typed equivalents; unknown detail is ignored,
+while unsupported detail extensions fail closed. Contact phone numbers and
+raw payloads never enter retained state or logs. Limits are 8 KiB per SA,
+4 KiB for v1 `xmlDetail`, 256 protobuf fields across fixed message levels and
+512 bytes per retained v1 text field. Malformed lengths, varints, versions,
+duplicate known singular fields and XML DTD/depth violations are rejected.
+
+Frame reads are capped at 8274 bytes, with one frame per ready EUD socket per
+existing event cycle. IPv4/UDP lengths and checksums are checked, and fragments
+are not reassembled. The existing shared byte/event/admission buckets also
+cover SA, including forced readback for a new ingress/IP/MAC tuple. Remote
+frames arriving through bat0 or forwarded out a local port never reach the SA
+decoder. The unit already had `CAP_NET_RAW` for br0 binding; it now permits
+`AF_PACKET` as well. No broader capability is added.
+
 The owned firewall uses an explicit allow-list of `end0` and the configured AP
 name, computed by `--print-firewall` and the pre-start installer. A deny-list of
 known mesh ports could expose a new/unknown interface. Bridge input/output
@@ -2854,9 +2894,9 @@ name requires `systemctl restart manet-atak.service` to install a new list;
 until then the daemon fails closed on the policy mismatch. Ordinary AP stop/start
 with the same name needs no firewall replacement.
 
-Android
-location services should be off; ATAK receives external GPS CoT on UDP 4349,
-ordinary CoT on UDP 4242, and sends SA to the radio's IPv4 address on UDP 4242.
+Android location services should be off and ATAK's external GPS input enabled
+on UDP 4349. Stock ordinary CoT input and Default Mesh SA need no per-radio
+output configuration. Unicast XML SA to UDP 4242 remains supported.
 SA admits a UID into the bounded phone table and refreshes its presence lease
 (the earlier of packet staleness and the 75-second receipt-age budget). Each
 phone retains IP, MAC, attachment type, callsign, clock/replay state and deadline.
@@ -2915,46 +2955,127 @@ startup. Reboot retains choice and radio manual-location age lower bounds but
 requires new SA before any phone becomes present. The service never sets the
 OS clock.
 
+With no live local phone lease, `RadioBeacon` advertises the selector's usable
+fix as protocol-0 XML on `239.2.3.1:6969`. Its stable UID is the machine-id-derived
+radio UID plus `-beacon`, distinct from the hidden contact and reserved against
+phone/marker admission. The callsign is the hostname or `atak_callsign`.
+Type `a-f-G-U-U-S-R` is the MIL-STD-2525 radio/signal unit, SIDC
+`SFGPUUSR-------`. It omits team/role details so ATAK uses type symbology, and
+omits a contact endpoint. Only geometry, source and uncertainty are published,
+without a held manual point's phone identity. The same selector supplies trusted
+GPS or the held manual fallback, never suspect receiver geometry or a 0,0 SA.
+Announcements use the radio's UTC clock, refresh at 30 seconds and expire at
+90 seconds. Movement of five metres horizontally or in known HAE, source or
+name changes can advance output, with a five-second minimum between attempts.
+Failed sends use that same backoff. Work runs on the existing application cycle.
+
+Beacon transport uses a separate nonblocking UDP socket bound to br0 and its
+primary/configured IPv4, with multicast interface selection, TTL 1, loopback
+disabled and fragmentation prohibited. Its datagram budget is 1200 bytes.
+The bridge output chain drops local UDP to `239.2.3.1:6969` on every egress
+except bat0. Linux applies that hook to each actual bridge output port, so
+local EUD ports cannot receive this beacon. The forward path for phone SA and
+other radios' announcements is unchanged. Existing bat0 multicast-router
+configuration remains in place, without a group join. Strict firewall readback
+and forwarding/carrier/br0 membership for bat0 precede output. A radio with no
+ready local EUD port can establish this mesh proof without admitting any phone.
+br0/bat0 ifindices identify the sender's lifetime. Invalidated proof is refreshed
+only for due output or admission. Packet-type filtering and proof's exclusion
+of local source addresses reject a looped beacon before SA parsing, and its
+radio type cannot classify as phone self SA.
+
+On phone arrival or loss of usable geometry, the beacon stops and schedules
+`t-x-d-d` with `__forcedelete` for only its beacon UID. A live phone lease keeps
+it suppressed across temporary proof loss. Cleanup seeks three successful local
+UDP handoffs at two-second spacing, bounded to five attempts, and then stops.
+A restart with a live phone also requests cleanup of a possible old beacon.
+After the final lease expires, new SA replaces any remaining cleanup job.
+Neither announcements nor deletions have a delivery acknowledgement. Public
+ATAK `CotDeleteImporter` removes a force-deleted item immediately unless that
+item disables remote deletion, whereas ordinary staleness follows client purge
+settings. The 90-second stale field is a fallback, not a removal guarantee.
+
+The public [TAK protocol contract](https://raw.githubusercontent.com/TAK-Product-Center/atak-civ/main/takproto/README.txt)
+requires legacy XML receive support. The [ATAK icon adapter](https://raw.githubusercontent.com/TAK-Product-Center/atak-civ/main/atak/ATAK/app/src/main/java/com/atakmap/android/icons/Icon2525cIconAdapter.java)
+uses military symbology without team metadata, and the [milsymbol ground mapping](https://raw.githubusercontent.com/spatialillusions/milsymbol/master/src/lettersidc/sidc/ground.js)
+identifies UUSR as radio. The [ATAK deletion importer](https://raw.githubusercontent.com/TAK-Product-Center/atak-civ/main/atak/ATAK/app/src/main/java/com/atakmap/android/cotdelete/CotDeleteImporter.java)
+supports the chosen force-delete task. Tests cover selection, identity, cadence,
+handoff, ingress rejection and egress policy. Stock Pixel rendering, multicast
+deletion and live bat0-only output still require CM4 verification. There is no
+separate feature switch, and `atak=n` suppresses all beacon traffic.
+
 The ATAK daemon now subscribes to route link/address/neighbor (including bridge
 FDB) and nftables notifications before its first readback. A cached proof avoids
 all four `nft`/`ip`/`bridge` subprocesses on unchanged ticks. Role/generation file
 metadata, AP role/config metadata and hostapd process identity are additional
-invalidators. With no live admitted SA lease, these events only discard proof;
-they never launch a snapshot. Each new TCP stream or UDP peer forces a full
-snapshot before application admission. While a lease remains live, event-driven
-verification and transient-readback retries continue even if its path temporarily
-fails, so it can recover without waiting for another SA. Output checks pending
-invalidations before sending. Events arriving during a snapshot discard it.
+invalidators. With no live admitted SA lease, relevant events only discard proof
+and defer readback to the next admission or due beacon. A verified snapshot
+supplies a notification scope: br0, bat0 and configured local EUD link identities,
+br0 address changes, IPv4-to-MAC associations and MAC-to-local-port associations.
+Unrelated link and neighbor/FDB churn is ignored even with a phone present.
+A protected IPv4 neighbor's `RTM_NEWNEIGH` refresh on br0 also preserves proof
+when its MAC matches and its state is REACHABLE, STALE, DELAY or PROBE. Failed,
+incomplete, NOARP, permanent or unrecognized states, deletion, a changed MAC or
+a different device still invalidate it. A healthy IPv6 refresh carrying the
+same protected MAC on br0 is likewise harmless to the IPv4 proof, while failure,
+deletion and another device remain significant. A dynamic AF_BRIDGE FDB refresh
+is ignored only on its proven local port, with matching br0 master identity,
+REACHABLE or STALE state and exactly the non-static flags recorded at readback.
+Static/permanent/self entries, deletion, changed flags, or learning that MAC on
+any other port, including bat0, trigger readback. VLAN, extended or unfamiliar
+metadata and ambiguous snapshot rows remain conservative. Known flag bits are
+decoded separately from iproute2's bridge-master field. Identity-set membership
+alone cannot hide one protected IP changing to another protected MAC, and a
+later healthy event in a batch cannot cancel a deletion. New local interface
+names catch recreation with a new ifindex.
+Missing scope or unknown/malformed events remain conservative. Each new TCP
+stream, UDP peer or mesh ingress/IP/MAC tuple forces fresh admission readback.
+Relevant events and transient-readback retries continue while an SA lease is
+live. Every nftables event remains significant, and output checks pending
+invalidations before sending. Relevant events during a snapshot discard it.
 Overflow, truncation or subscription failure closes the service and lets systemd restart
 with fresh subscriptions. SIGHUP also invalidates it. The existing output and
 input cycle intervals are unchanged, with no extra daemon or polling subprocess.
-The kernel firewall remains the packet boundary; asynchronous userspace
+The kernel firewall remains the packet boundary. Asynchronous userspace
 notifications cannot make an arbitrary external ruleset flush atomic with I/O.
 
-Without current proof, idle TCP/UDP listeners bind to the primary br0 IPv4
-address obtained by `SIOCGIFADDR` (or the configured bind address). This ioctl
-starts no subprocess and grants no admission; the full address, firewall,
-neighbor and FDB checks still precede application dispatch. It permits first
-arrival after boot or address changes without a timer-driven snapshot. Idle
-invalidation closes streams and the sender and forgets UDP peer admissions,
-leaving only passive listeners. `path_ready` is false until readback succeeds;
+Without current proof, `SIOCGIFADDR` cheaply detects br0 address readiness (or
+uses the configured bind address). TCP/UDP 4242 listeners bind IPv4 wildcard
+with `SO_BINDTODEVICE=br0`; accepted TCP destinations and UDP `IP_PKTINFO`
+destinations must match the full readback's global br0 address list before
+application dispatch. Thus both primary and secondary gateway addresses work,
+while the contact and output sender retain the primary/configured address.
+This permits first arrival after boot or address changes without a timer-driven
+snapshot. Idle invalidation closes streams and the unicast sender and forgets UDP/mesh
+peer admissions, leaving passive listeners. `path_ready` is false until readback succeeds;
 `path_reason` says verification awaits phone traffic after invalidation, or gives
 the last verification failure. A valid, unchanged cached proof can remain ready
 after the last lease expires.
 
-With no admitted phone, no CoT is sent. Before the first association, the
-application does not read GPS, select a position, create warnings or checkpoint
-unchanged state. It still checks monitor/jamming file metadata and their
+Before the first association, the application reads receiver inputs and selects
+a position for the unattended beacon. Missing GPS alone creates no phone warning
+or audio job at this stage. It also checks monitor/jamming file metadata and
 freshness deadlines, durably remembering producer activation/loss so a failed
 producer cannot later appear unwired. Inputs are parsed only when metadata
 changes or their boot/raw-clock freshness expires. Future timestamps have their
 own retry deadline; neither wall-clock steps nor the cache extend a fix's TTL.
 
+The event loop refreshes its clocks after admission readback before evaluating
+producer files. Otherwise a GPS observation published during readback can look
+future-dated against the earlier cycle time. Receiver sampling runs whenever
+ATAK is enabled, so temporary proof loss does not turn it off. A missing
+usable receiver fix delays the unavailable warning for three continuous seconds.
+This delays only the warning, never permits a stale fix, and resets on recovery.
+A held usable manual point needs no unavailable warning. Distrust, jamming and
+producer-loss distrust remain immediate. Each warning raise/clear emits one
+journal line with its code, GPS reason, state, freshness, age and distrust flag.
+The diagnostic omits phone identifiers and packet contents.
+
 After the last present phone leaves, changed safety inputs, phone presence expiry and
-warning deadlines still run. A held manual point or warning history retains the
+warning and beacon deadlines still run. A held manual point or warning history retains the
 30-second durable checkpoint to preserve age lower bounds across reboot. Audio
 acknowledgements are checked only with pending audio; audio output is rewritten
-only on changes. Unchanged idle cycles skip selection, serialization and runtime
+only on changes. Unchanged idle cycles without due work skip selection, serialization and runtime
 JSON writes. `status.json` includes `idle`; its timestamps describe the last
 snapshot, not a service heartbeat. Use systemd for liveness and the observation
 timestamps to advance a displayed manual age. Admission/path changes are handled
@@ -2964,8 +3085,36 @@ Remaining idle work is the existing 0.2-second select wakeup, one-second
 role/generation, AP/hostapd identity, producer-file and input metadata checks,
 stream expiry and netlink handling, plus the cheap br0 address ioctl while proof
 is unavailable. Readable events can advance these checks within the existing
-five-cycle-per-second bound. Repeated bat0 neighbor/FDB notifications invalidate
-proof without running `nft`, `ip` or `bridge`; there is no idle readback timer.
+five-cycle-per-second bound. Unrelated bat0 neighbor/FDB notifications are
+discarded once a scope exists. Relevant idle events invalidate proof without
+running `nft`, `ip` or `bridge` immediately. A due beacon verifies dirty proof
+before sending, with retries bounded to five-second intervals. An unchanged
+proof requires no snapshot commands even across beacon refreshes. There is no
+separate idle readback timer. New receiver observations can now trigger position
+selection and status writes even before the first phone, while unchanged
+never-associated state needs no periodic durable checkpoint.
+Packet sockets add no timer or nonmatching-packet userspace wakeup. Their BPF
+still executes in the kernel on local ingress. This is not a claim of zero
+kernel cost. Active phones retain their feed and safety deadlines, but unrelated
+notifications now require no snapshots. Relevant phone/path/policy changes and
+new admissions still perform readback.
+
+CM4 with a Pixel 6a running ATAK-CIV 5.6.0.12 admitted an AP-only phone using
+only Default Mesh SA, sent the contact and roughly 1 Hz external GPS feed, and
+gave ATAK a location lock from a continuous bench fix with `time_ok=false`.
+There was one filtered wlan1 packet socket, no br0/bat0 socket, no multicast
+membership and no service restart. Before notification filtering, that run used
+23.2 CPU seconds over 541 seconds, about 2.6 CPU seconds per minute or 4.3% of
+one core. With the warning correction, unrelated-event filtering and beacon
+output rule installed, a later AP-only run measured 1.374 CPU seconds per minute
+(2.29% of one core) over 120 seconds. The phone remained the Wi-Fi controller
+with trusted position, no banners and no warning raises over about five minutes.
+Only one verification-race message appeared in that interval. However, a
+60-second trace still showed 28 successful child execs, or seven full snapshots,
+correlated with the phone's own REACHABLE/STALE/PROBE neighbor cycle. Tests now
+preserve proof without commands through 300 protected-neighbor and same-port
+FDB refresh cycles while retaining MAC-move, failed-state, delete and firewall
+revocation. This additional refresh filtering still needs a CM4 CPU repeat.
 
 `manet-cpu-sample.py` reads cgroup-v2 `cpu.stat` twice around one timed sleep,
 including child-process CPU, and reports CPU seconds per elapsed minute plus
@@ -2983,9 +3132,11 @@ prove zero snapshot commands over 300 idle neighbor-event cycles, including
 the main loop, and fresh four-command proof on subsequent TCP/UDP arrival.
 With deferred readback, the same AP-only CM4 measured 0.254 CPU s/min (0.42% of
 one core) with no phone and started no snapshot commands over 60 seconds of
-that churn. The application
+that churn before the unattended beacon was added. The application
 also does no further JSON parsing/writing, durable saves or CoT sends over 300
-unchanged never-associated cycles. Tests cover input expiry, faults before first
+unchanged never-associated cycles with no usable position. A relay with a fresh
+receiver has additional selection and beacon work whose CM4 CPU cost remains
+unmeasured. Tests cover input expiry, faults before first
 association, reconnect, pending audio and warning deadlines.
 
 Operator scripts run through `manet-user-scripts.sh`. Per-script completion

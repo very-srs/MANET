@@ -12,10 +12,13 @@
 - **Change settings:** open [Manage](http://manet.local/manage/) and ask a grown up to help you enter the admin password.
 
 ATAK can use the cable or this radio's Wi-Fi. Pick the phone that sets the
-group's location on [status](http://manet.local/); no admin password is needed.
+group's location on [status](http://manet.local/). No admin password is needed.
+Set up the [phone's location input](location.md#user-set-up-your-atak-phone)
+once. You do not need to add a new output address for each radio.
 
 Wi-Fi access depends on how this radio was configured by some nerd. If it is not serving an access point, use Ethernet.
 
+Remember to not go to the car lot nearest the base to finance a Camaro as an E3.
 ## User
 
 ### Choose an available connection
@@ -44,8 +47,10 @@ The dashboard is for this radio's own clients. A device on the upstream internet
 
 ATAK works over the client Ethernet connection or this radio's enabled Wi-Fi
 access point. Keep phones near their radio: every attached phone receives its
-position. One phone controls the group's manual location; choose it in **ATAK
-PHONES** on the status page without the admin password. Follow
+position. One phone controls the group's manual location. Choose it in **ATAK
+PHONES** on the status page without the admin password. Turn Android location
+services off and enable ATAK's external GPS input on **UDP 4349** once. Leave
+**Default Mesh SA** enabled. No per-radio output entry is needed. Follow
 [location and ATAK](location.md) for phone settings and automatic selection.
 
 ## Developer
@@ -94,16 +99,16 @@ The management name illustrates why this boundary exists. Each node serves
 the same name, `manet.local`, but answers with **its own** client-gateway
 address through local DNS and mDNS. Discovery packets are blocked at the
 mesh port in both directions, including traffic to and from the node itself.
-The filter selects discovery protocols, rather than dropping all multicast;
-voice and ATAK still need their mesh transports. A released or invalid
+The filter selects discovery protocols, rather than dropping all multicast.
+Voice and ATAK still need their mesh transports. A released or invalid
 allocation withdraws the management-name announcement until a valid local
 gateway exists again.
 
 HTTP access is also checked independently of name resolution. Both local
 and remote packets can arrive on `br0`, so accepting every request on that
 interface would expose management to other radios' clients. The firewall
-instead permits localhost and source addresses in this node's DHCP pool;
-application checks also require localhost or the mesh/EUD subnet. This is an
+instead permits localhost and source addresses in this node's DHCP pool.
+Application checks also require localhost or the mesh/EUD subnet. This is an
 address-pool rule, not proof of a particular lease or a cryptographic client
 identity. Authentication then decides whether an admitted client may use
 management actions. 
@@ -115,15 +120,26 @@ With `acs=y` and Auto EUD mode, an Ethernet gateway can serve the AP while its o
 
 ### ATAK boundary
 
-`manet-atak.service` is enabled by default; `atak=n` explicitly opts out. Admission independently verifies wired `end0` or the active AP's forwarding
+`manet-atak.service` is enabled by default. `atak=n` explicitly opts out. Admission independently verifies wired `end0` or the active AP's forwarding
 br0 path. A MAC must be learned exclusively on that local EUD port and resolved
-on br0; simultaneous bat0 learning fails. The explicit firewall allow-list uses
+on br0. Simultaneous bat0 learning fails. The explicit firewall allow-list uses
 `end0` and the AP role name, requiring an ATAK restart after AP renaming. SA
 leases form a bounded per-phone table with one controller. Controller choice
 uses present manual preference, sole wired phone, present current controller,
 then stable random selection. The password-free controller POST checks the local
 DHCP source pool and JSON/origin boundary, then hands off through a producer
 file for daemon-side presence validation. No admitted phone means no CoT output. `manet-positioning.service` is a separate, disabled-by-default service.
+
+Default Mesh SA (`239.2.3.1:6969`) is captured only on local EUD ingress with
+filtered packet sockets. The daemon neither joins the group nor opens a socket
+on bat0. Outgoing copies forwarded from the mesh are filtered before userspace.
+The existing permanent multicast-router setting on bat0 remains unchanged.
+This receiver adds no multicast listener advertisement. A bounded v1 protobuf
+or legacy XML SA decoder runs only after ingress/MAC/neighbor/firewall proof,
+and requires the contact endpoint to match the proven IPv4 source. Unicast
+4242 input also accepts the secondary br0 gateway address: TCP destinations and
+UDP packet-info destinations must belong to br0's verified global address list.
+The radio advertises its primary address and replies directly to the phone.
 
 - [Networking and EUD reference](../../../MANET/node_tools/README.md#network-management)
 - [Discovery boundary internals](../../../docs/node-tools-internals.md#local-eud-discovery)

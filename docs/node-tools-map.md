@@ -169,9 +169,10 @@ the presence of these files is not evidence of a working field capability.
 
 | File | Responsibility |
 |---|---|
-| [manet-atak.py](../MANET/node_tools/manet-atak.py) | Admit the wired ATAK phone and own its CoT I/O and retained state. |
+| [manet-atak.py](../MANET/node_tools/manet-atak.py) | Admit local wired/AP ATAK phones from mesh SA or unicast and own their CoT I/O and retained state. |
 | [manet_phone.py](../MANET/node_tools/manet_phone.py) | Select location/feedback for the admitted phone from supplied observations. |
 | [manet_cot.py](../MANET/node_tools/manet_cot.py) | Build CoT XML and parse untrusted marker candidates. |
+| [manet_tak.py](../MANET/node_tools/manet_tak.py) | Decode bounded mesh v1/XML self SA into the shared phone observation type. |
 | [manet_gnss.py](../MANET/node_tools/manet_gnss.py) | Track per-receiver fix freshness and anomaly hints independently of system-clock slew. |
 | [manet-positioning.py](../MANET/node_tools/manet-positioning.py) | Orchestrate experimental ranging/monitoring/solving and socket-free simulation. |
 | [manet_ranging.py](../MANET/node_tools/manet_ranging.py) | Event-driven data/ACK ranging protocol and timing state; not 802.11mc FTM. |

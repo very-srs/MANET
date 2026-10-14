@@ -17,6 +17,8 @@ from unittest.mock import Mock, patch
 
 import manet_cot as cot
 import manet_phone as phone
+import manet_tak as tak
+from test_tak_protocol import sa_fixture
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -71,6 +73,7 @@ class MemoryStore:
 class Sender:
     def __init__(self):
         self.sent = []
+        self.beacons = []
         self.fail_ports = set()
         self.before_send = None
 
@@ -80,6 +83,12 @@ class Sender:
         if destination[1] in self.fail_ports:
             raise OSError('simulated transport failure')
         self.sent.append((ET.fromstring(data), destination))
+        return True
+
+    def send_beacon(self, data):
+        if 6969 in self.fail_ports:
+            raise OSError('simulated mesh failure')
+        self.beacons.append(ET.fromstring(data))
         return True
 
 
@@ -128,6 +137,151 @@ class DefaultConfigTests(unittest.TestCase):
                 self.assertEqual(atak.Config.load().enabled, expected)
         self.assertTrue(atak.Config('radio').enabled)
 
+    def test_beacon_defaults_to_hostname_and_honors_callsign_override(self):
+        with patch.object(atak.Path, 'read_text', return_value='a' * 32), \
+                patch.object(atak.socket, 'gethostname', return_value='mesh-5cc2'):
+            for conf, name in (({}, 'mesh-5cc2'), ({'atak_callsign': 'RELAY'}, 'RELAY')):
+                with patch.object(atak, 'read_kv', return_value=conf):
+                    config = atak.Config.load()
+                    self.assertEqual(config.beacon_name, name)
+                    self.assertEqual(config.uid, 'MANET-' + 'a' * 32)
+
+
+class RadioBeaconTests(Harness):
+    def announcements(self):
+        return [root for root in self.tx.beacons if root.get('type') == cot.BEACON_TYPE]
+
+    def test_idle_trusted_fix_has_distinct_stable_radio_identity_and_no_endpoint(self):
+        fix = cot.Fix(40, -105, 'gnss', hae=1600)
+        self.tick(fix)
+        first = self.announcements()[0]
+        self.assertEqual(first.get('uid'), 'radio-1-beacon')
+        self.assertEqual(first.get('type'), 'a-f-G-U-U-S-R')
+        self.assertEqual(first.find('detail/contact').attrib, {'callsign': self.config.callsign})
+        self.assertIsNone(first.find('detail/__group'))
+        self.assertIsNone(first.find('detail/link'))
+        self.assertEqual(float(first.find('point').get('lat')), 40)
+        self.assertEqual(float(first.find('point').get('hae')), 1600)
+        self.assertEqual((datetime.fromisoformat(first.get('stale').replace('Z', '+00:00')) -
+                          datetime.fromisoformat(first.get('time').replace('Z', '+00:00'))).total_seconds(), 90)
+        packet = ET.tostring(first)
+        self.assertTrue(packet.startswith(b'<event '))
+        self.assertLess(len(packet), 1200)
+        self.assertNotIsInstance(tak.decode_mesh_sa(packet), cot.PhoneSA)
+        self.clock.advance(31)
+        self.restart()
+        self.tick(fix)
+        self.assertEqual(self.announcements()[-1].get('uid'), first.get('uid'))
+        self.assertEqual(self.tx.sent, [])
+
+    def test_no_fix_zero_fix_and_disabled_send_nothing(self):
+        self.tick()
+        self.tick(cot.Fix(0, 0, 'gnss'))
+        self.service.config = atak.replace(self.config, enabled=False)
+        self.tick(cot.Fix(40, -105, 'gnss'))
+        self.assertEqual(self.tx.beacons, [])
+        self.assertEqual(self.tx.sent, [])
+
+    def test_arrival_retires_only_radio_marker_and_lease_expiry_resumes(self):
+        fix = cot.Fix(40, -105, 'gnss')
+        self.tick(fix)
+        self.sa()
+        self.tick(fix)
+        retirement = self.tx.beacons[-1]
+        self.assertEqual(retirement.get('type'), 't-x-d-d')
+        self.assertEqual(retirement.find('detail/link').get('uid'), 'radio-1-beacon')
+        self.assertIsNotNone(retirement.find('detail/__forcedelete'))
+        for _ in range(37):
+            self.clock.advance(2)
+            self.tick(fix)
+        self.assertEqual(len(self.announcements()), 1)
+        self.assertEqual(len([r for r in self.tx.beacons if r.get('type') == 't-x-d-d']), 3)
+        self.clock.advance(1)
+        self.tick(fix)
+        self.assertEqual(len(self.announcements()), 2)
+        self.assertFalse(self.service.has_live_lease(self.clock.now()))
+
+    def test_live_lease_suppresses_beacon_during_proof_churn(self):
+        self.sa()
+        self.tick(cot.Fix(40, -105, 'gnss'), proof=False)
+        self.clock.advance(30)
+        self.tick(cot.Fix(40, -105, 'gnss'), proof=False)
+        self.assertEqual(self.announcements(), [])
+
+    def test_suspect_gps_retires_last_fix_and_cannot_be_advertised(self):
+        fix = cot.Fix(40, -105, 'gnss')
+        self.tick(fix)
+        self.clock.advance(1)
+        self.tick(fix, state='GNSS_SUSPECTED', epoch=1)
+        self.assertEqual(self.tx.beacons[-1].get('type'), 't-x-d-d')
+        self.clock.advance(100)
+        self.tick(fix, state='GNSS_SUSPECTED', epoch=1)
+        self.assertEqual(len(self.announcements()), 1)
+
+    def test_suspect_gps_uses_held_manual_without_disclosing_phone_uid(self):
+        self.sa()
+        self.send_point((41, -106), 'landmark')
+        self.tick(cot.Fix(40, -105, 'gnss'), state='GNSS_SUSPECTED', epoch=1)
+        self.clock.advance(76)
+        self.tick(cot.Fix(40, -105, 'gnss'), state='GNSS_SUSPECTED', epoch=1)
+        root = self.announcements()[-1]
+        self.assertEqual(float(root.find('point').get('lat')), 41)
+        self.assertEqual(float(root.find('point').get('lon')), -106)
+        self.assertNotIn(self.packets.uid, ET.tostring(root).decode())
+        self.assertNotEqual(root.get('how'), 'm-g')
+
+    def test_cadence_movement_and_backoff_under_rapid_ticks(self):
+        first, moved = cot.Fix(40, -105, 'gnss'), cot.Fix(40.0001, -105, 'gnss')
+        self.tick(first)
+        for _ in range(24):
+            self.clock.advance(.2)
+            self.tick(moved)
+        self.assertEqual(len(self.announcements()), 1)
+        self.clock.advance(.3)
+        self.tick(moved)
+        self.assertEqual(len(self.announcements()), 2)
+        self.clock.advance(29.9)
+        self.tick(moved)
+        self.assertEqual(len(self.announcements()), 2)
+        self.clock.advance(.2)
+        self.tick(moved)
+        self.assertEqual(len(self.announcements()), 3)
+        self.clock.advance(5)
+        self.tick(cot.Fix(40.000101, -105, 'gnss'))  # sub-metre jitter
+        self.assertEqual(len(self.announcements()), 3)
+
+    def test_failed_sends_have_five_second_backoff_and_bounded_retirement(self):
+        self.tx.fail_ports.add(6969)
+        with patch.object(self.tx, 'send_beacon', wraps=self.tx.send_beacon) as send:
+            for _ in range(50):
+                self.tick(cot.Fix(40, -105, 'gnss'))
+                self.clock.advance(.1)
+            self.assertEqual(send.call_count, 1)
+        self.tx.fail_ports.clear()
+        self.clock.advance(.1)
+        self.tick(cot.Fix(40, -105, 'gnss'))
+        self.assertEqual(len(self.announcements()), 1)
+        self.tx.fail_ports.add(6969)
+        self.sa()
+        with patch.object(self.tx, 'send_beacon', wraps=self.tx.send_beacon) as send:
+            for _ in range(15):
+                self.tick()
+                self.clock.advance(2)
+            self.assertEqual(send.call_count, 5)
+            self.assertIsNone(self.service.beacon.next_due)
+
+    def test_short_send_is_not_success_and_jitter_cancels_early_deadline(self):
+        with patch.object(self.tx, 'send_beacon', return_value=False):
+            self.tick(cot.Fix(40, -105, 'gnss'))
+            self.assertFalse(self.service.beacon.active)
+        self.clock.advance(5)
+        self.tick(cot.Fix(40, -105, 'gnss'))
+        self.clock.advance(1)
+        self.tick(cot.Fix(40.001, -105, 'gnss'))
+        self.clock.advance(4)
+        self.tick(cot.Fix(40, -105, 'gnss'))
+        self.assertEqual(self.service.beacon.next_due, self.service.beacon.last_sent + 30)
+
 
 class IdleApplicationTests(Harness):
     def setUp(self):
@@ -140,6 +294,105 @@ class IdleApplicationTests(Harness):
 
     def update(self, proof=True):
         return self.app.update(self.clock.now(), self.proof if proof else None, 'verified' if proof else 'down')
+
+    def write_gps(self):
+        now = self.clock.now()
+        atak.atomic_json(self.runtime / 'gps_status.json', {
+            'schema': 2, 'boot_id': 'boot-1', 'written_boot': now.boot,
+            'clock': 'monotonic_raw', 'has_fix': True, 'devices': ['synthetic'],
+            'sample': {'mono': now.raw, 'mode': 3, 'lat': 40, 'lon': -105}})
+
+    def test_receiver_is_used_before_first_phone_and_no_fix_expires_beacon(self):
+        self.write_gps()
+        self.update()
+        self.assertEqual(self.tx.beacons[-1].get('type'), cot.BEACON_TYPE)
+        self.assertFalse(self.service.phones)
+        saves = self.store.writes
+        for _ in range(30):
+            self.clock.advance(1)
+            self.write_gps()
+            self.update()
+        self.assertEqual(len(self.tx.beacons), 2)
+        self.assertEqual(self.store.writes, saves)
+        self.clock.advance(20)
+        self.update()
+        self.assertEqual(self.tx.beacons[-1].get('type'), 't-x-d-d')
+
+    def test_last_lease_expiry_triggers_beacon_even_without_proof_or_changed_input(self):
+        self.sa()
+        self.send_point((41, -106), 'held')
+        self.update(proof=False)
+        for seconds in (2, 2, 26, 30, 14):
+            self.clock.advance(seconds)
+            self.update(proof=False)
+        self.assertFalse(any(r.get('type') == cot.BEACON_TYPE for r in self.tx.beacons))
+        self.clock.advance(1)
+        self.assertTrue(self.update(proof=False))
+        self.assertEqual(self.tx.beacons[-1].get('type'), cot.BEACON_TYPE)
+        # Beacon transport independently establishes the mesh proof on demand.
+        self.assertFalse(self.service.has_live_lease(self.clock.now()))
+
+    def test_continuous_receiver_during_readback_cannot_raise_transient_warning(self):
+        self.sa()
+        self.write_gps()
+        self.update()
+        # Admission readback can take time after main captured its cycle time.
+        # The producer publishes a valid newer observation during that work.
+        old_now = self.clock.now()
+        self.clock.advance(.4)
+        self.write_gps()
+        self.app.update(old_now, None, 'network changed during verification')
+        self.assertNotIn('gps_untrusted', self.service.position._warnings)
+        self.update()
+        self.assertFalse(any('Radio GPS is unavailable' in ET.tostring(root).decode()
+                             for root in self.of_type('b-t-f')))
+
+    def test_real_gps_loss_waits_three_seconds_then_logs_raise_and_clear(self):
+        self.sa()
+        self.write_gps()
+        self.update()
+        (self.runtime / 'gps_status.json').unlink()
+        with patch.object(atak, 'log') as journal:
+            self.update()
+            self.clock.advance(2.9)
+            self.update()
+            self.assertNotIn('gps_untrusted', self.service.position._warnings)
+            self.clock.advance(.1)
+            self.update()
+            self.assertIn('gps_untrusted', self.service.position._warnings)
+            self.clock.advance(1)
+            self.write_gps()
+            self.update()
+            self.assertNotIn('gps_untrusted', self.service.position._warnings)
+        lines = [call.args[0] for call in journal.call_args_list]
+        self.assertEqual(len(lines), 2)
+        self.assertIn('warning raised code=gps_untrusted', lines[0])
+        self.assertIn('warning cleared code=gps_untrusted', lines[1])
+        for line in lines:
+            for field in ('gps_reason=', 'state=', 'fresh=', 'age_s=', 'distrusted='):
+                self.assertIn(field, line)
+            self.assertNotIn(self.packets.uid, line)
+
+    def test_fresh_receiver_stays_sampled_across_repeated_proof_loss(self):
+        self.sa()
+        for i in range(60):
+            self.clock.advance(.2)
+            self.write_gps()
+            self.update(proof=i % 2 == 0)
+            self.assertNotIn('gps_untrusted', self.service.position._warnings)
+            self.assertIsNotNone(self.inputs.cached[0].fix)
+
+    def test_distrust_and_jamming_warn_immediately_during_availability_delay(self):
+        for state, jammed in (('GNSS_SUSPECTED', False), ('UNCHECKED', True)):
+            with self.subTest(state=state, jammed=jammed):
+                self.setUp()
+                self.sa()
+                self.tick()
+                with patch.object(atak, 'log') as journal:
+                    self.tick(state=state, jammed=jammed, epoch=1)
+                self.assertIn('gps_untrusted', self.service.position._warnings)
+                self.assertTrue(self.service.position._distrusted)
+                self.assertEqual(len(journal.call_args_list), 1)
 
     def test_never_attached_phone_has_no_repeated_app_io_or_serialization(self):
         self.assertTrue(self.update())
@@ -210,6 +463,8 @@ class IdleApplicationTests(Harness):
 
     def test_absent_phone_keeps_alert_deadlines_and_audio_acknowledgements(self):
         self.sa()
+        self.update()
+        self.clock.advance(3)
         self.update()
         self.service.position._presence = None
         warning = self.service.position._warnings['gps_untrusted']
@@ -291,6 +546,9 @@ class PhoneFlowTests(Harness):
         status = self.tick()
         self.assertTrue(status['phone_present'])
         self.assertIsNone(status['selected'])
+        self.assertFalse(self.of_type('b-t-f'))
+        self.clock.advance(3)
+        self.tick()
         self.assertTrue(self.of_type('b-t-f'))
         contact = next(root for root, dest in self.tx.sent if root.find('detail/contact') is not None)
         self.assertEqual(contact.find('point').get('lat'), '0')
@@ -350,6 +608,8 @@ class PhoneFlowTests(Harness):
 
     def test_receipts_plain_chat_audio_cancellation_and_timeout(self):
         self.sa()
+        self.tick()
+        self.clock.advance(3)
         self.tick()
         message = self.of_type('b-t-f')[-1].find('detail/__chat').get('messageId')
         audio = self.service.audio['gps_untrusted']['id']
@@ -475,6 +735,8 @@ class PhoneFlowTests(Harness):
         self.sa()
         self.tx.fail_ports = {4242, 4349}
         self.tick()
+        self.clock.advance(3)
+        self.tick()
         key = next(iter(self.service.messages))
         message_id = self.service.messages[key]['id']
         self.assertIsNone(self.service.position._warnings['gps_untrusted'].sent_mono)
@@ -486,6 +748,8 @@ class PhoneFlowTests(Harness):
         self.setUp()
         self.sa()
         self.tx.fail_ports = {4242}
+        self.tick()
+        self.clock.advance(3)
         self.tick()
         key = next(iter(self.service.messages))
         message_id = self.service.messages[key]['id']
@@ -504,6 +768,8 @@ def replace_proof(proof, peers):
 class PersistenceTests(Harness):
     def test_same_boot_restart_keeps_age_pin_warning_read_ids_and_guard(self):
         self.sa()
+        self.tick()
+        self.clock.advance(3)
         self.tick()
         msg = self.of_type('b-t-f')[-1].find('detail/__chat').get('messageId')
         self.clock.advance(1)
@@ -610,6 +876,11 @@ class FirewallReadbackTests(unittest.TestCase):
                 match = expression.get('match', {})
                 if match.get('left', {}).get('payload', {}).get('field') == 'dport' and match.get('right') == 4242:
                     match['right'] = {'set': [4242, 4349]}
+        # The historical capture predates relay SA. Add its new rule in the
+        # same normalized form, without relabelling synthetic JSON as a capture.
+        beacon = copy.deepcopy(atak.firewall_objects()[-1])
+        beacon['rule']['expr'] = atak._canonical_expr(beacon['rule']['expr'])
+        data['nftables'].append(beacon)
         self.assertTrue(atak.valid_firewall(data))
 
     def test_dropping_a_real_match_still_fails(self):
@@ -1135,8 +1406,9 @@ class InputTests(unittest.TestCase):
 
 
 class FakeSocket:
-    def __init__(self, family=socket.AF_INET, kind=socket.SOCK_STREAM):
+    def __init__(self, family=socket.AF_INET, kind=socket.SOCK_STREAM, protocol=0):
         self.family, self.kind = family, kind
+        self.protocol = protocol
         self.closed = False
         self.options, self.accepted, self.incoming, self.sent = [], [], [], []
         self.bound = None
@@ -1165,6 +1437,18 @@ class FakeSocket:
 
     recvfrom = recv
 
+    def recvmsg(self, count, ancillary=0):
+        incoming = self.recv(count)
+        if len(incoming) == 4:
+            return incoming
+        data, endpoint = incoming
+        destination = getattr(self, 'destination', LOCAL)
+        info = struct.pack('=I', 1) + socket.inet_aton(LOCAL) + socket.inet_aton(destination)
+        return data, [(socket.IPPROTO_IP, 8, info)], 0, endpoint
+
+    def getsockname(self):
+        return getattr(self, 'destination', LOCAL), 4242
+
     def sendto(self, packet, destination):
         self.sent.append((packet, destination))
         return len(packet)
@@ -1185,6 +1469,50 @@ class NotificationTests(unittest.TestCase):
     def packet(kind, payload=b''):
         size = 16 + len(payload)
         return struct.pack('=IHHII', size, kind, 0, 0, 0) + payload + b'\0' * (-size % 4)
+
+    @staticmethod
+    def attr(kind, value):
+        size = 4 + len(value)
+        return struct.pack('=HH', size, kind) + value + b'\0' * (-size % 4)
+
+    @classmethod
+    def neighbor(cls, index, *, mac=MAC, address=None, family=socket.AF_BRIDGE,
+                 state=2, flags=0, kind=28, attrs=b'', ndm_type=None):
+        if ndm_type is None:
+            ndm_type = 0 if family == socket.AF_BRIDGE else 1
+        body = struct.pack('=BBHiHBB', family, 0, 0, index, state, flags, ndm_type)
+        if mac is not None:
+            body += cls.attr(2, bytes.fromhex(mac.replace(':', '')))
+        if address is not None:
+            body += cls.attr(1, socket.inet_pton(family if family != socket.AF_BRIDGE else socket.AF_INET, address))
+        return cls.packet(kind, body + attrs)
+
+    @classmethod
+    def link(cls, index, name):
+        return cls.packet(16, struct.pack('=BBHiII', 0, 0, 1, index, 0, 0)
+                          + cls.attr(3, name.encode() + b'\0'))
+
+    def test_scope_preserves_local_links_address_changes_and_unknown_events(self):
+        mac = bytes.fromhex(MAC.replace(':', ''))
+        self.events.scope = ({2, 3}, 2, {socket.inet_aton(IP): mac},
+                             {mac: (3, 0)}, {'br0', 'end0'})
+        for packet, expected in (
+                (self.link(99, 'unrelated'), False), (self.link(3, 'end0'), True),
+                (self.link(77, 'end0'), True),
+                (self.packet(20, struct.pack('=BBBBI', 2, 24, 0, 0, 2)), True),
+                (self.packet(20, struct.pack('=BBBBI', 2, 24, 0, 0, 99)), False),
+                (self.neighbor(99), True),
+                (self.neighbor(99, mac='02:00:00:00:00:99'), False),
+                (self.neighbor(99, mac=None, address=IP, family=2), True),
+                (self.neighbor(99, mac='02:00:00:00:00:99', address='fe80::99', family=10), False),
+                (self.neighbor(99, mac=None), True),
+                (self.packet(28, b'bad'), True), (self.packet(99), True)):
+            self.socks[0].recvmsg.side_effect = [(packet, [], 0, (0, 1)), BlockingIOError()]
+            self.assertEqual(self.events.changed(), expected)
+        # Even a route-shaped payload on the nft subscription is never ignored.
+        self.socks[0].recvmsg.side_effect = BlockingIOError
+        self.socks[1].recvmsg.side_effect = [(self.link(99, 'unrelated'), [], 0, (0, 1)), BlockingIOError()]
+        self.assertTrue(self.events.changed())
 
     def test_subscriptions_precede_snapshot_and_idle_needs_no_child(self):
         self.socks[0].bind.assert_called_once_with((0, 1 | 4 | 16))
@@ -1225,6 +1553,298 @@ class NotificationTests(unittest.TestCase):
             atak.NetworkEvents(Mock(side_effect=self.socks))
         for sock in self.socks:
             sock.close.assert_called_once()
+
+
+class ProtectedNotificationTests(Harness):
+    def setUp(self):
+        super().setUp()
+        self.fixture = APAdmissionTests()
+        self.fixture.setUp()
+        self.addCleanup(self.fixture.doCleanups)
+        # Native bridge readback separates NDA_MASTER from ndm_flags. The
+        # ordinary dynamic entry has empty flags/state and master="br0".
+        self.fixture.fdb = [{'mac': MAC, 'ifname': 'wlan7', 'master': 'br0', 'flags': [], 'state': ''}]
+        for name, index in (('br0', 2), ('end0', 3), ('bat0', 5), ('wlan7', 7)):
+            (self.fixture.net / name).mkdir(exist_ok=True)
+            (self.fixture.net / name / 'ifindex').write_text(str(index))
+        self.guard = self.fixture.cached_guard()
+        self.socks = [Mock(), Mock()]
+        for sock in self.socks:
+            sock.recvmsg.side_effect = BlockingIOError
+        self.events = atak.NetworkEvents(Mock(side_effect=self.socks))
+        self.addCleanup(self.events.close)
+        self.guard.events = self.events
+        self.proof = self.guard.current()
+        self.assertEqual(self.sa(), 'accepted_presence')
+        self.assertEqual(self.proof.port(IP), 'wifi')
+        self.network = atak.Network(FakeSocket, self.guard.current)
+        self.addCleanup(self.network.close)
+        self.network.configure(self.proof)
+        self.guard.runner.reset_mock()
+
+    def notify(self, packet):
+        # Exhaust only this notification. Later pre/post readback drains are
+        # empty, so a changed proof can settle during this same call.
+        def receive(*_):
+            try:
+                return next(messages)
+            except StopIteration:
+                raise BlockingIOError
+        messages = iter([(packet, [], 0, (0, 1))])
+        self.socks[0].recvmsg.side_effect = receive
+        return self.guard.current(refresh=self.service.has_live_lease(self.clock.now()))
+
+    def test_phone_reachability_cycle_preserves_proof_without_commands(self):
+        attrs = NotificationTests.attr(3, b'\0' * 16) + NotificationTests.attr(4, struct.pack('=I', 3))
+        for cycle in range(300):
+            for state in (2, 4, 8, 16, 2):  # REACHABLE, STALE, DELAY, PROBE
+                proof = self.notify(NotificationTests.neighbor(2, address=IP, family=socket.AF_INET, state=state, attrs=attrs))
+                self.assertIs(proof, self.proof)
+                self.assertTrue(self.service.phone_ready(self.clock.now(), proof))
+            if cycle % 5 == 0:
+                self.assertTrue(self.network.send(b'feed', (IP, 4349)))
+            self.clock.advance(.2)
+        self.assertEqual(len(self.network.sender.sent), 60)
+        self.guard.runner.assert_not_called()
+
+    def test_phone_fdb_refresh_preserves_proof_without_commands(self):
+        attrs = (NotificationTests.attr(9, struct.pack('=I', 2))
+                 + NotificationTests.attr(15, struct.pack('=I', 0))
+                 + NotificationTests.attr(3, b'\0' * 16))
+        for _ in range(300):
+            for state in (2, 4):
+                proof = self.notify(NotificationTests.neighbor(7, state=state, attrs=attrs))
+                self.assertIs(proof, self.proof)
+                self.assertTrue(self.service.phone_ready(self.clock.now(), proof))
+            self.clock.advance(.2)
+        self.guard.runner.assert_not_called()
+
+    def test_matching_ipv6_refresh_is_benign_but_failure_delete_and_move_are_not(self):
+        for _ in range(300):
+            for state in (2, 4, 8, 16):
+                packet = NotificationTests.neighbor(2, address='fe80::2', family=socket.AF_INET6, state=state)
+                self.assertIs(self.notify(packet), self.proof)
+        self.guard.runner.assert_not_called()
+        for changes in ({'state': 32}, {'kind': 29}, {'index': 5}):
+            args = dict(index=2, address='fe80::2', family=socket.AF_INET6)
+            args.update(changes)
+            self.notify(NotificationTests.neighbor(**args))
+        self.assertEqual(self.guard.runner.call_count, 12)
+
+    def assert_revoked(self, packet):
+        sender = self.network.sender
+        proof = self.notify(packet)
+        self.assertIsNone(proof.peer(IP))
+        self.assertFalse(self.service.phone_ready(self.clock.now(), proof))
+        self.assertEqual(self.guard.runner.call_count, 4)
+        with self.assertRaises(OSError):
+            self.network.send(b'blocked', (IP, 4349))
+        self.assertEqual(sender.sent, [])
+
+    def test_ipv4_lladdr_change_revokes_before_output(self):
+        changed = '02:00:00:00:00:99'
+        self.fixture.neigh[0]['lladdr'] = changed
+        self.assert_revoked(NotificationTests.neighbor(2, address=IP, mac=changed, family=socket.AF_INET))
+
+    def test_ipv4_failed_state_revokes_before_output(self):
+        self.fixture.neigh[0]['state'] = ['FAILED']
+        self.assert_revoked(NotificationTests.neighbor(2, address=IP, family=socket.AF_INET, state=32))
+
+    def test_ipv4_delete_without_lladdr_revokes_before_output(self):
+        self.fixture.neigh.clear()
+        self.assert_revoked(NotificationTests.neighbor(2, address=IP, mac=None, family=socket.AF_INET, kind=29))
+
+    def test_protected_mac_learned_on_bat0_revokes_before_output(self):
+        self.fixture.fdb.append(dict(self.fixture.fdb[0], ifname='bat0'))
+        self.assert_revoked(NotificationTests.neighbor(5, attrs=NotificationTests.attr(9, struct.pack('=I', 2))))
+
+    def test_protected_mac_fdb_delete_revokes_before_output(self):
+        self.fixture.fdb.clear()
+        self.assert_revoked(NotificationTests.neighbor(7, kind=29))
+
+    def test_fdb_static_change_revokes_before_output(self):
+        self.fixture.fdb[0]['state'] = 'static'
+        self.assert_revoked(NotificationTests.neighbor(7, state=64, attrs=NotificationTests.attr(9, struct.pack('=I', 2))))
+
+    def test_known_identity_membership_cannot_replace_ip_mac_association(self):
+        other = '02:00:00:00:00:03'
+        self.fixture.fdb.append(dict(self.fixture.fdb[0], mac=other))
+        self.fixture.neigh.append(dict(self.fixture.neigh[0], dst='192.0.2.3', lladdr=other))
+        self.proof = self.guard.current(force=True)
+        self.guard.runner.reset_mock()
+        self.fixture.neigh[0]['lladdr'] = other
+        proof = self.notify(NotificationTests.neighbor(2, address=IP, mac=other, family=socket.AF_INET))
+        self.assertEqual(self.guard.runner.call_count, 4)
+        self.assertFalse(self.service.phone_ready(self.clock.now(), proof))
+
+    def test_fdb_flags_must_match_readback_and_unknown_readback_is_conservative(self):
+        attrs = NotificationTests.attr(9, struct.pack('=I', 2))
+        for flag, bit in (('master', 4), ('extern_learn', 16), ('offload', 32), ('sticky', 64), ('router', 128)):
+            with self.subTest(flag=flag):
+                self.fixture.fdb[0]['flags'] = [flag]
+                proof = self.notify(NotificationTests.neighbor(7, flags=bit, attrs=attrs))
+                self.assertEqual(self.guard.runner.call_count, 4)
+                self.assertTrue(self.service.phone_ready(self.clock.now(), proof))
+                self.guard.runner.reset_mock()
+                self.assertIs(self.notify(NotificationTests.neighbor(7, flags=bit, attrs=attrs)), proof)
+                self.guard.runner.assert_not_called()
+        for extra in ({'flags': ['unknown']}, {'vlan': 1}, {'master': 'other'}, {'flags': ['master', 'master']}):
+            with self.subTest(extra=extra):
+                self.fixture.fdb[0] = dict(mac=MAC, ifname='wlan7', state='', **extra)
+                self.guard.current(force=True)
+                self.guard.runner.reset_mock()
+                self.notify(NotificationTests.neighbor(7, attrs=attrs))
+                self.assertEqual(self.guard.runner.call_count, 4)
+
+    def test_dangerous_or_unclassifiable_peer_events_invalidate(self):
+        neighbor = NotificationTests.neighbor
+        attr = NotificationTests.attr
+        ipargs = dict(index=2, address=IP, family=socket.AF_INET)
+        master = attr(9, struct.pack('=I', 2))
+        packets = [neighbor(**ipargs, state=state) for state in (0, 1, 32, 64, 128, 2 | 32, 0x100)]
+        packets += [neighbor(7, state=state, attrs=master) for state in (0, 1, 8, 16, 32, 64, 128)]
+        packets += [neighbor(7, flags=flag, attrs=master) for flag in (1, 2, 8)]
+        packets += [neighbor(index, attrs=master) for index in (3, 5, 99, 0, -1)]
+        packets += [neighbor(5, address=IP, family=socket.AF_INET),
+                    neighbor(2, mac=None, address=IP, family=socket.AF_INET),
+                    neighbor(2, family=socket.AF_INET),
+                    neighbor(7),  # no bridge master evidence
+                    neighbor(7, attrs=attr(9, struct.pack('=I', 99))),
+                    neighbor(**ipargs, ndm_type=2), neighbor(7, attrs=master, ndm_type=1)]
+        for attrs in (attr(2, b'x' * 6), attr(3, b'x'), attr(4, b'x'),
+                      attr(9, b'x'), attr(15, b'x'), attr(15, struct.pack('=I', 1)),
+                      attr(5, b'\0' * 2), attr(99, b'unknown'),
+                      struct.pack('=HH', 3, 3), struct.pack('=HH', 50, 3),
+                      struct.pack('=HH', 5, 12) + b'x', b'\0'):
+            packets.append(neighbor(**ipargs, attrs=attrs))
+        for packet in packets:
+            with self.subTest(packet=packet):
+                kind = struct.unpack_from('=H', packet, 4)[0]
+                length = struct.unpack_from('=I', packet)[0]
+                self.assertTrue(self.events.relevant(kind, packet[16:length]))
+
+    def test_delete_cannot_be_cancelled_by_later_refresh_in_same_batch(self):
+        args = dict(index=2, address=IP, family=socket.AF_INET)
+        packet = NotificationTests.neighbor(**args, kind=29) + NotificationTests.neighbor(**args)
+        self.notify(packet)
+        self.assertEqual(self.guard.runner.call_count, 4)
+
+    def test_healthy_refresh_cannot_hide_firewall_change_before_send(self):
+        sender = self.network.sender
+        self.fixture.rules = {'nftables': []}
+        healthy = NotificationTests.neighbor(2, address=IP, family=socket.AF_INET)
+        self.socks[0].recvmsg.side_effect = [(healthy, [], 0, (0, 1)), BlockingIOError(), BlockingIOError()]
+        self.socks[1].recvmsg.side_effect = [
+            (NotificationTests.packet((10 << 8) | 16), [], 0, (0, 1)), BlockingIOError(), BlockingIOError()]
+        with self.assertRaises(OSError):
+            self.network.send(b'blocked', (IP, 4349))
+        self.assertEqual(sender.sent, [])
+        self.assertTrue(sender.closed)
+        self.assertEqual(self.guard.runner.call_count, 1)
+
+
+class BeaconTransportTests(unittest.TestCase):
+    def setUp(self):
+        self.fixture = GuardTests()
+        self.fixture.setUp()
+        self.addCleanup(self.fixture.doCleanups)
+        net = self.fixture.net
+        (net / 'end0/carrier').write_text('0')
+        (net / 'bat0').mkdir()
+        (net / 'bat0/master').symlink_to('../br0')
+        (net / 'bat0/carrier').write_text('1')
+        (net / 'br0/brif/bat0').mkdir()
+        (net / 'br0/brif/bat0/state').write_text('3')
+        for name, index in (('br0', 2), ('end0', 3), ('bat0', 4)):
+            (net / name / 'ifindex').write_text(str(index))
+        self.guard = self.fixture.cached_guard()
+        self.network = atak.Network(FakeSocket, self.guard.current)
+        self.addCleanup(self.network.close)
+        self.packet = cot.radio_beacon('radio-1', 'mesh-5cc2', cot.Fix(40, -105, 'gnss'), BASE)
+
+    def test_no_eud_path_needed_and_socket_cannot_join_or_loop_back(self):
+        self.assertTrue(self.network.send_beacon(self.packet))
+        proof = self.guard.cached
+        self.assertEqual(proof.peers, {})
+        self.assertEqual(proof.local_ports, {})
+        self.assertEqual(proof.mesh_path, ('2', '4'))
+        sock = self.network.beacon_sender
+        self.assertEqual(sock.sent, [(self.packet, ('239.2.3.1', 6969))])
+        self.assertEqual(sock.bound, (LOCAL, 0))
+        for option in ((socket.SOL_SOCKET, socket.SO_BINDTODEVICE, b'br0\0'),
+                       (socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton(LOCAL)),
+                       (socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 1),
+                       (socket.IPPROTO_IP, socket.IP_MULTICAST_LOOP, 0),
+                       (socket.IPPROTO_IP, 10, 2)):
+            self.assertIn(option, sock.options)
+        self.assertFalse(any(o[:2] == (socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP) for o in sock.options))
+        self.assertEqual(self.guard.runner.call_count, 4)
+        self.network.send_beacon(self.packet)
+        self.assertEqual(self.guard.runner.call_count, 4)
+        self.assertIs(self.network.beacon_sender, sock)
+        self.network.close()
+        self.assertTrue(sock.closed)
+
+    def test_firewall_event_is_checked_before_next_send(self):
+        self.network.send_beacon(self.packet)
+        sock = self.network.beacon_sender
+        self.fixture.rules['nftables'].pop()  # missing EUD egress confinement
+        self.guard.events.changed.side_effect = [True, False]
+        with self.assertRaisesRegex(OSError, 'path unavailable'):
+            self.network.send_beacon(self.packet)
+        self.assertEqual(len(sock.sent), 1)
+        self.assertTrue(sock.closed)
+        self.assertEqual(self.guard.runner.call_count, 5)
+
+    def test_bat0_link_loss_invalidates_proof_and_blocks_beacon(self):
+        self.network.send_beacon(self.packet)
+        scope = self.guard.events.scope
+        events = atak.NetworkEvents.__new__(atak.NetworkEvents)
+        events.scope = scope
+        self.assertTrue(events.relevant(16, NotificationTests.link(4, 'bat0')[16:]))
+        self.assertTrue(events.relevant(16, NotificationTests.link(77, 'bat0')[16:]))
+        self.assertFalse(events.relevant(16, NotificationTests.link(99, 'wlan-unrelated')[16:]))
+        (self.fixture.net / 'bat0/carrier').write_text('0')
+        self.guard.events.changed.side_effect = [True, False]
+        with self.assertRaisesRegex(OSError, 'path unavailable'):
+            self.network.send_beacon(self.packet)
+
+    def test_bridge_recreation_rebinds_and_oversized_datagrams_are_rejected(self):
+        self.network.send_beacon(self.packet)
+        sock = self.network.beacon_sender
+        (self.fixture.net / 'br0/ifindex').write_text('22')
+        self.guard.events.changed.side_effect = [True, False]
+        self.network.send_beacon(self.packet)
+        self.assertTrue(sock.closed)
+        self.assertIsNot(sock, self.network.beacon_sender)
+        self.guard.events.changed.side_effect = None
+        self.guard.events.changed.return_value = False
+        with self.assertRaisesRegex(OSError, 'budget'):
+            self.network.send_beacon(b'x' * 1201)
+
+    def test_local_beacon_egress_is_only_bat0_but_forwarded_sa_is_unchanged(self):
+        objects = atak.firewall_objects(('end0', 'wlan7'))
+        rule = objects[-1]['rule']
+        self.assertEqual((rule['family'], rule['chain']), ('bridge', 'output'))
+        self.assertFalse(any(o.get('chain', {}).get('hook') == 'forward' for o in objects))
+        for port in ('bat0', 'end0', 'wlan7', 'unexpected-port'):
+            for destination in ('239.2.3.1', '239.2.3.2'):
+                for dport in (6969, 4242):
+                    values = {'meta': {'oifname': port, 'l4proto': 'udp'},
+                              'ether': {'type': 'ip'}, 'ip': {'daddr': destination},
+                              'udp': {'dport': dport}}
+                    matches = []
+                    for expr in rule['expr'][:-1]:
+                        m = expr['match']
+                        left = m['left']
+                        if 'meta' in left:
+                            actual = values['meta'][left['meta']['key']]
+                        else:
+                            p = left['payload']
+                            actual = values[p['protocol']][p['field']]
+                        matches.append((actual == m['right']) if m['op'] == '==' else (actual != m['right']))
+                    self.assertEqual(all(matches), port != 'bat0' and destination == '239.2.3.1' and dport == 6969)
+        self.assertEqual(rule['expr'][-1], {'drop': None})
 
 
 class NetworkTests(Harness):
@@ -1284,8 +1904,8 @@ class NetworkTests(Harness):
         self.assertIsNone(self.network.sender)
 
     def test_only_ipv4_br0_binding_and_nonfragmenting_output(self):
-        self.assertEqual(self.network.listener.bound, (LOCAL, 4242))
-        self.assertEqual(self.network.udp.bound, (LOCAL, 4242))
+        self.assertEqual(self.network.listener.bound, ('0.0.0.0', 4242))
+        self.assertEqual(self.network.udp.bound, ('0.0.0.0', 4242))
         for sock in self.network.readers():
             self.assertEqual(sock.family, socket.AF_INET)
             self.assertIn((socket.SOL_SOCKET, socket.SO_BINDTODEVICE, b'br0\0'), sock.options)
@@ -1303,6 +1923,8 @@ class NetworkTests(Harness):
         self.assertIsNone(self.service.position.pinned_uid)
         sock.incoming.append(packet[100:])
         self.network.handle([sock], self.clock.now(), self.service)
+        self.tick()
+        self.clock.advance(3)
         self.tick()
         msg = self.of_type('b-t-f')[-1].find('detail/__chat').get('messageId')
         self.clock.advance(1)
@@ -1393,6 +2015,46 @@ class LazyNetworkTests(Harness):
         self.assertIsNone(proof)
         self.network.idle(LOCAL)
 
+    def test_active_unrelated_events_need_no_readback_but_duplicate_mac_and_policy_revoke(self):
+        (self.fixture.net / 'br0/ifindex').write_text('2')
+        (self.fixture.net / 'end0/ifindex').write_text('3')
+        self.idle()
+        self.arrive()
+        sockets = [Mock(), Mock()]
+        events = atak.NetworkEvents(Mock(side_effect=sockets))
+        self.addCleanup(events.close)
+        for sock in sockets:
+            sock.recvmsg.side_effect = BlockingIOError
+        self.guard.events = events
+        events.scope = self.guard.event_scope(self.guard.cached)
+        self.guard.runner.reset_mock()
+        unrelated = (NotificationTests.neighbor(5, mac='02:00:00:00:00:99')
+                     + NotificationTests.neighbor(5, mac='02:00:00:00:00:99', address='192.0.2.99', family=2)
+                     + NotificationTests.link(99, 'unrelated'))
+        for _ in range(300):
+            sockets[0].recvmsg.side_effect = [(unrelated, [], 0, (0, 1)), BlockingIOError()]
+            proof = self.guard.current(refresh=self.service.has_live_lease(self.clock.now()))
+            self.assertTrue(self.service.phone_ready(self.clock.now(), proof))
+        self.guard.runner.assert_not_called()
+        self.fixture.fdb.append({'mac': MAC, 'ifname': 'bat0'})
+        sockets[0].recvmsg.side_effect = [
+            (NotificationTests.neighbor(5), [], 0, (0, 1)), BlockingIOError(), BlockingIOError()]
+        proof = self.guard.current()
+        self.assertIsNone(proof.peer(IP))
+        self.assertFalse(self.service.phone_ready(self.clock.now(), proof))
+        self.assertEqual(self.guard.runner.call_count, 4)
+        self.fixture.fdb.pop()
+        sockets[0].recvmsg.side_effect = BlockingIOError
+        self.network.configure(self.guard.current(force=True))
+        sender = self.network.sender
+        self.fixture.rules = {'nftables': []}
+        sockets[1].recvmsg.side_effect = [
+            (NotificationTests.packet((10 << 8) | 16), [], 0, (0, 1)), BlockingIOError(), BlockingIOError()]
+        with self.assertRaises(OSError):
+            self.network.send(b'blocked', (IP, 4349))
+        self.assertEqual(sender.sent, [])
+        self.assertTrue(sender.closed)
+
     def arrive(self, tcp=False):
         packet = self.packets.sa('none', self.phone_time())
         if tcp:
@@ -1426,7 +2088,7 @@ class LazyNetworkTests(Harness):
             status = self.service.status(self.clock.now(), self.network.proof)
             self.assertFalse(status['path_ready'])
             self.assertIsNone(self.network.sender)
-            self.assertEqual(self.network.listener.bound, (LOCAL, 4242))
+            self.assertEqual(self.network.listener.bound, ('0.0.0.0', 4242))
             self.guard.events = Mock(sockets=[], changed=Mock(return_value=False))
             events.close()
 
@@ -1515,7 +2177,7 @@ class LazyNetworkTests(Harness):
         self.guard.invalidate()
         self.network.idle('192.0.2.10')
         self.assertTrue(previous.closed)
-        self.assertEqual(self.network.listener.bound, ('192.0.2.10', 4242))
+        self.assertEqual(self.network.listener.bound, ('0.0.0.0', 4242))
         self.arrive()
         self.assertEqual(self.network.proof.local_ip, '192.0.2.10')
 
@@ -1555,13 +2217,304 @@ class LazyNetworkTests(Harness):
                 patch.object(atak, 'Application') as application, \
                 patch.object(self.guard, 'start'), \
                 patch.object(self.guard, 'listen_address', return_value=LOCAL), \
+                patch.object(self.network, 'handle', side_effect=lambda *args: self.clock.advance(.4)), \
                 patch.object(atak.select, 'select', side_effect=ready), \
                 patch.object(atak.signal, 'signal', side_effect=lambda kind, fn: handlers.update({kind: fn})), \
                 patch.object(atak, 'log'):
+            application.return_value.update.side_effect = lambda now, *_: self.assertEqual(now, self.clock.now())
             atak.main([])
         self.assertEqual(cycles, 300)
         self.guard.runner.assert_not_called()
         self.assertTrue(all(call.args[1] is None for call in application.return_value.update.call_args_list))
+
+
+def mesh_frame(payload, *, address=IP, mac=MAC, destination=tak.MESH_GROUP,
+               port=tak.MESH_PORT, options=b'', fragment=0, checksum=True):
+    udp = struct.pack('!HHHH', 40000, port, 8 + len(payload), 0) + payload
+    source, target = socket.inet_aton(address), socket.inet_aton(destination)
+    if checksum:
+        value = atak.mesh_checksum(source + target + b'\0\x11' + udp[4:6] + udp) or 0xffff
+        udp = udp[:6] + struct.pack('!H', value) + udp[8:]
+    size = 20 + len(options)
+    header = struct.pack('!BBHHHBBH4s4s', 0x40 | (size // 4), 0, size + len(udp), 1,
+                         fragment, 64, 17, 0, source, target) + options
+    header = header[:10] + struct.pack('!H', atak.mesh_checksum(header)) + header[12:]
+    return bytes.fromhex('01005e020301' + mac.replace(':', '') + '0800') + header + udp
+
+
+def run_mesh_bpf(frame, packet_type=2):
+    """Interpret the emitted classic BPF subset, including short-load rejection."""
+    program, pc, accumulator, index = atak.mesh_sa_bpf(), 0, 0, 0
+    while pc < len(program):
+        code, jt, jf, value = program[pc]
+        pc += 1
+        if code in (0x20, 0x28, 0x30, 0x48, 0xb1):
+            if value == 0xfffff004:
+                accumulator = packet_type
+                continue
+            offset = value + (index if code == 0x48 else 0)
+            size = {0x20: 4, 0x28: 2, 0x30: 1, 0x48: 2, 0xb1: 1}[code]
+            if offset + size > len(frame):
+                return 0
+            loaded = int.from_bytes(frame[offset:offset + size], 'big')
+            if code == 0xb1:
+                index = 4 * (loaded & 15)
+            else:
+                accumulator = loaded
+        elif code == 0x80:
+            accumulator = len(frame)
+        elif code == 0x54:
+            accumulator &= value
+        elif code in (0x15, 0x25, 0x35, 0x45):
+            matches = {0x15: accumulator == value, 0x25: accumulator > value,
+                       0x35: accumulator >= value, 0x45: bool(accumulator & value)}[code]
+            pc += jt if matches else jf
+        elif code == 0x06:
+            return value
+        else:
+            raise AssertionError('unexpected BPF opcode')
+    raise AssertionError('BPF program fell off end')
+
+
+class MeshSAIngressTests(Harness):
+    def setUp(self):
+        super().setUp()
+        self.fixture = APAdmissionTests()
+        self.fixture.setUp()
+        self.addCleanup(self.fixture.doCleanups)
+        self.guard = self.fixture.cached_guard()
+        self.factory = Mock(side_effect=FakeSocket)
+        self.network = atak.Network(self.factory, self.guard.current)
+        self.addCleanup(self.network.close)
+        self.guard.current(refresh=False)
+        self.network.sync_mesh_ports(self.guard.local_ports)
+        self.network.idle(LOCAL)
+
+    def receive(self, *, iface='end0', payload=None, packet_type=2, metadata_iface=None,
+                flags=0, **options):
+        if payload is None:
+            payload = sa_fixture(stamp=self.phone_time(), contact_xml=True)[0]
+        sock = self.network.mesh_sockets[iface][1]
+        data = mesh_frame(payload, **options)
+        sock.incoming.append((data, [], flags, (metadata_iface or iface, 0x0800, packet_type,
+                                               1, bytes.fromhex(MAC.replace(':', '')))))
+        self.network.handle([sock], self.clock.now(), self.service)
+
+    def test_own_beacon_is_never_local_phone_admission(self):
+        beacon = cot.radio_beacon(self.config.uid, 'mesh-5cc2', cot.Fix(40, -105, 'gnss'), BASE)
+        frame = mesh_frame(beacon, address=LOCAL)
+        self.assertEqual(run_mesh_bpf(frame, socket.PACKET_OUTGOING), 0)
+        with patch.object(tak, 'decode_mesh_sa', wraps=tak.decode_mesh_sa) as decoder:
+            self.receive(payload=beacon, address=LOCAL, packet_type=socket.PACKET_OUTGOING)
+            self.receive(payload=beacon, address=LOCAL)  # reflected frame still has no proven local peer
+            decoder.assert_not_called()
+        self.receive(payload=beacon)  # copied payload from a real EUD is not person SA
+        self.assertEqual(self.service.phones, {})
+        self.assertEqual(self.tx.sent, [])
+        forged = self.packets.sa('none', self.phone_time()).replace(
+            self.packets.uid.encode(), (self.config.uid + '-beacon').encode())
+        proof = self.guard.current()
+        self.assertEqual(self.service.ingest(forged, IP, proof, self.clock.now()), 'reserved radio beacon UID')
+
+    def test_bpf_drops_unrelated_fragments_egress_and_short_frames(self):
+        good = mesh_frame(b'example')
+        self.assertEqual(run_mesh_bpf(good), atak.MAX_MESH_FRAME)
+        self.assertEqual(run_mesh_bpf(mesh_frame(b'example', options=b'\x01' * 4)), atak.MAX_MESH_FRAME)
+        rejected = [mesh_frame(b'x', destination='239.2.3.2'), mesh_frame(b'x', port=4242),
+                    mesh_frame(b'x', fragment=0x2000), mesh_frame(b'x', fragment=1),
+                    mesh_frame(b'x', fragment=0x8000),
+                    mesh_frame(b'x' * (atak.MAX_MESH_FRAME + 1)),
+                    good[:12] + b'\x86\xdd' + good[14:], good[:23] + b'\x06' + good[24:],
+                    good[:14] + b'\x44' + good[15:]]
+        for frame in rejected:
+            self.assertEqual(run_mesh_bpf(frame), 0)
+        for size in range(38):
+            self.assertEqual(run_mesh_bpf(good[:size]), 0, size)
+        for kind in (4, 5, 6):
+            self.assertEqual(run_mesh_bpf(good, kind), 0)
+        # A remote phone's frame forwarded out an EUD port is PACKET_OUTGOING.
+        self.assertEqual(run_mesh_bpf(good, socket.PACKET_OUTGOING), 0)
+
+    def test_filter_installed_before_bind_without_any_membership_or_promiscuity(self):
+        self.assertEqual(set(self.network.mesh_sockets), {'end0', 'wlan7'})
+        for iface, (_, sock) in self.network.mesh_sockets.items():
+            self.assertEqual((sock.family, sock.kind, sock.protocol), (socket.AF_PACKET, socket.SOCK_RAW, 0))
+            self.assertEqual(sock.bound, (iface, 3))
+            self.assertEqual(sock.options[0][:2], (socket.SOL_SOCKET, 26))
+            self.assertIn((socket.SOL_SOCKET, 44, 1), sock.options)
+            self.assertIn((263, 23, 1), sock.options)
+        for sock in self.network.readers():
+            self.assertFalse(any(level == socket.IPPROTO_IP and option == socket.IP_ADD_MEMBERSHIP
+                                 or level == 263 and option == 1
+                                 for level, option, _ in sock.options))
+        with self.assertRaises(ValueError):
+            atak.make_mesh_sa_socket('bat0', self.factory)
+
+    def test_kernel_accepts_native_filter_and_filters_synthetic_local_datagrams(self):
+        # AF_UNIX exercises the real kernel verifier/filter and ctypes ABI
+        # without CAP_NET_RAW, hardware access, multicast or a network address.
+        receiver, sender = socket.socketpair(socket.AF_UNIX, socket.SOCK_DGRAM)
+        self.addCleanup(receiver.close)
+        self.addCleanup(sender.close)
+        proxy = Mock()
+
+        def option(level, name, value):
+            if level == socket.SOL_SOCKET:
+                receiver.setsockopt(level, name, value)
+
+        proxy.setsockopt.side_effect = option
+        proxy.setblocking.side_effect = receiver.setblocking
+        try:
+            atak.make_mesh_sa_socket('end0', Mock(return_value=proxy))
+        except PermissionError:
+            self.skipTest('sandbox disallows attaching a kernel socket filter')
+        good = mesh_frame(b'mesh SA')
+        sender.send(mesh_frame(b'not SA', port=4242))
+        sender.send(good)
+        self.assertEqual(receiver.recv(atak.MAX_MESH_FRAME), good)
+        with self.assertRaises(BlockingIOError):
+            receiver.recv(atak.MAX_MESH_FRAME)
+
+    def test_filter_failure_closes_socket_before_it_can_receive(self):
+        sock = Mock()
+        sock.setsockopt.side_effect = OSError('filter rejected')
+        with self.assertRaises(OSError):
+            atak.make_mesh_sa_socket('end0', Mock(return_value=sock))
+        sock.bind.assert_not_called()
+        sock.close.assert_called_once()
+
+    def test_ap_and_wired_v1_admission_and_unicast_replies(self):
+        for iface, port in (('end0', 'wired'), ('wlan7', 'wifi')):
+            with self.subTest(iface=iface):
+                self.fixture.fdb[0]['ifname'] = iface
+                self.guard.invalidate()
+                self.clock.advance(100)
+                self.receive(iface=iface)
+                item = self.service.phones['synthetic-phone']
+                self.assertEqual((item['ip'], item['mac'], item['port']), (IP, MAC, port))
+                self.assertTrue(self.service.phone_ready(self.clock.now(), self.network.proof))
+                self.service.transport = self.network
+                self.service.tick(self.clock.now(), self.network.proof,
+                                  phone.RadioGPS(cot.Fix(40.5, -105.5, 'gnss'), self.clock.now().mono,
+                                                 'UNCHECKED', False, 0, False), {})
+                self.assertTrue(self.network.sender.sent)
+                self.assertTrue(all(endpoint[0] == IP and endpoint[1] in (4242, 4349)
+                                    for _, endpoint in self.network.sender.sent))
+                self.assertEqual({endpoint[1] for _, endpoint in self.network.sender.sent}, {4242, 4349})
+                self.assertNotIn('+15550100000', json.dumps(self.store.data))
+                self.assertNotIn('+15550100000', json.dumps(self.service.status(self.clock.now(), self.network.proof)))
+
+    def test_legacy_xml_mesh_sa_and_endpoint_mismatch(self):
+        _, xml = sa_fixture(stamp=self.phone_time())
+        self.receive(payload=xml)
+        self.assertIn('synthetic-phone', self.service.phones)
+        self.clock.advance(1)
+        for endpoint in ('192.0.2.99:4242:tcp', 'manet.local:4242:tcp', 'tcpsrcreply:4242:srctcp', ''):
+            packet, _ = sa_fixture(uid='another-phone', endpoint=endpoint, stamp=self.phone_time())
+            self.receive(payload=packet)
+            self.assertNotIn('another-phone', self.service.phones)
+            self.assertIn('endpoint', self.service.last_rejection)
+
+    def test_remote_and_unproven_frames_never_reach_decoder(self):
+        with patch.object(tak, 'decode_mesh_sa') as decoder:
+            self.receive(packet_type=socket.PACKET_OUTGOING)
+            self.receive(metadata_iface='bat0')
+            self.receive(flags=socket.MSG_TRUNC)
+            self.receive(mac='02:00:00:00:00:03')
+            self.receive(iface='wlan7')  # MAC is learned on end0, not wlan7.
+            self.fixture.fdb.append({'mac': MAC, 'ifname': 'bat0'})
+            self.guard.invalidate()
+            self.receive()
+            self.fixture.fdb.pop()
+            self.fixture.neigh = []
+            self.guard.invalidate()
+            self.receive()
+            decoder.assert_not_called()
+        self.assertNotIn('bat0', self.network.mesh_sockets)
+
+    def test_firewall_change_blocks_mesh_decoder_and_output(self):
+        self.receive()
+        self.fixture.rules = {'nftables': []}
+        self.guard.events.changed.side_effect = [True, False]
+        with patch.object(tak, 'decode_mesh_sa') as decoder:
+            self.receive()
+            decoder.assert_not_called()
+        self.guard.events.changed.side_effect = None
+        with self.assertRaises(OSError):
+            self.network.send(b'blocked', (IP, 4349))
+
+    def test_link_role_and_hostapd_events_change_sockets_without_polling(self):
+        original = dict(self.network.mesh_sockets)
+        with patch.object(self.guard, 'local_paths', wraps=self.guard.local_paths) as paths:
+            for _ in range(300):
+                self.guard.current(refresh=False)
+                self.network.sync_mesh_ports(self.guard.local_ports)
+            paths.assert_not_called()
+        self.assertEqual(self.network.mesh_sockets, original)
+        self.guard.runner.assert_not_called()
+        (self.fixture.proc / '123/stat').unlink()
+        self.guard.current(refresh=False)
+        self.network.sync_mesh_ports(self.guard.local_ports)
+        self.assertTrue(original['wlan7'][1].closed)
+        self.assertIs(self.network.mesh_sockets['end0'][1], original['end0'][1])
+        (self.fixture.proc / '123/stat').write_text('123 (hostapd) S ' + '0 ' * 18 + '54321\n')
+        self.guard.current(refresh=False)
+        self.network.sync_mesh_ports(self.guard.local_ports)
+        self.assertIsNot(self.network.mesh_sockets['wlan7'][1], original['wlan7'][1])
+        (self.fixture.net / 'end0/carrier').write_text('0')
+        self.guard.events.changed.return_value = True
+        self.guard.current(refresh=False)
+        self.network.sync_mesh_ports(self.guard.local_ports)
+        self.assertNotIn('end0', self.network.mesh_sockets)
+        previous = self.network.mesh_sockets['wlan7'][1]
+        (self.fixture.net / 'wlan7/ifindex').write_text('77\n')
+        self.guard.current(refresh=False)
+        self.network.sync_mesh_ports(self.guard.local_ports)
+        self.assertTrue(previous.closed)
+        self.assertIsNot(previous, self.network.mesh_sockets['wlan7'][1])
+        self.guard.runner.assert_not_called()
+
+    def test_bad_checksum_lengths_and_shared_budget_prevent_decoding(self):
+        packet = mesh_frame(b'example')
+        self.assertEqual(atak.mesh_checksum(bytes.fromhex('450000730000400040110000c0a80001c0a800c7')), 0xb861)
+        self.assertEqual(atak.mesh_sa_frame(mesh_frame(b'example', checksum=False))[2], b'example')
+        self.assertEqual(atak.mesh_sa_frame(mesh_frame(b'example', options=b'\x01' * 4))[2], b'example')
+        for bad in (packet[:-1], packet[:24] + b'\x01' + packet[25:], packet[:-1] + b'!',
+                    packet[:38] + b'\x00\x01' + packet[40:]):
+            with self.assertRaises(ValueError):
+                atak.mesh_sa_frame(bad)
+        self.network.budget = atak.Budget(self.clock.now().mono)
+        self.network.budget.accepts = 0
+        with patch.object(tak, 'decode_mesh_sa') as decoder:
+            self.receive()
+            decoder.assert_not_called()
+        self.guard.runner.assert_not_called()
+
+    def test_secondary_unicast_address_allowed_other_destinations_rejected(self):
+        secondary = '192.0.2.10'
+        self.fixture.addresses[0]['addr_info'].append(
+            {'family': 'inet', 'scope': 'global', 'local': secondary, 'secondary': True})
+        self.network.configure(self.guard.current(force=True))
+        self.assertEqual(self.network.proof.local_ip, LOCAL)
+        for destination in (secondary, '192.0.2.99'):
+            sock = FakeSocket()
+            sock.destination = destination
+            self.network.listener.accepted.append((sock, (IP, 12000)))
+            self.network.handle([self.network.listener], self.clock.now(), self.service)
+            self.assertEqual(sock.closed, destination != secondary)
+        _, packet = sa_fixture(stamp=self.phone_time())
+        self.network.udp.destination = '192.0.2.99'
+        self.network.udp.incoming.append((packet, (IP, 12000)))
+        self.network.handle([self.network.udp], self.clock.now(), self.service)
+        self.assertFalse(self.service.phones)
+        self.network.udp.destination = secondary
+        self.network.udp.incoming.append((packet, (IP, 12000)))
+        self.network.handle([self.network.udp], self.clock.now(), self.service)
+        self.assertTrue(self.service.phone_ready(self.clock.now(), self.network.proof))
+        # The existing bind override must not promote a secondary address to
+        # the advertised contact/sender address.
+        self.guard.config = atak.Config('radio-1', bind_ip=secondary)
+        self.assertIsNone(self.guard.current(force=True))
 
 
 class SimulatorTests(unittest.TestCase):
@@ -1699,6 +2652,8 @@ class ScenarioPlanTests(unittest.TestCase):
 class CrashAndCadenceTests(Harness):
     def test_receipt_recovers_send_interrupted_before_durable_ack(self):
         self.sa()
+        self.tick()
+        self.clock.advance(3)
         def crash_after_send(data, destination):
             if b'Radio GPS is unavailable or untrusted' in data:
                 self.store.fail = True
