@@ -40,9 +40,14 @@ SCAN_FREQS_5_0="5200 5220 5240 5745 5765 5785 5805 5825"
 # Minimum scan dwell for fresh survey data. Busy time has millisecond
 # resolution, so a 10 ms visit yields only 10% steps.
 SURVEY_MIN_DWELL_MS=25
+SCAN_DWELL_MS=250
+HOME_MIN_WINDOW_S=60
+# Provisional RF trouble limits pending controlled-interferer calibration.
+HOME_FOREIGN_LIMIT=50
+HOME_NOISE_LIMIT_DBM=-80
 
-# Publish the median of three valid visits within ten minutes. A single
-# short off-channel visit is too variable to justify a migration.
+# Retain the median of three short visits on 5 GHz and during discovery.
+# Home windows and long 2.4 GHz candidate visits publish directly.
 SURVEY_BUSY_SAMPLES=3
 SURVEY_BUSY_MAX_AGE=600
 # Do not republish a missed scan window as a new acquisition.
@@ -80,6 +85,7 @@ SYNCTHING_ID=""
 IDENTITY_PUBLISH_INTERVAL=270
 CACHED_SCAN_REPORT_JSON="{}"
 declare -A SCAN_FAILED
+declare -A HOME_BASELINE HOME_IDENTITY HOME_TROUBLE HOME_BAD HOME_GOOD
 LOBBY_ENTERED_TIME=0
 BOOTSTRAP_START_WINDOW=-1
 LOBBY_SOLO_LOGGED=false
@@ -277,7 +283,7 @@ phy_usable_freqs() {
 }
 
 # Parse "iw dev X survey dump" into one line per frequency:
-#   <freq> <noise|-> <active_ms|-> <busy_ms|-> <tx_ms|-> <in_use>
+#   <freq> <noise|-> <active_ms|-> <busy_ms|-> <tx_ms|-> <in_use> <rx_ms|->
 # Most counters accumulate. MT7915 resets off-channel counters on each visit.
 parse_survey() {
     awk '
@@ -289,10 +295,159 @@ parse_survey() {
         /channel active time:/ { act[f] = $4; next }
         /channel busy time:/ { busy[f] = $4; next }
         /channel transmit time:/ { tx[f] = $4; next }
+        /channel receive time:/ { rx[f] = $4; next }
         END {
             for (k in seen)
-                printf "%s %s %s %s %s %s\n", k, (k in noise ? noise[k] : "-"), (k in act ? act[k] : "-"), (k in busy ? busy[k] : "-"), (k in tx ? tx[k] : "-"), in_use[k]
+                printf "%s %s %s %s %s %s %s\n", k,
+                    (k in noise ? noise[k] : "-"),
+                    (k in act ? act[k] : "-"),
+                    (k in busy ? busy[k] : "-"),
+                    (k in tx ? tx[k] : "-"), in_use[k],
+                    (k in rx ? rx[k] : "-")
         }'
+}
+
+# Reset a band's measurement and consecutive-window history.
+reset_home_monitor() {
+    local band=$1
+    unset 'HOME_BASELINE[$band]'
+    HOME_BAD[$band]=0; HOME_GOOD[$band]=0
+    # Only three good windows clear trouble. An unavailable window cannot.
+    HOME_TROUBLE[$band]=${HOME_TROUBLE[$band]:-false}
+}
+
+# Update sender-owned hysteresis only after a valid home window.
+update_home_trouble() {
+    local band=$1 foreign=$2 noise=$3
+    if (( foreign >= HOME_FOREIGN_LIMIT ||
+          noise >= HOME_NOISE_LIMIT_DBM )); then
+        HOME_BAD[$band]=$(( ${HOME_BAD[$band]:-0} + 1 ))
+        HOME_GOOD[$band]=0
+        if (( HOME_BAD[$band] >= 2 )); then HOME_TROUBLE[$band]=true; fi
+    elif (( foreign < HOME_FOREIGN_LIMIT - 10 &&
+            noise < HOME_NOISE_LIMIT_DBM - 5 )); then
+        HOME_GOOD[$band]=$(( ${HOME_GOOD[$band]:-0} + 1 ))
+        HOME_BAD[$band]=0
+        if (( HOME_GOOD[$band] >= 3 )); then HOME_TROUBLE[$band]=false; fi
+    else
+        HOME_BAD[$band]=0; HOME_GOOD[$band]=0
+    fi
+}
+
+# Measure home from the pre-scan arrays, with shell-only station parsing.
+# Baselines live in this manager process and never survive a restart.
+measure_home() {
+    local band=$1 iface=$2 now=$3 freq=$4
+    local stations line peers=0 nrx=0 ntx=0 rx=0 tx=0
+    local old_iface old_freq old_time oa ob ot orx osrx ostx value
+    local duration_re='^[[:space:]]*(rx|tx)[[:space:]]duration:'
+    duration_re+='[[:space:]]+([0-9]+)'
+    HOME_ENTRY=""
+    if [ "${HOME_IDENTITY[$band]-}" != "$iface $freq" ]; then
+        reset_home_monitor "$band"
+    fi
+    HOME_IDENTITY[$band]="$iface $freq"
+    if [ -n "$freq" ]; then
+        HOME_ENTRY="{\"channel\":$freq,"
+        HOME_ENTRY+="\"rf_trouble\":${HOME_TROUBLE[$band]:-false},"
+        HOME_ENTRY+="\"_survey_iface\":\"$iface\",\"_survey_boot\":$now}"
+    fi
+    if [ -z "$freq" ] ||
+       ! stations=$(iw dev "$iface" station dump 2>/dev/null); then
+        reset_home_monitor "$band"
+        return
+    fi
+    while IFS= read -r line; do
+        [[ "$line" == Station\ * ]] && peers=$((peers + 1))
+        if [[ "$line" =~ $duration_re ]]; then
+            value=${BASH_REMATCH[2]}
+            if [ "${BASH_REMATCH[1]}" = rx ]; then
+                rx=$((rx + value)); nrx=$((nrx + 1))
+            else
+                tx=$((tx + value)); ntx=$((ntx + 1))
+            fi
+        fi
+    done <<< "$stations"
+    for value in "${pre_act[$freq]}" "${pre_busy[$freq]}" \
+                 "${pre_tx[$freq]}" "${pre_rx[$freq]}"; do
+        if [[ ! "$value" =~ ^[0-9]+$ ]]; then
+            reset_home_monitor "$band"
+            return
+        fi
+    done
+    if (( nrx != peers || ntx != peers )) ||
+       [[ ! "${pre_noise[$freq]}" =~ ^-[0-9]+$ ]]; then
+        reset_home_monitor "$band"
+        return
+    fi
+    read -r old_iface old_freq old_time oa ob ot orx osrx ostx \
+        <<< "${HOME_BASELINE[$band]-}"
+    if [ -n "$old_time" ] &&
+       (( now <= old_time || pre_act[$freq] < ${oa:-0} ||
+          pre_busy[$freq] < ${ob:-0} || pre_tx[$freq] < ${ot:-0} ||
+          pre_rx[$freq] < ${orx:-0} ||
+          rx < ${osrx:-0} || tx < ${ostx:-0} )); then
+        reset_home_monitor "$band"
+        old_time=""
+    fi
+    HOME_BASELINE[$band]="$iface $freq $now ${pre_act[$freq]}"
+    HOME_BASELINE[$band]+=" ${pre_busy[$freq]} ${pre_tx[$freq]}"
+    HOME_BASELINE[$band]+=" ${pre_rx[$freq]} $rx $tx"
+    [ -n "$old_time" ] || return 0
+    local window=$((now - old_time)) active=$((pre_act[$freq] - oa))
+    if (( window < HOME_MIN_WINDOW_S || active <= 0 )); then
+        HOME_BAD[$band]=0; HOME_GOOD[$band]=0
+        return
+    fi
+    local busy=$(( (pre_busy[$freq] - ob) * 100 / active ))
+    # Station duration is microseconds, survey counters are milliseconds.
+    local foreign=$(( ((pre_busy[$freq] - ob - pre_tx[$freq] + ot) * 1000
+                       - rx + osrx) * 100 / (active * 1000) ))
+    (( busy < 0 )) && busy=0
+    (( busy > 100 )) && busy=100
+    (( foreign < 0 )) && foreign=0
+    (( foreign > 100 )) && foreign=100
+    update_home_trouble "$band" "$foreign" "${pre_noise[$freq]}"
+    HOME_ENTRY="{\"channel\":$freq,\"noise_floor\":${pre_noise[$freq]},"
+    HOME_ENTRY+="\"busy_pct\":$busy,\"foreign_pct\":$foreign,"
+    HOME_ENTRY+="\"window_s\":$window,"
+    HOME_ENTRY+="\"rf_trouble\":${HOME_TROUBLE[$band]:-false},"
+    HOME_ENTRY+="\"_survey_iface\":\"$iface\",\"_survey_boot\":$now}"
+}
+
+# Read only fresh reports from the agreement service's connected member view.
+# One jq replaces the normal smoothing pass when no candidates are scanned.
+peer_trouble_bands() {
+    local now boot rest snapshot
+    local status_file="${MANET_ACS_RUN_DIR:-/run}/manet-acs-status.json"
+    # Capture the atomic snapshot before reading its age clock.
+    snapshot=$(< "$status_file") 2>/dev/null || return 0
+    read -r now rest < "${MESH_UPTIME_FILE:-/proc/uptime}" || return 0
+    read -r boot < "${MANET_BOOT_ID_FILE:-/proc/sys/kernel/random/boot_id}"
+    boot=${boot//-/}
+    jq -rn --arg boot "$boot" --argjson now "$now" \
+        --arg own "NODE_${MY_MAC//:/}" \
+        --argjson status "$snapshot" \
+        --rawfile registry "${REGISTRY_FILE:-/var/run/mesh_node_registry}" '
+        $status as $s
+        | select($s.boot == $boot and ($s.observed_boot | type) == "number")
+        | select($now >= $s.observed_boot and $now - $s.observed_boot < 30)
+        | ($registry | split("\n") | map(
+            capture("^(?<node>NODE_[0-9a-f]{12})_" +
+                    "(?<key>CHANNEL_REPORT_JSON|OBSERVED_AT_UPTIME)=" +
+                    "\u0027(?<value>.*)\u0027$")?
+          ) | group_by(.node))[]
+        | select(.[0].node != $own)
+        | select(.[0].node as $node | ($s.members // []) | index($node))
+        | (map({key: .key, value: .value}) | from_entries) as $r
+        | ($r.OBSERVED_AT_UPTIME | tonumber?) as $seen
+        | select($now >= $seen and $now - $seen < 240)
+        | ($r.CHANNEL_REPORT_JSON | fromjson?).results[]?
+        | select(.rf_trouble == true)
+        | if .channel >= 2400 and .channel < 2500 then "2_4"
+          elif .channel >= 5000 and .channel < 6000 then "5_0"
+          else empty end
+        ' 2>/dev/null || true
 }
 
 # Keep bounded local history in the existing scan cache. The encoder sends
@@ -308,6 +463,7 @@ smooth_scan_report() {
          | if type == "object" then . else {} end) as $previous
         |
         .results |= map(
+            if has("rf_trouble") or ._roc == true then . else
             . as $sample
             | ($sample._survey_boot // $now) as $sample_time
             | ([ $previous.results[]?
@@ -323,7 +479,7 @@ smooth_scan_report() {
                  and ($history | length) == $count
               then .busy_pct = ($history | map(.[1]) | sort
                                | .[($count / 2 | floor)])
-              else del(.busy_pct) end)
+              else del(.busy_pct) end end)
         ' <<< "$report"); then
         printf '%s\n' "$smoothed"
     else
@@ -333,7 +489,8 @@ smooth_scan_report() {
 import json, sys
 report = json.load(sys.stdin)
 for sample in report["results"]:
-    sample.pop("busy_pct", None)
+    if "foreign_pct" not in sample and not sample.get("_roc"):
+        sample.pop("busy_pct", None)
 print(json.dumps(report, separators=(",", ":")))'
     fi
 }
@@ -360,7 +517,7 @@ scan_outcome() {
     local iface=$1 failure=$2
     if [ -n "$failure" ]; then
         [ "${SCAN_FAILED[$iface]:-false}" = true ] ||
-            log "Scan failed on $iface ($failure). Discarding this band's report."
+            log "Scan failed on $iface ($failure). Discarding candidates."
         SCAN_FAILED[$iface]=true
     else
         [ "${SCAN_FAILED[$iface]:-false}" = false ] || log "Scan recovered on $iface."
@@ -385,82 +542,176 @@ scan_bss_count() {
     '
 }
 
-# Scan enabled WPA role bands and replace CACHED_SCAN_REPORT_JSON, even on
-# failure. Call directly so per-interface failure transitions survive.
-# Use SCAN_FREQS_2_4/5_0 and SURVEY_MIN_DWELL_MS for candidate measurements.
+# Capture a completed short scan and its post-survey for perform_scan.
+# The caller owns scan_data and post_survey so no subshell loses the result.
+capture_flush_scan() {
+    local iface=$1 freqs=$2 scan_file scan_pid scan_status=0
+    if ! scan_file=$(mktemp); then
+        scan_outcome "$iface" "scan capture unavailable"
+        return 1
+    fi
+    # iw's combined scan itself dumps the BSS cache, so flush old entries.
+    # Bound termination too, then wait to reap and capture the actual status.
+    timeout --foreground --kill-after=1s 5s iw dev "$iface" scan freq $freqs flush \
+        > "$scan_file" 2>/dev/null &
+    scan_pid=$!
+    wait "$scan_pid" 2>/dev/null || scan_status=$?
+    scan_data=$(cat "$scan_file")
+    rm -f "$scan_file"
+    case "$scan_status" in
+        0) ;;
+        124|137) scan_outcome "$iface" "timeout"; return 1 ;;
+        *) scan_outcome "$iface" "exit $scan_status"; return 1 ;;
+    esac
+    # iw also returns zero after NL80211_CMD_SCAN_ABORTED.
+    if grep -qx 'scan aborted!' <<< "$scan_data"; then
+        scan_outcome "$iface" "aborted"
+        return 1
+    fi
+    if ! post_survey=$(iw dev "$iface" survey dump 2>/dev/null); then
+        scan_outcome "$iface" "survey unavailable"
+        return 1
+    fi
+    scan_outcome "$iface" ""
+}
+
+# Measure enabled Wi-Fi home windows and scan candidates only on RF trouble.
+# Discovery keeps its scan path. Call directly so baselines survive cycles.
 perform_scan() {
+    local mode=${1:-data} peer_bands band home roc candidate_busy=false
+    local needs_smoothing=false scan_ready home_bss
+    peer_bands=""
+    if [ "$mode" = data ]; then
+        peer_bands=$(peer_trouble_bands)
+        acs_agreement_busy && candidate_busy=true
+    fi
     local json_out='{"results": ['
     local first_entry=true
     # Clear per-frequency survey snapshots for each interface to prevent
     # stale counters from entering the next radio's deltas.
-    local -A pre_act pre_busy pre_tx pre_use post_act post_busy post_tx post_noise post_use
-    local f n a b t used iface freq scan_file scan_data scan_pid scan_status
+    local -A pre_act pre_busy pre_tx pre_use pre_noise pre_rx
+    local -A post_act post_busy post_tx post_noise post_use
+    local f n a b t used r iface freq scan_data
     local scan_started scan_boot driver pre_survey post_survey
 
     load_mesh_roles
 
-    for iface in "$WPA_IFACE_2_4" "$WPA_IFACE_5_0"; do
-        radio_iface_enabled "$iface" || continue
+    for band in 2_4 5_0; do
+        local role="WPA_IFACE_$band"
+        iface=${!role}
+        if ! radio_iface_enabled "$iface"; then
+            reset_home_monitor "$band"
+            continue
+        fi
+        [ "$mode" != discovery ] || reset_home_monitor "$band"
         local freqs_to_scan=""
         [ "$iface" == "$WPA_IFACE_2_4" ] && freqs_to_scan=$SCAN_FREQS_2_4
         [ "$iface" == "$WPA_IFACE_5_0" ] && freqs_to_scan=$SCAN_FREQS_5_0
-        freqs_to_scan="$(phy_usable_freqs "$iface" "$freqs_to_scan")"
-
         pre_act=(); pre_busy=(); pre_tx=(); pre_use=()
+        pre_noise=(); pre_rx=(); home=""
         post_act=(); post_busy=(); post_tx=(); post_noise=(); post_use=()
-        driver=$(iface_driver "$iface")
 
-        # Bracket each scan with snapshots. Lifetime counters otherwise compare
-        # the home channel's average since boot with brief visits to candidates.
+        # Reuse this snapshot for the home window and short-scan baseline.
         if ! pre_survey=$(iw dev "$iface" survey dump 2>/dev/null); then
+            reset_home_monitor "$band"
             scan_outcome "$iface" "survey unavailable"
             continue
         fi
-        while read -r f n a b t used; do
+        while read -r f n a b t used r; do
             [ -z "$f" ] && continue
             pre_act[$f]=$a; pre_busy[$f]=$b; pre_tx[$f]=$t
             pre_use[$f]=$used
+            pre_noise[$f]=$n; pre_rx[$f]=$r
+            [ "$used" = 1 ] && home=$f
         done < <(printf '%s\n' "$pre_survey" | parse_survey)
 
-        if ! read -r scan_started _ < "${MESH_UPTIME_FILE:-/proc/uptime}" ||
-           ! scan_file=$(mktemp); then
+        if ! read -r scan_started _ < "${MESH_UPTIME_FILE:-/proc/uptime}"; then
             scan_outcome "$iface" "scan capture unavailable"
             continue
         fi
         scan_boot=${scan_started%.*}
-
-        # iw's combined scan itself dumps the BSS cache, so flush old entries.
-        # Bound termination too, then wait to reap and capture the actual status.
-        timeout --foreground --kill-after=1s 5s iw dev "$iface" scan freq $freqs_to_scan flush \
-            > "$scan_file" 2>/dev/null &
-        scan_pid=$!
-        scan_status=0
-        wait "$scan_pid" 2>/dev/null || scan_status=$?
-        scan_data=$(cat "$scan_file")
-        rm -f "$scan_file"
-        case "$scan_status" in
-            0) ;;
-            124|137) scan_outcome "$iface" "timeout"; continue ;;
-            *) scan_outcome "$iface" "exit $scan_status"; continue ;;
-        esac
-        # iw also returns zero after NL80211_CMD_SCAN_ABORTED.
-        if grep -qx 'scan aborted!' <<< "$scan_data"; then
-            scan_outcome "$iface" "aborted"
-            continue
+        HOME_ENTRY=""
+        scan_ready=true
+        roc=false
+        if [ "$mode" = data ]; then
+            measure_home "$band" "$iface" "$scan_boot" "$home"
+            if [ "$candidate_busy" = true ] || [ -z "$home" ] ||
+               { [ "${HOME_TROUBLE[$band]:-false}" != true ] &&
+                 [[ " $peer_bands " != *"$band"* ]]; }; then
+                scan_ready=false
+            fi
+            [ "$band" != 2_4 ] || roc=true
         fi
-
-        if ! post_survey=$(iw dev "$iface" survey dump 2>/dev/null); then
-            scan_outcome "$iface" "survey unavailable"
-            continue
+        if [ "$scan_ready" = true ]; then
+            freqs_to_scan="$(phy_usable_freqs "$iface" "$freqs_to_scan")"
+            [ -n "$freqs_to_scan" ] || scan_ready=false
         fi
-        scan_outcome "$iface" ""
-        while read -r f n a b t used; do
-            [ -z "$f" ] && continue
-            post_noise[$f]=$n; post_act[$f]=$a; post_busy[$f]=$b; post_tx[$f]=$t
-            post_use[$f]=$used
-        done < <(printf '%s\n' "$post_survey" | parse_survey)
+        home_bss=0
+        if [ "$scan_ready" = true ] && [ "$roc" = false ]; then
+            if capture_flush_scan "$iface" "$freqs_to_scan"; then
+                while read -r f n a b t used r; do
+                    [ -z "$f" ] && continue
+                    post_noise[$f]=$n; post_act[$f]=$a
+                    post_busy[$f]=$b; post_tx[$f]=$t; post_use[$f]=$used
+                done < <(printf '%s\n' "$post_survey" | parse_survey)
+                if [ -n "$HOME_ENTRY" ]; then
+                    home_bss=$(scan_bss_count "$home" "$scan_started" <<< "$scan_data")
+                fi
+            else
+                scan_ready=false
+            fi
+        fi
+        if [ -n "$HOME_ENTRY" ]; then
+            # Both sides carry zero BSS evidence on 2.4 GHz. On 5 GHz the
+            # successful scan supplies home and candidate counts together.
+            HOME_ENTRY="${HOME_ENTRY%\}},\"bss_count\":$home_bss}"
+            [ "$first_entry" = true ] && first_entry=false || json_out+=","
+            json_out+="$HOME_ENTRY"
+        fi
+        [ "$scan_ready" = true ] || continue
+        driver=$(iface_driver "$iface")
 
         for freq in $freqs_to_scan; do
+            # Home measurements always come from the full inter-cycle window.
+            if [ "$mode" = data ] && [ "$freq" = "$home" ]; then continue; fi
+            if [ "$roc" = true ]; then
+                # Occupancy and noise capture real co-channel airtime.
+                # No flush scan or BSS count is needed on this data path.
+                # Bracket each completed ROC separately.
+                pre_act=(); pre_busy=(); pre_tx=(); pre_use=()
+                if ! pre_survey=$(iw dev "$iface" survey dump 2>/dev/null); then
+                    continue
+                fi
+                while read -r f n a b t used r; do
+                    [ -n "$f" ] || continue
+                    pre_act[$f]=$a; pre_busy[$f]=$b; pre_tx[$f]=$t
+                    pre_use[$f]=$used
+                done < <(printf '%s\n' "$pre_survey" | parse_survey)
+                # Do not visit a channel that became home during collection.
+                [ "${pre_use[$freq]:-0}" = 0 ] || continue
+                if ! timeout --foreground --kill-after=1s 5s \
+                     iw dev "$iface" offchannel "$freq" "$SCAN_DWELL_MS" \
+                     >/dev/null 2>&1; then
+                    continue
+                fi
+                # iw returns once the visit is requested, not when it ends.
+                # Wait out the dwell plus switching time before reading.
+                sleep "$(( (SCAN_DWELL_MS + 150) / 1000 )).$(printf '%03d' \
+                    $(( (SCAN_DWELL_MS + 150) % 1000 )))"
+                post_act=(); post_busy=(); post_tx=()
+                post_noise=(); post_use=()
+                if ! post_survey=$(iw dev "$iface" survey dump 2>/dev/null)
+                then
+                    continue
+                fi
+                scan_outcome "$iface" ""
+                while read -r f n a b t used r; do
+                    [ -n "$f" ] || continue
+                    post_act[$f]=$a; post_busy[$f]=$b; post_tx[$f]=$t
+                    post_noise[$f]=$n; post_use[$f]=$used
+                done < <(printf '%s\n' "$post_survey" | parse_survey)
+                [ "${post_use[$freq]:-0}" = 0 ] || continue
+            fi
             local noise="${post_noise[$freq]:--}"
             # Require a measured visit before accepting noise or BSS evidence.
             # A synthetic -100 dBm floor would outrank real measurements.
@@ -481,16 +732,23 @@ perform_scan() {
                 # Unknown counter resets cannot establish an acquisition.
             fi
             [ "$d_act" -ge "$SURVEY_MIN_DWELL_MS" ] || continue
-            local bss_count
-            bss_count=$(scan_bss_count "$freq" "$scan_started" <<< "$scan_data")
+            if [ "$roc" = true ]; then
+                [ "$d_act" -ge "$SCAN_DWELL_MS" ] || continue
+            fi
+            local bss_count=0
+            if [ "$roc" = false ]; then
+                bss_count=$(scan_bss_count "$freq" "$scan_started" <<< "$scan_data")
+            fi
 
             # Occupancy excludes local transmit time. Same-driver counter ratios
             # compare across nodes and chip revisions without calibration.
-            # Local receive time still counts on the home channel. Hysteresis
-            # covers the few percent of airtime used by a healthy mesh.
             local occupancy_field=""
             local cb="${post_busy[$freq]:--}" pb="${pre_busy[$freq]:--}"
             local ct="${post_tx[$freq]:-0}"
+            if [ "$roc" = true ]; then
+                [[ "$ct" =~ ^[0-9]+$ &&
+                   "${pre_tx[$freq]:--}" =~ ^[0-9]+$ ]] || continue
+            fi
             if [[ "$cb" =~ ^[0-9]+$ && "$pb" =~ ^[0-9]+$ ]]; then
                 [ "$ct" = "-" ] && ct=0
                 local pt="${pre_tx[$freq]:-0}"
@@ -506,6 +764,13 @@ perform_scan() {
                     occupancy_field=", \"busy_pct\": ${occupancy}"
                 fi
             fi
+            # Long dwell needs valid busy and transmit deltas, not noise alone.
+            if [ "$roc" = true ]; then
+                [ -n "$occupancy_field" ] || continue
+                occupancy_field+=', "_roc": true'
+            else
+                needs_smoothing=true
+            fi
 
             [ "$first_entry" = true ] && first_entry=false || json_out+=","
             json_out+="{\"channel\": ${freq}, \"noise_floor\": ${noise},"
@@ -516,8 +781,14 @@ perform_scan() {
     done
 
     json_out+=']}'
-    CACHED_SCAN_REPORT_JSON=$(printf '%s\n' "$json_out" | smooth_scan_report) ||
-        CACHED_SCAN_REPORT_JSON='{"results":[]}'
+    # Only the retained short-scan path needs the median-of-three warmup.
+    if [ "$needs_smoothing" = true ]; then
+        CACHED_SCAN_REPORT_JSON=$(
+            printf '%s\n' "$json_out" | smooth_scan_report) ||
+            CACHED_SCAN_REPORT_JSON='{"results":[]}'
+    else
+        CACHED_SCAN_REPORT_JSON=$json_out
+    fi
 }
 
 
@@ -669,7 +940,7 @@ while true; do
         # === BOOTSTRAP STAGE 1: RF SCAN (every 3 min at :10) ===
         if [ "$BOOTSTRAPPING" = true ] && ! acs_agreement_busy && should_perform_action "SCAN" 180 10; then
             log "=== LOBBY BOOTSTRAP SCAN ==="
-            perform_scan
+            perform_scan discovery
         fi
 
         # === PUBLISH STATUS (so other nodes can see us) ===
@@ -816,7 +1087,7 @@ while true; do
         LOBBY_SOLO_LOGGED=false
 
         # === STAGE 1: RF SCAN (every 3 min at :10) ===
-        if ! acs_agreement_busy && should_perform_action "SCAN" 180 10; then
+        if should_perform_action "SCAN" 180 10; then
             log "=== SCAN ==="
             perform_scan
         fi

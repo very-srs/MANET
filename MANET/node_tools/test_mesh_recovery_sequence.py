@@ -30,7 +30,8 @@ class MeshRecoverySequenceTests(unittest.TestCase):
             (harness.root / 'net/br0/address').write_text(mac)
             (harness.root / 'boot').write_text(chr(ord('a') + index) * 32)
             (harness.roles / 'halow_if').write_text('wlan2')
-            harness.reports([[{'channel': 2437, 'noise_floor': -95, 'busy_pct': 95},
+            harness.reports([[{'channel': 2437, 'noise_floor': -95,
+                               'busy_pct': 95, 'foreign_pct': 95},
                               {'channel': 2462, 'noise_floor': -95, 'busy_pct': 0}]] * 3, self.macs)
             with harness.registry.open('a') as stream:
                 stream.write(''.join(node(peer) for peer in self.macs))

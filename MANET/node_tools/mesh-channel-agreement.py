@@ -719,7 +719,8 @@ class Runtime:
             saved = self.state.get('protocol', {})
             plan = saved.get('plan', {})
             hold_left = max(0, self.state.get('hold_until', 0) - boot_time())
-            self.ui_status.update(monotonic=time.monotonic(), phase=saved.get('phase', 'idle'),
+            self.ui_status.update(boot=self.boot, monotonic=time.monotonic(),
+                                  phase=saved.get('phase', 'idle'),
                                   target=self.state.get('destination', {}).get('plan', {}).get('channels', {}),
                                   pending_channels=plan.get('channels', {}),
                                   votes=len(saved.get('votes', {})), participants=len(plan.get('participants', {})),
@@ -779,6 +780,12 @@ class Runtime:
             except (OSError, ValueError, subprocess.SubprocessError):
                 # Unknown membership defers new proposals, never implies solo.
                 view = None
+            # Reuse this validated connected view for the manager's RF gate.
+            # Missing membership closes only the peer-triggered scan path.
+            self.ui_status['members'] = (
+                ['NODE_' + mac.replace(':', '') for mac in view]
+                if view is not None else [])
+            self.ui_status['observed_boot'] = boot_time()
             now = int(time.time())  # Discovery may time out. Refresh time.
             destinations = self.connected_destinations(view, records, local, now)
             destinations = protocol.network_destinations(destinations, view or {})

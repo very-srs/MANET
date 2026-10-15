@@ -126,6 +126,9 @@ class OccupancyTests(AcsHarness):
         self.configure(current if band == '2_4' else None,
                        current if band == '5_0' else None)
         (self.root / 'uptime').write_text('10000.0 1.0\n')
+        reports = [[dict(r, foreign_pct=r['busy_pct'])
+                    if r.get('channel') == current and 'busy_pct' in r
+                    else r for r in report] for report in reports]
         self.reports(reports)
         result = self.run_command(['bash', str(self.scorer), '--score'])
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -134,7 +137,7 @@ class OccupancyTests(AcsHarness):
         return int(winner), result.stderr, output
 
     def scans(self, samples, cache='{}', fault=''):
-        """Collect scans through the manager's real cache replacement."""
+        """Collect the unchanged discovery scans and their warmup."""
         self.configure(2462, None)
         (self.root / 'samples').write_text(json.dumps(samples))
         (self.root / 'survey-count').write_text('0')
@@ -177,7 +180,7 @@ uptime_now() {
 ''') + '''
 for ((round=0; round<''' + str(len(samples)) + '''; round++)); do
     printf '%s 1.0\n' "$((10000 + round * 180))" > "$MESH_UPTIME_FILE"
-    perform_scan
+    perform_scan discovery
     printf '%s\n' "$CACHED_SCAN_REPORT_JSON" | command jq -c .
 done
 ''')
@@ -402,7 +405,7 @@ iface_driver() { printf '%s\n' ''' + shlex.quote(driver) + '''; }
 for ((round=0; round<''' + str(len(rounds)) + '''; round++)); do
     export ROUND=$round
     printf '%s.50 1.0\n' "$((10000 + round * 180))" > "$MESH_UPTIME_FILE"
-    perform_scan
+    perform_scan discovery
     printf '%s\n' "$CACHED_SCAN_REPORT_JSON"
 done
 ''' + after

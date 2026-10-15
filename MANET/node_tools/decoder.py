@@ -114,7 +114,9 @@ def decode_telemetry(raw, emit=emit, emit_raw=emit_raw):
         # from a measured zero.
         dict({'channel': r.channel, 'noise_floor': r.noise_floor,
               'bss_count': r.bss_count},
-             **({'busy_pct': r.busy_pct} if r.HasField('busy_pct') else {}))
+             **{field: getattr(r, field)
+                for field in ('busy_pct', 'foreign_pct', 'window_s',
+                              'rf_trouble') if r.HasField(field)})
         for r in t.channel_report.results
     ]}))
 

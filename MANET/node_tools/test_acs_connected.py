@@ -70,6 +70,19 @@ else:
     def assert_frequency(self, freq):
         self.assertIn(f'frequency={freq}', (self.wpa / 'wpa_supplicant-wlan0.conf').read_text())
 
+    def test_scan_gate_snapshot_uses_connected_canonical_members(self):
+        """HaLow aliases map to the same identities used for RF scoring."""
+        self.tick(self.now, {})
+        snapshot = json.loads((self.root / 'manet-acs-status.json').read_text())
+        self.assertEqual(set(snapshot['members']),
+                         {'NODE_' + m.replace(':', '') for m in (OWN, PEER)})
+        self.assertEqual(snapshot['boot'], 'a' * 32)
+        self.assertEqual(snapshot['observed_boot'], self.elapsed)
+        with patch.object(self.runner, 'members', side_effect=ValueError):
+            self.tick(self.now + 1, {})
+        snapshot = json.loads((self.root / 'manet-acs-status.json').read_text())
+        self.assertEqual(snapshot['members'], [])
+
     def test_day_old_plan_recovers_over_halow_with_fresh_authenticated_advertisement(self):
         destination = self.destination(2462)
         when = self.now + 86400 + 121
@@ -167,13 +180,19 @@ else:
         self.tick(self.now - 1, records)
         self.assert_frequency(2437)
         self.assertNotIn('hold_until', self.runner.state)
+        # Subsequent home windows observe the shared incumbent. A peer's
+        # home on another frequency would not be a candidate dwell sample.
+        records[PEER]['status']['current'] = {'2.4': 2437}
         self.reports([
-            [{'channel': 2437, 'noise_floor': -95, 'busy_pct': 0},
+            [{'channel': 2437, 'noise_floor': -95,
+              'busy_pct': 0, 'foreign_pct': 0},
              {'channel': 2462, 'noise_floor': -95, 'busy_pct': 50}],
-            [{'channel': 2437, 'noise_floor': -95, 'busy_pct': 80},
+            [{'channel': 2437, 'noise_floor': -95,
+              'busy_pct': 80, 'foreign_pct': 80},
              {'channel': 2462, 'noise_floor': -95, 'busy_pct': 0}],
             # Still cached but unreachable; including this would change winner.
-            [{'channel': 2437, 'noise_floor': -95, 'busy_pct': 0},
+            [{'channel': 2437, 'noise_floor': -95,
+              'busy_pct': 0, 'foreign_pct': 0},
              {'channel': 2462, 'noise_floor': -95, 'busy_pct': 100}],
         ], [OWN, PEER, THIRD])
         with self.registry.open('a') as out:

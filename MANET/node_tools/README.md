@@ -24,10 +24,10 @@ The scripts that run a mesh node. Everything in this directory is installed to
 
 **node-manager-acs.sh**
 
-The orchestrator for Automatic Channel Selection mode. RF scans and elections
-run on a synchronized schedule; registry/IP management runs every loop:
+The orchestrator for Automatic Channel Selection mode. Home measurements and
+elections run on a synchronized schedule. Registry/IP management runs every loop:
 
-- RF scanning, every 3 minutes
+- Home RF measurement every 3 minutes, with candidate scans on RF trouble
 - Status publishing to Alfred
 - Registry building
 - Channel elections
@@ -576,33 +576,72 @@ can still leave stragglers: this is bounded agreement within a discovered
 partition, not an atomic switch across unreliable links. It requires aligned
 clocks. Firmware/radio validation on CM4 is still required.
 
-Occupancy is the share of a scan visit that the channel was busy with traffic
-this radio did not send. It is a ratio of two counters from one driver, so it
-compares directly between nodes and between radio chips. The noise floor does
-not: it is uncalibrated in absolute terms and varies with the chip, which is
-why it contributes a capped penalty instead of deciding the election.
+Each ACS cycle measures the home channel over the interval since the previous
+cycle, usually about 180 seconds. It reports total busy airtime, foreign
+airtime, noise, the real window length and a per-band RF trouble flag. Foreign
+airtime subtracts this radio's transmit time and summed peer receive duration
+from busy time. Overheard unicast between two other mesh nodes still counts
+as foreign. Windows shorter than 60 seconds are rejected. A counter decrease,
+channel or interface change, or manager restart starts a new baseline.
 
-A channel report carries only what the radio measured in its latest scan. A
-scan that fails or times out discards that band's report and logs `Scan failed
-on <radio>` once, then `Scan recovered on <radio>` when scans work again.
-A channel the radio visited for less than 25 ms is left out of that report.
-Occupancy needs three readings before it is reported, so a radio that has just
-started reports noise and network counts first. Observations older than three
-minutes are left out of telemetry.
+RF trouble starts after two consecutive windows with foreign airtime at least
+50% or noise at least -80 dBm. It clears after three consecutive windows with
+foreign airtime below 40% and noise below -85 dBm. These limits are provisional
+pending controlled-interferer calibration. Each band scans candidates only
+while this node or a member of its connected ACS view reports trouble on that
+band. Healthy bands make no off-channel scan visits. Lobby bootstrap,
+tourguide and discovery visits keep their existing behavior.
+
+An invalid measurement window breaks the consecutive-window streak but does
+not clear an active trouble flag. When the home frequency is known, the report
+still carries that flag without inventing airtime or noise measurements.
+
+When the gate is open, 2.4 GHz candidates get one 250 ms remain-on-channel
+visit each. Data mode performs no 2.4 GHz flush scan and reports zero BSS
+counts for both the home channel and candidates. Occupancy and noise capture
+co-channel networks' real airtime without charging candidates a BSS penalty
+that the home channel never pays. Removing the scan also removes a failure
+seen on both bench MT7916 cards: about 10 to 13% of 2.4 GHz scans timed out
+after five seconds without a results event, skipping all ROC visits that cycle.
+
+Occupancy comes from the visit's busy and transmit counter differences divided
+by its active time. The ROC command returns before the visit ends, so the
+manager waits the requested dwell plus 150 ms before reading the post-survey.
+Visits with less than 250 ms of measured active time are dropped. Each valid
+long-dwell result is published immediately. 5 GHz keeps its current main-radio
+flush scan behind the same gate, including its three-sample occupancy warmup.
+That scan includes the home channel and supplies BSS counts for both home and
+candidates. A failed scan discards candidates and leaves the home BSS count
+at zero while preserving valid home measurements. Lobby bootstrap and discovery
+keep their flush scans and BSS counts. Observations older than three minutes
+are omitted from telemetry.
+
+Long home windows on MT7916 measured 29 to 31% busy where short scan brackets
+varied from 35 to 62%. Candidate software scans spent about 75 ms off-channel,
+with 330 to 620 ms traffic stalls. A 250 ms remain-on-channel request measured
+273 ms of active time with a 486 ms stall. No loss was observed in that bench
+measurement. The
+[channel-scoring reference](../../docs/node-tools-internals.md#channel-scoring)
+explains the counters, driver behavior and remaining hardware validation.
+
+The incumbent is scored on foreign airtime, while candidates use dwell
+occupancy. Total home busy airtime remains visible without treating this
+node's own mesh traffic as interference. Noise contributes a weighted penalty
+because its absolute value varies between radio chips. BSS counts add half a
+point per network on 5 GHz and the bootstrap scan paths. They contribute
+nothing on 2.4 GHz in data mode.
 
 A channel is disqualified when enough of the nodes reporting on it call it bad,
 either too noisy or too congested. Once three or more nodes report, a single
 one cannot take a channel away from the mesh, so a radio with a bad connector
 or a driver returning garbage no longer costs everyone a band.
 
-A band whose radios reported no measurements at all is a different case from
-one where every candidate was measured and rejected, though both leave the
-qualified list empty. Missing data holds the current channel and logs `No scan
-data for any candidate channel`. When every measured candidate is disqualified,
-the election takes the least bad channel it did measure and asserts limp mode.
-It never moves the mesh to the lobby frequencies: those are the rendezvous
-point, they are not scanned, and a node parked there stops scanning and
-electing.
+With no measured alternative, the election holds the current channel without
+urgency or limp mode. A bad incumbent waits for candidate data before an
+urgent move is possible. Once alternatives are measured, disqualification and
+limp rules use the incumbent's foreign airtime. When every measured channel
+is disqualified, the election takes the least bad measured channel and asserts
+limp mode. Lobby frequencies remain reserved for rendezvous.
 
 Channel changes are applied with `wpa_cli reconfigure`, which re-reads the
 supplicant configuration in place instead of restarting the service, and the
