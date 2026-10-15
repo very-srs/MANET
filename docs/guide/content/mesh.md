@@ -14,6 +14,8 @@ Radios pass traffic through other radios. If a link breaks, another available pa
 
 The radio can find another route. It cannot invent one across a gap with no usable signal.
 
+Radios keep listening to the channel they are using. If interference stays, they look for a better one.
+
 ## User
 
 ### More than a direct connection
@@ -25,6 +27,10 @@ Wi-Fi and HaLow can connect the same group of nodes. Wi-Fi favors higher through
 ### Choosing channels
 
 With automatic channel selection enabled, radios share observations and agree on a Wi-Fi channel plan. Radios still connected through HaLow belong to the same connected mesh, even when their Wi-Fi links are temporarily disconnected.
+
+Each radio measures the channel it is on. It only looks at other channels when it, or another radio in the connected mesh, reports lasting interference: the channel busy with other people's traffic at least 60% of the time, which is where mesh speed starts to drop. A healthy band never leaves its channel to look around. After a restart the first measurement takes a full listening window, about three minutes, so a restart alone never moves the channel.
+
+A healthy channel also stays put through short load swings. A better channel has to win three three-minute rounds in a row before the mesh moves. A channel that is blocked, unmeasured or overloaded is left at once. A failed or expired scan is left out instead of being shared as new data, and when the connected mesh has no valid measurements for a band, that band keeps its current channel. Recovery visits that look for separated radios still happen.
 
 Time synchronization is needed for scheduled channel decisions. A cold radio can recover contact before its clock is synchronized, but timed decisions wait until GPS or network time has been verified.
 
@@ -42,7 +48,7 @@ Check the status dashboard for actual peers, routes, and link information. A com
 
 BATMAN V routes at Layer 2 over the attached mesh interfaces. Alfred replicates identity, telemetry, and control records; the local registry is a view derived from that data. Identity uses type 67 and volatile telemetry type 68. Reachable BATMAN membership must be distinguished from stale registry entries.
 
-`node-manager-acs.sh` schedules scanning, coordination requests, tourguide work, and service elections while maintaining status and addressing. The static manager retains the status, address, and service work without automatic Wi-Fi channel selection. `node-manager-select.sh` chooses the runtime symlink from `acs=` before service start.
+`node-manager-acs.sh` schedules home-channel RF measurement, gated candidate scans, coordination requests, tourguide work, and service elections while maintaining status and addressing. A scan only counts if it completed. A channel visited for less than 25 ms is left out, 5 GHz busy time needs three readings, and observations older than three minutes are not published. The static manager retains the status, address, and service work without automatic Wi-Fi channel selection. `node-manager-select.sh` chooses the runtime symlink from `acs=` before service start.
 
 ### One connected component, one channel decision
 
@@ -58,6 +64,40 @@ observations. Receivers check whether they can follow the proposed band plan,
 rather than independently choosing a new winner from their own observations.
 That matters because two radios with different interference reports could
 otherwise make different, individually reasonable channel choices.
+
+The coordinator keeps a per-band count of consecutive preference wins against
+the incumbent (any challenger counts) and moves on the third. The count
+starts over after a reboot or a coordinator change. Receivers still do not
+re-score. A vetoed, unmeasured or overloaded incumbent is not held.
+
+Each radio measures its home channel every three-minute cycle from survey and
+station counter deltas. Windows shorter than 60 seconds are rejected.
+Foreign airtime is busy time minus own transmit time minus summed peer
+receive time. Overheard unicast between two other mesh nodes still counts as
+foreign. Counter resets, channel or interface changes and restarts start a new
+baseline. Total busy time stays in telemetry, and foreign airtime scores the
+incumbent.
+
+A per-band trouble flag sets after two windows at or above 60% foreign or
+-80 dBm noise, and clears after three windows below 50% and -85 dBm. The 60%
+limit comes from a controlled interferer on a two-node 2.4 GHz mesh: measured
+foreign airtime tracked the interferer's airtime linearly, and throughput lost
+about 20% by 60% foreign, about 60% by 75%, and 70 to 75% above 80%.
+Off-channel and on-channel readings of one channel agreed within a point, so
+the mesh's own traffic is not counted as foreign. The noise limit is still
+provisional, because the noise floor did not move under Wi-Fi interference.
+The flag rides in the home channel report. A local flag, or a fresh one from
+any member of the connected view (including over HaLow), opens candidate
+scanning on that band. Reports from unreachable nodes cannot open it.
+
+With the gate open, 2.4 GHz visits each candidate once for 250 ms on its own
+channel and takes occupancy and noise from the survey counters, with no BSS
+scan. 5 GHz keeps its main-radio scan and short-sample warmup behind the same
+gate, with BSS counts on both incumbent and candidates. With no measured
+alternative the channel holds without urgency. Once candidates arrive, a
+disqualified incumbent can move at once, bypassing the three-round hold-down.
+Lobby, tourguide and discovery scans are not gated. See
+[channel scoring](../../../docs/node-tools-internals.md#channel-scoring).
 
 | Stage | What becomes fixed | What stops progress |
 |---|---|---|
@@ -75,7 +115,8 @@ The [agreement protocol](../../../docs/node-tools-internals.md#channel-agreement
 also describes round timing and membership expansion.
 
 At application time the node serializes changes against local tourguide
-work, reconfigures changed radios, and checks their actual frequencies.
+work, reconfigures changed radios, and checks their actual frequencies. An
+unchanged plan is not logged as applied.
 A service reporting that it is running does not prove that the radio landed
 on the selected channel. Failed landings use bounded repair attempts. The
 commit itself is an authenticated coordinator statement, not independent

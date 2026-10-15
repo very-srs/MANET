@@ -31,8 +31,11 @@ link can disconnect the nodes you are trying to configure.
 
 With automatic channel selection (ACS) enabled, the mesh coordinates its
 conventional Wi-Fi channel decisions. Manual Wi-Fi channel changes are
-rejected while ACS owns that decision. The [mesh guide](mesh.md) explains
-discovery, channel agreement, partition healing and limp mode.
+rejected while ACS owns that decision. The mesh only moves when its channel
+has lasting interference or another channel stays better for several rounds,
+as described in [choosing channels](mesh.md#user-choosing-channels). The
+[mesh guide](mesh.md) explains discovery, channel agreement, partition
+healing and limp mode.
 
 With ACS disabled, a manual Wi-Fi plan is saved by band and reapplied across
 radio restarts. That does not remove the need for compatible settings on

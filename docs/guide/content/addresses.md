@@ -65,6 +65,9 @@ Some [shared services](services.md) have reserved service addresses that
 can move between hosts. Those are separate from a radio's own address.
 Changing the shared mesh address range affects all of them; follow
 [settings](settings.md) rather than editing one radio independently.
+After a range change, each radio removes its old addresses, gateway and
+service addresses before taking new ones, so reconnect your devices once the
+change has finished.
 
 ## Developer
 
@@ -94,6 +97,11 @@ applies its addresses and DHCP pool, and publishes the claim. Periodic
 reconciliation repairs races and partition merges. For overlapping claims,
 the higher MAC keeps its allocation and the lower MAC releases and reselects.
 
+A CIDR change removes this node's old addresses, EUD gateway, old service
+VIPs, DHCP pool and mDNS entry before taking new ones. Unrelated aliases on
+the bridge are kept. If any step fails, the old DHCP service is put back and
+the change is retried every 15 seconds.
+
 A split mesh's convergence depends on an exchange of fresh claims. Unchanged
 telemetry does not renew the observation age and stale peers eventually stop
 reserving space. A returning node can therefore find its old allocation
@@ -105,9 +113,10 @@ describes expiry, mixed-width collisions, and exhaustion behavior in full.
 `manet.local` points to every EUD's client-gateway address. DHCP and local
 DNS/mDNS discovery are confined at the mesh bridge boundary so a different
 radio cannot answer a local client's setup request or put unnecessary traffic
-onto the mesh network. Netowkr allocation changes made through the admin web panel
+onto the mesh network. Network allocation changes made through the admin web panel
 therefore require synchronized updates to addresses, DHCP, discovery, and
-the management firewall's allowed source pool.
+the management firewall's allowed source pool. A CIDR change retires the old
+DHCP pool and mDNS entry together with the old addresses.
 
 Peer hostname->ip mappings are a separate registry derived local hosts view.
 A radio's /etc/hosts updater compares content before replacing to lower storage wear

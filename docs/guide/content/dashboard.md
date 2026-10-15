@@ -63,7 +63,7 @@ See [changing settings](settings.md) before applying a change that could disconn
 
 Expand **Mesh recovery** in management or this node's status panel. It explains observed and agreed Wi-Fi channels, acknowledgements, recovery holds, and the last verified clock source. A ready HaLow interface alone is not evidence of a connected peer.
 
-For an actual performance check, use **Measure**, select the endpoints, direction, and test, then keep the radios in place while it runs. Throughput tests use the network, so schedule them when that traffic will not disturb voice or other work. Use a meaningful session label and export results from **Sessions** for comparison.
+For an actual performance check, use **Measure**, select the peer, direction, and test, then keep the radios in place while it runs. The radio you are connected to is always the source. Throughput tests use the network, so schedule them when that traffic will not disturb voice or other work. Use a meaningful session label and export results from **Sessions** for comparison.
 
 Your login lasts up to 48 hours on this radio. A reboot, web-service restart, or admin-password change requires a new login. An expired login does not mean the mesh has failed.
 
@@ -84,6 +84,11 @@ publish theirs. Management and `/api/admin/*` require a
 session. Application checks admit localhost and the mesh/EUD subnet, while
 `manet-ui-firewall.sh` narrows this to localhost and this node's client pool,
 as described in the [connection guide](connect.md).
+
+Every HTML page carries a Content-Security-Policy. Scripts run only with a
+fresh per-response nonce, controls use event listeners instead of inline
+handlers, and all resources are same-origin. Inline styles are still allowed.
+Pages also send `nosniff` and same-origin referrer headers.
 
 No network bandwidth is used for this display. The server combines live BATMAN originator, neighbor, and gateway queries with `/var/run/mesh_node_registry`, `/etc/mesh.conf`, and allocation state. Peer details come from Alfred-derived records. Even though the route is named `/api/peer/<ip>`, it does not fetch a remote node's HTTP page. `manet_peer_radios.py` constructs the interface displays from locally saved data.
 

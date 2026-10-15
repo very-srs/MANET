@@ -67,8 +67,9 @@ necessarily a defective radio. Check the [dashboard](dashboard.md) and
 
 The authenticated management handler admits one local measurement worker.
 It runs `iperf3` against the selected peer's listening endpoint or sends
-ICMP ping. There is no Alfred configuration transaction for a test, and
-selecting a pair does not arrange an arbitrary remote-to-remote worker.
+ICMP ping. There is no Alfred configuration transaction for a test. The
+source is always the radio you are connected to, and results record that
+radio as the source. There is no remote-to-remote worker.
 Reverse iperf changes the traffic direction while retaining the local
 control client. Port 5201 is limited to the configured mesh subnet.
 
@@ -76,11 +77,12 @@ TCP single/four-stream tests use the respective parallelism. UDP throughput,
 jitter and loss views use a configured offered bitrate; reverse uses iperf's
 reverse flag. A TCP result prefers received totals. UDP summaries expose
 receiver loss and jitter, so offered rate must accompany a throughput claim.
-Ping parses round-trip statistics and loss separately.
+Ping parses round-trip statistics and loss separately. A ping with no replies
+is saved as a failed result.
 
 ### Admission and execution bounds
 
-A batch allows up to 64 pairs and seven test types. Throughput duration must
+A batch allows up to 64 peers and seven test types. Throughput duration must
 be 5–300 seconds. Admission budgets the combinations, subprocess overhead,
 route collection and pauses against a one-hour monotonic execution limit.
 An iperf command has a duration-plus-25-second timeout; the default hundred
@@ -97,7 +99,7 @@ limits still apply before job admission.
 ### Evidence and storage consistency
 
 A single topology snapshot annotates the batch, while individual results
-record endpoints, type, time and command output/metrics. That snapshot
+record endpoints, the executing node, type, time and command output/metrics. That snapshot
 cannot establish a per-packet path or freeze routing. Use packet capture
 or lower-layer evidence when a claim depends on which radio carried traffic.
 

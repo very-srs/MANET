@@ -37,7 +37,7 @@ Local EUD and AP edits take effect when you press **Stage Changes**; they do not
 ### Apply a shared configuration
 
 1. Edit the intended fields and select **Stage Changes**.
-2. Read the acknowledgement table. An **ACK** means that a node received and staged this particular change. Check the node list as well as the percentage; an offline radio cannot confirm receipt.
+2. Read the acknowledgement table. An **ACK** means that a node received and staged this particular change. Whether it was applied and verified is reported separately, after activation. Check the node list as well as the percentage; an offline radio cannot confirm receipt.
 3. When the table reaches 100%, select **Apply Now**. Activation is scheduled about 60 seconds later.
 4. Keep the radios powered while they apply the change. Reconnect your phone if its connection changed, then check the [dashboard](dashboard.md) for the expected peers.
 
@@ -49,7 +49,9 @@ If the form is waiting for time synchronization, let a verified GPS or network t
 
 For a changed mesh SSID, mesh key, or IP network, each radio saves its previous configuration. If it had peers before the change but sees none after the default five-minute trial, it restores that configuration. Leave **Skip the safety net** unchecked for this protection.
 
-This check needs only one reachable peer; it does not prove that every expected radio returned. A radio that was already alone keeps the new settings. After a failed or interrupted apply attempt, inspect the result and stage a fresh change if another attempt is needed.
+This check needs only one reachable peer; it does not prove that every expected radio returned. A radio that was already alone keeps the new settings.
+
+If an apply is interrupted, for example by a service restart, the radio finishes it on its own from a saved record. You do not need to send the change again. A reboot during the trial period ends the trial and restores the previous settings, so leave the radios powered until the trial is over. A rollback is final for that change. To try again, stage it as a new change.
 
 Changing the admin password ends existing management sessions. Use the new password to sign in again. After changing the regulatory domain, reboot the affected radios and check their channels.
 
@@ -71,7 +73,7 @@ The form validates changed fields before local writes or shared publication. A m
 
 Configuration staging uses authenticated, encrypted Alfred type 70; configuration ACKs use type 73. Radio changes use types 71 and 72. `manet_admin.py` authenticates control with the shared admin password; SAE membership and public telemetry do not authorize a command or satisfy the ACK gate. HTTP is the operator interface, not peer-to-peer control transport.
 
-Each stage has a fresh transaction identity. Normal control waits for `/run/initial_time_synced`, validates message age, and retains replay history in `/var/lib/manet-admin`. Activation is consumed before the apply attempt, so an interrupted attempt requires a fresh request. Clock-independent recovery messages cannot authorize configuration edits.
+Each stage has a fresh transaction identity. Normal control waits for `/run/initial_time_synced`, validates message age, and retains replay history in `/var/lib/manet-admin`. Transport consumption prevents replay, and it is separate from applying. The local journal in `/var/lib/manet-config` owns the job, so an interrupted apply resumes from local state without a fresh request or the original message. The updater migrates pending work into the journal. Clock-independent recovery messages cannot authorize configuration edits.
 
 The configuration workflow separates receipt from activation because a
 change can remove the very link that carries its instructions:
@@ -88,9 +90,12 @@ change can remove the very link that carries its instructions:
    automatic strict-majority channel vote.
 3. **Prepare and apply locally.** At the deadline, a node whose changed
    settings threaten connectivity prepares its rollback state. If that
-   fails, it defers the protected change. Once ready, it records the command
-   as consumed before attempting the change, so a restart cannot apply an
-   old activation again.
+   fails, it defers the protected change. Once ready, it saves the job and
+   its rollback snapshot in the journal and records the command as consumed
+   before any live write, so a restart resumes this job but cannot apply an
+   old activation again. The result is checked against the real files and
+   services before it counts as verified, and ACKs report applied status
+   only for verified or committed work.
 4. **Judge the trial.** Each node checks its own connectivity at its rollback
    deadline. Nodes can reach different outcomes; this is not a distributed
    transaction that either changes every radio or changes none.
@@ -108,7 +113,7 @@ explains the key derivation, receive limits, and replay ordering.
 
 `mesh-config-rollback.sh` counts distinct BATMAN originators, snapshots configuration and supplicant files, and records a persistent trial deadline. Dangerous apply requires successful preparation unless the request explicitly disables it. An unreadable peer baseline is an error, not proof of a solo node.
 
-At the deadline, a previously connected node keeps the change if at least one peer is visible; no peers or a failed query cause restoration. A verified empty baseline permits a solo node to keep the change. Failed restoration retains the snapshot and retries, including across reboot. An already armed trial cannot have its original snapshot or deadline replaced.
+At the deadline, a previously connected node keeps the change only if its files and services still match the request and at least one peer is visible; no peers or a failed query cause restoration. A verified empty baseline permits a solo node to keep the change. A reboot during the trial expires it at once and restores: there is no reboot grace extension. Failed restoration retains the snapshot and retries, including across reboot. A completed rollback is terminal for that transaction. An already armed trial cannot have its original snapshot or deadline replaced.
 
 For example, a wrong mesh key can isolate a node immediately after it applies
 the change. Waiting for a remote "undo" would not work because that command
