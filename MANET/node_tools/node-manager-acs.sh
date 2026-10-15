@@ -42,8 +42,9 @@ SCAN_FREQS_5_0="5200 5220 5240 5745 5765 5785 5805 5825"
 SURVEY_MIN_DWELL_MS=25
 SCAN_DWELL_MS=250
 HOME_MIN_WINDOW_S=60
-# Provisional RF trouble limits pending controlled-interferer calibration.
-HOME_FOREIGN_LIMIT=50
+# Mesh throughput holds to about 60% foreign airtime, then falls steeply.
+# The noise limit is uncalibrated: Wi-Fi interference does not move it.
+HOME_FOREIGN_LIMIT=60
 HOME_NOISE_LIMIT_DBM=-80
 
 # Retain the median of three short visits on 5 GHz and during discovery.

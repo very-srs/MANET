@@ -266,7 +266,7 @@ SCAN_FREQS_5_0='5200 5220'
 
     def test_local_trouble_opens_after_two_windows(self):
         """Two bad long windows open both bands with no peer flag."""
-        reports, commands = self.collect([self.row(i, 50) for i in range(3)])
+        reports, commands = self.collect([self.row(i, 60) for i in range(3)])
         self.assertFalse(reports[1]['results'][0]['rf_trouble'])
         home = [r for r in reports[2]['results'] if 'foreign_pct' in r]
         self.assertTrue(all(r['rf_trouble'] for r in home))
@@ -281,7 +281,7 @@ SCAN_FREQS_5_0='5200 5220'
 
     def test_gate_clears_and_drops_candidates_after_three_good_windows(self):
         """Two bad windows followed by three good windows close each band."""
-        rows = [self.row(i, 50) for i in range(3)]
+        rows = [self.row(i, 60) for i in range(3)]
         for i in range(3, 6):
             row = self.row(i, 30)
             row['busy'] += 2 * 20 * 1800
@@ -302,7 +302,7 @@ SCAN_FREQS_5_0='5200 5220'
 
     def test_counter_reset_preserves_trouble_until_three_good_windows(self):
         """Reset measurements never masquerade as a cleared trouble flag."""
-        rows = [self.row(i, 50) for i in range(3)]
+        rows = [self.row(i, 60) for i in range(3)]
         rows += [self.row(i, 30, time=10540 + i * 180) for i in range(4)]
         reports, _ = self.collect(rows)
         reset_homes = [r for r in reports[3]['results'] if 'rf_trouble' in r]
@@ -385,9 +385,9 @@ SCAN_FREQS_5_0='5200 5220'
     def test_hysteresis_boundaries_and_interrupted_streaks(self):
         """Either limit activates trouble, both must clear to turn it off."""
         body = self.definitions('node-manager-acs.sh') + '''
-for sample in '50 -90' '49 -90' '50 -90' '50 -90' \
-              '39 -86' '40 -86' '39 -86' '39 -85' \
-              '39 -86' '39 -86' '39 -86' '0 -80' '0 -80'; do
+for sample in '60 -90' '59 -90' '60 -90' '60 -90' \
+              '49 -86' '50 -86' '49 -86' '49 -85' \
+              '49 -86' '49 -86' '49 -86' '0 -80' '0 -80'; do
     update_home_trouble 2_4 $sample
     printf '%s\n' "${HOME_TROUBLE[2_4]:-false}"
 done

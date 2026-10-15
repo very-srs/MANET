@@ -1570,10 +1570,18 @@ unicast between two other mesh nodes still counts as foreign airtime. This
 limitation is accepted, so the result is not a perfect classifier of external
 interference.
 
-`HOME_FOREIGN_LIMIT=50` percent and `HOME_NOISE_LIMIT_DBM=-80` dBm are
-provisional until calibrated with a controlled interferer. Either limit reached
+`HOME_FOREIGN_LIMIT=60` percent comes from a controlled interferer on a
+two-node 2.4 GHz mesh. Measured foreign airtime rose by 0.82 of the
+interferer's airtime at every step. Throughput lost about 20% by 60% foreign,
+about 60% by 75%, and 70 to 75% above 80%. The limit is set at the point where
+throughput starts to fall, not from any site's background, so a site whose
+background already exceeds the clear edge keeps scanning. The 250 ms
+candidate visits make that harmless. Off-channel and on-channel readings of the
+same channel agreed within one point, so the mesh's own traffic is not counted
+as foreign. `HOME_NOISE_LIMIT_DBM=-80` dBm remains provisional: the noise floor
+did not move under Wi-Fi interference. Either limit reached
 in two consecutive valid windows sets trouble. Three consecutive windows with
-foreign airtime below 40% and noise below -85 dBm clear it. Values between
+foreign airtime below 50% and noise below -85 dBm clear it. Values between
 these edges leave the flag unchanged and break both streaks. Each band has
 independent state. Invalid observations do not supply a good window.
 
