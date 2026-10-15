@@ -37,6 +37,8 @@ The status pattern is restored at each boot. It reports setup completion, not th
 
 The SSH login banner clearly describes the status of the radio, from initial setup to completion. Detailed setup log is `/var/log/radio-setup.log`.
 
+First boot checks that it can reach the Debian package archive, the MANET install package and, if you selected it, the MediaMTX download. It waits at most five minutes. If something is still unreachable, the red LED blinks a heartbeat with the green LED solid, and the SSH banner names what could not be reached. Fix the connection, then reboot or run `sudo systemctl restart mesh-provision.service` to try again. You do not need to reflash.
+
 Additional, user added setup scripts have their own result and log, `/var/log/manet-user-scripts.log`. A failed additional script does not turn a successfully provisioned radio into a failed installation.
 
 [Full provisioning reference](../../../MANET/provisioning/README.md#first-boot)
@@ -46,6 +48,8 @@ Additional, user added setup scripts have their own result and log, `/var/log/ma
 ### Provisioning has distinct stages
 
 On Raspberry Pi targets, the image's `firstrun.sh` creates the radio user account, enables SSH, and installs the next provisioning stage's script. Rock 3A image preparation embeds the provisioning service and configuration directly in the Armbian image. Both paths ultimately schedule `radio-setup-run-once.service` after the wireless interfaces exist.
+
+Before downloading anything, the bootstrap checks over HTTP that the Debian archive, the install package URL and (if selected) the MediaMTX download are reachable, for at most 300 seconds. It no longer waits indefinitely for `ping 8.8.8.8`. On timeout it sets red heartbeat with green solid, writes the missing resources into the SSH banner and `/var/log/mesh-provision.log`, and leaves `mesh-provision.service` enabled, so a reboot or a restart of that unit retries.
 
 The release URL, SHA-256, and expected version are baked into the provisioning script at flash time. First boot validates that selection before extracting its archive. The kernel-protection helper runs before provisioning's APT operations. The certificate/date handling needed for a cold clock is deliberately limited to the provisioning path; see [download verification and kernel protection](../../../docs/provisioning-internals.md#first-boot-without-a-trusted-clock).
 
@@ -74,6 +78,8 @@ updater's trust policy.
 ### Final radio setup
 
 `radio-setup.sh` serializes setup with a process lock, classifies PHY capabilities into radio roles and expected wlan numbers, writes MAC-pinned interface names, generates supplicant and networkd configuration, and enables the runtime services. If names need to settle across a reboot, it retains the run-once unit for retry. Later boots use `manet-radio-names.service` to resolve naming collisions before network services start.
+
+If package downloads cannot resolve names, setup runs one restricted qualification of the Ethernet uplink (no radio or manager actions), publishes its DHCP DNS, and checks again. It gives up after about three minutes and records the failure, and the next setup boot retries.
 
 The orchestrator entry point is a **symlink**, selected by `node-manager-select.sh` from `acs=`. It points to `node-manager-acs.sh` or `node-manager-static.sh`; there is no independently maintained `node-manager.sh` source file.
 

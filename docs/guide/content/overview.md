@@ -159,6 +159,9 @@ Wi-Fi links can exist, so it requires coordination. With ACS enabled, a
 coordinator proposes a band plan to the whole reachable BATMAN component,
 including nodes connected through HaLow. Participants validate it and vote;
 a strict majority of the frozen membership permits a scheduled activation.
+Radios only look at other channels when one of them reports lasting
+interference on its current channel, and a preference move needs the better
+channel to win three rounds in a row.
 Using one membership view avoids independently moving two Wi-Fi groups that
 are still connected by another radio path. Lost final messages and partition
 changes still require authenticated recovery. See

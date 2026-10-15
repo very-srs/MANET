@@ -24,9 +24,10 @@ connection once the radios are set up.
 
 You can provide an uplink through a supported Ethernet connection, USB
 tether/modem, or USB Wi-Fi adapter. Ethernet detects whether a router offers
-network settings; the radio then checks whether the connection actually
-reaches the internet. A router being present does not guarantee that its
-internet service is working.
+network settings. The radio then checks whether the connection actually
+reaches the internet: an HTTP request that must come back with a 204 answer.
+A sign-in page fails that check. A router being present does not guarantee
+that its internet service is working.
 
 For a USB Wi-Fi uplink, open **Manage → Uplink**, enter that external
 network's credentials and follow the management apply process. These are
@@ -44,7 +45,9 @@ while failing the radio's internet check.
 More than one radio can offer internet. MANET considers both the path across
 the mesh and the advertised uplink capacity. It avoids changing gateways
 for small, brief improvements. If the current path fails, it can select an
-available replacement.
+available replacement. If a radio's own Ethernet uplink stops working, that
+radio stops being a gateway and its traffic goes out through another gateway
+on the mesh.
 
 A gateway change can break an existing download, call or other internet
 session because traffic now leaves through a different connection. Reconnect
@@ -58,6 +61,8 @@ radio airtime and other users can all limit the result. The displayed
 uplink figure is also different from an end-to-end speed test on your phone.
 
 Wired Ethernet uplinks use a small download to estimate available capacity.
+The download only sets the advertised figure. A slow or filtered connection
+still counts as internet. It is advertised as slow, not dropped.
 Phone tethers, cellular interfaces and Wi-Fi uplinks use an assumed capacity
 instead of that download test. Internet use by connected people still uses
 the upstream connection's data allowance.
@@ -94,7 +99,9 @@ hold after a switch limits churn, including after the first selection.
 The current gateway disappearing, or failing two consecutive reachability
 checks, permits replacement without waiting for an improvement interval.
 An existing `br0` default route identifies the incumbent after a controller
-restart. Other interfaces' default routes are preserved.
+restart. Only a metric-100 default route on the selected uplink interface is
+preserved. A promoted direct uplink uses metric 100, the mesh route 500, and
+networkd's own DHCP default 1024, which never wins.
 
 This hysteresis trades some instantaneous performance for session stability:
 a new egress gateway can change the NAT/public address and break transport
@@ -103,9 +110,11 @@ guarantee under every service scheduling or link condition.
 
 ### Advertised capacity and name resolution
 
-Ethernet qualification downloads 5 MB over HTTPS. The measurement excludes
-DNS/TCP/TLS setup and divides bytes by transfer time after the first byte;
-TCP startup can still under-read a fast connection. The result is reused
+Ethernet qualification is the HTTP 204 check. A separate 5 MB HTTPS download
+then estimates capacity. The measurement excludes DNS/TCP/TLS setup and
+divides bytes by transfer time after the first byte. A partial transfer of at
+least 250 kB counts. TCP startup can still under-read a fast connection, and a
+link with no usable measurement is advertised as 1 Mbit/s down and 0.2 up. The result is reused
 while the interface, address and router remain the same. Demotion invalidates
 it. Failed tests are rate-limited rather than repeated each loop.
 
@@ -115,8 +124,12 @@ uplinks, upload is an assumed fifth of download, not an upload test. Selection
 uses download. Consequently these advertisements are bounded inputs to a
 route heuristic, not a promise of symmetric throughput.
 
-Local DNS forwarding uses the resolved resolver list while avoiding a
-localhost forwarding loop. Gateway selection does not replicate an upstream
+DNS follows qualification. A promoted uplink's DHCP resolvers become the
+node's resolvers. An unqualified or demoted Ethernet lease never supplies DNS,
+so the node resolves through the public fallback over the mesh. A lone node on
+a LAN that only allows its own resolver qualifies with a lookup bound to that
+link, then uses that resolver once promoted. Local forwarding avoids a
+localhost loop. Gateway selection does not replicate an upstream
 router's private DNS namespace across every radio. If IP connectivity works
 but a private hostname fails, investigate DNS separately from the mesh route.
 The [gateway and speed reference](../../../docs/node-tools-internals.md#gateway-choice-and-uplink-speed)

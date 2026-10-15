@@ -33,6 +33,8 @@ Confirm voice is enabled, the mesh is connected, the talk groups match, and the 
 
 The default codec is **Lyra**. It transfers good-quality audio with less bandwidth than Opus, but lacks compatibility with other tools that would expect Opus. Lyra and Opus do not interoperate. A radio that missed a mesh-wide codec change while powered off must be set to the same codec. Reissue the change with it online.
 
+A receiver remembers at most 128 talkers, and each radio can add only a few new ones in a short time. If one radio's voice service restarts many times in quick succession, other radios may refuse its new voice for a while, until its old entries expire after about 15 minutes without traffic.
+
 ## Developer
 
 ### Pipeline and transport
@@ -41,7 +43,7 @@ The default codec is **Lyra**. It transfers good-quality audio with less bandwid
 
 Voice defaults to Lyra using the packaged GStreamer elements and model weights. Missing Lyra artifacts can trigger an Opus fallback, which cannot communicate with a Lyra mesh. Treat codec and payload framing as compatibility requirements, not quality preferences.
 
-Talk groups share multicast address `239.192.41.1`; group *n* uses RTP port `38801 + (n - 1) * 2`, with RTCP at the next port. The receive path demultiplexes SSRCs, gives talkers their own decode/jitter paths, and mixes them. Optional half-duplex behavior refuses local PTT while a remote source is transmitting.
+Talk groups share multicast address `239.192.41.1`; group *n* uses RTP port `38801 + (n - 1) * 2`. The next port is reserved for RTCP, but no RTCP is sent or received. Each packet passes source admission before it reaches the RTP session. The receive path demultiplexes SSRCs, gives talkers their own decode/jitter paths, and mixes them. Optional half-duplex behavior refuses local PTT while a remote source is transmitting.
 
 The transmit path captures audio through ALSA, measures its level, gates it
 with the PTT valve, encodes it, and places the encoded frames into RTP
@@ -60,10 +62,13 @@ device startup at every PTT press.
 ### Establishing a speaker before speech starts
 
 The RTP synchronization-source identifier, or SSRC, identifies one sender
-instance. MANET combines a prefix derived from its mesh address with a
-per-run generation byte. Reusing the same source identity after a restart
-could pair new sequence numbers with a receiver's old state. Changing the
-generation lets receivers establish the restarted stream separately.
+instance. Each run picks a fully random 32-bit SSRC, and receivers name a
+talker from its sender address, not from the SSRC. Reusing the same source
+identity after a restart could pair new sequence numbers with a receiver's
+old state. A fresh SSRC lets receivers establish the restarted stream
+separately. Receivers admit at most 128 sources, with a small per-address
+budget for new ones. An admitted source is released only when the RTP
+session's inactivity timer removes it, about 15 minutes after its last packet.
 
 Receivers keep established sources through silence so the next transmission
 does not pay the full branch-creation cost. A sender also emits a short
