@@ -168,7 +168,8 @@ class RuntimeTests(AcsHarness):
         self.now = int(time.time()) // 180 * 180 + 45
         self.env['TEST_NOW'] = str(self.now)
         (self.root / 'manet-acs-request.json').write_text(json.dumps({'round': self.now // 180}))
-        self.reports([[{'channel': 2437, 'noise_floor': -95, 'busy_pct': 80},
+        self.reports([[{'channel': 2437, 'noise_floor': -95,
+                       'busy_pct': 80, 'foreign_pct': 80},
                        {'channel': 2462, 'noise_floor': -95, 'busy_pct': 10}]], [OWN])
         with self.registry.open('a') as out:
             out.write(node(OWN) + node(PEER, aliases=RADIO) + node(THIRD))
@@ -208,7 +209,8 @@ class RuntimeTests(AcsHarness):
 
     def test_preference_streak_survives_ticks_and_same_boot_reload(self):
         """Normal clock setup and idle ticks preserve consecutive rounds."""
-        self.reports([[{'channel': 2437, 'noise_floor': -95, 'busy_pct': 45},
+        self.reports([[{'channel': 2437, 'noise_floor': -95,
+                       'busy_pct': 45, 'foreign_pct': 45},
                        {'channel': 2462, 'noise_floor': -95, 'busy_pct': 10}]],
                      [OWN])
         # Use canonical peer identities so the registry only needs RF data.
@@ -252,7 +254,8 @@ class RuntimeTests(AcsHarness):
 
     def test_new_clock_session_discards_streak_before_scoring(self):
         """A boot or missing clock session cannot carry old preference wins."""
-        self.reports([[{'channel': 2437, 'noise_floor': -95, 'busy_pct': 45},
+        self.reports([[{'channel': 2437, 'noise_floor': -95,
+                       'busy_pct': 45, 'foreign_pct': 45},
                        {'channel': 2462, 'noise_floor': -95, 'busy_pct': 10}]],
                      [OWN])
         (self.root / 'peers').write_text('[]')
@@ -413,7 +416,8 @@ class RuntimeTests(AcsHarness):
         self.assertNotIn('plan', self.runner.state['protocol'])
 
     def test_unchanged_plan_does_not_start_an_eight_minute_hold(self):
-        self.reports([[{'channel': 2437, 'noise_floor': -95, 'busy_pct': 10}]], [OWN])
+        self.reports([[{'channel': 2437, 'noise_floor': -95,
+                       'busy_pct': 10, 'foreign_pct': 10}]], [OWN])
         # Preserve discovery identities while changing only the scan report.
         with self.registry.open('a') as out:
             out.write(node(PEER, aliases=RADIO) + node(THIRD))

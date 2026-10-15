@@ -101,14 +101,18 @@ message NodeTelemetry {
     uint32 channel     = 1;  // MHz
     sint32 noise_floor = 2;  // dBm
     uint32 bss_count   = 3;
-    // Share of the measurement window the channel was busy with traffic that
-    // is not ours, 0-100. Driver-independent and needs no calibration, unlike
-    // noise_floor, so the election scores on this first.
+    // Home: total busy share of the survey window, 0-100. Off-channel:
+    // occupancy excluding this radio's transmit airtime during the visit.
     //
     // Explicitly optional: a channel measured at 0% busy and a channel the
     // radio never dwelled on long enough to measure are different answers,
     // and proto3 scalar defaults cannot tell them apart.
     optional uint32 busy_pct = 4;
+    // Home-channel entries only. Foreign airtime excludes local transmit
+    // and summed peer receive duration. Overheard peer unicast still counts.
+    optional uint32 foreign_pct = 5;
+    optional uint32 window_s = 6;  // Actual elapsed boot-clock seconds.
+    optional bool rf_trouble = 7; // Per-band hysteresis maintained by sender.
   }
   message ChannelReport {
     repeated ChannelScanResult results = 1;

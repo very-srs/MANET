@@ -1530,158 +1530,179 @@ The score, lowest wins, is
 
     occupancy% + max(0, median_noise - (-95 dBm)) * 0.5 + mean_bss_count * 0.5
 
-Occupancy comes from the survey counters bracketing each scan,
-`(busy - transmit) / active`, taken as the difference between a `survey dump`
-before the scan request and one after. That bracket is what makes the numbers
-comparable: the counters are cumulative since the interface came up, so without
-it the home channel reports a running average over its whole uptime while the
-other candidates report only the milliseconds the radio spent visiting them. A
-channel with under 25 ms of dwell in the window is left out of the report,
-because busy time counts in whole milliseconds and the ratio would move in 10%
-steps. An unchanged active count is no evidence of a visit, so it cannot pass.
+The incumbent's occupancy is the home monitor's `foreign_pct`. A candidate's
+occupancy is its off-channel dwell measurement. Total home `busy_pct` stays
+available in telemetry but never becomes the incumbent's congestion score or
+veto. Noise is uncalibrated across radio chips, so it contributes a weighted
+penalty. BSS count is a mean across reporters, not a sum that grows with mesh
+size. In data mode, 2.4 GHz home and candidate entries both carry
+`bss_count: 0`, so neither pays that penalty. BSS evidence remains on 5 GHz
+and the bootstrap scan paths. The incumbent receives a ten-point score
+preference after the raw score is calculated.
 
-mt7915e is the exception. `__mt76_set_channel` clears the survey state of a
-non-home channel on every visit, so two equally long healthy visits leave equal
-counters. For that driver, when the channel is not in use before or after the
-scan, the post-scan counters are the visit itself. This is only safe because
-the scan's own result is checked first: `perform_scan` captures the `iw scan
-... flush` output and exit status under a timeout, and a failed, timed-out or
-aborted scan discards that band's report instead of publishing old counters as
-new. The failure and the later recovery are each logged once per radio.
-Producer-side expiry drops any observation older than `SCAN_REPORT_MAX_AGE`
-(180 s, one publish period) from telemetry. Receivers still cannot tell the age
-of a record on the wire beyond the registry's own observation time.
+#### Home measurement and RF trouble
 
-Each measuring node publishes the median of its last three valid occupancy
-samples for that interface and frequency, all within ten minutes of boot-clock
-time. The first two samples remain unknown. A short dwell stays unknown for
-that scan even when history exists. This rejects a single short-visit burst;
-two sustained congested scans replace a quiet median. History lives in the
-manager's existing `CACHED_SCAN_REPORT_JSON`; the encoder sends only the public
-fields. Restart, expired history or an interface reassignment starts a new
-warmup. The median across reporting nodes and the ten-point incumbent bias
-still apply. The shell scorer stays stateless, so identical registry snapshots
-and shared incumbents produce identical score results.
+Every three-minute ACS cycle, `node-manager-acs.sh` reads the in-use channel's
+cumulative survey counters and summed station receive and transmit duration.
+It compares these with the previous cycle on the same interface and frequency.
+The manager retains baselines in memory, so a restart starts a new window.
+Trouble state also starts clear on restart.
+Interface or channel changes and counter decreases reset the baseline and
+consecutive-window streaks. An active trouble flag remains set until three
+valid good windows clear it. Missing measurements also break streaks. Windows
+under 60 seconds and windows without advancing active time are rejected.
 
-The coordinator adds a three-round hold-down for preference moves. Measured
-load swings can still reverse the ranking of two similarly busy channels after
-the occupancy median and ten-point bias. In one replay, the bias alone allowed
-six moves, two consecutive wins allowed two, and three allowed none. Increasing
-the margin relative to the incumbent score did not reduce those moves.
+The report includes total `busy_pct`, `foreign_pct`, `noise_floor`, the real
+elapsed boot-clock `window_s`, and the sender's per-band `rf_trouble` flag.
+When the home frequency is known but a window is invalid, its entry carries
+the trouble flag without airtime or noise measurements. The scorer excludes
+that entry from RF measurements, even if a 5 GHz scan supplies its BSS count.
+For differences between the two snapshots:
 
-`Runtime.score()` keeps a per-band `challenge` entry in `agreement.json`, with
-the incumbent, last counted round and count. Each round is `now // 180`.
-Any winner that beats the same incumbent counts, even if successive rounds
-prefer different challengers on 5 GHz. A repeated score in the same round
-counts once. A skipped round or changed incumbent restarts the count at one.
-An incumbent win clears it. Until the third consecutive win, the coordinator
-substitutes the incumbent and logs `ACS holding <band> GHz ... (1/3)` or `(2/3)`
-once per held band per round. The third round proposes its current winner.
+    busy_pct = 100 * delta_busy_ms / delta_active_ms
+    foreign_pct = 100 * (delta_busy_ms - delta_transmit_ms
+                        - delta_peer_rx_us / 1000) / delta_active_ms
 
-The scorer also emits `URGENT_2_4` and `URGENT_5_0`. An incumbent is urgent if
-it is disqualified, lacks measurements, is outside the candidate list, is
-absent, or has a raw score above `LIMP_MODE_SCORE_THRESHOLD` (60). An urgent
-result bypasses the preference hold-down and clears that band's streak.
-Missing data for every candidate still holds the channel because there is no
-measured replacement. The scorer's `LIMP_MODE` passes through unchanged.
+Both percentages are clamped to 0 through 100. Station transmit duration is
+retained for reset detection. Survey transmit time supplies the subtraction.
+Receive duration is summed across all peers on that interface. Overheard
+unicast between two other mesh nodes still counts as foreign airtime. This
+limitation is accepted, so the result is not a perfect classifier of external
+interference.
 
-The streak survives service restarts within one boot. A new coordinator starts
-without another node's history. Observing another coordinator during the
-proposal window clears the local streak. A new `clock_boot` session discards
-it before scoring, while ordinary ticks preserve it. It is not a local deadline
-in `LOCAL_TIMERS`.
-Receivers still ACK the frozen proposal without re-scoring. Applying unchanged
-channels refreshes the shell election output without printing `ACS applied
-channels ...`. That message accompanies actual changes only.
+`HOME_FOREIGN_LIMIT=50` percent and `HOME_NOISE_LIMIT_DBM=-80` dBm are
+provisional until calibrated with a controlled interferer. Either limit reached
+in two consecutive valid windows sets trouble. Three consecutive windows with
+foreign airtime below 40% and noise below -85 dBm clear it. Values between
+these edges leave the flag unchanged and break both streaks. Each band has
+independent state. Invalid observations do not supply a good window.
 
-The score was `avg_noise + total_bss * 0.1` until 0.548, which decided every
-election on `survey dump`'s noise field. A BSS was worth 0.1 dB, so ten
-co-channel networks equalled 1 dB of noise floor, and the elections turned
-almost entirely on the weakest number collected: driver-derived, uncalibrated
-in absolute terms, and different between chip revisions. `perform_scan` was
-already running the command that returns busy, receive and transmit time and
-discarding everything but the `noise:` line. Noise still contributes, capped
-and weighted at 0.5 per dB above -95 dBm, because it catches non-802.11 energy
-that busy time can attribute to nothing. It no longer decides the answer alone.
-The BSS count is a mean per reporting node, not a sum, so a channel is not
-scored worse for having been measured by more radios.
+These longer windows address measurement variance seen on MT7916 with
+mt7915e: consecutive 60-second home windows showed 29 to 31% busy with noise
+at -86 or -87 dBm. Scan-bracket measurements of that same channel ranged from
+35 to 62%. The roughly 180-second operating window measures the channel while
+it carries traffic instead of using the short scan bracket as its evidence.
 
-**Disqualification takes a quorum, not one node.** `max_noise > -70` removed a
-channel from the election mesh-wide if any single node reported it, with no
-outlier rejection and no weighting by whether that node carried traffic. One
-bad connector, one radio parked next to a microwave, or one mt76 instance
-returning garbage disqualified the channel for everybody, and with only two
-candidates at 2.4 GHz a single misbehaving node could take out the whole band.
-It now takes `ceil(reporters * 0.34)` nodes, minimum one, to disqualify: 1 of
-1, 1 of 2, 2 of 3, 2 of 5, 3 of 6. Two nodes cannot outvote each other and a
-veto still stands there, which is the honest answer for a two-node mesh.
-Scoring takes the median across reporters, so an outlier that fails to reach
-quorum also fails to drag the score.
+#### Connected trouble gate and candidate visits
 
-**The jamming fallback is no longer the lobby.** Both failure exits used to
-land on 2412/5180: a hardcoded pair, published in this repo, excluded from
-every scan list, and converged on by every node by design. The answer to "every
-channel I can measure is unusable" was a move to two frequencies with no
-measurements behind them, and the most predictable destination available.
-Landing there also made `is_in_lobby` true, which drops the node out of data
-state, and the lobby bootstrap only elects with `mesh_peer_count > 0`, so a
-node that was jammed and alone sat in the lobby indefinitely. The comment above
-`CHANNELS_2_4` had said for some time that the lobby pair must never be elected
-for exactly this reason, while the failure path elected it anyway. Total
-disqualification now takes the least bad measured channel and asserts limp
-mode. The channel is not a good one and limp mode says so, but the node keeps
-scanning and re-electing from it.
+A data-state node scans a band only when it has trouble locally or a member
+of the connected ACS view reports trouble on that band. The agreement service
+includes its validated member identities in its existing local status snapshot.
+These are the same canonical registry identities supplied as `ACS_MEMBERS` to
+the scorer, including connectivity through HaLow. The manager requires the
+same boot and a status snapshot younger than 30 seconds, and peer reports
+observed locally less than 240 seconds ago. Missing, stale or failed membership
+closes the peer-triggered path. A local flag still opens its own band. There
+is no separate membership discovery process for the monitor.
 
-**`LIMP_MODE_SCORE_THRESHOLD` is reachable now.** It was not before. A channel
-that survived disqualification had `max_noise <= -70`, so `avg_noise <= -70`
-too, and crossing the old -60 threshold needed `total_bss * 0.1 > 10`, which is
-more than 100 BSSes summed across every node's report for one channel. The
-branch logging `JAMMING DETECTED` was a congestion detector wearing a jamming
-label: it fires in a dense urban RF environment and essentially never in the
-field, real jamming always exited through `ALL CHANNELS DISQUALIFIED`, and the
-threshold that looked like the jamming sensitivity knob did nothing. In
-occupancy units the threshold of 60 reads as "the quietest channel available is
-still about two thirds occupied". It is compared against the raw score, not the
-one `CHANNEL_BIAS_SCORE` has discounted, so sitting on a band while it goes bad
-cannot hide it.
+With the gate closed, the manager performs no `iw scan` or `iw offchannel`
+on that band. It continues home measurements, including while an agreement
+settling interval pauses candidate work. Each cycle replaces the report, so
+closing the gate also drops earlier candidate measurements. Lobby bootstrap,
+tourguide visits and discovery retain their existing behavior.
 
-**Migration reconfigures the supplicant instead of restarting it.** The
-election used to `sed` the config and `systemctl restart
-wpa_supplicant@<iface>.service`, then let the caller sleep 5 seconds and assume
-the move worked. `tourguide-manager.sh` already had the better path for its
-lobby hops: `wpa_cli reconfigure` re-reads the config in place, so the mesh
-point is not destroyed and rebuilt and SAE does not start over from scratch,
-and a poll loop confirms `iw dev ... info` reports the target frequency. The
-election now uses the same path, keeping the unit restart as the fallback for a
-supplicant that does not answer or a radio that has not landed within 10
-seconds. This also matters for any SAE problem in the shared `radio-setup.sh`
-config, since the election was hitting the full-restart path on every channel
-change while the tourguide was not.
+On 2.4 GHz, an open gate permits one
+`iw dev <iface> offchannel <MHz> 250` remain-on-channel visit per non-home
+candidate, with no flush scan in data mode. Occupancy and noise capture a
+co-channel network's actual airtime. Counting its BSS only on the candidates
+would add a penalty the unscanned incumbent never pays. Both sides report
+zero BSS counts. The removed scan also timed out after five seconds without
+a results event on about 10 to 13% of attempts on both bench MT7916 cards.
+Previously that failure skipped every ROC visit for the cycle.
 
-One malformed report no longer takes out the election. The registry's reports
-were concatenated into a JSON array in awk, so one truncated or corrupt payload
-made the whole document unparseable, and the `bc` comparisons that followed
-then ran on empty operands under `set -eo pipefail` inside the `flock`
-subshell, leaving nothing behind but an exit status. Reports are parsed one per
-line now (`jq -Rn '[inputs | fromjson? // empty]'`), a bad one is dropped and
-the rest of the mesh still votes, and every per-channel arithmetic step happens
-in a single jq pass with no `bc` anywhere.
+Separate survey snapshots bracket each visit. The offchannel command returned
+after about 6 ms on the bench, before the visit ended. The manager waits
+`SCAN_DWELL_MS + 150` ms, currently 400 ms, after the command returns and before
+the post-survey. This is a fixed wait, not an observed completion event.
+Candidate occupancy is `100 * (delta_busy - delta_transmit) / delta_active`.
+Only a successful request with at least `SCAN_DWELL_MS=250` ms of measured
+active time, valid occupancy counters and measured noise is published.
+A shorter post-survey sample is dropped even after the wait. Each valid
+long-dwell sample is published directly, without the short-scan median warmup.
 
-`ChannelScanResult.busy_pct` in `NodeInfo.proto` is `optional`, so it carries
-explicit presence. A channel measured at 0% busy and a channel the radio could
-not measure are different answers, and a proto3 scalar default cannot tell them
-apart. The election filters absent values out of the median instead of counting
-them as zero, so a node on an older build still contributes its noise and BSS
-counts without making every channel it reports look empty. When every reporter
-lacks occupancy for a candidate, its score uses the shared incumbent's measured
-median occupancy. If the incumbent is also unmeasured, the highest measured
-candidate median in that band supplies the fallback; if none exists, only noise
-and BSS contribute. The log still shows `-` for unknown busy. This comparison
-fallback cannot cast a congestion veto, but does count toward limp mode.
-A rolling update can also make nodes disagree: a node still running the old
-scoring reads the same reports and can pick a different channel, so update the
-whole mesh in one pass. All participants need the agreement service; an older
-independently switching node is not a participant in this protocol.
+The measured software scan spent about 75 ms on the other channel, stalling
+traffic for 330 to 620 ms. The driver lacks `SET_SCAN_DWELL`, so `iw scan`
+cannot lengthen that measurement. Remain-on-channel requests of 100, 250 and
+400 ms produced 103, 273 and 300 ms of active time, with stalls of 323, 486
+and 783 ms. The 400 ms request was capped. No packet loss was observed in
+those measurements. The 250 ms request provides a longer sample within that
+cap. Those hardware measurements motivate the implementation, but deployment
+still requires CM4 validation.
+
+mt7915e clears non-home survey counters on each channel visit. For that known
+driver, a successful acquisition that was off-channel in both snapshots uses
+the post-visit counters directly. Equal counters across repeated visits are
+therefore valid. Other drivers use counter differences and reject decreases.
+The ROC path also rejects a frequency that becomes home during collection.
+
+5 GHz remains on the main radio's flush-scan method with the same trouble
+gate. The scan includes the home frequency. The same completed scan supplies
+`scan_bss_count` for both home and candidates, while the incumbent's airtime
+and noise still come from its long home window. With equal 20% occupancy and
+-95 dBm noise, six BSS add three points on either side, giving raw scores of
+23 before the incumbent preference. On 2.4 GHz in data mode those raw scores
+remain 20 regardless of the number of co-channel BSS.
+
+5 GHz candidate measurements require at least 25 ms of dwell and retain the
+median of three valid samples within ten minutes. Lobby bootstrap and discovery
+retain that short-scan path and its BSS counts on both bands. The first two
+short samples leave occupancy absent. A failed, timed-out or aborted flush
+scan discards its candidates and leaves the home BSS count at zero. A closed
+gate also leaves the home BSS count at zero and publishes no candidates.
+Neither condition discards a valid home window. Long-dwell visit failures omit
+that candidate. Producer expiry removes observations older than 180 seconds at
+publication.
+
+#### Scoring, hold-down and missing data
+
+The scorer takes median noise and occupancy across reporters for each channel.
+Home entries for another operating frequency are not off-channel candidate
+evidence. Missing occupancy is omitted from the median. An unknown occupancy
+score uses the incumbent's measured foreign median, or the highest measured
+candidate median if the incumbent is unmeasured. With neither, only noise and
+BSS contribute. This comparison fallback cannot cast a congestion veto.
+
+A node calls a channel bad above 85% occupancy or above -70 dBm noise. The
+incumbent uses foreign occupancy for that comparison. Disqualification needs
+`ceil(0.34 * reporters)` votes, with a minimum of one. This is one of one or
+two reporters, two of three through five, and three of six. A lone bad radio
+cannot disqualify a channel once three report.
+
+Without any measured alternative, the scorer holds the current channel,
+sets `URGENT` false and does not assert limp mode. This includes a bad home
+channel waiting for its first candidate data. Once candidates arrive, an
+incumbent that is disqualified, unmeasured, outside the candidate list, absent,
+or above the raw limp score threshold of 60 is urgent. Urgent results bypass
+the preference hold-down. If every measured channel is disqualified, the
+scorer chooses the least bad measured channel and asserts limp mode. A
+qualified winner with a raw score above 60 also asserts limp mode. The
+incumbent bias cannot conceal that raw threshold. Lobby frequencies are never
+elected as data channels.
+
+The coordinator requires three consecutive three-minute rounds preferring
+another channel before proposing a nonurgent move. `Runtime.score()` stores
+per-band `challenge` state in `agreement.json`: incumbent, last round and
+count. A round is `now // 180`. Different challengers can win successive
+rounds against the same incumbent. Repeated scoring in a round counts once.
+A skipped round or changed incumbent restarts the count. An incumbent win
+clears it. Before the third win, the coordinator substitutes the incumbent
+and logs the held preference once per band and round.
+
+The streak survives service restarts within one boot. A new coordinator or
+boot starts fresh. Observing another coordinator during the proposal window
+clears local streaks. Peers ACK the frozen plan without re-scoring.
+`wpa_cli reconfigure` applies changes, with bounded frequency verification
+and a supplicant restart fallback. Unchanged channels do not trigger radio
+reconfiguration. The agreement and recovery sections describe activation.
+
+`ChannelScanResult` uses optional `busy_pct`, `foreign_pct`, `window_s` and
+`rf_trouble` fields. Explicit presence distinguishes zero or false from an
+unmeasured or unavailable value. Home-only fields pass through the encoder
+and decoder into `CHANNEL_REPORT_JSON`. Local acquisition timestamps and
+short-scan history remain in the manager and are not transmitted. Each
+registry payload is parsed separately, so malformed JSON discards only that
+report. The scorer remains stateless given the reports, candidate list and
+shared incumbent.
 
 ### Tourguide election and partition comparison
 

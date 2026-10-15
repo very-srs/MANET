@@ -35,7 +35,11 @@ class HoldDownTests(AcsHarness):
     def score(self, round_offset=0):
         """Score one round and return its channel plan and journal text."""
         self.now = 945 + round_offset * protocol.ROUND_SECONDS
-        self.reports([self.measurements], [OWN])
+        homes = set(self.view[OWN]['current'].values())
+        measurements = [dict(r, foreign_pct=r['busy_pct'])
+                        if r['channel'] in homes else r
+                        for r in self.measurements]
+        self.reports([measurements], [OWN])
         journal = StringIO()
         with redirect_stdout(journal):
             result = self.runner.score(self.view)
@@ -133,7 +137,9 @@ class HoldDownTests(AcsHarness):
                     self.measurements = [sample(away)]
                     if cause != 'nodata':
                         self.measurements.append(home_sample)
-                    self.reports([self.measurements], [OWN])
+                    self.reports([[dict(r, foreign_pct=r['busy_pct'])
+                                   if r['channel'] == home else r
+                                   for r in self.measurements]], [OWN])
                     self.env['ACS_CHANNELS_' + suffix] = ' '.join(
                         map(str, allowed))
                     self.env['ACS_CURRENT_' + suffix] = (

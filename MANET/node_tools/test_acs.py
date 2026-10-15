@@ -273,9 +273,11 @@ class ChannelElectionTests(AcsHarness):
         self.assertIn('WINNER_2_4=2462', (self.root / 'election').read_text())
 
     def test_identical_reports_and_incumbents_ignore_registry_order(self):
-        reports = [[{'channel': 2437, 'noise_floor': -95, 'busy_pct': 70},
+        reports = [[{'channel': 2437, 'noise_floor': -95,
+                     'busy_pct': 70, 'foreign_pct': 70},
                     {'channel': 2462, 'noise_floor': -95, 'busy_pct': 10}],
-                   [{'channel': 2437, 'noise_floor': -95, 'busy_pct': 50},
+                   [{'channel': 2437, 'noise_floor': -95,
+                     'busy_pct': 50, 'foreign_pct': 50},
                     {'channel': 2462, 'noise_floor': -95, 'busy_pct': 20}]]
         outputs = []
         for ordered in [reports, reports[::-1]]:

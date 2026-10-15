@@ -117,7 +117,7 @@ log() {
          END{
              for (k in rpt)
                  if ((members == "" || (k in allowed)) && rpt[k] != "" && (k in seen) &&
-                     seen[k] < stale)
+                     seen[k] >= 0 && seen[k] < stale)
                      print rpt[k]
          }' "$REGISTRY_FILE")
 
@@ -125,10 +125,10 @@ log() {
     REPORT_COUNT=$(printf '%s' "$ALL_REPORTS_JSON" | jq 'length')
 
     if [ "${REPORT_COUNT:-0}" -eq 0 ]; then
-        log "No usable scan reports in registry. Exiting."
-        exit 0
+        log "No usable scan reports in registry. Holding current channels."
+    else
+        log "Scoring $REPORT_COUNT scan report(s)."
     fi
-    log "Scoring $REPORT_COUNT scan report(s)."
 
     # Initialize Limp Mode variable
     LIMP_MODE_NEEDED="false"
@@ -162,6 +162,15 @@ log() {
             def round2: (. * 100 | round) / 100;
 
             [ .[]? | .results? // [] | .[]? | select(type == "object") ] as $all
+            # Total home busy includes our traffic. Only foreign airtime is
+            # an incumbent score. Other home entries are not candidate visits.
+            | [ $all[]
+                | if .channel == ($current | tonumber? // null)
+                  then select((has("rf_trouble") | not)
+                              or (.foreign_pct | type) == "number")
+                       | .busy_pct = .foreign_pct
+                  else select((has("foreign_pct") or has("rf_trouble"))
+                              | not) end ] as $all
             | ([ $all[] | select(.channel == ($current | tonumber?))
                  | .busy_pct | numbers ] | median) as $home_busy
             | ($home_busy // ([ $chans[] as $candidate
@@ -228,7 +237,7 @@ log() {
         # can wait through the coordinator's preference hold-down.
         _urgent=true
         if awk -v cur="$current_channel" -v t="$LIMP_MODE_SCORE_THRESHOLD" '
-            $1 == cur && $2 == "ok" && $3 <= t { keep = 1 }
+            $1 == cur && $2 == "ok" && $3 <= t && $6 != "-" { keep = 1 }
             END { exit !keep }
         ' <<< "$lines"; then
             _urgent=false
@@ -248,12 +257,16 @@ log() {
 
         # An empty qualified list can mean disqualification or missing data.
         # Only measured RF conditions justify a channel or limp-mode change.
-        if [ -z "$best_any" ]; then
+        if ! awk -v cur="$current_channel" '
+            $1 != cur && $2 != "nodata" { measured = 1 }
+            END { exit !measured }
+        ' <<< "$lines"; then
             # Hold the channel without asserting limp mode when data is missing.
             # An absent radio, rejected scan or Alfred outage can leave no data.
             # Retry the election next cycle.
             log "[$band_name] No scan data for any candidate channel. Holding ${current_channel:-current channel}, not asserting limp mode."
             _winner="$current_channel"
+            _urgent=false
             return 0
         fi
 

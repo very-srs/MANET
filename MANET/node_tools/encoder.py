@@ -127,6 +127,12 @@ def build_telemetry(args):
             # comment in NodeInfo.proto.
             if r.get('busy_pct') is not None:
                 result.busy_pct = max(0, min(100, int(r['busy_pct'])))
+            if r.get('foreign_pct') is not None:
+                result.foreign_pct = max(0, min(100, int(r['foreign_pct'])))
+            if r.get('window_s') is not None:
+                result.window_s = max(0, min(2**32 - 1, int(r['window_s'])))
+            if type(r.get('rf_trouble')) is bool:
+                result.rf_trouble = r['rf_trouble']
     except (json.JSONDecodeError, KeyError, TypeError, ValueError):
         pass
 
