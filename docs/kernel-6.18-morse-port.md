@@ -37,6 +37,7 @@ Changes fall into three groups:
 | Driver: kernel-API compat | Gateworks branch commits (6.13→6.18 API churn) | all targets |
 | Driver: mm6108 SPI fixes | local uncommitted diff in `spi.c`/`firmware.c`/`bus.h` | CM4/RPi5 only |
 | Kernel trees | `spi-bcm2835.c` CS handling; `mt7915` txpower patch | per-tree (see §4) |
+| Kernel trees | cfg80211 background CAC fix (upstream backport) | all targets (§4.5) |
 
 Plus the DTS overlay (§5), config fragments (§6), and a post-build binary patch on
 `dot11ah.ko` (§7).
@@ -278,6 +279,25 @@ overlay: compile a fragment targeting `/regulator-vcc3v3-pcie` with
 `dtc -@` into `/boot/overlay-user/pcie-delay.dtbo` and add
 `user_overlays=pcie-delay` to `/boot/armbianEnv.txt`.
 
+### 4.5 cfg80211 background CAC fix (all trees)
+
+`kernel/patches/cfg80211-bgcac/` holds two upstream commits by Janusz
+Dziedzic that 6.18 stable does not carry: 92fecd2 "wifi: cfg80211: fix
+background CAC" and 68b908b "wifi: cfg80211: events, report background
+radar". In stock 6.18, stopping a background CAC clears the owning interface
+before the abort is handled. No abort event is sent, and the pending
+completion survives, so a replacement CAC on another channel can be reported
+finished at the old deadline, before its own 60 seconds. 92fecd2 fixes the
+lifecycle. 68b908b is required with it, because 92fecd2 alone releases the
+owner before the FINISHED event and that event then loses its interface index.
+
+0002 depends on 0001. `build-r3a.sh` and `build-cm4.sh` apply the pair with
+`git apply` unless 0002 already reverse-applies, and fail if only 0001 is
+present. Both apply cleanly to mainline 6.18 and to `linux-rpi-6.18` at
+6.18.33. RPi5 builds from the same tree. On a Rock 3A with the dedicated
+MT7916 receiver, the abort is reported and a replacement CAC runs its full
+time (61.8 s measured).
+
 ## 5. DTS overlay: `dts-overlays/cm4-morse-spi.dts` (CM4 only)
 
 Compiled to `mm610x-spi.dtbo` by `build-cm4.sh` (`dtc -@`). Wires spi0 to the
@@ -348,7 +368,9 @@ xz-compress all modules. Per-target notes:
   Driver flag `CONFIG_MORSE_USB=y` instead of SPI.
   Before configuration, applies the PCIe slot power patch (§4.4), the recorded
   txpower patch (§4.2), then the timing series via
-  `python3 "$KWORK/../kernel/patches/mt76-ftm/apply.py" "$KDIR"` (§4.3).
+  `python3 "$KWORK/../kernel/patches/mt76-ftm/apply.py" "$KDIR"` (§4.3), then
+  the cfg80211 background CAC pair (§4.5). `build-cm4.sh` applies the timing
+  series and the cfg80211 pair the same way.
   `manet-r3a.config` enables `CONFIG_FTRACE=y` (the tracing menu) and
   `CONFIG_ENABLE_DEFAULT_TRACERS=y` (static events without function tracing).
   Kconfig selects `TRACING`, `EVENT_TRACING`, `TRACEPOINTS`, `RING_BUFFER` and
