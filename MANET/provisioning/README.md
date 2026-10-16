@@ -136,7 +136,7 @@ for it.
 > does. Connect the module in USB-boot mode when prompted. The script then reports which
 > disk appeared so you can pick the right one.
 
-> **Rock 3A on Windows (password hashing):** The script pre-creates the `radio` user by writing directly to `/etc/shadow`, which requires generating a Linux SHA-512 password hash on your Windows machine. The script tries `openssl` (available if Git for Windows is installed), then WSL, then Python. If none of these are available the `radio` account will be created with a locked password. You can still log in as `root` (password `1234`) and run `passwd radio` to set it manually. Having Git for Windows installed is the easiest way to satisfy this.
+> **Rock 3A on Windows (password hashing):** The script pre-creates your selected SSH user (default `radio`) by writing directly to `/etc/shadow`, which requires generating a Linux SHA-512 password hash on your Windows machine. The script tries `openssl` (available if Git for Windows is installed), then WSL, then Python. If none of these are available the SSH account will be created with a locked password. You can still log in as `root` (password `1234`) and run `passwd <your-SSH-username>` to set it manually. Having Git for Windows installed is the easiest way to satisfy this.
 
 ### Files needed from this directory
 
@@ -314,7 +314,9 @@ needed is present.
 
 #### 3. Enter the mesh settings
 
-![The mesh settings page](../../docs/images/provisioning/flasher-3-settings.png)
+The settings page separates **SSH login** (editable username and password)
+from **Web interface admin password**. Scroll down to see all settings and
+**Save settings as**. The SSH username defaults to `radio`.
 
 Every node on one mesh needs the same **mesh name** and **mesh password** or they will not
 see each other. **Generate** makes a strong one for you.
@@ -323,7 +325,7 @@ Save the settings under a name with the **Save** button, then load that same nam
 every other card. Saved settings are shared with `flash-a-radio.sh`, so a mesh can be built from a
 mix of Windows and Linux machines.
 
-The address range shows how many nodes and clients it has room for as you type it. What
+The **Network CIDR** field accepts notation such as `10.30.2.0/24`, not an address span such as `192.168.10.1-80`. It shows how many radios and EUDs fit as you type. What
 each setting means is under [SETUP OPTIONS](#setup-options).
 
 #### 4. Review your own setup scripts
@@ -352,7 +354,7 @@ read the size and the label before picking one.
 
 #### 6. Read the summary back
 
-![The confirmation page](../../docs/images/provisioning/flasher-6-confirm.png)
+The summary includes the selected SSH username and its password as separate entries.
 
 Everything that is about to be written, on one page. Nothing happens until you tick the
 box naming the disk, which is the last point at which this can be stopped.
@@ -362,7 +364,7 @@ minutes and shows its own progress.
 
 #### 7. Write down what it tells you
 
-![The finished page](../../docs/images/provisioning/flasher-7-finished.png)
+The finished page lists **SSH username**, **SSH password**, and **Web UI admin password** separately.
 
 The generated passwords are shown here and **are not shown again**. Use **Save to a
 file...** or **Copy** before closing the window.
@@ -523,10 +525,16 @@ Your country code for Wi-Fi regulatory compliance (e.g. `US`, `GB`, `AU`). A mat
 
 If enabled, nodes negotiate channel selection automatically. If disabled, a fixed channel is used. Wireless EUD mode always uses fixed channels. Auto EUD mode supports it: the AP runs only while the node is a gateway.
 
-### 11. Passwords
+### 11. SSH login and web admin password
 
-- **Radio user password.** SSH/login password for the `radio` account on the node.
-- **Admin password.** Gates the management UI at `http://<node>/manage`. Stored
+- **SSH username.** The Linux login account created on the radio. Defaults to
+  `radio`, and can be changed in either flasher. Use 1–32 lowercase letters,
+  digits, underscores or hyphens, starting with a letter or underscore. `root`
+  and `nobody` are reserved, and existing system accounts cannot be used.
+- **SSH password.** Password for that username. The default remains `radio`.
+  For example, if you choose username `operator`, connect with
+  `ssh operator@<radio-address>` and enter your chosen SSH password.
+- **Web interface admin password.** Gates the management UI at `http://<node>/manage`. Stored
   as `admin_password` in `/etc/mesh.conf`. The status page at `http://<node>/`
   needs no password. Everything that can change this node or the mesh does.
 
@@ -567,7 +575,7 @@ Insert the storage media, connect Ethernet, and power on the node. What happens 
 The `firstrun.sh` script runs on the very first boot (injected by `rpi-imager`). It:
 
 1. Disables the default Raspberry Pi setup wizard
-2. Creates the `radio` user account
+2. Creates the selected SSH user account (default `radio`)
 3. Enables SSH
 4. Creates and enables a `mesh-provision` systemd service for the next stage
 
@@ -609,7 +617,7 @@ retain their existing `sudo radio-setup.sh` retry instruction.
 
 The provisioning script and all configuration are embedded directly into the Armbian image during flashing. No `rpi-imager` first-run injection is involved.
 
-On first boot, a `mesh-provision` systemd service (triggered by the presence of a `/root/.mesh-not-provisioned` flag file) runs `provision-mesh.sh`. The `radio` user account is pre-created during image preparation, so there is no interactive setup wizard to bypass.
+On first boot, a `mesh-provision` systemd service (triggered by the presence of a `/root/.mesh-not-provisioned` flag file) runs `provision-mesh.sh`. The selected SSH user account is pre-created during image preparation, so there is no interactive setup wizard to bypass.
 
 The provisioning script:
 

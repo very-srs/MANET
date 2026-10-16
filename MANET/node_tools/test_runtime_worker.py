@@ -200,6 +200,25 @@ printf 'vip=%s\n' "$?"
 
 
 class CertificateTests(unittest.TestCase):
+    def test_certificate_follows_selected_account_and_its_home(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary) / 'custom-home'
+            cert = home / '.local/state/syncthing/cert.pem'
+            cert.parent.mkdir(parents=True)
+            der = b'custom account certificate'
+            cert.write_text(ssl.DER_cert_to_PEM_cert(der))
+            conf = Path(temporary) / 'mesh.conf'
+            conf.write_text('ssh_user=field_ops-2\n')
+            account = types.SimpleNamespace(pw_dir=str(home), pw_uid=1001)
+            with patch.dict(os.environ, MANET_MESH_CONF=str(conf)), \
+                    patch.object(runtime.pwd, 'getpwnam', return_value=account) as lookup:
+                expected = bytes_to_syncthing_id(hashlib.sha256(der).digest())
+                self.assertEqual(runtime.Helpers().syncthing_id(), expected)
+                lookup.assert_called_once_with('field_ops-2')
+                conf.write_text('mesh_ssid=test\n')
+                self.assertEqual(runtime.Helpers().syncthing_id(), expected)
+                lookup.assert_called_with('radio')
+
     def test_missing_retries_and_unchanged_cert_reuses_decode_then_replacement_invalidates(self):
         with tempfile.TemporaryDirectory() as temporary:
             cert = Path(temporary) / 'cert.pem'

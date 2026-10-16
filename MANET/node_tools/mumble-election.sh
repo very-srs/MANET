@@ -11,6 +11,8 @@ case $? in
 esac
 
 # --- Configuration ---
+. "${MANET_TOOLS_DIR:-${BASH_SOURCE[0]%/*}}/manet-common.sh" || exit 1
+manet_load_ssh_account || exit 1
 REGISTRY_STATE_FILE="/var/run/mesh_node_registry"
 MUMBLE_SERVICE_NAME="mumble-server.service"
 MUMBLE_CONFIG="/etc/mumble/mumble-server.ini"
@@ -19,7 +21,7 @@ CONTROL_IFACE="br0"
 
 # Database paths
 WORKING_DB="/var/lib/mumble-server/mumble-server.sqlite"
-SHARED_DB_DIR="/home/radio/Sync/mumble"
+SHARED_DB_DIR="$MANET_SSH_HOME/Sync/mumble"
 SHARED_DB="${SHARED_DB_DIR}/mumble-server.sqlite"
 BACKUP_DIR="${SHARED_DB_DIR}/backups"
 
@@ -84,10 +86,10 @@ get_mumble_ipv4_vip() {
 ensure_shared_directory() {
     if [ ! -d "$SHARED_DB_DIR" ]; then
         log "Creating shared Mumble directory in Syncthing"
-        sudo -u radio mkdir -p "$SHARED_DB_DIR"
+        sudo -u "$MANET_SSH_USER" mkdir -p "$SHARED_DB_DIR"
     fi
     if [ ! -d "$BACKUP_DIR" ]; then
-        sudo -u radio mkdir -p "$BACKUP_DIR"
+        sudo -u "$MANET_SSH_USER" mkdir -p "$BACKUP_DIR"
     fi
 }
 
@@ -230,7 +232,7 @@ create_initial_database() {
         log "Copying existing working database to Syncthing"
         
         if safe_copy_database "$WORKING_DB" "$SHARED_DB"; then
-            sudo chown radio:radio "$SHARED_DB"
+            sudo chown "$MANET_SSH_USER:$MANET_SSH_GROUP" "$SHARED_DB"
             sudo chmod 644 "$SHARED_DB"
             log "Initial database created in Syncthing"
         else
@@ -240,7 +242,7 @@ create_initial_database() {
     else
         log "No existing database. Mumble will create default on first start."
         # Create empty placeholder
-        sudo -u radio touch "$SHARED_DB"
+        sudo -u "$MANET_SSH_USER" touch "$SHARED_DB"
     fi
 }
 
@@ -268,7 +270,7 @@ sync_database_from_shared() {
             log "Attempting to use latest backup: $(basename $latest_backup)"
             if check_database_integrity "$latest_backup" "backup"; then
                 if safe_copy_database "$latest_backup" "$SHARED_DB"; then
-                    sudo chown radio:radio "$SHARED_DB"
+                    sudo chown "$MANET_SSH_USER:$MANET_SSH_GROUP" "$SHARED_DB"
                     log "Restored shared database from backup"
                 else
                     return 1
@@ -296,7 +298,7 @@ sync_database_from_shared() {
             log "Creating backup of working DB: $BACKUP_NAME"
             
             if safe_copy_database "$WORKING_DB" "${BACKUP_DIR}/${BACKUP_NAME}"; then
-                sudo chown radio:radio "${BACKUP_DIR}/${BACKUP_NAME}"
+                sudo chown "$MANET_SSH_USER:$MANET_SSH_GROUP" "${BACKUP_DIR}/${BACKUP_NAME}"
                 
                 # Keep only last 10 backups
                 # Sort by modification time before dropping all but ten backups.
@@ -349,7 +351,7 @@ sync_database_to_shared() {
         log "Creating pre-sync backup: $BACKUP_NAME"
         
         if safe_copy_database "$SHARED_DB" "${BACKUP_DIR}/${BACKUP_NAME}"; then
-            sudo chown radio:radio "${BACKUP_DIR}/${BACKUP_NAME}"
+            sudo chown "$MANET_SSH_USER:$MANET_SSH_GROUP" "${BACKUP_DIR}/${BACKUP_NAME}"
         else
             log "WARNING: Failed to create pre-sync backup"
         fi
@@ -372,7 +374,7 @@ sync_database_to_shared() {
     local TEMP_SHARED="${SHARED_DB}.uploading"
     
     if safe_copy_database "$WORKING_DB" "$TEMP_SHARED" "$mode"; then
-        sudo chown radio:radio "$TEMP_SHARED" || return 1
+        sudo chown "$MANET_SSH_USER:$MANET_SSH_GROUP" "$TEMP_SHARED" || return 1
         sudo chmod 644 "$TEMP_SHARED" || return 1
 
         if [ "$mode" = live ]; then
@@ -388,7 +390,7 @@ sync_database_to_shared() {
         fi
         
         # Atomic move into place
-        if ! sudo -u radio mv "$TEMP_SHARED" "$SHARED_DB"; then
+        if ! sudo -u "$MANET_SSH_USER" mv "$TEMP_SHARED" "$SHARED_DB"; then
             log "ERROR: Failed to replace shared database"
             rm -f "$TEMP_SHARED"
             return 1
@@ -486,7 +488,7 @@ release_mumble_database() {
     local directory="$SHARED_DB_DIR/retired/${MY_MAC//:/}" generation
     local helper="${MANET_TOOLS_DIR:-/usr/local/bin}/manet_service_handover.py"
     read -r generation < /proc/sys/kernel/random/uuid || return 1
-    sudo -u radio mkdir -p "$directory" || return 1
+    sudo -u "$MANET_SSH_USER" mkdir -p "$directory" || return 1
     local SHARED_DB="$directory/$generation.sqlite"
     log "Preserving retired owner's final database at $SHARED_DB"
     sync_database_to_shared || return 1

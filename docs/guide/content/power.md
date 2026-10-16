@@ -52,7 +52,7 @@ rebooting, since reboot clears the board's event history.
 ### Shut down through the operating system
 
 The current guide's shutdown method is an SSH login to the radio followed
-by **`sudo poweroff`**. Use the radio account and its configured password or
+by **`sudo poweroff`**. Use the SSH account and its configured password or
 authorized key; this is separate from the web admin login. Ask the person
 who manages the unit to do this if you do not use SSH.
 

@@ -2,6 +2,39 @@
 # Shared shell helpers for MANET node tools. Source this file.
 . "${MANET_TOOLS_DIR:-$(dirname "${BASH_SOURCE[0]}")}/manet-runtime-client.sh"
 
+# Resolve the flash-time SSH account without sourcing mesh.conf as shell code.
+# Old configurations retain the original account name. Account database paths
+# take precedence over /home/<name> once the user exists.
+manet_load_ssh_account() {
+    local conf="${MANET_MESH_CONF:-/etc/mesh.conf}" entry uid gid unused
+    MANET_SSH_USER=radio
+    if [ -f "$conf" ]; then
+        MANET_SSH_USER=$(awk -F= '$1 == "ssh_user" {print substr($0, index($0, "=")+1); found=1; exit} END {if (!found) print "radio"}' "$conf")
+    fi
+    if [[ ! "$MANET_SSH_USER" =~ ^[a-z_][a-z0-9_-]{0,31}$ || "$MANET_SSH_USER" = root || "$MANET_SSH_USER" = nobody ]]; then
+        echo 'Invalid SSH username in mesh.conf' >&2
+        return 1
+    fi
+    MANET_SSH_HOME="/home/$MANET_SSH_USER"
+    MANET_SSH_GROUP="$MANET_SSH_USER"
+    if entry=$(getent passwd "$MANET_SSH_USER"); then
+        IFS=: read -r unused unused uid gid unused MANET_SSH_HOME unused <<< "$entry"
+        if [[ "$uid" -lt 1000 || "$uid" -eq 65534 || "$MANET_SSH_HOME" != /* || "$MANET_SSH_HOME" = / ]]; then
+            echo "Refusing system account or invalid home for SSH user '$MANET_SSH_USER'" >&2
+            return 1
+        fi
+        MANET_SSH_GROUP="$gid"
+    fi
+}
+
+# Generate the diagnostic sudo rule for this account. Do not ship a static
+# copy in archives: a later install payload must not overwrite the local name.
+manet_write_ssh_sudoers() {
+    install -d -m 750 /etc/sudoers.d || return 1
+    printf '%s ALL=(ALL) NOPASSWD: /usr/sbin/batctl, /sbin/ip link set wlan*, /usr/bin/iw\n' "$MANET_SSH_USER" > /etc/sudoers.d/perf || return 1
+    chmod 440 /etc/sudoers.d/perf
+}
+
 # Keep data on stdout. systemd timestamps diagnostics on stderr.
 manet_log() {
     local program="$1"

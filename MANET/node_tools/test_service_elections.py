@@ -482,7 +482,7 @@ create_initial_database() { :; }
                          ('/sys/class/net/${CONTROL_IFACE}/address', str(self.root / 'mac')),
                          ('/usr/local/bin/mumble-ip.sh', str(self.bin / 'mumble-ip')),
                          ('/etc/mesh.conf', str(self.root / 'mesh.conf')),
-                         ('/home/radio/Sync/mumble', str(self.root / 'shared')),
+                         ('$MANET_SSH_HOME/Sync/mumble', str(self.root / 'shared')),
                          ('/etc/mumble/mumble-server.ini', str(self.root / 'mumble.ini')),
                          ('/var/lib/mumble-server/mumble-server.sqlite', str(self.root / 'working.sqlite')),
                          ('/var/run/mumble-election.lock', lock or str(self.root / 'lock'))):

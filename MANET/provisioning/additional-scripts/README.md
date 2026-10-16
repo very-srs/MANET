@@ -176,11 +176,13 @@ can be written by the script that uses them:
 
 ```bash
 #!/bin/bash
-install -d -m 700 /home/radio/.ssh
-cat > /home/radio/.ssh/authorized_keys <<'KEYS'
+. /usr/local/bin/manet-common.sh
+manet_load_ssh_account || exit 1
+install -d -m 700 "$MANET_SSH_HOME/.ssh"
+cat > "$MANET_SSH_HOME/.ssh/authorized_keys" <<'KEYS'
 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA... ops@example.org
 KEYS
-chown -R radio:radio /home/radio/.ssh
+chown -R "$MANET_SSH_USER:$MANET_SSH_GROUP" "$MANET_SSH_HOME/.ssh"
 ```
 
 Anything **large or binary** should be fetched at run time instead:

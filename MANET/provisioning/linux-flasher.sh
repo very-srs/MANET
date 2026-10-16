@@ -779,6 +779,17 @@ prepare_flash_target() {
 }
 
 # Function to ask all setup questions
+valid_ssh_username() {
+        [[ "$1" =~ ^[a-z_][a-z0-9_-]{0,31}$ && "$1" != root && "$1" != nobody ]]
+}
+
+validate_ssh_username() {
+        if ! valid_ssh_username "${RADIO_USER:-}"; then
+                echo 'ERROR: SSH username must use 1-32 lowercase letters, digits, underscores or hyphens, starting with a letter or underscore. The names root and nobody are reserved.' >&2
+                return 1
+        fi
+}
+
 ask_questions() {
         echo "--- Starting New Configuration ---"
 
@@ -886,15 +897,19 @@ ask_questions() {
         fi
     done
 
-        echo "The device will have a user called radio, for ssh access."
-        read -p "Enter a password for the radio user [or press Enter to default to 'radio']: " RADIO_PW
+        while true; do
+                read -r -p 'SSH username [radio]: ' RADIO_USER
+                RADIO_USER=${RADIO_USER:-radio}
+                validate_ssh_username && break
+        done
+        read -r -p "SSH password for '$RADIO_USER' [radio]: " RADIO_PW
         echo
 
         if [ -z "$RADIO_PW" ]; then
                 RADIO_PW="radio"
                 echo "Setting default password"
         fi
-        echo "Setting radio password to be $RADIO_PW"
+        echo "SSH password set to: $RADIO_PW"
 
         # Network administrator password
         echo ""
@@ -978,6 +993,7 @@ MESH_SSID="$MESH_SSID"
 MESH_SAE_KEY="$MESH_SAE_KEY"
 LAN_CIDR_BLOCK="$LAN_CIDR_BLOCK"
 AUTO_CHANNEL="$AUTO_CHANNEL"
+RADIO_USER="$RADIO_USER"
 RADIO_PW="$RADIO_PW"
 ADMIN_PW="$ADMIN_PW"
 AUTO_UPDATE="$AUTO_UPDATE"
@@ -992,7 +1008,9 @@ load_config() {
         local CONFIG_FILE="$1"
         echo "Loading config from $CONFIG_FILE..."
         # Source the file to load the variables into this script
+        RADIO_USER=radio
         source "$CONFIG_FILE"
+        validate_ssh_username || exit 1
         HALOW_REGULATORY_DOMAIN=${HALOW_REGULATORY_DOMAIN:-$(halow_regulatory_domain_for_wifi_domain "$REGULATORY_DOMAIN")}
         # Config files saved before voice existed have neither key. Default them
         # rather than substituting an empty string into mesh.conf.
@@ -1016,7 +1034,8 @@ load_config() {
         echo "  Mesh SAE Key: $MESH_SAE_KEY"
         echo "  LAN CIDR Block: $LAN_CIDR_BLOCK"
         echo "  Auto Channel: $AUTO_CHANNEL"
-        echo "  User password: $RADIO_PW"
+        echo "  SSH username: $RADIO_USER"
+        echo "  SSH password: $RADIO_PW"
         echo "  Network admin password: ${ADMIN_PW:-(not set)}"
         echo "  Auto Update: ${AUTO_UPDATE:-n}"
         echo "----------------------------"
@@ -1382,7 +1401,8 @@ confirm_flash() {
         echo ""
         echo "  Hardware: $HARDWARE_MODEL"
         echo "  Mesh SSID: $MESH_SSID"
-        echo "  Network: $LAN_CIDR_BLOCK"
+        echo "  Network CIDR: $LAN_CIDR_BLOCK"
+        echo "  SSH username: $RADIO_USER"
         echo ""
         echo "⚠️  ALL DATA ON $device WILL BE DESTROYED! ⚠️"
         echo ""
@@ -1400,9 +1420,47 @@ confirm_flash() {
         echo "Proceeding with flash..."
 }
 
+# Populate the mounted Rock 3A image. The caller owns mount cleanup.
+create_rock3a_ssh_account() {
+        local ROOT_MOUNT="$1"
+        # Pre-create the selected SSH account with its hashed password.
+        validate_ssh_username || return 1
+        echo "Creating SSH user '$RADIO_USER'..."
+        local RADIO_PW_HASH
+        RADIO_PW_HASH=$(openssl passwd -6 "$RADIO_PW") || return 1
+
+        # A stock image must not already have this name or UID/GID 1000.
+        if awk -F: -v name="$RADIO_USER" '$1 == name || $3 == 1000 {found=1} END {exit !found}' "$ROOT_MOUNT/etc/passwd" ||
+           awk -F: -v name="$RADIO_USER" '$1 == name || $3 == 1000 {found=1} END {exit !found}' "$ROOT_MOUNT/etc/group"; then
+                echo "ERROR: The image already contains the SSH account name or UID/GID 1000." >&2
+                return 1
+        fi
+        echo "$RADIO_USER:x:1000:1000:$RADIO_USER:/home/$RADIO_USER:/bin/bash" | sudo tee -a "$ROOT_MOUNT/etc/passwd" > /dev/null || return 1
+
+        # Add the account's primary group.
+        echo "$RADIO_USER:x:1000:" | sudo tee -a "$ROOT_MOUNT/etc/group" > /dev/null || return 1
+
+        # Add the selected account to shadow with its hashed password.
+        echo "$RADIO_USER:${RADIO_PW_HASH}:19700:0:99999:7:::" | sudo tee -a "$ROOT_MOUNT/etc/shadow" > /dev/null || return 1
+
+        # Preserve existing sudo group members.
+        sudo sed -i "/^sudo:/s/\$/,$RADIO_USER/; /^sudo:/s/:,/:/" "$ROOT_MOUNT/etc/group" || return 1
+
+        # Create home directory
+        sudo mkdir -p "$ROOT_MOUNT/home/$RADIO_USER" "$ROOT_MOUNT/etc/sudoers.d" || return 1
+        sudo chown 1000:1000 "$ROOT_MOUNT/home/$RADIO_USER" || return 1
+        sudo chmod 755 "$ROOT_MOUNT/home/$RADIO_USER" || return 1
+
+        # Retain the Rock 3A image's passwordless sudo policy for this account.
+        echo "$RADIO_USER ALL=(ALL) NOPASSWD: ALL" | sudo tee "$ROOT_MOUNT/etc/sudoers.d/manet-login" > /dev/null || return 1
+        sudo chmod 440 "$ROOT_MOUNT/etc/sudoers.d/manet-login"
+
+}
+
 # Flash one SD card: Rock3A path (dd)
 flash_r3a() {
         local target="$1"
+        validate_ssh_username || return 1
 
         # Create temp copy of image to avoid modifying original
         local TEMP_IMAGE
@@ -1443,6 +1501,7 @@ flash_r3a() {
 # Mesh Network Configuration
 # Generated by provisioning script on $(date)
 hardware_model=${HARDWARE_MODEL}
+ssh_user=${RADIO_USER}
 eud=${EUD_CONNECTION}
 lan_ap_ssid=${LAN_AP_SSID}
 lan_ap_key=${LAN_AP_KEY}
@@ -1470,31 +1529,12 @@ EOF
         echo "Removing .not_logged_in_yet to bypass interactive setup..."
         sudo rm -f "$ROOT_MOUNT/root/.not_logged_in_yet"
 
-        # Pre-create the radio user with hashed password
-        echo "Creating radio user..."
-        local RADIO_PW_HASH
-        RADIO_PW_HASH=$(openssl passwd -6 "$RADIO_PW")
-
-        # Add radio user to passwd (UID 1000, GID 1000, home /home/radio, shell /bin/bash)
-        echo "radio:x:1000:1000:radio:/home/radio:/bin/bash" | sudo tee -a "$ROOT_MOUNT/etc/passwd" > /dev/null
-
-        # Add radio group
-        echo "radio:x:1000:" | sudo tee -a "$ROOT_MOUNT/etc/group" > /dev/null
-
-        # Add radio to shadow with hashed password
-        echo "radio:${RADIO_PW_HASH}:19700:0:99999:7:::" | sudo tee -a "$ROOT_MOUNT/etc/shadow" > /dev/null
-
-        # Add radio to sudo group
-        sudo sed -i 's/^sudo:x:\([0-9]*\):.*$/sudo:x:\1:radio/' "$ROOT_MOUNT/etc/group"
-
-        # Create home directory
-        sudo mkdir -p "$ROOT_MOUNT/home/radio"
-        sudo chown 1000:1000 "$ROOT_MOUNT/home/radio"
-        sudo chmod 755 "$ROOT_MOUNT/home/radio"
-
-        # Add radio to sudoers (passwordless sudo)
-        echo "radio ALL=(ALL) NOPASSWD: ALL" | sudo tee "$ROOT_MOUNT/etc/sudoers.d/radio" > /dev/null
-        sudo chmod 440 "$ROOT_MOUNT/etc/sudoers.d/radio"
+        if ! create_rock3a_ssh_account "$ROOT_MOUNT"; then
+                sudo umount "$ROOT_MOUNT" 2>/dev/null || true
+                sudo losetup -d "$LOOP_DEV" 2>/dev/null || true
+                rm -f "$TEMP_IMAGE"
+                return 1
+        fi
 
         # Generate and install the provisioning script
 
@@ -1525,6 +1565,7 @@ EOF
         sed -i "s|__MESH_SAE_KEY__|${MESH_SAE_KEY}|g" "$TEMP_PROVISION_SCRIPT"
         sed -i "s|__LAN_CIDR_BLOCK__|${LAN_CIDR_BLOCK}|g" "$TEMP_PROVISION_SCRIPT"
         sed -i "s|__AUTO_CHANNEL__|${AUTO_CHANNEL}|g" "$TEMP_PROVISION_SCRIPT"
+        sed -i "s|__RADIO_USER__|${RADIO_USER}|g" "$TEMP_PROVISION_SCRIPT"
         sed -i "s|__RADIO_PW__|${RADIO_PW}|g" "$TEMP_PROVISION_SCRIPT"
         sed -i "s|__REGULATORY_DOMAIN__|${REGULATORY_DOMAIN}|g" "$TEMP_PROVISION_SCRIPT"
         sed -i "s|__HALOW_REGULATORY_DOMAIN__|${HALOW_REGULATORY_DOMAIN}|g" "$TEMP_PROVISION_SCRIPT"
@@ -1599,7 +1640,8 @@ SERVICE_EOF
         echo "automatically when connected to the internet."
         echo ""
         echo "  - Root password: 1234 (Armbian default)"
-        echo "  - Radio user: radio / <your configured password>"
+        echo "  - SSH username: $RADIO_USER"
+        echo "  - SSH password: $RADIO_PW"
         echo ""
         echo " ONCE BOOTED, THE MESH NODE WILL AUTOMATICALLY START"
         echo " SETTING ITSELF UP AND WILL REBOOT MULTIPLE TIMES"
@@ -1988,6 +2030,7 @@ append_additional_scripts() {
 }
 
 flash_rpi() {
+        validate_ssh_username || return 1
         local target="$1"
 
         prepare_release
@@ -2007,6 +2050,7 @@ flash_rpi() {
             -e "s|__MESH_SAE_KEY__|${MESH_SAE_KEY}|g" \
             -e "s|__LAN_CIDR_BLOCK__|${LAN_CIDR_BLOCK}|g" \
             -e "s|__AUTO_CHANNEL__|${AUTO_CHANNEL}|g" \
+            -e "s|__RADIO_USER__|${RADIO_USER}|g" \
             -e "s|__RADIO_PW__|${RADIO_PW}|g" \
             -e "s|__REGULATORY_DOMAIN__|${REGULATORY_DOMAIN}|g" \
             -e "s|__HALOW_REGULATORY_DOMAIN__|${HALOW_REGULATORY_DOMAIN}|g" \
@@ -2025,6 +2069,8 @@ flash_rpi() {
         echo "=============================================="
         echo "           ✅ Flash complete: $target"
         echo "=============================================="
+        echo "  SSH username: $RADIO_USER"
+        echo "  SSH password: $RADIO_PW"
         echo ""
         echo " ONCE BOOTED, THE MESH NODE WILL AUTOMATICALLY START"
         echo " SETTING ITSELF UP AND WILL REBOOT MULTIPLE TIMES"
@@ -2113,6 +2159,7 @@ fi
 
 
 # --- 2b. Validate operator setup scripts ---
+validate_ssh_username || exit 1
 # Before any device selection, and long before anything is written: a bad
 # script here is a wasted flash, and the operator should find out while the
 # card is still safely in their hand.

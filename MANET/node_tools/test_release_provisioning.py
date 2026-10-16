@@ -200,8 +200,11 @@ $ErrorActionPreference = 'Stop'
 $tokens = $null; $errors = $null
 $ast = [Management.Automation.Language.Parser]::ParseFile($env:TEST_ENGINE, [ref]$tokens, [ref]$errors)
 if ($errors.Count) { throw ($errors | Out-String) }
-$function = $ast.Find({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Expand-ProvisioningTokens'}, $true)
-Invoke-Expression $function.Extent.Text
+foreach ($name in @('Test-SshUsername', 'Expand-ProvisioningTokens')) {
+    $function = $ast.Find({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name}, $true)
+    Invoke-Expression $function.Extent.Text
+}
+$Script:RADIO_USER = 'field_ops-2'
 $Script:HARDWARE_MODEL = $env:TEST_BOARD
 Expand-ProvisioningTokens (Get-Content $env:TEST_TEMPLATE -Raw)
 ''')
@@ -217,6 +220,8 @@ Expand-ProvisioningTokens (Get-Content $env:TEST_TEMPLATE -Raw)
                 self.assertIn(DOWNLOADS + f'/v0.551/{package_board}-install.tar.gz', result.stdout)
                 self.assertNotIn('__INSTALL_', result.stdout)
                 self.assertNotIn('__RELEASE_', result.stdout)
+                self.assertNotIn('__RADIO_USER__', result.stdout)
+                self.assertIn('ssh_user=field_ops-2', result.stdout)
                 pins = re.findall(r"^\s*((?:YQ|MEDIAMTX)_(?:VERSION|SHA256)='[^']+')$",
                                   (PROVISIONING / template).read_text(), re.M)
                 self.assertEqual(len(pins), 4)

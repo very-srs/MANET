@@ -22,7 +22,7 @@ Tokens (same set on Linux and Windows):
 `__HARDWARE_MODEL__` `__EUD_CONNECTION__` `__LAN_AP_SSID__` `__LAN_AP_KEY__`
 `__MAX_EUDS_PER_NODE__` `__INSTALL_MEDIAMTX__` `__INSTALL_MUMBLE__`
 `__VOICE_ENABLED__` `__MESH_SSID__` `__MESH_SAE_KEY__` `__LAN_CIDR_BLOCK__`
-`__AUTO_CHANNEL__` `__RADIO_PW__` `__REGULATORY_DOMAIN__`
+`__AUTO_CHANNEL__` `__RADIO_USER__` `__RADIO_PW__` `__REGULATORY_DOMAIN__`
 `__HALOW_REGULATORY_DOMAIN__` `__ADMIN_PW__` `__AUTO_UPDATE__`
 `__RELEASE_VERSION__` `__INSTALL_URL__` `__INSTALL_SHA256__`
 
@@ -36,6 +36,19 @@ The window adds no third list. It writes the same `.mesh-configs/*.conf` file
 that `windows.ps1` and `flash-a-radio.sh` already share, then calls
 `Build-ProvisioningScript`, so a setting added in the two places above reaches
 it with no further work.
+
+`RADIO_USER` is the SSH login name in saved flasher configurations. Loading a
+configuration without that key resets it to `radio`, even after a custom
+account was previously loaded. Both host engines validate usernames before
+rendering `__RADIO_USER__`. Raspberry Pi first boot creates the account with
+`useradd`, while the Rock 3A host path writes the account into the mounted
+image and refuses name or UID/GID collisions.
+
+Both templates persist the selected name as `ssh_user` in `/etc/mesh.conf`.
+Runtime setup, SSH recovery, Syncthing and Mumble resolve that local account
+and its home directory. It is a flash-time account choice, not an account
+rename operation on a running radio and not a mesh-wide setting. The SSH
+password is installed into the account database, not added to `mesh.conf`.
 
 Scripts from `additional-scripts/` are inserted **after** substitution and are
 never token-substituted, so a script containing a literal `__ADMIN_PW__`

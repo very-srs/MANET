@@ -750,6 +750,7 @@ systemctl enable --now manet-uplink-dns.path manet-uplink-dns.service || exit 1
 #write out the config selections for future use
 { set +x; } 2>/dev/null   # secrets follow: keep them out of the trace log
 echo "mesh_key=__MESH_SAE_KEY__" > /etc/mesh.conf
+echo "ssh_user=__RADIO_USER__" >> /etc/mesh.conf
 echo "mesh_ssid=__MESH_SSID__" >> /etc/mesh.conf
 echo "regulatory_domain=__REGULATORY_DOMAIN__" >> /etc/mesh.conf
 echo "halow_regulatory_domain=__HALOW_REGULATORY_DOMAIN__" >> /etc/mesh.conf

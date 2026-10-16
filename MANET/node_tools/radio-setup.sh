@@ -273,33 +273,30 @@ if [[ -n "$new_root_password" ]]; then
     printf '%s\n' "root:$new_root_password" | chpasswd
 fi
 
+manet_load_ssh_account || exit 1
+echo " > Ensuring SSH access for user '$MANET_SSH_USER'..."
+id -u "$MANET_SSH_USER" >/dev/null 2>&1 || useradd -m -U -s /bin/bash -G sudo,adm,dialout,cdrom,audio,video,plugdev,games,users,input,netdev,gpio,i2c,spi "$MANET_SSH_USER" || exit 1
+usermod -aG sudo,adm,dialout,cdrom,audio,video,plugdev,games,users,input,netdev,gpio,i2c,spi "$MANET_SSH_USER" 2>/dev/null || true
 if [[ -n "$new_user_password" ]]; then
-    echo " > Setting password for user 'radio'..."
-    printf '%s\n' "radio:$new_user_password" | chpasswd
+    printf '%s\n' "$MANET_SSH_USER:$new_user_password" | chpasswd
+elif [[ -n "$radio_password" ]]; then
+    printf '%s\n' "$MANET_SSH_USER:$radio_password" | chpasswd
 fi
 
 if [[ -n "$ssh_public_key" ]]; then
-    echo " > Updating authorized_keys for user 'radio'..."
-    mkdir -p /home/radio/.ssh
-    printf '%s\n' "$ssh_public_key" >> /home/radio/.ssh/authorized_keys
+    echo " > Updating authorized_keys for user '$MANET_SSH_USER'..."
+    mkdir -p "$MANET_SSH_HOME/.ssh"
+    printf '%s\n' "$ssh_public_key" >> "$MANET_SSH_HOME/.ssh/authorized_keys"
     # Keep the first occurrence of each authorized key across setup reruns.
-    awk '!seen[$0]++' /home/radio/.ssh/authorized_keys > /tmp/t
-    mv /tmp/t /home/radio/.ssh/authorized_keys
-fi
-
-echo " > Ensuring SSH password access for user 'radio'..."
-id -u radio >/dev/null 2>&1 || useradd -m -s /bin/bash -G sudo,adm,dialout,cdrom,audio,video,plugdev,games,users,input,netdev,gpio,i2c,spi radio
-usermod -aG sudo,adm,dialout,cdrom,audio,video,plugdev,games,users,input,netdev,gpio,i2c,spi radio 2>/dev/null || true
-if [[ -n "$new_user_password" ]]; then
-    printf '%s\n' "radio:$new_user_password" | chpasswd
-elif [[ -n "$radio_password" ]]; then
-    printf '%s\n' "radio:$radio_password" | chpasswd
+    awk '!seen[$0]++' "$MANET_SSH_HOME/.ssh/authorized_keys" > /tmp/t
+    mv /tmp/t "$MANET_SSH_HOME/.ssh/authorized_keys"
 fi
 set -x
-passwd -u radio 2>/dev/null || true
-mkdir -p /home/radio/.ssh /etc/ssh/sshd_config.d
-chmod 700 /home/radio/.ssh
-chown -R radio:radio /home/radio/.ssh
+passwd -u "$MANET_SSH_USER" 2>/dev/null || true
+mkdir -p "$MANET_SSH_HOME/.ssh" /etc/ssh/sshd_config.d
+chmod 700 "$MANET_SSH_HOME/.ssh"
+chown -R "$MANET_SSH_USER:$MANET_SSH_GROUP" "$MANET_SSH_HOME/.ssh"
+manet_write_ssh_sudoers || exit 1
 cat << EOF > /etc/ssh/sshd_config.d/10-manet.conf
 PasswordAuthentication yes
 KbdInteractiveAuthentication no
@@ -1268,7 +1265,7 @@ cat << EOF > /etc/systemd/system/mesh-clone-identity.service
 [Unit]
 Description=Reset cloned mesh node identity when hardware MAC changes
 After=local-fs.target
-Before=batman-enslave.service alfred.service node-manager.service gateway-route-manager.service syncthing@radio.service hostapd.service dnsmasq.service
+Before=batman-enslave.service alfred.service node-manager.service gateway-route-manager.service syncthing@${MANET_SSH_USER}.service hostapd.service dnsmasq.service
 
 [Service]
 Type=oneshot
@@ -1407,8 +1404,8 @@ systemctl enable node-manager.service
 cat <<- EOF > /etc/systemd/system/syncthing-peer-manager.service
 [Unit]
 Description=Syncthing Peer Manager
-After=syncthing@radio.service alfred.service
-Wants=syncthing@radio.service alfred.service
+After=syncthing@${MANET_SSH_USER}.service alfred.service
+Wants=syncthing@${MANET_SSH_USER}.service alfred.service
 
 [Service]
 Type=simple
@@ -1421,7 +1418,7 @@ WantedBy=multi-user.target
 EOF
 systemctl enable syncthing-peer-manager.service
 
-systemctl enable syncthing@radio.service
+systemctl enable syncthing@${MANET_SSH_USER}.service
 
 systemctl daemon-reload
 systemctl enable --now nftables.service
@@ -1716,18 +1713,18 @@ if [[ "$FIRST_BOOT_UNIT_ENABLED" -eq 1 && ! -f "$FIRST_BOOT_STAGE_MARKER" ]]; th
     systemctl set-default multi-user.target
 
     echo " >> Doing initial Syncthing config..."
-    install -d -o radio -g radio -m 700 /home/radio/.local/state/syncthing
-    # Syncthing apt setup can create .local as radio:root. Correct ownership
+    install -d -o "$MANET_SSH_USER" -g "$MANET_SSH_GROUP" -m 700 "$MANET_SSH_HOME/.local/state/syncthing"
+    # Syncthing apt setup can leave .local owned by the root group. Correct ownership
     # explicitly because install -d does not chown existing directories.
-    chown radio:radio /home/radio/.local
-    sudo -u radio syncthing -generate="/home/radio/.config/syncthing"
+    chown "$MANET_SSH_USER:$MANET_SSH_GROUP" "$MANET_SSH_HOME/.local"
+    sudo -u "$MANET_SSH_USER" syncthing -generate="$MANET_SSH_HOME/.config/syncthing"
     sleep 5
     killall syncthing
-    mkdir -p /home/radio/Sync/mumble/backups
-    chown -R radio:radio /home/radio/Sync
-    chown -R radio:radio /home/radio/.config/syncthing
+    mkdir -p "$MANET_SSH_HOME/Sync/mumble/backups"
+    chown -R "$MANET_SSH_USER:$MANET_SSH_GROUP" "$MANET_SSH_HOME/Sync"
+    chown -R "$MANET_SSH_USER:$MANET_SSH_GROUP" "$MANET_SSH_HOME/.config/syncthing"
 
-    SYNCTHING_CONFIG="/home/radio/.config/syncthing/config.xml"
+    SYNCTHING_CONFIG="$MANET_SSH_HOME/.config/syncthing/config.xml"
     echo " >> Hardening Syncthing for local-only operation..."
     # Insert discovery/relay options at the options element.
     sed -i '/<options>/a <globalAnnounceEnabled>false</globalAnnounceEnabled>\n<relaysEnabled>false</relaysEnabled>' "$SYNCTHING_CONFIG"
@@ -1874,7 +1871,7 @@ provision_try "systemd reload failed" systemctl daemon-reload
 provision_try "automatic update clock trigger failed" systemctl enable --now manet-auto-update.path
 provision_try "automatic update daily trigger failed" systemctl enable --now manet-auto-update.timer
 for unit in mesh-status.service batman-enslave-watch.service \
-    gateway-route-manager.service syncthing@radio.service \
+    gateway-route-manager.service syncthing@${MANET_SSH_USER}.service \
     syncthing-peer-manager.service mesh-hosts-update.timer \
     ethernet-autodetect.service manet-cpu-policy.service \
     button-monitor.service led-boot.service; do

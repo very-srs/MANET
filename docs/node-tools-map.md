@@ -244,7 +244,7 @@ Read [power and shutdown](guide/content/power.md) and
 | [manet-power-status.sh](../MANET/node_tools/manet-power-status.sh) | Report supported boards' live and sticky power/throttling events. |
 | [mesh-shutdown.sh](../MANET/node_tools/mesh-shutdown.sh) | Announce a shutdown tombstone before systemd completes shutdown. |
 | [mesh-clone-identity.sh](../MANET/node_tools/mesh-clone-identity.sh) | Reset cloned machine/SSH identity and allocation state after hardware changes. |
-| [ssh-recovery.sh](../MANET/node_tools/ssh-recovery.sh) | Restore the configured radio account and SSH service for headless access. |
+| [ssh-recovery.sh](../MANET/node_tools/ssh-recovery.sh) | Restore the configured SSH account and SSH service for headless access. |
 
 ## Maintaining this map
 

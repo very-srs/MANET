@@ -230,7 +230,7 @@ $Script:PageTitles  = @{
 $Script:PageBlurbs  = @{
     Hardware = 'Every node on one mesh must be flashed with the same mesh settings. The board type can differ.'
     Prereqs  = 'Anything missing can be installed from here. Nothing is downloaded until you ask for it.'
-    Config   = 'These are baked into the card. Saved configurations are shared with the Linux flasher.'
+    Config   = 'All radios on the same mesh must use the same mesh name and mesh password.'
     Scripts  = 'Files in the additional-scripts folder are embedded and run once on the node after setup.'
     Target   = 'Everything on the disk you pick will be destroyed. Check the size and the label.'
     Confirm  = 'Read this back before anything is written.'
@@ -468,7 +468,7 @@ function Get-PrereqList {
         [void]$list.Add([pscustomobject]@{
             Key      = 'openssl'
             Name     = 'openssl or WSL'
-            Why      = 'Hashes the radio password. Without it the radio account ships locked and you set the password from the console on first boot.'
+            Why      = 'Hashes the SSH password. Without it the SSH account ships locked and you set the password from the console on first boot.'
             Required = $false
             Source   = 'page'
             Page     = 'https://gitforwindows.org/'
@@ -537,7 +537,7 @@ function Test-Prereq {
             } elseif (Get-Command wsl -ErrorAction SilentlyContinue) {
                 $P.Found = $true;  $P.Detail = 'WSL is available and will be used'
             } else {
-                $P.Found = $false; $P.Detail = 'the radio account will ship with no password set'
+                $P.Found = $false; $P.Detail = 'the SSH account will ship with no password set'
             }
         }
     }
@@ -1182,6 +1182,8 @@ $Script:AfterPrereqInstall = {
 
 function Build-ConfigPage {
     $p = New-ContentPanel
+    # Longer explanations and separate login fields need more vertical space.
+    $p.AutoScroll = $true
 
     # --- saved configurations -------------------------------------------
     $g1 = New-GroupBox 'Saved settings' 16 6 398 70
@@ -1191,33 +1193,33 @@ function Build-ConfigPage {
     $p.Controls.Add($g1)
 
     # --- clients ---------------------------------------------------------
-    $g2 = New-GroupBox 'Clients (EUDs)' 16 84 398 160
-    $g2.Controls.Add((New-Text 'Connection' 12 27 124 20))
-    $Script:CmbEud = New-Combo 140 24 230 @('Wired', 'Wireless', 'Auto')
+    $g2 = New-GroupBox 'Client devices (EUDs)' 16 84 398 180
+    $g2.Controls.Add((New-Text 'Connection type' 12 27 132 20))
+    $Script:CmbEud = New-Combo 148 24 230 @('Wired', 'Wireless', 'Auto')
     $Script:CmbEud.SelectedIndex = 2
     $Script:CmbEud.Add_SelectedIndexChanged({ Update-ConfigEnablement })
     $g2.Controls.Add($Script:CmbEud)
 
-    $g2.Controls.Add((New-Text 'Wi-Fi name' 12 55 124 20))
-    $Script:TxtApSsid = New-Input 140 52 230
+    $g2.Controls.Add((New-Text 'EUD Wi-Fi name' 12 55 132 20))
+    $Script:TxtApSsid = New-Input 148 52 230
     $g2.Controls.Add($Script:TxtApSsid)
-    $g2.Controls.Add((New-Text 'Each node adds the last 4 of its wired MAC to this.' 12 78 370 18 $Script:UI.FontSmall $Script:UI.Muted))
+    $g2.Controls.Add((New-Text 'Each radio adds four characters from its Ethernet MAC address, for example FieldNet-a1b2.' 12 78 370 34 $Script:UI.FontSmall $Script:UI.Muted))
 
-    $g2.Controls.Add((New-Text 'Wi-Fi password' 12 99 124 20))
-    $Script:TxtApKey = New-Input 140 96 144
+    $g2.Controls.Add((New-Text 'EUD Wi-Fi password' 12 119 132 20))
+    $Script:TxtApKey = New-Input 148 116 136
     $g2.Controls.Add($Script:TxtApKey)
     # Letters and digits, not base64. Ten random bytes encode to sixteen
     # base64 characters of which the last two are always '==' padding, which
     # looks like a mistake and is two characters of nothing. This key is the
     # one that gets typed by hand into a phone or a tablet, so it also does
     # without base64's '+' and '/'.
-    $g2.Controls.Add((New-Btn 'Generate' 290 95 88 24 {
+    $g2.Controls.Add((New-Btn 'Generate' 290 115 88 24 {
         $Script:TxtApKey.Text = Generate-Password -length 16
     }))
 
-    $g2.Controls.Add((New-Text 'Clients per node' 12 127 124 20))
+    $g2.Controls.Add((New-Text 'EUDs per radio' 12 147 132 20))
     $Script:NumEuds          = New-Object System.Windows.Forms.NumericUpDown
-    $Script:NumEuds.Location = New-Object System.Drawing.Point((S 140), (S 124))
+    $Script:NumEuds.Location = New-Object System.Drawing.Point((S 148), (S 144))
     $Script:NumEuds.Size     = New-Object System.Drawing.Size((S 60), (S 24))
     $Script:NumEuds.Font     = $Script:UI.Font
     $Script:NumEuds.Minimum  = 1
@@ -1228,7 +1230,7 @@ function Build-ConfigPage {
     $p.Controls.Add($g2)
 
     # --- services --------------------------------------------------------
-    $g3 = New-GroupBox 'Services on the node' 16 252 398 126
+    $g3 = New-GroupBox 'Services on the radio' 16 272 398 126
     $Script:ChkMtx    = New-Check 'MediaMTX video server'                12 24 360 $false
     $Script:ChkMumble = New-Check 'Mumble voice server (murmur)'         12 48 360 $false
     $Script:ChkVoice  = New-Check 'Mesh push-to-talk (needs an OpenVLM board)' 12 72 360 $true
@@ -1237,7 +1239,7 @@ function Build-ConfigPage {
     $p.Controls.Add($g3)
 
     # --- mesh ------------------------------------------------------------
-    $g4 = New-GroupBox 'The mesh' 424 6 398 150
+    $g4 = New-GroupBox 'The mesh' 424 6 386 150
     $g4.Controls.Add((New-Text 'Mesh name' 12 27 124 20))
     $Script:TxtMeshSsid = New-Input 140 24 230
     $g4.Controls.Add($Script:TxtMeshSsid)
@@ -1264,8 +1266,8 @@ function Build-ConfigPage {
     $p.Controls.Add($g4)
 
     # --- network ---------------------------------------------------------
-    $g5 = New-GroupBox 'Addresses' 424 164 398 104
-    $g5.Controls.Add((New-Text 'Range' 12 27 124 20))
+    $g5 = New-GroupBox 'Addresses' 424 164 386 104
+    $g5.Controls.Add((New-Text 'Network CIDR' 12 27 124 20))
     $Script:TxtCidr = New-Input 140 24 140
     $Script:TxtCidr.Text = '10.30.2.0/24'
     $Script:TxtCidr.Add_TextChanged({ Update-CapacityLabel })
@@ -1274,28 +1276,36 @@ function Build-ConfigPage {
     $g5.Controls.Add($Script:LblCapacity)
     $p.Controls.Add($g5)
 
-    # --- passwords -------------------------------------------------------
-    $g6 = New-GroupBox 'Passwords' 424 276 398 102
-    $g6.Controls.Add((New-Text 'radio login' 12 27 124 20))
-    $Script:TxtRadioPw = New-Input 140 24 230
+    # --- SSH account -----------------------------------------------------
+    $g6 = New-GroupBox 'SSH login' 424 276 386 94
+    $g6.Controls.Add((New-Text 'SSH username' 12 27 124 20))
+    $Script:TxtRadioUser = New-Input 140 24 230
+    $Script:TxtRadioUser.Text = 'radio'
+    $g6.Controls.Add($Script:TxtRadioUser)
+    $g6.Controls.Add((New-Text 'SSH password' 12 59 124 20))
+    $Script:TxtRadioPw = New-Input 140 56 230
     $Script:TxtRadioPw.Text = 'radio'
     $g6.Controls.Add($Script:TxtRadioPw)
 
-    $g6.Controls.Add((New-Text 'Network admin' 12 55 124 20))
-    $Script:TxtAdminPw = New-Input 140 52 144
-    $g6.Controls.Add($Script:TxtAdminPw)
-    $g6.Controls.Add((New-Btn 'Generate' 290 51 88 24 {
-        $Script:TxtAdminPw.Text = Generate-Password -length 10
-    }))
-    $g6.Controls.Add((New-Text 'Both are shown again at the end. Write them down there.' 12 78 372 18 $Script:UI.FontSmall $Script:UI.Muted))
     $p.Controls.Add($g6)
 
+    # A full-width heading identifies this separate password without clipping.
+    $g7 = New-GroupBox 'Web interface admin password' 424 378 386 78
+    $Script:TxtAdminPw = New-Input 12 24 272
+    $g7.Controls.Add($Script:TxtAdminPw)
+    $g7.Controls.Add((New-Btn 'Generate' 290 23 88 24 {
+        $Script:TxtAdminPw.Text = Generate-Password -length 10
+    }))
+    $g7.Controls.Add((New-Text 'Used to change settings on the web management page.' 12 52 372 18 $Script:UI.FontSmall $Script:UI.Muted))
+    $p.Controls.Add($g7)
+    $p.Controls.Add((New-Text 'Your SSH login and passwords are shown again when flashing finishes. Save them before closing.' 16 408 398 44 $Script:UI.FontSmall $Script:UI.Muted))
+
     # --- save row --------------------------------------------------------
-    $p.Controls.Add((New-Text 'Save settings as' 16 390 140 20))
-    $Script:TxtSaveName = New-Input 160 387 200
+    $p.Controls.Add((New-Text 'Save settings as' 16 470 140 20))
+    $Script:TxtSaveName = New-Input 160 467 200
     $p.Controls.Add($Script:TxtSaveName)
-    $p.Controls.Add((New-Btn 'Save' 368 386 90 26 { Save-ConfigFromPage }))
-    $Script:LblSaveNote = New-Text '' 468 390 354 20 $Script:UI.FontSmall $Script:UI.Muted
+    $p.Controls.Add((New-Btn 'Save' 368 466 90 26 { Save-ConfigFromPage }))
+    $Script:LblSaveNote = New-Text '' 468 470 340 20 $Script:UI.FontSmall $Script:UI.Muted
     $p.Controls.Add($Script:LblSaveNote)
 
     return $p
@@ -1422,6 +1432,7 @@ MESH_SSID="$($Script:MESH_SSID)"
 MESH_SAE_KEY="$($Script:MESH_SAE_KEY)"
 LAN_CIDR_BLOCK="$($Script:LAN_CIDR_BLOCK)"
 AUTO_CHANNEL="$($Script:AUTO_CHANNEL)"
+RADIO_USER="$($Script:RADIO_USER)"
 RADIO_PW="$($Script:RADIO_PW)"
 ADMIN_PW="$($Script:ADMIN_PW)"
 AUTO_UPDATE="$($Script:AUTO_UPDATE)"
@@ -1497,6 +1508,8 @@ function Copy-PageToEngine {
         }
     }
 
+    $Script:RADIO_USER = $Script:TxtRadioUser.Text
+    if (-not (Test-SshUsername $Script:RADIO_USER)) { [void]$problems.Add($Script:SshUsernameHelp) }
     $Script:RADIO_PW = if ($Script:TxtRadioPw.Text) { $Script:TxtRadioPw.Text } else { 'radio' }
     if (-not $Script:TxtAdminPw.Text) { $Script:TxtAdminPw.Text = Generate-Password -length 10 }
     $Script:ADMIN_PW = $Script:TxtAdminPw.Text
@@ -1527,6 +1540,7 @@ function Copy-EngineToPage {
     $Script:TxtMeshKey.Text   = $Script:MESH_SAE_KEY
     if ($Script:REGULATORY_DOMAIN) { $Script:CmbDomain.SelectedItem = $Script:REGULATORY_DOMAIN }
     if ($Script:LAN_CIDR_BLOCK)    { $Script:TxtCidr.Text = $Script:LAN_CIDR_BLOCK }
+    $Script:TxtRadioUser.Text = $Script:RADIO_USER
     $Script:TxtRadioPw.Text = $Script:RADIO_PW
     $Script:TxtAdminPw.Text = $Script:ADMIN_PW
     Update-ConfigEnablement
@@ -1979,9 +1993,9 @@ function Update-ConfirmPage {
         "  Clients          $($Script:EUD_CONNECTION)"
     )
     if ($Script:EUD_CONNECTION -in @('wireless','auto')) {
-        $lines += "  Client Wi-Fi     $($Script:LAN_AP_SSID)  (the last 4 of the wired MAC is appended)"
-        $lines += "  Client password  $($Script:LAN_AP_KEY)"
-        $lines += "  Clients per node $($Script:MAX_EUDS_PER_NODE)"
+        $lines += "  EUD Wi-Fi     $($Script:LAN_AP_SSID)  (the last 4 of the wired MAC is appended)"
+        $lines += "  EUD password  $($Script:LAN_AP_KEY)"
+        $lines += "  EUDs per radio $($Script:MAX_EUDS_PER_NODE)"
     }
     $lines += @(
         ""
@@ -1990,8 +2004,9 @@ function Update-ConfirmPage {
         "  Push-to-talk     $($Script:VOICE_ENABLED)"
         "  Auto update      $($Script:AUTO_UPDATE)"
         ""
-        "  radio password   $($Script:RADIO_PW)"
-        "  network admin    $($Script:ADMIN_PW)"
+        "  SSH username     $($Script:RADIO_USER)"
+        "  SSH password     $($Script:RADIO_PW)"
+        "  Web UI admin password $($Script:ADMIN_PW)"
         ""
         "  Setup scripts    $scriptCount to run once on the node"
     )
@@ -2287,22 +2302,23 @@ function Get-ReceiptText {
         ""
         "Mesh name (SSID)      $($Script:MESH_SSID)"
         "Mesh password         $($Script:MESH_SAE_KEY)"
-        "Address range         $($Script:LAN_CIDR_BLOCK)"
+        "Network CIDR          $($Script:LAN_CIDR_BLOCK)"
         "Country               $($Script:REGULATORY_DOMAIN)"
         "HaLow region          $($Script:HALOW_REGULATORY_DOMAIN)"
         ""
     )
     if ($Script:EUD_CONNECTION -in @('wireless','auto')) {
         $lines += @(
-            "Client Wi-Fi name     $($Script:LAN_AP_SSID)-xxxx   (xxxx is the last 4 of the wired MAC)"
-            "Client Wi-Fi password $($Script:LAN_AP_KEY)"
-            "Clients per node      $($Script:MAX_EUDS_PER_NODE)"
+            "EUD Wi-Fi name     $($Script:LAN_AP_SSID)-xxxx   (xxxx is the last 4 of the wired MAC)"
+            "EUD Wi-Fi password $($Script:LAN_AP_KEY)"
+            "EUDs per radio      $($Script:MAX_EUDS_PER_NODE)"
             ""
         )
     }
     $lines += @(
-        "SSH login             radio / $($Script:RADIO_PW)"
-        "Network admin password $($Script:ADMIN_PW)"
+        "SSH username          $($Script:RADIO_USER)"
+        "SSH password          $($Script:RADIO_PW)"
+        "Web UI admin password $($Script:ADMIN_PW)"
         ""
         "Every node on this mesh must be flashed with the same mesh name and"
         "mesh password, or they will not see each other. Load the saved"
@@ -2320,7 +2336,7 @@ function Get-ReceiptText {
             "Rock 3A: the root password is the Armbian default, 1234. Change it."
         )
         if ($Script:R3A_RADIO_HASH -eq '!') {
-            $lines += "The radio account shipped locked: log in as root and run 'passwd radio'."
+            $lines += "The SSH account shipped locked: log in as root and run 'passwd $($Script:RADIO_USER)'."
         }
     }
     return ($lines -join "`r`n")
