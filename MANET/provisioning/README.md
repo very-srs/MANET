@@ -23,6 +23,14 @@ this protection through a tools update. Kernel changes and kernel security
 fixes come through a MANET install release, not APT; see
 [kernel updates and recovery](../../docs/kernel-6.18-morse-port.md#81-apt-owns-userland-manet-releases-own-the-kernel).
 
+CM4 provisioning sets `auto_initramfs=0`. MANET's CM4 kernel has MMC and ext4
+built in and boots without an initramfs. The image's stock initramfs8 belongs
+to a different kernel. RPi5 keeps its image's matched kernel/initramfs settings.
+Do not disable its initramfs without qualifying its root-device drivers and
+filesystem in the selected kernel. Updating CM4 EEPROM through rpiboot during
+provisioning is possible future hardening for unattended kernel-trial recovery.
+The current flasher does not perform that EEPROM update.
+
 ---
 
 ## Prerequisites

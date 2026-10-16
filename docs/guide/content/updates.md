@@ -16,6 +16,9 @@ To update manually:
 2. **Update this radio.** Over SSH, run `sudo node-update.sh`.
 3. **Wait.** Let it finish, then check that your radios can still talk.
 
+If a radio trying a test kernel stops responding, turn its power off and on.
+It starts again on its previous kernel.
+
 The updater waits for the radio's clock to synchronize. Automatic updates happen only when enabled.
 
 ## User
@@ -31,7 +34,10 @@ maintain them in place rather than make reflashing a routine requirement.
 
 Current packages update runtime software and some radio firmware. Full kernel
 updating is still under development. Follow the selected release's instructions
-for any required restart or reboot.
+for any required restart or reboot. An opt-in CM4 kernel trial can need a power
+cycle if the firmware cannot load the test kernel. Its next boot selects the
+previous kernel while the previous boot files remain intact. Keep access to
+the power supply even when the radio is sealed.
 
 ### Update one radio manually
 
@@ -123,8 +129,11 @@ matched kernel payload with trial activation. Downloading requires
 The default builder includes managed MT7916 firmware. Optional board kernel
 inputs carry a manifest, boot files, versioned modules and isolated Morse
 firmware. CM4 has an opt-in one-shot trial implementation. It requires a locally
-qualified boot profile, watchdog coverage and a pinned radio/management health
-check. The trial runs before runtime software replacement, and a failed trial
+qualified boot profile, firmware kernel watchdog, PID 1 runtime watchdog and a
+pinned radio/management health check. The EEPROM boot watchdog is optional.
+Without it, failure before kernel handoff can require a power cycle. CM4
+provisioning disables the stock kernel's unmatched initramfs. RPi5 retains its
+matched image configuration. The trial runs before runtime software replacement, and a failed trial
 is not automatically repeated. Early file recovery avoids the boot filesystem.
 Late recovery stages or confirms the trial after normal mounts. Rock 3A kernel
 activation is rejected until its actual bootloader fallback and reset path are

@@ -181,8 +181,9 @@ The durable sequence is:
 4. A trial boots once. Require the new release, a matching transaction token
    on the kernel command line, and the firmware's device-tree tryboot flag.
    A separately enabled confirmation deadline requests a normal reboot if
-   confirmation never completes. Firmware-to-kernel watchdog coverage must
-   already have been validated, including a kernel that never starts userspace.
+   confirmation never completes. The firmware kernel watchdog and PID 1
+   runtime watchdog must already have been validated, including a kernel
+   that never starts userspace.
    A systemd timer alone cannot reset a hung kernel.
 5. After multi-user startup, check core services and run a locally installed,
    hash-pinned health check that proves the required radio and remote management
@@ -200,16 +201,41 @@ settings. Do not ship a blanket profile to enable untested nodes.
 
 Its JSON fields are `backend` (`cm4-tryboot-v1`), `boot_uuid` (the mounted FAT
 UUID), `config_sha256`, `cmdline_sha256`, `health_sha256`,
-`watchdog_validated` (true only after a reset test), and `validation_id`
+`watchdog_validated` (true only after testing the installed start4.elf kernel
+watchdog handoff and reset), and `validation_id`
 (the bench evidence identifier). Config hashes cover the original full file
 bytes. The health hash covers the root-owned executable
-`/usr/local/sbin/manet-kernel-health-check`. The updater also checks the EEPROM
-boot watchdog setting and PID 1's runtime watchdog. The initial supported
+`/usr/local/sbin/manet-kernel-health-check`. The trial config ends with
+`kernel_watchdog_timeout=180`, and preflight requires PID 1's runtime watchdog.
+The local validation must cover the installed boot-partition firmware, not
+just the EEPROM version. An older start4.elf that ignores this setting does
+not qualify. `kernel.json` and `confirmed.json` record the kernel timeout,
+PID 1 setting and optional EEPROM `BOOT_WATCHDOG_TIMEOUT` status. A missing,
+disabled or unreadable EEPROM watchdog does not block a trial. Its presence
+alone does not establish a functioning reset path. The initial supported
 config uses `kernel8.img`, no initramfs, no included configs and no existing
 `autoboot.txt`, `tryboot.txt`, or custom OS prefix. Unsupported configurations
 need an explicit commissioned backend extension. Do not strip settings just
 to pass preflight. `confirmed.json` preserves the commissioned base and pins
 the committed selector for subsequent updates.
+
+Without the EEPROM boot watchdog, a failure before the firmware hands control
+to the kernel can halt until an operator power cycles the radio. Tryboot is
+one-shot, so that power cycle selects the previous kernel if its boot set and
+FAT filesystem are intact. This accepted recovery path needs access to the
+power supply, not to the sealed storage device. It is not unattended recovery
+from every failed boot. Updating CM4 EEPROM during provisioning, when rpiboot
+is already in use, is later hardening. The updater does not flash EEPROM.
+See the [firmware kernel watchdog](https://www.raspberrypi.com/documentation/computers/config_txt.html#kernel_watchdog_timeout)
+and [EEPROM boot watchdog](https://www.raspberrypi.com/documentation/computers/raspberry-pi.html#BOOT_WATCHDOG_TIMEOUT)
+reference for the separate handoff boundaries.
+
+CM4 provisioning disables automatic initramfs loading with `auto_initramfs=0`.
+MANET's CM4 kernel has MMC and ext4 built in. The stock image's initramfs8
+belongs to its distribution kernel and must not be paired with the MANET
+kernel. RPi5 retains the image's matched kernel/initramfs configuration.
+A future RPi5 kernel backend must supply a matching initramfs or independently
+qualify a built-in root-storage/filesystem path before disabling it.
 
 Health confirmation must finish before 240 seconds of boot uptime. The guard
 requests a normal reboot at 300 seconds without waiting for the updater lock.

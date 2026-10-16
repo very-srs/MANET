@@ -1694,8 +1694,11 @@ a locally pinned radio/management health check before changing the normal
 boot selector. A failed trial is retained for diagnosis and is never retried
 automatically. After returning to the original kernel, use
 `sudo node-update.sh --cancel-kernel-trial` to cancel an uncommitted trial.
-Candidate files are retained. The boot watchdog and confirmation deadline
-must be validated on the board before commissioning this path.
+Candidate files are retained. The firmware kernel watchdog, PID 1 runtime
+watchdog and confirmation deadline must be validated before commissioning.
+An EEPROM boot watchdog is optional and its status is recorded. Without it,
+a failure before kernel handoff can need a power cycle to select the previous
+kernel. The sealed radio's power supply must remain accessible.
 
 This completes an interrupted update; it does not roll back a defective release
 or provide an operating-system snapshot. The protection applies to installations

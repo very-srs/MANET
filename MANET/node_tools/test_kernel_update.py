@@ -132,6 +132,8 @@ class KernelUpdateTests(unittest.TestCase):
         self.assertFalse((self.root / 'manet-kernel').exists())
         trial_config = (self.boot / 'tryboot.txt').read_text()
         self.assertLess(trial_config.index('os_prefix='), trial_config.index('dtoverlay='))
+        self.assertTrue(trial_config.endswith('kernel_watchdog_timeout=180\n'))
+        self.assertEqual(self.updater.kernel().read()['watchdogs']['eeprom_boot_watchdog'], 'enabled')
         self.trial_boot()
         self.updater.update(recover_only=True)
         self.assertEqual((self.boot / 'config.txt').read_text(), trial_config)
@@ -229,7 +231,9 @@ class KernelUpdateTests(unittest.TestCase):
 
     def test_missing_boot_mount_or_watchdog_fails_before_arming(self):
         original = self.run_fake
-        for command, output in (('findmnt', b'ext4 TEST-FAT'), ('vcgencmd', b'BOOT_WATCHDOG_TIMEOUT=0')):
+        for command, output in (('findmnt', b'ext4 TEST-FAT'), ('systemctl', b'0'),
+                                ('systemctl', b'infinity'), ('systemctl', b'0us'),
+                                ('systemctl', b''), ('systemctl', b'unknown')):
             def wrong(args, **kwargs):
                 return output if args[0] == command else original(args, **kwargs)
             with self.subTest(command=command), patch.object(update, 'run_command', side_effect=wrong):
@@ -237,6 +241,49 @@ class KernelUpdateTests(unittest.TestCase):
                     self.updater.update()
                 self.assertFalse(self.updater.pending.exists())
                 self.assertNotIn('dependency', self.history())
+
+    def test_old_eeprom_allows_trial_and_records_missing_boot_watchdog(self):
+        staged = self.stage_only()
+        for output in (b'BOOT_WATCHDOG_TIMEOUT=0\n', b'BOOT_ORDER=0xf41\n'):
+            with self.subTest(output=output):
+                def old_eeprom(args, **kwargs):
+                    return output if args[0] == 'vcgencmd' else self.run_fake(args, **kwargs)
+                trial = kernel.KernelTrial(self.updater, old_eeprom, update.atomic_file, update.sync_directory)
+                trial.preflight(staged)
+                self.assertEqual(trial.watchdogs()['eeprom_boot_watchdog'], 'disabled-or-absent')
+        with patch.object(update, 'run_command', side_effect=old_eeprom):
+            self.updater.kernel().prepare(staged)
+        self.assertEqual(self.updater.kernel().read()['watchdogs']['eeprom_boot_watchdog'], 'disabled-or-absent')
+        self.assertEqual(self.calls[-1], ['reboot', '0 tryboot'])
+
+    def test_eeprom_query_failure_is_diagnostic(self):
+        def unavailable(args, **kwargs):
+            if args[0] == 'vcgencmd':
+                raise update.UpdateError('no mailbox')
+            return self.run_fake(args, **kwargs)
+        trial = kernel.KernelTrial(self.updater, unavailable, update.atomic_file, update.sync_directory)
+        trial.prepare(self.stage_only())
+        self.assertEqual(trial.read()['watchdogs']['eeprom_boot_watchdog'], 'unknown')
+        self.assertIn('no mailbox', trial.read()['watchdogs']['eeprom_query_error'])
+
+    def test_resumed_staging_rechecks_runtime_watchdog(self):
+        staged = self.stage_only()
+        def failed_depmod(args, **kwargs):
+            if args[0] == 'depmod':
+                raise update.UpdateError('interrupted')
+            return self.run_fake(args, **kwargs)
+        trial = kernel.KernelTrial(self.updater, failed_depmod, update.atomic_file, update.sync_directory)
+        with self.assertRaises(update.UpdateError):
+            trial.prepare(staged)
+        def disabled(args, **kwargs):
+            if args[:3] == ['systemctl', 'show', '--property=RuntimeWatchdogUSec']:
+                return b'0'
+            return self.run_fake(args, **kwargs)
+        trial.run = disabled
+        with self.assertRaisesRegex(kernel.KernelError, 'runtime watchdog'):
+            trial.prepare(staged)
+        self.assertFalse((self.boot / 'tryboot.txt').exists())
+        self.assert_old()
 
     def test_rock3a_activation_is_rejected(self):
         staged = self.stage_only()

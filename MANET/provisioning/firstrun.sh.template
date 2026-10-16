@@ -1025,6 +1025,12 @@ for _cfg in /boot/firmware/config.txt /boot/config.txt; do
         grep -qF 'gpio=17=op,dh' "$_cfg"   || echo "gpio=17=op,dh"             >> "$_cfg"
     fi
     if [ "__HARDWARE_MODEL__" = "rpi4" ]; then
+        # MANET CM4 has MMC/ext4 built in. The image's stock initramfs8 is
+        # for a different kernel. RPi5 retains its matched image initramfs.
+        # Replace enabled directives too: kernel-trial preflight rejects them
+        # even when a later conditional override would disable them on CM4.
+        sed -i 's/^[[:space:]]*auto_initramfs[[:space:]]*=.*/auto_initramfs=0/' "$_cfg"
+        grep -q '^# MANET CM4 initramfs policy$' "$_cfg" || printf '\n# MANET CM4 initramfs policy\n[cm4]\nauto_initramfs=0\n[all]\n' >> "$_cfg"
         grep -q 'pcie-32bit-dma' "$_cfg" || printf '\n[cm4]\ndtoverlay=pcie-32bit-dma\n' >> "$_cfg"
     fi
 
