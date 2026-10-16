@@ -110,12 +110,10 @@ def decode_telemetry(raw, emit=emit, emit_raw=emit_raw):
     emit_raw('EUD_COUNT', t.eud_count)
 
     emit('CHANNEL_REPORT_JSON', json.dumps({'results': [
-        # Omit unmeasured busy_pct so channel-election.sh can distinguish it
-        # from a measured zero.
-        dict({'channel': r.channel, 'noise_floor': r.noise_floor,
-              'bss_count': r.bss_count},
+        # Preserve measurement presence, including energy-only observations.
+        dict({'channel': r.channel, 'bss_count': r.bss_count},
              **{field: getattr(r, field)
-                for field in ('busy_pct', 'foreign_pct', 'window_s',
+                for field in ('noise_floor', 'busy_pct', 'foreign_pct', 'window_s',
                               'rf_trouble') if r.HasField(field)})
         for r in t.channel_report.results
     ]}))

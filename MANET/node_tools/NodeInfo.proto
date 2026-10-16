@@ -99,7 +99,7 @@ message NodeTelemetry {
 
   message ChannelScanResult {
     uint32 channel     = 1;  // MHz
-    sint32 noise_floor = 2;  // dBm
+    optional sint32 noise_floor = 2;  // dBm, absent for energy-only observers
     uint32 bss_count   = 3;
     // Home: total busy share of the survey window, 0-100. Off-channel:
     // occupancy excluding this radio's transmit airtime during the visit.

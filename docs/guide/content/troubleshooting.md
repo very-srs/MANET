@@ -48,6 +48,11 @@ If the phone's Wi-Fi network disappears, check the configured EUD mode. In Auto 
 
 After a protected configuration change, previously connected radios can restore their old settings if no peer returns within the default five-minute trial. Check the outcome before staging another change; do not assume that all radios kept the requested values.
 
+If the firmware journal reports `AUTO-DISABLED`, an earlier boot did not
+confirm that the Wi-Fi radio finished starting. The next boot uses the bundled
+stock firmware. Changing positioning settings does not retry the failed patch.
+Keep the journal message so the cause can be investigated before another trial.
+
 ### Rule out a power problem
 
 Low power can look like a radio fault: failed association, a USB device that stops answering, or unexpected resets. On supported Raspberry Pi hardware, inspect the dashboard's power state or the SSH login banner. A warning can record a voltage drop that happened earlier in this boot.
@@ -130,6 +135,17 @@ the observed result first differs from the expected one.
 `/run` observations disappear at reboot. Administrative replay records and configuration rollback snapshots persist because receiver restarts and reboots must not authorize old commands or lose a pending restore. Do not clear these directories as a routine troubleshooting step.
 
 For updater failures, retain `/var/lib/manet-update/in-progress` and its recovery archive. `--recover-only` retries the verified pending payload before any new release selection. Missing or corrupt data is a repair case, not permission to mark the installation complete.
+
+For MT7916 firmware, retain `/var/lib/manet/mt7916-probe-pending` and
+`mt7916-auto-disabled`, and inspect `journalctl -u manet-mt7916-firmware.service
+-u manet-mt7916-firmware-survived.service`. A failed patched boot latches the
+pinned stock 2024 set and suspends the managed RX reservation. After resolving
+the cause, `sudo manet-mt7916-firmware.py --rearm` prepares another patched
+trial for the next boot. An update with a different patched WM hash also
+rearms it. Config edits and updates with the same patched hash do not.
+A missing installed `manet_timing=1` tag always selects pinned stock.
+The [firmware mechanism](../../../docs/node-tools-internals.md#mt7916-firmware-selection)
+describes survival checks and ownership conflicts.
 
 Check installed service units and their actual running processes when an observation disagrees with the source. `node-manager.sh` is a generated selector symlink; the active ACS or static orchestrator and installed package version matter. Reproducing a software state in a unit test does not establish physical radio behavior.
 

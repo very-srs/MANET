@@ -21,7 +21,8 @@
         "sha256": "a90d3f66704d85889945fec5525ea77622549da83aced1aac99828383f8f1805",
         "path": "LICENCE.mediatek"
       }
-    }
+    },
+    "wm_build": "20240823172741"
   },
   "wm_patch": {
     "input_sha256": "64d86cfa4f00f9452b4706389d648d4ce0e563ddd512cc9845ba4e4442e99cb0",
@@ -38,5 +39,6 @@
         "hex": "b43f463830a558318bd040318680b403f082a019f083d507"
       }
     ]
-  }
+  },
+  "default_selection": "patched"
 }

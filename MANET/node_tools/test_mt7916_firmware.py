@@ -23,13 +23,13 @@ CACHE = Path(os.environ.get('MANET_FIRMWARE_CACHE', REPO / 'kernel-work/cache/li
                            MANIFEST['linux_firmware']['commit']))
 
 
-def fixture():
+def fixture(edit=0xa5):
     # Synthetic firmware: one 16-byte region, one descriptor, a common trailer.
     stock = bytearray(92)
     struct.pack_into('<I', stock, 36, 16)
     stock[58] = 1
     expected = bytearray(stock)
-    expected[0] = 0xa5
+    expected[0] = edit
     state = 0
     for word in struct.unpack('<4I', expected[:16]):
         parity = sum((state >> bit) & 1 for bit in range(32) if (0x10921111 >> bit) & 1) % 2
@@ -37,7 +37,8 @@ def fixture():
     struct.pack_into('<I', expected, 12, state)
     struct.pack_into('<I', expected, 88, zlib.crc32(expected[:88]))
     spec = {'size': 92, 'data_end': 16, 'input_sha256': fw.digest(stock),
-            'output_sha256': fw.digest(expected), 'replacements': [{'offset': 0, 'hex': 'a5'}]}
+            'output_sha256': fw.digest(expected),
+            'replacements': [{'offset': 0, 'hex': f'{edit:02x}'}]}
     blobs = dict(zip(fw.NAMES, (bytes(stock), b'fake WA', b'fake ROM')))
     manifest = {'wm_patch': spec, 'linux_firmware': {'files': {
         n: {'sha256': fw.digest(b)} for n, b in blobs.items()}}}
@@ -63,6 +64,10 @@ class FirmwareTests(unittest.TestCase):
         unique_hash = patch.object(fw, 'WM_SHA256', fw.digest(self.expected))
         unique_hash.start()
         self.addCleanup(unique_hash.stop)
+        stock_hash = patch.object(fw, 'STOCK_WM_SHA256',
+                                  fw.digest(self.blobs[fw.NAMES[0]]))
+        stock_hash.start()
+        self.addCleanup(stock_hash.stop)
         self.tool.assets.mkdir(parents=True)
         (self.tool.assets / 'firmware/mt7916').mkdir(parents=True)
         for name, data in self.blobs.items():
@@ -84,11 +89,26 @@ class FirmwareTests(unittest.TestCase):
         self.assertTrue(all(not os.path.lexists(self.tool.updates / n) for n in fw.NAMES))
         self.assertEqual(self.base_before, {n: (self.base / n).read_bytes() for n in fw.NAMES})
 
+    def assert_pinned(self):
+        """Check the owned unmodified set without changing distro firmware."""
+        for name in fw.NAMES:
+            self.assertEqual((self.tool.updates / name).read_bytes(),
+                             self.blobs[name])
+        self.assertEqual(self.base_before,
+                         {n: (self.base / n).read_bytes() for n in fw.NAMES})
+
+    def assert_patched(self):
+        for name in fw.NAMES:
+            self.assertEqual((self.tool.updates / name).read_bytes(),
+                             self.expected if name == fw.NAMES[0] else self.blobs[name])
+        self.assertEqual(self.base_before,
+                         {n: (self.base / n).read_bytes() for n in fw.NAMES})
+
     def snapshot(self):
         return {p.name: (p.stat().st_ino, p.stat().st_mtime_ns, p.read_bytes())
                 for p in self.tool.updates.iterdir()}
 
-    def test_enable_idempotence_disable(self):
+    def test_patched_default_is_idempotent_and_ignores_positioning(self):
         self.assertTrue(self.tool.run()[0])
         for name in fw.NAMES:
             path = self.tool.updates / name
@@ -109,21 +129,121 @@ class FirmwareTests(unittest.TestCase):
              patch.object(fw.os, 'open', side_effect=read_only_open):
             self.assertTrue(self.tool.run()[0])
         self.assertEqual(before, self.snapshot())
+        (self.tool.assets / 'firmware/mt7916').mkdir(parents=True)
+        for name, data in self.blobs.items():
+            (self.tool.assets / 'firmware/mt7916' / name).write_bytes(data)
         self.config.write_text('positioning=n\n')
         self.assertTrue(self.tool.run()[0])
-        self.assert_stock()
-        self.assertFalse(self.tool.owner.exists())
+        self.assert_patched()
+        self.assertEqual(before, self.snapshot())
+        self.assertTrue(self.tool.owner.exists())
 
-    def test_parsing_matches_positioning_switch(self):
-        for text, want in [('positioning=Y', True), (' positioning = "y" ', True),
-                           ("positioning='y'", True), ('positioning=yes', False),
-                           ('# positioning=y', False), ('positioning=y\npositioning=n', False),
-                           ('positioning=y # comment', False), ('', False)]:
+    def test_missing_timing_tag_uses_pinned_stock_without_a_patch_trial(self):
+        """The stock recovery set does not recursively arm another trial."""
+        self.config.unlink()
+        self.gate.return_value = False
+        self.assertTrue(self.tool.run('boot')[0])
+        self.gate.assert_called_once_with(self.root)
+        self.assert_pinned()
+        self.assertFalse(self.tool.pending.exists())
+        self.boot_file.write_text('boot-two')
+        self.assertTrue(self.tool.run('boot')[0])
+        self.assertFalse(self.tool.disabled.exists())
+        self.assert_pinned()
+        self.gate.return_value = True
+        self.assertTrue(self.tool.run('boot')[0])
+        self.assert_patched()
+        self.assertEqual(self.tool.read_state(self.tool.pending)['wm_sha256'],
+                         fw.WM_SHA256)
+
+    def test_identical_foreign_stock_wm_is_not_adopted_or_removed(self):
+        """Stock bytes alone cannot establish ownership of an override."""
+        self.gate.return_value = False
+        self.tool.updates.mkdir(parents=True)
+        wm = self.tool.updates / fw.NAMES[0]
+        wm.write_bytes(self.blobs[fw.NAMES[0]])
+        self.assertTrue(self.tool.run()[0])
+        self.assertNotIn(fw.NAMES[0], self.tool.owners())
+        self.gate.return_value = True
+        self.assertFalse(self.tool.run()[0])
+        self.assertEqual(wm.read_bytes(), self.blobs[fw.NAMES[0]])
+
+    def test_stock_wm_admin_replacement_survives_cleanup(self):
+        """An identical replacement loses the recorded inode ownership."""
+        self.gate.return_value = False
+        self.assertTrue(self.tool.run()[0])
+        wm = self.tool.updates / fw.NAMES[0]
+        replacement = self.root / 'replacement'
+        replacement.write_bytes(self.blobs[fw.NAMES[0]])
+        os.replace(replacement, wm)
+        shutil.rmtree(self.primary)
+        self.assertTrue(self.tool.run()[0])
+        self.assertEqual(wm.read_bytes(), self.blobs[fw.NAMES[0]])
+
+    def test_reservation_config_is_boot_only_and_module_gated(self):
+        """The existing watcher prepares only an understood module option."""
+        path = self.root / 'etc/modprobe.d/manet-mt7916.conf'
+        self.config.write_text('mt7916_background_rx=y')
+        result = SimpleNamespace(returncode=0,
+                                 stdout='background_radar_2t2r:Reserve RX')
+        with patch.object(fw.subprocess, 'run', return_value=result) as run:
+            self.assertTrue(self.tool.run()[0])
+            self.assertIn('background_radar_2t2r=1', path.read_text())
+            self.assertEqual(run.call_args.args[0][0], 'modinfo')
+            before = path.stat().st_mtime_ns
+            self.assertTrue(self.tool.run()[0])
+            self.assertEqual(path.stat().st_mtime_ns, before)
+            result.stdout = ''
+            self.assertTrue(self.tool.run()[0])
+            self.assertFalse(path.exists())
+            result.stdout = 'background_radar_2t2r:Reserve RX'
+            self.assertTrue(self.tool.run()[0])
+        self.config.write_text('mt7916_background_rx=n')
+        self.assertTrue(self.tool.run()[0])
+        self.assertFalse(path.exists())
+        path.write_text('operator option')
+        self.assertFalse(self.tool.run()[0])
+        self.assertEqual(path.read_text(), 'operator option')
+
+    def test_failed_boot_suspends_reservation_until_rearm(self):
+        """A failed reserved boot cannot silently reuse the same module option."""
+        self.config.write_text('positioning=n\nmt7916_background_rx=y\n')
+        path = self.root / 'etc/modprobe.d/manet-mt7916.conf'
+        result = SimpleNamespace(returncode=0,
+                                 stdout='background_radar_2t2r:Reserve RX')
+        with patch.object(fw.subprocess, 'run', return_value=result):
+            self.assertTrue(self.tool.run('boot')[0])
+            self.assertTrue(path.exists())
+            self.boot_file.write_text('boot-two')
+            self.assertIn('AUTO-DISABLED', self.tool.run('boot')[1])
+            self.assertFalse(path.exists())
+            self.assert_pinned()
+            self.assertTrue(self.tool.run('rearm')[0])
+            self.assertTrue(path.exists())
+            self.assert_patched()
+            with patch.object(fw.subprocess, 'run',
+                              side_effect=FileNotFoundError('modinfo')):
+                self.assertTrue(self.tool.run()[0])
+            self.assertFalse(path.exists())
+            self.assertTrue(self.tool.run()[0])
+            self.assertTrue(path.exists())
+            self.config.write_bytes(b'mt7916_background_rx=\xff')
+            self.assertFalse(self.tool.run()[0])
+            self.assertFalse(path.exists())
+            self.assert_stock()
+
+    def test_positioning_values_and_missing_config_do_not_select_firmware(self):
+        for text in ('positioning=y', 'positioning=n', ' positioning = "Y" ',
+                     'positioning=yes', '# positioning=y',
+                     'positioning=y\npositioning=n', 'positioning=bogus', ''):
             with self.subTest(text=text):
                 self.config.write_text(text)
-                self.assertEqual(fw.enabled(self.config), want)
+                self.assertTrue(self.tool.run()[0])
+                self.assert_patched()
         self.config.unlink()
-        self.assertFalse(fw.enabled(self.config))
+        self.assertTrue(self.tool.run('boot')[0])
+        self.assert_patched()
+        self.assertNotIn('positioning', self.tool.read_state(self.tool.pending))
 
     def test_wrong_stock_hashes_refused(self):
         for name in fw.NAMES:
@@ -166,7 +286,7 @@ class FirmwareTests(unittest.TestCase):
         link = self.tool.updates / fw.NAMES[1]
         link.symlink_to(self.base / fw.NAMES[1])
         self.assertFalse(self.tool.run()[0])
-        self.config.write_text('positioning=n')
+        shutil.rmtree(self.primary)
         ok, message = self.tool.run()
         self.assertTrue(ok)
         self.assertIn('unowned overrides preserved', message)
@@ -180,7 +300,7 @@ class FirmwareTests(unittest.TestCase):
         before = foreign.stat().st_mtime_ns
         self.assertTrue(self.tool.run()[0])
         self.assertNotIn(fw.NAMES[1], self.tool.owners())
-        self.config.write_text('positioning=n')
+        shutil.rmtree(self.primary)
         self.assertTrue(self.tool.run()[0])
         self.assertEqual(foreign.stat().st_mtime_ns, before)
         self.assertEqual(foreign.read_bytes(), self.blobs[fw.NAMES[1]])
@@ -193,7 +313,7 @@ class FirmwareTests(unittest.TestCase):
         replacement = self.tool.updates / 'admin-copy'
         replacement.write_bytes(self.blobs[fw.NAMES[1]])
         os.replace(replacement, foreign)
-        self.config.write_text('positioning=n')
+        shutil.rmtree(self.primary)
         self.assertTrue(self.tool.run()[0])
         self.assertEqual(foreign.read_bytes(), self.blobs[fw.NAMES[1]])
         self.assertFalse((self.tool.updates / fw.NAMES[2]).exists())
@@ -233,13 +353,13 @@ class FirmwareTests(unittest.TestCase):
             self.tool.run()
         self.assertEqual((self.tool.updates / fw.NAMES[1]).read_bytes(), self.blobs[fw.NAMES[1]])
         self.assertFalse((self.tool.updates / fw.NAMES[0]).exists())
-        self.config.write_text('positioning=n')
+        shutil.rmtree(self.primary)
         self.assertTrue(fw.Firmware(self.root).run()[0])
         self.assert_stock()
 
     def test_disabled_boot_retries_failed_removal(self):
         self.assertTrue(self.tool.run()[0])
-        self.config.write_text('positioning=n')
+        shutil.rmtree(self.primary)
         real_unlink = Path.unlink
         def deny(path, *args, **kwargs):
             if path == self.tool.updates / fw.NAMES[0]:
@@ -261,7 +381,8 @@ class FirmwareTests(unittest.TestCase):
         self.assertEqual(before, self.snapshot())
         self.config.write_text('positioning=n')
         self.assertTrue(fw.Firmware(self.root).run()[0])
-        self.assert_stock()
+        self.assert_patched()
+        self.assertEqual(before, self.snapshot())
 
     def test_merged_usr_files(self):
         shutil.move(self.root / 'lib', self.root / 'usr/lib')
@@ -282,21 +403,21 @@ class FirmwareTests(unittest.TestCase):
         self.assert_stock()
 
     def test_cli_logs_one_line(self):
-        self.config.write_text('positioning=n')
+        shutil.rmtree(self.primary)
         result = subprocess.run([sys.executable, str(Path(fw.__file__)), '--root', str(self.root)],
                                 capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(len(result.stderr.splitlines()), 1)
         self.assertIn('disabled', result.stderr)
-        self.assertFalse(self.tool.updates.exists())
+        self.assertFalse(self.tool.owner.exists())
 
-    def test_missing_driver_tag_removes_previous_override(self):
+    def test_missing_driver_tag_replaces_patch_with_pinned_stock(self):
         self.assertTrue(self.tool.run()[0])
         self.gate.return_value = False
         ok, message = self.tool.run('boot')
         self.assertTrue(ok)
         self.assertIn('lacks manet_timing=1', message)
-        self.assert_stock()
+        self.assert_pinned()
         self.assertFalse(self.tool.pending.exists())
 
     def test_absent_primary_skips_preparation_and_boot_marker(self):
@@ -365,7 +486,7 @@ class FirmwareTests(unittest.TestCase):
                 def replace(source, dest):
                     real_replace(source, dest)
                     events.append(('replace', str(dest)))
-                def prepare(enable):
+                def prepare(enable, **kwargs):
                     record = self.tool.read_state(self.tool.pending)
                     self.assertEqual(record['boot_id'], 'boot-one')
                     self.assertEqual(record['wm_sha256'], fw.WM_SHA256)
@@ -373,7 +494,7 @@ class FirmwareTests(unittest.TestCase):
                     self.assertTrue(any(kind == 'fsync' and path.endswith('/mt7916-probe-pending')
                                         for kind, path in events[:renamed]))
                     self.assertIn(('fsync', str(self.tool.state)), events[renamed + 1:])
-                    return real_prepare(enable)
+                    return real_prepare(enable, **kwargs)
                 with patch.object(fw.os, 'fsync', side_effect=fsync), \
                      patch.object(fw.os, 'replace', side_effect=replace), \
                      patch.object(self.tool, 'prepare', side_effect=prepare):
@@ -450,7 +571,7 @@ class FirmwareTests(unittest.TestCase):
         self.assertTrue(ok)
         self.assertIn('AUTO-DISABLED after failed boot', message)
         self.assertIn(fw.WM_SHA256, message)
-        self.assert_stock()
+        self.assert_pinned()
         self.assertEqual(self.tool.read_state(self.tool.disabled)['boot_id'], 'boot-one')
         self.assertFalse(self.tool.pending.exists())
 
@@ -464,31 +585,172 @@ class FirmwareTests(unittest.TestCase):
             self.config.write_text('positioning=y\nvoice=n\n')
             for mode in ('boot', 'apply', 'survived'):
                 self.assertIn('AUTO-DISABLED', self.tool.run(mode)[1])
-                self.assert_stock()
+                self.assert_pinned()
+                self.assertFalse(self.tool.pending.exists())
         self.assertEqual(before, self.tool.disabled.stat().st_mtime_ns)
 
-    def test_observed_positioning_change_rearms_but_does_not_edit_config(self):
+    def test_positioning_changes_do_not_rearm_or_edit_config(self):
         self.fail_boot()
-        self.config.write_text('positioning=n\n')
-        self.assertTrue(self.tool.run()[0])
-        self.assertFalse(self.tool.disabled.exists())
-        self.assert_stock()
-        self.assertEqual(self.config.read_text(), 'positioning=n\n')
-        self.config.write_text('positioning=y\n')
-        self.assertTrue(self.tool.run()[0])
-        self.assertEqual((self.tool.updates / fw.NAMES[0]).read_bytes(), self.expected)
+        before = self.tool.disabled.read_bytes()
+        for value in ('n', 'y', 'N', 'bogus'):
+            with self.subTest(value=value):
+                content = f'positioning={value}\n'
+                self.config.write_text(content)
+                self.assertIn('AUTO-DISABLED', self.tool.run()[1])
+                self.assertEqual(self.tool.disabled.read_bytes(), before)
+                self.assert_pinned()
+                self.assertEqual(self.config.read_text(), content)
+        self.config.unlink()
+        self.assertIn('AUTO-DISABLED', self.tool.run()[1])
+        self.assertEqual(self.tool.disabled.read_bytes(), before)
+        self.assert_pinned()
 
     def test_explicit_rearm_still_requires_tag_and_retains_current_pending(self):
         self.fail_boot()
         self.gate.return_value = False
         self.assertIn('lacks manet_timing', self.tool.run('rearm')[1])
-        self.assert_stock()
+        self.assert_pinned()
         self.assertFalse(self.tool.disabled.exists())
         self.gate.return_value = True
         self.assertTrue(self.tool.run('boot')[0])
         before = self.tool.pending.read_bytes()
         self.assertTrue(self.tool.run('rearm')[0])
         self.assertEqual(before, self.tool.pending.read_bytes())
+
+    def update_patch(self):
+        """Install a new, consistently pinned patch without changing stock."""
+        _, self.manifest, self.expected = fixture(0xa6)
+        self.write_manifest()
+        updated_hash = patch.object(fw, 'WM_SHA256', fw.digest(self.expected))
+        updated_hash.start()
+        self.addCleanup(updated_hash.stop)
+
+    def test_changed_patch_rearms_failed_hash_and_tracks_its_own_boot(self):
+        self.fail_boot()
+        failed_hash = self.tool.read_state(self.tool.disabled)['wm_sha256']
+        self.update_patch()
+        self.assertNotEqual(failed_hash, fw.WM_SHA256)
+        self.assertTrue(self.tool.run()[0])
+        self.assert_patched()
+        self.assertFalse(self.tool.disabled.exists())
+        self.assertFalse(self.tool.pending.exists())
+        self.assertTrue(self.tool.run('boot')[0])
+        self.assertEqual(self.tool.read_state(self.tool.pending)['wm_sha256'], fw.WM_SHA256)
+        self.boot_file.write_text('boot-three')
+        self.assertIn('AUTO-DISABLED', self.tool.run('boot')[1])
+        self.assertEqual(self.tool.read_state(self.tool.disabled)['wm_sha256'], fw.WM_SHA256)
+        self.assert_pinned()
+        # Reinstalling the same patch cannot retry a known failed hash.
+        self.write_manifest()
+        self.assertIn('AUTO-DISABLED', self.tool.run()[1])
+        self.assert_pinned()
+
+    def test_changed_patch_rearms_when_old_failure_is_first_observed(self):
+        self.assertTrue(self.tool.run('boot')[0])
+        self.update_patch()
+        self.boot_file.write_text('boot-two')
+        self.assertTrue(self.tool.run('boot')[0])
+        self.assert_patched()
+        self.assertFalse(self.tool.disabled.exists())
+        self.assertEqual(self.tool.read_state(self.tool.pending)['wm_sha256'], fw.WM_SHA256)
+
+    def test_changed_patch_still_requires_timing_tag(self):
+        self.fail_boot()
+        self.update_patch()
+        self.gate.return_value = False
+        self.assertIn('lacks manet_timing=1', self.tool.run('boot')[1])
+        self.assert_pinned()
+        self.assertFalse(self.tool.disabled.exists())
+        self.assertFalse(self.tool.pending.exists())
+
+    def test_update_replaces_owned_previous_patch_without_rewriting_companions(self):
+        self.assertTrue(self.tool.run()[0])
+        before = self.snapshot()
+        self.update_patch()
+        self.assertTrue(self.tool.run()[0])
+        self.assert_patched()
+        after = self.snapshot()
+        for name in fw.NAMES[1:]:
+            self.assertEqual(before[name], after[name])
+
+    def test_update_preserves_foreign_replacement_of_previous_patch(self):
+        self.assertTrue(self.tool.run()[0])
+        wm = self.tool.updates / fw.NAMES[0]
+        replacement = self.root / 'replacement'
+        replacement.write_bytes(self.expected)
+        os.replace(replacement, wm)
+        before = wm.read_bytes()
+        self.update_patch()
+        ok, message = self.tool.run()
+        self.assertFalse(ok)
+        self.assertIn('unowned firmware override', message)
+        self.assertEqual(wm.read_bytes(), before)
+
+    def test_interrupted_hash_update_retries_owned_previous_patch(self):
+        self.assertTrue(self.tool.run()[0])
+        old_wm = (self.tool.updates / fw.NAMES[0]).read_bytes()
+        self.update_patch()
+        real_replace = os.replace
+        def crash(source, destination):
+            if Path(destination) == self.tool.updates / fw.NAMES[0]:
+                raise SystemExit('power loss before new WM publication')
+            return real_replace(source, destination)
+        with patch.object(fw.os, 'replace', side_effect=crash), self.assertRaises(SystemExit):
+            self.tool.run()
+        self.assertEqual((self.tool.updates / fw.NAMES[0]).read_bytes(), old_wm)
+        self.assertTrue(fw.Firmware(self.root).run()[0])
+        self.assert_patched()
+
+    def test_interrupted_rearm_retries_owned_stock_wm(self):
+        self.fail_boot()
+        real_replace = os.replace
+        def crash(source, destination):
+            if Path(destination) == self.tool.updates / fw.NAMES[0]:
+                raise SystemExit('power loss before rearmed WM publication')
+            return real_replace(source, destination)
+        with patch.object(fw.os, 'replace', side_effect=crash), self.assertRaises(SystemExit):
+            self.tool.run('rearm')
+        self.assert_pinned()
+        self.assertTrue(fw.Firmware(self.root).run()[0])
+        self.assert_patched()
+
+    def test_pinned_recovery_is_idempotent_without_cached_stock(self):
+        self.fail_boot()
+        before = self.snapshot()
+        shutil.rmtree(self.tool.assets / 'firmware')
+        self.boot_file.write_text('boot-three')
+        with patch.object(fw, 'patch_wm', side_effect=AssertionError('must not reseal')), \
+             patch.object(fw, 'staged_file', side_effect=AssertionError('must not write')):
+            self.assertIn('AUTO-DISABLED', self.tool.run('boot')[1])
+        self.assert_pinned()
+        self.assertEqual(before, self.snapshot())
+        self.assertFalse(self.tool.pending.exists())
+
+    def test_legacy_positioning_in_failure_record_cannot_rearm(self):
+        self.fail_boot()
+        record = self.tool.read_state(self.tool.disabled)
+        record['positioning'] = 'y'
+        self.tool.write_state(self.tool.disabled, record)
+        self.config.write_text('positioning=n')
+        self.assertIn('AUTO-DISABLED', self.tool.run()[1])
+        self.assert_pinned()
+        self.assertEqual(self.tool.read_state(self.tool.disabled), record)
+
+    def test_fallback_publication_interruption_keeps_latch_and_retries_stock(self):
+        self.assertTrue(self.tool.run('boot')[0])
+        self.boot_file.write_text('boot-two')
+        real_replace = os.replace
+        def crash(source, destination):
+            if Path(destination) == self.tool.updates / fw.NAMES[0]:
+                raise SystemExit('power loss while publishing stock WM')
+            return real_replace(source, destination)
+        with patch.object(fw.os, 'replace', side_effect=crash), self.assertRaises(SystemExit):
+            self.tool.run('boot')
+        self.assertTrue(self.tool.disabled.exists())
+        self.boot_file.write_text('boot-three')
+        self.assertIn('AUTO-DISABLED', self.tool.run('boot')[1])
+        self.assert_pinned()
+        self.assertFalse(self.tool.pending.exists())
 
     def test_same_boot_apply_and_boot_retry_do_not_consume_pending(self):
         self.assertTrue(self.tool.run('boot')[0])
@@ -513,7 +775,7 @@ class FirmwareTests(unittest.TestCase):
         self.assertTrue(self.tool.pending.exists())
         self.boot_file.write_text('boot-three')
         self.assertIn('AUTO-DISABLED', self.tool.run('boot')[1])
-        self.assert_stock()
+        self.assert_pinned()
 
     def test_failed_recovery_record_keeps_pending_and_removes_override(self):
         self.assertTrue(self.tool.run('boot')[0])

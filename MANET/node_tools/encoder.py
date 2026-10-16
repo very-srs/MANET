@@ -121,7 +121,8 @@ def build_telemetry(args):
         for r in json.loads(args.channel_report_json).get('results', []):
             result = t.channel_report.results.add()
             result.channel = int(r.get('channel', 0))
-            result.noise_floor = int(r.get('noise_floor', 0))
+            if r.get('noise_floor') is not None:
+                result.noise_floor = int(r['noise_floor'])
             result.bss_count = int(r.get('bss_count', 0))
             # Left absent when the scan could not measure it -- see the field
             # comment in NodeInfo.proto.

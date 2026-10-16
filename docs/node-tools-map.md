@@ -64,6 +64,7 @@ Read [mesh mechanisms](guide/content/mesh.md) and
 | [mesh-channel-agreement.py](../MANET/node_tools/mesh-channel-agreement.py) | Run authenticated ACS agreement and recovery across the connected component. |
 | [manet_acs_agreement.py](../MANET/node_tools/manet_acs_agreement.py) | Pure bounded majority-agreement state machine. |
 | [mesh-acs-common.sh](../MANET/node_tools/mesh-acs-common.sh) | Shared clock, role and channel configuration helpers. |
+| [manet_bgobs.py](../MANET/node_tools/manet_bgobs.py) | Measure 5 GHz candidates on the reserved third RX chain and correct own-TX blanking. |
 | [channel-election.sh](../MANET/node_tools/channel-election.sh) | Score measured channels and request an agreed change; signal limp conditions. |
 | [quorum-checker.sh](../MANET/node_tools/quorum-checker.sh) | Decide whether isolation requires returning to discovery, distinguishing unavailable checks. |
 | [limp-mode-manager.sh](../MANET/node_tools/limp-mode-manager.sh) | Reconcile limp-mode entry/exit from mesh observations. |
@@ -213,7 +214,7 @@ Read [first boot](guide/content/first-boot.md), [updates](guide/content/updates.
 | [radio-setup.sh](../MANET/node_tools/radio-setup.sh) | Configure discovered radios, network roles and services from stored setup. |
 | [manet-wait-radios.py](../MANET/node_tools/manet-wait-radios.py) | Bound boot enumeration before assigning persistent interface roles. |
 | [manet-radio-names.py](../MANET/node_tools/manet-radio-names.py) | Finish MAC-pinned interface naming before networking. |
-| [manet-mt7916-firmware.py](../MANET/node_tools/manet-mt7916-firmware.py) | Prepare opt-in firmware selection and fallback state without reloading drivers. |
+| [manet-mt7916-firmware.py](../MANET/node_tools/manet-mt7916-firmware.py) | Prepare default patched WM or pinned-stock fallback, boot RX reservation and recovery state. |
 | [manet-mt7916-setup.sh](../MANET/node_tools/manet-mt7916-setup.sh) | Enable firmware-selection/survival integration during install/update. |
 | [manet-kernel-protect.py](../MANET/node_tools/manet-kernel-protect.py) | Protect MANET boot files from replacement by distribution package transactions. |
 | [manet-cpu-policy.sh](../MANET/node_tools/manet-cpu-policy.sh) | Keep CPUs available with demand scaling and the CM4 thermal policy. |
@@ -222,6 +223,7 @@ Read [first boot](guide/content/first-boot.md), [updates](guide/content/updates.
 | [manet_release.py](../MANET/node_tools/manet_release.py) | Select a published stable/development release and validate its manifest. |
 | [node-update.sh](../MANET/node_tools/node-update.sh) | Enter the Python updater or resume using the retained recovery copy. |
 | [node-update.py](../MANET/node_tools/node-update.py) | Verify, stage, replace and activate an update with durable recovery state. |
+| [manet_kernel_update.py](../MANET/node_tools/manet_kernel_update.py) | Validate matched kernel inputs and manage qualified CM4 trial, confirmation and fallback state. |
 | [manet-auto-update.sh](../MANET/node_tools/manet-auto-update.sh) | Gate routine updates on opt-in, clock sync and a direct or mesh-gateway route; spread mesh checks with a bounded delay. |
 | [version.txt](../MANET/node_tools/version.txt) | Runtime package version; must match the paired source version when publishing packages. |
 

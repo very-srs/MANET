@@ -94,10 +94,12 @@ also produce errors without explaining a USB failure. The
 [Morse bring-up record](../../../docs/kernel-6.18-morse-port.md) separates
 these stages and records the board-specific build requirements.
 
-The MT7916 path has its own firmware selection and boot-survival state.
-Managed firmware candidates must not be mistaken for arbitrary replacement
-blobs: the selector records which set was attempted and whether the boot
-survived. See the [firmware selection mechanism](../../../docs/node-tools-internals.md#mt7916-firmware-selection).
+The MT7916 path defaults to the patched 2024 WM and stock WA/ROM when the
+installed driver reports `manet_timing=1`, independently of `positioning=`.
+Its boot-survival record identifies the attempted patched WM. An unconfirmed
+boot or a driver without the tag selects the pinned unmodified 2024 set.
+An explicit rearm or an update with a different patched hash allows a new
+trial. See the [firmware selection mechanism](../../../docs/node-tools-internals.md#mt7916-firmware-selection).
 The tracked [binary reference](../../../MANET/binaries_arm64/README.md)
 identifies the supplied BATMAN tools and supplicant builds; the
 [development guide](development.md) explains reproducibility limits.

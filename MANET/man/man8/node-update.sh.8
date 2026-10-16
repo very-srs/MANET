@@ -1,4 +1,4 @@
-.Dd October 13, 2026
+.Dd October 15, 2026
 .Dt NODE-UPDATE.SH 8
 .Os MANET
 .Sh NAME
@@ -9,7 +9,11 @@
 .Op Fl -routine
 .Op Fl -development
 .Op Fl -allow-downgrade
-.Op Fl -recover-only | Fl -recover-files
+.Op Fl -recover-only | Fl -recover-files | Fl -cancel-kernel-trial
+.Nm
+.Fl -local-archive Ar path
+.Fl -local-version Ar version
+.Op Fl -allow-downgrade
 .Nm
 .Fl h | Fl -help
 .Sh DESCRIPTION
@@ -25,8 +29,9 @@ The archive digest, paths and embedded versions are checked before staging.
 The tools archive may carry any component selected for the release,
 including kernels, modules, firmware and configuration migrations.
 Current packages update runtime files and managed radio firmware.
-Kernel-specific installation, activation and boot recovery still require
-implementation and validation before a kernel payload is shipped.
+The opt-in CM4 kernel trial path requires a locally qualified boot profile
+and hardware validation before shipment.
+Rock 3A kernel activation is not yet enabled.
 Follow the selected release's activation and reboot instructions.
 .Pp
 A pending installation resumes from its saved archive before checking
@@ -65,6 +70,14 @@ Allow the selected release to replace a newer installed version.
 .It Fl -recover-only
 Finish a pending update from local recovery files without networking.
 Do nothing if no update is pending.
+.It Fl -local-archive Ar path Fl -local-version Ar version
+Install an explicitly supplied board tools archive with its adjacent SHA-256
+sidecar and the specified embedded version, without release discovery.
+An equal installed version is reinstalled. Downgrades still require
+.Fl -allow-downgrade .
+.It Fl -cancel-kernel-trial
+Cancel an uncommitted kernel trial after returning to the original kernel.
+Retain candidate files and diagnostics.
 .It Fl -recover-files
 Restore a pending payload before service startup, leaving final service
 checks and completion to the later recovery pass.
