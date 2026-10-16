@@ -38,7 +38,10 @@ detects again once the current run finishes.
 
 Once DHCP has finished and a route exists, gateway and NAT state are
 reconciled. Carrier alone does not mean the interface can reach anything, which
-is why this is a separate step.
+is why this is a separate step. Only events from a possible uplink, or from the
+current uplink, start this. The AP radio, mesh radios and bridges are ignored,
+so stopping hostapd by hand does not bring it straight back. The node manager's
+periodic reconcile still repairs a gateway's AP.
 
 An Ethernet uplink becomes a gateway after an interface-bound HTTP 204 check.
 An ICMP reply alone or a portal's HTTP 200/302 response cannot qualify it.
