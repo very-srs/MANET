@@ -346,9 +346,13 @@ class KernelTrial:
                 continue
             if sha256(self.target(name, info)) != item['sha256']:
                 raise KernelError('Installed candidate hash mismatch: ' + name)
+        # The kernel pets the firmware-armed watchdog until userspace opens
+        # it, forever by default. Bound that, so a trial that never reaches
+        # systemd (no root device under rootwait, for one) still resets.
         args = info['base_cmdline'].strip()
         args += (f" manet.kernel_trial={info['slot']} firmware_class.path="
-                 f"/var/lib/manet-kernel/{info['slot']}/firmware panic=10\n")
+                 f"/var/lib/manet-kernel/{info['slot']}/firmware panic=10"
+                 f" watchdog.open_timeout=120\n")
         target = self.u.destination('boot/firmware/manet/' + info['slot'] + '/cmdline.txt')
         self.write(target, data=args.encode())
         # Recheck immediately before arming, including a resumed staging run.
