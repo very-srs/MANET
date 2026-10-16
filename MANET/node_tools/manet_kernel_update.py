@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import re
 import stat
+import subprocess
 import time
 
 PREFIX = 'manet-kernel/'
@@ -230,17 +231,33 @@ class KernelTrial:
                 arg.startswith(('manet.kernel_trial=', 'firmware_class.path=')) for arg in args.split()):
             raise KernelError('Unsupported kernel command line')
         self.config(base, 'candidate', manifest['files'])
-        watchdog = self.run(['vcgencmd', 'bootloader_config']).decode()
-        if not re.search(r'^BOOT_WATCHDOG_TIMEOUT=[1-9][0-9]*$', watchdog, re.M):
-            raise KernelError('EEPROM boot watchdog is not enabled')
-        runtime = self.run(['systemctl', 'show', '--property=RuntimeWatchdogUSec', '--value']).strip()
-        if not runtime or runtime in (b'0', b'0us', b'infinity'):
-            raise KernelError('PID 1 runtime watchdog is not enabled')
+        self.watchdogs()
         sizes = manifest['files']
         self.u.space([(self.boot, sum(v['size'] + 4096 for k, v in sizes.items() if k.startswith('boot/'))),
                       (self.root / 'usr/lib', sum(v['size'] + 4096 for k, v in sizes.items()
                                                  if not k.startswith('boot/')))])
         return manifest, profile
+
+    def watchdogs(self):
+        # The commissioned profile attests to start4.elf's kernel watchdog
+        # handoff and reset test. An EEPROM setting alone cannot prove it.
+        # Older CM4 EEPROMs lack a boot watchdog; failure before kernel handoff
+        # then needs a power cycle to return to the normal one-shot selector.
+        runtime = self.run(['systemctl', 'show', '--property=RuntimeWatchdogUSec', '--value']).strip()
+        if not re.fullmatch(rb'(?:[0-9]+(?:\.[0-9]+)?(?:us|ms|s|min|h|d|w)?\s*)+', runtime) or not any(
+                float(value) > 0 for value in re.findall(rb'[0-9]+(?:\.[0-9]+)?', runtime)):
+            raise KernelError('PID 1 runtime watchdog is not enabled')
+        evidence = dict(kernel_timeout_sec=180, runtime=runtime.decode(),
+                        eeprom_boot_watchdog='unknown')
+        try:
+            config = self.run(['vcgencmd', 'bootloader_config'], timeout=10).decode()
+        except (OSError, KernelError, subprocess.TimeoutExpired, UnicodeError) as error:
+            evidence['eeprom_query_error'] = str(error)
+        else:
+            value = re.search(r'^BOOT_WATCHDOG_TIMEOUT=(\d+)\s*$', config, re.M)
+            evidence['eeprom_boot_watchdog'] = 'enabled' if value and int(value[1]) else 'disabled-or-absent'
+            evidence['eeprom_timeout_sec'] = int(value[1]) if value else None
+        return evidence
 
     def target(self, name, info):
         if name.startswith('boot/'):
@@ -334,6 +351,8 @@ class KernelTrial:
                  f"/var/lib/manet-kernel/{info['slot']}/firmware panic=10\n")
         target = self.u.destination('boot/firmware/manet/' + info['slot'] + '/cmdline.txt')
         self.write(target, data=args.encode())
+        # Recheck immediately before arming, including a resumed staging run.
+        info['watchdogs'] = self.watchdogs()
         self.write(self.boot / 'tryboot.txt', data=info['trial_config'].encode())
         info['phase'] = 'attempted'
         info['origin_boot'] = self.boot_id()
@@ -408,7 +427,8 @@ class KernelTrial:
         self.u.make_directory(directory)
         confirmed = dict(config_sha256=hashlib.sha256(info['trial_config'].encode()).hexdigest(),
                          base_config=info['base_config'], base_cmdline=info['base_cmdline'],
-                         release=info['release'], slot=info['slot'])
+                         release=info['release'], slot=info['slot'],
+                         watchdogs=info.get('watchdogs'))
         self.atomic(directory / 'confirmed.json', data=json.dumps(confirmed).encode(), mode=0o600)
         (self.boot / 'tryboot.txt').unlink(missing_ok=True)
         self.sync(self.boot)

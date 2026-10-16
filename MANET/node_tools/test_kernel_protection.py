@@ -25,6 +25,26 @@ def load_helper():
 
 
 class KernelProtectionTests(unittest.TestCase):
+    def test_cm4_initramfs_policy_is_idempotent_and_keeps_pi5(self):
+        text = (MANET / 'provisioning/firstrun.sh.template').read_text()
+        start = text.index('    if [ "__HARDWARE_MODEL__" = "rpi4" ]; then', text.index('for _cfg in /boot/firmware/config.txt'))
+        block = text[start:text.index('\n    fi', start) + len('\n    fi')]
+        for model in ('rpi4', 'rpi5'):
+            for initial in ('[all]\nauto_initramfs=1\n[cm5]\nauto_initramfs=1\n', '[all]\n'):
+                with self.subTest(model=model, initial=initial), tempfile.TemporaryDirectory() as tmp:
+                    config = Path(tmp) / 'config.txt'
+                    config.write_text(initial)
+                    command = '_cfg="$1"\n' + block.replace('__HARDWARE_MODEL__', model)
+                    subprocess.run(['bash', '-eu', '-c', command, 'test', str(config)], check=True)
+                    first = config.read_text()
+                    subprocess.run(['bash', '-eu', '-c', command, 'test', str(config)], check=True)
+                    self.assertEqual(first, config.read_text())
+                    if model == 'rpi4':
+                        self.assertNotIn('auto_initramfs=1', first)
+                        self.assertIn('[cm4]\nauto_initramfs=0\n[all]', first)
+                    else:
+                        self.assertEqual(first, initial)
+
     def test_pin_coverage_and_userland_exclusions(self):
         text = POLICY.read_text()
         patterns = []
