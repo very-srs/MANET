@@ -2,6 +2,8 @@
 # Keep headless SSH access available on provisioned MANET nodes.
 
 set -u
+. "${MANET_TOOLS_DIR:-$(dirname "${BASH_SOURCE[0]}")}/manet-common.sh" || exit 1
+manet_load_ssh_account || exit 1
 
 # Print the SSH recovery message to stderr.
 log() {
@@ -14,21 +16,22 @@ if [ -f /etc/mesh.conf ]; then
     RADIO_PASSWORD=$(awk -F= '$1 == "radio_password" {print substr($0, index($0, "=") + 1); exit}' /etc/mesh.conf)
 fi
 
-if ! id -u radio >/dev/null 2>&1; then
-    log "Creating missing radio user"
-    useradd -m -s /bin/bash -G sudo,adm,dialout,cdrom,audio,video,plugdev,games,users,input,netdev,gpio,i2c,spi radio
+if ! id -u "$MANET_SSH_USER" >/dev/null 2>&1; then
+    log "Creating missing SSH user '$MANET_SSH_USER'"
+    useradd -m -U -s /bin/bash -G sudo,adm,dialout,cdrom,audio,video,plugdev,games,users,input,netdev,gpio,i2c,spi "$MANET_SSH_USER" || exit 1
 else
-    usermod -aG sudo,adm,dialout,cdrom,audio,video,plugdev,games,users,input,netdev,gpio,i2c,spi radio 2>/dev/null || true
+    usermod -aG sudo,adm,dialout,cdrom,audio,video,plugdev,games,users,input,netdev,gpio,i2c,spi "$MANET_SSH_USER" 2>/dev/null || true
 fi
 
 if [ -n "$RADIO_PASSWORD" ]; then
-    printf '%s\n' "radio:$RADIO_PASSWORD" | chpasswd
+    printf '%s\n' "$MANET_SSH_USER:$RADIO_PASSWORD" | chpasswd
 fi
-passwd -u radio 2>/dev/null || true
+passwd -u "$MANET_SSH_USER" 2>/dev/null || true
 
-mkdir -p /home/radio/.ssh /etc/ssh/sshd_config.d
-chmod 700 /home/radio/.ssh
-chown -R radio:radio /home/radio/.ssh
+mkdir -p "$MANET_SSH_HOME/.ssh" /etc/ssh/sshd_config.d
+chmod 700 "$MANET_SSH_HOME/.ssh"
+chown -R "$MANET_SSH_USER:$MANET_SSH_GROUP" "$MANET_SSH_HOME/.ssh"
+manet_write_ssh_sudoers || exit 1
 
 # Enable password/public-key authentication and prohibit root passwords.
 cat << EOF > /etc/ssh/sshd_config.d/10-manet.conf

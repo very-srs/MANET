@@ -78,7 +78,7 @@ no additional daemon or polling timer. Static plan parsing and
 radio-state JSON parsing also reuse unchanged inputs.
 
 Interface publication uses `manet_interfaces.py`, avoiding web-server imports
-and UI-only probes. Syncthing IDs are derived from the radio account's public
+and UI-only probes. Syncthing IDs are derived from the configured SSH account's public
 certificate and cached until its metadata changes; an absent cert retries at
 the next identity publish without opening a PAM session. Once a chunk is held,
 failed or empty primary-address lookups defer identity publication and retain
@@ -1593,7 +1593,11 @@ through `manet-led-common.sh`.
 
 **ssh-recovery.sh**
 
-Keeps headless SSH reachable on a provisioned node.
+Keeps headless SSH reachable on a provisioned node. Reads `ssh_user` from
+`/etc/mesh.conf` (default `radio`) and resolves the account's home directory
+and primary group. Setup uses the same account for diagnostic sudo rules,
+Syncthing and Mumble shared files. The username is selected at flash time,
+not changed through mesh configuration synchronization.
 
 **mesh-clone-identity.sh**
 

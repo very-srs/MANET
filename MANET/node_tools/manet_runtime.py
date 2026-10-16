@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import pwd
 import re
 import select
 import ssl
@@ -31,10 +32,29 @@ class Helpers:
         """Derive the device ID, reusing it only while cert metadata matches."""
         from manet_ids import bytes_to_syncthing_id
         # Syncthing prefers an existing legacy config, else XDG_STATE_HOME.
-        # Match the provisioned radio account.
-        paths = [Path(os.environ['MANET_SYNCTHING_CERT'])] if 'MANET_SYNCTHING_CERT' in os.environ else [
-            Path('/home/radio/.config/syncthing/cert.pem'),
-            Path('/home/radio/.local/state/syncthing/cert.pem')]
+        # Match the account selected at flash time, including its actual home.
+        if 'MANET_SYNCTHING_CERT' in os.environ:
+            paths = [Path(os.environ['MANET_SYNCTHING_CERT'])]
+        else:
+            username = 'radio'
+            try:
+                for line in Path(os.environ.get('MANET_MESH_CONF', '/etc/mesh.conf')).read_text().splitlines():
+                    if line.startswith('ssh_user='):
+                        username = line.partition('=')[2]
+                        break
+            except FileNotFoundError:
+                pass
+            if not re.fullmatch(r'[a-z_][a-z0-9_-]{0,31}', username) or username in ('root', 'nobody'):
+                raise ValueError('Invalid SSH username in mesh.conf')
+            try:
+                account = pwd.getpwnam(username)
+            except KeyError:
+                return ''  # First boot has not created the account yet.
+            if account.pw_uid < 1000 or account.pw_uid == 65534:
+                raise ValueError('Refusing a system account for Syncthing')
+            home = Path(account.pw_dir)
+            paths = [home / '.config/syncthing/cert.pem',
+                     home / '.local/state/syncthing/cert.pem']
         for path in paths:
             try:
                 info = path.stat()

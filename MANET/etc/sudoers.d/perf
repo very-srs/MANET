@@ -1,1 +1,0 @@
-radio ALL=(ALL) NOPASSWD: /usr/sbin/batctl, /sbin/ip link set wlan*, /usr/bin/iw

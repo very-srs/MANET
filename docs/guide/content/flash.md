@@ -9,7 +9,7 @@
 1. **Get the flasher.** [Windows](https://github.com/very-srs/MANET/releases/latest/download/Flash-a-Radio.cmd) or [Linux](https://github.com/very-srs/MANET/releases/latest/download/flash-a-radio.sh).
 2. **Pick your board.** Enter the settings for your mesh.  You can ask a friend to read the words if you get confused.
 3. **Check the drive.** Flashing erases the selected storage. Look at it twice to make sure it is the right thing being deleted.
-4. **Let it finish.** Then follow [first boot](first-boot.md).
+4. **Keep your login.** Save the SSH username and passwords shown when flashing finishes. Then follow [first boot](first-boot.md).
 
 A CM4 with built-in eMMC uses USB boot access instead of a removable card. Follow the flasher's hardware instructions.
 
@@ -30,7 +30,13 @@ Run the Linux flasher as your regular user. It requests elevated access when it 
 
 ### Enter the mesh settings
 
-Select the board, then configure the mesh SSID and SAE key, network range, regulatory region, device connection mode, and passwords. Radios intended for the same mesh need compatible mesh settings. The admin password is shared across the mesh; local access-point settings belong to each radio.
+Select the board, then configure the mesh SSID and SAE key, network CIDR, regulatory region, EUD connection mode, SSH username and password, and web admin password. Radios intended for the same mesh need compatible mesh settings. The admin password is shared across the mesh; local access-point settings belong to each radio.
+
+The **SSH username** is the Linux account used to log in to the radio. It
+defaults to `radio` and is editable. The **SSH password** belongs to that
+account. The **Web interface admin password** opens the management page.
+Use CIDR notation such as `10.30.2.0/24` for the network, not a start–end
+address span. Save the login details shown when flashing finishes.
 
 Saved configurations can be reused by the Windows and Linux flashers. Optional additional setup scripts are embedded at flash time and run on the node after successful provisioning.
 
@@ -87,6 +93,16 @@ The [template contract](../../../docs/provisioning-internals.md#template-tokens)
 identifies the shared substitution paths.
 
 The rendered first-boot script pins the selected install URL, digest, and version. A later release cannot change that image's package target. An image pinned to a prerelease whose assets were deleted needs to be reflashed with a retained release.
+
+### SSH account selection
+
+Saved configurations carry `RADIO_USER`, and both host engines substitute
+`__RADIO_USER__` into provisioning. Missing keys default to `radio` on each
+load. Usernames are validated before writing an image. Both templates save
+`ssh_user` in `/etc/mesh.conf`, so SSH recovery and services using the
+account's home directory follow the selected name. Runtime configuration
+changes preserve this local setting. Editing it is not a supported way to
+rename an existing account.
 
 ### Review points for changes
 

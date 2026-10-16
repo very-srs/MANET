@@ -17,7 +17,7 @@ SystemCallArchitectures=native
 # Atomic replacement needs writable parent directories, including /etc.
 # wpa_cli binds its reply socket in the host's /tmp, so PrivateTmp breaks it.
 ReadWritePaths=/etc /var/lib /run /tmp
-# Syncthing identity reads the radio account's public certificate.
+# Syncthing identity reads the SSH account's public certificate.
 ProtectHome=read-only
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW

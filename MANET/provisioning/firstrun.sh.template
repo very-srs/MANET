@@ -47,20 +47,31 @@ systemctl restart systemd-journald
 journalctl --flush 2>/dev/null || true
 
 
-# Create the radio user with proper groups
-if ! id -u radio > /dev/null 2>&1; then
-	echo "Creating user 'radio'..."
-	useradd -m -s /bin/bash -G sudo,adm,dialout,cdrom,audio,video,plugdev,games,users,input,netdev,gpio,i2c,spi radio
-	{ set +x; } 2>/dev/null   # secrets follow: keep them out of the trace log
-	echo "radio:__RADIO_PW__" | chpasswd
-	set -x
-
-	# Set up SSH directory
-	mkdir -p /home/radio/.ssh
-	chmod 700 /home/radio/.ssh
-	chown -R radio:radio /home/radio/.ssh
-	echo "User 'radio' created successfully"
+# Create the selected SSH user with proper groups.
+SSH_USER='__RADIO_USER__'
+if [[ ! "$SSH_USER" =~ ^[a-z_][a-z0-9_-]{0,31}$ || "$SSH_USER" = root || "$SSH_USER" = nobody ]]; then
+    echo 'Invalid SSH username' >&2
+    exit 1
 fi
+if id -u "$SSH_USER" >/dev/null 2>&1; then
+    if [ "$(id -u "$SSH_USER")" -lt 1000 ]; then
+        echo "Refusing to use system account '$SSH_USER' for SSH" >&2
+        exit 1
+    fi
+else
+	echo "Creating SSH user '$SSH_USER'..."
+	useradd -m -U -s /bin/bash -G sudo,adm,dialout,cdrom,audio,video,plugdev,games,users,input,netdev,gpio,i2c,spi "$SSH_USER" || exit 1
+fi
+{ set +x; } 2>/dev/null   # secrets follow: keep them out of the trace log
+echo "$SSH_USER:__RADIO_PW__" | chpasswd || exit 1
+set -x
+
+# Set up SSH directory
+SSH_HOME=$(getent passwd "$SSH_USER" | cut -d: -f6)
+mkdir -p "$SSH_HOME/.ssh"
+chmod 700 "$SSH_HOME/.ssh"
+chown -R "$SSH_USER:$(id -gn "$SSH_USER")" "$SSH_HOME/.ssh"
+echo "SSH user '$SSH_USER' configured successfully"
 
 # Allow several client keys before password login during provisioning.
 # radio-setup.sh rewrites this drop-in with the full SSH policy.
@@ -961,6 +972,7 @@ systemctl enable --now manet-uplink-dns.path manet-uplink-dns.service || exit 1
 #write out the config selections for future use
 { set +x; } 2>/dev/null   # secrets follow: keep them out of the trace log
 echo "mesh_key=__MESH_SAE_KEY__" > /etc/mesh.conf
+echo "ssh_user=__RADIO_USER__" >> /etc/mesh.conf
 echo "mesh_ssid=__MESH_SSID__" >> /etc/mesh.conf
 echo "regulatory_domain=__REGULATORY_DOMAIN__" >> /etc/mesh.conf
 echo "halow_regulatory_domain=__HALOW_REGULATORY_DOMAIN__" >> /etc/mesh.conf

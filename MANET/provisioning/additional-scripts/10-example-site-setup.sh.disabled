@@ -20,12 +20,14 @@ echo "site setup starting on $(hostname)"
 # them. There is no separate data/ directory and none is needed: a quoted
 # heredoc carries any text verbatim, including one nested inside this script.
 # ---------------------------------------------------------------------------
-install -d -m 700 -o radio -g radio /home/radio/.ssh
-cat > /home/radio/.ssh/authorized_keys <<'KEYS'
+. /usr/local/bin/manet-common.sh
+manet_load_ssh_account || exit 1
+install -d -m 700 -o "$MANET_SSH_USER" -g "$MANET_SSH_GROUP" "$MANET_SSH_HOME/.ssh"
+cat > "$MANET_SSH_HOME/.ssh/authorized_keys" <<'KEYS'
 # ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA... ops@example.org
 KEYS
-chown radio:radio /home/radio/.ssh/authorized_keys
-chmod 600 /home/radio/.ssh/authorized_keys
+chown "$MANET_SSH_USER:$MANET_SSH_GROUP" "$MANET_SSH_HOME/.ssh/authorized_keys"
+chmod 600 "$MANET_SSH_HOME/.ssh/authorized_keys"
 
 # ---------------------------------------------------------------------------
 # Anything large or binary belongs behind a fetch, not in the image. The node
