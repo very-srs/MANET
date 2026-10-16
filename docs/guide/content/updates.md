@@ -116,15 +116,26 @@ the release includes a deliberate migration. See the
 
 The updater validates paths, ownership, file types, archive limits, required
 files, available space, the manifest digest, and the checksum sidecar before
-live replacement. There is no kernel, firmware, or network-configuration
-category ban. Downloading requires `/run/initial_time_synced`; local recovery
-does not.
+live replacement. Boot files, modules and Morse firmware use a separate
+matched kernel payload with trial activation. Downloading requires
+`/run/initial_time_synced`; local recovery does not.
 
-The current builder includes the managed MT7916 firmware payload but not a
-board-specific kernel overlay. Accepting boot files in an archive does not
-implement a complete kernel upgrade: boot-filesystem handling, a matched
-kernel/modules/device-tree set, module dependency generation, reboot sequencing,
-size limits, and boot-failure recovery need validation before that release ships.
+The default builder includes managed MT7916 firmware. Optional board kernel
+inputs carry a manifest, boot files, versioned modules and isolated Morse
+firmware. CM4 has an opt-in one-shot trial implementation. It requires a locally
+qualified boot profile, watchdog coverage and a pinned radio/management health
+check. The trial runs before runtime software replacement, and a failed trial
+is not automatically repeated. Early file recovery avoids the boot filesystem.
+Late recovery stages or confirms the trial after normal mounts. Rock 3A kernel
+activation is rejected until its actual bootloader fallback and reset path are
+verified. Hardware validation is still required before publishing kernel
+updates. Details and limitations are in the
+[kernel activation protocol](../../../docs/node-tools-internals.md#kernel-payload-and-activation-protocol).
+
+For an offline bench, `--local-archive` and `--local-version` validate an
+explicitly supplied board tools archive and adjacent checksum without release
+discovery. This trusts the locally supplied files and allows an equal version
+to be reinstalled. It uses the same staging, recovery and trial transaction.
 
 ### Installation and recovery
 

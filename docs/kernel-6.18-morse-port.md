@@ -38,6 +38,7 @@ Changes fall into three groups:
 | Driver: mm6108 SPI fixes | local uncommitted diff in `spi.c`/`firmware.c`/`bus.h` | CM4/RPi5 only |
 | Kernel trees | `spi-bcm2835.c` CS handling; `mt7915` txpower patch | per-tree (see §4) |
 | Kernel trees | cfg80211 background CAC fix (upstream backport) | all targets (§4.5) |
+| Kernel trees | MT7916 third-chain reservation and observer | CM4/Rock 3A (§4.6) |
 
 Plus the DTS overlay (§5), config fragments (§6), and a post-build binary patch on
 `dot11ah.ko` (§7).
@@ -255,7 +256,8 @@ idempotently before configuring/building the kernel; partial or conflicting
 applications fail before timing source changes. The existing txpower and SPI
 patches remain separate. No debugfs writes leaves timing selection and register
 changes inactive. Both builds carry `MODULE_INFO(manet_timing, "1")` for the
-positioning firmware selector; this tag is not a hardware validation result.
+MT7916 firmware selector, which defaults to patched WM when this tag is present
+regardless of `positioning=`; this tag is not a hardware validation result.
 The Rock 3A fragment enables `CONFIG_FTRACE=y` and
 `CONFIG_ENABLE_DEFAULT_TRACERS=y` for the same trace event format as CM4.
 Install the rebuilt Image and complete matching module tree together;
@@ -297,6 +299,40 @@ present. Both apply cleanly to mainline 6.18 and to `linux-rpi-6.18` at
 6.18.33. RPi5 builds from the same tree. On a Rock 3A with the dedicated
 MT7916 receiver, the abort is reported and a replacement CAC runs its full
 time (61.8 s measured).
+
+### 4.6 MT7916 third-chain observer (CM4 and Rock 3A)
+
+[`kernel/patches/mt76-bgobs/`](../kernel/patches/mt76-bgobs/README.md) carries
+an opt-in 2T2R reservation and the production cold-start observer. Both board
+builders apply the txpower patch, then invoke:
+
+```sh
+python3 "$KWORK/../kernel/patches/mt76-bgobs/apply.py" "$KDIR"
+```
+
+This replaces the standalone timing hook. The helper applies or verifies the
+complete timing prerequisite plus observer series transactionally on either
+pinned kernel HEAD. It preserves other local patches and refuses partial or
+conflicting series. The cfg80211 CAC fixes remain a separate build step.
+
+The EEPROM guard accepts the cards' selectable 5/6 GHz byte `0xdb` only when
+operating as 5 GHz. Reservation changes the RAM image and host chain masks;
+it never writes efuse. The main band loses its third receive chain. The
+read-only module parameter defaults off; the node firmware/config service
+prepares it from `mt7916_background_rx` before coldplug.
+
+Production observation uses the validated frontend/detector configuration
+with interrupts masked, pulse writer disabled and no CAC buffer dependency.
+It exposes a root-only, versioned debugfs JSON interface. The kernel preserves
+raw bins and matched main-band survey TX counters; userspace corrects own-TX
+blanking and rejects uncertain samples. No diagnostic probe modes ship.
+The series README specifies commands, fields, locking and restoration.
+
+The cold-start configuration has Rock 3A RF evidence on the pinned 2024 WM.
+Both production modules compile offline and the C lifecycle tests run against
+both trees. The added survey-TX alignment/correction still needs hardware
+validation. CM4 remains the verification target; its cold boot, reservation,
+RF response, cancellation and traffic behavior have not yet been benched.
 
 ## 5. DTS overlay: `dts-overlays/cm4-morse-spi.dts` (CM4 only)
 
@@ -367,10 +403,10 @@ xz-compress all modules. Per-target notes:
   **`rockchip_defconfig` no longer exists in 6.18**.
   Driver flag `CONFIG_MORSE_USB=y` instead of SPI.
   Before configuration, applies the PCIe slot power patch (§4.4), the recorded
-  txpower patch (§4.2), then the timing series via
-  `python3 "$KWORK/../kernel/patches/mt76-ftm/apply.py" "$KDIR"` (§4.3), then
-  the cfg80211 background CAC pair (§4.5). `build-cm4.sh` applies the timing
-  series and the cfg80211 pair the same way.
+  txpower patch (§4.2), then timing and observer support via
+  `python3 "$KWORK/../kernel/patches/mt76-bgobs/apply.py" "$KDIR"` (§4.6), then
+  the cfg80211 background CAC pair (§4.5). `build-cm4.sh` applies txpower,
+  the combined series and the cfg80211 pair the same way.
   `manet-r3a.config` enables `CONFIG_FTRACE=y` (the tracing menu) and
   `CONFIG_ENABLE_DEFAULT_TRACERS=y` (static events without function tracing).
   Kconfig selects `TRACING`, `EVENT_TRACING`, `TRACEPOINTS`, `RING_BUFFER` and

@@ -26,16 +26,18 @@ import time
 import zlib
 
 from manet_release import asset_url, select_release, verify_asset
+from manet_kernel_update import (KernelError, KernelTrial, MANIFEST as KERNEL_MANIFEST,
+                                 PREFIX as KERNEL_PREFIX, MAX_DOWNLOAD, MAX_EXPANDED,
+                                 validate_payload)
 
 
 MIB = 1024 * 1024
 # Bound compressed and expanded bytes, retaining 128 MiB free per filesystem.
-MAX_DOWNLOAD = 64 * MIB
-MAX_EXPANDED = 512 * MIB
 RESERVE = 128 * MIB
 RECOVERY_UNITS = {
     'manet-update-recover.service': 'sysinit.target.wants',
     'manet-update-finish.service': 'multi-user.target.wants',
+    'manet-kernel-trial-guard.service': 'multi-user.target.wants',
 }
 # Resident node_tools processes from MANET/systemd. Manager PartOf children
 # restart below with node-manager. Boot/setup oneshots must not be replayed.
@@ -52,6 +54,7 @@ REQUIRED = MARKERS | {
     "etc/systemd/system/wpa_supplicant@.service.d/20-manet-binary.conf",
     "usr/local/bin/node-update.sh", "usr/local/bin/node-update.py",
     "usr/local/bin/manet_release.py",
+    "usr/local/bin/manet_kernel_update.py",
     "usr/local/bin/manet-auto-update.sh",
     "etc/systemd/system/manet-auto-update.service",
     "etc/systemd/system/manet-auto-update.path",
@@ -126,7 +129,7 @@ REQUIRED = MARKERS | {
 VERSION_PATTERN = re.compile(r"[0-9]+(?:\.[0-9]+)+")
 
 
-class UpdateError(Exception):
+class UpdateError(KernelError):
     """Report a rejected update or a failed installation command."""
     pass
 
@@ -189,7 +192,8 @@ def atomic_file(destination, source=None, data=None, mode=0o644):
                     shutil.copyfileobj(incoming, output)
             else:
                 output.write(data)
-            os.fchmod(output.fileno(), mode)
+            if mode is not None:  # FAT permissions come from the mount options.
+                os.fchmod(output.fileno(), mode)
             output.flush()
             os.fsync(output.fileno())
         # A sibling temporary keeps replacement atomic on this filesystem.
@@ -306,6 +310,8 @@ class Updater:
 
     def validate(self, package, checksum, filename, expected):
         """Verify archive contents, checksum and release version."""
+        if package.stat().st_size > MAX_DOWNLOAD:
+            raise UpdateError("Compressed archive exceeds size limit")
         # Accept one sha256sum line with its text/binary marker and exact name.
         match = re.fullmatch(r"([a-fA-F0-9]{64}) [ *]([^\r\n]+)\n?",
                              checksum.read_text(encoding="ascii"))
@@ -328,6 +334,14 @@ class Updater:
         with tarfile.open(package, "r:gz") as archive:
             for member in archive:
                 name = archive_path(member.name)
+                if name.startswith(('boot/', 'usr/lib/modules/', 'lib/modules/',
+                                    'usr/lib/firmware/morse/', 'var/lib/manet-kernel/')):
+                    raise UpdateError('Kernel files require the matched kernel payload namespace')
+                if name in ('etc/manet-kernel-trial.json', 'usr/local/sbin/manet-kernel-health-check'):
+                    raise UpdateError('Kernel qualification must be installed locally')
+                if name in ('boot', 'usr/lib/modules', 'lib/modules', 'usr/lib/firmware/morse',
+                            'var/lib/manet-kernel') and not member.isdir():
+                    raise UpdateError('Boot and module paths must be directories')
                 # Bound metadata growth as well as decompressed archive bytes.
                 if name in members or len(members) >= 20000:
                     raise UpdateError("Duplicate archive path or too many members")
@@ -375,6 +389,7 @@ class Updater:
                 markers.append(text)
             if markers[0] != markers[1]:
                 raise UpdateError("Archive version files disagree")
+            validate_payload(archive, members, self.board())
         return members
 
     def stage(self, package, members, directory):
@@ -446,7 +461,9 @@ class Updater:
                 ('package.tar.gz', package), ('package.sha256', checksum),
                 ('node-update.py', Path(__file__)),
                 ('manet_release.py',
-                 Path(__file__).with_name('manet_release.py'))):
+                 Path(__file__).with_name('manet_release.py')),
+                ('manet_kernel_update.py',
+                 Path(__file__).with_name('manet_kernel_update.py'))):
             atomic_file(self.recovery / name, source=source, mode=0o600)
         info = {'version': expected, 'filename': filename}
         atomic_file(self.recovery / 'release.json',
@@ -486,6 +503,12 @@ class Updater:
                 or checksum.stat().st_size > 1024):
             raise UpdateError('Recovery archive exceeds size limit')
         members = self.validate(package, checksum, filename, expected)
+        # Kernel trials precede runtime replacement. Early recovery must not
+        # depend on the FAT mount or install a release before trial confirmation.
+        if KERNEL_MANIFEST in members and files_only:
+            info = self.kernel().read()
+            if not info or info['phase'] != 'committed':
+                return
         self.clean_payload_scratch(members)
         self.log(f'Resuming release {expected} from local recovery archive')
         with tempfile.TemporaryDirectory(prefix='download-',
@@ -500,6 +523,8 @@ class Updater:
                 # or systemctl calls belong in this early recovery phase.
                 self.restore_config()
             else:
+                if KERNEL_MANIFEST in members and not self.kernel().prepare(staged):
+                    return
                 self.install(staged, members)
         if not files_only:
             self.clean_scratch()
@@ -514,7 +539,7 @@ class Updater:
                     for name, member in members.items()])
         # Install shallow paths first, with lexical order at each depth.
         for name, member in sorted(members.items(), key=lambda pair: (pair[0].count("/"), pair[0])):
-            if name in MARKERS:
+            if name in MARKERS or name == KERNEL_PREFIX.rstrip("/") or name.startswith(KERNEL_PREFIX):
                 continue
             target = self.destination(name)
             self.make_directory(target.parent)
@@ -695,6 +720,10 @@ class Updater:
         snapshot.unlink(missing_ok=True)
         sync_directory(self.state)
 
+    def kernel(self):
+        """Use the same durable-file and command primitives as tools recovery."""
+        return KernelTrial(self, run_command, atomic_file, sync_directory)
+
     def protect_kernel(self, directory):
         """Protect boot files before package setup and on installation retries."""
         run_command([str(directory / 'usr/local/bin/manet-kernel-protect.py'),
@@ -761,7 +790,8 @@ class Updater:
         self.destination('usr/local/bin/manet-halow-power.py').unlink(missing_ok=True)
         self.destination('etc/ebtables.rules').unlink(missing_ok=True)
 
-    def update(self, recover_only=False, files_only=False):
+    def update(self, recover_only=False, files_only=False, cancel_kernel=False,
+               local_archive=None, local_version=None):
         """Serialize recovery or release selection, verification and install."""
         run = self.root / "run"
         run.mkdir(exist_ok=True)
@@ -776,6 +806,12 @@ class Updater:
             self.destination('var/lib/manet-update/placeholder')
             self.make_directory(self.state, mode=0o700)
             self.clean_scratch()
+            if cancel_kernel:
+                if not pending:
+                    raise UpdateError('No pending kernel transaction')
+                self.kernel().cancel()
+                self.clean_scratch()
+                return
             if pending:
                 self.recover(files_only=files_only)
                 return
@@ -790,41 +826,60 @@ class Updater:
                 local = "unknown"
             # Routine checks use marker mtime as a one-day wall-clock throttle.
             # A backward clock step does not count as a recent successful check.
-            if (self.routine and not pending and local != "unknown"
+            if (self.routine and local_archive is None and not pending and local != "unknown"
                     and 0 <= time.time() - self.marker.stat().st_mtime < 86400):
                 return
             board = self.board()
             self.state.mkdir(parents=True, exist_ok=True, mode=0o700)
             with tempfile.TemporaryDirectory(prefix="download-", dir=self.state) as scratch:
                 work = Path(scratch)
-                release = select_release(self.development, self.download, work)
-                expected = release["version"]
+                if local_archive is not None:
+                    expected = version(local_version)
+                    release = None
+                else:
+                    release = select_release(self.development, self.download, work)
+                    expected = release["version"]
                 # Compare decimal components so 0.10 sorts after 0.9.
                 if (local != "unknown" and not pending and not self.allow_downgrade
                         and tuple(map(int, local.split("."))) > tuple(map(int, expected.split(".")))):
                     self.marker.touch()
                     self.log(f"Installed {local} is newer than selected {expected}; use --allow-downgrade to replace it")
                     return
-                if local == expected and not pending:
+                if local == expected and not pending and local_archive is None:
                     self.marker.touch()
                     self.log(f"Node is already running release {expected}")
                     return
                 filename = f"{board}-tools.tar.gz"
-                url = asset_url(release, filename)
                 package, checksum = work / filename, work / (filename + ".sha256")
-                self.download(url + ".sha256", checksum, 1024)
-                self.download(url, package, MAX_DOWNLOAD)
-                verify_asset(package, release["assets"][filename])
+                if local_archive is not None:
+                    source = Path(local_archive)
+                    sidecar = source.with_name(source.name + '.sha256')
+                    if (source.name != filename or source.stat().st_size > MAX_DOWNLOAD
+                            or sidecar.stat().st_size > 1024):
+                        raise UpdateError('Invalid local board archive name or size')
+                    self.space([(work, source.stat().st_size + 1024)])
+                    shutil.copyfile(source, package)
+                    shutil.copyfile(sidecar, checksum)
+                    self.log('Using explicit local archive and checksum; no GitHub release metadata')
+                else:
+                    url = asset_url(release, filename)
+                    self.download(url + ".sha256", checksum, 1024)
+                    self.download(url, package, MAX_DOWNLOAD)
+                    verify_asset(package, release["assets"][filename])
                 members = self.validate(package, checksum, filename, expected)
                 self.clean_payload_scratch(members)
                 staged = work / "stage"
                 self.stage(package, members, staged)
+                if KERNEL_MANIFEST in members:
+                    self.kernel().preflight(staged)
                 # APT is allowed only before arming the transaction. Boot
                 # recovery never depends on network access or package installs.
                 self.protect_kernel(staged)
                 run_command([staged / 'usr/local/bin/manet-admin-setup.sh'],
                             timeout=600)
                 self.arm_recovery(package, checksum, filename, expected, staged)
+                if KERNEL_MANIFEST in members and not self.kernel().prepare(staged):
+                    return
                 self.install(staged, members)
                 self.log(f"Node tools updated to version {expected}")
             self.clean_scratch()
@@ -844,9 +899,18 @@ def main():
     recovery = parser.add_mutually_exclusive_group()
     recovery.add_argument('--recover-only', action='store_true',
                           help='finish a pending update without networking')
+    recovery.add_argument('--local-archive', type=Path,
+                          help='install an explicit local board archive with its adjacent SHA-256 sidecar')
+    parser.add_argument('--local-version', help='expected embedded version for --local-archive')
+    recovery.add_argument('--cancel-kernel-trial', action='store_true',
+                          help='cancel an uncommitted kernel trial on its original kernel')
+    recovery.add_argument('--kernel-guard', action='store_true',
+                          help=argparse.SUPPRESS)
     recovery.add_argument('--recover-files', action='store_true',
                           help='restore pending payload before service startup')
     args = parser.parse_args()
+    if (args.local_archive is None) != (args.local_version is None):
+        parser.error('--local-archive and --local-version must be supplied together')
     syslog.openlog("manet-update", syslog.LOG_PID, syslog.LOG_DAEMON)
     updater = Updater(routine=args.routine, development=args.development,
                       allow_downgrade=args.allow_downgrade)
@@ -855,9 +919,14 @@ def main():
             raise UpdateError("Run node-update.sh as root")
         signal.signal(signal.SIGTERM, interrupted)
         signal.signal(signal.SIGINT, interrupted)
+        if args.kernel_guard:
+            updater.kernel().guard()
+            return 0
         updater.update(recover_only=args.recover_only,
-                       files_only=args.recover_files)
-    except (UpdateError, OSError, ValueError, EOFError, tarfile.TarError, zlib.error,
+                       files_only=args.recover_files,
+                       cancel_kernel=args.cancel_kernel_trial,
+                       local_archive=args.local_archive, local_version=args.local_version)
+    except (KernelError, OSError, ValueError, EOFError, tarfile.TarError, zlib.error,
             subprocess.SubprocessError) as error:
         updater.log(f"node-update.sh: Tools update failed: {error}",
                     error=True)

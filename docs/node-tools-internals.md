@@ -122,17 +122,139 @@ be preserved unless a release deliberately migrates them. A generic copy of
 remains a generated selector symlink and is regenerated from the installed
 configuration after payload installation.
 
-The current tools builder includes a managed MT7916 firmware set under
-`usr/local/share/manet/firmware/mt7916`; firmware delivery is already part of
-the update path. It does not yet include board-specific kernel overlays.
-Before shipping a kernel update, the release needs a matched board/kernel,
-modules, device trees and firmware set, boot-filesystem handling, module
-dependency generation, activation/reboot sequencing, and tested recovery
-from interruption or a failed boot. Existing per-file replacement and
-service checks do not establish those guarantees. The current archive size
-limits and early recovery mount ordering also need review for that payload.
-These are implementation requirements for field updates, not reasons to
-make reflashing the normal maintenance procedure.
+#### Kernel payload and activation protocol
+
+Kernel field updates use a separate transaction before replacing runtime
+software. The first implementation is an opt-in CM4 trial path. It is not
+hardware-qualified for release yet. Rock 3A kernel activation is rejected
+until its installed bootloader and reset path have been identified and tested.
+Kernel-less updates keep the existing installation path on all boards,
+including RPi5. A tools-only release containing this updater must reach a node
+before a release containing the new payload format.
+
+A tools archive places its matched set under `manet-kernel/`:
+
+```text
+manifest.json                 schema, board, unique kernel release, file hashes
+boot/                         kernel image, DTBs, complete required overlays
+modules/<kernel-release>/     all in-tree and out-of-tree modules
+firmware/morse/               matching Morse firmware and BCFs
+```
+
+This namespace is transaction input, never a destination under `/`. Each
+regular file is listed with its size and SHA-256. Boot selectors, bootloader
+firmware and executable hooks are not payload inputs. CM4 uses `kernel8.img`
+and `bcm2711-rpi-cm4.dtb`. The package must supply every overlay used by the
+node, including ordinary Pi overlays, and an `overlays/README` so firmware
+honors the slot prefix. Rock 3A packages can be assembled for inspection but
+cannot yet activate. Its set also needs the exact initramfs used by its boot
+path, which the current SBC overlay does not build.
+
+Every build intended for a field trial must use a **new `uname -r`**, including
+Morse and all other external modules. Reusing `6.18.0-manet` or
+`6.18.33-manet` for changed binaries is rejected on a node already running that
+release. Renaming a module directory is insufficient: rebuild the kernel and
+modules with the new release. The old module tree is retained. Firmware goes
+in a private versioned directory and the trial command line selects it using
+`firmware_class.path`. Shared MT7916 firmware remains managed by its existing
+service. Kernel payloads must not contain a second MT7916 selection policy.
+
+The durable sequence is:
+
+1. Verify the archive, board, manifest and local boot profile before APT or
+   live runtime replacement. Refuse raw boot/module destinations. Check root
+   and boot space, including the download, recovery archive, staging copy,
+   installed candidate and reserve. Keep the old boot files and modules.
+2. Save the recovery archive, running updater and helper, recovery units and
+   pending marker. Journal the original config, command line, boot ID and
+   candidate identity before writing the inactive set. A retry can complete
+   only that set. Refuse a pre-existing module directory belonging to another
+   transaction. Copy and fsync the candidate, run `depmod` for its exact
+   release, then verify its files before making it selectable.
+3. On CM4, stage a unique directory on the mounted FAT filesystem. Build
+   `tryboot.txt` from the approved config with a slot `os_prefix`, preserving
+   hardware settings and root arguments. Persist it through a temporary sibling
+   and rename. Leave `config.txt` intact. Record the attempted trial before
+   requesting `reboot '0 tryboot'`. Never automatically repeat an attempted
+   trial after a reboot. An interruption before the reboot request is treated
+   conservatively as an unconfirmed attempt.
+4. A trial boots once. Require the new release, a matching transaction token
+   on the kernel command line, and the firmware's device-tree tryboot flag.
+   A separately enabled confirmation deadline requests a normal reboot if
+   confirmation never completes. Firmware-to-kernel watchdog coverage must
+   already have been validated, including a kernel that never starts userspace.
+   A systemd timer alone cannot reset a hung kernel.
+5. After multi-user startup, check core services and run a locally installed,
+   hash-pinned health check that proves the required radio and remote management
+   paths. Persist a commit intent before replacing `config.txt` with the
+   verified trial config. A retry resolves a crash during commit from that
+   intent and the selector contents. Then finish the ordinary runtime update
+   and version commit. Failed boot or health confirmation preserves the old
+   selector, records failure and never retries the defective kernel in a loop.
+
+The CM4 boot profile is `/etc/manet-kernel-trial.json`, a root-owned local
+bench attestation outside the archive. It pins the original config, command line, health-check program and
+boot filesystem UUID, and records validated watchdog coverage. Unsupported
+config constructs fail preflight rather than silently discarding custom boot
+settings. Do not ship a blanket profile to enable untested nodes.
+
+Its JSON fields are `backend` (`cm4-tryboot-v1`), `boot_uuid` (the mounted FAT
+UUID), `config_sha256`, `cmdline_sha256`, `health_sha256`,
+`watchdog_validated` (true only after a reset test), and `validation_id`
+(the bench evidence identifier). Config hashes cover the original full file
+bytes. The health hash covers the root-owned executable
+`/usr/local/sbin/manet-kernel-health-check`. The updater also checks the EEPROM
+boot watchdog setting and PID 1's runtime watchdog. The initial supported
+config uses `kernel8.img`, no initramfs, no included configs and no existing
+`autoboot.txt`, `tryboot.txt`, or custom OS prefix. Unsupported configurations
+need an explicit commissioned backend extension. Do not strip settings just
+to pass preflight. `confirmed.json` preserves the commissioned base and pins
+the committed selector for subsequent updates.
+
+Health confirmation must finish before 240 seconds of boot uptime. The guard
+requests a normal reboot at 300 seconds without waiting for the updater lock.
+These limits leave time for selector commit after health checks. A failed
+trial keeps old runtime/version files, the recovery archive and `kernel.json`.
+After booting the original kernel, `node-update.sh --cancel-kernel-trial`
+removes the pending transaction and recognized trial selector, preserving a
+`last-kernel-trial.json` diagnostic and all candidate files. Retained candidates
+are not automatically garbage-collected. A new trial must use a new unique
+release and slot. Qualification must include interrupted selector writes and
+confirmation, not only a successful trial.
+
+[Pi tryboot](https://www.raspberrypi.com/documentation/computers/raspberry-pi.html#fail-safe-os-updates-tryboot)
+clears the one-shot flag before boot, so the next reset uses the normal
+selector. `autoboot.txt` can alternatively select two FAT partitions with
+`tryboot_a_b=1`. Existing single-FAT installations use separate directories
+and `tryboot.txt`, without repartitioning. A rename gives a single selector
+replacement while Linux is running. FAT is not a journaled filesystem:
+fsync and rename do **not** prove survival of arbitrary power loss or eMMC
+failure. Hardware power-interruption testing remains a release gate. A
+separate recovery boot partition or boot medium is required if that gate
+cannot be met. No live archive extraction over the active boot set is allowed.
+
+Rock 3A's local Armbian board source selects `rock-3a-rk3568_defconfig` and
+U-Boot v2025.10 for current/edge. Its `boot-rockchip64.cmd` imports
+`armbianEnv.txt`, loads `Image`, `uInitrd` and the DTB, then calls `booti`.
+It contains no trial counter or alternate boot command. These source files do
+not establish which bootloader or script the installed node actually uses.
+[U-Boot boot-count recovery](https://docs.u-boot.org/en/latest/api/bootcount.html)
+requires `CONFIG_BOOTCOUNT_LIMIT`, a working persistent backend, `bootlimit`
+and `altbootcmd`, plus a reset source. An extlinux menu entry alone provides
+no unattended fallback. Do not write guessed environment offsets with
+`fw_setenv`, replace U-Boot remotely, or run a deliberately broken Rock 3A
+kernel before that recovery chain has been demonstrated.
+
+Early `manet-update-recover.service` must never mount or write `/boot` while
+ordered before `systemd-udev-trigger.service`. For a kernel transaction it
+leaves runtime files untouched until the kernel is confirmed. Boot staging
+and trial resolution run in the late finish unit, after local filesystems
+and multi-user startup. The independent trial guard starts after local
+filesystems, without waiting for multi-user startup. All updater state uses
+the existing lock except the guard, which only observes the journal and can
+request fallback. A failed trial retains the archive and diagnostics for
+explicit cancellation or repair. Kernel success does not turn the runtime
+updater into a whole-root rollback system.
 
 ### Tools update failure handling
 
@@ -147,15 +269,17 @@ names in the payload's destination directories, bounding leftovers from hard
 stops during live replacement.
 
 Downloads use HTTPS, bounded curl retries/timeouts, and limits of 4 MiB for
-release metadata, 1 KiB for checksum files and 64 MiB for tools archives. Builders emit a single-line
+release metadata, 1 KiB for checksum files and 256 MiB for tools archives. Builders emit a single-line
 SHA-256 sidecar naming the exact archive basename. The updater requires a hash
-match, reads gzip through its footer (with a 512 MiB expanded limit), and rejects
+match, reads gzip through its footer (with a 1536 MiB expanded limit), and rejects
 unsafe paths, duplicate names, hardlinks/devices/sparse files, non-root ownership,
 special mode bits, writable directories, and symlink traversal. Relative symlinks
 must target regular files included in the archive. Existing directory modes are
 preserved, and installation cannot traverse existing directory symlinks.
-Members may target any root-relative system path that passes these structural
-checks, including boot files, modules, firmware, and interface definitions.
+Ordinary members may target root-relative system paths that pass these checks.
+Boot files, module trees and Morse firmware must use the matched kernel
+namespace. The local kernel qualification profile and health check cannot be
+replaced by an update archive.
 Payload selection and activation follow the [field update policy](#field-update-policy).
 
 Both embedded version files must match each other and the advertised release.
@@ -1643,23 +1767,67 @@ the post-visit counters directly. Equal counters across repeated visits are
 therefore valid. Other drivers use counter differences and reject decreases.
 The ROC path also rejects a frequency that becomes home during collection.
 
-5 GHz remains on the main radio's flush-scan method with the same trouble
-gate. The scan includes the home frequency. The same completed scan supplies
-`scan_bss_count` for both home and candidates, while the incumbent's airtime
-and noise still come from its long home window. With equal 20% occupancy and
--95 dBm noise, six BSS add three points on either side, giving raw scores of
-23 before the incumbent preference. On 2.4 GHz in data mode those raw scores
-remain 20 regardless of the number of co-channel BSS.
+5 GHz uses the same home monitor, per-band trouble hysteresis and connected
+membership gate. On a reserved MT7916 with the versioned observer interface,
+`manet_bgobs.py` measures each non-home, non-DFS candidate for 250 ms on the
+third RX chain. The main PHY remains on its operating channel. No flush scan
+or BSS count is needed on that path; both home and candidates carry zero BSS
+counts. The energy histogram supplies no calibrated noise value. Candidate
+noise is omitted, including through the optional protobuf noise field.
+Home noise still comes from the normal long survey window.
 
-5 GHz candidate measurements require at least 25 ms of dwell and retain the
-median of three valid samples within ten minutes. Lobby bootstrap and discovery
-retain that short-scan path and its BSS counts on both bands. The first two
-short samples leave occupancy absent. A failed, timed-out or aborted flush
-scan discards its candidates and leaves the home BSS count at zero. A closed
-gate also leaves the home BSS count at zero and publishes no candidates.
-Neither condition discards a valid home window. Long-dwell visit failures omit
-that candidate. Producer expiry removes observations older than 180 seconds at
-publication.
+Bins 2 through 9 measured foreign energy on the Rock 3A bench. Bin 10 rose
+with the node's own transmit airtime on both same-channel and off-channel
+observations, consistent with receiver blanking. Very strong foreign energy
+can also enter bin 10. The kernel snapshots the existing band-1 survey TX
+accounting at each histogram endpoint and exports the raw counters plus MCU
+read latency. With L = bins 2..9 / population, B = bin 10 / population and
+T = delta TX microseconds / elapsed microseconds, userspace estimates:
+
+    foreign_pct = 100 * (L + max(0, B - T)) / (1 - T)
+
+The candidate sends this clamped, rounded value as `busy_pct`, preserving the
+scorer's existing candidate schema. It is an estimate of foreign energy during
+unblanked reception, not a decoded identity classification. Samples with
+T >= 0.9, negative TX deltas, T more than five percentage points above B,
+or TX read latency over 10 ms or 5% of the window are omitted. Population
+must match the observed 8 us sampling cadence within 20%, with at least
+1024 samples and an actual window between 250 ms and six seconds. All bins
+use modulo-23 subtraction. The observer reports no clean sample on an error,
+short window, sequence change or incomplete restoration. Mixed own/foreign
+TX correction and its alignment limits still need CM4 and Rock 3A bench
+validation. The 60/50% home gate is calibrated on 2.4 GHz and remains
+provisional for 5 GHz; its hold-down and urgent rules are unchanged.
+
+The helper resolves debugfs through the interface's actual PHY and holds a
+per-PHY lock under `/run`. Schema 1, sequence, frequency, width, threshold,
+validity and release are checked before publishing. Node-manager runs as root;
+0600 debugfs avoids an additional privileged daemon or unstable private
+nl80211 command. If the file is absent, the manager retains the main-radio
+flush scan, including its median of three valid samples in ten minutes and
+25 ms minimum dwell. A present but unusable observer omits candidates and
+keeps the long home result; it does not reinterpret errors as idle channels.
+An unmounted debugfs behaves as an absent observer. The reader never changes
+mounts or permissions. Healthy bands and agreement settling do not invoke it.
+
+Lobby bootstrap and discovery retain short scans and BSS counts on both
+bands. A successful flush scan supplies BSS counts to home and candidates
+together. Failed or aborted scans discard their candidates and leave the home
+BSS count at zero. Long candidate measurements publish immediately, while
+short scans retain the three-sample warmup. Producer expiry removes samples
+older than 180 seconds. Mixed reports still use the existing connected-domain
+medians and hold-down.
+
+DFS candidate moves remain outside this implementation. An observer dwell
+is not CAC. A future plan must arrange background CAC on every transmitting
+node, verify each completion and radar state, and activate while each node's
+permission remains valid. The bench kernel expires unused AVAILABLE state
+after two seconds in the FCC region. A pre-cleared spare cannot simply wait
+for a later three-minute election. Radar, cancellation, missed activation or
+membership changes must abandon the plan and preserve the current channel.
+Background CAC and observation share the reserved receiver and cannot run
+concurrently. The cfg80211 background-CAC lifecycle fixes remain prerequisites
+for a future CAC coordinator.
 
 #### Scoring, hold-down and missing data
 
@@ -4272,34 +4440,46 @@ that is 1 on some class devices and 255 on others.
 
 ## MT7916 firmware selection
 
-`manet-mt7916-firmware.py` uses the positioning service's literal config parser:
-only `positioning=y` (case-insensitive, optional quotes) requests it; missing
-config is off. The tool first requires a 14c3:7906 primary PCI function in
-`/sys/bus/pci/devices`, read under `--root` for offline tests. Without it,
-including a lone 14c3:790a secondary function, the tool removes owned overrides
-and creates no pending marker. This check uses file reads, with no subprocess.
-`modinfo` must also resolve `manet_timing=1` on the installed
-mt7915e module for the running kernel. Missing tags or lookup failures remove
-owned overrides and log the reason. Packages carry the unmodified WM/WA/ROM set and license from
-linux-firmware `20250613`, commit `47e03ef409e07315f2b5c1d0fc08383da2e1bde9`.
-Builders verify downloads and cache entries before staging. The cache is
+`manet-mt7916-firmware.py` selects the positioning-patched 2024 WM with stock
+2024 WA/ROM for every MT7916 primary PCI function whose installed mt7915e
+module for the running kernel reports `manet_timing=1`. This is the default
+even when positioning is off or mesh.conf is absent. The manifest pins
+linux-firmware `20250613`, commit
+`47e03ef409e07315f2b5c1d0fc08383da2e1bde9`; that release contains WM
+build `20240823172741`. The patched WM SHA-256 is
+`18a2e1d03f17913ef0450a905536d5defcdf78ee1d98a1232649c31a70a63e1e`.
+The manifest's `default_selection` is `patched`. Builders verify downloads and
+cache entries before staging. The cache is
 `kernel-work/cache/linux-firmware/47e03ef409e07315f2b5c1d0fc08383da2e1bde9/`,
-overridable with `MANET_FIRMWARE_CACHE` for builders and offline tests.
+overridable with `MANET_FIRMWARE_CACHE`.
+
+`positioning=` controls ranging only. Changing or removing it neither changes
+the selected firmware nor rearms a failed patch. A missing timing tag selects
+the pinned unmodified 2024 WM/WA/ROM set and logs the reason. The same stock
+set is the failed-boot fallback; its WM SHA-256 is
+`64d86cfa4f00f9452b4706389d648d4ce0e563ddd512cc9845ba4e4442e99cb0`.
+A missing 14c3:7906 primary function, including a lone 14c3:790a secondary,
+removes owned overrides and creates no marker.
+PCI presence uses sysfs reads before coldplug, without loading a driver.
 
 The JSON intent holds our replacement bytes and exact input/output hashes.
 The stdlib sealer applies the PDA recurrence and outer CRC. The node persists
-patched WM and matched stock WA/ROM as real files in
+selected WM and matched stock WA/ROM as real files in
 `/lib/firmware/updates/mediatek/`, using temporary files, fsync and rename;
 WM is published last. A ready firmware check hashes only the installed set
 and rewrites no firmware or ownership metadata. Correct files are retained
 when repairing a missing companion.
 
-The unique patched hash identifies our WM. `.manet-mt7916` records hashes and
-inode/mtime identities for companions we wrote, before their publication.
-Identical foreign copies are never adopted. Disable or preparation failure
-removes only owned overrides; failed removal is reported and retried at next
-boot. Distribution firmware is untouched. A directory lock serializes preparers
-without a lock file or any involvement in driver probing.
+The current unique patched hash identifies the patched WM. `.manet-mt7916`
+records hashes and inode/mtime identities for every file it writes, including
+patched WM so a subsequent hash-changing update can replace that owned file.
+The manifest is published before the staged files and retains the previous
+owned identity during replacement, allowing a retry after interrupted
+publication. Identical foreign stock WM and companion files are never adopted.
+Recovery replaces owned overrides with the pinned stock set. Preparation
+failure removes only owned overrides; failed removal is reported and retried
+at next boot. Distribution firmware is untouched. A directory lock serializes
+preparers without a lock file or any involvement in driver probing.
 
 The boot oneshot runs with `--boot` after `systemd-remount-fs.service` and
 before `systemd-udev-trigger.service`, covering CM4's PCI coldplug. It must not
@@ -4307,18 +4487,20 @@ wait for `local-fs.target`: `/boot/firmware` needs a by-partuuid device that
 only coldplug creates, so that ordering deadlocks into emergency mode. It is ordered
 before coldplug but never required by it: a failure in this tool must not stop
 every other device from loading. If the pending marker cannot be written, the
-tool removes the patched set, so the probe falls through to stock firmware. The CM4 kernel
-builds the PCIe host in and mt7915e as a module; its stock-kernel initramfs images
+tool removes the managed set, so the probe falls through to distribution
+firmware. The CM4 kernel builds the PCIe host in and mt7915e as a module; its stock-kernel initramfs images
 are not used for this radio. There is no probe wrapper or initramfs work.
 Setup/update prepares files once. The `.path` unit is the sole config-change
 trigger: `PathChanged=/etc/mesh.conf` covers atomic replacement via inode events
 in [systemd's path implementation](https://github.com/systemd/systemd/blob/v257/src/core/path.c).
 No tool loads or reloads the driver; a running radio changes firmware next boot.
 
-Before leaving patched firmware available at boot, the tool durably writes
-`/var/lib/manet/mt7916-probe-pending` with boot ID, WM hash and positioning
-value. File and directory fsync precede firmware preparation, including a ready
-set. This small marker write is required each enabled boot; no reseal occurs.
+Before leaving patched WM available at boot, the tool durably writes
+`/var/lib/manet/mt7916-probe-pending` with boot ID and patched WM hash.
+Positioning is not part of the recovery decision. File and directory fsync
+precede firmware preparation, including a ready set. This small marker write
+is required each patched boot; no reseal occurs. Pinned stock does not arm
+another firmware trial.
 The survival oneshot runs after `multi-user.target`. It independently checks
 that target is active and every MT7916 primary PCI function (14c3:7906) is
 bound to mt7915e with a registered wiphy, or that no MT7916 is present, then
@@ -4331,12 +4513,16 @@ or resident process.
 
 A marker from a different boot durably latches
 `/var/lib/manet/mt7916-auto-disabled` before cleanup, with the failed boot ID
-and firmware hash. Every subsequent check reports `AUTO-DISABLED after failed
-boot` and removes owned overrides. mesh.conf is untouched. An observed change
-to the parsed positioning value, or `manet-mt7916-firmware.py --rearm`, clears
-the latch; the driver tag is still required. Unrelated config edits, updates
-and repeated `y` writes do not rearm it. A rapid `n` then `y` that the watcher
-never observes requires explicit rearm. Same-boot checks preserve pending.
+and firmware hash. Subsequent checks report `AUTO-DISABLED after failed boot`
+and prepare or retain the pinned stock 2024 set, rather than selecting the
+distribution firmware. mesh.conf is untouched. `manet-mt7916-firmware.py
+--rearm` clears the latch. An update that changes the pinned patched hash also
+rearms automatically, including when the old failed boot is first observed
+after that update. Both the service's pinned hash and the JSON output hash
+must match the new verified patch. The installed driver tag remains required.
+Updates with the same patched hash and all config edits leave the latch in
+place. Same-boot checks preserve pending evidence of the WM originally tried.
+The survival check only confirms that boot; it does not rearm an updated patch.
 
 An orderly reboot before the survival check is conservatively treated as an
 unconfirmed boot. There is no shutdown shortcut that could clear evidence
@@ -4346,3 +4532,24 @@ Recovery depends on writable persistent storage and userspace coldplug ordering.
 The reported boot failures were traced to the local-fs/coldplug ordering cycle
 above. After its correction, patched warm and power-on boots on CM4 with
 driver b623a361 and WM 18a2e1d0 completed, and survival cleared the marker.
+
+The local `mt7916_background_rx=y|n` setting uses the same mesh.conf path
+watcher and early boot service. It defaults to `n` pending a product default
+decision. `y` writes `/etc/modprobe.d/manet-mt7916.conf` with
+`options mt7915e background_radar_2t2r=1`, only when modinfo reports that
+parameter on the installed running-kernel module. The service runs before
+coldplug and never reloads a radio. `n`, unsupported modules, preparation
+failure and the failed-boot latch remove only the exact managed options file.
+Operator-owned contents are preserved and reported as a conflict. Config is
+local; no Alfred config-push key or web UI control is added.
+
+Reservation enables the observer and band-1 background CAC but costs the main
+5 GHz radio its third receive chain and enforces 2T2R. Leaving it off preserves
+normal RX diversity and candidate scans. EEPROM shadow programming, firmware
+acceptance, wiphy background-CAC capability, reported antenna/chain masks,
+antenna reconfiguration, observer admission, CAC ownership and firmware reset
+all account for reservation state. Changing mesh.conf affects the next boot;
+the presence of the live debugfs endpoint, not the requested config value,
+determines whether ACS can observe. An auto-disabled patched boot also suspends
+the reservation until explicit or hash-change rearm, allowing pinned-stock
+fallback without rewriting mesh.conf.

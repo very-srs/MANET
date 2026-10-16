@@ -585,9 +585,9 @@ as foreign. Windows shorter than 60 seconds are rejected. A counter decrease,
 channel or interface change, or manager restart starts a new baseline.
 
 RF trouble starts after two consecutive windows with foreign airtime at least
-50% or noise at least -80 dBm. It clears after three consecutive windows with
-foreign airtime below 40% and noise below -85 dBm. These limits are provisional
-pending controlled-interferer calibration. Each band scans candidates only
+60% or noise at least -80 dBm. It clears after three consecutive windows with
+foreign airtime below 50% and noise below -85 dBm. The airtime threshold is
+calibrated on 2.4 GHz; its 5 GHz use and the noise threshold remain provisional. Each band scans candidates only
 while this node or a member of its connected ACS view reports trouble on that
 band. Healthy bands make no off-channel scan visits. Lobby bootstrap,
 tourguide and discovery visits keep their existing behavior.
@@ -608,10 +608,16 @@ Occupancy comes from the visit's busy and transmit counter differences divided
 by its active time. The ROC command returns before the visit ends, so the
 manager waits the requested dwell plus 150 ms before reading the post-survey.
 Visits with less than 250 ms of measured active time are dropped. Each valid
-long-dwell result is published immediately. 5 GHz keeps its current main-radio
-flush scan behind the same gate, including its three-sample occupancy warmup.
-That scan includes the home channel and supplies BSS counts for both home and
-candidates. A failed scan discards candidates and leaves the home BSS count
+long-dwell result is published immediately. On an MT7916 with its third RX
+chain reserved, 5 GHz candidates use a 250 ms background energy measurement.
+The main radio stays on its channel. The estimate corrects for the receiver
+being blanked during local transmissions. Home and candidates have zero BSS
+counts on this path; candidate noise is unmeasured. Invalid or mostly blanked
+windows are omitted. The observer currently accepts non-DFS candidates only.
+
+Without an observer, 5 GHz keeps its main-radio flush scan behind the same
+gate, including its three-sample occupancy warmup. That scan includes the
+home channel and supplies BSS counts for both home and candidates. A failed scan discards candidates and leaves the home BSS count
 at zero while preserving valid home measurements. Lobby bootstrap and discovery
 keep their flush scans and BSS counts. Observations older than three minutes
 are omitted from telemetry.
@@ -628,8 +634,8 @@ The incumbent is scored on foreign airtime, while candidates use dwell
 occupancy. Total home busy airtime remains visible without treating this
 node's own mesh traffic as interference. Noise contributes a weighted penalty
 because its absolute value varies between radio chips. BSS counts add half a
-point per network on 5 GHz and the bootstrap scan paths. They contribute
-nothing on 2.4 GHz in data mode.
+point per network on the 5 GHz fallback scans and bootstrap scan paths. They
+contribute nothing on 2.4 GHz visits or 5 GHz observer measurements.
 
 A channel is disqualified when enough of the nodes reporting on it call it bad,
 either too noisy or too congested. Once three or more nodes report, a single
@@ -821,15 +827,25 @@ its enabled Wi-Fi access point. Set `atak=n` in
 `n`, `no`, `0` or `false` (case-insensitive) disables the daemon and its firewall.
 Fresh installs enable and start it; updated packages enable it for the next boot.
 
-`manet-positioning.service` ships but remains disabled and default off.
-Setting `positioning=y` in `/etc/mesh.conf` selects patched MT7916 firmware at
-next boot only with an MT7916 primary PCI function present and a tagged MANET
-timing driver installed for the running kernel. Setting it back to `n` restores
-stock firmware at next boot. An unconfirmed boot automatically disables the
-override on the following boot;
-the boot journal reports `AUTO-DISABLED`. After addressing the cause, observe
-a `positioning=n` apply then set `y`, or run
-`sudo manet-mt7916-firmware.py --rearm` to retry on the next boot.
+Every MT7916 node defaults to the positioning-patched 2024 WM with stock
+2024 WA/ROM at the next boot when the installed driver has `manet_timing=1`.
+`positioning=` controls ranging only: changing it does not select firmware or
+retry a failed patch. `manet-positioning.service` ships but remains disabled
+and default off. A driver without the timing tag uses the pinned unmodified
+2024 firmware set. An unconfirmed patched boot also falls back to that pinned
+stock set on the following boot; the journal reports `AUTO-DISABLED`. After
+addressing the cause, run `sudo manet-mt7916-firmware.py --rearm` to retry on
+the next boot. An update with a different patched WM hash also rearms the
+trial. Reinstalling the same hash leaves the latch in place.
+
+`mt7916_background_rx=y` in `/etc/mesh.conf` reserves the third 5 GHz receive
+chain on supported kernels at the next boot. The main radio becomes 2T2R;
+ACS can then measure candidate energy while that radio carries traffic.
+The default is `n`, which retains the normal receive chains and candidate
+scans. This is a local setting, read by the existing config watcher; it does
+not reload a driver. An unconfirmed patched boot also suspends this reservation
+until explicit rearm or an update with a different patched WM hash.
+CM4 validation of the observer and own-transmit correction remains required.
 
 Connect by Ethernet or join this radio's own Wi-Fi network. For a radio with GPS,
 turn **Android location OFF**, enable **ATAK external GPS input on UDP 4349**, and
@@ -1614,9 +1630,10 @@ The update archive can carry any component required by a release, including
 kernels, modules, firmware, and configuration migrations. The `tools` name
 does not restrict payload scope. Fielded radios may be sealed, so maintenance
 must be designed around updates in place. Current packages include runtime
-software and managed MT7916 firmware; a complete board-specific kernel update
-and boot-recovery procedure still needs implementation and validation before
-a kernel payload is shipped. See the
+software and managed MT7916 firmware. An opt-in CM4 kernel trial path is
+implemented but still requires hardware qualification before shipment. It needs
+a local validated boot profile and a unique kernel release. Rock 3A kernel
+activation is disabled pending bootloader and reset-path validation. See the
 [field update policy](../../docs/node-tools-internals.md#field-update-policy).
 
 Updates node tools to the stable GitHub release marked Latest. It compares
@@ -1635,6 +1652,13 @@ including prereleases. This affects only that invocation. Stable checks leave a
 newer installed development version alone; use `--allow-downgrade` explicitly
 to return to an older stable build.
 
+For an offline bench package, use
+`sudo node-update.sh --local-archive /path/cm4-tools.tar.gz --local-version VERSION`
+with the adjacent `cm4-tools.tar.gz.sha256`. Use the board's exact filename.
+This explicitly trusts the supplied local archive and sidecar instead of GitHub
+release metadata, checks its embedded version, and reinstalls an equal version.
+Downgrades still require `--allow-downgrade`. Pending recovery takes precedence.
+
 The updater verifies the manifest digest and adjacent `<filename>.sha256`, reads
 the entire gzip stream, validates archive paths and required files, and checks
 both embedded version files before staging the payload. It checks free space
@@ -1650,8 +1674,9 @@ boot, so a failed daemon cannot silently become optional on retry. Failures retu
 installation leaves `/var/lib/manet-update/in-progress` and a durable recovery
 archive under `/var/lib/manet-update/recovery`. Every subsequent attempt first
 resumes that exact release locally, even without Ethernet or internet access.
-The archive is checked again before use. A saved updater and release helper
-allow recovery even if the installed tools contain files from different releases.
+The archive is checked again before use. The saved updater, release helper
+and kernel helper allow recovery even if the installed tools contain files
+from different releases.
 
 At boot, `manet-update-recover.service` restores the pending payload before
 radio coldplug and firmware preparation. `manet-update-finish.service` then
@@ -1661,6 +1686,16 @@ To retry manually, use `sudo node-update.sh --recover-only`. It does nothing
 when no update is pending. A missing or corrupt recovery archive fails with an
 error and retains the pending marker for repair; it is never silently replaced
 with a different release.
+
+A kernel payload stages a separate boot set and module tree before replacing
+runtime software. The old kernel remains the normal boot choice during the
+CM4 one-shot trial. Confirmation checks the trial identity, core services and
+a locally pinned radio/management health check before changing the normal
+boot selector. A failed trial is retained for diagnosis and is never retried
+automatically. After returning to the original kernel, use
+`sudo node-update.sh --cancel-kernel-trial` to cancel an uncommitted trial.
+Candidate files are retained. The boot watchdog and confirmation deadline
+must be validated on the board before commissioning this path.
 
 This completes an interrupted update; it does not roll back a defective release
 or provide an operating-system snapshot. The protection applies to installations

@@ -12,8 +12,10 @@ verifies, stages, and installs it. The archive can carry any component a
 release needs, including kernels, modules, firmware, and configuration
 migrations. End-user radios may be sealed; routine updates must not assume
 physical access for reflashing. The current builder carries runtime software
-and managed MT7916 firmware, with kernel-update activation and boot recovery
-still to be implemented and validated. See the
+and managed MT7916 firmware by default. The optional board kernel payload
+uses a separate manifest and trial transaction. CM4 activation requires a
+locally qualified boot profile and is not yet hardware-validated. Rock 3A
+kernel activation remains disabled. See the
 [field update policy](../../docs/node-tools-internals.md#field-update-policy).
 
 `*-install.tar.gz` sets up a new node. Current install packages combine the

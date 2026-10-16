@@ -464,7 +464,8 @@ smooth_scan_report() {
          | if type == "object" then . else {} end) as $previous
         |
         .results |= map(
-            if has("rf_trouble") or ._roc == true then . else
+            if has("rf_trouble") or ._roc == true or ._observer == true
+            then . else
             . as $sample
             | ($sample._survey_boot // $now) as $sample_time
             | ([ $previous.results[]?
@@ -490,7 +491,8 @@ smooth_scan_report() {
 import json, sys
 report = json.load(sys.stdin)
 for sample in report["results"]:
-    if "foreign_pct" not in sample and not sample.get("_roc"):
+    if ("foreign_pct" not in sample and not sample.get("_roc")
+            and not sample.get("_observer")):
         sample.pop("busy_pct", None)
 print(json.dumps(report, separators=(",", ":")))'
     fi
@@ -580,7 +582,7 @@ capture_flush_scan() {
 # Discovery keeps its scan path. Call directly so baselines survive cycles.
 perform_scan() {
     local mode=${1:-data} peer_bands band home roc candidate_busy=false
-    local needs_smoothing=false scan_ready home_bss
+    local needs_smoothing=false scan_ready home_bss observer_report observer_rc
     peer_bands=""
     if [ "$mode" = data ]; then
         peer_bands=$(peer_trouble_bands)
@@ -648,6 +650,25 @@ perform_scan() {
             [ -n "$freqs_to_scan" ] || scan_ready=false
         fi
         home_bss=0
+        observer_report=""
+        if [ "$scan_ready" = true ] && [ "$mode" = data ] &&
+           [ "$band" = 5_0 ]; then
+            local observer_freqs="" helper
+            for freq in $freqs_to_scan; do
+                [ "$freq" = "$home" ] || observer_freqs+=" $freq"
+            done
+            helper="${MANET_BGOBS_HELPER:-${MANET_TOOLS_DIR:-$(dirname \
+                "${BASH_SOURCE[0]}")}/manet_bgobs.py}"
+            observer_rc=0
+            # The helper bounds each window; the outer deadline covers a
+            # driver stalled in a debugfs read. Missing ABI retains scans.
+            observer_report=$(timeout --foreground --kill-after=2s 90s \
+                python3 "$helper" "$iface" $observer_freqs) || observer_rc=$?
+            if [ "$observer_rc" != 3 ]; then
+                scan_ready=false
+                [ "$observer_rc" = 0 ] || observer_report=""
+            fi
+        fi
         if [ "$scan_ready" = true ] && [ "$roc" = false ]; then
             if capture_flush_scan "$iface" "$freqs_to_scan"; then
                 while read -r f n a b t used r; do
@@ -668,6 +689,14 @@ perform_scan() {
             HOME_ENTRY="${HOME_ENTRY%\}},\"bss_count\":$home_bss}"
             [ "$first_entry" = true ] && first_entry=false || json_out+=","
             json_out+="$HOME_ENTRY"
+        fi
+        if [ -n "$observer_report" ]; then
+            local sample
+            while IFS= read -r sample; do
+                [ -n "$sample" ] || continue
+                [ "$first_entry" = true ] && first_entry=false || json_out+=","
+                json_out+="$sample"
+            done < <(jq -c '.results[]?' <<< "$observer_report")
         fi
         [ "$scan_ready" = true ] || continue
         driver=$(iface_driver "$iface")

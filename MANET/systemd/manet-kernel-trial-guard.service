@@ -1,0 +1,17 @@
+[Unit]
+Description=Reset an unconfirmed MANET kernel trial
+DefaultDependencies=no
+After=local-fs.target
+RequiresMountsFor=/var/lib /usr/local
+Before=basic.target shutdown.target
+Conflicts=shutdown.target
+ConditionPathExists=/var/lib/manet-update/recovery/kernel.json
+FailureAction=reboot
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /var/lib/manet-update/recovery/node-update.py --kernel-guard
+TimeoutStopSec=5s
+
+[Install]
+WantedBy=multi-user.target

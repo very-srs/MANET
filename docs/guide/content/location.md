@@ -469,6 +469,13 @@ capabilities are provided and verified. `manet-positioning.service` remains
 disabled and `positioning` defaults off. Enabling a flag alone does not
 complete those dependencies.
 
+`positioning=` controls ranging only. The MT7916 firmware service defaults to
+the patched 2024 WM whenever the installed driver has the required timing tag,
+even with ranging disabled. Changing this setting neither changes firmware nor
+rearms a failed firmware trial. See the
+[firmware selection mechanism](../../../docs/node-tools-internals.md#mt7916-firmware-selection)
+for the pinned-stock fallback and recovery rules.
+
 For the actual boundaries, read the module descriptions in
 [the positioning controller](../../../MANET/node_tools/manet-positioning.py),
 [radio adapter](../../../MANET/node_tools/manet_ranging_radio.py),

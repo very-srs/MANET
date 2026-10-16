@@ -485,13 +485,19 @@ if sys.argv[1] == 'is-active' and sys.argv[-1] == 'mesh-config-apply.service':
         self.updater.update()
         self.assertEqual(self.old_manager.readlink(), Path('node-manager-static.sh'))
 
+    def test_raw_kernel_files_require_transaction(self):
+        for name in ('boot/firmware/kernel8.img', 'usr/lib/modules/test/kernel/test.ko',
+                     'usr/lib/firmware/morse/test.bin', 'etc/manet-kernel-trial.json'):
+            with self.subTest(name=name):
+                self.members[name] = (b'candidate', 0o644)
+                self.make_archive()
+                self.assert_rejected_before_install()
+                del self.members[name]
+
     def test_release_payload_can_install_system_components(self):
         """Install representative files in a fake root, without booting them."""
         payload = {
-            'boot/firmware/kernel8.img': b'test kernel image',
-            'boot/firmware/overlays/test.dtbo': b'test device tree',
-            'usr/lib/modules/test/kernel/test.ko': b'test module',
-            'usr/lib/firmware/morse/test.bin': b'test firmware',
+            'usr/lib/firmware/example/test.bin': b'test firmware',
             'etc/systemd/network/test.network': b'[Match]\nName=test0\n',
             'etc/mesh.conf': b'acs=n\n',
             'opt/manet/example': b'additional software',
@@ -510,9 +516,7 @@ if sys.argv[1] == 'is-active' and sys.argv[-1] == 'mesh-config-apply.service':
     def test_extended_payload_recovers_from_retained_archive(self):
         """Retry additional payload paths offline after activation fails."""
         payload = {
-            'boot/firmware/kernel8.img': b'test kernel image',
-            'usr/lib/modules/test/kernel/test.ko': b'test module',
-            'usr/lib/firmware/morse/test.bin': b'test firmware',
+            'usr/lib/firmware/example/test.bin': b'test firmware',
             'etc/systemd/network/test.network': b'[Match]\nName=test0\n',
             'etc/mesh.conf': b'acs=n\n',
         }

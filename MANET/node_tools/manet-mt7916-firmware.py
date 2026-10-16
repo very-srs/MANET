@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prepare the opt-in MT7916 override without loading or reloading drivers."""
+"""Prepare the pinned MT7916 firmware without loading or reloading drivers."""
 import argparse
 from contextlib import contextmanager
 import fcntl
@@ -15,6 +15,8 @@ import zlib
 
 NAMES = ('mt7916_wm.bin', 'mt7916_wa.bin', 'mt7916_rom_patch.bin')
 OWNER = '.manet-mt7916'
+STOCK_WM_SHA256 = ('64d86cfa4f00f9452b4706389d648d4ce0e'
+                  '563ddd512cc9845ba4e4442e99cb0')
 WM_SHA256 = '18a2e1d03f17913ef0450a905536d5defcdf78ee1d98a1232649c31a70a63e1e'
 
 
@@ -23,25 +25,20 @@ def digest(data):
     return hashlib.sha256(data).hexdigest()
 
 
-def positioning(path):
-    """Read the literal positioning choice, defaulting to n if absent."""
+def config_choice(path, requested_key, default="n"):
+    """Read a literal config choice, without evaluating shell syntax."""
     # Keep the positioning service's literal key/value parsing, including quotes.
     result = {}
     try:
         text = path.read_text()
     except FileNotFoundError:
-        return 'n'
+        return default
     for line in text.splitlines():
         line = line.strip()
         if line and not line.startswith('#') and '=' in line:
             key, value = line.split('=', 1)
             result[key.strip()] = value.strip().strip('\"\'')
-    return result.get('positioning', 'n').lower()
-
-
-def enabled(path):
-    """Return whether the config explicitly requests positioning=y."""
-    return positioning(path) == 'y'
+    return result.get(requested_key, default).lower()
 
 
 def timing_driver(root):
@@ -169,7 +166,7 @@ class Firmware:
             return None
         if (record.get('schema') != 1 or
                 any(not isinstance(record.get(k), str)
-                    for k in ('boot_id', 'wm_sha256', 'positioning'))):
+                    for k in ('boot_id', 'wm_sha256'))):
             raise ValueError(f'invalid recovery state: {path.name}')
         return record
 
@@ -245,16 +242,15 @@ class Firmware:
         return primary or not secondary
 
     def select(self, mode):
-        """Reconcile boot recovery, opt-in config and firmware preparation."""
-        value = positioning(self.root / 'etc/mesh.conf')
+        """Prefer patched WM on timing drivers, with a pinned-stock fallback."""
         pending = self.read_state(self.pending)
         disabled = self.read_state(self.disabled)
-        current = self.boot_id() if pending or (mode == 'boot' and value == 'y') else None
+        current = self.boot_id() if pending or mode == 'boot' else None
         stale = pending and pending['boot_id'] != current
         if stale:
             # Record the failure before removing either the firmware or the
             # evidence. A crash during recovery must never silently rearm it.
-            disabled = dict(pending, positioning=value, reason='boot did not reach survival check')
+            disabled = dict(pending, reason='boot did not reach survival check')
             self.write_state(self.disabled, disabled)
             self.deactivate()
             self.remove_state(self.pending)
@@ -265,29 +261,75 @@ class Firmware:
                 return 'boot survived; pending marker cleared'
             if not disabled:
                 return 'pending marker retained; survival unconfirmed' if pending else 'no pending boot'
-        # A changed value or explicit --rearm rearms the choice.
-        # Unrelated edits and repeated writes of the same value do not.
+        # Retry a new pinned patch or an explicit --rearm. Config changes,
+        # including positioning, cannot erase evidence of a failed boot.
         if disabled and mode != 'survived':
-            if mode == 'rearm' or (not stale and value != disabled['positioning']):
+            if mode == 'rearm' or WM_SHA256 != disabled['wm_sha256']:
                 self.remove_state(self.disabled)
                 disabled = None
-        if disabled:
-            return ('AUTO-DISABLED after failed boot; WM ' + disabled['wm_sha256'] +
-                    '; change positioning or run --rearm; ' + self.prepare(False))
-        if value != 'y':
-            return self.prepare(False)
+        if mode != 'survived':
+            self.configure_reservation(allow=not disabled)
         if not self.present():
             return 'no MT7916 primary PCI function (14c3:7906); ' + self.prepare(False)
-        if not timing_driver(self.root):
-            return 'installed mt7915e lacks manet_timing=1 for running kernel; ' + self.prepare(False)
-        if mode == 'boot' and not pending:
-            # Persist probe intent before leaving the patched image available.
+        if disabled:
+            return ('AUTO-DISABLED after failed boot; WM ' + disabled['wm_sha256'] +
+                    '; run --rearm or install an updated patched WM; ' +
+                    self.prepare(True, patched=False))
+        patched = timing_driver(self.root)
+        reason = ''
+        if not patched:
+            reason = 'installed mt7915e lacks manet_timing=1; using pinned stock; '
+        if mode == 'boot' and patched and not pending:
+            # Persist probe intent before leaving patched WM available.
+            # Pinned stock is the recovery set and does not arm another trial.
             self.write_state(self.pending, {'schema': 1, 'boot_id': current,
-                                           'wm_sha256': WM_SHA256, 'positioning': value})
-        return self.prepare(True)
+                                           'wm_sha256': WM_SHA256})
+        return reason + self.prepare(True, patched=patched)
+
+    def configure_reservation(self, *, allow=True):
+        """Reconcile the local boot-only option through the config watcher."""
+        path = self.root / "etc/modprobe.d/manet-mt7916.conf"
+        content = ("# Managed by manet-mt7916-firmware.py\n"
+                   "options mt7915e background_radar_2t2r=1\n")
+        requested = (config_choice(self.root / "etc/mesh.conf",
+                                   "mt7916_background_rx") if allow else "n")
+        if requested not in ("y", "n"):
+            raise ValueError("mt7916_background_rx must be y or n")
+        if path.is_symlink() or (path.exists() and path.read_text() != content):
+            raise ValueError("unowned MT7916 modprobe config")
+        if requested == "n":
+            if path.exists():
+                path.unlink()
+                sync_directory(path.parent)
+            return
+        try:
+            result = subprocess.run(
+                ["modinfo", "-b", str(self.root), "-k", os.uname().release,
+                 "-F", "parm", "mt7915e"], capture_output=True, text=True,
+                timeout=10)
+            supported = result.returncode == 0 and any(
+                line.startswith("background_radar_2t2r:")
+                for line in result.stdout.splitlines())
+        except (OSError, subprocess.SubprocessError):
+            supported = False
+        if not supported:
+            # An unknown module option prevents probing on older kernels.
+            if path.exists():
+                path.unlink()
+                sync_directory(path.parent)
+            return
+        if path.exists():
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix=".mt7916-",
+                                         dir=path.parent) as temp:
+            staged = Path(temp) / path.name
+            staged_file(staged, content.encode())
+            os.replace(staged, path)
+            sync_directory(path.parent)
 
     def owners(self):
-        """Load companion ownership records, or an empty mapping if absent."""
+        """Load firmware ownership records, or an empty mapping if absent."""
         try:
             record = json.loads(self.owner.read_text())
         except FileNotFoundError:
@@ -297,14 +339,15 @@ class Firmware:
         return record['files']
 
     def owned(self, name, owners):
-        """Match WM by its unique hash and companions by hash plus identity."""
+        """Match current patched WM by hash; other files need owned identity."""
         path = self.updates / name
         value = file_hash(path)
-        if name == NAMES[0]:
-            return value == WM_SHA256
+        if name == NAMES[0] and value == WM_SHA256:
+            return True
         record = owners.get(name, {})
-        return (value is not None and value == record.get('sha256')
-                and identity(path) == record.get('identity'))
+        return any(value is not None and value == candidate.get('sha256')
+                   and identity(path) == candidate.get('identity')
+                   for candidate in (record, record.get('previous', {})))
 
     def deactivate(self):
         """Remove recognized overrides and their ownership manifest."""
@@ -315,7 +358,7 @@ class Firmware:
             wm.unlink()
             sync_directory(self.updates)
         owners = self.owners()
-        for name in NAMES[1:]:
+        for name in NAMES:
             if self.owned(name, owners):
                 (self.updates / name).unlink()
                 sync_directory(self.updates)
@@ -323,24 +366,26 @@ class Firmware:
             self.owner.unlink()
             sync_directory(self.updates)
 
-    def prepare(self, enable):
+    def prepare(self, enable, *, patched=True):
         """Remove owned overrides or stage the verified firmware set."""
         if not enable:
             self.deactivate()
             if any(os.path.lexists(self.updates / n) for n in NAMES):
                 return 'disabled; MANET overrides removed, unowned overrides preserved'
-            return 'disabled; stock firmware selected for next boot'
+            return 'disabled; MANET overrides removed'
         manifest = json.loads((self.assets / 'mt7916-firmware.json').read_text())
         spec = manifest['wm_patch']
         expected = {n: manifest['linux_firmware']['files'][n]['sha256'] for n in NAMES}
-        expected[NAMES[0]] = spec['output_sha256']
-        if expected[NAMES[0]] != WM_SHA256:
+        if patched:
+            expected[NAMES[0]] = spec['output_sha256']
+        if expected[NAMES[0]] != (WM_SHA256 if patched else STOCK_WM_SHA256):
             raise ValueError('unexpected WM output hash')
+        selection = 'patched WM' if patched else 'pinned stock'
         changed = [n for n in NAMES if file_hash(self.updates / n) != expected[n]]
         if not changed:
             # Ready boots read only the intent and installed set, not the stock
             # cache. Do not reseal, adopt foreign companions or rewrite metadata.
-            return 'enabled; firmware already prepared'
+            return selection + '; firmware already prepared'
         owners = self.owners()
         for name in changed:
             # lexists also sees dangling symlinks, which must not be replaced.
@@ -352,47 +397,57 @@ class Firmware:
             if digest(data) != manifest['linux_firmware']['files'][name]['sha256']:
                 raise ValueError(f'stock {name} hash mismatch')
             stock[name] = data
-        if NAMES[0] in changed:
+        if patched and NAMES[0] in changed:
             stock[NAMES[0]] = patch_wm(stock[NAMES[0]], spec)
         with tempfile.TemporaryDirectory(prefix='.manet-mt7916-', dir=self.updates) as temp:
             work = Path(temp)
             for name in changed:
                 staged_file(work / name, stock[name])
-                if name != NAMES[0]:
-                    owners[name] = {'sha256': expected[name], 'identity': identity(work / name)}
-            if any(n != NAMES[0] for n in changed):
-                # Record staged inode identities first. A crash between renames
-                # is recoverable without adopting an identical foreign file.
-                staged_file(work / OWNER, json.dumps({'schema': 1, 'files': owners},
-                                                     sort_keys=True).encode() + b'\n')
-                os.replace(work / OWNER, self.owner)
-                sync_directory(self.updates)
+                record = {'sha256': expected[name], 'identity': identity(work / name)}
+                path = self.updates / name
+                previous_hash = file_hash(path)
+                if previous_hash is not None:
+                    # Keep the currently owned inode recognizable if power is
+                    # lost after the manifest rename but before file publication.
+                    record['previous'] = {'sha256': previous_hash,
+                                          'identity': identity(path)}
+                owners[name] = record
+            # Record every staged identity first, including patched WM so a
+            # later update can replace its old hash without adopting files.
+            staged_file(work / OWNER, json.dumps({'schema': 1, 'files': owners},
+                                                 sort_keys=True).encode() + b'\n')
+            os.replace(work / OWNER, self.owner)
+            sync_directory(self.updates)
             # WM is published last, after both companions are complete.
             for name in (*NAMES[1:], NAMES[0]):
                 if name in changed:
                     os.replace(work / name, self.updates / name)
                     sync_directory(self.updates)
-        return 'enabled; firmware prepared for next boot'
+        return selection + '; firmware prepared for next boot'
 
     def run(self, mode='apply'):
         """Serialize selection and return success plus a diagnostic message."""
         try:
             if not self.updates.exists():
-                if (not self.state.exists() and not enabled(self.root / 'etc/mesh.conf')
-                        and mode != 'survived'):
-                    return True, 'disabled; stock firmware selected for next boot'
                 self.updates.mkdir(parents=True, exist_ok=True)
             with locked(self.updates):
                 try:
                     return True, self.select(mode)
                 except Exception as error:
-                    # A failed preparation must try to restore stock selection.
+                    # A failed preparation must remove unsafe owned overrides.
                     # Keep both errors visible if owned-file cleanup also fails.
-                    try:
-                        self.deactivate()
-                        recovery = 'owned overrides removed; other firmware left untouched'
-                    except Exception as cleanup:
-                        recovery = f'override cleanup failed, retry at next boot: {cleanup}'
+                    failures = []
+                    for cleanup in (self.deactivate, lambda:
+                                    self.configure_reservation(allow=False)):
+                        try:
+                            cleanup()
+                        except Exception as failure:
+                            failures.append(str(failure))
+                    recovery = ('owned overrides removed; other firmware '
+                                'left untouched')
+                    if failures:
+                        recovery = ('override cleanup failed, retry at next '
+                                    'boot: ' + '; '.join(failures))
                     return False, f'{error}; {recovery}'
         except Exception as error:
             return False, f'{error}; preparation unavailable, retry at next boot'
