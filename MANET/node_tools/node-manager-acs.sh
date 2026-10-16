@@ -225,6 +225,9 @@ update_lobby_bootstrap() {
 
 # Return failure only for confirmed quorum loss from QUORUM_CHECKER.
 check_mesh_quorum() {
+    # Radar uses the authenticated plan's fallback. Lost peers alone cannot
+    # select a different channel while the 5 GHz role is configured for DFS.
+    acs_dfs_operating && return 0
     local status
     "$QUORUM_CHECKER"
     status=$?

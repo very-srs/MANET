@@ -15,6 +15,7 @@ import base64
 import argparse
 import json
 import math
+import os
 from pathlib import Path
 import time
 
@@ -137,8 +138,33 @@ def build_telemetry(args):
     except (json.JSONDecodeError, KeyError, TypeError, ValueError):
         pass
 
+    add_dfs_hold(t, args)
     _add_interfaces(t, args.interfaces_json)
     return t
+
+
+def add_dfs_hold(telemetry, args):
+    """Copy optional hold progress without granting unsigned move authority."""
+    from manet_acs_agreement import valid_hold, DFS_LEASE_SECONDS
+    try:
+        report = json.loads(args.channel_report_json)
+        hold = report.get('dfs_hold')
+        if hold is None:
+            path = getattr(args, 'dfs_hold_file', '/run/manet-dfs-hold.json')
+            hold = json.loads(Path(path).read_text())
+            boot_path = os.environ.get('MANET_BOOT_ID_FILE',
+                                       '/proc/sys/kernel/random/boot_id')
+            boot = Path(boot_path).read_text().strip().replace('-', '')
+            if (hold.get('boot') != boot or
+                    not 0 <= time.time() - hold.get('observed_at', 0) <=
+                    DFS_LEASE_SECONDS):
+                return
+        if valid_hold(hold):
+            target = telemetry.channel_report.dfs_hold
+            for field, value in hold.items():
+                setattr(target, field, value)
+    except (OSError, ValueError, TypeError, AttributeError):
+        return
 
 
 def apply_positioning_location(telemetry, path, config_path, *, now_boot=None, boot_id=None):

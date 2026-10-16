@@ -229,7 +229,7 @@ class LocalTimeTests(AcsHarness):
             self.runner.tick(self.wall)
         self.assertEqual(self.runner.state['busy_until'], deadline)
 
-    def test_unknown_boot_restarts_only_hold_and_persists_it_before_sync(self):
+    def test_unknown_boot_restarts_holds_and_persists_them_before_sync(self):
         for boot in (None, 'f' * 32):
             with self.subTest(boot=boot):
                 self.runner.state.update({key: 9999999999 for key in runtime.LOCAL_TIMERS})
@@ -239,14 +239,20 @@ class LocalTimeTests(AcsHarness):
                 self.wall += 3600
                 self.runner = runtime.Runtime()
                 hold = self.elapsed + protocol.RECOVERY_SECONDS
+                cooldown = self.elapsed + protocol.DFS_COOLDOWN_SECONDS
                 self.assertEqual(self.runner.state['hold_until'], hold)
+                self.assertEqual(self.runner.state['dfs_cooldown_until'],
+                                 cooldown)
                 self.assertEqual(self.runner.state['timer_boot'], self.runner.boot)
                 for key in runtime.LOCAL_TIMERS[1:]:
-                    self.assertNotIn(key, self.runner.state)
+                    if key != 'dfs_cooldown_until':
+                        self.assertNotIn(key, self.runner.state)
                 self.elapsed += 10
                 self.wall -= 7200
                 self.runner = runtime.Runtime()
                 self.assertEqual(self.runner.state['hold_until'], hold)
+                self.assertEqual(self.runner.state['dfs_cooldown_until'],
+                                 cooldown)
 
     def test_boot_reconciliation_under_a_held_lock_stays_in_memory(self):
         # The tourguide holds the channel lock while it runs members and

@@ -116,6 +116,22 @@ message NodeTelemetry {
   }
   message ChannelReport {
     repeated ChannelScanResult results = 1;
+    // Discovery only. Authenticated ACS messages carry renewable authority.
+    // Absence means unsupported or unknown, never a cleared channel.
+    message DfsHold {
+      uint32 version = 1;
+      uint32 frequency = 2;
+      uint32 width = 3;
+      uint32 center = 4;
+      string state = 5; // cac, held, revoked, fault
+      string boot = 6;
+      string epoch = 7; // Receiver-reader session, changes after restart.
+      uint64 generation = 8;
+      bool live = 9;
+      uint64 observed_at = 10;
+      uint64 lease_until = 11;
+    }
+    DfsHold dfs_hold = 2;
   }
   // Structured, not a JSON string. A five-channel report is ~25 bytes here
   // and ~200 as JSON text nested inside the protobuf.

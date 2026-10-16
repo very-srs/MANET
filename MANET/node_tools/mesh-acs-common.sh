@@ -32,6 +32,21 @@ get_current_freq() {
     done < "$conf_file"
 }
 
+# A configured DFS radio must not select a lobby because peers disappear.
+# Read the role/config afresh, including after a daemon restart or reset.
+acs_dfs_operating() {
+    local roles="${MANET_IFACE_STATE_DIR:-/var/lib}"
+    local configs="${MANET_WPA_DIR:-/etc/wpa_supplicant}"
+    local iface='' freq
+    IFS= read -r iface 2>/dev/null < "$roles/mesh_5_if" ||
+        [ -n "$iface" ] || return 1
+    [[ "$iface" =~ ^[A-Za-z0-9_.-]{1,15}$ ]] || return 1
+    freq=$(get_current_freq "$configs/wpa_supplicant-$iface.conf")
+    [[ "$freq" =~ ^5[0-9]{3}$ ]] || return 1
+    (( (freq >= 5260 && freq <= 5320 || freq >= 5500 && freq <= 5720) &&
+       freq % 20 == 0 ))
+}
+
 . "${MANET_TOOLS_DIR:-$(dirname "${BASH_SOURCE[0]}")}/manet-common.sh" || return 1
 # radio_iface_enabled: manet-common.sh
 
