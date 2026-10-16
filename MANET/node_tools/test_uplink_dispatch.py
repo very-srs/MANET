@@ -3,6 +3,7 @@
 
 import fcntl
 import os
+import shutil
 from pathlib import Path
 import subprocess
 import sys
@@ -489,6 +490,25 @@ class AcsAutoModeTests(SpeedGateTests):
         self.assertTrue((self.root / 'run' / 'mesh-gateway.state').exists())
         self.assertIn('systemctl start hostapd.service', calls)
         self.assertNotIn('ap-mesh-helper mesh', calls)
+
+    def test_non_uplink_link_events_do_not_restart_hostapd(self):
+        self.uplink('end0')
+        self.iface('bat0')
+        for event, iface in (('carrier', 'wlan1'), ('routable', 'br0'),
+                             ('no-carrier', 'wlan1'), ('off', 'bat0')):
+            calls = self.dispatch(event, iface)
+            self.assertFalse([c for c in calls if 'hostapd' in c], (event, iface, calls))
+
+    def test_uplink_events_and_removed_uplink_still_reconcile(self):
+        self.uplink('end0')
+        calls = self.dispatch('routable', 'end0')
+        self.assertIn('systemctl start hostapd.service', calls)
+        self.uplink('usb0', usb=True)
+        (self.root / 'run' / 'manet-uplink.env').write_text('UPLINK_IFACE=usb0\n')
+        shutil.rmtree(self.root / 'net' / 'usb0')
+        self.calls.unlink()
+        calls = self.dispatch('remove', 'usb0')
+        self.assertTrue(calls, 'removing the current uplink must reconcile')
 
     def test_node_without_uplink_returns_ap_radio_to_mesh(self):
         self.iface('end0', carrier=False)

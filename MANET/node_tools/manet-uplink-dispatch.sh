@@ -603,6 +603,20 @@ reconcile() {
     demote_gateway "$current"
 }
 
+# Link events from the AP radio, mesh radios and bridges say nothing about
+# uplinks. Reconciling on them restarts a deliberately stopped hostapd, and a
+# failing start bounces the AP link into a retry loop. A removed uplink no
+# longer exists in sysfs, so the current uplink still passes.
+case "$EVENT" in
+    reconcile|--hotplug|provision) ;;
+    *)
+        if [ -n "$IFACE" ] && ! is_upstream_iface "$IFACE" &&
+                [ "$IFACE" != "$(current_uplink_iface)" ]; then
+            exit 0
+        fi
+        ;;
+esac
+
 case "$EVENT" in
     carrier|routable|configured|online|add|reconcile|--hotplug|provision)
         reconcile
