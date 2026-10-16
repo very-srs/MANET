@@ -183,7 +183,10 @@ The durable sequence is:
    A separately enabled confirmation deadline requests a normal reboot if
    confirmation never completes. The firmware kernel watchdog and PID 1
    runtime watchdog must already have been validated, including a kernel
-   that never starts userspace.
+   that never starts userspace. The kernel keeps a running watchdog alive
+   until userspace opens it, with no limit by default, so the trial command
+   line sets `watchdog.open_timeout=120`. A trial stuck before systemd (no
+   root device under `rootwait`, for example) then resets.
    A systemd timer alone cannot reset a hung kernel.
 5. After multi-user startup, check core services and run a locally installed,
    hash-pinned health check that proves the required radio and remote management

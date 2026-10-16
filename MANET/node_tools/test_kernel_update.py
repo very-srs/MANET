@@ -134,6 +134,9 @@ class KernelUpdateTests(unittest.TestCase):
         self.assertLess(trial_config.index('os_prefix='), trial_config.index('dtoverlay='))
         self.assertTrue(trial_config.endswith('kernel_watchdog_timeout=180\n'))
         self.assertEqual(self.updater.kernel().read()['watchdogs']['eeprom_boot_watchdog'], 'enabled')
+        slot = self.updater.kernel().read()['slot']
+        trial_args = (self.boot / 'manet' / slot / 'cmdline.txt').read_text().split()
+        self.assertIn('watchdog.open_timeout=120', trial_args)
         self.trial_boot()
         self.updater.update(recover_only=True)
         self.assertEqual((self.boot / 'config.txt').read_text(), trial_config)
