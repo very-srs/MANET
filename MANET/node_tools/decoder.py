@@ -109,14 +109,21 @@ def decode_telemetry(raw, emit=emit, emit_raw=emit_raw):
     emit('AP_SSID', t.ap_ssid)
     emit_raw('EUD_COUNT', t.eud_count)
 
-    emit('CHANNEL_REPORT_JSON', json.dumps({'results': [
+    report = {'results': [
         # Preserve measurement presence, including energy-only observations.
         dict({'channel': r.channel, 'bss_count': r.bss_count},
              **{field: getattr(r, field)
                 for field in ('noise_floor', 'busy_pct', 'foreign_pct', 'window_s',
                               'rf_trouble') if r.HasField(field)})
         for r in t.channel_report.results
-    ]}))
+    ]}
+    if t.channel_report.HasField('dfs_hold'):
+        hold = t.channel_report.dfs_hold
+        report['dfs_hold'] = {
+            field: getattr(hold, field) for field in
+            ('version', 'frequency', 'width', 'center', 'state', 'boot',
+             'epoch', 'generation', 'live', 'observed_at', 'lease_until')}
+    emit('CHANNEL_REPORT_JSON', json.dumps(report))
 
     # Wire enum values map to the role/state labels in interface JSON.
     role_names = {0: 'other', 1: 'bat', 2: 'mesh', 3: 'ap',
