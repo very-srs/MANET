@@ -21,12 +21,13 @@ class GatewayStartupTests(unittest.TestCase):
             root = Path(scratch)
             (root / 'bin').mkdir()
             (root / 'run').mkdir()
+            (root / 'run/manet-uplink').mkdir()
             (root / 'clock').write_text('0')
             (root / 'uptime').write_text('100.0 0.0\n')
             (root / 'route').write_text(current)
             (root / 'run/upstream_iface').write_text(upstream)
             if local_gateway:
-                (root / 'run/mesh-gateway.state').touch()
+                (root / 'run/manet-uplink/mesh-gateway.state').touch()
             if registry:
                 (root / 'run/mesh_node_registry').write_text(
                     "NODE_020000000010_MAC_ADDRESSES='02:00:00:00:00:10,02:00:00:00:01:10'\n"
@@ -149,13 +150,18 @@ elif name == 'date':
         self.assertFalse(route)
 
     def test_local_uplink_is_preserved_even_before_its_gateway_marker(self):
-        for marker in (False, True):
-            with self.subTest(marker=marker):
-                original = ('default via 192.168.69.1 dev end0 '
-                            'src 192.168.69.51 metric 100')
-                events, route = self.run_manager(current=original, local_gateway=marker, polls=2)
-                self.assertEqual(route, original)
-                self.assertTrue(all(e['kind'] == 'sleep' and e['seconds'] == 10 for e in events))
+        """Honor the dispatcher's choice across all supported uplink classes."""
+        for iface in ('end0', 'enx1234', 'usb0', 'wlan0', 'wlan1', 'wlan4'):
+            for marker in (False, True):
+                with self.subTest(iface=iface, marker=marker):
+                    original = (f'default via 192.168.69.1 dev {iface} '
+                                'src 192.168.69.51 metric 100')
+                    events, route = self.run_manager(
+                        current=original, upstream=iface,
+                        local_gateway=marker, polls=2)
+                    self.assertEqual(route, original)
+                    self.assertTrue(all(e['kind'] == 'sleep' and
+                                        e['seconds'] == 10 for e in events))
 
     def test_unqualified_dhcp_keeps_its_route_but_does_not_block_mesh(self):
         """An isolated DHCP LAN loses to a usable metric-500 mesh route."""

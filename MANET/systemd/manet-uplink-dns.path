@@ -2,7 +2,7 @@
 Description=Refresh MANET DNS after uplink and DHCP lease changes
 
 [Path]
-PathChanged=/run/mesh-gateway.state
+PathChanged=/run/manet-uplink/mesh-gateway.state
 PathChanged=/run/upstream_iface
 PathChanged=/run/systemd/netif/leases
 Unit=manet-uplink-dns.service

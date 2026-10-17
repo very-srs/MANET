@@ -59,8 +59,9 @@ from manet_registry import node_state, observed_age, parse_registry
 from manet_web_sessions import SessionStore, LoginThrottled
 from manet_web_limits import BoundedHTTPServer, RequestLimits, STATUS_CACHE, MANAGEMENT_WRITE, Busy
 from mesh_config import (local_changes, mesh_changes, strip_local_keys,
-                         validate_config, submitted_changes)
-from manet_eud_ap import apply_local as apply_local_settings, configured_ssid
+                         validate_config, submitted_changes,
+                         apply_local_to_conf)
+from manet_eud_ap import apply_local as apply_local_settings, configured_ssid, display_ssid
 from manet_config_journal import config_application_status
 from manet_admin import AdminTransport, CONFIG_ACK_TYPE, new_version, private_json_write, require_clock
 from manet_radio import (
@@ -611,6 +612,8 @@ def _interface_rows(raw, iw_info, bat0_slaves_active,
                     bat0_slaves_inactive, bat0_all_slaves,
                     wpa_running, eud_mode, no_mesh_ifaces):
     """Build interface rows with roles, health, and fault details."""
+    from manet_wifi_uplink import uplink_owner
+    owner = uplink_owner()
     ifaces = []
     for iface_data in raw:
         name   = iface_data.get('ifname', '')
@@ -645,6 +648,11 @@ def _interface_rows(raw, iw_info, bat0_slaves_active,
             elif not bat0_all_slaves:
                 health = 'warn'
                 faults.append('No interfaces enslaved to bat0')
+
+        elif name == owner:
+            role = 'uplink'
+            health = 'ok' if is_up else 'warn'
+            detail = 'Local Wi-Fi internet client'
 
         elif name == 'br0':
             role   = 'bridge'
@@ -1200,6 +1208,8 @@ def assemble_status_data():
         node_list.append({
             'id':           nid,
             'hostname':     hostname,
+            'operator':     (conf.get('operator_name', '') if is_me
+                             else ndata.get('ATAK_USER', '')),
             'mac':          raw_mac,
             'ip':           ndata.get('IPV4_ADDRESS', ''),
             'mbps':         mbps,
@@ -1232,6 +1242,7 @@ def assemble_status_data():
         node_list.insert(0, {
             'id': 'self',
             'hostname': my_host,
+            'operator': conf.get('operator_name', ''),
             'mac': my_mac or '',
             'ip': (state.get('CURRENT_IPV4') or ''),
             'mbps': None, 'is_me': True, 'is_direct': True,
@@ -1356,10 +1367,12 @@ CSS = """
   --fer-black:#02000d;
   --text:     #02000d;
   --muted:    #615f68;
-  --good:     #22c55e;
+  --small-text: 12px;
+  --good:     #16813d;
   --ok:       #ecb000;
   --warn:     #ecb000;
-  --bad:      #ef4444;
+  --warn-text:#806000;
+  --bad:      #c22c25;
   --gw:       #ecb000;
   --self:     #ecb000;
   --shadow:   0 18px 50px rgba(2,0,13,.10);
@@ -1376,11 +1389,18 @@ CSS = """
   --info:     #9fa8ff;
   --text:     #f8f6ef;
   --muted:    #aaa5b2;
+  --good:     #70d99a;
+  --warn-text:#ecb000;
+  --bad:      #ffaaa4;
   --gw:       #ecb000;
   --self:     #ecb000;
   --shadow:   0 18px 50px rgba(0,0,0,.36);
 }
 * { box-sizing: border-box; margin: 0; padding: 0; }
+:root { color-scheme: light; }
+:root[data-theme="dark"] { color-scheme: dark; }
+:focus-visible { outline: 3px solid var(--info); outline-offset: 3px; }
+::selection { background: var(--accent2); color: var(--fer-black); }
 html { min-height: 100%; scroll-behavior: smooth; }
 body { min-height: 100%; background: var(--bg); color: var(--text); font-family: var(--font); font-size: 13px; overflow-x: hidden; overflow-y: auto; -webkit-overflow-scrolling: touch; overscroll-behavior-y: auto; text-rendering: optimizeLegibility; }
 body {
@@ -1401,11 +1421,11 @@ body {
               transition: background 0.4s; }
 #hdr-health-dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0;
                   box-shadow: none; transition: background 0.4s, color 0.4s; }
-#hdr-health-label { font-size: 11px; font-weight: 800; letter-spacing: 0;
+#hdr-health-label { font-size:var(--small-text); font-weight: 800; letter-spacing: 0;
                     transition: color 0.4s; white-space: nowrap; }
-.health-ok   { color: #136c36; background: rgba(22,163,74,.07); }
-.health-warn { color: #8a6a00; background: rgba(236,176,0,.12); }
-.health-fault{ color: #b42318; background: rgba(180,35,24,.08); }
+.health-ok   { color: var(--good); background: rgba(22,163,74,.07); }
+.health-warn { color: var(--warn-text); background: rgba(236,176,0,.12); }
+.health-fault{ color: var(--bad); background: rgba(180,35,24,.08); }
 .health-loading { color: var(--muted); background: transparent; }
 .hdr-brand { grid-area: brand; display:flex; align-items:center; gap:8px; min-width:0; padding-left:12px; }
 .fer-lockup { display:flex; align-items:center; justify-content:flex-start; align-self:center; height:58px; padding:0 12px 0 0; border-right:1px solid var(--border); color:var(--fer-black); overflow:hidden; flex:0 0 auto; }
@@ -1416,14 +1436,14 @@ body {
 /* no brightness(0) invert(1) here: that flattens the badge to a solid silhouette */
 .hdr-logo { color: var(--text); font-size: 17px; letter-spacing: 0; font-weight: 900; display:flex; align-items:center; min-height:46px; line-height:1; }
 .hdr-logo span { color: var(--accent2); }
-.theme-toggle { border:1px solid var(--accent2); background:rgba(236,176,0,.10); color:var(--text); border-radius:999px; padding:6px 10px; font-family:var(--font); font-size:11px; font-weight:850; cursor:pointer; min-width:74px; }
+.theme-toggle { border:1px solid var(--accent2); background:rgba(236,176,0,.10); color:var(--text); border-radius:999px; padding:6px 10px; font-family:var(--font); font-size:var(--small-text); font-weight:850; cursor:pointer; min-width:74px; }
 .theme-toggle:hover { background:var(--accent2); color:var(--fer-black); box-shadow:0 8px 22px rgba(236,176,0,.20); }
-.perf-link-btn { border:1px solid var(--accent2); background:var(--accent2); color:var(--fer-black); border-radius:999px; padding:6px 12px; font-family:var(--font); font-size:11px; font-weight:850; cursor:pointer; min-width:92px; transition:background .18s ease,color .18s ease,box-shadow .18s ease,transform .18s ease; box-shadow:0 8px 20px rgba(236,176,0,.16); }
+.perf-link-btn { border:1px solid var(--accent2); background:var(--accent2); color:var(--fer-black); border-radius:999px; padding:6px 12px; font-family:var(--font); font-size:var(--small-text); font-weight:850; cursor:pointer; min-width:92px; transition:background .18s ease,color .18s ease,box-shadow .18s ease,transform .18s ease; box-shadow:0 8px 20px rgba(236,176,0,.16); }
 .perf-link-btn:hover { background:#f6c62f; color:var(--fer-black); box-shadow:0 10px 24px rgba(236,176,0,.26); transform:translateY(-1px); }
 :root[data-theme="dark"] .perf-link-btn { background:var(--accent2); color:var(--fer-black); border-color:var(--accent2); }
 :root[data-theme="dark"] .perf-link-btn:hover { background:#f6c62f; color:var(--fer-black); box-shadow:0 10px 24px rgba(236,176,0,.28); }
 /* Centre identity items */
-#header .meta { color: var(--muted); font-size: 12px; display: flex; align-items: center; }
+#header .meta { color: var(--muted); font-size:var(--small-text); display: flex; align-items: center; }
 #hdr-meta { grid-area: meta; display:flex; align-items:center; gap:0; flex-wrap:wrap; min-width:0; padding-left:12px; }
 #hdr-hostname { color: var(--text); font-size: 13px; font-weight: 800; padding-right: 10px;
                 border-right: 1px solid var(--border); margin-right: 10px; }
@@ -1431,13 +1451,13 @@ body {
 #header .spacer { display:none; }
 /* Right-side items */
 #hdr-right { grid-area: actions; display: flex; align-items: center; gap: 12px; flex-wrap:wrap; padding-left:12px; }
-#hdr-gw-label { font-size: 11px; }
+#hdr-gw-label { font-size:var(--small-text); }
 .gw-ok   { color: var(--good); }
 .gw-none { color: var(--muted); }
-.pill { display: inline-block; padding: 4px 9px; border-radius: 999px; font-size: 10px; font-weight: 800; letter-spacing: 0; }
+.pill { display: inline-block; padding: 4px 9px; border-radius: 999px; font-size:var(--small-text); font-weight: 800; letter-spacing: 0; }
 .pill-accent { background: rgba(236,176,0,.10); color: var(--text); border: 1px solid rgba(236,176,0,.30); }
-.pill-gw     { background: rgba(236,176,0,.14); color: var(--fer-black); border: 1px solid rgba(236,176,0,.38); }
-.pill-self   { background: rgba(236,176,0,.16); color: var(--fer-black); border: 1px solid rgba(236,176,0,.34); }
+.pill-gw     { background: rgba(236,176,0,.14); color: var(--text); border: 1px solid rgba(236,176,0,.38); }
+.pill-self   { background: rgba(236,176,0,.16); color: var(--text); border: 1px solid rgba(236,176,0,.34); }
 
 /* ── Main Panels ── */
 #main { display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 16px; flex: 1; padding: 16px; align-items: start; }
@@ -1457,29 +1477,35 @@ body {
 #side-panel { width: 100%; overflow: visible; border: 1px solid var(--border2); border-radius: 18px; background: var(--surface); box-shadow: 0 18px 44px rgba(2,0,13,.06); }
 
 /* ── Node Table ── */
-.section-hdr { padding: 12px 14px; font-size: 11px; font-weight: 800; letter-spacing: .3px; color: var(--muted); text-transform: none; border-bottom: 1px solid var(--border2); position: sticky; top: 0; background: color-mix(in srgb, var(--surface) 92%, transparent); backdrop-filter: blur(12px); z-index: 1; }
-.node-row { padding: 10px 12px; border-bottom: 1px solid var(--border2); cursor: pointer; transition: background .18s ease, transform .18s ease; }
-.node-row:hover { background: rgba(236,176,0,.08); transform: translateY(-1px); }
+.section-hdr { padding: 12px 14px; font-size:var(--small-text); font-weight: 800; letter-spacing: .3px; color: var(--muted); text-transform: none; border-bottom: 1px solid var(--border2); position: sticky; top: 0; background: color-mix(in srgb, var(--surface) 92%, transparent); backdrop-filter: blur(12px); z-index: 1; }
+.node-row { border-bottom: 1px solid var(--border2); transition: background .18s ease; }
+.node-row:hover { background: rgba(236,176,0,.08); }
 .node-row.is-me { border-left: 2px solid var(--self); }
 .node-row.is-gw { border-left: 2px solid var(--gw); }
 .node-row.is-me.is-gw { border-left: 2px solid var(--gw); }
 .node-row.peer-selected { background: rgba(236,176,0,.12); outline: 1px solid rgba(236,176,0,.36); outline-offset: -1px; }
-.node-summary { min-width: 0; }
-.node-name { font-size: 12px; font-weight: bold; display: flex; align-items: center; gap: 5px; margin-bottom: 2px; }
-.node-ip { color: var(--muted); font-size: 10px; margin-bottom: 2px; }
+.node-summary { display:block; width:100%; min-width:0; padding:12px; border:0; background:transparent; color:inherit; font:inherit; text-align:left; cursor:pointer; }
+.node-summary:focus-visible { outline-offset:-3px; }
+.node-summary .node-ip { display:block; }
+.node-summary .link-bar-wrap, .node-summary .link-bar { display:block; }
+.node-summary .node-name { flex-wrap:wrap; overflow-wrap:anywhere; }
+.node-summary .node-name::after { content:'+'; margin-left:auto; color:var(--muted); font-size:18px; font-weight:400; }
+.node-summary[aria-expanded="true"] .node-name::after { content:'−'; }
+.node-name { font-size:var(--small-text); font-weight: bold; display: flex; align-items: center; gap: 5px; margin-bottom: 2px; }
+.node-ip { color: var(--muted); font-size:var(--small-text); margin-bottom: 2px; }
 .node-meta { display: flex; gap: 5px; flex-wrap: wrap; }
-.node-inline-detail { margin-top: 12px; border: 1px solid var(--border2); border-radius: 14px; overflow: hidden; background: color-mix(in srgb, var(--surface) 96%, rgba(236,176,0,.06)); box-shadow: 0 16px 34px rgba(2,0,13,.05); }
+.node-inline-detail { margin:0 10px 10px; border: 1px solid var(--border2); border-radius: 14px; overflow: hidden; background: color-mix(in srgb, var(--surface) 96%, rgba(236,176,0,.06)); box-shadow: 0 16px 34px rgba(2,0,13,.05); }
 .inline-detail-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 10px 12px; border-bottom: 1px solid var(--border2); background: transparent; }
-.inline-detail-title { font-size: 12px; font-weight: 800; color: var(--text); }
+.inline-detail-title { font-size:var(--small-text); font-weight: 800; color: var(--text); }
 .node-inline-detail .section-hdr { position: static; top: auto; }
-.badge { padding: 3px 7px; border-radius: 999px; font-size: 10px; font-weight: 750; }
+.badge { padding: 3px 7px; border-radius: 999px; font-size:var(--small-text); font-weight: 750; }
 .badge-link-great  { background: rgba(22,163,74,.07); color: var(--text); border:1px solid rgba(22,163,74,.28); }
 .badge-link-ok     { background: rgba(236,176,0,.10); color: var(--text); border:1px solid rgba(236,176,0,.28); }
 .badge-link-warn   { background: rgba(217,119,6,.08); color: var(--text); border:1px solid rgba(217,119,6,.28); }
 .badge-link-bad    { background: rgba(180,35,24,.08); color: var(--text); border:1px solid rgba(180,35,24,.28); }
-.badge-link-none   { background: #f7f8fa; color: var(--muted); }
+.badge-link-none   { background: var(--panel); color: var(--muted); }
 .badge-svc       { background: rgba(236,176,0,.10); color: var(--text); border:1px solid rgba(236,176,0,.26); }
-.badge-gw        { background: rgba(236,176,0,.14); color: var(--fer-black); }
+.badge-gw        { background: rgba(236,176,0,.14); color: var(--text); }
 .badge-direct    { background: #ecfdf3; color: #136c36; }
 .badge-bestlink  { background: rgba(2,0,13,.08); color: var(--text); border: 1px solid rgba(2,0,13,.18); }
 :root[data-theme="dark"] .badge-bestlink { background: rgba(248,246,239,.08); border-color: rgba(248,246,239,.18); }
@@ -1489,7 +1515,7 @@ body {
   justify-content: center;
   padding: 4px 10px;
   border-radius: 999px;
-  font-size: 10px;
+  font-size:var(--small-text);
   font-weight: 850;
   letter-spacing: .2px;
   background: linear-gradient(135deg, rgba(236,176,0,.96), rgba(236,176,0,.82));
@@ -1510,16 +1536,16 @@ body {
 /* ── Admin Page ── */
 .admin-wrap { max-width: 600px; margin: 0 auto; padding: 16px 12px 40px; }
 .admin-wrap h2 { color: var(--text); font-size: 18px; letter-spacing: 0; margin-bottom: 4px; }
-.admin-wrap .notice { color: #8a6a00; font-size: 11px; margin-bottom: 20px; padding: 8px; background: rgba(236,176,0,.12); border: 1px solid rgba(236,176,0,.28); border-radius: 4px; }
+.admin-wrap .notice { color: #8a6a00; font-size:var(--small-text); margin-bottom: 20px; padding: 8px; background: rgba(236,176,0,.12); border: 1px solid rgba(236,176,0,.28); border-radius: 4px; }
 .form-section { background: var(--surface); border: 1px solid var(--border2); border-radius: 8px; margin-bottom: 16px; box-shadow: var(--shadow); }
-.form-section-title { padding: 12px 14px; font-size: 12px; font-weight: 800; letter-spacing: 0; color: var(--text); text-transform: none; border-bottom: 1px solid var(--border2); }
+.form-section-title { padding: 12px 14px; font-size:var(--small-text); font-weight: 800; letter-spacing: 0; color: var(--text); text-transform: none; border-bottom: 1px solid var(--border2); }
 .form-row { display: flex; align-items: center; gap: 10px; padding: 10px 14px; border-bottom: 1px solid var(--border2); }
 .form-row:last-child { border-bottom: none; }
-.form-row label { flex: 0 0 160px; color: var(--text); font-size: 12px; }
-.form-row .hint  { font-size: 10px; color: var(--muted); display: block; margin-top: 2px; }
+.form-row label { flex: 0 0 160px; color: var(--text); font-size:var(--small-text); }
+.form-row .hint  { font-size:var(--small-text); color: var(--muted); display: block; margin-top: 2px; }
 .form-row input[type=text], .form-row input[type=password], .form-row select {
   flex: 1; background: var(--surface); border: 1px solid var(--border); color: var(--text);
-  padding: 5px 8px; border-radius: 4px; font-family: var(--font); font-size: 12px;
+  padding: 5px 8px; border-radius: 4px; font-family: var(--font); font-size:var(--small-text);
 }
 .form-row input[type=text]:focus, .form-row input[type=password]:focus, .form-row select:focus {
   outline: none; border-color: var(--accent);
@@ -1533,9 +1559,9 @@ body {
 
 /* ── Local Node Panel ── */
 .local-panel { border-bottom: 1px solid var(--border2); }
-.local-row { display: flex; align-items: flex-start; gap: 8px; padding: 7px 12px; border-bottom: 1px solid var(--border2); font-size: 12px; }
+.local-row { display: flex; align-items: flex-start; gap: 8px; padding: 7px 12px; border-bottom: 1px solid var(--border2); font-size:var(--small-text); }
 .local-row:last-child { border-bottom: none; }
-.local-label { flex: 0 0 90px; color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .8px; padding-top: 1px; }
+.local-label { flex: 0 0 90px; color: var(--muted); font-size:var(--small-text); text-transform: uppercase; letter-spacing: .8px; padding-top: 1px; }
 .local-val { flex: 1; color: var(--text); word-break: break-all; }
 .iface-row { padding: 8px 12px; border-bottom: 1px solid var(--border2); position: relative; }
 .iface-row.health-fault { border-left: 2px solid var(--bad);  background: rgba(180,35,24,.08); }
@@ -1543,39 +1569,39 @@ body {
 .iface-row.health-ok    { border-left: 2px solid transparent; }
 .iface-row.health-info  { border-left: 2px solid transparent; }
 .iface-header { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; margin-bottom: 2px; }
-.iface-name { font-size: 11px; font-weight: bold; min-width: 52px; }
-.iface-state { font-size: 10px; font-weight: bold; padding: 1px 4px; border-radius: 2px; }
+.iface-name { font-size:var(--small-text); font-weight: bold; min-width: 52px; }
+.iface-state { font-size:var(--small-text); font-weight: bold; padding: 1px 4px; border-radius: 2px; }
 .iface-state-up      { color: var(--good); }
 .iface-state-down    { color: var(--bad); background: #ef444420; }
 .iface-state-unknown { color: var(--muted); }
-.iface-role { font-size: 10px; padding: 2px 6px; border-radius: 999px; font-weight: 750; }
+.iface-role { font-size:var(--small-text); padding: 2px 6px; border-radius: 999px; font-weight: 750; }
 .role-mesh     { background:rgba(236,176,0,.10); color:var(--text); }
 .role-ap       { background:#ecfdf3; color:#136c36; }
-.role-gateway  { background:rgba(236,176,0,.14); color:var(--fer-black); }
+.role-gateway  { background:rgba(236,176,0,.14); color:var(--text); }
 .role-bat      { background:rgba(236,176,0,.10); color:var(--text); }
 .role-bridge   { background:rgba(236,176,0,.10); color:var(--text); }
 .role-eud-bridge{ background:#ecfdf3; color:#136c36; }
-.role-other    { background:#f7f8fa; color:var(--muted); }
-.iface-detail  { font-size: 10px; color: var(--muted); }
-.iface-addrs   { font-size: 10px; color: #60b8d4; }
-.iface-fault   { font-size: 10px; color: var(--bad); margin-top: 2px; }
+.role-other    { background:var(--panel); color:var(--muted); }
+.iface-detail  { font-size:var(--small-text); color: var(--muted); }
+.iface-addrs   { font-size:var(--small-text); color: var(--info); overflow-wrap:anywhere; }
+.iface-fault   { font-size:var(--small-text); color: var(--bad); margin-top: 2px; }
 .iface-fault::before { content: '⚠ '; }
-.iface-warn    { font-size: 10px; color: var(--warn); margin-top: 2px; }
+.iface-warn    { font-size:var(--small-text); color: var(--warn-text); margin-top: 2px; }
 .iface-warn::before  { content: '⚠ '; }
-.fault-count { display:inline-block; padding:1px 5px; border-radius:3px; font-size:10px;
+.fault-count { display:inline-block; padding:1px 5px; border-radius:3px; font-size:var(--small-text);
                background:#ef444420; color:var(--bad); margin-left:6px; vertical-align:middle; }
-.warn-count  { display:inline-block; padding:1px 5px; border-radius:3px; font-size:10px;
-               background:#f9731620; color:var(--warn); margin-left:6px; vertical-align:middle; }
-.peer-loading { padding: 16px; color: var(--muted); font-size: 12px; text-align: center; letter-spacing: 1px; }
-.eud-row { padding: 5px 12px; border-bottom: 1px solid var(--border2); font-size: 11px; }
+.warn-count  { display:inline-block; padding:1px 5px; border-radius:3px; font-size:var(--small-text);
+               background:#f9731620; color:var(--warn-text); margin-left:6px; vertical-align:middle; }
+.peer-loading { padding: 16px; color: var(--muted); font-size:var(--small-text); text-align: center; letter-spacing: 1px; }
+.eud-row { padding: 5px 12px; border-bottom: 1px solid var(--border2); font-size:var(--small-text); }
 .eud-row:last-child { border-bottom: none; }
 .eud-name { color: var(--text); }
-.eud-ip   { color: #60b8d4; }
-.eud-mac  { color: var(--muted); font-size: 10px; }
+.eud-ip   { color: var(--info); }
+.eud-mac  { color: var(--muted); font-size:var(--small-text); }
 .svc-grid { display: flex; flex-wrap: wrap; gap: 5px; padding: 7px 10px; }
-.svc-pill { padding: 4px 8px; border-radius: 999px; font-size: 10px; font-weight: 750; letter-spacing: 0; }
+.svc-pill { padding: 4px 8px; border-radius: 999px; font-size:var(--small-text); font-weight: 750; letter-spacing: 0; }
 .svc-on  { background: rgba(22,163,74,.07); color: var(--text); border: 1px solid rgba(22,163,74,.28); }
-.svc-off { background: #f7f8fa; color: var(--muted); border: 1px solid var(--border); }
+.svc-off { background: var(--panel); color: var(--muted); border: 1px solid var(--border); }
 .batt-bar-wrap { display:inline-block; width:36px; height:10px; background:var(--border2); border-radius:999px; overflow:hidden; vertical-align:middle; margin-left:4px; }
 .batt-bar { height:100%; border-radius:2px; }
 .gps-dot { display:inline-block; width:7px; height:7px; border-radius:50%; margin-right:4px; vertical-align:middle; }
@@ -1585,29 +1611,40 @@ body {
 
 /* ── Responsive: narrow → stack ── */
 @media (max-width: 768px) {
+  :root { --small-text:14px; }
+  body { font-size:16px; line-height:1.4; }
   #main { grid-template-columns: 1fr; gap: 10px; padding: 10px; }
-  #topo-panel { order: 1; height: var(--topo-h, 46vh); min-height: 260px; }
+  #topo-panel { order: 1; height: var(--topo-h, clamp(220px, 34svh, 360px)); min-height: 180px; }
   #drag-handle { order: 2; }
   #side-panel { order: 3; width: 100%; overflow: visible; }
   #header { grid-template-columns:1fr; grid-template-areas:"brand" "meta" "actions"; height: auto; min-height: 58px; padding: 8px 10px 10px; row-gap:6px; }
   .hdr-brand { padding-left:0; gap:6px; }
-  .fer-lockup { min-width:clamp(92px,24vw,132px); width:clamp(92px,24vw,132px); height:46px; padding-right:4px; }
+  .fer-lockup { min-width:0; width:auto; height:46px; padding-right:12px; }
   .fer-logo-img { height: 36px; }
   .hdr-logo { font-size:15px; min-height:38px; }
   #hdr-meta { padding-left:0; }
   #hdr-hostname { max-width: 42vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  #hdr-right { margin-left: 0; gap: 8px; justify-content: flex-start; padding-left:0; }
-  #header .meta { font-size: 11px; }
+  #hdr-right { margin-left:0; display:grid; grid-template-columns:auto 1fr auto; gap:6px 8px; padding-left:0; }
+  #perf-link { grid-column:1; grid-row:1; }
+  #theme-toggle { grid-column:3; grid-row:1; }
+  #hdr-nodes { grid-column:2; grid-row:1; }
+  #hdr-gw-label { grid-column:1 / 3; grid-row:2; }
+  #hdr-time { grid-column:3; grid-row:2; }
+  #header .meta { font-size: var(--small-text); overflow-wrap:anywhere; }
   .theme-toggle { padding: 5px 8px; min-width: 66px; }
-}
-@media (min-width: 769px) {
-  #drag-handle { display: none; }
+  button, summary { min-height:44px; font-size:14px; }
+  .node-name, .inline-detail-title { font-size:16px; }
+  .node-meta { font-size:14px; }
+  .local-row { font-size:16px; }
+  .local-label { flex-basis:92px; letter-spacing:0; }
+  .local-val { min-width:0; word-break:normal; overflow-wrap:anywhere; }
+  .eud-row button { padding:8px; border:1px solid var(--border); border-radius:8px; background:var(--surface); color:var(--text); }
 }
 #drag-handle {
   display: flex;
   align-items: center;
   justify-content: center;
-  height: 22px;
+  height: 44px;
   background: var(--surface);
   border: 1px solid var(--border2);
   border-radius: 999px;
@@ -1627,6 +1664,37 @@ body {
   background: var(--muted);
   opacity: 0.6;
 }
+@media (min-width: 769px) {
+  #drag-handle { display:none; }
+  #header { grid-template-areas:"brand actions" "meta meta"; }
+  #hdr-right { justify-content:flex-end; }
+}
+/* A landscape phone has enough width for the map and node list together. */
+@media (orientation:landscape) and (max-height:600px) {
+  :root { --small-text:14px; }
+  body { font-size:14px; line-height:1.4; }
+  #header { grid-template-columns:auto 1fr; grid-template-areas:"brand actions" "meta meta"; padding:6px 10px; gap:4px 10px; }
+  .hdr-brand, #hdr-meta, #hdr-right { padding-left:0; }
+  .fer-lockup { min-width:0; width:auto; height:38px; padding-right:10px; }
+  .fer-logo-img { height:30px; }
+  .hdr-logo { font-size:15px; min-height:38px; }
+  #hdr-right { display:flex; justify-content:flex-end; gap:6px; }
+  #header #hdr-time { display:none; }
+  #header .meta { font-size:var(--small-text); }
+  button, summary { min-height:44px; font-size:14px; }
+  #main { grid-template-columns:minmax(0,1fr) minmax(240px,.9fr); gap:10px; padding:10px; }
+  #topo-panel { position:sticky; top:10px; height:clamp(180px,calc(100svh - 170px),340px); min-height:180px; }
+  #side-panel { order:2; }
+  #drag-handle { display:none; }
+  #operator-form label { flex-basis:auto; }
+  #operator-name { min-height:44px; font-size:16px; max-width:300px; }
+  #operator-save { font-size:14px; }
+  .node-name { font-size:16px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior:auto; }
+  *, *::before, *::after { transition:none!important; }
+}
 """
 
 # Raw HTML keeps JavaScript escapes intact; rendering replaces tokens.
@@ -1643,10 +1711,38 @@ STATUS_HTML = r"""<!DOCTYPE html>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>MANET Node</title>
 <style>__CSS__
-#power-banner { padding:7px 14px; font-size:12px; font-weight:600; letter-spacing:.4px;
+#power-banner { padding:7px 14px; font-size:var(--small-text); font-weight:600; letter-spacing:.4px;
   text-align:center; border-bottom:1px solid rgba(0,0,0,.25); }
-#power-banner.crit { background:var(--bad);  color:#fff; }
+#power-banner.crit { background:#b42318; color:#fff; }
 #power-banner.warn { background:var(--warn); color:#000; }
+#status-message { padding:12px 14px; background:var(--panel); color:var(--warn-text); font-size:var(--small-text); border-bottom:1px solid var(--border); }
+#operator-form {
+  display:flex; flex-wrap:wrap; align-items:center; gap:8px 12px;
+  padding:12px 14px; background:var(--surface);
+  border-bottom:1px solid var(--border2);
+}
+#operator-form label { font-weight:700; }
+#operator-name {
+  flex:1 1 160px; min-width:0; max-width:300px; padding:8px;
+  border:1px solid var(--border); border-radius:6px;
+  background:var(--panel); color:var(--text); font:inherit;
+}
+#operator-save { padding:8px 16px; }
+#operator-form :disabled { opacity:.6; cursor:wait; }
+#operator-help, #operator-message { color:var(--muted); font-size:var(--small-text); }
+#operator-help { flex-basis:100%; }
+#operator-message[data-error="true"] { color:var(--bad); }
+@media (max-width:768px) {
+  #operator-form { padding:12px; gap:8px; }
+  #operator-form label { flex-basis:100%; }
+  #operator-name { min-height:44px; font-size:16px; max-width:none; flex:1 1 120px; }
+  #operator-save { min-height:44px; font-size:14px; }
+  #operator-help, #operator-message { font-size:14px; line-height:1.4; }
+}
+@media (orientation:landscape) and (max-height:600px) {
+  #operator-form label { flex-basis:auto; }
+  #operator-name { flex:1 1 120px; max-width:300px; }
+}
 </style>
 </head>
 <body>
@@ -1677,12 +1773,23 @@ STATUS_HTML = r"""<!DOCTYPE html>
     </div>
   </div>
   <div id="power-banner" style="display:none"></div>
+  <div id="status-message" role="status" hidden></div>
+  <form id="operator-form">
+    <label for="operator-name">Your operator name</label>
+    <input id="operator-name" type="text" maxlength="32" autocomplete="off"
+           aria-describedby="operator-help" disabled>
+    <button id="operator-save" class="perf-link-btn" type="submit"
+            disabled>Save</button>
+    <span id="operator-message" role="status" aria-live="polite"></span>
+    <span id="operator-help">Name or callsign for this radio. Shared with the
+      mesh. No admin password needed. Leave blank and save to clear.</span>
+  </form>
   <div id="main">
     <div id="topo-panel">
-      <canvas id="topo"></canvas>
+      <canvas id="topo" role="img" aria-label="Mesh topology. Node details are available in the Mesh nodes list below."></canvas>
       <div id="loading">LOADING TOPOLOGY…</div>
     </div>
-    <div id="drag-handle"></div>
+    <div id="drag-handle" role="separator" tabindex="0" aria-label="Topology height" aria-orientation="horizontal" aria-controls="topo-panel" aria-valuemin="180" aria-valuemax="640" aria-valuenow="280"></div>
     <div id="side-panel">
       <div class="section-hdr">MESH NODES <span id="node-count"></span></div>
       <div id="node-list"></div>
@@ -1714,6 +1821,62 @@ let PEER_DETAIL_CACHE = {};
 let PEER_LOADING_IDS = new Set();
 let localBusy = false, dataBusy = false;
 let webRetryAt = 0;
+let operatorDirty = false, operatorSaving = false, operatorRevision = 0;
+const operatorForm = document.getElementById('operator-form');
+const operatorInput = document.getElementById('operator-name');
+const operatorSave = document.getElementById('operator-save');
+const operatorMessage = document.getElementById('operator-message');
+operatorInput.addEventListener('input', () => {
+  operatorDirty = true;
+  operatorMessage.textContent = '';
+});
+operatorForm.addEventListener('submit', saveOperatorName);
+
+function updateOperatorForm() {
+  const self = DATA && DATA.nodes.find(n => n.is_me);
+  operatorInput.disabled = operatorSave.disabled = !self || operatorSaving;
+  if (self && !operatorDirty && !operatorSaving) {
+    operatorInput.value = self.operator || '';
+  }
+}
+
+async function saveOperatorName(event) {
+  event.preventDefault();
+  if (operatorSaving || operatorSave.disabled) return;
+  operatorSaving = true;
+  operatorRevision++;
+  updateOperatorForm();
+  operatorMessage.dataset.error = 'false';
+  operatorMessage.textContent = 'Saving…';
+  try {
+    const response = await fetch('/api/operator-name', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({operator_name: operatorInput.value.trim()}),
+      signal: AbortSignal.timeout(15000),
+    });
+    const result = await response.json();
+    if (!response.ok || !result.ok) {
+      throw new Error(result.error || 'Could not save. Please retry.');
+    }
+    const self = DATA.nodes.find(n => n.is_me);
+    if (self) self.operator = result.operator_name;
+    operatorDirty = false;
+    operatorInput.value = result.operator_name;
+    renderNodeList(DATA.nodes);
+    operatorMessage.textContent = result.operator_name
+      ? 'Saved for this radio.' : 'Operator name cleared.';
+  } catch (error) {
+    operatorDirty = true;
+    operatorMessage.dataset.error = 'true';
+    operatorMessage.textContent = error.message;
+  } finally {
+    operatorSaving = false;
+    operatorRevision++;
+    updateOperatorForm();
+  }
+}
+
 async function statusFetch(url) {
   if (performance.now() < webRetryAt) throw new Error('Radio busy; retrying shortly');
   const r = await fetch(url, {signal: AbortSignal.timeout(45000)});
@@ -1827,6 +1990,10 @@ function getLocalNodeId() {
 // ── Node List ────────────────────────────────────────────────────────────────
 function renderNodeList(nodes) {
   const el = document.getElementById('node-list');
+  // Polling replaces the rows; keep keyboard focus on the same disclosure.
+  const focused = document.activeElement;
+  const focusedId = focused && focused.matches('.node-summary')
+    ? focused.closest('.node-row').dataset.id : null;
   document.getElementById('node-count').textContent = `(${nodes.length})`;
   el.innerHTML = nodes.map(n => {
     const cls = [
@@ -1853,7 +2020,7 @@ function renderNodeList(nodes) {
       : '';
     const nodeStale = !n.is_me && n.state !== 'ACTIVE';
     const rateBadge = (n.is_me || nodeStale) ? '' : `<span class="badge ${linkClass(n.mbps)}">${linkLabel(n.mbps)}</span>`;
-    const bar = nodeStale ? '' : `<div class="link-bar-wrap"><div class="link-bar" style="width:${linkPct(n.mbps)}%;background:${linkColor(n.mbps)}"></div></div>`;
+    const bar = nodeStale ? '' : `<span class="link-bar-wrap"><span class="link-bar" style="width:${linkPct(n.mbps)}%;background:${linkColor(n.mbps)}"></span></span>`;
     const meta = (!nodeStale && n.uptime) ? `<span style="color:var(--muted)">up ${esc(n.uptime)}</span>` : '';
     const cpu  = (!nodeStale && n.cpu)    ? `<span style="color:var(--muted)">CPU ${esc(n.cpu)}</span>` : '';
     let battMeta = '';
@@ -1861,9 +2028,9 @@ function renderNodeList(nodes) {
       const pct = n.battery.percentage;
       const col = battColor(pct);
       const icon = (n.battery.charging === true) ? '⚡' : (pct <= 15 ? '⚠' : '');
-      battMeta = `<span style="color:${col};font-size:10px">${icon}${esc(pct)}%</span>`;
+      battMeta = `<span style="color:${col};font-size:var(--small-text)">${icon}${esc(pct)}%</span>`;
     }
-    const offlineBadge = nodeStale ? `<span class="badge badge-link-bad" style="opacity:.7">OFFLINE</span><span style="color:var(--muted);font-size:10px">last seen ${fmtAge(n.last_seen)}</span>` : '';
+    const offlineBadge = nodeStale ? `<span class="badge badge-link-bad" style="opacity:.7">OFFLINE</span><span style="color:var(--muted);font-size:var(--small-text)">last seen ${fmtAge(n.last_seen)}</span>` : '';
 
     const expanded = EXPANDED_NODE_IDS.has(n.id);
       const detailBody = n.is_me
@@ -1880,15 +2047,21 @@ function renderNodeList(nodes) {
     </div>` : '';
 
     return `<div class="${cls}" data-id="${esc(n.id)}">
-      <div class="node-summary">
-        <div class="node-name" style="${nodeStale ? 'color:var(--muted)' : ''}">${esc(n.hostname)}${thisNodeLabel}${n.state==='SHUTTING_DOWN'?'<span style="color:var(--bad);font-size:10px;margin-left:4px">OFFLINE</span>':''}</div>
-        <div class="node-ip">${esc(n.ip||'-')} &nbsp; <span style="color:var(--muted)">${esc(n.mac)}</span></div>
-        <div class="node-meta">${nodeStale ? offlineBadge : rateBadge+badges.join('')+meta+cpu+battMeta}</div>
+      <button type="button" class="node-summary" aria-expanded="${expanded}">
+        <span class="node-name" style="${nodeStale ? 'color:var(--muted)' : ''}">${esc(n.hostname)}${thisNodeLabel}${n.state==='SHUTTING_DOWN'?'<span style="color:var(--bad);font-size:var(--small-text);margin-left:4px">OFFLINE</span>':''}</span>
+        ${n.operator ? `<span class="node-ip">Operator: ${esc(n.operator)}
+          </span>` : ''}
+        <span class="node-ip">${esc(n.ip||'-')} &nbsp; <span style="color:var(--muted)">${esc(n.mac)}</span></span>
+        <span class="node-meta">${nodeStale ? offlineBadge : rateBadge+badges.join('')+meta+cpu+battMeta}</span>
         ${bar}
-      </div>
+      </button>
       ${detail}
     </div>`;
   }).join('');
+  if (focusedId) {
+    const replacement = el.querySelector(`.node-row[data-id="${CSS.escape(focusedId)}"] .node-summary`);
+    if (replacement) replacement.focus({preventScroll:true});
+  }
 }
 
 function tickLocalTime() {
@@ -1979,7 +2152,7 @@ function updateHealthPill(localData) {
   dot.style.background = dotColor;
   dot.style.color      = dotColor;
   label.textContent  = text;
-  label.style.color  = dotColor;
+  label.style.color  = cls === 'health-warn' ? 'var(--warn-text)' : dotColor;
 }
 
 // ── Topology Simulation ───────────────────────────────────────────────────────
@@ -2370,21 +2543,25 @@ canvas.addEventListener('touchend', e => {
 // ── Panel drag-to-resize (mobile) ────────────────────────────────────────────
 (function () {
   const handle = document.getElementById('drag-handle');
-  const main   = document.getElementById('main');
+  const panel = document.getElementById('topo-panel');
   let dragging = false, startY = 0, startH = 0;
+
+  function resize(height) {
+    const next = Math.min(Math.max(height, 180), 640);
+    document.documentElement.style.setProperty('--topo-h', next + 'px');
+    handle.setAttribute('aria-valuenow', String(Math.round(next)));
+    if (!SIM.running) scheduleDraw();
+  }
 
   function onStart(y) {
     dragging = true;
     startY   = y;
-    startH   = document.getElementById('topo-panel').getBoundingClientRect().height;
+    startH   = panel.getBoundingClientRect().height;
     document.body.style.userSelect = 'none';
   }
   function onMove(y) {
     if (!dragging) return;
-    const mainH  = main.getBoundingClientRect().height;
-    const newH   = Math.min(Math.max(startH + (y - startY), 80), mainH - 60);
-    document.documentElement.style.setProperty('--topo-h', newH + 'px');
-    if (!SIM.running) scheduleDraw();
+    resize(startH + (y - startY));
   }
   function onEnd() {
     dragging = false;
@@ -2394,9 +2571,22 @@ canvas.addEventListener('touchend', e => {
   handle.addEventListener('touchstart', e => { onStart(e.touches[0].clientY); e.preventDefault(); }, { passive: false });
   handle.addEventListener('touchmove',  e => { onMove(e.touches[0].clientY);  e.preventDefault(); }, { passive: false });
   handle.addEventListener('touchend',   onEnd);
+  handle.addEventListener('touchcancel', onEnd);
   handle.addEventListener('mousedown',  e => onStart(e.clientY));
   window.addEventListener('mousemove',  e => onMove(e.clientY));
   window.addEventListener('mouseup',    onEnd);
+  handle.addEventListener('keydown', e => {
+    const height = panel.getBoundingClientRect().height;
+    const next = {ArrowUp:height - 40, ArrowDown:height + 40, Home:180, End:640}[e.key];
+    if (next === undefined) return;
+    e.preventDefault();
+    resize(next);
+  });
+  function syncHeight() {
+    handle.setAttribute('aria-valuenow', String(Math.round(panel.getBoundingClientRect().height)));
+  }
+  window.addEventListener('resize', syncHeight);
+  syncHeight();
 })();
 
 // ── Resize ────────────────────────────────────────────────────────────────────
@@ -2405,9 +2595,9 @@ window.addEventListener('resize', () => {
 });
 
 function battColor(pct) {
-  if (pct >= 60) return '#22c55e';
-  if (pct >= 30) return '#eab308';
-  return '#ef4444';
+  if (pct >= 60) return 'var(--good)';
+  if (pct >= 30) return 'var(--warn-text)';
+  return 'var(--bad)';
 }
 
 async function setAtakController(button) {
@@ -2447,9 +2637,9 @@ async function releaseAtakPoint(button) {
 function atakPanel(atak) {
   if (!atak || !atak.enabled) return '';
   let html = '';
-  html += '<div class="section-hdr" style="font-size:9px;position:static">ATAK PHONES</div>';
+  html += '<div class="section-hdr" style="font-size:var(--small-text);position:static">ATAK PHONES</div>';
   const peers = atak.phones || [];
-  html += '<div style="padding:5px 10px;font-size:11px">Radio with GPS: turn Android location off and enable ATAK external GPS on UDP 4349. Radio without GPS: keep Android location on. Leave Default Mesh SA on.</div>';
+  html += '<div style="padding:5px 10px;font-size:var(--small-text)">Radio with GPS: turn Android location off and enable ATAK external GPS on UDP 4349. Radio without GPS: keep Android location on. Leave Default Mesh SA on.</div>';
   if (atak.position) {
     const p = atak.position;
     html += `<div class="eud-row">Position: ${esc(p.lat)}, ${esc(p.lon)} · ${esc(p.source)}</div>`;
@@ -2487,7 +2677,7 @@ function renderLocalPanel(d) {
       const stIcon = st === 'charging' ? ' ⚡' : st === 'full' ? ' ✓' : '';
       const mAstr  = mA != null ? ` &nbsp;${mA > 0 ? '+' : ''}${esc(mA)}mA` : '';
       const mWstr  = mW != null ? ` &nbsp;${esc(mW)}W` : '';
-      extra = `<span style="font-size:9px;color:var(--muted)"> ${v}V${mAstr}${mWstr}${stIcon}</span>`;
+      extra = `<span style="font-size:var(--small-text);color:var(--muted)"> ${v}V${mAstr}${mWstr}${stIcon}</span>`;
     }
     battHtml = `${esc(pct)}%<span class="batt-bar-wrap"><span class="batt-bar" style="width:${Math.max(0, Math.min(100, Number(pct) || 0))}%;background:${col}"></span></span>${extra}`;
   }
@@ -2518,7 +2708,7 @@ function renderLocalPanel(d) {
               : ps === 'notice'   ? 'throttling since boot'
               : 'OK';
     rows.push(['Power', `<span class="gps-dot" style="background:${col}"></span>${txt}` +
-      (ps === 'ok' ? '' : ` <span style="font-size:9px;color:var(--muted)">${esc(d.power.raw)}</span>`)]);
+      (ps === 'ok' ? '' : ` <span style="font-size:var(--small-text);color:var(--muted)">${esc(d.power.raw)}</span>`)]);
   }
   if (d.eud_mode !== 'wired' && d.ap_ssid) {
     rows.push(['AP SSID', esc(d.ap_ssid)]);
@@ -2532,7 +2722,7 @@ function renderLocalPanel(d) {
   if (d.interfaces && d.interfaces.length) {
     const faultCount = d.interfaces.filter(i => i.health === 'fault').length;
     const warnCount  = d.interfaces.filter(i => i.health === 'warn').length;
-    let ifaceHdr = `<div class="section-hdr" style="font-size:9px;position:static">INTERFACES`;
+    let ifaceHdr = `<div class="section-hdr" style="font-size:var(--small-text);position:static">INTERFACES`;
     if (faultCount) ifaceHdr += `<span class="fault-count">⚠ ${faultCount} FAULT${faultCount>1?'S':''}</span>`;
     else if (warnCount) ifaceHdr += `<span class="warn-count">⚠ ${warnCount} WARN${warnCount>1?'S':''}</span>`;
     ifaceHdr += `</div>`;
@@ -2569,7 +2759,7 @@ function renderLocalPanel(d) {
 
   // ── Connected EUDs ──
   html += atakPanel(d.atak);
-  html += `<div class="section-hdr" style="font-size:9px;position:static">CONNECTED EUDS (${d.euds ? d.euds.length : 0})</div>`;
+  html += `<div class="section-hdr" style="font-size:var(--small-text);position:static">CONNECTED EUDS (${d.euds ? d.euds.length : 0})</div>`;
   if (d.euds && d.euds.length) {
     html += d.euds.map(e =>
       `<div class="eud-row">
@@ -2579,11 +2769,11 @@ function renderLocalPanel(d) {
       </div>`
     ).join('');
   } else {
-    html += `<div style="padding:5px 10px;font-size:11px;color:var(--muted)">None</div>`;
+    html += `<div style="padding:5px 10px;font-size:var(--small-text);color:var(--muted)">None</div>`;
   }
 
   // ── Services ──
-  html += `<div class="section-hdr" style="font-size:9px;position:static">SERVICES</div>`;
+  html += `<div class="section-hdr" style="font-size:var(--small-text);position:static">SERVICES</div>`;
   const svcLabels = {
     mumble: 'Mumble', mediamtx: 'MediaMTX', ntp: 'NTP', syncthing: 'Syncthing', tak: 'TAK'
   };
@@ -2616,18 +2806,28 @@ async function fetchLocal() {
 
 // ── Data Fetching ─────────────────────────────────────────────────────────────
 async function fetchData() {
-  if (dataBusy || document.hidden) return;
+  if (dataBusy || document.hidden || operatorSaving) return;
   dataBusy = true;
+  const revision = operatorRevision;
   try {
     const r = await statusFetch('/api/data');
     if (!r.ok) throw new Error(r.status);
-    DATA = await r.json();
+    const data = await r.json();
+    if (revision !== operatorRevision) return;
+    DATA = data;
+    updateOperatorForm();
+    document.getElementById('status-message').hidden = true;
     document.getElementById('loading').style.display = 'none';
     updateHeader(DATA);
     renderNodeList(DATA.nodes);
     startSim(DATA);
   } catch (err) {
-    document.getElementById('loading').textContent = `ERROR: ${err.message}`;
+    const message = document.getElementById('status-message');
+    message.textContent = DATA
+      ? 'Connection lost. Showing the last received status; retrying automatically.'
+      : 'Unable to reach the radio. Check your connection; retrying automatically.';
+    message.hidden = false;
+    document.getElementById('loading').textContent = 'Waiting for the radio…';
   } finally { dataBusy = false; }
 }
 
@@ -2643,8 +2843,9 @@ document.addEventListener('visibilitychange', () => {
 });
 
 document.getElementById('node-list').addEventListener('click', e => {
-  const row = e.target.closest('.node-row');
-  if (!row) return;
+  const summary = e.target.closest('.node-summary');
+  if (!summary) return;
+  const row = summary.closest('.node-row');
   const id = row.dataset.id;
   if (!id || !DATA) return;
   const node = DATA.nodes.find(n => n.id === id);
@@ -2669,7 +2870,7 @@ function openPeerDrawer(node) {
   PEER_LOADING_IDS.add(node.id);
   if (DATA) renderNodeList(DATA.nodes);
   const listRow = document.querySelector(`#node-list .node-row[data-id="${CSS.escape(node.id)}"]`);
-  if (listRow) listRow.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  if (listRow) listRow.scrollIntoView({ block: 'nearest' });
   if (!SIM.running) drawTopo();
   if (!node.ip) {
     PEER_DETAIL_CACHE[node.id] = '<div class="peer-loading" style="color:var(--muted)">No IP known for this node</div>';
@@ -2687,7 +2888,7 @@ function showLocalInDrawer() {
   PEER_LOADING_IDS.delete(localId);
   if (DATA) renderNodeList(DATA.nodes);
   const listRow = document.querySelector(`#node-list .node-row[data-id="${CSS.escape(localId)}"]`);
-  if (listRow) listRow.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  if (listRow) listRow.scrollIntoView({ block: 'nearest' });
   if (!SIM.running) drawTopo();
   fetchLocal();
 }
@@ -2724,7 +2925,7 @@ function renderPeerDrawer(d, hostname) {
       const mAstr = b.current_ma != null ? ` ${b.current_ma > 0 ? '+' : ''}${esc(b.current_ma)}mA` : '';
       const mWstr = b.power_w   != null ? ` ${esc(b.power_w)}W` : '';
       const stIcon = b.status === 'charging' ? ' ⚡' : '';
-      extra = `<span style="font-size:9px;color:var(--muted)"> ${b.voltage_v.toFixed(3)}V${mAstr}${mWstr}${stIcon}</span>`;
+      extra = `<span style="font-size:var(--small-text);color:var(--muted)"> ${b.voltage_v.toFixed(3)}V${mAstr}${mWstr}${stIcon}</span>`;
     }
     battHtml = `${esc(pct)}%<span class="batt-bar-wrap"><span class="batt-bar" style="width:${Math.max(0, Math.min(100, Number(pct) || 0))}%;background:${col}"></span></span>${icon}${extra}`;
   }
@@ -2755,12 +2956,12 @@ function renderPeerDrawer(d, hostname) {
   if (d.interfaces && d.interfaces.length) {
     const faults = d.interfaces.filter(i => i.health === 'fault').length;
     const warns  = d.interfaces.filter(i => i.health === 'warn').length;
-    let hdr = `<div class="section-hdr" style="font-size:9px;position:static">INTERFACES`;
+    let hdr = `<div class="section-hdr" style="font-size:var(--small-text);position:static">INTERFACES`;
     if (faults) hdr += `<span class="fault-count">⚠ ${faults} FAULT${faults>1?'S':''}</span>`;
     else if (warns) hdr += `<span class="warn-count">⚠ ${warns} WARN${warns>1?'S':''}</span>`;
     hdr += `</div>`;
     html += hdr;
-    const roleLabel = { bat:'BATMAN', mesh:'MESH', ap:'EUD AP', gateway:'GATEWAY', 'eud-bridge':'EUD', bridge:'BRIDGE', other:'' };
+    const roleLabel = { uplink:'WI-FI UPLINK', bat:'BATMAN', mesh:'MESH', ap:'EUD AP', gateway:'GATEWAY', 'eud-bridge':'EUD', bridge:'BRIDGE', other:'' };
     html += d.interfaces.map(iface => {
       const label = roleLabel[iface.role] || iface.role.toUpperCase();
       const sc = iface.state === 'UP' ? 'up' : iface.state === 'DOWN' ? 'down' : 'unknown';
@@ -2782,20 +2983,20 @@ function renderPeerDrawer(d, hostname) {
 
   // Connected EUDs
   const eudCount = (d.euds && d.euds.length) ? d.euds.length : (d.eud_count || 0);
-  html += `<div class="section-hdr" style="font-size:9px;position:static">CONNECTED EUDS (${esc(eudCount)})</div>`;
+  html += `<div class="section-hdr" style="font-size:var(--small-text);position:static">CONNECTED EUDS (${esc(eudCount)})</div>`;
   if (d.euds && d.euds.length) {
     html += d.euds.map(e => `<div class="eud-row">
       <span class="eud-name">${e.hostname ? esc(e.hostname) : '<i style="color:var(--muted)">unknown</i>'}</span>
       &nbsp;<span class="eud-ip">${esc(e.ip)}</span>
       <div class="eud-mac">${esc(e.mac)}</div></div>`).join('');
   } else if (eudCount) {
-    html += `<div style="padding:5px 10px;font-size:11px;color:var(--muted)">${esc(eudCount)} connected (names not published)</div>`;
+    html += `<div style="padding:5px 10px;font-size:var(--small-text);color:var(--muted)">${esc(eudCount)} connected (names not published)</div>`;
   } else {
-    html += `<div style="padding:5px 10px;font-size:11px;color:var(--muted)">None</div>`;
+    html += `<div style="padding:5px 10px;font-size:var(--small-text);color:var(--muted)">None</div>`;
   }
 
   // Services
-  html += `<div class="section-hdr" style="font-size:9px;position:static">SERVICES</div>`;
+  html += `<div class="section-hdr" style="font-size:var(--small-text);position:static">SERVICES</div>`;
   const svcLabels = { mumble:'Mumble', mediamtx:'MediaMTX', ntp:'NTP', syncthing:'Syncthing', tak:'TAK' };
   html += `<div class="svc-grid">`;
   for (const [key, label] of Object.entries(svcLabels)) {
@@ -2946,6 +3147,7 @@ def assemble_admin_status():
         'current_config': {
             'eud':              conf.get('eud', 'wired'),
             'lan_ap_ssid':      conf.get('lan_ap_ssid', ''),
+            'ap_ssid':          display_ssid(conf.get('lan_ap_ssid', '')),
             'lan_ap_key':       conf.get('lan_ap_key', ''),
             'max_euds_per_node':conf.get('max_euds_per_node', '0'),
             'mesh_ssid':        conf.get('mesh_ssid', ''),
@@ -2957,6 +3159,7 @@ def assemble_admin_status():
             'mumble':           conf.get('mumble', 'n'),
             'auto_update':      conf.get('auto_update', 'n'),
             'admin_password':   conf.get('admin_password', ''),
+            'operator_name':    conf.get('operator_name', ''),
         },
         'application':  config_application_status(),
         'pending':      pending,
@@ -3169,6 +3372,19 @@ button {{
   background: #ecb000;
   color: #02000d;
 }}
+:root {{ color-scheme: light; }}
+:root[data-theme="dark"] {{ color-scheme: dark; }}
+input:not(.sr-only), button {{ min-height:44px; font-size:16px; }}
+button:focus-visible {{ outline:3px solid #02000d; outline-offset:3px; }}
+:root[data-theme="dark"] button:focus-visible {{ outline-color:#f8f6ef; }}
+:root[data-theme="dark"] .err {{ color:#ffaaa4; }}
+p, label, .err {{ font-size:14px; line-height:1.4; }}
+@media (orientation:landscape) and (max-height:600px) {{
+  .wrap {{ width:min(680px,calc(100vw - 28px)); display:grid; grid-template-columns:1fr 1.4fr; }}
+  .top {{ border-bottom:0; display:flex; flex-direction:column; justify-content:center; padding:16px; }}
+  .logo {{ height:70px; }}
+  form {{ padding:20px; gap:10px; }}
+}}
 </style>
 </head>
 <body>
@@ -3359,6 +3575,39 @@ class MeshHandler(RequestLimits, ManageRoutes, http.server.BaseHTTPRequestHandle
         """Match the management prefix only at a path boundary."""
         return path == MANAGE_PREFIX or path.startswith(MANAGE_PREFIX + '/')
 
+    def _pin_eud_management(self, parsed):
+        """Move local phone HTML to this node's address before logging in.
+
+        Cookies stay host-only and node-local. A reconnect cannot send the
+        management page to a different responder for the shared mDNS name.
+        """
+        host = self.headers.get('Host', '').lower()
+        if (not re.fullmatch(r'manet\.local\.?(?::\d{1,5})?', host) or
+                not atak_local_eud(self.client_address[0]) or
+                '/api/' in parsed.path or parsed.path.endswith('/logout')):
+            return False
+        try:
+            lines = ATAK_DHCP_CONF.read_text().splitlines()
+            gateway = next(line.split(',', 1)[1] for line in lines
+                           if line.startswith('dhcp-option=3,'))
+            address = ipaddress.IPv4Address(gateway)
+            start = next(line.split('=', 1)[1].split(',')[0]
+                         for line in lines if line.startswith('dhcp-range='))
+            if int(address) + 1 != int(ipaddress.IPv4Address(start)):
+                return False
+        except (OSError, ValueError, StopIteration):
+            return False
+        port = getattr(self.server, 'server_port', 80)
+        authority = str(address) + (f':{port}' if port != 80 else '')
+        path = parsed.path + ('?' + parsed.query if parsed.query else '')
+        path = normalize_local_redirect(path)
+        self.send_response(302)
+        self.send_header('Location', f'http://{authority}{path}')
+        self.send_header('Cache-Control', 'no-store')
+        self.send_header('Content-Length', '0')
+        self.end_headers()
+        return True
+
     def _handle_manage(self, parsed):
         """Login, logout, or a management route once the password has been given."""
         path = parsed.path
@@ -3467,6 +3716,8 @@ class MeshHandler(RequestLimits, ManageRoutes, http.server.BaseHTTPRequestHandle
             return
 
         if self._is_manage_path(parsed.path) or parsed.path.startswith('/auth/perf-'):
+            if self._pin_eud_management(parsed):
+                return
             self._handle_manage(parsed)
             return
 
@@ -3578,8 +3829,11 @@ class MeshHandler(RequestLimits, ManageRoutes, http.server.BaseHTTPRequestHandle
     def do_POST(self):
         """Serialize management changes and expire cached observations."""
         path = urlparse(self.path).path
-        changing = (path.startswith('/manage/api/') or path.startswith('/api/admin/')
-                    or path.rstrip('/') in ('/api/atak/controller', '/api/atak/release'))
+        changing = (path.startswith('/manage/api/')
+                    or path.startswith('/api/admin/')
+                    or path.rstrip('/') in (
+                        '/api/atak/controller', '/api/atak/release',
+                        '/api/operator-name'))
         # One writer at a time; reject contention without blocking a worker.
         if changing and not MANAGEMENT_WRITE.acquire(blocking=False):
             self.send_busy('Another management change is running; retry when it finishes')
@@ -3593,16 +3847,16 @@ class MeshHandler(RequestLimits, ManageRoutes, http.server.BaseHTTPRequestHandle
                 STATUS_CACHE.invalidate()
                 MANAGEMENT_WRITE.release()
 
-    def post_atak_controller(self, conf, *, release=False):
-        """Stage a bounded same-origin local EUD choice without an admin cookie."""
+    def allow_local_json_write(self):
+        """Admit bounded same-origin JSON writes from this radio's EUD pool."""
         if not atak_local_eud(self.client_address[0]):
             self.send_json({'error': 'Connect to this radio as an EUD'}, status=403)
-            return
+            return False
         # JSON requires a browser preflight across origins; no CORS permission
         # is offered here. Also reject explicit foreign Origin/Referer headers.
         if self.headers.get('Content-Type', '').split(';')[0].strip().lower() != 'application/json':
             self.send_json({'error': 'JSON body required'}, status=415)
-            return
+            return False
         host = self.headers.get('Host', '').lower()
         for name in ('Origin', 'Referer'):
             value = self.headers.get(name)
@@ -3611,13 +3865,39 @@ class MeshHandler(RequestLimits, ManageRoutes, http.server.BaseHTTPRequestHandle
                     origin = urlparse(value)
                 except ValueError:
                     self.send_json({'error': 'Same-origin request required'}, status=403)
-                    return
+                    return False
                 if (origin.scheme != 'http' or origin.netloc.lower() != host
                         or origin.username is not None or origin.password is not None):
                     self.send_json({'error': 'Same-origin request required'}, status=403)
-                    return
+                    return False
         if self._body_length > 2048:
             self.send_json({'error': 'Choice exceeds size limit'}, status=413)
+            return False
+        return True
+
+    def post_operator_name(self):
+        """Save only this radio's display label without an admin session."""
+        if not self.allow_local_json_write():
+            return
+        try:
+            request = json.loads(self.read_body())
+            if not isinstance(request, dict) or set(request) != {'operator_name'}:
+                raise ValueError('Provide only an operator name')
+            ok, why = validate_config(request, local=True)
+            if not ok:
+                raise ValueError(why)
+            apply_local_to_conf(request, MESH_CONF_FILE)
+            self.send_json({'ok': True,
+                            'operator_name': request['operator_name']})
+        except (ValueError, TypeError) as error:
+            self.send_json({'error': str(error)}, status=400)
+        except OSError:
+            self.send_json({'error': 'Operator name could not be saved'},
+                           status=503)
+
+    def post_atak_controller(self, conf, *, release=False):
+        """Stage a bounded same-origin local EUD choice without an admin cookie."""
+        if not self.allow_local_json_write():
             return
         try:
             request = json.loads(self.read_body())
@@ -3654,7 +3934,7 @@ class MeshHandler(RequestLimits, ManageRoutes, http.server.BaseHTTPRequestHandle
             self.send_json({'error': 'ATAK choice could not be saved'}, status=503)
 
     def _do_POST(self):
-        """Handle login and authenticated config transaction requests."""
+        """Route login, local public choices and authenticated configuration."""
         conf      = load_kv_file(MESH_CONF_FILE)
         client_ip = self.client_address[0]
         parsed    = urlparse(self.path)
@@ -3668,6 +3948,9 @@ class MeshHandler(RequestLimits, ManageRoutes, http.server.BaseHTTPRequestHandle
             return
 
         path      = parsed.path.rstrip('/') or '/'
+        if path == '/api/operator-name':
+            self.post_operator_name()
+            return
         if path in ('/api/atak/controller', '/api/atak/release'):
             self.post_atak_controller(conf, release=path == '/api/atak/release')
             return

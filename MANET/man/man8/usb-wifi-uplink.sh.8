@@ -1,4 +1,4 @@
-.Dd October 10, 2026
+.Dd October 16, 2026
 .Dt USB-WIFI-UPLINK.SH 8
 .Os MANET
 .Sh NAME
@@ -33,6 +33,16 @@ Write client configuration, restart the client service and request DHCP.
 Stop the client and remove its generated Wi-Fi and network configuration.
 .It Cm status-json , status
 Print JSON describing adapter presence, association, address and service state.
+.It Cm scan-json
+Scan the eligible adapter and print nearby networks as JSON.
+Restore an initially down adapter after success or failure.
+Save the private scan list for five minutes for management-page selection.
+.It Cm set-stdin
+Read local management credentials as JSON from standard input.
+Open and WPA2 Personal networks are supported.
+A menu selection must match a selectable recent scan on the same adapter.
+Save its BSSID to reconnect to the selected access point.
+Passwords are never passed in process arguments by this action.
 .It Cm set Op Ar ssid Op Ar password Op Ar enabled
 Save credentials and attempt a connection.
 Omitted or empty values default to SSID
@@ -48,7 +58,9 @@ to stop an active uplink and disable future connection attempts.
 .Sh FILES
 .Bl -tag -width Ds
 .It Pa /etc/manet/usb-wifi-uplink.conf
-Stored enabled flag, SSID and password; mode 0600.
+Stored enabled flag, SSID, password, security and optional BSSID; mode 0600.
+.It Pa /run/manet-usb-wifi-scan.json
+Recent scan identity and network list; mode 0600.
 .It Pa /etc/wpa_supplicant/wpa_supplicant-*-uplink.conf
 Generated client credentials.
 .It Pa /etc/systemd/network/20-*-usb-wifi-uplink.network

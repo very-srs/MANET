@@ -83,6 +83,8 @@ refresh_interfaces() {
     WLAN_INTERFACES="$(iw dev 2>/dev/null | awk '$1 == "Interface" {print $2}' | tr '\n' ' ')"
 
     for WLAN in $WLAN_INTERFACES; do
+        is_builtin_wifi_uplink_iface "$WLAN" && continue
+        [ "$WLAN" != manetap ] || continue
         if [ -n "$AP_IFACE" ] && [ "$WLAN" = "$AP_IFACE" ]; then
             NONMESH_INTERFACES+="$WLAN "
         elif is_halow "$WLAN"; then
@@ -174,7 +176,7 @@ start() {
     ip link show bat0 &>/dev/null || ip link add name bat0 type batadv
 
     # Set gateway mode based on state
-    if [ -f /var/run/mesh-gateway.state ]; then
+    if [ -f /var/run/manet-uplink/mesh-gateway.state ]; then
         # Measured bandwidth for an Ethernet uplink, otherwise the default.
         /usr/local/bin/manet-uplink-speed.sh announce "$(cat /var/run/upstream_iface 2>/dev/null)" ||
             batctl gw_mode server

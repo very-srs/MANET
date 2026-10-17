@@ -123,8 +123,13 @@ systemd-cat() { cat >/dev/null; }
         manager = self.root / 'mesh-ip-manager.sh'
         manager.write_text('#!/bin/sh\necho configured-addresses\n'); manager.chmod(0o755)
         body = body.replace('/usr/local/bin/mesh-ip-manager.sh', str(manager))
+        dispatcher = self.root / 'manet-uplink-dispatch.sh'
+        dispatcher.write_text('#!/bin/sh\necho "reconciled-policy $* lock=$MANET_ETH_LOCK_HELD"\n')
+        dispatcher.chmod(0o755)
+        body = body.replace('/usr/local/bin/manet-uplink-dispatch.sh', str(dispatcher))
         result = self.shell('''
 log() { :; }
+record_carrier_generation() { :; }
 ip() { echo "master br0"; }
 python3() { return 1; }
 systemctl() { :; }
@@ -138,8 +143,7 @@ ACTIVE_CONFIG=""
 ''' + body)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('ETH_MODE=WIRED_EUD', (self.root / 'ethernet_detection_state').read_text())
-        self.assertIn('batctl gw_mode client', result.stdout)
-        self.assertIn('cleared-nat', result.stdout)
+        self.assertIn('reconciled-policy reconcile end0 lock=1', result.stdout)
         self.assertIn('configured-addresses', result.stdout)
 
 

@@ -65,7 +65,7 @@ class CompletionTests(unittest.TestCase):
         for name in ('manet-common.sh', 'manet-runtime-client.sh'):
             (root / name).write_text((TOOLS / name).read_text())
         source = (TOOLS / 'radio-setup.sh').read_text()
-        return source[:source.index('# Append setup output')].replace(
+        return source[:source.index('# Refuse a changed flash-time AP name')].replace(
             '/run/lock/manet-radio-setup.lock', str(root / 'setup.lock'))
 
     def test_overlapping_setup_does_not_enter_or_clear_state_and_retry_keeps_exit_code(self):

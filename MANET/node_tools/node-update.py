@@ -44,7 +44,7 @@ RECOVERY_UNITS = {
 RUNTIME_SERVICES = (
     'gps-reader.service', 'manet-positioning.service', 'manet-atak.service',
     'mesh-voice.service', 'button-monitor.service', 'sae-watchdog.service',
-    'batman-enslave-watch.service', 'led-boot.service',
+    'batman-enslave-watch.service', 'led-boot.service', 'manet-wifi-uplink.service',
 )
 MARKERS = {"etc/manet_version.txt", "usr/local/bin/version.txt"}
 REQUIRED = MARKERS | {
@@ -92,6 +92,12 @@ REQUIRED = MARKERS | {
     "etc/systemd/system/manet-dhcp-isolation.service",
     "etc/systemd/system/dnsmasq.service.d/20-manet-dhcp-isolation.conf",
     "usr/local/bin/manet_ap_mesh.py",
+    "usr/local/bin/manet_wifi_uplink.py",
+    "usr/local/bin/manet_wifi_events.py",
+    "etc/systemd/system/manet-wifi-uplink.service",
+    "etc/systemd/system/manet-wifi-uplink.path",
+    "etc/systemd/system/manet-wifi-client@.service",
+    "etc/systemd/system/hostapd.service.d/30-wifi-uplink-events.conf",
     "etc/systemd/system/ap-txpower.service",
     "etc/systemd/system/manet-mesh-power.service",
     "usr/local/bin/manet-mesh-power.sh",
@@ -699,6 +705,9 @@ class Updater:
         run_command(["systemctl", "enable", "--now", "manet-logrotate.timer"])
         run_command(["systemctl", "enable", "--now", "manet-auto-update.path"])
         run_command(["systemctl", "enable", "--now", "manet-auto-update.timer"])
+        run_command(["systemctl", "enable", "manet-wifi-uplink.service"])
+        run_command(["systemctl", "start", "manet-wifi-uplink.service"])
+        run_command(["systemctl", "try-restart", "manet-wifi-client@*.service"])
         # Only running Wi-Fi mesh instances adopt the new binary now.
         # HaLow candidates require separate bench approval and activation.
         run_command(["systemctl", "try-restart", "wpa_supplicant@*.service"])

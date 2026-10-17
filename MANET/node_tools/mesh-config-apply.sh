@@ -53,6 +53,13 @@ die() {
 # Read pending config
 [ -f "$PENDING_CONFIG" ] || die "No pending config at $PENDING_CONFIG"
 
+# A local/direct pending file must not turn a flash-time identity into an edit.
+# Received Alfred packages already strip per-node fields before staging.
+python3 - "$PENDING_CONFIG" <<'PY' || die "AP SSID is set at flash and cannot be changed on this node"
+import json, sys
+sys.exit('lan_ap_ssid' in json.load(open(sys.argv[1])).get('config', {}))
+PY
+
 VERSION=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('version',''))" "$PENDING_CONFIG" 2>/dev/null)
 [ -n "$VERSION" ] || die "Cannot read version from pending config"
 

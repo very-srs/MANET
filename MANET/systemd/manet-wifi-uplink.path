@@ -1,0 +1,10 @@
+[Unit]
+Description=Wake the optional Wi-Fi uplink for local intent or scan repair
+
+[Path]
+PathChanged=/etc/manet/wifi-uplink.json
+PathChanged=/run/manet-wifi-uplink/scan-repair.json
+Unit=manet-wifi-uplink.service
+
+[Install]
+WantedBy=multi-user.target

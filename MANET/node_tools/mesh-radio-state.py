@@ -18,7 +18,7 @@ from manet_admin import AdminTransport, private_json_write
 # Alfred-staged channel or power change means exactly the same thing.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from manet_radio import (
-    apply_txpower, apply_halow_channel, apply_wifi_channel, apply_uplink_wifi,
+    apply_txpower, apply_halow_channel, apply_wifi_channel,
     apply_voice_codec, is_halow_iface,
 )
 
@@ -36,7 +36,7 @@ ADMIN = AdminTransport()
 # Extra radio_state keys beyond "desired". Stage through Alfred so every
 # node applies these changes at the shared activation time.
 ACTION_KEYS = ("desired", "txpower", "halow_channel", "wifi_channel",
-               "uplink_wifi", "voice_codec")
+               "voice_codec")
 
 
 def log(msg):
@@ -186,6 +186,14 @@ def validate_pkg(pkg):
     """Validate a radio command before acknowledging or applying it."""
     if not isinstance(pkg, dict):
         return False, "package is not an object"
+    if 'uplink_wifi' in pkg:
+        return False, 'Wi-Fi uplink credentials are node-local'
+    from manet_wifi_uplink import uplink_owned
+    if target_matches(pkg):
+        for action in ('desired', 'txpower'):
+            value = pkg.get(action)
+            if isinstance(value, dict) and any(uplink_owned(iface) for iface in value):
+                return False, 'Use the local Uplink tab for a client radio'
     if pkg.get("kind") != "radio_state":
         return False, "not a radio_state package"
     if not pkg.get("version"):
@@ -323,12 +331,6 @@ def apply_package(pkg):
         result = apply_wifi_channel(wifi.get("band"), wifi.get("channel"), wifi.get("dbm"))
         if not result.get("ok"):
             raise RuntimeError(result.get("error", "wifi channel failed"))
-
-    uplink = pkg.get("uplink_wifi")
-    if uplink:
-        log(f"Applying USB Wi-Fi uplink ssid={uplink.get('ssid')}")
-        apply_uplink_wifi(uplink.get("ssid"), uplink.get("password"),
-                          uplink.get("enabled", True))
 
     voice = pkg.get("voice_codec")
     if voice:

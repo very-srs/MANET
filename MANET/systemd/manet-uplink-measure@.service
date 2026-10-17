@@ -1,0 +1,19 @@
+[Unit]
+Description=Measure qualified MANET Ethernet bandwidth on %I
+After=systemd-networkd.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/manet-uplink-speed.sh refresh %I
+TimeoutStartSec=240
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+LockPersonality=yes
+RestrictRealtime=yes
+SystemCallArchitectures=native
+ReadWritePaths=/run

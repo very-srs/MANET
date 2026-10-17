@@ -4,7 +4,12 @@
 import unittest
 
 import os
+import base64
+from pathlib import Path
+import subprocess
+import sys
 import tempfile
+import NodeInfo_pb2
 
 from mesh_config import (
     LOCAL_KEYS,
@@ -13,6 +18,7 @@ from mesh_config import (
     local_changes,
     mesh_changes,
     strip_local_keys,
+    submitted_changes,
 )
 
 
@@ -39,22 +45,56 @@ class SplitConfigTests(unittest.TestCase):
     def test_local_keys_constant(self):
         self.assertEqual(
             LOCAL_KEYS,
-            frozenset({'eud', 'lan_ap_ssid', 'lan_ap_key', 'max_euds_per_node'}),
+            frozenset({'eud', 'lan_ap_ssid', 'lan_ap_key',
+                       'max_euds_per_node', 'operator_name'}),
         )
 
 
 class LocalChangesTests(unittest.TestCase):
+    def test_operator_label_sets_clears_and_never_changes_peer_config(self):
+        """Persist the optional label while leaving shared settings alone."""
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, 'mesh.conf')
+            current = {'operator_name': 'Operator'}
+            for name in ('Team Lead', ''):
+                submitted = submitted_changes({'operator_name': name}, current)
+                changed = local_changes(submitted, current)
+                self.assertEqual(changed, {'operator_name': name})
+                self.assertEqual(mesh_changes(submitted, current), {})
+                self.assertEqual(strip_local_keys(submitted), {})
+                apply_local_to_conf(changed, path)
+                with open(path) as stream:
+                    self.assertEqual(stream.read(), f'operator_name={name}\n')
+                payload = subprocess.check_output([
+                    sys.executable, '-B',
+                    str(Path(__file__).with_name('encoder.py')), 'telemetry',
+                    '--timestamp', '1', '--mesh-config', path], timeout=5)
+                telemetry = NodeInfo_pb2.NodeTelemetry()
+                telemetry.ParseFromString(base64.b64decode(payload))
+                self.assertEqual(telemetry.atak_user, name)
+                current = changed
+            self.assertEqual(submitted_changes({'operator_name': ''}, {}), {})
+
+    def test_operator_label_uses_utf8_byte_limit_and_local_validation(self):
+        """Names remain bounded configuration data, never shared settings."""
+        for name in ('', 'é' * 16, 'Team Lead <A>'):
+            self.assertTrue(validate_config({'operator_name': name},
+                                            local=True)[0])
+            self.assertFalse(validate_config({'operator_name': name})[0])
+        for name in ('é' * 17, 'x' * 33, 'Bad\nName', ' leading'):
+            self.assertFalse(validate_config({'operator_name': name},
+                                             local=True)[0])
+
     def test_only_values_that_differ_from_mesh_conf(self):
-        current = {'lan_ap_ssid': 'mesh-ap-6b28', 'eud': 'wired'}
+        current = {'lan_ap_key': 'oldpassword', 'eud': 'wired'}
         cfg = {
-            'lan_ap_ssid': 'mesh-ap-new',
+            'lan_ap_key': 'newpassword',
             'eud': 'wired',
-            'lan_ap_key': '',
             'mesh_ssid': 'MANET',
         }
         self.assertEqual(
             local_changes(cfg, current),
-            {'lan_ap_ssid': 'mesh-ap-new'},
+            {'lan_ap_key': 'newpassword'},
         )
 
     def test_empty_value_is_not_a_change(self):
@@ -122,14 +162,14 @@ class ApplyLocalToConfTests(unittest.TestCase):
             path = fh.name
         try:
             applied = apply_local_to_conf(
-                {'eud': 'wireless', 'lan_ap_ssid': 'mesh-ap-6b28'},
+                {'eud': 'wireless', 'lan_ap_key': 'newpassword'},
                 path,
             )
-            self.assertEqual(set(applied), {'eud', 'lan_ap_ssid'})
+            self.assertEqual(set(applied), {'eud', 'lan_ap_key'})
             with open(path) as fh:
                 text = fh.read()
             self.assertIn('eud=wireless\n', text)
-            self.assertIn('lan_ap_ssid=mesh-ap-6b28\n', text)
+            self.assertIn('lan_ap_key=newpassword\n', text)
             self.assertIn('mesh_ssid=MANET\n', text)
         finally:
             os.unlink(path)

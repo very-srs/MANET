@@ -20,11 +20,12 @@ LOCAL_KEYS = frozenset({
     'lan_ap_ssid',
     'lan_ap_key',
     'max_euds_per_node',
+    'operator_name',
 })
 
-# max_euds_per_node is stripped from Alfred with the other per-node keys, but
-# it is set at flash and must not be rewritten from the management UI.
-LOCAL_APPLY_KEYS = LOCAL_KEYS - {'max_euds_per_node'}
+# These flash-time settings are stripped from Alfred, but never rewritten.
+LOCAL_APPLY_KEYS = LOCAL_KEYS - {'max_euds_per_node', 'lan_ap_ssid'}
+AP_SSID_FIXED = 'AP SSID is set at flash and cannot be changed on this node'
 
 
 def valid_value(key, value):
@@ -71,6 +72,8 @@ def valid_value(key, value):
         return False, 'must be a 2-letter country code'
     elif key == 'max_euds_per_node' and (not value.isascii() or not value.isdigit() or int(value) > 253):
         return False, 'must be a number 0-253'
+    elif key == 'operator_name' and length > 32:
+        return False, 'operator name must be 32 UTF-8 bytes or fewer'
     return True, ''
 
 
@@ -80,6 +83,8 @@ def validate_config(config, current=None, local=False):
         return False, 'No configuration provided'
     allowed = MESH_KEYS | LOCAL_KEYS if local else MESH_KEYS
     for key, value in config.items():
+        if key == 'lan_ap_ssid' and local:
+            return False, AP_SSID_FIXED
         if key not in allowed:
             return False, f'unknown setting {key!r}'
         ok, why = valid_value(key, value)
@@ -103,12 +108,14 @@ def submitted_changes(config, current):
     """Keep changed form fields and unknown keys (which validation must reject).
 
     Existing values need not pass current rules when editing an unrelated
-    setting. Empty editable fields leave the value alone.
+    setting. Empty fields leave the value alone except operator_name, which
+    can be cleared to remove the optional label.
     """
     return {key: value for key, value in config.items()
             if key not in MESH_KEYS | LOCAL_KEYS
-            or (not (value == '' and key in MESH_KEYS | LOCAL_APPLY_KEYS)
-                and value != current.get(key))}
+            or (not (value == '' and key != 'operator_name'
+                     and key in MESH_KEYS | LOCAL_APPLY_KEYS)
+                and value != current.get(key, ''))}
 
 
 def strip_local_keys(config):
@@ -119,14 +126,14 @@ def strip_local_keys(config):
 
 
 def local_changes(config, current):
-    """Local keys in `config` whose non-empty value differs from mesh.conf."""
+    """Local edits, allowing an empty operator name to clear its label."""
     if not isinstance(config, dict):
         return {}
     current = current or {}
     changed = {}
     for key in LOCAL_APPLY_KEYS:
         val = config.get(key)
-        if val is None or val == '':
+        if val is None or (val == '' and key != 'operator_name'):
             continue
         if str(val) != str(current.get(key, '')):
             changed[key] = val
@@ -151,6 +158,8 @@ def apply_local_to_conf(changes, mesh_conf):
     """Write per-node keys into mesh.conf. Returns the keys written."""
     if not changes:
         return []
+    if 'lan_ap_ssid' in changes:
+        raise ValueError(AP_SSID_FIXED)
     changes = {k: v for k, v in changes.items() if k in LOCAL_APPLY_KEYS}
     if not changes:
         return []

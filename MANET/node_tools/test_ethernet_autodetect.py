@@ -66,6 +66,8 @@ class AutodetectHarness(unittest.TestCase):
         self.stub('tcpdump', '#!/bin/bash\necho "tcpdump $*" >> "$REVIEW_ROOT/calls"\n'
                   'cat "$REVIEW_ROOT/frames" 2>/dev/null\nexit 0\n')
         self.stub('manet-uplink-speed.sh', SPEED_STUB, where='usr/local/bin')
+        self.stub('manet-uplink-dispatch.sh', '#!/bin/bash\necho "dispatch $* lock=$MANET_ETH_LOCK_HELD" >> "$REVIEW_ROOT/calls"\n',
+                  where='usr/local/bin')
         (self.root / 'speed-rc').mkdir()
         self.stub('mesh-ip-manager.sh', '#!/bin/bash\necho "mesh-ip-manager.sh $*" >> "$REVIEW_ROOT/calls"\n',
                   where='usr/local/bin')
@@ -103,7 +105,7 @@ class AutodetectHarness(unittest.TestCase):
             'ETH_MODE=WIRED_EUD\nETH_BRIDGE=br0\n')
         (self.root / 'var/run/eth-carrier-generation').write_text(f'end0 wired-eud {generation}\n')
 
-    def run_detector(self):
+    def run_detector(self, *args):
         """Run the detector with isolated paths and its shared libraries."""
         for name in ('manet-common.sh', 'manet-runtime-client.sh'):
             library = (TOOLS / name).read_text()
@@ -117,7 +119,7 @@ class AutodetectHarness(unittest.TestCase):
         script.write_text(source)
         env = dict(os.environ, REVIEW_ROOT=str(self.root),
                    PATH=os.pathsep.join((str(self.root / 'bin'), os.environ['PATH'])))
-        result = subprocess.run(['bash', str(script), '--hotplug'], env=env,
+        result = subprocess.run(['bash', str(script), '--hotplug', *args], env=env,
                                 capture_output=True, text=True, timeout=60)
         calls = (self.root / 'calls').read_text().splitlines() if (self.root / 'calls').exists() else []
         journal = (self.root / 'journal').read_text() if (self.root / 'journal').exists() else ''
@@ -310,8 +312,26 @@ class LinkEvidenceTests(AutodetectHarness):
 
 
 class GatewayShortcutTests(AutodetectHarness):
+    def test_saved_wifi_uplink_never_selects_ethernet_detection_target(self):
+        """Boot/manual detection defaults to end0 even while Wi-Fi is primary."""
+        (self.root / 'var/run/upstream_iface').write_text('wlan1\n')
+        _, calls, journal = self.run_detector()
+        self.assertIn('Carrier present on end0', journal)
+        self.assertIn('networkctl reconfigure end0', calls)
+        self.assertNotIn('networkctl reconfigure wlan1', calls)
+
+    def test_explicit_wireless_target_is_rejected_without_network_changes(self):
+        """Reject both conventional and renamed wireless interfaces."""
+        for iface in ('wlan1', 'enwifi'):
+            (self.root / 'sys/class/net' / iface / 'wireless').mkdir(parents=True)
+            result, calls, _ = self.run_detector('--iface', iface)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertFalse(any(c.startswith(('networkctl ', 'ip addr flush',
+                                               'ip link set', 'tcpdump ')) for c in calls))
+
     def healthy_gateway(self):
-        (self.root / 'var/run/mesh-gateway.state').touch()
+        (self.root / 'var/run/manet-uplink').mkdir(parents=True, exist_ok=True)
+        (self.root / 'var/run/manet-uplink/mesh-gateway.state').touch()
         (self.root / 'addr').write_text('192.168.69.51')
         (self.root / 'route').touch()
 
@@ -403,22 +423,21 @@ class ConnectivityTests(AutodetectHarness):
         self.stub('ping', '#!/bin/bash\nexit 0\n')
         self.stub('curl', '#!/bin/bash\nprintf 204\n')
 
-    def test_internet_and_speed_test_make_a_gateway(self):
+    def test_internet_qualifies_before_dispatcher_queues_speed_test(self):
         self.leased_with_internet()
         _, calls, journal = self.run_detector()
-        self.assertIn('uplink-speed measure end0', calls)
+        self.assertNotIn('uplink-speed measure end0', calls)
         self.assertIn('Configuring as gateway/uplink', journal)
-        self.assertIn('uplink-speed announce end0', calls)
+        self.assertIn('dispatch reconcile end0 lock=1', calls)
 
     def test_failed_speed_test_still_promotes_a_gateway(self):
         self.leased_with_internet()
         (self.root / 'speed-rc' / 'end0').write_text('1')
         _, calls, journal = self.run_detector()
-        self.assertIn('uplink-speed measure end0', calls)
+        self.assertNotIn('uplink-speed measure end0', calls)
         self.assertIn('Configuring as gateway/uplink', journal)
-        self.assertIn('uplink-speed announce end0', calls)
-        self.assertIn('ip route replace default via 192.168.69.1 dev end0 '
-                      'src 192.168.69.51 metric 100', calls)
+        self.assertIn('dispatch reconcile end0 lock=1', calls)
+        self.assertIn('Gateway configuration complete', journal)
 
     def test_portal_is_rejected_even_when_ping_works(self):
         """Automatic Ethernet detection also requires HTTP 204."""

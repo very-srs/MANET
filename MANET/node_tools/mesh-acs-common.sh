@@ -12,6 +12,8 @@ load_mesh_roles() {
     local configs="${MANET_WPA_DIR:-/etc/wpa_supplicant}"
     WPA_IFACE_2_4=$(cat "$roles/mesh_24_if" 2>/dev/null || true)
     WPA_IFACE_5_0=$(cat "$roles/mesh_5_if" 2>/dev/null || true)
+    is_builtin_wifi_uplink_iface "$WPA_IFACE_2_4" && WPA_IFACE_2_4=""
+    is_builtin_wifi_uplink_iface "$WPA_IFACE_5_0" && WPA_IFACE_5_0=""
     WPA_CONF_2_4=""; WPA_CONF_5_0=""
     [ -z "$WPA_IFACE_2_4" ] || WPA_CONF_2_4="$configs/wpa_supplicant-${WPA_IFACE_2_4}.conf"
     [ -z "$WPA_IFACE_5_0" ] || WPA_CONF_5_0="$configs/wpa_supplicant-${WPA_IFACE_5_0}.conf"

@@ -145,7 +145,7 @@ exec 9>"${MANET_ACS_LOCK_FILE:-/var/run/channel-election.lock}"
 flock -n 9 || { log "Another ACS channel operation is in progress. Skipping tourguide."; exit 1; }
 acs_agreement_busy && { log "Channel agreement in progress. Skipping tourguide."; exit 0; }
 # Gateways never tourguide. Peers exclude them through the registry too.
-[ ! -f "${MANET_GATEWAY_STATE:-/var/run/mesh-gateway.state}" ] || exit 0
+[ ! -f "${MANET_GATEWAY_STATE:-/var/run/manet-uplink/mesh-gateway.state}" ] || exit 0
 if python3 "$RENDEZVOUS_TOOL" halow-ready; then
     log "HaLow mesh is ready. Keeping Wi-Fi on data channels for recovery over HaLow."
     exit 0
@@ -231,7 +231,7 @@ AUTH_HELPER=$(python3 "$AGREEMENT_TOOL" helper-encode --channels "$CHANNELS_JSON
 # HaLow may have recovered while the election/helper was being prepared.
 python3 "$RENDEZVOUS_TOOL" halow-ready && exit 0
 # The node may have become a gateway while the hop was being prepared.
-[ ! -f "${MANET_GATEWAY_STATE:-/var/run/mesh-gateway.state}" ] || exit 0
+[ ! -f "${MANET_GATEWAY_STATE:-/var/run/manet-uplink/mesh-gateway.state}" ] || exit 0
 LIVE_NOW=$(date +%s)
 [ "$((LIVE_NOW / 120))" -eq "$((NOW / 120))" ] && [ "$((LIVE_NOW % 120))" -lt 50 ] || exit 0
 # Restore TOURGUIDE_RADIO from TOURGUIDE_CONF unless DATA_FREQ is the lobby.

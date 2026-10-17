@@ -33,6 +33,7 @@ restart_mesh() {
     log "Triggered by: $reason"
     log "Restarting wpa_supplicant for all standard mesh interfaces..."
 
+    STANDARD_MESH_INTERFACES="$(cat "$MESH_IF_FILE" 2>/dev/null)"
     for iface in $STANDARD_MESH_INTERFACES; do
         if ! radio_iface_enabled "$iface"; then
             log "Skipping wpa_supplicant@${iface}.service (radio-state says down)"

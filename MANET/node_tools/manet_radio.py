@@ -62,7 +62,6 @@ HALOW_OP_CLASS = {
 
 HALOW_WPA_CONF = '/etc/wpa_supplicant/wpa_supplicant-wlan2-s1g.conf'
 HALOW_OVERRIDE_FILE = '/var/run/halow-channel-override'
-USB_WIFI_UPLINK_SCRIPT = '/usr/local/bin/usb-wifi-uplink.sh'
 
 
 def halow_region():
@@ -768,23 +767,6 @@ def apply_wifi_channel(band, channel, dbm=None):
             raise RuntimeError('Cannot apply static Wi-Fi channel' + detail) from error
     return {'ok': True, 'band': band, 'iface': iface, 'channel': int(channel), 'freq': freq,
             'dbm': requested, 'actual_dbm': actual}
-
-
-def apply_uplink_wifi(ssid, password, enabled=True):
-    """Configure USB Wi-Fi uplink credentials through the local helper."""
-    ssid = (ssid or '').strip()
-    if not ssid:
-        raise ValueError('SSID is required')
-    if not password:
-        raise ValueError('Password is required')
-    # Allow 45 seconds for credential activation and uplink reconfiguration.
-    r = subprocess.run(
-        [USB_WIFI_UPLINK_SCRIPT, 'set', ssid, password, '1' if enabled else '0'],
-        capture_output=True, text=True, timeout=45)
-    if r.returncode != 0:
-        raise RuntimeError((r.stderr or r.stdout or '').strip()
-                           or f'usb-wifi-uplink exited {r.returncode}')
-    return {'ok': True, 'ssid': ssid, 'enabled': bool(enabled)}
 
 
 # Voice codec

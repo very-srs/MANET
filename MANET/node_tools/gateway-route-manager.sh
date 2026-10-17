@@ -119,7 +119,7 @@ while true; do
     # Inspect mesh and direct defaults independently of their display order.
     defaults="$(ip route show default || true)"
     cur=$(awk '/ dev br0( |$)/ {print; exit}' <<< "$defaults")
-    if [ -f /var/run/mesh-gateway.state ]; then
+    if [ -f /var/run/manet-uplink/mesh-gateway.state ]; then
         # Only log when actually removing a route: this branch runs every
         # poll cycle while in gateway mode.
         if [[ " $cur " == *" dev br0 "* ]]; then

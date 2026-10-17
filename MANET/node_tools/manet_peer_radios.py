@@ -95,6 +95,8 @@ def peer_radio_interfaces(nd):
         # Published role/state decides activity, with per-band field fallbacks.
         if pub:
             info['active'] = pub.get('state') == 'UP' and pub.get('role') == 'mesh'
+            if pub.get('role') == 'uplink':
+                info['uplink'] = True
             info['channel'] = str(pub.get('channel') or '') or freq_mhz_to_channel(band_freq[name])
             info['freq_mhz'] = str(pub.get('freq_mhz') or pub.get('freq') or '') or band_freq[name]
             info['txpower_dbm'] = str(pub.get('txpower_dbm') or '')
@@ -162,6 +164,8 @@ def _peer_iface_detail(iface, nd):
         return 'BATMAN-ADV mesh bridge'
     if role == 'bridge':
         return 'L2 bridge (mesh + EUD)'
+    if role == 'uplink':
+        return 'Wi-Fi internet client'
     if role == 'gateway':
         return 'Internet gateway'
     if role == 'ap':

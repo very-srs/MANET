@@ -473,6 +473,13 @@ How EUDs connect to this mesh node:
 - **Wireless.** The node broadcasts a 5 GHz 802.11ax access point at low power (5 dBm) for EUDs to join. Connecting to an upstream network enables gateway mode. Wired EUDs also work.
 - **Auto.** Behaves as Wireless until a wired EUD is detected, then stops broadcasting the AP. With Auto Channel Selection enabled, only a gateway broadcasts the AP. Without an internet uplink, the AP radio (normally 5 GHz) stays in the mesh.
 
+The EUD AP SSID base is chosen here for Wireless or Auto mode and stays fixed
+after flashing. Use the same base on every radio in a mesh. Each broadcast
+name appends `-` and four node-specific hexadecimal digits. Node config shows
+that full name read-only. The AP password can still be changed there. A
+radio-setup rerun refuses a changed base name before touching radio files.
+Wired-only flashing leaves the AP name empty and preserves that choice.
+
 ### 2. Install MediaMTX Server?
 
 If yes, a MediaMTX streaming server will be elected to run somewhere on the mesh. Its reserved address ends in `.2` of your chosen network range (e.g. `10.30.1.2` on a `10.30.1.0/24` network).

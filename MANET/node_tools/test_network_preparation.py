@@ -158,6 +158,7 @@ DHCP_START=10.30.0.8; DHCP_END=10.30.0.15
 ''' + function + '''
 configure_dnsmasq "$BR0_PRIMARY" "$BR0_SECONDARY" "$DHCP_START" "$DHCP_END"
 echo KEEP_LEASE > /var/lib/misc/dnsmasq.leases
+configure_dnsmasq "$BR0_PRIMARY" "$BR0_SECONDARY" "$DHCP_START" "$DHCP_END"
 echo 'nameserver 192.0.2.54' > /run/systemd/resolve/resolv.conf
 ''' + check + '''
 echo "$NEEDS_DNSMASQ_UPDATE"

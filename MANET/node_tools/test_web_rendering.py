@@ -160,6 +160,28 @@ const LINK_GREAT_MBPS = 30, LINK_OK_MBPS = 15, LINK_WARN_MBPS = 5, LINK_FULL_SCA
         self.js.evaluate('EXPANDED_NODE_IDS.add("peer"); PEER_DETAIL_CACHE.peer = renderPeerDrawer(detail); renderNodeList([' + json.dumps(node) + ']);')
         self.safe(self.js.evaluate('elements["node-list"].innerHTML'))
 
+    def test_operator_names_render_as_text_and_clear_without_hiding_host(self):
+        """Operator metadata is escaped in public and management node rows."""
+        self.functions(status.STATUS_HTML, 'renderNodeList', 'battColor',
+                       'linkClass', 'linkLabel', 'fmtMbps', 'linkPct',
+                       'linkColor', 'fmtAge')
+        self.functions(manage.JS, 'renderTopology')
+        for name in (PAYLOAD, ''):
+            node = dict(id='peer', hostname='mesh-abcd', operator=name,
+                        ip='10.30.0.1', state='ACTIVE', is_me=False)
+            self.js.evaluate('DATA = ' + json.dumps({'nodes': [node]}) +
+                             '; _topo = DATA; renderNodeList(DATA.nodes);'
+                             'renderTopology();')
+            for element in ('node-list', 'node-grid'):
+                markup = self.js.evaluate(
+                    f'elements[{json.dumps(element)}].innerHTML')
+                self.assertIn('mesh-abcd', markup)
+                if name:
+                    self.safe(markup)
+                    self.assertIn('Operator:', markup)
+                else:
+                    self.assertNotIn('Operator:', markup)
+
     def test_ack_table_and_saved_sessions_escape_names_and_attributes(self):
         self.functions(manage.CONFIG_TAB_JS, 'renderStatus')
         self.js.evaluate('let formPopulated = true, STATUS = null; renderStatus(' + json.dumps({
@@ -174,6 +196,23 @@ async function manageFetch() { return {ok: true, json: async () => sessionData};
 loadSessions();
 ''')
         self.safe(self.js.evaluate('elements["sessions-list"].innerHTML'))
+
+    def test_ap_name_is_readonly_full_broadcast_text_and_not_submitted(self):
+        parsed = Markup(manage.CONFIG_TAB_HTML)
+        self.assertIn(('id', 'f-lan-ap-ssid'), parsed.attributes)
+        self.assertRegex(manage.CONFIG_TAB_HTML, r'<span[^>]*id="f-lan-ap-ssid"')
+        self.functions(manage.CONFIG_TAB_JS, 'populateForm', 'readForm')
+        self.js.evaluate('''
+function setVal(id, v) { document.getElementById(id).value = v; }
+function setText(id, v) { document.getElementById(id).textContent = v; }
+function setChk(id, v) { document.getElementById(id).checked = v; }
+function getVal(id) { return document.getElementById(id).value; }
+function getChk(id) { return document.getElementById(id).checked; }
+''')
+        self.js.evaluate('populateForm(' + json.dumps({
+            'lan_ap_ssid': 'prefix', 'ap_ssid': PAYLOAD + '-5cc2'}) + ')')
+        self.assertEqual(self.js.evaluate('elements["f-lan-ap-ssid"].textContent'), PAYLOAD + '-5cc2')
+        self.assertNotIn('lan_ap_ssid', json.loads(self.js.evaluate('JSON.stringify(readForm())')))
 
     def test_server_rendered_identity_is_escaped(self):
         with patch.object(manage, 'get_my_hostname', return_value=PAYLOAD), \

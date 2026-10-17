@@ -75,42 +75,29 @@ start_hostapd_checked() {
     systemctl start hostapd.service 2>/dev/null
 }
 
-# Determine which upstream interface to use.
-# Priority: end0 (native ethernet) > USB ethernet (usb*, enx*)
-# Can be overridden by passing --iface <name> or via /var/run/upstream_iface
-resolve_eth_iface() {
-    # Explicit override from caller
-    if [ -n "${FORCE_IFACE:-}" ]; then
-        printf '%s\n' "$FORCE_IFACE"
-        return
-    fi
-    # Saved upstream from previous detection
-    if [ -f /var/run/upstream_iface ]; then
-        local saved
-        saved=$(cat /var/run/upstream_iface)
-        if ip link show "$saved" &>/dev/null; then
-            printf '%s\n' "$saved"
-            return
-        fi
-    fi
-    # Native ethernet first
-    if ip link show end0 &>/dev/null; then
-        echo "end0"
-        return
-    fi
-    # USB ethernet: usb0, usb1, enxXXX (CDC ECM/RNDIS/NCM dongles/tethering)
-    for iface in $(ls /sys/class/net/); do
-        local bus
-        bus=$(readlink /sys/class/net/$iface/device/subsystem 2>/dev/null | grep -o 'usb' || true)
-        if [ "$bus" = "usb" ] && [[ "$iface" != wlan* ]] && [[ "$iface" != bat* ]] && [[ "$iface" != br* ]]; then
-            printf '%s\n' "$iface"
-            return
-        fi
-    done
-    echo "end0"
-}
-
-ETH_IFACE=$(resolve_eth_iface)
+# The physical Ethernet target is independent of the promoted internet uplink.
+# All automatic callers pass end0 explicitly. Manual calls default to end0.
+ETH_IFACE=end0
+DETECTED_MODE=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --iface) ETH_IFACE="$2"; shift 2 ;;
+        --mode) DETECTED_MODE="$2"; shift 2 ;;
+        --hotplug) shift ;;
+    esac
+done
+# Reject wireless devices even when renamed to look like Ethernet. Tethers
+# and USB uplinks belong to the common dispatcher, never passive EUD detection.
+case "$ETH_IFACE" in
+    wlan*|wl*|lo|br*|bat*|usb*|wwan*|*[!a-zA-Z0-9_.-]*|'')
+        printf 'Not an Ethernet detection target: %s\n' "$ETH_IFACE" >&2
+        exit 1 ;;
+esac
+if [ -d "/sys/class/net/$ETH_IFACE/wireless" ] ||
+        [ -e "/sys/class/net/$ETH_IFACE/phy80211" ]; then
+    printf 'Wireless interface cannot undergo Ethernet detection: %s\n' "$ETH_IFACE" >&2
+    exit 1
+fi
 LOCK_FILE="/var/run/ethernet-autodetect.lock"
 
 # Written when DHCP works but the internet test fails, so repeated dispatcher
@@ -176,7 +163,7 @@ internet_probe_confirmed() {
     local attempts=2 i probe_mode=any
     "$UPLINK_SPEED" is-ethernet "$iface" && probe_mode=http-only
 
-    [ -f /var/run/mesh-gateway.state ] && attempts=3
+    [ -f /var/run/manet-uplink/mesh-gateway.state ] && attempts=3
 
     # Use two probes, or three for an active gateway, with 3 s between failures.
     for i in $(seq 1 "$attempts"); do
@@ -197,7 +184,7 @@ run_no_carrier_cleanup() {
     elif [ -x /root/networkd-dispatcher/off ]; then
         MANET_ETH_LOCK_HELD=1 MANET_ETH_FORCE_CLEANUP="${2:-0}" IFACE="$ETH_IFACE" /root/networkd-dispatcher/off
     else
-        rm -f "$ACTIVE_CONFIG" /var/run/mesh-gateway.state /var/run/mesh-ntp.state /var/run/ethernet_detection_state
+        rm -f "$ACTIVE_CONFIG" /var/run/manet-uplink/mesh-gateway.state /var/run/mesh-ntp.state /var/run/ethernet_detection_state
         ip addr flush dev "$ETH_IFACE" 2>/dev/null || true
         ip link set "$ETH_IFACE" nomaster 2>/dev/null || true
         batctl gw_mode client 2>/dev/null || true
@@ -303,14 +290,14 @@ detect_hotplug_mode() {
     # a fast cable swap can leave the old lease and route intact. Without a
     # decision record, use the address/route check for dispatcher promotion.
     ip=$(ip -4 addr show dev "$ETH_IFACE" | grep -oP 'inet \K[\d.]+' | head -1)
-    if [ -f /var/run/mesh-gateway.state ] && [ -n "$ip" ] && \
+    if [ -f /var/run/manet-uplink/mesh-gateway.state ] && [ -n "$ip" ] && \
        { [ ! -f "$CARRIER_GEN_STATE" ] || same_carrier_generation gateway; } && \
        ip route show dev "$ETH_IFACE" | grep -q '^default '; then
         log "Existing gateway state is healthy on $ETH_IFACE ($ip); skipping re-detection"
-        # Exit the whole script: returning here would still run the gateway
-        # mode section, which rewrites 20-end0.network, triggers a networkd
-        # inotify reconfigure, and restarts this loop.
-        exit 0
+        # The lease may have arrived while Wi-Fi was primary. Reconcile the
+        # local priority without flushing/reconfiguring either connection.
+        MANET_ETH_LOCK_HELD=1 /usr/local/bin/manet-uplink-dispatch.sh reconcile "$ETH_IFACE"
+        exit $?
     fi
 
     # Cache the DHCP-but-no-internet verdict for this iface+IP. Cleanup calls
@@ -370,7 +357,6 @@ detect_hotplug_mode() {
         log "IP acquired on $ETH_IFACE: $ip"
         if internet_probe_confirmed "$ETH_IFACE"; then
             # Connectivity qualifies the gateway even without a speed sample.
-            "$UPLINK_SPEED" measure "$ETH_IFACE" >/dev/null || true
             DETECTED_MODE="gateway"
             return 0
         fi
@@ -400,29 +386,6 @@ exec 200>"$LOCK_FILE"
 # Wait at most 90 seconds for another local Ethernet policy operation.
 flock -w 90 200 || { log "Ethernet policy busy; carrier detection deferred"; exit 1; }
 
-# Parse CLI argument
-DETECTED_MODE=""
-ARGS=("$@")
-i=0
-while [ $i -lt ${#ARGS[@]} ]; do
-    case "${ARGS[$i]}" in
-        --iface)
-            i=$((i+1))
-            FORCE_IFACE="${ARGS[$i]}"
-            ETH_IFACE=$(resolve_eth_iface)
-            ACTIVE_CONFIG="${NETWORKD_DIR}/20-${ETH_IFACE}.network"
-            ;;
-        --mode)
-            i=$((i+1))
-            DETECTED_MODE="${ARGS[$i]}"
-            log "Called with mode: $DETECTED_MODE"
-            ;;
-        --hotplug|"")
-            ;;
-    esac
-    i=$((i+1))
-done
-
 if [ -z "$DETECTED_MODE" ]; then
     detect_hotplug_mode
     log "Hotplug detected mode: $DETECTED_MODE"
@@ -431,9 +394,6 @@ fi
 # A definite gateway/wired-eud mode is selected here.
 # The no-internet paths exit before this point.
 rm -f "$NO_INET_STATE"
-
-# Save which interface we're managing so other scripts know
-printf '%s\n' "$ETH_IFACE" > /var/run/upstream_iface
 
 # Check if interface exists
 if ! ip link show "$ETH_IFACE" &>/dev/null; then
@@ -446,38 +406,8 @@ CARRIER=$(cat /sys/class/net/$ETH_IFACE/carrier 2>/dev/null || echo 0)
 if [ "$CARRIER" != "1" ]; then
     log "No carrier on $ETH_IFACE - cable unplugged"
 
-    # Clean up detection configs
-    rm -f "$ACTIVE_CONFIG"
-    rm -f /var/run/mesh-gateway.state
-    rm -f /var/run/mesh-ntp.state
-    rm -f /var/run/ethernet_detection_state
-    rm -f "$NO_INET_STATE"
+    run_no_carrier_cleanup
 
-    # Without Ethernet, auto mode serves the AP unless ACS keeps it in mesh.
-    EUD_MODE=$(grep "^eud=" /etc/mesh.conf 2>/dev/null | cut -d'=' -f2)
-    if [ "$EUD_MODE" == "auto" ] && [ -f /var/lib/ap_interface ] && ! auto_eud_ap_wanted; then
-        log "Auto mode with ACS: No ethernet, returning AP radio to mesh"
-        python3 /usr/local/bin/manet_ap_mesh.py mesh ||
-            log "AP-to-mesh transition deferred; reconcile will retry"
-    elif [ "$EUD_MODE" == "auto" ] && [ -f /var/lib/ap_interface ]; then
-        AP_INTERFACE=$(cat /var/lib/ap_interface)
-        log "Auto mode: No ethernet, ensuring AP on $AP_INTERFACE"
-
-        unmask_if_masked dnsmasq.service
-        enable_if_disabled hostapd.service
-        start_hostapd_checked || { log "AP start failed"; exit 1; }
-        enable_if_disabled dnsmasq.service
-        systemctl start dnsmasq.service 2>/dev/null
-
-		# If acting as an AP, lower the tx power
-        systemctl start ap-txpower.service 2>/dev/null
-
-
-        # Refresh address/DHCP configuration and its isolation rules
-        /usr/local/bin/mesh-ip-manager.sh
-
-
-    fi
     exit 0
 fi
 
@@ -524,94 +454,18 @@ if [ "$DETECTED_MODE" == "gateway" ]; then
         exit 1
     fi
 
-    ETH_IP="$EXISTING_IP"
-
-    # Keep $ACTIVE_CONFIG from detect_hotplug_mode. Rewriting it triggers a
-    # networkd inotify reconfigure, dropping the lease and repeating detection.
-    # networkd uses 10-end0.network regardless.
-    touch /var/run/mesh-gateway.state
-    systemctl start manet-uplink-dns.service 2>/dev/null || true
-
-    # Configure NAT
-    log "Configuring NAT..."
-    nft add table ip nat 2>/dev/null || true
-    nft add chain ip nat postrouting { type nat hook postrouting priority 100 \; } 2>/dev/null || true
-    nft flush chain ip nat postrouting 2>/dev/null || true
-    nft add rule ip nat postrouting oifname "$ETH_IFACE" masquerade
-
-    # Add MSS clamping for TCP packets going through the bridge
-    nft add table ip mangle 2>/dev/null || true
-    nft add chain ip mangle forward { type filter hook forward priority -150 \; } 2>/dev/null || true
-    nft flush chain ip mangle forward 2>/dev/null || true
-    nft add rule ip mangle forward tcp flags syn tcp option maxseg size set rt mtu
-
     sysctl -q net.ipv4.ip_forward=1
 
-    # The third field of a default-via route is the router IPv4 address.
-    DEFAULT_GW=$(ip route show default dev "$ETH_IFACE" |
-        awk '/^default via / {print $3; exit}')
-    if [ -n "$DEFAULT_GW" ]; then
-        ip route replace default via "$DEFAULT_GW" dev "$ETH_IFACE" \
-            src "$ETH_IP" metric 100
+    # One owner updates routes, NAT, DNS and bandwidth. Keep the Ethernet
+    # lock across the handoff, including when this came from the udev service.
+    MANET_ETH_LOCK_HELD=1 /usr/local/bin/manet-uplink-dispatch.sh reconcile "$ETH_IFACE" || exit 1
+
+    # Preserve the detector's boot/rename repair for an active but unbound
+    # AP. The dispatcher decides whether AP service is wanted at all.
+    if [ -n "$AP_INTERFACE" ] && systemctl is-active --quiet hostapd.service; then
+        start_hostapd_checked || { log "AP start failed"; exit 1; }
     fi
-    log "Default gateway: ${DEFAULT_GW:-none}"
-
-    # Enable BATMAN gateway mode
-    if command -v batctl &>/dev/null; then
-        "$UPLINK_SPEED" announce "$ETH_IFACE" >/dev/null 2>&1 || log "BATMAN not ready yet"
-        log "Enabled BATMAN gateway mode ($(batctl gw 2>/dev/null))"
-    fi
-
-    # Update router advertisements
-    cp /etc/radvd-gateway.conf /etc/radvd.conf
-    systemctl restart radvd 2>/dev/null
-
-    # mesh-time-sync owns chrony. It observes mesh-gateway.state/upstream_iface
-    # and advertises NTP through existing telemetry only after clock validation.
     systemctl --no-block start one-shot-time-sync.service 2>/dev/null || true
-
-    # === AP CONTROL ===
-    # In gateway mode, AP behavior depends on EUD mode
-    if [ "$EUD_MODE" == "auto" ] && [ -n "$AP_INTERFACE" ]; then
-        log "Auto mode + Gateway: Keeping AP enabled"
-
-        unmask_if_masked dnsmasq.service
-        enable_if_disabled hostapd.service
-        start_hostapd_checked || { log "AP start failed"; exit 1; }
-        enable_if_disabled dnsmasq.service
-        systemctl start dnsmasq.service 2>/dev/null
-        systemctl start ap-txpower.service 2>/dev/null
-
-
-    elif [ "$EUD_MODE" == "wireless" ] && [ -n "$AP_INTERFACE" ]; then
-        log "Wireless mode: Ensuring AP is enabled"
-
-        unmask_if_masked dnsmasq.service
-        enable_if_disabled hostapd.service
-        start_hostapd_checked || { log "AP start failed"; exit 1; }
-        enable_if_disabled dnsmasq.service
-        systemctl start dnsmasq.service 2>/dev/null
-        systemctl start ap-txpower.service 2>/dev/null
-
-    elif [ "$EUD_MODE" == "wired" ] && [ -n "$AP_INTERFACE" ]; then
-        log "Wired mode: Disabling AP, returning $AP_INTERFACE to mesh"
-
-        python3 /usr/local/bin/manet_ap_mesh.py mesh ||
-            log "AP-to-mesh transition deferred; reconcile will retry"
-
-    fi
-
-    # Refresh DHCP isolation and dnsmasq (handles wlan1 role changes)
-    /usr/local/bin/mesh-ip-manager.sh
-
-    # Save state
-    cat > /var/run/ethernet_detection_state <<EOF
-ETH_MODE=GATEWAY
-ETH_IP=$ETH_IP
-DEFAULT_GW=${DEFAULT_GW:-none}
-DETECTED_AT=$(date +%s)
-DETECTION_METHOD=CARRIER_WITH_INTERNET
-EOF
 
     record_carrier_generation gateway
     log "Gateway configuration complete"
@@ -650,26 +504,6 @@ elif [ "$DETECTED_MODE" == "wired-eud" ]; then
         # AP stays running, no changes
     fi
 
-    # Remove gateway state
-    rm -f /var/run/mesh-gateway.state
-    rm -f /var/run/mesh-ntp.state
-
-    # Disable BATMAN gateway mode
-    if command -v batctl &>/dev/null; then
-        batctl gw_mode client 2>/dev/null || log "BATMAN not ready yet"
-        log "Set BATMAN to client mode"
-    fi
-
-    # Revert radvd
-    cp /etc/radvd-mesh.conf /etc/radvd.conf
-    systemctl restart radvd 2>/dev/null
-
-    # Remove NAT rules
-    nft flush chain ip nat postrouting 2>/dev/null || true
-
-    # Refresh DHCP isolation and dnsmasq (handles wlan1 role + end0 addition)
-    /usr/local/bin/mesh-ip-manager.sh
-
     # Save state
     cat > /var/run/ethernet_detection_state <<EOF
 ETH_MODE=WIRED_EUD
@@ -677,6 +511,12 @@ ETH_BRIDGE=br0
 DETECTED_AT=$(date +%s)
 DETECTION_METHOD=CARRIER_NO_DHCP
 EOF
+
+    MANET_ETH_LOCK_HELD=1 /usr/local/bin/manet-uplink-dispatch.sh reconcile "$ETH_IFACE" || exit 1
+
+    # A surviving, unchanged USB/Wi-Fi gateway takes the dispatch shortcut.
+    # Still refresh DHCP isolation for the newly bridged wired EUD immediately.
+    /usr/local/bin/mesh-ip-manager.sh 2>/dev/null || true
 
     record_carrier_generation wired-eud
     log "Wired EUD configuration complete"

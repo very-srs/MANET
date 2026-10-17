@@ -13,6 +13,21 @@
 No internet? The radios can still talk to each other. If the way out changes,
 you may have to start your RedTube download again.
 
+A radio can also borrow house Wi-Fi. That uses one of its radios.
+Open **Manage → Uplink**, scan, and tap the network's name. A lock means it
+needs a password. Scroll the list to see more names.
+The radios hide their own phone hotspots from this list.
+Its friends may then have a slower path. If scanning needs to stop phone
+Wi-Fi, the page asks first. Reconnect to see the saved list. The phone hotspot can follow house Wi-Fi, but pauses when that
+connection drops or changes channel. If this radio cannot follow the channel,
+use a cable or connect your phone to another radio.
+
+Turn off borrowed Wi-Fi when you do not need it. Its helper then stops.
+
+A working internet cable wins over house Wi-Fi. If that cable stops working,
+the radio can use Wi-Fi again. Give it a few seconds, then try again if your
+picture stops loading. A cable to your phone is for your phone.
+
 ## User
 
 ### Internet and mesh are different connections
@@ -23,16 +38,99 @@ the mesh. Local voice and local mesh services do not need an internet
 connection once the radios are set up.
 
 You can provide an uplink through a supported Ethernet connection, USB
-tether/modem, or USB Wi-Fi adapter. Ethernet detects whether a router offers
+tether/modem, USB Wi-Fi adapter, or one of its built-in Wi-Fi radios. Ethernet detects whether a router offers
 network settings. The radio then checks whether the connection actually
 reaches the internet: an HTTP request that must come back with a 204 answer.
 A sign-in page fails that check. A router being present does not guarantee
 that its internet service is working.
 
-For a USB Wi-Fi uplink, open **Manage → Uplink**, enter that external
-network's credentials and follow the management apply process. These are
-credentials for the internet connection, separate from the mesh key and the
-access-point password used by your own phone.
+When this radio has several working internet connections, it prefers wired
+Ethernet, including a supported USB Ethernet adapter. A USB phone tether or
+cellular modem comes next. Built-in and USB Wi-Fi connections come last.
+A cable serving your phone or computer as a wired client is excluded.
+The current connection stays selected among working connections of the same
+kind. Wi-Fi can stay connected while Ethernet carries the internet traffic.
+If Ethernet fails, the radio tries its other connections. When Ethernet
+passes its internet check again, it becomes preferred again. These switches
+can interrupt a download or call.
+
+If Wi-Fi is already joined and working, cable unplug/replug should usually
+settle within a few seconds after the radio checks the new connection.
+It starts using the connection before measuring its speed. Getting a new
+network address, an unresponsive router or a hotspot channel change can take
+longer. The phone keeps its local address during a normal uplink switch.
+If an existing download or call stalls after internet returns, restart it.
+If the router still looks connected but its internet service changes, the
+radio's regular gateway check runs about once a minute. A slow connectivity
+probe or busy service can add time before the change is applied.
+
+### Use nearby Wi-Fi
+
+In source builds with uplink support, open **Manage → Uplink** on the node
+that should connect. Choose its 2.4 GHz radio, 5 GHz radio or USB Wi-Fi adapter,
+then press **Scan**. Tap a network in the list. Stronger signals come first.
+Scroll to see more names. Each row shows signal bars, the Wi-Fi band and a
+lock for a secured network. Grey rows explain why they cannot be selected.
+Hidden networks stay visible but cannot be selected because their names are
+not broadcast.
+
+The list omits phone hotspots with this radio's configured hotspot name and
+four lowercase digits or letters from a to f, such as **EUD-5cc2**. They lead
+back into the mesh and cannot supply a Wi-Fi uplink. Typing the name also
+fails. An older saved match is disconnected, and status explains why. Choose
+a house router or another independent internet connection. Radios using a
+different hotspot name are outside this name-based check.
+
+After choosing a network, enter its password and press **Connect**. Open
+networks do not show a password field. Built-in radios support WPA2 and WPA3
+personal passwords. USB supports WPA2, including networks offering both WPA2
+and WPA3, but cannot join a network requiring WPA3 only. Passwords stay on
+this node and are separate from the mesh key and your phone hotspot password.
+
+When built-in Wi-Fi uplink is disabled, its helper stops after restoring the
+normal radio roles. Saving an enabled connection or rebooting with one saved
+starts it again. Normal channel changes and connection loss wake the helper
+as they happen.
+
+The current network appears at the top with its connection state. **Joined
+Wi-Fi, waiting for a network address** means the nearby router has not yet
+assigned an address. **Connected, sharing internet** means this connection
+is the selected local internet path. A Wi-Fi connection can stay joined while
+a cable carries internet instead. Try an internet application to confirm the
+full path works. Use **Rescan** to refresh the list. After five minutes, scan
+again before connecting. Changing radios clears the previous selection.
+
+With a wired client connection, either built-in band can supply the uplink.
+That band leaves the mesh. With a Wi-Fi client connection and a 2.4 GHz
+uplink, only HaLow carries mesh traffic, so expect lower speed. With a 5 GHz
+uplink, this node's own Wi-Fi hotspot shares the radio and follows the house
+network's channel. Other nodes keep their agreed mesh channels.
+
+A shared hotspot with a working house connection normally stays up during a
+scan. When the hotspot must stop, the page asks first and warns of about
+15 seconds without Wi-Fi. Reconnect and the saved list appears with its age.
+If mesh restoration needs another try, a separate warning appears; the scan
+results are still available. Mesh scans briefly interrupt that mesh band.
+
+Networks marked **DFS** use
+channels where the upstream router watches for radar. With DFS follower
+support installed, this node joins that router first, then starts its shared
+hotspot on the same channel without another radar wait. Losing the house
+connection pauses the hotspot until the connection returns. A house-router
+channel move also pauses and restarts it, so your phone may need to reconnect.
+
+Without that support, a DFS upstream keeps this node's shared hotspot off.
+Status explains why. Use Ethernet or another node for access, or select a
+non-DFS house network. Repeated hotspot startup failures also leave it off.
+Reconnect the uplink to retry after correcting the problem. A separate
+hotspot on another radio is unaffected.
+The new built-in path still needs
+hardware qualification before release. **Disconnect** releases the uplink
+radio back to its normal mesh or hotspot role. Disconnect it before changing
+the EUD mode setting. A wrong password leaves it
+trying to connect until corrected or disconnected.
+
+Disconnect remains available while mesh channel agreement is in progress.
 
 ### Recognize a working path
 
@@ -45,9 +143,9 @@ while failing the radio's internet check.
 More than one radio can offer internet. MANET considers both the path across
 the mesh and the advertised uplink capacity. It avoids changing gateways
 for small, brief improvements. If the current path fails, it can select an
-available replacement. If a radio's own Ethernet uplink stops working, that
-radio stops being a gateway and its traffic goes out through another gateway
-on the mesh.
+available replacement. If a radio's own Ethernet uplink stops working, it
+tries its other local internet connections. If none works, it stops being a
+gateway and can use another gateway on the mesh.
 
 A gateway change can break an existing download, call or other internet
 session because traffic now leaves through a different connection. Reconnect
@@ -61,13 +159,108 @@ radio airtime and other users can all limit the result. The displayed
 uplink figure is also different from an end-to-end speed test on your phone.
 
 Wired Ethernet uplinks use a small download to estimate available capacity.
-The download only sets the advertised figure. A slow or filtered connection
+The connection can carry traffic before the download finishes. The download
+only sets the advertised figure. A slow or filtered connection
 still counts as internet. It is advertised as slow, not dropped.
 Phone tethers, cellular interfaces and Wi-Fi uplinks use an assumed capacity
 instead of that download test. Internet use by connected people still uses
 the upstream connection's data allowance.
 
 ## Developer
+
+### Local client and shared hotspot
+
+The Uplink picker scans built-in radios and USB dongles. Before storing or
+grouping observations, both paths remove exact matches of the current local
+`lan_ap_ssid` plus `-` and four lowercase hexadecimal characters. The prefix
+is fixed at flash time, literal and case-sensitive. Use the same base name
+on all radios in a mesh. Other prefixes, uppercase suffixes and suffixes
+of another length remain visible. This includes this node's own hotspot seen
+from another radio. It is a naming rule, not proof of mesh membership.
+
+The server rejects matching typed and scanned connection requests. The
+built-in watcher persists disabled intent and restores the normal radio roles
+for a previously saved match. USB cleanup stops and disables its client and
+flushes its address. Gateway qualification checks saved names before probing,
+so watcher timing cannot promote a matching profile. Status gives a plain
+reason. The shared AP follower owns startup after station association, while
+the dispatcher only starts its supporting services once hostapd is active.
+
+The picker groups matching
+SSID bytes by band, security, DFS status and availability, using the strongest
+BSSID in each group. Hidden names remain separate by BSSID. Different bands,
+security methods and radar-channel choices stay separate. The connected group
+appears once at the top. A selection pins its BSSID on both client paths.
+Names are escaped as text for rendering. Valid UTF-8 bytes from `iw` display
+as characters, including emoji. Invalid UTF-8 and control bytes stay visible
+as escapes with a disabled-row explanation.
+
+Both helpers reject menu selections outside their five-minute scan window
+or from a different interface. USB scans use the existing adapter eligibility
+rules and restore an initially down adapter after success or failure without
+stopping its client service. USB supports open and WPA2, choosing WPA2 for a
+mixed WPA2/WPA3 network. Its existing manual `set` action remains available
+outside the picker. Credentials travel in the local POST body and helper
+stdin, never through mesh coordination.
+
+The private client profile reserves one MT7916 PHY. Active mesh and band roles
+are withdrawn under the same lock used by ACS and drift repair. A dedicated
+supplicant owns wlan0 or wlan1. A shared 5 GHz EUD AP uses `manetap`, so AP
+preparation cannot change the station into a mesh interface. Client DHCP and
+NAT reuse the existing gateway path without bridging the upstream to br0.
+
+The networkd files and ownership marker are readable as soon as they are
+published; client credentials remain private. The shared AP uses a stable,
+locally administered unicast address derived from its PHY, avoiding the
+station, br0, bat0 and other local interface addresses. Disconnect restores
+the static channel, existing ACS commitment or recovery anchor under the
+channel lock, even during agreement, without starting a new round.
+
+The follower waits for supplicant association/channel events, hostapd events,
+link/address changes and local policy changes. Service lifecycle notifications
+and socket replacement also wake it. It prefers hostapd CSA on non-DFS changes,
+verifies completion and restarts the AP if necessary. A missing completion,
+busy lock or pending restore gets a three-second retry. Disassociation stops
+the shared AP before requesting station reconnection. With no enabled profile
+or repair work it exits, leaving a systemd path unit to wake it on demand.
+An enabled profile has a 120-second safety reconcile for missed events,
+including silent control failures. It calls the uplink dispatcher only when
+the observed policy changes. Node-manager's existing 60-second gateway check
+covers internet reachability changes without local events. Notifications and
+scan repair live under `/run/manet-wifi-uplink/`, and the gateway marker lives
+at `/run/manet-uplink/mesh-gateway.state`. Input and control-socket directories
+are watched directly, so unrelated `/run` activity leaves the follower asleep.
+
+DFS sharing requires the matched kernel and hostapd follower support. The
+controller checks the loaded kernel option and hostapd version. It starts the
+station first and requests a 20 MHz follower AP only on the station's live
+channel. The kernel checks the ordinary BSS station association again under
+its lock. It admits the explicit follower without local radar detection or
+CAC, so scanning is not blocked by a radar-required AP. Ordinary AP starts
+keep their normal DFS behavior. Regulatory flags remain unchanged.
+
+The kernel tracks follower permission separately from channel availability.
+It stops the follower on supporting-station loss, even if the channel is
+marked available. At upstream CSA start it stops the AP and blocks follower
+starts during the countdown. After the station moves, the watcher restarts
+the hotspot on the new channel. Radar at the upstream master is handled by
+that master's CSA or subsequent loss of association. RF timing and firmware
+behavior remain bench qualification items.
+
+Without both pieces of support, DFS retains the hotspot-off fallback and a
+plain status reason. The uplink's association, address and gateway status
+remain independent. Stale status cannot authorize an AP start. Three failed
+starts or any unexpected CAC latch the hotspot off until an observed loss
+and reconnect or a channel change. Radar-unavailable channels stay blocked.
+The usual AP-only PHY power cap is skipped while sharing. Associated shared
+APs scan in place when non-DFS or operating as supported DFS followers.
+Other serving-AP scans require preflight confirmation and a locked recheck.
+Scans save results before restoration; status exposes their boot-clock age.
+The watcher retries failed restoration separately from client state. Mesh
+restoration uses live starting MHz or the agreed/static channel and updates
+the supplicant file. Dispatcher AP starts share the same role lock. See the
+[ownership and recovery reference](../../../docs/node-tools-internals.md#built-in-wi-fi-uplink-ownership).
+
 
 ### Role changes reconcile the whole forwarding path
 
@@ -85,6 +278,40 @@ roles. See [Ethernet role ownership](../../../MANET/networkd-dispatcher/README.m
 and [client connections](connect.md).
 
 ### Selecting a Linux default route
+
+The local uplink dispatcher excludes wired EUD bridge ports, then ranks
+Ethernet ahead of supported USB tether/cellular links, with Wi-Fi clients
+last. It reuses the bandwidth helper's Ethernet classification, including
+its conservative phone/modem driver exclusions. Within each class it tries
+the saved promoted interface, current route, event interface, other defaults
+and discovered devices. Each must still pass carrier, address and internet
+checks. Reconciliation can replace working Wi-Fi with qualified Ethernet.
+Wi-Fi events cannot take the route from working Ethernet. Loss tries the
+remaining candidates in the same pass. This local policy has no speed-based
+improvement timer. The Wi-Fi follower requests that same reconciliation on
+connection/address and AP-policy changes. A quiet 120-second safety pass adds
+no dispatcher call. The node manager continues to requalify internet access
+at its existing 60-second gateway interval.
+The packaged Ethernet unplug hook requests reconciliation under its held
+policy lock before slow cleanup, without waiting for that tick. Ready local
+fallbacks are probed before demotion. An unaddressed standby is skipped on
+this loss pass, so DHCP cannot delay an already-ready Wi-Fi path. The gateway
+marker stays present across a successful local handoff, preventing a temporary
+mesh default. With no qualified ready fallback, remote mesh routing is the
+useful interim path. Ethernet detection always targets the physical event
+interface, never the saved Wi-Fi uplink, and rejects wireless devices.
+
+Each switch updates the metric-100 route, NAT, selected DNS and BATMAN
+bandwidth. Wi-Fi receives its own estimate, with the HaLow cap when needed,
+even if the preceding Ethernet estimate was higher. The mesh route manager
+defers to the selected local uplink regardless of its interface class.
+DNS follows the qualified resolver file without restarting dnsmasq. Identical
+EUD configuration preserves the DHCP process and leases. A changed pool or
+main configuration can require one restart. An optional, narrowly filtered
+conntrack deletion removes old-address NAT mappings after switching, but does
+not preserve established sessions or guarantee a TCP reset. Healthy ready-link
+handoffs are expected to take a few seconds on the bench. Probe failures, DHCP
+and real AP-role transitions remain outside that expectation.
 
 BATMAN's gateway selection steers its DHCP behavior; it does not by itself
 install the Linux default route required here. The route manager evaluates
@@ -111,15 +338,23 @@ guarantee under every service scheduling or link condition.
 ### Advertised capacity and name resolution
 
 Ethernet qualification is the HTTP 204 check. A separate 5 MB HTTPS download
-then estimates capacity. The measurement excludes DNS/TCP/TLS setup and
+then estimates capacity in a separate systemd worker after forwarding is
+installed. Ethernet starts with unknown bandwidth until a matching result is
+available. Before publishing or announcing, the worker rechecks the selected
+promotion, address, router and carrier generation under the policy lock.
+A download completing after a switch cannot overwrite Wi-Fi's announcement.
+The measurement excludes DNS/TCP/TLS setup and
 divides bytes by transfer time after the first byte. A partial transfer of at
 least 250 kB counts. TCP startup can still under-read a fast connection, and a
 link with no usable measurement is advertised as 1 Mbit/s down and 0.2 up. The result is reused
-while the interface, address and router remain the same. Demotion invalidates
+while the interface, address, router and carrier generation remain the same. Demotion invalidates
 it. Failed tests are rate-limited rather than repeated each loop.
 
 Recognized tether/cellular drivers and Wi-Fi uplinks avoid that download
-and advertise 10/2 Mbit/s after their connectivity probe. For measured wired
+and start from 10/2 Mbit/s after their connectivity probe. If HaLow is the
+only active mesh radio, both directions are capped at 1 Mbit/s without raising
+a lower upstream estimate. This is a conservative estimate, not a measured
+HaLow rate. For measured wired
 uplinks, upload is an assumed fifth of download, not an upload test. Selection
 uses download. Consequently these advertisements are bounded inputs to a
 route heuristic, not a promise of symmetric throughput.

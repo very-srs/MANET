@@ -19,8 +19,8 @@ Routes (relative to /manage):
   GET  /api/sessions/<id>       - Get session JSON
   GET  /api/sessions/<id>/csv   - Get session CSV
   DELETE /api/sessions/<id>     - Delete saved session
-  GET  /api/uplink/wifi         - USB Wi-Fi uplink status
-  POST /api/uplink/wifi         - Set USB Wi-Fi uplink credentials (all nodes)
+  GET  /api/uplink/wifi         - Local built-in and USB Wi-Fi uplink status
+  POST /api/uplink/wifi         - Set node-local Wi-Fi uplink credentials
 """
 
 import json
@@ -194,40 +194,53 @@ def get_usb_wifi_uplink_status():
         }
 
 
-def apply_usb_wifi_uplink(ssid, password, enabled=True):
-    """Set local uplink credentials and return the resulting status."""
-    ssid = (ssid or 'hotspot').strip()
-    password = password if password is not None else 'raspberry'
-    if not ssid:
-        raise ValueError('SSID is required')
-    if not password:
-        raise ValueError('Password is required')
-    if not os.path.exists(USB_WIFI_UPLINK_SCRIPT):
-        raise RuntimeError(f'Missing {USB_WIFI_UPLINK_SCRIPT}')
-    # Credential application can restart networking, with a 45 s process limit.
-    r = subprocess.run(
-        [USB_WIFI_UPLINK_SCRIPT, 'set', ssid, password, '1' if enabled else '0'],
-        capture_output=True, text=True, timeout=45
-    )
-    if r.returncode != 0:
-        err = (r.stderr or r.stdout or '').strip()
-        raise RuntimeError(err or f'usb-wifi-uplink exited {r.returncode}')
+def apply_usb_wifi_uplink(ssid, password, enabled=True, selection=None):
+    """Set dongle credentials locally, passing secrets through stdin."""
+    request = {'ssid': ssid, 'password': password, 'enabled': enabled}
+    if selection:
+        request.update({key: selection[key] for key in
+                        ('security', 'bssid', 'freq', 'scan_iface') if key in selection})
+    result = subprocess.run([USB_WIFI_UPLINK_SCRIPT, 'set-stdin'],
+                            input=json.dumps(request), capture_output=True,
+                            text=True, timeout=60)
+    if result.returncode:
+        from manet_wifi_uplink import OWN_HOTSPOT_REASON
+        reason = (result.stderr or '').strip()
+        if reason in ('Scan again and choose a network from the fresh list', OWN_HOTSPOT_REASON):
+            raise ValueError(reason)
+        raise RuntimeError('Could not save the USB Wi-Fi connection. Check the password and try again.')
     return get_usb_wifi_uplink_status()
 
 
-def apply_usb_wifi_uplink_all(ssid, password, enabled=True):
-    """Stage uplink credentials over Alfred for all nodes at activate_at."""
-    result = coordinate_radio_change({'uplink_wifi': {
-        'ssid': ssid, 'password': password, 'enabled': bool(enabled),
-    }})
-    status = dict(get_usb_wifi_uplink_status())
-    status.update({
-        'ok': result.get('ok', False),
-        'applied': result.get('acked', []),
-        'error': result.get('error', ''),
-    })
-    return status
+def builtin_wifi_request(action, request=None):
+    """Run a local client action behind the existing authenticated admin routes."""
+    command = ['/usr/local/bin/manet_wifi_uplink.py', action]
+    if action in ('scan', 'scan-plan'):
+        iface = (request or {}).get('iface')
+        if iface == 'usb':
+            if action == 'scan-plan':
+                return {'iface': 'usb', 'interrupts_ap': False}
+            command = [USB_WIFI_UPLINK_SCRIPT, 'scan-json']
+        elif iface in ('wlan0', 'wlan1'):
+            command.append(iface)
+            if action == 'scan' and request.get('allow_ap_stop') is True:
+                command.append('--allow-ap-stop')
+        else:
+            raise ValueError('Choose a radio before scanning')
+    result = subprocess.run(command, input=json.dumps(request or {}),
+                            capture_output=True, text=True, timeout=150)
+    try:
+        response = json.loads(result.stdout)
+    except ValueError as error:
+        raise RuntimeError('Wi-Fi helper returned no status') from error
+    if result.returncode:
+        raise RuntimeError(response.get('error', 'Wi-Fi operation failed'))
+    return response
 
+
+def wifi_uplink_status():
+    """Report both local client paths without exposing credentials."""
+    return {'builtin': builtin_wifi_request('status'), 'usb': get_usb_wifi_uplink_status()}
 
 
 def get_bat0_active_ifaces():
@@ -472,6 +485,8 @@ def coordinate_radio_change(actions, node_ip='all'):
 
     Single-node changes use the same transport with a restricted `targets` list.
     """
+    if 'uplink_wifi' in actions:
+        return {'ok': False, 'error': 'Wi-Fi uplink credentials are node-local'}
     targets = 'all'
     if node_ip != 'all':
         try:
@@ -601,6 +616,8 @@ def build_topology():
         node_info = {
             'id':       nid,
             'hostname': hostname,
+            'operator': (conf.get('operator_name', '') if is_me
+                         else nd.get('ATAK_USER', '')),
             'ip':       ip,
             'is_me':    is_me,
             'is_gateway': nd.get('IS_GATEWAY', 'false').lower() == 'true',
@@ -618,6 +635,11 @@ def build_topology():
                 'wlan1': {'active': 'wlan1' in active_ifaces, **iw_wlan1, **mcs_map['wlan1']},
                 'wlan2': {'active': 'wlan2' in active_ifaces, **iw_wlan2, **mcs_map['wlan2']},
             }
+            from manet_wifi_uplink import uplink_owner
+            owner = uplink_owner()
+            if owner in node_info['interfaces']:
+                node_info['interfaces'][owner]['uplink'] = True
+
         else:
             # Use peer INTERFACES_JSON when published, else MCS + DATA_CHANNEL_*
             # to retain channel state in the display.
@@ -1019,6 +1041,7 @@ def run_measurement_session(label, pairs, tests, duration, udp_bitrate):
 # Shared page styling is combined with the voice and config tab styles below.
 CSS = """
 :root {
+  color-scheme: light;
   --bg:      #ebeae8;
   --surface: #ffffff;
   --card:    #ffffff;
@@ -1031,6 +1054,9 @@ CSS = """
   --warn:    #ecb000;
   --fer-yellow:#ecb000;
   --fer-black:#02000d;
+  --good:    #16813d;
+  --bad:     #c22c25;
+  --small-text: 12px;
   --green:   #16a34a;
   --orange:  #8a6a00;
   --red:     #dc2626;
@@ -1040,6 +1066,7 @@ CSS = """
   --font:    Roobert, Arial, sans-serif;
 }
 :root[data-theme="dark"] {
+  color-scheme: dark;
   --bg:      #02000d;
   --surface: #121118;
   --card:    #17151d;
@@ -1050,11 +1077,21 @@ CSS = """
   --accent2: #ecb000;
   --info:    #9fa8ff;
   --warn:    #ecb000;
+  --good:    #70d99a;
+  --bad:     #ffaaa4;
   --text:    #f8f6ef;
   --muted:   #aaa5b2;
   --shadow:  0 18px 50px rgba(0,0,0,.36);
 }
 *{box-sizing:border-box;margin:0;padding:0}
+:root{color-scheme:light}
+:root[data-theme="dark"]{color-scheme:dark}
+:focus-visible{outline:3px solid var(--info);outline-offset:3px}
+::selection{background:var(--accent2);color:var(--fer-black)}
+@media (pointer:coarse){
+  button,summary,a.btn{min-height:44px;min-width:44px}
+  input[type=text],input[type=password],input[type=number],select{min-height:44px}
+}
 html,body{background:var(--bg);color:var(--text);font-family:var(--font);font-size:13px;min-height:100vh;max-width:100%;overflow-x:hidden}
 
 body{font-feature-settings:"cv02","cv03","cv04","cv11"}
@@ -1080,14 +1117,14 @@ body{
 #hdr-logo span{color:var(--accent2)}
 #hdr-node{font-size:12px;color:var(--muted);border-left:1px solid var(--border);padding-left:16px;transition:opacity .18s ease,max-width .18s ease,padding .18s ease,border .18s ease}
 #hdr-node strong{color:var(--text)}
-#hdr-right{margin-left:auto;display:flex;align-items:center;gap:16px;font-size:11px}
-#hdr-inet{padding:5px 10px;border-radius:999px;letter-spacing:0;font-size:11px;font-weight:700}
+#hdr-right{margin-left:auto;display:flex;align-items:center;gap:16px;font-size:var(--small-text)}
+#hdr-inet{padding:5px 10px;border-radius:999px;letter-spacing:0;font-size:var(--small-text);font-weight:700}
 #hdr-inet.ok{color:var(--text);border:1px solid rgba(22,163,74,.34);background:rgba(22,163,74,.07)}
 #hdr-inet.no{color:var(--text);border:1px solid rgba(217,119,6,.34);background:rgba(217,119,6,.07)}
-#hdr-clock{color:var(--muted);font-size:11px}
-.theme-toggle{border:1px solid var(--accent2);background:rgba(236,176,0,.10);color:var(--text);border-radius:999px;padding:6px 10px;font-family:var(--font);font-size:11px;font-weight:850;cursor:pointer;min-width:74px}
+#hdr-clock{color:var(--muted);font-size:var(--small-text)}
+.theme-toggle{border:1px solid var(--accent2);background:rgba(236,176,0,.10);color:var(--text);border-radius:999px;padding:6px 10px;font-family:var(--font);font-size:var(--small-text);font-weight:850;cursor:pointer;min-width:74px}
 .theme-toggle:hover{background:var(--accent2);color:var(--fer-black);box-shadow:0 8px 22px rgba(236,176,0,.20)}
-.overview-link-btn{border:1px solid var(--accent2);background:var(--accent2);color:var(--fer-black);border-radius:999px;padding:6px 12px;font-family:var(--font);font-size:11px;font-weight:850;cursor:pointer;min-width:92px;transition:background .18s ease,color .18s ease,box-shadow .18s ease,transform .18s ease;box-shadow:0 8px 20px rgba(236,176,0,.16)}
+.overview-link-btn{border:1px solid var(--accent2);background:var(--accent2);color:var(--fer-black);border-radius:999px;padding:6px 12px;font-family:var(--font);font-size:var(--small-text);font-weight:850;cursor:pointer;min-width:92px;transition:background .18s ease,color .18s ease,box-shadow .18s ease,transform .18s ease;box-shadow:0 8px 20px rgba(236,176,0,.16)}
 .overview-link-btn:hover{background:#f6c62f;color:var(--fer-black);box-shadow:0 10px 24px rgba(236,176,0,.26);transform:translateY(-1px)}
 :root[data-theme="dark"] .overview-link-btn{background:var(--accent2);color:var(--fer-black);border-color:var(--accent2)}
 :root[data-theme="dark"] .overview-link-btn:hover{background:#f6c62f;color:var(--fer-black);box-shadow:0 10px 24px rgba(236,176,0,.28)}
@@ -1095,7 +1132,8 @@ body{
 /* sidebar nav */
 #page{display:flex;min-height:calc(100vh - 58px)}
 #nav{background:var(--surface);border-right:1px solid var(--border2);width:160px;flex:0 0 160px;display:flex;flex-direction:column;padding:12px 0;position:sticky;top:58px;height:calc(100vh - 58px);overflow-y:auto;z-index:90;transition:top .18s ease}
-.tab{padding:11px 20px;cursor:pointer;font-size:12px;font-weight:700;letter-spacing:0;color:var(--muted);border-left:none;border-bottom:2px solid transparent;text-transform:none;transition:color .15s ease,border-color .15s ease,background .15s ease;white-space:nowrap}
+.tab{padding:11px 20px;cursor:pointer;font-family:var(--font);font-size:12px;font-weight:700;letter-spacing:0;color:var(--muted);background:transparent;border:0;border-bottom:2px solid transparent;text-align:left;text-transform:none;transition:color .15s ease,border-color .15s ease,background .15s ease;white-space:nowrap;min-height:44px}
+.tab:focus-visible{outline-offset:-3px}
 .tab:hover{color:var(--text);background:color-mix(in srgb, var(--panel) 92%, transparent)}
 .tab.active{color:var(--text);border-bottom-color:var(--fer-yellow);background:transparent}
 .tab.active::after{display:none}
@@ -1108,10 +1146,10 @@ body{
 :root[data-theme="dark"] #content::before{background:
   linear-gradient(90deg, rgba(236,176,0,.28) 0 12%, transparent 12% 100%)}
 body.chrome-compact #hdr{min-height:50px;gap:14px}
-  body.chrome-compact .fer-lockup{min-width:clamp(96px,18vw,140px);width:clamp(96px,18vw,140px);height:44px}
+  body.chrome-compact .fer-lockup{height:44px}
   body.chrome-compact .fer-logo-img{height:34px}
 body.chrome-compact #hdr-node{opacity:0;max-width:0;padding-left:0;border-left:0;overflow:hidden;white-space:nowrap}
-body.chrome-compact #nav{top:46px;height:calc(100vh - 46px)}
+body.chrome-compact #nav{top:50px;height:calc(100vh - 50px)}
 body.chrome-compact #content::before{height:8px;margin:-22px -22px 12px;opacity:.72}
 
 /* card */
@@ -1120,10 +1158,57 @@ body.chrome-compact #content::before{height:8px;margin:-22px -22px 12px;opacity:
 .card-title{padding:14px 16px;font-size:12px;font-weight:800;letter-spacing:0;color:var(--text);text-transform:none;border-bottom:1px solid var(--border2);display:flex;align-items:center;gap:8px;flex-wrap:wrap;min-width:0}
 .card-title::before{display:none}
 
+/* Wi-Fi picker: five to six ordinary rows, with room for longer names. */
+#tab-uplink [hidden]{display:none}
+#tab-uplink .uplink-body{padding:16px;font-size:16px;line-height:1.45;min-width:0}
+#tab-uplink .card-title{font-size:16px}
+#tab-uplink p{margin:0 0 12px;overflow-wrap:anywhere}
+#tab-uplink h3{font-size:16px;margin:14px 0 8px}
+#tab-uplink .btn,#tab-uplink select,#tab-uplink input,#tab-uplink summary{min-height:44px;font-size:16px}
+#tab-uplink .btn{color:var(--text);border-color:var(--border)}
+#tab-uplink .btn-green{color:var(--fer-black);border-color:var(--accent2)}
+#tab-uplink .btn:hover{background:var(--panel);color:var(--text);border-color:var(--accent2)}
+#tab-uplink .btn-green:hover{background:var(--accent2);color:var(--fer-black)}
+.uplink-help{color:var(--muted);margin-bottom:12px}
+.uplink-help summary{cursor:pointer;padding:10px 0;color:var(--text)}
+.uplink-toolbar{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
+.uplink-toolbar label{flex-basis:100%}
+#uplink-wifi-radio{flex:1;min-width:0;width:160px}
+#uplink-wifi-networks{max-height:420px;overflow-y:auto;overscroll-behavior:contain;border:1px solid var(--border);border-radius:8px;background:var(--surface)}
+#uplink-wifi-current{display:block;padding:12px;background:var(--panel);border-bottom:2px solid var(--accent2)}
+#uplink-wifi-current .uplink-detail{display:block}
+.uplink-network{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:3px 8px;width:100%;min-height:72px;padding:12px;text-align:left;border:0;border-bottom:1px solid var(--border2);background:var(--surface);color:var(--text);font:inherit;cursor:pointer}
+.uplink-network:last-child{border-bottom:0}
+.uplink-network[aria-pressed="true"]{background:var(--panel);box-shadow:inset 4px 0 var(--accent2)}
+.uplink-network:disabled{color:var(--muted);background:var(--panel);cursor:not-allowed}
+.uplink-network:focus-visible,#uplink-wifi-networks:focus-visible{outline:3px solid var(--accent2);outline-offset:-3px}
+.uplink-name{min-width:0;overflow-wrap:anywhere;white-space:pre-wrap;unicode-bidi:plaintext;font-weight:700}
+.uplink-detail{grid-column:1 / -1;font-size:14px;overflow-wrap:anywhere}
+.uplink-signal{display:flex;align-items:center;gap:6px;font-size:14px;white-space:nowrap}
+.uplink-bars{display:inline-flex;align-items:flex-end;gap:2px;height:20px}
+.uplink-bars i{width:4px;height:5px;background:var(--border)}
+.uplink-bars i:nth-child(2){height:10px}.uplink-bars i:nth-child(3){height:15px}.uplink-bars i:nth-child(4){height:20px}
+.uplink-bars .lit{background:currentColor}
+#uplink-wifi-feedback,#uplink-wifi-status{font-size:14px;margin-top:12px}
+#uplink-wifi-connect{margin:12px 0;padding:12px;border:1px solid var(--border);border-radius:8px}
+#uplink-wifi-password-row label{display:block;margin-bottom:6px}
+#uplink-wifi-password{width:100%;min-width:0;margin-bottom:12px}
+@media(max-width:480px){
+  .uplink-dbm{display:none}
+  #tab-uplink .uplink-body{padding:12px}
+  #tab-uplink .uplink-toolbar{display:grid;grid-template-columns:1fr auto}
+  #tab-uplink .uplink-toolbar label{
+    position:absolute;width:1px;height:1px;overflow:hidden;
+    clip-path:inset(50%);white-space:nowrap
+  }
+  #tab-uplink .uplink-toolbar .btn{width:auto}
+  #tab-uplink .uplink-toolbar select{width:100%}
+}
+
 /* rows */
 .row{display:flex;align-items:center;gap:12px;padding:10px 16px;border-bottom:1px solid var(--border2);flex-wrap:wrap}
 .row:last-child{border-bottom:none}
-.row-label{flex:0 0 150px;font-size:11px;color:var(--muted);letter-spacing:.5px;text-transform:uppercase}
+.row-label{flex:0 0 150px;font-size:var(--small-text);color:var(--muted);letter-spacing:.5px;text-transform:uppercase}
 
 /* inputs */
 input[type=text],input[type=password],input[type=number],select{
@@ -1154,16 +1239,16 @@ input[type=checkbox]{width:15px;height:15px;accent-color:var(--accent)}
 :root[data-theme="dark"] .btn-red:hover{background:#b42318;color:#ffffff;border-color:#b42318}
 
 /* badges */
-.badge{padding:3px 8px;font-size:10px;font-weight:750;letter-spacing:0;border:1px solid;border-radius:999px}
+.badge{padding:3px 8px;font-size:var(--small-text);font-weight:750;letter-spacing:0;border:1px solid;border-radius:999px}
 .b-on {color:var(--text); border-color:rgba(22,163,74,.34);background:rgba(22,163,74,.07)}
-.b-off{color:var(--muted); border-color:var(--border);background:#f7f8fa}
-.b-gw {color:var(--fer-black);border-color:rgba(236,176,0,.48);background:rgba(236,176,0,.14)}
+.b-off{color:var(--muted); border-color:var(--border);background:var(--panel)}
+.b-gw {color:var(--text);border-color:rgba(236,176,0,.48);background:rgba(236,176,0,.14)}
 .b-me {color:var(--info);border-color:rgba(0,0,63,.22);background:rgba(0,0,63,.08)}
 
 /* table */
 table{width:100%;border-collapse:collapse}
 thead tr{border-bottom:1px solid var(--border)}
-th{padding:8px 12px;font-size:9px;letter-spacing:2px;color:var(--muted);text-transform:uppercase;text-align:left}
+th{padding:8px 12px;font-size:var(--small-text);letter-spacing:2px;color:var(--muted);text-transform:uppercase;text-align:left}
 td{padding:10px 12px;border-bottom:1px solid var(--border2);font-size:12px;vertical-align:middle}
 tr:last-child td{border-bottom:none}
 tr:hover td{background:rgba(236,176,0,.08)}
@@ -1175,12 +1260,12 @@ tr:hover td{background:rgba(236,176,0,.08)}
 .node-card.is-me{border-color:rgba(0,0,63,.28);box-shadow:0 10px 26px rgba(0,0,63,.08)}
 .node-card.is-gw{border-color:rgba(236,176,0,.5);box-shadow:0 10px 26px rgba(236,176,0,.12)}
 .node-name{font-size:14px;font-weight:700;margin-bottom:4px;color:var(--text)}
-.node-ip{font-size:10px;color:var(--muted);margin-bottom:8px}
+.node-ip{font-size:var(--small-text);color:var(--muted);margin-bottom:8px}
 .node-ifaces{display:flex;gap:4px;flex-wrap:wrap;margin-bottom:8px}
-.iface-chip{font-size:9px;font-weight:750;padding:3px 7px;border:1px solid;border-radius:999px}
+.iface-chip{font-size:var(--small-text);font-weight:750;padding:3px 7px;border:1px solid;border-radius:999px}
 .iface-on {color:var(--text);border-color:rgba(22,163,74,.34);background:rgba(22,163,74,.07)}
-.iface-off{color:var(--muted);border-color:var(--border);background:#f7f8fa}
-.node-battery{font-size:10px;color:var(--muted)}
+.iface-off{color:var(--muted);border-color:var(--border);background:var(--panel)}
+.node-battery{font-size:var(--small-text);color:var(--muted)}
 .node-tags{position:absolute;top:10px;right:10px;display:flex;gap:4px;flex-wrap:wrap;justify-content:flex-end;max-width:45%}
 
 /* interface toggle cards */
@@ -1188,9 +1273,9 @@ tr:hover td{background:rgba(236,176,0,.08)}
 .iface-block:last-child{border-bottom:none}
 .iface-header{display:flex;align-items:center;gap:12px;margin-bottom:6px;flex-wrap:wrap}
 .iface-name{font-size:13px;font-weight:700;min-width:60px}
-.iface-band{font-size:10px;color:var(--muted);letter-spacing:.5px}
+.iface-band{font-size:var(--small-text);color:var(--muted);letter-spacing:.5px}
 .iface-controls{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
-.txpwr-row{display:flex;align-items:center;gap:8px;margin-top:4px;padding-left:72px;font-size:11px;color:var(--muted);flex-wrap:wrap}
+.txpwr-row{display:flex;align-items:center;gap:8px;margin-top:4px;padding-left:72px;font-size:var(--small-text);color:var(--muted);flex-wrap:wrap}
 
 /* global actions bar */
 .global-bar{display:flex;gap:8px;flex-wrap:wrap;padding:12px 16px}
@@ -1201,26 +1286,26 @@ tr:hover td{background:rgba(236,176,0,.08)}
 .pair-item:hover,.pair-row:hover{border-color:var(--border)}
 .pair-item input,.pair-row input{flex-shrink:0}
 .pair-label{font-size:12px;flex:1}
-.pair-arrow{color:var(--accent);margin:0 4px}
+.pair-arrow{color:var(--info);margin:0 4px}
 
 /* tests */
 .tests-wrap{display:flex;flex-wrap:wrap;gap:8px;padding:12px 16px}
-.test-chip{display:flex;align-items:center;gap:6px;padding:8px 12px;background:var(--card);border:1px solid var(--border2);border-radius:8px;cursor:pointer;font-size:11px;font-weight:700;transition:all .15s;letter-spacing:0}
-.test-chip:has(input:checked){border-color:var(--accent2);color:var(--accent);background:rgba(236,176,0,.12)}
+.test-chip{display:flex;align-items:center;gap:6px;padding:8px 12px;background:var(--card);border:1px solid var(--border2);border-radius:8px;cursor:pointer;font-size:var(--small-text);font-weight:700;transition:all .15s;letter-spacing:0}
+.test-chip:has(input:checked){border-color:var(--accent2);color:var(--text);background:rgba(236,176,0,.12)}
 .test-chip:hover{border-color:var(--border)}
 
 /* progress */
 .progress-wrap{padding:12px 16px}
-.progress-label{font-size:11px;color:var(--muted);margin-bottom:6px;letter-spacing:.5px}
+.progress-label{font-size:var(--small-text);color:var(--muted);margin-bottom:6px;letter-spacing:.5px}
 .progress-bar-bg{height:6px;background:var(--border2);position:relative;border-radius:999px;overflow:hidden}
 .progress-bar-fill{height:6px;background:var(--accent2);transition:width .3s;width:0;border-radius:999px}
 .progress-bar-fill.running{animation:progressPulse 1.2s ease-in-out infinite}
 @keyframes progressPulse{0%{width:15%;opacity:.55}50%{width:80%;opacity:1}100%{width:15%;opacity:.55}}
-.progress-text{font-size:12px;color:var(--accent);margin-top:6px;min-height:18px}
+.progress-text{font-size:12px;color:var(--info);margin-top:6px;min-height:18px}
 .progress-text.done{color:var(--green)}
 .progress-text.err{color:var(--red)}
 .progress-stats{margin-top:10px;display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:6px}
-.stat-chip{border:1px solid var(--border2);background:var(--card);border-radius:8px;padding:8px 10px;font-size:10px;color:var(--muted);min-height:38px}
+.stat-chip{border:1px solid var(--border2);background:var(--card);border-radius:8px;padding:8px 10px;font-size:var(--small-text);color:var(--muted);min-height:38px}
 .stat-chip strong{display:block;color:var(--text);font-size:12px;margin-top:2px;overflow-wrap:anywhere}
 .stat-chip.good strong{color:var(--green)}
 .stat-chip.warn strong{color:var(--orange)}
@@ -1249,43 +1334,45 @@ tr:hover td{background:rgba(236,176,0,.08)}
 .session-row{display:flex;align-items:center;gap:12px;padding:10px 16px;border-bottom:1px solid var(--border2);flex-wrap:wrap}
 .session-row:last-child{border-bottom:none}
 .session-label{flex:1;font-size:13px}
-.session-count{font-size:11px;color:var(--muted)}
+.session-count{font-size:var(--small-text);color:var(--muted)}
 .session-actions{display:flex;gap:6px}
 .session-summary{width:100%;display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:6px;margin-top:4px}
-.metric-mini{background:var(--card);border:1px solid var(--border2);border-radius:8px;padding:6px 8px;font-size:10px;color:var(--muted)}
-.metric-mini strong{display:block;color:var(--text);font-size:11px;margin-top:2px}
+.metric-mini{background:var(--card);border:1px solid var(--border2);border-radius:8px;padding:6px 8px;font-size:var(--small-text);color:var(--muted)}
+.metric-mini strong{display:block;color:var(--text);font-size:var(--small-text);margin-top:2px}
 
 .footer-actions{display:flex;justify-content:flex-end;padding:8px 0 6px}
-.logout-link-btn{border:1px solid rgba(180,35,24,.26);background:rgba(180,35,24,.05);color:#b42318;border-radius:999px;padding:8px 14px;font-family:var(--font);font-size:11px;font-weight:850;cursor:pointer;transition:background .18s ease,color .18s ease,box-shadow .18s ease,transform .18s ease}
+.logout-link-btn{border:1px solid rgba(180,35,24,.26);background:rgba(180,35,24,.05);color:#b42318;border-radius:999px;padding:8px 14px;font-family:var(--font);font-size:var(--small-text);font-weight:850;cursor:pointer;transition:background .18s ease,color .18s ease,box-shadow .18s ease,transform .18s ease}
 .logout-link-btn:hover{background:#b42318;color:#ffffff;box-shadow:0 8px 20px rgba(180,35,24,.16);transform:translateY(-1px)}
 :root[data-theme="dark"] .logout-link-btn{border-color:rgba(239,68,68,.34);background:rgba(239,68,68,.08);color:#ffb4b4}
 :root[data-theme="dark"] .logout-link-btn:hover{background:#ef4444;color:#ffffff;box-shadow:0 8px 20px rgba(239,68,68,.22)}
 
-@media (max-width: 620px) {
-  html,body{font-size:12px}
+@media (max-width: 620px), (orientation:landscape) and (max-height:600px) {
+  :root{--small-text:14px}
+  html,body{font-size:16px}
   #hdr{position:relative;padding:10px 12px;gap:6px;align-items:flex-start;flex-wrap:wrap}
-  .fer-lockup{order:1;min-width:clamp(92px,24vw,132px);width:clamp(92px,24vw,132px);height:46px;padding-right:4px}
+  .fer-lockup{order:1;min-width:0;width:auto;height:46px;padding-right:12px}
   .fer-logo-img{height:36px}
   #hdr-logo{order:2;font-size:16px;letter-spacing:0;flex:1;min-width:140px}
-  #hdr-node{order:3;flex:0 0 100%;border-left:0;padding-left:0;font-size:10px;max-width:100%;overflow-wrap:anywhere}
+  #hdr-node{order:3;flex:0 0 100%;border-left:0;padding-left:0;font-size:var(--small-text);max-width:100%;overflow-wrap:anywhere}
   #hdr-right{order:4;flex:0 0 100%;margin-left:0;width:100%;justify-content:flex-start;gap:8px;flex-wrap:wrap}
-  #hdr-clock{font-size:10px}
-  #hdr-inet{font-size:9px;padding:3px 8px}
-  .theme-toggle{padding:5px 8px;min-width:66px;font-size:10px}
+  #hdr-clock{font-size:var(--small-text)}
+  #hdr-inet{font-size:var(--small-text);padding:3px 8px}
+  .theme-toggle{padding:5px 8px;min-width:66px;font-size:var(--small-text)}
   #page{flex-direction:column}
   #nav{width:100%;flex:0 0 auto;display:grid;grid-template-columns:repeat(3,1fr);position:static;height:auto;border-right:none;border-bottom:1px solid var(--border2);padding:0;overflow:visible;top:auto}
-  .tab{padding:9px 4px;font-size:10px;white-space:nowrap;text-align:center;border-left:none;border-bottom:3px solid transparent;box-sizing:border-box;overflow:hidden;text-overflow:ellipsis}
+  .tab{padding:9px 4px;font-size:var(--small-text);white-space:nowrap;text-align:center;border-left:none;border-bottom:3px solid transparent;box-sizing:border-box;overflow:hidden;text-overflow:ellipsis}
   .tab.active{border-left-color:transparent;border-bottom-color:var(--fer-yellow);background:transparent}
   #content{padding:10px}
+  #content::before{display:none}
   .card{margin-bottom:10px}
   .card-title{padding:9px 10px;letter-spacing:1px}
   .row{padding:10px;gap:8px;align-items:stretch}
-  .row-label{flex:0 0 100%;font-size:10px}
+  .row-label{flex:0 0 100%;font-size:var(--small-text)}
   input[type=text],input[type=password],input[type=number],select{width:100%!important;min-width:0}
   .btn{width:100%;justify-content:center;text-align:center;padding:9px 10px}
   .btn-run{padding:12px 10px;font-size:12px;letter-spacing:1px}
   .global-bar{padding:10px;display:grid;grid-template-columns:1fr 1fr;gap:8px}
-  .global-bar .btn{width:100%;font-size:10px;letter-spacing:.5px}
+  .global-bar .btn{width:100%;font-size:var(--small-text);letter-spacing:.5px}
   .node-grid{padding:10px;grid-template-columns:1fr}
   .node-card{padding:12px}
   .node-tags{position:static;max-width:none;margin-bottom:6px;justify-content:flex-start}
@@ -1311,6 +1398,44 @@ tr:hover td{background:rgba(236,176,0,.08)}
   body.chrome-compact #nav{top:0}
   body.chrome-compact #content::before{height:6px;margin:-10px -10px 10px}
   #overlay{top:10px;width:calc(100vw - 16px)}
+  #content::before{margin:-10px -10px 12px}
+  .tab{font-size:14px;white-space:normal;display:flex;align-items:center;justify-content:center}
+  button,.btn,.tab,summary,.test-chip,.pair-row{min-height:44px;min-width:44px}
+  input[type=text],input[type=password],input[type=number],select{min-height:44px;font-size:16px}
+  input[type=checkbox]{width:44px;height:44px;flex-shrink:0;accent-color:var(--info)}
+  .btn,.btn-run,.global-bar .btn,.theme-toggle,.overview-link-btn,.logout-link-btn{font-size:14px}
+  .card-title,.row-label,.iface-name,.node-name,.session-label{font-size:16px;letter-spacing:0}
+  #hdr-node,#hdr-clock,#hdr-inet,.node-ip,.node-battery,.iface-band,.iface-chip,.badge,
+  .pair-label,.test-chip,.progress-label,.progress-text,.stat-chip,.stat-chip strong,
+  .session-count,.metric-mini,.metric-mini strong,#overlay-text,.txpwr-row{font-size:14px}
+  .node-name,.session-label,.node-ip{overflow-wrap:anywhere;min-width:0}
+  .txpwr-row{grid-template-columns:minmax(0,1fr);gap:8px}
+  .txpwr-row input{width:100%!important}
+  #recovery-summary{padding:10px}
+  #overlay-close{flex-shrink:0}
+}
+@media (orientation:landscape) and (max-height:600px){
+  #hdr{position:relative;padding:6px 10px;gap:4px 8px;align-items:center}
+  .fer-lockup{height:38px;padding-right:10px}
+  .fer-logo-img{height:30px}
+  #hdr-logo{min-height:38px;min-width:0;font-size:16px}
+  #hdr-node{order:4;font-size:14px}
+  #hdr-right{order:3;flex:0 1 auto;width:auto;margin-left:auto}
+  #hdr-clock{display:none}
+  #page{flex-direction:row}
+  #nav{display:flex;flex-direction:column;width:128px;flex:0 0 128px;position:sticky;top:0;height:100svh;overflow-y:auto;border-right:1px solid var(--border2);border-bottom:0}
+  .tab{flex-shrink:0;justify-content:flex-start;text-align:left;padding:10px 12px}
+  #content{padding:10px}
+  #content::before{display:none}
+  .node-grid{grid-template-columns:repeat(auto-fit,minmax(min(220px,100%),1fr))}
+  .tests-wrap{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .iface-controls{display:flex;flex-wrap:wrap}
+  .txpwr-row{grid-template-columns:auto minmax(80px,1fr) auto}
+  body.chrome-compact #hdr-node{display:block;opacity:1;max-width:none}
+  body.chrome-compact #nav{top:0;height:100svh}
+}
+@media (prefers-reduced-motion:reduce){
+  *,*::before,*::after{transition:none!important;scroll-behavior:auto!important}
 }
 """
 
@@ -1684,7 +1809,12 @@ function showTab(name, updateUrl = true) {
   if (updateUrl && window.location.hash !== '#' + name) {
     history.replaceState(null, '', '#' + name);
   }
-  document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
+  document.querySelectorAll('.tab').forEach(t => {
+    const selected = t.dataset.tab === name;
+    t.classList.toggle('active', selected);
+    t.setAttribute('aria-selected', String(selected));
+    t.tabIndex = selected ? 0 : -1;
+  });
   document.querySelectorAll('.tab-pane').forEach(p => p.style.display = p.id === 'tab-' + name ? '' : 'none');
   if (name === 'sessions') loadSessions();
   if (name === 'radio') buildIfaceControl();
@@ -1692,6 +1822,22 @@ function showTab(name, updateUrl = true) {
   if (name === 'config') startConfigPolling(); else stopConfigPolling();
   if (name === 'voice') startVoicePolling(); else stopVoicePolling();
 }
+
+// A single tab stop enters navigation; arrows move between sections.
+document.getElementById('nav').addEventListener('keydown', event => {
+  const tabs = Array.from(document.querySelectorAll('.tab'));
+  const index = tabs.indexOf(event.target);
+  if (index < 0) return;
+  let next;
+  if (event.key === 'Home') next = 0;
+  else if (event.key === 'End') next = tabs.length - 1;
+  else if (event.key === 'ArrowRight' || event.key === 'ArrowDown') next = (index + 1) % tabs.length;
+  else if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') next = (index + tabs.length - 1) % tabs.length;
+  else return;
+  event.preventDefault();
+  tabs[next].focus();
+  showTab(tabs[next].dataset.tab);
+});
 
 // ── Clock ──
 function tickLocalTime() {
@@ -1716,17 +1862,19 @@ function renderTopology() {
       const band = i === 'wlan0' ? '2.4G' : i === 'wlan1' ? '5G' : 'HaLow';
       const ch = info.channel ? ` ch${info.channel}` : (info.freq_mhz ? ` ${Math.round(info.freq_mhz)}MHz` : '');
       const mcs = on && (info.tx_mcs || info.rx_mcs) ? ` · ${info.tx_mcs || '-'} / ${info.rx_mcs || '-'}` : '';
-      return `<span class="iface-chip ${on ? 'iface-on' : 'iface-off'}">${band}${esc(on ? ch : ' OFF')}${esc(mcs)}</span>`;
+      return `<span class="iface-chip ${on ? 'iface-on' : 'iface-off'}">${band}${esc(info.uplink ? ' UPLINK' : (on ? ch : ' OFF'))}${esc(mcs)}</span>`;
     }).join('');
     const bat = node.battery ? `<div class="node-battery">BAT ${esc(node.battery)}%</div>` : '';
     const tags = [
-      node.is_me ? '<span class="badge b-me" style="font-size:9px">ME</span>' : '',
-      node.is_gateway ? `<span class="badge b-gw" style="font-size:9px">GW${esc(node.gateway_iface ? '·' + node.gateway_iface : '')}</span>` : '',
+      node.is_me ? '<span class="badge b-me" style="font-size:var(--small-text)">ME</span>' : '',
+      node.is_gateway ? `<span class="badge b-gw" style="font-size:var(--small-text)">GW${esc(node.gateway_iface ? '·' + node.gateway_iface : '')}</span>` : '',
     ].filter(Boolean).join('');
     const cls = [node.is_me ? 'is-me' : '', node.is_gateway ? 'is-gw' : ''].join(' ');
     grid.innerHTML += `<div class="node-card ${cls}">
       <div class="node-tags">${tags}</div>
       <div class="node-name">${esc(node.hostname)}</div>
+      ${node.operator ? `<div class="node-ip">Operator: ${esc(node.operator)}
+        </div>` : ''}
       <div class="node-ip">${esc(node.ip)}</div>
       <div class="node-ifaces">${chips}</div>
       ${bat}
@@ -1748,7 +1896,7 @@ function buildIfaceControl() {
     const card = document.createElement('div');
     card.className = 'card';
     const BANDS = {wlan0: '2.4 GHz', wlan1: '5 GHz', wlan2: 'HaLow'};
-    let html = `<div class="card-title">${esc(node.hostname)} &nbsp;<span style="color:var(--muted);font-size:10px">${esc(node.ip)}${node.is_me ? ' &bull; THIS NODE' : ''}</span></div>`;
+    let html = `<div class="card-title">${esc(node.hostname)} &nbsp;<span style="color:var(--muted);font-size:var(--small-text)">${esc(node.ip)}${node.is_me ? ' &bull; THIS NODE' : ''}</span></div>`;
     for (const iface of ['wlan0','wlan1','wlan2']) {
       const info = ifaces[iface] || {};
       const on = info.active === true;
@@ -1756,9 +1904,9 @@ function buildIfaceControl() {
         <div class="iface-header">
           <span class="iface-name">${iface}</span>
           <span class="iface-band">${BANDS[iface]}</span>
-          <span class="badge ${on ? 'b-on' : 'b-off'}" id="ibadge-${esc(node.id)}-${iface}">${on ? 'ACTIVE' : 'DOWN'}</span>
+          <span class="badge ${on ? 'b-on' : 'b-off'}" id="ibadge-${esc(node.id)}-${iface}">${info.uplink ? 'UPLINK' : (on ? 'ACTIVE' : 'DOWN')}</span>
           <div class="iface-controls">
-            ${on
+            ${info.uplink ? '<span>Use this node’s Uplink tab</span>' : on
               ? `<button class="btn btn-red" data-ip="${esc(node.ip)}" data-id="${esc(node.id)}" data-iface="${iface}" data-action="toggle-interface" data-state="down">DISABLE</button>`
               : `<button class="btn btn-green" data-ip="${esc(node.ip)}" data-id="${esc(node.id)}" data-iface="${iface}" data-action="toggle-interface" data-state="up">ENABLE</button>`
             }
@@ -1773,8 +1921,8 @@ function buildIfaceControl() {
         </div>
         <div class="txpwr-row">
           TX POWER
-          ${isHalowIface(iface, info) ? renderHalowPower(info) : `${renderTxPowerSelect(`txpwr-${node.id}-${iface}`, info)}
-          <button class="btn" style="padding:4px 10px;font-size:10px" data-ip="${esc(node.ip)}" data-id="${esc(node.id)}" data-iface="${iface}" data-action="set-power">SET</button>`}
+          ${info.uplink ? '<span>Automatic uplink power</span>' : isHalowIface(iface, info) ? renderHalowPower(info) : `${renderTxPowerSelect(`txpwr-${node.id}-${iface}`, info)}
+          <button class="btn" style="padding:4px 10px;font-size:var(--small-text)" data-ip="${esc(node.ip)}" data-id="${esc(node.id)}" data-iface="${iface}" data-action="set-power">SET</button>`}
         </div>
       </div>`;
     }
@@ -2009,60 +2157,320 @@ async function apply5G() {
   }
 }
 
-// ── Measurements tab ──
+// Wi-Fi uplink picker. Keep scan identity separate from periodically polled status.
+let uplinkNetworks = [], uplinkSelected = -1, uplinkScanIface = '', uplinkScanDevice = '';
+let uplinkScannedAt = 0, uplinkBusy = false, uplinkInitialized = false, uplinkStatus = null;
+let uplinkScanId = null;
+let uplinkScanResolve = null;
+
+function uplinkBand(ap) {
+  return ap.freq >= 5000 ? '5 GHz' : ap.freq >= 2400 ? '2.4 GHz' : '';
+}
+
+function groupUplinkNetworks(networks) {
+  const grouped = new Map();
+  for (const ap of [...networks].sort((a, b) => b.signal - a.signal)) {
+    // Keep security, DFS and availability choices distinct. A hidden name
+    // cannot identify a network, so retain each hidden BSSID separately.
+    const key = JSON.stringify([ap.ssid ? (ap.ssid_hex || ap.ssid) : ap.bssid, uplinkBand(ap),
+      ap.security, !!ap.dfs, !!ap.selectable, ap.reason || '']);
+    if (!grouped.has(key)) grouped.set(key, {...ap});
+  }
+  return [...grouped.values()];
+}
+
+function uplinkState(status) {
+  if (!status) return 'Checking connection';
+  if (status.state === 'missing') return 'Plug in a USB Wi-Fi adapter';
+  if (status.state === 'script-missing') return 'USB Wi-Fi support is unavailable';
+  if (status.state === 'blocked' && status.error) return status.error;
+  if (!status.enabled) return 'Disconnected';
+  if (status.state === 'recovery-failed' || status.error) {
+    return 'Connection needs attention. Retry or disconnect';
+  }
+  if (status.connected || status.state === 'connected' || status.state === 'waiting-address') {
+    if (!status.ip) return 'Joined Wi-Fi, waiting for a network address';
+    return status.gateway ? 'Connected, sharing internet' : 'Connected, not the current internet connection';
+  }
+  return status.state === 'idle' ? 'Not connected' : 'Connecting';
+}
+
+function uplinkError(error) {
+  const message = String(error.message || error);
+  if (/fresh list|scan again/i.test(message)) return 'This list is out of date. Scan again and choose the network.';
+  if (/Password must|USB Wi-Fi connection/i.test(message)) return 'Check the Wi-Fi password and try again. It may be missing, too short or too long.';
+  if (/double quotes/i.test(message)) return 'This radio cannot use a WPA3 password containing double quotes.';
+  if (/working mesh radio/i.test(message)) return 'Another mesh radio must stay connected. Restore that connection before trying again.';
+  if (/EUD mode|shared AP|EUD AP/i.test(message)) return 'This radio cannot connect while keeping the current phone hotspot. Choose another radio or use a cable.';
+  if (/Plug in|Could not scan this USB|one of this mesh's own hotspots/i.test(message)) return message;
+  return 'The radio could not finish: ' + message + '. Please try again.';
+}
+
+function uplinkCurrent() {
+  if (!uplinkStatus) return null;
+  const iface = document.getElementById('uplink-wifi-radio').value;
+  const status = iface === 'usb' ? uplinkStatus.usb : uplinkStatus.builtin;
+  return status && status.enabled && status.ssid && (iface === 'usb' || status.iface === iface) ? status : null;
+}
+
+function renderUplinkCurrent() {
+  const current = uplinkCurrent();
+  const box = document.getElementById('uplink-wifi-current');
+  box.hidden = !current;
+  box.replaceChildren();
+  if (!current) return;
+  const name = document.createElement('strong');
+  name.className = 'uplink-name';
+  name.textContent = current.ssid;
+  const state = document.createElement('span');
+  state.className = 'uplink-detail';
+  state.textContent = uplinkState(current) + (uplinkBand(current) ? ' · ' + uplinkBand(current) : '');
+  box.append(name, state);
+  const details = document.createElement('span');
+  details.className = 'uplink-detail';
+  const security = {open: 'Open network', wpa2: '🔒 WPA2', sae: '🔒 WPA3'}[current.security] || '';
+  const observed = uplinkNetworks.find(ap => ap.bssid === current.bssid);
+  details.textContent = security + (observed ? ` · ${observed.signal} dBm` : '') +
+    (current.freq >= 5260 && current.freq <= 5720 ? ' · DFS: radar channel' : '');
+  box.append(details);
+  if (current.ap_blocked || current.state === 'ap-channel-unavailable' || current.state === 'ap-starting') {
+    const note = document.createElement('span');
+    note.className = 'uplink-detail';
+    note.textContent = current.state === 'ap-channel-unavailable'
+      ? 'Phone hotspot off: this channel is unavailable here. Choose another network, or use a cable or another node.'
+      : current.state === 'ap-starting' ? 'Starting the phone hotspot on the new channel.'
+      : current.ap_blocked === 'dfs-upstream'
+      ? 'Phone hotspot off: this radio cannot share this radar channel. Use a cable, another node, or a network without DFS.'
+      : 'Phone hotspot could not start. Use a cable or another node. Reconnect Wi-Fi to retry.';
+    box.append(note);
+  }
+}
+
 async function loadUsbWifiUplink() {
   try {
     const r = await manageFetch(U('/api/uplink/wifi'));
     const d = await r.json();
-    if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
-    const ssid = document.getElementById('uplink-wifi-ssid');
-    const pass = document.getElementById('uplink-wifi-password');
-    const status = document.getElementById('uplink-wifi-status');
-    if (ssid && !ssid.value) ssid.value = d.ssid || 'hotspot';
-    if (pass && !pass.value) pass.value = 'raspberry';
-    if (status) {
-      const parts = [];
-      parts.push(d.iface ? `iface ${d.iface}` : 'no USB Wi-Fi adapter detected');
-      parts.push(d.state || 'unknown');
-      if (d.ip) parts.push(d.ip);
-      if (d.service) parts.push(`service ${d.service}`);
-      if (d.error) parts.push(d.error);
-      status.textContent = parts.join(' / ');
-      status.style.color = d.connected ? 'var(--green)' : 'var(--muted)';
+    if (!r.ok || d.error) throw new Error(d.error || `HTTP ${r.status}`);
+    uplinkStatus = d;
+    const radio = document.getElementById('uplink-wifi-radio');
+    if (!uplinkInitialized) {
+      for (const choice of d.builtin.choices || []) {
+        radio.add(new Option(`Built-in ${choice.band} GHz`, choice.iface));
+      }
+      radio.value = d.builtin.enabled ? d.builtin.iface : (d.usb.iface ? 'usb' : (d.builtin.choices?.[0]?.iface || 'usb'));
+      const savedIface = d.builtin.scan?.iface;
+      if (d.builtin.choices?.some(choice => choice.iface === savedIface)) {
+        radio.value = savedIface;
+      }
+      uplinkInitialized = true;
+      updateUplinkChoice();
     }
+    document.getElementById('uplink-wifi-status').textContent =
+      'Built-in: ' + uplinkState(d.builtin) + '. USB: ' + uplinkState(d.usb) + '.';
+    restoreUplinkScan();
+    renderUplinkCurrent();
+    updateUplinkControls();
   } catch (e) {
-    const status = document.getElementById('uplink-wifi-status');
-    if (status) {
-      status.textContent = 'Error: ' + e.message;
-      status.style.color = 'var(--red)';
-    }
+    document.getElementById('uplink-wifi-status').textContent = uplinkError(e);
   }
 }
 
-async function applyUsbWifiUplink() {
-  const ssid = document.getElementById('uplink-wifi-ssid').value.trim() || 'hotspot';
-  const password = document.getElementById('uplink-wifi-password').value || 'raspberry';
-  const btn = document.getElementById('btn-uplink-wifi-apply');
-  if (btn) { btn.disabled = true; btn.textContent = 'APPLYING...'; }
-  showMsg(`Configuring USB Wi-Fi uplink for SSID ${ssid}...`, 'info');
+function updateUplinkChoice(restore=true) {
+  uplinkNetworks = [];
+  uplinkSelected = -1;
+  uplinkScanIface = '';
+  uplinkScannedAt = 0;
+  uplinkScanId = null;
+  document.getElementById('uplink-wifi-password').value = '';
+  document.getElementById('uplink-wifi-results').replaceChildren();
+  document.getElementById('uplink-wifi-feedback').textContent = 'Scan to find nearby networks.';
+  document.getElementById('uplink-wifi-warning').textContent = '';
+  if (restore) restoreUplinkScan();
+  renderUplinkCurrent();
+  updateUplinkControls();
+}
+
+function uplinkFresh() {
+  const age = Date.now() - uplinkScannedAt;
+  return uplinkScanIface === document.getElementById('uplink-wifi-radio').value && age >= 0 && age <= 300000;
+}
+
+function updateUplinkControls() {
+  const ap = uplinkNetworks[uplinkSelected];
+  document.getElementById('uplink-wifi-intro').hidden =
+    !!uplinkCurrent() || !!uplinkNetworks.length;
+  document.getElementById('uplink-wifi-radio').disabled = uplinkBusy;
+  document.getElementById('btn-uplink-wifi-scan').disabled = uplinkBusy;
+  document.getElementById('btn-uplink-wifi-scan').textContent = uplinkBusy ? 'PLEASE WAIT' : uplinkScanIface ? 'RESCAN' : 'SCAN';
+  document.getElementById('uplink-wifi-connect').hidden = !ap;
+  document.getElementById('uplink-wifi-password-row').hidden = !ap || ap.security === 'open';
+  document.getElementById('uplink-wifi-password').disabled = uplinkBusy || !ap || ap.security === 'open';
+  document.getElementById('btn-uplink-wifi-apply').disabled = uplinkBusy || !ap || !uplinkFresh();
+  document.getElementById('btn-uplink-wifi-disconnect').disabled = uplinkBusy || !uplinkCurrent();
+  document.getElementById('uplink-wifi-selected').textContent = ap ? 'Selected: ' + ap.ssid : '';
+  if (uplinkScanIface && !uplinkFresh()) {
+    document.getElementById('uplink-wifi-feedback').textContent = 'This list is out of date. Scan again before connecting.';
+  }
+  document.getElementById('uplink-wifi-age').textContent = uplinkScanIface
+    ? `Last scan: ${Math.max(0, Math.floor((Date.now() - uplinkScannedAt)
+      / 1000))} seconds ago.` : '';
+  for (const row of document.querySelectorAll('[data-action="select-uplink"]')) {
+    const index = Number(row.dataset.index);
+    const network = uplinkNetworks[index];
+    const current = uplinkCurrent();
+    // The connected group is already shown at the top, including after a
+    // stronger BSSID appears. Leave other bands/security/DFS choices visible.
+    row.hidden = !!(current && (current.connected || current.state === 'connected') &&
+      current.ssid === network?.ssid && current.security === network.security &&
+      uplinkBand(current) === uplinkBand(network) &&
+      (current.freq >= 5260 && current.freq <= 5720) === !!network.dfs);
+    row.disabled = uplinkBusy || !uplinkNetworks[index]?.selectable;
+    row.setAttribute('aria-pressed', String(index === uplinkSelected));
+  }
+}
+
+function uplinkNetworkMarkup(ap, index) {
+  const strength = ap.signal >= -55 ? 4 : ap.signal >= -67 ? 3 : ap.signal >= -75 ? 2 : 1;
+  const signal = ['Weak', 'Fair', 'Good', 'Strong'][strength - 1];
+  const security = {open: 'Open network', wpa2: 'WPA2', sae: 'WPA3', unsupported: 'Unsupported security'}[ap.security] || 'Unsupported security';
+  const dfs = ap.dfs ? (document.getElementById('uplink-wifi-radio').value === 'wlan1'
+    ? 'DFS: radar channel; the phone hotspot may pause or stay off'
+    : 'DFS: the router may change channel for radar') : '';
+  const bars = [1, 2, 3, 4].map(n => `<i class="${n <= strength ? 'lit' : ''}"></i>`).join('');
+  return `<button type="button" class="uplink-network" data-action="select-uplink" data-index="${index}"
+    aria-pressed="false" ${ap.selectable ? '' : 'disabled'}>
+    <span class="uplink-name">${esc(ap.ssid || 'Hidden network')}</span>
+    <span class="uplink-signal" aria-label="${signal} signal, ${ap.signal} dBm"><span class="uplink-bars" aria-hidden="true">${bars}</span><span class="uplink-dbm">${ap.signal} dBm</span></span>
+    <span class="uplink-detail">${ap.security !== 'open' ? '<span aria-hidden="true">&#128274;</span> ' : ''}${security} · ${uplinkBand(ap)} · Channel ${ap.channel}</span>
+    ${dfs ? `<span class="uplink-detail">${dfs}</span>` : ''}
+    ${!ap.selectable ? `<span class="uplink-detail">${esc(ap.reason || 'This network cannot be selected')}</span>` : ''}
+    </button>`;
+}
+
+function selectUplinkNetwork(index) {
+  if (uplinkBusy || !uplinkNetworks[index]?.selectable) return;
+  uplinkSelected = index;
+  document.getElementById('uplink-wifi-password').value = '';
+  updateUplinkControls();
+  document.getElementById('uplink-wifi-connect').scrollIntoView({block: 'nearest', behavior: 'smooth'});
+}
+
+async function scanWifiUplink() {
+  if (uplinkBusy) return;
+  const iface = document.getElementById('uplink-wifi-radio').value;
+  uplinkBusy = true;
+  updateUplinkControls();
+  const feedback = document.getElementById('uplink-wifi-feedback');
+  feedback.textContent = 'Checking this radio before scanning...';
+  try {
+    const check = await manageFetch(U('/api/uplink/wifi/scan-plan'), {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({iface})
+    });
+    const plan = await check.json();
+    if (!check.ok || !plan.ok) {
+      throw new Error(plan.error || `HTTP ${check.status}`);
+    }
+    if (plan.interrupts_ap && !confirm('Phones on this hotspot will '
+      + 'disconnect for about 15 seconds. Results will appear after '
+      + 'reconnecting. Scan now?')) {
+      feedback.textContent = 'Scan cancelled.';
+      return;
+    }
+    const previousId = uplinkStatus?.builtin?.scan?.at;
+    updateUplinkChoice(false);
+    uplinkScanId = previousId;
+    feedback.textContent = plan.interrupts_ap
+      ? 'Scanning. Reconnect to this hotspot to see the saved results.'
+      : 'Scanning for nearby networks...';
+    const recovered = new Promise(resolve => { uplinkScanResolve = resolve; });
+    const response = (async () => {
+      const r = await manageFetch(U('/api/uplink/wifi/scan'), {
+        method: 'POST', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({iface, allow_ap_stop: !!plan.interrupts_ap})
+      });
+      const d = await r.json();
+      if (!r.ok || !d.ok) throw new Error(d.error || `HTTP ${r.status}`);
+      return d;
+    })();
+    // A hotspot drop can leave fetch waiting after the scan has completed.
+    // The normal status poll can complete the UI from the saved observation.
+    const d = await Promise.race([response, recovered]);
+    if (document.getElementById('uplink-wifi-radio').value !== iface) return;
+    showUplinkScan(d, iface);
+  } catch (e) { feedback.textContent = uplinkError(e); }
+  finally {
+    uplinkScanResolve = null;
+    uplinkBusy = false;
+    await loadUsbWifiUplink();
+    updateUplinkControls();
+  }
+}
+
+function showUplinkScan(scan, iface) {
+  uplinkNetworks = groupUplinkNetworks(scan.networks || []);
+  uplinkScanIface = iface;
+  uplinkScanDevice = scan.iface;
+  uplinkScanId = scan.at;
+  uplinkScannedAt = Date.now() - (scan.age_seconds || 0) * 1000;
+  uplinkSelected = -1;
+  document.getElementById('uplink-wifi-password').value = '';
+  document.getElementById('uplink-wifi-results').innerHTML =
+    uplinkNetworks.map(uplinkNetworkMarkup).join('');
+  document.getElementById('uplink-wifi-warning').textContent =
+    scan.warning || '';
+  document.getElementById('uplink-wifi-feedback').textContent =
+    uplinkNetworks.length
+    ? `${uplinkNetworks.length} networks. Tap one to connect.`
+    : 'No networks found. Move closer to the router and scan again.';
+  renderUplinkCurrent();
+}
+
+function restoreUplinkScan() {
+  const scan = uplinkStatus?.builtin?.scan;
+  const iface = document.getElementById('uplink-wifi-radio').value;
+  if (!scan || scan.iface !== iface) return;
+  if (uplinkBusy) {
+    if (uplinkScanResolve && scan.at !== uplinkScanId) uplinkScanResolve(scan);
+    return;
+  }
+  if (scan.at !== uplinkScanId) showUplinkScan(scan, iface);
+  document.getElementById('uplink-wifi-warning').textContent =
+    scan.warning || '';
+}
+
+async function applyUsbWifiUplink(enabled=true) {
+  if (uplinkBusy) return;
+  const iface = document.getElementById('uplink-wifi-radio').value;
+  const ap = uplinkNetworks[uplinkSelected];
+  if (enabled && (!ap || !ap.selectable || !uplinkFresh())) {
+    document.getElementById('uplink-wifi-feedback').textContent = 'Scan this radio and choose a nearby network first.';
+    updateUplinkControls(); return;
+  }
+  const request = {iface, enabled};
+  if (enabled) Object.assign(request, {
+    ssid: ap.ssid, bssid: ap.bssid, freq: ap.freq, security: ap.security,
+    scan_iface: uplinkScanDevice,
+    password: ap.security === 'open' ? '' : document.getElementById('uplink-wifi-password').value
+  });
+  uplinkBusy = true;
+  updateUplinkControls();
   try {
     const r = await manageFetch(U('/api/uplink/wifi'), {
-      method: 'POST',
-      headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ssid, password, enabled: true})
+      method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(request)
     });
     const d = await r.json();
     if (!r.ok || !d.ok) throw new Error(d.error || `HTTP ${r.status}`);
-    showMsg(`USB Wi-Fi uplink saved for ${ssid}`, 'ok');
+    document.getElementById('uplink-wifi-password').value = '';
+    uplinkSelected = -1;
+    document.getElementById('uplink-wifi-feedback').textContent = enabled
+      ? 'Connection saved on this node. Joining the network may take a moment.' : 'Wi-Fi disconnected.';
     await loadUsbWifiUplink();
-    await fetchTopo();
-  } catch (e) {
-    showMsg('USB Wi-Fi uplink failed: ' + e.message, 'err');
-  } finally {
-    if (btn) { btn.disabled = false; btn.textContent = 'APPLY'; }
-  }
+  } catch (e) { document.getElementById('uplink-wifi-feedback').textContent = uplinkError(e); }
+  finally { uplinkBusy = false; updateUplinkControls(); }
 }
 
+// Measurements tab
 function updatePairs() {
   if (!_topo) return;
   const wrap = document.getElementById('pairs-grid');
@@ -2176,7 +2584,7 @@ async function loadSessions() {
   const d = await r.json();
   const list = document.getElementById('sessions-list');
   if (!d.length) {
-    list.innerHTML = '<div style="padding:16px;color:var(--muted);font-size:11px">No sessions recorded yet.</div>';
+    list.innerHTML = '<div style="padding:16px;color:var(--muted);font-size:var(--small-text)">No sessions recorded yet.</div>';
     return;
   }
   list.innerHTML = d.map(s => `
@@ -2185,10 +2593,10 @@ async function loadSessions() {
       <div class="session-count">${esc(s.tests)} test${s.tests !== 1 ? 's' : ''} · ${esc(s.summary?.ok || 0)} ok / ${esc(s.summary?.fail || 0)} fail</div>
       <div class="session-actions">
         <a href="${esc(U(`/api/sessions/${encodeURIComponent(s.label)}/csv`))}" download="${esc(s.label)}.csv"
-           class="btn" style="text-decoration:none;font-size:10px">CSV</a>
+           class="btn" style="text-decoration:none;font-size:var(--small-text)">CSV</a>
         <a href="${esc(U(`/api/sessions/${encodeURIComponent(s.label)}`))}" target="_blank"
-           class="btn" style="text-decoration:none;font-size:10px">JSON</a>
-        <button class="btn btn-red" style="font-size:10px" data-label="${esc(encodeURIComponent(s.label))}" data-action="delete-session">DELETE</button>
+           class="btn" style="text-decoration:none;font-size:var(--small-text)">JSON</a>
+        <button class="btn btn-red" style="font-size:var(--small-text)" data-label="${esc(encodeURIComponent(s.label))}" data-action="delete-session">DELETE</button>
       </div>
       <div class="session-summary">
         ${sessionMetric('TCP', s.summary?.tcp_mbps, ' Mbps')}
@@ -2243,6 +2651,9 @@ function handleManageClick(event) {
     case 'start-measurement': startMeasurement(); break;
     case 'delete-session': deleteSession(data.label); break;
     case 'apply-uplink': applyUsbWifiUplink(); break;
+    case 'scan-uplink': scanWifiUplink(); break;
+    case 'select-uplink': selectUplinkNetwork(Number(data.index)); break;
+    case 'disconnect-uplink': applyUsbWifiUplink(false); break;
     case 'voice-step': voiceStepChannel(Number(data.step)); break;
     case 'voice-codec': voiceSetCodec(data.codec); break;
     case 'stage-config': stageChanges(); break;
@@ -2263,6 +2674,8 @@ window.addEventListener('load', async () => {
   buildHalowConfig();
   const halowBw = document.getElementById('halow-bw');
   if (halowBw) halowBw.addEventListener('change', onHalowBandwidthChange);
+  document.getElementById('uplink-wifi-radio').addEventListener('change', updateUplinkChoice);
+  setInterval(() => { if (document.getElementById('tab-uplink').style.display !== 'none') loadUsbWifiUplink(); }, 5000);
   startAutoRefresh();
 });
 
@@ -2281,8 +2694,8 @@ document.addEventListener('visibilitychange', () => {
 
 VOICE_TAB_CSS = r"""
 .voice-wrap { padding: 20px 24px; display: grid; gap: 18px;
-              grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }
-.voice-card { border: 1px solid var(--border); background: var(--card, #fff); }
+              grid-template-columns: repeat(auto-fit, minmax(min(300px, 100%), 1fr)); }
+.voice-card { border: 1px solid var(--border); background: var(--card); }
 .voice-card-hdr { font-size: 11px; color: var(--muted); font-weight: 800;
                   padding: 10px 14px; border-bottom: 1px solid var(--border); }
 .voice-card-body { padding: 14px; }
@@ -2300,7 +2713,7 @@ VOICE_TAB_CSS = r"""
 /* The PTT indicator is the one thing an operator glances at, so it is big. */
 .voice-ptt { text-align: center; padding: 18px 0; }
 .voice-ptt-ring { width: 84px; height: 84px; border-radius: 50%; margin: 0 auto 10px;
-                  border: 3px solid var(--border); background: #f2f2f2; }
+                  border: 3px solid var(--border); background: var(--panel); }
 .voice-ptt.tx .voice-ptt-ring { border-color: #d9534f; background: #ffe9e8; }
 .voice-ptt.rx .voice-ptt-ring { border-color: #2f6fd0; background: #e8f0ff; }
 .voice-ptt-label { font-size: 12px; font-weight: 800; letter-spacing: .04em; }
@@ -2319,7 +2732,7 @@ VOICE_TAB_CSS = r"""
 .voice-tg-stepper { display: flex; align-items: center; justify-content: center;
                     gap: 18px; padding: 4px 0 14px; }
 .voice-tg-step { width: 56px; height: 56px; font-size: 28px; line-height: 1;
-                 border: 1px solid var(--border); background: var(--card, #fff);
+                 border: 1px solid var(--border); background: var(--card);
                  color: inherit; border-radius: 8px; cursor: pointer;
                  -webkit-tap-highlight-color: transparent; }
 .voice-tg-step:active { background: var(--border); }
@@ -2329,7 +2742,7 @@ VOICE_TAB_CSS = r"""
 .voice-tg-grid { display: grid; gap: 6px;
                  grid-template-columns: repeat(8, minmax(0, 1fr)); }
 .voice-tg-cell { height: 44px; font-size: 13px; border: 1px solid var(--border);
-                 background: var(--card, #fff); color: inherit; border-radius: 6px;
+                 background: var(--card); color: inherit; border-radius: 6px;
                  cursor: pointer; -webkit-tap-highlight-color: transparent;
                  font-variant-numeric: tabular-nums; }
 .voice-tg-cell.sel { background: #2f6f3e; border-color: #2f6f3e; color: #fff;
@@ -2350,6 +2763,17 @@ VOICE_TAB_CSS = r"""
 .voice-codec-opt.sel { background: #2f6f3e; border-color: #2f6f3e; color: #fff; }
 .voice-codec-opt.sel span { color: rgba(255,255,255,.85); }
 .voice-codec-opt:disabled { opacity: .45; cursor: default; }
+@media (max-width: 760px), (orientation:landscape) and (max-height:600px) {
+  .voice-wrap { padding: 0; }
+  .voice-card { min-width: 0; }
+  .voice-row { gap: 10px; flex-wrap: wrap; font-size: 16px; }
+  .voice-row .v { min-width: 0; overflow-wrap: anywhere; }
+  .voice-card-hdr { font-size: 16px; }
+  .voice-note, .voice-empty, .voice-tg-msg, .voice-codec-opt span,
+  .voice-peers th, .voice-peers td { font-size: 14px; }
+  .voice-tg-cell { min-width: 44px; font-size: 16px; }
+  .voice-tg-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+}
 @media (max-width: 420px) {
   .voice-tg-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 }
@@ -2928,8 +3352,8 @@ CONFIG_TAB_CSS = r"""
 body { overflow-y: auto; }
 /* ── Admin layout ── */
 .admin-body { display: flex; gap: 0; height: calc(100vh - 34px); overflow: hidden; }
-.admin-form-col { flex: 1; overflow-y: auto; padding: 20px 24px; border-right: 1px solid var(--border); }
-.admin-status-col { width: 320px; flex-shrink: 0; overflow-y: auto; padding: 16px; background: #ffffff; }
+.admin-form-col { flex: 1; min-width: 0; overflow-y: auto; padding: 20px 24px; border-right: 1px solid var(--border); }
+.admin-status-col { width: 320px; flex-shrink: 0; overflow-y: auto; padding: 16px; background: var(--surface); }
 .admin-col-hdr { font-size: 11px; color: var(--muted); font-weight: 800; letter-spacing: 0; text-transform: none;
                  padding-bottom: 10px; border-bottom: 1px solid var(--border); margin-bottom: 14px; }
 /* Section styling */
@@ -2940,14 +3364,31 @@ body { overflow-y: auto; }
 .cfg-row label { flex: 0 0 180px; font-size: 11px; color: var(--muted); padding-top: 6px; }
 .cfg-row .hint { display: block; font-size: 9px; color: var(--muted); margin-top: 2px; }
 .cfg-row input[type=text], .cfg-row input[type=password], .cfg-row select {
-  flex: 1; background: #ffffff; border: 1px solid var(--border); border-radius: 8px;
+  flex: 1; min-width: 0; width: 100%; background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
   color: var(--text); font-family: var(--font); font-size: 12px;
   padding: 5px 8px; outline: none; }
 .cfg-row input:focus, .cfg-row select:focus { border-color: var(--accent); }
 .cfg-row input[type=checkbox] { width: 16px; height: 16px; margin-top: 6px; accent-color: var(--accent); }
 .cfg-readonly { flex: 1; font-size: 12px; color: var(--text); padding: 6px 0; }
+@media (max-width: 760px), (orientation:landscape) and (max-height:600px) {
+  .admin-body { flex-direction: column; height: auto; overflow: visible; }
+  .admin-form-col { min-width: 0; padding: 16px; border-right: 0; }
+  .admin-status-col { width: auto; min-width: 0; border-top: 1px solid var(--border); }
+  .cfg-row { flex-wrap: wrap; }
+  .cfg-row label { flex-basis: 100%; font-size: 16px; padding-top: 0; }
+  .cfg-row { gap: 6px; margin-bottom: 18px; }
+  .cfg-row .hint { font-size: 14px; line-height: 1.45; }
+  .cfg-row input[type=text], .cfg-row input[type=password], .cfg-row select {
+    flex: 1 0 100%; min-width: 0; width: 100%!important; max-width: 100%; min-height: 44px; font-size: 16px;
+  }
+  .cfg-row input[type=checkbox], #f-no-rollback {
+    width: 44px!important; height: 44px!important; margin: 0; flex-shrink: 0; accent-color: var(--info);
+  }
+  .cfg-readonly { font-size: 16px; overflow-wrap: anywhere; min-width: 0; }
+  .admin-actions { flex-wrap: wrap; }
+}
 /* Danger badge on dangerous fields */
-.danger-badge { font-size: 9px; font-weight: bold; color: var(--bad); background: #ef444415;
+.danger-badge { display: inline-block; font-size: 9px; font-weight: bold; color: var(--bad); background: #ef444415;
                 border: 1px solid #ef444430; border-radius: 2px; padding: 1px 5px;
                 margin-left: 6px; vertical-align: middle; letter-spacing: .5px; }
 /* Action buttons */
@@ -2973,17 +3414,17 @@ body { overflow-y: auto; }
 .ack-table { width: 100%; border-collapse: collapse; }
 .ack-table th { font-size: 9px; color: var(--muted); text-align: left; padding: 4px 6px;
                 letter-spacing: .8px; text-transform: uppercase; border-bottom: 1px solid var(--border); }
-.ack-table td { font-size: 11px; padding: 6px; border-bottom: 1px solid #edf0f4; }
+.ack-table td { font-size: 11px; padding: 6px; border-bottom: 1px solid var(--border2); }
 .ack-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 5px; }
 .ack-dot-yes  { background: var(--good); }
 .ack-dot-no   { background: var(--muted); }
-.ack-dot-self { background: var(--accent); }
+.ack-dot-self { background: var(--info); }
 /* Pending config info box */
-.pending-box { background: #f8fafc; border: 1px solid var(--border); border-radius: 8px;
+.pending-box { background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
                padding: 10px 12px; margin-bottom: 14px; }
 .pending-box.pending-active { border-color: #f59e0b40; background: #f59e0b08; }
 .pending-label { font-size: 9px; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; margin-bottom: 6px; }
-.pending-version { font-size: 12px; font-family: var(--font); font-weight: 800; color: var(--accent); }
+.pending-version { overflow-wrap: anywhere; font-size: 12px; font-family: var(--font); font-weight: 800; color: var(--info); }
 .pending-stat { font-size: 10px; color: var(--muted); margin-top: 4px; }
 .pending-stat span { color: var(--text); }
 /* Progress bar */
@@ -3006,6 +3447,19 @@ body { overflow-y: auto; }
 #cfg-toast.toast-ok   { border-color:#22c55e60; color:var(--good); }
 #cfg-toast.toast-err  { border-color:#ef444460; color:var(--bad); }
 #cfg-toast.toast-warn { border-color:#f9731660; color:var(--warn); }
+@media (max-width: 760px), (orientation:landscape) and (max-height:600px) {
+  .admin-col-hdr, .cfg-section-title { font-size: 16px; }
+  .cfg-btn { min-height: 44px; font-size: 16px; }
+  .cfg-row .danger-badge { font-size: 12px; }
+  .pending-label, .pending-stat, .modal-body, #cfg-toast { font-size: 14px; }
+  .pending-version, .modal-title { font-size: 16px; }
+  .ack-table { display: table; table-layout: fixed; }
+  .ack-table th, .ack-table td { font-size: 14px; padding: 8px 3px; overflow-wrap: anywhere; letter-spacing: 0; }
+  #cfg-force-modal { padding: 12px; }
+  .modal-box { width: 100%; max-height: calc(100dvh - 24px); overflow-y: auto; padding: 18px; }
+  .modal-actions { flex-wrap: wrap; }
+  #cfg-toast { left: 12px; right: 12px; overflow-wrap: anywhere; }
+}
 """
 
 CONFIG_TAB_HTML = r"""
@@ -3015,10 +3469,10 @@ CONFIG_TAB_HTML = r"""
 
       <div class="cfg-section">
         <div class="cfg-section-title">EUD / Client Connection</div>
-        <p class="cfg-section-note" style="font-size:10px;color:var(--muted);margin:0 0 10px;line-height:1.5">Applies on this node only. Mesh Network settings below still go to every radio.</p>
+        <p class="cfg-section-note" style="font-size:var(--small-text);color:var(--muted);margin:0 0 10px;line-height:1.5">Applies on this node only. Mesh Network settings below still go to every radio.</p>
 
         <div class="cfg-row">
-          <label>Connection Mode<span class="hint">How clients connect to this node</span></label>
+          <label for="f-eud">Connection Mode<span class="hint">How clients connect to this node</span></label>
           <select id="f-eud">
             <option value="wired">Wired (USB/Ethernet)</option>
             <option value="wireless">Wireless (5GHz AP)</option>
@@ -3026,11 +3480,11 @@ CONFIG_TAB_HTML = r"""
           </select>
         </div>
         <div class="cfg-row">
-          <label>AP SSID<span class="hint">WiFi network name for clients</span></label>
-          <input type="text" id="f-lan-ap-ssid">
+          <label>AP SSID<span class="hint">Set at flash; not changed from here</span></label>
+          <span id="f-lan-ap-ssid" class="cfg-readonly">-</span>
         </div>
         <div class="cfg-row">
-          <label>AP Password<span class="hint">Client WiFi password</span></label>
+          <label for="f-lan-ap-key">AP Password<span class="hint">Client WiFi password</span></label>
           <input type="password" id="f-lan-ap-key" autocomplete="new-password">
         </div>
         <div class="cfg-row">
@@ -3043,26 +3497,26 @@ CONFIG_TAB_HTML = r"""
         <div class="cfg-section-title">Mesh Network</div>
 
         <div class="cfg-row">
-          <label>Mesh SSID<span class="hint">BATMAN mesh network name
+          <label for="f-mesh-ssid">Mesh SSID<span class="hint">BATMAN mesh network name
             <span class="danger-badge">⚠ DANGEROUS</span></span></label>
           <input type="text" id="f-mesh-ssid">
         </div>
         <div class="cfg-row">
-          <label>Mesh SAE Key<span class="hint">WPA3-SAE passphrase
+          <label for="f-mesh-key">Mesh SAE Key<span class="hint">WPA3-SAE passphrase
             <span class="danger-badge">⚠ DANGEROUS</span></span></label>
           <input type="password" id="f-mesh-key" autocomplete="new-password">
         </div>
         <div class="cfg-row">
-          <label>IP Range (CIDR)<span class="hint">Mesh network address space
+          <label for="f-ipv4-network">IP Range (CIDR)<span class="hint">Mesh network address space
             <span class="danger-badge">⚠ DANGEROUS</span></span></label>
           <input type="text" id="f-ipv4-network">
         </div>
         <div class="cfg-row">
-          <label>Regulatory Domain<span class="hint">2-letter country code for RF. Takes effect when each radio reboots; switching between US and Europe also moves HaLow to that region's default channel</span></label>
+          <label for="f-regulatory-domain">Regulatory Domain<span class="hint">2-letter country code for RF. Takes effect when each radio reboots; switching between US and Europe also moves HaLow to that region's default channel</span></label>
           <input type="text" id="f-regulatory-domain" maxlength="2" style="width:48px;flex:none;">
         </div>
         <div class="cfg-row">
-          <label>Auto Channel<span class="hint">Scan and select best channel</span></label>
+          <label for="f-acs">Auto Channel<span class="hint">Scan and select best channel</span></label>
           <input type="checkbox" id="f-acs">
         </div>
       </div>
@@ -3071,15 +3525,15 @@ CONFIG_TAB_HTML = r"""
         <div class="cfg-section-title">Services</div>
 
         <div class="cfg-row">
-          <label>MediaMTX<span class="hint">RTSP/WebRTC streaming</span></label>
+          <label for="f-mtx">MediaMTX<span class="hint">RTSP/WebRTC streaming</span></label>
           <input type="checkbox" id="f-mtx">
         </div>
         <div class="cfg-row">
-          <label>Mumble<span class="hint">Voice communications</span></label>
+          <label for="f-mumble">Mumble<span class="hint">Voice communications</span></label>
           <input type="checkbox" id="f-mumble">
         </div>
         <div class="cfg-row">
-          <label>Auto Update<span class="hint">Automatic MANET tool updates</span></label>
+          <label for="f-auto-update">Auto Update<span class="hint">Automatic MANET tool updates</span></label>
           <input type="checkbox" id="f-auto-update">
         </div>
       </div>
@@ -3088,7 +3542,7 @@ CONFIG_TAB_HTML = r"""
         <div class="cfg-section-title">Security</div>
 
         <div class="cfg-row">
-          <label>Admin Password<span class="hint">This admin interface</span></label>
+          <label for="f-admin-password">Admin Password<span class="hint">This admin interface</span></label>
           <input type="password" id="f-admin-password" autocomplete="new-password">
         </div>
       </div>
@@ -3099,7 +3553,7 @@ CONFIG_TAB_HTML = r"""
         <button class="cfg-btn cfg-btn-force"  id="btn-force"  data-action="show-force" style="display:none">Force Apply</button>
         <button class="cfg-btn cfg-btn-cancel" id="btn-cancel" data-action="cancel-config" style="display:none">Cancel</button>
       </div>
-      <div id="action-msg" style="font-size:10px;color:var(--muted);margin-top:8px;min-height:14px;"></div>
+      <div id="action-msg" style="font-size:var(--small-text);color:var(--muted);margin-top:8px;min-height:14px;"></div>
     </div>
 
     <!-- ── Right: Deployment Status ── -->
@@ -3126,7 +3580,7 @@ CONFIG_TAB_HTML = r"""
       <!-- Dangerous change warning -->
       <div id="danger-warn" style="display:none;margin-top:14px;padding:10px;
            background:#ef444408;border:1px solid #ef444430;border-radius:3px;
-           font-size:10px;color:var(--bad);line-height:1.6;">
+           font-size:var(--small-text);color:var(--bad);line-height:1.6;">
         ⚠ Staged changes include <strong>DANGEROUS</strong> settings (mesh SSID, key, or IP range).
         All nodes will briefly disconnect while applying. Ensure 100% ACK before applying.
         <label style="display:flex;align-items:center;gap:6px;margin-top:8px;color:var(--muted);cursor:pointer">
@@ -3138,7 +3592,7 @@ CONFIG_TAB_HTML = r"""
       <!-- Rollback armed on this node -->
       <div id="rollback-box" style="display:none;margin-top:14px;padding:10px;
            background:#f59e0b0d;border:1px solid #f59e0b40;border-radius:3px;
-           font-size:10px;color:var(--text);line-height:1.6;">
+           font-size:var(--small-text);color:var(--text);line-height:1.6;">
         <strong>Rollback armed</strong>
         <div id="rollback-detail" style="color:var(--muted);margin-top:4px"></div>
       </div>
@@ -3201,7 +3655,7 @@ async function refreshStatus() {
 // ── Populate form from current config ────────────────────────────────────────
 function populateForm(cfg) {
   setVal('f-eud',              cfg.eud              || 'wired');
-  setVal('f-lan-ap-ssid',      cfg.lan_ap_ssid      || '');
+  setText('f-lan-ap-ssid',     cfg.ap_ssid          || 'Unavailable');
   setVal('f-lan-ap-key',       cfg.lan_ap_key        || '');
   setText('f-max-euds',        cfg.max_euds_per_node || '-');
   setVal('f-mesh-ssid',        cfg.mesh_ssid         || '');
@@ -3325,7 +3779,7 @@ function renderStatus(s) {
     const nameStyle = stale ? 'color:var(--muted)' : '';
     return `<tr>
       <td style="${nameStyle}">${esc(n.hostname)}</td>
-      <td style="color:var(--muted);font-size:10px">${esc(n.ip)}</td>
+      <td style="color:var(--muted);font-size:var(--small-text)">${esc(n.ip)}</td>
       <td><span class="ack-dot ${dotCls}"></span>${ackLabel}</td>
     </tr>`;
   }).join('');
@@ -3335,7 +3789,6 @@ function renderStatus(s) {
 function readForm() {
   return {
     eud:               getVal('f-eud'),
-    lan_ap_ssid:       getVal('f-lan-ap-ssid'),
     lan_ap_key:        getVal('f-lan-ap-key'),
     mesh_ssid:         getVal('f-mesh-ssid'),
     mesh_key:          getVal('f-mesh-key'),
@@ -3499,14 +3952,14 @@ def render_dashboard(nonce=None):
 </div>
 
 <div id="page">
-<div id="nav">
-  <div class="tab active" data-tab="topology" data-action="show-tab">TOPOLOGY</div>
-  <div class="tab"        data-tab="radio"    data-action="show-tab">RADIO CONFIG</div>
-  <div class="tab"        data-tab="measure"    data-action="show-tab">MEASURE</div>
-  <div class="tab"        data-tab="sessions"   data-action="show-tab">SESSIONS</div>
-  <div class="tab"        data-tab="uplink"     data-action="show-tab">UPLINK</div>
-  <div class="tab"        data-tab="voice"      data-action="show-tab">VOICE</div>
-  <div class="tab"        data-tab="config"     data-action="show-tab">NODE CONFIG</div>
+<div id="nav" role="tablist" aria-label="Management sections">
+  <button type="button" role="tab" id="nav-topology" class="tab active" data-tab="topology" data-action="show-tab" aria-controls="tab-topology" aria-selected="true" tabindex="0">TOPOLOGY</button>
+  <button type="button" role="tab" id="nav-radio" class="tab" data-tab="radio" data-action="show-tab" aria-controls="tab-radio" aria-selected="false" tabindex="-1">RADIO CONFIG</button>
+  <button type="button" role="tab" id="nav-measure" class="tab" data-tab="measure" data-action="show-tab" aria-controls="tab-measure" aria-selected="false" tabindex="-1">MEASURE</button>
+  <button type="button" role="tab" id="nav-sessions" class="tab" data-tab="sessions" data-action="show-tab" aria-controls="tab-sessions" aria-selected="false" tabindex="-1">SESSIONS</button>
+  <button type="button" role="tab" id="nav-uplink" class="tab" data-tab="uplink" data-action="show-tab" aria-controls="tab-uplink" aria-selected="false" tabindex="-1">UPLINK</button>
+  <button type="button" role="tab" id="nav-voice" class="tab" data-tab="voice" data-action="show-tab" aria-controls="tab-voice" aria-selected="false" tabindex="-1">VOICE</button>
+  <button type="button" role="tab" id="nav-config" class="tab" data-tab="config" data-action="show-tab" aria-controls="tab-config" aria-selected="false" tabindex="-1">NODE CONFIG</button>
 </div>
 
 <div id="content">
@@ -3514,17 +3967,17 @@ def render_dashboard(nonce=None):
   <details class="card"><summary id="recovery-summary" style="cursor:pointer">Mesh recovery</summary><div id="recovery-status"></div></details>
 
   <!-- ── TOPOLOGY ── -->
-  <div id="tab-topology" class="tab-pane">
+  <div id="tab-topology" class="tab-pane" role="tabpanel" aria-labelledby="nav-topology" tabindex="0">
     <div class="card">
       <div class="card-title">Mesh Nodes</div>
       <div class="node-grid" id="node-grid">
-        <div style="padding:20px;color:var(--muted);font-size:11px">Loading topology...</div>
+        <div style="padding:20px;color:var(--muted);font-size:var(--small-text)">Loading topology...</div>
       </div>
     </div>
   </div>
 
   <!-- ── RADIO CONFIG ── -->
-  <div id="tab-radio" class="tab-pane" style="display:none">
+  <div id="tab-radio" class="tab-pane" role="tabpanel" aria-labelledby="nav-radio" tabindex="0" style="display:none">
     <div class="card">
       <div class="card-title">Global Actions</div>
       <div class="global-bar" id="global-bar">
@@ -3618,7 +4071,7 @@ def render_dashboard(nonce=None):
   </div>
 
   <!-- ── MEASURE ── -->
-  <div id="tab-measure" class="tab-pane" style="display:none">
+  <div id="tab-measure" class="tab-pane" role="tabpanel" aria-labelledby="nav-measure" tabindex="0" style="display:none">
     <div class="card">
       <div class="card-title">Session Label</div>
       <div class="row">
@@ -3627,9 +4080,9 @@ def render_dashboard(nonce=None):
       </div>
     </div>
     <div class="card">
-      <div class="card-title">Test Pairs &nbsp;<span style="color:var(--muted);font-size:10px">Select source → destination</span></div>
+      <div class="card-title">Test Pairs &nbsp;<span style="color:var(--muted);font-size:var(--small-text)">Select source → destination</span></div>
       <div class="pairs-grid" id="pairs-grid">
-        <div style="padding:12px;color:var(--muted);font-size:11px">Loading nodes...</div>
+        <div style="padding:12px;color:var(--muted);font-size:var(--small-text)">Loading nodes...</div>
       </div>
     </div>
     <div class="card">
@@ -3649,7 +4102,7 @@ def render_dashboard(nonce=None):
       <div class="row">
         <span class="row-label">Duration</span>
         <input type="number" id="duration" value="30" min="5" max="300" style="width:80px">
-        <span style="font-size:11px;color:var(--muted)">seconds</span>
+        <span style="font-size:var(--small-text);color:var(--muted)">seconds</span>
       </div>
       <div class="row">
         <span class="row-label">UDP Bitrate</span>
@@ -3677,44 +4130,67 @@ def render_dashboard(nonce=None):
   </div>
 
   <!-- ── SESSIONS ── -->
-  <div id="tab-sessions" class="tab-pane" style="display:none">
+  <div id="tab-sessions" class="tab-pane" role="tabpanel" aria-labelledby="nav-sessions" tabindex="0" style="display:none">
     <div class="card">
       <div class="card-title">Saved Sessions</div>
       <div id="sessions-list">
-        <div style="padding:16px;color:var(--muted);font-size:11px">Loading...</div>
+        <div style="padding:16px;color:var(--muted);font-size:var(--small-text)">Loading...</div>
       </div>
     </div>
   </div>
 
-  <!-- ── UPLOAD ── -->
-  <div id="tab-uplink" class="tab-pane" style="display:none">
+  <!-- Wi-Fi internet connection -->
+  <div id="tab-uplink" class="tab-pane" role="tabpanel" aria-labelledby="nav-uplink" tabindex="0" style="display:none">
     <div class="card">
-      <div class="card-title">USB Wi-Fi Internet Uplink</div>
-      <div class="row">
-        <span class="row-label">SSID</span>
-        <input type="text" id="uplink-wifi-ssid" value="hotspot" style="width:260px">
-      </div>
-      <div class="row">
-        <span class="row-label">Password</span>
-        <input type="password" id="uplink-wifi-password" value="raspberry" autocomplete="new-password" style="width:260px">
-      </div>
-      <div class="row">
-        <span class="row-label">Status</span>
-        <span id="uplink-wifi-status" style="font-size:11px;color:var(--muted)">Loading...</span>
-      </div>
-      <div class="row">
-        <span class="row-label"></span>
-        <button class="btn btn-green" id="btn-uplink-wifi-apply" data-action="apply-uplink">APPLY</button>
+      <div class="card-title">Wi-Fi internet (this node)</div>
+      <div class="uplink-body">
+        <p id="uplink-wifi-intro">Choose a radio, scan, then tap the Wi-Fi
+        network you want to use for internet.
+        Its password is saved only on this node.</p>
+        <div class="uplink-toolbar">
+          <label for="uplink-wifi-radio">Radio</label>
+          <select id="uplink-wifi-radio"><option value="usb">USB Wi-Fi adapter</option></select>
+          <button class="btn" id="btn-uplink-wifi-scan" data-action="scan-uplink">SCAN</button>
+        </div>
+        <h3 id="uplink-wifi-heading">Nearby networks</h3>
+        <div id="uplink-wifi-networks" role="group" aria-labelledby="uplink-wifi-heading" tabindex="0">
+          <div id="uplink-wifi-current" hidden></div>
+          <div id="uplink-wifi-results"></div>
+        </div>
+        <p id="uplink-wifi-feedback" role="status" aria-live="polite">Scan to find nearby networks.</p>
+        <p id="uplink-wifi-age"></p>
+        <p id="uplink-wifi-warning" role="status" aria-live="polite"></p>
+        <div id="uplink-wifi-connect" hidden>
+          <p id="uplink-wifi-selected"></p>
+          <div id="uplink-wifi-password-row">
+            <label for="uplink-wifi-password">Password</label>
+            <input type="password" id="uplink-wifi-password" autocomplete="new-password" autocapitalize="none" spellcheck="false">
+          </div>
+          <button class="btn btn-green" id="btn-uplink-wifi-apply" data-action="apply-uplink" disabled>CONNECT</button>
+        </div>
+        <details class="uplink-help">
+          <summary>How this affects your connection</summary>
+          <p>The page asks before a scan needs to stop your phone hotspot.
+          A built-in radio used for internet stops carrying mesh traffic.
+          If your phone uses this node's Wi-Fi and you choose the 2.4 GHz
+          radio, only HaLow connects the other nodes.</p>
+          <p>With the 5 GHz radio, your phone hotspot shares the nearby
+          network's channel. On a radar channel (DFS), the hotspot may pause
+          or stay off. Keep access through a cable or another node.
+          A working internet cable takes priority over Wi-Fi.</p>
+        </details>
+        <p id="uplink-wifi-status" role="status">Checking connection...</p>
+        <button class="btn" id="btn-uplink-wifi-disconnect" data-action="disconnect-uplink">DISCONNECT</button>
       </div>
     </div>
   </div>
   <!-- ── VOICE ── -->
-  <div id="tab-voice" class="tab-pane" style="display:none">{VOICE_TAB_HTML}</div>
+  <div id="tab-voice" class="tab-pane" role="tabpanel" aria-labelledby="nav-voice" tabindex="0" style="display:none">{VOICE_TAB_HTML}</div>
 
   <!-- ── NODE CONFIG ── -->
   <!-- The old /admin page. Same staging/ACK/apply flow, now behind the same
        password as everything else here rather than open on port 80. -->
-  <div id="tab-config" class="tab-pane" style="display:none">
+  <div id="tab-config" class="tab-pane" role="tabpanel" aria-labelledby="nav-config" tabindex="0" style="display:none">
 {CONFIG_TAB_HTML}
   </div>
 
@@ -3802,7 +4278,7 @@ class ManageRoutes:
             self.send_json(measure_status_snapshot())
 
         elif path == '/api/uplink/wifi':
-            self.send_json(STATUS_CACHE.get('uplink', get_usb_wifi_uplink_status))
+            self.send_json(wifi_uplink_status())
 
         elif path == '/api/voice':
             try:
@@ -4021,17 +4497,25 @@ class ManageRoutes:
             except Exception as e:
                 self.send_json({'ok': False, 'error': str(e)})
 
+        elif path in ('/api/uplink/wifi/scan', '/api/uplink/wifi/scan-plan'):
+            try:
+                action = path.rsplit('/', 1)[1]
+                self.send_json(dict(builtin_wifi_request(
+                    action, json.loads(body)), ok=True))
+            except Exception as error:
+                self.send_json({'ok': False, 'error': str(error)})
+
         elif path == '/api/uplink/wifi':
             try:
                 req = json.loads(body)
-                result = apply_usb_wifi_uplink_all(
-                    req.get('ssid', 'hotspot'),
-                    req.get('password', 'raspberry'),
-                    bool(req.get('enabled', True)),
-                )
-                self.send_json(result)
-            except Exception as e:
-                self.send_json({'ok': False, 'error': str(e)})
+                if req.get('iface', 'usb') == 'usb':
+                    result = apply_usb_wifi_uplink(req.get('ssid', ''), req.get('password', ''),
+                                                   req.get('enabled', True), selection=req)
+                else:
+                    result = builtin_wifi_request('set', req)
+                self.send_json(dict(result, ok=True))
+            except Exception as error:
+                self.send_json({'ok': False, 'error': str(error)})
 
         else:
             self.send_response(404)

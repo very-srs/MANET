@@ -125,7 +125,7 @@ def resolver_config(root):
     """Publish only the promoted, live uplink; otherwise use public fallback."""
     iface = read_dns_text(root / 'run/upstream_iface').strip()
     fields, servers = ({}, [])
-    if (root / 'run/mesh-gateway.state').exists():
+    if (root / 'run/manet-uplink/mesh-gateway.state').exists():
         fields, servers = lease(root, iface)
     domains = []
     if servers:

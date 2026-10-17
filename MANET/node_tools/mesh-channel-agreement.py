@@ -320,6 +320,7 @@ class Runtime:
 
     def interfaces(self):
         """Return enabled Wi-Fi roles with config paths and configured MHz."""
+        from manet_wifi_uplink import uplink_owned
         desired = read_json(self.radio_state).get('desired', {})
         result = {}
         for band, role in [('2.4', 'mesh_24_if'), ('5', 'mesh_5_if')]:
@@ -327,7 +328,7 @@ class Runtime:
                 iface = (self.roles / role).read_text().strip()
             except FileNotFoundError:
                 continue
-            if not iface or desired.get(iface) == 'down':
+            if not iface or desired.get(iface) == 'down' or uplink_owned(iface, self.roles):
                 continue
             # Limit the role to a Linux interface name before using it in paths.
             if not re.fullmatch(r'[A-Za-z0-9_.-]{1,15}', iface):
@@ -353,6 +354,9 @@ class Runtime:
             iface = (self.roles / 'ap_interface').read_text().strip()
             band = (self.roles / 'ap_mesh_band').read_text().strip()
         except FileNotFoundError:
+            return None
+        from manet_wifi_uplink import uplink_owned
+        if uplink_owned(iface, self.roles):
             return None
         role = {'2.4': 'mesh_24_if', '5': 'mesh_5_if'}.get(band)
         if not role or not re.fullmatch(r'[A-Za-z0-9_.-]{1,15}', iface):

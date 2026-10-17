@@ -441,11 +441,23 @@ reboots. See [Mesh Configuration Push](#mesh-configuration-push).
 
 ## Web interface
 
-There is no unauthenticated route that changes anything. A set of
-`/api/control/*` handlers at the site root used to apply interface, TX power and
-channel changes locally, behind nothing but the subnet check, and were removed
-once every caller had moved to the Alfred-staged path; a local change and a
-mesh-wide one now take the same route through `manet_manage.py`.
+Public writes are limited to the local operator label and ATAK phone choices.
+They require a source address in this radio's DHCP pool, JSON content, a bounded
+request body, and matching Origin/Referer headers when supplied. No CORS access
+is granted. These are convenience actions on the trusted team network, not
+authenticated identity claims. Configuration and radio controls require an
+admin session. The former unauthenticated `/api/control/*` radio handlers were
+removed. Local and mesh-wide radio changes now use `manet_manage.py`.
+
+The public status form sends exactly `operator_name` to `/api/operator-name`.
+The handler validates the 32-byte label and writes only that key atomically to
+`mesh.conf`, preserving other settings. An empty value clears it. It shares
+the management write lock and expires the status cache, without applying AP
+settings, requiring synchronized time, or broadcasting mesh configuration.
+The label is shared by subsequent telemetry in static and both ACS paths.
+Anyone in the local client pool can replace it without an admin login.
+`test_operator_name.py` checks HTTP admission, persistence, clearing, config
+preservation, and rejection of other settings.
 
 **manet_web_sessions.py**
 
@@ -482,6 +494,25 @@ table uses textContent. Registry parsing bounds display names without
 restricting them to DNS labels. DNS publication has its own stricter policy.
 Measurements admit only a local source, record the actual executing hostname
 and IP, and require a received packet for ping success.
+
+Local EUD management HTML requested through `manet.local` is redirected to
+the configured internal EUD gateway before login. The redirect accepts only
+the shared name and a client in the local DHCP pool, verifies that the gateway
+immediately precedes that pool, uses the server's listening port and retains
+the local path/query. APIs, POST bodies, IP origins and loopback tunnels are
+not redirected. No token enters a URL or a peer session store. A changed
+phone MAC/lease does not revoke the token. Existing name-origin cookies do
+not migrate to the IP origin; a new login there is required. Reallocation of
+the node's EUD address requires reopening the name and logging in again.
+
+Android's resolver supports one-shot multicast `.local` lookup on devices
+with the November 2021 resolver update; older implementations use unicast
+DNS. See the [Android resolver documentation](https://source.android.com/docs/core/ota/modular-system/dns-resolver).
+The node publishes the same internal address through both mechanisms and
+isolates mDNS across bat0. A specific phone's actual lookup path requires a
+packet capture; DNS configuration alone cannot establish it. Pinning the
+management origin avoids another lookup after login without broadening the
+shared-password security model or cross-node session authority.
 
 **Browser content policy**
 
@@ -1974,7 +2005,7 @@ channel once both sides are talking again.
 
 ### Gateways in auto EUD mode
 
-With `acs=y` and `eud=auto`, the AP depends on `/var/run/mesh-gateway.state`.
+With `acs=y` and `eud=auto`, the AP depends on `/var/run/manet-uplink/mesh-gateway.state`.
 Reconciliation decides through `auto_eud_ap_wanted` in `manet-common.sh`.
 `prepare_ap`, hostapd's `ExecStartPre`, refuses every other start, so an AP
 left enabled by a former gateway cannot come up at boot. It checks after
@@ -2042,7 +2073,8 @@ renewals. Runtime per-link `resolvectl` settings are not used as ownership
 state, because networkd can republish its own settings on reconfiguration.
 
 The helper reads networkd's DHCPv4 lease for the carrier-bearing, unbridged
-`upstream_iface` only while `mesh-gateway.state` exists. It publishes up to
+`/run/upstream_iface` only while `/run/manet-uplink/mesh-gateway.state` exists.
+It publishes up to
 three plain IPv4 resolvers and sanitized search domains in
 `/run/systemd/resolved.conf.d/80-manet-uplink.conf`. Interface suffixes in
 global `DNS=` were silently ignored by Debian 13's systemd 257.13 on the
@@ -2740,7 +2772,303 @@ node with `tcpdump -Q in -nn -i bat0 'udp dst port 6969 and dst host 239.2.3.1'`
 the test marker is named `S12 TEST`, at 0/0, and expires after 60 seconds.
 Then collect the five-minute census with the real EUD workload.
 
+### Built-in Wi-Fi uplink ownership
+
+`manet_wifi_uplink.py` owns a local private JSON profile and a private recovery
+record. The admin routes use stdin for credentials. Both built-in and USB
+credentials now stay on the selected node. The coordinator and radio-state
+receiver reject `uplink_wifi` actions before publication or ACK. Mesh config
+journals already exclude `*-uplink.conf` and never acquire the client profile.
+
+Both scan paths discard the exact current local `lan_ap_ssid` plus `-` and
+four lowercase hex digits before cache storage and presentation. The same
+literal, case-sensitive rule rejects typed USB requests, fresh menu requests
+and direct built-in CLI requests. Old built-in caches are filtered on read.
+A different stem, uppercase suffix or wrong suffix length is outside the rule.
+This prevents a node from treating a same-named EUD bridge back into its own
+mesh as an internet path. It does not discover differently named peer hotspots.
+
+The built-in watcher writes disabled intent with the blocked name/interface
+before releasing the client, flushing its address and restoring AP/mesh roles.
+That intent survives cleanup errors and reboot, excludes rollback activation,
+and remains visible as a plain blocked-status reason until a new selection or
+explicit disconnect. USB retains its saved profile but stops and disables its
+service, removes client files and flushes the address. Its connect/reconcile
+path rejects the name before activation. Independently, gateway qualification
+rejects matching saved profiles before probing and disconnects an active USB
+match, so an old association cannot be promoted while cleanup is pending.
+
+The two generated networkd files and `wifi_uplink_if` are published with mode
+0644 on the temporary inode before atomic replacement. The profile, recovery
+record and uplink supplicant configuration use 0600 at that same boundary,
+including when an existing file has the wrong mode. Association without an
+IPv4 address reports `waiting-address`; `connected` requires an address and
+does not itself establish internet qualification.
+
+A transition takes the Wi-Fi operation lock, then the existing AP-role lock,
+then the channel-election lock. It records recovery state, withdraws only the
+selected physical interface from its mesh and band roles, stops its mesh
+supplicant, removes BATMAN membership and starts a managed client. A
+`05-wlanN-wifi-uplink.network` file takes precedence over the generated
+`30-wlanN.network`, enabling DHCP without bridging the upstream into br0.
+DNS remains qualified through the existing dispatcher. The persistent
+`wifi_uplink_if` marker also guards stale role lists and early boot restarts.
+The AP VIF is created after physical radio naming and deleted before setup
+rebuilds baseline roles. Both provisioners enable the watcher, radio setup
+reconciles saved ownership before its final radio restarts, and the updater
+requires and activates the new helper and units.
+
+The optional follower now exits when there is no enabled profile, reserved
+radio or pending scan repair. `manet-wifi-uplink.path` watches the private
+profile and scan-repair record and starts the service after changes. The
+boot-enabled service wants that path unit, and enabling it also enables the
+path. This keeps disabled nodes free of a resident watcher and periodic
+commands while still recovering a scan interrupted with no uplink selected.
+Blocked profiles finish their existing release/repair work before exiting.
+
+While enabled, `manet_wifi_events.py` multiplexes Linux event descriptors in
+one blocking selector, with no helper processes. It attaches directly to the
+selected supplicant's `/run/wpa_supplicant/wlanN` socket and the shared AP's
+`/run/hostapd/manetap` socket. Association, disassociation, channel switches,
+AP enable/disable and DFS events request a live reconcile. Scan-result and
+phone-association chatter do not. Rtnetlink link/address events cover radio
+removal, recreation and DHCP. Inotify watches profile, mesh policy, gateway,
+role and repair inputs, including atomic replacements. Identical content and
+the follower's own status writes do not trigger a reconcile loop.
+
+Client and hostapd start/stop-post hooks touch `client-event` and `ap-event`
+under `/run/manet-wifi-uplink/`. These cover a process killed without a
+terminating event or socket removal. The shared gateway marker lives at
+`/run/manet-uplink/mesh-gateway.state`, including its dispatcher writer, policy
+readers and DNS path trigger. Missing input and control-socket directories
+are created before inotify subscribes, without walking up to `/run`.
+Directory removal or replacement requests resubscription. Unrelated `/run`
+writes therefore do not wake the selector.
+Socket-directory creation and replacement cause reattachment. An ATTACH
+acknowledgement triggers another live read, closing the observation gap while
+subscribing. Reply sockets live in a private directory under
+`/run/manet-wifi-uplink/`. The lifecycle units preserve that runtime directory
+across stops, so they cannot erase another client's notifications or a pending
+`scan-repair.json` record. The watcher does not trust event MHz as authorization
+to start an AP.
+
+Busy locks, pending scan repair and unverified AP starts retry after three
+seconds. A non-DFS CSA acknowledgement still needs completion verification,
+with that same bounded retry if no event arrives. Upstream CSA-start defers
+follower attempts during the countdown until completion, with a three-second
+live check if completion is lost. Coalesced loss/reconnect events retain the
+loss across busy locks and clear the DFS failure latch. Normal upstream loss
+requests AP shutdown immediately on notification, before station reconnect.
+Existing command and lock timeouts still apply during a busy transition.
+
+Only an enabled profile has a 120-second safety reconcile and control-socket
+PING. This covers dropped notifications and silent control failures. The pass
+reads live association, address, allowed frequencies and AP state; it requests
+the dispatcher only if the policy tuple changes. Node-manager already runs
+gateway reconciliation at its 60-second interval, covering eventless internet
+reachability changes. Recovery from a missed radio event can grow from three
+seconds to 120 seconds. Normal event-driven moves have no polling delay.
+A timed-out control subscription backs off to the safety interval.
+
+The dispatcher and follower share the AP role lock. The lock prevents overlap,
+but association can still be pending after activation releases it. For
+`manetap`, only the follower starts hostapd after observing station MHz and
+writing the channel. The dispatcher waits for active hostapd before starting
+its DHCP and power helpers. This also avoids retrying a follower deliberately
+kept off after a DFS startup failure.
+
+For a 5 GHz upstream with Wi-Fi EUD, wlan1 remains the client. A virtual
+`manetap` becomes the AP role and hostapd's interface. The AP serves at 20 MHz
+on the upstream primary channel, with `ieee80211h=1`. AP preparation never
+changes the client's type or link state, and the AP-only PHY power cap is
+skipped. Auto EUD can stop this AP when Ethernet serves a client, but cannot
+reclaim the uplink PHY for mesh. Disconnect deletes the virtual interface,
+restores the physical AP identity and channel configuration, and preserves
+local AP password changes made while sharing.
+
+The virtual AP gets a locally administered unicast MAC at creation, derived
+from the PHY's permanent `phy80211/macaddress`. The low 40 bits advance past
+any address already used by another local interface, including br0 and bat0.
+The same PHY and local address set give the same AP address on recreation.
+An existing VIF with the wrong address is brought down before correction.
+
+Client release holds the channel lock and reads the existing static channel,
+valid ACS commitment or recovery anchor even while `manet-acs-busy` is active.
+It restores mesh roles and starts the mesh supplicant without initiating an
+agreement or deleting the busy marker. The agreement daemon reads the restored
+roles on its next locked pass. Ordinary AP-to-mesh transitions retain their
+busy guard so they can keep serving clients until agreement finishes.
+
+Association polling follows upstream channel changes every three seconds.
+For non-DFS changes, hostapd CSA is attempted first and read back on the next
+pass. An unchanged frequency causes an AP restart. A lost station association
+releases the AP's old channel context before requesting station reconnection.
+
+The optional [DFS follower patch](../kernel/patches/dfs-follow-ap/README.md)
+adds a paired kernel/hostapd mode for the shared HT20 AP. It is enabled by the
+read-only load-time `cfg80211.dfs_follow_ap_v1=1` option, restricted to
+`mt7915e`. The controller also requires the patched hostapd version before
+writing `dfs_follow_station=1`. `ieee80211h=1` remains set so hostapd 2.10
+admits radar channels. The explicit follower option bypasses its local DFS
+startup and requires a private START_AP flag, which the kernel validates
+under the wiphy lock. Merely setting `ieee80211h=0` would disable those
+channels in hostapd's channel list and does not bypass every DFS entry point.
+
+Admission retains cfg80211's ordinary BSS STA on the same channel or a
+subchannel of its chandef. It rejects unavailable/disabled channels, MLO and
+AP widths above 20 MHz. It does not require a regdb concurrent flag and does
+not alter regulatory flags or channel availability. mac80211 consequently
+sets `radar_required=false`, allowing station reconnect scans. No station
+disconnect or local CAC is part of follower startup. Normal AP starts without
+the explicit flag retain their original DFS handling.
+
+Private cfg80211 records track follower APs separately from DFS availability.
+Station BSS release stops a follower synchronously through `cfg80211_stop_ap`,
+without the ordinary regulatory check's 60-second grace. This also revokes
+an AP on a channel marked available. Upstream CSA start stops the follower
+and blocks restart during the countdown. Completion updates the station BSS
+and permits a new start on its live channel. The master's radar-driven CSA
+uses the same path. The hotspot restarts, so its clients must reconnect.
+The kernel action begins when it learns of the station event, not at the
+instant RF reception stops. Firmware behavior and latency need bench checks.
+
+Without both loaded kernel support and the paired hostapd, the watcher keeps
+the shared DFS hotspot off. The station retains its independent association,
+DHCP and gateway state, while `ap_blocked=dfs-upstream` and `ap_reason`
+explain hotspot loss. An old CAC/radar AP is stopped before reconnection.
+Every preparation reads live association, so stale watcher status cannot
+authorize an AP start. The kernel revalidates again when hostapd starts.
+Three unsuccessful follower starts or an unexpected CAC latch
+`ap_blocked=dfs-start-failed`. An observed disassociation or different channel
+clears that latch. Policy starts also honor it. There is no CAC retry loop.
+
+Scan restoration uses the same channel follower. Radar-unavailable channels
+stay blocked. The general AP watchdog retains its CAC handling for
+independent APs. PHY-reported DFS flags remain the source of truth, so testing
+this behavior requires a regulatory database with those flags present.
+Control clients bind their reply sockets in `/run`, which is visible across
+the management server's private `/tmp` namespace.
+
+Scanning holds the client and AP role locks. Live station MHz, hostapd's
+ENABLED state, matching AP MHz and the actual DFS follower mode determine
+whether a shared hotspot can stay up. A normal non-DFS shared AP and a
+supported DFS follower scan without a hostapd stop. `/api/uplink/wifi/scan-plan`
+preflights interruption. The browser asks before stopping a serving AP; the
+scan rechecks under the locks and refuses an unacknowledged interruption.
+
+`/run/manet-wifi-scan.json` is saved before restoration and exposed through
+status with BOOTTIME age and freshness. Reconnecting or reloading imports the
+last built-in scan, including its band, without extending its five-minute
+selection window. An unrecognised server reason is rendered using textContent.
+The current network stays at the top, and intro/help text gives way to the
+list on phones. An interrupted HTTP response does not discard observations.
+
+Mesh scans record live MHz, falling back to agreed/static selection, and
+update the supplicant file to that target before restarting. A private
+`/run/manet-wifi-uplink/scan-repair.json` records pending restoration before teardown.
+Failures attach a separate warning to the successful scan. The watcher retries
+under the same locks, honouring later role changes and channel-config updates.
+The dispatcher takes the same role lock nonblockingly around AP starts;
+its next pass retries if scanning or channel following owns it. Hostapd's
+prepare hook takes only the channel lock, so this does not invert lock order.
+Watch-loop lock contention leaves the connection status unchanged.
+
+WPA2 keys are derived locally, SSIDs are
+rendered as UTF-8 hex, and the client is pinned to the selected BSSID and band.
+All permitted frequencies in that band remain in its frequency list so the
+same upstream can change channel. Hidden SSIDs, enterprise authentication,
+invalid UTF-8 and control-byte scan names remain visible but cannot be selected.
+The parser decodes `iw` hex escapes once, preserving valid UTF-8, literal
+backslashes and edge spaces. The picker groups identical SSID bytes by band,
+security, DFS status and availability, keeping the strongest BSSID and
+displaying the connected group at the top. Different hidden BSSIDs stay separate.
+USB uses the same picker and parser through `scan-json`, with open/WPA2 client
+support and a separate private scan cache. Both paths validate selectable scan
+identity and the five-minute window before saving a menu selection. The USB
+client now pins that selection's BSSID. Legacy manual USB `set` remains usable.
+
+Registry telemetry uses the existing interface role string `uplink`, without
+publishing the upstream SSID or credentials. ACS role readers and channel
+agreement exclude the reserved radio even if stale band files reappear. The
+other radios continue participating in the same connected component's plan.
+Gateway announcement is capped at 1 Mbit/s down and up when HaLow exists but
+no conventional mesh interface is active in BATMAN. Lower upstream estimates
+are retained. This conservative capacity is not a measured S1G link rate.
+
+These paths have simulated transition and regression coverage. Concurrent
+MT7916 AP/client operation, scan completeness, DFS fail-safe/radar and upstream
+channel changes need hardware verification before enabling the feature in a
+published build.
+
 ### Gateway choice and uplink speed
+
+Local uplink selection belongs to `manet-uplink-dispatch.sh`. It excludes
+carrier-bearing wired EUD ports in `br0`, then ranks candidates by class:
+Ethernet, other supported USB uplinks, Wi-Fi clients. Ethernet uses
+`manet-uplink-speed.sh is-ethernet`, sharing its conservative phone/modem
+driver exclusions. The middle class keeps supported tether/cellular links
+ahead of Wi-Fi, the final fallback. This does not add support for non-USB
+cellular devices. Within each class, a stable ordering tries the saved
+promoted interface, current route, event interface, other defaults, `end0`
+and discovered interfaces. Carrier, address and the existing connectivity
+probe still gate every promotion. Bandwidth does not determine local class
+priority, so even an unknown Ethernet estimate outranks working Wi-Fi.
+
+A reconcile preempts Wi-Fi when Ethernet qualifies. A Wi-Fi event leaves
+working Ethernet in place. Loss tries other local uplinks in the same pass,
+without the mesh route manager's improvement timer. The Wi-Fi watcher calls
+this same reconcile when its policy tuple changes, including connection,
+address, channel or AP-policy changes discovered by its safety pass. A quiet
+120-second pass does not call the dispatcher. Node-manager's existing
+60-second gateway check handles eventless internet changes. The watcher neither
+installs defaults nor promotes Wi-Fi itself, and its gateway status requires
+the selected interface to match its client.
+The packaged `end0` unplug hook reconciles before interface cleanup while
+retaining the Ethernet lock. Detector-owned calls share that same lock.
+Ordinary dispatchers acquire Ethernet policy before their own lock, avoiding
+inversion with nested handoffs. A no-carrier event selects before demoting.
+An already-addressed fallback is probed and promoted while gateway state stays
+present. The remote route manager therefore cannot interpose a mesh default.
+An unaddressed standby is skipped on this loss pass. If no ready local path
+qualifies, demotion lets the mesh route manager provide the interim path.
+Stale off/degraded events with restored carrier do nothing.
+
+Ethernet detection uses the caller's explicit physical interface, with `end0`
+as the manual default. The selected upstream state never chooses a detection
+target. Wireless names, sysfs wireless devices and PHY-backed wireless targets
+are refused before sniffing, detaching or DHCP reconfiguration. Both the
+carrier hook and the udev/provisioning service pass `--iface end0`. A valid
+existing Ethernet lease triggers common reconciliation without a DHCP reset,
+including when Wi-Fi was previously selected.
+
+Promotion replaces the metric-100 route, removes the former interface's
+metric-100 default, and refreshes NAT, selected-interface state and DNS.
+Every normal promotion, including a steady-state refresh, announces explicit
+BATMAN bandwidth for the selected interface before its no-change shortcut.
+The speed cache is keyed by interface/address/router/carrier generation, so switching to Wi-Fi
+does not retain Ethernet's advertised rate. The HaLow-only cap still applies.
+`gateway-route-manager.sh` handles remote mesh gateways and defers to any
+qualified local uplink. It does not rank local Ethernet against Wi-Fi.
+
+Switches no longer stop dnsmasq. It follows resolved's upstream file, and
+reapplying an identical generated EUD configuration neither restarts DHCP nor
+deletes leases. Changed main configuration requires a restart because SIGHUP
+does not read it. Pool/gateway changes still invalidate leases. The old path
+ran Ethernet teardown and its IP/DHCP reconciliation before the separate
+promotion reconciliation, with an unconditional dnsmasq stop in between.
+Collapsing gateway ownership and preserving unchanged configuration removes
+that repeated service churn. Healthy ready-uplink failover should take the
+connectivity probe plus local forwarding work, usually a few seconds, while
+DHCP, failed probes and actual radio-role changes can add delay.
+
+NATed sessions cannot generally survive a different public source address.
+When the optional `conntrack` executable exists, switching to a different
+local uplink IPv4 or demoting deletes only IPv4 source-NAT entries with the
+old reply destination (`--src-nat --reply-dst OLD_IP`), bounded to two seconds.
+Equal addresses are skipped to avoid deleting the new path's mappings. This
+allows new mappings without flushing mesh/local flows. It does not synthesize
+TCP resets or promise fail-fast application recovery. See the
+[Netfilter command reference](https://www.netfilter.org/projects/conntrack-tools/conntrack-manpage.html).
 
 batman-adv picks a gateway itself (the `*` in `batctl gwl`), but that pick only
 steers its DHCP handling. Linux needs a default route, which is why this
@@ -2776,6 +3104,15 @@ does not prove that every internet application is reachable.
 
 `manet-uplink-speed.sh` separately estimates download bandwidth over HTTPS
 from Cloudflare's speed endpoint, falling back to a byte range from OVH.
+Promotion announces unknown Ethernet capacity immediately and queues the
+per-interface `manet-uplink-measure@.service` oneshot. Its `refresh` operation
+holds no Ethernet/dispatcher lock during the download. Before storing a result
+and again before announcing, it takes the Ethernet lock and compares the
+atomic promotion snapshot, including its generation, plus live interface,
+address, router and carrier generation. A stale result is discarded. Systemd
+coalesces overlapping starts for one interface and bounds each worker to 240
+seconds. A switch proceeds even when an old worker is downloading. If that
+worker outlives a new promotion, the next reconciliation retries measurement.
 Each request asks for at most 5 MB with a 15-second deadline. HTTP 200 from
 Cloudflare or 206 from OVH, with at least 250,000 bytes, supplies an estimate
 even if curl exits 28 at the deadline. Other errors remain unknown. The rate
@@ -2787,7 +3124,7 @@ No usable sample means unknown bandwidth, not failed connectivity. Unknown
 Ethernet advertises 1/0.2 Mbit/s, below the metered default of 10/2. This is a
 ranking fallback, not a measurement or lower bound. The 250 kB minimum filters
 tiny error responses and unstable short samples. A successful estimate is
-reused for the same interface/address/router tuple until demotion. Failed
+reused for the same interface/address/router/carrier-generation tuple until demotion. Failed
 estimates retain the 60-second boot-clock cooldown and retry on subsequent
 reconciliation, normally the node manager's three-minute status publish.
 This lets HTTPS measurement recover after NTS fixes a cold clock. Repeated
@@ -2854,8 +3191,8 @@ shell entry point, is the sole runtime owner of chrony's configuration and
 start/stop lifecycle. The manager, Ethernet detector and off hook no longer
 replace its config or stop it independently. This prevents a completing client
 attempt or departing Ethernet link from stopping a newly available GPS source.
-The active uplink dispatcher already records `mesh-gateway.state` and
-`upstream_iface`; the controller observes those files as well as carrier, so
+The active uplink dispatcher already records `/run/manet-uplink/mesh-gateway.state`
+and `/run/upstream_iface`; the controller observes those files as well as carrier, so
 both the active dispatcher and the legacy detector can trigger internet sync.
 
 Ethernet promotion now depends on plain HTTP connectivity, so HTTPS bandwidth
@@ -3079,6 +3416,15 @@ its claim while discovery proceeds.
 
 **encoder.py**
 
+Telemetry reads the optional `operator_name` from `--mesh-config` (normally
+`/etc/mesh.conf`) on every publication. It validates the local 32-byte label
+and writes the existing `atak_user` protobuf field. Missing, cleared or invalid
+labels produce an empty field. Static, ACS discovery and ACS data operation
+all use this encoder, so no manager restart or additional polling is needed.
+An explicit `--atak-user` retains its command-line override behavior, including
+an empty value. The name is presentation metadata, separate from ATAK phone
+identity and controller selection.
+
 Encodes this node's Alfred payloads to protobuf and Base64. Two subcommands:
 
 - `encoder.py identity`: hostname, secondary MACs, Syncthing ID, chunk, block size, IP.
@@ -3244,27 +3590,36 @@ retains a rollback snapshot for retry.
 **mesh_config.py**
 
 The one place that decides which settings are this node's own and which belong
-to the whole mesh. `LOCAL_KEYS` is `eud`, `lan_ap_ssid`, `lan_ap_key` and
-`max_euds_per_node`; `split_config()` partitions a submitted form into a local
-half and a mesh half, and `strip_local_keys()` is what keeps the local half off
-Alfred. The EUD AP is a node's own Wi-Fi for its own clients, and broadcasting
-it renamed every AP on the mesh.
+to the whole mesh. `LOCAL_KEYS` includes `eud`, `lan_ap_ssid`, `lan_ap_key`,
+`max_euds_per_node` and `operator_name`. `local_changes()` selects editable
+local fields and `strip_local_keys()` keeps all per-node fields off Alfred.
 
-`max_euds_per_node` is stripped with the others but excluded from
-`LOCAL_APPLY_KEYS`: it sizes the IPv4 chunk allocated at flash time, so the
-management UI shows it and never writes it. Shared by `mesh-config-sync.py`,
-`mesh-status.py` and `manet_manage.py`, so the receiving end and the submitting
-end cannot disagree about which half a key is in.
+`lan_ap_ssid` and `max_euds_per_node` are excluded from `LOCAL_APPLY_KEYS`.
+Both are set at flash time. Node config shows the full broadcast AP name
+read-only and keeps its password editable. The API validates changed fields
+before any local writes or mesh publication. A request to change the AP name
+fails with "AP SSID is set at flash and cannot be changed on this node".
+Unchanged provisioned values do not block unrelated edits. Local activation,
+the literal config writer and direct config apply also refuse AP-name edits.
+Received Alfred packages strip all local fields before staging.
 
-The form validates all changed fields before local writes or mesh publication;
-unchanged provisioned values do not block unrelated edits. Receivers use the
-same allowed keys, byte lengths, enums, and IPv4 allocation-capacity checks.
-`manet_eud_ap.py` preserves the `-xxxx` node suffix, so an AP base SSID may use
-at most 27 UTF-8 bytes. It writes mesh.conf and hostapd atomically per file,
-restarts hostapd, and restores both files if activation fails. Telemetry reads
-the actual configured broadcast SSID. Measurement session paths use a bounded
-label alphabet, reject dot/parent and symlink paths, and generate random result
-filenames; peer display names remain JSON data.
+`manet_eud_ap.py setup-ssid` freezes the full name in `/var/lib/manet-ap-ssid`
+at the start of radio setup, under its process lock and before other setup
+writes. It checks the flasher's base name plus the four lowercase hexadecimal
+digits from the node identity. The base may use at most 27 UTF-8 bytes.
+Retries and completed setup reruns must match that saved name. An existing
+node without the record uses its current hostapd SSID as the original name.
+A completed node without either record cannot choose a new name. Wired-only
+flashes that leave the AP name empty preserve that empty choice. This keeps
+setup from defeating the uplink filter by renaming a hotspot. A rejected
+rerun leaves radio files intact and asks the operator to restore the original
+`lan_ap_ssid` in mesh.conf.
+
+AP password activation writes mesh.conf and hostapd atomically per file,
+restarts a running hostapd, and restores both files if activation fails.
+Telemetry reads the actual configured broadcast SSID. Measurement session
+paths use a bounded label alphabet, reject dot/parent and symlink paths, and
+generate random result filenames. Peer display names remain JSON data.
 
 **manet_config_journal.py: local apply and rollback**
 
@@ -4320,7 +4675,7 @@ delivered over the air instead of needing a reflash.
 
 `carrier.d/50-ethernet-detect` is the canonical hook. The reference `carrier`
 delegates to it, and setup no longer overwrites it. The hook retains
-`ethernet-autodetect.sh --hotplug` for end0; other interfaces use
+`ethernet-autodetect.sh --hotplug --iface end0` for end0; other interfaces use
 `manet-uplink-dispatch.sh carrier`. The packaged Ethernet boot unit and setup
 use the same hotplug command. `off` is the same file in both places.
 
@@ -4563,8 +4918,8 @@ above. After its correction, patched warm and power-on boots on CM4 with
 driver b623a361 and WM 18a2e1d0 completed, and survival cleared the marker.
 
 The local `mt7916_background_rx=y|n` setting uses the same mesh.conf path
-watcher and early boot service. It defaults to `n` pending a product default
-decision. `y` writes `/etc/modprobe.d/manet-mt7916.conf` with
+watcher and early boot service. It currently defaults to `n` while the
+reservation fix awaits RF validation. `y` writes `/etc/modprobe.d/manet-mt7916.conf` with
 `options mt7915e background_radar_2t2r=1`, only when modinfo reports that
 parameter on the installed running-kernel module. The service runs before
 coldplug and never reloads a radio. `n`, unsupported modules, preparation
@@ -4582,3 +4937,11 @@ the presence of the live debugfs endpoint, not the requested config value,
 determines whether ACS can observe. An auto-disabled patched boot also suspends
 the reservation until explicit or hash-change rearm, allowing pinned-stock
 fallback without rewriting mesh.conf.
+
+The initial reservation left the main 5 GHz link unable to peer on two
+Rock 3A nodes. The kernel series now resolves selectable band 1 before
+uploading the EEPROM shadow and reduces the legacy OFDM TX-path count with
+the main-path count. This removes demonstrated host/firmware configuration
+inconsistencies, but restoring RF traffic still requires hardware validation.
+Keep the setting off outside the bench. Automatic runtime reservation and
+DFS activation remain separate work.

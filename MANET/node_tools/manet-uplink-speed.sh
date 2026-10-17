@@ -14,6 +14,9 @@ RUN_DIR="${MANET_RUN_DIR:-/run}"
 RESULT_FILE="$RUN_DIR/manet-uplink-speed"
 FAIL_FILE="$RUN_DIR/manet-uplink-speed.failed"
 LOCK_FILE="$RUN_DIR/manet-uplink-speed.lock"
+ETH_LOCK="${MANET_ETH_DETECT_LOCK:-$RUN_DIR/ethernet-autodetect.lock}"
+UPLINK_STATE="$RUN_DIR/manet-uplink.env"
+REFRESH_SNAPSHOT=""
 TEST_BYTES=5000000
 # Ignore tiny responses that cannot give a useful transfer-rate sample.
 MIN_TEST_BYTES=250000
@@ -50,12 +53,13 @@ is_ethernet() {
 
 # The uplink identity a result belongs to: interface, address and router.
 uplink_key() {
-    local iface="$1" ip gw
+    local iface="$1" ip gw generation
     # Use the first IPv4 CIDR address and first default-via router as cache
     # keys.
     ip=$(ip -4 -o addr show dev "$iface" 2>/dev/null | awk '{split($4, a, "/"); print a[1]; exit}')
     gw=$(ip -4 route show default dev "$iface" 2>/dev/null | awk '{print $3; exit}')
-    printf '%s\n' "$iface ${ip:-none} ${gw:-none}"
+    generation=$(cat "$SYS_NET/$iface/carrier_changes" 2>/dev/null || true)
+    printf '%s\n' "$iface ${ip:-none} ${gw:-none} ${generation:-unknown}"
 }
 
 # Print the first value for key $2 in the assignment file $1.
@@ -108,6 +112,13 @@ measure() {
     mbps=$(download "$iface" "https://speed.cloudflare.com/__down?bytes=$TEST_BYTES" 200) ||
         mbps=$(download "$iface" https://proof.ovh.net/files/10Mb.dat 206 \
                         -r "0-$((TEST_BYTES - 1))") || mbps=""
+    # A queued worker never publishes a result for a connection which changed
+    # during the download. Serialize result installation with promotion/loss.
+    if [ -n "$REFRESH_SNAPSHOT" ]; then
+        exec 9>"$ETH_LOCK"
+        flock -w 90 9 || return 1
+        uplink_refresh_matches "$iface" "$key" || return 1
+    fi
     if [ -z "$mbps" ]; then
         # Retries of the same unknown estimate stay quiet.
         if [ "$(field "$FAIL_FILE" KEY)" != "$key" ]; then
@@ -122,6 +133,34 @@ measure() {
         mv -f "$RESULT_FILE.tmp" "$RESULT_FILE"
     log "$iface downloads at $mbps Mbit/s"
     printf '%s\n' "$mbps"
+}
+
+# Check a worker's original connection under the shared Ethernet policy lock.
+uplink_refresh_matches() {
+    local iface="$1" key="$2"
+    [ -f "$RUN_DIR/manet-uplink/mesh-gateway.state" ] &&
+        [ "$(cat "$RUN_DIR/upstream_iface" 2>/dev/null)" = "$iface" ] &&
+        [ "$(cat "$SYS_NET/$iface/carrier" 2>/dev/null)" = 1 ] &&
+        [ "$(cat "$UPLINK_STATE" 2>/dev/null)" = "$REFRESH_SNAPSHOT" ] &&
+        [ "$(uplink_key "$iface")" = "$key" ]
+}
+
+# Measure outside policy locks, then announce only the still-selected uplink.
+# systemd coalesces concurrent starts of this per-interface oneshot.
+refresh_uplink_bandwidth() {
+    local iface="$1" key
+    is_ethernet "$iface" || return 0
+    REFRESH_SNAPSHOT=$(cat "$UPLINK_STATE" 2>/dev/null)
+    [ "$(field "$UPLINK_STATE" UPLINK_MODE)" = gateway ] &&
+        [ "$(field "$UPLINK_STATE" UPLINK_IFACE)" = "$iface" ] || return 0
+    key=$(uplink_key "$iface")
+    uplink_refresh_matches "$iface" "$key" || return 0
+    # The subshell releases the measurement lock before taking policy again.
+    ( measure "$iface" ) >/dev/null || true
+    exec 9>"$ETH_LOCK"
+    flock -w 90 9 || return 0
+    uplink_refresh_matches "$iface" "$key" || return 0
+    batctl gw_mode server "$(mesh_limited_bandwidth "$(bandwidth_arg "$iface")")"
 }
 
 # batctl requires whole numbers. Bare "server" retains the last value.
@@ -141,21 +180,45 @@ bandwidth_arg() {
     fi
 }
 
+# A gateway with only HaLow mesh attachment cannot deliver Ethernet rates.
+# Use a conservative 1 Mbit/s ceiling until a measured S1G capacity is available.
+mesh_limited_bandwidth() {
+    local value="$1" roles="${MANET_IFACE_STATE_DIR:-/var/lib}" iface standard=false
+    local members
+    [ -s "$roles/halow_if" ] || { printf '%s\n' "$value"; return; }
+    members=$(batctl if 2>/dev/null)
+    for iface in $(cat "$roles/mesh_if" 2>/dev/null); do
+        if printf '%s\n' "$members" | grep -q "^${iface}: active"; then
+            standard=true
+        fi
+    done
+    if [ "$standard" = true ]; then printf '%s\n' "$value"; return; fi
+    printf '%s\n' "$value" | awk -F'kbit/' '{
+        down=$1+0; up=$2+0;
+        if (down>1000) down=1000; if (up>1000) up=1000;
+        printf "%dkbit/%dkbit\n", down, up
+    }'
+}
+
 # Print the supported commands to stderr.
 usage() {
     printf '%s\n' \
-        'usage: manet-uplink-speed.sh {measure|announce|is-ethernet} IFACE' \
+        'usage: manet-uplink-speed.sh {measure|refresh|announce|is-ethernet} IFACE' \
         '       manet-uplink-speed.sh forget' >&2
 }
 
 case "${1:-}" in
+    refresh)
+        [ $# -eq 2 ] || { usage; exit 1; }
+        refresh_uplink_bandwidth "$2"
+        ;;
     measure)
         [ $# -eq 2 ] || { usage; exit 1; }
         measure "$2"
         ;;
     announce)
         [ $# -eq 2 ] || { usage; exit 1; }
-        batctl gw_mode server "$(bandwidth_arg "$2")"
+        batctl gw_mode server "$(mesh_limited_bandwidth "$(bandwidth_arg "$2")")"
         ;;
     forget)
         [ $# -eq 1 ] || { usage; exit 1; }

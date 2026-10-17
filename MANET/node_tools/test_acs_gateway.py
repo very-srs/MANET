@@ -46,7 +46,8 @@ class GatewayTourguideTests(halow.HaLowTourguideTests):
         (self.roles / 'halow_if').unlink()
         self.registry.write_text(node(OWN, 0) + node(PEER, 20, aliases=RADIO))
         (self.root / 'peers').write_text(json.dumps([{'orig_address': RADIO}]))
-        state = self.root / 'mesh-gateway.state'
+        state = self.root / 'manet-uplink/mesh-gateway.state'
+        state.parent.mkdir()
         state.touch()
         self.env['MANET_GATEWAY_STATE'] = str(state)
         result = self.run_tourguide()
@@ -161,7 +162,8 @@ class UnplugHookTests(unittest.TestCase):
             os.symlink('../br0', root / 'sys/class/net/usb1/master')
         (root / 'etc/mesh.conf').write_text(conf)
         (root / 'var/lib/ap_interface').write_text('wlan1\n')
-        (root / 'var/run/mesh-gateway.state').touch()
+        (root / 'var/run/manet-uplink').mkdir(parents=True, exist_ok=True)
+        (root / 'var/run/manet-uplink/mesh-gateway.state').touch()
         source = (acs.TOOLS.parent / 'networkd-dispatcher/off').read_text()
         source = re.sub(r'/(?:etc|run|var|sys|usr/local/bin)/', lambda m: str(root) + m[0], source)
         stubs = """
@@ -173,7 +175,7 @@ systemd-cat() { cat >/dev/null; }
         result = subprocess.run(['bash', '-c', stubs + source], capture_output=True, text=True,
                                 timeout=20, env=dict(os.environ, IFACE='end0'))
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual((root / 'var/run/mesh-gateway.state').exists(), usb_uplink)
+        self.assertEqual((root / 'var/run/manet-uplink/mesh-gateway.state').exists(), usb_uplink)
         return result.stdout
 
     def test_acs_returns_ap_radio_to_mesh_when_no_uplink_remains(self):
@@ -211,7 +213,8 @@ class PrepareApGuardTests(transitions.Harness):
     """hostapd's ExecStartPre enforces the gateway-only AP rule."""
     def setUp(self):
         super().setUp()
-        self.state = self.root / 'run' / 'mesh-gateway.state'
+        self.state = self.root / 'run' / 'manet-uplink/mesh-gateway.state'
+        self.state.parent.mkdir(exist_ok=True)
         env = patch.dict(os.environ, MANET_GATEWAY_STATE=str(self.state))
         env.start(); self.addCleanup(env.stop)
         self.write('mesh_5_if', IFACE)

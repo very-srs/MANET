@@ -51,6 +51,8 @@ def collect(sysnet=Path('/sys/class/net'), no_mesh=Path('/var/lib/no_mesh_if')):
     except OSError:
         excluded = set()
     mastered = {row.get('ifname') for row in raw if row.get('master') == 'bat0'}
+    from manet_wifi_uplink import uplink_owner
+    owner = uplink_owner(no_mesh.parent)
     result = []
     for row in raw:
         name = row.get('ifname')
@@ -68,7 +70,9 @@ def collect(sysnet=Path('/sys/class/net'), no_mesh=Path('/var/lib/no_mesh_if')):
             from manet_radio import get_halow_driver_info
             iw.update(get_halow_driver_info(name))
         role = 'other'
-        if name in bat or (name not in excluded and iw.get('type') != 'AP' and name not in mastered):
+        if name == owner:
+            role = 'uplink'
+        elif name in bat or (name not in excluded and iw.get('type') != 'AP' and name not in mastered):
             role = 'mesh'
         elif iw.get('type') == 'AP' or name in excluded:
             role = 'ap'

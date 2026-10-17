@@ -10,12 +10,20 @@
 2. **Open [the status page](http://manet.local/).** Look for your friends' radios there.
 3. **Tap a radio.** See its connections and details.
 
+Turn your phone sideways to see the map beside the radios. Upright works too.
+If the page says the connection was lost, it is showing the last status it
+received. Check your connection to the radio.
+
 A radio being on does not mean it can hear the others. A line on the map does not promise a particular download speed.
+
+An **Operator** name beside a radio tells you who it is labelled for.
+Type your name in **Your operator name** and press **Save**. You do not need
+the admin password. Clear it and save when you hand the radio to someone else.
 
 ATAK phones share this radio's position. Under **ATAK PHONES**, choose which
 phone sets the group's location. You do not need the admin password.
 
-Need to change radio settings? Open [Manage](http://manet.local/manage/) and ask an adult for help with the admin password.
+Need to change radio settings? Open [Manage](http://manet.local/manage/) and ask an adult for help with the admin password. Its address may turn into numbers so your phone stays with this radio.
 
 ## User
 
@@ -23,9 +31,30 @@ Need to change radio settings? Open [Manage](http://manet.local/manage/) and ask
 
 Connect your phone or computer to the radio you want to inspect, then open **[http://manet.local/](http://manet.local/)**. The status page needs no password and refreshes about every 15 seconds while visible. If the name does not resolve, use that radio's local IP address (your device's default gateway). See [device connections](connect.md) if you cannot reach it.
 
+Use landscape on a phone to see the topology and node list side by side.
+Management puts its sections down the left edge. Portrait stacks the status
+panels and puts the management sections above the content. Tap a node's name
+row to expand or collapse its details; controls inside the details stay open.
+If a refresh fails, a notice says the displayed status is from the last
+successful update. It clears automatically when the radio responds again.
+
+When your phone opens **Manage**, the address changes from `manet.local` to
+this radio's own IP address before you sign in. Keep that page open through
+a hotspot reconnect. If the radio receives a new address allocation, reopen
+`manet.local` and sign in again. The Uplink list recovers saved built-in scans
+after reconnecting and shows their age; a scan older than five minutes needs
+a rescan before connecting.
+
 The topology shows the mesh as seen by this radio. The links are logical connections. They do not indicate physical distance or direction. Expand a node to inspect its addresses, uptime, radio interfaces, attached devices, and hosted services. GPS and battery information appear when available. This radio's own panel also shows its installed MANET version. Include it when reporting a problem. Check which interface carries a route: a peer may still be reachable through HaLow even when its Wi-Fi link is absent.
 
 ![The MANET status dashboard showing mesh topology and the node list.](../../images/webui/status-topology.png)
+
+Radio entries can show an **Operator** name alongside their hostname. Set or
+clear your radio's label in **Your operator name** at the top of this public
+page, then press **Save**. No admin password is needed. Anyone connected to
+this radio can replace the label when it changes hands. It works with static
+and automatic channels. The label is manually assigned to the radio, so it
+does not prove who is connected or controlling location.
 
 ### Choose the ATAK controlling phone
 
@@ -53,7 +82,7 @@ Open **[Manage](http://manet.local/manage/)** and sign in with the admin passwor
 | Radio config | Radio interfaces on/off, supported channel controls, and Wi-Fi transmit power. |
 | Measure | Run iperf throughput or ping measurements. |
 | Sessions | Review and download saved measurement results. |
-| Uplink | Configure USB Wi-Fi internet uplink credentials. |
+| Uplink | Scan this node's USB or built-in Wi-Fi radio, tap a network in the scrolling list, then connect. The current network and its state appear at the top. Hotspots matching this radio's own hotspot naming pattern are omitted. |
 | Voice | Check audio health, choose a talk group, or coordinate a codec change. |
 | Node config | Change local client settings and shared mesh settings. |
 
@@ -75,6 +104,25 @@ chapters explain the corresponding status and management results.
 ## Developer
 
 ### Local radio status page
+
+CSS uses screen orientation and height for the landscape phone layout, while
+portrait keeps stacked panels. Public node disclosures are native buttons
+with `aria-expanded`; refresh restores focus to the same node disclosure.
+Management uses labelled tabs and panels, with arrow keys and Home/End for
+navigation. The portrait topology divider supports keyboard resizing between
+180 and 640 pixels. The public refresh notice retains the previous topology
+and clears only after `/api/data` succeeds. These presentation changes add no
+radio operations or polling requests.
+
+Public node rows and management topology cards display the local
+`operator_name` or a peer's registry `ATAK_USER`. The hostname remains visible.
+Names are escaped as text. Local edits are visible before the next telemetry
+publication, while peers retain the last received label until it is replaced.
+The public editor posts only `operator_name` to `/api/operator-name`. It admits
+clients in this radio's DHCP pool with bounded same-origin JSON, then saves
+the local label under the management write lock and invalidates cached status.
+Other configuration still requires an admin session. Polling preserves drafts,
+and an in-flight status response cannot overwrite a completed name save.
 
 `mesh-status.py` serves port 80 and includes the management handlers from
 `manet_manage.py`. Public read-only routes include `/api/data`, `/api/local`,
@@ -129,7 +177,7 @@ Status collections share a five-second cache, with two seconds for voice and con
 
 `manet_recovery_status.py` combines local ACS, last-channel-change, and time with the local registry. Observations older than 45 seconds are not treated as current recovery evidence. Display failures must not stop control or recovery.
 
-`manet_web_sessions.py` keeps token digests and monotonic 48-hour login deadlines in memory. Sessions are per node. Tests or tooling that restart the server must sign in again.
+`manet_web_sessions.py` keeps token digests and monotonic 48-hour login deadlines in memory. Sessions are per node. Local EUD HTML on `manet.local` redirects to the internal EUD IP before login; APIs and non-EUD clients retain their origin. Tokens are not transferred between nodes. Tests or tooling that restart the server must sign in again.
 
 Concurrent viewers share fixed cache keys, so opening more tabs does not
 create an independent radio-query workload for every request. Management

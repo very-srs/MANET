@@ -1,6 +1,6 @@
 #!/bin/bash
 TARGET_IFACE="end0"
-GATEWAY_STATE_FILE="/var/run/mesh-gateway.state"
+GATEWAY_STATE_FILE="/var/run/manet-uplink/mesh-gateway.state"
 NTP_STATE_FILE="/var/run/mesh-ntp.state"
 ETHERNET_STATE_FILE="/var/run/ethernet_detection_state"
 
@@ -38,7 +38,24 @@ if [ "${MANET_ETH_FORCE_CLEANUP:-0}" != 1 ]; then
     [ "$(cat /sys/class/net/end0/carrier 2>/dev/null)" != "1" ] || exit 0
 fi
 
-log "Cable unplugged from $IFACE - cleaning up all ethernet configurations..."
+log "Cable unplugged from $IFACE - selecting a surviving uplink before cleanup"
+
+# The dispatcher shares this Ethernet lock. It replaces forwarding while the
+# gateway marker is still present, so the mesh route manager cannot interpose
+# a remote gateway between two qualified local connections.
+RECONCILED=0
+if [ -x /usr/local/bin/manet-uplink-dispatch.sh ]; then
+    MANET_ETH_LOCK_HELD=1 MANET_UPLINK_LOST_IFACE="$IFACE" \
+        /usr/local/bin/manet-uplink-dispatch.sh no-carrier "$IFACE" && RECONCILED=1
+fi
+
+# Qualification can take time. A new cable arriving during it belongs to the
+# pending carrier event, and must not be flushed by this older loss event.
+if [ "${MANET_ETH_FORCE_CLEANUP:-0}" != 1 ] &&
+        [ "$(cat /sys/class/net/end0/carrier 2>/dev/null)" = 1 ]; then
+    log "Carrier returned during handoff; leaving end0 for the carrier event"
+    exit 0
+fi
 
 # Another live uplink, such as USB, keeps this node a gateway. Then only
 # end0's own configuration is cleaned up; gateway state, NAT and the AP stay.
@@ -50,8 +67,8 @@ if [ -n "$UPSTREAM" ] && [ "$UPSTREAM" != "$IFACE" ] &&
     log "Uplink $OTHER_UPLINK remains; keeping gateway state"
 fi
 
-# Stop all ethernet-related services
-systemctl stop dnsmasq.service 2>/dev/null
+# dnsmasq serves br0, not the uplink. Its resolver file follows qualified
+# DNS automatically, without a DHCP restart or loss of leases.
 
 # Flush all IPs from end0
 log "Flushing IP addresses from $IFACE"
@@ -73,8 +90,12 @@ cp /etc/systemd/network/10-end0.network.dhcp-default /etc/systemd/network/10-end
 networkctl reload 2>/dev/null || true
 networkctl reconfigure "$IFACE" 2>/dev/null || true
 
-# Remove dnsmasq wired-eud config
-rm -f /etc/dnsmasq.d/mesh-wired-eud.conf 2>/dev/null
+# The shared dispatcher already reconciled gateway and EUD service policy.
+# Only physical end0 cleanup remains in this hook.
+if [ "$RECONCILED" = 1 ]; then
+    log "Cleanup complete"
+    exit 0
+fi
 
 # If we were a gateway through this port, revert that too
 if [ -z "$OTHER_UPLINK" ] && [ -f "$GATEWAY_STATE_FILE" ]; then
