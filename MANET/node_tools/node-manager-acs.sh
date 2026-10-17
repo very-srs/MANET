@@ -607,9 +607,13 @@ perform_scan() {
         iface=${!role}
         if ! radio_iface_enabled "$iface"; then
             reset_home_monitor "$band"
+            [ "$band" != 5_0 ] || reconcile_rx_policy "$iface"
             continue
         fi
-        [ "$mode" != discovery ] || reset_home_monitor "$band"
+        if [ "$mode" = discovery ]; then
+            reset_home_monitor "$band"
+            [ "$band" != 5_0 ] || reconcile_rx_policy "$iface"
+        fi
         local freqs_to_scan=""
         [ "$iface" == "$WPA_IFACE_2_4" ] && freqs_to_scan=$SCAN_FREQS_2_4
         [ "$iface" == "$WPA_IFACE_5_0" ] && freqs_to_scan=$SCAN_FREQS_5_0
@@ -620,6 +624,7 @@ perform_scan() {
         # Reuse this snapshot for the home window and short-scan baseline.
         if ! pre_survey=$(iw dev "$iface" survey dump 2>/dev/null); then
             reset_home_monitor "$band"
+            [ "$band" != 5_0 ] || reconcile_rx_policy "$iface"
             scan_outcome "$iface" "survey unavailable"
             continue
         fi
@@ -641,6 +646,11 @@ perform_scan() {
         roc=false
         if [ "$mode" = data ]; then
             measure_home "$band" "$iface" "$scan_boot" "$home"
+            if [ "$band" = 5_0 ]; then
+                # Local trouble owns reservation. Peer trouble can request a
+                # scan but cannot reduce this node's receive path count.
+                reconcile_rx_policy "$iface" "${HOME_TROUBLE[$band]:-false}"
+            fi
             if [ "$candidate_busy" = true ] || [ -z "$home" ] ||
                { [ "${HOME_TROUBLE[$band]:-false}" != true ] &&
                  [[ " $peer_bands " != *"$band"* ]]; }; then

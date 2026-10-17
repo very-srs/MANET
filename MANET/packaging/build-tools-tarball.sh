@@ -19,7 +19,7 @@ set -euo pipefail
 # definitions, alfred, batctl, or S1G binaries. These are not archive limits.
 # Managed MT7916 firmware and the Wi-Fi mesh binaries are already carried.
 # Optional matched kernel inputs use MANET_KERNEL_BOARD and SBC_OVERLAY_DIR.
-# Activation requires a separately qualified local boot profile.
+# CM4 derives a local trial profile and defaults on, with an operator opt-out.
 # HaLow candidate binaries remain excluded from published payloads.
 #
 # Usage:
@@ -30,8 +30,9 @@ OUT="${1:-tools.tar.gz}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 STAGE="$(mktemp -d)"
+BOOTSTRAP_WORK=""
 
-cleanup() { rm -rf "$STAGE"; }
+cleanup() { rm -rf "$STAGE"; [ -z "$BOOTSTRAP_WORK" ] || rm -rf "$BOOTSTRAP_WORK"; }
 trap cleanup EXIT
 
 install_tree() {
@@ -147,6 +148,17 @@ ln -sf ../manet-mt7916-firmware-survived.service \
 . "$SCRIPT_DIR/lib-kernel-protection.sh"
 stage_kernel_protection "$STAGE" "$REPO_ROOT"
 
+. "$SCRIPT_DIR/lib-release-payload.sh"
+PACKAGE_BOARD="${MANET_PACKAGE_BOARD:-${MANET_KERNEL_BOARD:-}}"
+if [ -z "$PACKAGE_BOARD" ]; then
+    case "$(basename "$OUT")" in
+        cm4-*) PACKAGE_BOARD=cm4 ;;
+        r3a-*) PACKAGE_BOARD=r3a ;;
+        rpi5-*) PACKAGE_BOARD=rpi5 ;;
+    esac
+fi
+stage_release_payload "$STAGE" "$REPO_ROOT" "$PACKAGE_BOARD"
+
 # Kernel-less packages remain the default on every board.
 if [ -n "${MANET_KERNEL_BOARD:-}" ]; then
     KERNEL_OVERLAY="${SBC_OVERLAY_DIR:-$REPO_ROOT/kernel-work/packages/$MANET_KERNEL_BOARD-sbc-overlay}"
@@ -172,9 +184,25 @@ OUT_ABS="$(cd "$(dirname "$OUT")" && pwd)/$(basename "$OUT")"
 find "$STAGE" -type d -name __pycache__ -prune -exec rm -rf {} +
 
 find "$STAGE" ! -type l -exec chmod go-w {} +
+if [ "${MANET_LEGACY_BOOTSTRAP:-0}" = 1 ]; then
+    [ "${MANET_KERNEL_BOARD:-}" = cm4 ] || {
+        echo "The v0.569 bootstrap requires MANET_KERNEL_BOARD=cm4" >&2
+        exit 1
+    }
+    BOOTSTRAP_WORK="$(mktemp -d)"
+    INNER="$BOOTSTRAP_WORK/cm4-tools.tar.gz"
+    ( cd "$STAGE" && find . -mindepth 1 -maxdepth 1 -printf './%P\0' \
+        | tar --owner=0 --group=0 --numeric-owner --null -T - -czf "$INNER" )
+    python3 "$SCRIPT_DIR/stage-kernel-payload.py" --check-archive "$INNER"
+    python3 "$SCRIPT_DIR/stage-release-bootstrap.py" --archive "$INNER" --stage "$STAGE"
+    find "$STAGE" ! -type l -exec chmod go-w {} +
+fi
 ( cd "$STAGE" && find . -mindepth 1 -maxdepth 1 -printf './%P\0' \
     | tar --owner=0 --group=0 --numeric-owner --null -T - -czf "$OUT_ABS" )
 python3 "$SCRIPT_DIR/stage-kernel-payload.py" --check-archive "$OUT_ABS"
+if [ "${MANET_LEGACY_BOOTSTRAP:-0}" = 1 ]; then
+    python3 "$SCRIPT_DIR/stage-kernel-payload.py" --check-archive "$OUT_ABS" --legacy
+fi
 # Publish the checksum only after the archive has been written successfully.
 # Use the final basename so sha256sum -c works in the download directory.
 ( cd "$(dirname "$OUT_ABS")" && sha256sum -- "$(basename "$OUT_ABS")" ) > "$OUT_ABS.sha256.tmp"

@@ -172,6 +172,9 @@ ensure_static_channels() {
     STATIC_SETTLE=false
     if load_static_plan; then
         load_mesh_wpa_confs
+        # ACS trouble is cleared in static mode. Retain a live kernel hold,
+        # otherwise release its reservation when the transition is available.
+        reconcile_rx_policy "$WPA_IFACE_5_0"
         ensure_static_iface_channel "$WPA_IFACE_2_4" "$WPA_CONF_2_4" "$STATIC_FREQ_2_4" "2.4 GHz"
         ensure_static_iface_channel "$WPA_IFACE_5_0" "$WPA_CONF_5_0" "$STATIC_FREQ_5_0" "5 GHz"
     fi

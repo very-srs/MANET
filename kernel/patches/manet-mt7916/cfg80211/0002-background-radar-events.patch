@@ -1,0 +1,68 @@
+From 68b908b3c83b29442cc80266fc2146ca01d15dd1 Mon Sep 17 00:00:00 2001
+From: Janusz Dziedzic <janusz.dziedzic@gmail.com>
+Date: Fri, 6 Feb 2026 18:15:50 +0100
+Subject: [PATCH] wifi: cfg80211: events, report background radar
+
+In case we report radar event add also information
+this is connected with background one, so user mode
+application like hostapd, could check it and behave
+correctly.
+
+Signed-off-by: Janusz Dziedzic <janusz.dziedzic@gmail.com>
+Link: https://patch.msgid.link/20260206171830.553879-4-janusz.dziedzic@gmail.com
+Signed-off-by: Johannes Berg <johannes.berg@intel.com>
+---
+ net/wireless/mlme.c    | 6 ++++--
+ net/wireless/nl80211.c | 7 +++++++
+ 2 files changed, 11 insertions(+), 2 deletions(-)
+
+diff --git a/net/wireless/mlme.c b/net/wireless/mlme.c
+index 283ea4c7c61eb0..5cd86253a62ecb 100644
+--- a/net/wireless/mlme.c
++++ b/net/wireless/mlme.c
+@@ -1226,11 +1226,12 @@ void cfg80211_background_cac_done_wk(struct work_struct *work)
+ 	guard(wiphy)(&rdev->wiphy);
+ 
+ 	rdev_set_radar_background(rdev, NULL);
+-	rdev->background_radar_wdev = NULL;
+ 
+ 	__cfg80211_background_cac_event(rdev, rdev->background_radar_wdev,
+ 					&rdev->background_radar_chandef,
+ 					NL80211_RADAR_CAC_FINISHED);
++
++	rdev->background_radar_wdev = NULL;
+ }
+ 
+ void cfg80211_background_cac_abort_wk(struct work_struct *work)
+@@ -1330,11 +1331,12 @@ void cfg80211_stop_background_radar_detection(struct wireless_dev *wdev)
+ 		return;
+ 
+ 	rdev_set_radar_background(rdev, NULL);
+-	rdev->background_radar_wdev = NULL; /* Release offchain ownership */
+ 
+ 	__cfg80211_background_cac_event(rdev, wdev,
+ 					&rdev->background_radar_chandef,
+ 					NL80211_RADAR_CAC_ABORTED);
++
++	rdev->background_radar_wdev = NULL;
+ }
+ 
+ int cfg80211_assoc_ml_reconf(struct cfg80211_registered_device *rdev,
+diff --git a/net/wireless/nl80211.c b/net/wireless/nl80211.c
+index 7e288d3ce5aee5..b619f99c221efa 100644
+--- a/net/wireless/nl80211.c
++++ b/net/wireless/nl80211.c
+@@ -21229,6 +21229,13 @@ nl80211_radar_notify(struct cfg80211_registered_device *rdev,
+ 			goto nla_put_failure;
+ 	}
+ 
++	if (rdev->background_radar_wdev &&
++	    cfg80211_chandef_identical(&rdev->background_radar_chandef,
++				       chandef)) {
++		if (nla_put_flag(msg, NL80211_ATTR_RADAR_BACKGROUND))
++			goto nla_put_failure;
++	}
++
+ 	if (nla_put_u32(msg, NL80211_ATTR_RADAR_EVENT, event))
+ 		goto nla_put_failure;
+ 

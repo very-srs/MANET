@@ -16,7 +16,10 @@ The radio can find another route. It cannot invent one across a gap with no usab
 
 Radios keep listening to the channel they are using. If interference stays, they look for a better one.
 
-The extra 5 GHz listening mode is still being tested. Leave it off.
+A supported CM4 can use an extra listener while interference lasts. It gives
+that listener back when it is no longer needed. With the matching update,
+every radio checks a radar channel before the group uses it. If radar appears,
+they move to the backup channel they agreed on.
 
 A radio borrowing house Wi-Fi has fewer radios left to talk to its friends.
 
@@ -38,11 +41,24 @@ A healthy channel also stays put through short load swings. A better channel has
 
 Time synchronization is needed for scheduled channel decisions. A cold radio can recover contact before its clock is synchronized, but timed decisions wait until GPS or network time has been verified.
 
-Keep the optional background receiver disabled. A kernel fix lets normal
-5 GHz traffic and background listening work together, but the radio does not
-yet switch the receiver on and off by itself. While the receiver runs, the
-5 GHz radio listens with two antennas instead of three, so download speed
-over that link can drop by up to a third. The default remains off.
+The updated CM4 controller uses three receive paths normally. It reserves one
+for background listening while this radio has lasting interference, or while
+that receiver holds a cleared test channel. While using a radar channel, it
+keeps this receive configuration. After leaving it, the path returns when
+interference and receiver ownership both clear. Changes are at least a minute apart and wait if the receiver
+is busy. This needs the matched kernel and is limited to mesh mode. Rock 3A
+and RPi5 keep the feature off. Download speed can drop by up to a third while
+the extra listener is reserved.
+
+DFS channels are shared with radar. With the matching CM4 kernel and channel
+database, the mesh can choose one after every connected radio checks it and
+continues listening. They agree on a non-radar backup before moving. If radar
+appears, the detecting radio stops ordinary traffic and immediately switches
+to that backup. Other radios follow its channel announcement or the message
+carried through the remaining links. The mesh then avoids DFS for 30 minutes.
+Updating tools alone does not enable this. A connected radio without support
+keeps the whole group on non-radar channels. The complete update still needs
+its three-radio hardware acceptance test before publication.
 During testing, background readings taken while the radio transmits heavily
 are discarded because they can mistake its own traffic for interference.
 An uncertain reading is never treated as a clear channel.
@@ -109,21 +125,47 @@ scanning on that band. Reports from unreachable nodes cannot open it.
 
 With the gate open, 2.4 GHz visits each candidate once for 250 ms on its own
 channel and takes occupancy and noise from the survey counters, with no BSS
-scan. 5 GHz keeps its main-radio scan and short-sample warmup behind the same
+scan. 5 GHz uses the reserved third-chain observer when its ABI is present;
+otherwise it uses the main-radio scan and short-sample warmup behind the same
 gate, with BSS counts on both incumbent and candidates. With no measured
 alternative the channel holds without urgency. Once candidates arrive, a
 disqualified incumbent can move at once, bypassing the three-round hold-down.
 Lobby, tourguide and discovery scans are not gated. See
 [channel scoring](../../../docs/node-tools-internals.md#channel-scoring).
 
-The optional MT7916 third-chain observer remains a bench feature with
-`mt7916_background_rx=n` by default. The original reservation broke main-link
-peering on two Rock 3A nodes. The kernel fix finalizes the band-1 EEPROM
-selection before firmware upload and aligns the legacy OFDM path count with
-2T2R operation. A three-node 5180 MHz HT20 bench passed on both Rock 3A
-boards with the observer active: peers stay established, transmit holds 85
-to 114% of native and receive 66 to 104%. Runtime chain policy
-and DFS activation remain unimplemented. Quiet-channel captures with heavy
+`manet_rx_policy.py` reconciles local trouble and hold ownership under the
+observer lock. It reads the kernel's transition timestamp, preserves its
+60 second reversal limit, and defers EBUSY/EAGAIN without cancelling another
+owner. The default is native three-path receive operation. CM4 requests
+`rx_transition_probe` transitions only when available. The benched interface
+rejects AP/STA, scan/reset, non-HT20 and DFS main-channel operation. Rock 3A
+and RPi5 are excluded from this release policy.
+Static mode clears the local trouble request and retries release while still
+respecting a live hold and the transition interval.
+
+The schema-2 reader preserves kernel epochs across host restarts and checks
+the receiver heartbeat against boot time. The matched release adds a loaded
+driver capability and a token-bound transfer to main radar detection. Live
+PHY flags must identify DFS channels, and every connected participant must
+advertise support. Passive scoring selects a candidate and non-DFS runner-up.
+An authenticated preparation intention coordinates background CAC on all
+nodes. A completed CAC keeps its receiver live until the unanimous timed plan
+executes by mesh CSA, with HANDLE_DFS supplied by the host.
+
+The main RDD starts before the background detector is retired. cfg80211 keeps
+the channel AVAILABLE and preserves the token for later `main-radar` reports.
+The independent watcher issues a block-TX CSA to the agreed fallback before
+publishing over Alfred. Peers follow the first arriving CSA or authenticated
+report. Radar starts a 30-minute cooldown. Rescoring can refresh the fallback
+in a new unanimous plan. Peer loss alone never authorizes a DFS exit.
+The receiver stays reserved during DFS main operation because the benched
+path-count transition rejects radar channels. It can return to three paths
+after leaving DFS. See the [combined kernel series](../../../kernel/patches/manet-mt7916/README.md)
+for source tracing, the transfer API and the three-node acceptance script.
+Compilation and mocked tests do not establish RF sensitivity or evacuation
+latency. Those remain hardware acceptance measurements.
+
+Quiet-channel captures with heavy
 local TX showed positive bias in the observer correction. Candidate windows
 with at least 10% survey TX are now omitted. The limit preserves the observed
 low-TX controls and bounds amplification, but intermediate loads and the

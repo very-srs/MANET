@@ -1,0 +1,376 @@
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/bgscan.c b/drivers/net/wireless/mediatek/mt76/mt7915/bgscan.c
+--- a/drivers/net/wireless/mediatek/mt76/mt7915/bgscan.c
++++ b/drivers/net/wireless/mediatek/mt76/mt7915/bgscan.c
+@@ -380,8 +380,11 @@
+ 	dev->bg_scan.restore_error = 0;
+ }
+ 
++#include "hold-driver.inc"
++
+ void mt7915_bg_scan_init(struct mt7915_dev *dev)
+ {
++	INIT_DELAYED_WORK(&dev->hold.work, mt7915_hold_work);
+ 	INIT_DELAYED_WORK(&dev->bg_scan.work, mt7915_bg_scan_work);
+ }
+ 
+@@ -390,9 +393,11 @@
+ 	mutex_lock(&dev->mt76.mutex);
+ 	if (!dev->bg_scan.shutdown) {
+ 		dev->bg_scan.shutdown = true;
++		mt7915_hold_stop(dev);
+ 		mt7915_bg_scan_stop(dev, -ESHUTDOWN);
+ 	}
+ 	mutex_unlock(&dev->mt76.mutex);
++	cancel_delayed_work_sync(&dev->hold.work);
+ 	cancel_delayed_work_sync(&dev->bg_scan.work);
+ }
+ 
+@@ -662,3 +667,4 @@
+ 
+ MODULE_INFO(manet_observer, "third-chain-v1");
+ MODULE_INFO(manet_observer_probe, "0");
++MODULE_INFO(manet_cac_hold, "experimental-v2");
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/hold-api.h b/drivers/net/wireless/mediatek/mt76/mt7915/hold-api.h
+new file mode 100644
+--- /dev/null
++++ b/drivers/net/wireless/mediatek/mt76/mt7915/hold-api.h
+@@ -0,0 +1,27 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef __MANET_HOLD_API_V2_H
++#define __MANET_HOLD_API_V2_H
++
++/* Private paired-module API. No existing public structure is extended.
++ * Keep the copies in cfg80211 and mt7915 identical.
++ */
++#define MANET_HOLD_MAX_AGE_US 1500000ULL
++#define MANET_HOLD_POLL_MS 250
++struct manet_hold_token {
++	u64 epoch[2];
++	u64 generation;
++};
++
++struct manet_hold_sample {
++	u64 at_us, elapsed_us, sequence;
++	u64 tx_first_us, tx_last_us, tx_read_max_us;
++	u32 delta[12];
++	u32 sample_count, energy_permille, energy_upper_permille;
++	bool valid;
++};
++
++bool cfg80211_hold_token_v2(struct wiphy *wiphy, struct manet_hold_token *token);
++bool cfg80211_hold_sample_v2(struct wiphy *wiphy,
++			   const struct manet_hold_token *token,
++			   const struct manet_hold_sample *sample);
++#endif
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/hold-driver.inc b/drivers/net/wireless/mediatek/mt76/mt7915/hold-driver.inc
+new file mode 100644
+--- /dev/null
++++ b/drivers/net/wireless/mediatek/mt76/mt7915/hold-driver.inc
+@@ -0,0 +1,117 @@
++/* SPDX-License-Identifier: ISC */
++/* Read-only tap on the detector owned by cfg80211. No ext9A, RDD command,
++ * histogram reset, register write or receiver acquisition in this worker.
++ */
++/* Bench-only fault injection: suppress sampling, never keep a lease alive. */
++static bool mt7915_hold_pause;
++module_param_named(background_hold_pause, mt7915_hold_pause, bool, 0600);
++MODULE_PARM_DESC(background_hold_pause, "Pause experimental hold sampling to test expiry");
++
++void mt7915_hold_stop(struct mt7915_dev *dev)
++{
++	lockdep_assert_held(&dev->mt76.mutex);
++	dev->hold.active = false;
++	cancel_delayed_work(&dev->hold.work);
++}
++
++static void mt7915_hold_work(struct work_struct *work)
++{
++	struct mt7915_hold_monitor *hold = container_of(work,
++		struct mt7915_hold_monitor, work.work);
++	struct mt7915_dev *dev = container_of(hold, struct mt7915_dev, hold);
++	struct mt7915_bg_scan scan = { .threshold = 2 };
++	struct manet_hold_sample sample = {};
++	struct manet_hold_token token_now;
++	struct mt7915_phy *phy;
++	u64 start, at, tx, read_us;
++	int ret;
++
++	mutex_lock(&dev->mt76.mutex);
++	if (!hold->active)
++		goto out;
++	phy = hold->phy;
++	if (!mt7915_bg_scan_mcu_ready(dev) || dev->rdd2_phy != phy ||
++	    dev->bg_scan.dirty ||
++	    !test_bit(MT76_STATE_RUNNING, &phy->mt76->state) ||
++	    test_bit(MT76_SCANNING, &phy->mt76->state) ||
++	    !cfg80211_hold_token_v2(phy->mt76->hw->wiphy, &token_now) ||
++	    memcmp(&token_now, &hold->token, sizeof(token_now)))
++		goto abort;
++
++	if (READ_ONCE(mt7915_hold_pause))
++		goto reschedule;
++
++	/* The dedicated detector must remain enabled as well as sampling.
++	 * Counter cadence independently catches a frozen or disconnected bank.
++	 */
++	if (!(mt76_rr(dev, 0x831a5c00) & BIT(0)))
++		goto abort;
++	start = ktime_to_us(ktime_get_boottime());
++	ret = mt7915_mcu_get_chan_mib_info(phy, false);
++	if (ret)
++		goto abort;
++	tx = phy->mt76->chan_state->cc_tx;
++	mt7915_bg_read_bins(dev, &scan.last);
++	at = ktime_to_us(ktime_get_boottime());
++	read_us = at - start;
++	if (hold->at_us) {
++		scan.first = hold->previous;
++		scan.elapsed_us = at - hold->at_us;
++		/* A slow query cannot supply a recently running receiver proof. */
++		if (read_us >= MANET_HOLD_MAX_AGE_US ||
++		    scan.elapsed_us >= MANET_HOLD_MAX_AGE_US ||
++		    mt7915_bg_scan_calculate(&scan))
++			goto abort;
++		sample.at_us = at;
++		sample.elapsed_us = scan.elapsed_us;
++		sample.sequence = ++hold->sequence;
++		sample.tx_first_us = hold->tx_us;
++		sample.tx_last_us = tx;
++		sample.tx_read_max_us = max(read_us, hold->read_us);
++		memcpy(sample.delta, scan.delta.bins, sizeof(sample.delta));
++		sample.sample_count = scan.sample_count;
++		sample.energy_permille = scan.busy_permille;
++		sample.energy_upper_permille = scan.busy_raw_permille;
++		/* High local TX or slow MIB alignment invalidates occupancy,
++		 * without declaring a running receiver dead. Keep the raw data.
++		 */
++		sample.valid = tx >= hold->tx_us &&
++			tx - hold->tx_us < scan.elapsed_us * 9 / 10 &&
++			(tx - hold->tx_us) * scan.sample_count * 20 <=
++			scan.elapsed_us * ((u64)scan.delta.bins[10] * 20 + scan.sample_count) &&
++			sample.tx_read_max_us <= min_t(u64, 10000, scan.elapsed_us / 20);
++		if (!cfg80211_hold_sample_v2(phy->mt76->hw->wiphy,
++					    &hold->token, &sample))
++			goto abort;
++	}
++	hold->previous = scan.last;
++	hold->at_us = at;
++	hold->tx_us = tx;
++	hold->read_us = read_us;
++reschedule:
++	mod_delayed_work(system_wq, &hold->work,
++			 msecs_to_jiffies(MANET_HOLD_POLL_MS));
++	goto out;
++abort:
++	mt7915_hold_stop(dev);
++	cfg80211_background_cac_abort(phy->mt76->hw->wiphy);
++out:
++	mutex_unlock(&dev->mt76.mutex);
++}
++
++void mt7915_hold_start(struct mt7915_phy *phy)
++{
++	struct mt7915_dev *dev = phy->dev;
++	struct mt7915_hold_monitor *hold = &dev->hold;
++
++	lockdep_assert_held(&dev->mt76.mutex);
++	/* Ordinary background CAC with hold disabled keeps its old behavior. */
++	if (!cfg80211_hold_token_v2(phy->mt76->hw->wiphy, &hold->token))
++		return;
++	hold->phy = phy;
++	hold->at_us = 0;
++	hold->sequence = 0;
++	hold->active = true;
++	mod_delayed_work(system_wq, &hold->work,
++			 msecs_to_jiffies(MANET_HOLD_POLL_MS));
++}
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/init.c b/drivers/net/wireless/mediatek/mt76/mt7915/init.c
+--- a/drivers/net/wireless/mediatek/mt76/mt7915/init.c
++++ b/drivers/net/wireless/mediatek/mt76/mt7915/init.c
+@@ -334,6 +334,8 @@
+ 	struct mt76_phy *mphy = hw->priv;
+ 	struct mt7915_phy *phy = mphy->priv;
+ 
++	if (READ_ONCE(dev->rdd2_phy))
++		cfg80211_background_cac_abort(dev->rdd2_phy->mt76->hw->wiphy);
+ 	mutex_lock(&dev->mt76.mutex);
+ 	mt7915_bg_scan_stop(dev, -ECANCELED);
+ 	memcpy(dev->mt76.alpha2, request->alpha2, sizeof(dev->mt76.alpha2));
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/mac.c b/drivers/net/wireless/mediatek/mt76/mt7915/mac.c
+--- a/drivers/net/wireless/mediatek/mt76/mt7915/mac.c
++++ b/drivers/net/wireless/mediatek/mt76/mt7915/mac.c
+@@ -1597,8 +1597,12 @@
+ 	ext_phy = dev->mt76.phys[MT_BAND1];
+ 	phy2 = ext_phy ? ext_phy->priv : NULL;
+ 
++	if (READ_ONCE(dev->rdd2_phy))
++		cfg80211_background_cac_abort(dev->rdd2_phy->mt76->hw->wiphy);
++
+ 	/* A receiver retune interrupted by recovery needs a full reinit. */
+ 	mutex_lock(&dev->mt76.mutex);
++	mt7915_hold_stop(dev);
+ 	if (mt7915_bg_scan_reset(dev))
+ 		dev->recovery.restart = true;
+ 	mutex_unlock(&dev->mt76.mutex);
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/main.c b/drivers/net/wireless/mediatek/mt76/mt7915/main.c
+--- a/drivers/net/wireless/mediatek/mt76/mt7915/main.c
++++ b/drivers/net/wireless/mediatek/mt76/mt7915/main.c
+@@ -123,6 +123,8 @@
+ 		mt7915_bg_scan_stop(dev, -ECANCELED);
+ 	mt76_testmode_reset(phy->mt76, true);
+ 
++	if (dev->rdd2_phy == phy)
++		cfg80211_background_cac_abort(hw->wiphy);
+ 	clear_bit(MT76_STATE_RUNNING, &phy->mt76->state);
+ 
+ 	if (phy != &dev->phy) {
+@@ -296,6 +298,8 @@
+ 	struct mt7915_phy *phy = mt7915_hw_phy(hw);
+ 	int idx = msta->wcid.idx;
+ 
++	if (dev->rdd2_phy == phy)
++		cfg80211_background_cac_abort(hw->wiphy);
+ 	mt7915_mcu_add_bss_info(phy, vif, false);
+ 	mt7915_mcu_add_sta(dev, vif, NULL, CONN_STATE_DISCONNECT, false);
+ 	mt76_wcid_mask_clear(dev->mt76.wcid_mask, mvif->sta.wcid.idx);
+@@ -333,6 +337,10 @@
+ 	struct mt7915_phy *phy = mphy->priv;
+ 	struct mt7915_dev *dev = phy->dev;
+ 	int ret;
++
++	/* Prototype has no gap-free handoff. Revoke on any main retune. */
++	if (dev->rdd2_phy == phy)
++		cfg80211_background_cac_abort(mphy->hw->wiphy);
+ 
+ 	if (dev->bg_scan.phy == phy) {
+ 		ret = mt7915_bg_scan_stop(dev, -ECANCELED);
+@@ -1694,6 +1702,11 @@
+ 	bool running;
+ 
+ 	mutex_lock(&dev->mt76.mutex);
++	if (chandef && (!dev->background_rx_reserved ||
++	    phy->mt76->band_idx != MT_BAND1)) {
++		ret = -EOPNOTSUPP;
++		goto out;
++	}
+ 
+ 	if (dev->bg_scan.dirty && dev->bg_scan.borrowed)
+ 		mt7915_bg_scan_stop(dev, -ECANCELED);
+@@ -1703,7 +1716,7 @@
+ 		goto out;
+ 	}
+ 
+-	if (dev->mt76.region == NL80211_DFS_UNSET)
++	if (chandef && dev->mt76.region == NL80211_DFS_UNSET)
+ 		goto out;
+ 
+ 	if (dev->rdd2_phy && dev->rdd2_phy != phy) {
+@@ -1711,6 +1724,8 @@
+ 		ret = -EBUSY;
+ 		goto out;
+ 	}
++
++	mt7915_hold_stop(dev);
+ 
+ 	/* Sticky until module removal, including failed requests and resets. */
+ 	if (chandef)
+@@ -1726,18 +1741,27 @@
+ 		if (ret)
+ 			goto out;
+ 
+-		if (!running)
++		if (!chandef || !running)
+ 			goto update_phy;
+ 	}
+ 
++	/* Publish a tentative owner before the MCU can deliver radar. */
++	if (chandef) {
++		dev->rdd2_chandef = *chandef;
++		WRITE_ONCE(dev->rdd2_phy, phy);
++	}
+ 	ret = mt7915_mcu_rdd_background_enable(phy, chandef);
+-	if (ret)
+-		goto out;
++	if (ret) {
++		cfg80211_background_cac_abort(phy->mt76->hw->wiphy);
++		goto out;
++	}
+ 
+ update_phy:
+ 	dev->rdd2_phy = chandef ? phy : NULL;
+-	if (chandef)
++	if (chandef) {
+ 		dev->rdd2_chandef = *chandef;
++		mt7915_hold_start(phy);
++	}
+ out:
+ 	mutex_unlock(&dev->mt76.mutex);
+ 
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/mcu.c b/drivers/net/wireless/mediatek/mt76/mt7915/mcu.c
+--- a/drivers/net/wireless/mediatek/mt76/mt7915/mcu.c
++++ b/drivers/net/wireless/mediatek/mt76/mt7915/mcu.c
+@@ -2787,6 +2787,7 @@
+ {
+ 	struct mt7915_dev *dev = phy->dev;
+ 	int err, region, rdd_idx;
++	struct mt7915_ipi_sample fence;
+ 
+ 	rdd_idx = mt7915_get_rdd_idx(phy, true);
+ 	if (rdd_idx < 0)
+@@ -2797,8 +2798,11 @@
+ 		if (err)
+ 			return err;
+ 
+-		return mt7915_mcu_background_chain_ctrl(phy, NULL,
++		err = mt7915_mcu_background_chain_ctrl(phy, NULL,
+ 				CH_SWITCH_BACKGROUND_SCAN_STOP);
++		if (err)
++			return err;
++		return mt7915_mcu_ipi_query_index(phy, 11, phy->mt76->band_idx, &fence);
+ 	}
+ 
+ 	err = mt7915_mcu_background_chain_ctrl(phy, chandef,
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/mt7915.h b/drivers/net/wireless/mediatek/mt76/mt7915/mt7915.h
+--- a/drivers/net/wireless/mediatek/mt76/mt7915/mt7915.h
++++ b/drivers/net/wireless/mediatek/mt76/mt7915/mt7915.h
+@@ -7,6 +7,7 @@
+ #include <linux/interrupt.h>
+ #include <linux/ktime.h>
+ #include "../mt76_connac.h"
++#include "hold-api.h"
+ #include "regs.h"
+ 
+ #define MT7915_MAX_INTERFACES		19
+@@ -269,6 +270,15 @@
+ 	int error, restore_error;
+ };
+ 
++struct mt7915_hold_monitor {
++	struct delayed_work work;
++	struct mt7915_phy *phy;
++	struct manet_hold_token token;
++	struct mt7915_ipi_sample previous;
++	u64 at_us, tx_us, read_us, sequence;
++	bool active;
++};
++
+ struct mt7915_dev {
+ 	union { /* must be first */
+ 		struct mt76_dev mt76;
+@@ -307,6 +317,7 @@
+ 	struct mt7915_phy *rdd2_phy;
+ 	bool background_rx_reserved;
+ 	struct mt7915_bg_scan bg_scan;
++	struct mt7915_hold_monitor hold;
+ 
+ 	u16 chainmask;
+ 	u16 chainshift;
+@@ -479,6 +490,8 @@
+ 
+ int mt7915_register_device(struct mt7915_dev *dev);
+ void mt7915_unregister_device(struct mt7915_dev *dev);
++void mt7915_hold_start(struct mt7915_phy *phy);
++void mt7915_hold_stop(struct mt7915_dev *dev);
+ void mt7915_bg_scan_init(struct mt7915_dev *dev);
+ void mt7915_bg_scan_debugfs(struct mt7915_phy *phy, struct dentry *dir);
+ int mt7915_bg_scan_stop(struct mt7915_dev *dev, int error);

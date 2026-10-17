@@ -1,0 +1,11 @@
+[Unit]
+Description=Resume the embedded MANET CM4 update after tools installation
+ConditionPathExists=/usr/local/share/manet/bootstrap/manifest.json
+
+[Timer]
+OnBootSec=30s
+OnUnitInactiveSec=60s
+Unit=manet-release-bootstrap.service
+
+[Install]
+WantedBy=timers.target

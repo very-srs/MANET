@@ -176,6 +176,9 @@ ln -sf ../manet-mt7916-firmware-survived.service \
 . "$SCRIPT_DIR/lib-kernel-protection.sh"
 stage_kernel_protection "$STAGE" "$REPO_ROOT"
 
+. "$SCRIPT_DIR/lib-release-payload.sh"
+stage_release_payload "$STAGE" "$REPO_ROOT" cm4
+
 mkdir -p "$(dirname "$OUT")"
 OUT_ABS="$(cd "$(dirname "$OUT")" && pwd)/$(basename "$OUT")"
 

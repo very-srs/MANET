@@ -1,0 +1,117 @@
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/bgscan.c b/drivers/net/wireless/mediatek/mt76/mt7915/bgscan.c
+--- a/drivers/net/wireless/mediatek/mt76/mt7915/bgscan.c
++++ b/drivers/net/wireless/mediatek/mt76/mt7915/bgscan.c
+@@ -436,8 +436,7 @@
+ 	chandef->center_freq1 = center;
+ 	if (!chandef->chan || chandef->chan->band != NL80211_BAND_5GHZ ||
+ 	    !cfg80211_chandef_valid(chandef) ||
+-	    !cfg80211_chandef_usable(wiphy, chandef, IEEE80211_CHAN_DISABLED |
+-					IEEE80211_CHAN_RADAR | IEEE80211_CHAN_NO_IR))
++	    !cfg80211_chandef_usable(wiphy, chandef, IEEE80211_CHAN_DISABLED))
+ 		return -EINVAL;
+ 	for (f = center - width / 2 + 10; f < center + width / 2; f += 20) {
+ 		chan = ieee80211_get_channel(wiphy, f);
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/hold-api.h b/drivers/net/wireless/mediatek/mt76/mt7915/hold-api.h
+--- a/drivers/net/wireless/mediatek/mt76/mt7915/hold-api.h
++++ b/drivers/net/wireless/mediatek/mt76/mt7915/hold-api.h
+@@ -24,4 +24,13 @@
+ bool cfg80211_hold_sample_v2(struct wiphy *wiphy,
+ 			   const struct manet_hold_token *token,
+ 			   const struct manet_hold_sample *sample);
++
++struct wiphy;
++struct cfg80211_chan_def;
++
++/* Called only after main RDD start succeeds, before retiring RDD2. */
++bool cfg80211_hold_transfer_v3(struct wiphy *wiphy,
++                             const struct cfg80211_chan_def *chandef,
++                             const struct manet_hold_token *token);
++void cfg80211_hold_main_stop_v3(struct wiphy *wiphy);
+ #endif
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/init.c b/drivers/net/wireless/mediatek/mt76/mt7915/init.c
+--- a/drivers/net/wireless/mediatek/mt76/mt7915/init.c
++++ b/drivers/net/wireless/mediatek/mt76/mt7915/init.c
+@@ -333,6 +333,8 @@
+ 	struct mt7915_dev *dev = mt7915_hw_dev(hw);
+ 	struct mt76_phy *mphy = hw->priv;
+ 	struct mt7915_phy *phy = mphy->priv;
++
++	cfg80211_hold_main_stop_v3(wiphy);
+ 
+ 	if (READ_ONCE(dev->rdd2_phy))
+ 		cfg80211_background_cac_abort(dev->rdd2_phy->mt76->hw->wiphy);
+@@ -1320,3 +1322,8 @@
+ 
+ 	mt76_free_device(&dev->mt76);
+ }
++
++MODULE_INFO(manet_dfs_mesh, "1");
++static bool mt7915_dfs_mesh_v1 = true;
++module_param_named(dfs_mesh_v1, mt7915_dfs_mesh_v1, bool, 0444);
++MODULE_PARM_DESC(dfs_mesh_v1, "Token-bound DFS mesh detector transfer ABI");
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/mac.c b/drivers/net/wireless/mediatek/mt76/mt7915/mac.c
+--- a/drivers/net/wireless/mediatek/mt76/mt7915/mac.c
++++ b/drivers/net/wireless/mediatek/mt76/mt7915/mac.c
+@@ -1586,6 +1586,10 @@
+ 	ext_phy = dev->mt76.phys[MT_BAND1];
+ 	phy2 = ext_phy ? ext_phy->priv : NULL;
+ 
++	cfg80211_hold_main_stop_v3(dev->mt76.phy.hw->wiphy);
++	if (ext_phy)
++		cfg80211_hold_main_stop_v3(ext_phy->hw->wiphy);
++
+ 	if (READ_ONCE(dev->rdd2_phy))
+ 		cfg80211_background_cac_abort(dev->rdd2_phy->mt76->hw->wiphy);
+ 
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/main.c b/drivers/net/wireless/mediatek/mt76/mt7915/main.c
+--- a/drivers/net/wireless/mediatek/mt76/mt7915/main.c
++++ b/drivers/net/wireless/mediatek/mt76/mt7915/main.c
+@@ -129,6 +129,7 @@
+ 
+ 	if (dev->rdd2_phy == phy)
+ 		cfg80211_background_cac_abort(hw->wiphy);
++	cfg80211_hold_main_stop_v3(hw->wiphy);
+ 	clear_bit(MT76_STATE_RUNNING, &phy->mt76->state);
+ 
+ 	if (phy != &dev->phy) {
+@@ -340,10 +341,16 @@
+ {
+ 	struct mt7915_phy *phy = mphy->priv;
+ 	struct mt7915_dev *dev = phy->dev;
++	struct manet_hold_token token;
++	bool transfer = dev->rdd2_phy == phy && mphy->radar_enabled &&
++		cfg80211_chandef_identical(&mphy->chandef, &dev->rdd2_chandef) &&
++		cfg80211_hold_token_v2(mphy->hw->wiphy, &token);
+ 	int ret;
+ 
+-	/* Prototype has no gap-free handoff. Revoke on any main retune. */
+-	if (dev->rdd2_phy == phy)
++	if (mphy->dfs_state != MT_DFS_STATE_ACTIVE || !mphy->radar_enabled)
++		cfg80211_hold_main_stop_v3(mphy->hw->wiphy);
++	/* Keep RDD2 through the retune and main RDD start on its exact chandef. */
++	if (dev->rdd2_phy == phy && !transfer)
+ 		cfg80211_background_cac_abort(mphy->hw->wiphy);
+ 
+ 	if (dev->bg_scan.phy == phy) {
+@@ -364,12 +371,21 @@
+ 
+ 	mt7915_mac_set_timing(phy);
+ 	ret = mt7915_dfs_init_radar_detector(phy);
++	if (!ret && transfer &&
++	    (mphy->dfs_state != MT_DFS_STATE_ACTIVE ||
++	     !cfg80211_hold_transfer_v3(mphy->hw->wiphy, &mphy->chandef, &token)))
++		ret = -EACCES;
+ 	mt7915_mac_cca_stats_reset(phy);
+ 
+ 	mt7915_mac_reset_counters(phy);
+ 	phy->noise = 0;
+ 
+ out:
++	if (ret && transfer) {
++		ieee80211_stop_queues(mphy->hw);
++		mt7915_mcu_set_mac(dev, mphy->band_idx, false, false);
++		cfg80211_background_cac_abort(mphy->hw->wiphy);
++	}
+ 	if (!mt76_testmode_enabled(phy->mt76))
+ 		ieee80211_queue_delayed_work(phy->mt76->hw,
+ 					     &phy->mt76->mac_work,

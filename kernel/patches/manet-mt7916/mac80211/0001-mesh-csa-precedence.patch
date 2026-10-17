@@ -1,0 +1,51 @@
+diff --git a/net/mac80211/cfg.c b/net/mac80211/cfg.c
+--- a/net/mac80211/cfg.c
++++ b/net/mac80211/cfg.c
+@@ -4259,6 +4259,10 @@
+ #ifdef CONFIG_MAC80211_MESH
+ 	case NL80211_IFTYPE_MESH_POINT: {
+ 		struct ieee80211_if_mesh *ifmsh = &sdata->u.mesh;
++
++		if (params->radar_required)
++			ifmsh->userspace_handles_dfs = true;
++
+ 
+ 		/* changes into another band are not supported */
+ 		if (sdata->vif.bss_conf.chanreq.oper.chan->band !=
+diff --git a/net/mac80211/mesh.c b/net/mac80211/mesh.c
+--- a/net/mac80211/mesh.c
++++ b/net/mac80211/mesh.c
+@@ -1055,7 +1055,9 @@
+ 		}
+ 		*pos++ |= csa->settings.block_tx ?
+ 			  WLAN_EID_CHAN_SWITCH_PARAM_TX_RESTRICT : 0x00;
+-		put_unaligned_le16(WLAN_REASON_MESH_CHAN, pos);
++		put_unaligned_le16(csa->settings.block_tx &&
++			(sdata->vif.bss_conf.chanreq.oper.chan->flags & IEEE80211_CHAN_RADAR) ?
++			WLAN_REASON_MESH_CHAN_REGULATORY : WLAN_REASON_MESH_CHAN, pos);
+ 		pos += 2;
+ 		put_unaligned_le16(ifmsh->pre_value, pos);
+ 		pos += 2;
+@@ -1366,6 +1368,8 @@
+ 
+ 	if (cfg80211_chandef_identical(&params.chandef,
+ 				       &sdata->vif.bss_conf.chanreq.oper)) {
++		if (beacon && ifmsh->pre_value < csa_ie.pre_value)
++			ifmsh->pre_value = csa_ie.pre_value;
+ 		mcsa_dbg(sdata,
+ 			 "received csa with an identical chandef, ignoring\n");
+ 		return true;
+diff --git a/net/mac80211/util.c b/net/mac80211/util.c
+--- a/net/mac80211/util.c
++++ b/net/mac80211/util.c
+@@ -3775,7 +3775,9 @@
+ 		*pos |= WLAN_EID_CHAN_SWITCH_PARAM_INITIATOR;
+ 		*pos++ |= csa_settings->block_tx ?
+ 			  WLAN_EID_CHAN_SWITCH_PARAM_TX_RESTRICT : 0x00;
+-		put_unaligned_le16(WLAN_REASON_MESH_CHAN, pos); /* Reason Cd */
++		put_unaligned_le16(csa_settings->block_tx &&
++			(sdata->vif.bss_conf.chanreq.oper.chan->flags & IEEE80211_CHAN_RADAR) ?
++			WLAN_REASON_MESH_CHAN_REGULATORY : WLAN_REASON_MESH_CHAN, pos);
+ 		pos += 2;
+ 		put_unaligned_le16(ifmsh->pre_value, pos);/* Precedence Value */
+ 		pos += 2;

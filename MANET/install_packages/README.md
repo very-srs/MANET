@@ -13,8 +13,11 @@ release needs, including kernels, modules, firmware, and configuration
 migrations. End-user radios may be sealed; routine updates must not assume
 physical access for reflashing. The current builder carries runtime software
 and managed MT7916 firmware by default. The optional board kernel payload
-uses a separate manifest and trial transaction. CM4 activation requires a
-locally qualified boot profile and is not yet hardware-validated. Rock 3A
+uses a separate manifest and trial transaction. CM4 activation defaults on,
+derives the profile from this node's boot files and hardware, and supports a
+local `enabled=n` opt-out in `/etc/manet-kernel-update.conf`. The reset/fallback
+mechanism has been benched. The generic field health policy still needs
+on-node acceptance before release. Rock 3A
 kernel activation remains disabled. See the
 [field update policy](../../docs/node-tools-internals.md#field-update-policy).
 

@@ -15,18 +15,29 @@ from manet_kernel_update import (MAX_DOWNLOAD, MAX_EXPANDED, MANIFEST_LIMIT,
                                  validate_payload, sha256, KernelError)
 
 
-def check_archive(path):
-    if path.stat().st_size > MAX_DOWNLOAD:
-        raise ValueError('Compressed archive exceeds updater limit of 256 MiB')
+def check_archive(path, legacy=False):
+    download = 64 * 1024 * 1024 if legacy else MAX_DOWNLOAD
+    maximum = 512 * 1024 * 1024 if legacy else MAX_EXPANDED
+    if path.stat().st_size > download:
+        raise ValueError(f'Compressed archive exceeds updater limit of {download} bytes')
     expanded = 0
     with gzip.open(path, 'rb') as stream:
         for chunk in iter(lambda: stream.read(1024 * 1024), b''):
             expanded += len(chunk)
-            if expanded > MAX_EXPANDED:
-                raise ValueError('Expanded archive exceeds updater limit of 1536 MiB')
+            if expanded > maximum:
+                raise ValueError(f'Expanded archive exceeds updater limit of {maximum} bytes')
     with tarfile.open(path, 'r:gz') as archive:
-        if sum(1 for _ in archive) > 20000:
+        members = list(archive)
+        if len(members) > 20000:
             raise ValueError('Archive exceeds updater member limit')
+        if legacy:
+            for member in members:
+                name = member.name.removeprefix('./').rstrip('/')
+                forbidden = ('etc/mesh.conf', 'etc/systemd/network', 'usr/lib/modules',
+                             'usr/lib/firmware', 'usr/local/bin/node-manager.sh')
+                if (name.split('/')[0] not in ('etc', 'usr', 'root') or
+                        any(name == p or name.startswith(p + '/') for p in forbidden)):
+                    raise ValueError('v0.569 excludes archive path: ' + name)
     print(f'Archive bounds: {path.stat().st_size} compressed, {expanded} expanded bytes')
 
 
@@ -89,6 +100,7 @@ def assemble(overlay, board, payload):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--check-archive', type=Path)
+    parser.add_argument('--legacy', action='store_true')
     parser.add_argument('--board', choices=('cm4', 'r3a'))
     parser.add_argument('--overlay', type=Path)
     parser.add_argument('--stage', type=Path)
@@ -96,7 +108,7 @@ def main():
     args = parser.parse_args()
     try:
         if args.check_archive:
-            check_archive(args.check_archive)
+            check_archive(args.check_archive, args.legacy)
             return
         if not all((args.board, args.overlay, args.stage)):
             parser.error('--board, --overlay and --stage are required')

@@ -37,9 +37,9 @@ field radios must be maintainable without routine opening and reflashing.
 Follow the [field update policy](../../docs/node-tools-internals.md#field-update-policy)
 when adding payloads that need activation or recovery handling.
 
-Today the cm4, r3a and rpi5 tools archives have identical contents and are named
+The cm4, r3a and rpi5 tools archives share the common runtime and are named
 per board because the updater requests its board's package. Board-specific
-updates can use different contents. The current builder carries the node scripts
+kernel and release inputs make their contents differ. The current builder carries the node scripts
 and version file, systemd units together with their `multi-user.target.wants`
 enable symlinks, udev rules, the networkd-dispatcher hooks, the Lyra plugin and
 model weights, the dashboard assets under `share/manet`, and the journald
@@ -63,8 +63,10 @@ in `/usr/local/share/manet/installed-kernel.json`, alongside the existing root
 SBC overlay. They do not duplicate the kernel set. All builders check compressed
 size (256 MiB), expanded tar size (1536 MiB), and member count (20,000) before
 writing the checksum. This does not qualify an archive for live activation.
-The field updater requires a new unique kernel release and a locally qualified
-CM4 boot profile. Rock 3A activation is currently rejected. RPi5 keeps its
+The field updater requires a new unique kernel release. CM4 derives its trial
+profile from local boot files and hardware and activates by default unless
+`/etc/manet-kernel-update.conf` contains `enabled=n`. A local bench profile
+can override the generic health check. Rock 3A activation is currently rejected. RPi5 keeps its
 existing install payload and kernel-less update path.
 
 Example local build for inspection:
@@ -74,12 +76,52 @@ MANET_KERNEL_BOARD=cm4 SBC_OVERLAY_DIR=/path/to/matched-cm4-overlay \
   bash MANET/packaging/build-tools-tarball.sh /tmp/cm4-tools.tar.gz
 ```
 
-Ship the updated kernel-less updater before a kernel-bearing release. Old
-updaters do not understand the new namespace. Publication must wait until all
-intended recipients have that bootstrap updater or an enforced minimum-updater
-release protocol exists. Current overlay kernels reuse their existing release
-names and are not suitable candidate updates for nodes already running them.
-Rebuild with a new release suffix and rebuild every external module first.
+A CM4 tools archive can bootstrap stable v0.569 in one release. Set
+`MANET_LEGACY_BOOTSTRAP=1` together with `MANET_KERNEL_BOARD=cm4` and the
+matched overlay. The builder first creates the complete new-updater archive,
+then wraps it under `usr/local/share/manet/bootstrap/` inside a tools-only
+outer archive. The outer archive must fit v0.569's 64 MiB download and 512 MiB
+expanded limits and its path allowlist. A failed compatibility check is a
+build failure, not a package to publish.
+
+The old updater installs the tools and starts a retry timer through its
+existing firmware-setup call. After the outer transaction commits, the timer
+runs the new updater on the embedded archive with its exact version and
+checksum. CM4 trial confirmation removes the bootstrap payload and units.
+An explicit kernel cancellation stops automatic retries of that manifest.
+Other boards ignore a copied CM4 wrapper. Build their normal tools-only
+archives without either kernel variable. The wrapper uses the same default-on
+CM4 policy and derived profile as the new updater. Opt-out retains the embedded
+payload so the timer can resume if enabled later. Neither archive carries a
+radio-specific boot profile or operator policy file. The fallback mechanism
+has been benched, while the generic field health policy needs on-node acceptance.
+
+Release userland inputs use `MANET_HOSTAPD_DEB` and, for CM4,
+`MANET_REGDB`. The former must be the native Debian ARM64
+`hostapd_2.10-24+manet1_arm64.deb`, not a standalone cross-built binary.
+The latter is the DFS-tags-only database. All builders validate package
+identity and stage a digest inventory and APT pin. Only CM4 carries this
+unsigned regulatory DB. Rock 3A enforces signatures and must retain its
+existing signed database. Tools builds infer the board from their standard
+output basename, or accept `MANET_PACKAGE_BOARD` explicitly.
+The updater's firmware setup verifies and installs the package, checks the
+installed follower marker and APT candidate, and copies the DB for next boot.
+Missing requested inputs fail the build. No package is downloaded implicitly.
+
+```bash
+MANET_HOSTAPD_DEB=/path/to/hostapd_2.10-24+manet1_arm64.deb \
+MANET_REGDB=/path/to/regulatory.db \
+MANET_KERNEL_BOARD=cm4 MANET_LEGACY_BOOTSTRAP=1 \
+SBC_OVERLAY_DIR=/path/to/matched-cm4-overlay \
+  bash MANET/packaging/build-tools-tarball.sh /tmp/cm4-tools.tar.gz
+```
+
+A wrapper that exceeds the old limits requires a tools-only bridge release
+first. v0.569 installs that bridge through its existing updater. The bridge's
+new updater then installs a second release carrying the ordinary
+`manet-kernel/` namespace. The release-selection protocol does not force a
+node that skipped the bridge through it, so do not promote the second release
+as a general v0.569 target without an enforced bootstrap path.
 
 `node-manager.sh` is generated on the node from `acs=` rather than shipped.
 Both real variants are carried, and the updater regenerates the selected

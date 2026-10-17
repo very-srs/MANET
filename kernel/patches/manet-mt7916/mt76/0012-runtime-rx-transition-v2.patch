@@ -1,0 +1,253 @@
+From: MANET maintainers
+Subject: [PATCH] mt7915: retain benched reservation-v2 runtime transition
+
+Rebase the unchanged transition protocol onto the paired hold stack.
+Keep diagnostic-v2, its mesh/non-DFS gates and its default-off policy.
+
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/bgscan.c b/drivers/net/wireless/mediatek/mt76/mt7915/bgscan.c
+--- a/drivers/net/wireless/mediatek/mt76/mt7915/bgscan.c
++++ b/drivers/net/wireless/mediatek/mt76/mt7915/bgscan.c
+@@ -4,6 +4,7 @@
+ #include <linux/uaccess.h>
+ #include "mt7915.h"
+ #include "mcu.h"
++#include "eeprom.h"
+ 
+ #define MT7915_BG_SETTLE_MS 20
+ #define MT7915_BG_MIN_MS 100
+@@ -530,6 +531,8 @@
+ }
+ 
+ #ifdef CONFIG_DEBUG_FS
++#include "rxprobe.inc"
++
+ static ssize_t
+ mt7915_bg_scan_write(struct file *file, const char __user *user_buf,
+ 		     size_t count, loff_t *ppos)
+@@ -655,6 +658,13 @@
+ {
+ 	bool supported = phy->dev->background_rx_reserved;
+ 
++	if (is_mt7916(&phy->dev->mt76) && phy->mt76->band_idx == MT_BAND1 &&
++	    phy->dev->chainmask == 0x1f && phy->mt76->antenna_mask == 3) {
++		supported = true;
++		debugfs_create_file("rx_transition_probe", 0600, dir, phy,
++				    &mt7915_rx_probe_fops);
++	}
++
+ 	if (supported && phy->mt76->band_idx == MT_BAND1)
+ 		debugfs_create_file("background_scan", 0600, dir, phy,
+ 				    &mt7915_bg_scan_fops);
+@@ -666,5 +676,6 @@
+ #endif
+ 
+ MODULE_INFO(manet_observer, "third-chain-v1");
+-MODULE_INFO(manet_observer_probe, "0");
++MODULE_INFO(manet_observer_probe, "1");
++MODULE_INFO(manet_rx_transition, "diagnostic-v2");
+ MODULE_INFO(manet_cac_hold, "experimental-v2");
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/main.c b/drivers/net/wireless/mediatek/mt76/mt7915/main.c
+--- a/drivers/net/wireless/mediatek/mt76/mt7915/main.c
++++ b/drivers/net/wireless/mediatek/mt76/mt7915/main.c
+@@ -26,6 +26,10 @@
+ 	struct mt7915_phy *phy = mt7915_hw_phy(hw);
+ 	bool running;
+ 	int ret;
++
++	/* A failed command cannot be cleared by an ordinary interface start. */
++	if (phy->mt76->band_idx == MT_BAND1 && dev->rx_probe_failed)
++		return -EIO;
+ 
+ 	running = mt7915_dev_running(dev);
+ 
+@@ -1154,6 +1158,10 @@
+ 		return -EINVAL;
+ 
+ 	mutex_lock(&dev->mt76.mutex);
++	if (band == MT_BAND1 && dev->rx_probe_count) {
++		mutex_unlock(&dev->mt76.mutex);
++		return -EBUSY;
++	}
+ 
+ 	phy->mt76->antenna_mask = tx_ant;
+ 
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/mt7915.h b/drivers/net/wireless/mediatek/mt76/mt7915/mt7915.h
+--- a/drivers/net/wireless/mediatek/mt76/mt7915/mt7915.h
++++ b/drivers/net/wireless/mediatek/mt76/mt7915/mt7915.h
+@@ -316,6 +316,10 @@
+ 	struct cfg80211_chan_def rdd2_chandef;
+ 	struct mt7915_phy *rdd2_phy;
+ 	bool background_rx_reserved;
++	bool rx_probe_failed;
++	u32 rx_probe_count;
++	u64 rx_probe_at_us, rx_probe_pause_us;
++	int rx_probe_error, rx_probe_restore_error;
+ 	struct mt7915_bg_scan bg_scan;
+ 	struct mt7915_hold_monitor hold;
+ 
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/rxprobe.inc b/drivers/net/wireless/mediatek/mt76/mt7915/rxprobe.inc
+new file mode 100644
+--- /dev/null
++++ b/drivers/net/wireless/mediatek/mt76/mt7915/rxprobe.inc
+@@ -0,0 +1,161 @@
++/* SPDX-License-Identifier: ISC */
++/* Bench-only, two-NSS mesh path experiment. No runtime policy is implied. */
++struct mt7915_rx_probe_vifs {
++	bool incompatible;
++};
++
++static void mt7915_rx_probe_vif(void *data, u8 *mac, struct ieee80211_vif *vif)
++{
++	struct mt7915_rx_probe_vifs *vifs = data;
++
++	if (vif->type != NL80211_IFTYPE_MESH_POINT)
++		vifs->incompatible = true;
++}
++
++static int mt7915_rx_probe_transition(struct mt7915_phy *phy, bool reserve,
++				      bool cancel)
++{
++	struct mt7915_dev *dev = phy->dev;
++	struct mt76_phy *mphy = phy->mt76;
++	struct mt7915_rx_probe_vifs vifs = {};
++	u8 *eeprom = dev->mt76.eeprom.data;
++	u16 old = mphy->chainmask;
++	bool old_reserved = dev->background_rx_reserved;
++	u64 start;
++	int ret, restore = 0, wake;
++
++	lockdep_assert_held(&dev->mt76.mutex);
++	if (!is_mt7916(&dev->mt76) || mphy->band_idx != MT_BAND1 ||
++	    dev->chainshift != 2 || dev->chainmask != 0x1f ||
++	    mphy->antenna_mask != 3 || dev->ibf)
++		return -EOPNOTSUPP;
++	/* Only the untouched three-path EEPROM can restore three paths.
++	 * Boot reservation and unresolved 5/6 GHz selection cannot enter here.
++	 */
++	if (eeprom[MT_EE_WIFI_CONF + 1] != 0x5b ||
++	    u8_get_bits(eeprom[MT_EE_WIFI_CONF + 3],
++			MT_EE_WIFI_CONF_STREAM_NUM) != 2)
++		return -EOPNOTSUPP;
++	if (!cancel && (!test_bit(MT76_STATE_RUNNING, &mphy->state) ||
++	    test_bit(MT76_RESET, &mphy->state) || mphy->offchannel ||
++	    test_bit(MT76_SCANNING, &mphy->state)))
++		return -EBUSY;
++	if (dev->rdd2_phy || dev->bg_scan.dirty || dev->rx_probe_failed)
++		return -EBUSY;
++	if (old_reserved != (old == 0x0c))
++		return -EINVAL;
++	/* 0x0c is host packing: band-local RX 0x3, TX count 2 in ext4E.
++	 * It is not a literal selection of globally numbered RF pins.
++	 */
++	if (old == (reserve ? 0x0c : 0x1c))
++		return 0;
++	if (old != 0x0c && old != 0x1c)
++		return -EINVAL;
++	if (!cancel && dev->rx_probe_count &&
++	    ktime_get_boottime_ns() / 1000 - dev->rx_probe_at_us < 60000000)
++		return -EAGAIN;
++	if (!cancel && (!cfg80211_chandef_valid(&mphy->chandef) ||
++	    mphy->chandef.width != NL80211_CHAN_WIDTH_20 ||
++	    mphy->chandef.chan->band != NL80211_BAND_5GHZ ||
++	    mphy->chandef.chan->flags & (IEEE80211_CHAN_RADAR |
++				       IEEE80211_CHAN_DISABLED | IEEE80211_CHAN_NO_IR)))
++		return -EPERM;
++	ieee80211_iterate_active_interfaces_atomic(mphy->hw,
++		IEEE80211_IFACE_ITER_NORMAL, mt7915_rx_probe_vif, &vifs);
++	if (vifs.incompatible)
++		return -EOPNOTSUPP;
++
++	/* Keep two-NSS association/rate records unchanged. Mesh has no eBF,
++	 * and iBF/AP/station modes are excluded above. Never upload EEPROM.
++	 */
++	start = ktime_get_boottime_ns() / 1000;
++	ieee80211_stop_queues(mphy->hw);
++	ret = mt7915_mcu_set_mac(dev, MT_BAND1, false, false);
++	if (!ret) {
++		mphy->chainmask = reserve ? 0x0c : 0x1c;
++		ret = mt7915_mcu_set_chan_info(phy, MCU_EXT_CMD(SET_RX_PATH));
++	}
++	if (ret) {
++		mphy->chainmask = old;
++		restore = mt7915_mcu_set_chan_info(phy, MCU_EXT_CMD(SET_RX_PATH));
++	}
++	wake = mt7915_mcu_set_mac(dev, MT_BAND1, true, true);
++	dev->rx_probe_count++;
++	dev->rx_probe_at_us = ktime_get_boottime_ns() / 1000;
++	dev->rx_probe_pause_us = dev->rx_probe_at_us - start;
++	dev->rx_probe_error = ret ? ret : wake;
++	dev->rx_probe_restore_error = restore;
++	if (restore || wake) {
++		/* Unknown hardware state: keep queues stopped until reset/reload. */
++		dev->rx_probe_failed = true;
++		dev->background_rx_reserved = false;
++		return dev->rx_probe_error ? dev->rx_probe_error : restore;
++	}
++	dev->background_rx_reserved = ret ? old_reserved : reserve;
++	ieee80211_wake_queues(mphy->hw);
++	return ret;
++}
++
++static int mt7915_rx_probe_show(struct seq_file *seq, void *data)
++{
++	struct mt7915_phy *phy = seq->private;
++	struct mt7915_dev *dev = phy->dev;
++
++	mutex_lock(&dev->mt76.mutex);
++	seq_printf(seq, "{\"schema\":1,\"diagnostic\":true,\"chainmask\":%u,"
++		   "\"eeprom_band1\":%u,\"eeprom_streams1\":%u,"
++		   "\"rx_path_local\":%u,\"tx_path_count\":%u,"
++		   "\"antenna_mask\":%u,\"reserved\":%s,\"failed\":%s,"
++		   "\"transitions\":%u,\"last_boottime_us\":%llu,"
++		   "\"command_pause_us\":%llu,\"error\":%d,\"restore_error\":%d}\n",
++		   phy->mt76->chainmask,
++		   ((u8 *)dev->mt76.eeprom.data)[MT_EE_WIFI_CONF + 1],
++		   ((u8 *)dev->mt76.eeprom.data)[MT_EE_WIFI_CONF + 3],
++		   phy->mt76->chainmask >> dev->chainshift,
++		   hweight16(phy->mt76->chainmask), phy->mt76->antenna_mask,
++		   dev->background_rx_reserved ? "true" : "false",
++		   dev->rx_probe_failed ? "true" : "false", dev->rx_probe_count,
++		   dev->rx_probe_at_us, dev->rx_probe_pause_us,
++		   dev->rx_probe_error, dev->rx_probe_restore_error);
++	mutex_unlock(&dev->mt76.mutex);
++	return 0;
++}
++
++static int mt7915_rx_probe_open(struct inode *inode, struct file *file)
++{
++	return single_open(file, mt7915_rx_probe_show, inode->i_private);
++}
++
++static ssize_t mt7915_rx_probe_write(struct file *file, const char __user *buf,
++				    size_t count, loff_t *ppos)
++{
++	struct seq_file *seq = file->private_data;
++	struct mt7915_phy *phy = seq->private;
++	struct wiphy *wiphy = phy->mt76->hw->wiphy;
++	char value[4];
++	int ret;
++
++	if (!count || count >= sizeof(value))
++		return -EINVAL;
++	if (copy_from_user(value, buf, count))
++		return -EFAULT;
++	value[count] = 0;
++	if (!sysfs_streq(value, "2") && !sysfs_streq(value, "3"))
++		return -EINVAL;
++	if (!mutex_trylock(&wiphy->mtx))
++		return -EBUSY;
++	mutex_lock(&phy->dev->mt76.mutex);
++	ret = mt7915_rx_probe_transition(phy, value[0] == '2', false);
++	mutex_unlock(&phy->dev->mt76.mutex);
++	mutex_unlock(&wiphy->mtx);
++	return ret ? ret : count;
++}
++
++static const struct file_operations mt7915_rx_probe_fops = {
++	.owner = THIS_MODULE,
++	.open = mt7915_rx_probe_open,
++	.read = seq_read,
++	.write = mt7915_rx_probe_write,
++	.llseek = seq_lseek,
++	.release = single_release,
++};

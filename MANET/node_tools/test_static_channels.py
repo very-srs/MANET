@@ -80,6 +80,11 @@ class EnforcementTests(unittest.TestCase):
         self.plan = self.root / 'static-channels.json'
         self.lock = self.root / 'channel.lock'
         self.restarts = self.root / 'restarts'
+        self.rx_calls = self.root / 'rx-calls'
+        self.rx_helper = self.root / 'rx-helper.py'
+        self.rx_helper.write_text(
+            'import os, sys\nfrom pathlib import Path\n'
+            'Path(os.environ["TEST_RX_CALLS"]).write_text(" ".join(sys.argv[1:]))\n')
         (self.root / 'mesh_24_if').write_text('wlan0\n')
         (self.root / 'mesh_5_if').write_text('wlan1\n')
         for iface, freq in (('wlan0', 2412), ('wlan1', 5180)):
@@ -95,7 +100,7 @@ class EnforcementTests(unittest.TestCase):
         functions = ''.join(re.search(rf'^{name}\(\) \{{\n.*?^\}}\n', source, re.M | re.S)[0]
                             for name in ('get_current_freq', 'load_mesh_wpa_confs',
                                          'ensure_static_iface_channel', 'load_static_plan',
-                                         'ensure_static_channels'))
+                                         'ensure_static_channels', 'reconcile_rx_policy'))
 
         prefix = ('log() { echo "$1" >&2; }\nradio_iface_enabled() { return 0; }\n'
                   'sleep() { :; }\n'
@@ -103,6 +108,7 @@ class EnforcementTests(unittest.TestCase):
         env = dict(os.environ, MANET_STATIC_CHANNELS=str(self.plan),
                    MANET_STATIC_CHANNELS_TOOL=str(TOOLS / 'manet_static_channels.py'),
                    MANET_ACS_LOCK_FILE=str(self.lock), MANET_WPA_DIR=str(self.wpa),
+                   MANET_BGOBS_HELPER=str(self.rx_helper), TEST_RX_CALLS=str(self.rx_calls),
                    MANET_IFACE_STATE_DIR=str(self.root))
         return subprocess.run(['bash', '-c', prefix + header + functions + 'ensure_static_channels\n'],
                               env=env, capture_output=True, text=True, timeout=10)
@@ -131,6 +137,17 @@ class EnforcementTests(unittest.TestCase):
         self.assertEqual(self.freq('wpa_supplicant-wlan0.conf'), '2462')
         self.assertEqual(self.freq('wpa_supplicant-wlan0-lobby.conf'), '2462')
         self.assertEqual(self.restarted(), ['wpa_supplicant@wlan0.service'])
+
+    def test_static_mode_releases_previous_acs_reservation(self):
+        """Retry native reception when ACS stops maintaining a trouble flag."""
+        result = self.enforce()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.rx_calls.read_text(), 'wlan1 --policy clear')
+        self.rx_calls.unlink()
+        (self.root / 'mesh_5_if').write_text('')
+        result = self.enforce()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(self.rx_calls.exists())
 
     def test_single_5ghz_mesh_radio_gets_the_5ghz_plan(self):
         # mesh_if would list it first; the role files say it is 5 GHz.

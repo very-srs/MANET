@@ -295,6 +295,18 @@ functions += [function('bgscan.c', x) for x in (
     'mt7915_bg_scan_chandef', 'mt7915_bg_scan_start', 'mt7915_bg_scan_bins',
     'mt7915_bg_scan_show')]
 functions += [function('main.c', 'mt7915_set_radar_background')]
+# The combined stack adds passive hold callbacks around the same receiver.
+# Their fault handling has a separate C harness; keep this observer harness
+# usable against both the standalone and paired stack.
+if 'mt7915_hold_start' in functions[-1]:
+    shim = shim.replace('struct mt7915_dev {',
+                        'struct mt7915_dev { struct { struct delayed_work work; } hold;')
+    shim += r'''
+#define WRITE_ONCE(x,v) ((x)=(v))
+static void mt7915_hold_start(struct mt7915_phy *p) {}
+static void mt7915_hold_stop(struct mt7915_dev *d) {}
+static void cfg80211_background_cac_abort(struct wiphy *w) {}
+'''
 tests = r'''
 static void fire(struct mt7915_dev *d) {
     struct delayed_work *w=&d->bg_scan.work;

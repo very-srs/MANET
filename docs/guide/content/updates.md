@@ -14,10 +14,12 @@ To update manually:
 
 1. **Power and internet.** Leave both connected.
 2. **Update this radio.** Over SSH, run `sudo node-update.sh`.
-3. **Wait.** Let it finish, then check that your radios can still talk.
+3. **Wait.** Let every update step and restart finish, then check that your radios can still talk.
 
-If a radio trying a test kernel stops responding, turn its power off and on.
-It starts again on its previous kernel.
+A CM4 update can try new startup software and restart by itself. It checks
+its own radios even when no other radio is nearby. If it stops responding
+and does not restart, turn its power off and on. It tries its previous
+startup software. A failed trial is not tried again automatically.
 
 The updater waits for the radio's clock to synchronize. Automatic updates happen only when enabled.
 
@@ -32,12 +34,28 @@ drivers, firmware, and configuration changes. The name **tools** does not limit
 its contents. Radios may be sealed in enclosures, so updates are intended to
 maintain them in place rather than make reflashing a routine requirement.
 
-Current packages update runtime software and some radio firmware. Full kernel
-updating is still under development. Follow the selected release's instructions
-for any required restart or reboot. An opt-in CM4 kernel trial can need a power
-cycle if the firmware cannot load the test kernel. Its next boot selects the
+Current packages update runtime software and some radio firmware. This source
+also enables CM4 kernel trials by default when a release carries a matched
+kernel. Follow the selected release's instructions for restarts and validation.
+A trial can need a power cycle if the firmware cannot load the test kernel.
+Its next boot selects the
 previous kernel while the previous boot files remain intact. Keep access to
 the power supply even when the radio is sealed.
+
+A prepared CM4 package can carry two steps in one download: tools first,
+then a separately verified kernel trial. The displayed tools version can
+change before that trial finishes. The radio checks its own startup, drivers
+and attached radios before keeping the new kernel. It does not need Ethernet,
+internet, another radio or a synchronized clock to finish this trial. A failed
+trial keeps the previous kernel and is not retried automatically. Rock 3A and
+RPi5 keep tools-only updates.
+
+To opt out of CM4 kernel trials, use `sudoedit /etc/manet-kernel-update.conf`
+and save `enabled=n`. Tools updates still work. Use `enabled=y` to allow
+future kernel updates. A trial already started must finish or fall back first.
+This setting belongs to this radio and is separate from automatic update checks.
+The reset and fallback mechanism has been tested on CM4. The generic field
+checks still need acceptance on a radio before release.
 
 ### Update one radio manually
 
@@ -128,9 +146,12 @@ matched kernel payload with trial activation. Downloading requires
 
 The default builder includes managed MT7916 firmware. Optional board kernel
 inputs carry a manifest, boot files, versioned modules and isolated Morse
-firmware. CM4 has an opt-in one-shot trial implementation. It requires a locally
-qualified boot profile, firmware kernel watchdog, PID 1 runtime watchdog and a
-pinned radio/management health check. The EEPROM boot watchdog is optional.
+firmware. CM4 defaults to a one-shot trial unless its local
+`/etc/manet-kernel-update.conf` contains `enabled=n`. The profile is derived
+from the node's boot config, command line, FAT UUID and hardware and saved in
+the transaction before reboot. Existing local bench profiles remain overrides.
+Trials use the firmware kernel watchdog, `watchdog.open_timeout=120`, PID 1's
+runtime watchdog and a 300-second guard. The EEPROM boot watchdog is optional.
 Without it, failure before kernel handoff can require a power cycle. CM4
 provisioning disables the stock kernel's unmatched initramfs. RPi5 retains its
 matched image configuration. The trial runs before runtime software replacement, and a failed trial
@@ -141,10 +162,48 @@ verified. Hardware validation is still required before publishing kernel
 updates. Details and limitations are in the
 [kernel activation protocol](../../../docs/node-tools-internals.md#kernel-payload-and-activation-protocol).
 
+Field confirmation requires multi-user startup with healthy critical units,
+PID 1 holding an active hardware watchdog, root and boot mounts, the matching
+module tree, radio driver bindings and PHYs, and an up `bat0`. PCI/USB IDs
+identify radios even when no interfaces appeared. A bound SPI hat is recorded
+before reboot, while an unbound overlay is not treated as hardware. The
+saved inventory catches a radio disappearing during trial. Health has a
+60-second budget and must finish before 240 seconds of boot uptime. No network
+path, peers or clock sync is required. Opt-out skips the kernel and persists
+that selection for interrupted runtime recovery. It cannot abandon an armed
+trial or erase a failed candidate.
+
 For an offline bench, `--local-archive` and `--local-version` validate an
 explicitly supplied board tools archive and adjacent checksum without release
 discovery. This trusts the locally supplied files and allows an equal version
 to be reinstalled. It uses the same staging, recovery and trial transaction.
+
+### Compatibility with stable v0.569
+
+The old updater accepts only root-relative `etc`, `usr` and `root` paths,
+rejects raw boot/modules/firmware, and caps downloads at 64 MiB with 512 MiB
+expanded. `MANET_LEGACY_BOOTSTRAP=1` wraps a complete new-updater CM4 archive
+under `/usr/local/share/manet/bootstrap/`. The builder enforces those older
+limits. A timer starts through the firmware setup helper that v0.569 already
+calls. It waits for both version markers and the old transaction to finish,
+then runs the new updater on the pinned local archive.
+
+The inner transaction verifies its own checksum and matched kernel manifest,
+uses tryboot, and keeps the original selector until health confirmation. Its
+failure is retained without automatically retrying the kernel. Explicit kernel
+cancellation also stops the wrapper timer for that candidate. The wrapper
+removes its archive and units only after the exact candidate and tools are
+confirmed. The wrapper defaults to the derived field profile and honors the
+same opt-out. While opted out, its archive and timer remain available so
+re-enabling can resume the kernel stage. The field policy still requires an
+on-node acceptance run, separate from the completed reset/fallback bench.
+
+Optional release payloads carry the native Debian follower hostapd package
+and the DFS-tagged regulatory database. Setup verifies their hashes, package
+identity, installed version, follower marker and APT candidate before version
+commit. The hostapd preference pins `2:2.10-24+manet*` at priority 1001.
+The new regulatory DB is CM4-only and takes effect after reboot. Rock 3A and
+RPi5 retain their existing databases.
 
 ### Installation and recovery
 

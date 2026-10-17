@@ -1,8 +1,16 @@
 #!/bin/sh
 # Install/update integration without driver loading, removal or reload.
 set -eu
+# v0.569 calls this installed helper before committing its version markers.
+# Keep release payload verification in that path as well as the new updater.
+if [ -f /usr/local/share/manet/release/manifest.json ]; then
+    /usr/bin/python3 /usr/local/bin/manet-release-setup.py
+fi
 systemctl enable manet-mt7916-firmware.service
 systemctl enable manet-mt7916-firmware-survived.service
 systemctl enable --now manet-mt7916-firmware.path
 # Leave enabled units in place if the firmware command fails.
 /usr/bin/python3 /usr/local/bin/manet-mt7916-firmware.py || true
+if [ -f /usr/local/share/manet/bootstrap/manifest.json ]; then
+    systemctl enable --now manet-release-bootstrap.timer
+fi

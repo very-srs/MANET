@@ -1,0 +1,344 @@
+From: MANET maintainers
+Subject: [PATCH] cfg80211: opt in a same-radio DFS follower AP
+
+Require paired userspace intent, the load-time mt7915e gate and a
+current ordinary BSS station for a 20 MHz follower. Track that
+permission separately from DFS availability and stop the AP on
+association loss or upstream CSA. Keep ordinary AP and the existing
+P2P GO admission checks unchanged.
+
+diff --git a/net/wireless/ap.c b/net/wireless/ap.c
+--- a/net/wireless/ap.c
++++ b/net/wireless/ap.c
+@@ -32,6 +32,7 @@
+ 
+ 	err = rdev_stop_ap(rdev, dev, link_id);
+ 	if (!err) {
++		cfg80211_dfs_follow_del(wdev, link_id);
+ 		wdev->conn_owner_nlportid = 0;
+ 		wdev->links[link_id].ap.beacon_interval = 0;
+ 		memset(&wdev->links[link_id].ap.chandef, 0,
+diff --git a/net/wireless/chan.c b/net/wireless/chan.c
+--- a/net/wireless/chan.c
++++ b/net/wireless/chan.c
+@@ -10,10 +10,28 @@
+  */
+ 
+ #include <linux/export.h>
++#include <linux/moduleparam.h>
+ #include <linux/bitfield.h>
+ #include <net/cfg80211.h>
+ #include "core.h"
+ #include "rdev-ops.h"
++
++static bool dfs_follow_ap_v1;
++module_param(dfs_follow_ap_v1, bool, 0444);
++MODULE_PARM_DESC(dfs_follow_ap_v1,
++		 "Enable paired MANET AP/STA DFS follower on mt7915e (default off)");
++
++struct cfg80211_dfs_follow_ap {
++	struct list_head list;
++	struct wireless_dev *wdev;
++	unsigned int link;
++};
++
++bool cfg80211_dfs_follow_enabled(struct wiphy *wiphy)
++{
++	return dfs_follow_ap_v1 && wiphy_dev(wiphy) &&
++	       !strcmp(dev_driver_string(wiphy_dev(wiphy)), "mt7915e");
++}
+ 
+ static bool cfg80211_valid_60g_freq(u32 freq)
+ {
+@@ -693,14 +711,19 @@
+ 
+ 	lockdep_assert_held(&rdev->wiphy.mtx);
+ 
+-	if (!wiphy_ext_feature_isset(&rdev->wiphy,
+-				     NL80211_EXT_FEATURE_DFS_CONCURRENT) ||
+-	    !(chan->flags & IEEE80211_CHAN_DFS_CONCURRENT))
+-		return false;
+-
+-	/* only valid for P2P GO */
+-	if (iftype != NL80211_IFTYPE_P2P_GO)
+-		return false;
++	if (iftype == NL80211_IFTYPE_AP) {
++		if (!cfg80211_dfs_follow_enabled(wiphy) ||
++		    rdev->dfs_follow_start < 0 || rdev->dfs_follow_csa ||
++		    (!rdev->dfs_follow_start && list_empty(&rdev->dfs_follow_aps)) ||
++		    chan->dfs_state == NL80211_DFS_UNAVAILABLE ||
++		    chan->flags & IEEE80211_CHAN_DISABLED)
++			return false;
++	} else if (iftype != NL80211_IFTYPE_P2P_GO ||
++		   !wiphy_ext_feature_isset(wiphy,
++					    NL80211_EXT_FEATURE_DFS_CONCURRENT) ||
++		   !(chan->flags & IEEE80211_CHAN_DFS_CONCURRENT)) {
++		return false;
++	}
+ 
+ 	/*
+ 	 * Allow only if there's a concurrent BSS
+@@ -713,6 +736,80 @@
+ 	}
+ 
+ 	return false;
++}
++
++bool cfg80211_dfs_follow_chandef(struct wireless_dev *wdev,
++				 const struct cfg80211_chan_def *chandef)
++{
++	if (wdev->iftype != NL80211_IFTYPE_AP || wdev->valid_links ||
++	    !chandef->chan ||
++	    (chandef->width != NL80211_CHAN_WIDTH_20 &&
++	     chandef->width != NL80211_CHAN_WIDTH_20_NOHT) ||
++	    !(chandef->chan->flags & IEEE80211_CHAN_RADAR))
++		return false;
++	return cfg80211_dfs_permissive_chan(wdev->wiphy, wdev->iftype,
++					   chandef->chan);
++}
++
++int cfg80211_dfs_follow_add(struct wireless_dev *wdev, unsigned int link)
++{
++	struct cfg80211_registered_device *rdev = wiphy_to_rdev(wdev->wiphy);
++	struct cfg80211_dfs_follow_ap *ap;
++	struct wireless_dev *other;
++
++	lockdep_assert_wiphy(wdev->wiphy);
++	/* This protocol supports one AP beside the BSS STA, not MBSSID or
++	 * another beaconing role sharing detector state on this PHY.
++	 */
++	if (!list_empty(&rdev->dfs_follow_aps))
++		return -EBUSY;
++	list_for_each_entry(other, &rdev->wiphy.wdev_list, list)
++		if (other != wdev && cfg80211_beaconing_iface_active(other))
++			return -EBUSY;
++	ap = kzalloc(sizeof(*ap), GFP_KERNEL);
++	if (!ap)
++		return -ENOMEM;
++	ap->wdev = wdev;
++	ap->link = link;
++	list_add_tail(&ap->list, &rdev->dfs_follow_aps);
++	return 0;
++}
++
++void cfg80211_dfs_follow_del(struct wireless_dev *wdev, int link)
++{
++	struct cfg80211_registered_device *rdev = wiphy_to_rdev(wdev->wiphy);
++	struct cfg80211_dfs_follow_ap *ap, *tmp;
++
++	lockdep_assert_wiphy(wdev->wiphy);
++	list_for_each_entry_safe(ap, tmp, &rdev->dfs_follow_aps, list) {
++		if (ap->wdev != wdev || (link >= 0 && ap->link != link))
++			continue;
++		list_del(&ap->list);
++		kfree(ap);
++	}
++}
++
++void cfg80211_dfs_follow_check(struct wiphy *wiphy, bool force)
++{
++	struct cfg80211_registered_device *rdev = wiphy_to_rdev(wiphy);
++	struct cfg80211_dfs_follow_ap *ap, *tmp;
++
++	lockdep_assert_wiphy(wiphy);
++	list_for_each_entry_safe(ap, tmp, &rdev->dfs_follow_aps, list) {
++		struct wireless_dev *wdev = ap->wdev;
++		unsigned int link = ap->link;
++
++		if (!force && cfg80211_dfs_follow_chandef(wdev,
++							  &wdev->links[link].ap.chandef))
++			continue;
++		/* No regulatory grace and no reliance on DFS_AVAILABLE. mt7915
++		 * stop_ap synchronously disables beaconing and removes stations.
++		 * Keep the record if a driver reports failure so a later check
++		 * can retry; successful stop removes it in ap.c.
++		 */
++		if (cfg80211_stop_ap(rdev, wdev->netdev, link, true))
++			wiphy_warn(wiphy, "MANET DFS follower stop failed\n");
++	}
+ }
+ 
+ static int cfg80211_get_chans_dfs_required(struct wiphy *wiphy,
+diff --git a/net/wireless/core.c b/net/wireless/core.c
+--- a/net/wireless/core.c
++++ b/net/wireless/core.c
+@@ -519,6 +519,7 @@
+ 	}
+ 
+ 	mutex_init(&rdev->wiphy.mtx);
++	INIT_LIST_HEAD(&rdev->dfs_follow_aps);
+ 	INIT_LIST_HEAD(&rdev->wiphy.wdev_list);
+ 	INIT_LIST_HEAD(&rdev->beacon_registrations);
+ 	spin_lock_init(&rdev->beacon_registrations_lock);
+@@ -1284,7 +1285,12 @@
+ 			unregister_netdevice(wdev->netdev);
+ 	}
+ 
++	cfg80211_dfs_follow_del(wdev, -1);
+ 	list_del_rcu(&wdev->list);
++	if (wdev->iftype == NL80211_IFTYPE_STATION) {
++		rdev->dfs_follow_csa = false;
++		cfg80211_dfs_follow_check(wdev->wiphy, false);
++	}
+ 	synchronize_net();
+ 	rdev->devlist_generation++;
+ 
+diff --git a/net/wireless/core.h b/net/wireless/core.h
+--- a/net/wireless/core.h
++++ b/net/wireless/core.h
+@@ -21,6 +21,15 @@
+ 
+ #define WIPHY_IDX_INVALID	-1
+ 
++/* Private paired hostapd/cfg80211 protocol, not an upstream UAPI allocation. */
++#define MANET_AP_DFS_FOLLOW BIT(31)
++bool cfg80211_dfs_follow_enabled(struct wiphy *wiphy);
++bool cfg80211_dfs_follow_chandef(struct wireless_dev *wdev,
++				 const struct cfg80211_chan_def *chandef);
++int cfg80211_dfs_follow_add(struct wireless_dev *wdev, unsigned int link);
++void cfg80211_dfs_follow_del(struct wireless_dev *wdev, int link);
++void cfg80211_dfs_follow_check(struct wiphy *wiphy, bool force);
++
+ struct cfg80211_scan_request_int {
+ 	struct cfg80211_scan_info info;
+ 	bool notified;
+@@ -88,6 +97,11 @@
+ 
+ 	struct work_struct conn_work;
+ 	struct work_struct event_work;
++
++	/* MANET DFS follower v1: private state, protected by wiphy mutex. */
++	struct list_head dfs_follow_aps;
++	int dfs_follow_start; /* -1 ordinary START_AP, 0 idle, 1 follower */
++	bool dfs_follow_csa;
+ 
+ 	struct delayed_work dfs_update_channels_wk;
+ 
+diff --git a/net/wireless/nl80211.c b/net/wireless/nl80211.c
+--- a/net/wireless/nl80211.c
++++ b/net/wireless/nl80211.c
+@@ -6621,6 +6621,16 @@
+ 	if (!params)
+ 		return -ENOMEM;
+ 
++	rdev->dfs_follow_start =
++		info->attrs[NL80211_ATTR_AP_SETTINGS_FLAGS] &&
++		(nla_get_u32(info->attrs[NL80211_ATTR_AP_SETTINGS_FLAGS]) &
++		 MANET_AP_DFS_FOLLOW) ? 1 : -1;
++
++	if (rdev->dfs_follow_start != 1 && !list_empty(&rdev->dfs_follow_aps)) {
++		err = -EBUSY;
++		goto out;
++	}
++
+ 	err = nl80211_parse_beacon(rdev, info->attrs, &params->beacon,
+ 				   info->extack);
+ 	if (err)
+@@ -6863,7 +6873,19 @@
+ 
+ 	/* FIXME: validate MLO/link-id against driver capabilities */
+ 
++	if (rdev->dfs_follow_start == 1) {
++		if (!cfg80211_dfs_follow_chandef(wdev, &params->chandef)) {
++			err = -EINVAL;
++			goto out;
++		}
++		err = cfg80211_dfs_follow_add(wdev, link_id);
++		if (err)
++			goto out;
++	}
++	params->flags &= ~MANET_AP_DFS_FOLLOW;
+ 	err = rdev_start_ap(rdev, dev, params);
++	if (err)
++		cfg80211_dfs_follow_del(wdev, link_id);
+ 	if (!err) {
+ 		wdev->links[link_id].ap.beacon_interval = params->beacon_interval;
+ 		wdev->links[link_id].ap.chandef = params->chandef;
+@@ -6877,6 +6899,7 @@
+ 		nl80211_send_ap_started(wdev, link_id);
+ 	}
+ out:
++	rdev->dfs_follow_start = 0;
+ 	kfree(params->acl);
+ 	kfree(params->beacon.mbssid_ies);
+ 	if (params->mbssid_config.tx_wdev &&
+@@ -11472,7 +11495,14 @@
+ 	}
+ 
+ 	params.link_id = link_id;
+-	err = rdev_channel_switch(rdev, dev, &params);
++	if (wdev->iftype == NL80211_IFTYPE_AP &&
++	    cfg80211_dfs_follow_enabled(wdev->wiphy) &&
++	    !list_empty(&rdev->dfs_follow_aps) &&
++	    ((params.chandef.chan->flags & IEEE80211_CHAN_RADAR) ||
++	     (wdev->links[link_id].ap.chandef.chan->flags & IEEE80211_CHAN_RADAR)))
++		err = -EOPNOTSUPP;
++	else
++		err = rdev_channel_switch(rdev, dev, &params);
+ 
+ free:
+ 	kfree(params.beacon_after.mbssid_ies);
+@@ -20953,6 +20983,8 @@
+ 	WARN_INVALID_LINK_ID(wdev, link_id);
+ 
+ 	trace_cfg80211_ch_switch_notify(dev, chandef, link_id);
++	if (wdev->iftype == NL80211_IFTYPE_STATION)
++		rdev->dfs_follow_csa = false;
+ 
+ 	switch (wdev->iftype) {
+ 	case NL80211_IFTYPE_STATION:
+@@ -20998,6 +21030,11 @@
+ 	WARN_INVALID_LINK_ID(wdev, link_id);
+ 
+ 	trace_cfg80211_ch_switch_started_notify(dev, chandef, link_id);
++	if (wdev->iftype == NL80211_IFTYPE_STATION &&
++	    cfg80211_dfs_follow_enabled(wiphy)) {
++		rdev->dfs_follow_csa = true;
++		cfg80211_dfs_follow_check(wiphy, true);
++	}
+ 
+ 
+ 	nl80211_ch_switch_notify(rdev, dev, link_id, chandef, GFP_KERNEL,
+@@ -21770,6 +21807,12 @@
+ {
+ 	struct wiphy *wiphy = wdev->wiphy;
+ 
++	if (wdev->iftype == NL80211_IFTYPE_STATION) {
++		if (!wdev->connected)
++			wiphy_to_rdev(wiphy)->dfs_follow_csa = false;
++		cfg80211_dfs_follow_check(wiphy, false);
++	}
++
+ 	/* Schedule channels check if NO_IR or DFS relaxations are supported */
+ 	if (wdev->iftype == NL80211_IFTYPE_STATION &&
+ 	    (wiphy_ext_feature_isset(wiphy,
+diff --git a/net/wireless/reg.c b/net/wireless/reg.c
+--- a/net/wireless/reg.c
++++ b/net/wireless/reg.c
+@@ -2440,6 +2440,7 @@
+ 
+ 	guard(wiphy)(wiphy);
+ 
++	cfg80211_dfs_follow_check(wiphy, false);
+ 	list_for_each_entry(wdev, &rdev->wiphy.wdev_list, list)
+ 		if (!reg_wdev_chan_valid(wiphy, wdev))
+ 			cfg80211_leave(rdev, wdev);
+diff --git a/net/wireless/sme.c b/net/wireless/sme.c
+--- a/net/wireless/sme.c
++++ b/net/wireless/sme.c
+@@ -476,6 +476,7 @@
+ 				 &wdev->links[link].client.current_bss->pub);
+ 		wdev->links[link].client.current_bss = NULL;
+ 	}
++	cfg80211_dfs_follow_check(wdev->wiphy, false);
+ }
+ 
+ void cfg80211_wdev_release_link_bsses(struct wireless_dev *wdev, u16 link_mask)
+@@ -491,6 +492,7 @@
+ 				 &wdev->links[link].client.current_bss->pub);
+ 		wdev->links[link].client.current_bss = NULL;
+ 	}
++	cfg80211_dfs_follow_check(wdev->wiphy, false);
+ }
+ 
+ static int cfg80211_sme_get_conn_ies(struct wireless_dev *wdev,

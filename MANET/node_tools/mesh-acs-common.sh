@@ -127,6 +127,18 @@ acs_write_channels() (
     return 0
 )
 
+# Reconcile only local RF trouble; the helper also retains live hold ownership.
+# Retry deferred transitions on the next manager pass, including static mode.
+reconcile_rx_policy() {
+    local iface=$1 trouble=${2:-false} policy=clear helper
+    [ -n "$iface" ] || return 0
+    [ "$trouble" != true ] || policy=trouble
+    helper="${MANET_BGOBS_HELPER:-${MANET_TOOLS_DIR:-$(dirname \
+        "${BASH_SOURCE[0]}")}/manet_bgobs.py}"
+    timeout --foreground --kill-after=2s 5s python3 "$helper" \
+        "$iface" --policy "$policy" >/dev/null 2>&1 || true
+}
+
 # /proc/uptime and Python CLOCK_BOOTTIME include time spent suspended.
 acs_mark_busy() {
     local boot now rest

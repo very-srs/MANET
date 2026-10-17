@@ -205,7 +205,7 @@ class RuntimeTests(AcsHarness):
         self.assertEqual(self.runner.state['protocol']['phase'], 'attempted')
         self.assertFalse(self.runner.status(plan['activate_at'] + 1)['ready'])
         self.assertEqual(self.runner.state['hold_until'], self.elapsed + p.RECOVERY_SECONDS)
-        self.assertIn('wpa_cli -i wlan0 reconfigure', (self.root / 'commands').read_text())
+        self.assertIn('iw dev wlan0 switch freq 2462 HT20 beacons 5', (self.root / 'commands').read_text())
 
     def test_preference_streak_survives_ticks_and_same_boot_reload(self):
         """Normal clock setup and idle ticks preserve consecutive rounds."""

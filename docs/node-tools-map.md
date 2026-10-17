@@ -65,6 +65,8 @@ Read [mesh mechanisms](guide/content/mesh.md) and
 | [manet_acs_agreement.py](../MANET/node_tools/manet_acs_agreement.py) | Pure bounded majority-agreement state machine. |
 | [mesh-acs-common.sh](../MANET/node_tools/mesh-acs-common.sh) | Shared clock, role and channel configuration helpers. |
 | [manet_bgobs.py](../MANET/node_tools/manet_bgobs.py) | Measure 5 GHz candidates on the reserved third RX chain and correct own-TX blanking. |
+| [manet_dfs.py](../MANET/node_tools/manet_dfs.py) | Check paired DFS capability and live channel flags, and send bounded CAC and mesh CSA requests. |
+| [manet_rx_policy.py](../MANET/node_tools/manet_rx_policy.py) | Reconcile CM4 receive paths from local RF trouble and kernel hold ownership. |
 | [channel-election.sh](../MANET/node_tools/channel-election.sh) | Score measured channels and request an agreed change; signal limp conditions. |
 | [quorum-checker.sh](../MANET/node_tools/quorum-checker.sh) | Decide whether isolation requires returning to discovery, distinguishing unavailable checks. |
 | [limp-mode-manager.sh](../MANET/node_tools/limp-mode-manager.sh) | Reconcile limp-mode entry/exit from mesh observations. |
@@ -225,7 +227,9 @@ Read [first boot](guide/content/first-boot.md), [updates](guide/content/updates.
 | [manet_release.py](../MANET/node_tools/manet_release.py) | Select a published stable/development release and validate its manifest. |
 | [node-update.sh](../MANET/node_tools/node-update.sh) | Enter the Python updater or resume using the retained recovery copy. |
 | [node-update.py](../MANET/node_tools/node-update.py) | Verify, stage, replace and activate an update with durable recovery state. |
-| [manet_kernel_update.py](../MANET/node_tools/manet_kernel_update.py) | Validate matched kernel inputs and manage qualified CM4 trial, confirmation and fallback state. |
+| [manet-release-bootstrap.py](../MANET/node_tools/manet-release-bootstrap.py) | Apply an embedded CM4 archive after the legacy updater finishes, retaining recovery until kernel confirmation. |
+| [manet-release-setup.py](../MANET/node_tools/manet-release-setup.py) | Verify and install the native follower hostapd package, APT pin and regulatory database. |
+| [manet_kernel_update.py](../MANET/node_tools/manet_kernel_update.py) | Validate matched kernel inputs, derive local CM4 field profiles, honor operator opt-out and manage trial health, confirmation and fallback. |
 | [manet-auto-update.sh](../MANET/node_tools/manet-auto-update.sh) | Gate routine updates on opt-in, clock sync and a direct or mesh-gateway route; spread mesh checks with a bounded delay. |
 | [version.txt](../MANET/node_tools/version.txt) | Runtime package version; must match the paired source version when publishing packages. |
 

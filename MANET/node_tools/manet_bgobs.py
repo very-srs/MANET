@@ -7,11 +7,12 @@ import os
 from pathlib import Path
 import re
 import sys
+import subprocess
 import time
 
-# ACS currently elects these non-DFS 20 MHz primaries. The kernel additionally
-# checks the current regulatory flags, including disabled/radar channels.
-CANDIDATES = frozenset((5200, 5220, 5240, 5745, 5765, 5785, 5805, 5825))
+# Candidate 20 MHz primaries. DFS observation requires the paired release
+# capability; the kernel also rejects disabled and NOP channels.
+CANDIDATES = frozenset((5200, 5220, 5240, 5745, 5765, 5785, 5805, 5825)) | frozenset(range(5260, 5340, 20)) | frozenset(range(5500, 5740, 20))
 DWELL_MS = 250
 # Reservation-v2 validated low-TX controls only (up to 6.2%). Near 90%,
 # survey TX undercounts bin-10 blanking and lower bins also retain energy.
@@ -134,6 +135,28 @@ def collect_candidates(path, frequencies, iface):
     lock = run / ('manet-bgobs-' + path.parents[1].name + '.lock')
     with lock.open('a') as stream:
         fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        hold_path = path.parent.parent / 'background_hold'
+        if hold_path.exists():
+            hold = json.loads(hold_path.read_text())
+            if hold.get('owner'):
+                # CAC/hold owns RDD2. Publish its read-only occupancy tap and
+                # never retune it to collect other candidates.
+                sample = hold.get('occupancy', {})
+                if (sample.get('epoch') == hold.get('epoch') and
+                        sample.get('generation') == hold.get('generation')):
+                    record = dict(sample, rx_reserved=True, active=False,
+                        reserved=False, error=0, restore_error=0,
+                        center_mhz=hold['freq_mhz'], width_mhz=20,
+                        counter_policy='modulo23_no_clear')
+                    try:
+                        busy = occupancy(record, hold['freq_mhz'])
+                        return [dict(channel=hold['freq_mhz'], busy_pct=busy,
+                                     bss_count=0, _observer=True,
+                                     _survey_iface=iface,
+                                     _survey_boot=int(time.clock_gettime(time.CLOCK_BOOTTIME)))]
+                    except (ValueError, KeyError, TypeError):
+                        pass
+                return []
         for frequency in frequencies:
             if frequency not in CANDIDATES:
                 continue
@@ -156,13 +179,30 @@ def observer_main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('iface')
     parser.add_argument('frequencies', nargs='*', type=int)
+    parser.add_argument('--policy', choices=('trouble', 'clear'),
+                        help='reconcile the local RX policy without scanning')
     args = parser.parse_args()
     try:
         path = observer_path(args.iface)
         if path is None:
             return 3
-        results = collect_candidates(path, args.frequencies, args.iface)
-    except (OSError, ValueError, KeyError, TypeError) as error:
+        if args.policy:
+            from manet_rx_policy import reconcile_receive_paths
+            run = Path(os.environ.get('MANET_ACS_RUN_DIR', '/run'))
+            lock = run / ('manet-bgobs-' + path.parents[1].name + '.lock')
+            with lock.open('a') as stream:
+                fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                print(reconcile_receive_paths(path, args.policy == 'trouble'))
+            return 0
+        from manet_dfs import capable, dfs_frequencies
+        phy_text = subprocess.run(['iw', 'phy', path.parents[1].name, 'info'],
+            check=True, capture_output=True, text=True, timeout=2).stdout
+        frequencies = list(args.frequencies)
+        hold_path = path.parent.parent / 'background_hold'
+        if capable(hold_path, phy_text):
+            frequencies = sorted(set(frequencies) | set(dfs_frequencies(phy_text)))
+        results = collect_candidates(path, frequencies, args.iface)
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
         print('manet_bgobs: ' + str(error), file=sys.stderr)
         return 1
     print(json.dumps({'results': results}, separators=(',', ':')))

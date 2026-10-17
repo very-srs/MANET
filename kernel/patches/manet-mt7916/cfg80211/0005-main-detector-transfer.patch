@@ -1,0 +1,193 @@
+diff --git a/net/wireless/core.h b/net/wireless/core.h
+--- a/net/wireless/core.h
++++ b/net/wireless/core.h
+@@ -120,6 +120,9 @@
+ 	u64 background_hold_radar_at_us;
+ 	int background_hold_radar_freq;
+ 	const char *background_hold_reason, *background_hold_radar_cause;
++	bool hold_main_active;
++	struct manet_hold_token hold_main_token;
++	struct cfg80211_chan_def hold_main_chandef;
+ 	struct wireless_dev *background_radar_wdev;
+ 	struct cfg80211_chan_def background_radar_chandef;
+ 	struct delayed_work background_cac_done_wk;
+diff --git a/net/wireless/hold-api.h b/net/wireless/hold-api.h
+--- a/net/wireless/hold-api.h
++++ b/net/wireless/hold-api.h
+@@ -24,4 +24,13 @@
+ bool cfg80211_hold_sample_v2(struct wiphy *wiphy,
+ 			   const struct manet_hold_token *token,
+ 			   const struct manet_hold_sample *sample);
++
++struct wiphy;
++struct cfg80211_chan_def;
++
++/* Called only after main RDD start succeeds, before retiring RDD2. */
++bool cfg80211_hold_transfer_v3(struct wiphy *wiphy,
++                             const struct cfg80211_chan_def *chandef,
++                             const struct manet_hold_token *token);
++void cfg80211_hold_main_stop_v3(struct wiphy *wiphy);
+ #endif
+diff --git a/net/wireless/hold-debugfs.inc b/net/wireless/hold-debugfs.inc
+--- a/net/wireless/hold-debugfs.inc
++++ b/net/wireless/hold-debugfs.inc
+@@ -4,12 +4,12 @@
+ 	struct wiphy *wiphy = seq->private;
+ 	struct cfg80211_registered_device *rdev = wiphy_to_rdev(wiphy);
+ 	struct manet_hold_sample sample;
+-	struct manet_hold_token token, radar;
++	struct manet_hold_token token, radar, main_token;
+ 	unsigned long flags;
+ 	u64 now, age, radar_sequence, radar_at;
+-	bool enabled, owner, fault, fresh, live, revoked;
++	bool enabled, owner, fault, fresh, live, revoked, main_active;
+ 	const char *reason, *cause;
+-	int freq, radar_freq, i;
++	int freq, radar_freq, main_freq, i;
+ 
+ 	if (!mutex_trylock(&wiphy->mtx))
+ 		return -EBUSY;
+@@ -34,6 +34,10 @@
+ 	radar_sequence = rdev->background_hold_radar_sequence;
+ 	radar_at = rdev->background_hold_radar_at_us;
+ 	radar_freq = rdev->background_hold_radar_freq;
++	main_token = rdev->hold_main_token;
++	main_active = rdev->hold_main_active;
++	main_freq = rdev->hold_main_chandef.chan ?
++		rdev->hold_main_chandef.chan->center_freq : 0;
+ 	spin_unlock_irqrestore(&rdev->background_hold_lock, flags);
+ 	mutex_unlock(&wiphy->mtx);
+ 
+@@ -47,6 +51,11 @@
+ 		BOOL(enabled), token.generation, token.epoch[0], token.epoch[1],
+ 		BOOL(owner), BOOL(fault), BOOL(live), BOOL(fresh), BOOL(revoked), reason,
+ 		freq, freq, now, sample.at_us, MANET_HOLD_MAX_AGE_US);
++	seq_printf(seq, "\"dfs_mesh_v1\":true,\"main_active\":%s,"
++		"\"main_epoch\":\"%016llx%016llx\",\"main_generation\":%llu,"
++		"\"main_freq_mhz\":%d,",
++		BOOL(main_active), main_token.epoch[0], main_token.epoch[1],
++		main_token.generation, main_freq);
+ 	seq_printf(seq, "\"radar_sequence\":%llu,\"radar_cause\":\"%s\","
+ 		"\"radar_epoch\":\"%016llx%016llx\",\"radar_generation\":%llu,"
+ 		"\"radar_freq_mhz\":%d,\"radar_boottime_us\":%llu,",
+@@ -92,7 +101,7 @@
+ 	if (!mutex_trylock(&wiphy->mtx))
+ 		return -EBUSY;
+ 	if (sysfs_streq(buf, "enable")) {
+-		if (rdev->background_radar_wdev ||
++		if (rdev->hold_main_active || rdev->background_radar_wdev ||
+ 		    work_busy(&rdev->background_cac_abort_wk) ||
+ 		    work_busy(&rdev->background_cac_done_wk.work))
+ 			ret = -EBUSY;
+@@ -102,18 +111,23 @@
+ 			spin_unlock_irqrestore(&rdev->background_hold_lock, flags);
+ 		}
+ 	} else if (sysfs_streq(buf, "stop")) {
++		if (rdev->hold_main_active && !rdev->background_radar_wdev) {
++			ret = -EBUSY;
++			goto out;
++		}
+ 		if (rdev->background_radar_wdev)
+ 			cfg80211_stop_background_radar_detection(rdev->background_radar_wdev);
+ 		if (rdev->background_radar_wdev)
+ 			ret = -EIO;
+ 		else {
+ 			spin_lock_irqsave(&rdev->background_hold_lock, flags);
+-			rdev->background_hold_enabled = false;
++			rdev->background_hold_enabled = rdev->hold_main_active;
+ 			spin_unlock_irqrestore(&rdev->background_hold_lock, flags);
+ 		}
+ 	} else {
+ 		ret = -EINVAL;
+ 	}
++out:
+ 	mutex_unlock(&wiphy->mtx);
+ 	return ret ? ret : count;
+ }
+diff --git a/net/wireless/hold-monitor.inc b/net/wireless/hold-monitor.inc
+--- a/net/wireless/hold-monitor.inc
++++ b/net/wireless/hold-monitor.inc
+@@ -102,3 +102,53 @@
+ 	if (abort)
+ 		queue_work(cfg80211_wq, &rdev->background_cac_abort_wk);
+ }
++
++/* The driver holds mt76.mutex. RDD2 is still running and the main RDD has
++ * acknowledged start. Freeze its identity before asynchronous RDD2 teardown.
++ * No availability gap: revoke preserves AVAILABLE while this main owns it.
++ */
++bool cfg80211_hold_transfer_v3(struct wiphy *wiphy,
++                             const struct cfg80211_chan_def *chandef,
++                             const struct manet_hold_token *token)
++{
++ struct cfg80211_registered_device *rdev = wiphy_to_rdev(wiphy);
++ unsigned long flags;
++ bool valid;
++
++ spin_lock_irqsave(&rdev->background_hold_lock, flags);
++ valid = rdev->background_hold_enabled && rdev->background_radar_wdev &&
++         rdev->background_hold_active && !rdev->background_hold_revoked &&
++         !rdev->background_hold_fault && background_hold_fresh(rdev, background_hold_now()) &&
++         !memcmp(token, &rdev->background_hold_token, sizeof(*token)) &&
++         cfg80211_chandef_identical(chandef, &rdev->background_radar_chandef) &&
++         chandef->chan->dfs_state == NL80211_DFS_AVAILABLE;
++ if (valid) {
++  rdev->hold_main_token = *token;
++  rdev->hold_main_chandef = *chandef;
++  rdev->hold_main_active = true;
++  cfg80211_background_hold_revoke(rdev);
++  rdev->background_hold_reason = "main-transfer";
++ }
++ spin_unlock_irqrestore(&rdev->background_hold_lock, flags);
++ if (valid)
++  queue_work(cfg80211_wq, &rdev->background_cac_abort_wk);
++ return valid;
++}
++EXPORT_SYMBOL_GPL(cfg80211_hold_transfer_v3);
++
++void cfg80211_hold_main_stop_v3(struct wiphy *wiphy)
++{
++ struct cfg80211_registered_device *rdev = wiphy_to_rdev(wiphy);
++ struct ieee80211_channel *chan;
++ unsigned long flags;
++
++ spin_lock_irqsave(&rdev->background_hold_lock, flags);
++ chan = rdev->hold_main_chandef.chan;
++ if (rdev->hold_main_active && chan && chan->dfs_state == NL80211_DFS_AVAILABLE) {
++  chan->dfs_state = NL80211_DFS_USABLE;
++  chan->dfs_state_entered = jiffies;
++ }
++ rdev->hold_main_active = false;
++ spin_unlock_irqrestore(&rdev->background_hold_lock, flags);
++}
++EXPORT_SYMBOL_GPL(cfg80211_hold_main_stop_v3);
+diff --git a/net/wireless/mlme.c b/net/wireless/mlme.c
+--- a/net/wireless/mlme.c
++++ b/net/wireless/mlme.c
+@@ -1112,6 +1112,7 @@
+ 	rdev->background_hold_sample.valid = false;
+ 	rdev->background_hold_active = false;
+ 	if (rdev->background_hold_enabled && chan &&
++	    !(rdev->hold_main_active && rdev->hold_main_chandef.chan == chan) &&
+ 	    chan->dfs_state == NL80211_DFS_AVAILABLE) {
+ 		chan->dfs_state = NL80211_DFS_USABLE;
+ 		chan->dfs_state_entered = jiffies;
+@@ -1134,7 +1135,17 @@
+ 	 * spanned by the chandef.
+ 	 */
+ 	spin_lock_irqsave(&rdev->background_hold_lock, flags);
+-	if (rdev->background_hold_enabled) {
++	if (rdev->hold_main_active && !offchan &&
++	    cfg80211_chandef_identical(chandef, &rdev->hold_main_chandef)) {
++		rdev->background_hold_radar_sequence++;
++		rdev->background_hold_radar_token = rdev->hold_main_token;
++		rdev->background_hold_radar_at_us = background_hold_now();
++		rdev->background_hold_radar_freq = chandef->chan->center_freq;
++		rdev->background_hold_radar_cause = "main-radar";
++		rdev->hold_main_active = false;
++		cfg80211_background_hold_revoke(rdev);
++		rdev->background_hold_reason = "radar";
++	} else if (rdev->background_hold_enabled) {
+ 		/* Only a radar event for the current held chandef is attributed
+ 		 * to this generation. A different main-channel event still revokes
+ 		 * the hold but must not be relabelled as radar on the candidate.

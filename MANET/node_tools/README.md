@@ -656,7 +656,9 @@ counts on this path; candidate noise is unmeasured. Windows with at least 10%
 local transmit time are omitted: heavy local TX biased quiet-channel estimates
 on the reservation bench. This provisional limit preserves low-TX controls;
 it is not a calibrated correction for heavier load. Other invalid windows are
-also omitted. The observer currently accepts non-DFS candidates only.
+also omitted. With the matched DFS kernel, the passive observer also measures
+DFS candidates whose live PHY flags permit listening. A background CAC owner
+keeps the receiver and supplies its own read-only occupancy sample.
 
 Without an observer, 5 GHz keeps its main-radio flush scan behind the same
 gate, including its three-sample occupancy warmup. That scan includes the
@@ -885,19 +887,48 @@ addressing the cause, run `sudo manet-mt7916-firmware.py --rearm` to retry on
 the next boot. An update with a different patched WM hash also rearms the
 trial. Reinstalling the same hash leaves the latch in place.
 
-`mt7916_background_rx=y` in `/etc/mesh.conf` reserves the third 5 GHz receive
-chain on supported kernels at the next boot. The main radio becomes 2T2R;
-ACS can then measure candidate energy while that radio carries traffic.
-The default is `n`, which retains the normal receive chains and candidate
-scans. This is a local setting, read by the existing config watcher; it does
-not reload a driver. An unconfirmed patched boot also suspends this reservation
-until explicit rearm or an update with a different patched WM hash.
-Keep this setting at `n` outside the bench. The original reservation stopped
-the main 5 GHz link from peering on two Rock 3A nodes. Kernel initialization
-fixes now align the firmware EEPROM band and path settings with the host,
-but restored traffic with simultaneous observation remains unverified.
-CM4 validation is also required. Runtime `auto / always / never` policy is
-not implemented yet.
+On CM4, ACS starts with all three 5 GHz receive paths. When the local RF
+trouble flag is set, `manet_rx_policy.py` requests two receive paths plus the
+observer through the kernel's runtime transition. A CAC/hold owner keeps the
+reservation after trouble clears. Once both clear, the controller requests
+three paths again. Transitions are at least 60 seconds apart. Busy or throttled
+transitions are retried on a later measurement cycle without stopping another
+receiver owner. Peer trouble alone does not reserve this node's third path.
+Static mode also requests three paths, preserving any active kernel hold.
+The managed boot reservation is removed on deployed boards so the runtime
+transition can restore the native EEPROM configuration.
+
+This requires the paired kernel's `rx_transition_probe` interface and currently
+supports HT20 mesh operation only. Rock 3A and RPi5 do not enable it. Main-link
+receive throughput can fall by up to a third while reserved. Candidate samples
+with at least 10 percent local transmit time are discarded.
+
+DFS mesh selection is enabled on CM4 when the loaded driver advertises
+`dfs_mesh_v1`, cfg80211 exposes the matching transfer ABI, and the live PHY
+reports DFS flags. Every connected node must support it. Tools alone cannot
+open the gate. The coordinator selects a measured DFS candidate and the best
+common non-DFS fallback, then distributes a bounded CAC intention through
+authenticated Alfred. Every node reserves its receiver, completes background
+CAC and keeps a live hold. Only then can all nodes approve a timed channel
+plan binding their exact receiver epochs and generations.
+
+Each participant initiates mesh CSA at the agreed time. DFS entry includes
+`NL80211_ATTR_HANDLE_DFS`. RDD2 remains active until the main detector starts
+and cfg80211 accepts the exact token transfer. The channel stays AVAILABLE
+through background teardown. Main-channel radar keeps the transferred token
+and reports `main-radar` through the kernel latch, alongside nl80211 events.
+The independent watcher requests a one-beacon block-TX CSA to the agreed
+fallback before writing an event or publishing over Alfred. A failed CSA
+leaves the interface down for fallback recovery. Peers can follow CSA or the
+authenticated report over any surviving mesh path. Radar starts a 30-minute
+DFS cooldown. Peer loss alone never triggers this fallback.
+
+Later measurement rounds refresh the fallback through a new unanimous plan.
+The reserved receive configuration remains in place while a DFS main detector
+is active because the benched receive-path transition accepts non-DFS channels
+only. It can return to three paths after leaving DFS and releasing all owners.
+The source and built candidate support this sequence. Hardware acceptance of
+the complete CSA and main-radar path remains required before publication.
 
 Connect by Ethernet or join this radio's own Wi-Fi network. For a radio with GPS,
 turn **Android location OFF**, enable **ATAK external GPS input on UDP 4349**, and
@@ -1853,9 +1884,11 @@ The update archive can carry any component required by a release, including
 kernels, modules, firmware, and configuration migrations. The `tools` name
 does not restrict payload scope. Fielded radios may be sealed, so maintenance
 must be designed around updates in place. Current packages include runtime
-software and managed MT7916 firmware. An opt-in CM4 kernel trial path is
-implemented but still requires hardware qualification before shipment. It needs
-a local validated boot profile and a unique kernel release. Rock 3A kernel
+software and managed MT7916 firmware. A supplied CM4 kernel payload starts a
+one-shot trial by default, using this node's boot configuration and a unique
+kernel release. Set `enabled=n` in `/etc/manet-kernel-update.conf` to install
+only the runtime payload. The setting is local and cannot be replaced by an
+update archive. An already armed trial still resolves safely. Rock 3A kernel
 activation is disabled pending bootloader and reset-path validation. See the
 [field update policy](../../docs/node-tools-internals.md#field-update-policy).
 
@@ -1912,13 +1945,22 @@ with a different release.
 
 A kernel payload stages a separate boot set and module tree before replacing
 runtime software. The old kernel remains the normal boot choice during the
-CM4 one-shot trial. Confirmation checks the trial identity, core services and
-a locally pinned radio/management health check before changing the normal
-boot selector. A failed trial is retained for diagnosis and is never retried
+CM4 one-shot trial. The updater derives a profile from the node's config,
+command line, FAT UUID and detected hardware. Confirmation requires multi-user
+startup, healthy critical services, PID 1 holding an active hardware watchdog,
+mounted root and boot filesystems, matching modules, and an up `bat0`.
+PCI/USB identities determine which radio drivers and PHYs must work, including
+the MT7916 timing marker. A bound Morse SPI hat is also recorded before reboot.
+No Ethernet, internet, peers or clock synchronization is required. A root-owned
+`/etc/manet-kernel-trial.json` and its pinned health program remain an explicit
+bench override. Health gets up to 60 seconds within the 240-second boot
+confirmation deadline. A failed trial is retained for diagnosis and is never retried
 automatically. After returning to the original kernel, use
 `sudo node-update.sh --cancel-kernel-trial` to cancel an uncommitted trial.
-Candidate files are retained. The firmware kernel watchdog, PID 1 runtime
-watchdog and confirmation deadline must be validated before commissioning.
+Candidate files are retained. Trials use the firmware kernel watchdog,
+`watchdog.open_timeout=120`, PID 1's runtime watchdog and an independent
+300-second confirmation guard. The reset/fallback mechanism has been benched
+on CM4. The generic field health policy still needs an on-node acceptance run.
 An EEPROM boot watchdog is optional and its status is recorded. Without it,
 a failure before kernel handoff can need a power cycle to select the previous
 kernel. The sealed radio's power supply must remain accessible.
