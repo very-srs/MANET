@@ -291,7 +291,8 @@ Administrator, which writing to a card requires.
 On the first run it makes a `MANET Flasher` folder beside itself, moves in, and downloads
 what it needs. From then on run it from that folder. Your saved settings
 (`.mesh-configs`) and your own setup scripts (`additional-scripts`) live there too, and
-the window shows the path along its bottom edge as a link that opens it.
+the window has an **Open settings and setup scripts folder** link along its
+bottom edge. Hover over it to see the path.
 
 #### 1. Pick the board
 
@@ -315,8 +316,10 @@ needed is present.
 #### 3. Enter the mesh settings
 
 The settings page separates **SSH login** (editable username and password)
-from **Web interface admin password**. Scroll down to see all settings and
-**Save settings as**. The SSH username defaults to `radio`.
+from **Web interface admin password**. The SSH username defaults to `radio`,
+and the EUD connection type defaults to **Wired**. Choose **Show services and
+addressing** to reveal the service options and **Network CIDR**. You can resize
+the window or scroll the page. **Save settings as** stays in the footer.
 
 Every node on one mesh needs the same **mesh name** and **mesh password** or they will not
 see each other. **Generate** makes a strong one for you.
@@ -325,16 +328,20 @@ Save the settings under a name with the **Save** button, then load that same nam
 every other card. Saved settings are shared with `flash-a-radio.sh`, so a mesh can be built from a
 mix of Windows and Linux machines.
 
+**New configuration** restores the form defaults. Loading or creating a
+configuration asks before replacing edited settings. **Next** offers to save
+unsaved changes, continue without saving, or keep editing. Invalid settings
+are marked beside their fields.
+
 The **Network CIDR** field accepts notation such as `10.30.2.0/24`, not an address span such as `192.168.10.1-80`. It shows how many radios and EUDs fit as you type. What
 each setting means is under [SETUP OPTIONS](#setup-options).
 
 #### 4. Review your own setup scripts
 
-![The setup scripts page](../../docs/images/provisioning/flasher-4-scripts.png)
-
 Anything in the `additional-scripts` folder is checked here before a card is touched, and
-each file is reported as it will be treated: **will run**, **ignored**, or **BROKEN** with
-the reason. Scripts written in a Windows editor are corrected on the way in, and each
+scripts are reported as **will run** or **BROKEN**, with the reason. Select
+**Show ignored files and documentation** to include files marked **ignored**.
+Scripts written in a Windows editor are corrected on the way in, and each
 correction is named. Nothing is flashed while a file is broken.
 
 Skip this page if the folder is empty, which is the normal case. See
@@ -342,15 +349,15 @@ Skip this page if the folder is empty, which is the normal case. See
 
 #### 5. Choose the card
 
-![The card selection page, with the CM4 eMMC found](../../docs/images/provisioning/flasher-5-card.png)
-
 For a CM4, follow the three steps in order. The jumper goes on **before** power and USB,
 not after. **Expose the eMMC** runs `rpiboot` in its own window so you can watch it, and
 reports which disk appeared.
 
-Disks are listed with what they are connected by and what is on them, and the disk you
-booted from is never shown. **Anything that is not removable media is listed in red**:
-read the size and the label before picking one.
+Disks are listed with their connection, device type, and contents. Fixed and
+internal drives are hidden until you select **Show fixed / internal drives
+(advanced)**, then listed in red. The disk you booted from is never shown.
+Read the device type, size, and label before picking one. Use **Check again**
+after connecting a card reader.
 
 #### 6. Read the summary back
 

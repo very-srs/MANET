@@ -1,4 +1,4 @@
-#Requires -RunAsAdministrator
+﻿#Requires -RunAsAdministrator
 <#
 .SYNOPSIS
     A window for flashing mesh radio nodes on Windows.
@@ -85,16 +85,10 @@ try {
     $g.Dispose()
 } catch { }
 
-# Never smaller than the design, and never so large the window will not fit on
-# the screen it has to open on. A 175% laptop is short enough that the nominal
-# scale would put the buttons below the taskbar.
+# Keep font and geometry scaling in step. Fit the window to the display by
+# reducing the viewport, never by shrinking boxes around full-size fonts.
 $DESIGN_W = 838.0
-$DESIGN_H = 620.0
-try {
-    $area = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
-    $fit  = [math]::Min(($area.Width - 40) / $DESIGN_W, ($area.Height - 60) / $DESIGN_H)
-    if ($fit -lt $Script:UiScale) { $Script:UiScale = $fit }
-} catch { }
+$DESIGN_H = 740.0
 if ($Script:UiScale -lt 1.0) { $Script:UiScale = 1.0 }
 
 function S {
@@ -228,7 +222,7 @@ $Script:PageTitles  = @{
     Done     = 'Finished'
 }
 $Script:PageBlurbs  = @{
-    Hardware = 'Every node on one mesh must be flashed with the same mesh settings. The board type can differ.'
+    Hardware = 'Choose the board type. Next, check the tools needed to prepare it.'
     Prereqs  = 'Anything missing can be installed from here. Nothing is downloaded until you ask for it.'
     Config   = 'All radios on the same mesh must use the same mesh name and mesh password.'
     Scripts  = 'Files in the additional-scripts folder are embedded and run once on the node after setup.'
@@ -878,6 +872,8 @@ function New-ContentPanel {
     $p.Size      = New-Object System.Drawing.Size((S $Script:CONTENT_W), (S $Script:CONTENT_H))
     $p.Location  = New-Object System.Drawing.Point((S 0), (S 0))
     $p.BackColor = $Script:UI.Panel
+    $p.Dock      = 'Fill'
+    $p.AutoScroll = $true
     $p.Visible   = $false
     return $p
 }
@@ -913,10 +909,6 @@ function Build-HardwarePage {
     }
 
     $Script:RbCm4.Checked = $true
-
-    $note = New-Text ("The mesh settings on the next pages must match on every node, or they will not see each other. " +
-                      "Save them once and load the same saved configuration for each card.") 28 ($y + 8) 760 40 $Script:UI.FontSmall $Script:UI.Muted
-    $p.Controls.Add($note)
 
     return $p
 }
@@ -1186,40 +1178,49 @@ function Build-ConfigPage {
     $p.AutoScroll = $true
 
     # --- saved configurations -------------------------------------------
-    $g1 = New-GroupBox 'Saved settings' 16 6 398 70
-    $Script:CmbSaved = New-Combo 12 26 250 @()
+    $g1 = New-GroupBox 'Load or create a configuration' 16 6 794 82
+    $g1.Controls.Add((New-Text 'Load saved settings' 12 20 360 20 $Script:UI.FontBold))
+    $Script:CmbSaved = New-Combo 12 44 250 @()
+    $Script:CmbSaved.AccessibleName = 'Saved configuration'
     $g1.Controls.Add($Script:CmbSaved)
-    $g1.Controls.Add((New-Btn 'Load' 270 25 112 26 { Load-SelectedConfig }))
+    $Script:BtnLoadConfig = New-Btn 'Load' 270 43 112 26 { Load-SelectedConfig }
+    $g1.Controls.Add($Script:BtnLoadConfig)
+    $g1.Controls.Add((New-Text 'Create new settings' 410 20 360 20 $Script:UI.FontBold))
+    $g1.Controls.Add((New-Btn 'New configuration' 410 43 170 26 { New-Configuration }))
+    $Script:LblProfileEmpty = New-Text 'No saved settings yet.' 590 47 190 20 $Script:UI.FontSmall $Script:UI.Muted
+    $g1.Controls.Add($Script:LblProfileEmpty)
     $p.Controls.Add($g1)
 
-    # --- clients ---------------------------------------------------------
-    $g2 = New-GroupBox 'Client devices (EUDs)' 16 84 398 180
-    $g2.Controls.Add((New-Text 'Connection type' 12 27 132 20))
-    $Script:CmbEud = New-Combo 148 24 230 @('Wired', 'Wireless', 'Auto')
-    $Script:CmbEud.SelectedIndex = 2
+    # --- EUDs ---------------------------------------------------------
+    $g2 = New-GroupBox 'Client devices (EUDs)' 424 96 386 272
+    $Script:LblEudGuidance = New-Text 'Wired EUDs are the intended setup for the fullest feature set.' 12 20 362 32 $Script:UI.FontSmall $Script:UI.Muted
+    $g2.Controls.Add($Script:LblEudGuidance)
+    $g2.Controls.Add((New-Text 'Connection type' 12 61 132 20))
+    $Script:CmbEud = New-Combo 148 58 230 @('Wired', 'Wireless', 'Auto')
+    $Script:CmbEud.SelectedItem = 'Wired'
     $Script:CmbEud.Add_SelectedIndexChanged({ Update-ConfigEnablement })
     $g2.Controls.Add($Script:CmbEud)
 
-    $g2.Controls.Add((New-Text 'EUD Wi-Fi name' 12 55 132 20))
-    $Script:TxtApSsid = New-Input 148 52 230
+    $g2.Controls.Add((New-Text 'EUD Wi-Fi name' 12 139 132 20))
+    $Script:TxtApSsid = New-Input 148 136 230
     $g2.Controls.Add($Script:TxtApSsid)
-    $g2.Controls.Add((New-Text 'Each radio adds four characters from its Ethernet MAC address, for example FieldNet-a1b2.' 12 78 370 34 $Script:UI.FontSmall $Script:UI.Muted))
+    $g2.Controls.Add((New-Text 'Each radio adds four characters from its Ethernet MAC address, for example FieldNet-a1b2.' 12 162 370 34 $Script:UI.FontSmall $Script:UI.Muted))
 
-    $g2.Controls.Add((New-Text 'EUD Wi-Fi password' 12 119 132 20))
-    $Script:TxtApKey = New-Input 148 116 136
+    $g2.Controls.Add((New-Text 'EUD Wi-Fi password' 12 203 132 20))
+    $Script:TxtApKey = New-Input 148 200 136
     $g2.Controls.Add($Script:TxtApKey)
     # Letters and digits, not base64. Ten random bytes encode to sixteen
     # base64 characters of which the last two are always '==' padding, which
     # looks like a mistake and is two characters of nothing. This key is the
     # one that gets typed by hand into a phone or a tablet, so it also does
     # without base64's '+' and '/'.
-    $g2.Controls.Add((New-Btn 'Generate' 290 115 88 24 {
+    $g2.Controls.Add((New-Btn 'Generate' 290 199 88 24 {
         $Script:TxtApKey.Text = Generate-Password -length 16
     }))
 
-    $g2.Controls.Add((New-Text 'EUDs per radio' 12 147 132 20))
+    $g2.Controls.Add((New-Text 'EUDs per radio' 12 231 132 20))
     $Script:NumEuds          = New-Object System.Windows.Forms.NumericUpDown
-    $Script:NumEuds.Location = New-Object System.Drawing.Point((S 148), (S 144))
+    $Script:NumEuds.Location = New-Object System.Drawing.Point((S 148), (S 228))
     $Script:NumEuds.Size     = New-Object System.Drawing.Size((S 60), (S 24))
     $Script:NumEuds.Font     = $Script:UI.Font
     $Script:NumEuds.Minimum  = 1
@@ -1227,19 +1228,26 @@ function Build-ConfigPage {
     $Script:NumEuds.Value    = 4
     $Script:NumEuds.Add_ValueChanged({ Update-CapacityLabel })
     $g2.Controls.Add($Script:NumEuds)
+    $Script:LblEudMode = New-Text '' 12 86 362 44 $Script:UI.FontSmall $Script:UI.Muted
+    $g2.Controls.Add($Script:LblEudMode)
     $p.Controls.Add($g2)
 
     # --- services --------------------------------------------------------
-    $g3 = New-GroupBox 'Services on the radio' 16 272 398 126
+    $Script:AdvancedPanel = New-Object System.Windows.Forms.Panel
+    $Script:AdvancedPanel.Location = New-Object System.Drawing.Point((S 0), (S 488))
+    $Script:AdvancedPanel.Size = New-Object System.Drawing.Size((S 818), (S 158))
+    $Script:AdvancedPanel.Visible = $false
+    $p.Controls.Add($Script:AdvancedPanel)
+    $g3 = New-GroupBox 'Services on the radio' 424 0 386 126
     $Script:ChkMtx    = New-Check 'MediaMTX video server'                12 24 360 $false
     $Script:ChkMumble = New-Check 'Mumble voice server (murmur)'         12 48 360 $false
     $Script:ChkVoice  = New-Check 'Mesh push-to-talk (needs an OpenVLM board)' 12 72 360 $true
     $Script:ChkUpdate = New-Check 'Update MANET tools automatically'     12 96 360 $true
     $g3.Controls.AddRange(@($Script:ChkMtx, $Script:ChkMumble, $Script:ChkVoice, $Script:ChkUpdate))
-    $p.Controls.Add($g3)
+    $Script:AdvancedPanel.Controls.Add($g3)
 
     # --- mesh ------------------------------------------------------------
-    $g4 = New-GroupBox 'The mesh' 424 6 386 150
+    $g4 = New-GroupBox 'Mesh identity' 16 96 398 114
     $g4.Controls.Add((New-Text 'Mesh name' 12 27 124 20))
     $Script:TxtMeshSsid = New-Input 140 24 230
     $g4.Controls.Add($Script:TxtMeshSsid)
@@ -1261,12 +1269,17 @@ function Build-ConfigPage {
     $Script:LblDomainNote = New-Text '' 248 83 138 20 $Script:UI.FontSmall $Script:UI.Muted
     $g4.Controls.Add($Script:LblDomainNote)
 
-    $Script:ChkAcs = New-Check 'Choose the Wi-Fi channel automatically' 12 110 370 $false
-    $g4.Controls.Add($Script:ChkAcs)
+    $gChannels = New-GroupBox 'Mesh channel selection' 424 376 386 104
+    $Script:ChkAcs = New-Check 'Automatic channel selection (ACS)' 12 24 362 $false
+    $gChannels.Controls.Add($Script:ChkAcs)
+    $Script:LblChannelNote = New-Text '' 12 50 362 46 $Script:UI.FontSmall $Script:UI.Muted
+    $gChannels.Controls.Add($Script:LblChannelNote)
+    $Script:ChkAcs.Add_CheckedChanged({ Update-ChannelDescription })
+    $p.Controls.Add($gChannels)
     $p.Controls.Add($g4)
 
     # --- network ---------------------------------------------------------
-    $g5 = New-GroupBox 'Addresses' 424 164 386 104
+    $g5 = New-GroupBox 'Addresses' 16 0 398 150
     $g5.Controls.Add((New-Text 'Network CIDR' 12 27 124 20))
     $Script:TxtCidr = New-Input 140 24 140
     $Script:TxtCidr.Text = '10.30.2.0/24'
@@ -1274,10 +1287,11 @@ function Build-ConfigPage {
     $g5.Controls.Add($Script:TxtCidr)
     $Script:LblCapacity = New-Text '' 12 52 372 44 $Script:UI.FontSmall $Script:UI.Muted
     $g5.Controls.Add($Script:LblCapacity)
-    $p.Controls.Add($g5)
+    $g5.Controls.Add((New-Text 'Private network range, /16 to /26; for example 10.30.2.0/24.' 12 104 372 40 $Script:UI.FontSmall $Script:UI.Muted))
+    $Script:AdvancedPanel.Controls.Add($g5)
 
     # --- SSH account -----------------------------------------------------
-    $g6 = New-GroupBox 'SSH login' 424 276 386 94
+    $g6 = New-GroupBox 'SSH login' 16 218 398 94
     $g6.Controls.Add((New-Text 'SSH username' 12 27 124 20))
     $Script:TxtRadioUser = New-Input 140 24 230
     $Script:TxtRadioUser.Text = 'radio'
@@ -1290,7 +1304,7 @@ function Build-ConfigPage {
     $p.Controls.Add($g6)
 
     # A full-width heading identifies this separate password without clipping.
-    $g7 = New-GroupBox 'Web interface admin password' 424 378 386 78
+    $g7 = New-GroupBox 'Web interface admin password' 16 320 398 78
     $Script:TxtAdminPw = New-Input 12 24 272
     $g7.Controls.Add($Script:TxtAdminPw)
     $g7.Controls.Add((New-Btn 'Generate' 290 23 88 24 {
@@ -1298,15 +1312,59 @@ function Build-ConfigPage {
     }))
     $g7.Controls.Add((New-Text 'Used to change settings on the web management page.' 12 52 372 18 $Script:UI.FontSmall $Script:UI.Muted))
     $p.Controls.Add($g7)
-    $p.Controls.Add((New-Text 'Your SSH login and passwords are shown again when flashing finishes. Save them before closing.' 16 408 398 44 $Script:UI.FontSmall $Script:UI.Muted))
+    $Script:BtnAdvanced = New-Btn 'Show services and addressing' 16 442 280 28 { Toggle-AdvancedSettings }
+    $p.Controls.Add($Script:BtnAdvanced)
 
-    # --- save row --------------------------------------------------------
-    $p.Controls.Add((New-Text 'Save settings as' 16 470 140 20))
-    $Script:TxtSaveName = New-Input 160 467 200
-    $p.Controls.Add($Script:TxtSaveName)
-    $p.Controls.Add((New-Btn 'Save' 368 466 90 26 { Save-ConfigFromPage }))
-    $Script:LblSaveNote = New-Text '' 468 470 340 20 $Script:UI.FontSmall $Script:UI.Muted
-    $p.Controls.Add($Script:LblSaveNote)
+    # The save controls are hosted in the fixed footer, outside the scroll viewport.
+    $Script:ConfigSaveBar = New-Object System.Windows.Forms.Panel
+    $Script:ConfigSaveBar.Size = New-Object System.Drawing.Size((S 838), (S 56))
+    $Script:ConfigSaveBar.Controls.Add((New-Text 'Save settings as' 20 18 110 20))
+    $Script:TxtSaveName = New-Input 132 14 180
+    $Script:TxtSaveName.AccessibleName = 'Configuration file name'
+    $Script:ConfigSaveBar.Controls.Add($Script:TxtSaveName)
+    $Script:ConfigSaveBar.Controls.Add((New-Btn 'Save' 320 13 80 28 { [void](Save-ConfigFromPage) }))
+    $Script:LblSaveNote = New-Text 'New configuration; not saved yet.' 414 10 400 42 $Script:UI.FontSmall $Script:UI.Muted
+    $Script:ConfigSaveBar.Controls.Add($Script:LblSaveNote)
+    $Script:ConfigFields = [ordered]@{
+        TxtMeshSsid='Mesh name'; TxtMeshKey='Mesh password'; CmbDomain='Country'; ChkAcs='Automatic channel selection (ACS)'
+        CmbEud='EUD connection type'; TxtApSsid='EUD Wi-Fi name'; TxtApKey='EUD Wi-Fi password'; NumEuds='EUDs per radio'
+        TxtRadioUser='SSH username'; TxtRadioPw='SSH password'; TxtAdminPw='Web interface admin password'
+        TxtCidr='Network CIDR'; ChkMtx='MediaMTX video server'; ChkMumble='Mumble voice server'; ChkVoice='Mesh push-to-talk'; ChkUpdate='Automatic MANET updates'
+    }
+    $Script:ConfigErrors = New-Object System.Windows.Forms.ErrorProvider
+    $Script:ConfigErrors.ContainerControl = $Script:Form
+    $Script:ConfigErrors.BlinkStyle = 'NeverBlink'
+    $tab = 0
+    foreach ($key in $Script:ConfigFields.Keys) {
+        $control = Get-Variable -Scope Script -Name $key -ValueOnly
+        $control.AccessibleName = $Script:ConfigFields[$key]
+        $control.TabIndex = $tab++
+        if ($control -is [System.Windows.Forms.CheckBox]) { $control.Add_CheckedChanged({ param($sender, $eventArgs) $Script:ConfigErrors.SetError($sender, ''); Update-ConfigSaveState }) }
+        elseif ($control -is [System.Windows.Forms.NumericUpDown]) { $control.Add_ValueChanged({ param($sender, $eventArgs) $Script:ConfigErrors.SetError($sender, ''); Update-ConfigSaveState }) }
+        elseif ($control -is [System.Windows.Forms.ComboBox]) { $control.Add_SelectedIndexChanged({ param($sender, $eventArgs) $Script:ConfigErrors.SetError($sender, ''); Update-ConfigSaveState }) }
+        else { $control.Add_TextChanged({ param($sender, $eventArgs) $Script:ConfigErrors.SetError($sender, ''); Update-ConfigSaveState }) }
+    }
+    $g1.TabIndex = 0
+    $g4.TabIndex = 1
+    $g2.TabIndex = 2
+    $g6.TabIndex = 3
+    $g7.TabIndex = 4
+    $gChannels.TabIndex = 5
+    $Script:BtnAdvanced.TabIndex = 6
+    $Script:AdvancedPanel.TabIndex = 7
+    foreach ($group in @($g2, $g4, $g7)) {
+        foreach ($button in $group.Controls) {
+            if ($button -is [System.Windows.Forms.Button] -and $button.Text -eq 'Generate') {
+                $button.AccessibleName = switch ($group.Text) {
+                    'Client devices (EUDs)' { 'Generate EUD Wi-Fi password' }
+                    'Mesh identity' { 'Generate mesh password' }
+                    default { 'Generate web interface admin password' }
+                }
+            }
+        }
+    }
+    $Script:ConfigDefaults = Get-ConfigState
+    $Script:SavedConfigSnapshot = $null
 
     return $p
 }
@@ -1322,19 +1380,34 @@ function Update-ConfigEnablement {
     $wireless = ([string]$Script:CmbEud.SelectedItem) -in @('Wireless', 'Auto')
     foreach ($c in @($Script:TxtApSsid, $Script:TxtApKey, $Script:NumEuds)) { $c.Enabled = $wireless }
 
-    # Automatic channel selection and an always-on client AP cannot both have
-    # the radio, which is why the console flow forces it off and says so rather
-    # than letting the answer be given and quietly ignored. Auto mode allows
-    # it: with ACS, only a gateway serves the AP.
-    if (([string]$Script:CmbEud.SelectedItem) -eq 'Wireless') {
-        # Hidden rather than greyed out. A control that can never be used in
-        # this mode is only something else to read.
-        $Script:ChkAcs.Checked = $false
-        $Script:ChkAcs.Visible = $false
-    } else {
-        $Script:ChkAcs.Visible = $true
-    }
+    # Wireless EUD mode always uses the stored mesh channel plan.
+    $Script:ChkAcs.Visible = $true
+    $Script:ChkAcs.Enabled = ([string]$Script:CmbEud.SelectedItem) -ne 'Wireless'
+    if (-not $Script:ChkAcs.Enabled) { $Script:ChkAcs.Checked = $false }
+    Update-ChannelDescription
     Update-CapacityLabel
+}
+
+function Update-EudDescription {
+    $limitedAuto = ([string]$Script:CmbEud.SelectedItem -eq 'Auto') -and $Script:ChkAcs.Checked
+    $Script:LblEudMode.ForeColor = if ($limitedAuto) { $Script:UI.Bad } else { $Script:UI.Muted }
+    $Script:LblEudMode.Text = switch ([string]$Script:CmbEud.SelectedItem) {
+        'Wired' { 'EUDs connect by Ethernet. The EUD access point is off.' }
+        'Wireless' { 'The EUD access point stays on. Wired EUDs can also connect.' }
+        default {
+            if ($Script:ChkAcs.Checked) {
+                'Automatic channel selection limits Auto mode. The EUD AP requires this radio on Ethernet as a gateway, with no wired EUD.'
+            } else { 'Runs an access point for wireless EUDs when no wired EUD is attached. A wired EUD takes priority.' }
+        }
+    }
+}
+
+function Update-ChannelDescription {
+    if (-not $Script:LblChannelNote) { return }
+    Update-EudDescription
+    $mode = [string]$Script:CmbEud.SelectedItem
+    $Script:LblChannelNote.Text = 'When enabled, nodes scan and agree on mesh channels. When disabled, nodes use the stored mesh channel plan.'
+    if ($mode -eq 'Wireless') { $Script:LblChannelNote.Text += ' Unavailable in Wireless EUD mode.' }
 }
 
 function Update-CapacityLabel {
@@ -1347,21 +1420,93 @@ function Update-CapacityLabel {
         $Script:LblCapacity.ForeColor = $Script:UI.Muted
         return
     }
-    $Script:LblCapacity.Text = ("Room for {0} nodes, {1} client addresses, {2} reserved for services." -f `
+    $Script:LblCapacity.Text = ("Room for {0} nodes, {1} EUD addresses, {2} reserved for services." -f `
                                 $cap.MaxNodes, $cap.EudPool, $cap.Services)
     $Script:LblCapacity.ForeColor = if ($cap.MaxNodes -lt 5) { $Script:UI.Warn } else { $Script:UI.Muted }
     if ($cap.MaxNodes -lt 5) {
-        $Script:LblCapacity.Text += "`r`nThat is very few nodes. Use a bigger range or fewer clients per node."
+        $Script:LblCapacity.Text += "`r`nThat is very few nodes. Use a bigger range or fewer EUDs per node."
     }
+}
+
+function Toggle-AdvancedSettings {
+    $Script:AdvancedPanel.Visible = -not $Script:AdvancedPanel.Visible
+    $Script:BtnAdvanced.Text = if ($Script:AdvancedPanel.Visible) { 'Hide services and addressing' } else { 'Show services and addressing' }
+    $height = if ($Script:AdvancedPanel.Visible) { S 646 } else { S 480 }
+    $Script:Pages.Config.AutoScrollMinSize = New-Object System.Drawing.Size((S 818), $height)
+    $Script:Pages.Config.PerformLayout()
+    if ($Script:AdvancedPanel.Visible) { $Script:Pages.Config.ScrollControlIntoView($Script:AdvancedPanel) }
+}
+
+function Get-ConfigState {
+    $state = [ordered]@{}
+    foreach ($key in $Script:ConfigFields.Keys) {
+        $control = Get-Variable -Scope Script -Name $key -ValueOnly
+        $state[$key] = if ($control -is [System.Windows.Forms.CheckBox]) { $control.Checked }
+            elseif ($control -is [System.Windows.Forms.NumericUpDown]) { $control.Value }
+            elseif ($control -is [System.Windows.Forms.ComboBox]) { [string]$control.SelectedItem }
+            else { $control.Text }
+    }
+    return $state
+}
+
+function Test-ConfigUnsaved {
+    return ($null -eq $Script:SavedConfigSnapshot -or
+        (ConvertTo-Json -InputObject (Get-ConfigState) -Compress) -cne $Script:SavedConfigSnapshot)
+}
+
+function Update-ConfigSaveState {
+    if ($Script:ConfigUpdating -or -not $Script:ConfigFields) { return }
+    $Script:LblSaveNote.Text = if (Test-ConfigUnsaved) { 'Unsaved changes. Save to reuse these settings.' } else { "Saved configuration: $($Script:LoadedConfig)" }
+    $Script:LblSaveNote.ForeColor = if (Test-ConfigUnsaved) { $Script:UI.Warn } else { $Script:UI.Good }
+}
+
+function Confirm-ReplaceConfig {
+    if (-not (Test-ConfigUnsaved)) { return $true }
+    # The untouched initial form has nothing to lose.
+    if ((ConvertTo-Json -InputObject (Get-ConfigState) -Compress) -ceq
+        (ConvertTo-Json -InputObject $Script:ConfigDefaults -Compress)) { return $true }
+    return ([System.Windows.Forms.MessageBox]::Show($Script:Form,
+        'Replace the unsaved settings currently in this form?', 'Unsaved settings', 'YesNo', 'Warning') -eq 'Yes')
+}
+
+function New-Configuration {
+    if (-not (Confirm-ReplaceConfig)) { return }
+    $Script:ConfigUpdating = $true
+    try {
+        foreach ($key in $Script:ConfigFields.Keys) {
+            $control = Get-Variable -Scope Script -Name $key -ValueOnly
+            $value = $Script:ConfigDefaults[$key]
+            if ($control -is [System.Windows.Forms.CheckBox]) { $control.Checked = $value }
+            elseif ($control -is [System.Windows.Forms.NumericUpDown]) { $control.Value = $value }
+            elseif ($control -is [System.Windows.Forms.ComboBox]) { $control.SelectedItem = $value }
+            else { $control.Text = $value }
+        }
+        $Script:TxtSaveName.Clear()
+        $Script:LoadedConfig = $null
+        $Script:SavedConfigSnapshot = $null
+        Update-ConfigEnablement
+        Update-DomainNote
+    } finally { $Script:ConfigUpdating = $false }
+    Update-ConfigSaveState
+    $Script:Pages.Config.ScrollControlIntoView($Script:TxtMeshSsid.Parent)
+    [void]$Script:TxtMeshSsid.Focus()
 }
 
 function Update-SavedConfigList {
     if (-not (Test-Path $CONFIG_DIR)) { New-Item -ItemType Directory -Path $CONFIG_DIR | Out-Null }
+    $selected = [string]$Script:CmbSaved.SelectedItem
     $Script:CmbSaved.Items.Clear()
     foreach ($f in @(Get-ChildItem -Path $CONFIG_DIR -Filter '*.conf' -ErrorAction SilentlyContinue)) {
         [void]$Script:CmbSaved.Items.Add($f.BaseName)
     }
-    if ($Script:CmbSaved.Items.Count -gt 0) { $Script:CmbSaved.SelectedIndex = 0 }
+    $hasSaved = $Script:CmbSaved.Items.Count -gt 0
+    $Script:CmbSaved.Enabled = $hasSaved
+    $Script:BtnLoadConfig.Enabled = $hasSaved
+    $Script:LblProfileEmpty.Visible = -not $hasSaved
+    if ($hasSaved) {
+        if ($Script:CmbSaved.Items.Contains($selected)) { $Script:CmbSaved.SelectedItem = $selected }
+        else { $Script:CmbSaved.SelectedIndex = 0 }
+    }
 }
 
 function Load-SelectedConfig {
@@ -1370,8 +1515,14 @@ function Load-SelectedConfig {
     $file = Join-Path $CONFIG_DIR "$name.conf"
     if (-not (Test-Path $file)) { return }
 
-    Load-Config -ConfigFile $file
-    Copy-EngineToPage
+    if (-not (Confirm-ReplaceConfig)) { return }
+    $Script:ConfigUpdating = $true
+    try {
+        Load-Config -ConfigFile $file
+        Copy-EngineToPage
+    } finally { $Script:ConfigUpdating = $false }
+    $Script:ConfigErrors.Clear()
+    $Script:SavedConfigSnapshot = ConvertTo-Json -InputObject (Get-ConfigState) -Compress
     $Script:LoadedConfig = $name
     $Script:TxtSaveName.Text = $name
     $Script:LblSaveNote.Text = "Loaded '$name'."
@@ -1383,22 +1534,44 @@ function Load-SelectedConfig {
 # the shape the caller is entitled to expect.
 function Show-ConfigProblems {
     param([string[]]$Problems)
-    [System.Windows.Forms.MessageBox]::Show($Script:Form,
-        ("These need fixing first:`r`n`r`n  - " + ($Problems -join "`r`n  - ")),
-        'Not quite ready', 'OK', 'Warning') | Out-Null
+    $Script:ConfigErrors.Clear()
+    $first = $null
+    foreach ($problem in $Problems) {
+        $field = switch -Regex ($problem) {
+            'EUD Wi-Fi needs' { 'TxtApSsid'; break }
+            'EUD Wi-Fi password' { 'TxtApKey'; break }
+            'mesh needs' { 'TxtMeshSsid'; break }
+            'mesh password' { 'TxtMeshKey'; break }
+            'country' { 'CmbDomain'; break }
+            'range|prefix|address' { 'TxtCidr'; break }
+            default { 'TxtRadioUser' }
+        }
+        $control = Get-Variable -Scope Script -Name $field -ValueOnly
+        $Script:ConfigErrors.SetError($control, $problem)
+        $Script:ConfigErrors.SetIconAlignment($control, 'MiddleLeft')
+        if (-not $first) { $first = $control }
+    }
+    $Script:LblSaveNote.Text = "Fix $($Problems.Count) setting(s): $($Problems[0])"
+    $Script:LblSaveNote.ForeColor = $Script:UI.Bad
+    if ($first) {
+        if ($Script:AdvancedPanel.Contains($first) -and -not $Script:AdvancedPanel.Visible) { Toggle-AdvancedSettings }
+        $Script:Pages.Config.ScrollControlIntoView($first.Parent)
+        [void]$first.Focus()
+    }
 }
 
 function Save-ConfigFromPage {
     $name = $Script:TxtSaveName.Text.Trim()
     if (-not $name) {
+        [void]$Script:TxtSaveName.Focus()
         $Script:LblSaveNote.Text = 'Give it a name first.'
         $Script:LblSaveNote.ForeColor = $Script:UI.Bad
-        return
+        return $false
     }
     if ($name -match '[\\/:*?"<>|]') {
         $Script:LblSaveNote.Text = 'That name has characters Windows will not allow in a file.'
         $Script:LblSaveNote.ForeColor = $Script:UI.Bad
-        return
+        return $false
     }
     $problems = @(Copy-PageToEngine)
     if ($problems.Count -gt 0) {
@@ -1409,7 +1582,7 @@ function Save-ConfigFromPage {
         }
         $Script:LblSaveNote.ForeColor = $Script:UI.Bad
         Show-ConfigProblems $problems
-        return
+        return $false
     }
 
     if (-not (Test-Path $CONFIG_DIR)) { New-Item -ItemType Directory -Path $CONFIG_DIR | Out-Null }
@@ -1437,11 +1610,20 @@ RADIO_PW="$($Script:RADIO_PW)"
 ADMIN_PW="$($Script:ADMIN_PW)"
 AUTO_UPDATE="$($Script:AUTO_UPDATE)"
 "@
-    [System.IO.File]::WriteAllText($file, $content.Replace("`r`n", "`n"))
+    try { [System.IO.File]::WriteAllText($file, $content.Replace("`r`n", "`n")) }
+    catch {
+        $Script:LblSaveNote.Text = "Could not save: $($_.Exception.Message)"
+        $Script:LblSaveNote.ForeColor = $Script:UI.Bad
+        return $false
+    }
+    $Script:LoadedConfig = $name
+    $Script:SavedConfigSnapshot = ConvertTo-Json -InputObject (Get-ConfigState) -Compress
+    $Script:ConfigErrors.Clear()
     Update-SavedConfigList
     $Script:CmbSaved.SelectedItem = $name
     $Script:LblSaveNote.Text = "Saved as '$name'."
     $Script:LblSaveNote.ForeColor = $Script:UI.Good
+    return $true
 }
 
 # Page -> engine variables. Returns the list of things that are wrong, so the
@@ -1456,9 +1638,9 @@ function Copy-PageToEngine {
         $Script:LAN_AP_SSID = $Script:TxtApSsid.Text.Trim()
         $Script:LAN_AP_KEY  = $Script:TxtApKey.Text
         $Script:MAX_EUDS_PER_NODE = [int]$Script:NumEuds.Value
-        if (-not $Script:LAN_AP_SSID) { [void]$problems.Add('the client Wi-Fi needs a name') }
+        if (-not $Script:LAN_AP_SSID) { [void]$problems.Add('the EUD Wi-Fi needs a name') }
         if ($Script:LAN_AP_KEY.Length -lt 8 -or $Script:LAN_AP_KEY.Length -gt 63) {
-            [void]$problems.Add('the client Wi-Fi password must be 8 to 63 characters')
+            [void]$problems.Add('the EUD Wi-Fi password must be 8 to 63 characters')
         }
     } else {
         $Script:LAN_AP_SSID = ''
@@ -1573,14 +1755,14 @@ function Build-ScriptsPage {
     $p = New-ContentPanel
 
     $Script:LvScripts               = New-Object System.Windows.Forms.ListView
-    $Script:LvScripts.Location      = New-Object System.Drawing.Point((S 20), (S 14))
-    $Script:LvScripts.Size          = New-Object System.Drawing.Size((S 798), (S 228))
+    $Script:LvScripts.Location      = New-Object System.Drawing.Point((S 20), (S 72))
+    $Script:LvScripts.Size          = New-Object System.Drawing.Size((S 798), (S 210))
     $Script:LvScripts.View          = 'Details'
     $Script:LvScripts.FullRowSelect = $true
     $Script:LvScripts.GridLines     = $false
     $Script:LvScripts.Font          = $Script:UI.Font
     [void]$Script:LvScripts.Columns.Add('File', (S 210))
-    [void]$Script:LvScripts.Columns.Add('', (S 85))
+    [void]$Script:LvScripts.Columns.Add('Status', (S 85))
     [void]$Script:LvScripts.Columns.Add('Why', (S 495))
     $p.Controls.Add($Script:LvScripts)
 
@@ -1589,27 +1771,32 @@ function Build-ScriptsPage {
     # work, so a bar that crawled to 40% and sat there would be a worse lie
     # than one that simply says something is happening.
     $Script:ScriptsProgress          = New-Object System.Windows.Forms.ProgressBar
-    $Script:ScriptsProgress.Location = New-Object System.Drawing.Point((S 20), (S 250))
+    $Script:ScriptsProgress.Location = New-Object System.Drawing.Point((S 20), (S 320))
     $Script:ScriptsProgress.Size     = New-Object System.Drawing.Size((S 798), (S 12))
     $Script:ScriptsProgress.Style    = 'Marquee'
     $Script:ScriptsProgress.MarqueeAnimationSpeed = 30
     $Script:ScriptsProgress.Visible  = $false
     $p.Controls.Add($Script:ScriptsProgress)
 
-    $Script:LblScriptsSummary = New-Text '' 20 270 798 50 $Script:UI.Font $Script:UI.Text
+    $Script:LblScriptsSummary = New-Text '' 20 14 798 50 $Script:UI.Font $Script:UI.Text
     $p.Controls.Add($Script:LblScriptsSummary)
+    $Script:ChkIgnoredScripts = New-Check 'Show ignored files and documentation' 20 290 600 $false
+    $Script:ChkIgnoredScripts.Add_CheckedChanged({ Update-ScriptReportView })
+    $p.Controls.Add($Script:ChkIgnoredScripts)
+    $Script:LblScriptsEmpty = New-Text 'Custom setup scripts are optional. Use Open the folder to add one, then Check again.' 30 104 760 60 $Script:UI.Font $Script:UI.Muted
+    $p.Controls.Add($Script:LblScriptsEmpty)
 
     $warn = New-Text ('These are written into the card unencrypted and are not deleted afterwards. ' +
-                      'Anyone who reads the card reads them, so keep private keys and long-lived secrets out.') 20 326 798 36 $Script:UI.FontSmall $Script:UI.Warn
+                      'Anyone who reads the card reads them, so keep private keys and long-lived secrets out.') 20 342 798 36 $Script:UI.FontSmall $Script:UI.Warn
     $p.Controls.Add($warn)
 
-    $Script:BtnOpenScripts = New-Btn 'Open the folder' 20 372 140 28 {
+    $Script:BtnOpenScripts = New-Btn 'Open the folder' 20 390 140 28 {
         if (-not (Test-Path $ADDITIONAL_SCRIPTS_DIR)) { New-Item -ItemType Directory -Path $ADDITIONAL_SCRIPTS_DIR | Out-Null }
         Start-Process explorer.exe $ADDITIONAL_SCRIPTS_DIR
     }
     $p.Controls.Add($Script:BtnOpenScripts)
 
-    $Script:BtnCheckScripts = New-Btn 'Check again' 170 372 140 28 { Update-ScriptsPage }
+    $Script:BtnCheckScripts = New-Btn 'Check again' 170 390 140 28 { Update-ScriptsPage }
     $p.Controls.Add($Script:BtnCheckScripts)
 
     return $p
@@ -1658,19 +1845,11 @@ function Update-ScriptsPage {
         return
     }
 
-    foreach ($r in $Script:ScriptReport.Results) {
-        $item = New-Object System.Windows.Forms.ListViewItem($r.Name)
-        [void]$item.SubItems.Add($(switch ($r.Verdict) { 'OK' { 'will run' } 'SKIP' { 'ignored' } 'FAIL' { 'BROKEN' } }))
-        [void]$item.SubItems.Add($r.Reason)
-        $item.ForeColor = switch ($r.Verdict) { 'OK' { $Script:UI.Good } 'SKIP' { $Script:UI.Muted } 'FAIL' { $Script:UI.Bad } }
-        [void]$Script:LvScripts.Items.Add($item)
-    }
-
-    Expand-ListViewColumns -List $Script:LvScripts -Minimums @(210, 85, 495)
+    Update-ScriptReportView
 
     $rep = $Script:ScriptReport
-    if ($rep.Results.Count -eq 0) {
-        $Script:LblScriptsSummary.Text = "Nothing in additional-scripts, so nothing extra runs on the node. That is the normal case."
+    if ($rep.Accepted.Count -eq 0 -and -not $rep.Failed -and -not $rep.OverMax) {
+        $Script:LblScriptsSummary.Text = 'No custom scripts added. You can continue.'
         $Script:LblScriptsSummary.ForeColor = $Script:UI.Muted
     } elseif ($rep.Failed) {
         $Script:LblScriptsSummary.Text = "One or more scripts will not run as written. Nothing is flashed until they are fixed or renamed to .disabled."
@@ -1689,6 +1868,23 @@ function Update-ScriptsPage {
     $Script:ADDITIONAL_SCRIPTS = if ($rep.Failed -or $rep.OverMax) { @() } else { $rep.Accepted }
     Reset-ScriptsPageBusy
     Update-Nav
+}
+
+function Update-ScriptReportView {
+    $Script:LvScripts.Items.Clear()
+    foreach ($r in $Script:ScriptReport.Results) {
+        if ($r.Verdict -eq 'SKIP' -and -not $Script:ChkIgnoredScripts.Checked) { continue }
+        $item = New-Object System.Windows.Forms.ListViewItem($r.Name)
+        [void]$item.SubItems.Add($(switch ($r.Verdict) { 'OK' { 'will run' } 'SKIP' { 'ignored' } 'FAIL' { 'BROKEN' } }))
+        [void]$item.SubItems.Add($r.Reason)
+        $item.ForeColor = switch ($r.Verdict) { 'OK' { $Script:UI.Good } 'SKIP' { $Script:UI.Muted } 'FAIL' { $Script:UI.Bad } }
+        [void]$Script:LvScripts.Items.Add($item)
+    }
+
+    Expand-ListViewColumns -List $Script:LvScripts -Minimums @(210, 85, 495)
+
+    $Script:LvScripts.Visible = $Script:LvScripts.Items.Count -gt 0
+    $Script:LblScriptsEmpty.Visible = -not $Script:LvScripts.Visible
 }
 
 function Reset-ScriptsPageBusy {
@@ -1713,29 +1909,39 @@ function Build-TargetPage {
     $Script:GrpBoot.Controls.Add($Script:LblBootState)
     $p.Controls.Add($Script:GrpBoot)
 
+    $Script:ChkFixedDisks = New-Check 'Show fixed / internal drives (advanced)' 20 136 790 $false
+    $Script:ChkFixedDisks.Add_CheckedChanged({ Update-TargetPage })
+    $p.Controls.Add($Script:ChkFixedDisks)
+
     $Script:LvDisks               = New-Object System.Windows.Forms.ListView
-    $Script:LvDisks.Location      = New-Object System.Drawing.Point((S 20), (S 136))
-    $Script:LvDisks.Size          = New-Object System.Drawing.Size((S 798), (S 194))
+    $Script:LvDisks.Location      = New-Object System.Drawing.Point((S 20), (S 166))
+    $Script:LvDisks.Size          = New-Object System.Drawing.Size((S 798), (S 164))
     $Script:LvDisks.View          = 'Details'
     $Script:LvDisks.FullRowSelect = $true
     $Script:LvDisks.MultiSelect   = $false
     $Script:LvDisks.HideSelection = $false
     $Script:LvDisks.Font          = $Script:UI.Font
     [void]$Script:LvDisks.Columns.Add('Disk', (S 50))
-    [void]$Script:LvDisks.Columns.Add('Name', (S 300))
+    [void]$Script:LvDisks.Columns.Add('Name', (S 180))
     [void]$Script:LvDisks.Columns.Add('Size', (S 90))
-    [void]$Script:LvDisks.Columns.Add('Connected by', (S 110))
-    [void]$Script:LvDisks.Columns.Add('Contains', (S 224))
+    [void]$Script:LvDisks.Columns.Add('Connected by', (S 105))
+    [void]$Script:LvDisks.Columns.Add('Device type', (S 145))
+    [void]$Script:LvDisks.Columns.Add('Contains', (S 200))
     $Script:LvDisks.Add_SelectedIndexChanged({ Update-DiskWarning; Update-Nav })
     $p.Controls.Add($Script:LvDisks)
 
     $Script:LblDiskWarn = New-Text '' 20 336 798 40 $Script:UI.Font $Script:UI.Text
     $p.Controls.Add($Script:LblDiskWarn)
 
-    $p.Controls.Add((New-Btn 'Look again' 20 384 140 28 { Update-TargetPage }))
+    $p.Controls.Add((New-Btn 'Check again' 20 384 140 28 { Update-TargetPage }))
     $p.Controls.Add((New-Text 'The disk you are booted from is never listed.' 172 390 500 18 $Script:UI.FontSmall $Script:UI.Muted))
 
     return $p
+}
+
+function Get-VisibleCandidateDisks {
+    param([object[]]$Disks, [bool]$IncludeFixed = $false)
+    foreach ($disk in $Disks) { if ($disk.IsRemovable -or $IncludeFixed) { $disk } }
 }
 
 function Update-TargetPage {
@@ -1748,11 +1954,12 @@ function Update-TargetPage {
     $Script:LvDisks.Items.Clear()
     $Script:CandidateList = @(Get-CandidateDisks)
 
-    foreach ($d in $Script:CandidateList) {
+    foreach ($d in @(Get-VisibleCandidateDisks $Script:CandidateList $Script:ChkFixedDisks.Checked)) {
         $item = New-Object System.Windows.Forms.ListViewItem([string]$d.Number)
         [void]$item.SubItems.Add($d.FriendlyName)
         [void]$item.SubItems.Add("$($d.SizeGB) GB")
         [void]$item.SubItems.Add($d.BusType)
+        [void]$item.SubItems.Add($(if ($d.IsRemovable) { 'USB / SD / MMC' } else { 'Fixed / internal drive' }))
         [void]$item.SubItems.Add($(if ($d.Volumes.Count) { $d.Volumes -join ', ' } else { '' }))
         $item.Tag = $d
         if (-not $d.IsRemovable) { $item.ForeColor = $Script:UI.Bad }
@@ -1760,10 +1967,10 @@ function Update-TargetPage {
         if ($sel -and $item.Text -eq $sel) { $item.Selected = $true }
     }
 
-    Expand-ListViewColumns -List $Script:LvDisks -Minimums @(50, 300, 90, 110, 224)
+    Expand-ListViewColumns -List $Script:LvDisks -Minimums @(50, 180, 90, 105, 145, 200)
 
     if ($Script:LvDisks.Items.Count -eq 0) {
-        $Script:LblDiskWarn.Text = 'No card found. Plug in the card reader, or for a CM4 use the button above, then choose Look again.'
+        $Script:LblDiskWarn.Text = 'No card found. Plug in the card reader, or for a CM4 use the button above, then choose Check again. Fixed/internal drives are hidden unless you show them above.'
         $Script:LblDiskWarn.ForeColor = $Script:UI.Warn
     } else {
         Update-DiskWarning
@@ -1779,8 +1986,10 @@ function Get-SelectedDisk {
 function Update-DiskWarning {
     $d = Get-SelectedDisk
     if (-not $d) {
-        $Script:LblDiskWarn.Text = 'Pick the card from the list.'
-        $Script:LblDiskWarn.ForeColor = $Script:UI.Muted
+        $Script:LblDiskWarn.Text = if ($Script:ChkFixedDisks.Checked) {
+            'Fixed/internal drives are shown. These may contain personal data. Check the device type, size and label before selecting.'
+        } else { 'Pick the card or USB device from the list. Fixed/internal drives are hidden.' }
+        $Script:LblDiskWarn.ForeColor = if ($Script:ChkFixedDisks.Checked) { $Script:UI.Bad } else { $Script:UI.Muted }
         return
     }
     if ($d.Status -and $d.Status -ne 'Online') {
@@ -1990,7 +2199,7 @@ function Update-ConfirmPage {
         "  Country          $($Script:REGULATORY_DOMAIN)   (HaLow region $($Script:HALOW_REGULATORY_DOMAIN))"
         "  Auto channel     $($Script:AUTO_CHANNEL)"
         ""
-        "  Clients          $($Script:EUD_CONNECTION)"
+        "  EUD connection   $($Script:EUD_CONNECTION)"
     )
     if ($Script:EUD_CONNECTION -in @('wireless','auto')) {
         $lines += "  EUD Wi-Fi     $($Script:LAN_AP_SSID)  (the last 4 of the wired MAC is appended)"
@@ -2387,6 +2596,12 @@ function Go-Page {
 
     $Script:LblTitle.Text = $Script:PageTitles[$Name]
     $Script:LblBlurb.Text = $Script:PageBlurbs[$Name]
+    $stages = @('Hardware', 'Tools', 'Settings', 'Scripts', 'Target', 'Review', 'Write', 'Done')
+    $parts = for ($i = 0; $i -lt $stages.Count; $i++) {
+        if ($i -eq $Script:PageIndex) { "[$($stages[$i])]" } else { $stages[$i] }
+    }
+    $Script:LblSteps.Text = "Step $($Script:PageIndex + 1) of 8   " + ($parts -join '  >  ')
+    Update-WindowLayout
 
     switch ($Name) {
         'Prereqs' { Update-PrereqPage }
@@ -2452,12 +2667,12 @@ function Invoke-Next {
         'Config'  {
             $problems = @(Copy-PageToEngine)
             if ($problems.Count -gt 0) { Show-ConfigProblems $problems; return }
-            if (-not $Script:LoadedConfig -and -not $Script:TxtSaveName.Text.Trim()) {
+            if (Test-ConfigUnsaved) {
                 $r = [System.Windows.Forms.MessageBox]::Show($Script:Form,
-                    ("These settings have not been saved.`r`n`r`nEvery other node on this mesh has to be flashed with the same ones, " +
-                     "so saving them now is worth it. Carry on without saving?"),
-                    'Not saved', 'YesNo', 'Question')
-                if ($r -ne [System.Windows.Forms.DialogResult]::Yes) { return }
+                    "Save these settings before continuing?`r`n`r`nYes: save and continue. No: continue without saving. Cancel: keep editing.",
+                    'Unsaved settings', 'YesNoCancel', 'Question')
+                if ($r -eq 'Cancel') { return }
+                if ($r -eq 'Yes' -and -not (Save-ConfigFromPage)) { return }
             }
             Go-Page 'Scripts'
         }
@@ -2487,13 +2702,30 @@ function Invoke-Back {
 
 # The window
 
+function Update-WindowLayout {
+    if (-not $Script:Footer -or -not $Script:Form) { return }
+    $config = $Script:PageOrder[$Script:PageIndex] -eq 'Config'
+    $height = if ($config) { S 152 } else { S 108 }
+    $width = $Script:Form.ClientSize.Width
+    $Script:Header.Width = $width
+    $Script:Footer.SetBounds(0, $Script:Form.ClientSize.Height - $height, $width, $height)
+    $Script:ContentHost.SetBounds(0, (S 104), $width, [math]::Max(0, $Script:Footer.Top - (S 104)))
+    $Script:ConfigSaveBar.Visible = $config
+    $Script:ConfigSaveBar.Width = $width
+    $y = if ($config) { S 70 } else { S 30 }
+    foreach ($button in @($Script:BtnCancel, $Script:BtnBack, $Script:BtnNext)) { if ($button) { $button.Top = $y } }
+    if ($Script:LnkFolder) { $Script:LnkFolder.Top = $y + (S 42); $Script:LnkFolder.Width = $width - (S 40) }
+}
+
 function Build-Window {
     $form                 = New-Object System.Windows.Forms.Form
     $form.Text            = "MANET radio flasher      build $($Script:BuildId)"
-    $form.ClientSize      = New-Object System.Drawing.Size((S 838), (S 620))
+    $area = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
+    $form.ClientSize = New-Object System.Drawing.Size(([math]::Min((S 838), $area.Width - 40)), ([math]::Min((S 740), $area.Height - 80)))
+    $form.MinimumSize = New-Object System.Drawing.Size(([math]::Min((S 838) + 16, $area.Width - 20)), ([math]::Min((S 620) + 40, $area.Height - 40)))
     $form.StartPosition   = 'CenterScreen'
-    $form.FormBorderStyle = 'FixedDialog'
-    $form.MaximizeBox     = $false
+    $form.FormBorderStyle = 'Sizable'
+    $form.MaximizeBox     = $true
     $form.AutoScaleMode   = 'None'
     $form.BackColor       = $Script:UI.Bg
     $form.Font            = $Script:UI.Font
@@ -2502,7 +2734,8 @@ function Build-Window {
     # --- header ---
     $header           = New-Object System.Windows.Forms.Panel
     $header.Location  = New-Object System.Drawing.Point((S 0), (S 0))
-    $header.Size      = New-Object System.Drawing.Size((S 838), (S 84))
+    $header.Size      = New-Object System.Drawing.Size((S 838), (S 104))
+    $header.Anchor    = 'Top, Left, Right'
     $header.BackColor = $Script:UI.Header
     $form.Controls.Add($header)
 
@@ -2510,6 +2743,9 @@ function Build-Window {
     $header.Controls.Add($Script:LblTitle)
     $Script:LblBlurb = New-Text '' 22 50 798 22 $Script:UI.FontSmall ([System.Drawing.Color]::FromArgb(190, 205, 220))
     $header.Controls.Add($Script:LblBlurb)
+    $Script:LblSteps = New-Text '' 22 78 798 20 $Script:UI.FontSmall $Script:UI.HeaderTxt
+    $header.Controls.Add($Script:LblSteps)
+    $Script:Header = $header
 
     # --- content host ---
     $contentHost           = New-Object System.Windows.Forms.Panel
@@ -2517,6 +2753,7 @@ function Build-Window {
     $contentHost.Size      = New-Object System.Drawing.Size((S $Script:CONTENT_W), (S $Script:CONTENT_H))
     $contentHost.BackColor = $Script:UI.Panel
     $form.Controls.Add($contentHost)
+    $Script:ContentHost = $contentHost
 
     $Script:Pages = @{
         Hardware = Build-HardwarePage
@@ -2536,10 +2773,13 @@ function Build-Window {
     $footer.Size      = New-Object System.Drawing.Size((S 838), (S 108))
     $footer.BackColor = $Script:UI.Bg
     $form.Controls.Add($footer)
+    $Script:Footer = $footer
+    $footer.Controls.Add($Script:ConfigSaveBar)
 
     $rule             = New-Object System.Windows.Forms.Label
     $rule.Location    = New-Object System.Drawing.Point((S 0), (S 0))
     $rule.Size        = New-Object System.Drawing.Size((S 838), (S 1))
+    $rule.Anchor      = 'Top, Left, Right'
     $rule.BorderStyle = 'Fixed3D'
     $footer.Controls.Add($rule)
 
@@ -2568,12 +2808,16 @@ function Build-Window {
     $Script:LnkFolder.Font        = $Script:UI.FontSmall
     $Script:LnkFolder.LinkColor   = $Script:UI.Header
     $Script:LnkFolder.AutoEllipsis = $true
-    $Script:LnkFolder.Text        = "Settings and setup scripts live in  $WorkDir"
-    $Script:LnkFolder.LinkArea    = New-Object System.Windows.Forms.LinkArea(36, $WorkDir.Length)
+    $Script:LnkFolder.Text        = 'Open settings and setup scripts folder'
+    $Script:LnkFolder.LinkArea    = New-Object System.Windows.Forms.LinkArea(0, $Script:LnkFolder.Text.Length)
+    $Script:FolderTip = New-Object System.Windows.Forms.ToolTip
+    $Script:FolderTip.SetToolTip($Script:LnkFolder, $WorkDir)
     $Script:LnkFolder.Add_LinkClicked({
         try { Start-Process explorer.exe $WorkDir } catch { }
     })
     $footer.Controls.Add($Script:LnkFolder)
+    $form.Add_Resize({ Update-WindowLayout; Update-Nav })
+    $form.Add_Shown({ Update-WindowLayout })
 
     # The heartbeat for every long job. 90 ms is short enough that a progress
     # bar looks continuous and long enough that the stepping itself is not the

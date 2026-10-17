@@ -7,7 +7,7 @@
 ### Put the software on the radio
 
 1. **Get the flasher.** [Windows](https://github.com/very-srs/MANET/releases/latest/download/Flash-a-Radio.cmd) or [Linux](https://github.com/very-srs/MANET/releases/latest/download/flash-a-radio.sh).
-2. **Pick your board.** Enter the settings for your mesh.  You can ask a friend to read the words if you get confused.
+2. **Pick your board.** Enter and save the settings for your mesh. You can ask a friend to read the words if you get confused.
 3. **Check the drive.** Flashing erases the selected storage. Look at it twice to make sure it is the right thing being deleted.
 4. **Keep your login.** Save the SSH username and passwords shown when flashing finishes. Then follow [first boot](first-boot.md).
 
@@ -48,9 +48,21 @@ address span. Save the login details shown when flashing finishes.
 
 Saved configurations can be reused by the Windows and Linux flashers. Optional additional setup scripts are embedded at flash time and run on the node after successful provisioning.
 
+The Windows window starts with **Wired** connections selected. Choose
+**Show services and addressing** to change services or the network range.
+The save controls stay at the bottom while the settings scroll. **Next**
+offers to save edited settings, continue without saving, or keep editing.
+On the setup scripts page, select **Show ignored files and documentation**
+if you want to see files that will not run.
+
 ### Check the storage before writing
 
 Flashing erases the selected card or eMMC. Review the device and configuration before confirming. A CM4 with eMMC needs its carrier board in USB boot mode and `rpiboot` access; the [complete guide](../../../MANET/provisioning/README.md) covers the host and board requirements.
+
+The Windows disk list hides fixed and internal drives by default. Select
+**Show fixed / internal drives (advanced)** only when needed, and check the
+device type, size, and contents before selecting a drive. The computer's
+boot disk is never listed.
 
 The normal flasher selects the stable GitHub release marked **Latest**. Use `--development` only when you intend to test the most recently published build, including prereleases.
 
@@ -96,6 +108,13 @@ See [settings](settings.md#developer-keep-local-and-shared-settings-separate).
 ### Template rendering
 
 `linux-flasher.sh` and `windows.ps1` substitute matching `__TOKEN__` values in the Raspberry Pi and Rock 3A templates. The Windows GUI feeds the same configuration and rendering engine as its console path. A new setup option must reach both host substitution paths and both applicable templates.
+
+`manet-flasher.ps1` owns the Windows layout, field validation indicators,
+and saved-configuration state. It compares current form values with a
+snapshot taken after loading or saving to detect unsaved edits. The GUI
+filters the engine's candidate disks to removable media unless the operator
+enables fixed drives. This filter does not replace the engine's exclusion
+of the boot disk or the final write confirmation.
 
 Both templates contain `# >>> MANET_ADDITIONAL_SCRIPTS <<<`. The flasher inserts operator scripts at that anchor **after** token substitution. Appending scripts at the end is incorrect because the Rock 3A template ends in a reboot. Operator script content must not be treated as template tokens.
 
