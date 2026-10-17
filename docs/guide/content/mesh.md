@@ -38,10 +38,14 @@ A healthy channel also stays put through short load swings. A better channel has
 
 Time synchronization is needed for scheduled channel decisions. A cold radio can recover contact before its clock is synchronized, but timed decisions wait until GPS or network time has been verified.
 
-Keep the optional background receiver disabled. Earlier testing found that
-enabling it stopped the main 5 GHz link from connecting. A kernel fix is
-ready for further testing, but normal traffic and background listening must
-work together before this option is ready for use. The default remains off.
+Keep the optional background receiver disabled. A kernel fix lets normal
+5 GHz traffic and background listening work together, but the radio does not
+yet switch the receiver on and off by itself. While the receiver runs, the
+5 GHz radio listens with two antennas instead of three, so download speed
+over that link can drop by up to a third. The default remains off.
+During testing, background readings taken while the radio transmits heavily
+are discarded because they can mistake its own traffic for interference.
+An uncertain reading is never treated as a clear channel.
 
 Using a built-in radio as an internet connection removes that band from the
 mesh on this node. The remaining radios keep their mesh roles. See
@@ -116,9 +120,17 @@ The optional MT7916 third-chain observer remains a bench feature with
 `mt7916_background_rx=n` by default. The original reservation broke main-link
 peering on two Rock 3A nodes. The kernel fix finalizes the band-1 EEPROM
 selection before firmware upload and aligns the legacy OFDM path count with
-2T2R operation. Host tests verify the uploaded bytes, but simultaneous main
-traffic and observer response still need RF acceptance. Runtime chain policy
-and DFS activation remain unimplemented. See the
+2T2R operation. A three-node 5180 MHz HT20 bench passed on both Rock 3A
+boards with the observer active: peers stay established, transmit holds 85
+to 114% of native and receive 66 to 104%. Runtime chain policy
+and DFS activation remain unimplemented. Quiet-channel captures with heavy
+local TX showed positive bias in the observer correction. Candidate windows
+with at least 10% survey TX are now omitted. The limit preserves the observed
+low-TX controls and bounds amplification, but intermediate loads and the
+250 ms production dwell still require qualification. Raw bins and survey TX
+remain available for investigation; uncertain samples do not become clean
+channel scores. This affects candidate measurement, while the trouble flag
+continues to use the separate long home survey. See the
 [kernel series](../../../kernel/patches/mt76-bgobs/README.md).
 
 | Stage | What becomes fixed | What stops progress |

@@ -1,0 +1,33 @@
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/eeprom.c b/drivers/net/wireless/mediatek/mt76/mt7915/eeprom.c
+--- a/drivers/net/wireless/mediatek/mt76/mt7915/eeprom.c
++++ b/drivers/net/wireless/mediatek/mt76/mt7915/eeprom.c
+@@ -50,6 +50,10 @@
+ 			 MT_EE_WIFI_CONF0_TX_PATH);
+ 	u8p_replace_bits(&eeprom[MT_EE_WIFI_CONF + 1], 2,
+ 			 MT_EE_WIFI_CONF0_RX_PATH);
++	/* Legacy OFDM TX paths must agree with the two-path main radio.
++	 * Preserve the CCK bits, NSS and all calibration data independently.
++	 */
++	u8p_replace_bits(&eeprom[MT_EE_WIFI_CONF + 3], 2, GENMASK(4, 2));
+ 	u8p_replace_bits(&eeprom[MT_EE_WIFI_CONF + 3], 2,
+ 			 MT_EE_WIFI_CONF_STREAM_NUM);
+ 	dev->flash_mode = true;
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/init.c b/drivers/net/wireless/mediatek/mt76/mt7915/init.c
+--- a/drivers/net/wireless/mediatek/mt76/mt7915/init.c
++++ b/drivers/net/wireless/mediatek/mt76/mt7915/init.c
+@@ -846,8 +846,14 @@
+ 	if (ret < 0)
+ 		return ret;
+ 
+-	/* Do not advertise the reservation if firmware rejects buffer mode. */
++	/* Finalize both bands before the early buffer upload. In particular,
++	 * selectable 5/6 GHz band 1 must already describe the selected band.
++	 * Registration parses the same final image again without changing it.
++	 */
+ 	if (dev->background_rx_reserved) {
++		if (!phy2)
++			return -EINVAL;
++		mt7915_eeprom_parse_hw_cap(dev, phy2);
+ 		ret = mt7915_mcu_set_eeprom(dev);
+ 		if (ret)
+ 			return ret;

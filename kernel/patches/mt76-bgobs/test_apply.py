@@ -94,6 +94,31 @@ class ApplyCases:
             self.assertIn('partial or conflicting series', result.stderr)
             self.assertEqual(snapshot(tree), before)
 
+    def test_original_complete_series_upgrades_atomically(self):
+        with self.tree() as tree:
+            for patch in PATCHES[:2]:
+                run(tree, 'git', 'apply', str(patch))
+            before = snapshot(tree)
+            result = self.helper(tree)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            applied = snapshot(tree)
+            self.assertEqual(applied['unrelated.txt'], before['unrelated.txt'])
+            run(tree, 'git', 'apply', '-R', str(PATCHES[2]))
+            self.assertEqual(snapshot(tree), before)
+
+    def test_conflicting_upgrade_preserves_original_series(self):
+        with self.tree() as tree:
+            for patch in PATCHES[:2]:
+                run(tree, 'git', 'apply', str(patch))
+            path = tree / DRIVER / 'eeprom.c'
+            path.write_text(path.read_text().replace(
+                '\tu8p_replace_bits(&eeprom[MT_EE_WIFI_CONF + 3], 2,',
+                '\tu8p_replace_bits(&eeprom[MT_EE_WIFI_CONF + 3], 1,'))
+            before = snapshot(tree)
+            result = self.helper(tree)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(snapshot(tree), before)
+
     def test_clean_tree_gets_timing_and_observer_atomically(self):
         with self.tree() as tree:
             ftm = SERIES.parent / 'mt76-ftm'
@@ -111,7 +136,7 @@ class ApplyCases:
         with self.tree() as tree:
             result = self.helper(tree)
             self.assertEqual(result.returncode, 0, result.stderr)
-            for name in ('check_reservation.py', 'check_observer.py'):
+            for name in ('check_reservation.py', 'check_initialization.py', 'check_observer.py'):
                 result = run(tree, 'python3', str(SERIES / name),
                              str(tree / DRIVER), str(tree), check=False)
                 self.assertEqual(result.returncode, 0, result.stderr)

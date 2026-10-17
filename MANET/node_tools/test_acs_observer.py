@@ -10,7 +10,7 @@ import test_acs_home as home_tests
 from test_acs import AcsHarness, PEER
 
 
-def window(*, lower=25000, top=62500, own=500000, **extra):
+def window(*, lower=25000, top=6250, own=50000, **extra):
     """Construct a one-second window with a known foreign/own mixture."""
     bins = [125000 - lower - top, 0, lower] + [0] * 7 + [top, 0]
     result = dict(schema=1, sequence=4, active=False, reserved=False,
@@ -32,13 +32,25 @@ class CorrectionTests(unittest.TestCase):
                                        5200), 0)
         self.assertEqual(obs.occupancy(window(lower=62500, top=0, own=0),
                                        5200), 50)
-        self.assertEqual(obs.occupancy(window(lower=31250, top=62500),
+        self.assertEqual(obs.occupancy(window(lower=59375, top=6250),
                                        5200), 50)
-        self.assertEqual(obs.occupancy(window(lower=0, top=62500),
+        self.assertEqual(obs.occupancy(window(lower=0, top=6250),
                                        5200), 0)
         # Strong foreign energy in bin 10 exceeds the independent own TX.
         self.assertEqual(obs.occupancy(window(lower=12500, top=50000,
-                                              own=200000), 5200), 38)
+                                              own=20000), 5200), 49)
+
+    def test_local_tx_limit_does_not_erase_strong_foreign_energy(self):
+        """Gate measured local TX without treating high bin 10 as blanking."""
+        # Large bin 10 alone is not a reason to subtract or reject foreign RF.
+        self.assertEqual(obs.occupancy(window(lower=0, top=112500,
+                                              own=0), 5200), 90)
+        self.assertEqual(obs.occupancy(window(lower=0, top=12500,
+                                              own=99999), 5200), 0)
+        for own in (100000, 500000, 899999, 900000):
+            with self.subTest(own=own), self.assertRaisesRegex(
+                    ValueError, 'local TX exceeds'):
+                obs.occupancy(window(lower=0, top=112500, own=own), 5200)
 
     def test_invalid_and_mostly_blanked_windows_are_absent(self):
         cases = [dict(valid=False), dict(active=True), dict(reserved=True),
@@ -61,7 +73,7 @@ class CorrectionTests(unittest.TestCase):
                 before, running, window(), window()]), \
              patch.object(obs, 'write_command') as write, \
              patch.object(obs.time, 'sleep'):
-            self.assertEqual(obs.measure(path, 5200), 40)
+            self.assertEqual(obs.measure(path, 5200), 21)
             self.assertEqual(write.call_count, 1)
         broken = dict(window(), valid=False, reserved=True)
         with patch.object(obs, 'read_status', side_effect=[
@@ -106,6 +118,62 @@ class CorrectionTests(unittest.TestCase):
                 self.assertEqual(result[0]['busy_pct'], 20)
                 self.assertNotIn('noise_floor', result[0])
                 self.assertTrue(result[0]['_observer'])
+
+
+class CapturedCorrectionTests(unittest.TestCase):
+    """Replay reservation-v2 histograms, including quiet heavy local TX."""
+
+    @classmethod
+    def setUpClass(cls):
+        """Load raw snapshots independently of the ignored bench directory."""
+        cls.captures = json.loads((Path(__file__).parent / 'testdata/bgobs'
+                                  / 'reservation-v2.json').read_text())
+
+    def test_heavy_tx_is_missing_even_when_old_correction_looked_clean(self):
+        """Reject every high-TX window, including apparently plausible ones."""
+        for capture in self.captures:
+            if '/tx-' not in capture['source']:
+                continue
+            record = capture['record']
+            with self.subTest(source=capture['source']):
+                with self.assertRaises(ValueError):
+                    obs.occupancy(record, record['freq_mhz'])
+
+    def test_idle_and_receive_controls_keep_their_measured_energy(self):
+        """Preserve low-TX replay values without trusting confounded labels."""
+        ranges = {'quiet/idle': (0, 1), 'quiet/rx': (1, 2),
+                  '100/idle': (19, 20), '100/rx': (20, 20),
+                  # Pacing-confounded campaign retained for replay only.
+                  '250/idle': (68, 68), '250/rx': (49, 49),
+                  '488/idle': (94, 95), '488/rx': (94, 95),
+                  '250clean/idle': (49, 49), 'quiet-test': (1, 1)}
+        for capture in self.captures:
+            source = capture['source']
+            if '/tx-' in source:
+                continue
+            group = (source[:-5] if source == 'quiet-test.json'
+                     else source.rsplit('-', 1)[0])
+            low, high = ranges[group]
+            record = capture['record']
+            with self.subTest(source=source):
+                value = obs.occupancy(record, record['freq_mhz'])
+                self.assertGreaterEqual(value, low)
+                self.assertLessEqual(value, high)
+
+    def test_rejected_capture_does_not_publish_a_candidate(self):
+        """Exercise acquisition through publication with a biased quiet record."""
+        record = next(c['record'] for c in self.captures
+                      if c['source'] == 'quiet/tx-06.json')
+        before = dict(record, sequence=record['sequence'] - 1)
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / 'phy1/mt76/background_scan'
+            with patch.dict(obs.os.environ, MANET_ACS_RUN_DIR=temp), \
+                 patch.object(obs, 'read_status', side_effect=[
+                     before, record, record]), \
+                 patch.object(obs, 'write_command') as write:
+                result = obs.collect_candidates(path, [5200], 'wlan1')
+                self.assertEqual(result, [])
+                write.assert_called_once()
 
 
 class ObserverGateTests(AcsHarness):

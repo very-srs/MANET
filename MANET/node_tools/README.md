@@ -652,8 +652,11 @@ long-dwell result is published immediately. On an MT7916 with its third RX
 chain reserved, 5 GHz candidates use a 250 ms background energy measurement.
 The main radio stays on its channel. The estimate corrects for the receiver
 being blanked during local transmissions. Home and candidates have zero BSS
-counts on this path; candidate noise is unmeasured. Invalid or mostly blanked
-windows are omitted. The observer currently accepts non-DFS candidates only.
+counts on this path; candidate noise is unmeasured. Windows with at least 10%
+local transmit time are omitted: heavy local TX biased quiet-channel estimates
+on the reservation bench. This provisional limit preserves low-TX controls;
+it is not a calibrated correction for heavier load. Other invalid windows are
+also omitted. The observer currently accepts non-DFS candidates only.
 
 Without an observer, 5 GHz keeps its main-radio flush scan behind the same
 gate, including its three-sample occupancy warmup. That scan includes the

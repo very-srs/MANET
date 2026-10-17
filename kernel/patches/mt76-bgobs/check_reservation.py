@@ -54,8 +54,15 @@ typedef uint32_t u32;
 #define MT_EE_WIFI_CONF3_TX_PATH_B1 GENMASK(5,4)
 #define MT_EE_V2_BAND_SEL_2GHZ 0
 #define MT_EE_V2_BAND_SEL_5GHZ 1
+#define MT_EE_V2_BAND_SEL_6GHZ 2
 #define MT_EE_V2_BAND_SEL_5GHZ_6GHZ 3
-struct mt76_phy { u8 band_idx, chainmask, antenna_mask; };
+#define MT_EE_BAND_SEL_DEFAULT 0
+#define MT_EE_BAND_SEL_2GHZ 1
+#define MT_EE_BAND_SEL_5GHZ 2
+struct mt76_phy {
+    u8 band_idx, chainmask, antenna_mask;
+    struct { bool has_2ghz, has_5ghz, has_6ghz; } cap;
+};
 struct mt76_dev { struct { u8 *data; } eeprom; unsigned chip; };
 struct mt7915_dev {
     struct mt76_dev mt76;
@@ -72,7 +79,6 @@ struct ieee80211_hw { struct wiphy *wiphy; struct mt7915_phy *phy; };
 #define is_mt7915(m) ((m)->chip == 0x7915)
 #define is_mt798x(m) ((m)->chip == 0x7981 || (m)->chip == 0x7986)
 #define is_mt7981(m) ((m)->chip == 0x7981)
-#define mt7915_eeprom_parse_band_config(...) ((void)0)
 #define mt76_set_stream_caps(...) ((void)0)
 #define mt7915_set_stream_vht_txbf_caps(...) ((void)0)
 #define mt7915_set_stream_he_caps(...) ((void)0)
@@ -102,7 +108,7 @@ int main(void)
     background_radar_2t2r = true;
     assert(mt7915_eeprom_reserve_background_rx(&d) == 0);
     assert(d.background_rx_reserved && d.flash_mode);
-    assert(ee[0x191] == 0x52 && ee[0x193] == 0x4d);
+    assert(ee[0x191] == 0x52 && ee[0x193] == 0x49);
     for (unsigned i=0; i<sizeof(ee); i++)
         if (i != 0x191 && i != 0x193) assert(ee[i] == original[i]);
     d.chainmask = 0;
@@ -131,6 +137,8 @@ int main(void)
     // Selectable 5/6 GHz band 1 (as shipped on the bench cards): only as 5 GHz.
     memcpy(ee, original, sizeof(ee)); ee[0x191]=0xdb;
     assert(mt7915_eeprom_reserve_background_rx(&d) == 0 && ee[0x191] == 0xd2);
+    mt7915_eeprom_parse_hw_cap(&d, &p1);
+    assert(ee[0x191] == 0x52 && band1.cap.has_5ghz && !band1.cap.has_6ghz);
     memcpy(ee, original, sizeof(ee)); ee[0x191]=0xdb; enable_6ghz=true;
     assert(mt7915_eeprom_reserve_background_rx(&d) == -EINVAL && ee[0x191] == 0xdb);
     enable_6ghz=false;
@@ -148,6 +156,7 @@ int main(void)
 test_c = work / "stage1-host.c"
 test_c.write_text(shim + "\n" + "\n".join([
     function("eeprom.c", "mt7915_eeprom_reserve_background_rx"),
+    function("eeprom.c", "mt7915_eeprom_parse_band_config"),
     function("eeprom.c", "mt7915_eeprom_parse_hw_cap"),
     function("main.c", "mt7915_set_antenna"),
 ]) + tests)

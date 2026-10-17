@@ -1849,14 +1849,30 @@ T = delta TX microseconds / elapsed microseconds, userspace estimates:
 The candidate sends this clamped, rounded value as `busy_pct`, preserving the
 scorer's existing candidate schema. It is an estimate of foreign energy during
 unblanked reception, not a decoded identity classification. Samples with
-T >= 0.9, negative TX deltas, T more than five percentage points above B,
+T >= 0.10, negative TX deltas, T more than five percentage points above B,
 or TX read latency over 10 ms or 5% of the window are omitted. Population
 must match the observed 8 us sampling cadence within 20%, with at least
 1024 samples and an actual window between 250 ms and six seconds. All bins
 use modulo-23 subtraction. The observer reports no clean sample on an error,
-short window, sequence change or incomplete restoration. Mixed own/foreign
-TX correction and its alignment limits still need CM4 and Rock 3A bench
-validation. The 60/50% home gate is calibrated on 2.4 GHz and remains
+short window, sequence change or incomplete restoration.
+
+The reservation-v2 Rock 3A bench found positive quiet-channel bias at about
+89% local TX on both adjacent 5200 and far 5745 MHz observations. Bin 10
+exceeded survey TX, and bins 2..9 retained energy too. Dividing these residuals
+by roughly 10% unblanked time produced false candidate occupancy. Query latency
+did not explain the discrepancy. Subtracting all bin-10 energy would erase
+strong foreign signals and still leave the lower-bin residual. No fitted
+offset or multiplier is justified by those captures.
+
+The 10% local-TX ceiling is a provisional rejection policy, limiting formula
+amplification to less than 1.12. Existing low-TX records, up to 6.2% local TX,
+retain their readings. Intermediate loads and the production 250 ms dwell
+still need controlled qualification on CM4 and Rock 3A; the captures used a
+1000 ms dwell. Invalid candidates are omitted, never emitted as clean or
+replaced with old readings. This observer supplies candidates only. The
+60/50% trouble flag uses the separate long home measurement, so these captures
+do not demonstrate a false home trouble flag. The 60/50% home gate is
+calibrated on 2.4 GHz and remains
 provisional for 5 GHz; its hold-down and urgent rules are unchanged.
 
 The helper resolves debugfs through the interface's actual PHY and holds a
