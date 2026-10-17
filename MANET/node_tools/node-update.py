@@ -28,7 +28,7 @@ import zlib
 from manet_release import asset_url, select_release, verify_asset
 from manet_kernel_update import (KernelError, KernelTrial, MANIFEST as KERNEL_MANIFEST,
                                  PREFIX as KERNEL_PREFIX, MAX_DOWNLOAD, MAX_EXPANDED,
-                                 validate_payload)
+                                 POLICY as KERNEL_POLICY, kernel_enabled, validate_payload)
 
 
 MIB = 1024 * 1024
@@ -343,8 +343,8 @@ class Updater:
                 if name.startswith(('boot/', 'usr/lib/modules/', 'lib/modules/',
                                     'usr/lib/firmware/morse/', 'var/lib/manet-kernel/')):
                     raise UpdateError('Kernel files require the matched kernel payload namespace')
-                if name in ('etc/manet-kernel-trial.json', 'usr/local/sbin/manet-kernel-health-check'):
-                    raise UpdateError('Kernel qualification must be installed locally')
+                if name in ('etc/manet-kernel-trial.json', 'usr/local/sbin/manet-kernel-health-check', KERNEL_POLICY):
+                    raise UpdateError('Kernel qualification and policy must be installed locally')
                 if name in ('boot', 'usr/lib/modules', 'lib/modules', 'usr/lib/firmware/morse',
                             'var/lib/manet-kernel') and not member.isdir():
                     raise UpdateError('Boot and module paths must be directories')
@@ -459,7 +459,7 @@ class Updater:
                     elif path.is_dir():
                         shutil.rmtree(path)
 
-    def arm_recovery(self, package, checksum, filename, expected, staged):
+    def arm_recovery(self, package, checksum, filename, expected, staged, kernel_selected=True):
         """Publish a durable offline recovery source before live replacements."""
         self.space([(self.state, package.stat().st_size + MIB)])
         self.recovery.mkdir(mode=0o700)
@@ -471,7 +471,7 @@ class Updater:
                 ('manet_kernel_update.py',
                  Path(__file__).with_name('manet_kernel_update.py'))):
             atomic_file(self.recovery / name, source=source, mode=0o600)
-        info = {'version': expected, 'filename': filename}
+        info = {'version': expected, 'filename': filename, 'kernel_selected': kernel_selected}
         atomic_file(self.recovery / 'release.json',
                     data=json.dumps(info).encode(), mode=0o600)
         sync_directory(self.state)
@@ -509,9 +509,12 @@ class Updater:
                 or checksum.stat().st_size > 1024):
             raise UpdateError('Recovery archive exceeds size limit')
         members = self.validate(package, checksum, filename, expected)
+        kernel_selected = info.get('kernel_selected', True)
+        if type(kernel_selected) is not bool:
+            raise UpdateError('Invalid recovery kernel selection')
         # Kernel trials precede runtime replacement. Early recovery must not
         # depend on the FAT mount or install a release before trial confirmation.
-        if KERNEL_MANIFEST in members and files_only:
+        if KERNEL_MANIFEST in members and kernel_selected and files_only:
             info = self.kernel().read()
             if not info or info['phase'] != 'committed':
                 return
@@ -529,7 +532,7 @@ class Updater:
                 # or systemctl calls belong in this early recovery phase.
                 self.restore_config()
             else:
-                if KERNEL_MANIFEST in members and not self.kernel().prepare(staged):
+                if KERNEL_MANIFEST in members and kernel_selected and not self.kernel().prepare(staged):
                     return
                 self.install(staged, members)
         if not files_only:
@@ -879,15 +882,19 @@ class Updater:
                 self.clean_payload_scratch(members)
                 staged = work / "stage"
                 self.stage(package, members, staged)
-                if KERNEL_MANIFEST in members:
+                kernel_selected = (KERNEL_MANIFEST not in members or board != 'cm4'
+                                   or kernel_enabled(self.root))
+                if KERNEL_MANIFEST in members and kernel_selected:
                     self.kernel().preflight(staged)
+                elif KERNEL_MANIFEST in members:
+                    self.log('CM4 kernel update disabled locally; installing runtime payload only')
                 # APT is allowed only before arming the transaction. Boot
                 # recovery never depends on network access or package installs.
                 self.protect_kernel(staged)
                 run_command([staged / 'usr/local/bin/manet-admin-setup.sh'],
                             timeout=600)
-                self.arm_recovery(package, checksum, filename, expected, staged)
-                if KERNEL_MANIFEST in members and not self.kernel().prepare(staged):
+                self.arm_recovery(package, checksum, filename, expected, staged, kernel_selected)
+                if KERNEL_MANIFEST in members and kernel_selected and not self.kernel().prepare(staged):
                     return
                 self.install(staged, members)
                 self.log(f"Node tools updated to version {expected}")

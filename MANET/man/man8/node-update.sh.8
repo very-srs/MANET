@@ -29,8 +29,15 @@ The archive digest, paths and embedded versions are checked before staging.
 The tools archive may carry any component selected for the release,
 including kernels, modules, firmware and configuration migrations.
 Current packages update runtime files and managed radio firmware.
-The opt-in CM4 kernel trial path requires a locally qualified boot profile
-and hardware validation before shipment.
+CM4 kernel payloads start a one-shot trial by default using a profile derived
+from the node's boot files and hardware.
+Set enabled=n in
+.Pa /etc/manet-kernel-update.conf
+to install runtime files only.
+An already armed trial still resolves before another update.
+Confirmation checks local services, watchdog, mounts, modules and attached
+radio PHYs without requiring Ethernet, peers, internet or clock synchronization.
+A local bench profile remains an override.
 Rock 3A kernel activation is not yet enabled.
 Follow the selected release's activation and reboot instructions.
 .Pp

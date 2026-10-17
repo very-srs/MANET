@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""Matched kernel payload validation and opt-in CM4 one-shot boot transactions."""
+"""Matched kernel payload validation and default-on CM4 one-shot boot trials."""
 
+from collections import Counter
 import hashlib
 import json
 import os
@@ -14,9 +15,32 @@ PREFIX = 'manet-kernel/'
 MANIFEST = PREFIX + 'manifest.json'
 PROFILE = 'etc/manet-kernel-trial.json'
 HEALTH = 'usr/local/sbin/manet-kernel-health-check'
+POLICY = 'etc/manet-kernel-update.conf'
+FIELD_HEALTH_WAIT = 60
 MAX_DOWNLOAD = 256 * 1024 * 1024
 MAX_EXPANDED = 1536 * 1024 * 1024
 MANIFEST_LIMIT = 4 * 1024 * 1024
+
+
+def kernel_enabled(root):
+    """A local operator setting, never distributed through mesh configuration."""
+    path = root / POLICY
+    try:
+        lines = path.read_text().splitlines()
+    except FileNotFoundError:
+        return True
+    enabled = True
+    for line in lines:
+        line = line.split('#', 1)[0].strip()
+        if not line:
+            continue
+        key, separator, value = line.partition('=')
+        value = value.strip().lower()
+        if key.strip() != 'enabled' or not separator or value not in (
+                'y', 'yes', 'true', '1', 'n', 'no', 'false', '0'):
+            raise KernelError('Invalid kernel update policy: use enabled=y or enabled=n')
+        enabled = value in ('y', 'yes', 'true', '1')
+    return enabled
 
 
 class KernelError(Exception):
@@ -131,9 +155,24 @@ class KernelTrial:
         return (self.root / 'proc/sys/kernel/osrelease').read_text().strip()
 
     def profile(self):
+        info = self.read()
+        if info and info.get('profile', {}).get('health') == 'field-v1':
+            return info['profile']
         path = self.u.destination(PROFILE)
+        if not path.exists() and not path.is_symlink():
+            if info:
+                raise KernelError('Missing bench profile for pending kernel trial')
+            base, args = self.base()
+            mount = self.run(['findmnt', '--noheadings', '--raw', '--output',
+                              'FSTYPE,UUID', '--mountpoint', self.boot], timeout=10).decode().split()
+            if len(mount) != 2 or mount[0] != 'vfat':
+                raise KernelError('Expected CM4 FAT boot filesystem is not mounted')
+            return dict(backend='cm4-tryboot-v1', health='field-v1', boot_uuid=mount[1],
+                        config_sha256=hashlib.sha256(base.encode()).hexdigest(),
+                        cmdline_sha256=hashlib.sha256(args.encode()).hexdigest(),
+                        hardware=self.hardware())
         if not path.is_file() or path.is_symlink():
-            raise KernelError('Kernel trial requires a locally validated boot profile')
+            raise KernelError('Invalid local kernel trial profile')
         st = path.stat()
         if st.st_uid != 0 or st.st_mode & 0o022 or st.st_size > 8192:
             raise KernelError('Kernel trial profile must be root-owned and not writable by others')
@@ -163,8 +202,8 @@ class KernelTrial:
             if (self.boot / name).is_symlink():
                 raise KernelError('Boot selector must not be a symlink: ' + name)
 
-    def base(self, profile):
-        """Accept the commissioned config or the last committed selector."""
+    def base(self, profile=None):
+        """Accept this node's config or the last committed selector."""
         config = self.boot / 'config.txt'
         cmdline = self.boot / 'cmdline.txt'
         previous = self.u.destination('var/lib/manet-kernel/confirmed.json')
@@ -176,8 +215,8 @@ class KernelTrial:
             args = saved['base_cmdline']
         else:
             base, args = config.read_text(), cmdline.read_text()
-        if (hashlib.sha256(base.encode()).hexdigest() != profile['config_sha256']
-                or hashlib.sha256(args.encode()).hexdigest() != profile['cmdline_sha256']):
+        if profile and (hashlib.sha256(base.encode()).hexdigest() != profile['config_sha256']
+                        or hashlib.sha256(args.encode()).hexdigest() != profile['cmdline_sha256']):
             raise KernelError('Boot config or command line differs from validated profile')
         return base, args
 
@@ -239,8 +278,8 @@ class KernelTrial:
         return manifest, profile
 
     def watchdogs(self):
-        # The commissioned profile attests to start4.elf's kernel watchdog
-        # handoff and reset test. An EEPROM setting alone cannot prove it.
+        # Option B uses start4.elf's kernel watchdog and PID 1. An EEPROM
+        # setting alone cannot prove the reset path.
         # Older CM4 EEPROMs lack a boot watchdog; failure before kernel handoff
         # then needs a power cycle to return to the normal one-shot selector.
         runtime = self.run(['systemctl', 'show', '--property=RuntimeWatchdogUSec', '--value']).strip()
@@ -267,6 +306,126 @@ class KernelTrial:
         else:
             relative = 'var/lib/manet-kernel/' + info['slot'] + '/' + name
         return self.u.destination(relative)
+
+    def hardware(self):
+        """Bus enumeration survives a missing driver, netdev or PHY.
+
+        SPI has no discoverable vendor ID. Only an already bound Morse SPI
+        device proves a fitted hat; the common overlay also probes empty slots.
+        Save that proof before reboot so a failed candidate bind is detected.
+        """
+        result = []
+        for bus, keys in (('pci', ('vendor', 'device')), ('usb', ('idVendor', 'idProduct'))):
+            for device in sorted((self.root / 'sys/bus' / bus / 'devices').glob('*')):
+                if not (device / keys[0]).exists():
+                    continue
+                identity = ':'.join((device / key).read_text().strip().lower().removeprefix('0x')
+                                    for key in keys)
+                if bus == 'pci' and identity in ('14c3:7915', '14c3:7916'):
+                    driver, module = 'mt7915e', 'mt7915e'
+                    phys = 2 if identity == '14c3:7916' else 1
+                elif bus == 'usb' and identity == '325b:8100':
+                    driver, module, phys = 'morse_usb', 'morse', 1
+                else:
+                    continue
+                result.append(dict(bus=bus, identity=identity, path=str(device.relative_to(self.root)),
+                                   driver=driver, module=module, phys=phys))
+        for device in sorted((self.root / 'sys/bus/spi/devices').glob('*')):
+            if (device / 'driver').is_symlink() and (device / 'driver').resolve().name == 'morse_spi':
+                result.append(dict(bus='spi', identity='morse_spi', path=str(device.relative_to(self.root)),
+                                   driver='morse_spi', module='morse', phys=1))
+        return result
+
+    def field_health(self, info, profile, manifest):
+        """Bound local readiness by elapsed time and the boot commit deadline."""
+        uptime = float((self.root / 'proc/uptime').read_text().split()[0])
+        if uptime >= 240:
+            raise KernelError('Kernel confirmation deadline expired')
+        deadline = time.monotonic() + min(FIELD_HEALTH_WAIT, 240 - uptime)
+
+        def command(args):
+            return self.run(args, timeout=max(0.001, min(3, deadline - time.monotonic())))
+
+        # Verify the exact payload tree once, including out-of-tree modules.
+        # depmod's regenerated indexes are checked by staging, not rehashed.
+        for name, item in manifest['files'].items():
+            if not name.startswith('modules/') or not re.search(r'\.ko(?:\.(?:xz|zst|gz))?$', name):
+                continue
+            if sha256(self.target(name, info)) != item['sha256']:
+                raise KernelError('Installed candidate module hash mismatch: ' + name)
+            if FIELD_HEALTH_WAIT and time.monotonic() >= deadline:
+                raise KernelError('Module verification exceeded health deadline')
+        while True:
+            try:
+                self.field_ready(profile, command)
+                return
+            except (KernelError, OSError, ValueError, subprocess.SubprocessError) as error:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise KernelError(str(error)) from error
+                time.sleep(min(2, remaining))
+
+    def field_ready(self, profile, command):
+        active = ('multi-user.target', 'local-fs.target', 'systemd-udevd.service',
+                  'systemd-networkd.service', 'node-manager.service', 'mesh-status.service', 'ssh.service')
+        for service in active:
+            command(['systemctl', 'is-active', '--quiet', service])
+        critical = set(active) | {'radio-setup-run-once.service', 'batman-enslave.service',
+                                  'alfred.service', 'mesh-clone-identity.service',
+                                  'ssh-recovery.service', 'mesh-boot-lobby.service',
+                                  'manet-mt7916-firmware.service', 'manet-radio-names.service'}
+        failed = command(['systemctl', '--failed', '--no-legend', '--plain', '--no-pager']).decode()
+        units = [line.split()[0] for line in failed.splitlines() if line.split()]
+        if any(unit in critical or unit.startswith(('wpa_supplicant@', 'wpa_supplicant-s1g-'))
+               for unit in units):
+            raise KernelError('Critical boot unit failed')
+        root_mount = command(['findmnt', '--noheadings', '--raw', '--output', 'FSTYPE,OPTIONS',
+                              '--mountpoint', self.root]).decode().split()
+        if len(root_mount) != 2 or 'rw' not in root_mount[1].split(','):
+            raise KernelError('Root filesystem is not mounted read-write')
+        boot_mount = command(['findmnt', '--noheadings', '--raw', '--output', 'FSTYPE,UUID',
+                              '--mountpoint', self.boot]).decode().split()
+        if boot_mount != ['vfat', profile['boot_uuid']]:
+            raise KernelError('Expected CM4 FAT boot filesystem is not mounted')
+        runtime = command(['systemctl', 'show', '--property=RuntimeWatchdogUSec', '--value']).strip()
+        if not re.fullmatch(rb'(?:[0-9]+(?:\.[0-9]+)?(?:us|ms|s|min|h|d|w)?\s*)+', runtime) or not any(
+                float(value) > 0 for value in re.findall(rb'[0-9]+(?:\.[0-9]+)?', runtime)):
+            raise KernelError('PID 1 runtime watchdog is not enabled')
+        held = {os.readlink(fd) for fd in (self.root / 'proc/1/fd').iterdir() if fd.is_symlink()}
+        armed = False
+        for device in (self.root / 'sys/class/watchdog').glob('watchdog*'):
+            if ('/dev/' + device.name in held or (device.name == 'watchdog0' and '/dev/watchdog' in held)):
+                armed |= ((device / 'state').read_text().strip() == 'active'
+                          and int((device / 'timeout').read_text()) > 0)
+        if not armed:
+            raise KernelError('PID 1 does not hold an armed hardware watchdog')
+        present = self.hardware()
+        identity = lambda item: (item['bus'], item['identity'])
+        if Counter(map(identity, profile['hardware'])) - Counter(map(identity, present)):
+            raise KernelError('Previously detected radio hardware disappeared')
+        phys = [phy.resolve() for phy in (self.root / 'sys/class/ieee80211').glob('*/device')]
+        checked = set()
+        for radio in present:
+            device = self.root / radio['path']
+            bindings = [device] if radio['bus'] != 'usb' else list(device.glob('*:*'))
+            if not any((path / 'driver').is_symlink() and
+                       (path / 'driver').resolve().name == radio['driver'] for path in bindings):
+                raise KernelError('Radio driver is not bound: ' + radio['identity'])
+            if not (self.root / 'sys/module' / radio['module']).is_dir():
+                raise KernelError('Radio module is not loaded: ' + radio['module'])
+            device = device.resolve()
+            if sum(phy == device or phy.is_relative_to(device) for phy in phys) < radio['phys']:
+                raise KernelError('Radio PHY missing: ' + radio['identity'])
+            if radio['module'] not in checked:
+                version = command(['modinfo', '-k', self.release(), '-F', 'vermagic', radio['module']]).decode().split()
+                if not version or version[0] != self.release():
+                    raise KernelError('Radio module release does not match running kernel')
+                if radio['module'] == 'mt7915e' and command(
+                        ['modinfo', '-k', self.release(), '-F', 'manet_timing', 'mt7915e']).strip() != b'1':
+                    raise KernelError('mt7915e is missing manet_timing=1')
+                checked.add(radio['module'])
+        if not int((self.root / 'sys/class/net/bat0/flags').read_text().strip(), 16) & 1:
+            raise KernelError('bat0 is not up')
 
     def make_parent(self, target):
         if not target.is_relative_to(self.boot):
@@ -305,7 +464,7 @@ class KernelTrial:
         manifest, profile = self.preflight(directory)
         info = self.read()
         if info and info['phase'] != 'staging':
-            return self.resolve(info, profile)
+            return self.resolve(info, profile, manifest)
         if not info:
             base, args = self.base(profile)
             slot = sha256(directory / MANIFEST)[:24]
@@ -317,7 +476,7 @@ class KernelTrial:
                         manifest_sha256=sha256(directory / MANIFEST),
                         old_config=(self.boot / 'config.txt').read_text(),
                         base_config=base, base_cmdline=args, origin_boot=self.boot_id(),
-                        old_release=self.release())
+                        old_release=self.release(), profile=profile)
             info['trial_config'] = self.config(base, slot, manifest['files'])
             self.save(info)
         # Only this journal owns these paths; retries never touch running modules.
@@ -381,7 +540,7 @@ class KernelTrial:
             self.run(['systemctl', 'reboot'])
         raise KernelError(message + '; kernel transaction retained, no automatic retrial')
 
-    def resolve(self, info, profile):
+    def resolve(self, info, profile, manifest):
         phase = info['phase']
         if phase == 'committed':
             if (self.release() != info['release']
@@ -411,9 +570,12 @@ class KernelTrial:
                       reboot=(self.release() == info['release']
                               or (flag.is_file() and flag.read_bytes() == b'\x00\x00\x00\x01')))
         try:
-            for service in ('node-manager.service', 'mesh-status.service', 'ssh.service'):
-                self.run(['systemctl', 'is-active', '--quiet', service])
-            self.run([self.u.destination(HEALTH)], timeout=60)
+            if profile.get('health') == 'field-v1':
+                self.field_health(info, profile, manifest)
+            else:
+                for service in ('node-manager.service', 'mesh-status.service', 'ssh.service'):
+                    self.run(['systemctl', 'is-active', '--quiet', service])
+                self.run([self.u.destination(HEALTH)], timeout=60)
         except Exception as error:
             self.fail(info, 'Kernel health confirmation failed: ' + str(error), reboot=True)
         # Guard gives late activation 5 minutes. Never commit after its deadline.

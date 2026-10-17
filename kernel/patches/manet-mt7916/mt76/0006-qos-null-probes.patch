@@ -1,0 +1,565 @@
+From: MANET <manet@localhost>
+Subject: [PATCH 6/6] mt76: mt7915: send dedicated mesh QoS Null timing probes
+
+Add a bounded synchronous debugfs burst with cancellation, mesh admission
+checks and direct VO submission. Suppress legacy selection during a burst,
+request a single nonaggregated attempt, and retain the saved timing flag
+for TX status exclusion. Keep the existing marked-skb path outside bursts.
+
+---
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/Makefile b/drivers/net/wireless/mediatek/mt76/mt7915/Makefile
+--- a/drivers/net/wireless/mediatek/mt76/mt7915/Makefile
++++ b/drivers/net/wireless/mediatek/mt76/mt7915/Makefile
+@@ -3,7 +3,7 @@
+ obj-$(CONFIG_MT7915E) += mt7915e.o
+ 
+ mt7915e-y := pci.o init.o dma.o eeprom.o main.o mcu.o mac.o \
+-	     debugfs.o mmio.o tmr_trace.o
++	     debugfs.o tmr.o mmio.o tmr_trace.o
+ 
+ CFLAGS_tmr_trace.o := -I$(src)
+ 
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/debugfs.c b/drivers/net/wireless/mediatek/mt76/mt7915/debugfs.c
+--- a/drivers/net/wireless/mediatek/mt76/mt7915/debugfs.c
++++ b/drivers/net/wireless/mediatek/mt76/mt7915/debugfs.c
+@@ -1337,6 +1337,10 @@
+ 	req.band = phy->mt76->band_idx;
+ 
+ 	mutex_lock(&dev->mt76.mutex);
++	if (atomic_read(&dev->tmr_probe_busy)) {
++		mutex_unlock(&dev->mt76.mutex);
++		return -EBUSY;
++	}
+ 	if (req.enable)
+ 		mt7915_tmr_prepare(phy);
+ 	ret = mt76_mcu_send_msg(&dev->mt76, MCU_EXT_CMD(TMR_CTRL), &req,
+@@ -1368,17 +1372,23 @@
+ 		return -EFAULT;
+ 	buf[count] = '\0';
+ 
++	if (!sysfs_streq(buf, "off") &&
++	    (!mac_pton(strim(buf), addr) || !is_valid_ether_addr(addr)))
++		return -EINVAL;
++	mutex_lock(&dev->mt76.mutex);
++	if (atomic_read(&dev->tmr_probe_busy)) {
++		mutex_unlock(&dev->mt76.mutex);
++		return -EBUSY;
++	}
+ 	if (sysfs_streq(buf, "off")) {
+ 		WRITE_ONCE(dev->tmr_peer_set, false);
+-		return count;
+-	}
+-	if (!mac_pton(strim(buf), addr))
+-		return -EINVAL;
+-
+-	WRITE_ONCE(dev->tmr_peer_set, false);
+-	ether_addr_copy(dev->tmr_peer, addr);
+-	atomic_set(&dev->tmr_marked, 0);
+-	WRITE_ONCE(dev->tmr_peer_set, true);
++	} else {
++		WRITE_ONCE(dev->tmr_peer_set, false);
++		ether_addr_copy(dev->tmr_peer, addr);
++		atomic_set(&dev->tmr_marked, 0);
++		WRITE_ONCE(dev->tmr_peer_set, true);
++	}
++	mutex_unlock(&dev->mt76.mutex);
+ 	return count;
+ }
+ 
+@@ -1401,7 +1411,7 @@
+ {
+ 	struct mt7915_dev *dev = file->private_data;
+ 	char buf[16];
+-	u8 val;
++	u8 val = 0;
+ 
+ 	if (count >= sizeof(buf))
+ 		return -EINVAL;
+@@ -1409,13 +1419,16 @@
+ 		return -EFAULT;
+ 	buf[count] = '\0';
+ 
+-	if (sysfs_streq(buf, "off")) {
+-		WRITE_ONCE(dev->tmr_spe, -1);
+-		return count;
+-	}
+-	if (kstrtou8(strim(buf), 0, &val) || val > 31)
++	if (!sysfs_streq(buf, "off") &&
++	    (kstrtou8(strim(buf), 0, &val) || val > 31))
+ 		return -EINVAL;
+-	WRITE_ONCE(dev->tmr_spe, val);
++	mutex_lock(&dev->mt76.mutex);
++	if (atomic_read(&dev->tmr_probe_busy)) {
++		mutex_unlock(&dev->mt76.mutex);
++		return -EBUSY;
++	}
++	WRITE_ONCE(dev->tmr_spe, sysfs_streq(buf, "off") ? -1 : val);
++	mutex_unlock(&dev->mt76.mutex);
+ 	return count;
+ }
+ 
+@@ -1441,7 +1454,13 @@
+ {
+ 	struct mt7915_dev *dev = data;
+ 
++	mutex_lock(&dev->mt76.mutex);
++	if (atomic_read(&dev->tmr_probe_busy)) {
++		mutex_unlock(&dev->mt76.mutex);
++		return -EBUSY;
++	}
+ 	WRITE_ONCE(dev->tmr_mark, (u32)val);
++	mutex_unlock(&dev->mt76.mutex);
+ 	return 0;
+ }
+ 
+@@ -1462,7 +1481,13 @@
+ 
+ 	if (val & ~0xfffffc0fULL)
+ 		return -EINVAL;
++	mutex_lock(&dev->mt76.mutex);
++	if (atomic_read(&dev->tmr_probe_busy)) {
++		mutex_unlock(&dev->mt76.mutex);
++		return -EBUSY;
++	}
+ 	WRITE_ONCE(dev->tmr_rate, (u32)val);
++	mutex_unlock(&dev->mt76.mutex);
+ 	return 0;
+ }
+ 
+@@ -1580,6 +1605,8 @@
+ 				    &mt7915_tmr_registers_fops);
+ 		debugfs_create_file("tmr_ctrl", 0200, dir, phy,
+ 				    &mt7915_tmr_ctrl_fops);
++		debugfs_create_file("tmr_probe", 0600, dir, phy,
++				    &mt7915_tmr_probe_fops);
+ 		debugfs_create_file("tmr_peer", 0600, dir, dev,
+ 				    &mt7915_tmr_peer_fops);
+ 		debugfs_create_file("tmr_spe", 0600, dir, dev,
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/mac.c b/drivers/net/wireless/mediatek/mt76/mt7915/mac.c
+--- a/drivers/net/wireless/mediatek/mt76/mt7915/mac.c
++++ b/drivers/net/wireless/mediatek/mt76/mt7915/mac.c
+@@ -729,6 +729,24 @@
+ 		mt7915_mac_write_txwi_tm(mphy->priv, txwi, skb);
+ }
+ 
++static bool mt7915_tmr_selected(struct mt7915_dev *dev,
++				struct ieee80211_sta *sta, struct sk_buff *skb)
++{
++	return skb == READ_ONCE(dev->tmr_probe_skb) || (!atomic_read(&dev->tmr_probe_busy) &&
++	      unlikely(READ_ONCE(dev->tmr_peer_set)) && sta &&
++	      ether_addr_equal(sta->addr, dev->tmr_peer) &&
++	      (!READ_ONCE(dev->tmr_mark) ||
++	       skb->mark == READ_ONCE(dev->tmr_mark)));
++}
++
++/* Single attempt and normal ACK regardless of the optional SPE override. */
++static void mt7915_tmr_probe_txwi(__le32 *txd)
++{
++	txd[3] |= cpu_to_le32(MT_TXD3_BA_DISABLE);
++	le32p_replace_bits(&txd[3], 1, MT_TXD3_REM_TX_COUNT);
++	txd[7] &= ~cpu_to_le32(MT_TXD7_HW_AMSDU);
++}
++
+ int mt7915_tx_prepare_skb(struct mt76_dev *mdev, void *txwi_ptr,
+ 			  enum mt76_txq_id qid, struct mt76_wcid *wcid,
+ 			  struct ieee80211_sta *sta,
+@@ -744,6 +762,7 @@
+ 	int id, i, nbuf = tx_info->nbuf - 1;
+ 	u8 *txwi = (u8 *)txwi_ptr;
+ 	int pid;
++	bool probe = tx_info->skb == READ_ONCE(dev->tmr_probe_skb);
+ 	bool tmr;
+ 
+ 	if (unlikely(tx_info->skb->len <= ETH_HLEN))
+@@ -753,10 +772,7 @@
+ 		wcid = &dev->mt76.global_wcid;
+ 
+ 	/* Snapshot selection once: debugfs may change before TX status arrives. */
+-	tmr = unlikely(READ_ONCE(dev->tmr_peer_set)) && sta &&
+-	      ether_addr_equal(sta->addr, dev->tmr_peer) &&
+-	      (!READ_ONCE(dev->tmr_mark) ||
+-	       tx_info->skb->mark == READ_ONCE(dev->tmr_mark));
++	tmr = mt7915_tmr_selected(dev, sta, tx_info->skb);
+ 	if (tmr)
+ 		/* Also keep marked frames out of the untracked WED status path. */
+ 		info->flags |= IEEE80211_TX_CTL_REQ_TX_STATUS;
+@@ -791,6 +807,8 @@
+ 		s8 spe = READ_ONCE(dev->tmr_spe);
+ 
+ 		txd[3] |= cpu_to_le32(MT_TXD3_TIMING_MEASURE);
++		if (probe)
++			mt7915_tmr_probe_txwi(txd);
+ 		/* Send the probe on one chain: fixed OFDM 6M at 20 MHz, TXD SPE */
+ 		if (spe >= 0) {
+ 			txd[2] |= cpu_to_le32(MT_TXD2_FIX_RATE);
+@@ -1562,6 +1580,7 @@
+ 	int i;
+ 
+ 	dev = container_of(work, struct mt7915_dev, reset_work);
++	atomic_cmpxchg(&dev->tmr_probe_busy, 1, 2);
+ 	ext_phy = dev->mt76.phys[MT_BAND1];
+ 	phy2 = ext_phy ? ext_phy->priv : NULL;
+ 
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/main.c b/drivers/net/wireless/mediatek/mt76/mt7915/main.c
+--- a/drivers/net/wireless/mediatek/mt76/mt7915/main.c
++++ b/drivers/net/wireless/mediatek/mt76/mt7915/main.c
+@@ -112,6 +112,8 @@
+ {
+ 	struct mt7915_dev *dev = mt7915_hw_dev(hw);
+ 	struct mt7915_phy *phy = mt7915_hw_phy(hw);
++
++	atomic_cmpxchg(&dev->tmr_probe_busy, 1, 2);
+ 
+ 	cancel_delayed_work_sync(&phy->mt76->mac_work);
+ 
+@@ -295,6 +297,8 @@
+ 	mt7915_mcu_add_bss_info(phy, vif, false);
+ 	mt7915_mcu_add_sta(dev, vif, NULL, CONN_STATE_DISCONNECT, false);
+ 	mt76_wcid_mask_clear(dev->mt76.wcid_mask, mvif->sta.wcid.idx);
++
++	atomic_cmpxchg(&dev->tmr_probe_busy, 1, 2);
+ 
+ 	mutex_lock(&dev->mt76.mutex);
+ 	mt76_testmode_reset(phy->mt76, true);
+@@ -1158,6 +1162,10 @@
+ 	struct mt7915_sta *msta = (struct mt7915_sta *)sta->drv_priv;
+ 	struct rate_info *txrate = &msta->wcid.rate;
+ 	struct rate_info rxrate = {};
++
++	/* The burst's link query needs only mac80211's mesh state. */
++	if (current == READ_ONCE(phy->dev->tmr_probe_task))
++		return;
+ 
+ 	if (!mt7915_mcu_get_rx_rate(phy, vif, sta, &rxrate)) {
+ 		sinfo->rxrate = rxrate;
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/mt7915.h b/drivers/net/wireless/mediatek/mt76/mt7915/mt7915.h
+--- a/drivers/net/wireless/mediatek/mt76/mt7915/mt7915.h
++++ b/drivers/net/wireless/mediatek/mt76/mt7915/mt7915.h
+@@ -260,6 +260,13 @@
+ 	u32 tmr_mark;
+ 	/* if non-zero, TXD DW6 rate/width bits (mask 0xfffffc0f) for marked frames instead of OFDM 6M at 20 MHz */
+ 	u32 tmr_rate;
++	/* One synchronous burst across both PHYs: 0 idle, 1 running, 2 cancel. */
++	atomic_t tmr_probe_busy;
++	atomic_t tmr_probe_sent;
++	atomic_t tmr_probe_skipped;
++	int tmr_probe_error;
++	struct sk_buff *tmr_probe_skb;
++	struct task_struct *tmr_probe_task;
+ 
+ 	struct mt7915_hif *hif2;
+ 	struct mt7915_reg_desc reg;
+@@ -622,6 +629,8 @@
+ int mt7915_mcu_muru_debug_set(struct mt7915_dev *dev, bool enable);
+ int mt7915_mcu_muru_debug_get(struct mt7915_phy *phy);
+ int mt7915_mcu_wed_enable_rx_stats(struct mt7915_dev *dev);
++extern const struct file_operations mt7915_tmr_probe_fops;
++
+ int mt7915_init_debugfs(struct mt7915_phy *phy);
+ void mt7915_debugfs_rx_fw_monitor(struct mt7915_dev *dev, const void *data, int len);
+ bool mt7915_debugfs_rx_log(struct mt7915_dev *dev, const void *data, int len);
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/tmr.c b/drivers/net/wireless/mediatek/mt76/mt7915/tmr.c
+new file mode 100644
+--- /dev/null
++++ b/drivers/net/wireless/mediatek/mt76/mt7915/tmr.c
+@@ -0,0 +1,300 @@
++// SPDX-License-Identifier: ISC
++/* Bounded, synchronous QoS Null timing bursts on an established mesh link. */
++#include <linux/delay.h>
++#include <linux/rtnetlink.h>
++#include "mt7915.h"
++#include "mac.h"
++
++#define MT7915_TMR_PROBE_SKIPPED 1
++
++static int mt7915_tmr_probe_parse(char *buf, unsigned int *n,
++				  unsigned int *interval)
++{
++	char number[16], spacing[16];
++	char extra;
++
++	if (sysfs_streq(strim(buf), "0")) {
++		*n = 0;
++		return 0;
++	}
++	if (sscanf(buf, "%15s %15s %c", number, spacing, &extra) != 2 ||
++	    kstrtouint(number, 10, n) || kstrtouint(spacing, 10, interval) ||
++	    !*n || *n > 4096 || *interval < 10000 || *interval > 1000000 ||
++	    (u64)*n * *interval > 120000000)
++		return -EINVAL;
++	return 0;
++}
++
++static int mt7915_tmr_probe_link(struct station_info *sinfo)
++{
++	u64 required = BIT_ULL(NL80211_STA_INFO_PLINK_STATE) |
++		       BIT_ULL(NL80211_STA_INFO_LOCAL_PM) |
++		       BIT_ULL(NL80211_STA_INFO_PEER_PM);
++
++	if ((sinfo->filled & required) != required ||
++	    sinfo->plink_state != NL80211_PLINK_ESTAB)
++		return -ENOLINK;
++	/* The frame advertises active mode. Never change a sleeping mesh link. */
++	if (sinfo->local_pm != NL80211_MESH_POWER_ACTIVE ||
++	    sinfo->peer_pm != NL80211_MESH_POWER_ACTIVE)
++		return -EOPNOTSUPP;
++	return 0;
++}
++
++static void mt7915_tmr_probe_header(struct ieee80211_hdr *hdr,
++				    const u8 *peer, const u8 *local)
++{
++	u8 *qos = (u8 *)(hdr + 1);
++
++	/* Same four-address layout as mac80211 mesh power-save QoS Null. */
++	hdr->frame_control = cpu_to_le16(IEEE80211_FTYPE_DATA |
++		IEEE80211_STYPE_QOS_NULLFUNC | IEEE80211_FCTL_TODS |
++		IEEE80211_FCTL_FROMDS);
++	ether_addr_copy(hdr->addr1, peer);
++	ether_addr_copy(hdr->addr2, local);
++	ether_addr_copy(hdr->addr3, peer);
++	ether_addr_copy(hdr->addr4, local);
++	/* TID 7, normal ACK, no mesh control/body, no service-period trigger. */
++	qos[0] = 7 | IEEE80211_QOS_CTL_EOSP;
++}
++
++static int mt7915_tmr_probe_state(struct mt7915_phy *phy)
++{
++	struct mt76_phy *mphy = phy->mt76;
++
++	/* Called under the driver mutex. Fatal states take priority over scan. */
++	if (atomic_read(&phy->dev->tmr_probe_busy) != 1)
++		return -ECANCELED;
++	if (!test_bit(MT76_STATE_RUNNING, &mphy->state) ||
++	    test_bit(MT76_RESET, &mphy->state) ||
++	    mt76_testmode_enabled(mphy))
++		return -ENETDOWN;
++	if (test_bit(MT76_SCANNING, &mphy->state))
++		return MT7915_TMR_PROBE_SKIPPED;
++	return 0;
++}
++
++struct mt7915_tmr_lookup {
++	struct mt7915_phy *phy;
++	struct net_device *netdev;
++	u8 local[ETH_ALEN];
++	unsigned int matches;
++};
++
++static void mt7915_tmr_probe_lookup(void *data, u8 *mac,
++				    struct ieee80211_vif *vif)
++{
++	struct mt7915_tmr_lookup *lookup = data;
++	struct mt7915_phy *phy = lookup->phy;
++	struct ieee80211_sta *sta;
++
++	if (vif->type != NL80211_IFTYPE_MESH_POINT)
++		return;
++	sta = ieee80211_find_sta_by_ifaddr(phy->mt76->hw, phy->dev->tmr_peer, mac);
++	if (!sta)
++		return;
++	if (lookup->matches++)
++		return;
++	lookup->netdev = ieee80211_vif_to_wdev(vif)->netdev;
++	ether_addr_copy(lookup->local, mac);
++}
++
++static int mt7915_tmr_probe_send(struct mt7915_phy *phy)
++{
++	struct mt7915_dev *dev = phy->dev;
++	struct mt76_phy *mphy = phy->mt76;
++	struct mt7915_tmr_lookup lookup = { .phy = phy };
++	struct mt76_queue *q = mphy->q_tx[MT_TXQ_VO];
++	struct ieee80211_tx_info *info;
++	struct ieee80211_vif *vif;
++	struct ieee80211_sta *sta;
++	struct station_info sinfo = {};
++	struct mt7915_sta *msta;
++	struct sk_buff *skb;
++	int ret;
++
++	/* The burst writer holds RTNL for this submission's interface lifetime. */
++	ASSERT_RTNL();
++	rcu_read_lock();
++	ieee80211_iterate_active_interfaces_atomic(mphy->hw, 0,
++						   mt7915_tmr_probe_lookup, &lookup);
++	rcu_read_unlock();
++	ret = -ENOLINK;
++	if (lookup.matches != 1 || !lookup.netdev)
++		goto out;
++
++	/* Public API: ieee80211_sta does not expose the mesh plink state.
++	 * This takes the wiphy lock, so do not hold RCU or the driver mutex.
++	 */
++	WRITE_ONCE(dev->tmr_probe_task, current);
++	ret = cfg80211_get_station(lookup.netdev, dev->tmr_peer, &sinfo);
++	WRITE_ONCE(dev->tmr_probe_task, NULL);
++	if (ret)
++		goto out;
++	ret = mt7915_tmr_probe_link(&sinfo);
++	if (ret)
++		goto out;
++
++	mutex_lock(&dev->mt76.mutex);
++	ret = mt7915_tmr_probe_state(phy);
++	if (ret)
++		goto out_mutex;
++
++	rcu_read_lock();
++	sta = ieee80211_find_sta_by_ifaddr(mphy->hw, dev->tmr_peer, lookup.local);
++	ret = -ENOLINK;
++	if (!sta)
++		goto out_rcu;
++	msta = (struct mt7915_sta *)sta->drv_priv;
++	if (!msta->vif || msta->vif->phy != phy ||
++	    !msta->wcid.sta || msta->wcid.sta_disabled)
++		goto out_rcu;
++	vif = container_of((void *)msta->vif, struct ieee80211_vif, drv_priv);
++	skb = alloc_skb(mphy->hw->extra_tx_headroom +
++			sizeof(struct ieee80211_hdr) + 2, GFP_ATOMIC);
++	ret = -ENOMEM;
++	if (!skb)
++		goto out_rcu;
++	skb_reserve(skb, mphy->hw->extra_tx_headroom);
++	mt7915_tmr_probe_header(skb_put_zero(skb, sizeof(struct ieee80211_hdr) + 2),
++				dev->tmr_peer, vif->addr);
++	skb->priority = 7;
++	skb_set_queue_mapping(skb, IEEE80211_AC_VO);
++	info = IEEE80211_SKB_CB(skb);
++	memset(info, 0, sizeof(*info));
++	info->flags = IEEE80211_TX_CTL_REQ_TX_STATUS |
++		      IEEE80211_TX_CTL_NO_PS_BUFFER;
++	info->control.vif = vif;
++	info->band = mphy->chandef.chan->band;
++	info->hw_queue = FIELD_PREP(MT_TX_HW_QUEUE_PHY, mphy->band_idx);
++	info->control.rates[0].idx = -1;
++
++	/* The DMA entry point prepares TXD synchronously, bypassing BE and
++	 * mac80211 aggregation. It owns skb on both success and failure.
++	 * The pointer identifies only this submission, before skb_add clears
++	 * the status cb. Completion uses the saved MT7915_TX_CB_TMR flag.
++	 */
++	spin_lock_bh(&q->lock);
++	WRITE_ONCE(dev->tmr_probe_skb, skb);
++	ret = dev->mt76.queue_ops->tx_queue_skb(mphy, q, MT_TXQ_VO, skb,
++					     &msta->wcid, sta);
++	WRITE_ONCE(dev->tmr_probe_skb, NULL);
++	if (ret >= 0) {
++		/* Match __mt76_tx_queue_skb's non-AQL accounting. */
++		q->entry[ret].wcid = msta->wcid.idx;
++		atomic_inc(&msta->wcid.non_aql_packets);
++		dev->mt76.queue_ops->kick(&dev->mt76, q);
++		atomic_inc(&dev->tmr_probe_sent);
++		ret = 0;
++	}
++	spin_unlock_bh(&q->lock);
++out_rcu:
++	rcu_read_unlock();
++out_mutex:
++	mutex_unlock(&dev->mt76.mutex);
++out:
++	cfg80211_sinfo_release_content(&sinfo);
++	return ret;
++}
++
++static ssize_t mt7915_tmr_probe_write(struct file *file, const char __user *ubuf,
++				      size_t count, loff_t *ppos)
++{
++	struct mt7915_phy *phy = file->private_data;
++	struct mt7915_dev *dev = phy->dev;
++	unsigned int n, interval = 0, left, delay;
++	char buf[48];
++	int ret;
++
++	if (!count || count >= sizeof(buf))
++		return -EINVAL;
++	if (copy_from_user(buf, ubuf, count))
++		return -EFAULT;
++	if (memchr(buf, '\0', count))
++		return -EINVAL;
++	buf[count] = '\0';
++	ret = mt7915_tmr_probe_parse(buf, &n, &interval);
++	if (ret)
++		return ret;
++	if (!n) {
++		atomic_cmpxchg(&dev->tmr_probe_busy, 1, 2);
++		return count;
++	}
++
++	mutex_lock(&dev->mt76.mutex);
++	ret = -EBUSY;
++	if (atomic_read(&dev->tmr_probe_busy))
++		goto out;
++	ret = -ENOLINK;
++	if (!dev->tmr_peer_set || !is_valid_ether_addr(dev->tmr_peer))
++		goto out;
++	atomic_set(&dev->tmr_probe_busy, 1);
++	atomic_set(&dev->tmr_probe_sent, 0);
++	atomic_set(&dev->tmr_probe_skipped, 0);
++	atomic_set(&dev->tmr_marked, 0);
++	WRITE_ONCE(dev->tmr_probe_error, 0);
++	mutex_unlock(&dev->mt76.mutex);
++
++	/* Synchronous write: no worker or station/vif pointer outlives it.
++	 * Cancellation and signals are checked at most 20 ms apart in sleeps.
++	 */
++	while (n--) {
++		if (signal_pending(current)) {
++			ret = -EINTR;
++			break;
++		}
++		if (atomic_read(&dev->tmr_probe_busy) != 1) {
++			ret = -ECANCELED;
++			break;
++		}
++		/* Never wait behind RTNL teardown or retry a contended slot. */
++		if (rtnl_trylock()) {
++			ret = mt7915_tmr_probe_send(phy);
++			rtnl_unlock();
++		} else {
++			ret = MT7915_TMR_PROBE_SKIPPED;
++		}
++		if (ret == MT7915_TMR_PROBE_SKIPPED) {
++			atomic_inc(&dev->tmr_probe_skipped);
++			ret = 0;
++		}
++		if (ret || !n)
++			break;
++		for (left = interval; left; left -= delay) {
++			if (atomic_read(&dev->tmr_probe_busy) != 1 ||
++			    signal_pending(current))
++				break;
++			delay = min(left, 20000U);
++			usleep_range(delay, delay + 100);
++		}
++	}
++	mutex_lock(&dev->mt76.mutex);
++	WRITE_ONCE(dev->tmr_probe_error, ret);
++	atomic_set(&dev->tmr_probe_busy, 0);
++out:
++	mutex_unlock(&dev->mt76.mutex);
++	return ret ? ret : count;
++}
++
++static ssize_t mt7915_tmr_probe_read(struct file *file, char __user *ubuf,
++				     size_t count, loff_t *ppos)
++{
++	struct mt7915_phy *phy = file->private_data;
++	struct mt7915_dev *dev = phy->dev;
++	char buf[80];
++	int len;
++
++	len = scnprintf(buf, sizeof(buf), "running=%d sent=%d skipped=%d error=%d\n",
++			atomic_read(&dev->tmr_probe_busy),
++			atomic_read(&dev->tmr_probe_sent),
++			atomic_read(&dev->tmr_probe_skipped),
++			READ_ONCE(dev->tmr_probe_error));
++	return simple_read_from_buffer(ubuf, count, ppos, buf, len);
++}
++
++const struct file_operations mt7915_tmr_probe_fops = {
++	.write = mt7915_tmr_probe_write,
++	.read = mt7915_tmr_probe_read,
++	.open = simple_open,
++	.llseek = default_llseek,
++};

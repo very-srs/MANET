@@ -269,6 +269,7 @@ class Firmware:
                 disabled = None
         if mode != 'survived':
             self.configure_reservation(allow=not disabled)
+            self.configure_follower(allow=not disabled)
         if not self.present():
             return 'no MT7916 primary PCI function (14c3:7906); ' + self.prepare(False)
         if disabled:
@@ -295,6 +296,11 @@ class Firmware:
                                    "mt7916_background_rx") if allow else "n")
         if requested not in ("y", "n"):
             raise ValueError("mt7916_background_rx must be y or n")
+        # Field policy starts with three receive paths. The runtime controller
+        # owns CM4 transitions; other deployed boards keep these features off.
+        model = self.root / 'proc/device-tree/model'
+        if model.exists():
+            requested = 'n'
         if path.is_symlink() or (path.exists() and path.read_text() != content):
             raise ValueError("unowned MT7916 modprobe config")
         if requested == "n":
@@ -326,6 +332,43 @@ class Firmware:
             staged = Path(temp) / path.name
             staged_file(staged, content.encode())
             os.replace(staged, path)
+            sync_directory(path.parent)
+
+    def configure_follower(self, *, allow=True):
+        """Enable only the paired CM4 kernel's understood load-time option."""
+        path = self.root / 'etc/modprobe.d/manet-dfs-follow.conf'
+        content = '# Managed by manet-mt7916-firmware.py\noptions cfg80211 dfs_follow_ap_v1=1\n'
+        if path.is_symlink() or (path.exists() and path.read_text() != content):
+            raise ValueError('unowned DFS follower modprobe config')
+        try:
+            model = (self.root / 'proc/device-tree/model').read_text()
+        except FileNotFoundError:
+            model = ''
+        supported = False
+        if allow and 'Raspberry Pi Compute Module 4' in model:
+            try:
+                result = subprocess.run(
+                    ['modinfo', '-b', str(self.root), '-k', os.uname().release,
+                     '-F', 'parm', 'cfg80211'], capture_output=True, text=True, timeout=10)
+                supported = result.returncode == 0 and any(
+                    line.startswith('dfs_follow_ap_v1:') for line in result.stdout.splitlines())
+            except (OSError, subprocess.SubprocessError):
+                pass
+        if not supported:
+            if path.exists():
+                path.unlink()
+                sync_directory(path.parent)
+            return
+        if path.exists():
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix='.dfs-follow-', dir=path.parent) as temp:
+            candidate = Path(temp) / path.name
+            candidate.write_text(content)
+            candidate.chmod(0o644)
+            with candidate.open('rb') as stream:
+                os.fsync(stream.fileno())
+            os.replace(candidate, path)
             sync_directory(path.parent)
 
     def owners(self):

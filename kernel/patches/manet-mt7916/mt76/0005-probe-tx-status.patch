@@ -1,0 +1,114 @@
+From: MANET <manet@localhost>
+Subject: [PATCH 5/6] mt76: mt7915: exclude timing probes from TX rate samples
+
+Snapshot timing selection into a private skb completion flag. Request an
+individual TX status for probes, preserve ACK/completion handling, and skip
+connac rate decoding and histograms only for those skbs. Ordinary traffic
+keeps its periodic sampling opportunity even during a probe burst.
+
+---
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/mac.c b/drivers/net/wireless/mediatek/mt76/mt7915/mac.c
+--- a/drivers/net/wireless/mediatek/mt76/mt7915/mac.c
++++ b/drivers/net/wireless/mediatek/mt76/mt7915/mac.c
+@@ -9,6 +9,9 @@
+ #include "mac.h"
+ #include "mcu.h"
+ #include "tmr_trace.h"
++
++/* Private mt76_tx_cb flag; shared completion flags occupy bits 0..2. */
++#define MT7915_TX_CB_TMR BIT(3)
+ 
+ #define to_rssi(field, rcpi)	((FIELD_GET(field, rcpi) - 220) / 2)
+ 
+@@ -741,6 +744,7 @@
+ 	int id, i, nbuf = tx_info->nbuf - 1;
+ 	u8 *txwi = (u8 *)txwi_ptr;
+ 	int pid;
++	bool tmr;
+ 
+ 	if (unlikely(tx_info->skb->len <= ETH_HLEN))
+ 		return -EINVAL;
+@@ -748,7 +752,15 @@
+ 	if (!wcid)
+ 		wcid = &dev->mt76.global_wcid;
+ 
+-	if (sta) {
++	/* Snapshot selection once: debugfs may change before TX status arrives. */
++	tmr = unlikely(READ_ONCE(dev->tmr_peer_set)) && sta &&
++	      ether_addr_equal(sta->addr, dev->tmr_peer) &&
++	      (!READ_ONCE(dev->tmr_mark) ||
++	       tx_info->skb->mark == READ_ONCE(dev->tmr_mark));
++	if (tmr)
++		/* Also keep marked frames out of the untracked WED status path. */
++		info->flags |= IEEE80211_TX_CTL_REQ_TX_STATUS;
++	else if (sta) {
+ 		struct mt7915_sta *msta;
+ 
+ 		msta = (struct mt7915_sta *)sta->drv_priv;
+@@ -767,14 +779,14 @@
+ 		return id;
+ 
+ 	pid = mt76_tx_status_skb_add(mdev, wcid, tx_info->skb);
++	/* skb_add clears the cb; its private bit then survives TXFREE and TXS. */
++	if (tmr)
++		mt76_tx_skb_cb(tx_info->skb)->flags |= MT7915_TX_CB_TMR;
+ 	mt7915_mac_write_txwi(mdev, txwi_ptr, tx_info->skb, wcid, pid, key,
+ 			      qid, 0);
+ 
+ 	/* Request a timing report for frames to the peer. */
+-	if (unlikely(READ_ONCE(dev->tmr_peer_set)) && sta &&
+-	    ether_addr_equal(sta->addr, dev->tmr_peer) &&
+-	    (!READ_ONCE(dev->tmr_mark) ||
+-	     tx_info->skb->mark == READ_ONCE(dev->tmr_mark))) {
++	if (tmr) {
+ 		__le32 *txd = (__le32 *)txwi_ptr;
+ 		s8 spe = READ_ONCE(dev->tmr_spe);
+ 
+@@ -1017,6 +1029,38 @@
+ 	mt7915_mac_tx_free_done(dev, &free_list, wake);
+ }
+ 
++/* Keep the normal ACK/completion lifecycle, without sampling a probe rate. */
++static void mt7915_mac_add_txs_skb(struct mt7915_dev *dev,
++				   struct mt76_wcid *wcid, int pid,
++				   __le32 *txs_data)
++{
++	struct mt76_dev *mdev = &dev->mt76;
++	struct sk_buff_head list;
++	struct sk_buff *skb;
++
++	if (le32_get_bits(txs_data[0], MT_TXS0_TXS_FORMAT) == MT_TXS_PPDU_FMT)
++		return;
++
++	mt76_tx_status_lock(mdev, &list);
++	skb = mt76_tx_status_skb_get(mdev, wcid, pid, &list);
++	if (skb) {
++		struct ieee80211_tx_info *info = IEEE80211_SKB_CB(skb);
++
++		if (!(le32_to_cpu(txs_data[0]) & MT_TXS0_ACK_ERROR_MASK))
++			info->flags |= IEEE80211_TX_STAT_ACK;
++
++		info->status.ampdu_len = 1;
++		info->status.ampdu_ack_len =
++			!!(info->flags & IEEE80211_TX_STAT_ACK);
++		info->status.rates[0].idx = -1;
++
++		if (!(mt76_tx_skb_cb(skb)->flags & MT7915_TX_CB_TMR))
++			mt76_connac2_mac_fill_txs(mdev, wcid, txs_data);
++		mt76_tx_status_skb_done(mdev, skb, &list);
++	}
++	mt76_tx_status_unlock(mdev, &list);
++}
++
+ static void mt7915_mac_add_txs(struct mt7915_dev *dev, void *data)
+ {
+ 	struct mt7915_sta *msta = NULL;
+@@ -1042,7 +1086,7 @@
+ 	if (pid == MT_PACKET_ID_WED)
+ 		mt76_connac2_mac_fill_txs(&dev->mt76, wcid, txs_data);
+ 	else
+-		mt76_connac2_mac_add_txs_skb(&dev->mt76, wcid, pid, txs_data);
++		mt7915_mac_add_txs_skb(dev, wcid, pid, txs_data);
+ 
+ 	if (!wcid->sta)
+ 		goto out;

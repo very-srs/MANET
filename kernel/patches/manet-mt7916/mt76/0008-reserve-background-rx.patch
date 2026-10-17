@@ -1,0 +1,141 @@
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/eeprom.c b/drivers/net/wireless/mediatek/mt76/mt7915/eeprom.c
+--- a/drivers/net/wireless/mediatek/mt76/mt7915/eeprom.c
++++ b/drivers/net/wireless/mediatek/mt76/mt7915/eeprom.c
+@@ -9,6 +9,56 @@
+ static bool enable_6ghz;
+ module_param(enable_6ghz, bool, 0644);
+ MODULE_PARM_DESC(enable_6ghz, "Enable 6 GHz instead of 5 GHz on hardware that supports both");
++
++static bool background_radar_2t2r;
++module_param(background_radar_2t2r, bool, 0444);
++MODULE_PARM_DESC(background_radar_2t2r,
++		 "Reserve MT7916 band-1 third RX path for background radar");
++
++static int mt7915_eeprom_reserve_background_rx(struct mt7915_dev *dev)
++{
++	u8 *eeprom = dev->mt76.eeprom.data;
++	u8 band0 = eeprom[MT_EE_WIFI_CONF];
++	u8 band1 = eeprom[MT_EE_WIFI_CONF + 1];
++	u8 nss = u8_get_bits(eeprom[MT_EE_WIFI_CONF + 3],
++			     MT_EE_WIFI_CONF_STREAM_NUM);
++	u8 tx = u8_get_bits(band1, MT_EE_WIFI_CONF0_TX_PATH);
++	u8 sel1 = u8_get_bits(band1, MT_EE_WIFI_CONF0_BAND_SEL);
++
++	if (!background_radar_2t2r || !is_mt7916(&dev->mt76))
++		return 0;
++
++	/* Only the 2 GHz 2T2R + 5 GHz 3-RX DBDC layout is supported.
++	 * A 5/6 GHz selectable band 1 runs as 5 GHz unless enable_6ghz.
++	 */
++	if (!dev->dbdc_support ||
++	    u8_get_bits(band0, MT_EE_WIFI_CONF0_BAND_SEL) !=
++		MT_EE_V2_BAND_SEL_2GHZ ||
++	    u8_get_bits(band0, MT_EE_WIFI_CONF0_TX_PATH) != 2 ||
++	    u8_get_bits(band0, MT_EE_WIFI_CONF0_RX_PATH) != 2 ||
++	    (sel1 != MT_EE_V2_BAND_SEL_5GHZ &&
++	     (sel1 != MT_EE_V2_BAND_SEL_5GHZ_6GHZ || enable_6ghz)) ||
++	    u8_get_bits(band1, MT_EE_WIFI_CONF0_RX_PATH) != 3 ||
++	    (tx != 2 && tx != 3) || nss == 1) {
++		dev_err(dev->mt76.dev,
++			"background_radar_2t2r: unsupported EEPROM layout\n");
++		return -EINVAL;
++	}
++
++	/* Change only the RAM image, never efuse or calibration bytes. */
++	u8p_replace_bits(&eeprom[MT_EE_WIFI_CONF + 1], 2,
++			 MT_EE_WIFI_CONF0_TX_PATH);
++	u8p_replace_bits(&eeprom[MT_EE_WIFI_CONF + 1], 2,
++			 MT_EE_WIFI_CONF0_RX_PATH);
++	u8p_replace_bits(&eeprom[MT_EE_WIFI_CONF + 3], 2,
++			 MT_EE_WIFI_CONF_STREAM_NUM);
++	dev->flash_mode = true;
++	dev->background_rx_reserved = true;
++	dev_info(dev->mt76.dev,
++		 "band 1: 2T2R background RX reservation\n");
++
++	return 0;
++}
+ 
+ static int mt7915_eeprom_load_precal(struct mt7915_dev *dev)
+ {
+@@ -280,6 +330,10 @@
+ 	}
+ 
+ 	mt7915_eeprom_load_precal(dev);
++	ret = mt7915_eeprom_reserve_background_rx(dev);
++	if (ret)
++		return ret;
++
+ 	mt7915_eeprom_parse_hw_cap(dev, &dev->phy);
+ 	memcpy(dev->mphy.macaddr, dev->mt76.eeprom.data + MT_EE_MAC_ADDR,
+ 	       ETH_ALEN);
+@@ -365,6 +419,9 @@
+ 	u8 val, buf[MT7915_EEPROM_BLOCK_SIZE];
+ 	u8 band_sel, tx_path, rx_path;
+ 	int offs = MT_EE_WIFI_CONF + 1;
++
++	if (dev->background_rx_reserved)
++		return true;
+ 
+ 	switch (mt76_chip(&dev->mt76)) {
+ 	case 0x7915:
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/init.c b/drivers/net/wireless/mediatek/mt76/mt7915/init.c
+--- a/drivers/net/wireless/mediatek/mt76/mt7915/init.c
++++ b/drivers/net/wireless/mediatek/mt76/mt7915/init.c
+@@ -392,6 +392,7 @@
+ 		wiphy_ext_feature_set(wiphy, NL80211_EXT_FEATURE_STA_TX_PWR);
+ 
+ 	if (mt7915_eeprom_has_background_radar(phy->dev) &&
++	    (!dev->background_rx_reserved || mphy->band_idx == MT_BAND1) &&
+ 	    (!mdev->dev->of_node ||
+ 	     !of_property_read_bool(mdev->dev->of_node,
+ 				    "mediatek,disable-radar-background")))
+@@ -731,7 +732,9 @@
+ 	struct mt7915_dev *dev = container_of(work, struct mt7915_dev,
+ 				 init_work);
+ 
+-	mt7915_mcu_set_eeprom(dev);
++	/* The shadow image was checked before wiphy registration. */
++	if (!dev->background_rx_reserved)
++		mt7915_mcu_set_eeprom(dev);
+ 	mt7915_mac_init(dev);
+ 	mt7915_txbf_init(dev);
+ }
+@@ -839,6 +842,13 @@
+ 	ret = mt7915_eeprom_init(dev);
+ 	if (ret < 0)
+ 		return ret;
++
++	/* Do not advertise the reservation if firmware rejects buffer mode. */
++	if (dev->background_rx_reserved) {
++		ret = mt7915_mcu_set_eeprom(dev);
++		if (ret)
++			return ret;
++	}
+ 
+ 	if (dev->cal) {
+ 		ret = mt7915_mcu_apply_group_cal(dev);
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/main.c b/drivers/net/wireless/mediatek/mt76/mt7915/main.c
+--- a/drivers/net/wireless/mediatek/mt76/mt7915/main.c
++++ b/drivers/net/wireless/mediatek/mt76/mt7915/main.c
+@@ -1130,6 +1130,9 @@
+ 	u8 band = phy->mt76->band_idx;
+ 
+ 	if (!tx_ant || tx_ant != rx_ant || ffs(tx_ant) > max_nss)
++		return -EINVAL;
++
++	if (dev->background_rx_reserved && band && (tx_ant & ~GENMASK(1, 0)))
+ 		return -EINVAL;
+ 
+ 	mutex_lock(&dev->mt76.mutex);
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/mt7915.h b/drivers/net/wireless/mediatek/mt76/mt7915/mt7915.h
+--- a/drivers/net/wireless/mediatek/mt76/mt7915/mt7915.h
++++ b/drivers/net/wireless/mediatek/mt76/mt7915/mt7915.h
+@@ -278,6 +278,7 @@
+ 	/* monitor rx chain configured channel */
+ 	struct cfg80211_chan_def rdd2_chandef;
+ 	struct mt7915_phy *rdd2_phy;
++	bool background_rx_reserved;
+ 
+ 	u16 chainmask;
+ 	u16 chainshift;

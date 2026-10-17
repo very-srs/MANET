@@ -1,0 +1,11 @@
+[Unit]
+Description=Apply the embedded MANET CM4 update with the new updater
+After=multi-user.target manet-update-finish.service
+ConditionPathExists=/usr/local/share/manet/bootstrap/manifest.json
+
+[Service]
+# The updater needs its normal root access to boot slots, modules, dpkg state
+# and systemd. It verifies and journals each operation before activation.
+Type=oneshot
+ExecStart=/usr/bin/python3 /usr/local/bin/manet-release-bootstrap.py
+TimeoutStartSec=20min

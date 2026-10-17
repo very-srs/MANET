@@ -195,7 +195,8 @@ def valid_hold(hold):
 def live_hold(status, now):
     """Return a bounded clearance from authenticated status, or no promise."""
     hold = status.get('dfs_hold') if status else None
-    if (dfs_version(status) == DFS_VERSION and valid_hold(hold) and
+    if (dfs_version(status) == DFS_VERSION and
+            status.get('dfs_capable') is True and valid_hold(hold) and
             hold['boot'] == status.get('boot') and
             hold['state'] == 'held' and hold['live'] and
             hold['observed_at'] <= now < hold['lease_until'] and
@@ -314,13 +315,11 @@ def valid_dfs_abort(abort, plan, sender):
 
 
 def require_dfs_activation(plan, view, now):
-    """Check live authority and refuse activation without detector handoff."""
+    """Require every participant and its current detector token at activation."""
     validate_plan(plan)
     if not dfs_ready(plan, view, now):
         raise AgreementError('DFS clearance changed before activation')
-    # No config flag bypasses this gate. The ordinary restart fallback cannot
-    # preserve detector overlap. A hardware-qualified backend must replace it.
-    raise AgreementError('DFS detector handoff is not implemented')
+    return True
 
 
 def can_vote(plan, own, view, now):
@@ -456,7 +455,11 @@ def advance(saved, own, now, view, records, proposal=None, local=None):
         state['phase'] = 'expired'
         return state, {}, None
     # Reboot or a channel change invalidates the local promise.
-    if not local or snapshot(local) != state['local']:
+    landed_dfs = ('dfs' in plan and local and 'commit' in state and
+                  valid_commit(state['commit'], plan) and
+                  plan['activate_at'] <= now <= plan['activate_at'] + APPLY_GRACE and
+                  all(local['current'].get(b) == f for b, f in plan['channels'].items()))
+    if not local or (snapshot(local) != state['local'] and not landed_dfs):
         state['phase'] = 'expired'
         if ('dfs' in plan and local and
                 local.get('boot') == plan['participants'][own]):

@@ -1,0 +1,250 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: MANET <manet@localhost>
+Date: Wed, 7 Oct 2026 12:00:00 -0600
+Subject: [PATCH 2/3] mt76: mt7915: select marked timing probes and fixed rates
+
+Select unicast timing probes by peer and optional skb mark. Allow an
+explicit spatial-extension index and optional rate/width override. Peer
+selection defaults off and fixed-rate selection defaults inactive.
+
+---
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/debugfs.c b/drivers/net/wireless/mediatek/mt76/mt7915/debugfs.c
+--- a/drivers/net/wireless/mediatek/mt76/mt7915/debugfs.c
++++ b/drivers/net/wireless/mediatek/mt76/mt7915/debugfs.c
+@@ -1354,6 +1354,136 @@
+ 	.llseek = default_llseek,
+ };
+ 
++/* Write a MAC address to mark frames to that receiver, or "off". */
++static ssize_t mt7915_tmr_peer_write(struct file *file, const char __user *ubuf,
++				     size_t count, loff_t *ppos)
++{
++	struct mt7915_dev *dev = file->private_data;
++	char buf[32];
++	u8 addr[ETH_ALEN];
++
++	if (count >= sizeof(buf))
++		return -EINVAL;
++	if (copy_from_user(buf, ubuf, count))
++		return -EFAULT;
++	buf[count] = '\0';
++
++	if (sysfs_streq(buf, "off")) {
++		WRITE_ONCE(dev->tmr_peer_set, false);
++		return count;
++	}
++	if (!mac_pton(strim(buf), addr))
++		return -EINVAL;
++
++	WRITE_ONCE(dev->tmr_peer_set, false);
++	ether_addr_copy(dev->tmr_peer, addr);
++	atomic_set(&dev->tmr_marked, 0);
++	WRITE_ONCE(dev->tmr_peer_set, true);
++	return count;
++}
++
++static ssize_t mt7915_tmr_peer_read(struct file *file, char __user *ubuf,
++				    size_t count, loff_t *ppos)
++{
++	struct mt7915_dev *dev = file->private_data;
++	char buf[64];
++	int len;
++
++	len = scnprintf(buf, sizeof(buf), "%s %pM marked=%d\n",
++			READ_ONCE(dev->tmr_peer_set) ? "on" : "off",
++			dev->tmr_peer, atomic_read(&dev->tmr_marked));
++	return simple_read_from_buffer(ubuf, count, ppos, buf, len);
++}
++
++/* Write an SPE index 0..31 for marked frames (fixed OFDM 6M), or "off". */
++static ssize_t mt7915_tmr_spe_write(struct file *file, const char __user *ubuf,
++				    size_t count, loff_t *ppos)
++{
++	struct mt7915_dev *dev = file->private_data;
++	char buf[16];
++	u8 val;
++
++	if (count >= sizeof(buf))
++		return -EINVAL;
++	if (copy_from_user(buf, ubuf, count))
++		return -EFAULT;
++	buf[count] = '\0';
++
++	if (sysfs_streq(buf, "off")) {
++		WRITE_ONCE(dev->tmr_spe, -1);
++		return count;
++	}
++	if (kstrtou8(strim(buf), 0, &val) || val > 31)
++		return -EINVAL;
++	WRITE_ONCE(dev->tmr_spe, val);
++	return count;
++}
++
++static ssize_t mt7915_tmr_spe_read(struct file *file, char __user *ubuf,
++				   size_t count, loff_t *ppos)
++{
++	struct mt7915_dev *dev = file->private_data;
++	char buf[16];
++	int len;
++
++	len = scnprintf(buf, sizeof(buf), "%d\n", READ_ONCE(dev->tmr_spe));
++	return simple_read_from_buffer(ubuf, count, ppos, buf, len);
++}
++
++static const struct file_operations mt7915_tmr_spe_fops = {
++	.write = mt7915_tmr_spe_write,
++	.read = mt7915_tmr_spe_read,
++	.open = simple_open,
++	.llseek = default_llseek,
++};
++
++static int mt7915_tmr_mark_set(void *data, u64 val)
++{
++	struct mt7915_dev *dev = data;
++
++	WRITE_ONCE(dev->tmr_mark, (u32)val);
++	return 0;
++}
++
++static int mt7915_tmr_mark_get(void *data, u64 *val)
++{
++	struct mt7915_dev *dev = data;
++
++	*val = READ_ONCE(dev->tmr_mark);
++	return 0;
++}
++
++DEFINE_DEBUGFS_ATTRIBUTE(fops_tmr_mark, mt7915_tmr_mark_get,
++			 mt7915_tmr_mark_set, "0x%llx\n");
++
++static int mt7915_tmr_rate_set(void *data, u64 val)
++{
++	struct mt7915_dev *dev = data;
++
++	if (val & ~0xfffffc0fULL)
++		return -EINVAL;
++	WRITE_ONCE(dev->tmr_rate, (u32)val);
++	return 0;
++}
++
++static int mt7915_tmr_rate_get(void *data, u64 *val)
++{
++	struct mt7915_dev *dev = data;
++
++	*val = READ_ONCE(dev->tmr_rate);
++	return 0;
++}
++
++DEFINE_DEBUGFS_ATTRIBUTE(fops_tmr_rate, mt7915_tmr_rate_get,
++			 mt7915_tmr_rate_set, "0x%08llx\n");
++
++static const struct file_operations mt7915_tmr_peer_fops = {
++	.write = mt7915_tmr_peer_write,
++	.read = mt7915_tmr_peer_read,
++	.open = simple_open,
++	.llseek = default_llseek,
++};
++
+ int mt7915_init_debugfs(struct mt7915_phy *phy)
+ {
+ 	struct mt7915_dev *dev = phy->dev;
+@@ -1368,6 +1498,14 @@
+ 				    &mt7915_tmr_registers_fops);
+ 		debugfs_create_file("tmr_ctrl", 0200, dir, phy,
+ 				    &mt7915_tmr_ctrl_fops);
++		debugfs_create_file("tmr_peer", 0600, dir, dev,
++				    &mt7915_tmr_peer_fops);
++		debugfs_create_file("tmr_spe", 0600, dir, dev,
++				    &mt7915_tmr_spe_fops);
++		debugfs_create_file("tmr_mark", 0600, dir, dev,
++				    &fops_tmr_mark);
++		debugfs_create_file("tmr_rate", 0600, dir, dev,
++				    &fops_tmr_rate);
+ 	}
+ 	debugfs_create_file("muru_debug", 0600, dir, dev, &fops_muru_debug);
+ 	debugfs_create_file("muru_stats", 0400, dir, phy,
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/init.c b/drivers/net/wireless/mediatek/mt76/mt7915/init.c
+--- a/drivers/net/wireless/mediatek/mt76/mt7915/init.c
++++ b/drivers/net/wireless/mediatek/mt76/mt7915/init.c
+@@ -1222,6 +1222,7 @@
+ 	INIT_DELAYED_WORK(&dev->mphy.mac_work, mt7915_mac_work);
+ 	INIT_LIST_HEAD(&dev->sta_rc_list);
+ 	INIT_LIST_HEAD(&dev->twt_list);
++	dev->tmr_spe = -1;
+ 
+ 	init_waitqueue_head(&dev->reset_wait);
+ 	INIT_WORK(&dev->reset_work, mt7915_mac_reset_work);
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/mac.c b/drivers/net/wireless/mediatek/mt76/mt7915/mac.c
+--- a/drivers/net/wireless/mediatek/mt76/mt7915/mac.c
++++ b/drivers/net/wireless/mediatek/mt76/mt7915/mac.c
+@@ -770,6 +770,39 @@
+ 	mt7915_mac_write_txwi(mdev, txwi_ptr, tx_info->skb, wcid, pid, key,
+ 			      qid, 0);
+ 
++	/* Request a timing report for frames to the peer. */
++	if (unlikely(READ_ONCE(dev->tmr_peer_set)) && sta &&
++	    ether_addr_equal(sta->addr, dev->tmr_peer) &&
++	    (!READ_ONCE(dev->tmr_mark) ||
++	     tx_info->skb->mark == READ_ONCE(dev->tmr_mark))) {
++		__le32 *txd = (__le32 *)txwi_ptr;
++		s8 spe = READ_ONCE(dev->tmr_spe);
++
++		txd[3] |= cpu_to_le32(MT_TXD3_TIMING_MEASURE);
++		/* Send the probe on one chain: fixed OFDM 6M at 20 MHz, TXD SPE */
++		if (spe >= 0) {
++			txd[2] |= cpu_to_le32(MT_TXD2_FIX_RATE);
++			txd[3] |= cpu_to_le32(MT_TXD3_BA_DISABLE);
++			u32 rate = READ_ONCE(dev->tmr_rate);
++
++			if (rate) {
++				/* Optional fixed rate and channel width. */
++				txd[6] &= ~cpu_to_le32(0xfffffc0f);
++				txd[6] |= cpu_to_le32(rate);
++			} else {
++				txd[6] &= ~cpu_to_le32(MT_TXD6_TX_RATE | MT_TXD6_BW |
++						       MT_TXD6_SPE_ID_IDX);
++				txd[6] |= cpu_to_le32(MT_TXD6_FIXED_BW |
++						      FIELD_PREP(MT_TXD6_TX_RATE,
++							FIELD_PREP(MT_TX_RATE_MODE, MT_PHY_TYPE_OFDM) |
++							FIELD_PREP(MT_TX_RATE_IDX, 11)));
++			}
++			txd[7] &= ~cpu_to_le32(MT_TXD7_SPE_IDX | MT_TXD7_HW_AMSDU);
++			txd[7] |= cpu_to_le32(FIELD_PREP(MT_TXD7_SPE_IDX, spe));
++		}
++		atomic_inc(&dev->tmr_marked);
++	}
++
+ 	txp = (struct mt76_connac_fw_txp *)(txwi + MT_TXD_SIZE);
+ 	for (i = 0; i < nbuf; i++) {
+ 		txp->buf[i] = cpu_to_le32(tx_info->buf[i + 1].addr);
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/mt7915.h b/drivers/net/wireless/mediatek/mt76/mt7915/mt7915.h
+--- a/drivers/net/wireless/mediatek/mt76/mt7915/mt7915.h
++++ b/drivers/net/wireless/mediatek/mt76/mt7915/mt7915.h
+@@ -225,6 +225,7 @@
+ 	struct mt76_mib_stats mib;
+ 	struct mt76_channel_state state_ts;
+ 
++
+ #ifdef CONFIG_NL80211_TESTMODE
+ 	struct {
+ 		u32 *reg_backup;
+@@ -245,6 +246,17 @@
+ 		struct mt76_dev mt76;
+ 		struct mt76_phy mphy;
+ 	};
++
++	/* Mark unicast frames to this receiver for timing. */
++	u8 tmr_peer[ETH_ALEN];
++	bool tmr_peer_set;
++	atomic_t tmr_marked;
++	/* TXD spatial-extension index for marked frames (fixed OFDM 6M), or -1 */
++	s8 tmr_spe;
++	/* if non-zero, only frames with this skb->mark are marked */
++	u32 tmr_mark;
++	/* if non-zero, TXD DW6 rate/width bits (mask 0xfffffc0f) for marked frames instead of OFDM 6M at 20 MHz */
++	u32 tmr_rate;
+ 
+ 	struct mt7915_hif *hif2;
+ 	struct mt7915_reg_desc reg;
+-- 
+2.43.0

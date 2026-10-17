@@ -22,6 +22,7 @@ from manet_admin import AdminTransport, clock_ready, private_json_write, require
 from manet_radio import acs_enabled
 import manet_acs_agreement as protocol
 import manet_rendezvous as rendezvous
+import manet_dfs as dfs
 
 TOOLS = Path(__file__).resolve().parent
 # Maximum age in wall-clock seconds for authenticated type 74/75 records.
@@ -207,30 +208,130 @@ def boot_time():
 
 
 def read_background_hold(path, boot, epoch, now):
-    """Read continuous-CAC status at the single replaceable kernel boundary.
-
-    Schema 1 reports lifecycle liveness only. Polling bounds host leases but
-    cannot prove receiver heartbeat or detector overlap during activation.
-    """
+    """Read schema 2; kernel receiver epochs replace the schema-1 reader token."""
     try:
-        raw = json.loads(Path(path).read_text())
-        if (type(raw.get('schema')) is not int or raw['schema'] != 1 or
+        with Path(path).open() as stream:
+            raw = json.loads(stream.read(16385))
+        if (type(raw.get('schema')) is not int or raw['schema'] != 2 or
                 any(type(raw.get(k)) is not bool for k in
-                    ('enabled', 'owner', 'fault', 'live'))):
+                    ('enabled', 'owner', 'fault', 'live', 'receiver_live', 'revoked')) or
+                not isinstance(raw.get('epoch'), str) or
+                not protocol.TOKEN.fullmatch(raw['epoch']) or
+                any(type(raw.get(k)) is not int or raw[k] < 0 for k in
+                    ('observed_boottime_us', 'heartbeat_boottime_us',
+                     'heartbeat_max_age_us', 'generation')) or
+                raw['heartbeat_max_age_us'] != 1500000 or
+                type(raw.get('freq_mhz')) is not int or
+                type(raw.get('center_mhz')) is not int or
+                type(raw.get('width_mhz')) is not int or
+                raw.get('width_mhz') != 20 or
+                raw.get('center_mhz') != raw.get('freq_mhz')):
             return None
-        live = (raw['enabled'] and raw['owner'] and raw['live'] and
-                not raw['fault'])
+        if (raw.get('dfs_mesh_v1') is True and raw.get('main_active') is True and
+                (not raw.get('owner') or raw.get('freq_mhz') == raw.get('main_freq_mhz'))):
+            raw.update(epoch=raw['main_epoch'], generation=raw['main_generation'],
+                       freq_mhz=raw['main_freq_mhz'], center_mhz=raw['main_freq_mhz'],
+                       owner=True, enabled=True, revoked=False, fault=False,
+                       live=True, receiver_live=True,
+                       heartbeat_boottime_us=raw['observed_boottime_us'])
+        checked = int(boot_time() * 1000000)
+        at = raw['heartbeat_boottime_us']
+        fresh = (0 < at <= raw['observed_boottime_us'] <= checked and
+                 checked - at < raw['heartbeat_max_age_us'])
+        live = (fresh and raw['enabled'] and raw['owner'] and raw['live'] and
+                raw['receiver_live'] and not raw['revoked'] and not raw['fault'])
         state = ('fault' if raw['fault'] else 'held' if live else
-                 'cac' if raw['enabled'] and raw['owner'] else 'revoked')
+                 'cac' if raw['enabled'] and raw['owner'] and not raw['revoked']
+                 and not raw['live'] else 'revoked')
         hold = dict(version=protocol.DFS_VERSION, frequency=raw['freq_mhz'],
                     width=20, center=raw['freq_mhz'], state=state,
-                    boot=boot, epoch=epoch, generation=raw['generation'],
+                    boot=boot, epoch=raw['epoch'], generation=raw['generation'],
                     live=live, observed_at=now,
-                    lease_until=now + protocol.DFS_LEASE_SECONDS if live
-                    else now)
+                    lease_until=now + protocol.DFS_LEASE_SECONDS if live else now)
         return hold if protocol.valid_hold(hold) else None
     except (OSError, ValueError, TypeError, KeyError, AttributeError):
         return None
+
+
+def kernel_radar_event(raw):
+    """Return only an explicit kernel radar latch, never infer radar from loss."""
+    if (type(raw) is not dict or type(raw.get('schema')) is not int or
+            raw.get('schema') != 2 or
+            raw.get('radar_cause') not in ('background-radar', 'main-radar') or
+            not isinstance(raw.get('radar_epoch'), str) or
+            not protocol.TOKEN.fullmatch(raw['radar_epoch']) or
+            any(type(raw.get(k)) is not int or raw[k] <= 0 for k in
+                ('radar_sequence', 'radar_generation', 'radar_boottime_us')) or
+            type(raw.get('radar_freq_mhz')) is not int or
+            raw.get('radar_freq_mhz') not in protocol.DFS_CHANNELS):
+        return None
+    return (raw['radar_epoch'], raw['radar_generation'],
+            raw['radar_sequence'], raw['radar_freq_mhz'])
+
+
+def deliver_background_radar(runtime, event, delivered):
+    """Fence TX before a queued event or slow publication can delay this one."""
+    for plan_id, plan in runtime.dfs_plans().items():
+        key = (runtime.boot, *event, plan_id)
+        if (key in delivered or
+                plan['dfs']['holds'].get(runtime.own) != list(event[:2]) or
+                plan['channels'].get('5') != event[3]):
+            continue
+        # A full local event slot must never defer TX shutdown. Delivery can
+        # wait for the daemon to claim the previous slot after the radio stops.
+        runtime.vacate_dfs(plan)
+        pending = any((runtime.run_dir / name).exists() for name in
+                      ('manet-dfs-radar.json', 'manet-dfs-radar.processing.json'))
+        if pending:
+            wake_daemon(runtime.run_dir)
+            return
+        runtime.radar_detected(plan_id, event[0], event[1])
+        delivered.add(key)
+        if len(delivered) > 128:
+            delivered.intersection_update({key})
+        return
+
+
+def watch_background_radar(path=None):
+    """Run as a separate root process so a slow agreement tick cannot block it.
+
+    The existing dfs-radar hook remains responsible for immediate local vacate,
+    event persistence and authenticated publication. A saved plan is the arm.
+    The latched event is rechecked on startup, so a watcher restart cannot skip
+    radar merely because its sequence was nonzero before the first read.
+    """
+    delivered = set()
+    last_error = None
+    while True:
+        try:
+            # Resolve the role again after driver reload or uplink changes.
+            # No fixed phy number is valid across boots.
+            selected = Path(path) if path else background_hold_path()
+            if selected is None or not selected.exists():
+                time.sleep(1)
+                continue
+            event = kernel_radar_event(read_json(selected))
+            if event and not any(tuple(key[1:5]) == event for key in delivered):
+                runtime = Runtime()  # Refresh saved plans, including first arrival.
+                deliver_background_radar(runtime, event, delivered)
+            last_error = None
+        except (OSError, ValueError, TypeError, KeyError, subprocess.SubprocessError) as exc:
+            if str(exc) != last_error:
+                print('DFS kernel event deferred: ' + str(exc), file=sys.stderr)
+                last_error = str(exc)
+        time.sleep(.1)
+
+
+def background_hold_path():
+    """Resolve the current 5 GHz mesh role without constructing transport state."""
+    from manet_bgobs import observer_path
+    roles = Path(os.environ.get('MANET_IFACE_STATE_DIR', '/var/lib'))
+    try:
+        iface = (roles / 'mesh_5_if').read_text().strip()
+    except FileNotFoundError:
+        return None
+    observer = observer_path(iface)
+    return observer.parent.parent / 'background_hold' if observer else None
 
 
 class Runtime:
@@ -288,11 +389,6 @@ class Runtime:
         self.halow_health = None
         self.ui_status = {}
         self.drift_since = {}
-        # A reader restart withdraws its promises, including after module
-        # reloads whose generation counter may start over at the same value.
-        self.dfs_epoch = secrets.token_hex(16)
-        self.dfs_source = None
-        self.dfs_generation = None
 
     def reset_timers(self):
         """Discard deadlines from another boot, restarting any recovery hold."""
@@ -397,7 +493,7 @@ class Runtime:
         acs = acs_enabled(self.conf)
         requested = read_json(self.request_path).get('round') == now // protocol.ROUND_SECONDS
         current, configured_channels, allowed, stable = {}, {}, {}, True
-        dfs_allowed, hold = [], None
+        dfs_allowed, hold, dfs_candidates, dfs_capable = [], None, [], False
         for band, (iface, path, configured) in self.interfaces().items():
             # Bound iw queries to 2 s. The channel line carries actual MHz,
             # while wiphy identifies the physical radio for capability lookup.
@@ -416,14 +512,29 @@ class Runtime:
             # is still read each pass so a pending retune cannot look stable.
             if cached is None or checked - cached[0] >= 60:
                 data = command(['iw', 'phy', 'phy' + phy[1], 'info'], timeout=2)
-                cached = (checked, sorted(rendezvous.permitted_frequencies(data)))
+                cached = (checked, sorted(rendezvous.permitted_frequencies(data)), data)
                 self.capabilities[key] = cached
             # Election candidates and rendezvous channels use different sets.
             allowed[band] = [f for f in cached[1] if f in protocol.CHANNELS[band]]
             self.rendezvous_allowed[band] = [f for f in cached[1] if f in rendezvous.CHANNELS[band]]
             if band == '5':
+                hold_path = Path(os.environ.get('MANET_DFS_HOLD_PATH',
+                    f'/sys/kernel/debug/ieee80211/phy{phy[1]}/background_hold'))
+                dfs_capable = dfs.capable(hold_path, cached[2]) if len(cached) > 2 else False
+                if dfs_capable and boot_time() >= self.state.get('dfs_cooldown_until', 0):
+                    dfs_candidates = dfs.dfs_frequencies(cached[2])
                 # This does not start CAC or take the receiver from its owner.
                 hold = self.dfs_hold('phy' + phy[1], now)
+                armed = self.state.get('protocol', {})
+                plan = armed.get('plan', {})
+                if (hold and current[band] != configured and
+                        current[band] == plan.get('channels', {}).get('5') and
+                        'dfs' in plan and protocol.valid_commit(armed.get('commit'), plan) and
+                        plan['activate_at'] <= now <= plan['activate_at'] + protocol.APPLY_GRACE and
+                        plan['dfs']['holds'].get(self.own) == [hold['epoch'], hold['generation']]):
+                    write_frequency(path, current[band])
+                    configured_channels[band] = current[band]
+                    stable = all(current[b] == configured_channels[b] for b in current)
                 if hold and boot_time() >= self.state.get(
                         'dfs_cooldown_until', 0):
                     # The kernel hold supplies the exact cleared chandef.
@@ -443,8 +554,11 @@ class Runtime:
                   'current': current, 'allowed': allowed, 'stable': stable,
                   'halow_ready': self.halow_health[1],
                   'discovery': self.discovery.mode(configured_channels) == 'search'}
-        status.update(dfs_versions=[protocol.DFS_VERSION],
-                      dfs_allowed=dfs_allowed)
+        status.update(dfs_versions=[protocol.DFS_VERSION] if dfs_capable else [],
+                      dfs_capable=dfs_capable,
+                      dfs_reason='ready' if dfs_capable else 'release-kernel-or-regdb-missing',
+                      dfs_candidates=dfs_candidates,
+                      dfs_allowed=dfs_allowed if dfs_capable else [])
         if hold:
             status['dfs_hold'] = hold
         private_json_write(self.run_dir / 'manet-dfs-hold.json', hold)
@@ -455,28 +569,10 @@ class Runtime:
         return status
 
     def dfs_hold(self, phy, now):
-        """Read and fence the receiver epoch, including debugfs replacement."""
+        """Read the kernel generation and bounded receiver heartbeat."""
         path = Path(os.environ.get('MANET_DFS_HOLD_PATH',
                     f'/sys/kernel/debug/ieee80211/{phy}/background_hold'))
-        try:
-            info = path.stat()
-            source = (str(path), info.st_dev, info.st_ino)
-            if self.dfs_source != source:
-                self.dfs_epoch = secrets.token_hex(16)
-                self.dfs_source = source
-                self.dfs_generation = None
-            hold = read_background_hold(path, self.boot, self.dfs_epoch, now)
-        except OSError:
-            self.dfs_source = None
-            return None
-        if hold:
-            if (self.dfs_generation is not None and
-                    hold['generation'] < self.dfs_generation):
-                self.dfs_epoch = secrets.token_hex(16)
-                hold['epoch'] = self.dfs_epoch
-            self.dfs_generation = hold['generation']
-        else:
-            self.dfs_source = None
+        hold = read_background_hold(path, self.boot, None, now)
         revoked = self.state.get('dfs_revoked', [])
         pending_radar = False
         for name in ('manet-dfs-radar.json', 'manet-dfs-radar.processing.json'):
@@ -496,8 +592,10 @@ class Runtime:
     def dfs_plans(self):
         """Return local session plans whose generation can accept an abort."""
         plans = {}
+        # A fallback refresh can reuse the operating main token. Radar must
+        # keep the active destination's fallback until that refresh activates.
         candidates = [self.state.get(key, {}).get('plan')
-                      for key in ('protocol', 'destination')]
+                      for key in ('destination', 'protocol')]
         candidates.append(self.state.get('dfs_radar', {}).get('contract'))
         for plan in candidates:
             try:
@@ -523,13 +621,25 @@ class Runtime:
         view[self.own] = fresh
         protocol.require_dfs_activation(plan, view, int(time.time()))
 
-    def vacate_dfs(self):
+    def vacate_dfs(self, plan=None):
         """Stop local DFS TX before locks, persistence or network I/O."""
         interface = self.interfaces().get('5')
         if not interface:
             return False
         iface, _, configured = interface
+        pending = read_json(self.run_dir / 'manet-dfs-csa.json')
+        if (plan and pending.get('boot') == self.boot and
+                pending.get('plan') == protocol.digest(plan) and
+                0 <= boot_time() - pending.get('requested_boottime', -10) < 2):
+            return True
         on_dfs = configured in protocol.DFS_CHANNELS
+        if on_dfs and plan and configured != plan['channels']['5']:
+            # Radar on a different background candidate does not condemn the
+            # currently operating DFS channel.
+            info = command(['iw', 'dev', iface, 'info'], timeout=2)
+            match = re.search(r'channel.*\((\d+) MHz\)', info)
+            if match and int(match[1]) != plan['channels']['5']:
+                return False
         if not on_dfs:
             try:
                 info = command(['iw', 'dev', iface, 'info'], timeout=2)
@@ -537,6 +647,29 @@ class Runtime:
                 on_dfs = not match or int(match[1]) in protocol.DFS_CHANNELS
             except (OSError, subprocess.SubprocessError):
                 on_dfs = True  # Unknown readback cannot justify transmission.
+        if on_dfs and plan:
+            try:
+                frequency = plan['dfs']['fallback']['5']
+                requested_at = boot_time()
+                command(['iw', 'dev', iface, 'switch', 'freq', str(frequency),
+                         'HT20', 'beacons', '3', 'block-tx'], timeout=2)
+                acknowledged_at = boot_time()
+                # Persist only after the kernel accepted TX blocking and CSA.
+                write_frequency(interface[1], frequency)
+                private_json_write(self.run_dir / 'manet-dfs-csa.json',
+                    dict(plan=protocol.digest(plan), boot=self.boot,
+                         frequency=frequency, requested_boottime=requested_at,
+                         acknowledged_boottime=acknowledged_at))
+                return True
+            except (OSError, ValueError, subprocess.SubprocessError):
+                # A peer's CSA may have completed first. Preserve its landing.
+                try:
+                    info = command(['iw', 'dev', iface, 'info'], timeout=2)
+                    if re.search(r'channel.*\(' + str(frequency) + r' MHz\)', info):
+                        write_frequency(interface[1], frequency)
+                        return False
+                except (OSError, subprocess.SubprocessError):
+                    pass
         if on_dfs:
             command(['ip', 'link', 'set', 'dev', iface, 'down'], timeout=2)
         return on_dfs
@@ -571,10 +704,10 @@ class Runtime:
             raise ValueError('radar event does not match the armed DFS plan')
         if plan_id in self.state.get('dfs_aborted_plans', []):
             return
-        vacated = self.vacate_dfs()
+        vacated = self.vacate_dfs(plan)
         abort = protocol.dfs_abort(plan, self.own, 'radar')
-        # An atomic event survives daemon contention or restart. The kernel
-        # itself owns immediate radar TX inhibition, including host failure.
+        # The block-TX request precedes this atomic event and publication.
+        # Persistence lets agreement processing survive contention or restart.
         try:
             private_json_write(self.run_dir / 'manet-dfs-radar.json',
                                dict(plan=plan_id, abort=abort,
@@ -587,6 +720,16 @@ class Runtime:
         """Retune 5 GHz to the agreed non-DFS fallback, or leave it down."""
         iface, path, _ = self.interfaces()['5']
         frequency = plan['dfs']['fallback']['5']
+        csa = read_json(self.run_dir / 'manet-dfs-csa.json')
+        if (csa.get('boot') == self.boot and
+                csa.get('plan') == protocol.digest(plan)):
+            for _ in range(20):
+                info = command(['iw', 'dev', iface, 'info'], timeout=2)
+                if re.search(r'channel.*\(' + str(frequency) + r' MHz\)', info):
+                    self.sync_parked({'5': frequency})
+                    return
+                time.sleep(.1)
+            command(['ip', 'link', 'set', 'dev', iface, 'down'], timeout=2)
         # The radio is already down. Load the safe config before bringing it
         # back up, so a supplicant retry cannot rejoin the radar channel.
         try:
@@ -656,7 +799,7 @@ class Runtime:
             seen = self.state.get('dfs_aborted_plans', [])
             if old.get('plan') == abort['plan'] or abort['plan'] in seen:
                 continue  # Replays cannot extend cooldown or repeat a move.
-            needs_fallback = self.vacate_dfs() or vacated
+            needs_fallback = self.vacate_dfs(plan) or vacated
             local_abort = protocol.dfs_abort(plan, self.own, 'radar')
             self.state['dfs_radar'] = dict(
                 plan=abort['plan'], abort=local_abort,
@@ -754,7 +897,70 @@ class Runtime:
         registry = self.registry.read_text() if self.registry.exists() else ''
         return canonical_members(self.own, peers, registry, records)
 
-    def score(self, view):
+    def release_dfs_candidate(self):
+        """Retire rejected preparation without touching an agreed main RDD."""
+        if self.state.get('protocol', {}).get('phase') in ('prepared', 'committed'):
+            return
+        path = background_hold_path()
+        if path:
+            raw = read_json(path)
+            if raw.get('owner'):
+                from manet_bgobs import write_command
+                write_command(path, 'stop')
+
+    def prepare_dfs(self, view, records, now):
+        """Reconcile one authenticated component-wide background CAC intent."""
+        if not view or any(not x or not x.get('dfs_capable') for x in view.values()):
+            self.state.pop('dfs_prepare', None)
+            self.release_dfs_candidate()
+            return
+        participants = {m: x['boot'] for m, x in view.items()}
+        prep = self.state.get('dfs_prepare')
+        for sender, record in records.items():
+            offered = record.get('dfs_prepare')
+            if (isinstance(offered, dict) and offered.get('leader') == sender and
+                    offered.get('participants') == participants and
+                    sender == min(view)):
+                prep = offered
+        valid = (isinstance(prep, dict) and prep.get('participants') == participants and
+                 prep.get('leader') == min(view) and
+                 type(prep.get('expires')) is int and now < prep['expires'] <= now + 1200 and
+                 type(prep.get('created')) is int and prep['created'] <= now and
+                 prep.get('frequency') in protocol.DFS_CHANNELS and
+                 isinstance(prep.get('nonce'), str) and protocol.TOKEN.fullmatch(prep['nonce']) and
+                 all(prep['frequency'] in x.get('dfs_candidates', []) for x in view.values()) and
+                 all(protocol.compatible(prep.get('fallback', {}), x) for x in view.values()) and
+                 set(prep.get('fallback', {})) == {'5'} and
+                 prep['fallback']['5'] in protocol.CHANNELS['5'])
+        if not valid or boot_time() < self.state.get('dfs_cooldown_until', 0):
+            self.state.pop('dfs_prepare', None)
+            self.release_dfs_candidate()
+            return
+        self.state['dfs_prepare'] = prep
+        self.save()
+        iface = self.interfaces().get('5', (None,))[0]
+        from manet_bgobs import observer_path, write_command
+        from manet_rx_policy import reconcile_receive_paths
+        observer = observer_path(iface) if iface else None
+        if observer is None:
+            return
+        path = observer.parent.parent / 'background_hold'
+        with (self.run_dir / ('manet-bgobs-' + observer.parents[1].name + '.lock')).open('a') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            raw = read_json(path)
+            if raw.get('main_active') and raw.get('main_freq_mhz') == prep['frequency']:
+                return
+            if raw.get('owner'):
+                if raw.get('freq_mhz') != prep['frequency']:
+                    write_command(path, 'stop')
+                return
+            if reconcile_receive_paths(observer, True) != 'reserved':
+                return
+            if not raw.get('enabled'):
+                write_command(path, 'enable')
+            dfs.start_cac(iface, prep['frequency'])
+
+    def score(self, view, *, candidates=False, fallback=False):
         """Score the connected view and return per-band MHz plus limp mode."""
         # One coordinator freezes the score result. Receivers never re-score it.
         env = dict(os.environ)
@@ -771,6 +977,11 @@ class Runtime:
                 dfs_candidate = candidate
             except protocol.AgreementError:
                 pass
+        dfs_supported = set()
+        if candidates and view and all(x and x.get('dfs_capable') for x in view.values()):
+            dfs_supported = set.intersection(*(set(x.get('dfs_candidates', [])) for x in view.values()))
+        if dfs_candidate and not fallback:
+            dfs_supported.add(dfs_candidate)
         # Registry RF observations include every reachable node, regardless of
         # which radio carries Alfred. Exclude cached records of departed groups.
         env['ACS_MEMBERS'] = ' '.join('NODE_' + mac.replace(':', '') for mac in view)
@@ -778,13 +989,16 @@ class Runtime:
             # Candidate support is the union from ready nodes. The common
             # incumbent is the most reported MHz, breaking ties by lower MHz.
             supported = sorted({f for s in view.values() if s and s['ready'] for f in s['allowed'].get(band, [])})
-            if band == '5' and dfs_candidate is not None:
-                supported = sorted(set(supported) | {dfs_candidate})
+            if band == '5':
+                if fallback:
+                    supported = sorted(set.intersection(*(set(x['allowed'].get('5', [])) for x in view.values())))
+                else:
+                    supported = sorted(set(supported) | dfs_supported)
             incumbents = Counter(s['current'][band] for s in view.values() if s and band in s['current'])
             incumbent = min(incumbents, key=lambda f: (-incumbents[f], f)) if incumbents else ''
             incumbents_by_band[band] = incumbent
             env['ACS_CHANNELS_' + suffix] = ' '.join(map(str, supported))
-            env['ACS_CURRENT_' + suffix] = str(incumbent)
+            env['ACS_CURRENT_' + suffix] = '' if fallback and band == '5' else str(incumbent)
         fd, path = tempfile.mkstemp(dir=self.run_dir, prefix='.acs-score-')
         os.close(fd)
         try:
@@ -799,12 +1013,11 @@ class Runtime:
             challenge = self.state.setdefault('challenge', {})
             for band, suffix in [('2.4', '2_4'), ('5', '5_0')]:
                 value = values.get('WINNER_' + suffix, '')
-                candidates = protocol.CHANNELS[band] | (
-                    {dfs_candidate} if band == '5' and dfs_candidate else set())
-                if value and int(value) in candidates:
+                choices = protocol.CHANNELS[band] | (dfs_supported if band == '5' and not fallback else set())
+                if value and int(value) in choices:
                     winner = int(value)
                     incumbent = incumbents_by_band[band]
-                    if (winner == incumbent or not incumbent
+                    if (fallback or winner == incumbent or not incumbent
                             or values.get('URGENT_' + suffix) == 'true'):
                         challenge.pop(band, None)
                     else:
@@ -845,12 +1058,17 @@ class Runtime:
 
     def apply(self, channels, limp=False, *, challenged=False, discovering=False, reason='Agreed channel plan'):
         """Apply compatible Wi-Fi MHz, verify landing and publish the result."""
-        if channels.get('5') in protocol.DFS_CHANNELS:
-            raise ValueError('DFS cannot use supplicant restart activation')
         # Clockless callers may follow a consumed nonce reply or park a
         # disconnected searcher at fixed anchors, never run a timed election.
         if not challenged and not discovering:
             require_clock()
+        if channels.get('5') in protocol.DFS_CHANNELS:
+            armed = self.state.get('protocol', {})
+            plan = armed.get('plan', {})
+            if (plan.get('channels') != channels or
+                    not protocol.valid_commit(armed.get('commit'), plan) or
+                    not plan.get('activate_at', 0) <= time.time() <= plan.get('activate_at', 0) + protocol.APPLY_GRACE):
+                raise ValueError('DFS cannot activate without a live agreed commitment')
         interfaces = self.interfaces()
         local = self.status(int(time.time()))
         if discovering:
@@ -869,18 +1087,26 @@ class Runtime:
                 write_frequency(path, freq)
             if configured != freq or local['current'][band] != freq:
                 changes.append((iface, freq))
-        # Write every config, then start every reconfigure before polling.
+        # Every participant initiates mesh CSA at the agreed time. Never
+        # restart a supplicant to enter DFS: that destroys CAC ownership.
         for iface, freq in changes:
-            # Clear bitrate restrictions before reconfiguration.
             command(['iw', 'dev', iface, 'set', 'bitrates'], timeout=2)
             try:
-                # A rejected or timed-out reconfigure triggers a restart,
-                # bounded to 15 s by the fallback command below.
-                answer = command(['wpa_cli', '-i', iface, 'reconfigure'], timeout=2)
-                if 'FAIL' in answer:
-                    raise ValueError('supplicant rejected reconfigure')
-            except (subprocess.SubprocessError, ValueError):
-                command(['systemctl', 'restart', f'wpa_supplicant@{iface}.service'], timeout=15)
+                if freq in protocol.DFS_CHANNELS:
+                    dfs.switch_dfs(iface, freq)
+                else:
+                    command(['iw', 'dev', iface, 'switch', 'freq', str(freq),
+                             'HT20', 'beacons', '5'], timeout=2)
+            except (OSError, subprocess.SubprocessError, ValueError):
+                if freq in protocol.DFS_CHANNELS:
+                    # A peer CSA may already be pending. Verify it below.
+                    continue
+                try:
+                    answer = command(['wpa_cli', '-i', iface, 'reconfigure'], timeout=2)
+                    if 'FAIL' in answer:
+                        raise ValueError('supplicant rejected reconfigure')
+                except (subprocess.SubprocessError, ValueError):
+                    command(['systemctl', 'restart', f'wpa_supplicant@{iface}.service'], timeout=15)
         for iface, freq in changes:
             def landed():
                 """Match the target MHz in this interface's iw readback."""
@@ -892,6 +1118,9 @@ class Runtime:
                     break
                 time.sleep(.5)
             else:
+                if freq in protocol.DFS_CHANNELS:
+                    command(['ip', 'link', 'set', 'dev', iface, 'down'], timeout=2)
+                    raise ValueError('DFS CSA failed to land')
                 command(['systemctl', 'restart', f'wpa_supplicant@{iface}.service'], timeout=15)
                 for attempt in range(20):
                     if landed():
@@ -899,6 +1128,24 @@ class Runtime:
                     time.sleep(.5)
                 else:
                     raise ValueError(f'{iface} did not reach {freq}')
+        if channels.get('5') in protocol.DFS_CHANNELS:
+            expected = plan['dfs']['holds'][self.own]
+            path = background_hold_path()
+            verified = False
+            for _ in range(10):
+                try:
+                    raw = read_json(path) if path else {}
+                    verified = (raw.get('main_active') is True and
+                        raw.get('main_freq_mhz') == channels['5'] and
+                        [raw.get('main_epoch'), raw.get('main_generation')] == expected)
+                    if verified:
+                        break
+                except OSError:
+                    pass
+                time.sleep(.1)
+            if not verified:
+                command(['ip', 'link', 'set', 'dev', interfaces['5'][0], 'down'], timeout=2)
+                raise ValueError('DFS CSA lacks the agreed main detector token')
         # Discovery anchors are not the mesh's data channel: never park them.
         if not discovering:
             self.sync_parked(channels)
@@ -961,7 +1208,7 @@ class Runtime:
         drift = {}
         for band, (iface, path, target) in self.interfaces().items():
             actual = local['current'].get(band)
-            if actual is None or actual == target:
+            if actual is None or actual == target or target in protocol.DFS_CHANNELS:
                 continue
             previous, since = self.drift_since.get(iface, (target, elapsed))
             drift[iface] = (target, since if previous == target else elapsed)
@@ -1112,6 +1359,10 @@ class Runtime:
                 self.state.pop('hold_until', None)
                 local = self.status(now)
                 view[self.own] = local
+            try:
+                self.prepare_dfs(view, records, now)
+            except (OSError, ValueError, subprocess.SubprocessError) as exc:
+                self.ui_status['dfs_prepare'] = str(exc)
             saved = self.state.get('protocol', {})
             proposal = None
             leader = protocol.coordinator(view) if view else None
@@ -1123,13 +1374,37 @@ class Runtime:
                 self.state.pop('challenge', None)
             if (view and leader == self.own and proposing
                     and (saved.get('round', -1) < now // protocol.ROUND_SECONDS or saved.get('phase') == 'idle')):
-                scored = self.score(view)
+                scored = self.score(view, candidates=True)
+                if scored and scored[0].get('5') in protocol.DFS_CHANNELS:
+                    fallback_score = self.score(view, fallback=True)
+                    fallback = {'5': fallback_score[0]['5']} if fallback_score and fallback_score[0].get('5') else None
+                    if fallback is None:
+                        # RDD2 cannot rescan other channels during a long CAC.
+                        # Its intention already froze the measured runner-up.
+                        fallback = self.state.get('dfs_prepare', {}).get('fallback')
+                    frequency = scored[0]['5']
+                    try:
+                        protocol.dfs_contract(view, frequency, fallback, now)
+                    except protocol.AgreementError:
+                        if self.own == min(view) and fallback:
+                            previous = self.state.get('dfs_prepare', {})
+                            if (previous.get('frequency') != frequency or previous.get('expires', 0) <= now or
+                                    previous.get('participants') != {m: x['boot'] for m, x in view.items()}):
+                                self.state['dfs_prepare'] = dict(leader=self.own,
+                                    participants={m: x['boot'] for m, x in view.items()},
+                                    frequency=frequency, fallback=fallback, created=now,
+                                    expires=now + 1200, nonce=secrets.token_hex(16))
+                            self.prepare_dfs(view, {}, now)
+                        scored = None
+                else:
+                    fallback = None
+                    self.state.pop('dfs_prepare', None)
                 if scored:
                     now = int(time.time())
                     # The proposal window is validated again after slow scoring.
                     proposal = protocol.make_plan(
                         view, *scored, now, secrets.token_hex(16),
-                        fallback=protocol.dfs_fallback(view))
+                        fallback=fallback)
             fields = {mac: dict(r.get('protocol', {}))
                       for mac, r in records.items()
                       if isinstance(r.get('protocol', {}), dict)}
@@ -1141,7 +1416,7 @@ class Runtime:
             if plan is not None and 'dfs' in plan:
                 # Re-read under the channel lock after discovery, scoring and
                 # persistence delays. Neither a prior lease nor FINISHED is
-                # activation authority. The handoff gate still always refuses.
+                # activation authority. Every live token must still match.
                 try:
                     self.check_dfs_activation(plan, records)
                 except (ValueError, OSError, subprocess.SubprocessError) as exc:
@@ -1152,6 +1427,8 @@ class Runtime:
                     self.ui_status['dfs_activation'] = str(exc)
                     plan = None
             self.state['protocol'] = updated
+            if 'dfs' in updated.get('plan', {}) and updated.get('phase') in ('prepared', 'committed', 'attempted'):
+                self.state.pop('dfs_prepare', None)
             if not saved.get('plan') and 'dfs' in updated.get('plan', {}):
                 # An abort can arrive with the first proposal, before this
                 # node has a saved contract. Check both types before its vote
@@ -1265,6 +1542,8 @@ class Runtime:
             if (outgoing != self.state.get('last_outgoing') or local != self.last_status
                     or self.last_publish is None or checked - self.last_publish >= 5):
                 payload = {'kind': 'acs_state', 'node': self.own, 'aliases': self.aliases(), 'status': local, 'protocol': outgoing}
+                if self.state.get('dfs_prepare'):
+                    payload['dfs_prepare'] = self.state['dfs_prepare']
                 radar = self.state.get('dfs_radar', {})
                 if boot_time() < radar.get('publish_until', 0):
                     payload['dfs_abort'] = radar['abort']
@@ -1450,7 +1729,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action', choices=(
         'run', 'request', 'members', 'helper-encode', 'helper-select',
-        'tourguide-exclusions', 'dfs-radar'))
+        'tourguide-exclusions', 'dfs-radar', 'dfs-watch'))
     parser.add_argument('--channels', default='{}', type=json.loads)
     parser.add_argument('--size', type=int)
     parser.add_argument('--exclude', default='')
@@ -1459,6 +1738,7 @@ def main():
     parser.add_argument('--plan-id')
     parser.add_argument('--epoch')
     parser.add_argument('--generation', type=int)
+    parser.add_argument('--hold-path')
     args = parser.parse_args()
     if args.action == 'request':
         directory = Path(os.environ.get('MANET_ACS_RUN_DIR', '/run'))
@@ -1469,6 +1749,9 @@ def main():
         private_json_write(directory / 'manet-acs-request.json', {'round': int(time.time()) // protocol.ROUND_SECONDS})
         wake_daemon(directory)
         return 0
+    if args.action == 'dfs-watch':
+        path = args.hold_path or os.environ.get('MANET_DFS_HOLD_PATH')
+        return watch_background_radar(path)
     runtime = Runtime()
     now = int(time.time())
     if args.action == 'dfs-radar':

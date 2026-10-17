@@ -205,6 +205,25 @@ class FirmwareTests(unittest.TestCase):
         self.assertFalse(self.tool.run()[0])
         self.assertEqual(path.read_text(), 'operator option')
 
+    def test_field_cm4_starts_native_and_only_enables_known_follower_option(self):
+        model = self.root / 'proc/device-tree/model'
+        model.parent.mkdir(parents=True, exist_ok=True)
+        model.write_text('Raspberry Pi Compute Module 4')
+        self.config.write_text('mt7916_background_rx=y\n')
+        reservation = self.root / 'etc/modprobe.d/manet-mt7916.conf'
+        reservation.parent.mkdir(parents=True, exist_ok=True)
+        reservation.write_text('# Managed by manet-mt7916-firmware.py\n'
+                               'options mt7915e background_radar_2t2r=1\n')
+        follower = self.root / 'etc/modprobe.d/manet-dfs-follow.conf'
+        result = SimpleNamespace(returncode=0, stdout='dfs_follow_ap_v1:DFS follower')
+        with patch.object(fw.subprocess, 'run', return_value=result):
+            self.assertTrue(self.tool.run()[0])
+            self.assertFalse(reservation.exists())
+            self.assertIn('dfs_follow_ap_v1=1', follower.read_text())
+            model.write_text('Radxa ROCK 3A')
+            self.assertTrue(self.tool.run()[0])
+            self.assertFalse(follower.exists())
+
     def test_failed_boot_suspends_reservation_until_rearm(self):
         """A failed reserved boot cannot silently reuse the same module option."""
         self.config.write_text('positioning=n\nmt7916_background_rx=y\n')

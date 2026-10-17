@@ -1,0 +1,1029 @@
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/Makefile b/drivers/net/wireless/mediatek/mt76/mt7915/Makefile
+--- a/drivers/net/wireless/mediatek/mt76/mt7915/Makefile
++++ b/drivers/net/wireless/mediatek/mt76/mt7915/Makefile
+@@ -3,7 +3,7 @@
+ obj-$(CONFIG_MT7915E) += mt7915e.o
+ 
+ mt7915e-y := pci.o init.o dma.o eeprom.o main.o mcu.o mac.o \
+-	     debugfs.o tmr.o mmio.o tmr_trace.o
++	     debugfs.o bgscan.o tmr.o mmio.o tmr_trace.o
+ 
+ CFLAGS_tmr_trace.o := -I$(src)
+ 
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/bgscan.c b/drivers/net/wireless/mediatek/mt76/mt7915/bgscan.c
+new file mode 100644
+--- /dev/null
++++ b/drivers/net/wireless/mediatek/mt76/mt7915/bgscan.c
+@@ -0,0 +1,664 @@
++// SPDX-License-Identifier: ISC
++/* Dedicated receiver energy observer. Command layouts, no vendor implementation. */
++#include <linux/seq_file.h>
++#include <linux/uaccess.h>
++#include "mt7915.h"
++#include "mcu.h"
++
++#define MT7915_BG_SETTLE_MS 20
++#define MT7915_BG_MIN_MS 100
++#define MT7915_BG_MAX_MS 5000
++#define MT7915_BG_MAX_ELAPSED_US 6000000
++
++enum {
++	MT7915_BG_IDLE,
++	MT7915_BG_SETTLE,
++	MT7915_BG_DWELL,
++};
++
++static bool mt7915_bg_scan_mcu_ready(struct mt7915_dev *dev)
++{
++	return !test_bit(MT76_MCU_RESET, &dev->mphy.state) &&
++	       !dev->recovery.restart && !dev->recovery.hw_full_reset;
++}
++
++/* Masks bound restoration to the MT7916 RDD2 startup controls.
++ * No pulse writer, firmware buffer pointer or histogram reset is enabled.
++ */
++static const struct {
++	u32 address, mask;
++} mt7915_bg_controls[MT7915_BG_SAVE_COUNT] = {
++	{ 0x830af070, 0 },
++	{ 0x830af04c, 0 },
++	{ 0x831200c4, BIT(0) | GENMASK(10, 8) | GENMASK(15, 12) },
++	{ 0x831200d0, GENMASK(27, 24) },
++	{ 0x831ada2c, GENMASK(30, 28) | BIT(25) | BIT(24) | GENMASK(15, 9) },
++	{ 0x831ad218, 0xffffffff },
++	{ 0x83127250, GENMASK(13, 12) | GENMASK(7, 4) | GENMASK(1, 0) },
++	{ 0x83127254, GENMASK(7, 4) },
++	{ 0x83188230, 0 },
++	{ 0x8312f028, 0xffffffff },
++	{ 0x831a2130, GENMASK(31, 30) },
++	{ 0x831a5000, BIT(0) }, /* AHB bridge */
++	{ 0x831a5018, BIT(0) }, /* RDD2 memory writer */
++	{ 0x831a5c00, BIT(0) }, /* RDD2 detector */
++	{ 0x831a5df0, 0xffffffff }, /* ext9A BW and RDD2 configuration */
++	{ 0x83180038, GENMASK(11, 10) }, /* RDD2 wake/error interrupt enables */
++	{ 0x831a5004, BIT(7) }, /* RDD2 AHB interrupt enable */
++	{ 0x83180004, BIT(8) }, /* RDD START shared clock/reset controls */
++	{ 0x83180008, BIT(8) },
++	{ 0x831ada20, GENMASK(11, 8) | GENMASK(18, 16) },
++	{ 0x83120108, GENMASK(29, 24) },
++	{ 0x831a5df4, 0 },
++	{ 0x831a5de0, 0xffffffff },
++	{ 0x831a5de4, 0xffffffff },
++	{ 0x831a5de8, GENMASK(20, 0) },
++	{ 0x831a5dec, GENMASK(20, 0) },
++	{ 0x831a6024, GENMASK(31, 24) },
++};
++
++static void mt7915_bg_save(struct mt7915_dev *dev)
++{
++	struct mt7915_bg_scan *scan = &dev->bg_scan;
++	int i;
++
++	for (i = 0; i < ARRAY_SIZE(mt7915_bg_controls); i++)
++		scan->saved[i] = mt76_rr(dev, mt7915_bg_controls[i].address);
++	scan->controls_saved = true;
++}
++
++static int mt7915_bg_write_control(struct mt7915_dev *dev, int index,
++				   u32 mask, u32 value)
++{
++	struct mt7915_bg_scan *scan = &dev->bg_scan;
++	u32 address, before, written, after;
++
++	if (!scan->dirty || scan->borrowed || scan->on_channel ||
++	    !scan->controls_saved ||
++	    index < 0 || index >= ARRAY_SIZE(mt7915_bg_controls) ||
++	    (mask & ~mt7915_bg_controls[index].mask))
++		return -EINVAL;
++	address = mt7915_bg_controls[index].address;
++	before = mt76_rr(dev, address);
++	written = (before & ~mask) | (value & mask);
++	scan->changed |= BIT(index);
++	mt76_wr(dev, address, written);
++	after = mt76_rr(dev, address);
++	return ((after ^ written) & mask) ? -EIO : 0;
++}
++
++/* Disable observer-owned producers before restoring routing or buffers.
++ * Keep the reservation after any failed readback, including a failed quiesce.
++ * The shared AHB bridge itself is restored last among the new enables.
++ */
++static int mt7915_bg_quiesce(struct mt7915_dev *dev)
++{
++	static const u8 order[] = { 16, 15, 13, 12 };
++	struct mt7915_bg_scan *scan = &dev->bg_scan;
++	int i, ret, error = 0;
++
++	for (i = 0; i < ARRAY_SIZE(order); i++) {
++		int index = order[i];
++
++		if (!(scan->changed & BIT(index)))
++			continue;
++		ret = mt7915_bg_write_control(dev, index,
++					      mt7915_bg_controls[index].mask, 0);
++		if (ret)
++			error = ret;
++	}
++	return error;
++}
++
++static int mt7915_bg_restore_controls(struct mt7915_dev *dev, const u32 *target)
++{
++	struct mt7915_bg_scan *scan = &dev->bg_scan;
++	int i, ret, error;
++
++	error = mt7915_bg_quiesce(dev);
++	if (error)
++		return error;
++	/* Reverse order. Continue restoring other fields if a readback fails. */
++	for (i = ARRAY_SIZE(mt7915_bg_controls) - 1; i >= 0; i--) {
++		if (!(scan->changed & BIT(i)))
++			continue;
++		ret = mt7915_bg_write_control(dev, i, mt7915_bg_controls[i].mask,
++					      target[i]);
++		if (ret)
++			error = ret;
++		else
++			scan->changed &= ~BIT(i);
++	}
++	return error;
++}
++
++/* Caller holds mt76.mutex. Never wait for a worker that takes that mutex. */
++int mt7915_bg_scan_stop(struct mt7915_dev *dev, int error)
++{
++	struct mt7915_bg_scan *scan = &dev->bg_scan;
++	int ret;
++
++	lockdep_assert_held(&dev->mt76.mutex);
++	cancel_delayed_work(&scan->work);
++	if (scan->phase && error) {
++		scan->error = error;
++		scan->valid = false;
++	}
++	scan->phase = MT7915_BG_IDLE;
++	if (!scan->dirty)
++		return 0;
++	/* A read-only tap does not own or stop the cfg80211 CAC receiver. */
++	if (scan->borrowed || scan->on_channel)
++		goto released;
++	if (!mt7915_bg_scan_mcu_ready(dev)) {
++		ret = -EAGAIN;
++		goto failed;
++	}
++	/* STOP changes these controls even without host writes. */
++	scan->changed |= BIT(4) | BIT(5) | BIT(6) | BIT(7) | BIT(12) |
++			 BIT(13) | BIT(14) | BIT(19) | BIT(22) | BIT(24);
++	ret = mt7915_mcu_background_chain_ctrl(scan->phy, NULL,
++					       CH_SWITCH_BACKGROUND_SCAN_STOP);
++	if (ret)
++		goto failed;
++	/* Synchronize with WM before restoring registers changed by commands. */
++	{
++		struct mt7915_ipi_sample fence;
++
++		ret = mt7915_mcu_ipi_query_index(scan->phy, 0, 1, &fence);
++	}
++	if (ret)
++		goto failed;
++	ret = mt7915_bg_restore_controls(dev, scan->saved);
++	if (ret)
++		goto failed;
++released:
++	scan->restore_error = 0;
++	scan->dirty = false;
++	scan->controls_saved = false;
++	scan->phy = NULL;
++	return 0;
++failed:
++	scan->restore_error = ret;
++	scan->valid = false;
++	return ret;
++}
++
++/* Preserve raw energy bounds. Userspace corrects receiver blanking with
++ * the matched main-band survey TX delta, including excess energy in bin 10.
++ */
++static int mt7915_bg_scan_calculate(struct mt7915_bg_scan *scan)
++{
++	u64 high = 0, total = 0;
++	int i;
++
++	if (scan->threshold > 9 || !scan->elapsed_us)
++		return -EINVAL;
++	scan->wrap_mask = 0;
++	for (i = 0; i < 11; i++) {
++		/* Bench sequence 15 crossed the low-23-bit boundary at 8 us/tick.
++		 * Bound the actual interval and population below one modulus.
++		 * Firmware reset cancels ownership; do not clear band-wide NF.
++		 */
++		if (scan->last.bins[i] < scan->first.bins[i])
++			scan->wrap_mask |= BIT(i);
++		scan->delta.bins[i] = (scan->last.bins[i] - scan->first.bins[i]) &
++				      GENMASK(22, 0);
++		total += scan->delta.bins[i];
++		if (i >= scan->threshold && i < 10)
++			high += scan->delta.bins[i];
++	}
++	scan->sample_count = total;
++	/* The measured dedicated path produces one sample per 8 us. Reject
++	 * stalled, reset, saturated or delayed windows outside a 20% envelope.
++	 * Six seconds at its upper bound is 900000, well below 2^23.
++	 */
++	if (scan->elapsed_us > MT7915_BG_MAX_ELAPSED_US || total < 1024 ||
++	    total * 8 * 5 < scan->elapsed_us * 4 ||
++	    total * 8 * 5 > scan->elapsed_us * 6)
++		return -ERANGE;
++	/* Bin 10 contains own TX and potentially very strong foreign energy. */
++	high *= 1000;
++	scan->busy_permille = div_u64(high, total);
++	high += (u64)scan->delta.bins[10] * 1000;
++	scan->busy_raw_permille = div_u64(high + total - 1, total);
++	return 0;
++}
++
++static void mt7915_bg_read_bins(struct mt7915_dev *dev,
++				struct mt7915_ipi_sample *sample)
++{
++	int i;
++
++	for (i = 0; i < ARRAY_SIZE(sample->bins); i++)
++		sample->bins[i] = mt76_rr(dev, 0x83121000 + 4 * i) & GENMASK(22, 0);
++}
++
++/* Tested cold-start configuration: receiver frontend, detector and parameters.
++ * Mask interrupts before enabling the detector. Leave the pulse writer off.
++ */
++static int mt7915_bg_configure(struct mt7915_dev *dev)
++{
++	struct mt7915_bg_scan *scan = &dev->bg_scan;
++	const struct { u8 index; u32 mask, value; } writes[] = {
++		{ 16, BIT(7), 0 },
++		{ 15, GENMASK(11, 10), 0 },
++		{ 2, BIT(0) | GENMASK(10, 8), 0x401 },
++		{ 2, GENMASK(15, 12), 0x3000 },
++		{ 3, GENMASK(27, 24), 0x0c000000 },
++		{ 4, GENMASK(30, 28),
++		  mt76_connac_chan_bw(&scan->chandef) << 28 },
++		{ 5, 0xffffffff, 0x44444444 },
++		{ 4, BIT(25) | BIT(24) | GENMASK(15, 9),
++		  BIT(25) | BIT(24) | BIT(15) },
++		{ 6, GENMASK(13, 12) | GENMASK(7, 4) | GENMASK(1, 0), 0x30a2 },
++		{ 7, GENMASK(7, 4), 0xe0 },
++		{ 9, 0xffffffff, 0xffffffff },
++		{ 10, GENMASK(31, 30), BIT(31) },
++		{ 13, BIT(0), BIT(0) },
++		{ 17, BIT(8), BIT(8) },
++		{ 18, BIT(8), BIT(8) },
++		{ 14, GENMASK(19, 10), 0x2e000 },
++		{ 19, GENMASK(18, 16), 0 },
++		{ 14, GENMASK(9, 4), 0x300 },
++		{ 14, GENMASK(29, 20), 0 },
++		{ 20, GENMASK(29, 24), 0 },
++		{ 22, 0xffffffff, 0x104 },
++		{ 23, 0xffffffff, 0x104 },
++		{ 24, GENMASK(20, 0), 2 },
++		{ 25, GENMASK(20, 0), 2 },
++		{ 26, GENMASK(31, 24), BIT(24) },
++	};
++	int i, ret;
++
++	if (mt76_rr(dev, 0x831a5018) & BIT(0))
++		return -EBUSY;
++	for (i = 0; i < ARRAY_SIZE(writes); i++) {
++		ret = mt7915_bg_write_control(dev, writes[i].index,
++					      writes[i].mask, writes[i].value);
++		if (ret)
++			return ret;
++	}
++	return 0;
++}
++
++/* Use the survey's accumulated band-1 TX time under the same driver mutex.
++ * Export the MCU read latency so userspace can reject poorly aligned windows.
++ */
++static int mt7915_bg_sample(struct mt7915_dev *dev,
++			    struct mt7915_ipi_sample *sample, u64 *tx)
++{
++	struct mt7915_bg_scan *scan = &dev->bg_scan;
++	u64 start = ktime_to_us(ktime_get_boottime());
++	int ret;
++
++	ret = mt7915_mcu_get_chan_mib_info(scan->phy, false);
++	if (ret)
++		return ret;
++	*tx = scan->phy->mt76->chan_state->cc_tx;
++	mt7915_bg_read_bins(dev, sample);
++	scan->tx_read_max_us = max_t(u64, scan->tx_read_max_us,
++				     ktime_to_us(ktime_get_boottime()) - start);
++	return 0;
++}
++
++static void mt7915_bg_scan_work(struct work_struct *work)
++{
++	struct mt7915_bg_scan *scan = container_of(work, struct mt7915_bg_scan,
++						 work.work);
++	struct mt7915_dev *dev = container_of(scan, struct mt7915_dev, bg_scan);
++	int ret;
++
++	mutex_lock(&dev->mt76.mutex);
++	if (!scan->phase)
++		goto out;
++	if (!mt7915_bg_scan_mcu_ready(dev) ||
++	    !test_bit(MT76_STATE_RUNNING, &scan->phy->mt76->state) ||
++	    test_bit(MT76_SCANNING, &scan->phy->mt76->state)) {
++		ret = -ECANCELED;
++		goto stop;
++	}
++
++	if (scan->phase == MT7915_BG_SETTLE) {
++		struct mt7915_ipi_sample fence;
++
++		/* START is queued without a reply. Order host writes after WM tuning. */
++		ret = mt7915_mcu_ipi_query_index(scan->phy, 0, 1, &fence);
++		if (ret)
++			goto stop;
++		ret = mt7915_bg_configure(dev);
++		if (ret)
++			goto stop;
++		ret = mt7915_bg_sample(dev, &scan->first, &scan->tx_first_us);
++		if (ret)
++			goto stop;
++		scan->started_us = ktime_to_us(ktime_get_boottime());
++		scan->phase = MT7915_BG_DWELL;
++		mod_delayed_work(system_wq, &scan->work,
++				 msecs_to_jiffies(scan->dwell_ms));
++		goto out;
++	}
++	ret = mt7915_bg_sample(dev, &scan->last, &scan->tx_last_us);
++	if (ret)
++		goto stop;
++	scan->elapsed_us = ktime_to_us(ktime_get_boottime()) - scan->started_us;
++	ret = mt7915_bg_scan_calculate(scan);
++	scan->valid = !ret;
++stop:
++	mt7915_bg_scan_stop(dev, ret);
++out:
++	mutex_unlock(&dev->mt76.mutex);
++}
++
++/* No MCU traffic during reset. Successful firmware/EEPROM reinit restores RX. */
++bool mt7915_bg_scan_reset(struct mt7915_dev *dev)
++{
++	struct mt7915_bg_scan *scan = &dev->bg_scan;
++
++	lockdep_assert_held(&dev->mt76.mutex);
++	cancel_delayed_work(&scan->work);
++	scan->cac_primed = false;
++	if (!scan->dirty)
++		return false;
++	scan->phase = MT7915_BG_IDLE;
++	scan->valid = false;
++	scan->error = -EIO;
++	scan->restore_error = -EAGAIN;
++	return true;
++}
++
++void mt7915_bg_scan_reset_done(struct mt7915_dev *dev)
++{
++	lockdep_assert_held(&dev->mt76.mutex);
++	dev->bg_scan.dirty = false;
++	dev->bg_scan.changed = 0;
++	dev->bg_scan.controls_saved = false;
++	dev->bg_scan.borrowed = false;
++	dev->bg_scan.on_channel = false;
++	dev->bg_scan.cac_primed = false;
++	dev->bg_scan.phy = NULL;
++	dev->bg_scan.restore_error = 0;
++}
++
++void mt7915_bg_scan_init(struct mt7915_dev *dev)
++{
++	INIT_DELAYED_WORK(&dev->bg_scan.work, mt7915_bg_scan_work);
++}
++
++void mt7915_bg_scan_cleanup(struct mt7915_dev *dev)
++{
++	mutex_lock(&dev->mt76.mutex);
++	if (!dev->bg_scan.shutdown) {
++		dev->bg_scan.shutdown = true;
++		mt7915_bg_scan_stop(dev, -ESHUTDOWN);
++	}
++	mutex_unlock(&dev->mt76.mutex);
++	cancel_delayed_work_sync(&dev->bg_scan.work);
++}
++
++static int
++mt7915_bg_scan_chandef(struct mt7915_phy *phy, unsigned int freq,
++		       unsigned int width, unsigned int center,
++		       struct cfg80211_chan_def *chandef)
++{
++	struct wiphy *wiphy = phy->mt76->hw->wiphy;
++	struct ieee80211_channel *chan;
++	unsigned int f;
++
++	switch (width) {
++	case 20:
++		chandef->width = NL80211_CHAN_WIDTH_20;
++		break;
++	case 40:
++		chandef->width = NL80211_CHAN_WIDTH_40;
++		break;
++	case 80:
++		chandef->width = NL80211_CHAN_WIDTH_80;
++		break;
++	case 160:
++		chandef->width = NL80211_CHAN_WIDTH_160;
++		break;
++	default:
++		return -EINVAL;
++	}
++	if (freq < 5000 || freq > 5900 || center < 5000 || center > 5900)
++		return -EINVAL;
++	/* Exclude any occupied spectrum overlapping the requested exclusion. */
++	if (center + width / 2 > 5600 && center - width / 2 < 5650)
++		return -EPERM;
++	chandef->chan = ieee80211_get_channel(wiphy, freq);
++	chandef->center_freq1 = center;
++	if (!chandef->chan || chandef->chan->band != NL80211_BAND_5GHZ ||
++	    !cfg80211_chandef_valid(chandef) ||
++	    !cfg80211_chandef_usable(wiphy, chandef, IEEE80211_CHAN_DISABLED |
++					IEEE80211_CHAN_RADAR | IEEE80211_CHAN_NO_IR))
++		return -EINVAL;
++	for (f = center - width / 2 + 10; f < center + width / 2; f += 20) {
++		chan = ieee80211_get_channel(wiphy, f);
++		if (!chan || chan->dfs_state == NL80211_DFS_UNAVAILABLE)
++			return -EPERM;
++	}
++	return 0;
++}
++
++static int
++mt7915_bg_scan_start(struct mt7915_phy *phy, unsigned int freq,
++		     unsigned int width, unsigned int center,
++		     unsigned int dwell, unsigned int threshold)
++{
++	struct mt7915_dev *dev = phy->dev;
++	struct mt7915_bg_scan *scan = &dev->bg_scan;
++	struct cfg80211_chan_def chandef = {};
++	int ret;
++
++	lockdep_assert_held(&dev->mt76.mutex);
++	if (!dev->background_rx_reserved ||
++	    phy->mt76->band_idx != MT_BAND1)
++		return -EOPNOTSUPP;
++	if (scan->shutdown)
++		return -ESHUTDOWN;
++	/* Includes post-CAC monitoring. Never silently interrupt radar ownership. */
++	if (dev->rdd2_phy || scan->dirty || work_busy(&scan->work.work))
++		return -EBUSY;
++	if (!mt7915_bg_scan_mcu_ready(dev) ||
++	    !test_bit(MT76_STATE_RUNNING, &phy->mt76->state))
++		return -ENETDOWN;
++	if (test_bit(MT76_SCANNING, &phy->mt76->state) || phy->mt76->offchannel ||
++	    test_bit(MT76_RESET, &phy->mt76->state))
++		return -EBUSY;
++	if (dwell < MT7915_BG_MIN_MS || dwell > MT7915_BG_MAX_MS || threshold > 9)
++		return -EINVAL;
++	ret = mt7915_bg_scan_chandef(phy, freq, width, center, &chandef);
++	if (ret)
++		return ret;
++
++	scan->sequence++;
++	scan->phy = phy;
++	scan->chandef = chandef;
++	scan->dwell_ms = dwell;
++	scan->threshold = threshold;
++	scan->error = 0;
++	scan->restore_error = 0;
++	scan->valid = false;
++	scan->started_us = 0;
++	scan->elapsed_us = 0;
++	scan->configuration = 34;
++	scan->tx_first_us = 0;
++	scan->tx_last_us = 0;
++	scan->tx_read_max_us = 0;
++	scan->controls_saved = false;
++	scan->changed = 0;
++	scan->sample_count = 0;
++	scan->wrap_mask = 0;
++	scan->busy_permille = 0;
++	scan->busy_raw_permille = 0;
++	memset(&scan->first, 0, sizeof(scan->first));
++	memset(&scan->last, 0, sizeof(scan->last));
++	memset(&scan->delta, 0, sizeof(scan->delta));
++	/* Reserve before sending: even a failed enqueue may need restoration. */
++	scan->dirty = true;
++	scan->phase = MT7915_BG_SETTLE;
++	ret = 0;
++	mt7915_bg_save(dev);
++	/* An unowned active detector/writer is not an idle receiver. */
++	if ((scan->saved[12] | scan->saved[13]) & BIT(0)) {
++		scan->dirty = false;
++		scan->phase = MT7915_BG_IDLE;
++		scan->controls_saved = false;
++		scan->phy = NULL;
++		scan->error = -EBUSY;
++		return -EBUSY;
++	}
++	/* ext9A START/STOP also modify these fields without host writes. */
++	scan->changed = BIT(4) | BIT(5) | BIT(6) | BIT(7) | BIT(12) |
++			BIT(13) | BIT(14) | BIT(19) | BIT(22) | BIT(24);
++	ret = mt7915_mcu_background_chain_ctrl(phy, &scan->chandef,
++					       CH_SWITCH_BACKGROUND_SCAN_START);
++	if (ret) {
++		mt7915_bg_scan_stop(dev, ret);
++		return ret;
++	}
++
++	mod_delayed_work(system_wq, &scan->work,
++			 msecs_to_jiffies(MT7915_BG_SETTLE_MS));
++	return 0;
++}
++
++#ifdef CONFIG_DEBUG_FS
++static ssize_t
++mt7915_bg_scan_write(struct file *file, const char __user *user_buf,
++		     size_t count, loff_t *ppos)
++{
++	struct seq_file *seq = file->private_data;
++	struct mt7915_phy *phy = seq->private;
++	struct wiphy *wiphy = phy->mt76->hw->wiphy;
++	unsigned int freq, width, center, dwell, threshold;
++	char buf[96], extra;
++	int ret;
++
++	if (!count || count >= sizeof(buf))
++		return -EINVAL;
++	if (copy_from_user(buf, user_buf, count))
++		return -EFAULT;
++	if (memchr(buf, '\0', count))
++		return -EINVAL;
++	buf[count] = '\0';
++
++	/* Never wait on wiphy here: unregister can hold it during debugfs removal.
++	 * CFG80211_DEBUGFS and its cancellable write helper are optional.
++	 */
++	if (!mutex_trylock(&wiphy->mtx))
++		return -EBUSY;
++	mutex_lock(&phy->dev->mt76.mutex);
++	if (sysfs_streq(buf, "stop"))
++		ret = mt7915_bg_scan_stop(phy->dev, -ECANCELED);
++	else if (sscanf(buf, "start %u %u %u %u %u %c", &freq, &width,
++			&center, &dwell, &threshold, &extra) == 5)
++		ret = mt7915_bg_scan_start(phy, freq, width, center, dwell, threshold);
++	else
++		ret = -EINVAL;
++	mutex_unlock(&phy->dev->mt76.mutex);
++	mutex_unlock(&wiphy->mtx);
++
++	return ret ? ret : count;
++}
++
++static void mt7915_bg_scan_bins(struct seq_file *seq, const char *name,
++				const struct mt7915_ipi_sample *sample)
++{
++	int i;
++
++	seq_printf(seq, ",\"%s\":[", name);
++	for (i = 0; i < ARRAY_SIZE(sample->bins); i++)
++		seq_printf(seq, "%s%u", i ? "," : "", sample->bins[i]);
++	seq_puts(seq, "]");
++}
++
++static int mt7915_bg_scan_show(struct seq_file *seq, void *data)
++{
++	struct mt7915_phy *phy = seq->private;
++	struct mt7915_dev *dev = phy->dev;
++	struct mt7915_bg_scan *scan = &dev->bg_scan;
++
++	mutex_lock(&dev->mt76.mutex);
++	seq_printf(seq, "{\"schema\":1,\"sequence\":%llu,\"active\":%s,\"reserved\":%s,",
++		   scan->sequence, scan->phase ? "true" : "false",
++		   scan->dirty ? "true" : "false");
++	seq_printf(seq, "\"valid\":%s,\"error\":%d,\"restore_error\":%d,",
++		   scan->valid ? "true" : "false", scan->error, scan->restore_error);
++	seq_printf(seq, "\"freq_mhz\":%d,\"center_mhz\":%d,\"width_mhz\":%d,",
++		   scan->chandef.chan ? scan->chandef.chan->center_freq : 0,
++		   scan->chandef.center_freq1,
++		   scan->chandef.chan ? cfg80211_chandef_get_width(&scan->chandef) : 0);
++	seq_printf(seq, "\"dwell_ms\":%u,\"settle_ms\":%u,\"elapsed_us\":%llu,",
++		   scan->dwell_ms, MT7915_BG_SETTLE_MS, scan->elapsed_us);
++	seq_printf(seq, "\"started_boottime_us\":%llu,\"threshold_bucket\":%u,",
++		   scan->started_us, scan->threshold);
++	seq_printf(seq, "\"borrowed_cac\":%s,\"cac_owner_present\":%s,\"sample_count\":%u,",
++		   scan->borrowed ? "true" : "false", dev->rdd2_phy ? "true" : "false",
++		   scan->sample_count);
++	seq_puts(seq, "\"method\":\"third_chain_irpi_delta\",\"tx_correction\":false,");
++	seq_puts(seq, "\"busy_permille\":null,\"busy_raw_permille\":null,\"energy_permille\":");
++	if (scan->valid)
++		seq_printf(seq, "%u", scan->busy_permille);
++	else
++		seq_puts(seq, "null");
++	seq_puts(seq, ",\"energy_upper_permille\":");
++	if (scan->valid)
++		seq_printf(seq, "%u", scan->busy_raw_permille);
++	else
++		seq_puts(seq, "null");
++	seq_printf(seq, ",\"bin10_delta\":%u,\"bin10_policy\":\"uncertain_bounds\",",
++		   scan->delta.bins[10]);
++	seq_printf(seq, "\"on_channel\":%s,\"configuration\":%u,\"cac_primed\":%s",
++		   scan->on_channel ? "true" : "false", scan->configuration,
++		   scan->cac_primed ? "true" : "false");
++	seq_printf(seq, ",\"counter_policy\":\"modulo23_no_clear\",\"wrap_mask\":%u",
++		   scan->wrap_mask);
++	seq_printf(seq, ",\"cac_attempted\":%s", scan->cac_attempted ? "true" : "false");
++	mt7915_bg_scan_bins(seq, "first", &scan->first);
++	mt7915_bg_scan_bins(seq, "last", &scan->last);
++	mt7915_bg_scan_bins(seq, "delta", &scan->delta);
++	seq_printf(seq, ",\"tx_assert_first_us\":%u,\"tx_assert_last_us\":%u,",
++		   scan->first.tx_assert_us, scan->last.tx_assert_us);
++	seq_puts(seq, "\"tx_assert_delta_us\":null");
++	seq_printf(seq, ",\"tx_first_us\":%llu,\"tx_last_us\":%llu,",
++		   scan->tx_first_us, scan->tx_last_us);
++	seq_printf(seq, "\"tx_read_max_us\":%llu,\"rx_reserved\":%s",
++		   scan->tx_read_max_us,
++		   dev->background_rx_reserved ? "true" : "false");
++	seq_puts(seq, "}\n");
++	mutex_unlock(&dev->mt76.mutex);
++	return 0;
++}
++
++static int mt7915_bg_scan_open(struct inode *inode, struct file *file)
++{
++	return single_open(file, mt7915_bg_scan_show, inode->i_private);
++}
++
++static const struct file_operations mt7915_bg_scan_fops = {
++	.owner = THIS_MODULE,
++	.open = mt7915_bg_scan_open,
++	.read = seq_read,
++	.write = mt7915_bg_scan_write,
++	.llseek = seq_lseek,
++	.release = single_release,
++};
++
++void mt7915_bg_scan_debugfs(struct mt7915_phy *phy, struct dentry *dir)
++{
++	bool supported = phy->dev->background_rx_reserved;
++
++	if (supported && phy->mt76->band_idx == MT_BAND1)
++		debugfs_create_file("background_scan", 0600, dir, phy,
++				    &mt7915_bg_scan_fops);
++}
++#else
++void mt7915_bg_scan_debugfs(struct mt7915_phy *phy, struct dentry *dir)
++{
++}
++#endif
++
++MODULE_INFO(manet_observer, "third-chain-v1");
++MODULE_INFO(manet_observer_probe, "0");
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/debugfs.c b/drivers/net/wireless/mediatek/mt76/mt7915/debugfs.c
+--- a/drivers/net/wireless/mediatek/mt76/mt7915/debugfs.c
++++ b/drivers/net/wireless/mediatek/mt76/mt7915/debugfs.c
+@@ -1600,6 +1600,7 @@
+ 	dir = mt76_register_debugfs_fops(phy->mt76, NULL);
+ 	if (!dir)
+ 		return -ENOMEM;
++	mt7915_bg_scan_debugfs(phy, dir);
+ 	if (is_mt7916(&dev->mt76)) {
+ 		debugfs_create_file("tmr_registers", 0400, dir, phy,
+ 				    &mt7915_tmr_registers_fops);
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/init.c b/drivers/net/wireless/mediatek/mt76/mt7915/init.c
+--- a/drivers/net/wireless/mediatek/mt76/mt7915/init.c
++++ b/drivers/net/wireless/mediatek/mt76/mt7915/init.c
+@@ -334,6 +334,8 @@
+ 	struct mt76_phy *mphy = hw->priv;
+ 	struct mt7915_phy *phy = mphy->priv;
+ 
++	mutex_lock(&dev->mt76.mutex);
++	mt7915_bg_scan_stop(dev, -ECANCELED);
+ 	memcpy(dev->mt76.alpha2, request->alpha2, sizeof(dev->mt76.alpha2));
+ 	dev->mt76.region = request->dfs_region;
+ 
+@@ -344,6 +346,7 @@
+ 
+ 	mphy->dfs_state = MT_DFS_STATE_UNKNOWN;
+ 	mt7915_dfs_init_radar_detector(phy);
++	mutex_unlock(&dev->mt76.mutex);
+ }
+ 
+ static void
+@@ -1210,6 +1213,7 @@
+ 
+ static void mt7915_stop_hardware(struct mt7915_dev *dev)
+ {
++	mt7915_bg_scan_cleanup(dev);
+ 	mt7915_mcu_exit(dev);
+ 	mt76_connac2_tx_token_put(&dev->mt76);
+ 	mt7915_dma_cleanup(dev);
+@@ -1227,6 +1231,7 @@
+ 	dev->phy.dev = dev;
+ 	dev->phy.mt76 = &dev->mt76.phy;
+ 	dev->mt76.phy.priv = &dev->phy;
++	mt7915_bg_scan_init(dev);
+ 	INIT_WORK(&dev->rc_work, mt7915_mac_sta_rc_work);
+ 	INIT_DELAYED_WORK(&dev->mphy.mac_work, mt7915_mac_work);
+ 	INIT_LIST_HEAD(&dev->sta_rc_list);
+@@ -1300,3 +1305,4 @@ void mt7915_unregister_device(struct mt7915_dev *dev)
++	mt7915_bg_scan_cleanup(dev);
+ 	mt7915_unregister_ext_phy(dev);
+ 	mt7915_coredump_unregister(dev);
+ 	mt7915_unregister_thermal(&dev->phy);
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/mac.c b/drivers/net/wireless/mediatek/mt76/mt7915/mac.c
+--- a/drivers/net/wireless/mediatek/mt76/mt7915/mac.c
++++ b/drivers/net/wireless/mediatek/mt76/mt7915/mac.c
+@@ -1561,6 +1561,8 @@
+ 
+ 	if (i == 10)
+ 		dev_err(dev->mt76.dev, "chip full reset failed\n");
++	else
++		mt7915_bg_scan_reset_done(dev);
+ 
+ 	dev->phy.omac_mask = 0;
+ 	if (phy2)
+@@ -1594,6 +1596,12 @@
+ 	atomic_cmpxchg(&dev->tmr_probe_busy, 1, 2);
+ 	ext_phy = dev->mt76.phys[MT_BAND1];
+ 	phy2 = ext_phy ? ext_phy->priv : NULL;
++
++	/* A receiver retune interrupted by recovery needs a full reinit. */
++	mutex_lock(&dev->mt76.mutex);
++	if (mt7915_bg_scan_reset(dev))
++		dev->recovery.restart = true;
++	mutex_unlock(&dev->mt76.mutex);
+ 
+ 	/* chip full reset */
+ 	if (dev->recovery.restart) {
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/main.c b/drivers/net/wireless/mediatek/mt76/mt7915/main.c
+--- a/drivers/net/wireless/mediatek/mt76/mt7915/main.c
++++ b/drivers/net/wireless/mediatek/mt76/mt7915/main.c
+@@ -119,6 +119,8 @@
+ 
+ 	mutex_lock(&dev->mt76.mutex);
+ 
++	if (dev->bg_scan.phy == phy)
++		mt7915_bg_scan_stop(dev, -ECANCELED);
+ 	mt76_testmode_reset(phy->mt76, true);
+ 
+ 	clear_bit(MT76_STATE_RUNNING, &phy->mt76->state);
+@@ -301,6 +303,8 @@
+ 	atomic_cmpxchg(&dev->tmr_probe_busy, 1, 2);
+ 
+ 	mutex_lock(&dev->mt76.mutex);
++	if (dev->bg_scan.phy == phy)
++		mt7915_bg_scan_stop(dev, -ENODEV);
+ 	mt76_testmode_reset(phy->mt76, true);
+ 	mutex_unlock(&dev->mt76.mutex);
+ 
+@@ -329,6 +333,12 @@
+ 	struct mt7915_phy *phy = mphy->priv;
+ 	struct mt7915_dev *dev = phy->dev;
+ 	int ret;
++
++	if (dev->bg_scan.phy == phy) {
++		ret = mt7915_bg_scan_stop(dev, -ECANCELED);
++		if (ret)
++			goto out;
++	}
+ 
+ 	if (dev->cal) {
+ 		ret = mt7915_mcu_apply_tx_dpd(phy);
+@@ -1685,6 +1695,14 @@
+ 
+ 	mutex_lock(&dev->mt76.mutex);
+ 
++	if (dev->bg_scan.dirty && dev->bg_scan.borrowed)
++		mt7915_bg_scan_stop(dev, -ECANCELED);
++
++	if (dev->bg_scan.dirty) {
++		ret = -EBUSY;
++		goto out;
++	}
++
+ 	if (dev->mt76.region == NL80211_DFS_UNSET)
+ 		goto out;
+ 
+@@ -1694,6 +1712,9 @@
+ 		goto out;
+ 	}
+ 
++	/* Sticky until module removal, including failed requests and resets. */
++	if (chandef)
++		dev->bg_scan.cac_attempted = true;
+ 	/* rdd2 already configured on a radar channel */
+ 	running = dev->rdd2_phy &&
+ 		  cfg80211_chandef_valid(&dev->rdd2_chandef) &&
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/mcu.c b/drivers/net/wireless/mediatek/mt76/mt7915/mcu.c
+--- a/drivers/net/wireless/mediatek/mt76/mt7915/mcu.c
++++ b/drivers/net/wireless/mediatek/mt76/mt7915/mcu.c
+@@ -175,11 +175,19 @@
+ 		return -ETIMEDOUT;
+ 	}
+ 
++	if (skb->len < sizeof(*rxd))
++		return -EPROTO;
++
+ 	rxd = (struct mt76_connac2_mcu_rxd *)skb->data;
+ 	if (seq != rxd->seq &&
+ 	    !(rxd->eid == MCU_CMD_EXT_CID &&
+ 	      rxd->ext_eid == MCU_EXT_EVENT_WA_TX_STAT))
+ 		return -EAGAIN;
++
++	if (cmd == MCU_EXT_QUERY(RDD_IPI_HIST) &&
++	    (rxd->eid != MCU_EVENT_EXT ||
++	     rxd->ext_eid != MCU_EXT_CMD_RDD_IPI_HIST))
++		return -EPROTO;
+ 
+ 	if (cmd == MCU_CMD(PATCH_SEM_CONTROL)) {
+ 		skb_pull(skb, sizeof(*rxd) - 4);
+@@ -324,6 +332,13 @@
+ 		mphy = dev->mt76.phys[MT_BAND1];
+ 		break;
+ 	case MT_RDD_IDX_BACKGROUND:
++		/* Raw observer RDD2 activity has no cfg80211 owner. Drop its
++		 * reports even while cleanup is retained for retry. A CAC tap
++		 * leaves real radar reporting intact. Band-0/1 reports are separate.
++		 */
++		if (READ_ONCE(dev->bg_scan.dirty) &&
++		    !READ_ONCE(dev->bg_scan.borrowed))
++			return;
+ 		if (!dev->rdd2_phy)
+ 			return;
+ 		mphy = dev->rdd2_phy->mt76;
+@@ -448,6 +463,11 @@
+ void mt7915_mcu_rx_event(struct mt7915_dev *dev, struct sk_buff *skb)
+ {
+ 	struct mt76_connac2_mcu_rxd *rxd;
++
++	if (skb->len < sizeof(*rxd)) {
++		dev_kfree_skb(skb);
++		return;
++	}
+ 
+ 	rxd = (struct mt76_connac2_mcu_rxd *)skb->data;
+ 	if ((rxd->ext_eid == MCU_EXT_EVENT_THERMAL_PROTECT ||
+@@ -2666,7 +2686,7 @@
+ 				 sizeof(req), true);
+ }
+ 
+-static int
++int
+ mt7915_mcu_background_chain_ctrl(struct mt7915_phy *phy,
+ 				 struct cfg80211_chan_def *chandef,
+ 				 int cmd)
+@@ -2677,6 +2697,7 @@
+ 	int freq = mphy->chandef.center_freq1;
+ 	struct mt7915_mcu_background_chain_ctrl req = {
+ 		.monitor_scan_type = 2, /* simple rx */
++		.band_idx = mphy->band_idx,
+ 	};
+ 
+ 	if (!chandef && cmd != CH_SWITCH_BACKGROUND_SCAN_STOP)
+@@ -2719,6 +2740,46 @@
+ 
+ 	return mt76_mcu_send_msg(&dev->mt76, MCU_EXT_CMD(OFFCH_SCAN_CTRL),
+ 				 &req, sizeof(req), false);
++}
++
++static int
++mt7915_mcu_ipi_decode(const void *data, size_t len, u8 index, u8 band,
++		      struct mt7915_ipi_sample *sample)
++{
++	const struct mt7915_mcu_ipi_reply *reply = data;
++	int i;
++
++	if (len != sizeof(*reply))
++		return -EMSGSIZE;
++	if (reply->index != index || reply->band != band)
++		return -EPROTO;
++
++	for (i = 0; i < ARRAY_SIZE(sample->bins); i++)
++		sample->bins[i] = le32_to_cpu(reply->bins[i]);
++	sample->tx_assert_us = le32_to_cpu(reply->tx_assert_us);
++
++	return 0;
++}
++
++int mt7915_mcu_ipi_query_index(struct mt7915_phy *phy, u8 index, u8 band,
++			       struct mt7915_ipi_sample *sample)
++{
++	struct mt7915_mcu_ipi_req req = {
++		.index = index,
++		.band = band,
++	};
++	struct sk_buff *skb;
++	int ret;
++
++	ret = mt76_mcu_send_and_get_msg(&phy->dev->mt76,
++					MCU_EXT_QUERY(RDD_IPI_HIST),
++					&req, sizeof(req), true, &skb);
++	if (!ret) {
++		ret = mt7915_mcu_ipi_decode(skb->data, skb->len, index, band, sample);
++		dev_kfree_skb(skb);
++	}
++
++	return ret;
+ }
+ 
+ int mt7915_mcu_rdd_background_enable(struct mt7915_phy *phy,
+@@ -3185,6 +3246,11 @@
+ 	if (ret)
+ 		return ret;
+ 
++	if (skb->len < offs_cc + len * sizeof(*res)) {
++		dev_kfree_skb(skb);
++		return -EPROTO;
++	}
++
+ 	res = (struct mt7915_mcu_mib *)(skb->data + offs_cc);
+ 
+ #define __res_u64(s) le64_to_cpu(res[s].data)
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/mcu.h b/drivers/net/wireless/mediatek/mt76/mt7915/mcu.h
+--- a/drivers/net/wireless/mediatek/mt76/mt7915/mcu.h
++++ b/drivers/net/wireless/mediatek/mt76/mt7915/mcu.h
+@@ -5,6 +5,20 @@
+ #define __MT7915_MCU_H
+ 
+ #include "../mt76_connac_mcu.h"
++
++#define MCU_EXT_CMD_RDD_IPI_HIST 0xa3
++#define MT7915_IPI_ALL 12
++
++struct mt7915_mcu_ipi_req {
++	u8 index, band, set_val, reserved;
++	__le32 idle_threshold, idle_max, idle_duration, idle_cmd;
++} __packed;
++
++struct mt7915_mcu_ipi_reply {
++	u8 index, band, reserved[2];
++	__le32 bins[12];
++	__le32 tx_assert_us;
++} __packed;
+ 
+ enum {
+ 	MCU_ATE_SET_TRX = 0x1,
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/mt7915.h b/drivers/net/wireless/mediatek/mt76/mt7915/mt7915.h
+--- a/drivers/net/wireless/mediatek/mt76/mt7915/mt7915.h
++++ b/drivers/net/wireless/mediatek/mt76/mt7915/mt7915.h
+@@ -240,6 +240,33 @@
+ 		u8 spe_idx;
+ 	} test;
+ #endif
++};
++
++struct mt7915_ipi_sample {
++	u32 bins[12];
++	u32 tx_assert_us;
++};
++
++#define MT7915_BG_SAVE_COUNT 27
++
++/* Protected by mt76.mutex, shared with rdd2_phy. */
++struct mt7915_bg_scan {
++	struct delayed_work work;
++	struct mt7915_phy *phy;
++	struct cfg80211_chan_def chandef;
++	struct mt7915_ipi_sample first, last, delta;
++	u64 started_us, elapsed_us, sequence;
++	u64 tx_first_us, tx_last_us, tx_read_max_us;
++	u32 dwell_ms, busy_permille, busy_raw_permille;
++	u32 saved[MT7915_BG_SAVE_COUNT];
++	u32 changed, sample_count, wrap_mask;
++	u8 threshold, phase;
++	bool controls_saved, borrowed, on_channel;
++	bool cac_primed, cac_attempted;
++	u32 cac_buffer_start, cac_buffer_end;
++	u8 configuration;
++	bool dirty, valid, shutdown;
++	int error, restore_error;
+ };
+ 
+ struct mt7915_dev {
+@@ -279,6 +306,7 @@
+ 	struct cfg80211_chan_def rdd2_chandef;
+ 	struct mt7915_phy *rdd2_phy;
+ 	bool background_rx_reserved;
++	struct mt7915_bg_scan bg_scan;
+ 
+ 	u16 chainmask;
+ 	u16 chainshift;
+@@ -451,6 +479,17 @@
+ 
+ int mt7915_register_device(struct mt7915_dev *dev);
+ void mt7915_unregister_device(struct mt7915_dev *dev);
++void mt7915_bg_scan_init(struct mt7915_dev *dev);
++void mt7915_bg_scan_debugfs(struct mt7915_phy *phy, struct dentry *dir);
++int mt7915_bg_scan_stop(struct mt7915_dev *dev, int error);
++void mt7915_bg_scan_cleanup(struct mt7915_dev *dev);
++bool mt7915_bg_scan_reset(struct mt7915_dev *dev);
++void mt7915_bg_scan_reset_done(struct mt7915_dev *dev);
++int mt7915_mcu_background_chain_ctrl(struct mt7915_phy *phy,
++				     struct cfg80211_chan_def *chandef,
++				     int cmd);
++int mt7915_mcu_ipi_query_index(struct mt7915_phy *phy, u8 index, u8 band,
++			       struct mt7915_ipi_sample *sample);
+ int mt7915_eeprom_init(struct mt7915_dev *dev);
+ void mt7915_eeprom_parse_hw_cap(struct mt7915_dev *dev,
+ 				struct mt7915_phy *phy);

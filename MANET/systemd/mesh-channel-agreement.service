@@ -16,7 +16,8 @@ SystemCallArchitectures=native
 # The resident worker also reconciles IP, AP and service configuration.
 # Atomic replacement needs writable parent directories, including /etc.
 # wpa_cli binds its reply socket in the host's /tmp, so PrivateTmp breaks it.
-ReadWritePaths=/etc /var/lib /run /tmp
+# Paired DFS reservation and CAC ownership use the root-only wiphy ABI.
+ReadWritePaths=/etc /var/lib /run /tmp -/sys/kernel/debug/ieee80211
 # Syncthing identity reads the SSH account's public certificate.
 ProtectHome=read-only
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK

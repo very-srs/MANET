@@ -374,7 +374,12 @@ else:
                     command += ['--cap-add', capability]
             if line.startswith('ReadWritePaths='):
                 for directory in line.split('=', 1)[1].split():
-                    path = str(self.root / directory.lstrip('/'))
+                    # systemd's '-' prefix permits an absent optional mount,
+                    # such as the DFS debugfs ABI on an unsupported kernel.
+                    optional = directory.startswith('-')
+                    path = str(self.root / directory.lstrip('-').lstrip('/'))
+                    if optional and not Path(path).exists():
+                        continue
                     command += ['--bind', path, path]
         # /var/run aliases /run on Debian. The fixture uses a directory.
         path = str(self.root / 'var/run')

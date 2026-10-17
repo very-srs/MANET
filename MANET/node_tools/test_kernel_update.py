@@ -460,9 +460,10 @@ class KernelUpdateTests(unittest.TestCase):
         self.assertNotEqual((self.boot / 'config.txt').read_text(), first_config)
         self.assertFalse(self.updater.pending.exists())
 
-    def test_unqualified_profile_is_rejected(self):
+    def test_invalid_bench_override_is_not_replaced_by_default(self):
         self.profile_patch.stop()
-        with self.assertRaisesRegex(kernel.KernelError, 'locally validated'):
+        (self.root / kernel.PROFILE).write_text('{}')
+        with self.assertRaises(kernel.KernelError):
             self.updater.update()
         self.assertFalse(self.updater.pending.exists())
 

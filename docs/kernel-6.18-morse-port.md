@@ -651,11 +651,17 @@ replace these boot kernel files. A package requiring a new stock kernel is
 intentionally unsatisfiable; select a compatible userland package or update
 through a MANET release instead of overriding the policy.
 
-Current kernel replacement procedures cover provisioning and offline bench
-maintenance. The tools archive is also allowed to carry the matching board's
-kernel payload; its field installation and boot-recovery procedure still
-needs implementation and validation before shipping. Physical access or
-reflashing must not become the normal update requirement for sealed radios.
+Kernel replacement covers provisioning, offline bench maintenance and CM4
+field trials. A matched CM4 tools payload starts a one-shot tryboot trial by
+default, using a profile derived from that node's boot files and hardware.
+The firmware kernel watchdog, bounded userspace handoff, PID 1 watchdog and
+confirmation guard provide the benched fallback mechanism. Generic field
+health checks need an on-node acceptance run before release. Operators can
+set `enabled=n` in `/etc/manet-kernel-update.conf` to keep tools-only updates.
+Rock 3A kernel activation remains disabled. See the
+[kernel activation protocol](node-tools-internals.md#kernel-payload-and-activation-protocol)
+for boot-format restrictions, confirmation and retained failed candidates.
+Physical access or reflashing must not become the normal update requirement for sealed radios.
 Leave the APT protections enabled when installing a MANET kernel. Kernel
 security fixes require a new MANET kernel release as well as ordinary
 userland security updates.

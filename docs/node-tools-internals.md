@@ -129,8 +129,9 @@ software. The first implementation is an opt-in CM4 trial path. It is not
 hardware-qualified for release yet. Rock 3A kernel activation is rejected
 until its installed bootloader and reset path have been identified and tested.
 Kernel-less updates keep the existing installation path on all boards,
-including RPi5. A tools-only release containing this updater must reach a node
-before a release containing the new payload format.
+including RPi5. Stable v0.569 cannot consume the top-level kernel namespace.
+The optional legacy wrapper installs the new updater first and then applies
+an embedded matched archive in the same release.
 
 A tools archive places its matched set under `manet-kernel/`:
 
@@ -161,7 +162,7 @@ service. Kernel payloads must not contain a second MT7916 selection policy.
 
 The durable sequence is:
 
-1. Verify the archive, board, manifest and local boot profile before APT or
+1. Verify the archive, board, manifest and node-derived boot profile before APT or
    live runtime replacement. Refuse raw boot/module destinations. Check root
    and boot space, including the download, recovery archive, staging copy,
    installed candidate and reserve. Keep the old boot files and modules.
@@ -182,25 +183,62 @@ The durable sequence is:
    on the kernel command line, and the firmware's device-tree tryboot flag.
    A separately enabled confirmation deadline requests a normal reboot if
    confirmation never completes. The firmware kernel watchdog and PID 1
-   runtime watchdog must already have been validated, including a kernel
+   runtime watchdog provide the benched reset path, including a kernel
    that never starts userspace. The kernel keeps a running watchdog alive
    until userspace opens it, with no limit by default, so the trial command
    line sets `watchdog.open_timeout=120`. A trial stuck before systemd (no
    root device under `rootwait`, for example) then resets.
    A systemd timer alone cannot reset a hung kernel.
-5. After multi-user startup, check core services and run a locally installed,
-   hash-pinned health check that proves the required radio and remote management
-   paths. Persist a commit intent before replacing `config.txt` with the
+5. After multi-user startup, check core services, watchdog ownership, mounts,
+   candidate modules and attached radios using local health checks. No peer,
+   Ethernet, internet or clock-sync requirement applies. Persist a commit
+   intent before replacing `config.txt` with the
    verified trial config. A retry resolves a crash during commit from that
    intent and the selector contents. Then finish the ordinary runtime update
    and version commit. Failed boot or health confirmation preserves the old
    selector, records failure and never retries the defective kernel in a loop.
 
-The CM4 boot profile is `/etc/manet-kernel-trial.json`, a root-owned local
-bench attestation outside the archive. It pins the original config, command line, health-check program and
-boot filesystem UUID, and records validated watchdog coverage. Unsupported
-config constructs fail preflight rather than silently discarding custom boot
-settings. Do not ship a blanket profile to enable untested nodes.
+CM4 kernel activation defaults on when the archive includes a matched payload.
+The local `/etc/manet-kernel-update.conf` accepts `enabled=n` to install only
+the runtime payload. It defaults to enabled when absent. Archives cannot
+replace this setting. Recovery records the choice before installation and
+keeps it across interruptions. Changing the setting cannot abandon an armed
+trial. After an opted-out ordinary update commits, the same release requires
+an explicit local-archive reinstall or a later release to start its kernel.
+
+Without an override, `manet_kernel_update.py` derives the profile from the
+node's full `config.txt`, `cmdline.txt`, mounted FAT UUID and bus hardware.
+It stores that profile inside `kernel.json` before candidate writes and reuses
+it after reboot. Subsequent trials use the confirmed baseline and verify the
+current selector. The profile contains no fabricated bench attestation.
+The existing config dialect restrictions still apply. Unsupported constructs
+fail preflight rather than silently discarding custom boot settings.
+
+The field health check gets at most 60 seconds within the 240-second boot
+deadline. It requires active multi-user and local-filesystem targets, udev,
+networkd, node-manager, mesh-status and SSH. Failed radio setup, BATMAN setup,
+Alfred, clone identity reset, SSH recovery, lobby setup, mesh supplicants,
+firmware preparation or radio naming units also block confirmation. Unrelated
+failed services do not make an isolated node unhealthy. Root must be mounted
+read-write, boot must be the original FAT UUID, and PID 1 must both enable its
+runtime watchdog and hold the device open with active watchdog state.
+Every payload module is rehashed, and loaded radio modules need matching
+`vermagic`. MT7916 also needs `manet_timing=1`.
+
+PCI IDs `14c3:7915`/`14c3:7916` and USB ID `325b:8100` determine expected
+radios even if their drivers failed. Binding, loaded modules and device-owned
+PHYs are required. The two MT7916 PHYs and each Morse PHY are checked without
+depending on interface names or roles. SPI has no discoverable vendor ID.
+A bound `morse_spi` device before reboot proves a fitted hat and becomes a
+required device. An unbound overlay alone does not prove a hat is fitted.
+The saved hardware inventory catches devices that disappear after reboot.
+`bat0` must be administratively up, with no carrier or neighbor requirement.
+
+An existing `/etc/manet-kernel-trial.json` remains a root-owned bench override
+outside the archive. It pins the baseline config, command line, health program
+and boot UUID. Invalid overrides fail instead of falling through to the
+default. The reset/fallback mechanism has been benched on CM4. The generic
+field policy needs a separate on-node acceptance run before publication.
 
 Its JSON fields are `backend` (`cm4-tryboot-v1`), `boot_uuid` (the mounted FAT
 UUID), `config_sha256`, `cmdline_sha256`, `health_sha256`,
@@ -211,8 +249,9 @@ bytes. The health hash covers the root-owned executable
 `/usr/local/sbin/manet-kernel-health-check`. The trial config ends with
 `kernel_watchdog_timeout=180`, and preflight requires PID 1's runtime watchdog.
 The local validation must cover the installed boot-partition firmware, not
-just the EEPROM version. An older start4.elf that ignores this setting does
-not qualify. `kernel.json` and `confirmed.json` record the kernel timeout,
+just the EEPROM version. The field default relies on the same supported
+firmware behavior, not a per-radio reset attestation. `kernel.json` and
+`confirmed.json` record the kernel timeout,
 PID 1 setting and optional EEPROM `BOOT_WATCHDOG_TIMEOUT` status. A missing,
 disabled or unreadable EEPROM watchdog does not block a trial. Its presence
 alone does not establish a functioning reset path. The initial supported
@@ -284,6 +323,50 @@ the existing lock except the guard, which only observes the journal and can
 request fallback. A failed trial retains the archive and diagnostics for
 explicit cancellation or repair. Kernel success does not turn the runtime
 updater into a whole-root rollback system.
+
+### Legacy updater bootstrap and release userland
+
+`MANET_LEGACY_BOOTSTRAP=1` builds a CM4 outer tools archive whose embedded
+`usr/local/share/manet/bootstrap/cm4-tools.tar.gz` is the full new-updater
+archive. The outer descriptor pins its version, archive SHA-256, kernel
+release and manifest SHA-256. The builder checks v0.569's path exclusions,
+64 MiB download limit and 512 MiB expanded limit. The inner archive retains
+the normal updater limits and full matched-set validation.
+
+v0.569 already invokes the installed `manet-mt7916-setup.sh` before its
+version commit. That helper enables `manet-release-bootstrap.timer` without
+waiting for kernel activation. The timer waits for both outer version markers
+and the end of the legacy pending transaction. It invokes the new updater's
+local-archive path, which bypasses equal-version skipping but retains its
+lock, validation, recovery and trial behavior. A pending kernel transaction
+must match the embedded manifest. A failed trial remains failed. An explicit
+kernel cancellation stops the timer for that manifest and retains the payload
+and diagnostics. A later release with a different kernel manifest can start
+its own transaction. Successful completion
+requires the exact candidate release, slot, active selector hash, matching
+tools versions and no pending transaction before removing the wrapper payload
+and its units. Rock 3A and RPi5 exit before reading the CM4 descriptor.
+
+The bootstrap uses the same derived field profile and local opt-out as a
+direct new-updater installation. While opted out, it retains the embedded
+archive and timer without starting a kernel transaction. Re-enabling allows
+that timer to resume. A pending transaction always resolves first. Explicit
+bench overrides retain their original strict profile and health checks.
+
+When supplied at build time, `manet-release-setup.py` verifies SHA-256 for the
+native Debian `hostapd` package and regulatory DB before invoking dpkg. It
+requires package version `2:2.10-24+manet1`, architecture arm64, the installed
+follower version marker and the expected APT candidate. The shipped preference
+uses `Package: hostapd`, `Pin: version 2:2.10-24+manet*`, and
+`Pin-Priority: 1001`. Package setup is idempotent and runs before version commit
+through the same helper on old and new updaters. Dependencies are those of the
+already installed Debian hostapd. Setup does not fetch missing dependencies.
+dpkg preserves locally edited conffiles during unattended installation.
+On CM4 the DB is atomically copied to `/root` and `/usr/lib/firmware`, and
+its flags are consumed after reboot. Rock 3A and RPi5 retain their existing
+databases. The rebuilt DB is unsigned, matching the CM4 kernel's trust policy,
+while Rock 3A enforces signed-regdb loading. Live HaLow regulatory state is not
+retuned.
 
 ### Tools update failure handling
 
@@ -1829,7 +1912,7 @@ The ROC path also rejects a frequency that becomes home during collection.
 
 5 GHz uses the same home monitor, per-band trouble hysteresis and connected
 membership gate. On a reserved MT7916 with the versioned observer interface,
-`manet_bgobs.py` measures each non-home, non-DFS candidate for 250 ms on the
+`manet_bgobs.py` measures each non-home candidate for 250 ms on the
 third RX chain. The main PHY remains on its operating channel. No flush scan
 or BSS count is needed on that path; both home and candidates carry zero BSS
 counts. The energy histogram supplies no calibrated noise value. Candidate
@@ -1894,16 +1977,77 @@ short scans retain the three-sample warmup. Producer expiry removes samples
 older than 180 seconds. Mixed reports still use the existing connected-domain
 medians and hold-down.
 
-DFS candidate moves remain outside this implementation. An observer dwell
-is not CAC. A future plan must arrange background CAC on every transmitting
-node, verify each completion and radar state, and activate while each node's
-permission remains valid. The bench kernel expires unused AVAILABLE state
-after two seconds in the FCC region. A pre-cleared spare cannot simply wait
-for a later three-minute election. Radar, cancellation, missed activation or
-membership changes must abandon the plan and preserve the current channel.
-Background CAC and observation share the reserved receiver and cannot run
-concurrently. The cfg80211 background-CAC lifecycle fixes remain prerequisites
-for a future CAC coordinator.
+`manet_rx_policy.py` runs after each local 5 GHz home observation, including
+cycles that do not scan. It serializes against observer collection with
+`/run/manet-bgobs-phyN.lock`. CM4 starts with native three-path reception,
+reserves through the benched `rx_transition_probe` write of `2` while local
+trouble or kernel hold ownership exists, and requests `3` when both clear.
+The controller checks the kernel transition timestamp and preserves its
+60 second reversal limit. EBUSY/EAGAIN defer work. It never stops an owner to
+force a transition. Missing ABI, malformed state, AP/STA operation and other
+boards do not create a reservation. Kernel errors remain authoritative.
+Static mode requests native reception on each reconciliation pass, so turning
+ACS off cannot leave a cleared trouble flag's reservation behind. Discovery
+and unavailable home surveys also clear the local request. Active kernel
+holds still retain ownership in those cases.
+
+The continuous-CAC reader now requires schema 2, preserving the kernel epoch
+across host restarts and checking the 1.5 second heartbeat deadline with
+CLOCK_BOOTTIME. A host lease is never renewed from a stale, future, revoked
+or faulted receiver sample. The separate radar watcher reads explicit kernel
+radar latches and matches epoch, generation, frequency and saved plan. It
+vacates before pending event delivery or authenticated publication, then
+feeds the existing type 74/75 fallback and cooldown mechanism. Missing
+telemetry or peer loss does not manufacture a radar event.
+
+DFS admission requires the loaded MT7916 `dfs_mesh_v1` parameter, cfg80211's
+matching status ABI, live DFS regulatory flags and CM4 policy. Rock 3A can
+exercise this code only with the explicit `MANET_DFS_BENCH=1` service
+environment. Normal Rock 3A and RPi5 packages keep the policy off.
+
+The coordinator scores the shared registry with the intersection of connected
+DFS capabilities. A DFS winner starts an authenticated `dfs_prepare` intention
+with a nonce, exact participant boots, candidate, measured non-DFS runner-up
+and 1200-second expiry. All nodes reconcile that intention under the observer
+lock, reserve RDD2 and request background CAC with nl80211. The kernel owns
+CAC after the request ACK. During CAC, the read-only held occupancy tap can
+supply the candidate without retuning the receiver. The fallback remains the
+one scored before CAC if other observations expire during a weather-channel
+check. Rejection or changed membership retires an uncommitted background
+candidate. An existing timed plan retains its ownership until resolution.
+
+After every node has a live hold, the existing unanimous agreement freezes
+each epoch/generation and the fallback. A fresh activation check precedes
+mesh CSA with HANDLE_DFS. There is no supplicant-restart path into DFS.
+The driver's retune preserves the exact matching RDD2, starts the main RDD,
+then calls `cfg80211_hold_transfer_v3`. It rejects stale tokens, expired
+heartbeats, different chandefs and unavailable channels. Successful transfer
+records a separate main token before scheduling background teardown. Revocation
+preserves AVAILABLE under that main owner. Main stop, retune or firmware
+recovery invalidates the main token. Main radar retains its token in the
+`main-radar` latch and also reaches nl80211 through mac80211.
+
+The independent watcher issues `iw ... switch ... beacons 3 block-tx` before
+persistence or Alfred I/O. It never waits for the agreement lock. A pending
+local event does not defer this action. A recent accepted CSA is reused instead
+of submitting it twice, and a peer's completed CSA is preserved. The agreement
+daemon verifies fallback landing and can recover with the interface down if
+CSA fails. Radar received through encrypted types 74 or 75 initiates the same
+exit, then starts the 30-minute cooldown. The next unanimous plan can refresh
+the fallback after rescoring. Main detection retains the reserved receive
+configuration until the node leaves DFS, since the benched path-count change
+is restricted to non-DFS operation.
+
+The combined series also records mesh CSA precedence on an identical-channel
+beacon, so an already-landed node does not originate a later stale precedence.
+Block-TX exits from DFS carry the regulatory reason in mesh CSA actions and
+beacons. Peers can latch that event and enter cooldown before Alfred arrives.
+Ordinary drift repair never restarts a supplicant onto a configured DFS
+channel after it has followed a fallback CSA.
+Kernel C harnesses and host tests cover the transfer and command ordering.
+They do not measure RF detector sensitivity, over-the-air continuity or
+trigger-to-CSA latency. The three-node bench script in the combined series
+records those software event timings with MAIN `radar_trigger=1`.
 
 #### Scoring, hold-down and missing data
 
@@ -4933,31 +5077,23 @@ The reported boot failures were traced to the local-fs/coldplug ordering cycle
 above. After its correction, patched warm and power-on boots on CM4 with
 driver b623a361 and WM 18a2e1d0 completed, and survival cleared the marker.
 
-The local `mt7916_background_rx=y|n` setting uses the same mesh.conf path
-watcher and early boot service. It currently defaults to `n` while the
-reservation fix awaits RF validation. `y` writes `/etc/modprobe.d/manet-mt7916.conf` with
-`options mt7915e background_radar_2t2r=1`, only when modinfo reports that
-parameter on the installed running-kernel module. The service runs before
-coldplug and never reloads a radio. `n`, unsupported modules, preparation
-failure and the failed-boot latch remove only the exact managed options file.
-Operator-owned contents are preserved and reported as a conflict. Config is
-local; no Alfred config-push key or web UI control is added.
+The former local `mt7916_background_rx=y|n` setting controlled a module-load
+reservation through `background_radar_2t2r=1`. Deployed boards now remove that
+managed options file regardless of the old setting. Boot reservation changes
+the EEPROM shadow and prevents the runtime transition from restoring all
+three receive paths. Operator-owned options are preserved and reported as a
+conflict. The early service never reloads a running radio or rewrites mesh.conf.
 
-Reservation enables the observer and band-1 background CAC but costs the main
-5 GHz radio its third receive chain and enforces 2T2R. Leaving it off preserves
-normal RX diversity and candidate scans. EEPROM shadow programming, firmware
-acceptance, wiphy background-CAC capability, reported antenna/chain masks,
-antenna reconfiguration, observer admission, CAC ownership and firmware reset
-all account for reservation state. Changing mesh.conf affects the next boot;
-the presence of the live debugfs endpoint, not the requested config value,
-determines whether ACS can observe. An auto-disabled patched boot also suspends
-the reservation until explicit or hash-change rearm, allowing pinned-stock
-fallback without rewriting mesh.conf.
+The CM4 runtime policy above uses the benched receive-path transition without
+changing the native EEPROM configuration. It reserves only for local trouble
+or kernel hold ownership. Observer availability still depends on the actual
+debugfs ABI and runtime state. A configured request cannot grant ownership.
 
 The initial reservation left the main 5 GHz link unable to peer on two
 Rock 3A nodes. The kernel series now resolves selectable band 1 before
 uploading the EEPROM shadow and reduces the legacy OFDM TX-path count with
 the main-path count. This removes demonstrated host/firmware configuration
-inconsistencies, but restoring RF traffic still requires hardware validation.
-Keep the setting off outside the bench. Automatic runtime reservation and
-DFS activation remain separate work.
+inconsistencies. The subsequent reservation-v2 bench validated runtime
+transitions and measured the accepted receive-throughput reduction. The
+combined CM4 release still needs hardware qualification. The paired DFS
+transfer and block-TX CSA path are implemented in the combined release series.

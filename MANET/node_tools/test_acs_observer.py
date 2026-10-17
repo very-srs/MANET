@@ -98,7 +98,7 @@ class CorrectionTests(unittest.TestCase):
                 obs.measure(Path('/unused'), 5200)
             write.assert_not_called()
 
-    def test_phy_resolution_and_non_dfs_filter(self):
+    def test_phy_resolution_and_passive_dfs_candidates(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             phy = root / 'net/wlan1/phy80211'
@@ -114,7 +114,8 @@ class CorrectionTests(unittest.TestCase):
                 self.assertEqual(obs.observer_path('wlan1'), path)
                 with patch.object(obs, 'measure', return_value=20) as measure:
                     result = obs.collect_candidates(path, [5180, 5200, 5500], 'wlan1')
-                measure.assert_called_once_with(path, 5200)
+                self.assertEqual([c.args for c in measure.call_args_list],
+                                 [(path, 5200), (path, 5500)])
                 self.assertEqual(result[0]['busy_pct'], 20)
                 self.assertNotIn('noise_floor', result[0])
                 self.assertTrue(result[0]['_observer'])
@@ -188,6 +189,10 @@ class ObserverGateTests(AcsHarness):
         helper.write_text('''import json, os, sys
 from pathlib import Path
 root = Path(os.environ['TEST_ROOT'])
+if '--policy' in sys.argv:
+    with (root / 'policy-calls').open('a') as stream:
+        stream.write(json.dumps(sys.argv[1:]) + '\\n')
+    sys.exit(0)
 with (root / 'observer-calls').open('a') as stream:
     stream.write(json.dumps(sys.argv[1:]) + '\\n')
 print(json.dumps({'results': [dict(channel=5200, busy_pct=20,
@@ -200,6 +205,8 @@ sys.exit(int(os.environ.get('TEST_OBSERVER_RC', '0')))
     def test_closed_gate_never_calls_observer(self):
         self.collect([self.row(0), self.row(1)])
         self.assertFalse((self.root / 'observer-calls').exists())
+        calls = (self.root / 'policy-calls').read_text().splitlines()
+        self.assertEqual([json.loads(c)[-1] for c in calls], ['clear', 'clear'])
 
     def test_peer_trouble_uses_observer_and_no_main_radio_scan(self):
         reports, commands = self.collect([self.row(0)], peer=True,
@@ -212,6 +219,8 @@ sys.exit(int(os.environ.get('TEST_OBSERVER_RC', '0')))
                              ('scan', 'offchannel') for c in commands))
         self.assertEqual(json.loads((self.root / 'observer-calls').read_text()),
                          ['wlan1', '5200'])
+        self.assertEqual(json.loads((self.root / 'policy-calls').read_text()),
+                         ['wlan1', '--policy', 'clear'])
 
     def test_absent_falls_back_failed_present_omits(self):
         for code in (3, 1):

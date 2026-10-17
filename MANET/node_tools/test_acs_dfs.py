@@ -1,4 +1,4 @@
-"""DFS lease, authentication, radar ordering and closed-activation tests."""
+"""DFS lease, authentication, radar ordering and capability-gated activation tests."""
 from copy import deepcopy
 import base64
 import json
@@ -20,10 +20,19 @@ from test_acs_agreement import status
 NOW = 945
 
 
+def kernel_hold():
+    checked = int(runtime.boot_time() * 1000000)
+    return dict(schema=2, enabled=True, generation=7, epoch='d' * 32,
+                owner=True, fault=False, live=True, freq_mhz=5260,
+                center_mhz=5260, width_mhz=20, receiver_live=True,
+                revoked=False, observed_boottime_us=checked,
+                heartbeat_boottime_us=checked, heartbeat_max_age_us=1500000)
+
+
 def dfs_status(boot='a', now=NOW):
     """Create authenticated status for a node holding one DFS candidate."""
     result = status(boot, current={'5': 5200})
-    result.update(dfs_versions=[1], dfs_allowed=[5260], dfs_hold=dict(
+    result.update(dfs_versions=[1], dfs_capable=True, dfs_allowed=[5260], dfs_hold=dict(
         version=1, frequency=5260, width=20, center=5260, state='held',
         boot=boot * 32, epoch='d' * 32, generation=7, live=True,
         observed_at=now, lease_until=now + p.DFS_LEASE_SECONDS))
@@ -95,7 +104,7 @@ class DfsProtocolTests(unittest.TestCase):
         bad['approvals'] = {OWN: 'a' * 32, PEER: 'b' * 32}
         self.assertFalse(p.valid_commit(bad, plan))
 
-    def test_unanimous_vote_renews_leases_until_due_but_gate_stays_closed(self):
+    def test_unanimous_vote_renews_leases_until_due_and_activates(self):
         plan = dfs_plan()
         states, wire = {}, {}
         for mac in dfs_view():
@@ -114,9 +123,8 @@ class DfsProtocolTests(unittest.TestCase):
             _, _, due = p.advance(states[mac], mac, plan['activate_at'],
                                    dfs_view(plan['activate_at']), {})
             self.assertEqual(due, plan)
-        with self.assertRaisesRegex(p.AgreementError, 'handoff'):
-            p.require_dfs_activation(plan, dfs_view(plan['activate_at']),
-                                     plan['activate_at'])
+        p.require_dfs_activation(plan, dfs_view(plan['activate_at']),
+                                 plan['activate_at'])
 
     def test_lost_commit_cannot_be_recovered_from_cached_dfs_destination(self):
         plan = dfs_plan()
@@ -250,8 +258,7 @@ else:
         path = self.root / 'background_hold'
         self.assertIsNone(runtime.read_background_hold(
             path, 'a' * 32, 'd' * 32, NOW))
-        raw = dict(schema=1, experimental=True, enabled=True, generation=7,
-                   owner=True, fault=False, live=True, freq_mhz=5260)
+        raw = kernel_hold()
         for changes, expected in [({}, 'held'), ({'live': False}, 'cac'),
                                   ({'owner': False}, 'revoked'),
                                   ({'fault': True}, 'fault')]:
@@ -259,7 +266,7 @@ else:
             hold = runtime.read_background_hold(path, 'a' * 32, 'd' * 32, NOW)
             self.assertEqual(hold['state'], expected)
             self.assertEqual(hold['live'], expected == 'held')
-        for changes in ({'schema': 2}, {'live': 'true'},
+        for changes in ({'schema': 1}, {'live': 'true'},
                         {'generation': True}, {'freq_mhz': 5200}):
             path.write_text(json.dumps(dict(raw, **changes)))
             self.assertIsNone(runtime.read_background_hold(
@@ -270,7 +277,7 @@ else:
         with self.runner.channel_lock():
             self.radar()  # Event entry must not acquire the held ACS lock.
         commands = (self.root / 'commands').read_text().splitlines()
-        self.assertEqual(commands[0], 'ip link set dev wlan1 down')
+        self.assertEqual(commands[0], 'iw dev wlan1 switch freq 5200 HT20 beacons 3 block-tx')
         for type_id in (74, 75):
             envelope = json.loads((self.root / f'sent-{type_id}').read_text())
             payload = self.transport.open(type_id, envelope).payload
@@ -297,7 +304,7 @@ else:
             self.runner.process_dfs_aborts({}, NOW + 1)
         self.assertEqual(self.runner.state['dfs_cooldown_until'], until)
         self.assertEqual((self.root / 'commands').read_text(), commands)
-        self.assertIn('ip link set dev wlan1 up', commands)
+        self.assertIn('iw dev wlan1 switch freq 5200 HT20 beacons 3 block-tx', commands)
         self.radar()  # Local replay must also stop before radio commands.
         self.assertEqual((self.root / 'commands').read_text(), commands)
 
@@ -370,9 +377,7 @@ check_mesh_quorum
 
     def test_delayed_finished_cannot_restore_radar_generation(self):
         path = self.root / 'background_hold'
-        path.write_text(json.dumps(dict(schema=1, enabled=True, generation=7,
-                                       owner=True, fault=False, live=True,
-                                       freq_mhz=5260)))
+        path.write_text(json.dumps(kernel_hold()))
         with patch.dict(os.environ, MANET_DFS_HOLD_PATH=str(path)):
             hold = self.runner.dfs_hold('phy0', NOW)
             # The out-of-lock event also fences a stale live bit before the
@@ -405,8 +410,7 @@ check_mesh_quorum
                              return_value=list(records)), \
                 patch.object(self.runner, 'status',
                              return_value=dfs_status(now=at)) as local:
-            with self.assertRaisesRegex(ValueError, 'handoff'):
-                self.runner.check_dfs_activation(self.plan, records)
+            self.runner.check_dfs_activation(self.plan, records)
             local.return_value['dfs_hold']['generation'] += 1
             with self.assertRaisesRegex(ValueError, 'clearance changed'):
                 self.runner.check_dfs_activation(self.plan, records)
@@ -439,25 +443,23 @@ check_mesh_quorum
             self.assertEqual(self.runner.score(dfs_view(NOW + 540))[0],
                              {'5': 5200})
 
-    def test_receiver_reader_reset_and_counter_regression_change_epoch(self):
+    def test_receiver_epoch_belongs_to_kernel_across_reader_restart(self):
         path = self.root / 'background_hold'
-        raw = dict(schema=1, enabled=True, generation=7, owner=True,
-                   fault=False, live=True, freq_mhz=5260)
+        raw = kernel_hold()
         path.write_text(json.dumps(raw))
         with patch.dict(os.environ, MANET_DFS_HOLD_PATH=str(path)):
             first = self.runner.dfs_hold('phy0', NOW)
             raw['generation'] = 1
+            raw['epoch'] = 'e' * 32
             path.write_text(json.dumps(raw))
             second = self.runner.dfs_hold('phy0', NOW + 1)
             self.assertNotEqual(first['epoch'], second['epoch'])
             restarted = runtime.Runtime().dfs_hold('phy0', NOW + 2)
-            self.assertNotEqual(second['epoch'], restarted['epoch'])
+            self.assertEqual(second['epoch'], restarted['epoch'])
 
     def test_local_hold_snapshot_expires_before_telemetry_publication(self):
         path = self.root / 'background_hold'
-        path.write_text(json.dumps(dict(schema=1, enabled=True, generation=7,
-                                       owner=True, fault=False, live=True,
-                                       freq_mhz=5260)))
+        path.write_text(json.dumps(kernel_hold()))
         with patch.dict(os.environ, MANET_DFS_HOLD_PATH=str(path)):
             local = self.runner.status(NOW)
         args = SimpleNamespace(
@@ -507,7 +509,7 @@ check_mesh_quorum
                 patch.object(self.runner, 'members', return_value=list(view)), \
                 patch.object(self.runner, 'status', return_value=local), \
                 patch.object(self.runner, 'score',
-                             return_value=({'5': 5260}, False)), \
+                             side_effect=lambda *a, **k: ({'5': 5200 if k.get('fallback') else 5260}, False)), \
                 patch.object(runtime.time, 'time', return_value=NOW):
             self.runner.tick(NOW)
         envelope = json.loads((self.root / 'sent-74').read_text())
@@ -543,7 +545,7 @@ check_mesh_quorum
                         patch.object(self.runner, 'status',
                                      return_value=local), \
                         patch.object(self.runner, 'score',
-                                     return_value=({'5': 5260}, False)), \
+                                     side_effect=lambda *a, **k: ({'5': 5200 if k.get('fallback') else 5260}, False)), \
                         patch.object(runtime.secrets, 'token_hex',
                                      return_value='e' * 32), \
                         patch.object(runtime.time, 'time', return_value=NOW):

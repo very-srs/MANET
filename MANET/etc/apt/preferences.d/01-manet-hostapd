@@ -1,0 +1,3 @@
+Package: hostapd
+Pin: version 2:2.10-24+manet*
+Pin-Priority: 1001

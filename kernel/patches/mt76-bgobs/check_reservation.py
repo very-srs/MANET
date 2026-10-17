@@ -45,6 +45,7 @@ typedef uint32_t u32;
 #define dev_err(...) ((void)0)
 #define mutex_lock(...) ((void)0)
 #define mutex_unlock(...) ((void)0)
+#define MT_BAND1 1
 #define MT_EE_WIFI_CONF 0x190
 #define MT_EE_WIFI_CONF0_TX_PATH GENMASK(2,0)
 #define MT_EE_WIFI_CONF0_RX_PATH GENMASK(5,3)
@@ -65,6 +66,7 @@ struct mt76_phy {
 };
 struct mt76_dev { struct { u8 *data; } eeprom; unsigned chip; };
 struct mt7915_dev {
+    unsigned int rx_probe_count;
     struct mt76_dev mt76;
     struct mt76_phy mphy;
     bool dbdc_support, flash_mode, background_rx_reserved;
