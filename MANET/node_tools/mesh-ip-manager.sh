@@ -638,9 +638,23 @@ eud_ready() {
     fi
 }
 
+# True when dnsmasq has a UDP DNS socket on $1, or when $1 is empty or the
+# socket table cannot be read (a failed probe never forces a restart).
+dnsmasq_serves() {
+    local address="${1:-}" sockets
+    [ -n "$address" ] || return 0
+    sockets=$(ss -Hlnu 'sport = :53' 2>/dev/null) || return 0
+    printf '%s\n' "$sockets" | awk -v local="$address:53" '
+        $4 == local { found = 1 } END { exit !found }'
+}
+
 # Reuse the validated pool and leases after a temporary isolation failure.
 # Called only after this pass has checked the node's allocation/configuration.
+# $1 is the EUD gateway clients use for DNS. bind-dynamic does not always
+# pick up that address when it is added after dnsmasq starts at boot, so
+# restart dnsmasq when it is running without a DNS socket there.
 ensure_dnsmasq_running() {
+    local gateway="${1:-}"
     if ! eud_ready; then
         if systemctl is-active --quiet dnsmasq.service; then
             systemctl stop dnsmasq.service || return 1
@@ -654,6 +668,9 @@ ensure_dnsmasq_running() {
             return 1
         fi
         log "dnsmasq resumed with existing pool and leases"
+    elif ! dnsmasq_serves "$gateway"; then
+        systemctl restart dnsmasq.service || return 1
+        log "dnsmasq restarted: no DNS socket on EUD gateway $gateway"
     fi
 }
 
@@ -785,7 +802,7 @@ EOF
     # deletion. DNS server changes arrive through resolv-file automatically.
     if cmp -s "$temporary" /etc/dnsmasq.d/mesh-eud.conf; then
         rm -f "$temporary"
-        ensure_dnsmasq_running || return 1
+        ensure_dnsmasq_running "$br0_secondary" || return 1
         update_avahi_host "$br0_secondary" "$dhcp_start"
         return $?
     fi
@@ -1057,7 +1074,7 @@ case $IPV4_STATE in
                     configure_dnsmasq "$BR0_PRIMARY" "$BR0_SECONDARY" "$DHCP_START" "$DHCP_END" || exit 1
                 else
                     update_avahi_host "$BR0_SECONDARY" "$DHCP_START" || exit 1
-                    ensure_dnsmasq_running || exit 1
+                    ensure_dnsmasq_running "$BR0_SECONDARY" || exit 1
                 fi
 
                 # The web UI is restricted to whoever holds a lease from this

@@ -142,7 +142,8 @@ if name == 'systemctl' and os.environ.get('TEST_ROOT'):
         source += (TOOLS / 'manet-common.sh').read_text()
         function = '\n'.join(re.search(r'^' + name + r'\(\) \{\n.*?^\}', source, re.M | re.S)[0]
                              for name in ('ip_to_int', 'int_to_ip', 'valid_eud_gateway',
-                                          'update_avahi_host', 'configure_dnsmasq', 'eud_ready', 'ensure_dnsmasq_running'))
+                                          'update_avahi_host', 'configure_dnsmasq', 'eud_ready', 'dnsmasq_serves',
+                                          'ensure_dnsmasq_running'))
         start = source.index('                # Only reconfigure dnsmasq if the config has changed')
         end = source.index('                # The web UI is restricted', start)
         check = source[start:end]
@@ -152,6 +153,7 @@ if name == 'systemctl' and os.environ.get('TEST_ROOT'):
                 body = '''
 log() { :; }
 python3() { return 0; }
+ss() { echo "UNCONN 0 0 10.30.0.7:53 0.0.0.0:*"; }
 MUMBLE_VIP="$TEST_MUMBLE"; MTX_VIP="$TEST_MTX"
 BR0_PRIMARY=10.30.0.6; BR0_SECONDARY=10.30.0.7
 DHCP_START=10.30.0.8; DHCP_END=10.30.0.15
