@@ -430,7 +430,11 @@ if sys.argv[1] == 'is-active' and sys.argv[-1] == 'mesh-config-apply.service':
         configs = self.root / 'etc/wpa_supplicant'
         configs.mkdir()
         live = configs / 'wpa_supplicant-wlan0.conf'
-        live.write_text('network={\n    mode=5\n}\n')
+        lobby = configs / 'wpa_supplicant-wlan0-lobby.conf'
+        # An already-updated inactivity setting must not skip width migration.
+        for path in (live, lobby):
+            path.write_text('mesh_max_inactivity=10\nnetwork={\n'
+                            '    mode=5\n    frequency=5805\n}\n')
         self.make_archive()
         original = update.run_command
 
@@ -440,6 +444,9 @@ if sys.argv[1] == 'is-active' and sys.argv[-1] == 'mesh-config-apply.service':
                                  b'new mesh binary')
                 self.assertTrue(live.read_text().startswith(
                     'mesh_max_inactivity=10\n'))
+                for path in (live, lobby):
+                    self.assertIn('    max_oper_chwidth=0\n', path.read_text())
+                    self.assertIn('    disable_ht40=1\n', path.read_text())
                 self.assertEqual(self.updater.marker.read_text(),
                                  self.old_version)
             return original(args, **kwargs)

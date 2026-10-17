@@ -86,7 +86,7 @@ Read [radio controls](guide/content/radios.md) and [hardware](guide/content/hard
 | [manet_radio.py](../MANET/node_tools/manet_radio.py) | Query radios and apply local actions authorized by staged control. |
 | [manet_static_channels.py](../MANET/node_tools/manet_static_channels.py) | Validate and persist band-based static channel plans. |
 | [manet_supplicant.py](../MANET/node_tools/manet_supplicant.py) | Select and restart configured conventional/HaLow supplicants. |
-| [manet-mesh-supplicant.py](../MANET/node_tools/manet-mesh-supplicant.py) | Prepare mesh inactivity policy and launch the conventional MANET supplicant. |
+| [manet-mesh-supplicant.py](../MANET/node_tools/manet-mesh-supplicant.py) | Enforce 20 MHz Wi-Fi mesh width, prepare inactivity policy and launch the MANET supplicant. |
 | [prepare-standard-mesh-iface.sh](../MANET/node_tools/prepare-standard-mesh-iface.sh) | Prepare conventional mesh interface mode before supplicant start. |
 | [batman-if-setup.sh](../MANET/node_tools/batman-if-setup.sh) | Create/configure BATMAN and attach valid mesh interfaces. |
 | [batman-enslave-watch.sh](../MANET/node_tools/batman-enslave-watch.sh) | Repair interfaces that fall out of BATMAN membership. |

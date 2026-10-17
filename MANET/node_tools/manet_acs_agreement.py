@@ -20,7 +20,7 @@ ACTIVATION_LEAD = 30
 COMMIT_CUTOFF = 5
 APPLY_GRACE = 5
 MAX_MEMBERS = 64
-# Candidate frequencies are MHz, keyed by conventional Wi-Fi band.
+# Candidates are 20 MHz primary frequencies, keyed by Wi-Fi band.
 CHANNELS = {'2.4': {2437, 2462}, '5': {5200, 5220, 5240, 5745, 5765, 5785, 5805, 5825}}
 # DFS v1 describes only 20 MHz primaries. Actual PHY support is also required.
 DFS_CHANNELS = set(range(5260, 5340, 20)) | set(range(5500, 5740, 20))

@@ -28,6 +28,8 @@ class WifiChannelApplyTests(unittest.TestCase):
         self.paths = [self.root / f'wpa_supplicant-wlan0{suffix}.conf' for suffix in ('', '-lobby')]
         for path in self.paths:
             path.write_text('mesh_max_inactivity=10\nnetwork={\n'
+                            '    mode=5\n    max_oper_chwidth=0\n'
+                            '    disable_ht40=1\n'
                             '    frequency=5180\n    ssid="test"\n}\n')
             path.chmod(0o600)
         env = patch.dict(os.environ, MANET_MESH_CONF=str(self.conf), MANET_STATIC_CHANNELS=str(self.plan),
@@ -49,6 +51,8 @@ class WifiChannelApplyTests(unittest.TestCase):
         self.assertEqual(json.loads(self.plan.read_text()), {'2.4': 2412, '5': 5745})
         for path in self.paths:
             self.assertIn('    frequency=5745\n', path.read_text())
+            self.assertIn('    max_oper_chwidth=0\n', path.read_text())
+            self.assertIn('    disable_ht40=1\n', path.read_text())
             self.assertTrue(path.read_text().startswith(
                 'mesh_max_inactivity=10\n'))
             self.assertEqual(path.stat().st_mode & 0o777, 0o600)

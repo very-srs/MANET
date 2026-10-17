@@ -654,6 +654,12 @@ through a MANET release instead of overriding the policy.
 Kernel replacement covers provisioning, offline bench maintenance and CM4
 field trials. A matched CM4 tools payload starts a one-shot tryboot trial by
 default, using a profile derived from that node's boot files and hardware.
+Older CM4 images with `auto_initramfs=1` keep their original boot selector and
+initramfs for fallback. The trial disables automatic initramfs loading only
+in its candidate selector, then commits that setting with the new slot after
+health confirmation. Custom initramfs and roots needing early userspace are
+refused with an explanation. A new tools wrapper can deliver this fix to
+v0.574 installations without reflashing or manually changing boot settings.
 The firmware kernel watchdog, bounded userspace handoff, PID 1 watchdog and
 confirmation guard provide the benched fallback mechanism. Generic field
 health checks need an on-node acceptance run before release. Operators can

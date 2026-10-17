@@ -184,9 +184,13 @@ It waits for the same committed DFS plan and active transferred main token on
 all three nodes, then writes **1** to the detecting PHY's `mt76/radar_trigger`.
 Value **2** triggers the background detector and is not this test. Per-node
 JSONL records preparation, CAC/hold state, actual frequencies and nl80211
-events. `summary.json` reports trigger-to-main-latch and trigger-to-block-TX
+events. State and debugfs hold reads run once per five seconds after each
+sample, avoiding continuous contention on wiphy/device locks. The nl80211
+event stream remains continuous. `summary.json` records this sample interval
+and reports trigger-to-main-latch and trigger-to-block-TX
 ACK on the detecting node's boot clock, plus controller-observed fallback
-latencies for every node. The latter include polling and SSH latency. The
+latencies for every node. The latter include the five-second polling interval
+and SSH latency; kernel latch and CSA times still come from event records. The
 script times out if the real scoring never selects DFS. A separate monitor
 or traffic capture is needed for over-the-air TX cessation and loss.
 

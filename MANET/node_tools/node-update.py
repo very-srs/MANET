@@ -666,10 +666,11 @@ class Updater:
         self.quiesce_config()
         self.preserve_config()
         self.install_payload(directory, members)
+        self.retire_bootstrap(directory, members)
         self.migrate_config()
         self.protect_kernel(directory)
         mesh_setup = self.destination('usr/local/bin/manet-mesh-supplicant.py')
-        # Serialize the one-time rewrite with ACS and AP role transitions.
+        # Migrate live/lobby width and inactivity under the ACS/AP lock.
         output = run_command([
             'flock', '--exclusive', '--timeout', '10',
             str(self.root / 'run/channel-election.lock'),
@@ -711,7 +712,7 @@ class Updater:
         run_command(["systemctl", "enable", "manet-wifi-uplink.service"])
         run_command(["systemctl", "start", "manet-wifi-uplink.service"])
         run_command(["systemctl", "try-restart", "manet-wifi-client@*.service"])
-        # Only running Wi-Fi mesh instances adopt the new binary now.
+        # Running Wi-Fi mesh instances adopt the binary and 20 MHz width now.
         # HaLow candidates require separate bench approval and activation.
         run_command(["systemctl", "try-restart", "wpa_supplicant@*.service"])
         for service in ("mesh-status.service", "node-manager.service"):
@@ -735,6 +736,47 @@ class Updater:
     def kernel(self):
         """Use the same durable-file and command primitives as tools recovery."""
         return KernelTrial(self, run_command, atomic_file, sync_directory)
+
+    def retire_bootstrap(self, directory, members):
+        """A direct payload supersedes the legacy wrapper under the update lock.
+
+        Pending recovery already owns a durable copy of the full payload.
+        Keep a newly installed wrapper, but do not let an old timer or archive
+        survive a direct update or get re-enabled by firmware setup.
+        """
+        prefix = 'usr/local/share/manet/bootstrap/'
+        if prefix + 'manifest.json' in members:
+            return
+        descriptor = self.destination(prefix + 'manifest.json')
+        try:
+            data = json.loads(descriptor.read_text())
+        except (OSError, ValueError):
+            data = None
+        info = self.kernel().read() if KERNEL_MANIFEST in members else None
+        if (isinstance(data, dict) and info and info['phase'] == 'committed'
+                and data.get('version') == version((directory / 'etc/manet_version.txt').read_text())
+                and data.get('kernel_manifest_sha256') == info['manifest_sha256']):
+            # This is the current wrapper's inner install. Its helper removes
+            # the wrapper only after the tools markers have also committed.
+            return
+        names = [prefix + name for name in ('manifest.json', 'cm4-tools.tar.gz',
+                                            'cm4-tools.tar.gz.sha256')]
+        names += ['etc/systemd/system/' + name for name in (
+            'manet-release-bootstrap.service', 'manet-release-bootstrap.timer',
+            'timers.target.wants/manet-release-bootstrap.timer')]
+        paths = [self.destination(name) for name in names]
+        if not any(p.exists() or p.is_symlink() for p in paths):
+            return
+        # Do not stop the service: it may be the process doing this install.
+        timer = self.destination('etc/systemd/system/manet-release-bootstrap.timer')
+        if timer.exists():
+            run_command(['systemctl', 'disable', '--now', timer.name])
+        for path in paths:
+            path.unlink(missing_ok=True)
+        for directory in {p.parent for p in paths}:
+            if directory.is_dir():
+                sync_directory(directory)
+        self.log('Retired the legacy kernel bootstrap; this update owns recovery')
 
     def protect_kernel(self, directory):
         """Protect boot files before package setup and on installation retries."""

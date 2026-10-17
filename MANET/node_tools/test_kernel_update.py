@@ -69,6 +69,8 @@ class KernelUpdateTests(unittest.TestCase):
         args = [str(arg) for arg in args]
         self.calls.append(args)
         if args[0] == 'findmnt':
+            if 'SOURCE,FSTYPE,MAJ:MIN' in args:
+                return b'/dev/mmcblk0p2 ext4 179:2\n'
             return b'vfat TEST-FAT\n'
         if args[0] == 'vcgencmd':
             return b'BOOT_WATCHDOG_TIMEOUT=180\n'
@@ -418,7 +420,7 @@ class KernelUpdateTests(unittest.TestCase):
 
     def test_unsupported_boot_settings_are_not_silently_removed(self):
         trial = self.updater.kernel()
-        for directive in ('include usercfg.txt', 'auto_initramfs=1',
+        for directive in ('include usercfg.txt', 'auto_initramfs=2',
                           'kernel=/other.img', 'os_prefix=other/', 'initramfs initrd followkernel'):
             with self.subTest(directive=directive), self.assertRaises(kernel.KernelError):
                 trial.config(self.config + directive + '\n', 'slot', self.files)

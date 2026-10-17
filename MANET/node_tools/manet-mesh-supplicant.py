@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prepare mesh inactivity settings and start the MANET Wi-Fi supplicant."""
+"""Prepare mesh width/inactivity and start the MANET Wi-Fi supplicant."""
 
 import argparse
 import os
@@ -18,18 +18,44 @@ DEBIAN_BINARY = Path('/usr/sbin/wpa_supplicant')
 
 
 def prepare_config(path):
-    """Add a global default to a mesh file, preserving explicit tuning."""
+    """Enforce 20 MHz Wi-Fi mesh blocks and default global inactivity."""
     content = path.read_text()
-    if not re.search(r'^\s*mode=5\s*(?:#.*)?$', content, re.M):
+    mode = r'^[ \t]*mode[ \t]*=[ \t]*5[ \t]*(?:#[^\n]*)?$'
+    if not re.search(mode, content, re.M):
         return False
+    updated = content
+    if not path.name.endswith('-s1g.conf'):
+        def mesh_width(match):
+            opening, body, closing = match.groups()
+            if not re.search(mode, body, re.M):
+                return match[0]
+            # ht40=0 alone still permits HT40 on the benched supplicant.
+            # Keep HE/VHT enabled, limiting only the operating channel width.
+            body = re.sub(r'^[ \t]*ht40[ \t]*=[^\n]*\n', '', body,
+                          flags=re.M)
+            for key, value in (('max_oper_chwidth', 0), ('disable_ht40', 1)):
+                body, count = re.subn(
+                    rf'^[ \t]*{key}[ \t]*=[^\n]*$',
+                    f'    {key}={value}', body, flags=re.M)
+                if not count:
+                    body += f'    {key}={value}\n'
+            return opening + body + closing
+        # Closing braces must occupy their own line, so braces in SSIDs or
+        # passwords cannot terminate a block. Client blocks remain untouched.
+        updated = re.sub(
+            r'(^[ \t]*network[ \t]*=[ \t]*\{[ \t]*(?:#[^\n]*)?\n)'
+            r'(.*?)(^[ \t]*\}[ \t]*(?:#[^\n]*)?$)',
+            mesh_width, updated, flags=re.M | re.S)
     # mesh_max_inactivity is global, not a network-block field.
-    global_part = re.split(r'^\s*network\s*=\s*\{', content, maxsplit=1,
+    global_part = re.split(r'^\s*network\s*=\s*\{', updated, maxsplit=1,
                            flags=re.M)[0]
-    if re.search(r'^\s*mesh_max_inactivity\s*=', global_part, re.M):
+    if not re.search(r'^\s*mesh_max_inactivity\s*=', global_part, re.M):
+        seconds = (HALOW_INACTIVITY if path.name.endswith('-s1g.conf')
+                   else WIFI_INACTIVITY)
+        updated = f'mesh_max_inactivity={seconds}\n' + updated
+    if updated == content:
         return False
-    seconds = (HALOW_INACTIVITY if path.name.endswith('-s1g.conf')
-               else WIFI_INACTIVITY)
-    atomic_write(path, f'mesh_max_inactivity={seconds}\n' + content)
+    atomic_write(path, updated)
     return True
 
 
@@ -39,7 +65,7 @@ def prepare_all(directory=WPA_DIR):
         if path.name.endswith('-uplink.conf'):
             continue
         if prepare_config(path):
-            print(f'manet-mesh-supplicant: set inactivity default in {path}',
+            print(f'manet-mesh-supplicant: prepared mesh settings in {path}',
                   flush=True)
 
 

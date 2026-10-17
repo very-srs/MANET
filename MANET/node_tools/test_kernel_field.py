@@ -50,6 +50,8 @@ class FieldTrialTests(unittest.TestCase):
         strings = [str(arg) for arg in args]
         if strings[0] == 'findmnt' and strings[-1] == str(self.root):
             self.calls.append(strings)
+            if 'SOURCE,FSTYPE,MAJ:MIN' in strings:
+                return b'/dev/mmcblk0p2 ext4 179:2\n'
             return b'ext4 rw,relatime\n'
         if strings[:2] == ['systemctl', 'is-active']:
             self.calls.append(strings)
@@ -97,7 +99,7 @@ class FieldTrialTests(unittest.TestCase):
         (self.boot / 'config.txt').write_text(config)
         (self.boot / 'cmdline.txt').write_text(args)
         def local_mount(args, **kwargs):
-            if args[0] == 'findmnt':
+            if args[0] == 'findmnt' and str(args[-1]) == str(self.boot):
                 return b'vfat OTHER-FAT\n'
             return self.run_fake(args, **kwargs)
         with patch.object(fixtures.update, 'run_command', side_effect=local_mount):
@@ -238,7 +240,7 @@ class FieldTrialTests(unittest.TestCase):
             self.updater.validate(self.package, self.checksum, self.package.name, '0.550')
 
     def test_boot_config_support_is_unchanged_for_derived_profiles(self):
-        for directive in ('include extra.txt', 'auto_initramfs=1', 'os_prefix=custom/'):
+        for directive in ('include extra.txt', 'auto_initramfs=2', 'os_prefix=custom/'):
             with self.subTest(directive=directive):
                 (self.boot / 'config.txt').write_text(self.config + directive + '\n')
                 with self.assertRaisesRegex(kernel.KernelError, 'Unsupported'):

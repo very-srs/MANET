@@ -675,6 +675,8 @@ perform_scan() {
             observer_rc=0
             # The helper bounds each window; the outer deadline covers a
             # driver stalled in a debugfs read. Missing ABI retains scans.
+            # This list excludes DFS active scans. The helper adds passive
+            # DFS candidates from the live PHY when the paired ABI is present.
             observer_report=$(timeout --foreground --kill-after=2s 90s \
                 python3 "$helper" "$iface" $observer_freqs) || observer_rc=$?
             if [ "$observer_rc" != 3 ]; then

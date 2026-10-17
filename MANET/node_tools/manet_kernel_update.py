@@ -222,16 +222,22 @@ class KernelTrial:
 
     def config(self, base, slot, files):
         """Restrict the supported config dialect; preserve hardware settings."""
+        retained = []
         for line in base.splitlines():
+            original = line
             line = line.split('#', 1)[0].strip()
             if not line or line.startswith('['):
+                retained.append(original)
                 continue
             key, _, value = line.partition('=')
             key, value = key.strip(), value.strip()
-            if (line.startswith(('include ', 'initramfs '))
-                    or key in ('os_prefix', 'ramfsfile', 'ramfsaddr', 'boot_ramdisk',
+            if line.split()[0] == 'initramfs' or key in ('initramfs', 'ramfsfile', 'ramfsaddr'):
+                raise KernelError('Cannot trial without an initramfs: config.txt names a custom initramfs ('
+                                  + line + ')')
+            if (line.split()[0] == 'include'
+                    or key in ('os_prefix', 'boot_ramdisk',
                                'start_file', 'fixup_file', 'armstub')
-                    or (key == 'auto_initramfs' and value != '0')
+                    or (key == 'auto_initramfs' and value not in ('0', '1'))
                     or (key == 'kernel' and value != 'kernel8.img')
                     or (key == 'cmdline' and value != 'cmdline.txt')
                     or (key == 'overlay_prefix' and value != 'overlays/')
@@ -243,9 +249,100 @@ class KernelTrial:
                     overlay = overlay.removesuffix('.dtbo')
                     if f'boot/overlays/{overlay}.dtbo' not in files:
                         raise KernelError('Kernel payload lacks configured overlay: ' + overlay)
-        return (f'[all]\nos_prefix=manet/{slot}/\n' + base.rstrip() +
+            # Normalize only the candidate. The original selector, including
+            # every conditional auto-initramfs setting, remains the fallback.
+            if key != 'auto_initramfs':
+                retained.append(original)
+        return (f'[all]\nos_prefix=manet/{slot}/\n' + '\n'.join(retained).rstrip() +
                 '\n[all]\nkernel=kernel8.img\ndevice_tree=bcm2711-rpi-cm4.dtb\n'
                 'cmdline=cmdline.txt\nauto_initramfs=0\nkernel_watchdog_timeout=180\n')
+
+    def initramfs_preflight(self, base, args):
+        """Reject evidence of early userspace needed to mount this node's root.
+
+        Loading a stock initramfs does not itself establish a dependency on
+        it. Keep the original file and selector for the firmware fallback.
+        """
+        previous = []
+        section = '[all]'
+        for line in base.splitlines():
+            line = line.split('#', 1)[0].strip()
+            if line.startswith('['):
+                section = line
+            key, _, value = line.partition('=')
+            if key.strip() == 'auto_initramfs':
+                previous.append(dict(section=section, value=value.strip()))
+
+        def refuse(reason):
+            raise KernelError('Cannot trial without an initramfs: ' + reason)
+
+        roots = []
+        for label, cmdline in (('saved command line', args),
+                               ('running command line', (self.root / 'proc/cmdline').read_text())):
+            tokens = cmdline.split()
+            for token in tokens:
+                if token.startswith(('cryptdevice=', 'cryptopts=', 'rd.luks.', 'luks.')):
+                    refuse(label + ' requests encrypted root setup')
+                if token.startswith(('rd.lvm.', 'lvm.')):
+                    refuse(label + ' requests LVM root setup')
+                if token.startswith(('nfsroot=', 'nfsaddrs=', 'netroot=')):
+                    refuse(label + ' requests a network root')
+                if token.startswith(('rd.md.', 'md=')):
+                    refuse(label + ' requests RAID root setup')
+                if token.startswith(('dm-mod.create=', 'dm=')):
+                    refuse(label + ' requests encrypted or mapped root storage')
+                if token.startswith('rootfstype=') and any(
+                        fs in ('nfs', 'nfs4', 'cifs', 'overlay', 'tmpfs')
+                        for fs in token.split('=', 1)[1].split(',')):
+                    refuse(label + ' requests a root filesystem that needs early setup')
+            values = [t.split('=', 1)[1] for t in tokens if t.startswith('root=')]
+            root = values[-1] if values else ''
+            if root.startswith(('/dev/mapper/', '/dev/dm-')):
+                refuse(label + ' uses encrypted or mapped root storage (' + root + ')')
+            if root.startswith('/dev/md'):
+                refuse(label + ' uses RAID root storage (' + root + ')')
+            # Linux early_lookup_bdev also accepts partition labels and
+            # numeric block devices without any userspace name lookup.
+            numeric = re.fullmatch(r'(?:[0-9]+:[0-9]+|[0-9a-fA-F]+)', root)
+            if root in ('nfs', 'cifs', '/dev/nfs', '/dev/cifs') or (':' in root and not numeric):
+                refuse(label + ' uses a network root (' + root + ')')
+            if not (numeric or re.fullmatch(r'PARTLABEL=[^/\s]+', root)
+                    or re.fullmatch(r'PARTUUID=[A-Za-z0-9-]+(?:/PARTNROFF=-?\d+)?', root)
+                    or (re.fullmatch(r'/dev/[A-Za-z][A-Za-z0-9._-]*', root)
+                        and not root.startswith(('/dev/ram', '/dev/loop', '/dev/root')))):
+                refuse(label + ' has a root selector the kernel cannot mount directly ('
+                       + (root or 'missing root=') + ')')
+            roots.append(root)
+
+        mount = self.run(['findmnt', '--noheadings', '--raw', '--output',
+                          'SOURCE,FSTYPE,MAJ:MIN', '--mountpoint', self.root], timeout=10).decode().split()
+        if len(mount) != 3 or not re.fullmatch(r'\d+:\d+', mount[2]):
+            raise KernelError('Cannot inspect the mounted root storage for the kernel trial')
+        source, filesystem, device_number = mount
+        if source.startswith(('/dev/mapper/', '/dev/dm-')):
+            refuse('the mounted root uses encrypted or mapped storage (' + source + ')')
+        if source.startswith('/dev/md'):
+            refuse('the mounted root uses RAID storage (' + source + ')')
+        if filesystem in ('nfs', 'nfs4', 'cifs', 'overlay', 'tmpfs'):
+            refuse('the mounted root filesystem is ' + filesystem)
+        modules = self.root / 'proc/modules'
+        loaded = ({line.split()[0] for line in modules.read_text().splitlines() if line.split()}
+                  if modules.exists() else set())
+        if filesystem.replace('-', '_') in loaded:
+            refuse('the root filesystem ' + filesystem + ' is a loadable module')
+        device = (self.root / 'sys/dev/block' / device_number).resolve()
+        sysfs = self.root / 'sys'
+        if device.is_relative_to(sysfs):
+            for parent in (device, *device.parents):
+                if parent == sysfs:
+                    break
+                if (parent / 'dm').exists() or (parent / 'md').exists():
+                    refuse('the mounted root uses mapped or RAID storage')
+                module = parent / 'driver/module'
+                if module.is_symlink():
+                    refuse('the root storage driver ' + module.resolve().name + ' is a loadable module')
+        return dict(previous_auto_initramfs=previous, saved_root=roots[0], running_root=roots[1],
+                    source=source, filesystem=filesystem, device=device_number)
 
     def preflight(self, directory):
         manifest = json.loads((directory / MANIFEST).read_text())
@@ -270,6 +367,7 @@ class KernelTrial:
                 arg.startswith(('manet.kernel_trial=', 'firmware_class.path=')) for arg in args.split()):
             raise KernelError('Unsupported kernel command line')
         self.config(base, 'candidate', manifest['files'])
+        self.initramfs_preflight(base, args)
         self.watchdogs()
         sizes = manifest['files']
         self.u.space([(self.boot, sum(v['size'] + 4096 for k, v in sizes.items() if k.startswith('boot/'))),
@@ -478,6 +576,7 @@ class KernelTrial:
                         base_config=base, base_cmdline=args, origin_boot=self.boot_id(),
                         old_release=self.release(), profile=profile)
             info['trial_config'] = self.config(base, slot, manifest['files'])
+            info['initramfs'] = self.initramfs_preflight(info['old_config'], args)
             self.save(info)
         # Only this journal owns these paths; retries never touch running modules.
         if (self.boot / 'config.txt').read_text() != info['old_config']:
@@ -515,6 +614,7 @@ class KernelTrial:
         target = self.u.destination('boot/firmware/manet/' + info['slot'] + '/cmdline.txt')
         self.write(target, data=args.encode())
         # Recheck immediately before arming, including a resumed staging run.
+        self.initramfs_preflight(info['old_config'], info['base_cmdline'])
         info['watchdogs'] = self.watchdogs()
         self.write(self.boot / 'tryboot.txt', data=info['trial_config'].encode())
         info['phase'] = 'attempted'
@@ -594,6 +694,7 @@ class KernelTrial:
         confirmed = dict(config_sha256=hashlib.sha256(info['trial_config'].encode()).hexdigest(),
                          base_config=info['base_config'], base_cmdline=info['base_cmdline'],
                          release=info['release'], slot=info['slot'],
+                         initramfs=info.get('initramfs'),
                          watchdogs=info.get('watchdogs'))
         self.atomic(directory / 'confirmed.json', data=json.dumps(confirmed).encode(), mode=0o600)
         (self.boot / 'tryboot.txt').unlink(missing_ok=True)

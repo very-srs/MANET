@@ -195,9 +195,10 @@ if '--policy' in sys.argv:
     sys.exit(0)
 with (root / 'observer-calls').open('a') as stream:
     stream.write(json.dumps(sys.argv[1:]) + '\\n')
-print(json.dumps({'results': [dict(channel=5200, busy_pct=20,
+results = [dict(channel=int(os.environ.get('TEST_OBSERVER_FREQ', '5200')), busy_pct=20,
     bss_count=0, _observer=True, _survey_iface=sys.argv[1],
-    _survey_boot=10000)]}))
+    _survey_boot=10000)]
+print(json.dumps({'results': [] if os.environ.get('TEST_OBSERVER_EMPTY') else results}))
 sys.exit(int(os.environ.get('TEST_OBSERVER_RC', '0')))
 ''')
         self.env['MANET_BGOBS_HELPER'] = str(helper)
@@ -235,6 +236,24 @@ sys.exit(int(os.environ.get('TEST_OBSERVER_RC', '0')))
                     self.assertFalse(any(r['channel'] == 5200
                                          for r in reports[0]['results']))
 
+    def test_passive_dfs_result_is_published_without_a_main_radio_scan(self):
+        self.env['TEST_OBSERVER_FREQ'] = '5260'
+        reports, commands = self.collect([self.row(0)], peer=True,
+                                        peer_channel=5220)
+        candidate = next(r for r in reports[0]['results'] if r['channel'] == 5260)
+        self.assertEqual(candidate['busy_pct'], 20)
+        self.assertTrue(candidate['_observer'])
+        self.assertFalse(any(c[1] == 'wlan1' and c[2] in
+                             ('scan', 'offchannel') for c in commands))
+
+    def test_deferred_observer_omits_candidates_without_fallback_scan(self):
+        self.env['TEST_OBSERVER_EMPTY'] = '1'
+        reports, commands = self.collect([self.row(0)], peer=True,
+                                        peer_channel=5220)
+        self.assertFalse(any(r.get('_observer') for r in reports[0]['results']))
+        self.assertFalse(any(c[1] == 'wlan1' and c[2] in
+                             ('scan', 'offchannel') for c in commands))
+
     def test_energy_only_roundtrip_retains_absent_noise(self):
         """Energy-only candidates cannot acquire a false zero dBm penalty."""
         import base64
@@ -242,7 +261,8 @@ sys.exit(int(os.environ.get('TEST_OBSERVER_RC', '0')))
         import subprocess
         import sys
         from test_acs import TOOLS
-        results = [dict(channel=5200, busy_pct=20, bss_count=0)]
+        results = [dict(channel=5200, busy_pct=20, bss_count=0),
+                   dict(channel=5260, busy_pct=12, bss_count=0)]
         encoded = subprocess.check_output([
             sys.executable, str(TOOLS / 'encoder.py'), 'telemetry',
             '--timestamp', '1000', '--mesh-config', '/dev/null',

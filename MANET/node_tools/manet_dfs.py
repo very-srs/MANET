@@ -13,8 +13,10 @@ from manet_rx_policy import cm4_enabled
 def dfs_frequencies(text):
     """Use live PHY flags, including NOP, instead of a regulatory whitelist."""
     found = []
-    for block in re.split(r'(?=\* \d+ MHz)', text):
-        match = re.match(r'\* (\d+) MHz', block)
+    # iw phy info uses decimal MHz; iw phy channels uses integers. Split
+    # every channel so a neighbor's disabled/NOP state cannot leak into it.
+    for block in re.split(r'(?=\* \d+(?:\.\d+)? MHz)', text):
+        match = re.match(r'\* (\d+)(?:\.0+)? MHz', block)
         if (match and int(match[1]) in DFS_CHANNELS and
                 'radar detection' in block.lower() and
                 'disabled' not in block.lower() and

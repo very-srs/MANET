@@ -132,8 +132,11 @@ by every builder through `lib-supplicant.sh`. Other prebuilt binaries remain
 absent from the current tools payload. HaLow candidate names are never staged.
 `node-update.sh` verifies
 and stages the archive, installs it, reloads systemd, and restarts mesh-status and
-node-manager. It also prepares mesh inactivity settings and restarts active
-Wi-Fi mesh instances. Other newly enabled units become active at the next boot.
+node-manager. It also prepares mesh inactivity settings, enforces 20 MHz in
+both live and lobby Wi-Fi mesh configs, and restarts active Wi-Fi mesh
+instances. This migrates existing radios without reflashing. HaLow widths
+and client uplinks are unchanged. Other newly enabled units become active
+at the next boot.
 It does
 not run `udevadm`.
 
