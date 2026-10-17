@@ -371,7 +371,11 @@ class ElectionTests(unittest.TestCase):
             stamp.write_text(election.mumble_database_signature())
             self.assertEqual(election.check('mumble'), 'skip')
             # Same-size writes still invalidate via nanosecond metadata.
+            before = path.stat()
             path.write_bytes(b'other')
+            # Two writes can share a filesystem clock tick. Exercise the
+            # metadata change explicitly instead of depending on wall time.
+            os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns + 1))
             self.assertNotEqual(election.check('mumble'), 'skip')
             stamp.write_text(election.mumble_database_signature())
             path.write_bytes(b'longer payload')

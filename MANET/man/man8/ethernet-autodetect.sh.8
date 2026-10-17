@@ -21,10 +21,13 @@ setting in the node configuration.
 Run as root; detection can change addresses, routes, bridge membership,
 firewall rules and running network services.
 .Pp
-Without an interface override, the saved upstream interface is preferred,
-then native
-.Li end0 ,
-then an available USB Ethernet interface.
+Without an interface override, detection uses native
+.Li end0 .
+Automatic callers pass the physical interface explicitly.
+The saved internet uplink never selects the detection target.
+Wireless interfaces are rejected, including renamed Wi-Fi devices.
+Gateway promotion uses the common uplink dispatcher and does not wait for
+its asynchronous bandwidth estimate.
 An existing decision may be reused while the physical connection is unchanged.
 .Bl -tag -width Ds
 .It Fl -hotplug

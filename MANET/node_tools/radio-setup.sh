@@ -13,6 +13,10 @@ if [[ "${MANET_RADIO_SETUP_LOCKED:-}" != 1 ]]; then
         env MANET_RADIO_SETUP_LOCKED=1 /bin/bash "$0" "$@"
 fi
 
+# Refuse a changed flash-time AP name before resetting provisioning state or
+# touching radio files. The same name survives retries and wired-only setup.
+AP_BROADCAST_SSID=$(python3 "${MANET_TOOLS_DIR:-/usr/local/bin}/manet_eud_ap.py" setup-ssid) || exit 1
+
 # Append setup output so first boot, post-rename runs, and manual retries
 # retain the history needed to diagnose failures.
 exec >> >(tee -a /var/log/radio-setup.log) 2>&1
@@ -490,6 +494,10 @@ iface_mesh_freq() {
         echo ""
     fi
 }
+
+# Preserve the local Wi-Fi profile while rebuilding baseline radio roles.
+systemctl stop manet-wifi-uplink.service 2>/dev/null || true
+python3 /usr/local/bin/manet_wifi_uplink.py setup-begin || exit 1
 
 # iw lists PHY headings and netdevs. Extract only Interface records.
 for iface in $(iw dev | awk '$1 == "Interface" {print $2}'); do
@@ -988,11 +996,6 @@ EOF
         AP_80211AC=""
     fi
 
-    AP_BROADCAST_SSID=$(python3 /usr/local/bin/manet_eud_ap.py ssid "$LAN_AP_SSID") || {
-        provision_fail "Invalid AP SSID or unavailable node identity"
-        provision_state incomplete "$(date +%s)"
-        exit 1
-    }
     cat <<-EOF > /etc/hostapd/hostapd.conf
 interface=$AP_INTERFACE
 bridge=br0
@@ -1455,7 +1458,7 @@ ConditionPathExists=/usr/local/bin/ethernet-autodetect.sh
 
 [Service]
 Type=oneshot
-ExecStart=/usr/local/bin/ethernet-autodetect.sh --hotplug
+ExecStart=/usr/local/bin/ethernet-autodetect.sh --hotplug --iface end0
 TimeoutStartSec=240
 
 [Install]
@@ -1769,6 +1772,11 @@ if grep -q 'run-startup-triggers' /etc/default/networkd-dispatcher 2>/dev/null; 
 	EOF
     echo " > Disabled networkd-dispatcher --run-startup-triggers"
 fi
+
+# Restore saved uplink ownership before restarting any mesh supplicants.
+python3 /usr/local/bin/manet_wifi_uplink.py reserve || exit 1
+systemctl enable manet-wifi-uplink.service || exit 1
+systemctl start --no-block manet-wifi-uplink.service || exit 1
 
 echo " > restarting networkd..."
 systemctl restart systemd-networkd

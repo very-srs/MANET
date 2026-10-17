@@ -42,8 +42,8 @@ def rewrite_keys(text, values, quoted_keys=()):
     return ''.join(lines)
 
 
-def atomic_write(path, contents, metadata=None):
-    """Replace a file durably with its mode and, as root, ownership."""
+def atomic_write(path, contents, metadata=None, *, mode=None):
+    """Replace durably, preserving ownership and mode unless overridden."""
     path = Path(path)
     if metadata is None:
         try:
@@ -54,7 +54,11 @@ def atomic_write(path, contents, metadata=None):
     fd, temporary = tempfile.mkstemp(prefix='.' + path.name + '-', dir=path.parent)
     try:
         with os.fdopen(fd, 'wb') as target:
-            os.fchmod(target.fileno(), stat.S_IMODE(metadata.st_mode) if metadata else 0o600)
+            permissions = mode
+            if permissions is None:
+                permissions = (stat.S_IMODE(metadata.st_mode)
+                               if metadata else 0o600)
+            os.fchmod(target.fileno(), permissions)
             if metadata and os.geteuid() == 0:
                 os.fchown(target.fileno(), metadata.st_uid, metadata.st_gid)
             target.write(contents.encode('utf-8') if isinstance(contents, str) else contents)

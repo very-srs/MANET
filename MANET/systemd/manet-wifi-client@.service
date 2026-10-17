@@ -1,0 +1,20 @@
+[Unit]
+Description=Local Wi-Fi internet client on %i
+Requires=sys-subsystem-net-devices-%i.device
+After=sys-subsystem-net-devices-%i.device wifi-rfkill-unblock.service
+Wants=wifi-rfkill-unblock.service
+
+[Service]
+Type=simple
+RuntimeDirectory=manet-wifi-uplink
+RuntimeDirectoryPreserve=yes
+ExecStartPre=/usr/local/bin/unblock-wifi-rfkill.sh
+ExecStart=/usr/sbin/wpa_supplicant -c /etc/wpa_supplicant/wpa_supplicant-%I-uplink.conf -i %I -D nl80211
+ExecStartPost=/usr/bin/touch /run/manet-wifi-uplink/client-event
+ExecStopPost=/usr/bin/touch /run/manet-wifi-uplink/client-event
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/run /tmp
+ProtectHome=yes

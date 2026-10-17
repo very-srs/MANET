@@ -262,7 +262,7 @@ class TimeService:
         except (OSError, ValueError, TypeError, AttributeError, KeyError):
             pass
         uplink = ''
-        if (self.run / 'mesh-gateway.state').exists():
+        if (self.run / 'manet-uplink/mesh-gateway.state').exists():
             try:
                 iface = (self.run / 'upstream_iface').read_text().strip()
                 if (re.fullmatch(r'[A-Za-z0-9_.-]{1,15}', iface)

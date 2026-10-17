@@ -71,6 +71,10 @@ restart_dead_ap_if_needed() (
     systemctl is-active --quiet hostapd.service || return 0
     ip link show "$ap" >/dev/null 2>&1 || return 0
 
+    # A quiet DFS CAC can lack a beacon/SSID. Hostapd owns its deadline.
+    if timeout 3 hostapd_cli -s /run -i "$ap" status 2>/dev/null | grep -qx 'state=DFS'; then
+        return 0
+    fi
     strikes_file="/run/batman-enslave-watch-ap-strikes"
     if ap_is_serving "$ap"; then
         rm -f "$strikes_file"

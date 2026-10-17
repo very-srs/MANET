@@ -4,6 +4,10 @@
 IFACE="${1:-}"
 ROLES="${MANET_IFACE_STATE_DIR:-/var/lib}"
 [ -n "$IFACE" ] || exit 0
+if [ "$IFACE" = "$(cat "$ROLES/wifi_uplink_if" 2>/dev/null)" ] || [ "$IFACE" = manetap ]; then
+    echo "manet-ap-guard: $IFACE belongs to the Wi-Fi uplink" >&2
+    exit 1
+fi
 AP_IFACE="$(cat "$ROLES/ap_interface" 2>/dev/null || true)"
 [ "$IFACE" = "$AP_IFACE" ] || exit 0
 # Require an exact role-file line, so another interface cannot match.

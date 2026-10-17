@@ -16,6 +16,10 @@ The radio can find another route. It cannot invent one across a gap with no usab
 
 Radios keep listening to the channel they are using. If interference stays, they look for a better one.
 
+The extra 5 GHz listening mode is still being tested. Leave it off.
+
+A radio borrowing house Wi-Fi has fewer radios left to talk to its friends.
+
 ## User
 
 ### More than a direct connection
@@ -33,6 +37,15 @@ Each radio measures the channel it is on. It only looks at other channels when i
 A healthy channel also stays put through short load swings. A better channel has to win three three-minute rounds in a row before the mesh moves. A channel that is blocked, unmeasured or overloaded is left at once. A failed or expired scan is left out instead of being shared as new data, and when the connected mesh has no valid measurements for a band, that band keeps its current channel. Recovery visits that look for separated radios still happen.
 
 Time synchronization is needed for scheduled channel decisions. A cold radio can recover contact before its clock is synchronized, but timed decisions wait until GPS or network time has been verified.
+
+Keep the optional background receiver disabled. Earlier testing found that
+enabling it stopped the main 5 GHz link from connecting. A kernel fix is
+ready for further testing, but normal traffic and background listening must
+work together before this option is ready for use. The default remains off.
+
+Using a built-in radio as an internet connection removes that band from the
+mesh on this node. The remaining radios keep their mesh roles. See
+[Wi-Fi uplinks](internet.md#user-use-nearby-wi-fi).
 
 ### Rejoining after separation
 
@@ -99,6 +112,15 @@ disqualified incumbent can move at once, bypassing the three-round hold-down.
 Lobby, tourguide and discovery scans are not gated. See
 [channel scoring](../../../docs/node-tools-internals.md#channel-scoring).
 
+The optional MT7916 third-chain observer remains a bench feature with
+`mt7916_background_rx=n` by default. The original reservation broke main-link
+peering on two Rock 3A nodes. The kernel fix finalizes the band-1 EEPROM
+selection before firmware upload and aligns the legacy OFDM path count with
+2T2R operation. Host tests verify the uploaded bytes, but simultaneous main
+traffic and observer response still need RF acceptance. Runtime chain policy
+and DFS activation remain unimplemented. See the
+[kernel series](../../../kernel/patches/mt76-bgobs/README.md).
+
 | Stage | What becomes fixed | What stops progress |
 |---|---|---|
 | Discover and propose | Participant list, proposed channels, plan hash, and activation time | Incomplete membership or no ready coordinator |
@@ -148,6 +170,11 @@ rendezvous visits create opportunities for this exchange; they cannot repair
 physical lack of radio coverage. See
 [recovery across radios](../../../docs/node-tools-internals.md#recovery-and-reconciliation-across-all-radios)
 and [cold-node recovery](../../../docs/node-tools-internals.md#clock-readiness-and-cold-node-recovery).
+
+A built-in Wi-Fi radio reserved as an internet client is excluded from ACS,
+channel agreement and drift repair. Its remaining radios still participate in
+the same component's decisions. A shared 5 GHz EUD AP follows the upstream's
+channel locally. See [Wi-Fi uplinks](internet.md#user-use-nearby-wi-fi).
 
 ### Choosing an internet gateway
 

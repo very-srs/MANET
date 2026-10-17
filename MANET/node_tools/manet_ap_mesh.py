@@ -80,7 +80,7 @@ class Transition:
         self.boot_id = Path(os.environ.get('MANET_BOOT_ID_FILE', '/proc/sys/kernel/random/boot_id'))
         self.static_plan = Path(os.environ.get('MANET_STATIC_CHANNELS', str(static.PATH)))
         self.registry = Path(os.environ.get('REGISTRY_FILE', '/var/run/mesh_node_registry'))
-        self.gateway = Path(os.environ.get('MANET_GATEWAY_STATE', '/var/run/mesh-gateway.state'))
+        self.gateway = Path(os.environ.get('MANET_GATEWAY_STATE', '/var/run/manet-uplink/mesh-gateway.state'))
         self.selection = {}
 
     def command(self, args, timeout=10):
@@ -161,6 +161,9 @@ class Transition:
         # queued old AP job must not cap a radio which has since joined mesh.
         with locked(self.channel_lock):
             iface = self.ap_identity()
+            from manet_wifi_uplink import uplink_owned
+            if uplink_owned(iface, self.roles):
+                return {'mode': 'ap-power', 'changed': False}
             info = self.radio_info(iface)
             if (iface in text(self.roles / 'mesh_if').split()
                     or not re.search(r'^\s*type AP\s*$', info, re.M)):
@@ -260,8 +263,13 @@ class Transition:
                 f'    key_mgmt=SAE\n    sae_password={supplicant_string(key)}\n'
                 '    ieee80211w=2\n    mesh_fwding=0\n    group_rekey=0\n}\n')
 
-    def select_frequency(self, iface, band, acs):
-        """Choose a permitted static or ACS frequency and record evidence."""
+    def select_frequency(self, iface, band, acs, *, allow_busy=False):
+        """Read a permitted static/committed channel or recovery anchor.
+
+        The caller holds the channel lock. Client release may allow a busy
+        agreement so disconnect can restore mesh without starting a round.
+        Ordinary AP transitions wait for agreement to finish.
+        """
         info = self.radio_info(iface)
         # Resolve the PHY index before reading mesh and frequency capabilities.
         phy = re.search(r'\bwiphy (\d+)', info)
@@ -287,7 +295,7 @@ class Transition:
                 busy = busy_boot == boot and 0 <= float(expiry) - time.clock_gettime(time.CLOCK_BOOTTIME) <= 125
             except ValueError:
                 busy = False
-            if busy:
+            if busy and not allow_busy:
                 raise RuntimeError('Channel agreement is in progress; retry the role transition')
             state = read_json(self.state / 'agreement.json')
             current, configured = {}, {}
@@ -359,6 +367,10 @@ class Transition:
     def to_mesh(self):
         """Move the AP radio into its mesh role with recovery on failure."""
         with locked(self.role_lock):
+            from manet_wifi_uplink import uplink_owned
+            if uplink_owned(text(self.roles / 'ap_interface'), self.roles):
+                self.command(['systemctl', 'stop', 'hostapd.service'], timeout=30)
+                return {'mode': 'uplink', 'changed': False}
             iface, band = self.identity()
             service = f'wpa_supplicant@{iface}.service'
             was_ap = self.active('hostapd.service')
@@ -464,6 +476,10 @@ class Transition:
                     and not self.gateway.exists()):
                 raise ValueError('With ACS in auto mode, only a gateway serves the AP')
             iface = self.ap_identity()
+            from manet_wifi_uplink import WifiUplink, uplink_owned
+            if uplink_owned(iface, self.roles):
+                WifiUplink().prepare_shared_ap()
+                return {'mode': 'shared-ap', 'changed': False}
             before = self.snapshot(self.role_paths())
             had_mesh = iface in text(self.roles / 'mesh_if').split()
             try:

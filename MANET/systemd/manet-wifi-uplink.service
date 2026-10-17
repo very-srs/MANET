@@ -1,0 +1,24 @@
+[Unit]
+Description=Local Wi-Fi uplink and EUD channel follower
+After=systemd-networkd.service manet-radio-names.service
+Wants=systemd-networkd.service manet-radio-names.service
+Wants=manet-wifi-uplink.path
+
+[Service]
+Type=simple
+CPUAccounting=yes
+ConfigurationDirectory=manet
+RuntimeDirectory=manet-wifi-uplink
+RuntimeDirectoryPreserve=yes
+ExecStart=/usr/local/bin/manet_wifi_uplink.py watch
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=yes
+ProtectSystem=strict
+# Gateway reconciliation also maintains radvd and local address policy.
+ReadWritePaths=/run /tmp /var/lib /etc
+ProtectHome=yes
+
+[Install]
+WantedBy=multi-user.target
+Also=manet-wifi-uplink.path

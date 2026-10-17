@@ -5,7 +5,7 @@ set -euo pipefail
 . "${MANET_TOOLS_DIR:-$(dirname "${BASH_SOURCE[0]}")}/manet-runtime-client.sh"
 
 STATE_FILE=/run/manet-uplink.env
-LEGACY_GATEWAY_STATE=/var/run/mesh-gateway.state
+LEGACY_GATEWAY_STATE=/var/run/manet-uplink/mesh-gateway.state
 LEGACY_NTP_STATE=/var/run/mesh-ntp.state
 LEGACY_ETH_STATE=/var/run/ethernet_detection_state
 UPSTREAM_IFACE_FILE=/var/run/upstream_iface
@@ -37,16 +37,14 @@ esac
 # Runtime events still skip overlap and retry on the next manager cycle.
 lock_args=(-n)
 [ "$EVENT" != provision ] || lock_args=(-w 30)
+# Always take Ethernet policy before the dispatch lock. Detector/off callers
+# already own it and pass the inherited-lock flag. This avoids lock inversion.
+if [ "${MANET_ETH_LOCK_HELD:-0}" != 1 ]; then
+    exec 201>"$ETH_DETECT_LOCK"
+    flock "${lock_args[@]}" 201 || exit 0
+fi
 exec 200>"$LOCK_FILE"
 flock "${lock_args[@]}" 200 || exit 0
-
-# ethernet-autodetect owns end0 during DHCP probing and bridging. It does not
-# call this script while locked. Runtime events skip a busy lock and retry
-# on a later telemetry pass; setup waits within its overall timeout.
-exec 201>"$ETH_DETECT_LOCK"
-if ! flock "${lock_args[@]}" 201; then
-    exit 0
-fi
 
 # Send the uplink message to stderr and the manet-uplink journal tag.
 log() {
@@ -88,7 +86,7 @@ is_upstream_iface() {
 
     case "$iface" in
         lo|br*|bat*) return 1 ;;
-        wlan*) is_usb_wifi_uplink_iface "$iface" && return 0 || return 1 ;;
+        wlan*) { is_builtin_wifi_uplink_iface "$iface" || is_usb_wifi_uplink_iface "$iface"; } && return 0 || return 1 ;;
     esac
 
     if [ "$iface" = "end0" ]; then
@@ -139,6 +137,12 @@ iface_default_gw() {
 # Reload new configuration. Retry DHCP only if no IPv4 address is present.
 write_networkd_dhcp_config() {
     local iface="$1"
+    # The client controller owns its higher-priority DHCP file. Leaving a
+    # generic 20-wlanN file behind would override mesh networking on release.
+    if is_builtin_wifi_uplink_iface "$iface"; then
+        networkctl reconfigure "$iface" 2>/dev/null || true
+        return
+    fi
     local conf="${NETWORKD_DIR}/20-${iface}.network"
 
     # Write only missing configs. Even identical writes trigger networkd
@@ -213,13 +217,24 @@ wait_for_ipv4() {
     return 1
 }
 
-# Print event, routed, default-route, end0 and discovered candidates in order.
-# Read global IFACE and remove duplicates without changing their priority.
+# Ethernet first, other supported USB uplinks next, Wi-Fi clients last.
+# Reuse the speed helper's conservative tether/cellular driver classification.
+uplink_priority() {
+    local iface="$1"
+    if [[ "$iface" == wlan* ]] || [ -d "/sys/class/net/$iface/wireless" ]; then
+        echo 2
+    elif "$UPLINK_SPEED" is-ethernet "$iface"; then
+        echo 0
+    else
+        echo 1
+    fi
+}
+
+# Rank by class, then retain the promoted/routed interface before the event,
+# other defaults and discovery. Stable sorting preserves order within a class.
 candidate_ifaces() {
     {
-        if [ -n "$IFACE" ] && is_upstream_iface "$IFACE"; then
-            printf '%s\n' "$IFACE"
-        fi
+        current_uplink_iface
 
         ip route get 1.1.1.1 2>/dev/null | awk '
             {
@@ -231,6 +246,10 @@ candidate_ifaces() {
                 }
             }
         '
+
+        if [ -n "$IFACE" ]; then
+            printf '%s\n' "$IFACE"
+        fi
 
         ip route show default 2>/dev/null | awk '
             /^default / {
@@ -251,7 +270,25 @@ candidate_ifaces() {
             iface=$(basename "$path")
             is_upstream_iface "$iface" && printf '%s\n' "$iface"
         done
-    } | awk '!seen[$0]++'
+    } | awk 'NF && !seen[$0]++' | while read -r iface; do
+        is_upstream_iface "$iface" || continue
+        is_wired_eud_port "$iface" && continue
+        if [[ "$iface" == wlan* ]]; then
+            # Check every candidate before ranking, even with healthy Ethernet.
+            # Saved credentials are checked independently of watcher timing.
+            if ! PYTHONPATH="${MANET_TOOLS_DIR:-$(dirname "${BASH_SOURCE[0]}")}:${PYTHONPATH:-}" \
+                    python3 -c 'import sys; from manet_wifi_uplink import uplink_profile_allowed; sys.exit(0 if uplink_profile_allowed(sys.argv[1]) else 1)' "$iface"; then
+                # Built-ins have a watcher. USB clients otherwise only reconcile
+                # on hotplug, so disconnect a pre-existing rejected profile here.
+                if is_usb_wifi_uplink_iface "$iface" &&
+                        { has_carrier "$iface" || systemctl is-active --quiet "usb-wifi-client@${iface}.service"; }; then
+                    /usr/local/bin/usb-wifi-uplink.sh disconnect "$iface" >/dev/null 2>&1 || true
+                fi
+                continue
+            fi
+        fi
+        printf '%s %s\n' "$(uplink_priority "$iface")" "$iface"
+    done | sort -s -n -k1,1 | awk '{print $2}'
 }
 
 # Print the first eligible uplink passing address and internet checks.
@@ -261,6 +298,7 @@ find_working_uplink() {
 
     for iface in $(candidate_ifaces); do
         is_upstream_iface "$iface" || continue
+        [ "$iface" != "${MANET_UPLINK_LOST_IFACE:-}" ] || continue
         has_carrier "$iface" || continue
         # Never detach or DHCP-probe a port serving a wired EUD.
         is_wired_eud_port "$iface" && continue
@@ -272,6 +310,13 @@ find_working_uplink() {
         # race route restoration and repeatedly demote the uplink.
         ip=$(iface_ip "$iface")
         gw=$(iface_default_gw "$iface" || true)
+        # During physical loss use already-addressed standbys first. Waiting
+        # for another device's DHCP would strand a ready Wi-Fi path. If none
+        # is ready, mesh routing is the useful interim path until a later event.
+        if [ -n "${MANET_UPLINK_LOST_IFACE:-}" ] &&
+                { [ -z "$ip" ] || [ -z "$gw" ]; }; then
+            continue
+        fi
         if [ -z "$ip" ] || [ -z "$gw" ]; then
             write_networkd_dhcp_config "$iface"
             ip=$(wait_for_ipv4 "$iface" 12 || true)
@@ -283,10 +328,6 @@ find_working_uplink() {
         probe_mode=any
         "$UPLINK_SPEED" is-ethernet "$iface" && probe_mode=http-only
         if internet_probe "$iface" "$probe_mode"; then
-            # Measurement failure means unknown bandwidth, not no internet.
-            if [ "$EVENT" != provision ]; then
-                "$UPLINK_SPEED" measure "$iface" >/dev/null || true
-            fi
             printf '%s\n' "$iface"
             return 0
         fi
@@ -347,8 +388,17 @@ eud_mode() {
 }
 
 # Start hostapd before its DHCP and power helpers, with $1 used in errors.
-start_ap_services() {
+start_ap_services() (
     local ap_iface="$1"   # for the log only
+    # Scan, client following and AP-to-mesh transitions own this same lock.
+    # Skip this pass if busy; never queue a start behind their stop/start.
+    exec 202>"${MANET_AP_ROLE_LOCK:-/run/manet-ap-role.lock}"
+    flock -n 202 || return 0
+    # The shared AP can start only after its station associates and the
+    # follower writes a verified channel. The role lock alone cannot prove it.
+    if [ "$ap_iface" = manetap ] && ! systemctl is-active --quiet hostapd.service 2>/dev/null; then
+        return 0
+    fi
     unmask_if_masked dnsmasq.service
     enable_if_disabled hostapd.service
     # Synchronous, so a start cannot stay queued past this pass and race the
@@ -364,7 +414,7 @@ start_ap_services() {
     start_if_inactive ap-txpower.service
     # hostapd bridges the AP into br0 itself (bridge=br0). Enslaving the
     # radio here could grab it while it is still a mesh point.
-}
+)
 
 # Return the AP candidate radio to the mesh. The helper is idempotent (a radio
 # already meshing on the right channel is left alone) and owns roles, configs,
@@ -431,6 +481,22 @@ ensure_eud_services() {
     esac
 }
 
+# Queue the bounded measurement in its own systemd cgroup, without our locks.
+queue_uplink_measurement() {
+    [ "$EVENT" != provision ] || return 0
+    "$UPLINK_SPEED" is-ethernet "$1" || return 0
+    systemctl --no-block start "manet-uplink-measure@$1.service" 2>/dev/null || true
+}
+
+# Discard only source-NAT mappings to the old, different address. Mesh/local
+# sessions and mappings using the new address survive. Absence is harmless.
+forget_old_uplink_flows() {
+    local old_ip="$1" new_ip="${2:-}"
+    [ -n "$old_ip" ] && [ "$old_ip" != "$new_ip" ] || return 0
+    command -v conntrack >/dev/null 2>&1 || return 0
+    timeout 2 conntrack -D -f ipv4 --src-nat --reply-dst "$old_ip" >/dev/null 2>&1 || true
+}
+
 # Promote $1 using its IPv4, firewall, announcements and gateway state files.
 promote_gateway() {
     local iface="$1"
@@ -468,6 +534,7 @@ promote_gateway() {
         if [ "$EVENT" = provision ]; then
             systemctl start manet-uplink-dns.service 2>/dev/null || true
         else
+            queue_uplink_measurement "$iface"
             ensure_eud_services
         fi
         return 0
@@ -479,18 +546,23 @@ promote_gateway() {
 
     configure_firewall "$iface"
 
-    touch "$LEGACY_GATEWAY_STATE"
-    printf '%s\n' "$iface" > "$UPSTREAM_IFACE_FILE"
+    printf '%s\n' "$iface" > "$UPSTREAM_IFACE_FILE.tmp"
+    mv -f "$UPSTREAM_IFACE_FILE.tmp" "$UPSTREAM_IFACE_FILE"
+    mkdir -p "${LEGACY_GATEWAY_STATE%/*}"
+    [ -f "$LEGACY_GATEWAY_STATE" ] || touch "$LEGACY_GATEWAY_STATE"
     # A normal reconcile must finish radio/service work deferred by setup.
     local mode=gateway
     [ "$EVENT" != provision ] || mode=provisioning
-    cat > "$STATE_FILE" <<EOF
+    cat > "$STATE_FILE.tmp" <<EOF
 UPLINK_MODE=$mode
 UPLINK_IFACE=$iface
 UPLINK_IP=$ip
 UPLINK_GW=${gw:-}
 UPDATED_AT=$(date +%s)
+UPLINK_GENERATION=$(date +%s%N)
 EOF
+    mv -f "$STATE_FILE.tmp" "$STATE_FILE"
+    forget_old_uplink_flows "$prev_ip" "$ip"
     # Make the qualified DHCP resolver available before dependent services.
     systemctl start manet-uplink-dns.service 2>/dev/null || true
     # Keep the wired-EUD record on end0 while a USB uplink serves as gateway.
@@ -508,12 +580,13 @@ EOF
         return 0
     fi
 
+    log "Promoted $iface as MANET gateway (${ip}, gw=${gw:-none})"
+    queue_uplink_measurement "$iface"
     apply_radvd_conf /etc/radvd-gateway.conf
     ensure_eud_services
     /usr/local/bin/mesh-ip-manager.sh 2>/dev/null || true
     systemctl restart gateway-route-manager.service 2>/dev/null || true
 
-    log "Promoted $iface as MANET gateway (${ip}, gw=${gw:-none})"
 }
 
 # Withdraw gateway state and NAT, restoring mesh RA and EUD policy.
@@ -529,7 +602,10 @@ demote_gateway() {
         was_gateway=true
     fi
 
+    local old_ip=""
+    [ ! -f "$STATE_FILE" ] || old_ip=$(awk -F= '$1 == "UPLINK_IP" {print $2; exit}' "$STATE_FILE")
     clear_firewall
+    forget_old_uplink_flows "$old_ip"
     # Withdraw the promoted route even if the address flush is delayed.
     if [ -n "$old_iface" ] && ! is_wired_eud_port "$old_iface"; then
         ip route del default dev "$old_iface" metric 100 2>/dev/null || true
@@ -617,22 +693,7 @@ case "$EVENT" in
         ;;
 esac
 
-case "$EVENT" in
-    carrier|routable|configured|online|add|reconcile|--hotplug|provision)
-        reconcile
-        ;;
-    off|no-carrier|degraded|remove|offline)
-        current=$(current_uplink_iface)
-        if [ -n "$IFACE" ] && [ "$IFACE" != "$current" ]; then
-            log "$EVENT on $IFACE is not current uplink (${current:-none}); reconciling"
-            reconcile
-        else
-            demote_gateway "${IFACE:-$current}"
-            reconcile
-        fi
-        ;;
-    *)
-        usage
-        exit 1
-        ;;
-esac
+# Qualify a replacement before withdrawing gateway state. In particular a
+# no-carrier event must not demote, start mesh routing and only then discover
+# the ready local fallback. With no survivor, reconcile performs demotion.
+reconcile

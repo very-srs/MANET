@@ -191,8 +191,9 @@ class WebSessionTests(unittest.TestCase):
         self.conf.write_text(f'admin_password={password}\nipv4_network=10.30.2.0/24\n'
                              'mesh_key=radio-password\nlan_ap_key=ap-password\n')
 
-    def request(self, method, path, body=b'', cookie='', client='127.0.0.1'):
-        headers = [f'{method} {path} HTTP/1.1', 'Host: manet.local',
+    def request(self, method, path, body=b'', cookie='', client='127.0.0.1',
+                host='manet.local'):
+        headers = [f'{method} {path} HTTP/1.1', f'Host: {host}',
                    f'Content-Length: {len(body)}']
         if cookie:
             headers.append(f'Cookie: {status.PERF_AUTH_COOKIE}={cookie}')
@@ -203,6 +204,40 @@ class WebSessionTests(unittest.TestCase):
         response.begin()
         response.payload = response.read()
         return response
+
+    def test_local_phone_management_pins_address_before_login(self):
+        dhcp = self.conf.parent / 'mesh-eud.conf'
+        dhcp.write_text('dhcp-range=10.30.2.128,10.30.2.131,4m\n'
+                        'dhcp-option=3,10.30.2.127\n')
+        with patch.object(status, 'ATAK_DHCP_CONF', dhcp):
+            response = self.request('GET', '/manage/?tab=uplink',
+                                    client='10.30.2.129')
+            self.assertEqual(response.status, 302)
+            self.assertEqual(response.getheader('Location'),
+                             'http://10.30.2.127/manage/?tab=uplink')
+            self.assertEqual(response.getheader('Cache-Control'), 'no-store')
+            self.assertIsNone(response.getheader('Set-Cookie'))
+            response = self.request('GET', '/manage/',
+                                    client='10.30.2.129', host='10.30.2.127')
+            self.assertEqual(response.status, 401)
+            body = urlencode({'password': self.password,
+                              'next': '/manage/'}).encode()
+            response = self.request('POST', '/manage/login', body,
+                                    client='10.30.2.129', host='10.30.2.127')
+            token = SimpleCookie(response.getheader('Set-Cookie'))[
+                status.PERF_AUTH_COOKIE].value
+            # A new phone MAC/lease has no bearing on a node-local token.
+            with patch.object(status.MeshHandler, '_dispatch_manage',
+                              lambda handler: handler.send_json({'ok': True})):
+                response = self.request('GET', '/manage/api/uplink/wifi',
+                                        cookie=token, client='10.30.2.130',
+                                        host='10.30.2.127')
+                self.assertEqual(response.status, 200)
+            # APIs and remote/tunnel clients retain their existing origin.
+            self.assertEqual(self.request('GET', '/manage/',
+                             client='10.30.2.140').status, 401)
+            self.assertEqual(self.request('GET', '/manage/api/uplink/wifi',
+                             client='10.30.2.129').status, 401)
 
     def login(self, path='/manage/login', cookie='', next_path='/manage/'):
         body = urlencode({'password': self.password, 'next': next_path}).encode()
@@ -239,7 +274,7 @@ class WebSessionTests(unittest.TestCase):
         _, token = self.login()
         with patch.object(status, 'apply_local_settings') as local, \
                 patch.object(status, 'broadcast_config_package') as broadcast:
-            for changes in ({'lan_ap_ssid': 'Good', 'mesh_ssid': 'é' * 17},
+            for changes in ({'lan_ap_key': 'goodpassword', 'mesh_ssid': 'é' * 17},
                             {'max_euds_per_node': '5'}, {'unknown': ''}):
                 response = self.request('POST', '/api/admin/stage',
                                         json.dumps({'config': changes}).encode(), token)
@@ -252,10 +287,10 @@ class WebSessionTests(unittest.TestCase):
         with patch.object(status, 'apply_local_settings') as local, \
                 patch.object(status, 'broadcast_config_package') as broadcast:
             response = self.request('POST', '/api/admin/stage', json.dumps({'config': {
-                'mesh_ssid': "Team's Mesh", 'lan_ap_ssid': 'New AP'}}).encode(), token)
+                'mesh_ssid': "Team's Mesh", 'lan_ap_key': 'newpassword'}}).encode(), token)
         self.assertEqual(response.status, 200, response.payload)
         self.assertTrue(json.loads(response.payload)['local_only'])
-        local.assert_called_once_with({'lan_ap_ssid': 'New AP'}, str(self.conf))
+        local.assert_called_once_with({'lan_ap_key': 'newpassword'}, str(self.conf))
         broadcast.assert_not_called()
 
     def test_json_login_rejects_bad_body_and_non_admin_passwords(self):

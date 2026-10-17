@@ -2,9 +2,11 @@
 """Exercise cached Ethernet estimates, partial transfers and unknown scores."""
 
 import os
+import fcntl
 from pathlib import Path
 import subprocess
 import tempfile
+import time
 import unittest
 
 TOOLS = Path(__file__).resolve().parent
@@ -16,6 +18,7 @@ STUB = r'''#!/bin/bash
 T="$TEST_ROOT"
 echo "$(basename "$0") $*" >> "$T/calls"
 case "$(basename "$0")" in
+  batctl) if [ "$1" = if ]; then cat "$T/members" 2>/dev/null; fi ;;
   systemd-cat) exit 1 ;;  # Exercise the stderr fallback without a host journal.
   curl)
     case "$*" in *cloudflare*) f="$T/curl/cloudflare" ;; *) f="$T/curl/ovh" ;; esac
@@ -72,6 +75,91 @@ class UplinkSpeedTests(unittest.TestCase):
                                 capture_output=True, text=True, timeout=30)
         calls = (self.root / 'calls').read_text().splitlines() if (self.root / 'calls').exists() else []
         return result, calls
+
+    def promoted(self):
+        """Supply the real worker's qualified connection identity."""
+        (self.root / 'run/upstream_iface').write_text('end0\n')
+        (self.root / 'run/manet-uplink').mkdir(exist_ok=True)
+        (self.root / 'run/manet-uplink/mesh-gateway.state').touch()
+        (self.root / 'net/end0/carrier').write_text('1\n')
+        (self.root / 'net/end0/carrier_changes').write_text('3\n')
+        (self.root / 'run/manet-uplink.env').write_text(
+            'UPLINK_MODE=gateway\nUPLINK_IFACE=end0\nUPLINK_GENERATION=1\n')
+
+    def test_refresh_announces_only_after_a_qualified_measurement(self):
+        """Unknown bandwidth is replaced by the completed Ethernet estimate."""
+        self.promoted()
+        self.assertEqual(self.run_announce('end0'),
+                         ['batctl gw_mode server 1000kbit/200kbit'])
+        self.reply('cloudflare', '200 5000000 0.2 0.6')
+        result, calls = self.run_tool('refresh', 'end0')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('batctl gw_mode server 100000kbit/20000kbit', calls)
+
+    def test_late_measurement_cannot_publish_after_connection_changes(self):
+        """A transfer holds no policy lock and cannot resurrect stale state."""
+        curl = self.root / 'bin/curl'
+        curl.write_text(STUB.replace('  curl)\n', '''  curl)
+    touch "$T/download-started"
+    while [ ! -f "$T/download-release" ]; do sleep .01; done
+'''))
+        self.reply('cloudflare', '200 5000000 0.2 0.6')
+        for change in ('wifi', 'demoted', 'address', 'router', 'carrier', 'reselected'):
+            with self.subTest(change=change):
+                self.promoted()
+                for name in ('download-started', 'download-release', 'calls',
+                             'run/manet-uplink-speed'):
+                    (self.root / name).unlink(missing_ok=True)
+                process = subprocess.Popen(['bash', str(SCRIPT), 'refresh', 'end0'],
+                                           env=self.env, stdout=subprocess.PIPE,
+                                           stderr=subprocess.PIPE, text=True)
+                try:
+                    deadline = time.monotonic() + 3
+                    while not (self.root / 'download-started').exists():
+                        self.assertLess(time.monotonic(), deadline)
+                        time.sleep(.01)
+                    with (self.root / 'run/ethernet-autodetect.lock').open('a') as lock:
+                        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        if change == 'wifi':
+                            (self.root / 'run/upstream_iface').write_text('wlan1\n')
+                        elif change == 'demoted':
+                            (self.root / 'run/manet-uplink/mesh-gateway.state').unlink()
+                        elif change == 'address':
+                            (self.root / 'addr').write_text('192.0.2.20')
+                        elif change == 'router':
+                            (self.root / 'router').write_text('192.0.2.1')
+                        elif change == 'carrier':
+                            (self.root / 'net/end0/carrier_changes').write_text('5\n')
+                        else:
+                            with (self.root / 'run/manet-uplink.env').open('a') as out:
+                                out.write('UPLINK_GENERATION=2\n')
+                    (self.root / 'download-release').touch()
+                    _, stderr = process.communicate(timeout=5)
+                    self.assertEqual(process.returncode, 0, stderr)
+                    self.assertNotIn('batctl gw_mode server', (self.root / 'calls').read_text())
+                    self.assertFalse((self.root / 'run/manet-uplink-speed').exists())
+                finally:
+                    (self.root / 'download-release').touch()
+                    if process.poll() is None:
+                        process.kill()
+                    process.communicate(timeout=5)
+                (self.root / 'addr').write_text('192.168.1.20')
+                (self.root / 'router').write_text('192.168.1.1')
+
+    def test_halow_only_caps_gateway_but_preserves_lower_upstream(self):
+        roles = self.root / 'roles'
+        roles.mkdir()
+        self.env['MANET_IFACE_STATE_DIR'] = str(roles)
+        (roles / 'halow_if').write_text('wlan2\n')
+        (roles / 'mesh_if').write_text('wlan0\n')
+        (self.root / 'members').write_text('wlan2: active\nwlan0: inactive\n')
+        _, calls = self.run_tool('announce', 'wlan1')
+        self.assertIn('batctl gw_mode server 1000kbit/1000kbit', calls)
+        _, calls = self.run_tool('announce', 'end0')
+        self.assertIn('batctl gw_mode server 1000kbit/200kbit', calls)
+        (self.root / 'members').write_text('wlan2: active\nwlan0: active\n')
+        _, calls = self.run_tool('announce', 'wlan1')
+        self.assertIn('batctl gw_mode server 10000kbit/2000kbit', calls)
 
     def test_measures_once_and_reuses_the_result_for_the_same_uplink(self):
         # 5 MB in 0.4 s after the first byte: 100 Mbit/s, setup time excluded.

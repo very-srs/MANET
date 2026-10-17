@@ -387,7 +387,7 @@ if sys.argv[1] == 'is-active' and sys.argv[-1] == 'mesh-config-apply.service':
         residents = set()
         for unit in units.glob('*.service'):
             source = unit.read_text()
-            if ('Type=simple' in source and '/usr/local/bin/' in source
+            if ('@' not in unit.name and 'Type=simple' in source and '/usr/local/bin/' in source
                     and 'PartOf=node-manager.service' not in source):
                 residents.add(unit.name)
         self.assertEqual(set(update.RUNTIME_SERVICES), residents)

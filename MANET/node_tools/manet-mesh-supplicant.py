@@ -47,6 +47,9 @@ def launch(iface):
     """Prepare this interface and exec the mesh binary or logged fallback."""
     if not re.fullmatch(r'[a-zA-Z0-9_.:-]{1,15}', iface):
         raise ValueError('Invalid interface name')
+    from manet_wifi_uplink import uplink_owned
+    if uplink_owned(iface):
+        raise ValueError('Radio belongs to the local Wi-Fi uplink')
     config = WPA_DIR / f'wpa_supplicant-{iface}.conf'
     prepare_config(config)
     lobby = WPA_DIR / f'wpa_supplicant-{iface}-lobby.conf'

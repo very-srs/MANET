@@ -4,6 +4,8 @@ set -u
 
 IFACE="${1:-}"
 [ -n "$IFACE" ] || exit 0
+[ "$IFACE" != "$(cat "${MANET_IFACE_STATE_DIR:-/var/lib}/wifi_uplink_if" 2>/dev/null)" ] || exit 0
+[ "$IFACE" != manetap ] || exit 0
 [ -e "/sys/class/net/$IFACE" ] || exit 0
 
 /usr/local/bin/unblock-wifi-rfkill.sh 2>/dev/null || true

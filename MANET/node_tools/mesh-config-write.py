@@ -4,10 +4,13 @@
 from pathlib import Path
 import sys
 from manet_config_io import atomic_write, rewrite_keys
+from mesh_config import AP_SSID_FIXED
 
 
 def write_key(path, key, value, quoted=False):
     """Replace one key atomically, with optional supplicant quoting."""
+    if key == 'lan_ap_ssid':
+        raise ValueError(AP_SSID_FIXED)
     path = Path(path)
     original = path.read_text()
     text = rewrite_keys(original, {key: value}, {key} if quoted else ())

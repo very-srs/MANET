@@ -111,6 +111,14 @@ The node's only web server, on port 80. It serves an open status page and,
 behind the admin password, the management UI. Sized for a phone in the field,
 so nothing here needs SSH.
 
+Phone landscape places the public topology beside the node list and uses a
+side menu in management. Portrait stacks the public panels and management
+tabs. Touch controls remain at least 44 pixels tall in both orientations.
+Node disclosures and management tabs support keyboard navigation; the public
+portrait topology divider also accepts arrow keys. If a topology refresh
+fails, a visible notice identifies the retained status as old until a refresh
+succeeds.
+
 Open routes, no password:
 
 - `/`: force-directed topology with node health, link throughput and per-node
@@ -146,11 +154,21 @@ GPS/NTP clock corrections do not affect the deadline. When a management request
 finds an expired session, the page returns to login and preserves the current
 tab for after sign-in. Status pages remain available without a login.
 
+For a client in this node's EUD pool, opening management through `manet.local`
+redirects to this node's internal IP address before login. This keeps the
+browser on the same node after a hotspot reconnect even if the shared name
+resolves differently. Sessions remain private to one node. If its address
+allocation changes, reopen `manet.local` and sign in again. API callers,
+loopback tunnels and clients outside the local EUD pool keep their origin.
+
 Failed logins are limited to five per client address and thirty per node in
 sixty seconds. Throttled requests return HTTP 429 with `Retry-After`;
 existing sessions remain usable.
 
-No unauthenticated route changes anything.
+Public writes are limited to this radio's operator label and the ATAK phone
+choices described below. They require a client address in this radio's DHCP
+pool and bounded same-origin JSON. Configuration and radio controls require
+the admin session.
 
 Every HTML response, including login and error pages, carries a Content
 Security Policy. Scripts need a fresh response nonce, and controls use event
@@ -207,6 +225,23 @@ What the page reads:
 Peers are never queried over HTTP. Everything shown about another node comes
 from the registry, which is built from Alfred.
 
+**Operator names.** Connect to this radio and enter an optional name or callsign
+in **Your operator name** on the public status page, then press **Save**. No
+admin password is needed. The public node list and management topology show it
+alongside the hostname. Clear the field and save again to remove the label.
+Anyone connected to this radio can replace the name when it changes hands.
+Names are limited to 32 UTF-8 bytes and apply
+locally without a mesh ACK or restart. Both static and ACS modes share the
+name in their next telemetry publication, including ACS discovery. Peer pages
+update after receiving that publication. This label does not change ATAK phone
+callsigns or which phone controls location.
+
+`POST /api/operator-name` accepts only `{"operator_name": "..."}` and writes
+that local key atomically. It shares the management write lock and invalidates
+the status cache. It cannot target a peer or change other settings. The local
+DHCP-pool and same-origin JSON checks apply even without an admin password
+configured or ATAK enabled. The browser keeps unsaved edits during polling.
+
 **manet_manage.py**
 
 The management UI, reachable under `/manage` after the password check. Tabs:
@@ -215,7 +250,7 @@ The management UI, reachable under `/manage` after the password check. Tabs:
 - **Radio config.** Interface up/down, TX power, HaLow and Wi-Fi channels.
 - **Measure.** iperf3 and ping runs from this node toward a peer.
 - **Sessions.** Saved measurement results, as JSON and CSV.
-- **Uplink.** USB Wi-Fi uplink credentials.
+- **Uplink.** Node-local USB or built-in Wi-Fi client, scan list and connection status.
 - **Voice.** Talk group, codec and per-peer voice state.
 - **Node config.** EUD mode, AP credentials, mesh SSID and SAE key, IP range,
   regulatory domain, services and admin password, with the per-node ACK table.
@@ -252,14 +287,19 @@ it when the radio starts, and reloading the driver can wedge the USB card, so
 a change needs a reboot. The bench MM8108 firmware reports 24 dBm at 1 and
 2 MHz, 22.25 dBm at 4 MHz and 22 dBm at 8 MHz.
 
-The EUD access point is the exception and stays at 5 dBm.
+The standalone EUD access point is the exception and stays at 5 dBm. When
+sharing its PHY with a Wi-Fi uplink, it uses the client PHY power policy.
+
+Wi-Fi uplink selection and credentials are also local admin actions. They
+withdraw a local radio role without sending the credentials to other nodes.
 
 **mesh-radio-state.py**
 
 Applies radio changes that were staged over Alfred. Reads the package,
 publishes an acknowledgement, and applies at the package's activation time once
 the coordinator has collected the rest. Carries interface up/down, TX power,
-HaLow and Wi-Fi channel, and uplink credentials.
+HaLow and Wi-Fi channel, and voice codec. Uplink credentials are rejected by
+this transport and remain on the node.
 
 **manet_peer_radios.py**
 
@@ -776,7 +816,11 @@ isolation or a return to lobby operation.
 
 **ethernet-autodetect.sh**
 
-Works out what a connected Ethernet cable means:
+Works out what a connected Ethernet cable means. Automatic callers pass
+`--iface end0` explicitly. A manual call defaults to `end0`, never the saved
+Wi-Fi/USB uplink, and wireless targets are rejected. A usable existing lease
+is reconciled without restarting DHCP on that connection. Gateway and EUD
+service policy is handed to the common uplink dispatcher under the same lock.
 
 - **DHCP answers.** Gateway mode. NAT, advertise a default route, and
   optionally keep the AP running.
@@ -845,7 +889,12 @@ The default is `n`, which retains the normal receive chains and candidate
 scans. This is a local setting, read by the existing config watcher; it does
 not reload a driver. An unconfirmed patched boot also suspends this reservation
 until explicit rearm or an update with a different patched WM hash.
-CM4 validation of the observer and own-transmit correction remains required.
+Keep this setting at `n` outside the bench. The original reservation stopped
+the main 5 GHz link from peering on two Rock 3A nodes. Kernel initialization
+fixes now align the firmware EEPROM band and path settings with the host,
+but restored traffic with simultaneous observation remains unverified.
+CM4 validation is also required. Runtime `auto / always / never` policy is
+not implemented yet.
 
 Connect by Ethernet or join this radio's own Wi-Fi network. For a radio with GPS,
 turn **Android location OFF**, enable **ATAK external GPS input on UDP 4349**, and
@@ -1133,7 +1182,12 @@ setup. A slow sample receives a low score and still qualifies as connected.
 A failed download, including TLS failure before clock synchronization, means
 unknown bandwidth: Ethernet announces a conservative 1/0.2 Mbit/s and retries
 at most once a minute on subsequent reconciliation. A successful estimate is
-cached until its interface/address/router changes or the node is demoted.
+cached until its interface/address/router/carrier generation changes or the
+node is demoted. Promotion queues `manet-uplink-measure@IFACE.service` with
+`--no-block`, so neither the download nor its timeout delays forwarding.
+The worker checks the selected promotion generation under the Ethernet lock
+before publishing a result and before updating BATMAN. Stale work cannot
+announce Ethernet bandwidth on Wi-Fi or restore a withdrawn gateway.
 Phone tethers, cellular modems and Wi-Fi uplinks are never download-tested and
 announce batman's default 10/2 Mbit/s.
 
@@ -1144,6 +1198,22 @@ uplink or a wired EUD port, and on promotion configures NAT, the firewall,
 `radvd` and the EUD services. On demotion it tears them back down. Called by
 the networkd-dispatcher hooks and reconciled once a cycle by the node manager.
 Both paths return early when nothing has changed.
+
+Local selection prefers qualified wired Ethernet, then supported USB
+tether/cellular links, then built-in or USB Wi-Fi clients. Wired EUD ports
+are excluded. The saved promoted interface and current route take precedence
+over events within each class, so an event cannot displace a working peer
+of the same class. Reconciliation moves back from Wi-Fi to working Ethernet
+without waiting for Wi-Fi to fail. Ethernet loss tries other local uplinks
+in the same pass before withdrawing gateway status. Wi-Fi can remain
+associated while Ethernet carries internet traffic. The unplug hook invokes
+this selection before slow Ethernet cleanup, carrying its held policy lock.
+A ready fallback keeps the gateway marker and avoids a transient mesh default.
+The loss pass skips unaddressed standbys, leaving DHCP qualification to a later
+event. dnsmasq continues serving the existing pool and follows resolver-file
+changes without restarting. Unchanged DHCP configuration also preserves leases.
+Optional conntrack cleanup deletes only old-address source-NAT mappings when
+the address differs. Established internet sessions still need reconnection.
 
 Ethernet promotion requires an interface-bound IPv4 HTTP 204 response from
 one of two connectivity endpoints. ICMP alone and HTTP 200/302 portal replies
@@ -1217,7 +1287,146 @@ uplink decision path when it appears. Triggered by udev.
 **usb-wifi-uplink.sh**
 
 Configures a USB Wi-Fi adapter as an internet uplink from a stored SSID and
-password. The management UI drives it mesh-wide over Alfred.
+password. The management UI applies it only on this node, passing credentials
+through stdin. The existing hotplug lifecycle and gateway dispatcher remain
+in use. `scan-json` scans the eligible adapter without stopping its client
+service, restoring its prior link-up state afterward. Open and WPA2 Personal
+networks can be selected. Mixed WPA2/WPA3 networks use WPA2, while WPA3-only
+networks remain visible with a disabled explanation. Menu selections must
+match a selectable result in `/run/manet-usb-wifi-scan.json` from the same
+adapter within five minutes. The saved BSSID pins that access point. The
+operator `set` action is still accepted with its existing SSID/password form.
+
+**manet_wifi_uplink.py**
+
+Reserves one built-in MT7916 radio as a local Wi-Fi client. Configure it in
+**Manage → Uplink**, select wlan0 or wlan1, scan, choose the upstream AP and
+enter its password. Open, WPA2 Personal and WPA3 Personal networks are
+supported. Hidden and enterprise networks are displayed but cannot be selected.
+WPA3 passwords containing double quotes are rejected by the current renderer.
+SSID, BSSID, signal, security and channel come from the selected radio's scan.
+The scan result expires after five minutes. Valid UTF-8 SSIDs, including `iw`
+hex-escaped emoji and edge spaces, retain their exact bytes. Invalid UTF-8 and
+control-byte names remain visible as escapes but cannot be selected.
+Credentials never enter mesh.conf or Alfred.
+
+Both paths omit exact matches of the current local `lan_ap_ssid` followed by
+`-` and four lowercase hex digits, including this node's hotspot seen by another
+radio. These names are removed before saving or grouping scan results and are
+not counted. Old built-in scan caches are filtered when read. Typed and scanned
+connection requests are also rejected on the server, including USB CLI `set`.
+The prefix is literal and case-sensitive. Other prefixes, uppercase suffixes
+and suffixes of another length are unaffected. This naming rule cannot identify
+peers configured with a different hotspot prefix.
+
+A matching saved built-in profile is persistently disabled, its client is
+stopped and its normal AP/mesh role restored. USB keeps its saved credentials,
+but stops and disables the client and clears the interface address. Its
+connect/reconcile path refuses to reactivate the match. Both show the reason
+in status. The gateway dispatcher checks saved names before qualification and
+also disconnects an already associated USB match, closing the interval before
+client cleanup. A blocked built-in profile stays disabled even if the hotspot
+prefix later changes, until the user selects a new connection.
+
+Both radio paths use a scrolling, touch-sized network list. Matching SSID
+bytes are grouped by band, security, DFS status and availability, retaining
+the strongest BSSID. Hidden names remain separate by BSSID. The current
+connected group appears once at the top with its state. Different bands,
+security methods or DFS choices remain separate. Selecting a secured network
+shows the password field and Connect. Open networks show only Connect.
+Status polling preserves a typed password, while radio changes and rescans
+clear selection. Rescan is required after five minutes. The server remains
+authoritative for freshness and rejects disabled choices before changing roles.
+
+| EUD mode | Upstream | Remaining mesh and AP roles |
+| --- | --- | --- |
+| Wired | wlan0, 2.4 GHz | HaLow and 5 GHz mesh |
+| Wired | wlan1, 5 GHz | HaLow and 2.4 GHz mesh |
+| Wi-Fi | wlan0, 2.4 GHz | HaLow mesh, existing 5 GHz EUD AP |
+| Wi-Fi | wlan1, 5 GHz | HaLow and 2.4 GHz mesh, shared EUD AP with DFS follower support |
+
+Disconnect a built-in uplink before changing the configured EUD mode.
+Auto mode retains its wired-EUD preference. A reserved uplink PHY never returns
+to mesh until disconnected. A remaining active mesh interface is required.
+Selecting wlan0 with Wi-Fi or Auto EUD requires active HaLow. The shared AP is
+`manetap` on wlan1's PHY, uses 20 MHz, and follows the upstream channel locally.
+It does not change the mesh channel plan. The usual 5 dBm AP-only PHY cap is
+skipped while sharing, so it cannot reduce uplink range.
+
+On-demand scans keep an associated shared hotspot serving when it is on a
+non-DFS channel or running as a supported DFS follower on the station's
+channel. Other AP scans require confirmation: phones on that hotspot will
+disconnect for about 15 seconds, with actual duration depending on the radio.
+The page reloads the saved scan after reconnection and shows its age.
+A mesh scan temporarily stops that band, then restores its live starting
+channel, or the agreed/static channel if live information was unavailable.
+Restore failures leave results usable and show a separate warning while the
+watcher retries. The dispatcher shares the AP role lock with scans and the
+channel follower. Shared `manetap` startup belongs to the follower after
+station association, so the dispatcher cannot start it early between watcher
+passes. A busy scan does not mark the client connection as failed.
+The CLI uses `scan-plan wlan1` for the interruption check and requires
+`scan wlan1 --allow-ap-stop` when the serving AP must stop.
+
+The watcher sleeps on supplicant association/channel events, hostapd events,
+link/address changes and local profile/policy changes. It tries hostapd CSA
+for non-DFS changes and verifies completion, with a three-second check if the
+completion event does not arrive. Losing association stops the shared AP
+before station reconnection. Pending lock, scan-repair or AP-start work also
+retries after three seconds. A healthy follower has no three-second tick.
+Service start/stop hooks cover crashes and replaced control sockets.
+Notifications and scan repair live under `/run/manet-wifi-uplink/`; the shared
+gateway marker is `/run/manet-uplink/mesh-gateway.state`. The watcher creates
+missing input and control-socket directories and watches them directly, so
+unrelated `/run` writes do not wake it.
+
+A disabled profile leaves no watcher process after cleanup. A systemd path
+unit wakes it for profile changes or pending scan restoration, and the boot
+service restores enabled profiles. While enabled, a 120-second safety check
+covers lost notifications and silent control failures. Recovery from a missed
+radio event can take up to two minutes instead of the former three-second
+poll. It requests the uplink dispatcher only when the observed policy tuple
+changes. Node-manager's existing 60-second gateway check handles internet
+reachability changes without a local event. Normal channel and association
+events trigger work immediately.
+
+A DFS upstream can also serve the shared hotspot with the matched kernel and
+hostapd from `kernel/patches/dfs-follow-ap/`. The station associates first.
+The AP then starts on its channel without local CAC or its own radar detector,
+using the upstream master. The station is never disconnected to start the AP.
+The kernel stops a follower when its supporting BSS disappears, including
+channels already marked available. At upstream CSA start it stops the follower
+and refuses another follower start until the station completes the move or
+disconnects. The watcher restarts the hotspot on the new live channel. This
+also handles the upstream master's CSA away from radar. Phone clients briefly
+lose the hotspot during a channel move. Non-DFS CSA retains its existing path.
+
+The controller checks the loaded `cfg80211` option `dfs_follow_ap_v1` and the
+paired hostapd version. Without both, DFS keeps the shared hotspot off with
+the existing plain status reason. Association, address and gateway status
+remain separate. Use Ethernet or another node for access in that case.
+Every AP start rechecks live association and channel restrictions. Three
+unsuccessful follower starts, or any unexpected local CAC, latch the hotspot
+off until an observed loss/reconnection or channel change. Radar-unavailable
+channels remain blocked. Normal APs retain their CAC/radar handling. This
+source path and the matched binaries still need hardware qualification.
+
+The private desired profile is `/etc/manet/wifi-uplink.json`. A persistent
+`/var/lib/wifi_uplink_if` role blocks mesh supplicants, ACS, BATMAN repair and
+radio controls before association or DHCP. `manet-wifi-uplink.service` restores
+ownership at boot and follows channels. `manet-wifi-client@.service` owns the
+managed supplicant. Gateway qualification, DNS and NAT use the existing
+dispatcher on connection/address changes and the enabled safety check.
+Disconnect restores agreed/static mesh channels or the current EUD AP policy.
+A HaLow-only gateway's announcement is capped at 1 Mbit/s in each direction,
+without raising a lower upstream estimate. This is a conservative estimate,
+not a HaLow speed measurement.
+
+`waiting-address` means the upstream is associated but has no IPv4 address.
+`connected` requires an IPv4 address; internet qualification is still separate.
+Disconnect also works during channel agreement, restoring the existing valid
+commitment or recovery anchor under the channel lock, or the static channel
+when ACS is disabled. It does not initiate a new agreement round.
 
 **mesh-hosts-update.sh**
 
@@ -1424,10 +1633,17 @@ transaction. A deliberate retry after rollback requires a new staged edit.
 
 ### When each setting takes effect
 
-- **Per-node.** `eud`, `lan_ap_ssid` and `lan_ap_key` stay on this radio and
-  never go over Alfred, because the EUD access point is a node's own Wi-Fi for
-  its own clients. `max_euds_per_node` is per-node too, is set at flash time,
-  and the tab shows it without writing it.
+- **Operator name.** `operator_name` is stored only on this radio. **Save**
+  on the public status page saves or clears it immediately, without a password.
+  It is shared as a telemetry label, never
+  as a setting that overwrites another radio's name.
+- **Per-node.** `eud` and `lan_ap_key` apply only on this radio. The AP password
+  remains editable. `lan_ap_ssid` and `max_euds_per_node` are fixed at flash
+  time. Node config shows the full broadcast AP name, including its four-digit
+  suffix, without editing it. These local fields never go over Alfred. Keeping
+  the same hotspot prefix across a mesh lets the uplink picker exclude its own
+  hotspots. AP-name edits through the API, local activation, config writer or
+  setup reruns are refused before other settings change.
 - **Safe.** `admin_password`, `mtx`, `mumble` and `auto_update` apply mesh-wide
   straight away.
 - **Deferred.** `regulatory_domain` is written now, together with every radio

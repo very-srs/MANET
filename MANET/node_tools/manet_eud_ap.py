@@ -5,8 +5,10 @@ import re
 import socket
 import subprocess
 
-from manet_config_io import atomic_write, rewrite_keys
-from mesh_config import apply_local_to_conf, validate_config
+from manet_config_io import atomic_write, rewrite_keys, load_kv_file
+from mesh_config import AP_SSID_FIXED, apply_local_to_conf, validate_config, valid_value
+
+AP_IDENTITY = '/var/lib/manet-ap-ssid'
 
 
 def ap_suffix():
@@ -44,6 +46,52 @@ def configured_ssid(path='/etc/hostapd/hostapd.conf'):
     return ''
 
 
+def setup_ssid(mesh_conf='/etc/mesh.conf', hostapd='/etc/hostapd/hostapd.conf',
+               identity=AP_IDENTITY, provisioned='/var/lib/radio-setup.done'):
+    """Freeze the flash-time name, or verify it before any setup rerun writes.
+
+    Existing nodes use their hostapd name as the fixed identity. A completed
+    node without either record fails closed. New wired-only nodes also save
+    the identity, so enabling an AP later cannot choose a different name.
+    The setup process lock serializes this with all other setup invocations.
+    """
+    conf = load_kv_file(mesh_conf)
+    base = conf.get('lan_ap_ssid', '')
+    record = Path(identity)
+    fixed = record.read_text().rstrip('\n') if record.exists() else configured_ssid(hostapd)
+    if fixed:
+        if not re.fullmatch(re.escape(base) + r'-[0-9a-f]{4}', fixed):
+            raise ValueError(AP_SSID_FIXED + '; restore lan_ap_ssid in mesh.conf')
+    elif not base and conf.get('eud') == 'wired':
+        # Wired flashers deliberately leave the AP name empty. Freeze that
+        # choice too, without requiring a wireless interface to be present.
+        fixed = ''
+    else:
+        if record.exists() or Path(provisioned).exists():
+            raise ValueError(AP_SSID_FIXED + '; the original AP name is unavailable')
+        ok, why = valid_value('lan_ap_ssid', base)
+        if not ok:
+            raise ValueError('Invalid flash-time AP SSID: ' + why)
+        fixed = broadcast_ssid(base)
+    if not record.exists():
+        atomic_write(record, fixed + '\n')
+    return fixed
+
+
+def display_ssid(base):
+    """Show the full configured name, including when the AP is inactive."""
+    current = configured_ssid()
+    if current:
+        return current
+    try:
+        return Path(AP_IDENTITY).read_text().strip()
+    except FileNotFoundError:
+        try:
+            return broadcast_ssid(base) if base else ''
+        except ValueError:
+            return ''
+
+
 def restart_hostapd():
     """Restart only a running AP while serializing radio ownership."""
     from manet_ap_mesh import Transition, locked
@@ -68,16 +116,18 @@ def apply_local(changes, mesh_conf, hostapd='/etc/hostapd/hostapd.conf',
     if not ok:
         raise ValueError(why)
     conf_path, ap_path = Path(mesh_conf), Path(hostapd)
+    from manet_wifi_uplink import uplink_owner
+    if ('eud' in changes and changes['eud'] != load_kv_file(conf_path).get('eud')
+            and uplink_owner(Path(ap_role).parent)):
+        raise ValueError('Disconnect the built-in Wi-Fi uplink before changing EUD mode')
     before = conf_path.read_bytes()
-    radio_change = bool({'lan_ap_ssid', 'lan_ap_key'} & changes.keys())
+    radio_change = 'lan_ap_key' in changes
     enabled = (Path(ap_role).exists() and bool(Path(ap_role).read_text().strip())
                and ap_path.exists())
     ap_before = ap_path.read_bytes() if radio_change and enabled else None
     updated = None
     if ap_before is not None:
         values = {}
-        if 'lan_ap_ssid' in changes:
-            values['ssid'] = broadcast_ssid(changes['lan_ap_ssid'])
         if 'lan_ap_key' in changes:
             values['wpa_passphrase'] = changes['lan_ap_key']
         updated = rewrite_keys(ap_before.decode('utf-8'), values)
@@ -115,5 +165,10 @@ if __name__ == '__main__':
         print(broadcast_ssid(sys.argv[2]))
     elif len(sys.argv) == 2 and sys.argv[1] == 'current':
         print(configured_ssid())
+    elif len(sys.argv) == 2 and sys.argv[1] == 'setup-ssid':
+        try:
+            print(setup_ssid())
+        except (OSError, ValueError) as error:
+            sys.exit(str(error))
     else:
-        sys.exit('usage: manet_eud_ap.py {suffix|ssid BASE|current}')
+        sys.exit('usage: manet_eud_ap.py {suffix|ssid BASE|current|setup-ssid}')

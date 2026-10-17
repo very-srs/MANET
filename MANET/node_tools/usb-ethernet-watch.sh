@@ -88,7 +88,7 @@ EOF
 
         # Keep end0 as gateway when active, leaving this interface addressed.
         if [ -f /var/run/upstream_iface ] && [ "$(cat /var/run/upstream_iface)" = "end0" ] && \
-           [ -f /var/run/mesh-gateway.state ] && \
+           [ -f /var/run/manet-uplink/mesh-gateway.state ] && \
            ip route show dev end0 2>/dev/null | grep -q '^default'; then
             log "end0 is already active gateway, $IFACE standby with IP only"
             exit 0

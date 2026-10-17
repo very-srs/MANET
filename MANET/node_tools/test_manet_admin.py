@@ -492,7 +492,7 @@ class WebBoundaryTests(unittest.TestCase):
                 patch.object(status, 'clear_pending_config') as clear:
             for path in ('/api/admin/stage', '/api/admin/activate', '/api/admin/cancel'):
                 handler = self.handler(path, authenticated=True)
-                body = json.dumps({'force': True, 'config': {'mesh_ssid': 'new', 'lan_ap_ssid': 'local'}}).encode()
+                body = json.dumps({'force': True, 'config': {'mesh_ssid': 'new', 'lan_ap_key': 'localpassword'}}).encode()
                 handler.headers = {'Content-Length': str(len(body))}
                 handler.rfile = io.BytesIO(body)
                 handler.do_POST()
@@ -508,13 +508,81 @@ class WebBoundaryTests(unittest.TestCase):
                 patch.object(status, 'apply_local_settings') as local, \
                 patch.object(status, 'broadcast_config_package') as broadcast:
             handler = self.handler('/api/admin/stage', authenticated=True)
-            body = json.dumps({'config': {'lan_ap_ssid': 'new'}}).encode()
+            body = json.dumps({'config': {'lan_ap_key': 'newpassword'}}).encode()
             handler.headers = {'Content-Length': str(len(body))}
             handler.rfile = io.BytesIO(body)
             handler.do_POST()
             self.assertTrue(handler.send_json.call_args.args[0]['local_only'])
             local.assert_called_once()
             broadcast.assert_not_called()
+
+    def test_ap_name_change_rejects_entire_request_before_any_side_effect(self):
+        for name in ('new', '', None):
+            with self.subTest(name=name), \
+                    patch.object(status, 'load_kv_file', return_value={
+                        'admin_password': 'test', 'lan_ap_ssid': 'EUD'}), \
+                    patch.object(status, 'is_allowed_ip', return_value=True), \
+                    patch.object(status, 'apply_local_settings') as local, \
+                    patch.object(status, 'broadcast_config_package') as broadcast:
+                handler = self.handler('/api/admin/stage', authenticated=True)
+                body = json.dumps({'config': {'lan_ap_ssid': name,
+                                             'lan_ap_key': 'newpassword', 'mtx': 'y'}}).encode()
+                handler.headers = {'Content-Length': str(len(body))}
+                handler.rfile = io.BytesIO(body)
+                handler.do_POST()
+                self.assertEqual(handler.send_json.call_args.args[1], 400)
+                self.assertIn('AP SSID is set at flash', handler.send_json.call_args.args[0]['error'])
+                local.assert_not_called()
+                broadcast.assert_not_called()
+
+    def test_admin_status_exposes_full_ap_name_and_keeps_base_separate(self):
+        with patch.object(status, 'load_kv_file', return_value={'lan_ap_ssid': 'EUD'}), \
+                patch.object(status, 'parse_registry', return_value={}), \
+                patch.object(status, 'get_pending_config', return_value=None), \
+                patch.object(status, 'authenticated_config_acks', return_value={}), \
+                patch.object(status, 'config_application_status', return_value=None), \
+                patch.object(status, 'read_rollback_state', return_value={}), \
+                patch('manet_eud_ap.configured_ssid', return_value='EUD-5cc2'):
+            config = status.assemble_admin_status()['current_config']
+        self.assertEqual(config['lan_ap_ssid'], 'EUD')
+        self.assertEqual(config['ap_ssid'], 'EUD-5cc2')
+
+    def test_unchanged_ap_name_does_not_block_password_change(self):
+        with patch.object(status, 'load_kv_file', return_value={
+                'admin_password': 'test', 'lan_ap_ssid': 'EUD'}), \
+                patch.object(status, 'is_allowed_ip', return_value=True), \
+                patch.object(status, 'apply_local_settings') as local, \
+                patch.object(status, 'broadcast_config_package') as broadcast:
+            handler = self.handler('/api/admin/stage', authenticated=True)
+            body = json.dumps({'config': {'lan_ap_ssid': 'EUD',
+                                         'lan_ap_key': 'newpassword'}}).encode()
+            handler.headers = {'Content-Length': str(len(body))}
+            handler.rfile = io.BytesIO(body)
+            handler.do_POST()
+            self.assertTrue(handler.send_json.call_args.args[0]['local_only'])
+            local.assert_called_once_with({'lan_ap_key': 'newpassword'}, status.MESH_CONF_FILE)
+            broadcast.assert_not_called()
+
+    def test_operator_name_set_and_clear_are_local_without_clock_sync(self):
+        """The authenticated form changes only this radio's label."""
+        self.clock_marker.unlink()
+        for name in ('Team Lead', ''):
+            with self.subTest(name=name), \
+                    patch.object(status, 'load_kv_file', return_value={
+                        'admin_password': 'test', 'operator_name': 'Old'}), \
+                    patch.object(status, 'is_allowed_ip', return_value=True), \
+                    patch.object(status, 'apply_local_settings') as local, \
+                    patch.object(status, 'broadcast_config_package') as send:
+                handler = self.handler('/api/admin/stage', authenticated=True)
+                body = json.dumps({'config': {'operator_name': name}}).encode()
+                handler.headers = {'Content-Length': str(len(body))}
+                handler.rfile = io.BytesIO(body)
+                handler.do_POST()
+                reply = handler.send_json.call_args.args[0]
+                self.assertTrue(reply['ok'] and reply['local_only'])
+                local.assert_called_once_with({'operator_name': name},
+                                              status.MESH_CONF_FILE)
+                send.assert_not_called()
 
 
 if __name__ == '__main__':

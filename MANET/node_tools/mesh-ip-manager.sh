@@ -743,10 +743,6 @@ configure_dnsmasq() {
     fi
 
     log "Configuring dnsmasq: pool=$dhcp_start-$dhcp_end, gateway=$br0_secondary"
-    # Pool/gateway changes invalidate old EUD leases. Keeping them can make the
-    # dashboard or downstream clients try stale EUD IPs such as old ATAK peers.
-    rm -f /var/lib/misc/dnsmasq.leases /run/dnsmasq.leases /tmp/dnsmasq.leases 2>/dev/null || true
-
     temporary=$(mktemp /etc/dnsmasq.d/.mesh-eud.conf.XXXXXX) || return 1
     if ! cat > "$temporary" <<- EOF
 # Listen only on br0 bridge
@@ -783,6 +779,21 @@ EOF
     then
         rm -f "$temporary"
         return 1
+    fi
+    # Reclaiming the same allocation can reach this function again during an
+    # uplink/EUD transition. Identical content needs neither restart nor lease
+    # deletion. DNS server changes arrive through resolv-file automatically.
+    if cmp -s "$temporary" /etc/dnsmasq.d/mesh-eud.conf; then
+        rm -f "$temporary"
+        ensure_dnsmasq_running || return 1
+        update_avahi_host "$br0_secondary" "$dhcp_start"
+        return $?
+    fi
+    # Only a changed pool/gateway invalidates leases. DNS/format corrections
+    # still require a restart (SIGHUP does not reload dnsmasq configuration).
+    if [ "$old_gateway" != "$br0_secondary" ] ||
+            ! grep -Fxq "dhcp-range=$dhcp_start,$dhcp_end,4m" /etc/dnsmasq.d/mesh-eud.conf; then
+        rm -f /var/lib/misc/dnsmasq.leases /run/dnsmasq.leases /tmp/dnsmasq.leases 2>/dev/null || true
     fi
     if ! chmod 0644 "$temporary" || ! mv -f "$temporary" /etc/dnsmasq.d/mesh-eud.conf; then
         rm -f "$temporary"

@@ -17,13 +17,16 @@ OWN = '02:00:00:00:00:01'
 
 
 class BootPipelineTests(unittest.TestCase):
-    def run_manager(self, name, lobby=True, fail_publish='', missing_id=False):
+    def run_manager(self, name, lobby=True, fail_publish='', missing_id=False,
+                    operator_name=''):
         with tempfile.TemporaryDirectory(prefix='manet-boot-pipeline-') as scratch:
             root = Path(scratch)
             for directory in ('bin', 'run', 'etc', 'tools', 'net/br0'):
                 (root / directory).mkdir(parents=True)
             (root / 'net/br0/address').write_text(OWN)
             (root / 'clock').write_text('0')
+            (root / 'etc/mesh.conf').write_text(
+                f'operator_name={operator_name}\n')
             env = dict(os.environ, TEST_ROOT=str(root), TEST_TOOLS=str(TOOLS),
                        TEST_FAIL_PUBLISH=fail_publish, TEST_MISSING_ID=str(int(missing_id)),
                        TEST_LOBBY='true' if lobby else 'false', MANET_TOOLS_DIR=str(TOOLS),
@@ -42,7 +45,12 @@ name = Path(sys.argv[0]).name
 def event(kind, **extra):
     with (root / 'events').open('a') as out:
         out.write(json.dumps(dict(kind=kind, now=now, **extra)) + '\n')
-if name == 'date':
+if name == 'encode':
+    args = sys.argv[1:]
+    if args[0] == 'telemetry':
+        args += ['--mesh-config', str(root / 'etc/mesh.conf')]
+    os.execv(sys.executable, [sys.executable, str(tools / 'encoder.py'), *args])
+elif name == 'date':
     print(1000 + now if sys.argv[1:] == ['+%s'] else 'fixture-clock')
 elif name == 'cert-id':
     event('syncthing-id')
@@ -60,11 +68,16 @@ elif name == 'alfred':
         sys.exit(1)
     (root / ('published-' + kind)).write_text(payload)
     address = 0
+    operator = ''
     if kind == '67':
         ident = NodeInfo_pb2.NodeIdentity()
         ident.ParseFromString(base64.b64decode(payload))
         address = ident.ipv4_address
-    event('publish', record=kind, address=address)
+    else:
+        telemetry = NodeInfo_pb2.NodeTelemetry()
+        telemetry.ParseFromString(base64.b64decode(payload))
+        operator = telemetry.atak_user
+    event('publish', record=kind, address=address, operator=operator)
 elif name == 'tick':
     event('sleep', seconds=int(sys.argv[1]))
     (root / 'clock').write_text(str(now + int(sys.argv[1])))
@@ -101,7 +114,8 @@ elif name == 'allocate':
         chunk.write_text('0\n')
         event('allocated')
 '''
-            for command in ('date', 'cert-id', 'alfred', 'tick', 'allocate', 'throughput'):
+            for command in ('date', 'cert-id', 'alfred', 'tick', 'allocate',
+                            'throughput', 'encode'):
                 path = root / 'bin' / command
                 path.write_text(tool)
                 path.chmod(0o755)
@@ -116,7 +130,7 @@ elif name == 'allocate':
             overrides = r'''
 MY_MAC=02:00:00:00:00:01
 IP_MANAGER="$TEST_ROOT/bin/allocate"
-ENCODER_PATH="$TEST_TOOLS/encoder.py"
+ENCODER_PATH="$TEST_ROOT/bin/encode"
 RADIO_STATE_SYNC=''; CONFIG_SYNC=''; CONFIG_ROLLBACK=''
 THROUGHPUT_MEAN="$TEST_ROOT/bin/throughput"
 QUORUM_CHECKER=''; LIMP_MODE_MANAGER=''; CHANNEL_ELECTION=''; TOURGUIDE_MANAGER=''
@@ -157,6 +171,19 @@ sleep() {
             identity = NodeInfo_pb2.NodeIdentity()
             identity.ParseFromString(base64.b64decode((root / 'published-67').read_text()))
             return events, identity
+
+    def test_operator_name_reaches_static_and_both_acs_publications(self):
+        """Decode real manager publications in static, lobby and data modes."""
+        for manager, lobby in (('node-manager-static.sh', True),
+                               ('node-manager-acs.sh', True),
+                               ('node-manager-acs.sh', False)):
+            with self.subTest(manager=manager, lobby=lobby):
+                events, _ = self.run_manager(manager, lobby,
+                                            operator_name='Team Lead <A>')
+                names = [e['operator'] for e in events
+                         if e['kind'] == 'publish' and e['record'] == '68']
+                self.assertTrue(names)
+                self.assertEqual(set(names), {'Team Lead <A>'})
 
     def test_first_pass_starts_discovery_and_claim_publication_does_not_sleep(self):
         for name, lobby in (('node-manager-static.sh', True),

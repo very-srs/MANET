@@ -6,7 +6,7 @@ ConditionPathExists=/usr/local/bin/ethernet-autodetect.sh
 
 [Service]
 Type=oneshot
-ExecStart=/usr/local/bin/ethernet-autodetect.sh --hotplug
+ExecStart=/usr/local/bin/ethernet-autodetect.sh --hotplug --iface end0
 TimeoutStartSec=240
 
 [Install]

@@ -178,6 +178,7 @@ class ManageRadioTests(unittest.TestCase):
         return {
             'nodes': [{
                 'id': 'self', 'hostname': 'cm4', 'ip': '10.42.0.1',
+                'operator': '',
                 'is_me': True, 'is_gateway': False, 'gateway_iface': '',
                 'battery': '80', 'uptime': '1h07m',
                 'interfaces': {

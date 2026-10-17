@@ -240,7 +240,7 @@ else
     echo "AP Interface: none configured"
 fi
 
-if [ -f /var/run/mesh-gateway.state ]; then
+if [ -f /var/run/manet-uplink/mesh-gateway.state ]; then
     echo "Gateway Mode: ACTIVE (internet uplink on end0)"
 else
     echo "Gateway Mode: inactive"

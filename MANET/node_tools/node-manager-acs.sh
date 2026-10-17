@@ -105,7 +105,7 @@ log() {
 # === GATEWAY DETECTION ===
 # Gateway state is owned by manet-uplink-dispatch.sh. Node manager only
 # asks it to reconcile periodically before publishing status to Alfred.
-GATEWAY_STATE_FILE="/var/run/mesh-gateway.state"
+GATEWAY_STATE_FILE="/var/run/manet-uplink/mesh-gateway.state"
 LAST_GW_CHECK=$NEVER
 GW_CHECK_INTERVAL=60
 
@@ -999,7 +999,7 @@ while true; do
             
             # Service flags
             detect_and_update_gateway_state
-            IS_GATEWAY_FLAG=$([ -f /var/run/mesh-gateway.state ] && echo "--is-internet-gateway" || echo "")
+            IS_GATEWAY_FLAG=$([ -f /var/run/manet-uplink/mesh-gateway.state ] && echo "--is-internet-gateway" || echo "")
             GATEWAY_IFACE=$(cat /var/run/upstream_iface 2>/dev/null || echo "")
             IS_NTP_FLAG=$(is_ntp_time_source && echo "--is-ntp-server" || echo "")
             IS_MEDIAMTX_FLAG=$(is_hosting_service && echo "--is-mediamtx-server" || echo "")
@@ -1136,7 +1136,7 @@ while true; do
 
             # Service flags
             detect_and_update_gateway_state
-            IS_GATEWAY_FLAG=$([ -f /var/run/mesh-gateway.state ] && echo "--is-internet-gateway" || echo "")
+            IS_GATEWAY_FLAG=$([ -f /var/run/manet-uplink/mesh-gateway.state ] && echo "--is-internet-gateway" || echo "")
             GATEWAY_IFACE=$(cat /var/run/upstream_iface 2>/dev/null || echo "")
             IS_NTP_FLAG=$(is_ntp_time_source && echo "--is-ntp-server" || echo "")
             IS_MEDIAMTX_FLAG=$(is_hosting_service && echo "--is-mediamtx-server" || echo "")

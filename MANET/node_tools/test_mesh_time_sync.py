@@ -260,7 +260,8 @@ with (root / 'commands').open('a') as out:
         (self.root / 'gps_status.json').write_text(json.dumps(status))
 
     def uplink(self):
-        (self.root / 'mesh-gateway.state').touch()
+        (self.root / 'manet-uplink').mkdir(exist_ok=True)
+        (self.root / 'manet-uplink/mesh-gateway.state').touch()
         (self.root / 'upstream_iface').write_text('usb0')
         (self.root / 'net/usb0').mkdir(exist_ok=True)
         (self.root / 'net/usb0/carrier').write_text('1')
@@ -586,7 +587,7 @@ with (root / 'commands').open('a') as out:
                 self.service.state = {}
                 self.service.marker.unlink(missing_ok=True)
                 (self.root / 'gps_status.json').unlink(missing_ok=True)
-                (self.root / 'mesh-gateway.state').unlink(missing_ok=True)
+                (self.root / 'manet-uplink/mesh-gateway.state').unlink(missing_ok=True)
                 self.step(); new_role(); self.good('GPS' if new_role == self.gps else '192.0.2.1', '#' if new_role == self.gps else '^')
                 (self.root / 'commands').write_text('')
                 self.step(2)

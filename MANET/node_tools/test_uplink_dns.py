@@ -64,7 +64,7 @@ class UplinkDnsTests(unittest.TestCase):
 
     def promote(self):
         """Publish the same gateway marker used by the dispatcher."""
-        self.write('run/mesh-gateway.state', '')
+        self.write('run/manet-uplink/mesh-gateway.state', '')
 
     def applied(self):
         """Read the runtime configuration visible to resolved."""
@@ -84,7 +84,7 @@ class UplinkDnsTests(unittest.TestCase):
         self.assertIn('DNS=192.168.69.1\n', self.applied())
         self.assertNotIn('%', self.applied())
         self.assertIn('Domains=lab.example lan.example\n', self.applied())
-        (self.root / 'run/mesh-gateway.state').unlink()
+        (self.root / 'run/manet-uplink/mesh-gateway.state').unlink()
         dns.reconcile_dns(self.root, self.command)
         self.assertNotIn('192.168.69.1', self.applied())
         dns.reconcile_dns(self.root, self.command)
@@ -114,7 +114,7 @@ class UplinkDnsTests(unittest.TestCase):
         lines = path.read_text().splitlines()
         watched = {line.partition('=')[2] for line in lines
                    if line.startswith('PathChanged=')}
-        self.assertEqual(watched, {'/run/mesh-gateway.state',
+        self.assertEqual(watched, {'/run/manet-uplink/mesh-gateway.state',
                                    '/run/upstream_iface',
                                    '/run/systemd/netif/leases'})
 
@@ -279,7 +279,7 @@ class UplinkDnsTests(unittest.TestCase):
         sock.connect.assert_called_once_with(('192.168.69.1', 53))
         self.assertIn(wire_name('cp.cloudflare.com'),
                       sock.send.call_args.args[0])
-        self.assertFalse((self.root / 'run/mesh-gateway.state').exists())
+        self.assertFalse((self.root / 'run/manet-uplink/mesh-gateway.state').exists())
         self.assertFalse((self.root / 'run/systemd/resolved.conf.d').exists())
 
     def test_truncated_dns_retries_tcp_on_same_device(self):

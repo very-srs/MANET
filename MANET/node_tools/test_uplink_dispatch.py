@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""manet-uplink-dispatch.sh against a simulated node: wired-EUD protection."""
+"""Simulate uplink priority, gateway transitions and wired-EUD protection."""
 
 import fcntl
+import json
 import os
 import shutil
 from pathlib import Path
@@ -9,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 
 
@@ -36,7 +38,21 @@ case "$(basename "$0")" in
   ip)
     case "$*" in
       "-4 -o addr show dev "*) f="$T/addr/${@: -1}"; [ -f "$f" ] && echo "2: ${@: -1} inet $(cat "$f")/24 brd x scope global" ;;
-      "route show default dev "*) f="$T/gw/${@: -1}"; [ -f "$f" ] && echo "default via $(cat "$f") dev ${@: -1}" ;;
+      "route show default dev "*|"-4 route show default dev "*)
+        f="$T/gw/${@: -1}"
+        [ ! -f "$f" ] || echo "default via $(cat "$f") dev ${@: -1}" ;;
+      "route get 1.1.1.1")
+        [ ! -f "$T/primary" ] ||
+          echo "1.1.1.1 dev $(cat "$T/primary")" ;;
+      "route replace default "*)
+        for ((i=1; i<=$#; i++)); do
+          if [ "${!i}" = dev ]; then
+            j=$((i+1)); echo "${!j}" > "$T/primary"
+          fi
+        done ;;
+      "route del default dev "*)
+        [ "$(cat "$T/primary" 2>/dev/null)" != "$5" ] ||
+          rm -f "$T/primary" ;;
       "route show default") for f in "$T"/gw/*; do [ -f "$f" ] && echo "default via $(cat "$f") dev $(basename "$f")"; done ;;
       "link show "*) i="${@: -1}"; [ -L "$T/net/$i/master" ] && echo "3: $i: <UP> master $(basename "$(readlink "$T/net/$i/master")")" || echo "3: $i: <UP>" ;;
       "link set "*" nomaster") rm -f "$T/net/$3/master" ;;
@@ -49,6 +65,8 @@ case "$(basename "$0")" in
     esac ;;
   ping) for a in "$@"; do [ -f "$T/internet/$a" ] && exit 0; done; exit 1 ;;
   curl)
+    # Separate bandwidth transfer from connectivity probes.
+    [[ "$*" != *size_download* ]] || { echo '200 5000000 0.2 1.0'; exit 0; }
     while [ $# -gt 0 ]; do
       if [ "$1" = --interface ]; then iface="$2"; break; fi
       shift
@@ -73,7 +91,7 @@ class DispatchHarness(unittest.TestCase):
                      'networkd', 'bus/usb', 'http-code'):
             (self.root / name).mkdir(parents=True)
         for tool in ('ip', 'systemctl', 'batctl', 'networkctl', 'nft', 'ping', 'curl', 'nc',
-                     'systemd-cat', 'mesh-ip-manager'):
+                     'systemd-cat', 'mesh-ip-manager', 'usb-wifi-uplink.sh'):
             path = self.root / 'bin' / tool
             path.write_text(STUB)
             path.chmod(0o755)
@@ -130,7 +148,8 @@ class DispatchHarness(unittest.TestCase):
                          ('/etc/radvd-mesh.conf', root + '/radvd-mesh.conf'),
                          ('/etc/radvd-gateway.conf', root + '/radvd-gateway.conf'),
                          ('/etc/radvd.conf', root + '/radvd.conf'),
-                         ('/usr/local/bin/mesh-ip-manager.sh', root + '/bin/mesh-ip-manager')):
+                         ('/usr/local/bin/mesh-ip-manager.sh', root + '/bin/mesh-ip-manager'),
+                         ('/usr/local/bin/usb-wifi-uplink.sh', root + '/bin/usb-wifi-uplink.sh')):
             source = source.replace(old, new)
             common = common.replace(old, new)
         (self.root / 'manet-common.sh').write_text(common)
@@ -140,6 +159,9 @@ class DispatchHarness(unittest.TestCase):
         script.write_text(source)
         env = dict(os.environ, REVIEW_ROOT=root, MANET_TOOLS_DIR=root,
                    PATH=os.pathsep.join((str(self.root / 'bin'), os.environ['PATH'])),
+                   PYTHONPATH=str(TOOLS), MANET_MESH_CONF=str(self.root / 'mesh.conf'),
+                   MANET_WIFI_UPLINK_CONFIG=str(self.root / 'wifi-uplink.json'),
+                   MANET_USB_WIFI_UPLINK_CONFIG=str(self.root / 'usb-wifi-uplink.conf'),
                    MANET_ETH_DETECT_LOCK=str(self.eth_lock),
                    MANET_AP_MESH_HELPER=str(self.root / 'bin' / 'manet_ap_mesh.py'),
                    MANET_UPLINK_SPEED=str(self.root / 'bin' / 'uplink-speed'))
@@ -158,6 +180,17 @@ class DispatchHarness(unittest.TestCase):
 
 
 class WiredEudTests(DispatchHarness):
+    def test_scan_role_lock_defers_dispatcher_hostapd_start(self):
+        self.mode('wireless')
+        with (self.root / 'run/manet-ap-role.lock').open('a') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self.dispatch()
+        self.assertNotIn('systemctl start hostapd.service',
+                         self.calls.read_text())
+        self.dispatch()
+        self.assertIn('systemctl start hostapd.service',
+                      self.calls.read_text())
+
     def wired_eud(self):
         self.iface('end0', bridged=True)
         self.eth_state('WIRED_EUD')
@@ -350,7 +383,7 @@ printf '%s\\n' 198.51.100.10
         calls = self.dispatch(extra_env=self.env)
         self.assertIn('systemctl start hostapd.service', calls)
         self.assertIn('systemctl restart gateway-route-manager.service', calls)
-        self.assertIn('uplink-speed measure end0', calls)
+        self.assertIn('systemctl --no-block start manet-uplink-measure@end0.service', calls)
         self.assertIn('UPLINK_MODE=gateway',
                       (self.root / 'run/manet-uplink.env').read_text())
 
@@ -385,7 +418,7 @@ printf '%s\\n' 198.51.100.10
                 (self.root / 'http-code/end0').write_text(code)
                 calls = self.dispatch('provision', extra_env=self.env)
                 self.assert_no_radio_actions(calls)
-                marker = self.root / 'run/mesh-gateway.state'
+                marker = self.root / 'run/manet-uplink/mesh-gateway.state'
                 self.assertFalse(marker.exists())
                 self.assertNotIn('DNS=192.168.1.1', self.dns.read_text())
 
@@ -425,10 +458,24 @@ class SpeedGateTests(DispatchHarness):
     def test_ethernet_gateway_announces_its_measured_speed(self):
         self.uplink('end0')
         calls = self.dispatch()
-        self.assertIn('uplink-speed measure end0', calls)
+        self.assertIn('systemctl --no-block start manet-uplink-measure@end0.service', calls)
         self.assertIn('uplink-speed announce end0', calls)
         self.assertNotIn('batctl gw_mode server', calls)
         self.assertEqual((self.root / 'run' / 'upstream_iface').read_text().strip(), 'end0')
+
+    def test_promotion_does_not_wait_for_a_bandwidth_download(self):
+        """A slow transfer cannot delay forwarding or hold policy locks."""
+        self.uplink('end0')
+        speed = self.root / 'bin/uplink-speed'
+        speed.write_text(SPEED_STUB.replace('if [ "$1" = measure ]; then',
+                                            'if [ "$1" = measure ]; then\n  sleep 2'))
+        started = time.monotonic()
+        calls = self.dispatch()
+        elapsed = time.monotonic() - started
+        self.assertLess(elapsed, 1.5)
+        self.assertNotIn('uplink-speed measure end0', calls)
+        self.assertIn('systemctl --no-block start manet-uplink-measure@end0.service', calls)
+        self.assertTrue((self.root / 'run/manet-uplink/mesh-gateway.state').exists())
 
     def test_unknown_speed_is_promoted_and_retried_without_duplicate_logs(self):
         """TLS failure and its cooldown do not demote a connected Ethernet."""
@@ -436,7 +483,7 @@ class SpeedGateTests(DispatchHarness):
         for rc in ('1', '3', '0'):
             (self.root / 'speed-rc' / 'end0').write_text(rc)
             calls = self.dispatch()
-            self.assertTrue((self.root / 'run/mesh-gateway.state').exists())
+            self.assertTrue((self.root / 'run/manet-uplink/mesh-gateway.state').exists())
             self.assertIn('uplink-speed announce end0', calls)
         journal = (self.root / 'journal').read_text()
         self.assertEqual(journal.count('Promoted end0'), 1)
@@ -448,7 +495,7 @@ class SpeedGateTests(DispatchHarness):
         for code in ('200', '302'):
             (self.root / 'http-code/end0').write_text(code)
             calls = self.dispatch()
-            self.assertFalse((self.root / 'run/mesh-gateway.state').exists())
+            self.assertFalse((self.root / 'run/manet-uplink/mesh-gateway.state').exists())
             self.assertNotIn('uplink-speed measure end0', calls)
             self.assertFalse(any(c.startswith('ping ') for c in calls))
             probes = [c for c in calls if c.startswith('curl ')]
@@ -462,7 +509,7 @@ class SpeedGateTests(DispatchHarness):
         (self.root / 'internet/end0').unlink()
         self.calls.unlink()
         calls = self.dispatch()
-        self.assertFalse((self.root / 'run/mesh-gateway.state').exists())
+        self.assertFalse((self.root / 'run/manet-uplink/mesh-gateway.state').exists())
         self.assertIn('ip route del default dev end0 metric 100', calls)
         self.assertIn('systemctl restart gateway-route-manager.service', calls)
         self.assertIn('batctl gw_mode client', calls)
@@ -477,6 +524,342 @@ class SpeedGateTests(DispatchHarness):
         self.assertEqual((self.root / 'run' / 'upstream_iface').read_text().strip(), 'usb0')
 
 
+class UplinkPriorityTests(DispatchHarness):
+    """Exercise uplink selection and the real BATMAN bandwidth helper."""
+
+    def setUp(self):
+        """Use real device classification and keep AP policy out of the test."""
+        super().setUp()
+        self.mode('wired')
+        (self.root / 'ap_interface').write_text('')
+        self.env = {
+            # The off hook launches the staged dispatcher in a fresh process.
+            # Supply its Python dependencies and isolated profiles too.
+            'PYTHONPATH': str(TOOLS),
+            'MANET_MESH_CONF': str(self.root / 'mesh.conf'),
+            'MANET_WIFI_UPLINK_CONFIG': str(self.root / 'wifi-uplink.json'),
+            'MANET_USB_WIFI_UPLINK_CONFIG': str(self.root / 'usb-wifi-uplink.conf'),
+            'MANET_UPLINK_SPEED': str(TOOLS / 'manet-uplink-speed.sh'),
+            'MANET_SYS_NET': str(self.root / 'net'),
+            'MANET_RUN_DIR': str(self.root / 'run'),
+            'MANET_IFACE_STATE_DIR': str(self.root),
+        }
+
+    def uplink(self, name, driver='r8152', usb=False):
+        """Supply carrier, driver identity, DHCP and a working internet path."""
+        self.iface(name, usb=usb)
+        path = self.root / 'net' / name
+        (path / 'device').mkdir(exist_ok=True)
+        (path / 'device/driver').symlink_to('/drivers/' + driver)
+        (path / 'type').write_text('1\n')
+        if name.startswith('wlan'):
+            (path / 'wireless').mkdir()
+            if name in ('wlan0', 'wlan1'):
+                (self.root / 'wifi_uplink_if').write_text(name + '\n')
+        (self.root / 'addr' / name).write_text('192.168.1.20')
+        (self.root / 'gw' / name).write_text('192.168.1.1')
+        (self.root / 'internet' / name).touch()
+
+    def run_event(self, event='reconcile', iface=''):
+        """Finish the dispatcher, then run its queued systemd worker."""
+        self.calls.unlink(missing_ok=True)
+        calls = self.dispatch(event, iface, extra_env=self.env)
+        for call in calls:
+            if call.startswith('systemctl --no-block start manet-uplink-measure@'):
+                target = call.split('@', 1)[1].removesuffix('.service')
+                result = subprocess.run(
+                    ['bash', str(TOOLS / 'manet-uplink-speed.sh'), 'refresh', target],
+                    env=dict(os.environ, **self.env, REVIEW_ROOT=str(self.root),
+                             PATH=str(self.root / 'bin') + ':' + os.environ['PATH']),
+                    capture_output=True, text=True, timeout=10)
+                self.assertEqual(result.returncode, 0, result.stderr)
+        return self.calls.read_text().splitlines()
+
+    def assert_primary(self, iface):
+        """The route and both saved interface records must agree."""
+        self.assertEqual((self.root / 'primary').read_text().strip(), iface)
+        saved = (self.root / 'run/upstream_iface').read_text().strip()
+        self.assertEqual(saved, iface)
+        self.assertIn(f'UPLINK_IFACE={iface}\n',
+                      (self.root / 'run/manet-uplink.env').read_text())
+        self.assertTrue((self.root / 'run/manet-uplink/mesh-gateway.state').exists())
+
+    def assert_switch(self, calls, old, new, bandwidth):
+        """A switch must move forwarding, DNS and the explicit advertisement."""
+        self.assert_primary(new)
+        self.assertIn(f'ip route del default dev {old} metric 100', calls)
+        self.assertIn('nft add rule ip nat postrouting '
+                      f'oifname {new} masquerade', calls)
+        self.assertIn('systemctl start manet-uplink-dns.service', calls)
+        self.assertIn('systemctl restart gateway-route-manager.service', calls)
+        self.assertIn(f'batctl gw_mode server {bandwidth}', calls)
+
+    def test_own_hotspot_never_promoted_even_before_client_cleanup(self):
+        conf = self.root / 'mesh.conf'
+        conf.write_text(conf.read_text() + 'lan_ap_ssid=EUD\n')
+        for iface in ('wlan0', 'wlan1', 'wlan4'):
+            with self.subTest(iface=iface):
+                self.uplink(iface, driver='mt76x2u' if iface == 'wlan4' else 'mt7915e',
+                            usb=iface == 'wlan4')
+                (self.root / 'wifi-uplink.json').write_text(json.dumps(
+                    {'enabled': True, 'iface': iface, 'ssid': 'EUD-5cc2'}))
+                (self.root / 'usb-wifi-uplink.conf').write_text('enabled=1\nssid=EUD-5cc2\n')
+                calls = self.run_event('routable', iface)
+                self.assertFalse(any(c.startswith('batctl gw_mode server') for c in calls))
+                self.assertFalse(any(c.startswith('ip route replace default') for c in calls))
+                self.assertFalse((self.root / 'run/upstream_iface').exists())
+                if iface == 'wlan4':
+                    self.assertIn('usb-wifi-uplink.sh disconnect wlan4', calls)
+                shutil.rmtree(self.root / 'net' / iface)
+
+    def test_own_usb_hotspot_is_disconnected_even_with_working_ethernet(self):
+        conf = self.root / 'mesh.conf'
+        conf.write_text(conf.read_text() + 'lan_ap_ssid=EUD\n')
+        self.uplink('end0', driver='st_gmac')
+        self.uplink('wlan4', driver='mt76x2u', usb=True)
+        (self.root / 'usb-wifi-uplink.conf').write_text('enabled=1\nssid=EUD-5cc2\n')
+        calls = self.run_event()
+        self.assert_primary('end0')
+        self.assertIn('usb-wifi-uplink.sh disconnect wlan4', calls)
+
+    def test_shared_ap_start_waits_for_follower_after_role_lock_released(self):
+        self.mode('wireless')
+        self.uplink('wlan1', driver='mt7915e')
+        (self.root / 'ap_interface').write_text('manetap\n')
+        calls = self.run_event()
+        self.assertNotIn('systemctl start hostapd.service', calls)
+        self.assert_primary('wlan1')
+
+    def test_wifi_events_cannot_displace_working_ethernet(self):
+        """Keep Ethernet for both built-in bands and a USB Wi-Fi event."""
+        self.uplink('end0', driver='st_gmac')
+        self.run_event()
+        for wifi in ('wlan0', 'wlan1', 'wlan4'):
+            self.uplink(wifi, driver='mt7915e', usb=wifi == 'wlan4')
+            with self.subTest(wifi=wifi):
+                calls = self.run_event('routable', wifi)
+                self.assert_primary('end0')
+                self.assertIn('batctl gw_mode server '
+                              '50000kbit/10000kbit', calls)
+                self.assertNotIn('systemctl restart '
+                                 'gateway-route-manager.service', calls)
+                self.assertFalse(any(c.startswith('ping ') for c in calls))
+
+    def test_reconcile_replaces_wifi_with_working_ethernet(self):
+        """Promote recovered Ethernet even while Wi-Fi still works."""
+        self.uplink('wlan1', driver='mt7915e')
+        self.run_event()
+        self.uplink('end0', driver='st_gmac')
+        calls = self.run_event()
+        self.assert_switch(calls, 'wlan1', 'end0', '50000kbit/10000kbit')
+        self.assertTrue(any(c.startswith('curl ') and '--interface end0' in c
+                            and 'size_download' not in c for c in calls))
+
+    def test_usb_ethernet_also_preempts_wifi(self):
+        """Give a USB Ethernet adapter the same priority as end0."""
+        self.uplink('wlan1', driver='mt7915e')
+        self.run_event()
+        self.uplink('enx1234', usb=True)
+        calls = self.run_event('routable', 'wlan1')
+        self.assert_switch(calls, 'wlan1', 'enx1234', '50000kbit/10000kbit')
+
+    def test_ethernet_loss_falls_back_in_the_same_event(self):
+        """Restore Wi-Fi forwarding and its bandwidth on cable loss."""
+        self.uplink('end0', driver='st_gmac')
+        self.run_event()
+        self.uplink('wlan1', driver='mt7915e')
+        (self.root / 'net/end0/carrier').write_text('0\n')
+        calls = self.run_event('no-carrier', 'end0')
+        self.assert_switch(calls, 'end0', 'wlan1', '10000kbit/2000kbit')
+        self.assertNotIn('networkctl reconfigure wlan1', calls)
+
+    def off_event(self, iface='end0', held=0, force=0):
+        """Run the actual packaged hook against the staged dispatcher."""
+        source = (TOOLS.parent / 'networkd-dispatcher/off').read_text()
+        source = source.replace('/var/run/', '/run/')
+        root = str(self.root)
+        for old, new in (
+                ('/sys/class/net', root + '/net'), ('/run/', root + '/run/'),
+                ('/etc/mesh.conf', root + '/mesh.conf'),
+                ('/var/lib/', root + '/'),
+                ('/etc/systemd/network', root + '/networkd'),
+                ('/etc/', root + '/etc/'),
+                ('/usr/local/bin/manet-uplink-dispatch.sh',
+                 root + '/dispatch.sh'),
+                ('/usr/local/bin/manet-uplink-speed.sh',
+                 str(TOOLS / 'manet-uplink-speed.sh')),
+                ('/usr/local/bin/mesh-ip-manager.sh',
+                 root + '/bin/mesh-ip-manager')):
+            source = source.replace(old, new)
+        script = self.root / 'off.sh'
+        script.write_text(source)
+        (self.root / 'dispatch.sh').chmod(0o755)
+        self.calls.unlink(missing_ok=True)
+        result = subprocess.run(
+            ['bash', str(script)], capture_output=True, text=True, timeout=15,
+            env=dict(os.environ, **self.env, REVIEW_ROOT=root, IFACE=iface,
+                     MANET_TOOLS_DIR=root, MANET_ETH_LOCK_HELD=str(held),
+                     MANET_ETH_FORCE_CLEANUP=str(force),
+                     PATH=root + '/bin:' + os.environ['PATH']))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = self.calls.read_text().splitlines() if self.calls.exists() else []
+        return calls
+
+    def test_packaged_unplug_hook_promotes_before_slow_cleanup(self):
+        """A real unplug must promote standby Wi-Fi without a periodic tick."""
+        self.mode('auto')
+        with (self.root / 'mesh.conf').open('a') as config:
+            config.write('acs=y\n')
+        (self.root / 'ap_interface').write_text('ap0\n')
+        for unit in ('hostapd.service', 'dnsmasq.service'):
+            (self.root / 'active' / unit).touch()
+        self.uplink('end0', driver='st_gmac')
+        self.run_event()
+        self.uplink('wlan1', driver='mt7915e')
+        (self.root / 'net/end0/carrier').write_text('0\n')
+        calls = self.off_event()
+        self.assert_switch(calls, 'end0', 'wlan1', '10000kbit/2000kbit')
+        self.assertLess(calls.index('nft add rule ip nat postrouting oifname wlan1 masquerade'),
+                        calls.index('networkctl reconfigure end0'))
+        self.assertNotIn('systemctl stop dnsmasq.service', calls)
+        self.assertNotIn('batctl gw_mode client', calls)
+        self.assertNotIn('systemctl start hostapd.service', calls)
+        self.assertNotIn('ap-mesh-helper mesh', calls)
+
+    def test_detector_owned_unplug_uses_the_inherited_policy_lock(self):
+        """Nested detector cleanup must complete without releasing its lock."""
+        self.uplink('end0', driver='st_gmac')
+        self.run_event()
+        self.uplink('wlan1', driver='mt7915e')
+        (self.root / 'net/end0/carrier').write_text('0\n')
+        with self.eth_lock.open('a') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            calls = self.off_event(held=1)
+        self.assert_switch(calls, 'end0', 'wlan1', '10000kbit/2000kbit')
+        self.assertNotIn('batctl gw_mode client', calls)
+
+    def test_unplug_ignores_restored_carrier_and_wireless_events(self):
+        """Saved Wi-Fi state never authorizes tearing down that interface."""
+        self.uplink('wlan1', driver='mt7915e')
+        self.run_event()
+        self.uplink('end0', driver='st_gmac')
+        for iface in ('end0', 'wlan1'):
+            self.assertEqual(self.off_event(iface), [])
+            self.assert_primary('wlan1')
+        self.run_event()
+        (self.root / 'net/end0/carrier').write_text('0\n')
+        ping = self.root / 'bin/ping'
+        ping.write_text(ping.read_text().replace('  ping)',
+                        '  ping) echo 1 > "$T/net/end0/carrier";'))
+        calls = self.off_event()
+        self.assert_primary('wlan1')
+        self.assertNotIn('ip addr flush dev end0', calls)
+        self.assertNotIn('networkctl reconfigure end0', calls)
+
+    def test_forced_no_internet_cleanup_preserves_working_wifi(self):
+        """A failed cabled LAN with carrier must not be probed again here."""
+        self.uplink('end0', driver='st_gmac')
+        self.run_event()
+        self.uplink('wlan1', driver='mt7915e')
+        calls = self.off_event(force=1)
+        self.assert_switch(calls, 'end0', 'wlan1', '10000kbit/2000kbit')
+        self.assertFalse(any(c.startswith('curl ') and '--interface end0' in c
+                             for c in calls))
+
+    def test_ready_wifi_does_not_wait_for_a_second_ethernet_dhcp(self):
+        """An unaddressed standby must not add twelve seconds to failover."""
+        self.uplink('end0', driver='st_gmac')
+        self.run_event()
+        self.uplink('wlan1', driver='mt7915e')
+        self.uplink('enx1234', usb=True)
+        (self.root / 'addr/enx1234').unlink()
+        (self.root / 'net/end0/carrier').write_text('0\n')
+        calls = self.off_event()
+        self.assert_primary('wlan1')
+        self.assertNotIn('networkctl reconfigure enx1234', calls)
+
+    def test_switch_discards_only_old_address_nat_mappings(self):
+        """Scope conntrack deletion and leave same-address changes alone."""
+        tool = self.root / 'bin/conntrack'
+        tool.write_text(STUB)
+        tool.chmod(0o755)
+        self.uplink('end0', driver='st_gmac')
+        self.run_event()
+        self.uplink('wlan1', driver='mt7915e')
+        (self.root / 'addr/wlan1').write_text('192.0.2.40')
+        (self.root / 'net/end0/carrier').write_text('0\n')
+        calls = self.run_event('no-carrier', 'end0')
+        self.assertIn('conntrack -D -f ipv4 --src-nat --reply-dst 192.168.1.20', calls)
+        (self.root / 'net/end0/carrier').write_text('1\n')
+        (self.root / 'addr/end0').write_text('192.0.2.40')
+        calls = self.run_event()
+        self.assert_primary('end0')
+        self.assertFalse(any(c.startswith('conntrack ') for c in calls))
+
+    def test_wired_eud_never_becomes_preferred_even_with_stale_route(self):
+        """Exclude bridged EUD ports before probing or detaching them."""
+        self.uplink('wlan1', driver='mt7915e')
+        self.run_event()
+        self.uplink('end0', driver='st_gmac')
+        (self.root / 'net/end0/master').symlink_to('../br0')
+        self.eth_state('WIRED_EUD')
+        (self.root / 'primary').write_text('end0\n')
+        calls = self.run_event('routable', 'end0')
+        self.assert_primary('wlan1')
+        self.assert_eud_port_untouched(calls)
+        self.assertFalse(any(c.startswith(('curl ', 'ping ')) and
+                             'end0' in c for c in calls))
+        self.assertIn('ETH_MODE=WIRED_EUD',
+                      (self.root / 'run/ethernet_detection_state').read_text())
+
+    def test_current_ethernet_stays_when_another_ethernet_fires(self):
+        """Retain the working Ethernet incumbent within its class."""
+        self.uplink('enx1234', usb=True)
+        self.run_event()
+        self.uplink('end0', driver='st_gmac')
+        self.run_event('routable', 'end0')
+        self.assert_primary('enx1234')
+
+    def test_current_wifi_stays_when_another_wifi_fires(self):
+        """Retain the working Wi-Fi incumbent within its class."""
+        self.uplink('wlan1', driver='mt7915e')
+        self.run_event()
+        self.uplink('wlan4', driver='mt76x2u', usb=True)
+        self.run_event('routable', 'wlan4')
+        self.assert_primary('wlan1')
+
+    def test_usb_tether_sits_between_ethernet_and_wifi(self):
+        """Keep tether classification and skip bandwidth downloads."""
+        self.uplink('wlan1', driver='mt7915e')
+        self.run_event()
+        self.uplink('enxphone', driver='rndis_host', usb=True)
+        calls = self.run_event('routable', 'wlan1')
+        self.assert_switch(calls, 'wlan1', 'enxphone', '10000kbit/2000kbit')
+        self.assertFalse(any('size_download' in c for c in calls))
+        self.uplink('end0', driver='st_gmac')
+        calls = self.run_event('routable', 'enxphone')
+        self.assert_switch(calls, 'enxphone', 'end0', '50000kbit/10000kbit')
+
+    def test_carrier_with_portal_does_not_displace_working_wifi(self):
+        """Require HTTP 204 before Ethernet can take precedence."""
+        self.uplink('wlan1', driver='mt7915e')
+        self.run_event()
+        self.uplink('end0', driver='st_gmac')
+        (self.root / 'http-code/end0').write_text('302')
+        calls = self.run_event('routable', 'end0')
+        self.assert_primary('wlan1')
+        self.assertFalse(any('size_download' in c for c in calls))
+
+    def test_failed_ethernet_probe_falls_back_without_carrier_loss(self):
+        """Leave failed Ethernet when its cable still has carrier."""
+        self.uplink('end0', driver='st_gmac')
+        self.run_event()
+        self.uplink('wlan1', driver='mt7915e')
+        (self.root / 'internet/end0').unlink()
+        calls = self.run_event()
+        self.assert_switch(calls, 'end0', 'wlan1', '10000kbit/2000kbit')
+
+
 class AcsAutoModeTests(SpeedGateTests):
     """With ACS in auto mode, only a gateway serves the AP."""
     def setUp(self):
@@ -487,9 +870,20 @@ class AcsAutoModeTests(SpeedGateTests):
     def test_gateway_serves_the_ap(self):
         self.uplink('end0')
         calls = self.dispatch()
-        self.assertTrue((self.root / 'run' / 'mesh-gateway.state').exists())
+        self.assertTrue((self.root / 'run' / 'manet-uplink/mesh-gateway.state').exists())
         self.assertIn('systemctl start hostapd.service', calls)
         self.assertNotIn('ap-mesh-helper mesh', calls)
+
+    def test_explicit_builtin_client_is_an_uplink_without_usb_bus(self):
+        self.iface('wlan0')
+        (self.root / 'addr/wlan0').write_text('192.168.50.10')
+        (self.root / 'internet/wlan0').touch()
+        (self.root / 'wifi_uplink_if').write_text('wlan0\n')
+        calls = self.dispatch('routable', 'wlan0', extra_env={
+            'MANET_IFACE_STATE_DIR': str(self.root)})
+        self.assertEqual((self.root / 'run/upstream_iface').read_text().strip(), 'wlan0')
+        self.assertTrue(any('masquerade' in c and 'wlan0' in c for c in calls))
+        self.assertFalse((self.root / 'networkd/20-wlan0.network').exists())
 
     def test_non_uplink_link_events_do_not_restart_hostapd(self):
         self.uplink('end0')
@@ -523,7 +917,7 @@ class AcsAutoModeTests(SpeedGateTests):
         (self.root / 'speed-rc' / 'end0').write_text('1')
         self.calls.unlink()
         calls = self.dispatch()
-        self.assertFalse((self.root / 'run' / 'mesh-gateway.state').exists())
+        self.assertFalse((self.root / 'run' / 'manet-uplink/mesh-gateway.state').exists())
         self.assertIn('ap-mesh-helper mesh', calls)
 
     def test_gateway_with_wired_eud_keeps_radio_in_mesh(self):

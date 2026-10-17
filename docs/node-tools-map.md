@@ -109,8 +109,10 @@ and [dispatcher ownership](../MANET/networkd-dispatcher/README.md).
 | [gateway-route-manager.sh](../MANET/node_tools/gateway-route-manager.sh) | Select a reachable gateway and maintain the Linux mesh default route with hysteresis. |
 | [usb-ethernet-watch.sh](../MANET/node_tools/usb-ethernet-watch.sh) | Pass USB Ethernet/tether hotplug into role detection. |
 | [usb-wifi-uplink.sh](../MANET/node_tools/usb-wifi-uplink.sh) | Configure an external Wi-Fi client from saved uplink credentials. |
+| [manet_wifi_uplink.py](../MANET/node_tools/manet_wifi_uplink.py) | Reserve a local built-in Wi-Fi client, scan nearby APs and follow its channel with the shared EUD AP. |
+| [manet_wifi_events.py](../MANET/node_tools/manet_wifi_events.py) | Deliver supplicant, hostapd, link/address and local-file events to the optional Wi-Fi follower without periodic helper commands. |
 | [manet_ap_mesh.py](../MANET/node_tools/manet_ap_mesh.py) | Transfer the candidate physical interface between AP and mesh ownership. |
-| [manet_eud_ap.py](../MANET/node_tools/manet_eud_ap.py) | Render local AP naming/settings and support reversible activation. |
+| [manet_eud_ap.py](../MANET/node_tools/manet_eud_ap.py) | Keep the flash-time AP name fixed and activate local password changes with recovery. |
 | [prepare-ap-iface.sh](../MANET/node_tools/prepare-ap-iface.sh) | Withdraw mesh ownership before each hostapd preparation. |
 | [manet-ap-guard.sh](../MANET/node_tools/manet-ap-guard.sh) | Prevent a mesh supplicant starting on a candidate owned by the AP. |
 | [manet-dhcp-isolation.py](../MANET/node_tools/manet-dhcp-isolation.py) | Install local DHCP/discovery confinement at the bridge boundary. |

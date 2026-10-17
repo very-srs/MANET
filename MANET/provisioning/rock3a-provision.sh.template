@@ -746,6 +746,7 @@ systemctl enable --now systemd-networkd
 /usr/local/bin/manet-dns-setup.sh || exit 1
 /usr/local/bin/manet-uplink-dns.py install || exit 1
 systemctl enable --now manet-uplink-dns.path manet-uplink-dns.service || exit 1
+systemctl enable manet-wifi-uplink.service || exit 1
 
 #write out the config selections for future use
 { set +x; } 2>/dev/null   # secrets follow: keep them out of the trace log

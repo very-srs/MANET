@@ -67,7 +67,7 @@ log() {
 # === GATEWAY DETECTION ===
 # Gateway state is owned by manet-uplink-dispatch.sh. Node manager only
 # asks it to reconcile periodically before publishing status to Alfred.
-GATEWAY_STATE_FILE="/var/run/mesh-gateway.state"
+GATEWAY_STATE_FILE="/var/run/manet-uplink/mesh-gateway.state"
 LAST_GW_CHECK=$NEVER
 GW_CHECK_INTERVAL=60
 
@@ -99,6 +99,8 @@ load_mesh_wpa_confs() {
     WPA_IFACE_2_4=""; WPA_IFACE_5_0=""
     [ ! -r "$roles/mesh_24_if" ] || WPA_IFACE_2_4=$(<"$roles/mesh_24_if")
     [ ! -r "$roles/mesh_5_if" ] || WPA_IFACE_5_0=$(<"$roles/mesh_5_if")
+    is_builtin_wifi_uplink_iface "$WPA_IFACE_2_4" && WPA_IFACE_2_4=""
+    is_builtin_wifi_uplink_iface "$WPA_IFACE_5_0" && WPA_IFACE_5_0=""
     WPA_CONF_2_4=""; WPA_CONF_5_0=""
     [ -z "$WPA_IFACE_2_4" ] || WPA_CONF_2_4="$configs/wpa_supplicant-${WPA_IFACE_2_4}.conf"
     [ -z "$WPA_IFACE_5_0" ] || WPA_CONF_5_0="$configs/wpa_supplicant-${WPA_IFACE_5_0}.conf"
@@ -294,7 +296,7 @@ while true; do
 
         # Service flags
         detect_and_update_gateway_state
-        IS_GATEWAY_FLAG=$([ -f /var/run/mesh-gateway.state ] && echo "--is-internet-gateway" || echo "")
+        IS_GATEWAY_FLAG=$([ -f /var/run/manet-uplink/mesh-gateway.state ] && echo "--is-internet-gateway" || echo "")
         GATEWAY_IFACE=$(cat /var/run/upstream_iface 2>/dev/null || echo "")
         IS_NTP_FLAG=$(is_ntp_time_source && echo "--is-ntp-server" || echo "")
         IS_MEDIAMTX_FLAG=$(is_hosting_service && echo "--is-mediamtx-server" || echo "")

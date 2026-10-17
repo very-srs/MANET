@@ -11,6 +11,8 @@
 3. **Check the drive.** Flashing erases the selected storage. Look at it twice to make sure it is the right thing being deleted.
 4. **Keep your login.** Save the SSH username and passwords shown when flashing finishes. Then follow [first boot](first-boot.md).
 
+The phone Wi-Fi name you choose here stays with the radio.
+
 A CM4 with built-in eMMC uses USB boot access instead of a removable card. Follow the flasher's hardware instructions.
 
 ## User
@@ -31,6 +33,12 @@ Run the Linux flasher as your regular user. It requests elevated access when it 
 ### Enter the mesh settings
 
 Select the board, then configure the mesh SSID and SAE key, network CIDR, regulatory region, EUD connection mode, SSH username and password, and web admin password. Radios intended for the same mesh need compatible mesh settings. The admin password is shared across the mesh; local access-point settings belong to each radio.
+
+For Wireless or Auto client mode, choose the same phone Wi-Fi base name for
+all radios in the mesh. Each radio adds four identifying digits to its name.
+This name is fixed after flashing so the radios can recognize their own
+hotspots when choosing an internet connection. Its password remains editable
+in Node config. Wired-only flashing leaves the phone Wi-Fi name empty.
 
 The **SSH username** is the Linux account used to log in to the radio. It
 defaults to `radio` and is editable. The **SSH password** belongs to that
@@ -75,6 +83,15 @@ verification stops the launcher rather than silently switching channels or
 using an unrelated cached build.
 
 `MANET_RELEASE_FILE` passes the selected manifest into the engine. `MANET_FLASHER_WORK` keeps settings, downloads, and additional scripts outside the temporary extracted ZIP. `--local-scripts` runs a checkout's setup code against the selected published board package; it does not publish or package that checkout.
+
+### Fixed phone hotspot identity
+
+Both flashers and provisioning templates still supply `lan_ap_ssid`.
+Radio setup records the full name in `/var/lib/manet-ap-ssid` before other
+setup writes, including on wired nodes with an empty name. Later API edits,
+config activation and setup reruns cannot rename it. The fixed base is the
+literal prefix used to exclude mesh phone hotspots from Wi-Fi uplinks.
+See [settings](settings.md#developer-keep-local-and-shared-settings-separate).
 
 ### Template rendering
 

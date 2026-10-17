@@ -122,9 +122,11 @@ collect_ap_ssid() {
 }
 
 # mesh-radio-state.py records operator choices in "desired". Only an explicit
-# "down" disables a radio. Missing or unreadable state leaves it enabled.
+# "down" disables a radio. A reserved uplink is excluded from mesh operations.
+# Missing or unreadable desired state leaves other radios enabled.
 radio_iface_enabled() {
     [ -n "$1" ] || return 1
+    is_builtin_wifi_uplink_iface "$1" && return 1
     # Reuse one strict jq parse across watchdog interface checks until the
     # content changes, including deletion or malformed input. This avoids
     # mtime races and delayed radio-down decisions.
@@ -239,6 +241,13 @@ is_nonmesh_wifi() {
     [[ "$(iface_driver "$1")" == brcmfmac ]]
 }
 
+# A persistent ownership marker blocks mesh recovery even before association.
+is_builtin_wifi_uplink_iface() {
+    local roles="${MANET_IFACE_STATE_DIR:-/var/lib}" owner=""
+    [ ! -r "$roles/wifi_uplink_if" ] || read -r owner < "$roles/wifi_uplink_if"
+    case "$owner" in wlan0|wlan1) [ "$1" = "$owner" ] ;; *) return 1 ;; esac
+}
+
 # Accept existing USB Wi-Fi devices outside mesh/AP roles.
 is_usb_wifi_uplink_iface() {
     local iface="$1" bus driver
@@ -282,7 +291,7 @@ unmask_if_masked() {
 # a gateway serves it; other nodes keep the radio in the mesh.
 auto_eud_ap_wanted() {
     grep -Eq '^acs=["'\'']?[yY]["'\'']?[[:space:]]*$' "${MANET_MESH_CONF:-/etc/mesh.conf}" 2>/dev/null || return 0
-    [ -f "${MANET_GATEWAY_STATE:-/var/run/mesh-gateway.state}" ]
+    [ -f "${MANET_GATEWAY_STATE:-/var/run/manet-uplink/mesh-gateway.state}" ]
 }
 
 # Read the first local IPv4 address on an interface.

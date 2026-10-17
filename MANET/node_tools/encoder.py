@@ -21,6 +21,8 @@ import time
 
 import NodeInfo_pb2
 from manet_ids import mac_to_bytes, syncthing_id_to_bytes, ipv4_to_int
+from manet_config_io import load_kv_file
+from mesh_config import valid_value
 
 
 def emit(message):
@@ -80,8 +82,16 @@ def build_telemetry(args):
     # usable verdict, raw GNSS remains visible but cannot serve as an anchor.
     apply_positioning_location(t, getattr(args, 'position_file', '/run/manet-position.json'),
                                getattr(args, 'mesh_config', '/etc/mesh.conf'))
-    if args.atak_user:
-        t.atak_user = args.atak_user
+    # Both channel managers use this encoder, including ACS discovery.
+    # Read on each publication so edits and clearing need no manager restart.
+    operator = args.atak_user
+    if operator is None:
+        conf = load_kv_file(getattr(args, 'mesh_config', '/etc/mesh.conf'))
+        operator = conf.get('operator_name', '')
+        if not valid_value('operator_name', operator)[0]:
+            operator = ''
+    if operator:
+        t.atak_user = operator
 
     t.data_channel_2_4 = args.data_channel_2_4
     t.data_channel_5_0 = args.data_channel_5_0
@@ -358,7 +368,9 @@ def main():
     p.add_argument('--latitude', type=float, default=0.0)
     p.add_argument('--longitude', type=float, default=0.0)
     p.add_argument('--altitude', type=float, default=0.0)
-    p.add_argument('--atak-user', type=str, default='')
+    p.add_argument('--atak-user', type=str, default=None,
+                   help='Operator label. Defaults to operator_name in '
+                        'mesh.conf; an explicit empty value omits it.')
     p.add_argument('--position-file', default='/run/manet-position.json',
                    help='Local R4 position, used only with positioning=y in mesh.conf.')
     p.add_argument('--mesh-config', default='/etc/mesh.conf')

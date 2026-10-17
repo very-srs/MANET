@@ -13,7 +13,13 @@
 
 Leave **Skip the safety net** unchecked. If a radio is missing, bring it back to the group before changing the group's settings.
 
-Your radio's phone Wi-Fi settings stay only on your radio and apply when you press **Stage Changes**.
+Your radio keeps the phone Wi-Fi name chosen when it was flashed. You can
+change its Wi-Fi password. That change stays on your radio and takes effect
+when you press **Stage Changes**.
+
+Give your radio a name on the [status page](http://manet.local/). Type it in
+**Your operator name** and press **Save**. You do not need a password.
+Clear the name and save when you hand the radio to someone else.
 
 ## User
 
@@ -23,16 +29,30 @@ Connect to your radio, open **[Manage](http://manet.local/manage/)**, and select
 
 | Setting | What changes |
 |---|---|
-| EUD connection mode, AP name, AP password | This radio's client connection only. An AP change may disconnect your phone. |
-| Maximum EUDs per node | Shown here, but set during flashing and not editable in this form. |
+| EUD connection mode, AP password | This radio's client connection only. An AP change may disconnect your phone. |
+| AP SSID, maximum EUDs per node | Set during flashing. The full phone Wi-Fi name is shown here and cannot be changed after flashing. |
 | Mesh SSID, mesh key, IPv4 network | Shared mesh configuration; connections can drop while it is applied. |
 | Admin password, MediaMTX, Mumble, automatic updates | Shared settings applied through the mesh transaction. |
 | Automatic channel selection (ACS) | Changes the channel manager and restarts it when applied. |
 | Regulatory domain | Writes the selected region; radio changes require a reboot. |
 
+The AP SSID is the Wi-Fi name phones use to join this radio, such as `EUD-5cc2`.
+Choose the same base name for every radio when flashing. Keeping that name
+fixed helps radios recognize the mesh's phone hotspots and exclude them as
+internet connections. The AP password remains editable.
+
 An AP name is for phones joining this radio. The mesh SSID and mesh key are for radios joining each other. They are separate settings. See [connection modes](connect.md) before changing EUD mode.
 
 Local EUD and AP edits take effect when you press **Stage Changes**; they do not wait for a mesh ACK or the activation countdown. Make those edits separately from shared mesh changes so you can reconnect your phone before continuing.
+
+To label just your radio, open the [public status page](http://manet.local/),
+enter a name or callsign in **Your operator name**, and press **Save**. No admin
+password is needed. It appears alongside the radio's hostname on status pages.
+Other radios learn it with the next status announcement in either static or
+automatic channel mode. Clear the field and save again to remove it. Anyone
+connected to this radio can replace the label when the radio changes hands.
+The label does not rename an ATAK phone or choose the phone that controls
+location.
 
 ### Apply a shared configuration
 
@@ -65,7 +85,33 @@ Wi-Fi transmit-power selections do not survive radio restarts or reboots. The di
 
 ### Keep local and shared settings separate
 
-`mesh_config.py` owns the split. `eud`, `lan_ap_ssid`, and `lan_ap_key` apply locally; `max_euds_per_node` is local but read-only in management. AP fields must not enter Alfred packages. `manet_eud_ap.py` preserves the node suffix in the broadcast AP name and restores the previous local files if activation fails.
+`operator_name` is an optional node-local setting limited to 32 UTF-8 bytes.
+The public status form sends only that key to `POST /api/operator-name`.
+No session is required, but the client must be in this radio's DHCP pool.
+The endpoint requires bounded same-origin JSON, rejects all other keys, and
+uses the management write lock for its atomic local write. It neither runs
+AP configuration nor stages a mesh change. An empty submitted value clears
+the label. It is excluded from mesh configuration
+packages, but the telemetry encoder reads it on each publication and uses
+the existing `atak_user` field. Static operation and both ACS publication
+paths use that same encoder. Missing or invalid local labels publish as empty.
+
+`mesh_config.py` owns the split. `eud` and `lan_ap_key` apply locally.
+`lan_ap_ssid` and `max_euds_per_node` are fixed at flash time and shown read-only.
+AP fields must not enter Alfred packages. AP-name changes fail before local
+writes or shared staging, including direct config apply and AP activation.
+The password remains editable, with local file restoration if activation fails.
+
+`manet_eud_ap.py` records the full broadcast name in `/var/lib/manet-ap-ssid`
+during radio setup. Setup reruns verify it before touching radio configuration.
+Existing nodes without that record preserve the SSID already in hostapd.
+A completed node without either record refuses a new name. Wired flashes
+with no AP name retain that empty choice. The fixed base name preserves the
+uplink filter's local-prefix assumption. See the
+[configuration internals](../../../docs/node-tools-internals.md#mesh-configuration-push).
+
+On phones, Node config stacks the form above deployment status, places labels
+above full-width inputs, and uses the current theme for inputs and node rows.
 
 The form validates changed fields before local writes or shared publication. A mixed local/shared request also checks clock readiness before any local side effects. Local fields apply during staging; only the shared fields enter the ACK and activation flow. The receiver validates the same allowed keys and value constraints. `mesh-config-write.py` writes literal configuration data atomically, including quoted values, without interpreting them as shell or sed input.
 
