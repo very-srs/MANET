@@ -27,7 +27,7 @@ packaged and hardware-verified behavior.
 | Logs, retained state and OS cleanup | [Storage](content/storage.md) | [Retention](../node-tools-internals.md#bounded-logs-and-measurements), [cleanup](../../MANET/node_tools/manet-os-cleanup.py) |
 | Operator scripts and failures | [Customization](content/customization.md) | [Additional scripts](../../MANET/provisioning/additional-scripts/README.md) |
 | Payload scope, activation/recovery | [Updates](content/updates.md) | [Field update policy](../node-tools-internals.md#field-update-policy), [packages](../../MANET/install_packages/README.md) |
-| Builds, tests, versions and releases | [Development](content/development.md) | [Releases](../../MANET/releases/README.md), [tests](../node-tools-internals.md#tests), [binaries](../../MANET/binaries_arm64/README.md) |
+| Builds, tests, versions and releases | [Development](content/development.md) | [Contributing](../../CONTRIBUTING.md), [packaging](../../MANET/packaging/README.md), [kernel builds](../../kernel/build/README.md), [releases](../../MANET/releases/README.md), [tests](../node-tools-internals.md#tests), [binaries](../../MANET/binaries_arm64/README.md) |
 | Runtime ownership and tool inventory | [Automation](content/automation.md) | [Tool map](../node-tools-map.md), [orchestration](../node-tools-internals.md#core-orchestration) |
 | Documentation and publication | [Maintenance](README.md) | [Topics](topics.json), [builder](build.py), [prompts](assets/prompts.json) |
 
@@ -45,8 +45,9 @@ packaged and hardware-verified behavior.
   drift/source-loss measurements remain separate hardware evidence.
 - Service VIP movement and database synchronization do not guarantee live
   session continuity or lossless partition merges.
-- A checkout lacks the machine-local kernel workspace and package builders.
-  Keep missing build prerequisites explicit.
+- A checkout includes package builders and kernel recipes. Downloaded source
+  trees and generated overlays remain local. Document pinned inputs and
+  setup commands so contributors can create them without private files.
 
 Add new evidence to the owning reference and revise affected guide tiers.
 Add future areas here even when no new tool filename is introduced. Keep

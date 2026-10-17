@@ -13,11 +13,14 @@ __pycache__/
 *.prev-*
 install_packages-orig/
 
-# Kernel build infrastructure — deliberately not in this repo
+# Downloaded kernel sources, firmware caches and build outputs
 kernel-work/
 
-# Build tooling. The published repo is the user's manual, not a dev guide.
-MANET/packaging/
+# Local development environments and compiled build products
+.venv/
+lyra-aarch64-build/
+MANET/packaging/gst-lyra/*.o
+MANET/packaging/gst-lyra/*.so
 
 # Working folder a standalone flasher copy makes for itself
 manet-flasher/

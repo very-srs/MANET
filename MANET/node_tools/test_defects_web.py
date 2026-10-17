@@ -184,7 +184,7 @@ class MeasurementBudgetTests(unittest.TestCase):
 
 class VoiceRegistryTests(unittest.TestCase):
     def test_registry_hostnames_unescape_writer_quote_breaks(self):
-        names = ["Mike's radio", "'quoted'", "two''quotes", r"literal\path"]
+        names = ["Test's radio", "'quoted'", "two''quotes", r"literal\path"]
         with tempfile.TemporaryDirectory() as directory:
             registry = Path(directory) / 'registry'
             output = io.StringIO()

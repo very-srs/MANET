@@ -5,6 +5,7 @@ The two source trees in kernel-work/real_work are read only to these tests.
 An unavailable source tree skips its tests.
 """
 from contextlib import contextmanager
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -36,7 +37,8 @@ def snapshot(tree):
 class ApplyCases:
     @contextmanager
     def tree(self):
-        source = ROOT / 'kernel-work/real_work' / self.kernel
+        work = Path(os.environ.get('MANET_KERNEL_WORK', ROOT / 'kernel-work'))
+        source = work / 'real_work' / self.kernel
         if not (source / '.git').exists():
             self.skipTest(f'kernel objects unavailable: {source}')
         with tempfile.TemporaryDirectory(prefix='manet-ftm-test-') as temp:

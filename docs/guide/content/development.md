@@ -10,8 +10,8 @@ The builders change the software and check what it does. Then they make
 a little package for the radios. Your radio will try to find and install
 these updates for you.
 
-Normally, your radio will only update when a big boy package is ready and
-not for little updates.  Read [updates](updates.md) for more info.
+People check a package before calling it ready for normal use. Read
+[updates](updates.md) to learn how your radio gets new software.
 
 ## User
 
@@ -33,6 +33,10 @@ precede the source being discussed. Hardware support and unverified features
 are called out in the relevant chapters.
 
 ### Useful contributions
+
+The [GitHub repository](https://github.com/very-srs/MANET) is the starting
+point for contributing code. It includes development setup and build
+scripts. The [contributor guide](../../../CONTRIBUTING.md) explains the steps.
 
 You can edit the guide's Markdown locally and have those changes reviewed
 and published. Keep the three reading levels consistent when a fact changes.
@@ -57,6 +61,8 @@ just a dashboard color.
 | `MANET/etc/`, `share/manet/`, `root/` | Configuration defaults, shared assets and regulatory data. |
 | `MANET/binaries_arm64/`, `lyra_arm64/` | Supplied ARM64 programs and audio artifacts. |
 | `MANET/provisioning/` | Host flashers, first-boot templates and operator hooks. |
+| `MANET/packaging/` | Development setup, archive builders and Lyra plugin source. |
+| `kernel/build/` | Pinned upstream inputs, kernel/Morse builds and overlay assembly. |
 | `MANET/releases/` | Release selection, manifests, publication and promotion. |
 | `kernel/patches/` | Tracked kernel patch work; status depends on each area's evidence. |
 | `docs/guide/` | This three-tier site and its builder. |
@@ -65,14 +71,38 @@ The [node-tool map](../../node-tools-map.md) resolves individual runtime
 files. The systemd unit or invoking controller establishes when a helper
 runs; a filename alone does not imply a standalone daemon.
 
-### A clean checkout is not the complete build environment
+### Start from the contributor workflow
 
-The kernel/Morse build workspace and package builders are maintained on a
-development machine outside tracked source. The
-[kernel port record](../../../docs/kernel-6.18-morse-port.md) is the durable
-description of versions, overlays, modules and bring-up. Do not infer that
-an untracked directory mentioned in a handoff will exist for another
-contributor. Record prerequisites and any missing reproducibility inputs.
+[Contributing](../../../CONTRIBUTING.md) explains host setup, architecture
+constraints, focused tests, hardware evidence and PR expectations. Before
+changing a subsystem, read its owning reference and the service or controller
+that invokes it. For a design change, describe the proposed ownership and
+failure handling early so maintainers can identify overlap with ongoing work.
+
+### Create the build environment from tracked inputs
+
+The repository includes [packaging tools](../../../MANET/packaging/README.md)
+and [kernel recipes](../../../kernel/build/README.md). Generated outputs and
+downloaded upstream trees stay under ignored directories. A source checkout
+contains the instructions and patches needed to create those inputs.
+
+From the repository root on a Linux host:
+
+```bash
+bash MANET/packaging/setup-dev-env.sh
+source ~/.venvs/manet/bin/activate
+python -m unittest discover -s MANET/node_tools -p 'test_*.py'
+bash MANET/packaging/build-tools-tarball.sh /tmp/manet/cm4-tools.tar.gz
+```
+
+This builds a kernel-less update archive and checksum from the working
+checkout. It fetches verified MT7916 firmware if the cache is empty.
+Install archives also need a board overlay. The kernel source preparation
+script fetches pinned revisions and applies the tracked Morse patch, then
+the board builders compile and assemble the matching inputs. The
+[kernel port record](../../../docs/kernel-6.18-morse-port.md) explains why
+the driver changes and configuration fragments are required. Compilation
+and archive validation do not establish that a new kernel is ready to ship.
 
 Supplied ELF binaries must retain binary Git attributes; line-ending
 normalization corrupts them. Voice packages need both the Lyra GStreamer

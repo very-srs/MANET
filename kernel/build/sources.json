@@ -1,0 +1,27 @@
+{
+  "linux-rpi-6.18": {
+    "url": "https://github.com/raspberrypi/linux.git",
+    "commit": "95b85bebbedcaedfa7ca79116ed38b7376fba412",
+    "path": "real_work/linux-rpi-6.18",
+    "boards": ["cm4", "rpi5"]
+  },
+  "linux-6.18": {
+    "url": "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git",
+    "commit": "7d0a66e4bb9081d75c82ec4957c50034cb0ea449",
+    "path": "real_work/linux-6.18",
+    "boards": ["r3a"]
+  },
+  "morse-driver-1.16": {
+    "url": "https://github.com/Gateworks/morse_driver.git",
+    "commit": "dec5bc215b881c369ff530c440c212ec6dd13183",
+    "path": "real_work/morse-driver-1.16",
+    "patch": "kernel/patches/morse-driver/0001-spi-and-power.patch",
+    "boards": ["cm4", "r3a", "rpi5"]
+  },
+  "morse-firmware": {
+    "url": "https://github.com/MorseMicro/morse-firmware.git",
+    "commit": "ea18605f53387281c1029ea9eb8e0de2bda7bae2",
+    "path": "morse-firmware",
+    "boards": ["cm4", "r3a", "rpi5"]
+  }
+}

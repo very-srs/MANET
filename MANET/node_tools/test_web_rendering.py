@@ -19,7 +19,7 @@ TOOLS = Path(__file__).parent
 SPEC = importlib.util.spec_from_file_location('render_status', TOOLS / 'mesh-status.py')
 status = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(status)
-PAYLOAD = "Mike's radio \"'><img src=x onerror=alert(1)> & ');alert(2);//"
+PAYLOAD = "Test's radio \"'><img src=x onerror=alert(1)> & ');alert(2);//"
 
 
 class Markup(HTMLParser):
@@ -187,8 +187,8 @@ loadSessions();
     def test_registry_keeps_display_punctuation_but_bounds_names(self):
         with tempfile.TemporaryDirectory() as directory:
             registry = Path(directory) / 'registry'
-            for name in ("Mike's radio", PAYLOAD, 'x' * 254, 'bad\x01name', '  '):
+            for name in ("Test's radio", PAYLOAD, 'x' * 254, 'bad\x01name', '  '):
                 quoted = name.replace("'", "'\\''")
                 registry.write_text(f"NODE_aabbccddeeff_HOSTNAME='{quoted}'\n")
                 value = parse_registry(registry)['aabbccddeeff']['HOSTNAME']
-                self.assertEqual(value, name if name in ("Mike's radio", PAYLOAD) else '')
+                self.assertEqual(value, name if name in ("Test's radio", PAYLOAD) else '')

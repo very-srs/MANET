@@ -212,7 +212,12 @@ Current implementation and focused verification establish behavior. Historical h
 
 Normal provisioning and updates follow the full GitHub release marked Latest. Development selection is explicit. Publishing uses `MANET/releases/publish.py`, which stages assets, verifies their stored sizes and digests, and publishes the complete set. A source push does not announce a radio update.
 
-Kernel builds and package builders are maintained outside the tracked source layout. Do not infer that a clean repository checkout can reproduce those machine-local build environments without the documented prerequisites.
+The repository includes [package builders](../../../MANET/packaging/README.md)
+and [kernel recipes](../../../kernel/build/README.md), including pinned source
+preparation and local patches. Downloaded trees, caches and output archives
+are generated locally. Start with the
+[contributor workflow](../../../CONTRIBUTING.md) to set up the toolchain,
+validate a change and prepare a PR.
 
 ### Detailed references
 

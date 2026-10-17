@@ -352,7 +352,7 @@ class HeldPointReleaseTests(base.Harness):
 
 class HeldMarkerRefreshIntervalTest(unittest.TestCase):
     def test_shipped_refresh_is_one_minute(self):
-        # Mike, 2026-10-14: resend the held marker every minute.
+        # Resend the held marker every minute.
         self.assertEqual(atak.HELD_MARKER_REFRESH_S, 60)
 
 

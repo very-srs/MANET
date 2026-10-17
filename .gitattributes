@@ -16,6 +16,9 @@
 *.template text eol=lf
 *.sh.bak text eol=lf
 
+# Patch context needs its leading spaces, including before tabs/blank lines.
+*.patch text eol=lf -whitespace
+
 # cmd.exe mishandles LF-only batch files, and these are checked out on Windows
 # machines that never see a Linux normalization. PowerShell is happy with LF,
 # so .ps1 is deliberately not listed here: forcing CRLF on it would rewrite

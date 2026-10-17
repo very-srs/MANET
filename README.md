@@ -1,270 +1,129 @@
-# MANET Project
+# MANET
 
-Software for building mesh radios out of single-board computers. After flashing
-a card or eMMC, power on the node to join nearby peers and carry mesh traffic.
-Nodes coordinate addresses, channels, and service hosts as they move and as the
-mesh splits and rejoins.
+MANET builds self-forming mesh radios from ARM64 single-board computers,
+802.11ax/ac/n Wi-Fi and Morse Micro 802.11ah HaLow. The data path uses
+`batman-adv` with BATMAN V at Layer 2. Nodes coordinate addresses, channels,
+time sources and shared services as links appear, partitions form and groups
+rejoin.
 
-Routing is `batman-adv` at Layer 2, running the BATMAN V algorithm. The radios
-are 802.11ax/ac/n on 2.4 and 5 GHz, plus 802.11ah HaLow, which reaches further 
-at lower speed.
+**Using a radio:** start with the [field guide](https://very-srs.github.io/MANET/)
+for hardware, flashing, operation and troubleshooting. Choose User for normal
+instructions or Marine for illustrated explanations.
 
-## What the nodes do on their own
+**Contributing code:** start with [CONTRIBUTING.md](CONTRIBUTING.md), then
+choose Developer in the field guide for mechanisms and engineering
+constraints. Build source and developer setup belong in this repository.
+Generated packages are distributed through GitHub Releases.
 
-Each node claims a block of IPv4 addresses for its own clients, avoiding known
-claims and resolving overlaps when simultaneous starts or partition merges
-produce a collision. IPv6 comes up over SLAAC. In automatic channel
-selection (ACS) mode, nodes scan the 2.4 and 5 GHz bands and share their observations.
-A coordinator proposes one channel plan for the connected mesh and waits up to
-60 seconds for a majority to acknowledge it, with activation 30 seconds later.
-Missing participants can recover the agreed plan afterward. Wi-Fi groups linked
-through HaLow are part of that same decision: they do not choose separate Wi-Fi
-channels. Any node with Internet access will automatically become a gateway for the mesh.
-Multiple gateways can be active. Each node uses the gateway that gives it the
-fastest internet, counting both its mesh link to that gateway and the gateway's
-own internet speed, and changes gateway only when another is clearly faster.
+## Development quick start
 
-HaLow carries recovery information while keeping the Wi-Fi radios on their data
-channels. Nodes with working HaLow skip Wi-Fi tourguide excursions. Where HaLow
-is unavailable, guides visit a rotating set of lobby channels: synchronized lost
-nodes follow the rotation, while nodes without clock synchronization wait on
-fixed anchors within it. Truly isolated groups reconcile their channel plans
-when a radio path reconnects them. See
-[discovery and partition healing](MANET/node_tools/README.md#discovery--partition-healing)
-for the schedule and recovery behavior.
+On a Linux host with Python 3.10+, Git, curl and unzip:
 
-When links start to degrade, a node says so, and once more than half the mesh
-agrees, every node drops to the legacy 802.11 bitrates to keep the links alive.
-Services such as MediaMTX are elected based on connectivity, with a new host
-chosen when the previous one disappears. Push-to-talk voice runs across the mesh
-from a headset plugged into the node, mixing everyone who is talking.
+```bash
+git clone https://github.com/very-srs/MANET.git
+cd MANET
+bash MANET/packaging/setup-dev-env.sh
+source ~/.venvs/manet/bin/activate
+python -m unittest discover -s MANET/node_tools -p 'test_*.py'
+python docs/guide/build.py --check
+```
 
-Nodes with verified GPS or Internet time can serve time to their peers. Availability
-rides the existing Alfred telemetry; clients discover sources through the registry
-and refresh periodically instead of continuously polling across the mesh. Timed
-channel decisions wait for initial clock synchronization. See
-[time synchronization](MANET/node_tools/README.md#time-synchronization).
+Setup pins the protobuf compiler and Python runtime to the node-compatible
+versions and verifies the generated schema. See the
+[contributor workflow](CONTRIBUTING.md) for dependencies, focused validation,
+coding conventions, design constraints and PR expectations.
 
-## Repository layout
+Build a kernel-less update archive from this checkout:
 
-All of it sits under `MANET/`.
+```bash
+bash MANET/packaging/build-tools-tarball.sh /tmp/manet/cm4-tools.tar.gz
+```
 
-* `provisioning/` flashes a card/emmc. `additional-scripts/` inside it holds your
-  own setup scripts, embedded in the image and run once on the node.
-* `node_tools/` is what runs on the node: the orchestrator, the web interface,
-  voice, the registry builder, and the script that configures a fresh radio.
-* `binaries_arm64/` holds prebuilt `alfred` and `batctl`, and a
-  `wpa_supplicant` patched for HaLow.
-* `lyra_arm64/` holds the Lyra voice codec plugin and its model weights.
-* `systemd/`, `systemd-network/`, `udev/`, `networkd-dispatcher/` and `etc/`
-  are the units, network files, and hooks installed onto the node.
+The builder obtains and verifies pinned MT7916 firmware when it is not
+cached. Install archives additionally need a board overlay containing the
+kernel, device trees, modules and Morse firmware. Follow
+[packaging](MANET/packaging/README.md) and
+[kernel builds](kernel/build/README.md) to produce those inputs. Building an
+archive does not deploy it to a radio or publish a release.
+
+## Architecture and source ownership
+
+Wi-Fi mesh and HaLow interfaces feed `bat0`. The addressed bridge `br0`
+connects that forwarding domain to local end-user devices (EUDs). Alfred
+exchanges identity, telemetry and authenticated control records. Each node
+builds a local registry and reconciles its own state. Elected channel
+coordinators and service hosts have specific responsibilities, rather than
+acting as permanent controllers for all traffic.
+
+A connected BATMAN component is one channel-decision domain even when
+HaLow is the only link between two Wi-Fi groups. Authentication, observation
+freshness, clock readiness and recovery matter separately from forwarding.
+Read the [Developer overview](docs/guide/content/overview.md#developer-runtime-architecture),
+[runtime internals](docs/node-tools-internals.md) and
+[node-tool map](docs/node-tools-map.md) before changing that coordination.
+
+| Area | Responsibility |
+|---|---|
+| `MANET/node_tools/` | Runtime scripts, Python modules, telemetry schema and tests. |
+| `MANET/systemd/`, `systemd-network/`, `networkd-dispatcher/`, `udev/` | Service lifecycle, network configuration and event hooks. |
+| `MANET/etc/`, `share/manet/`, `root/` | Defaults, shared assets and regulatory data. |
+| `MANET/provisioning/` | Linux/Windows flashers, first-boot templates and operator setup hooks. |
+| `MANET/packaging/` | Development setup, install/update archive builders and Lyra source. |
+| `MANET/binaries_arm64/`, `lyra_arm64/` | Supplied ARM64 programs and voice codec artifacts. |
+| `kernel/build/`, `kernel/patches/` | Pinned source preparation, kernel/module recipes and project patches. |
+| `MANET/releases/` | Release selection, manifests, publication and promotion. |
+| `docs/guide/` | Three-level field guide, style rules, illustrations and site builder. |
 
 ## Supported Hardware
 
-| Hardware | Support Level | Notes |
-| :--- | :--- | :--- |
-| **Compute Module 4 (CM4)** | Functional, primary dev target | Supports 802.11ax + HaLow. |
-| **Raspberry Pi 4B** | Briefly tested, lacks pcie hardware | only useful for halow  |
-| **Raspberry Pi 5** | Functional, out of date, not a focus | Supports 802.11ax + HaLow. |
-| **Radxa Rock 3A** | Functional, up-to-date, not a focus | Supports 802.11ax + HaLow. |
+| Hardware | Status |
+|---|---|
+| Compute Module 4 | Primary development and verification target, Wi-Fi plus HaLow. |
+| Raspberry Pi 4B | Briefly tested, limited by lack of PCIe radio hardware. |
+| Raspberry Pi 5 | Functional but deprioritized. Results require board-specific verification. |
+| Radxa Rock 3A | Functional but deprioritized. Results require board-specific verification. |
 
-The Pi 5 and Rock 3A both work, but they run too hot for a sealed radio
-enclosure. Development and testing now focus on the CM4.
+CM4 is the focus because of thermal constraints in sealed enclosures.
+See [hardware requirements](MANET/provisioning/README.md#radio-hardware)
+and the [kernel port record](docs/kernel-6.18-morse-port.md) for board and
+radio details. Experimental capabilities are identified in their owning
+references. A compiled feature is not automatically qualified for use.
 
 ## Getting Started
 
-### 1. Prerequisites
-You will need a supported SBC and a Linux or Windows machine to flash from, and Ethernet Internet access for the SBC being flashed. 
+For flashing and operating a radio, use the
+[field guide](https://very-srs.github.io/MANET/) or the
+[provisioning reference](MANET/provisioning/README.md). Normal installs and
+updates select the stable GitHub release marked **Latest**. Development
+builds are selected explicitly with `--development`.
 
-See [/provisioning/README.md](MANET/provisioning/README.md) for detailed requirements and download links.
+### Connectivity Modes
 
-### 2. Provisioning a Node
+An EUD connects to its radio over Ethernet or a local Wi-Fi access point.
+The Wired, Wireless and Auto settings determine how those roles are
+assigned. Ethernet can instead provide an internet uplink, making the node
+a gateway. See [client connections](docs/guide/content/connect.md) and
+[internet gateways](docs/guide/content/internet.md) for behavior and recovery.
 
-#### On Windows: download one file
+### ATAK phones
 
-Download
-**[Flash-a-Radio.cmd](https://github.com/very-srs/MANET/releases/latest/download/Flash-a-Radio.cmd)**
-and double-click it.
-
-There is nothing else to download. The
-launcher fetches what it needs, and the GUI offers to install `rpi-imager` and, for a
-CM4, `rpiboot` if this computer does not already have them. On first run `Flash a Radio.cmd` makes itself a
-`MANET Flasher` folder beside where you put it and copies the launcher there, so your saved settings and
-your own setup scripts stay in one place.
-
-Windows shows a security warning the first time, because the file came from the internet.
-Choose **Run**, then **Yes** when Windows asks for Administrator: writing to a card needs
-it.
-
-![Choosing the board on the first page of the flasher](docs/images/provisioning/flasher-1-board.png)
-
-Six pages, in order: pick the board, check this computer for needed software, enter the mesh settings,
-review any setup scripts of your own, choose the card to flash, and read the summary back before
-anything is written.
-
-Every page is shown in
-[Windows: step by step](MANET/provisioning/README.md#windows-step-by-step).
-
-> The older console script, `windows.ps1`, still works and does exactly the same thing.
-> The GUI is a front end over it, so both produce an identical image.
-
-#### On Linux: download one file
-
-Download
-**[flash-a-radio.sh](https://github.com/very-srs/MANET/releases/latest/download/flash-a-radio.sh)**
-and run it:
-
-```bash
-chmod +x flash-a-radio.sh
-./flash-a-radio.sh
-```
-
-With Python 3 and curl installed, there is nothing else to download. The script fetches what it needs, and offers to
-install any missing software with apt or dnf. On other distributions it prints the exact
-command for your package manager instead of running it. On first run `flash-a-radio.sh`
-makes itself a `manet-flasher` folder beside where you put it and copies the launcher there, so
-your saved settings and your own setup scripts stay in one place.
-
-Run it as yourself, not with `sudo`. It asks for your password at the points where it
-needs to write to the card.
-
-#### What you will be asked, on either host
-
-* **EUD Connection**: Wired, Wireless (local AP), or Auto.
-* **Optional Services**: MediaMTX, mesh voice (Mumble is untested).
-* **Mesh Security**: SSID and SAE Password.
-* **Network Settings**: CIDR blocks and addressing.
-
-Settings can be named and saved, allowing you to load a saved config and flash many radios 
-with the same configuration, rather than manually entering this into every node one by one.  
-A saved configuration works in both flashers, so a mesh can be built from a mix of Windows and Linux machines.
-
-*(Optional)* Place site-specific setup scripts in `additional-scripts/`. They
-are sanity checked before anything is written to the card, embedded in the image, and run
-**once as root on the node** after the node is configured for the first time: for static routes, organization SSH
-keys, or additional custom configurations. See
-[Additional setup scripts](MANET/provisioning/additional-scripts/README.md).
-
-### 3. First Boot
-Insert the storage media into the node and power it on. The `firstrun.sh` script will, over the course of a few reboots:
-1.  Disable default setup wizards.
-2.  Wait for internet connectivity (via Ethernet) to download the latest kernel and tools.
-3.  Install necessary packages (`batctl`, `alfred`, `wpa_supplicant`, etc.).
-4.  Configure the radio interfaces.
-5.  Leave a working mesh node.
-6.  Run any scripts supplied in `additional-scripts/`. Their outcome is reported on
-    the SSH login banner. A failure there does not mark the node unprovisioned.
-
-Provisioning takes about ten minutes and reboots the node several times. Leave
-Ethernet and power connected until it settles.
-
-The two onboard LEDs tell you how it went, so you can check a node without
-logging in:
-
-| LEDs | Meaning |
-|---|---|
-| Green heartbeat, red off | Provisioned and ready |
-| Red heartbeat, green solid | Provisioning did not complete |
-| Unchanged from boot | Still working, do not disconnect |
-
-Red carries the same meaning as the SSH login banner, and the usual cause is
-Ethernet being unplugged before setup finished. Reconnect it and reboot, and
-the node retries on its own. The pattern is set on every boot from the recorded
-result, so it stays put until the status actually changes.
-
-An optional external LED and button harness provides a quick connectivity check:
-one green blink per directly connected neighbor, counting each node once across
-its radio links. Multihop nodes are left to the web UI. Red means no neighbors;
-amber means the check is unavailable. Solid green confirms a connection when
-identity metadata is still arriving. The harness is disabled by default and its
-wiring still needs bench validation. Configuration and all patterns are in
-[hardware support](MANET/node_tools/README.md#hardware-support).
-
-## ATAK phones
-
-ATAK integration runs by default on every radio. Connect the phone by Ethernet,
-turn off Android location services, and enable ATAK's external GPS input on UDP
-port **4349**. Configure ATAK to send its position reports (SA) by unicast to the
-radio's IPv4 address on UDP **4242**, and receive ordinary CoT on UDP **4242**.
-The radio then appears in ATAK's contacts as **MANET mesh-XXXX** (its hostname).
-Choose that contact when sending a manually placed point to the radio. The
-contact itself has no map marker; position updates arrive through external GPS.
-
-To turn this off on one radio, set `atak=n` in `/etc/mesh.conf` and run
-`sudo systemctl restart manet-atak.service`. Remove that setting, or set
-`atak=y`, and restart the service to turn it back on. With no admitted phone,
-the service sends no CoT. Ranging-based positioning remains off by default.
-
-## Web Interface
-
-Each node serves two things on port 80, reachable from a device connected to
-that node (Ethernet or its AP), or over an SSH port-forward:
-
-* **`http://<node>/`**: status page. Mesh topology, link throughput, per-node
-  health and detail. No password.
-* **`http://<node>/manage`**: management UI. Radio control, throughput and ping
-  measurement, uplink credentials, and the mesh configuration
-  form. Requires the **admin password** chosen at flash time.
-
-Both are restricted to that node's own clients and localhost, not other radios,
-not other radios' clients, and not the upstream LAN when the node is acting as a
-gateway. Clients of that radio may access this page at `http://manet.local/` or its IP.
-
-### Status page
-
-Live mesh topology with per-link throughput, and a node list showing which radio carries
-the best route to each peer.
-
-![Mesh topology on the status page](docs/images/webui/status-topology.png)
-
-Expanding a node gives its addresses, uptime, GPS info, battery state, every network
-interface with the role it is playing, connected EUDs, and which services it is hosting.
-
-![Per-node detail card](docs/images/webui/node-detail.png)
-
-### Management UI
-
-**Radio config**: bring each interface up or down and set TX power, per node or across
-the whole mesh at once, plus the HaLow channel.
-
-![Radio configuration tab](docs/images/webui/manage-radio-config.png)
-
-**Measure**: run iperf3 and ping between any pair of nodes, in either direction, and
-save the results against a labeled session so field tests can be compared later.
-
-![Measurement tab](docs/images/webui/manage-measure.png)
-
-See [Node Tools Documentation](MANET/node_tools/README.md) for the routes,
-access-control layers, and what each management tab does.
-
-## Connectivity Modes
-
-A phone or computer reaches the mesh through whichever node it is connected to.
-Those are End User Devices, EUDs throughout this documentation, and a node
-handles them three ways:
-
-* **Wired.** Over Ethernet. The node bridges the device onto the mesh, or acts
-  as a gateway when the cable leads to the internet instead of an EUD.
-* **Wireless.** The node runs a 5 GHz access point, separate from the mesh
-  backhaul, for clients to join.
-* **Auto.** The default. A wired EUD takes priority over the access point.
-  An Ethernet internet uplink makes the node a gateway and allows it to serve
-  an AP. With automatic channels enabled, the AP candidate otherwise participates
-  in the mesh; with static channels, wireless EUD access is available without
-  an uplink. See [Ethernet role selection](MANET/node_tools/README.md#discovery--partition-healing).
+ATAK integration is enabled by default. The radio supplies external GPS
+and exchanges CoT with the attached phone. Follow the
+[location and ATAK chapter](docs/guide/content/location.md) for phone
+configuration, contact selection and position-source limitations.
 
 ## Documentation
-* [Three-level field guide](docs/guide/content/overview.md) · [Build and preview](docs/guide/README.md)
-* [Provisioning Guide](MANET/provisioning/README.md)
-* [Additional setup scripts](MANET/provisioning/additional-scripts/README.md)
-* [Node Tools Documentation](MANET/node_tools/README.md)
-* [Runtime Internals](docs/node-tools-internals.md)
-* [Install Packages and Checksums](MANET/install_packages/README.md)
-* [Feature Roadmap and Validation Status](MANET/README.md#feature-roadmap)
-* [Binary Details](MANET/binaries_arm64/README.md)
-* [Dispatcher Hooks](MANET/networkd-dispatcher/README.md)
 
-Normal installs and updates use the stable GitHub release marked **Latest**.
-Use `--development` with the flasher or `node-update.sh` to test the newest
-published build, including prereleases. See the [provisioning guide](MANET/provisioning/README.md#stable-and-development-installs)
-and [release publishing instructions](MANET/releases/README.md).
+- [Contributing and PR workflow](CONTRIBUTING.md)
+- [Field guide](https://very-srs.github.io/MANET/) and [documentation style](docs/guide/README.md)
+- [Runtime reference](MANET/node_tools/README.md), [internals](docs/node-tools-internals.md) and [tool map](docs/node-tools-map.md)
+- [Provisioning reference](MANET/provisioning/README.md) and [flasher internals](docs/provisioning-internals.md)
+- [Packaging and development tools](MANET/packaging/README.md)
+- [Kernel builds](kernel/build/README.md) and [Morse port record](docs/kernel-6.18-morse-port.md)
+- [Supplied binaries and supplicant builds](MANET/binaries_arm64/README.md)
+- [Release publication and selection](MANET/releases/README.md)
+
+A source push, a guide deployment and a radio release are separate events.
+Contributions need review and validation before packaging. The release
+publisher verifies assets before publishing, and promotion makes the tested
+package set stable without rebuilding it.

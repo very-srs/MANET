@@ -1,0 +1,58 @@
+/dts-v1/;
+/plugin/;
+
+/ {
+    compatible = "brcm,bcm2835", "brcm,bcm2836",
+                 "brcm,bcm2708", "brcm,bcm2709", "brcm,bcm2711";
+};
+
+&gpio {
+    spi0_pins: spi0_pins {
+        brcm,pins = <9 10 11>;         /* MISO MOSI SCLK */
+        brcm,function = <4 4 4>;       /* ALT0 = SPI0 */
+        brcm,pull = <2 2 2>;
+    };
+
+    spi0_cs_pins: spi0_cs_pins {
+        brcm,pins = <8>;
+        brcm,function = <1>;   /* OUTPUT: default HIGH = chip CS deasserted until driver asserts */
+        brcm,pull = <2>;       /* pull-up */
+    };
+};
+
+&spi0 {
+    pinctrl-names = "default";
+    pinctrl-0 = <&spi0_pins &spi0_cs_pins>;
+    /* GPIO8 as CS, active-low.  The SPI framework (use_gpio_descriptors=true)
+     * drives GPIO8 high between messages and low during messages, giving the
+     * mm6108 the CS pulse it needs between CMD53 byte-mode writes and the
+     * next command.  morse_spi_initsequence uses cs_off=1 to keep CS high
+     * during the 74-clock power-on sequence. */
+    cs-gpios = <&gpio 8 1>;  /* 1 = GPIO_ACTIVE_LOW */
+    #address-cells = <1>;
+    #size-cells = <0>;
+    status = "okay";
+
+    spidev@0 {
+        reg = <0>;
+        status = "disabled";
+    };
+
+    spidev@1 {
+        reg = <1>;
+        status = "disabled";
+    };
+
+    mm6108: mm6108@0 {
+        compatible = "morse,mm610x-spi";
+        reg = <0>;
+        spi-max-frequency = <50000000>;
+
+        reset-gpios   = <&gpio 17 0>;  /* GPIO_ACTIVE_HIGH */
+        power-gpios   = <&gpio  3 0>,  /* GPIO_ACTIVE_HIGH */
+                        <&gpio  7 0>;  /* GPIO_ACTIVE_HIGH */
+        spi-irq-gpios = <&gpio  5 0>;  /* GPIO_ACTIVE_HIGH */
+
+        status = "okay";
+    };
+};

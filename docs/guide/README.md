@@ -75,9 +75,13 @@ workflow runs on node-tool changes as well as documentation changes. This
 checks coverage, not the truth of each description: review prose whenever
 behavior changes, even if no filename changes.
 
-**Developer** is the explanation a technical person or coding agent would
-want to read to understand how the mesh works. Explain the engineering in
-connected technical prose. Naming a subsystem or saying that it handles
+**Developer** is for someone who wants to contribute code. Explain how the
+system works and what a contributor needs to change it correctly: source
+ownership, prerequisites, design constraints, validation and failure paths.
+Use the [contributor workflow](../../CONTRIBUTING.md) for checkout-to-PR
+steps, and link to the tracked build recipes when a mechanism needs them.
+Explain the engineering in connected technical prose. Naming a subsystem
+or saying that it handles
 collisions, recovery, or authentication is insufficient. The implementation
 lives in the repository; do not reproduce source code or turn the page into
 an inventory of scripts. Use calculations, examples, tables, or diagrams
@@ -209,6 +213,7 @@ See [GitHub's workflow documentation](https://docs.github.com/en/pages/getting-s
 
 The site address is `https://very-srs.github.io/MANET/`. After a push, check
 that the `Documentation` workflow succeeds, then refresh the page. The URL
-stays the same as the guide develops. Keep the site out of prominent README
-promotion while it is being developed. Commits and pushes follow the
+stays the same as the guide develops. The root README directs radio users
+to this site and contributors to the repository workflow. Keep those
+destinations visible and consistent. Commits and pushes follow the
 repository's authorization rules; a local edit does not itself publish it.

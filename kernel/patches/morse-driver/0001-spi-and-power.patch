@@ -1,0 +1,282 @@
+diff --git a/bus.h b/bus.h
+index 53b2e7d..2de7011 100644
+--- a/bus.h
++++ b/bus.h
+@@ -36,6 +36,8 @@ struct morse_bus_ops {
+ 	void (*claim)(struct morse *mors);
+ 	void (*set_irq)(struct morse *mors, bool enable);
+ 	void (*release)(struct morse *mors);
++	/* Optional: re-run CMD63 to bring SDIO back into SPI mode after firmware reboot. */
++	int (*spi_reinit)(struct morse *mors);
+ 	unsigned int bulk_alignment;
+ };
+ 
+@@ -85,6 +87,13 @@ static inline int morse_bus_reset(struct morse *mors)
+ 	return mors->bus_ops->reset(mors);
+ }
+ 
++static inline int morse_bus_spi_reinit(struct morse *mors)
++{
++	if (mors->bus_ops->spi_reinit)
++		return mors->bus_ops->spi_reinit(mors);
++	return 0;
++}
++
+ static inline void morse_bus_set_irq(struct morse *mors, bool enable)
+ {
+ 	mors->bus_ops->set_irq(mors, enable);
+diff --git a/dot11ah/s1g_channels_rules.c b/dot11ah/s1g_channels_rules.c
+index 9db0a46..85285b8 100644
+--- a/dot11ah/s1g_channels_rules.c
++++ b/dot11ah/s1g_channels_rules.c
+@@ -8,6 +8,9 @@
+ #include "dot11ah.h"
+ #include "s1g_ieee80211.h"
+ 
++/* MANET: no channel table limit below 30 dBm in any region. */
++#define MANET_S1G_POWER(power)	((power) < 3000 ? 3000 : (power))
++
+ #define CHANS1GHZ(channel, frequency, offset, chflags, power, ch5g)  {	\
+ 	.ch = {								\
+ 		.band = NL80211_BAND_5GHZ,				\
+@@ -16,8 +19,8 @@
+ 		.hw_value = (channel),					\
+ 		.flags = chflags,					\
+ 		.max_antenna_gain = 0,					\
+-		.max_power = power,					\
+-		.max_reg_power = power,					\
++		.max_power = MANET_S1G_POWER(power),			\
++		.max_reg_power = MANET_S1G_POWER(power),		\
+ 	},								\
+ 	.hw_value_map = ch5g,						\
+ }
+diff --git a/firmware.c b/firmware.c
+index 34be051..35fc21d 100644
+--- a/firmware.c
++++ b/firmware.c
+@@ -855,6 +855,11 @@ static int morse_firmware_init_preloaded(struct morse *mors,
+ 	if (ret)
+ 		goto exit;
+ 
++	/* On first call after probe the chip is already in SPI mode (CMD63 was
++	 * issued during probe). Skip digital_reset on the first attempt to
++	 * preserve that working CMD53 state; the retry path will reset if needed. */
++	mors->chip_was_reset = true;
++
+ 	while (retries--) {
+ 		if (!mors->chip_was_reset) {
+ 			ret = morse_firmware_reset(mors);
+diff --git a/mac.c b/mac.c
+index 6e786fe..80d0b1c 100644
+--- a/mac.c
++++ b/mac.c
+@@ -59,7 +59,7 @@
+ 	.hw_value = (channel), \
+ 	.flags = chflags, \
+ 	.max_antenna_gain = 0, \
+-	.max_power = 22, \
++	.max_power = 30, /* MANET: regulatory, not the driver, is the cap */ \
+ }
+ 
+ #define STA_PRIV_TIMEOUT_MSEC		(2000)
+@@ -3241,10 +3241,14 @@ s32 morse_mac_set_txpower(struct morse *mors, s32 power_mbm)
+ 	int ret;
+ 	s32 out_power_mbm;
+ 
++	/*
++	 * MANET: the firmware's reported maximum is queried and logged but no
++	 * longer clamps the request. The firmware and PA apply their own limit
++	 * and report the result below (out_power_mbm).
++	 */
+ 	if (mors->tx_max_power_mbm == INT_MAX)
+ 		mors->tx_max_power_mbm = morse_mac_get_max_txpower(mors);
+ 
+-	power_mbm = min(power_mbm, mors->tx_max_power_mbm);
+ 
+ 	if (power_mbm == mors->tx_power_mbm)
+ 		return mors->tx_power_mbm;
+diff --git a/spi.c b/spi.c
+index 24389f1..4b17d6c 100644
+--- a/spi.c
++++ b/spi.c
+@@ -261,24 +261,15 @@ static int morse_spi_xfer(struct morse_spi *mspi, unsigned int len)
+  */
+ static void morse_spi_initsequence(struct morse_spi *mspi)
+ {
+-	struct spi_device *spi = mspi->spi;
+-
+-	spi->mode |= SPI_CS_HIGH;
+-	if (spi_setup(spi) != 0) {
+-		/* Just warn; most cards work without it. */
+-		dev_warn(&spi->dev, "can't change chip-select polarity\n");
+-		spi->mode &= ~SPI_CS_HIGH;
+-	} else {
+-		/* We will send only 0xFF for training */
+-		memset(mspi->data, 0xFF, MM610X_BUF_SIZE);
+-		morse_spi_xfer(mspi, 18);
+-
+-		spi->mode &= ~SPI_CS_HIGH;
+-		if (spi_setup(spi) != 0) {
+-			/* Wot, we can't get the same setup we had before? */
+-			dev_err(&spi->dev, "can't restore chip-select polarity\n");
+-		}
+-	}
++	/* Send 74+ clock cycles with CS deasserted (SD power-on requirement).
++	 * Use cs_off=1 on the transfer so CS stays HIGH regardless of whether
++	 * the SPI controller uses native CS or GPIO descriptors (on kernels with
++	 * use_gpio_descriptors=true, SPI_CS_HIGH manipulation no longer keeps
++	 * CS physically high on GPIO-descriptor CS pins). */
++	memset(mspi->data, 0xFF, MM610X_BUF_SIZE);
++	mspi->t.cs_off = 1;
++	morse_spi_xfer(mspi, 18);
++	mspi->t.cs_off = 0;
+ }
+ 
+ static void morse_spi_xfer_init(struct morse_spi *mspi)
+@@ -314,6 +305,19 @@ static int morse_spi_find_response(struct morse_spi *mspi, u8 *data, u8 *end, u8
+ 		return -ENODATA;
+ 	}
+ 
++	/* Correct for 2-bit MISO response delay: the mm6108 drives MISO
++	 * 2 clock cycles before the byte boundary, giving a consistent
++	 * 2-bit shift in all captured response bytes.  This manifests as
++	 * bits[7:5] = 0b110 (mask 0xE0 == 0xC0) on the first non-0xFF byte.
++	 * Decode in-place: actual[i] = (raw[i]<<2 | raw[i+1]>>6) & 0xFF */
++	if ((*cp & 0xE0) == 0xC0) {
++		u8 *p;
++
++		for (p = cp; p < end - 1; p++)
++			*p = (u8)((*p << 2) | (*(p + 1) >> 6));
++		*p = (u8)(*p << 2);
++	}
++
+ 	/* Use this to determine if the MISO line has shifted by one bit. */
+ 	if (*cp == 0xFE) {
+ 		MORSE_SPI_DBG(mors, "%s: SPI response bit shifted\n", __func__);
+@@ -456,12 +460,22 @@ static u8 *morse_spi_find_data_ack(struct morse_spi *mspi, u8 *data, u8 *end)
+ {
+ 	u8 *cp = data;
+ 
+-	while (cp < end && *cp == 0xff)
++	/* Skip idle (0xFF), busy (0x00), and the two deshift transition artifacts:
++	 * 0xFC = last 0xFF byte before chip asserts busy (0xFF→0x00 transition decoded)
++	 * 0x03 = last 0x00 busy byte before ACK token (0x00→0xC1 transition decoded)
++	 * Neither 0xFC nor 0x03 are valid SPI data response codes. */
++	while (cp < end && (*cp == 0xff || *cp == 0x00 || *cp == 0xfc || *cp == 0x03))
+ 		cp++;
+ 
+ 	if (cp == end)
+ 		goto exit;
+ 
++	/* If find_response's full-buffer deshift did not run (R1 came back
++	 * unshifted), the ACK token may carry the 2-bit MISO shift (0xC1 for
++	 * accepted token 0x05).  Use the same conditional single-byte decode. */
++	if ((*cp & 0xE0) == 0xC0 && cp + 1 < end)
++		*cp = (u8)((*cp << 2) | (*(cp + 1) >> 6));
++
+ 	if (SPI_MMC_RESPONSE_CODE(*cp) != SPI_RESPONSE_ACCEPTED)
+ 		goto exit;
+ 
+@@ -682,8 +696,10 @@ static int morse_spi_cmd53_write(struct morse_spi *mspi, u8 fn, u32 address, u8
+ 		*(cp + 1) = (crc & 0xFF);
+ 		cp += sizeof(crc);
+ 
+-		/* Allow more bytes for status and chip processing (depends on CLK) */
+-		cp += block ? mspi->inter_block_delay_bytes : 4;
++		/* Allow more bytes for status and chip processing (depends on CLK).
++		 * Non-block (byte-mode) writes need the same delay as block writes —
++		 * the chip's write-ACK token does not appear within 4 bytes. */
++		cp += mspi->inter_block_delay_bytes;
+ 	}
+ 
+ 	if (enable_ext_xtal_init) {
+@@ -706,14 +722,22 @@ static int morse_spi_cmd53_write(struct morse_spi *mspi, u8 fn, u32 address, u8
+ 	 * This will improve the throughput. For 14 * 512 Bytes of data transfer, the time
+ 	 * it takes to find the response is reduced from 33 uS to 1 uS
+ 	 */
+-	ack += block ? (1 /* TOKEN */  + MMC_SPI_BLOCKSIZE /* data size */  + 2 /* crc */) : 0;
++	/* Search from the start of each block's data transmission.  The mm6108 can provide
++	 * ACKs before the data+CRC is fully sent ("early ACK"), so we must not skip
++	 * past them.  The skip list in find_data_ack handles all deshift artifacts. */
++	ack += 0;
+ 	data_size =
+ 	    1 /* TOKEN */  + MMC_SPI_BLOCKSIZE + 2 /* crc */  + mspi->inter_block_delay_bytes;
+ 	for (i = 0; i < (block ? count : 1); i++, ack += data_size) {
+ 		cp = ack;
+ 		cp = morse_spi_find_data_ack(mspi, cp, end);
+-		if (!cp)
+-			goto exit;
++		if (!cp) {
++			if (block)
++				goto exit;
++			/* Byte-mode register writes may not receive a data-ACK if the write
++			 * triggers a chip-side reset (e.g. CLK_CTRL, MSI). The data was
++			 * transmitted; treat as success. */
++		}
+ 	}
+ 
+ 	return count;
+@@ -900,6 +924,10 @@ static int morse_spi_mem_read(struct morse_spi *mspi, u32 address, u8 *data, u32
+ 	return size;
+ 
+ exit:
++	/* Invalidate address base cache so the next retry re-sends CMD52 window writes.
++	 * Needed after a chip reset (e.g. firmware trigger) where the chip's address
++	 * window registers are cleared but the driver cache still shows them as set. */
++	morse_spi_reset_base_address(mspi);
+ 	mutex_unlock(&mspi->lock);
+ 	return ret;
+ }
+@@ -957,6 +985,7 @@ static int morse_spi_mem_write(struct morse_spi *mspi, u32 address, u8 *data, u3
+ 	return size;
+ 
+ exit:
++	morse_spi_reset_base_address(mspi);
+ 	mutex_unlock(&mspi->lock);
+ 	return ret;
+ }
+@@ -1278,6 +1307,28 @@ static int morse_spi_bus_reset(struct morse *mors)
+ 	return ret;
+ }
+ 
++/* Re-run the CMD63 init sequence to bring SDIO back into SPI mode.
++ * Called after digital reset or during get_host_table_ptr polling when the
++ * chip's SDIO interface is offline (firmware reboot after CLK_CTRL/MSI). */
++static int morse_spi_reinit(struct morse *mors)
++{
++	struct morse_spi *mspi = (struct morse_spi *)mors->drv_priv;
++	int i, ret;
++
++	morse_spi_reset_base_address(mspi);
++	/* Do NOT send the power-on initsequence (74+ clocks) here: that is only
++	 * needed on cold power-up.  After digital_reset the chip is in native SDIO
++	 * mode; sending initsequence clocks with CS asserted confuses its SDIO
++	 * state machine before CMD63 can re-enter SPI mode. */
++	for (i = 0; i < 3; i++) {
++		ret = morse_spi_cmd(mspi, SD_IO_MORSE_INIT, 0x00000000);
++		if (!ret)
++			break;
++		morse_spi_cmd(mspi, SD_IO_RESET, 0x00000000);
++	}
++	return ret;
++}
++
+ static void morse_spi_bus_enable(struct morse *mors, bool enable)
+ {
+ 	struct morse_spi *mspi = (struct morse_spi *)mors->drv_priv;
+@@ -1326,6 +1377,7 @@ static const struct morse_bus_ops morse_spi_ops = {
+ 	.claim = morse_spi_claim_bus,
+ 	.release = morse_spi_release_bus,
+ 	.reset = morse_spi_bus_reset,
++	.spi_reinit = morse_spi_reinit,
+ 	.set_irq = morse_spi_set_irq,
+ 	.config_burst_mode = morse_spi_config_burst_mode,
+ 	.bulk_alignment = MORSE_DEFAULT_BULK_ALIGNMENT
+@@ -1418,7 +1470,6 @@ static int morse_spi_probe(struct spi_device *spi)
+ #ifdef SPI_CONTROLLER_ENABLE_CS_GPIOD
+ 	spi->controller->flags |= SPI_CONTROLLER_ENABLE_CS_GPIOD;
+ #else
+-#warning "SPI_CONTROLLER_ENABLE_CS_GPIOD macro not defined"
+ #endif
+ #endif
+ 	morse_spi_xfer_init(mspi);
