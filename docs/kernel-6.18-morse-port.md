@@ -323,6 +323,17 @@ it never writes efuse. The main band loses its third receive chain. The
 read-only module parameter defaults off; the node firmware/config service
 prepares it from `mt7916_background_rx` before coldplug.
 
+The reservation initially prevented the main 5 GHz radio from peering on
+two Rock 3A nodes. Patch 0003 now parses band 1 before the early firmware
+upload, so a selectable card uploads `0x52` rather than `0xd2`, and aligns
+the legacy OFDM TX-path count with two-path operation. Host tests capture the
+actual uploaded image and reject the old initialization order. A three-node
+5180 MHz HT20 bench with the observer active passed on both Rock 3A boards:
+both peers stay established and traffic flows in both directions, with
+receive throughput reduced by up to a third by the reserved chain. The
+reservation stays off by default until runtime chain policy exists. Host mask `0x0c`
+encodes band-local RX `0x3`, not global RF pin numbers.
+
 Production observation uses the validated frontend/detector configuration
 with interrupts masked, pulse writer disabled and no CAC buffer dependency.
 It exposes a root-only, versioned debugfs JSON interface. The kernel preserves
@@ -332,8 +343,12 @@ The series README specifies commands, fields, locking and restoration.
 
 The cold-start configuration has Rock 3A RF evidence on the pinned 2024 WM.
 Both production modules compile offline and the C lifecycle tests run against
-both trees. The added survey-TX alignment/correction still needs hardware
-validation. CM4 remains the verification target; its cold boot, reservation,
+both trees. The reservation-v2 Rock 3A bench found that heavy local TX biases
+the corrected estimate even on a far quiet channel. Userspace now omits
+windows with at least 10% local TX, preserving the low-TX controls while
+limiting amplification of accounting error. This provisional guard does not
+qualify intermediate loads or the 250 ms production dwell. CM4 remains the
+verification target; its cold boot, reservation,
 RF response, cancellation and traffic behavior have not yet been benched.
 
 ## 5. DTS overlay: `dts-overlays/cm4-morse-spi.dts` (CM4 only)

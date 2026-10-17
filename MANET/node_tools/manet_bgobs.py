@@ -13,6 +13,10 @@ import time
 # checks the current regulatory flags, including disabled/radar channels.
 CANDIDATES = frozenset((5200, 5220, 5240, 5745, 5765, 5785, 5805, 5825))
 DWELL_MS = 250
+# Reservation-v2 validated low-TX controls only (up to 6.2%). Near 90%,
+# survey TX undercounts bin-10 blanking and lower bins also retain energy.
+# Limit correction gain to < 1.12 until a controlled TX sweep qualifies more.
+MAX_OWN_TX_FRACTION = .10
 
 
 def integer(record, key, minimum=0):
@@ -49,10 +53,13 @@ def occupancy(record, frequency):
     tx = integer(record, 'tx_last_us') - integer(record, 'tx_first_us')
     own = tx / elapsed
     top = bins[10] / total
-    # Too little unblanked time amplifies small alignment errors. Never turn
-    # a saturated local transmitter or a reset into a clean candidate.
-    if not 0 <= own < .9 or own > top + .05:
-        raise ValueError('survey TX inconsistent or receiver mostly blanked')
+    if own < 0 or own > top + .05:
+        raise ValueError('survey TX inconsistent with observer')
+    # Neither bin 10 nor lower-bin energy can distinguish own-TX artifacts
+    # from strong foreign signals. Reject load outside this provisional limit
+    # instead of fitting a subtraction that could erase real interference.
+    if own >= MAX_OWN_TX_FRACTION:
+        raise ValueError('local TX exceeds observer correction limit')
     foreign = sum(bins[2:10]) / total + max(0, top - own)
     return min(100, max(0, round(100 * foreign / (1 - own))))
 

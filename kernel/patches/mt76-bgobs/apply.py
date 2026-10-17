@@ -53,9 +53,14 @@ def apply(tree, series):
     if trial(complete, True)[0] is not None:
         print('mt76-bgobs: complete series already applied')
         return
-    # Accept an intact timing prefix or a clean tree. All other partial
-    # states must fail before writing any source file.
-    if trial(prerequisites, True)[0] is not None:
+    # The original complete observer series had two patches. Permit its
+    # exact prefix to acquire the EEPROM fix in the same transaction.
+    if (len(patches) == 3 and
+            trial(prerequisites + patches[:2], True)[0] is not None):
+        final, error = trial(patches[2:])
+    # Accept an intact timing prefix or a clean tree. Other partial states
+    # must fail before writing any source file.
+    elif trial(prerequisites, True)[0] is not None:
         final, error = trial(patches)
     else:
         final, error = trial(complete)
