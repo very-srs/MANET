@@ -655,7 +655,8 @@ class ManagerRecoveryTests(unittest.TestCase):
         source = (TOOLS / 'mesh-ip-manager.sh').read_text()
         source += (TOOLS / 'manet-common.sh').read_text()
         definitions = '\n'.join(re.search(r'^' + name + r'\(\) \{.*?^\}', source, re.M | re.S)[0]
-                                for name in ('ensure_dhcp_isolation', 'eud_ready', 'ensure_dnsmasq_running'))
+                                for name in ('ensure_dhcp_isolation', 'eud_ready', 'dnsmasq_serves',
+                                             'ensure_dnsmasq_running'))
         # Execute the real steady-state branch after its pool comparison,
         # ensuring recovery is actually wired into allocation reconciliation.
         branch = re.search(r'                if \[ "\$NEEDS_DNSMASQ_UPDATE" = true \]; then.*?                fi',
@@ -680,8 +681,10 @@ systemctl() {
 }
 configure_dnsmasq() { echo unexpected-reconfigure; exit 99; }
 update_avahi_host() { :; }
+ss() { echo "UNCONN 0 0 $BR0_SECONDARY:53 0.0.0.0:*"; }
 '''
-            script = stubs + definitions + '\nensure_dhcp_isolation || exit 1\nNEEDS_DNSMASQ_UPDATE=false\n' + branch
+            script = (stubs + definitions + '\nBR0_SECONDARY=10.30.2.241\nensure_dhcp_isolation || exit 1\n'
+                      'NEEDS_DNSMASQ_UPDATE=false\n' + branch)
             (root / 'running').touch()
             for state, port, expected in [('bad', 'present', 1), ('good', 'absent', 0),
                                            ('good', 'present', 0), ('good', 'present', 0),
@@ -696,6 +699,36 @@ update_avahi_host() { :; }
             events = (root / 'events').read_text()
             self.assertEqual(events.count('stop dnsmasq.service'), 2)
             self.assertEqual(events.count('start dnsmasq.service'), 1)
+            self.assertEqual(events.count('restart dnsmasq.service'), 0)
+
+    def test_running_dnsmasq_without_a_gateway_socket_is_restarted(self):
+        """Restart dnsmasq when boot left it without DNS on the EUD gateway."""
+        source = (TOOLS / 'mesh-ip-manager.sh').read_text()
+        definitions = '\n'.join(re.search(r'^' + name + r'\(\) \{.*?^\}', source, re.M | re.S)[0]
+                                for name in ('dnsmasq_serves', 'ensure_dnsmasq_running'))
+        stubs = '''
+log() { :; }
+eud_ready() { :; }
+systemctl() { echo "$*" >> "$TEST_ROOT/events"; [ "$1" != is-active ] || true; }
+ss() {
+    case "$TEST_SOCKETS" in
+        fail) return 1 ;;
+        gateway) printf '%s\\n' "UNCONN 0 0 10.30.2.240:53 0.0.0.0:*" "UNCONN 0 0 10.30.2.241:53 0.0.0.0:*" ;;
+        *) printf '%s\\n' "UNCONN 0 0 10.30.2.240:53 0.0.0.0:*" "UNCONN 0 0 127.0.0.1:53 0.0.0.0:*" ;;
+    esac
+}
+'''
+        cases = [('primary-only', '10.30.2.241', 1), ('gateway', '10.30.2.241', 0),
+                 ('fail', '10.30.2.241', 0), ('primary-only', '', 0)]
+        for sockets, gateway, restarts in cases:
+            with self.subTest(sockets=sockets, gateway=gateway), tempfile.TemporaryDirectory() as scratch:
+                script = stubs + definitions + '\nensure_dnsmasq_running "$GATEWAY"\n'
+                result = subprocess.run(['bash', '-c', script], capture_output=True, text=True,
+                                        env=dict(os.environ, TEST_ROOT=scratch, TEST_SOCKETS=sockets,
+                                                 GATEWAY=gateway))
+                self.assertEqual(result.returncode, 0, result.stderr)
+                events = (Path(scratch) / 'events').read_text()
+                self.assertEqual(events.count('restart dnsmasq.service'), restarts, events)
 
 
 if __name__ == '__main__':
