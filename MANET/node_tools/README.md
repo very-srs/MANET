@@ -555,6 +555,12 @@ or merged. The retired snapshots preserve final data for manual recovery.
 
 ## Channel Selection & Jamming Detection
 
+Both Wi-Fi mesh bands use 20 MHz channels. On 5 GHz this favors range and
+lets the MT7916 third-chain observer, background CAC and DFS moves use the
+same primary channel width. Bench throughput at 20 MHz was 137 to 178 Mbit/s
+between nodes, not a guaranteed field rate. HE and VHT rates remain enabled.
+ACS scores individual 20 MHz primaries, and DFS centers equal those primaries.
+
 **channel-election.sh**
 
 Requests an election round from **mesh-channel-agreement.py**, whose service
@@ -657,8 +663,13 @@ local transmit time are omitted: heavy local TX biased quiet-channel estimates
 on the reservation bench. This provisional limit preserves low-TX controls;
 it is not a calibrated correction for heavier load. Other invalid windows are
 also omitted. With the matched DFS kernel, the passive observer also measures
-DFS candidates whose live PHY flags permit listening. A background CAC owner
-keeps the receiver and supplies its own read-only occupancy sample.
+DFS candidates whose live PHY flags permit listening, excluding disabled
+channels and channels in a radar non-occupancy period. Every connected node
+must support the candidate, and at least one fresh occupancy measurement is
+required to score it. Noise or network counts alone cannot elect a DFS channel.
+A background CAC owner keeps the receiver and supplies its own read-only
+occupancy sample. If receive-path reservation is deferred, the observer omits
+the sweep without falling back to a main-radio scan.
 
 Without an observer, 5 GHz keeps its main-radio flush scan behind the same
 gate, including its three-sample occupancy warmup. That scan includes the
@@ -1964,6 +1975,17 @@ on CM4. The generic field health policy still needs an on-node acceptance run.
 An EEPROM boot watchdog is optional and its status is recorded. Without it,
 a failure before kernel handoff can need a power cycle to select the previous
 kernel. The sealed radio's power supply must remain accessible.
+
+Older CM4 images with `auto_initramfs=1` can trial without a manual boot edit.
+Only `tryboot.txt` disables automatic initramfs loading during the trial. The
+original `config.txt` and initramfs stay intact for fallback. After health
+confirmation, one atomic selector replacement commits both the new slot and
+`auto_initramfs=0`. The transaction records the previous settings. Preflight
+explains refusals for custom initramfs directives, root selectors needing
+userspace, encrypted/LVM/network roots, or modular root-storage/filesystem
+drivers. For radios already on v0.574, the next CM4 tools wrapper installs the
+fixed updater before its kernel follow-up runs. Stale bootstrap payloads and
+timers are retired when a direct update takes over recovery.
 
 This completes an interrupted update; it does not roll back a defective release
 or provide an operating-system snapshot. The protection applies to installations

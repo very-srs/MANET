@@ -44,7 +44,9 @@ while True:
            preparation=state.get('dfs_prepare'),protocol=state.get('protocol'),
            destination=state.get('destination'),cooldown=state.get('dfs_cooldown_until'),
            csa=read('/run/manet-dfs-csa.json')))
- time.sleep(.1)
+ # Debugfs hold reads acquire wiphy/device locks. Keep bench polling sparse;
+ # iw event remains continuous and the kernel/CSA records carry event times.
+ time.sleep(5)
 '''
 TRIGGER = r'''
 import json,pathlib,time
@@ -87,7 +89,7 @@ def main():
     for host in args.hosts:
         threading.Thread(target=collect,args=(host,),daemon=True).start()
     latest={}; started=time.monotonic(); trigger=None; fallback=None; landed={}
-    summary={}
+    summary={'sample_interval_seconds': 5}
     try:
         while time.monotonic()-started<args.timeout:
             try: host,received,row=messages.get(timeout=1)

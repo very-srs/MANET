@@ -255,7 +255,7 @@ firmware behavior, not a per-radio reset attestation. `kernel.json` and
 PID 1 setting and optional EEPROM `BOOT_WATCHDOG_TIMEOUT` status. A missing,
 disabled or unreadable EEPROM watchdog does not block a trial. Its presence
 alone does not establish a functioning reset path. The initial supported
-config uses `kernel8.img`, no initramfs, no included configs and no existing
+config uses `kernel8.img`, no custom initramfs, no included configs and no existing
 `autoboot.txt`, `tryboot.txt`, or custom OS prefix. Unsupported configurations
 need an explicit commissioned backend extension. Do not strip settings just
 to pass preflight. `confirmed.json` preserves the commissioned base and pins
@@ -275,7 +275,30 @@ reference for the separate handoff boundaries.
 CM4 provisioning disables automatic initramfs loading with `auto_initramfs=0`.
 MANET's CM4 kernel has MMC and ext4 built in. The stock image's initramfs8
 belongs to its distribution kernel and must not be paired with the MANET
-kernel. RPi5 retains the image's matched kernel/initramfs configuration.
+kernel. Older CM4 installations with `auto_initramfs=1` can also trial. The
+candidate removes those assignments from every accepted config section and
+sets `auto_initramfs=0` under `[all]` in `tryboot.txt`, beside the slot selector.
+The normal `config.txt` and old initramfs remain untouched. Firmware fallback
+therefore boots the original kernel with its original initramfs setting. Only
+successful health confirmation atomically replaces `config.txt` with the
+candidate selector and disabled automatic initramfs loading. `kernel.json`
+records the entire original config, each prior auto-initramfs assignment with
+its section, and root-storage evidence. The confirmation record retains that
+evidence too. Interrupted commit recovery follows the existing selector journal.
+
+Preflight inspects both the saved and running kernel command lines and the
+mounted root. A PARTUUID, PARTLABEL, numeric block identifier or directly named
+kernel block device can proceed.
+Filesystem UUID/LABEL aliases, encrypted or mapped storage, LVM/RAID setup,
+network roots and roots needing an overlay or RAM filesystem are refused with
+a reason in updater status. A loaded root-filesystem module or a modular driver
+in the root device's sysfs ancestry also requires an initramfs and is refused.
+Unrelated radio modules do not block a trial. Custom `initramfs`, `ramfsfile`
+and `ramfsaddr` directives remain unsupported. Root checks run again before
+arming tryboot, including after interrupted staging. These checks identify
+known early-userspace dependencies. They do not prove arbitrary boot hardware
+will work, so the one-shot trial and retained fallback remain necessary.
+RPi5 retains the image's matched kernel/initramfs configuration.
 A future RPi5 kernel backend must supply a matching initramfs or independently
 qualify a built-in root-storage/filesystem path before disabling it.
 
@@ -352,6 +375,19 @@ direct new-updater installation. While opted out, it retains the embedded
 archive and timer without starting a kernel transaction. Re-enabling allows
 that timer to resume. A pending transaction always resolves first. Explicit
 bench overrides retain their original strict profile and health checks.
+
+The v0.574 auto-initramfs refusal occurs before a pending kernel transaction
+exists. Deliver its replacement through the same outer wrapper, so the old
+updater installs the new tools and pinned inner payload before kernel preflight
+runs again. No reflash or manual config edit is needed for the usual CM4
+PARTUUID/ext4 boot. Repeated timer calls share the updater lock and the saved
+trial identity, so they cannot request a second trial. A direct payload retires
+any remaining bootstrap archive, timer and unit under that lock before firmware
+setup can enable the old timer again. A newly supplied wrapper is retained.
+The current wrapper is kept through its inner installation until both the
+kernel and tools are confirmed. When a newer direct update retires a stale
+wrapper, its durable recovery archive owns completion even if cleanup is
+interrupted.
 
 When supplied at build time, `manet-release-setup.py` verifies SHA-256 for the
 native Debian `hostapd` package and regulatory DB before invoking dpkg. It
@@ -2006,7 +2042,19 @@ exercise this code only with the explicit `MANET_DFS_BENCH=1` service
 environment. Normal Rock 3A and RPi5 packages keep the policy off.
 
 The coordinator scores the shared registry with the intersection of connected
-DFS capabilities. A DFS winner starts an authenticated `dfs_prepare` intention
+DFS capabilities. `manet_dfs.dfs_frequencies` accepts both integer MHz from
+`iw phy channels` and decimal MHz from `iw phy info`, splitting each channel's
+flags and DFS state independently. Disabled and NOP channels are excluded.
+The observer adds these passive candidates to the manager's non-DFS list.
+The coordinator passes the intersection in `ACS_CHANNELS_5_0` and identifies
+its DFS entries with `ACS_DFS_CHANNELS`. The scorer requires numeric occupancy
+from 0 through 100 for each DFS observation; it never substitutes unknown
+busy time from another channel. One connected reporter can supply the
+measurement, while every connected node must support the candidate. Missing
+or invalid observations cannot contribute noise or BSS penalties either.
+The non-DFS fallback is scored separately.
+
+A DFS winner starts an authenticated `dfs_prepare` intention
 with a nonce, exact participant boots, candidate, measured non-DFS runner-up
 and 1200-second expiry. All nodes reconcile that intention under the observer
 lock, reserve RDD2 and request background CAC with nl80211. The kernel owns
@@ -3957,7 +4005,7 @@ The script logs missing hotplug or cpufreq support and succeeds on those
 kernels; failed writes return an error. Tests redirect `MANET_SYS_CPU` and
 `MANET_CPU_MODEL_FILE` to temporary files without root.
 
-**Mesh supplicant selection and recovery**
+### Mesh supplicant selection and recovery
 
 `wpa_supplicant@.service.d/20-manet-binary.conf` resets ExecStart to
 `manet-mesh-supplicant.py`. It executes `/usr/sbin/wpa_supplicant_manet` or
@@ -3967,6 +4015,24 @@ All standard mesh start paths share this template: radio setup,
 `manet_supplicant.py`, channel changes from `manet_radio.py`, BATMAN setup,
 ACS, lobby/tourguide changes, node-manager and Ethernet AP transitions.
 USB client uplinks use their own unit and keep Debian's binary.
+
+Both Wi-Fi mesh bands use 20 MHz. `radio-setup.sh` and
+`manet_ap_mesh.py` put `max_oper_chwidth=0` and `disable_ht40=1` inside
+every Wi-Fi mesh network block, including lobby copies. This preserves
+HE/VHT rates. The bench reached 137 to 178 Mbit/s between nodes at 20 MHz.
+On 5 GHz the width favors range and matches the runtime third-chain switch,
+observer and DFS execution. ACS scores 20 MHz primaries. Background CAC and
+DFS CSA use that primary as the center frequency. There is no bonded-channel
+center calculation in the mesh channel plan.
+
+The start wrapper and its `--update-configs` migration enforce both keys
+even if an inactivity setting already exists. They replace conflicting
+width values and remove the obsolete `ht40` assignment from Wi-Fi mesh
+blocks. `ht40=0` with `max_oper_chwidth=0` still produced 40 MHz on the
+bench. Adding `disable_ht40=1` produced 20 MHz with established peers on
+CM4 and both Rock 3As. HaLow and client network blocks keep their widths.
+Frequency, country and credential rewrites preserve the keys, including
+agreement CSA, radar fallback and static channel changes.
 
 The Wi-Fi build enables HE and patches mesh peer lifecycle handling. An
 established peer is freed at ten seconds of kernel inactivity, without
@@ -3985,9 +4051,11 @@ existing settings. The updater invokes `--update-configs` after installing
 its payload and before service restarts. A ten-second `flock` acquisition
 on `/run/channel-election.lock` serializes this rewrite with ACS and AP
 transitions. Contention leaves the update pending for retry. It adds missing
-settings to all mesh configs, including lobby copies, preserving tuning.
+inactivity settings to all mesh configs, including lobby copies, preserving
+inactivity tuning while enforcing the Wi-Fi mesh width above.
 The updater uses `try-restart wpa_supplicant@*.service` after daemon-reload,
-so running Wi-Fi mesh instances adopt a delivered binary immediately.
+so running Wi-Fi mesh instances adopt the delivered binary and 20 MHz width
+without reflashing.
 Disabled instances remain stopped. Updates still commit version markers
 only after their service checks succeed.
 

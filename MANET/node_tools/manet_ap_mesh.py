@@ -260,6 +260,7 @@ class Transition:
                 'update_config=1\nsae_pwe=1\nap_scan=2\n'
                 'mesh_max_inactivity=10\nnetwork={\n'
                 f'    ssid={supplicant_string(ssid)}\n    mode=5\n    frequency={freq}\n'
+                '    max_oper_chwidth=0\n    disable_ht40=1\n'
                 f'    key_mgmt=SAE\n    sae_password={supplicant_string(key)}\n'
                 '    ieee80211w=2\n    mesh_fwding=0\n    group_rekey=0\n}\n')
 

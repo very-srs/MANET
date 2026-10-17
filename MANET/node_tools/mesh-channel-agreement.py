@@ -982,6 +982,9 @@ class Runtime:
             dfs_supported = set.intersection(*(set(x.get('dfs_candidates', [])) for x in view.values()))
         if dfs_candidate and not fallback:
             dfs_supported.add(dfs_candidate)
+        # DFS candidates require measured occupancy, never the scorer's
+        # unknown-busy substitution. Fallback scoring remains non-DFS.
+        env['ACS_DFS_CHANNELS'] = ' '.join(map(str, sorted(dfs_supported))) if not fallback else ''
         # Registry RF observations include every reachable node, regardless of
         # which radio carries Alfred. Exclude cached records of departed groups.
         env['ACS_MEMBERS'] = ' '.join('NODE_' + mac.replace(':', '') for mac in view)

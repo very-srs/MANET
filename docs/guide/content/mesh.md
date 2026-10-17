@@ -16,10 +16,14 @@ The radio can find another route. It cannot invent one across a gap with no usab
 
 Radios keep listening to the channel they are using. If interference stays, they look for a better one.
 
-A supported CM4 can use an extra listener while interference lasts. It gives
-that listener back when it is no longer needed. With the matching update,
+A supported CM4 can use an extra listener while interference lasts. It compares
+how busy other channels are and gives the listener back when it is no longer
+needed. With the matching update,
 every radio checks a radar channel before the group uses it. If radar appears,
 they move to the backup channel they agreed on.
+
+The 5 GHz mesh uses a narrow channel to favor reach and make these radar
+checks work.
 
 A radio borrowing house Wi-Fi has fewer radios left to talk to its friends.
 
@@ -32,6 +36,12 @@ Two radios do not need to hear each other directly if other mesh radios provide 
 Wi-Fi and HaLow can connect the same group of nodes. Wi-Fi favors higher throughput; HaLow provides another path at lower speed and typically longer reach. Neither promises a fixed distance through every building or landscape.
 
 ### Choosing channels
+
+The 5 GHz mesh uses a 20 MHz channel to favor range and support radar checks
+and channel moves, called DFS. Tests between bench radios measured 137 to
+178 Mbit/s at this width. Actual speed depends on signal, interference and
+the route. Updating applies this setting to existing radios without
+reflashing. The 2.4 GHz mesh also uses 20 MHz.
 
 With automatic channel selection enabled, radios share observations and agree on a Wi-Fi channel plan. Radios still connected through HaLow belong to the same connected mesh, even when their Wi-Fi links are temporarily disconnected.
 
@@ -51,7 +61,9 @@ and RPi5 keep the feature off. Download speed can drop by up to a third while
 the extra listener is reserved.
 
 DFS channels are shared with radar. With the matching CM4 kernel and channel
-database, the mesh can choose one after every connected radio checks it and
+database, the mesh first compares measured interference on supported channels.
+A radar channel without a valid measurement cannot win. The mesh can choose
+one after every connected radio checks it and
 continues listening. They agree on a non-radar backup before moving. If radar
 appears, the detecting radio stops ordinary traffic and immediately switches
 to that backup. Other radios follow its channel announcement or the message
@@ -84,6 +96,19 @@ BATMAN V routes at Layer 2 over the attached mesh interfaces. Alfred replicates 
 `node-manager-acs.sh` schedules home-channel RF measurement, gated candidate scans, coordination requests, tourguide work, and service elections while maintaining status and addressing. A scan only counts if it completed. A channel visited for less than 25 ms is left out, 5 GHz busy time needs three readings, and observations older than three minutes are not published. The static manager retains the status, address, and service work without automatic Wi-Fi channel selection. `node-manager-select.sh` chooses the runtime symlink from `acs=` before service start.
 
 ### One connected component, one channel decision
+
+Wi-Fi mesh configs enforce 20 MHz with `max_oper_chwidth=0` and
+`disable_ht40=1` in each network block, keeping HE/VHT rates enabled.
+`ht40=0` alone did not prevent 40 MHz in bench checks. The setup and
+AP-to-mesh generators use both required keys. The updater migrates live and
+lobby copies under the channel lock before restarting active Wi-Fi mesh
+services. The start wrapper also enforces the width when an inactive radio
+returns to mesh. HaLow and client uplinks keep their own width settings.
+ACS and observer candidates are 20 MHz primaries. DFS CAC and CSA use the
+primary as the center frequency, matching the runtime third-chain switch's
+20 MHz requirement. See
+[mesh supplicant recovery](../../../docs/node-tools-internals.md#mesh-supplicant-selection-and-recovery)
+for migration and bench details.
 
 `mesh-channel-agreement.py` coordinates a proposal for the connected BATMAN component across **all** radios. Wi-Fi groups connected through HaLow are not separate voting domains. A failed membership query does not mean a solo node.
 
@@ -146,8 +171,13 @@ respecting a live hold and the transition interval.
 The schema-2 reader preserves kernel epochs across host restarts and checks
 the receiver heartbeat against boot time. The matched release adds a loaded
 driver capability and a token-bound transfer to main radar detection. Live
-PHY flags must identify DFS channels, and every connected participant must
-advertise support. Passive scoring selects a candidate and non-DFS runner-up.
+PHY flags must identify DFS channels outside a radar non-occupancy period,
+and every connected participant must advertise support for the candidate.
+The parser accepts both integer and decimal MHz output from `iw`. The
+coordinator exports the common DFS set to the scorer, which admits only valid
+measured occupancy for those channels. Noise or BSS counts alone cannot win;
+one fresh connected observer report is sufficient to score the candidate.
+Passive scoring selects a candidate and non-DFS runner-up.
 An authenticated preparation intention coordinates background CAC on all
 nodes. A completed CAC keeps its receiver live until the unanimous timed plan
 executes by mesh CSA, with HANDLE_DFS supplied by the host.

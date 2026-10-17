@@ -207,6 +207,19 @@ class RuntimeTests(AcsHarness):
         self.assertEqual(self.runner.state['hold_until'], self.elapsed + p.RECOVERY_SECONDS)
         self.assertIn('iw dev wlan0 switch freq 2462 HT20 beacons 5', (self.root / 'commands').read_text())
 
+    def test_five_ghz_csa_preserves_mesh_width_settings(self):
+        from manet_ap_mesh import Transition
+        self.configure(None, 5805)
+        config = self.wpa / 'wpa_supplicant-wlan1.conf'
+        original = Transition().render_config(
+            {'mesh_ssid': 'test', 'mesh_key': 'test-password'}, 5805)
+        config.write_text(original)
+        self.runner.apply({'5': 5220})
+        self.assertEqual(config.read_text(), original.replace(
+            'frequency=5805', 'frequency=5220'))
+        self.assertIn('iw dev wlan1 switch freq 5220 HT20 beacons 5',
+                      (self.root / 'commands').read_text())
+
     def test_preference_streak_survives_ticks_and_same_boot_reload(self):
         """Normal clock setup and idle ticks preserve consecutive rounds."""
         self.reports([[{'channel': 2437, 'noise_floor': -95,

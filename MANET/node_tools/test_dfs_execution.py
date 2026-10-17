@@ -40,7 +40,8 @@ class DfsExecutionTests(unittest.TestCase):
             runner.state, runner.ui_status = {}, {}
             runner.run_dir = Path(temp)
             config = Path(temp) / 'mesh.conf'
-            config.write_text('network={\nfrequency=5260\n}\n')
+            config.write_text('network={\nfrequency=5260\n'
+                              'max_oper_chwidth=0\ndisable_ht40=1\n}\n')
             runner.interfaces = lambda: {'5': ('mesh5', config, 5260)}
             runner.dfs_plans = lambda: {protocol.digest(plan): plan}
             calls = []
@@ -57,6 +58,9 @@ class DfsExecutionTests(unittest.TestCase):
                                        '5200', 'HT20', 'beacons', '3', 'block-tx'])
             self.assertLess(calls.index(['persist']), calls.index(['publish']))
             self.assertNotIn(['ip', 'link', 'set', 'dev', 'mesh5', 'down'], calls)
+            self.assertEqual(config.read_text(),
+                             'network={\nfrequency=5200\n'
+                             'max_oper_chwidth=0\ndisable_ht40=1\n}\n')
 
 class DfsNetlinkTests(unittest.TestCase):
     def test_background_and_mesh_switch_have_required_uapi_flags(self):
@@ -69,12 +73,17 @@ class DfsNetlinkTests(unittest.TestCase):
             parsed = dict(dfs.attributes(b''.join(attrs)))
             self.assertEqual(parsed[308], b'')
             self.assertEqual(struct.unpack('I', parsed[159])[0], 1)
+            self.assertEqual(struct.unpack('I', parsed[38])[0], 5260)
+            self.assertEqual(struct.unpack('I', parsed[160])[0], 5260)
             dfs.switch_dfs('mesh5', 5260)
             iface, cmd, attrs = request.call_args.args
             self.assertEqual(cmd, 102)
             parsed = dict(dfs.attributes(b''.join(attrs)))
             self.assertEqual(parsed[191], b'')
             self.assertEqual(struct.unpack('I', parsed[183])[0], 5)
+            self.assertEqual(struct.unpack('I', parsed[159])[0], 1)
+            self.assertEqual(struct.unpack('I', parsed[38])[0], 5260)
+            self.assertEqual(struct.unpack('I', parsed[160])[0], 5260)
 
     def test_actual_radar_flags_and_nop_are_required(self):
         import manet_dfs as dfs

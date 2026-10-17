@@ -135,6 +135,22 @@ def collect_candidates(path, frequencies, iface):
     lock = run / ('manet-bgobs-' + path.parents[1].name + '.lock')
     with lock.open('a') as stream:
         fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        # Policy can defer reservation on EBUSY/EAGAIN. Check its result
+        # under the same lock before attempting a whole candidate sweep.
+        # Older kernels with a boot reservation lack the transition file.
+        try:
+            receiver = json.loads(path.with_name('rx_transition_probe').read_text())
+        except FileNotFoundError:
+            pass
+        else:
+            if (not isinstance(receiver, dict) or type(receiver.get('schema')) is not int
+                    or receiver['schema'] != 1
+                    or receiver.get('failed') is not False
+                    or type(receiver.get('reserved')) is not bool
+                    or receiver.get('chainmask') != (12 if receiver['reserved'] else 28)):
+                raise ValueError('invalid RX reservation before observer sweep')
+            if not receiver['reserved']:
+                return []
         hold_path = path.parent.parent / 'background_hold'
         if hold_path.exists():
             hold = json.loads(hold_path.read_text())

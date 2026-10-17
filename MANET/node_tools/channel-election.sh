@@ -138,14 +138,16 @@ log() {
     # <chan> <ok|dq> <score> <reporters> <median_noise> <median_busy>
     # <mean_bss> <bad>/<needed>
     score_band() {
-        local chans_json
+        local chans_json dfs_json
         chans_json=$(printf '%s\n' "$1" | jq -Rc 'split(" ") | map(select(length > 0) | tonumber)')
+        dfs_json=$(printf '%s\n' "${ACS_DFS_CHANNELS-}" | jq -Rc 'split(" ") | map(select(length > 0) | tonumber)')
 
         # Use median noise/busy values and mean BSS count per candidate MHz.
         # Unknown busy uses the incumbent's median, or the highest measured
         # candidate median when it is unmeasured. Round scores to two decimals.
         printf '%s' "$ALL_REPORTS_JSON" | jq -r \
             --argjson chans "$chans_json" \
+            --argjson dfs "$dfs_json" \
             --arg current "$2" \
             --argjson noise_dq "$NOISE_DISQUALIFY_THRESHOLD_DBM" \
             --argjson busy_dq "$OCCUPANCY_DISQUALIFY_PCT" \
@@ -170,7 +172,13 @@ log() {
                               or (.foreign_pct | type) == "number")
                        | .busy_pct = .foreign_pct
                   else select((has("foreign_pct") or has("rf_trouble"))
-                              | not) end ] as $all
+                              | not) end
+                # A DFS candidate needs an actual passive occupancy sample.
+                # Noise/BSS-only entries must not invent a usable channel.
+                | .channel as $c
+                | select(($dfs | index($c)) == null
+                         or ((.busy_pct | type) == "number"
+                             and .busy_pct >= 0 and .busy_pct <= 100)) ] as $all
             | ([ $all[] | select(.channel == ($current | tonumber?))
                  | .busy_pct | numbers ] | median) as $home_busy
             | ($home_busy // ([ $chans[] as $candidate
