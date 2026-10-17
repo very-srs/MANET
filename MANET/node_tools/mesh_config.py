@@ -20,6 +20,7 @@ LOCAL_KEYS = frozenset({
     'lan_ap_ssid',
     'lan_ap_key',
     'max_euds_per_node',
+    'operator_name',
 })
 
 # max_euds_per_node is stripped from Alfred with the other per-node keys, but
@@ -71,6 +72,8 @@ def valid_value(key, value):
         return False, 'must be a 2-letter country code'
     elif key == 'max_euds_per_node' and (not value.isascii() or not value.isdigit() or int(value) > 253):
         return False, 'must be a number 0-253'
+    elif key == 'operator_name' and length > 32:
+        return False, 'operator name must be 32 UTF-8 bytes or fewer'
     return True, ''
 
 

@@ -349,6 +349,10 @@ while true; do
         fi
         [ -n "$GPS_LAT" ] && ENCODER_ARGS+=("--latitude" "$GPS_LAT" "--longitude" "$GPS_LON" "--altitude" "$GPS_ALT")
 
+        # --- Operator name (published as the ATAK user / callsign) ---
+        OPERATOR_NAME=$(awk -F= '/^operator_name=/{sub(/^operator_name=/,""); print; exit}' /etc/mesh.conf 2>/dev/null)
+        [ -n "$OPERATOR_NAME" ] && ENCODER_ARGS+=("--atak-user" "$OPERATOR_NAME")
+
         CURRENT_PAYLOAD=$("$ENCODER_PATH" telemetry "${ENCODER_ARGS[@]}" 2>/dev/null)
         if [ -z "$CURRENT_PAYLOAD" ]; then
             # re-run only on failure, to surface why nothing was published

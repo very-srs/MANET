@@ -38,6 +38,7 @@ import os
 import ipaddress
 import socket
 import time
+import math
 import html
 import uuid
 from pathlib import Path
@@ -302,6 +303,43 @@ def run_batctl_neighbors():
     except Exception:
         pass
     return neighbors
+
+
+def run_iw_station_rssi(ifaces):
+    """Return {mac: {iface: signal_dbm}} from `iw dev <if> station dump`.
+
+    Only the instantaneous `signal:` line per station is read (not the
+    `signal avg:` or ack lines). Missing ifaces or a wedged iw are ignored.
+    """
+    rssi = {}
+    for iface in ifaces:
+        try:
+            # Bound to 5 s per iface in case the driver stalls the dump.
+            r = subprocess.run(['iw', 'dev', iface, 'station', 'dump'],
+                               capture_output=True, text=True, timeout=5)
+        except Exception:
+            continue
+        cur = None
+        for line in r.stdout.splitlines():
+            m = re.match(r'\s*Station ([0-9a-f:]{17})', line)
+            if m:
+                cur = norm_mac(m.group(1))
+                continue
+            if cur:
+                s = re.match(r'\s*signal:\s*(-?[\d.]+)', line)
+                if s:
+                    rssi.setdefault(cur, {})[iface] = float(s.group(1))
+                    cur = None
+    return rssi
+
+
+def haversine_m(lat1, lon1, lat2, lon2):
+    """Great-circle distance in metres between two (lat, lon) in degrees."""
+    r = 6371000.0
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    a = (math.sin(math.radians(lat2 - lat1) / 2) ** 2
+         + math.cos(p1) * math.cos(p2) * math.sin(math.radians(lon2 - lon1) / 2) ** 2)
+    return 2 * r * math.asin(math.sqrt(a))
 
 def run_batctl_gateways():
     """Return list of {mac, mbps, selected} from `batctl gwl`.
@@ -1132,6 +1170,55 @@ def assemble_status_data():
     my_mac     = get_my_mac()
     my_host    = get_my_hostname()
 
+    # Band + RSSI enrichment for the topology view.
+    iw_info      = _iw_dev_info()
+    bat0_active, _, _ = _bat0_slaves()
+    rssi         = run_iw_station_rssi(bat0_active)
+
+    def _iface_mhz(ifname):
+        info = iw_info.get(ifname, {})
+        if info.get('freq_mhz'):
+            return info['freq_mhz']
+        if info.get('freq'):
+            try:
+                return str(round(float(info['freq']) * 1000))
+            except ValueError:
+                return ''
+        return ''
+
+    def _band(mhz):
+        try:
+            f = float(mhz)
+        except (TypeError, ValueError):
+            return ''
+        if f < 1000:
+            return 'halow'
+        if f < 3000:
+            return '2g'
+        return '5g'
+
+    def _iface_band(ifname):
+        # Morse HaLow reports an internal frequency (e.g. 5660 for the 863.5
+        # MHz plan), so detect it by driver rather than by frequency band.
+        try:
+            drv = os.path.basename(os.readlink(
+                f'/sys/class/net/{ifname}/device/driver'))
+        except OSError:
+            drv = ''
+        if 'morse' in drv:
+            return 'halow'
+        return _band(_iface_mhz(ifname))
+
+    ifaces = {}
+    for ifname in bat0_active:
+        info = iw_info.get(ifname, {})
+        ifaces[ifname] = {
+            'band':        _iface_band(ifname),
+            'freq_mhz':    _iface_mhz(ifname),
+            'channel':     info.get('channel', ''),
+            'txpower_dbm': info.get('txpower_dbm', ''),
+        }
+
     neighbor_macs = {n['mac'] for n in neighbors}
     selected_gw   = next((g['mac'] for g in gateways if g['selected']), None)
 
@@ -1200,6 +1287,7 @@ def assemble_status_data():
         node_list.append({
             'id':           nid,
             'hostname':     hostname,
+            'operator':     ndata.get('ATAK_USER', ''),
             'mac':          raw_mac,
             'ip':           ndata.get('IPV4_ADDRESS', ''),
             'mbps':         mbps,
@@ -1213,6 +1301,12 @@ def assemble_status_data():
             'uptime':       fmt_uptime(ndata.get('UPTIME_SECONDS', '')),
             'cpu':          (f"{float(ndata['CPU_LOAD_AVERAGE']):.2f}" if ndata.get('CPU_LOAD_AVERAGE') else ''),
             'battery':      battery,
+            'gps': {
+                'available': bool(ndata.get('GPS_LATITUDE')),
+                'lat':       ndata.get('GPS_LATITUDE', ''),
+                'lon':       ndata.get('GPS_LONGITUDE', ''),
+                'alt':       ndata.get('GPS_ALTITUDE', ''),
+            },
             'mumble':       ndata.get('IS_MUMBLE_SERVER', 'false').lower() == 'true',
             'mediamtx':     ndata.get('IS_MEDIAMTX_SERVER', 'false').lower() == 'true',
             'ntp':          ndata.get('IS_NTP_SERVER', 'false').lower() == 'true',
@@ -1232,11 +1326,13 @@ def assemble_status_data():
         node_list.insert(0, {
             'id': 'self',
             'hostname': my_host,
+            'operator': '',
             'mac': my_mac or '',
             'ip': (state.get('CURRENT_IPV4') or ''),
             'mbps': None, 'is_me': True, 'is_direct': True,
             'is_gateway': False, 'is_selected_gw': False,
             'uptime': '', 'cpu': '', 'battery': None,
+            'gps': {'available': False, 'lat': '', 'lon': '', 'alt': ''},
             'mumble': False, 'mediamtx': False, 'ntp': False,
             'state': 'ACTIVE', 'ch_2g': '', 'ch_5g': '', 'limp': False,
             'hop_count': None, 'last_seen': str(int(time.time())),
@@ -1244,6 +1340,29 @@ def assemble_status_data():
 
     # Self first, then descending throughput; unknown rates sort last.
     node_list.sort(key=lambda n: (not n['is_me'], -(n['mbps'] if n['mbps'] is not None else -1)))
+
+    # Best direct link from self to each node: iface (band) + measured RSSI.
+    # Used to label edges and sidebar rows; falls back to the originator
+    # iface when the node is not a direct neighbor (multi-hop).
+    for node in node_list:
+        if node.get('is_me'):
+            node['link_iface'] = ''
+            node['link_band'] = ''
+            node['link_rssi'] = None
+            continue
+        macs = set(node.get('all_macs', []))
+        cands = [e for e in neighbors if e['mac'] in macs]
+        iface = max(cands, key=lambda e: e['mbps'])['iface'] if cands \
+            else node.get('best_link', {}).get('iface', '')
+        node['link_iface'] = iface
+        node['link_band'] = ifaces.get(iface, {}).get('band', '')
+        r = None
+        if iface:
+            for m in macs:
+                r = rssi.get(m, {}).get(iface)
+                if r is not None:
+                    break
+        node['link_rssi'] = r
 
     # Build topology edges from batctl o nexthop data
     # mac_to_node_id: every MAC (all interfaces) -> node_id
@@ -1324,6 +1443,40 @@ def assemble_status_data():
                         'mbps':   target_node['mbps'] if target_node else None,
                     })
 
+    # Label each edge with the band + RSSI of the best self->target link.
+    # Inferred peer edges (B->C, neither is self) have no measured link, so
+    # they stay unlabeled rather than showing self's numbers for B's link.
+    for e in edges:
+        tgt = node_by_id.get(e['target'])
+        if e['type'] in ('direct', 'multihop') and tgt:
+            e['iface'] = tgt.get('link_iface', '')
+            e['band']  = tgt.get('link_band', '')
+            e['rssi']  = tgt.get('link_rssi')
+        else:
+            e['iface'] = ''
+            e['band']  = ''
+            e['rssi']  = None
+
+    # Actual GPS separation (haversine) - distinct from the RSSI estimate.
+    def _gps(node):
+        g = node.get('gps', {})
+        try:
+            return float(g.get('lat')), float(g.get('lon'))
+        except (TypeError, ValueError):
+            return None
+    self_gps = _gps(self_node) if self_node else None
+    for node in node_list:
+        g = _gps(node)
+        node['gps_dist_m'] = (round(haversine_m(*self_gps, *g), 1)
+                              if (self_gps and g and not node.get('is_me')) else None)
+    fixed = [(n['id'], _gps(n)) for n in node_list]
+    fixed = [(i, g) for i, g in fixed if g]
+    gps_pairs = []
+    for a in range(len(fixed)):
+        for b in range(a + 1, len(fixed)):
+            (ia, ga), (ib, gb) = fixed[a], fixed[b]
+            gps_pairs.append({'a': ia, 'b': ib, 'm': round(haversine_m(*ga, *gb), 1)})
+
     return {
         'nodes':          node_list,
         'my_mac':         my_mac or '',
@@ -1331,10 +1484,12 @@ def assemble_status_data():
         'my_ip':          next((n['ip'] for n in node_list if n.get('is_me')), '') or (state.get('CURRENT_IPV4') or ''),
         'mesh_ssid':      conf.get('mesh_ssid', ''),
         'network':        conf.get('ipv4_network', ''),
+        'ifaces':         ifaces,
         'gateway_count':  len(gateways),  # includes registry fallback
         'selected_gw':    selected_gw or '',
         'neighbors':      neighbors,
         'edges':          edges,
+        'gps_pairs':      gps_pairs,
         'timestamp':      int(time.time()),
     }
 
@@ -1454,12 +1609,25 @@ body {
     0 22px 52px rgba(2,0,13,.08);
 }
 #topo-panel canvas { width: 100%; height: 100%; display: block; touch-action: pan-y pinch-zoom; }
+#topo-view-toggle { position:absolute; top:10px; right:10px; display:flex; gap:3px; padding:3px; background:color-mix(in srgb, var(--surface) 82%, transparent); border:1px solid var(--border2); border-radius:999px; backdrop-filter:blur(8px); z-index:2; }
+.topo-view-btn { border:0; background:transparent; color:var(--muted); font:700 11px/1 var(--font); letter-spacing:.3px; padding:5px 11px; border-radius:999px; cursor:pointer; }
+.topo-view-btn.active { background:var(--accent2); color:var(--fer-black); }
 #side-panel { width: 100%; overflow: visible; border: 1px solid var(--border2); border-radius: 18px; background: var(--surface); box-shadow: 0 18px 44px rgba(2,0,13,.06); }
 
 /* ── Node Table ── */
 .section-hdr { padding: 12px 14px; font-size: 11px; font-weight: 800; letter-spacing: .3px; color: var(--muted); text-transform: none; border-bottom: 1px solid var(--border2); position: sticky; top: 0; background: color-mix(in srgb, var(--surface) 92%, transparent); backdrop-filter: blur(12px); z-index: 1; }
 .node-row { padding: 10px 12px; border-bottom: 1px solid var(--border2); cursor: pointer; transition: background .18s ease, transform .18s ease; }
 .node-row:hover { background: rgba(236,176,0,.08); transform: translateY(-1px); }
+/* Operator / GPS ranges rows */
+.op-row { display:flex; align-items:center; gap:8px; padding:8px 12px; border-bottom:1px solid var(--border2); }
+.op-row.is-me { background: rgba(236,176,0,.06); }
+.op-name { font-weight:700; font-size:12px; flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.op-sub { display:block; font-size:10px; color:var(--muted); font-weight:500; }
+.op-dist { font-variant-numeric:tabular-nums; font-weight:800; font-size:12px; color:var(--accent); min-width:52px; text-align:right; }
+.op-pair { display:flex; align-items:center; gap:8px; padding:6px 12px; border-bottom:1px solid var(--border2); font-size:11px; }
+.op-pair span:first-child, .op-pair span:last-child { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.op-pair span:last-child { text-align:right; }
+.op-pair b { font-variant-numeric:tabular-nums; font-weight:800; color:var(--accent); }
 .node-row.is-me { border-left: 2px solid var(--self); }
 .node-row.is-gw { border-left: 2px solid var(--gw); }
 .node-row.is-me.is-gw { border-left: 2px solid var(--gw); }
@@ -1680,11 +1848,19 @@ STATUS_HTML = r"""<!DOCTYPE html>
   <div id="main">
     <div id="topo-panel">
       <canvas id="topo"></canvas>
+      <div id="topo-view-toggle">
+        <button id="view-mesh" class="topo-view-btn active" type="button">Mesh</button>
+        <button id="view-map" class="topo-view-btn" type="button">Map</button>
+      </div>
       <div id="loading">LOADING TOPOLOGY…</div>
     </div>
     <div id="drag-handle"></div>
     <div id="side-panel">
-      <div class="section-hdr">MESH NODES <span id="node-count"></span></div>
+      <div class="section-hdr">OPERATORS <span id="op-count"></span></div>
+      <div id="operator-list"></div>
+      <div class="section-hdr" style="margin-top:10px">GPS RANGES</div>
+      <div id="op-pairs"></div>
+      <div class="section-hdr" style="margin-top:10px">MESH NODES <span id="node-count"></span></div>
       <div id="node-list"></div>
     </div>
   </div>
@@ -1707,7 +1883,19 @@ document.addEventListener('click', handleStatusClick);
 let DATA = null;
 let SIM  = { nodes: [], links: [], running: false, raf: null };
 let HOVER_NODE = null;
+let TOPO_VIEW = 'mesh';   // 'mesh' (force graph) | 'map' (geo / local ranges)
 let drawQueued = false;
+
+function setTopoView(v) {
+  if (TOPO_VIEW === v) return;
+  TOPO_VIEW = v;
+  const m = document.getElementById('view-mesh');
+  const p = document.getElementById('view-map');
+  if (m) m.classList.toggle('active', v === 'mesh');
+  if (p) p.classList.toggle('active', v === 'map');
+  if (typeof view !== 'undefined') { view.x = 0; view.y = 0; view.scale = 1; }
+  scheduleDraw();
+}
 let EXPANDED_NODE_IDS = new Set();
 let LOCAL_DETAIL_HTML = '<div class="peer-loading">Loading…</div>';
 let PEER_DETAIL_CACHE = {};
@@ -1802,6 +1990,26 @@ function linkPct(mbps) {
   if (mbps == null) return 0;
   return Math.round(Math.min(mbps / LINK_FULL_SCALE_MBPS, 1) * 100);
 }
+// Band of the link carrying a node (2g / 5g / halow). Drives edge color.
+function bandColor(band) {
+  switch (band) {
+    case '2g':    return '#3b82f6'; // blue
+    case '5g':    return '#a855f7'; // purple
+    case 'halow': return '#f59e0b'; // amber
+    default:      return '#9aa4b2'; // gray
+  }
+}
+function bandShort(band) {
+  switch (band) {
+    case '2g':    return '2.4G';
+    case '5g':    return '5G';
+    case 'halow': return 'HaLow';
+    default:      return '';
+  }
+}
+function fmtRssi(rssi) {
+  return rssi == null ? '' : Math.round(rssi) + 'dBm';
+}
 function fmtAge(ts) {
   const secs = (DATA ? DATA.timestamp : Math.floor(Date.now() / 1000)) - parseInt(ts || 0);
   if (secs < 60)   return `${secs}s ago`;
@@ -1840,9 +2048,12 @@ function renderNodeList(nodes) {
     if (n.is_gateway)  badges.push(`<span class="badge badge-gw">${n.is_selected_gw ? '★ GW' : 'GW'}</span>`);
     if (n.is_direct && !n.is_me) badges.push(`<span class="badge badge-direct">DIRECT</span>`);
     if (n.best_link && n.best_link.iface && !n.is_me) {
-      const linkRate = linkLabel(n.best_link.mbps);
-      badges.push(`<span class="badge badge-bestlink" title="BATMAN selected route via ${esc(n.best_link.nexthop || 'unknown')}">BEST ${esc(n.best_link.iface)} ${linkRate}</span>`);
+      const band = n.link_band ? bandShort(n.link_band) : n.best_link.iface;
+      const rate = linkLabel(n.best_link.mbps);
+      const rssi = n.link_rssi != null ? ' ' + fmtRssi(n.link_rssi) : '';
+      badges.push(`<span class="badge badge-bestlink" title="BATMAN route via ${esc(n.best_link.nexthop || 'unknown')} on ${esc(n.best_link.iface)}">${esc(band)} ${rate}${rssi}</span>`);
     }
+    if (n.gps && n.gps.available) badges.push(`<span class="badge badge-svc" title="GPS fix available">GPS</span>`);
     if (n.mumble)      badges.push(`<span class="badge badge-svc">MUMBLE</span>`);
     if (n.mediamtx)    badges.push(`<span class="badge badge-svc">MTX</span>`);
     if (n.ntp)         badges.push(`<span class="badge badge-svc">NTP</span>`);
@@ -1889,6 +2100,44 @@ function renderNodeList(nodes) {
       ${detail}
     </div>`;
   }).join('');
+  renderOperatorList();
+}
+
+// Operators + GPS ranges section: per-node operator name and the actual
+// GPS (haversine) separation from this node, plus pairwise GPS ranges.
+function renderOperatorList() {
+  const el = document.getElementById('operator-list');
+  if (!el || !DATA) return;
+  const nodes = DATA.nodes;
+  const cnt = document.getElementById('op-count');
+  if (cnt) cnt.textContent = `(${nodes.length})`;
+  const rows = nodes.map(n => ({
+    n,
+    name: (n.operator && String(n.operator).trim()) || n.hostname || 'node',
+    dist: n.gps_dist_m,
+    fix: !!(n.gps && n.gps.available),
+  }));
+  rows.sort((a, b) => {
+    if (a.n.is_me !== b.n.is_me) return a.n.is_me ? -1 : 1;
+    const da = a.dist == null ? Infinity : a.dist;
+    const db = b.dist == null ? Infinity : b.dist;
+    return da - db;
+  });
+  el.innerHTML = rows.map(({n, name, dist, fix}) => `
+    <div class="op-row ${n.is_me ? 'is-me' : ''}">
+      <div class="op-name">${esc(name)}${n.is_me ? ' <span class="self-node-badge">ME</span>' : ''}
+        <span class="op-sub">${esc(n.hostname)} · ${fix ? 'positioned' : 'no position'}</span></div>
+      <div class="op-dist">${n.is_me ? '' : (dist != null ? fmtDist(dist) : '—')}</div>
+    </div>`).join('');
+
+  const pEl = document.getElementById('op-pairs');
+  if (!pEl) return;
+  const idName = {};
+  nodes.forEach(n => idName[n.id] = (n.operator && String(n.operator).trim()) || n.hostname || n.id);
+  const pairs = (DATA.gps_pairs || []).slice().sort((x, y) => x.m - y.m);
+  pEl.innerHTML = pairs.length
+    ? pairs.map(p => `<div class="op-pair"><span>${esc(idName[p.a] || p.a)}</span><b>${fmtDist(p.m)}</b><span>${esc(idName[p.b] || p.b)}</span></div>`).join('')
+    : '<div class="op-sub" style="padding:8px 12px">Need 2+ GPS fixes for pairwise ranges.</div>';
 }
 
 function tickLocalTime() {
@@ -2019,6 +2268,8 @@ function initSim(nodes, edges) {
       type:     edge.type,    // 'direct' | 'multihop' | 'inferred' | 'unknown'
       via:      edge.via,     // node id of hop, or null
       mbps:     edge.mbps,
+      band:     edge.band,    // '2g' | '5g' | 'halow' | ''
+      rssi:     edge.rssi,    // dBm measured by self, or null
     });
   });
 }
@@ -2098,6 +2349,179 @@ function simStep() {
 
 const view = { x: 0, y: 0, scale: 1 };
 
+// ── Map view: geographic (GPS) or local ranges (no GPS) ──────────────
+// Distance (m) from RSSI via the log-distance path-loss model (N=2, 0 dBi).
+function rangeFromRssi(rssi, txDbm, fMhz) {
+  if (rssi == null || !txDbm || !fMhz) return null;
+  const fspl1 = 32.44 + 20 * Math.log10(fMhz) - 60; // FSPL at 1 m
+  return Math.pow(10, ((txDbm - fspl1 - rssi) / 20));
+}
+function bandFreqMhz(band, iface) {
+  const f = (DATA && DATA.ifaces && DATA.ifaces[iface]) || {};
+  if (band === 'halow') return 863.5;            // EU 1 MHz plan (US: 907)
+  if (f.freq_mhz) return parseFloat(f.freq_mhz);
+  return band === '5g' ? 5200 : 2437;
+}
+function bandTxDbm(band, iface) {
+  const f = (DATA && DATA.ifaces && DATA.ifaces[iface]) || {};
+  if (f.txpower_dbm) return parseFloat(f.txpower_dbm);
+  return band === 'halow' ? 24 : 30;
+}
+function niceStep(raw) {
+  const p = Math.pow(10, Math.floor(Math.log10(raw)));
+  const m = raw / p;
+  return (m >= 5 ? 5 : m >= 2 ? 2 : 1) * p;
+}
+function fmtDist(m) {
+  if (m == null) return '?';
+  return m < 10 ? m.toFixed(1) + 'm' : m < 1000 ? Math.round(m) + 'm' : (m / 1000).toFixed(2) + 'km';
+}
+function drawMapNode(x, y, n, dim) {
+  const col = dim ? '#9aa4b2' : (n.is_me ? '#ecb000' : (n.is_gateway ? '#ecb000' : bandColor(n.link_band) || linkColor(n.mbps)));
+  const r = n.is_me ? 11 : 8;
+  ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2);
+  ctx.fillStyle = themeColor('#ffffff', '#121118'); ctx.fill();
+  ctx.lineWidth = n.is_me ? 2.5 : 1.5; ctx.strokeStyle = col; ctx.stroke();
+  if (n.is_gateway && !dim) { ctx.fillStyle = '#ecb000'; ctx.font = topoFont('700', r); ctx.textAlign='center'; ctx.textBaseline='middle'; ctx.fillText('★', x, y); }
+  else if (n.is_me) { ctx.fillStyle = '#ecb000'; ctx.font = topoFont('700', r); ctx.textAlign='center'; ctx.textBaseline='middle'; ctx.fillText('◉', x, y); }
+  ctx.fillStyle = themeColor('#111827', '#e5e7eb');
+  ctx.font = topoFont(n.is_me ? '800' : '600', 10);
+  ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+  ctx.fillText(n.hostname || 'node', x, y + r + 3);
+  ctx.textBaseline = 'alphabetic';
+}
+function drawMapLink(x1, y1, x2, y2, link) {
+  const col = link.band ? bandColor(link.band) : '#9aa4b2';
+  ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2);
+  ctx.strokeStyle = col + (link.type === 'direct' ? 'dd' : '66');
+  ctx.lineWidth = link.type === 'direct' ? 2 : 1.2;
+  ctx.setLineDash(link.type === 'direct' ? [] : [5, 4]);
+  ctx.stroke(); ctx.setLineDash([]);
+  const mx = (x1 + x2) / 2, my = (y1 + y2) / 2;
+  const parts = [];
+  if (link.mbps != null) parts.push(fmtMbps(link.mbps));
+  if (link.rssi != null) parts.push(Math.round(link.rssi) + 'dB');
+  if (parts.length) {
+    const label = parts.join(' ');
+    const w = 12 + label.length * 5;
+    ctx.fillStyle = themeColor('#ffffffe8', '#121118e8');
+    ctx.fillRect(mx - w / 2, my - 7, w, 13);
+    ctx.fillStyle = col + 'ee'; ctx.font = topoFont('700', 9);
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(label, mx, my); ctx.textBaseline = 'alphabetic';
+  }
+}
+
+function drawMapGeo(W, H, nodes, gpsNodes) {
+  const pad = 46;
+  let minLat = Infinity, maxLat = -Infinity, minLon = Infinity, maxLon = -Infinity;
+  gpsNodes.forEach(n => {
+    const la = parseFloat(n.gps.lat), lo = parseFloat(n.gps.lon);
+    if (la == null || lo == null) return;
+    minLat = Math.min(minLat, la); maxLat = Math.max(maxLat, la);
+    minLon = Math.min(minLon, lo); maxLon = Math.max(maxLon, lo);
+  });
+  // Guard against a degenerate (single-point) box.
+  const minSpan = 0.0004; // ~45 m
+  if (maxLat - minLat < minSpan) { minLat -= minSpan / 2; maxLat += minSpan / 2; }
+  if (maxLon - minLon < minSpan) { minLon -= minSpan / 2; maxLon += minSpan / 2; }
+  const px = lo => pad + (lo - minLon) / (maxLon - minLon) * (W - 2 * pad);
+  const py = la => H - pad - (la - minLat) / (maxLat - minLat) * (H - 2 * pad);
+
+  // Graticule with labelled, nicely-stepped lines.
+  const latStep = niceStep((maxLat - minLat) / 5);
+  const lonStep = niceStep((maxLon - minLon) / 5);
+  ctx.strokeStyle = themeColor('#00000018', '#ffffff14'); ctx.lineWidth = 1;
+  ctx.fillStyle = themeColor('#00000055', '#ffffff44'); ctx.font = topoFont('500', 8);
+  for (let la = Math.ceil(minLat / latStep) * latStep; la <= maxLat; la += latStep) {
+    const y = py(la); ctx.beginPath(); ctx.moveTo(pad, y); ctx.lineTo(W - pad, y); ctx.stroke();
+    ctx.textAlign = 'left'; ctx.textBaseline = 'bottom'; ctx.fillText(la.toFixed(2) + '°N', pad, y - 2);
+  }
+  for (let lo = Math.ceil(minLon / lonStep) * lonStep; lo <= maxLon; lo += lonStep) {
+    const x = px(lo); ctx.beginPath(); ctx.moveTo(x, pad); ctx.lineTo(x, H - pad); ctx.stroke();
+    ctx.textAlign = 'center'; ctx.textBaseline = 'top'; ctx.fillText(lo.toFixed(2) + '°E', x, H - pad + 3);
+  }
+  ctx.textBaseline = 'alphabetic';
+
+  const pos = {};
+  gpsNodes.forEach(n => { pos[n.id] = { x: px(parseFloat(n.gps.lon)), y: py(parseFloat(n.gps.lat)) }; });
+
+  SIM.links.forEach(link => {
+    const a = pos[link.source.id], b = pos[link.target.id];
+    if (a && b) drawMapLink(a.x, a.y, b.x, b.y, link);
+  });
+  gpsNodes.forEach(n => { if (pos[n.id]) drawMapNode(pos[n.id].x, pos[n.id].y, n, false); });
+
+  // No-fix nodes in a bottom tray.
+  const nofix = nodes.filter(n => !(n.gps && n.gps.available && n.gps.lat && n.gps.lon));
+  if (nofix.length) {
+    const ty = H - 16;
+    ctx.fillStyle = themeColor('#00000055', '#ffffff44'); ctx.font = topoFont('600', 9);
+    ctx.textAlign = 'left'; ctx.fillText('no GPS fix', pad, ty - 12);
+    nofix.forEach((n, i) => drawMapNode(pad + 14 + i * 34, ty, n, true));
+  }
+}
+
+function drawMapLocal(W, H, nodes) {
+  const cx = W / 2, cy = H / 2;
+  const self = nodes.find(n => n.is_me);
+  const peers = nodes.filter(n => !n.is_me);
+  // Range per peer from its measured RSSI; fall back to the outer ring.
+  let maxR = 0;
+  peers.forEach(p => {
+    p._range = (p.link_rssi != null) ? rangeFromRssi(p.link_rssi, bandTxDbm(p.link_band, p.link_iface), bandFreqMhz(p.link_band, p.link_iface)) : null;
+    if (p._range) maxR = Math.max(maxR, p._range);
+  });
+  if (!maxR) maxR = 10; // default span when nothing measurable
+  const maxPx = Math.min(W, H) / 2 - 40;
+  const k = maxPx / maxR;
+
+  // Range rings.
+  ctx.strokeStyle = themeColor('#00000018', '#ffffff14'); ctx.fillStyle = themeColor('#00000055', '#ffffff44');
+  ctx.font = topoFont('500', 8);
+  [0.33, 0.66, 1].forEach(f => {
+    const rr = maxPx * f;
+    ctx.beginPath(); ctx.arc(cx, cy, rr, 0, Math.PI * 2); ctx.stroke();
+    ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
+    ctx.fillText(fmtDist(maxR * f), cx, cy - rr - 2);
+  });
+  ctx.textBaseline = 'alphabetic';
+
+  // Place peers on a circle, radius by estimated range, even angles.
+  const step = (Math.PI * 2) / (peers.length || 1);
+  peers.forEach((p, i) => {
+    const ang = -Math.PI / 2 + i * step;
+    const rr = p._range ? Math.max(26, p._range * k) : maxPx;
+    p._mx = cx + Math.cos(ang) * rr;
+    p._my = cy + Math.sin(ang) * rr;
+  });
+  // Links from self.
+  peers.forEach(p => {
+    if (p._mx == null) return;
+    const link = { band: p.link_band, rssi: p.link_rssi, mbps: p.mbps, type: p.is_direct ? 'direct' : 'multihop' };
+    drawMapLink(cx, cy, p._mx, p._my, link);
+    // Range label near the peer.
+    if (p._range) {
+      ctx.fillStyle = themeColor('#111827', '#e5e7eb'); ctx.font = topoFont('700', 9);
+      ctx.textAlign = 'center'; ctx.fillText('≈' + fmtDist(p._range), p._mx, p._my - 14);
+    }
+  });
+  peers.forEach(p => { if (p._mx != null) drawMapNode(p._mx, p._my, p, p._range == null); });
+  if (self) drawMapNode(cx, cy, self, false);
+  ctx.fillStyle = themeColor('#00000066', '#ffffff55'); ctx.font = topoFont('600', 10);
+  ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+  ctx.fillText('Local view — no shared GPS. Ranges estimated from 2.4 GHz signal.', 12, 10);
+  ctx.textBaseline = 'alphabetic';
+}
+
+function drawMap(W, H) {
+  const nodes = SIM.nodes;
+  if (!nodes.length) return;
+  const gpsNodes = nodes.filter(n => n.gps && n.gps.available && n.gps.lat && n.gps.lon);
+  if (gpsNodes.length >= 2) drawMapGeo(W, H, nodes, gpsNodes);
+  else drawMapLocal(W, H, nodes);
+}
+
 function drawTopo() {
   drawQueued = false;
   const dpr = window.devicePixelRatio || 1;
@@ -2109,6 +2533,8 @@ function drawTopo() {
   ctx.scale(view.scale, view.scale);
 
   ctx.clearRect(-view.x / view.scale, -view.y / view.scale, W / view.scale, H / view.scale);
+
+  if (TOPO_VIEW === 'map') { drawMap(W, H); return; }
 
   if (SIM.nodes.length === 0) return;
 
@@ -2128,7 +2554,9 @@ function drawTopo() {
   sorted_links.forEach(link => {
     const a = link.source, b = link.target;
     const mbps = link.mbps;
-    const col = linkColor(mbps);
+    // Band-colored for measured links (2.4G/5G/HaLow); unlabeled peer edges
+    // fall back to the throughput color.
+    const col = link.band ? bandColor(link.band) : linkColor(mbps);
     const isDirect   = link.type === 'direct';
     const isInferred = link.type === 'inferred';
     const isUnknown  = link.type === 'unknown';
@@ -2159,18 +2587,22 @@ function drawTopo() {
     ctx.stroke();
     ctx.setLineDash([]);
 
-    // Throughput label at midpoint for direct and multihop lines involving self
+    // Throughput + RSSI label at midpoint for direct and multihop lines
+    // involving self. Edge color already encodes the band.
     const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
-    if (mbps != null && (isDirect || link.type === 'multihop')) {
-      ctx.fillStyle = col + 'cc';
+    if ((mbps != null || link.rssi != null) && (isDirect || link.type === 'multihop')) {
+      const parts = [];
+      if (mbps != null)   parts.push(fmtMbps(mbps));
+      if (link.rssi != null) parts.push(Math.round(link.rssi) + 'dB');
+      const label = parts.join(' ');
+      const w = 14 + label.length * 5;
+      ctx.fillStyle = themeColor('#ffffffe8', '#121118e8');
+      ctx.fillRect(mx - w / 2, my - 7, w, 13);
+      ctx.fillStyle = col + 'dd';
       ctx.font = topoFont('700', 9);
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
-      // Small white backing for readability
-      ctx.fillStyle = themeColor('#ffffffe8', '#121118e8');
-      ctx.fillRect(mx - 12, my - 7, 24, 13);
-      ctx.fillStyle = col + 'dd';
-      ctx.fillText(fmtMbps(mbps), mx, my);
+      ctx.fillText(label, mx, my);
       ctx.textBaseline = 'alphabetic';
     }
 
@@ -2306,6 +2738,10 @@ canvas.addEventListener('mouseleave', () => {
   HOVER_NODE = null;
   if (!SIM.running) scheduleDraw();
 });
+
+// Mesh/Map view toggle (wired here, not inline, to satisfy the CSP).
+document.getElementById('view-mesh').addEventListener('click', () => setTopoView('mesh'));
+document.getElementById('view-map').addEventListener('click', () => setTopoView('map'));
 
 canvas.addEventListener('click', e => {
   const rect = canvas.getBoundingClientRect();
@@ -2957,6 +3393,7 @@ def assemble_admin_status():
             'mumble':           conf.get('mumble', 'n'),
             'auto_update':      conf.get('auto_update', 'n'),
             'admin_password':   conf.get('admin_password', ''),
+            'operator_name':    conf.get('operator_name', ''),
         },
         'application':  config_application_status(),
         'pending':      pending,
