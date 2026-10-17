@@ -218,7 +218,7 @@ JSON.stringify(calls);'''
             for iface in ('wlan0', 'wlan1', 'wlan2'):
                 cases.append(('toggle-all', 'toggleAll',
                               {'iface': iface, 'state': state}, [iface, state]))
-        literal = "Mike's radio \"'><img src=x> & ');alert(1);//"
+        literal = "Test's radio \"'><img src=x> & ');alert(1);//"
         for state in ('up', 'down'):
             cases.append(('toggle-interface', 'toggleIface',
                           {'ip': literal, 'id': literal, 'iface': 'wlan1',

@@ -222,6 +222,26 @@
       "id": "lyra",
       "path": "MANET/lyra_arm64/README.md",
       "title": "Lyra codec artifacts"
+    },
+    {
+      "id": "contributing",
+      "path": "CONTRIBUTING.md",
+      "title": "Contributing code"
+    },
+    {
+      "id": "builds",
+      "path": "MANET/packaging/README.md",
+      "title": "Package builders"
+    },
+    {
+      "id": "kernel-builds",
+      "path": "kernel/build/README.md",
+      "title": "Kernel build workflow"
+    },
+    {
+      "id": "binaries",
+      "path": "MANET/binaries_arm64/README.md",
+      "title": "Binary build reference"
     }
   ]
 }

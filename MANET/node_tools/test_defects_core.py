@@ -123,7 +123,7 @@ class RegistryQuotingTests(CoreHarness):
 
     def test_decoder_writer_preserves_apostrophes_and_literal_shell(self):
         """Treat quote breaks and shell-looking text as literal data."""
-        for value in ("Mike's AP", "''", "ends'", "'starts", '',
+        for value in ("Test's AP", "''", "ends'", "'starts", '',
                       "back\\slash's $(false); `false` = x\nnext line"):
             with self.subTest(value=value):
                 output = io.StringIO()
@@ -135,7 +135,7 @@ class RegistryQuotingTests(CoreHarness):
 
     def test_builder_round_trip_preserves_ap_ssid(self):
         """Build a real registry from encoded Alfred telemetry."""
-        ssid = "Mike's AP"
+        ssid = "Test's AP"
         payload = self.encode('--ap-ssid', ssid)
         snapshots = [subprocess.CompletedProcess([], 0, stdout=''),
                      subprocess.CompletedProcess(

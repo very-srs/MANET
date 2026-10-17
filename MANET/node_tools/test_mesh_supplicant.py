@@ -108,8 +108,7 @@ class MeshSupplicantTests(unittest.TestCase):
 
     def test_builders_stage_wifi_binaries_and_exclude_halow_candidate(self):
         packaging = TOOLS.parent / 'packaging'
-        if not packaging.exists():
-            self.skipTest('Local packaging tooling is not in this checkout')
+        self.assertTrue(packaging.is_dir(), 'tracked package builders are missing')
         repo = self.root / 'repo'
         binaries = repo / 'MANET/binaries_arm64'
         binaries.mkdir(parents=True)

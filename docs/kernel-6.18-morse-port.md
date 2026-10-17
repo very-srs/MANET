@@ -2,12 +2,14 @@
 
 This records the kernel and driver changes for Linux 6.18 with the Morse Micro
 HaLow driver (morse_driver 1.16.4) on all three hardware targets. The build
-workspace (`kernel-work/`) is not in git, so the changes are documented here.
+workspace (`kernel-work/`) contains downloaded inputs and build outputs.
+The [build recipes](../kernel/build/README.md), configuration fragments and
+local patches are tracked in the repository.
 
 Companion documents:
-- `kernel-work/real_work/PORTING-MORSE-DRIVER.md`: deep diagnostic guide for the
-  CM4 SPI debugging (symptom → cause tables, wire-level analysis). Read it before
-  re-porting to a newer kernel.
+- [Kernel build workflow](../kernel/build/README.md): source pins, dependencies,
+  commands, configuration and overlay assembly. The SPI mechanisms and
+  failure signatures below explain the changes to preserve when porting.
 - `docs/armbian_6.18_morse_build.txt`: **historical**: the original Rock 3A
   approach (Armbian stock kernel + headers + container build + manual sed patches).
   Superseded by the Gateworks driver branch + `build-r3a.sh` described below.
@@ -35,7 +37,7 @@ Changes fall into three groups:
 | Layer | What | Applies to |
 |-------|------|-----------|
 | Driver: kernel-API compat | Gateworks branch commits (6.13→6.18 API churn) | all targets |
-| Driver: mm6108 SPI fixes | local uncommitted diff in `spi.c`/`firmware.c`/`bus.h` | CM4/RPi5 only |
+| Driver: mm6108 SPI fixes | tracked `kernel/patches/morse-driver/0001-spi-and-power.patch` | CM4/RPi5 only |
 | Kernel trees | `spi-bcm2835.c` CS handling; `mt7915` txpower patch | per-tree (see §4) |
 | Kernel trees | cfg80211 background CAC fix (upstream backport) | all targets (§4.5) |
 | Kernel trees | MT7916 third-chain reservation and observer | CM4/Rock 3A (§4.6) |
@@ -77,7 +79,7 @@ These are the result of the June 2026 SPI debug sessions on the CM4. They live a
 an **uncommitted working-tree diff** in `morse-driver-1.16/` touching `spi.c`,
 `firmware.c`, `bus.h` (~90 insertions). None of them are kernel-version-specific
 except 3.1: the rest are mm6108 hardware-behavior fixes that older kernels' looser
-SPI timing happened to mask. Full diagnostic narrative: `PORTING-MORSE-DRIVER.md`.
+SPI timing happened to mask. The failure mechanisms and signatures follow.
 
 ### 3.1 `morse_spi_initsequence`: `cs_off=1` instead of `SPI_CS_HIGH` (`spi.c`)
 
@@ -183,13 +185,15 @@ loop tries CMD63 first and only issues CMD0 as a retry fallback.
 
 ## 4. Kernel tree patches
 
-The kernel source changes below are separate from untracked build files.
+The tracked recipes in `kernel/build/` apply the project patch series.
+The Morse source preparation step applies its separate driver patch.
 
 ### 4.1 GPIO-descriptor CS in `linux-rpi-6.18` (CM4/RPi5)
 
 File: `drivers/spi/spi-bcm2835.c`.
 
-Two hunks, working in tandem with the DTS overlay (§5):
+The pinned kernel already enables GPIO descriptor chip select, working
+with the DTS overlay (§5):
 
 ```c
 /* in bcm2835_spi_probe(): */
@@ -199,12 +203,10 @@ Two hunks, working in tandem with the DTS overlay (§5):
 ctlr->use_gpio_descriptors = true;
 ```
 
-`use_gpio_descriptors = true` is the upstream default in 6.18: we had disabled it
-during an earlier (wrong) debugging approach; the patch pins it back on with a
-comment so it can't silently regress. The second hunk is a comment-only
-clarification on the existing empty-`cs-gpios` early return in
-`bcm2835_spi_setup()` (a leftover guard from the old approach; harmless and never
-taken now that `cs-gpios` is non-empty).
+`use_gpio_descriptors = true` is the upstream default in the pinned 6.18
+source. No functional patch is needed there. Preserve it when porting.
+The existing empty-`cs-gpios` early return in `bcm2835_spi_setup()` is not
+taken with this overlay because `cs-gpios` is non-empty.
 
 The mm6108 uses SDIO byte-mode CMD53 for small
 register writes. After a byte-mode write the chip's SPI state machine needs a
@@ -363,7 +365,7 @@ Rock 3A needs no overlay (USB enumeration; MorseMicro VID `325b`).
 
 Config is assembled per target as: platform defconfig + `manet-common.config` +
 platform fragment, merged with `merge_config.sh` then `olddefconfig`.
-Fragments live in `kernel-work/real_work/config-fragments/`.
+Fragments live in `kernel/build/config-fragments/`.
 
 Relevant `manet-common.config` entries for all targets:
 
@@ -380,7 +382,7 @@ Platform fragments: `manet-rpi.config` (bcm2835 thermal, RPi firmware/cpufreq,
 `CONFIG_MFD_RP1=y`: needed for RPi5, harmless on CM4) and `manet-r3a.config`
 (Rockchip thermal/cpufreq/PM domains).
 
-Build scripts (`kernel-work/real_work/build-{cm4,rpi5,r3a}.sh`) each: configure,
+Build scripts (`kernel/build/build-{cm4,rpi5,r3a}.sh`) each: configure,
 build `Image[.gz] modules dtbs`, `modules_install` into `build-*/staging/`, build
 the Morse driver out-of-tree against the build dir, stage `morse.ko` +
 `dot11ah/dot11ah.ko` into `extra/morse/`, apply the power patch (§7), and
@@ -428,8 +430,8 @@ All targets cross-compile with `aarch64-linux-gnu-`. All Morse builds pass
 Build and stage the Rock 3A overlay from the repository root:
 
 ```sh
-bash kernel-work/real_work/build-r3a.sh
-bash kernel-work/real_work/build-r3a-sbc-overlay.sh
+bash kernel/build/build-r3a.sh
+bash kernel/build/build-r3a-sbc-overlay.sh
 ```
 
 The first script builds `6.18.0-manet` and installs modules under
@@ -497,7 +499,7 @@ Three layers would otherwise cap HaLow below what the hardware can do. All
 three are raised to 30 dBm for every region. What remains is the firmware's own
 per-bandwidth limit and the hardware; nothing here measures radiated output.
 
-**dot11ah.ko regulatory rules.** `kernel-work/morse-dot11ah-power-patch.py`
+**dot11ah.ko regulatory rules.** `kernel/build/morse-dot11ah-power-patch.py`
 rewrites `max_eirp` in **every** HaLow regulatory rule baked into `dot11ah.ko`,
 run by all three build scripts with `--power-dbm 30`. It scans the binary for
 plausible `ieee80211_reg_rule` structs (start_freq 700-960 MHz) instead of
@@ -507,7 +509,7 @@ raises only rules below the target, and doubles as a check: on the deployed
 
 **BCF per-region power tables.** Each BCF carries a TX power TLV per channel
 in each `.regdom_XX` section, and the firmware will not exceed it. All three
-`build-*-sbc-overlay.sh` scripts run `kernel-work/morse-bcf-patch.py
+`build-*-sbc-overlay.sh` scripts run `kernel/build/morse-bcf-patch.py
 --country ALL --power-dbm 30` over **every** `bcf_*.bin`, because a USB MM8108
 picks its BCF by OTP board type (`bcf_boardtype_XXXX.bin`) and SPI modules
 name theirs in a module option. A region with no power TLVs is left as is;
@@ -595,8 +597,9 @@ dmesg | grep -E 'morse|wlan2'
 # SPI setup: normal) → Loaded firmware → batman_adv: bat0: Adding interface: wlan2
 ```
 
-If it breaks, work through the symptom table in `PORTING-MORSE-DRIVER.md`
-("Diagnostic guide: what to check if it breaks again").
+For SPI failures, compare the observed response/ACK bytes and chip-select
+behavior against sections 3 and 4.1. For a USB card, check the compiled bus
+support and module alias described in section 6.1.
 
 ### 8.1 APT owns userland; MANET releases own the kernel
 

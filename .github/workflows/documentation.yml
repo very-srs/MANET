@@ -7,6 +7,9 @@ on:
     paths:
       - 'docs/**'
       - '**/README.md'
+      - 'CONTRIBUTING.md'
+      - 'MANET/packaging/**'
+      - 'kernel/build/**'
       - 'MANET/node_tools/**'
       - 'MANET/share/manet/fer-logo-black.png'
       - '.github/workflows/documentation.yml'
@@ -14,6 +17,9 @@ on:
     paths:
       - 'docs/**'
       - '**/README.md'
+      - 'CONTRIBUTING.md'
+      - 'MANET/packaging/**'
+      - 'kernel/build/**'
       - 'MANET/node_tools/**'
       - 'MANET/share/manet/fer-logo-black.png'
       - '.github/workflows/documentation.yml'
@@ -38,6 +44,12 @@ jobs:
         run: |
           /tmp/manet-docs-venv/bin/python -m unittest discover -s docs/guide
           /tmp/manet-docs-venv/bin/python docs/guide/build.py
+      - name: Check contributor build tools
+        run: |
+          python3 -m unittest discover -s kernel/build
+          for script in MANET/packaging/*.sh kernel/build/*.sh; do
+            bash -n "$script"
+          done
       - name: Upload Pages artifact
         if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         uses: actions/upload-pages-artifact@v4

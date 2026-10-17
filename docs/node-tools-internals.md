@@ -4277,8 +4277,8 @@ Run them from the git root, so this directory is on `sys.path`, and from the dev
 venv, so the protobuf runtime matches the fleet:
 
 ```bash
-source ~/.venvs/manet/bin/activate    # bash ../packaging/setup-dev-env.sh
-python -m pip install cryptography==43.0.0
+bash MANET/packaging/setup-dev-env.sh
+source ~/.venvs/manet/bin/activate
 python -m unittest discover -s MANET/node_tools -p 'test_*.py'
 ```
 

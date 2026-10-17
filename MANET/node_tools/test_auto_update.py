@@ -181,8 +181,7 @@ class AutoUpdateUnitTests(unittest.TestCase):
 
     def test_builders_ship_the_enabled_path(self):
         builders = TOOLS.parent / 'packaging'
-        if not builders.is_dir():
-            self.skipTest('local packaging tools are not tracked in this repository')
+        self.assertTrue(builders.is_dir(), 'tracked package builders are missing')
         for board in ('tools', 'cm4', 'rpi5', 'r3a'):
             with self.subTest(board=board):
                 source = (builders / f'build-{board}-tarball.sh').read_text()
