@@ -65,13 +65,13 @@ TCP traffic on 8089 or 8087. TLS cannot be rewritten. The local panel shows
 
 ### Layer 2 topology and address ownership
 
-Each node claims an IPv4 block sized `max_euds_per_node + 2`. Its first address is the primary mesh address on `br0`, its second is the local EUD gateway address, and the remaining addresses form its DHCP pool. `br0` bridges `bat0` (which contans one or more wlan devices, depending on EUD mode). 
+Each node claims an IPv4 block sized `max_euds_per_node + 2`. Its first address is the primary mesh address on `br0`, its second is the local EUD gateway address, and the remaining addresses form its DHCP pool. `br0` bridges `bat0` (which contains one or more wlan devices, depending on EUD mode). 
 
 These are allocations within one shared IPv4 subnet, not a separate routed
 subnet per radio. The [address-selection explanation](overview.md#developer-addresses-selecting-a-block-and-resolving-collisions)
 covers how a radio chooses the block and what happens after an overlap.
 
-`ethernet-autodetect.sh` classifies Ethernet as an uplink when DHCP traffic, switch traffic, or external RAs are heard.  The absense of
+`ethernet-autodetect.sh` classifies Ethernet as an uplink when DHCP traffic, switch traffic, or external RAs are heard.  The absence of
 such traffic determines that this is an EUD. Dispatcher hooks and the AP/mesh role helpers reconcile bridge membership, addressing, gateway advertisement, and access-point ownership. The AP's mesh role is preserved in configs for its possible return to mesh operation.
 
 ### From a client connection to a mesh packet

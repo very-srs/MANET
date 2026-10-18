@@ -44,7 +44,7 @@ between that EUD and the mesh.
 The radio also has a hostname such as `mesh-1234` and a mesh address, visible
 in its status details. These identify it to the rest of the system. Record
 the hostname when reporting a fault, so another person knows which radio
-you mean. Each radio's hostname is derrived from its hardware address and will
+you mean. Each radio's hostname is derived from its hardware address and will
 not change if re-flashed. If the convenient manet.local name fails, try the 
 numerical local gateway address shown in your phone or computer's network details.
 

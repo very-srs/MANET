@@ -27,7 +27,7 @@ together. A supported computer alone is not a complete radio.
 | Raspberry Pi Compute Module 4 (CM4) | Primary development and verification target; supports conventional Wi-Fi and HaLow. |
 | Raspberry Pi 4B | Briefly tested; its lack of the required PCIe connection limits its usefulness here to HaLow. |
 | Raspberry Pi 5 | Functional, but its project support is out of date and it is not the current focus. |
-| Radxa Rock 3A | Functional | supports conventional Wi-Fi and HaLow. |
+| Radxa Rock 3A | Functional, and supports conventional Wi-Fi and HaLow. |
 
 The Pi 5 and Rock 3A have run too hot for the intended sealed enclosure.
 The CM4 is the best-documented starting point for following this project's
@@ -37,7 +37,7 @@ need changes before they work.
 ### What each part contributes
 
 Conventional Wi-Fi and HaLow are the links **between radios**. A local Wi-Fi
-access point, when enabled, is a for connecting your phone to a
+access point, when enabled, is for connecting your phone to a
 radio. An Ethernet adapter provides the wired alternative for a phone.
 See [connections](connect.md) and [radio controls](radios.md).
 
