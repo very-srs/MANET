@@ -9,7 +9,7 @@
 A radio can run little jobs, like a shared video stream or chats with the boys. If all the radios
 chooses another radio for this job, that radio takes over and the job continues.
 
-You may need to reconnect when the job moves or you move to far away from your friends.
+You may need to reconnect when the job moves or you move too far away from your friends.
 
 ## User
 

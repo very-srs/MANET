@@ -35,7 +35,7 @@ Run the Linux flasher as your regular user. It requests elevated access when it 
 Select the board, then configure the mesh SSID and SAE key, network CIDR, regulatory region, EUD connection mode, SSH username and password, and web admin password. Radios intended for the same mesh need compatible mesh settings. The admin password is shared across the mesh. Local access-point settings belong to each radio.
 
 For Wireless or Auto client mode, choose the SSID for the radios.  All radio APs get
-this name, but each one adds four alph-numeric characters to the end to uniquely identify each radio.
+this name, but each one adds four alphanumeric characters to the end to uniquely identify each radio.
 This name is fixed after flashing so the radios can recognize their own
 hotspots when choosing an internet connection. Its password remains editable
 in Node config. Wired-only flashing leaves the phone Wi-Fi name empty.
