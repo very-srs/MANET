@@ -1,0 +1,62 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 860 470" role="img" aria-labelledby="t d">
+  <title id="t">How a MANET mesh fits together</title>
+  <desc id="d">Your phone connects to your radio by Wi-Fi or cable. Your radio links to other radios by Wi-Fi over shorter distances and by HaLow over longer distances. A friend's phone connects to their radio. One radio can share an internet connection with the whole mesh.</desc>
+  <defs>
+    <g id="radio">
+      <line x1="-20" y1="-22" x2="-20" y2="-40" stroke="#25372f" stroke-width="4" stroke-linecap="round"/>
+      <line x1="20" y1="-22" x2="20" y2="-40" stroke="#25372f" stroke-width="4" stroke-linecap="round"/>
+      <rect x="-38" y="-24" width="76" height="48" rx="7" fill="#315f48"/>
+      <circle cx="-22" cy="0" r="4" fill="#9fd3a8"/>
+    </g>
+    <g id="phone">
+      <rect x="-16" y="-28" width="32" height="56" rx="6" fill="#ffffff" stroke="#25372f" stroke-width="3"/>
+      <line x1="-6" y1="20" x2="6" y2="20" stroke="#25372f" stroke-width="3" stroke-linecap="round"/>
+    </g>
+  </defs>
+  <style>
+    text { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; fill: #25372f; }
+    .label { font-size: 22px; font-weight: 700; text-anchor: middle; }
+    .note { font-size: 18px; fill: #64736a; }
+    .mid { text-anchor: middle; }
+    .wifi { stroke: #315f48; stroke-width: 9; stroke-linecap: round; fill: none; }
+    .halow { stroke: #c45c31; stroke-width: 4; stroke-dasharray: 12 9; stroke-linecap: round; fill: none; }
+    .local { stroke: #64736a; stroke-width: 3; stroke-dasharray: 3 7; stroke-linecap: round; fill: none; }
+  </style>
+  <rect width="860" height="470" fill="#fffdf7"/>
+
+  <path d="M370 96 a26 26 0 0 1 22 -40 a34 34 0 0 1 62 -6 a28 28 0 0 1 40 30 a22 22 0 0 1 -4 16 z" fill="#ffffff" stroke="#64736a" stroke-width="3"/>
+  <text class="label" x="432" y="84" style="font-size:19px">Internet</text>
+  <text class="note" x="520" y="66">Optional. One radio can</text>
+  <text class="note" x="520" y="88">share it with everyone.</text>
+  <line class="local" x1="430" y1="100" x2="430" y2="150"/>
+
+  <line class="wifi" x1="252" y1="252" x2="392" y2="200"/>
+  <line class="wifi" x1="468" y1="200" x2="608" y2="252"/>
+  <line class="halow" x1="262" y1="276" x2="598" y2="276"/>
+
+  <line class="local" x1="68" y1="266" x2="172" y2="266"/>
+  <line class="local" x1="688" y1="266" x2="792" y2="266"/>
+  <text class="note mid" x="118" y="250" style="font-size:16px">Wi-Fi or cable</text>
+
+  <use href="#phone" x="45" y="266"/>
+  <text class="label" x="45" y="326">Your</text>
+  <text class="label" x="45" y="352">phone</text>
+
+  <use href="#radio" x="215" y="266"/>
+  <text class="label" x="215" y="326">Your radio</text>
+
+  <use href="#radio" x="430" y="190"/>
+  <text class="label" x="430" y="246">Another radio</text>
+
+  <use href="#radio" x="645" y="266"/>
+  <text class="label" x="645" y="326">Friend's radio</text>
+
+  <use href="#phone" x="815" y="266"/>
+  <text class="label" x="815" y="326">Their</text>
+  <text class="label" x="815" y="352">phone</text>
+
+  <line class="wifi" x1="70" y1="434" x2="126" y2="434"/>
+  <text x="140" y="441" style="font-size:19px"><tspan font-weight="700">Wi-Fi:</tspan> fast, shorter reach</text>
+  <line class="halow" x1="450" y1="434" x2="506" y2="434"/>
+  <text x="520" y="441" style="font-size:19px"><tspan font-weight="700">HaLow:</tspan> slower, longer reach</text>
+</svg>
