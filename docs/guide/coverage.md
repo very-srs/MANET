@@ -7,7 +7,7 @@ packaged and hardware-verified behavior.
 
 | Area | Outcome chapters | Canonical reference |
 |---|---|---|
-| Purpose, architecture and boards | [Overview](content/overview.md), [hardware](content/hardware.md) | [Project README](../../README.md) |
+| Purpose, architecture and boards | [What this does](content/about.md), [overview](content/overview.md), [hardware](content/hardware.md) | [Project README](../../README.md) |
 | Windows/Linux imaging and setup | [Flash](content/flash.md), [first boot](content/first-boot.md) | [Provisioning](../../MANET/provisioning/README.md), [internals](../provisioning-internals.md) |
 | Enumeration, firmware, kernel and overlays | [Hardware](content/hardware.md), [development](content/development.md) | [Kernel record](../kernel-6.18-morse-port.md), [firmware](../node-tools-internals.md#mt7916-firmware-selection) |
 | EUD/AP, DHCP, DNS and discovery | [Connections](content/connect.md) | [Discovery](../node-tools-internals.md#local-eud-discovery), [dispatcher](../../MANET/networkd-dispatcher/README.md) |

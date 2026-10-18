@@ -2,6 +2,13 @@
   "topics": [
     {
       "id": "index",
+      "source": "about.md",
+      "title": "What this does",
+      "description": "What MANET radios are, why use them, who they are for and what they are built from.",
+      "group": "Start here"
+    },
+    {
+      "id": "overview",
       "source": "overview.md",
       "title": "Meet the mesh",
       "description": "MANET hardware, connections, and setup.",
