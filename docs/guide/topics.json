@@ -4,7 +4,7 @@
       "id": "index",
       "source": "about.md",
       "title": "What this does",
-      "description": "What MANET radios are, why use them, who they are for and what they are built from.",
+      "description": "What MANET radios are, why use them, who they are for, and what they are built from.",
       "group": "Start here"
     },
     {
@@ -18,7 +18,7 @@
       "id": "hardware",
       "source": "hardware.md",
       "title": "Hardware and accessories",
-      "description": "Supported boards, radio hardware, power and peripherals.",
+      "description": "Supported boards, radio hardware, power, and peripherals.",
       "group": "Start here"
     },
     {
@@ -74,7 +74,7 @@
       "id": "services",
       "source": "services.md",
       "title": "Shared services",
-      "description": "Media streams, Mumble and synchronized files.",
+      "description": "Media streams, Mumble, and synchronized files.",
       "group": "Use the mesh"
     },
     {
@@ -109,7 +109,7 @@
       "id": "radios",
       "source": "radios.md",
       "title": "Radio controls",
-      "description": "Channels, transmit power and interface ownership.",
+      "description": "Channels, transmit power, and interface ownership.",
       "group": "Understand the radio"
     },
     {
@@ -130,14 +130,14 @@
       "id": "power",
       "source": "power.md",
       "title": "Power and shutdown",
-      "description": "Read indicators, check power and shut down a radio.",
+      "description": "Read indicators, check power, and shut down a radio.",
       "group": "Maintain the radios"
     },
     {
       "id": "storage",
       "source": "storage.md",
       "title": "Storage and logs",
-      "description": "Saved state, measurement limits and diagnostic retention.",
+      "description": "Saved state, measurement limits, and diagnostic retention.",
       "group": "Maintain the radios"
     },
     {
@@ -165,7 +165,7 @@
       "id": "development",
       "source": "development.md",
       "title": "Develop and release MANET",
-      "description": "Source ownership, validation, builds and publication.",
+      "description": "Source ownership, validation, builds, and publication.",
       "group": "Build and customize"
     }
   ],
