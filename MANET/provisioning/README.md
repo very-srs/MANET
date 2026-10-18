@@ -1,6 +1,7 @@
 # Provisioning Guide
 
 How to flash a card and bring up a new mesh radio.
+For a step-by-step walkthrough, see [Flash a radio](https://very-srs.github.io/MANET/flash.html) in the field guide.
 
 ---
 
