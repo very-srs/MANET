@@ -3,6 +3,8 @@
 > The files in this repository are under active development. They frequently contain breaking bugs, untested changes, or active debugging.
 >
 > When you flash a device it will pull down the most recent code automatically.
+>
+> For hardware, flashing, operation, and troubleshooting, see the [field guide](https://very-srs.github.io/MANET/).
 
 ---
 
