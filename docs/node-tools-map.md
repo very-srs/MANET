@@ -92,7 +92,6 @@ Read [radio controls](guide/content/radios.md) and [hardware](guide/content/hard
 | [batman-if-setup.sh](../MANET/node_tools/batman-if-setup.sh) | Create/configure BATMAN and attach valid mesh interfaces. |
 | [batman-enslave-watch.sh](../MANET/node_tools/batman-enslave-watch.sh) | Repair interfaces that fall out of BATMAN membership, and restart a HaLow supplicant whose mesh is gone. |
 | [sae-watchdog.sh](../MANET/node_tools/sae-watchdog.sh) | Guarded recovery for SAE-authentication-blocked missing mesh interfaces. |
-| [usb-wifi-halow-recovery.sh](../MANET/node_tools/usb-wifi-halow-recovery.sh) | Recover HaLow around non-Morse USB Wi-Fi hotplug events. |
 | [unblock-wifi-rfkill.sh](../MANET/node_tools/unblock-wifi-rfkill.sh) | Clear software Wi-Fi blocks while respecting hardware blocks. |
 | [manet-mesh-power.sh](../MANET/node_tools/manet-mesh-power.sh) | Request mesh startup transmit power without claiming measured RF output. |
 | [manet-region.py](../MANET/node_tools/manet-region.py) | Propagate the configured regulatory domain to radio configuration. |
@@ -111,8 +110,9 @@ and [dispatcher ownership](../MANET/networkd-dispatcher/README.md).
 | [manet-uplink-dns.py](../MANET/node_tools/manet-uplink-dns.py) | Select qualified DHCP DNS, migrate networkd policy, and resolve candidate probes. |
 | [gateway-route-manager.sh](../MANET/node_tools/gateway-route-manager.sh) | Select a reachable gateway and maintain the Linux mesh default route with hysteresis. |
 | [usb-ethernet-watch.sh](../MANET/node_tools/usb-ethernet-watch.sh) | Pass USB Ethernet/tether hotplug into role detection. |
-| [usb-wifi-uplink.sh](../MANET/node_tools/usb-wifi-uplink.sh) | Configure an external Wi-Fi client from saved uplink credentials. |
 | [manet_wifi_uplink.py](../MANET/node_tools/manet_wifi_uplink.py) | Reserve a local built-in Wi-Fi client, scan nearby APs, and follow its channel with the shared EUD AP. |
+| [manet-retire-uplink.py](../MANET/node_tools/manet-retire-uplink.py) | Remove retired external Wi-Fi uplink artifacts during updates. |
+| [manet_wifi_saved.py](../MANET/node_tools/manet_wifi_saved.py) | Keep successful uplink credentials private on this node, shared by built-in radios. |
 | [manet_wifi_events.py](../MANET/node_tools/manet_wifi_events.py) | Deliver supplicant, hostapd, link/address, and local-file events to the optional Wi-Fi follower without periodic helper commands. |
 | [manet_ap_mesh.py](../MANET/node_tools/manet_ap_mesh.py) | Transfer the candidate physical interface between AP and mesh ownership. |
 | [manet_eud_ap.py](../MANET/node_tools/manet_eud_ap.py) | Keep the flash-time AP name fixed and activate local password changes with recovery. |

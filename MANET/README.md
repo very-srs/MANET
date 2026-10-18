@@ -38,6 +38,7 @@ proven enough to be "finished".
       radar before the mesh moves onto it, and the mesh agrees a fallback
       channel to move to if radar appears
 - [x] Built-in Wi-Fi as an internet uplink, picked from a scan list in the web UI
+- [x] Saved Wi-Fi uplink networks, kept only on the radio, with Forget
 - [x] ATAK on a connected phone: radio markers on the map, the radio as the
       phone's GPS source, and chat with the radio. On by default.
 

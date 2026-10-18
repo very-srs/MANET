@@ -205,7 +205,7 @@ JSON.stringify(calls);'''
             ('apply-halow', 'applyHalow', {}, []),
             ('apply-2g', 'apply2G', {}, []), ('apply-5g', 'apply5G', {}, []),
             ('start-measurement', 'startMeasurement', {}, []),
-            ('apply-uplink', 'applyUsbWifiUplink', {}, []),
+            ('apply-uplink', 'applyWifiUplink', {}, []),
             ('stage-config', 'stageChanges', {}, []),
             ('apply-config', 'applyChanges', {}, [False]),
             ('force-config', 'applyChanges', {}, [True]),

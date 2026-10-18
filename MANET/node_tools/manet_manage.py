@@ -19,8 +19,9 @@ Routes (relative to /manage):
   GET  /api/sessions/<id>       - Get session JSON
   GET  /api/sessions/<id>/csv   - Get session CSV
   DELETE /api/sessions/<id>     - Delete saved session
-  GET  /api/uplink/wifi         - Local built-in and USB Wi-Fi uplink status
+  GET  /api/uplink/wifi         - Local built-in Wi-Fi uplink status
   POST /api/uplink/wifi         - Set node-local Wi-Fi uplink credentials
+  POST /api/uplink/wifi/forget  - Forget a local saved password without disconnecting
 """
 
 import json
@@ -101,7 +102,6 @@ def logo_asset_token():
             parts.append('missing')
     # Eight hex digits identify both theme assets for browser cache refresh.
     return hashlib.sha1('|'.join(parts).encode()).hexdigest()[:8]
-USB_WIFI_UPLINK_SCRIPT = '/usr/local/bin/usb-wifi-uplink.sh'
 
 # The S1G channel plan is region-dependent and lives in manet_radio, so the
 # UI, the Alfred applier and mesh-status all offer the same channels.
@@ -153,82 +153,24 @@ def has_internet():
     except Exception:
         return False
 
-def get_usb_wifi_uplink_status():
-    """Read local uplink status with defaults for missing observations."""
-    if not os.path.exists(USB_WIFI_UPLINK_SCRIPT):
-        return {
-            'enabled': True,
-            'iface': '',
-            'ssid': 'hotspot',
-            'state': 'script-missing',
-            'connected': False,
-            'ip': '',
-            'service': '',
-        }
-    try:
-        # Allow eight seconds for the uplink helper's JSON status collection.
-        r = subprocess.run(
-            [USB_WIFI_UPLINK_SCRIPT, 'status-json'],
-            capture_output=True, text=True, timeout=8
-        )
-        # Empty helper output leaves display fields at their unknown defaults.
-        data = json.loads((r.stdout or '{}').strip() or '{}')
-        data.setdefault('ssid', 'hotspot')
-        data.setdefault('iface', '')
-        data.setdefault('state', 'unknown')
-        data.setdefault('connected', False)
-        data.setdefault('ip', '')
-        data.setdefault('service', '')
-        data.setdefault('enabled', True)
-        return data
-    except Exception as e:
-        return {
-            'enabled': True,
-            'iface': '',
-            'ssid': 'hotspot',
-            'state': 'error',
-            'connected': False,
-            'ip': '',
-            'service': '',
-            'error': str(e),
-        }
-
-
-def apply_usb_wifi_uplink(ssid, password, enabled=True, selection=None):
-    """Set dongle credentials locally, passing secrets through stdin."""
-    request = {'ssid': ssid, 'password': password, 'enabled': enabled}
-    if selection:
-        request.update({key: selection[key] for key in
-                        ('security', 'bssid', 'freq', 'scan_iface') if key in selection})
-    result = subprocess.run([USB_WIFI_UPLINK_SCRIPT, 'set-stdin'],
-                            input=json.dumps(request), capture_output=True,
-                            text=True, timeout=60)
-    if result.returncode:
-        from manet_wifi_uplink import OWN_HOTSPOT_REASON
-        reason = (result.stderr or '').strip()
-        if reason in ('Scan again and choose a network from the fresh list', OWN_HOTSPOT_REASON):
-            raise ValueError(reason)
-        raise RuntimeError('Could not save the USB Wi-Fi connection. Check the password and try again.')
-    return get_usb_wifi_uplink_status()
-
-
 def builtin_wifi_request(action, request=None):
     """Run a local client action behind the existing authenticated admin routes."""
     command = ['/usr/local/bin/manet_wifi_uplink.py', action]
     if action in ('scan', 'scan-plan'):
         iface = (request or {}).get('iface')
-        if iface == 'usb':
-            if action == 'scan-plan':
-                return {'iface': 'usb', 'interrupts_ap': False}
-            command = [USB_WIFI_UPLINK_SCRIPT, 'scan-json']
-        elif iface in ('wlan0', 'wlan1'):
+        if iface in ('wlan0', 'wlan1'):
             command.append(iface)
             if action == 'scan' and request.get('allow_ap_stop') is True:
                 command.append('--allow-ap-stop')
         else:
             raise ValueError('Choose a radio before scanning')
-    result = subprocess.run(command, input=json.dumps(request or {}),
-                            capture_output=True, text=True, timeout=150)
+    if action == 'set' and (request or {}).get('iface') not in ('wlan0', 'wlan1'):
+        raise ValueError('Choose a built-in radio before connecting')
+    try:
+        result = subprocess.run(command, input=json.dumps(request or {}),
+                                capture_output=True, text=True, timeout=150)
+    except (OSError, subprocess.SubprocessError) as error:
+        raise RuntimeError('Wi-Fi operation failed. Try again.') from error
     try:
         response = json.loads(result.stdout)
     except ValueError as error:
@@ -239,8 +181,10 @@ def builtin_wifi_request(action, request=None):
 
 
 def wifi_uplink_status():
-    """Report both local client paths without exposing credentials."""
-    return {'builtin': builtin_wifi_request('status'), 'usb': get_usb_wifi_uplink_status()}
+    """Report the local built-in client without exposing credentials."""
+    builtin = builtin_wifi_request('status')
+    return {'builtin': builtin,
+            'saved_networks': builtin.get('saved_networks', [])}
 
 
 def get_bat0_active_ifaces():
@@ -1193,6 +1137,12 @@ body.chrome-compact #content::before{height:8px;margin:-22px -22px 12px;opacity:
 #uplink-wifi-connect{margin:12px 0;padding:12px;border:1px solid var(--border);border-radius:8px}
 #uplink-wifi-password-row label{display:block;margin-bottom:6px}
 #uplink-wifi-password{width:100%;min-width:0;margin-bottom:12px}
+.uplink-saved-mark{display:inline-flex;align-items:center;gap:4px;white-space:nowrap;font-size:14px}
+.uplink-saved-mark svg{width:16px;height:16px;flex:none}
+#uplink-wifi-saved-password .btn{margin-bottom:12px}
+#uplink-wifi-saved-list{list-style:none;margin:0;padding:0;max-height:280px;overflow-y:auto}
+.uplink-saved-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;align-items:center;padding:8px 0;border-bottom:1px solid var(--border2)}
+.uplink-saved-row .uplink-detail{display:block}
 @media(max-width:480px){
   .uplink-dbm{display:none}
   #tab-uplink .uplink-body{padding:12px}
@@ -1818,7 +1768,7 @@ function showTab(name, updateUrl = true) {
   document.querySelectorAll('.tab-pane').forEach(p => p.style.display = p.id === 'tab-' + name ? '' : 'none');
   if (name === 'sessions') loadSessions();
   if (name === 'radio') buildIfaceControl();
-  if (name === 'uplink') loadUsbWifiUplink();
+  if (name === 'uplink') loadWifiUplink();
   if (name === 'config') startConfigPolling(); else stopConfigPolling();
   if (name === 'voice') startVoicePolling(); else stopVoicePolling();
 }
@@ -2162,6 +2112,61 @@ let uplinkNetworks = [], uplinkSelected = -1, uplinkScanIface = '', uplinkScanDe
 let uplinkScannedAt = 0, uplinkBusy = false, uplinkInitialized = false, uplinkStatus = null;
 let uplinkScanId = null;
 let uplinkScanResolve = null;
+let uplinkSavedNetworks = [], uplinkDifferentPassword = false;
+
+function uplinkSavedMarkup() {
+  return '<span class="uplink-saved-mark"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true" focusable="false"><circle cx="8" cy="8" r="5"/><path d="m12 12 9 9m-4-4 3-3m-7-1 3-3"/></svg>Saved</span>';
+}
+
+function updateSavedNetworks(networks) {
+  if (!Array.isArray(networks)) return;
+  const changed = JSON.stringify(networks) !== JSON.stringify(uplinkSavedNetworks);
+  uplinkSavedNetworks = networks;
+  if (changed) {
+    document.getElementById('uplink-wifi-saved-list').innerHTML = networks.map((ap, index) =>
+      `<li class="uplink-saved-row"><span><span class="uplink-name">${esc(ap.ssid)}</span>
+      <span class="uplink-detail">${ap.security === 'sae' ? 'WPA3' : 'WPA2'}</span></span>
+      <button type="button" class="btn" data-action="forget-uplink" data-index="${index}"
+      aria-label="Forget ${esc(ap.ssid)} ${ap.security === 'sae' ? 'WPA3' : 'WPA2'}">Forget</button></li>`).join('');
+  }
+  document.getElementById('uplink-wifi-saved-empty').hidden = networks.length > 0;
+  let rowsChanged = false;
+  for (const ap of uplinkNetworks) {
+    const saved = ap.security !== 'open' && networks.some(n => n.ssid === ap.ssid && n.security === ap.security);
+    if (!!ap.saved !== saved) rowsChanged = true;
+    ap.saved = saved;
+  }
+  if (rowsChanged) document.getElementById('uplink-wifi-results').innerHTML = uplinkNetworks.map(uplinkNetworkMarkup).join('');
+}
+
+function useDifferentUplinkPassword() {
+  if (uplinkBusy) return;
+  uplinkDifferentPassword = true;
+  updateUplinkControls();
+  document.getElementById('uplink-wifi-password').focus();
+}
+
+async function forgetUplinkNetwork(index) {
+  const ap = uplinkSavedNetworks[index];
+  if (uplinkBusy || !ap) return;
+  uplinkBusy = true;
+  updateUplinkControls();
+  const feedback = document.getElementById('uplink-wifi-saved-feedback');
+  feedback.textContent = 'Forgetting saved password...';
+  try {
+    const r = await manageFetch(U('/api/uplink/wifi/forget'), {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ssid: ap.ssid, security: ap.security})
+    });
+    const d = await r.json();
+    if (!r.ok || !d.ok) throw new Error(d.error || `HTTP ${r.status}`);
+    updateSavedNetworks(d.saved_networks);
+    renderUplinkCurrent();
+    feedback.textContent = 'Saved password forgotten. The current connection stays connected.';
+    document.getElementById('uplink-wifi-saved-heading').focus();
+  } catch (e) { feedback.textContent = uplinkError(e); }
+  finally { uplinkBusy = false; updateUplinkControls(); }
+}
 
 function uplinkBand(ap) {
   return ap.freq >= 5000 ? '5 GHz' : ap.freq >= 2400 ? '2.4 GHz' : '';
@@ -2181,8 +2186,6 @@ function groupUplinkNetworks(networks) {
 
 function uplinkState(status) {
   if (!status) return 'Checking connection';
-  if (status.state === 'missing') return 'Plug in a USB Wi-Fi adapter';
-  if (status.state === 'script-missing') return 'USB Wi-Fi support is unavailable';
   if (status.state === 'blocked' && status.error) return status.error;
   if (!status.enabled) return 'Disconnected';
   if (status.state === 'recovery-failed' || status.error) {
@@ -2198,19 +2201,19 @@ function uplinkState(status) {
 function uplinkError(error) {
   const message = String(error.message || error);
   if (/fresh list|scan again/i.test(message)) return 'This list is out of date. Scan again and choose the network.';
-  if (/Password must|USB Wi-Fi connection/i.test(message)) return 'Check the Wi-Fi password and try again. It may be missing, too short or too long.';
+  if (/Password must/i.test(message)) return 'Check the Wi-Fi password and try again. It may be missing, too short or too long.';
   if (/double quotes/i.test(message)) return 'This radio cannot use a WPA3 password containing double quotes.';
   if (/working mesh radio/i.test(message)) return 'Another mesh radio must stay connected. Restore that connection before trying again.';
   if (/EUD mode|shared AP|EUD AP/i.test(message)) return 'This radio cannot connect while keeping the current phone hotspot. Choose another radio or use a cable.';
-  if (/Plug in|Could not scan this USB|one of this mesh's own hotspots/i.test(message)) return message;
+  if (/one of this mesh's own hotspots/i.test(message)) return message;
   return 'The radio could not finish: ' + message + '. Please try again.';
 }
 
 function uplinkCurrent() {
   if (!uplinkStatus) return null;
   const iface = document.getElementById('uplink-wifi-radio').value;
-  const status = iface === 'usb' ? uplinkStatus.usb : uplinkStatus.builtin;
-  return status && status.enabled && status.ssid && (iface === 'usb' || status.iface === iface) ? status : null;
+  const status = uplinkStatus.builtin;
+  return status && status.enabled && status.ssid && status.iface === iface ? status : null;
 }
 
 function renderUplinkCurrent() {
@@ -2233,6 +2236,11 @@ function renderUplinkCurrent() {
   details.textContent = security + (observed ? ` · ${observed.signal} dBm` : '') +
     (current.freq >= 5260 && current.freq <= 5720 ? ' · DFS: radar channel' : '');
   box.append(details);
+  if (uplinkSavedNetworks.some(ap => ap.ssid === current.ssid && ap.security === current.security)) {
+    const saved = document.createElement('span');
+    saved.innerHTML = uplinkSavedMarkup();
+    box.append(saved);
+  }
   if (current.ap_blocked || current.state === 'ap-channel-unavailable' || current.state === 'ap-starting') {
     const note = document.createElement('span');
     note.className = 'uplink-detail';
@@ -2246,7 +2254,7 @@ function renderUplinkCurrent() {
   }
 }
 
-async function loadUsbWifiUplink() {
+async function loadWifiUplink() {
   try {
     const r = await manageFetch(U('/api/uplink/wifi'));
     const d = await r.json();
@@ -2254,10 +2262,12 @@ async function loadUsbWifiUplink() {
     uplinkStatus = d;
     const radio = document.getElementById('uplink-wifi-radio');
     if (!uplinkInitialized) {
+      radio.replaceChildren();
       for (const choice of d.builtin.choices || []) {
         radio.add(new Option(`Built-in ${choice.band} GHz`, choice.iface));
       }
-      radio.value = d.builtin.enabled ? d.builtin.iface : (d.usb.iface ? 'usb' : (d.builtin.choices?.[0]?.iface || 'usb'));
+      radio.value = d.builtin.choices?.some(choice => choice.iface === d.builtin.iface)
+        ? d.builtin.iface : (d.builtin.choices?.[0]?.iface || '');
       const savedIface = d.builtin.scan?.iface;
       if (d.builtin.choices?.some(choice => choice.iface === savedIface)) {
         radio.value = savedIface;
@@ -2266,8 +2276,10 @@ async function loadUsbWifiUplink() {
       updateUplinkChoice();
     }
     document.getElementById('uplink-wifi-status').textContent =
-      'Built-in: ' + uplinkState(d.builtin) + '. USB: ' + uplinkState(d.usb) + '.';
+      d.builtin.choices?.length === 0 ? 'No built-in radio is available for uplink.'
+      : uplinkState(d.builtin) + '.';
     restoreUplinkScan();
+    updateSavedNetworks(d.saved_networks);
     renderUplinkCurrent();
     updateUplinkControls();
   } catch (e) {
@@ -2278,6 +2290,7 @@ async function loadUsbWifiUplink() {
 function updateUplinkChoice(restore=true) {
   uplinkNetworks = [];
   uplinkSelected = -1;
+  uplinkDifferentPassword = false;
   uplinkScanIface = '';
   uplinkScannedAt = 0;
   uplinkScanId = null;
@@ -2297,14 +2310,18 @@ function uplinkFresh() {
 
 function updateUplinkControls() {
   const ap = uplinkNetworks[uplinkSelected];
+  const useSaved = !!ap?.saved && ap.security !== 'open' && !uplinkDifferentPassword;
   document.getElementById('uplink-wifi-intro').hidden =
     !!uplinkCurrent() || !!uplinkNetworks.length;
-  document.getElementById('uplink-wifi-radio').disabled = uplinkBusy;
-  document.getElementById('btn-uplink-wifi-scan').disabled = uplinkBusy;
+  document.getElementById('uplink-wifi-radio').disabled = uplinkBusy || (uplinkStatus?.builtin?.choices?.length ?? 2) < 2;
+  document.getElementById('btn-uplink-wifi-scan').disabled = uplinkBusy || !document.getElementById('uplink-wifi-radio').value;
   document.getElementById('btn-uplink-wifi-scan').textContent = uplinkBusy ? 'PLEASE WAIT' : uplinkScanIface ? 'RESCAN' : 'SCAN';
   document.getElementById('uplink-wifi-connect').hidden = !ap;
-  document.getElementById('uplink-wifi-password-row').hidden = !ap || ap.security === 'open';
-  document.getElementById('uplink-wifi-password').disabled = uplinkBusy || !ap || ap.security === 'open';
+  document.getElementById('uplink-wifi-password-row').hidden = !ap || ap.security === 'open' || useSaved;
+  document.getElementById('uplink-wifi-password').disabled = uplinkBusy || !ap || ap.security === 'open' || useSaved;
+  document.getElementById('uplink-wifi-saved-password').hidden = !useSaved;
+  document.getElementById('btn-uplink-wifi-password').disabled = uplinkBusy;
+  for (const button of document.querySelectorAll('[data-action="forget-uplink"]')) button.disabled = uplinkBusy;
   document.getElementById('btn-uplink-wifi-apply').disabled = uplinkBusy || !ap || !uplinkFresh();
   document.getElementById('btn-uplink-wifi-disconnect').disabled = uplinkBusy || !uplinkCurrent();
   document.getElementById('uplink-wifi-selected').textContent = ap ? 'Selected: ' + ap.ssid : '';
@@ -2341,7 +2358,7 @@ function uplinkNetworkMarkup(ap, index) {
     aria-pressed="false" ${ap.selectable ? '' : 'disabled'}>
     <span class="uplink-name">${esc(ap.ssid || 'Hidden network')}</span>
     <span class="uplink-signal" aria-label="${signal} signal, ${ap.signal} dBm"><span class="uplink-bars" aria-hidden="true">${bars}</span><span class="uplink-dbm">${ap.signal} dBm</span></span>
-    <span class="uplink-detail">${ap.security !== 'open' ? '<span aria-hidden="true">&#128274;</span> ' : ''}${security} · ${uplinkBand(ap)} · Channel ${ap.channel}</span>
+    <span class="uplink-detail">${ap.security !== 'open' ? '<span aria-hidden="true">&#128274;</span> ' : ''}${security} · ${uplinkBand(ap)} · Channel ${ap.channel}${ap.saved && ap.security !== 'open' ? ' · ' + uplinkSavedMarkup() : ''}</span>
     ${dfs ? `<span class="uplink-detail">${dfs}</span>` : ''}
     ${!ap.selectable ? `<span class="uplink-detail">${esc(ap.reason || 'This network cannot be selected')}</span>` : ''}
     </button>`;
@@ -2350,6 +2367,7 @@ function uplinkNetworkMarkup(ap, index) {
 function selectUplinkNetwork(index) {
   if (uplinkBusy || !uplinkNetworks[index]?.selectable) return;
   uplinkSelected = index;
+  uplinkDifferentPassword = false;
   document.getElementById('uplink-wifi-password').value = '';
   updateUplinkControls();
   document.getElementById('uplink-wifi-connect').scrollIntoView({block: 'nearest', behavior: 'smooth'});
@@ -2402,7 +2420,7 @@ async function scanWifiUplink() {
   finally {
     uplinkScanResolve = null;
     uplinkBusy = false;
-    await loadUsbWifiUplink();
+    await loadWifiUplink();
     updateUplinkControls();
   }
 }
@@ -2414,6 +2432,7 @@ function showUplinkScan(scan, iface) {
   uplinkScanId = scan.at;
   uplinkScannedAt = Date.now() - (scan.age_seconds || 0) * 1000;
   uplinkSelected = -1;
+  uplinkDifferentPassword = false;
   document.getElementById('uplink-wifi-password').value = '';
   document.getElementById('uplink-wifi-results').innerHTML =
     uplinkNetworks.map(uplinkNetworkMarkup).join('');
@@ -2439,7 +2458,7 @@ function restoreUplinkScan() {
     scan.warning || '';
 }
 
-async function applyUsbWifiUplink(enabled=true) {
+async function applyWifiUplink(enabled=true) {
   if (uplinkBusy) return;
   const iface = document.getElementById('uplink-wifi-radio').value;
   const ap = uplinkNetworks[uplinkSelected];
@@ -2451,7 +2470,9 @@ async function applyUsbWifiUplink(enabled=true) {
   if (enabled) Object.assign(request, {
     ssid: ap.ssid, bssid: ap.bssid, freq: ap.freq, security: ap.security,
     scan_iface: uplinkScanDevice,
-    password: ap.security === 'open' ? '' : document.getElementById('uplink-wifi-password').value
+    use_saved: !!ap.saved && ap.security !== 'open' && !uplinkDifferentPassword,
+    password: ap.security === 'open' || (ap.saved && !uplinkDifferentPassword)
+      ? '' : document.getElementById('uplink-wifi-password').value
   });
   uplinkBusy = true;
   updateUplinkControls();
@@ -2464,8 +2485,8 @@ async function applyUsbWifiUplink(enabled=true) {
     document.getElementById('uplink-wifi-password').value = '';
     uplinkSelected = -1;
     document.getElementById('uplink-wifi-feedback').textContent = enabled
-      ? 'Connection saved on this node. Joining the network may take a moment.' : 'Wi-Fi disconnected.';
-    await loadUsbWifiUplink();
+      ? 'Connecting. This node saves the password after joining the network.' : 'Wi-Fi disconnected.';
+    await loadWifiUplink();
   } catch (e) { document.getElementById('uplink-wifi-feedback').textContent = uplinkError(e); }
   finally { uplinkBusy = false; updateUplinkControls(); }
 }
@@ -2650,10 +2671,12 @@ function handleManageClick(event) {
     case 'apply-5g': apply5G(); break;
     case 'start-measurement': startMeasurement(); break;
     case 'delete-session': deleteSession(data.label); break;
-    case 'apply-uplink': applyUsbWifiUplink(); break;
+    case 'apply-uplink': applyWifiUplink(); break;
     case 'scan-uplink': scanWifiUplink(); break;
     case 'select-uplink': selectUplinkNetwork(Number(data.index)); break;
-    case 'disconnect-uplink': applyUsbWifiUplink(false); break;
+    case 'different-uplink-password': useDifferentUplinkPassword(); break;
+    case 'forget-uplink': forgetUplinkNetwork(Number(data.index)); break;
+    case 'disconnect-uplink': applyWifiUplink(false); break;
     case 'voice-step': voiceStepChannel(Number(data.step)); break;
     case 'voice-codec': voiceSetCodec(data.codec); break;
     case 'stage-config': stageChanges(); break;
@@ -2675,7 +2698,7 @@ window.addEventListener('load', async () => {
   const halowBw = document.getElementById('halow-bw');
   if (halowBw) halowBw.addEventListener('change', onHalowBandwidthChange);
   document.getElementById('uplink-wifi-radio').addEventListener('change', updateUplinkChoice);
-  setInterval(() => { if (document.getElementById('tab-uplink').style.display !== 'none') loadUsbWifiUplink(); }, 5000);
+  setInterval(() => { if (document.getElementById('tab-uplink').style.display !== 'none') loadWifiUplink(); }, 5000);
   startAutoRefresh();
 });
 
@@ -4149,7 +4172,7 @@ def render_dashboard(nonce=None):
         Its password is saved only on this node.</p>
         <div class="uplink-toolbar">
           <label for="uplink-wifi-radio">Radio</label>
-          <select id="uplink-wifi-radio"><option value="usb">USB Wi-Fi adapter</option></select>
+          <select id="uplink-wifi-radio" disabled></select>
           <button class="btn" id="btn-uplink-wifi-scan" data-action="scan-uplink">SCAN</button>
         </div>
         <h3 id="uplink-wifi-heading">Nearby networks</h3>
@@ -4162,6 +4185,10 @@ def render_dashboard(nonce=None):
         <p id="uplink-wifi-warning" role="status" aria-live="polite"></p>
         <div id="uplink-wifi-connect" hidden>
           <p id="uplink-wifi-selected"></p>
+          <div id="uplink-wifi-saved-password" hidden>
+            <p>Uses the saved password</p>
+            <button type="button" class="btn" id="btn-uplink-wifi-password" data-action="different-uplink-password">Use a different password</button>
+          </div>
           <div id="uplink-wifi-password-row">
             <label for="uplink-wifi-password">Password</label>
             <input type="password" id="uplink-wifi-password" autocomplete="new-password" autocapitalize="none" spellcheck="false">
@@ -4181,6 +4208,13 @@ def render_dashboard(nonce=None):
         </details>
         <p id="uplink-wifi-status" role="status">Checking connection...</p>
         <button class="btn" id="btn-uplink-wifi-disconnect" data-action="disconnect-uplink">DISCONNECT</button>
+        <h3 id="uplink-wifi-saved-heading" tabindex="-1">Saved networks</h3>
+        <p>Passwords stay on this node. Both built-in radios share this list. Forget removes
+        the saved password without disconnecting the current connection. Next time
+        you choose that network, enter its password again.</p>
+        <p id="uplink-wifi-saved-empty">No saved networks yet. Connect to a secured network to save its password.</p>
+        <ul id="uplink-wifi-saved-list" aria-labelledby="uplink-wifi-saved-heading"></ul>
+        <p id="uplink-wifi-saved-feedback" role="status" aria-live="polite"></p>
       </div>
     </div>
   </div>
@@ -4484,19 +4518,6 @@ class ManageRoutes:
                     _measure_status['running'] = False
                     self.send_json({'ok': False, 'error': str(e)})
 
-        elif path == '/api/control/uplink_wifi':
-            try:
-                req = json.loads(body)
-                status = apply_usb_wifi_uplink(
-                    req.get('ssid', 'hotspot'),
-                    req.get('password', 'raspberry'),
-                    bool(req.get('enabled', True)),
-                )
-                status['ok'] = True
-                self.send_json(status)
-            except Exception as e:
-                self.send_json({'ok': False, 'error': str(e)})
-
         elif path in ('/api/uplink/wifi/scan', '/api/uplink/wifi/scan-plan'):
             try:
                 action = path.rsplit('/', 1)[1]
@@ -4505,14 +4526,16 @@ class ManageRoutes:
             except Exception as error:
                 self.send_json({'ok': False, 'error': str(error)})
 
+        elif path == '/api/uplink/wifi/forget':
+            try:
+                self.send_json(dict(builtin_wifi_request('forget', json.loads(body)), ok=True))
+            except Exception as error:
+                self.send_json({'ok': False, 'error': str(error)})
+
         elif path == '/api/uplink/wifi':
             try:
                 req = json.loads(body)
-                if req.get('iface', 'usb') == 'usb':
-                    result = apply_usb_wifi_uplink(req.get('ssid', ''), req.get('password', ''),
-                                                   req.get('enabled', True), selection=req)
-                else:
-                    result = builtin_wifi_request('set', req)
+                result = builtin_wifi_request('set', req)
                 self.send_json(dict(result, ok=True))
             except Exception as error:
                 self.send_json({'ok': False, 'error': str(error)})

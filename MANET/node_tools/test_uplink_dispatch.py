@@ -91,7 +91,7 @@ class DispatchHarness(unittest.TestCase):
                      'networkd', 'bus/usb', 'http-code'):
             (self.root / name).mkdir(parents=True)
         for tool in ('ip', 'systemctl', 'batctl', 'networkctl', 'nft', 'ping', 'curl', 'nc',
-                     'systemd-cat', 'mesh-ip-manager', 'usb-wifi-uplink.sh'):
+                     'systemd-cat', 'mesh-ip-manager'):
             path = self.root / 'bin' / tool
             path.write_text(STUB)
             path.chmod(0o755)
@@ -149,7 +149,7 @@ class DispatchHarness(unittest.TestCase):
                          ('/etc/radvd-gateway.conf', root + '/radvd-gateway.conf'),
                          ('/etc/radvd.conf', root + '/radvd.conf'),
                          ('/usr/local/bin/mesh-ip-manager.sh', root + '/bin/mesh-ip-manager'),
-                         ('/usr/local/bin/usb-wifi-uplink.sh', root + '/bin/usb-wifi-uplink.sh')):
+):
             source = source.replace(old, new)
             common = common.replace(old, new)
         (self.root / 'manet-common.sh').write_text(common)
@@ -161,7 +161,6 @@ class DispatchHarness(unittest.TestCase):
                    PATH=os.pathsep.join((str(self.root / 'bin'), os.environ['PATH'])),
                    PYTHONPATH=str(TOOLS), MANET_MESH_CONF=str(self.root / 'mesh.conf'),
                    MANET_WIFI_UPLINK_CONFIG=str(self.root / 'wifi-uplink.json'),
-                   MANET_USB_WIFI_UPLINK_CONFIG=str(self.root / 'usb-wifi-uplink.conf'),
                    MANET_ETH_DETECT_LOCK=str(self.eth_lock),
                    MANET_AP_MESH_HELPER=str(self.root / 'bin' / 'manet_ap_mesh.py'),
                    MANET_UPLINK_SPEED=str(self.root / 'bin' / 'uplink-speed'))
@@ -169,7 +168,7 @@ class DispatchHarness(unittest.TestCase):
         result = subprocess.run(['bash', str(script), event, iface], env=env,
                                 capture_output=True, text=True, timeout=60)
         self.assertEqual(result.returncode, 0, result.stderr)
-        return self.calls.read_text().splitlines() if self.calls.exists() else []
+        return self.calls.read_text().splitlines() if self.calls.exists() else [] if self.calls.exists() else []
 
     def assert_eud_port_untouched(self, calls):
         touched = [c for c in calls if c.startswith(('ip link set end0', 'ip addr flush dev end0',
@@ -538,7 +537,6 @@ class UplinkPriorityTests(DispatchHarness):
             'PYTHONPATH': str(TOOLS),
             'MANET_MESH_CONF': str(self.root / 'mesh.conf'),
             'MANET_WIFI_UPLINK_CONFIG': str(self.root / 'wifi-uplink.json'),
-            'MANET_USB_WIFI_UPLINK_CONFIG': str(self.root / 'usb-wifi-uplink.conf'),
             'MANET_UPLINK_SPEED': str(TOOLS / 'manet-uplink-speed.sh'),
             'MANET_SYS_NET': str(self.root / 'net'),
             'MANET_RUN_DIR': str(self.root / 'run'),
@@ -573,7 +571,7 @@ class UplinkPriorityTests(DispatchHarness):
                              PATH=str(self.root / 'bin') + ':' + os.environ['PATH']),
                     capture_output=True, text=True, timeout=10)
                 self.assertEqual(result.returncode, 0, result.stderr)
-        return self.calls.read_text().splitlines()
+        return self.calls.read_text().splitlines() if self.calls.exists() else []
 
     def assert_primary(self, iface):
         """The route and both saved interface records must agree."""
@@ -603,24 +601,12 @@ class UplinkPriorityTests(DispatchHarness):
                             usb=iface == 'wlan4')
                 (self.root / 'wifi-uplink.json').write_text(json.dumps(
                     {'enabled': True, 'iface': iface, 'ssid': 'EUD-5cc2'}))
-                (self.root / 'usb-wifi-uplink.conf').write_text('enabled=1\nssid=EUD-5cc2\n')
                 calls = self.run_event('routable', iface)
                 self.assertFalse(any(c.startswith('batctl gw_mode server') for c in calls))
                 self.assertFalse(any(c.startswith('ip route replace default') for c in calls))
                 self.assertFalse((self.root / 'run/upstream_iface').exists())
-                if iface == 'wlan4':
-                    self.assertIn('usb-wifi-uplink.sh disconnect wlan4', calls)
                 shutil.rmtree(self.root / 'net' / iface)
 
-    def test_own_usb_hotspot_is_disconnected_even_with_working_ethernet(self):
-        conf = self.root / 'mesh.conf'
-        conf.write_text(conf.read_text() + 'lan_ap_ssid=EUD\n')
-        self.uplink('end0', driver='st_gmac')
-        self.uplink('wlan4', driver='mt76x2u', usb=True)
-        (self.root / 'usb-wifi-uplink.conf').write_text('enabled=1\nssid=EUD-5cc2\n')
-        calls = self.run_event()
-        self.assert_primary('end0')
-        self.assertIn('usb-wifi-uplink.sh disconnect wlan4', calls)
 
     def test_shared_ap_start_waits_for_follower_after_role_lock_released(self):
         self.mode('wireless')
@@ -639,8 +625,11 @@ class UplinkPriorityTests(DispatchHarness):
             with self.subTest(wifi=wifi):
                 calls = self.run_event('routable', wifi)
                 self.assert_primary('end0')
-                self.assertIn('batctl gw_mode server '
-                              '50000kbit/10000kbit', calls)
+                if wifi == 'wlan4':
+                    self.assertEqual(calls, [])
+                else:
+                    self.assertIn('batctl gw_mode server '
+                                  '50000kbit/10000kbit', calls)
                 self.assertNotIn('systemctl restart '
                                  'gateway-route-manager.service', calls)
                 self.assertFalse(any(c.startswith('ping ') for c in calls))
@@ -820,8 +809,8 @@ class UplinkPriorityTests(DispatchHarness):
         self.run_event('routable', 'end0')
         self.assert_primary('enx1234')
 
-    def test_current_wifi_stays_when_another_wifi_fires(self):
-        """Retain the working Wi-Fi incumbent within its class."""
+    def test_external_wifi_event_is_ignored(self):
+        """An unsupported external Wi-Fi event cannot displace a built-in client."""
         self.uplink('wlan1', driver='mt7915e')
         self.run_event()
         self.uplink('wlan4', driver='mt76x2u', usb=True)

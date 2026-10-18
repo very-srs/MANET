@@ -11,6 +11,7 @@ ConfigurationDirectory=manet
 RuntimeDirectory=manet-wifi-uplink
 RuntimeDirectoryPreserve=yes
 ExecStart=/usr/local/bin/manet_wifi_uplink.py watch
+ExecStopPost=/usr/local/bin/manet_wifi_uplink.py rewake
 Restart=on-failure
 RestartSec=5
 NoNewPrivileges=yes

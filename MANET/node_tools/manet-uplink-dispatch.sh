@@ -86,7 +86,7 @@ is_upstream_iface() {
 
     case "$iface" in
         lo|br*|bat*) return 1 ;;
-        wlan*) { is_builtin_wifi_uplink_iface "$iface" || is_usb_wifi_uplink_iface "$iface"; } && return 0 || return 1 ;;
+        wlan*) is_builtin_wifi_uplink_iface "$iface" && return 0 || return 1 ;;
     esac
 
     if [ "$iface" = "end0" ]; then
@@ -278,12 +278,6 @@ candidate_ifaces() {
             # Saved credentials are checked independently of watcher timing.
             if ! PYTHONPATH="${MANET_TOOLS_DIR:-$(dirname "${BASH_SOURCE[0]}")}:${PYTHONPATH:-}" \
                     python3 -c 'import sys; from manet_wifi_uplink import uplink_profile_allowed; sys.exit(0 if uplink_profile_allowed(sys.argv[1]) else 1)' "$iface"; then
-                # Built-ins have a watcher. USB clients otherwise only reconcile
-                # on hotplug, so disconnect a pre-existing rejected profile here.
-                if is_usb_wifi_uplink_iface "$iface" &&
-                        { has_carrier "$iface" || systemctl is-active --quiet "usb-wifi-client@${iface}.service"; }; then
-                    /usr/local/bin/usb-wifi-uplink.sh disconnect "$iface" >/dev/null 2>&1 || true
-                fi
                 continue
             fi
         fi

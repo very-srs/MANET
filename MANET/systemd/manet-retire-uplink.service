@@ -1,0 +1,8 @@
+[Unit]
+Description=Remove retired external Wi-Fi uplink files
+After=systemd-networkd.service
+Before=manet-wifi-uplink.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/manet-retire-uplink.py

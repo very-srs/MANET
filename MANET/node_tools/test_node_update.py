@@ -174,6 +174,26 @@ if sys.argv[1] == 'is-active' and sys.argv[-1] == 'mesh-config-apply.service':
         self.assertFalse(list(self.updater.state.glob('download-*')))
         self.updater.log.assert_called_with('Node tools updated to version 0.550')
 
+    def test_uplink_retirement_precedes_activation_and_failed_cleanup_retries(self):
+        helper = 'usr/local/bin/manet-retire-uplink.py'
+        self.members[helper] = (b'#!/bin/sh\necho retire-uplink >> "$TEST_EVENTS"\n'
+                                b'test ! -f "$TEST_ROOT/fail-retirement"\n', 0o755)
+        self.make_archive()
+        failure = self.root / 'fail-retirement'
+        failure.touch()
+        with self.assertRaises(update.UpdateError):
+            self.updater.update()
+        self.assertTrue(self.updater.pending.exists())
+        self.assertEqual(self.updater.marker.read_text(), self.old_version)
+        self.assertNotIn('systemctl restart node-manager.service', self.history())
+        failure.unlink()
+        self.updater.update(recover_only=True)
+        history = self.history()
+        self.assertEqual(history.count('retire-uplink'), 2)
+        self.assertLess(history.index('retire-uplink'),
+                        history.index('systemctl restart node-manager.service'))
+        self.assertFalse(self.updater.pending.exists())
+
     def test_dns_migration_precedes_runtime_activation_and_version_commit(self):
         """Activate the installed DNS policy before restarting the manager."""
         self.updater.update()

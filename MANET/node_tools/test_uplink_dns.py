@@ -193,7 +193,7 @@ class UplinkDnsTests(unittest.TestCase):
         original = ('[Match]\nMACAddress=aa:bb:cc:dd:ee:ff\n\n[Network]\n'
                     'DHCP=yes\nIPv6AcceptRA=no\n\n[DHCPv4]\nUseDomains=true\n')
         names = ('10-end0.network', '10-end0.network.dhcp-default',
-                 '20-usb0.network', '20-wlan2-usb-wifi-uplink.network',
+                 '20-usb0.network', '20-wlan1-uplink.network',
                  '20-end0-gateway.network.off')
         for name in names:
             self.write('etc/systemd/network/' + name, original)
@@ -232,7 +232,6 @@ class UplinkDnsTests(unittest.TestCase):
     def test_network_generators_embed_same_policy(self):
         for relative in ('node_tools/manet-uplink-dispatch.sh',
                          'node_tools/usb-ethernet-watch.sh',
-                         'node_tools/usb-wifi-uplink.sh',
                          'systemd-network/20-end0-gateway.network.off',
                          'provisioning/firstrun.sh.template',
                          'provisioning/rock3a-provision.sh.template'):

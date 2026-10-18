@@ -694,6 +694,7 @@ class Runtime:
         private_json_write(self.run_dir / 'manet-dfs-hold.json', hold)
         if not protocol.valid_status(status):
             raise ValueError('invalid local radio state')
+        self.ui_observed_at = time.monotonic()
         self.ui_status.update(current=current, halow_ready=status['halow_ready'],
                               searching=status['discovery'])
         return status
@@ -1585,7 +1586,20 @@ class Runtime:
         # A tick that started clockless may have applied a recovery reply
         # that is newer than the saved timed destination.
         timed = clock_ready()
-        self.ui_status = {'clock_ready': timed}
+        # A lock holder or failed read must not erase the last observations.
+        # Carry only display values, not errors or membership freshness: the
+        # manager's peer scan gate still requires a validated view this tick.
+        # Drop them 60 s after the last radio read, so repeated failures do
+        # not keep an old channel and peer count looking fresh.
+        # Channels and membership come from separate reads, so each keeps its
+        # own clock: a working radio read must not keep old peers alive.
+        clock = time.monotonic()
+        radio = clock - getattr(self, 'ui_observed_at', -1e9) <= 60
+        peers = clock - getattr(self, 'ui_members_at', -1e9) <= 60
+        self.ui_status = {'clock_ready': timed,
+                          'current': self.ui_status.get('current', {}) if radio else {},
+                          'members': self.ui_status.get('members', []) if peers else [],
+                          'reachable': self.ui_status.get('reachable') if peers else None}
         try:
             self._tick(now)
             # Recovery can adopt a destination without retuning any radio.
@@ -1678,15 +1692,16 @@ class Runtime:
                 view = None
             # Reuse this validated connected view for the manager's RF gate.
             # Missing membership closes only the peer-triggered scan path.
-            self.ui_status['members'] = (
-                ['NODE_' + mac.replace(':', '') for mac in view]
-                if view is not None else [])
-            self.ui_status['observed_boot'] = boot_time()
+            if view is not None:
+                self.ui_members_at = time.monotonic()
+                self.ui_status.update(
+                    members=['NODE_' + mac.replace(':', '') for mac in view],
+                    reachable=len(view) - 1, observed_boot=boot_time())
             now = int(time.time())  # Discovery may time out. Refresh time.
             destinations = self.connected_destinations(view, records, local, now)
             destinations = protocol.network_destinations(destinations, view or {})
             conflicting = protocol.conflicting_destinations(destinations.values())
-            self.ui_status.update(reachable=len(view) - 1 if view else None, conflicting=conflicting)
+            self.ui_status['conflicting'] = conflicting
             if conflicting and self.state.get('hold_until', 0) > boot_time():
                 # Lift the recollection hold when groups reunite on different
                 # channels. Their next shared scan/round includes the whole

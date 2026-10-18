@@ -118,7 +118,7 @@ BATMAN interface setup and the enslave watchdog maintain mesh membership
 when interfaces return. The watchdog also restarts the HaLow supplicant when
 it is still running but HaLow has left its mesh for about 30 seconds, backing
 off between repeat attempts. The SAE watchdog targets guarded authentication
-recovery. USB Wi-Fi/HaLow recovery handles device appearance/disappearance.
+recovery. HaLow role discovery supports Morse USB and SPI devices.
 An interface's administrative UP state, an authenticated station, and an
 originator route are different stages. Diagnostics should establish which
 stage failed before forcing a restart. Consult

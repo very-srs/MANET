@@ -82,7 +82,7 @@ Open **[Manage](http://manet.local/manage/)** and sign in with the admin passwor
 | Radio config | Radio interfaces on/off, supported channel controls, and Wi-Fi transmit power. |
 | Measure | Run iperf throughput or ping measurements. |
 | Sessions | Review and download saved measurement results. |
-| Uplink | Scan this node's USB or built-in Wi-Fi radio, tap a network in the scrolling list, then connect. The current network and its state appear at the top. Hotspots matching this radio's own hotspot naming pattern are omitted. |
+| Uplink | Scan this node's built-in Wi-Fi radio, tap a network in the scrolling list, then connect. The current network and its state appear at the top. Hotspots matching this radio's own hotspot naming pattern are omitted. |
 | Voice | Check audio health, choose a talk group, or coordinate a codec change. |
 | Node config | Change local client settings and shared mesh settings. |
 
@@ -91,6 +91,10 @@ See [changing settings](settings.md) before applying a change that could disconn
 ### Check recovery and measure a path
 
 Expand **Mesh recovery** in management or this node's status panel. It explains observed and agreed Wi-Fi channels, acknowledgements, recovery holds, and the last verified clock source. A ready HaLow interface alone is not evidence of a connected peer.
+
+An expired agreement keeps the observed channels visible. If the radio cannot
+refresh its observations, it retains the last known channels and peer count
+until a successful read replaces them.
 
 For an actual performance check, use **Measure**, select the peer, direction, and test, then keep the radios in place while it runs. The radio you are connected to is always the source. Throughput tests use the network, so schedule them when that traffic will not disturb voice or other work. Use a meaningful session label and export results from **Sessions** for comparison.
 
@@ -176,6 +180,11 @@ place, with no new polling loop.
 Status collections share a five-second cache, with two seconds for voice and configuration. At most eight HTTP connections and two status collections run concurrently. A busy server can return 503 with a retry delay. Background tabs stop polling. These bounds protect radio work from dashboard load.
 
 `manet_recovery_status.py` combines local ACS, last-channel-change, and time with the local registry. Observations older than 45 seconds are not treated as current recovery evidence. Display failures must not stop control or recovery.
+
+The ACS daemon atomically publishes current channels, members, and reachability
+in every phase. Failed reads retain the last known display values within the
+running daemon. Each tick clears membership freshness until a validated view
+replaces it, so retained members cannot trigger the manager's RF scan gate.
 
 `manet_web_sessions.py` keeps token digests and monotonic 48-hour login deadlines in memory. Sessions are per node. Local EUD HTML on `manet.local` redirects to the internal EUD IP before login. APIs and non-EUD clients retain their origin. Tokens are not transferred between nodes. Tests or tooling that restart the server must sign in again.
 
