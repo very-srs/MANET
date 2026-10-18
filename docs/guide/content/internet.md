@@ -17,16 +17,14 @@ A radio can also borrow house Wi-Fi. That uses one of its radios.
 Open **Manage → Uplink**, scan, and tap the network's name. A lock means it
 needs a password. Scroll the list to see more names.
 The radios hide their own phone hotspots from this list.
-Its friends may then have a slower path. If scanning needs to stop phone
-Wi-Fi, the page asks first. Reconnect to see the saved list. The phone hotspot can follow house Wi-Fi, but pauses when that
-connection drops or changes channel. If this radio cannot follow the channel,
-use a cable or connect your phone to another radio.
+If scanning needs to stop phone
+Wi-Fi, the page asks first. Reconnect to see the saved list. 
 
 Turn off borrowed Wi-Fi when you do not need it. Its helper then stops.
 
 A working internet cable wins over house Wi-Fi. If that cable stops working,
 the radio can use Wi-Fi again. Give it a few seconds, then try again if your
-picture stops loading. A cable to your phone is for your phone.
+picture stops loading.
 
 ## User
 

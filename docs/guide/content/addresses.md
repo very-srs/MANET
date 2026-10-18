@@ -83,8 +83,8 @@ range.
 
 ### Discover, claim, reconcile
 
-The radio's IPv6 address autoconfigures to the same /48 prefix, which is announced
-by an identical RA service on all radios, providing
+The radio's IPv6 address autoconfigures to the same /64 prefix, which is announced
+by an identical radvd service on all radios, providing
 a usable IPv6 SLAAC network which can carry Alfred gossip data between radios.
 Alfred carries radio metadata supplied by the radios, which include the IPv4 address
 chunk they have selected.  A newly booted radio publishes local identity and telemetry,

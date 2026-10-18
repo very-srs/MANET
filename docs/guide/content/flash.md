@@ -34,23 +34,23 @@ Run the Linux flasher as your regular user. It requests elevated access when it 
 
 Select the board, then configure the mesh SSID and SAE key, network CIDR, regulatory region, EUD connection mode, SSH username and password, and web admin password. Radios intended for the same mesh need compatible mesh settings. The admin password is shared across the mesh. Local access-point settings belong to each radio.
 
-For Wireless or Auto client mode, choose the same phone Wi-Fi base name for
-all radios in the mesh. Each radio adds four identifying digits to its name.
+For Wireless or Auto client mode, choose the SSID for the radios.  All radio APs get
+this name, but each one adds four alph-numeric characters to the end to uniquely identify each radio.
 This name is fixed after flashing so the radios can recognize their own
 hotspots when choosing an internet connection. Its password remains editable
 in Node config. Wired-only flashing leaves the phone Wi-Fi name empty.
 
 The **SSH username** is the Linux account used to log in to the radio. It
 defaults to `radio` and is editable. The **SSH password** belongs to that
-account. The **Web interface admin password** opens the management page.
+account. The **Web interface admin password** unlocks the management page.
 Use CIDR notation such as `10.30.2.0/24` for the network, not a start–end
 address span. Save the login details shown when flashing finishes.
 
-Saved configurations can be reused by the Windows and Linux flashers. Optional additional setup scripts are embedded at flash time and run on the node after successful provisioning.
+Saved configurations can be reused by the Windows and Linux flashers. 
+Optional additional setup scripts are embedded at flash time to be run on the node after successful provisioning.
 
-The Windows window starts with **Wired** connections selected. Choose
-**Show services and addressing** to change services or the network range.
-The save controls stay at the bottom while the settings scroll. **Next**
+EUD style starts with **Wired** connections selected. Choose
+**Show services and addressing** to change services or the network range. **Next**
 offers to save edited settings, continue without saving, or keep editing.
 On the setup scripts page, select **Show ignored files and documentation**
 if you want to see files that will not run.
