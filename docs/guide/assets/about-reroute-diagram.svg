@@ -1,0 +1,51 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="500" height="720" viewBox="0 0 500 720" role="img" aria-labelledby="t d">
+  <title id="t">The mesh routes around a missing radio</title>
+  <desc id="d">Top: a message from radio A to radio C hops through radio B. Bottom: radio B is turned off, and the message goes through radio D instead.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#c45c31"/>
+    </marker>
+    <g id="r">
+      <line x1="-14" y1="-17" x2="-14" y2="-31" stroke="#25372f" stroke-width="3.5" stroke-linecap="round"/>
+      <line x1="14" y1="-17" x2="14" y2="-31" stroke="#25372f" stroke-width="3.5" stroke-linecap="round"/>
+      <rect x="-28" y="-19" width="56" height="38" rx="6" fill="#315f48"/>
+    </g>
+  </defs>
+  <style>
+    text { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; fill: #25372f; }
+    .id { font-size: 22px; font-weight: 700; fill: #ffffff; text-anchor: middle; }
+    .head { font-size: 24px; font-weight: 700; text-anchor: middle; }
+    .note { font-size: 19px; fill: #64736a; text-anchor: middle; }
+    .link { stroke: #dcded4; stroke-width: 6; stroke-linecap: round; }
+    .path { stroke: #c45c31; stroke-width: 6; stroke-linecap: round; fill: none; marker-end: url(#arrow); }
+  </style>
+  <rect width="500" height="720" fill="#fffdf7"/>
+
+  <text class="head" x="250" y="40">Messages hop radio to radio</text>
+  <line class="link" x1="90" y1="190" x2="250" y2="105"/>
+  <line class="link" x1="250" y1="105" x2="410" y2="190"/>
+  <line class="link" x1="90" y1="190" x2="250" y2="275"/>
+  <line class="link" x1="250" y1="275" x2="410" y2="190"/>
+  <path class="path" d="M116 170 L216 118"/>
+  <path class="path" d="M284 118 L382 170"/>
+  <use href="#r" x="90" y="190"/><text class="id" x="90" y="197">A</text>
+  <use href="#r" x="250" y="105"/><text class="id" x="250" y="112">B</text>
+  <use href="#r" x="410" y="190"/><text class="id" x="410" y="197">C</text>
+  <use href="#r" x="250" y="275"/><text class="id" x="250" y="282">D</text>
+  <text class="note" x="250" y="330">A message from A to C hops through B.</text>
+
+  <line x1="30" y1="362" x2="470" y2="362" stroke="#dcded4" stroke-width="2"/>
+
+  <text class="head" x="250" y="404">B goes away, D takes over</text>
+  <line class="link" x1="90" y1="554" x2="250" y2="639"/>
+  <line class="link" x1="250" y1="639" x2="410" y2="554"/>
+  <path class="path" d="M116 574 L216 626"/>
+  <path class="path" d="M284 626 L382 574"/>
+  <g opacity="0.3"><use href="#r" x="250" y="469"/><text class="id" x="250" y="476">B</text></g>
+  <path d="M224 445 L276 493 M276 445 L224 493" stroke="#b3261e" stroke-width="6" stroke-linecap="round"/>
+  <text class="note" x="250" y="525">B is turned off</text>
+  <use href="#r" x="90" y="554"/><text class="id" x="90" y="561">A</text>
+  <use href="#r" x="410" y="554"/><text class="id" x="410" y="561">C</text>
+  <use href="#r" x="250" y="639"/><text class="id" x="250" y="646">D</text>
+  <text class="note" x="250" y="700">The same message now goes through D.</text>
+</svg>

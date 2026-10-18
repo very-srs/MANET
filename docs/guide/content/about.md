@@ -47,6 +47,8 @@ neighbors, so a message can hop from radio to radio until it arrives.
 - **Normal devices.** Phones and laptops connect like they would to any
   Wi-Fi network or Ethernet port, and use ordinary apps.
 
+![Diagram in two parts. Top, a message from radio A to radio C hops through radio B. Bottom, radio B is turned off and the same message goes through radio D instead.](../assets/about-reroute-diagram.svg)
+
 ### What you can do with it
 
 - **Share locations and maps** with [ATAK](location.md), a free map and team
@@ -61,6 +63,8 @@ neighbors, so a message can hop from radio to radio until it arrives.
   [measure](measurements.md) how well each link is working.
 
 ### How it works
+
+![Diagram: your phone connects to your radio by Wi-Fi or cable. Your radio links to another radio and to a friend's radio by Wi-Fi, a fast link with shorter reach, and by HaLow, a slower link with longer reach. The friend's phone connects to their radio. One radio can share an internet connection with everyone.](../assets/about-mesh-diagram.svg)
 
 Each radio has two kinds of radio links to other radios:
 
