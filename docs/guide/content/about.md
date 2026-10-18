@@ -101,10 +101,9 @@ Micro HaLow card or USB dongle. That is the hardware the project develops
 and tests on. The [hardware page](hardware.md) lists every supported board
 and what each part does.
 
-The goal is a single purpose-built radio. The **Raven** carrier board from
-[BuildsByShane](https://buildsbyshane.com) holds the CM4, the Wi-Fi card and
-the HaLow card on one board, with stronger power delivery than the boards in
-use now. An enclosure for the Raven radio is being developed.
+The goal is a purpose-built radio based on the **Raven** carrier board,
+which [BuildsByShane](https://buildsbyshane.com) is making for this project.
+An enclosure for it is being developed.
 
 ### Get started
 
@@ -169,10 +168,6 @@ for a sealed enclosure. [Hardware](hardware.md#developer-hardware-roles-are-disc
 discovery and the kernel, firmware and userspace bring-up chain.
 
 The target is the **Raven** carrier board by
-[BuildsByShane](https://buildsbyshane.com), built for this project. It
-carries the CM4, an mPCIe slot for the MT7916 Wi-Fi card and an M.2 slot
-that passes USB to a Gateworks MM8108 HaLow card, with more robust power
-delivery than the carriers in use now. The HaLow card is the same MM8108
-chip over the same USB path as today's dongles, so the existing Morse driver,
-firmware and supplicant carry over unchanged. An enclosure for the Raven
-radio is being developed alongside it.
+[BuildsByShane](https://buildsbyshane.com), built for thiThe target is the **Raven** carrier board, which
+[BuildsByShane](https://buildsbyshane.com) is making for this project. An
+enclosure for it is being developed.
