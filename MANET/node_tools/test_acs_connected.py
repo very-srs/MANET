@@ -81,7 +81,11 @@ else:
         with patch.object(self.runner, 'members', side_effect=ValueError):
             self.tick(self.now + 1, {})
         snapshot = json.loads((self.root / 'manet-acs-status.json').read_text())
-        self.assertEqual(snapshot['members'], [])
+        self.assertEqual(set(snapshot['members']),
+                         {'NODE_' + m.replace(':', '') for m in (OWN, PEER)})
+        self.assertEqual(snapshot['reachable'], 1)
+        # Last known membership is display-only when this tick's query fails.
+        self.assertNotIn('observed_boot', snapshot)
 
     def test_day_old_plan_recovers_over_halow_with_fresh_authenticated_advertisement(self):
         destination = self.destination(2462)

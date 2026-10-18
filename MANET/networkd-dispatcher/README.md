@@ -51,7 +51,7 @@ watcher also requests reconciliation, so DHCP can qualify even if a wireless
 networkd event is missed. The shared AP virtual interface is never an uplink.
 
 Candidates are ranked by class: wired Ethernet first, supported USB
-tether/cellular links next, and built-in or USB Wi-Fi clients last. The
+tether/cellular links next, and built-in Wi-Fi clients last. The
 Ethernet class uses the speed helper's existing driver classification, which
 conservatively treats phone/modem drivers as metered. USB tethers remain
 ahead of Wi-Fi to keep Wi-Fi as the final local fallback. Carrier-bearing

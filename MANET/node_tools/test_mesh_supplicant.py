@@ -135,7 +135,7 @@ class MeshSupplicantTests(unittest.TestCase):
         self.assertIn('ExecCondition=/usr/local/bin/manet-ap-guard.sh %i',
                       (directory / '10-manet-ap-guard.conf').read_text())
         self.assertIn('ExecStart=/usr/sbin/wpa_supplicant -c ',
-                      (TOOLS / 'usb-wifi-uplink.sh').read_text())
+                      (TOOLS.parent / 'systemd/manet-wifi-client@.service').read_text())
 
     def test_ap_transition_renders_global_inactivity(self):
         for frequency in (2412, 5805):

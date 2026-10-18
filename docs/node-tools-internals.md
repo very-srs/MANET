@@ -3129,14 +3129,14 @@ Then collect the five-minute census with the real EUD workload.
 ### Built-in Wi-Fi uplink ownership
 
 `manet_wifi_uplink.py` owns a local private JSON profile and a private recovery
-record. The admin routes use stdin for credentials. Both built-in and USB
-credentials now stay on the selected node. The coordinator and radio-state
+record. The admin routes use stdin for credentials. Built-in Wi-Fi
+credentials stay on the selected node. The coordinator and radio-state
 receiver reject `uplink_wifi` actions before publication or ACK. Mesh config
 journals already exclude `*-uplink.conf` and never acquire the client profile.
 
-Both scan paths discard the exact current local `lan_ap_ssid` plus `-` and
+Scans discard the exact current local `lan_ap_ssid` plus `-` and
 four lowercase hex digits before cache storage and presentation. The same
-literal, case-sensitive rule rejects typed USB requests, fresh menu requests
+literal, case-sensitive rule rejects fresh menu requests
 and direct built-in CLI requests. Old built-in caches are filtered on read.
 A different stem, uppercase suffix or wrong suffix length is outside the rule.
 This prevents a node from treating a same-named EUD bridge back into its own
@@ -3146,11 +3146,9 @@ The built-in watcher writes disabled intent with the blocked name/interface
 before releasing the client, flushing its address, and restoring AP/mesh roles.
 That intent survives cleanup errors and reboot, excludes rollback activation,
 and remains visible as a plain blocked-status reason until a new selection or
-explicit disconnect. USB retains its saved profile but stops and disables its
-service, removes client files and flushes the address. Its connect/reconcile
-path rejects the name before activation. Independently, gateway qualification
-rejects matching saved profiles before probing and disconnects an active USB
-match, so an old association cannot be promoted while cleanup is pending.
+explicit disconnect. Independently, gateway qualification rejects matching
+saved profiles before probing, so an old association cannot be promoted
+while cleanup is pending.
 
 The two generated networkd files and `wifi_uplink_if` are published with mode
 0644 on the temporary inode before atomic replacement. The profile, recovery
@@ -3336,10 +3334,8 @@ The parser decodes `iw` hex escapes once, preserving valid UTF-8, literal
 backslashes, and edge spaces. The picker groups identical SSID bytes by band,
 security, DFS status and availability, keeping the strongest BSSID and
 displaying the connected group at the top. Different hidden BSSIDs stay separate.
-USB uses the same picker and parser through `scan-json`, with open/WPA2 client
-support and a separate private scan cache. Both paths validate selectable scan
-identity and the five-minute window before saving a menu selection. The USB
-client now pins that selection's BSSID. Legacy manual USB `set` remains usable.
+The helper validates selectable scan identity and the five-minute window
+before saving a menu selection.
 
 Registry telemetry uses the existing interface role string `uplink`, without
 publishing the upstream SSID or credentials. ACS role readers and channel
@@ -3936,7 +3932,7 @@ Enabled services remain governed by the normal elections.
 
 Ordinary supplicant quotes delimit literal bytes, so the writer does not double
 backslashes. Embedded quotes use hexadecimal string encoding. Mesh changes and
-rollback exclude USB `*-uplink.conf` files. A shared helper selects the standard
+rollback exclude client `*-uplink.conf` files. A shared helper selects the standard
 or HaLow service from configured roles and checks both service activity and a
 control-socket PONG. A failed restart prevents a successful apply marker and
 retains a rollback snapshot for retry.
@@ -4160,7 +4156,7 @@ MANET binary is absent. The AP guard and interface preparation still apply.
 All standard mesh start paths share this template: radio setup,
 `manet_supplicant.py`, channel changes from `manet_radio.py`, BATMAN setup,
 ACS, lobby/tourguide changes, node-manager, and Ethernet AP transitions.
-USB client uplinks use their own unit and keep Debian's binary.
+Built-in client uplinks use their own unit and keep Debian's binary.
 
 Both Wi-Fi mesh bands use 20 MHz. `radio-setup.sh` and
 `manet_ap_mesh.py` put `max_oper_chwidth=0` and `disable_ht40=1` inside
@@ -4314,7 +4310,7 @@ user bus does not require terminating logins. System D-Bus is never masked.
 | `cron.service` | Disable/stop/mask only if no user crontabs, custom table entries, or executable jobs without a recognized systemd early-exit guard exist. No repo/provisioning cron consumer exists. Retain `cron` tools; log custom consumers for review. |
 | `man-db.timer`, `dpkg-db-backup.timer` | Disable/stop/mask optional indexing/backup schedules; retain `man`, `mandb`, and dpkg. Their commands remain usable manually. |
 | `e2scrub_all.timer`, `e2scrub_reap.service` | Disable/stop/mask on the raw-partition appliance. Preserve both if LVM tools or device-mapper LVM volumes exist. Keep `e2fsprogs` and boot fsck. [Debian's e2scrub manual](https://manpages.debian.org/trixie/e2fsprogs/e2scrub_all.8.en.html) describes the LVM requirement. |
-| Global `wpa_supplicant.service` | Disable/stop/mask its unused D-Bus instance. Keep `wpasupplicant`, `wpa_supplicant@wlanX`, the s1g services and USB-uplink instance management used by radio setup/uplink tools. No wildcard masks. |
+| Global `wpa_supplicant.service` | Disable/stop/mask its unused D-Bus instance. Keep `wpasupplicant`, `wpa_supplicant@wlanX`, the s1g services, and built-in uplink instance management used by radio setup/uplink tools. No wildcard masks. |
 | `polkit.service` / `polkitd` | Keep. Our UI, `networkctl`/`resolvectl`/`hostnamectl` callers run as root, but the OS networkd daemon does not. DHCP uplinks retain default hostname handling; networkd requests transient hostnames and may request the product UUID from hostnamed. The upstream [DHCP path](https://raw.githubusercontent.com/systemd/systemd/v257/src/network/networkd-dhcp4.c) and [hostnamed authorization](https://raw.githubusercontent.com/systemd/systemd/v257/src/hostname/hostnamed.c) make blanket removal inappropriate. No MANET network configuration is changed to avoid this dependency. |
 | User `gpg-agent*`, `dirmngr`, `keyboxd`, `ssh-agent` sockets | Keep unmasked: no recurring polling job, and masking would break normal user signing/decryption, key retrieval, or SSH credentials. Protect installed GnuPG/OpenSSH client packages from autoremove. |
 | `keyboard-setup.service`, `console-setup.service` | Disable/stop/mask boot console setup on this headless appliance; retain configuration/tools for manual recovery. No runtime/provisioning consumer requires the boot services. |

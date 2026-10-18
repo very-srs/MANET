@@ -250,7 +250,7 @@ The management UI, reachable under `/manage` after the password check. Tabs:
 - **Radio config.** Interface up/down, TX power, HaLow and Wi-Fi channels.
 - **Measure.** iperf3 and ping runs from this node toward a peer.
 - **Sessions.** Saved measurement results, as JSON and CSV.
-- **Uplink.** Node-local USB or built-in Wi-Fi client, scan list and connection status.
+- **Uplink.** Node-local built-in Wi-Fi client, scan list, and connection status.
 - **Voice.** Talk group, codec, and per-peer voice state.
 - **Node config.** EUD mode, AP credentials, mesh SSID and SAE key, IP range,
   regulatory domain, services, and admin password, with the per-node ACK table.
@@ -623,6 +623,13 @@ Ordinary and DFS transitions log the plan identity, round, proposer, targets,
 vote quorum, readiness, and remaining recovery hold. Expiry records distinguish
 membership expansion, changed local snapshots, missing majority, missing
 commit, and missed activation. Adoption logs old and new live/configured MHz.
+
+Every atomic `/run/manet-acs-status.json` snapshot includes current channels,
+members, and the reachable peer count, including when an agreement expires.
+If a lock or observation fails, the daemon keeps its last known display values
+until the next successful read. Before any observation, these are empty channel
+and member collections and an unknown peer count. Cached membership carries no
+freshness stamp, so it cannot authorize the manager's peer-triggered scan.
 
 One publisher per plan carries the full majority
 certificate; other holders send its ID, with automatic publisher failover.
@@ -1332,7 +1339,7 @@ the networkd-dispatcher hooks and reconciled once a cycle by the node manager.
 Both paths return early when nothing has changed.
 
 Local selection prefers qualified wired Ethernet, then supported USB
-tether/cellular links, then built-in or USB Wi-Fi clients. Wired EUD ports
+tether/cellular links, then built-in Wi-Fi clients. Wired EUD ports
 are excluded. The saved promoted interface and current route take precedence
 over events within each class, so an event cannot displace a working peer
 of the same class. Reconciliation moves back from Wi-Fi to working Ethernet
@@ -1416,18 +1423,15 @@ remove elected service VIPs.
 Brings a USB Ethernet interface, such as a tether or an LTE dongle, into the
 uplink decision path when it appears. Triggered by udev.
 
-**usb-wifi-uplink.sh**
+**manet-retire-uplink.py**
 
-Configures a USB Wi-Fi adapter as an internet uplink from a stored SSID and
-password. The management UI applies it only on this node, passing credentials
-through stdin. The existing hotplug lifecycle and gateway dispatcher remain
-in use. `scan-json` scans the eligible adapter without stopping its client
-service, restoring its prior link-up state afterward. Open and WPA2 Personal
-networks can be selected. Mixed WPA2/WPA3 networks use WPA2, while WPA3-only
-networks remain visible with a disabled explanation. Menu selections must
-match a selectable result in `/run/manet-usb-wifi-scan.json` from the same
-adapter within five minutes. The saved BSSID pins that access point. The
-operator `set` action is still accepted with its existing SSID/password form.
+Removes retired external Wi-Fi uplink services, generated configuration,
+scripts, manual, and hotplug recovery rule during updates. The updater runs
+this idempotent hook before activation. A self-deleting one-shot dependency
+of the built-in uplink service also covers the first installation while the
+previous updater is still running. It preserves built-in profiles and saved
+networks, mesh/AP roles, and Morse HaLow. Failed cleanup retries on update
+recovery or service startup.
 
 **manet_wifi_uplink.py**
 
@@ -1442,33 +1446,57 @@ hex-escaped emoji and edge spaces, retain their exact bytes. Invalid UTF-8 and
 control-byte names remain visible as escapes but cannot be selected.
 Credentials never enter mesh.conf or Alfred.
 
-Both paths omit exact matches of the current local `lan_ap_ssid` followed by
+Scans omit exact matches of the current local `lan_ap_ssid` followed by
 `-` and four lowercase hex digits, including this node's hotspot seen by another
 radio. These names are removed before saving or grouping scan results and are
 not counted. Old built-in scan caches are filtered when read. Typed and scanned
-connection requests are also rejected on the server, including USB CLI `set`.
+connection requests are also rejected on the server.
 The prefix is literal and case-sensitive. Other prefixes, uppercase suffixes
 and suffixes of another length are unaffected. This naming rule cannot identify
 peers configured with a different hotspot prefix.
 
 A matching saved built-in profile is persistently disabled, its client is
-stopped, and its normal AP/mesh role restored. USB keeps its saved credentials,
-but stops and disables the client and clears the interface address. Its
-connect/reconcile path refuses to reactivate the match. Both show the reason
-in status. The gateway dispatcher checks saved names before qualification and
-also disconnects an already associated USB match, closing the interval before
-client cleanup. A blocked built-in profile stays disabled even if the hotspot
+stopped, and its normal AP/mesh role restored. Status shows the reason.
+The gateway dispatcher checks saved names before qualification.
+A blocked built-in profile stays disabled even if the hotspot
 prefix later changes, until the user selects a new connection.
 
-Both radio paths use a scrolling, touch-sized network list. Matching SSID
+The built-in radios use a scrolling, touch-sized network list. Matching SSID
 bytes are grouped by band, security, DFS status and availability, retaining
 the strongest BSSID. Hidden names remain separate by BSSID. The current
 connected group appears once at the top with its state. Different bands,
 security methods or DFS choices remain separate. Selecting a secured network
-shows the password field and Connect. Open networks show only Connect.
+shows the password field and Connect. A key icon and **Saved** identify a
+password already kept on this node. Selecting it shows **Uses the saved
+password**, with **Use a different password** to enter a replacement.
+Open networks show only Connect.
 Status polling preserves a typed password, while radio changes and rescans
 clear selection. Rescan is required after five minutes. The server remains
 authoritative for freshness and rejects disabled choices before changing roles.
+
+The shared root-only `0600` store is `/etc/manet/wifi-uplink-saved.json`, managed
+by `manet_wifi_saved.py`. It keys credentials by exact UTF-8 SSID bytes and
+security, so WPA2 and WPA3 copies remain separate. Either built-in radio can reuse the same compatible entry. The store retains at most 32 networks,
+dropping the least recently used entry outside the enabled profiles after a
+successful connection. It uses a
+private file lock and atomic, fsynced replacements. The existing built-in profile migrates
+on first read. Every new connection request carries a random private attempt
+ID in its profile and supplicant `id_str`. Only a `COMPLETED` association with
+that ID and the selected BSSID saves or replaces a password. Starting the
+service, a stale association, and a failed password do not count as success.
+The built-in follower observes completion.
+
+The browser sends `use_saved: true` with the selected SSID and security.
+The helper resolves it locally and refuses an absent entry before changing
+the client. Scan responses carry only a `saved` boolean, and the saved list
+contains only names and security. Passwords and derived PSKs never enter
+public status, logs, telemetry, or mesh coordination. **Saved networks →
+Forget** uses the authenticated local POST route. It removes only the saved
+copy, leaving the current client running. Completed attempt IDs persist so
+reconnects, reboot, and repeated observations cannot recreate a forgotten
+entry. Forget also cancels a pending save for that network for the active built-in client.
+A fresh explicit connection can save it again after association.
+Saved networks are never automatically selected just because they are nearby.
 
 | EUD mode | Upstream | Remaining mesh and AP roles |
 | --- | --- | --- |
@@ -1635,12 +1663,7 @@ starts, clearing rfkill and setting the mode. Called from `radio-setup.sh`.
 **unblock-wifi-rfkill.sh**
 
 Clears soft rfkill blocks on the wireless interfaces. Called by
-`radio-setup.sh`, `prepare-standard-mesh-iface.sh` and `usb-wifi-uplink.sh`.
-
-**usb-wifi-halow-recovery.sh**
-
-Restarts the HaLow supplicant when a non-Morse USB Wi-Fi adapter appears or
-disappears, recovering from USB bus contention. Triggered by udev.
+`radio-setup.sh` and `prepare-standard-mesh-iface.sh`.
 
 **halow-mcs-summary.py**
 

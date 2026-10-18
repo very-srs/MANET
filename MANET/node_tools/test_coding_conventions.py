@@ -13,7 +13,7 @@ import warnings
 MANET = Path(__file__).resolve().parent.parent
 MAN_COMMANDS = (
     'radio-setup.sh', 'node-update.sh', 'ethernet-autodetect.sh',
-    'usb-wifi-uplink.sh', 'manet-user-scripts.sh', 'manet-provision-status.sh',
+    'manet-user-scripts.sh', 'manet-provision-status.sh',
     'manet-power-status.sh', 'verify-bridge.sh', 'manet-region.py',
     'manet-os-cleanup.py', 'manet-mesh-census.py', 'manet-cpu-sample.py',
     'mesh-neighbor-count.py', 'halow-mcs-summary.py', 'mac-to-ip.sh',
@@ -253,6 +253,7 @@ DUPLICATE_NAME_ALLOWLIST = {
             'manet-positioning.py',
             'manet-radio-names.py',
             'manet-region.py',
+            'manet-retire-uplink.py',
             'manet-wait-radios.py',
             'manet-uplink-dns.py',
             'manet_ap_mesh.py',
@@ -340,11 +341,6 @@ DUPLICATE_NAME_ALLOWLIST = {
             'gps-reader.py',
             'mesh-radio-state.py',
     }),
-    # UNRELATED: pending JSON versus key/value config with a default.
-    ('shell', 'cfg_get'): frozenset({
-            'mesh-config-apply.sh',
-            'usb-wifi-uplink.sh',
-    }),
     # UNRELATED: accumulate power errors versus terminate peer query.
     ('shell', 'fail'): frozenset({
             'manet-mesh-power.sh',
@@ -375,8 +371,6 @@ DUPLICATE_NAME_ALLOWLIST = {
             'syncthing-peer-manager.sh',
             'tourguide-manager.sh',
             'usb-ethernet-watch.sh',
-            'usb-wifi-halow-recovery.sh',
-            'usb-wifi-uplink.sh',
     }),
     # UNRELATED: independent CLI arguments and exit behavior.
     ('shell', 'usage'): frozenset({
@@ -393,7 +387,6 @@ DUPLICATE_NAME_ALLOWLIST = {
             'mesh-config-apply.sh',
             'mesh-config-rollback.sh',
             'node-manager-select.sh',
-            'usb-wifi-uplink.sh',
     }),
 }
 
@@ -568,8 +561,7 @@ five() ( : )
                 'batman-if-setup.sh': 'iface_driver',
                 'radio-setup.sh': 'iface_supports_mesh',
                 'ethernet-autodetect.sh': 'internet_probe',
-                'manet-uplink-dispatch.sh': 'is_usb_wifi_uplink_iface',
-                'usb-wifi-uplink.sh': 'iface_driver',
+                'manet-uplink-dispatch.sh': 'is_builtin_wifi_uplink_iface',
                 'gateway-route-manager.sh': 'uptime_now',
                 'mesh-config-rollback.sh': 'uptime_now',
             }

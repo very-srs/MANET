@@ -133,6 +133,12 @@ class ClientModel(SimTransition):
             if args[-1] == 'disconnect':
                 self.associated = None
             return 'OK\n'
+        if args[0] == 'wpa_cli' and args[-1] == 'status':
+            if self.associated is None:
+                return 'wpa_state=SCANNING\n'
+            profile = json.loads(Path(os.environ['MANET_WIFI_UPLINK_CONFIG']).read_text())
+            return ('wpa_state=COMPLETED\nid_str=' + profile.get('save_id', '') +
+                    '\nbssid=' + profile.get('bssid', '') + '\n')
         if args[:2] in (['systemctl', 'start'], ['systemctl', 'restart']) and args[2] == 'hostapd.service':
             if self.ap_start_fails:
                 raise subprocess.CalledProcessError(1, args)
@@ -268,18 +274,6 @@ class BuiltinUplinkTests(UplinkHarness):
         self.uplink.reconcile()
         self.assertNotIn('manet-wifi-client@wlan1.service', self.radio.active)
 
-    def test_gateway_check_preserves_literal_usb_names(self):
-        conf = self.root / 'mesh.conf'
-        conf.write_text(conf.read_text() + 'lan_ap_ssid=EUD\n')
-        usb = self.root / 'usb.conf'
-        with mock.patch.dict(os.environ, {'MANET_USB_WIFI_UPLINK_CONFIG': str(usb)}):
-            for ssid in (' EUD-5cc2', 'EUD-5cc2 ', '"EUD-5cc2"', "'EUD-5cc2'",
-                         'EUD-5CC2', 'EUD-5cg2', 'EUD-5cc', 'EUD-5cc22', 'EUD2-5cc2'):
-                with self.subTest(ssid=ssid):
-                    usb.write_text('enabled=1\nssid=' + ssid + '\n')
-                    self.assertTrue(wifi.uplink_profile_allowed('wlan5'))
-            usb.write_text('enabled=1\nssid=EUD-5cc2\n')
-            self.assertFalse(wifi.uplink_profile_allowed('wlan5'))
 
     def test_shared_client_owns_phy_and_secrets_stay_private(self):
         result = self.choose()
@@ -1151,6 +1145,41 @@ class ProfileTests(unittest.TestCase):
         ok, why = module.validate_pkg({'kind': 'radio_state', 'version': 'a', 'uplink_wifi': PROFILE})
         self.assertFalse(ok)
         self.assertIn('node-local', why)
+
+
+
+class WatcherRewakeTests(unittest.TestCase):
+    """A watcher that exits as new work arrives is started once more."""
+
+    class Uplink:
+        def __init__(self, pending):
+            self.pending = pending
+
+        def watch_pending(self):
+            return self.pending
+
+    def rewake(self, pending, **environ):
+        with mock.patch.object(wifi.subprocess, 'run') as run:
+            restarted = wifi.rewake(self.Uplink(pending), environ)
+        return restarted, run.call_args_list
+
+    def test_clean_exit_with_pending_work_queues_a_start(self):
+        restarted, calls = self.rewake(True, EXIT_CODE='exited', EXIT_STATUS='0')
+        self.assertTrue(restarted)
+        self.assertEqual(calls[0].args[0],
+                         ['systemctl', '--no-block', 'start', 'manet-wifi-uplink.service'])
+
+    def test_idle_exit_stop_request_or_crash_does_not_restart(self):
+        for pending, environ in ((False, dict(EXIT_CODE='exited', EXIT_STATUS='0')),
+                                 (True, dict(EXIT_CODE='killed', EXIT_STATUS='TERM')),
+                                 (True, dict(EXIT_CODE='exited', EXIT_STATUS='1')),
+                                 (True, {})):
+            with self.subTest(pending=pending, environ=environ):
+                self.assertEqual(self.rewake(pending, **environ), (False, []))
+
+    def test_unit_rewakes_after_the_watcher_exits(self):
+        unit = (Path(__file__).parents[1] / 'systemd/manet-wifi-uplink.service').read_text()
+        self.assertIn('ExecStopPost=/usr/local/bin/manet_wifi_uplink.py rewake\n', unit)
 
 
 if __name__ == '__main__':

@@ -13,9 +13,12 @@
 No internet? The radios can still talk to each other. If the way out changes,
 you may have to start your RedTube download again.
 
-A radio can also borrow house Wi-Fi. That uses one of its radios.
+A radio can also borrow house Wi-Fi. That uses one of its built-in radios.
 Open **Manage → Uplink**, scan, and tap the network's name. A lock means it
 needs a password. Scroll the list to see more names.
+A key and **Saved** mean this radio remembers the password. Tap the name,
+then **Connect**. The password stays on this radio.
+**Forget** removes a remembered password. It does not stop the connection.
 The radios hide their own phone hotspots from this list.
 If scanning needs to stop phone
 Wi-Fi, the page asks first. Reconnect to see the saved list. 
@@ -36,7 +39,7 @@ the mesh. Local voice and local mesh services do not need an internet
 connection once the radios are set up.
 
 You can provide an uplink through a supported Ethernet connection, USB
-tether/modem, USB Wi-Fi adapter, or one of its built-in Wi-Fi radios. Ethernet detects whether a router offers
+tether/modem, or one of its built-in Wi-Fi radios. Ethernet detects whether a router offers
 network settings. The radio then checks whether the connection actually
 reaches the internet: an HTTP request that must come back with a 204 answer.
 A sign-in page fails that check. A router being present does not guarantee
@@ -44,7 +47,7 @@ that its internet service is working.
 
 When this radio has several working internet connections, it prefers wired
 Ethernet, including a supported USB Ethernet adapter. A USB phone tether or
-cellular modem comes next. Built-in and USB Wi-Fi connections come last.
+cellular modem comes next. Built-in Wi-Fi connections come last.
 A cable serving your phone or computer as a wired client is excluded.
 The current connection stays selected among working connections of the same
 kind. Wi-Fi can stay connected while Ethernet carries the internet traffic.
@@ -64,8 +67,8 @@ probe or busy service can add time before the change is applied.
 
 ### Use nearby Wi-Fi
 
-In source builds with uplink support, open **Manage → Uplink** on the node
-that should connect. Choose its 2.4 GHz radio, 5 GHz radio, or USB Wi-Fi adapter,
+Open **Manage → Uplink** on the node
+that should connect. Choose an available built-in 2.4 GHz or 5 GHz radio,
 then press **Scan**. Tap a network in the list. Stronger signals come first.
 Scroll to see more names. Each row shows signal bars, the Wi-Fi band, and a
 lock for a secured network. Grey rows explain why they cannot be selected.
@@ -81,9 +84,22 @@ different hotspot name are outside this name-based check.
 
 After choosing a network, enter its password and press **Connect**. Open
 networks do not show a password field. Built-in radios support WPA2 and WPA3
-personal passwords. USB supports WPA2, including networks offering both WPA2
-and WPA3, but cannot join a network requiring WPA3 only. Passwords stay on
+personal passwords. Passwords stay on
 this node and are separate from the mesh key and your phone hotspot password.
+
+Once the radio joins a secured network, it remembers the working password.
+That network shows a key and **Saved** in the list. Choose it and press
+**Connect** to use the saved password. Choose **Use a different password**
+if the router's password has changed. A password that fails to connect does
+not replace the saved one. A password saved for WPA2 is separate from one
+saved for WPA3, even when the network name is the same.
+
+The **Saved networks** list shows the names and security types remembered
+on this node. Both built-in radios share that list. **Forget** removes
+the saved copy without disconnecting a connection already in use. The next
+time you choose that network, enter its password again. This radio remembers
+up to 32 networks and drops the one unused longest when it needs room.
+It does not pick a different saved network automatically when you move.
 
 When built-in Wi-Fi uplink is disabled, its helper stops after restoring the
 normal radio roles. Saving an enabled connection or rebooting with one saved
@@ -167,8 +183,8 @@ the upstream connection's data allowance.
 
 ### Local client and shared hotspot
 
-The Uplink picker scans built-in radios and USB dongles. Before storing or
-grouping observations, both paths remove exact matches of the current local
+The Uplink picker scans built-in radios. Before storing or
+grouping observations, it removes exact matches of the current local
 `lan_ap_ssid` plus `-` and four lowercase hexadecimal characters. The prefix
 is fixed at flash time, literal, and case-sensitive. Use the same base name
 on all radios in a mesh. Other prefixes, uppercase suffixes, and suffixes
@@ -177,8 +193,7 @@ from another radio. It is a naming rule, not proof of mesh membership.
 
 The server rejects matching typed and scanned connection requests. The
 built-in watcher persists disabled intent and restores the normal radio roles
-for a previously saved match. USB cleanup stops and disables its client and
-flushes its address. Gateway qualification checks saved names before probing,
+for a previously saved match. Gateway qualification checks saved names before probing,
 so watcher timing cannot promote a matching profile. Status gives a plain
 reason. The shared AP follower owns startup after station association, while
 the dispatcher only starts its supporting services once hostapd is active.
@@ -187,18 +202,40 @@ The picker groups matching
 SSID bytes by band, security, DFS status, and availability, using the strongest
 BSSID in each group. Hidden names remain separate by BSSID. Different bands,
 security methods, and radar-channel choices stay separate. The connected group
-appears once at the top. A selection pins its BSSID on both client paths.
+appears once at the top. A selection pins its BSSID on either built-in radio.
 Names are escaped as text for rendering. Valid UTF-8 bytes from `iw` display
 as characters, including emoji. Invalid UTF-8 and control bytes stay visible
 as escapes with a disabled-row explanation.
 
-Both helpers reject menu selections outside their five-minute scan window
-or from a different interface. USB scans use the existing adapter eligibility
-rules and restore an initially down adapter after success or failure without
-stopping its client service. USB supports open and WPA2, choosing WPA2 for a
-mixed WPA2/WPA3 network. Its existing manual `set` action remains available
-outside the picker. Credentials travel in the local POST body and helper
-stdin, never through mesh coordination.
+The helper rejects menu selections outside its five-minute scan window
+or from a different interface. Credentials travel in the local POST body
+and helper stdin, never through mesh coordination.
+
+`manet_wifi_saved.py` owns `/etc/manet/wifi-uplink-saved.json`, a root-only
+`0600` credential store shared by the built-in radios. Entries use exact UTF-8
+SSID bytes and security as their key. The store retains the 32 most recently
+used networks, updating order only after successful association and protecting
+the enabled profiles from eviction. A separate
+private lock serializes migration, observation, and forgetting. Writes replace
+the file atomically and fsync both the contents and its directory.
+
+The first read imports the existing built-in profile. New requests
+put a random attempt ID in the private profile and supplicant `id_str`.
+The built-in follower saves credentials only after supplicant reports `COMPLETED` for that
+attempt and the selected BSSID. Service startup alone is insufficient.
+A stale observation cannot validate a replacement profile. Failed passwords
+leave any saved copy intact. DHCP and internet qualification are separate
+from this authentication check.
+
+Scan responses expose only a `saved` boolean. Saved-network lists expose
+only names and security. A local `use_saved: true` request resolves the
+password on the radio by SSID and security, refusing absent entries before
+changing roles. The authenticated Forget POST removes the saved entry without
+changing the active profile. It also cancels a pending save for that network
+for the active built-in client. Completed attempt IDs prevent later observations
+or reboot from restoring a forgotten entry. A new explicit connection can
+save it again after successful authentication. No saved-network auto-join
+policy runs, and the store stays outside config push, Alfred and telemetry.
 
 The private client profile reserves one MT7916 PHY. Active mesh and band roles
 are withdrawn under the same lock used by ACS and drift repair. A dedicated
@@ -265,7 +302,7 @@ not the final internet verdict. The active dispatcher reconciles interface
 role, bridge membership, local addressing, route/NAT policy, and BATMAN
 gateway advertisement. Client-facing Ethernet belongs to `br0`. An upstream
 LAN must not remain bridged into the client mesh after promotion. USB
-hotplug handlers feed the corresponding uplink lifecycle.
+Ethernet hotplug handlers feed the corresponding uplink lifecycle.
 
 Gateway status also affects Auto EUD/AP policy, so loss of an uplink can
 change whether the candidate Wi-Fi interface serves clients or mesh peers.

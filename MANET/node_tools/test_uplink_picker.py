@@ -44,12 +44,6 @@ class ScanNameTests(unittest.TestCase):
                                          '\tsignal: -40\n\tSSID: ' + prefix + r'-\x35cc2' + '\n')
                 self.assertEqual(rows, [])
 
-    def test_usb_api_preserves_plain_hotspot_refusal(self):
-        reason = "This network is one of this mesh's own hotspots and cannot be used as an uplink"
-        response = subprocess.CompletedProcess([], 1, '', reason + '\n')
-        with patch.object(manage.subprocess, 'run', return_value=response):
-            with self.assertRaisesRegex(ValueError, "one of this mesh's own hotspots"):
-                manage.apply_usb_wifi_uplink('EUD-5cc2', 'secret password')
 
     def test_literal_utf8_quotes_html_backslashes_and_edge_spaces(self):
         for wire, expected in [(' "<b> &\'"', '"<b> &\'"'),
@@ -73,36 +67,21 @@ class ScanNameTests(unittest.TestCase):
                 if 'bad' in wire:
                     self.assertEqual(row['ssid'], wire[1:])
 
-    def test_enterprise_and_usb_wpa3_have_plain_reasons(self):
+    def test_enterprise_has_plain_reason(self):
         row = self.scan(' Office', '\tRSN:\n\t Authentication suites: IEEE 802.1X\n')
         self.assertFalse(row['selectable'])
         self.assertIn('sign-in', row['reason'])
-        row = wifi.usb_scan_result('BSS 02:00:00:00:00:01\n\tfreq: 5260\n'
-                                  '\tsignal: -40\n\tSSID: House\n\tRSN:\n'
-                                  '\t Authentication suites: SAE\n', 'wlan5')['networks'][0]
-        self.assertFalse(row['selectable'])
-        self.assertTrue(row['dfs'])
-        self.assertIn('WPA3', row['reason'])
-        mixed = wifi.usb_scan_result('BSS 02:00:00:00:00:01\n\tfreq: 5180\n'
-                                    '\tsignal: -40\n\tSSID: House\n\tRSN:\n'
-                                    '\t Authentication suites: PSK SAE\n', 'wlan5')['networks'][0]
-        self.assertTrue(mixed['selectable'])
-        self.assertEqual(mixed['security'], 'wpa2')
 
-    def test_usb_api_uses_scan_action_and_stdin_selection(self):
-        response = subprocess.CompletedProcess([], 0, '{"networks":[],"iface":"wlan5"}', '')
-        with patch.object(manage.subprocess, 'run', return_value=response) as run:
-            manage.builtin_wifi_request('scan', {'iface': 'usb'})
-            self.assertEqual(run.call_args.args[0], [manage.USB_WIFI_UPLINK_SCRIPT, 'scan-json'])
-        selection = dict(network(), scan_iface='wlan5')
-        with patch.object(manage.subprocess, 'run', return_value=response) as run, \
-                patch.object(manage, 'get_usb_wifi_uplink_status', return_value={}):
-            manage.apply_usb_wifi_uplink('House', 'secret password', selection=selection)
-            self.assertEqual(run.call_args.args[0], [manage.USB_WIFI_UPLINK_SCRIPT, 'set-stdin'])
-            request = json.loads(run.call_args.kwargs['input'])
-            self.assertEqual(request['password'], 'secret password')
-            self.assertEqual(request['bssid'], selection['bssid'])
-            self.assertEqual(request['scan_iface'], 'wlan5')
+    def test_api_rejects_removed_or_missing_radio_without_running_helpers(self):
+        with patch.object(manage.subprocess, 'run') as run:
+            for action in ('scan', 'scan-plan', 'set'):
+                for iface in ('usb', 'wlan5', None):
+                    with self.subTest(action=action, iface=iface), self.assertRaises(ValueError):
+                        manage.builtin_wifi_request(action, {'iface': iface, 'enabled': False})
+            run.assert_not_called()
+        with patch.object(manage, 'builtin_wifi_request', return_value={'saved_networks': []}):
+            self.assertEqual(manage.wifi_uplink_status(),
+                             {'builtin': {'saved_networks': []}, 'saved_networks': []})
 
     def test_scan_api_only_passes_explicit_interruption_acknowledgement(self):
         response = subprocess.CompletedProcess([], 0, '{"networks":[]}', '')
@@ -128,8 +107,9 @@ const elements = {};
 function element(id) { return elements[id] || (elements[id] = {
   value: '', hidden: false, disabled: false, innerHTML: '', textContent: '', children: [],
   dataset: {}, replaceChildren(...children) { this.children = children; this.innerHTML = ''; },
-  append(...children) { this.children.push(...children); }, add() {}, scrollIntoView() {}
+  append(...children) { this.children.push(...children); }, add(option) { this.children.push(option); }, scrollIntoView() {}, focus() {}
 }); }
+function Option(text, value) { this.text = text; this.value = value; }
 const document = {getElementById: element, querySelectorAll: () => [],
   createElement: () => ({textContent: '', className: ''})};
 const calls = [];
@@ -161,6 +141,19 @@ element('uplink-wifi-radio').value = 'wlan1';
         self.js.evaluate('uplinkNetworks = ' + json.dumps(rows or [network()]) + ';'
                          "uplinkScanIface = 'wlan1'; uplinkScanDevice = 'wlan1'; uplinkScannedAt = Date.now();")
 
+    def test_radio_selector_handles_one_two_and_no_builtin_radios(self):
+        for choices in ([{'iface': 'wlan1', 'band': '5'}],
+                        [{'iface': 'wlan0', 'band': '2.4'}, {'iface': 'wlan1', 'band': '5'}], []):
+            self.js.evaluate('uplinkInitialized=false; reply=' + json.dumps({
+                'builtin': {'enabled': False, 'choices': choices}}) + '; loadWifiUplink();')
+            self.assertEqual(self.value("element('uplink-wifi-radio').children.map(o => o.value)"),
+                             [choice['iface'] for choice in choices])
+            self.assertEqual(self.value("element('uplink-wifi-radio').value"),
+                             choices[0]['iface'] if choices else '')
+            self.assertEqual(self.value("element('uplink-wifi-radio').disabled"), len(choices) < 2)
+            self.assertEqual(self.value("element('btn-uplink-wifi-scan').disabled"), not choices)
+        self.assertIn('No built-in radio', self.value("element('uplink-wifi-status').textContent"))
+
     def test_grouping_keeps_strongest_bssid_but_preserves_operator_choices(self):
         rows = [network(signal=-80), network(bssid='02:00:00:00:00:02', signal=-30),
                 network(freq=2412), network(security='open'), network(dfs=True),
@@ -178,18 +171,16 @@ element('uplink-wifi-radio').value = 'wlan1';
         self.assertIn(reason, self.value('uplinkError(new Error(' +
                                         json.dumps(reason) + '))'))
         self.js.evaluate('uplinkInitialized = true; reply = ' + json.dumps({
-            'builtin': {'enabled': True, 'error': 'failed'},
-            'usb': {'enabled': False}}) + '; loadUsbWifiUplink();')
+            'builtin': {'enabled': True, 'error': 'failed'}}) + '; loadWifiUplink();')
         self.assertNotIn('..', self.value(
             "element('uplink-wifi-status').textContent"))
 
     def test_reconnect_recovers_scan_age_warning_and_preserves_input(self):
         scan = dict(iface='wlan1', at=42, age_seconds=200,
                     networks=[network()], warning='Mesh restore pending')
-        status = {'builtin': {'enabled': False, 'scan': scan},
-                  'usb': {'enabled': False}}
+        status = {'builtin': {'enabled': False, 'scan': scan}}
         self.js.evaluate('uplinkInitialized = true; reply = ' +
-                         json.dumps(status) + '; loadUsbWifiUplink();')
+                         json.dumps(status) + '; loadWifiUplink();')
         self.assertEqual(len(self.value('uplinkNetworks')), 1)
         self.assertGreaterEqual(self.value('Date.now()-uplinkScannedAt'),
                                 200000)
@@ -198,7 +189,7 @@ element('uplink-wifi-radio').value = 'wlan1';
         self.assertTrue(self.value("element('uplink-wifi-intro').hidden"))
         self.js.evaluate("selectUplinkNetwork(0); "
                          "element('uplink-wifi-password').value = 'keep'; "
-                         'loadUsbWifiUplink();')
+                         'loadWifiUplink();')
         self.assertEqual(self.value("element('uplink-wifi-password').value"),
                          'keep')
         self.js.evaluate('uplinkScannedAt -= 101000; updateUplinkControls();')
@@ -209,8 +200,8 @@ element('uplink-wifi-radio').value = 'wlan1';
         reason = "This network is one of this mesh's own hotspots and cannot be used as an uplink"
         blocked = dict(enabled=False, iface='wlan1', ssid='EUD-5cc2',
                        state='blocked', error=reason, connected=False)
-        self.js.evaluate('reply=' + json.dumps({'builtin': blocked, 'usb': {'enabled': False}})
-                         + '; loadUsbWifiUplink();')
+        self.js.evaluate('reply=' + json.dumps({'builtin': blocked})
+                         + '; loadWifiUplink();')
         self.assertIn(reason, self.value("element('uplink-wifi-status').textContent"))
         self.assertNotIn('..', self.value("element('uplink-wifi-status').textContent"))
         self.assertTrue(self.value("element('uplink-wifi-current').hidden"))
@@ -219,7 +210,7 @@ element('uplink-wifi-radio').value = 'wlan1';
     def test_status_completes_a_scan_whose_http_response_is_still_waiting(self):
         status = {'builtin': {'enabled': False, 'scan': {
             'iface': 'wlan1', 'at': 55, 'age_seconds': 20,
-            'networks': [network()]}}, 'usb': {'enabled': False}}
+            'networks': [network()]}}}
         self.js.evaluate('uplinkInitialized=true; reply=' +
                          json.dumps(status) + ''';
 manageFetch = async (url, options) => {
@@ -232,7 +223,7 @@ manageFetch = async (url, options) => {
 scanWifiUplink();
 ''')
         self.assertTrue(self.value('uplinkBusy'))
-        self.js.evaluate('loadUsbWifiUplink();')
+        self.js.evaluate('loadWifiUplink();')
         self.assertFalse(self.value('uplinkBusy'))
         self.assertEqual(len(self.value('uplinkNetworks')), 1)
         self.assertIn('networks', self.value(
@@ -269,8 +260,8 @@ scanWifiUplink();
         self.prepare()
         status = dict(enabled=True, iface='wlan1', ssid='<b>📶</b>', connected=True,
                       state='connected', ip='192.0.2.1', freq=5180, gateway=False)
-        self.js.evaluate('uplinkInitialized = true; reply = ' + json.dumps({'builtin': status, 'usb': {'enabled': False}}) + ';'
-                         "selectUplinkNetwork(0); element('uplink-wifi-password').value = 'keep me'; loadUsbWifiUplink();")
+        self.js.evaluate('uplinkInitialized = true; reply = ' + json.dumps({'builtin': status}) + ';'
+                         "selectUplinkNetwork(0); element('uplink-wifi-password').value = 'keep me'; loadWifiUplink();")
         self.assertEqual(self.value("element('uplink-wifi-current').children[0].textContent"), '<b>📶</b>')
         self.assertIn('not the current internet', self.value("element('uplink-wifi-current').children[1].textContent"))
         self.assertEqual(self.value("element('uplink-wifi-password').value"), 'keep me')
@@ -278,11 +269,11 @@ scanWifiUplink();
 
     def test_stale_scan_and_radio_switch_prevent_connecting(self):
         self.prepare()
-        self.js.evaluate('selectUplinkNetwork(0); uplinkScannedAt -= 300001; applyUsbWifiUplink();')
+        self.js.evaluate('selectUplinkNetwork(0); uplinkScannedAt -= 300001; applyWifiUplink();')
         self.assertEqual(self.value('calls'), [])
         self.assertTrue(self.value("element('btn-uplink-wifi-apply').disabled"))
         self.assertIn('out of date', self.value("element('uplink-wifi-feedback').textContent"))
-        self.js.evaluate("element('uplink-wifi-radio').value = 'usb'; updateUplinkChoice(); applyUsbWifiUplink();")
+        self.js.evaluate("element('uplink-wifi-radio').value = 'wlan0'; updateUplinkChoice(); applyWifiUplink();")
         self.assertEqual(self.value('calls'), [])
         self.assertEqual(self.value('uplinkSelected'), -1)
         self.assertEqual(self.value('uplinkNetworks'), [])
@@ -299,7 +290,7 @@ scanWifiUplink();
 
     def test_open_selection_posts_no_old_password_or_credentials_in_url(self):
         self.prepare([network(security='open')])
-        self.js.evaluate("selectUplinkNetwork(0); element('uplink-wifi-password').value = 'old secret'; applyUsbWifiUplink();")
+        self.js.evaluate("selectUplinkNetwork(0); element('uplink-wifi-password').value = 'old secret'; applyWifiUplink();")
         sent = self.value('calls[0]')
         self.assertEqual(sent['url'], '/manage/api/uplink/wifi')
         self.assertEqual(sent['options']['method'], 'POST')
@@ -308,6 +299,51 @@ scanWifiUplink();
         self.assertEqual(request['ssid'], 'House')
         self.assertEqual(request['bssid'], network()['bssid'])
         self.assertEqual(request['scan_iface'], 'wlan1')
+
+    def test_saved_badge_lookup_and_password_override(self):
+        self.prepare([network(saved=True)])
+        self.js.evaluate('uplinkInitialized = true;')
+        markup = Markup(self.js.evaluate('uplinkNetworkMarkup(uplinkNetworks[0], 0)'))
+        self.assertIn('Saved', ''.join(markup.text))
+        self.assertIn('svg', markup.tags)
+        self.js.evaluate('selectUplinkNetwork(0);')
+        self.assertTrue(self.value("element('uplink-wifi-password-row').hidden"))
+        self.assertFalse(self.value("element('uplink-wifi-saved-password').hidden"))
+        self.js.evaluate('applyWifiUplink();')
+        request = json.loads(self.value('calls[0].options.body'))
+        self.assertTrue(request['use_saved'])
+        self.assertEqual(request['password'], '')
+        self.js.evaluate("selectUplinkNetwork(0); useDifferentUplinkPassword(); element('uplink-wifi-password').value='replacement';")
+        self.assertFalse(self.value("element('uplink-wifi-password-row').hidden"))
+        self.js.evaluate('reply={builtin:{},saved_networks:[{ssid:"House",security:"wpa2"}]}; loadWifiUplink();')
+        self.assertEqual(self.value("element('uplink-wifi-password').value"), 'replacement')
+        self.js.evaluate('calls.length=0; applyWifiUplink();')
+        request = json.loads(self.value('calls[0].options.body'))
+        self.assertFalse(request['use_saved'])
+        self.assertEqual(request['password'], 'replacement')
+
+    def test_forget_refreshes_selection_without_disconnect_and_escapes_names(self):
+        self.prepare([network(saved=True)])
+        names = [{'ssid': 'House', 'security': 'wpa2'},
+                 {'ssid': '<img src=x onerror=bad>', 'security': 'sae'}]
+        self.js.evaluate('updateSavedNetworks(' + json.dumps(names) + '); selectUplinkNetwork(0);')
+        markup = Markup(self.value("element('uplink-wifi-saved-list').innerHTML"))
+        self.assertNotIn('img', markup.tags)
+        self.assertIn(names[1]['ssid'], ''.join(markup.text))
+        self.js.evaluate('reply={ok:true,saved_networks:[]}; forgetUplinkNetwork(0);')
+        sent = self.value('calls[0]')
+        self.assertEqual(sent['url'], '/manage/api/uplink/wifi/forget')
+        self.assertEqual(json.loads(sent['options']['body']), names[0])
+        self.assertFalse(self.value('uplinkNetworks[0].saved'))
+        self.assertFalse(self.value("element('uplink-wifi-password-row').hidden"))
+        self.assertIn('stays connected', self.value("element('uplink-wifi-saved-feedback').textContent"))
+
+    def test_open_network_never_uses_a_saved_password_or_shows_badge(self):
+        self.prepare([network(security='open', saved=True)])
+        markup = Markup(self.js.evaluate('uplinkNetworkMarkup(uplinkNetworks[0], 0)'))
+        self.assertNotIn('Saved', ''.join(markup.text))
+        self.js.evaluate('selectUplinkNetwork(0); applyWifiUplink();')
+        self.assertFalse(json.loads(self.value('calls[0].options.body'))['use_saved'])
 
     def test_mobile_rules_and_markup_keep_scroll_touch_and_label_contracts(self):
         self.assertIn('max-height:420px;overflow-y:auto', manage.CSS)

@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import re
+import secrets
 import subprocess
 import sys
 import time
@@ -15,6 +16,7 @@ import time
 from manet_ap_mesh import Transition, locked, text
 from manet_config_io import atomic_write, load_kv_file, rewrite_keys, supplicant_string
 from manet_wifi_events import UplinkEvents
+from manet_wifi_saved import SavedNetworks
 
 AP_VIF = 'manetap'
 DFS_FOLLOW_CAP = Path('/sys/module/cfg80211/parameters/dfs_follow_ap_v1')
@@ -49,22 +51,12 @@ def reject_mesh_hotspot(ssid, settings=None):
 
 def uplink_profile_allowed(iface):
     """Gate gateway qualification even before the client watcher cleans up."""
-    if iface in BANDS:
-        path = Path(os.environ.get('MANET_WIFI_UPLINK_CONFIG', '/etc/manet/wifi-uplink.json'))
-        profile = json.loads(text(path, '{}'))
-        if profile.get('iface', profile.get('blocked_iface')) != iface:
-            return True
-    else:
-        path = Path(os.environ.get('MANET_USB_WIFI_UPLINK_CONFIG',
-                                   '/etc/manet/usb-wifi-uplink.conf'))
-        try:
-            # USB credentials are literal, unlike shell-style mesh.conf.
-            # Match cfg_get's first assignment without stripping SSID bytes.
-            ssid = next((line.partition('=')[2] for line in path.read_text().splitlines()
-                         if line.startswith('ssid=')), '')
-        except FileNotFoundError:
-            ssid = ''
-        profile = {'ssid': ssid}
+    if iface not in BANDS:
+        return False
+    path = Path(os.environ.get('MANET_WIFI_UPLINK_CONFIG', '/etc/manet/wifi-uplink.json'))
+    profile = json.loads(text(path, '{}'))
+    if profile.get('iface', profile.get('blocked_iface')) != iface:
+        return True
     return not is_mesh_hotspot(profile.get('ssid', profile.get('blocked_ssid')))
 
 
@@ -146,30 +138,6 @@ def scan_records(output, settings=None):
     return sorted(records, key=lambda row: row['signal'], reverse=True)
 
 
-def usb_scan_result(output, iface):
-    """Describe USB choices using its existing open/WPA2 client capabilities."""
-    rows = scan_records(output)
-    for row in rows:
-        row['dfs'] = 5260 <= row['freq'] <= 5720
-        if row['security'] == 'sae':
-            if row['wpa2_available']:
-                row['security'] = 'wpa2'
-            else:
-                row.update(selectable=False, reason='WPA3 is not supported by this USB connection')
-    return {'iface': iface, 'at': time.clock_gettime(time.CLOCK_BOOTTIME), 'networks': rows}
-
-
-def validate_usb_selection(value, scans, iface):
-    """Bind a menu selection to a recent scan of the currently selected dongle."""
-    reject_mesh_hotspot(value.get('ssid'))
-    age = time.clock_gettime(time.CLOCK_BOOTTIME) - scans.get('at', -1000)
-    matches = [row for row in scans.get('networks', []) if row.get('selectable') and all(
-        value.get(key) == row.get(key) for key in ('ssid', 'bssid', 'freq', 'security'))]
-    if (not iface or value.get('scan_iface') != iface or scans.get('iface') != iface
-            or not 0 <= age <= 300 or not matches):
-        raise ValueError('Scan again and choose a network from the fresh list')
-
-
 def validate_profile(value):
     """Accept only local, single-radio personal/open network credentials."""
     if not isinstance(value, dict) or type(value.get('enabled', True)) is not bool:
@@ -206,6 +174,8 @@ def client_config(profile, frequencies, country):
              'network={', '    ssid=' + profile['ssid'].encode().hex(),
              '    bssid=' + profile['bssid'],
              '    freq_list=' + ' '.join(str(f) for f in frequencies)]
+    if re.fullmatch('[0-9a-f]{32}', profile.get('save_id', '')):
+        lines.append('    id_str="' + profile['save_id'] + '"')
     security = profile['security']
     if security == 'open':
         lines.append('    key_mgmt=NONE')
@@ -261,6 +231,8 @@ class WifiUplink:
         """Read the private desired profile, treating absence as disabled."""
         value = json.loads(text(self.config, '{"enabled":false}'))
         profile = validate_profile(value)
+        if 'save_id' in value:
+            profile['save_id'] = value['save_id']
         if not profile['enabled'] and value.get('blocked_ssid'):
             profile['blocked_ssid'] = value['blocked_ssid']
         return profile
@@ -358,6 +330,7 @@ class WifiUplink:
                           state='blocked', error=OWN_HOTSPOT_REASON,
                           ssid=profile.get('blocked_ssid', profile.get('ssid', '')))
         status['scan'] = self.saved_scan()
+        status['saved_networks'] = SavedNetworks().public()
         return status
 
     def publish(self, state, **values):
@@ -579,7 +552,8 @@ class WifiUplink:
 
     def set_profile(self, value):
         """Apply a local admin request, restoring the prior profile on failure."""
-        desired = validate_profile(value)
+        credentials = SavedNetworks()
+        desired = validate_profile(credentials.resolve(value))
         if desired['enabled']:
             reject_mesh_hotspot(desired['ssid'], self.radio.settings())
         with locked(self.lock), locked(self.radio.role_lock):
@@ -593,8 +567,16 @@ class WifiUplink:
                     desired[k] == r.get(k) for k in ('ssid', 'bssid', 'freq', 'security'))]
                 if scans.get('iface') != desired['iface'] or not 0 <= age <= 300 or not matches:
                     raise ValueError('Scan again and choose a network from the fresh list')
+            if desired['enabled']:
+                credentials.public()
+            else:
+                try:
+                    credentials.public()
+                except (ValueError, OSError):
+                    pass
             try:
                 self.release()
+                desired['save_id'] = secrets.token_hex(16)
                 self.store(self.config, desired)
                 if desired['enabled']:
                     self.activate(desired)
@@ -627,6 +609,7 @@ class WifiUplink:
         scan['networks'] = [{k: row[k] for k in fields if k in row}
                             for row in scan.get('networks', [])
                             if not is_mesh_hotspot(row.get('ssid'), settings)]
+        SavedNetworks().annotate(scan['networks'])
         age = time.clock_gettime(time.CLOCK_BOOTTIME) - scan['at']
         return dict(scan, age_seconds=max(0, age), fresh=0 <= age <= 300)
 
@@ -803,6 +786,14 @@ class WifiUplink:
         iface = profile['iface']
         link = self.invoke(['iw', 'dev', iface, 'link'], optional=True)
         match = re.search(r'^\s*freq: (\d+)', link, re.M)
+        if match and profile.get('save_id'):
+            output = self.invoke(['wpa_cli', '-i', iface, 'status'], optional=True)
+            status = dict(line.split('=', 1) for line in output.splitlines() if '=' in line)
+            try:
+                SavedNetworks().observe(profile, status)
+            except (ValueError, OSError):
+                # Keep following the upstream even if persistence needs retry.
+                pass
         prior = json.loads(text(self.status_path, '{}'))
         associated_state = ('connected' if match and self.ipv4_address(iface)
                             else 'waiting-address')
@@ -1021,18 +1012,38 @@ class WifiUplink:
                     reasons.add('safety')
 
 
+def rewake(uplink, environ=os.environ):
+    """Restart a watcher that exited just as new work arrived.
+
+    systemd.path merges a change into the unit while its process is still
+    running, so a profile written after watch() decided to exit is lost.
+    ExecStopPost runs after that decision: a clean exit with work pending
+    queues one more start. A stop request kills the process instead, so an
+    operator or updater stop is left alone.
+    """
+    if (environ.get('EXIT_CODE') != 'exited' or environ.get('EXIT_STATUS') != '0'
+            or not uplink.watch_pending()):
+        return False
+    subprocess.run(['systemctl', '--no-block', 'start', 'manet-wifi-uplink.service'],
+                   check=False, capture_output=True, timeout=10)
+    return True
+
+
 def wifi_uplink_main():
     """Dispatch local operations; credentials are read from stdin, never argv."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action', choices=('status', 'set', 'scan',
                         'scan-plan', 'reconcile', 'watch', 'setup-begin',
-                        'reserve'))
+                        'reserve', 'forget', 'rewake'))
     parser.add_argument('iface', nargs='?')
     parser.add_argument('--allow-ap-stop', action='store_true')
     args = parser.parse_args()
     uplink = WifiUplink()
     if args.action == 'status':
         result = uplink.read_status()
+    elif args.action == 'forget':
+        request = json.load(sys.stdin)
+        result = {'saved_networks': SavedNetworks().forget(request.get('ssid'), request.get('security'))}
     elif args.action == 'set':
         result = uplink.set_profile(json.load(sys.stdin))
     elif args.action == 'scan':
@@ -1050,6 +1061,8 @@ def wifi_uplink_main():
     elif args.action == 'reconcile':
         uplink.reconcile()
         result = {'ok': True}
+    elif args.action == 'rewake':
+        result = {'ok': True, 'restarted': rewake(uplink)}
     else:
         uplink.watch()
         result = {'ok': True}

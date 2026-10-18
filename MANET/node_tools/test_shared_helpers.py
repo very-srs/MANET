@@ -393,7 +393,7 @@ class RadioShellHelperTests(unittest.TestCase):
     def test_driver_and_phy_probes(self):
         """Pin complete driver and PHY command sequences at every caller."""
         for caller in ('batman-if-setup.sh', 'radio-setup.sh',
-                       'manet-uplink-dispatch.sh', 'usb-wifi-uplink.sh'):
+                       'manet-uplink-dispatch.sh'):
             source = shell_functions(caller, ('iface_driver',))
             for sysfs in (False, True):
                 with tempfile.TemporaryDirectory() as directory:
@@ -494,33 +494,6 @@ systemctl() {
                                          query + ' sample.service\n' +
                                          operation + ' sample.service\n')
 
-    def test_usb_candidate_exclusions(self):
-        """Pin assigned roles, driver exclusions and missing netdevs."""
-        for caller in ('manet-uplink-dispatch.sh', 'usb-wifi-uplink.sh'):
-            with tempfile.TemporaryDirectory() as directory:
-                root = Path(directory)
-                (root / 'net/wlan5').mkdir(parents=True)
-                (root / 'mesh_if').write_text('wlan6\n')
-                source = shell_functions(caller, ('is_usb_wifi_uplink_iface',))
-                source = source.replace('/sys/class/net', str(root / 'net'))
-                source = source.replace('/var/lib/', str(root) + '/')
-                result = subprocess.run(['bash', '-c', source + '''
-readlink() { echo /sys/bus/usb; }
-iface_driver() { echo mt76x2u; }
-for iface in wlan0 wlan3 eth0 wlan5 wlan6 wlan7; do
-    is_usb_wifi_uplink_iface "$iface"; printf '%s:%s\\n' "$iface" "$?"
-done
-iface_driver() { echo morse_usb; }
-is_usb_wifi_uplink_iface wlan5; printf 'morse:%s\\n' "$?"
-iface_driver() { echo brcmfmac; }
-is_usb_wifi_uplink_iface wlan5; printf 'brcm:%s\\n' "$?"
-'''], capture_output=True, text=True, timeout=5)
-                missing = '1'
-                self.assertEqual(result.stdout,
-                                 'wlan0:1\nwlan3:1\neth0:1\nwlan5:0\n'
-                                 'wlan6:1\nwlan7:' + missing +
-                                 '\nmorse:1\nbrcm:1\n')
-                self.assertEqual((result.returncode, result.stderr), (0, ''))
 
     def test_internet_probe_commands(self):
         """Pin the full timeout/argv sequence for curl and TCP fallbacks."""

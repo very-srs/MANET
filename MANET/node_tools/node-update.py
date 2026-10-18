@@ -75,6 +75,7 @@ REQUIRED = MARKERS | {
     "usr/local/bin/manet_node_ipv4.py",
     "usr/local/bin/manet-radio-names.py",
     "usr/local/bin/manet-os-cleanup.py",
+    "usr/local/bin/manet-retire-uplink.py",
     "etc/systemd/system/manet-radio-names.service",
     "etc/systemd/system/hostapd.service.d/10-manet-prepare.conf",
     "etc/systemd/system/dnsmasq.service.d/10-manet-resolved.conf",
@@ -708,6 +709,8 @@ class Updater:
         self.retire_battery_reader()
         self.retire_network_boot_units()
         self.retire_cpu_powersave()
+        run_command([str(self.destination('usr/local/bin/manet-retire-uplink.py')),
+                     '--root', str(self.root)])
         run_command(["systemctl", "daemon-reload"])
         run_command(['systemctl', 'enable', '--now', 'manet-dfs-watch.service'])
         run_command(['systemctl', 'is-active', '--quiet', 'manet-dfs-watch.service'])
