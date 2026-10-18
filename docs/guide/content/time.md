@@ -96,7 +96,7 @@ service restarts in `/run/mesh-time-client.json`, without granting extra
 attempt time. Success must refer to the selected address and a sample from
 the current attempt.
 
-### Initial synchronization, refresh and holdover
+### Initial synchronization, refresh, and holdover
 
 Successful initial synchronization creates `/run/initial_time_synced`.
 For a mesh client, chrony then stops and the quiet profile remains. The

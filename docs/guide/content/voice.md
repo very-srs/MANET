@@ -84,7 +84,7 @@ receive path also discards packets carrying its own SSRC. Otherwise a radio
 could play its microphone back a jitter-buffer delay later and, in optional
 half-duplex mode, mistake itself for a remote speaker.
 
-### Multicast, scheduling and packet size
+### Multicast, scheduling, and packet size
 
 BATMAN's multicast optimization already fans out to unicast where applicable. Receivers must join the multicast group. Additional userspace unicast redundancy is off by default. Voice uses DSCP CS6 (48) to reach the desired queue through BATMAN's priority mapping.
 
@@ -100,10 +100,10 @@ Lyra adapts frames per packet while keeping bitrate fixed. Under loss it reduces
 
 ### Configuration and failure handling
 
-Talk-group changes are local: write `voice_channel` and reload through the checked retune path. Codec changes require mesh-wide staging and ACKs because encoder, payload and clock rate change together. An offline node does not automatically reconcile a missed codec change.
+Talk-group changes are local: write `voice_channel` and reload through the checked retune path. Codec changes require mesh-wide staging and ACKs because encoder, payload, and clock rate change together. An offline node does not automatically reconcile a missed codec change.
 
 Transmit remains blocked until the socket is bound to the configured voice interface and its IPv4 address. A held PTT resumes only when the binding and duplex conditions permit it. A watchdog monitors actual audio flow so a pipeline reporting PLAYING cannot hide a stalled USB path indefinitely. `/run/mesh-voice.json` supplies the status readout.
 
 - [Voice settings and operational behavior](../../../MANET/node_tools/README.md#push-to-talk-voice)
-- [Pipeline, multicast, buffering and QoS internals](../../../docs/node-tools-internals.md#voice)
+- [Pipeline, multicast, buffering, and QoS internals](../../../docs/node-tools-internals.md#voice)
 - [Voice daemon](../../../MANET/node_tools/mesh-voice.py)

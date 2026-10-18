@@ -12,11 +12,11 @@ A MANET radio is a little box. You carry one. Your friends carry one too. The bo
 
 Is your friend too far away? The box in the middle passes your message along, like passing a note down the row in class.
 
-Your phone talks to your box. Then you can share maps, talk with a headset, and send pictures to your friends.
+Your phone talks to your box (no, do not laugh at this). Then you can share maps, talk with a headset, and send pictures to your friends.
 
 - **More boxes, more reach.** Every box helps pass messages along.
 - **Boxes fix themselves.** If one box goes away, the others find another way.
-- **No internet needed.** If one box has internet, it can share it.
+- **No internet needed.** If one box has internet, it can share it with the others.
 
 Want one? See [what is in the box](hardware.md).
 
@@ -24,28 +24,31 @@ Want one? See [what is in the box](hardware.md).
 
 ### What MANET does
 
-MANET turns small single-board computers into mesh radios. A mesh is a
+The word MANET stands for **M**obile **A**d-hoc **NET**work. This particular MANET project
+ turns small single-board computers into mesh radios. A mesh is a
 network where every radio connects to the radios near it and passes traffic
-along for the others. There is no cell tower, central router or internet
-connection in the middle. Turn on a few radios with the same mesh settings
+along for the others. There is no cell tower or central router, no master server
+that manages the mesh nodes, and an internet connection is optional. 
+Turn on a few radios with the same mesh settings
 and they find each other and build the network themselves.
 
-Your phone, laptop, or other end user device (EUD) connects to its own radio
+Your phone, laptop, or other end user device (EUD) connects to your own radio
 by Wi-Fi or an Ethernet cable. From there, it can reach every other device on
 the mesh, even one several radios away. Each radio forwards traffic for its
 neighbors, so a message can hop from radio to radio until it arrives.
 
 ### Why use a mesh
 
-- **No infrastructure.** It works where there is no cell service, where the
-  cell network is down, or where you do not want to depend on it.
+- **No infrastructure.** It works where there is no public Wi-Fi, where the
+  cell network is down, or where you do not want to depend on local infrastructure.
 - **No setup on the day.** Radios choose their own addresses and channels
   and agree on them together. Nobody has to configure a network on site.
 - **It repairs itself.** When a radio moves out of range or turns off, the
   others route around it. When groups that were separated meet again, they
   join back into one mesh.
 - **Normal devices.** Phones and laptops connect like they would to any
-  Wi-Fi network or Ethernet port, and use ordinary apps.
+  Wi-Fi network or Ethernet port, and use ordinary apps that work over a 
+  regular TCP/IP network.
 
 ![Diagram in two parts. Top, a message from radio A to radio C hops through radio B. Bottom, radio B is turned off and the same message goes through radio D instead.](../assets/about-reroute-diagram.svg)
 
@@ -57,8 +60,8 @@ neighbors, so a message can hop from radio to radio until it arrives.
   the radio. See [voice](voice.md).
 - **Share an internet connection** from any radio that has one. See
   [internet](internet.md).
-- **Use shared services** such as video streams, a Mumble voice server and
-  file sync. See [services](services.md).
+- **Use shared services** such as video streams and
+  file sync. See [services](services.md). Build on top of this like a regular Linux device with your own setup scripts.
 - **See the whole mesh** on the radio's [dashboard](dashboard.md), and
   [measure](measurements.md) how well each link is working.
 
@@ -71,21 +74,21 @@ Each radio has two kinds of radio links to other radios:
 | Link | What it is good at |
 |---|---|
 | Wi-Fi (2.4 GHz and 5 GHz) | High speed over shorter distances. |
-| HaLow (900 MHz) | Longer reach and getting through trees and walls, at lower speed. |
+| HaLow (868/915 MHz) | Longer reach and getting through trees and walls, at lower speed. |
 
 The radios use whichever links are working and pick the best path for each
-message. Wi-Fi and HaLow can both connect the same group of radios, so if one
+message. Wi-Fi and HaLow both connect the same group of radios, so if one
 kind of link fails, the other can keep the group together. Real range and
-speed depend on the antennas, height, terrain and what is in the way. See
-[meet the mesh](overview.md) for how the radios share addresses, channels
+speed depend on the antennas, height, terrain, and what is in the way. See
+[meet the mesh](overview.md) for how the radios share addresses, channels,
 and services.
 
 ### Who would use it
 
 MANET is for groups that need to stay connected to each other where phones
-alone will not do it. Examples include search and rescue teams, event staff
-spread over a large site, people working on farms, ranches or job sites with
-poor coverage, emergency and disaster response, and groups hiking, hunting
+alone would not or should not do it. Examples include search and rescue teams, event staff
+spread over a large site, people working on farms, ranches, or job sites with
+poor network coverage, emergency and disaster response, and groups hiking, playing airsoft,
 or camping together. It is also an open project for people who want to build
 and improve their own radios.
 
@@ -106,8 +109,8 @@ and tests on. The [hardware page](hardware.md) lists every supported board
 and what each part does.
 
 The goal is a purpose-built radio based on the **Raven** carrier board,
-which [BuildsByShane](https://buildsbyshane.com) is making for this project.
-An enclosure for it is being developed.
+which [BuildsByShane](https://buildsbyshane.com) is making for the openMANET project.
+An enclosure for it is still being developed.
 
 ### Get started
 
@@ -131,7 +134,7 @@ explains how they fit together, and the topic pages explain each mechanism.
 |---|---|---|
 | Mobile ad hoc network (MANET) | The general idea: a self-configuring network of mobile nodes with no fixed infrastructure. | [Wikipedia](https://en.wikipedia.org/wiki/Mobile_ad_hoc_network) |
 | batman-adv, BATMAN V | Layer 2 mesh routing in the Linux kernel. Every radio link joins one virtual interface, `bat0`, and BATMAN V picks paths by measured throughput. | [open-mesh.org](https://www.open-mesh.org/projects/batman-adv/wiki), [BATMAN V](https://www.open-mesh.org/projects/batman-adv/wiki/BATMAN_V), [kernel docs](https://docs.kernel.org/networking/batman-adv.html) |
-| Alfred | Distributes identity, telemetry and authenticated control records between radios over the mesh. | [open-mesh.org](https://www.open-mesh.org/projects/alfred/wiki) |
+| Alfred | Distributes identity, telemetry, and authenticated control records between radios over the mesh. | [open-mesh.org](https://www.open-mesh.org/projects/alfred/wiki) |
 | IEEE 802.11s | The Wi-Fi mesh link layer under BATMAN, on both conventional Wi-Fi and HaLow. Mesh peers authenticate with SAE using the shared mesh password. | [Wikipedia](https://en.wikipedia.org/wiki/IEEE_802.11s) |
 | wpa_supplicant, hostapd | Run the 802.11s mesh links and the local access point for EUDs. MANET ships a patched mesh supplicant for radar channel moves. | [w1.fi](https://w1.fi/) |
 
@@ -141,7 +144,7 @@ explains how they fit together, and the topic pages explain each mechanism.
 |---|---|---|
 | IEEE 802.11ax (Wi-Fi 6) | The MT7916 Wi-Fi card's standard. MANET runs its mesh links at 20 MHz for range and stability. | [Wikipedia](https://en.wikipedia.org/wiki/Wi-Fi_6) |
 | IEEE 802.11ac, 802.11n, 802.11a | The older 5 GHz and 2.4 GHz Wi-Fi standards the same card and most EUDs also speak. | [802.11ac](https://en.wikipedia.org/wiki/IEEE_802.11ac-2013), [802.11n](https://en.wikipedia.org/wiki/IEEE_802.11n-2009), [802.11a](https://en.wikipedia.org/wiki/IEEE_802.11a-1999) |
-| IEEE 802.11ah (Wi-Fi HaLow) | Sub-1 GHz long-range links, using Morse Micro MM6108 and MM8108 chips. | [Wikipedia](https://en.wikipedia.org/wiki/IEEE_802.11ah), [Wi-Fi Alliance](https://www.wi-fi.org/discover-wi-fi/wi-fi-certified-halow), [Morse Micro](https://www.morsemicro.com/) |
+| IEEE 802.11ah (Wi-Fi HaLow) | Sub-1 GHz long-range links, using Morse Micro MM6108 or MM8108 chips. | [Wikipedia](https://en.wikipedia.org/wiki/IEEE_802.11ah), [Wi-Fi Alliance](https://www.wi-fi.org/discover-wi-fi/wi-fi-certified-halow), [Morse Micro](https://www.morsemicro.com/) |
 | mt76 | The Linux driver for the MT7916. MANET carries patches for timing measurements and background radar detection. | [GitHub](https://github.com/openwrt/mt76) |
 | Dynamic frequency selection (DFS) | The radar-detection rules for many 5 GHz channels. The MT7916's third receive chain checks a channel for radar before the mesh moves onto it. | [Wikipedia](https://en.wikipedia.org/wiki/Dynamic_frequency_selection) |
 | IEEE 802.11mc fine timing measurement (FTM) | Wi-Fi round trip time (RTT) ranging between radios, the basis for the experimental positioning work. | [Wikipedia](https://en.wikipedia.org/wiki/IEEE_802.11mc), [Android Wi-Fi RTT](https://developer.android.com/develop/connectivity/wifi/wifi-rtt) |
@@ -169,7 +172,7 @@ USB dongle or an MM6108 SPI card. The Waveshare carriers run close to their
 power limit, so under-voltage warnings on them are expected and are not by
 themselves a fault. Raspberry Pi 5 and Rock 3A builds work but run too hot
 for a sealed enclosure. [Hardware](hardware.md#developer-hardware-roles-are-discovered-not-inferred-from-interface-order) covers role
-discovery and the kernel, firmware and userspace bring-up chain.
+discovery and the kernel, firmware, and userspace bring-up chain.
 
 The target is the **Raven** carrier board, which
 [BuildsByShane](https://buildsbyshane.com) is making for this project. An

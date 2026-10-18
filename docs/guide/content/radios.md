@@ -16,13 +16,13 @@ on the screen before changing something else.
 ### Know which radio link you are changing
 
 One MANET unit can contain several wireless interfaces. Conventional
-2.4 GHz Wi-Fi, 5 GHz Wi-Fi and HaLow provide different links between nodes.
+2.4 GHz Wi-Fi, 5 GHz Wi-Fi, and HaLow provide different links between nodes.
 The local access point serves your phone and has a separate role. The
 dashboard shows the detected interfaces. Absent hardware cannot provide
 another path simply because a setting exists for it.
 
 Open **Manage → Radio config** to inspect supported controls, including
-interface state, channel and transmit power. Changes involving peers use
+interface state, channel, and transmit power. Changes involving peers use
 the shared acknowledgement/apply process. Turning off your only working
 link can disconnect the nodes you are trying to configure.
 
@@ -34,7 +34,7 @@ rejected while ACS owns that decision. The mesh only moves when its channel
 has lasting interference or another channel stays better for several rounds,
 as described in [choosing channels](mesh.md#user-choosing-channels). The
 [mesh guide](mesh.md) explains discovery, channel agreement, partition
-healing and limp mode.
+healing, and limp mode.
 
 With ACS disabled, a manual Wi-Fi plan is saved by band and reapplied across
 radio restarts. That does not remove the need for compatible settings on
@@ -91,7 +91,7 @@ under the lock, skips a busy pass, and leaves radios alone if the plan is
 malformed. This prevents the periodic manager from treating a half-written
 plan as a completed operator decision.
 
-ACS additionally coordinates membership, proposals, voting, activation and
+ACS additionally coordinates membership, proposals, voting, activation, and
 recovery over all surviving mesh paths. HaLow connectivity can keep two
 otherwise separated Wi-Fi groups in the same decision domain. The
 [mesh mechanism](mesh.md#developer-one-connected-component-one-channel-decision)
@@ -117,7 +117,7 @@ records the current firmware reports and regional options.
 BATMAN interface setup and the enslave watchdog maintain mesh membership
 when interfaces return. The SAE watchdog targets guarded authentication
 recovery. USB Wi-Fi/HaLow recovery handles device appearance/disappearance.
-An interface's administrative UP state, an authenticated station and an
+An interface's administrative UP state, an authenticated station, and an
 originator route are different stages. Diagnostics should establish which
 stage failed before forcing a restart. Consult
 [network management](../../../MANET/node_tools/README.md#network-management)

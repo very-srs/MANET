@@ -85,7 +85,7 @@ not permission to apply a side effect twice after an ambiguous failure.
 Stable inputs do not always mean no work is needed. The IP preflight confirms
 kernel addresses/policy, EUD readiness, and dnsmasq before skipping a settled
 allocation. The MediaMTX election checks both VIPs and live service state
-against the current winner. Missing outputs, failed services or changed
+against the current winner. Missing outputs, failed services, or changed
 configuration return to the normal repair path.
 
 Conversely, a stable valid state should not cause needless writes/restarts.

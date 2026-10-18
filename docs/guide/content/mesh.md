@@ -33,7 +33,7 @@ Wi-Fi and HaLow can connect the same group of nodes. Wi-Fi favors higher through
 Both Wi-Fi meshes use 20 MHz channels. A narrow channel reaches farther and
 lets a CM4 check radar channels in the background. Between nearby radios the
 5 GHz mesh carries about 140 to 180 Mbit/s at this width. Actual speed depends
-on signal, interference and the route. Updating an existing radio applies the
+on signal, interference, and the route. Updating an existing radio applies the
 narrow channels without reflashing.
 
 With automatic channel selection enabled, radios share what they measure and
@@ -150,7 +150,7 @@ per plan identity. A repeated advertisement or same-boot restart cannot renew
 it. Config repair alone never sends a second CSA. A committed ordinary plan
 that lands first by peer CSA survives only on the same boot, at its exact
 target and within its activation grace. DFS still needs live detector tokens.
-Ordinary and DFS transition logs include quorum, readiness, hold time and an
+Ordinary and DFS transition logs include quorum, readiness, hold time, and an
 explicit expiry reason. Adoption logs capture old/new live and configured MHz.
 
 The coordinator keeps a per-band count of consecutive preference wins against
@@ -163,7 +163,7 @@ Each radio measures its home channel every three-minute cycle from survey and
 station counter deltas. Windows shorter than 60 seconds are rejected.
 Foreign airtime is busy time minus own transmit time minus summed peer
 receive time. Overheard unicast between two other mesh nodes still counts as
-foreign. Counter resets, channel or interface changes and restarts start a new
+foreign. Counter resets, channel or interface changes, and restarts start a new
 baseline. Total busy time stays in telemetry, and foreign airtime scores the
 incumbent.
 
@@ -188,7 +188,7 @@ alternative the channel holds without urgency. Once candidates arrive, a
 disqualified incumbent can move at once, bypassing the three-round hold-down.
 An allowed non-lobby incumbent missing home telemetry stays put until a valid
 comparison arrives. There is no missing-data timeout that authorizes a move.
-Lobby, tourguide and discovery scans are not gated. See
+Lobby, tourguide, and discovery scans are not gated. See
 [channel scoring](../../../docs/node-tools-internals.md#channel-scoring).
 
 `manet_rx_policy.py` reconciles local trouble and hold ownership under the
@@ -196,7 +196,7 @@ observer lock. It reads the kernel's transition timestamp, preserves its
 60 second reversal limit, and defers EBUSY/EAGAIN without cancelling another
 owner. The default is native three-path receive operation. CM4 requests
 `rx_transition_probe` transitions only when available. The transition interface
-rejects AP/STA, scan/reset, non-HT20 and DFS main-channel operation. Rock 3A
+rejects AP/STA, scan/reset, non-HT20, and DFS main-channel operation. Rock 3A
 and RPi5 are excluded from this release policy.
 Static mode clears the local trouble request and retries release while still
 respecting a live hold and the transition interval.
@@ -227,19 +227,19 @@ pass, with another authenticated read before deciding and at activation.
 This leaves room for Alfred's ten-second synchronization inside the 15-second
 lease. An otherwise matching expired peer observation can wait up to five
 seconds for a fresh one, within the original apply window. That wait grants no
-vote, commitment or channel move. Local clearance loss and radar still cancel
+vote, commitment, or channel move. Local clearance loss and radar still cancel
 immediately.
 
 The MANET Wi-Fi supplicant requires patches 0007 and 0008. Patch 0007 filters background CAC
-STARTED, FINISHED and ABORTED for mesh interfaces before the foreground BSS
-state machine can change state. Foreground CAC, AP operation and all radar
+STARTED, FINISHED, and ABORTED for mesh interfaces before the foreground BSS
+state machine can change state. Foreground CAC, AP operation, and all radar
 reports still reach the supplicant. Patch 0008 marks radar channels unavailable
 for an ACS-owned BSS without invoking hostapd's mesh channel picker or
 restarting the BSS. A volatile per-BSS opt-in defaults off, so static and
 unmanaged meshes retain native evacuation. External
 mesh CSA also preserves the BSS when its foreground CAC cache is stale.
 The kernel enforces NOP, and MANET owns the agreed fallback.
-Capability requires a compatible running supplicant, a ready guardian and
+Capability requires a compatible running supplicant, a ready guardian, and
 the paired kernel. A new file copied over an old process is insufficient.
 The package builder rejects a missing or incompatible DFS binary. Explicit
 non-DFS packages retain Debian fallback and cannot advertise DFS support.
@@ -263,7 +263,7 @@ The independent watcher issues a block-TX CSA to the agreed fallback before
 publishing over Alfred. Peers follow the first arriving CSA or authenticated
 report. A follower already switching to the agreed fallback keeps its BSS
 when the kernel confirms that the matching switch has blocked transmit queues.
-The watcher binds that evidence to the current boot, contract and interface.
+The watcher binds that evidence to the current boot, contract, and interface.
 It retains the original deadline across daemon restarts and repeated events,
 and verifies the live channel before completing recovery. Missing evidence
 still requires fencing. A historical radar latch is superseded only by a
@@ -276,7 +276,7 @@ in a new unanimous plan. Peer loss alone never authorizes a DFS exit.
 The receiver stays reserved during DFS main operation because the
 path-count transition rejects radar channels. It can return to three paths
 after leaving DFS. See the [combined kernel series](../../../kernel/patches/manet-mt7916/README.md)
-for source tracing, the transfer API and the two- or three-node test
+for source tracing, the transfer API, and the two- or three-node test
 scripts.
 
 Heavy local TX biases the observer's
@@ -338,7 +338,7 @@ physical lack of radio coverage. See
 and [cold-node recovery](../../../docs/node-tools-internals.md#clock-readiness-and-cold-node-recovery).
 
 A built-in Wi-Fi radio reserved as an internet client is excluded from ACS,
-channel agreement and drift repair. Its remaining radios still participate in
+channel agreement, and drift repair. Its remaining radios still participate in
 the same component's decisions. A shared 5 GHz EUD AP follows the upstream's
 channel locally. See [Wi-Fi uplinks](internet.md#user-use-nearby-wi-fi).
 

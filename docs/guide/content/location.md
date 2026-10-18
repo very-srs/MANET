@@ -2,7 +2,7 @@
 
 ## Marine
 
-![Crayon drawing of a phone cabled through an adapter to a radio, with a GPS receiver, satellite and a location dot on the phone.](../assets/location-crayon.png)
+![Crayon drawing of a phone cabled through an adapter to a radio, with a GPS receiver, satellite, and a location dot on the phone.](../assets/location-crayon.png)
 
 ### Show the phone where you are
 
@@ -35,7 +35,7 @@ ATAK is a mapping application that can receive information from the radio.
 Use a **wired Ethernet connection** or this radio's enabled **Wi-Fi access point**.
 Several nearby phones can use one radio, although one EUD per radio is recommended.
 Set up the phone to use the radio's position on its own map and every output,
-including mesh sharing, direct sharing and a TAK server. Stay near the radio
+including mesh sharing, direct sharing, and a TAK server. Stay near the radio
 and coordinate who sets the group's location if needed.
 
 1. Connect the phone through a compatible Ethernet adapter to the radio's
@@ -59,7 +59,7 @@ the contact is missing. A custom `atak_callsign` can change its name.
 
 ### How the group sees you
 
-With the setup above, ATAK uses the radio position for mesh, direct and
+With the setup above, ATAK uses the radio position for mesh, direct, and
 TAK-server sharing. If you forget the settings on a multicast-only network,
 the radio has a safety net. It replaces positions in admitted **Default Mesh SA**
 reports (239.2.3.1, UDP 6969) toward other radios with its trusted GPS or held
@@ -144,7 +144,7 @@ confirmation and override behavior.
 To release it yourself, use the controlling phone to open this radio's
 **ATAK PHONES** panel and tap **Use phone GPS again** beside the held point.
 No admin password is needed. Guest phones cannot release it. The radio sends one
-quiet chat, stops using the point and asks ATAK to remove the sent marker.
+quiet chat, stops using the point, and asks ATAK to remove the sent marker.
 Release itself has no spoken alert. Receiver warnings still work normally.
 Deleting the marker in ATAK does not release the point on the radio.
 
@@ -160,7 +160,7 @@ the explanation chat without creating a separate map marker.
 
 The radio supplies the external position input after discovering your
 phone. If nothing appears on your own map, check
-the cable or local Wi-Fi connection, the phone's address and the ATAK settings before
+the cable or local Wi-Fi connection, the phone's address, and the ATAK settings before
 assuming GPS is broken. A healthy mesh between radios does not establish
 the phone's local connection.
 
@@ -183,16 +183,16 @@ separate function.
 
 The supported setup for a radio with GPS is Android location off, ATAK external
 GPS input on UDP 4349, and Default Mesh SA left on. ATAK then uses the radio fix
-for multicast, unicast and TLS outputs. A radio without GPS hardware instead
+for multicast, unicast, and TLS outputs. A radio without GPS hardware instead
 needs Android location on, using its controller's phone GPS as the team position.
 Mesh rewriting is only a safety net for forgotten settings on multicast-only
 networks. TLS cannot be rewritten by the bridge.
 
 The ATAK daemon is enabled by default. An absent/empty `atak` setting means
-enabled, while `n`, `no`, `0` or `false` disables it. Phone admission requires
+enabled, while `n`, `no`, `0`, or `false` disables it. Phone admission requires
 an independently verified local EUD port: wired `end0`, or the active AP named
 by `/var/lib/ap_interface`. The AP requires live hostapd identity, matching
-configuration, carrier and forwarding br0 membership. Routed Ethernet does not
+configuration, carrier, and forwarding br0 membership. Routed Ethernet does not
 prevent AP admission. A resolved br0 neighbor's MAC must be learned exclusively
 on one admitted local port, never also bat0. Each new TCP stream or UDP peer
 requires a fresh proof. Default Mesh SA arrives through a packet socket on
@@ -203,7 +203,7 @@ SA payload reaches the decoder. The contact endpoint must name its IPv4 source.
 
 The bounded mesh decoder accepts legacy XML and TAK v1's `bf 01 bf` header
 followed by protobuf SA. Both produce the same `PhoneSA`, including `how`,
-`geopointsrc`, `altsrc` and parent links. Other detail and phone numbers are
+`geopointsrc`, `altsrc`, and parent links. Other detail and phone numbers are
 discarded from retained phone state. A separate bounded rewrite preserves the
 original packet's other fields. Replies remain unicast XML on 4242/4349.
 Existing unicast XML input
@@ -214,19 +214,19 @@ The bridge firewall allows only the configured local interface names for service
 traffic on 4242/4349. Strict readback rejects altered rules. AP renaming requires
 an ATAK service restart to replace the allow-list. AP role/config metadata and
 hostapd PID/start identity invalidate cached proof without subprocess polling.
-SA leases, clocks and UID/IP/MAC/attachment records are bounded by the provisioned
+SA leases, clocks, and UID/IP/MAC/attachment records are bounded by the provisioned
 `max_euds_per_node` (0–253, zero meaning one wired-primary phone). Missing/invalid
 values log and use eight. Absent rows can be evicted when the table is full.
 
 The daemon subscribes to route/link/address/neighbor/FDB and nftables events
 before its initial snapshot. Unchanged ticks reuse a cached proof, avoiding
-repeated `ip`, `bridge` and `nft` subprocesses. Events during a snapshot
-invalidate it. Subscription failure, overflow or truncation ends the process
+repeated `ip`, `bridge`, and `nft` subprocesses. Events during a snapshot
+invalidate it. Subscription failure, overflow, or truncation ends the process
 so systemd can establish fresh subscriptions. The kernel policy remains
 the packet boundary: userspace notifications do not make an arbitrary
 external firewall flush atomic with I/O.
 
-### Inputs, output and retained state
+### Inputs, output, and retained state
 
 GPS data comes through gpsd and the local reader, with per-receiver epochs
 and freshness. Replayed epochs cannot keep a fix alive merely by arriving
@@ -235,8 +235,8 @@ not proof of spoofing. In particular, an unavailable receiver diagnostic
 must stay unknown rather than become a clean bill of health.
 
 The ATAK selection logic combines admitted-phone state, fresh location
-inputs, manual points and available monitoring information. Phone presence,
-phone clock information, manual controller preference and radio manual-location
+inputs, manual points, and available monitoring information. Phone presence,
+phone clock information, manual controller preference, and radio manual-location
 state persist under `/var/lib/manet-atak`. Schema 2 explicitly discards old
 schema-1 single-pin state. Checksum failures and unknown schemas still stop
 startup. The daemon never sets the OS clock. Every present phone gets contact
@@ -248,10 +248,10 @@ Controller preference is manual-if-present, sole wired, current-if-present,
 then stable random. A boot/session-bound JSON producer file carries the local
 web choice to the existing event cycle, which rechecks the selected phone's
 presence and path. The overview exposes only ATAK enable/running state and
-phone UID, callsign, port, controller status, TAK-server marker, GPS disagreement
+phone UID, callsign, port, controller status, TAK-server marker, GPS disagreement,
 and selected position/source with independently checked freshness deadlines. Session identity and the full
 runtime snapshot stay server-side. The HTTP POST requires JSON, rejects foreign
-origins and checks this radio's DHCP source pool. The port-80 `manet_ui` firewall enforces
+origins, and checks this radio's DHCP source pool. The port-80 `manet_ui` firewall enforces
 that same local pool plus loopback. It assumes a trusted team network rather
 than proving physical HTTP ingress. The held location and distrust survive
 controller switches, and marker deletions still target the original phone.
@@ -262,7 +262,7 @@ The public overview also carries an opaque held-point ID and controller UID for
 the local **Use phone GPS again** button. Its JSON POST additionally requires the
 request's source IP to match the current controller. The daemon consumes
 `release.json` on the existing cycle and rechecks the boot, session, five-second
-BOOTTIME envelope, point ID and current controller UID/IP/MAC/path. Only a held
+BOOTTIME envelope, point ID, and current controller UID/IP/MAC/path. Only a held
 point selected without trusted own GPS can be released this way. The HTTP
 source-address trust boundary is the same local team network as controller choice.
 
@@ -272,7 +272,7 @@ It excludes source MACs in `tak_phones` in the kernel, even while the daemon is
 slow or paused. Rewrite memberships retain their three-second timeout and
 one-second renewal. A stopped or crashed daemon cannot renew them, and
 ExecStopPost removes the table. Unadmitted senders, local EUD-to-EUD copies,
-TAK-server traffic and unicast outputs pass natively. The first discovery report
+TAK-server traffic, and unicast outputs pass natively. The first discovery report
 also passes natively.
 
 Bridge prerouting rules on the configured local EUD ports update the dynamic
@@ -281,7 +281,7 @@ Each packet, including established ACKs, refreshes its 600-second kernel timeout
 TCP never reaches the userspace packet sockets. A same-EUD-side server counts
 when its traffic crosses the bridge. Detection can precede phone admission and
 is bounded to 1024 MACs. Visible TCP ports are required, so encrypted tunnels,
-nonstandard ports and traffic switched elsewhere are outside this detector.
+nonstandard ports, and traffic switched elsewhere are outside this detector.
 Unit restart recreates the set, while a paused daemon does not stop its updates.
 
 Before replacing an admitted SA frame, or on meaningful status changes, the
@@ -297,7 +297,7 @@ paused to bound retained bytes. Expiry of that SA produces original forwarding.
 A read still outstanding at two seconds stops
 the daemon. TCP traffic causes no read or wakeup. Set writes wait for a pending dump to finish so the
 daemon does not invalidate its own multipart read. Its own rewrite notifications
-are identified by the kernel sender, multicast group, originating socket port
+are identified by the kernel sender, multicast group, originating socket port,
 and bounded rewrite-sequence or set identity checks, so renewals keep cached
 proof. External or unrecognized notifications still require policy readback.
 
@@ -315,7 +315,7 @@ The packet tap replaces lat/lon/HAE/CE/LE and precisionlocation source attribute
 with the selected trusted radio GPS or held manual point. Every other protobuf
 field retains its encoded bytes, including unknown fields. XML changes only the
 relevant attribute values. Source tags use `MANET:<radio name>`. An output-only
-packet socket sends on bat0, retaining Ethernet/IP source, UDP ports and other
+packet socket sends on bat0, retaining Ethernet/IP source, UDP ports, and other
 headers with updated lengths and checksums. Bounded undecodable or unsupported
 packets from blocked senders are forwarded unchanged. Budget exhaustion or capture
 queue loss suspends the block for three seconds. Capture loss cannot lose
@@ -328,23 +328,23 @@ Present receivers retain the three-second no-fix debounce and immediate distrust
 handling. Reminder deadlines use 60 seconds with an explicit 30-second floor.
 The controller's admitted `geopointsrc=GPS` SA can supply fallback geometry only
 when no radio fix or held manual point is selected. It cannot supply GNSS trust,
-time authority, mesh rewrites or 4349 output. The cache is ephemeral and expires
+time authority, mesh rewrites, or 4349 output. The cache is ephemeral and expires
 at the earlier of SA staleness and the 75-second receipt-age limit. If the phone's
 path disappears first, the beacon may use the remaining fresh interval, with its
 stale field shortened to that same deadline. It never extends the phone fix.
 
-Without selected trusted own GPS, `MANUAL_MOVE_M=30`, `MANUAL_MOVE_S=15` and
+Without selected trusted own GPS, `MANUAL_MOVE_M=30`, `MANUAL_MOVE_S=15`, and
 `MANUAL_MAX_OFFSET_M=200` bound held-point release using only the controller's
 admitted, fresh own GPS. Acceptance saves that GPS anchor, or leaves it pending
 until the first fresh fix. Reports within 30 m hold the correction indefinitely.
 Distinct fresh reports outside 30 m must span at least 15 seconds continuously.
-A return inside, stale GPS, lost controller proof or trusted own GPS resets the
+A return inside, stale GPS, lost controller proof, or trusted own GPS resets the
 interval. Any fresh report over 200 m from the held geometry releases immediately,
 including the first fix after acceptance. These are operational allowances for
 phone noise and small manual corrections, not accuracy or spoof guarantees.
 The point identity and anchor persist, but movement timing and phone GPS do not.
 A controller change resets the anchor and interval. Trusted-own-GPS mark,
-override and confirmation rules are unchanged.
+override, and confirmation rules are unchanged.
 
 Release first reserves normal marker retirement to the original owner. Queue
 backpressure keeps the held point. Success clears geometry and rewrite authority
@@ -359,13 +359,13 @@ Receive-driven release remains unimplemented.
 Newly accepted held selections produce one best-effort GeoChat after selection,
 using plain browser instructions. Restart and movement reanchoring do not
 regenerate it. For a Send-created point, one bounded checkpoint record preserves
-the accepted XML exactly, including UID, timestamps, labels and unknown detail.
+the accepted XML exactly, including UID, timestamps, labels, and unknown detail.
 `HELD_MARKER_REFRESH_S=60` schedules quiet unicast replay to the present controller
 on the existing cycle. A failed send also waits five minutes. Same-boot restart
 retains the deadline, while reboot starts a new five-minute interval. Earlier
 checkpoints without the original XML cannot reconstruct its full content, so a
 new Send is needed to enable refresh. USER/drag selections have no separate
-marker payload. Replacement, release, GPS-confirmation retirement and pending
+marker payload. Replacement, release, GPS-confirmation retirement, and pending
 retirement all suppress the old refresh before output. Retirement still targets
 the original marker owner.
 
@@ -374,8 +374,8 @@ selector's trusted own GNSS fix, never its manual or phone fallback. The initial
 50 m threshold assumes 10 m of horizontal error for each GPS plus 30 m of local
 AP separation. These are operating allowances, not measured error guarantees or
 a maximum Wi-Fi range. One journal line and one best-effort GeoChat handoff mark
-an episode. There is no audio, retry or trust mutation. Rearming requires fresh
-fixes within 35 m continuously for 30 seconds. Missing proof, stale fixes or the
+an episode. There is no audio, retry, or trust mutation. Rearming requires fresh
+fixes within 35 m continuously for 30 seconds. Missing proof, stale fixes, or the
 35–50 m band interrupt that timer. Episodes are bounded by the phone table and
 ephemeral, so restart begins a new observation history. Agreement cannot restore
 trust or clear distrust, since a spoofer could move both fixes together.
@@ -384,7 +384,7 @@ An unattended radio uses the same position selector and publishes protocol-0
 XML to `239.2.3.1:6969` through br0. Its UID is `<radio-uid>-beacon`, distinct
 from the hidden contact, with hostname or `atak_callsign` as its label.
 CoT type `a-f-G-U-U-S-R` selects the standard radio/signal symbol, with no team,
-role or contact endpoint. Trusted receiver GPS or the held manual fallback
+role, or contact endpoint. Trusted receiver GPS or the held manual fallback
 can supply geometry, as can the bounded phone GPS fallback described above.
 No selected fix means no position announcement, including
 no 0,0 placeholder. Refresh is 30 seconds with 90-second staleness. Five metres
@@ -404,17 +404,17 @@ multicast socket disables loopback and fragmentation. The bridge output rule
 drops locally originated mesh SA on every port except bat0. The separate forward
 rule covers the admitted phone rewrites described above. Readback proves policy
 and bat0 readiness before
-sending. Outgoing packet filtering, local-source exclusion and the person-SA
+sending. Outgoing packet filtering, local-source exclusion, and the person-SA
 classifier prevent admission of the radio's own beacon.
 
 Before the first association, the application reads receiver and monitoring
-inputs for the relay beacon. Changed inputs, freshness deadlines and due beacon
+inputs for the relay beacon. Changed inputs, freshness deadlines, and due beacon
 work run selection, while unchanged cycles skip serialization. With no live SA
 lease, network events discard proof. The next due beacon or phone admission
 establishes it again, with no separate verification timer.
 Passive br0 listeners use a cheap address ioctl. Filtered packet sockets follow
 the existing role/link events. Nonmatching packets cause no userspace wakeup.
-The next new mesh-SA peer, unicast peer or TCP stream must pass full
+The next new mesh-SA peer, unicast peer, or TCP stream must pass full
 firewall/path readback before application admission.
 Pending verification makes `path_ready` false.
 After a phone leaves, retained manual points and warning history still need expiry and
@@ -425,7 +425,7 @@ See [ATAK lifecycle and freshness](../../../docs/node-tools-internals.md#atak-ru
 ### Experimental ranging has an explicit hardware boundary
 
 The positioning code separates ranging messages/scheduling, the radio
-adapter, a position solver and GNSS-versus-range consistency checks. The
+adapter, a position solver, and GNSS-versus-range consistency checks. The
 solver uses acquisition-time observations and uncertainty models. Repeated
 frames do not remove a shared radio boot-offset error. A range-consistent
 solution is not proof that satellite signals are authentic: jointly
@@ -433,7 +433,7 @@ displaced positions can preserve relative geometry.
 
 The supplied simulation exercises service objects without opening live radio
 sockets. The production helper boundary is unavailable until authorization,
-mesh-port ingress proof, scoped probes, watchdog behavior and capture
+mesh-port ingress proof, scoped probes, watchdog behavior, and capture
 capabilities are provided and verified. `manet-positioning.service` remains
 disabled and `positioning` defaults off. Enabling a flag alone does not
 complete those dependencies.
@@ -448,7 +448,7 @@ for the pinned-stock fallback and recovery rules.
 For the actual boundaries, read the module descriptions in
 [the positioning controller](../../../MANET/node_tools/manet-positioning.py),
 [radio adapter](../../../MANET/node_tools/manet_ranging_radio.py),
-[solver](../../../MANET/node_tools/manet_locate.py) and
+[solver](../../../MANET/node_tools/manet_locate.py), and
 [consistency monitor](../../../MANET/node_tools/manet_spoof.py).
 The [tool map](../../node-tools-map.md#location-and-experimental-positioning)
 lists the related files. Kernel timing experiments should be evaluated

@@ -1,4 +1,4 @@
-# Storage, logs and saved state
+# Storage, logs, and saved state
 
 ## Marine
 
@@ -17,7 +17,7 @@ longer need. If something broke, save its logs before they roll away.
 
 Settings and saved measurement sessions survive a reboot. Some temporary
 information does not: the radio rebuilds its current view of neighbors,
-checks time again and requires a new web login. These are different kinds
+checks time again, and requires a new web login. These are different kinds
 of state, so an empty or changing display after startup does not necessarily
 mean saved settings were lost.
 
@@ -28,14 +28,14 @@ copied to every other radio or automatically removed to make room.
 ### What happens when space runs low
 
 The measurement store has a bounded budget: by default 256 MiB, at most
-4,096 files and 128 sessions, with space also reserved for the system. A
+4,096 files, and 128 sessions, with space also reserved for the system. A
 full budget stops new measurement work with an error. Download and remove
 unneeded sessions, then try again. A system-wide storage problem can affect
 other services too. This budget does not limit every file on the radio.
 
 Diagnostic logs are rotated: older copies are eventually replaced. Preserve
 relevant logs promptly when reporting a problem, along with the node name,
-version, approximate time and what you were doing. The
+version, approximate time, and what you were doing. The
 [troubleshooting guide](troubleshooting.md) identifies useful evidence.
 
 ### Updates and backups
@@ -46,7 +46,7 @@ delete unknown files just because an update stopped midway. The recovery
 path has limits and is not a backup of everything you put on the radio.
 
 Keep separate copies of important exported measurements, custom setup
-scripts and configuration you would need to recreate. Shared files can be
+scripts, and configuration you would need to recreate. Shared files can be
 synchronized by Syncthing, but synchronization also propagates changes.
 It does not replace a separate backup.
 
@@ -74,8 +74,8 @@ without understanding its ownership is not a migration strategy.
 ### Measurement admission is a budget, not pruning
 
 The storage helper accounts for allocated/logical bytes, regular-file count,
-session count, per-result size and filesystem free space. Defaults are
-256 MiB total, 4,096 files, 128 sessions, 1 MiB per result and 128 MiB free
+session count, per-result size, and filesystem free space. Defaults are
+256 MiB total, 4,096 files, 128 sessions, 1 MiB per result, and 128 MiB free
 space. Admission reserves room for one maximum-sized result, then checks
 again before each test and each durable atomic save. Temporary output also
 uses space, so a result cannot be accepted on final JSON length alone.
@@ -83,7 +83,7 @@ uses space, so a result cannot be accepted on final JSON length alone.
 No automatic pruning occurs. Exhaustion goes through the normal measurement
 error path while existing sessions remain available for export. Limits can
 be overridden through `MANET_MEASUREMENTS_MAX_BYTES`, `MAX_FILES`,
-`MAX_SESSIONS`, `MAX_RESULT_BYTES` and `MIN_FREE_BYTES`, each with the same
+`MAX_SESSIONS`, `MAX_RESULT_BYTES`, and `MIN_FREE_BYTES`, each with the same
 `MANET_MEASUREMENTS_` prefix. Put overrides in the web service's systemd
 environment drop-in rather than editing packaged files. These are MANET
 measurement limits, not a filesystem quota for Syncthing or other programs.
@@ -92,7 +92,7 @@ measurement limits, not a filesystem quota for Syncthing or other programs.
 
 The dedicated logrotate timer first runs five minutes after boot and then
 every fifteen minutes. Its explicit MANET log list uses a 5 MiB threshold,
-three archives and delayed compression. The threshold is checked on that
+three archives, and delayed compression. The threshold is checked on that
 schedule, so it is not a strict maximum file size. `copytruncate` keeps an
 existing append descriptor usable but can lose lines during copying.
 The journal has its separate persistent policy. Application-owned logs and
@@ -105,7 +105,7 @@ See [bounded logs and measurements](../../../docs/node-tools-internals.md#bounde
 
 ### Base-system cleanup is a provisioning operation
 
-The cleanup profile removes selected stock-image packages, services, swap
+The cleanup profile removes selected stock-image packages, services, swap,
 and caches while protecting required runtime dependencies. Its recorded
 profile state prevents later setup from repeatedly removing software the
 operator installed afterward. It runs during initial setup before operator

@@ -3253,7 +3253,7 @@ For non-DFS changes, hostapd CSA is attempted first and read back on the next
 pass. An unchanged frequency causes an AP restart. A lost station association
 releases the AP's old channel context before requesting station reconnection.
 
-The optional [DFS follower patch](../kernel/patches/dfs-follow-ap/README.md)
+The optional DFS follower patch
 adds a paired kernel/hostapd mode for the shared HT20 AP. It is enabled by the
 read-only load-time `cfg80211.dfs_follow_ap_v1=1` option, restricted to
 `mt7915e`. The controller also requires the patched hostapd version before

@@ -1,4 +1,4 @@
-# Power, indicators and shutdown
+# Power, indicators, and shutdown
 
 ## Marine
 
@@ -24,7 +24,7 @@ being set up.  Then you can unplug it.
 
 These are the supported board's onboard LEDs. They report the same setup
 verdict as the SSH login banner. They do not count neighbors, confirm
-internet service or prove that voice works.
+internet service, or prove that voice works.
 
 An optional external LED/button harness has a different purpose. It is
 disabled unless explicitly configured and wired. Pressing its button gives
@@ -45,7 +45,7 @@ The CM4 also has a deliberate CPU speed ceiling to reduce heat in a sealed
 enclosure. A lower configured maximum speed alone is not evidence of a new
 thermal fault. The live power/throttling report answers that question.
 
-Unexpected resets, missing USB radios or failed associations can come from
+Unexpected resets, missing USB radios, or failed associations can come from
 power supply or cable problems under load. Record the indication before
 rebooting, since reboot clears the board's event history.
 
@@ -108,7 +108,7 @@ Other boards retain their reported hardware maximum. This configured ceiling
 is distinct from live throttling caused by temperature or supply problems.
 
 The power helper reads Broadcom live and sticky throttling bits when
-available. Sticky undervoltage, capping or thermal events describe this
+available. Sticky undervoltage, capping, or thermal events describe this
 boot's history. Sampling a healthy current value cannot erase that earlier
 evidence. The helper's failure-tolerant output must not break the dashboard
 or login banner on other platforms.
@@ -123,5 +123,5 @@ client accepts it.
 
 The separate SSH recovery helper restores the `radio` account and group
 membership, configured radio password, SSH authentication settings, missing
-host keys and service availability. It does not bypass the need for a
+host keys, and service availability. It does not bypass the need for a
 working network path. See [identity and recovery tools](../../node-tools-map.md#power-indicators-and-recovery).
