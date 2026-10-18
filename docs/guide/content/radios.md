@@ -4,10 +4,9 @@
 
 ![Crayon drawing of radios exchanging messages before a shared setting changes.](../assets/settings-crayon.png)
 
-### Agree before changing the channel
+### Think before changing the channel
 
-Radios need matching settings to hear each other. Usually they choose their
-Wi-Fi channels together.
+Radios need matching settings to hear each other. 
 
 Manually changing a channel or turning a radio off can break a path. Read the result
 on the screen before changing something else.

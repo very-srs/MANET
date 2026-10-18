@@ -7,7 +7,7 @@
 ### Let it finish before pulling the plug
 
 Your radio's volume knob is also a power switch.  Don't accidentally your radio
-or you will not be able to talk to your friends until it is turned back on.
+or you will not be able to talk to your friends until you turn it back on.
 
 If your radio is just a cm4 on a bench, you can see the green heartbeat to know it is done
 being set up.  Then you can unplug it.

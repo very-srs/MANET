@@ -23,7 +23,7 @@ the admin password. Clear it and save when you hand the radio to someone else.
 ATAK phones share this radio's position. Under **ATAK PHONES**, choose which
 phone sets the group's location. You do not need the admin password.
 
-Need to change radio settings? Open [Manage](http://manet.local/manage/) and ask an adult for help with the admin password. Its address may turn into numbers so your phone stays with this radio.
+Need to change radio settings? Open [Manage](http://manet.local/manage/) and ask an adult for help with the admin password.
 
 ## User
 

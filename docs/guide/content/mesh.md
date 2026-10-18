@@ -15,21 +15,10 @@ Radios pass traffic through other radios. If a link breaks, another available pa
 The radio can find another route. It cannot invent one across a gap with no usable signal.
 
 Radios keep listening to the channel they are using. If other people's Wi-Fi
-keeps it busy, they look for a better one together. A missed reading does not
-make them move. After following their friends to a new channel, they stay
+keeps it busy, they look for a better channel together. After following their friends to a new channel, they stay
 there for a while before choosing again.
 
-Some channels are shared with weather and airport radar. A CM4 can use its
-third antenna to quietly check those channels while the radios keep talking.
-If every radio checks a radar channel and it is the best one, the group moves
-there together. If radar shows up, the radio that hears it stops talking right
-away and everyone moves to a backup channel they picked beforehand. Radar
-always wins. Do not argue with radar.
-
-The Wi-Fi meshes use narrow channels. Narrow channels reach farther and make
-these radar checks possible.
-
-A radio borrowing house Wi-Fi has fewer radios left to talk to its friends.
+A radio borrowing house Wi-Fi for internet access has fewer radios left to talk to its friends.
 
 ## User
 
@@ -233,6 +222,13 @@ publication working, with no DFS clearance or capability grant for that pass.
 Pending watcher rechecks and unexpired preparations wait for a fresh read.
 A saved DFS promise keeps its original apply window and cannot use a stale
 clearance lease.
+Preparation and pending DFS plans refresh and read clearance every one-second
+pass, with another authenticated read before deciding and at activation.
+This leaves room for Alfred's ten-second synchronization inside the 15-second
+lease. An otherwise matching expired peer observation can wait up to five
+seconds for a fresh one, within the original apply window. That wait grants no
+vote, commitment or channel move. Local clearance loss and radar still cancel
+immediately.
 
 The MANET Wi-Fi supplicant requires patches 0007 and 0008. Patch 0007 filters background CAC
 STARTED, FINISHED and ABORTED for mesh interfaces before the foreground BSS
@@ -249,7 +245,9 @@ The package builder rejects a missing or incompatible DFS binary. Explicit
 non-DFS packages retain Debian fallback and cannot advertise DFS support.
 The operating contract has its own same-boot record, independent of ordinary
 agreements. A 2.4 GHz-only move cannot erase it. Only verified departure or
-verified replacement retires it. Radar without a contract stops the radio.
+verified replacement retires it. Radar without a contract stops an externally
+owned radio. The watcher checks the running BSS: explicit native ownership
+retains native evacuation, while unknown ownership still requires fencing.
 The guardian survives manager stops and config applies. Before replacing its
 code, updates fence DFS interfaces and stop their supplicants. They resume
 on the saved fallback only after the new guardian reports ready. A failed

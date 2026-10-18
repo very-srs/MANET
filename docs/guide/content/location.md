@@ -6,7 +6,7 @@
 
 ### Show the phone where you are
 
-Plug your ATAK phone into the radio with its Ethernet adapter, or join that
+Plug your ATAK phone into the radio with its internet hose or join that
 radio's Wi-Fi. Stay near the radio. Count to twenty, or, if you can't do that, just
 be patient. A GPS signal has to come from outer space.
 
@@ -14,33 +14,18 @@ Several phones? (Several means more than one.) Only one of them can set the grou
 location. Open [manet.local](http://manet.local/)
 and look under **ATAK PHONES**. Choose a phone there to be in charge.
 
-If the radio has GPS, turn **Android location OFF**. In ATAK, turn **external
-GPS input ON, UDP 4349**. Leave **Default Mesh SA ON**. Your own map and the
+If the radio has GPS, turn **Android location OFF** in your phone settings. 
+In ATAK, turn **external GPS input ON, UDP 4349**. Leave **Default Mesh SA ON**. Your own map and the
 team's maps then use the radio's position. Follow the
 [phone setup steps](location.md#user-set-up-your-atak-phone).
 No good position? You should drag your location marker so that it matches where you
 are on the map anyway.
 
-No GPS receiver in the radio? It uses the controlling phone's GPS and does not
-ask you to fix missing radio GPS. Leave phone location on in that case.
+No GPS receiver in the radio? Leave phone location on in that case.
 
-Without good radio GPS, a point you set can fix a small mistake while you stay
-within about 30 metres of where you started. Walk farther and fresh phone GPS
-takes over after about fifteen seconds. A point over 200 metres away
-lets go straight away. The controlling phone can also tap **Use phone GPS again**
-under **ATAK PHONES**. You get a quiet chat when the point lets go.
-
-Deleting a sent point in ATAK does not make the radio let go. While it holds
-the point, the radio sends the same marker back every minute, so it comes
-back if you delete it. Open **manet.local in your browser** and tap
-**Use phone GPS again**, or move on as described above. The first holding chat
-explains this. The marker refreshes are quiet.
-
-If the status page says the radio and phone GPS disagree, check where you are
-and check those phone settings. That message does not decide which GPS is right.
-
-Nobody using a radio? If it has a good position, the team sees the radio's name
-on the map. When a phone takes over, its dot replaces the radio's marker.
+Without ATAK on a connected phone, the radio will still tell your ATAK buddies where
+you are.  The team sees the radio's name on the map, but it is just holding that location for a friend. 
+When a phone takes over, its dot replaces the radio's marker.
 
 ## User
 

@@ -6,23 +6,14 @@
 
 ### Update. Keep the cables in.
 
-With automatic updates on, your radio checks when internet becomes available,
-including through another radio. It also tries each day. Sharing another
-radio's internet can add up to 15 minutes of waiting before a check.
+With automatic updates on, your radio does a little peek at the internet to
+check if there is an update for its software.
 
-To update manually:
+Without automatic updates, you can ask it to do that yourself:
 
 1. **Power and internet.** Leave both connected.
 2. **Update this radio.** Over SSH, run `sudo node-update.sh`.
 3. **Wait.** Let every update step and restart finish, then check that your radios can still talk.
-
-A CM4 update can bring a new kernel. The radio restarts to try it and checks
-that its own radios and services come up. If everything works, it keeps the new
-kernel. If not, it goes back to the old one by itself and does not try again.
-It does not need other radios nearby for this check. If it stops responding
-and never comes back, turn its power off and on. It starts on the old kernel.
-
-The updater waits for the radio's clock to synchronize. Automatic updates happen only when enabled.
 
 ## User
 
