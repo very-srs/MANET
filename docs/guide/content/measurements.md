@@ -40,13 +40,13 @@ hundred seconds. Only one batch can run on this radio at once.
 
 Keep positions, antennas and settings fixed during the test. Record what
 you changed between runs, such as location, HaLow width or Wi-Fi band.
-Traffic from other users affects the result; the test also competes with
+Traffic from other users affects the result. The test also competes with
 their traffic. A faster result after several changes cannot identify which
 change helped.
 
 Use **Sessions** to inspect and download JSON or CSV results. Export anything
 you need to keep before deleting sessions. The radio does not automatically
-erase old measurements to make room; when its measurement budget is full,
+erase old measurements to make room. When its measurement budget is full,
 new work reports an error until space is available. See [storage](storage.md).
 
 ### Interpret a result in context
@@ -74,7 +74,7 @@ Reverse iperf changes the traffic direction while retaining the local
 control client. Port 5201 is limited to the configured mesh subnet.
 
 TCP single/four-stream tests use the respective parallelism. UDP throughput,
-jitter and loss views use a configured offered bitrate; reverse uses iperf's
+jitter and loss views use a configured offered bitrate. Reverse uses iperf's
 reverse flag. A TCP result prefers received totals. UDP summaries expose
 receiver loss and jitter, so offered rate must accompany a throughput claim.
 Ping parses round-trip statistics and loss separately. A ping with no replies
@@ -85,15 +85,15 @@ is saved as a failed result.
 A batch allows up to 64 peers and seven test types. Throughput duration must
 be 5–300 seconds. Admission budgets the combinations, subprocess overhead,
 route collection and pauses against a one-hour monotonic execution limit.
-An iperf command has a duration-plus-25-second timeout; the default hundred
+An iperf command has a duration-plus-25-second timeout. The default hundred
 ping probes at 0.2-second intervals have a thirty-second command budget.
 The worker checks remaining time between operations rather than starting
 work known not to fit.
 
 The web server's management-write serialization is distinct from the
 long-running measurement lock. A submitted job continues without requiring
-a browser poll to remain connected. Status reports progress and errors;
-another start is rejected while it runs. Authentication and request-size
+a browser poll to remain connected. Status reports progress and errors.
+Another start is rejected while it runs. Authentication and request-size
 limits still apply before job admission.
 
 ### Evidence and storage consistency
@@ -107,7 +107,7 @@ Capacity is checked at admission, before tests and before saves. Results
 are durably replaced atomically, with temporary-file allocation included in
 the storage budget. Exhaustion is an explicit failure and existing sessions
 remain intact. Session paths are validated as direct real children of the
-measurement directory; arbitrary paths and symlinks are not export/delete
+measurement directory. Arbitrary paths and symlinks are not export/delete
 targets. The [storage guide](storage.md#developer-measurement-admission-is-a-budget-not-pruning)
 explains configurable limits.
 

@@ -30,8 +30,8 @@ An optional external LED/button harness has a different purpose. It is
 disabled unless explicitly configured and wired. Pressing its button gives
 one green blink per **direct neighboring radio**, not every radio reachable
 through other nodes. Solid green for three seconds means connected but
-still waiting for enough identity information to count; red means confirmed
-zero; amber means the count could not be obtained. Multiple wireless links
+still waiting for enough identity information to count. Red means confirmed
+zero. Amber means the count could not be obtained. Multiple wireless links
 to the same radio should count once.
 
 ### Check the power report
@@ -43,7 +43,7 @@ interface has unavailable information, not an implicit healthy result.
 
 The CM4 also has a deliberate CPU speed ceiling to reduce heat in a sealed
 enclosure. A lower configured maximum speed alone is not evidence of a new
-thermal fault; the live power/throttling report answers that question.
+thermal fault. The live power/throttling report answers that question.
 
 Unexpected resets, missing USB radios or failed associations can come from
 power supply or cable problems under load. Record the indication before
@@ -53,14 +53,14 @@ rebooting, since reboot clears the board's event history.
 
 The current guide's shutdown method is an SSH login to the radio followed
 by **`sudo poweroff`**. Use the SSH account and its configured password or
-authorized key; this is separate from the web admin login. Ask the person
+authorized key. This is separate from the web admin login. Ask the person
 who manages the unit to do this if you do not use SSH.
 
 Wait for the operating system to halt before removing power. Losing the
 browser or SSH connection alone is not confirmation that storage writes
 have finished. The external neighbor-count button is not a documented
 power button. Normal shutdown gives the radio an opportunity to announce
-its departure and finish writes; abrupt power loss cannot do that.
+its departure and finish writes. Abrupt power loss cannot do that.
 
 ## Developer
 
@@ -70,7 +70,7 @@ The onboard LED service consumes the provisioning verdict, including the
 legacy completion-marker fallback. It changes when setup finishes and on
 subsequent boots. It is not a peer watchdog. The optional external harness
 instead uses a bounded BATMAN `neighbors_json` query for direct neighbors.
-Registry radio aliases collapse multiple links to one canonical node; the
+Registry radio aliases collapse multiple links to one canonical node. The
 registry itself cannot create a live neighbor.
 
 Zero or one neighbor address needs no alias metadata. Multiple unresolved
@@ -81,8 +81,8 @@ output and prevent unavailable metadata from manufacturing isolation.
 The harness requires explicit `/etc/default/manet-led` configuration and
 libgpiod v2. A shared lock gives a button display exclusive ownership while
 boot blinks yield between half-cycles. Holder failure or termination releases
-GPIO ownership. The electrical state after release depends on the circuit;
-provisional pin assignments and software tests are not verified wiring.
+GPIO ownership. The electrical state after release depends on the circuit.
+Provisional pin assignments and software tests are not verified wiring.
 See [external harness behavior](../../../docs/node-tools-internals.md#external-harness-audit).
 
 ### Departures withdraw service eligibility
@@ -91,7 +91,7 @@ The generated shutdown unit runs before shutdown/reboot/halt targets with
 a ten-second start budget. It encodes a telemetry tombstone with
 `NODE_STATE=SHUTTING_DOWN`, sends it three times at two-second intervals,
 then allows three more seconds for propagation. The helper returns and
-systemd continues shutdown; invoking the helper alone is not `poweroff`.
+systemd continues shutdown. Invoking the helper alone is not `poweroff`.
 
 Peers retain identity but exclude the shutting-down state from relevant
 elections. A tombstone is best-effort distributed information, not an
@@ -103,8 +103,8 @@ a client avoids reconnecting after a host leaves.
 
 The CPU policy keeps cores online and prefers a demand-based scaling governor
 (`schedutil`, then `ondemand` when available). On the CM4 it caps the maximum
-at 800 MHz, bounded by the hardware's minimum and supported frequency steps;
-other boards retain their reported hardware maximum. This configured ceiling
+at 800 MHz, bounded by the hardware's minimum and supported frequency steps.
+Other boards retain their reported hardware maximum. This configured ceiling
 is distinct from live throttling caused by temperature or supply problems.
 
 The power helper reads Broadcom live and sticky throttling bits when

@@ -67,7 +67,7 @@ A recent GPS fix enables the SHM refclock. A direct uplink enables configured
 internet servers with Network Time Security (NTS), with acquisition bound
 to the uplink interface. Ordinary mesh clients receive neither unconditional
 internet sources nor a fabricated local-stratum fallback. Only qualified
-source profiles serve time to the configured mesh networks; idle/client
+source profiles serve time to the configured mesh networks. Idle/client
 profiles do not advertise themselves as sources.
 
 Qualification checks chrony command success, a real reference, stratum 1–15,
@@ -91,7 +91,7 @@ advertisement is only a candidate: it can outlive a lost source until the
 next regular Alfred telemetry publication.
 
 No usable candidate causes a thirty-second discovery retry. A chosen peer
-gets a ninety-second attempt; failure excludes it for five minutes so
+gets a ninety-second attempt. Failure excludes it for five minutes so
 another can be tried. Monotonic deadlines and exclusions persist across
 service restarts in `/run/mesh-time-client.json`, without granting extra
 attempt time. Success must refer to the selected address and a sample from
@@ -102,20 +102,20 @@ the current attempt.
 Successful initial synchronization creates `/run/initial_time_synced`.
 For a mesh client, chrony then stops and the quiet profile remains. The
 next refresh is due after six hours plus a per-boot stagger of zero to ten
-minutes. Source nodes keep chrony available; local role checks can promote
+minutes. Source nodes keep chrony available. Local role checks can promote
 a client when GPS or an uplink appears.
 
 Initial acquisition may step the clock. After the first verified success,
 the controller disarms startup stepping and subsequent corrections slew.
 This avoids ordinary refreshes jumping backward through the timestamps used
 for channel/admin replay checks. A large correction may not settle within a
-bounded attempt; it is not forced by stepping.
+bounded attempt. It is not forced by stepping.
 
 Failure after initial success retains the boot-ready marker but withdraws
 source-serving flags and keeps retrying. A marker is evidence of a past
 success, not current accuracy. `/run` state disappears on reboot. Missing
 refresh state cannot grant another six-hour delay merely because the marker
 exists. The [time reference](../../../docs/node-tools-internals.md#time-synchronization)
-describes remaining drift and hardware-validation limits; the
+describes remaining drift. The
 [mesh guide](mesh.md#developer-one-connected-component-one-channel-decision)
 explains why scheduled channel activation depends on these clocks.

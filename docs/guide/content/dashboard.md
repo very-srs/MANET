@@ -34,7 +34,7 @@ Connect your phone or computer to the radio you want to inspect, then open **[ht
 Use landscape on a phone to see the topology and node list side by side.
 Management puts its sections down the left edge. Portrait stacks the status
 panels and puts the management sections above the content. Tap a node's name
-row to expand or collapse its details; controls inside the details stay open.
+row to expand or collapse its details. Controls inside the details stay open.
 If a refresh fails, a notice says the displayed status is from the last
 successful update. It clears automatically when the radio responds again.
 
@@ -42,7 +42,7 @@ When your phone opens **Manage**, the address changes from `manet.local` to
 this radio's own IP address before you sign in. Keep that page open through
 a hotspot reconnect. If the radio receives a new address allocation, reopen
 `manet.local` and sign in again. The Uplink list recovers saved built-in scans
-after reconnecting and shows their age; a scan older than five minutes needs
+after reconnecting and shows their age. A scan older than five minutes needs
 a rescan before connecting.
 
 The topology shows the mesh as seen by this radio. The links are logical connections. They do not indicate physical distance or direction. Expand a node to inspect its addresses, uptime, radio interfaces, attached devices, and hosted services. GPS and battery information appear when available. This radio's own panel also shows its installed MANET version. Include it when reporting a problem. Check which interface carries a route: a peer may still be reachable through HaLow even when its Wi-Fi link is absent.
@@ -107,7 +107,7 @@ chapters explain the corresponding status and management results.
 
 CSS uses screen orientation and height for the landscape phone layout, while
 portrait keeps stacked panels. Public node disclosures are native buttons
-with `aria-expanded`; refresh restores focus to the same node disclosure.
+with `aria-expanded`. Refresh restores focus to the same node disclosure.
 Management uses labelled tabs and panels, with arrow keys and Home/End for
 navigation. The portrait topology divider supports keyboard resizing between
 180 and 640 pixels. The public refresh notice retains the previous topology
@@ -177,7 +177,7 @@ Status collections share a five-second cache, with two seconds for voice and con
 
 `manet_recovery_status.py` combines local ACS, last-channel-change, and time with the local registry. Observations older than 45 seconds are not treated as current recovery evidence. Display failures must not stop control or recovery.
 
-`manet_web_sessions.py` keeps token digests and monotonic 48-hour login deadlines in memory. Sessions are per node. Local EUD HTML on `manet.local` redirects to the internal EUD IP before login; APIs and non-EUD clients retain their origin. Tokens are not transferred between nodes. Tests or tooling that restart the server must sign in again.
+`manet_web_sessions.py` keeps token digests and monotonic 48-hour login deadlines in memory. Sessions are per node. Local EUD HTML on `manet.local` redirects to the internal EUD IP before login. APIs and non-EUD clients retain their origin. Tokens are not transferred between nodes. Tests or tooling that restart the server must sign in again.
 
 Concurrent viewers share fixed cache keys, so opening more tabs does not
 create an independent radio-query workload for every request. Management

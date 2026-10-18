@@ -19,7 +19,7 @@ on the screen before changing something else.
 One MANET unit can contain several wireless interfaces. Conventional
 2.4 GHz Wi-Fi, 5 GHz Wi-Fi and HaLow provide different links between nodes.
 The local access point serves your phone and has a separate role. The
-dashboard shows the detected interfaces; absent hardware cannot provide
+dashboard shows the detected interfaces. Absent hardware cannot provide
 another path simply because a setting exists for it.
 
 Open **Manage → Radio config** to inspect supported controls, including
@@ -39,12 +39,12 @@ healing and limp mode.
 
 With ACS disabled, a manual Wi-Fi plan is saved by band and reapplied across
 radio restarts. That does not remove the need for compatible settings on
-the other nodes. A change may temporarily interrupt your management access;
-reconnect and inspect the result before assuming it failed.
+the other nodes. A change may temporarily interrupt your management access.
+Reconnect and inspect the result before assuming it failed.
 
 HaLow offers the widths and channels supported by the selected region and
-the current software. The current US plan reaches 8 MHz; the EU plan exposes
-1 MHz. New US nodes start on channel 10 at 907 MHz with 2 MHz width; new EU
+the current software. The current US plan reaches 8 MHz. The EU plan exposes
+1 MHz. New US nodes start on channel 10 at 907 MHz with 2 MHz width. New EU
 nodes start on channel 1 at 863.5 MHz with 1 MHz width. Use the region and
 available choices configured for your deployment.
 
@@ -52,8 +52,8 @@ available choices configured for your deployment.
 
 The displayed transmit power is the driver's report, not a measurement of
 the radio signal leaving the antenna. Firmware or hardware can limit it
-below the requested setting. The mesh startup policy requests 30 dBm;
-the client access point uses 5 dBm.
+below the requested setting. The mesh startup policy requests 30 dBm.
+The client access point uses 5 dBm.
 
 Wi-Fi power changes in the UI are temporary: a radio restart or reboot
 returns to the startup policy. A requested reduction that does not take
@@ -71,9 +71,9 @@ establish a better end-to-end link.
 
 Mesh configuration transactions and immediate radio-state transactions use
 related authenticated Alfred transports but distinct payloads. Configuration
-uses types 70/73; radio state uses 71/72. The receiver validates and stages a
+uses types 70/73. Radio state uses 71/72. The receiver validates and stages a
 package, acknowledges it, and applies an authorized action at its activation
-time. The shared admin password authorizes control; an observed identity or
+time. The shared admin password authorizes control. An observed identity or
 BATMAN peer does not. See [transaction lifecycle](settings.md#developer-transaction-authority-and-lifecycle).
 
 ACS owns conventional Wi-Fi channel choice while enabled. Both API and
@@ -86,7 +86,7 @@ does not restart an unrelated interface.
 ### A channel change is a serialized state transition
 
 Plan writes, active and lobby supplicant configurations, and radio restart
-share the channel lock. A manual apply waits at most ten seconds; failure
+share the channel lock. A manual apply waits at most ten seconds. Failure
 restores the prior plan and configurations. Static enforcement also reads
 under the lock, skips a busy pass, and leaves radios alone if the plan is
 malformed. This prevents the periodic manager from treating a half-written
@@ -117,7 +117,7 @@ records the current firmware reports and regional options.
 
 BATMAN interface setup and the enslave watchdog maintain mesh membership
 when interfaces return. The SAE watchdog targets guarded authentication
-recovery; USB Wi-Fi/HaLow recovery handles device appearance/disappearance.
+recovery. USB Wi-Fi/HaLow recovery handles device appearance/disappearance.
 An interface's administrative UP state, an authenticated station and an
 originator route are different stages. Diagnostics should establish which
 stage failed before forcing a restart. Consult

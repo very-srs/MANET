@@ -31,7 +31,7 @@ The measurement store has a bounded budget: by default 256 MiB, at most
 4,096 files and 128 sessions, with space also reserved for the system. A
 full budget stops new measurement work with an error. Download and remove
 unneeded sessions, then try again. A system-wide storage problem can affect
-other services too; this budget does not limit every file on the radio.
+other services too. This budget does not limit every file on the radio.
 
 Diagnostic logs are rotated: older copies are eventually replaced. Preserve
 relevant logs promptly when reporting a problem, along with the node name,
@@ -41,14 +41,14 @@ version, approximate time and what you were doing. The
 ### Updates and backups
 
 An [update](updates.md) has staging and recovery state so an interrupted
-installation can be recognized. Those files are part of recovery; do not
+installation can be recognized. Those files are part of recovery. Do not
 delete unknown files just because an update stopped midway. The recovery
 path has limits and is not a backup of everything you put on the radio.
 
 Keep separate copies of important exported measurements, custom setup
 scripts and configuration you would need to recreate. Shared files can be
-synchronized by Syncthing, but synchronization also propagates changes;
-it does not replace a separate backup.
+synchronized by Syncthing, but synchronization also propagates changes.
+It does not replace a separate backup.
 
 ## Developer
 
@@ -68,7 +68,7 @@ it does not replace a separate backup.
 Replay protection and update transactions also retain durable state because
 a process restart must not make an old command new or erase evidence of a
 partly installed payload. Use [settings](settings.md) and
-[updates](updates.md) for their lifecycle; copying a live state directory
+[updates](updates.md) for their lifecycle. Copying a live state directory
 without understanding its ownership is not a migration strategy.
 
 ### Measurement admission is a budget, not pruning
@@ -95,7 +95,7 @@ every fifteen minutes. Its explicit MANET log list uses a 5 MiB threshold,
 three archives and delayed compression. The threshold is checked on that
 schedule, so it is not a strict maximum file size. `copytruncate` keeps an
 existing append descriptor usable but can lose lines during copying.
-The journal has its separate persistent policy; application-owned logs and
+The journal has its separate persistent policy. Application-owned logs and
 synchronized files are outside this standalone-log list.
 
 For a custom log list, configure `MANET_LOGROTATE_CONFIG` to a root-owned
@@ -109,6 +109,6 @@ The cleanup profile removes selected stock-image packages, services, swap
 and caches while protecting required runtime dependencies. Its recorded
 profile state prevents later setup from repeatedly removing software the
 operator installed afterward. It runs during initial setup before operator
-scripts; ordinary tools updates do not silently reapply it. The
+scripts. Ordinary tools updates do not silently reapply it. The
 [cleanup implementation](../../../MANET/node_tools/manet-os-cleanup.py)
 provides the plan/apply boundary and protected dependency checks.

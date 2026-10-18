@@ -49,14 +49,14 @@ when preparing site-specific credentials.
 Linux and Windows flashers accept a flat set of named text scripts. They
 normalize supported encodings, byte-order marks, CRLF and a missing final
 newline on a copy, leaving the operator's file untouched. A missing shebang
-is skipped; invalid names, empty data, NUL bytes and unsupported encoding
+is skipped. Invalid names, empty data, NUL bytes and unsupported encoding
 are errors. Shell/Python syntax checks run when the required parsers are
 available. Other interpreters are reported without executing their code on
 the flashing host.
 
 The flashers embed quoted heredocs at the explicit additional-scripts marker
 in each provisioning template. The marker must remain before the template's
-final reboot; appending after it would produce a valid-looking image whose
+final reboot. Appending after it would produce a valid-looking image whose
 hooks never run. Payloads above 256 KB warn and above 2 MB are refused. Large
 or binary data should be retrieved by an appropriate runtime setup action.
 
@@ -69,7 +69,7 @@ being treated as executable inputs. The shebang and disabled/backup-name
 filters run again for scripts copied onto a live node.
 
 Each completed attempt records name, exit status and time. Interruption before
-completion leaves work to resume; a recorded nonzero exit is still a finished
+completion leaves work to resume. A recorded nonzero exit is still a finished
 attempt and needs explicit retry. The runner's default timeout is 300 seconds,
 overridable by `user_script_timeout` in mesh configuration. Forced execution
 repeats the set, so authors should make actions safe to repeat where possible.

@@ -50,7 +50,7 @@ provide.
 
 The [node-tool map](../../node-tools-map.md) indexes every production file
 from `MANET/node_tools`, grouped by responsibility. Each group links
-to the guide chapter explaining its outcome; each file links to its source.
+to the guide chapter explaining its outcome. Each file links to its source.
 Use it to find task ownership after reading the mechanism responsible, rather than starting
 with an alphabetical script list and guessing.
 
@@ -100,7 +100,7 @@ explains observation age and publication.
 Udev and networkd-dispatcher hooks react to USB and network carrier events. Periodic
 managers and watchdogs repair missed transitions or incomplete state.
 Locks serialize local operations such as channel/config changes and
-service ownership; they do not establish a global distributed lock.
+service ownership. They do not establish a global distributed lock.
 Alfred exchanges observations and authenticated control, while BATMAN
 provides the data path and current reachability.
 

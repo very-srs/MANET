@@ -16,12 +16,11 @@ To update manually:
 2. **Update this radio.** Over SSH, run `sudo node-update.sh`.
 3. **Wait.** Let every update step and restart finish, then check that your radios can still talk.
 
-A CM4 update can try new startup software and restart by itself. It checks
-its own radios even when no other radio is nearby. If it stops responding
-and does not restart, turn its power off and on. It tries its previous
-startup software. A failed trial is not tried again automatically.
-Older CM4 radios can update too. They keep their old startup software ready
-in case the test fails.
+A CM4 update can bring a new kernel. The radio restarts to try it and checks
+that its own radios and services come up. If everything works, it keeps the new
+kernel. If not, it goes back to the old one by itself and does not try again.
+It does not need other radios nearby for this check. If it stops responding
+and never comes back, turn its power off and on. It starts on the old kernel.
 
 The updater waits for the radio's clock to synchronize. Automatic updates happen only when enabled.
 
@@ -33,43 +32,40 @@ MANET's tools updater uses the GitHub release marked **Latest**, which is the st
 
 The update archive can carry any component a release needs, including kernels,
 drivers, firmware, and configuration changes. The name **tools** does not limit
-its contents. Radios may be sealed in enclosures, so updates are intended to
-maintain them in place rather than make reflashing a routine requirement.
+its contents. Radios may be sealed in enclosures, so updates keep them working
+in place without reflashing.
 
-Current packages update runtime software and some radio firmware. This source
-also enables CM4 kernel trials by default when a release carries a matched
-kernel. Follow the selected release's instructions for restarts and validation.
-A trial can need a power cycle if the firmware cannot load the test kernel.
-Its next boot selects the
-previous kernel while the previous boot files remain intact. Keep access to
-the power supply even when the radio is sealed.
+### New kernels on CM4 radios
 
-A prepared CM4 package can carry two steps in one download: tools first,
-then a separately verified kernel trial. The displayed tools version can
-change before that trial finishes. The radio checks its own startup, drivers
-and attached radios before keeping the new kernel. It does not need Ethernet,
-internet, another radio or a synchronized clock to finish this trial. A failed
-trial keeps the previous kernel and is not retried automatically. Rock 3A and
-RPi5 keep tools-only updates.
+A CM4 release can carry a new kernel along with the tools. The update installs
+the tools first, then restarts the radio once to try the new kernel. Before
+keeping it, the radio checks its own startup, drivers, attached radios and
+mesh interface. It does not need Ethernet, internet, another radio or a set
+clock for this check. The tools version shown can change before the kernel
+check finishes.
 
-Older CM4 images can keep their original startup settings while testing the
-new kernel. The updater changes the normal startup settings only after the
-test passes. If an earlier update stopped before reboot because it reported
-`auto_initramfs=1`, a release containing this fix can continue automatically
-after installing its new tools. You do not need to edit the boot files or
-reflash the radio. A custom encrypted or network root, or other startup work
-that requires an initramfs, still stops the trial with an explanation.
+If the check fails, the radio returns to its previous kernel by itself and never
+tries that kernel again. If the new kernel cannot start at all, the firmware
+falls back to the old one on the next restart. A sealed radio may need one power
+cycle for that, so keep access to its power supply.
 
-To opt out of CM4 kernel trials, use `sudoedit /etc/manet-kernel-update.conf`
-and save `enabled=n`. Tools updates still work. Use `enabled=y` to allow
-future kernel updates. A trial already started must finish or fall back first.
-This setting belongs to this radio and is separate from automatic update checks.
-The reset and fallback mechanism has been tested on CM4. The generic field
-checks still need acceptance on a radio before release.
+Radios flashed before mid-October still have a Raspberry Pi setting,
+`auto_initramfs=1`, in their boot files. The update tries the new kernel
+without changing that file, and only updates the setting once the new kernel has
+passed its check. You do not need to edit boot files or reflash. A radio whose
+startup really needs an initramfs, such as an encrypted or network root,
+keeps its old kernel and the updater says why.
+
+Rock 3A and RPi5 radios update their tools only.
+
+To turn off kernel updates on a CM4, run `sudoedit /etc/manet-kernel-update.conf`
+and save `enabled=n`. Tools updates still work. Save `enabled=y` to allow kernel
+updates again. A kernel check already in progress finishes or falls back first.
+This setting stays on this radio and is separate from automatic update checks.
 
 ### Update one radio manually
 
-1. Give the radio working internet access and leave it powered. Wait for its first verified clock synchronization; **Mesh recovery** in the dashboard shows clock information.
+1. Give the radio working internet access and leave it powered. Wait for its first verified clock synchronization. **Mesh recovery** in the dashboard shows clock information.
 2. Connect over SSH with the account and hostname chosen during flashing.
 3. Run:
 
@@ -134,14 +130,14 @@ Once the updater has saved its recovery package, a later attempt or reboot resum
 sudo node-update.sh --recover-only
 ```
 
-Local recovery works without internet or clock synchronization. If the recovery data is missing or corrupt, retain it and collect the error for diagnosis. Successful recovery finishes the interrupted installation; it does not undo a defective release. See [troubleshooting](troubleshooting.md) for what to collect.
+Local recovery works without internet or clock synchronization. If the recovery data is missing or corrupt, retain it and collect the error for diagnosis. Successful recovery finishes the interrupted installation. It does not undo a defective release. See [troubleshooting](troubleshooting.md) for what to collect.
 
 ## Developer
 
 ### Update scope and release identity
 
 Treat the archive as the general field-update mechanism. Any required component
-may be included in a release; match its installation, activation, and recovery
+may be included in a release. Match its installation, activation, and recovery
 procedure to that payload. Preserve operator configuration and identity unless
 the release includes a deliberate migration. See the
 [field update policy](../../../docs/node-tools-internals.md#field-update-policy).
@@ -152,14 +148,14 @@ The updater validates paths, ownership, file types, archive limits, required
 files, available space, the manifest digest, and the checksum sidecar before
 live replacement. Boot files, modules and Morse firmware use a separate
 matched kernel payload with trial activation. Downloading requires
-`/run/initial_time_synced`; local recovery does not.
+`/run/initial_time_synced`. Local recovery does not.
 
 The default builder includes managed MT7916 firmware. Optional board kernel
 inputs carry a manifest, boot files, versioned modules and isolated Morse
 firmware. CM4 defaults to a one-shot trial unless its local
 `/etc/manet-kernel-update.conf` contains `enabled=n`. The profile is derived
 from the node's boot config, command line, FAT UUID and hardware and saved in
-the transaction before reboot. Existing local bench profiles remain overrides.
+the transaction before reboot. An existing local trial profile overrides it.
 Trials use the firmware kernel watchdog, `watchdog.open_timeout=120`, PID 1's
 runtime watchdog and a 300-second guard. The EEPROM boot watchdog is optional.
 Without it, failure before kernel handoff can require a power cycle. CM4
@@ -175,9 +171,8 @@ are refused with a specific reason. RPi5 retains its
 matched image configuration. The trial runs before runtime software replacement, and a failed trial
 is not automatically repeated. Early file recovery avoids the boot filesystem.
 Late recovery stages or confirms the trial after normal mounts. Rock 3A kernel
-activation is rejected until its actual bootloader fallback and reset path are
-verified. Hardware validation is still required before publishing kernel
-updates. Details and limitations are in the
+activation is rejected because its bootloader fallback and reset path are not
+supported. Details and limitations are in the
 [kernel activation protocol](../../../docs/node-tools-internals.md#kernel-payload-and-activation-protocol).
 
 Field confirmation requires multi-user startup with healthy critical units,
@@ -191,7 +186,7 @@ path, peers or clock sync is required. Opt-out skips the kernel and persists
 that selection for interrupted runtime recovery. It cannot abandon an armed
 trial or erase a failed candidate.
 
-For an offline bench, `--local-archive` and `--local-version` validate an
+For an offline update, `--local-archive` and `--local-version` validate an
 explicitly supplied board tools archive and adjacent checksum without release
 discovery. This trusts the locally supplied files and allows an equal version
 to be reinstalled. It uses the same staging, recovery and trial transaction.
@@ -213,8 +208,7 @@ cancellation also stops the wrapper timer for that candidate. The wrapper
 removes its archive and units only after the exact candidate and tools are
 confirmed. The wrapper defaults to the derived field profile and honors the
 same opt-out. While opted out, its archive and timer remain available so
-re-enabling can resume the kernel stage. The field policy still requires an
-on-node acceptance run, separate from the completed reset/fallback bench.
+re-enabling can resume the kernel stage.
 
 The same wrapper delivers the fix to v0.574 radios whose follow-up stopped on
 `auto_initramfs=1` before creating a pending transaction. Its tools step replaces
@@ -249,7 +243,7 @@ flushes it, then renames it over the destination and flushes the directory.
 A reader should therefore see the old or new complete file rather than a
 partially written file. Across many files, however, an interruption can leave
 a mixture of versions. Reinstalling the entire retained payload repairs that
-mixture; the updater does not keep an old filesystem image to roll back to.
+mixture. The updater does not keep an old filesystem image to roll back to.
 
 | Interruption point | Meaning on the next attempt |
 |---|---|
@@ -259,7 +253,7 @@ mixture; the updater does not keep an old filesystem image to roll back to.
 | During final version-marker writes | Pending recovery still wins, even if one or both markers already show the new version. |
 | After the pending marker is durably removed | The installation has passed its completion checks; an application defect needs diagnosis or a later release, not interrupted-install recovery. |
 
-`manet-update-recover.service` restores the pending files early in boot; `manet-update-finish.service` performs activation once normal startup is available. Recovery revalidates the retained package and retries the same release without downloading or running APT. Failed or corrupt recovery remains pending for diagnosis.
+`manet-update-recover.service` restores the pending files early in boot. `manet-update-finish.service` performs activation once normal startup is available. Recovery revalidates the retained package and retries the same release without downloading or running APT. Failed or corrupt recovery remains pending for diagnosis.
 
 Separating file restoration from activation lets early boot repair the
 runtime before depending on its normal services. The later phase can then
@@ -267,13 +261,13 @@ restart and inspect those services. Neither phase proves that a new kernel
 can boot: a kernel payload will require its own boot-set installation and
 recovery design under the general update policy. The
 [failure-handling reference](../../../docs/node-tools-internals.md#tools-update-failure-handling)
-describes retained state, validation limits, and recovery entry points.
+describes retained state and recovery entry points.
 
 ### Automatic triggering and kernel ownership
 
 The dispatcher queues `manet-auto-update.service` after uplink reconciliation.
 The gateway route manager queues the same service only after successfully
-installing a mesh default where none existed; route refreshes and gateway
+installing a mesh default where none existed. Route refreshes and gateway
 switches do not queue it. `manet-auto-update.path` and the latched clock relay
 retry after initial verified time sync. `manet-auto-update.timer` adds a daily
 calendar event with `RandomizedDelaySec=2h` and `Persistent=true`, so a missed
@@ -282,14 +276,14 @@ event is caught after downtime.
 Every trigger checks opt-in and the clock marker. The wrapper accepts either
 the selected direct uplink's IPv4 default or `default via <IPv4> dev br0`,
 which only the gateway route manager installs. Mesh clients need no saved
-upstream interface. Only mesh checks sleep a random 0–900 seconds;
+upstream interface. Only mesh checks sleep a random 0–900 seconds.
 `MANET_AUTO_UPDATE_DELAY` provides a bounded test override. The
 45-minute service timeout covers sleep and update together, leaving
 30 minutes at maximum jitter. Route and opt-in are rechecked after the sleep.
 Systemd coalesces starts of this oneshot while it is activating, and the
 updater's flock excludes overlapping manual updates. The version-marker mtime
 still enforces the actual 24-hour routine throttle. The timer and path are
-shipped enabled and activated by setup and updates; disabled opt-in exits
+shipped enabled and activated by setup and updates. Disabled opt-in exits
 before any network check.
 
 `manet-kernel-protect.py` applies MANET's boot-package policy before updater

@@ -32,7 +32,7 @@ Run the Linux flasher as your regular user. It requests elevated access when it 
 
 ### Enter the mesh settings
 
-Select the board, then configure the mesh SSID and SAE key, network CIDR, regulatory region, EUD connection mode, SSH username and password, and web admin password. Radios intended for the same mesh need compatible mesh settings. The admin password is shared across the mesh; local access-point settings belong to each radio.
+Select the board, then configure the mesh SSID and SAE key, network CIDR, regulatory region, EUD connection mode, SSH username and password, and web admin password. Radios intended for the same mesh need compatible mesh settings. The admin password is shared across the mesh. Local access-point settings belong to each radio.
 
 For Wireless or Auto client mode, choose the same phone Wi-Fi base name for
 all radios in the mesh. Each radio adds four identifying digits to its name.
@@ -57,7 +57,7 @@ if you want to see files that will not run.
 
 ### Check the storage before writing
 
-Flashing erases the selected card or eMMC. Review the device and configuration before confirming. A CM4 with eMMC needs its carrier board in USB boot mode and `rpiboot` access; the [complete guide](../../../MANET/provisioning/README.md) covers the host and board requirements.
+Flashing erases the selected card or eMMC. Review the device and configuration before confirming. A CM4 with eMMC needs its carrier board in USB boot mode and `rpiboot` access. The [complete guide](../../../MANET/provisioning/README.md) covers the host and board requirements.
 
 The Windows disk list hides fixed and internal drives by default. Select
 **Show fixed / internal drives (advanced)** only when needed, and check the
@@ -72,7 +72,7 @@ When writing completes, proceed to [first boot](first-boot.md). Flashing storage
 
 ### Launchers select a complete release
 
-The standalone launchers resolve a published MANET release and verify its flasher ZIP against the manifest's size and SHA-256. Stable selection uses Latest; `--development` selects the most recently published eligible build. Selection supplies setup scripts and the board package together.
+The standalone launchers resolve a published MANET release and verify its flasher ZIP against the manifest's size and SHA-256. Stable selection uses Latest. `--development` selects the most recently published eligible build. Selection supplies setup scripts and the board package together.
 
 The selected release is the consistency boundary between the computer doing
 the imaging and the radio doing first boot. The launcher first obtains the
@@ -88,13 +88,13 @@ pair one version's generated configuration with another version's installer.
 | Render first boot | Board install URL, expected digest/version, and operator settings | All required template values and script anchor are handled |
 | Boot the radio | The already selected package identity | Download digest and both embedded version markers agree before extraction |
 
-SHA-256 detects content that differs from the selected manifest; it does
+SHA-256 detects content that differs from the selected manifest. It does
 not independently establish who authorized the manifest. The release
 selection and download path provide that trust context. A failed fetch or
 verification stops the launcher rather than silently switching channels or
 using an unrelated cached build.
 
-`MANET_RELEASE_FILE` passes the selected manifest into the engine. `MANET_FLASHER_WORK` keeps settings, downloads, and additional scripts outside the temporary extracted ZIP. `--local-scripts` runs a checkout's setup code against the selected published board package; it does not publish or package that checkout.
+`MANET_RELEASE_FILE` passes the selected manifest into the engine. `MANET_FLASHER_WORK` keeps settings, downloads, and additional scripts outside the temporary extracted ZIP. `--local-scripts` runs a checkout's setup code against the selected published board package. It does not publish or package that checkout.
 
 ### Fixed phone hotspot identity
 
@@ -142,7 +142,7 @@ rename an existing account.
 
 ### Review points for changes
 
-Check Linux and Windows rendering, saved configuration compatibility, unexpanded tokens, script embedding, and release selection. Prove rendered outputs as well as the form or prompt that collects a value. Storage-writing checks require disposable media; rendering checks alone do not establish hardware flashing behavior.
+Check Linux and Windows rendering, saved configuration compatibility, unexpanded tokens, script embedding, and release selection. Prove rendered outputs as well as the form or prompt that collects a value. Storage-writing checks require disposable media. Rendering checks alone do not establish hardware flashing behavior.
 
 - [Token list and rendering internals](../../../docs/provisioning-internals.md)
 - [Host requirements and user workflow](../../../MANET/provisioning/README.md)
