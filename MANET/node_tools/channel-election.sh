@@ -260,6 +260,19 @@ log() {
             fi
         done <<< "$lines"
 
+        # An allowed data channel with no home measurement is not an RF
+        # failure. Wait for a comparison, even if another channel has data.
+        # Excluded lobby/illegal channels have no row and may still escape.
+        if awk -v cur="$current_channel" '
+            $1 == cur && ($2 == "nodata" || ($2 == "ok" && $6 == "-")) { missing = 1 }
+            END { exit !missing }
+        ' <<< "$lines"; then
+            log "[$band_name] Incumbent telemetry unavailable. Holding $current_channel pending a home comparison."
+            _winner="$current_channel"
+            _urgent=false
+            return 0
+        fi
+
         best_ok=$(printf '%s\n' "$lines" | pick_best ok "$current_channel" "$CHANNEL_BIAS_SCORE")
         best_any=$(printf '%s\n' "$lines" | pick_best any "$current_channel" "$CHANNEL_BIAS_SCORE")
 

@@ -4,3 +4,5 @@
 0004-mesh-sae-logging.patch
 0005-mesh-recovery-tests.patch
 0006-mesh-keep-primary.patch
+0007-mesh-background-cac.patch
+0008-mesh-external-radar.patch

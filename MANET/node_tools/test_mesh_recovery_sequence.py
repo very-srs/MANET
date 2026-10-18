@@ -137,12 +137,15 @@ else:
         self.assertEqual([self.frequency(i) for i in range(3)], [2462] * 3)
 
     def test_missing_majority_times_out_and_stable_ticks_bound_announcements(self):
-        self.drop = {(sender, receiver, 74) for sender in (1, 2) for receiver in (0,)}
+        # Establish ready membership first. With no ready peer status, the
+        # coordinator now correctly defers the proposal instead of timing out.
         self.start_round()
         plan = self.runners[0].state['protocol']['plan']
+        self.drop = {(sender, receiver, 74) for sender in (1, 2) for receiver in (0,)}
         for when in range(self.now + 25, plan['activate_at'] + 1, 5):
             self.step(when)
         self.assertNotIn('commit', self.runners[0].state['protocol'])
+        self.assertEqual(self.runners[0].state['protocol']['expiry_reason'], 'no-majority')
         self.assertEqual([self.frequency(i) for i in range(3)], [2437] * 3)
         # Once the round is idle, repeated one-second ticks must not turn
         # the existing five-second advertisement into a per-tick stream.

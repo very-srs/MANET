@@ -1604,11 +1604,25 @@ the configured data channel.
 After a moving plan, participants suppress further election votes for 1560
 seconds (26 minutes), allowing two twelve-minute rendezvous cycles and an
 exchange window even when a band has only one usable entry.
-An unchanged plan can update limp mode without starting that hold. A node
+An unchanged plan can update limp mode without starting that hold. Recovery
+uses the same adoption path even if a peer CSA already landed the radios. It
+persists the agreed config, recovery identity and moving-plan hold before
+application. The hold starts once per adopted plan identity and survives
+same-boot restarts without renewal from repeated advertisements. A committed
+ordinary plan may replace its promised channel snapshot only with its exact
+target, on the same boot, during activation/grace. Unplanned radios must still
+match, and DFS retains its separate live detector checks. A node
 still reachable on another band can follow a freshly advertised committed
 destination from a reachable peer already operating there, even days after
 the original switch. Otherwise lobby recollection handles the straggler. No radio that
 is physically out of range is guaranteed to rejoin until contact returns.
+
+Protocol transitions are journaled once per round/plan/phase change for
+ordinary and DFS plans, with proposer, target, votes/required/participants,
+local readiness reason and remaining recovery hold. Persisted `expiry_reason`
+identifies membership expansion, local snapshot change, no majority, missing
+commit or missed activation. Successful adoption logs the plan identity, cause
+and old/new live and configured MHz.
 
 ### Recovery and reconciliation across all radios
 
@@ -2036,8 +2050,42 @@ vacates before pending event delivery or authenticated publication, then
 feeds the existing type 74/75 fallback and cooldown mechanism. Missing
 telemetry or peer loss does not manufacture a radar event.
 
+The watcher subscribes to nl80211 `mlme`/`config` and inotify before its startup
+latch read, then blocks without a polling timer. Kernel RADAR_DETECTED for
+the mesh PHY and a saved plan's frequency fences transmission before debugfs
+access. Latch validation still binds encrypted abort publication to the exact
+epoch/generation. EBUSY requests one snapshot through `manet-dfs-recheck`.
+The agreement answers on its next successful status read with
+`manet-dfs-kernel.json`, binding the reply to the debugfs path. The response,
+saved-plan changes and pending-slot deletion resume delivery. Unrelated file
+changes do not trigger reads. Capability and hold validation share one fresh
+snapshot. A busy read publishes fresh ordinary ACS status with
+`dfs_reason=hold-unavailable`, no DFS capability grant and no clearance token.
+It leaves watcher rechecks pending and preserves an unexpired preparation.
+A prepared or committed DFS promise waits within its original apply window,
+without voting or activating from cached clearance. Radar fencing and abort
+handling still run before ordinary status work.
+
+DFS preparation and every pending vote/commit/activation pass use one-second
+spacing. Each live kernel observation changes the published clearance, so it
+is sent on that pass rather than waiting for the ordinary five-second refresh.
+Alfred synchronizes every ten seconds. The former five-second idle spacing,
+plus command time and sampling before discovery, could exhaust the 15-second
+lease at a voter even while the remote detector stayed live. The daemon now
+reads authenticated status again after discovery/scoring and at activation.
+Only a recently expired peer lease with otherwise matching identity, capability,
+membership and readiness can defer a saved promise. Its persisted five-second
+wait cannot slide and cannot exceed the original apply window. No vote,
+commitment or activation is emitted during that wait. The local detector must
+remain live, and radar or an actual capability/token change still cancels
+immediately. Expired observations never become clearance authority.
+
 DFS admission requires the loaded MT7916 `dfs_mesh_v1` parameter, cfg80211's
-matching status ABI, live DFS regulatory flags and CM4 policy. Rock 3A can
+matching status ABI, live DFS regulatory flags, CM4 policy, a ready guardian
+and the running supplicant's `MANET_DFS_V3` control response. The package
+builder requires the `v2.11-manet-dfs3` binary with patches 0007/0008. Setting
+`MANET_DFS_ENABLED=0` builds a non-DFS package and installs a policy file that
+suppresses DFS capability. Debian fallback remains available there. Rock 3A can
 exercise this code only with the explicit `MANET_DFS_BENCH=1` service
 environment. Normal Rock 3A and RPi5 packages keep the policy off.
 
@@ -2064,6 +2112,42 @@ one scored before CAC if other observations expire during a weather-channel
 check. Rejection or changed membership retires an uncommitted background
 candidate. An existing timed plan retains its ownership until resolution.
 
+The candidate and fallback are frozen for the entire preparation. Once every
+hold is live, the coordinator builds the timed plan directly from that
+intention. It does not rescore against expired observations while RDD2 is
+occupied. Separate fallback scoring cannot modify the election's preference
+streak. Missing peer observations preserve an unexpired intention but cannot
+authorize activation. Expiry, a changed participant boot, loss of support or
+radar cooldown can retire it. Stop and DFS protocol-phase transitions are
+logged with their reason. An unplanned manual CAC remains subject to cleanup.
+
+The MANET Wi-Fi supplicant patch 0007 recognizes the paired kernel's
+`NL80211_ATTR_RADAR_BACKGROUND`. For mesh interfaces it excludes background
+STARTED, FINISHED and ABORTED from the foreground hostapd state machine.
+Otherwise STARTED changes ENABLED to DFS and FINISHED tries to initialize the
+existing BSS, fails and disables it. AP mode and unflagged CAC stay unchanged.
+All radar events still reach the supplicant, including a main event flagged
+background during the exact-chandef RDD2 transfer. This requires rebuilding
+the Wi-Fi binary. A dedicated CAC interface is unnecessary for this design.
+Patch 0008 defaults to upstream mesh evacuation. The ACS contract path
+stores its pending contract and sends the volatile per-BSS `MANET_DFS_OWNER 1`
+command before publishing a commitment, protecting a peer's early CSA too.
+A new BSS starts with ownership off. For that opted-in BSS, 0008 keeps mesh
+radar logging and unavailable-channel bookkeeping but
+returns before hostapd's autonomous channel selection and BSS restart paths.
+It updates the channel state even when the mesh began on non-DFS and its
+cached `ieee80211h` setting is zero. NOP completion still updates that cache.
+External mesh CSA completion also avoids a BSS restart based on stale
+foreground CAC state. Kernel admission, NOP and MANET clearance checks remain
+in force. AP operation keeps its original callbacks.
+
+The watcher queries the running BSS before fencing. An explicit
+`MANET_DFS_V3 owner=0` leaves evacuation to the native supplicant, even if an
+older contract remains on disk after a BSS restart. Missing or unknown control
+responses still fail closed. This matches the standalone shutdown helper's
+ownership rule and prevents the watcher from stopping a static mesh before its
+native radar handler can evacuate.
+
 After every node has a live hold, the existing unanimous agreement freezes
 each epoch/generation and the fallback. A fresh activation check precedes
 mesh CSA with HANDLE_DFS. There is no supplicant-restart path into DFS.
@@ -2075,13 +2159,60 @@ preserves AVAILABLE under that main owner. Main stop, retune or firmware
 recovery invalidates the main token. Main radar retains its token in the
 `main-radar` latch and also reaches nl80211 through mac80211.
 
+`/run/manet-dfs-contract.json` holds the same-boot operating contract separately
+from `agreement.json`, plus a pending replacement during activation. The
+operating fallback remains first in radar dispatch until live readback verifies
+the replacement channel and main token. A verified non-DFS landing disables
+the BSS opt-in and removes the record. A failed departure or an ordinary plan
+omitting 5 GHz retains it. Radar without a matching valid contract fences an
+externally owned radio instead of relying on general agreement history. An
+explicit native BSS retains its own evacuation.
+
+`manet-dfs-watch.service` has no manager `PartOf` relationship. Its notify
+readiness follows subscription and the initial latch read. Startup failure or
+service termination invokes the standard-library-only `manet_dfs_safety.py`.
+The updater invokes the staged helper before quiescing, and again afterward
+to catch an in-flight config worker. It fences operating DFS interfaces,
+stops their supplicants, and saves the stored non-DFS fallback plus a same-boot
+resume obligation. It then stops the guardian before replacing any modules.
+The new guardian must start and report ready before fallback supplicants resume
+and before update completion. A failed installer retains stopped DFS radios
+and old version markers. The helper does not need admin, ACS or config imports,
+so a partially replaced Python runtime cannot disable the handoff. Hardware
+acceptance must still verify RF stop latency and secured peer restoration.
+
 The independent watcher issues `iw ... switch ... beacons 3 block-tx` before
 persistence or Alfred I/O. It never waits for the agreement lock. A pending
 local event does not defer this action. A recent accepted CSA is reused instead
-of submitting it twice, and a peer's completed CSA is preserved. The agreement
-daemon verifies fallback landing and can recover with the interface down if
-CSA fails. Radar received through encrypted types 74 or 75 initiates the same
-exit, then starts the 30-minute cooldown. The next unanimous plan can refresh
+of submitting it twice, and a peer's completed CSA is preserved. A follower
+already executing a peer CSA can receive EBUSY from its own switch request.
+The watcher records kernel switch-start notifications separately in
+`/run/manet-dfs-peer-csa.json`, requiring TX blocking, the agreed fallback
+with 20 MHz width and center, and matching boot, contract and interface index.
+After a rejected request the guardian drains its subscribed event socket to
+catch a switch that started during that request. Other radar events stay queued.
+This kernel evidence permits the existing bounded wait without inventing a
+local block-TX acknowledgment. Missing or mismatched evidence still fences.
+The agreement daemon gives an accepted three-beacon CSA ten seconds from its request to
+land with TX blocked. A peer switch uses its first observed kernel start,
+with duplicate notifications unable to extend the deadline. When both local
+and peer evidence exist, the earlier deadline wins. Live frequency readback
+is still required before retiring the operating contract. Two seconds is too short for the mesh beacon countdown
+and would force teardown before a normal switch finishes. An authenticated
+remote abort checks the live channel before initiating a move, because a peer
+CSA can arrive first while the on-disk configuration still names DFS.
+Failed or expired CSA takes the interface down, saves the fallback and fully
+restarts the supplicant. Reconfiguring a live process during that countdown
+can leave peer authentication broken. Successful CSA does not reconfigure it.
+Radar received through encrypted types 74 or 75 initiates the same
+exit, then starts the 30-minute cooldown. A later peer report can replace the
+saved abort contract while an earlier local radar latch remains in the kernel.
+Replaying that historical latch must not condemn a newer cleared generation.
+The watcher suppresses that replay only when a fresh live receiver snapshot
+for the same frequency has a strictly newer generation and exactly matches
+an accepted local contract token. Unknown, expired, unbound or current
+generations still take the original safety path. Fresh nl80211 radar
+notifications still fence before any latch read or supersession check. The next unanimous plan can refresh
 the fallback after rescoring. Main detection retains the reserved receive
 configuration until the node leaves DFS, since the benched path-count change
 is restricted to non-DFS operation.
@@ -2115,13 +2246,23 @@ cannot disqualify a channel once three report.
 Without any measured alternative, the scorer holds the current channel,
 sets `URGENT` false and does not assert limp mode. This includes a bad home
 channel waiting for its first candidate data. Once candidates arrive, an
-incumbent that is disqualified, unmeasured, outside the candidate list, absent,
-or above the raw limp score threshold of 60 is urgent. Urgent results bypass
+allowed non-lobby incumbent without a valid home measurement stays on its
+current channel, without urgency or a new limp assertion, until a valid home
+comparison arrives. There is no timeout that converts missing telemetry to RF
+failure. A disqualified incumbent, one outside the candidate list or absent,
+or one above the raw limp score threshold of 60 is urgent. Urgent results bypass
 the preference hold-down. If every measured channel is disqualified, the
 scorer chooses the least bad measured channel and asserts limp mode. A
 qualified winner with a raw score above 60 also asserts limp mode. The
 incumbent bias cannot conceal that raw threshold. Lobby frequencies are never
 elected as data channels.
+
+The coordinator first requires fresh ready status from a majority of the
+full membership, then enough compatible voters for the scored plan. Unknown
+and unready nodes remain in the denominator. DFS still requires every node.
+Insufficient readiness waits inside the existing proposal window. A rejected
+proposal does not advance the preference streak. This admission check reduces
+futile rounds but cannot eliminate asynchronous coordinator disagreements.
 
 The coordinator requires three consecutive three-minute rounds preferring
 another channel before proposing a nonurgent move. `Runtime.score()` stores
@@ -2135,9 +2276,9 @@ and logs the held preference once per band and round.
 The streak survives service restarts within one boot. A new coordinator or
 boot starts fresh. Observing another coordinator during the proposal window
 clears local streaks. Peers ACK the frozen plan without re-scoring.
-`wpa_cli reconfigure` applies changes, with bounded frequency verification
-and a supplicant restart fallback. Unchanged channels do not trigger radio
-reconfiguration. The agreement and recovery sections describe activation.
+Mesh CSA applies changes, with bounded frequency verification and a
+supplicant reconfigure/restart fallback on ordinary channels. Config-only
+reconciliation never initiates another same-frequency CSA. The agreement and recovery sections describe activation.
 
 `ChannelScanResult` uses optional `busy_pct`, `foreign_pct`, `window_s` and
 `rf_trouble` fields. Explicit presence distinguishes zero or false from an
@@ -4848,6 +4989,7 @@ Tests sit alongside the code they cover and run without hardware or a node:
 | `test_led.py` | Real boot/button displays with fake GPIO holders and BATMAN: direct nodes across radio aliases, multihop exclusion, connected before registry arrival, unknown versus zero, recovery, opt-in hardware, GPIO errors, exclusive ownership, signal cleanup and onboard provisioning verdicts |
 | `test_mesh_time_sync.py` | Selected BATMAN routes and canonical identities, safe registry/address parsing, late/missing peers, bounded attempts and six-hour refreshes across restarts/clock steps, correction and source freshness, GPS/uplink transitions, quiet intervals and holdover on source loss, disarming startup steps, unchanged advertisement path and provisioning unit parity |
 | `test_acs_agreement.py` | Majority/timeouts, message loss, replay/restart safety, real scoring/activation, failed persistence and radio landing, authenticated straggler recovery |
+| `test_acs_recovery.py` | Peer CSA before commitment application or destination adoption, config persistence without duplicate CSA, once-per-adoption holds, readiness/compatibility admission, explicit expiry logs and ordinary publication during unavailable DFS reads |
 | `test_acs_bootstrap.py` | Clockless recovery with real encryption, boot/recipient/nonce binding, expiry after restart and slow reads, consume-before-move failure, radio compatibility, traffic bounds, live tourguide response and no unsynchronized timed work |
 | `test_acs_connected.py` | Day-old plan recovery over HaLow, actual-channel and freshness checks, one certificate publisher and failover, bounded retries, shared RF scoring after real partitions reconnect, static ACKs, and clockless replies without tourguide hops |
 | `test_acs_rendezvous.py` | Absolute rotation, cold anchor waiting, HaLow precedence, unavailable slots and peer queries, restart/retry behavior, authenticated data-channel overlap, selective helper adoption and real tourguide visits without redundant retunes |

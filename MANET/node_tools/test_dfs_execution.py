@@ -206,7 +206,7 @@ class DfsCsaTests(unittest.TestCase):
                                            main_epoch='d'*32,main_generation=7)))
             runner=object.__new__(runtime.Runtime)
             runner.state={'protocol':dict(plan=plan,commit=committed(plan))}
-            runner.own,runner.run_dir=plan['leader'],root
+            runner.own,runner.run_dir,runner.boot=plan['leader'],root,'a'*32
             runner.status=lambda now: dfs_status(now=now)
             runner.interfaces=lambda: {'5':('mesh5',config,5200)}
             runner.sync_parked=Mock();runner.discovery=Mock()
@@ -218,6 +218,8 @@ class DfsCsaTests(unittest.TestCase):
                     patch.object(runtime,'require_clock'), \
                     patch.object(runtime.time,'time',return_value=plan['activate_at']), \
                     patch.object(runtime,'background_hold_path',return_value=hold), \
+                    patch.object(runtime.dfs,'guardian_ready',return_value=True), \
+                    patch.object(runtime.dfs,'external_owner'), \
                     patch.object(runtime.dfs,'switch_dfs') as switch:
                 runner.apply({'5':5260})
                 switch.assert_called_once_with('mesh5',5260)
@@ -229,6 +231,8 @@ class DfsCsaTests(unittest.TestCase):
                     patch.object(runtime.time,'time',return_value=plan['activate_at']), \
                     patch.object(runtime.time,'sleep'), \
                     patch.object(runtime,'background_hold_path',return_value=hold), \
+                    patch.object(runtime.dfs,'guardian_ready',return_value=True), \
+                    patch.object(runtime.dfs,'external_owner'), \
                     patch.object(runtime.dfs,'switch_dfs'):
                 with self.assertRaisesRegex(ValueError,'main detector token'):
                     runner.apply({'5':5260})
@@ -247,7 +251,9 @@ class DfsCapabilityTests(unittest.TestCase):
         ):
             raw.read_text.return_value=json.dumps(dict(dfs_mesh_v1=abi))
             with patch.object(dfs,'cm4_enabled',return_value=board), \
-                    patch.object(dfs.Path,'read_text',return_value=driver):
+                    patch.object(dfs.Path,'read_text',return_value=driver), \
+                    patch.object(dfs,'running_supplicant',return_value=True), \
+                    patch.object(dfs,'guardian_ready',return_value=True):
                 self.assertEqual(dfs.capable(raw,flags),expected)
 
     def test_pending_event_cannot_issue_duplicate_csa(self):

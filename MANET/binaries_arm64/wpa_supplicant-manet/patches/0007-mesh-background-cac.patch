@@ -1,0 +1,37 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+Subject: [PATCH] mesh: leave external background CAC to MANET
+
+The paired cfg80211 reports RADAR_BACKGROUND on CAC notifications. MANET
+starts and owns that CAC while the secured mesh stays on its current channel.
+Do not feed its lifecycle notifications to the foreground mesh BSS state
+machine. AP mode, ordinary CAC, NOP and radar reports retain upstream handling.
+Radar is deliberately not filtered: during RDD2 to main transfer cfg80211 can
+still flag a same-chandef main report as background.
+
+--- a/src/drivers/driver_nl80211_event.c
++++ b/src/drivers/driver_nl80211_event.c
+@@ -2469,6 +2469,24 @@
+ 	data.dfs_event.freq = nla_get_u32(tb[NL80211_ATTR_WIPHY_FREQ]);
+ 	event_type = nla_get_u32(tb[NL80211_ATTR_RADAR_EVENT]);
+ 
++#ifdef CONFIG_MESH
++	/* MANET owns background CAC on the live mesh interface. These are
++	 * not foreground CAC events: feeding them to ifmsh changes ENABLED
++	 * to DFS and tries to initialize the already-running BSS on FINISHED.
++	 * Keep radar detection (including a main report during RDD2 transfer)
++	 * and all unflagged foreground events on their ordinary path.
++	 */
++	if (drv->nlmode == NL80211_IFTYPE_MESH_POINT &&
++	    tb[NL80211_ATTR_RADAR_BACKGROUND] &&
++	    (event_type == NL80211_RADAR_CAC_STARTED ||
++	     event_type == NL80211_RADAR_CAC_FINISHED ||
++	     event_type == NL80211_RADAR_CAC_ABORTED)) {
++		wpa_printf(MSG_DEBUG, "nl80211: MANET external background CAC event %d on %d MHz",
++			   event_type, data.dfs_event.freq);
++		return;
++	}
++#endif /* CONFIG_MESH */
++
+ 	if (tb[NL80211_ATTR_MLO_LINK_ID]) {
+ 		data.dfs_event.link_id =
+ 			nla_get_u8(tb[NL80211_ATTR_MLO_LINK_ID]);

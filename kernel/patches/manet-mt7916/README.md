@@ -163,7 +163,7 @@ not reuse stale precedence. A block-TX exit from a DFS channel carries the
 regulatory reason in mesh actions and beacons, allowing peers to mark the old
 channel unavailable and latch the event before Alfred arrives.
 
-On main radar, the independent host watcher requests one-beacon block-TX CSA
+On main radar, the independent host watcher requests three-beacon block-TX CSA
 before persistence, agreement processing or Alfred publication. Failed CSA
 uses interface-down recovery. The main detector follows the standard kernel
 radar path; the userspace watcher is not a bound on stop latency if the host
@@ -194,9 +194,54 @@ and SSH latency; kernel latch and CSA times still come from event records. The
 script times out if the real scoring never selects DFS. A separate monitor
 or traffic capture is needed for over-the-air TX cessation and loss.
 
+For a clean-RF bench, use the rebuilt `v2.11-manet-dfs3` supplicant and
+current runtime on every node, with all connected participants listed and
+their 5 GHz mesh already at 5240 MHz/HT20. This temporary controller supplies
+local scan requests and a deterministic preference after real candidate and
+fallback measurements. It leaves capability, clock, membership, CAC,
+unanimous votes, live-token activation and transfer checks in the normal path:
+
+```sh
+python3 kernel/patches/manet-mt7916/bench-dfs-auto.py cm4 r3a \
+  --target 5260 --fallback 5240 --detector cm4 \
+  --output /absolute/path/to/new-capture
+```
+
+Add a third host to exercise three participants. The script verifies the
+running supplicant inode, installs only temporary `/run` service overrides,
+and removes its overrides in `finally`. After controller loss, use
+`bench-dfs-auto.py cm4 r3a --cleanup`. Cleanup restores the services, not a
+previous channel configuration. Normal successful radar fallback lands on
+the starting channel. The override expires at the capture deadline and cannot
+forge an occupancy sample or CAC clearance. The existing capture also accepts
+two hosts, checks established peering and fresh main-token samples, and records
+the supplicant/agreement journals for abort attribution. Neither script has
+been hardware qualified by its source checks.
+
+Both controllers accept `--recovery-timeout` (default 60 seconds). After radar,
+every node must reach the fallback and regain at least its pre-trigger peer
+count, with fresh samples, for ten seconds. The controller fails immediately
+on BSS disable/disconnect events, or at the recovery deadline with the node,
+frequency or missing peer count. Silence cannot extend that deadline.
+Failure writes its reason to `summary.json`, and the automatic controller
+still removes its temporary overrides. This prevents a later manual restart
+from turning a failed evacuation into an apparent pass.
+
 The complete path remains a hardware acceptance candidate until this bench
 passes. Keep all three Rock 3A modules together with their pinned Image and
 configuration. Do not replace only cfg80211 or only the driver.
+
+For acceptance, install the native Debian `v2.11-manet-dfs3` build, the
+updated guardian unit, and `manet_dfs_safety.py` on every participant. Verify
+`wpa_cli -i IFACE raw MANET_DFS_STATUS` returns `MANET_DFS_V3 owner=0` before
+ACS arms the contract. The guardian must be active after its notify readiness.
+The full secured-mesh run must preserve peers during background CAC, transfer
+the main token, opt in the BSS, detect radar, and restore every baseline peer
+on the fallback within the capture deadline without manual recovery. Then
+repeat after a 2.4 GHz-only agreement, with the manager stopped, and through
+a tools-update handoff. A failed install or guardian start must leave the DFS
+radio stopped. Static DFS must retain native foreground CAC and evacuation
+with owner=0. None of the host or C harnesses proves RF stop latency.
 
 ## DFS-only regulatory database
 

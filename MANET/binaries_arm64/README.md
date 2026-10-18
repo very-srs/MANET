@@ -63,6 +63,30 @@ Patch 0006 keeps the mesh on its configured primary channel. Upstream moves
 a joining node's primary when other networks share its 40 or 80 MHz block,
 which leaves that node unable to peer with the rest of the mesh.
 
+Patch 0007 keeps externally owned background CAC notifications out of the
+mesh BSS state machine. The paired kernel marks these notifications with
+`RADAR_BACKGROUND`. STARTED, FINISHED and ABORTED for that background receiver
+must not restart or disable the already running secure mesh. Foreground CAC
+and AP mode retain their ordinary handling. Radar reports are
+preserved even if marked background because a main report during detector
+transfer can carry that flag. Patch 0008 retains mesh radar reporting and
+marks the affected channel unavailable, including after entry from a non-DFS
+channel. It leaves evacuation to MANET's independent block-TX watcher and
+authenticated fallback agreement. It also prevents external mesh CSA from
+restarting the BSS based on a stale foreground CAC cache. cfg80211 retains
+NOP enforcement, and AP radar/channel selection stays unchanged.
+The exception requires a volatile per-BSS `MANET_DFS_OWNER 1` command.
+Only the ACS contract path sends it, after storing the contract and checking
+the independent guardian. New BSSs, static meshes and unmanaged meshes default
+to native evacuation and ordinary foreground CAC checks. No opt-in is saved
+in the WPA configuration.
+This build identifies itself as `v2.11-manet-dfs3` and answers
+`MANET_DFS_STATUS` with `MANET_DFS_V3 owner=0` or `owner=1`.
+DFS capability queries this running control endpoint. Copying a new binary
+without restarting the old process cannot enable DFS.
+A source patch alone does not update the prebuilt binary.
+Rebuild and restart the Wi-Fi mesh supplicants before the automatic DFS bench.
+
 Mesh configs use the global setting `mesh_max_inactivity=10`. The patched
 Wi-Fi build frees an established peer when kernel inactivity reaches ten
 seconds. Received beacons refresh activity, so an idle peer in range remains
@@ -83,7 +107,7 @@ Every `wpa_supplicant@.service` instance uses `manet-mesh-supplicant.py` through
 changes, lobby visits and AP-to-mesh transitions. The existing AP guard still
 runs first. When the MANET executable is absent, the wrapper logs a WARNING
 to the journal and executes `/usr/sbin/wpa_supplicant`. That fallback lacks
-the HE and recovery changes. USB client uplinks retain their separate Debian
+the HE and recovery changes and cannot advertise ACS DFS capability. USB client uplinks retain their separate Debian
 unit: they do not need these mesh patches or a reduced dependency build.
 
 The tools updater adds missing inactivity settings to live, lobby and HaLow
@@ -110,6 +134,15 @@ and builds both programs into the requested output directory. It does not
 install into the running system. Set `WPA_TARBALL=/path/to/archive` for an
 offline build and `JOBS=2` to limit parallel compilation. The tarball digest
 is `912ea06f74e30a8e36fbb68064d6cdff218d8d591db0fc5d75dee6c81ac7fc0a`.
+
+`test-background-events.py /path/to/patched/wpa_supplicant-2.11` compiles the
+actual nl80211 radar decoder under address/undefined-behavior sanitizers. It
+checks external mesh CAC isolation and continued delivery of foreground,
+AP and radar events. It does not establish radio behavior or SAE continuity.
+`test-mesh-radar.py` accepts the same source tree and exercises the actual
+radar, NOP and CSA callbacks under the same sanitizers, with channel lookup
+and BSS lifecycle dependencies replaced. It checks mesh state preservation
+and the unchanged AP paths. Hardware acceptance is still required.
 
 The configuration derives from Debian 2:2.10-24. It removes D-Bus, PC/SC,
 smartcard, readline and MACsec dependencies, and uses OpenSSL's default

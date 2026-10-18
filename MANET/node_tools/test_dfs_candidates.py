@@ -69,6 +69,8 @@ class DfsCandidateTests(AcsHarness):
                 patch.object(observer, 'observer_path', return_value=path), \
                 patch.object(observer.subprocess, 'run') as iw, \
                 patch.object(dfs, 'cm4_enabled', return_value=True), \
+                patch.object(dfs, 'running_supplicant', return_value=True), \
+                patch.object(dfs, 'guardian_ready', return_value=True), \
                 patch.object(Path, 'read_text', read), \
                 patch.object(observer, 'measure', side_effect=lambda p, f: 12 if f == 5260 else 70), \
                 patch('sys.argv', ['manet_bgobs.py', 'wlan1', '5200']), \

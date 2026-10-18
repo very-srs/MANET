@@ -102,6 +102,7 @@ for unit in \
     ethernet-autodetect.service \
     sae-watchdog.service \
     manet-dhcp-isolation.service \
+    manet-dfs-watch.service \
     manet-atak.service \
     manet-mesh-power.service \
     manet-cpu-policy.service \

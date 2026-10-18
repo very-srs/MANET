@@ -261,7 +261,14 @@ The main RDD starts before the background detector is retired. cfg80211 keeps
 the channel AVAILABLE and preserves the token for later `main-radar` reports.
 The independent watcher issues a block-TX CSA to the agreed fallback before
 publishing over Alfred. Peers follow the first arriving CSA or authenticated
-report. The daemon allows ten seconds for an accepted three-beacon CSA with
+report. A follower already switching to the agreed fallback keeps its BSS
+when the kernel confirms that the matching switch has blocked transmit queues.
+The watcher binds that evidence to the current boot, contract and interface.
+It retains the original deadline across daemon restarts and repeated events,
+and verifies the live channel before completing recovery. Missing evidence
+still requires fencing. A historical radar latch is superseded only by a
+newer live receiver on the same frequency with an exact local contract binding.
+Fresh radar notifications still fence immediately. The daemon allows ten seconds for an accepted three-beacon CSA with
 TX blocked and preserves a peer's completed move. Only a failed or expired
 CSA needs interface-down recovery and a full supplicant restart on the safe
 configuration. Radar starts a 30-minute cooldown. Rescoring can refresh the fallback

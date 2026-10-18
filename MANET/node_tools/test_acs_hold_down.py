@@ -148,10 +148,11 @@ class HoldDownTests(AcsHarness):
                     self.assertEqual(result.returncode, 0, result.stderr)
                     output = (self.root / 'election').read_text().splitlines()
                     values = dict(line.split('=', 1) for line in output)
-                    urgent = cause not in ('preference', 'threshold')
+                    urgent = cause not in ('preference', 'threshold', 'nodata')
                     self.assertEqual(values['URGENT_' + suffix],
                                      str(urgent).lower())
-                    self.assertEqual(values['WINNER_' + suffix], str(away))
+                    self.assertEqual(values['WINNER_' + suffix],
+                                     str(home if cause == 'nodata' else away))
                     self.runner.state['challenge'] = {
                         band: {'incumbent': home, 'round': 4, 'count': 1}}
                     scored, journal = self.score()

@@ -392,6 +392,44 @@ if sys.argv[1] == 'is-active' and sys.argv[-1] == 'mesh-config-apply.service':
                 residents.add(unit.name)
         self.assertEqual(set(update.RUNTIME_SERVICES), residents)
 
+    def dfs_handoff_fixture(self):
+        from test_acs_dfs import dfs_plan
+        safety = Path(__file__).with_name('manet_dfs_safety.py')
+        self.members['usr/local/bin/manet_dfs_safety.py'] = (safety.read_bytes(), 0o755)
+        self.command('iw', "print('Interface mesh5\\n type mesh point\\n channel 52 (5260 MHz)')")
+        self.command('ip', "with open(os.environ['TEST_EVENTS'], 'a') as f: f.write('ip ' + ' '.join(sys.argv[1:]) + '\\n')")
+        config = self.root / 'etc/wpa_supplicant/wpa_supplicant-mesh5.conf'
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_text('frequency=5260\n')
+        (self.root / 'run/manet-dfs-contract.json').write_text(json.dumps(dict(
+            boot='boottest', iface='mesh5', operating=dfs_plan())))
+        self.make_archive()
+        return config
+
+    def test_failed_installer_after_dfs_handoff_leaves_radio_safe(self):
+        config = self.dfs_handoff_fixture()
+        with patch.dict(os.environ, TEST_CONFIG_MIGRATION_FAIL='1'):
+            with self.assertRaises(update.UpdateError):
+                self.updater.update()
+        history = self.history()
+        self.assertIn('ip link set dev mesh5 down', history)
+        self.assertLess(history.index('ip link set dev mesh5 down'),
+                        history.index('systemctl stop node-manager.service'))
+        self.assertIn('frequency=5200', config.read_text())
+        self.assertNotIn('systemctl start wpa_supplicant@mesh5.service', history)
+        self.assertTrue(self.updater.pending.exists())
+        self.assertEqual(self.updater.marker.read_text(), self.old_version)
+
+    def test_guardian_start_failure_prevents_update_commit_and_resume(self):
+        self.dfs_handoff_fixture()
+        with patch.dict(os.environ, TEST_SYSTEMCTL_FAIL='enable --now manet-dfs-watch.service'):
+            with self.assertRaises(update.UpdateError):
+                self.updater.update()
+        self.assertNotIn('systemctl start wpa_supplicant@mesh5.service', self.history())
+        self.assertNotIn('try-restart wpa_supplicant@', self.history())
+        self.assertTrue(self.updater.pending.exists())
+        self.assertEqual(self.updater.marker.read_text(), self.old_version)
+
     def test_firmware_setup_runs_after_install_and_before_version(self):
         name = 'usr/local/bin/manet-mt7916-setup.sh'
         self.members[name] = (
