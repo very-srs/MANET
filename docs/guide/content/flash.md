@@ -101,7 +101,7 @@ using an unrelated cached build.
 Both flashers and provisioning templates still supply `lan_ap_ssid`.
 Radio setup records the full name in `/var/lib/manet-ap-ssid` before other
 setup writes, including on wired nodes with an empty name. Later API edits,
-config activation and setup reruns cannot rename it. The fixed base is the
+config activation, and setup reruns cannot rename it. The fixed base is the
 literal prefix used to exclude mesh phone hotspots from Wi-Fi uplinks.
 See [settings](settings.md#developer-keep-local-and-shared-settings-separate).
 

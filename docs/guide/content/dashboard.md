@@ -98,7 +98,7 @@ Your login lasts up to 48 hours on this radio. A reboot, web-service restart, or
 
 For test selection and interpretation, continue to
 [measure a connection](measurements.md). The [radio controls](radios.md),
-[internet](internet.md), [services](services.md) and [power](power.md)
+[internet](internet.md), [services](services.md), and [power](power.md)
 chapters explain the corresponding status and management results.
 
 ## Developer
@@ -163,9 +163,9 @@ See [registry freshness](../../../docs/node-tools-internals.md#data-management).
 
 The local panel reads `/run/manet-atak/status.json` and removes expired phone
 leases using monotonic time and the current boot ID. `POST /api/atak/controller`
-requires a local DHCP-pool source, JSON and a same-origin Origin/Referer when
+requires a local DHCP-pool source, JSON, and a same-origin Origin/Referer when
 provided. No admin cookie is needed. A bounded atomic `controller.json` producer
-file carries the selected UID, request ID, session, boot and BOOTTIME timestamp.
+file carries the selected UID, request ID, session, boot, and BOOTTIME timestamp.
 The existing ATAK event cycle rechecks presence/path and the five-second envelope
 before persisting the choice. HTTP 202 reports a queued request. The next status
 snapshot shows the actual controller. Normal status refresh/caching remains in

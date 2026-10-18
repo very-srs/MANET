@@ -30,8 +30,8 @@ in place without reflashing.
 
 A CM4 release can carry a new kernel along with the tools. The update installs
 the tools first, then restarts the radio once to try the new kernel. Before
-keeping it, the radio checks its own startup, drivers, attached radios and
-mesh interface. It does not need Ethernet, internet, another radio or a set
+keeping it, the radio checks its own startup, drivers, attached radios, and
+mesh interface. It does not need Ethernet, internet, another radio, or a set
 clock for this check. The tools version shown can change before the kernel
 check finishes.
 
@@ -137,18 +137,18 @@ the release includes a deliberate migration. See the
 
 The updater validates paths, ownership, file types, archive limits, required
 files, available space, the manifest digest, and the checksum sidecar before
-live replacement. Boot files, modules and Morse firmware use a separate
+live replacement. Boot files, modules, and Morse firmware use a separate
 matched kernel payload with trial activation. Downloading requires
 `/run/initial_time_synced`. Local recovery does not.
 
 The default builder includes managed MT7916 firmware. Optional board kernel
-inputs carry a manifest, boot files, versioned modules and isolated Morse
+inputs carry a manifest, boot files, versioned modules, and isolated Morse
 firmware. CM4 defaults to a one-shot trial unless its local
 `/etc/manet-kernel-update.conf` contains `enabled=n`. The profile is derived
-from the node's boot config, command line, FAT UUID and hardware and saved in
+from the node's boot config, command line, FAT UUID, and hardware and saved in
 the transaction before reboot. An existing local trial profile overrides it.
 Trials use the firmware kernel watchdog, `watchdog.open_timeout=120`, PID 1's
-runtime watchdog and a 300-second guard. The EEPROM boot watchdog is optional.
+runtime watchdog, and a 300-second guard. The EEPROM boot watchdog is optional.
 Without it, failure before kernel handoff can require a power cycle. CM4
 provisioning disables the stock kernel's unmatched initramfs. Older CM4 images
 with `auto_initramfs=1` retain their original `config.txt` and initramfs during
@@ -157,7 +157,7 @@ alongside its slot prefix. Only health confirmation atomically commits both
 settings to `config.txt`. The journal preserves the old assignments and their
 sections. Preflight checks the saved and running root selectors, mounted root
 and its storage drivers. Custom initramfs directives, userspace root aliases,
-encrypted/LVM/RAID/network roots and modular root filesystem or storage drivers
+encrypted/LVM/RAID/network roots, and modular root filesystem or storage drivers
 are refused with a specific reason. RPi5 retains its
 matched image configuration. The trial runs before runtime software replacement, and a failed trial
 is not automatically repeated. Early file recovery avoids the boot filesystem.
@@ -173,18 +173,18 @@ identify radios even when no interfaces appeared. A bound SPI hat is recorded
 before reboot, while an unbound overlay is not treated as hardware. The
 saved inventory catches a radio disappearing during trial. Health has a
 60-second budget and must finish before 240 seconds of boot uptime. No network
-path, peers or clock sync is required. Opt-out skips the kernel and persists
+path, peers, or clock sync is required. Opt-out skips the kernel and persists
 that selection for interrupted runtime recovery. It cannot abandon an armed
 trial or erase a failed candidate.
 
 For an offline update, `--local-archive` and `--local-version` validate an
 explicitly supplied board tools archive and adjacent checksum without release
 discovery. This trusts the locally supplied files and allows an equal version
-to be reinstalled. It uses the same staging, recovery and trial transaction.
+to be reinstalled. It uses the same staging, recovery, and trial transaction.
 
 ### Compatibility with stable v0.569
 
-The old updater accepts only root-relative `etc`, `usr` and `root` paths,
+The old updater accepts only root-relative `etc`, `usr`, and `root` paths,
 rejects raw boot/modules/firmware, and caps downloads at 64 MiB with 512 MiB
 expanded. `MANET_LEGACY_BOOTSTRAP=1` wraps a complete new-updater CM4 archive
 under `/usr/local/share/manet/bootstrap/`. The builder enforces those older
@@ -210,7 +210,7 @@ Its retained recovery archive completes an interrupted installation.
 
 Optional release payloads carry the native Debian follower hostapd package
 and the DFS-tagged regulatory database. Setup verifies their hashes, package
-identity, installed version, follower marker and APT candidate before version
+identity, installed version, follower marker, and APT candidate before version
 commit. The hostapd preference pins `2:2.10-24+manet*` at priority 1001.
 The new regulatory DB is CM4-only and takes effect after reboot. Rock 3A and
 RPi5 retain their existing databases.

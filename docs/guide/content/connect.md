@@ -51,7 +51,7 @@ ATAK works over the client Ethernet connection or this radio's enabled Wi-Fi
 access point. Keep phones near their radio. With a GPS-equipped radio, turn
 **Android location OFF**, enable ATAK external GPS input on **UDP 4349**, and leave
 **Default Mesh SA ON**. ATAK then shares the radio's position over mesh, direct
-connections and TAK servers. With no radio GPS receiver, keep **Android location
+connections, and TAK servers. With no radio GPS receiver, keep **Android location
 ON** instead. The controlling phone supplies GPS and there is no missing-receiver
 prompt. Choose the controller in **ATAK PHONES** without the admin password.
 

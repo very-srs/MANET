@@ -2,7 +2,7 @@
 
 ## Marine
 
-![A childlike crayon drawing of a green radio beside a power plug, Ethernet plug, headset and GPS receiver.](../assets/hardware-crayon.png)
+![A childlike crayon drawing of a green radio beside a power plug, Ethernet plug, headset, and GPS receiver.](../assets/hardware-crayon.png)
 
 ### Give the radio what it needs
 
@@ -19,7 +19,7 @@ The picture shows the parts' jobs. It is not an assembly diagram.
 ### Choose a supported computer
 
 A MANET radio contains a small Linux computer and its radio hardware. The
-computer, wireless cards, antennas, power supply and enclosure need to work
+computer, wireless cards, antennas, power supply, and enclosure need to work
 together. A supported computer alone is not a complete radio.
 
 | Computer | Current project status |
@@ -45,7 +45,7 @@ A GPS receiver supplies position and can supply time. A radio without its own
 GPS can obtain time from another suitable node, but that does not give it a
 GPS position. See [time](time.md) and [location](location.md).
 
-Voice needs a supported audio device, microphone/headset and physical PTT
+Voice needs a supported audio device, microphone/headset, and physical PTT
 input. Opening the dashboard on a phone does not turn the phone into a
 microphone. Follow the [voice guide](voice.md).
 
@@ -67,7 +67,7 @@ numbers must not be treated as a finished wiring specification.
 
 The runtime depends on roles such as the HaLow mesh link, the 2.4 GHz mesh
 link, the 5 GHz mesh link, and the candidate client AP. Linux interface
-numbers can change with enumeration order, driver timing and attached USB
+numbers can change with enumeration order, driver timing, and attached USB
 devices. Early naming and role discovery establish the actual interfaces.
 Later controllers consume those mappings instead of assuming that `wlan1`
 always means one band. Missing hardware must remain an absent role, not be
@@ -78,10 +78,10 @@ one conventional mesh band, or with HaLow alone. A missing band does not
 justify moving a different physical radio when a band-specific channel
 command arrives. [Channel control](radios.md) explains that resolution.
 
-### Kernel, firmware and userspace form one bring-up chain
+### Kernel, firmware, and userspace form one bring-up chain
 
 The Debian 13 image needs the board's boot files, matching kernel modules,
-device-tree configuration, radio firmware and the appropriate supplicant.
+device-tree configuration, radio firmware, and the appropriate supplicant.
 Installing a userspace program cannot compensate for a module built without
 the required bus support. A kernel replacement also needs a matching module
 tree under `/usr/lib/modules/` on the merged-usr system.
@@ -106,9 +106,9 @@ identifies the supplied BATMAN tools and supplicant builds. The
 
 ### Separate hardware evidence from a software request
 
-A configured channel, a requested transmit power and an UP interface are
+A configured channel, a requested transmit power, and an UP interface are
 three different observations. None alone establishes an authenticated peer,
-a working BATMAN route or measured RF output. The UI reads back what the
+a working BATMAN route, or measured RF output. The UI reads back what the
 driver reports. Actual transmit power remains a hardware measurement.
 
 Likewise, a successful provisioning verdict does not test an enclosure's
@@ -120,7 +120,7 @@ attributing every lost peer to channel selection.
 
 ### Optional peripherals have independent readiness
 
-GPS position, clock qualification, audio readiness and external GPIO
+GPS position, clock qualification, audio readiness, and external GPIO
 indications each have their own producer and state. GPS can lack a fix while
 the mesh operates. Time can come from another node. A USB audio device can
 disappear while packet forwarding continues. User-facing status should

@@ -15,14 +15,14 @@ People check a package before calling it ready for normal use. Read
 
 ## User
 
-### Source, documentation and radio releases are separate
+### Source, documentation, and radio releases are separate
 
 The GitHub repository holds the project's source and documentation. A
 documentation update can appear here while your radio stays on the same
 software version. Source changes also need packaging and publication before
 the ordinary updater can install them.
 
-Normal flashing, first boot and updates follow the full GitHub release
+Normal flashing, first boot, and updates follow the full GitHub release
 marked **Latest**, the stable selection. A development build is chosen
 explicitly and may contain work still under evaluation. Moving a tested
 build to stable changes its release status without rebuilding it.
@@ -46,7 +46,7 @@ explains it simply with drawings. The
 both human contributors and coding agents.
 
 For a fault report, include the radio version, hardware, what you expected,
-what happened and the relevant [diagnostic evidence](troubleshooting.md).
+what happened, and the relevant [diagnostic evidence](troubleshooting.md).
 For a performance claim, include a saved measurement and conditions, not
 just a dashboard color.
 
@@ -57,13 +57,13 @@ just a dashboard color.
 | Repository area | Installed responsibility |
 |---|---|
 | `MANET/node_tools/` | Runtime executables and Python modules, generally under `/usr/local/bin`. |
-| `MANET/systemd/`, `systemd-network/`, `networkd-dispatcher/`, `udev/` | Service lifecycle, interfaces and event hooks. Some units are generated during provisioning. |
-| `MANET/etc/`, `share/manet/`, `root/` | Configuration defaults, shared assets and regulatory data. |
+| `MANET/systemd/`, `systemd-network/`, `networkd-dispatcher/`, `udev/` | Service lifecycle, interfaces, and event hooks. Some units are generated during provisioning. |
+| `MANET/etc/`, `share/manet/`, `root/` | Configuration defaults, shared assets, and regulatory data. |
 | `MANET/binaries_arm64/`, `lyra_arm64/` | Supplied ARM64 programs and audio artifacts. |
-| `MANET/provisioning/` | Host flashers, first-boot templates and operator hooks. |
-| `MANET/packaging/` | Development setup, archive builders and Lyra plugin source. |
-| `kernel/build/` | Pinned upstream inputs, kernel/Morse builds and overlay assembly. |
-| `MANET/releases/` | Release selection, manifests, publication and promotion. |
+| `MANET/provisioning/` | Host flashers, first-boot templates, and operator hooks. |
+| `MANET/packaging/` | Development setup, archive builders, and Lyra plugin source. |
+| `kernel/build/` | Pinned upstream inputs, kernel/Morse builds, and overlay assembly. |
+| `MANET/releases/` | Release selection, manifests, publication, and promotion. |
 | `kernel/patches/` | Tracked kernel patch work; status depends on each area's evidence. |
 | `docs/guide/` | This three-tier site and its builder. |
 
@@ -74,7 +74,7 @@ runs. A filename alone does not imply a standalone daemon.
 ### Start from the contributor workflow
 
 [Contributing](../../../CONTRIBUTING.md) explains host setup, architecture
-constraints, focused tests, hardware evidence and PR expectations. Before
+constraints, focused tests, hardware evidence, and PR expectations. Before
 changing a subsystem, read its owning reference and the service or controller
 that invokes it. For a design change, describe the proposed ownership and
 failure handling early so maintainers can identify overlap with ongoing work.
@@ -127,10 +127,10 @@ project's requirements. The [test reference](../../../docs/node-tools-internals.
 describes the environment and subsystem coverage.
 
 Select checks that exercise the change's consequences: stale peer data,
-missing hardware, restart, partial apply, loss of a path, malformed input or
+missing hardware, restart, partial apply, loss of a path, malformed input, or
 storage exhaustion where relevant. Hardware behavior needs evidence on
 the CM4, the verification target. A simulation cannot establish on-air
-timing, wiring, RF output or power-loss boot recovery.
+timing, wiring, RF output, or power-loss boot recovery.
 
 Documentation changes require a guide build and link check. Navigation or
 presentation changes also need desktop/mobile and all-tier browser review.
@@ -149,7 +149,7 @@ changing package bytes. Cleanup keeps the newest three prereleases while
 preserving full releases and Git tags.
 
 The field update tarball can carry any component needed by a release,
-including kernels, modules, firmware and migrations. Payload freedom is
+including kernels, modules, firmware, and migrations. Payload freedom is
 separate from activation and recovery. Kernel boot sets follow their own
 activation and recovery rules. Follow
 [updates](updates.md) and the

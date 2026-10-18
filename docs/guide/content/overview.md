@@ -39,7 +39,7 @@ decide which radio must choose again. That can briefly interrupt a connected
 device. Its connection may need to renew before traffic resumes. A short
 startup wait gives radios time to hear one another before choosing.
 
-See [addresses and names](addresses.md) for client capacity, local names
+See [addresses and names](addresses.md) for client capacity, local names,
 and what to do after an address changes.
 
 ### Start with a CM4
@@ -63,7 +63,7 @@ The Compute Module 4 is the primary verification target. Raspberry Pi 5 and Rock
 
 [What runs automatically](automation.md) connects the background jobs to
 these results. Builders can also read [hardware](hardware.md),
-[custom setup](customization.md) and [development](development.md).
+[custom setup](customization.md), and [development](development.md).
 
 ### What is still developing
 
@@ -216,10 +216,10 @@ Normal provisioning and updates follow the full GitHub release marked Latest. De
 
 The repository includes [package builders](../../../MANET/packaging/README.md)
 and [kernel recipes](../../../kernel/build/README.md), including pinned source
-preparation and local patches. Downloaded trees, caches and output archives
+preparation and local patches. Downloaded trees, caches, and output archives
 are generated locally. Start with the
 [contributor workflow](../../../CONTRIBUTING.md) to set up the toolchain,
-validate a change and prepare a PR.
+validate a change, and prepare a PR.
 
 ### Detailed references
 

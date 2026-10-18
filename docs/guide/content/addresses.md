@@ -65,7 +65,7 @@ Some [shared services](services.md) have reserved service addresses that
 can move between hosts. Those are separate from a radio's own address.
 Changing the shared mesh address range affects all of them. Follow
 [settings](settings.md) rather than editing one radio independently.
-After a range change, each radio removes its old addresses, gateway and
+After a range change, each radio removes its old addresses, gateway, and
 service addresses before taking new ones, so reconnect your devices once the
 change has finished.
 
@@ -98,7 +98,7 @@ reconciliation repairs races and partition merges. For overlapping claims,
 the higher MAC keeps its allocation and the lower MAC releases and reselects.
 
 A CIDR change removes this node's old addresses, EUD gateway, old service
-VIPs, DHCP pool and mDNS entry before taking new ones. Unrelated aliases on
+VIPs, DHCP pool, and mDNS entry before taking new ones. Unrelated aliases on
 the bridge are kept. If any step fails, the old DHCP service is put back and
 the change is retried every 15 seconds.
 

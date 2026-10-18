@@ -47,9 +47,9 @@ when preparing site-specific credentials.
 ### Validation precedes writing an image
 
 Linux and Windows flashers accept a flat set of named text scripts. They
-normalize supported encodings, byte-order marks, CRLF and a missing final
+normalize supported encodings, byte-order marks, CRLF, and a missing final
 newline on a copy, leaving the operator's file untouched. A missing shebang
-is skipped. Invalid names, empty data, NUL bytes and unsupported encoding
+is skipped. Invalid names, empty data, NUL bytes, and unsupported encoding
 are errors. Shell/Python syntax checks run when the required parsers are
 available. Other interpreters are reported without executing their code on
 the flashing host.
@@ -68,7 +68,7 @@ whole-set marker are siblings of that directory, preventing state files from
 being treated as executable inputs. The shebang and disabled/backup-name
 filters run again for scripts copied onto a live node.
 
-Each completed attempt records name, exit status and time. Interruption before
+Each completed attempt records name, exit status, and time. Interruption before
 completion leaves work to resume. A recorded nonzero exit is still a finished
 attempt and needs explicit retry. The runner's default timeout is 300 seconds,
 overridable by `user_script_timeout` in mesh configuration. Forced execution
@@ -89,7 +89,7 @@ configuration transaction, and forcing hooks during an update would violate
 their completed-attempt semantics.
 
 The [full script reference](../../../MANET/provisioning/additional-scripts/README.md)
-contains accepted languages, filename rules, exact paths and retry commands.
+contains accepted languages, filename rules, exact paths, and retry commands.
 [Flasher internals](../../../docs/provisioning-internals.md) explains token
 substitution and embedding, while [first boot](first-boot.md) describes the
 core provisioning lifecycle into which these hooks fit.

@@ -2,12 +2,12 @@
 
 ## Marine
 
-![Crayon drawing of three connected radios, with video, speech and folder symbols above one and an arrow showing the job moving.](../assets/services-crayon.png)
+![Crayon drawing of three connected radios, with video, speech, and folder symbols above one and an arrow showing the job moving.](../assets/services-crayon.png)
 
 ### One radio takes a job
 
 A radio can run little jobs, like a shared video stream or chats with the boys. If all the radios
-chooses another radio for this job, that radio takes over and the job continues.
+choose another radio for this job, that radio takes over and the job continues.
 
 You may need to reconnect when the job moves or you move too far away from your friends.
 
@@ -116,7 +116,7 @@ MediaMTX listens on all addresses (RTSP 8554, WebRTC 8889) and Mumble on
 64738 TCP and UDP. IPv6 clients work, and the listener already exists before
 the service address moves. Client stream paths and publisher behavior belong
 to the application's configuration.
-Moving the listener address does not move a TCP socket, encoder or pending
+Moving the listener address does not move a TCP socket, encoder, or pending
 media buffer. Documentation and applications must handle reconnection.
 
 ### Mumble state transfer and Syncthing

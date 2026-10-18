@@ -55,7 +55,7 @@ can interrupt a download or call.
 If Wi-Fi is already joined and working, cable unplug/replug should usually
 settle within a few seconds after the radio checks the new connection.
 It starts using the connection before measuring its speed. Getting a new
-network address, an unresponsive router or a hotspot channel change can take
+network address, an unresponsive router, or a hotspot channel change can take
 longer. The phone keeps its local address during a normal uplink switch.
 If an existing download or call stalls after internet returns, restart it.
 If the router still looks connected but its internet service changes, the
@@ -65,9 +65,9 @@ probe or busy service can add time before the change is applied.
 ### Use nearby Wi-Fi
 
 In source builds with uplink support, open **Manage → Uplink** on the node
-that should connect. Choose its 2.4 GHz radio, 5 GHz radio or USB Wi-Fi adapter,
+that should connect. Choose its 2.4 GHz radio, 5 GHz radio, or USB Wi-Fi adapter,
 then press **Scan**. Tap a network in the list. Stronger signals come first.
-Scroll to see more names. Each row shows signal bars, the Wi-Fi band and a
+Scroll to see more names. Each row shows signal bars, the Wi-Fi band, and a
 lock for a secured network. Grey rows explain why they cannot be selected.
 Hidden networks stay visible but cannot be selected because their names are
 not broadcast.
@@ -144,7 +144,7 @@ available replacement. If a radio's own Ethernet uplink stops working, it
 tries its other local internet connections. If none works, it stops being a
 gateway and can use another gateway on the mesh.
 
-A gateway change can break an existing download, call or other internet
+A gateway change can break an existing download, call, or other internet
 session because traffic now leaves through a different connection. Reconnect
 the application after the new route settles. No replacement is possible if
 none of the reachable radios has a working uplink.
@@ -152,14 +152,14 @@ none of the reachable radios has a working uplink.
 ### Speed and data use
 
 A fast router cannot make a slow mesh path faster. Several hops, shared
-radio airtime and other users can all limit the result. The displayed
+radio airtime, and other users can all limit the result. The displayed
 uplink figure is also different from an end-to-end speed test on your phone.
 
 Wired Ethernet uplinks use a small download to estimate available capacity.
 The connection can carry traffic before the download finishes. The download
 only sets the advertised figure. A slow or filtered connection
 still counts as internet. It is advertised as slow, not dropped.
-Phone tethers, cellular interfaces and Wi-Fi uplinks use an assumed capacity
+Phone tethers, cellular interfaces, and Wi-Fi uplinks use an assumed capacity
 instead of that download test. Internet use by connected people still uses
 the upstream connection's data allowance.
 
@@ -170,8 +170,8 @@ the upstream connection's data allowance.
 The Uplink picker scans built-in radios and USB dongles. Before storing or
 grouping observations, both paths remove exact matches of the current local
 `lan_ap_ssid` plus `-` and four lowercase hexadecimal characters. The prefix
-is fixed at flash time, literal and case-sensitive. Use the same base name
-on all radios in a mesh. Other prefixes, uppercase suffixes and suffixes
+is fixed at flash time, literal, and case-sensitive. Use the same base name
+on all radios in a mesh. Other prefixes, uppercase suffixes, and suffixes
 of another length remain visible. This includes this node's own hotspot seen
 from another radio. It is a naming rule, not proof of mesh membership.
 
@@ -184,9 +184,9 @@ reason. The shared AP follower owns startup after station association, while
 the dispatcher only starts its supporting services once hostapd is active.
 
 The picker groups matching
-SSID bytes by band, security, DFS status and availability, using the strongest
+SSID bytes by band, security, DFS status, and availability, using the strongest
 BSSID in each group. Hidden names remain separate by BSSID. Different bands,
-security methods and radar-channel choices stay separate. The connected group
+security methods, and radar-channel choices stay separate. The connected group
 appears once at the top. A selection pins its BSSID on both client paths.
 Names are escaped as text for rendering. Valid UTF-8 bytes from `iw` display
 as characters, including emoji. Invalid UTF-8 and control bytes stay visible
@@ -209,15 +209,15 @@ NAT reuse the existing gateway path without bridging the upstream to br0.
 The networkd files and ownership marker are readable as soon as they are
 published. Client credentials remain private. The shared AP uses a stable,
 locally administered unicast address derived from its PHY, avoiding the
-station, br0, bat0 and other local interface addresses. Disconnect restores
-the static channel, existing ACS commitment or recovery anchor under the
+station, br0, bat0, and other local interface addresses. Disconnect restores
+the static channel, existing ACS commitment, or recovery anchor under the
 channel lock, even during agreement, without starting a new round.
 
 The follower waits for supplicant association/channel events, hostapd events,
-link/address changes and local policy changes. Service lifecycle notifications
+link/address changes, and local policy changes. Service lifecycle notifications
 and socket replacement also wake it. It prefers hostapd CSA on non-DFS changes,
-verifies completion and restarts the AP if necessary. A missing completion,
-busy lock or pending restore gets a three-second retry. Disassociation stops
+verifies completion, and restarts the AP if necessary. A missing completion,
+busy lock, or pending restore gets a three-second retry. Disassociation stops
 the shared AP before requesting station reconnection. With no enabled profile
 or repair work it exits, leaving a systemd path unit to wake it on demand.
 An enabled profile has a 120-second safety reconcile for missed events,
@@ -244,7 +244,7 @@ the hotspot on the new channel. Radar at the upstream master is handled by
 that master's CSA or subsequent loss of association.
 
 Without both pieces of support, DFS retains the hotspot-off fallback and a
-plain status reason. The uplink's association, address and gateway status
+plain status reason. The uplink's association, address, and gateway status
 remain independent. Stale status cannot authorize an AP start. Three failed
 starts or any unexpected CAC latch the hotspot off until an observed loss
 and reconnect or a channel change. Radar-unavailable channels stay blocked.
@@ -262,7 +262,7 @@ the supplicant file. Dispatcher AP starts share the same role lock. See the
 
 An Ethernet DHCP response classifies a possible upstream network. It is
 not the final internet verdict. The active dispatcher reconciles interface
-role, bridge membership, local addressing, route/NAT policy and BATMAN
+role, bridge membership, local addressing, route/NAT policy, and BATMAN
 gateway advertisement. Client-facing Ethernet belongs to `br0`. An upstream
 LAN must not remain bridged into the client mesh after promotion. USB
 hotplug handlers feed the corresponding uplink lifecycle.
@@ -279,8 +279,8 @@ The local uplink dispatcher excludes wired EUD bridge ports, then ranks
 Ethernet ahead of supported USB tether/cellular links, with Wi-Fi clients
 last. It reuses the bandwidth helper's Ethernet classification, including
 its conservative phone/modem driver exclusions. Within each class it tries
-the saved promoted interface, current route, event interface, other defaults
-and discovered devices. Each must still pass carrier, address and internet
+the saved promoted interface, current route, event interface, other defaults,
+and discovered devices. Each must still pass carrier, address, and internet
 checks. Reconciliation can replace working Wi-Fi with qualified Ethernet.
 Wi-Fi events cannot take the route from working Ethernet. Loss tries the
 remaining candidates in the same pass. This local policy has no speed-based
@@ -297,7 +297,7 @@ mesh default. With no qualified ready fallback, remote mesh routing is the
 useful interim path. Ethernet detection always targets the physical event
 interface, never the saved Wi-Fi uplink, and rejects wireless devices.
 
-Each switch updates the metric-100 route, NAT, selected DNS and BATMAN
+Each switch updates the metric-100 route, NAT, selected DNS, and BATMAN
 bandwidth. Wi-Fi receives its own estimate, with the HaLow cap when needed,
 even if the preceding Ethernet estimate was higher. The mesh route manager
 defers to the selected local uplink regardless of its interface class.
@@ -306,7 +306,7 @@ EUD configuration preserves the DHCP process and leases. A changed pool or
 main configuration can require one restart. An optional, narrowly filtered
 conntrack deletion removes old-address NAT mappings after switching, but does
 not preserve established sessions or guarantee a TCP reset. Healthy ready-link
-handoffs take a few seconds. Probe failures, DHCP and AP-role transitions can
+handoffs take a few seconds. Probe failures, DHCP, and AP-role transitions can
 take longer.
 
 BATMAN's gateway selection steers its DHCP behavior. It does not by itself
@@ -337,13 +337,13 @@ Ethernet qualification is the HTTP 204 check. A separate 5 MB HTTPS download
 then estimates capacity in a separate systemd worker after forwarding is
 installed. Ethernet starts with unknown bandwidth until a matching result is
 available. Before publishing or announcing, the worker rechecks the selected
-promotion, address, router and carrier generation under the policy lock.
+promotion, address, router, and carrier generation under the policy lock.
 A download completing after a switch cannot overwrite Wi-Fi's announcement.
 The measurement excludes DNS/TCP/TLS setup and
 divides bytes by transfer time after the first byte. A partial transfer of at
 least 250 kB counts. TCP startup can still under-read a fast connection, and a
 link with no usable measurement is advertised as 1 Mbit/s down and 0.2 up. The result is reused
-while the interface, address, router and carrier generation remain the same. Demotion invalidates
+while the interface, address, router, and carrier generation remain the same. Demotion invalidates
 it. Failed tests are rate-limited rather than repeated each loop.
 
 Recognized tether/cellular drivers and Wi-Fi uplinks avoid that download

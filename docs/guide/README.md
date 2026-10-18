@@ -42,7 +42,7 @@ afterward; do not include unrelated commits just to refresh the site.
    published release and hardware-verified behavior.
 2. Update the existing canonical README or internals document for the area.
    Use `coverage.md`, then find matching topics with `rg` in `content/`.
-   For a new, renamed or removed production node tool, update its map row.
+   For a new, renamed, or removed production node tool, update its map row.
 3. Update every affected tier. Marine explains the action with drawings and
    very short captions. User gives steps, expected results, and recovery.
    Developer explains mechanisms, files, invariants, and failure cases, with
@@ -68,8 +68,8 @@ Do not replace a Developer mechanism explanation with an inventory table.
 
 The builder compares map rows to top-level production files in
 `MANET/node_tools`, excluding `README.md` and `test_*` files. It includes
-executables, libraries, generated schemas and version metadata. Test fixture
-directories are outside that inventory. Missing, duplicate and stale entries
+executables, libraries, generated schemas, and version metadata. Test fixture
+directories are outside that inventory. Missing, duplicate, and stale entries
 fail the build; `node-manager.sh` is rejected as generated state. The CI
 workflow runs on node-tool changes as well as documentation changes. This
 checks coverage, not the truth of each description: review prose whenever
@@ -77,7 +77,7 @@ behavior changes, even if no filename changes.
 
 **Developer** is for someone who wants to contribute code. Explain how the
 system works and what a contributor needs to change it correctly: source
-ownership, prerequisites, design constraints, validation and failure paths.
+ownership, prerequisites, design constraints, validation, and failure paths.
 Use the [contributor workflow](../../CONTRIBUTING.md) for checkout-to-PR
 steps, and link to the tracked build recipes when a mechanism needs them.
 Explain the engineering in connected technical prose. Naming a subsystem
@@ -134,7 +134,7 @@ Use plain, factual documentation. Do not add marketing copy, taglines, slogans,
 or decorative prose to make the pages sound more exciting. Descriptions should
 explain what a page covers. Labels should identify controls or destinations.
 Do not use semicolons in guide prose. Write two sentences, or reword the
-sentence so it does not need one. Code, commands and file contents are exempt.
+sentence so it does not need one. Code, commands, and file contents are exempt.
 Keep **Reading level** directly above the three selectors.
 
 Use the existing FER logo from `MANET/share/manet/fer-logo-black.png`, as the
@@ -182,7 +182,7 @@ python3 docs/guide/build.py
 
 If changing the builder's inventory rules, also run
 `python3 -m unittest discover -s docs/guide`. These checks exercise additions,
-removals, duplicate rows and the generated-manager boundary.
+removals, duplicate rows, and the generated-manager boundary.
 
 Open `docs/guide/_site/index.html` in a browser. No server or internet is needed
 for the generated documentation and illustrations. Source links, downloads,

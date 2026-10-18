@@ -34,12 +34,12 @@ test path.
 ### Run and label a comparison
 
 Connect to the radio that will run the test and sign in to **Manage**.
-Open **Measure**, select the peer, tests, direction and duration, and give
+Open **Measure**, select the peer, tests, direction, and duration, and give
 the session a useful name. Throughput durations range from five to three
 hundred seconds. Only one batch can run on this radio at once.
 
-Keep positions, antennas and settings fixed during the test. Record what
-you changed between runs, such as location, HaLow width or Wi-Fi band.
+Keep positions, antennas, and settings fixed during the test. Record what
+you changed between runs, such as location, HaLow width, or Wi-Fi band.
 Traffic from other users affects the result. The test also competes with
 their traffic. A faster result after several changes cannot identify which
 change helped.
@@ -54,7 +54,7 @@ new work reports an error until space is available. See [storage](storage.md).
 A multihop transfer can cross different radios or change path during a
 test. The stored topology helps explain conditions, but it is not a recording
 of every packet's route. The displayed BATMAN Mbit/s figure, the wireless
-connection rate and measured application throughput answer different questions.
+connection rate, and measured application throughput answer different questions.
 
 Repeat a comparison under similar conditions before drawing a conclusion.
 A failed test can mean a missing route or unreachable test service, not
@@ -74,7 +74,7 @@ Reverse iperf changes the traffic direction while retaining the local
 control client. Port 5201 is limited to the configured mesh subnet.
 
 TCP single/four-stream tests use the respective parallelism. UDP throughput,
-jitter and loss views use a configured offered bitrate. Reverse uses iperf's
+jitter, and loss views use a configured offered bitrate. Reverse uses iperf's
 reverse flag. A TCP result prefers received totals. UDP summaries expose
 receiver loss and jitter, so offered rate must accompany a throughput claim.
 Ping parses round-trip statistics and loss separately. A ping with no replies
@@ -84,7 +84,7 @@ is saved as a failed result.
 
 A batch allows up to 64 peers and seven test types. Throughput duration must
 be 5–300 seconds. Admission budgets the combinations, subprocess overhead,
-route collection and pauses against a one-hour monotonic execution limit.
+route collection, and pauses against a one-hour monotonic execution limit.
 An iperf command has a duration-plus-25-second timeout. The default hundred
 ping probes at 0.2-second intervals have a thirty-second command budget.
 The worker checks remaining time between operations rather than starting
@@ -99,11 +99,11 @@ limits still apply before job admission.
 ### Evidence and storage consistency
 
 A single topology snapshot annotates the batch, while individual results
-record endpoints, the executing node, type, time and command output/metrics. That snapshot
+record endpoints, the executing node, type, time, and command output/metrics. That snapshot
 cannot establish a per-packet path or freeze routing. Use packet capture
 or lower-layer evidence when a claim depends on which radio carried traffic.
 
-Capacity is checked at admission, before tests and before saves. Results
+Capacity is checked at admission, before tests, and before saves. Results
 are durably replaced atomically, with temporary-file allocation included in
 the storage budget. Exhaustion is an explicit failure and existing sessions
 remain intact. Session paths are validated as direct real children of the
