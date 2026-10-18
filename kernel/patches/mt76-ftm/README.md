@@ -1,6 +1,6 @@
 # MT7916 timing support
 
-These patches provide opt-in timing reports, marked probes and ACK spatial
+These patches provide opt-in timing reports, marked probes, and ACK spatial
 extension controls for MANET ranging. The same six patches target both:
 
 - Raspberry Pi CM4: `linux-rpi-6.18` at
@@ -23,8 +23,9 @@ are accepted. The helper tests the sequence in a temporary tree before applying
 its combined diff. A completely applied series is skipped. A partial or
 conflicting series fails without changing source files. Existing unrelated
 changes, including the separate txpower edit in `init.c`, are retained.
-`series` records patch order; both build scripts invoke this helper before
-configuring the kernel. `build-r3a.sh` first applies the PCIe slot power patch
+`series` records patch order. Both board build scripts apply it through
+`mt76-bgobs/apply.py` together with the observer series before configuring
+the kernel. `build-r3a.sh` first applies the PCIe slot power patch
 and `kernel/patches/mt76-txpower/0001-mt7915-channel-power.patch`, skipping each
 when already applied. Each timing prefix can be built independently.
 
@@ -37,7 +38,7 @@ python3 -m unittest discover -s kernel/patches/mt76-ftm -v
 The tests read the two local kernel repositories under `kernel-work/real_work/`
 and create disposable trees using their base objects. They exercise the actual
 series, including apply/skip, partial and conflicting series, unknown bases,
-path rejection and preservation of txpower and PCIe edits. A missing kernel
+path rejection, and preservation of txpower and PCIe edits. A missing kernel
 repository skips that target's tests; the source repositories are not changed.
 
 Patch 0004 adds `MODULE_INFO(manet_timing, "1")`. The firmware selector
@@ -90,7 +91,7 @@ current debugfs configuration or skb mark when status arrives.
 Marked frames request individual status and therefore cannot select the
 untracked `MT_PACKET_ID_WED` path. TXS WCID/PID resolves the retained skb under
 the mt76 status lock. A local version of the connac completion helper keeps
-ACK/error, AMPDU status, timeout and TXFREE completion behavior, but skips
+ACK/error, AMPDU status, timeout, and TXFREE completion behavior, but skips
 `mt76_connac2_mac_fill_txs` for that saved flag. Thus neither `wcid.rate` nor
 the TX mode/MCS/NSS/bandwidth histograms take the probe's fixed rate.
 `mt7915_sta_statistics` reads that rate into `sinfo->txrate`, which BATMAN V
@@ -99,7 +100,7 @@ periodic sampling opportunity during a probe burst. Exhausted PID allocation
 falls back to `NO_SKB`, whose status is already ignored by this driver.
 
 The driver advertises `HAS_RATE_CONTROL`; rate selection is firmware-owned.
-The patch leaves airtime, retry/failure and byte counters intact. It changes
+The patch leaves airtime, retry/failure, and byte counters intact. It changes
 host reporting, without claiming to change firmware rate-control internals.
 
 ## Dedicated QoS Null probes
@@ -130,22 +131,22 @@ without first draining and starting a new capture epoch.
 The station must be on exactly one active mesh interface on the selected
 PHY. Each submission queries the public station API for an ESTAB link with
 both local and peer power modes active, then looks up the station by MAC
-under RCU. Nonmesh, missing, ambiguous, sleeping and non-ESTAB peers are
+under RCU. Nonmesh, missing, ambiguous, sleeping, and non-ESTAB peers are
 refused. The link query bypasses the driver's optional firmware statistics
 read only in the calling task; normal station statistics remain unchanged.
 RTNL is acquired with trylock for one submission. Contention skips that slot.
 Under the driver mutex, scanning also skips the slot after cancellation,
-running, reset and testmode checks. A stopped radio, reset or testmode stays
+running, reset, and testmode checks. A stopped radio, reset, or testmode stays
 fatal even if scanning is also set. All submission errors, including `EBUSY`
 and `ENETDOWN`, still abort the burst. Scanning is checked once without
 waiting for it to finish. There is no bounded retry: one immediate attempt
 preserves slot pacing without extra RTNL attempts during configuration or
 teardown. No station or interface
-pointer survives a sleep. Interface removal, radio stop and firmware reset
+pointer survives a sleep. Interface removal, radio stop, and firmware reset
 request cancellation. There is no background worker to outlive debugfs.
 
 The frame is a 32-byte four-address mesh QoS Null, TID 7 / AC VO, normal ACK,
-PM=0, EOSP=1 and RSPI=0. It carries no mesh control or payload and uses no
+PM=0, EOSP=1, and RSPI=0. It carries no mesh control or payload and uses no
 key or Protected bit. This matches the layout of mac80211's mesh power
 management frames. The active-mode admission check avoids changing a
 sleeping link's power mode. Direct mt76 DMA queue submission bypasses the
@@ -154,7 +155,7 @@ HW_AMSDU prohibit aggregation independently of `tmr_spe`; REM_TX_COUNT=1
 requests one attempt. The usual optional `tmr_spe` / `tmr_rate` override and
 patch 0005's saved completion flag apply. Ordinary skb-mark selection is
 suppressed during the burst, then resumes with its previous settings.
-Peer, mark, rate, SPE and timing-control writes return `EBUSY` during a burst.
+Peer, mark, rate, SPE, and timing-control writes return `EBUSY` during a burst.
 
 To admit only QoS Null on the responder, the existing `tmr_ctrl` already
 accepts this command, with no ABI change:
@@ -164,7 +165,7 @@ printf '1 1 2 0 0x32 3 3 3 8 10\n' > tmr_ctrl
 ```
 
 The type/subtype byte is `(subtype << 2) | type`: QoS Data 0x22, Data 0x02,
-QoS Null 0x32, Null 0x12 and Action 0x34. The vendor uses reserved type 3 for
+QoS Null 0x32, Null 0x12, and Action 0x34. The vendor uses reserved type 3 for
 unused slots. RMAC TMR_PA packs four six-bit match slots in bits 0..23,
 with separate category checks in bits 24..27. They are alternative matches,
 not a mask on one combined value. Category=0 avoids parsing a nonexistent
@@ -190,16 +191,16 @@ subframe chosen by hardware and the extent of bulk-traffic starvation must
 still be measured. Existing marked probes with SPE enabled already request
 BA_DISABLE, so aggregation of those probes is not an established cause.
 
-For idle, same-peer bulk and other-peer bulk runs, test both the narrow and
+For idle, same-peer bulk, and other-peer bulk runs, test both the narrow and
 wide fixed-rate profiles. Require `sent=N`, `marked=N`, initiator reports=N,
-no trace loss, ACK success and stable ordinary station rates/BATMAN routes.
+no trace loss, ACK success, and stable ordinary station rates/BATMAN routes.
 Inspect an over-air capture for subtype, four addresses, no Protected bit,
-normal ACK, no retries and no aggregation. Test SAE/PMF mesh links as well as
+normal ACK, no retries, and no aggregation. Test SAE/PMF mesh links as well as
 open links. mac80211 consumes valid mesh Null frames before ordinary data
 unencrypted checks and without counting them as dropped packets. Hardware
 ACK/report behavior on a secured peer still needs bench confirmation.
 Exercise cancellation, overlapping writes, peer removal, interface stop,
-firmware recovery and module unload while a burst is active.
+firmware recovery, and module unload while a burst is active.
 
 The standalone bench tools support `PROBE=null`; their default remains ping.
 Pairing uses the same report ABI and needs no subtype-specific decoder change.
@@ -213,7 +214,7 @@ replace only `mt7915e.ko.xz` in staging and regenerate both SBC overlays.
 Keep the existing Image and complete dependency module set.
 
 Compare the build configuration, generated headers, Image, full
-`Module.symvers` and module vermagic before and after building. CM4 uses
+`Module.symvers`, and module vermagic before and after building. CM4 uses
 MODVERSIONS; every imported symbol CRC must match its existing symbol table.
 Rock 3A has MODVERSIONS disabled, so matching vermagic alone is insufficient:
 it must be the existing tracing-enabled build, with all imports present in

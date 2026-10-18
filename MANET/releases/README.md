@@ -10,7 +10,7 @@ release instructions; archive acceptance alone does not establish that a
 kernel update is ready to deploy. See the
 [field update policy](../../docs/node-tools-internals.md#field-update-policy).
 
-Normal imaging, setup and `node-update.sh` use the full release marked **Latest**.
+Normal imaging, setup, and `node-update.sh` use the full release marked **Latest**.
 We use that designation for the recommended stable build. Development builds are
 prereleases; they do not move Latest. `--development` selects the most recently
 published MANET build, including prereleases, by publication date.
@@ -32,7 +32,7 @@ python3 MANET/releases/publish.py publish \
 The default is a prerelease. The publisher checks every archive's checksum and
 both embedded version files. It packages the committed provisioning scripts in
 `manet-flasher.zip`, adds standalone Linux and Windows launchers, and creates a
-manifest with the source commit, version, file sizes and SHA-256 digests. It
+manifest with the source commit, version, file sizes, and SHA-256 digests. It
 uploads everything to a draft, checks GitHub's stored sizes and digests, and
 publishes only when the complete set matches. An interrupted upload leaves a
 draft; rerunning with the same commit and packages resumes it. To correct an
@@ -66,7 +66,7 @@ the initial release uses it so normal installs have a download target.
 
 After publishing, the script retains the three most recently published MANET
 prereleases and deletes older prereleases and their downloads. Full releases,
-drafts, unrelated releases and Git tags are retained. There is no age grace
+drafts, unrelated releases, and Git tags are retained. There is no age grace
 period. Tags are small source references and do not retain deleted release assets.
 
 Preview cleanup or run it separately:
@@ -152,7 +152,7 @@ The script saves a root-only configuration backup at
 `/var/lib/manet-upgrade-0.559/configuration-before-upgrade.tar.gz`. This contains
 passwords and keys; keep it private. It is a configuration backup, not a complete
 rollback image. The first backup is retained on retries. The upgrade preserves
-mesh/AP settings, existing HaLow channels, network definitions and operator data.
+mesh/AP settings, existing HaLow channels, network definitions, and operator data.
 It does not run `radio-setup.sh`, change boot files, or upgrade kernel/modules.
 Preserved HaLow settings must match the intended peers; this update does not
 retune an older radio to the defaults used by a freshly flashed radio.
@@ -164,8 +164,8 @@ the newer automatic offline recovery work. A different OS version or an update
 already managed by that newer recovery system is refused before installation.
 
 Validation uses the actual published 0.559 archive in an isolated filesystem
-with a 0.541 version, copied manager, old units and preserved configuration. It
-checks installation, backup retention, activation failure and retry. Service and
+with a 0.541 version, copied manager, old units, and preserved configuration. It
+checks installation, backup retention, activation failure, and retry. Service and
 APT calls are simulated in that test. The same tests pass on the bench CM4, and
 a check-only run using a temporary cache passed against its real filesystem and
 kernel, with its newer installed version left unchanged. This is not a physical

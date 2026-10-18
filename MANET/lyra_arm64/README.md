@@ -3,7 +3,7 @@
 Two files belong in this directory:
 
 - `libgstlyra.so`: the GStreamer plugin providing `lyraenc`, `lyradec`,
-  `rtplyrapay` and `rtplyradepay`
+  `rtplyrapay`, and `rtplyradepay`
 - `model_coeffs/`: the Lyra v2 model weights
 
 Voice defaults to Lyra, so a node needs both. They are committed here because

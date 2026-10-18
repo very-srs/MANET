@@ -6,8 +6,10 @@ newer than what apt ships. The S1G supplicant and its client are built from
 Morse Micro's HaLow-enabled hostapd sources.
 
 Install tarballs stage the shipped binaries into `/usr/sbin`. Tools tarballs
-also carry `wpa_supplicant_manet` and `wpa_cli_manet` when present, so a normal
-update can deliver Wi-Fi mesh fixes. The HaLow candidate build is excluded
+also carry `wpa_supplicant_manet` and `wpa_cli_manet`, so a normal
+update can deliver Wi-Fi mesh fixes. DFS-enabled builds require the compatible
+MANET supplicant. A missing client produces a warning.
+The HaLow candidate build is excluded
 from every archive and needs separate bench testing before activation.
 
 ## The files
@@ -34,14 +36,14 @@ from every archive and needs separate bench testing before activation.
 
 - `openvlm`
 
-  Reads, writes and validates the EEPROM on an OpenVLM USB audio board
+  Reads, writes, and validates the EEPROM on an OpenVLM USB audio board
   (C-Media CM108B) over USB HID. A board ships with a blank EEPROM, and until
   it is programmed the chip ignores every volume and analog setting, so voice
   on a node with a fresh board needs this tool once. Statically linked Go, with
   no runtime dependencies.
 
   The settings that matter for a headset with an external mic preamp are
-  `mic-boost false`, `adc-init-volume 0` and `aa-init-volume -23`. The last is
+  `mic-boost false`, `adc-init-volume 0`, and `aa-init-volume -23`. The last is
   the analog sidetone, which howls against a preamp at anything higher.
 
   The EEPROM is read only at chip power-on, so writing it needs a physical
@@ -54,7 +56,7 @@ from every archive and needs separate bench testing before activation.
 series. The output names are `wpa_supplicant_manet` and `wpa_cli_manet`.
 Debian upgrades do not replace these MANET-owned binaries.
 
-The build enables `CONFIG_IEEE80211AX` alongside mesh, SAE, 802.11n and
+The build enables `CONFIG_IEEE80211AX` alongside mesh, SAE, 802.11n, and
 802.11ac. Debian's 2:2.10-24 build omits AX, which prevents reliable HE
 capability exchange during mesh peering. The patches remove random extra
 inactivity delay for established mesh peers, bound unsuccessful SAE attempts,
@@ -65,7 +67,7 @@ which leaves that node unable to peer with the rest of the mesh.
 
 Patch 0007 keeps externally owned background CAC notifications out of the
 mesh BSS state machine. The paired kernel marks these notifications with
-`RADAR_BACKGROUND`. STARTED, FINISHED and ABORTED for that background receiver
+`RADAR_BACKGROUND`. STARTED, FINISHED, and ABORTED for that background receiver
 must not restart or disable the already running secure mesh. Foreground CAC
 and AP mode retain their ordinary handling. Radar reports are
 preserved even if marked background because a main report during detector
@@ -77,7 +79,7 @@ restarting the BSS based on a stale foreground CAC cache. cfg80211 retains
 NOP enforcement, and AP radar/channel selection stays unchanged.
 The exception requires a volatile per-BSS `MANET_DFS_OWNER 1` command.
 Only the ACS contract path sends it, after storing the contract and checking
-the independent guardian. New BSSs, static meshes and unmanaged meshes default
+the independent guardian. New BSSs, static meshes, and unmanaged meshes default
 to native evacuation and ordinary foreground CAC checks. No opt-in is saved
 in the WPA configuration.
 This build identifies itself as `v2.11-manet-dfs3` and answers
@@ -99,18 +101,18 @@ local setup failures. Existing SAE retransmissions operate during that
 window. One second of random jitter separates synchronized retries; the next
 beacon after cleanup can start a fresh exchange. The SAE timeout never sets
 PLINK_BLOCKED. INFO messages include the peer, exchange step, state, received
-status and local result where applicable. Status -1 means no received status
-is available. Keys, passwords and commit material are not logged.
+status, and local result where applicable. Status -1 means no received status
+is available. Keys, passwords, and commit material are not logged.
 
 Every `wpa_supplicant@.service` instance uses `manet-mesh-supplicant.py` through
 `20-manet-binary.conf`. This covers radio setup, BATMAN attachment, channel
-changes, lobby visits and AP-to-mesh transitions. The existing AP guard still
+changes, lobby visits, and AP-to-mesh transitions. The existing AP guard still
 runs first. When the MANET executable is absent, the wrapper logs a WARNING
 to the journal and executes `/usr/sbin/wpa_supplicant`. That fallback lacks
 the HE and recovery changes and cannot advertise ACS DFS capability. USB client uplinks retain their separate Debian
 unit: they do not need these mesh patches or a reduced dependency build.
 
-The tools updater adds missing inactivity settings to live, lobby and HaLow
+The tools updater adds missing inactivity settings to live, lobby, and HaLow
 mesh configs under the channel-change lock, reloads systemd, and restarts
 active Wi-Fi mesh instances. Lock contention leaves the update pending.
 Explicitly configured values are preserved. The wrapper also prepares the
@@ -138,20 +140,22 @@ is `912ea06f74e30a8e36fbb68064d6cdff218d8d591db0fc5d75dee6c81ac7fc0a`.
 `test-background-events.py /path/to/patched/wpa_supplicant-2.11` compiles the
 actual nl80211 radar decoder under address/undefined-behavior sanitizers. It
 checks external mesh CAC isolation and continued delivery of foreground,
-AP and radar events. It does not establish radio behavior or SAE continuity.
+AP, and radar events. It does not establish radio behavior or SAE continuity.
 `test-mesh-radar.py` accepts the same source tree and exercises the actual
-radar, NOP and CSA callbacks under the same sanitizers, with channel lookup
+radar, NOP, and CSA callbacks under the same sanitizers, with channel lookup
 and BSS lifecycle dependencies replaced. It checks mesh state preservation
 and the unchanged AP paths. Hardware acceptance is still required.
 
 The configuration derives from Debian 2:2.10-24. It removes D-Bus, PC/SC,
-smartcard, readline and MACsec dependencies, and uses OpenSSL's default
-cipher policy. Runtime dependencies are libc, libnl-3, libnl-genl-3, libssl
+smartcard, readline, and MACsec dependencies, and uses OpenSSL's default
+cipher policy. Runtime dependencies are libc, libnl-3, libnl-genl-3, libssl,
 and libcrypto. Use the node's native build to retain its glibc/OpenSSL ABI.
 
 After hardware verification, place both output files directly under
 `MANET/binaries_arm64/` and rebuild the install and tools archives. A builder
-warns if a Wi-Fi binary is missing. Check `systemctl cat
+rejects a missing or incompatible mesh supplicant when DFS is enabled, which
+is the default. With `MANET_DFS_ENABLED=0`, missing Wi-Fi binaries produce
+warnings and permit the Debian fallback. Check `systemctl cat
 wpa_supplicant@wlan0` and the journal for binary selection on the node.
 `wpa_cli_manet` is available for diagnosis; existing scripts may keep using
 Debian's compatible `wpa_cli` control client.
@@ -163,7 +167,7 @@ Debian's compatible `wpa_cli` control client.
 recipe with mesh enabled, carries its feature-indication patch and header,
 and removes OpenWrt ubus and optional desktop dependencies. The hostapd
 feature-indication hunk is rebased to the tag's DPP initialization context.
-The resulting candidate has the same SAE timeout, stale-station repair and
+The resulting candidate has the same SAE timeout, stale-station repair, and
 INFO diagnostics as the Wi-Fi build.
 
 ```sh
@@ -191,8 +195,8 @@ Tune the global S1G setting only after testing both traffic and idle beacons.
 ### Validation
 
 `0005-mesh-recovery-tests.patch` adds hwsim cases for repeated wrong-key SAE,
-local setup failure and recovery after `iw station del`. The Wi-Fi series
+local setup failure, and recovery after `iw station del`. The Wi-Fi series
 also tests beacon-only retention and silent-peer expiry. Run these in the
 upstream hwsim environment with its testing build configuration; the release
 tarball does not include the complete hwsim harness. Passing a native build
-and version check does not establish RF, HE rates or firmware stability.
+and version check does not establish RF, HE rates, or firmware stability.

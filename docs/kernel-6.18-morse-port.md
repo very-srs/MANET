@@ -3,12 +3,12 @@
 This records the kernel and driver changes for Linux 6.18 with the Morse Micro
 HaLow driver (morse_driver 1.16.4) on all three hardware targets. The build
 workspace (`kernel-work/`) contains downloaded inputs and build outputs.
-The [build recipes](../kernel/build/README.md), configuration fragments and
+The [build recipes](../kernel/build/README.md), configuration fragments, and
 local patches are tracked in the repository.
 
 Companion documents:
 - [Kernel build workflow](../kernel/build/README.md): source pins, dependencies,
-  commands, configuration and overlay assembly. The SPI mechanisms and
+  commands, configuration, and overlay assembly. The SPI mechanisms and
   failure signatures below explain the changes to preserve when porting.
 - `docs/armbian_6.18_morse_build.txt`: **historical**: the original Rock 3A
   approach (Armbian stock kernel + headers + container build + manual sed patches).
@@ -249,7 +249,7 @@ update as needed.
 ### 4.3 MT7916 timing controls (CM4 and Rock 3A)
 
 The [MT7916 patch series](../kernel/patches/mt76-ftm/README.md) adds opt-in
-report capture, marked probe selection and ACK spatial-extension controls.
+report capture, marked probe selection, and ACK spatial-extension controls.
 The same patches apply to Raspberry Pi kernel commit
 `95b85bebbedcaedfa7ca79116ed38b7376fba412` and mainline Rock 3A commit
 `7d0a66e4bb9081d75c82ec4957c50034cb0ea449`. The helper selects by exact HEAD
@@ -335,11 +335,11 @@ reservation stays off by default until runtime chain policy exists. Host mask `0
 encodes band-local RX `0x3`, not global RF pin numbers.
 
 Production observation uses the validated frontend/detector configuration
-with interrupts masked, pulse writer disabled and no CAC buffer dependency.
+with interrupts masked, pulse writer disabled, and no CAC buffer dependency.
 It exposes a root-only, versioned debugfs JSON interface. The kernel preserves
 raw bins and matched main-band survey TX counters; userspace corrects own-TX
 blanking and rejects uncertain samples. No diagnostic probe modes ship.
-The series README specifies commands, fields, locking and restoration.
+The series README specifies commands, fields, locking, and restoration.
 
 The cold-start configuration has Rock 3A RF evidence on the pinned 2024 WM.
 Both production modules compile offline and the C lifecycle tests run against
@@ -349,14 +349,14 @@ windows with at least 10% local TX, preserving the low-TX controls while
 limiting amplification of accounting error. This provisional guard does not
 qualify intermediate loads or the 250 ms production dwell. CM4 remains the
 verification target; its cold boot, reservation,
-RF response, cancellation and traffic behavior have not yet been benched.
+RF response, cancellation, and traffic behavior have not yet been benched.
 
 ## 5. DTS overlay: `dts-overlays/cm4-morse-spi.dts` (CM4 only)
 
 Compiled to `mm610x-spi.dtbo` by `build-cm4.sh` (`dtc -@`). Wires spi0 to the
 mm6108: pins 9/10/11 as ALT0 (MISO/MOSI/SCLK), GPIO8 as **function 1 = OUTPUT** for
 CS, `spi-max-frequency = 50000000`, plus control GPIOs (reset=17, power=3+7,
-spi-irq=5, all active-high) and disabled `spidev@0/1`.
+spi-irq=5, all active-high), and disabled `spidev@0/1`.
 
 The critical line, paired with §4.1:
 
@@ -423,16 +423,16 @@ xz-compress all modules. Per-target notes:
   txpower patch (§4.2), then timing and observer support via
   `python3 "$KWORK/../kernel/patches/mt76-bgobs/apply.py" "$KDIR"` (§4.6), then
   the cfg80211 background CAC pair (§4.5). `build-cm4.sh` applies txpower,
-  the combined series and the cfg80211 pair the same way.
+  the combined series, and the cfg80211 pair the same way.
   `manet-r3a.config` enables `CONFIG_FTRACE=y` (the tracing menu) and
   `CONFIG_ENABLE_DEFAULT_TRACERS=y` (static events without function tracing).
-  Kconfig selects `TRACING`, `EVENT_TRACING`, `TRACEPOINTS`, `RING_BUFFER` and
+  Kconfig selects `TRACING`, `EVENT_TRACING`, `TRACEPOINTS`, `RING_BUFFER`, and
   `NOP_TRACER`, which provide tracefs instances, event enable/filter files,
-  `trace`, `trace_pipe`, `set_event`, clocks and per-CPU loss statistics.
-  The fragment disables `UPROBE_EVENTS`, `EPROBE_EVENTS` and
+  `trace`, `trace_pipe`, `set_event`, clocks, and per-CPU loss statistics.
+  The fragment disables `UPROBE_EVENTS`, `EPROBE_EVENTS`, and
   `IWLWIFI_DEVICE_TRACING`, which otherwise default on with tracing but are
   unnecessary for MT7916 capture. `FUNCTION_TRACER`, `STACK_TRACER`,
-  `SCHED_TRACER` and `FTRACE_SYSCALLS` remain unset. Context-switch event
+  `SCHED_TRACER`, and `FTRACE_SYSCALLS` remain unset. Context-switch event
   support is selected by `EVENT_TRACING`, with recording opt-in.
   CM4's fragment and defconfig are unchanged.
   This replaces the entire old Armbian headers/podman/GCC-13 workflow: the kernel
@@ -452,7 +452,7 @@ bash kernel/build/build-r3a-sbc-overlay.sh
 The first script builds `6.18.0-manet` and installs modules under
 `kernel-work/real_work/build-r3a/staging/lib/modules/`. The second copies them
 into `kernel-work/packages/r3a-sbc-overlay/usr/lib/modules/`, with the kernel
-Image, RK3568 DTBs and Morse firmware, and regenerates module dependencies.
+Image, RK3568 DTBs, and Morse firmware, and regenerates module dependencies.
 Check the staged `mt7915e.ko.xz` with `modinfo -F manet_timing` (expect `1`)
 and `modinfo -F vermagic` (expect `6.18.0-manet SMP preempt mod_unload aarch64`).
 Hardware validation of the Rock 3A timing build is still pending.
@@ -492,7 +492,7 @@ comes up normally afterwards.
 Provisioning: `radio-setup.sh` skips the SPI overlay / GPIO 3+7+17 config.txt
 entries when `has_usb_morse_device` sees a USB card (it was already USB-aware
 for the BCF/spi_clock modparams). An already-provisioned board keeps whatever
-config.txt it has; drop `dtoverlay=mm610x-spi.dtbo`, `dtparam=spi=on` and the
+config.txt it has; drop `dtoverlay=mm610x-spi.dtbo`, `dtparam=spi=on`, and the
 three `gpio=` lines by hand to silence the phantom SPI probe.
 
 **Module.symvers gotcha:** the Morse make consumes the kernel build dir's
@@ -528,7 +528,7 @@ in each `.regdom_XX` section, and the firmware will not exceed it. All three
 --country ALL --power-dbm 30` over **every** `bcf_*.bin`, because a USB MM8108
 picks its BCF by OTP board type (`bcf_boardtype_XXXX.bin`) and SPI modules
 name theirs in a module option. A region with no power TLVs is left as is;
-`bcf_boardtype_0802`, `bcf_fgh100maamd` and `bcf_mf08651_jp` have none at
+`bcf_boardtype_0802`, `bcf_fgh100maamd`, and `bcf_mf08651_jp` have none at
 all and are skipped. Regression this replaced: the CM4 overlay used to patch
 only `bcf_fgh100mhaamd.bin` (US), so the USB card's stock
 `bcf_boardtype_0807.bin` held the bench nodes at 21.25 dBm (908 MHz, 8 MHz).
@@ -618,11 +618,11 @@ support and module alias described in section 6.1.
 
 ### 8.1 APT owns userland; MANET releases own the kernel
 
-Only a matched kernel, DTBs, overlays and modules from the board's MANET
+Only a matched kernel, DTBs, overlays, and modules from the board's MANET
 release belong in its boot path, whether delivered by provisioning or a
 validated field-update procedure. `/etc/apt/preferences.d/00-manet-kernel`
 assigns priority -1 to distribution kernel images, headers, per-flavour base
-packages, DTBs, Armbian U-Boot/BSP packages and alternate boot writers.
+packages, DTBs, Armbian U-Boot/BSP packages, and alternate boot writers.
 `raspi-firmware` is also pinned: its own upgrade invokes the kernel-copy hook.
 The helper `manet-kernel-protect.py` holds installed boot packages to prevent
 automatic removal as well as upgrades. Headers stay removable for OS cleanup.
@@ -651,7 +651,7 @@ replace these boot kernel files. A package requiring a new stock kernel is
 intentionally unsatisfiable; select a compatible userland package or update
 through a MANET release instead of overriding the policy.
 
-Kernel replacement covers provisioning, offline bench maintenance and CM4
+Kernel replacement covers provisioning, offline bench maintenance, and CM4
 field trials. A matched CM4 tools payload starts a one-shot tryboot trial by
 default, using a profile derived from that node's boot files and hardware.
 Older CM4 images with `auto_initramfs=1` keep their original boot selector and
@@ -660,13 +660,13 @@ in its candidate selector, then commits that setting with the new slot after
 health confirmation. Custom initramfs and roots needing early userspace are
 refused with an explanation. A new tools wrapper can deliver this fix to
 v0.574 installations without reflashing or manually changing boot settings.
-The firmware kernel watchdog, bounded userspace handoff, PID 1 watchdog and
+The firmware kernel watchdog, bounded userspace handoff, PID 1 watchdog, and
 confirmation guard provide the benched fallback mechanism. Generic field
-health checks need an on-node acceptance run before release. Operators can
+health checks have confirmed real CM4 kernel updates through the updater. Operators can
 set `enabled=n` in `/etc/manet-kernel-update.conf` to keep tools-only updates.
 Rock 3A kernel activation remains disabled. See the
 [kernel activation protocol](node-tools-internals.md#kernel-payload-and-activation-protocol)
-for boot-format restrictions, confirmation and retained failed candidates.
+for boot-format restrictions, confirmation, and retained failed candidates.
 Physical access or reflashing must not become the normal update requirement for sealed radios.
 Leave the APT protections enabled when installing a MANET kernel. Kernel
 security fixes require a new MANET kernel release as well as ordinary
@@ -686,7 +686,7 @@ Installing protection prevents another overwrite; it does not restore the
 running kernel or boot files. If `uname -r` reports a stock `rpt-rpi` kernel
 and the MANET radios disappeared, obtain the matching board and MANET
 release's install archive and verify its release checksum. Preserve mesh
-configuration. For a CM4, power down, expose the eMMC using rpiboot and mount
+configuration. For a CM4, power down, expose the eMMC using rpiboot, and mount
 its FAT boot and ext4 root partitions on the dev machine. Follow the offline
 partition layout in section 8, using that install archive as the source:
 
@@ -704,11 +704,11 @@ sync
 Use the matching release's boot configuration; preserve any required local
 boot settings when reviewing the restored files. Unmount both partitions
 cleanly before powering on. RPi5 and Rock 3A likewise need their own matching
-boot files, DTBs, modules and firmware; Rock 3A uses `/boot/Image` and
+boot files, DTBs, modules, and firmware; Rock 3A uses `/boot/Image` and
 `/boot/dtb/rockchip/` on its root filesystem. Do not apply Pi paths to Rock 3A.
 Install the protection from the corrected release before another APT action.
 After boot, verify `uname -r`, the matching `/usr/lib/modules` directory,
-Morse/MT7916 driver loading, radio enumeration and mesh peers. Do not purge
+Morse/MT7916 driver loading, radio enumeration, and mesh peers. Do not purge
 stock kernels as a recovery step: their removal hooks can also change boot
 files.
 
@@ -722,12 +722,12 @@ and boot arguments. If the boot path loads an initramfs, rebuild it against the
 new module tree. The overlay builder does not produce an initramfs.
 
 Confirm the node's actual boot path before changing it. The expected paths are
-`/boot/Image`, `/boot/dtb/rockchip/` and `/usr/lib/modules/6.18.0-manet/`, with
+`/boot/Image`, `/boot/dtb/rockchip/`, and `/usr/lib/modules/6.18.0-manet/`, with
 `/boot` on the ext4 root filesystem. The local Armbian Rockchip boot-script
-sources load `Image`, `uInitrd` and `dtb/${fdtfile}` after importing
+sources load `Image`, `uInitrd`, and `dtb/${fdtfile}` after importing
 `armbianEnv.txt`. This does not prove the installed node uses that script:
 inspect the loaded `boot.scr`, any `extlinux/extlinux.conf`, symlink targets,
-`/proc/cmdline`, mounts and the installed U-Boot configuration. The presence of
+`/proc/cmdline`, mounts, and the installed U-Boot configuration. The presence of
 both files does not establish which one U-Boot selects.
 
 Before a live replacement, save the entire boot directory, a detached copy of
@@ -741,7 +741,7 @@ Do not reload modules from the new tree into the old running kernel.
 Leave the APT protection diversions enabled. For an intentional update, use
 `mkinitramfs` with the exact release and new module tree, and explicitly wrap
 the result with `mkimage` if the verified boot script loads a U-Boot `uInitrd`.
-Use the installed boot path's architecture, compression and filenames. Calling
+Use the installed boot path's architecture, compression, and filenames. Calling
 the diverted `update-initramfs` or `99-uboot` hook will not do this work.
 
 An extlinux entry can name a saved Image and initramfs, but an old kernel also
@@ -749,7 +749,7 @@ needs its old root module tree. A second entry pointing at the newly replaced
 root is not a complete fallback with this shared release string. Use a tested
 separate recovery root, or restore the old module tree before selecting the
 saved Image. A menu entry cannot recover a hung kernel by itself; unattended
-recovery needs verified boot-count support, an alternate boot command and a
+recovery needs verified boot-count support, an alternate boot command, and a
 way to reset the board. Do not assume those are enabled on an installed node.
 See the U-Boot [extlinux documentation](https://docs.u-boot.org/en/latest/develop/bootstd/extlinux.html)
 and [boot-count requirements](https://docs.u-boot.org/en/latest/api/bootcount.html).

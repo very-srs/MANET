@@ -13,15 +13,16 @@ Windows (`windows.ps1` is still there if you prefer the console). That walks you
 through picking the hardware, loading or creating a configuration, and writing
 the image. Your mesh settings are baked into the image as it is written.
 
-Then you put the card in the node, connect Ethernet and power it on. A service
+Then you put the card in the node, connect Ethernet, and power it on. A service
 embedded in the image runs as soon as the network is up, downloads what it
 needs, configures the radio interfaces, and reboots into a working mesh node.
 
 After provisioning, `apt upgrade` is safe for userland updates. MANET pins
 distribution kernel and boot packages and disables their boot-copy hooks, so
-APT keeps the MANET kernel, DTBs and boot initramfs. Existing nodes receive
+APT keeps the MANET kernel, DTBs, and boot initramfs. Existing nodes receive
 this protection through a tools update. Kernel changes and kernel security
-fixes come through a MANET install release, not APT; see
+fixes come through MANET releases, including CM4 tools updates with a matched
+kernel payload. See
 [kernel updates and recovery](../../docs/kernel-6.18-morse-port.md#81-apt-owns-userland-manet-releases-own-the-kernel).
 
 CM4 provisioning sets `auto_initramfs=0`. MANET's CM4 kernel has MMC and ext4
@@ -158,14 +159,14 @@ cannot mix versions. First boot checks the package SHA-256 and embedded version
 before extracting it. It installs the release selected when the image was made.
 
 First boot can download these files even when the node's clock is wrong.
-The MANET archive, yq and optional MediaMTX have fixed SHA-256 hashes baked
+The MANET archive, yq, and optional MediaMTX have fixed SHA-256 hashes baked
 into the image. First boot disables certificate checks only for those
 individual downloads and verifies each hash before installing or extracting
 anything. A failed download or hash mismatch stops provisioning.
 
 APT continues to verify repository signatures and package hashes. Its date
 checks are temporarily disabled during each provisioning phase and restored
-before the phase completes. Operator setup scripts, later updates and manual
+before the phase completes. Operator setup scripts, later updates, and manual
 installs use normal certificate and date checks. The optional HTTP Date clock
 adjustment helps make logs readable; download verification does not rely on it.
 
@@ -242,7 +243,7 @@ saved settings owned by root.
 On the first run a standalone copy creates a `manet-flasher` folder beside
 itself and copies the launcher there. Run that copy next time. Settings and
 additional setup scripts stay in this folder; each run fetches and verifies the
-selected release's flasher bundle. Python 3, curl and internet access are needed.
+selected release's flasher bundle. Python 3, curl, and internet access are needed.
 
 `rpi-imager` has to be version 1.8 or newer. Older builds cannot put the mesh
 setup script onto the card, and they fail only after the card has been written,
@@ -257,12 +258,12 @@ never replaces an rpi-imager that works.
 
 Next it checks this computer for the tools it uses, naming what each one is
 for. On Debian and Ubuntu it offers to install the missing ones with apt, and
-on Fedora with dnf. For pacman, zypper and apk it prints the exact command and
+on Fedora with dnf. For pacman, zypper, and apk it prints the exact command and
 stops, and where a tool is not packaged at all, such as `rpi-imager` on Fedora,
 it says where to get it. Only the tools your chosen board actually needs are
 checked, so picking Rock 3A never asks for `rpiboot`.
 
-Disk selection shows model, capacity, serial, removability and mounted volumes.
+Disk selection shows model, capacity, serial, removability, and mounted volumes.
 Each selected target, including every card in a batch, requires typing `yes`.
 Enter alone does not confirm. System-mounted disks and active mapped storage
 are refused; ordinary desktop automounts are unmounted before writing, and
@@ -544,7 +545,7 @@ If enabled, nodes negotiate channel selection automatically. If disabled, a fixe
 
 - **SSH username.** The Linux login account created on the radio. Defaults to
   `radio`, and can be changed in either flasher. Use 1–32 lowercase letters,
-  digits, underscores or hyphens, starting with a letter or underscore. `root`
+  digits, underscores, or hyphens, starting with a letter or underscore. `root`
   and `nobody` are reserved, and existing system accounts cannot be used.
 - **SSH password.** Password for that username. The default remains `radio`.
   For example, if you choose username `operator`, connect with
@@ -571,7 +572,7 @@ a site daemon.
 ```
 
 Scripts may be written in any language a node provides (bash, dash, python3,
-perl, lua or awk), selected by the shebang. Other interpreters must be
+perl, lua, or awk), selected by the shebang. Other interpreters must be
 installed by an earlier script. Scripts run in filename order, each with a
 300 s limit. Failures are reported
 on the login banner and never mark the node unprovisioned. The full rules,
@@ -657,7 +658,7 @@ It performs:
 - **Per-interface supplicant configs.** Writes `wpa_supplicant` mesh-point / SAE configs for the 2.4 and 5 GHz radios and `wpa_supplicant_s1g` (S1G) configs for the HaLow interface, along with the matching `systemd-networkd` link/network files.
 - **HaLow / Morse setup.** Enables the mesh radio power request (30 dBm on every mesh radio), writes `/etc/modprobe.d/morse.conf` and the `cfg80211` regulatory domain (including EU handling), and ensures the SPI overlay, Morse power/reset GPIOs, and CM4 `pcie-32bit-dma` settings are present in `config.txt`.
 - **Core services.** Enables and starts the mesh stack (`alfred`, BATMAN-adv (`batman-enslave`), `node-manager`, and `radvd`) plus support services for LED/button handling, SSH recovery, cloned-identity reset, the boot lobby channels, and time synchronization. `one-shot-time-sync.service` owns chrony: verified GPS/uplink sources keep it running, while mesh clients stop polling between brief refreshes about every six hours.
-- **ATAK.** Installs, enables and starts `manet-atak.service` on every node. Generated `mesh.conf` files document `atak=y`; an absent setting also means enabled. Set `atak=n` and restart the service to opt out. The positioning unit ships without being enabled. See [phone setup](../../README.md#atak-phones).
+- **ATAK.** Installs, enables, and starts `manet-atak.service` on every node. Generated `mesh.conf` files document `atak=y`; an absent setting also means enabled. Set `atak=n` and restart the service to opt out. The positioning unit ships without being enabled. See [phone setup](../../README.md#atak-phones).
 - **Optional services.** Brings up MediaMTX and Mumble when selected. `gpsd` and `gps-reader.service` support an optional GPS; the time service uses chrony `SHM 0` when a current fix is available.
 - **Identity and web UI.** Derives the hostname from the node's MAC (`mesh-XXXX`) and starts the web server (`mesh-status.py`) on port 80: open status page at `/`, password-gated management UI at `/manage`. Also advertises the node as `manet.local` over mDNS on the EUD-facing interface only.
 - **OS footprint.** On Raspberry Pi OS Trixie running the MANET kernel, removes the unused build tools, kernel headers, desktop GPS clients, camera utilities, desktop storage/modem/Bluetooth daemons, and stock swap machinery. GPS uses the command-line `gpsd-tools` package. Runtime libraries, radio firmware, kernel images, audio/video, diagnostics, user files, and logs are retained. The inactive stock `/var/swap` and downloaded APT package cache are removed after the package transaction succeeds.
@@ -684,7 +685,7 @@ upgrade on the next setup or explicit `--apply`; no `--force` is required.
 Profile 2 removes PulseAudio/rtkit, stops their active units and the unused
 per-user D-Bus units (including logged-in users), and masks their automatic
 activation. It retains `dbus-user-session` because removing it would also remove
-the GStreamer good plugins through their dependencies. ALSA voice, system D-Bus, normal login/user managers, polkit and
+the GStreamer good plugins through their dependencies. ALSA voice, system D-Bus, normal login/user managers, polkit, and
 credential-agent sockets remain available. It masks the global supplicant only,
 retaining the per-radio instances, and disables unused maintenance/console units.
 Cron is retained if local jobs need review; e2scrub is retained with LVM.
@@ -755,7 +756,7 @@ button, then *Terminal (Admin)* or *Windows PowerShell (Admin)*.
 - `/var/log/radio-setup.log`
 
 These logs trace every command, but tracing is switched off wherever the mesh
-key, hotspot key or passwords are handled, so the logs are safe to share.
+key, hotspot key, or passwords are handled, so the logs are safe to share.
 Logs from releases before 0.558 contain them.
 
 **Radios misbehaving: check power first.** A HaLow card that stops answering, a Wi-Fi

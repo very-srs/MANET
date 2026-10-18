@@ -16,13 +16,13 @@ and managed MT7916 firmware by default. The optional board kernel payload
 uses a separate manifest and trial transaction. CM4 activation defaults on,
 derives the profile from this node's boot files and hardware, and supports a
 local `enabled=n` opt-out in `/etc/manet-kernel-update.conf`. The reset/fallback
-mechanism has been benched. The generic field health policy still needs
-on-node acceptance before release. Rock 3A
+mechanism has been benched. The generic field health policy has
+confirmed real CM4 kernel updates. Rock 3A
 kernel activation remains disabled. See the
 [field update policy](../../docs/node-tools-internals.md#field-update-policy).
 
 `*-install.tar.gz` sets up a new node. Current install packages combine the
-runtime payload with the kernel, device trees, modules and radio firmware for
+runtime payload with the kernel, device trees, modules, and radio firmware for
 that board. This initial-provisioning role does not reserve those components
 exclusively for install archives.
 First-boot provisioning downloads it by exact filename, so these are not
@@ -48,7 +48,7 @@ marked Latest; testing uses an explicit `--development` option.
 
 The publisher creates a draft, uploads and verifies all assets, then publishes
 it. It keeps the newest three prereleases and preserves stable releases. See
-[Publishing MANET releases](../releases/README.md) for publishing, promotion and
+[Publishing MANET releases](../releases/README.md) for publishing, promotion, and
 cleanup commands. Tarballs remain outside Git history.
 
 If copying an identical tools archive to another board's filename, regenerate

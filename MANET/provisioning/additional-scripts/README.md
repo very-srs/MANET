@@ -30,7 +30,7 @@ additional-scripts/            (this directory, on your machine)
 ```
 
 They run after provisioning finishes, not during it, so the mesh, the AP, the
-radios and the network are already available to them.
+radios, and the network are already available to them.
 
 ## Where things land on the node
 
@@ -66,7 +66,7 @@ Scripts run in lexical order, so use a numeric prefix:
 
 Filenames must match `[A-Za-z0-9][A-Za-z0-9._-]*`, so no spaces.
 
-Anything ending in `.disabled`, `.bak`, `.orig` or `~`, and anything starting
+Anything ending in `.disabled`, `.bak`, `.orig`, or `~`, and anything starting
 with `.`, is ignored. That is how to park a script without deleting it, and it
 is what keeps the bundled example inert.
 
@@ -84,7 +84,7 @@ installed on the node can be used. A freshly flashed node provides:
 | `#!/usr/bin/lua` | Lua 5.1 |
 | `#!/usr/bin/awk -f` | mawk |
 
-Nothing else is installed. Ruby, Node, PHP, Tcl and similar are absent, and a
+Nothing else is installed. Ruby, Node, PHP, Tcl, and similar are absent, and a
 script written for one of them fails with exit 127 and a log line naming the
 missing interpreter.
 
@@ -134,7 +134,7 @@ languages are accepted at their shebang and reported as `not checked`.
 
 > **Nothing has to be installed for any of this.** The full shell check needs
 > `bash` and the Python check needs `python3`. On Windows those turn up if you
-> happen to have Git for Windows, WSL or Python already, and the report says so
+> happen to have Git for Windows, WSL, or Python already, and the report says so
 > when they do not. With neither present the flasher still checks what it can
 > without a parser: an unclosed quote and an unclosed heredoc, which are the
 > two ways a hand-written script usually breaks. That check only ever warns,
@@ -229,7 +229,7 @@ sudo manet-user-scripts.sh --force  # re-run everything
 
 Scripts can also be added to a node directly by placing them in
 `/var/lib/manet-user-scripts/` and invoking `manet-user-scripts.sh`. The same
-rules apply: the shebang requirement and the `.disabled`, `.bak`, `.orig` and
+rules apply: the shebang requirement and the `.disabled`, `.bak`, `.orig`, and
 `~` suffixes are re-checked on the node, so a configuration file placed
 alongside the scripts is skipped instead of executed. Without that check it
 would be executed, because a file with no shebang does not fail to run. The
