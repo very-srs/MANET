@@ -1,11 +1,12 @@
 [Unit]
 Description=MANET independent DFS radar event watcher
 After=alfred.service
-PartOf=node-manager.service
 
 [Service]
-Type=simple
+Type=notify
+NotifyAccess=main
 ExecStart=/usr/local/bin/mesh-channel-agreement.py dfs-watch
+ExecStopPost=/usr/local/bin/manet_dfs_safety.py stop
 Restart=always
 RestartSec=1
 NoNewPrivileges=yes
@@ -14,4 +15,8 @@ ProtectHome=yes
 ReadWritePaths=/run /var/lib /etc/wpa_supplicant
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_DAC_OVERRIDE
-TimeoutStopSec=5
+TimeoutStartSec=15
+TimeoutStopSec=60
+
+[Install]
+WantedBy=multi-user.target

@@ -215,7 +215,7 @@ def observer_main():
             check=True, capture_output=True, text=True, timeout=2).stdout
         frequencies = list(args.frequencies)
         hold_path = path.parent.parent / 'background_hold'
-        if capable(hold_path, phy_text):
+        if capable(hold_path, phy_text, iface=args.iface):
             frequencies = sorted(set(frequencies) | set(dfs_frequencies(phy_text)))
         results = collect_candidates(path, frequencies, args.iface)
     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:

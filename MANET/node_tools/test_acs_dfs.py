@@ -277,7 +277,9 @@ else:
         with self.runner.channel_lock():
             self.radar()  # Event entry must not acquire the held ACS lock.
         commands = (self.root / 'commands').read_text().splitlines()
-        self.assertEqual(commands[0], 'iw dev wlan1 switch freq 5200 HT20 beacons 3 block-tx')
+        self.assertEqual(commands[:2], [
+            'wpa_cli -i wlan1 raw MANET_DFS_STATUS',
+            'iw dev wlan1 switch freq 5200 HT20 beacons 3 block-tx'])
         for type_id in (74, 75):
             envelope = json.loads((self.root / f'sent-{type_id}').read_text())
             payload = self.transport.open(type_id, envelope).payload
@@ -406,6 +408,7 @@ check_mesh_quorum
         records = {m: {'status': s} for m, s in dfs_view(at).items()}
         with self.runner.channel_lock(), \
                 patch.object(runtime.time, 'time', return_value=at), \
+                patch.object(self.runner, 'receive', return_value=records), \
                 patch.object(self.runner, 'members',
                              return_value=list(records)), \
                 patch.object(self.runner, 'status',

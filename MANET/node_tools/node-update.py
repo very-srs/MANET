@@ -51,6 +51,8 @@ REQUIRED = MARKERS | {
     "etc/apt/preferences.d/00-manet-kernel",
     "usr/local/bin/manet-kernel-protect.py",
     "usr/local/bin/manet-mesh-supplicant.py",
+    "usr/local/bin/manet_dfs.py", "usr/local/bin/manet_dfs_safety.py",
+    "etc/systemd/system/manet-dfs-watch.service",
     "etc/systemd/system/wpa_supplicant@.service.d/20-manet-binary.conf",
     "usr/local/bin/node-update.sh", "usr/local/bin/node-update.py",
     "usr/local/bin/manet_release.py",
@@ -663,7 +665,16 @@ class Updater:
                     raise UpdateError('Invalid runtime activation snapshot')
         atomic_file(snapshot, data=json.dumps({'boot': boot, 'services': active_runtime}).encode(),
                     mode=0o600)
+        # Use the self-contained staged helper even when the previous release
+        # had no safe watcher handoff. No runtime file is replaced before this
+        # verifies that DFS meshes are fenced and their supplicants stopped.
+        safety = directory / 'usr/local/bin/manet_dfs_safety.py'
+        run_command([str(safety), 'stop', '--root', str(self.root)])
         self.quiesce_config()
+        # A config worker that was already running may have retuned a radio
+        # while it exited. Recheck after all producers have stopped.
+        run_command([str(safety), 'stop', '--root', str(self.root)])
+        run_command(['systemctl', 'stop', 'manet-dfs-watch.service'])
         self.preserve_config()
         self.install_payload(directory, members)
         self.retire_bootstrap(directory, members)
@@ -682,6 +693,8 @@ class Updater:
         self.retire_network_boot_units()
         self.retire_cpu_powersave()
         run_command(["systemctl", "daemon-reload"])
+        run_command(['systemctl', 'enable', '--now', 'manet-dfs-watch.service'])
+        run_command(['systemctl', 'is-active', '--quiet', 'manet-dfs-watch.service'])
         # Preserve MAC-matched DHCP files while disabling unqualified DNS.
         # Fail before version commit; recovery repeats the pending migration.
         run_command([str(self.destination('usr/local/bin/manet-dns-setup.sh'))])
@@ -715,9 +728,11 @@ class Updater:
         # Running Wi-Fi mesh instances adopt the binary and 20 MHz width now.
         # HaLow candidates require separate bench approval and activation.
         run_command(["systemctl", "try-restart", "wpa_supplicant@*.service"])
+        run_command([str(self.destination('usr/local/bin/manet_dfs_safety.py')),
+                     'resume', '--root', str(self.root)])
         for service in ("mesh-status.service", "node-manager.service"):
             run_command(["systemctl", "restart", service])
-        for service in ("mesh-status.service", "node-manager.service", "mesh-channel-agreement.service", "one-shot-time-sync.service"):
+        for service in ("mesh-status.service", "node-manager.service", "mesh-channel-agreement.service", "one-shot-time-sync.service", "manet-dfs-watch.service"):
             run_command(["systemctl", "is-active", "--quiet", service])
         for service in RUNTIME_SERVICES:
             run_command(['systemctl', 'try-restart', service])

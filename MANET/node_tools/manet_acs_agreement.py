@@ -26,6 +26,8 @@ CHANNELS = {'2.4': {2437, 2462}, '5': {5200, 5220, 5240, 5745, 5765, 5785, 5805,
 DFS_CHANNELS = set(range(5260, 5340, 20)) | set(range(5500, 5740, 20))
 DFS_VERSION = 1
 DFS_LEASE_SECONDS = 15
+# Waiting grants no clearance and cannot move a plan's activation deadline.
+DFS_REFRESH_WAIT = DFS_LEASE_SECONDS // 3
 DFS_COOLDOWN_SECONDS = 1800
 # Membership uses lowercase MACs and 32-hex boot/nonce tokens.
 MAC = re.compile(r'(?:[0-9a-f]{2}:){5}[0-9a-f]{2}')
@@ -87,6 +89,18 @@ def majority(plan):
     if 'dfs' in plan:
         return len(plan['participants'])
     return len(plan['participants']) // 2 + 1
+
+
+def proposal_possible(view, channels=None):
+    """Count ready, compatible voters without dropping unknown members."""
+    leader = coordinator(view)
+    if leader is None or (channels is not None and not compatible(channels, view[leader])):
+        return False  # Every valid certificate must include its coordinator.
+    required = (len(view) if channels and channels.get('5') in DFS_CHANNELS
+                else len(view) // 2 + 1)
+    return sum(bool(s and s['ready'] and
+                    (channels is None or compatible(channels, s)))
+               for s in view.values()) >= required
 
 
 def make_plan(view, channels, limp, now, nonce, fallback=None):
@@ -271,12 +285,16 @@ def validate_dfs_contract(plan):
             raise AgreementError('invalid DFS receiver binding')
 
 
-def dfs_ready(plan, view, now):
-    """Recheck full connected membership and renewable authenticated leases."""
+def _dfs_clearances(plan, view):
+    """Match authenticated receiver identities without granting time validity."""
     if view is None or set(view) != set(plan['participants']):
-        return False
+        return None
+    holds = {}
     for mac, status in view.items():
-        hold = live_hold(status, now) if isinstance(status, dict) else None
+        raw = status.get('dfs_hold') if isinstance(status, dict) else None
+        # Validate the original observation, including its bounded lease. The
+        # callers must separately require a live lease at decision time.
+        hold = live_hold(status, raw['observed_at']) if valid_hold(raw) else None
         if (not hold or not valid_status(status) or
                 not status['ready'] or
                 status.get('stable', True) is not True or
@@ -289,8 +307,27 @@ def dfs_ready(plan, view, now):
                 '5' not in status.get('current', {}) or
                 not compatible(plan['channels'], status) or
                 not compatible(plan['dfs']['fallback'], status)):
-            return False
-    return True
+            return None
+        holds[mac] = hold
+    return holds
+
+
+def dfs_ready(plan, view, now):
+    """Recheck full connected membership and renewable authenticated leases."""
+    holds = _dfs_clearances(plan, view)
+    return bool(holds and all(h['observed_at'] <= now < h['lease_until']
+                              for h in holds.values()))
+
+
+def dfs_refresh_pending(plan, view, own, now):
+    """Only a recently expired peer observation may wait for replacement."""
+    holds = _dfs_clearances(plan, view)
+    if not holds or own not in holds:
+        return False
+    local = holds[own]
+    return (local['observed_at'] <= now < local['lease_until'] and
+            all(h['observed_at'] <= now < h['lease_until'] + DFS_REFRESH_WAIT
+                for h in holds.values()))
 
 
 def dfs_abort(plan, own, reason):
@@ -442,25 +479,39 @@ def advance(saved, own, now, view, records, proposal=None, local=None):
                 state['phase'] = 'aborted'
                 return state, {}, None
         if not dfs_ready(plan, view, now):
+            if dfs_refresh_pending(plan, view, own, now):
+                until = state.setdefault('clearance_wait_until', min(
+                    now + DFS_REFRESH_WAIT, plan['activate_at'] + APPLY_GRACE))
+                if now < until:
+                    # Keep the original promise, but no vote, commitment or
+                    # activation can be issued using the expired observation.
+                    return state, {}, None
             state['phase'] = 'aborted'
             if local and local.get('boot') == plan['participants'][own]:
                 state['abort'] = dfs_abort(plan, own, 'clearance_lost')
             return state, ({'abort': state['abort']}
                            if state.get('abort') else {}), None
+        state.pop('clearance_wait_until', None)
     # A newly reachable group (over HaLow or any other interface) is part of
     # the same decision domain. Stop uncommitted island elections when
     # membership expands. Execute issued commitments, then reconcile in a
     # shared round.
     if view and set(view) - set(plan['participants']) and 'commit' not in state:
-        state['phase'] = 'expired'
+        state.update(phase='expired', expiry_reason='membership-expanded')
         return state, {}, None
     # Reboot or a channel change invalidates the local promise.
-    landed_dfs = ('dfs' in plan and local and 'commit' in state and
-                  valid_commit(state['commit'], plan) and
-                  plan['activate_at'] <= now <= plan['activate_at'] + APPLY_GRACE and
-                  all(local['current'].get(b) == f for b, f in plan['channels'].items()))
-    if not local or (snapshot(local) != state['local'] and not landed_dfs):
-        state['phase'] = 'expired'
+    # A peer's CSA can land first. Only the already committed target may
+    # replace the snapshot, on the same boot and within the apply window.
+    # Unplanned radios must still match. DFS readiness was checked above.
+    landed = (local and 'commit' in state and
+              valid_commit(state['commit'], plan) and
+              local['boot'] == state['local']['boot'] and
+              plan['activate_at'] <= now <= plan['activate_at'] + APPLY_GRACE and
+              set(local['current']) == set(state['local']['current']) and
+              all(f == plan['channels'].get(b, state['local']['current'][b])
+                  for b, f in local['current'].items()))
+    if not local or (snapshot(local) != state['local'] and not landed):
+        state.update(phase='expired', expiry_reason='local-snapshot-changed')
         if ('dfs' in plan and local and
                 local.get('boot') == plan['participants'][own]):
             state['phase'] = 'aborted'
@@ -482,7 +533,7 @@ def advance(saved, own, now, view, records, proposal=None, local=None):
                 state['commit'] = {'plan': plan_id, 'approvals': deepcopy(state['votes']), 'issued_at': now}
                 state['phase'] = 'committed'
             else:
-                state['phase'] = 'expired'
+                state.update(phase='expired', expiry_reason='no-majority')
                 return state, {}, None
     if 'commit' not in state and now < plan['activate_at'] - COMMIT_CUTOFF:
         commit = records.get(plan['leader'], {}).get('commit')
@@ -498,6 +549,7 @@ def advance(saved, own, now, view, records, proposal=None, local=None):
         if 'commit' in state and now <= plan['activate_at'] + APPLY_GRACE:
             state['phase'] = 'attempted'
             return state, outgoing, plan
-        state['phase'] = 'expired'
+        state.update(phase='expired', expiry_reason=(
+            'activation-missed' if 'commit' in state else 'missing-commit'))
         return state, {}, None
     return state, outgoing, None

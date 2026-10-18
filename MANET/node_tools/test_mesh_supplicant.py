@@ -185,7 +185,7 @@ class MeshSupplicantTests(unittest.TestCase):
                      'wpa_supplicant_s1g_candidate'):
             (binaries / name).write_bytes(b'fixture-' + name.encode())
         stage = self.root / 'stage'
-        command = '. "$1"; stage_mesh_supplicant "$2" "$3"'
+        command = '. "$1"; MANET_DFS_ENABLED=0 stage_mesh_supplicant "$2" "$3"'
         args = ['bash', '-c', command, 'test',
                 str(packaging / 'lib-supplicant.sh'), str(stage), str(repo)]
         subprocess.run(args, check=True)

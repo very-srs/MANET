@@ -65,7 +65,8 @@ Read [mesh mechanisms](guide/content/mesh.md) and
 | [manet_acs_agreement.py](../MANET/node_tools/manet_acs_agreement.py) | Pure bounded majority-agreement state machine. |
 | [mesh-acs-common.sh](../MANET/node_tools/mesh-acs-common.sh) | Shared clock, role and channel configuration helpers. |
 | [manet_bgobs.py](../MANET/node_tools/manet_bgobs.py) | Measure 5 GHz candidates on the reserved third RX chain and correct own-TX blanking. |
-| [manet_dfs.py](../MANET/node_tools/manet_dfs.py) | Check paired DFS capability and live channel flags, and send bounded CAC and mesh CSA requests. |
+| [manet_dfs.py](../MANET/node_tools/manet_dfs.py) | Check paired DFS capability and live channel flags, subscribe to radar/file events without polling, and send bounded CAC and mesh CSA requests. |
+| [manet_dfs_safety.py](../MANET/node_tools/manet_dfs_safety.py) | Fence DFS interfaces during guardian failure or code replacement and resume stored non-DFS fallbacks only after guardian readiness. |
 | [manet_rx_policy.py](../MANET/node_tools/manet_rx_policy.py) | Reconcile CM4 receive paths from local RF trouble and kernel hold ownership. |
 | [channel-election.sh](../MANET/node_tools/channel-election.sh) | Score measured channels and request an agreed change; signal limp conditions. |
 | [quorum-checker.sh](../MANET/node_tools/quorum-checker.sh) | Decide whether isolation requires returning to discovery, distinguishing unavailable checks. |

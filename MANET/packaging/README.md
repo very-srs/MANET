@@ -128,7 +128,14 @@ Both real variants are carried, and the updater regenerates the selected
 symlink after installing the payload, using the installed configuration.
 
 The Wi-Fi mesh binaries `wpa_supplicant_manet` and `wpa_cli_manet` are carried
-by every builder through `lib-supplicant.sh`. Other prebuilt binaries remain
+by every builder through `lib-supplicant.sh`. DFS is enabled by default, and
+builders reject a missing or incompatible `v2.11-manet-dfs3` supplicant. The
+binary must contain the paired 0007/0008 control ABI. Native Debian build
+instructions are in the [binaries README](../binaries_arm64/README.md#native-debian-13-build).
+`MANET_DFS_ENABLED=0` explicitly builds a non-DFS package, permits the Debian
+fallback, and stages `usr/local/share/manet/dfs-enabled` as `0`. Runtime
+capability also queries the running BSS, so a stale process cannot be enabled
+by a newly copied executable. Other prebuilt binaries remain
 absent from the current tools payload. HaLow candidate names are never staged.
 `node-update.sh` verifies
 and stages the archive, installs it, reloads systemd, and restarts mesh-status and

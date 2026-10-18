@@ -1,0 +1,76 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+Subject: [PATCH] mesh: opt in each BSS to external DFS radar ownership
+
+Only the live ACS contract path opts in through the root control socket.
+The default and every new BSS retain native radar evacuation and CAC checks.
+The runtime arms its independent guardian and stores the fallback before
+opting in. Static meshes and ordinary APs keep upstream behavior.
+
+---
+--- a/src/ap/dfs.c
++++ b/src/ap/dfs.c
+@@ -1449,6 +1449,15 @@
+ 		"freq=%d ht_enabled=%d chan_offset=%d chan_width=%d cf1=%d cf2=%d",
+ 		freq, ht_enabled, chan_offset, chan_width, cf1, cf2);
+ 
++#ifdef CONFIG_MESH
++	if (iface->mconf && iface->manet_dfs_owner) {
++		/* The live ACS owner has a fallback and an independent guardian. */
++		set_dfs_state(iface, freq, ht_enabled, chan_offset, chan_width,
++			      cf1, cf2, HOSTAPD_CHAN_DFS_UNAVAILABLE);
++		return 0;
++	}
++#endif /* CONFIG_MESH */
++
+ 	iface->radar_detected = true;
+ 
+ 	/* Proceed only if DFS is not offloaded to the driver */
+--- a/src/ap/drv_callbacks.c
++++ b/src/ap/drv_callbacks.c
+@@ -1313,6 +1313,9 @@
+ 		wpa_msg(hapd->msg_ctx, MSG_INFO, AP_CSA_FINISHED
+ 			"freq=%d dfs=%d", freq, is_dfs);
+ 	} else if (is_dfs &&
++#ifdef CONFIG_MESH
++		   !(hapd->iface->mconf && hapd->iface->manet_dfs_owner) &&
++#endif /* CONFIG_MESH */
+ 		   hostapd_is_dfs_required(hapd->iface) &&
+ 		   !hostapd_is_dfs_chan_available(hapd->iface) &&
+ 		   !hapd->iface->cac_started) {
+--- a/src/ap/hostapd.h
++++ b/src/ap/hostapd.h
+@@ -546,6 +546,8 @@
+ 
+ #ifdef CONFIG_MESH
+ 	struct mesh_conf *mconf;
++	/* Volatile per-BSS opt-in. A fresh/static mesh always starts at zero. */
++	int manet_dfs_owner;
+ #endif /* CONFIG_MESH */
+ 
+ 	size_t num_bss;
+--- a/wpa_supplicant/ctrl_iface.c
++++ b/wpa_supplicant/ctrl_iface.c
+@@ -12553,6 +12553,23 @@
+ 	if (os_strcmp(buf, "PING") == 0) {
+ 		os_memcpy(reply, "PONG\n", 5);
+ 		reply_len = 5;
++
++#ifdef CONFIG_MESH
++	} else if (os_strcmp(buf, "MANET_DFS_STATUS") == 0) {
++		if (!wpa_s->ifmsh || !wpa_s->ifmsh->mconf)
++			reply_len = -1;
++		else
++			reply_len = os_snprintf(reply, reply_size,
++				"MANET_DFS_V3 owner=%d\n",
++				wpa_s->ifmsh->manet_dfs_owner);
++	} else if (os_strcmp(buf, "MANET_DFS_OWNER 1") == 0 ||
++		   os_strcmp(buf, "MANET_DFS_OWNER 0") == 0) {
++		/* Root control client must arm its contract before opting in. */
++		if (!wpa_s->ifmsh || !wpa_s->ifmsh->mconf)
++			reply_len = -1;
++		else
++			wpa_s->ifmsh->manet_dfs_owner = buf[16] == '1';
++#endif /* CONFIG_MESH */
+ 	} else if (os_strcmp(buf, "IFNAME") == 0) {
+ 		reply_len = os_strlen(wpa_s->ifname);
+ 		os_memcpy(reply, wpa_s->ifname, reply_len);

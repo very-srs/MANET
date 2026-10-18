@@ -459,7 +459,10 @@ done
         self.assertEqual(result.returncode, 0, result.stderr)
         output = (self.root / 'election').read_text()
         self.assertIn('WINNER_2_4=2462', output)
-        self.assertIn('WINNER_5_0=5200', output)
+        # The healthy candidate report survives, but neither incumbent has
+        # home telemetry here. Candidate data alone no longer causes a move.
+        self.assertIn('WINNER_5_0=5220', output)
+        self.assertIn('URGENT_5_0=false', output)
         self.assertIn('LIMP_MODE=false', output)
 
     def test_unchanged_short_reset_missing_counters_or_noise_omit_channel(self):
