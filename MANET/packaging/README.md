@@ -4,8 +4,8 @@ Build scripts and their support files are tracked in this directory. Start
 with [contributing](../../CONTRIBUTING.md) for host setup and validation.
 Two kinds of tarball are built from this repository, for three boards.
 
-A kernel-less update needs the checkout, Bash, Python 3, curl and GNU tar,
-findutils and coreutils. Tools and CM4 install builders fetch the pinned
+A kernel-less update needs the checkout, Bash, Python 3, curl, and GNU tar,
+findutils, and coreutils. Tools and CM4 install builders fetch the pinned
 stock MT7916 firmware
 when absent and verify its SHA-256 against
 `MANET/share/manet/mt7916-firmware.json`. Set `MANET_FIRMWARE_CACHE` to an
@@ -16,7 +16,7 @@ Install archives also need a board overlay. Build one using the tracked
 
 The builders copy this working tree, including uncommitted runtime files.
 Use an isolated checkout for a candidate whose source must be unambiguous.
-They write only staging directories, caches and output files. They do not
+They write only staging directories, caches, and output files. They do not
 install anything on a radio or publish to GitHub.
 
 | Script | Output | Contents |
@@ -27,7 +27,7 @@ install anything on a radio or publish to GitHub.
 | `build-tools-tarball.sh` | `<board>-tools.tar.gz` | payload selected for an existing node's update |
 
 **Install tarballs** bootstrap a new node: everything universal from this repo,
-plus the board's kernel, DTBs, modules and Morse firmware from an SBC overlay.
+plus the board's kernel, DTBs, modules, and Morse firmware from an SBC overlay.
 
 **Tools tarballs** update an existing node: `node-update.sh` fetches, verifies,
 stages, and installs one into the root filesystem. The archive can carry
@@ -37,7 +37,7 @@ field radios must be maintainable without routine opening and reflashing.
 Follow the [field update policy](../../docs/node-tools-internals.md#field-update-policy)
 when adding payloads that need activation or recovery handling.
 
-The cm4, r3a and rpi5 tools archives share the common runtime and are named
+The cm4, r3a, and rpi5 tools archives share the common runtime and are named
 per board because the updater requests its board's package. Board-specific
 kernel and release inputs make their contents differ. The current builder carries the node scripts
 and version file, systemd units together with their `multi-user.target.wants`
@@ -51,7 +51,7 @@ or `r3a` and optionally `SBC_OVERLAY_DIR` to package a matched set through
 `stage-kernel-payload.py`. The default input is
 `kernel-work/packages/<board>-sbc-overlay`. The helper creates the
 `manet-kernel/` inventory and validates it with the runtime validator. Only
-regular boot inputs, modules and Morse firmware are copied. Module build/source
+regular boot inputs, modules, and Morse firmware are copied. Module build/source
 links are omitted. CM4 gets the private-overlay README sentinel. Include every
 configured overlay from the matching kernel build, not only the Morse overlay.
 Use `ALL_OVERLAYS=1` with `kernel/build/build-cm4-sbc-overlay.sh` to
@@ -94,7 +94,8 @@ archives without either kernel variable. The wrapper uses the same default-on
 CM4 policy and derived profile as the new updater. Opt-out retains the embedded
 payload so the timer can resume if enabled later. Neither archive carries a
 radio-specific boot profile or operator policy file. The fallback mechanism
-has been benched, while the generic field health policy needs on-node acceptance.
+has been benched, and the generic field health policy has confirmed real CM4
+kernel updates.
 
 Release userland inputs use `MANET_HOSTAPD_DEB` and, for CM4,
 `MANET_REGDB`. The former must be the native Debian ARM64
@@ -142,8 +143,10 @@ and stages the archive, installs it, reloads systemd, and restarts mesh-status a
 node-manager. It also prepares mesh inactivity settings, enforces 20 MHz in
 both live and lobby Wi-Fi mesh configs, and restarts active Wi-Fi mesh
 instances. This migrates existing radios without reflashing. HaLow widths
-and client uplinks are unchanged. Other newly enabled units become active
-at the next boot.
+and client uplinks are unchanged. The updater starts the DFS guardian and
+required setup services before committing the version. Other shipped runtime
+daemons restart only if already active. Newly enabled ATAK and voice services
+start at the next boot.
 It does
 not run `udevadm`.
 
@@ -169,7 +172,7 @@ updates follow the full release marked Latest. Iterations are prereleases and
 retains the newest three prereleases and preserves stable releases.
 
 See [release tooling](../releases/README.md) for draft uploads, verification,
-promotion and cleanup. First-boot provisioning and the tools updater both verify
+promotion, and cleanup. First-boot provisioning and the tools updater both verify
 checksums and embedded versions. Keep canonical outputs in
 `MANET/install_packages/`; do not commit generated archives.
 
@@ -198,7 +201,7 @@ indicates that a later regeneration would produce differences unrelated to the
 `.proto` change being made.
 
 The same environment installs `cryptography` for transport tests,
-Python-Markdown for guide builds and `pyelftools` for BCF assembly. Their
+Python-Markdown for guide builds, and `pyelftools` for BCF assembly. Their
 requirements are recorded in [requirements-dev.txt](requirements-dev.txt).
 
 The build scripts in this directory do **not** invoke protoc; they copy the
@@ -263,8 +266,8 @@ artifacts are absent.
 Two artifacts, both committed under `MANET/lyra_arm64/`:
 
 - `libgstlyra.so`: the GStreamer plugin (`lyraenc`, `lyradec`, `rtplyrapay`,
-  `rtplyradepay`), statically linked against Lyra, TFLite and abseil, so its only
-  runtime needs are glibc, libstdc++ and GStreamer itself.
+  `rtplyradepay`), statically linked against Lyra, TFLite, and abseil, so its only
+  runtime needs are glibc, libstdc++, and GStreamer itself.
 - `model_coeffs/`: the Lyra v2 model weights, loaded at pipeline build.
 
 They are built in two stages. Cross-build the static codec dependencies,

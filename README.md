@@ -1,13 +1,13 @@
 # MANET
 
 MANET builds self-forming mesh radios from ARM64 single-board computers,
-802.11ax/ac/n Wi-Fi and Morse Micro 802.11ah HaLow. The data path uses
+802.11ax/ac/n Wi-Fi, and Morse Micro 802.11ah HaLow. The data path uses
 `batman-adv` with BATMAN V at Layer 2. Nodes coordinate addresses, channels,
-time sources and shared services as links appear, partitions form and groups
+time sources, and shared services as links appear, partitions form, and groups
 rejoin.
 
 **Using a radio:** start with the [field guide](https://very-srs.github.io/MANET/)
-for hardware, flashing, operation and troubleshooting. Choose User for normal
+for hardware, flashing, operation, and troubleshooting. Choose User for normal
 instructions or Marine for illustrated explanations.
 
 **Contributing code:** start with [CONTRIBUTING.md](CONTRIBUTING.md), then
@@ -17,7 +17,7 @@ Generated packages are distributed through GitHub Releases.
 
 ## Development quick start
 
-On a Linux host with Python 3.10+, Git, curl and unzip:
+On a Linux host with Python 3.10+, Git, curl, and unzip:
 
 ```bash
 git clone https://github.com/very-srs/MANET.git
@@ -31,7 +31,7 @@ python docs/guide/build.py --check
 Setup pins the protobuf compiler and Python runtime to the node-compatible
 versions and verifies the generated schema. See the
 [contributor workflow](CONTRIBUTING.md) for dependencies, focused validation,
-coding conventions, design constraints and PR expectations.
+coding conventions, design constraints, and PR expectations.
 
 Build a kernel-less update archive from this checkout:
 
@@ -41,7 +41,7 @@ bash MANET/packaging/build-tools-tarball.sh /tmp/manet/cm4-tools.tar.gz
 
 The builder obtains and verifies pinned MT7916 firmware when it is not
 cached. Install archives additionally need a board overlay containing the
-kernel, device trees, modules and Morse firmware. Follow
+kernel, device trees, modules, and Morse firmware. Follow
 [packaging](MANET/packaging/README.md) and
 [kernel builds](kernel/build/README.md) to produce those inputs. Building an
 archive does not deploy it to a radio or publish a release.
@@ -50,29 +50,29 @@ archive does not deploy it to a radio or publish a release.
 
 Wi-Fi mesh and HaLow interfaces feed `bat0`. The addressed bridge `br0`
 connects that forwarding domain to local end-user devices (EUDs). Alfred
-exchanges identity, telemetry and authenticated control records. Each node
+exchanges identity, telemetry, and authenticated control records. Each node
 builds a local registry and reconciles its own state. Elected channel
 coordinators and service hosts have specific responsibilities, rather than
 acting as permanent controllers for all traffic.
 
 A connected BATMAN component is one channel-decision domain even when
 HaLow is the only link between two Wi-Fi groups. Authentication, observation
-freshness, clock readiness and recovery matter separately from forwarding.
+freshness, clock readiness, and recovery matter separately from forwarding.
 Read the [Developer overview](docs/guide/content/overview.md#developer-runtime-architecture),
-[runtime internals](docs/node-tools-internals.md) and
+[runtime internals](docs/node-tools-internals.md), and
 [node-tool map](docs/node-tools-map.md) before changing that coordination.
 
 | Area | Responsibility |
 |---|---|
-| `MANET/node_tools/` | Runtime scripts, Python modules, telemetry schema and tests. |
-| `MANET/systemd/`, `systemd-network/`, `networkd-dispatcher/`, `udev/` | Service lifecycle, network configuration and event hooks. |
-| `MANET/etc/`, `share/manet/`, `root/` | Defaults, shared assets and regulatory data. |
-| `MANET/provisioning/` | Linux/Windows flashers, first-boot templates and operator setup hooks. |
-| `MANET/packaging/` | Development setup, install/update archive builders and Lyra source. |
+| `MANET/node_tools/` | Runtime scripts, Python modules, telemetry schema, and tests. |
+| `MANET/systemd/`, `systemd-network/`, `networkd-dispatcher/`, `udev/` | Service lifecycle, network configuration, and event hooks. |
+| `MANET/etc/`, `share/manet/`, `root/` | Defaults, shared assets, and regulatory data. |
+| `MANET/provisioning/` | Linux/Windows flashers, first-boot templates, and operator setup hooks. |
+| `MANET/packaging/` | Development setup, install/update archive builders, and Lyra source. |
 | `MANET/binaries_arm64/`, `lyra_arm64/` | Supplied ARM64 programs and voice codec artifacts. |
-| `kernel/build/`, `kernel/patches/` | Pinned source preparation, kernel/module recipes and project patches. |
-| `MANET/releases/` | Release selection, manifests, publication and promotion. |
-| `docs/guide/` | Three-level field guide, style rules, illustrations and site builder. |
+| `kernel/build/`, `kernel/patches/` | Pinned source preparation, kernel/module recipes, and project patches. |
+| `MANET/releases/` | Release selection, manifests, publication, and promotion. |
+| `docs/guide/` | Three-level field guide, style rules, illustrations, and site builder. |
 
 ## Supported Hardware
 
@@ -100,7 +100,7 @@ builds are selected explicitly with `--development`.
 ### Connectivity Modes
 
 An EUD connects to its radio over Ethernet or a local Wi-Fi access point.
-The Wired, Wireless and Auto settings determine how those roles are
+The Wired, Wireless, and Auto settings determine how those roles are
 assigned. Ethernet can instead provide an internet uplink, making the node
 a gateway. See [client connections](docs/guide/content/connect.md) and
 [internet gateways](docs/guide/content/internet.md) for behavior and recovery.
@@ -110,20 +110,20 @@ a gateway. See [client connections](docs/guide/content/connect.md) and
 ATAK integration is enabled by default. The radio supplies external GPS
 and exchanges CoT with the attached phone. Follow the
 [location and ATAK chapter](docs/guide/content/location.md) for phone
-configuration, contact selection and position-source limitations.
+configuration, contact selection, and position-source limitations.
 
 ## Documentation
 
 - [Contributing and PR workflow](CONTRIBUTING.md)
 - [Field guide](https://very-srs.github.io/MANET/) and [documentation style](docs/guide/README.md)
-- [Runtime reference](MANET/node_tools/README.md), [internals](docs/node-tools-internals.md) and [tool map](docs/node-tools-map.md)
+- [Runtime reference](MANET/node_tools/README.md), [internals](docs/node-tools-internals.md), and [tool map](docs/node-tools-map.md)
 - [Provisioning reference](MANET/provisioning/README.md) and [flasher internals](docs/provisioning-internals.md)
 - [Packaging and development tools](MANET/packaging/README.md)
 - [Kernel builds](kernel/build/README.md) and [Morse port record](docs/kernel-6.18-morse-port.md)
 - [Supplied binaries and supplicant builds](MANET/binaries_arm64/README.md)
 - [Release publication and selection](MANET/releases/README.md)
 
-A source push, a guide deployment and a radio release are separate events.
+A source push, a guide deployment, and a radio release are separate events.
 Contributions need review and validation before packaging. The release
 publisher verifies assets before publishing, and promotion makes the tested
 package set stable without rebuilding it.

@@ -45,7 +45,7 @@ rendering `__RADIO_USER__`. Raspberry Pi first boot creates the account with
 image and refuses name or UID/GID collisions.
 
 Both templates persist the selected name as `ssh_user` in `/etc/mesh.conf`.
-Runtime setup, SSH recovery, Syncthing and Mumble resolve that local account
+Runtime setup, SSH recovery, Syncthing, and Mumble resolve that local account
 and its home directory. It is a flash-time account choice, not an account
 rename operation on a running radio and not a mesh-wide setting. The SSH
 password is installed into the account database, not added to `mesh.conf`.
@@ -82,7 +82,7 @@ The publisher builds the ZIP from committed provisioning sources, with a copy
 of `manet_release.py`. `MANET/releases/publish.py:PROVISIONING` lists its inputs.
 The Linux launcher runs `linux-flasher.sh`; Windows runs the GUI or console
 engine. `MANET_RELEASE_FILE` passes the selected manifest, and
-`MANET_FLASHER_WORK` keeps saved settings, downloaded images, tool paths and
+`MANET_FLASHER_WORK` keeps saved settings, downloaded images, tool paths, and
 operator setup scripts outside the temporary extracted bundle. No source files
 are overwritten. `--local-scripts` explicitly runs a checkout's scripts against
 the selected published packages.
@@ -94,7 +94,7 @@ Network or verification failures stop startup; there is no fallback to a
 cached build from a different channel.
 
 At flash time `prepare-release.py` (Linux) and `Expand-ProvisioningTokens`
-(Windows) insert the install URL, digest and version. First boot checks all three
+(Windows) insert the install URL, digest, and version. First boot checks all three
 before extraction. The selected package cannot drift to another release between
 imaging and first boot. Deleted prereleases require reflashing old test images.
 
@@ -105,7 +105,7 @@ imaging and first boot. Deleted prereleases require reflashing old test images.
 ### Bounded resource readiness
 
 Both templates use the same readiness block before the logging-clock fetch,
-archive download and APT transactions. It sends bounded HTTP HEAD requests to
+archive download, and APT transactions. It sends bounded HTTP HEAD requests to
 `deb.debian.org/debian/dists/trixie/InRelease`, the exact selected MANET release
 asset, and the pinned MediaMTX release asset when selected. Redirects are
 followed through GitHub's download hosting. The HTTP Date endpoint is also
@@ -124,7 +124,7 @@ extend the wait.
 Before waiting, the templates create the standard provisioning state and an
 early standalone status reader if the archive has not supplied the full one.
 The MOTD symlink therefore works on the base image. Timeout records
-`STATE=incomplete`, `PHASE=bootstrap-network`, timestamps and the platform's
+`STATE=incomplete`, `PHASE=bootstrap-network`, timestamps, and the platform's
 log path, plus a failure list naming resources. PWR/its board alias uses a
 100 ms on/off timer while waiting. Timeout uses the existing red heartbeat
 and green solid failure pattern, with missing LEDs tolerated.
@@ -144,7 +144,7 @@ extract only `etc/apt/preferences.d/00-manet-kernel` and
 `usr/local/bin/manet-kernel-protect.py`, then run the helper before the first
 APT command. Missing files or a failed helper abort provisioning. The full
 archive is still extracted after package setup. Rock 3A's initial
-`apt upgrade -y` therefore runs with the pins, holds and hook guards installed.
+`apt upgrade -y` therefore runs with the pins, holds, and hook guards installed.
 The helper waits for APT's frontend lock while it changes hooks, so it does
 not replace an entry point underneath an existing package transaction.
 
@@ -156,10 +156,10 @@ The existing hardware token selects Pi or Rock 3A hook protection. See
 
 ### Download verification
 
-The install archive's URL, version and SHA-256 come from the selected release
+The install archive's URL, version, and SHA-256 come from the selected release
 manifest through the existing `__INSTALL_*__` and `__RELEASE_VERSION__`
 tokens. Both templates also carry identical `YQ_VERSION`, `YQ_SHA256`,
-`MEDIAMTX_VERSION` and `MEDIAMTX_SHA256` constants. These constants are baked
+`MEDIAMTX_VERSION`, and `MEDIAMTX_SHA256` constants. These constants are baked
 into the image with the template. `test_first_boot_downloads.py` asserts the
 pins and download/verification blocks agree between templates, and exercises
 the actual Linux rendering commands. The Windows rendering test checks that
@@ -196,7 +196,7 @@ with `Acquire::Check-Date "false";` before its first APT command. Raspberry Pi
 has two processes: the imager's wrapper and its generated post-network
 script. Each installs its own exit/signal cleanup and recreates the override
 on retries. Explicit cleanup happens before disabling the provisioning
-service, staging operator scripts or rebooting, as appropriate to the phase.
+service, staging operator scripts, or rebooting, as appropriate to the phase.
 An uncatchable termination or power loss can leave the file until the next
 provisioning attempt; that attempt recreates and later removes it.
 
@@ -207,7 +207,7 @@ without a trusted clock; custom HTTPS repositories may require a correct
 clock. See Debian 13's
 [apt.conf(5), Acquire group](https://manpages.debian.org/trixie/apt/apt.conf.5.en.html#THE_ACQUIRE_GROUP).
 Once provisioning completes, normal date and certificate validation applies
-again, including to operator setup scripts, node updates and manual installs.
+again, including to operator setup scripts, node updates, and manual installs.
 
 ## CM4 disk enumeration
 
@@ -220,10 +220,10 @@ existing disks and loop devices cannot become the automatic target.
 `flash-target.py` is included in the release flasher bundle. It checks the whole
 disk and all descendant devices, rejects active mapped storage and mounts outside
 `/media` or `/run/media`, and reports disk identity for confirmation. The selected
-fingerprint includes name, major/minor number, capacity, model, serial, WWN and
+fingerprint includes name, major/minor number, capacity, model, serial, WWN, and
 the kernel disk sequence when available. `prepare` rechecks it, unmounts allowed
 desktop mounts, then rechecks identity and mount state. Linux calls it before
-wipefs, dd and rpi-imager.
+wipefs, dd, and rpi-imager.
 
 Desktop automounting raced the unmount. GNOME reads each new mount for a few
 seconds, so `umount` failed with "target is busy", and an ext4 mount doing

@@ -22,7 +22,7 @@ before any detection or network changes. Other interfaces enter reconciliation t
 While it waits for an address on `end0`, the node listens to what the other
 end sends. A lease means an upstream network. A single device asking for an
 address is treated as a wired EUD after about 5 seconds. Router
-advertisements, switch protocol frames (STP, LLDP, CDP) or traffic from more
+advertisements, switch protocol frames (STP, LLDP, CDP), or traffic from more
 than one device mean a network is attached. If that network gives the node no
 address within 20 seconds, the port is left unbridged and the node does not
 serve DHCP onto it. A capture reaching 1 MiB is also treated conservatively
@@ -43,7 +43,7 @@ detects again once the current run finishes.
 Once DHCP has finished and a route exists, gateway and NAT state are
 reconciled. Carrier alone does not mean the interface can reach anything, which
 is why this is a separate step. Only events from a possible uplink, or from the
-current uplink, start this. The AP radio, mesh radios and bridges are ignored,
+current uplink, start this. The AP radio, mesh radios, and bridges are ignored,
 so stopping hostapd by hand does not bring it straight back. The node manager's
 periodic reconcile still repairs a gateway's AP. A built-in Wi-Fi client is
 eligible only when explicitly reserved in `/var/lib/wifi_uplink_if`. Its
@@ -57,7 +57,7 @@ conservatively treats phone/modem drivers as metered. USB tethers remain
 ahead of Wi-Fi to keep Wi-Fi as the final local fallback. Carrier-bearing
 ports bridged into `br0` for wired EUDs are excluded before ranking.
 Within a class, the saved promoted interface wins, followed by the current
-route, event interface, other defaults and discovered devices. Each candidate
+route, event interface, other defaults, and discovered devices. Each candidate
 still has to pass the address and connectivity checks. A Wi-Fi event cannot
 displace working Ethernet. Reconciliation promotes Ethernet when it recovers,
 and Ethernet loss tries the remaining candidates in the same pass. Switching
@@ -70,13 +70,13 @@ Promotion installs forwarding immediately after qualification. A separate
 without holding the Ethernet/dispatcher locks during the download. Ethernet
 announces unknown capacity until a matching measurement is available. A late
 worker must recheck the selected interface, promotion generation, address,
-router and carrier generation under the Ethernet lock before publishing or
+router, and carrier generation under the Ethernet lock before publishing or
 announcing. It cannot replace Wi-Fi bandwidth or resurrect a demoted gateway.
 The HTTPS download estimates bandwidth from up to 5 MB, including
 partial samples of at least 250 kB at the 15-second deadline. Failed estimates
 keep the gateway connected with an assumed 1/0.2 Mbit/s and retry after a
 60-second cooldown on subsequent reconciliation, normally the next status
-publish within 3 minutes. Phone tethers, cellular modems and Wi-Fi uplinks
+publish within 3 minutes. Phone tethers, cellular modems, and Wi-Fi uplinks
 retain their connectivity probes, skip the download and start from a 10/2 Mbit/s
 estimate. With only HaLow active on the mesh side, each direction is capped
 at 1 Mbit/s without raising lower estimates.
@@ -101,11 +101,11 @@ still skip a busy lock and retry on a later cycle.
 After reconciliation, an opted-in node queues `manet-auto-update.service`
 without waiting for it. This oneshot rechecks `auto_update` and accepts either
 the selected uplink's IPv4 default route or a next-hop default on `br0` from
-the mesh gateway route manager. It still excludes loopback, BATMAN devices and
+the mesh gateway route manager. It still excludes loopback, BATMAN devices, and
 other bridges, and does not require ICMP access. Systemd serializes concurrent
 starts, and the updater's flock excludes concurrent manual updates too.
 Without `/run/initial_time_synced`, it logs that the check is deferred and exits
-successfully. The time service creates this marker after verified GPS, NTS or
+successfully. The time service creates this marker after verified GPS, NTS, or
 qualified peer synchronization. `manet-auto-update.path` watches for it and
 queues another check once per boot, including if the marker already exists
 when the path unit starts. The clock trigger also checks opt-in and the route;
@@ -122,7 +122,7 @@ still skips routine checks within 24 hours of a successful check or installation
 the timer does not override that limit. Path and timer ship enabled and are
 started by setup and updates. With automatic updates disabled, the wrapper exits
 successfully before looking up routes or waiting.
-The opt-in accepts `y`, `yes`, `1` or `true`, case-insensitively.
+The opt-in accepts `y`, `yes`, `1`, or `true`, case-insensitively.
 
 The time service observes the selected uplink and starts internet time
 synchronization through it. Only a verified chrony source sets the NTP flag
@@ -140,7 +140,7 @@ demotes and the remote mesh gateway is the useful interim path. Later DHCP
 or periodic events can promote a newly ready local uplink.
 
 After this handoff, the hook flushes and detaches only `end0`, removes its
-generated networkd overrides and restores its default DHCP configuration.
+generated networkd overrides, and restores its default DHCP configuration.
 Wireless/USB events never run this Ethernet teardown. A degraded event with
 carrier still present leaves the port's role intact. Detector-owned cleanup
 passes its held lock into the same dispatcher. Normal dispatcher calls acquire
@@ -153,11 +153,11 @@ change can require one restart because SIGHUP does not reload the main
 configuration. Only a changed DHCP pool or gateway discards old leases.
 Chrony remains owned by the time service, which preserves a usable GPS source.
 
-Healthy, already-associated and addressed Wi-Fi should take over after its
+Healthy, already-associated, and addressed Wi-Fi should take over after its
 connectivity probe and forwarding commands, usually a few seconds on the
 bench. Ethernet recovery also waits for its lease and HTTP 204 probe, but no
 longer for a bandwidth download. These are bench expectations, not a hard
-latency guarantee. Failed probes, new DHCP, EUD role changes and busy services
+latency guarantee. Failed probes, new DHCP, EUD role changes, and busy services
 can take longer. Existing NATed sessions may need to reconnect when the source
 address changes. If `conntrack` is installed, the dispatcher deletes only
 source-NAT mappings whose reply destination is the old, different uplink IPv4,
@@ -179,8 +179,8 @@ AP-only hardware is stopped instead. Returning to AP uses hostapd's preparation
 helper to withdraw mesh roles and detach bat0 before changing interface type.
 
 Reconciliation recognizes carrier-bearing br0 ports as wired EUDs: it never
-DHCP-probes, detaches or flushes them. A USB uplink can remain the gateway while
-end0 serves a wired EUD. The detector, off hook and dispatcher serialize policy
+DHCP-probes, detaches, or flushes them. A USB uplink can remain the gateway while
+end0 serves a wired EUD. The detector, off hook, and dispatcher serialize policy
 changes; a pending detector waits with a bound, while reconciliation skips a
 busy pass and retries later. Unplug events recheck carrier after taking the
 lock so queued stale events cannot undo a new cable connection.

@@ -1,8 +1,8 @@
 # Contributing to MANET
 
-MANET combines Linux networking, radio drivers and distributed control on
+MANET combines Linux networking, radio drivers, and distributed control on
 small ARM64 computers. Start with the mechanism you want to change, its
-owner and its failure paths. A change that works on a laptop still needs
+owner, and its failure paths. A change that works on a laptop still needs
 the relevant radio evidence before it is ready for a release.
 
 The [field guide](https://very-srs.github.io/MANET/) explains the system at
@@ -14,7 +14,7 @@ responsibility.
 
 ## Set up a checkout
 
-Use a Linux host with Python 3.10 or newer, Git, curl, unzip and standard
+Use a Linux host with Python 3.10 or newer, Git, curl, unzip, and standard
 GNU command-line tools. Some tests execute Bash and system utilities even
 when their network and service calls are simulated.
 
@@ -37,7 +37,7 @@ Python protobuf runtime can hide compatibility errors that occur on the
 node. Keep the pinned compiler and runtime together.
 
 The environment also supplies `cryptography` for admin-transport tests,
-Python-Markdown for the guide and `pyelftools` for Morse BCF assembly.
+Python-Markdown for the guide, and `pyelftools` for Morse BCF assembly.
 The Python dependency pins are in
 [requirements-dev.txt](MANET/packaging/requirements-dev.txt).
 
@@ -45,23 +45,23 @@ The Python dependency pins are in
 
 | Change | Read first | Main source |
 |---|---|---|
-| Boot, orchestration, addressing, channels or elections | [Runtime reference](MANET/node_tools/README.md), [internals](docs/node-tools-internals.md) | `MANET/node_tools/`, `MANET/systemd/` |
+| Boot, orchestration, addressing, channels, or elections | [Runtime reference](MANET/node_tools/README.md), [internals](docs/node-tools-internals.md) | `MANET/node_tools/`, `MANET/systemd/` |
 | Dashboard or management UI | [Web interface](MANET/node_tools/README.md#web-interface) | `mesh-status.py`, `manet_manage.py`, their supporting modules |
-| Ethernet, client access or internet gateways | [Network management](MANET/node_tools/README.md#network-management), [dispatcher hooks](MANET/networkd-dispatcher/README.md) | Runtime helpers, networkd configuration and hooks |
+| Ethernet, client access, or internet gateways | [Network management](MANET/node_tools/README.md#network-management), [dispatcher hooks](MANET/networkd-dispatcher/README.md) | Runtime helpers, networkd configuration, and hooks |
 | Imaging or first boot | [Provisioning](MANET/provisioning/README.md), [flasher internals](docs/provisioning-internals.md) | `MANET/provisioning/` and `radio-setup.sh` |
 | Package contents or development setup | [Packaging](MANET/packaging/README.md) | `MANET/packaging/` |
-| Kernel, modules or Morse firmware | [Kernel builds](kernel/build/README.md), [port record](docs/kernel-6.18-morse-port.md) | `kernel/build/`, `kernel/patches/` |
+| Kernel, modules, or Morse firmware | [Kernel builds](kernel/build/README.md), [port record](docs/kernel-6.18-morse-port.md) | `kernel/build/`, `kernel/patches/` |
 | Wi-Fi/HaLow supplicant binaries | [Binary reference](MANET/binaries_arm64/README.md) | Build configurations and patches under `MANET/binaries_arm64/` |
 | Voice codec | [Voice internals](docs/node-tools-internals.md#voice), [Lyra build](MANET/packaging/README.md#lyra-codec-plugin) | Runtime voice code and `MANET/packaging/gst-lyra/` |
 | Release selection or publication | [Release tooling](MANET/releases/README.md) | `MANET/releases/` and updater/provisioning callers |
 | Documentation | [Maintenance and style](docs/guide/README.md), [coverage](docs/guide/coverage.md) | Topic Markdown and the canonical reference for that area |
 
 Read the invoking service or controller as well as the helper. Systemd
-ordering, locks and generated state often determine when a command is safe
+ordering, locks, and generated state often determine when a command is safe
 to run. A filename does not imply that a tool should be started by hand.
 
 For an architectural change, open an issue or a draft PR early with the
-problem, proposed ownership and affected interfaces. Explain which current
+problem, proposed ownership, and affected interfaces. Explain which current
 mechanism you would extend or replace and why. That gives reviewers a way
 to identify overlapping work and constraints before the implementation
 becomes large. A focused bug fix can proceed directly to a PR.
@@ -75,14 +75,14 @@ membership distinct from cached registry observations.
 
 A connected BATMAN component is one channel-decision domain across all
 radios. Two Wi-Fi groups linked through HaLow are still connected. Channel
-plans, recovery and clock readiness must account for that surviving path.
+plans, recovery, and clock readiness must account for that surviving path.
 See [channel agreement](docs/node-tools-internals.md#channel-agreement-and-recovery).
 
 Administrative control requires authentication with the mesh admin
 password. Mesh membership and public telemetry do not grant permission.
 Local EUD/AP settings stay local. Mesh configuration travels through the
 authenticated Alfred transaction, including acknowledgements, replay
-protection and recovery. Do not add a peer HTTP configuration push.
+protection, and recovery. Do not add a peer HTTP configuration push.
 See [configuration transactions](docs/node-tools-internals.md#mesh-configuration-push).
 
 `node-manager.sh` is a generated symlink selected from `acs=`. Packages
@@ -104,7 +104,7 @@ packages require both the Lyra plugin and model weights because an Opus
 fallback cannot communicate with Lyra peers.
 
 Radios may be sealed. Updates can carry any component a release needs,
-including kernels, modules, firmware and migrations. A change to package
+including kernels, modules, firmware, and migrations. A change to package
 contents must include its activation and failure-recovery behavior. Follow
 the [field update policy](docs/node-tools-internals.md#field-update-policy).
 Do not make routine reflashing the maintenance procedure.
@@ -112,9 +112,9 @@ Do not make routine reflashing the maintenance procedure.
 ## Implement and validate
 
 Follow the [coding conventions](docs/node-tools-internals.md#coding-conventions)
-for shell/Python behavior, comments, error reporting and service
+for shell/Python behavior, comments, error reporting, and service
 restrictions. Keep each PR focused. Explain changes to ownership, ordering,
-dependencies or persistent formats so reviewers can assess their effects.
+dependencies, or persistent formats so reviewers can assess their effects.
 
 From the repository root, with the development environment active:
 
@@ -126,14 +126,14 @@ python docs/guide/build.py --check
 During development, run the tests for the mechanism you changed. For
 example, a telemetry change should exercise real encoding/decoding as well
 as registry handling. A config change should test rejected input, partial
-application, restart and rollback. A helper test that mocks out the entire
+application, restart, and rollback. A helper test that mocks out the entire
 mechanism does not establish that its callers still work.
 
 The full runtime suite uses simulated commands and temporary files for
 many hardware interactions. It does not prove RF behavior, power-loss
-recovery or that a systemd restriction permits the required device access.
+recovery, or that a systemd restriction permits the required device access.
 CM4 is the verification target. Report the board, kernel, MANET version,
-configuration and conditions for hardware results. Other boards do not
+configuration, and conditions for hardware results. Other boards do not
 inherit that evidence. If you have no hardware, say which part remains
 unverified so the maintainer can arrange the relevant check.
 
@@ -160,31 +160,31 @@ changes. Build commands produce files, not a deployment to a radio.
 Update the owning README or internals section and the affected field-guide
 tiers in the same PR. Developer is written for someone contributing code:
 explain inputs, authority, state transitions, cross-node messages, timing,
-failure handling and why the design chooses them. Include focused source
+failure handling, and why the design chooses them. Include focused source
 and test links. User describes the observable behavior and recovery. Marine
 uses simple drawings and short captions without contradicting either.
 
 New or removed production node tools also need a
 [tool-map](docs/node-tools-map.md) update. The guide builder rejects missing,
-duplicate and stale entries. It checks local links and headings as well.
+duplicate, and stale entries. It checks local links and headings as well.
 Run the guide's build checks and preview instructions from the
 [maintenance guide](docs/guide/README.md#build-and-preview).
 
 Public documentation describes committed implementation and identifies
 experimental or unverified behavior explicitly. A feature name, package
-build or test result alone does not establish readiness for use. Keep
-private bench notes, credentials and machine-specific paths out of the PR.
+build, or test result alone does not establish readiness for use. Keep
+private bench notes, credentials, and machine-specific paths out of the PR.
 
 ## Submit a reviewable PR
 
 Describe the concrete problem and resulting behavior. Include the reason
-for the approach, affected components, validation performed and remaining
+for the approach, affected components, validation performed, and remaining
 limits. Include logs or measurements that explain a failure or support a
 hardware claim, with credentials and personal data removed. Describe the
 behaviors checked rather than quoting a test count.
 
 Keep generated packages, downloaded kernel trees, `.ko` modules, firmware
-BCFs, caches and local environments out of Git. The existing supplied
+BCFs, caches, and local environments out of Git. The existing supplied
 binaries have their own documented update paths. Avoid unrelated
 reformatting or silently replacing them during a source change.
 

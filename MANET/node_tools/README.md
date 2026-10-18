@@ -54,7 +54,7 @@ publishing status and managing IP addresses without running Wi-Fi elections.
 **node-manager-static.sh**
 
 The orchestrator for static channel operation. It handles status publishing,
-registry building, service elections and IP management.
+registry building, service elections, and IP management.
 
 Manual Wi-Fi changes persist in `/etc/manet/static-channels.json`, including
 the boot/lobby copies. Changes identify a band, so nodes with different radio
@@ -64,13 +64,13 @@ owns the channels; the API and receiver enforce the same rule.
 Both managers keep their one-second discovery and 15-second steady sleeps.
 Registry decoding is shared within the IP pass and cached by payload; freshness
 still advances on every read. `manet_ip_runtime.py` checks live
-addresses, DHCP isolation, EUD readiness and service state, then skips shell
+addresses, DHCP isolation, EUD readiness, and service state, then skips shell
 reconciliation only after identical inputs previously reconciled successfully.
-Missing files, changed claims, failed checks and pending repairs invalidate that
+Missing files, changed claims, failed checks, and pending repairs invalidate that
 shortcut. The existing channel-agreement process hosts these synchronous helper
 requests on a blocking FIFO thread; its ACS loop keeps its own schedule. The
 same worker serves primary-address, MCS, interface telemetry, AP-to-mesh,
-MediaMTX/Mumble elections and serving flags. Service observations allow a
+MediaMTX/Mumble elections, and serving flags. Service observations allow a
 one-second client-lock wait so concurrently launched elections can both reuse
 the worker. Other callers remain nonblocking. Standalone calls retain one-shot
 fallbacks when the worker is absent or still busy after that bound. There is
@@ -84,7 +84,7 @@ the next identity publish without opening a PAM session. Once a chunk is held,
 failed or empty primary-address lookups defer identity publication and retain
 the previous publication timer for retry. A Syncthing lookup error also defers
 publication; a missing first-boot certificate is still a valid empty result.
-MediaMTX and Mumble rank current candidates and check live VIPs, unit state
+MediaMTX and Mumble rank current candidates and check live VIPs, unit state,
 and required wildcard listeners every election pass. Settled owners and
 non-owners skip shell reconciliation without starting Python. Waiting
 incumbents and pending announcements/publications always reconcile. Listener
@@ -121,15 +121,15 @@ succeeds.
 
 Open routes, no password:
 
-- `/`: force-directed topology with node health, link throughput and per-node
+- `/`: force-directed topology with node health, link throughput, and per-node
   detail panels. Refreshes every 15 seconds.
-- `/api/data`: full mesh topology, node list, gateway status and per-node
+- `/api/data`: full mesh topology, node list, gateway status, and per-node
   throughput, as JSON. Drives the status page, and available for external
   tooling.
 - `/api/local`: this node's own state, meaning the installed MANET version,
-  interfaces, services, IP state and channel info.
+  interfaces, services, IP state, and channel info.
 - `/api/peer/<ip>`: one peer's detail panel, fetched when you expand a node.
-- `/api/debug`: raw `batctl` originator, neighbor and gateway output alongside
+- `/api/debug`: raw `batctl` originator, neighbor, and gateway output alongside
   the registry's MAC to hostname mapping. A diagnostic dump. Nothing in the UI
   calls it.
 
@@ -139,11 +139,11 @@ cookie. A missing admin password disables login; radio/AP passwords do not
 grant management access:
 
 - `/manage/`: the management UI and every route beneath it, including the
-  radio, measurement, voice and uplink APIs.
+  radio, measurement, voice, and uplink APIs.
 - `/manage/login`, `/manage/logout`
-- `/api/perf-auth`: POST a JSON `password`, set the cookie and receive its
+- `/api/perf-auth`: POST a JSON `password`, set the cookie, and receive its
   `token` and `expires_in` (seconds).
-- `/api/admin/*`: mesh config staging, ACK status and apply.
+- `/api/admin/*`: mesh config staging, ACK status, and apply.
 - `/admin`: redirects to `/manage/#config`.
 
 Each login creates a separate session on this node, valid for 48 hours with no
@@ -159,7 +159,7 @@ redirects to this node's internal IP address before login. This keeps the
 browser on the same node after a hotspot reconnect even if the shared name
 resolves differently. Sessions remain private to one node. If its address
 allocation changes, reopen `manet.local` and sign in again. API callers,
-loopback tunnels and clients outside the local EUD pool keep their origin.
+loopback tunnels, and clients outside the local EUD pool keep their origin.
 
 Failed logins are limited to five per client address and thirty per node in
 sixty seconds. Throttled requests return HTTP 429 with `Retry-After`;
@@ -203,7 +203,7 @@ least one reply arrives. A second measurement cannot start while one is running.
 
 Expand **Mesh recovery** on the management page or in this node's status panel
 for observed and agreed Wi-Fi channels, acknowledgement progress, recovery holds,
-the last verified clock source, peer metadata age and the last automatic Wi-Fi
+the last verified clock source, peer metadata age, and the last automatic Wi-Fi
 switch. Reachability covers all radios: a working route through HaLow still
 counts as a connected mesh. A ready HaLow interface alone is not proof of a peer
 connection. Missing or stale observations are labelled accordingly. These
@@ -212,7 +212,7 @@ announcements.
 
 Link quality is BATMAN_V's metric, which is throughput in Mbit/s and not a
 0-255 link quality. `batctl` prints 43.2 for a 43.2 Mbit/s link. The color
-thresholds are 30, 15 and 5 Mbit/s, set so a healthy HaLow link reads as good.
+thresholds are 30, 15, and 5 Mbit/s, set so a healthy HaLow link reads as good.
 HaLow tops out near 43 Mbit/s at 8 MHz.
 
 What the page reads:
@@ -251,9 +251,9 @@ The management UI, reachable under `/manage` after the password check. Tabs:
 - **Measure.** iperf3 and ping runs from this node toward a peer.
 - **Sessions.** Saved measurement results, as JSON and CSV.
 - **Uplink.** Node-local USB or built-in Wi-Fi client, scan list and connection status.
-- **Voice.** Talk group, codec and per-peer voice state.
+- **Voice.** Talk group, codec, and per-peer voice state.
 - **Node config.** EUD mode, AP credentials, mesh SSID and SAE key, IP range,
-  regulatory domain, services and admin password, with the per-node ACK table.
+  regulatory domain, services, and admin password, with the per-node ACK table.
 
 Anything that affects other nodes is staged over Alfred and applied once peers
 acknowledge it. Nothing is pushed node to node over HTTP. Measurement is the
@@ -285,7 +285,7 @@ power service requests 30 dBm again.
 HaLow power is shown but cannot be changed from the UI. The Morse driver sets
 it when the radio starts, and reloading the driver can wedge the USB card, so
 a change needs a reboot. The bench MM8108 firmware reports 24 dBm at 1 and
-2 MHz, 22.25 dBm at 4 MHz and 22 dBm at 8 MHz.
+2 MHz, 22.25 dBm at 4 MHz, and 22 dBm at 8 MHz.
 
 The standalone EUD access point is the exception and stays at 5 dBm. When
 sharing its PHY with a Wi-Fi uplink, it uses the client PHY power policy.
@@ -305,7 +305,7 @@ this transport and remain on the node.
 
 Builds the per-peer radio chips and the expandable panel the topology view
 shows for another node: role, up and down state, channel, MCS, service pills,
-and the inferred `bat0`, `br0` and gateway rows. Everything comes from what
+and the inferred `bat0`, `br0`, and gateway rows. Everything comes from what
 Alfred already replicates, so no node is queried.
 
 **manet-ui-firewall.sh**
@@ -354,7 +354,7 @@ Codec is therefore a mesh-wide setting. The CODEC card in the VOICE tab stages
 the change over Alfred, waits for every node to ACK it, and switches the whole
 fleet on a common clock about 20 seconds out. If any node fails to ACK, the
 change is canceled and nothing moves. Each node restarts mesh-voice on
-activation, because the encoder, payloader and RTP clock rate all change
+activation, because the encoder, payloader, and RTP clock rate all change
 together.
 
 A node that was powered off during a codec change comes back on the old codec
@@ -388,7 +388,7 @@ they autodetect the OpenVLM card.
 
 A high-pass filter at 80 Hz is on by default. It sits ahead of the level meter,
 so the mic dB the web UI shows is the level of what is actually transmitted. It
-removes mains hum, wind, handling rumble and a boom mic rubbing on a face. A
+removes mains hum, wind, handling rumble, and a boom mic rubbing on a face. A
 60 Hz mains component only sees about 10 dB of cut at that corner, so raise
 `voice_highpass_hz` toward 120 if hum is the actual complaint.
 
@@ -397,7 +397,7 @@ like 100 to 4000 Hz gives the classic walkie-talkie sound, clearer and more
 cutting on some headsets and thin on others. It is off by default. Compare it on
 your own headsets before enabling it.
 
-`voice_eq=y` adds a three-band EQ with fixed centres at 100 Hz, 1100 Hz and
+`voice_eq=y` adds a three-band EQ with fixed centres at 100 Hz, 1100 Hz, and
 11 kHz, for a formant or presence lift. Under lyra the 11 kHz band is forced to
 0, because lyra's raw rate is 16 kHz and that centre is above Nyquist. The
 daemon logs when it does this.
@@ -431,7 +431,7 @@ that reset under the CM108B causes this, as does a lost multicast membership.
 
 `/run/mesh-voice.json` carries the state that row reads: `capture_idle` and
 `playback_idle` (both `null` when the flow has never run at all, which means a
-missing audio device), `igmp_joined`, `stalls` and `watchdog_sec`.
+missing audio device), `igmp_joined`, `stalls`, and `watchdog_sec`.
 
 Transmit stays blocked until the send socket is bound to `voice_iface` and
 its IPv4 address. The existing peer poll checks every 30 seconds and rebuilds
@@ -488,8 +488,8 @@ Config keys in `/etc/mesh.conf`:
 | `voice_dscp` | `48` | DSCP marking. 48 is CS6, which reaches the 802.11 voice access category through batman-adv |
 | `voice_codec` | `lyra` | `lyra` or `opus`. Mesh-wide: change it from the VOICE tab, not by hand |
 | `voice_bitrate` | `32000` | Opus bitrate |
-| `voice_frame_ms` | `20` | Opus frame duration: 10, 20, 40 or 60 |
-| `voice_lyra_bitrate` | `6000` | Lyra rate: 3200, 6000 or 9200 only |
+| `voice_frame_ms` | `20` | Opus frame duration: 10, 20, 40, or 60 |
+| `voice_lyra_bitrate` | `6000` | Lyra rate: 3200, 6000, or 9200 only |
 | `voice_lyra_frames_per_packet` | `2` | Starting packet size in lyra frames. Adapts at runtime |
 | `voice_lyra_model` | `/usr/local/share/lyra/model_coeffs` | Lyra model weights |
 | `voice_jitter_ms` | `100` | Jitter buffer depth per talker. Raised to two packets at start-up |
@@ -556,7 +556,7 @@ or merged. The retired snapshots preserve final data for manual recovery.
 ## Channel Selection & Jamming Detection
 
 Both Wi-Fi mesh bands use 20 MHz channels. On 5 GHz this favors range and
-lets the MT7916 third-chain observer, background CAC and DFS moves use the
+lets the MT7916 third-chain observer, background CAC, and DFS moves use the
 same primary channel width. Bench throughput at 20 MHz was 137 to 178 Mbit/s
 between nodes, not a guaranteed field rate. HE and VHT rates remain enabled.
 ACS scores individual 20 MHz primaries, and DFS centers equal those primaries.
@@ -585,9 +585,9 @@ there is a measured winner. A same-boot service restart keeps the streak.
 A new coordinator or boot starts fresh. Peers still follow the frozen proposal
 without re-scoring.
 
-Scheduled scans, elections and tourguide duty wait for the node's first
+Scheduled scans, elections, and tourguide duty wait for the node's first
 verified GPS/NTP sync. Static and HaLow-only nodes also wait before voting.
-Discovery, IP allocation and normal mesh traffic continue while waiting; a
+Discovery, IP allocation, and normal mesh traffic continue while waiting; a
 node without any time source defers timed decisions. Authenticated cold recovery
 over a surviving mesh link or a lobby encounter remains available as described below.
 
@@ -620,9 +620,9 @@ Ordinary committed plans already landed by peer CSA remain valid only on the
 same boot and within their original activation grace.
 
 Ordinary and DFS transitions log the plan identity, round, proposer, targets,
-vote quorum, readiness and remaining recovery hold. Expiry records distinguish
+vote quorum, readiness, and remaining recovery hold. Expiry records distinguish
 membership expansion, changed local snapshots, missing majority, missing
-commit and missed activation. Adoption logs old and new live/configured MHz.
+commit, and missed activation. Adoption logs old and new live/configured MHz.
 
 One publisher per plan carries the full majority
 certificate; other holders send its ID, with automatic publisher failover.
@@ -643,7 +643,7 @@ clocks. Firmware/radio validation on CM4 is still required.
 
 Each ACS cycle measures the home channel over the interval since the previous
 cycle, usually about 180 seconds. It reports total busy airtime, foreign
-airtime, noise, the real window length and a per-band RF trouble flag. Foreign
+airtime, noise, the real window length, and a per-band RF trouble flag. Foreign
 airtime subtracts this radio's transmit time and summed peer receive duration
 from busy time. Overheard unicast between two other mesh nodes still counts
 as foreign. Windows shorter than 60 seconds are rejected. A counter decrease,
@@ -655,7 +655,7 @@ foreign airtime below 50% and noise below -85 dBm. The airtime threshold is
 calibrated on 2.4 GHz; its 5 GHz use and the noise threshold remain provisional. Each band scans candidates only
 while this node or a member of its connected ACS view reports trouble on that
 band. Healthy bands make no off-channel scan visits. Lobby bootstrap,
-tourguide and discovery visits keep their existing behavior.
+tourguide, and discovery visits keep their existing behavior.
 
 An invalid measurement window breaks the consecutive-window streak but does
 not clear an active trouble flag. When the home frequency is known, the report
@@ -703,7 +703,7 @@ with 330 to 620 ms traffic stalls. A 250 ms remain-on-channel request measured
 273 ms of active time with a 486 ms stall. No loss was observed in that bench
 measurement. The
 [channel-scoring reference](../../docs/node-tools-internals.md#channel-scoring)
-explains the counters, driver behavior and remaining hardware validation.
+explains the counters, driver behavior, and remaining hardware validation.
 
 The incumbent is scored on foreign airtime, while candidates use dwell
 occupancy. Total home busy airtime remains visible without treating this
@@ -724,11 +724,13 @@ limp rules use the incumbent's foreign airtime. When every measured channel
 is disqualified, the election takes the least bad measured channel and asserts
 limp mode. Lobby frequencies remain reserved for rendezvous.
 
-Channel changes are applied with `wpa_cli reconfigure`, which re-reads the
-supplicant configuration in place instead of restarting the service, and the
-radio is then polled until it reports the new frequency. A supplicant that does
-not answer, or a radio that has not landed within 10 seconds, falls back to
-restarting the unit and checking the frequency again. A 30-second settling
+Channel changes first use mesh CSA, then poll the radio for the new frequency.
+An ordinary non-DFS move falls back to `wpa_cli reconfigure` if CSA fails,
+and restarts the unit if reconfiguration fails. Landing checks allow twenty
+reads with half-second sleeps, plus command time. A non-DFS radio that has not
+landed then gets one restart and another check sequence. DFS entry never uses
+a supplicant restart as a fallback. A failed DFS landing takes the interface down.
+A 30-second settling
 period suppresses isolation handling while links re-form. Ordinary status/IP
 work continues during the agreement wait; scanning and tourguide hops wait.
 
@@ -762,9 +764,9 @@ table; multiple routes to the same originator count once.
 HaLow takes priority over Wi-Fi tourguide visits. A node with a working S1G mesh
 radio skips guide duty and keeps its Wi-Fi radios participating on data channels.
 The local check uses the `halow_if` role, enabled/up state, active BATMAN attachment,
-running S1G supplicant and a responsive joined mesh. It does not require a current
+running S1G supplicant, and a responsive joined mesh. It does not require a current
 peer: the operating assumption is that HaLow reaches at least as far as Wi-Fi.
-Missing, disabled, unjoined or failed HaLow restores Wi-Fi fallback automatically.
+Missing, disabled, unjoined, or failed HaLow restores Wi-Fi fallback automatically.
 
 Readiness rides existing encrypted type-74 status, so a mixed group's election
 can exclude nodes using HaLow and select a guide without it. Local readiness is
@@ -804,13 +806,13 @@ an isolated node with fewer than three remembered peers.
 
 A node missing the scheduled band or permission to initiate on its frequency
 skips that window. It never substitutes or renumbers entries. Disabled,
-non-initiating and DFS frequencies are excluded using the actual PHY report.
+non-initiating, and DFS frequencies are excluded using the actual PHY report.
 Missing peer identities or failed peer queries defer election. The existing
-dwell is retained pending CM4 switch, peering, Alfred and traffic measurements.
+dwell is retained pending CM4 switch, peering, Alfred, and traffic measurements.
 
 Discovery is explicit in `/run/manet-rendezvous.json`, surviving daemon restarts.
 Frequency alone no longer identifies a lobby: rotating entries can also be data
-channels. Fresh authenticated type-74 plans, type-75 helpers or nonce-bound cold
+channels. Fresh authenticated type-74 plans, type-75 helpers, or nonce-bound cold
 replies end discovery even when already on the destination. Only mismatched
 radios change. Radio setup and boot anchor restoration reset discovery state.
 
@@ -857,9 +859,12 @@ Wi-Fi/USB uplink, and wireless targets are rejected. A usable existing lease
 is reconciled without restarting DHCP on that connection. Gateway and EUD
 service policy is handed to the common uplink dispatcher under the same lock.
 
-- **DHCP answers.** Gateway mode. NAT, advertise a default route, and
-  optionally keep the AP running.
-- **No DHCP.** EUD mode, bridging the port to the mesh.
+- **DHCP answers.** Gateway mode requires an interface-bound HTTP 204
+  connectivity check. A lease alone does not enable NAT or advertise a gateway.
+- **No DHCP.** A single device requesting an address is treated as a wired EUD
+  after about five seconds. An inconclusive or silent connection falls back to
+  wired EUD after twenty seconds. Router traffic, switch traffic, or multiple devices
+  keep the port unbridged without serving DHCP onto the attached network.
 
 In auto mode, an Ethernet gateway takes a dual role as gateway and AP, an
 Ethernet EUD disables the AP because wired takes priority, and a wireless EUD
@@ -891,9 +896,11 @@ inactive stock swap file and downloaded package cache. See the provisioning
 README for manual use and the saved package inventory.
 
 Profile 2 also stops and masks unused system/user services and timers. It
-removes PulseAudio, rtkit and the unused user D-Bus session package; voice
-continues to use ALSA. It preserves system D-Bus, polkit, per-radio supplicants,
-credential-agent sockets and the iperf3 server used by the measurement UI.
+removes PulseAudio and rtkit and masks the unused user D-Bus units. The
+`dbus-user-session` package stays installed to preserve GStreamer dependencies.
+Voice continues to use ALSA.
+It preserves system D-Bus, polkit, per-radio supplicants,
+credential-agent sockets, and the iperf3 server used by the measurement UI.
 Custom cron jobs or LVM tools/volumes preserve their maintenance services.
 The preview includes the unit inventory and reasons; apply records each action.
 Profile 1 installations advance to profile 2 on the next explicit apply/setup.
@@ -903,7 +910,7 @@ Profile 1 installations advance to profile 2 on the next explicit apply/setup.
 The ATAK service runs by default on every node for wired phones and phones on
 its enabled Wi-Fi access point. Set `atak=n` in
 `/etc/mesh.conf` and restart `manet-atak.service` to disable it; only explicit
-`n`, `no`, `0` or `false` (case-insensitive) disables the daemon and its firewall.
+`n`, `no`, `0`, or `false` (case-insensitive) disables the daemon and its firewall.
 Fresh installs enable and start it; updated packages enable it for the next boot.
 
 Every MT7916 node defaults to the positioning-patched 2024 WM with stock
@@ -941,7 +948,7 @@ support it. Tools alone cannot
 open the gate. The coordinator selects a measured DFS candidate and the best
 common non-DFS fallback, then distributes a bounded CAC intention through
 authenticated Alfred. Every node reserves its receiver, completes background
-CAC and keeps a live hold. Only then can all nodes approve a timed channel
+CAC, and keeps a live hold. Only then can all nodes approve a timed channel
 plan binding their exact receiver epochs and generations.
 
 During preparation and the entire pending plan, the agreement daemon refreshes
@@ -962,7 +969,8 @@ but cannot authorize a move. The Wi-Fi supplicant needs the MANET background
 CAC and external-radar patches so these events leave the existing mesh and
 SAE state intact. Radar still marks the channel unavailable, while MANET
 owns the fallback choice and the kernel enforces NOP.
-The complete path still requires acceptance with the real supplicant.
+The complete path passed secured-mesh acceptance with the real supplicant
+on CM4 and Rock 3A. Radar on a hand-set DFS channel has not passed yet.
 
 Each participant initiates mesh CSA at the agreed time. DFS entry includes
 `NL80211_ATTR_HANDLE_DFS`. RDD2 remains active until the main detector starts
@@ -975,7 +983,7 @@ Native `owner=0` BSSs retain their own evacuation, including after a BSS restart
 leaves an old contract on disk. Unknown ownership still requires fencing.
 Accepted CSA has ten seconds from its request to land with TX blocked. The
 watcher also records kernel switch-start notifications for the agreed fallback,
-bound to the current boot, contract and interface. A matching notification must
+bound to the current boot, contract, and interface. A matching notification must
 confirm TX blocking and the agreed 20 MHz channel. It lets a follower finish
 a peer's countdown without a second local CSA acknowledgment. The original
 deadline survives daemon restarts and cannot be renewed by duplicate events.
@@ -1023,7 +1031,7 @@ the complete CSA and main-radar path remains required before publication.
 Connect by Ethernet or join this radio's own Wi-Fi network. For a radio with GPS,
 turn **Android location OFF**, enable **ATAK external GPS input on UDP 4349**, and
 leave **Default Mesh SA ON**. ATAK then uses the radio position on its own map and
-all outputs, including mesh, unicast and TLS to a TAK server. Keep phones near
+all outputs, including mesh, unicast, and TLS to a TAK server. Keep phones near
 their radio. If the radio has no GPS hardware, keep **Android location ON** so the
 controlling phone supplies the team's GPS. Leave stock CoT input enabled. No
 per-radio output entry is needed. Existing unicast XML output to
@@ -1033,7 +1041,7 @@ Phone setup is in the [location guide](../../docs/guide/content/location.md).
 No GPS receiver means no missing-GPS prompt. When neither trusted radio GPS nor
 a held manual point is usable, the controlling phone's admitted GPS supplies the
 status position, labelled `phone GPS (<callsign>)`. It never supplies receiver
-trust, clock authority or external input on 4349. It expires with its SA, at most
+trust, clock authority, or external input on 4349. It expires with its SA, at most
 75 seconds after receipt. If the phone's path disappears first, a radio beacon
 can use only that remaining fresh interval. A present receiver without a fix
 still warns after three seconds, with unread spoken reminders every 60 seconds
@@ -1045,7 +1053,7 @@ Within 30 m of that anchor it holds indefinitely. Distinct fresh reports more
 than 30 m away for 15 seconds release it, as does any fresh report more than
 200 m from the held point. These operating thresholds allow phone GPS noise and
 small manual corrections while limiting obsolete geometry. Stale GPS, loss of
-the controller's path or a trusted own fix resets the movement interval.
+the controller's path, or a trusted own fix resets the movement interval.
 The anchor survives restart, while the interval does not. A new controller gets
 a new anchor. No phone GPS means the point holds. On GPS-less radios this is a
 phone-track decision, without a spoof monitor. Trusted-own-GPS confirmation and
@@ -1054,9 +1062,9 @@ override rules retain their existing behavior.
 The controller can also tap **Use phone GPS again** beside the held point in the
 local **ATAK PHONES** panel, without an admin password. The POST checks its source
 address against the current controller, and the daemon rechecks the point,
-controller path, session and five-second request age. Guests cannot release.
+controller path, session, and five-second request age. Guests cannot release.
 Either release queues normal marker retirement to its original owner, clears
-rewrite authority and makes one quiet best-effort GeoChat and journal entry,
+rewrite authority, and makes one quiet best-effort GeoChat and journal entry,
 without a release audio alert. Existing receiver warnings remain independent.
 Deleting a marker inside ATAK does not release it on the radio. A Pixel test
 observed no phone-to-radio CoT traffic after local deletion.
@@ -1064,10 +1072,10 @@ observed no phone-to-radio CoT traffic after local deletion.
 Each newly accepted held point gets one quiet explanation chat, including
 USER/drag selections. It tells the controller to open manet.local in a browser
 and tap **Use phone GPS again**, or move on with fresh phone GPS. No chat repeats
-on restart, reanchoring or marker refresh. For a Send-created point, the daemon
+on restart, reanchoring, or marker refresh. For a Send-created point, the daemon
 retains its exact bounded XML and quietly replays that marker to the present
-controller every five minutes. The UID, content and timestamps stay unchanged.
-Retirement always takes priority, including GPS confirmation, replacement and
+controller every five minutes. The UID, content, and timestamps stay unchanged.
+Retirement always takes priority, including GPS confirmation, replacement, and
 release. Failed sends wait for the next five-minute interval. USER/drag selections
 have no separate marker to replay. Older checkpoints without original XML need
 a new Send before refresh can work. Reappearance after the original stale time
@@ -1108,7 +1116,7 @@ without affecting kernel TAK detection. Nonstandard ports and traffic the radio
 cannot see remain outside detection. Restarting the unit recreates both sets.
 
 CM4 testing with a Pixel's Android location on verified XML phone-GPS replacement
-toward bat0 and one quiet disagreement GeoChat, journal entry and panel note.
+toward bat0 and one quiet disagreement GeoChat, journal entry, and panel note.
 The phone sent XML, so TAK v1 replacement remains covered by tests rather than
 hardware evidence. Before on-demand membership reads, the service used 1.20 CPU
 seconds per minute with one phone and four child executions per minute, compared
@@ -1119,8 +1127,8 @@ and `sudo nft -j list set bridge manet_atak tak_phones`. Use JSON output. On the
 CM4, plain-text listing omitted populated concatenated rewrite-set elements.
 
 When an admitted phone reports fresh own GPS and the radio has a trusted own
-fix, separation over 50 m creates a local status note, one journal line and one
-quiet GeoChat handoff per episode. No audio, retry or trust change follows.
+fix, separation over 50 m creates a local status note, one journal line, and one
+quiet GeoChat handoff per episode. No audio, retry, or trust change follows.
 The threshold assumes 10 m error per GPS plus 30 m phone-to-radio separation.
 Fresh agreement within 35 m for 30 seconds rearms notification. Missing fixes
 interrupt that timer. Agreement never restores trust or clears distrust. Phones
@@ -1149,7 +1157,7 @@ If none remains, the radio picks a present phone at random and keeps that choice
 Replacement phones therefore work without deleting state. Phone presence ends
 when its SA expires, at most 75 seconds after the latest admitted report.
 
-Open **http://manet.local/**, expand this radio and find **ATAK PHONES**. It lists
+Open **http://manet.local/**, expand this radio, and find **ATAK PHONES**. It lists
 callsigns, **Wired** or **Wi-Fi**, **Controls location**, selected position/source,
 **TAK server**, and **radio and phone GPS disagree by N m** when applicable.
 Use **Set location
@@ -1157,7 +1165,7 @@ from this phone** beside another phone to choose it. No admin password is needed
 The choice survives reboot and absence; while it is absent the automatic rules
 supply a controller, and the saved choice takes over when it returns. A held
 manual point belongs to the radio and survives a controller change. Only the
-controller's sent points, drags, USER selections and alert receipts set manual
+controller's sent points, drags, USER selections, and alert receipts set manual
 location or acknowledge alerts. Its admitted GPS is the automatic fallback.
 Other phones still receive radio-selected external position
 and GPS warnings; a rejected guest point gets a chat explaining who controls.
@@ -1182,7 +1190,7 @@ while verification is pending. Unchanged ticks use the cached proof, and
 notification loss fails closed. No extra monitoring process is started.
 Receiver inputs are read before any phone joins so a relay can advertise its
 position. Unchanged inputs and cycles without due work skip policy evaluation
-and status writes. Producer failures, beacon work and alert deadlines still run.
+and status writes. Producer failures, beacon work, and alert deadlines still run.
 An idle `status.json` is a snapshot, not a heartbeat. The phone contact and
 position-feed cadence is unchanged. Measure service CPU, including its
 children, with `sudo python3 /usr/local/bin/manet-cpu-sample.py --label before`, then
@@ -1213,36 +1221,36 @@ covers the address calculation, occupied-range selection, mixed block widths,
 startup window, and why simultaneous claims still require later repair.
 
 When `ipv4_network` changes, the allocator retires the saved node address,
-EUD gateway and locally held old MediaMTX/Mumble IPv4 VIPs before claiming a
+EUD gateway, and locally held old MediaMTX/Mumble IPv4 VIPs before claiming a
 new block. It replaces the DHCP pool and management names and clears old
 leases. Exact address ownership comes from the saved allocation, which stays
 durable until retirement succeeds so an interrupted pass can retry. Operator
-aliases, uplink addresses and IPv6 remain intact. Removing the last old-prefix
+aliases, uplink addresses, and IPv6 remain intact. Removing the last old-prefix
 address also removes its connected route, unless an operator alias still needs
 that route. The new allocation is saved before its addresses are installed.
 Retirement reads the kernel's secondary-promotion policy without changing it.
 With promotion disabled it removes owned secondary addresses before the
 primary, or defers without stopping DHCP if an operator alias would be lost.
-Locks, ownership, capabilities and file access are checked before disruption.
-A failed retirement restores the old addresses, pool and leases and restarts
+Locks, ownership, capabilities, and file access are checked before disruption.
+A failed retirement restores the old addresses, pool, and leases and restarts
 previously active DHCP. Interrupted restoration keeps a checkpoint in `/run`
 for the next attempt. Failures retry at most once every 15 seconds and repeat
 the diagnostic only when the failure changes.
 
 **manet-dhcp-isolation.py**
 
-Keeps DHCP and EUD discovery (mDNS, LLMNR, SSDP/UPnP, NetBIOS and
+Keeps DHCP and EUD discovery (mDNS, LLMNR, SSDP/UPnP, NetBIOS, and
 WS-Discovery) on the local node so phones and laptops do not send that chatter
 across the mesh. Wired and AP clients retain local discovery and resolve
 `manet.local` through DNS or mDNS to their node's internal EUD gateway
 address, which stays with the node when shared services change leaders.
 Management and measurements are at `http://manet.local/manage/`.
-ATAK, mesh voice and other mesh services retain their transports.
+ATAK, mesh voice, and other mesh services retain their transports.
 
 **manet-mesh-census.py**
 
 Summarizes traffic observed on the mesh port to help identify other chatter.
-The traffic inventory, implementation details and bench procedures are in
+The traffic inventory, implementation details, and bench procedures are in
 [Node tools internals](../../docs/node-tools-internals.md#local-eud-discovery).
 
 On each boot, IPv4 allocation waits for usable `br0` link-local IPv6, active
@@ -1312,14 +1320,14 @@ node is demoted. Promotion queues `manet-uplink-measure@IFACE.service` with
 The worker checks the selected promotion generation under the Ethernet lock
 before publishing a result and before updating BATMAN. Stale work cannot
 announce Ethernet bandwidth on Wi-Fi or restore a withdrawn gateway.
-Phone tethers, cellular modems and Wi-Fi uplinks are never download-tested and
+Phone tethers, cellular modems, and Wi-Fi uplinks are never download-tested and
 announce batman's default 10/2 Mbit/s.
 
 **manet-uplink-dispatch.sh**
 
 Owns gateway state. Decides whether an interface with carrier is an upstream
 uplink or a wired EUD port, and on promotion configures NAT, the firewall,
-`radvd` and the EUD services. On demotion it tears them back down. Called by
+`radvd`, and the EUD services. On demotion it tears them back down. Called by
 the networkd-dispatcher hooks and reconciled once a cycle by the node manager.
 Both paths return early when nothing has changed.
 
@@ -1354,28 +1362,28 @@ can therefore qualify even when only its LAN's resolver is allowed.
 **manet-dns-setup.sh**
 
 Sets the shared resolved upstream file and public fallback servers.
-Provisioning, updates and dnsmasq startup run this idempotent helper.
+Provisioning, updates, and dnsmasq startup run this idempotent helper.
 `manet.local` and service aliases remain local to dnsmasq.
 
 **manet-uplink-dns.py**
 
 Publishes DHCPv4 DNS and search domains only for the promoted direct uplink.
-Networkd's managed DHCP files permanently disable automatic DNS, domains and
+Networkd's managed DHCP files permanently disable automatic DNS, domains, and
 resolver host routes. An isolated LAN therefore cannot hide fallback DNS or
 pin its traffic away from the mesh route. A path-triggered oneshot follows
 gateway state and lease changes, updating a resolved runtime drop-in only
 when the selection changes. Renewal does not reload networkd or restart
 dnsmasq. Resolver addresses are plain IPv4: on-link LAN DNS uses its connected
 route, and public DNS uses the promoted metric-100 default. The path unit
-watches the gateway marker, selected-interface file and lease directory.
+watches the gateway marker, selected-interface file, and lease directory.
 Routine networkd link-state rewrites do not trigger it.
 With no qualified resolver, public fallback DNS follows the best
 default route. The helper also performs the bound candidate lookup above.
 
 First boot and the updater run `install` to preserve existing MAC matches
-while migrating active DHCP files, saved defaults and inactive templates.
+while migrating active DHCP files, saved defaults, and inactive templates.
 The first migration can briefly interrupt DHCP while networkd reloads.
-Promotion, demotion and renewal never toggle that persistent policy.
+Promotion, demotion, and renewal never toggle that persistent policy.
 
 **prepare-ap-iface.sh**
 
@@ -1424,11 +1432,11 @@ operator `set` action is still accepted with its existing SSID/password form.
 **manet_wifi_uplink.py**
 
 Reserves one built-in MT7916 radio as a local Wi-Fi client. Configure it in
-**Manage → Uplink**, select wlan0 or wlan1, scan, choose the upstream AP and
-enter its password. Open, WPA2 Personal and WPA3 Personal networks are
+**Manage → Uplink**, select wlan0 or wlan1, scan, choose the upstream AP, and
+enter its password. Open, WPA2 Personal, and WPA3 Personal networks are
 supported. Hidden and enterprise networks are displayed but cannot be selected.
 WPA3 passwords containing double quotes are rejected by the current renderer.
-SSID, BSSID, signal, security and channel come from the selected radio's scan.
+SSID, BSSID, signal, security, and channel come from the selected radio's scan.
 The scan result expires after five minutes. Valid UTF-8 SSIDs, including `iw`
 hex-escaped emoji and edge spaces, retain their exact bytes. Invalid UTF-8 and
 control-byte names remain visible as escapes but cannot be selected.
@@ -1444,7 +1452,7 @@ and suffixes of another length are unaffected. This naming rule cannot identify
 peers configured with a different hotspot prefix.
 
 A matching saved built-in profile is persistently disabled, its client is
-stopped and its normal AP/mesh role restored. USB keeps its saved credentials,
+stopped, and its normal AP/mesh role restored. USB keeps its saved credentials,
 but stops and disables the client and clears the interface address. Its
 connect/reconcile path refuses to reactivate the match. Both show the reason
 in status. The gateway dispatcher checks saved names before qualification and
@@ -1493,10 +1501,10 @@ The CLI uses `scan-plan wlan1` for the interruption check and requires
 `scan wlan1 --allow-ap-stop` when the serving AP must stop.
 
 The watcher sleeps on supplicant association/channel events, hostapd events,
-link/address changes and local profile/policy changes. It tries hostapd CSA
+link/address changes, and local profile/policy changes. It tries hostapd CSA
 for non-DFS changes and verifies completion, with a three-second check if the
 completion event does not arrive. Losing association stops the shared AP
-before station reconnection. Pending lock, scan-repair or AP-start work also
+before station reconnection. Pending lock, scan-repair, or AP-start work also
 retries after three seconds. A healthy follower has no three-second tick.
 Service start/stop hooks cover crashes and replaced control sockets.
 Notifications and scan repair live under `/run/manet-wifi-uplink/`; the shared
@@ -1527,7 +1535,7 @@ lose the hotspot during a channel move. Non-DFS CSA retains its existing path.
 
 The controller checks the loaded `cfg80211` option `dfs_follow_ap_v1` and the
 paired hostapd version. Without both, DFS keeps the shared hotspot off with
-the existing plain status reason. Association, address and gateway status
+the existing plain status reason. Association, address, and gateway status
 remain separate. Use Ethernet or another node for access in that case.
 Every AP start rechecks live association and channel restrictions. Three
 unsuccessful follower starts, or any unexpected local CAC, latch the hotspot
@@ -1536,10 +1544,10 @@ channels remain blocked. Normal APs retain their CAC/radar handling. This
 source path and the matched binaries still need hardware qualification.
 
 The private desired profile is `/etc/manet/wifi-uplink.json`. A persistent
-`/var/lib/wifi_uplink_if` role blocks mesh supplicants, ACS, BATMAN repair and
+`/var/lib/wifi_uplink_if` role blocks mesh supplicants, ACS, BATMAN repair, and
 radio controls before association or DHCP. `manet-wifi-uplink.service` restores
 ownership at boot and follows channels. `manet-wifi-client@.service` owns the
-managed supplicant. Gateway qualification, DNS and NAT use the existing
+managed supplicant. Gateway qualification, DNS, and NAT use the existing
 dispatcher on connection/address changes and the enabled safety check.
 Disconnect restores agreed/static mesh channels or the current EUD AP policy.
 A HaLow-only gateway's announcement is capped at 1 Mbit/s in each direction,
@@ -1560,7 +1568,7 @@ are accepted. Localhost and aliases outside the managed block are reserved. Name
 for one name are omitted, while identical claims collapse to one mapping.
 The two-minute refresh compares mappings in memory and leaves the file untouched
 when they are unchanged. Changed mappings replace only the marked mesh block,
-preserving other entries, ownership and permissions. Publication uses a temporary
+preserving other entries, ownership, and permissions. Publication uses a temporary
 file beside `/etc/hosts`, followed by file/directory syncs and an atomic rename.
 Missing/empty registry snapshots and malformed block markers leave hosts intact.
 The shell entry point runs `manet_hosts.py`, which reads registry assignments as
@@ -1660,7 +1668,7 @@ Daemon for an optional u-blox USB GPS receiver. It queries local `gpsd` on
 
 **mesh-time-sync.py** / **one-shot-time-sync.sh**
 
-The time service owns chrony across GPS, internet and mesh-client roles. A GPS
+The time service owns chrony across GPS, internet, and mesh-client roles. A GPS
 node disciplines its clock locally; a node with a direct internet uplink uses
 authenticated public time (NTS) through that interface, never plain internet
 NTP. Both can serve time to the mesh once chrony confirms a recent selected
@@ -1676,7 +1684,7 @@ a failed peer is skipped for five minutes while discovery continues. Missing
 servers or failed queries are retried, so a source can appear after boot.
 After a verified sync, chrony stops and mesh NTP polling pauses for six hours,
 plus up to ten minutes of per-node staggering. A brief refresh then uses the
-same discovery, validation and timeout rules. This covers deployments lasting
+same discovery, validation, and timeout rules. This covers deployments lasting
 a day or two and longer runs without continuous mesh polling. A missing source
 leaves the node running on its last synchronized clock while discovery retries.
 After the first sync, corrections are gradual; refreshes and source changes do
@@ -1715,7 +1723,7 @@ are rejected, so upgrade the whole mesh before changing settings. Keep node
 clocks synchronized for scheduled activation and command expiry.
 
 Timed mesh control is deferred until the first verified GPS/NTP sync, including
-publishing, receiving and ACKing mesh changes. The configuration UI reports
+publishing, receiving, and ACKing mesh changes. The configuration UI reports
 when it is waiting for time. Local-only configuration and public status remain
 available. Later brief loss of GPS/NTP does not revoke the initial-sync marker;
 the periodic refresh/holdover policy above applies.
@@ -1751,7 +1759,7 @@ A staged ACK means the node saved the package. It does not mean application
 succeeded. Type-73 acknowledgements carry `application_status` and a separate
 `applied_version`. The pending package in the admin API also carries
 `application_status`. The durable journal distinguishes `prepared`, `applying`,
-`verified`, `committed` and `rolled_back`. Only verified or committed work
+`verified`, `committed`, and `rolled_back`. Only verified or committed work
 produces the volatile applied-version marker. Rollback is terminal for that
 transaction. A deliberate retry after rollback requires a new staged edit.
 
@@ -1766,17 +1774,17 @@ transaction. A deliberate retry after rollback requires a new staged edit.
   time. Node config shows the full broadcast AP name, including its four-digit
   suffix, without editing it. These local fields never go over Alfred. Keeping
   the same hotspot prefix across a mesh lets the uplink picker exclude its own
-  hotspots. AP-name edits through the API, local activation, config writer or
+  hotspots. AP-name edits through the API, local activation, config writer, or
   setup reruns are refused before other settings change.
-- **Safe.** `admin_password`, `mtx`, `mumble` and `auto_update` apply mesh-wide
+- **Safe.** `admin_password`, `mtx`, `mumble`, and `auto_update` apply mesh-wide
   straight away.
 - **Deferred.** `regulatory_domain` is written now, together with every radio
   file that carries the country (`manet-region.py`): the cfg80211 and Morse
-  module options, crda, hostapd and each supplicant. The radios use it from
+  module options, crda, hostapd, and each supplicant. The radios use it from
   their next boot. Moving between the US and EU HaLow plans also puts HaLow
   on that region's default channel, since the two plans share none. `acs` selects the orchestrator
   and applies at once, with a `node-manager` restart.
-- **Dangerous.** `mesh_ssid`, `mesh_key` and `ipv4_network` rewrite the
+- **Dangerous.** `mesh_ssid`, `mesh_key`, and `ipv4_network` rewrite the
   supplicant configs and restart the supplicants, so the mesh drops briefly.
 
 ### Rollback
@@ -1820,7 +1828,7 @@ committing. Interrupted restoration keeps restoring even if peers return.
 
 The updater stops node-manager and any running `mesh-config-apply` unit before
 replacing files. It saves the pending package and ACK in its private recovery
-directory, installs the receiver, applier and `manet_config_journal.py`, then
+directory, installs the receiver, applier, and `manet_config_journal.py`, then
 runs `mesh-config-sync.py migrate` before activation. A successful import
 fsyncs the pending package and any legacy rollback snapshot/deadline before
 disabling the legacy checker for that trial. An already consumed legacy
@@ -1878,7 +1886,7 @@ when idle. A GPIO monitor error ends the process instead of spinning.
 Boot-progress states and an on-demand blink sequence for an external GPIO LED
 harness, separate from the onboard provisioning LEDs above. The button display
 counts **directly connected neighbor nodes**, using a bounded BATMAN
-`neighbors_json` query. HaLow, Wi-Fi and wired mesh links all count; registry
+`neighbors_json` query. HaLow, Wi-Fi, and wired mesh links all count; registry
 radio aliases merge multiple links to the same node into one blink. Multihop
 nodes are excluded, keeping this a quick local connectivity check. ACS continues
 to use its separate whole-mesh originator counter.
@@ -1923,7 +1931,7 @@ The pins above are provisional active-high LED / active-low button assignments,
 not a verified CM4 wiring diagram. Restart `button-monitor.service` and
 `led-boot.service` after configuring them. The harness must provide an inactive
 electrical bias after GPIO release; libgpiod does not guarantee the output state
-after its holder exits. Pin assignments, polarity, debounce and off-state remain
+after its holder exits. Pin assignments, polarity, debounce, and off-state remain
 bench checks pending hardware. Configuration is shared by all three scripts
 through `manet-led-common.sh`.
 
@@ -1989,7 +1997,7 @@ library plus the existing `curl` command). `--routine` is quiet on the console
 and skips checks for 24 hours after a successful check or installation.
 
 Every board reads `manet-release.json` from that published release. The manifest
-pins the version, source commit, package sizes and SHA-256 digests. Archives and
+pins the version, source commit, package sizes, and SHA-256 digests. Archives and
 checksum sidecars come from URLs for that exact release. Pushing source code to
 `main` does not announce a tools update.
 
@@ -2020,7 +2028,7 @@ boot, so a failed daemon cannot silently become optional on retry. Failures retu
 installation leaves `/var/lib/manet-update/in-progress` and a durable recovery
 archive under `/var/lib/manet-update/recovery`. Every subsequent attempt first
 resumes that exact release locally, even without Ethernet or internet access.
-The archive is checked again before use. The saved updater, release helper
+The archive is checked again before use. The saved updater, release helper,
 and kernel helper allow recovery even if the installed tools contain files
 from different releases.
 
@@ -2036,21 +2044,21 @@ with a different release.
 A kernel payload stages a separate boot set and module tree before replacing
 runtime software. The old kernel remains the normal boot choice during the
 CM4 one-shot trial. The updater derives a profile from the node's config,
-command line, FAT UUID and detected hardware. Confirmation requires multi-user
+command line, FAT UUID, and detected hardware. Confirmation requires multi-user
 startup, healthy critical services, PID 1 holding an active hardware watchdog,
 mounted root and boot filesystems, matching modules, and an up `bat0`.
 PCI/USB identities determine which radio drivers and PHYs must work, including
 the MT7916 timing marker. A bound Morse SPI hat is also recorded before reboot.
-No Ethernet, internet, peers or clock synchronization is required. A root-owned
+No Ethernet, internet, peers, or clock synchronization is required. A root-owned
 `/etc/manet-kernel-trial.json` and its pinned health program remain an explicit
 bench override. Health gets up to 60 seconds within the 240-second boot
 confirmation deadline. A failed trial is retained for diagnosis and is never retried
 automatically. After returning to the original kernel, use
 `sudo node-update.sh --cancel-kernel-trial` to cancel an uncommitted trial.
 Candidate files are retained. Trials use the firmware kernel watchdog,
-`watchdog.open_timeout=120`, PID 1's runtime watchdog and an independent
+`watchdog.open_timeout=120`, PID 1's runtime watchdog, and an independent
 300-second confirmation guard. The reset/fallback mechanism has been benched
-on CM4. The generic field health policy still needs an on-node acceptance run.
+on CM4. The generic field health policy has confirmed real kernel updates on CM4.
 An EEPROM boot watchdog is optional and its status is recorded. Without it,
 a failure before kernel handoff can need a power cycle to select the previous
 kernel. The sealed radio's power supply must remain accessible.
@@ -2131,7 +2139,7 @@ to a root-owned configuration file outside the shipped policy path.
 
 The first-boot stage that runs before `radio-setup.sh` is not in this
 directory. It installs the apt dependencies, the install tarball, the Morse
-firmware and the base networkd, nftables and radvd config. It is generated at
+firmware, and the base networkd, nftables, and radvd config. It is generated at
 flash time from
 [`MANET/provisioning/firstrun.sh.template`](../provisioning/firstrun.sh.template)
 with your answers substituted in. See
@@ -2142,11 +2150,11 @@ with your answers substituted in. See
 First-boot configuration, run once from `radio-setup-run-once.service`. It sets
 up:
 
-- Interface renaming, separating the mesh, HaLow and AP radios.
+- Interface renaming, separating the mesh, HaLow, and AP radios.
 - A wpa_supplicant config per interface.
 - Network services: alfred, batman, radvd, chrony.
 - Optional services: MediaMTX and Mumble.
-- Optional GPS and NTP support through `gpsd`, `gps-reader.service` and chrony
+- Optional GPS and NTP support through `gpsd`, `gps-reader.service`, and chrony
   `SHM 0`.
 - The systemd service for the node manager.
 
@@ -2182,7 +2190,7 @@ If repository DNS fails, setup makes one bounded
 `manet-uplink-dispatch.sh provision` attempt per run, then checks DNS again.
 This qualifies the direct uplink and publishes its DHCP resolver even when
 the LAN blocks public DNS and node-manager has not started. It defers radio
-role changes, bandwidth measurement, announcements and manager startup until
+role changes, bandwidth measurement, announcements, and manager startup until
 normal reconciliation, so rename reboots and unfinished AP configuration
 are safe. Working mesh or public DNS needs no extra dispatch.
 
@@ -2240,10 +2248,10 @@ provisioning completes.
 - Each is allowed 300 seconds. `user_script_timeout=` in `/etc/mesh.conf`
   changes that.
 - Every regular file in the directory is a candidate except dotfiles, the
-  `.disabled`, `.bak` and `.orig` suffixes, files ending in `~`, and any file
+  `.disabled`, `.bak`, and `.orig` suffixes, files ending in `~`, and any file
   without `#!` on the first line.
 - Scripts are executed directly, so the shebang picks the interpreter. A stock
-  node provides bash, dash, python3, perl, lua and mawk, and anything else has
+  node provides bash, dash, python3, perl, lua, and mawk, and anything else has
   to be installed by an earlier script. Exit 126 and 127 are reported with the
   name of the missing interpreter.
 - Exit codes are appended to `/var/lib/manet-user-scripts.state`, one line per

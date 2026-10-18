@@ -1,14 +1,14 @@
 # Kernel and Morse builds
 
-These are the kernel, Morse module and SBC overlay recipes used by the
-package builders. Source recipes, configuration fragments and local patches
-belong in Git. Downloaded trees, modules, firmware blobs and completed
+These are the kernel, Morse module, and SBC overlay recipes used by the
+package builders. Source recipes, configuration fragments, and local patches
+belong in Git. Downloaded trees, modules, firmware blobs, and completed
 overlays remain under the ignored `kernel-work/` directory.
 
 CM4 is the verification target. Rock 3A and RPi5 have build recipes, but a
 successful build does not establish hardware support for a new change.
 The [kernel port record](../../docs/kernel-6.18-morse-port.md) explains the
-driver changes, board differences and hardware failure modes.
+driver changes, board differences, and hardware failure modes.
 
 ## Host setup
 
@@ -35,7 +35,7 @@ python3 kernel/build/prepare-sources.py --board cm4 --check
 ```
 
 Use `--board r3a`, `--board rpi5`, or `--board all` for the other targets.
-[sources.json](sources.json) pins the kernel, Gateworks Morse driver and
+[sources.json](sources.json) pins the kernel, Gateworks Morse driver, and
 Morse firmware revisions. Preparation checks out those exact commits and
 applies the [Morse patch](../patches/morse-driver/0001-spi-and-power.patch).
 It can resume an interrupted fetch. It refuses a checkout at a different
@@ -56,7 +56,7 @@ kernel-work/
 ```
 
 Set `MANET_KERNEL_WORK` to an **absolute path** to use another workspace.
-Export it before preparation, compilation and overlay assembly. The package
+Export it before preparation, compilation, and overlay assembly. The package
 builders accept the resulting overlay through `SBC_OVERLAY_DIR`.
 
 ## Build a board
@@ -77,29 +77,30 @@ SBC_OVERLAY_DIR="$PWD/kernel-work/packages/rpi5-sbc-overlay" \
 
 The kernel builders merge the platform defconfig with
 [common](config-fragments/manet-common.config) and platform fragments, run
-`olddefconfig`, then build the image, device trees and modules. They clean
+`olddefconfig`, then build the image, device trees, and modules. They clean
 the Morse build before rebuilding against the same kernel. Morse's build
 does not reliably notice changed generated kernel configuration on its own.
 Do not build multiple boards concurrently against the shared Morse source.
 
 CM4 and Rock 3A apply the committed MT7916 timing/observer series as well as
 the channel-power and background-CAC patches. The observer remains disabled
-by default. Its recorded 2T2R reservation defect is not resolved by restoring
-these build scripts. RPi5 applies the channel-power and background-CAC
+by default. The series includes the EEPROM reservation fix that finalizes
+band 1 before firmware upload and sets the legacy OFDM TX-path count to two.
+RPi5 applies the channel-power and background-CAC
 patches but does not add the CM4/Rock 3A observer series itself. A shared Pi
 tree previously built for CM4 retains those patches. Use a separate
 workspace when comparing exact per-board patch sets.
 
 The pinned Pi source already enables GPIO descriptor chip select. The
-Morse patch supplies the SPI initialization, response/ACK handling and
+Morse patch supplies the SPI initialization, response/ACK handling, and
 power-policy changes described in the port record. The build also patches
 the compiled `dot11ah.ko` rules, and overlay assembly patches BCF power
 tables and their CRCs. These are separate layers of the existing radio
 power policy. Neither a configured limit nor a successful build measures
 the RF power delivered by a particular board.
 
-Overlay assembly combines the kernel, DTBs, modules and Morse firmware,
-removes development-machine module links and runs `depmod`. CM4's
+Overlay assembly combines the kernel, DTBs, modules, and Morse firmware,
+removes development-machine module links, and runs `depmod`. CM4's
 `ALL_OVERLAYS=1` includes the full matching Pi overlay set and
 `overlay_map.dtb`. Keep it enabled for field-update inputs. RPi5's current
 overlay recipe assumes USB HaLow.
@@ -130,8 +131,10 @@ SBC_OVERLAY_DIR="$PWD/kernel-work/packages/cm4-sbc-overlay" \
 ```
 
 That command constructs a candidate. It does not install or qualify it.
-The updater also requires the local CM4 trial profile and the activation,
-watchdog, health-check and recovery conditions in the
+The updater derives the CM4 trial profile from local boot files and hardware
+unless a local bench profile overrides it. Activation defaults on unless
+`/etc/manet-kernel-update.conf` contains `enabled=n`. It still requires the
+activation, watchdog, health-check, and recovery conditions in the
 [field update policy](../../docs/node-tools-internals.md#field-update-policy).
 Rock 3A kernel activation remains refused. Its current overlay also lacks
 the initramfs required by that field-update path. RPi5 updates remain
@@ -153,7 +156,7 @@ python3 -m unittest discover -s kernel/patches/mt76-bgobs
 ```
 
 For source changes, record the input revisions, resulting kernel release,
-resolved `.config`, compiler version and patch series. Check module
+resolved `.config`, compiler version, and patch series. Check module
 `vermagic` and that both Morse modules are present in the assembled overlay.
 Boot and exercise the changed behavior on the target before claiming
 hardware validation. Report the board and limits of that evidence in the
