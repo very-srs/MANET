@@ -573,6 +573,22 @@ class Updater:
                               ("55-manet-power", "manet-power-status.sh")):
             self.install_link(motd / label, f"/usr/local/bin/{script}")
 
+    def recover_halow(self):
+        """Restart a HaLow supplicant whose interface an older DFS fence downed.
+
+        Releases up to 0.576 fenced Morse HaLow when its S1G channel mapped to
+        a 5 GHz DFS number, and that copy still runs when the old guardian
+        stops. Leave an up interface alone: HaLow candidates need separate
+        activation.
+        """
+        try:
+            iface = (self.root / 'var/lib/halow_if').read_text().strip()
+            flags = int((self.root / f'sys/class/net/{iface}/flags').read_text(), 16)
+        except (OSError, ValueError):
+            return
+        if re.fullmatch(r'[A-Za-z0-9_.-]{1,15}', iface) and not flags & 1:
+            run_command(['systemctl', 'try-restart', f'wpa_supplicant-s1g-{iface}.service'])
+
     def quiesce_config(self):
         """Stop config producers and wait for an in-flight applier to exit."""
         manager = 'node-manager.service'
@@ -730,6 +746,7 @@ class Updater:
         run_command(["systemctl", "try-restart", "wpa_supplicant@*.service"])
         run_command([str(self.destination('usr/local/bin/manet_dfs_safety.py')),
                      'resume', '--root', str(self.root)])
+        self.recover_halow()
         for service in ("mesh-status.service", "node-manager.service"):
             run_command(["systemctl", "restart", service])
         for service in ("mesh-status.service", "node-manager.service", "mesh-channel-agreement.service", "one-shot-time-sync.service", "manet-dfs-watch.service"):

@@ -1613,7 +1613,11 @@ longest-range link.
 
 8-second watchdog after `batman-enslave.service`. Re-enslaves interfaces that
 fall out of `bat0`, and enforces `mesh_plink_timeout=0` on HaLow interfaces,
-which the supplicant resets each time it rejoins the mesh.
+which the supplicant resets each time it rejoins the mesh. It also restarts
+`wpa_supplicant-s1g-<iface>` when that unit is active but HaLow has no joined
+mesh for four passes in a row (about 30 seconds), for example after the
+interface was taken down or the driver disabled the BSS. Repeat restarts back
+off from 60 seconds to 16 minutes, and a rejoin resets the back-off.
 
 **sae-watchdog.sh**
 

@@ -115,7 +115,9 @@ records the current firmware reports and regional options.
 ### Recovery is layered below the dashboard
 
 BATMAN interface setup and the enslave watchdog maintain mesh membership
-when interfaces return. The SAE watchdog targets guarded authentication
+when interfaces return. The watchdog also restarts the HaLow supplicant when
+it is still running but HaLow has left its mesh for about 30 seconds, backing
+off between repeat attempts. The SAE watchdog targets guarded authentication
 recovery. USB Wi-Fi/HaLow recovery handles device appearance/disappearance.
 An interface's administrative UP state, an authenticated station, and an
 originator route are different stages. Diagnostics should establish which

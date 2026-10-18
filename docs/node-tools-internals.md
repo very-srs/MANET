@@ -2174,7 +2174,12 @@ service termination invokes the standard-library-only `manet_dfs_safety.py`.
 The updater invokes the staged helper before quiescing, and again afterward
 to catch an in-flight config worker. It fences operating DFS interfaces,
 stops their supplicants, and saves the stored non-DFS fallback plus a same-boot
-resume obligation. It then stops the guardian before replacing any modules.
+resume obligation. Morse HaLow interfaces are recognized by their driver and
+left alone, because the driver reports S1G channels as 5 GHz numbers that can
+fall in the DFS range. An interface whose driver cannot be read is still
+fenced. After resuming, the updater restarts a HaLow supplicant whose
+interface is down, which repairs radios updated from a release that fenced
+HaLow. It then stops the guardian before replacing any modules.
 The new guardian must start and report ready before fallback supplicants resume
 and before update completion. A failed installer retains stopped DFS radios
 and old version markers. The helper does not need admin, ACS, or config imports,

@@ -100,6 +100,58 @@ restart_dead_ap_if_needed() (
     systemctl restart hostapd.service 2>/dev/null || true
 )
 
+# The S1G supplicant can stay active after its mesh is gone: something downed
+# the netdev or the driver disabled the BSS. Nothing else restarts it then.
+# The mesh_param read works only while joined, as in the readiness probe.
+halow_is_joined() {
+    local flags
+    flags=$(cat "/sys/class/net/$1/flags" 2>/dev/null) || return 1
+    [[ "$flags" =~ ^0x[0-9a-fA-F]+$ ]] && (( flags & 1 )) || return 1
+    timeout 3 iw dev "$1" get mesh_param mesh_plink_timeout >/dev/null 2>&1
+}
+
+# Count consecutive passes where an active S1G supplicant has no joined mesh.
+# Run under the channel lock, so a deliberate HaLow retune is not counted.
+note_halow_health() {
+    local halow strikes
+    read -r halow _ <<< "${HALOW_IFS//$'\n'/ }"
+    if [ -z "$halow" ] || ! radio_iface_enabled "$halow" || [ ! -e "/sys/class/net/$halow" ] ||
+            ! systemctl is-active --quiet "wpa_supplicant-s1g-$halow.service"; then
+        rm -f "$HALOW_STRIKES_FILE"
+        return 0
+    fi
+    if halow_is_joined "$halow"; then
+        rm -f "$HALOW_STRIKES_FILE" "$HALOW_RESTART_FILE"
+        return 0
+    fi
+    strikes=""
+    read -r strikes _ 2>/dev/null < "$HALOW_STRIKES_FILE"
+    [[ "$strikes" =~ ^[0-9]+$ ]] || strikes=0
+    printf '%s %s\n' "$((strikes + 1))" "$halow" > "$HALOW_STRIKES_FILE"
+}
+
+# Restart the S1G supplicant after four unjoined passes (about 30 s), which
+# outlasts its own start and a channel change. Repeat restarts back off from
+# 60 s to 16 min, so a wedged USB card is not restarted every pass.
+restart_dead_halow_if_needed() {
+    local strikes halow now last interval
+    read -r strikes halow 2>/dev/null < "$HALOW_STRIKES_FILE" || return 0
+    [[ "$strikes" =~ ^[0-9]+$ ]] && [ "$strikes" -ge 4 ] || return 0
+    [[ "$halow" =~ ^[A-Za-z0-9_.-]{1,15}$ ]] || return 0
+    now="$(uptime_now)" || return 0
+    read -r last interval 2>/dev/null < "$HALOW_RESTART_FILE"
+    # Boot-clock seconds. Missing, malformed or future values disable cooldown.
+    [[ "$last" =~ ^[0-9]+$ ]] && [ "$last" -le "$now" ] || last=-1000000
+    [[ "$interval" =~ ^[0-9]+$ ]] || interval=30
+    [ $((now - last)) -ge "$interval" ] || return 0
+    interval=$((interval * 2))
+    [ "$interval" -le 960 ] || interval=960
+    printf '%s %s\n' "$now" "$interval" > "$HALOW_RESTART_FILE"
+    rm -f "$HALOW_STRIKES_FILE"
+    log "WARNING: wpa_supplicant-s1g-$halow is active but $halow has no joined mesh; restarting it"
+    systemctl restart "wpa_supplicant-s1g-$halow.service" 2>/dev/null || true
+}
+
 # Keep joined HaLow meshes from closing idle plinks during key teardown.
 enforce_halow_plink_timeout() {
     local iface="$1" current pattern
@@ -113,6 +165,9 @@ enforce_halow_plink_timeout() {
         log "Set mesh_plink_timeout=0 on $iface (was: $current)"
     fi
 }
+
+HALOW_STRIKES_FILE="/run/batman-enslave-watch-halow-strikes"
+HALOW_RESTART_FILE="/run/batman-enslave-watch-halow-restart"
 
 # Wait 8 s between passes, in addition to time spent checking or repairing.
 while true; do
@@ -136,6 +191,7 @@ while true; do
         radio_iface_enabled "$IFACE" || continue
         enforce_halow_plink_timeout "$IFACE"
     done
+    note_halow_health
 
     for IFACE in $HALOW_IFS $MESH_IFS; do
         # Skip if radio-state says down
@@ -173,5 +229,6 @@ while true; do
     flock -u 8
     exec 8>&-
     restore_halow_primary_if_needed
+    restart_dead_halow_if_needed
     restart_dead_ap_if_needed
 done

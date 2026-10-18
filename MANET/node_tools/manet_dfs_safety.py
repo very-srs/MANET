@@ -50,6 +50,15 @@ def safety_read(path):
         return {}
 
 
+def morse_halow(root, iface):
+    """Recognize Morse HaLow, which reports S1G channels as 5 GHz numbers."""
+    try:
+        driver = os.readlink(root / f'sys/class/net/{iface}/device/driver')
+    except OSError:
+        return False  # Unknown hardware stays subject to the DFS fence.
+    return os.path.basename(driver).startswith('morse')
+
+
 def stop_dfs(root=Path('/')):
     """Fence all operating DFS meshes before stopping or replacing protection.
 
@@ -74,10 +83,12 @@ def stop_dfs(root=Path('/')):
         name = re.match(r'Interface ([A-Za-z0-9_.-]{1,15})\s', block)
         if not name or not re.search(r'\btype mesh point\b', block):
             continue
+        iface = name[1]
+        if morse_halow(root, iface):
+            continue  # A mapped HaLow channel such as 5660 MHz is not radar-bound.
         frequency = re.search(r'channel.*\((\d+) MHz\)', block)
         if frequency and (int(frequency[1]) < 5000 or int(frequency[1]) in NON_DFS):
             continue
-        iface = name[1]
         if not frequency and iface not in (mesh5, contract.get('iface')):
             continue  # An idle HaLow/2.4 GHz interface is not our DFS owner.
         try:
