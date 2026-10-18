@@ -167,7 +167,6 @@ themselves a fault. Raspberry Pi 5 and Rock 3A builds work but run too hot
 for a sealed enclosure. [Hardware](hardware.md#developer-hardware-roles-are-discovered-not-inferred-from-interface-order) covers role
 discovery and the kernel, firmware and userspace bring-up chain.
 
-The target is the **Raven** carrier board by
-[BuildsByShane](https://buildsbyshane.com), built for thiThe target is the **Raven** carrier board, which
+The target is the **Raven** carrier board, which
 [BuildsByShane](https://buildsbyshane.com) is making for this project. An
 enclosure for it is being developed.
