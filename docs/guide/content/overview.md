@@ -16,13 +16,15 @@ New radio? Start with [flashing](flash.md).
 
 ## User
 
-### What MANET does
+### How the mesh works
 
-MANET turns supported single-board computers into mesh radios. Nodes form links with nearby peers and carry traffic across multiple hops. Each node manages addresses for its connected phones and computers.
+New to MANET? [What this does](about.md) explains what the radios are for
+and who uses them. This page covers how a group of radios works together.
 
-Conventional Wi-Fi provides the faster links. HaLow uses a lower radio band and is intended for longer reach at lower speed. Actual range and throughput depend on the hardware, antennas, placement, and surroundings.
-
-Radios coordinate channels, recover connections, and elect hosts for shared services. A node with internet access can act as a gateway for the mesh. Internet access is needed for initial provisioning. An already provisioned mesh can operate without it.
+The radios coordinate channels, recover connections, and elect hosts for
+shared services. A node with internet access can act as a gateway for the
+mesh. Internet access is needed for initial provisioning. An already
+provisioned mesh can operate without it.
 
 ### Why addresses are automatic
 
