@@ -109,7 +109,7 @@ network's channel. Other nodes keep their agreed mesh channels.
 A shared hotspot with a working house connection normally stays up during a
 scan. When the hotspot must stop, the page asks first and warns of about
 15 seconds without Wi-Fi. Reconnect and the saved list appears with its age.
-If mesh restoration needs another try, a separate warning appears; the scan
+If mesh restoration needs another try, a separate warning appears. The scan
 results are still available. Mesh scans briefly interrupt that mesh band.
 
 Networks marked **DFS** use
@@ -124,8 +124,7 @@ Status explains why. Use Ethernet or another node for access, or select a
 non-DFS house network. Repeated hotspot startup failures also leave it off.
 Reconnect the uplink to retry after correcting the problem. A separate
 hotspot on another radio is unaffected.
-The new built-in path still needs
-hardware qualification before release. **Disconnect** releases the uplink
+**Disconnect** releases the uplink
 radio back to its normal mesh or hotspot role. Disconnect it before changing
 the EUD mode setting. A wrong password leaves it
 trying to connect until corrected or disconnected.
@@ -136,7 +135,7 @@ Disconnect remains available while mesh channel agreement is in progress.
 
 Look at gateway and route information on the [dashboard](dashboard.md).
 Then try the application you actually need. A working local dashboard
-proves that your device can reach its radio; it does not prove that the
+proves that your device can reach its radio. It does not prove that the
 mesh has internet. A network with a sign-in page may also provide an address
 while failing the radio's internet check.
 
@@ -210,7 +209,7 @@ preparation cannot change the station into a mesh interface. Client DHCP and
 NAT reuse the existing gateway path without bridging the upstream to br0.
 
 The networkd files and ownership marker are readable as soon as they are
-published; client credentials remain private. The shared AP uses a stable,
+published. Client credentials remain private. The shared AP uses a stable,
 locally administered unicast address derived from its PHY, avoiding the
 station, br0, bat0 and other local interface addresses. Disconnect restores
 the static channel, existing ACS commitment or recovery anchor under the
@@ -244,8 +243,7 @@ It stops the follower on supporting-station loss, even if the channel is
 marked available. At upstream CSA start it stops the AP and blocks follower
 starts during the countdown. After the station moves, the watcher restarts
 the hotspot on the new channel. Radar at the upstream master is handled by
-that master's CSA or subsequent loss of association. RF timing and firmware
-behavior remain bench qualification items.
+that master's CSA or subsequent loss of association.
 
 Without both pieces of support, DFS retains the hotspot-off fallback and a
 plain status reason. The uplink's association, address and gateway status
@@ -255,7 +253,7 @@ and reconnect or a channel change. Radar-unavailable channels stay blocked.
 The usual AP-only PHY power cap is skipped while sharing. Associated shared
 APs scan in place when non-DFS or operating as supported DFS followers.
 Other serving-AP scans require preflight confirmation and a locked recheck.
-Scans save results before restoration; status exposes their boot-clock age.
+Scans save results before restoration. Status exposes their boot-clock age.
 The watcher retries failed restoration separately from client state. Mesh
 restoration uses live starting MHz or the agreed/static channel and updates
 the supplicant file. Dispatcher AP starts share the same role lock. See the
@@ -264,10 +262,10 @@ the supplicant file. Dispatcher AP starts share the same role lock. See the
 
 ### Role changes reconcile the whole forwarding path
 
-An Ethernet DHCP response classifies a possible upstream network; it is
+An Ethernet DHCP response classifies a possible upstream network. It is
 not the final internet verdict. The active dispatcher reconciles interface
 role, bridge membership, local addressing, route/NAT policy and BATMAN
-gateway advertisement. Client-facing Ethernet belongs to `br0`; an upstream
+gateway advertisement. Client-facing Ethernet belongs to `br0`. An upstream
 LAN must not remain bridged into the client mesh after promotion. USB
 hotplug handlers feed the corresponding uplink lifecycle.
 
@@ -310,14 +308,14 @@ EUD configuration preserves the DHCP process and leases. A changed pool or
 main configuration can require one restart. An optional, narrowly filtered
 conntrack deletion removes old-address NAT mappings after switching, but does
 not preserve established sessions or guarantee a TCP reset. Healthy ready-link
-handoffs are expected to take a few seconds on the bench. Probe failures, DHCP
-and real AP-role transitions remain outside that expectation.
+handoffs take a few seconds. Probe failures, DHCP and AP-role transitions can
+take longer.
 
-BATMAN's gateway selection steers its DHCP behavior; it does not by itself
+BATMAN's gateway selection steers its DHCP behavior. It does not by itself
 install the Linux default route required here. The route manager evaluates
 the advertised gateways and scores each as the smaller of its BATMAN path
 throughput and advertised download bandwidth. A 100 Mbit/s uplink reached
-over a 6 Mbit/s path scores 6; a 20 Mbit/s uplink reached over a 40 Mbit/s
+over a 6 Mbit/s path scores 6. A 20 Mbit/s uplink reached over a 40 Mbit/s
 path scores 20.
 
 A voluntary replacement must be at least 1.5 times the current score and

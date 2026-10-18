@@ -28,7 +28,7 @@ explicitly and may contain work still under evaluation. Moving a tested
 build to stable changes its release status without rebuilding it.
 
 This guide describes the current documented implementation. When comparing
-behavior, record the version actually installed on your radio; it may
+behavior, record the version actually installed on your radio. It may
 precede the source being discussed. Hardware support and unverified features
 are called out in the relevant chapters.
 
@@ -69,7 +69,7 @@ just a dashboard color.
 
 The [node-tool map](../../node-tools-map.md) resolves individual runtime
 files. The systemd unit or invoking controller establishes when a helper
-runs; a filename alone does not imply a standalone daemon.
+runs. A filename alone does not imply a standalone daemon.
 
 ### Start from the contributor workflow
 
@@ -104,7 +104,7 @@ the board builders compile and assemble the matching inputs. The
 the driver changes and configuration fragments are required. Compilation
 and archive validation do not establish that a new kernel is ready to ship.
 
-Supplied ELF binaries must retain binary Git attributes; line-ending
+Supplied ELF binaries must retain binary Git attributes. Line-ending
 normalization corrupts them. Voice packages need both the Lyra GStreamer
 plugin and model weights. Omitting them can cause an Opus fallback that
 cannot communicate with Lyra peers. See the
@@ -113,7 +113,7 @@ cannot communicate with Lyra peers. See the
 
 For node telemetry, `NodeInfo.proto` is authoritative and its generated
 Python binding is committed. The project's documented protoc 3.21.x toolchain
-and protobuf 4.21.12 runtime must agree with nodes; a newer local runtime
+and protobuf 4.21.12 runtime must agree with nodes. A newer local runtime
 accepting generated output is insufficient. Use the documented development
 environment rather than the host distro's unrelated compiler.
 
@@ -132,7 +132,7 @@ storage exhaustion where relevant. Hardware behavior needs evidence on
 the CM4, the verification target. A simulation cannot establish on-air
 timing, wiring, RF output or power-loss boot recovery.
 
-Documentation changes require a guide build and link check; navigation or
+Documentation changes require a guide build and link check. Navigation or
 presentation changes also need desktop/mobile and all-tier browser review.
 The inventory check prevents a production node tool from being silently
 omitted, but cannot prove its prose remains accurate after a behavior change.
@@ -144,14 +144,14 @@ tools/install archives for all three published board targets, with matching
 sidecars and manifest digests. Use the
 [release publisher](../../../MANET/releases/README.md): it stages a draft,
 uploads and verifies remote assets, then publishes. New iterations default
-to prereleases; promotion marks a verified full release Latest without
+to prereleases. Promotion marks a verified full release Latest without
 changing package bytes. Cleanup keeps the newest three prereleases while
 preserving full releases and Git tags.
 
 The field update tarball can carry any component needed by a release,
 including kernels, modules, firmware and migrations. Payload freedom is
-separate from implemented activation/recovery: kernel boot-set handling
-still needs its documented work and validation. Follow
+separate from activation and recovery. Kernel boot sets follow their own
+activation and recovery rules. Follow
 [updates](updates.md) and the
 [field update policy](../../../docs/node-tools-internals.md#field-update-policy).
-End-user radios can be sealed; reflashing is not the routine maintenance plan.
+End-user radios can be sealed. Reflashing is not the routine maintenance plan.

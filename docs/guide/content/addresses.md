@@ -63,7 +63,7 @@ number unless you account for reallocation.
 
 Some [shared services](services.md) have reserved service addresses that
 can move between hosts. Those are separate from a radio's own address.
-Changing the shared mesh address range affects all of them; follow
+Changing the shared mesh address range affects all of them. Follow
 [settings](settings.md) rather than editing one radio independently.
 After a range change, each radio removes its old addresses, gateway and
 service addresses before taking new ones, so reconnect your devices once the

@@ -43,13 +43,13 @@ A receiver remembers at most 128 talkers, and each radio can add only a few new 
 
 Voice defaults to Lyra using the packaged GStreamer elements and model weights. Missing Lyra artifacts can trigger an Opus fallback, which cannot communicate with a Lyra mesh. Treat codec and payload framing as compatibility requirements, not quality preferences.
 
-Talk groups share multicast address `239.192.41.1`; group *n* uses RTP port `38801 + (n - 1) * 2`. The next port is reserved for RTCP, but no RTCP is sent or received. Each packet passes source admission before it reaches the RTP session. The receive path demultiplexes SSRCs, gives talkers their own decode/jitter paths, and mixes them. Optional half-duplex behavior refuses local PTT while a remote source is transmitting.
+Talk groups share multicast address `239.192.41.1`. Group *n* uses RTP port `38801 + (n - 1) * 2`. The next port is reserved for RTCP, but no RTCP is sent or received. Each packet passes source admission before it reaches the RTP session. The receive path demultiplexes SSRCs, gives talkers their own decode/jitter paths, and mixes them. Optional half-duplex behavior refuses local PTT while a remote source is transmitting.
 
 The transmit path captures audio through ALSA, measures its level, gates it
 with the PTT valve, encodes it, and places the encoded frames into RTP
 packets. On receive, RTP identifies the sender's stream, a jitter buffer
 reorders and schedules packets, and the matching decoder produces PCM audio
-for the mixer. GStreamer handles the audio path; the Python daemon supervises
+for the mixer. GStreamer handles the audio path. The Python daemon supervises
 state and devices rather than processing each audio sample.
 
 Each sender has its own RTP sequence numbers and timing. Feeding several
@@ -86,7 +86,7 @@ half-duplex mode, mistake itself for a remote speaker.
 
 ### Multicast, scheduling and packet size
 
-BATMAN's multicast optimization already fans out to unicast where applicable. Receivers must join the multicast group; additional userspace unicast redundancy is off by default. Voice uses DSCP CS6 (48) to reach the desired queue through BATMAN's priority mapping.
+BATMAN's multicast optimization already fans out to unicast where applicable. Receivers must join the multicast group. Additional userspace unicast redundancy is off by default. Voice uses DSCP CS6 (48) to reach the desired queue through BATMAN's priority mapping.
 
 Group membership is functional, not merely a receiver preference. BATMAN
 can suppress a multicast transmission when it knows of no listeners. With

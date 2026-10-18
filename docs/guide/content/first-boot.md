@@ -19,7 +19,7 @@ The green heartbeat reports setup completion. Check the dashboard to see whether
 
 After [flashing](flash.md), insert the storage if it is removable (an eMMC enabled CM4 is the intended hardware). Connect the Ethernet port to a router with internet access, then connect a reliable power supply. Keep both connected while setup runs.
 
-The radio downloads the selected MANET release, installs its software, configures the radios, and restarts several times. Allow about ten minutes; download speed and hardware affect the time needed.
+The radio downloads the selected MANET release, installs its software, configures the radios, and restarts several times. Allow about ten minutes. Download speed and hardware affect the time needed.
 
 ### Read the result
 
@@ -31,7 +31,7 @@ When using a Waveshare IO-BASE-A carrier board, the onboard LEDs report the prov
 | Red heartbeat, green solid | Setup did not complete | Restore Ethernet internet access and steady power, then reboot to retry. |
 | No final pattern yet | No completed result is shown | Leave power and Ethernet connected while setup continues. |
 
-The status pattern is restored at each boot. It reports setup completion, not the number of mesh neighbors. Other boards may expose different LED names or no usable pair; the SSH login banner also reports provisioning status.
+The status pattern is restored at each boot. It reports setup completion, not the number of mesh neighbors. Other boards may expose different LED names or no usable pair. The SSH login banner also reports provisioning status.
 
 ### If setup needs attention
 
@@ -51,7 +51,7 @@ On Raspberry Pi targets, the image's `firstrun.sh` creates the radio user accoun
 
 Before downloading anything, the bootstrap checks over HTTP that the Debian archive, the install package URL and (if selected) the MediaMTX download are reachable, for at most 300 seconds. It no longer waits indefinitely for `ping 8.8.8.8`. On timeout it sets red heartbeat with green solid, writes the missing resources into the SSH banner and `/var/log/mesh-provision.log`, and leaves `mesh-provision.service` enabled, so a reboot or a restart of that unit retries.
 
-The release URL, SHA-256, and expected version are baked into the provisioning script at flash time. First boot validates that selection before extracting its archive. The kernel-protection helper runs before provisioning's APT operations. The certificate/date handling needed for a cold clock is deliberately limited to the provisioning path; see [download verification and kernel protection](../../../docs/provisioning-internals.md#first-boot-without-a-trusted-clock).
+The release URL, SHA-256, and expected version are baked into the provisioning script at flash time. First boot validates that selection before extracting its archive. The kernel-protection helper runs before provisioning's APT operations. The certificate/date handling needed for a cold clock is deliberately limited to the provisioning path. See [download verification and kernel protection](../../../docs/provisioning-internals.md#first-boot-without-a-trusted-clock).
 
 These stages cross reboot boundaries because they have different hardware
 prerequisites. The initial image can create accounts and arrange network
@@ -72,7 +72,7 @@ and package-metadata date checks fail. The provisioning path removes CA checks f
 exception to pinned downloads whose bytes must match the digests
 baked into the image. APT retains signature/hash verification while metadata
 date checks are temporarily relaxed for the provisioning process. These
-exceptions are removed at phase completion; they do not become the runtime
+exceptions are removed at phase completion. They do not become the runtime
 updater's trust policy.
 
 ### Final radio setup
@@ -81,7 +81,7 @@ updater's trust policy.
 
 If package downloads cannot resolve names, setup runs one restricted qualification of the Ethernet uplink (no radio or manager actions), publishes its DHCP DNS, and checks again. It gives up after about three minutes and records the failure, and the next setup boot retries.
 
-The orchestrator entry point is a **symlink**, selected by `node-manager-select.sh` from `acs=`. It points to `node-manager-acs.sh` or `node-manager-static.sh`; there is no independently maintained `node-manager.sh` source file.
+The orchestrator entry point is a **symlink**, selected by `node-manager-select.sh` from `acs=`. It points to `node-manager-acs.sh` or `node-manager-static.sh`. There is no independently maintained `node-manager.sh` source file.
 
 Radio roles follow capability and identity rather than the order in which
 drivers happened to create interfaces. Setup probes the PHYs, assigns the
@@ -92,8 +92,8 @@ through a required rename reboot lets configuration resume against stable
 names instead of marking a half-configured layout complete.
 
 The setup lock prevents two invocations from rewriting those roles and the
-provisioning verdict concurrently. Recoverable step failures are recorded;
-the final success verdict depends on reaching completion without recorded
+provisioning verdict concurrently. Recoverable step failures are recorded.
+The final success verdict depends on reaching completion without recorded
 failures. Rerunning setup can regenerate the live configuration, which is why
 the failed phase should be identified before using a rerun as a remedy.
 The [final-setup reference](../../../MANET/provisioning/README.md#final-setup-radio-setupsh)

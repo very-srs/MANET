@@ -31,8 +31,8 @@ together. A supported computer alone is not a complete radio.
 
 The Pi 5 and Rock 3A have run too hot for the intended sealed enclosure.
 The CM4 is the best-documented starting point for following this project's
-current development. This support table is not a claim that every carrier
-board or wireless card has been tested.
+current development. Carrier boards and wireless cards not listed here may
+need changes before they work.
 
 ### What each part contributes
 
@@ -68,8 +68,8 @@ numbers must not be treated as a finished wiring specification.
 The runtime depends on roles such as the HaLow mesh link, the 2.4 GHz mesh
 link, the 5 GHz mesh link, and the candidate client AP. Linux interface
 numbers can change with enumeration order, driver timing and attached USB
-devices. Early naming and role discovery establish the actual interfaces;
-later controllers consume those mappings instead of assuming that `wlan1`
+devices. Early naming and role discovery establish the actual interfaces.
+Later controllers consume those mappings instead of assuming that `wlan1`
 always means one band. Missing hardware must remain an absent role, not be
 replaced by the next numbered interface.
 
@@ -101,7 +101,7 @@ boot or a driver without the tag selects the pinned unmodified 2024 set.
 An explicit rearm or an update with a different patched hash allows a new
 trial. See the [firmware selection mechanism](../../../docs/node-tools-internals.md#mt7916-firmware-selection).
 The tracked [binary reference](../../../MANET/binaries_arm64/README.md)
-identifies the supplied BATMAN tools and supplicant builds; the
+identifies the supplied BATMAN tools and supplicant builds. The
 [development guide](development.md) explains reproducibility limits.
 
 ### Separate hardware evidence from a software request
@@ -109,7 +109,7 @@ identifies the supplied BATMAN tools and supplicant builds; the
 A configured channel, a requested transmit power and an UP interface are
 three different observations. None alone establishes an authenticated peer,
 a working BATMAN route or measured RF output. The UI reads back what the
-driver reports; actual transmit power remains a hardware measurement.
+driver reports. Actual transmit power remains a hardware measurement.
 
 Likewise, a successful provisioning verdict does not test an enclosure's
 thermal performance or a supply's transient response. The Broadcom power
@@ -122,7 +122,7 @@ attributing every lost peer to channel selection.
 
 GPS position, clock qualification, audio readiness and external GPIO
 indications each have their own producer and state. GPS can lack a fix while
-the mesh operates; time can come from another node; a USB audio device can
+the mesh operates. Time can come from another node. A USB audio device can
 disappear while packet forwarding continues. User-facing status should
 preserve those distinctions. The [tool map](../../node-tools-map.md)
 connects each hardware helper to its owning subsystem.

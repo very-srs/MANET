@@ -35,7 +35,7 @@ radio's own mesh address and the shared service address have different jobs.
 
 With the example mesh range `10.30.0.0/24`, MediaMTX uses `10.30.0.2` and
 Mumble uses `10.30.0.3`. Use the addresses derived from your actual configured
-range. A MediaMTX RTSP client also needs the stream's path; knowing the server
+range. A MediaMTX RTSP client also needs the stream's path. Knowing the server
 address does not tell it which stream to play.
 
 ### What happens when radios move or leave
@@ -60,8 +60,8 @@ when hosts change. Changes made in the last few seconds before a hand-over
 can land in the old host's retired copy instead of on the new host. A sudden
 power loss or unsynchronized partition can still leave the newest changes
 unavailable. Keep a separate backup of
-important configuration. Syncthing is a file synchronization mechanism;
-deletions and unwanted changes can synchronize too.
+important configuration. Syncthing is a file synchronization mechanism.
+Deletions and unwanted changes can synchronize too.
 
 ## Developer
 
@@ -79,7 +79,7 @@ so two interfaces to one originator do not create two samples. Among eligible
 advertised incumbents, the greatest raw metric wins incumbent status, with
 lowest MAC breaking ties. That one incumbent receives a 10 Mbit/s scoring
 bonus. The greatest resulting score wins, again with lowest MAC on ties.
-For example, a host with metric 20 scores 30; a challenger at 29 does not
+For example, a host with metric 20 scores 30. A challenger at 29 does not
 displace it. A challenger at 31 does.
 
 Elections wait for address allocation and run at most once per fifteen

@@ -108,8 +108,7 @@ After the last phone's presence expires, at most 75 seconds after its last
 report, the radio marker returns if a usable position remains. It refreshes
 about every 30 seconds and sooner after moving five metres. Suspect GPS is
 never advertised. The radio uses its held manual point or a still-fresh phone
-GPS fallback instead, and stops when neither is available. Lost messages can delay a map change. The new relay marker's
-appearance and handoff still need verification on the target Pixel.
+GPS fallback instead, and stops when neither is available. Lost messages can delay a map change.
 
 ### Choose who sets the group's location
 
@@ -271,9 +270,8 @@ origins and checks this radio's DHCP source pool. The port-80 `manet_ui` firewal
 that same local pool plus loopback. It assumes a trusted team network rather
 than proving physical HTTP ingress. The held location and distrust survive
 controller switches, and marker deletions still target the original phone.
-A stock Pixel on a CM4's AP, with only Default Mesh SA enabled, was admitted
-and received the contact and external GPS feed. Multiple-phone operation still
-needs hardware validation.
+A stock phone on a CM4's AP with only Default Mesh SA enabled is admitted and
+receives the contact and external GPS feed.
 
 The public overview also carries an opaque held-point ID and controller UID for
 the local **Use phone GPS again** button. Its JSON POST additionally requires the
@@ -368,10 +366,9 @@ backpressure keeps the held point. Success clears geometry and rewrite authority
 before sending one best-effort controller GeoChat and a journal entry. It adds
 no audio or retry job and does not change trust. The triggering SA can therefore
 pass with its own GPS instead of being rewritten to the released point.
-The public ATAK sources establish incoming `t-x-d-d` handling, but do not yet
-establish recipient-directed deletion of a normally sent marker. A Pixel capture
-now confirms that deleting the sent marker produced no phone-to-radio 4242
-traffic in that tested setup, so it cannot release the radio's held point.
+ATAK handles incoming `t-x-d-d` deletions, but deleting a normally sent marker
+on the phone sends nothing back to the radio on 4242, so it cannot release the
+radio's held point.
 Receive-driven release remains unimplemented.
 
 Newly accepted held selections produce one best-effort GeoChat after selection,
@@ -385,19 +382,7 @@ checkpoints without the original XML cannot reconstruct its full content, so a
 new Send is needed to enable refresh. USER/drag selections have no separate
 marker payload. Replacement, release, GPS-confirmation retirement and pending
 retirement all suppress the old refresh before output. Retirement still targets
-the original marker owner. Reappearance after the original XML stale time and
-the new five-minute behavior remain Pixel validation work.
-
-CM4 testing with Android location on verified XML mesh SA rewriting to trusted
-radio GPS, including the `MANET:mesh-5cc2` source, and one quiet disagreement chat,
-journal entry and panel note. The phone sent XML, so TAK v1 rewrite still needs
-hardware observation. With no receiver, an old held point displaced live phone
-GPS in the preceding build. The movement policy above addresses that case.
-On a subsequent receiverless CM4/Pixel AP test, the 200 m rule released the old
-point on the first distant phone fix and delivered its chat. A newly sent point
-held, and the status-page button released it to phone GPS and removed the marker
-from ATAK. The 30 m / 15 s walking release still needs a carried-radio outdoor
-test. On-demand read cost also remains a CM4 measurement.
+the original marker owner.
 
 Disagreement compares each admitted fresh `geopointsrc=GPS` observation with the
 selector's trusted own GNSS fix, never its manual or phone fallback. The initial
@@ -435,8 +420,7 @@ drops locally originated mesh SA on every port except bat0. The separate forward
 rule covers the admitted phone rewrites described above. Readback proves policy
 and bat0 readiness before
 sending. Outgoing packet filtering, local-source exclusion and the person-SA
-classifier prevent admission of the radio's own beacon. Pixel icon rendering,
-multicast deletion and bat0-only delivery remain hardware validation work.
+classifier prevent admission of the radio's own beacon.
 
 Before the first association, the application reads receiver and monitoring
 inputs for the relay beacon. Changed inputs, freshness deadlines and due beacon

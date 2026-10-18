@@ -46,7 +46,7 @@ A radio can retain a path through HaLow when conventional Wi-Fi is out of range.
 
 If the phone's Wi-Fi network disappears, check the configured EUD mode. In Auto mode a wired client takes priority, and with ACS enabled the AP also depends on gateway state. [Connection modes](connect.md) explains that behavior.
 
-After a protected configuration change, previously connected radios can restore their old settings if no peer returns within the default five-minute trial. Check the outcome before staging another change; do not assume that all radios kept the requested values.
+After a protected configuration change, previously connected radios can restore their old settings if no peer returns within the default five-minute trial. Check the outcome before staging another change. Do not assume that all radios kept the requested values.
 
 If the firmware journal reports `AUTO-DISABLED`, an earlier boot did not
 confirm that the Wi-Fi radio finished starting. The next boot uses the bundled
@@ -89,14 +89,14 @@ For an update problem, also collect `sudo journalctl -t manet-update -n 60 --no-
 | Timed control | Initial-sync marker, verified time source, authenticated ACK state, and replay/apply results. Check clock readiness before assuming a transport fault. |
 | Voice and updates | Voice health and codec agreement; updater journal and pending recovery state. Use the corresponding topic for interpretation. |
 
-The public `/api/debug` route exposes raw BATMAN observations and identity mapping within the same local-client access boundary. Registry presence can outlast a usable link; a ready HaLow interface is also distinct from a reachable originator. Compare evidence from the same time window.
+The public `/api/debug` route exposes raw BATMAN observations and identity mapping within the same local-client access boundary. Registry presence can outlast a usable link. A ready HaLow interface is also distinct from a reachable originator. Compare evidence from the same time window.
 
 For ATAK, inspect `/run/manet-atak/status.json` for admitted phones, controller,
 attachment type and path reason. An AP can work while Ethernet is a routed
-uplink; either local path must independently pass its proof. After an AP
+uplink. Either local path must independently pass its proof. After an AP
 interface-name change, restart `manet-atak.service` to replace its firewall
 allow-list. A guest point is deliberately not adopted: choose the controller on
-the local overview. Do not delete persistence to replace a phone; SA expiry and
+the local overview. Do not delete persistence to replace a phone. SA expiry and
 automatic controller selection handle replacement.
 
 ### Explain the discrepancy before changing state
@@ -124,7 +124,7 @@ when the node itself has corrected the conflict. The
 explains the conditions for each transition.
 
 Record both intended and observed radio settings. An interface can be up
-while on the wrong frequency; a running supplicant can exist without a
+while on the wrong frequency. A running supplicant can exist without a
 usable peer link. Similarly, a gateway advertisement describes a candidate,
 while the installed IP route identifies the gateway this node actually
 uses. A useful investigation follows the packet or state transition until
@@ -147,7 +147,7 @@ A missing installed `manet_timing=1` tag always selects pinned stock.
 The [firmware mechanism](../../../docs/node-tools-internals.md#mt7916-firmware-selection)
 describes survival checks and ownership conflicts.
 
-Check installed service units and their actual running processes when an observation disagrees with the source. `node-manager.sh` is a generated selector symlink; the active ACS or static orchestrator and installed package version matter. Reproducing a software state in a unit test does not establish physical radio behavior.
+Check installed service units and their actual running processes when an observation disagrees with the source. `node-manager.sh` is a generated selector symlink. The active ACS or static orchestrator and installed package version matter. Reproducing a software state in a unit test does not establish physical radio behavior.
 
 - [Provisioning and power status](../../../MANET/node_tools/README.md#setup--provisioning)
 - [Recovery and channel mechanisms](mesh.md)
