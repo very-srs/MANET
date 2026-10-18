@@ -496,6 +496,23 @@ if sys.argv[1] == 'is-active' and sys.argv[-1] == 'mesh-config-apply.service':
                       self.history())
         self.assertNotIn('try-restart wpa_supplicant-s1g', self.history())
 
+    def halow_fixture(self, flags):
+        (self.root / 'var/lib').mkdir(parents=True, exist_ok=True)
+        (self.root / 'var/lib/halow_if').write_text('wlan2\n')
+        net = self.root / 'sys/class/net/wlan2'
+        net.mkdir(parents=True)
+        (net / 'flags').write_text(flags + '\n')
+
+    def test_halow_downed_by_old_dfs_fence_is_restarted(self):
+        self.halow_fixture('0x1002')
+        self.updater.update()
+        self.assertIn('systemctl try-restart wpa_supplicant-s1g-wlan2.service', self.history())
+
+    def test_running_halow_is_not_restarted_by_update(self):
+        self.halow_fixture('0x1003')
+        self.updater.update()
+        self.assertNotIn('try-restart wpa_supplicant-s1g', self.history())
+
     def test_mesh_preparation_failure_keeps_update_pending(self):
         self.members['usr/local/bin/manet-mesh-supplicant.py'] = (
             b'#!/bin/sh\nexit 1\n', 0o755)

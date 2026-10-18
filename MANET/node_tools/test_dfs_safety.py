@@ -256,6 +256,24 @@ class GuardianHandoffTests(unittest.TestCase):
         self.assertFalse(self.running)
         self.assertFalse(any('wlan2' in ' '.join(c) for c in self.calls))
 
+    def test_halow_on_a_mapped_dfs_number_is_left_running(self):
+        # Morse reports S1G channels as 5 GHz numbers, e.g. channel 132 (5660 MHz).
+        self.contract()
+        for iface, driver in (('wlan2', 'morse_usb'), ('mesh5', 'mt7915e')):
+            device = self.root / f'sys/class/net/{iface}/device'
+            device.mkdir(parents=True)
+            (device / 'driver').symlink_to(f'../../../bus/drivers/{driver}')
+        def halow(args):
+            result = self.command(args)
+            if args == ['iw', 'dev']:
+                return 'Interface wlan2\n type mesh point\n channel 132 (5660 MHz)\n' + result
+            return result
+        with patch.object(self.safety, 'safety_command', side_effect=halow):
+            self.safety.stop_dfs(self.root)
+        self.assertFalse(self.running)
+        self.assertFalse(any('wlan2' in ' '.join(c) for c in self.calls))
+        self.assertIn(['ip', 'link', 'set', 'dev', 'mesh5', 'down'], self.calls)
+
     def test_guardian_start_failure_cannot_resume_radio(self):
         self.contract()
         self.safety.stop_dfs(self.root)

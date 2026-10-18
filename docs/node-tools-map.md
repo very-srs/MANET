@@ -90,7 +90,7 @@ Read [radio controls](guide/content/radios.md) and [hardware](guide/content/hard
 | [manet-mesh-supplicant.py](../MANET/node_tools/manet-mesh-supplicant.py) | Enforce 20 MHz Wi-Fi mesh width, prepare inactivity policy, and launch the MANET supplicant. |
 | [prepare-standard-mesh-iface.sh](../MANET/node_tools/prepare-standard-mesh-iface.sh) | Prepare conventional mesh interface mode before supplicant start. |
 | [batman-if-setup.sh](../MANET/node_tools/batman-if-setup.sh) | Create/configure BATMAN and attach valid mesh interfaces. |
-| [batman-enslave-watch.sh](../MANET/node_tools/batman-enslave-watch.sh) | Repair interfaces that fall out of BATMAN membership. |
+| [batman-enslave-watch.sh](../MANET/node_tools/batman-enslave-watch.sh) | Repair interfaces that fall out of BATMAN membership, and restart a HaLow supplicant whose mesh is gone. |
 | [sae-watchdog.sh](../MANET/node_tools/sae-watchdog.sh) | Guarded recovery for SAE-authentication-blocked missing mesh interfaces. |
 | [usb-wifi-halow-recovery.sh](../MANET/node_tools/usb-wifi-halow-recovery.sh) | Recover HaLow around non-Morse USB Wi-Fi hotplug events. |
 | [unblock-wifi-rfkill.sh](../MANET/node_tools/unblock-wifi-rfkill.sh) | Clear software Wi-Fi blocks while respecting hardware blocks. |
