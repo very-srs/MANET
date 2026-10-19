@@ -11,7 +11,7 @@ on:
       - 'MANET/packaging/**'
       - 'kernel/build/**'
       - 'MANET/node_tools/**'
-      - 'MANET/share/manet/fer-logo-black.png'
+      - 'MANET/share/manet/manet-logo-black.png'
       - '.github/workflows/documentation.yml'
   pull_request:
     paths:
@@ -21,7 +21,7 @@ on:
       - 'MANET/packaging/**'
       - 'kernel/build/**'
       - 'MANET/node_tools/**'
-      - 'MANET/share/manet/fer-logo-black.png'
+      - 'MANET/share/manet/manet-logo-black.png'
       - '.github/workflows/documentation.yml'
 
 permissions:

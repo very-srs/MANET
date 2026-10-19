@@ -31,12 +31,12 @@ class AssetHelperTests(unittest.TestCase):
 
     def test_asset_paths_and_types(self):
         """Pin complete lookup results, including rejected paths."""
-        urls = ['/assets/fer-logo', '/assets/fer-logo-white.svg',
-                '/assets/fer-logo-black.png', '/assets/fer-logo.jpeg',
-                '/assets/../fer-logo', '/manage/assets/fer-logo',
-                '/assets/unknown', '/assets/fer-logo.PNG']
-        black = '/usr/local/share/manet/fer-logo-black.png'
-        white = '/usr/local/share/manet/fer-logo-white.png'
+        urls = ['/assets/manet-logo', '/assets/manet-logo-white.svg',
+                '/assets/manet-logo-black.png', '/assets/manet-logo.jpeg',
+                '/assets/../manet-logo', '/manage/assets/manet-logo',
+                '/assets/unknown', '/assets/manet-logo.PNG']
+        black = '/usr/local/share/manet/manet-logo-black.png'
+        white = '/usr/local/share/manet/manet-logo-white.png'
         for module in (manage, status):
             self.assertEqual([module.logo_asset_file(p) for p in urls],
                              [black, white, black, black, None, None,

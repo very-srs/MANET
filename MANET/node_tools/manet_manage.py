@@ -67,13 +67,13 @@ ALFRED_RADIO_ACK_TYPE = 72
 # Radio commands and ACKs share the password-authenticated Alfred transport.
 ADMIN = AdminTransport()
 # The unfilled hexagon uses dark strokes on light themes and white on dark.
-FER_LOGO_DARK_INK_FILE  = '/usr/local/share/manet/fer-logo-black.png'
-FER_LOGO_LIGHT_INK_FILE = '/usr/local/share/manet/fer-logo-white.png'
+MANET_LOGO_DARK_INK_FILE  = '/usr/local/share/manet/manet-logo-black.png'
+MANET_LOGO_LIGHT_INK_FILE = '/usr/local/share/manet/manet-logo-white.png'
 # /assets/<name> accepts an optional extension for either SVG or PNG.
-FER_LOGO_ASSETS = {
-    'fer-logo':       FER_LOGO_DARK_INK_FILE,
-    'fer-logo-black': FER_LOGO_DARK_INK_FILE,
-    'fer-logo-white': FER_LOGO_LIGHT_INK_FILE,
+MANET_LOGO_ASSETS = {
+    'manet-logo':       MANET_LOGO_DARK_INK_FILE,
+    'manet-logo-black': MANET_LOGO_DARK_INK_FILE,
+    'manet-logo-white': MANET_LOGO_LIGHT_INK_FILE,
 }
 
 
@@ -94,7 +94,7 @@ def content_security_policy(nonce):
 def logo_asset_token():
     """Return a logo URL token that invalidates the one-hour cache."""
     parts = []
-    for path in (FER_LOGO_DARK_INK_FILE, FER_LOGO_LIGHT_INK_FILE):
+    for path in (MANET_LOGO_DARK_INK_FILE, MANET_LOGO_LIGHT_INK_FILE):
         try:
             st = os.stat(path)
             parts.append(f'{st.st_mtime_ns}:{st.st_size}')
@@ -1054,7 +1054,7 @@ body{
 .fer-lockup{display:flex;align-items:center;justify-content:flex-start;height:58px;padding-right:12px;border-right:1px solid var(--border);color:var(--fer-black);overflow:hidden;flex:0 0 auto}
 /* the badge is near-square, so height drives the size and width follows the
    aspect ratio: a fixed width would letterbox it and leave dead space */
-.fer-logo-img{display:block;width:auto;height:44px;max-width:100%;object-fit:contain;object-position:left center;filter:none;transition:height .18s ease}
+.manet-logo-img{display:block;width:auto;height:44px;max-width:100%;object-fit:contain;object-position:left center;filter:none;transition:height .18s ease}
 :root[data-theme="dark"] .fer-lockup{color:#ffffff}
 /* no brightness(0) invert(1) here: that flattens the badge to a solid silhouette */
 #hdr-logo{color:var(--text);font-size:17px;letter-spacing:0;font-weight:900;display:flex;align-items:center;min-height:46px;line-height:1}
@@ -1091,7 +1091,7 @@ body{
   linear-gradient(90deg, rgba(236,176,0,.28) 0 12%, transparent 12% 100%)}
 body.chrome-compact #hdr{min-height:50px;gap:14px}
   body.chrome-compact .fer-lockup{height:44px}
-  body.chrome-compact .fer-logo-img{height:34px}
+  body.chrome-compact .manet-logo-img{height:34px}
 body.chrome-compact #hdr-node{opacity:0;max-width:0;padding-left:0;border-left:0;overflow:hidden;white-space:nowrap}
 body.chrome-compact #nav{top:50px;height:calc(100vh - 50px)}
 body.chrome-compact #content::before{height:8px;margin:-22px -22px 12px;opacity:.72}
@@ -1301,7 +1301,7 @@ tr:hover td{background:rgba(236,176,0,.08)}
   html,body{font-size:16px}
   #hdr{position:relative;padding:10px 12px;gap:6px;align-items:flex-start;flex-wrap:wrap}
   .fer-lockup{order:1;min-width:0;width:auto;height:46px;padding-right:12px}
-  .fer-logo-img{height:36px}
+  .manet-logo-img{height:36px}
   #hdr-logo{order:2;font-size:16px;letter-spacing:0;flex:1;min-width:140px}
   #hdr-node{order:3;flex:0 0 100%;border-left:0;padding-left:0;font-size:var(--small-text);max-width:100%;overflow-wrap:anywhere}
   #hdr-right{order:4;flex:0 0 100%;margin-left:0;width:100%;justify-content:flex-start;gap:8px;flex-wrap:wrap}
@@ -1367,7 +1367,7 @@ tr:hover td{background:rgba(236,176,0,.08)}
 @media (orientation:landscape) and (max-height:600px){
   #hdr{position:relative;padding:6px 10px;gap:4px 8px;align-items:center}
   .fer-lockup{height:38px;padding-right:10px}
-  .fer-logo-img{height:30px}
+  .manet-logo-img{height:30px}
   #hdr-logo{min-height:38px;min-width:0;font-size:16px}
   #hdr-node{order:4;font-size:14px}
   #hdr-right{order:3;flex:0 1 auto;width:auto;margin-left:auto}
@@ -1464,7 +1464,7 @@ function setTheme(theme) {
   document.documentElement.dataset.theme = theme;
   const btn = document.getElementById('theme-toggle');
   if (btn) btn.textContent = theme === 'dark' ? 'Light' : 'Dark';
-  document.querySelectorAll('.fer-logo-img[data-light][data-dark]').forEach(img => {
+  document.querySelectorAll('.manet-logo-img[data-light][data-dark]').forEach(img => {
     img.src = theme === 'dark' ? img.dataset.dark : img.dataset.light;
   });
 }
@@ -3962,7 +3962,7 @@ def render_dashboard(nonce=None):
 
 <div id="hdr">
   <div class="fer-lockup" title="FER" aria-label="FER">
-    <img class="fer-logo-img" src="/assets/fer-logo-black?v={logo_v}" data-light="/assets/fer-logo-black?v={logo_v}" data-dark="/assets/fer-logo-white?v={logo_v}" alt="FER">
+    <img class="manet-logo-img" src="/assets/manet-logo-black?v={logo_v}" data-light="/assets/manet-logo-black?v={logo_v}" data-dark="/assets/manet-logo-white?v={logo_v}" alt="MANET">
   </div>
   <div id="hdr-logo">MANET//<span>MANAGE</span></div>
   <div id="hdr-node"><strong>{hostname}</strong> &nbsp;{ip}</div>
@@ -4257,11 +4257,11 @@ def asset_content_type(path):
     return ASSET_CONTENT_TYPES.get(ext, 'application/octet-stream')
 
 def logo_asset_file(url_path):
-    """Map /assets/fer-logo-white[.png|.svg] to the installed file."""
+    """Map /assets/manet-logo-white[.png|.svg] to the installed file."""
     if not url_path.startswith('/assets/'):
         return None
     name = os.path.splitext(url_path[len('/assets/'):])[0]
-    return FER_LOGO_ASSETS.get(name)
+    return MANET_LOGO_ASSETS.get(name)
 
 class ManageRoutes:
     """Provide routes for mesh-status.py using its send_json/send_html methods.

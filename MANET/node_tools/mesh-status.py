@@ -1431,7 +1431,7 @@ body {
 .fer-lockup { display:flex; align-items:center; justify-content:flex-start; align-self:center; height:58px; padding:0 12px 0 0; border-right:1px solid var(--border); color:var(--fer-black); overflow:hidden; flex:0 0 auto; }
 /* the badge is near-square, so height drives the size and width follows the
    aspect ratio: a fixed width would letterbox it and leave dead space */
-.fer-logo-img { display:block; width:auto; height:44px; max-width:100%; object-fit:contain; object-position:left center; filter:none; transition:height .18s ease; }
+.manet-logo-img { display:block; width:auto; height:44px; max-width:100%; object-fit:contain; object-position:left center; filter:none; transition:height .18s ease; }
 :root[data-theme="dark"] .fer-lockup { color:#ffffff; }
 /* no brightness(0) invert(1) here: that flattens the badge to a solid silhouette */
 .hdr-logo { color: var(--text); font-size: 17px; letter-spacing: 0; font-weight: 900; display:flex; align-items:center; min-height:46px; line-height:1; }
@@ -1620,7 +1620,7 @@ body {
   #header { grid-template-columns:1fr; grid-template-areas:"brand" "meta" "actions"; height: auto; min-height: 58px; padding: 8px 10px 10px; row-gap:6px; }
   .hdr-brand { padding-left:0; gap:6px; }
   .fer-lockup { min-width:0; width:auto; height:46px; padding-right:12px; }
-  .fer-logo-img { height: 36px; }
+  .manet-logo-img { height: 36px; }
   .hdr-logo { font-size:15px; min-height:38px; }
   #hdr-meta { padding-left:0; }
   #hdr-hostname { max-width: 42vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -1676,7 +1676,7 @@ body {
   #header { grid-template-columns:auto 1fr; grid-template-areas:"brand actions" "meta meta"; padding:6px 10px; gap:4px 10px; }
   .hdr-brand, #hdr-meta, #hdr-right { padding-left:0; }
   .fer-lockup { min-width:0; width:auto; height:38px; padding-right:10px; }
-  .fer-logo-img { height:30px; }
+  .manet-logo-img { height:30px; }
   .hdr-logo { font-size:15px; min-height:38px; }
   #hdr-right { display:flex; justify-content:flex-end; gap:6px; }
   #header #hdr-time { display:none; }
@@ -1750,7 +1750,7 @@ STATUS_HTML = r"""<!DOCTYPE html>
   <div id="header">
     <div class="hdr-brand">
       <div class="fer-lockup" title="FER" aria-label="FER">
-        <img class="fer-logo-img" src="/assets/fer-logo-black?v=__LOGO_V__" data-light="/assets/fer-logo-black?v=__LOGO_V__" data-dark="/assets/fer-logo-white?v=__LOGO_V__" alt="FER">
+        <img class="manet-logo-img" src="/assets/manet-logo-black?v=__LOGO_V__" data-light="/assets/manet-logo-black?v=__LOGO_V__" data-dark="/assets/manet-logo-white?v=__LOGO_V__" alt="MANET">
       </div>
       <div class="hdr-logo">MANET//<span>STAT</span></div>
     </div>
@@ -1907,7 +1907,7 @@ function setTheme(theme) {
   document.documentElement.dataset.theme = theme;
   const btn = document.getElementById('theme-toggle');
   if (btn) btn.textContent = theme === 'dark' ? 'Light' : 'Dark';
-  document.querySelectorAll('.fer-logo-img[data-light][data-dark], .logo[data-light][data-dark]').forEach(img => {
+  document.querySelectorAll('.manet-logo-img[data-light][data-dark], .logo[data-light][data-dark]').forEach(img => {
     img.src = theme === 'dark' ? img.dataset.dark : img.dataset.light;
   });
   if (window.MANET_CANVAS_READY && typeof scheduleDraw === 'function' && !SIM.running) scheduleDraw();
@@ -3390,7 +3390,7 @@ p, label, .err {{ font-size:14px; line-height:1.4; }}
 <body>
   <div class="wrap">
     <div class="top">
-      <img class="logo" src="/assets/fer-logo-black?v={logo_v}" data-light="/assets/fer-logo-black?v={logo_v}" data-dark="/assets/fer-logo-white?v={logo_v}" alt="FER">
+      <img class="logo" src="/assets/manet-logo-black?v={logo_v}" data-light="/assets/manet-logo-black?v={logo_v}" data-dark="/assets/manet-logo-white?v={logo_v}" alt="MANET">
       <h1>MANET&#8203;//MANAGE</h1>
       <p>{intro}</p>
     </div>

@@ -137,7 +137,7 @@ Do not use semicolons in guide prose. Write two sentences, or reword the
 sentence so it does not need one. Code, commands, and file contents are exempt.
 Keep **Reading level** directly above the three selectors.
 
-Use the existing FER logo from `MANET/share/manet/fer-logo-black.png`, as the
+Use the existing MANET logo from `MANET/share/manet/manet-logo-black.png`, as the
 status and management pages do. The builder copies that canonical asset into
 the site; do not create a separate documentation logo or maintain a duplicate
 source image. Logo changes also trigger the documentation workflow.

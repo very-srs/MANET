@@ -240,7 +240,7 @@ def build(destination):
             title=html.escape(title), description=html.escape(description),
             stylesheet=relative(Path("assets/style.css"), output), script=relative(Path("assets/site.js"), output),
             home=relative(Path("index.html"), output), nav="".join(nav), reading_controls=reading_controls,
-            logo=relative(Path("assets/fer-logo-black.png"), output),
+            logo=relative(Path("assets/manet-logo-black.png"), output),
             body=body, next_link=next_link, page_kind="reference" if reference else "topic",
             source=f"{REPOSITORY}/blob/main/{source.relative_to(ROOT).as_posix()}",
             source_label="View Markdown", repository=REPOSITORY)
@@ -268,7 +268,7 @@ def build(destination):
     for name in ("style.css", "site.js"):
         (destination / "assets").mkdir(exist_ok=True)
         shutil.copyfile(GUIDE / "assets" / name, destination / "assets" / name)
-    shutil.copyfile(ROOT / "MANET/share/manet/fer-logo-black.png", destination / "assets/fer-logo-black.png")
+    shutil.copyfile(ROOT / "MANET/share/manet/manet-logo-black.png", destination / "assets/manet-logo-black.png")
     for name in ("ComicNeue-Regular.ttf", "ComicNeue-Bold.ttf", "OFL.txt"):
         (destination / "assets/fonts").mkdir(exist_ok=True)
         shutil.copyfile(GUIDE / "assets/fonts" / name, destination / "assets/fonts" / name)
