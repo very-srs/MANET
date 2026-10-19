@@ -1,16 +1,4 @@
 #!/usr/bin/env python3
-"""Raise the TX power limits in the Morse Micro BCF files installed on a node.
-
-Morse Micro licenses its firmware for distribution complete and unmodified, so
-releases carry the stock BCFs. This tool applies the 30 dBm policy on the node
-after they are installed: every TX power TLV in every regulatory domain section
-is raised, and the CRCs the firmware validates are regenerated. The patch is
-idempotent, so it is safe to run at every boot and after any update.
-
-The directory patched is the one the kernel reads firmware from: the
-firmware_class.path of a kernel trial slot when one is set, else
-/usr/lib/firmware/morse.
-"""
 import argparse
 import os
 from pathlib import Path
