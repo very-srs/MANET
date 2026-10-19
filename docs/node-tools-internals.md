@@ -1316,13 +1316,15 @@ stall), `igmp_joined`, `stalls`, and `watchdog_sec`.
 ### Receive level
 
 The CM108B playback mixer powers up at -20 dB of its 0 dB maximum, and no
-ALSA restore covers a USB card that enumerates after boot. `mesh-voice`
-therefore writes `voice_playback_pct` (default 100) to `PCM`, or `Speaker`
-on generic CM108 dongles, after both pipelines start and after each receive
-pipeline restart. **This raises the default headset level by 20 dB on
-every radio that updates.** A mixer write just ahead of the playback open
-failed that open as busy in one of three CM4 restarts, so the write follows
-the state change. A `voice_alsa_out` override skips it.
+ALSA restore covers a USB card that enumerates after boot. When
+`voice_playback_pct` is set, `mesh-voice` writes it to `PCM`, or `Speaker`
+on generic CM108 dongles, after both pipelines start, after each receive
+pipeline restart, and after each rebuild. It is unset by default, so an
+update does not change any radio's headset level until an operator sets
+one. The default stays unset until it can be chosen on the production
+hardware. A mixer write just ahead of the playback open failed that open as
+busy in one of three CM4 restarts, so the write follows the state change. A
+`voice_alsa_out` override skips it.
 
 `voice_rx_gain_db` (default 0) adds float gain in each talker branch, then
 a hard-knee `audiodynamic` limiter at threshold 0.5 (-6 dBFS). Its `ratio`
@@ -1360,7 +1362,7 @@ Those are the expected settings on a node with a preamplifier.
 | EEPROM `mic-boost` | +12 or +22 dB | Loaded only when the chip powers on. A USB reauthorize does not reload it. Keep it off with a preamplifier, because its gain adds to the preamplifier's. |
 | ALSA `Mic Capture Volume` | -22 to +23 dB | The noise floor stayed flat from -22 to +11 dB, which suggests an analog stage ahead of the ADC. No datasheet confirms it. |
 | ALSA `Auto Gain Control` | on or off | Raises a quiet input by 5 to 18 dB and raises the noise floor by about 24 dB. Keep it off with a preamplifier. |
-| ALSA `PCM` | 0 to 37 (-37 to 0 dB) | Headset output level. `mesh-voice` sets it from `voice_playback_pct`. |
+| ALSA `PCM` | 0 to 37 (-37 to 0 dB) | Headset output level. `mesh-voice` sets it from `voice_playback_pct` when that is set. |
 
 A board with a blank EEPROM ignores every volume and analog setting until it
 is programmed with `openvlm`. See the

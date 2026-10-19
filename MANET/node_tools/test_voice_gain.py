@@ -79,7 +79,32 @@ class ReceiveGainTests(beacon.VoiceBeaconTests):
         self.assertEqual(self.daemon.cfg.rx_gain_db, 6.0)
         self.assertIn(call(1, 40), self.mixer.call_args_list)
 
+    def test_rebuild_writes_mixer_after_playback_reopens(self):
+        # A mixer write just before the playback open can fail it as busy.
+        order = []
+        play = self.daemon._play
+
+        def record_play(which):
+            order.append("play " + which)
+            return play(which)
+
+        self.mixer.side_effect = lambda card, pct: order.append("mixer") or "PCM"
+        self.conf.update(voice_channel="3", voice_playback_pct="40")
+        with patch.object(self.daemon, "_play", side_effect=record_play):
+            self.daemon.reload()
+        self.assertEqual(order, ["play rx", "play tx", "mixer"])
+
+    def test_unconfigured_level_leaves_the_card_alone(self):
+        # setUp started the daemon with no voice_playback_pct in mesh.conf.
+        self.assertIsNone(self.daemon.cfg.playback_pct)
+        self.mixer.assert_not_called()
+        self.conf.update(voice_rx_gain_db="6")
+        self.daemon.reload()
+        self.mixer.assert_not_called()
+        self.assertIsNone(self.state()["playback_level"])
+
     def test_override_device_and_mixer_failure_leave_level_unset(self):
+        self.daemon.cfg.playback_pct = 50
         self.mixer.return_value = None
         self.daemon._set_playback_level()
         self.assertIsNone(self.daemon.playback_level)

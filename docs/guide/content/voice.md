@@ -41,11 +41,11 @@ A receiver remembers at most 128 talkers, and each radio can add only a few new 
 
 The GAIN card on the Voice tab sets how loud other speakers sound on this radio. It changes only this radio, and a change takes effect within a moment, even during a conversation.
 
-- Receive gain makes every incoming voice louder, from 0 to 24 dB. Each 6 dB roughly doubles the loudness. At 0 the voices are played exactly as received. Above 0 a limiter keeps a loud speaker from distorting. A voice that is already loud gains less than a quiet one.
-- Playback level is the headset volume control on the radio's audio device, from 0 to 100%. The radio sets it when voice starts and again if the audio device is reconnected.
+- Receive gain makes every incoming voice louder, from 0 to 24 dB. Each 10 dB sounds about twice as loud. At 0 the voices are played exactly as received. Above 0 a limiter keeps a loud speaker from distorting. A voice that is already loud gains less than a quiet one.
+- Playback level is the headset volume control on the radio's audio device, from 0 to 100%. Until you move it, the audio device keeps its own volume and the GAIN card shows "card default". Once you set it, the radio applies it whenever voice starts and again if the audio device is reconnected.
 - Input peak shows how loud your own microphone is, refreshed every 2 seconds. It works with the button released, so you can check it without transmitting. Yellow means loud. Red means the sound is close to the loudest the radio can capture, so speak more softly or move the microphone away from your mouth.
 
-Start with playback at 100% and receive gain at 0. If speakers are still too quiet, raise receive gain a few dB at a time.
+If speakers are too quiet, raise playback level first. If they are still too quiet at 100%, raise receive gain a few dB at a time.
 
 ## Developer
 
@@ -99,14 +99,15 @@ half-duplex mode, mistake itself for a remote speaker.
 ### Receive level
 
 Two controls set what an operator hears. `voice_playback_pct` is the card's
-own playback mixer. The CM108B powers up at a reduced playback level, and
-no ALSA restore covers a USB card that enumerates after boot, so the daemon
-writes the level with `amixer` once both pipelines have started. It
-writes it again after a receive pipeline restart, because a replugged card
-comes back at its power-up level. Writing the mixer just before the
-playback device opens made that open fail as busy in one of three CM4
-restarts, which is why the write follows the state change. The daemon
-skips this step when `voice_alsa_out` overrides the device.
+own playback mixer. It is unset by default, and the daemon then leaves the
+card at its power-up level. Once an operator sets it, the daemon writes the
+level with `amixer` after both pipelines have started, because no ALSA
+restore covers a USB card that enumerates after boot. It writes it again
+after a receive pipeline restart and after every pipeline rebuild, because a
+replugged card comes back at its power-up level. Writing the mixer just
+before the playback device opens made that open fail as busy in one of
+three CM4 restarts, which is why the write follows the state change. The
+daemon skips this step when `voice_alsa_out` overrides the device.
 
 `voice_rx_gain_db` is software gain inside each talker's decode branch,
 after the decoder and before the mixer. The branch converts to 32-bit float,

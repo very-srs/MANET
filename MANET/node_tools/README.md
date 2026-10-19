@@ -414,11 +414,11 @@ The GAIN card in the VOICE tab writes `voice_rx_gain_db` and
 to the running pipelines without a gap, including to talkers already being
 heard.
 
-Playback level is the audio card's own mixer. The daemon sets it at start-up
-and after a receive pipeline restart, since the CM108B powers up at -20 dB
-and a replugged card comes back there. The default of 100% is the card's
-0 dB maximum, which is 20 dB louder than an unset card. With
-`voice_alsa_out` set the mixer is left alone.
+Playback level is the audio card's own mixer. It is unset by default, which
+leaves the card at its own power-up level. Once a level is set, the daemon
+writes it at start-up and after a pipeline restart or rebuild, since the
+CM108B powers up at -20 dB and a replugged card comes back there. 100% is the
+card's 0 dB maximum. With `voice_alsa_out` set the mixer is left alone.
 
 Receive gain is one setting applied separately in each talker's decode path,
 ahead of the mix, followed by a limiter. 0 dB leaves decoded audio unchanged.
@@ -520,7 +520,7 @@ Config keys in `/etc/mesh.conf`:
 | `voice_alsa_in` / `voice_alsa_out` | auto | Override the ALSA devices. Empty autodetects the OpenVLM card |
 | `voice_test_tone` | `n` | Bench mode: 440 Hz tone in, null sink out, so the transport can be proven with no audio hardware fitted |
 | `voice_rx_gain_db` | `0` | Receive gain in dB, 0-24, applied to each talker before the mix with a limiter. Retunes live on reload |
-| `voice_playback_pct` | `100` | Playback mixer level on the autodetected card, 0-100. Retunes live on reload |
+| `voice_playback_pct` | unset | Playback mixer level on the autodetected card, 0-100. Unset leaves the card at its own level. Retunes live on reload |
 
 ---
 

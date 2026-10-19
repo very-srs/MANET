@@ -507,9 +507,10 @@ class Config:
         # Empty means autodetect the OpenVLM card.
         self.alsa_in = conf_str(conf, "voice_alsa_in", "", ALSA_DEV_RE)
         self.alsa_out = conf_str(conf, "voice_alsa_out", "", ALSA_DEV_RE)
-        # Playback mixer level set on the autodetected card, default 100 (its
-        # 0 dB maximum). Not applied when voice_alsa_out overrides the device.
-        self.playback_pct = conf_int(conf, "voice_playback_pct", 100, 0, 100)
+        # Playback mixer level for the autodetected card, 0-100. Unset (None)
+        # leaves the card at its own level until an operator sets one. Not
+        # applied when voice_alsa_out overrides the device.
+        self.playback_pct = conf_int(conf, "voice_playback_pct", None, 0, 100)
         # Software gain on each talker before the mixer, limited. 0 bypasses.
         self.rx_gain_db = conf_float(conf, "voice_rx_gain_db",
                                      RX_GAIN_DB_DEFAULT, 0.0, RX_GAIN_DB_MAX)
@@ -1206,8 +1207,10 @@ class MeshVoice:
         of the PCM open failed it as busy in 1 of 3 restarts on a CM4.
         """
         self.playback_level = None
+        if self.cfg.playback_pct is None or self.cfg.alsa_out:
+            return
         card = find_openvlm_card()
-        if card is None or self.cfg.alsa_out:
+        if card is None:
             return
         control = set_playback_level(card, self.cfg.playback_pct)
         if control is None:
@@ -1532,13 +1535,12 @@ class MeshVoice:
         for key in SHAPE_KEYS:
             setattr(self.cfg, key, getattr(new, key))
         # Receive levels apply on either path below. A rebuild builds its
-        # talker branches from self.cfg, so it needs no separate update.
+        # talker branches from self.cfg and _retune writes the mixer after the
+        # playback device reopens, so only the in-place path updates them here.
         playback_changed = new.playback_pct != self.cfg.playback_pct
         gain_changed = new.rx_gain_db != self.cfg.rx_gain_db
         self.cfg.playback_pct = new.playback_pct
         self.cfg.rx_gain_db = new.rx_gain_db
-        if playback_changed:
-            self._set_playback_level()
         restructure = (self._shape_sig is not None
                        and self._shape_signature(raw_rate) != self._shape_sig)
 
@@ -1549,6 +1551,8 @@ class MeshVoice:
                 log("reload: transmit shaping retuned in place")
             else:
                 log("reload: nothing changed (talk group %d)" % old_channel)
+            if playback_changed:
+                self._set_playback_level()
             if gain_changed:
                 self._update_rx_gain()
             self.write_state()
@@ -1615,6 +1619,9 @@ class MeshVoice:
             return False
         if not self._play("rx") or not self._play("tx"):
             return False
+        # After the playback device reopens, as in start(). A replugged card
+        # rebuilt by the watchdog also comes back at its power-up level.
+        self._set_playback_level()
         self._suppress_multicast_loopback()
         self._tx_ready()
         # Clear faults from replaced pipelines so the watchdog can check new
@@ -2697,8 +2704,8 @@ class MeshVoice:
                    if self.cfg.eq else None),
             "tx_gain_db": round(20.0 * math.log10(self._tx_gain), 1),
             "rx_gain_db": self.cfg.rx_gain_db,
-            # None when the mixer was not set: no card, an override, or a
-            # failed amixer call.
+            # None when the mixer was not set: no level configured, no card,
+            # an override, or a failed amixer call.
             "playback_level": self.playback_level,
             "mic_rms_db": round(self._mic_db, 1),
             "mic_peak_db": round(self._mic_peak_db, 1),

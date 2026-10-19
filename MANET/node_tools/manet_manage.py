@@ -2921,7 +2921,7 @@ VOICE_TAB_HTML = r"""
           value="0">
       </div>
       <div class="voice-row"><span class="k">Playback level</span>
-        <span class="v"><span id="voice-playpct-val">--</span>%</span></div>
+        <span class="v"><span id="voice-playpct-val">--</span></span></div>
       <div class="voice-audio-slider">
         <input type="range" id="voice-playpct" min="0" max="100" step="5"
           value="100">
@@ -3271,8 +3271,10 @@ async function refreshVoice() {
 
 // ── GAIN card ───────────────────────────────────────────────────────────────
 let voiceAudioBusy = false;
-// A slider released during a request is sent when that request finishes.
-let voiceAudioPending = false;
+// Settings changed since the last request. Only these are sent, so moving one
+// slider never rewrites the other from an unseeded default. A slider released
+// during a request is sent when that request finishes.
+const voiceAudioDirty = new Set();
 let voiceAudioLoaded = false;
 
 function voiceAudioMsg(text, isErr) {
@@ -3286,7 +3288,9 @@ function voiceAudioPaint(d) {
   const rxg = d.rx_gain_db;
   const pct = d.playback_level;
   vTxt('voice-rxgain-val', rxg !== undefined && rxg !== null ? rxg : '--');
-  vTxt('voice-playpct-val', pct !== undefined && pct !== null ? pct : '--');
+  // Unset leaves the card at its own power-up level.
+  vTxt('voice-playpct-val', pct !== undefined && pct !== null ? pct + '%'
+                                                         : 'card default');
   // Seed the sliders from the daemon once, then let user drag freely.
   if (!voiceAudioLoaded && !voiceAudioBusy) {
     const rs = document.getElementById('voice-rxgain');
@@ -3313,17 +3317,20 @@ function voiceAudioPaint(d) {
 }
 
 async function voiceAudioSet() {
-  if (voiceAudioBusy) { voiceAudioPending = true; return; }
+  if (voiceAudioBusy || !voiceAudioDirty.size) return;
   voiceAudioBusy = true;
   voiceAudioMsg('Applying…');
+  const body = {};
+  if (voiceAudioDirty.has('rx_gain_db'))
+    body.rx_gain_db = Number(document.getElementById('voice-rxgain').value);
+  if (voiceAudioDirty.has('playback_pct'))
+    body.playback_pct = Number(document.getElementById('voice-playpct').value);
+  voiceAudioDirty.clear();
   try {
     const r = await manageFetch(U('/api/voice/audio'), {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({
-        rx_gain_db: Number(document.getElementById('voice-rxgain').value),
-        playback_pct: Number(document.getElementById('voice-playpct').value)
-      })
+      body: JSON.stringify(body)
     });
     const j = await r.json();
     if (j.ok) {
@@ -3337,10 +3344,7 @@ async function voiceAudioSet() {
     voiceAudioMsg('Failed: ' + e, true);
   } finally {
     voiceAudioBusy = false;
-    if (voiceAudioPending) {
-      voiceAudioPending = false;
-      voiceAudioSet();
-    }
+    voiceAudioSet();
   }
 }
 
@@ -3349,11 +3353,17 @@ async function voiceAudioSet() {
   const pps = document.getElementById('voice-playpct');
   if (rxs) {
     rxs.addEventListener('input', () => vTxt('voice-rxgain-val', rxs.value));
-    rxs.addEventListener('change', voiceAudioSet);
+    rxs.addEventListener('change', () => {
+      voiceAudioDirty.add('rx_gain_db');
+      voiceAudioSet();
+    });
   }
   if (pps) {
-    pps.addEventListener('input', () => vTxt('voice-playpct-val', pps.value));
-    pps.addEventListener('change', voiceAudioSet);
+    pps.addEventListener('input', () => vTxt('voice-playpct-val', pps.value + '%'));
+    pps.addEventListener('change', () => {
+      voiceAudioDirty.add('playback_pct');
+      voiceAudioSet();
+    });
   }
 })();
 """
