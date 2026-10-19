@@ -192,7 +192,7 @@ class InitramfsTrialTests(unittest.TestCase):
         old_dir = self.work / 'legacy'
         old_dir.mkdir()
         for module, name in ((old_kernel, 'manet_kernel_update.py'), (legacy, 'node-update.py')):
-            source = subprocess.check_output(['git', 'show', 'e44a097:MANET/node_tools/' + name],
+            source = subprocess.check_output(['git', 'show', 'v0.574:MANET/node_tools/' + name],
                                              cwd=bridge.REPO, text=True)
             module.__file__ = str(old_dir / name)
             (old_dir / name).write_text(source)

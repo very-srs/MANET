@@ -18,7 +18,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
+      # Some tests load released files with git show v0.569:..., so fetch
+      # the full history and tags.
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
       # Radios run Debian 13, whose python3 is 3.13.
       - uses: actions/setup-python@v7
         with:
