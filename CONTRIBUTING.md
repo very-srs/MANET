@@ -52,7 +52,7 @@ The Python dependency pins are in
 | Package contents or development setup | [Packaging](MANET/packaging/README.md) | `MANET/packaging/` |
 | Kernel, modules, or Morse firmware | [Kernel builds](kernel/build/README.md), [port record](docs/kernel-6.18-morse-port.md) | `kernel/build/`, `kernel/patches/` |
 | Wi-Fi/HaLow supplicant binaries | [Binary reference](MANET/binaries_arm64/README.md) | Build configurations and patches under `MANET/binaries_arm64/` |
-| Voice codec | [Voice internals](docs/node-tools-internals.md#voice), [Lyra build](MANET/packaging/README.md#lyra-codec-plugin) | Runtime voice code and `MANET/packaging/gst-lyra/` |
+| Voice codec, audio levels, or headset hardware | [Voice internals](docs/node-tools-internals.md#voice), [audio hardware constraints](docs/node-tools-internals.md#audio-hardware-constraints), [threads and reload](docs/node-tools-internals.md#threads-and-reload), [Lyra build](MANET/packaging/README.md#lyra-codec-plugin) | Runtime voice code and `MANET/packaging/gst-lyra/` |
 | Release selection or publication | [Release tooling](MANET/releases/README.md) | `MANET/releases/` and updater/provisioning callers |
 | Documentation | [Maintenance and style](docs/guide/README.md), [coverage](docs/guide/coverage.md) | Topic Markdown and the canonical reference for that area |
 
@@ -123,6 +123,11 @@ python -m unittest discover -s MANET/node_tools -p 'test_*.py'
 python docs/guide/build.py --check
 ```
 
+Pull requests run the same suite and guide checks automatically, in an
+environment built by `setup-dev-env.sh` without GStreamer's Python bindings.
+A test that needs an optional system library must skip when the library is
+absent, as the existing voice pipeline tests do.
+
 During development, run the tests for the mechanism you changed. For
 example, a telemetry change should exercise real encoding/decoding as well
 as registry handling. A config change should test rejected input, partial
@@ -182,6 +187,15 @@ for the approach, affected components, validation performed, and remaining
 limits. Include logs or measurements that explain a failure or support a
 hardware claim, with credentials and personal data removed. Describe the
 behaviors checked rather than quoting a test count.
+
+Before opening or updating a PR, read the complete diff against `main`.
+Remove edits the change does not need, such as reformatted tables or moved
+functions. Confirm each statement in the description with a command or
+measurement you ran, and delete any you could not confirm. When a review
+fix changes a function, check its other callers and the default
+configuration as well as the reported case. A change that alters behavior
+at default settings must say so and give its evidence, because every radio
+picks up a new default with the update.
 
 Keep generated packages, downloaded kernel trees, `.ko` modules, firmware
 BCFs, caches, and local environments out of Git. The existing supplied

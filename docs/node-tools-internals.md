@@ -1313,6 +1313,69 @@ The VOICE tab shows all of this on an **Audio path** row, and
 when the flow has never run, which is a missing audio device rather than a
 stall), `igmp_joined`, `stalls`, and `watchdog_sec`.
 
+### Audio hardware constraints
+
+The headset input has to work with stock ComTac headsets. Their 3M PELTOR
+MT33 boom microphone is a dynamic element: 150 Ω, about -66 dBV/Pa at 50 cm,
+200 Hz to 7 kHz, with no bias supply. A design that only works after the
+headset's microphone is replaced does not meet this requirement.
+
+Connected directly to the OpenVLM board's CM108B, the MT33 does not produce
+usable speech at any mixer setting. The best measured signal-to-noise ratio
+was +2.4 dB. An external preamplifier of about 25 to 35 dB is required ahead
+of the CM108B. With one fitted, the ratio measured about 40 dB with EEPROM
+mic boost off, `Mic Capture Volume` at 0 dB, and `Auto Gain Control` off.
+Those are the expected settings on a node with a preamplifier.
+
+| Control | Range | Behavior |
+|---|---|---|
+| EEPROM `mic-boost` | +12 or +22 dB | Loaded only when the chip powers on. A USB reauthorize does not reload it. Keep it off with a preamplifier, because its gain adds to the preamplifier's. |
+| ALSA `Mic Capture Volume` | -22 to +23 dB | The noise floor stayed flat from -22 to +11 dB, which suggests an analog stage ahead of the ADC. No datasheet confirms it. |
+| ALSA `Auto Gain Control` | on or off | Raises a quiet input by 5 to 18 dB and raises the noise floor by about 24 dB. Keep it off with a preamplifier. |
+| ALSA `PCM` | 0 to 37 (-37 to 0 dB) | Headset output level. |
+
+A board with a blank EEPROM ignores every volume and analog setting until it
+is programmed with `openvlm`. See the
+[binary reference](../MANET/binaries_arm64/README.md).
+
+Microphone type selection, electret support, and a microphone gain trim are
+not implemented. Their design depends on the microphone front end of the
+production carrier board: the preamplifier's gain and clipping point, and
+whether electret bias can be switched off for a dynamic element. An electret
+delivers roughly 14 to 24 dB more signal than the MT33, which is enough to
+clip a preamplifier sized for the dynamic element. Gain applied in software
+after the preamplifier cannot repair that, and a digital level measurement
+does not detect it.
+
+A change to a default audio level alters what every operator hears or sends
+after an update. Measure it on the reference hardware (CM4, OpenVLM board,
+preamplifier, and MT33) at the default settings as well as at the setting the
+change targets.
+
+### Threads and reload
+
+The GLib main loop runs the timers, the `idle_add` callbacks, bus messages
+(delivered through `add_signal_watch`), and `reload()` on `SIGHUP`.
+GStreamer streaming threads run every pad probe and the `rtpbin` signal
+handlers for `pad-added`, `pad-removed`, `new-jitterbuffer`, `on-timeout`,
+and `on-bye-timeout`. `OpenVLMPTT` reads the PTT button on its own thread
+and passes events to the main loop with `GLib.idle_add`.
+
+`self.sources.lock` guards the source records. Streaming threads add and
+remove talkers in `rx_branches`, `rx_parked`, and `jitterbuffers` while
+holding it. Main-loop code that walks one of those tables iterates a copy,
+such as `list(self.rx_branches)`, because a talker can join or leave during
+the loop. Iterating the live dictionary can raise `RuntimeError: dictionary
+changed size during iteration`.
+
+`reload()` runs from `reload_on_signal()`, which logs an exception and keeps
+the handler. Without that wrapper, a raising callback makes GLib drop the
+source and restore the default action for `SIGHUP`. The next
+`systemctl reload mesh-voice` then terminates the daemon, systemd counts a
+`SIGHUP` death as a clean exit, and `Restart=on-failure` leaves voice
+stopped. A reload that fails partway can still leave some settings applied
+and others not, so validate new settings before changing pipeline state.
+
 ---
 
 ## Elections, channels, and healing

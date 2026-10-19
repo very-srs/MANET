@@ -1,0 +1,35 @@
+name: Tests
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  node-tools:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+      # Radios run Debian 13, whose python3 is 3.13.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - uses: actions/cache@v4
+        with:
+          path: ~/.venvs/manet
+          key: venv-${{ runner.os }}-py313-${{ hashFiles('MANET/packaging/requirements-dev.txt', 'MANET/packaging/setup-dev-env.sh') }}
+      - name: Build the pinned development environment
+        run: bash MANET/packaging/setup-dev-env.sh
+      - name: Run the node_tools suite
+        run: |
+          source ~/.venvs/manet/bin/activate
+          python -m unittest discover -s MANET/node_tools -p 'test_*.py'

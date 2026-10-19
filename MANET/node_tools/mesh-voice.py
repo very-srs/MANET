@@ -49,6 +49,11 @@ Startup traffic may pause until joins propagate.
 _note_pipeline_error backs off bus errors. The stall watchdog checks idle
 audio flows and multicast membership. See the watchdog constants below.
 Reads /etc/mesh.conf and writes /run/mesh-voice.json.
+
+Pad probes and rtpbin signals run on GStreamer streaming threads, and
+self.sources.lock guards the talker tables they change. Iterate a copy of
+those tables from the main loop. "Threads and reload" in
+docs/node-tools-internals.md lists which code runs where.
 """
 
 import errno
