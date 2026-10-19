@@ -2800,6 +2800,23 @@ VOICE_TAB_CSS = r"""
 @media (max-width: 420px) {
   .voice-tg-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 }
+.voice-audio-slider { padding: 6px 14px 12px; }
+.voice-audio-slider input[type=range] { width: 100%; accent-color: #2e9e4f;
+  cursor: pointer; }
+
+/* Input level meter, -60 to 0 dBFS across the bar. */
+.voice-meter { position: relative; width: 100%; height: 18px;
+  background: var(--panel); border: 1px solid var(--border);
+  border-radius: 9px; overflow: hidden; }
+.voice-meter-fill { height: 100%; width: 0%;
+  transition: width 80ms linear, background-color 80ms; }
+.voice-meter-fill.ok { background: #2e9e4f; }
+.voice-meter-fill.warn { background: #d1a000; }
+.voice-meter-fill.clip { background: #b3261e; }
+@media (max-width: 760px), (orientation:landscape) and (max-height:600px) {
+  .voice-meter { height: 22px; }
+}
+
 """
 
 VOICE_TAB_HTML = r"""
@@ -2892,6 +2909,34 @@ VOICE_TAB_HTML = r"""
     </div>
     <div class="voice-note">Peers come from the Alfred node registry, so a node
       that has never transmitted still receives a unicast copy.</div>
+  </div>
+
+  <div class="voice-card">
+    <div class="voice-card-hdr">GAIN</div>
+    <div class="voice-card-body">
+      <div class="voice-row"><span class="k">Receive gain</span>
+        <span class="v"><span id="voice-rxgain-val">--</span> dB</span></div>
+      <div class="voice-audio-slider">
+        <input type="range" id="voice-rxgain" min="0" max="24" step="1"
+          value="0">
+      </div>
+      <div class="voice-row"><span class="k">Playback level</span>
+        <span class="v"><span id="voice-playpct-val">--</span>%</span></div>
+      <div class="voice-audio-slider">
+        <input type="range" id="voice-playpct" min="0" max="100" step="5"
+          value="100">
+      </div>
+      <div class="voice-row"><span class="k">Input peak</span>
+        <span class="v" id="voice-peak-val">-- dBFS</span></div>
+      <div class="voice-audio-slider">
+        <div class="voice-meter"><div class="voice-meter-fill"
+          id="voice-meter-fill"></div></div>
+      </div>
+      <div class="voice-tg-msg" id="voice-audio-msg"></div>
+    </div>
+    <div class="voice-note">Receive gain boosts each talker's audio before the
+      mixer, with a limiter. 0 bypasses it. Playback level sets the hardware
+      mixer on the audio card. All are per-radio settings.</div>
   </div>
 
 </div>
@@ -3190,6 +3235,8 @@ async function refreshVoice() {
   vDot('voice-uni-dot', d.unicast ? 'on' : '');
   vTxt('voice-uni', d.unicast === undefined ? '--' : (d.unicast ? 'Yes' : 'No'));
 
+  voiceAudioPaint(d);
+
   const wrap = document.getElementById('voice-peer-wrap');
   if (!wrap) return;
   const peers = d.peers || [];
@@ -3221,12 +3268,101 @@ async function refreshVoice() {
   });
   wrap.appendChild(table);
 }
+
+// ── GAIN card ───────────────────────────────────────────────────────────────
+let voiceAudioBusy = false;
+// A slider released during a request is sent when that request finishes.
+let voiceAudioPending = false;
+let voiceAudioLoaded = false;
+
+function voiceAudioMsg(text, isErr) {
+  const m = document.getElementById('voice-audio-msg');
+  if (!m) return;
+  m.textContent = text || '';
+  m.className = 'voice-tg-msg' + (isErr ? ' err' : '');
+}
+
+function voiceAudioPaint(d) {
+  const rxg = d.rx_gain_db;
+  const pct = d.playback_level;
+  vTxt('voice-rxgain-val', rxg !== undefined && rxg !== null ? rxg : '--');
+  vTxt('voice-playpct-val', pct !== undefined && pct !== null ? pct : '--');
+  // Seed the sliders from the daemon once, then let user drag freely.
+  if (!voiceAudioLoaded && !voiceAudioBusy) {
+    const rs = document.getElementById('voice-rxgain');
+    const ps = document.getElementById('voice-playpct');
+    if (rs && rxg !== undefined && rxg !== null) rs.value = rxg;
+    if (ps && pct !== undefined && pct !== null) ps.value = pct;
+    if (rxg !== undefined || pct !== undefined) voiceAudioLoaded = true;
+  }
+  // Input level meter from the TX pipeline's level element.
+  const peak = d.mic_peak_db;
+  const fill = document.getElementById('voice-meter-fill');
+  const peakEl = document.getElementById('voice-peak-val');
+  if (fill && peak !== undefined && peak !== null) {
+    // Map -60..0 dBFS to 0..100% width.
+    const pctWidth = Math.max(0, Math.min(100, (peak + 60) / 60 * 100));
+    fill.style.width = pctWidth + '%';
+    // Color zones: green < -12, yellow -12..-3, red > -3 (near clipping).
+    fill.className = 'voice-meter-fill ' +
+      (peak > -3 ? 'clip' : peak > -12 ? 'warn' : 'ok');
+  }
+  if (peakEl && peak !== undefined && peak !== null) {
+    peakEl.textContent = peak.toFixed(1) + ' dBFS';
+  }
+}
+
+async function voiceAudioSet() {
+  if (voiceAudioBusy) { voiceAudioPending = true; return; }
+  voiceAudioBusy = true;
+  voiceAudioMsg('Applying…');
+  try {
+    const r = await manageFetch(U('/api/voice/audio'), {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        rx_gain_db: Number(document.getElementById('voice-rxgain').value),
+        playback_pct: Number(document.getElementById('voice-playpct').value)
+      })
+    });
+    const j = await r.json();
+    if (j.ok) {
+      voiceAudioMsg(j.reloaded ? 'Applied'
+                               : 'Saved, applies when voice starts');
+      if (j.reloaded) setTimeout(() => voiceAudioMsg(''), 2000);
+    } else {
+      voiceAudioMsg(j.error || 'Failed', true);
+    }
+  } catch (e) {
+    voiceAudioMsg('Failed: ' + e, true);
+  } finally {
+    voiceAudioBusy = false;
+    if (voiceAudioPending) {
+      voiceAudioPending = false;
+      voiceAudioSet();
+    }
+  }
+}
+
+(function initAudioSliders() {
+  const rxs = document.getElementById('voice-rxgain');
+  const pps = document.getElementById('voice-playpct');
+  if (rxs) {
+    rxs.addEventListener('input', () => vTxt('voice-rxgain-val', rxs.value));
+    rxs.addEventListener('change', voiceAudioSet);
+  }
+  if (pps) {
+    pps.addEventListener('input', () => vTxt('voice-playpct-val', pps.value));
+    pps.addEventListener('change', voiceAudioSet);
+  }
+})();
 """
 
 VOICE_STATE_FILE = '/run/mesh-voice.json'
 
-
 VOICE_CHANNEL_MAX = 32
+# Matches RX_GAIN_DB_MAX in mesh-voice.py.
+VOICE_RX_GAIN_DB_MAX = 24.0
 # Lyra is the default. Opus uses stock elements and cannot interoperate
 # with Lyra. See set_voice_codec_all().
 VOICE_CODECS = ('lyra', 'opus')
@@ -3296,6 +3432,90 @@ def set_voice_channel(channel):
         pass
 
     return {'ok': True, 'channel': channel, 'reloaded': reloaded}
+
+
+def set_voice_audio(req):
+    """Set this radio's receive gain and playback level.
+
+    Rewrite voice_rx_gain_db and voice_playback_pct in mesh.conf with the
+    atomic replacement set_voice_channel() uses, then reload mesh-voice.
+    """
+    updates = {}
+    if 'rx_gain_db' in req:
+        try:
+            val = float(req['rx_gain_db'])
+        except (TypeError, ValueError):
+            return {'ok': False, 'error': 'Receive gain must be a number'}
+        # NaN fails this range check as well.
+        if not 0.0 <= val <= VOICE_RX_GAIN_DB_MAX:
+            return {'ok': False, 'error': 'Receive gain must be 0-%d dB'
+                    % VOICE_RX_GAIN_DB_MAX}
+        updates['voice_rx_gain_db'] = '%.1f' % val
+    if 'playback_pct' in req:
+        try:
+            val = int(req['playback_pct'])
+        except (TypeError, ValueError):
+            return {'ok': False, 'error': 'Playback level must be a number'}
+        if not 0 <= val <= 100:
+            return {'ok': False, 'error': 'Playback level must be 0-100%'}
+        updates['voice_playback_pct'] = str(val)
+    if not updates:
+        return {'ok': False, 'error': 'No settings provided'}
+
+    try:
+        with open(MESH_CONF_FILE) as f:
+            lines = f.readlines()
+    except OSError as e:
+        return {'ok': False,
+                'error': 'Cannot read %s: %s' % (MESH_CONF_FILE, e)}
+
+    out, replaced = [], set()
+    for line in lines:
+        key = line.split('=', 1)[0].strip()
+        if key in updates:
+            if key not in replaced:
+                out.append('%s=%s\n' % (key, updates[key]))
+                replaced.add(key)
+            continue          # Collapse duplicate keys.
+        out.append(line)
+    for key, val in updates.items():
+        if key not in replaced:
+            if out and not out[-1].endswith('\n'):
+                out[-1] += '\n'
+            out.append('%s=%s\n' % (key, val))
+
+    tmp = MESH_CONF_FILE + '.tmp'
+    try:
+        st = os.stat(MESH_CONF_FILE)
+        with open(tmp, 'w') as f:
+            f.writelines(out)
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp, stat.S_IMODE(st.st_mode))
+        try:
+            os.chown(tmp, st.st_uid, st.st_gid)
+        except PermissionError:
+            pass              # Non-root: preserve mode, keep writer ownership.
+        os.replace(tmp, MESH_CONF_FILE)
+    except OSError as e:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        return {'ok': False,
+                'error': 'Cannot write %s: %s' % (MESH_CONF_FILE, e)}
+
+    # Reload failure is nonfatal because the saved config takes effect at
+    # the next start.
+    reloaded = False
+    try:
+        rc = subprocess.run(['systemctl', 'reload', 'mesh-voice'],
+                            timeout=10, stderr=subprocess.DEVNULL)
+        reloaded = rc.returncode == 0
+    except Exception:
+        pass
+
+    return {'ok': True, 'reloaded': reloaded}
 
 
 def set_voice_codec_all(codec):
@@ -4404,6 +4624,13 @@ class ManageRoutes:
             try:
                 req = json.loads(body)
                 self.send_json(set_voice_codec_all(req.get('codec')))
+            except Exception as e:
+                self.send_json({'ok': False, 'error': str(e)})
+
+        elif path == '/api/voice/audio':
+            try:
+                req = json.loads(body)
+                self.send_json(set_voice_audio(req))
             except Exception as e:
                 self.send_json({'ok': False, 'error': str(e)})
 

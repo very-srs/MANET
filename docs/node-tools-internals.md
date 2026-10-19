@@ -1313,6 +1313,34 @@ The VOICE tab shows all of this on an **Audio path** row, and
 when the flow has never run, which is a missing audio device rather than a
 stall), `igmp_joined`, `stalls`, and `watchdog_sec`.
 
+### Receive level
+
+The CM108B playback mixer powers up at -20 dB of its 0 dB maximum, and no
+ALSA restore covers a USB card that enumerates after boot. `mesh-voice`
+therefore writes `voice_playback_pct` (default 100) to `PCM`, or `Speaker`
+on generic CM108 dongles, after both pipelines start and after each receive
+pipeline restart. **This raises the default headset level by 20 dB on
+every radio that updates.** A mixer write just ahead of the playback open
+failed that open as busy in one of three CM4 restarts, so the write follows
+the state change. A `voice_alsa_out` override skips it.
+
+`voice_rx_gain_db` (default 0) adds float gain in each talker branch, then
+a hard-knee `audiodynamic` limiter at threshold 0.5 (-6 dBFS). Its `ratio`
+multiplies the excess over threshold, so the limiter uses 0.05 and 0 dB uses
+1.0, which leaves the default path unchanged. Measured peak out for a 1 kHz
+tone at 16 kHz:
+
+| gain | -30 dBFS in | -12 dBFS in | -3 dBFS in | -3 in, ratio 20 |
+|---|---|---|---|---|
+| +6 dB | -24.0 | -6.0 | -5.3 | 0.0 (clips) |
+| +12 dB | -18.0 | -5.6 | -4.2 | 0.0 (clips) |
+| +18 dB | -12.0 | -4.8 | -2.4 | 0.0 (clips) |
+| +24 dB | -6.0 | -3.4 | 0.0 (clips) | 0.0 (clips) |
+
+Tried: ratio 20, read as 20:1. It expands and clips every boosted peak.
+`test_voice_gain.py` repeats the measurement when GStreamer is present.
+Gain above about +18 dB clips a full-scale talker even with the limiter.
+
 ### Audio hardware constraints
 
 The headset input has to work with stock ComTac headsets. Their 3M PELTOR
@@ -1332,7 +1360,7 @@ Those are the expected settings on a node with a preamplifier.
 | EEPROM `mic-boost` | +12 or +22 dB | Loaded only when the chip powers on. A USB reauthorize does not reload it. Keep it off with a preamplifier, because its gain adds to the preamplifier's. |
 | ALSA `Mic Capture Volume` | -22 to +23 dB | The noise floor stayed flat from -22 to +11 dB, which suggests an analog stage ahead of the ADC. No datasheet confirms it. |
 | ALSA `Auto Gain Control` | on or off | Raises a quiet input by 5 to 18 dB and raises the noise floor by about 24 dB. Keep it off with a preamplifier. |
-| ALSA `PCM` | 0 to 37 (-37 to 0 dB) | Headset output level. |
+| ALSA `PCM` | 0 to 37 (-37 to 0 dB) | Headset output level. `mesh-voice` sets it from `voice_playback_pct`. |
 
 A board with a blank EEPROM ignores every volume and analog setting until it
 is programmed with `openvlm`. See the
@@ -1366,7 +1394,8 @@ remove talkers in `rx_branches`, `rx_parked`, and `jitterbuffers` while
 holding it. Main-loop code that walks one of those tables iterates a copy,
 such as `list(self.rx_branches)`, because a talker can join or leave during
 the loop. Iterating the live dictionary can raise `RuntimeError: dictionary
-changed size during iteration`.
+changed size during iteration`. `_update_rx_gain()` follows this rule
+when a reload changes `voice_rx_gain_db`.
 
 `reload()` runs from `reload_on_signal()`, which logs an exception and keeps
 the handler. Without that wrapper, a raising callback makes GLib drop the

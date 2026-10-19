@@ -133,6 +133,32 @@ HID_GPIO1_MASK = 0x01  # IR1 bit 0: OpenVLM identity strap
 # CM108B datasheet 7.4: IR1[3:0] only reflects live GPIO when IR0[7:6] == 0.
 HID_IR0_VALID_MASK = 0xC0
 
+# The CM108B playback mixer powers up at -20 dB of a 0 dB maximum, and no
+# restore covers a USB card that enumerates late, so receive is quiet unless
+# the daemon sets it. Generic CM108 dongles call the control Speaker.
+PLAYBACK_CONTROLS = ("PCM", "Speaker")
+AMIXER = "amixer"
+AMIXER_TIMEOUT_SEC = 3
+
+# --- receive gain ------------------------------------------------------------
+# The card's 0 dB playback maximum leaves headset speech quiet, so each talker
+# branch can add software gain ahead of the mixer. A hard-knee limiter follows
+# it in float, so the boosted signal survives until the limiter folds it
+# back under full scale. Measured on a 1 kHz tone at 16 kHz, peak dBFS out:
+#   gain   -30 dBFS in   -3 dBFS in
+#   +12    -18.0         -4.2
+#   +18    -12.0         -2.4
+#   +24     -6.0          0.0 (clips)
+# audiodynamic multiplies the excess over threshold by ratio, so a limiter
+# needs ratio < 1. Tried: ratio=20. Expands, clips every boosted peak.
+RX_GAIN_DB_DEFAULT = 0.0
+RX_GAIN_DB_MAX = 24.0
+# Limiter threshold as a linear fraction of full scale (0.5 is -6 dBFS).
+RX_LIMIT_THRESHOLD = 0.5
+# Excess kept above threshold, 20:1. At 0 dB gain the ratio is 1.0 instead,
+# so the default leaves decoded speech unchanged.
+RX_LIMIT_RATIO = 0.05
+
 # Size the warm decode-branch table from the registry. Each Lyra branch uses
 # about 5.3 MB. The cap of 64 uses roughly 340 MB on a 3.7 GB node.
 # VOICE_TALKER_HEADROOM reserves room for new nodes before eviction.
@@ -481,6 +507,12 @@ class Config:
         # Empty means autodetect the OpenVLM card.
         self.alsa_in = conf_str(conf, "voice_alsa_in", "", ALSA_DEV_RE)
         self.alsa_out = conf_str(conf, "voice_alsa_out", "", ALSA_DEV_RE)
+        # Playback mixer level set on the autodetected card, default 100 (its
+        # 0 dB maximum). Not applied when voice_alsa_out overrides the device.
+        self.playback_pct = conf_int(conf, "voice_playback_pct", 100, 0, 100)
+        # Software gain on each talker before the mixer, limited. 0 bypasses.
+        self.rx_gain_db = conf_float(conf, "voice_rx_gain_db",
+                                     RX_GAIN_DB_DEFAULT, 0.0, RX_GAIN_DB_MAX)
         # Bench mode: a 440 Hz tone in place of the mic and a null sink in
         # place of the speaker, so the transport can be proven on a node that
         # has no audio hardware fitted yet.
@@ -800,6 +832,24 @@ def local_ipv4_addresses():
 
 # --- ALSA --------------------------------------------------------------------
 
+def set_playback_level(card, pct):
+    """Set the playback mixer on the given ALSA card to pct percent.
+
+    Try PCM first (OpenVLM), then Speaker (generic CM108 dongles).
+    """
+    for control in PLAYBACK_CONTROLS:
+        try:
+            out = subprocess.run([AMIXER, "-q", "-c", str(card), "sset",
+                                  control, "%d%%" % pct, "unmute"],
+                                 capture_output=True, text=True,
+                                 timeout=AMIXER_TIMEOUT_SEC)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if out.returncode == 0:
+            return control
+    return None
+
+
 def find_openvlm_card():
     """ALSA card index for the CM108B, via /proc/asound/card*/usbid."""
     want = "%04x:%04x" % (OPENVLM_VID, OPENVLM_PID)
@@ -859,6 +909,7 @@ class MeshVoice:
         self.shaper = None
         self.equalizer = None
         self.txhead = None
+        self.playback_level = None
         # Transmit gain, at most 1.0. Applied before EQ to reserve boost
         # headroom.
         self._tx_gain = 1.0
@@ -915,6 +966,10 @@ class MeshVoice:
         self._stall_history = {"tx": [], "rx": []}
         self._igmp_ok = None
         self._igmp_lost_since = 0.0
+        # Microphone RMS and peak in dBFS from the transmit level element,
+        # posted every 200 ms. -90 until the first message.
+        self._mic_db = -90.0
+        self._mic_peak_db = -90.0
         # Set by _panic. main() returns it, and a non-zero exit is what asks
         # systemd to rebuild the whole voice stack.
         self.exit_code = 0
@@ -1107,6 +1162,62 @@ class MeshVoice:
             log("transmit headroom: %.3f (-%.1f dB) ahead of the eq boost"
                 % (self._tx_gain, boost))
 
+    def _rx_gain_params(self):
+        """Return the talker amplification and limiter ratio for rx_gain_db."""
+        if self.cfg.rx_gain_db == 0.0:
+            return 1.0, 1.0
+        return 10.0 ** (self.cfg.rx_gain_db / 20.0), RX_LIMIT_RATIO
+
+    def _rx_gain_stage(self):
+        """Return the talker gain and limiter fragment.
+
+        Float, so the boosted signal survives until the limiter folds it
+        back under full scale. Per talker, so one loud talker is limited
+        without pulling the others down. Built at 0 dB as well, so a later
+        reload can change the gain on existing branches.
+        """
+        amp, ratio = self._rx_gain_params()
+        return ("audioconvert ! capsfilter caps=\"audio/x-raw,format=F32LE\" "
+                "! audioamplify name=rxgain amplification=%.4f "
+                "clipping-method=none ! audiodynamic name=rxlimit "
+                "mode=compressor characteristics=hard-knee threshold=%.2f "
+                "ratio=%.2f ! " % (amp, RX_LIMIT_THRESHOLD, ratio))
+
+    def _update_rx_gain(self):
+        """Apply rx_gain_db to the gain and limiter of every attached talker.
+
+        Parked talkers have no decoder and pick up the gain when rebuilt.
+        """
+        amp, ratio = self._rx_gain_params()
+        with self.sources.lock:
+            entries = list(self.rx_branches.values())
+        for _pad, depay, _mixpad, _probe in entries:
+            gain = depay.get_by_name("rxgain")
+            if gain is not None:
+                gain.set_property("amplification", amp)
+            limit = depay.get_by_name("rxlimit")
+            if limit is not None:
+                limit.set_property("ratio", ratio)
+
+    def _set_playback_level(self):
+        """Apply voice_playback_pct to the autodetected card's mixer.
+
+        Call after both pipelines are told to play. A mixer write just ahead
+        of the PCM open failed it as busy in 1 of 3 restarts on a CM4.
+        """
+        self.playback_level = None
+        card = find_openvlm_card()
+        if card is None or self.cfg.alsa_out:
+            return
+        control = set_playback_level(card, self.cfg.playback_pct)
+        if control is None:
+            log("audio: could not set playback level on card %d, it stays "
+                "at the card's own level" % card)
+            return
+        self.playback_level = self.cfg.playback_pct
+        log("audio: playback %s set to %d%% on card %d"
+            % (control, self.cfg.playback_pct, card))
+
     def build(self):
         """Construct audio pipelines with transport and health probes."""
         if self.cfg.test_tone:
@@ -1282,6 +1393,7 @@ class MeshVoice:
         # Start the receiver before transmit so its multicast join can begin.
         self._play("rx")
         self._play("tx")
+        self._set_playback_level()
         self._suppress_multicast_loopback()
         self._tx_ready()
         log("listening on %s:%d (channel %d) via %s"
@@ -1386,7 +1498,7 @@ class MeshVoice:
     # -- events --
 
     def _on_bus_message(self, _bus, message, which):
-        """Handle pipeline errors and retain the microphone RMS level."""
+        """Handle pipeline errors and retain the microphone RMS and peak."""
         if message.type == Gst.MessageType.ERROR:
             err, debug = message.parse_error()
             # USB resets can remove audio devices. Keep the process alive and
@@ -1396,15 +1508,17 @@ class MeshVoice:
             struct = message.get_structure()
             if struct and struct.get_name() == "level":
                 self._mic_db = (struct.get_value("rms") or [-90.0])[0]
+                self._mic_peak_db = (struct.get_value("peak") or [-90.0])[0]
 
     def reload(self):
-        """Apply talk-group and transmit-shaping changes on SIGHUP.
+        """Apply talk-group, shaping, and receive-level changes on SIGHUP.
 
-        Retune cutoffs and gains live. Rebuild for a changed group or shaping
-        layout. Codec, bitrate and devices remain startup settings.
-        If rebuilding fails, restore the working group and shaping. If that
-        also fails, exit for a systemd restart. In-process retunes avoid a
-        service restart and Lyra model reload for each channel selection.
+        Retune cutoffs, gains, and receive levels live. Rebuild for a changed
+        group or shaping layout. Codec, bitrate, and devices remain startup
+        settings. If rebuilding fails, restore the working group and
+        shaping. If that also fails, exit for a systemd restart. In-process
+        retunes avoid a service restart and Lyra model reload for each
+        channel selection.
         """
         new = Config()
         was_transmitting = self.transmitting
@@ -1417,6 +1531,14 @@ class MeshVoice:
         shape_was = {k: getattr(self.cfg, k) for k in SHAPE_KEYS}
         for key in SHAPE_KEYS:
             setattr(self.cfg, key, getattr(new, key))
+        # Receive levels apply on either path below. A rebuild builds its
+        # talker branches from self.cfg, so it needs no separate update.
+        playback_changed = new.playback_pct != self.cfg.playback_pct
+        gain_changed = new.rx_gain_db != self.cfg.rx_gain_db
+        self.cfg.playback_pct = new.playback_pct
+        self.cfg.rx_gain_db = new.rx_gain_db
+        if playback_changed:
+            self._set_playback_level()
         restructure = (self._shape_sig is not None
                        and self._shape_signature(raw_rate) != self._shape_sig)
 
@@ -1427,6 +1549,8 @@ class MeshVoice:
                 log("reload: transmit shaping retuned in place")
             else:
                 log("reload: nothing changed (talk group %d)" % old_channel)
+            if gain_changed:
+                self._update_rx_gain()
             self.write_state()
             return False
 
@@ -1676,6 +1800,9 @@ class MeshVoice:
         self._mark_playing(which)
         if which == "tx" and was_transmitting:
             self._set_tx(True)
+        # A replugged card powers up at its own level.
+        if which == "rx":
+            self._set_playback_level()
         return False  # one-shot
 
     def _on_tx_buffer(self, _pad, _info):
@@ -1957,10 +2084,11 @@ class MeshVoice:
             # element audio". Every branch must reach the mixer in the same
             # format.
             depay = Gst.parse_bin_from_description(
-                "%s ! %s ! audioconvert ! audioresample ! capsfilter "
+                "%s ! %s ! %saudioconvert ! audioresample ! capsfilter "
                 "caps=\"audio/x-raw, rate=(int)%d, channels=(int)1, "
                 "format=(string)S16LE\""
-                % (self._rx_depay_desc, self._rx_dec_desc, self._rx_raw_rate),
+                % (self._rx_depay_desc, self._rx_dec_desc,
+                   self._rx_gain_stage(), self._rx_raw_rate),
                 True)
         except GLib.Error as exc:
             log("rx: cannot build branch for %s: %s" % (name, exc))
@@ -2568,6 +2696,12 @@ class MeshVoice:
             "eq": ([round(g, 2) for g in self._eq_gains(self._raw_rate)]
                    if self.cfg.eq else None),
             "tx_gain_db": round(20.0 * math.log10(self._tx_gain), 1),
+            "rx_gain_db": self.cfg.rx_gain_db,
+            # None when the mixer was not set: no card, an override, or a
+            # failed amixer call.
+            "playback_level": self.playback_level,
+            "mic_rms_db": round(self._mic_db, 1),
+            "mic_peak_db": round(self._mic_peak_db, 1),
             # Watchdog capture/playback flows run while idle. Packet counters
             # stay flat between transmissions.
             "watchdog": self.cfg.watchdog,

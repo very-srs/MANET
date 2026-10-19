@@ -13,11 +13,13 @@
 
 You can hear other speakers while your button is released. Speaking louder does not make the signal go farther.
 
+**Too quiet or too loud?** Move the sliders on the Voice tab's GAIN card.
+
 ## User
 
 ### Voice comes from the radio's headset
 
-Mesh PTT uses an audio device and physical push-to-talk button attached to the radio. Enable mesh voice during setup. The web interface shows status and lets you choose a talk group. It is not a browser microphone.
+Mesh PTT uses an audio device and physical push-to-talk button attached to the radio. Enable mesh voice during setup. The web interface shows status, lets you choose a talk group, and sets this radio's listening level. It is not a browser microphone.
 
 The supported USB path uses a CM108-family audio device and is intended for OpenVLM hardware. Headset wiring and microphone level matter: a military dynamic microphone needs suitable amplification before the CM108B input. Check the [audio hardware reference](../../../MANET/node_tools/README.md#audio-hardware) before connecting a headset. An electret mic needs no amplification on a bare OpenVLM.
 
@@ -34,6 +36,16 @@ Confirm voice is enabled, the mesh is connected, the talk groups match, and the 
 The default codec is **Lyra**. It transfers good-quality audio with less bandwidth than Opus, but lacks compatibility with other tools that would expect Opus. Lyra and Opus do not interoperate. A radio that missed a mesh-wide codec change while powered off must be set to the same codec. Reissue the change with it online.
 
 A receiver remembers at most 128 talkers, and each radio can add only a few new ones in a short time. If one radio's voice service restarts many times in quick succession, other radios may refuse its new voice for a while, until its old entries expire after about 15 minutes without traffic.
+
+### Set the listening level
+
+The GAIN card on the Voice tab sets how loud other speakers sound on this radio. It changes only this radio, and a change takes effect within a moment, even during a conversation.
+
+- Receive gain makes every incoming voice louder, from 0 to 24 dB. Each 6 dB roughly doubles the loudness. At 0 the voices are played exactly as received. Above 0 a limiter keeps a loud speaker from distorting. A voice that is already loud gains less than a quiet one.
+- Playback level is the headset volume control on the radio's audio device, from 0 to 100%. The radio sets it when voice starts and again if the audio device is reconnected.
+- Input peak shows how loud your own microphone is, refreshed every 2 seconds. It works with the button released, so you can check it without transmitting. Yellow means loud. Red means the sound is close to the loudest the radio can capture, so speak more softly or move the microphone away from your mouth.
+
+Start with playback at 100% and receive gain at 0. If speakers are still too quiet, raise receive gain a few dB at a time.
 
 ## Developer
 
@@ -83,6 +95,45 @@ Local multicast loopback is disabled on the transmitting socket, and the
 receive path also discards packets carrying its own SSRC. Otherwise a radio
 could play its microphone back a jitter-buffer delay later and, in optional
 half-duplex mode, mistake itself for a remote speaker.
+
+### Receive level
+
+Two controls set what an operator hears. `voice_playback_pct` is the card's
+own playback mixer. The CM108B powers up at a reduced playback level, and
+no ALSA restore covers a USB card that enumerates after boot, so the daemon
+writes the level with `amixer` once both pipelines have started. It
+writes it again after a receive pipeline restart, because a replugged card
+comes back at its power-up level. Writing the mixer just before the
+playback device opens made that open fail as busy in one of three CM4
+restarts, which is why the write follows the state change. The daemon
+skips this step when `voice_alsa_out` overrides the device.
+
+`voice_rx_gain_db` is software gain inside each talker's decode branch,
+after the decoder and before the mixer. The branch converts to 32-bit float,
+applies `audioamplify` without clipping, and then a hard-knee
+`audiodynamic` limiter with its threshold at -6 dBFS. The limiter keeps 1/20
+of the excess above that threshold. Per-talker placement means one loud
+speaker is limited without pulling the others down, and the sum of several
+talkers is then clipped only by the mixer. At 0 dB the limiter runs at a
+ratio of 1, so the default leaves decoded audio unchanged. `audiodynamic`
+multiplies the excess by the ratio, so a ratio above 1 expands rather than
+limits.
+
+Both elements are named in every branch, including at 0 dB. A SIGHUP from
+the GAIN card updates them on the main loop by walking a copy of
+`rx_branches`, taken under the sources lock as the
+[threads and reload](../../../docs/node-tools-internals.md#threads-and-reload)
+rules require. Parked talkers have no decoder and pick up the current gain
+when their branch is rebuilt. A reload that also rebuilds the pipelines
+builds every branch at the new gain.
+
+The input meter reads the peak from the transmit pipeline's existing
+`level` element, which runs ahead of the PTT valve and therefore moves
+while the button is released. `/run/mesh-voice.json` reports `rx_gain_db`,
+`playback_level` (`null` when the mixer was not set), `mic_rms_db`, and
+`mic_peak_db`. The [receive level internals](../../../docs/node-tools-internals.md#receive-level)
+hold the measured limiter response. See the
+[gain tests](../../../MANET/node_tools/test_voice_gain.py) for the reload paths.
 
 ### Multicast, scheduling, and packet size
 
