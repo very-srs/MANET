@@ -44,8 +44,10 @@ class CodingConventionTests(unittest.TestCase):
                     self.assertIn(f'.Sh {section}\n', source)
 
     def test_manual_pages_parse(self):
+        # Fail on warnings, as groff -ww does. Style notes such as the
+        # explicit .Os MANET and references to unwritten pages are allowed.
         if shutil.which('mandoc'):
-            command = ['mandoc', '-T', 'lint']
+            command = ['mandoc', '-T', 'lint', '-W', 'warning']
         elif shutil.which('groff'):
             command = ['groff', '-mandoc', '-ww', '-z']
         else:
