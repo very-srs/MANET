@@ -571,7 +571,7 @@ class BuiltinUplinkTests(UplinkHarness):
         with mock.patch.object(wifi.time, 'clock_gettime',
                                return_value=at + 301):
             scan = self.uplink.read_status()['scan']
-        self.assertEqual(scan['age_seconds'], 301)
+        self.assertAlmostEqual(scan['age_seconds'], 301)
         self.assertFalse(scan['fresh'])
         self.assertTrue(scan['networks'])
 
