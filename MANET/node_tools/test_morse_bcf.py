@@ -227,11 +227,20 @@ class WiringTests(unittest.TestCase):
                 text = (REPO / f'kernel/build/build-{name}-sbc-overlay.sh').read_text()
                 self.assertNotIn('morse-bcf-patch', text)
 
+    def test_overlay_builds_ship_the_morse_license(self):
+        for name in ('cm4', 'r3a', 'rpi5'):
+            with self.subTest(name):
+                text = (REPO / f'kernel/build/build-{name}-sbc-overlay.sh').read_text()
+                self.assertIn('firmware/morse/LICENSE', text)
+
     def test_payload_stager_refuses_a_patched_overlay(self):
         sys.path.insert(0, str(REPO / 'MANET/node_tools'))
         stager = load('stage_kernel_payload', REPO / 'MANET/packaging/stage-kernel-payload.py')
         with tempfile.TemporaryDirectory() as temp:
             (Path(temp) / 'bcf_a.bin').write_bytes(stock())
+            with self.assertRaisesRegex(ValueError, 'license missing'):
+                stager.require_stock_bcfs(Path(temp))
+            (Path(temp) / 'LICENSE').write_text('Morse Micro binary distribution license\n')
             stager.require_stock_bcfs(Path(temp))
             (Path(temp) / 'bcf_b.bin').write_bytes(bcf.patch_image(stock()))
             with self.assertRaisesRegex(ValueError, 'bcf_b.bin'):

@@ -17,7 +17,10 @@ from manet_kernel_update import (MAX_DOWNLOAD, MAX_EXPANDED, MANIFEST_LIMIT,
 
 
 def require_stock_bcfs(directory):
-    """Morse Micro licenses its BCFs for distribution unmodified only."""
+    """Morse Micro licenses its BCFs for distribution unmodified, with its license."""
+    if not (directory / 'LICENSE').is_file():
+        raise ValueError('Morse Micro license missing from the firmware directory. '
+                         'Rebuild the SBC overlay.')
     spec = importlib.util.spec_from_file_location(
         'manet_morse_bcf', REPO / 'MANET/node_tools/manet-morse-bcf.py')
     bcf = importlib.util.module_from_spec(spec)

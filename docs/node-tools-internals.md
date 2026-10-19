@@ -5214,8 +5214,11 @@ updater's `systemctl enable --now` can repeat without a state file. Files are
 replaced atomically with an fsync, symlinks are never followed, and one
 malformed file is reported without blocking the rest.
 
-`stage-kernel-payload.py` runs the tool's stock check on the overlay and refuses to build an archive whose BCFs already carry the policy,
-which catches an overlay assembled before this split.
+The Morse license also requires a copy of itself with the files, so the overlay
+builds install it as `usr/lib/firmware/morse/LICENSE`. `stage-kernel-payload.py`
+refuses an overlay without it, and runs the tool's stock check to refuse one
+whose BCFs already carry the policy. Both catch an overlay assembled before this
+split.
 
 ## MT7916 firmware selection
 

@@ -113,6 +113,8 @@ find "$MORSE_FW/firmware" "$MORSE_FW/bcf" -name "*.bin" \
 # The BCFs stay exactly as Morse Micro published them: their license permits
 # distribution only complete and unmodified. The node applies the TX power
 # policy at boot with manet-morse-bcf.py.
+# The same license requires a copy of itself to travel with the files.
+install -m 0644 "$MORSE_FW/firmware/LICENSE" "$OVERLAY/usr/lib/firmware/morse/LICENSE"
 
 echo ""
 echo "=== CM4 SBC overlay complete ==="
