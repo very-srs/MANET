@@ -1,7 +1,5 @@
 # Match the node's protobuf API and admin-transport test dependencies.
 protobuf==4.21.12
 cryptography==43.0.0
-# ELF parsing for Morse BCF assembly.
-pyelftools==0.31
 # Use the same renderer requirements as the documentation workflow.
 -r ../../docs/guide/requirements.txt

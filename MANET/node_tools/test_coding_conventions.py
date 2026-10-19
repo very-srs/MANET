@@ -249,6 +249,7 @@ DUPLICATE_NAME_ALLOWLIST = {
             'manet-cpu-sample.py',
             'manet-dhcp-isolation.py',
             'manet-mesh-census.py',
+            'manet-morse-bcf.py',
             'manet-mt7916-firmware.py',
             'manet-positioning.py',
             'manet-radio-names.py',

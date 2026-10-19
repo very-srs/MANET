@@ -115,6 +115,8 @@ REQUIRED = MARKERS | {
     "usr/local/bin/manet-common.sh",
     "usr/local/bin/mesh-peer-count.sh",
     "usr/local/bin/manet-mt7916-firmware.py",
+    "usr/local/bin/manet-morse-bcf.py",
+    "etc/systemd/system/manet-morse-bcf.service",
     "usr/local/bin/manet-mt7916-setup.sh",
     "usr/local/share/manet/mt7916-firmware.json",
     "usr/local/share/manet/firmware/mt7916/mt7916_wm.bin",
@@ -836,6 +838,7 @@ class Updater:
                     timeout=120)
         run_command(['systemctl', 'enable', '--now', 'manet-uplink-dns.path',
                      'manet-uplink-dns.service'])
+        run_command(['systemctl', 'enable', '--now', 'manet-morse-bcf.service'])
         firmware_setup = self.destination('usr/local/bin/manet-mt7916-setup.sh')
         # Bound firmware setup and service integration to ten minutes.
         output = run_command([str(firmware_setup)], timeout=600)

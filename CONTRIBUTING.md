@@ -37,7 +37,7 @@ Python protobuf runtime can hide compatibility errors that occur on the
 node. Keep the pinned compiler and runtime together.
 
 The environment also supplies `cryptography` for admin-transport tests,
-Python-Markdown for the guide, and `pyelftools` for Morse BCF assembly.
+and Python-Markdown for the guide.
 The Python dependency pins are in
 [requirements-dev.txt](MANET/packaging/requirements-dev.txt).
 

@@ -5195,6 +5195,28 @@ because whatever the kernel had driving the LED will otherwise overwrite the
 value immediately. Brightness comes from the LED's own `max_brightness`, since
 that is 1 on some class devices and 255 on others.
 
+## Morse BCF TX power policy
+
+Releases ship the Morse Micro BCF files exactly as published, because the Morse
+license allows distribution only complete and unmodified. The 30 dBm policy is
+applied on the node. `manet-morse-bcf.service` runs `manet-morse-bcf.py` in
+`sysinit.target`, before `systemd-udev-trigger.service`, so the radios probe
+against patched tables. The tool sets every TX power TLV (tag `0xcc`) in every
+`.regdom_*` section and regenerates the `.board_config` and regdomain CRCs. A
+region with no power TLVs and a file with no regdomain sections are left alone.
+
+The patched directory is the one the kernel loads from: the
+`firmware_class.path` on `/proc/cmdline` during a kernel trial slot, else
+`/usr/lib/firmware/morse`. The slot copy is hashed only while it is staged, so
+patching it later does not disturb the kernel transaction. The rewrite is a
+fixed point: a patched file patches to itself, so the boot run and the
+updater's `systemctl enable --now` can repeat without a state file. Files are
+replaced atomically with an fsync, symlinks are never followed, and one
+malformed file is reported without blocking the rest.
+
+`stage-kernel-payload.py` runs the tool's stock check on the overlay and refuses to build an archive whose BCFs already carry the policy,
+which catches an overlay assembled before this split.
+
 ## MT7916 firmware selection
 
 `manet-mt7916-firmware.py` selects the positioning-patched 2024 WM with stock

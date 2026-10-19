@@ -220,6 +220,7 @@ Read [first boot](guide/content/first-boot.md), [updates](guide/content/updates.
 | [manet-wait-radios.py](../MANET/node_tools/manet-wait-radios.py) | Bound boot enumeration before assigning persistent interface roles. |
 | [manet-radio-names.py](../MANET/node_tools/manet-radio-names.py) | Finish MAC-pinned interface naming before networking. |
 | [manet-mt7916-firmware.py](../MANET/node_tools/manet-mt7916-firmware.py) | Prepare default patched WM or pinned-stock fallback, boot RX reservation, and recovery state. |
+| [manet-morse-bcf.py](../MANET/node_tools/manet-morse-bcf.py) | Apply the 30 dBm TX power policy and CRCs to the stock Morse BCFs at boot. |
 | [manet-mt7916-setup.sh](../MANET/node_tools/manet-mt7916-setup.sh) | Enable firmware-selection/survival integration during install/update. |
 | [manet-kernel-protect.py](../MANET/node_tools/manet-kernel-protect.py) | Protect MANET boot files from replacement by distribution package transactions. |
 | [manet-cpu-policy.sh](../MANET/node_tools/manet-cpu-policy.sh) | Keep CPUs available with demand scaling and the CM4 thermal policy. |

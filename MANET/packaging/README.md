@@ -201,7 +201,7 @@ indicates that a later regeneration would produce differences unrelated to the
 `.proto` change being made.
 
 The same environment installs `cryptography` for transport tests,
-Python-Markdown for guide builds, and `pyelftools` for BCF assembly. Their
+and Python-Markdown for guide builds. Their
 requirements are recorded in [requirements-dev.txt](requirements-dev.txt).
 
 The build scripts in this directory do **not** invoke protoc; they copy the

@@ -22,9 +22,8 @@ bash MANET/packaging/setup-dev-env.sh
 source ~/.venvs/manet/bin/activate
 ```
 
-Run commands from the repository root. The development environment supplies
-`pyelftools` for BCF parsing. Allow several gigabytes for each kernel source
-and build tree. `JOBS=2` limits compilation concurrency when memory is tight.
+Run commands from the repository root. Allow several gigabytes for each kernel
+source and build tree. `JOBS=2` limits compilation concurrency when memory is tight.
 Preparation needs network access. Compilation uses the downloaded inputs.
 
 ## Fetch the exact inputs
@@ -94,9 +93,9 @@ workspace when comparing exact per-board patch sets.
 The pinned Pi source already enables GPIO descriptor chip select. The
 Morse patch supplies the SPI initialization, response/ACK handling, and
 power-policy changes described in the port record. The build also patches
-the compiled `dot11ah.ko` rules, and overlay assembly patches BCF power
-tables and their CRCs. These are separate layers of the existing radio
-power policy. Neither a configured limit nor a successful build measures
+the compiled `dot11ah.ko` rules. The Morse BCFs ship as published, and the
+node patches their power tables and CRCs at boot with `manet-morse-bcf.py`.
+These are separate layers of the existing radio power policy. Neither a configured limit nor a successful build measures
 the RF power delivered by a particular board.
 
 Overlay assembly combines the kernel, DTBs, modules, and Morse firmware,

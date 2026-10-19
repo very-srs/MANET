@@ -1,0 +1,16 @@
+[Unit]
+Description=Apply the TX power policy to the installed Morse BCF files
+DefaultDependencies=no
+# Not local-fs.target: /boot/firmware waits for a by-partuuid device that only
+# coldplug creates, so ordering before the trigger would deadlock the boot.
+After=systemd-remount-fs.service manet-update-recover.service
+RequiresMountsFor=/usr/lib/firmware /var/lib
+Before=systemd-udev-trigger.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /usr/local/bin/manet-morse-bcf.py
+RemainAfterExit=yes
+
+[Install]
+WantedBy=sysinit.target

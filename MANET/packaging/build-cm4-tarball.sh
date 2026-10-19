@@ -169,6 +169,8 @@ python3 "$SCRIPT_DIR/stage-mt7916-firmware.py" "$STAGE"
 mkdir -p "$STAGE/etc/systemd/system/sysinit.target.wants"
 ln -sf ../manet-mt7916-firmware.service \
     "$STAGE/etc/systemd/system/sysinit.target.wants/manet-mt7916-firmware.service"
+ln -sf ../manet-morse-bcf.service \
+    "$STAGE/etc/systemd/system/sysinit.target.wants/manet-morse-bcf.service"
 ln -sf ../manet-mt7916-firmware.path \
     "$STAGE/etc/systemd/system/multi-user.target.wants/manet-mt7916-firmware.path"
 ln -sf ../manet-mt7916-firmware-survived.service \

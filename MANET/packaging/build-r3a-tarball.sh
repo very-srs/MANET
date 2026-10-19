@@ -142,6 +142,11 @@ do
     fi
 done
 
+# Morse BCFs ship stock; this boot unit applies the TX power policy on the node.
+mkdir -p "$STAGE/etc/systemd/system/sysinit.target.wants"
+ln -sf ../manet-morse-bcf.service \
+    "$STAGE/etc/systemd/system/sysinit.target.wants/manet-morse-bcf.service"
+
 # ── SBC overlay (kernel, DTBs, modules, firmware) ─────────────────────────────
 
 require_dir "$SBC_OVERLAY_DIR" "SBC overlay"

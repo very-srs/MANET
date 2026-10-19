@@ -99,27 +99,9 @@ mkdir -p "$OVERLAY/usr/lib/firmware/morse"
 find "$MORSE_FW/firmware" "$MORSE_FW/bcf" -name "*.bin" \
     -exec cp {} "$OVERLAY/usr/lib/firmware/morse/" \;
 
-# ── Patch BCF TX power limits ─────────────────────────────────────────────────
-# Every BCF is patched, not just the one this board's module is known to use:
-# a USB MM8108 selects its BCF by OTP board type (bcf_boardtype_XXXX.bin) and
-# SPI modules name theirs in a module option, so any of them can be loaded.
-# Raise every region to 30 dBm, so the BCF tables set no ceiling below that.
-
-echo "Patching TX power for every region in every BCF to 30 dBm..."
-for BCF in "$OVERLAY/usr/lib/firmware/morse/"bcf_*.bin; do
-    [ -f "$BCF" ] || continue
-    # Exit 3 means the file has nothing to patch; any other failure (missing
-    # pyelftools, a malformed ELF, an unexpected TLV) must stop the build
-    # rather than ship a stock BCF under the 30 dBm policy.
-    rc=0
-    python3 "$SCRIPT_DIR/morse-bcf-patch.py" "$BCF" "$BCF.patched" \
-        --country ALL --power-dbm 30 >/dev/null || rc=$?
-    case "$rc" in
-        0) mv "$BCF.patched" "$BCF"; echo "  patched $(basename "$BCF")" ;;
-        3) rm -f "$BCF.patched"; echo "  skipped $(basename "$BCF") (no TX power entries)" ;;
-        *) rm -f "$BCF.patched"; echo "ERROR: cannot patch $(basename "$BCF") (exit $rc)" >&2; exit 1 ;;
-    esac
-done
+# The BCFs stay exactly as Morse Micro published them: their license permits
+# distribution only complete and unmodified. The node applies the TX power
+# policy at boot with manet-morse-bcf.py.
 
 echo ""
 echo "=== RPi5 SBC overlay complete ==="

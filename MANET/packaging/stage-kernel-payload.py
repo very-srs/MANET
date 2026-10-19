@@ -2,6 +2,7 @@
 """Assemble an explicit board kernel input, or enforce updater archive limits."""
 import argparse
 import gzip
+import importlib.util
 import json
 from pathlib import Path
 import shutil
@@ -13,6 +14,18 @@ REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / 'MANET/node_tools'))
 from manet_kernel_update import (MAX_DOWNLOAD, MAX_EXPANDED, MANIFEST_LIMIT,
                                  validate_payload, sha256, KernelError)
+
+
+def require_stock_bcfs(directory):
+    """Morse Micro licenses its BCFs for distribution unmodified only."""
+    spec = importlib.util.spec_from_file_location(
+        'manet_morse_bcf', REPO / 'MANET/node_tools/manet-morse-bcf.py')
+    bcf = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(bcf)
+    modified = bcf.check_stock(directory)
+    if modified:
+        raise ValueError('Morse BCFs must ship as published; the node applies the TX power '
+                         'policy. Rebuild the SBC overlay. Modified: ' + ', '.join(modified))
 
 
 def check_archive(path, legacy=False):
@@ -56,6 +69,7 @@ def assemble(overlay, board, payload):
         raise ValueError('SBC overlay must contain exactly one versioned module directory')
     release = releases[0].name
     boot = overlay / ('boot/firmware' if board == 'cm4' else 'boot')
+    require_stock_bcfs(overlay / 'usr/lib/firmware/morse')
     roots = [(boot, 'boot'), (releases[0], 'modules/' + release),
              (overlay / 'usr/lib/firmware/morse', 'firmware/morse')]
     for source, relative in roots:

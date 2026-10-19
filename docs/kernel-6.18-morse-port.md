@@ -523,9 +523,17 @@ raises only rules below the target, and doubles as a check: on the deployed
 6.18.33 CM4 module it finds 33 rules, none below 30.)
 
 **BCF per-region power tables.** Each BCF carries a TX power TLV per channel
-in each `.regdom_XX` section, and the firmware will not exceed it. All three
-`build-*-sbc-overlay.sh` scripts run `kernel/build/morse-bcf-patch.py
---country ALL --power-dbm 30` over **every** `bcf_*.bin`, because a USB MM8108
+in each `.regdom_XX` section, and the firmware will not exceed it. Morse Micro
+licenses the BCFs for distribution complete and unmodified, so the overlays and
+every archive carry them as published and `stage-kernel-payload.py` refuses an
+overlay whose BCFs are already patched. The node raises the limits itself:
+`manet-morse-bcf.service` runs `manet-morse-bcf.py` at every boot, before udev
+probes the radios, and sets every TX power TLV to 30 dBm in **every**
+`bcf_*.bin` and regenerates the CRCs. It patches the directory the kernel reads
+firmware from, which is the trial slot's `firmware_class.path` while a kernel
+update is running and `/usr/lib/firmware/morse` otherwise. The patch is
+idempotent, needs no `pyelftools`, and was checked byte for byte against the
+build-time tool it replaced. Every BCF is covered because a USB MM8108
 picks its BCF by OTP board type (`bcf_boardtype_XXXX.bin`) and SPI modules
 name theirs in a module option. A region with no power TLVs is left as is;
 `bcf_boardtype_0802`, `bcf_fgh100maamd`, and `bcf_mf08651_jp` have none at
