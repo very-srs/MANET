@@ -121,7 +121,9 @@ Once the updater has saved its recovery package, a later attempt or reboot resum
 sudo node-update.sh --recover-only
 ```
 
-Local recovery works without internet or clock synchronization. If the recovery data is missing or corrupt, retain it and collect the error for diagnosis. Successful recovery finishes the interrupted installation. It does not undo a defective release. See [troubleshooting](troubleshooting.md) for what to collect.
+Local recovery works without internet or clock synchronization. If the recovery data is missing or corrupt, retain it and collect the error for diagnosis. Successful recovery finishes the interrupted installation.
+
+If the same release fails to install three times, the radio goes back to the last release that installed cleanly on it and skips the failed release until a newer one is published. A newer release also replaces a stuck one at the next daily check. See [troubleshooting](troubleshooting.md) for what to collect.
 
 ## Developer
 
@@ -223,9 +225,16 @@ Files are staged and atomically replaced individually. The two version markers a
 
 The durable boundary is the pending marker. The archive, its checksum,
 release descriptor, recovery program, and boot-recovery units must be saved
-before that marker is made durable. Once it exists, an attempt finishes that
-release before considering a newer one. This prevents a failed installation
-from being abandoned midway simply because GitHub now offers another version.
+before that marker is made durable. Once it exists, a manual or boot attempt
+finishes that release without network access. Only the routine daily check
+looks for a newer published release, and it replaces the pending one only
+outside a kernel trial. An explicit `--local-archive` also replaces it.
+`/var/lib/manet-update/recovery/attempts` counts install attempts. After three,
+the updater reinstalls the runtime payload of the last clean release from
+`/var/lib/manet-update/installed`, leaves the kernel to its own trial and
+fallback, and records the failed version in `failed.json` so selection skips
+it. Without a stored release it restarts the management services and stays
+pending. A successful installation moves its recovery archive to `installed`.
 Dependencies are prepared before arming the transaction so the retained
 recovery path can run without internet or a functioning package repository.
 

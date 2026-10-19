@@ -439,7 +439,9 @@ Before replacing payload files, it durably stores the verified compressed
 archive, checksum, release identity, and the running updater and release helper
 in a private `recovery` directory. Boot recovery units and their enable links
 are persisted before the `in-progress` marker is created. Installation space is
-checked again after retaining the recovery copy. Files are copied to temporary
+checked again after retaining the recovery copy. After success the recovery
+directory becomes `installed`, the rollback source for a later release that
+fails three install attempts. Files are copied to temporary
 siblings, fsynced, and
 renamed; the version files are withheld until the end. Required commands have
 checked exit status and timeouts; timeout/interruption terminates their process

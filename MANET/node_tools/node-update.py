@@ -34,6 +34,9 @@ from manet_kernel_update import (KernelError, KernelTrial, MANIFEST as KERNEL_MA
 MIB = 1024 * 1024
 # Bound compressed and expanded bytes, retaining 128 MiB free per filesystem.
 RESERVE = 128 * MIB
+# A pending release gets this many install attempts before the updater
+# reinstalls the last release that installed cleanly on this radio.
+RECOVERY_ATTEMPTS = 3
 RECOVERY_UNITS = {
     'manet-update-recover.service': 'sysinit.target.wants',
     'manet-update-finish.service': 'multi-user.target.wants',
@@ -238,6 +241,9 @@ class Updater:
         self.state = self.root / "var/lib/manet-update"
         self.pending = self.state / "in-progress"
         self.recovery = self.state / "recovery"
+        # The last release that installed cleanly, kept for rollback.
+        self.installed = self.state / "installed"
+        self.failed = self.state / "failed.json"
 
     def log(self, message, error=False):
         """Send messages to syslog and also print outside routine mode."""
@@ -441,8 +447,105 @@ class Updater:
         if not self.pending.exists() and self.recovery.exists():
             if self.recovery.is_symlink():
                 raise UpdateError('Unsafe recovery directory')
-            shutil.rmtree(self.recovery)
+            self.retire_recovery()
+
+    def retire_recovery(self):
+        """Keep a cleanly installed archive as the rollback source, else drop it."""
+        try:
+            installed = version(self.marker.read_text())
+            kept = version(json.loads((self.recovery / 'release.json').read_text())['version'])
+        except (OSError, ValueError, KeyError, TypeError, UpdateError):
+            kept = installed = None
+        if kept is not None and kept == installed:
+            (self.recovery / 'attempts').unlink(missing_ok=True)
+            previous = self.state / 'installed.old'
+            if previous.exists():
+                shutil.rmtree(previous)
+            if self.installed.exists():
+                if self.installed.is_symlink():
+                    raise UpdateError('Unsafe installed directory')
+                os.replace(self.installed, previous)
+            os.replace(self.recovery, self.installed)
             sync_directory(self.state)
+            if previous.exists():
+                shutil.rmtree(previous)
+        else:
+            shutil.rmtree(self.recovery)
+        sync_directory(self.state)
+
+    def kernel_idle(self):
+        """Only replace a pending tools release outside an active kernel trial."""
+        info = self.kernel().read()
+        return not info or info.get('phase') in ('committed', 'cancelled')
+
+    def pending_version(self):
+        try:
+            return version(json.loads((self.recovery / 'release.json').read_text())['version'])
+        except (OSError, ValueError, KeyError, TypeError, UpdateError):
+            return None
+
+    def drop_pending(self, reason):
+        """Abandon a pending release so a replacement can install instead."""
+        self.log(reason)
+        self.pending.unlink(missing_ok=True)
+        if self.recovery.exists():
+            if self.recovery.is_symlink():
+                raise UpdateError('Unsafe recovery directory')
+            shutil.rmtree(self.recovery)
+        sync_directory(self.state)
+
+    def newer_release(self, stuck):
+        """Return a published version newer than the pending one, if reachable."""
+        if stuck is None:
+            return None
+        try:
+            with tempfile.TemporaryDirectory(prefix='download-', dir=self.state) as scratch:
+                candidate = version(select_release(self.development, self.download, Path(scratch))['version'])
+        except Exception:
+            return None  # Offline or no usable metadata: finish the pending release.
+        newer = tuple(map(int, candidate.split('.'))) > tuple(map(int, stuck.split('.')))
+        return candidate if newer and candidate != self.failed_release() else None
+
+    def failed_release(self):
+        try:
+            return version(json.loads(self.failed.read_text())['version'])
+        except (OSError, ValueError, KeyError, TypeError, UpdateError):
+            return None
+
+    def roll_back(self, failed, attempts):
+        """Reinstall the last clean release after repeated failures."""
+        atomic_file(self.failed, data=json.dumps(
+            {'version': failed, 'attempts': attempts}).encode(), mode=0o600)
+        if not self.kernel_idle():
+            raise UpdateError(f'Release {failed} failed {attempts} times; '
+                              'a kernel transaction is active, so no rollback')
+        descriptor = self.installed / 'release.json'
+        try:
+            info = json.loads(descriptor.read_text())
+            previous = version(info['version'])
+        except (OSError, ValueError, KeyError, TypeError, UpdateError):
+            previous = None
+        if previous is None or previous == failed or self.installed.is_symlink():
+            # No local fallback: bring management back on the files present
+            # and keep the release pending for a replacement or a repair.
+            for service in ("mesh-status.service", "node-manager.service",
+                            "mesh-channel-agreement.service", "manet-dfs-watch.service"):
+                run_command(['systemctl', 'start', service])
+            raise UpdateError(f'Release {failed} failed {attempts} times and no '
+                              'previous release is stored; waiting for a newer release')
+        filename = self.board() + '-tools.tar.gz'
+        package, checksum = self.installed / 'package.tar.gz', self.installed / 'package.sha256'
+        members = self.validate(package, checksum, filename, previous)
+        self.clean_payload_scratch(members)
+        self.log(f'Release {failed} failed {attempts} times; reinstalling {previous}')
+        with tempfile.TemporaryDirectory(prefix='download-', dir=self.state) as scratch:
+            staged = Path(scratch) / 'stage'
+            self.stage(package, members, staged)
+            # The kernel keeps its own trial and fallback. Roll back runtime only.
+            self.install(staged, members)
+        shutil.rmtree(self.recovery)
+        sync_directory(self.state)
+        self.log(f'Node tools rolled back to version {previous}')
 
     def clean_payload_scratch(self, members):
         """Remove updater temporaries from validated payload parents."""
@@ -488,6 +591,7 @@ class Updater:
             link = self.destination('etc/systemd/system/' + target + '/' + name)
             self.make_directory(link.parent)
             self.install_link(link, '../' + name)
+        atomic_file(self.recovery / 'attempts', data=b'1\n', mode=0o600)
         # The marker must become durable after all recovery inputs and units.
         atomic_file(self.pending, data=b'Offline recovery required\n',
                     mode=0o600)
@@ -506,6 +610,16 @@ class Updater:
                 or not isinstance(info.get('version'), str)):
             raise UpdateError('Recovery archive does not match this board')
         expected = version(info['version'])
+        if not files_only:
+            try:
+                attempts = int((self.recovery / 'attempts').read_text())
+            except (OSError, ValueError):
+                attempts = 1
+            if attempts >= RECOVERY_ATTEMPTS:
+                self.roll_back(expected, attempts)
+                return
+            # Count the attempt durably before it can fail or hang.
+            atomic_file(self.recovery / 'attempts', data=f'{attempts + 1}\n'.encode(), mode=0o600)
         package = self.recovery / 'package.tar.gz'
         checksum = self.recovery / 'package.sha256'
         if (package.stat().st_size > MAX_DOWNLOAD
@@ -901,6 +1015,19 @@ class Updater:
                 self.kernel().cancel()
                 self.clean_scratch()
                 return
+            replaced = False
+            if pending and not (recover_only or files_only) and self.kernel_idle():
+                stuck = self.pending_version()
+                if local_archive is not None:
+                    self.drop_pending(f'Replacing pending release {stuck} with the explicit local archive')
+                    pending, replaced = False, True
+                elif self.routine:
+                    # Only the daily check looks online. A manual or boot run
+                    # finishes the pinned release without network access.
+                    newer = self.newer_release(stuck)
+                    if newer:
+                        self.drop_pending(f'Replacing pending release {stuck} with newer release {newer}')
+                        pending, replaced = False, True
             if pending:
                 self.recover(files_only=files_only)
                 return
@@ -915,7 +1042,7 @@ class Updater:
                 local = "unknown"
             # Routine checks use marker mtime as a one-day wall-clock throttle.
             # A backward clock step does not count as a recent successful check.
-            if (self.routine and local_archive is None and not pending and local != "unknown"
+            if (self.routine and local_archive is None and not pending and not replaced and local != "unknown"
                     and 0 <= time.time() - self.marker.stat().st_mtime < 86400):
                 return
             board = self.board()
@@ -928,6 +1055,11 @@ class Updater:
                 else:
                     release = select_release(self.development, self.download, work)
                     expected = release["version"]
+                    if expected == self.failed_release():
+                        self.marker.touch()
+                        self.log(f'Release {expected} failed to install on this radio; '
+                                 'waiting for a newer release')
+                        return
                 # Compare decimal components so 0.10 sorts after 0.9.
                 if (local != "unknown" and not pending and not self.allow_downgrade
                         and tuple(map(int, local.split("."))) > tuple(map(int, expected.split(".")))):
@@ -974,6 +1106,9 @@ class Updater:
                 if KERNEL_MANIFEST in members and kernel_selected and not self.kernel().prepare(staged):
                     return
                 self.install(staged, members)
+                failed = self.failed_release()
+                if failed and tuple(map(int, expected.split('.'))) >= tuple(map(int, failed.split('.'))):
+                    self.failed.unlink(missing_ok=True)
                 self.log(f"Node tools updated to version {expected}")
             self.clean_scratch()
 

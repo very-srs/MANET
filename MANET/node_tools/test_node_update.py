@@ -533,6 +533,87 @@ if sys.argv[1] == 'is-active' and sys.argv[-1] == 'mesh-config-apply.service':
         self.updater.update()
         self.assertNotIn('try-restart wpa_supplicant-s1g', self.history())
 
+    def publish(self, release, migration=0):
+        """Serve one board archive as the current stable release."""
+        text = f'{release}\n09/2026\n'.encode()
+        for name in update.MARKERS:
+            self.members[name] = (text, 0o644)
+        self.members['usr/local/bin/mesh-config-sync.py'] = (
+            f'#!/bin/sh\necho config-migration >> "$TEST_EVENTS"\nexit {migration}\n'.encode(), 0o755)
+        self.make_archive()
+        self.manifest.update(version=release, tag='v' + release)
+        self.release.write_text(json.dumps(self.manifest))
+
+    def stuck_release(self):
+        """Install 0.550 cleanly, then leave a broken 0.551 pending."""
+        self.publish('0.550')
+        self.updater.update()
+        self.publish('0.551', migration=1)
+        with self.assertRaises(update.UpdateError):
+            self.updater.update()
+        self.assertTrue(self.updater.pending.exists())
+
+    def version_now(self):
+        return self.updater.marker.read_text().splitlines()[0]
+
+    def test_repeated_failures_roll_back_to_the_last_clean_release(self):
+        self.stuck_release()
+        installed = json.loads((self.updater.installed / 'release.json').read_text())
+        self.assertEqual(installed['version'], '0.550')
+        for _ in range(update.RECOVERY_ATTEMPTS - 1):
+            with self.assertRaises(update.UpdateError):
+                self.updater.update(recover_only=True)
+        self.updater.update(recover_only=True)
+        self.assertEqual(self.version_now(), '0.550')
+        self.assertFalse(self.updater.pending.exists())
+        self.assertFalse(self.updater.recovery.exists())
+        self.assertEqual(json.loads(self.updater.failed.read_text())['version'], '0.551')
+        # The broken release is not downloaded again.
+        self.events.write_text('')
+        self.updater.update()
+        self.assertNotIn('cm4-tools.tar.gz', self.history())
+        self.assertEqual(self.version_now(), '0.550')
+
+    def test_no_stored_release_restarts_management_and_stays_pending(self):
+        self.stuck_release()
+        shutil.rmtree(self.updater.installed)
+        for _ in range(update.RECOVERY_ATTEMPTS - 1):
+            with self.assertRaises(update.UpdateError):
+                self.updater.update(recover_only=True)
+        self.events.write_text('')
+        with self.assertRaisesRegex(update.UpdateError, 'no previous release'):
+            self.updater.update(recover_only=True)
+        self.assertIn('systemctl start node-manager.service', self.history())
+        self.assertTrue(self.updater.pending.exists())
+
+    def test_daily_check_replaces_a_stuck_release_with_a_newer_one(self):
+        self.stuck_release()
+        self.publish('0.552')
+        daily = update.Updater(self.root, routine=True)
+        daily.log = Mock()
+        daily.update()
+        self.assertEqual(self.version_now(), '0.552')
+        self.assertFalse(daily.pending.exists())
+
+    def test_manual_run_finishes_the_pinned_release_offline(self):
+        self.stuck_release()
+        self.publish('0.552')
+        self.events.write_text('')
+        with self.assertRaises(update.UpdateError):
+            self.updater.update()
+        self.assertNotIn('curl', self.history())
+
+    def test_explicit_local_archive_replaces_a_stuck_release(self):
+        self.stuck_release()
+        self.publish('0.551')
+        local = self.work / 'local'
+        local.mkdir()
+        shutil.copyfile(self.package, local / 'cm4-tools.tar.gz')
+        shutil.copyfile(self.checksum, local / 'cm4-tools.tar.gz.sha256')
+        self.updater.update(local_archive=local / 'cm4-tools.tar.gz', local_version='0.551')
+        self.assertEqual(self.version_now(), '0.551')
+        self.assertFalse(self.updater.pending.exists())
+
     def test_mesh_preparation_failure_keeps_update_pending(self):
         self.members['usr/local/bin/manet-mesh-supplicant.py'] = (
             b'#!/bin/sh\nexit 1\n', 0o755)

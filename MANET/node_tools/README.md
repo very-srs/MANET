@@ -2055,6 +2055,14 @@ boot, so a failed daemon cannot silently become optional on retry. Failures retu
 installation leaves `/var/lib/manet-update/in-progress` and a durable recovery
 archive under `/var/lib/manet-update/recovery`. Every subsequent attempt first
 resumes that exact release locally, even without Ethernet or internet access.
+A pending release gets three install attempts. After the third failure, the
+updater reinstalls the last release that installed cleanly, kept under
+`/var/lib/manet-update/installed`, and records the failed version in
+`/var/lib/manet-update/failed.json` so it is not downloaded again until a newer
+release is published. With no stored release, it restarts the management
+services and keeps the release pending. The daily check replaces a pending
+release when a newer one is published, and an explicit `--local-archive` always
+replaces it. Neither replacement happens during a kernel trial.
 The archive is checked again before use. The saved updater, release helper,
 and kernel helper allow recovery even if the installed tools contain files
 from different releases.
@@ -2065,8 +2073,8 @@ runs activation and service checks once normal service startup is available.
 Dependencies are installed before an update is armed; recovery does not run APT.
 To retry manually, use `sudo node-update.sh --recover-only`. It does nothing
 when no update is pending. A missing or corrupt recovery archive fails with an
-error and retains the pending marker for repair; it is never silently replaced
-with a different release.
+error and retains the pending marker for repair. Only a newer published release
+or an explicit local archive replaces it.
 
 A kernel payload stages a separate boot set and module tree before replacing
 runtime software. The old kernel remains the normal boot choice during the
