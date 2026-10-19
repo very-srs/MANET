@@ -497,6 +497,30 @@ Config keys in `/etc/mesh.conf`:
 | `voice_ttl` | `32` | Multicast TTL |
 | `voice_alsa_in` / `voice_alsa_out` | auto | Override the ALSA devices. Empty autodetects the OpenVLM card |
 | `voice_test_tone` | `n` | Bench mode: 440 Hz tone in, null sink out, so the transport can be proven with no audio hardware fitted |
+| `voice_rx_gain_db` | `18` | Per-talker RX gain in dB, 0-24. Applied after decode, before summing. Includes a limiter |
+| `voice_playback_pct` | `100` | Playback mixer level, 0-100% |
+| `voice_agc` | `n` | Capture AGC. `y` enables automatic gain control on the mic input |
+| `voice_mic_type` | `dynamic` | Mic type: `dynamic` or `electret`. Sets default gain and bias expectations |
+
+### Web UI GAIN card
+
+The VOICE tab includes a **GAIN** card with live controls:
+
+- **RX gain** slider: per-talker receive gain (0-24 dB), writes `voice_rx_gain_db`
+- **Playback** slider: output mixer level (0-100%), writes `voice_playback_pct`
+- **Input level meter**: green/yellow/red zones with clipping warning
+
+All controls apply immediately on change. No restart required.
+
+### SIGHUP reload
+
+`mesh-voice` reloads configuration on SIGHUP without restarting the audio pipeline:
+
+```bash
+systemctl reload mesh-voice
+```
+
+This picks up changes to `voice_rx_gain_db`, `voice_playback_pct`, `voice_highpass_hz`, `voice_lowpass_hz`, `voice_eq`, and the three EQ gains. Talk-group and codec changes still require a full pipeline rebuild via the VOICE tab.
 
 ---
 

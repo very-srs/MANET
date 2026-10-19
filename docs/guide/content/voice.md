@@ -13,6 +13,8 @@
 
 You can hear other speakers while your button is released. Speaking louder does not make the signal go farther.
 
+Audio level controls are in the Voice tab — if too quiet or too loud, adjust there.
+
 ## User
 
 ### Voice comes from the radio's headset
@@ -34,6 +36,15 @@ Confirm voice is enabled, the mesh is connected, the talk groups match, and the 
 The default codec is **Lyra**. It transfers good-quality audio with less bandwidth than Opus, but lacks compatibility with other tools that would expect Opus. Lyra and Opus do not interoperate. A radio that missed a mesh-wide codec change while powered off must be set to the same codec. Reissue the change with it online.
 
 A receiver remembers at most 128 talkers, and each radio can add only a few new ones in a short time. If one radio's voice service restarts many times in quick succession, other radios may refuse its new voice for a while, until its old entries expire after about 15 minutes without traffic.
+
+### GAIN card controls
+
+The Voice tab's GAIN card has live audio controls:
+
+- **RX gain slider** — per-talker receive gain, 0 to 24 dB. Adjust individual talkers who are too quiet or too loud.
+- **Playback slider** — overall mixer output level, 0 to 100%. Sets how loud the mixed audio plays back.
+- **Input meter** — shows your microphone level in real time. Red means clipping; lower the mic gain or speak softer.
+- **Controls apply live** — no restart needed. Sliders take effect immediately.
 
 ## Developer
 
@@ -83,6 +94,13 @@ Local multicast loopback is disabled on the transmitting socket, and the
 receive path also discards packets carrying its own SSRC. Otherwise a radio
 could play its microphone back a jitter-buffer delay later and, in optional
 half-duplex mode, mistake itself for a remote speaker.
+
+### GAIN card implementation
+
+- **Playback level fix** — the mixer output level is applied at daemon startup and reapplied on device replug so the playback volume persists across restarts and hotplug events.
+- **Per-talker RX gain in F32LE with limiter** — each remote talker's receive branch has a named gain element operating in 32-bit float with a limiter to prevent clipping when multiple talkers sum.
+- **Named gain elements update live** — when the RX gain slider moves, the corresponding named gain element is updated immediately without pipeline rebuild.
+- **Input meter reads existing level element** — the microphone input meter uses the pipeline's existing level element; no extra probe or branch is added.
 
 ### Multicast, scheduling, and packet size
 

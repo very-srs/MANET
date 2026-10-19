@@ -25,6 +25,7 @@ Routes (relative to /manage):
 """
 
 import json
+import glob
 import html
 import ipaddress
 import subprocess
@@ -2800,6 +2801,23 @@ VOICE_TAB_CSS = r"""
 @media (max-width: 420px) {
   .voice-tg-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 }
+.voice-audio-slider { padding: 6px 14px 12px; }
+.voice-audio-slider input[type=range] { width: 100%; accent-color: #2e9e4f;
+  cursor: pointer; }
+.voice-agc-toggle { cursor: pointer; display: inline-flex; align-items: center;
+  gap: 6px; }
+.voice-agc-toggle input { accent-color: #2e9e4f; width: 16px; height: 16px; }
+
+/* Input level meter */
+.voice-meter { position: relative; width: 100%; height: 18px; background: var(--panel); border: 1px solid var(--border); border-radius: 9px; overflow: hidden; }
+.voice-meter-fill { height: 100%; width: 0%; transition: width 80ms linear, background-color 80ms; }
+.voice-meter-fill.ok { background: #2e9e4f; }
+.voice-meter-fill.warn { background: #d1a000; }
+.voice-meter-fill.clip { background: #b3261e; }
+@media (max-width: 760px), (orientation:landscape) and (max-height:600px) {
+  .voice-meter { height: 22px; }
+}
+
 """
 
 VOICE_TAB_HTML = r"""
@@ -2892,6 +2910,29 @@ VOICE_TAB_HTML = r"""
     </div>
     <div class="voice-note">Peers come from the Alfred node registry, so a node
       that has never transmitted still receives a unicast copy.</div>
+  </div>
+
+  <div class="voice-card">
+    <div class="voice-card-hdr">GAIN</div>
+    <div class="voice-card-body">
+      <div class="voice-row"><span class="k">Receive gain</span>
+        <span class="v"><span id="voice-rxgain-val">--</span> dB</span></div>
+      <div class="voice-audio-slider">
+        <input type="range" id="voice-rxgain" min="0" max="24" step="1" value="18">
+      </div>
+      <div class="voice-row"><span class="k">Playback level</span>
+        <span class="v"><span id="voice-playpct-val">--</span>%</span></div>
+      <div class="voice-audio-slider">
+        <input type="range" id="voice-playpct" min="0" max="100" step="5" value="100">
+      </div>
+      <div class="voice-row"><span class="k">Input level</span>
+        <span class="v"><div class="voice-meter" id="voice-meter"><div class="voice-meter-fill" id="voice-meter-fill"></div></div>
+        <span id="voice-peak-val" style="margin-left:8px; font-variant-numeric:tabular-nums; min-width:48px;">-- dBFS</span></span></div>
+      <div class="voice-tg-msg" id="voice-audio-msg"></div>
+    </div>
+    <div class="voice-note">Receive gain boosts each talker's audio before the
+      mixer, with a limiter. 0 bypasses it. Playback level sets the hardware
+      mixer on the audio card. All are per-radio settings.</div>
   </div>
 
 </div>
@@ -3190,6 +3231,8 @@ async function refreshVoice() {
   vDot('voice-uni-dot', d.unicast ? 'on' : '');
   vTxt('voice-uni', d.unicast === undefined ? '--' : (d.unicast ? 'Yes' : 'No'));
 
+  voiceAudioPaint(d);
+
   const wrap = document.getElementById('voice-peer-wrap');
   if (!wrap) return;
   const peers = d.peers || [];
@@ -3221,9 +3264,110 @@ async function refreshVoice() {
   });
   wrap.appendChild(table);
 }
+
+// ── AUDIO sliders ────────────────────────────────────────────────────────────
+let voiceAudioBusy = false;
+let voiceAudioLoaded = false;
+
+function voiceAudioMsg(text, isErr) {
+  const m = document.getElementById('voice-audio-msg');
+  if (!m) return;
+  m.textContent = text || '';
+  m.className = 'voice-tg-msg' + (isErr ? ' err' : '');
+}
+
+function voiceAudioPaint(d) {
+  const rxg = d.rx_gain_db;
+  const pct = d.playback_level;
+  vTxt('voice-rxgain-val', rxg !== undefined && rxg !== null ? rxg : '--');
+  vTxt('voice-playpct-val', pct !== undefined && pct !== null ? pct : '--');
+  // Seed the sliders from the daemon once, then let user drag freely.
+  if (!voiceAudioLoaded && !voiceAudioBusy) {
+    const rs = document.getElementById('voice-rxgain');
+    const ps = document.getElementById('voice-playpct');
+    if (rs && rxg !== undefined && rxg !== null) rs.value = rxg;
+    if (ps && pct !== undefined && pct !== null) ps.value = pct;
+    if (rxg !== undefined || pct !== undefined) voiceAudioLoaded = true;
+  }
+  // Input level meter from the TX pipeline's level element.
+  const peak = d.mic_peak_db;
+  const fill = document.getElementById('voice-meter-fill');
+  const peakEl = document.getElementById('voice-peak-val');
+  if (fill && peak !== undefined && peak !== null) {
+    // Map -60..0 dBFS to 0..100% width.
+    const pctWidth = Math.max(0, Math.min(100, (peak + 60) / 60 * 100));
+    fill.style.width = pctWidth + '%';
+    // Color zones: green < -12, yellow -12..-3, red > -3 (clipping).
+    fill.className = 'voice-meter-fill ' +
+      (peak > -3 ? 'clip' : peak > -12 ? 'warn' : 'ok');
+  }
+  if (peakEl && peak !== undefined && peak !== null) {
+    peakEl.textContent = peak.toFixed(1) + ' dBFS';
+  }
+}
+
+async function voiceAudioSet(rxGain, playPct) {
+  if (voiceAudioBusy) return;
+  voiceAudioBusy = true;
+  voiceAudioMsg('Applying…');
+  try {
+    const body = {};
+    if (rxGain !== undefined) body.rx_gain_db = Number(rxGain);
+    if (playPct !== undefined) body.playback_pct = Number(playPct);
+    const r = await manageFetch(U('/api/voice/audio'), {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body)
+    });
+    const j = await r.json();
+    if (j.ok) {
+      voiceAudioMsg('Applied');
+      setTimeout(() => voiceAudioMsg(''), 2000);
+    } else {
+      voiceAudioMsg(j.error || 'Failed', true);
+    }
+  } catch (e) {
+    voiceAudioMsg('Failed: ' + e, true);
+  } finally {
+    voiceAudioBusy = false;
+  }
+}
+
+(function initAudioSliders() {
+  const rxs = document.getElementById('voice-rxgain');
+  const pps = document.getElementById('voice-playpct');
+  if (rxs) {
+    rxs.addEventListener('input', () => vTxt('voice-rxgain-val', rxs.value));
+    rxs.addEventListener('change', () => voiceAudioSet(rxs.value, undefined));
+  }
+  if (pps) {
+    pps.addEventListener('input', () => vTxt('voice-playpct-val', pps.value));
+    pps.addEventListener('change', () => voiceAudioSet(undefined, pps.value));
+  }
+})();
 """
 
 VOICE_STATE_FILE = '/run/mesh-voice.json'
+
+# CM108B USB identifiers for the OpenVLM board.
+_OPENVLM_VID = 0x0D8C
+_OPENVLM_PID = 0x000C
+
+
+def find_openvlm_card():
+    """ALSA card index for the CM108B, via /proc/asound/card*/usbid."""
+    want = "%04x:%04x" % (_OPENVLM_VID, _OPENVLM_PID)
+    for path in sorted(glob.glob("/proc/asound/card*/usbid")):
+        try:
+            with open(path) as fh:
+                if fh.read().strip().lower() != want:
+                    continue
+        except OSError:
+            continue
+        match = re.search(r"card(\d+)", path)
+        if match:
+            return int(match.group(1))
+    return None
 
 
 VOICE_CHANNEL_MAX = 32
@@ -3298,6 +3442,89 @@ def set_voice_channel(channel):
     return {'ok': True, 'channel': channel, 'reloaded': reloaded}
 
 
+def set_voice_audio(req):
+    """Set per-radio audio levels: voice_rx_gain_db, voice_playback_pct.
+
+    Writes mesh.conf settings with the same atomic-replace pattern as
+    set_voice_channel(), then reloads mesh-voice via SIGHUP.
+    """
+    updates = {}
+    if 'rx_gain_db' in req:
+        try:
+            val = float(req['rx_gain_db'])
+        except (TypeError, ValueError):
+            return {'ok': False, 'error': 'rx_gain_db must be a number'}
+        if not 0.0 <= val <= 24.0:
+            return {'ok': False, 'error': 'rx_gain_db must be 0-24'}
+        updates['voice_rx_gain_db'] = '%.1f' % val
+
+    if 'playback_pct' in req:
+        try:
+            val = int(req['playback_pct'])
+        except (TypeError, ValueError):
+            return {'ok': False, 'error': 'playback_pct must be a number'}
+        if not 0 <= val <= 100:
+            return {'ok': False, 'error': 'playback_pct must be 0-100'}
+        updates['voice_playback_pct'] = str(val)
+
+    if not updates:
+        return {'ok': False, 'error': 'No settings provided'}
+
+    reloaded = False
+    if updates:
+        try:
+            with open(MESH_CONF_FILE) as f:
+                lines = f.readlines()
+        except OSError as e:
+            return {'ok': False, 'error': 'Cannot read %s: %s' % (MESH_CONF_FILE, e)}
+
+        replaced = set()
+        out = []
+        for line in lines:
+            key = line.split('=', 1)[0].strip()
+            if key in updates:
+                if key not in replaced:
+                    out.append('%s=%s\n' % (key, updates[key]))
+                    replaced.add(key)
+                continue
+            out.append(line)
+
+        for key, val in updates.items():
+            if key not in replaced:
+                if out and not out[-1].endswith('\n'):
+                    out[-1] += '\n'
+                out.append('%s=%s\n' % (key, val))
+
+        tmp = MESH_CONF_FILE + '.tmp'
+        try:
+            st = os.stat(MESH_CONF_FILE)
+            with open(tmp, 'w') as f:
+                f.writelines(out)
+                f.flush()
+                os.fsync(f.fileno())
+            os.chmod(tmp, stat.S_IMODE(st.st_mode))
+            try:
+                os.chown(tmp, st.st_uid, st.st_gid)
+            except PermissionError:
+                pass
+            os.replace(tmp, MESH_CONF_FILE)
+        except OSError as e:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            return {'ok': False, 'error': 'Cannot write %s: %s' % (MESH_CONF_FILE, e)}
+
+        try:
+            rc = subprocess.run(['systemctl', 'reload', 'mesh-voice'],
+                                timeout=10, stderr=subprocess.DEVNULL)
+            reloaded = rc.returncode == 0
+        except Exception:
+            pass
+
+    return {'ok': True, 'reloaded': reloaded}
+
+
 def set_voice_codec_all(codec):
     """Stage a voice codec change over Alfred for every node.
 
@@ -3367,6 +3594,7 @@ def voice_status():
             out['stale'] = True
     except (OSError, ValueError):
         pass
+
     return out
 
 
@@ -4404,6 +4632,13 @@ class ManageRoutes:
             try:
                 req = json.loads(body)
                 self.send_json(set_voice_codec_all(req.get('codec')))
+            except Exception as e:
+                self.send_json({'ok': False, 'error': str(e)})
+
+        elif path == '/api/voice/audio':
+            try:
+                req = json.loads(body)
+                self.send_json(set_voice_audio(req))
             except Exception as e:
                 self.send_json({'ok': False, 'error': str(e)})
 
