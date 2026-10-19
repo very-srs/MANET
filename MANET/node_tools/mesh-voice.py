@@ -2591,6 +2591,21 @@ class MeshVoice:
             log("state write failed: %s" % exc)
 
 
+def reload_on_signal(voice):
+    """Apply mesh.conf changes from SIGHUP and keep the handler installed.
+
+    An exception would end the callback without returning True. GLib then drops
+    the source and restores SIGHUP's default action, so the next reload kills
+    the daemon with a signal systemd counts as a clean exit, and
+    Restart=on-failure leaves voice stopped.
+    """
+    try:
+        voice.reload()
+    except Exception as exc:
+        log("reload failed: %s: %s" % (type(exc).__name__, exc))
+    return True
+
+
 def main():
     """Start configured voice and return its shutdown or restart exit status."""
     if GST_IMPORT_ERROR is not None:
@@ -2616,10 +2631,10 @@ def main():
     for sig in (signal.SIGINT, signal.SIGTERM):
         GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, sig,
                              lambda *_: (voice.stop(), False)[1])
-    # SIGHUP applies mesh.conf changes from the web UI. Return True to retain
-    # the handler for subsequent reloads and future rotary-switch input.
+    # SIGHUP applies mesh.conf changes from the web UI and future rotary-switch
+    # input.
     GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGHUP,
-                         lambda *_: (voice.reload(), True)[1])
+                         lambda *_: reload_on_signal(voice))
 
     voice.start()
     try:

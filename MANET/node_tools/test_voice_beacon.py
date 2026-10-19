@@ -395,5 +395,20 @@ class VoiceBeaconTests(unittest.TestCase):
         self.assertEqual(daemon.exit_code, 1)
 
 
+
+class ReloadSignalTests(unittest.TestCase):
+    def test_failed_reload_keeps_the_sighup_handler(self):
+        daemon = Mock()
+        daemon.reload.side_effect = RuntimeError("dictionary changed size")
+        with patch.object(voice, "log") as log:
+            self.assertIs(voice.reload_on_signal(daemon), True)
+        self.assertIn("RuntimeError", log.call_args[0][0])
+
+    def test_successful_reload_keeps_the_sighup_handler(self):
+        daemon = Mock()
+        self.assertIs(voice.reload_on_signal(daemon), True)
+        daemon.reload.assert_called_once_with()
+
+
 if __name__ == "__main__":
     unittest.main()
