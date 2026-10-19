@@ -13,6 +13,13 @@ __pycache__/
 *.prev-*
 install_packages-orig/
 
+# Built archives, release folders and flasher bundles; only the README is source
+MANET/install_packages/*
+!MANET/install_packages/README.md
+
+# Third-party Windows installers are downloaded by the flasher, never committed
+*.exe
+
 # Downloaded kernel sources, firmware caches and build outputs
 kernel-work/
 
