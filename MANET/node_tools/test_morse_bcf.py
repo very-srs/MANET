@@ -3,6 +3,7 @@ import importlib.util
 import os
 from pathlib import Path
 import struct
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -181,6 +182,13 @@ class DirectoryTests(unittest.TestCase):
                            'firmware_class.path=/var/lib/manet-kernel/abc/firmware panic=10\n')
         self.assertEqual(bcf.firmware_directory(self.root),
                          self.root / 'var/lib/manet-kernel/abc/firmware/morse')
+
+    def test_usage_does_not_depend_on_docstrings(self):
+        # Running with -OO strips docstrings; the command line must still work.
+        result = subprocess.run([sys.executable, '-OO', str(Path(bcf.__file__)), '--help'],
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('--check-stock', result.stdout)
 
     def test_missing_directory_does_not_fail_boot(self):
         self.assertEqual(bcf.main(['--directory', str(self.root / 'absent')]), 0)

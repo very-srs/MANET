@@ -208,7 +208,7 @@ def check_stock(directory):
 
 def main(argv=None):
     """Patch the active firmware directory, or verify a staged one is stock."""
-    parser = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
+    parser = argparse.ArgumentParser(description='Apply the TX power policy to the installed Morse BCFs.')
     parser.add_argument('--directory', type=Path,
                         help='BCF directory (default: the one the kernel reads)')
     parser.add_argument('--check-stock', action='store_true',
