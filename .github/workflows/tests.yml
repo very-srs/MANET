@@ -15,7 +15,8 @@ concurrency:
 
 jobs:
   node-tools:
-    runs-on: ubuntu-latest
+    # Pinned so the apt package names below stay valid.
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
       # Some tests load released files with git show v0.569:..., so fetch
@@ -31,9 +32,24 @@ jobs:
         with:
           path: ~/.venvs/manet
           key: venv-${{ runner.os }}-py313-${{ hashFiles('MANET/packaging/requirements-dev.txt', 'MANET/packaging/setup-dev-env.sh') }}
+      # JavaScriptCore runs the web UI rendering tests, and mandoc lints the
+      # manual pages. Without them those tests skip.
+      - name: Install optional test tools
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends \
+            libjavascriptcoregtk-4.1-0 mandoc
       - name: Build the pinned development environment
         run: bash MANET/packaging/setup-dev-env.sh
       - name: Run the node_tools suite
         run: |
           source ~/.venvs/manet/bin/activate
-          python -m unittest discover -s MANET/node_tools -p 'test_*.py'
+          status=0
+          python -m unittest discover -v -s MANET/node_tools -p 'test_*.py' \
+            > test.log 2>&1 || status=$?
+          echo "Skipped tests, by reason:"
+          sed -n "s/.* \.\.\. skipped '\(.*\)'$/\1/p" test.log | sort | uniq -c | sort -rn
+          # Failure details and the final summary.
+          sed -n '/^======/,$p' test.log
+          tail -n 3 test.log
+          exit "$status"
