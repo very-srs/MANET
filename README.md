@@ -127,3 +127,22 @@ A source push, a guide deployment, and a radio release are separate events.
 Contributions need review and validation before packaging. The release
 publisher verifies assets before publishing, and promotion makes the tested
 package set stable without rebuilding it.
+
+## License
+
+MANET's own code is released under the [MIT license](LICENSE). The
+copyright holders are listed in [AUTHORS](AUTHORS).
+
+Some files in this repository are other projects' work and keep their own
+licenses:
+
+- The patch series under `kernel/patches/` modify Linux kernel and driver
+  sources and carry the license of each file they change, GPL-2.0 or ISC as
+  the file states.
+- The prebuilt programs `alfred`, `batctl`, `openvlm`, and the hostap-based
+  supplicants in `MANET/binaries_arm64/`, and `chronyc` and `morse_cli` in
+  `MANET/node_tools/`, are distributed under their upstream projects'
+  licenses.
+- The Lyra codec plugin and model files in `MANET/lyra_arm64/` and
+  `MANET/root/regulatory.db` come from their upstream projects under those
+  projects' licenses.
