@@ -23,9 +23,9 @@ Companion documents:
 
 | Target | SoC | Kernel tree | Kernel version | Morse bus | Module |
 |--------|-----|-------------|----------------|-----------|--------|
-| CM4 | BCM2711 | `linux-rpi-6.18` (RPi fork) | 6.18.33-manet | SPI (spi0) | mm6108, FGH100M-AA-MD (Molex) |
-| RPi5 | BCM2712 | `linux-rpi-6.18` (RPi fork) | 6.18.33-manet | SPI | mm6108 |
-| Rock 3A | RK3568 | `linux-6.18` (mainline) | 6.18.0-manet | USB (M.2 E-key) | MM8108B2, Gateworks GW16167 |
+| CM4 | BCM2711 | `linux-rpi-6.18` (RPi fork) | 6.18.57-manet-r1 | SPI (spi0) | mm6108, FGH100M-AA-MD (Molex) |
+| RPi5 | BCM2712 | `linux-rpi-6.18` (RPi fork) | 6.18.57-manet | SPI | mm6108 |
+| Rock 3A | RK3568 | `linux-6.18` (stable) | 6.18.57-manet | USB (M.2 E-key) | MM8108B2, Gateworks GW16167 |
 
 Driver: **morse_driver 1.16.4**, built from the **Gateworks fork**
 (`https://github.com/Gateworks/morse_driver.git`, branch `1.16.4-gateworks`),
@@ -251,8 +251,8 @@ update as needed.
 The [MT7916 patch series](../kernel/patches/mt76-ftm/README.md) adds opt-in
 report capture, marked probe selection, and ACK spatial-extension controls.
 The same patches apply to Raspberry Pi kernel commit
-`95b85bebbedcaedfa7ca79116ed38b7376fba412` and mainline Rock 3A commit
-`7d0a66e4bb9081d75c82ec4957c50034cb0ea449`. The helper selects by exact HEAD
+`5d64d1ea73716526ed9c0ed184a9cb5f6042e32c` and stable Rock 3A commit
+`2ff600d29ee478d0a8d46ef8a58afb5e038fe692` (v6.18.57). The helper selects by exact HEAD
 and rejects other bases. `build-cm4.sh` and `build-r3a.sh` apply the series
 idempotently before configuring/building the kernel; partial or conflicting
 applications fail before timing source changes. The existing txpower and SPI
@@ -297,8 +297,8 @@ owner before the FINISHED event and that event then loses its interface index.
 
 0002 depends on 0001. `build-r3a.sh` and `build-cm4.sh` apply the pair with
 `git apply` unless 0002 already reverse-applies, and fail if only 0001 is
-present. Both apply cleanly to mainline 6.18 and to `linux-rpi-6.18` at
-6.18.33. RPi5 builds from the same tree. On a Rock 3A with the dedicated
+present. Both apply cleanly to stable 6.18.57 and to `linux-rpi-6.18` at
+6.18.57. RPi5 builds from the same tree. On a Rock 3A with the dedicated
 MT7916 receiver, the abort is reported and a replacement CAC runs its full
 time (61.8 s measured).
 
@@ -389,7 +389,10 @@ Relevant `manet-common.config` entries for all targets:
 - `CONFIG_CFG80211_CERTIFICATION_ONUS=y`, `CONFIG_CFG80211_REQUIRE_SIGNED_REGDB=n`,
   `CONFIG_CFG80211_USE_KERNEL_REGDB_KEYS=n`: allows our unsigned custom
   `regulatory.db` (S1G/HaLow rules; deployed from `MANET/root/`).
-- batman-adv `=m` with DAT/NC/MCAST/BLA; cfg80211/mac80211/CRC7 `=m` (morse deps);
+- batman-adv `=m` with DAT/MCAST/BLA. The build scripts replace the in-tree
+  module with batman-adv 2026.3 built out of tree, matching the shipped alfred
+  and batctl. Network coding no longer exists upstream.
+- cfg80211/mac80211/CRC7 `=m` (morse deps);
   `CONFIG_MT7915E=m` (MT7916 card); ebtables; SPI core `=y`; cpufreq + thermal
   governors; `CONFIG_LOCALVERSION="-manet"`, `LOCALVERSION_AUTO=n`.
 
@@ -601,7 +604,7 @@ not be interrupted. It does not make live extraction safe for an established
 node. For a kernel-only tarball onto offline mounted partitions:
 
 ```bash
-# $BOOTFS = FAT boot partition, $ROOTFS = ext4 root, $KVER e.g. 6.18.33-manet
+# $BOOTFS = FAT boot partition, $ROOTFS = ext4 root, $KVER e.g. 6.18.57-manet-r1
 sudo tar xzf cm4-kernel.tar.gz -C "$BOOTFS" --strip-components=2 ./boot/firmware/
 sudo tar xzf cm4-kernel.tar.gz -C "$ROOTFS" ./usr/lib/modules/ ./etc/ ./usr/local/ ./root/
 sudo depmod -b "$ROOTFS" "$KVER"
