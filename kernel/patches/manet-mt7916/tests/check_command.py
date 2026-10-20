@@ -39,8 +39,10 @@ struct ieee80211_channel { int hw_value, band; };
 struct cfg80211_chan_def { int center_freq1, center_freq2, width; struct ieee80211_channel *chan; };
 struct ieee80211_hw { void *wiphy; struct { int flags; } conf; };
 struct mt76_phy { struct cfg80211_chan_def chandef; u8 band_idx, chainmask, antenna_mask; bool offchannel; struct ieee80211_hw *hw; };
-struct mt7915_dev { int mt76; u8 chainshift; };
+struct mt7915_dev { int mt76; u8 chainshift; bool dbdc_support; };
 struct mt7915_phy { struct mt7915_dev *dev; struct mt76_phy *mt76; };
+static inline u8 mt7915_band_chainshift(struct mt7915_phy *phy) { struct mt7915_dev *dev = phy->dev; if (!dev->dbdc_support) return 0; return phy->mt76->band_idx * dev->chainshift; }
+static inline unsigned short mt7915_band_chainmask(struct mt7915_phy *phy) { return phy->mt76->chainmask >> mt7915_band_chainshift(phy); }
 static u8 packet[76];
 static int command, fail;
 static int ieee80211_frequency_to_channel(int f) { return (f - 5000) / 5; }
@@ -54,7 +56,7 @@ static int mt76_mcu_send_msg(void *d, int cmd, void *p, unsigned size, bool wait
 '''
 tests = r'''
 int main(void) {
- struct mt7915_dev d = { .chainshift = 2 };
+ struct mt7915_dev d = { .chainshift = 2, .dbdc_support = true };
  struct ieee80211_channel ch = { .hw_value = 36, .band = NL80211_BAND_5GHZ };
  struct ieee80211_hw hw = {};
  struct mt76_phy m = { .band_idx = 1, .antenna_mask = 3, .hw = &hw,

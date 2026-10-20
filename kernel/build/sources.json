@@ -1,15 +1,21 @@
 {
   "linux-rpi-6.18": {
     "url": "https://github.com/raspberrypi/linux.git",
-    "commit": "95b85bebbedcaedfa7ca79116ed38b7376fba412",
+    "commit": "5d64d1ea73716526ed9c0ed184a9cb5f6042e32c",
     "path": "real_work/linux-rpi-6.18",
     "boards": ["cm4", "rpi5"]
   },
   "linux-6.18": {
     "url": "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git",
-    "commit": "7d0a66e4bb9081d75c82ec4957c50034cb0ea449",
+    "commit": "2ff600d29ee478d0a8d46ef8a58afb5e038fe692",
     "path": "real_work/linux-6.18",
     "boards": ["r3a"]
+  },
+  "batman-adv-2026.3": {
+    "url": "https://git.open-mesh.org/batman-adv.git",
+    "commit": "f38d7c3263ab0ba6c08b232eed55f63a6b8a6775",
+    "path": "real_work/batman-adv-2026.3",
+    "boards": ["cm4", "r3a"]
   },
   "morse-driver-1.16": {
     "url": "https://github.com/Gateworks/morse_driver.git",

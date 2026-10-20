@@ -50,8 +50,10 @@ struct ieee80211_vif { int type; };
 struct ieee80211_channel { int band, flags; };
 struct cfg80211_chan_def { int width; struct ieee80211_channel *chan; };
 struct mt76_phy { unsigned long state; bool offchannel; int band_idx, antenna_mask; u16 chainmask; struct cfg80211_chan_def chandef; void *hw; };
-struct mt7915_dev { struct { int mutex; struct { u8 *data; } eeprom; } mt76; int chainshift, chainmask; bool ibf, background_rx_reserved, rx_probe_failed; void *rdd2_phy; struct { bool dirty; } bg_scan; u32 rx_probe_count; u64 rx_probe_at_us, rx_probe_pause_us; int rx_probe_error, rx_probe_restore_error; };
+struct mt7915_dev { struct { int mutex; struct { u8 *data; } eeprom; } mt76; int chainshift, chainmask; bool dbdc_support, ibf, background_rx_reserved, rx_probe_failed; void *rdd2_phy; struct { bool dirty; } bg_scan; u32 rx_probe_count; u64 rx_probe_at_us, rx_probe_pause_us; int rx_probe_error, rx_probe_restore_error; };
 struct mt7915_phy { struct mt7915_dev *dev; struct mt76_phy *mt76; };
+static inline u8 mt7915_band_chainshift(struct mt7915_phy *phy) { struct mt7915_dev *dev = phy->dev; if (!dev->dbdc_support) return 0; return phy->mt76->band_idx * dev->chainshift; }
+static inline u16 mt7915_band_chainmask(struct mt7915_phy *phy) { return phy->mt76->chainmask >> mt7915_band_chainshift(phy); }
 struct wiphy { u32 available_antennas_tx; };
 struct ieee80211_hw { struct wiphy *wiphy; struct mt7915_phy *phy; };
 static int calls, failures, mask_seen[8], mode, chip = 1, stopped;
@@ -80,7 +82,7 @@ int main(void) {
  struct mt7915_phy phy = { .dev = &dev, .mt76 = &mphy };
  for (int failure = 0; failure < 16; failure++) {
   memset(&dev, 0, sizeof(dev)); memset(&mphy, 0, sizeof(mphy)); memset(&ch, 0, sizeof(ch));
-  dev.mt76.eeprom.data = ee; dev.chainshift = 2; dev.chainmask = 0x1f;
+  dev.mt76.eeprom.data = ee; dev.chainshift = 2; dev.dbdc_support = true; dev.chainmask = 0x1f;
   mphy.state = 1; mphy.band_idx = 1; mphy.antenna_mask = 3; mphy.chainmask = 0x1c;
   mphy.chandef.width = 20; mphy.chandef.chan = &ch; ch.band = 1;
   mode = 1; failures = failure; calls = 0; stopped = 0;
@@ -96,7 +98,7 @@ int main(void) {
    assert(mphy.chainmask == 0x1c && !dev.background_rx_reserved && !stopped);
   }
  }
- memset(&dev, 0, sizeof(dev)); dev.mt76.eeprom.data = ee; dev.chainshift = 2; dev.chainmask = 0x1f;
+ memset(&dev, 0, sizeof(dev)); dev.mt76.eeprom.data = ee; dev.chainshift = 2; dev.dbdc_support = true; dev.chainmask = 0x1f;
  mphy.chainmask = 0x1c; calls = 0; failures = 0;
  dev.rdd2_phy = &dev; assert(mt7915_rx_probe_transition(&phy, true, false) == -EBUSY); dev.rdd2_phy = NULL;
  dev.bg_scan.dirty = true; assert(mt7915_rx_probe_transition(&phy, true, false) == -EBUSY); dev.bg_scan.dirty = false;

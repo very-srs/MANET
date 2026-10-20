@@ -13,7 +13,7 @@ BUILD=$(realpath "$2")
 OUTPUT=$(realpath -m "$3")
 CROSS=${CROSS_COMPILE:-aarch64-linux-gnu-}
 export KBUILD_BUILD_USER=build KBUILD_BUILD_HOST=manet KBUILD_BUILD_TIMESTAMP='' LOCALVERSION=''
-test "$(git -C "$TREE" rev-parse HEAD)" = 7d0a66e4bb9081d75c82ec4957c50034cb0ea449
+test "$(git -C "$TREE" rev-parse HEAD)" = 2ff600d29ee478d0a8d46ef8a58afb5e038fe692
 test "$(cat "$BUILD/include/config/kernel.release")" = 6.18.0-manet
 python3 "$SERIES/apply.py" "$TREE"
 make -C "$BUILD" M="$TREE/net/wireless" ARCH=arm64 CROSS_COMPILE="$CROSS" -j"${JOBS:-2}" modules

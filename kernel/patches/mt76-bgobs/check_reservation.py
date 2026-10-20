@@ -73,6 +73,8 @@ struct mt7915_dev {
     u8 chainshift, chainmask;
 };
 struct mt7915_phy { struct mt7915_dev *dev; struct mt76_phy *mt76; };
+static inline u8 mt7915_band_chainshift(struct mt7915_phy *phy) { struct mt7915_dev *dev = phy->dev; if (!dev->dbdc_support) return 0; return phy->mt76->band_idx * dev->chainshift; }
+static inline unsigned short mt7915_band_chainmask(struct mt7915_phy *phy) { return phy->mt76->chainmask >> mt7915_band_chainshift(phy); }
 struct wiphy { u32 available_antennas_tx; };
 struct ieee80211_hw { struct wiphy *wiphy; struct mt7915_phy *phy; };
 #define mt7915_hw_dev(hw) ((hw)->phy->dev)

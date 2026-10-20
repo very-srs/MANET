@@ -10,7 +10,7 @@ P2P GO admission checks unchanged.
 diff --git a/net/wireless/ap.c b/net/wireless/ap.c
 --- a/net/wireless/ap.c
 +++ b/net/wireless/ap.c
-@@ -32,6 +32,7 @@
+@@ -32,6 +32,7 @@ static int ___cfg80211_stop_ap(struct cfg80211_registered_device *rdev,
  
  	err = rdev_stop_ap(rdev, dev, link_id);
  	if (!err) {
@@ -21,7 +21,7 @@ diff --git a/net/wireless/ap.c b/net/wireless/ap.c
 diff --git a/net/wireless/chan.c b/net/wireless/chan.c
 --- a/net/wireless/chan.c
 +++ b/net/wireless/chan.c
-@@ -10,10 +10,28 @@
+@@ -10,11 +10,29 @@
   */
  
  #include <linux/export.h>
@@ -30,7 +30,7 @@ diff --git a/net/wireless/chan.c b/net/wireless/chan.c
  #include <net/cfg80211.h>
  #include "core.h"
  #include "rdev-ops.h"
-+
+ 
 +static bool dfs_follow_ap_v1;
 +module_param(dfs_follow_ap_v1, bool, 0444);
 +MODULE_PARM_DESC(dfs_follow_ap_v1,
@@ -47,10 +47,11 @@ diff --git a/net/wireless/chan.c b/net/wireless/chan.c
 +	return dfs_follow_ap_v1 && wiphy_dev(wiphy) &&
 +	       !strcmp(dev_driver_string(wiphy_dev(wiphy)), "mt7915e");
 +}
- 
++
  static bool cfg80211_valid_60g_freq(u32 freq)
  {
-@@ -693,14 +711,19 @@
+ 	return freq >= 58320 && freq <= 70200;
+@@ -693,14 +711,19 @@ static bool cfg80211_dfs_permissive_chan(struct wiphy *wiphy,
  
  	lockdep_assert_held(&rdev->wiphy.mtx);
  
@@ -61,7 +62,6 @@ diff --git a/net/wireless/chan.c b/net/wireless/chan.c
 -
 -	/* only valid for P2P GO */
 -	if (iftype != NL80211_IFTYPE_P2P_GO)
--		return false;
 +	if (iftype == NL80211_IFTYPE_AP) {
 +		if (!cfg80211_dfs_follow_enabled(wiphy) ||
 +		    rdev->dfs_follow_start < 0 || rdev->dfs_follow_csa ||
@@ -73,17 +73,15 @@ diff --git a/net/wireless/chan.c b/net/wireless/chan.c
 +		   !wiphy_ext_feature_isset(wiphy,
 +					    NL80211_EXT_FEATURE_DFS_CONCURRENT) ||
 +		   !(chan->flags & IEEE80211_CHAN_DFS_CONCURRENT)) {
-+		return false;
+ 		return false;
 +	}
  
  	/*
  	 * Allow only if there's a concurrent BSS
-@@ -713,6 +736,80 @@
- 	}
- 
+@@ -715,6 +738,80 @@ static bool cfg80211_dfs_permissive_chan(struct wiphy *wiphy,
  	return false;
-+}
-+
+ }
+ 
 +bool cfg80211_dfs_follow_chandef(struct wireless_dev *wdev,
 +				 const struct cfg80211_chan_def *chandef)
 +{
@@ -156,13 +154,15 @@ diff --git a/net/wireless/chan.c b/net/wireless/chan.c
 +		if (cfg80211_stop_ap(rdev, wdev->netdev, link, true))
 +			wiphy_warn(wiphy, "MANET DFS follower stop failed\n");
 +	}
- }
- 
++}
++
  static int cfg80211_get_chans_dfs_required(struct wiphy *wiphy,
+ 					   const struct cfg80211_chan_def *chandef,
+ 					   enum nl80211_iftype iftype)
 diff --git a/net/wireless/core.c b/net/wireless/core.c
 --- a/net/wireless/core.c
 +++ b/net/wireless/core.c
-@@ -519,6 +519,7 @@
+@@ -598,6 +598,7 @@ use_default_name:
  	}
  
  	mutex_init(&rdev->wiphy.mtx);
@@ -170,7 +170,7 @@ diff --git a/net/wireless/core.c b/net/wireless/core.c
  	INIT_LIST_HEAD(&rdev->wiphy.wdev_list);
  	INIT_LIST_HEAD(&rdev->beacon_registrations);
  	spin_lock_init(&rdev->beacon_registrations_lock);
-@@ -1284,7 +1285,12 @@
+@@ -1382,7 +1383,12 @@ static void _cfg80211_unregister_wdev(struct wireless_dev *wdev,
  			unregister_netdevice(wdev->netdev);
  	}
  
@@ -182,7 +182,7 @@ diff --git a/net/wireless/core.c b/net/wireless/core.c
 +	}
  	synchronize_net();
  	rdev->devlist_generation++;
- 
+ 	wiphy_work_cancel(wdev->wiphy, &wdev->disconnect_wk);
 diff --git a/net/wireless/core.h b/net/wireless/core.h
 --- a/net/wireless/core.h
 +++ b/net/wireless/core.h
@@ -202,22 +202,22 @@ diff --git a/net/wireless/core.h b/net/wireless/core.h
  struct cfg80211_scan_request_int {
  	struct cfg80211_scan_info info;
  	bool notified;
-@@ -88,6 +97,11 @@
- 
+@@ -99,6 +108,11 @@ struct cfg80211_registered_device {
  	struct work_struct conn_work;
  	struct work_struct event_work;
-+
+ 
 +	/* MANET DFS follower v1: private state, protected by wiphy mutex. */
 +	struct list_head dfs_follow_aps;
 +	int dfs_follow_start; /* -1 ordinary START_AP, 0 idle, 1 follower */
 +	bool dfs_follow_csa;
- 
++
  	struct delayed_work dfs_update_channels_wk;
  
+ 	struct wireless_dev *background_radar_wdev;
 diff --git a/net/wireless/nl80211.c b/net/wireless/nl80211.c
 --- a/net/wireless/nl80211.c
 +++ b/net/wireless/nl80211.c
-@@ -6621,6 +6621,16 @@
+@@ -6739,6 +6739,16 @@ static int nl80211_start_ap(struct sk_buff *skb, struct genl_info *info)
  	if (!params)
  		return -ENOMEM;
  
@@ -234,7 +234,7 @@ diff --git a/net/wireless/nl80211.c b/net/wireless/nl80211.c
  	err = nl80211_parse_beacon(rdev, info->attrs, &params->beacon,
  				   info->extack);
  	if (err)
-@@ -6863,7 +6873,19 @@
+@@ -6985,7 +6995,19 @@ static int nl80211_start_ap(struct sk_buff *skb, struct genl_info *info)
  
  	/* FIXME: validate MLO/link-id against driver capabilities */
  
@@ -254,7 +254,7 @@ diff --git a/net/wireless/nl80211.c b/net/wireless/nl80211.c
  	if (!err) {
  		wdev->links[link_id].ap.beacon_interval = params->beacon_interval;
  		wdev->links[link_id].ap.chandef = params->chandef;
-@@ -6877,6 +6899,7 @@
+@@ -6999,6 +7021,7 @@ static int nl80211_start_ap(struct sk_buff *skb, struct genl_info *info)
  		nl80211_send_ap_started(wdev, link_id);
  	}
  out:
@@ -262,7 +262,7 @@ diff --git a/net/wireless/nl80211.c b/net/wireless/nl80211.c
  	kfree(params->acl);
  	kfree(params->beacon.mbssid_ies);
  	if (params->mbssid_config.tx_wdev &&
-@@ -11472,7 +11495,14 @@
+@@ -11639,7 +11662,14 @@ skip_beacons:
  	}
  
  	params.link_id = link_id;
@@ -278,7 +278,7 @@ diff --git a/net/wireless/nl80211.c b/net/wireless/nl80211.c
  
  free:
  	kfree(params.beacon_after.mbssid_ies);
-@@ -20953,6 +20983,8 @@
+@@ -21367,6 +21397,8 @@ void cfg80211_ch_switch_notify(struct net_device *dev,
  	WARN_INVALID_LINK_ID(wdev, link_id);
  
  	trace_cfg80211_ch_switch_notify(dev, chandef, link_id);
@@ -287,7 +287,7 @@ diff --git a/net/wireless/nl80211.c b/net/wireless/nl80211.c
  
  	switch (wdev->iftype) {
  	case NL80211_IFTYPE_STATION:
-@@ -20998,6 +21030,11 @@
+@@ -21452,6 +21484,11 @@ void cfg80211_ch_switch_started_notify(struct net_device *dev,
  	WARN_INVALID_LINK_ID(wdev, link_id);
  
  	trace_cfg80211_ch_switch_started_notify(dev, chandef, link_id);
@@ -299,7 +299,7 @@ diff --git a/net/wireless/nl80211.c b/net/wireless/nl80211.c
  
  
  	nl80211_ch_switch_notify(rdev, dev, link_id, chandef, GFP_KERNEL,
-@@ -21770,6 +21807,12 @@
+@@ -22225,6 +22262,12 @@ void cfg80211_schedule_channels_check(struct wireless_dev *wdev)
  {
  	struct wiphy *wiphy = wdev->wiphy;
  
@@ -315,7 +315,7 @@ diff --git a/net/wireless/nl80211.c b/net/wireless/nl80211.c
 diff --git a/net/wireless/reg.c b/net/wireless/reg.c
 --- a/net/wireless/reg.c
 +++ b/net/wireless/reg.c
-@@ -2440,6 +2440,7 @@
+@@ -2442,6 +2442,7 @@ static void reg_leave_invalid_chans(struct wiphy *wiphy)
  
  	guard(wiphy)(wiphy);
  
@@ -326,7 +326,7 @@ diff --git a/net/wireless/reg.c b/net/wireless/reg.c
 diff --git a/net/wireless/sme.c b/net/wireless/sme.c
 --- a/net/wireless/sme.c
 +++ b/net/wireless/sme.c
-@@ -476,6 +476,7 @@
+@@ -476,6 +476,7 @@ static void cfg80211_wdev_release_bsses(struct wireless_dev *wdev)
  				 &wdev->links[link].client.current_bss->pub);
  		wdev->links[link].client.current_bss = NULL;
  	}
@@ -334,7 +334,7 @@ diff --git a/net/wireless/sme.c b/net/wireless/sme.c
  }
  
  void cfg80211_wdev_release_link_bsses(struct wireless_dev *wdev, u16 link_mask)
-@@ -491,6 +492,7 @@
+@@ -491,6 +492,7 @@ void cfg80211_wdev_release_link_bsses(struct wireless_dev *wdev, u16 link_mask)
  				 &wdev->links[link].client.current_bss->pub);
  		wdev->links[link].client.current_bss = NULL;
  	}

@@ -1,7 +1,7 @@
 diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/bgscan.c b/drivers/net/wireless/mediatek/mt76/mt7915/bgscan.c
 --- a/drivers/net/wireless/mediatek/mt76/mt7915/bgscan.c
 +++ b/drivers/net/wireless/mediatek/mt76/mt7915/bgscan.c
-@@ -380,8 +380,11 @@
+@@ -380,8 +380,11 @@ void mt7915_bg_scan_reset_done(struct mt7915_dev *dev)
  	dev->bg_scan.restore_error = 0;
  }
  
@@ -13,7 +13,7 @@ diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/bgscan.c b/drivers/net/wi
  	INIT_DELAYED_WORK(&dev->bg_scan.work, mt7915_bg_scan_work);
  }
  
-@@ -390,9 +393,11 @@
+@@ -390,9 +393,11 @@ void mt7915_bg_scan_cleanup(struct mt7915_dev *dev)
  	mutex_lock(&dev->mt76.mutex);
  	if (!dev->bg_scan.shutdown) {
  		dev->bg_scan.shutdown = true;
@@ -25,7 +25,7 @@ diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/bgscan.c b/drivers/net/wi
  	cancel_delayed_work_sync(&dev->bg_scan.work);
  }
  
-@@ -662,3 +667,4 @@
+@@ -662,3 +667,4 @@ void mt7915_bg_scan_debugfs(struct mt7915_phy *phy, struct dentry *dir)
  
  MODULE_INFO(manet_observer, "third-chain-v1");
  MODULE_INFO(manet_observer_probe, "0");
@@ -187,7 +187,7 @@ new file mode 100644
 diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/init.c b/drivers/net/wireless/mediatek/mt76/mt7915/init.c
 --- a/drivers/net/wireless/mediatek/mt76/mt7915/init.c
 +++ b/drivers/net/wireless/mediatek/mt76/mt7915/init.c
-@@ -334,6 +334,8 @@
+@@ -334,6 +334,8 @@ mt7915_regd_notifier(struct wiphy *wiphy,
  	struct mt76_phy *mphy = hw->priv;
  	struct mt7915_phy *phy = mphy->priv;
  
@@ -199,7 +199,7 @@ diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/init.c b/drivers/net/wire
 diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/mac.c b/drivers/net/wireless/mediatek/mt76/mt7915/mac.c
 --- a/drivers/net/wireless/mediatek/mt76/mt7915/mac.c
 +++ b/drivers/net/wireless/mediatek/mt76/mt7915/mac.c
-@@ -1597,8 +1597,12 @@
+@@ -1586,8 +1586,12 @@ void mt7915_mac_reset_work(struct work_struct *work)
  	ext_phy = dev->mt76.phys[MT_BAND1];
  	phy2 = ext_phy ? ext_phy->priv : NULL;
  
@@ -215,7 +215,7 @@ diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/mac.c b/drivers/net/wirel
 diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/main.c b/drivers/net/wireless/mediatek/mt76/mt7915/main.c
 --- a/drivers/net/wireless/mediatek/mt76/mt7915/main.c
 +++ b/drivers/net/wireless/mediatek/mt76/mt7915/main.c
-@@ -123,6 +123,8 @@
+@@ -123,6 +123,8 @@ static void mt7915_stop(struct ieee80211_hw *hw, bool suspend)
  		mt7915_bg_scan_stop(dev, -ECANCELED);
  	mt76_testmode_reset(phy->mt76, true);
  
@@ -224,7 +224,7 @@ diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/main.c b/drivers/net/wire
  	clear_bit(MT76_STATE_RUNNING, &phy->mt76->state);
  
  	if (phy != &dev->phy) {
-@@ -296,6 +298,8 @@
+@@ -306,6 +308,8 @@ static void mt7915_remove_interface(struct ieee80211_hw *hw,
  	struct mt7915_phy *phy = mt7915_hw_phy(hw);
  	int idx = msta->wcid.idx;
  
@@ -232,19 +232,19 @@ diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/main.c b/drivers/net/wire
 +		cfg80211_background_cac_abort(hw->wiphy);
  	mt7915_mcu_add_bss_info(phy, vif, false);
  	mt7915_mcu_add_sta(dev, vif, NULL, CONN_STATE_DISCONNECT, false);
- 	mt76_wcid_mask_clear(dev->mt76.wcid_mask, mvif->sta.wcid.idx);
-@@ -333,6 +337,10 @@
- 	struct mt7915_phy *phy = mphy->priv;
+ 
+@@ -344,6 +348,10 @@ int mt7915_set_channel(struct mt76_phy *mphy)
  	struct mt7915_dev *dev = phy->dev;
  	int ret;
-+
+ 
 +	/* Prototype has no gap-free handoff. Revoke on any main retune. */
 +	if (dev->rdd2_phy == phy)
 +		cfg80211_background_cac_abort(mphy->hw->wiphy);
- 
++
  	if (dev->bg_scan.phy == phy) {
  		ret = mt7915_bg_scan_stop(dev, -ECANCELED);
-@@ -1694,6 +1702,11 @@
+ 		if (ret)
+@@ -1707,6 +1715,11 @@ mt7915_set_radar_background(struct ieee80211_hw *hw,
  	bool running;
  
  	mutex_lock(&dev->mt76.mutex);
@@ -256,7 +256,7 @@ diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/main.c b/drivers/net/wire
  
  	if (dev->bg_scan.dirty && dev->bg_scan.borrowed)
  		mt7915_bg_scan_stop(dev, -ECANCELED);
-@@ -1703,7 +1716,7 @@
+@@ -1716,7 +1729,7 @@ mt7915_set_radar_background(struct ieee80211_hw *hw,
  		goto out;
  	}
  
@@ -265,16 +265,16 @@ diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/main.c b/drivers/net/wire
  		goto out;
  
  	if (dev->rdd2_phy && dev->rdd2_phy != phy) {
-@@ -1711,6 +1724,8 @@
- 		ret = -EBUSY;
+@@ -1725,6 +1738,8 @@ mt7915_set_radar_background(struct ieee80211_hw *hw,
  		goto out;
  	}
-+
-+	mt7915_hold_stop(dev);
  
++	mt7915_hold_stop(dev);
++
  	/* Sticky until module removal, including failed requests and resets. */
  	if (chandef)
-@@ -1726,18 +1741,27 @@
+ 		dev->bg_scan.cac_attempted = true;
+@@ -1739,18 +1754,27 @@ mt7915_set_radar_background(struct ieee80211_hw *hw,
  		if (ret)
  			goto out;
  
@@ -290,10 +290,9 @@ diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/main.c b/drivers/net/wire
 +	}
  	ret = mt7915_mcu_rdd_background_enable(phy, chandef);
 -	if (ret)
--		goto out;
 +	if (ret) {
 +		cfg80211_background_cac_abort(phy->mt76->hw->wiphy);
-+		goto out;
+ 		goto out;
 +	}
  
  update_phy:
@@ -309,7 +308,7 @@ diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/main.c b/drivers/net/wire
 diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/mcu.c b/drivers/net/wireless/mediatek/mt76/mt7915/mcu.c
 --- a/drivers/net/wireless/mediatek/mt76/mt7915/mcu.c
 +++ b/drivers/net/wireless/mediatek/mt76/mt7915/mcu.c
-@@ -2787,6 +2787,7 @@
+@@ -2797,6 +2797,7 @@ int mt7915_mcu_rdd_background_enable(struct mt7915_phy *phy,
  {
  	struct mt7915_dev *dev = phy->dev;
  	int err, region, rdd_idx;
@@ -317,7 +316,7 @@ diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/mcu.c b/drivers/net/wirel
  
  	rdd_idx = mt7915_get_rdd_idx(phy, true);
  	if (rdd_idx < 0)
-@@ -2797,8 +2798,11 @@
+@@ -2807,8 +2808,11 @@ int mt7915_mcu_rdd_background_enable(struct mt7915_phy *phy,
  		if (err)
  			return err;
  
@@ -341,7 +340,7 @@ diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/mt7915.h b/drivers/net/wi
  #include "regs.h"
  
  #define MT7915_MAX_INTERFACES		19
-@@ -269,6 +270,15 @@
+@@ -271,6 +272,15 @@ struct mt7915_bg_scan {
  	int error, restore_error;
  };
  
@@ -357,7 +356,7 @@ diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/mt7915.h b/drivers/net/wi
  struct mt7915_dev {
  	union { /* must be first */
  		struct mt76_dev mt76;
-@@ -307,6 +317,7 @@
+@@ -309,6 +319,7 @@ struct mt7915_dev {
  	struct mt7915_phy *rdd2_phy;
  	bool background_rx_reserved;
  	struct mt7915_bg_scan bg_scan;
@@ -365,7 +364,7 @@ diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/mt7915.h b/drivers/net/wi
  
  	u16 chainmask;
  	u16 chainshift;
-@@ -479,6 +490,8 @@
+@@ -499,6 +510,8 @@ u32 mt7915_wed_init_buf(void *ptr, dma_addr_t phys, int token_id);
  
  int mt7915_register_device(struct mt7915_dev *dev);
  void mt7915_unregister_device(struct mt7915_dev *dev);

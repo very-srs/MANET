@@ -22,7 +22,7 @@ diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/Makefile b/drivers/net/wi
 diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/debugfs.c b/drivers/net/wireless/mediatek/mt76/mt7915/debugfs.c
 --- a/drivers/net/wireless/mediatek/mt76/mt7915/debugfs.c
 +++ b/drivers/net/wireless/mediatek/mt76/mt7915/debugfs.c
-@@ -1337,6 +1337,10 @@
+@@ -1337,6 +1337,10 @@ static ssize_t mt7915_tmr_ctrl_write(struct file *file, const char __user *ubuf,
  	req.band = phy->mt76->band_idx;
  
  	mutex_lock(&dev->mt76.mutex);
@@ -33,7 +33,7 @@ diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/debugfs.c b/drivers/net/w
  	if (req.enable)
  		mt7915_tmr_prepare(phy);
  	ret = mt76_mcu_send_msg(&dev->mt76, MCU_EXT_CMD(TMR_CTRL), &req,
-@@ -1368,17 +1372,23 @@
+@@ -1368,17 +1372,23 @@ static ssize_t mt7915_tmr_peer_write(struct file *file, const char __user *ubuf,
  		return -EFAULT;
  	buf[count] = '\0';
  
@@ -48,7 +48,12 @@ diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/debugfs.c b/drivers/net/w
  	if (sysfs_streq(buf, "off")) {
  		WRITE_ONCE(dev->tmr_peer_set, false);
 -		return count;
--	}
++	} else {
++		WRITE_ONCE(dev->tmr_peer_set, false);
++		ether_addr_copy(dev->tmr_peer, addr);
++		atomic_set(&dev->tmr_marked, 0);
++		WRITE_ONCE(dev->tmr_peer_set, true);
+ 	}
 -	if (!mac_pton(strim(buf), addr))
 -		return -EINVAL;
 -
@@ -56,17 +61,11 @@ diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/debugfs.c b/drivers/net/w
 -	ether_addr_copy(dev->tmr_peer, addr);
 -	atomic_set(&dev->tmr_marked, 0);
 -	WRITE_ONCE(dev->tmr_peer_set, true);
-+	} else {
-+		WRITE_ONCE(dev->tmr_peer_set, false);
-+		ether_addr_copy(dev->tmr_peer, addr);
-+		atomic_set(&dev->tmr_marked, 0);
-+		WRITE_ONCE(dev->tmr_peer_set, true);
-+	}
 +	mutex_unlock(&dev->mt76.mutex);
  	return count;
  }
  
-@@ -1401,7 +1411,7 @@
+@@ -1401,7 +1411,7 @@ static ssize_t mt7915_tmr_spe_write(struct file *file, const char __user *ubuf,
  {
  	struct mt7915_dev *dev = file->private_data;
  	char buf[16];
@@ -75,7 +74,7 @@ diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/debugfs.c b/drivers/net/w
  
  	if (count >= sizeof(buf))
  		return -EINVAL;
-@@ -1409,13 +1419,16 @@
+@@ -1409,13 +1419,16 @@ static ssize_t mt7915_tmr_spe_write(struct file *file, const char __user *ubuf,
  		return -EFAULT;
  	buf[count] = '\0';
  
@@ -98,7 +97,7 @@ diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/debugfs.c b/drivers/net/w
  	return count;
  }
  
-@@ -1441,7 +1454,13 @@
+@@ -1441,7 +1454,13 @@ static int mt7915_tmr_mark_set(void *data, u64 val)
  {
  	struct mt7915_dev *dev = data;
  
@@ -112,7 +111,7 @@ diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/debugfs.c b/drivers/net/w
  	return 0;
  }
  
-@@ -1462,7 +1481,13 @@
+@@ -1462,7 +1481,13 @@ static int mt7915_tmr_rate_set(void *data, u64 val)
  
  	if (val & ~0xfffffc0fULL)
  		return -EINVAL;
@@ -126,7 +125,7 @@ diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/debugfs.c b/drivers/net/w
  	return 0;
  }
  
-@@ -1580,6 +1605,8 @@
+@@ -1580,6 +1605,8 @@ int mt7915_init_debugfs(struct mt7915_phy *phy)
  				    &mt7915_tmr_registers_fops);
  		debugfs_create_file("tmr_ctrl", 0200, dir, phy,
  				    &mt7915_tmr_ctrl_fops);
@@ -138,7 +137,7 @@ diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/debugfs.c b/drivers/net/w
 diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/mac.c b/drivers/net/wireless/mediatek/mt76/mt7915/mac.c
 --- a/drivers/net/wireless/mediatek/mt76/mt7915/mac.c
 +++ b/drivers/net/wireless/mediatek/mt76/mt7915/mac.c
-@@ -729,6 +729,24 @@
+@@ -729,6 +729,24 @@ void mt7915_mac_write_txwi(struct mt76_dev *dev, __le32 *txwi,
  		mt7915_mac_write_txwi_tm(mphy->priv, txwi, skb);
  }
  
@@ -163,7 +162,7 @@ diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/mac.c b/drivers/net/wirel
  int mt7915_tx_prepare_skb(struct mt76_dev *mdev, void *txwi_ptr,
  			  enum mt76_txq_id qid, struct mt76_wcid *wcid,
  			  struct ieee80211_sta *sta,
-@@ -744,6 +762,7 @@
+@@ -744,6 +762,7 @@ int mt7915_tx_prepare_skb(struct mt76_dev *mdev, void *txwi_ptr,
  	int id, i, nbuf = tx_info->nbuf - 1;
  	u8 *txwi = (u8 *)txwi_ptr;
  	int pid;
@@ -171,7 +170,7 @@ diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/mac.c b/drivers/net/wirel
  	bool tmr;
  
  	if (unlikely(tx_info->skb->len <= ETH_HLEN))
-@@ -753,10 +772,7 @@
+@@ -753,10 +772,7 @@ int mt7915_tx_prepare_skb(struct mt76_dev *mdev, void *txwi_ptr,
  		wcid = &dev->mt76.global_wcid;
  
  	/* Snapshot selection once: debugfs may change before TX status arrives. */
@@ -183,7 +182,7 @@ diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/mac.c b/drivers/net/wirel
  	if (tmr)
  		/* Also keep marked frames out of the untracked WED status path. */
  		info->flags |= IEEE80211_TX_CTL_REQ_TX_STATUS;
-@@ -791,6 +807,8 @@
+@@ -791,6 +807,8 @@ int mt7915_tx_prepare_skb(struct mt76_dev *mdev, void *txwi_ptr,
  		s8 spe = READ_ONCE(dev->tmr_spe);
  
  		txd[3] |= cpu_to_le32(MT_TXD3_TIMING_MEASURE);
@@ -192,7 +191,7 @@ diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/mac.c b/drivers/net/wirel
  		/* Send the probe on one chain: fixed OFDM 6M at 20 MHz, TXD SPE */
  		if (spe >= 0) {
  			txd[2] |= cpu_to_le32(MT_TXD2_FIX_RATE);
-@@ -1562,6 +1580,7 @@
+@@ -1562,6 +1580,7 @@ void mt7915_mac_reset_work(struct work_struct *work)
  	int i;
  
  	dev = container_of(work, struct mt7915_dev, reset_work);
@@ -203,39 +202,39 @@ diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/mac.c b/drivers/net/wirel
 diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/main.c b/drivers/net/wireless/mediatek/mt76/mt7915/main.c
 --- a/drivers/net/wireless/mediatek/mt76/mt7915/main.c
 +++ b/drivers/net/wireless/mediatek/mt76/mt7915/main.c
-@@ -112,6 +112,8 @@
- {
+@@ -113,6 +113,8 @@ static void mt7915_stop(struct ieee80211_hw *hw, bool suspend)
  	struct mt7915_dev *dev = mt7915_hw_dev(hw);
  	struct mt7915_phy *phy = mt7915_hw_phy(hw);
-+
-+	atomic_cmpxchg(&dev->tmr_probe_busy, 1, 2);
  
++	atomic_cmpxchg(&dev->tmr_probe_busy, 1, 2);
++
  	cancel_delayed_work_sync(&phy->mt76->mac_work);
  
-@@ -295,6 +297,8 @@
+ 	mutex_lock(&dev->mt76.mutex);
+@@ -305,6 +307,8 @@ static void mt7915_remove_interface(struct ieee80211_hw *hw,
  	mt7915_mcu_add_bss_info(phy, vif, false);
  	mt7915_mcu_add_sta(dev, vif, NULL, CONN_STATE_DISCONNECT, false);
- 	mt76_wcid_mask_clear(dev->mt76.wcid_mask, mvif->sta.wcid.idx);
-+
-+	atomic_cmpxchg(&dev->tmr_probe_busy, 1, 2);
  
++	atomic_cmpxchg(&dev->tmr_probe_busy, 1, 2);
++
  	mutex_lock(&dev->mt76.mutex);
  	mt76_testmode_reset(phy->mt76, true);
-@@ -1158,6 +1162,10 @@
- 	struct mt7915_sta *msta = (struct mt7915_sta *)sta->drv_priv;
+ 	mutex_unlock(&dev->mt76.mutex);
+@@ -1171,6 +1175,10 @@ static void mt7915_sta_statistics(struct ieee80211_hw *hw,
  	struct rate_info *txrate = &msta->wcid.rate;
  	struct rate_info rxrate = {};
-+
+ 
 +	/* The burst's link query needs only mac80211's mesh state. */
 +	if (current == READ_ONCE(phy->dev->tmr_probe_task))
 +		return;
- 
++
  	if (!mt7915_mcu_get_rx_rate(phy, vif, sta, &rxrate)) {
  		sinfo->rxrate = rxrate;
+ 		sinfo->filled |= BIT_ULL(NL80211_STA_INFO_RX_BITRATE);
 diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/mt7915.h b/drivers/net/wireless/mediatek/mt76/mt7915/mt7915.h
 --- a/drivers/net/wireless/mediatek/mt76/mt7915/mt7915.h
 +++ b/drivers/net/wireless/mediatek/mt76/mt7915/mt7915.h
-@@ -260,6 +260,13 @@
+@@ -260,6 +260,13 @@ struct mt7915_dev {
  	u32 tmr_mark;
  	/* if non-zero, TXD DW6 rate/width bits (mask 0xfffffc0f) for marked frames instead of OFDM 6M at 20 MHz */
  	u32 tmr_rate;
@@ -249,7 +248,7 @@ diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/mt7915.h b/drivers/net/wi
  
  	struct mt7915_hif *hif2;
  	struct mt7915_reg_desc reg;
-@@ -622,6 +629,8 @@
+@@ -640,6 +647,8 @@ void mt7915_update_channel(struct mt76_phy *mphy);
  int mt7915_mcu_muru_debug_set(struct mt7915_dev *dev, bool enable);
  int mt7915_mcu_muru_debug_get(struct mt7915_phy *phy);
  int mt7915_mcu_wed_enable_rx_stats(struct mt7915_dev *dev);

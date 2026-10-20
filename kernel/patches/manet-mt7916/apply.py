@@ -9,8 +9,8 @@ import subprocess
 import tempfile
 
 BASES = {
-    '95b85bebbedcaedfa7ca79116ed38b7376fba412': 'cm4',
-    '7d0a66e4bb9081d75c82ec4957c50034cb0ea449': 'r3a',
+    '5d64d1ea73716526ed9c0ed184a9cb5f6042e32c': 'cm4',
+    '2ff600d29ee478d0a8d46ef8a58afb5e038fe692': 'r3a',
 }
 HERE = Path(__file__).resolve().parent
 PREFIXES = ('net/mac80211/', 'net/wireless/', 'drivers/net/wireless/mediatek/mt76/mt7915/')
