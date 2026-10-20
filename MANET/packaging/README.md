@@ -227,13 +227,17 @@ Universal files come from this repository:
 - `MANET/networkd-dispatcher` -> dispatcher hook locations
 - `MANET/share/manet` -> `/usr/local/share/manet`
 - `MANET/man/man8` -> `/usr/local/share/man/man8` (mode 0644)
+- `LICENSE`, `AUTHORS`, `THIRD_PARTY_NOTICES` -> `/usr/local/share/doc/manet`
 - `MANET/etc` -> `/etc`
 - `MANET/root/regulatory.db` -> `/root/regulatory.db`
 
 All four builders source `lib-man.sh` and call `stage_man_pages` for the
 section 8 manuals. Keep command suffixes in page names so commands such as
-`man 8 node-update.sh` work. Lint source pages with `mandoc -T lint`, or
-`groff -mandoc -ww -z` when mandoc is unavailable.
+`man 8 node-update.sh` work. Lint source pages with `mandoc -T lint -W warning`,
+or `groff -mandoc -ww -z` when mandoc is unavailable. They also source
+`lib-notices.sh` and call `stage_notices`, so every archive carries the license
+and third-party notices. Update `THIRD_PARTY_NOTICES` when a release adds,
+removes, or changes the version of a third-party component.
 
 Board-specific overlay files come from a release artifact or a local build
 directory, never from committed source. CM4 and Rock 3A default to

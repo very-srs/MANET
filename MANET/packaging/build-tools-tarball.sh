@@ -91,6 +91,8 @@ stage_mesh_supplicant "$STAGE" "$REPO_ROOT"
 
 . "$SCRIPT_DIR/lib-man.sh"
 stage_man_pages "$STAGE" "$REPO_ROOT"
+. "$SCRIPT_DIR/lib-notices.sh"
+stage_notices "$STAGE" "$REPO_ROOT"
 
 mkdir -p "$STAGE/etc/systemd/system/timers.target.wants"
 ln -sf ../manet-auto-update.timer \

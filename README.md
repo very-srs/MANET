@@ -132,6 +132,9 @@ package set stable without rebuilding it.
 
 MANET's own code is released under the [MIT license](LICENSE). The
 copyright holders are listed in [AUTHORS](AUTHORS).
+[THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES) lists every third-party component
+in the release archives, with its license and the offer of source code.
+Archives install all three files under `/usr/local/share/doc/manet/`.
 
 Some files in this repository are other projects' work and keep their own
 licenses:
