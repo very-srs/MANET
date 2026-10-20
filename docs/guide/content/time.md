@@ -9,8 +9,10 @@
 A radio can learn the time from GPS or the internet. Other radios can ask
 it for the time.
 
-The radios need matching clocks to do some jobs together. If they are still
-waiting for time, give one a working GPS fix or internet connection.
+The radios need matching clocks to do some jobs together. With no GPS or
+internet, they wait about three minutes and then all use one radio's clock.
+It may be wrong, but it is the same on every radio. Give one radio GPS or
+internet if you need the right time.
 
 Knowing the time does not tell a radio where it is.
 
@@ -24,9 +26,10 @@ change too early or reject another's message. MANET therefore verifies a
 time source before enabling timed control.
 
 A GPS receiver with a usable fix can supply time. A radio with its own
-internet uplink can obtain time from public time servers. Other radios can
-obtain time from a reachable mesh radio that advertises a qualified source.
-They do not all need separate internet connections.
+internet uplink can obtain time from public time servers. Other radios get
+time from radios they can reach. They do not all need separate internet
+connections. A radio that had GPS or internet time earlier is preferred over
+one that only learned the time from other radios.
 
 ### What to look for
 
@@ -35,15 +38,20 @@ source and whether time is ready. GPS details show whether a receiver has
 a position fix. A receiver being plugged in is not the same as a usable
 fix, and a gateway advertisement is not proof that a time check succeeded.
 
-At startup, allow the source to become ready. If no source is available,
-provide GPS reception or a working uplink and wait for the check. The radio
-can still search for peers while timed control is gated. It does not invent
-a reliable time just because another radio is nearby.
+At startup, a radio asks the radios around it for the time. One that had
+GPS or internet time answers within a minute or so. If no radio in reach has
+a clock it trusts, they wait about three minutes, then all follow one radio's
+clock. Timed control starts working, but that clock can be off from real time
+by however far that radio was off.
 
-After an initial successful check, losing the source does not immediately
-stop the mesh. The radio continues on its own clock and tries to refresh
-time later. The longer it goes without a source, the less confidence you
-should place in clock agreement. Rebooting starts a new qualification cycle.
+A radio sets its clock in one jump only at its first sync after startup.
+After that it corrects gradually. If GPS or internet appears after the radios
+have agreed on a wrong time, they move toward it slowly, less than a minute
+a day. Reboot a radio to make it take the right time at once.
+
+After an initial successful check, losing the source does not stop the mesh.
+The radio continues on its own clock. It checks again when another radio
+joins, when a GPS or internet source appears, and once a day.
 
 ### Time is separate from location
 
@@ -64,10 +72,9 @@ GPS time source.
 
 A recent GPS fix enables the SHM refclock. A direct uplink enables configured
 internet servers with Network Time Security (NTS), with acquisition bound
-to the uplink interface. Ordinary mesh clients receive neither unconditional
-internet sources nor a fabricated local-stratum fallback. Only qualified
-source profiles serve time to the configured mesh networks. Idle/client
-profiles do not advertise themselves as sources.
+to the uplink interface. Ordinary mesh nodes never receive unconditional
+internet sources. Only qualified GPS and NTS sources set `is_ntp_server` in
+telemetry. Mesh time between other nodes uses chrony's orphan mode, below.
 
 Qualification checks chrony command success, a real reference, stratum 1–15,
 synchronized leap state, at most 0.1 seconds remaining system-clock
@@ -77,43 +84,54 @@ condition measures remaining correction, **not absolute UTC accuracy**.
 
 ### Peer selection uses evidence independent of the clock being repaired
 
-The controller joins advertised time-server identities to BATMAN radio
-aliases, accepts only unambiguous IPv4 host addresses inside the mesh CIDR,
-and requires a selected route with positive throughput and last-seen age
-no greater than thirty seconds. It ranks by throughput, with a deterministic
-MAC tie-break, excluding self and shutting-down nodes.
+The controller joins registry identities to BATMAN radio aliases, accepts
+only unambiguous IPv4 host addresses inside the mesh CIDR, and requires a
+selected route with positive throughput and last-seen age no greater than
+thirty seconds. It lists up to eight peers, advertised real sources first,
+then by throughput, excluding self and shutting-down nodes.
 
 Peer wall-clock timestamps cannot establish bootstrap freshness when the
 local wall clock is wrong. Live kernel route age and an actual NTP sample
-from the selected peer provide the relevant evidence. A cached service
-advertisement is only a candidate: it can outlive a lost source until the
-next regular Alfred telemetry publication.
+from a listed peer provide the relevant evidence.
 
-No usable candidate causes a thirty-second discovery retry. A chosen peer
-gets a ninety-second attempt. Failure excludes it for five minutes so
-another can be tried. Monotonic deadlines and exclusions persist across
-service restarts in `/run/mesh-time-client.json`, without granting extra
-attempt time. Success must refer to the selected address and a sample from
-the current attempt.
+### Mesh time on demand
+
+Between windows chronyd is stopped. `chrony.socket` holds UDP 123, so a
+peer's request starts chronyd with the sockets already bound. `chrony.service`
+does not start at boot, and the socket is armed only after the controller
+writes this boot's profile, so a rebooted node never serves a stale clock
+from the previous boot's profile. Windows open
+at boot, when a peer arrives or returns after ten minutes away, when a real
+source is newly advertised, once a day, and when a request wakes chronyd.
+The first window of a boot lasts twenty minutes so chrony learns the
+crystal's drift. Later windows close after a sync from that window, or at
+three minutes.
+
+Each window profile polls the listed peers. A node with a clock also runs
+`local stratum N orphan`: stratum 8 after GPS or internet time earlier this
+boot, stratum 10 after mesh time only. A node that never synced serves
+nothing for three minutes, then uses stratum 12. chrony prefers the lowest
+stratum and, among equal strata, the lowest address, so every node agrees on
+one reference. A node whose own reference stays selected for sixty seconds
+records `mesh` as its source.
 
 ### Initial synchronization, refresh, and holdover
 
 Successful initial synchronization creates `/run/initial_time_synced`.
-For a mesh client, chrony then stops and the quiet profile remains. The
-next refresh is due after six hours plus a per-boot stagger of zero to ten
-minutes. Source nodes keep chrony available. Local role checks can promote
-a client when GPS or an uplink appears.
+The next refresh is due after twenty-four hours plus a per-boot stagger of
+zero to ten minutes. Source nodes keep chrony running. Local role checks can
+promote a node when GPS or an uplink appears.
 
 Initial acquisition may step the clock. After the first verified success,
 the controller disarms startup stepping and subsequent corrections slew.
 This avoids ordinary refreshes jumping backward through the timestamps used
-for channel/admin replay checks. A large correction may not settle within a
-bounded attempt. It is not forced by stepping.
+for channel/admin replay checks. Groups that synced separately to different
+times converge at the kernel slew rate, not by stepping.
 
 Failure after initial success retains the boot-ready marker but withdraws
 source-serving flags and keeps retrying. A marker is evidence of a past
 success, not current accuracy. `/run` state disappears on reboot. Missing
-refresh state cannot grant another six-hour delay merely because the marker
+refresh state cannot grant another day's delay merely because the marker
 exists. The [time reference](../../../docs/node-tools-internals.md#time-synchronization)
 describes remaining drift. The
 [mesh guide](mesh.md#developer-one-connected-component-one-channel-decision)

@@ -94,6 +94,7 @@ REQUIRED = MARKERS | {
     "etc/systemd/system/node-manager.service.d/acs-agreement.conf",
     "usr/local/bin/mesh-time-sync.py", "usr/local/bin/one-shot-time-sync.sh",
     "etc/systemd/system/one-shot-time-sync.service",
+    "etc/systemd/system/chrony.socket",
     "etc/systemd/system/node-manager.service.d/time-sync.conf",
     "etc/systemd/system/node-manager.service.d/select.conf",
     "usr/local/bin/node-manager-select.sh",
@@ -862,6 +863,9 @@ class Updater:
         run_command(["systemctl", "enable", "--now", "manet-logrotate.timer"])
         run_command(["systemctl", "enable", "--now", "manet-auto-update.path"])
         run_command(["systemctl", "enable", "--now", "manet-auto-update.timer"])
+        # The time service starts chrony. Started at boot, chronyd would serve
+        # the previous boot's profile before the service replaces it.
+        run_command(["systemctl", "disable", "chrony.service"])
         run_command(["systemctl", "enable", "manet-wifi-uplink.service"])
         run_command(["systemctl", "start", "manet-wifi-uplink.service"])
         run_command(["systemctl", "try-restart", "manet-wifi-client@*.service"])

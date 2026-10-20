@@ -20,7 +20,7 @@ You may need to reconnect when the job moves or you move too far away from your 
 | MediaMTX | Hosts media streams on an elected radio. | A compatible stream source and viewing application, with their stream settings. |
 | Mumble | Hosts a Mumble voice server on an elected radio. | A Mumble client and the relevant account/channel settings. |
 | Syncthing | Synchronizes configured files between peers, including the shared Mumble database. | Any additional folder configuration beyond the project defaults. |
-| Time service | Shares a qualified clock source. | GPS or internet at a suitable node; see [time](time.md). |
+| Time service | Shares one clock across the mesh. | GPS or internet when present, otherwise the best mesh clock; see [time](time.md). |
 
 The [physical PTT voice system](voice.md) is a separate service from Mumble.
 Installing a Mumble client is not required to use the radio's headset/PTT.

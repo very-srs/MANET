@@ -1,0 +1,7 @@
+[Unit]
+Description=Wake chrony for mesh NTP requests
+
+[Socket]
+ListenDatagram=0.0.0.0:123
+ListenDatagram=[::]:123
+BindIPv6Only=ipv6-only

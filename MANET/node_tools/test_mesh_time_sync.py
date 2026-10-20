@@ -79,6 +79,12 @@ class SelectionTests(unittest.TestCase):
         self.assertEqual(len(self.pick(rows)), 2)
         self.assertEqual(self.pick(rows)[0]['mac'], PEER)
 
+    def test_all_peers_can_be_listed_with_their_server_flag(self):
+        registry = node(PEER, '10.30.2.7', RADIO, ntp=False) + node(THIRD, '10.30.2.8')
+        peers = time_sync.candidates(registry, [route(RADIO, 900), route(THIRD)], OWN, NETWORK, servers_only=False)
+        self.assertEqual([(p['mac'], p['server']) for p in peers], [(PEER, False), (THIRD, True)])
+        self.assertEqual(self.pick([route(RADIO, 900), route(THIRD)], registry)[0]['mac'], THIRD)
+
     def test_self_unadvertised_shutdown_and_old_routes_are_excluded(self):
         for registry in [node(PEER, '10.30.2.7', RADIO, ntp=False),
                          node(PEER, '10.30.2.7', RADIO, state='SHUTTING_DOWN')]:
@@ -116,6 +122,11 @@ class SelectionTests(unittest.TestCase):
 
 
 class ClockTests(unittest.TestCase):
+    def test_local_reference_is_recognized_only_when_synchronized(self):
+        self.assertTrue(time_sync.local_active(tracking(refid='7F7F0101', stratum=12)))
+        for text in [tracking(), tracking(refid='7F7F0101', leap='Not synchronised'), '200 OK']:
+            self.assertFalse(time_sync.local_active(text), text)
+
     def test_remaining_correction_and_reference_are_checked(self):
         self.assertTrue(time_sync.settled(tracking()))
         for text in [tracking('0.101'), tracking('-0.2'), tracking('nan'), tracking('inf'),
@@ -165,9 +176,17 @@ class ClockTests(unittest.TestCase):
         self.assertNotIn('nocerttimecheck', warm)
         self.assertNotIn('makestep', warm)
         self.assertIn('refclock SHM 0 refid GPS', warm)
-        client = time_sync.chrony_config(network, peer='10.44.0.7')
+        client = time_sync.chrony_config(network, peers=['10.44.0.7', '10.44.0.8'])
         self.assertIn('server 10.44.0.7 iburst', client)
+        self.assertIn('server 10.44.0.8 iburst', client)
         self.assertIn('deny all', client)
+        self.assertNotIn('local ', client)
+        orphan = time_sync.chrony_config(network, peers=['10.44.0.7'], stratum=10)
+        self.assertIn('local stratum 10 orphan distance 0.1', orphan)
+        self.assertIn('allow 10.44.0.0/16', orphan)
+        self.assertNotIn('deny all', orphan)
+        with self.assertRaises(ValueError):
+            time_sync.chrony_config(network, peers=['10.44.0.7\nallow all'])
         self.assertIn('corrtimeratio 1', client)
         self.assertIn('leapsecmode slew', client)
         self.assertNotIn('pool ', client)
@@ -197,7 +216,8 @@ class RuntimeTests(unittest.TestCase):
                         REGISTRY_STATE_FILE=str(self.root / 'registry'), BATCTL_PATH=str(self.bin / 'batctl'),
                         TEST_ROOT=str(self.root))
         self.command('systemctl', '''
-active = root / 'active'
+unit = sys.argv[-1]
+active = root / ('active' if unit == 'chrony.service' else unit)
 if (root / 'systemctl-fail').exists():
     sys.exit(1)
 if sys.argv[1] == 'is-active':
@@ -269,76 +289,305 @@ with (root / 'commands').open('a') as out:
     def history(self):
         return (self.root / 'commands').read_text() if (self.root / 'commands').exists() else ''
 
+    def conf(self):
+        return (self.root / 'chrony.conf').read_text()
+
+    def sync(self):
+        """Complete the boot window's peer sync and let the first window end."""
+        self.step(); self.good(); self.step(5)
+        self.assertTrue(self.service.marker.exists())
+        self.clock = self.service.state['first_until']
+        self.step()
+        self.assertNotIn('window', self.service.state)
+        self.unsynced()
+
+    def unsynced(self):
+        """A newly started chronyd has no selected source yet."""
+        (self.root / 'tracking').write_text(tracking(leap='Not synchronised'))
+        (self.root / 'sources').write_text(sources(selected='?'))
+
     def test_real_wrapper_and_service_candidate_path_never_uses_text_table(self):
         result = subprocess.run(['bash', str(TOOLS / 'one-shot-time-sync.sh'), '--once'], env=self.env,
                                 capture_output=True, text=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn('server 10.30.2.7 iburst', (self.root / 'chrony.conf').read_text())
+        self.assertIn('server 10.30.2.7 iburst', self.conf())
+        self.assertIn('server 10.30.2.8 iburst', self.conf())
         self.assertIn('batctl meshif bat0 originators_json', self.history())
         self.assertFalse(self.service.marker.exists())
 
-    def test_success_stops_polling_and_keeps_local_role_checks(self):
-        self.step(); self.good(); self.step(5)
-        self.assertTrue(self.service.marker.exists())
-        self.assertFalse((self.root / 'active').exists())
-        self.assertNotIn('server ', (self.root / 'chrony.conf').read_text())
+    def test_socket_is_bound_before_chrony_starts(self):
+        self.step()
+        history = self.history()
+        self.assertLess(history.index('systemctl start chrony.socket'),
+                        history.index('systemctl restart chrony.service'))
+        self.assertTrue((self.root / 'chrony.socket').exists())
+
+    def test_socket_is_armed_only_after_this_boots_profile_is_written(self):
+        (self.root / 'chrony.conf').write_text('local stratum 8 orphan distance 0.1\nallow 10.30.2.0/24\n')
+        writes = []
+        original = time_sync.atomic_text
+
+        def record(path, text):
+            writes.append((path.name, (self.root / 'chrony.socket').exists()))
+            original(path, text)
+        with patch.object(time_sync, 'atomic_text', record):
+            self.step()
+        self.assertEqual(writes[0], ('chrony.conf', False))
+        self.assertNotIn('local ', self.conf())
+        self.assertTrue((self.root / 'chrony.socket').exists())
+
+    def test_boot_never_starts_chrony_with_a_previous_profile(self):
+        for name in ('firstrun.sh.template', 'rock3a-provision.sh.template'):
+            text = (TOOLS.parent / 'provisioning' / name).read_text()
+            self.assertIn('systemctl disable chrony.service', text)
+            self.assertNotIn('systemctl enable chrony.service', text)
+        self.assertIn('"disable", "chrony.service"', (TOOLS / 'node-update.py').read_text())
+
+    def test_running_chrony_is_stopped_to_bind_the_socket_and_started_again(self):
+        (self.root / 'active').touch()
+        self.service.arm_socket()
+        self.assertEqual([line for line in self.history().splitlines() if 'is-active' not in line], [
+            'systemctl stop chrony.service', 'systemctl start chrony.socket', 'systemctl start chrony.service'])
         (self.root / 'commands').write_text('')
-        self.step(30)
-        self.assertNotIn('batctl', self.history())
+        self.service.arm_socket()
+        self.assertEqual(self.history(), '')
+
+    def test_unsynced_node_polls_peers_without_serving_its_own_clock(self):
+        self.step()
+        self.assertTrue((self.root / 'active').exists())
+        self.assertIn('deny all', self.conf())
+        self.assertNotIn('local ', self.conf())
+        self.assertIn('makestep 0.1 3', self.conf())
+        self.assertEqual(self.service.state['window']['reason'], 'boot')
+
+    def test_peer_sync_steps_once_and_keeps_the_first_window_open(self):
+        self.step(); self.good(); self.step(5)
+        self.assertEqual(self.service.marker.read_text(), '10.30.2.7\n')
+        self.assertIn('chronyc makestep 0.1 0', self.history())
+        self.assertTrue((self.root / 'active').exists())
+        self.step(5)
+        self.assertIn('local stratum 10 orphan', self.conf())
+        self.assertNotIn('makestep', self.conf())
+        self.clock = self.service.state['first_until'] - 1
+        self.step()
+        self.assertTrue((self.root / 'active').exists())
+        self.step(1)
+        self.assertFalse((self.root / 'active').exists())
+        self.assertIn('local stratum 10 orphan', self.conf())
+
+    def test_idle_node_makes_no_mesh_queries_beyond_route_checks(self):
+        self.sync()
+        (self.root / 'commands').write_text('')
+        self.step(15)
         self.assertNotIn('chronyc', self.history())
         self.assertNotIn('restart', self.history())
         self.assertFalse((self.root / 'mesh-ntp.state').exists())
 
-    def test_refresh_waits_six_hours_and_survives_process_restart(self):
-        self.step(); self.good(); self.step(5)
+    def test_refresh_waits_a_day_and_survives_process_restart(self):
+        self.sync()
         due = self.service.state['refresh_at']
-        self.assertGreaterEqual(due, self.clock + 6 * 60 * 60)
-        self.assertLessEqual(due, self.clock + 6 * 60 * 60 + 600)
+        self.assertGreaterEqual(due, self.clock - time_sync.FIRST_WINDOW_SECONDS + 24 * 60 * 60)
+        self.assertLessEqual(due, self.clock + 24 * 60 * 60 + 600)
         self.service = time_sync.TimeService()
-        (self.root / 'commands').write_text('')
         self.clock = due - 1
         self.step()
-        self.assertNotIn('batctl', self.history())
-        self.assertNotIn('chronyc', self.history())
+        self.assertNotIn('window', self.service.state)
         self.step(1)
-        self.assertIn('pending', self.service.state)
-        self.assertIn('server 10.30.2.7 iburst', (self.root / 'chrony.conf').read_text())
-        self.assertNotIn('makestep', (self.root / 'chrony.conf').read_text())
-        self.step(5)
-        self.assertNotIn('pending', self.service.state)
+        self.assertEqual(self.service.state['window']['reason'], 'refresh')
+        self.assertNotIn('makestep', self.conf())
+        self.good(age='1'); self.step(5)
+        self.assertNotIn('window', self.service.state)
         self.assertFalse((self.root / 'active').exists())
-        self.assertGreater(self.service.state['refresh_at'], due + 6 * 60 * 60)
+        self.assertGreater(self.service.state['refresh_at'], due + 24 * 60 * 60 - 10)
 
     def test_refresh_schedule_is_unaffected_by_wall_clock_jumps(self):
-        self.step(); self.good(); self.step(5)
+        self.sync()
         due = self.service.state['refresh_at']
         with patch.object(time_sync.time, 'monotonic', return_value=due - 1):
             for wall in [-100000, 10000000000]:
                 with patch.object(time_sync.time, 'time', return_value=wall):
                     self.service.step()
-                    self.assertNotIn('pending', self.service.state)
+                    self.assertNotIn('window', self.service.state)
                     self.assertEqual(self.service.state['refresh_at'], due)
 
-    def test_missing_or_failed_refresh_preserves_holdover_and_backoff(self):
-        self.step(); self.good(); self.step(5)
+    def test_refresh_without_a_peer_retries_later_and_keeps_the_marker(self):
+        self.sync()
         due = self.service.state['refresh_at']
         (self.root / 'routes').write_text('[]')
+        (self.root / 'tracking').write_text(tracking(leap='Not synchronised'))
         self.clock = due
         self.step()
+        self.assertEqual(self.service.state['window']['reason'], 'refresh')
+        self.step(time_sync.WINDOW_SECONDS)
+        self.assertNotIn('window', self.service.state)
         self.assertTrue(self.service.marker.exists())
-        self.assertEqual(self.service.state['refresh_at'], due)
         self.assertFalse((self.root / 'active').exists())
-        (self.root / 'routes').write_text(json.dumps([route(RADIO), route(THIRD, 100)]))
-        (self.root / 'tracking').write_text(tracking(correction='2.0'))
-        self.step(30); self.step(5)
-        self.assertIn('pending', self.service.state)
-        self.step(90)
-        self.assertTrue(self.service.marker.exists())
-        self.assertEqual(self.service.state['refresh_at'], due)
-        self.assertFalse((self.root / 'active').exists())
+        self.assertEqual(self.service.state['refresh_at'], self.clock + time_sync.RETRY_SECONDS)
+
+    def test_missing_refresh_state_does_not_grant_a_new_holdover_window(self):
+        self.sync()
+        self.service.state_path.unlink()
+        self.service = time_sync.TimeService()
+        self.step()
+        self.assertIn('window', self.service.state)
+        self.assertNotIn('makestep', self.conf())
+
+    def test_refreshes_continue_for_multiple_days_without_continuous_polling(self):
+        self.sync()
+        start = self.clock
+        jitter = self.service.state['refresh_jitter']
+        for _ in range(3):
+            self.service = time_sync.TimeService()
+            self.clock = self.service.state['refresh_at'] - 1
+            (self.root / 'commands').write_text('')
+            self.step()
+            self.assertNotIn('chronyc', self.history())
+            self.step(1); self.good(); self.step(5); self.unsynced()
+            self.assertNotIn('window', self.service.state)
+            self.assertFalse((self.root / 'active').exists())
+            self.assertNotIn('makestep', self.history())
+            self.assertEqual(self.service.state['refresh_jitter'], jitter)
+        self.assertGreaterEqual(self.clock - start, 48 * 60 * 60)
+
+    def test_peer_appearing_after_boot_is_added_to_the_window(self):
+        (self.root / 'routes').write_text('[]')
+        self.step()
+        self.assertNotIn('server ', self.conf())
+        (self.root / 'routes').write_text(json.dumps([route(RADIO)]))
+        self.step(5)
+        self.assertIn('server 10.30.2.7 iburst', self.conf())
+        self.assertEqual(self.history().count('systemctl restart chrony.service'), 2)
+
+    def test_failed_query_does_not_start_chrony_or_claim_success(self):
+        (self.root / 'batctl-fail').touch()
+        self.assertEqual(self.step(), 30)
+        self.assertFalse(self.service.marker.exists())
+        self.assertNotIn('restart', self.history())
+
+    def test_cold_mesh_free_runs_after_three_minutes(self):
+        (self.root / 'routes').write_text('[]')
+        self.step()
+        self.step(time_sync.COLD_SECONDS - 1)
+        self.assertNotIn('local ', self.conf())
+        self.step(1)
+        self.assertIn('local stratum 12 orphan', self.conf())
+        self.assertIn('makestep 0.1 3', self.conf())
+        (self.root / 'tracking').write_text(tracking(refid='7F7F0101', stratum=12))
+        self.step(5)
+        self.step(time_sync.MASTER_SECONDS - 1)
+        self.assertFalse(self.service.marker.exists())
+        self.step(1)
+        self.assertEqual(self.service.marker.read_text(), 'mesh\n')
+        self.step(5)
+        self.assertIn('local stratum 10 orphan', self.conf())
+
+    def test_cold_node_that_hears_a_better_clock_follows_it(self):
+        self.step(); self.step(time_sync.COLD_SECONDS)
+        self.step(5)
+        self.assertIn('local stratum 12 orphan', self.conf())
+        (self.root / 'tracking').write_text(tracking(refid='7F7F0101', stratum=12))
         self.step(30)
-        self.assertEqual(self.service.state['pending']['mac'], THIRD)
-        self.assertNotIn('makestep', (self.root / 'chrony.conf').read_text())
+        self.good(age='1'); self.step(5)
+        self.assertEqual(self.service.marker.read_text(), '10.30.2.7\n')
+
+    def test_real_source_earlier_this_boot_outranks_mesh_time(self):
+        self.gps(); self.good('GPS', '#'); self.step()
+        self.gps(fix=False); self.step(15)
+        self.assertIn('local stratum 8 orphan', self.conf())
+        self.service = time_sync.TimeService()
+        self.step(15)
+        self.assertIn('local stratum 8 orphan', self.conf())
+
+    def test_peer_request_wakes_a_short_serving_window(self):
+        self.sync()
+        (self.root / 'active').touch()
+        (self.root / 'commands').write_text('')
+        self.step(15)
+        self.assertEqual(self.service.state['window']['reason'], 'wake')
+        self.assertNotIn('restart', self.history())
+        self.good(); self.step(5)
+        self.assertTrue((self.root / 'active').exists())
+        self.step(time_sync.WINDOW_SECONDS)
+        self.assertFalse((self.root / 'active').exists())
+        self.assertNotIn('window', self.service.state)
+
+    def test_joining_node_and_new_source_open_windows_once(self):
+        self.sync()
+        newcomer = '02:00:00:00:00:04'
+        with (self.root / 'registry').open('a') as registry:
+            registry.write(node(newcomer, '10.30.2.9', ntp=False))
+        (self.root / 'routes').write_text(json.dumps([route(RADIO, 900), route(THIRD, 432), route(newcomer)]))
+        self.step(15)
+        self.assertEqual(self.service.state['window']['reason'], 'join')
+        self.assertIn('server 10.30.2.9 iburst', self.conf())
+        self.good(); self.step(5); self.unsynced()
+        self.assertNotIn('window', self.service.state)
+        self.step(15)
+        self.assertNotIn('window', self.service.state)
+        (self.root / 'registry').write_text((self.root / 'registry').read_text().replace(
+            "NODE_020000000004_IS_NTP_SERVER='false'", "NODE_020000000004_IS_NTP_SERVER='true'"))
+        self.step(15)
+        self.assertEqual(self.service.state['window']['reason'], 'source')
+
+    def test_brief_route_loss_is_not_a_new_arrival(self):
+        self.sync()
+        routes = (self.root / 'routes').read_text()
+        (self.root / 'routes').write_text('[]')
+        self.step(60)
+        (self.root / 'routes').write_text(routes)
+        self.step(60)
+        self.assertNotIn('window', self.service.state)
+
+    def test_real_sources_come_first_and_peer_count_is_bounded(self):
+        registry, routes = node(OWN, '10.30.2.6', ntp=False), []
+        for index in range(10):
+            mac = '02:00:00:00:10:%02x' % index
+            registry += node(mac, '10.30.2.%d' % (20 + index), ntp=index == 9)
+            routes.append(route(mac, 1000 - index))
+        (self.root / 'registry').write_text(registry)
+        (self.root / 'routes').write_text(json.dumps(routes))
+        self.step()
+        servers = [line for line in self.conf().splitlines() if line.startswith('server ')]
+        self.assertEqual(len(servers), time_sync.MAX_PEERS)
+        self.assertIn('server 10.30.2.29 iburst', servers)
+        self.assertNotIn('server 10.30.2.27 iburst', servers)
+        self.assertEqual(servers, sorted(servers, key=lambda line: ipaddress.IPv4Address(line.split()[1])))
+
+    def test_route_metric_changes_do_not_restart_chrony(self):
+        self.step()
+        (self.root / 'routes').write_text(json.dumps([route(RADIO, 100), route(THIRD, 900)]))
+        self.step(5)
+        self.assertEqual(self.history().count('systemctl restart chrony.service'), 1)
+
+    def test_restart_preserves_the_window_deadline(self):
+        self.step()
+        until = self.service.state['window']['until']
+        self.service = time_sync.TimeService()
+        self.step(30)
+        self.assertEqual(self.service.state['window']['until'], until)
+
+    def test_wall_clock_jump_does_not_extend_a_window(self):
+        self.sync()
+        (self.root / 'active').touch()
+        self.step(15)
+        until = self.service.state['window']['until']
+        with patch.object(time_sync.time, 'monotonic', return_value=until), \
+                patch.object(time_sync.time, 'time', return_value=-100000):
+            self.service.step()
+        self.assertNotIn('window', self.service.state)
+
+    def test_unsettled_unknown_or_old_source_cannot_complete(self):
+        self.step()
+        for address, correction, age in [('10.30.2.7', '0.5', '1'), ('10.30.2.99', '0', '1'), ('10.30.2.7', '0', '60')]:
+            self.good(address, correction=correction, age=age)
+            self.step(1)
+            self.assertFalse(self.service.marker.exists())
+            self.assertTrue((self.root / 'active').exists())
+
+    def test_failed_chronyc_is_not_evidence_of_sync(self):
+        self.step(); (self.root / 'chronyc-fail').touch()
+        self.step(5)
+        self.assertFalse(self.service.marker.exists())
 
     def test_local_source_extends_holdover_without_peer_polls(self):
         self.gps(); self.good('GPS', '#'); self.step()
@@ -349,8 +598,6 @@ with (root / 'commands').open('a') as out:
         self.assertNotIn('batctl', self.history())
         self.gps(fix=False); self.step(15)
         self.assertEqual(self.service.state['refresh_at'], last_due)
-        self.assertNotIn('pending', self.service.state)
-        self.assertFalse((self.root / 'active').exists())
 
     def test_startup_steps_are_disarmed_live_and_on_later_role_changes(self):
         self.gps(); self.good('GPS', '#'); self.step()
@@ -362,14 +609,6 @@ with (root / 'commands').open('a') as out:
         self.assertIn('bindacqdevice usb0', (self.root / 'chrony.conf').read_text())
         self.assertNotIn('makestep', (self.root / 'chrony.conf').read_text())
         self.assertEqual(self.history().count('chronyc makestep 0.1 0'), 1)
-
-    def test_missing_refresh_state_does_not_grant_a_new_holdover_window(self):
-        self.step(); self.good(); self.step(5)
-        self.service.state_path.unlink()
-        self.service = time_sync.TimeService()
-        self.step()
-        self.assertIn('pending', self.service.state)
-        self.assertNotIn('makestep', (self.root / 'chrony.conf').read_text())
 
     def test_failed_step_disarming_cannot_claim_initial_sync(self):
         self.gps(); self.good('GPS', '#')
@@ -383,78 +622,6 @@ with (root / 'commands').open('a') as out:
         self.assertTrue(self.service.marker.exists())
         self.assertTrue((self.root / 'mesh-ntp-gps.state').exists())
 
-    def test_refreshes_continue_for_multiple_days_without_continuous_polling(self):
-        self.step(); self.good(); self.step(5)
-        start = self.clock
-        jitter = self.service.state['refresh_jitter']
-        for _ in range(8):
-            self.service = time_sync.TimeService()
-            self.clock = self.service.state['refresh_at'] - 1
-            (self.root / 'commands').write_text('')
-            self.step()
-            self.assertNotIn('batctl', self.history())
-            self.assertNotIn('chronyc', self.history())
-            self.step(1); self.step(5)
-            self.assertNotIn('pending', self.service.state)
-            self.assertFalse((self.root / 'active').exists())
-            self.assertNotIn('makestep', self.history())
-            self.assertEqual(self.service.state['refresh_jitter'], jitter)
-        self.assertGreaterEqual(self.clock - start, 48 * 60 * 60)
-
-    def test_no_server_at_boot_is_retried_when_one_appears(self):
-        (self.root / 'routes').write_text('[]')
-        self.assertEqual(self.step(), 30)
-        self.assertNotIn('restart', self.history())
-        (self.root / 'routes').write_text(json.dumps([route(RADIO)]))
-        self.step(30)
-        self.assertEqual(self.service.state['pending']['address'], '10.30.2.7')
-
-    def test_failed_query_does_not_start_chrony_or_claim_success(self):
-        (self.root / 'batctl-fail').touch()
-        self.assertEqual(self.step(), 30)
-        self.assertFalse(self.service.marker.exists())
-        self.assertNotIn('restart', self.history())
-
-    def test_timeout_stops_failed_peer_and_tries_another(self):
-        self.step()
-        self.step(90)
-        self.assertFalse(self.service.marker.exists())
-        self.assertNotIn('pending', self.service.state)
-        self.assertFalse((self.root / 'active').exists())
-        self.step(30)
-        self.assertEqual(self.service.state['pending']['mac'], THIRD)
-
-    def test_restart_preserves_deadline_and_cooldown(self):
-        self.step()
-        deadline = self.service.state['pending']['deadline']
-        self.service = time_sync.TimeService()
-        self.step(30)
-        self.assertEqual(self.service.state['pending']['deadline'], deadline)
-        self.step(60)
-        self.service = time_sync.TimeService()
-        self.step(30)
-        self.assertEqual(self.service.state['pending']['mac'], THIRD)
-
-    def test_wall_clock_jump_does_not_extend_attempt(self):
-        self.step()
-        with patch.object(time_sync.time, 'monotonic', return_value=1091), patch.object(time_sync.time, 'time', return_value=-100000):
-            self.service.step()
-        self.assertNotIn('pending', self.service.state)
-        self.assertFalse(self.service.marker.exists())
-
-    def test_unsettled_wrong_or_old_source_cannot_complete(self):
-        self.step()
-        for address, correction, age in [('10.30.2.7', '0.5', '1'), ('10.30.2.8', '0', '1'), ('10.30.2.7', '0', '60')]:
-            self.good(address, correction=correction, age=age)
-            self.step(1)
-            self.assertFalse(self.service.marker.exists())
-            self.assertTrue((self.root / 'active').exists())
-
-    def test_good_sample_after_timeout_is_not_accepted(self):
-        self.step(); self.good(); self.step(91)
-        self.assertFalse(self.service.marker.exists())
-        self.assertFalse((self.root / 'active').exists())
-
     def test_gps_fix_alone_is_not_a_server_advertisement(self):
         self.gps(); self.step()
         self.assertTrue((self.root / 'active').exists())
@@ -466,12 +633,12 @@ with (root / 'commands').open('a') as out:
         self.assertNotIn('pool ', (self.root / 'chrony.conf').read_text())
         self.assertNotIn('batctl', self.history())
 
-    def test_gps_source_loss_withdraws_flag_and_stops_mesh_polling(self):
+    def test_gps_source_loss_withdraws_flag_and_falls_back_to_mesh_time(self):
         self.gps(); self.good('GPS', '#'); self.step()
         self.gps(fix=False); self.step(15)
         self.assertFalse((self.root / 'mesh-ntp-gps.state').exists())
-        self.assertFalse((self.root / 'active').exists())
-        self.assertNotIn('server ', (self.root / 'chrony.conf').read_text())
+        self.assertNotIn('refclock', self.conf())
+        self.assertIn('server 10.30.2.7 iburst', self.conf())
 
     def test_future_or_stale_gps_status_is_not_a_local_time_source(self):
         for timestamp in [1900, 2010, float('nan')]:
@@ -586,12 +753,13 @@ with (root / 'commands').open('a') as out:
             with self.subTest(role=new_role.__name__):
                 self.service.state = {}
                 self.service.marker.unlink(missing_ok=True)
+                self.service.active_config = None
                 (self.root / 'gps_status.json').unlink(missing_ok=True)
                 (self.root / 'manet-uplink/mesh-gateway.state').unlink(missing_ok=True)
                 self.step(); new_role(); self.good('GPS' if new_role == self.gps else '192.0.2.1', '#' if new_role == self.gps else '^')
                 (self.root / 'commands').write_text('')
                 self.step(2)
-                self.assertNotIn('pending', self.service.state)
+                self.assertNotIn('window', self.service.state)
                 self.assertTrue((self.root / 'active').exists())
                 self.assertNotIn('systemctl stop', self.history())
                 self.assertNotIn('server 10.30.2.7', (self.root / 'chrony.conf').read_text())
@@ -608,6 +776,7 @@ with (root / 'commands').open('a') as out:
         self.assertFalse((self.root / 'mesh-ntp-gps.state').exists())
 
     def test_failed_start_retries_even_after_configuration_was_written(self):
+        self.service.socket_ready = True
         self.gps(); (self.root / 'systemctl-fail').touch()
         with self.assertRaises(subprocess.CalledProcessError):
             self.step()

@@ -1729,25 +1729,31 @@ flag alone does not qualify a node as a time server.
 The existing `is_ntp_server` field in Alfred telemetry advertises availability
 at the normal publication cadence. There are no extra time-server announcements.
 
-Other nodes discover advertised servers through the registry and rank them by
-their selected BATMAN_V route throughput. A sync attempt lasts up to 90 seconds;
-a failed peer is skipped for five minutes while discovery continues. Missing
-servers or failed queries are retried, so a source can appear after boot.
-After a verified sync, chrony stops and mesh NTP polling pauses for six hours,
-plus up to ten minutes of per-node staggering. A brief refresh then uses the
-same discovery, validation, and timeout rules. This covers deployments lasting
-a day or two and longer runs without continuous mesh polling. A missing source
-leaves the node running on its last synchronized clock while discovery retries.
-After the first sync, corrections are gradual; refreshes and source changes do
-not request clock jumps. The service keeps checking local GPS/uplink state so
-a node can become a source later. Losing an uplink preserves GPS service when
-a usable GPS source remains.
+Other nodes keep chrony stopped behind `chrony.socket`, which holds the NTP
+port and starts chrony when a peer asks for the time. A node opens a short sync
+window at boot, when another radio arrives, when a GPS or internet source
+appears, and once a day. Each window polls up to eight peers, real sources
+first. The first window after boot stays open for 20 minutes so chrony learns
+the clock's drift. Later windows close once synced, after 3 minutes at most.
+
+When no real source is in reach, chrony's orphan mode picks one mesh clock for
+everyone. A node that had GPS or internet time earlier this boot outranks one
+that only has mesh time, and the lowest address breaks ties. A node that has
+never synced only listens for 3 minutes. If no synced clock answers by then,
+the unsynced nodes agree on the lowest address's clock. A mesh with no GPS or
+internet therefore reaches timed control a few minutes after power-up.
+
+A node steps its clock once, at its first sync after boot. Later corrections
+are gradual, so two groups that synced separately to different times converge
+slowly. A rebooted node takes the mesh time at once. The service keeps checking
+local GPS/uplink state so a node can become a source later. Losing an uplink
+preserves GPS service when a usable GPS source remains.
 
 `one-shot-time-sync.service` runs the shell wrapper and Python controller. It
-starts with node-manager and follows its restarts. Refresh timing survives
-service restarts and wall-clock changes. Actual drift still needs bench
-measurement. Timed ACS and mesh administration wait for initial synchronization;
-cold lobby recovery can establish contact before then.
+starts with node-manager and follows its restarts. Window and refresh timing
+survive service restarts and wall-clock changes. Timed ACS and mesh
+administration wait for initial synchronization; cold lobby recovery can
+establish contact before then.
 Details:
 [time synchronization internals](../../docs/node-tools-internals.md#time-synchronization).
 

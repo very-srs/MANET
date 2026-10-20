@@ -59,7 +59,7 @@ It does not replace a separate backup.
 | Mesh configuration | `/etc/mesh.conf` | Persistent policy, with local and shared keys governed by config transactions. |
 | Remembered IPv4 block | `/etc/mesh_ipv4_state` | Persistent preference; current peer claims can force reallocation. |
 | Registry observations and claims | `/run/manet-registry/` | Rebuilt this boot; freshness uses local boot time. |
-| Initial clock qualification and refresh state | `/run/initial_time_synced`, `/run/mesh-time-client.json` | Survive controller restart, not reboot. |
+| Initial clock qualification, window and refresh state | `/run/initial_time_synced`, `/run/mesh-time-client.json` | Survive controller restart, not reboot. |
 | Web login sessions | Web-process memory | Lost on service restart/reboot or password change. |
 | Measurements | `/var/log/manet-measurements/` | Persistent exports/results, explicitly removed by the operator. |
 | ATAK retained phone/manual state | `/var/lib/manet-atak/` | Durable state with age/freshness handling, not a live service heartbeat. |

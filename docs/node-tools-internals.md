@@ -3655,9 +3655,8 @@ bootstrap exception and is not equivalent to a cold boot.
 Local roles are checked every 15 seconds. A recent `gps_status.json` fix enables
 the GPS SHM refclock. A direct uplink enables configured public NTS servers, with
 `bindacqdevice` restricting NTP acquisition to that interface. Source profiles
-allow the configured IPv4 mesh CIDR and the existing IPv6 mesh prefix. Client
-and idle profiles deny serving; no profile has a `local stratum` fallback or
-unconditional internet sources on an ordinary mesh client. Both provisioning
+allow the configured IPv4 mesh CIDR and the existing IPv6 mesh prefix. Ordinary
+mesh nodes never get unconditional internet sources. Both provisioning
 templates emit the same service and a quiet initial chrony config.
 
 The controller reads `chronyc -n tracking` and `sources` with checked exit status
@@ -3674,57 +3673,88 @@ type-68 `is_ntp_server`; cadence is unchanged and no separate announcement is
 sent. Cached advertisements can therefore outlive source availability until
 the next telemetry update; actual NTP validation still has to succeed.
 
-Ordinary clients parse registry assignments as data, never source them as shell.
+### Mesh time without a real source
+
+Nodes without GPS or an uplink keep chronyd stopped between short windows.
+`chrony.socket` holds UDP 123 for IPv4 and IPv6, so a peer's request starts
+chronyd, which inherits the bound sockets and answers. The socket must bind
+before chronyd does. When the socket is not active, the controller stops a
+running chronyd, starts the socket, and starts chronyd again. `chrony.service`
+is disabled at boot, and the socket is armed only after the controller has
+written the profile for this boot. Otherwise a rebooted node could serve the
+previous boot's orphan profile with a stale clock.
+
+Every window profile lists up to eight peers: advertised real sources first,
+then the best BATMAN_V routes, written in address order so metric changes do
+not restart chrony. Nodes with a clock add chrony's orphan mode, `local stratum
+N orphan distance 0.1`. A lower stratum always wins, and among equal strata
+chrony selects the lowest address, so all nodes agree on one reference:
+
+| Node clock | Profile |
+|---|---|
+| GPS or verified NTS now | real source, strata 1 to 3 |
+| Synced from GPS or internet earlier this boot | orphan, stratum 8 |
+| Synced only from mesh time | orphan, stratum 10 |
+| Never synced, no synced clock in reach for 3 minutes | orphan, stratum 12 |
+| Never synced, before that timeout | client only, `deny all` |
+
+An unsynced node never serves its own clock until the three-minute cold
+timeout. It polls its peers and steps on the first settled sample from one of
+them. In a cold mesh every node reaches stratum 12 together, the lowest address
+serves, and the others step to it. A node whose own local reference stays
+selected for 60 seconds records `mesh` as its source. A cold mesh therefore
+reaches timed control a few minutes after power-up instead of never.
+
+Windows open at boot, when a peer arrives, when a real source is newly
+advertised, when the daily refresh is due, and when a peer's request wakes
+chronyd. A peer counts as arriving when it is new or when checks saw it absent
+for 10 minutes, so a service restart or a brief route loss does not open a
+window. The first window of a boot stays open for 20 minutes, letting chrony
+learn the crystal frequency into its drift file. Later windows close once a
+peer sample from that window settles, or the node has been the reference for
+60 seconds, and after 3 minutes at most. A woken window serves for the full
+3 minutes. A refresh that finds no peer retries after 5 minutes. A daemon
+found running without a window was started by the socket with the profile on
+disk, so the controller adopts it instead of restarting it.
+
+Ordinary nodes parse registry assignments as data, never source them as shell.
 `MAC_ADDRESSES` maps interface originators to canonical identities, and IPv4
 addresses must be unambiguous host addresses within the mesh CIDR. Only selected
 `originators_json` routes (`best: true`) with positive BATMAN_V throughput and
-last-seen age at most 30 seconds qualify. Highest throughput wins, with a MAC
-tie-break. Self, shutting-down, and unadvertised nodes are excluded. Registry
-wall-clock timestamps and the derived STALE state are deliberately not liveness
-gates: the local clock being repaired cannot reliably compare them. Kernel
-route age and an actual recent NTP measurement provide bootstrap liveness.
-
-No usable peer or failed discovery causes a local retry after 30 seconds. A
-selected peer gets a 90-second attempt, followed by a five-minute exclusion on
-failure so another source can be tried. Deadlines and exclusions use monotonic
-time and persist in `/run/mesh-time-client.json` across service restarts, without
-extending the attempt. Successful client sync requires the selected source to
-match the chosen address and the sample to be from the current attempt. It
-creates `/run/initial_time_synced`, writes the quiet profile, and stops chrony.
-The marker survives process restarts, not reboot. A nonblocking file lock
-prevents duplicate owners.
+last-seen age at most 30 seconds qualify. Self and shutting-down nodes are
+excluded. Registry wall-clock timestamps and the derived STALE state are
+deliberately not liveness gates: the local clock being repaired cannot
+reliably compare them. Kernel route age and an actual recent NTP sample
+provide bootstrap liveness. A failed discovery retries after 30 seconds.
+Window deadlines, arrival times and the refresh deadline use monotonic time and
+persist in `/run/mesh-time-client.json` across service restarts. The marker
+`/run/initial_time_synced` survives process restarts, not reboot. A
+nonblocking file lock prevents duplicate owners.
 
 The operational expectation is one or two days of use, sometimes longer, with
 most nodes directly using GPS. ACS needs alignment on a seconds scale, not
-millisecond accuracy. Ordinary mesh clients therefore refresh after **six
-hours plus 0–600 seconds of per-node staggering**. The jitter is generated once
-per boot and persisted with the monotonic refresh deadline. Service restarts
-and wall-clock corrections cannot postpone it. Local source qualification
-renews the deadline, so losing GPS/internet starts a holdover period based on
-the last verified source. Between refreshes there are only local role checks;
-no BATMAN query, NTP polling, or extra Alfred announcement is required.
+millisecond accuracy. The tightest radio-to-radio timing in the runtime is
+about five seconds (ACS future-message allowance and apply grace). Worst-case
+relative crystal drift is about 3.5 seconds a day, so a refresh is due **every
+24 hours plus 0–600 seconds of per-node staggering**, in addition to arrivals
+and new sources. The jitter is generated once per boot and persisted with the
+monotonic refresh deadline. Service restarts and wall-clock corrections cannot
+postpone it. Local source qualification renews the deadline. Between windows
+the controller only checks local roles and BATMAN routes; there is no NTP
+traffic or extra Alfred announcement.
 
-For scale, an assumed residual error of 50 ppm accumulates 1.08 seconds in six
-hours, versus 8.64 seconds in two days. Oppositely drifting nodes can differ by
-twice that amount. Those are arithmetic examples, **not measured CM4 limits**.
-ACS has a five-second future-message allowance and late-apply grace; those
-checks are not a blanket guarantee that every operation tolerates five seconds
-of skew. Hardware measurements should determine whether the refresh interval
-needs adjustment. No freshness guarantee is made if sources remain unreachable.
-
-Each due refresh uses the same 90-second attempt and peer backoff as initial
-sync. An unsuccessful refresh retains the boot-sync marker and previous success
-time, keeps serving flags off, and retries discovery without claiming accuracy
-or blocking ordinary mesh operation. If the refresh state is missing, a boot
-marker alone cannot grant another six-hour delay. Startup may step the clock;
-after the first verified sync the controller disables remaining live startup
-steps with `chronyc makestep 0.1 0` and removes the directive from the config.
-All later source changes, daemon restarts, and client refreshes use slewing, so
-routine correction does not jump backwards through saved ACS/admin timestamps.
-`leapsecmode slew` also avoids a kernel leap-second step. Peer profiles use
-`corrtimeratio 1`, preferring an average correction over one poll interval rather
-than three to fit the bounded attempt, still subject to chrony's slew-rate cap.
-The current source daemon is not restarted just to disarm stepping.
+Startup may step the clock; after the first verified sync the controller
+disables remaining live startup steps with `chronyc makestep 0.1 0` and removes
+the directive from the config. All later source changes, daemon restarts, and
+refreshes slew, so routine correction does not jump backwards through saved
+ACS/admin timestamps. Admin envelopes still order by wall-clock nanoseconds
+with a 900-second freshness window, so a later step remains unsafe. Two groups
+that synced separately to different times therefore converge only at the
+kernel's slew rate, about 43 seconds a day. A node that reboots takes the
+group's time at once. `leapsecmode slew` also avoids a kernel leap-second step.
+Peer profiles use `corrtimeratio 1`, preferring an average correction over one
+poll interval rather than three. The current source daemon is not restarted
+just to disarm stepping.
 
 The old positional `batctl o` reader treated last-seen timestamps or `(` as the
 metric and did not map radio MACs. Its unchecked command failures, executable
@@ -3735,12 +3765,12 @@ for `tracking`, `sources`, and `waitsync`, and the [chrony configuration referen
 for acquisition binding and source settings.
 
 Remaining limits: ACS/admin activation and tourguide rendezvous still depend
-on wall-clock alignment. Initial synchronization now gates timed control, with
+on wall-clock alignment. Initial synchronization gates timed control, with
 nonce-bound cold lobby recovery as described above. Arbitrary external clock
-steps after synchronization are not repaired by ACS. An unusually large
-later correction may not settle inside a bounded refresh; it is not forced by
-stepping. CM4 checks of real chrony/GPS timing, 24–48-hour drift, source loss,
-missed telemetry, and on-air traffic remain pending hardware setup.
+steps after synchronization are not repaired by ACS. Mesh time is unauthenticated
+NTP between members, so any member can steer the clock of a node that has not
+synced yet. CM4 and Rock 3A checks covered a stale-clock boot, a cold mesh and
+loss of internet time; 24–48-hour drift and larger meshes remain unmeasured.
 
 ---
 
