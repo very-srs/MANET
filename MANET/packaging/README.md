@@ -43,7 +43,8 @@ kernel and release inputs make their contents differ. The current builder carrie
 and version file, systemd units together with their `multi-user.target.wants`
 enable symlinks, udev rules, the networkd-dispatcher hooks, the Lyra plugin and
 model weights, the dashboard assets under `share/manet`, and the journald
-persistence drop-in. It also stages managed MT7916 firmware. A one-shot unit
+persistence drop-in. It also stages managed MT7916 firmware and the `alfred`
+and `batctl` binaries that match the kernel's batman-adv module. A one-shot unit
 that runs a migration is a legitimate payload for a conditional fix.
 
 Kernel-less tools packages remain the default. Set `MANET_KERNEL_BOARD=cm4`

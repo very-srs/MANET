@@ -233,7 +233,7 @@ if sys.argv[1] == 'is-active' and sys.argv[-1] == 'mesh-config-apply.service':
         self.assertNotIn('curl ', self.history())
         self.assertNotIn('dependency', self.history())
         self.assertIn('config-migration', self.history())
-        for service in update.RUNTIME_SERVICES:
+        for service in update.RESTARTED_SERVICES:
             self.assertIn('systemctl try-restart ' + service, self.history())
 
     def test_config_units_stop_before_first_payload_replacement(self):
@@ -363,7 +363,7 @@ if sys.argv[1] == 'is-active' and sys.argv[-1] == 'mesh-config-apply.service':
         with patch.dict(os.environ, {'TEST_ACTIVE_SERVICES': 'manet-atak.service,gps-reader.service'}):
             self.updater.update()
         history = self.history()
-        for service in update.RUNTIME_SERVICES:
+        for service in update.RESTARTED_SERVICES:
             self.assertIn('systemctl try-restart ' + service, history)
             self.assertNotIn('systemctl restart ' + service, history)
             check = 'systemctl is-active --quiet ' + service

@@ -49,10 +49,14 @@ RUNTIME_SERVICES = (
     'mesh-voice.service', 'button-monitor.service', 'sae-watchdog.service',
     'batman-enslave-watch.service', 'led-boot.service', 'manet-wifi-uplink.service',
 )
+# Units written on the node whose shipped binaries the archive replaces.
+NODE_SERVICES = ('alfred.service',)
+RESTARTED_SERVICES = RUNTIME_SERVICES + NODE_SERVICES
 MARKERS = {"etc/manet_version.txt", "usr/local/bin/version.txt"}
 REQUIRED = MARKERS | {
     "etc/apt/preferences.d/00-manet-kernel",
     "usr/local/bin/manet-kernel-protect.py",
+    "usr/sbin/alfred", "usr/sbin/batctl",
     "usr/local/bin/manet-mesh-supplicant.py",
     "usr/local/bin/manet_dfs.py", "usr/local/bin/manet_dfs_safety.py",
     "etc/systemd/system/manet-dfs-watch.service",
@@ -780,7 +784,7 @@ class Updater:
     def install(self, directory, members):
         """Install files, activate services and commit versions after checks."""
         active_runtime = []
-        for service in RUNTIME_SERVICES:
+        for service in RESTARTED_SERVICES:
             state = run_command(['systemctl', 'show', '--property=ActiveState',
                                  '--value', service]).strip()
             if state == b'active':
@@ -794,7 +798,7 @@ class Updater:
             previous = json.loads(snapshot.read_text())
             if previous.get('boot') == boot:
                 active_runtime = sorted(set(active_runtime) | set(previous['services']))
-                if not set(active_runtime) <= set(RUNTIME_SERVICES):
+                if not set(active_runtime) <= set(RESTARTED_SERVICES):
                     raise UpdateError('Invalid runtime activation snapshot')
         atomic_file(snapshot, data=json.dumps({'boot': boot, 'services': active_runtime}).encode(),
                     mode=0o600)
@@ -871,7 +875,7 @@ class Updater:
             run_command(["systemctl", "restart", service])
         for service in ("mesh-status.service", "node-manager.service", "mesh-channel-agreement.service", "one-shot-time-sync.service", "manet-dfs-watch.service"):
             run_command(["systemctl", "is-active", "--quiet", service])
-        for service in RUNTIME_SERVICES:
+        for service in RESTARTED_SERVICES:
             run_command(['systemctl', 'try-restart', service])
         for service in active_runtime:
             run_command(['systemctl', 'is-active', '--quiet', service])

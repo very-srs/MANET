@@ -452,8 +452,9 @@ reloaded. Both mesh-status and node-manager are restarted on every installation
 attempt, including retries. They and the agreement/time services are checked
 active; the latter follow node-manager through their drop-ins and `PartOf=`.
 Other node_tools processes use try-restart: gps-reader, manet-positioning,
-manet-atak, mesh-voice, button-monitor, sae-watchdog, batman-enslave-watch, and
-led-boot. Setup oneshots are excluded. Only services active before installation
+manet-atak, mesh-voice, button-monitor, sae-watchdog, batman-enslave-watch,
+led-boot, and alfred. alfred's unit is written on the node by radio-setup, but
+the archive replaces its binary. Setup oneshots are excluded. Only services active before installation
 have an additional active-state check. Their names are saved with the boot ID
 in recovery/runtime-active.json, so a failed restart still blocks completion on
 a retry in the same boot. A failed stopped service may need an explicit start

@@ -16,7 +16,7 @@ set -euo pipefail
 # recovery requirements when adding new payloads.
 #
 # Current payload choices: no SBC kernel overlay, config.txt, systemd-network
-# definitions, alfred, batctl, or S1G binaries. These are not archive limits.
+# definitions, or S1G binaries. These are not archive limits.
 # Managed MT7916 firmware and the Wi-Fi mesh binaries are already carried.
 # Optional matched kernel inputs use MANET_KERNEL_BOARD and SBC_OVERLAY_DIR.
 # CM4 derives a local trial profile and defaults on, with an operator opt-out.
@@ -88,6 +88,11 @@ stage_dispatcher_hooks "$STAGE" "$REPO_ROOT"
 
 . "$SCRIPT_DIR/lib-supplicant.sh"
 stage_mesh_supplicant "$STAGE" "$REPO_ROOT"
+
+# alfred and batctl match the batman-adv module in the kernel payload. The
+# updater restarts alfred.
+install_file 0755 "$REPO_ROOT/MANET/binaries_arm64/alfred" "$STAGE/usr/sbin/alfred"
+install_file 0755 "$REPO_ROOT/MANET/binaries_arm64/batctl" "$STAGE/usr/sbin/batctl"
 
 . "$SCRIPT_DIR/lib-man.sh"
 stage_man_pages "$STAGE" "$REPO_ROOT"

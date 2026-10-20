@@ -6,8 +6,9 @@ newer than what apt ships. The S1G supplicant and its client are built from
 Morse Micro's HaLow-enabled hostapd sources.
 
 Install tarballs stage the shipped binaries into `/usr/sbin`. Tools tarballs
-also carry `wpa_supplicant_manet` and `wpa_cli_manet`, so a normal
-update can deliver Wi-Fi mesh fixes. DFS-enabled builds require the compatible
+also carry `alfred`, `batctl`, `wpa_supplicant_manet`, and `wpa_cli_manet`, so a
+normal update keeps the batman tools matched to the kernel module and can
+deliver Wi-Fi mesh fixes. The updater restarts a running alfred. DFS-enabled builds require the compatible
 MANET supplicant. A missing client produces a warning.
 The HaLow candidate build is excluded
 from every archive and needs separate bench testing before activation.
