@@ -25,15 +25,23 @@ locations and exact versions are listed below.
 COMPONENTS
 ===============================================================================
 
-Linux kernel 6.18
+Linux kernel 6.18.57
   CM4 and Raspberry Pi 5: https://github.com/raspberrypi/linux at commit
-  95b85bebbedcaedfa7ca79116ed38b7376fba412. Rock 3A: the stable kernel at
+  5d64d1ea73716526ed9c0ed184a9cb5f6042e32c. Rock 3A: the stable kernel at
   https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git commit
-  7d0a66e4bb9081d75c82ec4957c50034cb0ea449. Both carry the MANET patches in
-  kernel/patches/. Ships as the kernel image, modules, and device trees.
+  2ff600d29ee478d0a8d46ef8a58afb5e038fe692 (tag v6.18.57). Both carry the
+  MANET patches in kernel/patches/. Ships as the kernel image, modules, and
+  device trees.
   License: GPL-2.0 with the Linux-syscall-note. Some device tree sources are
   dual-licensed with MIT, as each file states.
   Copyright (C) Linus Torvalds and many others.
+
+batman-adv kernel module
+  batman-adv 2026.3 at commit f38d7c3263ab0ba6c08b232eed55f63a6b8a6775
+  (https://git.open-mesh.org/batman-adv.git), built outside the kernel tree
+  and shipped in place of the kernel's own batman-adv module.
+  License: GPL-2.0.
+  Copyright (C) B.A.T.M.A.N. contributors.
 
 Morse Micro HaLow driver and mmrc rate control
   https://github.com/Gateworks/morse_driver at commit
@@ -60,8 +68,10 @@ MediaTek MT7916 firmware
   LICENCE.mediatek.
 
 alfred and batctl
-  alfred 2025.3 at commit 6fe6480 (https://git.open-mesh.org/alfred.git) and
-  batctl 2025.3 at commit 882ab0d (https://git.open-mesh.org/batctl.git).
+  alfred 2026.3 at commit a61f8d2ce8ab5d83966f6e67f22be3d80a4340c4
+  (https://git.open-mesh.org/alfred.git) and batctl 2026.3 at commit
+  9e098cb2bcd40e367f91f1a3c5379ea4d4e0f9da (https://git.open-mesh.org/batctl.git).
+  Built by MANET/binaries_arm64/batman-tools/.
   License: GPL-2.0.
   Copyright (C) B.A.T.M.A.N. contributors.
 

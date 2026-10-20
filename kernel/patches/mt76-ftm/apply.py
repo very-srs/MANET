@@ -11,8 +11,8 @@ import tempfile
 # Exact kernel HEAD -> patch directory relative to this helper. Both trees
 # accept the same series, including when the separate txpower patch is present.
 BASES = {
-    '95b85bebbedcaedfa7ca79116ed38b7376fba412': '.',  # linux-rpi-6.18
-    '7d0a66e4bb9081d75c82ec4957c50034cb0ea449': '.',  # linux-6.18
+    '5d64d1ea73716526ed9c0ed184a9cb5f6042e32c': '.',  # linux-rpi-6.18
+    '2ff600d29ee478d0a8d46ef8a58afb5e038fe692': '.',  # linux-6.18
 }
 
 

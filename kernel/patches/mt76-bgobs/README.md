@@ -2,8 +2,8 @@
 
 The three patches reserve the third band-1 RX path and add an energy
 observer. They target the same exact kernel HEADs as `mt76-ftm`: CM4
-`95b85bebbedcaedfa7ca79116ed38b7376fba412` and Rock 3A
-`7d0a66e4bb9081d75c82ec4957c50034cb0ea449`. Apply txpower first, then:
+`5d64d1ea73716526ed9c0ed184a9cb5f6042e32c` and Rock 3A
+`2ff600d29ee478d0a8d46ef8a58afb5e038fe692`. Apply txpower first, then:
 
 ```sh
 python3 kernel/patches/mt76-bgobs/apply.py /path/to/kernel

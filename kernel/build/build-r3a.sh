@@ -15,6 +15,8 @@ KDIR="$WORK/linux-6.18"
 BUILD="${BUILD:-$WORK/build-r3a}"
 FRAGS="$SCRIPT_DIR/config-fragments"
 MORSE="$WORK/morse-driver-1.16"
+BATMAN="$WORK/batman-adv-2026.3"
+BATMAN_VERSION=2026.3
 OVERLAYS="$SCRIPT_DIR/dts-overlays"
 
 ARCH=arm64
@@ -97,6 +99,18 @@ python3 "$SCRIPT_DIR/morse-dot11ah-power-patch.py" \
     "$MORSE_STAGING/dot11ah.ko.patched" \
     --power-dbm 30
 mv "$MORSE_STAGING/dot11ah.ko.patched" "$MORSE_STAGING/dot11ah.ko"
+
+# batman-adv 2026.3 is built out of tree. It replaces the kernel's own module
+# so only one batman-adv.ko exists for depmod to find.
+make -C "$BATMAN" KERNELPATH="$BUILD" ARCH=$ARCH CROSS_COMPILE=$CROSS clean
+make -C "$BATMAN" KERNELPATH="$BUILD" ARCH=$ARCH CROSS_COMPILE=$CROSS \
+     REVISION=$BATMAN_VERSION -j$JOBS
+BATMAN_KO="$STAGING/lib/modules/$KVER/kernel/net/batman-adv/batman-adv.ko"
+rm -f "$BATMAN_KO" "$BATMAN_KO.xz"
+cp "$BATMAN/net/batman-adv/batman-adv.ko" "$BATMAN_KO"
+make -C "$BATMAN" KERNELPATH="$BUILD" ARCH=$ARCH CROSS_COMPILE=$CROSS clean
+test "$(modinfo -F version "$BATMAN_KO")" = "$BATMAN_VERSION"
+modinfo -F vermagic "$BATMAN_KO" | grep -q "^$KVER "
 
 # Compress modules
 find "$STAGING/lib/modules/$KVER" -name "*.ko" -exec xz -f {} \;

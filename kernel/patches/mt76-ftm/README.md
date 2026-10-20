@@ -4,9 +4,9 @@ These patches provide opt-in timing reports, marked probes, and ACK spatial
 extension controls for MANET ranging. The same six patches target both:
 
 - Raspberry Pi CM4: `linux-rpi-6.18` at
-  `95b85bebbedcaedfa7ca79116ed38b7376fba412` (6.18.33).
+  `5d64d1ea73716526ed9c0ed184a9cb5f6042e32c` (6.18.57).
 - Rock 3A: `linux-6.18` at
-  `7d0a66e4bb9081d75c82ec4957c50034cb0ea449` (6.18).
+  `2ff600d29ee478d0a8d46ef8a58afb5e038fe692` (6.18.57).
 
 Apply the complete series from the MANET repository:
 
