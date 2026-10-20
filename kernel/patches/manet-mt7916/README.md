@@ -33,17 +33,18 @@ objects. From the repository root, with the development venv activated:
 export MANET_KERNEL_WORK=/absolute/path/to/separate-work
 python3 kernel/build/prepare-sources.py --board cm4
 git -C "$MANET_KERNEL_WORK/real_work/morse-driver-1.16" submodule update --init --recursive
-BUILD=/absolute/path/to/build-cm4 LOCALVERSION=-r3 JOBS=7 \
+BUILD=/absolute/path/to/build-cm4 LOCALVERSION=-r1 JOBS=7 \
   bash kernel/patches/manet-mt7916/build-cm4.sh
 bash kernel/patches/manet-mt7916/package-cm4.sh \
   /absolute/path/to/build-cm4 /absolute/path/to/cm4-overlay /absolute/path/to/output
 ```
 
-The new release is `6.18.33-manet-r3`. The build includes all configured
-modules and fresh Morse SPI/USB modules. Packaging includes every compiled
-Pi overlay, `overlay_map.dtb`, the matched upstream `overlays/README`, the
-Morse overlay, module dependencies, firmware, and BCFs. The existing runtime
-payload validator checks the manifest and archive bounds. MT7916 WM selection
+The new release is `6.18.57-manet-r1`. The build includes all configured
+modules, fresh Morse SPI/USB modules, and batman-adv 2026.3 built out of
+tree. Packaging includes every compiled Pi overlay, `overlay_map.dtb`, the
+matched upstream `overlays/README`, the Morse overlay, module dependencies,
+firmware, and BCFs. The existing runtime payload validator checks the
+manifest and archive bounds. MT7916 WM selection
 remains the runtime package's responsibility; no MT7916 firmware is placed
 inside the Morse firmware namespace.
 
