@@ -1,0 +1,3 @@
+# name tag commit sha256 of `git archive --format=tar` at that commit
+alfred v2026.3 a61f8d2ce8ab5d83966f6e67f22be3d80a4340c4 d5e8d4f4abdad9010ad4c71bea702c6ed2b876c20cb67c220efafc9084e2f835
+batctl v2026.3 9e098cb2bcd40e367f91f1a3c5379ea4d4e0f9da 5179bc5d025701ed36ec26357b5234cbca7ecdeae76b048ac8a44884334c417f

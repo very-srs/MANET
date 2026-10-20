@@ -50,6 +50,24 @@ from every archive and needs separate bench testing before activation.
   unplug and replug afterward. Detaching the device logically with
   `echo 0 > .../authorized` does not drop VBUS and has no effect.
 
+## alfred and batctl
+
+`batman-tools/` pins the open-mesh release tags and builds both tools. They are
+version 2026.3, the same release as the batman-adv module in the MANET kernel.
+`sources.txt` lists each tag, its commit, and the SHA-256 of the source archive.
+The build refuses to continue if any of them differs.
+
+Build on an ARM64 host with Debian 13, `libnl-3-dev`, `libnl-genl-3-dev`,
+`libcap-dev`, and `pkg-config` installed:
+
+```bash
+bash MANET/binaries_arm64/batman-tools/build.sh /tmp/batman-out
+```
+
+Set `BATMAN_MIRROR` to a directory or URL holding `alfred.git` and `batctl.git`
+when the build host cannot reach git.open-mesh.org. The build leaves the GPS and
+vis helpers out of alfred. Two builds on the same host produce identical binaries.
+
 ## Wi-Fi mesh supplicant
 
 `wpa_supplicant-manet/` contains the hostap 2.11 build configuration and patch
