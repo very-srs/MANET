@@ -16,6 +16,7 @@ BUILD="${BUILD:-$WORK/build-cm4}"
 FRAGS="$SCRIPT_DIR/config-fragments"
 MORSE="$WORK/morse-driver-1.16"
 BATMAN="$WORK/batman-adv-2026.3"
+BATMAN_VERSION=2026.3
 OVERLAYS="$SCRIPT_DIR/dts-overlays"
 
 ARCH=arm64
@@ -87,13 +88,16 @@ cd -
 # batman-adv 2026.3 is built out of tree. It replaces the kernel's own module
 # so only one batman-adv.ko exists for depmod to find.
 make -C "$BATMAN" KERNELPATH="$BUILD" ARCH=$ARCH CROSS_COMPILE=$CROSS clean
-make -C "$BATMAN" KERNELPATH="$BUILD" ARCH=$ARCH CROSS_COMPILE=$CROSS -j$JOBS
-BATMAN_KO="$STAGING/usr/lib/modules/$KVER/kernel/net/batman-adv/batman-adv.ko"
-test -f "$BATMAN_KO"
+make -C "$BATMAN" KERNELPATH="$BUILD" ARCH=$ARCH CROSS_COMPILE=$CROSS \
+     REVISION=$BATMAN_VERSION -j$JOBS
+BATMAN_KO="$STAGING/lib/modules/$KVER/kernel/net/batman-adv/batman-adv.ko"
+test -f "$BATMAN_KO.xz"
+rm "$BATMAN_KO.xz"
 cp "$BATMAN/net/batman-adv/batman-adv.ko" "$BATMAN_KO"
 make -C "$BATMAN" KERNELPATH="$BUILD" ARCH=$ARCH CROSS_COMPILE=$CROSS clean
-test "$(modinfo -F version "$BATMAN_KO")" = 2026.3
+test "$(modinfo -F version "$BATMAN_KO")" = "$BATMAN_VERSION"
 modinfo -F vermagic "$BATMAN_KO" | grep -q "^$KVER "
+xz -f "$BATMAN_KO"
 
 echo "Patching max_eirp in dot11ah.ko to 30 dBm (all regions)..."
 python3 "$SCRIPT_DIR/morse-dot11ah-power-patch.py" \
