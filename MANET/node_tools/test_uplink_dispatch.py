@@ -871,10 +871,26 @@ class AcsAutoModeTests(SpeedGateTests):
         exempt = calls.index('nft add rule ip nat postrouting oifname end0 ip daddr 10.147.0.0/16 accept')
         self.assertLess(exempt, calls.index('nft add rule ip nat postrouting oifname end0 masquerade'))
         self.assertIn('nft add rule inet filter forward iifname end0 oifname br0 '
-                      'ip saddr 10.147.0.0/16 accept', calls)
+                      'ip saddr 10.147.0.0/16 ip saddr != 10.30.2.0/24 accept', calls)
         self.assertFalse(any('10.300' in call for call in calls))
-        self.assertIn('Ignoring invalid uplink_routed network: 10.300.0.0/8',
+        self.assertIn('Ignoring uplink_routed network: 10.300.0.0/8 (not an IPv4 network)',
                       (self.root / 'journal').read_text())
+
+    def test_routed_range_may_contain_the_mesh_but_not_the_internet(self):
+        """The mesh is often a slice of the ZeroTier range it is routed from."""
+        with (self.root / 'mesh.conf').open('a') as conf:
+            conf.write('uplink_routed=10.0.0.0/8,0.0.0.0/0,32.0.0.0/4,10.30.2.128/25\n')
+        self.uplink('end0')
+        calls = self.dispatch()
+        self.assertIn('nft add rule ip nat postrouting oifname end0 ip daddr 10.0.0.0/8 accept', calls)
+        self.assertIn('nft add rule inet filter forward iifname end0 oifname br0 '
+                      'ip saddr 10.0.0.0/8 ip saddr != 10.30.2.0/24 accept', calls)
+        exempt = [c for c in calls if ' ip daddr ' in c or ' ip saddr ' in c]
+        self.assertEqual(len(exempt), 2, exempt)
+        journal = (self.root / 'journal').read_text()
+        self.assertIn('0.0.0.0/0 (broader than /8 would bypass NAT for the internet)', journal)
+        self.assertIn('32.0.0.0/4 (broader than /8', journal)
+        self.assertIn('10.30.2.128/25 (inside the mesh network)', journal)
 
     def test_changing_routed_networks_rebuilds_a_running_gateway(self):
         self.uplink('end0')

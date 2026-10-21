@@ -91,6 +91,17 @@ else:
         self.assert_frequency(2462)
         self.assertEqual(self.mode(), 'data')
 
+    def test_joining_searching_peers_keeps_this_node_searching(self):
+        """If HaLow then drops, it rotates with them instead of parking."""
+        self.searching()
+        peers = {m: {'status': dict(status(b, ready=False, current={'2.4': 2462}), discovery=True)}
+                 for m, b in ((PEER, 'b'), (THIRD, 'c'))}
+        self.tick(self.now, peers)
+        self.assert_frequency(2462)
+        self.assertEqual(self.mode(), 'search')
+        change = json.loads((self.root / 'manet-last-channel-change.json').read_text())
+        self.assertEqual(change['reason'], 'Joining connected peers')
+
     def test_equal_groups_keep_the_one_holding_the_lowest_mac(self):
         self.searching()
         peers = {PEER: {'status': status('b', ready=False, current={'2.4': 2462})},

@@ -1487,7 +1487,8 @@ class Runtime:
         self.discovery.set_mode('search' if discovering else 'data')
         if changes:
             event = {'at': int(time.time()), 'monotonic': time.monotonic(), 'channels': channels,
-                     'reason': ('Lobby rotation' if discovering else
+                     'reason': (reason if reason == 'Joining connected peers' else
+                                'Lobby rotation' if discovering else
                                 'Clockless peer recovery' if challenged else reason)}
             try:
                 private_json_write(self.run_dir / 'manet-last-channel-change.json', event)
@@ -1533,11 +1534,13 @@ class Runtime:
         so a connected searcher need not wait for a round to find them. With no
         agreed plan in reach, the larger group on each band wins, then the group
         holding the lowest MAC, as partitions merge. A later round optimizes.
+        Joining peers that are all still searching keeps this node searching,
+        so it rotates with them if its last path drops.
         """
         if not local['acs'] or not local['discovery']:
             return False
         configured = {b: data[2] for b, data in self.interfaces().items()}
-        targets = {}
+        targets, searching = {}, True
         for band, own in local['current'].items():
             groups = {own: [self.own]}
             for mac, status in view.items():
@@ -1549,6 +1552,8 @@ class Runtime:
             best = min(groups, key=lambda f: (-len(groups[f]), min(groups[f])))
             if best != own or configured.get(band, best) != best:
                 targets[band] = best
+                searching &= all(view[mac].get('discovery') is True
+                                 for mac in groups[best] if mac != self.own)
         if not targets:
             return False
         retry_path = self.run_dir / 'manet-join-retry.json'
@@ -1558,11 +1563,13 @@ class Runtime:
         # Persist a 30 s retry delay before touching radios, including failures.
         private_json_write(retry_path, {'boot': self.boot, 'after': time.monotonic() + 30})
         channels = dict(local['current'], **targets)
+        # Searchers sit on rendezvous channels. Anything else is a data channel.
+        searching &= all(f in self.rendezvous_allowed.get(b, []) for b, f in channels.items())
         print('ACS joining connected peers ' + json.dumps(targets), flush=True)
         self.state['settle_until'] = boot_time() + 30
         self.save()
         self.write_busy(self.state['settle_until'])
-        self.apply(channels, reason='Joining connected peers')
+        self.apply(channels, discovering=searching, reason='Joining connected peers')
         return True
 
     def repair_drift(self, local, connected=False):

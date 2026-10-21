@@ -46,7 +46,8 @@ A connected searcher with no agreed plan in reach does not wait for a round to
 find its peers on Wi-Fi. Every peer publishes its live channels over any BATMAN
 path, so the searcher tunes each band to the channel most connected peers use,
 then a normal round optimizes. Equal groups keep the channel of the group
-holding the lowest MAC, the same rule partitions use. Joining never enters a
+holding the lowest MAC, the same rule partitions use. A searcher that joins
+peers who are all still searching keeps searching with them. Joining never enters a
 DFS channel. A connected searcher also repairs a radio that drifted from its
 configured channel, which a rotating searcher leaves alone.
 
@@ -1392,8 +1393,11 @@ uplink address. `uplink_routed=` in `/etc/mesh.conf` lists IPv4 networks that
 reach the mesh by its own addresses instead, for example a ZeroTier network
 whose router routes the mesh subnet to the gateway. For each network the
 gateway skips NAT and accepts new connections from the uplink into the mesh.
-Internet traffic keeps NAT. Separate several networks with commas. Invalid
-entries are logged and skipped. The setting is local to each radio and only
+Internet traffic keeps NAT. Separate several networks with commas. A network
+may contain the mesh's own `ipv4_network`, as when the mesh is a slice of the
+ZeroTier range. Mesh addresses arriving from the uplink are still dropped.
+Invalid entries, entries broader than /8 and entries inside the mesh network
+are logged and skipped. The setting is local to each radio and only
 the gateway uses it, so the same value can go on every radio. The router still
 needs a route for `ipv4_network` via the gateway's LAN address. Node web pages
 stay limited to each radio's own clients. The bundled

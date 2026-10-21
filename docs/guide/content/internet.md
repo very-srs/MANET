@@ -173,7 +173,9 @@ from a private network, such as a ZeroTier network your router belongs to,
 set `uplink_routed` to that network on the radios. Only the gateway uses it,
 so the same setting can go on every radio. Your router also needs a route for
 the mesh network via the gateway radio. Give the gateway radio a fixed address
-on the router so the route stays valid.
+on the router so the route stays valid. The mesh network can be part of the
+private network's range. Ranges wider than a /8 are ignored, so a mistake
+cannot switch off address translation for the whole internet.
 
 Devices on that network can then reach radios and the devices connected to
 them by their mesh addresses, for SSH, ATAK, voice and video. Each radio's web

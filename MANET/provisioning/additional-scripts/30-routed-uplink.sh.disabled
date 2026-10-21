@@ -19,7 +19,8 @@
 
 set -euo pipefail
 
-# One or more IPv4 networks, separated by commas.
+# One or more IPv4 networks, separated by commas. A network may contain the
+# mesh's own ipv4_network. Networks wider than /8 are ignored.
 ROUTED="10.147.0.0/16"
 
 # Replace an existing setting instead of adding a second line.

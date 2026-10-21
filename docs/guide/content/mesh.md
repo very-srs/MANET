@@ -155,7 +155,8 @@ A searching radio connected to peers, over HaLow or any other path, with no
 agreed plan in reach tunes each band to the channel most of those peers
 already use, as published in their status. Equal groups keep the channel of
 the group holding the lowest MAC. It never joins a DFS channel this way, and a
-normal round then optimizes. A connected searcher also repairs a radio that
+normal round then optimizes. Joining peers that are all still searching keeps
+it searching with them. A connected searcher also repairs a radio that
 drifted from its configured channel. Config repair alone never sends a second CSA. A committed ordinary plan
 that lands first by peer CSA survives only on the same boot, at its exact
 target and within its activation grace. DFS still needs live detector tokens.

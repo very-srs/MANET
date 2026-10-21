@@ -1839,8 +1839,10 @@ connected searcher to the channels its peers already use. Every member's live
 searcher counts the members on each band's channels, itself on its own. The
 largest group wins, then the group holding the lowest MAC. DFS channels and
 channels outside this node's allowed list never count. The join writes the
-config and switches by CSA through the normal apply path, leaves search mode,
-and keeps a 30-second retry marker and settle interval. It corrects the
+config and switches by CSA through the normal apply path, and keeps a
+30-second retry marker and settle interval. A node that joined peers who are
+all still searching stays in search mode, so it rotates with them if its last
+path drops. Joining any other group leaves search mode. It corrects the
 configured channel as well when only that differs, so drift repair cannot pull
 the radio back. Before this, connected searchers with no plan waited for a
 round, and a round needs a quorum of ready members. A radio left drifted by
@@ -3544,7 +3546,12 @@ an accept in another table cannot override a drop or skip a later NAT rule.
 A user script inserting the same rules once would lose them at the next
 promotion, which flushes both chains. `routed_networks` canonicalizes each
 entry with Python's `ipaddress` and logs and skips invalid ones, so a typo
-cannot stop the rebuild halfway. Input from the uplink is already accepted.
+cannot stop the rebuild halfway. It also skips entries broader than /8, since
+`0.0.0.0/0` would turn off NAT for the internet, and entries inside the mesh
+network, which do nothing. An entry may contain the mesh network: the usual
+ZeroTier setup gives the mesh a slice of the ZeroTier range. The forward
+accept therefore excludes `ipv4_network` as a source, so mesh addresses
+arriving from the uplink, which can only be spoofed, are still dropped. Input from the uplink is already accepted.
 `manet-ui-firewall.sh` still limits port 80 to the local DHCP pool. Only the
 gateway runs this code, so the key is inert on other radios.
 
@@ -3834,8 +3841,10 @@ the epoch itself, so no jump waits for the time service:
 
 - Admin: the first read of a control channel (types 70 and 71) in a new epoch
   voids every command present in Alfred by message ID, and ordering restarts
-  at the wall time of the jump. Commands sealed before the jump are rejected,
-  including old-timeline ones whose timestamps now look new. The sender's own
+  at the wall time of the jump. Commands sealed before the jump are rejected.
+  Voiding covers every authenticated envelope, before the freshness check:
+  after a backward jump, a command from the old timeline sits in the future
+  and would otherwise become fresh once the new clock caught up. The sender's own
   history is dropped, so the node can send again at once. A new boot keeps its
   replay history: its first sync precedes any timed control.
 - Config and radio changes staged but not yet activated are voided. The config

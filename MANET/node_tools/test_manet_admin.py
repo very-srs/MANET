@@ -223,6 +223,19 @@ class AdminTests(unittest.TestCase):
         fresh = self.receiver.open(70, self.sender.seal(70, dict(self.payload, version=new_version())))
         self.assertTrue(self.receiver.accept(70, fresh))
 
+    def test_command_from_ahead_of_a_backward_jump_never_becomes_fresh(self):
+        envelope = self.sender.seal(70, self.payload)
+        self.assertEqual(len(self.receiver.messages(70, '')), 0)  # An idle poll.
+        self.jump(-600)
+        # Right after the jump the command is 600 s in the future.
+        self.assertEqual(self.receiver.messages(70, frame(envelope)), [])
+        fresh = self.receiver.open(70, self.sender.seal(70, dict(self.payload, version=new_version())))
+        self.assertTrue(self.receiver.accept(70, fresh))
+        # Once the new clock reaches its timestamp it is still void.
+        self.now += 590 * 10**9
+        self.assertEqual(self.receiver.messages(70, frame(envelope)), [])
+        self.assertFalse(self.receiver.accept(70, self.receiver._decrypt(70, envelope, {70: {'mesh_config'}})))
+
     def test_commands_present_at_a_clock_jump_are_voided_by_id(self):
         envelope = self.sender.seal(70, self.payload)
         self.assertEqual(len(self.receiver.messages(70, '')), 0)  # An idle poll.

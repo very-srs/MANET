@@ -347,27 +347,56 @@ routed_key() {
 
 # Print each IPv4 network in mesh.conf's uplink_routed list, one per line.
 # These networks reach the mesh through the uplink without NAT, for example a
-# ZeroTier network whose router routes the mesh subnet to this gateway.
-# Invalid entries are logged and skipped, so a typo never breaks the gateway.
+# ZeroTier network whose router routes the mesh subnet to this gateway. A list
+# entry may contain the mesh network, as when the mesh is a slice of the
+# ZeroTier range. Entries broader than /8 would bypass NAT for the internet,
+# and entries inside the mesh network do nothing; both are skipped. Invalid
+# entries are logged and skipped too, so a typo never breaks the gateway.
 routed_networks() {
-    local raw item
-    local -a items
+    local raw line
     raw=$(routed_setting)
-    read -r -a items <<< "${raw//,/ }"
-    for item in "${items[@]}"; do
-        if python3 -c 'import ipaddress, sys; print(ipaddress.IPv4Network(sys.argv[1], strict=False))' "$item" 2>/dev/null; then
-            continue
-        fi
-        log "Ignoring invalid uplink_routed network: $item"
-    done
+    [ -n "$raw" ] || return 0
+    while IFS= read -r line; do
+        case "$line" in
+            '!'*) log "Ignoring uplink_routed network: ${line#!}" ;;
+            ?*) printf '%s\n' "$line" ;;
+        esac
+    done < <(python3 -c '
+import ipaddress, sys
+try:
+    mesh = ipaddress.IPv4Network(sys.argv[2], strict=False)
+except ValueError:
+    mesh = None
+for item in sys.argv[1].replace(",", " ").split():
+    try:
+        net = ipaddress.IPv4Network(item, strict=False)
+    except ValueError:
+        print("!" + item + " (not an IPv4 network)")
+    else:
+        if net.prefixlen < 8:
+            print("!%s (broader than /8 would bypass NAT for the internet)" % net)
+        elif mesh and net.subnet_of(mesh):
+            print("!%s (inside the mesh network)" % net)
+        else:
+            print(net)
+' "$raw" "$(mesh_network)")
+}
+
+# Print mesh.conf's ipv4_network in canonical form, or nothing when unusable.
+mesh_network() {
+    local raw
+    raw=$(awk -F= '$1 == "ipv4_network" {print $2; exit}' /etc/mesh.conf 2>/dev/null) || true
+    raw=${raw//[\"\']/}
+    python3 -c 'import ipaddress, sys; print(ipaddress.IPv4Network(sys.argv[1], strict=False))' "$raw" 2>/dev/null || true
 }
 
 # Rebuild filter, NAT and TCP MSS rules for the uplink interface in $1.
 configure_firewall() {
     local iface="$1"
-    local candidate network
+    local candidate network mesh
     local -a routed
     mapfile -t routed < <(routed_networks)
+    mesh=$(mesh_network)
 
     nft add table inet filter 2>/dev/null || true
     nft add chain inet filter input '{ type filter hook input priority filter; policy drop; }' 2>/dev/null || true
@@ -392,7 +421,13 @@ configure_firewall() {
     nft add rule inet filter forward iifname "br0" oifname "$iface" accept
     nft add rule inet filter forward iifname "$iface" oifname "br0" ct state established,related accept
     for network in "${routed[@]}"; do
-        nft add rule inet filter forward iifname "$iface" oifname "br0" ip saddr "$network" accept
+        # The mesh's own addresses never arrive from the uplink, even when a
+        # routed network contains them: those would be spoofed.
+        if [ -n "$mesh" ]; then
+            nft add rule inet filter forward iifname "$iface" oifname "br0" ip saddr "$network" ip saddr != "$mesh" accept
+        else
+            nft add rule inet filter forward iifname "$iface" oifname "br0" ip saddr "$network" accept
+        fi
     done
 
     nft add table ip nat 2>/dev/null || true

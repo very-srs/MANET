@@ -238,8 +238,11 @@ class AdminTransport:
     def open(self, type_id, envelope):
         """Authenticate a timed message and enforce its clock window."""
         require_clock()
-        message = self._decrypt(type_id, envelope, KINDS)
-        # Accept at most 15 minutes of age or 60 seconds of future clock skew.
+        return self._fresh(self._decrypt(type_id, envelope, KINDS))
+
+    @staticmethod
+    def _fresh(message):
+        """Accept at most 15 minutes of age or 60 seconds of future clock skew."""
         age = (time.time_ns() - message.sent_ns) / 10**9
         if not -FUTURE_SKEW_SECONDS <= age <= MAX_AGE_SECONDS:
             raise AdminError('Expired admin message or clocks out of sync')
@@ -296,21 +299,30 @@ class AdminTransport:
     def messages(self, type_id, raw):
         """Authenticate before comparing versions/timestamps or inspecting actions."""
         from cryptography.exceptions import InvalidTag
-        messages = []
+        if not clock_ready():
+            return []
+        authenticated = []
         # The wire envelope is printable ASCII. Alfred escapes quotes and
         # backslashes. Decode quoted payload only, never network text as code.
         for match in re.finditer(r'\{\s*"[0-9a-fA-F:]{17}"\s*,\s*("(?:\\.|[^"\\])*")\s*\}', raw):
             try:
                 envelope = json.loads(json.loads(match.group(1)))
-                messages.append(self.open(type_id, envelope))
+                authenticated.append(self._decrypt(type_id, envelope, KINDS))
             except (ValueError, KeyError, TypeError, InvalidTag):
                 continue
         if type_id in (70, 71):
-            # Commands still in Alfred when the clock jumps are void, even
-            # those whose old-timeline timestamps now look new.
+            # Commands still in Alfred when the clock jumps are void. That
+            # includes ones the new clock places in the future: they become
+            # fresh once it catches up, and must not be accepted then.
             with self._locked():
-                voided = set(self._received(type_id, messages).get('void', []))
-            messages = [message for message in messages if message.message_id not in voided]
+                voided = set(self._received(type_id, authenticated).get('void', []))
+            authenticated = [m for m in authenticated if m.message_id not in voided]
+        messages = []
+        for message in authenticated:
+            try:
+                messages.append(self._fresh(message))
+            except AdminError:
+                continue
         return sorted(messages, key=lambda message: message.order)
 
     def _received(self, type_id, present=()):

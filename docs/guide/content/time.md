@@ -146,8 +146,9 @@ it follows them.
 
 `manet_clock.py` tracks the wall clock's offset from `CLOCK_BOOTTIME`. A change
 of more than ten seconds starts a new clock epoch, whatever caused it. Admin
-control channels then void every command present in Alfred and restart
-ordering at the jump, the sender drops its own history, staged config and
+control channels then void every authenticated command present in Alfred,
+including ones the new clock places in the future, and restart ordering at
+the jump, the sender drops its own history, staged config and
 radio changes are cancelled, and ACS agreement drops its rounds while keeping
 its boot-clock timers. Activated changes continue, because their rollback
 deadlines use the boot clock.
