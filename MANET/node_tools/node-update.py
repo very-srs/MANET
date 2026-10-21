@@ -255,6 +255,8 @@ class Updater:
         # The last release that installed cleanly, kept for rollback.
         self.installed = self.state / "installed"
         self.failed = self.state / "failed.json"
+        # A newer release's updater, run once before that release installs.
+        self.handoff = self.state / "handoff"
 
     def log(self, message, error=False):
         """Send messages to syslog and also print outside routine mode."""
@@ -419,11 +421,14 @@ class Updater:
         return members
 
     def hand_off(self, package, members, expected, local_archive, local_version):
-        """Install a newer release's updater, then run this check again with it.
+        """Run this check again with a newer release's updater.
 
         An older updater can refuse a payload that its replacement accepts.
-        The archive has already passed validation. Process replacement drops
-        the update lock and leaves the download for the next run's cleanup.
+        The archive has already passed validation. The copy runs from private
+        state, so an interrupted handoff never leaves a mixed updater live;
+        the normal installation replaces /usr/local/bin under recovery.
+        Process replacement drops the update lock and leaves the download for
+        the next run's cleanup.
         """
         running = Path(__file__).resolve().parent
         with tarfile.open(package, "r:gz") as archive:
@@ -431,12 +436,14 @@ class Updater:
         if all((running / PurePosixPath(name).name).read_bytes() == body
                for name, body in bodies.items()):
             return
+        self.remove_handoff()
+        self.handoff.mkdir(mode=0o700)
         for name, body in bodies.items():
-            target = self.destination(name)
-            self.make_directory(target.parent)
-            atomic_file(target, data=body, mode=members[name].mode & 0o777)
-        self.log(f"Installed the updater from release {expected}; checking again with it")
-        args = [sys.executable, str(self.destination(UPDATER[0])), "--handed-off"]
+            atomic_file(self.handoff / PurePosixPath(name).name, data=body,
+                        mode=members[name].mode & 0o700)
+        sync_directory(self.state)
+        self.log(f"Checking again with the updater from release {expected}")
+        args = [sys.executable, str(self.handoff / "node-update.py"), "--handed-off"]
         for flag, enabled in (("--routine", self.routine), ("--development", self.development),
                               ("--allow-downgrade", self.allow_downgrade)):
             if enabled:
@@ -482,10 +489,19 @@ class Updater:
                     path.unlink()
                 elif path.is_dir():
                     shutil.rmtree(path)
+        # Keep the handoff copy only while it is the updater running now.
+        if Path(__file__).resolve().parent != self.handoff.resolve():
+            self.remove_handoff()
         if not self.pending.exists() and self.recovery.exists():
             if self.recovery.is_symlink():
                 raise UpdateError('Unsafe recovery directory')
             self.retire_recovery()
+
+    def remove_handoff(self):
+        if self.handoff.is_symlink() or self.handoff.is_file():
+            self.handoff.unlink()
+        elif self.handoff.is_dir():
+            shutil.rmtree(self.handoff)
 
     def retire_recovery(self):
         """Keep a cleanly installed archive as the rollback source, else drop it."""

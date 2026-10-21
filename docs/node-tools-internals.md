@@ -448,14 +448,18 @@ files must be present, including the node-manager service drop-ins.
 A newer release's updater installs that release. After validation, when the
 archive is newer than the installed version, the updater compares the
 archive's `node-update.py`, `manet_release.py`, and `manet_kernel_update.py`
-with its own running files. If any differ, it installs those three into
-`/usr/local/bin` and replaces itself with the installed `node-update.py`,
-keeping the original options. The replacement repeats the whole check,
-including release selection and download, without the daily throttle. A
-hidden `--handed-off` option prevents a second handoff. Reinstalls and
-downgrades keep the running updater. The handoff happens after validation,
-so a new archive must still pass the previous release's validation. Everything
-after it, including kernel decisions, belongs to the new updater.
+with its own running files. If any differ, it copies those three into the
+private `/var/lib/manet-update/handoff` directory and replaces itself with
+that `node-update.py`, keeping the original options. Nothing under
+`/usr/local/bin` changes until the new updater's ordinary installation, which
+arms recovery with the new updater first. An interrupted handoff therefore
+never leaves a mixed updater installed. The replacement repeats the whole
+check, including release selection and download, without the daily throttle.
+A hidden `--handed-off` option prevents a second handoff. The next run from
+any other location removes the copy. Reinstalls and downgrades keep the
+running updater. The handoff happens after validation, so a new archive must
+still pass the previous release's validation. Everything after it, including
+kernel decisions, belongs to the new updater.
 The updater estimates staging plus installation space per filesystem, leaving
 128 MiB headroom. It stages regular files and resolves the admin dependency.
 Before replacing payload files, it durably stores the verified compressed

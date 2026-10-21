@@ -141,9 +141,9 @@ the release includes a deliberate migration. See the
 The updater validates paths, ownership, file types, archive limits, required
 files, available space, the manifest digest, and the checksum sidecar before
 live replacement. When a validated archive is newer than the installed release
-and carries a different updater, the radio installs that updater first and
-runs the check again with it. Updater fixes therefore apply to the release
-that carries them. Reinstalls and downgrades keep the running updater. Boot files, modules, and Morse firmware use a separate
+and carries a different updater, the radio runs the check again with that
+updater from a private copy. Updater fixes therefore apply to the release that
+carries them. Reinstalls and downgrades keep the running updater. Boot files, modules, and Morse firmware use a separate
 matched kernel payload with trial activation. Downloading requires
 `/run/initial_time_synced`. Local recovery does not.
 

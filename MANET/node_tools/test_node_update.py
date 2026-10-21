@@ -1202,30 +1202,39 @@ module.Updater(Path(sys.argv[2])).update(recover_only=True)
         self.make_archive()
         return self.members[name][0]
 
-    def test_newer_updater_installs_itself_and_checks_again(self):
+    def test_newer_updater_checks_again_from_a_private_copy(self):
         body = self.newer_updater()
         with patch.object(update.os, 'execv', side_effect=SystemExit) as execv:
             with self.assertRaises(SystemExit):
                 self.updater.update()
-        installed = self.root / 'usr/local/bin/node-update.py'
-        self.assertEqual(installed.read_bytes(), body)
-        self.assertEqual(installed.stat().st_mode & 0o777, 0o755)
+        copy = self.updater.handoff / 'node-update.py'
+        self.assertEqual(copy.read_bytes(), body)
+        self.assertEqual(copy.stat().st_mode & 0o777, 0o700)
         for name in ('manet_release.py', 'manet_kernel_update.py'):
-            self.assertEqual((self.root / 'usr/local/bin' / name).read_bytes(),
+            self.assertEqual((self.updater.handoff / name).read_bytes(),
                              Path(__file__).with_name(name).read_bytes())
         self.assertEqual(execv.call_args.args,
-                         (sys.executable, [sys.executable, str(installed), '--handed-off']))
+                         (sys.executable, [sys.executable, str(copy), '--handed-off']))
+        # Nothing live changes before the new updater arms its own recovery.
+        self.assertFalse((self.root / 'usr/local/bin/node-update.py').exists())
         self.assertEqual(self.updater.marker.read_text(), self.old_version)
         self.assertFalse(self.updater.pending.exists())
         self.assertNotIn('dependency', self.history())
         self.assertEqual(self.old_manager.read_text(), 'old manager\n')
-        # The replacement checks again despite the daily throttle and never
-        # hands off a second time.
+        # The copy checks again despite the daily throttle, keeps itself while
+        # running and never hands off a second time.
         self.updater.routine = True
-        with patch.object(update.os, 'execv') as execv:
+        with patch.object(update, '__file__', str(copy)), patch.object(update.os, 'execv') as execv:
             self.updater.update(handed_off=True)
         execv.assert_not_called()
+        self.assertTrue(copy.exists())
         self.assertEqual(self.updater.marker.read_text(), self.new_version)
+        self.assertEqual((self.root / 'usr/local/bin/node-update.py').read_bytes(), body)
+        self.assertEqual((self.updater.installed / 'node-update.py').read_bytes(), body)
+        # Any later run from elsewhere removes the copy.
+        self.updater.routine = False
+        self.updater.update()
+        self.assertFalse(self.updater.handoff.exists())
 
     def test_handoff_keeps_the_requested_mode(self):
         self.newer_updater()
