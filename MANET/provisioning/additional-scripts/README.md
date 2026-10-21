@@ -68,7 +68,12 @@ Filenames must match `[A-Za-z0-9][A-Za-z0-9._-]*`, so no spaces.
 
 Anything ending in `.disabled`, `.bak`, `.orig`, or `~`, and anything starting
 with `.`, is ignored. That is how to park a script without deleting it, and it
-is what keeps the bundled example inert.
+is what keeps the bundled examples inert. Two ship here:
+
+| Example | Does |
+|---|---|
+| `10-example-site-setup.sh.disabled` | SSH keys, a fetched bundle and reading `mesh.conf` |
+| `30-routed-uplink.sh.disabled` | sets `uplink_routed`, so a network such as ZeroTier reaches the mesh without NAT |
 
 ## Languages
 

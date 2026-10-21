@@ -3517,6 +3517,21 @@ allows new mappings without flushing mesh/local flows. It does not synthesize
 TCP resets or promise fail-fast application recovery. See the
 [Netfilter command reference](https://www.netfilter.org/projects/conntrack-tools/conntrack-manpage.html).
 
+`uplink_routed` exempts listed IPv4 networks from NAT. `configure_firewall`
+reads it on every rebuild, so promotion, switching and service restarts keep
+it. The gateway state records a checksum of the setting next to the uplink
+interface, address and router, so the next reconcile after a change rebuilds
+the firewall instead of taking the unchanged-gateway shortcut. Each network adds `ip daddr NET accept` ahead of the masquerade rule in
+`ip nat postrouting`, and `ip saddr NET accept` from the uplink to `br0` in the
+forward chain, whose policy is drop. Both rules have to live in those chains:
+an accept in another table cannot override a drop or skip a later NAT rule.
+A user script inserting the same rules once would lose them at the next
+promotion, which flushes both chains. `routed_networks` canonicalizes each
+entry with Python's `ipaddress` and logs and skips invalid ones, so a typo
+cannot stop the rebuild halfway. Input from the uplink is already accepted.
+`manet-ui-firewall.sh` still limits port 80 to the local DHCP pool. Only the
+gateway runs this code, so the key is inert on other radios.
+
 batman-adv picks a gateway itself (the `*` in `batctl gwl`), but that pick only
 steers its DHCP handling. Linux needs a default route, which is why this
 script exists. It used to route to batman's pick, which switches as

@@ -1,0 +1,37 @@
+#!/bin/bash
+#
+# EXAMPLE: rename to 30-routed-uplink.sh and set ROUTED below to make it run.
+#
+# Lets a network behind the gateway's uplink reach the mesh by its own
+# addresses, without NAT. The usual case is a ZeroTier network: a router that
+# is a ZeroTier member routes the mesh subnet to the gateway radio, and every
+# ZeroTier member can then reach every radio and EUD on the mesh.
+#
+# The same image can go on every radio. Only the radio that is the gateway
+# applies the setting, so the others ignore it.
+#
+# The router needs a static route for the mesh subnet (ipv4_network) via the
+# gateway radio's address on the router's LAN. Reserve that address in the
+# router's DHCP server by the gateway radio's Ethernet MAC. Give the mesh
+# subnet its own slice of the ZeroTier range, keep that slice out of
+# ZeroTier's auto-assign pool, and add a managed route for it via the
+# router's ZeroTier address.
+
+set -euo pipefail
+
+# One or more IPv4 networks, separated by commas.
+ROUTED="10.147.0.0/16"
+
+# Replace an existing setting instead of adding a second line.
+tmp=$(mktemp /etc/mesh.conf.XXXXXX)
+grep -v '^uplink_routed=' /etc/mesh.conf > "$tmp" || true
+printf 'uplink_routed=%s\n' "$ROUTED" >> "$tmp"
+chmod --reference=/etc/mesh.conf "$tmp"
+chown --reference=/etc/mesh.conf "$tmp"
+sync "$tmp"
+mv "$tmp" /etc/mesh.conf
+sync /etc
+
+# A radio that is already the gateway rebuilds its firewall now.
+/usr/local/bin/manet-uplink-dispatch.sh reconcile || true
+echo "uplink_routed=$ROUTED"

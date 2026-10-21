@@ -165,6 +165,22 @@ session because traffic now leaves through a different connection. Reconnect
 the application after the new route settles. No replacement is possible if
 none of the reachable radios has a working uplink.
 
+### Reach the mesh from your own network
+
+A gateway normally hides the mesh behind its own internet address, so devices
+on the internet side cannot start a connection to a radio. To reach the radios
+from a private network, such as a ZeroTier network your router belongs to,
+set `uplink_routed` to that network on the radios. Only the gateway uses it,
+so the same setting can go on every radio. Your router also needs a route for
+the mesh network via the gateway radio. Give the gateway radio a fixed address
+on the router so the route stays valid.
+
+Devices on that network can then reach radios and the devices connected to
+them by their mesh addresses, for SSH, ATAK, voice and video. Each radio's web
+page still only answers its own connected devices. The
+[additional scripts guide](../../../MANET/provisioning/additional-scripts/README.md)
+includes an example that sets it.
+
 ### Speed and data use
 
 A fast router cannot make a slow mesh path faster. Several hops, shared
@@ -309,6 +325,13 @@ change whether the candidate Wi-Fi interface serves clients or mesh peers.
 These are related transitions, not independent scripts choosing permanent
 roles. See [Ethernet role ownership](../../../MANET/networkd-dispatcher/README.md)
 and [client connections](connect.md).
+
+The gateway masquerades its uplink except for networks listed in
+`uplink_routed`. The firewall rebuild on every promotion adds a NAT exemption
+ahead of the masquerade rule and a forward accept from the uplink into `br0`
+for each one. They are not standalone rules because the rebuild flushes both
+chains and the forward policy drops. See the
+[uplink internals](../../../docs/node-tools-internals.md#gateway-choice-and-uplink-speed).
 
 ### Selecting a Linux default route
 

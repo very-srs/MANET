@@ -1378,6 +1378,19 @@ changes without restarting. Unchanged DHCP configuration also preserves leases.
 Optional conntrack cleanup deletes only old-address source-NAT mappings when
 the address differs. Established internet sessions still need reconnection.
 
+**Routed networks.** By default the gateway hides the mesh behind its own
+uplink address. `uplink_routed=` in `/etc/mesh.conf` lists IPv4 networks that
+reach the mesh by its own addresses instead, for example a ZeroTier network
+whose router routes the mesh subnet to the gateway. For each network the
+gateway skips NAT and accepts new connections from the uplink into the mesh.
+Internet traffic keeps NAT. Separate several networks with commas. Invalid
+entries are logged and skipped. The setting is local to each radio and only
+the gateway uses it, so the same value can go on every radio. The router still
+needs a route for `ipv4_network` via the gateway's LAN address. Node web pages
+stay limited to each radio's own clients. The bundled
+[`30-routed-uplink.sh.disabled`](../provisioning/additional-scripts/30-routed-uplink.sh.disabled)
+sets it at first boot.
+
 Ethernet promotion requires an interface-bound IPv4 HTTP 204 response from
 one of two connectivity endpoints. ICMP alone and HTTP 200/302 portal replies
 cannot qualify it. This probe needs no TLS clock, and speed-test failure does

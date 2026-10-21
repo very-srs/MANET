@@ -863,6 +863,38 @@ class AcsAutoModeTests(SpeedGateTests):
         self.assertIn('systemctl start hostapd.service', calls)
         self.assertNotIn('ap-mesh-helper mesh', calls)
 
+    def test_routed_networks_reach_the_mesh_without_nat(self):
+        with (self.root / 'mesh.conf').open('a') as conf:
+            conf.write('uplink_routed="10.147.0.5/16, 10.300.0.0/8"\n')
+        self.uplink('end0')
+        calls = self.dispatch()
+        exempt = calls.index('nft add rule ip nat postrouting oifname end0 ip daddr 10.147.0.0/16 accept')
+        self.assertLess(exempt, calls.index('nft add rule ip nat postrouting oifname end0 masquerade'))
+        self.assertIn('nft add rule inet filter forward iifname end0 oifname br0 '
+                      'ip saddr 10.147.0.0/16 accept', calls)
+        self.assertFalse(any('10.300' in call for call in calls))
+        self.assertIn('Ignoring invalid uplink_routed network: 10.300.0.0/8',
+                      (self.root / 'journal').read_text())
+
+    def test_changing_routed_networks_rebuilds_a_running_gateway(self):
+        self.uplink('end0')
+        self.dispatch()
+        self.calls.unlink()
+        self.assertNotIn('nft flush chain ip nat postrouting', self.dispatch())
+        with (self.root / 'mesh.conf').open('a') as conf:
+            conf.write('uplink_routed=10.147.0.0/16\n')
+        self.calls.unlink(missing_ok=True)
+        calls = self.dispatch()
+        self.assertIn('nft add rule ip nat postrouting oifname end0 ip daddr 10.147.0.0/16 accept', calls)
+        self.calls.unlink()
+        self.assertNotIn('nft flush chain ip nat postrouting', self.dispatch())
+
+    def test_without_routed_networks_everything_is_masqueraded(self):
+        self.uplink('end0')
+        calls = self.dispatch()
+        self.assertFalse(any(' ip daddr ' in call or ' ip saddr ' in call
+                             for call in calls if call.startswith('nft ')))
+
     def test_explicit_builtin_client_is_an_uplink_without_usb_bus(self):
         self.iface('wlan0')
         (self.root / 'addr/wlan0').write_text('192.168.50.10')

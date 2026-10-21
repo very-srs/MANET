@@ -330,10 +330,44 @@ find_working_uplink() {
     return 1
 }
 
+# Print mesh.conf's uplink_routed value without quotes.
+routed_setting() {
+    local raw
+    raw=$(awk -F= '$1 == "uplink_routed" {sub(/^[^=]*=/, ""); print; exit}' /etc/mesh.conf 2>/dev/null) || true
+    printf '%s\n' "${raw//[\"\']/}"
+}
+
+# Print a checksum of the setting for the gateway state, or nothing when it is
+# unset. A changed list then rebuilds the firewall.
+routed_key() {
+    local raw
+    raw=$(routed_setting)
+    [ -z "$raw" ] || printf '%s' "$raw" | cksum | cut -d' ' -f1
+}
+
+# Print each IPv4 network in mesh.conf's uplink_routed list, one per line.
+# These networks reach the mesh through the uplink without NAT, for example a
+# ZeroTier network whose router routes the mesh subnet to this gateway.
+# Invalid entries are logged and skipped, so a typo never breaks the gateway.
+routed_networks() {
+    local raw item
+    local -a items
+    raw=$(routed_setting)
+    read -r -a items <<< "${raw//,/ }"
+    for item in "${items[@]}"; do
+        if python3 -c 'import ipaddress, sys; print(ipaddress.IPv4Network(sys.argv[1], strict=False))' "$item" 2>/dev/null; then
+            continue
+        fi
+        log "Ignoring invalid uplink_routed network: $item"
+    done
+}
+
 # Rebuild filter, NAT and TCP MSS rules for the uplink interface in $1.
 configure_firewall() {
     local iface="$1"
-    local candidate
+    local candidate network
+    local -a routed
+    mapfile -t routed < <(routed_networks)
 
     nft add table inet filter 2>/dev/null || true
     nft add chain inet filter input '{ type filter hook input priority filter; policy drop; }' 2>/dev/null || true
@@ -357,10 +391,17 @@ configure_firewall() {
     nft add rule inet filter forward iifname "br0" oifname "br0" accept
     nft add rule inet filter forward iifname "br0" oifname "$iface" accept
     nft add rule inet filter forward iifname "$iface" oifname "br0" ct state established,related accept
+    for network in "${routed[@]}"; do
+        nft add rule inet filter forward iifname "$iface" oifname "br0" ip saddr "$network" accept
+    done
 
     nft add table ip nat 2>/dev/null || true
     nft add chain ip nat postrouting '{ type nat hook postrouting priority srcnat; policy accept; }' 2>/dev/null || true
     nft flush chain ip nat postrouting 2>/dev/null || true
+    for network in "${routed[@]}"; do
+        # Routed networks see mesh addresses. Everything else is masqueraded.
+        nft add rule ip nat postrouting oifname "$iface" ip daddr "$network" accept
+    done
     nft add rule ip nat postrouting oifname "$iface" masquerade
 
     nft add table ip mangle 2>/dev/null || true
@@ -515,16 +556,18 @@ promote_gateway() {
     # Skip firewall rewrites, radvd/gateway-route-manager restarts and
     # mesh-ip-manager when this exact uplink is already promoted.
     # Reconciliation runs every node-manager cycle.
-    local prev_mode="" prev_iface="" prev_ip="" prev_gw=""
+    local prev_mode="" prev_iface="" prev_ip="" prev_gw="" prev_routed="" routed
+    routed=$(routed_key)
     if [ -f "$STATE_FILE" ]; then
         prev_mode=$(awk -F= '$1 == "UPLINK_MODE" {print $2}' "$STATE_FILE" 2>/dev/null)
         prev_iface=$(awk -F= '$1 == "UPLINK_IFACE" {print $2}' "$STATE_FILE" 2>/dev/null)
         prev_ip=$(awk -F= '$1 == "UPLINK_IP" {print $2}' "$STATE_FILE" 2>/dev/null)
         prev_gw=$(awk -F= '$1 == "UPLINK_GW" {print $2}' "$STATE_FILE" 2>/dev/null)
+        prev_routed=$(awk -F= '$1 == "UPLINK_ROUTED" {print $2}' "$STATE_FILE" 2>/dev/null)
     fi
     if [ "$prev_mode" = "gateway" ] && [ "$prev_iface" = "$iface" ] && \
        [ "$prev_ip" = "$ip" ] && [ "$prev_gw" = "${gw:-}" ] && \
-       [ -f "$LEGACY_GATEWAY_STATE" ]; then
+       [ "$prev_routed" = "$routed" ] && [ -f "$LEGACY_GATEWAY_STATE" ]; then
         if [ "$EVENT" = provision ]; then
             systemctl start manet-uplink-dns.service 2>/dev/null || true
         else
@@ -552,6 +595,7 @@ UPLINK_MODE=$mode
 UPLINK_IFACE=$iface
 UPLINK_IP=$ip
 UPLINK_GW=${gw:-}
+UPLINK_ROUTED=$routed
 UPDATED_AT=$(date +%s)
 UPLINK_GENERATION=$(date +%s%N)
 EOF
