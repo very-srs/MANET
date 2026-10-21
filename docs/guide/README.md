@@ -43,6 +43,8 @@ afterward; do not include unrelated commits just to refresh the site.
 2. Update the existing canonical README or internals document for the area.
    Use `coverage.md`, then find matching topics with `rg` in `content/`.
    For a new, renamed, or removed production node tool, update its map row.
+   Add, change, or remove the matching item in the
+   [feature list](content/features.md), in each tier it appears in.
 3. Update every affected tier. Marine explains the action with drawings and
    very short captions. User gives steps, expected results, and recovery.
    Developer explains mechanisms, files, invariants, and failure cases, with

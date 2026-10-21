@@ -116,6 +116,7 @@ configuration, contact selection, and position-source limitations.
 
 - [Contributing and PR workflow](CONTRIBUTING.md)
 - [Field guide](https://very-srs.github.io/MANET/) and [documentation style](docs/guide/README.md)
+- [Feature list](docs/guide/content/features.md)
 - [Runtime reference](MANET/node_tools/README.md), [internals](docs/node-tools-internals.md), and [tool map](docs/node-tools-map.md)
 - [Provisioning reference](MANET/provisioning/README.md) and [flasher internals](docs/provisioning-internals.md)
 - [Packaging and development tools](MANET/packaging/README.md)

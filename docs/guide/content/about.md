@@ -65,6 +65,8 @@ neighbors, so a message can hop from radio to radio until it arrives.
 - **See the whole mesh** on the radio's [dashboard](dashboard.md), and
   [measure](measurements.md) how well each link is working.
 
+The [feature list](features.md) covers everything else the radios do.
+
 ### How it works
 
 ![Diagram: your phone connects to your radio by Wi-Fi or cable. Your radio links to another radio and to a friend's radio by Wi-Fi, a fast link with shorter reach, and by HaLow, a slower link with longer reach. The friend's phone connects to their radio. One radio can share an internet connection with everyone.](../assets/about-mesh-diagram.svg)

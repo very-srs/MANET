@@ -8,6 +8,13 @@
       "group": "Start here"
     },
     {
+      "id": "features",
+      "source": "features.md",
+      "title": "Feature list",
+      "description": "Everything the radios do, grouped by area, with a link to each chapter.",
+      "group": "Start here"
+    },
+    {
       "id": "overview",
       "source": "overview.md",
       "title": "Meet the mesh",
