@@ -53,6 +53,9 @@ RUNTIME_SERVICES = (
 NODE_SERVICES = ('alfred.service',)
 RESTARTED_SERVICES = RUNTIME_SERVICES + NODE_SERVICES
 MARKERS = {"etc/manet_version.txt", "usr/local/bin/version.txt"}
+# A newer release's updater installs that release, not the one running now.
+UPDATER = ("usr/local/bin/node-update.py", "usr/local/bin/manet_release.py",
+           "usr/local/bin/manet_kernel_update.py")
 REQUIRED = MARKERS | {
     "etc/apt/preferences.d/00-manet-kernel",
     "usr/local/bin/manet-kernel-protect.py",
@@ -414,6 +417,33 @@ class Updater:
                 raise UpdateError("Archive version files disagree")
             validate_payload(archive, members, self.board())
         return members
+
+    def hand_off(self, package, members, expected, local_archive, local_version):
+        """Install a newer release's updater, then run this check again with it.
+
+        An older updater can refuse a payload that its replacement accepts.
+        The archive has already passed validation. Process replacement drops
+        the update lock and leaves the download for the next run's cleanup.
+        """
+        running = Path(__file__).resolve().parent
+        with tarfile.open(package, "r:gz") as archive:
+            bodies = {name: archive.extractfile(members[name]).read() for name in UPDATER}
+        if all((running / PurePosixPath(name).name).read_bytes() == body
+               for name, body in bodies.items()):
+            return
+        for name, body in bodies.items():
+            target = self.destination(name)
+            self.make_directory(target.parent)
+            atomic_file(target, data=body, mode=members[name].mode & 0o777)
+        self.log(f"Installed the updater from release {expected}; checking again with it")
+        args = [sys.executable, str(self.destination(UPDATER[0])), "--handed-off"]
+        for flag, enabled in (("--routine", self.routine), ("--development", self.development),
+                              ("--allow-downgrade", self.allow_downgrade)):
+            if enabled:
+                args.append(flag)
+        if local_archive is not None:
+            args += ["--local-archive", str(local_archive), "--local-version", local_version]
+        os.execv(sys.executable, args)
 
     def stage(self, package, members, directory):
         """Reserve space and unpack regular files into private staging."""
@@ -1006,7 +1036,7 @@ class Updater:
         self.destination('etc/ebtables.rules').unlink(missing_ok=True)
 
     def update(self, recover_only=False, files_only=False, cancel_kernel=False,
-               local_archive=None, local_version=None):
+               local_archive=None, local_version=None, handed_off=False):
         """Serialize recovery or release selection, verification and install."""
         run = self.root / "run"
         run.mkdir(exist_ok=True)
@@ -1054,7 +1084,8 @@ class Updater:
                 local = "unknown"
             # Routine checks use marker mtime as a one-day wall-clock throttle.
             # A backward clock step does not count as a recent successful check.
-            if (self.routine and local_archive is None and not pending and not replaced and local != "unknown"
+            if (self.routine and local_archive is None and not pending and not replaced
+                    and not handed_off and local != "unknown"
                     and 0 <= time.time() - self.marker.stat().st_mtime < 86400):
                 return
             board = self.board()
@@ -1100,15 +1131,24 @@ class Updater:
                     self.download(url, package, MAX_DOWNLOAD)
                     verify_asset(package, release["assets"][filename])
                 members = self.validate(package, checksum, filename, expected)
+                # A reinstall or downgrade keeps the updater the operator started.
+                if not handed_off and (local == "unknown" or tuple(map(int, expected.split(".")))
+                                       > tuple(map(int, local.split(".")))):
+                    self.hand_off(package, members, expected, local_archive, local_version)
                 self.clean_payload_scratch(members)
                 staged = work / "stage"
                 self.stage(package, members, staged)
-                kernel_selected = (KERNEL_MANIFEST not in members or board != 'cm4'
-                                   or kernel_enabled(self.root))
-                if KERNEL_MANIFEST in members and kernel_selected:
-                    self.kernel().preflight(staged)
-                elif KERNEL_MANIFEST in members:
-                    self.log('CM4 kernel update disabled locally; installing runtime payload only')
+                if KERNEL_MANIFEST in members and self.kernel().running_set(staged):
+                    # Releases keep shipping the current kernel for older radios.
+                    kernel_selected = False
+                    self.log('Kernel payload is already running; installing runtime payload only')
+                else:
+                    kernel_selected = (KERNEL_MANIFEST not in members or board != 'cm4'
+                                       or kernel_enabled(self.root))
+                    if KERNEL_MANIFEST in members and kernel_selected:
+                        self.kernel().preflight(staged)
+                    elif KERNEL_MANIFEST in members:
+                        self.log('CM4 kernel update disabled locally; installing runtime payload only')
                 # APT is allowed only before arming the transaction. Boot
                 # recovery never depends on network access or package installs.
                 self.protect_kernel(staged)
@@ -1148,6 +1188,7 @@ def main():
                           help=argparse.SUPPRESS)
     recovery.add_argument('--recover-files', action='store_true',
                           help='restore pending payload before service startup')
+    parser.add_argument('--handed-off', action='store_true', help=argparse.SUPPRESS)
     args = parser.parse_args()
     if (args.local_archive is None) != (args.local_version is None):
         parser.error('--local-archive and --local-version must be supplied together')
@@ -1165,7 +1206,8 @@ def main():
         updater.update(recover_only=args.recover_only,
                        files_only=args.recover_files,
                        cancel_kernel=args.cancel_kernel_trial,
-                       local_archive=args.local_archive, local_version=args.local_version)
+                       local_archive=args.local_archive, local_version=args.local_version,
+                       handed_off=args.handed_off)
     except (KernelError, OSError, ValueError, EOFError, tarfile.TarError, zlib.error,
             subprocess.SubprocessError) as error:
         updater.log(f"node-update.sh: Tools update failed: {error}",

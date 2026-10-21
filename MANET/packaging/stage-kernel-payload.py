@@ -12,7 +12,7 @@ import tempfile
 
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / 'MANET/node_tools'))
-from manet_kernel_update import (MAX_DOWNLOAD, MAX_EXPANDED, MANIFEST_LIMIT,
+from manet_kernel_update import (INSTALLED, MAX_DOWNLOAD, MAX_EXPANDED, MANIFEST_LIMIT,
                                  validate_payload, sha256, KernelError)
 
 
@@ -138,7 +138,7 @@ def main():
                                  args.stage / 'boot/firmware/overlays/README')
                 # Install archives already contain the SBC overlay at root.
                 # Record its identity without duplicating a second kernel set.
-                target = args.stage / 'usr/local/share/manet/installed-kernel.json'
+                target = args.stage / INSTALLED
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_text(json.dumps(manifest, sort_keys=True, indent=2) + '\n')
             else:

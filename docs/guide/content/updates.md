@@ -33,7 +33,8 @@ the tools first, then restarts the radio once to try the new kernel. Before
 keeping it, the radio checks its own startup, drivers, attached radios, and
 mesh interface. It does not need Ethernet, internet, another radio, or a set
 clock for this check. The tools version shown can change before the kernel
-check finishes.
+check finishes. A radio that already runs the release's kernel updates its
+tools without the extra restart.
 
 If the check fails, the radio returns to its previous kernel by itself and never
 tries that kernel again. If the new kernel cannot start at all, the firmware
@@ -139,7 +140,10 @@ the release includes a deliberate migration. See the
 
 The updater validates paths, ownership, file types, archive limits, required
 files, available space, the manifest digest, and the checksum sidecar before
-live replacement. Boot files, modules, and Morse firmware use a separate
+live replacement. When a validated archive is newer than the installed release
+and carries a different updater, the radio installs that updater first and
+runs the check again with it. Updater fixes therefore apply to the release
+that carries them. Reinstalls and downgrades keep the running updater. Boot files, modules, and Morse firmware use a separate
 matched kernel payload with trial activation. Downloading requires
 `/run/initial_time_synced`. Local recovery does not.
 
@@ -177,7 +181,11 @@ saved inventory catches a radio disappearing during trial. Health has a
 60-second budget and must finish before 240 seconds of boot uptime. No network
 path, peers, or clock sync is required. Opt-out skips the kernel and persists
 that selection for interrupted runtime recovery. It cannot abandon an armed
-trial or erase a failed candidate.
+trial or erase a failed candidate. A payload that matches the running kernel
+is skipped and recorded the same way. Its release must be the running
+release, and the manifest must match the committed slot in `confirmed.json`
+or, on a flashed radio, `installed-kernel.json`. A different set under the
+running release is refused before anything is installed.
 
 For an offline update, `--local-archive` and `--local-version` validate an
 explicitly supplied board tools archive and adjacent checksum without release

@@ -160,6 +160,17 @@ in a private versioned directory and the trial command line selects it using
 `firmware_class.path`. Shared MT7916 firmware remains managed by its existing
 service. Kernel payloads must not contain a second MT7916 selection policy.
 
+Later releases can keep shipping an unchanged set for radios that do not have
+it yet. A node already running that set installs only the runtime payload.
+The running release must equal the manifest release, and one local record must
+match the manifest. A committed trial names its slot after the first 24 hex
+digits of the manifest's SHA-256 in `/var/lib/manet-kernel/confirmed.json`. A
+flashed radio keeps the install archive's normalized manifest in
+`/usr/local/share/manet/installed-kernel.json`. The committed slot takes
+precedence when it names the running release. Recovery records the skip the
+same way as an opt-out. A different set under the running release is still
+refused.
+
 The durable sequence is:
 
 1. Verify the archive, board, manifest, and node-derived boot profile before APT or
@@ -433,6 +444,18 @@ Payload selection and activation follow the [field update policy](#field-update-
 Both embedded version files must match each other and the advertised release.
 Required updater, manager, status, dependency, agreement, time-service, and MOTD
 files must be present, including the node-manager service drop-ins.
+
+A newer release's updater installs that release. After validation, when the
+archive is newer than the installed version, the updater compares the
+archive's `node-update.py`, `manet_release.py`, and `manet_kernel_update.py`
+with its own running files. If any differ, it installs those three into
+`/usr/local/bin` and replaces itself with the installed `node-update.py`,
+keeping the original options. The replacement repeats the whole check,
+including release selection and download, without the daily throttle. A
+hidden `--handed-off` option prevents a second handoff. Reinstalls and
+downgrades keep the running updater. The handoff happens after validation,
+so a new archive must still pass the previous release's validation. Everything
+after it, including kernel decisions, belongs to the new updater.
 The updater estimates staging plus installation space per filesystem, leaving
 128 MiB headroom. It stages regular files and resolves the admin dependency.
 Before replacing payload files, it durably stores the verified compressed

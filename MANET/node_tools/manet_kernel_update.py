@@ -16,6 +16,8 @@ MANIFEST = PREFIX + 'manifest.json'
 PROFILE = 'etc/manet-kernel-trial.json'
 HEALTH = 'usr/local/sbin/manet-kernel-health-check'
 POLICY = 'etc/manet-kernel-update.conf'
+# Install archives record the matched set they flash. Tools archives never ship it.
+INSTALLED = 'usr/local/share/manet/installed-kernel.json'
 FIELD_HEALTH_WAIT = 60
 MAX_DOWNLOAD = 256 * 1024 * 1024
 MAX_EXPANDED = 1536 * 1024 * 1024
@@ -344,6 +346,27 @@ class KernelTrial:
         return dict(previous_auto_initramfs=previous, saved_root=roots[0], running_root=roots[1],
                     source=source, filesystem=filesystem, device=device_number)
 
+    def running_set(self, directory):
+        """Whether the payload is the matched set this node already runs.
+
+        A committed trial names its slot after the manifest digest. A flashed
+        node keeps the install archive's record. Either needs the running
+        release, so a different set under the same uname -r still fails preflight.
+        """
+        manifest = json.loads((directory / MANIFEST).read_text())
+        if manifest['release'] != self.release():
+            return False
+
+        def record(name):
+            try:
+                return json.loads(self.u.destination(name).read_text())
+            except (FileNotFoundError, ValueError):
+                return None
+        confirmed = record('var/lib/manet-kernel/confirmed.json')
+        if isinstance(confirmed, dict) and confirmed.get('release') == manifest['release']:
+            return confirmed.get('slot') == sha256(directory / MANIFEST)[:24]
+        return record(INSTALLED) == manifest
+
     def preflight(self, directory):
         manifest = json.loads((directory / MANIFEST).read_text())
         if self.u.board() != 'cm4':
@@ -356,7 +379,8 @@ class KernelTrial:
                 raise KernelError('Kernel transaction identity changed')
             return manifest, profile
         if manifest['release'] == self.release():
-            raise KernelError('Kernel update must have a new unique uname -r')
+            raise KernelError('Running kernel ' + manifest['release'] + ' is not this matched set; '
+                              'a kernel update must have a new unique uname -r')
         modules = self.u.destination('usr/lib/modules/' + manifest['release'])
         if modules.exists() or modules.is_symlink():
             raise KernelError('Candidate module directory already exists')

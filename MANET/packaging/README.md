@@ -64,7 +64,9 @@ in `/usr/local/share/manet/installed-kernel.json`, alongside the existing root
 SBC overlay. They do not duplicate the kernel set. All builders check compressed
 size (256 MiB), expanded tar size (1536 MiB), and member count (20,000) before
 writing the checksum. This does not qualify an archive for live activation.
-The field updater requires a new unique kernel release. CM4 derives its trial
+The field updater requires a new unique kernel release for a changed set. A
+radio already running the archive's exact set installs only the runtime
+payload, on every board. CM4 derives its trial
 profile from local boot files and hardware and activates by default unless
 `/etc/manet-kernel-update.conf` contains `enabled=n`. A local bench profile
 can override the generic health check. Rock 3A activation is currently rejected. RPi5 keeps its

@@ -85,11 +85,11 @@ class KernelUpdateTests(unittest.TestCase):
             return b''
         return self.real_run(args, **kwargs)
 
-    def kernel_archive(self, release='6.18-new'):
+    def kernel_archive(self, release='6.18-new', board='cm4'):
         for name in list(self.members):
             if name.startswith(kernel.PREFIX):
                 del self.members[name]
-        manifest = dict(schema=1, board='cm4', release=release, files={
+        manifest = dict(schema=1, board=board, release=release, files={
             name: dict(size=len(body), sha256=hashlib.sha256(body).hexdigest())
             for name, body in self.files.items()})
         for name, body in self.files.items():
@@ -105,6 +105,21 @@ class KernelUpdateTests(unittest.TestCase):
             (self.root / 'proc/cmdline').write_text(
                 self.args.strip() + ' manet.kernel_trial=' + info['slot'])
             self.flag.write_bytes(b'\0\0\0\1')
+
+    def flashed(self):
+        """Run the archive's set as an install archive leaves it on a fresh radio."""
+        manifest = json.loads(self.members[kernel.MANIFEST][0])
+        record = self.root / kernel.INSTALLED
+        record.parent.mkdir(parents=True, exist_ok=True)
+        record.write_text(json.dumps(manifest, sort_keys=True, indent=2) + '\n')
+        (self.root / 'proc/sys/kernel/osrelease').write_text(manifest['release'])
+
+    def assert_runtime_only(self):
+        self.assertEqual(self.updater.marker.read_text(), self.new_version)
+        self.assertFalse(self.updater.pending.exists())
+        self.assertFalse((self.boot / 'tryboot.txt').exists())
+        self.assertFalse(any(call[0] in ('reboot', 'depmod', 'findmnt') for call in self.calls))
+        self.assertFalse(json.loads((self.updater.installed / 'release.json').read_text())['kernel_selected'])
 
     def stage_only(self):
         self.updater.state.mkdir(parents=True, exist_ok=True)
@@ -225,6 +240,59 @@ class KernelUpdateTests(unittest.TestCase):
         with self.assertRaisesRegex(kernel.KernelError, 'unique uname'):
             self.updater.update()
         self.assertFalse(self.updater.pending.exists())
+
+    def test_running_flashed_set_installs_runtime_only(self):
+        self.flashed()
+        self.updater.update()
+        self.assert_runtime_only()
+        self.assertFalse((self.root / 'usr/lib/modules/6.18-new').exists())
+        self.assertEqual((self.boot / 'config.txt').read_text(), self.config)
+
+    def test_running_committed_set_installs_runtime_only(self):
+        self.updater.update()
+        self.trial_boot()
+        self.updater.update(recover_only=True)
+        committed = (self.boot / 'config.txt').read_text()
+        self.calls.clear()
+        self.updater.update(local_archive=self.package, local_version='0.550')
+        self.assert_runtime_only()
+        self.assertEqual((self.boot / 'config.txt').read_text(), committed)
+
+    def test_running_rock3a_set_installs_runtime_only(self):
+        self.files = {
+            'boot/Image': b'image',
+            'boot/dtb/rockchip/rk3568-rock-3a.dtb': b'dtb',
+            'modules/6.18-new/modules.order': b'kernel/test.ko\n',
+            'modules/6.18-new/modules.builtin': b'',
+            'modules/6.18-new/kernel/test.ko': b'new module',
+            'firmware/morse/test.bin': b'new firmware',
+        }
+        self.kernel_archive(board='r3a')
+        (self.root / 'proc/device-tree/model').write_text('Radxa ROCK 3A')
+        shutil.copyfile(self.package, self.server / 'r3a-tools.tar.gz')
+        (self.server / 'r3a-tools.tar.gz.sha256').write_text(
+            hashlib.sha256(self.package.read_bytes()).hexdigest() + '  r3a-tools.tar.gz\n')
+        with self.assertRaisesRegex(kernel.KernelError, 'Rock 3A'):
+            self.updater.update()
+        self.flashed()
+        self.updater.update()
+        self.assert_runtime_only()
+
+    def test_different_set_under_running_release_is_refused(self):
+        self.flashed()
+        self.files['modules/6.18-new/kernel/test.ko'] = b'rebuilt module'
+        self.kernel_archive()
+        with self.assertRaisesRegex(kernel.KernelError, 'unique uname'):
+            self.updater.update()
+        # A committed trial outranks the flash record it replaced.
+        self.flashed()
+        confirmed = self.root / 'var/lib/manet-kernel/confirmed.json'
+        confirmed.parent.mkdir(parents=True)
+        confirmed.write_text(json.dumps(dict(release='6.18-new', slot='0' * 24)))
+        with self.assertRaisesRegex(kernel.KernelError, 'unique uname'):
+            self.updater.update()
+        self.assertFalse(self.updater.pending.exists())
+        self.assertEqual(self.updater.marker.read_text(), self.old_version)
 
     def test_payload_hash_and_inventory_mismatch_rejected(self):
         self.members[kernel.PREFIX + 'boot/kernel8.img'] = b'corrupt', 0o644

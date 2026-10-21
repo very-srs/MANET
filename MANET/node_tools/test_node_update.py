@@ -99,6 +99,9 @@ if sys.argv[1] == 'is-active' and sys.argv[-1] == 'mesh-config-apply.service':
         for name in update.REQUIRED:
             if name in update.MARKERS:
                 body = self.new_version.encode()
+            elif name in update.UPDATER:
+                # Ship the running updater, so installs do not hand off to a stub.
+                body = Path(__file__).with_name(Path(name).name).read_bytes()
             elif name.endswith('manet-admin-setup.sh'):
                 body = b'#!/bin/sh\necho dependency >> "$TEST_EVENTS"\nexit "$TEST_DEPENDENCY_FAIL"\n'
             elif name.endswith('manet-kernel-protect.py'):
@@ -1191,6 +1194,71 @@ module.Updater(Path(sys.argv[2])).update(recover_only=True)
         self.assertIn('curl ' + STABLE_MANIFEST, self.history())
         self.assertNotIn('tools.tar.gz', self.history())
         self.assertGreater(self.updater.marker.stat().st_mtime, old)
+
+    def newer_updater(self):
+        """Ship an updater that differs from the one running this test."""
+        name = 'usr/local/bin/node-update.py'
+        self.members[name] = self.members[name][0] + b'# newer release\n', 0o755
+        self.make_archive()
+        return self.members[name][0]
+
+    def test_newer_updater_installs_itself_and_checks_again(self):
+        body = self.newer_updater()
+        with patch.object(update.os, 'execv', side_effect=SystemExit) as execv:
+            with self.assertRaises(SystemExit):
+                self.updater.update()
+        installed = self.root / 'usr/local/bin/node-update.py'
+        self.assertEqual(installed.read_bytes(), body)
+        self.assertEqual(installed.stat().st_mode & 0o777, 0o755)
+        for name in ('manet_release.py', 'manet_kernel_update.py'):
+            self.assertEqual((self.root / 'usr/local/bin' / name).read_bytes(),
+                             Path(__file__).with_name(name).read_bytes())
+        self.assertEqual(execv.call_args.args,
+                         (sys.executable, [sys.executable, str(installed), '--handed-off']))
+        self.assertEqual(self.updater.marker.read_text(), self.old_version)
+        self.assertFalse(self.updater.pending.exists())
+        self.assertNotIn('dependency', self.history())
+        self.assertEqual(self.old_manager.read_text(), 'old manager\n')
+        # The replacement checks again despite the daily throttle and never
+        # hands off a second time.
+        self.updater.routine = True
+        with patch.object(update.os, 'execv') as execv:
+            self.updater.update(handed_off=True)
+        execv.assert_not_called()
+        self.assertEqual(self.updater.marker.read_text(), self.new_version)
+
+    def test_handoff_keeps_the_requested_mode(self):
+        self.newer_updater()
+        updater = update.Updater(self.root, routine=True, development=True, allow_downgrade=True)
+        updater.log = Mock()
+        with patch.object(update.os, 'execv', side_effect=SystemExit) as execv:
+            with self.assertRaises(SystemExit):
+                updater.update(local_archive=self.package, local_version='0.550')
+        argv = execv.call_args.args[1][1:]
+        self.assertEqual(argv[1:], ['--handed-off', '--routine', '--development', '--allow-downgrade',
+                                    '--local-archive', str(self.package), '--local-version', '0.550'])
+        runner = Mock()
+        with patch.object(update, 'Updater', return_value=runner) as factory, \
+                patch.object(update.os, 'geteuid', return_value=0), \
+                patch.object(update.signal, 'signal'), \
+                patch.object(sys, 'argv', argv):
+            self.assertEqual(update.main(), 0)
+        factory.assert_called_with(routine=True, development=True, allow_downgrade=True)
+        runner.update.assert_called_with(recover_only=False, files_only=False, cancel_kernel=False,
+                                         local_archive=self.package, local_version='0.550',
+                                         handed_off=True)
+
+    def test_reinstall_and_downgrade_keep_the_running_updater(self):
+        self.newer_updater()
+        self.updater.allow_downgrade = True
+        for installed in (self.new_version, '0.551\n09/2026\n'):
+            with self.subTest(installed=installed.split()[0]):
+                for name in update.MARKERS:
+                    (self.root / name).write_text(installed)
+                with patch.object(update.os, 'execv') as execv:
+                    self.updater.update(local_archive=self.package, local_version='0.550')
+                execv.assert_not_called()
+                self.assertEqual(self.updater.marker.read_text(), self.new_version)
 
     def test_unsynced_manual_update_reports_clock_before_any_download(self):
         (self.root / 'run/initial_time_synced').unlink()
