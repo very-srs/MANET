@@ -196,6 +196,31 @@ class ClockTests(unittest.TestCase):
             time_sync.chrony_config(network, uplink='usb0\nserver malicious')
 
 
+class MergeTests(unittest.TestCase):
+    def peers(self, *macs, server=False):
+        return [{'mac': mac, 'address': '10.30.2.%d' % int(mac[-2:], 16), 'metric': 1, 'server': server}
+                for mac in macs]
+
+    def test_smaller_group_steps_to_the_larger_one(self):
+        two = self.peers('02:00:00:00:00:10', '02:00:00:00:00:11')
+        self.assertEqual(time_sync.merge_target(OWN, [], two), two)
+        self.assertEqual(time_sync.merge_target(OWN, self.peers(PEER, THIRD), two), [])
+
+    def test_equal_groups_keep_the_lowest_mac(self):
+        group, other = self.peers(PEER), self.peers('02:00:00:00:00:10', '02:00:00:00:00:11')[:1]
+        self.assertEqual(time_sync.merge_target(OWN, group, other), [])
+        self.assertEqual(time_sync.merge_target('02:00:00:00:00:12', [], self.peers('02:00:00:00:00:10')),
+                         self.peers('02:00:00:00:00:10'))
+
+    def test_real_source_wins_over_size_and_two_real_sources_stay(self):
+        big = self.peers(PEER, THIRD, '02:00:00:00:00:10')
+        source = self.peers('02:00:00:00:00:11', server=True)
+        self.assertEqual(time_sync.merge_target(OWN, big, source), source)
+        self.assertEqual(time_sync.merge_target(OWN, [], big, trusted=True), [])
+        self.assertEqual(time_sync.merge_target(OWN, self.peers(PEER, server=True), source), [])
+        self.assertEqual(time_sync.merge_target(OWN, self.peers(PEER), []), [])
+
+
 class RuntimeTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix='manet-time-test-')
@@ -528,6 +553,55 @@ with (root / 'commands').open('a') as out:
             "NODE_020000000004_IS_NTP_SERVER='false'", "NODE_020000000004_IS_NTP_SERVER='true'"))
         self.step(15)
         self.assertEqual(self.service.state['window']['reason'], 'source')
+
+    def mesh_only(self, *extra):
+        """Make every peer a mesh-time node and add arrivals after a sync."""
+        registry = node(OWN, '10.30.2.6', ntp=False) + node(PEER, '10.30.2.7', RADIO, ntp=False)
+        routes = [route(RADIO, 900)]
+        for index, mac in enumerate(extra):
+            registry += node(mac, '10.30.2.%d' % (20 + index), ntp=False)
+            routes.append(route(mac))
+        (self.root / 'registry').write_text(registry)
+        (self.root / 'routes').write_text(json.dumps(routes))
+
+    def test_smaller_group_steps_to_a_larger_group_that_joins(self):
+        self.mesh_only(); self.sync()
+        self.mesh_only('02:00:00:00:00:10', '02:00:00:00:00:11', '02:00:00:00:00:12')
+        self.step(15)
+        self.assertEqual(self.service.state['window']['reason'], 'merge')
+        conf = self.conf()
+        self.assertIn('makestep 0.1 3', conf)
+        self.assertNotIn('10.30.2.7', conf)
+        self.assertIn('server 10.30.2.20 iburst', conf)
+        self.assertNotIn('local stratum', conf)
+        self.good('10.30.2.20'); self.step(5)
+        self.assertNotIn('makestep', self.conf())
+        self.assertEqual(self.service.marker.read_text(), '10.30.2.7\n')
+        self.assertNotIn('window', self.service.state)
+        self.assertIn('local stratum 10 orphan', self.conf())
+        self.unsynced(); self.step(15)
+        self.assertNotIn('window', self.service.state)
+
+    def test_larger_group_keeps_its_time_when_a_smaller_one_joins(self):
+        self.mesh_only('02:00:00:00:00:10'); self.sync()
+        self.mesh_only('02:00:00:00:00:10', '02:00:00:00:00:11')
+        self.step(15)
+        self.assertEqual(self.service.state['window']['reason'], 'join')
+        self.assertNotIn('makestep', self.conf())
+        self.assertIn('local stratum 10 orphan', self.conf())
+
+    def test_unanswered_merge_retries_after_five_minutes(self):
+        self.mesh_only(); self.sync()
+        self.mesh_only('02:00:00:00:00:10', '02:00:00:00:00:11', '02:00:00:00:00:12')
+        self.step(15)
+        self.assertEqual(self.service.state['window']['reason'], 'merge')
+        self.step(time_sync.WINDOW_SECONDS)
+        self.assertNotIn('window', self.service.state)
+        self.assertNotIn('makestep', self.conf())
+        self.step(15)
+        self.assertNotIn('window', self.service.state)
+        self.step(time_sync.RETRY_SECONDS)
+        self.assertEqual(self.service.state['window']['reason'], 'merge')
 
     def test_brief_route_loss_is_not_a_new_arrival(self):
         self.sync()

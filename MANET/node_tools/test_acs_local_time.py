@@ -104,6 +104,20 @@ class LocalTimeTests(AcsHarness):
         self.runner = runtime.Runtime()
         self.assertTrue(self.ready())
 
+    def test_clock_jump_restarts_rounds_and_keeps_local_timers(self):
+        ahead = {'round': self.wall // 180 + 4, 'phase': 'attempted'}
+        self.runner.state.update(protocol=ahead, hold_until=self.elapsed + 60)
+        result = ({'phase': 'idle', 'round': self.wall // 180}, {}, None)
+        with patch.object(protocol, 'advance', return_value=result) as advance:
+            self.runner.tick(self.wall)
+            self.assertEqual(advance.call_args.args[0], ahead)
+            self.runner.state['protocol'] = ahead
+            self.clock_epoch['epoch'] += 1
+            self.runner.tick(self.wall)
+            self.assertEqual(advance.call_args.args[0], {})
+        self.assertEqual(self.runner.state['hold_until'], self.elapsed + 60)
+        self.assertEqual(self.runner.state['clock_epoch'], 1)
+
     def test_capability_cache_refreshes_only_after_monotonic_minute(self):
         original = self.runner.status(self.wall)['allowed']
         self.frequencies = (2462,)

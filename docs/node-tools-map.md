@@ -132,6 +132,7 @@ Read [settings transactions](guide/content/settings.md) and
 |---|---|
 | [manet_admin.py](../MANET/node_tools/manet_admin.py) | Password-authenticated encrypted Alfred control and replay protection. |
 | [manet_admin_limits.py](../MANET/node_tools/manet_admin_limits.py) | Share boot-local limits on unauthenticated password-derivation work. |
+| [manet_clock.py](../MANET/node_tools/manet_clock.py) | Count wall-clock jumps against the boot clock so timed protocols can void old commands and rounds. |
 | [manet-admin-setup.sh](../MANET/node_tools/manet-admin-setup.sh) | Install the control transport's cryptography dependency during setup/update. |
 | [mesh_config.py](../MANET/node_tools/mesh_config.py) | Separate local EUD/AP keys from mesh-wide packages. |
 | [mesh-config-sync.py](../MANET/node_tools/mesh-config-sync.py) | Receive/acknowledge shared configuration and invoke scheduled activation. |

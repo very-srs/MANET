@@ -21,6 +21,7 @@ import tempfile
 import threading
 import time
 from manet_admin_limits import ReceiveLimits
+import manet_clock
 
 
 MESH_CONF = '/etc/mesh.conf'
@@ -34,6 +35,9 @@ KINDS = {70: {'mesh_config', 'mesh_config_cancel'},
 CHALLENGE_KINDS = {76: {'acs_probe'}, 77: {'acs_probe_reply'}}
 MAX_MESSAGE_BYTES = 16384
 MAX_AGE_SECONDS = 900
+# Message IDs voided by a clock jump, per control channel. Alfred keeps one
+# record per publisher, so this bounds a mesh of many more nodes than it holds.
+MAX_VOIDED = 256
 FUTURE_SKEW_SECONDS = 60
 ENVELOPE_KIND = 'manet_admin_v1'
 
@@ -183,7 +187,10 @@ class AdminTransport:
             path = self.state_dir / 'sender.json'
             sender = _read_json(path)
             salt = _unb64(sender['salt'], 16) if sender else os.urandom(16)
-            received = _read_json(self.state_dir / f'received-{type_id}.json')
+            received = self._received(type_id)
+            clock = manet_clock.epoch_id()
+            if _jumped(sender.get('clock'), clock):
+                sender.pop('sent_ns', None)  # History from the old timeline.
             now = time.time_ns()
             # Nanosecond timestamps advance beyond both local send history and
             # the latest accepted command, even after a small backward step.
@@ -191,7 +198,7 @@ class AdminTransport:
                           int(received.get('order', [0])[0]) + 1)
             if sent_ns > now + FUTURE_SKEW_SECONDS * 10**9:
                 raise AdminError('Clock behind admin history; synchronize time before changing settings')
-            private_json_write(path, {'salt': _b64(salt), 'sent_ns': sent_ns})
+            private_json_write(path, {'salt': _b64(salt), 'sent_ns': sent_ns, 'clock': clock})
         return self._encrypt(type_id, payload, password, salt, sent_ns)
 
     def seal_challenge(self, type_id, payload):
@@ -298,7 +305,37 @@ class AdminTransport:
                 messages.append(self.open(type_id, envelope))
             except (ValueError, KeyError, TypeError, InvalidTag):
                 continue
+        if type_id in (70, 71):
+            # Commands still in Alfred when the clock jumps are void, even
+            # those whose old-timeline timestamps now look new.
+            with self._locked():
+                voided = set(self._received(type_id, messages).get('void', []))
+            messages = [message for message in messages if message.message_id not in voided]
         return sorted(messages, key=lambda message: message.order)
+
+    def _received(self, type_id, present=()):
+        """Return a control channel's receive state, voided by a clock jump.
+
+        Commands sent before the jump are void, so ordering restarts at the
+        jump. Present messages are voided by ID. Hold the state lock.
+        """
+        path = self.state_dir / f'received-{type_id}.json'
+        state = _read_json(path)
+        if type_id not in (70, 71):
+            return state
+        epoch = manet_clock.observe()
+        clock = manet_clock.epoch_id(epoch)
+        if _jumped(state.get('clock'), clock):
+            state = {'order': [epoch['jump_ns'], ''], 'done': True, 'clock': clock,
+                     'void': [message.message_id for message in present][-MAX_VOIDED:]}
+        elif state.get('clock') != clock:
+            # A new boot keeps its replay history. Its first sync step came
+            # before any timed control, so no command spans it.
+            state['clock'] = clock
+        else:
+            return state
+        private_json_write(path, state)
+        return state
 
     def accept(self, type_id, message):
         """Persist the newest control message before staging or applying it.
@@ -311,12 +348,14 @@ class AdminTransport:
             raise AdminError('Replay tracking is only for control channels')
         with self._locked():
             path = self.state_dir / f'received-{type_id}.json'
-            state = _read_json(path)
+            state = self._received(type_id)
             previous = state.get('order', [0, ''])
-            if message.order < previous or (message.order == previous and state.get('done')):
+            if (message.order < previous or (message.order == previous and state.get('done'))
+                    or message.message_id in state.get('void', [])):
                 return False
             if message.order != previous:
-                private_json_write(path, {'order': message.order, 'done': False})
+                private_json_write(path, {'order': message.order, 'done': False,
+                                          'clock': state['clock'], 'void': state.get('void', [])})
         return True
 
     def complete(self, type_id, message):
@@ -327,6 +366,11 @@ class AdminTransport:
             if state.get('order') == message.order:
                 state['done'] = True
                 private_json_write(path, state)
+
+
+def _jumped(saved, current):
+    """Return whether saved state comes from an earlier epoch of this boot."""
+    return isinstance(saved, list) and len(saved) == 2 and saved[0] == current[0] and saved != current
 
 
 def new_version():

@@ -57,6 +57,10 @@ class AdminTests(unittest.TestCase):
         clock = patch('manet_admin.time.time_ns', side_effect=lambda: self.now)
         clock.start()
         self.addCleanup(clock.stop)
+        self.epoch = {'boot': 'test-boot', 'epoch': 0, 'offset': 0.0, 'jump_ns': 0}
+        epoch = patch('manet_clock.observe', side_effect=lambda: dict(self.epoch))
+        epoch.start()
+        self.addCleanup(epoch.stop)
         self.payload = {
             'kind': 'mesh_config', 'version': new_version(), 'issued_at': self.now // 10**9,
             'activate_at': 0, 'config': {'mtx': 'n'},
@@ -195,6 +199,48 @@ class AdminTests(unittest.TestCase):
         self.assertEqual(stat.S_IMODE(state.stat().st_mode), 0o600)
         self.assertEqual(stat.S_IMODE(state.parent.stat().st_mode), 0o700)
 
+    def jump(self, seconds):
+        """Step every transport's wall clock as a merge into another group would."""
+        self.now += seconds * 10**9
+        self.epoch.update(epoch=self.epoch['epoch'] + 1, jump_ns=self.now)
+
+    def test_clock_jump_voids_pending_commands_and_restarts_ordering(self):
+        envelope = self.sender.seal(70, self.payload)
+        old = self.receiver.open(70, envelope)
+        self.assertTrue(self.receiver.accept(70, old))
+        winner = AdminTransport(self.conf, self.root / 'winner')
+        self.now -= 700 * 10**9
+        before_jump = self.receiver.open(70, winner.seal(70, self.payload))
+        self.now += 700 * 10**9
+        self.jump(-600)
+        # The old-timeline command is still in Alfred and still within reach.
+        self.now += 590 * 10**9
+        self.assertEqual(self.receiver.messages(70, frame(envelope)), [])
+        self.assertFalse(self.receiver.accept(70, old))
+        self.assertFalse(self.receiver.accept(70, before_jump))
+        # Sending works at once instead of waiting for the old history.
+        self.now -= 590 * 10**9
+        fresh = self.receiver.open(70, self.sender.seal(70, dict(self.payload, version=new_version())))
+        self.assertTrue(self.receiver.accept(70, fresh))
+
+    def test_commands_present_at_a_clock_jump_are_voided_by_id(self):
+        envelope = self.sender.seal(70, self.payload)
+        self.assertEqual(len(self.receiver.messages(70, '')), 0)  # An idle poll.
+        self.jump(-30)
+        self.assertEqual(self.receiver.messages(70, frame(envelope)), [])
+        self.assertEqual(self.receiver.messages(70, frame(envelope)), [])
+        message = self.receiver.open(70, envelope)
+        self.assertFalse(self.receiver.accept(70, message))
+
+    def test_new_boot_keeps_replay_history_across_epochs(self):
+        message = self.receiver.open(70, self.sender.seal(70, self.payload))
+        self.assertTrue(self.receiver.accept(70, message))
+        self.receiver.complete(70, message)
+        self.epoch.update(boot='next-boot', epoch=1, jump_ns=self.now)
+        self.assertFalse(self.receiver.accept(70, message))
+        self.assertEqual(self.receiver.messages(70, frame(self.sender.seal(70, self.payload)))[0].payload,
+                         self.payload)
+
     def test_cancel_prevents_replay_of_earlier_activation(self):
         activate = dict(self.payload, activate_at=1)
         older = self.receiver.open(70, self.sender.seal(70, activate))
@@ -255,6 +301,31 @@ class AdminTests(unittest.TestCase):
         self.assertEqual(config_sync.sync_once(), 0)
         self.assertEqual(sum(args == config_sync.APPLY_COMMAND for args, _ in self.calls), 1)
         self.assertFalse(Path(config_sync.PENDING_FILE).exists())
+
+    def test_clock_jump_voids_a_staged_config_change(self):
+        self.receiver_patches(config_sync, 70)
+        self.raw = frame(self.sender.seal(70, self.payload))
+        config_sync.sync_once()
+        self.assertTrue(Path(config_sync.PENDING_FILE).exists())
+        self.jump(-120)
+        self.raw = frame(self.sender.seal(70, dict(self.payload, activate_at=1)))
+        self.assertEqual(config_sync.sync_once(), 0)
+        self.assertFalse(Path(config_sync.PENDING_FILE).exists())
+        self.assertFalse(any(args == config_sync.APPLY_COMMAND for args, _ in self.calls))
+
+    def test_clock_jump_voids_a_staged_radio_change(self):
+        self.receiver_patches(radio_sync, 71)
+        payload = {'kind': 'radio_state', 'version': new_version(), 'activate_at': 0,
+                   'targets': 'all', 'voice_codec': {'codec': 'opus'}}
+        with patch.object(radio_sync, 'apply_package') as apply, \
+                patch.object(radio_sync, 'send_alfred', return_value=True):
+            self.raw = frame(self.sender.seal(71, payload))
+            radio_sync.sync_once()
+            self.assertTrue(Path(radio_sync.PENDING_FILE).exists())
+            self.jump(45)
+            self.assertEqual(radio_sync.sync_once(), 0)
+            self.assertFalse(Path(radio_sync.PENDING_FILE).exists())
+            apply.assert_not_called()
 
     def test_authenticated_cancel_clears_pending(self):
         self.receiver_patches(config_sync, 70)

@@ -273,7 +273,7 @@ if sys.argv[1] == 'is-active' and sys.argv[-1] == 'mesh-config-apply.service':
         """Ship real import code and prepare a consumed legacy activation."""
         tools = Path(__file__).resolve().parent
         for name in ('mesh-config-sync.py', 'manet_config_journal.py',
-                     'manet_admin.py', 'manet_admin_limits.py',
+                     'manet_admin.py', 'manet_admin_limits.py', 'manet_clock.py',
                      'manet_config_io.py', 'mesh_config.py',
                      'manet_supplicant.py'):
             self.members['usr/local/bin/' + name] = (

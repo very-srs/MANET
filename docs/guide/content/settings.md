@@ -119,7 +119,7 @@ The form validates changed fields before local writes or shared publication. A m
 
 Configuration staging uses authenticated, encrypted Alfred type 70. Configuration ACKs use type 73. Radio changes use types 71 and 72. `manet_admin.py` authenticates control with the shared admin password. SAE membership and public telemetry do not authorize a command or satisfy the ACK gate. HTTP is the operator interface, not peer-to-peer control transport.
 
-Each stage has a fresh transaction identity. Normal control waits for `/run/initial_time_synced`, validates message age, and retains replay history in `/var/lib/manet-admin`. Transport consumption prevents replay, and it is separate from applying. The local journal in `/var/lib/manet-config` owns the job, so an interrupted apply resumes from local state without a fresh request or the original message. The updater migrates pending work into the journal. Clock-independent recovery messages cannot authorize configuration edits.
+Each stage has a fresh transaction identity. Normal control waits for `/run/initial_time_synced`, validates message age, and retains replay history in `/var/lib/manet-admin`. A clock jump of more than ten seconds voids commands sent before it and cancels a staged change that has not activated. Transport consumption prevents replay, and it is separate from applying. The local journal in `/var/lib/manet-config` owns the job, so an interrupted apply resumes from local state without a fresh request or the original message. The updater migrates pending work into the journal. Clock-independent recovery messages cannot authorize configuration edits.
 
 The configuration workflow separates receipt from activation because a
 change can remove the very link that carries its instructions:

@@ -3743,15 +3743,11 @@ postpone it. Local source qualification renews the deadline. Between windows
 the controller only checks local roles and BATMAN routes; there is no NTP
 traffic or extra Alfred announcement.
 
-Startup may step the clock; after the first verified sync the controller
+The first sync of a boot may step the clock, as may a merge (below). After
+the first verified sync the controller
 disables remaining live startup steps with `chronyc makestep 0.1 0` and removes
-the directive from the config. All later source changes, daemon restarts, and
-refreshes slew, so routine correction does not jump backwards through saved
-ACS/admin timestamps. Admin envelopes still order by wall-clock nanoseconds
-with a 900-second freshness window, so a later step remains unsafe. Two groups
-that synced separately to different times therefore converge only at the
-kernel's slew rate, about 43 seconds a day. A node that reboots takes the
-group's time at once. `leapsecmode slew` also avoids a kernel leap-second step.
+the directive from the config. Source changes, daemon restarts, and refreshes
+then slew. `leapsecmode slew` also avoids a kernel leap-second step.
 Peer profiles use `corrtimeratio 1`, preferring an average correction over one
 poll interval rather than three. The current source daemon is not restarted
 just to disarm stepping.
@@ -3766,11 +3762,59 @@ for acquisition binding and source settings.
 
 Remaining limits: ACS/admin activation and tourguide rendezvous still depend
 on wall-clock alignment. Initial synchronization gates timed control, with
-nonce-bound cold lobby recovery as described above. Arbitrary external clock
-steps after synchronization are not repaired by ACS. Mesh time is unauthenticated
+nonce-bound cold lobby recovery as described above. A command published in the
+seconds between a jump and the receiver's next read is voided with the old
+ones. Mesh time is unauthenticated
 NTP between members, so any member can steer the clock of a node that has not
 synced yet. CM4 and Rock 3A checks covered a stale-clock boot, a cold mesh and
 loss of internet time; 24–48-hour drift and larger meshes remain unmeasured.
+
+#### Merging groups
+
+Groups that synced separately merge their time the way partitions merge
+channels: the smaller group moves. Peers that arrived since this node's last
+sync form the other group. The rest of the reachable mesh shares this node's
+time. Every node applies the same order:
+
+1. A group with an advertised GPS or internet source, or a node synced from one
+   earlier this boot, wins. Two such groups already agree and neither moves.
+2. Otherwise the larger group wins, counting this node in its own group.
+3. Equal sizes keep the group holding the lowest MAC.
+
+A node on the losing side opens a `merge` window that polls only the arrivals,
+permits a step (`makestep 0.1 3`), and drops its orphan line, so it serves no
+clock until it follows the winner. The first settled sample from an arrival
+completes the merge and disarms stepping again. Its own group mates reach the
+same verdict from the same arrivals. Nodes on the winning side see a smaller
+arrival group and open an ordinary join window. A merge window that hears no
+arrival retries after 5 minutes. Registry entries arrive over a few minutes,
+so a node may first see part of the other group and wait. The verdict is
+re-evaluated every pass while the arrivals are recent.
+
+#### Clock jumps
+
+Admin commands and ACS rounds carry wall-clock times that compare only within
+one timeline. `manet_clock.py` records the wall clock's offset from
+`CLOCK_BOOTTIME` in `/run/manet-clock-epoch.json`. A change of more than
+10 seconds between observations starts a new clock epoch: a merge step, the
+first sync of a boot, or a manual `date`. chrony's fastest slew, 83 ms/s, cannot
+move the offset that far between the few-second checks. Each consumer reads
+the epoch itself, so no jump waits for the time service:
+
+- Admin: the first read of a control channel (types 70 and 71) in a new epoch
+  voids every command present in Alfred by message ID, and ordering restarts
+  at the wall time of the jump. Commands sealed before the jump are rejected,
+  including old-timeline ones whose timestamps now look new. The sender's own
+  history is dropped, so the node can send again at once. A new boot keeps its
+  replay history: its first sync precedes any timed control.
+- Config and radio changes staged but not yet activated are voided. The config
+  journal records the staged job as cancelled, so its version cannot be staged
+  again. Activated changes continue: their rollback deadlines use the boot
+  clock.
+- ACS agreement drops its rounds, as at a new boot, and keeps its boot-clock
+  timers (holds, retries, repair and busy windows).
+
+An operator whose change was voided pushes it again.
 
 ---
 

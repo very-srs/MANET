@@ -138,6 +138,7 @@ REQUIRED = MARKERS | {
     "usr/local/bin/manet_config_journal.py",
     "usr/local/bin/mesh-config-sync.py", "usr/local/bin/mesh-config-apply.sh",
     "usr/local/bin/mesh_config.py", "usr/local/bin/manet_admin_limits.py",
+    "usr/local/bin/manet_clock.py",
     "usr/local/bin/manet_supplicant.py",
     "usr/local/share/manet/logrotate.conf",
     "etc/systemd/system/manet-logrotate.service",

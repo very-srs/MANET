@@ -1743,9 +1743,13 @@ never synced only listens for 3 minutes. If no synced clock answers by then,
 the unsynced nodes agree on the lowest address's clock. A mesh with no GPS or
 internet therefore reaches timed control a few minutes after power-up.
 
-A node steps its clock once, at its first sync after boot. Later corrections
-are gradual, so two groups that synced separately to different times converge
-slowly. A rebooted node takes the mesh time at once. The service keeps checking
+A node steps its clock at its first sync after boot, and when its group merges
+into another. Groups merge their time as partitions merge: a group with GPS or
+internet time wins, then the larger group, then the group holding the lowest
+MAC. The smaller side steps to the winner's time. Other corrections are
+gradual. A clock jump of more than 10 seconds voids admin changes that are
+staged but not yet active, and restarts any channel agreement round. Push a
+voided change again. The service keeps checking
 local GPS/uplink state so a node can become a source later. Losing an uplink
 preserves GPS service when a usable GPS source remains.
 

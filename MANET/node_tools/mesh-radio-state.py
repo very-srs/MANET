@@ -12,7 +12,8 @@ import socket
 import subprocess
 import sys
 import time
-from manet_admin import AdminTransport, private_json_write
+from manet_admin import AdminTransport, _jumped, private_json_write
+import manet_clock
 
 # Same implementations the management UI uses for a local change, so an
 # Alfred-staged channel or power change means exactly the same thing.
@@ -360,6 +361,12 @@ def sync_once(raw=None):
     """Process authenticated cancellation, staging and due activation."""
     message = latest_radio_package() if raw is None else latest_radio_package(raw)
     pending = read_json(PENDING_FILE)
+    clock = manet_clock.epoch_id()
+    if pending and _jumped(pending.get("clock"), clock):
+        # A clock jump voids a staged change before its activation.
+        clear_pending()
+        log(f"Voided pending radio state {pending.get('version', '')} after a clock jump")
+        pending = None
 
     if not message:
         return 0
@@ -396,7 +403,7 @@ def sync_once(raw=None):
         return 0
 
     if not pending or pending.get("version") != version or pending.get("activate_at") != pkg.get("activate_at"):
-        write_json(PENDING_FILE, pkg)
+        write_json(PENDING_FILE, dict(pkg, clock=clock))
         log(f"Staged radio state {version}: {pkg.get('desired')} targets={pkg.get('targets', 'all')} activate_at={pkg.get('activate_at', 0)}")
 
     write_text(ACK_VERSION_FILE, version)

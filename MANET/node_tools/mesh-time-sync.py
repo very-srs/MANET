@@ -197,8 +197,30 @@ def nts_authenticated(authdata, address):
     return False
 
 
+def merge_target(own, group, arrivals, trusted=False):
+    """Return the arrivals to step to when this node's group is the smaller one.
+
+    Groups merge as partitions do: a group with a GPS or internet source wins,
+    then the larger group, then the group holding the lowest MAC.
+    """
+    if not arrivals:
+        return []
+    ours = trusted or any(p['server'] for p in group)
+    theirs = any(p['server'] for p in arrivals)
+    if ours or theirs:
+        # Two real sources already agree, and a real source never yields.
+        return arrivals if theirs and not ours else []
+    size, other = len(group) + 1, len(arrivals)
+    if other > size or (other == size and min(p['mac'] for p in arrivals) < min([own] + [p['mac'] for p in group])):
+        return arrivals
+    return []
+
+
 def chrony_config(network, gps=False, uplink='', peers=(), stratum=None, initial=True):
-    """Build a chrony profile for local sources or mesh peers and orphan mode."""
+    """Build a chrony profile for local sources or mesh peers and orphan mode.
+
+    initial permits a step: the first sync of a boot, or a merge into a larger group.
+    """
     lines = ['# Managed by mesh-time-sync.py; role changes replace this file.',
              'driftfile /var/lib/chrony/chrony.drift', 'leapsecmode slew']
     if initial:
@@ -379,12 +401,12 @@ class TimeService:
         return selected_source(self.command(['chronyc', '-n', 'sources']))
 
     def complete(self, source):
-        """Record verified sync, disable initial stepping and defer refresh."""
+        """Record verified sync, disable stepping and defer refresh."""
         initial = not self.marker.exists()
-        if initial:
-            # Disarm remaining startup steps in the live daemon as well as its
-            # next config. A later GPS/uplink change or peer refresh must slew,
-            # not jump backwards through ACS rounds or admin replay timestamps.
+        if initial or 'makestep 0.1 3\n' in self.chrony_conf.read_text():
+            # Disarm remaining steps in the live daemon as well as its next
+            # config. Only a first sync or a merge steps. A later GPS/uplink
+            # change or peer refresh slews.
             self.command(['chronyc', 'makestep', '0.1', '0'])
             profile = self.chrony_conf.read_text().replace('makestep 0.1 3\n', '')
             # The live daemon has already consumed its first clock update.
@@ -392,6 +414,7 @@ class TimeService:
             profile = profile.replace('nocerttimecheck 1\n', '')
             atomic_text(self.chrony_conf, profile)
             self.active_config = profile
+        if initial:
             atomic_text(self.marker, source + '\n')
         if source in ('GPS', 'internet'):
             # Remember for this boot that the clock came from a real source.
@@ -467,8 +490,20 @@ class TimeService:
         arrived = arrivals([p['mac'] for p in peers], state.setdefault('seen', {}))
         new_source = arrivals([p['mac'] for p in peers if p['server']], state.setdefault('sources_seen', {}))
         state['checked'] = now
+        joined = state.setdefault('joined', {})
+        for mac in list(joined):
+            if now - joined[mac] > JOIN_SECONDS:
+                del joined[mac]
+        joined.update(dict.fromkeys(arrived, now))
 
         trusted = state.get('trusted') or (not initial and self.marker.read_text().strip() in ('GPS', 'internet'))
+        merge = []
+        if not initial and 'last_sync' in state and now >= state.get('merge_retry_at', 0):
+            # Peers that joined since this node's last sync form the other
+            # group. The rest of the reachable mesh shares this node's time.
+            since = state.get('last_sync', 0)
+            recent = [p for p in peers if joined.get(p['mac'], since) > since]
+            merge = merge_target(own, [p for p in peers if p not in recent], recent, bool(trusted))
         if trusted:
             stratum = STRATUM_TRUSTED
         elif not initial:
@@ -477,15 +512,27 @@ class TimeService:
             stratum = STRATUM_COLD
         else:
             stratum = None
-        # Real sources first, then the best routes, so a join wakes a bounded set.
-        chosen = [p for p in peers if p['server']] + [p for p in peers if not p['server']]
-        # Sorted lines keep the profile stable while route metrics fluctuate.
-        addresses = sorted((p['address'] for p in chosen[:MAX_PEERS]), key=ipaddress.IPv4Address)
-        profile = chrony_config(network, peers=addresses, stratum=stratum, initial=initial)
+
+        def poll(chosen):
+            # Real sources first, then the best routes, so a join wakes a
+            # bounded set. Sorted lines keep the profile stable while route
+            # metrics fluctuate.
+            chosen = [p for p in chosen if p['server']] + [p for p in chosen if not p['server']]
+            return sorted((p['address'] for p in chosen[:MAX_PEERS]), key=ipaddress.IPv4Address)
+        settled_profile = chrony_config(network, peers=poll(peers), stratum=stratum, initial=False)
+        if merge:
+            # Step to the larger group and serve nothing until synced to it.
+            addresses = poll(merge)
+            profile = chrony_config(network, peers=addresses, initial=True)
+        else:
+            addresses = poll(peers)
+            profile = chrony_config(network, peers=addresses, stratum=stratum, initial=initial)
 
         reason = None
         if initial:
             reason = 'boot'
+        elif merge:
+            reason = 'merge'
         elif now >= state.get('refresh_at', 0):
             reason = 'refresh'
         elif arrived:
@@ -496,11 +543,12 @@ class TimeService:
         if reason is None and window is None and self.running():
             # Socket activation: a peer's request started chronyd.
             reason = 'wake'
-        if reason and (window is None or reason in ('join', 'source')):
+        if reason and (window is None or reason in ('join', 'source')
+                       or (reason == 'merge' and window['reason'] != 'merge')):
             if 'first_until' not in state:
                 state['first_until'] = now + FIRST_WINDOW_SECONDS
             until = max(now + WINDOW_SECONDS, state['first_until'])
-            if window is None:
+            if window is None or reason == 'merge':
                 self.log('Opening a mesh time window (' + reason + ').')
             window = dict(reason=reason, started=now, until=max(until, (window or {}).get('until', 0)))
             state['window'] = window
@@ -531,7 +579,7 @@ class TimeService:
                 self.complete(source['address'])
                 self.log('Synced from ' + source['address'] + '.')
             window['synced'] = True
-        elif (stratum is not None and 'local_since' in window
+        elif (stratum is not None and not merge and 'local_since' in window
               and now - window['local_since'] >= MASTER_SECONDS):
             # This node is the reference for its reachable mesh.
             if not window.get('synced'):
@@ -543,8 +591,10 @@ class TimeService:
         if self.marker.exists() and finished and now >= state['first_until']:
             if not window.get('synced') and window['reason'] == 'refresh':
                 state['refresh_at'] = now + RETRY_SECONDS
+            if not window.get('synced') and window['reason'] == 'merge':
+                state['merge_retry_at'] = now + RETRY_SECONDS
             state.pop('window')
-            self.configure(chrony_config(network, peers=addresses, stratum=stratum, initial=False), start=False)
+            self.configure(settled_profile, start=False)
             self.save()
             self.log('Mesh time window closed; chrony waits on its socket.')
             return 15

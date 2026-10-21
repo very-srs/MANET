@@ -21,6 +21,7 @@ import time
 from manet_admin import AdminTransport, clock_ready, private_json_write, require_clock
 from manet_radio import acs_enabled
 import manet_acs_agreement as protocol
+import manet_clock
 import manet_rendezvous as rendezvous
 import manet_dfs as dfs
 import manet_dfs_safety as dfs_safety
@@ -1658,9 +1659,10 @@ class Runtime:
             except (OSError, subprocess.SubprocessError):
                 records = {}
             self.process_dfs_aborts(records, now)
-            if self.state.get('clock_boot') != self.boot:
-                # A new boot starts a voting session. Drop rounds from its old
-                # clock, which may have been ahead of GPS.
+            epoch = manet_clock.observe()['epoch']
+            if self.state.get('clock_boot') != self.boot or self.state.get('clock_epoch', epoch) != epoch:
+                # A new boot or a clock jump starts a voting session. Drop
+                # rounds from the old clock, which may have been ahead.
                 previous = self.state.get('destination')
                 timers = {key: self.state[key] for key in LOCAL_TIMERS if key in self.state}
                 for key in ('dfs_revoked', 'dfs_aborted_plans'):
@@ -1669,7 +1671,7 @@ class Runtime:
                 radar = self.state.get('dfs_radar', {})
                 if radar.get('abort', {}).get('boot') == self.boot:
                     timers['dfs_radar'] = radar
-                self.state = dict(timers, clock_boot=self.boot, timer_boot=self.boot)
+                self.state = dict(timers, clock_boot=self.boot, timer_boot=self.boot, clock_epoch=epoch)
                 # Re-attest only a validated plan operating after boot-timer
                 # reconciliation.
                 if protocol.live_destination(previous, self.status(now), now):
@@ -1677,6 +1679,7 @@ class Runtime:
                 self.save()
                 self.last_publish = None
                 self.capabilities.clear()
+            self.state.setdefault('clock_epoch', epoch)
             local = self.status(now)
             try:
                 members = self.members(records)

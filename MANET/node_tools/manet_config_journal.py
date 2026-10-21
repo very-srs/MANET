@@ -12,7 +12,8 @@ import sys
 import time
 from types import SimpleNamespace
 
-from manet_admin import Message, clock_ready, private_json_write
+from manet_admin import Message, _jumped, clock_ready, private_json_write
+import manet_clock
 from manet_config_io import atomic_write, load_kv_file, rewrite_keys
 from mesh_config import DANGEROUS_KEYS
 from manet_supplicant import configured, service_name
@@ -127,6 +128,7 @@ class ConfigJournal:
             'desired_digest': digest, 'phase': 'staged',
             'acknowledged': acknowledged, 'consumed': False,
             'backup': None, 'last_error': None,
+            'clock': manet_clock.epoch_id(),
         }
         self.save()
         self.project()
@@ -153,6 +155,11 @@ class ConfigJournal:
             return False
         job = self.job
         if job['phase'] == 'staged':
+            if _jumped(job.get('clock'), manet_clock.epoch_id()):
+                # A clock jump voids a staged change before its activation.
+                self.finish('cancelled')
+                self.project()
+                return False
             # A newer transport order may have been accepted just before a
             # crash saving its replacement stage. Never activate that older
             # stage while replay history already points to its replacement.

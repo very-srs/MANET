@@ -50,6 +50,11 @@ class AcsHarness(unittest.TestCase):
         (self.root / 'initial_time_synced').touch()
         clock_env = patch.dict(os.environ, MANET_TIME_RUN_DIR=str(self.root))
         clock_env.start(); self.addCleanup(clock_env.stop)
+        # Tests move the wall clock freely. A jump counts only when a test
+        # advances this epoch.
+        self.clock_epoch = {'boot': 'test-boot', 'epoch': 0, 'offset': 0.0, 'jump_ns': 0}
+        epoch = patch('manet_clock.observe', side_effect=lambda: dict(self.clock_epoch))
+        epoch.start(); self.addCleanup(epoch.stop)
         self.bin = self.root / 'bin'
         self.roles = self.root / 'roles'
         self.wpa = self.root / 'wpa'

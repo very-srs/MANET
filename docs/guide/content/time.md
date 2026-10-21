@@ -14,6 +14,9 @@ internet, they wait about three minutes and then all use one radio's clock.
 It may be wrong, but it is the same on every radio. Give one radio GPS or
 internet if you need the right time.
 
+When two groups of radios meet, the smaller group takes the bigger group's
+time.
+
 Knowing the time does not tell a radio where it is.
 
 ## User
@@ -44,10 +47,16 @@ a clock it trusts, they wait about three minutes, then all follow one radio's
 clock. Timed control starts working, but that clock can be off from real time
 by however far that radio was off.
 
-A radio sets its clock in one jump only at its first sync after startup.
-After that it corrects gradually. If GPS or internet appears after the radios
-have agreed on a wrong time, they move toward it slowly, less than a minute
-a day. Reboot a radio to make it take the right time at once.
+A radio sets its clock in one jump at its first sync after startup, and
+when its group meets a bigger one. When two groups of radios meet, the
+smaller group jumps to the bigger group's time. A group with GPS or internet
+time always wins, and equal groups keep the time of the group with the lowest
+radio address. Otherwise radios correct gradually. If GPS or internet appears
+on a radio already in the group, the others move toward it slowly, less than
+a minute a day. Reboot a radio to make it take the right time at once.
+
+A clock jump cancels settings changes that were sent but not yet applied, and
+restarts any channel vote in progress. Send the change again.
 
 After an initial successful check, losing the source does not stop the mesh.
 The radio continues on its own clock. It checks again when another radio
@@ -123,10 +132,25 @@ zero to ten minutes. Source nodes keep chrony running. Local role checks can
 promote a node when GPS or an uplink appears.
 
 Initial acquisition may step the clock. After the first verified success,
-the controller disarms startup stepping and subsequent corrections slew.
-This avoids ordinary refreshes jumping backward through the timestamps used
-for channel/admin replay checks. Groups that synced separately to different
-times converge at the kernel slew rate, not by stepping.
+the controller disarms startup stepping and subsequent corrections slew,
+except when the node's group merges into another.
+
+### Merging groups and clock jumps
+
+Peers that arrived since a node's last sync form the other group. Every node
+ranks the two groups the same way. A group with an advertised real source, or
+a node synced from one earlier this boot, wins. Next comes the larger group,
+then the group holding the lowest MAC. A node on the losing side opens a `merge`
+window that polls only the arrivals, permits a step, and serves no clock until
+it follows them.
+
+`manet_clock.py` tracks the wall clock's offset from `CLOCK_BOOTTIME`. A change
+of more than ten seconds starts a new clock epoch, whatever caused it. Admin
+control channels then void every command present in Alfred and restart
+ordering at the jump, the sender drops its own history, staged config and
+radio changes are cancelled, and ACS agreement drops its rounds while keeping
+its boot-clock timers. Activated changes continue, because their rollback
+deadlines use the boot clock.
 
 Failure after initial success retains the boot-ready marker but withdraws
 source-serving flags and keeps retrying. A marker is evidence of a past

@@ -63,7 +63,8 @@ class BackgroundRegressions(unittest.TestCase):
         with patch.object(manet_bgobs, 'observer_path', return_value=None), \
                 patch.object(runtime.time, 'time', return_value=NOW), \
                 patch.object(runtime, 'clock_ready', return_value=True), \
-                patch.object(runtime, 'command', return_value=''):
+                patch.object(runtime, 'command', return_value=''), \
+                patch('manet_clock.observe', return_value={'epoch': 0}):
             runner._tick(NOW)
         runner.score.assert_not_called()
         self.assertEqual(runner.state['protocol']['phase'], 'prepared')
