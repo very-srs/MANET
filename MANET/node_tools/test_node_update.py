@@ -1257,8 +1257,12 @@ module.Updater(Path(sys.argv[2])).update(recover_only=True)
     def test_handed_off_descriptor_must_be_the_update_lock(self):
         (self.root / 'run/manet-update.lock').touch()
         with (self.work / 'not-the-lock').open('a') as other:
-            with self.assertRaisesRegex(update.UpdateError, 'not the update lock'):
-                self.updater.update(handed_off=os.dup(other.fileno()))
+            for descriptor in (other.fileno(), sys.stdout.fileno()):
+                with self.subTest(descriptor=descriptor):
+                    with self.assertRaisesRegex(update.UpdateError, 'not the update lock'):
+                        self.updater.update(handed_off=descriptor)
+                    # A refused descriptor stays open for its owner.
+                    os.fstat(descriptor)
         self.assertEqual(self.history(), '')
 
     def test_handoff_keeps_the_requested_mode(self):

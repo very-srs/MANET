@@ -1063,11 +1063,13 @@ class Updater:
         run.mkdir(exist_ok=True)
         path = run / "manet-update.lock"
         # A handed-off updater inherits the descriptor holding the lock.
+        # Check it before taking ownership, so a wrong number closes nothing.
+        if handed_off is not None and (handed_off < 3 or not os.path.samestat(
+                os.fstat(handed_off), path.stat())):
+            raise UpdateError("Handed-off descriptor is not the update lock")
         with (path.open("a") if handed_off is None else os.fdopen(handed_off, "a")) as lock:
             if handed_off is not None:
                 os.set_inheritable(lock.fileno(), False)
-                if not os.path.samestat(os.fstat(lock.fileno()), path.stat()):
-                    raise UpdateError("Handed-off descriptor is not the update lock")
             try:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
