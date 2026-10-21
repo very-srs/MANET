@@ -142,7 +142,8 @@ The updater validates paths, ownership, file types, archive limits, required
 files, available space, the manifest digest, and the checksum sidecar before
 live replacement. When a validated archive is newer than the installed release
 and carries a different updater, the radio runs the check again with that
-updater from a private copy. Updater fixes therefore apply to the release that
+updater from a private copy. The new updater keeps the update lock and reuses
+the verified download. Updater fixes therefore apply to the release that
 carries them. Reinstalls and downgrades keep the running updater. Boot files, modules, and Morse firmware use a separate
 matched kernel payload with trial activation. Downloading requires
 `/run/initial_time_synced`. Local recovery does not.
@@ -183,9 +184,10 @@ path, peers, or clock sync is required. Opt-out skips the kernel and persists
 that selection for interrupted runtime recovery. It cannot abandon an armed
 trial or erase a failed candidate. A payload that matches the running kernel
 is skipped and recorded the same way. Its release must be the running
-release, and the manifest must match the committed slot in `confirmed.json`
-or, on a flashed radio, `installed-kernel.json`. A different set under the
-running release is refused before anything is installed.
+release, the manifest must match the committed slot in `confirmed.json`
+or, on a flashed radio, `installed-kernel.json`, and every installed module
+must match its manifest hash. A different set under the running release is
+refused before anything is installed.
 
 For an offline update, `--local-archive` and `--local-version` validate an
 explicitly supplied board tools archive and adjacent checksum without release

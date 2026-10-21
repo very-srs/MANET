@@ -112,6 +112,11 @@ class KernelUpdateTests(unittest.TestCase):
         record = self.root / kernel.INSTALLED
         record.parent.mkdir(parents=True, exist_ok=True)
         record.write_text(json.dumps(manifest, sort_keys=True, indent=2) + '\n')
+        for name, body in self.files.items():
+            if name.startswith('modules/'):
+                path = self.root / 'usr/lib' / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(body)
         (self.root / 'proc/sys/kernel/osrelease').write_text(manifest['release'])
 
     def assert_runtime_only(self):
@@ -245,8 +250,14 @@ class KernelUpdateTests(unittest.TestCase):
         self.flashed()
         self.updater.update()
         self.assert_runtime_only()
-        self.assertFalse((self.root / 'usr/lib/modules/6.18-new').exists())
         self.assertEqual((self.boot / 'config.txt').read_text(), self.config)
+
+    def test_hand_installed_build_under_running_release_is_refused(self):
+        self.flashed()
+        (self.root / 'usr/lib/modules/6.18-new/kernel/test.ko').write_bytes(b'hand-built module')
+        with self.assertRaisesRegex(kernel.KernelError, 'unique uname'):
+            self.updater.update()
+        self.assertFalse(self.updater.pending.exists())
 
     def test_running_committed_set_installs_runtime_only(self):
         self.updater.update()

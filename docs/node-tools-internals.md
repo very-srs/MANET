@@ -167,9 +167,10 @@ match the manifest. A committed trial names its slot after the first 24 hex
 digits of the manifest's SHA-256 in `/var/lib/manet-kernel/confirmed.json`. A
 flashed radio keeps the install archive's normalized manifest in
 `/usr/local/share/manet/installed-kernel.json`. The committed slot takes
-precedence when it names the running release. Recovery records the skip the
-same way as an opt-out. A different set under the running release is still
-refused.
+precedence when it names the running release. Every module in the manifest
+must also be installed with its listed SHA-256, which catches another build
+installed by hand under the same release. Recovery records the skip the same
+way as an opt-out. A different set under the running release is still refused.
 
 The durable sequence is:
 
@@ -453,9 +454,12 @@ private `/var/lib/manet-update/handoff` directory and replaces itself with
 that `node-update.py`, keeping the original options. Nothing under
 `/usr/local/bin` changes until the new updater's ordinary installation, which
 arms recovery with the new updater first. An interrupted handoff therefore
-never leaves a mixed updater installed. The replacement repeats the whole
-check, including release selection and download, without the daily throttle.
-A hidden `--handed-off` option prevents a second handoff. The next run from
+never leaves a mixed updater installed. The replacement inherits the
+descriptor that holds the update lock, so no other updater runs between the
+two. It takes over the verified download from the private directory instead
+of fetching it again. An operator's `--local-archive` passes through and is
+read in place. The hidden `--handed-off` option carries the lock descriptor
+and prevents a second handoff. The next run from
 any other location removes the copy. Reinstalls and downgrades keep the
 running updater. The handoff happens after validation, so a new archive must
 still pass the previous release's validation. Everything after it, including

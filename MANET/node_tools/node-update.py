@@ -420,15 +420,14 @@ class Updater:
             validate_payload(archive, members, self.board())
         return members
 
-    def hand_off(self, package, members, expected, local_archive, local_version):
+    def hand_off(self, lock, package, checksum, members, expected, local_archive):
         """Run this check again with a newer release's updater.
 
         An older updater can refuse a payload that its replacement accepts.
         The archive has already passed validation. The copy runs from private
         state, so an interrupted handoff never leaves a mixed updater live;
-        the normal installation replaces /usr/local/bin under recovery.
-        Process replacement drops the update lock and leaves the download for
-        the next run's cleanup.
+        the normal installation replaces /usr/local/bin under recovery. The
+        replacement inherits the update lock and the verified download.
         """
         running = Path(__file__).resolve().parent
         with tarfile.open(package, "r:gz") as archive:
@@ -441,15 +440,21 @@ class Updater:
         for name, body in bodies.items():
             atomic_file(self.handoff / PurePosixPath(name).name, data=body,
                         mode=members[name].mode & 0o700)
+        if local_archive is None:
+            local_archive = self.handoff / package.name
+            os.replace(package, local_archive)
+            os.replace(checksum, self.handoff / checksum.name)
+            sync_directory(self.handoff)
         sync_directory(self.state)
         self.log(f"Checking again with the updater from release {expected}")
-        args = [sys.executable, str(self.handoff / "node-update.py"), "--handed-off"]
+        os.set_inheritable(lock.fileno(), True)
+        args = [sys.executable, str(self.handoff / "node-update.py"),
+                "--handed-off", str(lock.fileno())]
         for flag, enabled in (("--routine", self.routine), ("--development", self.development),
                               ("--allow-downgrade", self.allow_downgrade)):
             if enabled:
                 args.append(flag)
-        if local_archive is not None:
-            args += ["--local-archive", str(local_archive), "--local-version", local_version]
+        args += ["--local-archive", str(local_archive), "--local-version", expected]
         os.execv(sys.executable, args)
 
     def stage(self, package, members, directory):
@@ -1052,11 +1057,17 @@ class Updater:
         self.destination('etc/ebtables.rules').unlink(missing_ok=True)
 
     def update(self, recover_only=False, files_only=False, cancel_kernel=False,
-               local_archive=None, local_version=None, handed_off=False):
+               local_archive=None, local_version=None, handed_off=None):
         """Serialize recovery or release selection, verification and install."""
         run = self.root / "run"
         run.mkdir(exist_ok=True)
-        with (run / "manet-update.lock").open("a") as lock:
+        path = run / "manet-update.lock"
+        # A handed-off updater inherits the descriptor holding the lock.
+        with (path.open("a") if handed_off is None else os.fdopen(handed_off, "a")) as lock:
+            if handed_off is not None:
+                os.set_inheritable(lock.fileno(), False)
+                if not os.path.samestat(os.fstat(lock.fileno()), path.stat()):
+                    raise UpdateError("Handed-off descriptor is not the update lock")
             try:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
@@ -1100,8 +1111,7 @@ class Updater:
                 local = "unknown"
             # Routine checks use marker mtime as a one-day wall-clock throttle.
             # A backward clock step does not count as a recent successful check.
-            if (self.routine and local_archive is None and not pending and not replaced
-                    and not handed_off and local != "unknown"
+            if (self.routine and local_archive is None and not pending and not replaced and local != "unknown"
                     and 0 <= time.time() - self.marker.stat().st_mtime < 86400):
                 return
             board = self.board()
@@ -1138,9 +1148,14 @@ class Updater:
                             or sidecar.stat().st_size > 1024):
                         raise UpdateError('Invalid local board archive name or size')
                     self.space([(work, source.stat().st_size + 1024)])
-                    shutil.copyfile(source, package)
-                    shutil.copyfile(sidecar, checksum)
-                    self.log('Using explicit local archive and checksum; no GitHub release metadata')
+                    if source.parent.resolve() == self.handoff.resolve():
+                        # The predecessor verified this download against the release.
+                        os.replace(source, package)
+                        os.replace(sidecar, checksum)
+                    else:
+                        shutil.copyfile(source, package)
+                        shutil.copyfile(sidecar, checksum)
+                        self.log('Using explicit local archive and checksum; no GitHub release metadata')
                 else:
                     url = asset_url(release, filename)
                     self.download(url + ".sha256", checksum, 1024)
@@ -1148,9 +1163,9 @@ class Updater:
                     verify_asset(package, release["assets"][filename])
                 members = self.validate(package, checksum, filename, expected)
                 # A reinstall or downgrade keeps the updater the operator started.
-                if not handed_off and (local == "unknown" or tuple(map(int, expected.split(".")))
-                                       > tuple(map(int, local.split(".")))):
-                    self.hand_off(package, members, expected, local_archive, local_version)
+                if handed_off is None and (local == "unknown" or tuple(map(int, expected.split(".")))
+                                           > tuple(map(int, local.split(".")))):
+                    self.hand_off(lock, package, checksum, members, expected, local_archive)
                 self.clean_payload_scratch(members)
                 staged = work / "stage"
                 self.stage(package, members, staged)
@@ -1204,7 +1219,7 @@ def main():
                           help=argparse.SUPPRESS)
     recovery.add_argument('--recover-files', action='store_true',
                           help='restore pending payload before service startup')
-    parser.add_argument('--handed-off', action='store_true', help=argparse.SUPPRESS)
+    parser.add_argument('--handed-off', type=int, metavar='FD', help=argparse.SUPPRESS)
     args = parser.parse_args()
     if (args.local_archive is None) != (args.local_version is None):
         parser.error('--local-archive and --local-version must be supplied together')

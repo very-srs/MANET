@@ -1204,7 +1204,15 @@ module.Updater(Path(sys.argv[2])).update(recover_only=True)
 
     def test_newer_updater_checks_again_from_a_private_copy(self):
         body = self.newer_updater()
-        with patch.object(update.os, 'execv', side_effect=SystemExit) as execv:
+        lock_path = self.root / 'run/manet-update.lock'
+
+        def replaced(path, args):
+            # The lock stays held through the handoff.
+            self.assertTrue(os.get_inheritable(int(args[3])))
+            with lock_path.open('a') as other, self.assertRaises(BlockingIOError):
+                fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            raise SystemExit
+        with patch.object(update.os, 'execv', side_effect=replaced) as execv:
             with self.assertRaises(SystemExit):
                 self.updater.update()
         copy = self.updater.handoff / 'node-update.py'
@@ -1213,28 +1221,45 @@ module.Updater(Path(sys.argv[2])).update(recover_only=True)
         for name in ('manet_release.py', 'manet_kernel_update.py'):
             self.assertEqual((self.updater.handoff / name).read_bytes(),
                              Path(__file__).with_name(name).read_bytes())
-        self.assertEqual(execv.call_args.args,
-                         (sys.executable, [sys.executable, str(copy), '--handed-off']))
+        archive = self.updater.handoff / 'cm4-tools.tar.gz'
+        self.assertEqual(archive.read_bytes(), self.package.read_bytes())
+        self.assertTrue((self.updater.handoff / 'cm4-tools.tar.gz.sha256').is_file())
+        args = execv.call_args.args[1]
+        self.assertEqual(args[:3], [sys.executable, str(copy), '--handed-off'])
+        self.assertEqual(args[4:], ['--local-archive', str(archive), '--local-version', '0.550'])
         # Nothing live changes before the new updater arms its own recovery.
         self.assertFalse((self.root / 'usr/local/bin/node-update.py').exists())
         self.assertEqual(self.updater.marker.read_text(), self.old_version)
         self.assertFalse(self.updater.pending.exists())
         self.assertNotIn('dependency', self.history())
         self.assertEqual(self.old_manager.read_text(), 'old manager\n')
-        # The copy checks again despite the daily throttle, keeps itself while
-        # running and never hands off a second time.
-        self.updater.routine = True
+        # The copy runs under the inherited lock with the verified download,
+        # keeps itself while running and never hands off a second time.
+        lock = lock_path.open('a')
+        fcntl.flock(lock, fcntl.LOCK_EX)
         with patch.object(update, '__file__', str(copy)), patch.object(update.os, 'execv') as execv:
-            self.updater.update(handed_off=True)
+            self.updater.update(handed_off=os.dup(lock.fileno()), local_archive=archive,
+                                local_version='0.550')
+        lock.close()
         execv.assert_not_called()
         self.assertTrue(copy.exists())
+        self.assertFalse(archive.exists())
+        downloads = [line for line in self.history().splitlines()
+                     if line.startswith('curl ') and line.endswith('/cm4-tools.tar.gz')]
+        self.assertEqual(len(downloads), 1)
         self.assertEqual(self.updater.marker.read_text(), self.new_version)
         self.assertEqual((self.root / 'usr/local/bin/node-update.py').read_bytes(), body)
         self.assertEqual((self.updater.installed / 'node-update.py').read_bytes(), body)
         # Any later run from elsewhere removes the copy.
-        self.updater.routine = False
         self.updater.update()
         self.assertFalse(self.updater.handoff.exists())
+
+    def test_handed_off_descriptor_must_be_the_update_lock(self):
+        (self.root / 'run/manet-update.lock').touch()
+        with (self.work / 'not-the-lock').open('a') as other:
+            with self.assertRaisesRegex(update.UpdateError, 'not the update lock'):
+                self.updater.update(handed_off=os.dup(other.fileno()))
+        self.assertEqual(self.history(), '')
 
     def test_handoff_keeps_the_requested_mode(self):
         self.newer_updater()
@@ -1244,8 +1269,12 @@ module.Updater(Path(sys.argv[2])).update(recover_only=True)
             with self.assertRaises(SystemExit):
                 updater.update(local_archive=self.package, local_version='0.550')
         argv = execv.call_args.args[1][1:]
-        self.assertEqual(argv[1:], ['--handed-off', '--routine', '--development', '--allow-downgrade',
+        self.assertEqual(argv[1], '--handed-off')
+        self.assertEqual(argv[3:], ['--routine', '--development', '--allow-downgrade',
                                     '--local-archive', str(self.package), '--local-version', '0.550'])
+        # An operator's own archive is read in place, never moved.
+        self.assertTrue(self.package.exists())
+        self.assertFalse((updater.handoff / 'cm4-tools.tar.gz').exists())
         runner = Mock()
         with patch.object(update, 'Updater', return_value=runner) as factory, \
                 patch.object(update.os, 'geteuid', return_value=0), \
@@ -1255,7 +1284,7 @@ module.Updater(Path(sys.argv[2])).update(recover_only=True)
         factory.assert_called_with(routine=True, development=True, allow_downgrade=True)
         runner.update.assert_called_with(recover_only=False, files_only=False, cancel_kernel=False,
                                          local_archive=self.package, local_version='0.550',
-                                         handed_off=True)
+                                         handed_off=int(argv[2]))
 
     def test_reinstall_and_downgrade_keep_the_running_updater(self):
         self.newer_updater()

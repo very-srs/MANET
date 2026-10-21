@@ -350,8 +350,10 @@ class KernelTrial:
         """Whether the payload is the matched set this node already runs.
 
         A committed trial names its slot after the manifest digest. A flashed
-        node keeps the install archive's record. Either needs the running
-        release, so a different set under the same uname -r still fails preflight.
+        node keeps the install archive's record. The installed modules must
+        still hash to that set, which catches another build installed by hand
+        under the same release. A different set under the running uname -r
+        still fails preflight.
         """
         manifest = json.loads((directory / MANIFEST).read_text())
         if manifest['release'] != self.release():
@@ -364,8 +366,16 @@ class KernelTrial:
                 return None
         confirmed = record('var/lib/manet-kernel/confirmed.json')
         if isinstance(confirmed, dict) and confirmed.get('release') == manifest['release']:
-            return confirmed.get('slot') == sha256(directory / MANIFEST)[:24]
-        return record(INSTALLED) == manifest
+            if confirmed.get('slot') != sha256(directory / MANIFEST)[:24]:
+                return False
+        elif record(INSTALLED) != manifest:
+            return False
+        for name, item in manifest['files'].items():
+            if name.startswith('modules/') and re.search(r'\.ko(?:\.(?:xz|zst|gz))?$', name):
+                path = self.u.destination('usr/lib/' + name)
+                if not path.is_file() or sha256(path) != item['sha256']:
+                    return False
+        return True
 
     def preflight(self, directory):
         manifest = json.loads((directory / MANIFEST).read_text())
