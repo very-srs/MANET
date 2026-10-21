@@ -177,6 +177,10 @@ on the router so the route stays valid. The mesh network can be part of the
 private network's range. Ranges wider than a /8 are ignored, so a mistake
 cannot switch off address translation for the whole internet.
 
+On the router, let traffic from the private network reach the LAN without
+address translation. Many routers translate it by default. The gateway radio
+then sees the router's own address instead of the device's and drops it.
+
 Devices on that network can then reach radios and the devices connected to
 them by their mesh addresses, for SSH, ATAK, voice and video. Each radio's web
 page still only answers its own connected devices. The

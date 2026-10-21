@@ -1399,7 +1399,9 @@ ZeroTier range. Mesh addresses arriving from the uplink are still dropped.
 Invalid entries, entries broader than /8 and entries inside the mesh network
 are logged and skipped. The setting is local to each radio and only
 the gateway uses it, so the same value can go on every radio. The router still
-needs a route for `ipv4_network` via the gateway's LAN address. Node web pages
+needs a route for `ipv4_network` via the gateway's LAN address, and must forward
+from the routed network to its LAN without NAT. Many ZeroTier routers NAT that
+traffic by default, and the gateway then drops it as coming from the router. Node web pages
 stay limited to each radio's own clients. The bundled
 [`30-routed-uplink.sh.disabled`](../provisioning/additional-scripts/30-routed-uplink.sh.disabled)
 sets it at first boot.

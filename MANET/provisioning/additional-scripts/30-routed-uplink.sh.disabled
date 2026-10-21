@@ -15,7 +15,12 @@
 # router's DHCP server by the gateway radio's Ethernet MAC. Give the mesh
 # subnet its own slice of the ZeroTier range, keep that slice out of
 # ZeroTier's auto-assign pool, and add a managed route for it via the
-# router's ZeroTier address.
+# router's ZeroTier address. The more specific route wins over the ZeroTier
+# network's own range. A separate subnet outside the ZeroTier range also works.
+#
+# Let the router forward from ZeroTier to its LAN without masquerading. Many
+# routers NAT that traffic by default, and the gateway then sees the router's
+# LAN address instead of the ZeroTier member and drops it.
 
 set -euo pipefail
 
