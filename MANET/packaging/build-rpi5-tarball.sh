@@ -41,6 +41,8 @@ install_file() {
 mkdir -p "$STAGE/usr/local/bin" "$STAGE/usr/sbin" "$STAGE/etc/systemd/system"
 
 install_tree "$REPO_ROOT/MANET/node_tools" "$STAGE/usr/local/bin"
+# Tests, their data and the build host's bytecode never reach a node.
+rm -rf "$STAGE"/usr/local/bin/test_*.py "$STAGE"/usr/local/bin/{fixtures,testdata,__pycache__}
 chmod -R a+rX "$STAGE/usr/local/bin"
 find "$STAGE/usr/local/bin" -type f \( -name '*.sh' -o -name '*.py' -o -name 'morse_cli' -o -name 'chronyc' \) -exec chmod 0755 {} +
 

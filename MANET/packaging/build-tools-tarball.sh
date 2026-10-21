@@ -50,6 +50,8 @@ install_file() {
 mkdir -p "$STAGE/usr/local/bin" "$STAGE/etc"
 
 install_tree "$REPO_ROOT/MANET/node_tools" "$STAGE/usr/local/bin"
+# Tests, their data and the build host's bytecode never reach a node.
+rm -rf "$STAGE"/usr/local/bin/test_*.py "$STAGE"/usr/local/bin/{fixtures,testdata,__pycache__}
 
 # node-manager.sh is a symlink made on the node by node-manager-select.sh,
 # before every node-manager start, from acs= in mesh.conf. Never ship a file
