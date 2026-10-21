@@ -70,6 +70,53 @@ else:
     def assert_frequency(self, freq):
         self.assertIn(f'frequency={freq}', (self.wpa / 'wpa_supplicant-wlan0.conf').read_text())
 
+    def searching(self, freq5=None):
+        """Put this node in rendezvous search on the anchors, with two HaLow peers."""
+        self.configure(2412, freq5)
+        self.registry.write_text(node(OWN) + node(PEER, aliases=RADIO) + node(THIRD))
+        (self.root / 'peers').write_text(json.dumps([
+            {'orig_address': RADIO, 'hard_ifname': 'wlan2', 'best': True},
+            {'orig_address': THIRD, 'hard_ifname': 'wlan2', 'best': True}]))
+        self.runner = runtime.Runtime()
+
+    def mode(self):
+        return json.loads((self.root / 'manet-rendezvous.json').read_text())['mode']
+
+    def test_searching_node_joins_the_channel_its_connected_peers_use(self):
+        """No round is needed: HaLow already carries the peers' live channels."""
+        self.searching()
+        peers = {PEER: {'status': status('b', ready=False, current={'2.4': 2462})},
+                 THIRD: {'status': status('c', ready=False, current={'2.4': 2462})}}
+        self.tick(self.now, peers)
+        self.assert_frequency(2462)
+        self.assertEqual(self.mode(), 'data')
+
+    def test_equal_groups_keep_the_one_holding_the_lowest_mac(self):
+        self.searching()
+        peers = {PEER: {'status': status('b', ready=False, current={'2.4': 2462})},
+                 THIRD: {'status': status('c', ready=False, current={'2.4': 2437})}}
+        self.tick(self.now, peers)
+        # Three groups of one: this node holds the lowest MAC and stays.
+        self.assert_frequency(2412)
+        self.assertEqual(self.mode(), 'search')
+
+    def test_joining_never_enters_a_dfs_channel(self):
+        self.searching(freq5=5180)
+        peers = {m: {'status': dict(status(b, ready=False, current={'2.4': 2412, '5': 5260}),
+                                    allowed={'2.4': [2412], '5': [5180, 5260]})}
+                 for m, b in ((PEER, 'b'), (THIRD, 'c'))}
+        self.tick(self.now, peers)
+        self.assertIn('frequency=5180', (self.wpa / 'wpa_supplicant-wlan1.conf').read_text())
+
+    def test_connected_searcher_repairs_drift_but_a_rotating_one_does_not(self):
+        self.searching()
+        local = dict(self.runner.status(self.now), current={'2.4': 2462})
+        self.assertTrue(local['discovery'])
+        self.assertFalse(self.runner.repair_drift(local))
+        self.assertEqual(self.runner.drift_since, {})
+        self.runner.repair_drift(local, connected=True)
+        self.assertIn('wlan0', self.runner.drift_since)
+
     def test_scan_gate_snapshot_uses_connected_canonical_members(self):
         """HaLow aliases map to the same identities used for RF scoring."""
         self.tick(self.now, {})

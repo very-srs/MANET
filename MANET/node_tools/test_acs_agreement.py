@@ -340,20 +340,18 @@ class RuntimeTests(AcsHarness):
                              'hold_until': future, 'recovered_round': future // 180}
         self.runner.save()
         self.runner = runtime.Runtime()
-        hold = self.runner.state['hold_until']
+        # The old boot's recovery hold ends with that boot.
+        self.assertNotIn('hold_until', self.runner.state)
         (self.root / 'initial_time_synced').unlink()
         self.tick(future)
-        self.assertEqual(self.runner.state['hold_until'], hold)
         (self.root / 'initial_time_synced').touch()
         self.tick(self.now)
         saved = self.runner.state['protocol']
         self.assertEqual(saved['round'], self.now // 180)
-        self.assertEqual(hold, 10000.5 + p.RECOVERY_SECONDS)
-        self.assertEqual(self.runner.state['hold_until'], hold)
+        self.assertNotIn('hold_until', self.runner.state)
         self.runner = runtime.Runtime()
         self.tick(self.now + 1)
         self.assertEqual(self.runner.state['protocol'], saved)
-        self.assertEqual(self.runner.state['hold_until'], hold)
 
     def test_missed_commit_recovered_from_peer_already_on_destination(self):
         v = view()

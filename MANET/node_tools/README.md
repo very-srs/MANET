@@ -42,6 +42,14 @@ HaLow, holds discovery still for authenticated recovery or joint bootstrap.
 When an authenticated destination matches a visited channel, discovery ends
 there without restarting that radio or hopping away at the next rotation.
 
+A connected searcher with no agreed plan in reach does not wait for a round to
+find its peers on Wi-Fi. Every peer publishes its live channels over any BATMAN
+path, so the searcher tunes each band to the channel most connected peers use,
+then a normal round optimizes. Equal groups keep the channel of the group
+holding the lowest MAC, the same rule partitions use. Joining never enters a
+DFS channel. A connected searcher also repairs a radio that drifted from its
+configured channel, which a rotating searcher leaves alone.
+
 Bootstrap counts distinct BATMAN originators across every mesh interface,
 including HaLow. If the peer query fails, it defers bootstrap and requires a
 fresh scan/publish round once the query succeeds again.
@@ -638,7 +646,8 @@ cycles plus an exchange window. The current plan remains recoverable afterward: 
 peer operating that plan advertises a fresh authenticated destination through
 the existing type-74 exchange. A follower already moved by a peer CSA also
 persists the target configuration and takes the moving plan's recovery hold
-once. Repeated advertisements and same-boot restarts do not extend that hold.
+once. Repeated advertisements and same-boot restarts do not extend that hold,
+and a reboot ends it, so a rebooted radio can vote at once.
 Matching live channels never receive a second CSA just to repair config.
 Ordinary committed plans already landed by peer CSA remain valid only on the
 same boot and within their original activation grace.

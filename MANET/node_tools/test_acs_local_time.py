@@ -243,7 +243,7 @@ class LocalTimeTests(AcsHarness):
             self.runner.tick(self.wall)
         self.assertEqual(self.runner.state['busy_until'], deadline)
 
-    def test_unknown_boot_restarts_holds_and_persists_them_before_sync(self):
+    def test_unknown_boot_drops_holds_and_restarts_dfs_cooling_before_sync(self):
         for boot in (None, 'f' * 32):
             with self.subTest(boot=boot):
                 self.runner.state.update({key: 9999999999 for key in runtime.LOCAL_TIMERS})
@@ -252,9 +252,8 @@ class LocalTimeTests(AcsHarness):
                 (self.root / 'initial_time_synced').unlink(missing_ok=True)
                 self.wall += 3600
                 self.runner = runtime.Runtime()
-                hold = self.elapsed + protocol.RECOVERY_SECONDS
                 cooldown = self.elapsed + protocol.DFS_COOLDOWN_SECONDS
-                self.assertEqual(self.runner.state['hold_until'], hold)
+                self.assertNotIn('hold_until', self.runner.state)
                 self.assertEqual(self.runner.state['dfs_cooldown_until'],
                                  cooldown)
                 self.assertEqual(self.runner.state['timer_boot'], self.runner.boot)
@@ -264,24 +263,27 @@ class LocalTimeTests(AcsHarness):
                 self.elapsed += 10
                 self.wall -= 7200
                 self.runner = runtime.Runtime()
-                self.assertEqual(self.runner.state['hold_until'], hold)
+                self.assertNotIn('hold_until', self.runner.state)
                 self.assertEqual(self.runner.state['dfs_cooldown_until'],
                                  cooldown)
 
     def test_boot_reconciliation_under_a_held_lock_stays_in_memory(self):
         # The tourguide holds the channel lock while it runs members and
         # helper-encode, which construct Runtime: they must not fail.
-        self.runner.state.update(timer_boot='f' * 32, hold_until=9999999999)
+        self.runner.state.update(timer_boot='f' * 32, hold_until=9999999999,
+                                 dfs_cooldown_until=9999999999)
         self.runner.save()
         original = self.runner.path.read_text()
+        cooldown = self.elapsed + protocol.DFS_COOLDOWN_SECONDS
         with self.runner.channel_lock():
             for step in STEPS:
                 self.wall = 1800000045 + step
                 helper = runtime.Runtime()
-                self.assertEqual(helper.state['hold_until'], self.elapsed + protocol.RECOVERY_SECONDS)
+                self.assertNotIn('hold_until', helper.state)
+                self.assertEqual(helper.state['dfs_cooldown_until'], cooldown)
                 self.assertEqual(self.runner.path.read_text(), original)
         self.runner = runtime.Runtime()
-        self.assertEqual(self.runner.state['hold_until'], self.elapsed + protocol.RECOVERY_SECONDS)
+        self.assertEqual(self.runner.state['dfs_cooldown_until'], cooldown)
         self.assertNotEqual(self.runner.path.read_text(), original)
 
     def test_shell_and_python_share_busy_deadlines_across_wall_steps(self):

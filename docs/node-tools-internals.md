@@ -1705,7 +1705,10 @@ An unchanged plan can update limp mode without starting that hold. Recovery
 uses the same adoption path even if a peer CSA already landed the radios. It
 persists the agreed config, recovery identity, and moving-plan hold before
 application. The hold starts once per adopted plan identity and survives
-same-boot restarts without renewal from repeated advertisements. A committed
+same-boot restarts without renewal from repeated advertisements. A new boot
+ends it: the hold damps moves within one session, and a held radio counts as
+unready, so carrying it across a reboot kept the radio out of rounds for
+26 minutes and could leave a small mesh short of a quorum. A committed
 ordinary plan may replace its promised channel snapshot only with its exact
 target, on the same boot, during activation/grace. Unplanned radios must still
 match, and DFS retains its separate live detector checks. A node
@@ -1830,7 +1833,19 @@ status converges. There is no new registry schema or additional broadcast stream
 This gate applies to elected guide excursions from data channels. Fully
 disconnected searchers retain their rotating/fixed-anchor discovery behavior;
 any BATMAN connection already holds them still for authenticated recovery or
-joint bootstrap. The twelve-minute fallback cycle and 26-minute recovery hold
+joint bootstrap. With no agreed destination in reach, `join_connected` tunes a
+connected searcher to the channels its peers already use. Every member's live
+`current` arrives in its type 74 status over any path, HaLow included, so the
+searcher counts the members on each band's channels, itself on its own. The
+largest group wins, then the group holding the lowest MAC. DFS channels and
+channels outside this node's allowed list never count. The join writes the
+config and switches by CSA through the normal apply path, leaves search mode,
+and keeps a 30-second retry marker and settle interval. It corrects the
+configured channel as well when only that differs, so drift repair cannot pull
+the radio back. Before this, connected searchers with no plan waited for a
+round, and a round needs a quorum of ready members. A radio left drifted by
+its last rotation was unready and could not repair, which deadlocked the
+component. The twelve-minute fallback cycle and 26-minute recovery hold
 remain, allowing nodes without usable HaLow to recover too.
 
 `/run/manet-rendezvous.json` stores `search` or `data`. The first usable config
@@ -2427,6 +2442,7 @@ The daemon's defensive drift repair uses that lock too. A blocked pass clears
 its mismatch grace, so neither a lobby visit nor its temporary config can
 trigger a repair. Discovery mode separately suppresses repairs throughout
 search rotations, including when live MHz lags the newly written slot config.
+A connected searcher no longer rotates, so it repairs drift like a data node.
 
 **Which radio hops is derived from the clock, never from this node's own
 history**: `(epoch / 120) % 2`, the same window index `should_perform_tourguide`

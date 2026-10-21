@@ -38,7 +38,9 @@ narrow channels without reflashing.
 
 With automatic channel selection enabled, radios share what they measure and
 agree on one Wi-Fi channel plan. Radios still connected through HaLow belong to
-the same mesh for this decision, even while their Wi-Fi links are down.
+the same mesh for this decision, even while their Wi-Fi links are down. A radio
+that starts on a different Wi-Fi channel moves to the one the others use as
+soon as HaLow connects it, without waiting for a vote.
 
 Each radio measures the channel it is on. It only looks at other channels when
 it, or another radio in the mesh, reports lasting interference. That means the
@@ -147,7 +149,14 @@ This reduces futile proposals without guaranteeing identical leadership views.
 An authenticated destination is adopted even after a peer CSA has already
 landed the radio. Adoption saves the config and moving-plan recovery hold once
 per plan identity. A repeated advertisement or same-boot restart cannot renew
-it. Config repair alone never sends a second CSA. A committed ordinary plan
+it, and a reboot ends it.
+
+A searching radio connected to peers, over HaLow or any other path, with no
+agreed plan in reach tunes each band to the channel most of those peers
+already use, as published in their status. Equal groups keep the channel of
+the group holding the lowest MAC. It never joins a DFS channel this way, and a
+normal round then optimizes. A connected searcher also repairs a radio that
+drifted from its configured channel. Config repair alone never sends a second CSA. A committed ordinary plan
 that lands first by peer CSA survives only on the same boot, at its exact
 target and within its activation grace. DFS still needs live detector tokens.
 Ordinary and DFS transition logs include quorum, readiness, hold time, and an

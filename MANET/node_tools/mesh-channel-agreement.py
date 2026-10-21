@@ -493,18 +493,16 @@ class Runtime:
         self.drift_since = {}
 
     def reset_timers(self):
-        """Discard deadlines from another boot, restarting any recovery hold."""
+        """Discard deadlines from another boot, including any recovery hold."""
         if not isinstance(self.state, dict):
             raise ValueError('invalid persisted agreement state')
         if self.state.get('timer_boot') != self.boot:
-            held = self.state.get('hold_until', 0) > 0
             dfs_cooling = self.state.get('dfs_cooldown_until', 0) > 0
             for key in LOCAL_TIMERS:
                 self.state.pop(key, None)
             self.state['timer_boot'] = self.boot
-            # Unknown-boot holds restart in full. Drop all other local timers.
-            if held:
-                self.state['hold_until'] = boot_time() + protocol.RECOVERY_SECONDS
+            # A recovery hold damps moves within one session and ends with the
+            # boot, so a rebooted radio can vote at once. DFS cooling restarts.
             if dfs_cooling:
                 self.state['dfs_cooldown_until'] = (
                     boot_time() + protocol.DFS_COOLDOWN_SECONDS)
@@ -1528,15 +1526,55 @@ class Runtime:
         self.apply(targets, discovering=True)
         return True
 
-    def repair_drift(self, local):
+    def join_connected(self, local, view):
+        """Tune a searching radio to the Wi-Fi channels its connected peers use.
+
+        Peers publish their live channels over any BATMAN path, HaLow included,
+        so a connected searcher need not wait for a round to find them. With no
+        agreed plan in reach, the larger group on each band wins, then the group
+        holding the lowest MAC, as partitions merge. A later round optimizes.
+        """
+        if not local['acs'] or not local['discovery']:
+            return False
+        configured = {b: data[2] for b, data in self.interfaces().items()}
+        targets = {}
+        for band, own in local['current'].items():
+            groups = {own: [self.own]}
+            for mac, status in view.items():
+                freq = (status or {}).get('current', {}).get(band) if mac != self.own else None
+                # Joining never enters DFS: that needs an agreed, cleared plan.
+                if (freq is not None and status.get('acs') and freq not in protocol.DFS_CHANNELS
+                        and freq in local['allowed'].get(band, [])):
+                    groups.setdefault(freq, []).append(mac)
+            best = min(groups, key=lambda f: (-len(groups[f]), min(groups[f])))
+            if best != own or configured.get(band, best) != best:
+                targets[band] = best
+        if not targets:
+            return False
+        retry_path = self.run_dir / 'manet-join-retry.json'
+        retry = read_json(retry_path)
+        if retry.get('boot') == self.boot and time.monotonic() < retry.get('after', 0):
+            return False
+        # Persist a 30 s retry delay before touching radios, including failures.
+        private_json_write(retry_path, {'boot': self.boot, 'after': time.monotonic() + 30})
+        channels = dict(local['current'], **targets)
+        print('ACS joining connected peers ' + json.dumps(targets), flush=True)
+        self.state['settle_until'] = boot_time() + 30
+        self.save()
+        self.write_busy(self.state['settle_until'])
+        self.apply(channels, reason='Joining connected peers')
+        return True
+
+    def repair_drift(self, local, connected=False):
         """Reconfigure sustained idle drift once per radio backoff interval.
 
         The caller holds the channel lock, including against tourguide visits.
         Configured MHz remains the target; this does not select a new plan.
+        A searcher repairs only while connected: it no longer rotates then.
         """
         elapsed = boot_time()
         phase = self.state.get('protocol', {}).get('phase')
-        if (local['discovery'] or self.busy()
+        if ((local['discovery'] and not connected) or self.busy()
                 or phase in ('prepared', 'committed')
                 or elapsed <= self.state.get('repair_until', -1)
                 or elapsed < self.state.get('settle_until', 0)):
@@ -1920,11 +1958,17 @@ class Runtime:
                 self.save()
                 # This pass publishes post-apply status without pre-apply votes.
                 outgoing = {}
+            connected = bool(view) and len(view) > 1
             if (plan is None and view and not self.busy()
                     and updated.get('phase') not in ('prepared', 'committed')
-                    and self.discovery_step(now, local, len(view) > 1)):
+                    and self.discovery_step(now, local, connected)):
                 local = self.status(int(time.time()))
-            if plan is None and self.repair_drift(local):
+            if (plan is None and connected and not destinations and not self.busy()
+                    and updated.get('phase') not in ('prepared', 'committed')
+                    and self.join_connected(local, view)):
+                local = self.status(int(time.time()))
+                outgoing = {}
+            if plan is None and self.repair_drift(local, connected):
                 local = self.status(int(time.time()))
                 outgoing = {}
             # Advertise current plans through the existing type 74 exchange.
