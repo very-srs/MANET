@@ -23,7 +23,7 @@ Companion documents:
 
 | Target | SoC | Kernel tree | Kernel version | Morse bus | Module |
 |--------|-----|-------------|----------------|-----------|--------|
-| CM4 | BCM2711 | `linux-rpi-6.18` (RPi fork) | 6.18.57-manet-r1 | SPI (spi0) | mm6108, FGH100M-AA-MD (Molex) |
+| CM4 | BCM2711 | `linux-rpi-6.18` (RPi fork) | 6.18.57-manet-r2 | SPI (spi0) | mm6108, FGH100M-AA-MD (Molex) |
 | RPi5 | BCM2712 | `linux-rpi-6.18` (RPi fork) | 6.18.57-manet | SPI | mm6108 |
 | Rock 3A | RK3568 | `linux-6.18` (stable) | 6.18.57-manet | USB (M.2 E-key) | MM8108B2, Gateworks GW16167 |
 
@@ -604,7 +604,7 @@ not be interrupted. It does not make live extraction safe for an established
 node. For a kernel-only tarball onto offline mounted partitions:
 
 ```bash
-# $BOOTFS = FAT boot partition, $ROOTFS = ext4 root, $KVER e.g. 6.18.57-manet-r1
+# $BOOTFS = FAT boot partition, $ROOTFS = ext4 root, $KVER e.g. 6.18.57-manet-r2
 sudo tar xzf cm4-kernel.tar.gz -C "$BOOTFS" --strip-components=2 ./boot/firmware/
 sudo tar xzf cm4-kernel.tar.gz -C "$ROOTFS" ./usr/lib/modules/ ./etc/ ./usr/local/ ./root/
 sudo depmod -b "$ROOTFS" "$KVER"

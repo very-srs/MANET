@@ -3,7 +3,7 @@ set -e
 export KBUILD_BUILD_USER=build
 export KBUILD_BUILD_HOST=manet
 export KBUILD_BUILD_TIMESTAMP=""
-export LOCALVERSION="${LOCALVERSION:--r1}"
+export LOCALVERSION="${LOCALVERSION:--r2}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
