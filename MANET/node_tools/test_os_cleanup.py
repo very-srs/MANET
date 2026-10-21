@@ -16,6 +16,14 @@ class CleanupTests(unittest.TestCase):
     def package(self, essential=False):
         return {'size_kib': 100, 'essential': essential, 'version': '1'}
 
+    def test_numbered_manet_kernels_qualify_and_stock_kernels_do_not(self):
+        """A CM4 build is 6.18.57-manet-r1. A stock kernel must stop cleanup."""
+        for release, allowed in (('6.18.57-manet-r1', True), ('6.18.33-manet-r3', True),
+                                 ('6.18.0-manet', True), ('6.12.47+rpt-rpi-v8', False),
+                                 ('6.18.0-manet-rc', False)):
+            with self.subTest(release=release):
+                self.assertEqual(cleanup.manet_kernel(release), allowed)
+
     def test_headers_can_go_but_kernel_firmware_and_runtime_are_protected(self):
         runtime = ['linux-image-6.12.47+rpt-rpi-v8', 'linux-base-rpi-v8',
                    'firmware-mediatek', 'firmware-realtek', 'raspi-firmware',

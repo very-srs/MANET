@@ -265,6 +265,11 @@ def cleanup_swap():
     path.unlink()
 
 
+def manet_kernel(release):
+    """Recognize MANET releases: -manet, or -manet-rN for a numbered CM4 build."""
+    return bool(re.search(r'-manet(-r[0-9]+)?$', release))
+
+
 def run(apply=False, force=False):
     """Preview or apply the appliance cleanup policy with audit records."""
     model = Path('/proc/device-tree/model').read_text().rstrip('\0')
@@ -272,7 +277,7 @@ def run(apply=False, force=False):
     if 'Raspberry Pi' not in model or 'VERSION_CODENAME=trixie' not in os_release:
         print('OS cleanup applies only to Raspberry Pi OS Trixie; skipped')
         return
-    if not platform.release().endswith('-manet'):
+    if not manet_kernel(platform.release()):
         raise RuntimeError('Boot the MANET kernel before cleaning up the OS')
     marker = STATE / 'complete'
     if apply and not force and marker.exists() and marker.read_text().strip() == PROFILE:
