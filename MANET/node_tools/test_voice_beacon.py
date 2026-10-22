@@ -6,7 +6,7 @@ import re
 import tempfile
 from types import SimpleNamespace
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import call, Mock, patch
 
 
 spec = importlib.util.spec_from_file_location(
@@ -307,6 +307,166 @@ class VoiceBeaconTests(unittest.TestCase):
         daemon._tick_peers()
         self.assertTrue(daemon.transmitting)
         self.assertIsNone(self.state()['tx_blocked'])
+
+    def lose_playback(self, clock):
+        """Start, let playback run, then fail its device at clock[0]."""
+        self.gst.PadProbeReturn = SimpleNamespace(OK="OK", DROP="DROP")
+        clock_patch = patch.object(voice.time, "monotonic",
+                                   side_effect=lambda: clock[0])
+        clock_patch.start()
+        self.addCleanup(clock_patch.stop)
+        self.start()
+        daemon = self.daemon
+        daemon._on_playback_buffer(None, None)
+        daemon._note_pipeline_error(
+            "rx", "Error outputting to audio device. The device has been "
+            "disconnected.", "alsasink play")
+        return daemon
+
+    def test_playback_recovers_only_after_audio_flows_without_error(self):
+        clock = [1000.0]
+        daemon = self.lose_playback(clock)
+        # Buffers reach the sink between errors while the device is gone.
+        clock[0] += 1
+        daemon._on_playback_buffer(None, None)
+        daemon._tick_health()
+        self.assertIn("rx", daemon._pipeline_fault)
+        daemon._note_pipeline_error(
+            "rx", "Error outputting to audio device. The device has been "
+            "disconnected.", "alsasink play")
+        # Audio then flows past the hold with no new error.
+        clock[0] += voice.PIPELINE_OK_HOLD_SEC + 1
+        daemon._on_playback_buffer(None, None)
+        daemon._tick_health()
+        self.assertNotIn("rx", daemon._pipeline_fault)
+        self.assertIn(call("rx pipeline recovered"), self.logs.call_args_list)
+        self.assertEqual(daemon.exit_code, 0)
+
+    def test_lost_device_restarts_the_voice_stack(self):
+        clock = [1000.0]
+        daemon = self.lose_playback(clock)
+        clock[0] += voice.VOICE_DEVICE_LOST_SEC - 1
+        daemon._tick_health()
+        self.assertEqual(daemon.exit_code, 0)
+        clock[0] += 2
+        daemon._tick_health()
+        # A fresh process opens the replugged card. Restarts in place did not.
+        self.assertEqual(daemon.exit_code, 1)
+        self.assertIn("rx pipeline failed for", daemon._fault)
+
+    def test_missing_hardware_at_start_keeps_the_retry_path(self):
+        clock = [1000.0]
+        clock_patch = patch.object(voice.time, "monotonic",
+                                   side_effect=lambda: clock[0])
+        clock_patch.start()
+        self.addCleanup(clock_patch.stop)
+        self.start()
+        daemon = self.daemon
+        daemon._note_pipeline_error("rx", "Could not open audio device for "
+                                    "playback.", "alsasink play")
+        clock[0] += voice.VOICE_DEVICE_LOST_SEC * 10
+        daemon._tick_health()
+        self.assertEqual(daemon.exit_code, 0)
+
+    def board_returns(self, daemon):
+        """Report the OpenVLM board present and run the settle timer."""
+        daemon.on_ptt_presence(True)
+        settle = self.timers.matching(daemon._retry_audio)
+        self.assertEqual(len(settle), 1)
+        self.timers.fire(settle[0])
+
+    def test_board_return_retries_failed_pipelines_at_once(self):
+        self.start()
+        daemon = self.daemon
+        daemon._note_pipeline_error("rx", "Could not open audio device for "
+                                    "playback.", "alsasink play")
+        self.assertEqual(len(self.timers.matching(daemon._restart)), 1)
+        with patch.object(daemon, "_restart", wraps=daemon._restart) as restart:
+            self.board_returns(daemon)
+        restart.assert_called_once_with("rx")
+        # The backoff timer is cancelled, so a recovered pipeline is not
+        # cycled again when it would have fired.
+        self.assertEqual(self.timers.matching(daemon._restart), [])
+        self.assertEqual(daemon.exit_code, 0)
+
+    def test_board_after_a_cardless_start_restarts_the_stack(self):
+        daemon = self.daemon
+        daemon.cfg.test_tone = False
+        with patch.object(voice, "find_openvlm_card", return_value=None):
+            daemon.build()
+        daemon.start()
+        with patch.object(voice, "find_openvlm_card", return_value=0):
+            self.board_returns(daemon)
+        # ALSA's default device was opened, so only a fresh process opens
+        # the board by index.
+        self.assertEqual(daemon.exit_code, 1)
+        self.assertIn("OpenVLM board appeared after start", daemon._fault)
+
+    def test_board_present_at_start_changes_nothing(self):
+        daemon = self.daemon
+        daemon.cfg.test_tone = False
+        with patch.object(voice, "find_openvlm_card", return_value=0):
+            daemon.build()
+            daemon.start()
+            with patch.object(daemon, "_restart") as restart:
+                self.board_returns(daemon)
+        restart.assert_not_called()
+        self.assertEqual(daemon.exit_code, 0)
+
+    def test_repeated_errors_keep_one_pending_retry(self):
+        self.start()
+        daemon = self.daemon
+        for _ in range(5):
+            daemon._note_pipeline_error("tx", "Could not open audio device "
+                                        "for recording.", "alsasrc cap")
+        # One retry per pipeline, so the backoff is not spent in a burst.
+        self.assertEqual(len(self.timers.matching(daemon._restart)), 1)
+        self.assertEqual(daemon._pipeline_fault["tx"]["delay"],
+                         2 * voice.PIPELINE_RETRY_BASE_SEC)
+
+    def test_recovery_cancels_the_pending_retry(self):
+        clock = [1000.0]
+        daemon = self.lose_playback(clock)
+        daemon._note_pipeline_error(
+            "rx", "Error outputting to audio device. The device has been "
+            "disconnected.", "alsasink play")
+        clock[0] += voice.PIPELINE_OK_HOLD_SEC + 1
+        daemon._on_playback_buffer(None, None)
+        daemon._tick_health()
+        self.assertNotIn("rx", daemon._pipeline_fault)
+        # A retry left pending would cut the recovered pipeline later.
+        self.assertEqual(self.timers.matching(daemon._restart), [])
+
+    def test_a_restart_alone_is_not_recovery(self):
+        clock = [1000.0]
+        daemon = self.lose_playback(clock)
+        # The backoff restart marks the pipeline playing, but nothing flows.
+        clock[0] += voice.PIPELINE_RETRY_BASE_SEC
+        self.timers.fire(self.timers.matching(daemon._restart)[0])
+        clock[0] += voice.PIPELINE_OK_HOLD_SEC + 1
+        daemon._tick_health()
+        self.assertIn("rx", daemon._pipeline_fault)
+        # The lost-device clock keeps running from the first error.
+        clock[0] = 1000.0 + voice.VOICE_DEVICE_LOST_SEC + 1
+        daemon._tick_health()
+        self.assertEqual(daemon.exit_code, 1)
+
+    def test_error_burst_then_board_return_leaves_no_timer(self):
+        self.start()
+        daemon = self.daemon
+        # GStreamer posts several errors when the board is pulled.
+        for _ in range(4):
+            daemon._note_pipeline_error("rx", "Error outputting to audio "
+                                        "device. The device has been "
+                                        "disconnected.", "alsasink play")
+            daemon._note_pipeline_error("tx", "Error recording from audio "
+                                        "device.", "alsasrc cap")
+        self.assertEqual(len(self.timers.matching(daemon._restart)), 2)
+        with patch.object(daemon, "_restart", wraps=daemon._restart) as restart:
+            self.board_returns(daemon)
+        self.assertEqual(sorted(c.args[0] for c in restart.call_args_list),
+                         ["rx", "tx"])
+        self.assertEqual(self.timers.matching(daemon._restart), [])
 
     def test_socket_startup_without_pipeline_error_does_not_claim_binding_failure(self):
         self.start()

@@ -15,6 +15,8 @@ You can hear other speakers while your button is released. Speaking louder does 
 
 **Too quiet or too loud?** Move the sliders on the Voice tab's GAIN card.
 
+**Swapped the headset box?** Wait a minute. The radio restarts its voice by itself.
+
 ## User
 
 ### Voice comes from the radio's headset
@@ -32,6 +34,8 @@ Hold the physical PTT button to transmit. Release it to stop transmitting. Recei
 ### When there is no audio
 
 Confirm voice is enabled, the mesh is connected, the talk groups match, and the Voice tab reports a healthy audio path. Then check the audio hardware and microphone wiring.
+
+After the audio board is unplugged and plugged back in on a running radio, voice comes back by itself. The voice service restarts about 30 seconds after the board was lost, and retries within a few seconds of the board returning. A radio started without its board picks it up when it is plugged in.
 
 The default codec is **Lyra**. It transfers good-quality audio with less bandwidth than Opus, but lacks compatibility with other tools that would expect Opus. Lyra and Opus do not interoperate. A radio that missed a mesh-wide codec change while powered off must be set to the same codec. Reissue the change with it online.
 
@@ -154,7 +158,7 @@ Lyra adapts frames per packet while keeping bitrate fixed. Under loss it reduces
 
 Talk-group changes are local: write `voice_channel` and reload through the checked retune path. Codec changes require mesh-wide staging and ACKs because encoder, payload, and clock rate change together. An offline node does not automatically reconcile a missed codec change.
 
-Transmit remains blocked until the socket is bound to the configured voice interface and its IPv4 address. A held PTT resumes only when the binding and duplex conditions permit it. A watchdog monitors actual audio flow so a pipeline reporting PLAYING cannot hide a stalled USB path indefinitely. `/run/mesh-voice.json` supplies the status readout.
+Transmit remains blocked until the socket is bound to the configured voice interface and its IPv4 address. A held PTT resumes only when the binding and duplex conditions permit it. A watchdog monitors actual audio flow so a pipeline reporting PLAYING cannot hide a stalled USB path indefinitely. A pipeline with a bus error recovers only after a buffer flows since its last restart and its audio flows 2 seconds past the last error, because received RTP keeps arriving while a dead playback device fails each write. A pipeline that had flowed and stays faulted for 30 seconds exits for a systemd restart, since restarting it in place did not reopen a replugged CM108B. One that never flowed, such as missing hardware at start, keeps the retry backoff. The OpenVLM HID returning triggers an immediate retry, and a process started without the board restarts once the board appears. `/run/mesh-voice.json` supplies the status readout.
 
 - [Voice settings and operational behavior](../../../MANET/node_tools/README.md#push-to-talk-voice)
 - [Pipeline, multicast, buffering, and QoS internals](../../../docs/node-tools-internals.md#voice)

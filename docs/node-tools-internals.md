@@ -1302,6 +1302,29 @@ are healthy, and those are what is counted, both at about one buffer per 20 ms:
 - **Playback buffers reaching the sink**, fed continuously by the permanent
   silent mixer input the receive pipeline already carries for its own reasons.
 
+A pipeline with a bus error leaves this count to the retry backoff. It
+recovers only once a buffer has flowed since its last restart and its flow
+runs `PIPELINE_OK_HOLD_SEC` (2 s) past the last error. A restart alone does
+not count, although `_mark_playing` sets `_flow_ts`. Received RTP does not
+count either. Packets keep arriving while a dead
+playback device fails each write, and counting them reset the backoff on
+every packet. A CM108B replugged under a running daemon stayed failed with
+"device has been disconnected" for 6 minutes of restarts in place, logging
+806 lines, until systemd's watchdog restarted the process, which opened it at
+once. A pipeline that never flowed, such as missing hardware at start, stays
+on the backoff and never restarts the process. Each pipeline has at most one
+pending retry, and recovery cancels it. With a retry per error, the timers
+left from an unplug restarted the recovered pipelines again 4 and 18 s later.
+
+When the OpenVLM HID returns, `on_ptt_presence` waits `AUDIO_SETTLE_SEC` (2 s)
+for its sound card, then `_retry_audio` restarts each faulted pipeline at once
+and cancels its backoff timer. Without this, a board replugged after the
+process had restarted waited for the next backoff retry: 71 s in one run, up
+to `PIPELINE_RETRY_MAX_SEC` (300 s). A process that started without the board
+opened ALSA's `default` device, which can be HDMI, so when the board appears
+it exits for a systemd restart that opens the board by index. ALSA overrides
+(`voice_alsa_in`, `voice_alsa_out`) and the bench tone skip that restart.
+
 Multicast membership is checked separately, by reading `/proc/net/igmp`,
 because there is no dataflow to miss: a receiver nobody is talking to looks
 exactly like one that has fallen out of the group. A membership that cannot be
@@ -1315,6 +1338,7 @@ The ladder, in order of cost:
 |---------|----------|
 | A flow stopped for `voice_watchdog_sec` | Restart that pipeline in place |
 | Three such restarts inside 10 minutes | Exit non-zero; `Restart=on-failure` rebuilds the whole stack |
+| A pipeline that had flowed stays in a bus-error fault for `VOICE_DEVICE_LOST_SEC` (30 s) | Exit non-zero, same whole-stack rebuild |
 | Talk group change fails to come up | Revert to the group that was working |
 | The revert fails too | Exit non-zero, same whole-stack rebuild |
 | The GLib main loop stops turning | `WatchdogSec=60` in the unit; systemd aborts and restarts |

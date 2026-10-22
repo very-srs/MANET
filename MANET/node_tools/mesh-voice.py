@@ -195,6 +195,17 @@ PIPELINE_RETRY_BASE_SEC = 5
 PIPELINE_RETRY_MAX_SEC = 300
 # Seconds without another error before the retry delay resets to its base.
 PIPELINE_RETRY_RESET_SEC = 900
+# A faulted pipeline recovers once its audio has flowed this long past the
+# last error. Receive packets arrive while a dead playback device fails each
+# write, so they cannot count as recovery.
+PIPELINE_OK_HOLD_SEC = 2
+# A pipeline that had flowed and stays faulted this long restarts the stack.
+# Restarts in place kept a replugged CM108B failing with "device has been
+# disconnected" for 6 minutes. A fresh process opened it at once.
+VOICE_DEVICE_LOST_SEC = 30
+# After the OpenVLM HID returns, wait this long for its sound card, then
+# retry failed audio at once instead of waiting out the backoff.
+AUDIO_SETTLE_SEC = 2
 REGISTRY_POLL_SEC = 30
 STATE_WRITE_SEC = 2
 
@@ -974,6 +985,9 @@ class MeshVoice:
         # Set by _panic. main() returns it, and a non-zero exit is what asks
         # systemd to rebuild the whole voice stack.
         self.exit_code = 0
+        # Card the pipelines were built on, and whether it was autodetected.
+        self._card = None
+        self._card_auto = False
         self._fault = None
         # name -> (bus, handler id), so a retune can take down what it replaces.
         self._bus_watch = {}
@@ -1226,9 +1240,12 @@ class MeshVoice:
         if self.cfg.test_tone:
             src_desc = ("audiotestsrc name=cap is-live=true wave=sine freq=440")
             playback_desc = "fakesink name=play sync=false"
+            self._card, self._card_auto = None, False
             log("audio: BENCH MODE: 440 Hz tone in, null sink out")
         else:
             card = find_openvlm_card()
+            self._card = card
+            self._card_auto = not (self.cfg.alsa_in or self.cfg.alsa_out)
             dev_in = alsa_device(self.cfg.alsa_in, card)
             dev_out = alsa_device(self.cfg.alsa_out, card)
             src_desc = "alsasrc device=%s name=cap" % dev_in
@@ -1749,7 +1766,7 @@ class MeshVoice:
 
         if state is None or now - state["last_ts"] > PIPELINE_RETRY_RESET_SEC:
             state = {"delay": PIPELINE_RETRY_BASE_SEC, "text": None, "repeats": 0,
-                     "last_ts": now, "capped": False}
+                     "last_ts": now, "since": now, "capped": False}
             self._pipeline_fault[which] = state
         state["last_ts"] = now
 
@@ -1769,9 +1786,13 @@ class MeshVoice:
             log("%s pipeline error: %s (%s): retrying in %ds"
                 % (which, text, debug, state["delay"]))
 
-        # Double retries from five seconds to five minutes after each error.
-        GLib.timeout_add_seconds(state["delay"], self._restart, which)
-        state["delay"] = min(state["delay"] * 2, PIPELINE_RETRY_MAX_SEC)
+        # Double retries from five seconds to five minutes after each retry.
+        # One pending retry per pipeline: a burst of errors from one failure
+        # must not schedule a restart each, which cycled recovered pipelines.
+        if state.get("timer") is None:
+            state["timer"] = GLib.timeout_add_seconds(state["delay"],
+                                                      self._restart, which)
+            state["delay"] = min(state["delay"] * 2, PIPELINE_RETRY_MAX_SEC)
         if which == "tx":
             self._tx_ready()
             self.write_state()
@@ -1786,6 +1807,9 @@ class MeshVoice:
     def _note_pipeline_ok(self, which):
         """Clear a pipeline fault when a buffer flows and log recovery."""
         state = self._pipeline_fault.pop(which, None)
+        timer = state.pop("timer", None) if state else None
+        if timer is not None:
+            GLib.source_remove(timer)  # no restart of a recovered pipeline
         if state and state["text"] is not None:
             self._flush_pipeline_repeats(which, state)
             log("%s pipeline recovered" % which)
@@ -1798,6 +1822,8 @@ class MeshVoice:
             self._set_tx(False)
         # Suppress restart messages along with repeated identical errors.
         state = self._pipeline_fault.get(which)
+        if state:
+            state.pop("timer", None)  # one-shot, or cancelled by the caller
         if not state or not state["repeats"]:
             log("%s pipeline restarting" % which)
         pipeline.set_state(Gst.State.NULL)
@@ -1859,8 +1885,6 @@ class MeshVoice:
             return Gst.PadProbeReturn.DROP
         self.rx_packets += 1
         self.last_rx_ms = now_ms()
-        if self._pipeline_fault:
-            self._note_pipeline_ok("rx")
         if not self.rx_active:
             self.rx_active = True
         return Gst.PadProbeReturn.OK
@@ -1890,10 +1914,14 @@ class MeshVoice:
         # Notify systemd independently of voice_watchdog. Only systemd can
         # detect a blocked GLib loop because local checks run on that loop.
         sd_notify("WATCHDOG=1")
+        now = time.monotonic()
+        for which in ("tx", "rx"):
+            state = self._pipeline_fault.get(which)
+            if state is not None and self._check_fault(which, state, now):
+                return True
         if not self.cfg.watchdog:
             return True
 
-        now = time.monotonic()
         for which in ("tx", "rx"):
             if which in self._pipeline_fault:
                 continue            # the error path owns this one
@@ -1938,6 +1966,30 @@ class MeshVoice:
             self._on_stall("rx", "multicast membership for %s dropped on %s"
                            % (TALK_GROUP_ADDR, self.cfg.iface))
 
+    def _check_fault(self, which, state, now):
+        """Clear a fault once audio flows, or restart for a lost device.
+
+        Recovery needs a buffer after the last restart and flow
+        PIPELINE_OK_HOLD_SEC past the last error. _mark_playing sets _flow_ts
+        on restart, so the restart alone must not count. A pipeline that had
+        flowed and stays faulted VOICE_DEVICE_LOST_SEC restarts the stack. One
+        that never flowed, such as missing hardware, keeps the retry backoff.
+        Returns True after a restart.
+        """
+        flow = self._flow_ts[which]
+        if (flow > self._playing_since[which]
+                and flow - state["last_ts"] >= PIPELINE_OK_HOLD_SEC):
+            self._note_pipeline_ok(which)
+            return False
+        if not self.cfg.watchdog or not self._ever_flowed[which]:
+            return False
+        lost = now - state["since"]
+        if lost < VOICE_DEVICE_LOST_SEC:
+            return False
+        self._panic("%s pipeline failed for %.0fs and restarting it in place "
+                    "did not clear it" % (which, lost))
+        return True
+
     def _on_stall(self, which, why):
         """Restart a stalled pipeline or escalate repeated stalls to systemd.
 
@@ -1971,7 +2023,27 @@ class MeshVoice:
         self.ptt_connected = connected
         if not connected and self.transmitting:
             self._set_tx(False)
+        if connected:
+            GLib.timeout_add_seconds(AUDIO_SETTLE_SEC, self._retry_audio)
         return False  # idle_add one-shot
+
+    def _retry_audio(self):
+        """Retry failed audio at once after the OpenVLM board returns.
+
+        A process that started without the board opened ALSA's default
+        device, so it restarts to open the board by index. Otherwise each
+        faulted pipeline restarts now and its backoff timer is cancelled.
+        """
+        if self._card_auto and self._card is None \
+                and find_openvlm_card() is not None:
+            self._panic("OpenVLM board appeared after start")
+            return False
+        for which, state in list(self._pipeline_fault.items()):
+            timer = state.pop("timer", None)
+            if timer is not None:
+                GLib.source_remove(timer)
+            self._restart(which)
+        return False  # one-shot
 
     def on_ptt(self, pressed):
         """Apply a PTT edge subject to the half-duplex receive gate."""

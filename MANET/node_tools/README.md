@@ -459,6 +459,12 @@ Treat that as arithmetic.
 The VOICE tab shows an Audio path row. A watchdog restarts a pipeline that has
 stopped moving audio while still reporting itself as playing. A USB audio device
 that reset under the CM108B causes this, as does a lost multicast membership.
+A pipeline that was moving audio and then stays in an error for 30 seconds, as
+when the audio board is unplugged and plugged back in, restarts the voice
+service, which opens the replugged board. Received packets do not count as a
+recovered playback path. When the board comes back, voice retries at once
+rather than waiting for its next scheduled retry, and a service that started
+without the board restarts so it opens the board.
 
 `/run/mesh-voice.json` carries the state that row reads: `capture_idle` and
 `playback_idle` (both `null` when the flow has never run at all, which means a
@@ -506,7 +512,7 @@ Config keys in `/etc/mesh.conf`:
 | `voice_lowpass_hz` | `0` | Upper edge, 0-8000. Non-zero switches the stage to a band-pass. Try 4000 with a 100 Hz corner |
 | `voice_eq` | `n` | Add the three-band transmit EQ. Its gains then retune live on reload |
 | `voice_eq_low` / `voice_eq_mid` / `voice_eq_high` | `0` | EQ gain in dB at 100 / 1100 / 11000 Hz, -24 to +12. The high band is forced to 0 under lyra |
-| `voice_watchdog` | `y` | Stall watchdog. `n` disables the stall judgement only, not the systemd keep-alive |
+| `voice_watchdog` | `y` | Stall watchdog. `n` disables the stall judgement and the lost-device restart only, not the systemd keep-alive |
 | `voice_watchdog_sec` | `15` | Seconds without audio flowing before a pipeline counts as stalled, 5-300 |
 | `voice_iface` | `br0` | Interface for the multicast group and send socket |
 | `voice_channel` | `1` | Talk group, 1–32 |
