@@ -511,6 +511,17 @@ class VoiceBeaconTests(unittest.TestCase):
         self.assertIsNone(daemon._beacon_end)
         self.assertTrue(daemon.valve.props["drop"])
 
+    def test_retune_cancels_a_pending_pipeline_retry(self):
+        self.start()
+        daemon = self.daemon
+        daemon._note_pipeline_error("rx", "Could not open audio device for "
+                                    "playback.", "alsasink play")
+        self.assertEqual(len(self.timers.matching(daemon._restart)), 1)
+        self.assertTrue(daemon._retune(2, voice.talk_group_port(2)))
+        # A retry left pending would cycle the new pipeline when it fired.
+        self.assertEqual(self.timers.matching(daemon._restart), [])
+        self.assertEqual(daemon._pipeline_fault, {})
+
     def test_reload_preserves_ptt_with_verified_binding(self):
         self.start()
         daemon = self.daemon

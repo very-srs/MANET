@@ -1687,6 +1687,10 @@ class MeshVoice:
             self._remove_branch(name)
         for source in self._reviving.values():
             GLib.source_remove(source)
+        # A retry left pending for a released pipeline would cycle its
+        # replacement.
+        for state in self._pipeline_fault.values():
+            self._cancel_retry(state)
         for pad, probe in self._discarded_pads.values():
             pad.remove_probe(probe)
         self.tx = self.rx = None
@@ -1807,12 +1811,17 @@ class MeshVoice:
     def _note_pipeline_ok(self, which):
         """Clear a pipeline fault when a buffer flows and log recovery."""
         state = self._pipeline_fault.pop(which, None)
-        timer = state.pop("timer", None) if state else None
-        if timer is not None:
-            GLib.source_remove(timer)  # no restart of a recovered pipeline
+        if state:
+            self._cancel_retry(state)  # no restart of a recovered pipeline
         if state and state["text"] is not None:
             self._flush_pipeline_repeats(which, state)
             log("%s pipeline recovered" % which)
+
+    def _cancel_retry(self, state):
+        """Remove a fault's pending backoff restart, if it has one."""
+        timer = state.pop("timer", None)
+        if timer is not None:
+            GLib.source_remove(timer)
 
     def _restart(self, which):
         """Cycle one pipeline and reset watchdog grace for its next start."""
@@ -2039,9 +2048,7 @@ class MeshVoice:
             self._panic("OpenVLM board appeared after start")
             return False
         for which, state in list(self._pipeline_fault.items()):
-            timer = state.pop("timer", None)
-            if timer is not None:
-                GLib.source_remove(timer)
+            self._cancel_retry(state)
             self._restart(which)
         return False  # one-shot
 

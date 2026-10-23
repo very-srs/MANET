@@ -1313,8 +1313,10 @@ every packet. A CM108B replugged under a running daemon stayed failed with
 806 lines, until systemd's watchdog restarted the process, which opened it at
 once. A pipeline that never flowed, such as missing hardware at start, stays
 on the backoff and never restarts the process. Each pipeline has at most one
-pending retry, and recovery cancels it. With a retry per error, the timers
-left from an unplug restarted the recovered pipelines again 4 and 18 s later.
+pending retry. Recovery cancels it, and so does a rebuild for a talk group
+change or interface rebind, which replaces the pipeline it was for. With a
+retry per error, the timers left from an unplug restarted the recovered
+pipelines again 4 and 18 s later.
 
 When the OpenVLM HID returns, `on_ptt_presence` waits `AUDIO_SETTLE_SEC` (2 s)
 for its sound card, then `_retry_audio` restarts each faulted pipeline at once
