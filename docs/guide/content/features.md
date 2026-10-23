@@ -2,7 +2,7 @@
 
 ## Marine
 
-![Crayon drawing of three friends far apart, each with a green radio. Orange dashed lines hop from radio to radio over a hill. A cell tower in the distance has a big red X on it.](../assets/about-crayon.png)
+![Crayon drawing of three friends using radios to share messages. One checks a map on a phone, one uses a push-to-talk headset, and one radio connects to an internet router.](../assets/features-crayon.png)
 
 ### What your radio can do
 
