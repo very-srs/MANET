@@ -41,7 +41,7 @@ setup steps and what to expect.
   carry the same network, and each message takes the best working path.
 - When a radio turns off or a link fails, traffic takes another path.
 - Mesh links are encrypted with the shared mesh key (WPA3 SAE). The flasher
-  generates a strong key if you leave it blank.
+  can generate a strong key for you.
 - Separated groups join back into one mesh when any radio path reconnects
   them. HaLow carries this recovery when it works. Without HaLow, chosen
   radios visit shared meeting channels so the groups can find each other.
@@ -57,9 +57,6 @@ setup steps and what to expect.
 - Each radio watches the channel it is on. The mesh only looks at other
   channels when a radio reports lasting interference, meaning other traffic
   fills the channel at least 60% of the time.
-- A better channel has to win three rounds in a row, three minutes apart,
-  before the mesh moves. A blocked channel can be left as soon as a measured
-  alternative exists. A missing reading never moves the mesh.
 - A radio that starts on a different channel moves to the others' channel as
   soon as HaLow connects it, without waiting for a vote.
 - When every measured channel is jammed, the mesh takes the least bad one. If
@@ -68,7 +65,7 @@ setup steps and what to expect.
   [runtime reference](../../../MANET/node_tools/README.md#channel-selection--jamming-detection).
 - Both Wi-Fi meshes use 20 MHz channels, which reach farther. Nearby radios
   carry about 140 to 180 Mbit/s over the 5 GHz mesh at this width.
-- While a CM4 checks other channels, its 5 GHz card lends its third antenna to
+- When a CM4 checks other channels, its 5 GHz card lends its third antenna as
   a background listener, so the mesh keeps running. See
   [the third antenna](mesh.md#user-the-third-antenna-and-radar-channels).
 - The mesh can use quiet radar (DFS) channels. It only does so when every
@@ -77,8 +74,6 @@ setup steps and what to expect.
 - If radar appears, the radio that hears it stops transmitting at once, the
   mesh moves to the backup channel, and it stays off radar channels for
   30 minutes.
-- With ACS turned off, you set the Wi-Fi channels yourself, band by band, and
-  the plan survives restarts. See [radio controls](radios.md#user-automatic-and-manual-channels).
 - HaLow offers the channels and widths of your region. New US radios start on
   channel 10 at 907 MHz, 2 MHz wide. New EU radios start on channel 1 at
   863.5 MHz, 1 MHz wide.
@@ -96,7 +91,7 @@ setup steps and what to expect.
   radio. See [choose an available connection](connect.md#user-choose-an-available-connection).
 - The access point runs on 5 GHz at low power. Every radio's access point
   uses the base name you choose when flashing plus four characters unique to
-  that radio, such as **EUD-5cc2**. You can change its password later.
+  that radio, such as **EUD-5cc2**.
 - Each radio gives its own devices their addresses, name lookups, and a local
   gateway. A device's setup requests never leave its radio.
 - **[manet.local](http://manet.local/)** always opens the dashboard of the
@@ -123,7 +118,7 @@ setup steps and what to expect.
 
 ### Internet sharing
 
-- Any radio with internet can share it with the whole mesh as a gateway. Local
+- Any radio with internet automatically becomes a gateway for the mesh. Local
   mesh traffic, voice, and services keep working without internet. See
   [share an internet connection](internet.md).
 - A radio can get internet from Ethernet to a router, a USB Ethernet adapter, a
@@ -134,7 +129,7 @@ setup steps and what to expect.
 - With several working connections, a radio prefers Ethernet, then a phone
   tether or modem, then Wi-Fi, and switches to the next one if its connection
   fails.
-- **Manage → Uplink** scans for nearby Wi-Fi and connects to a house router or
+- **Manage → Uplink** scans for nearby Wi-Fi and connects to an external Wi-Fi router or
   hotspot. It supports WPA2 and WPA3 personal passwords. See
   [use nearby Wi-Fi](internet.md#user-use-nearby-wi-fi).
 - Each radio remembers up to 32 working Wi-Fi networks and their passwords,
@@ -142,7 +137,7 @@ setup steps and what to expect.
 - The scan list hides the mesh's own phone hotspots, which lead back into the
   mesh and cannot supply internet.
 - With a 5 GHz Wi-Fi uplink, the radio's own phone hotspot shares that radio
-  and follows the house network's channel.
+  and follows the external network's channel.
 - When several radios share internet, each radio picks a gateway from the
   mesh path and the advertised uplink speed. It ignores small, brief
   improvements so the route does not keep changing.
@@ -186,7 +181,7 @@ setup steps and what to expect.
   shares uses the radio's fix.
 - The radio finds ATAK phones on its own from ATAK's standard **Default Mesh
   SA** output. There is no per-radio phone setup or IP address to enter.
-- ATAK shows the radio as a contact, **MANET mesh-XXXX**, for sending it a
+- ATAK shows the radio as a contact, **MANET mesh-XXXX**, for manually sending it a location
   point when GPS is bad. A custom callsign can replace the name.
 - When several phones share a radio, anyone can choose which phone controls
   location from the status page, without the admin password. See
@@ -294,7 +289,7 @@ setup steps and what to expect.
 
 - One small launcher for Windows or Linux downloads the matching flasher. See
   [flash a radio](flash.md).
-- The Windows flasher is a step-by-step window that checks for the tools it
+- The Windows flasher is a step-by-step GUI that checks for the tools it
   needs and offers to install them. A console version is also available.
 - The Linux flasher checks for its tools, offers to install them on Debian,
   Ubuntu, and Fedora, and fetches a working Raspberry Pi Imager if the system
@@ -303,8 +298,6 @@ setup steps and what to expect.
   Pi boards, and Rock 3A.
 - One form covers the mesh settings, region, connection mode, services, SSH
   account, and admin password. Saved settings work in both flashers.
-- The flasher never lists the computer's own boot disk, and asks you to
-  confirm each target before erasing it.
 - Your own setup scripts are checked and built into the image.
 - Flashing installs the current stable release by default.
   `--development` selects the newest published build instead.
