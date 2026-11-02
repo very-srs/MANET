@@ -1,0 +1,881 @@
+From: MANET <manet@localhost>
+Subject: [PATCH] mt76: mt7915: per-peer transmit paths and power reapply
+
+Add per-peer transmit-path modes for rate-adapted data:
+- full: the firmware default (its RA setup writes SPE 24 or 25).
+- dual: the negotiated streams with SPE 0, one stream per band-local
+  path, without spatial expansion. It keeps two-stream rates; on the
+  bench it ran the card cooler at the same load, which is consistent with
+  the third 5 GHz path no longer transmitting. Per-path RF activity has
+  not been measured.
+- single: one stream with SPE 0, on band-local path 0 (chip chain 2 on
+  band 1, the chain ranging uses). The HT, VHT and HE rate maps offer one
+  stream and no STBC.
+
+Stock WM activates a fixed rate profile for a station, with MCS capped at
+7 for VHT and HE, when it receives RATE_PARAM_SPE_UPDATE. The
+MANET-patched WM stores the SPE as a tagged per-station override that its
+single-user transmit commands use, and no longer activates the profile
+for this command, so rate adaptation keeps running. The driver classifies
+the WM image it downloads (build date and the selector hook bytes), holding
+that firmware while mt76_connac2_load_ram() sends it, and only with that WM
+offers dual and single, sends the update, and skips the upstream SPE
+update that ends a forced GI/LTF rate setup.
+
+A per-phy debugfs file, peer_tx_paths, takes "<peer MAC> <mode>" (full,
+dual, single, or auto to hand a peer back to the policy) and lists each
+station's mode, marked manual and failed where they apply. A MAC held by
+more than one local interface is refused. The file lives in the driver's
+own debugfs directory because kernels without MAC80211_DEBUGFS have no
+per-station directories.
+
+With tx_paths_auto set (the default), mac_work checks associated mesh
+peers not set by hand every 5 s. A peer moves to dual when its averaged
+received signal is at or above tx_paths_dual_dbm (-62) and back to full
+below tx_paths_full_dbm (-68), keeping each automatic choice at least
+30 s.
+The receive path samples the signal of unicast frames from the peer, at
+most four times a second while the policy can act, once a frame has
+passed the driver's checks. Frames with an FCS error and monitor-only
+frames are not sampled. Each sample is measured as the frame arrives,
+under the peer's current transmit settings, so the peer's own path mode
+or power limit can shift it. An average whose last sample is more than
+10 s old is not used and starts again with the next frame. The sampler
+and the policy share the average under sta_poll_lock. The policy
+chooses only full or dual: a peer in single, including one handed back
+with auto, returns to full. A failed transaction is retried on the next
+pass. Without the MANET WM, or with inverted thresholds, the policy is
+idle. It makes no new choice on a band whose transmit chains do not
+outnumber its streams: 2.4 GHz (two chains, two streams), and 5 GHz
+while the observer holds the third chain. Modes stay as they are
+there, and failed transactions are still retried. The policy keeps the
+exact station it examined, under dev->mt76.mutex, rather than looking it
+up again by MAC.
+
+A mode change rebuilds the station's rate records, which also drops the
+saved SPE override, then sends SPE 0 for dual and single. The mode is
+applied again after association, after authorization (which rewrites the
+transmit-table entry), and after rc_work rebuilds the records. rc_work,
+association, authorization, the policy and the writer hold
+dev->mt76.mutex for the whole update, which also holds off
+mt76_sta_remove(). Only a complete transaction clears the failed mark.
+
+The firmware returns success without storing a station power limit while
+the station is inactive, so a limit set right after peering was lost.
+Send a limited station's power table again after association and
+authorization.
+
+---
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/debugfs.c b/drivers/net/wireless/mediatek/mt76/mt7915/debugfs.c
+index b434dac..47477ac 100644
+--- a/drivers/net/wireless/mediatek/mt76/mt7915/debugfs.c
++++ b/drivers/net/wireless/mediatek/mt76/mt7915/debugfs.c
+@@ -869,6 +869,96 @@ mt7915_sta_hw_queue_read(void *data, struct ieee80211_sta *sta)
+ 	}
+ }
+ 
++static const char * const mt7915_tx_paths_names[] = {
++	[MT7915_TX_PATHS_FULL] = "full",
++	[MT7915_TX_PATHS_DUAL] = "dual",
++	[MT7915_TX_PATHS_SINGLE] = "single",
++};
++
++/* Write "<peer MAC> <full|dual|single|auto>". A mode set here is kept until
++ * "auto" hands the peer back to the policy.
++ */
++static ssize_t mt7915_peer_tx_paths_set(struct file *file,
++					const char __user *user_buf,
++					size_t count, loff_t *ppos)
++{
++	struct mt7915_phy *phy = file->private_data;
++	char buf[48], mac[18], name[8];
++	u8 addr[ETH_ALEN];
++	int mode, ret;
++
++	if (count >= sizeof(buf))
++		return -EINVAL;
++
++	if (copy_from_user(buf, user_buf, count))
++		return -EFAULT;
++
++	buf[count] = '\0';
++	if (sscanf(buf, "%17s %7s", mac, name) != 2 || !mac_pton(mac, addr))
++		return -EINVAL;
++
++	if (!strcmp(name, "auto"))
++		mode = MT7915_TX_PATHS_AUTO;
++	else
++		mode = match_string(mt7915_tx_paths_names,
++				    ARRAY_SIZE(mt7915_tx_paths_names), name);
++	if (mode < 0)
++		return mode;
++
++	mutex_lock(&phy->dev->mt76.mutex);
++	ret = mt7915_set_peer_tx_paths(phy, addr, mode,
++				       mode != MT7915_TX_PATHS_AUTO);
++	mutex_unlock(&phy->dev->mt76.mutex);
++
++	return ret ? ret : count;
++}
++
++struct mt7915_tx_paths_list {
++	char *buf;
++	int len;
++	int size;
++};
++
++static void mt7915_peer_tx_paths_list(void *data, struct ieee80211_sta *sta)
++{
++	struct mt7915_sta *msta = (struct mt7915_sta *)sta->drv_priv;
++	struct mt7915_tx_paths_list *list = data;
++
++	list->len += scnprintf(list->buf + list->len, list->size - list->len,
++			       "%pM %s%s%s\n", sta->addr,
++			       mt7915_tx_paths_names[READ_ONCE(msta->tx_paths)],
++			       READ_ONCE(msta->tx_paths_manual) ? " manual" : "",
++			       READ_ONCE(msta->tx_paths_failed) ? " failed" : "");
++}
++
++static ssize_t mt7915_peer_tx_paths_get(struct file *file,
++					char __user *user_buf,
++					size_t count, loff_t *ppos)
++{
++	struct mt7915_phy *phy = file->private_data;
++	struct mt7915_tx_paths_list list = { .size = 2048 };
++	ssize_t ret;
++
++	list.buf = kzalloc(list.size, GFP_KERNEL);
++	if (!list.buf)
++		return -ENOMEM;
++
++	ieee80211_iterate_stations_atomic(phy->mt76->hw,
++					  mt7915_peer_tx_paths_list, &list);
++	ret = simple_read_from_buffer(user_buf, count, ppos, list.buf, list.len);
++	kfree(list.buf);
++
++	return ret;
++}
++
++static const struct file_operations fops_peer_tx_paths = {
++	.write = mt7915_peer_tx_paths_set,
++	.read = mt7915_peer_tx_paths_get,
++	.open = simple_open,
++	.owner = THIS_MODULE,
++	.llseek = default_llseek,
++};
++
+ static int
+ mt7915_hw_queues_show(struct seq_file *file, void *data)
+ {
+@@ -1620,6 +1710,7 @@ int mt7915_init_debugfs(struct mt7915_phy *phy)
+ 				    &mt7915_tmr_ack_spe_fops);
+ 	}
+ 	debugfs_create_file("muru_debug", 0600, dir, dev, &fops_muru_debug);
++	debugfs_create_file("peer_tx_paths", 0600, dir, phy, &fops_peer_tx_paths);
+ 	debugfs_create_file("muru_stats", 0400, dir, phy,
+ 			    &mt7915_muru_stats_fops);
+ 	debugfs_create_file("hw-queues", 0400, dir, phy,
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/mac.c b/drivers/net/wireless/mediatek/mt76/mt7915/mac.c
+index 45b576b..8ae0f0a 100644
+--- a/drivers/net/wireless/mediatek/mt76/mt7915/mac.c
++++ b/drivers/net/wireless/mediatek/mt76/mt7915/mac.c
+@@ -263,6 +263,62 @@ mt7915_wed_check_ppe(struct mt7915_dev *dev, struct mt76_queue *q,
+ 				 FIELD_GET(MT_DMA_PPE_ENTRY, info));
+ }
+ 
++/* signal samples older than this are not used to change a peer's mode */
++#define MT7915_TX_PATHS_SAMPLE_AGE	(10 * HZ)
++/* an automatic choice is kept at least this long */
++#define MT7915_TX_PATHS_HOLD		(30 * HZ)
++
++static bool tx_paths_auto = true;
++module_param(tx_paths_auto, bool, 0644);
++MODULE_PARM_DESC(tx_paths_auto,
++		 "Choose dual or full transmit paths per mesh peer from link strength (MANET WM only)");
++
++static int tx_paths_dual_dbm = -62;
++module_param(tx_paths_dual_dbm, int, 0644);
++MODULE_PARM_DESC(tx_paths_dual_dbm,
++		 "Received signal at or above which a mesh peer uses dual paths (above tx_paths_full_dbm)");
++
++static int tx_paths_full_dbm = -68;
++module_param(tx_paths_full_dbm, int, 0644);
++MODULE_PARM_DESC(tx_paths_full_dbm,
++		 "Received signal below which a mesh peer returns to full paths (below tx_paths_dual_dbm)");
++
++/* Sample the policy's link signal from the peer's own frames, at most four
++ * times a second and only while the policy can act. Each sample is measured
++ * on reception, so its age is known; an average whose last sample has
++ * expired starts again rather than carrying old readings forward.
++ */
++static void
++mt7915_mac_sample_path_signal(struct mt7915_dev *dev, struct mt7915_sta *msta,
++			      struct mt76_rx_status *status)
++{
++	unsigned long now = jiffies, last;
++	int signal;
++
++	if (!READ_ONCE(tx_paths_auto) || !dev->peer_spe)
++		return;
++
++	/* unlocked first look: most frames fall inside the current slot */
++	last = READ_ONCE(msta->path_signal_jiffies);
++	if (last && !time_after(now, last + HZ / 4))
++		return;
++
++	signal = mt76_rx_signal(status->chains, status->chain_signal);
++	if (signal <= -128 || signal >= 0)
++		return;
++
++	spin_lock_bh(&dev->mt76.sta_poll_lock);
++	last = msta->path_signal_jiffies;
++	if (!last || time_after(now, last + HZ / 4)) {
++		if (!last ||
++		    time_after(now, last + MT7915_TX_PATHS_SAMPLE_AGE))
++			ewma_avg_signal_init(&msta->path_signal);
++		ewma_avg_signal_add(&msta->path_signal, -signal);
++		WRITE_ONCE(msta->path_signal_jiffies, now);
++	}
++	spin_unlock_bh(&dev->mt76.sta_poll_lock);
++}
++
+ static int
+ mt7915_mac_fill_rx(struct mt7915_dev *dev, struct sk_buff *skb,
+ 		   enum mt76_rxq_id q, u32 *info)
+@@ -536,6 +592,10 @@ mt7915_mac_fill_rx(struct mt7915_dev *dev, struct sk_buff *skb,
+ 	if (rxv && mode >= MT_PHY_TYPE_HE_SU && !(status->flag & RX_FLAG_8023))
+ 		mt76_connac2_mac_decode_he_radiotap(&dev->mt76, skb, rxv, mode);
+ 
++	if (rxv && unicast && msta && msta->wcid.sta &&
++	    !(status->flag & (RX_FLAG_ONLY_MONITOR | RX_FLAG_FAILED_FCS_CRC)))
++		mt7915_mac_sample_path_signal(dev, msta, status);
++
+ 	if (!status->wcid || !ieee80211_is_data_qos(fc))
+ 		return 0;
+ 
+@@ -2075,6 +2135,10 @@ void mt7915_mac_sta_rc_work(struct work_struct *work)
+ 	u32 changed;
+ 	LIST_HEAD(list);
+ 
++	/* Serializes with peer_tx_paths writes, and holds off station removal
++	 * (mt76_sta_remove() takes this mutex) until the list is processed.
++	 */
++	mutex_lock(&dev->mt76.mutex);
+ 	spin_lock_bh(&dev->mt76.sta_poll_lock);
+ 	list_splice_init(&dev->sta_rc_list, &list);
+ 
+@@ -2088,18 +2152,131 @@ void mt7915_mac_sta_rc_work(struct work_struct *work)
+ 		sta = container_of((void *)msta, struct ieee80211_sta, drv_priv);
+ 		vif = container_of((void *)msta->vif, struct ieee80211_vif, drv_priv);
+ 
++		/* rebuilds the rate records, then applies this peer's paths */
+ 		if (changed & (IEEE80211_RC_SUPP_RATES_CHANGED |
+ 			       IEEE80211_RC_NSS_CHANGED |
+ 			       IEEE80211_RC_BW_CHANGED))
+-			mt7915_mcu_add_rate_ctrl(dev, vif, sta, true);
++			mt7915_mcu_set_tx_paths(dev, vif, sta, true);
+ 
+-		if (changed & IEEE80211_RC_SMPS_CHANGED)
+-			mt7915_mcu_add_smps(dev, vif, sta);
++		if (changed & IEEE80211_RC_SMPS_CHANGED) {
++			if (mt7915_mcu_add_smps(dev, vif, sta))
++				msta->tx_paths_failed = true;
++			else
++				mt7915_mcu_set_tx_paths(dev, vif, sta, false);
++		}
+ 
+ 		spin_lock_bh(&dev->mt76.sta_poll_lock);
+ 	}
+ 
+ 	spin_unlock_bh(&dev->mt76.sta_poll_lock);
++	mutex_unlock(&dev->mt76.mutex);
++}
++
++struct mt7915_tx_paths_scan {
++	struct mt7915_phy *phy;
++	int dual_dbm, full_dbm;
++	bool choose; /* the band has more transmit chains than streams */
++	struct {
++		struct ieee80211_sta *sta;
++		u8 mode;
++	} change[8];
++	int n;
++};
++
++/* Runs in the atomic station iteration: only decide, never program.
++ * mac_work holds dev->mt76.mutex across the scan and the apply, so the
++ * stations collected here cannot be freed in between. The signal is that
++ * of the peer's unicast frames as the peer currently sends them.
++ */
++static void mt7915_tx_paths_scan_sta(void *data, struct ieee80211_sta *sta)
++{
++	struct mt7915_tx_paths_scan *scan = data;
++	struct mt7915_sta *msta = (struct mt7915_sta *)sta->drv_priv;
++	struct ieee80211_vif *vif;
++	u8 mode = READ_ONCE(msta->tx_paths), want;
++	unsigned long stamp;
++	int signal;
++
++	if (msta->vif->phy != scan->phy || READ_ONCE(msta->tx_paths_manual) ||
++	    !msta->wcid.sta || msta->wcid.sta_disabled ||
++	    scan->n >= ARRAY_SIZE(scan->change))
++		return;
++
++	vif = container_of((void *)msta->vif, struct ieee80211_vif, drv_priv);
++	if (vif->type != NL80211_IFTYPE_MESH_POINT)
++		return;
++
++	/* the policy only chooses full or dual */
++	want = mode == MT7915_TX_PATHS_SINGLE ? MT7915_TX_PATHS_FULL : mode;
++
++	/* an incomplete transaction, or a single peer, needs no new sample */
++	if (READ_ONCE(msta->tx_paths_failed) || want != mode)
++		goto queue;
++
++	if (!scan->choose)
++		return;
++
++	spin_lock_bh(&scan->phy->dev->mt76.sta_poll_lock);
++	stamp = msta->path_signal_jiffies;
++	signal = -(int)ewma_avg_signal_read(&msta->path_signal);
++	spin_unlock_bh(&scan->phy->dev->mt76.sta_poll_lock);
++
++	if (!stamp || !signal ||
++	    time_after(jiffies, stamp + MT7915_TX_PATHS_SAMPLE_AGE))
++		return;
++
++	if (signal >= scan->dual_dbm)
++		want = MT7915_TX_PATHS_DUAL;
++	else if (signal < scan->full_dbm)
++		want = MT7915_TX_PATHS_FULL;
++
++	if (want == mode ||
++	    (msta->tx_paths_changed &&
++	     time_before(jiffies, msta->tx_paths_changed + MT7915_TX_PATHS_HOLD)))
++		return;
++
++queue:
++	scan->change[scan->n].sta = sta;
++	scan->change[scan->n++].mode = want;
++}
++
++static void mt7915_mac_tx_paths_policy(struct mt7915_phy *phy)
++{
++	struct mt7915_tx_paths_scan scan = {
++		.phy = phy,
++		.dual_dbm = READ_ONCE(tx_paths_dual_dbm),
++		.full_dbm = READ_ONCE(tx_paths_full_dbm),
++	};
++	int i;
++
++	/* without the MANET WM only full is possible; inverted thresholds
++	 * would defeat the hysteresis
++	 */
++	if (!phy->dev->peer_spe || scan.dual_dbm <= scan.full_dbm)
++		return;
++
++	/* Dual saves a transmitter only where the band has more transmit
++	 * chains than streams: never on 2.4 GHz, and not on 5 GHz while the
++	 * third chain is reserved for the observer. There no new choice is
++	 * made and modes stay as they are, but incomplete transactions are
++	 * still retried.
++	 */
++	scan.choose = hweight16(phy->mt76->chainmask) >
++		      hweight8(phy->mt76->antenna_mask);
++
++	ieee80211_iterate_stations_atomic(phy->mt76->hw,
++					  mt7915_tx_paths_scan_sta, &scan);
++	for (i = 0; i < scan.n; i++) {
++		struct ieee80211_sta *sta = scan.change[i].sta;
++		struct mt7915_sta *msta = (struct mt7915_sta *)sta->drv_priv;
++		struct ieee80211_vif *vif;
++
++		vif = container_of((void *)msta->vif, struct ieee80211_vif,
++				   drv_priv);
++		msta->tx_paths_changed = jiffies;
++		mt7915_set_sta_tx_paths(phy->dev, vif, sta, scan.change[i].mode,
++					false);
++	}
+ }
+ 
+ void mt7915_mac_work(struct work_struct *work)
+@@ -2124,6 +2301,13 @@ void mt7915_mac_work(struct work_struct *work)
+ 			mt7915_mcu_muru_debug_get(phy);
+ 	}
+ 
++	/* every 5 s */
++	if (++phy->tx_paths_tick >= 50) {
++		phy->tx_paths_tick = 0;
++		if (READ_ONCE(tx_paths_auto) && phy->dev->peer_spe)
++			mt7915_mac_tx_paths_policy(phy);
++	}
++
+ 	mutex_unlock(&mphy->dev->mutex);
+ 
+ 	mt76_tx_status_check(mphy->dev, false);
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/main.c b/drivers/net/wireless/mediatek/mt76/mt7915/main.c
+index 68b361d..f888096 100644
+--- a/drivers/net/wireless/mediatek/mt76/mt7915/main.c
++++ b/drivers/net/wireless/mediatek/mt76/mt7915/main.c
+@@ -816,6 +816,7 @@ int mt7915_mac_sta_add(struct mt76_dev *mdev, struct ieee80211_vif *vif,
+ 	msta->jiffies = jiffies;
+ 
+ 	ewma_avg_signal_init(&msta->avg_ack_signal);
++	ewma_avg_signal_init(&msta->path_signal);
+ 
+ 	mt7915_mac_wtbl_update(dev, idx,
+ 			       MT_WTBL_UPDATE_ADM_COUNT_CLEAR);
+@@ -876,6 +877,32 @@ mt7915_drop_other_sta(struct mt7915_dev *dev, struct ieee80211_vif *vif,
+ 	ieee80211_iterate_active_interfaces(data.hw, 0, __mt7915_drop_sta, &data);
+ }
+ 
++/* Send a station's power limit and transmit paths again. The firmware
++ * ignores a power limit sent before the station is active, and
++ * authorization rewrites the station's transmit-table entry.
++ */
++static void mt7915_sta_reapply(struct mt7915_dev *dev,
++			       struct ieee80211_vif *vif,
++			       struct ieee80211_sta *sta, bool rebuild)
++{
++	struct mt7915_vif *mvif = (struct mt7915_vif *)vif->drv_priv;
++	struct mt7915_sta *msta = (struct mt7915_sta *)sta->drv_priv;
++	int ret;
++
++	lockdep_assert_held(&dev->mt76.mutex);
++
++	if (sta->deflink.txpwr.type == NL80211_TX_POWER_LIMITED) {
++		ret = mt7915_mcu_set_txpower_frame(mvif->phy, vif, sta,
++						   sta->deflink.txpwr.power);
++		if (ret)
++			dev_warn(dev->mt76.dev,
++				 "station %pM power limit not applied: %d\n",
++				 sta->addr, ret);
++	}
++	mt7915_mcu_set_tx_paths(dev, vif, sta,
++				rebuild && msta->tx_paths != MT7915_TX_PATHS_FULL);
++}
++
+ int mt7915_mac_sta_event(struct mt76_dev *mdev, struct ieee80211_vif *vif,
+ 			 struct ieee80211_sta *sta, enum mt76_sta_event ev)
+ {
+@@ -886,14 +913,20 @@ int mt7915_mac_sta_event(struct mt76_dev *mdev, struct ieee80211_vif *vif,
+ 
+ 	switch (ev) {
+ 	case MT76_STA_EVENT_ASSOC:
++		/* peer_tx_paths writers hold this mutex: build the records and
++		 * reapply under it so they all see one transmit-path mode
++		 */
++		mutex_lock(&dev->mt76.mutex);
+ 		ret = mt7915_mcu_add_sta(dev, vif, sta, CONN_STATE_CONNECT, true);
+-		if (ret)
+-			return ret;
+-
+-		addr = mt7915_mac_wtbl_lmac_addr(dev, msta->wcid.idx, 30);
+-		mt76_rmw_field(dev, addr, GENMASK(7, 0), 0xa0);
++		if (!ret) {
++			addr = mt7915_mac_wtbl_lmac_addr(dev, msta->wcid.idx, 30);
++			mt76_rmw_field(dev, addr, GENMASK(7, 0), 0xa0);
+ 
+-		ret = mt7915_mcu_add_rate_ctrl(dev, vif, sta, false);
++			ret = mt7915_mcu_add_rate_ctrl(dev, vif, sta, false);
++		}
++		if (!ret)
++			mt7915_sta_reapply(dev, vif, sta, false);
++		mutex_unlock(&dev->mt76.mutex);
+ 		if (ret)
+ 			return ret;
+ 
+@@ -905,7 +938,13 @@ int mt7915_mac_sta_event(struct mt76_dev *mdev, struct ieee80211_vif *vif,
+ 
+ 	case MT76_STA_EVENT_AUTHORIZE:
+ 		mt7915_drop_other_sta(dev, vif, sta);
+-		return mt7915_mcu_add_sta(dev, vif, sta, CONN_STATE_PORT_SECURE, false);
++		mutex_lock(&dev->mt76.mutex);
++		ret = mt7915_mcu_add_sta(dev, vif, sta, CONN_STATE_PORT_SECURE, false);
++		if (!ret)
++			mt7915_sta_reapply(dev, vif, sta, true);
++		mutex_unlock(&dev->mt76.mutex);
++
++		return ret;
+ 
+ 	case MT76_STA_EVENT_DISASSOC:
+ 		for (i = 0; i < ARRAY_SIZE(msta->twt.flow); i++)
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/mcu.c b/drivers/net/wireless/mediatek/mt76/mt7915/mcu.c
+index 58dee79..8e077c3 100644
+--- a/drivers/net/wireless/mediatek/mt76/mt7915/mcu.c
++++ b/drivers/net/wireless/mediatek/mt76/mt7915/mcu.c
+@@ -2,6 +2,7 @@
+ /* Copyright (C) 2020 MediaTek Inc. */
+ 
+ #include <linux/fs.h>
++#include <linux/firmware.h>
+ #include "mt7915.h"
+ #include "mcu.h"
+ #include "mac.h"
+@@ -54,6 +55,21 @@ mt7915_mcu_get_sta_nss(u16 mcs_map)
+ 	return nss ? nss - 1 : 0;
+ }
+ 
++/* A peer limited to one transmit path gets one stream and no STBC */
++static bool mt7915_mcu_sta_single_path(struct ieee80211_sta *sta)
++{
++	struct mt7915_sta *msta = (struct mt7915_sta *)sta->drv_priv;
++
++	return READ_ONCE(msta->tx_paths) == MT7915_TX_PATHS_SINGLE;
++}
++
++static int mt7915_mcu_sta_max_nss(struct ieee80211_sta *sta)
++{
++	int nss = min_t(int, sta->deflink.rx_nss, 4);
++
++	return mt7915_mcu_sta_single_path(sta) ? min(nss, 1) : nss;
++}
++
+ static void
+ mt7915_mcu_set_sta_he_mcs(struct ieee80211_sta *sta, __le16 *he_mcs,
+ 			  u16 mcs_map)
+@@ -62,7 +78,7 @@ mt7915_mcu_set_sta_he_mcs(struct ieee80211_sta *sta, __le16 *he_mcs,
+ 	struct mt7915_dev *dev = msta->vif->phy->dev;
+ 	enum nl80211_band band = msta->vif->phy->mt76->chandef.chan->band;
+ 	const u16 *mask = msta->vif->bitrate_mask.control[band].he_mcs;
+-	int nss, max_nss = sta->deflink.rx_nss > 3 ? 4 : sta->deflink.rx_nss;
++	int nss, max_nss = mt7915_mcu_sta_max_nss(sta);
+ 
+ 	for (nss = 0; nss < max_nss; nss++) {
+ 		int mcs;
+@@ -106,6 +122,11 @@ mt7915_mcu_set_sta_he_mcs(struct ieee80211_sta *sta, __le16 *he_mcs,
+ 			break;
+ 	}
+ 
++	/* a per-peer stream limit leaves the higher streams unsupported */
++	if (mt7915_mcu_sta_single_path(sta))
++		for (nss = max_nss; nss < 8; nss++)
++			mcs_map |= IEEE80211_HE_MCS_NOT_SUPPORTED << (nss * 2);
++
+ 	*he_mcs = cpu_to_le16(mcs_map);
+ }
+ 
+@@ -116,7 +137,7 @@ mt7915_mcu_set_sta_vht_mcs(struct ieee80211_sta *sta, __le16 *vht_mcs,
+ 	struct mt7915_sta *msta = (struct mt7915_sta *)sta->drv_priv;
+ 	struct mt7915_dev *dev = msta->vif->phy->dev;
+ 	u16 mcs_map = le16_to_cpu(sta->deflink.vht_cap.vht_mcs.rx_mcs_map);
+-	int nss, max_nss = sta->deflink.rx_nss > 3 ? 4 : sta->deflink.rx_nss;
++	int nss, max_nss = mt7915_mcu_sta_max_nss(sta);
+ 	u16 mcs;
+ 
+ 	for (nss = 0; nss < max_nss; nss++, mcs_map >>= 2) {
+@@ -147,7 +168,7 @@ static void
+ mt7915_mcu_set_sta_ht_mcs(struct ieee80211_sta *sta, u8 *ht_mcs,
+ 			  const u8 *mask)
+ {
+-	int nss, max_nss = sta->deflink.rx_nss > 3 ? 4 : sta->deflink.rx_nss;
++	int nss, max_nss = mt7915_mcu_sta_max_nss(sta);
+ 
+ 	for (nss = 0; nss < max_nss; nss++)
+ 		ht_mcs[nss] = sta->deflink.ht_cap.mcs.rx_mask[nss] & mask[nss];
+@@ -840,8 +861,9 @@ mt7915_mcu_sta_he_tlv(struct sk_buff *skb, struct ieee80211_sta *sta,
+ 	    IEEE80211_HE_PHY_CAP2_STBC_TX_UNDER_80MHZ)
+ 		cap |= STA_REC_HE_CAP_LE_EQ_80M_TX_STBC;
+ 
+-	if (elem->phy_cap_info[2] &
+-	    IEEE80211_HE_PHY_CAP2_STBC_RX_UNDER_80MHZ)
++	if ((elem->phy_cap_info[2] &
++	     IEEE80211_HE_PHY_CAP2_STBC_RX_UNDER_80MHZ) &&
++	    !mt7915_mcu_sta_single_path(sta))
+ 		cap |= STA_REC_HE_CAP_LE_EQ_80M_RX_STBC;
+ 
+ 	if (elem->phy_cap_info[6] &
+@@ -860,8 +882,9 @@ mt7915_mcu_sta_he_tlv(struct sk_buff *skb, struct ieee80211_sta *sta,
+ 	    IEEE80211_HE_PHY_CAP7_STBC_TX_ABOVE_80MHZ)
+ 		cap |= STA_REC_HE_CAP_GT_80M_TX_STBC;
+ 
+-	if (elem->phy_cap_info[7] &
+-	    IEEE80211_HE_PHY_CAP7_STBC_RX_ABOVE_80MHZ)
++	if ((elem->phy_cap_info[7] &
++	     IEEE80211_HE_PHY_CAP7_STBC_RX_ABOVE_80MHZ) &&
++	    !mt7915_mcu_sta_single_path(sta))
+ 		cap |= STA_REC_HE_CAP_GT_80M_RX_STBC;
+ 
+ 	if (elem->phy_cap_info[8] &
+@@ -1474,6 +1497,119 @@ mt7915_mcu_set_spe_idx(struct mt7915_dev *dev, struct ieee80211_vif *vif,
+ 					      RATE_PARAM_SPE_UPDATE);
+ }
+ 
++/* Apply the peer's tx_paths mode. The rate records built from the mode
++ * carry its stream and STBC limits; rebuilding them restores the
++ * firmware's default SPE. rebuild = true makes a complete transaction,
++ * and only a complete one clears tx_paths_failed. Callers that have just
++ * rebuilt the records pass false to send the SPE alone.
++ */
++int mt7915_mcu_set_tx_paths(struct mt7915_dev *dev, struct ieee80211_vif *vif,
++			    struct ieee80211_sta *sta, bool rebuild)
++{
++	struct mt7915_sta *msta = (struct mt7915_sta *)sta->drv_priv;
++	int ret = 0;
++
++	lockdep_assert_held(&dev->mt76.mutex);
++
++	if (rebuild)
++		ret = mt7915_mcu_add_rate_ctrl(dev, vif, sta, true);
++
++	/* SPE 0 maps each stream to its own band-local path: path 0 is
++	 * chip chain 2 on band 1, the chain ranging uses. The MANET WM stores
++	 * this as a tagged per-peer override for the transmit command; stock
++	 * WM instead pins the peer to a fixed rate profile.
++	 */
++	if (!ret && msta->tx_paths != MT7915_TX_PATHS_FULL && dev->peer_spe) {
++		u8 spe = 0;
++
++		ret = mt7915_mcu_set_fixed_rate_ctrl(dev, vif, sta, &spe,
++						     RATE_PARAM_SPE_UPDATE);
++	}
++
++	if (ret) {
++		msta->tx_paths_failed = true;
++		dev_warn_ratelimited(dev->mt76.dev,
++				     "station %pM tx_paths %u not applied: %d\n",
++				     sta->addr, msta->tx_paths, ret);
++	} else if (rebuild) {
++		msta->tx_paths_failed = false;
++	}
++
++	return ret;
++}
++
++/* Set one station's mode. The caller holds dev->mt76.mutex, which
++ * mt76_sta_remove() takes before a station is freed, so sta stays valid.
++ * MT7915_TX_PATHS_AUTO hands a hand-set peer back to the policy, which
++ * only chooses full or dual: a single peer returns to full first.
++ */
++int mt7915_set_sta_tx_paths(struct mt7915_dev *dev, struct ieee80211_vif *vif,
++			    struct ieee80211_sta *sta, u8 mode, bool manual)
++{
++	struct mt7915_sta *msta = (struct mt7915_sta *)sta->drv_priv;
++
++	lockdep_assert_held(&dev->mt76.mutex);
++
++	if (mode != MT7915_TX_PATHS_FULL && mode != MT7915_TX_PATHS_AUTO &&
++	    !dev->peer_spe)
++		return -EOPNOTSUPP;
++
++	WRITE_ONCE(msta->tx_paths_manual, manual);
++	if (mode == MT7915_TX_PATHS_AUTO) {
++		if (msta->tx_paths != MT7915_TX_PATHS_SINGLE)
++			return 0;
++		mode = MT7915_TX_PATHS_FULL;
++	}
++
++	WRITE_ONCE(msta->tx_paths, mode);
++
++	return mt7915_mcu_set_tx_paths(dev, vif, sta, true);
++}
++
++struct mt7915_peer_lookup {
++	struct mt7915_phy *phy;
++	const u8 *addr;
++	struct ieee80211_sta *sta;
++	int matches;
++};
++
++static void mt7915_peer_lookup_sta(void *data, struct ieee80211_sta *sta)
++{
++	struct mt7915_peer_lookup *l = data;
++	struct mt7915_sta *msta = (struct mt7915_sta *)sta->drv_priv;
++
++	if (msta->vif->phy == l->phy && ether_addr_equal(sta->addr, l->addr)) {
++		l->sta = sta;
++		l->matches++;
++	}
++}
++
++/* Set one peer's mode by MAC on this phy. The caller holds
++ * dev->mt76.mutex. A MAC held by more than one local interface is refused
++ * rather than guessed.
++ */
++int mt7915_set_peer_tx_paths(struct mt7915_phy *phy, const u8 *addr, u8 mode,
++			     bool manual)
++{
++	struct mt7915_peer_lookup l = { .phy = phy, .addr = addr };
++	struct ieee80211_vif *vif;
++	struct mt7915_sta *msta;
++
++	lockdep_assert_held(&phy->dev->mt76.mutex);
++
++	ieee80211_iterate_stations_atomic(phy->mt76->hw,
++					  mt7915_peer_lookup_sta, &l);
++	if (!l.matches)
++		return -ENOENT;
++	if (l.matches > 1)
++		return -EINVAL;
++
++	msta = (struct mt7915_sta *)l.sta->drv_priv;
++	vif = container_of((void *)msta->vif, struct ieee80211_vif, drv_priv);
++
++	return mt7915_set_sta_tx_paths(phy->dev, vif, l.sta, mode, manual);
++}
++
+ static int
+ mt7915_mcu_add_rate_ctrl_fixed(struct mt7915_dev *dev,
+ 			       struct ieee80211_vif *vif,
+@@ -1561,6 +1697,12 @@ mt7915_mcu_add_rate_ctrl_fixed(struct mt7915_dev *dev,
+ 			return ret;
+ 	}
+ 
++	/* With the MANET WM this command stores a per-peer SPE override, which
++	 * mt7915_mcu_set_tx_paths() owns; stock WM keeps the upstream call.
++	 */
++	if (dev->peer_spe)
++		return 0;
++
+ 	return mt7915_mcu_set_spe_idx(dev, vif, sta);
+ }
+ 
+@@ -1619,7 +1761,8 @@ mt7915_mcu_sta_rate_ctrl_tlv(struct sk_buff *skb, struct mt7915_dev *dev,
+ 			cap |= STA_CAP_SGI_40;
+ 		if (sta->deflink.ht_cap.cap & IEEE80211_HT_CAP_TX_STBC)
+ 			cap |= STA_CAP_TX_STBC;
+-		if (sta->deflink.ht_cap.cap & IEEE80211_HT_CAP_RX_STBC)
++		if ((sta->deflink.ht_cap.cap & IEEE80211_HT_CAP_RX_STBC) &&
++		    !mt7915_mcu_sta_single_path(sta))
+ 			cap |= STA_CAP_RX_STBC;
+ 		if (mvif->cap.ht_ldpc &&
+ 		    (sta->deflink.ht_cap.cap & IEEE80211_HT_CAP_LDPC_CODING))
+@@ -1645,7 +1788,8 @@ mt7915_mcu_sta_rate_ctrl_tlv(struct sk_buff *skb, struct mt7915_dev *dev,
+ 			cap |= STA_CAP_VHT_SGI_160;
+ 		if (sta->deflink.vht_cap.cap & IEEE80211_VHT_CAP_TXSTBC)
+ 			cap |= STA_CAP_VHT_TX_STBC;
+-		if (sta->deflink.vht_cap.cap & IEEE80211_VHT_CAP_RXSTBC_1)
++		if ((sta->deflink.vht_cap.cap & IEEE80211_VHT_CAP_RXSTBC_1) &&
++		    !mt7915_mcu_sta_single_path(sta))
+ 			cap |= STA_CAP_VHT_RX_STBC;
+ 		if (mvif->cap.vht_ldpc &&
+ 		    (sta->deflink.vht_cap.cap & IEEE80211_VHT_CAP_RXLDPC))
+@@ -2141,10 +2285,37 @@ mt7915_firmware_state(struct mt7915_dev *dev, bool wa)
+ 	return 0;
+ }
+ 
++/* WM build 20240823172741 as patched by MANET stores a rate-control SPE
++ * update as a tagged per-station override instead of pinning a fixed rate
++ * profile. Recognise it by its build date and the transmit-command
++ * selector hook at file offset MT7916_WM_SPE_HOOK.
++ */
++#define MT7916_WM_SPE_BUILD	"20240823172741"
++#define MT7916_WM_SPE_HOOK	613458
++
++static bool mt7915_wm_has_peer_spe(const struct firmware *fw)
++{
++	static const u8 hook[] = { 0x48, 0x00, 0x88, 0xc0 };
++	const struct mt76_connac2_fw_trailer *hdr;
++
++	if (fw->size < sizeof(*hdr) ||
++	    fw->size <= MT7916_WM_SPE_HOOK + sizeof(hook))
++		return false;
++
++	hdr = (const void *)(fw->data + fw->size - sizeof(*hdr));
++	return !memcmp(hdr->build_date, MT7916_WM_SPE_BUILD,
++		       sizeof(MT7916_WM_SPE_BUILD) - 1) &&
++	       !memcmp(fw->data + MT7916_WM_SPE_HOOK, hook, sizeof(hook));
++}
++
+ static int mt7915_load_firmware(struct mt7915_dev *dev)
+ {
++	const struct firmware *wm = NULL;
++	bool peer_spe = false;
+ 	int ret;
+ 
++	dev->peer_spe = false;
++
+ 	/* Release Semaphore if taken by previous failed attempt */
+ 	ret = mt76_connac_mcu_patch_sem_ctrl(&dev->mt76, false);
+ 	if (ret != PATCH_REL_SEM_SUCCESS) {
+@@ -2166,11 +2337,24 @@ static int mt7915_load_firmware(struct mt7915_dev *dev)
+ 	if (ret)
+ 		return ret;
+ 
++	/* Hold the WM while it is downloaded: the firmware loader shares this
++	 * live entry with the same name, so the image classified here is the
++	 * one mt76_connac2_load_ram() sends.
++	 */
++	if (is_mt7916(&dev->mt76) &&
++	    !request_firmware(&wm, fw_name_var(dev, FIRMWARE_WM), dev->mt76.dev))
++		peer_spe = mt7915_wm_has_peer_spe(wm);
++
+ 	ret = mt76_connac2_load_ram(&dev->mt76, fw_name_var(dev, FIRMWARE_WM),
+ 				    fw_name(dev, FIRMWARE_WA));
++	release_firmware(wm);
+ 	if (ret)
+ 		return ret;
+ 
++	dev->peer_spe = peer_spe;
++	if (peer_spe)
++		dev_info(dev->mt76.dev, "WM supports per-peer transmit paths\n");
++
+ 	ret = mt7915_firmware_state(dev, true);
+ 	if (ret)
+ 		return ret;
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/mt7915.h b/drivers/net/wireless/mediatek/mt76/mt7915/mt7915.h
+index 6c18908..123f082 100644
+--- a/drivers/net/wireless/mediatek/mt76/mt7915/mt7915.h
++++ b/drivers/net/wireless/mediatek/mt76/mt7915/mt7915.h
+@@ -138,6 +138,14 @@ struct mt7915_twt_flow {
+ 
+ DECLARE_EWMA(avg_signal, 10, 8)
+ 
++/* Transmit paths for one peer's rate-adapted data */
++enum mt7915_tx_paths {
++	MT7915_TX_PATHS_FULL,	/* firmware default */
++	MT7915_TX_PATHS_DUAL,	/* negotiated streams, no spatial expansion */
++	MT7915_TX_PATHS_SINGLE,	/* one stream on one path */
++	MT7915_TX_PATHS_AUTO = 0xff,	/* setter only: hand the peer back to the policy */
++};
++
+ struct mt7915_sta {
+ 	struct mt76_wcid wcid; /* must be first */
+ 
+@@ -149,6 +157,16 @@ struct mt7915_sta {
+ 	int ack_signal;
+ 	struct ewma_avg_signal avg_ack_signal;
+ 
++	u8 tx_paths; /* enum mt7915_tx_paths */
++	bool tx_paths_failed; /* last apply of tx_paths failed */
++	bool tx_paths_manual; /* set by hand; the policy leaves it alone */
++	unsigned long tx_paths_changed; /* jiffies of the last automatic change */
++	/* the transmit-path policy's signal of this peer's frames, both
++	 * under dev->mt76.sta_poll_lock
++	 */
++	struct ewma_avg_signal path_signal;
++	unsigned long path_signal_jiffies; /* jiffies of the last sample */
++
+ 	unsigned long changed;
+ 	unsigned long jiffies;
+ 	struct mt76_connac_sta_key_conf bip;
+@@ -248,6 +266,8 @@ struct mt7915_phy {
+ 		u8 spe_idx;
+ 	} test;
+ #endif
++
++	u8 tx_paths_tick; /* mac_work runs between policy passes */
+ };
+ 
+ struct mt7915_ipi_sample {
+@@ -364,6 +384,7 @@ struct mt7915_dev {
+ 	u32 hw_pattern;
+ 
+ 	bool dbdc_support;
++	bool peer_spe; /* loaded WM honours per-peer SPE overrides */
+ 	bool flash_mode;
+ 	bool muru_debug;
+ 	bool ibf;
+@@ -580,6 +601,12 @@ int mt7915_mcu_add_obss_spr(struct mt7915_phy *phy, struct ieee80211_vif *vif,
+ 			    struct ieee80211_he_obss_pd *he_obss_pd);
+ int mt7915_mcu_add_rate_ctrl(struct mt7915_dev *dev, struct ieee80211_vif *vif,
+ 			     struct ieee80211_sta *sta, bool changed);
++int mt7915_mcu_set_tx_paths(struct mt7915_dev *dev, struct ieee80211_vif *vif,
++			    struct ieee80211_sta *sta, bool rebuild);
++int mt7915_set_sta_tx_paths(struct mt7915_dev *dev, struct ieee80211_vif *vif,
++			    struct ieee80211_sta *sta, u8 mode, bool manual);
++int mt7915_set_peer_tx_paths(struct mt7915_phy *phy, const u8 *addr, u8 mode,
++			     bool manual);
+ int mt7915_mcu_add_smps(struct mt7915_dev *dev, struct ieee80211_vif *vif,
+ 			struct ieee80211_sta *sta);
+ int mt7915_set_channel(struct mt76_phy *mphy);

@@ -1,0 +1,157 @@
+From: MANET <manet@localhost>
+Subject: [PATCH] mt76: mt7915: gentler TX duty steps and earlier thermal trigger
+
+The firmware steps one protection level per 10 s recheck while the die is
+at or above the trigger, and one level back per recheck at or below the
+restore temperature. The driver programmed levels 0-3 as 100/50/25/12%
+with a 120 C trigger and 100 C restore, so protection began only once the
+card was near its limit and then halved throughput at each step.
+
+Program 100/75/50/40% of the level-0 duty, and trigger at 90 C with
+restore at 80 C. Both thresholds stay writable through hwmon.
+
+mt7915_run() reprogrammed the duty table at full duty on every radio start
+while cdev_state kept the old value, so a cooling-device state silently
+stopped applying after an interface restart. Program the table from
+cdev_state, and check and publish cdev_state under the mutex mt7915_run()
+reads it with.
+
+Re-enabling protection restarts the firmware at level 0. An unchanged
+hwmon threshold write no longer re-enables it while the last programming
+succeeded; after a failure it is sent again. A radio start or a changed
+threshold still restarts protection at level 0.
+
+---
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/init.c b/drivers/net/wireless/mediatek/mt76/mt7915/init.c
+index 6a2ae91..756d47a 100644
+--- a/drivers/net/wireless/mediatek/mt76/mt7915/init.c
++++ b/drivers/net/wireless/mediatek/mt76/mt7915/init.c
+@@ -86,6 +86,15 @@ static ssize_t mt7915_thermal_temp_store(struct device *dev,
+ 	mutex_lock(&phy->dev->mt76.mutex);
+ 	val = DIV_ROUND_CLOSEST(clamp_val(val, 60 * 1000, 130 * 1000), 1000);
+ 
++	/* Re-enabling protection restarts it at level 0 (full duty), so an
++	 * unchanged threshold is not resent while the last programming
++	 * succeeded. After a failure, either command may have taken effect.
++	 */
++	if (val == phy->throttle_temp[i - 1] && !phy->throttle_dirty) {
++		mutex_unlock(&phy->dev->mt76.mutex);
++		return count;
++	}
++
+ 	if ((i - 1 == MT7915_CRIT_TEMP_IDX &&
+ 	     val > phy->throttle_temp[MT7915_MAX_TEMP_IDX]) ||
+ 	    (i - 1 == MT7915_MAX_TEMP_IDX &&
+@@ -98,6 +107,7 @@ static ssize_t mt7915_thermal_temp_store(struct device *dev,
+ 
+ 	phy->throttle_temp[i - 1] = val;
+ 	ret = mt7915_mcu_set_thermal_protect(phy);
++	phy->throttle_dirty = !!ret;
+ 	mutex_unlock(&phy->dev->mt76.mutex);
+ 	if (ret)
+ 		return ret;
+@@ -153,22 +163,25 @@ mt7915_thermal_set_cur_throttle_state(struct thermal_cooling_device *cdev,
+ 		return -EINVAL;
+ 	}
+ 
+-	if (state == phy->cdev_state)
+-		return 0;
+-
+ 	/*
+ 	 * cooling_device convention: 0 = no cooling, more = more cooling
+ 	 * mcu convention: 1 = max cooling, more = less cooling
++	 *
++	 * mt7915_run() programs the table from cdev_state under the same
++	 * mutex, so check and publish the state while holding it.
+ 	 */
+ 	mutex_lock(&phy->dev->mt76.mutex);
++	if (state == phy->cdev_state) {
++		mutex_unlock(&phy->dev->mt76.mutex);
++		return 0;
++	}
++
+ 	ret = mt7915_mcu_set_thermal_throttling(phy, throttling);
++	if (!ret)
++		phy->cdev_state = state;
+ 	mutex_unlock(&phy->dev->mt76.mutex);
+-	if (ret)
+-		return ret;
+ 
+-	phy->cdev_state = state;
+-
+-	return 0;
++	return ret;
+ }
+ 
+ static const struct thermal_cooling_device_ops mt7915_thermal_ops = {
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/main.c b/drivers/net/wireless/mediatek/mt76/mt7915/main.c
+index 8952f11..68b361d 100644
+--- a/drivers/net/wireless/mediatek/mt76/mt7915/main.c
++++ b/drivers/net/wireless/mediatek/mt76/mt7915/main.c
+@@ -61,13 +61,16 @@ int mt7915_run(struct ieee80211_hw *hw)
+ 		mt7915_mac_enable_nf(dev, phy->mt76->band_idx);
+ 	}
+ 
++	/* Keep a cooling state set before the radio started. */
+ 	ret = mt7915_mcu_set_thermal_throttling(phy,
+-						MT7915_THERMAL_THROTTLE_MAX);
++						MT7915_THERMAL_THROTTLE_MAX -
++						phy->cdev_state);
+ 
+ 	if (ret)
+ 		goto out;
+ 
+ 	ret = mt7915_mcu_set_thermal_protect(phy);
++	phy->throttle_dirty = !!ret;
+ 
+ 	if (ret)
+ 		goto out;
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/mcu.c b/drivers/net/wireless/mediatek/mt76/mt7915/mcu.c
+index 2e23c58..58dee79 100644
+--- a/drivers/net/wireless/mediatek/mt76/mt7915/mcu.c
++++ b/drivers/net/wireless/mediatek/mt76/mt7915/mcu.c
+@@ -3328,13 +3328,14 @@ int mt7915_mcu_set_thermal_throttling(struct mt7915_phy *phy, u8 state)
+ 		.band_idx = phy->mt76->band_idx,
+ 		.ctrl_id = THERMAL_PROTECT_DUTY_CONFIG,
+ 	};
++	/* TX duty per protection level, in percent of the level-0 duty */
++	static const u8 duty[] = { 100, 75, 50, 40 };
+ 	int level, ret;
+ 
+ 	/* set duty cycle and level */
+-	for (level = 0; level < 4; level++) {
++	for (level = 0; level < ARRAY_SIZE(duty); level++) {
+ 		req.duty.duty_level = level;
+-		req.duty.duty_cycle = state;
+-		state /= 2;
++		req.duty.duty_cycle = DIV_ROUND_UP(state * duty[level], 100);
+ 
+ 		ret = mt76_mcu_send_msg(&dev->mt76, MCU_EXT_CMD(THERMAL_PROT),
+ 					&req, sizeof(req), false);
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/mt7915.h b/drivers/net/wireless/mediatek/mt76/mt7915/mt7915.h
+index 482f369..6c18908 100644
+--- a/drivers/net/wireless/mediatek/mt76/mt7915/mt7915.h
++++ b/drivers/net/wireless/mediatek/mt76/mt7915/mt7915.h
+@@ -81,8 +81,12 @@
+ 
+ #define MT7915_CRIT_TEMP_IDX		0
+ #define MT7915_MAX_TEMP_IDX		1
+-#define MT7915_CRIT_TEMP		110
+-#define MT7915_MAX_TEMP			120
++/* Firmware TX duty protection starts at MAX_TEMP and steps back toward
++ * full duty at CRIT_TEMP - 10, one level per 10 s recheck. Trigger early
++ * enough to limit enclosure heating, not only to protect the die.
++ */
++#define MT7915_CRIT_TEMP		90
++#define MT7915_MAX_TEMP			90
+ 
+ #define MT7915_RTS_LEN_THRES		0x92b
+ 
+@@ -209,6 +213,7 @@ struct mt7915_phy {
+ 	u8 cdev_state;
+ 	u8 throttle_state;
+ 	u32 throttle_temp[2]; /* 0: critical high, 1: maximum */
++	bool throttle_dirty; /* last protection programming failed */
+ 
+ 	u32 rxfilter;
+ 	u64 omac_mask;

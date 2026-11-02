@@ -12,3 +12,6 @@
 0012-runtime-rx-transition-v2.patch
 0013-main-detector-transfer.patch
 0014-runtime-background-cac.patch
+0015-station-power-limit.patch
+0016-thermal-duty-steps.patch
+0017-peer-tx-paths.patch

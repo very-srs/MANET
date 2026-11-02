@@ -1,0 +1,95 @@
+From: MANET <manet@localhost>
+Subject: [PATCH] mt76: mt7915: clear and cap per-station TX power limits
+
+NL80211_TX_POWER_AUTOMATIC reached mt76_get_power_bound() as 0 dBm, and
+subtracting the chain delta made it negative, so a station limit could
+never be cleared. Send an all-zero offset table for AUTOMATIC instead.
+
+An explicit limit arrives as s16 and was narrowed to s8 before any range
+check, so an out-of-range request could wrap to a different accepted
+limit. Validate it before narrowing, then convert and range-check it.
+
+The per-rate offsets are relative to each rate's own limit, and the
+firmware adds them to that rate's power. A station limit above a rate's
+limit produced a positive offset that raised the rate, and negative
+offsets rounded toward higher power. Send only nonpositive offsets,
+rounded toward lower power. The firmware keeps a rate's base power when
+an offset would take it below zero, so reject a limit that converts below
+one half-dB rather than let it silently fall back to full power.
+
+---
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/mcu.c b/drivers/net/wireless/mediatek/mt76/mt7915/mcu.c
+index e66750c..2e23c58 100644
+--- a/drivers/net/wireless/mediatek/mt76/mt7915/mcu.c
++++ b/drivers/net/wireless/mediatek/mt76/mt7915/mcu.c
+@@ -3402,7 +3402,7 @@ int mt7915_mcu_set_txpower_frame_min(struct mt7915_phy *phy, s8 txpower)
+ 
+ int mt7915_mcu_set_txpower_frame(struct mt7915_phy *phy,
+ 				 struct ieee80211_vif *vif,
+-				 struct ieee80211_sta *sta, s8 txpower)
++				 struct ieee80211_sta *sta, s16 txpower)
+ {
+ 	struct mt7915_sta *msta = (struct mt7915_sta *)sta->drv_priv;
+ 	struct mt7915_dev *dev = phy->dev;
+@@ -3427,12 +3427,24 @@ int mt7915_mcu_set_txpower_frame(struct mt7915_phy *phy,
+ 	if (ret)
+ 		return ret;
+ 
+-	txpower = mt76_get_power_bound(mphy, txpower);
+-	if (txpower > mphy->txpower_cur || txpower < 0)
+-		return -EINVAL;
+-
+-	if (txpower) {
++	/* An all-zero offset table clears the station's limit; only an
++	 * explicit limit is converted and range-checked.
++	 */
++	if (sta->deflink.txpwr.type != NL80211_TX_POWER_AUTOMATIC) {
+ 		u32 offs, len, i;
++		int target;
++
++		/* mt76_get_power_bound() doubles the limit into an s8 */
++		if (txpower < 0 || txpower > S8_MAX / 2)
++			return -EINVAL;
++
++		/* The firmware keeps a rate's base power when the offset would
++		 * take it below zero, so a target under one half-dB cannot be
++		 * enforced on every rate.
++		 */
++		target = mt76_get_power_bound(mphy, txpower);
++		if (target > mphy->txpower_cur || target < 1)
++			return -EINVAL;
+ 
+ 		if (sta->deflink.ht_cap.ht_supported) {
+ 			const u8 *sku_len = mt7915_sku_group_len;
+@@ -3453,9 +3465,15 @@ int mt7915_mcu_set_txpower_frame(struct mt7915_phy *phy,
+ 			return -EINVAL;
+ 		}
+ 
+-		for (i = 0; i < len; i++, offs++)
+-			req.txpower_offs[i] =
+-				DIV_ROUND_UP(txpower - txpower_sku[offs], 2);
++		/* Offsets in dB are relative to each rate's own half-dB
++		 * limit. A station limit may lower a rate but never raise
++		 * it, and rounds toward lower power.
++		 */
++		for (i = 0; i < len; i++, offs++) {
++			int diff = target - txpower_sku[offs];
++
++			req.txpower_offs[i] = diff < 0 ? -DIV_ROUND_UP(-diff, 2) : 0;
++		}
+ 	}
+ 
+ 	return mt76_mcu_send_msg(&dev->mt76,
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/mt7915.h b/drivers/net/wireless/mediatek/mt76/mt7915/mt7915.h
+index da9c57a..482f369 100644
+--- a/drivers/net/wireless/mediatek/mt76/mt7915/mt7915.h
++++ b/drivers/net/wireless/mediatek/mt76/mt7915/mt7915.h
+@@ -599,7 +599,7 @@ int mt7915_mcu_get_txpower_sku(struct mt7915_phy *phy, s8 *txpower, int len);
+ int mt7915_mcu_set_txpower_frame_min(struct mt7915_phy *phy, s8 txpower);
+ int mt7915_mcu_set_txpower_frame(struct mt7915_phy *phy,
+ 				 struct ieee80211_vif *vif,
+-				 struct ieee80211_sta *sta, s8 txpower);
++				 struct ieee80211_sta *sta, s16 txpower);
+ int mt7915_mcu_set_txbf(struct mt7915_dev *dev, u8 action);
+ int mt7915_mcu_set_fcc5_lpn(struct mt7915_dev *dev, int val);
+ int mt7915_mcu_set_pulse_th(struct mt7915_dev *dev,

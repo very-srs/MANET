@@ -376,6 +376,47 @@ is already applied. The firmware ignored a `config.txt` overlay setting the
 same property in earlier testing, so the change lives in the DTB the kernel
 build ships.
 
+### 4.8 MT7916 transmit power, thermal steps and per-peer paths
+
+Three patches at the end of `kernel/patches/manet-mt7916/mt76/series` reduce
+the card's heat. Card temperature follows transmit airtime times the number
+of active power amplifiers; output power matters much less.
+
+- `0015-station-power-limit.patch`: `iw dev <if> station set <MAC> txpwr
+  auto` clears a per-station limit (it always failed with EINVAL). A limit
+  never raises a rate above its own power limit and rounds toward lower
+  power, and out-of-range limits are rejected.
+- `0016-thermal-duty-steps.patch`: firmware TX duty protection steps
+  100/75/50/40% of the level-0 duty, triggers at 90 C and restores at
+  80 C. Both are writable through hwmon: the trigger is `temp1_max` and
+  the restore point is `temp1_crit` minus 10. The firmware moves one level per 10 s each way and holds its
+  level between the two thresholds. A cooling-device state survives radio
+  restarts.
+- `0017-peer-tx-paths.patch`: per-peer transmit paths. `dual` maps the
+  negotiated two streams one per path instead of spreading them over all
+  three 5 GHz paths; `single` sends one stream on one path. The lower card
+  temperature fits fewer transmitting amplifiers, but per-path RF activity
+  has not been measured. Both modes need the MANET-patched WM described in
+  [node-tools-internals.md](node-tools-internals.md#mt7916-firmware-selection).
+  The driver classifies the WM it downloads and refuses both modes on any
+  other image. Control is the per-phy debugfs file `mt76/peer_tx_paths`
+  (`<MAC> full|dual|single|auto`). By default (module parameter
+  `tx_paths_auto`, `N` turns it off), associated mesh peers move to
+  `dual` when frames from them arrive at -62 dBm or better on average
+  and back to `full` below -68 dBm (`tx_paths_dual_dbm`,
+  `tx_paths_full_dbm`), holding each automatic choice at least 30 s. The policy never selects `single`. It
+  acts only where a band has more transmit chains than streams: 5 GHz,
+  and not while the observer holds the third chain (section 4.6), which
+  leaves the main radio two transmit chains. A limit set with `txpwr
+  limit` is now reapplied after association and authorization.
+
+Measured on a CM4 at a 100 Mbit/s TCP load: `dual` ran the card about 4 C
+cooler than `full` with the same delivered rate and a peak of about
+200 Mbit/s. `single` ran about 5 C cooler but needed more airtime and
+peaked near 90 Mbit/s. With the thermal trigger lowered to 76 C for a
+test, saturating TCP stepped the duty to 40% within 30 s and held it
+there at 75 to 79 C, delivering about 107 Mbit/s on a strong link.
+
 ## 5. DTS overlay: `dts-overlays/cm4-morse-spi.dts` (CM4 only)
 
 Compiled to `mm610x-spi.dtbo` by `build-cm4.sh` (`dtc -@`). Wires spi0 to the
