@@ -1,0 +1,30 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: MANET <manet@localhost>
+Date: Sun, 1 Nov 2026 12:00:00 -0600
+Subject: [PATCH] ARM: dts: bcm2711-rpi-cm4: limit PCIe to 2.5 GT/s
+
+With the MT7916 M.2 card behind the IO-BASE-A's M-key to A+E adapter, the
+5 GT/s link flaps: the root port raises PME/AER/bandwidth-notification
+interrupts until IRQ 27 is disabled, and the next MMIO access to the card
+raises an asynchronous SError panic. kernel.panic then reboots the board
+every one to six minutes. At 2.5 GT/s the same hardware runs cleanly, and
+the link still carries several times the radio's traffic.
+
+---
+diff --git a/arch/arm/boot/dts/broadcom/bcm2711-rpi-cm4.dts b/arch/arm/boot/dts/broadcom/bcm2711-rpi-cm4.dts
+index 233dfe8..9e5b197 100644
+--- a/arch/arm/boot/dts/broadcom/bcm2711-rpi-cm4.dts
++++ b/arch/arm/boot/dts/broadcom/bcm2711-rpi-cm4.dts
+@@ -221,6 +221,12 @@
+ };
+ 
+ &pcie0 {
++	/* At 5 GT/s the M.2 Wi-Fi link through carrier adapters drops, and the
++	 * next MMIO access raises an asynchronous SError panic. 2.5 GT/s still
++	 * carries several times the radio's traffic.
++	 */
++	max-link-speed = <1>;
++
+ 	pci@0,0 {
+ 		device_type = "pci";
+ 		#address-cells = <3>;

@@ -351,6 +351,31 @@ qualify intermediate loads or the 250 ms production dwell. CM4 remains the
 verification target; its cold boot, reservation,
 RF response, cancellation, and traffic behavior have not yet been benched.
 
+### 4.7 CM4 PCIe link speed
+
+`kernel/patches/cm4-pcie/0001-cm4-pcie-gen1.patch` adds
+`max-link-speed = <1>` to `&pcie0` in `bcm2711-rpi-cm4.dts`, so the MT7916
+link trains at 2.5 GT/s instead of 5 GT/s. On the IO-BASE-A, with the card
+behind the M-key to A+E adapter, the 5 GT/s link flaps. The root port then
+floods IRQ 27 (`pcie_pme_irq`, `aer_irq` and `pcie_bwnotif_irq` until
+`Disabling IRQ #27`), and the next MMIO access from mt7915e raises
+`SError Interrupt ... code 0x00000000bf000002` and a kernel panic. With
+`kernel.panic = 10` the board reboots, and the journal loses the tail, so
+the failure looks like a silent reset. Capture the console over netconsole
+to tell it apart from a brownout.
+
+Measured on one CM4: at 5 GT/s it panicked every one to six minutes; at
+2.5 GT/s it ran over five hours without an SError or AER event while
+carrying mesh traffic. Whether the adapter or the card is marginal is not
+established. 2.5 GT/s with 8b/10b coding still carries about 2 Gbit/s,
+several times the radio's 20 MHz mesh traffic. Confirm the live link with
+`lspci -vv` (`LnkSta: Speed 2.5GT/s`).
+
+Both CM4 build scripts apply the patch with `git apply` and skip it when it
+is already applied. The firmware ignored a `config.txt` overlay setting the
+same property in earlier testing, so the change lives in the DTB the kernel
+build ships.
+
 ## 5. DTS overlay: `dts-overlays/cm4-morse-spi.dts` (CM4 only)
 
 Compiled to `mm610x-spi.dtbo` by `build-cm4.sh` (`dtc -@`). Wires spi0 to the
@@ -426,7 +451,8 @@ xz-compress all modules. Per-target notes:
   txpower patch (§4.2), then timing and observer support via
   `python3 "$KWORK/../kernel/patches/mt76-bgobs/apply.py" "$KDIR"` (§4.6), then
   the cfg80211 background CAC pair (§4.5). `build-cm4.sh` applies txpower,
-  the combined series, and the cfg80211 pair the same way.
+  the combined series, and the cfg80211 pair the same way, then the CM4 PCIe
+  link-speed patch (§4.7).
   `manet-r3a.config` enables `CONFIG_FTRACE=y` (the tracing menu) and
   `CONFIG_ENABLE_DEFAULT_TRACERS=y` (static events without function tracing).
   Kconfig selects `TRACING`, `EVENT_TRACING`, `TRACEPOINTS`, `RING_BUFFER`, and

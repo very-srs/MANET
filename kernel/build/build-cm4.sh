@@ -42,6 +42,10 @@ if ! git apply --reverse --check "$BGCAC/0002-wifi-cfg80211-events-report-backgr
     git apply "$BGCAC/0002-wifi-cfg80211-events-report-background-radar.patch"
 fi
 
+# CM4 DT fix kept in the MANET repo (kernel/patches/cm4-pcie); skip if applied
+CM4_PCIE_PATCH="$PATCHES/cm4-pcie/0001-cm4-pcie-gen1.patch"
+git apply --reverse --check "$CM4_PCIE_PATCH" 2>/dev/null || git apply "$CM4_PCIE_PATCH"
+
 make O="$BUILD" ARCH=$ARCH CROSS_COMPILE=$CROSS bcm2711_defconfig
 
 ./scripts/kconfig/merge_config.sh -m -O "$BUILD" \
