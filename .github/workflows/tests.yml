@@ -26,12 +26,15 @@ jobs:
           fetch-depth: 0
       # Radios run Debian 13, whose python3 is 3.13.
       - uses: actions/setup-python@v7
+        id: python
         with:
           python-version: '3.13'
+      # The venv links to the exact interpreter, so a 3.13 patch update on
+      # the runner must not restore a venv built on the previous one.
       - uses: actions/cache@v6
         with:
           path: ~/.venvs/manet
-          key: venv-${{ runner.os }}-py313-${{ hashFiles('MANET/packaging/requirements-dev.txt', 'MANET/packaging/setup-dev-env.sh') }}
+          key: venv-${{ runner.os }}-py${{ steps.python.outputs.python-version }}-${{ hashFiles('MANET/packaging/requirements-dev.txt', 'MANET/packaging/setup-dev-env.sh') }}
       # JavaScriptCore runs the web UI rendering tests, and mandoc lints the
       # manual pages. Without them those tests skip.
       - name: Install optional test tools

@@ -45,6 +45,12 @@ case "$(uname -m)" in
 esac
 
 echo "==> venv: $VENV_DIR"
+# A venv whose base interpreter has gone (a Python update, or a restored cache
+# built on another patch release) cannot run anything. Rebuild it.
+if [ -f "$VENV_DIR/pyvenv.cfg" ] && ! "$VENV_DIR/bin/python" -c '' 2>/dev/null; then
+    echo "==> rebuilding a venv whose interpreter no longer runs"
+    rm -rf "$VENV_DIR"
+fi
 if [ ! -x "$VENV_DIR/bin/python" ]; then
     # --without-pip because Ubuntu splits ensurepip into python3.x-venv, which
     # is not installed by default and needs root. pip is bootstrapped below
