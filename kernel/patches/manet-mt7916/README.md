@@ -1,4 +1,4 @@
-# Paired CM4 release stack and Rock 3A bench modules
+# Paired cfg80211/MT7916 release stack for CM4 and Rock 3A
 
 This directory combines the pinned cfg80211 and MT7916 features into one
 application transaction. The `series` file orders three component series:
@@ -8,7 +8,9 @@ application transaction. The `series` file orders three component series:
 - mt76: FTM patches 0001 through 0006, channel-power policy, all three
   background-observer/reservation patches, continuous hold v2, and the
   reservation-v2 runtime transition that was benched separately, passive DFS
-  observations, and main-detector transfer.
+  observations, and main-detector transfer. Patches 0015 through 0018 add
+  per-station power limits, thermal duty steps, per-peer transmit paths,
+  and automatic per-peer transmit power.
 - mac80211: mesh CSA precedence retention and DFS handling after a local CSA.
 
 The preceding feature patches are preserved. Hold is split into cfg80211 and driver
@@ -58,6 +60,26 @@ helper currently does not initialize this nested dependency itself.
 The stock `kernel/build/build-cm4.sh` still applies the older feature set.
 Use this directory's build wrapper for this combined stack. A subsequent
 field candidate must use another unique release identifier.
+
+A Rock 3A release kernel uses the same series through this directory's
+Rock 3A wrapper, in its own workspace. Stage its overlay with the existing
+overlay builder:
+
+```sh
+export MANET_KERNEL_WORK=/absolute/path/to/separate-r3a-work
+python3 kernel/build/prepare-sources.py --board r3a
+git -C "$MANET_KERNEL_WORK/real_work/morse-driver-1.16" submodule update --init --recursive
+BUILD=/absolute/path/to/build-r3a LOCALVERSION=-r1 JOBS=7 \
+  bash kernel/patches/manet-mt7916/build-r3a.sh
+BUILD=/absolute/path/to/build-r3a OVERLAY=/absolute/path/to/r3a-overlay \
+  bash kernel/build/build-r3a-sbc-overlay.sh
+```
+
+The wrapper adds the Rock 3A PCIe startup-delay DT fix and builds Morse for
+USB only. The stock `kernel/build/build-r3a.sh` applies the older feature
+set, without the hold, runtime transition, detector transfer, background
+CAC, or patches 0015 through 0018. A Rock 3A takes its kernel only from an
+install archive; the field updater does not activate Rock 3A kernels.
 
 For the Rock 3A bench, use a disposable source snapshot containing the pinned
 `net/wireless`, `net/mac80211`, and `drivers/net/wireless/mediatek/mt76` trees, backed by that

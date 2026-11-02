@@ -537,20 +537,23 @@ xz-compress all modules. Per-target notes:
 All targets cross-compile with `aarch64-linux-gnu-`. All Morse builds pass
 `KERNEL_SRC="$BUILD"` and `MORSE_TRACE_PATH="$(pwd)"`.
 
-Build and stage the Rock 3A overlay from the repository root:
+Build and stage the Rock 3A overlay from the repository root, in its own
+`MANET_KERNEL_WORK` workspace:
 
 ```sh
-bash kernel/build/build-r3a.sh
+LOCALVERSION=-r1 bash kernel/patches/manet-mt7916/build-r3a.sh
 bash kernel/build/build-r3a-sbc-overlay.sh
 ```
 
-The first script builds `6.18.0-manet` and installs modules under
-`kernel-work/real_work/build-r3a/staging/lib/modules/`. The second copies them
-into `kernel-work/packages/r3a-sbc-overlay/usr/lib/modules/`, with the kernel
-Image, RK3568 DTBs, and Morse firmware, and regenerates module dependencies.
-Check the staged `mt7915e.ko.xz` with `modinfo -F manet_timing` (expect `1`)
-and `modinfo -F vermagic` (expect `6.18.0-manet SMP preempt mod_unload aarch64`).
-Hardware validation of the Rock 3A timing build is still pending.
+The first script applies the combined `kernel/patches/manet-mt7916` series
+and the Rock 3A PCIe DT fix, builds `6.18.57-manet-r1`, and installs modules
+under `real_work/build-r3a/staging/lib/modules/`. The second copies them into
+`packages/r3a-sbc-overlay/usr/lib/modules/`, with the kernel Image, RK3568
+DTBs, and Morse firmware, and regenerates module dependencies. The older
+`kernel/build/build-r3a.sh` applies the pre-hold feature set. Check the
+staged `mt7915e.ko.xz` with `modinfo -F manet_timing` (expect `1`) and
+`modinfo -F vermagic` (expect `6.18.57-manet-r1 SMP preempt mod_unload
+aarch64`). Hardware validation of the Rock 3A timing build is still pending.
 Also check `__tracepoint_mt7915_rx_tmr` and the `_ftrace_events` section in
 the built `mt7915e.ko`. A module tag by itself does not prove tracing was built.
 
