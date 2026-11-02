@@ -40,6 +40,9 @@ setup steps and what to expect.
   farther and gets through trees and walls better, at lower speed. All three
   carry the same network, and each message takes the best working path.
 - When a radio turns off or a link fails, traffic takes another path.
+- Radios turn their Wi-Fi power down toward close neighbors, and on strong
+  5 GHz links send on two of the card's three transmitters. Both save heat
+  without slowing the link, and both undo themselves as a link weakens.
 - Mesh links are encrypted with the shared mesh key (WPA3 SAE). The flasher
   can generate a strong key for you.
 - Separated groups join back into one mesh when any radio path reconnects
@@ -343,6 +346,9 @@ setup steps and what to expect.
   earlier in the same boot.
 - The CPU scales with demand. A CM4 also has a speed limit to keep a sealed
   enclosure cool.
+- The Wi-Fi card keeps itself cool. From 90 °C it slows its transmissions in
+  steps, to no less than 40% of normal, and returns to full speed once it
+  cools to 80 °C.
 - `sudo poweroff` shuts a radio down cleanly and tells the mesh it is leaving.
 - Logs survive a reboot and rotate so they do not fill the storage.
 - A recovery service keeps SSH reachable on a radio with no screen or
@@ -392,6 +398,7 @@ canonical reference for each area.
 | Addresses | Nodes claim IPv4 blocks in their Alfred identity after an observation window, exclude overlapping ranges, and settle conflicts by MAC. | [Discover, claim, reconcile](addresses.md#developer-discover-claim-reconcile) | [mesh-ip-manager.sh](../../../MANET/node_tools/mesh-ip-manager.sh), [mesh-ip-startup.py](../../../MANET/node_tools/mesh-ip-startup.py) |
 | Channels | The lowest ready node in the connected BATMAN component coordinates. A strict majority of the frozen membership commits a plan over encrypted Alfred. Home-channel RF trouble opens scanning, and a three-round hold-down limits preference moves. | [One connected component, one channel decision](mesh.md#developer-one-connected-component-one-channel-decision) | [mesh-channel-agreement.py](../../../MANET/node_tools/mesh-channel-agreement.py), [channel-election.sh](../../../MANET/node_tools/channel-election.sh) |
 | DFS and third chain | A reserved MT7916 receive chain measures 5 GHz candidates and runs background CAC. Unanimous leases admit a DFS channel, and a guardian evacuates to the agreed fallback on radar. | [One connected component, one channel decision](mesh.md#developer-one-connected-component-one-channel-decision) | [manet_bgobs.py](../../../MANET/node_tools/manet_bgobs.py), [manet_dfs.py](../../../MANET/node_tools/manet_dfs.py), [manet_dfs_safety.py](../../../MANET/node_tools/manet_dfs_safety.py) |
+| Wi-Fi heat and power | The MT7916 driver steps its transmit duty down from 90 °C. It reads each mesh peer's signal from that peer's broadcast and management frames, then picks dual or full transmit paths and caps the data power to close peers, clearing a cap when the link's rate drops. | [Kernel, firmware, and userspace form one bring-up chain](hardware.md#developer-kernel-firmware-and-userspace-form-one-bring-up-chain) | [0016-thermal-duty-steps.patch](../../../kernel/patches/manet-mt7916/mt76/0016-thermal-duty-steps.patch), [0017-peer-tx-paths.patch](../../../kernel/patches/manet-mt7916/mt76/0017-peer-tx-paths.patch), [0018-peer-tx-power.patch](../../../kernel/patches/manet-mt7916/mt76/0018-peer-tx-power.patch) |
 | Partitions and limp mode | Working HaLow carries recovery. Without it, an elected tourguide visits a clock-derived rendezvous rotation. The quorum checker returns isolated nodes to discovery, and limp mode drops to legacy rates under mesh-wide jamming. | [Recovery and local role constraints](mesh.md#developer-recovery-and-local-role-constraints) | [tourguide-manager.sh](../../../MANET/node_tools/tourguide-manager.sh), [manet_rendezvous.py](../../../MANET/node_tools/manet_rendezvous.py), [limp-mode-manager.sh](../../../MANET/node_tools/limp-mode-manager.sh) |
 | Client access | Ethernet is classified as uplink or client. DHCP and local discovery stay inside the bridge boundary, and the web firewall admits only the local pool. | [Layer 2 topology and address ownership](connect.md#developer-layer-2-topology-and-address-ownership) | [ethernet-autodetect.sh](../../../MANET/node_tools/ethernet-autodetect.sh), [manet-dhcp-isolation.py](../../../MANET/node_tools/manet-dhcp-isolation.py), [manet-ui-firewall.sh](../../../MANET/node_tools/manet-ui-firewall.sh) |
 | Internet | Uplinks qualify by an HTTP 204 probe and rank by kind. Gateways advertise measured or assumed capacity, and each node picks a gateway with hysteresis and keeps its own default route. | [Selecting a Linux default route](internet.md#developer-selecting-a-linux-default-route) | [manet-uplink-dispatch.sh](../../../MANET/node_tools/manet-uplink-dispatch.sh), [gateway-route-manager.sh](../../../MANET/node_tools/gateway-route-manager.sh), [manet_wifi_uplink.py](../../../MANET/node_tools/manet_wifi_uplink.py) |
@@ -427,6 +434,7 @@ full key set, including the voice tuning keys.
 | `voice_codec` | `lyra` | Mesh-wide | Change it from the Voice tab, never by hand. |
 | `atak` | `y` | Local | The ATAK phone service. `atak=n` is the only off switch. |
 | `positioning` | Off | Local | Experimental ranging only. It does not select MT7916 firmware. |
+| `tx_paths_auto`, `tx_power_auto` | `Y` | Local | `mt7915e` module options for automatic dual transmit paths and per-peer transmit power. Set them in `/etc/modprobe.d/`, or at runtime under `/sys/module/mt7915e/parameters/`. |
 | `uplink_routed` | Unset | Gateway | Private ranges the gateway forwards without NAT. |
 | `operator_name` | Empty | Local | The label set from the status page. |
 | `enabled` in `/etc/manet-kernel-update.conf` | `y` on CM4 | Local | CM4 kernel field updates. Tools updates continue with `n`. |
@@ -440,5 +448,7 @@ only on the CM4, because the Rock 3A bootcount and reset path is unverified.
 A Rock 3A takes its kernel from the install archive when flashed, and its
 tools archive carries no kernel. RPi5 and Rock 3A radios still join DFS
 decisions as unsupported members, which keeps a mixed mesh on regular
-channels. See [hardware](hardware.md#developer-kernel-firmware-and-userspace-form-one-bring-up-chain)
+channels. Dual transmit paths, per-peer transmit power, and the stepped
+thermal throttle come from the MANET MT7916 driver patches in the CM4
+kernel. The Rock 3A install kernel does not carry them. See [hardware](hardware.md#developer-kernel-firmware-and-userspace-form-one-bring-up-chain)
 for the bring-up chain on each board.

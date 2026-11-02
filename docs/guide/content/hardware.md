@@ -104,6 +104,16 @@ The tracked [binary reference](../../../MANET/binaries_arm64/README.md)
 identifies the supplied BATMAN tools and supplicant builds. The
 [development guide](development.md) explains reproducibility limits.
 
+The patched WM also accepts a per-peer transmit path, and the driver offers
+dual and single paths only when the image it downloads is that WM. The CM4
+driver patches step the card's transmit duty down from 90 °C. For each mesh
+peer they read the signal of that peer's broadcast and management frames,
+which travel at the peer's normal power. They then choose dual or full paths
+on 5 GHz and cap the data power to a close peer. A cap clears when the
+link's rate drops and returns only after a delay. The
+[kernel port record](../../../docs/kernel-6.18-morse-port.md) gives the
+thresholds, controls, and bench results.
+
 ### Separate hardware evidence from a software request
 
 A configured channel, a requested transmit power, and an UP interface are
