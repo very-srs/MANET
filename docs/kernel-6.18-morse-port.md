@@ -378,7 +378,7 @@ build ships.
 
 ### 4.8 MT7916 transmit power, thermal steps and per-peer paths
 
-Three patches at the end of `kernel/patches/manet-mt7916/mt76/series` reduce
+Four patches at the end of `kernel/patches/manet-mt7916/mt76/series` reduce
 the card's heat. Card temperature follows transmit airtime times the number
 of active power amplifiers; output power matters much less.
 
@@ -389,9 +389,9 @@ of active power amplifiers; output power matters much less.
 - `0016-thermal-duty-steps.patch`: firmware TX duty protection steps
   100/75/50/40% of the level-0 duty, triggers at 90 C and restores at
   80 C. Both are writable through hwmon: the trigger is `temp1_max` and
-  the restore point is `temp1_crit` minus 10. The firmware moves one level per 10 s each way and holds its
-  level between the two thresholds. A cooling-device state survives radio
-  restarts.
+  the restore point is `temp1_crit` minus 10. The firmware moves one level
+  per 10 s each way and holds its level between the two thresholds. A
+  cooling-device state survives radio restarts.
 - `0017-peer-tx-paths.patch`: per-peer transmit paths. `dual` maps the
   negotiated two streams one per path instead of spreading them over all
   three 5 GHz paths; `single` sends one stream on one path. The lower card
@@ -402,13 +402,33 @@ of active power amplifiers; output power matters much less.
   other image. Control is the per-phy debugfs file `mt76/peer_tx_paths`
   (`<MAC> full|dual|single|auto`). By default (module parameter
   `tx_paths_auto`, `N` turns it off), associated mesh peers move to
-  `dual` when frames from them arrive at -62 dBm or better on average
-  and back to `full` below -68 dBm (`tx_paths_dual_dbm`,
-  `tx_paths_full_dbm`), holding each automatic choice at least 30 s. The policy never selects `single`. It
+  `dual` when their signal averages -62 dBm or better and back to `full`
+  below -68 dBm (`tx_paths_dual_dbm`, `tx_paths_full_dbm`), holding each
+  automatic choice at least 30 s. The policy never selects `single`. It
   acts only where a band has more transmit chains than streams: 5 GHz,
   and not while the observer holds the third chain (section 4.6), which
   leaves the main radio two transmit chains. A limit set with `txpwr
   limit` is now reapplied after association and authorization.
+- `0018-peer-tx-power.patch`: automatic per-peer transmit power (module
+  parameter `tx_power_auto`, default on). Both this rule and 0017's choice
+  read a peer's signal from its broadcast and management frames: beacons,
+  mesh action frames and BATMAN broadcasts. A peer sends those at its
+  normal power whatever data limits it has set, so the two ends of a link
+  each set their cap from the same path loss and cannot chase each other.
+  On the bench this signal read 0 to 1 dB above unicast data on 5 GHz and
+  1 to 3 dB above on 2.4 GHz, so 0017 kept its thresholds. With the
+  MANET WM, a two-stream HE mesh peer above -48 dBm gets a data power cap
+  in 2 dB steps, at most 8 dB below the phy's power and never below
+  10 dBm. A cap needs two matching uncapped windows of TX statuses first
+  (at least 5 s and 16 statuses each, waiting up to 30 s on light
+  traffic). A capped window more than half an MCS below them, or more than
+  10 error points above, clears the cap and retries after 5 minutes,
+  doubling to an hour; ten good capped minutes reset that delay. Light
+  traffic and silence clear a cap without a delay, and a weaker signal
+  raises power at once. A `txpwr limit` set by hand takes precedence, and
+  `txpwr auto` hands the peer back. `peer_tx_paths` also shows each peer's
+  cap and guard state. 0018 adds a generation field to the mt76 TX control
+  block, so `mt76.ko` and `mt7915e.ko` must come from the same build.
 
 Measured on a CM4 at a 100 Mbit/s TCP load: `dual` ran the card about 4 C
 cooler than `full` with the same delivered rate and a peak of about
@@ -416,6 +436,11 @@ cooler than `full` with the same delivered rate and a peak of about
 peaked near 90 Mbit/s. With the thermal trigger lowered to 76 C for a
 test, saturating TCP stepped the duty to 40% within 30 s and held it
 there at 75 to 79 C, delivering about 107 Mbit/s on a strong link.
+
+With 0018 on a Rock 3A, caps of 17 to 22 dBm toward peers at -33 to
+-42 dBm held through steady, bulk, light and idle traffic without a
+rollback. A fixed 150 Mbit/s UDP load and TCP on the same path ran the
+same capped and uncapped. No throughput gain appeared at these distances.
 
 ## 5. DTS overlay: `dts-overlays/cm4-morse-spi.dts` (CM4 only)
 

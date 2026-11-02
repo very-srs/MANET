@@ -108,7 +108,7 @@ class ApplyCases:
             helper.apply(tree)
             checks = [(HERE.parent / 'dfs-follow-ap/test_kernel.py', [tree])]
             checks += [(HERE / 'tests' / ('check_' + name + '.py'), [tree, tree])
-                       for name in ('hold', 'driver', 'monitor', 'timing', 'transition', 'command', 'transfer', 'csa', 'main', 'background')]
+                       for name in ('hold', 'driver', 'monitor', 'timing', 'transition', 'command', 'transfer', 'csa', 'main', 'background', 'power')]
             checks += [(HERE.parent / 'mt76-bgobs' / name, [tree / DRIVER, tree])
                        for name in ('check_reservation.py', 'check_initialization.py')]
             checks += [(HERE / 'tests/check_observer.py', [tree / DRIVER, tree])]

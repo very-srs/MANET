@@ -1,0 +1,1032 @@
+From: MANET <manet@localhost>
+Subject: [PATCH] mt76: mt7915: automatic per-peer transmit power
+
+At short range full transmit power can overload a mesh peer's receiver,
+and it heats the card for no gain. Lower the data power toward each close
+mesh peer automatically, and raise it again as the link weakens, without
+costing the link its rate.
+
+Link metric: the signal of a peer's broadcast and management frames
+(beacons, mesh action frames, and group data such as BATMAN broadcasts).
+A peer sends these at its normal power, outside any per-station limit, so
+their signal measures path loss and does not move when the peer lowers
+its own data power. Each end sets its cap from the same path loss on its
+own, so the two ends cannot chase each other. The peer comes from the raw
+RXD WLAN index, taken before group delivery remaps it to the local vif and
+checked against the transmitter address where available. Otherwise the
+over-air transmitter address (802.11 header or RXD group 4) is looked up
+in mac80211's station hash. The translated Ethernet source is never used.
+Unicast data (including multicast-to-unicast copies), FCS failures and
+monitor-only frames are excluded. Sampling keeps 0017's rules: at most
+four samples a second, a ten-second expiry, and one sta_poll_lock for
+publication and snapshot.
+
+0017's dual/full choice now uses the same metric. A peer's lowered power
+therefore no longer pushes our choice for it toward full. Its -62/-68
+thresholds stay: on the bench this signal read 0 to 1 dB above unicast
+data on 5 GHz and 1 to 3 dB above on 2.4 GHz.
+
+Cap: with the MANET WM, an associated mesh peer with automatic power and
+a two-stream HE link in full or dual mode gets a cap when its signal is
+above -48 dBm. The cap falls in 2 dB steps, at most 8 dB below the phy's
+aggregate power and never below 10 dBm. Deepening an existing cap needs
+another 2 dB of signal. A weaker or stale signal, or disabling the rule,
+raises power at once.
+
+Rate guard: a reduction needs two adjacent uncapped windows that agree.
+A window lasts at least 5 s, and up to 30 s, to collect 16 tracked data
+completions. The two must agree within half an MCS of mean HE MCS and
+within 10 percentage points of sampled errors (ACK errors and mode, NSS,
+bandwidth or DCM mismatches), with at most 25% errors. That baseline is
+frozen while capped. A capped window more than half an MCS below it, or
+more than 10 points above its error ratio, clears the cap and schedules a
+retry after 5 minutes, doubling to at most an hour. A sparse window keeps
+the cap while it collects samples. The 30 s timeout clears the cap
+without a penalty, as does 2 s without a status. Ten minutes of good
+capped operation resets the backoff. TX statuses carry a generation
+stamp in the mt76 TX control block, so statuses from before or during a
+change cannot qualify it.
+
+Controls: tx_power_auto (default on) enables the rule. A limit set by
+hand with "iw dev <if> station set <MAC> txpwr limit" takes precedence,
+and "txpwr auto" hands the peer back. No interface restart, peer message
+or daemon is involved. peer_tx_paths also shows each peer's cap, baseline,
+window and retry state. At most eight stations are programmed per
+watchdog pass, in circular WCID order. With the rule off and no cap left,
+the pass skips station iteration. An MCU failure retries an uncapped
+table.
+
+The mean-rate guard is not a TCP throughput floor and does not guarantee
+every packet's rate. The driver's TXD and beacon paths and earlier WM
+tracing show basic frames bypassing per-station limits; radiated power
+per frame class has not been measured.
+
+---
+diff --git a/drivers/net/wireless/mediatek/mt76/mt76.h b/drivers/net/wireless/mediatek/mt76/mt76.h
+index 6ca5f3b..806bc8a 100644
+--- a/drivers/net/wireless/mediatek/mt76/mt76.h
++++ b/drivers/net/wireless/mediatek/mt76/mt76.h
+@@ -492,6 +492,7 @@ struct mt76_tx_cb {
+ 	u16 wcid;
+ 	u8 pktid;
+ 	u8 flags;
++	u32 rate_generation; /* optional driver rate-control observation cookie */
+ };
+ 
+ enum {
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/Makefile b/drivers/net/wireless/mediatek/mt76/mt7915/Makefile
+index a6b2235..fbb989c 100644
+--- a/drivers/net/wireless/mediatek/mt76/mt7915/Makefile
++++ b/drivers/net/wireless/mediatek/mt76/mt7915/Makefile
+@@ -3,7 +3,7 @@
+ obj-$(CONFIG_MT7915E) += mt7915e.o
+ 
+ mt7915e-y := pci.o init.o dma.o eeprom.o main.o mcu.o mac.o \
+-	     debugfs.o bgscan.o tmr.o mmio.o tmr_trace.o
++	     debugfs.o bgscan.o tmr.o mmio.o tmr_trace.o power.o
+ 
+ CFLAGS_tmr_trace.o := -I$(src)
+ 
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/debugfs.c b/drivers/net/wireless/mediatek/mt76/mt7915/debugfs.c
+index 47477ac..3efb073 100644
+--- a/drivers/net/wireless/mediatek/mt76/mt7915/debugfs.c
++++ b/drivers/net/wireless/mediatek/mt76/mt7915/debugfs.c
+@@ -923,12 +923,38 @@ static void mt7915_peer_tx_paths_list(void *data, struct ieee80211_sta *sta)
+ {
+ 	struct mt7915_sta *msta = (struct mt7915_sta *)sta->drv_priv;
+ 	struct mt7915_tx_paths_list *list = data;
++	struct mt7915_dev *dev = msta->vif->phy->dev;
++	struct mt7915_peer_power p;
++	unsigned long stamp, retry_ms;
++	int signal;
++	u16 fc, index;
++	bool by_index;
++
++	spin_lock_bh(&dev->mt76.sta_poll_lock);
++	p = msta->power;
++	stamp = msta->path_signal_jiffies;
++	signal = -(int)ewma_avg_signal_read(&msta->path_signal);
++	fc = msta->path_signal_fc;
++	index = msta->path_signal_index;
++	by_index = msta->path_signal_by_index;
++	spin_unlock_bh(&dev->mt76.sta_poll_lock);
++	retry_ms = p.backoff && time_before(jiffies, p.retry_at) ?
++		jiffies_to_msecs(p.retry_at - jiffies) : 0;
+ 
+ 	list->len += scnprintf(list->buf + list->len, list->size - list->len,
+-			       "%pM %s%s%s\n", sta->addr,
++			       "%pM %s%s%s power=%d%s rate=%u/%u/%u samples=%u "
++			       "errors=%u baseline_q8=%u per=%u stable=%u retry_ms=%lu backoff_s=%u "
++			       "signal=%d age_ms=%ld src=%s raw=%u fc=%04x\n",
++			       sta->addr,
+ 			       mt7915_tx_paths_names[READ_ONCE(msta->tx_paths)],
+ 			       READ_ONCE(msta->tx_paths_manual) ? " manual" : "",
+-			       READ_ONCE(msta->tx_paths_failed) ? " failed" : "");
++			       READ_ONCE(msta->tx_paths_failed) ? " failed" : "",
++			       p.limit, p.dirty ? " pending" : "",
++			       p.mcs, p.nss, p.bw, p.samples,
++			       p.errors, p.baseline_mcs, p.baseline_per, p.stable,
++			       retry_ms, p.backoff, signal,
++			       stamp ? (long)jiffies_to_msecs(jiffies - stamp) : -1L,
++			       !stamp ? "none" : by_index ? "index" : "TA", index, fc);
+ }
+ 
+ static ssize_t mt7915_peer_tx_paths_get(struct file *file,
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/mac.c b/drivers/net/wireless/mediatek/mt76/mt7915/mac.c
+index 8ae0f0a..728e1f4 100644
+--- a/drivers/net/wireless/mediatek/mt76/mt7915/mac.c
++++ b/drivers/net/wireless/mediatek/mt76/mt7915/mac.c
+@@ -283,19 +283,21 @@ module_param(tx_paths_full_dbm, int, 0644);
+ MODULE_PARM_DESC(tx_paths_full_dbm,
+ 		 "Received signal below which a mesh peer returns to full paths (below tx_paths_dual_dbm)");
+ 
+-/* Sample the policy's link signal from the peer's own frames, at most four
++/* Sample both policies' signal from peer broadcast/management, at most four
+  * times a second and only while the policy can act. Each sample is measured
+  * on reception, so its age is known; an average whose last sample has
+  * expired starts again rather than carrying old readings forward.
+  */
+ static void
+ mt7915_mac_sample_path_signal(struct mt7915_dev *dev, struct mt7915_sta *msta,
+-			      struct mt76_rx_status *status)
++			      struct mt76_rx_status *status, u16 fc, u16 index,
++			      bool by_index)
+ {
+ 	unsigned long now = jiffies, last;
+ 	int signal;
+ 
+-	if (!READ_ONCE(tx_paths_auto) || !dev->peer_spe)
++	if (!dev->peer_spe ||
++	    !(READ_ONCE(tx_paths_auto) || READ_ONCE(mt7915_txpower_auto)))
+ 		return;
+ 
+ 	/* unlocked first look: most frames fall inside the current slot */
+@@ -315,10 +317,54 @@ mt7915_mac_sample_path_signal(struct mt7915_dev *dev, struct mt7915_sta *msta,
+ 			ewma_avg_signal_init(&msta->path_signal);
+ 		ewma_avg_signal_add(&msta->path_signal, -signal);
+ 		WRITE_ONCE(msta->path_signal_jiffies, now);
++		msta->path_signal_fc = fc;
++		msta->path_signal_index = index;
++		msta->path_signal_by_index = by_index;
+ 	}
+ 	spin_unlock_bh(&dev->mt76.sta_poll_lock);
+ }
+ 
++struct mt7915_basic_signal {
++	struct mt7915_phy *phy;
++	struct mt76_rx_status *status;
++	const u8 *addr;
++	u16 fc, index;
++	bool by_index;
++};
++
++static bool
++mt7915_mac_sample_basic_peer(struct mt7915_basic_signal *s,
++			    struct mt7915_sta *msta)
++{
++	struct ieee80211_sta *sta;
++	struct ieee80211_vif *vif;
++
++	if (!msta || !msta->wcid.sta || msta->wcid.sta_disabled ||
++	    msta->vif->phy != s->phy)
++		return false;
++	sta = container_of((void *)msta, struct ieee80211_sta, drv_priv);
++	if (s->addr && !ether_addr_equal(sta->addr, s->addr))
++		return false;
++	vif = container_of((void *)msta->vif, struct ieee80211_vif, drv_priv);
++	if (vif->type != NL80211_IFTYPE_MESH_POINT)
++		return false;
++	mt7915_mac_sample_path_signal(s->phy->dev, msta, s->status,
++				     s->fc, s->index, s->by_index);
++	return true;
++}
++
++/* RX NAPI holds RCU. Hash lookup avoids a full station walk on each
++ * group frame whose raw WLAN index is invalid (common on MT7916).
++ */
++static void mt7915_mac_sample_basic(struct mt7915_basic_signal *s)
++{
++	struct ieee80211_sta *sta;
++
++	sta = ieee80211_find_sta_by_ifaddr(s->phy->mt76->hw, s->addr, NULL);
++	if (sta)
++		mt7915_mac_sample_basic_peer(s, (void *)sta->drv_priv);
++}
++
+ static int
+ mt7915_mac_fill_rx(struct mt7915_dev *dev, struct sk_buff *skb,
+ 		   enum mt76_rxq_id q, u32 *info)
+@@ -339,6 +385,9 @@ mt7915_mac_fill_rx(struct mt7915_dev *dev, struct sk_buff *skb,
+ 	u8 remove_pad, amsdu_info;
+ 	u8 mode = 0, qos_ctl = 0;
+ 	struct mt7915_sta *msta = NULL;
++	struct mt7915_sta *signal_sta = NULL;
++	u8 signal_ta[ETH_ALEN];
++	bool signal_ta_valid = false;
+ 	u32 csum_status = *(u32 *)skb->cb;
+ 	bool hdr_trans;
+ 	u16 hdr_gap;
+@@ -373,6 +422,15 @@ mt7915_mac_fill_rx(struct mt7915_dev *dev, struct sk_buff *skb,
+ 
+ 	unicast = FIELD_GET(MT_RXD3_NORMAL_ADDR_TYPE, rxd3) == MT_RXD3_NORMAL_U2M;
+ 	idx = FIELD_GET(MT_RXD1_NORMAL_WLAN_IDX, rxd1);
++	/* Preserve the transmitter's raw index before nonunicast delivery
++	 * deliberately substitutes the local vif's group WCID.
++	 */
++	{
++		struct mt76_wcid *raw = mt76_wcid_ptr(dev, idx);
++
++		if (raw && raw->sta)
++			signal_sta = container_of(raw, struct mt7915_sta, wcid);
++	}
+ 	status->wcid = mt7915_rx_get_wcid(dev, idx, unicast);
+ 
+ 	if (status->wcid) {
+@@ -422,6 +480,9 @@ mt7915_mac_fill_rx(struct mt7915_dev *dev, struct sk_buff *skb,
+ 		fc = cpu_to_le16(FIELD_GET(MT_RXD6_FRAME_CONTROL, v0));
+ 		qos_ctl = FIELD_GET(MT_RXD8_QOS_CTL, v2);
+ 		seq_ctrl = FIELD_GET(MT_RXD8_SEQ_CTRL, v2);
++		/* Group 4 retains the over-air TA even after 802.3 translation. */
++		memcpy(signal_ta, (u8 *)rxd + 2, ETH_ALEN);
++		signal_ta_valid = true;
+ 
+ 		rxd += 4;
+ 		if ((u8 *)rxd - skb->data >= skb->len)
+@@ -592,9 +653,45 @@ mt7915_mac_fill_rx(struct mt7915_dev *dev, struct sk_buff *skb,
+ 	if (rxv && mode >= MT_PHY_TYPE_HE_SU && !(status->flag & RX_FLAG_8023))
+ 		mt76_connac2_mac_decode_he_radiotap(&dev->mt76, skb, rxv, mode);
+ 
+-	if (rxv && unicast && msta && msta->wcid.sta &&
+-	    !(status->flag & (RX_FLAG_ONLY_MONITOR | RX_FLAG_FAILED_FCS_CRC)))
+-		mt7915_mac_sample_path_signal(dev, msta, status);
++	if (rxv && dev->peer_spe &&
++	    (READ_ONCE(tx_paths_auto) || READ_ONCE(mt7915_txpower_auto)) &&
++	    !(status->flag & (RX_FLAG_ONLY_MONITOR |
++				    RX_FLAG_FAILED_FCS_CRC))) {
++		bool basic = false;
++
++		if (status->flag & RX_FLAG_8023) {
++			/* A multicast Ethernet DA can have a unicast over-air RA
++			 * (multicast-to-unicast replication). That uses a peer cap.
++			 */
++			basic = !unicast && skb->len >= ETH_HLEN &&
++				is_multicast_ether_addr(skb->data);
++		} else {
++			struct ieee80211_hdr *hdr = mt76_skb_get_hdr(skb);
++
++			if ((u8 *)hdr + 24 <= skb_tail_pointer(skb)) {
++				basic = ieee80211_is_mgmt(fc) ||
++					(ieee80211_is_data(fc) &&
++					 is_multicast_ether_addr(hdr->addr1));
++				memcpy(signal_ta, hdr->addr2, ETH_ALEN);
++				signal_ta_valid = true;
++			}
++		}
++		if (basic) {
++			struct mt7915_basic_signal sample = {
++				.phy = phy, .status = status,
++				.addr = signal_ta_valid ? signal_ta : NULL,
++				.fc = status->flag & RX_FLAG_8023 ?
++					IEEE80211_FTYPE_DATA : le16_to_cpu(fc),
++				.index = idx, .by_index = true,
++			};
++
++			if (!mt7915_mac_sample_basic_peer(&sample, signal_sta) &&
++			    signal_ta_valid) {
++				sample.by_index = false;
++				mt7915_mac_sample_basic(&sample);
++			}
++		}
++	}
+ 
+ 	if (!status->wcid || !ieee80211_is_data_qos(fc))
+ 		return 0;
+@@ -858,6 +955,8 @@ int mt7915_tx_prepare_skb(struct mt76_dev *mdev, void *txwi_ptr,
+ 	/* skb_add clears the cb; its private bit then survives TXFREE and TXS. */
+ 	if (tmr)
+ 		mt76_tx_skb_cb(tx_info->skb)->flags |= MT7915_TX_CB_TMR;
++	else if (sta)
++		mt7915_power_tx_prepare(dev, sta, tx_info->skb);
+ 	mt7915_mac_write_txwi(mdev, txwi_ptr, tx_info->skb, wcid, pid, key,
+ 			      qid, 0);
+ 
+@@ -1132,6 +1231,10 @@ static void mt7915_mac_add_txs_skb(struct mt7915_dev *dev,
+ 			!!(info->flags & IEEE80211_TX_STAT_ACK);
+ 		info->status.rates[0].idx = -1;
+ 
++		if (!(mt76_tx_skb_cb(skb)->flags & MT7915_TX_CB_TMR))
++			mt7915_power_tx_status(dev,
++				container_of((void *)wcid, struct ieee80211_sta,
++					     drv_priv), skb, txs_data);
+ 		if (!(mt76_tx_skb_cb(skb)->flags & MT7915_TX_CB_TMR))
+ 			mt76_connac2_mac_fill_txs(mdev, wcid, txs_data);
+ 		mt76_tx_status_skb_done(mdev, skb, &list);
+@@ -2186,7 +2289,7 @@ struct mt7915_tx_paths_scan {
+ /* Runs in the atomic station iteration: only decide, never program.
+  * mac_work holds dev->mt76.mutex across the scan and the apply, so the
+  * stations collected here cannot be freed in between. The signal is that
+- * of the peer's unicast frames as the peer currently sends them.
++ * of the peer's broadcast/management frames, outside peer data caps.
+  */
+ static void mt7915_tx_paths_scan_sta(void *data, struct ieee80211_sta *sta)
+ {
+@@ -2307,6 +2410,8 @@ void mt7915_mac_work(struct work_struct *work)
+ 		if (READ_ONCE(tx_paths_auto) && phy->dev->peer_spe)
+ 			mt7915_mac_tx_paths_policy(phy);
+ 	}
++	/* Guard/disable cleanup runs on every watchdog pass, including stock WM. */
++	mt7915_power_work(phy);
+ 
+ 	mutex_unlock(&mphy->dev->mutex);
+ 
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/main.c b/drivers/net/wireless/mediatek/mt76/mt7915/main.c
+index f888096..fa1bfad 100644
+--- a/drivers/net/wireless/mediatek/mt76/mt7915/main.c
++++ b/drivers/net/wireless/mediatek/mt76/mt7915/main.c
+@@ -817,6 +817,7 @@ int mt7915_mac_sta_add(struct mt76_dev *mdev, struct ieee80211_vif *vif,
+ 
+ 	ewma_avg_signal_init(&msta->avg_ack_signal);
+ 	ewma_avg_signal_init(&msta->path_signal);
++	mt7915_power_init(dev, sta);
+ 
+ 	mt7915_mac_wtbl_update(dev, idx,
+ 			       MT_WTBL_UPDATE_ADM_COUNT_CLEAR);
+@@ -885,20 +886,16 @@ static void mt7915_sta_reapply(struct mt7915_dev *dev,
+ 			       struct ieee80211_vif *vif,
+ 			       struct ieee80211_sta *sta, bool rebuild)
+ {
+-	struct mt7915_vif *mvif = (struct mt7915_vif *)vif->drv_priv;
+ 	struct mt7915_sta *msta = (struct mt7915_sta *)sta->drv_priv;
+ 	int ret;
+ 
+ 	lockdep_assert_held(&dev->mt76.mutex);
+ 
+-	if (sta->deflink.txpwr.type == NL80211_TX_POWER_LIMITED) {
+-		ret = mt7915_mcu_set_txpower_frame(mvif->phy, vif, sta,
+-						   sta->deflink.txpwr.power);
+-		if (ret)
+-			dev_warn(dev->mt76.dev,
+-				 "station %pM power limit not applied: %d\n",
+-				 sta->addr, ret);
+-	}
++	ret = mt7915_power_reapply(dev, vif, sta);
++	if (ret)
++		dev_warn_ratelimited(dev->mt76.dev,
++				     "station %pM power not reapplied: %d\n",
++				     sta->addr, ret);
+ 	mt7915_mcu_set_tx_paths(dev, vif, sta,
+ 				rebuild && msta->tx_paths != MT7915_TX_PATHS_FULL);
+ }
+@@ -913,6 +910,7 @@ int mt7915_mac_sta_event(struct mt76_dev *mdev, struct ieee80211_vif *vif,
+ 
+ 	switch (ev) {
+ 	case MT76_STA_EVENT_ASSOC:
++		mt7915_power_init(dev, sta);
+ 		/* peer_tx_paths writers hold this mutex: build the records and
+ 		 * reapply under it so they all see one transmit-path mode
+ 		 */
+@@ -954,6 +952,7 @@ int mt7915_mac_sta_event(struct mt76_dev *mdev, struct ieee80211_vif *vif,
+ 		msta->wcid.tx_info &= ~MT_WCID_TX_INFO_SET;
+ 		msta->wcid.sta_disabled = 1;
+ 		msta->wcid.sta = 0;
++		mt7915_power_invalidate(dev, sta);
+ 		return 0;
+ 	}
+ 
+@@ -1426,6 +1425,8 @@ static int mt7915_sta_set_txpwr(struct ieee80211_hw *hw,
+ 		txpower = 0;
+ 
+ 	mutex_lock(&dev->mt76.mutex);
++	/* A user limit owns the station; AUTO explicitly starts a new trial. */
++	mt7915_power_init(dev, sta);
+ 
+ 	/* NOTE: temporarily use 0 as minimum limit, which is a
+ 	 * global setting and will be applied to all stations.
+@@ -1439,6 +1440,13 @@ static int mt7915_sta_set_txpwr(struct ieee80211_hw *hw,
+ 	 * using fixed rate can be configured via TxD.
+ 	 */
+ 	ret = mt7915_mcu_set_txpower_frame(phy, vif, sta, txpower);
++	if (!ret) {
++		struct mt7915_sta *msta = (void *)sta->drv_priv;
++
++		spin_lock_bh(&dev->mt76.sta_poll_lock);
++		msta->power.dirty = false;
++		spin_unlock_bh(&dev->mt76.sta_poll_lock);
++	}
+ 
+ out:
+ 	mutex_unlock(&dev->mt76.mutex);
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/mcu.c b/drivers/net/wireless/mediatek/mt76/mt7915/mcu.c
+index 8e077c3..e0dc335 100644
+--- a/drivers/net/wireless/mediatek/mt76/mt7915/mcu.c
++++ b/drivers/net/wireless/mediatek/mt76/mt7915/mcu.c
+@@ -1510,6 +1510,7 @@ int mt7915_mcu_set_tx_paths(struct mt7915_dev *dev, struct ieee80211_vif *vif,
+ 	int ret = 0;
+ 
+ 	lockdep_assert_held(&dev->mt76.mutex);
++	mt7915_power_invalidate(dev, sta);
+ 
+ 	if (rebuild)
+ 		ret = mt7915_mcu_add_rate_ctrl(dev, vif, sta, true);
+@@ -3585,7 +3586,8 @@ int mt7915_mcu_set_txpower_frame_min(struct mt7915_phy *phy, s8 txpower)
+ 				 sizeof(req), true);
+ }
+ 
+-int mt7915_mcu_set_txpower_frame(struct mt7915_phy *phy,
++/* Explicit controller limit; -1 clears without changing mac80211 ownership. */
++int mt7915_mcu_set_txpower_limit(struct mt7915_phy *phy,
+ 				 struct ieee80211_vif *vif,
+ 				 struct ieee80211_sta *sta, s16 txpower)
+ {
+@@ -3608,19 +3610,23 @@ int mt7915_mcu_set_txpower_frame(struct mt7915_phy *phy,
+ 	int ret;
+ 	s8 txpower_sku[MT7915_SKU_RATE_NUM];
+ 
+-	ret = mt7915_mcu_get_txpower_sku(phy, txpower_sku, sizeof(txpower_sku));
+-	if (ret)
+-		return ret;
++	if (txpower < -1)
++		return -EINVAL;
+ 
+ 	/* An all-zero offset table clears the station's limit; only an
+ 	 * explicit limit is converted and range-checked.
+ 	 */
+-	if (sta->deflink.txpwr.type != NL80211_TX_POWER_AUTOMATIC) {
++	if (txpower >= 0) {
+ 		u32 offs, len, i;
+ 		int target;
+ 
++		ret = mt7915_mcu_get_txpower_sku(phy, txpower_sku,
++					      sizeof(txpower_sku));
++		if (ret)
++			return ret;
++
+ 		/* mt76_get_power_bound() doubles the limit into an s8 */
+-		if (txpower < 0 || txpower > S8_MAX / 2)
++		if (txpower > S8_MAX / 2)
+ 			return -EINVAL;
+ 
+ 		/* The firmware keeps a rate's base power when the offset would
+@@ -3666,6 +3672,17 @@ int mt7915_mcu_set_txpower_frame(struct mt7915_phy *phy,
+ 				 sizeof(req), true);
+ }
+ 
++int mt7915_mcu_set_txpower_frame(struct mt7915_phy *phy,
++			       struct ieee80211_vif *vif,
++			       struct ieee80211_sta *sta, s16 txpower)
++{
++	if (sta->deflink.txpwr.type == NL80211_TX_POWER_AUTOMATIC)
++		txpower = -1;
++	else if (txpower < 0)
++		return -EINVAL;
++	return mt7915_mcu_set_txpower_limit(phy, vif, sta, txpower);
++}
++
+ int mt7915_mcu_set_txpower_sku(struct mt7915_phy *phy)
+ {
+ 	struct mt7915_dev *dev = phy->dev;
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/mt7915.h b/drivers/net/wireless/mediatek/mt76/mt7915/mt7915.h
+index 123f082..46a7887 100644
+--- a/drivers/net/wireless/mediatek/mt76/mt7915/mt7915.h
++++ b/drivers/net/wireless/mediatek/mt76/mt7915/mt7915.h
+@@ -92,6 +92,8 @@
+ 
+ struct mt7915_vif;
+ struct mt7915_sta;
++struct mt7915_dev;
++struct mt7915_phy;
+ struct mt7915_dfs_pulse;
+ struct mt7915_dfs_pattern;
+ 
+@@ -146,6 +148,17 @@ enum mt7915_tx_paths {
+ 	MT7915_TX_PATHS_AUTO = 0xff,	/* setter only: hand the peer back to the policy */
+ };
+ 
++/* All fields below are protected by mt76.sta_poll_lock. */
++struct mt7915_peer_power {
++	u32 generation, sum_mcs;
++	unsigned long changed, last_txs, window_start, retry_at;
++	u16 freq, chains, samples, errors, mismatches;
++	u16 baseline_mcs, baseline_per, backoff;
++	s16 base, limit;
++	u8 bw, nss, paths, mcs, stable;
++	bool ready, dirty, qualified;
++};
++
+ struct mt7915_sta {
+ 	struct mt76_wcid wcid; /* must be first */
+ 
+@@ -161,11 +174,14 @@ struct mt7915_sta {
+ 	bool tx_paths_failed; /* last apply of tx_paths failed */
+ 	bool tx_paths_manual; /* set by hand; the policy leaves it alone */
+ 	unsigned long tx_paths_changed; /* jiffies of the last automatic change */
+-	/* the transmit-path policy's signal of this peer's frames, both
+-	 * under dev->mt76.sta_poll_lock
++	/* Basic-frame EWMA, age and attribution for both automatic policies;
++	 * all published/snapshotted under dev->mt76.sta_poll_lock
+ 	 */
+ 	struct ewma_avg_signal path_signal;
+ 	unsigned long path_signal_jiffies; /* jiffies of the last sample */
++	u16 path_signal_fc, path_signal_index; /* last sampled RX attribution */
++	bool path_signal_by_index;
++	struct mt7915_peer_power power;
+ 
+ 	unsigned long changed;
+ 	unsigned long jiffies;
+@@ -177,6 +193,20 @@ struct mt7915_sta {
+ 	} twt;
+ };
+ 
++extern bool mt7915_txpower_auto;
++void mt7915_power_init(struct mt7915_dev *dev, struct ieee80211_sta *sta);
++void mt7915_power_invalidate(struct mt7915_dev *dev, struct ieee80211_sta *sta);
++void mt7915_power_tx_prepare(struct mt7915_dev *dev, struct ieee80211_sta *sta,
++			    struct sk_buff *skb);
++void mt7915_power_tx_status(struct mt7915_dev *dev, struct ieee80211_sta *sta,
++			   struct sk_buff *skb, __le32 *txs);
++void mt7915_power_work(struct mt7915_phy *phy);
++int mt7915_power_reapply(struct mt7915_dev *dev, struct ieee80211_vif *vif,
++			struct ieee80211_sta *sta);
++int mt7915_mcu_set_txpower_limit(struct mt7915_phy *phy,
++			       struct ieee80211_vif *vif,
++			       struct ieee80211_sta *sta, s16 limit);
++
+ struct mt7915_vif_cap {
+ 	bool ht_ldpc:1;
+ 	bool vht_ldpc:1;
+@@ -268,6 +298,8 @@ struct mt7915_phy {
+ #endif
+ 
+ 	u8 tx_paths_tick; /* mac_work runs between policy passes */
++	u16 power_cursor; /* round-robin WCID for bounded power transactions */
++	bool power_active; /* enabled previously, or automatic cleanup remains */
+ };
+ 
+ struct mt7915_ipi_sample {
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7915/power.c b/drivers/net/wireless/mediatek/mt76/mt7915/power.c
+new file mode 100644
+index 0000000..4247609
+--- /dev/null
++++ b/drivers/net/wireless/mediatek/mt76/mt7915/power.c
+@@ -0,0 +1,461 @@
++// SPDX-License-Identifier: ISC
++/* Local basic-frame signal caps. No peer signalling or interface restart. */
++#include "mt7915.h"
++#include "mac.h"
++#include "mcu.h"
++
++bool mt7915_txpower_auto = true;
++module_param_named(tx_power_auto, mt7915_txpower_auto, bool, 0644);
++MODULE_PARM_DESC(tx_power_auto,
++	"Map mesh broadcast/management signal to data power with rollback (default on)");
++
++#define POWER_CLEAR -1
++#define POWER_NONE -2
++#define POWER_STEP 2
++#define POWER_WINDOW (5 * HZ)
++#define POWER_WINDOW_MAX (30 * HZ)
++#define POWER_RECOVER (10 * 60 * HZ)
++#define POWER_FRESH (2 * HZ)
++#define POWER_SIGNAL_AGE (10 * HZ)
++#define POWER_MIN_SAMPLES 16
++#define POWER_MCS_TOLERANCE 128 /* half an MCS, Q8 */
++#define POWER_PER_TOLERANCE 10 /* percentage points */
++#define POWER_RETRY_MIN 300 /* seconds */
++#define POWER_RETRY_MAX 3600
++
++enum mt7915_power_check {
++	POWER_KEEP,
++	POWER_SPARSE,
++	POWER_REGRESSION,
++};
++
++/* Compare complete windows to the peer's uncapped behaviour, not its
++ * highest individual completion. All helpers run under sta_poll_lock.
++ */
++static void mt7915_power_window_reset(struct mt7915_peer_power *p,
++				    unsigned long now)
++{
++	p->window_start = now;
++	p->sum_mcs = 0;
++	p->samples = 0;
++	p->errors = 0;
++	p->mismatches = 0;
++}
++
++static void mt7915_power_backoff(struct mt7915_peer_power *p, unsigned long now)
++{
++	p->backoff = p->backoff ? min_t(u16, 2 * p->backoff, POWER_RETRY_MAX) :
++				POWER_RETRY_MIN;
++	p->retry_at = now + p->backoff * HZ;
++}
++
++static enum mt7915_power_check
++mt7915_power_window(struct mt7915_peer_power *p, unsigned long now)
++{
++	enum mt7915_power_check result = POWER_KEEP;
++	u16 mean, per;
++	bool bad;
++
++	if (time_before(now, p->window_start + POWER_WINDOW))
++		return POWER_KEEP;
++	p->qualified = false;
++	/* Low traffic is not evidence of rate loss. Wait for enough samples
++	 * without permitting a deeper cap on an incomplete old window.
++	 */
++	if (p->samples < POWER_MIN_SAMPLES &&
++	    time_before(now, p->window_start + POWER_WINDOW_MAX))
++		return POWER_KEEP;
++	if (p->samples >= POWER_MIN_SAMPLES) {
++		u16 valid = p->samples - p->mismatches;
++
++		mean = valid ? p->sum_mcs * 256 / valid : 0;
++		per = p->errors * 100 / p->samples;
++		if (p->limit < 0) {
++			/* Two adjacent full-power windows must agree. There is
++			 * no absolute MCS floor: stable MCS8 can save power too.
++			 */
++			if (per <= 25) {
++				if (p->stable &&
++				    abs((int)mean - p->baseline_mcs) <= POWER_MCS_TOLERANCE &&
++				    abs((int)per - p->baseline_per) <= POWER_PER_TOLERANCE)
++					p->stable = 2;
++				else
++					p->stable = 1;
++			} else {
++				p->stable = 0;
++			}
++			p->baseline_mcs = mean;
++			p->baseline_per = per;
++			p->qualified = p->stable == 2;
++		} else {
++			bad = mean + POWER_MCS_TOLERANCE < p->baseline_mcs ||
++			      per > p->baseline_per + POWER_PER_TOLERANCE;
++			p->qualified = !bad;
++			if (bad) {
++				result = POWER_REGRESSION;
++			} else if (!time_before(now, p->changed + POWER_RECOVER)) {
++				/* Only a passing complete window confirms recovery;
++				 * uncapped time or an unfinished window earns nothing.
++				 */
++				p->backoff = 0;
++				p->retry_at = 0;
++			}
++		}
++	} else {
++		p->stable = 0;
++		/* The 30-second measurement timeout clears without penalty. */
++		result = p->limit >= 0 ? POWER_SPARSE : POWER_KEEP;
++	}
++	mt7915_power_window_reset(p, now);
++	return result;
++}
++
++void mt7915_power_init(struct mt7915_dev *dev, struct ieee80211_sta *sta)
++{
++	struct mt7915_sta *msta = (void *)sta->drv_priv;
++	struct mt7915_peer_power *p = &msta->power;
++	u32 gen;
++	bool dirty;
++
++	spin_lock_bh(&dev->mt76.sta_poll_lock);
++	gen = p->generation + 1;
++	dirty = p->generation && (p->limit >= 0 || p->dirty);
++	memset(p, 0, sizeof(*p));
++	p->generation = gen ?: 1;
++	p->limit = POWER_CLEAR;
++	p->dirty = dirty;
++	spin_unlock_bh(&dev->mt76.sta_poll_lock);
++}
++
++void mt7915_power_invalidate(struct mt7915_dev *dev, struct ieee80211_sta *sta)
++{
++	struct mt7915_sta *msta = (void *)sta->drv_priv;
++	struct mt7915_peer_power *p = &msta->power;
++
++	spin_lock_bh(&dev->mt76.sta_poll_lock);
++	if (p->ready || p->limit >= 0) {
++		p->generation++;
++		p->ready = false;
++		/* An uncapped table needs no clear just to invalidate rates.
++		 * In particular, do not create cleanup work while disabled.
++		 */
++		p->dirty |= p->limit >= 0;
++		p->limit = POWER_CLEAR;
++		p->stable = 0;
++		p->qualified = false;
++	}
++	spin_unlock_bh(&dev->mt76.sta_poll_lock);
++}
++
++void mt7915_power_tx_prepare(struct mt7915_dev *dev, struct ieee80211_sta *sta,
++			    struct sk_buff *skb)
++{
++	struct mt7915_sta *msta = (void *)sta->drv_priv;
++	struct ieee80211_tx_info *info = IEEE80211_SKB_CB(skb);
++	struct ieee80211_hdr *hdr = (void *)skb->data;
++	struct mt76_tx_cb *cb = mt76_tx_skb_cb(skb);
++
++	if (!READ_ONCE(mt7915_txpower_auto) || !dev->peer_spe ||
++	    cb->pktid < MT_PACKET_ID_FIRST ||
++	    info->flags & (IEEE80211_TX_CTL_RATE_CTRL_PROBE |
++			   IEEE80211_TX_CTL_NO_ACK) ||
++	    (!(info->flags & IEEE80211_TX_CTL_HW_80211_ENCAP) &&
++	     !ieee80211_is_data_present(hdr->frame_control)))
++		return;
++	spin_lock_bh(&dev->mt76.sta_poll_lock);
++	if (msta->power.ready)
++		cb->rate_generation = msta->power.generation;
++	spin_unlock_bh(&dev->mt76.sta_poll_lock);
++}
++
++void mt7915_power_tx_status(struct mt7915_dev *dev, struct ieee80211_sta *sta,
++			   struct sk_buff *skb, __le32 *txs)
++{
++	struct mt7915_sta *msta = (void *)sta->drv_priv;
++	struct mt7915_peer_power *p = &msta->power;
++	u32 cookie = mt76_tx_skb_cb(skb)->rate_generation;
++	u32 v = le32_to_cpu(txs[0]);
++	u32 rate = FIELD_GET(MT_TXS0_TX_RATE, v);
++	u8 mode = FIELD_GET(MT_TX_RATE_MODE, rate);
++	u8 nss = FIELD_GET(MT_TX_RATE_NSS, rate) + 1;
++	u8 mcs = FIELD_GET(MT_TX_RATE_IDX, rate);
++	bool he = mode == MT_PHY_TYPE_HE_SU || mode == MT_PHY_TYPE_HE_EXT_SU;
++
++	if (!cookie || !msta->wcid.sta)
++		return;
++	if (FIELD_GET(MT_TX_RATE_STBC, rate) && nss > 1)
++		nss >>= 1;
++	spin_lock_bh(&dev->mt76.sta_poll_lock);
++	if (p->ready && cookie == p->generation) {
++		bool valid = he && mcs <= 11 && nss == p->nss &&
++			FIELD_GET(MT_TXS0_BW, v) == p->bw &&
++			!(rate & MT_TX_RATE_DCM);
++
++		if (p->samples < U16_MAX) {
++			p->samples++;
++			/* ACK errors are a ratio; invalid mode/NSS/BW also
++			 * counts as an error, outside the matching HE MCS mean.
++			 */
++			p->sum_mcs += valid ? mcs : 0;
++			p->mismatches += !valid;
++			p->errors += !valid || !!(v & MT_TXS0_ACK_ERROR_MASK);
++		}
++		p->mcs = mcs;
++		p->last_txs = jiffies;
++	}
++	spin_unlock_bh(&dev->mt76.sta_poll_lock);
++}
++
++/* Device mutex held. All state transitions are under sta_poll_lock; never
++ * hold that spin lock across MCU traffic. Statuses from before/during an
++ * application have a different cookie and cannot qualify its new window.
++ */
++static int mt7915_power_apply(struct mt7915_dev *dev, struct ieee80211_vif *vif,
++			     struct ieee80211_sta *sta, s16 limit)
++{
++	struct mt7915_sta *msta = (void *)sta->drv_priv;
++	struct mt7915_phy *phy = msta->vif->phy;
++	struct mt7915_peer_power *p = &msta->power;
++	int ret;
++
++	lockdep_assert_held(&dev->mt76.mutex);
++	spin_lock_bh(&dev->mt76.sta_poll_lock);
++	if (limit >= 0 && (p->limit < 0 || limit < p->limit)) {
++		/* A status may have arrived since the atomic scan/decision. */
++		if (!p->qualified || !p->last_txs ||
++		    time_after(jiffies, p->last_txs + POWER_FRESH)) {
++			spin_unlock_bh(&dev->mt76.sta_poll_lock);
++			return -EAGAIN;
++		}
++	}
++	p->generation++;
++	p->ready = false;
++	p->limit = limit;
++	p->dirty = true;
++	spin_unlock_bh(&dev->mt76.sta_poll_lock);
++	ret = mt7915_mcu_set_txpower_frame_min(phy, 0);
++	if (!ret)
++		ret = mt7915_mcu_set_txpower_limit(phy, vif, sta, limit);
++	spin_lock_bh(&dev->mt76.sta_poll_lock);
++	p->generation++;
++	p->dirty = !!ret;
++	p->ready = !ret;
++	p->changed = jiffies;
++	p->last_txs = 0;
++	p->qualified = false;
++	mt7915_power_window_reset(p, jiffies);
++	if (limit < 0 || ret)
++		p->stable = 0;
++	if (ret) {
++		/* Unknown effective limit: retry a clear, never a reduction.
++		 * Failed clear retries must not extend cooldown every pass.
++		 */
++		p->limit = POWER_CLEAR;
++		if (!p->backoff || !time_before(jiffies, p->retry_at))
++			mt7915_power_backoff(p, jiffies);
++	}
++	spin_unlock_bh(&dev->mt76.sta_poll_lock);
++	if (ret)
++		dev_warn_ratelimited(dev->mt76.dev, "peer %pM power %d failed: %d\n",
++				     sta->addr, limit, ret);
++	return ret;
++}
++
++int mt7915_power_reapply(struct mt7915_dev *dev, struct ieee80211_vif *vif,
++			struct ieee80211_sta *sta)
++{
++	struct mt7915_sta *msta = (void *)sta->drv_priv;
++	s16 limit;
++	bool needed;
++
++	lockdep_assert_held(&dev->mt76.mutex);
++	if (sta->deflink.txpwr.type == NL80211_TX_POWER_LIMITED)
++		return mt7915_mcu_set_txpower_frame(msta->vif->phy, vif, sta,
++						   sta->deflink.txpwr.power);
++	spin_lock_bh(&dev->mt76.sta_poll_lock);
++	limit = msta->power.limit;
++	needed = msta->power.dirty || limit >= 0;
++	spin_unlock_bh(&dev->mt76.sta_poll_lock);
++	return needed ? mt7915_power_apply(dev, vif, sta, limit) : 0;
++}
++
++/* Caller holds sta_poll_lock. POWER_NONE means no firmware transaction.
++ * The received management/broadcast signal selects a fixed cap. A
++ * sustained window regression clears it and schedules a timed retry.
++ * No downward power search or peer power estimate.
++ */
++static s16 mt7915_power_decide(struct mt7915_peer_power *p, unsigned long now,
++			     bool enabled, bool fresh, int signal)
++{
++	bool stale = !p->last_txs || time_after(now, p->last_txs + POWER_FRESH);
++	enum mt7915_power_check check;
++	s16 reduction, next;
++
++	if (!enabled) {
++		p->ready = false;
++		return p->limit >= 0 || p->dirty ? POWER_CLEAR : POWER_NONE;
++	}
++	if (p->dirty)
++		return p->limit;
++	if (stale) {
++		p->qualified = false;
++		if (p->limit >= 0 && time_after(now, p->changed + POWER_FRESH))
++			return POWER_CLEAR;
++		if (p->limit < 0) {
++			p->stable = 0;
++			mt7915_power_window_reset(p, now);
++		}
++	}
++	check = mt7915_power_window(p, now);
++	if (check != POWER_KEEP) {
++		if (check == POWER_REGRESSION)
++			mt7915_power_backoff(p, now);
++		return POWER_CLEAR;
++	}
++	if (!fresh)
++		return p->limit >= 0 ? POWER_CLEAR : POWER_NONE;
++	/* 2 dB bins above -48 dBm, maximum 8 dB attenuation, floor 10 dBm.
++	 * Matching rate/error windows qualify this signal-selected target.
++	 */
++	reduction = clamp_t(s16, (signal + 48) / POWER_STEP, 0, 4) * POWER_STEP;
++	if (p->limit >= 0 && reduction > p->base - p->limit)
++		reduction = max_t(s16, p->base - p->limit,
++			clamp_t(s16, (signal + 46) / POWER_STEP, 0, 4) * POWER_STEP);
++	next = reduction ? max_t(s16, 10, p->base - reduction) : POWER_CLEAR;
++	if (p->base <= 10 || next >= p->base)
++		next = POWER_CLEAR;
++	if (next == p->limit)
++		return POWER_NONE;
++	/* Raising power and disabling a cap never wait for a rate window. */
++	if (next < 0 || (p->limit >= 0 && next > p->limit))
++		return next;
++	if (stale || !p->qualified ||
++	    (p->backoff && time_before(now, p->retry_at)))
++		return POWER_NONE;
++	return next;
++}
++
++struct mt7915_power_scan {
++	struct mt7915_phy *phy;
++	struct ieee80211_sta *sta[8];
++	int n;
++	u16 start;
++	bool pending;
++};
++
++static s16 mt7915_power_target(struct mt7915_phy *phy, struct ieee80211_sta *sta)
++{
++	struct mt7915_sta *msta = (void *)sta->drv_priv;
++	struct mt7915_peer_power *p = &msta->power;
++	struct mt76_phy *mphy = phy->mt76;
++	struct ieee80211_vif *vif = container_of((void *)msta->vif,
++						struct ieee80211_vif, drv_priv);
++	u8 nss = min_t(u8, sta->deflink.rx_nss, hweight8(mphy->antenna_mask));
++	s16 base = clamp_t(s16, (mphy->txpower_cur +
++		mt76_tx_power_path_delta(hweight16(mphy->chainmask))) / 2, 1, 63);
++	u16 freq = mphy->chandef.center_freq1;
++	bool enabled = READ_ONCE(mt7915_txpower_auto) && phy->dev->peer_spe &&
++		sta->deflink.he_cap.has_he && nss == 2 &&
++		msta->tx_paths != MT7915_TX_PATHS_SINGLE;
++	unsigned long stamp;
++	int signal;
++	s16 target;
++
++	if (msta->vif->phy != phy || vif->type != NL80211_IFTYPE_MESH_POINT ||
++	    !msta->wcid.sta || msta->wcid.sta_disabled ||
++	    sta->deflink.txpwr.type != NL80211_TX_POWER_AUTOMATIC)
++		return POWER_NONE;
++	spin_lock_bh(&phy->dev->mt76.sta_poll_lock);
++	if (enabled && ((!p->ready && !p->dirty) || p->freq != freq || p->base != base ||
++	    p->chains != mphy->chainmask || p->bw != sta->deflink.bandwidth ||
++	    p->paths != msta->tx_paths || p->nss != nss)) {
++		p->freq = freq;
++		p->base = base;
++		p->chains = mphy->chainmask;
++		p->bw = sta->deflink.bandwidth;
++		p->paths = msta->tx_paths;
++		p->nss = nss;
++		p->mcs = 0;
++		p->limit = POWER_CLEAR;
++		p->stable = 0;
++		p->qualified = false;
++		p->dirty = true;
++	}
++	stamp = msta->path_signal_jiffies;
++	signal = -(int)ewma_avg_signal_read(&msta->path_signal);
++	target = mt7915_power_decide(p, jiffies, enabled,
++		stamp && signal && !time_after(jiffies, stamp + POWER_SIGNAL_AGE), signal);
++	spin_unlock_bh(&phy->dev->mt76.sta_poll_lock);
++	return target;
++}
++
++static void mt7915_power_scan_sta(void *data, struct ieee80211_sta *sta)
++{
++	struct mt7915_power_scan *s = data;
++	struct mt7915_sta *msta = (void *)sta->drv_priv;
++	struct mt7915_dev *dev = s->phy->dev;
++	struct ieee80211_vif *vif;
++	unsigned int distance;
++	int i, j;
++
++	if (msta->vif->phy != s->phy || !msta->wcid.sta ||
++	    msta->wcid.sta_disabled ||
++	    sta->deflink.txpwr.type != NL80211_TX_POWER_AUTOMATIC)
++		return;
++	vif = container_of((void *)msta->vif, struct ieee80211_vif, drv_priv);
++	if (vif->type != NL80211_IFTYPE_MESH_POINT)
++		return;
++	/* This scan visits every eligible station, including entries outside
++	 * the bounded apply batch. Keep disable cleanup alive until drained.
++	 */
++	spin_lock_bh(&dev->mt76.sta_poll_lock);
++	s->pending |= msta->power.limit >= 0 || msta->power.dirty;
++	spin_unlock_bh(&dev->mt76.sta_poll_lock);
++	/* The mac80211 list is not ordered by WCID. Retain the eight nearest
++	 * entries in circular WCID order, not the first eight list entries.
++	 */
++	distance = (msta->wcid.idx + MT7915_WTBL_STA - s->start) % MT7915_WTBL_STA;
++	for (i = 0; i < s->n; i++) {
++		struct mt7915_sta *other = (void *)s->sta[i]->drv_priv;
++		unsigned int d = (other->wcid.idx + MT7915_WTBL_STA - s->start) %
++				 MT7915_WTBL_STA;
++
++		if (distance < d)
++			break;
++	}
++	if (i == ARRAY_SIZE(s->sta))
++		return;
++	for (j = min_t(int, s->n, ARRAY_SIZE(s->sta) - 1); j > i; j--)
++		s->sta[j] = s->sta[j - 1];
++	s->sta[i] = sta;
++	if (s->n < ARRAY_SIZE(s->sta))
++		s->n++;
++}
++
++void mt7915_power_work(struct mt7915_phy *phy)
++{
++	struct mt7915_dev *dev = phy->dev;
++	struct mt7915_power_scan s = { .phy = phy, .start = phy->power_cursor };
++	int i;
++
++	lockdep_assert_held(&dev->mt76.mutex);
++	if (!is_mt7916(&dev->mt76) ||
++	    (!READ_ONCE(mt7915_txpower_auto) && !phy->power_active))
++		return;
++	ieee80211_iterate_stations_atomic(phy->mt76->hw, mt7915_power_scan_sta, &s);
++	for (i = 0; i < s.n; i++) {
++		struct ieee80211_sta *sta = s.sta[i];
++		struct mt7915_sta *msta = (void *)sta->drv_priv;
++		struct ieee80211_vif *vif = container_of((void *)msta->vif,
++						struct ieee80211_vif, drv_priv);
++		s16 target = mt7915_power_target(phy, sta);
++
++		phy->power_cursor = (msta->wcid.idx + 1) % MT7915_WTBL_STA;
++		if (target != POWER_NONE)
++			mt7915_power_apply(dev, vif, sta, target);
++		spin_lock_bh(&dev->mt76.sta_poll_lock);
++		s.pending |= msta->power.limit >= 0 || msta->power.dirty;
++		spin_unlock_bh(&dev->mt76.sta_poll_lock);
++	}
++	phy->power_active = READ_ONCE(mt7915_txpower_auto) || s.pending;
++}

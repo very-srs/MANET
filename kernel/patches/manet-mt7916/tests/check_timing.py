@@ -18,7 +18,14 @@ helpers = probe[start:probe.index('\nstruct mt7915_tmr_lookup', start)]
 start = probe.index('static ssize_t mt7915_tmr_probe_write(')
 io = probe[start:probe.index('\nconst struct file_operations', start)]
 template = Path(__file__).resolve().parents[2] / 'mt76-ftm/timing_test.c'
-harness = template.read_text().replace('/* DRIVER_HELPERS */', flag + '\n' + status)
+# 0018 reports tracked statuses to the power controller; it has no role here.
+power = r'''
+struct ieee80211_sta;
+#define container_of(ptr, type, member) ((type *)(void *)(ptr))
+static void mt7915_power_tx_status(struct mt7915_dev *dev, struct ieee80211_sta *sta,
+				   struct sk_buff *skb, __le32 *txs) {}
+'''
+harness = template.read_text().replace('/* DRIVER_HELPERS */', flag + '\n' + power + status)
 harness = harness.replace('/* PROBE_HELPERS */', txwi + helpers + io)
 source, exe = output / 'timing_test.c', output / 'timing_test'
 source.write_text(harness)

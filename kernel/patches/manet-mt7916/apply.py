@@ -13,7 +13,7 @@ BASES = {
     '2ff600d29ee478d0a8d46ef8a58afb5e038fe692': 'r3a',
 }
 HERE = Path(__file__).resolve().parent
-PREFIXES = ('net/mac80211/', 'net/wireless/', 'drivers/net/wireless/mediatek/mt76/mt7915/')
+PREFIXES = ('net/mac80211/', 'net/wireless/', 'drivers/net/wireless/mediatek/mt76/')
 
 
 def inventory(series=HERE):
