@@ -857,7 +857,7 @@ class CachedFirmwareTests(unittest.TestCase):
             self.skipTest(f'cached stock WM absent: {path}; run either firmware package builder')
         output = fw.patch_wm(path.read_bytes(), MANIFEST['wm_patch'])
         self.assertEqual(hashlib.sha256(output).hexdigest(),
-                         '18a2e1d03f17913ef0450a905536d5defcdf78ee1d98a1232649c31a70a63e1e')
+                         '5e3d31b1814c590c8f8bef9c6a21eb05f7421b265913d84d5af83441566ed0e2')
         # Exact expected hash above is independent of the configurable manifest.
 
     def test_real_wrong_input_hash(self):

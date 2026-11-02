@@ -5488,16 +5488,35 @@ split.
 
 ## MT7916 firmware selection
 
-`manet-mt7916-firmware.py` selects the positioning-patched 2024 WM with stock
+`manet-mt7916-firmware.py` selects the MANET-patched 2024 WM with stock
 2024 WA/ROM for every MT7916 primary PCI function whose installed mt7915e
 module for the running kernel reports `manet_timing=1`. This is the default
 even when positioning is off or mesh.conf is absent. The manifest pins
 linux-firmware `20250613`, commit
 `47e03ef409e07315f2b5c1d0fc08383da2e1bde9`; that release contains WM
 build `20240823172741`. The patched WM SHA-256 is
-`18a2e1d03f17913ef0450a905536d5defcdf78ee1d98a1232649c31a70a63e1e`.
-The manifest's `default_selection` is `patched`. Builders verify downloads and
-cache entries before staging. The cache is
+`5e3d31b1814c590c8f8bef9c6a21eb05f7421b265913d84d5af83441566ed0e2`.
+The manifest's `default_selection` is `patched`.
+
+The patched WM carries two changes. The positioning patch serves ranging.
+The per-peer transmit-path patch changes how the WM handles a rate-control
+SPE update (field 22) for one station. Stock WM saves the SPE and also
+activates a fixed rate profile for that station, whose MCS is capped at 7
+for VHT and HE. The patched WM saves the SPE with a valid tag and no longer
+activates the profile for this command, so a freshly rebuilt rate record
+keeps adapting. It uses the tagged SPE for that station's single-user
+transmit commands in the two transmit modes that normally take the default
+SPE, when the band's existing gate allows it. Multi-user transmissions and
+stations without a tag keep the stock selection, and the tag is cleared
+when the station's rate record is deleted. The patch does not clear a
+fixed profile that another command already set.
+
+mt7915e classifies the WM image it downloads and offers per-peer transmit
+paths only for this patched WM. On stock WM the feature is off; the
+driver's other uses of field 22, such as the end of a forced GI/LTF rate
+setup, keep their upstream behaviour there.
+
+Builders verify downloads and cache entries before staging. The cache is
 `kernel-work/cache/linux-firmware/47e03ef409e07315f2b5c1d0fc08383da2e1bde9/`,
 overridable with `MANET_FIRMWARE_CACHE`.
 

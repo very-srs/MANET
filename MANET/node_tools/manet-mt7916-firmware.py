@@ -17,7 +17,7 @@ NAMES = ('mt7916_wm.bin', 'mt7916_wa.bin', 'mt7916_rom_patch.bin')
 OWNER = '.manet-mt7916'
 STOCK_WM_SHA256 = ('64d86cfa4f00f9452b4706389d648d4ce0e'
                   '563ddd512cc9845ba4e4442e99cb0')
-WM_SHA256 = '18a2e1d03f17913ef0450a905536d5defcdf78ee1d98a1232649c31a70a63e1e'
+WM_SHA256 = '5e3d31b1814c590c8f8bef9c6a21eb05f7421b265913d84d5af83441566ed0e2'
 
 
 def digest(data):
