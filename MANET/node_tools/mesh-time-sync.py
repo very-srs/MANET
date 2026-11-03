@@ -400,6 +400,25 @@ class TimeService:
             return None
         return selected_source(self.command(['chronyc', '-n', 'sources']))
 
+    def selected_real_source(self, gps, uplink):
+        """Identify qualified local authority before the clock has settled.
+
+        A mesh-only clock can be far wrong. Once startup stepping is disarmed,
+        chrony slews that offset and can never satisfy settled(). A selected
+        GPS/NTS source is independent authority to step it, so authenticate
+        that source before testing whether the clock has settled.
+        """
+        source = selected_source(self.command(['chronyc', '-n', 'sources']))
+        if not source:
+            return None
+        if gps and source['mode'] == '#' and source['address'] == 'GPS':
+            return 'GPS'
+        if (uplink and source['mode'] == '^'
+                and nts_authenticated(self.command(['chronyc', '-n', 'authdata']),
+                                     source['address'])):
+            return 'internet'
+        return None
+
     def complete(self, source):
         """Record verified sync, disable stepping and defer refresh."""
         initial = not self.marker.exists()
@@ -415,6 +434,10 @@ class TimeService:
             atomic_text(self.chrony_conf, profile)
             self.active_config = profile
         if initial:
+            atomic_text(self.marker, source + '\n')
+        elif source in ('GPS', 'internet') and self.marker.read_text().strip() == 'mesh':
+            # Preserve the strongest source reached this boot if client state
+            # is later lost and the controller has to reconstruct its role.
             atomic_text(self.marker, source + '\n')
         if source in ('GPS', 'internet'):
             # Remember for this boot that the clock came from a real source.
@@ -442,6 +465,16 @@ class TimeService:
                 self.save()
             try:
                 self.configure(chrony_config(network, gps, uplink, initial=initial), start=True)
+                real_source = self.selected_real_source(gps, uplink)
+                if (real_source and self.marker.exists()
+                        and self.marker.read_text().strip() == 'mesh'
+                        and not self.state.get('trusted_step_attempted')):
+                    # A mesh orphan is holdover, never authority over a
+                    # verified local source. Yield to GPS or authenticated
+                    # NTS once that independent source is selected.
+                    self.command(['chronyc', 'makestep'])
+                    self.state['trusted_step_attempted'] = True
+                    self.save()
                 source = self.clock_source()
                 internet_ready = bool(source and uplink and source['mode'] == '^'
                                       and nts_authenticated(self.command(['chronyc', '-n', 'authdata']),

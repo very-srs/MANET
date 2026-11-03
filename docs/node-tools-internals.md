@@ -3839,10 +3839,22 @@ the controller only checks local roles and BATMAN routes; there is no NTP
 traffic or extra Alfred announcement.
 
 The first sync of a boot may step the clock, as may a merge (below). After
-the first verified sync the controller
-disables remaining live startup steps with `chronyc makestep 0.1 0` and removes
-the directive from the config. Source changes, daemon restarts, and refreshes
-then slew. `leapsecmode slew` also avoids a kernel leap-second step.
+the first verified sync the controller disables remaining live startup steps
+with `chronyc makestep 0.1 0` and removes the directive from the config.
+Ordinary source changes, daemon restarts, and refreshes then slew.
+
+There is one authority handoff: a node whose first successful source was mesh
+time may later select a local GPS refclock or authenticated NTS source while
+still far from UTC. Before applying the settled-clock test, the controller
+checks that the real source is selected and, for NTS, that its negotiated
+authentication keys are present. It then issues chrony's immediate `makestep`
+once, allowing the independent source to displace the mesh orphan estimate.
+Only after the clock settles does the node publish itself as a real time
+server and replace its mesh-only boot marker. This prevents a bad mesh
+holdover clock from keeping itself authoritative by making NTS qualification
+impossible. It does not permit a mesh peer or an unauthenticated internet
+source to step the clock. `leapsecmode slew` also avoids a kernel leap-second
+step.
 Peer profiles use `corrtimeratio 1`, preferring an average correction over one
 poll interval rather than three. The current source daemon is not restarted
 just to disarm stepping.

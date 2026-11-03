@@ -1777,11 +1777,18 @@ never synced only listens for 3 minutes. If no synced clock answers by then,
 the unsynced nodes agree on the lowest address's clock. A mesh with no GPS or
 internet therefore reaches timed control a few minutes after power-up.
 
-A node steps its clock at its first sync after boot, and when its group merges
-into another. Groups merge their time as partitions merge: a group with GPS or
-internet time wins, then the larger group, then the group holding the lowest
-MAC. The smaller side steps to the winner's time. Other corrections are
-gradual. A clock jump of more than 10 seconds voids admin changes that are
+If a node first syncs to a mesh clock and later selects its own GPS or
+authenticated NTS source, that real source can immediately step the mesh-only
+holdover clock once. This lets a verified local source take authority even
+when the mesh clock was far wrong. Mesh peers and unauthenticated internet
+sources cannot trigger that step.
+
+A node steps its clock at its first sync after boot, when verified local GPS or
+NTS displaces mesh-only time, and when its group merges into another. Groups
+merge their time as partitions merge: a group with GPS or internet time wins,
+then the larger group, then the group holding the lowest MAC. The smaller
+side steps to the winner's time. Other corrections are gradual. A clock jump
+of more than 10 seconds voids admin changes that are
 staged but not yet active, and restarts any channel agreement round. Push a
 voided change again. The service keeps checking
 local GPS/uplink state so a node can become a source later. Losing an uplink

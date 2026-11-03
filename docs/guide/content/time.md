@@ -14,6 +14,9 @@ internet, they wait about three minutes and then all use one radio's clock.
 It may be wrong, but it is the same on every radio. Give one radio GPS or
 internet if you need the right time.
 
+If a radio later gets GPS or internet time, it corrects the mesh clock to
+that real source.
+
 When two groups of radios meet, the smaller group takes the bigger group's
 time.
 
@@ -47,13 +50,19 @@ a clock it trusts, they wait about three minutes, then all follow one radio's
 clock. Timed control starts working, but that clock can be off from real time
 by however far that radio was off.
 
-A radio sets its clock in one jump at its first sync after startup, and
-when its group meets a bigger one. When two groups of radios meet, the
+If a radio first followed a mesh clock that was far wrong, it steps to a
+verified GPS or NTS internet source when one becomes available. The radios
+then follow the corrected time.
+
+A radio sets its clock in one jump at its first sync after startup, when a
+verified local GPS or NTS source displaces mesh-only time, and when its group
+meets a bigger one. When two groups of radios meet, the
 smaller group jumps to the bigger group's time. A group with GPS or internet
 time always wins, and equal groups keep the time of the group with the lowest
 radio address. Otherwise radios correct gradually. If GPS or internet appears
-on a radio already in the group, the others move toward it slowly, less than
-a minute a day. Reboot a radio to make it take the right time at once.
+on a radio already in the group, that radio corrects itself at once and the
+others move toward it slowly, less than a minute a day. Reboot another radio
+to make it take the corrected time at once.
 
 A clock jump cancels settings changes that were sent but not yet applied, and
 restarts any channel vote in progress. Send the change again.
@@ -132,8 +141,13 @@ zero to ten minutes. Source nodes keep chrony running. Local role checks can
 promote a node when GPS or an uplink appears.
 
 Initial acquisition may step the clock. After the first verified success,
-the controller disarms startup stepping and subsequent corrections slew,
-except when the node's group merges into another.
+the controller disarms startup stepping and subsequent corrections slew.
+If this boot's initial source was mesh time, a newly selected GPS refclock or
+authenticated NTS source can step that holdover clock once. Mesh time cannot
+keep a node hours away from a verified local source. After the step and
+qualification, the marker records the real source so a controller restart
+does not mistake it for mesh-only time. Group merges use their separate
+explicit step path.
 
 ### Merging groups and clock jumps
 

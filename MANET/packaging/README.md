@@ -11,6 +11,7 @@ when absent and verify its SHA-256 against
 `MANET/share/manet/mt7916-firmware.json`. Set `MANET_FIRMWARE_CACHE` to an
 absolute directory containing those three verified files for offline use.
 The default cache is under `kernel-work/cache/linux-firmware/<commit>/`.
+Tools and both CM4 and Rock 3A install builders stage that firmware set.
 Install archives also need a board overlay. Build one using the tracked
 [kernel recipes](../../kernel/build/README.md).
 
@@ -36,6 +37,10 @@ binaries, services, interface definitions, and configuration migrations. Sealed
 field radios must be maintainable without routine opening and reflashing.
 Follow the [field update policy](../../docs/node-tools-internals.md#field-update-policy)
 when adding payloads that need activation or recovery handling.
+
+The CM4 and Rock 3A install archives both stage the pinned MT7916 firmware
+along with the early boot, firmware-change, and survived-firmware units. This
+keeps a fresh flash on the same managed firmware path as later tools updates.
 
 The cm4, r3a, and rpi5 tools archives share the common runtime and are named
 per board because the updater requests its board's package. Board-specific
