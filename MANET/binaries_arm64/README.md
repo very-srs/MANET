@@ -193,10 +193,18 @@ INFO diagnostics as the Wi-Fi build.
 bash MANET/binaries_arm64/wpa_supplicant-s1g-manet/build.sh /tmp/manet-s1g
 ```
 
-The script verifies the pinned commit and the SHA-256 of its deterministic
-`git archive`. For an offline build, set `MORSE_TARBALL` to an archive made
-with `git archive --format=tar --prefix=hostap-1.16.4/` at that commit. The
-expected digest is in `source.sha256`.
+The corresponding source is vendored in this directory as
+`morse-hostap-1.16.4.tar.gz` (the deterministic `git archive` of the pinned
+commit, gzipped). The build uses it by default, so a checkout needs no network
+access and the source that produced the shipped binary stays available even if
+the upstream commit moves. Morse hostap is BSD-licensed (see the tree's
+`COPYING`), so this is kept as corresponding source and the binary notice lives
+in the repo-root `THIRD_PARTY_NOTICES`.
+
+`build.sh` always checks the extracted archive against `source.sha256`,
+whatever the source. Set `MORSE_TARBALL` to override with your own archive
+made with `git archive --format=tar --prefix=hostap-1.16.4/` at that commit; if
+the vendored file is absent the script falls back to cloning the pinned commit.
 
 Outputs are named `wpa_supplicant_s1g_candidate` and `wpa_cli_s1g_candidate`.
 No unit or builder selects these names. Complete Wi-Fi bench testing before

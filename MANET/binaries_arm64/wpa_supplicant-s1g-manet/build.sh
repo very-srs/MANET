@@ -12,8 +12,14 @@ trap 'rm -rf "$BUILD_DIR"' EXIT
 pkg-config --exists libnl-3.0 libnl-genl-3.0 openssl
 
 TARBALL="$BUILD_DIR/morse-hostap-1.16.4.tar"
+VENDORED="$SOURCE_DIR/morse-hostap-1.16.4.tar.gz"
 if [ -n "${MORSE_TARBALL:-}" ]; then
     cp -- "$MORSE_TARBALL" "$TARBALL"
+elif [ -f "$VENDORED" ]; then
+    # Default: the corresponding source is vendored in-repo. This is the
+    # authoritative source of the shipped binary; the git clone below is only a
+    # fallback for a checkout without the vendored archive.
+    gunzip -c -- "$VENDORED" > "$TARBALL"
 else
     git clone --quiet --depth 1 --branch 1.16.4 \
         https://github.com/MorseMicro/hostap.git "$BUILD_DIR/hostap"
@@ -22,6 +28,7 @@ else
     git -C "$BUILD_DIR/hostap" archive --format=tar \
         --prefix=hostap-1.16.4/ HEAD > "$TARBALL"
 fi
+# Gate every source path (vendored, override, or clone) on the same digest.
 (cd "$BUILD_DIR" && sha256sum --check "$SOURCE_DIR/source.sha256")
 tar -xf "$TARBALL" -C "$BUILD_DIR"
 TREE="$BUILD_DIR/hostap-1.16.4"

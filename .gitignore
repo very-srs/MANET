@@ -20,6 +20,9 @@ MANET/install_packages/*
 # Third-party Windows installers are downloaded by the flasher, never committed
 *.exe
 
+# Vendored upstream source we ship as corresponding source (exception to *.tar.gz)
+!MANET/binaries_arm64/wpa_supplicant-s1g-manet/morse-hostap-1.16.4.tar.gz
+
 # Downloaded kernel sources, firmware caches and build outputs
 kernel-work/
 
