@@ -1019,6 +1019,9 @@ wpa=2
 wpa_key_mgmt=WPA-PSK
 wpa_pairwise=CCMP
 rsn_pairwise=CCMP
+# ieee80211w=1 (PMF-optional): protect deauth/disassoc for clients that
+# negotiate PMF, without refusing clients that do not support it.
+ieee80211w=1
 wpa_passphrase=$LAN_AP_KEY
 EOF
 

@@ -290,6 +290,16 @@ class BuiltinUplinkTests(UplinkHarness):
         self.assertNotIn(PROFILE['password'], '\n'.join(self.radio.calls))
         self.assertNotIn(PROFILE['password'], (self.wpa / 'wpa_supplicant-wlan1-uplink.conf').read_text())
 
+    def test_shared_release_writes_ap_in_current_pmf_format(self):
+        self.choose()  # enable a shared uplink; saves the pre-PMF AP snapshot
+        self.assertNotIn('ieee80211w', json.loads(self.uplink.saved.read_text())['hostapd'])
+        # Even if the live AP config still lacks PMF, restoring the AP must write
+        # the current format (PMF-optional), not revert to a config without it.
+        (self.root / 'hostapd.conf').write_text(
+            'interface=wlan1\nssid=EUD\nwpa=2\nwpa_key_mgmt=WPA-PSK\nwpa_passphrase=eud-secret\n')
+        self.uplink.set_profile({'enabled': False})  # release -> restore the AP
+        self.assertIn('ieee80211w=1', (self.root / 'hostapd.conf').read_text())
+
     def test_wired_mode_either_band_and_restore_mesh(self):
         self.mode('wired')
         self.write('ap_interface', '')
@@ -1122,6 +1132,8 @@ class ProfileTests(unittest.TestCase):
         self.assertIn('freq_list=5180 5200 5260', output)
         self.assertIn('ssid=' + profile['ssid'].encode().hex(), output)
         self.assertNotIn(profile['password'], output)
+        # WPA2 Personal uplinks negotiate PMF when the AP offers it.
+        self.assertIn('ieee80211w=1', output)
         with self.assertRaises(ValueError):
             wifi.validate_profile(dict(PROFILE, ssid='a\nnetwork={'))
 

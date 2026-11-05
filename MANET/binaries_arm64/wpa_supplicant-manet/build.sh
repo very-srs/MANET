@@ -11,16 +11,16 @@ trap 'rm -rf "$BUILD_DIR"' EXIT
 
 pkg-config --exists libnl-3.0 libnl-genl-3.0 openssl
 
-TARBALL="$BUILD_DIR/wpa_supplicant-2.11.tar.gz"
+TARBALL="$BUILD_DIR/wpa_supplicant-2.12.tar.gz"
 if [ -n "${WPA_TARBALL:-}" ]; then
     cp -- "$WPA_TARBALL" "$TARBALL"
 else
     curl --fail --location --retry 3 --proto '=https' --tlsv1.2 \
-        https://w1.fi/releases/wpa_supplicant-2.11.tar.gz -o "$TARBALL"
+        https://w1.fi/releases/wpa_supplicant-2.12.tar.gz -o "$TARBALL"
 fi
 (cd "$BUILD_DIR" && sha256sum --check "$SOURCE_DIR/source.sha256")
 tar -xzf "$TARBALL" -C "$BUILD_DIR"
-TREE="$BUILD_DIR/wpa_supplicant-2.11"
+TREE="$BUILD_DIR/wpa_supplicant-2.12"
 
 while IFS= read -r patch_name; do
     patch --batch --fuzz=0 -d "$TREE" -p1 < "$SOURCE_DIR/patches/$patch_name"

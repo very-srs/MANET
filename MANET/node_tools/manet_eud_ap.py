@@ -5,7 +5,7 @@ import re
 import socket
 import subprocess
 
-from manet_config_io import atomic_write, rewrite_keys, load_kv_file
+from manet_config_io import atomic_write, rewrite_keys, load_kv_file, ensure_ap_pmf
 from mesh_config import AP_SSID_FIXED, apply_local_to_conf, validate_config, valid_value
 
 AP_IDENTITY = '/var/lib/manet-ap-ssid'
@@ -130,7 +130,8 @@ def apply_local(changes, mesh_conf, hostapd='/etc/hostapd/hostapd.conf',
         values = {}
         if 'lan_ap_key' in changes:
             values['wpa_passphrase'] = changes['lan_ap_key']
-        updated = rewrite_keys(ap_before.decode('utf-8'), values)
+        # Write the AP in the current PMF format, like every hostapd.conf writer.
+        updated = ensure_ap_pmf(rewrite_keys(ap_before.decode('utf-8'), values))
     changed = []
     try:
         changed.append((conf_path, before))
@@ -141,9 +142,12 @@ def apply_local(changes, mesh_conf, hostapd='/etc/hostapd/hostapd.conf',
             restart_hostapd()
     except Exception as error:
         failures = []
-        # Restore the last attempted write first, including failed writes.
+        # Restore the last attempted write first, including failed writes. The
+        # restored AP config is still written in the current PMF format.
         for path, content in reversed(changed):
             try:
+                if path == ap_path:
+                    content = ensure_ap_pmf(content.decode('utf-8'))
                 atomic_write(path, content)
             except OSError:
                 failures.append(path.name)

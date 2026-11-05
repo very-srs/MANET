@@ -15,6 +15,23 @@ def supplicant_string(value):
     return value.encode('utf-8').hex() if '"' in value else '"' + value + '"'
 
 
+def ensure_ap_pmf(text):
+    """Return hostapd.conf text with PMF set for a WPA2 access point.
+
+    Protected Management Frames (``ieee80211w``) default to PMF-optional (``1``)
+    when a WPA2 config omits them, so every path that writes the EUD AP config
+    emits the same format. An explicit value is kept, and a non-WPA2 (open)
+    config is left unchanged. Idempotent and newline-safe.
+    """
+    if not re.search(r'(?m)^[ \t]*wpa=2([ \t\r]|$)', text):
+        return text
+    if re.search(r'(?m)^[ \t]*ieee80211w[ \t]*=', text):
+        return text
+    if text and not text.endswith('\n'):
+        text += '\n'
+    return text + 'ieee80211w=1\n'
+
+
 def rewrite_keys(text, values, quoted_keys=()):
     """Replace matching assignments and append missing validated keys."""
     replacements = {}

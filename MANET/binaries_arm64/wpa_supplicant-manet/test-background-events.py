@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Compile the actual nl80211 radar decoder from a supplied hostap source tree.
 
-Usage: python3 test-background-events.py /path/to/wpa_supplicant-2.11
+Usage: python3 test-background-events.py /path/to/wpa_supplicant-2.12
 Only netlink attribute access, logging and event consumers are replaced.
 Both mesh and AP inputs exercise the real decoder, with and without the flag.
 """

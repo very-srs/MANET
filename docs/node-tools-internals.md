@@ -122,6 +122,23 @@ be preserved unless a release deliberately migrates them. A generic copy of
 remains a generated selector symlink and is regenerated from the installed
 configuration after payload installation.
 
+#### One-off migration ledger
+
+Fix-ups that cannot be a plain file replacement run from a script the package
+carries, `usr/local/bin/manet-update-oneshot.sh`, which the updater runs once
+per install after the payload and durable config are in place and before
+services restart. It is a cumulative ledger: each entry is a self-contained
+"check whether it is needed, then apply it" block, tagged with the release that
+introduced it and ordered oldest first. New releases append a block; old blocks
+are pruned once no node an update must still support could be behind them,
+roughly a stable release or two back. The reach of the retained blocks is the
+contract for how out of date a node may be and still update reliably. Every
+block must be idempotent, because the updater reruns the whole script on a retry
+after a partially applied install; a non-zero exit is fatal and leaves the
+update pending. The updater exports a rooted environment (`MANET_ROOT`,
+`MANET_HOSTAPD_CONF`, `MANET_WPA_DIR`) so recovery and tests target an alternate
+root. An absent script is a no-op, so the hook is compatible across releases.
+
 #### Kernel payload and activation protocol
 
 Kernel field updates use a separate transaction before replacing runtime
@@ -2254,7 +2271,7 @@ immediately. Expired observations never become clearance authority.
 DFS admission requires the loaded MT7916 `dfs_mesh_v1` parameter, cfg80211's
 matching status ABI, live DFS regulatory flags, CM4 policy, a ready guardian,
 and the running supplicant's `MANET_DFS_V3` control response. The package
-builder requires the `v2.11-manet-dfs3` binary with patches 0007/0008. Setting
+builder requires the `v2.12-manet-dfs3` binary with patches 0007/0008. Setting
 `MANET_DFS_ENABLED=0` builds a non-DFS package and installs a policy file that
 suppresses DFS capability. Debian fallback remains available there. Rock 3A can
 exercise this code only with the explicit `MANET_DFS_BENCH=1` service

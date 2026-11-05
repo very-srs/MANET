@@ -1397,5 +1397,74 @@ module.Updater(Path(sys.argv[2])).update(recover_only=True)
         self.assertEqual(self.updater.marker.read_text(), self.new_version)
 
 
+class ReleaseOneshotTests(unittest.TestCase):
+    """The standing per-release one-off migration hook."""
+
+    NAME = 'usr/local/bin/manet-update-oneshot.sh'
+
+    def setUp(self):
+        self.work = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.work, ignore_errors=True)
+        self.root = self.work / 'root'
+        (self.root / 'etc/hostapd').mkdir(parents=True)
+        (self.root / 'run').mkdir(parents=True)  # flock creates the lock here
+        # Staged release payload the updater runs the hook from.
+        self.staged = self.work / 'staged'
+        (self.staged / 'usr/local/bin').mkdir(parents=True)
+        shutil.copyfile(Path(__file__).with_name('manet-update-oneshot.sh'),
+                        self.staged / self.NAME)
+        member = Mock()
+        member.isfile.return_value = True
+        self.members = {self.NAME: member}
+        self.hostapd = self.root / 'etc/hostapd/hostapd.conf'
+        self.updater = update.Updater(self.root)
+
+    def run_hook(self, members=None):
+        self.updater.run_release_oneshot(self.staged,
+                                         self.members if members is None else members)
+
+    def test_absent_from_release_does_not_run_a_stale_on_disk_script(self):
+        # A ledger left on disk from a newer release must not run on rollback.
+        (self.root / 'usr/local/bin').mkdir(parents=True)
+        shutil.copyfile(Path(__file__).with_name('manet-update-oneshot.sh'),
+                        self.root / self.NAME)
+        self.hostapd.write_text('wpa=2\nwpa_passphrase=x\n')
+        self.run_hook(members={})  # this release omits the hook
+        self.assertNotIn('ieee80211w', self.hostapd.read_text())
+
+    def test_pmf_added_to_legacy_wpa2_ap_and_idempotent(self):
+        self.hostapd.write_text('interface=wlan1\nssid=EUD\nwpa=2\n'
+                                'wpa_key_mgmt=WPA-PSK\nwpa_pairwise=CCMP\n'
+                                'wpa_passphrase=secret\n')
+        self.hostapd.chmod(0o600)
+        self.run_hook()
+        text = self.hostapd.read_text()
+        self.assertEqual(text.count('ieee80211w='), 1)
+        self.assertLess(text.index('ieee80211w=1'), text.index('wpa_passphrase='))
+        self.assertIn('wpa_passphrase=secret', text)  # secret preserved
+        self.assertEqual(self.hostapd.stat().st_mode & 0o777, 0o600)
+        self.run_hook()  # rerun: still exactly one line
+        self.assertEqual(self.hostapd.read_text().count('ieee80211w='), 1)
+
+    def test_psk_without_trailing_newline_is_not_corrupted(self):
+        self.hostapd.write_text('wpa=2\nwpa_key_mgmt=WPA-PSK\n'
+                                'wpa_psk=' + 'a' * 64)  # no final newline
+        self.run_hook()
+        text = self.hostapd.read_text()
+        self.assertIn('wpa_psk=' + 'a' * 64 + '\n', text)  # PSK intact, own line
+        self.assertIn('\nieee80211w=1\n', text)
+        self.assertEqual(text.count('ieee80211w='), 1)
+
+    def test_existing_pmf_and_non_wpa2_are_left_alone(self):
+        self.hostapd.write_text('wpa=2\nieee80211w=2\nwpa_passphrase=x\n')
+        self.run_hook()
+        self.assertIn('ieee80211w=2', self.hostapd.read_text())
+        self.assertNotIn('ieee80211w=1', self.hostapd.read_text())
+        open_ap = 'interface=wlan1\nssid=Open\n'
+        self.hostapd.write_text(open_ap)
+        self.run_hook()
+        self.assertEqual(self.hostapd.read_text(), open_ap)
+
+
 if __name__ == '__main__':
     unittest.main()

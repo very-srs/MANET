@@ -138,7 +138,7 @@ symlink after installing the payload, using the installed configuration.
 
 The Wi-Fi mesh binaries `wpa_supplicant_manet` and `wpa_cli_manet` are carried
 by every builder through `lib-supplicant.sh`. DFS is enabled by default, and
-builders reject a missing or incompatible `v2.11-manet-dfs3` supplicant. The
+builders reject a missing or incompatible `v2.12-manet-dfs3` supplicant. The
 binary must contain the paired 0007/0008 control ABI. Native Debian build
 instructions are in the [binaries README](../binaries_arm64/README.md#native-debian-13-build).
 `MANET_DFS_ENABLED=0` explicitly builds a non-DFS package, permits the Debian

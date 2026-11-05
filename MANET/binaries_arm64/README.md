@@ -71,7 +71,7 @@ vis helpers out of alfred. Two builds on the same host produce identical binarie
 
 ## Wi-Fi mesh supplicant
 
-`wpa_supplicant-manet/` contains the hostap 2.11 build configuration and patch
+`wpa_supplicant-manet/` contains the hostap 2.12 build configuration and patch
 series. The output names are `wpa_supplicant_manet` and `wpa_cli_manet`.
 Debian upgrades do not replace these MANET-owned binaries.
 
@@ -101,7 +101,7 @@ Only the ACS contract path sends it, after storing the contract and checking
 the independent guardian. New BSSs, static meshes, and unmanaged meshes default
 to native evacuation and ordinary foreground CAC checks. No opt-in is saved
 in the WPA configuration.
-This build identifies itself as `v2.11-manet-dfs3` and answers
+This build identifies itself as `v2.12-manet-dfs3` and answers
 `MANET_DFS_STATUS` with `MANET_DFS_V3 owner=0` or `owner=1`.
 DFS capability queries this running control endpoint. Copying a new binary
 without restarting the old process cannot enable DFS.
@@ -149,14 +149,14 @@ sudo apt install build-essential pkg-config libnl-3-dev libnl-genl-3-dev \
 bash MANET/binaries_arm64/wpa_supplicant-manet/build.sh /tmp/manet-wifi
 ```
 
-The script downloads `https://w1.fi/releases/wpa_supplicant-2.11.tar.gz`,
+The script downloads `https://w1.fi/releases/wpa_supplicant-2.12.tar.gz`,
 checks the SHA-256 in `source.sha256`, applies `patches/series` without fuzz,
 and builds both programs into the requested output directory. It does not
 install into the running system. Set `WPA_TARBALL=/path/to/archive` for an
 offline build and `JOBS=2` to limit parallel compilation. The tarball digest
-is `912ea06f74e30a8e36fbb68064d6cdff218d8d591db0fc5d75dee6c81ac7fc0a`.
+is `08e23937e16d0155e55cab2b51f51fbe10d80a1aa91c4e15442645059b737ef6`.
 
-`test-background-events.py /path/to/patched/wpa_supplicant-2.11` compiles the
+`test-background-events.py /path/to/patched/wpa_supplicant-2.12` compiles the
 actual nl80211 radar decoder under address/undefined-behavior sanitizers. It
 checks external mesh CAC isolation and continued delivery of foreground,
 AP, and radar events. It does not establish radio behavior or SAE continuity.

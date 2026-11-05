@@ -219,7 +219,7 @@ and SSH latency; kernel latch and CSA times still come from event records. The
 script times out if the real scoring never selects DFS. A separate monitor
 or traffic capture is needed for over-the-air TX cessation and loss.
 
-For a clean-RF bench, use the rebuilt `v2.11-manet-dfs3` supplicant and
+For a clean-RF bench, use the rebuilt `v2.12-manet-dfs3` supplicant and
 current runtime on every node, with all connected participants listed and
 their 5 GHz mesh already at 5240 MHz/HT20. This temporary controller supplies
 local scan requests and a deterministic preference after real candidate and
@@ -256,7 +256,7 @@ The complete path passed secured-mesh acceptance on CM4 and both Rock 3As
 for v0.576. Keep all three Rock 3A modules together with their pinned Image
 and configuration. Do not replace only cfg80211 or only the driver.
 
-For acceptance, install the native Debian `v2.11-manet-dfs3` build, the
+For acceptance, install the native Debian `v2.12-manet-dfs3` build, the
 updated guardian unit, and `manet_dfs_safety.py` on every participant. Verify
 `wpa_cli -i IFACE raw MANET_DFS_STATUS` returns `MANET_DFS_V3 owner=0` before
 ACS arms the contract. The guardian must be active after its notify readiness.

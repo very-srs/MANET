@@ -182,7 +182,10 @@ def client_config(profile, frequencies, country):
     elif security == 'wpa2':
         psk = hashlib.pbkdf2_hmac('sha1', profile['password'].encode(),
                                   profile['ssid'].encode(), 4096, 32).hex()
-        lines += ['    key_mgmt=WPA-PSK', '    proto=RSN', '    psk=' + psk]
+        # ieee80211w=1 (PMF-optional): protect management frames with APs that
+        # offer PMF, without refusing APs that do not. WPA3/SAE below requires it.
+        lines += ['    key_mgmt=WPA-PSK', '    proto=RSN', '    psk=' + psk,
+                  '    ieee80211w=1']
     else:
         # SAE passwords use wpa_supplicant's literal quoted string syntax.
         # Unlike SSID/PSK, sae_password does not accept a hexadecimal string.
@@ -398,6 +401,9 @@ class WifiUplink:
                         self.hostapd.read_text(), flags=re.M)
         if dfs_follow:
             values['dfs_follow_station'] = '1'
+        # Write the AP in the current PMF format: keep an explicit live value,
+        # else default PMF-optional (the EUD AP is WPA2).
+        values['ieee80211w'] = load_kv_file(self.hostapd).get('ieee80211w') or '1'
         atomic_write(self.hostapd, rewrite_keys(source, values))
 
     def withdraw(self, iface):
@@ -526,10 +532,16 @@ class WifiUplink:
                 (self.network / '05-manetap.network').unlink(missing_ok=True)
                 for name in ('ap_interface', 'ap_mesh_band', 'no_mesh_if'):
                     atomic_write(self.roles / name, saved.get(name, '') + '\n')
-                # Preserve any local EUD SSID/password changes during sharing.
+                # Preserve local EUD SSID/password changes, and write the AP in
+                # the current format: carry the live ieee80211w, else default to
+                # PMF-optional (the EUD AP is WPA2). This keeps a restored pre-PMF
+                # snapshot from dropping PMF. rewrite_keys appends a missing key.
                 current = load_kv_file(self.hostapd)
                 original = saved.get('hostapd', '')
-                values = {key: current[key] for key in ('ssid', 'wpa_passphrase') if key in current}
+                values = {key: current[key]
+                          for key in ('ssid', 'wpa_passphrase')
+                          if key in current}
+                values['ieee80211w'] = current.get('ieee80211w') or '1'
                 atomic_write(self.hostapd, rewrite_keys(original, values))
             (self.roles / 'wifi_uplink_if').unlink(missing_ok=True)
             if iface != text(self.roles / 'ap_interface'):

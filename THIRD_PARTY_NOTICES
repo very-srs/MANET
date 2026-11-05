@@ -117,7 +117,7 @@ ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 wpa_supplicant and wpa_cli (wpa_supplicant_manet, wpa_cli_manet)
-  wpa_supplicant 2.11 from https://w1.fi/, with the MANET patches in
+  wpa_supplicant 2.12 from https://w1.fi/, with the MANET patches in
   MANET/binaries_arm64/wpa_supplicant-manet/patches/.
 
 wpa_supplicant and wpa_cli for HaLow (wpa_supplicant_s1g, wpa_cli_s1g)

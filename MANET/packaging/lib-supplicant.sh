@@ -15,12 +15,12 @@ try:
 except OSError:
     data = b''
 sys.exit(0 if all(s in data for s in (
-    b'wpa_supplicant v2.11-manet-dfs3\n', b'MANET_DFS_V3 owner=%d\n\0',
+    b'wpa_supplicant v2.12-manet-dfs3\n', b'MANET_DFS_V3 owner=%d\n\0',
     b'MANET_DFS_OWNER 1\0',
     b'nl80211: MANET external background CAC event %d on %d MHz\0')) else 1)
 PY
         then
-            echo 'DFS requires the native Debian wpa_supplicant v2.11-manet-dfs3 build (0007/0008).' >&2
+            echo 'DFS requires the native Debian wpa_supplicant v2.12-manet-dfs3 build (0007/0008).' >&2
             return 1
         fi
     fi

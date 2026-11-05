@@ -15,12 +15,12 @@ set -euo pipefail
 # See docs/node-tools-internals.md, "Field update policy", for activation and
 # recovery requirements when adding new payloads.
 #
-# Current payload choices: no SBC kernel overlay, config.txt, systemd-network
-# definitions, or S1G binaries. These are not archive limits.
-# Managed MT7916 firmware and the Wi-Fi mesh binaries are already carried.
-# Optional matched kernel inputs use MANET_KERNEL_BOARD and SBC_OVERLAY_DIR.
-# CM4 derives a local trial profile and defaults on, with an operator opt-out.
-# HaLow candidate binaries remain excluded from published payloads.
+# Current payload choices: no config.txt or systemd-network definitions. These
+# are not archive limits. Managed MT7916 firmware, the Wi-Fi mesh binaries, and
+# the HaLow (S1G) binaries are carried. The HaLow pair is installed but not
+# force-restarted; an organic restart adopts it. Optional matched kernel inputs
+# use MANET_KERNEL_BOARD and SBC_OVERLAY_DIR. CM4 derives a local trial profile
+# and defaults on, with an operator opt-out.
 #
 # Usage:
 #   build-tools-tarball.sh [output.tar.gz]
@@ -90,6 +90,13 @@ stage_dispatcher_hooks "$STAGE" "$REPO_ROOT"
 
 . "$SCRIPT_DIR/lib-supplicant.sh"
 stage_mesh_supplicant "$STAGE" "$REPO_ROOT"
+
+# The HaLow (S1G) supplicant ships in the update so an organic restart (reboot
+# or reconfigure) adopts it. The updater installs the file but does not restart
+# a healthy HaLow link, which avoids the MM8108 USB wedge a forced restart can
+# trigger. recover_halow() only restarts a down interface.
+install_file 0755 "$REPO_ROOT/MANET/binaries_arm64/wpa_cli_s1g" "$STAGE/usr/sbin/wpa_cli_s1g"
+install_file 0755 "$REPO_ROOT/MANET/binaries_arm64/wpa_supplicant_s1g" "$STAGE/usr/sbin/wpa_supplicant_s1g"
 
 # alfred and batctl match the batman-adv module in the kernel payload. The
 # updater restarts alfred.

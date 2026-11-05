@@ -834,6 +834,35 @@ class Updater:
         helper = self.destination('usr/local/bin/mesh-config-sync.py')
         run_command([str(helper), 'migrate'], env=env)
 
+    def run_release_oneshot(self, directory, members):
+        """Run the release's one-off migration script, if the package ships one.
+
+        A standing hook: each release may carry
+        usr/local/bin/manet-update-oneshot.sh with idempotent one-off fix-ups,
+        or an empty body when nothing is needed. It runs once per install, after
+        the payload and durable config are in place and before services restart.
+        A failure is fatal, so the pending update retries it.
+
+        The script is gated on THIS release's archive membership and run from the
+        staged copy, not from disk: a rollback to a release that predates the
+        hook must not run a newer ledger left on the filesystem. It does not lock
+        against the config writers it may touch (hostapd.conf): every writer of
+        that file emits the current format, so a concurrent atomic overwrite
+        self-corrects rather than needing serialization. The rooted environment
+        lets recovery and tests target an alternate root.
+        """
+        name = 'usr/local/bin/manet-update-oneshot.sh'
+        member = members.get(name)
+        if member is None or not member.isfile():
+            return
+        env = dict(os.environ,
+                   MANET_ROOT=str(self.root),
+                   MANET_HOSTAPD_CONF=str(self.root / 'etc/hostapd/hostapd.conf'),
+                   MANET_WPA_DIR=str(self.root / 'etc/wpa_supplicant'))
+        output = run_command(['bash', str(directory / name)], env=env)
+        for line in output.decode('utf-8', errors='replace').splitlines():
+            self.log(line)
+
     def install(self, directory, members):
         """Install files, activate services and commit versions after checks."""
         active_runtime = []
@@ -869,6 +898,7 @@ class Updater:
         self.install_payload(directory, members)
         self.retire_bootstrap(directory, members)
         self.migrate_config()
+        self.run_release_oneshot(directory, members)
         self.protect_kernel(directory)
         mesh_setup = self.destination('usr/local/bin/manet-mesh-supplicant.py')
         # Migrate live/lobby width and inactivity under the ACS/AP lock.

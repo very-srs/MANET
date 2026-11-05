@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Exercise actual hostap radar, NOP and CSA callbacks with isolated dependencies.
 
-Usage: test-mesh-radar.py /path/to/patched/wpa_supplicant-2.11
+Usage: test-mesh-radar.py /path/to/patched/wpa_supplicant-2.12
 The harness replaces hardware, channel lookup and BSS lifecycle consumers.
 It cannot prove RF stop latency or on-radio SAE continuity.
 """

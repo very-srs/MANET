@@ -776,5 +776,38 @@ class WriterContractTests(unittest.TestCase):
                 self.assertEqual(list(Path(directory).iterdir()), [path])
 
 
+class EnsureApPmfTests(unittest.TestCase):
+    """The shared PMF format every hostapd.conf writer emits."""
+
+    def setUp(self):
+        import manet_config_io
+        self.ensure = manet_config_io.ensure_ap_pmf
+
+    def test_adds_pmf_optional_to_wpa2_config_lacking_it(self):
+        out = self.ensure('ssid=EUD\nwpa=2\nwpa_passphrase=x\n')
+        self.assertEqual(out.count('ieee80211w='), 1)
+        self.assertIn('ieee80211w=1\n', out)
+        self.assertEqual(self.ensure(out), out)  # idempotent
+
+    def test_preserves_explicit_value(self):
+        for value in ('0', '1', '2'):
+            text = f'wpa=2\nieee80211w={value}\nwpa_passphrase=x\n'
+            self.assertEqual(self.ensure(text), text)
+
+    def test_leaves_non_wpa2_and_open_untouched(self):
+        for text in ('interface=wlan1\nssid=Open\n', 'wpa=1\nssid=x\n'):
+            self.assertEqual(self.ensure(text), text)
+
+    def test_newline_safe_when_config_lacks_trailing_newline(self):
+        out = self.ensure('wpa=2\nwpa_psk=' + 'a' * 64)
+        self.assertIn('wpa_psk=' + 'a' * 64 + '\n', out)
+        self.assertTrue(out.endswith('ieee80211w=1\n'))
+
+    def test_crlf_wpa2_config_still_gets_pmf(self):
+        out = self.ensure('wpa=2\r\nwpa_passphrase=oldpassword\n')
+        self.assertIn('ieee80211w=1', out)
+        self.assertIn('wpa_passphrase=oldpassword', out)
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -21,6 +21,8 @@ import re
 import sys
 import tempfile
 
+from manet_config_io import ensure_ap_pmf
+
 # Must match uses_eu_halow_region() in radio-setup.sh.
 EU_HALOW_COUNTRIES = frozenset(
     'AT BE BG HR CY CZ DK EE FI FR DE GR HU IE IT LV LT LU MT NL PL PT RO SK SI '
@@ -144,8 +146,9 @@ def apply():
     update(p['morse'], morse_options(morse, halow))
     update(p['crda'], f'REGDOMAIN={country}\n')
     if p['hostapd'].exists():
-        update(p['hostapd'], re.sub(r'^country_code=.*$', f'country_code={country}',
-                                    p['hostapd'].read_text(), flags=re.M))
+        update(p['hostapd'], ensure_ap_pmf(
+            re.sub(r'^country_code=.*$', f'country_code={country}',
+                   p['hostapd'].read_text(), flags=re.M)))
     for conf in sorted(p['wpa'].glob('wpa_supplicant-*.conf')):
         text = conf.read_text()
         if conf.name.endswith('-s1g.conf'):
