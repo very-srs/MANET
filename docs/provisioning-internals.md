@@ -100,6 +100,178 @@ imaging and first boot. Deleted prereleases require reflashing old test images.
 
 ---
 
+## Offline setup
+
+An offline card carries everything a CM4 first boot otherwise downloads, so
+the radio provisions with no network at all. It holds two release files in the
+root of its boot partition: the board's install package and the board's
+offline bundle. Only `cm4` has a bundle, which also serves the Raspberry Pi 4B.
+Without the option the flashers run the original flow, and the templates find
+nothing on the card.
+
+### The offline bundle
+
+`MANET/packaging/build-offline-bundle.py` builds `cm4-offline.tar`, an
+uncompressed tar with `debs/*.deb` and an `apt-ftparchive` `debs/Packages`
+index, `yq_linux_arm64`, the MediaMTX archive, a `VERSION` copy of the version
+files, and `os-image.json` recording the Raspberry Pi OS image it was built for.
+
+The packages are resolved against the exact image both flashers write. The
+builder reads `PI_OS_IMAGE_URL` from `linux-flasher.sh` and refuses to run if
+`windows.ps1` names a different one. It downloads that image, checks it against
+the `.sha256` Raspberry Pi publishes beside it, and loop-mounts its root
+partition. apt's lists and downloads go to bind-mounted folders outside the
+image, so the image needs no resizing. In a qemu-user chroot it installs the
+`00-manet-kernel` preferences and runs `manet-kernel-protect.py --board rpi4`,
+as first boot does before its first apt command, so the resolver cannot pull a
+kernel. Then it runs `apt-get install --download-only` for each provisioning
+install in order. `install_steps()` reads those from `firstrun.sh.template`
+(the main list without recommends, then `mumble-server` with recommends) and
+from the two `install_packages` calls in `radio-setup.sh`. A fifth install site
+stops the build until the builder knows about it. yq and MediaMTX are
+downloaded from their releases and checked against the template pins.
+
+The bundle for the current image holds 163 packages, about 175 MiB with yq and
+MediaMTX. The install removes `systemd-timesyncd` (chrony replaces it) and
+upgrades 32 base packages, as an online first boot does.
+
+### Release records
+
+`publish.py` requires `cm4-offline.tar` beside the package archives.
+`check_offline_bundle` checks its sidecar, that `VERSION` matches the committed
+version files, that `os-image.json` names the image in the committed
+`linux-flasher.sh`, that yq and MediaMTX match the committed template pins, and
+that a package repository is present. The manifest gains the asset and an
+`os_image` record (`url`, `sha256`, `size`). `validate_manifest` requires that
+record whenever an offline bundle is listed and checks that the URL is a
+Raspberry Pi download. Older releases have neither and still validate.
+`promote` verifies the bundle when the manifest lists one.
+
+### Kits
+
+`--make-kit DIR` (both launchers) selects the stable or development manifest and
+fills `DIR` with `manet-flasher.zip`, both launchers, `cm4-install.tar.gz`,
+`cm4-offline.tar`, the image named by `os_image`, and the manifest. Every file
+is checked against its size and digest, a download goes to `.partial` first,
+and a verified file already present is kept, so a second run resumes. The
+marker `MANET-OFFLINE-KIT.txt` is removed at the start and written last, so a
+half-filled folder is not taken for a kit. The Windows launcher makes kits
+before its UAC relaunch, since a folder needs no administrator access. Both
+write the same kit, so either computer can use it.
+
+A launcher that finds the marker in its own folder, or the folder above (its
+`manet-flasher` or `MANET Flasher` working copy), runs from the kit. It reads
+the kit's manifest, checks the flasher ZIP and image against it, and starts the
+engine with `MANET_OFFLINE=1`, `MANET_KIT_DIR`, and `MANET_OS_IMAGE`. Nothing
+in that path calls curl or `Invoke-WebRequest`. `--development` and
+`--local-scripts` are refused, since a kit is fixed to one release. A missing
+host tool stops the run with a list of what to install. The Linux preflight
+does not offer its package-manager install, and the Windows prerequisites page
+does not download installers. The window refuses Rock 3A, which would need the
+Armbian image and a network.
+
+### Flasher side
+
+`--offline` reaches the engines as `MANET_OFFLINE=1`. The Windows launcher sets
+it in batch and passes `--offline` again through the UAC relaunch, because an
+elevated process does not inherit the caller's environment. The GUI seeds its
+confirmation-page checkbox from it, keeps it ticked and locked in a kit, and
+clears and disables it for boards without a bundle. Both engines refuse other
+boards straight after board selection.
+
+`prepare-release.py` and `Get-ReleaseInstallAsset` return the install asset and,
+when the release has one, the offline asset. `fetch_release_file` and
+`Get-ReleaseFile` take a file from the kit, or keep one verified copy per board
+in `packages/` under `MANET_FLASHER_WORK`, downloading to `.partial` and
+renaming only after the digest matches. The offline digest fills the templates'
+`__OFFLINE_SHA256__`, which is empty on every other flash. With
+`MANET_OS_IMAGE` set, the engines give rpi-imager the kit's image file in place
+of the URL, after checking that its name matches the one they would download.
+
+The copy happens after rpi-imager exits:
+
+1. The imager's eject would take the card away first, so the engines pass
+   `--disable-eject` when the imager accepts it. Linux asks the binary the
+   same way `imager_state_of` does, with no device, and treats an
+   `Unknown option` reply as unsupported. Windows decides from the file
+   version without running the program. It passes the flag only to a build
+   whose file version is 2 or later, or to `rpi-imager-cli.cmd`, which only
+   2.x ships, and refuses offline setup with any other imager. Passing the
+   flag to 1.x would fail the whole run.
+2. Linux rereads the partition table, takes the card's first partition, and
+   requires `blkid` to report `vfat`. Windows takes the lowest-numbered
+   partition, adds a drive letter if it has none, and requires a FAT volume.
+3. Both require free space for the files plus 32 MiB, which covers the kernel
+   and overlay files (about 12 MB) that first boot extracts onto the same
+   partition while the files are still there. The stock image leaves about
+   437 MB free.
+4. Each file is written as `<name>.partial`, renamed, and hashed on the card
+   against the digest from the manifest. That catches a cached file replaced
+   since it was checked, for example by a second flasher sharing `packages/`.
+   If any file fails, every file and partial is removed again. The volume is
+   then flushed and unmounted (Linux) or the added drive letter is removed
+   (Windows).
+
+A card that does not get both files is a failed flash, because it cannot set
+itself up offline. Linux stops the run. Windows reports the card as failed.
+Linux keeps the automount hold from `flash-target.py` in place during the copy,
+so the desktop does not mount the partition underneath it.
+
+### Node side
+
+The readiness block runs `bootstrap_local_package` and `bootstrap_offline_bundle`
+before it waits. Each looks for its file under `/boot/firmware/` and then
+`/boot/`, and accepts it only if its SHA-256 matches the digest pinned in the
+script. The offline bundle's name is the install asset's with `-install.tar.gz`
+replaced by `-offline.tar`. With an empty `__OFFLINE_SHA256__` the bundle is
+never considered. A matching install package alone drops the GitHub release
+from the resources the gate waits for. With both, the gate does not run, and no
+probe or clock request is sent.
+
+The package step hard-links the card copy to `/root/morse-pi-install.tar.gz`,
+or copies it when the two are on different filesystems, as they are on a
+Raspberry Pi. The usual digest and version checks follow.
+
+After kernel protection, the Raspberry Pi template's offline block unpacks the
+bundle into `/var/lib/manet-offline`, checks that `VERSION` matches the selected
+release, and writes two files. `/etc/apt/manet-offline.list` names the bundle as
+a `[trusted=yes]` file repository. `/etc/apt/apt.conf.d/99manet-offline` points
+`Dir::Etc::SourceList` at that list, `Dir::Etc::SourceParts` at an empty
+folder, and turns translations off. That one drop-in moves every apt command to
+the bundle, including radio-setup's `install_packages` and the admin and voice
+setup units, without changing them. The bundle carries no repository signature.
+Its integrity comes from the pinned digest, and its packages were fetched with
+apt's signature checks when the bundle was built. The yq and MediaMTX steps copy
+from the unpacked bundle when it is there and keep their pinned digest checks.
+
+radio-setup's `have_package_network` returns at once while the drop-in exists.
+After radio-setup records `complete`, it removes the drop-in, the list, and
+`/var/lib/manet-offline`, so apt returns to the image's own sources. When a
+retry finds the card files missing or damaged and falls back to downloading,
+the offline block removes any drop-in and bundle an earlier offline attempt
+left, so apt uses the image's sources and `have_package_network` checks the
+network again. The card copies are removed at the end of the earlier
+provisioning stage, after `mesh-provision` is disabled and a `sync` has written
+that to disk. A power cut before that point leaves the stage enabled with the
+files in place, and a cut after it leaves only the space they take. A run that
+fails earlier keeps everything in place for the retry. The readiness,
+package, yq, MediaMTX, and cleanup blocks are identical in both templates. The
+offline apt block exists only in `firstrun.sh.template`.
+
+### Tests
+
+`test_first_boot_downloads.py` runs the readiness gate with both files on the
+card in each location, with the bundle alone, unpinned, or mismatched. It also
+runs the offline apt block against a fixture bundle and reads the drop-in back
+with `apt-config`, and covers yq and MediaMTX from the bundle and radio-setup's
+offline check. `test_offline_bundle.py` covers the builder's install steps,
+`check_offline_bundle`, and the manifest record. `test_release_provisioning.py`
+makes and uses kits with both launchers and fails any network use from a kit,
+runs the flasher functions against stand-in block-device tools, and checks that
+the imager arguments are unchanged without the option.
+
+---
+
 ## First boot without a trusted clock
 
 ### Bounded resource readiness
@@ -107,7 +279,9 @@ imaging and first boot. Deleted prereleases require reflashing old test images.
 Both templates use the same readiness block before the logging-clock fetch,
 archive download, and APT transactions. It sends bounded HTTP HEAD requests to
 `deb.debian.org/debian/dists/trixie/InRelease`, the exact selected MANET release
-asset, and the pinned MediaMTX release asset when selected. Redirects are
+asset unless a matching copy is on the card, and the pinned MediaMTX release
+asset when selected. A card with both offline files skips the gate entirely
+(see [Offline setup](#offline-setup)). Redirects are
 followed through GitHub's download hosting. The HTTP Date endpoint is also
 probed but remains optional, matching the following best-effort clock step.
 There is no ICMP requirement. Success means the required resource endpoints

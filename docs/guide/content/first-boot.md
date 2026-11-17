@@ -11,15 +11,17 @@
 
 **Red heartbeat and green solid?** Setup did not finish. This is bad, but sometimes even friends make mistakes. Check the internet cable and power, then reboot and it will try again.
 
+Flashed for offline setup? The radio does not need the internet cable. Everything is on its card.
+
 The green heartbeat reports setup completion. Check the dashboard to see whether other radios are connected.
 
 ## User
 
 ### Connect, then let it finish
 
-After [flashing](flash.md), insert the storage if it is removable (an eMMC enabled CM4 is the intended hardware). Connect the Ethernet port to a router with internet access, then connect a reliable power supply. Keep both connected while setup runs.
+After [flashing](flash.md), insert the storage if it is removable (an eMMC enabled CM4 is the intended hardware). Connect the Ethernet port to a router with internet access, then connect a reliable power supply. Keep both connected while setup runs. A card written with [offline setup](flash.md#user-set-up-radios-without-internet) needs no internet, only the power supply.
 
-The radio downloads the selected MANET release, installs its software, configures the radios, and restarts several times. Allow about ten minutes. Download speed and hardware affect the time needed.
+The radio downloads the selected MANET release, or takes it from the card after offline setup, then installs its software, configures the radios, and restarts several times. Allow about ten minutes. Download speed and hardware affect the time needed.
 
 ### Read the result
 
@@ -37,7 +39,7 @@ The status pattern is restored at each boot. It reports setup completion, not th
 
 The SSH login banner clearly describes the status of the radio, from initial setup to completion. Detailed setup log is `/var/log/radio-setup.log`.
 
-First boot checks that it can reach the Debian package archive, the MANET install package, and, if you selected it, the MediaMTX download. It waits at most five minutes. If something is still unreachable, the red LED blinks a heartbeat with the green LED solid, and the SSH banner names what could not be reached. Fix the connection, then reboot or run `sudo systemctl restart mesh-provision.service` to try again. You do not need to reflash.
+First boot checks that it can reach the Debian package archive, the MANET install package, and, if you selected it, the MediaMTX download. A card written with offline setup skips this check, because everything it needs is on the card. It waits at most five minutes. If something is still unreachable, the red LED blinks a heartbeat with the green LED solid, and the SSH banner names what could not be reached. Fix the connection, then reboot or run `sudo systemctl restart mesh-provision.service` to try again. You do not need to reflash.
 
 Additional, user added setup scripts have their own result and log, `/var/log/manet-user-scripts.log`. A failed additional script does not turn a successfully provisioned radio into a failed installation.
 
@@ -49,7 +51,7 @@ Additional, user added setup scripts have their own result and log, `/var/log/ma
 
 On Raspberry Pi targets, the image's `firstrun.sh` creates the radio user account, enables SSH, and installs the next provisioning stage's script. Rock 3A image preparation embeds the provisioning service and configuration directly in the Armbian image. Both paths ultimately schedule `radio-setup-run-once.service` after the wireless interfaces exist.
 
-Before downloading anything, the bootstrap checks over HTTP that the Debian archive, the install package URL, and (if selected) the MediaMTX download are reachable, for at most 300 seconds. It no longer waits indefinitely for `ping 8.8.8.8`. On timeout it sets red heartbeat with green solid, writes the missing resources into the SSH banner and `/var/log/mesh-provision.log`, and leaves `mesh-provision.service` enabled, so a reboot or a restart of that unit retries.
+Before downloading anything, the bootstrap checks over HTTP that the Debian archive, the install package URL, and (if selected) the MediaMTX download are reachable, for at most 300 seconds. A card copy of the install package whose SHA-256 matches the pinned digest removes the install package URL from that list. With the offline bundle as well, the check does not run. See [offline setup](flash.md#developer-offline-setup). It no longer waits indefinitely for `ping 8.8.8.8`. On timeout it sets red heartbeat with green solid, writes the missing resources into the SSH banner and `/var/log/mesh-provision.log`, and leaves `mesh-provision.service` enabled, so a reboot or a restart of that unit retries.
 
 The release URL, SHA-256, and expected version are baked into the provisioning script at flash time. First boot validates that selection before extracting its archive. The kernel-protection helper runs before provisioning's APT operations. The certificate/date handling needed for a cold clock is deliberately limited to the provisioning path. See [download verification and kernel protection](../../../docs/provisioning-internals.md#first-boot-without-a-trusted-clock).
 

@@ -15,6 +15,8 @@ The phone Wi-Fi name you choose here stays with the radio.
 
 A CM4 with built-in eMMC uses USB boot access instead of a removable card. Follow the flasher's hardware instructions.
 
+No internet where the radio is going? Tick **Offline setup** before you flash. The card then carries everything the radio needs.
+
 ## User
 
 ### Choose your computer
@@ -66,6 +68,22 @@ boot disk is never listed.
 
 The normal flasher selects the stable GitHub release marked **Latest**. Use `--development` only when you intend to test the most recently published build, including prereleases.
 
+### Set up radios without internet
+
+A radio normally needs Ethernet with internet the first time it starts, because it downloads its software during [first boot](first-boot.md). **Offline setup** puts everything it needs on the card instead, and the radio then sets itself up with no network connection at all. It works for the Compute Module 4 and the Raspberry Pi 4B.
+
+If the computer you flash from has internet, tick **Offline setup** on the Windows confirmation page, or start the Linux flasher with `./flash-a-radio.sh --offline`.
+
+If the computer you flash from has no internet, prepare a USB stick on another computer that does. On Linux, run:
+
+```bash
+./flash-a-radio.sh --make-kit /media/usb/manet-kit
+```
+
+On Windows, run `"Flash-a-Radio.cmd" --make-kit E:\manet-kit` from Command Prompt. This puts about 830 MB on the stick: both flashers, the Raspberry Pi OS image, and the MANET software for one release. Take the stick to the offline computer and run the flasher from the kit folder. Double-click `Flash-a-Radio.cmd` on Windows, or run `bash flash-a-radio.sh` on Linux. Every card it writes is set up for offline use, and nothing is downloaded. The offline computer needs Raspberry Pi Imager installed, and `rpiboot` for a CM4. On Windows, Raspberry Pi Imager must be version 2.0 or later.
+
+When a card is done, the flasher says that it carries everything the radio needs. If it says the card is not ready for offline setup, flash that card again.
+
 When writing completes, proceed to [first boot](first-boot.md). Flashing storage and provisioning the running radio are separate stages.
 
 ## Developer
@@ -86,7 +104,7 @@ pair one version's generated configuration with another version's installer.
 | Select release | Version, board assets, sizes, and digests from the manifest | Stable versus explicit development selection |
 | Fetch setup bundle | The selected release's flasher ZIP | Size and SHA-256 match the manifest |
 | Render first boot | Board install URL, expected digest/version, and operator settings | All required template values and script anchor are handled |
-| Boot the radio | The already selected package identity | Download digest and both embedded version markers agree before extraction |
+| Boot the radio | The already selected package identity | Download or card copy digest and both embedded version markers agree before extraction |
 
 SHA-256 detects content that differs from the selected manifest. It does
 not independently establish who authorized the manifest. The release
@@ -95,6 +113,14 @@ verification stops the launcher rather than silently switching channels or
 using an unrelated cached build.
 
 `MANET_RELEASE_FILE` passes the selected manifest into the engine. `MANET_FLASHER_WORK` keeps settings, downloads, and additional scripts outside the temporary extracted ZIP. `--local-scripts` runs a checkout's setup code against the selected published board package. It does not publish or package that checkout.
+
+### Offline setup
+
+An offline card carries two release files in the root of its boot partition: `cm4-install.tar.gz` and `cm4-offline.tar`. The second is built for each release by `MANET/packaging/build-offline-bundle.py`. It resolves every apt install that first boot and radio-setup run, against the exact Raspberry Pi OS image the flashers write and after the same kernel protection, and adds yq, MediaMTX, and a version marker. `publish.py` checks the bundle against the committed version, image, and pins, and records the image in the manifest as `os_image`. The current bundle holds 163 packages, about 175 MiB.
+
+`--offline`, or the Windows checkbox, makes the engine fetch both files into `packages/` and check them against the manifest. `--make-kit` fills a folder with both launchers, the flasher ZIP, the manifest, the image, and both files, and marks it with `MANET-OFFLINE-KIT.txt` once it is complete. A launcher that finds that marker beside it reads everything from the kit, checks it against the kit's manifest, and makes no network request. After rpi-imager writes a card, the engine copies both files onto its boot partition and checks each copy against its digest. That only works if the imager leaves the card attached, so the engine passes `--disable-eject` to builds that accept it (2.0 and later). A card that does not get both files is a failed flash. Without the option the engines download nothing extra and call rpi-imager with the same arguments as before.
+
+The flasher pins the bundle's SHA-256 in the first-boot script as `__OFFLINE_SHA256__`, which is empty on other flashes. When both files on the card match their pinned digests, first boot skips the network readiness gate. It unpacks the bundle into `/var/lib/manet-offline` and writes one apt drop-in that makes the bundle the only package source. Every later apt command, radio-setup's included, then installs from the card. radio-setup removes the drop-in and the unpacked bundle after it records a complete setup, and the card copies are deleted once the earlier provisioning stage is disabled, so a failed run retries with them. The [internals reference](../../../docs/provisioning-internals.md#offline-setup) covers the bundle build, the kit checks, the card copy, and the trust model of the local repository.
 
 ### Fixed phone hotspot identity
 

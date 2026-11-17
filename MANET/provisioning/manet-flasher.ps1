@@ -21,13 +21,15 @@ param(
     # Skip the elevation and Windows-only checks and just build the window.
     # For looking at the layout, nothing else; every flash path needs admin.
     [switch]$Preview,
-    [switch]$Development
+    [switch]$Development,
+    [switch]$Offline
 )
 
 $ErrorActionPreference = 'Stop'
 if (-not $Preview -and -not $env:MANET_RELEASE_FILE) {
     $launchArgs = @()
     if ($Development) { $launchArgs += '--development' }
+    if ($Offline) { $launchArgs += '--offline' }
     & (Join-Path $PSScriptRoot 'Flash a Radio.cmd') @launchArgs
     exit $LASTEXITCODE
 }
@@ -1049,6 +1051,13 @@ function Install-Prereq {
     param($P)
 
     if ($P.Busy) { return }
+
+    # A computer running an offline kit has no network to download from.
+    if ($env:MANET_KIT_DIR) {
+        $P.Ui.Detail.Text      = 'running from an offline kit: install this on the computer first'
+        $P.Ui.Detail.ForeColor = $Script:UI.Warn
+        return
+    }
 
     # Nothing to download for these: there is no release API to pick an asset
     # from, so the browser is the answer.
@@ -2172,6 +2181,12 @@ function Build-ConfirmPage {
     $Script:ChkErase.Add_CheckedChanged({ Update-Nav })
     $p.Controls.Add($Script:ChkErase)
 
+    # Kept from card to card. --offline starts it ticked. A run from an
+    # offline kit has no other choice, so it stays ticked there.
+    $Script:ChkOffline = New-Check ('Offline setup: put everything the radio needs on the card, ' +
+                                    'so it sets itself up without internet') 20 396 798 $Script:OFFLINE
+    $p.Controls.Add($Script:ChkOffline)
+
     return $p
 }
 
@@ -2224,6 +2239,16 @@ function Update-ConfirmPage {
     $Script:LblEraseWarn.Text = "Everything on disk $($d.Number) will be destroyed. This cannot be undone."
     $Script:ChkErase.Text     = "Yes, erase disk $($d.Number) ($($d.FriendlyName), $($d.SizeGB) GB)"
     $Script:ChkErase.Checked  = $false
+    # Offline bundles exist for the CM4's Raspberry Pi OS image only.
+    if ($env:MANET_KIT_DIR) {
+        $Script:ChkOffline.Checked = $true
+        $Script:ChkOffline.Enabled = $false
+    } elseif ($hw.Model -ne 'rpi4') {
+        $Script:ChkOffline.Checked = $false
+        $Script:ChkOffline.Enabled = $false
+    } else {
+        $Script:ChkOffline.Enabled = $true
+    }
     Update-Nav
 }
 
@@ -2299,8 +2324,39 @@ function Test-CardWasWritten {
     return 'empty'
 }
 
+# For offline setup, put the offline files on the card the imager has just
+# written. A card without them cannot set itself up offline, so that is a
+# failed flash.
+function Complete-RpiFlashOffline {
+    if (-not $Script:OFFLINE) { Complete-Flash $true ''; return }
+    $Script:LblFlashStatus.Text = 'Copying the offline setup files to the card...'
+    [System.Windows.Forms.Application]::DoEvents()
+    $problem = Copy-FilesToCard -DiskNumber $Script:TARGET_DEVICE -Files $Script:OFFLINE_FILES
+    if ($problem) {
+        Complete-Flash $false ("The card was written but is NOT ready for offline setup: $problem. " +
+                               "Without internet it cannot set itself up. Flash it again.")
+        return
+    }
+    Add-Log 'Offline setup files copied to the card.'
+    Complete-Flash $true ''
+}
+
+# Gather the offline files, once per release, before the first card.
+function Get-OfflineFilesForGui {
+    $Script:LblFlashStatus.Text = 'Fetching the offline setup files...'
+    [System.Windows.Forms.Application]::DoEvents()
+    foreach ($file in (Get-OfflineFiles)) { Add-Log "Offline setup file: $($file.Path)" }
+}
+
 function Start-RpiFlash {
+    $Script:OFFLINE = $Script:ChkOffline.Checked
+    $imager = ($Script:PrereqItems | Where-Object { $_.Key -eq 'rpi-imager' } | Select-Object -First 1).Path
+    $Script:RPI_IMAGER_PATH = $imager
     try {
+        if ($Script:OFFLINE) {
+            Assert-ImagerKeepsCard
+            Get-OfflineFilesForGui
+        }
         $content    = Build-ProvisioningScript -TemplatePath $TEMPLATE_FILE
         $tempScript = Join-Path $ScriptDir 'firstrun.sh'
         [System.IO.File]::WriteAllText($tempScript, $content.Replace("`r`n", "`n"))
@@ -2310,16 +2366,16 @@ function Start-RpiFlash {
         return
     }
 
-    $imager = ($Script:PrereqItems | Where-Object { $_.Key -eq 'rpi-imager' } | Select-Object -First 1).Path
-    $Script:RPI_IMAGER_PATH = $imager
     $target = "\\.\PhysicalDrive$($Script:TARGET_DEVICE)"
 
     # Its own window, for the same reason rpiboot has one: with --cli the imager
     # prints download and write progress, and redirecting it captured nothing at
     # all while leaving five minutes of blank marquee here. Watching it work is
     # the point.
-    $argLine = (@(@('--cli', $OS_IMAGE_URL, $target, '--first-run-script', $tempScript) |
-                  ForEach-Object { Format-ProcessArgument $_ }) -join ' ')
+    $imagerArgs = @('--cli')
+    if ($Script:OFFLINE) { $imagerArgs += @(Get-RpiImagerExtraArgs $imager) }
+    $imagerArgs += @($OS_IMAGE_URL, $target, '--first-run-script', $tempScript)
+    $argLine = (@($imagerArgs | ForEach-Object { Format-ProcessArgument $_ }) -join ' ')
     $exe = $imager
     if ([System.IO.Path]::GetExtension($imager) -in @('.cmd', '.bat')) {
         $exe = $env:ComSpec
@@ -2369,7 +2425,7 @@ function Start-RpiFlash {
     # usually left the USB bus by then, so a good flash looked like an empty
     # one.
     if ($null -ne $code) {
-        if ($code -eq 0) { Complete-Flash $true ''; return }
+        if ($code -eq 0) { Complete-RpiFlashOffline; return }
 
         # A remembered path that does not flash must not be replayed on every
         # future run, here or on the console.
@@ -2385,7 +2441,7 @@ function Start-RpiFlash {
     $state = Test-CardWasWritten -DiskNumber $Script:TARGET_DEVICE
     Add-Log "Exit code unreadable; the card says: $state"
 
-    if ($state -eq 'written' -or $state -eq 'gone') { Complete-Flash $true ''; return }
+    if ($state -eq 'written' -or $state -eq 'gone') { Complete-RpiFlashOffline; return }
 
     Remove-CachedToolPath -Key 'rpi-imager' -Reason "it did not flash the card"
     Complete-Flash $false ("Raspberry Pi Imager finished but its exit code could not be read, and the card " +
@@ -2393,6 +2449,12 @@ function Start-RpiFlash {
 }
 
 function Start-Rock3aFlash {
+    # Rock 3A has no offline bundle, and a kit has no Armbian image or network.
+    if ($env:MANET_KIT_DIR) {
+        Complete-Flash $false 'An offline kit flashes the Compute Module 4 and Raspberry Pi 4B only.'
+        return
+    }
+    $Script:OFFLINE = $false
     if (-not (Test-Ext4Driver)) {
         Complete-Flash $false 'The Ext2Fsd service is not running. Go back to the prerequisites page.'
         return
@@ -2539,6 +2601,13 @@ function Get-ReceiptText {
         "computer and read firstrun.log in the root of the bootfs drive: the"
         "whole of the first-boot run is in there, and the reason will be too."
     )
+    if ($Script:OFFLINE) {
+        $lines += @(
+            ""
+            "Offline setup: the card carries everything the radio needs, so it"
+            "sets itself up without internet. Ethernet is not needed for it."
+        )
+    }
     if ($Script:HARDWARE_MODEL -eq 'r3a') {
         $lines += @(
             ""

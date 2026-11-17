@@ -4532,7 +4532,10 @@ Exits 0 to allow non-AP radios or a released candidate with an active mesh role,
 and 1 to skip a radio reserved for AP.
 
 `have_package_network` is checked before each apt phase, so "no network" is
-recorded once before attempting package downloads.
+recorded once before attempting package downloads. While the offline apt
+drop-in from an [offline flash](provisioning-internals.md#offline-setup) is in
+place it succeeds at once, because every package comes from the card. radio-setup
+removes that drop-in and the unpacked bundle after it records a complete setup.
 
 This exists because a node reached the field with none of its packages
 installed: its Ethernet was unplugged part-way through provisioning, every apt

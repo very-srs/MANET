@@ -41,7 +41,7 @@ You will need:
 - A supported SBC. The **Compute Module 4 (CM4) is the current reference platform**. Raspberry Pi 5 and Radxa Rock 3A are also supported, though both are currently deprioritized because of thermal limits in enclosed builds. See the main README for the hardware support table.
 - A Linux or Windows computer to flash from
 - An SD card or cm4 eMMC, appropriate for your hardware
-- Ethernet internet access on the node during its first boot
+- Ethernet internet access on the node during its first boot, unless the card was written for [offline setup](#offline-setup)
 
 ### Windows: the short version
 
@@ -196,6 +196,74 @@ Normal node updates also use stable. Testing nodes can run
 `sudo node-update.sh --development` explicitly. See
 [release publishing and retention](../releases/README.md).
 
+### Offline setup
+
+A normal flash leaves first boot to download the MANET install package, the
+Debian packages it installs, yq, and MediaMTX, so the radio needs Ethernet with
+internet access the first time it starts. Offline setup puts all of that on the
+card, and the radio then sets itself up with no network connection at all. It
+is available for the Compute Module 4 and the Raspberry Pi 4B.
+
+#### Flashing from a computer with internet
+
+Add `--offline`:
+
+```bash
+./flash-a-radio.sh --offline
+```
+
+```bat
+"Flash-a-Radio.cmd" --offline
+```
+
+In the Windows window the same choice is the **Offline setup** checkbox on the
+confirmation page. The launcher option starts it ticked.
+
+#### Flashing from a computer without internet
+
+First fill a USB stick on any computer that has internet, Linux or Windows:
+
+```bash
+./flash-a-radio.sh --make-kit /media/usb/manet-kit
+```
+
+```bat
+"Flash-a-Radio.cmd" --make-kit E:\manet-kit
+```
+
+The kit folder holds both launchers, the setup scripts, the Raspberry Pi OS
+image, the install package, and the offline bundle for one release, about
+830 MB in all. Add `--development` to make a kit from the newest published
+build. Running `--make-kit` again on the same folder checks what is already
+there and downloads only what is missing or damaged.
+
+On the computer without internet, run the launcher from the kit folder:
+`bash flash-a-radio.sh` on Linux, or double-click `Flash-a-Radio.cmd` on
+Windows. It finds `MANET-OFFLINE-KIT.txt` beside it, uses only the files in the
+kit, and writes offline cards. That computer needs Raspberry Pi Imager, and
+`rpiboot` for a CM4, installed beforehand. Saved settings are kept in a folder
+inside the kit.
+
+#### What goes on the card
+
+Both ways put two files in the root of the card's boot partition:
+`cm4-install.tar.gz` and `cm4-offline.tar`, about 230 MB together. A connected
+flasher downloads them once from the selected release and keeps them in a
+`packages` folder for later runs. Each is checked against the release's SHA-256
+before it is used.
+
+The flasher copies them after Raspberry Pi Imager has written the card, so the
+imager must leave the card attached. Raspberry Pi Imager 2.0 and later can do
+that. Windows needs version 2.0 or later for offline setup. On Linux an older
+imager may still work. If a card cannot take the files, the flasher stops and
+says that the card is not ready for offline setup. Flash it again.
+
+First boot checks both files against the checksums written into the card's
+setup script. When both match, it does not wait for internet, and every package
+comes from the card. The files stay on the card until setup succeeds, so a
+failed first boot retries with them. If they are missing or do not match, first
+boot downloads as usual and needs internet.
+
 ### OS Images
 
 **You do not need to download OS images manually.** The scripts handle this automatically:
@@ -244,6 +312,7 @@ On the first run a standalone copy creates a `manet-flasher` folder beside
 itself and copies the launcher there. Run that copy next time. Settings and
 additional setup scripts stay in this folder; each run fetches and verifies the
 selected release's flasher bundle. Python 3, curl, and internet access are needed.
+A run from an [offline kit](#offline-setup) needs only Python 3.
 
 `rpi-imager` has to be version 1.8 or newer. Older builds cannot put the mesh
 setup script onto the card, and they fail only after the card has been written,
@@ -598,8 +667,8 @@ The `firstrun.sh` script runs on the very first boot (injected by `rpi-imager`).
 
 After a reboot, `provision-mesh.sh` runs once network is available. It:
 
-1. Waits for installation resources over HTTP/HTTPS (up to 5 minutes)
-2. Downloads the kernel and mesh orchestration tools
+1. Waits for installation resources over HTTP/HTTPS (up to 5 minutes), unless the card carries everything for [offline setup](#offline-setup)
+2. Downloads the kernel and mesh orchestration tools, or takes them from the card
 3. Sets the Wi-Fi regulatory domain
 4. Calculates a unique hostname from the node's MAC address
 5. Installs required packages (`batctl`, `wpa_supplicant`, etc.)

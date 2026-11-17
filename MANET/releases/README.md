@@ -21,6 +21,16 @@ Increment both `MANET/node_tools/version.txt` and `MANET/etc/manet_version.txt`.
 Build all six archives and their checksum sidecars, run the checks, and commit
 and push the source. A source push alone does not announce an update.
 
+Then build the CM4 offline bundle from the same checkout:
+
+```bash
+MANET/packaging/build-offline-bundle.py
+```
+
+It writes `cm4-offline.tar` and its sidecar to `MANET/install_packages/`. See
+[offline setup](../../docs/provisioning-internals.md#offline-setup) for what it
+contains and how flashers and first boot use it.
+
 Write release notes to a text file, then run:
 
 ```bash
@@ -30,7 +40,11 @@ python3 MANET/releases/publish.py publish \
 ```
 
 The default is a prerelease. The publisher checks every archive's checksum and
-both embedded version files. It packages the committed provisioning scripts in
+both embedded version files. It checks that the offline bundle carries the
+committed version, was built for the Raspberry Pi OS image the committed
+flashers write, and holds the yq and MediaMTX the templates pin. That image's
+URL, size, and digest go into the manifest as `os_image`, which offline kits
+use. It packages the committed provisioning scripts in
 `manet-flasher.zip`, adds standalone Linux and Windows launchers, and creates a
 manifest with the source commit, version, file sizes, and SHA-256 digests. It
 uploads everything to a draft, checks GitHub's stored sizes and digests, and

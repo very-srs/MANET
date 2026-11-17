@@ -27,13 +27,15 @@ param(
     # Load the functions and stop. For `. .\windows.ps1 -NoRun` from a host
     # script; without it the console flow runs as it always has.
     [switch]$NoRun,
-    [switch]$Development
+    [switch]$Development,
+    [switch]$Offline
 )
 
 # Direct console invocations use the same released scripts as the GUI launcher.
 if (-not $NoRun -and -not $env:MANET_RELEASE_FILE) {
     $launchArgs = @('--console')
     if ($Development) { $launchArgs += '--development' }
+    if ($Offline) { $launchArgs += '--offline' }
     & (Join-Path $PSScriptRoot 'Flash a Radio.cmd') @launchArgs
     exit $LASTEXITCODE
 }
@@ -75,8 +77,23 @@ $ARMBIAN_IMAGE_FILENAME = "Armbian_26.2.1_Rock-3a_trixie_vendor_6.1.115_minimal.
 $Script:ARMBIAN_IMAGE   = ""   # Set by Get-ArmbianImage
 
 $OS_IMAGE_URL  = "https://downloads.raspberrypi.com/raspios_lite_arm64/images/raspios_lite_arm64-2025-10-02/2025-10-01-raspios-trixie-arm64-lite.img.xz"
+# An offline kit carries the same image file, verified by the launcher.
+if ($env:MANET_OS_IMAGE) {
+    if ((Split-Path -Leaf $env:MANET_OS_IMAGE) -ne ($OS_IMAGE_URL -split '/')[-1]) {
+        throw 'The offline kit holds a different Raspberry Pi OS image than this flasher writes.'
+    }
+    $OS_IMAGE_URL = $env:MANET_OS_IMAGE
+}
 
 $DEVICE_WAIT   = 8   # seconds to wait for the CM4 eMMC to enumerate after rpiboot
+
+# With --offline, or when run from an offline kit, every card carries the
+# pinned install package and the release's offline bundle (Debian packages,
+# yq, and MediaMTX), so the radio sets itself up without internet. A connected
+# run keeps one verified copy of each here. A kit run takes both from the kit.
+# See Get-OfflineFiles. Without the option nothing touches them and first boot
+# downloads as before.
+$OFFLINE_FILE_DIR = Join-Path $WorkDir "packages"
 
 # Where a program location the user pointed us at gets remembered, so nobody is
 # asked twice. Not a *.conf, so the saved-config picker does not list it.
@@ -107,6 +124,12 @@ $Script:RPIBOOT_PATH      = $null
 # Set by New-Rock3aCustomImage. "!" means no hash tool was reachable and the
 # radio account was left locked, which the completion message has to say.
 $Script:R3A_RADIO_HASH    = ""
+# From --offline or an offline kit. The window front end also sets it from a
+# checkbox.
+$Script:OFFLINE           = $env:MANET_OFFLINE -eq '1'
+# Set by Get-OfflineFiles: verified local copies of the files each card gets,
+# each with the SHA-256 the release manifest gives for it.
+$Script:OFFLINE_FILES     = @()
 
 
 # Helper Functions
@@ -2108,11 +2131,9 @@ function Load-Config {
 # setting still means the token in both templates and the substitution list in
 # both flashers, as the provisioning README says - it is just one list here
 # now instead of two.
-function Expand-ProvisioningTokens {
-    param([string]$Content)
-
-    if (-not (Test-SshUsername $Script:RADIO_USER)) { throw $Script:SshUsernameHelp }
-
+# What the release manifest pins for the selected board: the install package
+# and, when the release has one, the offline bundle.
+function Get-ReleaseInstallAsset {
     if (-not $env:MANET_RELEASE_FILE) { throw 'Start the flasher through Flash a Radio.cmd.' }
     $release = Get-Content -LiteralPath $env:MANET_RELEASE_FILE -Raw | ConvertFrom-Json
     if ($release.schema -ne 1 -or $release.tag -notmatch '^v[0-9]+(?:\.[0-9]+)+$' -or $release.tag -ne ('v' + $release.version)) {
@@ -2123,12 +2144,35 @@ function Expand-ProvisioningTokens {
     $filename = "$board-install.tar.gz"
     $asset = $release.assets.$filename
     if ($asset.sha256 -notmatch '^[0-9a-f]{64}$') { throw 'Missing install checksum.' }
-    $installUrl = "https://github.com/very-srs/MANET/releases/download/$($release.tag)/$filename"
+    $offlineName = "$board-offline.tar"
+    $offline = $release.assets.$offlineName
+    if ($offline -and $offline.sha256 -notmatch '^[0-9a-f]{64}$') { throw 'Invalid offline bundle checksum.' }
+    $download = "https://github.com/very-srs/MANET/releases/download/$($release.tag)"
+    return [pscustomobject]@{
+        Version       = $release.version
+        Name          = $filename
+        Url           = "$download/$filename"
+        Sha256        = $asset.sha256
+        OfflineName   = $(if ($offline) { $offlineName } else { '' })
+        OfflineUrl    = $(if ($offline) { "$download/$offlineName" } else { '' })
+        OfflineSha256 = $(if ($offline) { $offline.sha256 } else { '' })
+    }
+}
+
+function Expand-ProvisioningTokens {
+    param([string]$Content)
+
+    if (-not (Test-SshUsername $Script:RADIO_USER)) { throw $Script:SshUsernameHelp }
+
+    $install = Get-ReleaseInstallAsset
+    # Empty unless this flash is offline. The template then ignores the card.
+    $offlineToken = if ($Script:OFFLINE) { $install.OfflineSha256 } else { '' }
 
     return ($Content `
-        -replace '__RELEASE_VERSION__',         $release.version `
-        -replace '__INSTALL_URL__',             $installUrl `
-        -replace '__INSTALL_SHA256__',          $asset.sha256 `
+        -replace '__RELEASE_VERSION__',         $install.Version `
+        -replace '__INSTALL_URL__',             $install.Url `
+        -replace '__INSTALL_SHA256__',          $install.Sha256 `
+        -replace '__OFFLINE_SHA256__',          $offlineToken `
         -replace '__HARDWARE_MODEL__',          $Script:HARDWARE_MODEL `
         -replace '__EUD_CONNECTION__',          $Script:EUD_CONNECTION `
         -replace '__LAN_AP_SSID__',             $Script:LAN_AP_SSID `
@@ -2193,6 +2237,157 @@ auto_update=$($Script:AUTO_UPDATE)
     return $meshConf.Replace("`r`n", "`n")
 }
 
+# Find or download one release file and check its digest. A run from an
+# offline kit takes it from the kit and never downloads. Throws when no
+# verified copy can be had.
+function Get-ReleaseFile {
+    param([string]$Name, [string]$Url, [string]$Sha256)
+    if ($env:MANET_KIT_DIR) {
+        $file = Join-Path $env:MANET_KIT_DIR $Name
+        if (-not (Test-Path -LiteralPath $file) -or
+            (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash -ne $Sha256) {
+            throw "$Name in the offline kit is missing or damaged. Make the kit again."
+        }
+        return $file
+    }
+    $file = Join-Path $OFFLINE_FILE_DIR $Name
+    if ((Test-Path -LiteralPath $file) -and
+        (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash -eq $Sha256) {
+        return $file
+    }
+    New-Item -ItemType Directory -Path $OFFLINE_FILE_DIR -Force | Out-Null
+    $partial = "$file.partial"
+    Write-Host "Downloading $Name..."
+    # The progress bar slows Windows PowerShell 5.1 downloads many times over.
+    $ProgressPreference = 'SilentlyContinue'
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        Invoke-WebRequest -Uri $Url -OutFile $partial -UseBasicParsing
+    } catch {
+        Remove-Item -LiteralPath $partial -Force -ErrorAction SilentlyContinue
+        throw "Could not download ${Url}: $($_.Exception.Message)"
+    }
+    if ((Get-FileHash -LiteralPath $partial -Algorithm SHA256).Hash -ne $Sha256) {
+        Remove-Item -LiteralPath $partial -Force -ErrorAction SilentlyContinue
+        throw "The downloaded $Name does not match the release checksum."
+    }
+    Move-Item -LiteralPath $partial -Destination $file -Force
+    return $file
+}
+
+# The install package and offline bundle every offline card carries, each as
+# a Path and its Sha256. Sets $Script:OFFLINE_FILES and throws when either
+# cannot be had.
+function Get-OfflineFiles {
+    if ($Script:HARDWARE_MODEL -notin @('cm4', 'rpi4')) {
+        throw 'Offline setup is available for the Compute Module 4 and Raspberry Pi 4B only.'
+    }
+    $install = Get-ReleaseInstallAsset
+    if (-not $install.OfflineName) { throw "Release $($install.Version) has no offline bundle for this board." }
+    $Script:OFFLINE_FILES = @(
+        [pscustomobject]@{ Path = (Get-ReleaseFile $install.Name $install.Url $install.Sha256); Sha256 = $install.Sha256 },
+        [pscustomobject]@{ Path = (Get-ReleaseFile $install.OfflineName $install.OfflineUrl $install.OfflineSha256); Sha256 = $install.OfflineSha256 })
+    return $Script:OFFLINE_FILES
+}
+
+# Offline setup copies files onto the card after the imager finishes, which
+# only works with an imager that can leave the card attached.
+function Assert-ImagerKeepsCard {
+    if (@(Get-RpiImagerExtraArgs $Script:RPI_IMAGER_PATH).Count -eq 0) {
+        throw ('Offline setup needs Raspberry Pi Imager 2.0 or later. This one ejects the card ' +
+               'before the offline files can be copied onto it.')
+    }
+}
+
+# rpi-imager ejects the card when it finishes, which on Windows takes it off
+# the bus before the install package can be copied on. 2.0 and later take
+# --disable-eject. Older builds refuse the whole run over an unknown option,
+# so the flag goes only to a build known to be 2.0 or later. Only 2.x ships
+# rpi-imager-cli.cmd, so a .cmd counts as 2.x unless the program beside it
+# says otherwise.
+function Get-RpiImagerExtraArgs {
+    param([string]$ImagerPath)
+    if (-not $ImagerPath) { return @() }
+    $exe = $ImagerPath
+    if ([System.IO.Path]::GetExtension($ImagerPath) -in @('.cmd', '.bat')) {
+        $exe = Join-Path (Split-Path -Parent $ImagerPath) 'rpi-imager.exe'
+        if (-not (Test-Path -LiteralPath $exe)) { return @('--disable-eject') }
+    }
+    $major = 0
+    try { $major = (Get-Item -LiteralPath $exe).VersionInfo.FileMajorPart } catch { }
+    if ($major -ge 2) { return @('--disable-eject') }
+    return @()
+}
+
+# Copy files to the boot partition of a card rpi-imager has just written. Each
+# file has a Path and the Sha256 its copy on the card must match. Windows does
+# not always give that partition a drive letter, so one is added for the copy
+# and taken away after. Either every file lands or none is left behind.
+# Returns '' on success, otherwise the reason.
+function Copy-FilesToCard {
+    param([int]$DiskNumber, [object[]]$Files)
+
+    $partition = $null
+    for ($t = 0; $t -lt 15 -and -not $partition; $t++) {
+        try { Update-HostStorageCache -ErrorAction SilentlyContinue } catch { }
+        $partition = Get-Partition -DiskNumber $DiskNumber -ErrorAction SilentlyContinue |
+                     Sort-Object PartitionNumber | Select-Object -First 1
+        if (-not $partition) { Start-Sleep -Seconds 1 }
+    }
+    if (-not $partition) { return 'the card was ejected before the copy' }
+
+    $number = $partition.PartitionNumber
+    $added  = $false
+    $letter = $null
+    try {
+        if (-not $partition.DriveLetter -or $partition.DriveLetter -eq "`0") {
+            Add-PartitionAccessPath -DiskNumber $DiskNumber -PartitionNumber $number -AssignDriveLetter -ErrorAction Stop
+            $added = $true
+            Start-Sleep -Seconds 2
+            $partition = Get-Partition -DiskNumber $DiskNumber -PartitionNumber $number
+        }
+        if (-not $partition.DriveLetter -or $partition.DriveLetter -eq "`0") {
+            return 'Windows did not give the boot partition a drive letter'
+        }
+        $letter = $partition.DriveLetter
+        $volume = Get-Volume -DriveLetter $letter -ErrorAction Stop
+        if ($volume.FileSystem -notmatch '^FAT') {
+            return "the first partition is $($volume.FileSystem), not the boot partition"
+        }
+        # Room for the files, plus the kernel files first boot adds beside them.
+        $need = 32MB
+        foreach ($file in $Files) { $need += (Get-Item -LiteralPath $file.Path).Length }
+        if ($volume.SizeRemaining -lt $need) {
+            return 'the boot partition has too little free space'
+        }
+        foreach ($file in $Files) {
+            $name = Split-Path -Leaf $file.Path
+            Copy-Item -LiteralPath $file.Path -Destination "${letter}:\$name.partial" -Force -ErrorAction Stop
+            Move-Item -LiteralPath "${letter}:\$name.partial" -Destination "${letter}:\$name" -Force -ErrorAction Stop
+            # Catches a source replaced since it was checked, such as by
+            # another flasher sharing packages\.
+            if ((Get-FileHash -LiteralPath "${letter}:\$name" -Algorithm SHA256).Hash -ne $file.Sha256) {
+                throw "$name on the card does not match the release checksum"
+            }
+        }
+        Write-VolumeCache -DriveLetter $letter -ErrorAction SilentlyContinue
+        return ''
+    } catch {
+        if ($letter) {
+            foreach ($file in $Files) {
+                $name = Split-Path -Leaf $file.Path
+                Remove-Item -LiteralPath "${letter}:\$name.partial", "${letter}:\$name" -Force -ErrorAction SilentlyContinue
+            }
+        }
+        return $_.Exception.Message
+    } finally {
+        if ($added -and $letter) {
+            Remove-PartitionAccessPath -DiskNumber $DiskNumber -PartitionNumber $number `
+                -AccessPath "${letter}:\" -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 # One card, one rpi-imager run. Returns a result rather than printing a verdict
 # so a caller with a window can show it its own way. Dropping a bad remembered
 # path stays here: it must happen however the flash was started.
@@ -2200,9 +2395,12 @@ function Invoke-RpiImagerFlash {
     param([int]$DiskNumber, [string]$ScriptPath)
 
     $targetDrive = "\\.\PhysicalDrive$DiskNumber"
+    $imagerArgs  = @('--cli')
+    if ($Script:OFFLINE) { $imagerArgs += @(Get-RpiImagerExtraArgs $Script:RPI_IMAGER_PATH) }
+    $imagerArgs += @($OS_IMAGE_URL, $targetDrive, '--first-run-script', $ScriptPath)
 
     try {
-        & $Script:RPI_IMAGER_PATH --cli $OS_IMAGE_URL $targetDrive --first-run-script "$ScriptPath"
+        & $Script:RPI_IMAGER_PATH @imagerArgs
         if ($LASTEXITCODE -ne 0) {
             Remove-CachedToolPath -Key 'rpi-imager' -Reason "it did not flash the card"
             return [pscustomobject]@{ Ok = $false; Error = "exited with code $LASTEXITCODE" }
@@ -2449,6 +2647,12 @@ function Invoke-Main {
 
     Select-HardwareAndTargetDevice
 
+    # Offline bundles are built for the CM4's Raspberry Pi OS image only.
+    if ($Script:OFFLINE -and $Script:HARDWARE_MODEL -notin @('cm4', 'rpi4')) {
+        Write-Host "ERROR: Offline setup is available for the Compute Module 4 and Raspberry Pi 4B only." -ForegroundColor Red
+        exit 1
+    }
+
     if (-not (Test-Path $TEMPLATE_FILE)) {
         Write-Host "ERROR: Template file '$TEMPLATE_FILE' not found." -ForegroundColor Red
         exit 1
@@ -2511,6 +2715,17 @@ function Invoke-Main {
         $imageOk = Get-ArmbianImage
         if (-not $imageOk) {
             Write-Host "ERROR: Could not obtain Armbian image." -ForegroundColor Red
+            exit 1
+        }
+    }
+
+    if ($Script:OFFLINE) {
+        Write-Host "Offline setup: each card gets the install package and the offline bundle."
+        try {
+            Assert-ImagerKeepsCard
+            [void](Get-OfflineFiles)
+        } catch {
+            Write-Host "ERROR: $($_.Exception.Message)" -ForegroundColor Red
             exit 1
         }
     }
@@ -2637,13 +2852,30 @@ function Invoke-Main {
 
             Remove-Item $tempScript -Force -ErrorAction SilentlyContinue
 
-            if ($result.Ok) {
+            $offlineProblem = ''
+            if ($result.Ok -and $Script:OFFLINE) {
+                Write-Host "Copying the offline setup files to the card..."
+                $offlineProblem = Copy-FilesToCard -DiskNumber $Script:TARGET_DEVICE -Files $Script:OFFLINE_FILES
+            }
+
+            if ($offlineProblem) {
+                Write-Host ""
+                Write-Host "ERROR: The card was written but is NOT ready for offline setup:" -ForegroundColor Red
+                Write-Host "       $offlineProblem." -ForegroundColor Red
+                Write-Host "       Without internet it cannot set itself up. Flash it again." -ForegroundColor Red
+                Write-Host ""
+            } elseif ($result.Ok) {
                 $flashCount++
                 Write-Host ""
                 Write-Host "==============================================" -ForegroundColor Green
                 Write-Host "           DONE: Flash complete!" -ForegroundColor Green
                 Write-Host "==============================================" -ForegroundColor Green
                 Write-Host ""
+                if ($Script:OFFLINE) {
+                    Write-Host "  Offline setup: the card carries everything the radio needs,"
+                    Write-Host "  so it sets itself up without internet."
+                    Write-Host ""
+                }
                 Write-Host " ONCE BOOTED, THE MESH NODE WILL AUTOMATICALLY START"
                 Write-Host " SETTING ITSELF UP AND WILL REBOOT MULTIPLE TIMES"
                 Write-Host " Just leave it alone, this process takes about ten minutes"

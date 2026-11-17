@@ -304,6 +304,10 @@ setup steps and what to expect.
 - Your own setup scripts are checked and built into the image.
 - Flashing installs the current stable release by default.
   `--development` selects the newest published build instead.
+- Offline setup puts everything a CM4 needs on its card, so the radio sets
+  itself up without internet. A USB stick prepared on a connected computer
+  lets a computer without internet write those cards. See
+  [set up radios without internet](flash.md#user-set-up-radios-without-internet).
 - First boot needs Ethernet with internet and steady power, and takes about
   ten minutes. See [the first boot](first-boot.md).
 - Before installing anything, first boot checks that it can reach what it

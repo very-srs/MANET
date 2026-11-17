@@ -16,6 +16,10 @@ STABLE_MANIFEST = f"https://github.com/{REPOSITORY}/releases/latest/download/man
 TAG_PATTERN = re.compile(r"v([0-9]+(?:\.[0-9]+)+)")
 BOARDS = ("cm4", "r3a", "rpi5")
 PACKAGES = tuple(f"{board}-{kind}.tar.gz" for board in BOARDS for kind in ("tools", "install"))
+# Boards with an offline bundle: the Debian packages, yq, and MediaMTX that
+# first boot otherwise downloads. Built against the image in "os_image".
+OFFLINE_BOARDS = ("cm4",)
+OFFLINE_BUNDLES = tuple(f"{board}-offline.tar" for board in OFFLINE_BOARDS)
 
 
 class ReleaseError(ValueError):
@@ -86,6 +90,16 @@ def validate_manifest(value, tag=None):
                 or not re.fullmatch(r"[a-f0-9]{64}", asset.get("sha256", ""))
                 or type(asset.get("size")) is not int or asset["size"] <= 0):
             raise ReleaseError("Invalid release asset")
+    # Older releases have no offline bundle. A release with one names the
+    # Raspberry Pi OS image it was built for, which an offline kit carries.
+    image = value.get("os_image")
+    if image is not None or any(name in assets for name in OFFLINE_BUNDLES):
+        if (not isinstance(image, dict)
+                or not re.fullmatch(r"https://downloads\.raspberrypi\.com/[A-Za-z0-9_./-]+\.img\.xz",
+                                    image.get("url", ""))
+                or not re.fullmatch(r"[a-f0-9]{64}", image.get("sha256", ""))
+                or type(image.get("size")) is not int or image["size"] <= 0):
+            raise ReleaseError("Invalid Raspberry Pi OS image record")
     return value
 
 

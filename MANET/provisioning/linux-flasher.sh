@@ -51,6 +51,15 @@ TEMPLATE_FILE="$SCRIPT_DIR/firstrun.sh.template"
 ROCK3A_TEMPLATE="$SCRIPT_DIR/rock3a-provision.sh.template"
 cd "$MANET_FLASHER_WORK"
 
+# An offline kit carries the same image file, verified by the launcher.
+if [ -n "${MANET_OS_IMAGE:-}" ]; then
+    if [ "${MANET_OS_IMAGE##*/}" != "${PI_OS_IMAGE_URL##*/}" ]; then
+        echo "ERROR: The offline kit holds a different Raspberry Pi OS image than this flasher writes." >&2
+        exit 1
+    fi
+    PI_OS_IMAGE_URL="$MANET_OS_IMAGE"
+fi
+
 fetch_url() {
     if command -v curl >/dev/null 2>&1; then
         curl -fsSL --connect-timeout 15 --max-time 120 -o "$2" "$1"
@@ -67,6 +76,137 @@ prepare_release() {
     RELEASE_VERSION="${release_values[0]}"
     INSTALL_URL="${release_values[1]}"
     INSTALL_SHA256="${release_values[2]}"
+    OFFLINE_URL="${release_values[3]:-}"
+    OFFLINE_SHA256="${release_values[4]:-}"
+}
+
+# --- Offline setup ---------------------------------------------------------
+# With --offline, or when run from an offline kit, every card carries the
+# pinned install package and the release's offline bundle (Debian packages,
+# yq, and MediaMTX), so the radio sets itself up without internet. A connected
+# run keeps one verified copy of each in packages/ and reuses it until the
+# release changes. A kit run takes both from the kit and uses no network.
+# Without the option nothing here runs and first boot downloads as before.
+OFFLINE="${MANET_OFFLINE:-0}"
+KIT_DIR="${MANET_KIT_DIR:-}"
+OFFLINE_FILE_DIR="packages"
+OFFLINE_FILES=()
+# The templates' __OFFLINE_SHA256__: empty unless this run is offline.
+OFFLINE_TOKEN=""
+
+# Find or download one release file and check its digest. Sets RELEASE_FILE.
+fetch_release_file() {
+    local url="$1" digest="$2" name="${1##*/}" file
+    RELEASE_FILE=""
+    if [ -n "$KIT_DIR" ]; then
+        file="$KIT_DIR/$name"
+        if ! printf '%s  %s\n' "$digest" "$file" | sha256sum -c --status - 2>/dev/null; then
+            echo "ERROR: $name in the offline kit is missing or damaged. Make the kit again." >&2
+            return 1
+        fi
+        RELEASE_FILE="$file"
+        return 0
+    fi
+    file="$OFFLINE_FILE_DIR/$name"
+    if [ -f "$file" ] && printf '%s  %s\n' "$digest" "$file" | sha256sum -c --status -; then
+        echo "$name for release $RELEASE_VERSION is already in $OFFLINE_FILE_DIR/."
+        RELEASE_FILE="$PWD/$file"
+        return 0
+    fi
+    mkdir -p "$OFFLINE_FILE_DIR" || return 1
+    echo "Downloading $name for release $RELEASE_VERSION..."
+    if ! curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
+            --connect-timeout 15 --max-time 1800 --retry 2 \
+            --output "$file.partial" "$url"; then
+        rm -f "$file.partial"
+        echo "ERROR: Could not download $url" >&2
+        return 1
+    fi
+    if ! printf '%s  %s\n' "$digest" "$file.partial" | sha256sum -c --status -; then
+        rm -f "$file.partial"
+        echo "ERROR: The downloaded $name does not match the release checksum." >&2
+        return 1
+    fi
+    mv -f "$file.partial" "$file" || return 1
+    RELEASE_FILE="$PWD/$file"
+}
+
+# Gather the install package and the offline bundle. Sets OFFLINE_FILES, each
+# entry "<sha256> <path>", and OFFLINE_TOKEN.
+prepare_offline_files() {
+    if [ -z "$OFFLINE_URL" ]; then
+        echo "ERROR: Release $RELEASE_VERSION has no offline bundle for this board." >&2
+        return 1
+    fi
+    OFFLINE_FILES=()
+    fetch_release_file "$INSTALL_URL" "$INSTALL_SHA256" || return 1
+    OFFLINE_FILES+=("$INSTALL_SHA256 $RELEASE_FILE")
+    fetch_release_file "$OFFLINE_URL" "$OFFLINE_SHA256" || return 1
+    OFFLINE_FILES+=("$OFFLINE_SHA256 $RELEASE_FILE")
+    OFFLINE_TOKEN="$OFFLINE_SHA256"
+}
+
+# Copy files to the boot partition of a card rpi-imager has just written. Each
+# argument after the device is "<sha256> <path>", and each copy is checked
+# against its digest on the card. The automount hold keeps the desktop off the
+# card meanwhile. Either every file lands or none is left behind. On failure
+# the reason goes to stderr.
+copy_files_to_card() {
+    local target="$1" part mnt need avail entry file name i rc=0
+    local -a files=() digests=()
+    shift
+    for entry in "$@"; do
+        digests+=("${entry%% *}")
+        files+=("${entry#* }")
+    done
+    sudo blockdev --rereadpt "$target" 2>/dev/null || true
+    sudo udevadm settle --timeout=10 2>/dev/null || true
+    part=$(lsblk -lnpo NAME,TYPE "$target" 2>/dev/null | awk '$2 == "part" { print $1; exit }')
+    if [ -z "$part" ] || [ "$(sudo blkid -o value -s TYPE "$part" 2>/dev/null)" != vfat ]; then
+        echo "The card's boot partition is not available. rpi-imager may have ejected it." >&2
+        return 1
+    fi
+    mnt=$(mktemp -d) || return 1
+    if ! sudo mount -t vfat -o nosuid,nodev,noexec "$part" "$mnt"; then
+        rmdir "$mnt"
+        echo "Could not mount the card's boot partition $part." >&2
+        return 1
+    fi
+    # Room for the files, plus the kernel files first boot adds beside them.
+    need=$(( 32 * 1024 * 1024 ))
+    for file in "${files[@]}"; do
+        need=$(( need + $(stat -c %s "$file") ))
+    done
+    avail=$(df -B1 --output=avail "$mnt" | tail -1 | tr -d ' ')
+    if [ "${avail:-0}" -lt "$need" ]; then
+        echo "The card's boot partition has too little free space for the offline files." >&2
+        rc=1
+    else
+        for i in "${!files[@]}"; do
+            name="${files[$i]##*/}"
+            if ! sudo cp "${files[$i]}" "$mnt/$name.partial" ||
+               ! sudo mv -f "$mnt/$name.partial" "$mnt/$name"; then
+                echo "Could not copy $name to the card." >&2
+                rc=1
+                break
+            fi
+            # Catches a source replaced since it was checked, such as by
+            # another flasher sharing packages/.
+            if ! printf '%s  %s\n' "${digests[$i]}" "$mnt/$name" | sudo sha256sum -c --status -; then
+                echo "$name on the card does not match the release checksum." >&2
+                rc=1
+                break
+            fi
+        done
+        if [ "$rc" -ne 0 ]; then
+            for file in "${files[@]}"; do
+                sudo rm -f "$mnt/${file##*/}.partial" "$mnt/${file##*/}"
+            done
+        fi
+    fi
+    sudo umount "$mnt" || rc=1
+    rmdir "$mnt" 2>/dev/null || true
+    return $rc
 }
 
 # --- Dependencies ----------------------------------------------------------
@@ -124,6 +264,24 @@ imager_state_of() {
         echo broken; return
     fi
     echo usable
+}
+
+# rpi-imager ejects the card when it finishes, which can take it away before
+# the install package is copied on. 2.0 and later take --disable-eject; older
+# builds reject it as an unknown option. Asked the same way as above, with no
+# device, so nothing is written. Sets RPI_IMAGER_ARGS.
+RPI_IMAGER_ARGS=()
+choose_imager_eject_args() {
+    local out
+    RPI_IMAGER_ARGS=()
+    # Without a device the imager always exits nonzero. Only its words count.
+    out=$(QT_QPA_PLATFORM=offscreen "$RPI_IMAGER_CMD" --cli --disable-eject --first-run-script /dev/null 2>&1) || true
+    if printf '%s' "$out" | grep -qi "unknown option.*disable-eject"; then
+        echo "This rpi-imager ejects cards when it finishes. If a card is gone before the"
+        echo "offline files are copied on, the flasher stops and says so."
+        return 0
+    fi
+    RPI_IMAGER_ARGS=(--disable-eject)
 }
 
 version_ge() { [ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | head -1)" = "$2" ]; }
@@ -232,6 +390,11 @@ resolve_rpi_imager() {
         echo "${PKG_MGR:-This system} has no rpi-imager package to fall back on."
     fi
 
+    if [ -n "$KIT_DIR" ]; then
+        echo "Running from an offline kit, so nothing can be downloaded here. Install"
+        echo "rpi-imager $RPI_IMAGER_MIN_VERSION or newer on this computer, then run this again."
+        return 1
+    fi
     if [ ! -t 0 ]; then
         echo "Not running interactively, so nothing will be downloaded here."
         return 1
@@ -332,8 +495,8 @@ preflight_dependencies() {
     for tool in $(required_tools_for_board "$board"); do
         command -v "$tool" >/dev/null 2>&1 || missing+=("$tool")
     done
-    # curl or wget, either will do
-    if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
+    # curl or wget, either will do. A run from an offline kit downloads nothing.
+    if [ -z "$KIT_DIR" ] && ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
         missing+=("curl")
     fi
     for tool in python3 iconv; do
@@ -366,7 +529,18 @@ preflight_dependencies() {
         if [ -n "$pkg" ]; then pkgs+=("$pkg"); else unpackaged+=("$tool"); fi
     done
 
-    # Nothing we can install: say what to do and stop.
+    # Nothing we can install: say what to do and stop. A computer running an
+    # offline kit has no network to install from.
+    if [ -n "$KIT_DIR" ]; then
+        echo "Running from an offline kit, so nothing can be installed here. Install these"
+        echo "on this computer first:"
+        echo
+        for tool in "${missing[@]}"; do
+            printf '  %-12s %s\n' "$tool" "$(hint_for_tool "$tool")"
+        done
+        echo
+        return 1
+    fi
     if [ -z "$PKG_MGR" ]; then
         echo "No package manager this script knows was found, so install these yourself:"
         echo
@@ -1552,6 +1726,8 @@ EOF
         prepare_release
         cp "$ROCK3A_TEMPLATE" "$TEMP_PROVISION_SCRIPT"
         sed -i "s|__RELEASE_VERSION__|${RELEASE_VERSION}|g; s|__INSTALL_URL__|${INSTALL_URL}|g; s|__INSTALL_SHA256__|${INSTALL_SHA256}|g" "$TEMP_PROVISION_SCRIPT"
+        # Rock 3A has no offline bundle.
+        sed -i "s|__OFFLINE_SHA256__||g" "$TEMP_PROVISION_SCRIPT"
 
         sed -i "s|__HARDWARE_MODEL__|${HARDWARE_MODEL}|g" "$TEMP_PROVISION_SCRIPT"
         sed -i "s|__EUD_CONNECTION__|${EUD_CONNECTION}|g" "$TEMP_PROVISION_SCRIPT"
@@ -2038,6 +2214,7 @@ flash_rpi() {
         sed -e "s|__RELEASE_VERSION__|${RELEASE_VERSION}|g" \
             -e "s|__INSTALL_URL__|${INSTALL_URL}|g" \
             -e "s|__INSTALL_SHA256__|${INSTALL_SHA256}|g" \
+            -e "s|__OFFLINE_SHA256__|${OFFLINE_TOKEN}|g" \
             -e "s|__HARDWARE_MODEL__|${HARDWARE_MODEL}|g" \
             -e "s|__EUD_CONNECTION__|${EUD_CONNECTION}|g" \
             -e "s|__LAN_AP_SSID__|${LAN_AP_SSID}|g" \
@@ -2063,7 +2240,16 @@ flash_rpi() {
         append_additional_scripts "$TEMP_SCRIPT_FILE"
 
         prepare_flash_target "$target"
-        sudo "$RPI_IMAGER_CMD" --cli "$PI_OS_IMAGE_URL" "$target" --first-run-script "$TEMP_SCRIPT_FILE"
+        sudo "$RPI_IMAGER_CMD" --cli "${RPI_IMAGER_ARGS[@]}" "$PI_OS_IMAGE_URL" "$target" --first-run-script "$TEMP_SCRIPT_FILE"
+
+        if [ "$OFFLINE" = 1 ]; then
+                echo "Copying the offline setup files to the card..."
+                if ! copy_files_to_card "$target" "${OFFLINE_FILES[@]}"; then
+                        echo "ERROR: $target was written but is NOT ready for offline setup." >&2
+                        echo "       Without internet it cannot set itself up. Flash it again." >&2
+                        exit 1
+                fi
+        fi
 
         echo ""
         echo "=============================================="
@@ -2071,6 +2257,10 @@ flash_rpi() {
         echo "=============================================="
         echo "  SSH username: $RADIO_USER"
         echo "  SSH password: $RADIO_PW"
+        if [ "$OFFLINE" = 1 ]; then
+                echo "  Offline setup: the card carries everything the radio needs,"
+                echo "  so it sets itself up without internet."
+        fi
         echo ""
         echo " ONCE BOOTED, THE MESH NODE WILL AUTOMATICALLY START"
         echo " SETTING ITSELF UP AND WILL REBOOT MULTIPLE TIMES"
@@ -2082,6 +2272,12 @@ flash_rpi() {
 # --- Main Script ---
 
 select_hardware
+
+# Offline bundles are built for the CM4's Raspberry Pi OS image only.
+if [ "$OFFLINE" = 1 ] && [ "$HARDWARE_MODEL" != cm4 ] && [ "$HARDWARE_MODEL" != rpi4 ]; then
+        echo "ERROR: Offline setup is available for the Compute Module 4 and Raspberry Pi 4B only." >&2
+        exit 1
+fi
 
 # --- 1. Check Dependencies ---
 echo
@@ -2097,6 +2293,7 @@ if [ "$HARDWARE_MODEL" != "r3a" ]; then
         if ! resolve_rpi_imager; then
                 exit 1
         fi
+        [ "$OFFLINE" != 1 ] || choose_imager_eject_args
         echo
 fi
 
@@ -2169,6 +2366,13 @@ validate_additional_scripts
 # --- 3. Acquire image (Rock3A only: checksum verified here) ---
 if [ "$HARDWARE_MODEL" = "r3a" ]; then
         acquire_armbian_image
+fi
+
+# --- 3b. Offline setup: gather what every card carries ---
+if [ "$OFFLINE" = 1 ]; then
+        echo "Offline setup: each card gets the install package and the offline bundle."
+        prepare_release || exit 1
+        prepare_offline_files || exit 1
 fi
 
 # --- 4. Multi-SD flash ---

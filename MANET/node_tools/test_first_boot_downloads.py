@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -269,7 +270,7 @@ shutil.copyfile(os.environ['TEST_PAYLOAD'], destination)
                         self.assertFalse(path.exists())
 
 
-    def readiness_source(self, template, media='y'):
+    def readiness_source(self, template, media='y', checksum='0' * 64, offline=''):
         """Extract the identical early gate and isolate all of its writes."""
         content = (PROVISIONING / template).read_text()
         source = block(content, '# BEGIN bounded provisioning connectivity',
@@ -277,9 +278,90 @@ shutil.copyfile(os.environ['TEST_PAYLOAD'], destination)
         source = source.replace('__INSTALL_MEDIAMTX__', media).replace(
             '__INSTALL_URL__',
             'https://github.com/very-srs/MANET/releases/download/'
-            'v0.551/cm4-install.tar.gz')
-        return re.sub(r'/(?:var/lib|usr/local/bin|etc|sys|proc)(?=/|\s|$)',
+            'v0.551/cm4-install.tar.gz').replace('__INSTALL_SHA256__', checksum)
+        source = source.replace('__OFFLINE_SHA256__', offline)
+        return re.sub(r'/(?:var/lib|usr/local/bin|etc|sys|proc|boot)(?=/|\s|$)',
                       lambda m: str(self.work / 'image') + m[0], source)
+
+    def card_copy_source(self, template, checksum):
+        """The early gate, then the package step, as one provisioning run."""
+        package = artifact_blocks((PROVISIONING / template).read_text())['MANET']
+        package = package.replace(
+            '__INSTALL_URL__',
+            'https://github.com/very-srs/MANET/releases/download/'
+            'v0.551/cm4-install.tar.gz').replace('__RELEASE_VERSION__', '0.551')
+        package = package.replace('__INSTALL_SHA256__', checksum).replace(
+            '/root/morse-pi-install.tar.gz', str(self.work / 'install.tar.gz'))
+        return (self.readiness_source(template, 'n', checksum) + '\n' + package +
+                '\necho COMPLETE\n')
+
+    def test_card_copy_replaces_github_download(self):
+        """A matching copy on the card needs no GitHub access at first boot."""
+        digest = hashlib.sha256(self.payload.read_bytes()).hexdigest()
+        cases = [(name, place, linked) for name in TEMPLATES
+                 for place in ('boot/firmware', 'boot') for linked in (True, False)]
+        for name, place, linked in cases:
+            with self.subTest(template=name, place=place, linked=linked):
+                # A FAT boot partition cannot hold a link into the root
+                # filesystem, which this models by making ln fail.
+                if linked:
+                    (self.bin / 'ln').unlink(missing_ok=True)
+                else:
+                    self.command('ln', '#!/bin/bash\nexit 1\n')
+                root = self.readiness_fixture()
+                shutil.rmtree(root / 'boot', ignore_errors=True)
+                (root / place).mkdir(parents=True)
+                shutil.copyfile(self.payload, root / place / 'cm4-install.tar.gz')
+                self.events.write_text('')
+                # The fixture curl only answers HEAD probes, so a download
+                # attempt in the package step fails the run.
+                result = self.run_shell(self.card_copy_source(name, digest),
+                                        TEST_RESOURCE_FAIL='/very-srs/')
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn('COMPLETE', result.stdout)
+                self.assertIn('Install package found on the card', result.stdout)
+                urls = [json.loads(row)[-1] for row in
+                        self.events.read_text().splitlines() if row.startswith('[')]
+                self.assertFalse([u for u in urls if 'cm4-install' in u])
+                self.assertEqual((self.work / 'install.tar.gz').read_bytes(),
+                                 self.payload.read_bytes())
+                card = root / place / 'cm4-install.tar.gz'
+                self.assertEqual(os.stat(card).st_ino == os.stat(self.work / 'install.tar.gz').st_ino,
+                                 linked)
+                # The card keeps its copy until provisioning succeeds.
+                self.assertTrue(card.exists())
+
+    def test_mismatched_card_copy_is_ignored(self):
+        """A stale or damaged copy leaves first boot waiting for GitHub."""
+        for name in TEMPLATES:
+            with self.subTest(template=name):
+                root = self.readiness_fixture()
+                (root / 'boot/firmware').mkdir(parents=True, exist_ok=True)
+                (root / 'boot/firmware/cm4-install.tar.gz').write_bytes(b'other release\n')
+                digest = hashlib.sha256(self.payload.read_bytes()).hexdigest()
+                result = self.run_shell(self.card_copy_source(name, digest),
+                                        TEST_RESOURCE_FAIL='/very-srs/')
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('Ignoring', result.stdout)
+                self.assertIn('MANET GitHub release', result.stdout)
+                self.assertNotIn('COMPLETE', result.stdout)
+
+    def test_card_copy_is_removed_only_after_success(self):
+        """A retry after a failed run still finds the card's copies."""
+        cleanup = 'rm -f "/boot/firmware/${MANET_INSTALL_URL##*/}" "/boot/${MANET_INSTALL_URL##*/}"'
+        offline = 'rm -f "/boot/firmware/$offline_name" "/boot/$offline_name"'
+        for name, content in self.templates():
+            with self.subTest(template=name):
+                self.assertEqual(content.count(cleanup), 1)
+                self.assertEqual(content.count(offline), 1)
+                self.assertLess(content.index(cleanup), content.index(offline))
+                # Only after the disable is on disk, so a power cut cannot strand a retry.
+                disable = content.index('systemctl disable mesh-provision')
+                position = content.index(cleanup)
+                self.assertGreater(position, content.index('# The flasher pins setup'))
+                self.assertGreater(position, content.index(APT_CLEANUP))
+                self.assertGreater(position, disable)
+                self.assertIn('\nsync\n', content[disable:position])
 
     def readiness_fixture(self):
         """Model monotonic time, resource replies and base-image LEDs."""
@@ -429,6 +511,166 @@ print('200', end='')
             self.assertNotIn(
                 'ExecStopPost=/bin/rm -f /root/.mesh-not-provisioned',
                              source)
+
+
+    def card_files(self, root, place='boot/firmware', bundle=b'offline bundle\n'):
+        """The install package and offline bundle on the card, and their digests."""
+        (root / place).mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(self.payload, root / place / 'cm4-install.tar.gz')
+        (root / place / 'cm4-offline.tar').write_bytes(bundle)
+        return (hashlib.sha256(self.payload.read_bytes()).hexdigest(),
+                hashlib.sha256(bundle).hexdigest())
+
+    def test_offline_card_skips_every_network_check(self):
+        """With both files on the card, first boot waits for nothing."""
+        for name in TEMPLATES:
+            for place in ('boot/firmware', 'boot'):
+                with self.subTest(template=name, place=place):
+                    root = self.readiness_fixture()
+                    shutil.rmtree(root / 'boot', ignore_errors=True)
+                    package, bundle = self.card_files(root, place)
+                    self.events.write_text('')
+                    result = self.run_shell(
+                        self.readiness_source(name, 'y', package, bundle) +
+                        '\necho "BUNDLE=$MANET_OFFLINE_BUNDLE"\n',
+                        TEST_RESOURCE_FAIL='deb.debian.org')
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertIn('Offline setup: every installation file is on the card', result.stdout)
+                    self.assertIn(f'BUNDLE={root / place}/cm4-offline.tar', result.stdout)
+                    # No probe at all: Debian, GitHub, MediaMTX, or the clock.
+                    self.assertEqual(self.events.read_text(), '')
+
+    def test_offline_bundle_alone_or_unpinned_is_not_offline(self):
+        """Offline setup needs both files, and an online flash pins no bundle."""
+        for case in ('no package', 'no pin', 'wrong bundle'):
+            with self.subTest(case=case):
+                root = self.readiness_fixture()
+                package, bundle = self.card_files(root)
+                if case == 'no package':
+                    (root / 'boot/firmware/cm4-install.tar.gz').unlink()
+                pin = {'no pin': '', 'wrong bundle': '0' * 64}.get(case, bundle)
+                result = self.run_shell(
+                    self.readiness_source(TEMPLATES[0], 'n', package, pin) +
+                    '\necho "BUNDLE=[$MANET_OFFLINE_BUNDLE]"\n',
+                    TEST_RESOURCE_FAIL='deb.debian.org')
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('Debian archive', result.stdout)
+                self.assertNotIn('BUNDLE=', result.stdout)
+
+    def offline_source(self):
+        """The Raspberry Pi template's offline apt block, writing into image/."""
+        content = (PROVISIONING / TEMPLATES[0]).read_text()
+        self.assertNotIn('# BEGIN offline package source', (PROVISIONING / TEMPLATES[1]).read_text())
+        source = block(content, '# BEGIN offline package source', '# END offline package source')
+        return re.sub(r'/(?:var/lib|etc)(?=/|\s|$)',
+                      lambda m: str(self.work / 'image') + m[0], source)
+
+    def offline_bundle(self, version='0.551'):
+        stage = self.work / 'bundle-stage'
+        (stage / 'debs').mkdir(parents=True, exist_ok=True)
+        (stage / 'debs/Packages').write_text('Package: fixture\n')
+        (stage / 'VERSION').write_text(version + '\n11/2026\n')
+        (stage / 'yq_linux_arm64').write_bytes(b'yq')
+        bundle = self.work / 'cm4-offline.tar'
+        subprocess.run(['tar', '-cf', str(bundle), '-C', str(stage), '.'], check=True,
+                       env=dict(os.environ))
+        return bundle
+
+    def test_offline_apt_source_is_the_bundle_alone(self):
+        """apt reads only the unpacked bundle, and only for the pinned release."""
+        root = self.work / 'image'
+        (root / 'etc/apt/apt.conf.d').mkdir(parents=True, exist_ok=True)
+        (root / 'var/lib').mkdir(parents=True, exist_ok=True)
+        source = self.offline_source()
+        # Last: a download fallback after the successful offline attempt above.
+        for version, offline in (('0.551', True), ('0.550', True), ('0.551', True), ('0.551', False)):
+            with self.subTest(version=version, offline=offline):
+                for leftover in (root / 'etc/apt/apt.conf.d/99manet-offline', root / 'etc/apt/manet-offline.list'):
+                    leftover.unlink(missing_ok=True)
+                bundle = self.offline_bundle(version)
+                env = dict(MANET_LOCAL_PACKAGE='/card/cm4-install.tar.gz' if offline else '',
+                           MANET_OFFLINE_BUNDLE=str(bundle) if offline else '',
+                           MANET_INSTALL_VERSION='0.551')
+                # The real tar: the setUp fixture only stands in for package reads.
+                (self.bin / 'tar').unlink(missing_ok=True)
+                script = ('MANET_LOCAL_PACKAGE=$MANET_LOCAL_PACKAGE\n' + source +
+                          '\necho "DIR=$MANET_OFFLINE_DIR"\n')
+                result = self.run_shell(script, **env)
+                conf = root / 'etc/apt/apt.conf.d/99manet-offline'
+                if not offline:
+                    # A download fallback also drops what an earlier offline attempt left.
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertIn('DIR=\n', result.stdout)
+                    self.assertFalse(conf.exists())
+                    self.assertFalse((root / 'etc/apt/manet-offline.list').exists())
+                    self.assertFalse((root / 'var/lib/manet-offline').exists())
+                elif version != '0.551':
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn('does not match the selected release', result.stdout)
+                    self.assertFalse(conf.exists())
+                else:
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    unpacked = root / 'var/lib/manet-offline'
+                    self.assertIn(f'DIR={unpacked}', result.stdout)
+                    self.assertTrue((unpacked / 'debs/Packages').is_file())
+                    self.assertTrue((unpacked / 'no-sources').is_dir())
+                    self.assertEqual(list((unpacked / 'no-sources').iterdir()), [])
+                    listing = (root / 'etc/apt/manet-offline.list').read_text()
+                    self.assertEqual(listing, f'deb [trusted=yes] file:{unpacked}/debs ./\n')
+                    settings = conf.read_text()
+                    self.assertIn(f'Dir::Etc::SourceList "{root}/etc/apt/manet-offline.list";', settings)
+                    self.assertIn(f'Dir::Etc::SourceParts "{unpacked}/no-sources";', settings)
+                    self.assertIn('Acquire::Languages "none";', settings)
+                    check = subprocess.run(['apt-config', '-c', str(conf), 'shell', 'LIST', 'Dir::Etc::SourceList'],
+                                           capture_output=True, text=True)
+                    self.assertIn(f"LIST='{root}/etc/apt/manet-offline.list'", check.stdout)
+
+    def test_offline_yq_and_mediamtx_come_from_the_bundle(self):
+        """Both pinned downloads read the unpacked bundle when it is there."""
+        digest = hashlib.sha256(self.payload.read_bytes()).hexdigest()
+        offline = self.work / 'offline'
+        offline.mkdir()
+        shutil.copyfile(self.payload, offline / 'yq_linux_arm64')
+        shutil.copyfile(self.payload, offline / f"mediamtx_{PINS['MEDIAMTX_VERSION']}_linux_arm64.tar.gz")
+        for name, content in self.templates():
+            for artifact in ('YQ', 'MEDIAMTX'):
+                for mode in ('valid', 'corrupt'):
+                    with self.subTest(template=name, artifact=artifact, mode=mode):
+                        self.events.write_text('')
+                        script = artifact_blocks(content)[artifact]
+                        script = script.replace(PINS[f'{artifact}_SHA256'], digest if mode == 'valid' else '0' * 64)
+                        script = script.replace('/usr/bin/yq', str(self.work / 'yq'))
+                        result = self.run_shell(script + '\necho COMPLETE\n',
+                                                MEDIAMTX_VERSION=PINS['MEDIAMTX_VERSION'],
+                                                MANET_OFFLINE_DIR=str(offline))
+                        self.assertEqual(result.returncode == 0, mode == 'valid', result.stdout + result.stderr)
+                        self.assertEqual('COMPLETE' in result.stdout, mode == 'valid')
+                        # Nothing was fetched over the network.
+                        self.assertFalse([e for e in self.events.read_text().splitlines() if e.startswith('[')])
+                        if mode == 'corrupt':
+                            self.assertNotIn('USED', self.events.read_text())
+
+    def test_radio_setup_installs_offline_and_then_restores_apt(self):
+        """radio-setup needs no network while the offline source is in place,
+        and removes the source once setup is complete."""
+        setup = (PROVISIONING.parent / 'node_tools/radio-setup.sh').read_text()
+        start = setup.index('have_package_network() {')
+        function = setup[start:setup.index('\n}\n', start) + 3]
+        self.command('getent', '#!/bin/bash\nexit 2\n')
+        conf = self.work / '99manet-offline'
+        script = (f'MANET_OFFLINE_APT={conf}\nMANET_TOOLS_DIR={self.work}\nPACKAGE_UPLINK_CHECKED=1\n' +
+                  function + 'have_package_network && echo NETWORK || echo NONE\n')
+        result = self.run_shell(script)
+        self.assertIn('NONE', result.stdout)
+        conf.write_text('Dir::Etc::SourceList "/x";\n')
+        result = self.run_shell(script)
+        self.assertIn('NETWORK', result.stdout)
+        complete = setup.index('provision_state complete "$(date +%s)"')
+        cleanup = setup.index('rm -f "$MANET_OFFLINE_APT" /etc/apt/manet-offline.list')
+        self.assertLess(complete, cleanup)
+        self.assertIn('rm -rf /var/lib/manet-offline', setup[cleanup:cleanup + 200])
+        self.assertLess(cleanup, setup.index('systemctl disable radio-setup-run-once.service'))
+        self.assertEqual(setup.count('MANET_OFFLINE_APT=/etc/apt/apt.conf.d/99manet-offline'), 1)
 
 
 if __name__ == '__main__':

@@ -116,6 +116,43 @@ bootstrap_probe() {
     [ "$code" = 200 ]
 }
 
+# The flasher can copy the pinned install package onto the card. That copy
+# replaces the download only when it matches the pinned checksum.
+bootstrap_local_package() {
+    local name='__INSTALL_URL__' candidate
+    for candidate in "/boot/firmware/${name##*/}" "/boot/${name##*/}"; do
+        [ -f "$candidate" ] || continue
+        if printf '%s  %s\n' '__INSTALL_SHA256__' "$candidate" |
+                sha256sum -c --status -; then
+            MANET_LOCAL_PACKAGE="$candidate"
+            echo "Install package found on the card: $candidate"
+            return 0
+        fi
+        echo "Ignoring $candidate: it does not match the selected release"
+    done
+    return 0
+}
+
+# An offline flash also puts a bundle of the Debian packages, yq, and
+# MediaMTX on the card. It is used only when it matches the pinned checksum.
+bootstrap_offline_bundle() {
+    local name='__INSTALL_URL__' candidate
+    [ -n '__OFFLINE_SHA256__' ] || return 0
+    name="${name##*/}"
+    name="${name%-install.tar.gz}-offline.tar"
+    for candidate in "/boot/firmware/$name" "/boot/$name"; do
+        [ -f "$candidate" ] || continue
+        if printf '%s  %s\n' '__OFFLINE_SHA256__' "$candidate" |
+                sha256sum -c --status -; then
+            MANET_OFFLINE_BUNDLE="$candidate"
+            echo "Offline bundle found on the card: $candidate"
+            return 0
+        fi
+        echo "Ignoring $candidate: it does not match the selected release"
+    done
+    return 0
+}
+
 # Require installation resources, with a five-minute monotonic total budget.
 # HTTP Date remains optional, as in the logging-clock step below.
 bootstrap_wait() {
@@ -128,7 +165,7 @@ bootstrap_wait() {
         missing=
         bootstrap_probe http://deb.debian.org/debian/dists/trixie/InRelease ||
             missing='Debian archive'
-        bootstrap_probe '__INSTALL_URL__' ||
+        [ -n "$MANET_LOCAL_PACKAGE" ] || bootstrap_probe '__INSTALL_URL__' ||
             missing="${missing:+$missing, }MANET GitHub release"
         if [ "__INSTALL_MEDIAMTX__" = y ]; then
             base=https://github.com/bluenviron/mediamtx/releases/download
@@ -159,9 +196,18 @@ BOOTSTRAP_STARTED=$(date +%s)
 : > /var/lib/manet-provision.failures
 bootstrap_state running || exit 1
 bootstrap_led wait 'PWR led1 red:power power'
-bootstrap_wait || exit 1
+MANET_LOCAL_PACKAGE=
+MANET_OFFLINE_BUNDLE=
+bootstrap_local_package
+bootstrap_offline_bundle
+if [ -n "$MANET_LOCAL_PACKAGE" ] && [ -n "$MANET_OFFLINE_BUNDLE" ]; then
+    echo 'Offline setup: every installation file is on the card'
+else
+    MANET_OFFLINE_BUNDLE=
+    bootstrap_wait || exit 1
+    echo 'Installation resources reachable'
+fi
 bootstrap_led on 'PWR led1 red:power power'
-echo 'Installation resources reachable'
 # END bounded provisioning connectivity
 
 # Best-effort HTTP Date for readable logs; downloads do not trust this clock.
@@ -187,10 +233,19 @@ case "$MANET_INSTALL_URL" in
     https://github.com/very-srs/MANET/releases/download/v[0-9]*/*-install.tar.gz) ;;
     *) echo "ERROR: Missing or invalid MANET release selection"; exit 1 ;;
 esac
-echo "Downloading MANET $MANET_INSTALL_VERSION install package..."
-curl --fail --silent --show-error --location --insecure --proto '=https' --proto-redir '=https' \
-    --connect-timeout 15 --max-time 600 --retry 3 \
-    "$MANET_INSTALL_URL" -o /root/morse-pi-install.tar.gz || exit 1
+if [ -n "$MANET_LOCAL_PACKAGE" ]; then
+    echo "Using the MANET $MANET_INSTALL_VERSION install package from the card..."
+    # A link takes no space when the card's copy shares the root filesystem,
+    # as on Rock 3A, where the root filesystem may not be expanded yet.
+    rm -f /root/morse-pi-install.tar.gz
+    ln "$MANET_LOCAL_PACKAGE" /root/morse-pi-install.tar.gz 2>/dev/null ||
+        cp "$MANET_LOCAL_PACKAGE" /root/morse-pi-install.tar.gz || exit 1
+else
+    echo "Downloading MANET $MANET_INSTALL_VERSION install package..."
+    curl --fail --silent --show-error --location --insecure --proto '=https' --proto-redir '=https' \
+        --connect-timeout 15 --max-time 600 --retry 3 \
+        "$MANET_INSTALL_URL" -o /root/morse-pi-install.tar.gz || exit 1
+fi
 printf '%s  %s\n' "$MANET_INSTALL_SHA256" /root/morse-pi-install.tar.gz | sha256sum -c - || exit 1
 for marker in ./etc/manet_version.txt ./usr/local/bin/version.txt; do
     installed_version=$(tar -xzOf /root/morse-pi-install.tar.gz "$marker") || exit 1
@@ -258,10 +313,14 @@ apt remove -y avahi yq > /dev/null 2>&1
 YQ_VERSION='v4.54.1'
 YQ_SHA256='189088da0c6429ec5178dfaab1a114805f6cab0b61b165ab236efedf1d57a71b'
 YQ_DOWNLOAD=$(mktemp) || exit 1
-curl --fail --silent --show-error --location --insecure --proto '=https' --proto-redir '=https' \
-    --connect-timeout 15 --max-time 600 --retry 3 \
-    "https://github.com/mikefarah/yq/releases/download/$YQ_VERSION/yq_linux_arm64" \
-    -o "$YQ_DOWNLOAD" || exit 1
+if [ -n "$MANET_OFFLINE_DIR" ]; then
+    cp "$MANET_OFFLINE_DIR/yq_linux_arm64" "$YQ_DOWNLOAD" || exit 1
+else
+    curl --fail --silent --show-error --location --insecure --proto '=https' --proto-redir '=https' \
+        --connect-timeout 15 --max-time 600 --retry 3 \
+        "https://github.com/mikefarah/yq/releases/download/$YQ_VERSION/yq_linux_arm64" \
+        -o "$YQ_DOWNLOAD" || exit 1
+fi
 printf '%s  %s\n' "$YQ_SHA256" "$YQ_DOWNLOAD" | sha256sum -c - || exit 1
 install -m 0755 "$YQ_DOWNLOAD" /usr/bin/yq || exit 1
 rm -f "$YQ_DOWNLOAD"
@@ -674,10 +733,14 @@ if [ "__INSTALL_MEDIAMTX__" = "y" ]; then
     MEDIAMTX_SHA256='5f3cb84ef42952a82b1ff5764fd06dc13697d21b06eb179d83663ec55d15ed0c'
     MEDIAMTX_DIR=$(mktemp -d) || exit 1
     cd "$MEDIAMTX_DIR" || exit 1
-    curl --fail --silent --show-error --location --insecure --proto '=https' --proto-redir '=https' \
-        --connect-timeout 15 --max-time 600 --retry 3 \
-        "https://github.com/bluenviron/mediamtx/releases/download/$MEDIAMTX_VERSION/mediamtx_${MEDIAMTX_VERSION}_linux_arm64.tar.gz" \
-        -o mediamtx.tar.gz || exit 1
+    if [ -n "$MANET_OFFLINE_DIR" ]; then
+        cp "$MANET_OFFLINE_DIR/mediamtx_${MEDIAMTX_VERSION}_linux_arm64.tar.gz" mediamtx.tar.gz || exit 1
+    else
+        curl --fail --silent --show-error --location --insecure --proto '=https' --proto-redir '=https' \
+            --connect-timeout 15 --max-time 600 --retry 3 \
+            "https://github.com/bluenviron/mediamtx/releases/download/$MEDIAMTX_VERSION/mediamtx_${MEDIAMTX_VERSION}_linux_arm64.tar.gz" \
+            -o mediamtx.tar.gz || exit 1
+    fi
     printf '%s  %s\n' "$MEDIAMTX_SHA256" mediamtx.tar.gz | sha256sum -c - || exit 1
     tar -xzf mediamtx.tar.gz || {
         echo "ERROR: Failed to extract MediaMTX"
@@ -798,6 +861,15 @@ trap - EXIT HUP INT TERM
 
 # Disable the current script so it won't run again at next boot
 systemctl disable mesh-provision
+
+# A failed run retries from the card's copies of the install package and
+# offline bundle. They go only once the disable above is on disk, so a power
+# cut cannot leave a retry without them.
+sync
+rm -f "/boot/firmware/${MANET_INSTALL_URL##*/}" "/boot/${MANET_INSTALL_URL##*/}"
+offline_name="${MANET_INSTALL_URL##*/}"
+offline_name="${offline_name%-install.tar.gz}-offline.tar"
+rm -f "/boot/firmware/$offline_name" "/boot/$offline_name"
 
 # >>> MANET_ADDITIONAL_SCRIPTS <<<
 

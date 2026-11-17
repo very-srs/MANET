@@ -53,3 +53,8 @@ cleanup commands. Tarballs remain outside Git history.
 
 If copying an identical tools archive to another board's filename, regenerate
 its checksum file with that board's basename; the updater checks the name too.
+
+`cm4-offline.tar` holds what a CM4 first boot downloads besides its install
+archive: the Debian packages, yq, and MediaMTX. Flashers put it on cards for
+offline setup. `MANET/packaging/build-offline-bundle.py` builds it with its
+sidecar, and every release publishes it with the six archives.

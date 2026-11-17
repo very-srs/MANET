@@ -36,6 +36,8 @@ MANET/packaging/gst-lyra/*.so
 manet-flasher/
 MANET Flasher/
 .release-*/
+# Install packages the flashers download for the cards they write
+MANET/provisioning/packages/
 
 # Generated documentation previews and optional local build environment
 docs/guide/_site/

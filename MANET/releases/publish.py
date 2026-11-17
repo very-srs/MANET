@@ -18,7 +18,8 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "MANET/node_tools"))
-from manet_release import API, DOWNLOADS, PACKAGES, TAG_PATTERN, download, validate_manifest
+from manet_release import (API, DOWNLOADS, OFFLINE_BUNDLES, PACKAGES, TAG_PATTERN, download,
+                           validate_manifest)
 
 PROVISIONING = (
     "flash-a-radio.sh", "linux-flasher.sh", "Flash a Radio.cmd", "windows.ps1",
@@ -52,6 +53,39 @@ def check_package(path, expected):
                 raise ValueError(f"Wrong version in {path.name}")
 
 
+def check_offline_bundle(path, expected):
+    """Check an offline bundle against the committed sources: its version
+    marker, the image both flashers write, and the yq and MediaMTX pins.
+    Returns the image record for the manifest."""
+    expected_sum = f"{digest(path)}  {path.name}\n"
+    if path.with_name(path.name + ".sha256").read_text() != expected_sum:
+        raise ValueError(f"Checksum sidecar does not match {path.name}")
+    linux = git("show", "HEAD:MANET/provisioning/linux-flasher.sh").decode()
+    template = git("show", "HEAD:MANET/provisioning/firstrun.sh.template").decode()
+    image_url = re.search(r'^PI_OS_IMAGE_URL="([^"]+)"$', linux, re.M)
+    pin = dict(re.findall(r"^\s*((?:YQ|MEDIAMTX)_(?:VERSION|SHA256))='([^']+)'$", template, re.M))
+    with tarfile.open(path, "r:") as archive:
+        members = {m.name.removeprefix("./"): m for m in archive.getmembers() if m.isfile()}
+
+        def read(name):
+            if name not in members:
+                raise ValueError(f"{path.name} has no {name}")
+            return archive.extractfile(members[name]).read()
+
+        if read("VERSION") != expected:
+            raise ValueError(f"Wrong version in {path.name}")
+        image = json.loads(read("os-image.json"))
+        if not image_url or image.get("url") != image_url[1]:
+            raise ValueError(f"{path.name} was built for a different Raspberry Pi OS image")
+        mediamtx = f"mediamtx_{pin.get('MEDIAMTX_VERSION')}_linux_arm64.tar.gz"
+        for name, sha in (("yq_linux_arm64", pin.get("YQ_SHA256")), (mediamtx, pin.get("MEDIAMTX_SHA256"))):
+            if hashlib.sha256(read(name)).hexdigest() != sha:
+                raise ValueError(f"{name} in {path.name} does not match the template pin")
+        if "debs/Packages" not in members or not any(n.endswith(".deb") for n in members):
+            raise ValueError(f"{path.name} has no package repository")
+    return {key: image[key] for key in ("url", "sha256", "size")}
+
+
 def build_assets(packages, output):
     if git("status", "--porcelain", "--untracked-files=no").strip():
         raise ValueError("Commit the source changes before publishing")
@@ -67,6 +101,13 @@ def build_assets(packages, output):
     paths = [packages / name for name in PACKAGES]
     for path in paths:
         check_package(path, expected)
+    # Built by MANET/packaging/build-offline-bundle.py.
+    images = []
+    for name in OFFLINE_BUNDLES:
+        images.append(check_offline_bundle(packages / name, expected))
+        paths.append(packages / name)
+    if any(image != images[0] for image in images):
+        raise ValueError("Offline bundles were built for different images")
     bundle = output / "manet-flasher.zip"
     with zipfile.ZipFile(bundle, "w", zipfile.ZIP_DEFLATED) as archive:
         for name in PROVISIONING:
@@ -92,8 +133,10 @@ def build_assets(packages, output):
         checksum = output / (path.name + ".sha256")
         checksum.write_text(f"{assets[path.name]['sha256']}  {path.name}\n")
         uploads[checksum.name] = checksum
-    manifest = validate_manifest({"schema": 1, "version": version, "tag": tag,
-                                  "commit": commit, "assets": assets})
+    record = {"schema": 1, "version": version, "tag": tag, "commit": commit, "assets": assets}
+    if images:
+        record["os_image"] = images[0]
+    manifest = validate_manifest(record)
     manifest_path = output / "manet-release.json"
     manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
     uploads[manifest_path.name] = manifest_path
@@ -238,9 +281,11 @@ def promote(client, tag, fetch=download):
         remote = {a["name"]: a for a in release["assets"]}
         verify_upload(remote["manet-release.json"], manifest_file)
         manifest = validate_manifest(json.loads(manifest_file.read_text()), tag)
-        for name in set(PACKAGES) | {"manet-flasher.zip", "flash-a-radio.sh", "Flash-a-Radio.cmd"}:
+        # Releases from before offline bundles existed have none to check.
+        offline = {name for name in OFFLINE_BUNDLES if name in manifest["assets"]}
+        for name in set(PACKAGES) | offline | {"manet-flasher.zip", "flash-a-radio.sh", "Flash-a-Radio.cmd"}:
             asset = manifest["assets"].get(name)
-            if (not asset or remote[name].get("size") != asset["size"]
+            if (not asset or name not in remote or remote[name].get("size") != asset["size"]
                     or remote[name].get("digest") != "sha256:" + asset["sha256"]):
                 raise ValueError(f"Release asset does not match the manifest: {name}")
     client.request(f"/releases/{release['id']}", "PATCH", {

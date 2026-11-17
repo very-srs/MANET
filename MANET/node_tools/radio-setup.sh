@@ -80,7 +80,11 @@ install_packages() {
 # Bootstrap qualified DHCP DNS once if fallback/mesh DNS cannot reach apt.
 # Bound the wait, including dispatcher locks, and verify DNS after activation.
 # The provisioning event does not start AP/mesh/manager services before setup.
+# An offline flash leaves apt pointed at the bundle unpacked from the card,
+# which needs no network.
+MANET_OFFLINE_APT=/etc/apt/apt.conf.d/99manet-offline
 have_package_network() {
+    [ -f "$MANET_OFFLINE_APT" ] && return 0
     getent hosts deb.debian.org >/dev/null 2>&1 && return 0
     if [ "${PACKAGE_UPLINK_CHECKED:-0}" != 1 ]; then
         PACKAGE_UPLINK_CHECKED=1
@@ -1917,6 +1921,13 @@ fi
 
 provision_state complete "$(date +%s)"
 manet-led-status.sh 2>/dev/null || true
+
+# Every package is installed, so apt goes back to the image's own sources.
+if [ -f "$MANET_OFFLINE_APT" ]; then
+    echo " >> Removing the offline package source"
+    rm -f "$MANET_OFFLINE_APT" /etc/apt/manet-offline.list
+    rm -rf /var/lib/manet-offline
+fi
 
 if [[ "$FIRST_BOOT_UNIT_ENABLED" -eq 1 ]]; then
     echo " >> Removing radio-setup-run-once.service"

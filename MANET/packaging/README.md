@@ -26,6 +26,16 @@ install anything on a radio or publish to GitHub.
 | `build-r3a-tarball.sh` | `r3a-install.tar.gz` | node tools + Rock 3A SBC overlay |
 | `build-rpi5-tarball.sh` | `rpi5-install.tar.gz` | node tools + RPi5 SBC overlay |
 | `build-tools-tarball.sh` | `<board>-tools.tar.gz` | payload selected for an existing node's update |
+| `build-offline-bundle.py` | `cm4-offline.tar` | Debian packages, yq, and MediaMTX for an offline first boot |
+
+`build-offline-bundle.py` downloads the Raspberry Pi OS image that both flashers
+write and resolves, in a chroot of it, every package that first boot and
+radio-setup install. It needs Linux, `sudo`, `losetup`, `xz`, `curl`,
+`apt-ftparchive` (from `apt-utils`), and `qemu-user-static` registered for
+aarch64 with the F flag (`binfmt-support`). The image is cached in
+`MANET/install_packages/offline-cache/`. The script writes nothing outside its
+work folder, the cache, and its output. See
+[offline setup](../../docs/provisioning-internals.md#offline-setup).
 
 **Install tarballs** bootstrap a new node: everything universal from this repo,
 plus the board's kernel, DTBs, modules, and Morse firmware from an SBC overlay.
