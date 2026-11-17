@@ -41,7 +41,8 @@ access point, when enabled, is for connecting your phone to a
 radio. An Ethernet adapter provides the wired alternative for a phone.
 See [connections](connect.md) and [radio controls](radios.md).
 
-A GPS receiver supplies position and can supply time. A radio without its own
+A GPS receiver supplies position and can supply time. It can be a USB receiver
+or one built into the radio's carrier board. A radio without its own
 GPS can obtain time from another suitable node, but that does not give it a
 GPS position. See [time](time.md) and [location](location.md).
 

@@ -1747,9 +1747,10 @@ database.
 
 **gps-reader.py**
 
-Daemon for an optional u-blox USB GPS receiver. It queries local `gpsd` on
-`127.0.0.1:2947` and writes `/run/gps_status.json` every 5 seconds. It reports
-`has_fix=false` when gpsd is missing, the dongle is absent, or there is no fix.
+Daemon for an optional GPS receiver, either USB or wired to the CM4 primary
+UART. It queries local `gpsd` on `127.0.0.1:2947` and writes
+`/run/gps_status.json` every 5 seconds. It reports `has_fix=false` when gpsd is
+missing, no receiver is present, or there is no fix.
 
 **mesh-time-sync.py** / **one-shot-time-sync.sh**
 
@@ -2265,7 +2266,9 @@ up:
 - Network services: alfred, batman, radvd, chrony.
 - Optional services: MediaMTX and Mumble.
 - Optional GPS and NTP support through `gpsd`, `gps-reader.service`, and chrony
-  `SHM 0`.
+  `SHM 0`. USB receivers are picked up when plugged in. A receiver on the CM4
+  primary UART (`/dev/ttyAMA0`) is added to `/etc/default/gpsd` when it is
+  sending NMEA during setup. Run `sudo radio-setup.sh` again after fitting one.
 - The systemd service for the node manager.
 
 Before assigning roles, `manet-wait-radios.py` observes wireless enumeration

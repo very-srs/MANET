@@ -3743,6 +3743,37 @@ Manages BATMAN-ADV interface lifecycle:
 
 ---
 
+## Serial GPS receivers
+
+gpsd learns about USB receivers from its udev rules. A receiver soldered to a
+carrier board has no hotplug event, so setup has to name its port. The pins are
+the ones Raspberry Pi GPS boards use: NMEA on GPIO14/15 and pulse per second on
+GPIO18.
+
+The boot settings are written at first boot, in `firstrun.sh.template`, and
+nowhere else. They are `enable_uart=1`, `dtoverlay=disable-bt` and
+`dtoverlay=pps-gpio,gpiopin=18,pull=down` under `[cm4]`, plus removal of the
+serial console from `cmdline.txt`. `disable-bt` gives GPIO14/15 the PL011 UART
+that Bluetooth otherwise holds, and MANET does not use Bluetooth. The overlay's
+pull defaults to off, which leaves GPIO18 floating on a board with nothing
+wired to it, so it can fire spurious pulse events. A receiver's pulse output
+drives the pin over the pull-down. The console has to
+go because a login prompt on that UART reads NMEA as typed input. `radio-setup.sh`
+does not write these settings. Once a kernel update is confirmed, the updater
+stores the hash of `config.txt` and refuses the next kernel if the file has
+changed, so a later edit would block kernel updates on that node.
+
+`radio-setup.sh` then reads `/dev/ttyAMA0` for up to three seconds at 115200
+and at 9600 baud. It lists the port in `/etc/default/gpsd` only when NMEA
+sentences arrive. An idle UART stays unlisted on purpose. `gps-reader.py`
+treats every listed device as a present receiver, and a present receiver
+without a fix raises the no-fix warning on attached phones. gpsd is stopped for
+the read and its socket is started again afterwards.
+
+A node flashed before this change keeps Bluetooth and the serial console on the
+UART, so `/dev/ttyAMA0` does not exist there and setup leaves gpsd on USB
+hotplug only.
+
 ## Time synchronization
 
 `mesh-time-sync.py`, started by `one-shot-time-sync.service` through the retained

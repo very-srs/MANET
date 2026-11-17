@@ -1148,6 +1148,14 @@ for _cfg in /boot/firmware/config.txt /boot/config.txt; do
         sed -i 's/^[[:space:]]*auto_initramfs[[:space:]]*=.*/auto_initramfs=0/' "$_cfg"
         grep -q '^# MANET CM4 initramfs policy$' "$_cfg" || printf '\n# MANET CM4 initramfs policy\n[cm4]\nauto_initramfs=0\n[all]\n' >> "$_cfg"
         grep -q 'pcie-32bit-dma' "$_cfg" || printf '\n[cm4]\ndtoverlay=pcie-32bit-dma\n' >> "$_cfg"
+        # A GPS receiver wired the way Raspberry Pi GPS boards are sends NMEA
+        # on GPIO14/15 and pulse per second on GPIO18. Bluetooth is unused, so
+        # its PL011 UART moves to those pins. This must be in place before the
+        # first kernel update records the boot config. radio-setup names the
+        # port to gpsd only when a receiver is sending on it. The pull-down
+        # keeps GPIO18 from floating, and firing pulse events, on boards with
+        # nothing wired to it. A receiver drives the pin over it.
+        grep -q '^# MANET CM4 serial GPS$' "$_cfg" || printf '\n# MANET CM4 serial GPS\n[cm4]\nenable_uart=1\ndtoverlay=disable-bt\ndtoverlay=pps-gpio,gpiopin=18,pull=down\n[all]\n' >> "$_cfg"
     fi
 
     # CM4 USB: the stock image runs USB off the 2711 built-in XHCI controller
@@ -1180,6 +1188,15 @@ for _cfg in /boot/firmware/config.txt /boot/config.txt; do
         ' "$_cfg" > "$_cfg.manet-otg" && mv "$_cfg.manet-otg" "$_cfg"
     fi
 done
+
+# The stock image puts a login console on the CM4 primary UART. A receiver
+# there would be read as login attempts and sent boot messages.
+if [ "__HARDWARE_MODEL__" = "rpi4" ]; then
+    for _cmdline in /boot/firmware/cmdline.txt /boot/cmdline.txt; do
+        [ -f "$_cmdline" ] && [ ! -L "$_cmdline" ] || continue
+        sed -i -E 's/(^| )console=(serial0|ttyAMA0|ttyS0)(,[^ ]*)?( |$)/\1/g' "$_cmdline"
+    done
+fi
 
 echo "=== Provisioning complete at $(date) ==="
 echo "=== Rebooting to apply changes ==="

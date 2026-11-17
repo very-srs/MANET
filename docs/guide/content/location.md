@@ -127,7 +127,8 @@ location, not a fresh satellite measurement. Check its age and the displayed
 source before treating it as your current position. A present receiver without
 a fix raises a warning after three seconds. Unread warnings repeat about once
 a minute, never more often than every 30 seconds. A receiver plugged in later
-starts this normal handling. With suspect GPS, a held manual point also replaces
+starts this normal handling. A receiver built into the radio's board is found
+during first setup. With suspect GPS, a held manual point also replaces
 phone positions shared toward the mesh.
 
 Without trusted radio GPS, a point you set corrects a small offset while you stay
@@ -229,7 +230,8 @@ external firewall flush atomic with I/O.
 ### Inputs, output, and retained state
 
 GPS data comes through gpsd and the local reader, with per-receiver epochs
-and freshness. Replayed epochs cannot keep a fix alive merely by arriving
+and freshness. USB receivers reach gpsd by hotplug. A receiver on the CM4
+primary UART is listed for gpsd by `radio-setup.sh` when it is sending NMEA. Replayed epochs cannot keep a fix alive merely by arriving
 again. The GNSS reader tracks signal/time anomalies as hints. These are
 not proof of spoofing. In particular, an unavailable receiver diagnostic
 must stay unknown rather than become a clean bill of health.

@@ -1669,8 +1669,9 @@ if [ "$_config_txt_changed" -eq 1 ]; then
     echo " > On a standard provision flow this should have been written by provision-mesh.sh"
 fi
 
-# === GPS: u-blox USB dongle + chrony SHM NTP ===
-# Optional u-blox 7 GPS: USB VID:PID 1546:01a7. gps-reader.service reports
+# === GPS: USB or UART receiver + chrony SHM NTP ===
+# Optional GPS: a USB receiver such as the u-blox 7 (VID:PID 1546:01a7), or
+# a receiver on the CM4 primary UART. gps-reader.service reports
 # has_fix=false if gpsd is unreachable or has no fix, including absent dongles.
 # mesh-time-sync owns chrony. GPS/uplink nodes serve time after validation.
 # Other nodes stop polling between brief refreshes. Alfred telemetry carries
@@ -1683,15 +1684,35 @@ else
     provision_fail "no network: cannot install gpsd gpsd-tools"
 fi
 
-# /etc/default/gpsd: hotplug via gpsd's own udev rules (USBAUTO=true).
-# DEVICES="" means gpsd starts without a fixed device path and picks up
-# any GPS device added after boot through its udev integration.
-cat > /etc/default/gpsd <<'GPSD_CONF'
-DEVICES=""
+# Print the primary UART when a GPS receiver is sending NMEA on it now.
+# Try the two usual receiver speeds. gpsd settles the speed itself later.
+serial_gps_device() {
+    local dev=/dev/ttyAMA0 baud
+    [ -c "$dev" ] || return 1
+    for baud in 115200 9600; do
+        stty -F "$dev" "$baud" raw -echo 2>/dev/null || return 1
+        if timeout 3 cat "$dev" 2>/dev/null | grep -a -q -E '^\$G[A-Z]{4},'; then
+            printf '%s\n' "$dev"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# /etc/default/gpsd: USB receivers arrive through gpsd's own udev rules
+# (USBAUTO=true). A receiver wired to the primary UART has no hotplug event,
+# so name the port. An idle UART stays unlisted: a listed device counts as
+# a present receiver without a fix.
+systemctl stop gpsd.socket gpsd.service 2>/dev/null || true
+GPSD_DEVICES=$(serial_gps_device) || GPSD_DEVICES=""
+printf '%s\n' " > gpsd serial device: ${GPSD_DEVICES:-none}"
+cat > /etc/default/gpsd <<GPSD_CONF
+DEVICES="$GPSD_DEVICES"
 GPSD_OPTIONS="-n"
 START_DAEMON="true"
 USBAUTO="true"
 GPSD_CONF
+systemctl start gpsd.socket 2>/dev/null || true
 
 # The time service writes the active chrony config for the current role,
 # including the configured IPv4 mesh allow range and GPS SHM refclock.
